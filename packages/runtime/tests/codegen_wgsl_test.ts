@@ -43,7 +43,12 @@ import {
   argmaxParams,
 } from "../src/kernels/argmax.ts";
 import { bmmKey, bmmParams, bmmWgsl } from "../src/kernels/bmm.ts";
-import { statePvWgsl, stateQkWgsl, stateStatsWgsl } from "../src/kernels/state-attention.ts";
+import {
+  statePvParallelWgsl,
+  statePvWgsl,
+  stateQkWgsl,
+  stateStatsWgsl,
+} from "../src/kernels/state-attention.ts";
 import { stateAppendWgsl } from "../src/kernels/state-append.ts";
 import {
   assertTopkK,
@@ -591,6 +596,11 @@ Deno.test("生成した WGSL がスナップショットとバイト単位で一
     ["attention_state_pv_gqa.wgsl", statePvWgsl(false, true)],
     ["attention_state_pv_sliding.wgsl", statePvWgsl(true, false)],
     ["attention_state_pv_sliding_gqa.wgsl", statePvWgsl(true, true)],
+    // ③' KV 並列縮約変種（opt-in — `stateAttentionReduce: "parallel"`・perf-ledger K-12）。
+    ["attention_state_pv_par.wgsl", statePvParallelWgsl(false, false)],
+    ["attention_state_pv_par_gqa.wgsl", statePvParallelWgsl(false, true)],
+    ["attention_state_pv_par_sliding.wgsl", statePvParallelWgsl(true, false)],
+    ["attention_state_pv_par_sliding_gqa.wgsl", statePvParallelWgsl(true, true)],
     ["state_append.wgsl", stateAppendWgsl(false)],
     ["state_append_sliding.wgsl", stateAppendWgsl(true)],
   ];

@@ -120,6 +120,7 @@ import {
   type SessionBuildStats,
   type SessionDiagnostics,
   type SessionOptions,
+  type StateAttentionReduce,
   type StorageDiagnostics,
   type Tensor,
 } from "./session-types.ts";
@@ -137,6 +138,7 @@ export type {
   SessionBuildStats,
   SessionDiagnostics,
   SessionOptions,
+  StateAttentionReduce,
   StateBackingStats,
   StorageDiagnostics,
   Tensor,
@@ -784,6 +786,8 @@ type SessionState = {
   readonly attentionCompute: ComputePrecision;
   /** S の格納形（opt-in — {@link SessionOptions.attentionScoreStorage}）。計算形と直交する軸。 */
   readonly attentionScoreStorage: ScoreStorage;
+  /** states 形 attention ③PV の縮約形（opt-in — {@link SessionOptions.stateAttentionReduce}）。 */
+  readonly stateAttentionReduce: StateAttentionReduce;
   /**
    * **linear の** i8a8 整数内積変種。既定は `navigator.gpu.wgslLanguageFeatures` の列挙から
    * 決まり、テストは {@link I8A8_DOT} で強制できる。**どちらでも数値は 1 ビットも変わらない**
@@ -883,6 +887,7 @@ export class Session {
     const linearCompute = options.linearCompute ?? "f32";
     const attentionCompute = options.attentionCompute ?? "f32";
     const attentionScoreStorage = options.attentionScoreStorage ?? "f32";
+    const stateAttentionReduce = options.stateAttentionReduce ?? "sequential";
     // MUST: S の格納形は 1 つに決まらなければならない。`:c16` は S を array<f16> で持つ
     // **別の形**（ADR 0028）なので、s16 と併記されたら黙ってどちらかに解釈せず落とす
     // （どちらの丸め列で走ったのかが診断からも数値からも見えなくなる）。
@@ -1265,6 +1270,7 @@ export class Session {
       linearCompute,
       attentionCompute,
       attentionScoreStorage,
+      stateAttentionReduce,
       // linear の拡張の有無は**速度にしか効かない**（両変種は同じ整数を返す）ので、機能検出では
       // なく経路選択としてここで 1 度だけ決める（src/kernels/linear-i8a8.ts の docstring）。
       linearI8a8Dot: options[I8A8_DOT] ?? (dp4a ? "dp4a" : "emu"),

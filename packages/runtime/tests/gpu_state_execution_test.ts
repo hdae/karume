@@ -23,7 +23,7 @@
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { compareTensors, formatAllclose, type Tolerance } from "../src/reference/allclose.ts";
 import { referenceStateAppend, referenceStateAttention } from "../src/reference/state-attention.ts";
-import { stateQkKey } from "../src/kernels/state-attention.ts";
+import { statePvKey, statePvParallelKey, stateQkKey } from "../src/kernels/state-attention.ts";
 import { acquireGpu, type GpuContext, RUNTIME_INTERNAL } from "../src/gpu/device.ts";
 import { openModel } from "../src/format/container.ts";
 import {
@@ -439,6 +439,58 @@ Deno.test({
             keys.filter((key) => key.startsWith("attention_qk")),
             [],
             `${label}: 融合 attention のキーが混ざっている`,
+          );
+        } finally {
+          await context.dispose();
+          await session.dispose();
+        }
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+/**
+ * **census**（ADR 0058 決定 4 ③）— `stateAttentionReduce: "parallel"` を指定したとき ③' の
+ * キー（`:par`）が**実際に走り**、③ のキーが 1 本も出ないことを見る。逆に既定では ③ だけが出る
+ * （opt-in が黙って既定へ落ちる / 既定が黙って変種へ上がる、の両方向を塞ぐ）。
+ */
+Deno.test({
+  name: "states 形 attention ③PV の縮約形は席どおりに走る（census・実 GPU / timestamp-query）",
+  ignore: !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    try {
+      for (
+        const [label, model, sliding, reduce] of [
+          ["full r=2 parallel", GQA, false, "parallel"],
+          ["sliding r=1 parallel", SLIDING, true, "parallel"],
+          ["full r=2 sequential", GQA, false, "sequential"],
+        ] as const
+      ) {
+        const session = await stateSession(gpu, model, { stateAttentionReduce: reduce });
+        const context = await session.createGenerationContext({ chunkLength: 2 });
+        try {
+          await runStep(session, context, model, stepInputs(model, 2, 7), 2, 2);
+          const keys = session.diagnostics().lastRunTiming?.entries.map((entry) => entry.key) ?? [];
+          assert(keys.length > 0, `${label}: 内訳が空（キー検査が空振りしている）`);
+          const gqa = model.heads !== model.kvHeads;
+          const expected = reduce === "parallel"
+            ? statePvParallelKey(sliding, gqa)
+            : statePvKey(sliding, gqa);
+          const other = reduce === "parallel"
+            ? statePvKey(sliding, gqa)
+            : statePvParallelKey(sliding, gqa);
+          assertEquals(
+            keys.includes(expected),
+            true,
+            `${label}: 期待した ③ のキーが出ていない（${keys.join(" / ")}）`,
+          );
+          assertEquals(
+            keys.includes(other),
+            false,
+            `${label}: 席と違う ③ のキーが混ざっている（${keys.join(" / ")}）`,
           );
         } finally {
           await context.dispose();

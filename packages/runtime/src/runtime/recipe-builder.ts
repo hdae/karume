@@ -183,6 +183,9 @@ import {
   STATE_STATS_STRIDE,
   stateAttentionParams,
   statePvKey,
+  statePvParallelKey,
+  statePvParallelWgsl,
+  statePvParallelWorkgroups,
   statePvWgsl,
   statePvWorkgroups,
   stateQkKey,
@@ -260,7 +263,12 @@ import {
   validateStepRecipe,
   type ValueSource,
 } from "./recipe.ts";
-import type { ComputePrecision, I8a8Dot, ParamsCacheStats } from "./session-types.ts";
+import type {
+  ComputePrecision,
+  I8a8Dot,
+  ParamsCacheStats,
+  StateAttentionReduce,
+} from "./session-types.ts";
 import type { ResidentWeight } from "./weight-residency.ts";
 
 /** elementwise 族の生成入力のうち rank に依らない部分（rank はエンコード時に決まる）。 */
@@ -301,6 +309,8 @@ type RecipeBuilderContext = {
   readonly linearCompute: "f32" | "a8" | "f16";
   readonly attentionCompute: ComputePrecision;
   readonly attentionScoreStorage: ScoreStorage;
+  /** states 形 attention ③PV の縮約形（executor の {@link SessionState} が既定を決める）。 */
+  readonly stateAttentionReduce: StateAttentionReduce;
   /**
    * i8a8 の整数内積変種（**族ごとに別席** — 「両変種はビット同一」が attention だけ実機で
    * 反証されているため。executor の {@link SessionState} が既定を決める）。
@@ -2183,10 +2193,16 @@ export class RecipeBuilder {
 
     const qkKey = stateQkKey(sliding, gqa);
     const statsKey = stateStatsKey(sliding);
-    const pvKey = statePvKey(sliding, gqa);
+    // ③ の縮約形は opt-in 席（ADR 0058）。③' は束縛・params が ③ と同一で、キー・WGSL・
+    // workgroup 算出の 3 点だけが替わる（キーの `:par` が census 門の目印）。
+    const parallel = this.#state.stateAttentionReduce === "parallel";
+    const pvKey = parallel ? statePvParallelKey(sliding, gqa) : statePvKey(sliding, gqa);
     const qk = await this.#state.cache.get(qkKey, stateQkWgsl(sliding, gqa));
     const stats = await this.#state.cache.get(statsKey, stateStatsWgsl(sliding));
-    const pv = await this.#state.cache.get(pvKey, statePvWgsl(sliding, gqa));
+    const pv = await this.#state.cache.get(
+      pvKey,
+      parallel ? statePvParallelWgsl(sliding, gqa) : statePvWgsl(sliding, gqa),
+    );
 
     for (const block of blocks) {
       // ①③ が共有する静的 params（内容アドレスキャッシュ適格 — ブロック間の差は rowOffset /
@@ -2266,7 +2282,9 @@ export class RecipeBuilder {
           { binding: 5, source: outs[0] },
           { binding: 6, source: { kind: "lengths" } },
         ],
-        workgroups: statePvWorkgroups(dispatchGeometry, limit, `${where} ③PV`),
+        workgroups: parallel
+          ? statePvParallelWorkgroups(dispatchGeometry, limit, `${where} ③PV`)
+          : statePvWorkgroups(dispatchGeometry, limit, `${where} ③PV`),
       });
 
       // MUST: 確保の逆順で返す（{@link executeStepRecipe} の LIFO と同じ順）。

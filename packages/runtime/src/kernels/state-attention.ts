@@ -6,6 +6,7 @@
  * | ①  | `attention_state_qk:v1:f32:wg16x4`       | 論理 col 空間の `S` を**行ブロック窓で実体化**  |
  * | ②  | `attention_state_stats:v2:f32:wg256`     | 行ごとの `m = amax S` と `inv = 1/Σexp(S−m)`    |
  * | ③  | `attention_state_pv:v1:f32:wg16x4`       | `O = P @ V`（`P = exp(S−m)·inv` は**非実体化**）|
+ * | ③' | `attention_state_pv:v1:f32:wg16x16:par`  | ③ の **KV 並列縮約**変種（opt-in — 下記）      |
  *
  * 既存の融合 attention（src/kernels/attention.ts + GEMM 骨格）とは**別族**で、1 バイトも共有
  * しない。理由は 3 つで、どれも既存側を触らずに済ませるためではなく、意味論が違うため:
@@ -21,6 +22,24 @@
  * MUST: **ビット同一契約（分解経路との一致）は states 形に適用されない**（ADR 0067 決定 4 は
  * 分解経路を持たない — GQA モデルは SDPA 保存が必須）。代わりに従来どおり**決定性**が掛かる:
  * 同一キー → バイト同一 WGSL・同一入力 → 同一出力（縮約は col 昇順の逐次で固定）。
+ *
+ * ## ③' KV 並列縮約変種（`SessionOptions.stateAttentionReduce: "parallel"` — perf-ledger K-12）
+ *
+ * ③ は 1 invocation が O の 1 要素を live 列の**逐次ループ**で積むため、decode（M=1）では
+ * 有効 invocation が `D × B·H`（Gemma 4 E2B の full 層で 4,096）に固定され、KV 長が伸びるほど
+ * 1 スレッドの逐次長だけが伸びる（P=16K で attention が decode GPU 時間の 72% —
+ * docs/research/2026-09-03-gemma4-context-length-sweep.md）。③' は workgroup を
+ * `TILE_X（D 方向）× KV_LANES（KV 方向）` の 2 次元に組み替え、レーン `l` が `cl ≡ l (mod KV_LANES)`
+ * の列を昇順に部分累積し、workgroup 共有メモリで**固定順の木縮約**（stride 8 → 4 → 2 → 1）に
+ * 畳む。dispatch 数・中間バッファは ③ と同じ（増えるのは workgroup 内のレーンだけ）。
+ *
+ * MUST: 縮約順が ③ と違うので**ビット同一ではない**（決定性は保つ — 同一入力 → 同一出力）。
+ * ADR 0058 の opt-in 席で、既定は ③（参照経路）。検証門は 3 点セット（参照経路の門は無変更・
+ * ③' の A/B 帯門 = tests/gpu_state_attention_parallel_test.ts・census 門 =
+ * tests/gpu_state_execution_test.ts）。
+ * MUST: pad 行の分岐は **workgroup 一様**（局所行は `workgroup_id.y` 由来）なので barrier の
+ * 手前で返してよいが、`d ≥ D` のレーンは barrier に参加させる（return しない — 走査を空回り
+ * させて `0.0` を寄与する）。WGSL の barrier は一様制御流の外に置けない。
  *
  * ## 記号（正本 = ADR 0067 決定 4）
  *
@@ -144,6 +163,18 @@ export const stateStatsKey = (sliding: boolean): string =>
 
 export const statePvKey = (sliding: boolean, gqa: boolean): string =>
   `attention_state_pv:v1:f32:wg${STATE_ATTENTION_TILE_X}x${STATE_ATTENTION_TILE_M}${
+    stateVariantKeyPart(sliding, gqa)
+  }`;
+
+/**
+ * ③' の KV 方向レーン数（workgroup = `TILE_X × KV_LANES` = 256 スレッド — ポータビリティの床
+ * `maxComputeInvocationsPerWorkgroup` の仕様既定 256 に収める）。
+ */
+export const STATE_PV_KV_LANES = 16;
+
+/** ③' のキー（`:par` が census 門の目印 — ③ と同じ変種ビットを後置）。 */
+export const statePvParallelKey = (sliding: boolean, gqa: boolean): string =>
+  `attention_state_pv:v1:f32:wg${STATE_ATTENTION_TILE_X}x${STATE_PV_KV_LANES}:par${
     stateVariantKeyPart(sliding, gqa)
   }`;
 
@@ -560,6 +591,96 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 `;
 
+/**
+ * ③' KV 並列縮約変種（ファイル冒頭「③' KV 並列縮約変種」節）。束縛と params は ③ と**同一**
+ * （差し替え可能 — 呼び手はキーと workgroup 算出だけを切り替える）。
+ *
+ * 1 workgroup = 局所行 1 本 × `TILE_X` 本の `d`。レーン `lane` は `cl = lane, lane + KV_LANES, …`
+ * を昇順に部分累積し、`scratch[lane][x]` に置いてから固定順の木で畳む。
+ */
+export const statePvParallelWgsl = (sliding: boolean, gqa: boolean): string =>
+  `// karume attention_state_pv (states 形の O = P @ V, f32, KV 並列縮約${
+    sliding ? ", sliding window" : ""
+  }${gqa ? ", GQA" : ""})
+${STATE_PARAMS_STRUCT}
+${STATE_LENGTHS_STRUCT}
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read> s: array<f32>;
+@group(0) @binding(2) var<storage, read> stats: array<f32>;
+@group(0) @binding(3) var<storage, read> ins_v: array<f32>;
+@group(0) @binding(4) var<storage, read> slot_v: array<f32>;
+@group(0) @binding(5) var<storage, read_write> out: array<f32>;
+@group(0) @binding(6) var<uniform> lengths: Lengths;
+
+${stateSlotRowWgsl(sliding)}
+
+${stateLiveWgsl(sliding)}
+
+${stateEffectiveRowsWgsl}
+
+var<workgroup> scratch: array<f32, ${STATE_ATTENTION_TILE_X * STATE_PV_KV_LANES}>;
+
+@compute @workgroup_size(${STATE_ATTENTION_TILE_X}, ${STATE_PV_KV_LANES})
+fn main(
+  @builtin(workgroup_id) wid: vec3<u32>,
+  @builtin(local_invocation_id) lid: vec3<u32>,
+) {
+  let d = wid.x * ${STATE_ATTENTION_TILE_X}u + lid.x;
+  let local_row = wid.y;
+  let lane = lid.y;
+  let z = wid.z;
+  let in_depth = d < params.depth;
+  let at = (z * params.chunk_rows + params.row_offset + local_row) * params.depth + d;
+  // pad 行（row ≥ Q）は live を走査せず厳密 0（③ と同じ契約）。局所行は workgroup 一様なので
+  // barrier の手前で返してよい
+  if (local_row >= effective_rows(lengths.query)) {
+    if (in_depth) {
+      out[at] = 0.0;
+    }
+    return;
+  }
+  let past = lengths.past;
+  let live = live_columns(past, lengths.query);
+  let base_col = column_base(past);
+  let kv_plane = ${kvPlaneWgsl(gqa)};
+  let s_row = z * params.rows_block + local_row;
+  let s_base = s_row * params.col_cap;
+  let amax = stats[s_row * ${STATE_STATS_STRIDE}u];
+  let inv = stats[s_row * ${STATE_STATS_STRIDE}u + 1u];
+  // レーンごとの部分和（col 昇順・stride KV_LANES）。d が範囲外のレーンは走査せず 0 を寄与する
+  // （barrier に参加させるため return しない）
+  var acc = 0.0;
+  if (in_depth) {
+    for (var cl = lane; cl < live; cl = cl + ${STATE_PV_KV_LANES}u) {
+      let col = base_col + cl;
+      let p = exp(s[s_base + cl] - amax) * inv;
+      var value = 0.0;
+      if (col < past) {
+        value = slot_v[(kv_plane * params.capacity + slot_row(col)) * params.depth + d];
+      } else {
+        value = ins_v[(kv_plane * params.chunk_rows + (col - past)) * params.depth + d];
+      }
+      acc = acc + p * value;
+    }
+  }
+  scratch[lane * ${STATE_ATTENTION_TILE_X}u + lid.x] = acc;
+  workgroupBarrier();
+  // 固定順の木縮約（stride 8 → 4 → 2 → 1）— 決定性の根拠
+  var stride = ${STATE_PV_KV_LANES / 2}u;
+  while (stride > 0u) {
+    if (lane < stride) {
+      let mine = lane * ${STATE_ATTENTION_TILE_X}u + lid.x;
+      scratch[mine] = scratch[mine] + scratch[(lane + stride) * ${STATE_ATTENTION_TILE_X}u + lid.x];
+    }
+    workgroupBarrier();
+    stride = stride / 2u;
+  }
+  if (lane == 0u && in_depth) {
+    out[at] = scratch[lid.x];
+  }
+}
+`;
+
 /** ①③ が共有する静的幾何（{@link STATE_PARAMS_STRUCT} の語順の型側）。 */
 export type StateAttentionGeometry = {
   /** この dispatch が担当する行数（S の行数 — `rows_block`）。 */
@@ -857,5 +978,23 @@ export const statePvWorkgroups = (
     tiledWorkgroups(geometry.depth, STATE_ATTENTION_TILE_X, limit, `${where} ③PV`),
     tiledWorkgroups(geometry.rowsBlock, STATE_ATTENTION_TILE_M, limit, `${where} ③PV`),
     tiledWorkgroups(geometry.batchHeads, 1, limit, `${where} ③PV`),
+  ];
+};
+
+/**
+ * ③' の workgroup 数 `[D / TILE_X, rows_block, B·H]`（行軸は **1 行 = 1 workgroup**）。
+ *
+ * ③ と同じく行軸は `rows_block` 全て（pad 行も full-write）・上限超過は fail loudly。
+ */
+export const statePvParallelWorkgroups = (
+  geometry: StateDispatchGeometry,
+  limit: number,
+  where: string,
+): [number, number, number] => {
+  assertDispatchGeometry(`${where} ③'PV`, geometry);
+  return [
+    tiledWorkgroups(geometry.depth, STATE_ATTENTION_TILE_X, limit, `${where} ③'PV`),
+    tiledWorkgroups(geometry.rowsBlock, 1, limit, `${where} ③'PV`),
+    tiledWorkgroups(geometry.batchHeads, 1, limit, `${where} ③'PV`),
   ];
 };

@@ -12,6 +12,8 @@
 import {
   STATE_STATS_STRIDE,
   stateAttentionParams,
+  statePvParallelWgsl,
+  statePvParallelWorkgroups,
   statePvWgsl,
   statePvWorkgroups,
   stateQkWgsl,
@@ -189,9 +191,15 @@ export const runStateAttention = async (
   device: GPUDevice,
   spec: StateCase,
   inputs: StateInputs,
-  options: { readonly mutate?: StateMutation; readonly cache?: StatePipelineCache } = {},
+  options: {
+    readonly mutate?: StateMutation;
+    readonly cache?: StatePipelineCache;
+    /** ③ の縮約形（既定 sequential = 参照経路・parallel = ③' の KV 並列縮約変種）。 */
+    readonly pvReduce?: "sequential" | "parallel";
+  } = {},
 ): Promise<StateRunResult> => {
   const { mutate } = options;
+  const parallel = options.pvReduce === "parallel";
   const sliding = stateSliding(spec.window);
   const gqa = spec.heads !== spec.kvHeads;
   const colCap = caseColCap(spec);
@@ -261,7 +269,11 @@ export const runStateAttention = async (
       );
       const qk = pipelineOf(device, cache, wgsl("qk", stateQkWgsl(sliding, gqa)));
       const st = pipelineOf(device, cache, wgsl("stats", stateStatsWgsl(sliding)));
-      const pv = pipelineOf(device, cache, wgsl("pv", statePvWgsl(sliding, gqa)));
+      const pv = pipelineOf(
+        device,
+        cache,
+        wgsl("pv", parallel ? statePvParallelWgsl(sliding, gqa) : statePvWgsl(sliding, gqa)),
+      );
       const encoder = device.createCommandEncoder();
       const pass = encoder.beginComputePass();
       pass.setPipeline(qk);
@@ -274,7 +286,9 @@ export const runStateAttention = async (
       pass.dispatchWorkgroups(statsGroups[0], statsGroups[1], statsGroups[2]);
       pass.setPipeline(pv);
       pass.setBindGroup(0, bind(device, pv, [params, scores, stats, insV, slotV, out, lengths]));
-      const pvGroups = statePvWorkgroups(dispatchGeometry, limit, spec.name);
+      const pvGroups = parallel
+        ? statePvParallelWorkgroups(dispatchGeometry, limit, spec.name)
+        : statePvWorkgroups(dispatchGeometry, limit, spec.name);
       pass.dispatchWorkgroups(pvGroups[0], pvGroups[1], pvGroups[2]);
       pass.end();
       device.queue.submit([encoder.finish()]);

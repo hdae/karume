@@ -99,13 +99,23 @@ export type { ModelShard } from "./src/runtime/executor.ts";
  * メモリ必要量 estimator（ADR 0070 決定 5）。GPU 非依存の純関数で「必要側」のカテゴリ別
  * バイト数だけを出す — 空き側との比較・可否判定はしない（最終門は out-of-memory errorScope）。
  */
-export { estimateSessionMemory } from "./src/runtime/estimate.ts";
+export { estimateGraphMemory, estimateSessionMemory } from "./src/runtime/estimate.ts";
 export type {
   AdmissionReport,
   AdmissionScenario,
   AdmissionScenarioName,
   EstimateOptions,
 } from "./src/runtime/estimate.ts";
+/**
+ * 重み常駐計画 — グラフだけで決まる純関数で、{@link estimateGraphMemory} の第 2 引数。
+ *
+ * ロードを終えた呼び手（models のパイプライン）は `PreparedModel` を握らず `IrGraph` だけ
+ * 残す規律なので、`PreparedModel.estimate` の口が使えない。そこから同じ見積りへ戻る唯一の
+ * 経路がこの 2 本（`estimateGraphMemory(graph, planWeightResidency(graph), options)`）で、
+ * グラフが同じなら計画も同じ（純関数）。
+ */
+export { planWeightResidency } from "./src/runtime/weight-residency.ts";
+export type { WeightResidency } from "./src/runtime/weight-residency.ts";
 /**
  * Session の構築は {@link createSession} だけを入口にするため、型としてのみ公開する。
  *
@@ -140,6 +150,7 @@ export type {
   SessionBuildStats,
   SessionDiagnostics,
   SessionOptions,
+  StateAttentionReduce,
   StateBackingStats,
   StorageDiagnostics,
   Tensor,

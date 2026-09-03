@@ -181,3 +181,28 @@ S とは別に **state スロット自体の binding も上限を超えうる**�
 - 受入条件（実装波のゲート）: ①r=1 スナップショットバイト同一 ②repeat_kv parity + 故障
   注入 ③census（GQA が実際に効いた検査 — 0058 決定 4）④行ブロック動作（強制分割含む）
   ⑤空行 → 0 の直接門（全 padding 行入力）⑥既存 sha 門全緑。
+
+## 追記（2026-09-03）— ③PV の KV 並列縮約変種（perf-ledger K-12）
+
+決定 4 の states 形 ③PV（`O = P @ V`）に **KV 長方向を workgroup 内 16 レーンで分担する変種**
+（`attention_state_pv:…:wg16x16:par`）を足した。1 invocation が O の 1 要素を live 列の逐次ループで
+積む形は、decode（M=1）で有効 invocation が `D × B·H`（Gemma 4 E2B の full 層で 4,096）に固定され、
+KV 長が 1 スレッドの逐次長にしか効かない — P=16K で attention が decode GPU 時間の 72% を占めた
+機序（[research 2026-09-03 P 掃引](../research/2026-09-03-gemma4-context-length-sweep.md) §3）。
+
+- **契約**: 束縛・params・dispatch 数は ③ と同一で、レーン `l` が `cl ≡ l (mod 16)` の列を昇順に
+  部分累積し、workgroup 共有メモリで固定順の木（stride 8 → 4 → 2 → 1）に畳む。決定性（同一入力 →
+  同一出力）・容量非依存・行ブロック非依存・pad 行 → 厳密 0 は ③ と同じくビット門で保つ。
+  縮約順が違うので **③ とビット同一ではない**（本 ADR 冒頭の「縮約は col 昇順の逐次で固定」は ③ の
+  契約であり、③' は「レーン部分和 → 固定順木」を自分の契約として持つ）。
+- **席**: ADR 0058 の opt-in 席 `SessionOptions.stateAttentionReduce: "sequential" | "parallel"`
+  （既定 `"sequential"` = 参照経路）。検証門は 3 点セット — ③ の既存門は無変更・③' の A/B 帯門
+  （`tests/gpu_state_attention_parallel_test.ts`・帯 5e-6・実測最悪 2.4e-7）・census 門
+  （`tests/gpu_state_execution_test.ts` — 席どおりのキーが走り、他方が混ざらない）。
+- **実測**（[research 2026-09-03](../research/2026-09-03-gemma4-chunklength-k12-sweep.md) §3）:
+  full PV 35.0 → 3.6 ms・sliding PV 6.2 → 0.8 ms・decode 壁 P=16K 81.3 → 41.0 ms/token（×1.98）・
+  token 列一致。既定への昇格は ADR 0058 決定 6（品質裁定 + golden 更新を同一コミット）に従う。
+- why-not（split-KV + merge 段 / online softmax / subgroup）: workgroup 内分割は dispatch 数も中間
+  バッファも増やさず実装が最小で、③' を段 A の中身として流用する形で split-KV へ伸ばせる。
+  online 形は S 一時を消す別の価値を持つが decode の並列度を単体では解かない。subgroup はアダプタが
+  feature を広告せず入場不可（2026-08-10 プローブ）。

@@ -147,6 +147,9 @@ export const ROW_BLOCK_SPLIT: unique symbol = Symbol("karume.rowBlockSplit");
  */
 export type ComputePrecision = "f32" | "f16" | "a8";
 
+/** states 形 attention ③PV の縮約形（{@link SessionOptions.stateAttentionReduce}）。 */
+export type StateAttentionReduce = "sequential" | "parallel";
+
 export type SessionOptions = {
   /** submit の時間予算政策（TDR / watchdog 対策 — ADR 0004）。既定は DEFAULT_SUBMIT_POLICY。 */
   readonly submitPolicy?: SubmitPolicy;
@@ -214,6 +217,18 @@ export type SessionOptions = {
    * キーにだけ出る）。
    */
   readonly attentionScoreStorage?: ScoreStorage;
+  /**
+   * states 形 attention（ADR 0067 決定 4 — 生成 context の KV スロットを読む形）の ③PV の
+   * 縮約形（既定 `"sequential"` = 参照経路）。
+   *
+   * `"parallel"` は KV 長方向を workgroup 内の 16 レーンで分担し固定順の木で畳む変種
+   * （perf-ledger K-12 — src/kernels/state-attention.ts「③' KV 並列縮約変種」節）。decode
+   * （M=1）で 1 スレッドの逐次長が KV 長に比例して伸びる形を潰す。縮約順が変わるので
+   * **参照経路とビット同一ではない**（決定性は保つ）。融合 attention（`attentionCompute`）
+   * とは別族なので直交する。
+   * MUST: 既定は `"sequential"`（ADR 0058 決定 2 — 数値を変える経路の自動選択禁止）。
+   */
+  readonly stateAttentionReduce?: StateAttentionReduce;
   /** テスト専用（{@link I8A8_DOT}）。既定は wgslLanguageFeatures の列挙から決める。 */
   readonly [I8A8_DOT]?: I8a8Dot;
   /** テスト専用（{@link ROW_BLOCK_SPLIT}）。既定は device の limit から静的に決まる枚数。 */
