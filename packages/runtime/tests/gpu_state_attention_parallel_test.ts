@@ -37,11 +37,15 @@ const STATE_TOLERANCE: Tolerance = { atol: 5e-6, rtol: 0 };
  * ③ と ③' の A/B 帯。
  *
  * 導出: 両者とも f32 で `live` 本の積を足すが順序が違う（③ = 昇順逐次・③' = 16 レーン部分和 →
- * 固定順の木）。差の上界は f32 の縮約誤差 2 本ぶんで、出力の大きさ O(1)・live ≤ 数千の範囲で
- * 実測最悪は下の `PARALLEL_CASES` 全件で **vs ③ maxAbs 2.38e-7 / vs f64 参照 3.99e-7**
- * （2026-09-03 / RTX 3080 Ti・Vulkan）。`atol = 5e-6` はそこへ約 20 倍の余裕（f64 参照との帯と
- * 同じ値 — 両者が f64 参照と同じ帯に居るなら互いの差もその帯の 2 倍以内）。`rtol = 0` の理由は
- * STATE_TOLERANCE と同じ。
+ * 固定順の木）。差の上界は f32 の縮約誤差 2 本ぶんで、出力の大きさ O(1)。実測最悪は下の
+ * `PARALLEL_CASES` 全件（縮約長 `live` は 1 〜 16,384）で
+ * **vs ③ maxAbs 2.38e-7 / vs f64 参照 3.99e-7**（2026-09-03 / RTX 3080 Ti・Vulkan）。
+ * `atol = 5e-6` はそこへ約 20 倍の余裕（f64 参照との帯と同じ値 — 両者が f64 参照と同じ帯に
+ * 居るなら互いの差もその帯の 2 倍以内）。`rtol = 0` の理由は STATE_TOLERANCE と同じ。
+ * NOTE: この最悪値を作るのは live が**小さい**側のケースで、live 4,096 / 16,384 の
+ * 射程宣言ケースを足しても最悪値は動かない（重みが多数の列へ散るぶん出力の変動が小さくなる）。
+ * メイン実測（レビュー 2026-09-03）では live 65,536 まで同傾向 — ③' vs f64 1.8e-8 /
+ * ③ vs f64 3.6e-8 / ③' vs ③ 5.0e-8 で、いずれも帯 5e-6 の 1/100 に収まる。
  * NOTE: 実測値はドライバの fma 使用に依るので、別アダプタでは「実測 → 余裕を積む」の手順ごと
  * 繰り返す（テストは最悪値を毎回 stdout に出す）。
  */
@@ -151,6 +155,32 @@ const PARALLEL_CASES: readonly StateCase[] = [
     capacity: 512,
     window: 0,
     past: 300,
+    query: 1,
+  },
+  // 射程宣言（帯の根拠を実運用の live まで伸ばす — レビュー W-G1-1）。縮約長 `live` が
+  // 4 桁 / 5 桁でも帯が桁で動かないことを門にする。形は Gemma 4 E2B の decode（MQA 8:1・D 32）。
+  {
+    name: "full r8 MQA decode live 4096",
+    batch: 1,
+    heads: 8,
+    kvHeads: 1,
+    chunkRows: 1,
+    depth: 32,
+    capacity: 4096,
+    window: 0,
+    past: 4095,
+    query: 1,
+  },
+  {
+    name: "full r8 MQA decode live 16384",
+    batch: 1,
+    heads: 8,
+    kvHeads: 1,
+    chunkRows: 1,
+    depth: 32,
+    capacity: 16384,
+    window: 0,
+    past: 16383,
     query: 1,
   },
   {

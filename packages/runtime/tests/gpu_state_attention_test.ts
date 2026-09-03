@@ -42,8 +42,12 @@ import { GPU_AVAILABLE } from "./helpers/gpu.ts";
  * 突合の許容誤差。
  *
  * 根拠: 参照は f64 で積んで格納時に 1 度だけ丸める・GPU は f32 の逐次累積で、差は内積長 `D` と
- * 縮約長 `live` に比例する。下の `PARITY_CASES` 全 16 ケースの**実測最悪は maxAbs 6.6e-7**
- * （2026-08-18 / 出力の大きさは O(1)）で、`atol = 5e-6` はそこへ約 7.6 倍の余裕を積んだ値。
+ * 縮約長 `live` に比例する。下の `PARITY_CASES` 全 18 ケース（`live` は 1 〜 4,096）の
+ * **実測最悪は maxAbs 6.6e-7**（2026-08-18 初測。`live 4096` のケースを足した 2026-09-03 の
+ * 再測でも同値 — RTX 3080 Ti・Vulkan / 出力の大きさは O(1)）で、`atol = 5e-6` はそこへ
+ * 約 7.6 倍の余裕を積んだ値。最悪値を作るのは live が**小さい**側で、live を伸ばすと誤差は
+ * むしろ縮む（メイン実測〈レビュー 2026-09-03〉= live 4,096 で 4.9e-8・16,384 で 4.1e-8・
+ * 65,536 で 3.6e-8）。
  * MUST: `DEFAULT_TOLERANCE`（atol 1e-5 / rtol 1e-3）を使わない — rtol 1e-3 は「窓の外の key が
  * 混ざった」級の誤りを平気で通す（このファイルの門はそれを見るためにある）。
  * MUST: `rtol = 0`。states 形は**厳密 0 が正解の要素**（空行・述語外の寄与）を正規に含むので、
@@ -342,6 +346,23 @@ const PARITY_CASES: readonly StateCase[] = [
     capacity: 2,
     window: 2,
     past: 0xfffffffe,
+    query: 1,
+  },
+  // ── 射程宣言 ──────────────────────────────────────────────────────────────
+  // 縮約長 `live` を実運用の桁（4 桁）まで伸ばした decode。上の格子は live ≤ 数十なので、
+  // 「`atol` の根拠が小さい live の外挿ではない」ことをここで門にする（レビュー W-G1-1）。
+  // 形は Gemma 4 E2B の decode（MQA 8:1・D 32）。**末尾に足す** — 上の添字を動かすと
+  // `PREDICATE_CASES` / `INJECTIONS` の参照がずれる。
+  {
+    name: "full r8 MQA decode live 4096",
+    batch: 1,
+    heads: 8,
+    kvHeads: 1,
+    chunkRows: 1,
+    depth: 32,
+    capacity: 4096,
+    window: 0,
+    past: 4095,
     query: 1,
   },
 ];
