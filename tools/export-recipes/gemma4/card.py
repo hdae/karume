@@ -135,7 +135,7 @@ def _gemma4_base_weights(manifest: Mapping[str, Any]) -> list[str]:
         "  decoder was extracted and re-expressed in the Karume container format; linear weights",
         "  were quantized to packed int4 (group 32) and the embedding tables to int8; the",
         "  per-layer embeddings were moved out of the graph into a host-gathered sidecar; the exit",
-        "  was narrowed to the last row's logits; rotary position tables were baked as constants.",
+        "  was narrowed to the last row's logits; rotary cos/sin arrive as host-generated inputs.",
         "  No retraining and no fine-tuning.",
         "- **What the model can and cannot do** — capabilities, limitations, intended use,",
         "  evaluations and safety guidance — is documented on the upstream model card, and this",
