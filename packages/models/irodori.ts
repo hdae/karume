@@ -28,11 +28,13 @@ export type {
 } from "./src/irodori/pipeline.ts";
 
 /**
- * **このパッケージ版が検証した取得元**（`hdae/karume-irodori-v4-small` の pin 済み commit SHA —
- * ADR 0073）。
+ * **このパッケージ版が検証した取得元**（公開配布リポ 1 つにつき 1 定数・pin 済み commit SHA —
+ * ADR 0073）。上流の v4 / v4.1 は別リポなので 2 本
+ * （`hdae/karume-irodori-v4-small` / `hdae/karume-irodori-v4.1-small`）— v4.1 は duration
+ * predictor だけを再学習した後続版で、旧版の pin も温存する。
  *
  * **パッケージ版に合わせて自動追従したい場合のオプトイン** — {@link IrodoriPipeline.fromPretrained}
  * の第 1 引数へそのまま渡す。再現性を自分で固定したい場合は、この定数ではなく自分の
  * `{ repo, revision }` を書く（`fromPretrained` に既定は無い）。
  */
-export { IRODORI_V4_SMALL_CURRENT } from "./src/irodori/config.ts";
+export { IRODORI_V4_1_SMALL_CURRENT, IRODORI_V4_SMALL_CURRENT } from "./src/irodori/config.ts";

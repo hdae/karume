@@ -33,8 +33,12 @@ export type { AnimaSamplerType } from "./src/anima/config.ts";
 
 /**
  * **このパッケージ版が検証した取得元**（公開配布リポ 1 つにつき 1 定数・pin 済み commit SHA —
- * ADR 0073）。`ANIMA_CURRENT` = `hdae/karume-anima`（公式モデル同居・既定 = Turbo —
- * 既定以外は `{ model }` で選ぶ）。
+ * ADR 0073）。リポの分割軸は「公式 / 追加学習」（ADR 0087）で 2 本:
+ *
+ * - `ANIMA_CURRENT` = `hdae/karume-anima`（公式モデル同居・既定 = Turbo）
+ * - `ANIMA_EXTRA_CURRENT` = `hdae/karume-anima-extra`（第三者 fine-tune 同居・既定 = wai）
+ *
+ * どちらも既定以外は `{ model }` で選ぶ。
  *
  * **パッケージ版に合わせて自動追従したい場合のオプトイン** — `fromPretrained` の第 1 引数へ
  * そのまま渡す。再現性を自分で固定したい場合は、この定数ではなく自分の `{ repo, revision }` を
@@ -43,7 +47,7 @@ export type { AnimaSamplerType } from "./src/anima/config.ts";
  * NOTE: 旧 `ANIMA_TURBO_CURRENT` は廃止（2026-09-01・breaking — `src/anima/config.ts` の
  * NOTE 参照）。
  */
-export { ANIMA_CURRENT } from "./src/anima/config.ts";
+export { ANIMA_CURRENT, ANIMA_EXTRA_CURRENT } from "./src/anima/config.ts";
 
 /**
  * 途中 latent からの RGB プレビュー近似。`denoise-step` イベントの `copyLatents()`

@@ -129,15 +129,15 @@ curl -sS -H "Authorization: Bearer <accessToken>" "<casUrl>/v1/reconstructions/<
       `curl -sS "https://huggingface.co/api/models/<owner>/<repo>/revision/main"` の `sha` 欄
 - [ ] `packages/models` の pin 定数（`<FAMILY>[_<VARIANT>]_CURRENT` — ADR 0073 追記
       2026-08-25）の `revision` へ記入。**公開リポ 1 つにつき 1 定数**なので、上げたリポの
-      定数を漏れなく: `ANIMA_CURRENT` / `SBV2_JVNV_CURRENT` / `IRODORI_V4_SMALL_CURRENT`
-      （旧 `ANIMA_TURBO_CURRENT` は廃止 — ADR 0087。extra リポの pin 定数
-      `ANIMA_EXTRA_CURRENT` は公開時に新設 = 下の項目）
+      定数を漏れなく: `ANIMA_CURRENT` / `ANIMA_EXTRA_CURRENT` / `SBV2_JVNV_CURRENT` /
+      `IRODORI_V4_SMALL_CURRENT` / `IRODORI_V4_1_SMALL_CURRENT` / `GEMMA4_CURRENT`
+      （旧 `ANIMA_TURBO_CURRENT` は廃止 — ADR 0087）
 - [ ] **初公開リポの pin 定数はこの時点で新設**（ADR 0073 決定 1 — 公開前に置くと 404 にしか
-      ならない定数が公開面に生える。gemma4 の config.ts 冒頭 NOTE と同型）。次リリースで新設:
-      `GEMMA4_CURRENT`・`IRODORI_V4_1_SMALL_CURRENT`・`ANIMA_EXTRA_CURRENT`
-      （各 config.ts + `mod.ts` re-export + `current_source_test.ts` の CASES 追随）。あわせて
-      `examples/irodori/main.ts` の台本既定を `IRODORI_V4_1_SMALL_CURRENT` へ切替
-      （2026-09-01 裁定 — 旧 pin は温存）
+      ならない定数が公開面に生える）。`GEMMA4_CURRENT`・`IRODORI_V4_1_SMALL_CURRENT`・
+      `ANIMA_EXTRA_CURRENT` は **0.8.0 で新設済み**（以後の初公開リポも同じ手順 — 各 config.ts
+      + `mod.ts` / サブパス barrel の re-export + `current_source_test.ts` の SOURCES と実 URL
+      の門 1 本）。0.8.0 では `examples/irodori/main.ts` の台本既定も
+      `IRODORI_V4_1_SMALL_CURRENT` へ切替済み（2026-09-01 裁定 — 旧 pin は温存）
 - [ ] pin の更新は **bump のたびの義務**（`*_CURRENT` = 「このパッケージ版が**検証した**
       取得元」— ADR 0073 追記 2026-08-25）。下の疎通に加え、席や既定 quant が動いたなら
       動作テストまで通してから「検証した」と名乗る

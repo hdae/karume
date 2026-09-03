@@ -54,7 +54,7 @@ export const SBV2_PIPELINE_MAJOR = 1;
 // SHA に更新する（ADR 0073 決定 3 — 手書き + 手順書ゲート）。
 export const SBV2_JVNV_CURRENT = {
   repo: "hdae/karume-sbv2-jvnv",
-  revision: "be752c6321f06bf91dc36a2715bc3b87f0f1cc2d",
+  revision: "4578c3edb2050bcd1a3d183ca6ac9e4287478546",
 } as const satisfies HubRepoRef;
 
 const ROOT_KEYS: readonly string[] = ["styles", "speakers", "maxTokens", "maxFrames", "defaults"];

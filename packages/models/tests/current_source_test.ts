@@ -16,12 +16,14 @@
 // 持たないので、この門の対象外（ADR 0073 決定 1）。
 
 import { assertEquals, assertMatch, assertRejects } from "@std/assert";
-import { ANIMA_CURRENT } from "../src/anima/config.ts";
-import { IRODORI_V4_SMALL_CURRENT } from "../src/irodori/config.ts";
+import { ANIMA_CURRENT, ANIMA_EXTRA_CURRENT } from "../src/anima/config.ts";
+import { IRODORI_V4_1_SMALL_CURRENT, IRODORI_V4_SMALL_CURRENT } from "../src/irodori/config.ts";
 import { SBV2_JVNV_CURRENT } from "../src/sbv2/config.ts";
+import { GEMMA4_CURRENT } from "../src/gemma/config.ts";
 import { AnimaPipeline } from "../src/anima/pipeline.ts";
 import { IrodoriPipeline } from "../src/irodori/pipeline.ts";
 import { Sbv2Pipeline } from "../src/sbv2/pipeline.ts";
+import { Gemma4Pipeline } from "../src/gemma/pipeline.ts";
 import { MemoryCacheStorage } from "./helpers/memory-cache.ts";
 
 /** hub が解決要求を出さずに済む形（`@hdae/fetch-cache` の `isCommitSha` と同じ綴り）。 */
@@ -60,7 +62,14 @@ const SOURCES = [
     source: IRODORI_V4_SMALL_CURRENT,
     repo: "hdae/karume-irodori-v4-small",
   },
+  {
+    name: "IRODORI_V4_1_SMALL_CURRENT",
+    source: IRODORI_V4_1_SMALL_CURRENT,
+    repo: "hdae/karume-irodori-v4.1-small",
+  },
   { name: "ANIMA_CURRENT", source: ANIMA_CURRENT, repo: "hdae/karume-anima" },
+  { name: "ANIMA_EXTRA_CURRENT", source: ANIMA_EXTRA_CURRENT, repo: "hdae/karume-anima-extra" },
+  { name: "GEMMA4_CURRENT", source: GEMMA4_CURRENT, repo: "hdae/karume-gemma4-e2b" },
 ] as const;
 
 for (const { name, source, repo } of SOURCES) {
@@ -86,6 +95,14 @@ Deno.test("irodori: IRODORI_V4_SMALL_CURRENT の pin がそのまま取得 URL �
   assertEquals(paths, [manifestPath(IRODORI_V4_SMALL_CURRENT)]);
 });
 
+// 上流 v4.1（duration predictor だけ再学習）は別リポ = 別定数。旧 pin は温存する。
+Deno.test("irodori: IRODORI_V4_1_SMALL_CURRENT の pin がそのまま取得 URL に載る", async () => {
+  const paths = await requestedPaths((options) =>
+    IrodoriPipeline.fromPretrained(IRODORI_V4_1_SMALL_CURRENT, options)
+  );
+  assertEquals(paths, [manifestPath(IRODORI_V4_1_SMALL_CURRENT)]);
+});
+
 // 公式モデル同居リポ（既定 = Turbo・既定以外は `{ model }` で選ぶ席）。旧
 // ANIMA_TURBO_CURRENT は廃止（2026-09-01・breaking — anima/config.ts の NOTE）。
 Deno.test("anima: ANIMA_CURRENT の pin がそのまま取得 URL に載る", async () => {
@@ -93,6 +110,22 @@ Deno.test("anima: ANIMA_CURRENT の pin がそのまま取得 URL に載る", as
     AnimaPipeline.fromPretrained(ANIMA_CURRENT, options)
   );
   assertEquals(paths, [manifestPath(ANIMA_CURRENT)]);
+});
+
+// 第三者 fine-tune 同居リポ（既定 = wai — ADR 0087）。text stack を公式リポから越境参照する側だが、
+// **manifest 自体はこのリポから取る**（越境は manifest の中のファイル参照の話）。
+Deno.test("anima: ANIMA_EXTRA_CURRENT の pin がそのまま取得 URL に載る", async () => {
+  const paths = await requestedPaths((options) =>
+    AnimaPipeline.fromPretrained(ANIMA_EXTRA_CURRENT, options)
+  );
+  assertEquals(paths, [manifestPath(ANIMA_EXTRA_CURRENT)]);
+});
+
+Deno.test("gemma4: GEMMA4_CURRENT の pin がそのまま取得 URL に載る", async () => {
+  const paths = await requestedPaths((options) =>
+    Gemma4Pipeline.fromPretrained(GEMMA4_CURRENT, options)
+  );
+  assertEquals(paths, [manifestPath(GEMMA4_CURRENT)]);
 });
 
 // 文字列 ref の意味（`{ repo }` = main 追従）は pin 導入後も ref 必須化後も不変。main は

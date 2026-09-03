@@ -8,8 +8,9 @@
  * 縮退すると、配布者の意図した既定と実行が食い違ったまま気づけない）。
  * MUST: マップは `Object.hasOwn` 経由でのみ引く（横断不変条件）。
  *
- * NOTE: 公開配布リポの pin 定数（{@link ANIMA_CURRENT}）もここに置く。manifest から導ける
- * 値ではなく「どの manifest を取りに行くか」の側なので、配布形が持てない（ADR 0073）。
+ * NOTE: 公開配布リポの pin 定数（{@link ANIMA_CURRENT} / {@link ANIMA_EXTRA_CURRENT}）もここに
+ * 置く。manifest から導ける値ではなく「どの manifest を取りに行くか」の側なので、配布形が
+ * 持てない（ADR 0073）。
  */
 
 import type { HubRepoRef } from "@karume/hub";
@@ -44,7 +45,29 @@ export const ANIMA_PIPELINE_MAJOR = 1;
 // SHA に更新する（ADR 0073 決定 3 — 手書き + 手順書ゲート）。
 export const ANIMA_CURRENT = {
   repo: "hdae/karume-anima",
-  revision: "d4dbb35fcb5e7146a5845cfc657fe39aa169c788",
+  revision: "0115048e174fe6a9e40bad256e3a7f17bc898317",
+} as const satisfies HubRepoRef;
+
+/**
+ * `hdae/karume-anima-extra`（**第三者 fine-tune** が同居するリポ — 追加学習の側。既定 =
+ * `anima-wai-v1.0`）を**このパッケージ版が検証した取得元**（pin 済み commit SHA — ADR 0073）。
+ * リポの分割軸は「公式 / 追加学習」で、公式変種は {@link ANIMA_CURRENT} が持つ（ADR 0087）。
+ *
+ * このリポは text stack（`text_encoder` / `vae_decoder` / `tokenizer` / `tokenizer_2`）を
+ * 自分では配らず、公式リポ（{@link ANIMA_CURRENT} が指す revision）から**越境参照で借りる**
+ * （ADR 0038 §7）。したがって 2 定数は独立ではなく、公式を上げ直したら extra も焼き直す
+ * （公開順序の MUST は docs/release-runbook.md）。
+ *
+ * 既定以外のモデルを使うときは `fromPretrained(ANIMA_EXTRA_CURRENT, { model })` と綴る
+ * （1 リポ = 複数モデルなので、リポ参照だけでは 1 本に決まらない）。
+ *
+ * MUST: revision は commit SHA で固定する（理由は {@link ANIMA_CURRENT} と同じ）。
+ */
+// NOTE: revision はリリース手順書（docs/release-runbook.md）§3 で、アップロード後の main の
+// SHA に更新する（ADR 0073 決定 3 — 手書き + 手順書ゲート）。
+export const ANIMA_EXTRA_CURRENT = {
+  repo: "hdae/karume-anima-extra",
+  revision: "d09f96b2db67058e553562b4085334fcb8fd5d64",
 } as const satisfies HubRepoRef;
 
 const ROOT_KEYS: readonly string[] = ["scheduler", "defaults"];

@@ -6,10 +6,6 @@
  * {@link Gemma4Pipeline.fromAssets}）/ 会話する（`chat`）/ 自分で回す（`sequence` +
  * {@link gemma4ChatPrompt} + tokenizer の復号）/ 解放する（`dispose`）。
  *
- * NOTE: pin 定数（`*_CURRENT` — ADR 0073）は**まだ無い**。公開配布リポを持たないファミリは
- * 定数自体を持たない（同 決定 1）ので、`fromPretrained` の取得元は呼び手が
- * `{ repo, revision }` で明示する（`src/gemma/config.ts` の NOTE）。
- *
  * 生成の語彙（`GenerationEvent` / `GenerationStop` / `SamplerSpec` / `GenerationCapacityError`）
  * は**パイプライン非依存**だが、今のところ触れるのはこのファミリだけなので barrel とこの面の
  * 両方から出す。`GenerationProgram` / `GenerationSequence` を**作る**関数は出さない — 入口は
@@ -53,6 +49,15 @@ export type {
 } from "./src/gemma/chat-session.ts";
 /** 配布形が宣言する静的配線（`karume.json` の `pipelineConfig` — ADR 0038 §1）。 */
 export type { Gemma4DefaultSampler, Gemma4PipelineConfig } from "./src/gemma/config.ts";
+/**
+ * **このパッケージ版が検証した取得元**（`hdae/karume-gemma4-e2b` の pin 済み commit SHA —
+ * ADR 0073）。
+ *
+ * **パッケージ版に合わせて自動追従したい場合のオプトイン** — {@link Gemma4Pipeline.fromPretrained}
+ * の第 1 引数へそのまま渡す。再現性を自分で固定したい場合は、この定数ではなく自分の
+ * `{ repo, revision }` を書く（`fromPretrained` に既定は無い）。
+ */
+export { GEMMA4_CURRENT } from "./src/gemma/config.ts";
 /**
  * 生の宣言（`unknown`）→ 検証済みの {@link Gemma4PipelineConfig}（失敗は fail loudly）。
  *

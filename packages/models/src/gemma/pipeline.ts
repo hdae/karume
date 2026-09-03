@@ -940,8 +940,8 @@ export class Gemma4Pipeline {
    * tokenizer と索引の取得 → 構築）。重み shard は Session を組むときに 1 本ずつ流れ、PLE
    * sidecar は**触った 1 本だけ**が永続キャッシュから読み直される（ADR 0070 / 0085 決定 3）。
    *
-   * **`ref` は必須**（取得元に既定は無い — `src/hub/repo-ref.ts` の MUST）。gemma4 は公開配布
-   * リポをまだ持たないので pin 定数も無い（`./config.ts` の NOTE）— `{ repo, revision }` を
+   * **`ref` は必須**（取得元に既定は無い — `src/hub/repo-ref.ts` の MUST）。パッケージ版が検証した
+   * 取得元は {@link GEMMA4_CURRENT}（`./config.ts`）— 再現性を自分で固定するなら `{ repo, revision }` を
    * 呼び手が明示する。文字列の `ref` は `{ repo }` と読む（= `main` 追従）。
    *
    * 手元の配布形は**取得元ハンドル**で渡す（`localDirectory` / `@karume/hub/deno` の
@@ -953,7 +953,7 @@ export class Gemma4Pipeline {
     options: Gemma4FromPretrainedOptions = {},
   ): Promise<Gemma4Pipeline> {
     const where = "Gemma4Pipeline.fromPretrained";
-    const source = toManifestSource(ref, where);
+    const source = toManifestSource(ref, where, "GEMMA4_CURRENT（@karume/models/gemma）");
     const hubOptions: StreamAssetsOptions = {
       ...(options.signal === undefined ? {} : { signal: options.signal }),
       ...(options.headers === undefined ? {} : { headers: options.headers }),

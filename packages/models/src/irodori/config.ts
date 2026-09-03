@@ -22,9 +22,9 @@
  * （`"noise"` / `joint` / `alternating`）は同値が成り立たないので、分岐を持つのではなく
  * **受理しない**（型としても "mask" / "independent" しか表せない）。
  *
- * NOTE: 公開配布リポの pin 定数（{@link IRODORI_V4_SMALL_CURRENT}）もここに置く。上の MUST が
- * 禁じる「モデル固有の数」ではなく「どの manifest を取りに行くか」の側で、そもそも配布形が
- * 持てない値だから（ADR 0073）。
+ * NOTE: 公開配布リポの pin 定数（{@link IRODORI_V4_SMALL_CURRENT} /
+ * {@link IRODORI_V4_1_SMALL_CURRENT}）もここに置く。上の MUST が禁じる「モデル固有の数」では
+ * なく「どの manifest を取りに行くか」の側で、そもそも配布形が持てない値だから（ADR 0073）。
  */
 
 import type { HubRepoRef } from "@karume/hub";
@@ -51,7 +51,28 @@ export const IRODORI_PIPELINE_MAJOR = 1;
 // SHA に更新する（ADR 0073 決定 3 — 手書き + 手順書ゲート）。
 export const IRODORI_V4_SMALL_CURRENT = {
   repo: "hdae/karume-irodori-v4-small",
-  revision: "49b61517f8b69e27dc8e2e4dca030282932ce8ac",
+  revision: "f65e4b7b7ccb8d6342733b1f4ab0d83e9557e456",
+} as const satisfies HubRepoRef;
+
+/**
+ * `hdae/karume-irodori-v4.1-small`（上流 v4.1 = duration predictor だけを再学習した後続版）を
+ * **このパッケージ版が検証した取得元**（pin 済み commit SHA — ADR 0073）。
+ *
+ * v4 の pin（{@link IRODORI_V4_SMALL_CURRENT}）は**温存する** — 公開リポ 1 つにつき 1 定数
+ * （同 決定 1）で、旧版のリポはそのまま公開が続くから。発話長の付き方が変わるので、この 2 つは
+ * 「新旧」ではなく**別の取得元**として並ぶ（examples の台本既定は v4.1）。
+ *
+ * **パッケージ版に合わせて自動追従したい場合のオプトイン**として渡す — 再現性を自分で
+ * 固定したい場合は、この定数ではなく自分の `{ repo, revision }` を書く（`fromPretrained` に
+ * 既定は無い）。
+ *
+ * MUST: revision は commit SHA で固定する（理由は {@link IRODORI_V4_SMALL_CURRENT} と同じ）。
+ */
+// NOTE: revision はリリース手順書（docs/release-runbook.md）§3 で、アップロード後の main の
+// SHA に更新する（ADR 0073 決定 3 — 手書き + 手順書ゲート）。
+export const IRODORI_V4_1_SMALL_CURRENT = {
+  repo: "hdae/karume-irodori-v4.1-small",
+  revision: "e4d9502ee94ca57ba1b28ff7e16a1f886a53e83d",
 } as const satisfies HubRepoRef;
 
 const ROOT_KEYS: readonly string[] = [

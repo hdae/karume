@@ -64,8 +64,11 @@ export { approximatePreview } from "./src/anima/preview.ts";
  * 出さないと 2 本の定数が消費側に二重持ちされる（`./anima` を参照）。
  */
 export { animaLatents, denormalizeLatents } from "./src/anima/latents.ts";
-/** このパッケージ版が検証した取得元（`./anima` を参照 — 追従したい場合のオプトイン）。 */
-export { ANIMA_CURRENT } from "./src/anima/config.ts";
+/**
+ * このパッケージ版が検証した取得元（`./anima` を参照 — 追従したい場合のオプトイン）。公式変種の
+ * リポと第三者 fine-tune のリポで 2 本（ADR 0087）。
+ */
+export { ANIMA_CURRENT, ANIMA_EXTRA_CURRENT } from "./src/anima/config.ts";
 
 export { IrodoriPipeline } from "./src/irodori/pipeline.ts";
 export type {
@@ -80,8 +83,11 @@ export type {
   IrodoriRunComponent,
   IrodoriSpeakerInput,
 } from "./src/irodori/pipeline.ts";
-/** このパッケージ版が検証した取得元（`./irodori` を参照 — 追従したい場合のオプトイン）。 */
-export { IRODORI_V4_SMALL_CURRENT } from "./src/irodori/config.ts";
+/**
+ * このパッケージ版が検証した取得元（`./irodori` を参照 — 追従したい場合のオプトイン）。上流の
+ * v4 / v4.1 は別リポなので 2 本（旧 pin は温存）。
+ */
+export { IRODORI_V4_1_SMALL_CURRENT, IRODORI_V4_SMALL_CURRENT } from "./src/irodori/config.ts";
 
 export { Sbv2Pipeline } from "./src/sbv2/pipeline.ts";
 export type {
@@ -141,6 +147,8 @@ export type {
   Gemma4ChatTurnOptions,
 } from "./src/gemma/chat-session.ts";
 export type { Gemma4DefaultSampler, Gemma4PipelineConfig } from "./src/gemma/config.ts";
+/** このパッケージ版が検証した取得元（`./gemma` を参照 — 追従したい場合のオプトイン）。 */
+export { GEMMA4_CURRENT } from "./src/gemma/config.ts";
 /**
  * 生の宣言（`unknown`）→ 検証済みの `Gemma4PipelineConfig`。**`fromAssets` を使う消費者のための
  * 口**で、`fromPretrained` は内部で通すので呼ぶ必要は無い（`./gemma` を参照）。

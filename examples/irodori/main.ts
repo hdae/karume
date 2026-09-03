@@ -5,8 +5,9 @@
  *     deno task demo:irodori --caption "落ち着いた女性の声で、ゆっくりと話している。" --seed 7
  *     deno task demo:irodori --ref inputs/irodori/v4-small/samples/clone_ref1.wav
  *
- * `--source` 未指定ならこの台本が {@link IRODORI_V4_SMALL_CURRENT}（このパッケージ版が検証した
- * 取得元 — ADR 0073）を渡す。`fromPretrained` 自体に既定は無いので、取得元を綴るのは常に
+ * `--source` 未指定ならこの台本が {@link IRODORI_V4_1_SMALL_CURRENT}（このパッケージ版が
+ * 検証した取得元 — ADR 0073。旧版 v4 の pin `IRODORI_V4_SMALL_CURRENT` も公開面に残っている）
+ * を渡す。`fromPretrained` 自体に既定は無いので、取得元を綴るのは常に
  * 呼び出し側。明示したときだけ、`karume.json` を持つディレクトリなら `denoDirectory` で直に
  * 読み、それ以外は HF リポジトリ名として読む（どちらも `fromPretrained` の 1 本 — shard 分割
  * された配布形もそのまま通る）。越境参照を持つ配布形は `--source-map owner/name=<パス>` で
@@ -23,7 +24,7 @@ import {
   IrodoriPipeline,
   type IrodoriSpeakerInput,
 } from "../../packages/models/mod.ts";
-import { IRODORI_V4_SMALL_CURRENT } from "../../packages/models/irodori.ts";
+import { IRODORI_V4_1_SMALL_CURRENT } from "../../packages/models/irodori.ts";
 import { distributionSource } from "../shared/local-source.ts";
 
 const USAGE = "--source <パス|HF repo> --source-map <owner/name=パス> --text <文字列>" +
@@ -94,11 +95,11 @@ const speaker: IrodoriSpeakerInput | undefined = ref === undefined
 
 /** 取得元（ローカルの配布形なら `denoDirectory`・それ以外は HF リポジトリ名）。 */
 const from = source === undefined
-  ? IRODORI_V4_SMALL_CURRENT
+  ? IRODORI_V4_1_SMALL_CURRENT
   : await distributionSource(source, sourceMaps);
 
 console.log(
-  `[irodori] ${source ?? `${IRODORI_V4_SMALL_CURRENT.repo}（台本の既定 = 検証済み pin）`}` +
+  `[irodori] ${source ?? `${IRODORI_V4_1_SMALL_CURRENT.repo}（台本の既定 = 検証済み pin）`}` +
     ` / model ${model ?? "（manifest の既定）"}` +
     ` / quant ${quant ?? "（manifest の既定）"} / seed ${seed}` +
     `${ref === undefined ? "" : ` / 参照 ${ref}`}\n` +
@@ -124,7 +125,7 @@ const audio = await pipeline.generate({
 const name = `irodori-${quant ?? "default"}-${ref === undefined ? "no-ref" : "cloned"}` +
   `-seed${seed}.wav`;
 /** 既定の出力先に使うモデル名（取得元の末尾要素 — パスでも HF リポ名でも同じ規則）。 */
-const sourceRef = source ?? IRODORI_V4_SMALL_CURRENT.repo;
+const sourceRef = source ?? IRODORI_V4_1_SMALL_CURRENT.repo;
 const sourceName = sourceRef.replace(/\/+$/, "").split("/").at(-1) ?? sourceRef;
 const out = args.get("out") ?? `outputs/examples/${sourceName}/${name}`;
 // MUST: `cut > 0` で判定する。`-1`（`/` 無し = cwd 直下）を切ると 1 文字削ったディレクトリを

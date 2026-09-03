@@ -13,8 +13,11 @@
  *
  * 取得元は 2 つに割れている（`fromPretrained` 自体に既定は無いので、綴るのは常に呼び出し側）:
  * `--source` は**手元の配布形ディレクトリ**（`karume.json` を持つ）を `denoDirectory` で直に読み、
- * `--repo owner/name[@revision]` は HF から取る。gemma4 は公開配布リポをまだ持たないので pin
- * 定数（`*_CURRENT` — ADR 0073）も無く、既定はローカルミラーの綴り {@link DEFAULT_SOURCE}。
+ * `--repo owner/name[@revision]` は HF から取る。この台本の既定はローカルミラーの綴り
+ * {@link DEFAULT_SOURCE}（手元で焼いた配布形をそのまま回すのがデモの主用途）で、HF から取るなら
+ * `--repo hdae/karume-gemma4-e2b` — 版まで固定したければ pin 定数 `GEMMA4_CURRENT`
+ * （`@karume/models/gemma` — このパッケージ版が検証した revision。ADR 0073）の
+ * `repo@revision` を渡す。
  *
  * ## なぜ `chat` ではなく `Gemma4ChatSession` なのか
  *

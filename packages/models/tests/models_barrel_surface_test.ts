@@ -58,6 +58,9 @@ const GEMMA_VALUES = [
   // 溢れたときの既定ポリシー。消費者が**名指しで差し替える**口なので公開面に要る
   // （出していないと「既定と同じものを自分で書く」しかなくなる）。
   "dropOldestTurns",
+  // このパッケージ版が検証した取得元（ADR 0073 — 0.8.0 で新設）。値の正しさは
+  // `current_source_test.ts` の門で、ここで見るのは**両建ての公開面に載っていること**だけ。
+  "GEMMA4_CURRENT",
 ];
 
 /** 公開面に出してはならない綴り（内部の組み立て口）。 */
@@ -102,4 +105,33 @@ Deno.test("barrel: gemma の公開面（薄い面 — 組み立ての入口は�
     [],
     "./gemma にあって barrel に無い値 export",
   );
+});
+
+// ---- pin 定数の両建て（ADR 0073 — 公開リポ 1 つにつき 1 定数）----------------
+//
+// 定数の**値**（repo 名と 40 桁 hex）を見るのは `current_source_test.ts` で、ここで縛るのは
+// 「サブパスと barrel の両方から出ていること」だけ。0.8.0 で 3 本増えた（`ANIMA_EXTRA_CURRENT` /
+// `IRODORI_V4_1_SMALL_CURRENT` / `GEMMA4_CURRENT` — 最後の 1 本は GEMMA_VALUES 側）ので、
+// 片方の barrel へ足し忘れても型検査では咎められない（export の増減は型に出ない）。
+
+Deno.test("barrel: pin 定数はサブパスと barrel の両方から出る", async () => {
+  const barrel = Object.keys(models);
+  const subpaths = [
+    { name: "./anima", surface: Object.keys(await import("../anima.ts")) },
+    { name: "./irodori", surface: Object.keys(await import("../irodori.ts")) },
+    { name: "./sbv2", surface: Object.keys(await import("../sbv2.ts")) },
+  ];
+  for (const { name, surface } of subpaths) {
+    const pins = surface.filter((exported) => exported.endsWith("_CURRENT"));
+    // 陽性対照 — 空集合を回して緑になる形にしない。
+    assert(pins.length >= 1, `${name} に pin 定数が 1 本も無い`);
+    for (const pin of pins) assert(barrel.includes(pin), `barrel に ${pin} が無い`);
+  }
+  // サブパス側の足し忘れは上の filter では見えないので、増えた定数を名指しでも縛る。
+  for (const pin of ["ANIMA_EXTRA_CURRENT", "IRODORI_V4_1_SMALL_CURRENT"]) {
+    assert(
+      subpaths.some(({ surface }) => surface.includes(pin)),
+      `サブパス barrel に ${pin} が無い`,
+    );
+  }
 });
