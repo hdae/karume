@@ -13,6 +13,12 @@ import {
   type StreamedAsset,
 } from "../mod.ts";
 import {
+  DistributionSource,
+  type PinnedSource,
+  type SourceDriver,
+  type SourceOrigin,
+} from "../src/source.ts";
+import {
   abortWhileAwaitingResponse,
   createMockFetch,
   hasEntry,
@@ -509,6 +515,110 @@ Deno.test("streamAssets: 2 回目は相 1 も相 2 も network に出ない（�
       `${event.path}: ${event.phase} の全体 loaded がこの shard ぶんを数えていない`,
     );
   }
+});
+
+// ---- 器の契約違反（`fetch.ts` の `assertView`）。組み込みの 2 取得元はどちらも契約を守るので、
+// 違反を踏むには取得元そのものを偽物に差し替えるしかない。上の「全 shard が 1 本の buffer」は
+// 成功側の観測で、ここは**違反した取得元を落とせるか**の故障注入 — 器の途中を指す view
+// （同じ buffer・prefix でない）と、器を借りたのに別 buffer を返す形の 2 分岐を踏む。
+
+/**
+ * 引き渡す view の作り方だけを差し替えられる偽取得元。器は必ず借り、実体は器の先頭へ読む
+ * （契約を破るのは**返す view の形だけ**にして、落ちた理由を 1 つに絞る）。
+ */
+const vesselSource = (
+  view: (vessel: Uint8Array<ArrayBuffer>, ref: FileRef) => Uint8Array,
+): DistributionSource => {
+  const origin: SourceOrigin = { label: "偽の取得元", integrity: "local" };
+  const pinned: PinnedSource = {
+    origin,
+    readManifest: ({ parse }) => {
+      parse(manifestBytes);
+      return Promise.resolve();
+    },
+    readFile: (ref, { into }) => {
+      // 相 1 を持たない取得元なので、器が貸されないのは逐次面の側の退行（門が空振りする）。
+      if (into === undefined) return Promise.reject(new Error("test: 逐次面が器を貸していない"));
+      const vessel = into();
+      vessel.set(payloadFor(ref.path));
+      return Promise.resolve(view(vessel, ref));
+    },
+    originFor: () => {
+      throw new Error("test: この manifest に越境参照は無い");
+    },
+  };
+  const driver: SourceDriver = {
+    origin,
+    resolveGeneration: () => Promise.resolve(""),
+    pin: () => pinned,
+  };
+  return new DistributionSource(driver);
+};
+
+/**
+ * 器に余裕がある 2 本（先頭 = 最大 shard より小さい shard）。器は列の最大 size で作られるので、
+ * この形でないと「器の途中を指す view」を素直に作れない（末尾が器からはみ出す）。
+ */
+const roomyRefs = (refs: readonly FileRef[]): FileRef[] => {
+  const largest = refs.reduce((max, ref) => (ref.size > max.size ? ref : max), refs[0]);
+  const smaller = refs.find((ref) => ref.size < largest.size);
+  assert(smaller !== undefined, "器に余裕のある shard の対が fixture に無い");
+  return [smaller, largest];
+};
+
+const openFake = async (
+  view: (vessel: Uint8Array<ArrayBuffer>, ref: FileRef) => Uint8Array,
+): Promise<{ loaded: LoadedManifest; refs: FileRef[]; caches: MemoryCacheStorage }> => {
+  const caches = new MemoryCacheStorage();
+  const loaded = await loadManifest(vesselSource(view), { caches });
+  return { loaded, refs: roomyRefs(shardRefs(loaded)), caches };
+};
+
+Deno.test("streamAssets: 器の prefix view を返す偽取得元は素通りする（門が恒真でないことの対照）", async () => {
+  const { loaded, refs, caches } = await openFake((vessel, ref) => vessel.subarray(0, ref.size));
+
+  const seen = await drain(streamAssets(loaded, refs, { caches }));
+
+  assertEquals(seen.map((asset) => asset.id), refs.map((ref) => ref.path));
+  for (const asset of seen) assertEquals(asset.bytes, payloadFor(asset.id), `${asset.id} が化けた`);
+});
+
+Deno.test("streamAssets: 器の途中を指す view を返す取得元は fail loudly", async () => {
+  const { loaded, refs, caches } = await openFake((vessel, ref) =>
+    vessel.subarray(1, 1 + ref.size)
+  );
+  assert(refs[0].size < refs[1].size, "器に余裕が無い列で試している（はみ出しを見てしまう）");
+
+  // 落ちなければ shard N のバイト列が shard N+1 の中身に化けたまま下流へ流れる（例外が出ない）。
+  const error = await assertRejects(
+    () => drain(streamAssets(loaded, refs, { caches })),
+    Error,
+    refs[0].path,
+  );
+  assert(
+    error.message.includes("器の先頭") && error.message.includes("byteOffset 1"),
+    `${error.message} が器の契約違反（先頭からずれた view）を名乗っていない`,
+  );
+});
+
+Deno.test("streamAssets: 器を借りたのに別 buffer の view を返す取得元は fail loudly", async () => {
+  // 別 buffer は tight view 検査の側へ落ちる（器を使ったかは buffer の同一性でしか分からない）。
+  // 中身は正しいバイト列を写しておく — 落ちる理由を view の形だけに絞るため。
+  const { loaded, refs, caches } = await openFake((_vessel, ref) => {
+    const detached = new Uint8Array(new ArrayBuffer(ref.size + 8));
+    detached.set(payloadFor(ref.path), 4);
+    return detached.subarray(4, 4 + ref.size);
+  });
+
+  const error = await assertRejects(
+    () => drain(streamAssets(loaded, refs, { caches })),
+    Error,
+    refs[0].path,
+  );
+  assert(
+    error.message.includes("buffer 全体を占めていない"),
+    `${error.message} が tight view 違反を名乗っていない`,
+  );
 });
 
 // ---- 越境参照（`FileRef` の repo / revision — ADR 0038 §7）。逐次面も宣言された
