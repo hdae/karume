@@ -109,7 +109,7 @@ from torch import nn
 from torch.export import Dim
 
 from _shared.paths import INPUTS_ROOT, SERIES_ROOT
-from gemma4 import ple
+from gemma4 import ple, rope
 from karume.artifacts import staged_publication
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION, normalize_boundary_tensor
 from karume.ir import IrGraph
@@ -153,9 +153,10 @@ NEG_INF = float("-inf")
 #: バックエンド固有の dispatch 検査へ分岐する）。
 ATTENTION_NAME = "karume_gqa"
 
-#: `config.layer_types` に現れる層種別（= mask 辞書のキー = RoPE バッファの接頭辞）。
-FULL_ATTENTION = "full_attention"
-SLIDING_ATTENTION = "sliding_attention"
+#: `config.layer_types` に現れる層種別（= mask 辞書のキー = RoPE の宣言のキー）。綴りの正本は
+#: {@link gemma4.rope}（配布 recipe も同じ語彙を読むので、torch を要さない側に置いてある）。
+FULL_ATTENTION = rope.FULL_ATTENTION
+SLIDING_ATTENTION = rope.SLIDING_ATTENTION
 
 #: multimodal チェックポイントでの text 部のキー接頭辞と、text 専用モデルでの接頭辞。
 CHECKPOINT_TEXT_PREFIX = "model.language_model."
@@ -232,7 +233,7 @@ GOLDEN_CASES: tuple[tuple[str, str], ...] = (
 
 #: 各ケースの**最終位置の greedy トークン**に期待する継続（恒真でない sanity — ADR 0005 の
 #: fail loudly）。いずれも「強く決まる継続」で、①重みの取り違え ②mask の向き（未来を見る）
-#: ③RoPE 表の位置ずれ ④PLE の層割り付け違い のどれかが起きれば最終位置の 1 位が変わる。
+#: ③RoPE の位置ずれ ④PLE の層割り付け違い のどれかが起きれば最終位置の 1 位が変わる。
 #: MUST: 期待継続は**単一トークン**でなければならない（{@link expected_token_ids} が検査）。
 GREEDY_EXPECTATIONS: Mapping[str, str] = {
     "capital-en": " Paris",
@@ -453,7 +454,7 @@ def load_model_and_tables(model_dir: Path) -> tuple[nn.Module, nn.ModuleList]:
 
     ラッパの組み立て（{@link build_wrapper}）と RoPE バッファの降格を**含まない**のは、
     decode 台本（{@link gemma4.export_decode}）が同じ素材を別のラッパ形・別の RoPE 形
-    （表引きへの差し替え）で使うから。素材の読み方と 3 つの等価検査（PLE 表の行数・
+    （ホスト供給の受け渡し口への差し替え）で使うから。素材の読み方と 3 つの等価検査（PLE 表の行数・
     KV 共有層の残骸落とし・35 分割のビット一致）は 1 箇所に閉じる。
     """
     from transformers import Gemma4ForCausalLM

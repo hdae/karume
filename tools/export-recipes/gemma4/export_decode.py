@@ -17,7 +17,7 @@ ADR [0066](../../../docs/decisions/0066-generation-context-state-slots.md)（Gen
 
 states 形の chunk グラフは出口が 2 種類ある — logits opt-in 形（この台本の系列）と
 token-only 既定出口（{@link gemma4.export_token} の系列 / ADR 0068 決定 4）。両者で違うのは
-**出口の形と golden を採るかどうかだけ**で、素材の読み方・RoPE の表引き・KV 共有の手術・
+**出口の形と golden を採るかどうかだけ**で、素材の読み方・RoPE のホスト供給・KV 共有の手術・
 混成量子化・門の順序は同一なので、経路は {@link ChunkVariant} 駆動の 1 本
 （{@link load_wrapper} / {@link export_series} / {@link run_variant_cli}）に閉じる。
 token-only 台本が持つのはラッパ 1 つと variant 記述と入口だけ。
@@ -34,25 +34,32 @@ MUST: 差分は variant の 4 欄に載る形だけにする。台本側へ経�
 （ADR 0068 決定 4 の decode 出口）。**出力順は `[logits, token]` 固定**で、ランタイム側の
 slot 番号がこの順を読む。
 
-## 位置は入力・RoPE は表引き（1-shot 形との構造差 その 1）
+## 位置はグラフに無い・RoPE はホストが渡す派生入力（1-shot 形との構造差 その 1）
 
 1-shot 形は `position_ids` を持たない — 位置は常に `0..T-1` なので cos / sin は `arange` の
 定数畳み込みで Tmax 表 + `sym_prefix_slice` に落ちる（ADR 0010）。decode では位置が
 `pastLength + row` で**実行時にしか決まらない**ので、この畳み込みは成立しない。
 
-そこで `model.model.rotary_emb` を {@link RopeTable}（表引きモジュール）へ差し替える
-（上流のモデリングコードは 1 行も触らない）。Gemma 4 の rotary は Llama 系と違い
+そこで `model.model.rotary_emb` を {@link RopeInputs}（受け渡し口）へ差し替える（上流の
+モデリングコードは 1 行も触らない）。Gemma 4 の rotary は Llama 系と違い
 **`forward(x, position_ids, layer_type)`** で層種別ごとに呼ばれる（modeling_gemma4.py:1713）
-ので、表も層種別ごとに 1 組ずつ持つ。表は**元の rotary を `arange(POS_MAX)[None]` で
-層種別ごとに 1 回呼んで**得た cos / sin そのもので、値同一は {@link swap_rope_table} が
-構築時に 3 種の position 列 × 全 layer_type で `torch.equal` 突合する。full 層の RoPE は
-`proportional`（`partial_rotary_factor` 0.25）で零周波数が 192 本あるが、それは cos = 1 /
-sin = 0 の列として表に自然に入るだけなので特別扱いは要らない。
+ので、受け口も層種別ごとに 1 組ずつ受ける。ラッパの forward が受け取った cos / sin を
+`RopeInputs` へ束ね、上流はその値をそのまま `position_embeddings` として使う。結果として
+グラフ入力は `input_ids` + **RoPE 4 本**（層種別 2 × cos / sin・f32 `[1, M, headDim]`）になり、
+`position_ids` 入力も表の初期化子も出荷 IR から消える。表を組むのはホスト（TS 側）で、
+配布形が宣言するのは**式のパラメータ**（theta / headDim / rotaryDim）と位置の上限だけ
+（{@link gemma4.rope}）。full 層の RoPE は `proportional`（`partial_rotary_factor` 0.25）で
+零周波数が 192 本あるが、それは cos = 1 / sin = 0 の列として行に入るだけなので特別扱いは
+要らない。
 
-MUST: `rope.assert_rope_lifted` は**適用しない** — あれは `inv_freq` バッファを畳み込みの葉へ
-降格する門で、本台本は rotary モジュールを丸ごと差し替えるため `inv_freq` は模型から消える。
-代わりに {@link assert_ir_form_decode} が **`sin` 系 op の不在**を直接見る（`cos` は IR 語彙に
-無いので、RoPE が残ったグラフは export 自体が落ちる — 到達しうる残骸は `sin` の側だけ）。
+台本自身が要る表（例示入力・io / greedy golden・sanity）は TS と**同じ式**で組む
+（{@link rope_args}）— 別の式で採った期待列を検収門が読む形にしないため。
+
+MUST: `karume.rope.assert_rope_lifted` は**適用しない** — あれは `inv_freq` バッファを
+畳み込みの葉へ降格する門で、本台本は rotary モジュールを丸ごと差し替えるため `inv_freq` は
+模型から消える。代わりに {@link assert_ir_form_decode} が **`sin` 系 op の不在**を直接見る
+（`cos` は IR 語彙に無いので、RoPE が残ったグラフは export 自体が落ちる — 到達しうる残骸は
+`sin` の側だけ）。
 
 ## KV 共有層は「所有層のスロットを読む」（1-shot 形との構造差 その 2）
 
@@ -110,7 +117,8 @@ causal も窓も**述語計算**になるので mask tensor は要らない。�
 from __future__ import annotations
 
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -120,12 +128,12 @@ import torch
 from safetensors.torch import save_file
 from torch import nn
 from torch.export import Dim
-from torch.nn import functional
 
 from _shared.decode_series import _write_greedy, assert_case_room, positions_for
 from _shared.paths import SERIES_ROOT
 from gemma4 import export as one_shot
 from gemma4 import ple, provenance
+from gemma4 import rope as rope_math
 from karume.artifacts import staged_publication
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION, normalize_boundary_tensor
 from karume.ir import IrGraph, IrNode
@@ -141,26 +149,33 @@ from karume.states import StateAttentionSpec, StatesPlan, to_states_form
 DEFAULT_OUT_DIR = SERIES_ROOT / "gemma4-e2b-decode"
 
 #: グラフ入力の名前（chunk ラッパの forward 引数名）。{@link assert_ir_form_decode} が
-#: 「この 2 本だけ」を見るための綴り。
+#: 「この綴りだけ」を見るための正本。
 INPUT_IDS = one_shot.INPUT_IDS
-POSITION_IDS = "position_ids"
+
+#: RoPE 派生入力の綴り（`rope_<層種別>_<cos|sin>`）と、並びを決める層種別の順。
+#: **ラッパの forward 引数名そのもの**（torch.export がグラフ入力名に採る）で、TS 側の
+#: `Gemma4Pipeline` が名前で束ねる。
+ROPE_INPUT_PREFIX = "rope_"
+ROPE_PARTS: tuple[str, ...] = ("cos", "sin")
+ROPE_LAYER_TYPES: tuple[str, ...] = (one_shot.SLIDING_ATTENTION, one_shot.FULL_ATTENTION)
+
+
+def rope_input_name(layer_type: str, part: str) -> str:
+    """RoPE 派生入力 1 本の綴り（{@link ROPE_INPUTS} と forward の引数名の唯一の出どころ）。"""
+    return f"{ROPE_INPUT_PREFIX}{layer_type}_{part}"
+
+
+#: RoPE 派生入力 4 本（順序は {@link DecodeChunkWrapper.forward} の引数順と同一 MUST）。
+ROPE_INPUTS: tuple[str, ...] = tuple(
+    rope_input_name(layer_type, part) for layer_type in ROPE_LAYER_TYPES for part in ROPE_PARTS
+)
 
 #: 物理 chunk 次元の記号名（IR 上の名前は `symbol_names` が決める — Dim 名と同じ綴りにする）。
 SEQ_SYMBOL = "M"
 
-#: 差し替えた RoPE 表のラッパ基準 FQN（{@link rope_table_keys} が initializer キーを組む起点）。
-ROPE_TABLE_MODULE = "model.model.rotary_emb"
-
 #: state スロットの容量記号（ADR 0066 決定 2 / 追記 7 — 束縛点は `createGenerationContext`）。
 #: **値 shape には現れない states 専用記号**で、export 時に容量を焼かないための席。
 CAPACITY_SYMBOL = "C"
-
-#: RoPE 表の位置数（= 表引きできる絶対位置の上限）。`gemma4.export.SYM_MAX`（768）とは
-#: **別の概念**で値も違う — あちらは 1 chunk の最大行数、こちらは prompt + 生成を通した絶対
-#: 位置の上限（decode では `pastLength + M` がこれを超えられない）。長ケース T=598 に
-#: {@link GREEDY_STEPS} を足しても余る点に置く。表は層種別 2 組（f32 で
-#: 1024×(256+512)×2 = 6MiB）なので、上げるならその代償を承知の上で上げる。
-ROPE_TABLE_POSITIONS = 1024
 
 #: greedy golden の継続 step 数（ADR 0068 決定 4 の出口を多 step で踏む）。
 GREEDY_STEPS = 16
@@ -186,7 +201,7 @@ MARGIN_FLOOR = 2.5e-2
 GREEDY_CASES: tuple[str, ...] = ("capital-en", "capital-ja", "context-en")
 
 #: 手術で死ぬべき残骸 op。`sym_prefix_slice` は mask の Tmax 畳み込み（ADR 0010）で、`sin` は
-#: RoPE が畳み込みにも表引きにも落ちなかったときの生き残り。
+#: RoPE が畳み込みにも派生入力にも落ちなかったときの生き残り。
 #: NOTE: `cos` は IR 語彙に無い（ops.py の UNARY_OPS は `sin` だけ）ので、cos が残る形は
 #: export が落ちて here まで来ない — 検査に載せるのは実際に到達しうる 2 本だけ。
 RESIDUE_OPS = (one_shot.SYM_PREFIX_SLICE_OP, "sin")
@@ -202,142 +217,151 @@ def slot_name(layer: int, part: str) -> str:
     return f"l{layer}.{part}"
 
 
-class RopeTable(nn.Module):
-    """`Gemma4TextRotaryEmbedding` と同じ呼び出し規約を持つ**位置表の引き**モジュール。
+class RopeInputs(nn.Module):
+    """`Gemma4TextRotaryEmbedding` と同じ呼び出し規約を持つ**受け渡し口**。
 
     上流は `self.rotary_emb(hidden_states, position_ids, layer_type)` を層種別ごとに呼び
     （modeling_gemma4.py:1713）、`(cos, sin)` の 2 タプル（各 `[B, seq, head_dim]`）を受ける。
-    ここはその規約だけを満たし、`inv_freq` からの三角関数計算を**表の gather** に置き換える。
-    層種別で `head_dim` が違う（sliding 256 / full 512）ので、表は種別ごとに別の組。
+    ここはその規約だけを満たし、`inv_freq` からの三角関数計算を**ラッパが受け取った派生入力
+    そのもの**に置き換える。層種別で `head_dim` が違う（sliding 256 / full 512）ので、束ねる
+    のも種別ごとに 1 組ずつ。
 
-    MUST: 表は素の属性で持つ（バッファにしない）— `rope.lift_rope_buffers` が既存モデルで
-    やっている降格と同じ形で、torch.export は lifted tensor constant として拾う。属性名を
-    `<layer_type>_cos_table` にするのは上流の `<layer_type>_inv_freq` と同じ流儀
-    （どの層種別の表かが initializer の FQN から読める）。
-    MUST: 戻り値に dtype キャストを挟まない。上流は `cos.to(dtype=x.dtype)` を最後に置くが、
-    表は模型と同じ dtype で作る（{@link swap_rope_table} が突合する）ので恒等であり、
-    恒等キャストを書くと export へ `_to_copy` が漏れうる。
+    受け渡しが属性の一時束縛（{@link bound}）なのは、上流の呼び出し規約が
+    `(x, position_ids, layer_type)` 固定で、ホスト供給の値を引数で通す隙間が無いため。
+    export は `strict=False`（`karume.pipeline.export_module`）なので Python がそのまま走り、
+    束ねた入力テンソルは通常のデータフローとして辿られる。
+
+    MUST: パラメータもバッファも持たない — 表は**もう配布物に入らない**（初期化子が残ると
+    量子化の適格判定と `maxPosition` の意味が両方戻る）。
+    MUST: 束縛は 1 回の forward のあいだだけ（`finally` で必ず外す）。持ち越すと、次の呼び
+    出しが**前の位置の表**で回る形が形も型も合ったまま通る。
+    MUST: 未束縛・未知の層種別は fail loudly。既定へ落とすと「full 層が sliding の周波数で
+    回る」（値は出るが角度が別物）形が黙って通る。
     """
 
-    def __init__(self, tables: Mapping[str, tuple[torch.Tensor, torch.Tensor]]) -> None:
+    def __init__(self, layer_types: Sequence[str]) -> None:
         super().__init__()
-        self.layer_types = tuple(tables)
-        for layer_type, (cos, sin) in tables.items():
-            setattr(self, f"{layer_type}_cos_table", cos)
-            setattr(self, f"{layer_type}_sin_table", sin)
+        self.layer_types = tuple(layer_types)
+        self._tables: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
 
-    def tables_for(self, layer_type: str) -> tuple[torch.Tensor, torch.Tensor]:
-        """層種別の `(cos 表, sin 表)`。
-
-        MUST: 未知の層種別は fail loudly。既定の表へ落とすと「full 層が sliding の表を引く」
-        （値は出るが位置の周波数が違う）形が黙って通る。
-        """
-        if layer_type not in self.layer_types:
-            raise KeyError(
-                f"layer_type '{layer_type}' の RoPE 表が無い（持っているのは {self.layer_types}）"
-            )
-        return getattr(self, f"{layer_type}_cos_table"), getattr(self, f"{layer_type}_sin_table")
+    @contextmanager
+    def bound(self, tables: Mapping[str, tuple[torch.Tensor, torch.Tensor]]) -> Iterator[None]:
+        """1 回の forward のあいだだけ層種別 → `(cos, sin)` を束ねる。"""
+        missing = sorted(set(self.layer_types) - set(tables))
+        if missing:
+            raise KeyError(f"層種別 {missing} の cos / sin が渡されていない")
+        self._tables = dict(tables)
+        try:
+            yield
+        finally:
+            self._tables = {}
 
     def forward(
         self, x: torch.Tensor, position_ids: torch.Tensor, layer_type: str
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """`position_ids[B,seq]` で層種別の表を引く（`x` は規約上の引数 — 値は読まない）。"""
-        del x
-        cos, sin = self.tables_for(layer_type)
-        return (
-            functional.embedding(position_ids, cos),
-            functional.embedding(position_ids, sin),
-        )
+        """束ねた `(cos, sin)` を返す（`x` / `position_ids` は規約上の引数 — 値は読まない）。"""
+        del x, position_ids
+        tables = self._tables.get(layer_type)
+        if tables is None:
+            raise KeyError(
+                f"layer_type '{layer_type}' の cos / sin が束ねられていない"
+                f"（束ねてあるのは {sorted(self._tables)}）"
+            )
+        return tables
 
 
 def unique_layer_types(config: Any) -> tuple[str, ...]:
-    """`config.layer_types` の**出現順**の重複除去（表と検査の走査順を 1 箇所に閉じる）。"""
+    """`config.layer_types` の**出現順**の重複除去（入力と検査の走査順を 1 箇所に閉じる）。"""
     return tuple(dict.fromkeys(config.layer_types))
 
 
-def build_rope_table(
-    rotary: nn.Module, probe: torch.Tensor, positions: int, layer_types: Sequence[str]
-) -> RopeTable:
-    """元の rotary を層種別ごとに `arange(positions)` で 1 回呼び、その cos / sin を表にする。
+def rope_specs(config: Any) -> dict[str, rope_math.RopeLayerSpec]:
+    """層種別 → RoPE の式（{@link gemma4.rope.rope_specs} に、幅の突合を足したもの）。
 
-    MUST: 表は**元実装の出力そのもの**で作る（`inv_freq` から作り直さない）— 作り直すと
-    `attention_scaling` や rope_type 別の初期化（full 層は `proportional`）を写し損ねる経路が
-    でき、値同一の突合が「同じ式を 2 回書いて比べただけ」の恒真に近づく。
+    MUST: 導いた `head_dim` が attention の head_dim（{@link gemma4.export._attention_depth}）
+    と一致することまで見る。上流の rotary は full + `proportional` のときだけ
+    `global_head_dim` を読む枝を持つので、rope_type が変わると表の幅だけが黙って 256 に落ちて
+    「幅は合わないが宣言は書ける」形になる。
     """
-    tables: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
-    for layer_type in layer_types:
-        with torch.no_grad():
-            cos, sin = rotary(
-                probe, position_ids=torch.arange(positions).unsqueeze(0), layer_type=layer_type
+    specs = rope_math.rope_specs(config)
+    for layer_type, spec in specs.items():
+        depth = one_shot._attention_depth(config, layer_type)
+        if spec.head_dim != depth:
+            raise AssertionError(
+                f"層種別 '{layer_type}' の RoPE 幅 {spec.head_dim} が attention の head_dim"
+                f" {depth} と違う（rotary の head_dim の引き先がずれている）"
             )
-        tables[layer_type] = (cos[0].detach().clone(), sin[0].detach().clone())
-    return RopeTable(tables)
+    return specs
 
 
-def assert_rope_table_matches(
-    rotary: nn.Module,
-    table: RopeTable,
-    probe: torch.Tensor,
-    positions: int,
-    layer_types: Sequence[str],
-) -> None:
-    """表引きが元実装と**完全一致**（タプル構成・shape・dtype・全要素）であることを見る。
+def rope_args(
+    specs: Mapping[str, rope_math.RopeLayerSpec], positions: torch.Tensor
+) -> tuple[torch.Tensor, ...]:
+    """位置列 `[1, T]` → forward が受ける派生入力 4 本（{@link ROPE_INPUTS} と同じ並び）。
 
-    MUST: 恒真でない。表は `arange` 1 本から作るので、「添字 → 行」の引き方が正しいことは
-    値の同一でしか確かめられない。踏む 3 種は ①連続（`0..4`）②オフセット付き（`3..9` —
-    decode の `pastLength + row`）③非単調（並びに依らず**値で**引くことの確認）。
-    MUST: 全 layer_type を踏む。片方だけ見ると、もう片方の表が丸ごと無検査になる
-    （sliding と full は head_dim も rope_type も違う）。
+    式は TS 正本の鏡像（{@link gemma4.rope.rope_rows}）— 台本が採る golden / io / 例示入力も
+    配布形が実行時に組む表と同じ式で作る。
     """
-    probes = (
-        torch.arange(5).unsqueeze(0),
-        torch.arange(3, 10).unsqueeze(0),
-        torch.tensor([[positions - 1, 0, 17, 2]], dtype=torch.int64),
+    unknown = sorted(set(ROPE_LAYER_TYPES) - set(specs))
+    if unknown:
+        raise AssertionError(f"層種別 {unknown} の RoPE の式が無い（持っているのは {list(specs)}）")
+    rows = [int(value) for value in positions.reshape(-1).tolist()]
+    tables: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+    for layer_type in ROPE_LAYER_TYPES:
+        cos, sin = rope_math.rope_rows(specs[layer_type], rows)
+        tables[layer_type] = (
+            torch.from_numpy(cos).unsqueeze(0),
+            torch.from_numpy(sin).unsqueeze(0),
+        )
+    return tuple(
+        tables[layer_type][index]
+        for layer_type in ROPE_LAYER_TYPES
+        for index in range(len(ROPE_PARTS))
     )
-    for layer_type in layer_types:
-        for position_ids in probes:
-            with torch.no_grad():
-                reference = rotary(probe, position_ids=position_ids, layer_type=layer_type)
-                actual = table(probe, position_ids, layer_type)
-            where = f"{layer_type} position_ids={position_ids.tolist()}"
-            if len(actual) != len(reference):
-                raise AssertionError(
-                    f"{where}: 戻りが {len(actual)} 本（元実装は {len(reference)} 本）"
-                )
-            for index, (got, want) in enumerate(zip(actual, reference, strict=True)):
-                if got.dtype is not want.dtype or got.shape != want.shape:
-                    raise AssertionError(
-                        f"{where}: 戻り {index} が {got.dtype} {tuple(got.shape)} —"
-                        f" 元実装は {want.dtype} {tuple(want.shape)}"
-                    )
-                if not torch.equal(got, want):
-                    raise AssertionError(
-                        f"{where}: 戻り {index} の値が元実装と違う"
-                        f"（最大差 {float((got - want).abs().max())}）— 表の引き方がずれている"
-                    )
 
 
-def swap_rope_table(model: nn.Module, positions: int) -> RopeTable:
-    """`model.model.rotary_emb` を表引きへ差し替える（値同一を確認してから差し替える）。
+def bound_rope(
+    cos_sliding: torch.Tensor,
+    sin_sliding: torch.Tensor,
+    cos_full: torch.Tensor,
+    sin_full: torch.Tensor,
+) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
+    """派生入力 4 本 → {@link RopeInputs.bound} が受ける層種別ごとの組。
 
-    差し替え**前**に突合するのは、失敗したときに模型が半端な状態で残らないようにするため。
+    綴りを 1 箇所に閉じる — chunk ラッパ 3 本が別々に組み立てると、cos と sin を取り違えた
+    配線が 1 本だけ書ける（形も型も合うので数値の門にしか映らない）。
     """
-    rotary = model.model.rotary_emb
-    layer_types = unique_layer_types(model.config)
-    probe = torch.zeros(1, 1, int(model.config.hidden_size), dtype=torch.float32)
-    table = build_rope_table(rotary, probe, positions, layer_types)
-    assert_rope_table_matches(rotary, table, probe, positions, layer_types)
-    model.model.rotary_emb = table
-    return table
+    return {
+        one_shot.SLIDING_ATTENTION: (cos_sliding, sin_sliding),
+        one_shot.FULL_ATTENTION: (cos_full, sin_full),
+    }
+
+
+def max_position(config: Any) -> int:
+    """モデルが宣言する位置の上限（`text_config.max_position_embeddings`）。
+
+    RoPE を表で焼かなくなった以上、「引ける絶対位置の上限」を決めるのは資産ではなくモデルの
+    宣言だけになる（配布形の `pipelineConfig.maxPosition` と同じ出どころ —
+    `gemma4.distribution.gemma4_max_position`）。
+    """
+    declared = int(config.max_position_embeddings)
+    if declared < 1:
+        raise AssertionError(f"config.max_position_embeddings が {declared}（正整数でない）")
+    return declared
 
 
 class DecodeChunkWrapper(one_shot.Gemma4Wrapper):
     """1-shot ラッパ（{@link gemma4.export.Gemma4Wrapper}）の chunk 形
-    （`(input_ids, position_ids) → (logits, token)`）版。
+    （`(input_ids, RoPE 4 本) → (logits, token)`）版。
 
     MUST: **派生**で持つ（同じ構成を書き直さない）— 量子化の対象述語
     （`is_int8_module` / `is_int4_module`）も scale 台帳のキーもモジュール FQN 空間の上に
     載っているので、`model` / `per_layer` の綴りが 1-shot と同一であることが再利用の条件。
+    MUST: RoPE 派生入力の**引数名と並び**は {@link ROPE_INPUTS} と一致させる（torch.export が
+    引数名をグラフ入力名に採るので、綴りがずれるとホストが束ねられない）。
+    MUST: `position_ids` は渡さない（`None`）。渡すと出荷 IR に位置入力が戻る。上流は
+    `None` のとき `arange` を組むが、rotary は受け渡し口に差し替わっていて誰も読まないので、
+    その `arange` は export の到達解析で落ちる（残れば IR 語彙外の op として fail loudly）。
     MUST: `attention_mask` は 1-shot と同じ層種別 2 本の辞書（省略すると transformers 側で
     mask が組まれ、`cache_position` 由来の値が畳み込みの葉に混ざる）。trace を通すためだけの
     存在で、手術が落とす。
@@ -347,7 +371,12 @@ class DecodeChunkWrapper(one_shot.Gemma4Wrapper):
     """
 
     def forward(  # type: ignore[override]
-        self, input_ids: torch.Tensor, position_ids: torch.Tensor
+        self,
+        input_ids: torch.Tensor,
+        rope_sliding_attention_cos: torch.Tensor,
+        rope_sliding_attention_sin: torch.Tensor,
+        rope_full_attention_cos: torch.Tensor,
+        rope_full_attention_sin: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         length = input_ids.shape[1]
         mask = {
@@ -356,14 +385,46 @@ class DecodeChunkWrapper(one_shot.Gemma4Wrapper):
         }
         embeds = self.model.model.embed_tokens(input_ids)
         stacked = ple.per_layer_inputs(self.per_layer, input_ids, self.per_layer_scale)
-        logits = self.model(
-            inputs_embeds=embeds,
-            per_layer_inputs=stacked,
-            attention_mask=mask,
-            position_ids=position_ids,
-            use_cache=False,
-        ).logits
+        tables = bound_rope(
+            rope_sliding_attention_cos,
+            rope_sliding_attention_sin,
+            rope_full_attention_cos,
+            rope_full_attention_sin,
+        )
+        with self.model.model.rotary_emb.bound(tables):
+            logits = self.model(
+                inputs_embeds=embeds,
+                per_layer_inputs=stacked,
+                attention_mask=mask,
+                position_ids=None,
+                use_cache=False,
+            ).logits
         return logits, logits.argmax(-1, keepdim=True)
+
+
+class GreedyRopeView(nn.Module):
+    """`_shared.decode_series` が呼ぶ `(input_ids, position_ids) → (logits, token)` の面。
+
+    greedy 継続と io 参照は「位置列を与えて全長で引く」形で採る（`_shared` は family の
+    グラフ入力を知らない）。RoPE がグラフ入力になった以上、その位置列から表を組む席がどこかに
+    要る — chunk ラッパの引数を増やす代わりにここで覆う（`_shared` の規律を family 都合で
+    書き換えない）。
+
+    MUST: 表は配布形と**同じ式**（{@link rope_args}）で組む。別の式で採った期待列を検収門が
+    読むと、門が「台本と資産の食い違い」ではなく「表の作り方の違い」で赤になる。
+    """
+
+    def __init__(
+        self, wrapper: DecodeChunkWrapper, specs: Mapping[str, rope_math.RopeLayerSpec]
+    ) -> None:
+        super().__init__()
+        self.wrapper = wrapper
+        self.specs = dict(specs)
+
+    def forward(
+        self, input_ids: torch.Tensor, position_ids: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.wrapper(input_ids, *rope_args(self.specs, position_ids))
 
 
 @dataclass(frozen=True)
@@ -393,10 +454,19 @@ DECODE = ChunkVariant(
 )
 
 
-def load_wrapper(
-    variant: ChunkVariant, model_dir: Path, *, positions: int = ROPE_TABLE_POSITIONS
-) -> DecodeChunkWrapper:
-    """実重みを f32 で読み、RoPE を表引きへ差し替えた export 可能な chunk ラッパを返す。
+def swap_rope_inputs(model: nn.Module) -> RopeInputs:
+    """`model.model.rotary_emb` を受け渡し口（{@link RopeInputs}）へ差し替える。
+
+    層種別は config の**出現順**そのままで受ける — 未宣言の層種別で呼ばれたら
+    `RopeInputs.bound` / `forward` が落とす（既定へ落とす枝を作らない）。
+    """
+    receiver = RopeInputs(unique_layer_types(model.config))
+    model.model.rotary_emb = receiver
+    return receiver
+
+
+def load_wrapper(variant: ChunkVariant, model_dir: Path) -> DecodeChunkWrapper:
+    """実重みを f32 で読み、RoPE を受け渡し口へ差し替えた export 可能な chunk ラッパを返す。
 
     variant で変わるのは最後に組むラッパ型だけ — 素材の読み方（3 つの等価検査を含む）と
     RoPE の差し替えは chunk 系列で同一。
@@ -405,31 +475,8 @@ def load_wrapper(
     # 検査席の PLE 表を落とす理由は {@link gemma4.export.build_wrapper} と同じ
     # （分割 35 本を PLE の唯一の正本にして、量子化の対象網羅を言える形にする）。
     del model.model.embed_tokens_per_layer
-    swap_rope_table(model, positions)
+    swap_rope_inputs(model)
     return variant.wrapper(model, tables).eval()
-
-
-def rope_table_keys(wrapper: nn.Module) -> tuple[str, ...]:
-    """RoPE 表の initializer テンソルキー（= ラッパ基準の FQN）。
-
-    表引きにした以上、cos / sin 表は `embedding` の**重みスロット**で消費される — つまり
-    圧縮格納の**適格集合に入る**（`emit.eligible_compressed_initializers`）。既定 i8 のまま
-    書くと「重みスロット適格なのに per-channel scale が無い」で fail loudly になるので、
-    `"f32"` の明示指定で圧縮既定から外す（`emit._plan_weight_dtype` の f32 明示 = 除外）。
-
-    MUST: 除外であって「量子化し忘れ」ではない。位置表を丸めると RoPE の角度がずれ、
-    長い位置ほど誤差が効く（重みの丸めと違って誤差が位置に沿って蓄積する）。1-shot 形では
-    同じ表が `mul` の入力に畳まれていて適格外だったので、この席は decode 形にだけ要る。
-
-    NOTE: 綴りは wrapper 内での rotary の FQN（{@link ROPE_TABLE_MODULE}）+ {@link RopeTable}
-    の属性名。ズレたら `emit._plan_weight_dtype` の未知キー検査が落とす。
-    """
-    table = wrapper.model.model.rotary_emb
-    return tuple(
-        f"{ROPE_TABLE_MODULE}.{layer_type}_{part}_table"
-        for layer_type in table.layer_types
-        for part in ("cos", "sin")
-    )
 
 
 def first_shared_layer(config: Any) -> int:
@@ -562,6 +609,41 @@ def assert_layer_type_count(config: Any) -> None:
     declared = len(list(config.layer_types))
     if declared != layers:
         raise AssertionError(f"config.layer_types が {declared} 本（{layers} 層と違う）")
+
+
+def assert_rope_inputs(graph: IrGraph, config: Any, *, seq_symbol: str = SEQ_SYMBOL) -> None:
+    """RoPE 派生入力 4 本が f32 `[1, M, headDim]` で、層種別の幅どおりであることを見る。
+
+    MUST: 幅まで見る。sliding（256）と full（512）を取り違えた配線は、ホストが渡す表の幅で
+    しか露見しない — グラフの側は入力の宣言 shape が食い違って初めて落ちる。
+    MUST: 表の initializer が 1 本も残っていないことも見る。派生入力を足したのに表も残って
+    いる形（両方通る配線）は、常駐 6MiB が戻るうえ `maxPosition` の意味が資産へ逆戻りする。
+    """
+    declared = {spec.name: spec for spec in graph.inputs}
+    specs = rope_specs(config)
+    for layer_type in ROPE_LAYER_TYPES:
+        depth = specs[layer_type].head_dim
+        for part in ROPE_PARTS:
+            name = rope_input_name(layer_type, part)
+            spec = declared.get(name)
+            if spec is None:
+                raise AssertionError(f"グラフ入力 '{name}' が無い（RoPE がホスト供給でない）")
+            expected = [1, seq_symbol, depth]
+            if spec.dtype != "f32" or list(spec.shape) != expected:
+                raise AssertionError(
+                    f"グラフ入力 '{name}' が {spec.dtype} {list(spec.shape)} —"
+                    f" f32 {expected} でない（層種別の headDim と食い違う）"
+                )
+    residue = sorted(
+        name
+        for name, initializer in graph.initializers.items()
+        if rope_math.BAKED_TABLE_INFIX in initializer.tensor
+    )
+    if residue:
+        raise AssertionError(
+            f"RoPE 表の initializer が {len(residue)} 本残っている: {residue[:4]}"
+            "（ホスト生成へ外に出し切れていない）"
+        )
 
 
 def assert_single_row_lm_head(
@@ -791,20 +873,20 @@ def assert_ir_form_decode(
     ここが見るのは入口・出口だけ:
 
     - グラフ入力に mask が残ると「ホストが毎 chunk T² を作って渡す」別物になる
+    - `position_ids` が残ると位置がグラフの内側へ戻る（RoPE の外出しが半端）
     - 出口が argmax でなければ decode 出口（ADR 0068 決定 4）ではない
     - `token_only` では行選択が lm_head より**前**に居ること（{@link assert_single_row_lm_head}）
     """
     assert_layer_type_count(config)
 
     names = [spec.name for spec in graph.inputs]
-    expected_inputs = (
-        [INPUT_IDS, POSITION_IDS, TOKEN_ONLY_LAST_ROW] if token_only else [INPUT_IDS, POSITION_IDS]
-    )
+    expected_inputs = [INPUT_IDS, *ROPE_INPUTS, *([TOKEN_ONLY_LAST_ROW] if token_only else [])]
     if names != expected_inputs:
         raise AssertionError(
             f"グラフ入力が {names} — {expected_inputs} でない"
-            "（mask が畳み込まれずに入力へ残っている可能性）"
+            "（mask や position_ids が畳み込まれずに入力へ残っている可能性）"
         )
+    assert_rope_inputs(graph, config, seq_symbol=seq_symbol)
     expected_outputs = 1 if token_only else 2
     if len(graph.outputs) != expected_outputs:
         kind = (
@@ -871,6 +953,7 @@ def _write_io(
     graph: IrGraph,
     cases: Sequence[tuple[str, torch.Tensor]],
     out_dir: Path,
+    specs: Mapping[str, rope_math.RopeLayerSpec],
 ) -> list[str]:
     """各ケースの**無 pad 全長**の入出力を `io.<case>.safetensors` へ書く。
 
@@ -883,9 +966,10 @@ def _write_io(
     """
     written: list[str] = []
     for name, ids in cases:
-        args = {INPUT_IDS: ids, POSITION_IDS: positions_for(ids)}
+        rope_inputs = rope_args(specs, positions_for(ids))
+        args = {INPUT_IDS: ids, **dict(zip(ROPE_INPUTS, rope_inputs, strict=True))}
         with torch.no_grad():
-            outputs = wrapper(args[INPUT_IDS], args[POSITION_IDS])
+            outputs = wrapper(ids, *rope_inputs)
         tensors = {
             f"{one_shot.INPUT_PREFIX}{declared.name}": normalize_boundary_tensor(
                 args[declared.name], f"{name} の入力 '{declared.name}'"
@@ -903,15 +987,20 @@ def _write_io(
 
 
 def _export_args(
-    variant: ChunkVariant, ids: torch.Tensor, seq: Dim
+    variant: ChunkVariant,
+    ids: torch.Tensor,
+    seq: Dim,
+    specs: Mapping[str, rope_math.RopeLayerSpec],
 ) -> tuple[tuple[torch.Tensor, ...], tuple[Any, ...]]:
     """例示入力と `dynamic_shapes` の組（token-only は `last_row` が 1 本増える）。
 
+    RoPE 派生入力は `[1, M, headDim]` — 行数が chunk 行数そのものなので、`input_ids` と同じ
+    記号次元を与える（別の記号にすると「行数の違う表を渡せる」形が宣言できてしまう）。
     `last_row` は静的 `[1]`（動的次元なし）— 実行時スカラだが形は 1 要素で固定なので、
     記号次元を与えると M と紐づいた別物になる。
     """
-    args: tuple[torch.Tensor, ...] = (ids, positions_for(ids))
-    shapes: tuple[Any, ...] = ({1: seq}, {1: seq})
+    args: tuple[torch.Tensor, ...] = (ids, *rope_args(specs, positions_for(ids)))
+    shapes: tuple[Any, ...] = tuple({1: seq} for _ in args)
     if variant.token_only:
         return (*args, last_row_for(ids)), (*shapes, None)
     return args, shapes
@@ -923,7 +1012,6 @@ def export_series(
     out_dir: Path,
     *,
     sym_max: int = one_shot.SYM_MAX,
-    positions: int = ROPE_TABLE_POSITIONS,
     steps: int = GREEDY_STEPS,
     reference: Path = DEFAULT_OUT_DIR,
 ) -> dict[str, Any]:
@@ -936,15 +1024,19 @@ def export_series(
     MUST: `reference` を読むのは golden を**採らない**系列だけ — 流用する greedy golden の
     置き場で、出所記録（{@link gemma4.provenance}）がその digest を容器と束ねる。
     """
-    wrapper = load_wrapper(variant, model_dir, positions=positions)
+    wrapper = load_wrapper(variant, model_dir)
     # MUST: 丸めは参照・golden の採取より前（ADR 0006）— 後だと参照だけが元の重みで動く。
     int8, int4, scales = one_shot.quantize_wrapper(wrapper)
+    specs = rope_specs(wrapper.model.config)
+    greedy_view = GreedyRopeView(wrapper, specs)
     cases = one_shot.build_cases(model_dir, sym_max, wrapper.sliding_window)
     greedy_cases = tuple(case for case in cases if case[0] in GREEDY_CASES)
+    # 位置の上限はモデルの宣言（表を焼かなくなったので資産では決まらない）。
     # io / sanity は prompt を丸ごと 1 回引くだけ（継続分の位置は要らない）ので steps=0 で見る。
-    assert_case_room(cases, 0, positions)
+    limit = max_position(wrapper.model.config)
+    assert_case_room(cases, 0, limit)
     if variant.goldens:
-        assert_case_room(greedy_cases, steps, positions)
+        assert_case_room(greedy_cases, steps, limit)
     # MUST: 流用する golden の検めは席へ入る**前**（席の外に掛かる前提 — 落ちるなら
     # 数十分の export を始める前に落とす）。読むだけで、参照系列には 1 バイトも書かない。
     reference_goldens = (
@@ -955,7 +1047,7 @@ def export_series(
     # mask の Tmax 畳み込みの評価点（手術で刈るので配布物には残らないが、trace は通る）。
     _, example_ids = max(cases, key=lambda case: case[1].shape[1])
     seq = Dim(SEQ_SYMBOL, min=2, max=sym_max)
-    args, shapes = _export_args(variant, example_ids, seq)
+    args, shapes = _export_args(variant, example_ids, seq, specs)
     print("[export] torch.export → 変換", file=sys.stderr, flush=True)
     graph, tensors = export_module(
         wrapper,
@@ -977,18 +1069,15 @@ def export_series(
         staged.mkdir()
         container = staged / one_shot.MODEL_FILE
         # 格納は既定 i8 + linear を 1 本ずつ i4（向きの根拠は 1-shot 台本の docstring —
-        # tied 実体の FQN を書く前に知らずに済む側）。RoPE 表は既定 i8 の適格に入ってしまう
-        # ので f32 を明示して外す（{@link rope_table_keys}）。
+        # tied 実体の FQN を書く前に知らずに済む側）。RoPE の f32 明示席はもう無い
+        # （表が initializer でなくなったので、圧縮の適格集合に入らない）。
         verified = _write_container(
             surgical,
             tensors,
             container,
             weight_dtype="i8",
             weight_scales=scales,
-            weight_dtype_overrides={
-                **dict.fromkeys(int4.scales, "i4"),
-                **dict.fromkeys(rope_table_keys(wrapper), "f32"),
-            },
+            weight_dtype_overrides=dict.fromkeys(int4.scales, "i4"),
         )
         form = assert_ir_form_decode(
             verified,
@@ -999,9 +1088,9 @@ def export_series(
 
         if variant.goldens:
             print("[io] 全長 forward", file=sys.stderr, flush=True)
-            io_written = _write_io(wrapper, verified, cases, staged)
+            io_written = _write_io(wrapper, verified, cases, staged, specs)
             greedy_written, tokens, margins = _write_greedy(
-                wrapper, greedy_cases, staged, steps=steps, floor=MARGIN_FLOOR
+                greedy_view, greedy_cases, staged, steps=steps, floor=MARGIN_FLOOR
             )
             first = {name: continuation[0] for name, continuation in tokens.items()}
         else:
@@ -1010,7 +1099,7 @@ def export_series(
             first = {}
             for name, ids in cases:
                 with torch.no_grad():
-                    token = wrapper(ids, positions_for(ids), last_row_for(ids))
+                    token = wrapper(ids, *rope_args(specs, positions_for(ids)), last_row_for(ids))
                 first[name] = int(token[0, 0, 0])
 
         # 第 1 継続 token を 1-shot 台本の期待表と突き合わせる（機構横断の突合 — 1-shot 形と
@@ -1083,11 +1172,10 @@ def run_variant_cli(variant: ChunkVariant, description: str, argv: Sequence[str]
     """variant の CLI を組んで走らせる（chunk 系列 2 本の入口はこれ 1 本）。
 
     骨組みは 1-shot 台本と共有する（{@link gemma4.export.series_parser}）— chunk 系列が足すのは
-    位置表の大きさ `--positions` と、golden を採る系列だけの `--steps`、採らない系列だけの
-    `--reference`（流用する golden 系列の置き場）。
+    golden を採る系列だけの `--steps` と、採らない系列だけの `--reference`（流用する golden
+    系列の置き場）だけ。位置の上限はモデルの宣言なので、ノブにしない。
     """
     parser = one_shot.series_parser(description, variant.out_dir)
-    parser.add_argument("--positions", type=int, default=ROPE_TABLE_POSITIONS)
     if variant.goldens:
         parser.add_argument("--steps", type=int, default=GREEDY_STEPS)
     else:

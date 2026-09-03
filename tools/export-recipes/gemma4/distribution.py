@@ -16,11 +16,16 @@
   `shards[].file` を鍵に引くので、そこに別の綴りを挟むと索引と取得キーの対応が
   「位置で合わせる」形になり、片方だけ並べ替えた組が黙って通る。
 
-`pipelineConfig` は 2 系統に割れる（Irodori と同じ分け方）: **資産世代ごとに動く数**
-（`maxPosition` = 焼き込んだ RoPE 表の行数）はコンテナから導出し、**実行時ノブ**
-（`chunkLength` / `capacity`）と**配布者の推奨サンプラ**（上流 `generation_config.json` の
-temperature / top_k / top_p — ADR 0083 決定 7）はそれぞれの正本から引く。前者を写経すると
-「表は 1024 行なのにホストだけ 4096 と思っている」形で、RoPE の外を引いた瞬間に落ちる。
+`pipelineConfig` は 2 系統に割れる（Irodori と同じ分け方）: **モデルが決める数**
+（`maxPosition` = 上流 `text_config.max_position_embeddings`・`rope` = 層種別ごとの式の
+パラメータ）は上流 `config.json` から導出し、**実行時ノブ**（`chunkLength` / `capacity`）と
+**配布者の推奨サンプラ**（上流 `generation_config.json` の temperature / top_k / top_p —
+ADR 0083 決定 7）はそれぞれの正本から引く。前者を写経すると、チェックポイントを差し替えた
+日に宣言だけが古びて「宣言どおりに組んだ表が上流と別の角度で回る」形になる。
+
+RoPE の cos / sin 表は**もう配布物に入らない** — ホスト（TS 側）が `rope` の宣言から実行時に
+組む。したがって位置の上限を決めるのは資産ではなくモデルの宣言だけで、`capacity` は
+`maxPosition` までの実行時ノブになる。
 
 公開面は {@link PIPELINE} 1 つ（`karume.dist.Pipeline`）— リポの dist ドライバ
 （`tools/export-recipes/dist.py`）がこれを core の PIPELINES へ合成する。
@@ -33,6 +38,7 @@ import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from _shared.paths import INPUTS_ROOT
@@ -52,6 +58,14 @@ from karume.dist import (
 )
 
 from .card import GEMMA4_UPSTREAM, render_gemma4_model_card
+from .rope import (
+    BAKED_TABLE_INFIX,
+    FULL_ATTENTION,
+    HEAD_DIM_FIELD,
+    SLIDING_ATTENTION,
+    RopeSpecError,
+    rope_specs,
+)
 
 #: パイプライン契約（ADR 0041 §2 — モデル単位）。TS 側の受理集合は
 #: `GEMMA4_PIPELINE_NAME` / `GEMMA4_PIPELINE_MAJOR`（`packages/models/src/gemma/config.ts`）。
@@ -79,8 +93,12 @@ GEMMA4_MODEL_FILE = "model.safetensors"
 GEMMA4_PLE_INDEX_FILE = "ple.json"
 GEMMA4_TOKENIZER_FILE = "tokenizer.json"
 
-#: 上流チェックポイントが持つ推奨サンプラの出どころ（ADR 0083 決定 7）。
+#: 上流チェックポイントが持つ推奨サンプラの出どころ（ADR 0083 決定 7）と、モデルが決める数
+#: （位置の上限・RoPE の式）の出どころ。text 部は `config.json` の `text_config` 節。
 GEMMA4_GENERATION_CONFIG_FILE = "generation_config.json"
+GEMMA4_CONFIG_FILE = "config.json"
+GEMMA4_TEXT_CONFIG_KEY = "text_config"
+GEMMA4_MAX_POSITION_KEY = "max_position_embeddings"
 
 #: 役割名（manifest の weights / assets が指す内部キー）。
 GEMMA4_ROLE = "model"
@@ -92,23 +110,32 @@ GEMMA4_PLE_ROLE_PREFIX = "ple_"
 GEMMA4_PLE_DIR = "ple"
 
 #: グラフ入力の名前と並び（正本は `gemma4/export_product.py` — ラッパの forward 引数名）。
-#: 実行側は名前で束ねるので、1 つでも綴りが変われば束ねられない。
+#: 実行側は名前で束ねるので、1 つでも綴りが変われば束ねられない。RoPE の 4 本はホストが
+#: 実行時に組む cos / sin（綴りの正本は `gemma4.export_decode.rope_input_name`）。
 GEMMA4_INPUT_IDS = "input_ids"
-GEMMA4_POSITION_IDS = "position_ids"
 GEMMA4_PER_LAYER_INPUTS = "per_layer_inputs"
 GEMMA4_LAST_ROW = "last_row"
+GEMMA4_ROPE_INPUT_PREFIX = "rope_"
+GEMMA4_ROPE_PARTS: tuple[str, ...] = ("cos", "sin")
+GEMMA4_ROPE_LAYER_TYPES: tuple[str, ...] = (SLIDING_ATTENTION, FULL_ATTENTION)
+
+
+def gemma4_rope_input_name(layer_type: str, part: str) -> str:
+    """RoPE 派生入力 1 本の綴り（焼く側 `export_decode.rope_input_name` の鏡像）。"""
+    return f"{GEMMA4_ROPE_INPUT_PREFIX}{layer_type}_{part}"
+
+
+GEMMA4_ROPE_INPUTS: tuple[str, ...] = tuple(
+    gemma4_rope_input_name(layer_type, part)
+    for layer_type in GEMMA4_ROPE_LAYER_TYPES
+    for part in GEMMA4_ROPE_PARTS
+)
 GEMMA4_GRAPH_INPUTS: tuple[str, ...] = (
     GEMMA4_INPUT_IDS,
-    GEMMA4_POSITION_IDS,
+    *GEMMA4_ROPE_INPUTS,
     GEMMA4_PER_LAYER_INPUTS,
     GEMMA4_LAST_ROW,
 )
-
-#: RoPE 表の initializer テンソル名の接頭と接尾（`gemma4.export_decode.rope_table_keys` の綴り
-#: — `<ROPE_TABLE_MODULE>.<layer_type>_<part>_table`）。**行数がそのまま `maxPosition`** で、
-#: 4 本（full / sliding × cos / sin）が同じ行数を名乗ることまで見る。
-GEMMA4_ROPE_TABLE_INFIX = "rotary_emb."
-GEMMA4_ROPE_TABLE_SUFFIX = "_table"
 
 #: 出力の相対 path（**モデルサブツリー内**）— 配置表と manifest が共有する 1 箇所。格納 dtype を
 #: ファイル名に出すのは他 family と同じ形（系列が 2 本並んでも取り違えようがない綴り）。
@@ -159,21 +186,21 @@ GEMMA4_QUANTS: Mapping[str, Any] = {
 GEMMA4_DEFAULT_QUANT = GEMMA4_DTYPE
 
 #: 固定長 prefill chunk の行数（ADR 0066 決定 4 — context の計画時定数）。**実行時ノブ**なので
-#: 資産からは導出できない。値は検収門が通した組み合わせそのもの
-#: （`packages/models/tests/e2e_gemma4_chat_test.ts` の `CHUNK_LENGTH`）で、chunk 長を動かすと
-#: prefill の刻みが変わって token 列も動きうるため、golden を採った値をそのまま宣言する。
-GEMMA4_CHUNK_LENGTH = 32
+#: 資産からは導出できない。上限は記号 `M` の trace 時の上限（{@link GEMMA4_MAX_CHUNK_LENGTH}）。
+GEMMA4_CHUNK_LENGTH = 768
 
-#: full スロットの容量（会話が使える最大の論理長）。同じく実行時ノブ。上限は
-#: {@link gemma4_pipeline_config} が RoPE 表の行数で押さえる。
+#: 記号 `M`（1 chunk の行数）の上限。焼く側の `gemma4.export.SYM_MAX` の鏡像で、こちらは
+#: torch を読まない側に置いた写し（同値は `tests/test_distribution.py` が突き合わせる）。
+GEMMA4_MAX_CHUNK_LENGTH = 768
+
+#: full スロットの容量（会話が使える最大の論理長）の**既定値**。同じく実行時ノブで、上限は
+#: {@link gemma4_pipeline_config} がモデルの宣言（`maxPosition`）で押さえる。
 #:
-#: NOTE: **VRAM と会話長のトレードオフの政策値**で、資産は `maxPosition`（現行 1024）まで
-#: 引ける。2026-09-02 に 640 → 1024（= 表の上限）へ引き上げた（裁定「コンテキスト窓は可能な
-#: 限り大きく」）。fromAssets 側の検収門（`e2e_gemma4_chat_test.ts` ほか）は 640 のままで、
-#: 宣言どおりの組み合わせは配布形を読む `e2e_gemma4_pretrained_test.ts` /
-#: `e2e_gemma4_directory_test.ts` が通す。golden は full スロットが `pastLength` 行しか読まない
-#: ため不変（同 2 門で実測）。さらに上げるには RoPE 表の再 export（`--positions`）が要る。
-GEMMA4_CAPACITY = 1024
+#: NOTE: **VRAM と会話長のトレードオフの政策値**。RoPE をホスト生成へ移したので資産側の
+#: 位置上限は消え、`maxPosition`（E2B は 131,072）まで宣言できる — ここに置くのは
+#: 「既定でどこまで確保するか」だけで、full スロットの常駐バイト数が容量に比例する
+#: （`karume.limits`）ぶんが代償になる。
+GEMMA4_CAPACITY = 4096
 
 #: 上流 `generation_config.json` → `pipelineConfig.sampler` の欄名（TS 側 `SamplerSpec` の綴り）。
 GEMMA4_SAMPLER_FIELDS: tuple[tuple[str, str], ...] = (
@@ -404,52 +431,71 @@ def gemma4_vocab_size(graph: Mapping[str, Any], path: Path) -> int:
     return vocab
 
 
-def gemma4_max_position(graph: Mapping[str, Any], path: Path) -> int:
-    """焼き込んだ RoPE 表の行数（= `pipelineConfig.maxPosition`）をコンテナから導く。
+def gemma4_text_config(model_dir: Path) -> SimpleNamespace:
+    """上流 `config.json` の `text_config` 節（位置の上限と RoPE の式の出どころ）。
 
-    MUST: 写経しない。`--positions` は台本の引数なので、宣言と焼かれた表は独立に動く —
-    ずれると「宣言の内側なのに表の外を引く」形になり、実行時まで誰も気づけない。
-
-    4 本（full / sliding × cos / sin）が**同じ行数**であることまで見るのは、層種ごとに別の表を
-    焼く形（`export_decode.rope_table_keys`）だから — 片方だけ古い表が残ると、その層種だけが
-    静かに別の角度で回る。
+    属性アクセスの形へ寄せるのは {@link gemma4.rope.rope_specs} が transformers の config
+    オブジェクトと同じ読み方をするため — 焼く側と配る側で**同じ導出コード**を通す。
     """
-    initializers = graph.get("initializers")
-    values = graph.get("values")
-    if not isinstance(initializers, dict) or not isinstance(values, dict):
-        raise DistError(f"{path}: IR メタデータに initializers / values が無い")
-    rows: dict[str, int] = {}
-    for key, entry in initializers.items():
-        tensor = entry.get("tensor") if isinstance(entry, dict) else None
-        if not isinstance(tensor, str):
-            continue
-        if GEMMA4_ROPE_TABLE_INFIX not in tensor or not tensor.endswith(GEMMA4_ROPE_TABLE_SUFFIX):
-            continue
-        value = values.get(key)
-        shape = value.get("shape") if isinstance(value, dict) else None
-        if not isinstance(shape, list) or len(shape) != 2 or not isinstance(shape[0], int):
-            raise DistError(f"{path}: RoPE 表 '{tensor}' の形が [位置数, 幅] でない（{shape!r}）")
-        rows[tensor] = shape[0]
-    if not rows:
-        raise DistError(
-            f"{path}: RoPE 表の initializer が 1 本も無い"
-            f"（'…{GEMMA4_ROPE_TABLE_INFIX}<層種>_<cos|sin>{GEMMA4_ROPE_TABLE_SUFFIX}'）"
-            " — 位置表を持たないグラフでは maxPosition を導けない"
-        )
-    if len(set(rows.values())) != 1:
-        raise DistError(
-            f"{path}: RoPE 表の行数が揃っていない（{dict(sorted(rows.items()))}）"
-            " — 層種ごとに別世代の表が焼かれている"
-        )
-    return next(iter(rows.values()))
+    where = str(model_dir / GEMMA4_CONFIG_FILE)
+    raw = _read_json(model_dir / GEMMA4_CONFIG_FILE, "上流のモデル設定")
+    if not isinstance(raw, dict):
+        raise DistError(f"{where}: 最上位オブジェクトでない")
+    text = raw.get(GEMMA4_TEXT_CONFIG_KEY)
+    if not isinstance(text, dict):
+        raise DistError(f"{where}: {GEMMA4_TEXT_CONFIG_KEY} がオブジェクトでない（{text!r}）")
+    return SimpleNamespace(**text)
 
 
-def assert_gemma4_graph(graph: Mapping[str, Any], path: Path, index: Mapping[str, Any]) -> None:
+def gemma4_max_position(text_config: SimpleNamespace, where: str) -> int:
+    """モデルが宣言する位置の上限（= `pipelineConfig.maxPosition`）。
+
+    MUST: 写経しない（上流 `text_config.max_position_embeddings` が唯一の出どころ）。RoPE を
+    ホスト生成へ移した以上、位置の上限を持っているのは資産ではなくモデルの宣言だけになる。
+    """
+    declared = getattr(text_config, GEMMA4_MAX_POSITION_KEY, None)
+    if isinstance(declared, bool) or not isinstance(declared, int) or declared < 1:
+        raise DistError(f"{where}: {GEMMA4_MAX_POSITION_KEY} が正の整数でない（{declared!r}）")
+    return declared
+
+
+def gemma4_rope(text_config: SimpleNamespace, where: str) -> dict[str, Any]:
+    """`pipelineConfig.rope`（層種別ごとの theta / headDim / rotaryDim）を config から導く。
+
+    MUST: 受理外の rope_type / 係数は fail loudly（{@link gemma4.rope.layer_spec}）— 式が
+    別物なのに theta と幅だけを写すと、ホストが**形も型も合う別の角度**で表を組む。
+    MUST: 層種別は sliding / full の 2 つちょうど。増減はグラフ入力の本数
+    （{@link GEMMA4_ROPE_INPUTS}）と噛み合わなくなる。
+    """
+    try:
+        specs = rope_specs(text_config)
+    except RopeSpecError as error:
+        raise DistError(f"{where}: RoPE の宣言を導けない — {error}") from error
+    if sorted(specs) != sorted(GEMMA4_ROPE_LAYER_TYPES):
+        raise DistError(
+            f"{where}: 層種別が {sorted(specs)} — {sorted(GEMMA4_ROPE_LAYER_TYPES)} でない"
+        )
+    return {layer_type: specs[layer_type].declaration() for layer_type in GEMMA4_ROPE_LAYER_TYPES}
+
+
+def assert_gemma4_graph(
+    graph: Mapping[str, Any],
+    path: Path,
+    index: Mapping[str, Any],
+    rope: Mapping[str, Any],
+) -> None:
     """グラフ入力の並び・形・記号の割れ方を、配置の前に実測する。
 
     MUST: PLE の層数と層当たり次元は**グラフ入力の宣言**と**索引**の両方が持つ（前者は
     `per_layer_inputs[1, M, 35, 256]`・後者は `layers` / `dim`）。食い違ったまま配ると、
     ホストが組む表と GPU が読む形が別物になる — shape が合う組み合わせでは沈黙する。
+
+    MUST: RoPE 派生入力の幅は `pipelineConfig.rope` の `headDim` と一致すること。宣言と
+    グラフは別々の正本（config / コンテナ）から来るので、噛み合わせはここでしか見られない
+    — ホストが宣言どおりに組んだ表が入力の幅と違えば、実行時まで誰も気づけない。
+
+    MUST: 表の initializer が 1 本も残っていないこと。派生入力を足したのに表も残っている形は
+    常駐が戻るうえ、位置の上限が資産側へ逆戻りする。
 
     MUST: 記号は 2 本で、**入力 shape から決まらないもの**がちょうど 1 本（full スロットの
     容量記号）。TS 側 `Gemma4Pipeline` はこの 1 本を容量の束縛点にするので、割れ方が変わると
@@ -461,6 +507,27 @@ def assert_gemma4_graph(graph: Mapping[str, Any], path: Path, index: Mapping[str
         raise DistError(
             f"{path} のグラフ入力が {list(names)} で、期待の {list(GEMMA4_GRAPH_INPUTS)} と違う"
             " — 実行側は名前で束ねるので、1 つでも綴りが変われば束ねられない"
+        )
+    sequence = inputs[GEMMA4_INPUT_IDS][1]
+    for layer_type in GEMMA4_ROPE_LAYER_TYPES:
+        head_dim = rope[layer_type][HEAD_DIM_FIELD]
+        for part in GEMMA4_ROPE_PARTS:
+            name = gemma4_rope_input_name(layer_type, part)
+            declared = inputs[name]
+            if list(declared) != [1, sequence, head_dim]:
+                raise DistError(
+                    f"{path} の入力 '{name}' が {list(declared)!r} — 宣言した headDim から組んだ"
+                    f" 期待 {[1, sequence, head_dim]} と違う（表とグラフが別世代）"
+                )
+    baked = sorted(
+        key
+        for key, entry in (graph.get("initializers") or {}).items()
+        if isinstance(entry, dict) and BAKED_TABLE_INFIX in str(entry.get("tensor", ""))
+    )
+    if baked:
+        raise DistError(
+            f"{path}: 焼き込んだ RoPE 表の initializer が {len(baked)} 本残っている: {baked[:4]}"
+            " — ホスト生成へ外に出し切れていない世代の資産"
         )
     per_layer = inputs[GEMMA4_PER_LAYER_INPUTS]
     if len(per_layer) != 4:
@@ -605,16 +672,21 @@ def gemma4_sampler(model_dir: Path) -> dict[str, Any]:
     return sampler
 
 
-def gemma4_pipeline_config(max_position: int, sampler: Mapping[str, Any]) -> dict[str, Any]:
-    """`pipelineConfig`（TS 側スキーマの 4 欄）を組む。
+def gemma4_pipeline_config(
+    max_position: int, rope: Mapping[str, Any], sampler: Mapping[str, Any]
+) -> dict[str, Any]:
+    """`pipelineConfig`（TS 側スキーマの 5 欄）を組む。
 
-    MUST: 実行時ノブが**焼かれた表の内側**に収まることをここで落とす。`capacity` は会話が
-    使える最大の論理長なので、位置は最大 `capacity - 1` まで進む — RoPE 表の行数を超える宣言は
-    「宣言の内側なのに表の外を引く」形になり、長い会話でだけ実行時に落ちる。
+    MUST: 実行時ノブが**両側の上限の内側**に収まることをここで落とす。chunk の行数は記号 `M`
+    の trace 時の上限（{@link GEMMA4_MAX_CHUNK_LENGTH}）を超えられず、`capacity` は会話が
+    使える最大の論理長なので位置は最大 `capacity - 1` まで進む — モデルの宣言
+    （`maxPosition`）を超える容量は「宣言の内側なのに上流が想定していない位置を回す」形で、
+    長い会話でだけ表面化する。
     """
-    if GEMMA4_CHUNK_LENGTH < 2:
+    if not 2 <= GEMMA4_CHUNK_LENGTH <= GEMMA4_MAX_CHUNK_LENGTH:
         raise DistError(
-            f"chunkLength {GEMMA4_CHUNK_LENGTH} が 2 未満（記号 M の下限は 2 — 台本の `Dim`）"
+            f"chunkLength {GEMMA4_CHUNK_LENGTH} が [2, {GEMMA4_MAX_CHUNK_LENGTH}] の外"
+            "（下限は記号 M の下限・上限は trace 時の `Dim` の上限）"
         )
     if GEMMA4_CAPACITY < GEMMA4_CHUNK_LENGTH:
         raise DistError(
@@ -623,13 +695,14 @@ def gemma4_pipeline_config(max_position: int, sampler: Mapping[str, Any]) -> dic
         )
     if max_position < GEMMA4_CAPACITY:
         raise DistError(
-            f"capacity {GEMMA4_CAPACITY} が焼き込んだ RoPE 表の行数 {max_position} を超えた"
-            " — 容量いっぱいの会話が位置表の外を引く"
+            f"capacity {GEMMA4_CAPACITY} がモデルの位置上限 {max_position} を超えた"
+            " — 容量いっぱいの会話が宣言の外の位置を回す"
         )
     return {
         "chunkLength": GEMMA4_CHUNK_LENGTH,
         "maxPosition": max_position,
         "capacity": GEMMA4_CAPACITY,
+        "rope": {layer_type: dict(spec) for layer_type, spec in rope.items()},
         "sampler": dict(sampler),
     }
 
@@ -643,10 +716,13 @@ def gemma4_plan(sources: Gemma4Sources, model: str = GEMMA4_DEFAULT_MODEL) -> Mo
         assert_storage(role, source, GEMMA4_STORAGE_REQUIREMENTS)
         assert_storage(role, source, GEMMA4_STORAGE_ALSO_REQUIRED)
         assert_storage_absent(role, source, GEMMA4_STORAGE_FORBIDDEN)
+    text_config = gemma4_text_config(sources.model)
+    where = str(sources.model / GEMMA4_CONFIG_FILE)
+    rope = gemma4_rope(text_config, where)
     container = placements[GEMMA4_ROLE]
     graph = ir_graph(container)
     vocab_size = gemma4_vocab_size(graph, container)
-    assert_gemma4_graph(graph, container, index)
+    assert_gemma4_graph(graph, container, index, rope)
     if index["tokens"] != vocab_size:
         raise DistError(
             f"{sources.product / GEMMA4_PLE_INDEX_FILE}: tokens {index['tokens']} が製品グラフの"
@@ -655,7 +731,7 @@ def gemma4_plan(sources: Gemma4Sources, model: str = GEMMA4_DEFAULT_MODEL) -> Mo
     assert_gemma4_ple_shards(placements, index)
     assert_gemma4_tokenizer(placements[GEMMA4_TOKENIZER_ROLE], vocab_size)
     pipeline_config = gemma4_pipeline_config(
-        gemma4_max_position(graph, container), gemma4_sampler(sources.model)
+        gemma4_max_position(text_config, where), rope, gemma4_sampler(sources.model)
     )
     output_paths = gemma4_output_paths(index)
     return ModelPlan(
@@ -699,7 +775,8 @@ the Apache License, Version 2.0 (see `LICENSE.md`). The following changes were m
   The values are therefore not bit-identical to the source checkpoint.
 - The **per-layer embedding tables were moved out of the graph** into a sidecar that the host
   gathers, and the exit was narrowed to the last row's logits.
-- Rotary position tables were baked as constants for a fixed number of positions.
+- **Rotary position embeddings were moved out of the graph**: the cosine and sine rows are built
+  by the host from the declared parameters and passed in as ordinary graph inputs.
 
 No retraining and no fine-tuning were performed. The original checkpoint is not distributed here.
 """

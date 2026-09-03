@@ -39,7 +39,6 @@ from gemma4.tests.test_export_decode import (
     DECODE_LAYER_TYPES,
     OWNER_LAYERS,
     TINY_CONTAINER_FILES,
-    TINY_POSITIONS,
     _tiny_decode_config,
 )
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION
@@ -325,7 +324,7 @@ def tiny_model_trio():
         ]
     )
     del model.model.embed_tokens_per_layer
-    decode.swap_rope_table(model, TINY_POSITIONS)
+    decode.swap_rope_inputs(model)
     return (
         token_only.TokenOnlyChunkWrapper(model, tables).eval(),
         product.ProductChunkWrapper(model, tables).eval(),
@@ -339,14 +338,15 @@ class TestEagerEquivalence:
         token_form, product_form, tables = tiny_model_trio
         torch.manual_seed(1)
         ids = torch.randint(0, VOCAB, (1, 7), dtype=torch.int64)
-        positions = decode.positions_for(ids)
+        specs = decode.rope_specs(product_form.model.config)
+        rope = decode.rope_args(specs, decode.positions_for(ids))
         stacked = ple.per_layer_inputs(tables, ids, product_form.per_layer_scale)
 
         with torch.no_grad():
             for row in range(int(ids.shape[1])):
                 last_row = torch.tensor([row], dtype=torch.int64)
-                logits = product_form(ids, positions, stacked, last_row)
-                expected = token_form(ids, positions, last_row)
+                logits = product_form(ids, *rope, stacked, last_row)
+                expected = token_form(ids, *rope, last_row)
                 assert tuple(logits.shape) == (1, 1, VOCAB), f"row {row} の出力形"
                 assert int(logits[0, 0].argmax()) == int(expected[0, 0, 0]), f"row {row} の token"
 
@@ -358,14 +358,15 @@ class TestEagerEquivalence:
         token_form, product_form, tables = tiny_model_trio
         torch.manual_seed(2)
         ids = torch.randint(0, VOCAB, (1, 5), dtype=torch.int64)
-        positions = decode.positions_for(ids)
+        specs = decode.rope_specs(product_form.model.config)
+        rope = decode.rope_args(specs, decode.positions_for(ids))
         last_row = torch.tensor([4], dtype=torch.int64)
         stacked = ple.per_layer_inputs(tables, ids, product_form.per_layer_scale)
 
         with torch.no_grad():
-            correct = product_form(ids, positions, stacked, last_row)
-            swapped = product_form(ids, positions, stacked.flip(2), last_row)
-            expected = token_form(ids, positions, last_row)
+            correct = product_form(ids, *rope, stacked, last_row)
+            swapped = product_form(ids, *rope, stacked.flip(2), last_row)
+            expected = token_form(ids, *rope, last_row)
 
         assert int(correct[0, 0].argmax()) == int(expected[0, 0, 0])
         assert not torch.equal(correct, swapped), "層の並びを崩しても同じ logits が出ている"
@@ -385,13 +386,15 @@ class TestExportedProductForm:
         ids = torch.randint(0, VOCAB, (1, WINDOW + 3), dtype=torch.int64)
         stacked = ple.per_layer_inputs(tables, ids, wrapper.per_layer_scale)
         last_row = decode.last_row_for(ids)
+        specs = decode.rope_specs(wrapper.model.config)
+        rope = decode.rope_args(specs, decode.positions_for(ids))
         # PLE はホストが供給する入力になったので、export の前に席ごと落とす（台本と同じ順序）。
         del wrapper.per_layer
         seq = Dim(decode.SEQ_SYMBOL, min=2, max=TINY_SYM_MAX)
         graph, tensors = export_module(
             wrapper,
-            (ids, decode.positions_for(ids), stacked, last_row),
-            dynamic_shapes=({1: seq}, {1: seq}, {1: seq}, None),
+            (ids, *rope, stacked, last_row),
+            dynamic_shapes=(*({1: seq} for _ in range(2 + len(rope))), None),
             symbol_names=(decode.SEQ_SYMBOL,),
             preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
         )
@@ -403,10 +406,7 @@ class TestExportedProductForm:
             tmp_path / gx.MODEL_FILE,
             weight_dtype="i8",
             weight_scales=scales,
-            weight_dtype_overrides={
-                **dict.fromkeys(int4.scales, "i4"),
-                **dict.fromkeys(decode.rope_table_keys(wrapper), "f32"),
-            },
+            weight_dtype_overrides=dict.fromkeys(int4.scales, "i4"),
         )
         storage = {
             "i8": len(int8.scales) - len(DECODE_LAYER_TYPES),
@@ -421,7 +421,7 @@ class TestExportedProductForm:
 
         assert [spec.name for spec in verified.inputs] == [
             decode.INPUT_IDS,
-            decode.POSITION_IDS,
+            *decode.ROPE_INPUTS,
             product.PER_LAYER_INPUTS,
             decode.TOKEN_ONLY_LAST_ROW,
         ]
@@ -442,8 +442,8 @@ class TestExportedProductForm:
         ]
 
         assert [VOCAB, PLE_DIM] not in weights
-        # embedding は 主 embedding 1 + RoPE 表 4（cos/sin × 層種別 2）+ 行選択 1。
-        assert len(weights) == 6
+        # embedding は 主 embedding 1 + 行選択 1（RoPE の表引きはもう居ない）。
+        assert len(weights) == 2
 
     def test_the_decode_form_check_rejects_the_product_graph(self, tiny_container):
         """既存 2 系列の形検査は製品形を通さない（3 つの形が混ざらないことの固定）。"""
@@ -607,7 +607,6 @@ class TestExportSeries:
             checkpoint,
             out_dir,
             sym_max=TINY_SYM_MAX,
-            positions=TINY_POSITIONS,
             reference=reference,
         )
 
@@ -638,7 +637,6 @@ class TestExportSeries:
             checkpoint,
             out_dir,
             sym_max=TINY_SYM_MAX,
-            positions=TINY_POSITIONS,
             reference=reference,
         )
 
@@ -660,7 +658,6 @@ class TestExportSeries:
             checkpoint,
             out_dir,
             sym_max=TINY_SYM_MAX,
-            positions=TINY_POSITIONS,
             reference=reference,
         )
 
@@ -683,7 +680,6 @@ class TestExportSeries:
                 checkpoint,
                 out_dir,
                 sym_max=TINY_SYM_MAX,
-                positions=TINY_POSITIONS,
                 reference=Path(tmp_path / "missing"),
             )
         assert not out_dir.exists()

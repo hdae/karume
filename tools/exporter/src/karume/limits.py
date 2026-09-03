@@ -52,7 +52,12 @@ WEBGPU_DEFAULT_LIMITS: Mapping[str, int] = {
 STATE_DTYPE_BYTES: Mapping[str, int] = {"f32": 4}
 
 #: state shape の記号次元（KV 容量）の束縛値を引く `pipelineConfig` の席。
-STATE_CAPACITY_KEY = "capacity"
+#:
+#: MUST: 既定容量（`capacity`）ではなく**配布形が許す最大容量**（`maxPosition`）を読む。
+#: 容量は実行時ノブ（ホストが `createGenerationContext` で選ぶ）なので、既定値で焼くと
+#: 「既定より大きい容量を選んだ瞬間に、宣言を満たすデバイスで `createSession` が落ちる」
+#: という最も損な形になる。上限で焼けば宣言は常に十分側へ倒れる。
+STATE_CAPACITY_KEY = "maxPosition"
 
 
 def required_limits(demand: int) -> dict[str, int]:
@@ -106,12 +111,11 @@ def max_tensor_payload(header: Mapping[str, Any], where: str) -> int:
 def state_bindings(
     states: Mapping[str, Any], pipeline_config: Mapping[str, Any], where: str
 ) -> dict[str, int]:
-    """state shape の記号次元 → 束縛値（`pipelineConfig` の容量席から引く）。
+    """state shape の記号次元 → 束縛値（`pipelineConfig` の位置上限の席から引く）。
 
-    束縛点は `createGenerationContext(spec.bindings)`（ADR 0066 追記 7）で、その値を配布形が
-    持っているのは `pipelineConfig` の {@link STATE_CAPACITY_KEY} 席だけ — 読み手
-    （`packages/models/src/gemma/pipeline.ts` の `capacitySymbolOf` +
-    `bindings: {[capacitySymbol]: config.capacity}`）の鏡像になる。
+    束縛点は `createGenerationContext(spec.bindings)`（ADR 0066 追記 7）で、そこへ渡る容量は
+    ホストが選ぶ実行時ノブ。配布形が持っているその**上限**が `pipelineConfig` の
+    {@link STATE_CAPACITY_KEY} 席で、requiredLimits はこの上限で焼く（席の docstring）。
 
     MUST: 束縛が取れなければ fail loudly — 黙って state を勘定から外すと「重みだけを見た
     小さい値」が焼かれ、**宣言があるのに足りない**という最も損な形になる（宣言が無い方が
@@ -146,9 +150,9 @@ def max_state_slot_bytes(
     """グラフの state スロット（ADR 0066 決定 2）**1 本の最大**バイト数（states 無しなら 0）。
 
     スロットは `createGenerationContext` が容量ぶん丸ごと確保する常駐バッファ（1 スロット =
-    1 バッファ = 1 binding）なので、記号を束縛した具体寸法がそのまま需要になる。KV 容量の
-    大きい系列では**最大テンソルより state の方が大きい**（どちらも 1 バッファのまま —
-    重みは shard を跨いで配れるが、GPU 側で 1 本に戻る）。
+    1 バッファ = 1 binding）なので、記号を**配布形が許す最大容量**で束縛した寸法がそのまま
+    需要になる。KV 容量の大きい系列では**最大テンソルより state の方が大きい**（どちらも
+    1 バッファのまま — 重みは shard を跨いで配れるが、GPU 側で 1 本に戻る）。
     """
     states = graph.get("states")
     if states is None:

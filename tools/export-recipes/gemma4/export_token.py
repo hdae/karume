@@ -1,8 +1,8 @@
 """実重み Gemma 4 E2B を **token-only 既定出口**（ADR 0068 決定 4）の states 形へ書き出す台本。
 
 `export_decode.py`（logits opt-in 形 — 全 M 行に lm_head を通し `[logits, token]` を出す）の
-**既定形**版。chunk 系列の経路（素材の読み方・states 手術・RoPE 表引き・混成量子化・門の
-順序）は {@link gemma4.export_decode} の中核をそのまま通し、この台本が持つのはラッパ 1 つと
+**既定形**版。chunk 系列の経路（素材の読み方・states 手術・RoPE のホスト供給・混成量子化・
+門の順序）は {@link gemma4.export_decode} の中核をそのまま通し、この台本が持つのはラッパ 1 つと
 variant 記述（{@link VARIANT}）と入口だけ。出口の差は次の 3 点:
 
 - 入力に **`last_row[1]` i32**（最終有効行の添字 = `queryLength − 1`）が増える。prefill
@@ -56,7 +56,7 @@ DEFAULT_OUT_DIR = SERIES_ROOT / "gemma4-e2b-decode-token"
 
 
 class TokenOnlyChunkWrapper(decode.DecodeChunkWrapper):
-    """`(input_ids, position_ids, last_row) → token[1,1,1]` の token-only chunk ラッパ。
+    """`(input_ids, RoPE 4 本, last_row) → token[1,1,1]` の token-only chunk ラッパ。
 
     MUST: `DecodeChunkWrapper` の**派生**（モジュール FQN 空間の同一性 — 量子化の対象述語と
     scale 台帳の再利用条件。`export_decode.DecodeChunkWrapper` の docstring と同じ理由）。
@@ -68,7 +68,13 @@ class TokenOnlyChunkWrapper(decode.DecodeChunkWrapper):
     """
 
     def forward(  # type: ignore[override]
-        self, input_ids: torch.Tensor, position_ids: torch.Tensor, last_row: torch.Tensor
+        self,
+        input_ids: torch.Tensor,
+        rope_sliding_attention_cos: torch.Tensor,
+        rope_sliding_attention_sin: torch.Tensor,
+        rope_full_attention_cos: torch.Tensor,
+        rope_full_attention_sin: torch.Tensor,
+        last_row: torch.Tensor,
     ) -> torch.Tensor:
         length = input_ids.shape[1]
         mask = {
@@ -77,13 +83,20 @@ class TokenOnlyChunkWrapper(decode.DecodeChunkWrapper):
         }
         embeds = self.model.model.embed_tokens(input_ids)
         stacked = ple.per_layer_inputs(self.per_layer, input_ids, self.per_layer_scale)
-        hidden = self.model.model(
-            inputs_embeds=embeds,
-            per_layer_inputs=stacked,
-            attention_mask=mask,
-            position_ids=position_ids,
-            use_cache=False,
-        ).last_hidden_state
+        tables = decode.bound_rope(
+            rope_sliding_attention_cos,
+            rope_sliding_attention_sin,
+            rope_full_attention_cos,
+            rope_full_attention_sin,
+        )
+        with self.model.model.rotary_emb.bound(tables):
+            hidden = self.model.model(
+                inputs_embeds=embeds,
+                per_layer_inputs=stacked,
+                attention_mask=mask,
+                position_ids=None,
+                use_cache=False,
+            ).last_hidden_state
         # 行選択のあと [1,1,H] へ上げてから lm_head へ通す — argmax の**後ろ**に形合わせを
         # 置くと出力の供給元が reshape になり、「token 出力 = argmax 直結」（ADR 0068 決定 4 /
         # assert_ir_form_decode の検査）が崩れる。

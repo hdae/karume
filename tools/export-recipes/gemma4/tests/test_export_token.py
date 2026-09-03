@@ -19,7 +19,6 @@ from gemma4.tests.test_export import PLE_DIM, TINY_SYM_MAX, VOCAB, WINDOW
 from gemma4.tests.test_export_decode import (
     DECODE_LAYER_TYPES,
     OWNER_LAYERS,
-    TINY_POSITIONS,
     _tiny_decode_config,
 )
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION
@@ -48,7 +47,7 @@ def tiny_model_pair():
         ]
     )
     del model.model.embed_tokens_per_layer
-    decode.swap_rope_table(model, TINY_POSITIONS)
+    decode.swap_rope_inputs(model)
     return (
         decode.DecodeChunkWrapper(model, tables).eval(),
         token.TokenOnlyChunkWrapper(model, tables).eval(),
@@ -64,11 +63,12 @@ class TestEagerEquivalence:
         logits_form, token_form = tiny_model_pair
         torch.manual_seed(1)
         ids = torch.randint(0, VOCAB, (1, 7), dtype=torch.int64)
-        positions = decode.positions_for(ids)
+        specs = decode.rope_specs(logits_form.model.config)
+        rope = decode.rope_args(specs, decode.positions_for(ids))
         with torch.no_grad():
-            _, reference = logits_form(ids, positions)
+            _, reference = logits_form(ids, *rope)
             for row in range(int(ids.shape[1])):
-                selected = token_form(ids, positions, torch.tensor([row], dtype=torch.int64))
+                selected = token_form(ids, *rope, torch.tensor([row], dtype=torch.int64))
                 assert tuple(selected.shape) == (1, 1, 1), f"row {row} の出力形"
                 assert int(selected[0, 0, 0]) == int(reference[0, row, 0]), f"row {row} の token"
 
@@ -81,12 +81,13 @@ class TestExportedTokenForm:
         _, wrapper = tiny_model_pair
         int8, int4, scales = gx.quantize_wrapper(wrapper)
         ids = torch.randint(0, VOCAB, (1, WINDOW + 3), dtype=torch.int64)
-        last_row = torch.tensor([int(ids.shape[1]) - 1], dtype=torch.int64)
         seq = Dim(decode.SEQ_SYMBOL, min=2, max=TINY_SYM_MAX)
+        specs = decode.rope_specs(wrapper.model.config)
+        args, shapes = decode._export_args(token.VARIANT, ids, seq, specs)
         graph, tensors = export_module(
             wrapper,
-            (ids, decode.positions_for(ids), last_row),
-            dynamic_shapes=({1: seq}, {1: seq}, None),
+            args,
+            dynamic_shapes=shapes,
             symbol_names=(decode.SEQ_SYMBOL,),
             preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
         )
@@ -98,10 +99,7 @@ class TestExportedTokenForm:
             tmp_path / gx.MODEL_FILE,
             weight_dtype="i8",
             weight_scales=scales,
-            weight_dtype_overrides={
-                **dict.fromkeys(int4.scales, "i4"),
-                **dict.fromkeys(decode.rope_table_keys(wrapper), "f32"),
-            },
+            weight_dtype_overrides=dict.fromkeys(int4.scales, "i4"),
         )
         storage = {"i8": len(int8.scales), "i4": len(int4.scales)}
         return verified, config, storage
@@ -115,7 +113,7 @@ class TestExportedTokenForm:
         assert form["state_append_nodes"] == 2 * OWNER_LAYERS
         assert [spec.name for spec in verified.inputs] == [
             decode.INPUT_IDS,
-            decode.POSITION_IDS,
+            *decode.ROPE_INPUTS,
             decode.TOKEN_ONLY_LAST_ROW,
         ]
         assert len(verified.outputs) == 1

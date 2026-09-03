@@ -1329,7 +1329,7 @@ class TestRequiredLimits:
             "ir_graph",
             lambda path: {"states": {"kv": {"dtype": "f32", "shape": [1, 1, "C", 512]}}},
         )
-        plan = self._plan(tmp_path / "series", pipeline_config={"capacity": 200_000})
+        plan = self._plan(tmp_path / "series", pipeline_config={"maxPosition": 200_000})
 
         manifest = self._assemble(tmp_path, plan)
 
@@ -1351,7 +1351,7 @@ class TestRequiredLimits:
         )
         plan = self._plan(tmp_path / "series")
 
-        with pytest.raises(DistError, match="capacity"):
+        with pytest.raises(DistError, match="maxPosition"):
             self._assemble(tmp_path, plan)
 
     def test_it_refuses_a_plan_that_writes_the_field_itself(self, tmp_path: Path) -> None:

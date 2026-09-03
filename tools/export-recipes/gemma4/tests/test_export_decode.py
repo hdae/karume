@@ -3,8 +3,9 @@
 実重みの emit は手動（1-shot 形のテストと同じ規律）。ここで固定するのは、壊れると**偽 PASS**
 になる側の規律だけ:
 
-- RoPE 表引きが元実装と**値同一**であること（差し替えの正当性そのもの）と、層種別の
-  dispatch が効いていること（sliding の表で full 層を引く形が通らない）
+- RoPE の受け渡し口（{@link decode.RopeInputs}）が層種別ごとに**渡された値そのもの**を返し、
+  束縛の持ち越しも未知の層種別も fail loudly で落ちること（式そのものの検証は
+  `test_rope.py` が上流と突き合わせる）
 - KV 共有の割り付け（所有層 = 共有開始より前で最後の同種層）が上流の規則と一致し、
   `states_plan` が所有層のスロットだけを 1 本ずつ作ること
 - `assert_ir_form_decode` が「数値は合うが静かに壊れた」形を**実際に検出**すること
@@ -23,6 +24,7 @@ transformers を要するケースだけ `importorskip` で SKIP する（既定
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import os
 from dataclasses import replace
@@ -78,138 +80,219 @@ OWNER_LAYERS = len(DECODE_LAYER_TYPES) - KV_SHARED_LAYERS
 
 DEPTHS = {gx.SLIDING_ATTENTION: SLIDING_DEPTH, gx.FULL_ATTENTION: FULL_DEPTH}
 
-#: tiny な RoPE 表の位置数（{@link decode.assert_rope_table_matches} の probe が 17 と
-#: `positions - 1` を踏むので 18 以上が要る）。
-TINY_POSITIONS = 32
+#: tiny な模型が宣言する位置の上限（実物の 131,072 とは別の数 — 写経していれば落ちる）。
+TINY_MAX_POSITION = 256
+
+#: tiny な RoPE の宣言（sliding は全周波数・full は `proportional` で半分だけ回る）。
+TINY_ROPE_PARAMETERS = {
+    gx.SLIDING_ATTENTION: {"rope_type": "default", "rope_theta": 10000.0},
+    gx.FULL_ATTENTION: {
+        "rope_type": "proportional",
+        "rope_theta": 1000000.0,
+        "partial_rotary_factor": 0.25,
+    },
+}
 
 TINY_IR_CONFIG = SimpleNamespace(
     num_attention_heads=HEADS,
     num_key_value_heads=KV_HEADS,
+    hidden_size=HIDDEN,
     head_dim=SLIDING_DEPTH,
     global_head_dim=FULL_DEPTH,
     num_hidden_layers=len(DECODE_LAYER_TYPES),
     num_kv_shared_layers=KV_SHARED_LAYERS,
     layer_types=list(DECODE_LAYER_TYPES),
     sliding_window=WINDOW,
+    max_position_embeddings=TINY_MAX_POSITION,
+    rope_parameters=dict(TINY_ROPE_PARAMETERS),
 )
+
+#: tiny な層種別ごとの RoPE の式（合成 IR の入力幅と、ラッパ呼び出しの派生入力に使う）。
+TINY_ROPE_SPECS = decode.rope_specs(TINY_IR_CONFIG)
 
 #: 正例の格納内訳（i8 = embedding 系 / i4 = linear のダミー本数）。
 STORAGE_COUNTS = {"i8": 4, "i4": 9}
 
 
-# ---- RoPE 表引き -----------------------------------------------------------
+# ---- RoPE の受け渡し口 -----------------------------------------------------
 
 
-class _StubRotary(nn.Module):
-    """`Gemma4TextRotaryEmbedding` の呼び出し規約だけを持つ被験体。
-
-    値は**位置と layer_type だけの決定的な関数**（表引きで厳密に再現できる形）。`x` は
-    dtype / device のためだけに受ける引数で、上流実装と同じく値は読まない。
-    """
-
-    def __init__(self, depths: dict[str, int]) -> None:
-        super().__init__()
-        self.depths = depths
-        self.offsets = {name: index + 1 for index, name in enumerate(sorted(depths))}
-
-    def angles(self, position_ids: torch.Tensor, layer_type: str) -> torch.Tensor:
-        depth = self.depths[layer_type]
-        scale = torch.arange(depth, dtype=torch.float32) * 0.017 + 0.31 * self.offsets[layer_type]
-        return position_ids.unsqueeze(-1).to(torch.float32) * scale
-
-    def forward(self, x: torch.Tensor, position_ids: torch.Tensor, layer_type: str | None = None):
-        del x
-        angles = self.angles(position_ids, layer_type)
-        return angles.cos(), angles.sin()
+def _rope_of(layer_type: str, part: str, args: tuple[torch.Tensor, ...]) -> torch.Tensor:
+    """派生入力 4 本から 1 本を綴りで引く（並びの前提を書き下さない）。"""
+    return args[decode.ROPE_INPUTS.index(decode.rope_input_name(layer_type, part))]
 
 
-class _LengthDependentRotary(_StubRotary):
-    """位置**以外**（系列長）にも依存する rotary — 表引きでは原理的に再現できない被験体。"""
+class TestRopeInputNames:
+    def test_the_names_and_order_are_the_forward_argument_names(self):
+        """MUST: torch.export はラッパの引数名をグラフ入力名に採る — 綴りがずれれば束ねられない。"""
+        parameters = list(inspect.signature(decode.DecodeChunkWrapper.forward).parameters)
 
-    def forward(self, x: torch.Tensor, position_ids: torch.Tensor, layer_type: str | None = None):
-        del x
-        angles = self.angles(position_ids, layer_type) + float(position_ids.shape[1])
-        return angles.cos(), angles.sin()
+        assert parameters[1] == decode.INPUT_IDS
+        assert tuple(parameters[2:]) == decode.ROPE_INPUTS
+
+    def test_the_names_are_the_ones_the_distribution_recipe_expects(self):
+        """配布 recipe は torch を読まない側に写しを持つ（同値をここで突き合わせる）。"""
+        from gemma4.distribution import GEMMA4_ROPE_INPUTS
+
+        assert decode.ROPE_INPUTS == GEMMA4_ROPE_INPUTS
+
+    def test_the_layer_type_order_is_the_config_order(self):
+        """並びは `config.layer_types` の出現順（先頭は sliding）。"""
+        assert decode.unique_layer_types(TINY_IR_CONFIG) == decode.ROPE_LAYER_TYPES
 
 
-@pytest.fixture
-def probe() -> torch.Tensor:
-    """rotary が dtype / device を読むためのダミー入力。"""
-    return torch.zeros(1, 1, HIDDEN, dtype=torch.float32)
+class TestRopeSpecs:
+    def test_it_derives_the_width_of_each_layer_type(self):
+        assert TINY_ROPE_SPECS[gx.SLIDING_ATTENTION].head_dim == SLIDING_DEPTH
+        assert TINY_ROPE_SPECS[gx.FULL_ATTENTION].head_dim == FULL_DEPTH
+        # `proportional` は 2 × int(0.25 × 32 // 2) = 8 本だけが回る。
+        assert TINY_ROPE_SPECS[gx.FULL_ATTENTION].rotary_dim == 8
 
+    def test_a_width_that_disagrees_with_the_attention_head_dim_fails_loudly(self):
+        """MUST: rotary の head_dim の引き先がずれると表と attention の幅が食い違う。
 
-class TestRopeTable:
-    def test_the_lookup_reproduces_the_reference_for_every_layer_type(self, probe):
-        rotary = _StubRotary(DEPTHS)
-
-        table = decode.build_rope_table(rotary, probe, TINY_POSITIONS, tuple(DEPTHS))
-
-        # 例外が出なければ全 probe × 全 layer_type で torch.equal（値・shape・dtype の一致）。
-        decode.assert_rope_table_matches(rotary, table, probe, TINY_POSITIONS, tuple(DEPTHS))
-        for layer_type, depth in DEPTHS.items():
-            cos, sin = table.tables_for(layer_type)
-            assert cos.shape == (TINY_POSITIONS, depth)
-            assert sin.shape == (TINY_POSITIONS, depth)
-
-    def test_an_unknown_layer_type_fails_loudly(self, probe):
-        """MUST: 既定の表へ落とすと「full 層が sliding の周波数で回る」形が黙って通る。"""
-        rotary = _StubRotary(DEPTHS)
-        table = decode.build_rope_table(rotary, probe, TINY_POSITIONS, (gx.SLIDING_ATTENTION,))
-
-        with pytest.raises(KeyError, match=gx.FULL_ATTENTION):
-            table.tables_for(gx.FULL_ATTENTION)
-
-    def test_a_reference_that_is_not_a_function_of_position_is_rejected(self, probe):
-        """MUST: 表で表せない実装を黙って表に落とすと、値が「それらしく」ずれる。"""
-        rotary = _LengthDependentRotary(DEPTHS)
-        table = decode.build_rope_table(rotary, probe, TINY_POSITIONS, tuple(DEPTHS))
-
-        with pytest.raises(AssertionError, match="表の引き方がずれている"):
-            decode.assert_rope_table_matches(rotary, table, probe, TINY_POSITIONS, tuple(DEPTHS))
-
-    def test_a_shifted_table_is_rejected(self, probe):
-        """故障注入: 表を 1 行ずらすと突合が落ちる（= 上の緑が恒真でないことの裏取り）。"""
-        rotary = _StubRotary(DEPTHS)
-        table = decode.build_rope_table(rotary, probe, TINY_POSITIONS, tuple(DEPTHS))
-        shifted = decode.RopeTable(
-            {
-                layer_type: (cos.roll(1, 0), sin)
-                for layer_type, (cos, sin) in ((name, table.tables_for(name)) for name in DEPTHS)
-            }
-        )
-
-        with pytest.raises(AssertionError, match="表の引き方がずれている"):
-            decode.assert_rope_table_matches(rotary, shifted, probe, TINY_POSITIONS, tuple(DEPTHS))
-
-    def test_a_table_built_for_the_wrong_layer_type_is_rejected(self, probe):
-        """故障注入: 層種別の組を入れ替えると突合が落ちる（dispatch が効いていることの裏取り）。
-
-        NOTE: 幅が違う（16 / 32）ので shape で落ちる — 実物の 256 / 512 も同じ関係にある。
+        上流が `global_head_dim` を読むのは full 層かつ `proportional` のときだけなので、
+        rope_type を `default` に落とすと表だけが `head_dim`（16）幅になる — attention は
+        `global_head_dim`（32）のままで、宣言は書けるのに噛み合わない形が作れる。
         """
-        rotary = _StubRotary(DEPTHS)
-        table = decode.build_rope_table(rotary, probe, TINY_POSITIONS, tuple(DEPTHS))
-        swapped = decode.RopeTable(
-            {
-                gx.SLIDING_ATTENTION: table.tables_for(gx.FULL_ATTENTION),
-                gx.FULL_ATTENTION: table.tables_for(gx.SLIDING_ATTENTION),
-            }
-        )
+        parameters = {
+            **TINY_ROPE_PARAMETERS,
+            gx.FULL_ATTENTION: {"rope_type": "default", "rope_theta": 1000000.0},
+        }
+        derived = SimpleNamespace(**{**vars(TINY_IR_CONFIG), "rope_parameters": parameters})
 
-        with pytest.raises(AssertionError, match="元実装は"):
-            decode.assert_rope_table_matches(rotary, swapped, probe, TINY_POSITIONS, tuple(DEPTHS))
+        with pytest.raises(AssertionError, match="attention の head_dim"):
+            decode.rope_specs(derived)
 
-    def test_the_swap_leaves_the_model_untouched_when_the_check_fails(self, probe):
-        """MUST: 突合の失敗で模型が半端な状態（表引きだが値が違う）に残らない。"""
-        model = SimpleNamespace(
-            model=SimpleNamespace(rotary_emb=_LengthDependentRotary(DEPTHS)),
-            config=SimpleNamespace(hidden_size=HIDDEN, layer_types=list(DECODE_LAYER_TYPES)),
-        )
-        original = model.model.rotary_emb
 
-        with pytest.raises(AssertionError):
-            decode.swap_rope_table(model, TINY_POSITIONS)
+class TestRopeArgs:
+    def test_it_builds_one_pair_per_layer_type_with_the_declared_width(self):
+        args = decode.rope_args(TINY_ROPE_SPECS, torch.arange(5).unsqueeze(0))
 
-        assert model.model.rotary_emb is original
+        assert len(args) == len(decode.ROPE_INPUTS)
+        widths = ((gx.SLIDING_ATTENTION, SLIDING_DEPTH), (gx.FULL_ATTENTION, FULL_DEPTH))
+        for layer_type, depth in widths:
+            for part in decode.ROPE_PARTS:
+                table = _rope_of(layer_type, part, args)
+                assert tuple(table.shape) == (1, 5, depth)
+                assert table.dtype is torch.float32
+
+    def test_the_rows_follow_the_positions_it_was_given(self):
+        """MUST: 位置の値で組む（並びではない）— decode の `pastLength + row` が非 0 始まり。"""
+        offset = decode.rope_args(TINY_ROPE_SPECS, torch.tensor([[3, 4]]))
+        contiguous = decode.rope_args(TINY_ROPE_SPECS, torch.arange(5).unsqueeze(0))
+
+        for part in decode.ROPE_PARTS:
+            shifted = _rope_of(gx.SLIDING_ATTENTION, part, offset)
+            whole = _rope_of(gx.SLIDING_ATTENTION, part, contiguous)
+            assert torch.equal(shifted[0], whole[0, 3:5])
+
+    def test_position_zero_is_the_identity_rotation(self):
+        args = decode.rope_args(TINY_ROPE_SPECS, torch.zeros(1, 1, dtype=torch.int64))
+
+        assert torch.equal(_rope_of(gx.FULL_ATTENTION, "cos", args)[0, 0], torch.ones(FULL_DEPTH))
+        assert torch.equal(_rope_of(gx.FULL_ATTENTION, "sin", args)[0, 0], torch.zeros(FULL_DEPTH))
+
+    def test_a_missing_layer_type_fails_loudly(self):
+        with pytest.raises(AssertionError, match="RoPE の式が無い"):
+            decode.rope_args(
+                {gx.SLIDING_ATTENTION: TINY_ROPE_SPECS[gx.SLIDING_ATTENTION]},
+                torch.arange(3).unsqueeze(0),
+            )
+
+
+class TestRopeInputs:
+    def test_it_returns_the_bound_tables_untouched(self):
+        """受け口は値を触らない（渡された実体そのものが返る）。"""
+        receiver = decode.RopeInputs((gx.SLIDING_ATTENTION, gx.FULL_ATTENTION))
+        sliding = (torch.zeros(1, 2, SLIDING_DEPTH), torch.ones(1, 2, SLIDING_DEPTH))
+        full = (torch.full((1, 2, FULL_DEPTH), 3.0), torch.full((1, 2, FULL_DEPTH), 4.0))
+
+        with receiver.bound({gx.SLIDING_ATTENTION: sliding, gx.FULL_ATTENTION: full}):
+            got = receiver(torch.zeros(1, 1, HIDDEN), torch.zeros(1, 2), gx.FULL_ATTENTION)
+
+        assert got[0] is full[0] and got[1] is full[1]
+
+    def test_it_dispatches_on_the_layer_type(self):
+        """MUST: sliding の組で full 層を回す形（幅も周波数も別物）が黙って通らない。"""
+        receiver = decode.RopeInputs((gx.SLIDING_ATTENTION, gx.FULL_ATTENTION))
+        sliding = (torch.zeros(1, 2, SLIDING_DEPTH), torch.zeros(1, 2, SLIDING_DEPTH))
+        full = (torch.ones(1, 2, FULL_DEPTH), torch.ones(1, 2, FULL_DEPTH))
+
+        with receiver.bound({gx.SLIDING_ATTENTION: sliding, gx.FULL_ATTENTION: full}):
+            narrow = receiver(torch.zeros(1), torch.zeros(1), gx.SLIDING_ATTENTION)
+
+        assert narrow[0].shape[-1] == SLIDING_DEPTH
+
+    def test_the_binding_is_released_after_the_call(self):
+        """MUST: 持ち越すと次の呼び出しが**前の位置の表**で回る（形も型も合ったまま）。"""
+        receiver = decode.RopeInputs((gx.SLIDING_ATTENTION,))
+        tables = {gx.SLIDING_ATTENTION: (torch.zeros(1), torch.zeros(1))}
+
+        with receiver.bound(tables):
+            pass
+
+        with pytest.raises(KeyError, match="束ねられていない"):
+            receiver(torch.zeros(1), torch.zeros(1), gx.SLIDING_ATTENTION)
+
+    def test_the_binding_is_released_even_when_the_body_raises(self):
+        receiver = decode.RopeInputs((gx.SLIDING_ATTENTION,))
+        tables = {gx.SLIDING_ATTENTION: (torch.zeros(1), torch.zeros(1))}
+
+        with pytest.raises(RuntimeError), receiver.bound(tables):
+            raise RuntimeError("途中で落ちる")
+
+        with pytest.raises(KeyError, match="束ねられていない"):
+            receiver(torch.zeros(1), torch.zeros(1), gx.SLIDING_ATTENTION)
+
+    def test_an_incomplete_binding_fails_loudly(self):
+        """MUST: 宣言した層種別が 1 つでも欠けたら束ねる時点で落とす。"""
+        receiver = decode.RopeInputs((gx.SLIDING_ATTENTION, gx.FULL_ATTENTION))
+
+        with (
+            pytest.raises(KeyError, match=gx.FULL_ATTENTION),
+            receiver.bound({gx.SLIDING_ATTENTION: (torch.zeros(1), torch.zeros(1))}),
+        ):
+            pass
+
+    def test_an_unknown_layer_type_fails_loudly(self):
+        receiver = decode.RopeInputs((gx.SLIDING_ATTENTION,))
+
+        with (
+            receiver.bound({gx.SLIDING_ATTENTION: (torch.zeros(1), torch.zeros(1))}),
+            pytest.raises(KeyError, match=gx.FULL_ATTENTION),
+        ):
+            receiver(torch.zeros(1), torch.zeros(1), gx.FULL_ATTENTION)
+
+    def test_it_carries_no_parameters_or_buffers(self):
+        """MUST: 表はもう配布物に入らない（initializer が残ると位置上限が資産へ戻る）。"""
+        receiver = decode.RopeInputs((gx.SLIDING_ATTENTION, gx.FULL_ATTENTION))
+
+        assert list(receiver.parameters()) == []
+        assert list(receiver.buffers()) == []
+
+
+class TestBoundRope:
+    def test_it_pairs_each_layer_type_with_its_own_cos_and_sin(self):
+        """MUST: cos と sin の取り違えは形も型も合う（綴りを 1 箇所に閉じる理由）。"""
+        sliding_cos, sliding_sin = torch.zeros(1), torch.ones(1)
+        full_cos, full_sin = torch.full((1,), 2.0), torch.full((1,), 3.0)
+
+        tables = decode.bound_rope(sliding_cos, sliding_sin, full_cos, full_sin)
+
+        assert tables[gx.SLIDING_ATTENTION] == (sliding_cos, sliding_sin)
+        assert tables[gx.FULL_ATTENTION] == (full_cos, full_sin)
+
+
+class TestMaxPosition:
+    def test_it_reads_the_model_declaration(self):
+        assert decode.max_position(TINY_IR_CONFIG) == TINY_MAX_POSITION
+
+    def test_a_non_positive_declaration_fails_loudly(self):
+        derived = SimpleNamespace(**{**vars(TINY_IR_CONFIG), "max_position_embeddings": 0})
+
+        with pytest.raises(AssertionError, match="max_position_embeddings"):
+            decode.max_position(derived)
 
 
 # ---- KV 共有の割り付け -----------------------------------------------------
@@ -284,10 +367,17 @@ def _pre_surgery_graph(
     }
     graph = IrGraph(symbols=[decode.SEQ_SYMBOL])
     graph.inputs.append(IrInput(name=decode.INPUT_IDS, dtype="i32", shape=[1, "M"]))
-    graph.inputs.append(IrInput(name=decode.POSITION_IDS, dtype="i32", shape=[1, "M"]))
+    for layer_type in decode.ROPE_LAYER_TYPES:
+        for part in decode.ROPE_PARTS:
+            graph.inputs.append(
+                IrInput(
+                    name=decode.rope_input_name(layer_type, part),
+                    dtype="f32",
+                    shape=[1, "M", TINY_ROPE_SPECS[layer_type].head_dim],
+                )
+            )
     for name, shape in (
         ("tok.table", [VOCAB, HIDDEN]),
-        ("rope.cos", [TINY_POSITIONS, SLIDING_DEPTH]),
         ("mask.table", [1, 1, TINY_SYM_MAX, TINY_SYM_MAX]),
     ):
         graph.initializers[name] = IrInitializer(
@@ -296,13 +386,9 @@ def _pre_surgery_graph(
         graph.values[name] = IrValue(dtype="f32", shape=shape)
 
     graph.values["h"] = IrValue(dtype="f32", shape=[1, "M", HIDDEN])
-    graph.values["cos"] = IrValue(dtype="f32", shape=[1, "M", SLIDING_DEPTH])
     graph.values["mask"] = IrValue(dtype="f32", shape=[1, 1, "M", "M"])
     graph.nodes.append(
         IrNode(op="embedding", ins=["tok.table", decode.INPUT_IDS], outs=["h"], attrs={})
-    )
-    graph.nodes.append(
-        IrNode(op="embedding", ins=["rope.cos", decode.POSITION_IDS], outs=["cos"], attrs={})
     )
     graph.nodes.append(
         IrNode(
@@ -312,17 +398,21 @@ def _pre_surgery_graph(
             attrs={"sym": "M", "slices": [{"dim": 2, "coeff": 1, "offset": 0}]},
         )
     )
+    # MUST: 派生入力 4 本を**全部**読む形にする（手術は到達不能になった入力を拒否する —
+    # 実物では各層の q / k が自分の層種の cos と sin を両方読む）。
     for layer, layer_type in enumerate(layer_types):
         depth = DEPTHS[layer_type]
         source = "h" if layer == 0 else f"attn{layer - 1}"
+        cos = decode.rope_input_name(layer_type, "cos")
+        sin = decode.rope_input_name(layer_type, "sin")
         graph.values[f"q{layer}"] = IrValue(dtype="f32", shape=[1, HEADS, "M", depth])
-        graph.nodes.append(IrNode(op="mul", ins=[source, "cos"], outs=[f"q{layer}"], attrs={}))
+        graph.nodes.append(IrNode(op="mul", ins=[source, cos], outs=[f"q{layer}"], attrs={}))
         owner = layer if layer < boundary else owners[layer_type]
         if owner == layer:
-            for slot in ("k", "v"):
+            for slot, table in (("k", sin), ("v", cos)):
                 name = f"{slot}{layer}"
                 graph.values[name] = IrValue(dtype="f32", shape=[1, kv_heads, "M", depth])
-                graph.nodes.append(IrNode(op="mul", ins=[source, "cos"], outs=[name], attrs={}))
+                graph.nodes.append(IrNode(op="mul", ins=[source, table], outs=[name], attrs={}))
         graph.values[f"attn{layer}"] = IrValue(dtype="f32", shape=[1, HEADS, "M", depth])
         graph.nodes.append(
             IrNode(
@@ -470,11 +560,16 @@ class TestAssertIrFormDecode:
             )
 
     def test_a_head_dim_from_the_wrong_layer_type_is_rejected(self):
-        """MUST: D は層種別で引く（sliding 層に global_head_dim が来たら落ちる）。"""
-        derived = SimpleNamespace(**{**vars(TINY_IR_CONFIG), "head_dim": FULL_DEPTH})
+        """MUST: D は層種別で引く（sliding 層の q に full の幅が来たら落ちる）。
+
+        故障注入はグラフ側の宣言 shape で掛ける — config の `head_dim` を動かすと RoPE 派生
+        入力の幅の門（{@link decode.assert_rope_inputs}）が先に落ちて、この検査を踏まない。
+        """
+        graph = _surgical_graph()
+        graph.values["q0"] = replace(graph.values["q0"], shape=[1, HEADS, "M", FULL_DEPTH])
 
         with pytest.raises(AssertionError, match="head_dim"):
-            decode.assert_ir_form_decode(_surgical_graph(), derived, STORAGE_COUNTS)
+            decode.assert_ir_form_decode(graph, TINY_IR_CONFIG, STORAGE_COUNTS)
 
     def test_a_window_on_a_full_layer_is_rejected(self):
         """全 context の full 層に window が付くと、窓外の過去を黙って切り捨てる。"""
@@ -685,9 +780,15 @@ class TestCaseRoom:
         with pytest.raises(AssertionError, match="RoPE 表の位置数"):
             shared.assert_case_room([("case", torch.zeros(1, 11, dtype=torch.int64))], 6, 16)
 
-    def test_the_real_long_case_fits_the_table(self):
-        """長ケース（T=598）+ K=16 が表に収まること — 定数を動かしたときの気づき線。"""
-        assert 598 + decode.GREEDY_STEPS <= decode.ROPE_TABLE_POSITIONS
+    def test_the_real_long_case_fits_the_shipped_capacity(self):
+        """長ケース（T=598）+ K=16 が**配布形の既定容量**に収まること — 定数の気づき線。
+
+        位置の上限はモデルの宣言（E2B は 131,072）になったので、golden が現実に触れる制約は
+        「既定の会話容量に収まるか」だけになった（`gemma4.distribution.GEMMA4_CAPACITY`）。
+        """
+        from gemma4.distribution import GEMMA4_CAPACITY
+
+        assert 598 + decode.GREEDY_STEPS <= GEMMA4_CAPACITY
 
 
 class TestGreedyCases:
@@ -749,7 +850,7 @@ def tiny_wrapper():
         ]
     )
     del model.model.embed_tokens_per_layer
-    decode.swap_rope_table(model, TINY_POSITIONS)
+    decode.swap_rope_inputs(model)
     return decode.DecodeChunkWrapper(model, tables).eval()
 
 
@@ -768,10 +869,12 @@ class TestExportedDecodeForm:
         int8, int4, scales = gx.quantize_wrapper(tiny_wrapper)
         ids = torch.randint(0, VOCAB, (1, WINDOW + 3), dtype=torch.int64)
         seq = Dim(decode.SEQ_SYMBOL, min=2, max=TINY_SYM_MAX)
+        specs = decode.rope_specs(tiny_wrapper.model.config)
+        args, shapes = decode._export_args(decode.DECODE, ids, seq, specs)
         graph, tensors = export_module(
             tiny_wrapper,
-            (ids, decode.positions_for(ids)),
-            dynamic_shapes=({1: seq}, {1: seq}),
+            args,
+            dynamic_shapes=shapes,
             symbol_names=(decode.SEQ_SYMBOL,),
             preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
         )
@@ -783,10 +886,7 @@ class TestExportedDecodeForm:
             tmp_path / gx.MODEL_FILE,
             weight_dtype="i8",
             weight_scales=scales,
-            weight_dtype_overrides={
-                **dict.fromkeys(int4.scales, "i4"),
-                **dict.fromkeys(decode.rope_table_keys(tiny_wrapper), "f32"),
-            },
+            weight_dtype_overrides=dict.fromkeys(int4.scales, "i4"),
         )
         storage = {"i8": len(int8.scales), "i4": len(int4.scales)}
         return SimpleNamespace(pre=graph, verified=verified, config=config, storage=storage)
@@ -801,7 +901,7 @@ class TestExportedDecodeForm:
         assert form["kv_owners"] == {gx.SLIDING_ATTENTION: 1, gx.FULL_ATTENTION: 2}
         assert [spec.name for spec in tiny_container.verified.inputs] == [
             decode.INPUT_IDS,
-            decode.POSITION_IDS,
+            *decode.ROPE_INPUTS,
         ]
         assert sorted(tiny_container.verified.symbols) == [
             decode.CAPACITY_SYMBOL,
@@ -815,32 +915,22 @@ class TestExportedDecodeForm:
         assert gx.SYM_PREFIX_SLICE_OP in tiny_container.pre.required_ops
         assert gx.SYM_PREFIX_SLICE_OP not in tiny_container.verified.required_ops
 
-    def test_the_rope_is_a_table_lookup_not_folded_trig(self, tiny_container):
-        """位置が入力になった以上、RoPE は畳み込みでなく `embedding` で引かれていること。"""
-        readers = [
-            node
-            for node in tiny_container.verified.nodes
-            if node.op == "embedding" and decode.POSITION_IDS in node.ins
-        ]
+    def test_the_rope_arrives_as_graph_inputs_with_no_table_left(self, tiny_container):
+        """位置がグラフから消えた以上、RoPE は入力そのもので、表も三角関数も残らない。
 
-        # 層種別 2 組 × cos / sin
-        assert len(readers) == 4
-        assert "sin" not in tiny_container.verified.required_ops
-
-    def test_the_rope_tables_stay_f32(self, tiny_container, tiny_wrapper):
-        """MUST: 表引きの cos / sin は既定 i8 の**適格に入る**ので f32 を明示して外す。
-
-        外さないと「重みスロット適格なのに scale が無い」で書き出しごと落ちる（実測）。
-        丸めて通す形も採らない — 位置表の誤差は位置に沿って効く。
+        MUST: `sin` の不在まで見る（畳み残した RoPE の唯一の到達しうる残骸 — `cos` は IR
+        語彙に無いので、残っていれば export 自体が落ちる）。
         """
-        stored = {
-            init.tensor: init.storage.dtype
-            for init in tiny_container.verified.initializers.values()
-        }
-        keys = decode.rope_table_keys(tiny_wrapper)
+        verified = tiny_container.verified
 
-        assert len(keys) == 2 * len(DEPTHS)
-        assert {stored[key] for key in keys} == {"f32"}
+        assert [spec.name for spec in verified.inputs][1:] == list(decode.ROPE_INPUTS)
+        assert "sin" not in verified.required_ops
+        assert not [
+            name for name, init in verified.initializers.items() if "rotary_emb." in init.tensor
+        ]
+        # 位置表の gather が消えたので `embedding` は主 embedding + PLE 分割ぶんだけ。
+        readers = [node for node in verified.nodes if node.op == "embedding"]
+        assert len(readers) == 1 + len(DECODE_LAYER_TYPES)
 
     def test_every_linear_weight_is_stored_as_int4(self, tiny_container):
         """MUST: 手術で刈られた重みがあれば i4 の本数が合わない（黙って f32 で残る形の検出線）。"""
@@ -870,17 +960,19 @@ class TestExportedDecodeForm:
         monkeypatch.setattr(gx, "additive_sliding_mask", spy("band", gx.additive_sliding_mask))
         ids = torch.randint(0, VOCAB, (1, WINDOW + 3), dtype=torch.int64)
 
+        specs = decode.rope_specs(tiny_wrapper.model.config)
         with torch.no_grad():
-            tiny_wrapper(ids, decode.positions_for(ids))
+            tiny_wrapper(ids, *decode.rope_args(specs, decode.positions_for(ids)))
 
         assert seen == [("causal", WINDOW + 3), ("band", WINDOW + 3, WINDOW)]
 
     def test_the_wrapper_returns_logits_and_the_greedy_token(self, tiny_wrapper):
         """MUST: 出力順は `[logits, token]`（ランタイムは slot 番号で読む）。"""
         ids = torch.randint(0, VOCAB, (1, 5), dtype=torch.int64)
+        specs = decode.rope_specs(tiny_wrapper.model.config)
 
         with torch.no_grad():
-            logits, token = tiny_wrapper(ids, decode.positions_for(ids))
+            logits, token = tiny_wrapper(ids, *decode.rope_args(specs, decode.positions_for(ids)))
 
         assert logits.shape == (1, 5, VOCAB)
         assert token.shape == (1, 5, 1)
@@ -894,10 +986,12 @@ class TestExportedDecodeForm:
         """
         ids = torch.randint(0, VOCAB, (1, WINDOW + 3), dtype=torch.int64)
         seq = Dim(decode.SEQ_SYMBOL, min=2, max=TINY_SYM_MAX)
+        specs = decode.rope_specs(tiny_wrapper.model.config)
+        args, shapes = decode._export_args(decode.DECODE, ids, seq, specs)
         graph, _ = export_module(
             tiny_wrapper,
-            (ids, decode.positions_for(ids)),
-            dynamic_shapes=({1: seq}, {1: seq}),
+            args,
+            dynamic_shapes=shapes,
             symbol_names=(decode.SEQ_SYMBOL,),
             preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
         )
@@ -997,25 +1091,30 @@ class TestExportArgs:
     def seq(self):
         return Dim(decode.SEQ_SYMBOL, min=2, max=TINY_SYM_MAX)
 
-    def test_the_logits_form_traces_ids_and_positions(self, seq):
+    def test_the_logits_form_traces_ids_and_the_rope_inputs(self, seq):
         ids = torch.zeros(1, 5, dtype=torch.int64)
 
-        args, shapes = decode._export_args(decode.DECODE, ids, seq)
+        args, shapes = decode._export_args(decode.DECODE, ids, seq, TINY_ROPE_SPECS)
 
-        assert len(args) == 2
-        assert torch.equal(args[1], torch.arange(5).unsqueeze(0))
-        assert shapes == ({1: seq}, {1: seq})
+        assert len(args) == 1 + len(decode.ROPE_INPUTS)
+        # 例示の位置は無 pad 全長の `arange`（RoPE の行がそのまま位置に対応する）。
+        assert torch.equal(
+            _rope_of(gx.SLIDING_ATTENTION, "cos", args[1:]),
+            decode.rope_args(TINY_ROPE_SPECS, torch.arange(5).unsqueeze(0))[0],
+        )
+        # 行数は chunk 行数と同じ記号（別記号にすると行数の違う表を渡せる形が宣言できる）。
+        assert shapes == tuple({1: seq} for _ in args)
 
     def test_the_token_only_form_adds_the_last_row_as_a_static_input(self, seq):
         """MUST: `last_row` は最終有効行 T−1 を指し、記号次元を持たない（M と紐づけない）。"""
         ids = torch.zeros(1, 5, dtype=torch.int64)
 
-        args, shapes = decode._export_args(token_only.VARIANT, ids, seq)
+        args, shapes = decode._export_args(token_only.VARIANT, ids, seq, TINY_ROPE_SPECS)
 
-        assert len(args) == 3
-        assert args[2].tolist() == [4]
-        assert args[2].dtype is torch.int64
-        assert shapes[2] is None
+        assert len(args) == 2 + len(decode.ROPE_INPUTS)
+        assert args[-1].tolist() == [4]
+        assert args[-1].dtype is torch.int64
+        assert shapes[-1] is None
 
 
 @pytest.fixture
@@ -1046,12 +1145,13 @@ class TestLoadWrapper:
         [decode.DECODE, token_only.VARIANT],
         ids=["logits", "token-only"],
     )
-    def test_it_builds_the_variant_wrapper_on_a_table_rope(self, variant, tiny_materials):
+    def test_it_builds_the_variant_wrapper_on_a_host_rope(self, variant, tiny_materials):
         """variant で変わるのはラッパ型だけ（素材の読み方と RoPE の差し替えは共通）。"""
-        wrapper = decode.load_wrapper(variant, Path("unused"), positions=TINY_POSITIONS)
+        wrapper = decode.load_wrapper(variant, Path("unused"))
 
         assert type(wrapper) is variant.wrapper
-        assert isinstance(wrapper.model.model.rotary_emb, decode.RopeTable)
+        assert isinstance(wrapper.model.model.rotary_emb, decode.RopeInputs)
+        assert wrapper.model.model.rotary_emb.layer_types == decode.ROPE_LAYER_TYPES
         # 検査席の PLE 表は落ちている（量子化の対象網羅の条件 — 1-shot 台本と同文）。
         assert not hasattr(wrapper.model.model, "embed_tokens_per_layer")
         assert not wrapper.training
@@ -1168,7 +1268,6 @@ class TestExportSeries:
             tmp_path / "unused",
             out_dir,
             sym_max=TINY_SYM_MAX,
-            positions=TINY_POSITIONS,
             steps=1,
         )
 
@@ -1198,7 +1297,6 @@ class TestExportSeries:
             tiny_series.checkpoint,
             out_dir,
             sym_max=TINY_SYM_MAX,
-            positions=TINY_POSITIONS,
             reference=tiny_series.reference,
         )
 
@@ -1220,7 +1318,6 @@ class TestExportSeries:
             tiny_series.checkpoint,
             out_dir,
             sym_max=TINY_SYM_MAX,
-            positions=TINY_POSITIONS,
             reference=tiny_series.reference,
         )
 
@@ -1250,7 +1347,6 @@ class TestExportSeries:
                 tiny_series.checkpoint,
                 out_dir,
                 sym_max=TINY_SYM_MAX,
-                positions=TINY_POSITIONS,
                 reference=tiny_series.reference,
             )
 
@@ -1271,7 +1367,6 @@ class TestExportSeries:
                 tmp_path / "unused",
                 out_dir,
                 sym_max=TINY_SYM_MAX,
-                positions=TINY_POSITIONS,
                 steps=1,
             )
 

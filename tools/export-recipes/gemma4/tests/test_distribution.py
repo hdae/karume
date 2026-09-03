@@ -28,6 +28,7 @@ from gemma4.distribution import (
     GEMMA4_CAPACITY,
     GEMMA4_CHUNK_LENGTH,
     GEMMA4_DEFAULT_MODEL,
+    GEMMA4_MAX_CHUNK_LENGTH,
     GEMMA4_OUTPUT_PATHS,
     GEMMA4_PLE_INDEX_ROLE,
     GEMMA4_ROLE,
@@ -36,9 +37,11 @@ from gemma4.distribution import (
     Gemma4Sources,
     gemma4_plan,
     gemma4_repo_name,
+    gemma4_rope_input_name,
     gemma4_series_name,
     gemma4_sources,
 )
+from gemma4.rope import FULL_ATTENTION, SLIDING_ATTENTION
 from gemma4.tests import product_fixture as fixture
 from karume.dist import (
     MANIFEST_FILENAME,
@@ -48,7 +51,7 @@ from karume.dist import (
     verify_dist,
 )
 
-#: 合成の寸法で成立する実行時ノブ（実物は 32 / 640・合成の RoPE 表は 5 行）。
+#: 合成の寸法で成立する実行時ノブ（実物は 768 / 4096・合成の位置上限は 37）。
 SMALL_CHUNK = 2
 SMALL_CAPACITY = 4
 
@@ -57,8 +60,8 @@ SMALL_CAPACITY = 4
 def _small_runtime_knobs(monkeypatch: pytest.MonkeyPatch) -> None:
     """実行時ノブを合成の寸法へ寄せる（`capacity ≤ maxPosition` の門を素通りさせるため）。
 
-    実物の値そのままだと合成の RoPE 表（5 行）に対して容量 640 が外れる — その組み合わせ自体は
-    {@link TestGemma4Config.test_it_refuses_a_capacity_beyond_the_rope_table} が門として使う。
+    実物の値そのままだと合成の位置上限（37）に対して容量 4096 が外れる — その組み合わせ自体は
+    {@link TestGemma4Config.test_it_refuses_a_capacity_beyond_the_model_limit} が門として使う。
     """
     monkeypatch.setattr(gemma4_distribution, "GEMMA4_CHUNK_LENGTH", SMALL_CHUNK)
     monkeypatch.setattr(gemma4_distribution, "GEMMA4_CAPACITY", SMALL_CAPACITY)
@@ -168,11 +171,69 @@ class TestGemma4Layout:
 
 
 class TestGemma4Config:
-    """`pipelineConfig` の 4 欄 — 導出（`maxPosition` / `sampler`）と実行時ノブの関係。"""
+    """`pipelineConfig` の 5 欄 — 導出（`maxPosition` / `rope` / `sampler`）と実行時ノブの関係。"""
 
-    def test_it_derives_max_position_from_the_baked_rope_tables(self, gemma4_assembled) -> None:
+    def test_it_derives_max_position_from_the_upstream_declaration(self, gemma4_assembled) -> None:
+        """MUST: 写経しない — 出どころは上流 `text_config.max_position_embeddings` だけ。"""
         _, manifest = gemma4_assembled
-        assert _model(manifest)["pipelineConfig"]["maxPosition"] == fixture.POSITIONS
+        assert _model(manifest)["pipelineConfig"]["maxPosition"] == fixture.MAX_POSITION
+
+    def test_it_derives_the_rope_parameters_from_the_upstream_config(
+        self, gemma4_assembled
+    ) -> None:
+        """層種別ごとの theta / headDim / rotaryDim（full だけ `global_head_dim` を読む）。"""
+        _, manifest = gemma4_assembled
+
+        assert _model(manifest)["pipelineConfig"]["rope"] == {
+            SLIDING_ATTENTION: {
+                "theta": fixture.SLIDING_THETA,
+                "headDim": fixture.SLIDING_HEAD_DIM,
+                # `default` は全周波数が回る
+                "rotaryDim": fixture.SLIDING_HEAD_DIM,
+            },
+            FULL_ATTENTION: {
+                "theta": fixture.FULL_THETA,
+                "headDim": fixture.FULL_HEAD_DIM,
+                # `proportional`: 2 × int(0.5 × 8 // 2) = 4
+                "rotaryDim": 4,
+            },
+        }
+
+    def test_it_refuses_a_rope_type_it_cannot_mirror(self, tmp_path: Path) -> None:
+        """MUST: 式が別物なら落とす（ホストが宣言どおりに組めない表を配らない）。"""
+        text_config = json.loads(json.dumps(dict(fixture.TEXT_CONFIG)))
+        text_config["rope_parameters"][SLIDING_ATTENTION]["rope_type"] = "yarn"
+        sources = _sources(tmp_path)
+        fixture.write_series(
+            sources.product, sources.tokenizer, sources.model, text_config=text_config
+        )
+
+        with pytest.raises(DistError, match="rope_type"):
+            gemma4_plan(sources)
+
+    @pytest.mark.parametrize(
+        ("dropped", "message"),
+        [("max_position_embeddings", "max_position_embeddings"), ("layer_types", "layer_types")],
+    )
+    def test_it_refuses_a_checkpoint_config_without_the_declaration(
+        self, tmp_path: Path, dropped: str, message: str
+    ) -> None:
+        """MUST: 導出元が欠けたら落とす（既定へ落とすと配布形が勝手な数を名乗る）。"""
+        text_config = {key: value for key, value in fixture.TEXT_CONFIG.items() if key != dropped}
+        sources = _sources(tmp_path)
+        fixture.write_series(
+            sources.product, sources.tokenizer, sources.model, text_config=text_config
+        )
+
+        with pytest.raises(DistError, match=message):
+            gemma4_plan(sources)
+
+    def test_it_refuses_a_checkpoint_without_a_text_config(self, tmp_path: Path) -> None:
+        sources = _build(tmp_path)
+        (sources.model / "config.json").write_text(json.dumps({"model_type": "gemma4"}))
+
+        with pytest.raises(DistError, match="text_config"):
+            gemma4_plan(sources)
 
     def test_it_copies_the_upstream_sampler_recommendation(self, gemma4_assembled) -> None:
         """MUST: 値を写経しない（ADR 0083 決定 7 — 出どころは上流の宣言そのもの）。"""
@@ -189,14 +250,14 @@ class TestGemma4Config:
         assert config["chunkLength"] == SMALL_CHUNK
         assert config["capacity"] == SMALL_CAPACITY
 
-    def test_it_refuses_a_capacity_beyond_the_rope_table(
+    def test_it_refuses_a_capacity_beyond_the_model_limit(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """実物のノブ（容量 640）× 合成の位置表（5 行）— 長い会話でだけ落ちる形を焼かない。"""
+        """実物のノブ（容量 4096）× 合成の位置上限（37）— 長い会話でだけ落ちる形を焼かない。"""
         monkeypatch.setattr(gemma4_distribution, "GEMMA4_CHUNK_LENGTH", GEMMA4_CHUNK_LENGTH)
         monkeypatch.setattr(gemma4_distribution, "GEMMA4_CAPACITY", GEMMA4_CAPACITY)
         sources = _build(tmp_path)
-        with pytest.raises(DistError, match="RoPE 表の行数"):
+        with pytest.raises(DistError, match="モデルの位置上限"):
             gemma4_plan(sources)
 
     def test_it_refuses_a_capacity_below_one_chunk(
@@ -207,6 +268,33 @@ class TestGemma4Config:
         sources = _build(tmp_path)
         with pytest.raises(DistError, match="1 chunk すら入らない"):
             gemma4_plan(sources)
+
+    @pytest.mark.parametrize("chunk", [1, GEMMA4_MAX_CHUNK_LENGTH + 1])
+    def test_it_refuses_a_chunk_length_outside_the_traced_range(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, chunk: int
+    ) -> None:
+        """記号 `M` は trace 時に `[2, SYM_MAX]` で宣言される — その外は宣言できない。"""
+        monkeypatch.setattr(gemma4_distribution, "GEMMA4_CHUNK_LENGTH", chunk)
+        monkeypatch.setattr(gemma4_distribution, "GEMMA4_CAPACITY", 2048)
+        sources = _build(tmp_path)
+        with pytest.raises(DistError, match="chunkLength"):
+            gemma4_plan(sources)
+
+    def test_the_declared_knobs_are_inside_the_shipped_bounds(self) -> None:
+        """実物の宣言（768 / 4096）そのものが両方の上限の内側にあること。"""
+        assert 2 <= GEMMA4_CHUNK_LENGTH <= GEMMA4_MAX_CHUNK_LENGTH
+        assert GEMMA4_CHUNK_LENGTH <= GEMMA4_CAPACITY
+
+    def test_the_chunk_bound_mirrors_the_export_script(self) -> None:
+        """MUST: 記号 `M` の上限は焼く側（`gemma4.export.SYM_MAX`）と同じ数。
+
+        配布 recipe は torch を読まない（既定 sync の CI job で collection ごと落とさない）
+        ので写しを持つ。写しが古びると「trace の外の chunk 長を宣言した配布形」が通る。
+        """
+        pytest.importorskip("torch")
+        from gemma4.export import SYM_MAX
+
+        assert GEMMA4_MAX_CHUNK_LENGTH == SYM_MAX
 
 
 class TestGemma4Graph:
@@ -246,18 +334,32 @@ class TestGemma4Graph:
         with pytest.raises(DistError, match=r"\[1, 1, V\] でない"):
             gemma4_plan(sources)
 
-    def test_it_refuses_rope_tables_from_two_generations(self, tmp_path: Path) -> None:
-        """層種ごとに別世代の表が焼かれていれば、その層種だけが静かに別の角度で回る。"""
+    def test_it_refuses_rope_inputs_whose_width_is_not_the_declared_head_dim(
+        self, tmp_path: Path
+    ) -> None:
+        """宣言（config 由来）とグラフ（コンテナ由来）は別々に動く — 噛み合わせはここだけ。"""
         sources = _sources(tmp_path)
         fixture.write_series(
             sources.product,
             sources.tokenizer,
             sources.model,
             container=fixture.product_container(
-                rope_rows={fixture.ROPE_TABLES[0][0]: fixture.POSITIONS + 1}
+                head_dims={FULL_ATTENTION: fixture.FULL_HEAD_DIM + 2}
             ),
         )
-        with pytest.raises(DistError, match="RoPE 表の行数が揃っていない"):
+        with pytest.raises(DistError, match=gemma4_rope_input_name(FULL_ATTENTION, "cos")):
+            gemma4_plan(sources)
+
+    def test_it_refuses_a_graph_that_still_bakes_the_rope_tables(self, tmp_path: Path) -> None:
+        """派生入力も表も両方持つ形（外に出し切れていない世代）を落とす。"""
+        sources = _sources(tmp_path)
+        fixture.write_series(
+            sources.product,
+            sources.tokenizer,
+            sources.model,
+            container=fixture.product_container(baked_rope=True),
+        )
+        with pytest.raises(DistError, match="焼き込んだ RoPE 表"):
             gemma4_plan(sources)
 
     def test_it_refuses_a_graph_without_a_free_capacity_symbol(self, tmp_path: Path) -> None:
@@ -472,7 +574,7 @@ class TestGemma4Card:
         assert "upstream model card" in card
         assert "LICENSE.md" in card and "NOTICE.md" in card
         # 数は manifest から導出する（推奨サンプラも位置上限も本文に出る）。
-        assert str(fixture.POSITIONS) in card
+        assert str(fixture.MAX_POSITION) in card
         assert str(fixture.GENERATION_CONFIG["top_k"]) in card
 
     def test_it_refuses_to_describe_another_pipeline(self, gemma4_assembled) -> None:

@@ -100,9 +100,11 @@ def _gemma4_overview(manifest: Mapping[str, Any]) -> list[str]:
         "- **Per-layer embeddings are a sidecar, not graph weights.** They are gathered on the",
         "  host and handed to the graph as an input, which keeps them out of the GPU's resident",
         "  set; the loader reads only the vocabulary ranges a conversation actually touches.",
-        f"- **Context**: a conversation may run up to {config['capacity']} tokens"
-        f" (positions are baked up to {config['maxPosition']}); prefill runs in chunks of"
-        f" {config['chunkLength']} rows.",
+        f"- **Context**: the default capacity is {config['capacity']} tokens per conversation and",
+        f"  the loader accepts any capacity up to {config['maxPosition']} (the model's declared",
+        "  position limit); rotary cos/sin are generated on the host per chunk from the declared",
+        "  `rope` parameters, so no position table ships. Prefill runs in chunks of",
+        f"  {config['chunkLength']} rows by default.",
         "- **Not multimodal here.** The published checkpoint also carries vision and audio towers;",
         "  this distribution contains neither, and cannot take images or audio.",
         "- Not readable by transformers (it's a different container with an embedded graph); the",
@@ -208,9 +210,9 @@ def _gemma4_generation(model: Mapping[str, Any]) -> list[str]:
         "Derived from the exported graph and the checkpoint's own `generation_config.json`, and",
         "checked against each other when this repository was assembled.",
         "",
-        f"- **context**: up to {config['capacity']} tokens in one conversation"
-        f" (prompt + generated), with rotary tables baked for {config['maxPosition']} positions",
-        f"- **prefill chunk**: {config['chunkLength']} rows per step",
+        f"- **context**: {config['capacity']} tokens per conversation (prompt + generated) by"
+        f" default; any capacity up to {config['maxPosition']} can be chosen at load time",
+        f"- **prefill chunk**: {config['chunkLength']} rows per step by default",
         f"- **recommended sampler**: temperature {knob(sampler['temperature'])}, top-k"
         f" {knob(sampler['topK'])}, top-p {knob(sampler['topP'])} — used when a request omits",
         "  `sampler`; pass `{ temperature: 0 }` for greedy decoding",

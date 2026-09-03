@@ -8,7 +8,8 @@ gemma4 の門が読む形（full スロットの容量記号 `C` が **states �
 MUST: safetensors のバイト列も IR の規則も手で綴らない（`ir_fixtures` の同 MUST）— 規則の
 写しを持つと、規則が動いた日にフィクスチャだけが古びて「テストは緑・実物だけ落ちる」になる。
 
-MUST: **実物と違う数**にする（語彙 6・層 2・次元 3・位置 5）— 寸法を焼き込んでいれば落ちる。
+MUST: **実物と違う数**にする（語彙 6・層 2・次元 3・位置上限 37・headDim 4/8）— 寸法を
+焼き込んでいれば落ちる。
 """
 
 from __future__ import annotations
@@ -23,6 +24,12 @@ import numpy as np
 import torch
 from safetensors.numpy import save_file
 
+from gemma4.distribution import (
+    GEMMA4_ROPE_LAYER_TYPES,
+    GEMMA4_ROPE_PARTS,
+    gemma4_rope_input_name,
+)
+from gemma4.rope import FULL_ATTENTION, SLIDING_ATTENTION
 from karume.emit import write_model
 from karume.ir import IrGraph, IrInitializer, IrInput, IrNode, IrState, IrStorage, IrValue
 from karume.quantize import (
@@ -34,11 +41,42 @@ from karume.quantize import (
 )
 from karume.verify import verify_shards
 
-#: 合成の寸法（実物は 262144 / 35 / 256 / 1024）。
+#: 合成の寸法（実物は 262144 / 35 / 256）。
 VOCAB = 6
 LAYERS = 2
 DIM = 3
-POSITIONS = 5
+
+#: 上流 `config.json` の `text_config` のうち、配布 recipe が読む欄だけを持つ最小形。
+#: **実物と違う数**（位置上限 131072 → 37・head_dim 256/512 → 4/8・theta も別値）。
+MAX_POSITION = 37
+SLIDING_HEAD_DIM = 4
+FULL_HEAD_DIM = 8
+SLIDING_THETA = 100.0
+FULL_THETA = 1000.0
+PARTIAL_ROTARY_FACTOR = 0.5
+
+TEXT_CONFIG: Mapping[str, Any] = {
+    "max_position_embeddings": MAX_POSITION,
+    "hidden_size": 16,
+    "num_attention_heads": 4,
+    "head_dim": SLIDING_HEAD_DIM,
+    "global_head_dim": FULL_HEAD_DIM,
+    "layer_types": [SLIDING_ATTENTION, FULL_ATTENTION],
+    "rope_parameters": {
+        SLIDING_ATTENTION: {"rope_type": "default", "rope_theta": SLIDING_THETA},
+        FULL_ATTENTION: {
+            "rope_type": "proportional",
+            "rope_theta": FULL_THETA,
+            "partial_rotary_factor": PARTIAL_ROTARY_FACTOR,
+        },
+    },
+}
+
+#: 層種別 → RoPE 派生入力の幅（{@link TEXT_CONFIG} から導いた値と一致していることが門の前提）。
+ROPE_HEAD_DIMS: Mapping[str, int] = {
+    SLIDING_ATTENTION: SLIDING_HEAD_DIM,
+    FULL_ATTENTION: FULL_HEAD_DIM,
+}
 
 #: `sym_prefix_slice` の焼き込み定数の長さ（chunk 記号 `M` の上限）と、full スロットの容量。
 SYM_MAX = 4
@@ -51,14 +89,8 @@ GROUP_SIZE = 16
 _IN = 32
 _OUT = 4
 
-#: RoPE 表のテンソル名（`gemma4.export_decode.rope_table_keys` の綴り — 層種 × cos / sin）。
-#: 幅は層種ごとに違い（実物も 512 / 256）、**行数だけが揃う**のが門の読む事実。
-ROPE_TABLES: tuple[tuple[str, int], ...] = (
-    ("model.model.rotary_emb.full_attention_cos_table", 4),
-    ("model.model.rotary_emb.full_attention_sin_table", 4),
-    ("model.model.rotary_emb.sliding_attention_cos_table", 2),
-    ("model.model.rotary_emb.sliding_attention_sin_table", 2),
-)
+#: 退役した「表を焼く」形の initializer 名（残骸の門に使う — 現行の資産には 1 本も無い）。
+BAKED_ROPE_TABLE = "model.model.rotary_emb.full_attention_cos_table"
 
 #: PLE sidecar の綴り（`gemma4.export_product` / `packages/models/src/gemma/ple.ts` の正本）。
 PLE_INDEX_FILE = "ple.json"
@@ -88,19 +120,21 @@ def _ramp(*shape: int) -> torch.Tensor:
 
 def product_container(
     *,
-    positions: int = POSITIONS,
     vocab: int = VOCAB,
     layers: int = LAYERS,
     dim: int = DIM,
-    rope_rows: Mapping[str, int] | None = None,
+    head_dims: Mapping[str, int] | None = None,
+    baked_rope: bool = False,
     free_symbol: bool = True,
 ) -> list[bytes]:
     """製品グラフ 1 本ぶんの shard バイト列（読む順 — 先頭がグラフ shard）。
 
-    `rope_rows` は表ごとの行数の上書き（揃っていない世代を作る門のため）。`free_symbol` を
-    偽にすると容量記号を states から外し、`M` の 1 本だけにする（記号の割れ方の門）。
+    `head_dims` は RoPE 派生入力の幅の上書き（宣言と食い違う世代を作る門のため）。
+    `baked_rope` は退役した「表を焼く」形の initializer を 1 本混ぜる（残骸の門）。
+    `free_symbol` を偽にすると容量記号を states から外し、`M` の 1 本だけにする
+    （記号の割れ方の門）。
     """
-    rows = dict(rope_rows or {})
+    widths = {**ROPE_HEAD_DIMS, **dict(head_dims or {})}
     initializers: dict[str, IrInitializer] = {}
     values: dict[str, IrValue] = {}
     tensors: dict[str, torch.Tensor] = {}
@@ -139,9 +173,9 @@ def product_container(
         values[out] = IrValue(dtype="f32", shape=[1, _OUT])
         nodes.append(IrNode(op="linear", ins=[activation, name, bias], outs=[out], attrs={}))
 
-    # ② RoPE 表（f32 のまま — 位置表を丸めると角度がずれる。`rope_table_keys` の MUST）。
-    for name, width in ROPE_TABLES:
-        declare(name, _ramp(rows.get(name, positions), width))
+    # ② 退役形の残骸（既定では入れない — 門が「1 本も無い」を見るための対照）。
+    if baked_rope:
+        declare(BAKED_ROPE_TABLE, _ramp(2, 2))
 
     # ③ 記号次元の席: `M` は入力 shape が束縛し、`C` は states にだけ現れる。
     const = "baked"
@@ -179,7 +213,15 @@ def product_container(
         symbols=[CAPACITY_SYMBOL, SEQ_SYMBOL] if free_symbol else [SEQ_SYMBOL],
         inputs=[
             IrInput(name="input_ids", dtype="i32", shape=[1, SEQ_SYMBOL]),
-            IrInput(name="position_ids", dtype="i32", shape=[1, SEQ_SYMBOL]),
+            *(
+                IrInput(
+                    name=gemma4_rope_input_name(layer_type, part),
+                    dtype="f32",
+                    shape=[1, SEQ_SYMBOL, widths[layer_type]],
+                )
+                for layer_type in GEMMA4_ROPE_LAYER_TYPES
+                for part in GEMMA4_ROPE_PARTS
+            ),
             IrInput(name="per_layer_inputs", dtype="f32", shape=[1, SEQ_SYMBOL, layers, dim]),
             IrInput(name="last_row", dtype="i32", shape=[1]),
         ],
@@ -279,6 +321,7 @@ def write_series(
     shard_metadata: Mapping[int, Mapping[str, Any]] | None = None,
     tokenizer: Mapping[str, Any] | None = None,
     generation_config: Mapping[str, Any] | None = None,
+    text_config: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """系列 2 本 + チェックポイントを書き、使った `ple.json` の中身を返す。
 
@@ -310,6 +353,16 @@ def write_series(
     model_dir.mkdir(parents=True, exist_ok=True)
     (model_dir / "generation_config.json").write_text(
         json.dumps(dict(generation_config if generation_config is not None else GENERATION_CONFIG)),
+        encoding="utf-8",
+    )
+    # 上流の `config.json` は multimodal の器で、text 部は `text_config` 節（実物と同じ形）。
+    (model_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "gemma4",
+                "text_config": dict(text_config if text_config is not None else TEXT_CONFIG),
+            }
+        ),
         encoding="utf-8",
     )
     return declared

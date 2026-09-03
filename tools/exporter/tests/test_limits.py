@@ -152,7 +152,9 @@ class TestTensorPayloadDemand:
 class TestStateSlotDemand:
     """需要の 2 本目 — **容量ぶん常駐する** state スロット（ADR 0066 決定 2）。"""
 
-    _CONFIG: ClassVar[dict[str, Any]] = {"chunkLength": 32, "capacity": 640}
+    #: 束縛は**配布形が許す最大容量**（`maxPosition`）から採る — 既定容量（`capacity`）は
+    #: ホストが上書きできる実行時ノブなので、そちらで焼くと足りない宣言になる。
+    _CONFIG: ClassVar[dict[str, Any]] = {"chunkLength": 32, "capacity": 640, "maxPosition": 4096}
 
     def test_a_graph_without_states_has_no_state_demand(self) -> None:
         """states を持たない既存の全モデルは無風（欄そのものが無い）。"""
@@ -164,17 +166,25 @@ class TestStateSlotDemand:
 
         assert max_state_slot_bytes(graph, self._CONFIG, "where") == 2 * 512 * 256 * 4
 
-    def test_a_symbolic_slot_is_bound_by_the_pipeline_config_capacity(self) -> None:
-        """full スロットは容量記号のまま焼かれる — 数値化の値は配布形の既定容量。"""
+    def test_a_symbolic_slot_is_bound_by_the_pipeline_config_max_position(self) -> None:
+        """full スロットは容量記号のまま焼かれる — 数値化の値は配布形が許す**最大**容量。"""
         graph = {"states": {"l4.k": {"dtype": "f32", "shape": [1, 1, "C", 512]}}}
 
-        assert max_state_slot_bytes(graph, self._CONFIG, "where") == 640 * 512 * 4
+        assert max_state_slot_bytes(graph, self._CONFIG, "where") == 4096 * 512 * 4
+
+    def test_the_default_capacity_is_not_what_binds_the_symbol(self) -> None:
+        """MUST: 既定容量で焼くと「既定より大きい容量を選んだ瞬間に落ちる」宣言になる。"""
+        graph = {"states": {"l4.k": {"dtype": "f32", "shape": [1, 1, "C", 512]}}}
+
+        demand = max_state_slot_bytes(graph, self._CONFIG, "where")
+
+        assert demand != self._CONFIG["capacity"] * 512 * 4
 
     def test_it_evaluates_a_derived_dimension(self) -> None:
         """`coeff·sym+offset` の派生形も束縛して数える（ADR 0057 の次元言語）。"""
         graph = {"states": {"s": {"dtype": "f32", "shape": ["2C+8"]}}}
 
-        assert max_state_slot_bytes(graph, self._CONFIG, "where") == (2 * 640 + 8) * 4
+        assert max_state_slot_bytes(graph, self._CONFIG, "where") == (2 * 4096 + 8) * 4
 
     def test_it_takes_the_largest_slot_of_the_graph(self) -> None:
         """スロットは 1 本ずつ別バッファ — 合計ではなく最大が binding / buffer の需要。"""
@@ -185,7 +195,7 @@ class TestStateSlotDemand:
             }
         }
 
-        assert max_state_slot_bytes(graph, self._CONFIG, "where") == 640 * 256 * 4
+        assert max_state_slot_bytes(graph, self._CONFIG, "where") == 4096 * 256 * 4
 
     def test_a_large_capacity_outgrows_any_single_tensor(self) -> None:
         """重みは shard 上限で割れるが、スロットは 1 本のまま — 長い会話は state が支配する。
@@ -195,19 +205,48 @@ class TestStateSlotDemand:
         """
         graph = {"states": {"full": {"dtype": "f32", "shape": [1, 1, "C", 512]}}}
 
-        demand = max_state_slot_bytes(graph, {"capacity": 131_072}, "where")
+        demand = max_state_slot_bytes(graph, {"maxPosition": 131_072}, "where")
 
         assert demand == 131_072 * 512 * 4 == _BUFFER
         assert required_limits(demand) == {"maxStorageBufferBindingSize": demand}
 
+    def test_the_gemma4_state_stays_under_its_int8_embedding(self) -> None:
+        """gemma4 E2B の実寸: 上限 131,072 の full スロットは主 embedding より小さい。
+
+        束縛を既定容量（`capacity`）から上限（`maxPosition`）へ移しても、この family の
+        焼き値が動かないことの根拠。full スロットは `[1, 1, C, 512]` の f32 で 256MiB、
+        主 embedding（tied lm_head と同一実体）は i8 格納の 262,144 × 1,536 = 384MiB —
+        需要は後者のままなので `requiredLimits` は 2 欄とも 384MiB で不変。
+        """
+        graph = {"states": {"full": {"dtype": "f32", "shape": [1, 1, "C", 512]}}}
+
+        state = max_state_slot_bytes(graph, {"maxPosition": 131_072}, "where")
+        embedding = 262_144 * 1_536  # i8 = 1 バイト/要素
+
+        assert state == 256 * 1024**2
+        assert embedding == 384 * 1024**2
+        assert embedding > state
+        assert required_limits(embedding) == {
+            "maxBufferSize": embedding,
+            "maxStorageBufferBindingSize": embedding,
+        }
+
     @pytest.mark.parametrize(
-        "config", [{}, {"capacity": 0}, {"capacity": "640"}, {"capacity": True}]
+        "config",
+        [
+            {},
+            {"maxPosition": 0},
+            {"maxPosition": "640"},
+            {"maxPosition": True},
+            # 既定容量だけがある配布形（上限を宣言しない世代）も落とす。
+            {"capacity": 640},
+        ],
     )
     def test_it_refuses_a_capacity_the_distribution_does_not_pin(self, config: Any) -> None:
         """束縛が取れないなら fail loudly — 黙って state を外すと「宣言があるのに足りない」。"""
         graph = {"states": {"full": {"dtype": "f32", "shape": [1, 1, "C", 512]}}}
 
-        with pytest.raises(LimitsError, match="capacity"):
+        with pytest.raises(LimitsError, match="maxPosition"):
             max_state_slot_bytes(graph, config, "where")
 
     def test_it_refuses_two_symbols_it_cannot_tell_apart(self) -> None:

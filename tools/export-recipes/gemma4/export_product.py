@@ -9,7 +9,7 @@ ADR [0083](../../../docs/decisions/0083-generation-api-surface.md) 決定 6（�
 
 ## 既存 2 系列との差は入口 2 本・出口 1 本
 
-chunk 系列の経路（素材の読み方・RoPE の表引き・KV 共有の手術・混成量子化・門の順序）は
+chunk 系列の経路（素材の読み方・RoPE のホスト供給・KV 共有の手術・混成量子化・門の順序）は
 {@link gemma4.export_decode} の中核をそのまま通す（import して使う — 同じ規律を 2 箇所に
 書かない）。差分は 3 点だけ:
 
@@ -123,7 +123,7 @@ PLE_METADATA_KEY = "karume_ple"
 
 
 class ProductChunkWrapper(decode.DecodeChunkWrapper):
-    """`(input_ids, position_ids, per_layer_inputs, last_row) → logits[1,1,V]` の製品ラッパ。
+    """`(input_ids, RoPE 4 本, per_layer_inputs, last_row) → logits[1,1,V]` の製品ラッパ。
 
     MUST: `DecodeChunkWrapper` の**派生**（モジュール FQN 空間の同一性 — 量子化の対象述語
     `is_int8_module` / `is_int4_module` と scale 台帳のキーの再利用条件。
@@ -140,7 +140,10 @@ class ProductChunkWrapper(decode.DecodeChunkWrapper):
     def forward(  # type: ignore[override]
         self,
         input_ids: torch.Tensor,
-        position_ids: torch.Tensor,
+        rope_sliding_attention_cos: torch.Tensor,
+        rope_sliding_attention_sin: torch.Tensor,
+        rope_full_attention_cos: torch.Tensor,
+        rope_full_attention_sin: torch.Tensor,
         per_layer_inputs: torch.Tensor,
         last_row: torch.Tensor,
     ) -> torch.Tensor:
@@ -150,13 +153,20 @@ class ProductChunkWrapper(decode.DecodeChunkWrapper):
             one_shot.SLIDING_ATTENTION: one_shot.additive_sliding_mask(length, self.sliding_window),
         }
         embeds = self.model.model.embed_tokens(input_ids)
-        hidden = self.model.model(
-            inputs_embeds=embeds,
-            per_layer_inputs=per_layer_inputs,
-            attention_mask=mask,
-            position_ids=position_ids,
-            use_cache=False,
-        ).last_hidden_state
+        tables = decode.bound_rope(
+            rope_sliding_attention_cos,
+            rope_sliding_attention_sin,
+            rope_full_attention_cos,
+            rope_full_attention_sin,
+        )
+        with self.model.model.rotary_emb.bound(tables):
+            hidden = self.model.model(
+                inputs_embeds=embeds,
+                per_layer_inputs=per_layer_inputs,
+                attention_mask=mask,
+                position_ids=None,
+                use_cache=False,
+            ).last_hidden_state
         # 行選択のあと [1,1,H] へ上げてから lm_head へ通す（token-only 形と同文 — 1 行 lm_head の
         # 構造検査が「選択済みの 1 行」を見るのはこの形が前提）。
         rowed = functional.embedding(last_row, hidden[0]).unsqueeze(0)
@@ -174,16 +184,14 @@ _LOAD_VARIANT = decode.ChunkVariant(
 )
 
 
-def load_wrapper(
-    model_dir: Path, *, positions: int = decode.ROPE_TABLE_POSITIONS
-) -> ProductChunkWrapper:
-    """実重みを f32 で読み、RoPE を表引きへ差し替えた製品ラッパを返す。
+def load_wrapper(model_dir: Path) -> ProductChunkWrapper:
+    """実重みを f32 で読み、RoPE を受け渡し口へ差し替えた製品ラッパを返す。
 
     素材の読み方（3 つの等価検査を含む）と RoPE の差し替えは chunk 系列 3 本で同一なので、
     {@link decode.load_wrapper} をそのまま通す（同じ規律を 2 箇所に書かない）。
     """
     # variant の `wrapper` 欄が組む型そのものが返る（{@link _LOAD_VARIANT}）。
-    return decode.load_wrapper(_LOAD_VARIANT, model_dir, positions=positions)
+    return decode.load_wrapper(_LOAD_VARIANT, model_dir)
 
 
 # ---- PLE sidecar -----------------------------------------------------------
@@ -442,8 +450,9 @@ def assert_ir_form_product(
       MUST: `ple_rows` は**引数で受ける** — `config.vocab_size_per_layer_input` は
       {@link gemma4.export.load_model_and_tables} が検査席の 8 行へ差し替えた後の値なので、
       config から引くとこの検査が実質空振りになる（実際に 1 度踏んだ）。
-    - `embedding` ノードが**主 embedding + RoPE 表 + 行選択**の本数ちょうどであること。
-      本数で見るのは、PLE の一部だけが残る形（35 本中 1 本の刈り漏れ）を数で捕まえるため。
+    - `embedding` ノードが**主 embedding + 行選択**の 2 本ちょうどであること。本数で見るのは、
+      PLE の一部だけが残る形（35 本中 1 本の刈り漏れ）を数で捕まえるため。RoPE は
+      ホスト供給の入力になったので、表を引く `embedding` はもう 1 本も居ない。
     - 出口が **argmax でない**こと。`argmax` が 1 本でも残っていれば sampling の余地が消える
       （ADR 0083 決定 6 — GPU 側は最終行 logits まで）。
     - 出力の宣言 shape が `[1, 1, vocab_size]`（最終**行**のみ）であること。全行 logits へ
@@ -455,7 +464,7 @@ def assert_ir_form_product(
 
     expected_inputs = [
         decode.INPUT_IDS,
-        decode.POSITION_IDS,
+        *decode.ROPE_INPUTS,
         PER_LAYER_INPUTS,
         decode.TOKEN_ONLY_LAST_ROW,
     ]
@@ -463,8 +472,10 @@ def assert_ir_form_product(
     if names != expected_inputs:
         raise AssertionError(
             f"グラフ入力が {names} — {expected_inputs} でない"
-            "（PLE がグラフに残っている / mask が畳み込まれずに入力へ残っている可能性）"
+            "（PLE がグラフに残っている / mask や position_ids が畳み込まれずに入力へ残って"
+            "いる可能性）"
         )
+    decode.assert_rope_inputs(graph, config, seq_symbol=seq_symbol)
     per_layer_spec = next(spec for spec in graph.inputs if spec.name == PER_LAYER_INPUTS)
     expected_shape = [1, seq_symbol, layers, ple_dim]
     if per_layer_spec.dtype != "f32" or list(per_layer_spec.shape) != expected_shape:
@@ -488,13 +499,12 @@ def assert_ir_form_product(
             f" {len(residents)} 本残っている: {residents[:4]}"
             "（ホスト gather へ外に出し切れていない）"
         )
-    # 主 embedding（tied lm_head と同一実体）1 本 + RoPE 表引き（cos / sin × 層種別）+
-    # 最終行の行選択 1 本。PLE が 1 本でも残ればここが増える。
-    expected_embeddings = 2 + 2 * len(decode.unique_layer_types(config))
+    # 主 embedding（tied lm_head と同一実体）1 本 + 最終行の行選択 1 本。PLE が 1 本でも
+    # 残ればここが増え、RoPE の表引きが戻ってもここが増える（どちらも退行の印）。
+    expected_embeddings = 2
     if len(embeddings) != expected_embeddings:
         raise AssertionError(
-            f"`{EMBEDDING_OP}` が {len(embeddings)} 本 — 主 embedding 1 + RoPE 表"
-            f" {2 * len(decode.unique_layer_types(config))} + 行選択 1 の"
+            f"`{EMBEDDING_OP}` が {len(embeddings)} 本 — 主 embedding 1 + 行選択 1 の"
             f" {expected_embeddings} 本でない"
         )
 
@@ -539,7 +549,6 @@ def export_series(
     out_dir: Path,
     *,
     sym_max: int = one_shot.SYM_MAX,
-    positions: int = decode.ROPE_TABLE_POSITIONS,
     reference: Path = REFERENCE_DIR,
 ) -> dict[str, Any]:
     """製品グラフのコンテナ + PLE sidecar + 出所記録を書き、要約を返す。
@@ -552,12 +561,13 @@ def export_series(
     `per_layer` を落とす → export」。逆にすると参照側が i8 経路で作られ、ビット一致の門が
     「同じ向きに間違った 2 つ」を突き合わせる形になる。
     """
-    wrapper = load_wrapper(model_dir, positions=positions)
+    wrapper = load_wrapper(model_dir)
     # MUST: 丸めは参照・golden の採取より前（ADR 0006）— 後だと参照だけが元の重みで動く。
     int8, int4, scales = one_shot.quantize_wrapper(wrapper)
+    specs = decode.rope_specs(wrapper.model.config)
     cases = one_shot.build_cases(model_dir, sym_max, wrapper.sliding_window)
     greedy_cases = tuple(case for case in cases if case[0] in decode.GREEDY_CASES)
-    assert_case_room(cases, 0, positions)
+    assert_case_room(cases, 0, decode.max_position(wrapper.model.config))
     reference_goldens = provenance.assert_reference_goldens(reference, greedy_cases)
 
     config = wrapper.model.config
@@ -611,15 +621,16 @@ def export_series(
         row_scales.clear()
 
         print("[export] torch.export → 変換", file=sys.stderr, flush=True)
+        example_rope = decode.rope_args(specs, positions_for(example_ids))
         graph, tensors = export_module(
             wrapper,
             (
                 example_ids,
-                positions_for(example_ids),
+                *example_rope,
                 case_inputs[example_name],
                 decode.last_row_for(example_ids),
             ),
-            dynamic_shapes=({1: seq}, {1: seq}, {1: seq}, None),
+            dynamic_shapes=(*({1: seq} for _ in range(2 + len(example_rope))), None),
             symbol_names=(decode.SEQ_SYMBOL,),
             preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
         )
@@ -631,10 +642,7 @@ def export_series(
             staged / one_shot.MODEL_FILE,
             weight_dtype="i8",
             weight_scales=scales,
-            weight_dtype_overrides={
-                **dict.fromkeys(int4.scales, "i4"),
-                **dict.fromkeys(decode.rope_table_keys(wrapper), "f32"),
-            },
+            weight_dtype_overrides=dict.fromkeys(int4.scales, "i4"),
         )
         # i8 の initializer は **PLE 35 表を外したぶんだけ減る** — 残るのは主 embedding
         # （tied lm_head と同一実体）1 本。台帳の本数から引くので、外し漏れは本数で落ちる。
@@ -650,7 +658,10 @@ def export_series(
         for name, ids in cases:
             with torch.no_grad():
                 logits = wrapper(
-                    ids, positions_for(ids), case_inputs[name], decode.last_row_for(ids)
+                    ids,
+                    *decode.rope_args(specs, positions_for(ids)),
+                    case_inputs[name],
+                    decode.last_row_for(ids),
                 )
             first[name] = int(logits[0, 0].argmax())
 
@@ -699,7 +710,6 @@ def export_series(
 
 def main(argv: Sequence[str] | None = None) -> None:
     parser = one_shot.series_parser(__doc__.split("\n\n")[0], DEFAULT_OUT_DIR)
-    parser.add_argument("--positions", type=int, default=decode.ROPE_TABLE_POSITIONS)
     parser.add_argument("--reference", type=Path, default=REFERENCE_DIR)
     one_shot.run_series_cli(parser, export_series, argv)
 

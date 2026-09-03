@@ -114,15 +114,18 @@ would only reserve rows that can never be read (ADR 0066 addendum 9).
 
 Three structural differences from the 1-shot recipe, and the export fails loudly when any is lost:
 
-- **positions are a graph input and RoPE is a table lookup.** In the 1-shot shape a position is
+- **RoPE cos/sin are graph inputs the host generates per chunk.** In the 1-shot shape a position is
   always its row index, so cos/sin fold into constants; here a position is `pastLength + row` and is
-  only known at run time. The recipe swaps `model.model.rotary_emb` for a module that gathers a
-  1024-position cos/sin table with `F.embedding` — **one table pair per layer type**, because Gemma
-  4 calls its rotary with a `layer_type` argument and the two types differ in both head dim and RoPE
-  type. The lookup is asserted to reproduce the original implementation exactly (`torch.equal`,
-  three kinds of position vector, both layer types) before the swap happens. Because the tables are
-  consumed as `embedding` weights they land in the int8 eligibility set, so the recipe excludes them
-  from compressed storage explicitly: rounding a position table would smear the angles.
+  only known at run time. The recipe swaps `model.model.rotary_emb` for a pass-through module that
+  returns the cos/sin the wrapper received as inputs — **one pair per layer type**
+  (`rope_<layer_type>_<cos|sin>`, `[1, M, head_dim]`), because Gemma 4 calls its rotary with a
+  `layer_type` argument and the two types differ in both head dim and RoPE type. No position table
+  ships and there is no `position_ids` input: the distribution declares the per-layer-type formula
+  parameters (`pipelineConfig.rope` = theta / headDim / rotaryDim, derived from the checkpoint's
+  `config.json`) and the TypeScript host is the reference implementation (f64 math, stored as f32).
+  `gemma4/rope.py` mirrors that formula in numpy and is checked against the upstream module's
+  actual output with a position-proportional tolerance (upstream computes in f32, so bit-equality
+  is not attainable — see `tests/test_rope.py`). The graph gate rejects any leftover baked table.
 - **only the 15 KV-owning layers get slots.** Layers 15 to 34 share key/value states upstream, so
   they read the slots of the last sliding layer (13) and the last full layer (14) rather than
   declaring their own. The surgery in `karume.states` requires every reader of a slot to agree on
@@ -334,14 +337,18 @@ a fetch key with the one spelling it already has (`ple.json`'s `shards[].file`);
 second naming would make the correspondence positional, and a reordering of either side would pass
 silently.
 
-`pipelineConfig` splits the way Irodori's does. Derived from the assets: `maxPosition` (the row
-count of the baked rotary tables, which all four must agree on) and `sampler` (the checkpoint's own
-`generation_config.json` — temperature / top-k / top-p, ADR
-[0083](../../../docs/decisions/0083-generation-api-surface.md) decision 7). Declared as runtime
-knobs, because no asset can state them: `chunkLength` and `capacity`. The assembly refuses
-`chunkLength > capacity` and `capacity > maxPosition` — a conversation that fills the declared
-capacity reaches position `capacity - 1`, so a capacity beyond the rotary tables only fails on long
-conversations, at run time, on someone else's machine.
+`pipelineConfig` splits the way Irodori's does. Derived from the checkpoint's own files, never
+copied by hand: `maxPosition` (`text_config.max_position_embeddings` — the model's declared position
+limit, 131,072 for E2B), `rope` (per layer type: `theta` / `headDim` / `rotaryDim`, derived from
+`rope_parameters` and the head dims; any rope type other than `default` / `proportional`, or a
+scaling factor other than 1, fails the export) and `sampler` (`generation_config.json` —
+temperature / top-k / top-p, ADR [0083](../../../docs/decisions/0083-generation-api-surface.md)
+decision 7). Declared as **defaults for runtime knobs**, because no asset can state them:
+`chunkLength` (768 = the traced upper bound of the chunk symbol) and `capacity` (4,096). Both can be
+overridden at load time; the loader keeps `chunkLength ≤ capacity ≤ maxPosition`, and the assembly
+refuses declarations that violate it. The full-attention KV slots are the only thing that grows
+with capacity (12 KiB per token), so `requiredLimits` is baked for `maxPosition`, the largest
+capacity the distribution allows.
 
 Gates that run **before a single byte is placed** (each one covers a mismatch that leaves shape,
 dtype and manifest all correct, and shows up only as wrong values):
