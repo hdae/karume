@@ -88,7 +88,9 @@ On macOS/Metal the flag currently loses the whole device: the driver cannot allo
 sample buffers this many query sets need, and wgpu turns that failure into a lost device rather than
 an error you can catch. The run dies on the first turn. Take the breakdown on a Vulkan or D3D12
 machine instead; the details and the state of the workaround are in
-[`docs/limitations.md`](../../docs/limitations.md).
+[`docs/limitations.md`](../../docs/limitations.md). The script warns on stderr at startup when you
+pass the flag on macOS, and any fatal error is unwrapped in full — `SuppressedError` pairs,
+`AggregateError` members, and `cause` chains — to stderr before the script exits with status 1.
 
 ## What the startup lines mean
 

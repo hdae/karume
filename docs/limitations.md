@@ -851,8 +851,12 @@ query set が約 100 本**同時に生きた状態**になる。1 本あたり�
 
 「`GpuDeviceLostError` として可視化されるので沈黙はしない」も**撤回**する。トップレベルの
 `await using` で資源を掴む台本では、本体の例外と解放時の例外が `SuppressedError` に畳まれ、Deno は
-その外皮しか印字しないため型も文言も読めない（例示台本の全印字と、消失理由を捨てている
-`device.ts` の修正は別項）。
+その外皮しか印字しないため型も文言も読めない。**この 2 点は 2026-09-03 に埋めた** — 例示台本
+（`examples/gemma4/main.ts`）は本体を関数に包み、最上位で `SuppressedError`（`.error` /
+`.suppressed`）・`AggregateError`・`cause` 連鎖を再帰で全て stderr へ展開して exit 1 する。
+`device.ts` は消失理由（`GPUDeviceLostInfo` の `reason` / `message`）を `GpuDeviceLostError` の
+文言へ載せるので、バックエンドが入れた真因文字列（Metal の `Device::create_query_set: …` 相当）が
+初めて呼び手まで届く。
 
 観測は Apple M2 / Deno 2.9.x（anima の DiT 1 step = 3,301 dispatch と gemma4 の対話台本の両方）。
 

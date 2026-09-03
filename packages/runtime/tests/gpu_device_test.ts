@@ -377,6 +377,39 @@ Deno.test("raceDeviceLost は消失を例外にし、決着時に購読を解除
   assertEquals(gpu.pendingLostListeners, 0);
 });
 
+Deno.test("device 消失の例外はバックエンドが入れた reason / message を文言に載せる", async () => {
+  // 真因（Metal の counter sample buffer 確保失敗など）は `GPUDeviceLostInfo.message` にしか
+  // 残らない — 消失済み device のエラーは errorScope へ入らないので、ここで落とすと karume の
+  // どこにも真因が残らない（docs/limitations.md の Metal timestamp 節）。
+  // NOTE: `reason` は仕様上 "unknown" も取るが、Deno の型宣言は "destroyed" しか持たない。
+  // 検証の要点は message 側（真因文字列）なので、型が受ける値のまま組む。
+  const loss: GPUDeviceLostInfo = {
+    reason: "destroyed",
+    message: "Device::create_query_set: Not enough memory left.",
+  };
+  const { gpu, lose } = losableGpuContext();
+
+  const hanging = gpu[RUNTIME_INTERNAL].raceDeviceLost(new Promise<void>(() => {}), "flush");
+  lose(loss);
+  const raced = await assertRejects(() => hanging, GpuDeviceLostError);
+  assert(
+    raced.message.startsWith("flush 中に device が失われた（再構築が必要）"),
+    `接頭は変えない: ${raced.message}`,
+  );
+  assert(raced.message.includes("reason: destroyed"), raced.message);
+  assert(raced.message.includes("Device::create_query_set"), raced.message);
+
+  // 同期判定（assertDeviceUsable）も同じ理由を運ぶ。フェイク device でも消失済みなら
+  // createBuffer へ届く前に落ちるので、実 GPU は要らない。
+  await gpu.device.lost;
+  const gated = await assertRejects(() => gpu.createResident(16, "after-lost"), GpuDeviceLostError);
+  assert(
+    gated.message.startsWith("resident 'after-lost' の確保: device が失われた"),
+    `接頭は変えない: ${gated.message}`,
+  );
+  assert(gated.message.includes("Device::create_query_set"), gated.message);
+});
+
 Deno.test("消失通知は listener の例外で止まらず、その例外も握り潰さない", async () => {
   const failure = new Error("user callback の失敗");
   // 公開 onDeviceLost はコンストラクタが登録するため挿入順の先頭に来る。隔離が無いと、この

@@ -45,16 +45,21 @@ export const fakeGpuContext = (
   onDeviceLost?: DeviceLostHandler,
 ): GpuContext => new GpuContext(device, readAdapterInfo({}), ZERO_LIMITS, new Set(), onDeviceLost);
 
+/** 引き金に何も渡さなかったときの消失情報（`reason` は GpuContext の分岐に使われない）。 */
+const DEFAULT_LOSS: GPUDeviceLostInfo = { reason: "destroyed", message: "テストによる消失" };
+
 /**
  * 消失を後から起こせるフェイク device と、その引き金。
- * `reason` は GpuContext の分岐（意図的な破棄かどうか）に使われないため固定値でよい。
+ *
+ * `lose` に情報を渡せるのは、バックエンドが入れる真因（`reason` / `message`）が例外の文言まで
+ * 運ばれることを固定するため。
  *
  * `onDeviceLost` を渡せるのは、公開通知が**挿入順の先頭**に来る形（コンストラクタでの登録）
  * を再現するため。内部購読より先に呼ばれることが、例外隔離を要求する条件そのものになる。
  */
 export const losableGpuContext = (onDeviceLost?: DeviceLostHandler): {
   readonly gpu: GpuContext;
-  readonly lose: () => void;
+  readonly lose: (info?: GPUDeviceLostInfo) => void;
 } => {
   let resolve: (info: GPUDeviceLostInfo) => void = () => {};
   const lost = new Promise<GPUDeviceLostInfo>((settle) => {
@@ -62,6 +67,6 @@ export const losableGpuContext = (onDeviceLost?: DeviceLostHandler): {
   });
   return {
     gpu: fakeGpuContext(fakeDevice({ lost }), onDeviceLost),
-    lose: (): void => resolve({ reason: "destroyed", message: "テストによる消失" }),
+    lose: (info: GPUDeviceLostInfo = DEFAULT_LOSS): void => resolve(info),
   };
 };

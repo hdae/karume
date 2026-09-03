@@ -277,230 +277,306 @@ const observeRun = (diagnostic: SessionDiagnostics): void => {
 };
 
 /**
- * 計測が有効な device は `--diagnostics` のときだけ**台本が**持つ（feature は device 作成時に
- * しか要求できないので、pipeline に任せる口が無い）。貸した device は渡した側が所有者なので
- * `pipeline.dispose()` は破棄しない — 破棄は台本の責務で、しかも **pipeline を畳んだ後**で
- * なければならない（flush-before-destroy）。`using` の解放は宣言の逆順に走るので、pipeline より
- * 前に宣言したこの口が最後に片付く。
- */
-const gpu = diagnostics ? await acquireGpu({ gpuTiming: true }) : undefined;
-using _gpuOwned = gpu === undefined ? undefined : { [Symbol.dispose]: (): void => gpu.destroy() };
-
-const started = performance.now();
-note(`[gemma4] ${sourceDir ?? repoRef ?? DEFAULT_SOURCE} を読み込む\n`);
-await using pipeline = await Gemma4Pipeline.fromPretrained(
-  repoRef === undefined ? denoDirectory(sourceDir ?? DEFAULT_SOURCE) : parseRepo(repoRef),
-  {
-    ...(maxResidentPleBytes === undefined ? {} : { maxResidentPleBytes }),
-    ...(chunkLengthArg === undefined ? {} : { chunkLength: chunkLengthArg }),
-    ...(gpu === undefined ? {} : { gpu }),
-    ...(diagnostics ? { onRunDiagnostics: observeRun } : {}),
-    onProgress: showProgress,
-  },
-);
-clearLine();
-
-/**
- * 抽選の指定。**低レベル面は配布形を知らない**ので、`generate` へ渡さなければ低層の既定
- * （温度 0 = greedy）で走る（`Gemma4Pipeline.defaultSampler` の MUST）。既定は配布形が宣言した
- * 推奨値で、CLI のフラグはその上に重ねる（`--temperature 0` だけを渡せば top-k / top-p は
- * 推奨値のまま残るが、温度 0 では候補を削っても最大値が残るので結果は greedy に畳まれる）。
- */
-const overrides = {
-  ...(temperature === undefined ? {} : { temperature }),
-  ...(topK === undefined ? {} : { topK }),
-  ...(topP === undefined ? {} : { topP }),
-  ...(seed === undefined ? {} : { seed }),
-};
-const sampler: SamplerSpec | undefined = Object.keys(overrides).length === 0
-  ? pipeline.defaultSampler
-  : { ...pipeline.defaultSampler, ...overrides };
-
-const { capacity: defaultCapacity, maxPosition, chunkLength } = pipeline.program;
-const capacity = capacityArg ?? defaultCapacity;
-
-/**
- * 確保の**前**に読む必要量（ADR 0070 決定 5 の estimator）。
+ * 例外を 1 つ残らず stderr へ展開する（型名 + 文言 + 入れ子の深さ）。
  *
- * **上限ではない**（`unaccounted` に載っているものは勘定に入っていない）ので、可否の最終門は
- * 今も out-of-memory である。ここで出すのは「この容量と chunk 長なら何 MiB 要るのか」を選ぶ前に
- * 見るためで、`--capacity` の値の検査（`chunkLength ≤ capacity ≤ maxPosition`）もこの呼び出しが
- * 兼ねる（sequence を作る最初のターンまで待たずに落ちる）。
- */
-const estimate = pipeline.estimateSessionMemory({ capacity });
-const residentBytes = estimate.resident.weights.totalBytes + estimate.resident.stateBytes;
-
-write(
-  `[gemma4] ready（${((performance.now() - started) / 1000).toFixed(1)}s）` +
-    ` / capacity ${capacity}${capacity === defaultCapacity ? "" : `（既定 ${defaultCapacity}）`}` +
-    ` / maxPosition ${maxPosition} / chunk ${chunkLength}\n` +
-    `         GPU 見積り resident ${mib(residentBytes)} MiB` +
-    ` / peakAccounted ${mib(estimate.peakAccountedBytes)} MiB` +
-    `（上限ではない — 勘定外 ${estimate.unaccounted.length} 項目）\n` +
-    `         sampler ${
-      sampler === undefined ? "greedy（配布形の宣言なし）" : JSON.stringify(sampler)
-    }` +
-    ` / max-new-tokens ${maxNewTokens}\n` +
-    `         /reset で会話を捨てる・/exit か Ctrl+D で終わる・生成中の Ctrl+C はそのターンを中断\n\n`,
-);
-
-/**
- * セッションの設定（`/reset` は同じ設定で組み直す — 会話を捨てるとはそういうこと）。
+ * `using` / `await using` は、本体が投げたうえに解放も投げると両方を `SuppressedError` に畳む
+ * （`.error` = 解放側 / `.suppressed` = 本体側）。Deno の未捕捉ハンドラはその**外皮しか印字
+ * しない**ため、そのままだと型も文言も画面に出ない — device 消失のように「本体と解放が同じ
+ * 理由で落ちる」故障では診断が丸ごと消える。`cause` 連鎖と `AggregateError` も同じ理由で辿る。
  *
- * `onOverflow` を包んでいるのは**画面に出すため**だけで、切り詰めそのものは既定の
- * `dropOldestTurns` に任せる（最古の user / assistant の対を落とし、system は残す）。
+ * MUST: 中身を 1 つも落とさない。ここは台本の最後の出力口で、握り潰せば以後どこにも出ない。
  */
-const sessionOptions: Gemma4ChatSessionOptions = {
-  ...(system === undefined ? {} : { system }),
-  maxNewTokens,
-  // 容量はセッション 1 本 = 会話 1 本の単位で決まる（切り詰めの物差しでもあるので、
-  // `/reset` で組み直しても同じ値を渡す）。
-  ...(capacityArg === undefined ? {} : { capacity: capacityArg }),
-  ...(sampler === undefined ? {} : { sampler }),
-  onOverflow: (context) => {
-    write(
-      `\n  [容量超過（上限 ${context.capacity} に対し ${context.needed} 要る）— ` +
-        `古い turn を落として再構成]\n`,
-    );
-    return dropOldestTurns(context);
-  },
-};
-let session = new Gemma4ChatSession(pipeline, sessionOptions);
-
-/**
- * prefill の進捗を 1 行で上書きする（`Gemma4ChatTurnOptions.onPrefill` の受け手）。
- *
- * 長い prompt では最初の文字が出るまでの無音時間が prefill そのもので、`send` が流すのは復号後の
- * **本文**だけなので、進捗を出す口はここにしか無い。chunk が 1 本で終わる prompt（= chunk 長
- * 以下）では出さない — 進捗にならないうえ、出しても次の瞬間に消すだけである。
- */
-let prefilling = false;
-const showPrefill = ({ chunk, chunks }: Gemma4PrefillProgress): void => {
-  if (chunks <= 1) return;
-  note(`\r${`  prefill ${chunk}/${chunks}`.padEnd(LINE_WIDTH)}`);
-  prefilling = true;
+const printError = (error: unknown, depth = 0): void => {
+  const indent = "  ".repeat(depth);
+  if (!(error instanceof Error)) {
+    note(`${indent}[${depth}] ${typeof error}: ${String(error)}\n`);
+    return;
+  }
+  note(`${indent}[${depth}] ${error.name}: ${error.message}\n`);
+  // 外皮のスタックだけは残す（Deno の既定の未捕捉出力と同じ情報量を下回らないため）。
+  // 1 行目は「名前: 文言」の写しなので落とす — 直前の行と重複する。
+  if (depth === 0 && error.stack !== undefined) {
+    const frames = error.stack.slice(error.stack.indexOf("\n") + 1);
+    if (frames !== error.stack) note(`${frames}\n`);
+  }
+  if (error instanceof SuppressedError) {
+    note(`${indent}  ↳ error（解放側）\n`);
+    printError(error.error, depth + 1);
+    note(`${indent}  ↳ suppressed（本体側）\n`);
+    printError(error.suppressed, depth + 1);
+  }
+  if (error instanceof AggregateError) {
+    for (const [at, inner] of error.errors.entries()) {
+      note(`${indent}  ↳ errors[${at}]\n`);
+      printError(inner, depth + 1);
+    }
+  }
+  if (error.cause !== undefined) {
+    note(`${indent}  ↳ cause\n`);
+    printError(error.cause, depth + 1);
+  }
 };
 
-/** prefill の行を消す（本文が出始めた時点・ターンが落ちた時点。2 度目以降は何もしない）。 */
-const clearPrefill = (): void => {
-  if (!prefilling) return;
-  clearLine();
-  prefilling = false;
-};
-
-/** `--diagnostics` の内訳に書く op の本数（GPU 時間の降順で上位から）。 */
-const TIMING_TOP = 5;
-
 /**
- * 直近 run の op 別 GPU 時間を上位から書く（`--diagnostics` のときだけ埋まっている）。
+ * 台本の本体。
  *
- * `clampedNegativeSamples` は 0 でなければ添える — ドライバの timestamp が非単調で 0 に丸めた
- * 件数で、0 でないなら内訳の読みそのものが疑わしい（黙って捨てない）。
+ * MUST: `using` / `await using` は全てこの中に置く。トップレベルの `using` が畳んだ
+ * `SuppressedError` は自分では捕まえられず（モジュール本体の外に catch を置けない）、Deno の
+ * 既定出力では外皮しか読めない。関数に包んで最上位で {@link printError} に渡すのが、
+ * 解放時の例外と本体の例外を**両方**読むための唯一の確実な形である。
  */
-const showTiming = (): void => {
-  if (lastTiming === undefined) return;
-  const { entries, totalNs, dispatchCount, clampedNegativeSamples } = lastTiming;
-  const ms = (ns: number): string => (ns / 1e6).toFixed(3);
-  note(
-    `  [diagnostics] run ${turnRuns} 本 · 直近 run ${ms(totalNs)} ms / dispatch ${dispatchCount}` +
-      `${clampedNegativeSamples === 0 ? "" : ` · 非単調 timestamp ${clampedNegativeSamples} 件`}\n`,
-  );
-  for (const entry of entries.slice(0, TIMING_TOP)) {
-    const share = totalNs === 0 ? "—" : `${percent(entry.ns, totalNs)}%`;
+const main = async (): Promise<void> => {
+  // 計測は Metal（Apple GPU）では device ごと落とす（timestamp 用の query set を確保できない）。
+  // 拒否はしない — OS / ドライバ / wgpu 側が直れば黙って使えるようになる種類の制約なので、
+  // karume 側に撤去の宿題が残る門は置かない。
+  if (diagnostics && Deno.build.os === "darwin") {
     note(
-      `                ${entry.key} ${ms(entry.ns)} ms（${share}）` +
-        ` · ${entry.dispatchCount} dispatch\n`,
+      "[gemma4] 警告: macOS（Metal）では --diagnostics の GPU 時間計測が device 消失を招く\n" +
+        "         （timestamp 用の counter sample buffer を確保できず device lost になる）。\n" +
+        "         内訳は Metal 以外のバックエンドで採ること — 詳細は docs/limitations.md の\n" +
+        "         「Metal（Apple GPU）では GPU 側 timestamp 計測が実用にならない」節。\n",
     );
   }
-};
 
-/**
- * 1 ターンの締め。tok/s は `stop.tokens`（停止 token も 1 個 = 抽選 1 回 = run 1 回）から書く —
- * 出力文字列を符号化し直すと、byte_fallback や停止 token のぶんだけ数がずれる。
- */
-const report = (stop: Gemma4ChatStop, at: number): void => {
-  // 本文が 1 片も出なかったターン（即 EOS）では、ここが prefill の行を畳む唯一の席になる。
-  clearPrefill();
-  const elapsed = (performance.now() - at) / 1000;
-  write(
-    `\n  [${describeStop(stop)} · ${stop.tokens} tok · ${elapsed.toFixed(1)}s · ` +
-      `${(stop.tokens / elapsed).toFixed(1)} tok/s · 会話 ${session.turns.length} 発話]\n`,
+  /**
+   * 計測が有効な device は `--diagnostics` のときだけ**台本が**持つ（feature は device 作成時に
+   * しか要求できないので、pipeline に任せる口が無い）。貸した device は渡した側が所有者なので
+   * `pipeline.dispose()` は破棄しない — 破棄は台本の責務で、しかも **pipeline を畳んだ後**で
+   * なければならない（flush-before-destroy）。`using` の解放は宣言の逆順に走るので、pipeline より
+   * 前に宣言したこの口が最後に片付く。
+   */
+  const gpu = diagnostics ? await acquireGpu({ gpuTiming: true }) : undefined;
+  using _gpuOwned = gpu === undefined ? undefined : { [Symbol.dispose]: (): void => gpu.destroy() };
+
+  const started = performance.now();
+  note(`[gemma4] ${sourceDir ?? repoRef ?? DEFAULT_SOURCE} を読み込む\n`);
+  await using pipeline = await Gemma4Pipeline.fromPretrained(
+    repoRef === undefined ? denoDirectory(sourceDir ?? DEFAULT_SOURCE) : parseRepo(repoRef),
+    {
+      ...(maxResidentPleBytes === undefined ? {} : { maxResidentPleBytes }),
+      ...(chunkLengthArg === undefined ? {} : { chunkLength: chunkLengthArg }),
+      ...(gpu === undefined ? {} : { gpu }),
+      ...(diagnostics ? { onRunDiagnostics: observeRun } : {}),
+      onProgress: showProgress,
+    },
   );
-  showTiming();
-};
+  clearLine();
 
-/**
- * Ctrl+C は「今のターンを止める」。生成していないときはプロセスごと終わる。
- *
- * 中断は `AbortSignal` が正で、`signal.reason` は包まれずそのまま throw されるので、下の
- * `error === controller.signal.reason` が「自分が止めた」の判定になる（ADR 0083 決定 5）。
- */
-let turn: AbortController | undefined;
-const onInterrupt = (): void => {
-  if (turn === undefined) {
-    write("\n");
-    Deno.exit(130);
-  }
-  turn.abort(new Error("interrupted"));
-};
-Deno.addSignalListener("SIGINT", onInterrupt);
+  /**
+   * 抽選の指定。**低レベル面は配布形を知らない**ので、`generate` へ渡さなければ低層の既定
+   * （温度 0 = greedy）で走る（`Gemma4Pipeline.defaultSampler` の MUST）。既定は配布形が宣言した
+   * 推奨値で、CLI のフラグはその上に重ねる（`--temperature 0` だけを渡せば top-k / top-p は
+   * 推奨値のまま残るが、温度 0 では候補を削っても最大値が残るので結果は greedy に畳まれる）。
+   */
+  const overrides = {
+    ...(temperature === undefined ? {} : { temperature }),
+    ...(topK === undefined ? {} : { topK }),
+    ...(topP === undefined ? {} : { topP }),
+    ...(seed === undefined ? {} : { seed }),
+  };
+  const sampler: SamplerSpec | undefined = Object.keys(overrides).length === 0
+    ? pipeline.defaultSampler
+    : { ...pipeline.defaultSampler, ...overrides };
 
-write("> ");
-for await (const raw of readLines()) {
-  const line = raw.trim();
-  if (line === "") {
-    write("> ");
-    continue;
-  }
-  if (line === "/exit" || line === "/quit") break;
-  if (line === "/reset") {
-    // 会話を捨てる = セッションを畳んで同じ設定で組み直す（履歴も KV も持っているのは
-    // セッションなので、捨てる口を別に持たない）。
-    await session.dispose();
-    session = new Gemma4ChatSession(pipeline, sessionOptions);
-    write("(reset)\n> ");
-    continue;
-  }
+  const { capacity: defaultCapacity, maxPosition, chunkLength } = pipeline.program;
+  const capacity = capacityArg ?? defaultCapacity;
 
-  const controller = new AbortController();
-  turn = controller;
-  const turnStarted = performance.now();
-  turnRuns = 0;
-  lastTiming = undefined;
-  // 発行した stream は必ず汲み切るか break で閉じる（ターンの締めは列の終端で走る）。
-  const stream = session.send(line, { onPrefill: showPrefill, signal: controller.signal });
-  try {
-    // 片は逐次復号器が**確定させたぶん**だけで、連結すると全体の decode と一致する。
-    for await (const chunk of stream) {
-      // 本文が出始めたら prefill の行は用済み（1 片目で 1 度だけ効く）。
-      clearPrefill();
-      write(chunk);
-    }
-    report(await stream.done, turnStarted);
-  } catch (error) {
-    clearPrefill();
-    if (error instanceof GenerationCapacityError) {
-      // 溢れ処理で落とせるものが尽きた = この 1 発話だけで入り切らない。判断に要る実値は
-      // 例外の欄が運ぶ（文言を読み解かない）。
+  /**
+   * 確保の**前**に読む必要量（ADR 0070 決定 5 の estimator）。
+   *
+   * **上限ではない**（`unaccounted` に載っているものは勘定に入っていない）ので、可否の最終門は
+   * 今も out-of-memory である。ここで出すのは「この容量と chunk 長なら何 MiB 要るのか」を選ぶ前に
+   * 見るためで、`--capacity` の値の検査（`chunkLength ≤ capacity ≤ maxPosition`）もこの呼び出しが
+   * 兼ねる（sequence を作る最初のターンまで待たずに落ちる）。
+   */
+  const estimate = pipeline.estimateSessionMemory({ capacity });
+  const residentBytes = estimate.resident.weights.totalBytes + estimate.resident.stateBytes;
+
+  write(
+    `[gemma4] ready（${((performance.now() - started) / 1000).toFixed(1)}s）` +
+      ` / capacity ${capacity}${
+        capacity === defaultCapacity ? "" : `（既定 ${defaultCapacity}）`
+      }` +
+      ` / maxPosition ${maxPosition} / chunk ${chunkLength}\n` +
+      `         GPU 見積り resident ${mib(residentBytes)} MiB` +
+      ` / peakAccounted ${mib(estimate.peakAccountedBytes)} MiB` +
+      `（上限ではない — 勘定外 ${estimate.unaccounted.length} 項目）\n` +
+      `         sampler ${
+        sampler === undefined ? "greedy（配布形の宣言なし）" : JSON.stringify(sampler)
+      }` +
+      ` / max-new-tokens ${maxNewTokens}\n` +
+      `         /reset で会話を捨てる・/exit か Ctrl+D で終わる・生成中の Ctrl+C はそのターンを中断\n\n`,
+  );
+
+  /**
+   * セッションの設定（`/reset` は同じ設定で組み直す — 会話を捨てるとはそういうこと）。
+   *
+   * `onOverflow` を包んでいるのは**画面に出すため**だけで、切り詰めそのものは既定の
+   * `dropOldestTurns` に任せる（最古の user / assistant の対を落とし、system は残す）。
+   */
+  const sessionOptions: Gemma4ChatSessionOptions = {
+    ...(system === undefined ? {} : { system }),
+    maxNewTokens,
+    // 容量はセッション 1 本 = 会話 1 本の単位で決まる（切り詰めの物差しでもあるので、
+    // `/reset` で組み直しても同じ値を渡す）。
+    ...(capacityArg === undefined ? {} : { capacity: capacityArg }),
+    ...(sampler === undefined ? {} : { sampler }),
+    onOverflow: (context) => {
       write(
-        `\n  [入り切らない: ${error.constraint} 上限 ${error.limit} に対し` +
-          ` 既存 ${error.pastLength} + prompt ${error.promptLength}` +
-          `（この長さなら maxNewTokens ≤ ${error.maxNewTokens}）— 発話を短くするか /reset]\n`,
+        `\n  [容量超過（上限 ${context.capacity} に対し ${context.needed} 要る）— ` +
+          `古い turn を落として再構成]\n`,
       );
-    } else if (error === controller.signal.reason) {
-      // 中断でも「成功した run のぶんだけ」会話は進んでいる。done は reject ではなく
-      // `aborted` で settle するので、生成できた token 数はそのまま読める。
-      report(await stream.done, turnStarted);
-    } else {
-      throw error;
+      return dropOldestTurns(context);
+    },
+  };
+  let session = new Gemma4ChatSession(pipeline, sessionOptions);
+
+  /**
+   * prefill の進捗を 1 行で上書きする（`Gemma4ChatTurnOptions.onPrefill` の受け手）。
+   *
+   * 長い prompt では最初の文字が出るまでの無音時間が prefill そのもので、`send` が流すのは復号後の
+   * **本文**だけなので、進捗を出す口はここにしか無い。chunk が 1 本で終わる prompt（= chunk 長
+   * 以下）では出さない — 進捗にならないうえ、出しても次の瞬間に消すだけである。
+   */
+  let prefilling = false;
+  const showPrefill = ({ chunk, chunks }: Gemma4PrefillProgress): void => {
+    if (chunks <= 1) return;
+    note(`\r${`  prefill ${chunk}/${chunks}`.padEnd(LINE_WIDTH)}`);
+    prefilling = true;
+  };
+
+  /** prefill の行を消す（本文が出始めた時点・ターンが落ちた時点。2 度目以降は何もしない）。 */
+  const clearPrefill = (): void => {
+    if (!prefilling) return;
+    clearLine();
+    prefilling = false;
+  };
+
+  /** `--diagnostics` の内訳に書く op の本数（GPU 時間の降順で上位から）。 */
+  const TIMING_TOP = 5;
+
+  /**
+   * 直近 run の op 別 GPU 時間を上位から書く（`--diagnostics` のときだけ埋まっている）。
+   *
+   * `clampedNegativeSamples` は 0 でなければ添える — ドライバの timestamp が非単調で 0 に丸めた
+   * 件数で、0 でないなら内訳の読みそのものが疑わしい（黙って捨てない）。
+   */
+  const showTiming = (): void => {
+    if (lastTiming === undefined) return;
+    const { entries, totalNs, dispatchCount, clampedNegativeSamples } = lastTiming;
+    const ms = (ns: number): string => (ns / 1e6).toFixed(3);
+    note(
+      `  [diagnostics] run ${turnRuns} 本 · 直近 run ${
+        ms(totalNs)
+      } ms / dispatch ${dispatchCount}` +
+        `${
+          clampedNegativeSamples === 0 ? "" : ` · 非単調 timestamp ${clampedNegativeSamples} 件`
+        }\n`,
+    );
+    for (const entry of entries.slice(0, TIMING_TOP)) {
+      const share = totalNs === 0 ? "—" : `${percent(entry.ns, totalNs)}%`;
+      note(
+        `                ${entry.key} ${ms(entry.ns)} ms（${share}）` +
+          ` · ${entry.dispatchCount} dispatch\n`,
+      );
     }
-  } finally {
-    turn = undefined;
-  }
+  };
+
+  /**
+   * 1 ターンの締め。tok/s は `stop.tokens`（停止 token も 1 個 = 抽選 1 回 = run 1 回）から書く —
+   * 出力文字列を符号化し直すと、byte_fallback や停止 token のぶんだけ数がずれる。
+   */
+  const report = (stop: Gemma4ChatStop, at: number): void => {
+    // 本文が 1 片も出なかったターン（即 EOS）では、ここが prefill の行を畳む唯一の席になる。
+    clearPrefill();
+    const elapsed = (performance.now() - at) / 1000;
+    write(
+      `\n  [${describeStop(stop)} · ${stop.tokens} tok · ${elapsed.toFixed(1)}s · ` +
+        `${(stop.tokens / elapsed).toFixed(1)} tok/s · 会話 ${session.turns.length} 発話]\n`,
+    );
+    showTiming();
+  };
+
+  /**
+   * Ctrl+C は「今のターンを止める」。生成していないときはプロセスごと終わる。
+   *
+   * 中断は `AbortSignal` が正で、`signal.reason` は包まれずそのまま throw されるので、下の
+   * `error === controller.signal.reason` が「自分が止めた」の判定になる（ADR 0083 決定 5）。
+   */
+  let turn: AbortController | undefined;
+  const onInterrupt = (): void => {
+    if (turn === undefined) {
+      write("\n");
+      Deno.exit(130);
+    }
+    turn.abort(new Error("interrupted"));
+  };
+  Deno.addSignalListener("SIGINT", onInterrupt);
 
   write("> ");
-}
+  for await (const raw of readLines()) {
+    const line = raw.trim();
+    if (line === "") {
+      write("> ");
+      continue;
+    }
+    if (line === "/exit" || line === "/quit") break;
+    if (line === "/reset") {
+      // 会話を捨てる = セッションを畳んで同じ設定で組み直す（履歴も KV も持っているのは
+      // セッションなので、捨てる口を別に持たない）。
+      await session.dispose();
+      session = new Gemma4ChatSession(pipeline, sessionOptions);
+      write("(reset)\n> ");
+      continue;
+    }
 
-Deno.removeSignalListener("SIGINT", onInterrupt);
-await session.dispose();
-write("\nbye\n");
+    const controller = new AbortController();
+    turn = controller;
+    const turnStarted = performance.now();
+    turnRuns = 0;
+    lastTiming = undefined;
+    // 発行した stream は必ず汲み切るか break で閉じる（ターンの締めは列の終端で走る）。
+    const stream = session.send(line, { onPrefill: showPrefill, signal: controller.signal });
+    try {
+      // 片は逐次復号器が**確定させたぶん**だけで、連結すると全体の decode と一致する。
+      for await (const chunk of stream) {
+        // 本文が出始めたら prefill の行は用済み（1 片目で 1 度だけ効く）。
+        clearPrefill();
+        write(chunk);
+      }
+      report(await stream.done, turnStarted);
+    } catch (error) {
+      clearPrefill();
+      if (error instanceof GenerationCapacityError) {
+        // 溢れ処理で落とせるものが尽きた = この 1 発話だけで入り切らない。判断に要る実値は
+        // 例外の欄が運ぶ（文言を読み解かない）。
+        write(
+          `\n  [入り切らない: ${error.constraint} 上限 ${error.limit} に対し` +
+            ` 既存 ${error.pastLength} + prompt ${error.promptLength}` +
+            `（この長さなら maxNewTokens ≤ ${error.maxNewTokens}）— 発話を短くするか /reset]\n`,
+        );
+      } else if (error === controller.signal.reason) {
+        // 中断でも「成功した run のぶんだけ」会話は進んでいる。done は reject ではなく
+        // `aborted` で settle するので、生成できた token 数はそのまま読める。
+        report(await stream.done, turnStarted);
+      } else {
+        throw error;
+      }
+    } finally {
+      turn = undefined;
+    }
+
+    write("> ");
+  }
+
+  Deno.removeSignalListener("SIGINT", onInterrupt);
+  await session.dispose();
+  write("\nbye\n");
+};
+
+try {
+  await main();
+} catch (error) {
+  printError(error);
+  Deno.exit(1);
+}

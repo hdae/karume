@@ -19,7 +19,12 @@
 import { evalDim, parseDim } from "../format/dims.ts";
 import type { IrDim, IrGraph } from "../format/ir.ts";
 import { STORAGE_USAGE } from "../gpu/arena.ts";
-import { type GpuContext, GpuDeviceLostError, RUNTIME_INTERNAL } from "../gpu/device.ts";
+import {
+  describeDeviceLoss,
+  type GpuContext,
+  GpuDeviceLostError,
+  RUNTIME_INTERNAL,
+} from "../gpu/device.ts";
 import { discardFailureScopes, popFailureScopes, pushFailureScopes } from "../gpu/error-scope.ts";
 import { BUFFER_USAGE } from "../gpu/webgpu-constants.ts";
 import { numel, stateWindow } from "../ops.ts";
@@ -69,7 +74,8 @@ const MAX_LOGICAL_LENGTH = 0xffffffff;
 const assertDeviceUsable = (gpu: GpuContext, where: string): void => {
   if (gpu.destroyRequested || gpu.lost !== undefined) {
     throw new GpuDeviceLostError(
-      `${where}: device が失われた（生成は失われる — device を取り直して作り直すこと）`,
+      `${where}: device が失われた（生成は失われる — device を取り直して作り直すこと）` +
+        describeDeviceLoss(gpu.lost),
     );
   }
 };

@@ -47,6 +47,25 @@ export class GpuDeviceLostError extends Error {
   override readonly name = "GpuDeviceLostError";
 }
 
+/**
+ * 消失理由を {@link GpuDeviceLostError} の文言へ足す接尾（未消失・情報無しなら空文字）。
+ *
+ * MUST: 消失を例外へ変える経路（`#raceDeviceLost` の待ち・{@link assertDeviceUsable} の同期判定・
+ * shader-f16 カナリアの `raceCanaryDeviceLost`・`runtime/generation-context.ts` の同名判定）は
+ * 全てこれを通す。`GPUDeviceLostInfo.message` は
+ * **バックエンドが入れた真因の唯一の生き残り**で（Metal の
+ * `Device::create_query_set: ...` 相当）、errorScope には入らない — 消失済み device の
+ * エラーは Deno の error handler の入口で捨てられるため、ここで落とすと真因は karume の
+ * どこにも残らない（`docs/limitations.md` の Metal timestamp 節）。
+ * 接**頭**は変えない: 「どこで失われたか」を先に読ませる形は既存の呼び手と doc が前提に
+ * している（理由は後置の追加情報）。
+ */
+export const describeDeviceLoss = (info: GPUDeviceLostInfo | undefined): string => {
+  if (info === undefined) return "";
+  const message = info.message.trim();
+  return ` — reason: ${info.reason}${message === "" ? "" : ` / ${message}`}`;
+};
+
 /** 常駐テンソル（{@link ResidentTensor}）の寿命規律の破れ（破棄後利用・参照中の破棄）。 */
 export class ResidentTensorError extends Error {
   override readonly name = "ResidentTensorError";
@@ -322,9 +341,11 @@ const raceCanaryDeviceLost = <T>(
 ): Promise<T> =>
   Promise.race([
     work,
-    device.lost.then((): never => {
+    device.lost.then((info): never => {
       throw new GpuDeviceLostError(
-        `shader-f16 カナリアの${where}中に device が失われた（再構築が必要）`,
+        `shader-f16 カナリアの${where}中に device が失われた（再構築が必要）${
+          describeDeviceLoss(info)
+        }`,
       );
     }),
   ]);
@@ -570,7 +591,8 @@ type GpuContextInternals = {
 const assertDeviceUsable = (gpu: GpuContext, where: string): void => {
   if (gpu.destroyRequested || gpu.lost !== undefined) {
     throw new GpuDeviceLostError(
-      `${where}: device が失われた（device を取り直して作り直すこと）`,
+      `${where}: device が失われた（device を取り直して作り直すこと）` +
+        describeDeviceLoss(gpu.lost),
     );
   }
 };
@@ -763,8 +785,12 @@ export class GpuContext {
   async #raceDeviceLost<T>(work: Promise<T>, where: string): Promise<T> {
     let unsubscribe: () => void = () => {};
     const lost = new Promise<never>((_resolve, reject) => {
-      unsubscribe = this.onLost(() => {
-        reject(new GpuDeviceLostError(`${where} 中に device が失われた（再構築が必要）`));
+      unsubscribe = this.onLost((info) => {
+        reject(
+          new GpuDeviceLostError(
+            `${where} 中に device が失われた（再構築が必要）${describeDeviceLoss(info)}`,
+          ),
+        );
       });
     });
     try {
