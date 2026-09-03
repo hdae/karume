@@ -7,11 +7,23 @@
 > [docs/perf-ledger.md](../docs/perf-ledger.md)。ここは「今この瞬間の文脈」だけを持つ —
 > 履歴・完了記録は ADR / research / git へ。
 >
-> Last updated: 2026-09-02
+> Last updated: 2026-09-03
 
 ## Now
 
-- **並列作業（2026-09-02 深夜 — 裁定済み優先順）**: ①DL 改善 = 実測で b+a を kill（[research](../docs/research/2026-09-02-cold-load-dl-timeline.md)・残る問い = 実回線の同時本数）②gemma4 対話 example 第 2 弾 = **全消化**（②〜⑧ `f7f0b66` `c659dd9`・① ChatSession `d72bd9d` = 溢れ処理は注入 + 既定 clear・残起票 = send の prefill 進捗の口）③perf: P-1 採用（`3175161`・短い行 ×4.1）・P-2 採用（`e7b4489`・submit −95%・壁は揺れ内・追試 no-ref / Chrome）・P-3 実装済み（`9591783`・VAE A/B と視認は実行中） ④可変 capacity 波（RoPE 表 TS 正本ホスト生成 + 見積り結線）= P 依存計測を先行 ⑤TurboQuant = 記録のみ（perf-ledger Q-11 / L-10）。hub HF `into` 配線はコミット済み（fetch-cache 0.6.0）。
+- **可変 capacity 波 + K-12（2026-09-03 — 実装済み・リリース前・[ADR 0091](../docs/decisions/0091-gemma4-host-rope-variable-capacity.md)）**:
+  gemma4 の RoPE 表は配布物に無く、cos / sin は chunk ごとにホストが派生入力で供給する
+  （`packages/models/src/gemma/rope.ts` が正本・上流 f32 とはビット同一でない = 位置比例 parity）。
+  `position_ids` 入力は消え、capacity は sequence / ChatSession 生成時のノブ・chunkLength は
+  PipelineOptions（既定 768 / 4,096・上限 = maxPosition 131,072）。K-12 = states 形 ③PV の KV
+  並列縮約（`stateAttentionReduce: "parallel"`・opt-in・decode 16K ×2）。**落とし穴**: ①旧配布形
+  （表を焼いた karume/4 gemma4）は読めない ②`GreedySpec` / `GenerationProgramSpec` は `positionIds`
+  を持たない（派生入力 `derive` が位置の唯一の供給口）③states 形 attention を持つグラフの見積りは
+  `maxStorageBufferBindingSize` 必須 ④K-12 を既定にする昇格は品質裁定 + golden 更新を同一コミットで。
+  次 = フル verify → リリース（gemma4 のアップまで）→ ②OP マイクロベンチ / ③Fusion 半自動発見
+  （1 段目 = census / IR n-gram・GPU 不要）→ K-13 / K-14。
+
+- **並列作業（2026-09-02 深夜 — 裁定済み優先順）**: ①DL 改善 = 実測で b+a を kill（[research](../docs/research/2026-09-02-cold-load-dl-timeline.md)・残る問い = 実回線の同時本数）②gemma4 対話 example 第 2 弾 = **全消化**（②〜⑧ `f7f0b66` `c659dd9`・① ChatSession `d72bd9d` = 溢れ処理は注入 + 既定 clear・残起票 = send の prefill 進捗の口）③perf: P-1 採用（`3175161`・短い行 ×4.1）・P-2 採用（`e7b4489`・submit −95%・壁は揺れ内・追試 no-ref / Chrome）・P-3 実装済み（`9591783`・VAE A/B と視認は実行中） ④可変 capacity 波 = **実装済み（2026-09-03・ADR 0091 — 下の新項）** ⑤TurboQuant = 記録のみ（perf-ledger Q-11 / L-10）。hub HF `into` 配線はコミット済み（fetch-cache 0.6.0）。
 - **モデル更新波（2026-09-01 裁定 — 実装中・詳細は [backlog](../docs/backlog.md) now の
   「モデル更新波」）**: **N1 Irodori v4.1-small = ローカル完了**（凍結をバイトで確証・
   全系列 export + dist + スモーク緑・pin 新設と examples 既定切替はリリース時 = runbook §3。

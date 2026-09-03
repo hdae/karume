@@ -57,3 +57,29 @@
 - 数値: ③' は縮約順が違うので ③ とビット同一ではない。A/B 帯門（`tests/gpu_state_attention_parallel_test.ts`）の
   実測最悪は vs ③ 2.38e-7 / vs f64 参照 3.99e-7（帯 5e-6）。決定性・容量非依存・行ブロック非依存・pad 行厳密 0 は
   ビット門で保持。opt-in 席 = `stateAttentionReduce`（既定 `"sequential"` — ADR 0058）。
+
+## §4 新配布形（RoPE ホスト供給・chunkLength 768 / capacity 4,096 既定）での再測
+
+再 export 後のミラー `models/karume-gemma4-e2b`（ADR 0091）で同じ台本を回した（session 経路・N = 48・
+capacity は P に合わせて上書き）。
+
+|      P | capacity | prefill（seq / par） | decode ms/token（seq → par） |
+| -----: | -------: | -------------------: | ---------------------------: |
+|    992 |    4,096 |        3.99 / 3.91 s |                  40.0 → 33.0 |
+|  4,096 |    4,160 |        12.2 / 12.6 s |                  47.1 → 34.7 |
+| 16,000 |   16,384 |        68.2 / 74.0 s |                  82.2 → 41.1 |
+
+token 列は 3 点とも旧計測用配布形（pos16k）と一致 — 出荷バイト（GPTQ 再走）と RoPE 表（f64 → f32）が
+両方変わっても greedy の列は動かなかった。
+
+`Gemma4Pipeline.estimateSessionMemory` の実値（同ミラー・RTX 3080 Ti の granted limit）:
+
+| capacity |   weights | state（KV） | prefill workspace | peakAccounted |
+| -------: | --------: | ----------: | ----------------: | ------------: |
+|    4,096 | 1,506 MiB |      60 MiB |           431 MiB |     2,028 MiB |
+|   16,384 | 1,506 MiB |     204 MiB |           719 MiB |     2,460 MiB |
+|   65,536 | 1,506 MiB |     780 MiB |         1,871 MiB |     4,188 MiB |
+|  131,072 | 1,506 MiB |   1,548 MiB |         1,871 MiB |     4,956 MiB |
+
+workspace が 65,536 で頭打ちなのは states 形 attention の一時 S が行ブロック（binding 上限で等分）に
+収まるため。128K の会話は 12 GB 級の device なら見積り上は載る（時間の壁は §2 / §3 のとおり）。
