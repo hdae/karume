@@ -98,7 +98,8 @@ shard 1GiB 上限（ADR 0081）の門は書き手側にしか無かった。
   両上限 314,572,800（300MiB）/ f16 に binding のみ 157,286,400（150MiB）、gemma4 は manifest
   不変、sbv2 は欄なし。shard のサイズ・sha は全て不変（manifest の差分は `requiredLimits` 欄
   のみを機械比較）。「全 8 家族」は文書上の数え方で、siglip2 / birefnet / depth-anything /
-  vowel-detector は未配布（ミラーも pin も無い）— 初回組み立てはリリース波。
+  vowel-detector は未配布（ミラーも pin も無い）— ~~初回組み立てはリリース波~~ → リリース後
+  （2026-09-03 裁定・backlog release 節）。
 - 再生成で見えた既存ドリフト 2 点（本 ADR の対象外・記録のみ）: ①sbv2 の
   `shared/text/symbols.json` が源（`outputs/misc/sbv2-demo/`・2026-08-30 17:40 再生成）に追随して
   1,642 → 1,647 バイトへ変化（WAV 凍結 e2e は緑 = 出力に影響しないメタデータ差）②gemma4 と

@@ -5,6 +5,8 @@
 from the product one, a **distribution** (`distribution.py` / `card.py` — see "Assembling the
 distribution" below).
 
+Upstream provenance: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
 The checkpoint is `google/gemma-4-E2B-it`, licensed **Apache 2.0** (the snapshot's own README
 frontmatter says `license: apache-2.0`, and its `license_link` page carries the plain Apache 2.0
 text — the earlier claim here that the weights fell under the Gemma Terms of Use was wrong; that

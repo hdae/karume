@@ -16,7 +16,9 @@ verify を並行させた走りで 2 回観測（単独走行でも過去に観�
 
 実機 **Apple M2**（初出 Deno 2.9.4・2026-08-29 に 2.9.6 で再検証・2026-08-31 フル verify で
 節の対象を棚卸し・**2026-09-02 にメモリ管理波 Phase A 後の HEAD `2b096c4` を Deno 2.9.4 で
-再実測 = 計 12 本が同一署名で再現・新規 0**）で attention i8a8 系 4 本
+再実測 = 計 12 本が同一署名で再現・新規 0**・**2026-09-03 にレビュー修正波後の HEAD `b7e32c1` を
+macOS 26 で再実測 = 同じ 12 本が同一署名で再現。フル verify は 1856 passed / 13 failed /
+139 ignored で、13 本目は本節の対象ではなく下の `--diagnostics` 節**）で attention i8a8 系 4 本
 （`gpu_attention_i8a8_test.ts` 3 本 + `gpu_attention_pv_i8a8_test.ts` 1 本）+
 **conv1d parity 2 本 + conv2d parity 2 本**
 （旧記述は conv2d のみ — conv1d の 2 本が記載から漏れていた・症状は同型）+
@@ -113,28 +115,59 @@ Metal では errorScope 沈黙のまま — by-design 制約として limitation
 （宣言 311,164,928B）の配布形ミラーが M2 のアダプタ値（maxBufferSize 14,302,248,960 /
 maxStorageBufferBindingSize 4,294,967,292）で誤拒否なく通過し、生成まで完走。
 
-## Metal で `--diagnostics`（`gpuTiming: true`）が device ごと落ちる — 切り分け実験待ち
+## Metal で `--diagnostics`（`gpuTiming: true`）が device ごと落ちる — 実験と改修はリリース後（裁定 2026-09-03）
 
-実機 **Apple M2 / Deno 2.9.x** で `examples/gemma4` を `--diagnostics` 付きで走らせると、最初の
-ターンで device が消失して落ちる。機序と確定事実は
+実機 **Apple M2 / macOS 26 / Deno 2.9.x** で `examples/gemma4` を `--diagnostics` 付きで走らせると、
+最初のターンで device が消失して落ちる。機序と確定事実は
 [limitations](limitations.md)「Metal（Apple GPU）では GPU 側 timestamp 計測が実用にならない」節に
 書いた（`createQuerySet` の失敗 → `DeviceError::Unexpected` → device lost・errorScope には入らない）。
 **未確定なのは資源の軸**で、①初回 run で同時に生きる query set の本数（1 チャンク 16 dispatch 固定
 なので gemma4 prefill ≈1,500 dispatch で約 100 本）②Deno の `GPUQuerySet.destroy()` が no-op で
-GC まで滞留する量、のどちらが支配的か切り分けられていない。両者は排他ではない。
+GC まで滞留する量、のどちらが支配的か切り分けられていない。両者は排他ではない。実機は
+**macOS 26（Metal 4）と確認済み（2026-09-03）**なので、確保に成功しても timestamp が全ゼロになる
+別の未修正問題（[wgpu#9414](https://github.com/gfx-rs/wgpu/issues/9414)）の射程にも入る — 下の修正
+候補を入れても、この機体で op 別内訳が読めるようになるとは限らない。
+
+**フル verify でも同じ形で 1 本赤になる（2026-09-03・M2 / macOS 26 実測）**: `--diagnostics` を
+渡さない `deno task verify` でも、`packages/models/tests/e2e_gemma4_pretrained_test.ts:202` の
+census 門（「gemma4 配布形: パイプラインの既定は ③' 並列縮約で走り…」）が `acquireGpu({ gpuTiming:
+true })` で実重み gemma4 の prefill を走らせるため、parallel / sequential の 2 step とも赤になる
+（フル verify 1856 passed / 13 failed / 139 ignored の **13 本目** — 上の 1 ULP 節が数える 12 本
+とは別クラス）。Metal でも **`ignore` 条件に掛からない**: 判定は `adapter.features` の列挙だけで
+（`packages/models/tests/helpers/gpu.ts` の `TIMESTAMP_QUERY_AVAILABLE`）、Metal は
+`timestamp-query` を申告する。「Metal は広告しないので計測テストは skip される」という理解は誤り。
+観測されたエラーは逐語で
+
+```
+GpuDeviceLostError: flush 中に device が失われた（再構築が必要） — reason: unknown / device was lost
+```
+
+（スタックは `SubmitScheduler.flush`〈`submit.ts:508`〉→ `RunArena.destroy`〈`arena.ts:272`〉→
+`GpuContext.onLost`）。**`reason` に載ったのは Metal 側の汎用文言「device was lost」だけで、
+`createQuerySet` の真因文字列は届かなかった** — limitations の「バックエンドが入れた真因文字列が
+初めて呼び手まで届く」は本経路では成立しない。したがって「query set 約 100 本の同時生存が原因」は
+**見立てのまま**（逐語の裏付けはまだ無い）。傍証として、単一 query set の
+`packages/runtime/tests/gpu_timing_test.ts` は同じ M2 で緑 = 失敗は本数依存であって無条件ではない。
+wgpu#9414 の「timestamp 全ゼロ」はこの構成では観測されていない。
 
 切り分け実験（実機が要る・1 ターンだけ走らせる）:
 
 1. `SubmitPolicy.initialChunkSize` を 16 → 256 にして本数を約 1/16 に落とす A/B。落ちなくなれば
    同時生存本数が支配（①）。
 2. `deno --v8-flags=--expose-gc` で run ごとに GC を強制する。落ちなくなれば滞留が支配（②）。
-3. 実機の macOS バージョン確認。26（Metal 4）なら確保に成功しても timestamp が全ゼロになる
-   （[wgpu#9414](https://github.com/gfx-rs/wgpu/issues/9414)）ので、修正の投資判断自体が変わる。
+3. ~~実機の macOS バージョン確認~~ **確認済み（2026-09-03）= macOS 26（Metal 4）**。上記のとおり
+   wgpu#9414 の射程に入るので、修正の投資判断はその前提で行う。
 
 修正候補: **query set を 1 本だけ持って使い回す**（容量は per-set 上限固定・Dawn の counter sample
 buffer プールと同じ発想）。同一 queue の実行順序保証があるので、チャンクごとにホストで待つ形へ
 落とす必要は無い見込み（`resolveBuffer` / `readBuffer` はチャンクごとに要るが、こちらは Deno でも
 `destroy()` が効く）。逆方向（刻みを小さくする）は総サンプル数が変わらず本数だけ増えるので採らない。
+
+**裁定（2026-09-03・ユーザー）**: 切り分け実験（①②）も上の修正候補も**リリース後**に回す。理由 =
+実機が macOS 26 と確定し、query set を使い回して確保に成功しても wgpu#9414 で timestamp が全ゼロに
+なる可能性があるため、改修より先に実験で見極める。リリース判定では **verify の census 門 1 本が
+M2 で赤のまま残ることを受容する**（Linux / Vulkan は緑・parallel と sequential の等価性は計測を
+要求しない `packages/models/tests/e2e_gemma4_reduce_parity_test.ts` が担保する）。
 
 ## EmbeddingGemma の batch>1 export が変換段で通らない
 

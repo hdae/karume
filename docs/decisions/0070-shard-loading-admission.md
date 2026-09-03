@@ -105,7 +105,7 @@ await が無い」ことで従来どおり保たれ、区間が短くなるだ�
 
 - ストリーミング fake 展開（i4 → f32 の CPU 展開を shard 単位で行う適格外経路）は
   決定 3 に内包（追加設計不要）。
-- 大型 DL 前の limits preflight（backlog release 項）は本 ADR の estimator を土台に
+- 大型 DL 前の limits preflight（backlog release 項 — ADR 0089 波 2 で消化済み・2026-09-01）は本 ADR の estimator を土台に
   release 波で。hub Range 並列 + prefetch（perf L-3・parked）は相 1 の内側の最適化として
   席が残る（契約は不変）。
 

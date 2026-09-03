@@ -22,9 +22,19 @@ questions it has to answer.
   verbatim from `AnimaTextConditioner` and `CosmosTransformer3DModel`, and `tiling.py` self-reports
   verbatim ports of `AutoencoderKLQwenImage.blend_v` / `blend_h`. `pipeline_ref.py` self-reports a
   verbatim transcription of the upstream pipeline blocks.
+- **Official single-file checkpoints** — [circlestone-labs/Anima](https://huggingface.co/circlestone-labs/Anima),
+  `split_files/diffusion_models/` (fetched by hand into `inputs/anima/upstream-2458426/`). These are
+  the four official variants the distribution now carries besides the base: `anima-turbo-v1.1`,
+  `anima-turbo-v1.0`, `anima-aesthetic-v1.1`, `anima-aesthetic-v1.0` (ADR 0087).
+- **Third-party fine-tunes** — `anima-wai-v1.0` and `anima-copycat-20260610`, published on Civitai
+  and redistributed from the separate `karume-anima-extra` repository (ADR 0087 / 0088). Their
+  weights derive from the same CircleStone base, so the upstream license flows through; the
+  per-source permission fields differ and are listed below.
 - **Distilled LoRA** — the official CircleStone Labs "Anima Turbo LoRA" (see the inventory row
-  below), baked into the weights at export time (`lora.py`). The conversion to diffusers naming
-  uses the diffusers-supplied function.
+  below). It used to be baked into the weights at export time (`lora.py`); **that path is retired
+  from the distribution** (ADR 0087 — the official Turbo checkpoint replaced it). The machinery is
+  kept for possible future fine-tune intake, and the conversion to diffusers naming uses the
+  diffusers-supplied function.
 
 ## Release-gate inventory
 
@@ -53,13 +63,46 @@ published.
 | Weights license          | n/a                                                                                                                            |
 | Attribution requirements | Unverified                                                                                                                     |
 
-### Distilled LoRA (baked in at export time)
+### circlestone-labs/Anima (official single-file checkpoints)
+
+| Item                     | Value                                                                                                                                                                                                           |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Upstream repository      | <https://huggingface.co/circlestone-labs/Anima> (`card.py` records it as the same bytes Civitai distributes as model version 2458426)                                                                           |
+| Revision used            | Unverified — the hand-placed copy under `inputs/anima/upstream-2458426/` carries no snapshot metadata. Files used: `split_files/diffusion_models/anima-{turbo,aesthetic}-v1.{0,1}.safetensors`                  |
+| Form of copy             | Loaded, not copied. Re-distributed in converted storage form (`karume-anima`).                                                                                                                                  |
+| Code license             | n/a (weights only)                                                                                                                                                                                              |
+| Weights license          | CircleStone Labs Non-Commercial License v1.2 — the verbatim text is vendored as `circlestone_license.txt` and shipped as the distribution's `LICENSE.md`. The v1.2 wording was compared verbatim on 2026-09-01. |
+| Attribution requirements | License §3(a)/(b)/(d): the distribution bundles `LICENSE.md` + `NOTICE.md` (Attribution Notice verbatim, modification statement, non-endorsement). The card also carries them (`card.py` `ATTRIBUTION_NOTICE`). |
+
+### anima-wai-v1.0 (third-party fine-tune)
+
+| Item                     | Value                                                                                                                                                                                                                                                                                                                                                                  |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Upstream repository      | <https://civitai.com/models/2544636/wai-anima> (author `WAI0731`; AIR `urn:air:anima:checkpoint:civitai:2544636@2983680`)                                                                                                                                                                                                                                              |
+| Revision used            | version 2983680 — `inputs/anima/civitai-2983680/` with `civitai.json`; file `waiANIMA_v10Base10.safetensors`, sha256 `9d5a1e1393c2978d6a979fab38fb0dee00bc2a94e354196c9f3cf2f6f56d5fbf` (byte-matched)                                                                                                                                                                 |
+| Form of copy             | Loaded, not copied. Re-distributed in converted storage form (`karume-anima-extra`).                                                                                                                                                                                                                                                                                   |
+| Code license             | n/a (weights only)                                                                                                                                                                                                                                                                                                                                                     |
+| Weights license          | Derivative of the CircleStone base, so the CircleStone Non-Commercial License flows through. Civitai permissions as of 2026-08-22 (re-checked 2026-09-01, unchanged): `allowNoCredit` true / `allowCommercialUse` Image, RentCivit / `allowDerivatives` true / `allowDifferentLicense` true. Whether those page fields can broaden the upstream license is Unverified. |
+| Attribution requirements | The card lists the source page, author and the four permission fields with an "as of" date (`card.py`). Base-model obligations are covered by the bundled `LICENSE.md` / `NOTICE.md`.                                                                                                                                                                                  |
+
+### anima-copycat-20260610 (third-party fine-tune)
+
+| Item                     | Value                                                                                                                                                                                                                                                                                                                     |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Upstream repository      | <https://civitai.com/models/2377376/copycat-anima> (author `calculater`)                                                                                                                                                                                                                                                  |
+| Revision used            | `inputs/anima/copycatAnima_20260610.safetensors`, placed by hand on 2026-08-22 — predates the `anima.civitai` intake command (ADR 0088), so there is no `civitai.json` beside it and no version id or sha256 was recorded. Unverified.                                                                                    |
+| Form of copy             | Loaded, not copied. Re-distributed in converted storage form (`karume-anima-extra`).                                                                                                                                                                                                                                      |
+| Code license             | n/a (weights only)                                                                                                                                                                                                                                                                                                        |
+| Weights license          | Derivative of the CircleStone base, so the CircleStone Non-Commercial License flows through. Civitai permissions as of 2026-08-22: `allowNoCredit` true / `allowCommercialUse` Image, RentCivit / `allowDerivatives` true / **`allowDifferentLicense` false** — this source requires redistribution under the same terms. |
+| Attribution requirements | The card lists the source page, author and the four permission fields with an "as of" date (`card.py`), including the `allowDifferentLicense` false row. Base-model obligations are covered by the bundled `LICENSE.md` / `NOTICE.md`.                                                                                    |
+
+### Distilled LoRA (retired from the distribution path)
 
 | Item                     | Value                                                                                                                                                                                                                        |
 | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Upstream repository      | Official CircleStone Labs "Anima Turbo LoRA" — <https://civitai.com/models/2560840/anima-turbo-lora> (author `circlestone_labs`; identified 2026-08-20, user-confirmed provenance)                                           |
 | Revision used            | v0.2 (`inputs/anima/anima-turbo-lora-v0.2.safetensors`, 148,902,616 B — matches the v0.2 SafeTensor size listed on the Civitai page as of 2026-08-20)                                                                        |
-| Form of copy             | Merged into the exported weights (`lora.py`).                                                                                                                                                                                |
+| Form of copy             | Was merged into the exported weights (`lora.py`). **No published form derives from it any more** — ADR 0087 replaced the baked Turbo with the official checkpoint; the merge path is kept but unused.                        |
 | Code license             | n/a (weights only)                                                                                                                                                                                                           |
 | Weights license          | "Anima License" per the Civitai page = the CircleStone Non-Commercial License (same terms as the base weights; Copyright CircleStone Labs LLC). Checked on the model page 2026-08-20.                                        |
 | Attribution requirements | Covered by the base-model obligations: the distribution bundles `LICENSE.md` + `NOTICE.md` (Attribution Notice, modification statement naming the baked LoRA, non-endorsement) per License §3(a)/(b)/(d) — wired 2026-08-20. |

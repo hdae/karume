@@ -37,7 +37,9 @@
   コマンド（AIR / URL → sha256 突合 DL → `inputs/anima/civitai-<versionId>/` +
   `civitai.json`・命名は機械正規化 = 0077 改訂・ライセンスはエージェント事前確認形 =
   判定せず記録 + `license-review.md`・実 DL 疎通済み）。**モデル更新波クローズ**（HF 一括
-  アップはメモリ管理波を含むリリースの直前 — 2026-09-01 裁定）。
+  アップはメモリ管理波を含むリリースの直前 — 2026-09-01 裁定。**範囲は 2026-09-03 裁定で
+  gemma4 のアップまでへ改訂** = 6 リポ + pin 3 新設・3 更新。BiRefNet / DepthAnything /
+  SigLIP2 / vowel-detector の初回公開はリリース後）。
 - **メモリ管理波 Phase A（2026-09-01・ADR 0089 — 波 1〜4 実装済み = Phase A クローズ）**:
   GPU メモリ適合を「絶対上限との決定論的比較」へ昇格 — runtime 重み/state の確保前検査
   （`assertWeightsWithinLimits` = 席→バッファ写像 `planWeightBuffers` を見積りと共有）・
@@ -45,7 +47,9 @@
   ≤1GiB 読み手検査・**models 読み手結線**（`requiredLimits` を重み DL 前に検査 — 共有 GPU は
   `GpuContext.limits`、自前経路は `readAdapterLimits` でアダプタを読んで捨てる = 案 A・
   既存 5 ミラー再生成済み・**M2 検証消化 2026-09-02** = 赤は既知 12 + sha 参照門 15 のみ・DL 前
-  検査は gemma4 / anima で通過・chat golden 緑 = gemv margin 命題成立〈ADR 0082 追記 3〉）。
+  検査は gemma4 / anima で通過・chat golden 緑 = gemv margin 命題成立〈ADR 0082 追記 3〉。
+  **Mac リリース前検証も消化 2026-09-03**〈macOS 26・フル verify 1856/13/139 = 既知 12 +
+  census 1 本・③' stdout 3.58e-7 / 2.38e-7 が Linux と桁一致 — backlog now〉）。
   空き VRAM・合計は比較しない（ADR 0070 決定 5 維持 — Metal
   errorScope 沈黙で残る限界は limitations 記録）。**Phase B へ持ち越し = `estimateSessionMemory`
   のロード面結線**（ロード時に束縛値を持つ家族が gemma4 だけ — 実測後に席を決める）→
@@ -128,7 +132,7 @@
   **受け入れ実証済み**: Base f16 3.9GB → 4 shard で実ロード + 生成完走。正本 = ADR
   [0070](../docs/decisions/0070-shard-loading-admission.md) 追記 2026-08-29。
   **HF 更新系まで完了（2026-08-29）**: 全席分割ビット同一・base / turbo とも公開済み
-  （**公開 revision の正本は pin 定数** `ANIMA_CURRENT` / `ANIMA_TURBO_CURRENT` — 値は
+  （**公開 revision の正本は pin 定数** `ANIMA_CURRENT` — 値は
   `packages/models/src/anima/config.ts` を見る。docs に SHA を写さない）・**shard ごとの
   越境参照**（ADR 0038 §7 追記 2026-08-29）初適用・pin 焼き込み + 実 DL
   疎通済み。実資産テストとローカル配信は越境 + 分割ミラーへ追随済み（fromAssets の実 GPU
@@ -176,8 +180,9 @@
     （ADR [0038](../docs/decisions/0038-manifest-v1.md) 追記 2026-08-25）。旧 format は読めない。
   - **`fromPretrained` の `ref` は必須**（既定ソースの廃止 — ADR
     [0073](../docs/decisions/0073-models-source-pin.md) 追記 2026-08-25）。pin 定数は
-    `<FAMILY>[_<VARIANT>]_CURRENT` の 4 本で、位置づけは「**パッケージ版に合わせて自動追従したい
-    場合のオプトイン**」= bump のたびに pin 更新 + 動作確認の義務つき。hub は revision 未指定の
+    `<FAMILY>[_<VARIANT>]_CURRENT`（**公開リポ 1 つにつき 1 定数** — 現物は
+    `packages/models/mod.ts` の re-export が正本）で、位置づけは「**パッケージ版に合わせて自動追従
+    したい場合のオプトイン**」= bump のたびに pin 更新 + 動作確認の義務つき。hub は revision 未指定の
     暗黙 `main` 解決に 1 回だけ warn（解決 SHA 印字 + pin / `*_CURRENT` の 2 択案内）。
   - anima に `pipelineConfig.scheduler.type` 席（`euler` / `dpmpp-2m`・省略時 euler）。
     **配布既定は euler**（再裁定 2026-08-25 — ADR 0078。0.5.0 期の公開 revision

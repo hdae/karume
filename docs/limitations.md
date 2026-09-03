@@ -355,8 +355,9 @@ bit 幅からのバイト長導出）は公式 `F4` と同型で、非互換は 
 
 - 影響: i4 テンソルを含む shard は **karume のリーダ / exporter 以外では読めない**
   （HF へのアップロード・DL は内容非依存なので通る）。i4 を含まない shard は公式互換のまま。
-- 対象: i4 系列を含む配布形すべて（例: anima `w4` 系・irodori `w4`・sbv2 `w8-bert4` の
-  text_encoder）。モデルカードへの注記は次リリース一括のカード再生成で入れる。
+- 対象: i4 系列を含む配布形すべて（例: gemma4-e2b — この配布形の重みは i4 のみ・irodori `w4`・
+  sbv2 `w8-bert4` の text_encoder）。**モデルカードには注記済み**（0.8.0 のカード再発行 —
+  格納 dtype に `i4` を含む配布形にだけ出る）。
 - 公式仕様への追随提案（upstream への I4/U4 追加要望）はしない — 2026-09-01 ユーザー裁定。
   目指す方向が違うため、将来は**別形式 / 独自形式への移行**を検討する（器は次の
   manifest format 変更時 — [backlog](backlog.md) の次波計画）。
@@ -855,15 +856,23 @@ query set が約 100 本**同時に生きた状態**になる。1 本あたり�
 （`examples/gemma4/main.ts`）は本体を関数に包み、最上位で `SuppressedError`（`.error` /
 `.suppressed`）・`AggregateError`・`cause` 連鎖を再帰で全て stderr へ展開して exit 1 する。
 `device.ts` は消失理由（`GPUDeviceLostInfo` の `reason` / `message`）を `GpuDeviceLostError` の
-文言へ載せるので、バックエンドが入れた真因文字列（Metal の `Device::create_query_set: …` 相当）が
-初めて呼び手まで届く。
+文言へ載せる。ただし**この経路では真因文字列は届かなかった**（2026-09-03 M2 実測）— 実際に出た
+のは `GpuDeviceLostError: flush 中に device が失われた（再構築が必要） — reason: unknown /
+device was lost` で、`message` は Metal 側の汎用文言だけ。`Device::create_query_set: …` 相当の
+文字列が呼び手まで届くという期待は、少なくともこの消失の出方では成立しない。
 
-観測は Apple M2 / Deno 2.9.x（anima の DiT 1 step = 3,301 dispatch と gemma4 の対話台本の両方）。
+観測は Apple M2 / Deno 2.9.x の 3 経路（anima の DiT 1 step = 3,301 dispatch・gemma4 の対話台本・
+フル verify の census 門 `packages/models/tests/e2e_gemma4_pretrained_test.ts`）。3 経路目の観測は
+**macOS 26 実機・2026-09-03 のフル verify**（赤 1 本 — アダプタが `timestamp-query` を列挙するので
+Metal でも skip されない）。先行 2 経路の macOS 版は記録が無いので、この版を 3 経路すべてへ被せない。
 
 **現状の Deno では回避策が無い**（query set を 1 本に固定して使い回す案は未実験 —
 [known-issues](known-issues.md) 参照）。op 別の内訳が要る計測は Linux / Vulkan 機で行う。
-壁時計だけなら計測を切って（既定）測れる。なお macOS 26（Metal 4）では確保に成功しても
-timestamp が全ゼロになる別の未修正問題がある（[wgpu#9414](https://github.com/gfx-rs/wgpu/issues/9414)）。
+壁時計だけなら計測を切って（既定）測れる。**本節の観測に使っている参照 Mac は macOS 26（Metal 4）
+と確認済み（2026-09-03）**で、確保に成功しても timestamp が全ゼロになる別の未修正問題
+（[wgpu#9414](https://github.com/gfx-rs/wgpu/issues/9414)）の射程に入る — query set を 1 本へ畳む
+改修を入れても、この機体で op 別内訳が読めるようになるとは限らない。なお本機で観測されているのは
+確保そのものの失敗（device lost）で、全ゼロの側は未観測。
 
 なお同じ理由で本ファイルの「Deno では GPUBuffer の総確保がドライバ申告予算の 97% で頭打ちになる」
 節の制約は **Metal には効かない** — wgpu の `MemoryBudgetThresholds` は D3D12 と Vulkan のみ対応で、
@@ -1019,6 +1028,9 @@ VRAM は容量に比例して伸びる（full 層 KV
 - **decode の attention ③PV は `Gemma4Pipeline` では KV 並列縮約（perf-ledger K-12）が既定**
   （`GEMMA4_STATE_ATTENTION_REDUCE = "parallel"`）。runtime の参照経路 `"sequential"` とは縮約順が
   違い（A/B 帯 5e-6・実測は ③ との差 2.4e-7・f64 参照との差 3.99e-7）、gemma4 の golden は両者で同一。
+  帯の実測範囲は縮約長 live 1〜16,384（`gpu_state_attention_parallel_test.ts` の門 — 最悪値は live が
+  小さい側で出る）+ 65,536（手実測）: live 4,096 / 16,384 / 65,536 で ③' vs f64 = 8.6e-9 / 1.5e-8 /
+  1.8e-8（帯の 1/100・2026-09-03 レビュー実測）。
   `Gemma4PipelineOptions.stateAttentionReduce: "sequential"` で参照経路へ戻せる。
   低レベル面（`createSession` を自分で呼ぶ消費者）の既定は runtime のまま `"sequential"`。
 - `chunkLength` の上限は焼いた記号 `M` の trace 上限で、配布形が `pipelineConfig.maxChunkLength`

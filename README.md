@@ -8,7 +8,7 @@ packages built from Web-standard APIs). Composed of three JSR packages — `@kar
 (the installed CLI ships `dist` / `verify`; the `export*` commands run from the repository
 work tree only).
 
-Status: **WIP** (this description gets written during release preparation. The current design's
-source of truth is [docs/decisions/](docs/decisions/))
+Status: **pre-1.0** (this page is a stub; the current design's source of truth is
+[docs/decisions/](docs/decisions/))
 
 License: MIT ([LICENSE](LICENSE))

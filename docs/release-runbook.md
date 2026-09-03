@@ -29,16 +29,26 @@
 commit SHA を焼き込む**ので、参照先が先に公開されていないと焼けない。extra（追加学習系）が
 公式リポの text stack を参照する現行の組（ADR 0087 — 旧 turbo → anima の向きと同型）では:
 
-1. **`karume-anima` を先に上げる**（§2 の断片化対策込み・公式 3 変種 — ADR 0087）
+1. **`karume-anima` を先に上げる**（§2 の断片化対策込み・公式 5 変種〈`anima-turbo-v1.1`〈既定〉/
+   `anima-v1.0` / `anima-aesthetic-v1.1` / `anima-turbo-v1.0` / `anima-aesthetic-v1.0`〉— ADR 0087）
 2. その **main の commit SHA を確定**させる（§3 と同じ取り方）
 3. その SHA を渡して **`karume-anima-extra` を越境参照で焼く** — `tools/export-recipes/dist.py`
    の 5 指定（`--ref-repo` / `--ref-revision` / `--ref-dist` / `--ref-model` / `--ref-role`）は
    **全部揃うか 1 つも無いか**の 2 通りだけで、部分指定は落ちる。
+   **extra は 2 モデル同居なので `--model anima-wai-v1.0 --model anima-copycat-20260610` で
+   1 リポを 1 回で焼く**（`--model` は繰り返し指定 = ファミリー組み立て。先頭が `defaultModel`）。
+   `--ref-role` は `text_encoder` / `vae_decoder` / `tokenizer` / `tokenizer_2` の 4 つ
+   （`text_conditioner` は extra の 2 モデルとも自前なので越境しない — `distribution.py` の
+   `own_text_conditioner=True`）。
    **ステージングの `--out` は必ずリポ名と同名のディレクトリにする** — カードの Usage 例の
    repo 名は出力ディレクトリ名から導出されるため、別名で焼くと誤った repo 名がカードに載る
    （0.5.0 で `-release` 付きステージング名がそのまま公開カードに写った実害 — 2026-08-25 に
    修正。恒久策は backlog later）
 4. **`karume-anima-extra` を上げる**
+   - [ ] extra ミラーの生成後に**越境の実資産門を復活**させる — `packages/models/tests/e2e_anima_test.ts`
+         の `CROSS_REPO_MIRRORS` と `packages/runtime/tests/assets_fusion_counts_test.ts` の
+         `MIRRORS` にエントリを戻し、extra 変種の融合ヒット数と参照 sha を新規凍結する
+         （公式リポの自己完結化で一旦空にした門 — 表と配り分けの機構は残してある）
 
 参照先を後から上げ直すと SHA が変わり、extra の manifest は**古い revision を指したまま**に
 なる（バイト列は二重 pin で守られるので誤配は起きないが、2 リポの内容が別世代になる）—
@@ -61,8 +71,11 @@ NOTE（次リリース限り）: 旧 `hdae/karume-anima-turbo` は ADR 0087 で�
       写す）。ローカル e2e の SBV2 門は公開ミラー `karume-sbv2-jvnv` が正本（2026-08-30 に
       非公開 fn から付け替え — fn ミラーは常設せず、必要時のみ assets-layout の dist コマンドで
       `inputs/sbv2/FN*` から再生成する）
-- [ ] ライセンス確認: 各リポの `THIRD_PARTY_NOTICES.md` と生成カードの attribution が
-      upstream の現物と一致（per-revision の人間確認 — release gate）
+- [ ] ライセンス確認: 各 family の provenance 記録
+      （`tools/export-recipes/<family>/THIRD_PARTY_NOTICES.md`）と、配布リポの生成カードの
+      attribution が upstream の現物と一致（per-revision の人間確認 — release gate。正本 =
+      backlog release 節。配布リポ直下に置けるのは `LICENSE.md` / `NOTICE.md` だけ —
+      `verify_dist` の `LEGAL_PATHS`）
 - [ ] git: 全てコミット済み・push はユーザー
 
 ## 2. HF アップロード（断片化対策 — MUST）

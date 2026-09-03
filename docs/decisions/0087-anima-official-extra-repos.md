@@ -26,7 +26,8 @@
 
 1. **リポの分割軸は「公式 / 追加学習」にする。**
    - `karume-anima`（公式）: `anima-turbo-v1.1`（**既定** — 上流推奨・2026-09-01 裁定）/
-     `anima-v1.0` / `anima-aesthetic-v1.1`。
+     `anima-v1.0` / `anima-aesthetic-v1.1` / `anima-turbo-v1.0` / `anima-aesthetic-v1.0`
+     = 計 5 変種（下の追記 2026-09-01 を参照）。
    - `karume-anima-extra`（追加学習）: `anima-wai-v1.0` / `anima-copycat-20260610` +
      以後 Civitai URL / AIR 指定で足す第三者 fine-tune（N3 の受け皿）。
 2. **旧 `anima-turbo`（LoRA 焼き込み）モデルと `hdae/karume-anima-turbo` リポは退役。**
@@ -50,3 +51,23 @@
   持つため新しい席には入らない）。掃除は別途裁定。
 - extra リポは公式リポの公開 SHA に従属する（参照先を上げ直したら extra も焼き直し —
   runbook の公開順序 MUST）。
+
+## 追記 2026-09-01（公式は 5 変種）
+
+決定 1 の公式列挙へ `anima-turbo-v1.0` / `anima-aesthetic-v1.0` を足す（同日のユーザー追加裁定 —
+この系はバージョン間で好みが分かれるので旧版へ戻る先を残す。ADR
+[0077](0077-model-version-naming.md) の動機そのもの）。公式リポは計 **5 変種**同居になる。
+Context の「上流の 3 公式変種」は上流の系列（Base / Aesthetic / Turbo）の話なので据え置き —
+配布モデル数 5 = 3 系列 × 版（v1.0 / v1.1、ただし Base は v1.0 のみ）。
+
+## 追記 2026-09-03（越境参照の対象役割の訂正と、複数モデル同居リポへの適用）
+
+- **決定 3 の「共有 text_conditioner」は誤り**。extra の 2 モデル（`anima-wai-v1.0` /
+  `anima-copycat-20260610`）はどちらも `own_text_conditioner=True`
+  （`tools/export-recipes/anima/distribution.py`）で text_conditioner を自前で持つ。越境参照の
+  対象は **`text_encoder` / `vae_decoder` / `tokenizer` / `tokenizer_2`** の 4 役割。
+- **越境参照は複数モデル同居リポの組み立てにも掛ける。** 門は「指定役割の現物が**全モデルで
+  参照先とバイト同一**」— plan ごとに突合し、全 plan の参照が一致することを確認する。旧門
+  「越境参照は 1 モデルの組み立てにだけ許す」（2026-08-24 — 旧 `karume-anima-turbo` が
+  1 リポ 1 モデルだった時代の綴り）は、extra が 2 モデル同居になった時点で成立しなくなった。
+  曖昧さの実体は「同じ役割名が別バイトを指す」ことなので、そこを直接検査する形へ置き換える。

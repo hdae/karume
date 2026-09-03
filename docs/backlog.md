@@ -20,12 +20,23 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
   なし）。読み手契約と書き手ポリシーの 2 層構造で、層/MoE 境界の cut 選好はポリシー側の
   将来拡張（正本 = ADR [0081](decisions/0081-shard-spec-v2.md)）。ローカルは完了（2026-08-30 —
   series 241 本 repack・dist 4 リポ再生成・新旧 59,803 テンソルのビット同一証明・lockstep
-  0.8.0）。**後続 = 次リリース時に一括（2026-08-30 ユーザー裁定）**: HF アップ（anima /
-  irodori / jvnv）→ base SHA で turbo 越境焼き → turbo アップ → pin 4 本更新、を
+  0.8.0）。**後続 = 次リリース時に一括（2026-08-30 ユーザー裁定）**: HF アップ 6 リポ
+  （`karume-anima` / `karume-irodori-v4-small` / `karume-sbv2-jvnv` の再アップ + 新規
+  `karume-irodori-v4.1-small` / `karume-gemma4-e2b` / `karume-anima-extra`〈公式 `karume-anima`
+  の公開 SHA で越境焼き〉）→ pin 3 更新（`ANIMA_CURRENT` / `IRODORI_V4_SMALL_CURRENT` /
+  `SBV2_JVNV_CURRENT`）+ 3 新設（`GEMMA4_CURRENT` / `IRODORI_V4_1_SMALL_CURRENT` /
+  `ANIMA_EXTRA_CURRENT`）、を
   **アップロードと SHA 更新まで含めて Claude が実施**（ユーザー明示許可済み — hf upload の
-  分類器拒否はこの許可で通す）。**時期（2026-09-01 裁定）: BiRefNet 等の他家族分も揃えてから・
-  アップ直後にリリースする形 — 準備が十分整うまで着手しない**。リリース判定は turbo 再焼き後の
-  e2e 全緑（現在の ignored +8 = turbo ミラー不在の想定内 SKIP）が条件。karume-sbv2-fn は**アップしない**（非公開のまま —
+  分類器拒否はこの許可で通す）。手順の正本は [release-runbook](release-runbook.md) §0 越境節 /
+  §2 / §3。旧 `hdae/karume-anima-turbo` は ADR
+  [0087](decisions/0087-anima-official-extra-repos.md) で退役 = 上げ直さない。
+  ~~**時期（2026-09-01 裁定）: BiRefNet 等の他家族分も揃えてから・アップ直後にリリースする形
+  — 準備が十分整うまで着手しない**~~ → **範囲を絞る改訂（2026-09-03 ユーザー裁定）: 今回の
+  リリースは gemma4 のアップまで**（上の 6 リポ + pin + リリースノート）。BiRefNet /
+  DepthAnything / SigLIP2 / vowel-detector の初回公開は**リリース後**。リリース判定門は下の
+  「Mac（M2）リリース前検証」で、越境の実資産門は公式リポの自己完結化で一旦退避している
+  （`e2e_anima_test.ts` の `CROSS_REPO_MIRRORS` は空 — extra ミラーが生えたら門ごと戻す。
+  runbook §0 手順 4 のチェック項目）。karume-sbv2-fn は**アップしない**（非公開のまま —
   e2e の WAV sha 門と parity は 2026-08-30 に jvnv へ付け替え済みで、fn ローカルミラーは削除。
   再生成 = assets-layout の dist コマンドで `inputs/sbv2/FN*` から）
 - ~~LLM 先行波~~ **消化済み（2026-08-30）**: L-0 = decode 初回実測（**≈85ms/token・
@@ -55,8 +66,8 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
   **ライセンス門（ADR 0065 stage 6）は 2026-09-01 に消化** — Gemma 4 は **Apache 2.0**
   （snapshot README frontmatter + license_link 本文で現物確認。「Gemma ToU」記述は撤回済み）。
   **HF 公開は次リリース一括に同乗（2026-09-01 裁定）**: 新規リポ `karume-gemma4-e2b` の作成・
-  アップ・`GEMMA4_CURRENT` pin 焼き込み・事後疎通を、anima/irodori/jvnv の shard v2 再アップ +
-  turbo 越境 2 巡 + pin 4 本と同じ回で実施（素材は完備）。リリースノートは検証 WF 経由で、
+  アップ・`GEMMA4_CURRENT` pin 焼き込み・事後疎通を、上の HF 一括（6 リポ・shard v3 ミラー）と
+  同じ回で実施（素材は完備）。リリースノートは検証 WF 経由で、
   **breaking 2 件**（`generateGreedy` 公開削除 / 会話切り詰めのホスト責務化）+ 新面 `./gemma` を
   記載（2026-09-01 裁定 OK）。**capacity は引き上げ裁定済み（2026-09-01）**: 1024（RoPE 表
   上限）へ上げる — full スロット +5MB 級でほぼ無料。**それ以上に利点があれば RoPE 表の
@@ -118,15 +129,22 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
   格子化後の初実測）・軸 reduce パリティ **2/2 緑**（旧記述の「4 本」は誤記・known-issues への
   読み方ポインタも切れていた）。**新規 = gemv u32 門が M2 で 1 ULP 赤 → 裁定済み（既定維持
   — GEMV 固有と切り分け確定・ADR 0082 追記 1・[known-issues](known-issues.md) Metal 節）**
-- **Mac（M2）リリース前検証（2026-09-03 起票 — gemma4 リリースの判定条件）**: ③'（③PV の KV
-  並列縮約・K-12）を `Gemma4Pipeline` の既定へ上げたが、実測は Linux / Vulkan だけである
-  （ADR [0067](decisions/0067-autoregressive-attention-vocabulary.md) 追記 2026-09-03）。手順:
-  ①フル verify を M2 で 1 往復し、赤が既知クラス（[known-issues](known-issues.md) Metal 節）に
-  収まることを確認する ②`gpu_state_attention_parallel_test.ts` を明示的に緑にする
-  ③その **stdout（`③' 実測最悪: vs 参照 … / vs ③ …`）を読み、Linux の vs f64 参照 3.99e-7 /
-  vs ③ 2.38e-7 と桁を突き合わせる** — census 門（席どおりのキーが走ったか）は `lastRunTiming`
-  を要求するので Metal では常に skip される。この桁の一致が「同じ経路が走った」ことの唯一の傍証
-  になる。
+- ~~**Mac（M2）リリース前検証（2026-09-03 起票 — gemma4 リリースの判定条件）**~~
+  **消化（2026-09-03 実測 — 実機 Apple M2 / macOS 26 / Deno 2.9.x）**: ③'（③PV の KV 並列縮約・
+  K-12）を `Gemma4Pipeline` の既定へ上げた根拠が Linux / Vulkan だけだった件（ADR
+  [0067](decisions/0067-autoregressive-attention-vocabulary.md) 追記 2026-09-03）の Mac 追試。
+  ①ミラー同期後のフル verify = **1856 passed / 13 failed / 139 ignored**。赤 13 = 既知 12
+  （attention i8a8 4 / conv1d・conv2d parity 4 / gru_scan parity 2 / GEMV u32 門 1 / OOM
+  errorScope 門 1 — [known-issues](known-issues.md) Metal 節）+ **census テスト 1 本**
+  （`packages/models/tests/e2e_gemma4_pretrained_test.ts:202`・step は parallel / sequential の
+  両方が赤 — 既知クラス 13 本目として known-issues の `--diagnostics` 節へ登録済み）。初回の
+  17 赤のうち 5 本は Mac 側 `models/karume-gemma4-e2b/karume.json` が 08:37 の再発行前
+  （`maxChunkLength` 欄なし）だったためで、ミラー同期で解消した。②`gpu_state_attention_parallel_test.ts`
+  は緑。③その stdout = **vs 参照 3.58e-7 / vs ③ 2.38e-7**（Linux の 3.99e-7 / 2.38e-7 と桁一致
+  = 同じ経路が同じ帯で走っている）。**訂正**: 起票時の「census 門は `lastRunTiming` を要求するので
+  Metal では常に skip される」は誤り — skip 条件は `adapter.features.has("timestamp-query")` の
+  有無だけ（`packages/models/tests/helpers/gpu.ts`）で、Metal もこの feature を申告するため census は
+  走り、`gpuTiming: true` の query set が積み上がった時点で device が落ちる。
 - ~~anima-web の cold ロード DL スロット改善（提案 b+a）~~ **kill（2026-09-02 実測 — [research](research/2026-09-02-cold-load-dl-timeline.md)）**: 起票時 2.4GiB だったグラフ相は shard 仕様 v2/v3 で 1.15MiB になり、extras は既に 3 本同時・相境界の空白は 0.2 s で、a / b の利得は ≤0.3%。c（コンポーネント単位の門）も同時に閉じる。律速は回線帯域そのもの（50MB/s で床 +2.7%）。第 1 相は共有カーソルのワーカープール（4 並列キュー — `fetch.ts` `runPrefetchPhase`・3ab4d45 以来）で「4 並列バッチ」ではない。**2026-09-03 ユーザー: DL の件は完了**。実回線の同時本数（HF CDN で 4 本 / 8 本）は起票のみ — 接続ごとの上限が実測されたら定数引き上げか末尾向けの shard 細分化を再起票
 - perf: レンズ E-1 は裁定済み — **P-1〜P-3 スパイク承認・P-4 起票・P-5 計測のみ** +
   M1-2 代償の L-9（いずれも [perf-ledger](perf-ledger.md)）。既存起票 H-8〜H-10 / L-7 / L-8。
@@ -172,10 +190,12 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
     `CIVITAI_API_TOKEN`（`?token=` クエリ渡し）・UA は urllib 既定が 403 のため独自名
     （実測）。**全経路実走緑**（メタ・冪等スキップ・provenance 連鎖・実 DL = turbo LoRA
     142MiB を取得し既存手置きとビット同一 → 手置き資産の出所を provenance で確証）。
-  - **リリース**: HF 一括（anima 新構成 + extra + irodori v4.1 + gemma4 + jvnv +
-    BiRefNet ほか + pin 更新 — 上の shard v2 一括と同じ回）。**時期 = メモリ管理波を含む
-    リリースの直前**（2026-09-01 裁定 — N1〜N3 完了は「準備が整った」であって即アップでは
-    ない）。
+  - **リリース**: HF 一括 6 リポ（`karume-anima` 新構成 / `karume-anima-extra`〈越境焼き〉/
+    `karume-irodori-v4-small` / `karume-irodori-v4.1-small` / `karume-sbv2-jvnv` /
+    `karume-gemma4-e2b`〈新規〉）+ pin 3 新設・3 更新 — 上の shard v2 一括と同じ回。
+    **範囲 = gemma4 のアップまで（2026-09-03 ユーザー裁定）** — BiRefNet / DepthAnything /
+    SigLIP2 / vowel-detector の初回公開はリリース後（2026-09-01 の「他家族分も揃えてから」は
+    この裁定で改訂）。
   - **export-recipes 切り出し（裁定済み・案 A）**: 切り出すのは**レシピ部分のみ**・
     exporter core（tools/exporter）は本リポ残留。sibling checkout + path 依存 +
     資産根 / fixture 書き先の注入形。**時期 = モデル波の後**（parked 起票の復活裁定）。
@@ -189,7 +209,8 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
     limitations に by-design 記録。**Phase B へ持ち越し**: `estimateSessionMemory` のロード面
     結線（見積りは全記号の束縛が前提でロード時に束縛値を持つのは gemma4 だけ — 実測後に席を
     決める）。未配布 4 家族（siglip2 / birefnet / depth-anything / vowel-detector）の初回
-    ミラー組み立てはリリース波。
+    ミラー組み立て・公開は**リリース後**（2026-09-03 裁定 — 今回のリリース範囲は gemma4 の
+    アップまで。作業項目は下の release 節）。
     **Mac（M2）検証消化（2026-09-02・Deno 2.9.4）**: フル verify 1742 passed / 27 failed /
     115 ignored — 赤 27 = 既知 Metal 12（同一署名）+ sha 参照門 15（資産同期で初走・limitations
     どおり）・新規 0。gemma4 / anima の DL 前検査は M2 アダプタ値で誤拒否なく通過・chat golden 緑
@@ -223,8 +244,8 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
     前倒しせず **Opus PoC を並行起動（2026-09-01・リポ外 spike）**: miss 相乗り readback +
     step 再実行の成立性実測が先・設計スパイク（IR 語彙裁定 = ADR 級）は PoC の結果を見て。
     **safetensors `I4` は方言と実測確定**（公式 0.8.0 が拒否 — limitations 明記済み・上流提案は
-    しない裁定・別形式 / 独自形式への移行は次 manifest format 変更時の器。モデルカード注記は
-    次リリースのカード再生成に同乗）
+    しない裁定・別形式 / 独自形式への移行は次 manifest format 変更時の器。モデルカードには
+    **注記済み**（0.8.0 のカード再発行 — 格納 dtype に `i4` を含む配布形にだけ出る）
 
 ## 消化済み（既知問題 3 件 + anima 素版 i4 感度 — 2026-08-25〜28）
 
@@ -467,12 +488,17 @@ autoregressive 波の**残項目（波外へ送り）**:
 - 実資産 CI gate（GitHub CI はローカル資産を踏まない問題）
 - HF 公開: **jvnv / irodori / anima の 3 リポは波 K-4 で公開済み**（2026-08-21）。FN は parked
   （再配布の書面根拠なし）。以後の新モデルは runbook に従う
-- リポ直下 README の書き上げ・JSR npm 互換層の sideEffects 検証
+- リポ直下 README の書き上げ・JSR npm 互換層の sideEffects 検証。**0.8.0 の範囲外
+  （2026-09-03 裁定 — Status 行だけスタブと名乗る形へ差し替え済み）。復活条件 = 1.0 または
+  対外アナウンス時**で、着手にはバンドルサイズの再実測が前提（2026-08-16 の gzip 実測は
+  gemma4 生成 API・GEMV 族・tokenizer の追加で失効している）
 - ライセンス interview（export-recipes の family 別 provenance を upstream revision 単位で
   人間確認 — 再編の release gate。**公開 4 リポぶんは波 K-4 の人間ゲートで先行実施**）
+- 未配布 4 家族（siglip2 / birefnet / depth-anything / vowel-detector）の初回公開
+  （**リリース後** — 2026-09-03 裁定）: 家族ごとに dist 組み立て + カード + ライセンス門 +
+  pin 定数の新設が要る
 - 「semantic surface と実装済み subset の分離」方針の再裁定（attention / deform_conv2d /
   gather / conv_transpose1d / upsample_bilinear2d — 観測 subset を op 意味論にしない統一規約）
-- 大型 DL 前の limits preflight（DL 後にしか limits 不足が分からない問題）
 
 ## parked（復活条件つき）
 
