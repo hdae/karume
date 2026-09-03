@@ -13,13 +13,15 @@ rotaryDim）と位置の上限だけになる。ここが持つのは 2 つ:
 
 MUST: 上流とビット同一にはならない。上流の rotary は inv_freq も角度も cos / sin も**全部
 f32** で通す（modeling_gemma4.py:1170-1179）ので、f64 で通してから丸めた値とは最終 1 ULP から
-先が食い違う（位置が大きいほど角度の f32 表現誤差が効き、実測で P=131,072 のとき最大 9.4e-3）。
+先が食い違う（位置が大きいほど角度の f32 表現誤差が効き、実測で位置 0..131,071 の全掃引の
+最大 9.44e-3〈最大点 ≈129,293〉・位置 131,071 ちょうどは 4.77e-3・許容差の帯に対する最悪比 0.756）。
 突合は位置比例の許容差で見る（{@link gemma4.tests.test_rope}）— ここを「ビット一致」に
 締めると、正しい実装が落ちる門になる。
 
-MUST: torch を import しない。`gemma4.distribution`（配布 recipe — モデル依存グループ無しの
-CI job でも読まれる）がこのモジュールを読むので、重い依存を持ち込むと既定 sync の環境で
-collection ごと落ちる（`tests/test_optional_group_imports.py` の門と同じ理由）。
+MUST: torch を import しない。`gemma4.distribution`（配布 recipe）がこのモジュールを読むので、
+重い依存を持ち込むと配布側の import と、実重みを要さない CI job の collection がそのぶん重くなる。
+式は numpy だけで書けるので払う理由が無い。NOTE: これを見る門は無い（torch は core `karume` の
+必須依存で常に入るため、`tests/test_optional_group_imports.py` の対象外）。
 """
 
 from __future__ import annotations

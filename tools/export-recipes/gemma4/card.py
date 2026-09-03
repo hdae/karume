@@ -100,11 +100,13 @@ def _gemma4_overview(manifest: Mapping[str, Any]) -> list[str]:
         "- **Per-layer embeddings are a sidecar, not graph weights.** They are gathered on the",
         "  host and handed to the graph as an input, which keeps them out of the GPU's resident",
         "  set; the loader reads only the vocabulary ranges a conversation actually touches.",
-        f"- **Context**: the default capacity is {config['capacity']} tokens per conversation and",
-        f"  the loader accepts any capacity up to {config['maxPosition']} (the model's declared",
-        "  position limit); rotary cos/sin are generated on the host per chunk from the declared",
-        "  `rope` parameters, so no position table ships. Prefill runs in chunks of",
-        f"  {config['chunkLength']} rows by default.",
+        f"- **Context**: the default capacity is {config['capacity']} tokens per conversation, and",
+        "  the loader accepts any capacity between the chunk length in use and",
+        f"  {config['maxPosition']} (the model's declared position limit); rotary cos/sin are",
+        "  generated on the host per chunk from the declared `rope` parameters, so no position",
+        f"  table ships. Prefill runs in chunks of {config['chunkLength']} rows by default, and",
+        f"  the chunk length itself can be raised up to {config['maxChunkLength']} — the traced",
+        "  upper bound of the chunk symbol, which the graph does not carry.",
         "- **Not multimodal here.** The published checkpoint also carries vision and audio towers;",
         "  this distribution contains neither, and cannot take images or audio.",
         "- Not readable by transformers (it's a different container with an embedded graph); the",
@@ -211,8 +213,10 @@ def _gemma4_generation(model: Mapping[str, Any]) -> list[str]:
         "checked against each other when this repository was assembled.",
         "",
         f"- **context**: {config['capacity']} tokens per conversation (prompt + generated) by"
-        f" default; any capacity up to {config['maxPosition']} can be chosen at load time",
-        f"- **prefill chunk**: {config['chunkLength']} rows per step by default",
+        f" default; any capacity from the chunk length in use up to {config['maxPosition']}"
+        " can be chosen at load time",
+        f"- **prefill chunk**: {config['chunkLength']} rows per step by default, up to"
+        f" {config['maxChunkLength']} (the traced upper bound of the chunk symbol)",
         f"- **recommended sampler**: temperature {knob(sampler['temperature'])}, top-k"
         f" {knob(sampler['topK'])}, top-p {knob(sampler['topP'])} — used when a request omits",
         "  `sampler`; pass `{ temperature: 0 }` for greedy decoding",

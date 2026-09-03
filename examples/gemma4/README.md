@@ -38,22 +38,26 @@ forms are mutually exclusive:
 All options are `--key value` pairs except `--diagnostics`, which is a bare switch. Unknown keys are
 rejected rather than silently ignored.
 
-| Option                           | Default                    | What it does                                                                |
-| -------------------------------- | -------------------------- | --------------------------------------------------------------------------- |
-| `--source <dir>`                 | `models/karume-gemma4-e2b` | Read a local distribution directory.                                        |
-| `--repo <owner/name[@revision]>` | —                          | Fetch from Hugging Face instead.                                            |
-| `--system <text>`                | none                       | System turn placed at the head of the conversation.                         |
-| `--max-new-tokens <n>`           | `256`                      | Per-turn generation cap (stop tokens are not counted).                      |
-| `--temperature <x>`              | asset default              | Sampling temperature; `0` is greedy.                                        |
-| `--top-k <n>` / `--top-p <x>`    | asset default              | Candidate truncation.                                                       |
-| `--seed <n>`                     | asset default              | Sampling seed.                                                              |
-| `--capacity <n>`                 | asset default              | Logical positions this conversation reserves KV for.                        |
-| `--chunk-length <n>`             | asset default              | Rows per prefill run.                                                       |
-| `--max-resident-ple-bytes <n>`   | two largest shards         | Host RAM budget for the resident PLE sidecar.                               |
-| `--diagnostics`                  | off                        | Print the per-op GPU time breakdown of the last run of each turn to stderr. |
+| Option                           | Default                    | What it does                                                                                                       |
+| -------------------------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `--source <dir>`                 | `models/karume-gemma4-e2b` | Read a local distribution directory.                                                                               |
+| `--repo <owner/name[@revision]>` | —                          | Fetch from Hugging Face instead.                                                                                   |
+| `--system <text>`                | none                       | System turn placed at the head of the conversation.                                                                |
+| `--max-new-tokens <n>`           | `256`                      | Per-turn generation cap (stop tokens are not counted).                                                             |
+| `--temperature <x>`              | asset default              | Sampling temperature; `0` is greedy.                                                                               |
+| `--top-k <n>` / `--top-p <x>`    | asset default              | Candidate truncation.                                                                                              |
+| `--seed <n>`                     | asset default              | Sampling seed.                                                                                                     |
+| `--capacity <n>`                 | asset default              | Logical positions this conversation reserves KV for.                                                               |
+| `--chunk-length <n>`             | asset default              | Rows per prefill run.                                                                                              |
+| `--max-resident-ple-bytes <n>`   | twice the largest shard    | Host RAM budget for the resident PLE sidecar.                                                                      |
+| `--diagnostics`                  | off                        | Print the per-op GPU time breakdown of the last run of each turn to stderr. Not usable on macOS/Metal — see below. |
 
 Any sampling flag you pass is layered on top of the recommended values the asset declares; the ones
 you leave out keep their declared value.
+
+A flag value may not start with `--`. The parser treats such a value as a swallowed flag and stops,
+so that a mistyped knob never runs silently on its default. The cost is that a system prompt whose
+text begins with `--` (say `--- rules ---`) is rejected; reword it or drop the leading dashes.
 
 ### Capacity and chunk length are runtime knobs
 
@@ -66,9 +70,12 @@ you can pick different values without re-exporting the model.
   when to drop old turns.
 - `--chunk-length` trades prefill run count (and therefore fence waits) against the temporary
   buffers and attention score matrix of a single run. The generated token sequence does not change.
+  It is capped by the `maxChunkLength` the distribution declares (768 for E2B) — the traced upper
+  bound of the chunk symbol, which the graph itself does not carry.
 
-Both are validated at startup, by the same memory estimate that prints the `GPU 見積り` line — you
-find out before the first turn, not on the first `send`.
+Both are validated at startup — chunk length when the pipeline is built, capacity by the memory
+estimate that prints the `GPU 見積り` line. You find out before the first turn, not on the first
+`send`.
 
 ### `--diagnostics` is not free
 
@@ -76,6 +83,12 @@ Per-op GPU timing needs the `timestamp-query` feature, which can only be request
 is created, so the script acquires its own device in this mode. A device with timing enabled opens
 one pass per dispatch, which stretches wall-clock time. Do not read the `tok/s` figure of a
 `--diagnostics` run as a speed measurement; take speed numbers without the flag.
+
+On macOS/Metal the flag currently loses the whole device: the driver cannot allocate the counter
+sample buffers this many query sets need, and wgpu turns that failure into a lost device rather than
+an error you can catch. The run dies on the first turn. Take the breakdown on a Vulkan or D3D12
+machine instead; the details and the state of the workaround are in
+[`docs/limitations.md`](../../docs/limitations.md).
 
 ## What the startup lines mean
 

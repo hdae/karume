@@ -109,9 +109,11 @@ i8a8 版へそのまま流用できる形で作っておく。
   するため、ORT の indirect dispatch 相当は不要 — ADR 0066 の仕事量合格条件
   〈∝ queryLength × (有効 past + queryLength)・追記 1 の訂正式〉をホスト側 dispatch
   算出で満たす）。
-- **RoPE は attention op の外**（グラフの通常ノード列）。層種別 RoPE（Gemma 4 E2B の
-  theta 100 倍差 + partial rotary 0.25 — 調査 §6.1）はエクスポータがグラフに焼く。
-  attention op は RoPE を知らない MUST。
+- **RoPE は attention op の外**（グラフの通常ノード列）。~~層種別 RoPE（Gemma 4 E2B の
+  theta 100 倍差 + partial rotary 0.25 — 調査 §6.1）はエクスポータがグラフに焼く。~~ →
+  **ADR [0091](0091-gemma4-host-rope-variable-capacity.md) 決定 1 で置換**（表は配布物に入れず、
+  ホストが chunk ごとに cos / sin を派生入力として渡す）。**`attention op は RoPE を知らない`
+  MUST は 0091 でも不変**。
 
 ### 5. KV の書き込みは別 op `state_append`
 
@@ -190,14 +192,17 @@ S とは別に **state スロット自体の binding も上限を超えうる**�
 KV 長が 1 スレッドの逐次長にしか効かない — P=16K で attention が decode GPU 時間の 72% を占めた
 機序（[research 2026-09-03 P 掃引](../research/2026-09-03-gemma4-context-length-sweep.md) §3）。
 
-- **契約**: 束縛・params・dispatch 数は ③ と同一で、レーン `l` が `cl ≡ l (mod 16)` の列を昇順に
+- **契約**: 束縛・params・dispatch の**本数**は ③ と同一（workgroup 幾何は違う — 行軸が
+  `rowsBlock / TILE_M` から `rowsBlock` へ変わるので workgroup 数は prefill で 4 倍。decode は
+  `rowsBlock = 1` なので両者一致する）。レーン `l` が `cl ≡ l (mod 16)` の列を昇順に
   部分累積し、workgroup 共有メモリで固定順の木（stride 8 → 4 → 2 → 1）に畳む。決定性（同一入力 →
   同一出力）・容量非依存・行ブロック非依存・pad 行 → 厳密 0 は ③ と同じくビット門で保つ。
   縮約順が違うので **③ とビット同一ではない**（本 ADR 冒頭の「縮約は col 昇順の逐次で固定」は ③ の
   契約であり、③' は「レーン部分和 → 固定順木」を自分の契約として持つ）。
 - **席**: ADR 0058 の opt-in 席 `SessionOptions.stateAttentionReduce: "sequential" | "parallel"`
   （既定 `"sequential"` = 参照経路）。検証門は 3 点セット — ③ の既存門は無変更・③' の A/B 帯門
-  （`tests/gpu_state_attention_parallel_test.ts`・帯 5e-6・実測最悪 2.4e-7）・census 門
+  （`tests/gpu_state_attention_parallel_test.ts`・帯 5e-6・実測最悪は ③ との差 2.4e-7 /
+  f64 参照との差 3.99e-7）・census 門
   （`tests/gpu_state_execution_test.ts` — 席どおりのキーが走り、他方が混ざらない）。
 - **実測**（[research 2026-09-03](../research/2026-09-03-gemma4-chunklength-k12-sweep.md) §3）:
   full PV 35.0 → 3.6 ms・sliding PV 6.2 → 0.8 ms・decode 壁 P=16K 81.3 → 41.0 ms/token（×1.98）・

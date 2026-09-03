@@ -80,7 +80,8 @@ sequence が出るまでの間、この面に相当するものは公開され�
 - **`Gemma4Pipeline.sampler` → `defaultSampler` へ改名**し、`Gemma4PipelineConfig.sampler` の型が
   `SamplerSpec` から `Gemma4DefaultSampler`（`temperature` / `topK` / `topP` の 3 欄必須）へ縮小
   された。あわせて `fromAssets` も `fromPretrained` と同じ門（未知キー・値域・
-  `chunkLength ≤ capacity ≤ maxPosition`）をバイト列を開く前に通すので、**不正な宣言は
+  `chunkLength ≤ maxChunkLength`・`chunkLength ≤ capacity ≤ maxPosition`）をバイト列を開く前に
+  通すので、**不正な宣言は
   3.7GiB のロードが終わる前に落ちる**（従来は初回 `generate` で初めて `RangeError` になった）。
 - **停止理由の union に `stop-token` が増え、`Gemma4ChatStream.done` の型が `Gemma4ChatStop` へ
   広がった**（2026-09-02 — 要求ごとの停止条件）。`switch (stop.reason)` を網羅で書いていたコードは
@@ -829,17 +830,36 @@ PyPI `karume` は汎用 exporter core のみ（ADR
 ## Metal（Apple GPU）では GPU 側 timestamp 計測が実用にならない（外部制約）
 
 `gpuTiming: true`（ADR 0021）は 1 dispatch = 1 pass に開いて pass 境界の timestamp を取るため、
-dispatch 数ぶんのカウンタサンプルが要る。Anima の DiT は 1 step = **3,301 dispatch** で、
-Metal はこの規模のサンプルバッファを確保できず
+チャンクごとに query set を 1 本作る。Metal ではその query set を作る `createQuerySet` が失敗し
 
 ```
 Failed to create counter sample buffer: Cannot allocate sample buffer (MTLCounterErrorDomain)
 ```
 
-を返し、そのまま **device 消失**に至る（{@link GpuDeviceLostError} として可視化されるので
-沈黙はしない）。実測は Apple M2 / Deno 2.9.4。**Karume 側では回避不能**で、op 別の内訳が要る
-計測は Linux / Vulkan 機で行うか、dispatch 数の少ない小さいグラフに限る。壁時計だけなら
-計測を切って（既定）測れる。
+を返す。NSError の code 0 = `MTLCounterSampleBufferError.outOfMemory`（Metal ドライバが counter
+sample buffer を確保できない）で、wgpu-hal はこれを `DeviceError::Unexpected` に潰し、wgpu-core が
+致命扱いして device を lost にする。**errorScope には入らない**（消失済み device のエラーは Deno の
+error handler の入口で捨てられる）ので、`pushErrorScope('validation')` では捕まらない。
+
+失敗の軸は「1 本のサンプルバッファが大きすぎる」ではない。初回の run は 1 チャンク 16 dispatch に
+固定される（壁時計の実測がまだ無く時間予算を引けない）ため、gemma4 の prefill ≈1,500 dispatch では
+query set が約 100 本**同時に生きた状態**になる。1 本あたりは 32 query（総量でも数十 KB）で、Chrome
+の Dawn が Metal 上で常用する 4,096 サンプルより小さい。さらに Deno 2.9.x の
+`GPUQuerySet.destroy()` は **no-op**（wgpu 29.0.1 pin・実装は wgpu v30 で入った）なので、karume が
+`destroy()` を呼んでも実解放は V8 の GC 任せで滞留する。したがって「anima の 3,301 dispatch が
+大きすぎる」という以前の帰属は誤りで、dispatch 数のより少ない gemma4 でも起きる。
+
+「`GpuDeviceLostError` として可視化されるので沈黙はしない」も**撤回**する。トップレベルの
+`await using` で資源を掴む台本では、本体の例外と解放時の例外が `SuppressedError` に畳まれ、Deno は
+その外皮しか印字しないため型も文言も読めない（例示台本の全印字と、消失理由を捨てている
+`device.ts` の修正は別項）。
+
+観測は Apple M2 / Deno 2.9.x（anima の DiT 1 step = 3,301 dispatch と gemma4 の対話台本の両方）。
+
+**現状の Deno では回避策が無い**（query set を 1 本に固定して使い回す案は未実験 —
+[known-issues](known-issues.md) 参照）。op 別の内訳が要る計測は Linux / Vulkan 機で行う。
+壁時計だけなら計測を切って（既定）測れる。なお macOS 26（Metal 4）では確保に成功しても
+timestamp が全ゼロになる別の未修正問題がある（[wgpu#9414](https://github.com/gfx-rs/wgpu/issues/9414)）。
 
 なお同じ理由で本ファイルの「Deno では GPUBuffer の総確保がドライバ申告予算の 97% で頭打ちになる」
 節の制約は **Metal には効かない** — wgpu の `MemoryBudgetThresholds` は D3D12 と Vulkan のみ対応で、
@@ -978,8 +998,10 @@ Deno 側の実 GPU テストはもともと tolerance 判定なので影響し�
 配布形の `pipelineConfig.capacity` / `chunkLength` は**既定値**で、呼び手が
 `Gemma4Pipeline.sequence({ capacity })` / `Gemma4ChatSession` の `capacity`（1 会話 = 1 容量）と
 `Gemma4PipelineOptions.chunkLength`（pipeline 単位）で上書きできる（ADR
-[0091](decisions/0091-gemma4-host-rope-variable-capacity.md) 決定 4）。上限は `chunkLength ≤
-capacity ≤ maxPosition`（モデルの宣言・E2B は 131,072）。VRAM は容量に比例して伸びる（full 層 KV
+[0091](decisions/0091-gemma4-host-rope-variable-capacity.md) 決定 4）。門は 2 本 —
+`chunkLength ≤ maxChunkLength`（記号 `M` の trace 上限の宣言・E2B は 768）と
+`chunkLength ≤ capacity ≤ maxPosition`（位置の排他的上限の宣言・E2B は 131,072）。
+VRAM は容量に比例して伸びる（full 層 KV
 12,288 B/token + states 形 attention の一時 S = `8 × 行ブロック行数 × capacity × 4 B`）ので、
 `Gemma4Pipeline.estimateSessionMemory({ capacity, chunkLength })` で確保前に見積もれる（必要側の
 合計だけ — 空き側との比較はしない）。
@@ -992,13 +1014,18 @@ capacity ≤ maxPosition`（モデルの宣言・E2B は 131,072）。VRAM は�
 - **`capacity` は token 列に効かない**（仕事量は論理長で切られ、値は容量非依存 — ビット門あり）。
 - **decode の attention ③PV は `Gemma4Pipeline` では KV 並列縮約（perf-ledger K-12）が既定**
   （`GEMMA4_STATE_ATTENTION_REDUCE = "parallel"`）。runtime の参照経路 `"sequential"` とは縮約順が
-  違い（A/B 帯 5e-6・実測 2.4e-7）、gemma4 の golden は両者で同一。`Gemma4PipelineOptions.
-  stateAttentionReduce: "sequential"` で参照経路へ戻せる。低レベル面（`createSession` を自分で呼ぶ
-  消費者）の既定は runtime のまま `"sequential"`。
-- `chunkLength` の上限は焼いた記号 `M` の trace 上限（E2B は 768）で、配布形はその値を宣言しない。
-  超える値は run のエンコードでランタイムが落とす（fail loudly だが文言は真因から遠い）。
+  違い（A/B 帯 5e-6・実測は ③ との差 2.4e-7・f64 参照との差 3.99e-7）、gemma4 の golden は両者で同一。
+  `Gemma4PipelineOptions.stateAttentionReduce: "sequential"` で参照経路へ戻せる。
+  低レベル面（`createSession` を自分で呼ぶ消費者）の既定は runtime のまま `"sequential"`。
+- `chunkLength` の上限は焼いた記号 `M` の trace 上限で、配布形が `pipelineConfig.maxChunkLength`
+  として宣言する（E2B は 768）。超える値は宣言の門で落ちる（2026-09-03 実測: 宣言が無かった頃は
+  `chunkLength: 1024` が黙って通り、prefill が 2 chunk に割れて token 列も 768 と同一だった）。
+- **未公開面の破壊的変更**: `Gemma4PipelineConfig` に `maxChunkLength` が**必須欄**として増えた。
+  `fromAssets` へ `config` を手書きで渡す呼び手は 1 欄追加が要る（配布形ミラーは `dist.py` の
+  再発行で宣言済み・重み shard は sha 不変）。
 - 上流の RoPE 表とはビット同一でない（TS が f64 で計算し f32 へ丸める — 上流は全経路 f32）。
-  差は位置比例で P=131,071 の最悪 4.8e-3。golden はこの表で採り直してある（同 ADR 決定 2）。
+  差は位置比例で、位置 0..131,071 の全掃引の最大は 9.4e-3（許容差の帯は同じく位置比例で最上位
+  131,071 では 1.57e-2・帯に対する最悪比は全位置で 0.76）。golden はこの表で採り直してある（同 ADR 決定 2）。
 
 ## 生成 sequence: 会話の切り詰めは低レベル面ではホストの責務（容量超過は専用型で落とす）
 

@@ -113,6 +113,29 @@ Metal では errorScope 沈黙のまま — by-design 制約として limitation
 （宣言 311,164,928B）の配布形ミラーが M2 のアダプタ値（maxBufferSize 14,302,248,960 /
 maxStorageBufferBindingSize 4,294,967,292）で誤拒否なく通過し、生成まで完走。
 
+## Metal で `--diagnostics`（`gpuTiming: true`）が device ごと落ちる — 切り分け実験待ち
+
+実機 **Apple M2 / Deno 2.9.x** で `examples/gemma4` を `--diagnostics` 付きで走らせると、最初の
+ターンで device が消失して落ちる。機序と確定事実は
+[limitations](limitations.md)「Metal（Apple GPU）では GPU 側 timestamp 計測が実用にならない」節に
+書いた（`createQuerySet` の失敗 → `DeviceError::Unexpected` → device lost・errorScope には入らない）。
+**未確定なのは資源の軸**で、①初回 run で同時に生きる query set の本数（1 チャンク 16 dispatch 固定
+なので gemma4 prefill ≈1,500 dispatch で約 100 本）②Deno の `GPUQuerySet.destroy()` が no-op で
+GC まで滞留する量、のどちらが支配的か切り分けられていない。両者は排他ではない。
+
+切り分け実験（実機が要る・1 ターンだけ走らせる）:
+
+1. `SubmitPolicy.initialChunkSize` を 16 → 256 にして本数を約 1/16 に落とす A/B。落ちなくなれば
+   同時生存本数が支配（①）。
+2. `deno --v8-flags=--expose-gc` で run ごとに GC を強制する。落ちなくなれば滞留が支配（②）。
+3. 実機の macOS バージョン確認。26（Metal 4）なら確保に成功しても timestamp が全ゼロになる
+   （[wgpu#9414](https://github.com/gfx-rs/wgpu/issues/9414)）ので、修正の投資判断自体が変わる。
+
+修正候補: **query set を 1 本だけ持って使い回す**（容量は per-set 上限固定・Dawn の counter sample
+buffer プールと同じ発想）。同一 queue の実行順序保証があるので、チャンクごとにホストで待つ形へ
+落とす必要は無い見込み（`resolveBuffer` / `readBuffer` はチャンクごとに要るが、こちらは Deno でも
+`destroy()` が効く）。逆方向（刻みを小さくする）は総サンプル数が変わらず本数だけ増えるので採らない。
+
 ## EmbeddingGemma の batch>1 export が変換段で通らない
 
 `python -m embeddinggemma.export --batch N`（N>1・tools/export-recipes 側 — 起動形は

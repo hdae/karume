@@ -210,9 +210,11 @@ Gemma 4 E2B（`tools/export-recipes/gemma4/` — 1-shot + states 形 decode の 
    export が付ける FQN を書く前に知らずに済む。
 3. **RoPE 位置表は量子化しない**: decode 系列の表引き化で cos/sin 表が embedding の
    重みスロット（= i8 適格集合）に入るため、`"f32"` 明示除外が必須。位置表の丸めは重みの
-   丸めと違い**角度誤差が位置に沿って蓄積する**。読み手側は census の「f32 embedding = 表 4 本
-   ちょうど」で固定。（追記 2026-09-03: gemma4 は表を配布物から外した — ADR 0091。本項が
-   残るのは表を焼く系列〈minicpm5 の `export_decode`〉だけ。）
+   丸めと違い**角度誤差が位置に沿って蓄積する**。読み手側は census の「f32 embedding = その系列が
+   宣言する表の本数ちょうど」で固定。（追記 2026-09-03: gemma4 は表を配布物から外した —
+   ADR 0091。本項が残るのは表を焼く系列〈minicpm5 の `export_decode`〉だけで、そこは
+   `cos_table` / `sin_table` の**表 2 本**である〈上流 `LlamaRotaryEmbedding` は層種別を持たない〉。
+   4 本は層種別 2 × cos/sin を持っていた gemma4 の数なので、写すと偽の期待値になる。）
 
 ## 追記 5（2026-08-19・測定側の拡張 — 対象 op の opt-in と方式スクリーニングの受け皿）
 

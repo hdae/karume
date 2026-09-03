@@ -23,7 +23,7 @@
   ②③ の 1 段目（`tools/opbench` census / `tools/fusion-hints` 列挙 — GPU 不要）は消化済み
   （[research](../docs/research/2026-09-03-op-census-fusion-hints.md)）。次 = リリース（gemma4 のアップまで）→ ②③ 2 段目 → K-13 / K-14。
 
-- **並列作業（2026-09-02 深夜 — 裁定済み優先順）**: ①DL 改善 = 実測で b+a を kill（[research](../docs/research/2026-09-02-cold-load-dl-timeline.md)・残る問い = 実回線の同時本数）②gemma4 対話 example 第 2 弾 = **全消化**（②〜⑧ `f7f0b66` `c659dd9`・① ChatSession `d72bd9d` = 溢れ処理は注入 + 既定 clear・残起票 = send の prefill 進捗の口）③perf: P-1 採用（`3175161`・短い行 ×4.1）・P-2 採用（`e7b4489`・submit −95%・壁は揺れ内・追試 no-ref / Chrome）・P-3 実装済み（`9591783`・VAE A/B と視認は実行中） ④可変 capacity 波 = **実装済み（2026-09-03・ADR 0091 — 下の新項）** ⑤TurboQuant = 記録のみ（perf-ledger Q-11 / L-10）。hub HF `into` 配線はコミット済み（fetch-cache 0.6.0）。
+- **並列作業（2026-09-02 深夜 — 裁定済み優先順）**: ①DL 改善 = 実測で b+a を kill（[research](../docs/research/2026-09-02-cold-load-dl-timeline.md)・残る問い = 実回線の同時本数）②gemma4 対話 example 第 2 弾 = **全消化**（②〜⑧ `f7f0b66` `c659dd9`・① ChatSession `d72bd9d` = 溢れ処理は注入 + 既定 `dropOldestTurns`〈最古の user / assistant の対を落とす・system は残す〉・prefill 進捗の口は `Gemma4ChatTurnOptions.onPrefill` で消化〈`4ff238f`・ADR 0091 決定 6〉）③perf: P-1 採用（`3175161`・短い行 ×4.1）・P-2 採用（`e7b4489`・submit −95%・壁は揺れ内・no-ref 追試済み・残は Chrome のみ）・P-3 採用（`9591783`・視認裁定 OK 2026-09-03） ④可変 capacity 波 = **実装済み（2026-09-03・ADR 0091 — 下の新項）** ⑤TurboQuant = 記録のみ（perf-ledger Q-11 / L-10）。hub HF `into` 配線はコミット済み（fetch-cache 0.6.0）。
 - **モデル更新波（2026-09-01 裁定 — 実装中・詳細は [backlog](../docs/backlog.md) now の
   「モデル更新波」）**: **N1 Irodori v4.1-small = ローカル完了**（凍結をバイトで確証・
   全系列 export + dist + スモーク緑・pin 新設と examples 既定切替はリリース時 = runbook §3。
@@ -100,8 +100,8 @@
   （`gemma4ChatTurn` 増分描画 = turn-local 契約の正本化・`parseGemma4PipelineConfig` 公開・
   `GenerationProgram` 凍結絞り込み・`defaultSampler` 改名・`used` + `GenerationCapacityError`
   構造化欄・`GenerationStop.tokens`）+ `examples/gemma4/` 対話 chat（sequence KV 継続の
-  写経見本・デモ 4 本も denoDirectory 移行）。**残 = capacity 1024 の dist 再生成**（P 依存
-  実測と同時）。実行計画は
+  写経見本・デモ 4 本も denoDirectory 移行）。**capacity の dist 再生成は消化済み**
+  （`4ff238f`・ADR 0091 で capacity は実行時ノブになり、宣言の既定は 4,096）。実行計画は
   [backlog](../docs/backlog.md) now、候補比較は
   [research 2026-08-31](../docs/research/2026-08-31-generation-api-design-draft.md)。
   **スケール戦略は調査 + 裁定とも完了** =

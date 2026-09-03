@@ -19,8 +19,9 @@
 
 gemma4 E2B の配布形は RoPE（回転位置エンコーディング）の cos / sin 表 4 本（層種別 2 × cos / sin・
 f32・6 KiB/行）を IR の初期化子として焼き、会話の最大長 `capacity` は表の行数 `maxPosition`（1,024）
-で頭打ちだった。上流は 128K。表を 128K 行焼くと配布 +762 MiB・VRAM +768 MiB で、短い会話の
-利用者にも一律に掛かる。
+で頭打ちだった。上流は 128K。表を 128K 行焼くと配布は **+762 MiB**（既存の 1,024 行を除いた増分 =
+(131,072 − 1,024) × 6,144 B）・VRAM は **768 MiB**（表の全量 = 131,072 × 6,144 B — 常駐するのは
+全行なので増分ではなく全量が要る）で、短い会話の利用者にも一律に掛かる。
 
 P 掃引（research 2026-09-03）で分かったこと: VRAM は 128K でも +2.3 GiB で壁にならず、天井は
 時間の側にある（prefill は chunkLength 32 のまま P² に効き 16K で 5.4 分・decode は full 層 attention
@@ -31,10 +32,13 @@ P 掃引（research 2026-09-03）で分かったこと: VRAM は 128K でも +2.
    させる形は、容量記号 `C` を入力 shape に持ち込んで `capacitySymbolOf` と束縛点 MUST を壊す。
 2. 上流の RoPE は全経路 f32（角度 `position × invFreq` を f32 で積む — 131,071 で ULP ≈ 0.008 rad・
    cos / sin は SLEEF の 1 ULP）。TS が f64 で計算して f32 へ丸めても**ビット同一にはならない**
-   （実測: P=1,024 で 6.9e-5・P=131,071 で 4.8e-3）。数学的に正確なのは f64 側で、gemma4 の検収門は
+   （実測は測定範囲ごとに別の数: 位置 0..1,024 の掃引の最大 6.9e-5・位置 131,071 ちょうどの点 4.8e-3・
+   位置 0..131,071 の全掃引の最大 9.4e-3）。数学的に正確なのは f64 側で、gemma4 の検収門は
    もともと token 列の離散一致 + logits atol 1e-2（余裕床 2.5e-2）なのでビット同一を要求していない。
 3. chunkLength は出荷 IR に上下限が無く（記号は名前のみ・768 由来の定数ゼロ）、`karume.json` の宣言
-   だけで 768 まで上げられる。実測で prefill は 5〜9 倍縮み（16K で 326 → 60 s）、token 列は不変。
+   だけで 768 まで上げられる。実測で prefill は 5〜9 倍縮み（16K で 326 → 60 s）、token 列は不変。\
+   追記 2026-09-03: 上限は宣言 `maxChunkLength` が門になった（決定 3）。IR に上限が無いという事実は
+   変わらないので、trace 範囲を知る唯一の口が配布形の宣言になる。
 
 ## Decision
 
@@ -65,11 +69,12 @@ TS 側は `packages/models/src/gemma/rope.ts` が正本で、`DerivedRunInputs.d
 
 ### 3. 配布形の宣言（`pipelineConfig` — 内側なので format bump 不要）
 
-`chunkLength`（既定 768 = export の Dim 上限）・`capacity`（既定 4,096 = 実測の実用線）・
+`chunkLength`（既定 768 = export の Dim 上限）・`maxChunkLength`（= 記号 `M` の trace 上限 768・
+追記 2026-09-03）・`capacity`（既定 4,096 = 実測の実用線）・
 `maxPosition`（= 上流 `max_position_embeddings` 131,072 — **モデルが宣言する位置の上限**）・
 `rope`（層種別 `{theta, headDim, rotaryDim}` — config から導出・写経しない）・`sampler`。
-TS の門 `chunkLength ≤ capacity ≤ maxPosition` はそのまま。`maxPosition` の意味だけが
-「焼いた表の行数」から「モデル宣言」へ変わる。
+TS の門は 2 本 — `chunkLength ≤ maxChunkLength` と `chunkLength ≤ capacity ≤ maxPosition`。
+`maxPosition` の意味だけが「焼いた表の行数」から「モデル宣言」へ変わる。
 
 ### 4. capacity / chunkLength は実行時ノブ
 

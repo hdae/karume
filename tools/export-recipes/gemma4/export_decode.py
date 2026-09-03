@@ -28,8 +28,10 @@ MUST: 差分は variant の 4 欄に載る形だけにする。台本側へ経�
 
 ## 何をグラフに載せるか
 
-`(input_ids[1,M], position_ids[1,M]) → (logits[1,M,262144], token[1,M,1])` の **chunk ラッパ**
-1 本。`M` は物理 chunk 次元（ADR 0067 決定 4 — prefill は `chunkLength` / decode は 1）で、
+`(input_ids[1,M], rope_{sliding,full}_attention_{cos,sin}[1,M,headDim]) →
+(logits[1,M,262144], token[1,M,1])` の **chunk ラッパ** 1 本（token-only 変種はさらに
+`last_row` を取る）。位置そのものは入力に無い（下の節）。`M` は物理 chunk 次元
+（ADR 0067 決定 4 — prefill は `chunkLength` / decode は 1）で、
 有効行は先頭 `queryLength` 行の compact-prefix。`token` は `logits.argmax(-1, keepdim=True)`
 （ADR 0068 決定 4 の decode 出口）。**出力順は `[logits, token]` 固定**で、ランタイム側の
 slot 番号がこの順を読む。
@@ -443,8 +445,11 @@ class ChunkVariant:
     #: 出口が token-only（`last_row` 入力が増え、出力が token 1 本 — ADR 0068 決定 4）か。
     token_only: bool
     #: 自分の golden（io + greedy）を採るか。token-only 系列は logits opt-in 系列の greedy
-    #: 記録を検収門がそのまま流用するので採らない（{@link gemma4.export_token} の docstring）
-    #: — 出口の形とは独立の系列ごとの方針なので、`token_only` から導かない。
+    #: 記録を検収門がそのまま流用するので採らない（{@link gemma4.export_token} の docstring）。
+    #: NOTE: `token_only` とは別欄だが、現状は 2 通りの組でしか成立しない — `goldens=True` かつ
+    #: `token_only=True` は `_write_io` が `last_row` を `args` から引けず `KeyError` で落ちる。
+    #: 逆の組（`goldens=False` かつ `token_only=False`）は {@link gemma4.export_product} が
+    #: 実際に使っているが、そちらは `export_series` を通らずラッパ欄だけを読む。
     goldens: bool
 
 

@@ -357,4 +357,8 @@ full スロットの `P + Q ≤ C` 超過は今日「汎用メッセージで fa
     実 GPU 無しの門（`tests/gemma_chat_session_test.ts`）もそこから来る。
   - **今回入れないもの**: モデルに要約させる compact（`onOverflow` の実装の 1 つとして後から
     足せる席はある）。**窓（`capacity`）を広げた後に再検討する** — 今の 640 では要約自体が
-    入らない。
+    入らない。\
+    **追記 2026-09-03: この再検討条件は成立した**。ADR
+    [0091](0091-gemma4-host-rope-variable-capacity.md) 決定 4 で `capacity` は実行時ノブになり、
+    既定 4,096・上限は配布形の宣言 `maxPosition`（E2B は 131,072）。compact は `onOverflow` の
+    ポリシー実装 1 本として backlog へ起票済み（数字 640 は当時の値で、現在の既定ではない）。

@@ -95,8 +95,9 @@ mismatch reports the measured token and the expected one, both decoded.
 
 ## What `export_decode.py` emits
 
-The same checkpoint as **one states-form chunk graph**: `input_ids[1, M]` and `position_ids[1, M]`
-in, `logits[1, M, 262144]` and `token[1, M, 1]` out, with the KV held in 30 named state slots
+The same checkpoint as **one states-form chunk graph**: `input_ids[1, M]` and the four RoPE rows
+`rope_{sliding,full}_attention_{cos,sin}[1, M, headDim]` in, `logits[1, M, 262144]` and
+`token[1, M, 1]` out, with the KV held in 30 named state slots
 instead of graph I/O. It is the acceptance fixture for ADR
 [0066](../../../docs/decisions/0066-generation-context-state-slots.md) (the generation context and
 named state slots), ADR
