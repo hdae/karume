@@ -183,10 +183,13 @@ export type Gemma4PipelineOptions = {
    *
    * 上げるほど prefill の run 本数が減り（フェンス待ちの回数もその比で減る）、1 run あたりの
    * 一時バッファと attention のスコア行列が増える。グラフの chunk 行は記号なので、資産を
-   * 焼き直さずに選べる（ただし焼いた記号の上限を超える値は run のエンコードで落ちる）。
+   * 焼き直さずに選べる。
    *
-   * MUST: 2 以上・`maxPosition` 以下（このパイプラインの門）。1 は decode 形の専用値で、prefill
-   * 形として流す経路が無い（有効行 1 本の chunk は `GenerationSequence` が decode 形で流す）。
+   * MUST: 2 以上・配布形の宣言 {@link Gemma4PipelineConfig.maxChunkLength} 以下・`maxPosition`
+   * 以下（このパイプラインの門）。1 は decode 形の専用値で、prefill 形として流す経路が無い
+   * （有効行 1 本の chunk は `GenerationSequence` が decode 形で流す）。上限を宣言から見るのは、
+   * 記号 `M` の trace 範囲が資産からは読めない（IR の `symbols` は名前の列だけ）ため — 宣言が
+   * 無かった頃は範囲外の値が例外なしで走っていた（2026-09-03 実測）。
    * 各 sequence の容量に対する `chunkLength ≤ capacity` は `createGenerationSequence` が見る。
    */
   readonly chunkLength?: number;
@@ -603,8 +606,14 @@ const admitGemma4 = (component: ModelComponent, config: Gemma4PipelineConfig): G
  * 実行時ノブの `chunkLength` を検査して返す（{@link Gemma4PipelineOptions.chunkLength} の門）。
  *
  * MUST: 2 以上（グラフの chunk 記号は prefill 形の最小 2 で焼かれており、1 行の chunk は decode 形
- * として流れる）かつ `maxPosition` 以下。宣言（`parseGemma4PipelineConfig`）が同じ関係を既定値に
- * 対して見るので、ここが見るのは**呼び手が上書きした値**である。
+ * として流れる）・配布形が宣言する `maxChunkLength` 以下・`maxPosition` 以下。宣言
+ * （`parseGemma4PipelineConfig`）が同じ関係を既定値に対して見るので、ここが見るのは**呼び手が
+ * 上書きした値**である。
+ *
+ * MUST: `maxChunkLength` の門は落とせない — 記号 `M` の trace 範囲は資産に残らない（IR の
+ * `symbols` は名前の列だけ）ので、宣言だけが「この資産が受けられる chunk 行数」の出どころで
+ * ある。門が無かった頃、上限 768 の資産に `chunkLength: 1024` を渡すと例外なしで走っていた
+ * （2026-09-03 実測）— 保証の外で動く形は fail loudly にする（横断不変条件）。
  *
  * NOTE: 容量との関係（`chunkLength ≤ capacity`）はここでは見ない — 容量は sequence ごとに選ぶので、
  * 両者が揃う唯一の場所が `createGenerationSequence` である（同じ式を 2 箇所に持たない）。
@@ -612,6 +621,12 @@ const admitGemma4 = (component: ModelComponent, config: Gemma4PipelineConfig): G
 const assertChunkLength = (chunkLength: number, config: Gemma4PipelineConfig): number => {
   if (!Number.isSafeInteger(chunkLength) || chunkLength < 2) {
     throw new Error(`Gemma4Pipeline: chunkLength ${chunkLength} が 2 以上の整数でない`);
+  }
+  if (chunkLength > config.maxChunkLength) {
+    throw new Error(
+      `Gemma4Pipeline: chunkLength ${chunkLength} が配布形の宣言 maxChunkLength` +
+        ` ${config.maxChunkLength} を超えた（記号 M を焼いた trace 範囲の外）`,
+    );
   }
   if (chunkLength > config.maxPosition) {
     throw new Error(

@@ -344,17 +344,20 @@ limit, 131,072 for E2B), `rope` (per layer type: `theta` / `headDim` / `rotaryDi
 scaling factor other than 1, fails the export) and `sampler` (`generation_config.json` —
 temperature / top-k / top-p, ADR [0083](../../../docs/decisions/0083-generation-api-surface.md)
 decision 7). Declared as **defaults for runtime knobs**, because no asset can state them:
-`chunkLength` (768 = the traced upper bound of the chunk symbol) and `capacity` (4,096). Both can be
-overridden at load time; the loader keeps `chunkLength ≤ capacity ≤ maxPosition`, and the assembly
-refuses declarations that violate it. The full-attention KV slots are the only thing that grows
-with capacity (12 KiB per token), so `requiredLimits` is baked for `maxPosition`, the largest
-capacity the distribution allows.
+`chunkLength` (768) and `capacity` (4,096). Alongside them, `maxChunkLength` (768) states the
+traced upper bound of the chunk symbol — a copy of `export.SYM_MAX`, and the one number a reader
+cannot recover from the asset, because an IR's `symbols` are names without ranges. Both knobs can be
+overridden at load time; the loader keeps `chunkLength ≤ maxChunkLength` and
+`chunkLength ≤ capacity ≤ maxPosition`, and the assembly refuses declarations that violate it. The
+full-attention KV slots are the only thing that grows with capacity (12 KiB per token), so
+`requiredLimits` is baked for `maxPosition`, the largest capacity the distribution allows.
 
 Gates that run **before a single byte is placed** (each one covers a mismatch that leaves shape,
 dtype and manifest all correct, and shows up only as wrong values):
 
 - the container carries both `I4` (linear weights) and `I8` (embeddings) and no `F16`
-- graph inputs are exactly `input_ids` / `position_ids` / `per_layer_inputs` / `last_row`, the exit
+- graph inputs are exactly `input_ids` / `rope_{sliding,full}_attention_{cos,sin}` /
+  `per_layer_inputs` / `last_row`, in that order, the exit
   is `[1, 1, V]`, and exactly one symbol is free of the input shapes (the full slot's capacity)
 - `per_layer_inputs`' layer and dim axes match the sidecar index
 - the sidecar index is a gap-free ascending partition of `[0, tokens)`, `tokens` equals `V`, and

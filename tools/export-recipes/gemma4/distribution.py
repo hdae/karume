@@ -23,6 +23,11 @@
 ADR 0083 決定 7）はそれぞれの正本から引く。前者を写経すると、チェックポイントを差し替えた
 日に宣言だけが古びて「宣言どおりに組んだ表が上流と別の角度で回る」形になる。
 
+実行時ノブのうち `chunkLength` だけは**上限も宣言する**（`maxChunkLength`）— IR の `symbols`
+は名前の列だけで記号の上限を持たないので、読み手は「この資産が受けられる chunk 行数」を
+資産から導けない。焼く側（`gemma4.export.SYM_MAX`）が知っている唯一の数を宣言へ載せて、
+trace 範囲の外の `chunkLength` を TS 側の門が落とせるようにする（2026-09-03 裁定）。
+
 RoPE の cos / sin 表は**もう配布物に入らない** — ホスト（TS 側）が `rope` の宣言から実行時に
 組む。したがって位置の上限を決めるのは資産ではなくモデルの宣言だけで、`capacity` は
 `maxPosition` までの実行時ノブになる。
@@ -191,6 +196,10 @@ GEMMA4_CHUNK_LENGTH = 768
 
 #: 記号 `M`（1 chunk の行数）の上限。焼く側の `gemma4.export.SYM_MAX` の鏡像で、こちらは
 #: torch を読まない側に置いた写し（同値は `tests/test_distribution.py` が突き合わせる）。
+#:
+#: これは `pipelineConfig.maxChunkLength` として**配布形に載る**（{@link gemma4_pipeline_config}）。
+#: 資産からは導けない数（IR の `symbols` は名前の列だけ）なので、宣言が無いと読み手は
+#: `chunkLength` の上書きが trace 範囲の内側かどうかを判定できない。
 GEMMA4_MAX_CHUNK_LENGTH = 768
 
 #: full スロットの容量（会話が使える最大の論理長）の**既定値**。同じく実行時ノブで、上限は
@@ -675,13 +684,23 @@ def gemma4_sampler(model_dir: Path) -> dict[str, Any]:
 def gemma4_pipeline_config(
     max_position: int, rope: Mapping[str, Any], sampler: Mapping[str, Any]
 ) -> dict[str, Any]:
-    """`pipelineConfig`（TS 側スキーマの 5 欄）を組む。
+    """`pipelineConfig`（TS 側スキーマの 6 欄）を組む。
 
     MUST: 実行時ノブが**両側の上限の内側**に収まることをここで落とす。chunk の行数は記号 `M`
     の trace 時の上限（{@link GEMMA4_MAX_CHUNK_LENGTH}）を超えられず、`capacity` は会話が
     使える最大の論理長なので位置は最大 `capacity - 1` まで進む — モデルの宣言
     （`maxPosition`）を超える容量は「宣言の内側なのに上流が想定していない位置を回す」形で、
     長い会話でだけ表面化する。
+
+    MUST: その chunk の上限を `maxChunkLength` として**宣言にも載せる**。ここの検査が見るのは
+    配布形が焼く既定値だけで、`chunkLength` は読み手の実行時ノブでもある — 宣言が無いと
+    「trace 範囲の外の chunk 長で走る」形を読み手側で落とせない（IR の `symbols` は名前の列
+    だけで上限を持たない）。
+
+    NOTE: 上限の側は**写しの同値しか見ていない**。比較相手 {@link GEMMA4_MAX_CHUNK_LENGTH} は
+    `gemma4.export.SYM_MAX` を写した定数で、系列を組んだときに実際に使われた `--sym-max` は
+    どこにも記録されていない（資産からも読めない）。小さい `--sym-max` で trace した容器に対して
+    `chunkLength: 768` を名乗る配布形は、この検査も同値テストも素通りする。
     """
     if not 2 <= GEMMA4_CHUNK_LENGTH <= GEMMA4_MAX_CHUNK_LENGTH:
         raise DistError(
@@ -700,6 +719,7 @@ def gemma4_pipeline_config(
         )
     return {
         "chunkLength": GEMMA4_CHUNK_LENGTH,
+        "maxChunkLength": GEMMA4_MAX_CHUNK_LENGTH,
         "maxPosition": max_position,
         "capacity": GEMMA4_CAPACITY,
         "rope": {layer_type: dict(spec) for layer_type, spec in rope.items()},

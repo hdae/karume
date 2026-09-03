@@ -62,9 +62,18 @@ export type Gemma4PipelineConfig = {
    * 固定長 prefill chunk の行数の**既定**（ADR 0066 決定 4 — context の計画時定数）。
    *
    * 実行時ノブでもある（`Gemma4PipelineOptions.chunkLength`）— グラフの chunk 行は記号 `M` なので、
-   * 資産を焼き直さずに選べる（上限は焼いた記号の max）。
+   * 資産を焼き直さずに選べる（上限は {@link maxChunkLength}）。
    */
   readonly chunkLength: number;
+  /**
+   * `chunkLength` に選べる値の**上限**（記号 `M` を焼いた trace 範囲の上端）。
+   *
+   * MUST: 必須。IR の `symbols` は名前の列だけで記号の上限を持たない（`format/ir.ts`）ので、
+   * これは**資産から導けない唯一の数**である。宣言が無いと、trace 範囲の外の `chunkLength` は
+   * 例外なく素通りして走る（値が壊れるとは限らないが保証の外 — 横断不変条件「想定外は
+   * fail loudly」に反する）。焼く側の正本は `gemma4.export.SYM_MAX`（配布 recipe が写しを持つ）。
+   */
+  readonly maxChunkLength: number;
   /**
    * この**モデルが宣言する**絶対位置の排他的上限（上流 `max_position_embeddings`）。
    *
@@ -100,6 +109,7 @@ export type Gemma4PipelineConfig = {
 
 const ROOT_KEYS: readonly string[] = [
   "chunkLength",
+  "maxChunkLength",
   "maxPosition",
   "capacity",
   "rope",
@@ -218,11 +228,11 @@ const parseRope = (raw: unknown, where: string): Gemma4RopeSpec => {
 /**
  * `unknown`（hub が素通しした生の宣言）を検査して {@link Gemma4PipelineConfig} にする。
  *
- * MUST: 3 つの数の関係まで見る — `chunkLength ≤ capacity ≤ maxPosition`。容量いっぱいの会話は
- * 位置 `capacity - 1` まで進むので、モデルが宣言した位置上限を超える既定は**長い会話でだけ**
- * 実行時に落ちる（焼く側の `gemma4_pipeline_config` が同じ関係を見るが、他人の配布形は検査を
- * 通っていない前提で読む）。実行時ノブ（sequence の `capacity`）にも同じ関係が掛かる
- * （`generation/sequence.ts`）。
+ * MUST: 数の関係まで見る — `chunkLength ≤ maxChunkLength` と `chunkLength ≤ capacity ≤ maxPosition`。
+ * 容量いっぱいの会話は位置 `capacity - 1` まで進むので、モデルが宣言した位置上限を超える既定は
+ * **長い会話でだけ**実行時に落ちる（焼く側の `gemma4_pipeline_config` が同じ関係を見るが、他人の
+ * 配布形は検査を通っていない前提で読む）。実行時ノブ（sequence の `capacity`・pipeline の
+ * `chunkLength`）にも同じ関係が掛かる（`generation/sequence.ts` / `./pipeline.ts`）。
  *
  * ## 公開している理由 — `fromAssets` を使う消費者のための口
  *
@@ -238,8 +248,21 @@ export const parseGemma4PipelineConfig = (raw: unknown): Gemma4PipelineConfig =>
   assertAllowedKeys(raw, ROOT_KEYS, where);
   const positiveInteger = (value: number): boolean => Number.isSafeInteger(value) && value >= 1;
   const chunkLength = readNumber(raw, "chunkLength", where, positiveInteger, "1 以上の整数でない");
+  const maxChunkLength = readNumber(
+    raw,
+    "maxChunkLength",
+    where,
+    positiveInteger,
+    "1 以上の整数でない",
+  );
   const maxPosition = readNumber(raw, "maxPosition", where, positiveInteger, "1 以上の整数でない");
   const capacity = readNumber(raw, "capacity", where, positiveInteger, "1 以上の整数でない");
+  if (chunkLength > maxChunkLength) {
+    throw new Error(
+      `${where}: chunkLength ${chunkLength} が maxChunkLength ${maxChunkLength} を超えた` +
+        `（記号 M を焼いた trace 範囲の外）`,
+    );
+  }
   if (chunkLength > capacity) {
     throw new Error(
       `${where}: chunkLength ${chunkLength} が capacity ${capacity} を超えた` +
@@ -254,9 +277,12 @@ export const parseGemma4PipelineConfig = (raw: unknown): Gemma4PipelineConfig =>
   }
   if (!Object.hasOwn(raw, "rope")) throw new Error(`${where}.rope: 無い`);
   const rope = parseRope(raw["rope"], `${where}.rope`);
-  if (!Object.hasOwn(raw, "sampler")) return { chunkLength, maxPosition, capacity, rope };
+  if (!Object.hasOwn(raw, "sampler")) {
+    return { chunkLength, maxChunkLength, maxPosition, capacity, rope };
+  }
   return {
     chunkLength,
+    maxChunkLength,
     maxPosition,
     capacity,
     rope,

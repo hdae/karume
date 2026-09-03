@@ -60,6 +60,8 @@ const GENERATE_COMMAND =
 
 /** 実行条件は既存の gemma4 検収門と同値（同じ資産世代の裁定をそのまま使う）。 */
 const CHUNK_LENGTH = 768;
+/** 記号 `M` を焼いた trace 上限（配布形の宣言 `maxChunkLength` と同値 — `chunkLength` の門）。 */
+const MAX_CHUNK_LENGTH = 768;
 const CAPACITY = 4096;
 const MAX_POSITION = 131072;
 /**
@@ -178,6 +180,7 @@ const openPipeline = async (): Promise<Gemma4Pipeline> => {
   return await Gemma4Pipeline.fromAssets({
     config: {
       chunkLength: CHUNK_LENGTH,
+      maxChunkLength: MAX_CHUNK_LENGTH,
       maxPosition: MAX_POSITION,
       capacity: CAPACITY,
       rope: ROPE,

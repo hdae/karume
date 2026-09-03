@@ -171,7 +171,7 @@ class TestGemma4Layout:
 
 
 class TestGemma4Config:
-    """`pipelineConfig` の 5 欄 — 導出（`maxPosition` / `rope` / `sampler`）と実行時ノブの関係。"""
+    """`pipelineConfig` の 6 欄 — 導出（`maxPosition` / `rope` / `sampler`）と実行時ノブの関係。"""
 
     def test_it_derives_max_position_from_the_upstream_declaration(self, gemma4_assembled) -> None:
         """MUST: 写経しない — 出どころは上流 `text_config.max_position_embeddings` だけ。"""
@@ -285,11 +285,28 @@ class TestGemma4Config:
         assert 2 <= GEMMA4_CHUNK_LENGTH <= GEMMA4_MAX_CHUNK_LENGTH
         assert GEMMA4_CHUNK_LENGTH <= GEMMA4_CAPACITY
 
+    def test_it_declares_the_traced_chunk_bound(self, gemma4_assembled) -> None:
+        """MUST: 記号 `M` の trace 上限を配布形が宣言する（読み手は資産から導けない）。
+
+        IR の `symbols` は名前の列だけで上限を持たないので、`chunkLength` を上書きした呼び手が
+        trace 範囲の外へ出たことは資産側では検出できない。焼く側が知っている唯一の数を宣言へ
+        載せることで、TS 側（`parseGemma4PipelineConfig` / `assertChunkLength`）が門にできる。
+
+        既定（{@link SMALL_CHUNK} へ寄せてある）とは**別の事実**なので、上限は monkeypatch の
+        影響を受けず実物の値のまま出る。
+        """
+        _, manifest = gemma4_assembled
+        assert _model(manifest)["pipelineConfig"]["maxChunkLength"] == GEMMA4_MAX_CHUNK_LENGTH
+
     def test_the_chunk_bound_mirrors_the_export_script(self) -> None:
         """MUST: 記号 `M` の上限は焼く側（`gemma4.export.SYM_MAX`）と同じ数。
 
         配布 recipe は torch を読まない（既定 sync の CI job で collection ごと落とさない）
         ので写しを持つ。写しが古びると「trace の外の chunk 長を宣言した配布形」が通る。
+
+        NOTE: 見えるのは 2 つの**既定値**が一致することだけ。系列を `--sym-max 640` などで
+        組み直しても（513 未満は export 自体が拒む）、使った値はどこにも残らないのでこの門は
+        緑のままになる。
         """
         pytest.importorskip("torch")
         from gemma4.export import SYM_MAX

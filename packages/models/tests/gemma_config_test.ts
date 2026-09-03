@@ -1,26 +1,32 @@
 // gemma4 の `pipelineConfig` スキーマ（`src/gemma/config.ts`）の門 —— GPU も資産も要らない。
 //
 // hub は `pipelineConfig` を素通しするので、形の正本は models 側のこのパーサ 1 本しかない。
-// ここで押さえるのは 3 つ:
+// ここで押さえるのは 4 つ:
 //
 //  ① **欄の受理集合**（未知キー・欠落・型・値域）— 綴り違いが黙って既定へ縮退すると、配布者の
 //     宣言と実行が食い違ったまま気づけない
-//  ② **3 つの数の関係**（`chunkLength ≤ capacity ≤ maxPosition`）— 容量いっぱいの会話は位置
-//     `capacity - 1` まで進むので、RoPE 表の行数を超える宣言は**長い会話でだけ**落ちる
+//  ② **数の関係**（`chunkLength ≤ maxChunkLength` と `chunkLength ≤ capacity ≤ maxPosition`）—
+//     容量いっぱいの会話は位置 `capacity - 1` まで進むので、位置上限を超える宣言は**長い会話で
+//     だけ**落ちる。`maxChunkLength` は記号 `M` の trace 範囲の上端で、資産からは読めない
+//     （IR の `symbols` は名前の列だけ）ので宣言が唯一の出どころ
 //  ③ **焼く側との一致** — 手元に配布形ミラーがあれば、その `karume.json` の宣言がこのパーサを
 //     素通りし、推奨サンプラが上流 `generation_config.json` の値そのものであること
 //     （ADR 0083 決定 7 の「既定値は配布形が宣言する」の実測）
+//  ④ **グラフ宣言との突合**（`rope.<層種>.headDim` = `rope_*` 入力の最終次元）— 宣言だけが
+//     正しくてもグラフと食い違えば表の幅が違う。落ちる位置を初 `run` から admission へ引き戻す
 //
 // ③ の資産（`models/karume-gemma4-e2b/`）はリポジトリ管理外なので、無い環境では**その 1 本だけ**
 // を明示 SKIP する（①② は常に走る）。
 
-import { assertEquals, assertRejects, assertThrows } from "@std/assert";
+import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { parseManifest } from "@karume/hub";
 import { type Gemma4PipelineConfig, parseGemma4PipelineConfig } from "../src/gemma/config.ts";
-import { Gemma4Pipeline } from "../src/gemma/pipeline.ts";
+import { assertRopeInputShapes, Gemma4Pipeline } from "../src/gemma/pipeline.ts";
+import type { GenerationGraph } from "../src/generation/program.ts";
+import { stubModel } from "./helpers/stub-model.ts";
 
 /**
- * 受理される最小形（3 つの数 + `rope` — `sampler` だけが optional）。
+ * 受理される最小形（4 つの数 + `rope` — `sampler` だけが optional）。
  *
  * `rope` は Gemma 4 E2B の実値（sliding は default rope・full は partial rotary 0.25 の
  * proportional）。表は配布形に無く、cos / sin はこの宣言からホストが作る。
@@ -29,9 +35,17 @@ const ROPE = {
   sliding_attention: { theta: 10000, headDim: 256, rotaryDim: 256 },
   full_attention: { theta: 1000000, headDim: 512, rotaryDim: 128 },
 } as const;
-const MINIMAL = { chunkLength: 32, maxPosition: 1024, capacity: 640, rope: ROPE } as const;
+const MINIMAL = {
+  chunkLength: 32,
+  maxChunkLength: 128,
+  maxPosition: 1024,
+  capacity: 640,
+  rope: ROPE,
+} as const;
 /** 配布形ミラーが宣言する既定（capacity / chunkLength はどちらも実行時ノブの**既定**）。 */
 const SHIPPED_CHUNK_LENGTH = 768;
+/** 記号 `M` の trace 上限（焼く側の `gemma4.export.SYM_MAX` — 既定と同値だが別の事実）。 */
+const SHIPPED_MAX_CHUNK_LENGTH = 768;
 const SHIPPED_CAPACITY = 4096;
 /** 上流 `max_position_embeddings`（= モデルが宣言する位置上限）。 */
 const SHIPPED_MAX_POSITION = 131072;
@@ -81,6 +95,16 @@ Deno.test("gemma4 pipelineConfig: 未知キーと欠落は fail loudly", async (
   await t.step("欄の欠落", () => {
     const { capacity: _dropped, ...rest } = MINIMAL;
     assertThrows(() => parseGemma4PipelineConfig(rest), Error, "pipelineConfig.capacity: 無い");
+  });
+  await t.step("maxChunkLength は必須（無いと trace 範囲の外を誰も落とせない）", () => {
+    // 欠落を「上限なし」として通すと、上限 768 の資産に chunkLength 1024 を渡す形が例外なしで
+    // 走る（門を入れる前の実測 — 2026-09-03）。宣言が唯一の出どころなので欠落は fail loudly。
+    const { maxChunkLength: _dropped, ...rest } = MINIMAL;
+    assertThrows(
+      () => parseGemma4PipelineConfig(rest),
+      Error,
+      "pipelineConfig.maxChunkLength: 無い",
+    );
   });
   await t.step("rope は必須（欠けたまま動くと回転しない attention が黙って走る）", () => {
     const { rope: _dropped, ...rest } = MINIMAL;
@@ -197,7 +221,18 @@ Deno.test("gemma4 pipelineConfig: 値域", async (t) => {
   });
 });
 
-Deno.test("gemma4 pipelineConfig: chunkLength ≤ capacity ≤ maxPosition", async (t) => {
+Deno.test("gemma4 pipelineConfig: chunkLength ≤ maxChunkLength / capacity ≤ maxPosition", async (t) => {
+  await t.step("既定の chunkLength が記号 M の trace 範囲の外", () => {
+    assertThrows(
+      () => parseGemma4PipelineConfig({ ...MINIMAL, chunkLength: 129 }),
+      Error,
+      "maxChunkLength 128 を超えた",
+    );
+  });
+  await t.step("上限ちょうどは通る（門が広すぎないことの対）", () => {
+    const config = parseGemma4PipelineConfig({ ...MINIMAL, chunkLength: 128 });
+    assertEquals(config.chunkLength, 128);
+  });
   await t.step("1 chunk すら入らない容量", () => {
     assertThrows(
       () => parseGemma4PipelineConfig({ ...MINIMAL, chunkLength: 64, capacity: 32 }),
@@ -262,6 +297,79 @@ Deno.test("gemma4 fromAssets: config は fromPretrained と同じ門を、バイ
   });
 });
 
+// ---- グラフ宣言との突合（RoPE の幅）----------------------------------------
+//
+// `pipelineConfig.rope.<層種>.headDim` は**ホストが作る表の幅そのもの**なので、グラフ入力の
+// 宣言（`[1, M, headDim]`）と食い違うとホストは最後まで通り、落ちるのは最初の `run` になる
+// （3.7GiB のロードの**後**・文言は「要素数が shape と合わない」= どちらの宣言が誤りか読めない）。
+// 突合は家族 admission（`admitGemma4` = 重み shard を 1 バイトも取る前）が通す。焼く側の鏡像は
+// `tools/export-recipes/gemma4/export_decode.py` の `assert_rope_inputs`。
+
+/** 実配布形と同じ宣言（sliding 256 / full 512）。`patch` で 1 本だけ壊す。 */
+const ropeGraph = (
+  patch: Readonly<Record<string, readonly (number | string)[]>> = {},
+): GenerationGraph =>
+  stubModel({
+    symbols: ["C", "M"],
+    inputs: [
+      { name: "input_ids", shape: [1, "M"] },
+      { name: "last_row", shape: [1] },
+      { name: "per_layer_inputs", shape: [1, "M", 35, 256] },
+      { name: "rope_sliding_attention_cos", shape: patch.slidingCos ?? [1, "M", 256] },
+      { name: "rope_sliding_attention_sin", shape: patch.slidingSin ?? [1, "M", 256] },
+      { name: "rope_full_attention_cos", shape: patch.fullCos ?? [1, "M", 512] },
+      { name: "rope_full_attention_sin", shape: patch.fullSin ?? [1, "M", 512] },
+    ].filter((input) => input.shape.length > 0),
+    outputs: ["logits"],
+    values: { logits: [1, 1, 262144] },
+  }).graph;
+
+Deno.test("gemma4 rope 突合: 宣言どおりのグラフは通り、幅の食い違いは名指しで落ちる", async (t) => {
+  const config = parseGemma4PipelineConfig(MINIMAL);
+
+  await t.step("宣言どおり（陰性対照 — 門が全部落として緑になっていないこと）", () => {
+    assertRopeInputShapes(ropeGraph(), config);
+  });
+
+  await t.step("層種別の取り違え（full の席に sliding の幅）", () => {
+    // exporter 側 `rope.py` が `head_dim` / `global_head_dim` の分岐で自認している間違い方。
+    const error = assertThrows(
+      () => assertRopeInputShapes(ropeGraph({ fullCos: [1, "M", 256] }), config),
+      Error,
+      "rope_full_attention_cos",
+    );
+    assert(error.message.includes("headDim 512"), error.message);
+  });
+
+  await t.step("配布形が headDim を偽った宣言（同じ食い違いの逆側）", () => {
+    const lying = parseGemma4PipelineConfig({
+      ...MINIMAL,
+      rope: { ...ROPE, sliding_attention: { theta: 10000, headDim: 128, rotaryDim: 128 } },
+    });
+    assertThrows(
+      () => assertRopeInputShapes(ropeGraph(), lying),
+      Error,
+      "rope_sliding_attention_cos",
+    );
+  });
+
+  await t.step("次元の数が違う宣言（`[1, M, headDim]` でない）", () => {
+    assertThrows(
+      () => assertRopeInputShapes(ropeGraph({ fullSin: [1, 512] }), config),
+      Error,
+      "rope_full_attention_sin",
+    );
+  });
+
+  await t.step("RoPE がホスト供給でない資産（入力そのものが無い）", () => {
+    assertThrows(
+      () => assertRopeInputShapes(ropeGraph({ slidingSin: [] }), config),
+      Error,
+      "グラフ入力 'rope_sliding_attention_sin' が無い",
+    );
+  });
+});
+
 Deno.test("gemma4 pipelineConfig: 配布形ミラーの宣言がこのパーサを素通りする", () => {
   const text = readMirror();
   if (text === undefined) {
@@ -277,6 +385,9 @@ Deno.test("gemma4 pipelineConfig: 配布形ミラーの宣言がこのパーサ�
   // 推奨サンプラは**上流の宣言そのもの**（写経していれば値が動く）。
   assertEquals(config.sampler, RECOMMENDED, "配布形が宣言する sampler の既定");
   assertEquals(config.chunkLength, SHIPPED_CHUNK_LENGTH);
+  // 記号 `M` の trace 上限は資産に残らない（IR の symbols は名前だけ）ので、配布形の宣言が
+  // 唯一の出どころ。焼く側（`gemma4.export.SYM_MAX`）との同値は recipe 側の pytest が見る。
+  assertEquals(config.maxChunkLength, SHIPPED_MAX_CHUNK_LENGTH);
   // capacity / chunkLength は実行時ノブで、配布形が宣言するのはその**既定**である。
   assertEquals(config.capacity, SHIPPED_CAPACITY);
   // 位置上限は上流 `max_position_embeddings`（表の行数ではない — 表は配布形から外れた）。
