@@ -180,7 +180,6 @@ import {
   scoreStorageBytes,
 } from "../kernels/score-storage.ts";
 import {
-  STATE_STATS_STRIDE,
   stateAttentionParams,
   statePvKey,
   statePvParallelKey,
@@ -269,6 +268,7 @@ import type {
   ParamsCacheStats,
   StateAttentionReduce,
 } from "./session-types.ts";
+import { planStateAttention } from "./state-attention-plan.ts";
 import type { ResidentWeight } from "./weight-residency.ts";
 
 /** elementwise 族の生成入力のうち rank に依らない部分（rank はエンコード時に決まる）。 */
@@ -2131,9 +2131,10 @@ export class RecipeBuilder {
    * 走査範囲は実行時値なので **①QK の dispatch 数だけが論理長から算出**される（②③ は出力側の
    * 形だけで決まり、live の走査は invocation の内側）。
    *
-   * MUST: 行ブロックは {@link planRowBlocks}（ADR 0060 と同じ純関数）で割る。S 1 枚 =
-   * `B·H · block · colCap · 4` バイトが `maxStorageBufferBindingSize` に収まる最小枚数の等分で、
-   * 実行時オートチューンは持たない（ADR 0022）。1 行でも収まらない形は fail loudly。
+   * MUST: 列容量 `colCap` と行ブロックの割り方・一時のバイト式は {@link planStateAttention}
+   * （見積り `estimate.ts` と共有する 1 本）だけから引く。S 1 枚 = `B·H · block · colCap · 4`
+   * バイトが `maxStorageBufferBindingSize` に収まる最小枚数の等分で、実行時オートチューンは
+   * 持たない（ADR 0022 / ADR 0060）。1 行でも収まらない形は fail loudly。
    * MUST: 一時（S / 行統計）は**ブロックごとに**確保して返す（全ブロックぶんまとめて取ると、
    * 上限を越えない形にした意味が消える）。
    */
@@ -2155,9 +2156,6 @@ export class RecipeBuilder {
     const capacity = kSlot.shape[2];
     const window = stateWindow(step.node.attrs, where) ?? 0;
     const sliding = stateSliding(window);
-    // S の列ストライド上限。full は容量ぶん・sliding は resident 窓 `(W−1) + M`
-    // （下限式の正本は src/kernels/state-attention.ts の `assertStateGeometry`）。
-    const colCap = sliding ? window - 1 + chunkRows : capacity;
     const scale = attentionScale(step.node.attrs, where);
     // DECIDED: 数値変種 × states 形は fail loudly で開始する（ADR 0058 決定 3 —「未実装の組は
     // 縮退でなく fail loudly」。黙って f32 で走ると opt-in を指定した意味が診断からも数値からも
@@ -2184,9 +2182,10 @@ export class RecipeBuilder {
 
     const limit = this.#state.gpu.limits.maxComputeWorkgroupsPerDimension;
     const batchHeads = batch * heads;
-    const blocks = planRowBlocks(
-      chunkRows,
-      batchHeads * colCap * 4,
+    // 行ブロックの枚数を明示する `rowBlockSplit`（テスト専用 `ROW_BLOCK_SPLIT`）を渡すのは
+    // 実行計画側だけ — 見積りには受け口が無く、既定の等分だけを名乗る。
+    const { colCap, blocks } = planStateAttention(
+      { batchHeads, chunkRows, capacity, window },
       this.#state.gpu.limits.maxStorageBufferBindingSize,
       this.#state.rowBlockSplit,
     );
@@ -2228,8 +2227,8 @@ export class RecipeBuilder {
         depth,
         window,
       };
-      const scores = builder.allocTemp(batchHeads * block.rows * colCap * 4);
-      const rowStats = builder.allocTemp(batchHeads * block.rows * STATE_STATS_STRIDE * 4);
+      const scores = builder.allocTemp(block.scoreBytes);
+      const rowStats = builder.allocTemp(block.statsBytes);
 
       // ①QK — **workgroup 数だけが論理長から算出**される（仕事量 ∝ Q × (有効 past + Q) の機構
       // そのもの — ADR 0066 決定 3 の合格条件）。

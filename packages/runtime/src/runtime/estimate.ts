@@ -37,9 +37,8 @@ import { assertRuntimeSupport, type KarumeModel } from "../format/container.ts";
 import { parseDim, solveDim } from "../format/dims.ts";
 import type { IrDim, IrGraph } from "../format/ir.ts";
 import { toSizeClass } from "../gpu/arena.ts";
-import { STATE_STATS_STRIDE, stateSliding } from "../kernels/state-attention.ts";
 import { numel, RUNTIME_SUPPORT, stateWindow } from "../ops.ts";
-import { aliasesInput, planRowBlocks } from "./fusion.ts";
+import { aliasesInput } from "./fusion.ts";
 import {
   assertChunkLength,
   LENGTHS_BYTES,
@@ -58,6 +57,7 @@ import {
   validateGraphContracts,
 } from "./plan.ts";
 import type { GenerationContextSpec } from "./session-types.ts";
+import { planStateAttention, type StateAttentionBlock } from "./state-attention-plan.ts";
 import {
   planWeightBuffers,
   planWeightResidency,
@@ -158,7 +158,7 @@ export type EstimateOptions = {
    * `maxStorageBufferBindingSize` の granted 値（`GPUDevice.limits` / `readAdapterLimits`）。
    *
    * states 形 attention のノード内一時は**行ブロック 1 枚ぶん**しか同時生存せず、その枚数は
-   * この上限だけで決まる（{@link planRowBlocks} — ADR 0022 の実行時オートチューン禁止により
+   * この上限だけで決まる（{@link planStateAttention} — ADR 0022 の実行時オートチューン禁止により
    * device の granted limit と束縛だけの純関数）。
    *
    * MUST: states 形 attention を持つグラフでは**必須**（{@link stateAttentionTemps} が
@@ -388,24 +388,16 @@ const weightEstimate = (
 const isStateAttention = (node: NodePlan): boolean =>
   node.contract.kind === "attention" && Object.keys(node.node.states).length > 0;
 
-/** 行ブロック 1 枚ぶんのノード内一時（確保順 — 解放は逆順）。 */
-type StateAttentionBlockTemps = {
-  /** スコア S = `B·H × 行ブロック行数 × 列容量 × 4` バイト。 */
-  readonly scoreBytes: number;
-  /** 行統計 = `B·H × 行ブロック行数 × STATE_STATS_STRIDE × 4` バイト。 */
-  readonly statsBytes: number;
-};
-
 /**
  * states 形 attention 1 ノードが出すノード内一時（スコア S と行統計）を行ブロック順に並べる。
  *
  * 融合の成立に依存せず必ず出て、大きさは列容量（full = スロット容量 `C` / sliding = 窓の
  * resident 幅 `W−1+M`）に比例するため、可変 capacity のグラフでは中間の主役になる。
  *
- * MUST: 算式の正本は recipe-builder の `#buildStateAttention` — 列容量 `colCap` の 2 分岐と、
- * 行ブロック分割の {@link planRowBlocks}（ADR 0060 と同じ純関数）をそのまま写す。ここで別式を
- * 書くと、片方だけ直された実装に対して estimator が例外も警告も無く別の数を主張し続ける
- * （モジュール doc の MUST）。
+ * MUST: 算式は {@link planStateAttention}（実行計画 `#buildStateAttention` と共有する 1 本）
+ * だけから引く。ここで式を書き直すと、片方だけ直された実装に対して estimator が例外も警告も
+ * 無く別の数を主張し続ける（モジュール doc の MUST）。ここが持つのは、見積り固有の材料
+ * （記号解決済みのスロット shape）を幾何へ翻訳する部分だけ。
  * MUST: `maxStorageBufferBindingSize` が無ければ fail loudly。枚数は device の granted limit
  * だけで決まるので、既定値で埋めると「どの device でも出ない一時の大きさ」を名乗ることになる。
  */
@@ -413,7 +405,7 @@ const stateAttentionTemps = (
   node: NodePlan,
   stateShapes: ReadonlyMap<string, readonly number[]> | undefined,
   limit: number | undefined,
-): readonly StateAttentionBlockTemps[] => {
+): readonly StateAttentionBlock[] => {
   const q = node.inputShapes[0];
   const where = `attention (states) [${q.join(",")}]`;
   if (limit === undefined) {
@@ -437,14 +429,15 @@ const stateAttentionTemps = (
         "（GenerationContext を伴わない見積りでは states 形 attention を数えられない）",
     );
   }
-  const window = stateWindow(node.node.attrs, where) ?? 0;
-  // S の列ストライド上限。full は容量ぶん・sliding は resident 窓 `(W−1) + M`。
-  const colCap = stateSliding(window) ? window - 1 + chunkRows : slotShape[2];
-  const batchHeads = batch * heads;
-  return planRowBlocks(chunkRows, batchHeads * colCap * 4, limit).map((block) => ({
-    scoreBytes: batchHeads * block.rows * colCap * 4,
-    statsBytes: batchHeads * block.rows * STATE_STATS_STRIDE * 4,
-  }));
+  // 行ブロックの枚数を明示する `forced`（テスト専用 `ROW_BLOCK_SPLIT`）は渡さない —
+  // `EstimateOptions` に受け口が無く、実運用の呼び手も使わないため（見積りは既定の等分だけを
+  // 名乗る）。
+  return planStateAttention({
+    batchHeads: batch * heads,
+    chunkRows,
+    capacity: slotShape[2],
+    window: stateWindow(node.node.attrs, where) ?? 0,
+  }, limit).blocks;
 };
 
 /**
@@ -576,9 +569,12 @@ export const estimateSessionMemory = (
  * グラフと `planWeightResidency(graph)` の計画、そして `{capacity, chunkLength}` を
  * `options.generation` に載せて同じ {@link AdmissionReport} を得る。
  *
- * MUST: 常駐計画は**呼び手が持っているものを渡す**（`PreparedModel` は prepare 時に 1 回だけ
- * 計算して構築とも共有する）。ここで引き直すと「見積りに使った席」と「実際に上げた席」が
- * 別の計算結果になりうる形が復活する。
+ * MUST: 常駐計画を**持っている呼び手はそれを渡す**（`PreparedModel` は prepare 時に 1 回だけ
+ * 計算して構築とも共有する）。構築に使ったのと別の計画を組み直して渡すと、「見積りに使った席」
+ * と「実際に上げた席」が別の計算結果になりうる形が復活する。
+ * 持っていない呼び手（`PreparedModel` を捨てて `IrGraph` だけ残す models のパイプライン）は
+ * `planWeightResidency(graph)` で引いてよい — グラフが同じなら計画も同じ純関数なので、席の
+ * 食い違いは生じない（`mod.ts` がこの 2 本を公開している理由そのもの）。
  */
 export const estimateGraphMemory = (
   graph: IrGraph,

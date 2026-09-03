@@ -1072,53 +1072,71 @@ Deno.test("states 形 attention の見積りに上限を渡さないのは fail 
 });
 
 /**
- * S / 行統計の算式が recipe-builder と同じ導出元から出ていることの唯一の実測門。
+ * S / 行統計の算式が recipe-builder と同じ導出元（`planStateAttention`）から出ていることの
+ * 唯一の実測門。
  *
  * このグラフは融合が 1 本も掛からない（states を触るノードは窓を掴まない — ADR 0067 決定 5b）
  * ので、`workspaceBytes` は slot 表の総バイト = `planBacking.residentBytes` と**厳密一致**する。
- * 列容量 `colCap` か行ブロックの割り方が実装とずれれば、ここが例外なしで割れる。
+ * 算式そのものは両者が共有する（= ここでは割れない）が、共有関数へ**渡す材料**（`B·H`・窓・
+ * 容量の出どころ）と、返ったバイト数を実行相が確保する位置・サイズクラス再利用の規則が
+ * estimator の写しとずれれば、ここが例外なしで割れる。
+ *
+ * 呼ぶのは full / sliding の 2 変種（下の 2 本）— `colCap` は変種で式が分かれる唯一の欄なので、
+ * 片方だけでは分岐のもう一方が無門のままになる。
  */
-Deno.test({
-  name: "states 形 attention の中間総量が実行計画の slot 表と厳密一致する（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
-    const gpu = await acquireGpu();
+const assertPlanBackingMatchesEstimate = async (
+  variant: { readonly capacity: number; readonly window?: number },
+): Promise<void> => {
+  const gpu = await acquireGpu();
+  try {
+    const model = openGraph(stateAttentionGraph(variant.window));
+    const generation = { chunkLength: 4, bindings: { C: variant.capacity } };
+    const { prefill } = bothScenarios(
+      estimateSessionMemory(model, {
+        generation,
+        maxStorageBufferBindingSize: gpu.limits.maxStorageBufferBindingSize,
+      }),
+    );
+    const session = await createSession(gpu, model);
     try {
-      const model = openGraph(stateAttentionGraph());
-      const generation = { chunkLength: 4, bindings: { C: 16 } };
-      const { prefill } = bothScenarios(
-        estimateSessionMemory(model, {
-          generation,
-          maxStorageBufferBindingSize: gpu.limits.maxStorageBufferBindingSize,
-        }),
-      );
-      const session = await createSession(gpu, model);
+      const context = await session.createGenerationContext(generation);
       try {
-        const context = await session.createGenerationContext(generation);
-        try {
-          // slot backing は同じ signature の 2 run 目で組まれる（1 run 目はアリーナ経路）。
-          for (let step = 0; step < 2; step += 1) {
-            await session.run(
-              {
-                q: fill([1, 4, 4, 8], (i) => ((i % 5) - 2) / 4),
-                k: fill([1, 2, 4, 8], (i) => ((i % 3) - 1) / 4),
-                v: fill([1, 2, 4, 8], (i) => ((i % 7) - 3) / 4),
-              },
-              {},
-              { context, queryLength: 4 },
-            );
-          }
-        } finally {
-          await context.dispose();
+        // slot backing は同じ signature の 2 run 目で組まれる（1 run 目はアリーナ経路）。
+        for (let step = 0; step < 2; step += 1) {
+          await session.run(
+            {
+              q: fill([1, 4, 4, 8], (i) => ((i % 5) - 2) / 4),
+              k: fill([1, 2, 4, 8], (i) => ((i % 3) - 1) / 4),
+              v: fill([1, 2, 4, 8], (i) => ((i % 7) - 3) / 4),
+            },
+            {},
+            { context, queryLength: 4 },
+          );
         }
-        assertEquals(session.diagnostics().planBacking.residentBytes, prefill.workspaceBytes);
       } finally {
-        await session.dispose();
+        await context.dispose();
       }
+      assertEquals(session.diagnostics().planBacking.residentBytes, prefill.workspaceBytes);
     } finally {
-      gpu.destroy();
+      await session.dispose();
     }
-  },
+  } finally {
+    gpu.destroy();
+  }
+};
+
+Deno.test({
+  name: "states 形 attention の中間総量が実行計画の slot 表と厳密一致する（full 変種・実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  // 列容量 = C = 16（S は容量に比例する側）。
+  fn: () => assertPlanBackingMatchesEstimate({ capacity: 16 }),
+});
+
+Deno.test({
+  name: "states 形 attention の中間総量が実行計画の slot 表と厳密一致する（sliding 変種・実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  // 列容量 = W−1+M = 8−1+4 = 11（容量 C とは別の式 — full と同じ数にならない形を選ぶ）。
+  fn: () => assertPlanBackingMatchesEstimate({ capacity: 8, window: 8 }),
 });
 
 Deno.test("1 行でも上限に入らない形は fail loudly（行ブロックでは割り切れない）", () => {
