@@ -64,7 +64,8 @@ current plan, and the top candidate chains.
 - `graph` — the graph's path, node count, bindings, `FusionCounts` of the current plan, total
   candidate windows.
 - `candidate` — one op-name chain: `ops`, `count`, `maximal`, `windowSizes`, and an `example`
-  (node index plus the chain's output name, for locating it in the IR).
+  (step-order index; equals the IR node index only with `--no-fusion` — use `outputName` to locate
+  the chain).
 - `skipped` — a file that could not be read, with the reason. Nothing is dropped silently.
 
 Reading the table:
@@ -86,12 +87,16 @@ table with it (ADR 0040 decision 1: one judgment point). This module only decide
 read, how to bind their symbols, and how to count what comes back.
 
 Because of that the tool imports `packages/runtime/src/…` directly rather than the published
-`mod.ts` surface: the fusion pass is internal on purpose (ADR 0008), and this is in-repo tooling,
-not a consumer.
+`mod.ts` surface: the fusion pass is internal on purpose, and this is in-repo tooling, not a
+consumer (ADR 0008, addendum of 2026-09-03).
 
 ## Checked by
 
-`packages/runtime/tests/runtime_fusion_hints_test.ts` — synthetic windows for the enumerator, plus
-the real-asset gate: with fusion switched off the known hit counts reappear as candidates, and with
-the current plan the folded chains are gone. Expected values come from
-`packages/runtime/tests/assets_fusion_counts_test.ts`.
+`enumerate_test.ts`, next to the code — the aggregation on a synthetic IR, plus the real-asset
+gate: with fusion switched off the known hit counts reappear as candidates, and with the current
+plan the folded chains are gone. Expected values come from
+`packages/runtime/tests/assets_fusion_counts_test.ts`; a source whose assets are absent is skipped
+by name, not silently.
+
+The enumerator itself (which contiguous windows are eligible) is checked on synthetic graphs in
+`packages/runtime/tests/runtime_fusion_hints_test.ts`, next to `fusion.ts`.

@@ -33,24 +33,35 @@ export const readIrGraph = async (url: URL): Promise<IrGraph> => {
   const file = await Deno.open(url, { read: true });
   try {
     const lengthBytes = new Uint8Array(8);
-    await file.read(lengthBytes);
+    await readExact(file, lengthBytes, url);
     const length = Number(new DataView(lengthBytes.buffer).getBigUint64(0, true));
     const headerBytes = new Uint8Array(length);
-    for (let read = 0; read < length;) {
-      const chunk = await file.read(headerBytes.subarray(read));
-      if (chunk === null) {
-        throw new Error(`${url.pathname}: ヘッダ ${length} バイトを読み切れない`);
-      }
-      read += chunk;
-    }
-    const header = JSON.parse(new TextDecoder().decode(headerBytes));
-    const ir = header.__metadata__?.karume_ir;
+    await readExact(file, headerBytes, url);
+    const header: unknown = JSON.parse(new TextDecoder().decode(headerBytes));
+    const metadata = (header as { readonly __metadata__?: Record<string, string> }).__metadata__;
+    const ir = metadata?.karume_ir;
     if (typeof ir !== "string") {
       throw new Error(`${url.pathname}: __metadata__.karume_ir が無い（IR を載せない資産）`);
     }
     return parseIrGraph(ir);
   } finally {
     file.close();
+  }
+};
+
+/**
+ * `into.length` バイトちょうど読む。
+ *
+ * MUST: 短い読み返しを検査する。`Deno.FsFile.read` は要求より短い長さも `null`（EOF）も返せる
+ * ので、返り値を捨てると残りが 0 のままのヘッダを黙って組み立ててしまう。長さ 8 バイトが
+ * ゼロ埋めなら別の長さで JSON を切り出し、「IR を載せない資産」という誤った理由でグラフが
+ * 1 本静かに候補表から消える（main.ts が読めない 1 本を skipped に丸めるため）。
+ */
+const readExact = async (handle: Deno.FsFile, into: Uint8Array, where: URL): Promise<void> => {
+  for (let read = 0; read < into.length;) {
+    const chunk = await handle.read(into.subarray(read));
+    if (chunk === null) throw new Error(`${where.pathname}: ${into.length} バイトを読み切れない`);
+    read += chunk;
   }
 };
 

@@ -413,7 +413,11 @@ export const summarizeScenario = (
       count,
       out_elements: outElements(row),
     }))
-    .sort((a, b) => b.count - a.count || b.out_elements - a.out_elements || (a.op < b.op ? -1 : 1));
+    // 完全等値のときは 0 を返す（比較子の契約 — `1` だと「a > b かつ b > a」を主張する形になる）。
+    .sort((a, b) =>
+      b.count - a.count || b.out_elements - a.out_elements ||
+      (a.op < b.op ? -1 : a.op > b.op ? 1 : 0)
+    );
   return {
     scenario: scenario.name,
     bindings: scenario.bindings,

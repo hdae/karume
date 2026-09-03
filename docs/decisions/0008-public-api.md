@@ -31,3 +31,13 @@
   ない付帯資産（Anima の rope 素表 — ADR 0038 §2 の extras）を models 側が読むための面で、
   models の最小 safetensors 再実装（約 80 行）を削除して 1 実装へ集約した（二重実装の解消）。
   汎用ローダの提供が目的ではない — 厳格検査（被覆・整列・dtype）ごと共有するのが趣旨。
+- 2026-09-03: **リポ内の道具（`tools/`）は `packages/runtime/src/` を直接 import してよい**。
+  薄い面（`mod.ts`）の制約は「JSR で配る面と実装の乖離を作らない」ためのもので、道具は配布物
+  でも消費者でもないので射程の外（`tools/fusion-hints` は `runtime/fusion.ts` の非公開述語を
+  唯一の判定点として使う — ADR 0040 決定 1）。逆に道具のために内部 API を公開面へ出すのは、
+  面を利用者ストーリー以外の理由で太らせるので禁止（この決定の本文どおり）。
+  併せて **テストの置き場は検証対象と同じ層** とする — 道具の面（資産の発見・束縛・集計）を
+  見るテストは `tools/<道具>/*_test.ts` に置く。root の `deno test -A` は `tools/` 配下の
+  `*_test.ts` も収集する（root `deno.json` の `exclude` は `inputs/ outputs/ models/` のみ・
+  2026-09-03 のフル verify ログで実測）。`packages/*/tests/` から `tools/` を import する形
+  （層の逆流）は採らない。

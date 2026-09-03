@@ -30,6 +30,12 @@ const parseArgs = (argv: readonly string[]): ReadonlyMap<string, readonly string
     if (!key.startsWith("--") || value === undefined) {
       throw new Error(`引数 ${key} が '--キー 値' の対になっていない`);
     }
+    // 値の書き忘れ（`--source --out`）は偶数個で終わると対として通り、`--out` を資産根として
+    // 読みに行く NotFound になる。理由が打ち間違いだと分かる位置で落とす（値に `--` 始まりを
+    // 取るオプションは 1 つも無い）。
+    if (value.startsWith("--")) {
+      throw new Error(`引数 ${key} の値が無い（'${value}' はオプション）`);
+    }
     const name = key.slice(2);
     args.set(name, [...(args.get(name) ?? []), value]);
   }

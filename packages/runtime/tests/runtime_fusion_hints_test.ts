@@ -1,17 +1,12 @@
 /**
- * 融合候補の列挙（`enumerateUnfusedWindows`）と、それを実資産に掛ける道具
- * （tools/fusion-hints）の答え合わせ。GPU 不要。
+ * 融合候補の列挙（`enumerateUnfusedWindows`）の単体検証。GPU 不要・合成 IR だけを使う。
  *
- * 列挙器が背負う性質は 2 つで、どちらも「数えそこない」と「数えすぎ」の対になっている:
+ * 見るのは窓の作り方 =「どの連続窓を候補にし、どれを落とすか」で、適格条件（単一出力 /
+ * state 不触 / f32 / 鎖の内部値が外へ出ない）の 1 本ずつに対照を置く。
  *
- * 1. **融合を切った計画**に掛けると、現行 5 ルールが実資産で掴んでいる鎖が候補として
- *    そのまま出る（op 名列 × 本数が既知のヒット数と一致する）。出なければ列挙器が窓を
- *    取りこぼしている。
- * 2. **現行計画**に掛けると、既に掴めている鎖は 1 本も出ない（融合ステップを跨いだ窓を
- *    作らない = 二重計上しない）。
- *
- * 実資産の期待値の出典は tests/assets_fusion_counts_test.ts（同じ資産・同じ読み方）。資産の
- * 無い環境は理由を出して**明示 SKIP** する。
+ * 実資産に掛けた答え合わせ（既知のヒット数の再現・二重計上の検出）と集計は、道具側の
+ * tools/fusion-hints/enumerate_test.ts にある — 資産の発見・束縛・集計は道具の面で、
+ * runtime のテストから tools を import しない（ADR 0008 追記 2026-09-03）。
  */
 
 import { assertEquals, assertThrows } from "@std/assert";
@@ -25,12 +20,6 @@ import {
 } from "../src/runtime/fusion.ts";
 import { bindSymbols, countUses, ExecutionError, planGraph } from "../src/runtime/plan.ts";
 import type { GraphJson } from "./helpers/format.ts";
-import {
-  bindGraphSymbols,
-  discoverGraphs,
-  readIrGraph,
-} from "../../../tools/fusion-hints/assets.ts";
-import { aggregate, enumerateGraph } from "../../../tools/fusion-hints/enumerate.ts";
 
 /** 判定に使う device の能力（WebGPU core 既定 — 128MiB / 65535）。 */
 const TEST_LIMITS = {
@@ -293,184 +282,4 @@ Deno.test("窓幅の上限が 2 未満なら fail loudly", () => {
       `maxWindow=${maxWindow}`,
     );
   }
-});
-
-Deno.test("候補の集計は op 名列ごとに数え、同じ先頭からの最長窓を極大として印す", () => {
-  const { nodes, context } = plan(chainGraph(), CHAIN_INPUTS);
-  const rows = aggregate(enumerateUnfusedWindows(unfused(nodes), context, 3));
-  assertEquals(
-    rows.map((row) => [row.ops.join(","), row.count, row.maximal, row.windowSizes]),
-    [
-      // 同数なら鎖の長い順。`neg,add` は同じ先頭（node 0）に長さ 3 の窓があるので極大でない。
-      ["neg,add,mul", 1, 1, [3]],
-      ["add,mul", 1, 1, [2]],
-      ["neg,add", 1, 0, [2]],
-    ],
-  );
-});
-
-// ------------------------------------------------------- 実資産の答え合わせ
-
-/**
- * 資産 1 件ぶんの門。`expected` は**融合を切った計画**で出るべき候補（op 名列 → 本数）、
- * `fusedExpected` は**現行計画**で残る本数（掴めている鎖はここで 0 になる）。
- */
-type AssetCase = {
-  readonly source: string;
-  readonly graph: string;
-  readonly binds: Readonly<Record<string, number>>;
-  readonly expected: Readonly<Record<string, number>>;
-  readonly fusedExpected: Readonly<Record<string, number>>;
-};
-
-const SILU = "sigmoid,mul";
-/** RoPE の 7 ノード窓（`mul` 先行形と、後置形 = 実際のノード順が違う 2 綴り）。 */
-const ROPE_DIRECT_FIRST = "mul,slice,slice,neg,cat,mul,add";
-const ROPE_DIRECT_LAST = "slice,slice,neg,cat,mul,mul,add";
-/** adaLN の鎖（窓内 passthrough の reshape を除いた並び）。 */
-const ADALN = "layer_norm,reshape,reshape,add,mul,add";
-const ROW_BLOCK_ATTENTION = "bmm,reshape,add,safe_softmax,expand,reshape,expand,reshape,bmm";
-
-const ASSET_CASES: readonly AssetCase[] = [
-  {
-    source: "models/karume-anima",
-    graph: "anima-turbo-v1.1/transformer",
-    binds: { S: 4096 },
-    expected: { [ROPE_DIRECT_LAST]: 56, [ADALN]: 85, [SILU]: 2 },
-    fusedExpected: { [ROPE_DIRECT_LAST]: 0, [ADALN]: 0, [SILU]: 0 },
-  },
-  {
-    source: "models/karume-anima",
-    graph: "anima-turbo-v1.1/text_encoder",
-    binds: { T: 64 },
-    // rope 56 のうち 1 本は窓幅 8（cos / sin 表の `sym_prefix_slice` を窓内 passthrough として
-    // 跨ぐ形）。窓内 passthrough を切り出せないと 55 になる。
-    expected: { [ROPE_DIRECT_FIRST]: 56, [SILU]: 28 },
-    fusedExpected: { [ROPE_DIRECT_FIRST]: 0, [SILU]: 0 },
-  },
-  {
-    source: "models/karume-anima",
-    graph: "anima-turbo-v1.1/vae_decoder",
-    binds: {},
-    expected: { [SILU]: 29 },
-    fusedExpected: { [SILU]: 0 },
-  },
-  {
-    source: "models/karume-irodori-v4-small",
-    graph: "v4-small/dit",
-    binds: { S: 750 },
-    // silu 29 = 掴めている 17 + ゲート 12（`mul(v, sigmoid(u))` — 自分自身に掛からないので
-    // SILU_RULE の受理集合の外）。op 名列の n-gram はルールの受理集合より広い。
-    expected: { [SILU]: 29, [ROW_BLOCK_ATTENTION]: 12 },
-    fusedExpected: { [SILU]: 12, [ROW_BLOCK_ATTENTION]: 0 },
-  },
-  {
-    source: "models/karume-irodori-v4-small",
-    graph: "v4-small/backbone",
-    binds: { T: 256 },
-    expected: { [ROPE_DIRECT_FIRST]: 50 },
-    fusedExpected: { [ROPE_DIRECT_FIRST]: 0 },
-  },
-  {
-    source: "outputs/series/embeddinggemma-300m",
-    graph: "embeddinggemma-300m",
-    binds: { T: 318 },
-    expected: { [ROPE_DIRECT_FIRST]: 48 },
-    fusedExpected: { [ROPE_DIRECT_FIRST]: 0 },
-  },
-  {
-    source: "outputs/series/minicpm5-1b-decode",
-    graph: "minicpm5-1b-decode",
-    binds: { M: 1, C: 640 },
-    expected: { [ROPE_DIRECT_FIRST]: 48, [SILU]: 24 },
-    fusedExpected: { [ROPE_DIRECT_FIRST]: 0, [SILU]: 0 },
-  },
-  {
-    source: "outputs/series/gemma4-e2b-decode",
-    graph: "gemma4-e2b-decode",
-    binds: { M: 1, C: 640 },
-    // **既知の穴**: 綴りは 50 箇所とも並ぶのに計画は 15 本しか掴まない（機序は未特定 —
-    // docs/research/2026-08-30-gemma4-decode-wallclock.md §4）。残る 35 本が候補に出る。
-    expected: { [ROPE_DIRECT_FIRST]: 50 },
-    fusedExpected: { [ROPE_DIRECT_FIRST]: 35 },
-  },
-];
-
-const REPO = new URL("../../../", import.meta.url);
-
-/**
- * 資産の有無。
- * MUST: NotFound 以外は伝播させる — 全 I/O エラーを「未生成」に丸めると、資産ルートの
- * マウント異常が SKIP に化けて、実行されていない検証が静かに緑になる。
- */
-const exists = async (url: URL): Promise<boolean> => {
-  try {
-    await Deno.stat(url);
-    return true;
-  } catch (cause) {
-    if (cause instanceof Deno.errors.NotFound) return false;
-    throw cause;
-  }
-};
-
-const AVAILABLE = new Map<string, boolean>();
-for (const source of new Set(ASSET_CASES.map((entry) => entry.source))) {
-  const present = await exists(new URL(source, REPO));
-  AVAILABLE.set(source, present);
-  if (!present) {
-    console.warn(
-      `[karume] ${source} が無いため融合候補の答え合わせを SKIP する` +
-        "（列挙器の取りこぼしは実資産でしか検出できない）",
-    );
-  }
-}
-const ASSETS_AVAILABLE = [...AVAILABLE.values()].every((present) => present);
-
-/** 資産 1 件を計画して、`keys` の op 名列ごとの本数を引く。 */
-const assetCounts = async (
-  entry: AssetCase,
-  fused: boolean,
-  keys: readonly string[],
-): Promise<Record<string, number>> => {
-  const root = new URL(`${entry.source}/`, REPO);
-  const sources = await discoverGraphs(root);
-  const found = sources.find((source) => source.name === entry.graph);
-  if (found === undefined) {
-    throw new Error(
-      `${entry.source} に '${entry.graph}' が無い（見えたのは ${
-        sources.map((source) => source.name).join(" / ")
-      }）`,
-    );
-  }
-  const graph = await readIrGraph(found.url);
-  const bound = bindGraphSymbols(graph, entry.binds, undefined);
-  const rows = aggregate(enumerateGraph(graph, bound, { maxWindow: 9, fused }).windows);
-  const counts: Record<string, number> = Object.fromEntries(keys.map((key) => [key, 0]));
-  for (const row of rows) {
-    const key = row.ops.join(",");
-    if (Object.hasOwn(counts, key)) counts[key] = row.count;
-  }
-  return counts;
-};
-
-Deno.test({
-  name: "実資産: 融合を切った計画に掛けると既知のヒット数が候補として再現する",
-  ignore: !ASSETS_AVAILABLE,
-  fn: async () => {
-    for (const entry of ASSET_CASES) {
-      const keys = Object.keys(entry.expected);
-      assertEquals(await assetCounts(entry, false, keys), entry.expected, entry.graph);
-    }
-  },
-});
-
-Deno.test({
-  name: "実資産: 現行計画では掴めている鎖が候補に出ない（二重計上の検出）",
-  ignore: !ASSETS_AVAILABLE,
-  fn: async () => {
-    for (const entry of ASSET_CASES) {
-      const keys = Object.keys(entry.fusedExpected);
-      assertEquals(await assetCounts(entry, true, keys), entry.fusedExpected, entry.graph);
-    }
-  },
 });

@@ -91,8 +91,10 @@ const keyOf = (ops: readonly string[]): string => ops.join(",");
 
 /**
  * 候補窓を op 名列ごとに数える。並びは**極大の多い順** → 本数の多い順 → 鎖の長い順 →
- * op 名列順（表の並びを機に依らせない）。極大を先頭に置くのは、n-gram 列挙が長い鎖の接頭辞も
- * 同じ本数で出すため — 本数順だと接頭辞が上位を埋めて、読むべき最長の鎖が沈む。
+ * op 名列の**コードポイント順**（表の並びを機に依らせない — `localeCompare` は `,` のような
+ * 可変重み文字の扱いが既定ロケール依存で、同じ資産で採った表の diff が環境で割れる）。
+ * 極大を先頭に置くのは、n-gram 列挙が長い鎖の接頭辞も同じ本数で出すため — 本数順だと
+ * 接頭辞が上位を埋めて、読むべき最長の鎖が沈む。
  */
 export const aggregate = (windows: readonly UnfusedWindow[]): readonly CandidateRow[] => {
   // 同じ先頭ノードから出た最長の窓幅（極大の判定 = n-gram の接頭辞を数え落とさずに区別する）。
@@ -130,10 +132,12 @@ export const aggregate = (windows: readonly UnfusedWindow[]): readonly Candidate
       windowSizes: [...bucket.sizes].sort((a, b) => a - b),
       example: bucket.example,
     }))
-    .sort((a, b) =>
-      b.maximal - a.maximal || b.count - a.count || b.ops.length - a.ops.length ||
-      keyOf(a.ops).localeCompare(keyOf(b.ops))
-    );
+    .sort((a, b) => {
+      const left = keyOf(a.ops);
+      const right = keyOf(b.ops);
+      return b.maximal - a.maximal || b.count - a.count || b.ops.length - a.ops.length ||
+        (left < right ? -1 : left > right ? 1 : 0);
+    });
 };
 
 /** グラフ 1 本ぶんの報告（jsonl / Markdown の素）。 */
