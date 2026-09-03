@@ -38,7 +38,7 @@
   `civitai.json`・命名は機械正規化 = 0077 改訂・ライセンスはエージェント事前確認形 =
   判定せず記録 + `license-review.md`・実 DL 疎通済み）。**モデル更新波クローズ**（HF 一括
   アップはメモリ管理波を含むリリースの直前 — 2026-09-01 裁定。**範囲は 2026-09-03 裁定で
-  gemma4 のアップまでへ改訂** = 6 リポ + pin 3 新設・3 更新。BiRefNet / DepthAnything /
+  gemma4 のアップまでへ改訂** = 6 リポ + pin 3 新設・3 更新 — **HF 公開と pin 焼き込みは 2026-09-03 に実施済み**。BiRefNet / DepthAnything /
   SigLIP2 / vowel-detector の初回公開はリリース後）。
 - **メモリ管理波 Phase A（2026-09-01・ADR 0089 — 波 1〜4 実装済み = Phase A クローズ）**:
   GPU メモリ適合を「絶対上限との決定論的比較」へ昇格 — runtime 重み/state の確保前検査

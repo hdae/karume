@@ -20,7 +20,7 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
   なし）。読み手契約と書き手ポリシーの 2 層構造で、層/MoE 境界の cut 選好はポリシー側の
   将来拡張（正本 = ADR [0081](decisions/0081-shard-spec-v2.md)）。ローカルは完了（2026-08-30 —
   series 241 本 repack・dist 4 リポ再生成・新旧 59,803 テンソルのビット同一証明・lockstep
-  0.8.0）。**後続 = 次リリース時に一括（2026-08-30 ユーザー裁定）**: HF アップ 6 リポ
+  0.8.0）。**後続 = 次リリース時に一括（2026-08-30 ユーザー裁定）→ 実施済み（2026-09-03 — 6 リポ公開・pin 3 更新 + 3 新設・疎通・verify 2203/0/5）**: HF アップ 6 リポ
   （`karume-anima` / `karume-irodori-v4-small` / `karume-sbv2-jvnv` の再アップ + 新規
   `karume-irodori-v4.1-small` / `karume-gemma4-e2b` / `karume-anima-extra`〈公式 `karume-anima`
   の公開 SHA で越境焼き〉）→ pin 3 更新（`ANIMA_CURRENT` / `IRODORI_V4_SMALL_CURRENT` /
@@ -163,7 +163,7 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
     途中で full-loop 検証の許容超過を発見 → 機序実測（誤差増幅 37,107 倍・実装差は従来水準・
     聴感 A/B 区別不能）→ **2 段判定へ改修（ユーザー裁定 a・2026-09-01）** —
     [research](research/2026-09-01-irodori-v41-euler-sensitivity.md)。
-    **残 = リリース時**: pin `IRODORI_V4_1_SMALL_CURRENT` 新設（旧 pin 温存）+ examples
+    ~~残 = リリース時~~ **消化（2026-09-03）**: pin `IRODORI_V4_1_SMALL_CURRENT` 新設（旧 pin 温存）+ examples
     既定切替（ADR 0073 決定 1 = 未公開リポに pin を置かない — runbook §3 に手順記載済み）。
   - **N2 Anima 再構造 — ローカル完了（2026-09-01・ADR 0087）**: `karume-anima` = 公式
     **5 変種**同居（turbo-v1.1〈既定〉/ v1.0 / aesthetic-v1.1 / **turbo-v1.0 /
@@ -176,8 +176,8 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
     聴視認 OK（「LoRA マージよりパキッとした絵」）/ conditioner 共有は f16 丸め後ビット比較
     で判定（turbo-v1.1 のみ共有）/ **aesthetic 既定 = 30 step / CFG 4（20/30/50 視認裁定）**/
     カード v1.2 追随（Outputs 商用可の明記・ライセンス原文は v1.2 逐語一致確認済み）。
-    残 = リリース時: extra 越境焼き + `ANIMA_EXTRA_CURRENT` 新設 + 旧 karume-anima-turbo
-    リポの deprecation 扱い（アップロード時にユーザー裁定）。
+    ~~残 = リリース時~~ **消化（2026-09-03）**: extra 越境焼き + `ANIMA_EXTRA_CURRENT` 新設 + 旧 karume-anima-turbo
+    リポの deprecation 扱い（ユーザー裁定 a = README を deprecation 掲示に差し替えて残置・重みは据え置き）。
   - **N3 Civitai 追加機構 — 完了（2026-09-01・ADR 0088）**: `anima.civitai` コマンド
     （`--air urn:air:…@<versionId>` / `--url`・版未指定は版一覧の案内）。model-versions API
     から AIR（サーバ発行値を実測確認）+ sha256 + 許諾 4 欄 + 本文 HTML を取り、primary
@@ -192,7 +192,7 @@ throw / 同一 `GenerationContext` への並行発行拒否）は [limitations](
     142MiB を取得し既存手置きとビット同一 → 手置き資産の出所を provenance で確証）。
   - **リリース**: HF 一括 6 リポ（`karume-anima` 新構成 / `karume-anima-extra`〈越境焼き〉/
     `karume-irodori-v4-small` / `karume-irodori-v4.1-small` / `karume-sbv2-jvnv` /
-    `karume-gemma4-e2b`〈新規〉）+ pin 3 新設・3 更新 — 上の shard v2 一括と同じ回。
+    `karume-gemma4-e2b`〈新規〉）+ pin 3 新設・3 更新 — 上の shard v2 一括と同じ回。**実施済み（2026-09-03 — push / GitHub Release / JSR publish はユーザー）**。
     **範囲 = gemma4 のアップまで（2026-09-03 ユーザー裁定）** — BiRefNet / DepthAnything /
     SigLIP2 / vowel-detector の初回公開はリリース後（2026-09-01 の「他家族分も揃えてから」は
     この裁定で改訂）。
