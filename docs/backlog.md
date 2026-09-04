@@ -25,9 +25,10 @@
    Metal の timestamp 不能）。K-7 の再評価材料は perf-ledger へ記入済み（adaLN 側は Inductor も畳む）。
 2. **b. 未配布家族の初回公開**（リポ割り・命名・対応表の規則の正本 = ADR
    [0092](decisions/0092-distribution-repos-and-sources.md)）。**対象** = `karume-siglip2`
-   （**1 リポ 2 モデル**・base / so400m 同居・既定 base — ADR 0092 決定 8）/ `karume-birefnet-hr`
-   と `karume-lucida`（**2048² 対応の実現性の確認が前提** — 前回の export は 1024² のみ）/
-   `karume-depth-anything-v2`。**vowel-detector は今回の波から外す**（上流の体裁整備が先 —
+   （**1 リポ 2 モデル**・base / so400m 同居・既定 base — ADR 0092 決定 8）/ `karume-depth-anything-v2`。
+   `karume-birefnet-hr` と `karume-lucida` は**後回し**（2026-09-04 ユーザー裁定 — 2048² は現状
+   不成立〈[limitations](limitations.md) の BiRefNet 節〉。プールの再利用方式の見直しと中間
+   テンソルの `requiredLimits` 宣言が前提で、公開する時は 1024² の配布形のまま）。**vowel-detector は今回の波から外す**（上流の体裁整備が先 —
    2026-09-04 ユーザー裁定）。**手順** = 段 0 docs（ADR 0092 + runbook / assets-layout /
    README 追随）→ 段 1 models（`<FAMILY>_SOURCES` + `KARUME_SOURCES` へ移行・旧 pin 定数の
    廃止 = breaking）→ 段 2 recipes（siglip2 の同居対応・リポ命名・`LICENSE.md` / `NOTICE.md` 同梱）
