@@ -97,8 +97,11 @@ export HF_XET_DEDUPLICATION_GLOBAL_DEDUP_QUERY_ENABLED=false
 ```
 
 - [ ] 上の env 4 本を**同一シェルで** export してから `hf upload` を実行する
-      （正本: [assets-layout.md](assets-layout.md) 公開節）。4 本目が読まれたことは hf_xet の
-      ログの `global_dedup_query_enabled = false (user set)` 行で確認する。
+      （正本: [assets-layout.md](assets-layout.md) 公開節）。**台本
+      `tools/release/hf-upload.zsh upload <repo>` がこの env・shard-cache 退避・venv の hf・
+      直後の断片化表までを 1 回で行う** — 手で打つのは台本が使えないときだけ。4 本目が
+      読まれたことは hf_xet のログの `global_dedup_query_enabled = false (user set)` 行で
+      確認する（台本はこの行と CAS 照会回数をログへ写す）。
       **NOTE（hf_xet の版差）**: 4 本目 `GLOBAL_DEDUP_QUERY_ENABLED` は
       **1.4.3 には無く 1.6.0 にはある**（2026-09-04 にバイナリの env 名一覧で確認）。
       1.4.3 で後継とされた `HF_XET_MIN_SPACING_BETWEEN_GLOBAL_DEDUP_QUERIES` を巨大値にする形は
@@ -111,8 +114,9 @@ export HF_XET_DEDUPLICATION_GLOBAL_DEDUP_QUERY_ENABLED=false
 - [ ] **書き込みトークンへ切替**: `hf auth switch --token-name "Karume Release"` —
       既定の読み取りトークン（Karume Gated Read）のままだと LFS batch が 403 になる
       （2026-08-21 実測）。アップロードが済んだら読み取りトークンへ戻す
-- [ ] アップロード: `tools/.venv/bin/hf upload <owner>/<repo> models/<repo> . --repo-type model`
-      （`models/` は 1 ディレクトリ = 1 HF リポ — assets-layout）
+- [ ] アップロード: `tools/release/hf-upload.zsh upload <repo>`（中身は
+      `tools/.venv/bin/hf upload hdae/<repo> models/<repo> . --repo-type model` —
+      `models/` は 1 ディレクトリ = 1 HF リポ — assets-layout。追加引数はそのまま hf へ渡る）
 - [ ] **リポ名の改名（該当回のみ）**: `hf repos move <old> <new>` で改める。旧名は API /
       resolve とも **HTTP 307** で新名へリダイレクトするので既公開の参照は切れないが、
       **リダイレクトが生きていることを実際に叩いて確認**する —
@@ -125,7 +129,8 @@ export HF_XET_DEDUPLICATION_GLOBAL_DEDUP_QUERY_ENABLED=false
 
 **全 safetensors を表にする**（代表 2〜3 本のサンプルでは足りない — 2026-09-04 の siglip2 は
 so400m の 7 shard 中 5 本だけが断片化しており、サンプルの当たり外れで見落とす）。
-research §9 の再現手順:
+`tools/release/hf-upload.zsh upload` は終了時に表を出す。公開済みリポを後から見るときは
+`tools/release/hf-upload.zsh check <repo>`。表の中身は research §9 の再現手順そのもの:
 
 ```sh
 curl -sS -I "https://huggingface.co/<repo>/resolve/main/<path>" | grep -i x-xet-hash

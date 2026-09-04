@@ -115,6 +115,8 @@ export HF_XET_DEDUPLICATION_NRANGES_IN_STREAMING_FRAGMENTATION_ESTIMATOR=1
 export HF_XET_DEDUPLICATION_GLOBAL_DEDUP_QUERY_ENABLED=false
 ```
 
+台本 `tools/release/hf-upload.zsh upload <repo>` がこの env・shard-cache の退避・venv の hf・
+直後の断片化表までを 1 回で行う（[release-runbook](release-runbook.md) §2）。
 付けないと Xet の chunk 単位 dedup が効きすぎて**再構成が断片化し、DL が数倍遅くなる**。
 4 本目は CAS 全体への chunk 照会（global dedup）を止める — これが無いと、上げた覚えの無い
 他リポの xorb へヒットして**初回アップロードでも断片化する**（2026-09-04 の siglip2 で実測）。
