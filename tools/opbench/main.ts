@@ -35,6 +35,7 @@ import {
   type SingleSummary,
 } from "./single.ts";
 import { compareWithCensus, driveOnce, type RunRecord } from "./graph.ts";
+import { defaultVenv, runTorchBench, summarizeTorch, type TorchRecord } from "./torch.ts";
 import {
   assertBindingKeys,
   defaultScenarios,
@@ -92,6 +93,15 @@ const GRAPH_OPTIONS: ReadonlySet<string> = new Set([
   "steps",
   "size",
   "prompt",
+]);
+const TORCH_OPTIONS: ReadonlySet<string> = new Set([
+  "single",
+  "out",
+  "venv",
+  "rounds",
+  "compile",
+  "limit",
+  "op",
 ]);
 const SINGLE_OPTIONS: ReadonlySet<string> = new Set([
   "census",
@@ -223,7 +233,13 @@ const USAGE = `使い方: deno run -A tools/opbench/main.ts <census|single> …
     --single <dir>       single の出力（op 別の single / graph 比を出す）
     --model / --quant    配布形の選択（既定 = manifest）
     --new-tokens <n>     gemma4 の生成 token 数（既定 8）/ --steps <n> --size <px> anima の step と辺（既定 2 / 1024・step は 2 以上）
-    --prompt <text>      入力文（既定あり）`;
+    --prompt <text>      入力文（既定あり）
+  torch --single <dir> --out <dir> [--venv <dir>] [--compile true] [--rounds <n>] [--limit <n>] [--op <name>]
+    --single <dir>       single の出力（single.jsonl の各行を torch eager で組んで測る）
+    --out <dir>          torch.jsonl / summary.json / comparison.json の書き出し先
+    --venv <dir>         CUDA venv（既定 = KARUME_CUDA_VENV か ~/workspace/karume-cuda-venv）
+    --compile true       torch.compile（Inductor）の f16 列も測る
+    --rounds / --limit / --op   single と同じ意味`;
 
 const timestampQueryAvailable = async (): Promise<boolean> => {
   const gpu: GPU | undefined = navigator.gpu;
@@ -465,9 +481,73 @@ const runGraph = async (args: ReadonlyMap<string, readonly string[]>): Promise<v
   }));
 };
 
+const runTorch = async (args: ReadonlyMap<string, readonly string[]>): Promise<void> => {
+  const singleDir = single(args, "single");
+  if (singleDir === undefined) throw new Error("--single <single の出力ディレクトリ> は必須");
+  const out = single(args, "out");
+  if (out === undefined) throw new Error("--out <ディレクトリ> は必須");
+  const compileArg = single(args, "compile");
+  if (compileArg !== undefined && compileArg !== "true" && compileArg !== "false") {
+    throw new Error(`--compile は true か false（'${compileArg}'）`);
+  }
+  const rounds = single(args, "rounds");
+  const limit = single(args, "limit");
+  const options = {
+    venv: single(args, "venv") ?? defaultVenv(),
+    single: new URL("single.jsonl", directoryUrl(singleDir)).pathname,
+    out: directoryUrl(out).pathname,
+    compile: compileArg === "true",
+    ...(rounds === undefined ? {} : { rounds: positiveInteger(rounds, "--rounds") }),
+    ...(limit === undefined ? {} : { limit: positiveInteger(limit, "--limit") }),
+    ...(args.get("op") === undefined ? {} : { ops: args.get("op") }),
+  };
+  await runTorchBench(options);
+  const outDir = directoryUrl(out);
+  const records: TorchRecord[] = (await Deno.readTextFile(new URL("torch.jsonl", outDir)))
+    .split("\n").filter((line) => line.length > 0).map((line) => JSON.parse(line) as TorchRecord);
+  const torchSummary: unknown = JSON.parse(
+    await Deno.readTextFile(new URL("summary.json", outDir)),
+  );
+  const columns = (torchSummary as { columns?: unknown }).columns;
+  if (!Array.isArray(columns) || !columns.every((column) => typeof column === "string")) {
+    throw new Error("torch の summary.json に columns が無い");
+  }
+  const comparison = summarizeTorch(records, columns);
+  await Deno.writeTextFile(
+    new URL("comparison.json", outDir),
+    JSON.stringify(
+      { generated_at: new Date().toISOString(), single: singleDir, columns, ops: comparison },
+      null,
+      2,
+    ) + "\n",
+  );
+  console.log(JSON.stringify({
+    single: singleDir,
+    measured: records.length,
+    columns,
+    top: comparison.slice(0, 10).map((row) => ({
+      op: row.op,
+      cases: row.cases,
+      karume_ms: Math.round(row.weighted_ms.karume * 1000) / 1000,
+      ...Object.fromEntries(columns.map((column) => [
+        column,
+        {
+          ms: Math.round((row.weighted_ms[column] ?? 0) * 1000) / 1000,
+          ratio: row.median_ratio[column] === null
+            ? null
+            : Math.round((row.median_ratio[column] ?? 0) * 100) / 100,
+        },
+      ])),
+    })),
+    out,
+  }));
+};
+
 if (import.meta.main) {
   const [subcommand, ...rest] = Deno.args;
-  if (subcommand === "census") {
+  if (subcommand === "torch") {
+    await runTorch(parseArgs(rest, TORCH_OPTIONS));
+  } else if (subcommand === "census") {
     await runCensus(parseArgs(rest, CENSUS_OPTIONS));
   } else if (subcommand === "single") {
     await runSingle(parseArgs(rest, SINGLE_OPTIONS));

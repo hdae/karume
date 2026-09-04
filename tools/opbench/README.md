@@ -211,6 +211,27 @@ model is from the in-graph time (K-11 measured 0.75–0.85).
 Other families fail loudly for now: the two acceptance lines of this stage (K-11 on gemma4, P-1 on
 anima) are the assets that exist here.
 
+## `torch` — the PyTorch reference (column B)
+
+```
+deno run -A tools/opbench/main.ts torch --single <single dir> --out <dir> [--venv <dir>] [--compile true]
+```
+
+Takes the rows a `single` run measured and builds the same op in PyTorch eager on CUDA
+(`tools/opbench/torch_bench.py`, run as a subprocess of the CUDA venv — `--venv`, `KARUME_CUDA_VENV`,
+default `~/workspace/karume-cuda-venv`). Column B is "what torch actually runs fast": the op in f16
+and bf16 (cuBLAS / cuDNN / SDPA), next to f32 with TF32 off and on (the two are reported separately
+because torch's default is asymmetric — matmul off, cudnn on). `--compile true` adds a
+`compile_f16` column through `torch.compile` (Inductor), which needs a C compiler on PATH for
+Triton's launcher stub. Weights are synthetic; the numbers say nothing about numerics.
+
+The protocol mirrors `bench.ts`: a heater matmul pins the clocks, one pass is stacked to about 80 ms,
+and the value is the min over rounds. `comparison.json` joins each torch row with the `single` time
+of the same case and reports, per op, the median of `karume_ms / torch_ms` for every column (above 1
+means karume is slower) and the census-weighted totals of both sides. The IR-op → torch table is
+hand-written in `torch_bench.py`; ops without an entry are counted under `skipped`, and a column
+that fails for a case is recorded under `errors` instead of dropping the row.
+
 ## Notes
 
 - Fusion is planned against the **WebGPU core default limits** (128 MiB storage binding, 65535
