@@ -65,10 +65,10 @@ export { approximatePreview } from "./src/anima/preview.ts";
  */
 export { animaLatents, denormalizeLatents } from "./src/anima/latents.ts";
 /**
- * このパッケージ版が検証した取得元（`./anima` を参照 — 追従したい場合のオプトイン）。公式変種の
- * リポと第三者 fine-tune のリポで 2 本（ADR 0087）。
+ * このパッケージ版が検証した取得元の対応表（`./anima` を参照 — 追従したい場合のオプトイン）。
+ * 公式変種のリポと第三者 fine-tune のリポで 2 エントリ（ADR 0087 / 0092）。
  */
-export { ANIMA_CURRENT, ANIMA_EXTRA_CURRENT } from "./src/anima/config.ts";
+export { ANIMA_SOURCES } from "./src/anima/config.ts";
 
 export { IrodoriPipeline } from "./src/irodori/pipeline.ts";
 export type {
@@ -84,10 +84,10 @@ export type {
   IrodoriSpeakerInput,
 } from "./src/irodori/pipeline.ts";
 /**
- * このパッケージ版が検証した取得元（`./irodori` を参照 — 追従したい場合のオプトイン）。上流の
- * v4 / v4.1 は別リポなので 2 本（旧 pin は温存）。
+ * このパッケージ版が検証した取得元の対応表（`./irodori` を参照 — 追従したい場合のオプトイン）。
+ * 上流の v4 / v4.1 は別リポなので 2 エントリ（旧版の pin は温存 — ADR 0092）。
  */
-export { IRODORI_V4_1_SMALL_CURRENT, IRODORI_V4_SMALL_CURRENT } from "./src/irodori/config.ts";
+export { IRODORI_SOURCES } from "./src/irodori/config.ts";
 
 export { Sbv2Pipeline } from "./src/sbv2/pipeline.ts";
 export type {
@@ -107,8 +107,8 @@ export { toSbv2Utterance } from "./src/sbv2/text/utterance.ts";
 export type { Sbv2Mora, Sbv2Phrases, Sbv2Utterance, Sbv2Word } from "./src/sbv2/text/utterance.ts";
 /** 入力起因の失敗（内部不変条件の破れは素の `Error` のまま — `./sbv2` を参照）。 */
 export { Sbv2InputError } from "./src/sbv2/errors.ts";
-/** このパッケージ版が検証した取得元（`./sbv2` を参照 — 追従したい場合のオプトイン）。 */
-export { SBV2_JVNV_CURRENT } from "./src/sbv2/config.ts";
+/** このパッケージ版が検証した取得元の対応表（`./sbv2` を参照 — 追従したい場合のオプトイン）。 */
+export { SBV2_SOURCES } from "./src/sbv2/config.ts";
 
 export { Siglip2Pipeline } from "./src/siglip2/pipeline.ts";
 export type {
@@ -147,8 +147,8 @@ export type {
   Gemma4ChatTurnOptions,
 } from "./src/gemma/chat-session.ts";
 export type { Gemma4DefaultSampler, Gemma4PipelineConfig } from "./src/gemma/config.ts";
-/** このパッケージ版が検証した取得元（`./gemma` を参照 — 追従したい場合のオプトイン）。 */
-export { GEMMA4_CURRENT } from "./src/gemma/config.ts";
+/** このパッケージ版が検証した取得元の対応表（`./gemma` を参照 — 追従したい場合のオプトイン）。 */
+export { GEMMA4_SOURCES } from "./src/gemma/config.ts";
 /**
  * 生の宣言（`unknown`）→ 検証済みの `Gemma4PipelineConfig`。**`fromAssets` を使う消費者のための
  * 口**で、`fromPretrained` は内部で通すので呼ぶ必要は無い（`./gemma` を参照）。
@@ -204,6 +204,14 @@ export type {
   VowelDetectorResult,
 } from "./src/vowel-detector/pipeline.ts";
 export type { LabSegment } from "./src/vowel-detector/postprocess.ts";
+
+/**
+ * 全ファミリの取得元対応表を 1 つに畳んだ表（家族ごとの `*_SOURCES` と**同じキー・同じ値** —
+ * ADR 0092）。**barrel にしか無い**面で、「公開している配布リポを全部なめる」側（疎通スモーク・
+ * 事前取得・一覧）のために置く。1 家族しか使わない消費者はサブパスの家族表を引く
+ * （barrel を引くと 4 家族の config が繋がる）。
+ */
+export { KARUME_SOURCES } from "./src/sources.ts";
 
 /**
  * RGBA → PNG / f32 波形 ↔ WAV / RGB8 → モデル入力。**パイプライン非依存の共通処理**

@@ -6,8 +6,9 @@
 // 化ける。ここで押さえるのは 4 つ:
 //  ① 取得元が無い呼び出しは「repo が必須」で落ちる。
 //  ② その文言に**正しい記述例**が載る（`{ repo, revision }` の綴りと、そのファミリの
-//     `*_CURRENT` 定数名の 2 択）— 読んだ人がそのまま直せない診断は「落ちた」だけで役に立たない。
-//  ③ 公開配布リポを持たないファミリには存在しない定数を案内しない。
+//     取得元対応表を引く綴りの 2 択）— 読んだ人がそのまま直せない診断は「落ちた」だけで
+//     役に立たない。
+//  ③ 公開配布リポを持たないファミリには存在しない識別子を案内しない。
 //  ④ **綴りが HF の `owner/name` であること**（パスにしか見えない文字列を URL へ綴り込まない）。
 //     救えない綴り（`models/karume-gemma4-e2b` のような合法な `owner/name`）も対で固定する。
 //  ⑤ **取得元ハンドル**（`localDirectory` / `denoDirectory`）はこの門を通さず素通りし、かつ
@@ -28,17 +29,17 @@ import { AnimaPipeline } from "../src/anima/pipeline.ts";
 Deno.test("toRepoRef: 取得元が無ければ『repo が必須』+ 記述例 2 択で落ちる", () => {
   // JS からの引数なし呼び出しの形（TS では型検査が先に落とす）。
   const error = assertThrows(
-    () => toRepoRef(undefined, "AnimaPipeline.fromPretrained", "ANIMA_CURRENT"),
+    () => toRepoRef(undefined, "AnimaPipeline.fromPretrained", 'ANIMA_SOURCES["anima"]'),
     Error,
     "repo が必須",
   );
   // 主語（どの入口が落ちたか）と記述例 2 択が揃っていること。
   assertStringIncludes(error.message, "AnimaPipeline.fromPretrained");
   assertStringIncludes(error.message, '{ repo: "owner/name", revision: "<40 桁の commit SHA>" }');
-  assertStringIncludes(error.message, "ANIMA_CURRENT");
+  assertStringIncludes(error.message, 'ANIMA_SOURCES["anima"]');
 });
 
-Deno.test("toRepoRef: 公開配布リポを持たないファミリには定数を案内しない", () => {
+Deno.test("toRepoRef: 公開配布リポを持たないファミリには対応表を案内しない", () => {
   // 存在しない識別子を案内すると、読んだ人は import できないものを探しに行く。
   const error = assertThrows(
     () => toRepoRef(undefined, "BirefnetPipeline.fromPretrained"),
@@ -47,7 +48,7 @@ Deno.test("toRepoRef: 公開配布リポを持たないファミリには定数�
   );
   assertStringIncludes(error.message, '{ repo: "owner/name", revision: "<40 桁の commit SHA>" }');
   assertStringIncludes(error.message, "リポ名の文字列");
-  assertEquals(error.message.includes("_CURRENT"), false);
+  assertEquals(error.message.includes("_SOURCES"), false);
 });
 
 Deno.test("toRepoRef: 空の repo も同じ門で落ちる（空文字の URL を組み立てない）", () => {

@@ -626,7 +626,7 @@ export class AnimaPipeline {
     const source = toManifestSource(
       ref,
       "AnimaPipeline.fromPretrained",
-      "ANIMA_CURRENT（@karume/models/anima）",
+      'ANIMA_SOURCES["anima"]（@karume/models/anima）',
     );
     const hubOptions = {
       ...(options.signal === undefined ? {} : { signal: options.signal }),

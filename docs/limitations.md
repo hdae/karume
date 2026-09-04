@@ -54,6 +54,38 @@ RoPE の cos / sin 派生入力 — ホストが位置から組む）は**呼び
 `AbortSignal` / 多ターン）で、ホスト側 sampling は `src/generation/sampler.ts`（同 決定 7〜8）。
 sequence が出るまでの間、この面に相当するものは公開されていない。
 
+## pin 定数 `*_CURRENT` は公開面から消えた（家族ごとの取得元対応表へ置き換え・0.9.0）
+
+`@karume/models` が出していた `ANIMA_CURRENT` / `ANIMA_EXTRA_CURRENT` /
+`IRODORI_V4_SMALL_CURRENT` / `IRODORI_V4_1_SMALL_CURRENT` / `SBV2_JVNV_CURRENT` /
+`GEMMA4_CURRENT` は**削除した**（0.8.0 までの公開面に対する**破壊的変更** — ADR
+[0092](decisions/0092-distribution-repos-and-sources.md)。互換の
+re-export は置いていない）。置換は家族ごとの対応表で、キーは HF リポ名の basename から
+`karume-` を落とした綴りである:
+
+| 0.8.0 まで                   | 0.9.0 から                              |
+| ---------------------------- | --------------------------------------- |
+| `ANIMA_CURRENT`              | `ANIMA_SOURCES["anima"]`                |
+| `ANIMA_EXTRA_CURRENT`        | `ANIMA_SOURCES["anima-extra"]`          |
+| `IRODORI_V4_SMALL_CURRENT`   | `IRODORI_SOURCES["irodori-v4-small"]`   |
+| `IRODORI_V4_1_SMALL_CURRENT` | `IRODORI_SOURCES["irodori-v4.1-small"]` |
+| `SBV2_JVNV_CURRENT`          | `SBV2_SOURCES["sbv2-jvnv"]`             |
+| `GEMMA4_CURRENT`             | `GEMMA4_SOURCES["gemma4"]`              |
+
+gemma4 のエントリは**リポ名も改名する** — `karume-gemma4-e2b` → `karume-gemma4`（E4B / 12B が
+同居する器にするため — ADR 0092 決定 1）。HF の rename は旧名をリダイレクトするので、
+0.8.0 までの `GEMMA4_CURRENT` に焼かれた pin は解決し続ける。
+
+値（`{ repo, revision }`）は従来と同じ形で、`fromPretrained` の第 1 引数へそのまま渡せる。
+barrel（`@karume/models`）はさらに全家族を畳んだ `KARUME_SOURCES` を出す（**同じキー・同じ
+値**）— 公開リポを全部なめる側のための面で、1 家族しか使わない消費者はサブパスの家族表を引く。
+
+`*_CURRENT` は「1 定数 = 1 リポ」で、リポが増えるたびに定数名を発明する必要があり（`_V4_1_` の
+ような版の綴りが識別子に混ざる）、「この家族が公開しているリポの一覧」をコードから引く手段が
+無かった。表にすると一覧は `Object.entries` で引け、キーがリポ名から機械的に導ける
+（`"karume-" + key` が repo の basename に戻る — 門は `packages/models/tests/sources_test.ts`）。
+既定の席は引き続き**無い**（どのエントリを使うかは呼び手が綴る — ADR 0073 の 2026-08-25 撤回）。
+
 ## 生成 API は公開前に 7 点変わった（ADR 0083 / 0084 の初版記述に対する破壊的変更）
 
 生成 API（`GenerationSequence` / `Gemma4Pipeline`）は **JSR にはまだ出ていない**（`@karume/models`
@@ -206,10 +238,14 @@ implicit GEMM（[decisions/0024](decisions/0024-conv2d-implicit-gemm.md)）は 1
 `BIREFNET_RESOLUTION`）。export 段（`python -m birefnet.export --resolution 2048`）は通るので、
 系列を作ること自体はできる。
 
-配らないのは実行段が未実測だから: 中間テンソルが `[1, 192, 2048, 2048]` = 3.22GB になる。
+配らないのは実行段が未実測だから: 最大の中間テンソルが `[1, 240, 2048, 2048]`（decoder の
+cat 出力）= 4.03GB になる。
 （かつては「上の conv2d dispatch 上限に decoder の 1×1 conv が当たる」も理由に挙げていたが、
 既定幾何が M128N128 になった `d0afc22` 以降は 2048² の n タイルが 32,768 で上限の内側 —
 残る理由は資源側だけ。）
+配っている 1024² も軽くはない: 見積りで重み 919MiB + workspace 6,283MiB = **1 binding が
+約 1GiB・GPU 総確保が約 7.3GiB** を要する（2026-09-04 実測）ので、実質**デスクトップ級 GPU
+限定**である。
 本家（同梱 `handler.py` の General-HR）の推論解像度は 2048² なので、**上流と同じ設定では
 ない**点は配布形の制約として明示しておく。回避策は入れていない（実測して判断する側の話）。
 

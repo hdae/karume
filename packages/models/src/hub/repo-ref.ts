@@ -55,22 +55,22 @@ const assertRepoSpelling = (repo: string, where: string): void => {
  * 消してしまうと、この門自体を素直に叩けなくなる。
  *
  * @param where 診断の主語（`"AnimaPipeline.fromPretrained"`）。
- * @param current このファミリの `*_CURRENT` 定数の綴り。公開配布リポを持たないファミリでは
- *   省く（存在しない識別子を案内しない）。
+ * @param sourcesExample このファミリの対応表を引く綴り（`ANIMA_SOURCES["anima"]` — ADR 0092）。
+ *   公開配布リポを持たないファミリでは省く（存在しない識別子を案内しない）。
  */
 export const toRepoRef = (
   ref: string | HubRepoRef | undefined,
   where: string,
-  current?: string,
+  sourcesExample?: string,
 ): HubRepoRef => {
   const repo: unknown = typeof ref === "string" ? ref : ref?.repo;
   if (ref === undefined || typeof repo !== "string" || repo.length === 0) {
     throw new Error(
       `${where}: repo が必須（取得元に既定は無い）— ` +
         '{ repo: "owner/name", revision: "<40 桁の commit SHA>" } を渡すか、' +
-        (current === undefined
+        (sourcesExample === undefined
           ? "リポ名の文字列（= main 追従）を渡す"
-          : `このパッケージ版が検証した ${current} を渡す`),
+          : `このパッケージ版が検証した ${sourcesExample} を渡す`),
     );
   }
   assertRepoSpelling(repo, where);
@@ -89,6 +89,6 @@ export const toRepoRef = (
 export const toManifestSource = (
   ref: string | HubRepoRef | DistributionSource | undefined,
   where: string,
-  current?: string,
+  sourcesExample?: string,
 ): HubRepoRef | DistributionSource =>
-  isDistributionSource(ref) ? ref : toRepoRef(ref, where, current);
+  isDistributionSource(ref) ? ref : toRepoRef(ref, where, sourcesExample);

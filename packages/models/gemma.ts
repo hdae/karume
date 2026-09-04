@@ -50,14 +50,17 @@ export type {
 /** 配布形が宣言する静的配線（`karume.json` の `pipelineConfig` — ADR 0038 §1）。 */
 export type { Gemma4DefaultSampler, Gemma4PipelineConfig } from "./src/gemma/config.ts";
 /**
- * **このパッケージ版が検証した取得元**（`hdae/karume-gemma4-e2b` の pin 済み commit SHA —
- * ADR 0073）。
+ * **このパッケージ版が検証した取得元の対応表**（家族 1 つにつき 1 表・キーは HF リポ名から
+ * `karume-` を落とした綴り・値は pin 済み commit SHA — ADR 0073 / 0092）。同一家族 = 1 リポ
+ * なので今は 1 エントリで、将来の E4B / 12B もここに同居する:
+ *
+ * - `GEMMA4_SOURCES["gemma4"]` = `hdae/karume-gemma4`
  *
  * **パッケージ版に合わせて自動追従したい場合のオプトイン** — {@link Gemma4Pipeline.fromPretrained}
- * の第 1 引数へそのまま渡す。再現性を自分で固定したい場合は、この定数ではなく自分の
+ * の第 1 引数へそのまま渡す。再現性を自分で固定したい場合は、この表ではなく自分の
  * `{ repo, revision }` を書く（`fromPretrained` に既定は無い）。
  */
-export { GEMMA4_CURRENT } from "./src/gemma/config.ts";
+export { GEMMA4_SOURCES } from "./src/gemma/config.ts";
 /**
  * 生の宣言（`unknown`）→ 検証済みの {@link Gemma4PipelineConfig}（失敗は fail loudly）。
  *

@@ -1586,7 +1586,7 @@ export class IrodoriPipeline {
     const source = toManifestSource(
       ref,
       "IrodoriPipeline.fromPretrained",
-      "IRODORI_V4_SMALL_CURRENT（@karume/models/irodori）",
+      'IRODORI_SOURCES["irodori-v4.1-small"]（@karume/models/irodori）',
     );
     const hubOptions = {
       ...(options.signal === undefined ? {} : { signal: options.signal }),

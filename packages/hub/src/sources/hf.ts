@@ -61,7 +61,7 @@ const warnImplicitMain = (repo: string, revisionSha: string): void => {
     `@karume/hub: revision を指定していないため 'main' を解決した（repo ${repo} → ${revisionSha}）。\n` +
       `main は付け替えられるので、同じコードが次の起動で別の重みを読み得る。次のどちらかで固定すること:\n` +
       `  ① revision: "${revisionSha}" を渡す（この 1 行のコピーで pin が完成する）\n` +
-      `  ② @karume/models の *_CURRENT 定数（パッケージ検証済みの pin）を使う`,
+      `  ② @karume/models の *_SOURCES（公開配布リポの対応表 — パッケージ検証済みの pin）を使う`,
   );
 };
 

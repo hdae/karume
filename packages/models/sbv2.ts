@@ -48,11 +48,13 @@ export type { Sbv2Mora, Sbv2Phrases, Sbv2Utterance, Sbv2Word } from "./src/sbv2/
 export { Sbv2InputError } from "./src/sbv2/errors.ts";
 
 /**
- * **このパッケージ版が検証した取得元**（`hdae/karume-sbv2-jvnv` の pin 済み commit SHA —
- * ADR 0073）。
+ * **このパッケージ版が検証した取得元の対応表**（家族 1 つにつき 1 表・キーは HF リポ名から
+ * `karume-` を落とした綴り・値は pin 済み commit SHA — ADR 0073 / 0092）。今は 1 エントリ:
+ *
+ * - `SBV2_SOURCES["sbv2-jvnv"]` = `hdae/karume-sbv2-jvnv`
  *
  * **パッケージ版に合わせて自動追従したい場合のオプトイン** — {@link Sbv2Pipeline.fromPretrained}
- * の第 1 引数へそのまま渡す。再現性を自分で固定したい場合は、この定数ではなく自分の
+ * の第 1 引数へそのまま渡す。再現性を自分で固定したい場合は、この表ではなく自分の
  * `{ repo, revision }` を書く（`fromPretrained` に既定は無い）。
  */
-export { SBV2_JVNV_CURRENT } from "./src/sbv2/config.ts";
+export { SBV2_SOURCES } from "./src/sbv2/config.ts";

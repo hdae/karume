@@ -8,9 +8,8 @@
  * 縮退すると、配布者の意図した既定と実行が食い違ったまま気づけない）。
  * MUST: マップは `Object.hasOwn` 経由でのみ引く（横断不変条件）。
  *
- * NOTE: 公開配布リポの pin 定数（{@link ANIMA_CURRENT} / {@link ANIMA_EXTRA_CURRENT}）もここに
- * 置く。manifest から導ける値ではなく「どの manifest を取りに行くか」の側なので、配布形が
- * 持てない（ADR 0073）。
+ * NOTE: 公開配布リポの対応表（{@link ANIMA_SOURCES}）もここに置く。manifest から導ける値では
+ * なく「どの manifest を取りに行くか」の側なので、配布形が持てない（ADR 0073）。
  */
 
 import type { HubRepoRef } from "@karume/hub";
@@ -22,53 +21,52 @@ export const ANIMA_PIPELINE_NAME = "anima";
 export const ANIMA_PIPELINE_MAJOR = 1;
 
 /**
- * `hdae/karume-anima`（公式モデルが**同居する**リポ — 再構造後は Turbo / Base / Aesthetic の
- * 5 変種・既定 = Turbo）を**このパッケージ版が検証した取得元**（pin 済み commit SHA —
- * ADR 0073）。1 リポ = 複数モデルなので、リポ参照だけでは 1 本に決まらない —
- * 既定以外を使うときは `fromPretrained(ANIMA_CURRENT, { model })` と綴る。
+ * Anima ファミリの**公開配布リポ対応表**（ADR 0092 — 家族 1 つにつき 1 表・**既定の席は無い**）。
+ * 値は**このパッケージ版が検証した取得元**（pin 済み commit SHA — ADR 0073）。
+ *
+ * キーは HF リポ名の basename から `karume-` を落とした綴り（`"karume-" + key` がリポ名の
+ * basename に戻る — この不変条件は `tests/sources_test.ts` の門が見る）。リポの分割軸は
+ * 「公式 / 追加学習」（ADR 0087）で 2 本:
+ *
+ * - `"anima"` = `hdae/karume-anima`（公式モデルが同居 — Turbo / Base / Aesthetic の 5 変種・
+ *   既定 = Turbo）
+ * - `"anima-extra"` = `hdae/karume-anima-extra`（**第三者 fine-tune** が同居・既定 =
+ *   `anima-wai-v1.0`）
+ *
+ * どちらも 1 リポ = 複数モデルなので、リポ参照だけでは 1 本に決まらない — 既定以外を使うときは
+ * `fromPretrained(ANIMA_SOURCES["anima"], { model })` と綴る。
+ *
+ * `anima-extra` は text stack（`text_encoder` / `vae_decoder` / `tokenizer` / `tokenizer_2`）を
+ * 自分では配らず、公式リポ（`"anima"` が指す revision）から**越境参照で借りる**（ADR 0038 §7）。
+ * したがって 2 本は独立ではなく、公式を上げ直したら extra も焼き直す（公開順序の MUST は
+ * docs/release-runbook.md）。
  *
  * **パッケージ版に合わせて自動追従したい場合のオプトイン**として渡す — 再現性を自分で
- * 固定したい場合は、この定数ではなく自分の `{ repo, revision }` を書く（`fromPretrained` に
+ * 固定したい場合は、この表ではなく自分の `{ repo, revision }` を書く（`fromPretrained` に
  * 既定は無い）。
  *
  * MUST: revision は commit SHA で固定する — ブランチ・タグは配布側で付け替えられるので、
  * 公開済みのこのパッケージが読むバイト列がネットワーク側の都合で黙って変わる（回復不能側の
  * 事故）。SHA 指定は revision 解決要求そのものを消すため、完全キャッシュ時のオフライン起動も
  * 同時に成立する（ADR 0038）。main 追従が要る利用者は
- * `{ ...ANIMA_CURRENT, revision: "main" }` を明示的に選ぶ。
+ * `{ ...ANIMA_SOURCES["anima"], revision: "main" }` を明示的に選ぶ。
  *
- * NOTE: 旧 `ANIMA_TURBO_CURRENT`（hdae/karume-anima-turbo — LoRA 焼き込みの旧 turbo 専用
- * リポ）は廃止（2026-09-01 裁定・breaking）。公式 Turbo checkpoint（anima-turbo-v1.1）が
- * このリポの既定モデルとして同居する形に統合された。
+ * NOTE: 旧 turbo 専用リポ（`hdae/karume-anima-turbo` — LoRA を焼き込んだ 1 モデル 1 リポの形）は
+ * 廃止（2026-09-01 裁定・breaking）。公式 Turbo checkpoint（anima-turbo-v1.1）が `"anima"` の
+ * 既定モデルとして同居する形に統合された。
  */
 // NOTE: revision はリリース手順書（docs/release-runbook.md）§3 で、アップロード後の main の
-// SHA に更新する（ADR 0073 決定 3 — 手書き + 手順書ゲート）。
-export const ANIMA_CURRENT = {
-  repo: "hdae/karume-anima",
-  revision: "0115048e174fe6a9e40bad256e3a7f17bc898317",
-} as const satisfies HubRepoRef;
-
-/**
- * `hdae/karume-anima-extra`（**第三者 fine-tune** が同居するリポ — 追加学習の側。既定 =
- * `anima-wai-v1.0`）を**このパッケージ版が検証した取得元**（pin 済み commit SHA — ADR 0073）。
- * リポの分割軸は「公式 / 追加学習」で、公式変種は {@link ANIMA_CURRENT} が持つ（ADR 0087）。
- *
- * このリポは text stack（`text_encoder` / `vae_decoder` / `tokenizer` / `tokenizer_2`）を
- * 自分では配らず、公式リポ（{@link ANIMA_CURRENT} が指す revision）から**越境参照で借りる**
- * （ADR 0038 §7）。したがって 2 定数は独立ではなく、公式を上げ直したら extra も焼き直す
- * （公開順序の MUST は docs/release-runbook.md）。
- *
- * 既定以外のモデルを使うときは `fromPretrained(ANIMA_EXTRA_CURRENT, { model })` と綴る
- * （1 リポ = 複数モデルなので、リポ参照だけでは 1 本に決まらない）。
- *
- * MUST: revision は commit SHA で固定する（理由は {@link ANIMA_CURRENT} と同じ）。
- */
-// NOTE: revision はリリース手順書（docs/release-runbook.md）§3 で、アップロード後の main の
-// SHA に更新する（ADR 0073 決定 3 — 手書き + 手順書ゲート）。
-export const ANIMA_EXTRA_CURRENT = {
-  repo: "hdae/karume-anima-extra",
-  revision: "d09f96b2db67058e553562b4085334fcb8fd5d64",
-} as const satisfies HubRepoRef;
+// SHA に更新する（ADR 0073 決定 3 の維持義務を継承 — 手書き + 手順書ゲート）。
+export const ANIMA_SOURCES = {
+  "anima": {
+    repo: "hdae/karume-anima",
+    revision: "0115048e174fe6a9e40bad256e3a7f17bc898317",
+  },
+  "anima-extra": {
+    repo: "hdae/karume-anima-extra",
+    revision: "d09f96b2db67058e553562b4085334fcb8fd5d64",
+  },
+} as const satisfies Record<string, HubRepoRef>;
 
 const ROOT_KEYS: readonly string[] = ["scheduler", "defaults"];
 const SCHEDULER_KEYS: readonly string[] = ["type", "shift", "numTrainTimesteps"];

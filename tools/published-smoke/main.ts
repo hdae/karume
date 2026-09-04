@@ -6,8 +6,9 @@
 // 「parent workspace を無視する」warning を 1 行出すのは想定どおり）。公開直後は依存の最小経過
 // 時間チェックに掛かるので、同 deno.json が `jsr:@karume/*` だけを除外している。
 //
-// 検査 = models barrel が export する全 pin 定数（`*_CURRENT`）で manifest を解決し、1 家族
-// （sbv2）は `fromPretrained` まで通す（GPU が要る — `--manifests-only` で省く）。
+// 検査 = models barrel の取得元対応表（`KARUME_SOURCES` — 全家族の和集合。ADR 0092）の全
+// エントリで manifest を解決し、1 家族（sbv2）は `fromPretrained` まで通す（GPU が要る —
+// `--manifests-only` で省く）。
 // 起動: deno task smoke:published [--manifests-only]
 
 type PinRef = { readonly repo: string; readonly revision: string };
@@ -18,7 +19,15 @@ type Sbv2Module = {
   Sbv2Pipeline: {
     fromPretrained: (ref: PinRef) => Promise<{ dispose: () => Promise<void> }>;
   };
+  SBV2_SOURCES: Record<string, unknown>;
 };
+
+/**
+ * 動的 import で受けた値を**キー付きの表として引ける形**へ絞る。`typeof === "object"` だけだと
+ * 型は `object` にしかならず、`Object.entries` の戻りが `any` に落ちて以降の検査が型に効かない。
+ */
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null;
 
 const isPinRef = (value: unknown): value is PinRef =>
   typeof value === "object" && value !== null &&
@@ -46,11 +55,16 @@ const models = (await import(`jsr:@karume/models@${version}`)) as Record<
 >;
 const hub = (await import(`jsr:@karume/hub@${version}`)) as HubModule;
 
-const pins = Object.entries(models).filter(([name, value]) =>
-  name.endsWith("_CURRENT") && isPinRef(value)
-) as [string, PinRef][];
+const sources: unknown = models.KARUME_SOURCES;
+if (!isRecord(sources)) {
+  throw new Error("models barrel に KARUME_SOURCES が見つからない");
+}
+// filter は tuple の第 2 要素を絞れないので flatMap で型ごと絞る（as を使わない）。
+const pins = Object.entries(sources).flatMap(([name, value]) =>
+  isPinRef(value) ? [[name, value] as const] : []
+);
 if (pins.length === 0) {
-  throw new Error("models barrel に *_CURRENT の pin 定数が見つからない");
+  throw new Error("KARUME_SOURCES にエントリが 1 本も無い");
 }
 
 for (const [name, ref] of pins) {
@@ -72,9 +86,10 @@ if (manifestsOnly) {
     `published smoke OK: ${pins.length} manifests（fromPretrained は省略）`,
   );
 } else {
-  const pin = models.SBV2_JVNV_CURRENT;
-  if (!isPinRef(pin)) throw new Error("SBV2_JVNV_CURRENT が pin 定数でない");
-  const { Sbv2Pipeline } = (await import(`jsr:@karume/models@${version}/sbv2`)) as Sbv2Module;
+  const { Sbv2Pipeline, SBV2_SOURCES } =
+    (await import(`jsr:@karume/models@${version}/sbv2`)) as Sbv2Module;
+  const pin: unknown = SBV2_SOURCES["sbv2-jvnv"];
+  if (!isPinRef(pin)) throw new Error('SBV2_SOURCES["sbv2-jvnv"] が pin エントリでない');
   const started = performance.now();
   const pipeline = await Sbv2Pipeline.fromPretrained(pin);
   console.log(

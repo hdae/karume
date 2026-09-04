@@ -28,13 +28,18 @@ export type {
 } from "./src/irodori/pipeline.ts";
 
 /**
- * **このパッケージ版が検証した取得元**（公開配布リポ 1 つにつき 1 定数・pin 済み commit SHA —
- * ADR 0073）。上流の v4 / v4.1 は別リポなので 2 本
- * （`hdae/karume-irodori-v4-small` / `hdae/karume-irodori-v4.1-small`）— v4.1 は duration
- * predictor だけを再学習した後続版で、旧版の pin も温存する。
+ * **このパッケージ版が検証した取得元の対応表**（家族 1 つにつき 1 表・キーは HF リポ名から
+ * `karume-` を落とした綴り・値は pin 済み commit SHA — ADR 0073 / 0092）。上流の v4 / v4.1 は
+ * 別リポなので 2 エントリ:
+ *
+ * - `IRODORI_SOURCES["irodori-v4-small"]` = `hdae/karume-irodori-v4-small`
+ * - `IRODORI_SOURCES["irodori-v4.1-small"]` = `hdae/karume-irodori-v4.1-small`（duration
+ *   predictor だけを再学習した後続版）
+ *
+ * 旧版の pin も温存する（**既定の席は無い** — どちらを使うかは呼び手が綴る）。
  *
  * **パッケージ版に合わせて自動追従したい場合のオプトイン** — {@link IrodoriPipeline.fromPretrained}
- * の第 1 引数へそのまま渡す。再現性を自分で固定したい場合は、この定数ではなく自分の
+ * の第 1 引数へそのまま渡す。再現性を自分で固定したい場合は、この表ではなく自分の
  * `{ repo, revision }` を書く（`fromPretrained` に既定は無い）。
  */
-export { IRODORI_V4_1_SMALL_CURRENT, IRODORI_V4_SMALL_CURRENT } from "./src/irodori/config.ts";
+export { IRODORI_SOURCES } from "./src/irodori/config.ts";

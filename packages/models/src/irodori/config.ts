@@ -22,9 +22,9 @@
  * （`"noise"` / `joint` / `alternating`）は同値が成り立たないので、分岐を持つのではなく
  * **受理しない**（型としても "mask" / "independent" しか表せない）。
  *
- * NOTE: 公開配布リポの pin 定数（{@link IRODORI_V4_SMALL_CURRENT} /
- * {@link IRODORI_V4_1_SMALL_CURRENT}）もここに置く。上の MUST が禁じる「モデル固有の数」では
- * なく「どの manifest を取りに行くか」の側で、そもそも配布形が持てない値だから（ADR 0073）。
+ * NOTE: 公開配布リポの対応表（{@link IRODORI_SOURCES}）もここに置く。上の MUST が禁じる
+ * 「モデル固有の数」ではなく「どの manifest を取りに行くか」の側で、そもそも配布形が持てない
+ * 値だから（ADR 0073）。
  */
 
 import type { HubRepoRef } from "@karume/hub";
@@ -34,46 +34,42 @@ export const IRODORI_PIPELINE_NAME = "irodori";
 export const IRODORI_PIPELINE_MAJOR = 1;
 
 /**
- * `hdae/karume-irodori-v4-small` を**このパッケージ版が検証した取得元**
- * （pin 済み commit SHA — ADR 0073）。
+ * Irodori ファミリの**公開配布リポ対応表**（ADR 0092 — 家族 1 つにつき 1 表・**既定の席は
+ * 無い**）。値は**このパッケージ版が検証した取得元**（pin 済み commit SHA — ADR 0073）。
+ *
+ * キーは HF リポ名の basename から `karume-` を落とした綴り（`"karume-" + key` がリポ名の
+ * basename に戻る — この不変条件は `tests/sources_test.ts` の門が見る）。世代・版は別リポ =
+ * 別エントリで、旧版も**温存する**（旧版のリポはそのまま公開が続く）:
+ *
+ * - `"irodori-v4-small"` = `hdae/karume-irodori-v4-small`
+ * - `"irodori-v4.1-small"` = `hdae/karume-irodori-v4.1-small`（上流 v4.1 = duration predictor
+ *   だけを再学習した後続版）
+ *
+ * 発話長の付き方が変わるので、この 2 つは「新旧」ではなく**別の取得元**として並ぶ
+ * （examples の台本既定は v4.1）。
  *
  * **パッケージ版に合わせて自動追従したい場合のオプトイン**として渡す — 再現性を自分で
- * 固定したい場合は、この定数ではなく自分の `{ repo, revision }` を書く（`fromPretrained` に
+ * 固定したい場合は、この表ではなく自分の `{ repo, revision }` を書く（`fromPretrained` に
  * 既定は無い）。
  *
  * MUST: revision は commit SHA で固定する — ブランチ・タグは配布側で付け替えられるので、
  * 公開済みのこのパッケージが読むバイト列がネットワーク側の都合で黙って変わる（回復不能側の
  * 事故）。SHA 指定は revision 解決要求そのものを消すため、完全キャッシュ時のオフライン起動も
  * 同時に成立する（ADR 0038）。main 追従が要る利用者は
- * `{ ...IRODORI_V4_SMALL_CURRENT, revision: "main" }` を明示的に選ぶ。
+ * `{ ...IRODORI_SOURCES["irodori-v4.1-small"], revision: "main" }` を明示的に選ぶ。
  */
 // NOTE: revision はリリース手順書（docs/release-runbook.md）§3 で、アップロード後の main の
-// SHA に更新する（ADR 0073 決定 3 — 手書き + 手順書ゲート）。
-export const IRODORI_V4_SMALL_CURRENT = {
-  repo: "hdae/karume-irodori-v4-small",
-  revision: "f65e4b7b7ccb8d6342733b1f4ab0d83e9557e456",
-} as const satisfies HubRepoRef;
-
-/**
- * `hdae/karume-irodori-v4.1-small`（上流 v4.1 = duration predictor だけを再学習した後続版）を
- * **このパッケージ版が検証した取得元**（pin 済み commit SHA — ADR 0073）。
- *
- * v4 の pin（{@link IRODORI_V4_SMALL_CURRENT}）は**温存する** — 公開リポ 1 つにつき 1 定数
- * （同 決定 1）で、旧版のリポはそのまま公開が続くから。発話長の付き方が変わるので、この 2 つは
- * 「新旧」ではなく**別の取得元**として並ぶ（examples の台本既定は v4.1）。
- *
- * **パッケージ版に合わせて自動追従したい場合のオプトイン**として渡す — 再現性を自分で
- * 固定したい場合は、この定数ではなく自分の `{ repo, revision }` を書く（`fromPretrained` に
- * 既定は無い）。
- *
- * MUST: revision は commit SHA で固定する（理由は {@link IRODORI_V4_SMALL_CURRENT} と同じ）。
- */
-// NOTE: revision はリリース手順書（docs/release-runbook.md）§3 で、アップロード後の main の
-// SHA に更新する（ADR 0073 決定 3 — 手書き + 手順書ゲート）。
-export const IRODORI_V4_1_SMALL_CURRENT = {
-  repo: "hdae/karume-irodori-v4.1-small",
-  revision: "e4d9502ee94ca57ba1b28ff7e16a1f886a53e83d",
-} as const satisfies HubRepoRef;
+// SHA に更新する（ADR 0073 決定 3 の維持義務を継承 — 手書き + 手順書ゲート）。
+export const IRODORI_SOURCES = {
+  "irodori-v4-small": {
+    repo: "hdae/karume-irodori-v4-small",
+    revision: "f65e4b7b7ccb8d6342733b1f4ab0d83e9557e456",
+  },
+  "irodori-v4.1-small": {
+    repo: "hdae/karume-irodori-v4.1-small",
+    revision: "e4d9502ee94ca57ba1b28ff7e16a1f886a53e83d",
+  },
+} as const satisfies Record<string, HubRepoRef>;
 
 const ROOT_KEYS: readonly string[] = [
   "maxTextLen",

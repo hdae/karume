@@ -1,13 +1,14 @@
 # published-smoke — smoke test against the published JSR packages
 
 Runs the post-release check from `docs/release-runbook.md` §5 against the
-**published** `@karume/*` packages: every pin constant (`*_CURRENT`) exported by
-the `@karume/models` barrel must resolve its manifest through the published
+**published** `@karume/*` packages: every entry of `KARUME_SOURCES` (the published
+repository table exported by the `@karume/models` barrel — the union of every
+family's `*_SOURCES`) must resolve its manifest through the published
 `@karume/hub`, and one family (sbv2) is constructed with `fromPretrained` end to
 end.
 
 ```sh
-deno task smoke:published                   # manifests for every pin + sbv2 fromPretrained (needs a GPU)
+deno task smoke:published                   # manifests for every entry + sbv2 fromPretrained (needs a GPU)
 deno task smoke:published --manifests-only  # no GPU: manifest resolution only
 ```
 

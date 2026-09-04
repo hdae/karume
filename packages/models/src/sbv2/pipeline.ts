@@ -1016,7 +1016,7 @@ export class Sbv2Pipeline {
     const source = toManifestSource(
       ref,
       "Sbv2Pipeline.fromPretrained",
-      "SBV2_JVNV_CURRENT（@karume/models/sbv2）",
+      'SBV2_SOURCES["sbv2-jvnv"]（@karume/models/sbv2）',
     );
     const hubOptions = {
       ...(options.signal === undefined ? {} : { signal: options.signal }),

@@ -15,9 +15,9 @@
  * `--source` は**手元の配布形ディレクトリ**（`karume.json` を持つ）を `denoDirectory` で直に読み、
  * `--repo owner/name[@revision]` は HF から取る。この台本の既定はローカルミラーの綴り
  * {@link DEFAULT_SOURCE}（手元で焼いた配布形をそのまま回すのがデモの主用途）で、HF から取るなら
- * `--repo hdae/karume-gemma4-e2b` — 版まで固定したければ pin 定数 `GEMMA4_CURRENT`
- * （`@karume/models/gemma` — このパッケージ版が検証した revision。ADR 0073）の
- * `repo@revision` を渡す。
+ * `--repo hdae/karume-gemma4` — 版まで固定したければ取得元対応表
+ * `GEMMA4_SOURCES["gemma4"]`（`@karume/models/gemma` — このパッケージ版が検証した revision。
+ * ADR 0073 / 0092）の `repo@revision` を渡す。
  *
  * ## なぜ `chat` ではなく `Gemma4ChatSession` なのか
  *
