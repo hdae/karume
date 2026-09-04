@@ -30,6 +30,8 @@ from karume.modelcard import (
     require_pipeline,
 )
 
+from .measurements import convt_diff_text
+
 #: このテンプレートが説明できるパイプライン契約（ADR 0041 §2 — モデル単位）。
 DEPTH_ANYTHING_SUPPORTED_PIPELINE = "depth-anything/1"
 
@@ -58,10 +60,14 @@ DEPTH_ANYTHING_UPSTREAM: Mapping[str, str] = {
 #: この 1 値**である前提で frontmatter を書く（上の MUST）。
 DEPTH_ANYTHING_LICENSE = "apache-2.0"
 
+#: 原文の在処（配布リポ直下の `LICENSE.md` と同じテキスト — Apache 2.0 §4(a)）。
+DEPTH_ANYTHING_LICENSE_TEXT_LINK = "https://www.apache.org/licenses/LICENSE-2.0"
+
 #: `ConvTranspose2d` → 1×1 conv + pixel shuffle の差し替え（`depth_anything.patch` の
 #: ③）が持ち込む差の実測幅。**ビット同一ではない**ので帰属節が明示する
 #: （`depth_anything/export.py --verify` が毎回実測する値・深度の RMS はおよそ 1.0）。
-DEPTH_ANYTHING_CONVT_DIFF = "1.4e-6"
+#: 数も書式も持たない — 正本は {@link depth_anything.measurements.convt_diff_text}。
+DEPTH_ANYTHING_CONVT_DIFF = convt_diff_text()
 
 
 def _depth_anything_repo(name: str) -> str:
@@ -143,7 +149,9 @@ def _depth_anything_base_weights(manifest: Mapping[str, Any]) -> list[str]:
         repo = _depth_anything_repo(name)
         lines.append(
             f"- **`{name}`**: [{repo}](https://huggingface.co/{repo}), licensed"
-            f" **{DEPTH_ANYTHING_LICENSE}** (as of retrieval)."
+            f" **{DEPTH_ANYTHING_LICENSE}** (as of retrieval;"
+            f" [full text]({DEPTH_ANYTHING_LICENSE_TEXT_LINK}) — a verbatim copy is in"
+            " `LICENSE.md`)."
         )
     lines += [
         "- **Only the Small checkpoint is Apache-2.0.** Upstream ships Base and Large under"
@@ -153,16 +161,17 @@ def _depth_anything_base_weights(manifest: Mapping[str, Any]) -> list[str]:
         "  check the upstream sources against your own use case.",
         f"- **Architecture**: DINOv2 backbone + DPT head"
         f" ([{DEPTH_ANYTHING_PAPER}](https://{DEPTH_ANYTHING_PAPER})).",
-        "- **Changes made here**: conversion into the Karume container format. No retraining, no",
-        "  fine-tuning and **no quantization** — the weights are the source checkpoint's own f32",
-        "  values. The graph is the upstream `forward` with two layout-only rewrites (the last",
-        "  fusion stage's upsample takes an explicit output size instead of a scale factor, and",
-        "  the position-embedding interpolation is pinned to the pretraining resolution where it",
-        "  is the identity — both bit-exact), plus one module rewrite that is equivalent up to",
-        "  floating-point rounding: the DPT reassemble stage's transposed convolutions became a",
-        "  1×1 convolution followed by a pixel shuffle (they have `kernel == stride`, so the two",
-        "  are exactly the same sum in a different order — measured max"
-        f" {DEPTH_ANYTHING_CONVT_DIFF} on depth values whose RMS is around 1).",
+        "- **Changes made here** (also listed in `NOTICE.md`, per Apache 2.0 §4(b)):",
+        "  conversion into the Karume container format. No retraining, no fine-tuning and",
+        "  **no quantization** — the weights are the source checkpoint's own f32 values. The",
+        "  graph is the upstream `forward` with two layout-only rewrites (the last fusion",
+        "  stage's upsample takes an explicit output size instead of a scale factor, and the",
+        "  position-embedding interpolation is pinned to the pretraining resolution where it",
+        "  is the identity — both bit-exact), plus one module rewrite that is equivalent up",
+        "  to floating-point rounding: the DPT reassemble stage's transposed convolutions",
+        "  became a 1×1 convolution followed by a pixel shuffle (they have",
+        "  `kernel == stride`, so the two are exactly the same sum in a different order —",
+        f"  measured max {DEPTH_ANYTHING_CONVT_DIFF} on depth values whose RMS is around 1).",
     ]
     return lines
 

@@ -23,6 +23,7 @@ import pytest
 from ir_fixtures import ir_container
 from shard_series import placed_paths, write_component
 
+from _shared.licenses import APACHE_LICENSE_2_0_PATH
 from dist import default_out_dir, main
 from karume.dist import (
     MANIFEST_FILENAME,
@@ -33,7 +34,7 @@ from karume.dist import (
     verify_dist,
 )
 from karume.ir import IR_METADATA_KEY
-from siglip2.card import SIGLIP2_UPSTREAM
+from siglip2.card import SIGLIP2_MAP_HEAD_DIFF, SIGLIP2_UPSTREAM
 from siglip2.distribution import (
     PIPELINE,
     SIGLIP2_DEFAULT_MODEL,
@@ -104,6 +105,10 @@ _SIGLIP2_HEIGHT = 96
 _SIGLIP2_WIDTH = 64
 _SIGLIP2_HIDDEN = 7
 
+#: 2 モデル目（so400m）の寸法。**base と 1 つも重ねない** — 1 リポ 2 モデルの器で
+#: `pipelineConfig` がモデルごとに宣言されていることは、値が違うときしか観測できない。
+_SIGLIP2_SO400M_DIMS = (48, 80, 5)
+
 #: 偽の `preprocessor_config.json`（実物と同じ欄・違う値）。
 _SIGLIP2_PREPROCESSOR: Mapping[str, Any] = {
     "do_normalize": True,
@@ -116,6 +121,11 @@ _SIGLIP2_PREPROCESSOR: Mapping[str, Any] = {
     "rescale_factor": 1.0 / 255.0,
     "size": {"height": _SIGLIP2_HEIGHT, "width": _SIGLIP2_WIDTH},
 }
+
+
+def _siglip2_preprocessor(height: int, width: int) -> dict[str, Any]:
+    """同じ欄・違う寸法の `preprocessor_config.json`（2 モデル目の入力素材）。"""
+    return {**_SIGLIP2_PREPROCESSOR, "size": {"height": height, "width": width}}
 
 
 def _siglip2_graph(
@@ -138,7 +148,12 @@ def _siglip2_graph(
     )
 
 
-def _siglip2_container(dtype: str, graph: str | None, storage: str | None) -> bytes | list[bytes]:
+def _siglip2_container(
+    dtype: str,
+    graph: str | None,
+    storage: str | None,
+    dims: tuple[int, int, int] = (_SIGLIP2_HEIGHT, _SIGLIP2_WIDTH, _SIGLIP2_HIDDEN),
+) -> bytes | list[bytes]:
     """系列に置く vision tower の中身。
 
     組み立てへ届く既定の形は**正当な IR コンポーネント**でなければならない（組み立ては入力を
@@ -155,15 +170,18 @@ def _siglip2_container(dtype: str, graph: str | None, storage: str | None) -> by
       F32 で残り、i4 はさらに I8 が混ざる）。禁止表（{@link SIGLIP2_STORAGE_FORBIDDEN}）の門は
       この形でしか試せない。
     """
+    height, width, hidden = dims
     if storage is not None or (graph is None and dtype == "F32"):
         return ir_container(
             mark="siglip2-vision",
             storage=storage if storage is not None else dtype.lower(),
-            inputs=(("pixel_values", (1, 3, _SIGLIP2_HEIGHT, _SIGLIP2_WIDTH)),),
-            outputs=([1, _SIGLIP2_HIDDEN],),
+            inputs=(("pixel_values", (1, 3, height, width)),),
+            outputs=([1, hidden],),
         )
     return _fake_safetensors(
-        dtype, b"siglip2-vision-weights", {IR_METADATA_KEY: graph or _siglip2_graph()}
+        dtype,
+        b"siglip2-vision-weights",
+        {IR_METADATA_KEY: graph or _siglip2_graph(shape=(1, 3, height, width), hidden=hidden)},
     )
 
 
@@ -175,6 +193,7 @@ def _build_siglip2_sources(
     dtype: str = "F32",
     storage: str | None = None,
     preprocessor: Mapping[str, Any] | None = _SIGLIP2_PREPROCESSOR,
+    dims: tuple[int, int, int] = (_SIGLIP2_HEIGHT, _SIGLIP2_WIDTH, _SIGLIP2_HIDDEN),
 ) -> Siglip2Sources:
     """系列 + 実重みの置き場を偽資産で再現する（配布しない `io.*` の混入込み）。
 
@@ -186,7 +205,9 @@ def _build_siglip2_sources(
         series=root / "outputs" / "series" / checkpoint,
         model=root / "inputs" / "siglip2" / checkpoint,
     )
-    write_component(sources.series / "model.safetensors", _siglip2_container(dtype, graph, storage))
+    write_component(
+        sources.series / "model.safetensors", _siglip2_container(dtype, graph, storage, dims)
+    )
     # 配布に入ってはいけない E2E フィクスチャ（系列には実際にこれが並んでいる）。
     _write(sources.series / "io.ramp.safetensors", b"io-fixture")
     if preprocessor is not None:
@@ -197,12 +218,30 @@ def _build_siglip2_sources(
     return sources
 
 
+#: 2 モデル目の綴り（帰属表に載っているもう 1 つ）。
+_SIGLIP2_SECOND_MODEL = "so400m"
+
+
+def _build_siglip2_family(root: Path) -> None:
+    """1 リポ 2 モデル（base + so400m）の入力素材を並べる — 寸法は 1 つも重ねない。"""
+    _build_siglip2_sources(root)
+    _build_siglip2_sources(
+        root,
+        model=_SIGLIP2_SECOND_MODEL,
+        dims=_SIGLIP2_SO400M_DIMS,
+        preprocessor=_siglip2_preprocessor(*_SIGLIP2_SO400M_DIMS[:2]),
+    )
+
+
 @pytest.fixture
 def siglip2_assembled(tmp_path: Path) -> tuple[Path, dict]:
     sources = _build_siglip2_sources(tmp_path)
     out_dir = tmp_path / "models" / siglip2_repo_name(SIGLIP2_DEFAULT_MODEL)
     manifest = assemble_family(
-        [siglip2_plan(sources, SIGLIP2_DEFAULT_MODEL)], out_dir, SIGLIP2_DEFAULT_MODEL
+        [siglip2_plan(sources, SIGLIP2_DEFAULT_MODEL)],
+        out_dir,
+        SIGLIP2_DEFAULT_MODEL,
+        root_files=PIPELINE.root_files,
     )
     return out_dir, manifest
 
@@ -215,7 +254,10 @@ class TestSiglip2Layout:
     def test_it_places_the_single_graph_under_the_model_subtree(self, siglip2_assembled) -> None:
         out_dir, _ = siglip2_assembled
         expected = _in_subtree(SIGLIP2_DEFAULT_MODEL, _placed_paths())
-        assert _present(out_dir) == sorted([*expected, MANIFEST_FILENAME])
+        # 法的テキスト 2 本（Apache 2.0 §4）は manifest が宣言しないメタ席。
+        assert _present(out_dir) == sorted(
+            [*expected, MANIFEST_FILENAME, "LICENSE.md", "NOTICE.md"]
+        )
 
     def test_it_never_carries_the_io_fixtures(self, siglip2_assembled) -> None:
         out_dir, _ = siglip2_assembled
@@ -465,10 +507,115 @@ class TestSiglip2ModelCard:
         assert SIGLIP2_UPSTREAM["base"] not in card
 
 
+class TestSiglip2Family:
+    """1 リポ 2 モデル（ADR 0092 決定 8）— base と so400m が同じリポに同居する。"""
+
+    def _run(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        from siglip2 import distribution
+
+        _build_siglip2_family(tmp_path)
+        monkeypatch.setattr(distribution, "INPUTS_ROOT", tmp_path / "inputs")
+        out_dir = tmp_path / "models" / siglip2_repo_name(SIGLIP2_DEFAULT_MODEL)
+        main(
+            [
+                "--pipeline",
+                "siglip2",
+                "--model",
+                SIGLIP2_DEFAULT_MODEL,
+                "--model",
+                _SIGLIP2_SECOND_MODEL,
+                "--series",
+                str(tmp_path / "outputs" / "series"),
+                "--out",
+                str(out_dir),
+            ]
+        )
+        return out_dir
+
+    def test_both_models_live_in_one_repository_with_base_as_the_default(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """既定は**先頭の `--model`**（`karume.dist.main`）— 綴りの順序が既定を決める。"""
+        out_dir = self._run(tmp_path, monkeypatch)
+        manifest = json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+        assert sorted(manifest["models"]) == sorted([SIGLIP2_DEFAULT_MODEL, _SIGLIP2_SECOND_MODEL])
+        assert manifest["defaultModel"] == SIGLIP2_DEFAULT_MODEL
+        assert out_dir.name == "karume-siglip2"
+
+    def test_each_model_keeps_its_own_preprocessing_declaration(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """同居しても寸法はモデルごと — 1 つの宣言を共有していれば片方が別の数になる。"""
+        out_dir = self._run(tmp_path, monkeypatch)
+        manifest = json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+        base = manifest["models"][SIGLIP2_DEFAULT_MODEL]["pipelineConfig"]
+        so400m = manifest["models"][_SIGLIP2_SECOND_MODEL]["pipelineConfig"]
+        assert (base["imageHeight"], base["imageWidth"], base["hiddenDim"]) == (
+            _SIGLIP2_HEIGHT,
+            _SIGLIP2_WIDTH,
+            _SIGLIP2_HIDDEN,
+        )
+        assert (so400m["imageHeight"], so400m["imageWidth"], so400m["hiddenDim"]) == (
+            _SIGLIP2_SO400M_DIMS
+        )
+
+    def test_the_card_attributes_both_upstream_checkpoints(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """再配布する上流を 1 つでも落とすと、出所を名乗っていないカードになる。"""
+        card = (self._run(tmp_path, monkeypatch) / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
+        for repo in SIGLIP2_UPSTREAM.values():
+            assert repo in card
+        models = " / ".join(sorted([SIGLIP2_DEFAULT_MODEL, _SIGLIP2_SECOND_MODEL]))
+        assert f'  // model: "{SIGLIP2_DEFAULT_MODEL}", // default — available: {models}' in card
+
+    def test_the_layout_keeps_each_models_graph_in_its_own_subtree(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """グラフ shard は寸法の宣言そのものなので、**共有席へ畳まれてはいけない**。
+
+        バイト単位で同じコンポーネントは `shared/` へ畳まれる（ADR 0041 §9）ので、期待は
+        「モデル別サブツリー + shared のどれか」— 合成資産では重み shard が偶然一致するが、
+        寸法の違うグラフ shard が畳まれたらそれは器の側のバグになる。
+        """
+        out_dir = self._run(tmp_path, monkeypatch)
+        placed = sorted(verify_dist(out_dir))
+        graph_shard = _placed_paths()[0]
+        assert f"{SIGLIP2_DEFAULT_MODEL}/{graph_shard}" in placed
+        assert f"{_SIGLIP2_SECOND_MODEL}/{graph_shard}" in placed
+        assert {path.split("/", 1)[0] for path in placed} <= {
+            SIGLIP2_DEFAULT_MODEL,
+            _SIGLIP2_SECOND_MODEL,
+            "shared",
+        }
+
+
+class TestSiglip2LegalText:
+    """配布リポ直下の Apache 2.0 原文と改変告知（ADR 0092 決定 7）。"""
+
+    def test_it_ships_the_license_text_byte_identical(self, siglip2_assembled) -> None:
+        """§4(a) — 提供するのは**このライセンスのコピー**（要約でも整形でもない）。
+
+        原本は `_shared/licenses/apache_license_2_0.txt`。組み立ての経路のどこかで整形や
+        改行変換が入ると 1 バイト動くが、散文としては妥当なままなので他の門は素通りする。
+        """
+        out_dir, _ = siglip2_assembled
+        assert (out_dir / "LICENSE.md").read_bytes() == APACHE_LICENSE_2_0_PATH.read_bytes()
+
+    def test_it_ships_the_modification_notice(self, siglip2_assembled) -> None:
+        out_dir, _ = siglip2_assembled
+        notice = (out_dir / "NOTICE.md").read_text(encoding="utf-8")
+        # 「text tower は入っていない」と、ビット同一でない書き換えの実測幅が告知に出る。
+        assert "vision tower only" in notice
+        assert SIGLIP2_MAP_HEAD_DIFF in notice
+        assert "No quantization" in notice
+
+
 class TestSiglip2Cli:
-    def test_the_default_output_directory_follows_the_single_model(self) -> None:
-        assert default_out_dir(PIPELINE, [SIGLIP2_DEFAULT_MODEL]).name == "karume-siglip2-base"
-        assert default_out_dir(PIPELINE, ["so400m"]).name == "karume-siglip2-so400m"
+    def test_the_default_output_directory_is_the_family_repository(self) -> None:
+        """家族 1 リポ（ADR 0092 決定 1）— 行き先はモデル名を見ない 1 つ。"""
+        assert default_out_dir(PIPELINE, [SIGLIP2_DEFAULT_MODEL]).name == "karume-siglip2"
+        assert default_out_dir(PIPELINE, [_SIGLIP2_SECOND_MODEL]).name == "karume-siglip2"
 
     def test_one_attribution_profile_needs_no_choice(self) -> None:
         profiles = PIPELINE.card_profiles

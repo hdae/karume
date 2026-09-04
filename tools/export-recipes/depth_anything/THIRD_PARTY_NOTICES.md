@@ -30,14 +30,14 @@ published.
 
 ### depth-anything/Depth-Anything-V2-Small-hf
 
-| Item                     | Value                                                                                                                   |
-| ------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
-| Upstream repository      | <https://huggingface.co/depth-anything/Depth-Anything-V2-Small-hf>                                                      |
-| Revision used            | `5426e4f0f36572d16453bbda7a8389317b1bef99` (fetched 2026-08-16 into `inputs/depth-anything/Depth-Anything-V2-Small-hf`) |
-| Form of copy             | Loaded, not copied. Re-distributed in converted storage form.                                                           |
-| Code license             | n/a (weights only)                                                                                                      |
-| Weights license          | `card.py` records `apache-2.0` (checked on the HF model API, 2026-08-14). Unverified against the revision used.         |
-| Attribution requirements | Unverified                                                                                                              |
+| Item                     | Value                                                                                                                                                                                                                                                                               |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Upstream repository      | <https://huggingface.co/depth-anything/Depth-Anything-V2-Small-hf>                                                                                                                                                                                                                  |
+| Revision used            | `5426e4f0f36572d16453bbda7a8389317b1bef99` (fetched 2026-08-16 into `inputs/depth-anything/Depth-Anything-V2-Small-hf`)                                                                                                                                                             |
+| Form of copy             | Loaded, not copied. Re-distributed in converted storage form.                                                                                                                                                                                                                       |
+| Code license             | n/a (weights only)                                                                                                                                                                                                                                                                  |
+| Weights license          | `card.py` records `apache-2.0` (checked on the HF model API, 2026-08-14). Unverified against the revision used.                                                                                                                                                                     |
+| Attribution requirements | Apache 2.0 §4: the distribution bundles `LICENSE.md` (verbatim `../_shared/licenses/apache_license_2_0.txt`) and `NOTICE.md` (§4(b) statement of changes — container re-expression, the two bit-exact rewrites, the non-bit-exact transposed-convolution rewrite, no quantization). |
 
 ### transformers (model implementation)
 

@@ -24,8 +24,15 @@ uv run --group siglip2 python -m siglip2.export
 uv run --group siglip2 python -m siglip2.export --verify              # eager equivalence vs the unpatched model
 uv run --group siglip2-preprocess python -m siglip2.export --real-images
 uv run --group siglip2-preprocess python -m siglip2.preprocess        # preprocessing parity fixture
-uv run python dist.py --pipeline siglip2                              # distribution
+uv run python dist.py --pipeline siglip2 \
+    --model base --model so400m --out ../../models/karume-siglip2     # distribution
 ```
+
+Both sizes live in **one** repository (`karume-siglip2`, default `base` — ADR
+[0092](../../../docs/decisions/0092-distribution-repos-and-sources.md) decisions 1 and 8), so the
+distribution command names both models and the output directory: the driver only derives a
+directory name when a single model is built. The first `--model` becomes the manifest's
+`defaultModel`.
 
 `transformers` is pinned with `==` (the patch layer replaces class attributes of the modeling
 code); the group is declared in [`../pyproject.toml`](../pyproject.toml).

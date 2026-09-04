@@ -39,10 +39,10 @@ MUST: lucida の `lucida-m35-comfy.safetensors` は**対象外**（`hf download`
 書いている実験枝の重みで、グラフ 1 本の配布形では再現できない ②そのために配布形の前処理を
 分岐させると、全モデルが 2 通りの前処理を持つ設計になる — ので**受け入れない**。
 
-**既定は 1024²**。本家の推論解像度（同梱 `handler.py` の General-HR）は 2048² だが、
-2048² は ①conv2d の dispatch 上限（docs/limitations.md の n タイル 65,536）に decoder の
-1×1 conv が当たる ②中間テンソルが `[1, 192, 2048, 2048]` = 3.22GB になる、の 2 点で
-karume 側の別工事が要る（export 段は 2048² でも通る — 落ちるとすれば実行段）。
+**既定は 1024²**。本家の推論解像度（同梱 `handler.py` の General-HR）は 2048² だが、2048² は
+最大の中間テンソルが `[1, 240, 2048, 2048]`（decoder の cat 出力）= 4.03GB になるので karume 側の
+別工事が要る（export 段は 2048² でも通る — 落ちるとすれば実行段）。制約の正本は
+docs/limitations.md の「BiRefNet 系の配布形は 1024² だけ」節。
 
 `--resolution` は **64 の倍数**だけを受ける: 本体側の `PatchMerging` が各段で偶数 H/W を
 要求し（S/4・S/8・S/16 が偶数 = S%32）、`mul_scl_ipt='cat'` の半解像度枝が同じ要求を

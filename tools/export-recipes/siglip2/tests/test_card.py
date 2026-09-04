@@ -16,7 +16,11 @@ from typing import Any
 
 import pytest
 
-from siglip2.card import SIGLIP2_SUPPORTED_PIPELINE, render_siglip2_model_card
+from siglip2.card import (
+    SIGLIP2_MAP_HEAD_DIFF,
+    SIGLIP2_SUPPORTED_PIPELINE,
+    render_siglip2_model_card,
+)
 
 #: 使い方スニペットに綴られるリポ ID（組み立て先のディレクトリ名から dist が渡す）。
 REPO = "hdae/fake-repo"
@@ -80,6 +84,20 @@ class TestSiglip2CardGate:
             manifest, REPO
         )
         assert manifest == before
+
+
+class TestSiglip2LegalPointers:
+    """リポ直下の法的テキスト（ADR 0092 決定 7）へカード本文から辿れること。"""
+
+    def test_it_points_at_the_bundled_license_and_notice(self) -> None:
+        card = render_siglip2_model_card(_siglip2_manifest(), REPO)
+        assert "a verbatim copy is in `LICENSE.md`" in card
+        assert "also listed in `NOTICE.md`, per Apache 2.0 §4(b)" in card
+
+    def test_it_reports_the_measured_map_head_difference(self) -> None:
+        """帰属節が名乗る差は実測の綴り 1 つきり（正本は `siglip2.patch`）。"""
+        card = render_siglip2_model_card(_siglip2_manifest(), REPO)
+        assert SIGLIP2_MAP_HEAD_DIFF in card
 
 
 class TestSiglip2EntryPoint:

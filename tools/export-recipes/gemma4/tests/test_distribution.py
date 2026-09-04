@@ -22,6 +22,7 @@ import pytest
 from ir_fixtures import ir_container
 from shard_series import placed_paths, replace_component, write_component
 
+from _shared.licenses import APACHE_LICENSE_2_0_PATH
 from gemma4 import distribution as gemma4_distribution
 from gemma4.card import GEMMA4_UPSTREAM, render_gemma4_model_card
 from gemma4.distribution import (
@@ -611,12 +612,18 @@ class TestGemma4Card:
 
 
 class TestGemma4LegalText:
-    def test_it_ships_the_license_copy_and_the_modification_notice(self, gemma4_assembled) -> None:
-        """Apache 2.0 §4(a) のライセンスのコピーと §4(b) の改変告知。"""
+    def test_it_ships_the_license_text_byte_identical(self, gemma4_assembled) -> None:
+        """§4(a) — 提供するのは**このライセンスのコピー**（要約でも整形でもない）。
+
+        原本は `_shared/licenses/apache_license_2_0.txt`。組み立ての経路のどこかで整形や
+        改行変換が入ると 1 バイト動くが、散文としては妥当なままなので他の門は素通りする。
+        """
         out_dir, _ = gemma4_assembled
-        license_text = (out_dir / "LICENSE.md").read_text(encoding="utf-8")
-        assert "Apache License" in license_text
-        assert "Version 2.0, January 2004" in license_text
+        assert (out_dir / "LICENSE.md").read_bytes() == APACHE_LICENSE_2_0_PATH.read_bytes()
+
+    def test_it_ships_the_modification_notice(self, gemma4_assembled) -> None:
+        """Apache 2.0 §4(b) の改変告知。"""
+        out_dir, _ = gemma4_assembled
         notice = (out_dir / "NOTICE.md").read_text(encoding="utf-8")
         assert "gemma-4-E2B-it" in notice
         assert "int4" in notice

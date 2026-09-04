@@ -513,7 +513,8 @@ def verify_patches(model_dir: Path) -> list[dict[str, Any]]:
        1 対 1 で対応するので差は 0 でなければならず、外れたらここで落とす。
     2. MAP head の q/k/v 明示化まで → **maxdiff を報告**。`nn.MultiheadAttention` は q にだけ
        1/√d を掛けるのに対し SDPA は q と k に対称に割るのでビット一致にはならない
-       （実測 7.75e-07〜2.38e-06 / ベクトルの L2 ノルムは 12.7〜13.1）。
+       （実測幅の綴りは `siglip2.measurements.MAP_HEAD_MAXDIFF` / ベクトルの L2 ノルムは
+       12.7〜13.1）。
 
     MUST: 順序は「**全ケースの参照値を確定** → 1 → 2」。パッチはクラス属性のプロセス全域
     差し替えなので、段ごとに参照を採り直すと 2 段目の参照がパッチ後の値になる（恒真化）。

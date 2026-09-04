@@ -29,6 +29,8 @@ from karume.modelcard import (
     require_pipeline,
 )
 
+from .measurements import map_head_diff_text
+
 #: このテンプレートが説明できるパイプライン契約（ADR 0041 §2 — モデル単位）。
 SIGLIP2_SUPPORTED_PIPELINE = "siglip2/1"
 
@@ -52,9 +54,14 @@ SIGLIP2_UPSTREAM: Mapping[str, str] = {
 
 SIGLIP2_LICENSE = "apache-2.0"
 
-#: MAP head の差し替え（`siglip2.patch` の段 ③）が持ち込む差の実測幅。**ビット同一では
-#: ない**ので帰属節が明示する（`siglip2/export.py --verify` が 2 系列とも毎回実測する値）。
-SIGLIP2_MAP_HEAD_DIFF = "1.1e-6 to 2.9e-6"
+#: 原文の在処（配布リポ直下の `LICENSE.md` と同じテキスト — Apache 2.0 §4(a)）。
+SIGLIP2_LICENSE_TEXT_LINK = "https://www.apache.org/licenses/LICENSE-2.0"
+
+#: MAP head の差し替え（`siglip2.patch` の段 ③）が持ち込む差の実測幅を本文の綴りへ。
+#: **ビット同一ではない**ので帰属節が明示する（`siglip2/export.py --verify` が 2 系列とも
+#: 毎回実測する値）。数も書式も持たない — 正本は
+#: {@link siglip2.measurements.map_head_diff_text}。
+SIGLIP2_MAP_HEAD_DIFF = map_head_diff_text()
 
 
 def _siglip2_metadata(manifest: Mapping[str, Any]) -> CardMetadata:
@@ -119,10 +126,12 @@ def _siglip2_base_weights(manifest: Mapping[str, Any]) -> list[str]:
         repo = SIGLIP2_UPSTREAM[name]
         lines.append(
             f"- **`{name}`**: [{repo}](https://huggingface.co/{repo}), licensed"
-            f" **{SIGLIP2_LICENSE}** (as of retrieval)."
+            f" **{SIGLIP2_LICENSE}** (as of retrieval;"
+            f" [full text]({SIGLIP2_LICENSE_TEXT_LINK}) — a verbatim copy is in `LICENSE.md`)."
         )
     lines += [
-        "- **Changes made here**: conversion into the Karume container format, vision tower only.",
+        "- **Changes made here** (also listed in `NOTICE.md`, per Apache 2.0 §4(b)): conversion"
+        " into the Karume container format, vision tower only.",
         "  No retraining, no fine-tuning and **no quantization** — the weights are the source",
         "  checkpoint's own f32 values. Two rewrites were needed to export the graph: the patch",
         "  embedding's padding and the position embedding lookup were folded into equivalent",

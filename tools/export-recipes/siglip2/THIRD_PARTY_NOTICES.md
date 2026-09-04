@@ -18,8 +18,11 @@ questions it has to answer.
   and [google/siglip2-so400m-patch14-384](https://huggingface.co/google/siglip2-so400m-patch14-384).
   Only the vision tower is exported and distributed; the text tower is not.
 - **Model implementation** — the `transformers` package (`Siglip*` classes), pinned
-  `transformers==5.14.1`. `patch.py` replaces class attributes and self-reports that its q/k/v
-  split follows `nn.MultiheadAttention`'s `_in_projection_packed` verbatim; nothing is copied.
+  `transformers==5.14.1`. `patch.py` replaces class attributes; nothing is copied.
+- **Packed-projection split** — PyTorch, not transformers. `patch.py` self-reports that the order
+  in which it splits `nn.MultiheadAttention`'s packed `in_proj_weight` into q / k / v follows
+  `torch.nn.functional._in_projection_packed` verbatim. `nn.MultiheadAttention` and that helper
+  are PyTorch's, so the attribution belongs to PyTorch.
 - **Preprocessing reference** — `preprocess.py` treats `AutoImageProcessor` as the source of truth
   and generates parity fixtures from it rather than copying its code.
 
@@ -30,22 +33,33 @@ published.
 
 ### google/siglip2-base-patch16-224 and google/siglip2-so400m-patch14-384
 
-| Item                     | Value                                                                                                                 |
-| ------------------------ | --------------------------------------------------------------------------------------------------------------------- |
-| Upstream repository      | <https://huggingface.co/google/siglip2-base-patch16-224> / <https://huggingface.co/google/siglip2-so400m-patch14-384> |
-| Revision used            | Unverified                                                                                                            |
-| Form of copy             | Loaded, not copied. The vision tower is re-distributed in converted storage form.                                     |
-| Code license             | n/a (weights only)                                                                                                    |
-| Weights license          | `card.py` records `apache-2.0` (checked on the model page, 2026-08-13). Unverified against the revision used.         |
-| Attribution requirements | Unverified                                                                                                            |
+| Item                     | Value                                                                                                                                                                                                                                                                                                |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Upstream repository      | <https://huggingface.co/google/siglip2-base-patch16-224> / <https://huggingface.co/google/siglip2-so400m-patch14-384>                                                                                                                                                                                |
+| Revision used            | Unverified                                                                                                                                                                                                                                                                                           |
+| Form of copy             | Loaded, not copied. The vision tower is re-distributed in converted storage form.                                                                                                                                                                                                                    |
+| Code license             | n/a (weights only)                                                                                                                                                                                                                                                                                   |
+| Weights license          | `card.py` records `apache-2.0` (checked on the model page, 2026-08-13). Unverified against the revision used.                                                                                                                                                                                        |
+| Attribution requirements | Apache 2.0 §4: the distribution bundles `LICENSE.md` (verbatim `../_shared/licenses/apache_license_2_0.txt`) and `NOTICE.md` (§4(b) statement of changes — vision-tower extraction, container re-expression, the two bit-exact shape rewrites, the non-bit-exact MAP head rewrite, no quantization). |
 
 ### transformers (model implementation)
 
-| Item                     | Value                                                                                                                 |
-| ------------------------ | --------------------------------------------------------------------------------------------------------------------- |
-| Upstream repository      | <https://github.com/huggingface/transformers>                                                                         |
-| Revision used            | `transformers==5.14.1` (pinned in `pyproject.toml`)                                                                   |
-| Form of copy             | Monkeypatch of imported classes; `patch.py` follows `_in_projection_packed` verbatim for the packed-projection split. |
-| Code license             | Unverified                                                                                                            |
-| Weights license          | n/a                                                                                                                   |
-| Attribution requirements | Unverified                                                                                                            |
+| Item                     | Value                                               |
+| ------------------------ | --------------------------------------------------- |
+| Upstream repository      | <https://github.com/huggingface/transformers>       |
+| Revision used            | `transformers==5.14.1` (pinned in `pyproject.toml`) |
+| Form of copy             | Monkeypatch of imported classes. Nothing is copied. |
+| Code license             | Unverified                                          |
+| Weights license          | n/a                                                 |
+| Attribution requirements | Unverified                                          |
+
+### PyTorch (packed-projection split)
+
+| Item                     | Value                                                                                            |
+| ------------------------ | ------------------------------------------------------------------------------------------------ |
+| Upstream repository      | <https://github.com/pytorch/pytorch>                                                             |
+| Revision used            | The `torch` version resolved by `uv.lock` (`torch>=2.13.0`, a base dependency of the core).      |
+| Form of copy             | `patch.py` follows `torch.nn.functional._in_projection_packed`'s q / k / v split order verbatim. |
+| Code license             | Unverified                                                                                       |
+| Weights license          | n/a                                                                                              |
+| Attribution requirements | Unverified                                                                                       |

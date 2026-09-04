@@ -8,9 +8,12 @@
 の docstring）。実行に要る資産もそれ 1 本で、tokenizer も表も無い（`assets` は空）。格納
 dtype は f32 の 1 系列だけなので quant 席も 1 つ。
 
-**1 リポ 1 モデル**（base と so400m は解像度も hidden も違う別物で、同居させると利用者が
-何も指定しなかったときに引く既定が寸法ごと変わる）。ファミリー組み立ての機構は core の共有部が
-持ったままだが、既定の出力先は `karume-siglip2-<モデル名>` の単一モデル形。
+**1 リポ 2 モデル**（`karume-siglip2` に base と so400m が同居・既定は base — ADR 0092
+決定 1 の「家族 1 リポ」と決定 8）。旧「1 リポ 1 モデル」制約は撤回した: 寸法も hidden も
+違うのは事実だが、同居しても利用者が引くのは `defaultModel` 1 つで、寸法は
+`pipelineConfig` がモデルごとに宣言する（読み手はモデルを選んだ時点で寸法を知る）。
+組み立ては `--model base --model so400m --out <リポ>` の 2 モデル 1 周で、**最初の
+`--model` が `defaultModel`** になる（`karume.dist.main`）。
 
 `pipelineConfig` の数は**2 つの独立した出どころ**から来る: 前処理の定数は上流の
 `preprocessor_config.json`、`hiddenDim` は焼かれたグラフの出力宣言。どちらも写経しない
@@ -30,6 +33,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from _shared.licenses import apache_license_2_0
 from _shared.paths import INPUTS_ROOT
 from karume.dist import (
     Artifact,
@@ -47,18 +51,19 @@ from karume.dist import (
     preprocessor_int,
 )
 
-from .card import SIGLIP2_UPSTREAM, render_siglip2_model_card
+from .card import SIGLIP2_MAP_HEAD_DIFF, SIGLIP2_UPSTREAM, render_siglip2_model_card
 
 #: パイプライン契約（ADR 0041 §2 — モデル単位）。TS 側の受理集合は
 #: `SIGLIP2_PIPELINE_NAME` / `SIGLIP2_PIPELINE_MAJOR`。
 SIGLIP2_PIPELINE = "siglip2/1"
 
-#: 既定のモデル名（= 既定のリポ名 `karume-siglip2-base` の末尾）。綴りの受理集合は帰属表
+#: 既定のモデル名（`--model` を省いた組み立てが入れるモデル）。綴りの受理集合は帰属表
 #: （`siglip2.card.SIGLIP2_UPSTREAM`）が持つ。
 SIGLIP2_DEFAULT_MODEL = "base"
 
-#: 系列名とリポ名の接頭辞（`karume-siglip2-<モデル名>`）。
-SIGLIP2_PREFIX = "siglip2"
+#: 配布リポ名（ADR 0092 決定 2 の `karume-<family>`）。**モデル名から導かない** — 家族 1 リポ
+#: なので、どのモデルを組んでも行き先は 1 つ。
+SIGLIP2_REPO_NAME = "karume-siglip2"
 
 #: 実重みと `preprocessor_config.json` の親（`hf download google/<名前> --local-dir
 #: inputs/siglip2/<名前>` の展開先 — `siglip2.export.MODELS_ROOT` と同じ場所）。
@@ -142,9 +147,14 @@ def siglip2_checkpoint(model: str) -> str:
     return repo.split("/", 1)[1]
 
 
-def siglip2_repo_name(model: str) -> str:
-    """単一モデルの配布リポ名（`karume-` prefix はリポ名裁定 2026-08-09）。"""
-    return f"karume-{SIGLIP2_PREFIX}-{model}"
+def siglip2_repo_name(_model: str) -> str:
+    """配布リポ名（家族 1 リポなので、どのモデルでも同じ 1 つ）。
+
+    `Pipeline.repo_name` は「単一モデルを組んだときの既定の出力先」を答える席で、家族が
+    1 リポに畳まれた今はモデル名を見ない。`--model` を 2 つ渡す本番の組み立ては
+    `--out` が要る（複数モデルの行き先はドライバが導出しない — `dist.default_out_dir`）。
+    """
+    return SIGLIP2_REPO_NAME
 
 
 @dataclass(frozen=True)
@@ -327,6 +337,34 @@ def siglip2_dist_plan(series_dir: Path, model: str) -> ModelPlan:
     return siglip2_plan(siglip2_sources(series_dir, model), model)
 
 
+#: 改変告知（Apache 2.0 §4(b)）。**このリポが上流の重みへ加えた変更**を列挙する。
+#:
+#: MUST: 文面は配布形の中身と対応していること — 値としては妥当な散文なので `verify_dist` も
+#: manifest 検査も素通りし、配ってからでないと食い違いに気づけない。MAP head の実測幅は
+#: 焼き込まず、モデルカードと**同じ綴り**（{@link siglip2.card.SIGLIP2_MAP_HEAD_DIFF} —
+#: 数も書式も `siglip2.measurements` が正本）から組む。
+SIGLIP2_NOTICE_MARKDOWN = f"""# NOTICE
+
+This repository redistributes a modified form of the SigLIP2 checkpoints listed in `README.md`,
+which are licensed under the Apache License, Version 2.0 (see `LICENSE.md`). The following changes
+were made:
+
+- The **vision tower only** was extracted; the text tower was never read, so zero-shot
+  classification and image/text similarity are not possible from this repository.
+- The graph was re-expressed in the Karume container format (a safetensors file whose
+  `__metadata__` carries the graph).
+- Two rewrites were needed to export the graph and are **bit-exact**: the patch embedding's
+  string padding became its numeric equivalent, and the position-embedding row gather became a
+  direct addition.
+- The pooling (MAP) head's packed attention was rewritten with explicit q/k/v projections. That
+  is equivalent up to floating-point rounding, **not bit-exact**: measured on the pooled vector,
+  whose L2 norm is around 13, the difference is {SIGLIP2_MAP_HEAD_DIFF}.
+- **No quantization**: the stored weights are the source checkpoints' own f32 values.
+
+No retraining and no fine-tuning were performed. The original checkpoints are not distributed here.
+"""
+
+
 #: `--pipeline siglip2` の 1 行（ドライバが core の PIPELINES へ合成する）。
 PIPELINE = Pipeline(
     default_model=SIGLIP2_DEFAULT_MODEL,
@@ -336,4 +374,7 @@ PIPELINE = Pipeline(
     # 重み）ので、選ばせる軸にしない。プロファイルを分けると「so400m を base の帰属で
     # 配る」取り違えを操作者が起こせるようになる。
     card_profiles={"siglip2": render_siglip2_model_card},
+    # 上流ライセンス（Apache 2.0）の再配布条件 §4 は配布リポ 1 つに掛かるので、原文の読みも
+    # 組み立ての回数によらずここで 1 回（ADR 0092 決定 7）。
+    root_files={"LICENSE.md": apache_license_2_0(), "NOTICE.md": SIGLIP2_NOTICE_MARKDOWN},
 )

@@ -10,6 +10,9 @@
     uv run python dist.py --pipeline sbv2 --card-profile fn
     uv run python dist.py --pipeline sbv2 --card-profile jvnv \\
         --model F1 --model F2 --out ../../models/karume-sbv2-jvnv
+    uv run python dist.py --pipeline siglip2 \\
+        --model base --model so400m --out ../../models/karume-siglip2
+    uv run python dist.py --pipeline lucida                # BiRefNet_HR の派生（別リポ）
 
 置き場の既定（`--series` / `--out`）もここが渡す — リポの `outputs/series/` と `models/` は
 repo topology で、core は綴りを持たない（ADR 0065 Consequences・`karume.dist` の同 MUST）。
@@ -44,6 +47,8 @@ PIPELINES: Mapping[str, Pipeline] = {
     "irodori": irodori_distribution.PIPELINE,
     "siglip2": siglip2_distribution.PIPELINE,
     "birefnet": birefnet_distribution.PIPELINE,
+    # 派生は別リポ（ADR 0092 決定 1）— リポ直下の著作権表示が違うので Pipeline も別席。
+    "lucida": birefnet_distribution.LUCIDA_PIPELINE,
     "depth-anything": depth_anything_distribution.PIPELINE,
     "vowel-detector": vowel_detector_distribution.PIPELINE,
     "gemma4": gemma4_distribution.PIPELINE,

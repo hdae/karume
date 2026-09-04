@@ -9,11 +9,17 @@ staging/swap・検証）は `karume.dist` が持つ。ここが持つのは **Bi
 実行に要る資産もそれ 1 本で、tokenizer も表も無い（`assets` は空）。格納 dtype は f32 の
 1 系列だけなので quant 席も 1 つ — ここまでは SigLIP2 と同じ形。
 
-**1 リポ 1 モデル**（ユーザー裁定 — BiRefNet_HR と Lucida は構造が同一で重みだけが違う
-fine-tune 同士なので、まとめると「何も指定しなかったときにどちらの学習が動くか」が
-既定に隠れる）。リポ名は導出せず {@link BIREFNET_REPO_NAMES} が持つ — `karume-lucida` は
-「BiRefNet 系の 1 つ」ではなく上流が名前で売っているモデルで、綴りは命名の決定であって
-モデル名から決まらない（SBV2 のファミリー名と同じ性質）。
+**1 リポ 1 モデル**（ADR 0092 決定 1 — Lucida は BiRefNet_HR の**派生**なので別リポ）。
+リポ名は導出せず {@link BIREFNET_REPO_NAMES} が持つ — `karume-lucida` は「BiRefNet 系の
+1 つ」ではなく上流が名前で売っているモデルで、綴りは命名の決定であってモデル名から
+決まらない（SBV2 のファミリー名と同じ性質）。
+
+公開面が **2 つの Pipeline** に割れているのはこのため（anima の公式 / 追加学習と同じ形）:
+`root_files`（配布リポ直下の `LICENSE.md` / `NOTICE.md`）は Pipeline に固定で載る 1 組で、
+MIT の著作権行はリポごとに違う（HR は ZhengPeng の 1 行、Lucida は fine-tune 側と上流の
+2 行）。1 つに畳むと、どちらかのリポが**自分のものでない著作権を名乗る**か、上流の著作権
+表示を落とす — どちらも散文としては妥当なままなので `verify_dist` も manifest 検査も
+素通りし、配ってからでないと誰も気づけない。
 
 `pipelineConfig` の数の出どころは **2 つとも独立**:
 
@@ -24,7 +30,8 @@ fine-tune 同士なので、まとめると「何も指定しなかったとき�
   （{@link BIREFNET_IMAGE_MEAN}）、台本側の写し（`birefnet.export.IMAGENET_MEAN`）との一致は
   pytest が毎回突き合わせる（2 表が独立に動く形にはしない）。
 
-公開面は {@link PIPELINE} 1 つ（`karume.dist.Pipeline`）— リポの dist ドライバ
+公開面は {@link PIPELINE}（`--pipeline birefnet`）と {@link LUCIDA_PIPELINE}
+（`--pipeline lucida`）の 2 つ（`karume.dist.Pipeline`）— リポの dist ドライバ
 （`tools/export-recipes/dist.py`）がこれを core の PIPELINES へ合成する。
 """
 
@@ -35,6 +42,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from _shared.licenses import mit_license
 from karume.dist import (
     Artifact,
     DistError,
@@ -57,6 +65,9 @@ BIREFNET_PIPELINE = "birefnet/1"
 
 #: 既定のモデル名。綴りの受理集合は帰属表（`birefnet.card.BIREFNET_UPSTREAM`）が持つ。
 BIREFNET_DEFAULT_MODEL = "hr"
+
+#: 派生（`--pipeline lucida`）の唯一のモデル名。
+BIREFNET_LUCIDA_MODEL = "lucida"
 
 #: 実重みの親（`hf download <リポ> --local-dir inputs/birefnet/<名前>` の展開先 —
 #: `birefnet.export.MODELS_ROOT` と同じ場所）。系列名はこのディレクトリ名から決まる。
@@ -291,18 +302,96 @@ def birefnet_plan(sources: BirefnetSources, model: str = BIREFNET_DEFAULT_MODEL)
     )
 
 
-def birefnet_dist_plan(series_dir: Path, model: str) -> ModelPlan:
-    """`--series` の親から BiRefNet 系 1 モデルの計画を組む（CLI のディスパッチ先）。"""
+def birefnet_dist_plan(series_dir: Path, model: str, allowed: str) -> ModelPlan:
+    """`--series` の親から BiRefNet 系 1 モデルの計画を組む（CLI のディスパッチ先）。
+
+    MUST: `allowed` は**その Pipeline のリポに入ってよい唯一のモデル**（anima と同じ規律）。
+    取り違えて組むと、リポ直下の著作権表示と改変告知が中身と食い違ったまま配布形が成立する。
+    """
+    if model != allowed:
+        raise DistError(
+            f"モデル {model!r} はこの pipeline のリポに入らない（入るのは: {allowed}）— "
+            "リポ直下の著作権表示と改変告知が中身と食い違うので組み立てを止める"
+        )
     return birefnet_plan(birefnet_sources(series_dir, model), model)
 
 
-#: `--pipeline birefnet` の 1 行（ドライバが core の PIPELINES へ合成する）。
+#: MIT の著作権行（配布リポ直下の `LICENSE.md`）。上流 2 リポとも `license: mit` を名乗る
+#: 一方でライセンス**原文を同梱していない**（HF のカード frontmatter だけ）ので、原文は
+#: 共有テンプレート（`_shared.licenses.mit_license`）から組み、権利者の行をここが持つ。
+#:
+#: MUST: Lucida は 2 行（fine-tune 側と上流）。MIT の「著作権表示と許諾表示を含めること」は
+#: 派生でも上流の表示を落とせないという要求で、上流カードも「the original copyright notice
+#: is preserved」と自己申告している。
+#:
+#: NOTE: 年は上流が明示していない（どちらのリポにも `LICENSE` ファイルが無い）。ZhengPeng は
+#: BiRefNet 論文の年（2024）、egeorcun は上流カード自身が現行重みへ付けている年（2026）を
+#: 採った — リリース前の人手ライセンス確認（ADR 0065 決定 7）が最終判断を持つ。
+BIREFNET_COPYRIGHTS: Mapping[str, tuple[str, ...]] = {
+    BIREFNET_DEFAULT_MODEL: ("Copyright (c) 2024 ZhengPeng",),
+    BIREFNET_LUCIDA_MODEL: (
+        "Copyright (c) 2026 egeorcun",
+        "Copyright (c) 2024 ZhengPeng",
+    ),
+}
+
+#: 改変告知。MIT は改変告知を要求しないが、格納形を変えずコンテナだけを移した配布形である
+#: ことは利用者が最初に確かめたい事実なので、`LICENSE.md` と同じ席で 1 枚出す。
+#:
+#: MUST: 文面は配布形の中身と対応していること — 値としては妥当な散文なので `verify_dist` も
+#: manifest 検査も素通りし、配ってからでないと食い違いに気づけない。
+BIREFNET_NOTICE_TEMPLATE = """# NOTICE
+
+This repository redistributes a modified form of `{repo}`, which is licensed under
+the MIT License (see `LICENSE.md`). The following changes were made:
+
+- The graph was re-expressed in the Karume container format (a safetensors file whose
+  `__metadata__` carries the graph).
+- The upstream `forward` was rewritten layout-only and **bit-exact**: windowing, the
+  shifted-window roll, spatial padding and the patch merges became equivalent operations.
+- Two modules were rewritten in a form that is equivalent up to floating-point rounding:
+  inference-time `BatchNorm2d` became a per-channel affine, and the ASPP image-level pooling
+  became a two-stage sum.
+- **No quantization**: the stored weights are the source checkpoint's own f32 values.
+
+No retraining and no fine-tuning were performed. The original checkpoint is not distributed here.
+"""
+
+
+def birefnet_root_files(model: str) -> dict[str, str]:
+    """配布リポ直下へ入れる法的テキスト（`karume.dist.Pipeline.root_files`）。
+
+    MIT は「著作権表示と許諾表示を全ての複製に含める」ことだけを求めるので、`LICENSE.md` は
+    共有テンプレートの本文 + そのリポの著作権行（{@link BIREFNET_COPYRIGHTS}）。本文へは
+    触らない（整形した瞬間に許諾表示のコピーではなくなる）。
+    """
+    return {
+        "LICENSE.md": mit_license(BIREFNET_COPYRIGHTS[model]),
+        "NOTICE.md": BIREFNET_NOTICE_TEMPLATE.format(repo=BIREFNET_UPSTREAM[model]),
+    }
+
+
+#: `--pipeline birefnet` の 1 行（配布リポ `karume-birefnet-hr`）。
+#:
+#: MUST: 派生（`lucida`）と**別の Pipeline**にする — 理由はモジュール doc の 2 段落目。
 PIPELINE = Pipeline(
     default_model=BIREFNET_DEFAULT_MODEL,
     repo_name=birefnet_repo_name,
-    plan=birefnet_dist_plan,
+    plan=lambda series_dir, model: birefnet_dist_plan(series_dir, model, BIREFNET_DEFAULT_MODEL),
     # SigLIP2 と同じ理由で選ばせる軸にしない — 帰属（上流リポ・ライセンス・学習データ）は
     # モデル名から一意に決まる。プロファイルを分けると「Lucida を BiRefNet_HR の帰属で
     # 配る」取り違えを操作者が起こせるようになる。
     card_profiles={"birefnet": render_birefnet_model_card},
+    root_files=birefnet_root_files(BIREFNET_DEFAULT_MODEL),
+)
+
+#: `--pipeline lucida` の 1 行（配布リポ `karume-lucida` — BiRefNet_HR の第三者 fine-tune）。
+#: テンプレートは同じ（構造が同一なので配布形も同型）で、違うのは中身とリポ直下の法的
+#: テキストだけ。
+LUCIDA_PIPELINE = Pipeline(
+    default_model=BIREFNET_LUCIDA_MODEL,
+    repo_name=birefnet_repo_name,
+    plan=lambda series_dir, model: birefnet_dist_plan(series_dir, model, BIREFNET_LUCIDA_MODEL),
+    card_profiles={"birefnet": render_birefnet_model_card},
+    root_files=birefnet_root_files(BIREFNET_LUCIDA_MODEL),
 )

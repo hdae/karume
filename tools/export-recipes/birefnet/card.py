@@ -177,16 +177,18 @@ def _birefnet_base_weights(manifest: Mapping[str, Any]) -> list[str]:
         "## Base weights and attribution",
         "",
         f"- **Weights**: [{entry.repo}](https://huggingface.co/{entry.repo}), licensed"
-        f" **{BIREFNET_LICENSE}** (as of retrieval).",
+        f" **{BIREFNET_LICENSE}** (as of retrieval) — a verbatim copy of the license, carrying"
+        " the copyright notices that apply to this repository, is in `LICENSE.md`.",
         *entry.attribution,
         f"- **Architecture**: BiRefNet ([{BIREFNET_PAPER}](https://{BIREFNET_PAPER})).",
-        "- **Changes made here**: conversion into the Karume container format. No retraining, no",
-        "  fine-tuning and **no quantization** — the weights are the source checkpoint's own f32",
-        "  values. The graph is the upstream `forward` with layout-only rewrites (windowing, the",
-        "  shifted-window roll, spatial padding and the patch merges were folded into equivalent",
-        "  operations — bit-exact), plus two module rewrites that are equivalent up to",
-        "  floating-point rounding: inference-time `BatchNorm2d` became a per-channel affine, and",
-        "  the ASPP image-level pooling became a two-stage sum.",
+        "- **Changes made here** (also listed in `NOTICE.md`): conversion into the Karume",
+        "  container format. No retraining, no fine-tuning and **no quantization** — the",
+        "  weights are the source checkpoint's own f32 values. The graph is the upstream",
+        "  `forward` with layout-only rewrites (windowing, the shifted-window roll, spatial",
+        "  padding and the patch merges were folded into equivalent operations — bit-exact),",
+        "  plus two module rewrites that are equivalent up to floating-point rounding:",
+        "  inference-time `BatchNorm2d` became a per-channel affine, and the ASPP image-level",
+        "  pooling became a two-stage sum.",
     ]
 
 

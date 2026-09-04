@@ -1,5 +1,12 @@
 # Karume export recipes
 
+**This directory contains upstream-derived code and is not covered by the project's MIT license.**
+Each family here carries its own `THIRD_PARTY_NOTICES.md` recording what the recipe derives from,
+and the upstream terms recorded there govern that family. A derivative whose redistribution terms
+the project cannot vouch for — unknown training data, decensored fine-tunes — does not belong here
+at all: build it as a separate library on top of the exporter core, distributed from its own Hugging
+Face repository.
+
 Model-specific export recipes for the Karume exporter. Everything here is **repo-only**: it is never
 published to PyPI, and the wheel ([`../exporter/`](../exporter/README.md) = PyPI `karume`) contains
 none of it. The split is ADR

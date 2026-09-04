@@ -23,7 +23,12 @@ import pytest
 from ir_fixtures import ir_container
 from shard_series import placed_paths, write_component
 
-from depth_anything.card import DEPTH_ANYTHING_LICENSE, DEPTH_ANYTHING_UPSTREAM
+from _shared.licenses import APACHE_LICENSE_2_0_PATH
+from depth_anything.card import (
+    DEPTH_ANYTHING_CONVT_DIFF,
+    DEPTH_ANYTHING_LICENSE,
+    DEPTH_ANYTHING_UPSTREAM,
+)
 from depth_anything.distribution import (
     DEPTH_ANYTHING_DEFAULT_MODEL,
     DEPTH_ANYTHING_OUTPUT_PATHS,
@@ -213,6 +218,7 @@ def depth_anything_assembled(tmp_path: Path) -> tuple[Path, dict]:
         [depth_anything_plan(sources, DEPTH_ANYTHING_DEFAULT_MODEL)],
         out_dir,
         DEPTH_ANYTHING_DEFAULT_MODEL,
+        root_files=PIPELINE.root_files,
     )
     return out_dir, manifest
 
@@ -227,7 +233,10 @@ class TestDepthAnythingLayout:
     ) -> None:
         out_dir, _ = depth_anything_assembled
         expected = _in_subtree(DEPTH_ANYTHING_DEFAULT_MODEL, _placed_paths())
-        assert _present(out_dir) == sorted([*expected, MANIFEST_FILENAME])
+        # 法的テキスト 2 本（Apache 2.0 §4）は manifest が宣言しないメタ席。
+        assert _present(out_dir) == sorted(
+            [*expected, MANIFEST_FILENAME, "LICENSE.md", "NOTICE.md"]
+        )
 
     def test_it_never_carries_the_io_fixtures(self, depth_anything_assembled) -> None:
         out_dir, _ = depth_anything_assembled
@@ -516,12 +525,41 @@ class TestDepthAnythingModelCard:
         card = (self._run(tmp_path, monkeypatch) / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
         assert "# Depth Anything V2 Small — Karume" in card
 
+    def test_it_points_at_the_bundled_license_and_notice(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        card = (self._run(tmp_path, monkeypatch) / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
+        assert "a verbatim copy is in `LICENSE.md`" in card
+        assert "also listed in `NOTICE.md`, per Apache 2.0 §4(b)" in card
+
+
+class TestDepthAnythingLegalText:
+    """配布リポ直下の Apache 2.0 原文と改変告知（ADR 0092 決定 7）。"""
+
+    def test_it_ships_the_license_text_byte_identical(self, depth_anything_assembled) -> None:
+        """§4(a) — 提供するのは**このライセンスのコピー**（要約でも整形でもない）。
+
+        原本は `_shared/licenses/apache_license_2_0.txt`。組み立ての経路のどこかで整形や
+        改行変換が入ると 1 バイト動くが、散文としては妥当なままなので他の門は素通りする。
+        """
+        out_dir, _ = depth_anything_assembled
+        assert (out_dir / "LICENSE.md").read_bytes() == APACHE_LICENSE_2_0_PATH.read_bytes()
+
+    def test_it_ships_the_modification_notice(self, depth_anything_assembled) -> None:
+        out_dir, _ = depth_anything_assembled
+        notice = (out_dir / "NOTICE.md").read_text(encoding="utf-8")
+        # 非ビット同一の書き換えと、その実測幅がカードと同じ数で出る。
+        assert "pixel shuffle" in notice
+        assert DEPTH_ANYTHING_CONVT_DIFF in notice
+        assert "No quantization" in notice
+
 
 class TestDepthAnythingCli:
-    def test_the_default_output_directory_follows_the_single_model(self) -> None:
+    def test_the_default_output_directory_is_the_generation_repository(self) -> None:
+        """リポは世代 1 つ（ADR 0092 決定 2）— サイズは綴りに出ない。"""
         assert (
             default_out_dir(PIPELINE, [DEPTH_ANYTHING_DEFAULT_MODEL]).name
-            == "karume-depth-anything-v2-small"
+            == "karume-depth-anything-v2"
         )
 
     def test_one_attribution_profile_needs_no_choice(self) -> None:

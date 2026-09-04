@@ -370,10 +370,11 @@ dtype and manifest all correct, and shows up only as wrong values):
   `pipelineConfig` parser accepts
 
 Apache 2.0 §4 applies to the redistribution, so the repository root also carries `LICENSE.md` (a
-verbatim copy of `apache_license_2_0.txt`) and `NOTICE.md` (the list of modifications). Both are
+verbatim copy of `../_shared/licenses/apache_license_2_0.txt`) and `NOTICE.md` (the list of modifications). Both are
 `karume.dist`'s legal-text seat, not manifest-declared assets.
 
-Loading it back is `Gemma4Pipeline.fromPretrained` (`packages/models/src/gemma/pipeline.ts`). There
-is **no pin constant** (`*_CURRENT`) yet: ADR
-[0073](../../../docs/decisions/0073-models-source-pin.md) decision 1 gives one only to families
-with a published repository, so the fetch source is spelled out by the caller until then.
+Loading it back is `Gemma4Pipeline.fromPretrained` (`packages/models/src/gemma/pipeline.ts`). The
+pinned fetch source for the published repository is `GEMMA4_SOURCES["gemma4"]`
+(`@karume/models/gemma` — ADR [0073](../../../docs/decisions/0073-models-source-pin.md) /
+[0092](../../../docs/decisions/0092-distribution-repos-and-sources.md)); a locally built
+distribution is spelled out by the caller, since `fromPretrained` has no default source.

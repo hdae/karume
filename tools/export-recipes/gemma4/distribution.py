@@ -46,6 +46,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from _shared.licenses import apache_license_2_0
 from _shared.paths import INPUTS_ROOT
 from karume.dist import (
     Artifact,
@@ -775,10 +776,6 @@ def gemma4_dist_plan(series_dir: Path, model: str) -> ModelPlan:
     return gemma4_plan(gemma4_sources(series_dir, model), model)
 
 
-#: 上流ライセンスの原文（Apache License 2.0 の逐語コピー）。`Path(__file__)` 基準で引くのは、
-#: cwd にも系列の置き場にも依存しないため（anima の `LICENSE_SOURCE_PATH` と同じ規律）。
-GEMMA4_LICENSE_PATH = Path(__file__).parent / "apache_license_2_0.txt"
-
 #: 改変告知（Apache 2.0 §4(b)）。**このリポが上流の重みへ加えた変更**を列挙する。
 #:
 #: MUST: 文面は配布形の中身と対応していること — 値としては妥当な散文なので `verify_dist` も
@@ -807,13 +804,13 @@ def gemma4_root_files() -> dict[str, str]:
 
     上流は Apache License 2.0（`gemma4/README.md` 冒頭のライセンス方針 — 2026-09-01 の裁定）で、
     §4(a) は「派生物の受領者にライセンスのコピーを渡す」ことを、§4(b) は「改変したファイルに
-    改変した旨の目立つ告知を付ける」ことを求める。ライセンス原文は recipe に置いた現物
-    （{@link GEMMA4_LICENSE_PATH}）を**逐語で**読む — 整形や差し替えをするとコピーではなくなる。
-    上流に `NOTICE` ファイルは無い（§4(d) は掛からない）ので、`NOTICE.md` は §4(b) の改変告知
-    だけを持つ。
+    改変した旨の目立つ告知を付ける」ことを求める。ライセンス原文は family で共有する現物
+    （{@link _shared.licenses.apache_license_2_0}）を**逐語で**読む — 整形や差し替えをすると
+    コピーではなくなる。上流に `NOTICE` ファイルは無い（§4(d) は掛からない）ので、`NOTICE.md`
+    は §4(b) の改変告知だけを持つ。
     """
     return {
-        "LICENSE.md": GEMMA4_LICENSE_PATH.read_text(encoding="utf-8"),
+        "LICENSE.md": apache_license_2_0(),
         "NOTICE.md": GEMMA4_NOTICE_MARKDOWN,
     }
 

@@ -17,6 +17,7 @@ import dist
 from _shared.paths import DIST_ROOT, SERIES_ROOT
 from anima.distribution import EXTRA_PIPELINE as ANIMA_EXTRA_PIPELINE
 from anima.distribution import OFFICIAL_PIPELINE as ANIMA_OFFICIAL_PIPELINE
+from birefnet.distribution import LUCIDA_PIPELINE
 from birefnet.distribution import PIPELINE as BIREFNET_PIPELINE
 from depth_anything.distribution import PIPELINE as DEPTH_ANYTHING_PIPELINE
 from gemma4.distribution import PIPELINE as GEMMA4_PIPELINE
@@ -36,6 +37,7 @@ RECIPE_PIPELINES = {
     "irodori": IRODORI_PIPELINE,
     "siglip2": SIGLIP2_PIPELINE,
     "birefnet": BIREFNET_PIPELINE,
+    "lucida": LUCIDA_PIPELINE,
     "depth-anything": DEPTH_ANYTHING_PIPELINE,
     "vowel-detector": VOWEL_DETECTOR_PIPELINE,
     "gemma4": GEMMA4_PIPELINE,
@@ -80,6 +82,43 @@ class TestRegistry:
         assert official is not extra
         assert official.root_files["NOTICE.md"] != extra.root_files["NOTICE.md"]
 
+    def test_the_two_birefnet_repositories_stay_separate_pipelines(self) -> None:
+        """BiRefNet HR と派生の Lucida も**別の席**（ADR 0092 決定 1）。
+
+        MIT の著作権行はリポごとに違う（Lucida は fine-tune 側と上流の 2 行）ので、1 つに
+        畳むとどちらかのリポが自分のものでない著作権を名乗るか、上流の表示を落とす。
+        """
+        base = dist.PIPELINES["birefnet"]
+        derived = dist.PIPELINES["lucida"]
+
+        assert base is not derived
+        assert base.root_files["LICENSE.md"] != derived.root_files["LICENSE.md"]
+        assert base.root_files["NOTICE.md"] != derived.root_files["NOTICE.md"]
+
+    def test_every_distribution_pipeline_ships_its_legal_text(self) -> None:
+        """配布リポ直下の `LICENSE.md` / `NOTICE.md`（ADR 0092 決定 7）。
+
+        既公開の irodori（MIT）/ sbv2-jvnv（CC BY-SA）と、波から外れた vowel-detector は
+        まだ同梱していない — 次に上げ直す回で是正する（backlog）ので、ここは**今揃っている
+        席**を名指しで固定する。名指しにするのは、新しい family が黙って同梱なしで生えるのを
+        「表に載せ忘れた」形で見えるようにするため。
+        """
+        expected = {
+            "anima",
+            "anima-extra",
+            "gemma4",
+            "siglip2",
+            "birefnet",
+            "lucida",
+            "depth-anything",
+        }
+        carried = {
+            name
+            for name, spec in dist.PIPELINES.items()
+            if set(spec.root_files) == {"LICENSE.md", "NOTICE.md"}
+        }
+        assert carried == expected
+
     def test_every_pipeline_renders_its_own_model_card(self) -> None:
         """カードは pipeline ごとのテンプレート — 描き手が他 pipeline の manifest を拒む。"""
         for name, spec in dist.PIPELINES.items():
@@ -98,7 +137,7 @@ class TestDefaultPlaces:
 
     def test_the_default_output_directory_follows_the_single_model(self) -> None:
         assert dist.default_out_dir(SBV2_PIPELINE, ["jvnv-F1"]).parent == DIST_ROOT
-        assert dist.default_out_dir(SIGLIP2_PIPELINE, ["base"]).name == "karume-siglip2-base"
+        assert dist.default_out_dir(SIGLIP2_PIPELINE, ["base"]).name == "karume-siglip2"
 
     def test_it_refuses_to_invent_a_family_repository_name(self) -> None:
         """ファミリーリポの名前（例 `karume-sbv2-jvnv`）はモデル名の並びからは決まらない。"""

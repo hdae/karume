@@ -28,7 +28,8 @@ transformers のクラス属性と、モデル内の `nn.ConvTranspose2d` イン
      へ並べ替えた 1×1 conv と pixel shuffle の合成に**厳密に**一致する（添字の同値は
      `depth_anything/tests/test_patch.py` が整数値データの `torch.equal` で固定する）。
      f32 の実データでは Cin 方向の**縮約順序**が ATen の転置畳み込みと違うぶん最下位ビットが
-     動く（実測 max 1.4e-06 / 値の RMS ≈ 1.0）。
+     動く（実測の上限は {@link depth_anything.measurements.CONVT_MAXDIFF} が唯一の綴りで
+     持つ — **torch を読まない側**に置いてあり、配布側がそこから引く。値の RMS ≈ 1.0）。
 
 入口は 2 群に対応して分かれている（{@link apply_layout_patches} / {@link apply_module_patches}
 ・両方当てるのが {@link apply}）— 一括でしか当てられないと ①② のビット同一を単体で

@@ -9,8 +9,10 @@ staging/swap・検証）は `karume.dist` が持つ。ここが持つのは **De
 1 本しか出さない）。実行に要る資産もそれ 1 本で、tokenizer も表も無い（`assets` は空）。
 格納 dtype は f32 の 1 系列だけなので quant 席も 1 つ — ここまでは SigLIP2 / BiRefNet と同じ形。
 
-**1 リポ 1 モデル = 1 サイズ**（`karume-depth-anything-v2-<サイズ>`）。サイズは重みも
-埋め込み幅も違う別物で、同居させると利用者が何も指定しなかったときに引く既定が丸ごと変わる。
+**リポは世代 1 つ**（`karume-depth-anything-v2` — ADR 0092 決定 2 の
+`karume-<family>-<世代>`）。世代を綴りへ入れるのは V3 が別アーキで単一画像 depth の後継では
+ないためで、サイズは世代の中の**モデル軸**（同じ器に並ぶ）。今は配れるサイズが 1 つしか
+無い（下の MUST）ので、実際に並ぶのも 1 つ。
 
 MUST: 配れるのは**帰属表（{@link depth_anything.card.DEPTH_ANYTHING_UPSTREAM}）に載っている
 サイズだけ**。上流で Apache-2.0 なのは Small のみで、Base / Large は CC BY-NC 4.0（同表の MUST
@@ -35,6 +37,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from _shared.licenses import apache_license_2_0
 from _shared.paths import INPUTS_ROOT
 from karume.dist import (
     Artifact,
@@ -52,21 +55,26 @@ from karume.dist import (
     preprocessor_int,
 )
 
-from .card import DEPTH_ANYTHING_UPSTREAM, render_depth_anything_model_card
+from .card import (
+    DEPTH_ANYTHING_CONVT_DIFF,
+    DEPTH_ANYTHING_UPSTREAM,
+    render_depth_anything_model_card,
+)
 
 #: パイプライン契約（ADR 0041 §2 — モデル単位）。TS 側の受理集合は
 #: `DEPTH_ANYTHING_PIPELINE_NAME` / `DEPTH_ANYTHING_PIPELINE_MAJOR`。
 DEPTH_ANYTHING_PIPELINE = "depth-anything/1"
 
-#: 既定のモデル名（= 既定のリポ名 `karume-depth-anything-v2-small` の末尾）。綴りの受理集合は
-#: 帰属表（`depth_anything.card.DEPTH_ANYTHING_UPSTREAM`）が持つ。
+#: 既定のモデル名（`--model` を省いた組み立てが入れるサイズ）。綴りの受理集合は帰属表
+#: （`depth_anything.card.DEPTH_ANYTHING_UPSTREAM`）が持つ。
 DEPTH_ANYTHING_DEFAULT_MODEL = "small"
 
-#: リポ名の接頭辞（`karume-depth-anything-v2-<サイズ>`）。系列名は別（上流リポ名の小文字化 —
+#: 配布リポ名（ADR 0092 決定 2）。系列名は別（上流リポ名の小文字化 —
 #: {@link depth_anything_series_name}）。V2 まで綴りへ入れるのは、
 #: V3 が別アーキ（多視点 + カメラ姿勢の DualDPT）で単一画像 depth の後継ではないため —
-#: 世代を落とすと「新しい方が良い」と読める並びになる。
-DEPTH_ANYTHING_PREFIX = "depth-anything-v2"
+#: 世代を落とすと「新しい方が良い」と読める並びになる。**サイズは綴りに入れない** —
+#: サイズは世代リポの中のモデル軸で、リポ名へ出すと 2 つ目が生えた日にリポが割れる。
+DEPTH_ANYTHING_REPO_NAME = "karume-depth-anything-v2"
 
 #: 実重みと `preprocessor_config.json` の親（`hf download depth-anything/<名前> --local-dir
 #: inputs/depth-anything/<名前>` の展開先 — `depth_anything.export.MODELS_ROOT` と同じ場所）。
@@ -164,9 +172,9 @@ def depth_anything_series_name(model: str) -> str:
     return depth_anything_checkpoint(model).lower()
 
 
-def depth_anything_repo_name(model: str) -> str:
-    """単一モデルの配布リポ名（`karume-` prefix はリポ名裁定 2026-08-09）。"""
-    return f"karume-{DEPTH_ANYTHING_PREFIX}-{model}"
+def depth_anything_repo_name(_model: str) -> str:
+    """配布リポ名（世代 1 リポなので、どのサイズでも同じ 1 つ — ADR 0092 決定 2）。"""
+    return DEPTH_ANYTHING_REPO_NAME
 
 
 @dataclass(frozen=True)
@@ -347,6 +355,34 @@ def depth_anything_dist_plan(series_dir: Path, model: str) -> ModelPlan:
     return depth_anything_plan(depth_anything_sources(series_dir, model), model)
 
 
+#: 改変告知（Apache 2.0 §4(b)）。**このリポが上流の重みへ加えた変更**を列挙する。
+#:
+#: MUST: 文面は配布形の中身と対応していること — 値としては妥当な散文なので `verify_dist` も
+#: manifest 検査も素通りし、配ってからでないと食い違いに気づけない。ConvTranspose 差し替えの
+#: 実測幅は焼き込まずカードの綴り（{@link depth_anything.card.DEPTH_ANYTHING_CONVT_DIFF}）を
+#: 引く（本文とカードで別の数を名乗らない）。
+DEPTH_ANYTHING_NOTICE_MARKDOWN = f"""# NOTICE
+
+This repository redistributes a modified form of the Depth Anything V2 checkpoint listed in
+`README.md`, which is licensed under the Apache License, Version 2.0 (see `LICENSE.md`). The
+following changes were made:
+
+- The graph was re-expressed in the Karume container format (a safetensors file whose
+  `__metadata__` carries the graph).
+- Two rewrites were needed to export the graph and are **bit-exact**: the last fusion stage's
+  upsample takes an explicit output size instead of a scale factor, and the position-embedding
+  interpolation is pinned to the pretraining resolution where it is the identity.
+- The DPT reassemble stage's transposed convolutions were **rewritten as a 1×1 convolution
+  followed by a pixel shuffle**, which reorders the weights and the summation. They have
+  `kernel == stride`, so it is the same sum in a different order — equivalent up to
+  floating-point rounding, **not bit-exact**: the measured maximum difference is
+  {DEPTH_ANYTHING_CONVT_DIFF} on depth values whose RMS is around 1.
+- **No quantization**: the stored weights are the source checkpoint's own f32 values.
+
+No retraining and no fine-tuning were performed. The original checkpoint is not distributed here.
+"""
+
+
 #: `--pipeline depth-anything` の 1 行（ドライバが core の PIPELINES へ合成する）。
 PIPELINE = Pipeline(
     default_model=DEPTH_ANYTHING_DEFAULT_MODEL,
@@ -356,4 +392,10 @@ PIPELINE = Pipeline(
     # モデル名から一意に決まる。プロファイルを分けると「Base を Small の帰属で配る」
     # 取り違えを操作者が起こせるようになる（しかも Base は CC BY-NC 4.0）。
     card_profiles={"depth-anything": render_depth_anything_model_card},
+    # 上流ライセンス（Apache 2.0）の再配布条件 §4 は配布リポ 1 つに掛かるので、原文の読みも
+    # 組み立ての回数によらずここで 1 回（ADR 0092 決定 7）。
+    root_files={
+        "LICENSE.md": apache_license_2_0(),
+        "NOTICE.md": DEPTH_ANYTHING_NOTICE_MARKDOWN,
+    },
 )

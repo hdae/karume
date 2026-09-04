@@ -22,15 +22,19 @@ import pytest
 from ir_fixtures import ir_container
 from shard_series import placed_paths, write_component
 
+from _shared.licenses import mit_license
 from birefnet.card import BIREFNET_UPSTREAM
 from birefnet.distribution import (
+    BIREFNET_COPYRIGHTS,
     BIREFNET_DEFAULT_MODEL,
     BIREFNET_IMAGE_MEAN,
     BIREFNET_IMAGE_STD,
+    BIREFNET_LUCIDA_MODEL,
     BIREFNET_OUTPUT_PATHS,
     BIREFNET_RESOLUTION,
     BIREFNET_ROLE,
     BIREFNET_WEIGHTS,
+    LUCIDA_PIPELINE,
     PIPELINE,
     BirefnetSources,
     birefnet_plan,
@@ -175,12 +179,19 @@ def _build_birefnet_sources(
     return sources
 
 
+#: モデル名 → その配布リポを組む pipeline の CLI 名（1 リポ 1 Pipeline — ADR 0092 決定 1）。
+_PIPELINE_NAMES = {BIREFNET_DEFAULT_MODEL: "birefnet", BIREFNET_LUCIDA_MODEL: "lucida"}
+
+
 @pytest.fixture
 def birefnet_assembled(tmp_path: Path) -> tuple[Path, dict]:
     sources = _build_birefnet_sources(tmp_path)
     out_dir = tmp_path / "models" / birefnet_repo_name(BIREFNET_DEFAULT_MODEL)
     manifest = assemble_family(
-        [birefnet_plan(sources, BIREFNET_DEFAULT_MODEL)], out_dir, BIREFNET_DEFAULT_MODEL
+        [birefnet_plan(sources, BIREFNET_DEFAULT_MODEL)],
+        out_dir,
+        BIREFNET_DEFAULT_MODEL,
+        root_files=PIPELINE.root_files,
     )
     return out_dir, manifest
 
@@ -193,7 +204,10 @@ class TestBirefnetLayout:
     def test_it_places_the_single_graph_under_the_model_subtree(self, birefnet_assembled) -> None:
         out_dir, _ = birefnet_assembled
         expected = _in_subtree(BIREFNET_DEFAULT_MODEL, _placed_paths())
-        assert _present(out_dir) == sorted([*expected, MANIFEST_FILENAME])
+        # 法的テキスト 2 本（MIT の著作権 / 許諾表示と改変告知）は manifest が宣言しないメタ席。
+        assert _present(out_dir) == sorted(
+            [*expected, MANIFEST_FILENAME, "LICENSE.md", "NOTICE.md"]
+        )
 
     def test_it_never_carries_the_io_fixtures(self, birefnet_assembled) -> None:
         out_dir, _ = birefnet_assembled
@@ -329,7 +343,7 @@ class TestBirefnetModelCard:
         main(
             [
                 "--pipeline",
-                "birefnet",
+                _PIPELINE_NAMES[model],
                 "--model",
                 model,
                 "--series",
@@ -397,12 +411,28 @@ class TestBirefnetCli:
     def test_the_default_output_directory_is_named_per_model(self) -> None:
         """リポ名は導出しない（`karume-lucida` はモデル名からは決まらない綴り）。"""
         assert default_out_dir(PIPELINE, [BIREFNET_DEFAULT_MODEL]).name == "karume-birefnet-hr"
-        assert default_out_dir(PIPELINE, ["lucida"]).name == "karume-lucida"
+        assert default_out_dir(LUCIDA_PIPELINE, [BIREFNET_LUCIDA_MODEL]).name == "karume-lucida"
 
     def test_one_attribution_profile_needs_no_choice(self) -> None:
         profiles = PIPELINE.card_profiles
         assert len(profiles) == 1
         assert resolve_card_renderer(PIPELINE, None) is next(iter(profiles.values()))
+
+    @pytest.mark.parametrize(
+        ("pipeline", "model"),
+        [(PIPELINE, BIREFNET_LUCIDA_MODEL), (LUCIDA_PIPELINE, BIREFNET_DEFAULT_MODEL)],
+    )
+    def test_each_pipeline_refuses_the_other_repositorys_model(
+        self, tmp_path: Path, pipeline, model: str
+    ) -> None:
+        """席を跨いで組むと、リポ直下の著作権表示が中身と食い違ったまま配布形が成立する。
+
+        `LICENSE.md` の著作権行は Pipeline に固定で載る 1 組なので、HR の席で Lucida を
+        組むと「fine-tune の著作権を名乗らない配布」、逆向きだと「自分のものでない著作権を
+        名乗る配布」になる。どちらも散文としては妥当なまま `verify_dist` を通る。
+        """
+        with pytest.raises(DistError, match="この pipeline のリポに入らない"):
+            pipeline.plan(tmp_path, model)
 
     def test_the_series_name_carries_the_upstream_name_and_the_resolution(
         self, tmp_path: Path
@@ -424,13 +454,66 @@ class TestBirefnetCli:
     ) -> None:
         import dist
 
-        sources = _build_birefnet_sources(tmp_path, model="lucida")
+        sources = _build_birefnet_sources(tmp_path, model=BIREFNET_LUCIDA_MODEL)
         monkeypatch.setattr(dist, "DIST_ROOT", tmp_path / "models")
 
-        main(
-            ["--pipeline", "birefnet", "--model", "lucida", "--series", str(sources.series.parent)]
-        )
+        main(["--pipeline", "lucida", "--series", str(sources.series.parent)])
 
         out_dir = tmp_path / "models" / "karume-lucida"
-        expected = _in_subtree("lucida", _placed_paths())
+        expected = _in_subtree(BIREFNET_LUCIDA_MODEL, _placed_paths())
         assert sorted(verify_dist(out_dir)) == sorted(expected)
+
+
+class TestBirefnetLegalText:
+    """配布リポ直下の MIT 原文と改変告知（ADR 0092 決定 7）。"""
+
+    def _legal(self, tmp_path: Path, model: str) -> tuple[str, str]:
+        sources = _build_birefnet_sources(tmp_path, model=model)
+        out_dir = tmp_path / "dist"
+        main(
+            [
+                "--pipeline",
+                _PIPELINE_NAMES[model],
+                "--series",
+                str(sources.series.parent),
+                "--out",
+                str(out_dir),
+            ]
+        )
+        return (
+            # LICENSE はバイト列を decode して返す（read_text の改行変換で CRLF が畳まれると
+            # バイト同一の門が素通りする — 他家族の read_bytes 比較と同じ網の粗さにする）。
+            (out_dir / "LICENSE.md").read_bytes().decode("utf-8"),
+            (out_dir / "NOTICE.md").read_text(encoding="utf-8"),
+        )
+
+    @pytest.mark.parametrize("model", [BIREFNET_DEFAULT_MODEL, BIREFNET_LUCIDA_MODEL])
+    def test_it_ships_the_license_text_byte_identical(self, tmp_path: Path, model: str) -> None:
+        """MIT §「著作権表示と許諾表示を含めること」— 差し込み口以外は本文テンプレそのもの。
+
+        原本は `_shared/licenses/mit.txt` に {@link BIREFNET_COPYRIGHTS} を差し込んだ結果。
+        組み立ての経路のどこかで整形や改行変換が入ると 1 バイト動くが、散文としては妥当な
+        ままなので他の門は素通りする。
+        """
+        license_text, _ = self._legal(tmp_path, model)
+        assert license_text == mit_license(BIREFNET_COPYRIGHTS[model])
+
+    def test_the_hr_repository_carries_only_the_upstream_copyright(self, tmp_path: Path) -> None:
+        license_text, notice = self._legal(tmp_path, BIREFNET_DEFAULT_MODEL)
+        assert "MIT License" in license_text
+        assert "Copyright (c) 2024 ZhengPeng" in license_text
+        # 自分のものでない著作権を名乗らない（fine-tune 側は別リポの事実）。
+        assert "egeorcun" not in license_text
+        assert (
+            "The above copyright notice and this permission notice shall be included in all"
+            in license_text
+        )
+        assert BIREFNET_UPSTREAM[BIREFNET_DEFAULT_MODEL] in notice
+        assert "no quantization" in notice.lower()
+
+    def test_the_lucida_repository_carries_both_copyrights(self, tmp_path: Path) -> None:
+        """MIT は派生でも上流の著作権表示を落とせない（上流カードの自己申告と同じ向き）。"""
+        license_text, notice = self._legal(tmp_path, BIREFNET_LUCIDA_MODEL)
+        assert "Copyright (c) 2026 egeorcun" in license_text
+        assert "Copyright (c) 2024 ZhengPeng" in license_text
+        assert BIREFNET_UPSTREAM[BIREFNET_LUCIDA_MODEL] in notice

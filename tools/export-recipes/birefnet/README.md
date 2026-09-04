@@ -27,8 +27,15 @@ uv run --group birefnet python -m birefnet.export --verify     # eager equivalen
 uv run --group birefnet python -m birefnet.export --resolution 2048
 uv run --group birefnet python -m birefnet.export --model-dir ../../inputs/birefnet/lucida
 uv run --group birefnet python -m birefnet.export --real-images
-uv run python dist.py --pipeline birefnet                      # distribution
+uv run python dist.py --pipeline birefnet                      # distribution (karume-birefnet-hr)
+uv run python dist.py --pipeline lucida                        # distribution (karume-lucida)
 ```
+
+One `--model` axis for the export script, but **two distribution pipelines**: Lucida is a
+derivative and ships as its own repository (ADR
+[0092](../../../docs/decisions/0092-distribution-repos-and-sources.md) decision 1), and the MIT
+copyright lines that go into each repository's `LICENSE.md` differ, so a single pipeline seat
+cannot carry both.
 
 `transformers` is pinned with `==` (the patch layer replaces class attributes of the module the
 `trust_remote_code` loader produced); the group is declared in [`../pyproject.toml`](../pyproject.toml).
