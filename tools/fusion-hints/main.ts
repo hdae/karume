@@ -15,6 +15,7 @@
  * 2 つの道具で別値だと、形状に依存する量（census 加重と候補本数）を跨いで読めない。
  */
 
+import { parseInductorArgs, runInductor } from "./inductor.ts";
 import { directoryUrl, readIrGraph, resolveAsset } from "../_shared/assets.ts";
 import {
   assertBindingKeys,
@@ -32,6 +33,7 @@ import {
 } from "./enumerate.ts";
 
 const USAGE = `使い方: deno run -A tools/fusion-hints/main.ts enumerate --source <dir> [オプション]
+      （Inductor との突合は \`inductor --out <dir> --candidates <candidates.jsonl>…\` — 詳細は README）
   --source <dir>       配布形（karume.json あり）か outputs/series の系列ディレクトリ
   --out <dir>          candidates.jsonl / candidates.md の書き出し先（省略時は Markdown を標準出力へ）
   --max-window <n>     連続窓の最大長（既定 9）
@@ -205,7 +207,10 @@ const buildReport = async (options: Options): Promise<SourceReport> => {
 // MUST: CLI の本体は `import.meta.main` の内側だけで走らせる（横断の不変条件「全モジュール
 // 副作用ゼロ = import 時実行の禁止」— 型や関数をここから import した瞬間に引数解析と
 // ディレクトリ書き出しが走るのを防ぐ）。
-if (import.meta.main) {
+if (import.meta.main && Deno.args[0] === "inductor") {
+  // Inductor の融合決定と候補表の突合（CUDA venv の python に委ねる — inductor.ts）。
+  await runInductor(parseInductorArgs(Deno.args.slice(1)));
+} else if (import.meta.main) {
   const options = parseArgs(Deno.args);
   const report = await buildReport(options);
   const markdown = toMarkdown(report, options.top);

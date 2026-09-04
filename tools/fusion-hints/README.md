@@ -113,6 +113,27 @@ Reading the table:
   the chain reads but cannot fold, such as the shared cos/sin table slice of RoPE). The passthrough
   is excluded from the chain, exactly as the existing rules declare it.
 
+## `inductor` — does Inductor fuse the chains karume does not?
+
+```
+deno run -A tools/fusion-hints/main.ts inductor --out <dir> --candidates <candidates.jsonl> [...]
+```
+
+Runs `inductor_probe.py` in the CUDA venv (`--venv`, `KARUME_CUDA_VENV`, default
+`~/workspace/karume-cuda-venv`). The probe exports the exporter's golden models (the 31 tiny modules
+that cover the op contract) plus a handful of chain modules written for the chains that top the
+candidate tables (post-norm residual `rms_norm,add`, `linear,rms_norm,add`, gated `gelu_tanh,mul`,
+the RoPE half-rotation, `bmm,softmax,bmm`, adaLN modulation), and asks Inductor — via a patched
+`Scheduler.codegen` — which nodes it would put into one kernel. Node names are joined to the IR the
+exporter produces for the same module, so every fused group is reported as a sequence of IR ops.
+
+`comparison.jsonl` then labels every candidate chain from the given `candidates.jsonl` files:
+`fused` (a probe model shows Inductor putting that op sequence into one kernel — the witness names
+the model and group), `split` (all ops were observed but never in one kernel), `unobserved` (an op
+in the chain occurs in no probe model — the verdict needs a model that has it), `trivial` (the chain
+is only reshapes). This is a structural check: the probe models are tiny, so Inductor's shape-dependent
+decisions (tiling, reduction splits) are out of scope until a real asset's ExportedProgram is fed in.
+
 ## Where the judgment lives
 
 The tool contains no eligibility judgment of its own. `enumerateUnfusedWindows` lives in
