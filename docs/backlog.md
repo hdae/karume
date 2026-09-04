@@ -35,8 +35,8 @@
    46〜61 MiB/term へ回復させた（機序と実測 =
    [research 2026-08-09 の 2026-09-04 追記](research/2026-08-09-xet-fragmentation.md)・恒久手順 =
    [release-runbook](release-runbook.md) §2）。**合格線の実績** = 断片化検証は siglip2 46〜61 /
-   depth-anything 47 MiB/term で目安 ≥10 を全て満たす。**残** = `deno task smoke:published`
-   による `KARUME_SOURCES` の総なめ（JSR publish 後にしか打てない — runbook §0 の順序）。
+   depth-anything 47 MiB/term で目安 ≥10 を全て満たす。**公開完了**（2026-09-04 — GitHub Release
+   v0.9.0 → JSR 0.9.0 → `deno task smoke:published` 緑・`KARUME_SOURCES` 8 本の疎通を確認）。
    `karume-birefnet-hr` と `karume-lucida` は**後回し**（2026-09-04 ユーザー裁定 — 2048² は現状
    不成立〈[limitations](limitations.md) の BiRefNet 節〉。プールの再利用方式の見直しと中間
    テンソルの `requiredLimits` 宣言が前提で、公開する時は 1024² の配布形のまま。上流ライセンス
