@@ -170,6 +170,8 @@ PyPI `karume`（tools/exporter）は**未リリース**。公開を始める時�
 
 - [ ] docs 同期: ACTIVE_DESIGN・backlog（release 節の消化状況）・リリース記録・
       プロジェクトメモリ
-- [ ] 公開リポの実 DL 疎通: `fromPretrained(<FAMILY>_CURRENT)` を 1 回（`ref` に既定は無い —
-      ADR 0073 追記 2026-08-25。文字列で渡すと `main` 追従になり pin の疎通確認にならない）
+- [ ] 公開パッケージからの疎通: `deno task smoke:published`（tools/published-smoke — 公開版
+      `@karume/hub` で全 pin 定数の manifest を解決し、sbv2 を `fromPretrained` まで通す。GPU が
+      無い機体は `--manifests-only`）。ワークスペース配下の `jsr:@karume/*` はローカル member に
+      解決されるため、疎通は必ずこの task で打つ（自前の deno.json で registry を引く）
 - [ ] 断片化検証の結果（§2）を research か backlog へ 1 行記録

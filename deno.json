@@ -5,9 +5,10 @@
     "exclude": ["jsr:@hdae/*"]
   },
   "tasks": {
-    "check": "deno check packages/runtime/mod.ts packages/hub/mod.ts packages/hub/deno.ts packages/models/mod.ts examples/anima/main.ts examples/anima/eval-images.ts examples/gemma4/main.ts examples/sbv2/main.ts examples/sbv2/dump.ts examples/irodori/main.ts examples/irodori/eval-audio.ts examples/vowel-detector/main.ts tools/opbench/main.ts tools/fusion-hints/main.ts",
+    "check": "deno check packages/runtime/mod.ts packages/hub/mod.ts packages/hub/deno.ts packages/models/mod.ts examples/anima/main.ts examples/anima/eval-images.ts examples/gemma4/main.ts examples/sbv2/main.ts examples/sbv2/dump.ts examples/irodori/main.ts examples/irodori/eval-audio.ts examples/vowel-detector/main.ts tools/opbench/main.ts tools/fusion-hints/main.ts tools/published-smoke/main.ts",
     "verify": "deno fmt --check && deno lint && deno task check && deno test -A",
     "demo:anima": "deno run -A examples/anima/main.ts",
+    "smoke:published": "deno run -A --config tools/published-smoke/deno.json tools/published-smoke/main.ts",
     "demo:eval-audio": "deno run -A examples/irodori/eval-audio.ts",
     "demo:eval-images": "deno run -A examples/anima/eval-images.ts",
     "demo:gemma4": "deno run -A examples/gemma4/main.ts",

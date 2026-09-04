@@ -1,0 +1,10 @@
+{
+  "lock": false,
+  "fmt": {
+    "lineWidth": 100,
+    "proseWrap": "preserve"
+  },
+  "minimumDependencyAge": {
+    "exclude": ["jsr:@karume/*"]
+  }
+}
