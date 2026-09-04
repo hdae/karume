@@ -13,14 +13,19 @@
  * ヘッダだけ。
  */
 
-import { readIrGraph, resolveAsset } from "./assets.ts";
+import { directoryUrl, readIrGraph, resolveAsset } from "../_shared/assets.ts";
 import {
+  buildCensusSummary,
   censusComponent,
   type CensusRow,
-  type CensusSummary,
   summarizeScenario,
 } from "./census.ts";
-import { assertBindingKeys, defaultScenarios, parseScenario, type Scenario } from "./scenario.ts";
+import {
+  assertBindingKeys,
+  defaultScenarios,
+  parseScenarios,
+  type Scenario,
+} from "../_shared/scenario.ts";
 
 /** `--key value` の並びを読む（同じキーの繰り返しは全て残す）。 */
 const parseArgs = (argv: readonly string[]): ReadonlyMap<string, readonly string[]> => {
@@ -39,8 +44,21 @@ const parseArgs = (argv: readonly string[]): ReadonlyMap<string, readonly string
     const name = key.slice(2);
     args.set(name, [...(args.get(name) ?? []), value]);
   }
+  // 未知のオプションを黙って捨てない（`--scenarios` の打ち間違いが既定シナリオへ静かに落ちる）。
+  for (const name of args.keys()) {
+    if (!KNOWN_OPTIONS.has(name)) throw new Error(`未知のオプション --${name}。\n${USAGE}`);
+  }
   return args;
 };
+
+const KNOWN_OPTIONS: ReadonlySet<string> = new Set([
+  "source",
+  "out",
+  "model",
+  "quant",
+  "family",
+  "scenario",
+]);
 
 const single = (
   args: ReadonlyMap<string, readonly string[]>,
@@ -51,10 +69,6 @@ const single = (
   if (values.length > 1) throw new Error(`--${name} は 1 度しか指定できない`);
   return values[0];
 };
-
-/** 相対 path を cwd 基準のディレクトリ URL にする（末尾 `/` を必ず付ける）。 */
-const directoryUrl = (path: string): URL =>
-  new URL(path.endsWith("/") ? path : `${path}/`, `file://${Deno.cwd()}/`);
 
 const runCensus = async (args: ReadonlyMap<string, readonly string[]>): Promise<void> => {
   const source = single(args, "source");
@@ -72,7 +86,7 @@ const runCensus = async (args: ReadonlyMap<string, readonly string[]>): Promise<
   const explicit = args.get("scenario");
   const scenarios: readonly Scenario[] = explicit === undefined
     ? defaultScenarios(asset.family)
-    : explicit.map(parseScenario);
+    : parseScenarios(explicit);
   const componentNames = asset.components.map((target) => target.component);
   for (const scenario of scenarios) assertBindingKeys(scenario, componentNames);
 
@@ -101,14 +115,7 @@ const runCensus = async (args: ReadonlyMap<string, readonly string[]>): Promise<
     return summarizeScenario(scenario, scoped, unused, hits);
   });
 
-  const summary: CensusSummary = {
-    generated_at: new Date().toISOString(),
-    source,
-    family: asset.family,
-    model: asset.model,
-    quant: asset.quant,
-    scenarios: summaries,
-  };
+  const summary = buildCensusSummary(source, asset, summaries);
 
   const outDir = directoryUrl(out);
   await Deno.mkdir(outDir, { recursive: true });

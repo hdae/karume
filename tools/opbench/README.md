@@ -89,6 +89,16 @@ does not actually reach the graph is visible rather than silent.
 
 ### `summary.json`
 
+The header names the asset the census was taken from: `generated_at`, `source`, `family`, `model`,
+`quant`, and `session`.
+
+`session` is a verbatim copy of the execution variant the chosen quant declares in the manifest
+(`linearCompute`, `attentionCompute`, `attentionScoreStorage`), kept in the manifest's own
+vocabulary and never translated into the runtime's `SessionOptions`. A quant that declares no knob
+gives `{}`. A series output has no manifest, so it gives `null`: the execution variant is not
+declared there and the caller supplies it. A census row is decided by the IR alone, so without this
+field the weight table does not say which kernel variant a real run of that asset would take.
+
 Per scenario:
 
 - `by_op` — node count and total output element count per op. The element count is what makes the
@@ -101,15 +111,39 @@ Per scenario:
   those steps swallowed, `plain` is everything left over, and `aliased` is the subset of `plain`
   that costs zero dispatches.
 - `weights` — the census weight table: identical `(component, op, in_shapes, out_shapes, dtypes,
-  storage, fusion)` tuples collapsed into one row with a `count`, sorted by count. This is the input
-  a single-op benchmark iterates over.
+  attrs, storage, fused_by, aliases_input)` tuples collapsed into one row with a `count`, sorted by
+  count. This is the input a single-op benchmark iterates over.
+  - **`attrs` is part of the key.** Identical shapes with different `permute` dims or `slice` bounds
+    are different memory access patterns, so they are different benchmark cases and get separate
+    rows. Key order inside `attrs` is normalised, so only the values matter. A table produced before
+    this definition collapsed such nodes together, and its "number of distinct shapes" is therefore
+    lower than the same asset gives now.
+  - `storage` is aligned with `ins` exactly like the census row (`null` for a non-initializer
+    input), so `linear`'s `[x, W, bias]` shows which slot is `i4g32` and which is `f32`. Slot order
+    is part of the key: two nodes with the same set of storage dtypes but a different assignment to
+    slots are separate rows, because they select different kernels. It carries
+    the storage dtype and group length only — the safetensors keys belong to one layer and cannot
+    describe a row that collapsed many. `storage_signature` is the set signature (`f32+i4g32`) that
+    `by_storage` counts by.
 
 ## Notes
 
 - Fusion is planned against the **WebGPU core default limits** (128 MiB storage binding, 65535
   workgroups per dimension), not the limits of whatever machine runs the tool. A census must not
   change with the machine that produced it; for a machine's real behaviour, `lastRunFusions` at
-  runtime is the source of truth.
+  runtime is the source of truth. The constant lives in `tools/_shared/assets.ts`, so the census and
+  the candidate table of `tools/fusion-hints` are always planned against the same limits.
+- Finding the asset (`tools/_shared/assets.ts`) and the scenario table (`tools/_shared/scenario.ts`)
+  are shared with `tools/fusion-hints`. There is **one resolver**, and it always follows the quant
+  table for the storage dtype (the manifest quant for a distribution mirror, `--quant` or the single
+  group present for a series output), so both tools open the same first shard of the same component.
+  Series shard sequences are resolved through `resolveShards`, the mirror of the exporter's
+  `karume.shards.resolve_shards`.
+- Whether a scenario is valid is decided in one place too (`resolveComponentBindings`): a
+  `<component>.SYM` key naming a symbol the component does not declare, and a symbol the shapes use
+  but the scenario does not bind, both fail with the same message in either tool.
+- `session` in `summary.json` is copied verbatim from the manifest; this tool does not validate it
+  (the allowlist and its spelling belong to the hub's `parseSession` — ADR 0038 §3).
 - Generated files belong under `outputs/bench/<model>/<YYYY-MM-DD>_<purpose>/`, which is untracked
   (see `docs/assets-layout.md`). Numbers that are meant to last go into `docs/research/`, and
   adoption decisions into `docs/perf-ledger.md`.

@@ -10,7 +10,14 @@
  * キーは `SYM`（家族全体）か `<component>.SYM`（そのコンポーネントだけ）。同じ記号名が
  * コンポーネントごとに別の意味を持つ資産があるので後者が要る — irodori の `T` は backbone で
  * トークン数・codec_encoder でフレーム数、という具合に割れている。
+ *
+ * 束縛が正しいかの判定は {@link resolveComponentBindings} 1 本で、opbench（census）と
+ * fusion-hints（候補列挙）はこれを呼ぶ。判定が 2 箇所にあると、同じ打ち間違いが片方でだけ
+ * 落ちる（実際に fusion-hints は `<component>.SYM` の記号側の誤綴りを見逃していた）。
  */
+
+import type { IrGraph } from "../../packages/runtime/src/format/ir.ts";
+import { parseDim } from "../../packages/runtime/src/format/dims.ts";
 
 /** 1 シナリオ（= census.jsonl の `scenario` 欄 1 値ぶん）。 */
 export type Scenario = {
@@ -147,13 +154,31 @@ export const parseScenario = (text: string): Scenario => {
 };
 
 /**
+ * `--scenario` の並びをまとめて解く。
+ *
+ * MUST: 同じ名前を 2 度受けない。シナリオ名は census の `summary.json` の `scenarios[]` と
+ * 候補表を突き合わせる唯一のキーなので、同名が 2 本並ぶと突合先が一意に決まらない。
+ */
+export const parseScenarios = (texts: readonly string[]): readonly Scenario[] => {
+  const scenarios = texts.map(parseScenario);
+  const seen = new Set<string>();
+  for (const scenario of scenarios) {
+    if (seen.has(scenario.name)) {
+      throw new Error(`--scenario の名前 '${scenario.name}' が重複している`);
+    }
+    seen.add(scenario.name);
+  }
+  return scenarios;
+};
+
+/**
  * 1 コンポーネントへ効く束縛（`<component>.SYM` が同名の `SYM` を上書きする）。
  *
  * MUST: `<component>.` の付いたキーのうち、どのコンポーネントにも当たらない綴りは
  * fail loudly（打ち間違いが「その束縛は無かった」として静かに通ると、別の shape の census が
  * 出る）。判定は呼び手が全コンポーネント名を知っている位置で行う（{@link assertBindingKeys}）。
  */
-export const bindingsFor = (
+const bindingsFor = (
   scenario: Scenario,
   component: string,
 ): Readonly<Record<string, number>> => {
@@ -186,4 +211,80 @@ export const assertBindingKeys = (
       );
     }
   }
+};
+
+/** 宣言 shape に現れる記号を集める。 */
+const symbolsOf = (shape: readonly (number | string)[], into: Set<string>): void => {
+  for (const dim of shape) {
+    if (typeof dim === "string") into.add(parseDim(dim).sym);
+  }
+};
+
+/** グラフのどこか（入力 / 値 / state スロット）の shape が実際に使う記号。 */
+const usedSymbols = (graph: IrGraph): ReadonlySet<string> => {
+  const used = new Set<string>();
+  for (const spec of graph.inputs) symbolsOf(spec.shape, used);
+  for (const value of Object.values(graph.values)) symbolsOf(value.shape, used);
+  for (const slot of Object.values(graph.states)) symbolsOf(slot.shape, used);
+  return used;
+};
+
+/** グラフ 1 本に対して解けた束縛。 */
+export type ComponentBindings = {
+  /** このコンポーネントに効く束縛（`<component>.SYM` を解いた後）。 */
+  readonly bindings: Readonly<Record<string, number>>;
+  /** shape の解決に渡す表（グラフが名乗る記号のうち束縛が付いたもの）。 */
+  readonly symbols: Readonly<Record<string, number>>;
+  /** 束縛したがこのグラフのどの shape も使わなかった記号（容量が焼き込み済みの `C` など）。 */
+  readonly unused: readonly string[];
+};
+
+/**
+ * シナリオをグラフ 1 本へ解く。**束縛の判定はここ 1 箇所**（opbench の census と fusion-hints の
+ * 候補列挙が同じ文言で落ちる）。
+ *
+ * 落とすのは 2 つ:
+ *
+ * - `<component>.SYM` の **SYM 側**の誤綴り — そのグラフが名乗らない記号を名指す修飾キーは、
+ *   黙って捨てると「修飾したつもりの値が効かないまま既定側の値で解かれた表」が出る
+ * - **未束縛** — ただし要求するのは {@link usedSymbols}（実際に shape が使う記号）だけ。
+ *   宣言だけあって shape が使わない記号（焼き込み済みの容量）まで要求すると、実行に関係の
+ *   ない束縛を書かせることになる
+ */
+export const resolveComponentBindings = (
+  scenario: Scenario,
+  component: string,
+  graph: IrGraph,
+): ComponentBindings => {
+  const bindings = bindingsFor(scenario, component);
+  const declared = new Set(graph.symbols);
+  for (const key of Object.keys(scenario.bindings)) {
+    const dot = key.indexOf(".");
+    if (dot < 0 || key.slice(0, dot) !== component) continue;
+    const sym = key.slice(dot + 1);
+    if (!declared.has(sym)) {
+      throw new Error(
+        `シナリオ '${scenario.name}' の束縛 '${key}': ${component} に記号 '${sym}' が無い` +
+          `（既知: ${graph.symbols.join(", ") || "なし"}）`,
+      );
+    }
+  }
+  const used = usedSymbols(graph);
+  const missing = [...used].filter((sym) => !Object.hasOwn(bindings, sym));
+  if (missing.length > 0) {
+    throw new Error(
+      `${component}: 記号 ${missing.join(" / ")} が未束縛` +
+        `（シナリオ '${scenario.name}' の束縛: ${JSON.stringify(bindings)}）` +
+        " — --scenario <名前>=<記号>:<値>[,…] で与える（記号のまま表を出さない）",
+    );
+  }
+  const symbols: Record<string, number> = {};
+  for (const sym of new Set([...declared, ...used])) {
+    if (Object.hasOwn(bindings, sym)) symbols[sym] = bindings[sym];
+  }
+  return {
+    bindings,
+    symbols,
+    unused: [...declared].filter((sym) => Object.hasOwn(bindings, sym) && !used.has(sym)),
+  };
 };

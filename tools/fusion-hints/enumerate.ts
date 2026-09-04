@@ -17,16 +17,9 @@ import {
   type UnfusedWindow,
 } from "../../packages/runtime/src/runtime/fusion.ts";
 import { bindSymbols, countUses, planGraph } from "../../packages/runtime/src/runtime/plan.ts";
-import type { BoundShapes } from "./assets.ts";
-
-/**
- * 判定に使う device の上限。**WebGPU core 既定**（128MiB / 65535）を固定で使う — 行ブロック
- * 枚数は候補の本数に効かないので、機の実測値を持ち込まないことで表が機に依らない。
- */
-export const DEFAULT_LIMITS: FusionLimits = {
-  maxStorageBufferBindingSize: 128 * 1024 * 1024,
-  maxComputeWorkgroupsPerDimension: 65535,
-};
+import { CORE_LIMITS } from "../_shared/assets.ts";
+import { resolveComponentBindings, type Scenario } from "../_shared/scenario.ts";
+import { bindGraphSymbols, type BoundShapes } from "./binding.ts";
 
 export type EnumerateOptions = {
   /** 連続窓の最大長。 */
@@ -40,7 +33,7 @@ export type EnumerateOptions = {
 };
 
 export type GraphCandidates = {
-  readonly nodeCount: number;
+  readonly node_count: number;
   /** 現行計画（融合あり）のルール別ヒット数 — 候補表の読み合わせ相手。 */
   readonly counts: FusionCounts;
   readonly windows: readonly UnfusedWindow[];
@@ -57,7 +50,7 @@ export const enumerateGraph = (
   const context = {
     useCounts: countUses(graph),
     outputNames: new Set(graph.outputs),
-    limits: options.limits ?? DEFAULT_LIMITS,
+    limits: options.limits ?? CORE_LIMITS,
   };
   const plan = planFusions(nodes, context);
   // 融合を切った計画は「全ノードが素のステップ」— planFusions の別名化判定
@@ -66,13 +59,18 @@ export const enumerateGraph = (
     ? nodes.map((node) => ({ kind: "node", plan: node, aliasesInput: aliasesInput(node) }))
     : plan.steps;
   return {
-    nodeCount: nodes.length,
+    node_count: nodes.length,
     counts: plan.counts,
     windows: enumerateUnfusedWindows(steps, context, options.maxWindow),
   };
 };
 
-/** 同じ op 名列の候補をまとめた 1 行。 */
+/**
+ * 同じ op 名列の候補をまとめた 1 行。
+ *
+ * 欄の綴りは jsonl へそのまま出るので**全て snake_case**（census の行と混ぜて読むため — 未公開
+ * ツールなので旧綴りの互換シムは置かない）。
+ */
 export type CandidateRow = {
   /** 畳む鎖の op 名列。 */
   readonly ops: readonly string[];
@@ -83,8 +81,8 @@ export type CandidateRow = {
    */
   readonly maximal: number;
   /** 出現した連続窓の幅（昇順）。`ops.length` より大きい幅は窓内 passthrough を含む。 */
-  readonly windowSizes: readonly number[];
-  readonly example: { readonly nodeIndex: number; readonly outputName: string };
+  readonly window_sizes: readonly number[];
+  readonly example: { readonly node_index: number; readonly output_name: string };
 };
 
 const keyOf = (ops: readonly string[]): string => ops.join(",");
@@ -107,7 +105,7 @@ export const aggregate = (windows: readonly UnfusedWindow[]): readonly Candidate
     count: number;
     maximal: number;
     sizes: Set<number>;
-    example: { nodeIndex: number; outputName: string };
+    example: { node_index: number; output_name: string };
   };
   const buckets = new Map<string, Bucket>();
   for (const window of windows) {
@@ -117,7 +115,7 @@ export const aggregate = (windows: readonly UnfusedWindow[]): readonly Candidate
       count: 0,
       maximal: 0,
       sizes: new Set<number>(),
-      example: { nodeIndex: window.nodeIndex, outputName: window.outputName },
+      example: { node_index: window.nodeIndex, output_name: window.outputName },
     };
     bucket.count += 1;
     if (longest.get(window.nodeIndex) === window.windowSize) bucket.maximal += 1;
@@ -129,7 +127,7 @@ export const aggregate = (windows: readonly UnfusedWindow[]): readonly Candidate
       ops: bucket.ops,
       count: bucket.count,
       maximal: bucket.maximal,
-      windowSizes: [...bucket.sizes].sort((a, b) => a - b),
+      window_sizes: [...bucket.sizes].sort((a, b) => a - b),
       example: bucket.example,
     }))
     .sort((a, b) => {
@@ -142,52 +140,128 @@ export const aggregate = (windows: readonly UnfusedWindow[]): readonly Candidate
 
 /** グラフ 1 本ぶんの報告（jsonl / Markdown の素）。 */
 export type GraphReport = {
+  /** 表の見出し（`<model>/<component>`）。 */
   readonly graph: string;
+  /** opbench の census 行と同じ component 綴り。 */
+  readonly component: string;
   readonly path: string;
-  readonly nodeCount: number;
+  readonly node_count: number;
+  /** このグラフの記号に実際に入った値（`bindings` を `graph.symbols` へ絞ったもの）。 */
   readonly symbols: Readonly<Record<string, number>>;
   readonly counts: FusionCounts;
-  readonly windowCount: number;
+  readonly window_count: number;
   readonly rows: readonly CandidateRow[];
+};
+
+/** 列挙にかける 1 コンポーネント（IR は先頭 shard のヘッダから読んだもの）。 */
+export type GraphInput = {
+  readonly component: string;
+  readonly graph: string;
+  readonly path: string;
+  readonly ir: IrGraph;
+};
+
+/**
+ * シナリオ 1 本ぶんの報告。欄の綴り（`scenario` / `bindings` / `binding_source` / `provenance`）は
+ * opbench の `summary.json` の `scenarios[]` と同じ — 同じ資産の census と候補表を機械で
+ * 突き合わせるのはこの 4 欄。
+ */
+export type ScenarioReport = {
+  readonly scenario: string;
+  /** シナリオが宣言した束縛そのもの（`<component>.SYM` 込み）。 */
+  readonly bindings: Readonly<Record<string, number>>;
+  readonly binding_source: Scenario["source"];
+  readonly provenance: string;
+  readonly graphs: readonly GraphReport[];
 };
 
 export type SourceReport = {
   readonly source: string;
-  readonly maxWindow: number;
+  readonly family: string;
+  readonly model: string;
+  readonly quant: string;
+  readonly max_window: number;
   readonly fused: boolean;
-  readonly graphs: readonly GraphReport[];
+  readonly scenarios: readonly ScenarioReport[];
   /** 読めなかった / IR を持たないファイル（黙って落とさない）。 */
   readonly skipped: readonly { readonly name: string; readonly reason: string }[];
 };
 
+/**
+ * シナリオ 1 本を全コンポーネントに掛ける。
+ *
+ * 束縛は `resolveComponentBindings` が `<component>.SYM` を解いたものだけを渡す — 同じ記号名が
+ * コンポーネントごとに別の意味を持つ資産（irodori の `T` = backbone のトークン数 /
+ * codec_encoder のフレーム数）で、家族共通の値が混ざらないようにする。誤綴りと未束縛を
+ * 打ち切るのもその中（判定は census と同じ 1 箇所）。
+ */
+export const reportScenario = (
+  scenario: Scenario,
+  graphs: readonly GraphInput[],
+  options: EnumerateOptions,
+): ScenarioReport => ({
+  scenario: scenario.name,
+  bindings: scenario.bindings,
+  binding_source: scenario.source,
+  provenance: scenario.provenance,
+  graphs: graphs.map((entry): GraphReport => {
+    const { symbols } = resolveComponentBindings(scenario, entry.component, entry.ir);
+    const bound = bindGraphSymbols(entry.ir, symbols);
+    const candidates = enumerateGraph(entry.ir, bound, options);
+    return {
+      graph: entry.graph,
+      component: entry.component,
+      path: entry.path,
+      node_count: candidates.node_count,
+      symbols: bound.symbols,
+      counts: candidates.counts,
+      window_count: candidates.windows.length,
+      rows: aggregate(candidates.windows),
+    };
+  }),
+});
+
 /** 1 行 1 レコードの jsonl（`kind` で graph 行と candidate 行を分ける）。 */
 export const toJsonl = (report: SourceReport): string => {
   const lines: string[] = [];
-  for (const graph of report.graphs) {
-    lines.push(JSON.stringify({
-      kind: "graph",
-      source: report.source,
-      fused: report.fused,
-      maxWindow: report.maxWindow,
-      graph: graph.graph,
-      path: graph.path,
-      nodeCount: graph.nodeCount,
-      symbols: graph.symbols,
-      counts: graph.counts,
-      windowCount: graph.windowCount,
-    }));
-    for (const row of graph.rows) {
+  const identity = {
+    source: report.source,
+    family: report.family,
+    model: report.model,
+    quant: report.quant,
+    fused: report.fused,
+  };
+  for (const scenario of report.scenarios) {
+    for (const graph of scenario.graphs) {
       lines.push(JSON.stringify({
-        kind: "candidate",
-        source: report.source,
-        fused: report.fused,
+        kind: "graph",
+        ...identity,
+        max_window: report.max_window,
+        scenario: scenario.scenario,
+        bindings: scenario.bindings,
+        binding_source: scenario.binding_source,
         graph: graph.graph,
-        ops: row.ops,
-        count: row.count,
-        maximal: row.maximal,
-        windowSizes: row.windowSizes,
-        example: row.example,
+        component: graph.component,
+        path: graph.path,
+        node_count: graph.node_count,
+        symbols: graph.symbols,
+        counts: graph.counts,
+        window_count: graph.window_count,
       }));
+      for (const row of graph.rows) {
+        lines.push(JSON.stringify({
+          kind: "candidate",
+          ...identity,
+          scenario: scenario.scenario,
+          graph: graph.graph,
+          component: graph.component,
+          ops: row.ops,
+          count: row.count,
+          maximal: row.maximal,
+          window_sizes: row.window_sizes,
+          example: row.example,
+        }));
+      }
     }
   }
   for (const skip of report.skipped) {
@@ -206,41 +280,53 @@ export const toMarkdown = (report: SourceReport, top: number): string => {
   const out: string[] = [
     `# fusion hints — ${report.source}`,
     "",
+    `- 資産: ${report.family} / model ${report.model} / quant ${report.quant}`,
     `- 計画: ${report.fused ? "現行（融合あり）" : "融合を切った計画"}`,
-    `- 窓の最大長: ${report.maxWindow}`,
+    `- 窓の最大長: ${report.max_window}`,
     "- 候補であって設計ではない（共通の適格条件を通しただけ・ADR 0040 決定 2 の受理集合は" +
     "広げていない）",
     "",
   ];
-  for (const graph of report.graphs) {
-    const symbols = Object.entries(graph.symbols).map(([name, value]) => `${name}=${value}`);
+  for (const scenario of report.scenarios) {
+    const bindings = Object.entries(scenario.bindings).map(([name, value]) => `${name}=${value}`);
     out.push(
-      `## ${graph.graph}`,
+      `## シナリオ ${scenario.scenario}（束縛 ${
+        bindings.length === 0 ? "なし" : bindings.join(" ")
+      }）`,
       "",
-      `- ノード ${graph.nodeCount} / 束縛 ${symbols.length === 0 ? "なし" : symbols.join(" ")}`,
-      `- 現行計画のヒット: ${hitSummary(graph.counts)}`,
-      `- 候補窓 ${graph.windowCount} 本 / 相異なる op 名列 ${graph.rows.length} 種`,
+      `- 束縛の出どころ: ${scenario.binding_source} — ${scenario.provenance}`,
       "",
     );
-    if (graph.rows.length === 0) {
-      out.push("候補なし。", "");
-      continue;
-    }
-    out.push(
-      "| 鎖の op 名列 | 本数 | うち極大 | 窓幅 | 例（node / 出力） |",
-      "| --- | ---: | ---: | --- | --- |",
-    );
-    for (const row of graph.rows.slice(0, top)) {
+    for (const graph of scenario.graphs) {
+      const symbols = Object.entries(graph.symbols).map(([name, value]) => `${name}=${value}`);
       out.push(
-        `| \`${keyOf(row.ops)}\` | ${row.count} | ${row.maximal} | ${
-          row.windowSizes.join(",")
-        } | ${row.example.nodeIndex} / \`${row.example.outputName}\` |`,
+        `### ${graph.graph}`,
+        "",
+        `- ノード ${graph.node_count} / 束縛 ${symbols.length === 0 ? "なし" : symbols.join(" ")}`,
+        `- 現行計画のヒット: ${hitSummary(graph.counts)}`,
+        `- 候補窓 ${graph.window_count} 本 / 相異なる op 名列 ${graph.rows.length} 種`,
+        "",
       );
+      if (graph.rows.length === 0) {
+        out.push("候補なし。", "");
+        continue;
+      }
+      out.push(
+        "| 鎖の op 名列 | 本数 | うち極大 | 窓幅 | 例（node / 出力） |",
+        "| --- | ---: | ---: | --- | --- |",
+      );
+      for (const row of graph.rows.slice(0, top)) {
+        out.push(
+          `| \`${keyOf(row.ops)}\` | ${row.count} | ${row.maximal} | ${
+            row.window_sizes.join(",")
+          } | ${row.example.node_index} / \`${row.example.output_name}\` |`,
+        );
+      }
+      if (graph.rows.length > top) {
+        out.push(`| …（残り ${graph.rows.length - top} 種は jsonl） | | | | |`);
+      }
+      out.push("");
     }
-    if (graph.rows.length > top) {
-      out.push(`| …（残り ${graph.rows.length - top} 種は jsonl） | | | | |`);
-    }
-    out.push("");
   }
   if (report.skipped.length > 0) {
     out.push("## 読めなかったファイル", "");

@@ -15,9 +15,9 @@
 
 import { assert, assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import { parseIrGraph } from "../../packages/runtime/src/format/ir.ts";
-import { readIrGraph, resolveAsset } from "./assets.ts";
-import { censusComponent, summarizeScenario } from "./census.ts";
-import { assertBindingKeys, defaultScenarios, parseScenario } from "./scenario.ts";
+import { readIrGraph, resolveAsset } from "../_shared/assets.ts";
+import { buildCensusSummary, censusComponent, summarizeScenario } from "./census.ts";
+import { assertBindingKeys, defaultScenarios, parseScenario } from "../_shared/scenario.ts";
 
 const TARGET = { component: "unit", componentDtype: "i4", graphShard: new URL("file:///none") };
 const IDENTITY = { family: "unit", model: "unit", quant: "i4" };
@@ -48,6 +48,69 @@ const UNIT_GRAPH = parseIrGraph(JSON.stringify({
     { op: "linear", ins: ["x", "w", "b"], outs: ["h"], attrs: {} },
     { op: "sigmoid", ins: ["h"], outs: ["s"], attrs: {} },
     { op: "mul", ins: ["h", "s"], outs: ["y"], attrs: {} },
+  ],
+}));
+
+/**
+ * 合成 IR: 同じ入力から出る `permute` 2 本（`dims` だけ違う）と `slice` 2 本（属性の値は同じで
+ * **キーの書き順だけ**違う）。どれも出力なので融合の対象にならず、加重が attrs だけで割れる /
+ * 畳まれることを他の要因抜きで見られる。
+ */
+const ATTRS_GRAPH = parseIrGraph(JSON.stringify({
+  format: "karume-ir",
+  version: 1,
+  requires: { ops: ["permute", "slice"] },
+  symbols: [],
+  inputs: [{ name: "x", dtype: "f32", shape: [1, 4, 4, 4] }],
+  outputs: ["p1", "p2", "s1", "s2"],
+  initializers: {},
+  values: {
+    p1: { dtype: "f32", shape: [1, 4, 4, 4] },
+    p2: { dtype: "f32", shape: [1, 4, 4, 4] },
+    s1: { dtype: "f32", shape: [1, 2, 4, 4] },
+    s2: { dtype: "f32", shape: [1, 2, 4, 4] },
+  },
+  nodes: [
+    { op: "permute", ins: ["x"], outs: ["p1"], attrs: { dims: [0, 2, 1, 3] } },
+    { op: "permute", ins: ["x"], outs: ["p2"], attrs: { dims: [0, 1, 3, 2] } },
+    { op: "slice", ins: ["x"], outs: ["s1"], attrs: { dim: 1, start: 0, end: 2 } },
+    { op: "slice", ins: ["x"], outs: ["s2"], attrs: { start: 0, end: 2, dim: 1 } },
+  ],
+}));
+
+/**
+ * 合成 IR: 格納の**集合**は同じで**スロット割り当てだけ**違う 2 ノード。どちらも
+ * `add(i4g16, f32)` / `add(f32, i4g16)` で、shape も dtype も attrs も融合の帰属も同一なので、
+ * 加重キーが格納をスロット同順の列で持っているかだけを分離して見られる（集合シグネチャへ
+ * 戻すと 2 行が 1 行 count 2 に畳まれる）。
+ *
+ * NOTE: 加重キーの doc が例に挙げる `linear` の `[x, W, bias]` はここでは組めない — rank 1 の
+ * bias は行長が常に 1 で、i4 の group 長（16 以上）で割り切れない（ADR 0069 決定 2）。
+ */
+const SLOT_GRAPH = parseIrGraph(JSON.stringify({
+  format: "karume-ir",
+  version: 1,
+  requires: { ops: ["add"] },
+  symbols: [],
+  inputs: [],
+  outputs: ["o1", "o2"],
+  initializers: {
+    a4: { tensor: "a4.q", storage: { dtype: "i4", scale: "a4.scale", group_size: 16 } },
+    af: { tensor: "af", storage: { dtype: "f32" } },
+    b4: { tensor: "b4.q", storage: { dtype: "i4", scale: "b4.scale", group_size: 16 } },
+    bf: { tensor: "bf", storage: { dtype: "f32" } },
+  },
+  values: {
+    a4: { dtype: "f32", shape: [4, 32] },
+    af: { dtype: "f32", shape: [4, 32] },
+    b4: { dtype: "f32", shape: [4, 32] },
+    bf: { dtype: "f32", shape: [4, 32] },
+    o1: { dtype: "f32", shape: [4, 32] },
+    o2: { dtype: "f32", shape: [4, 32] },
+  },
+  nodes: [
+    { op: "add", ins: ["a4", "af"], outs: ["o1"], attrs: {} },
+    { op: "add", ins: ["bf", "b4"], outs: ["o2"], attrs: {} },
   ],
 }));
 
@@ -113,7 +176,7 @@ Deno.test("合成 IR: そのコンポーネントに無い記号を名指した�
   assertStringIncludes(error.message, "記号 'S' が無い");
 });
 
-Deno.test("census 加重は同一の (op, shape, dtype, 格納, 融合) を 1 行に畳む", () => {
+Deno.test("census 加重は同一の (op, shape, dtype, attrs, 格納, 融合) を 1 行に畳む", () => {
   const census = censusComponent(UNIT_GRAPH, TARGET, IDENTITY, unitScenario({ T: 3 }));
   const summary = summarizeScenario(
     unitScenario({ T: 3 }),
@@ -133,6 +196,109 @@ Deno.test("census 加重は同一の (op, shape, dtype, 格納, 融合) を 1 �
   });
   assertEquals(summary.weights.length, 3);
   assertEquals(summary.weights.every((weight) => weight.count === 1), true);
+
+  // 加重行の格納は census 行と同じ**スロット同順の列**（集合の署名は別欄）。linear の
+  // `[x, W, bias]` で W だけが i4g32 という対応が、加重表だけを見て読める。
+  const [linear] = summary.weights.filter((weight) => weight.op === "linear");
+  assertEquals(linear.storage.length, linear.in_shapes.length);
+  assertEquals(linear.storage, [null, { dtype: "i4", group_size: 16 }, { dtype: "f32" }]);
+  assertEquals(linear.storage_signature, "f32+i4g16");
+});
+
+Deno.test("census 加重: attrs が違えば別行・attrs のキー順だけの違いは 1 行", () => {
+  const census = censusComponent(ATTRS_GRAPH, TARGET, IDENTITY, unitScenario({}));
+  const summary = summarizeScenario(
+    unitScenario({}),
+    census.rows,
+    census.unusedBindings,
+    census.fusionHits,
+  );
+  assertEquals(summary.node_count, 4);
+
+  // permute 2 本は shape も dtype も格納も融合も同じ（= attrs 以外の欄では区別が付かない）。
+  const permutes = summary.weights.filter((weight) => weight.op === "permute");
+  assertEquals(permutes.length, 2);
+  assertEquals(permutes.map((weight) => weight.count), [1, 1]);
+  assertEquals(new Set(permutes.map((weight) => JSON.stringify(weight.out_shapes))).size, 1);
+  assertEquals(
+    new Set(permutes.map((weight) => weight.storage_signature)),
+    new Set(["none"]),
+  );
+  // 割れているのは `dims` だけ — [0,2,1,3] と [0,1,3,2] はメモリアクセス形が別物。
+  assertEquals(
+    permutes.map((weight) => weight.attrs.dims),
+    [[0, 2, 1, 3], [0, 1, 3, 2]],
+  );
+
+  // slice 2 本は attrs の値が同じでキーの書き順だけ違う → 1 行に畳まれる。
+  const slices = summary.weights.filter((weight) => weight.op === "slice");
+  assertEquals(slices.length, 1);
+  assertEquals(slices[0].count, 2);
+});
+
+Deno.test("census 加重: 格納の集合が同じでもスロット割り当てが違えば別行", () => {
+  const census = censusComponent(SLOT_GRAPH, TARGET, IDENTITY, unitScenario({}));
+  const summary = summarizeScenario(
+    unitScenario({}),
+    census.rows,
+    census.unusedBindings,
+    census.fusionHits,
+  );
+  assertEquals(summary.node_count, 2);
+  // 集合シグネチャは 2 本とも同じ = `by_storage` では区別が付かない。
+  assertEquals(summary.by_storage, { "f32+i4g16": 2 });
+  // それでも加重は 2 行（各 1 本）— スロット列が違うので別のカーネルケースになる。
+  assertEquals(summary.weights.length, 2);
+  assertEquals(summary.weights.map((weight) => weight.count), [1, 1]);
+  assertEquals(summary.weights.map((weight) => weight.storage), [
+    [{ dtype: "i4", group_size: 16 }, { dtype: "f32" }],
+    [{ dtype: "f32" }, { dtype: "i4", group_size: 16 }],
+  ]);
+});
+
+/** 一時ディレクトリに置く配布形の manifest（資産解決は shard の実体を読まない）。 */
+const DIST_MANIFEST = JSON.stringify({
+  defaultModel: "m",
+  models: {
+    m: {
+      pipeline: "gemma4/1",
+      defaultQuant: "i8-a8",
+      quants: {
+        "i8-a8": { weights: { model: "i8" }, session: { linearCompute: "a8" } },
+        // `session` の欄ごと無い quant（配布形の多数派）。
+        i8: { weights: { model: "i8" } },
+      },
+      weights: { model: { i8: { shards: [{ path: "model/model.i8.safetensors" }] } } },
+    },
+  },
+});
+
+Deno.test("summary ヘッダの session: 配布形は宣言の写し・系列出力は null", async () => {
+  const temp = await Deno.makeTempDir();
+  try {
+    const distRoot = new URL(`file://${temp}/dist/`);
+    await Deno.mkdir(distRoot, { recursive: true });
+    await Deno.writeTextFile(new URL("karume.json", distRoot), DIST_MANIFEST);
+
+    const declared = await resolveAsset(distRoot, undefined, undefined, undefined);
+    assertEquals(declared.session, { linearCompute: "a8" });
+    // manifest 所有の綴りのまま（runtime の SessionOptions へ翻訳しない）。
+    assertEquals(buildCensusSummary("dist", declared, []).session, { linearCompute: "a8" });
+
+    // 欄ごと無い quant は「ノブを 1 つも指定しない」= 空の宣言（`null` ではない）。
+    const silent = await resolveAsset(distRoot, undefined, "i8", undefined);
+    assertEquals(buildCensusSummary("dist", silent, []).session, {});
+
+    // 系列出力は manifest を持たない = 実行変種が宣言されていない（呼び手が与える）。
+    const seriesRoot = new URL(`file://${temp}/gemma4-series/`);
+    await Deno.mkdir(seriesRoot, { recursive: true });
+    await Deno.writeTextFile(new URL("model.f32.safetensors", seriesRoot), "");
+    const series = await resolveAsset(seriesRoot, undefined, undefined, undefined);
+    assertEquals(series.session, undefined);
+    assertEquals(buildCensusSummary("series", series, []).session, null);
+  } finally {
+    await Deno.remove(temp, { recursive: true });
+  }
 });
 
 Deno.test("シナリオ: --scenario の綴りと、実在しない component 名の拒否", () => {
@@ -172,6 +338,8 @@ Deno.test({
   fn: async () => {
     const asset = await resolveAsset(GEMMA4_DIR, undefined, undefined, undefined);
     assertEquals(asset.family, "gemma4");
+    // 既定 quant `i4` はノブを 1 つも宣言していない（実行変種は呼び手の既定のまま）。
+    assertEquals(asset.session, {});
     assertEquals(asset.components.map((target) => target.component), ["model"]);
     const [target] = asset.components;
     const graph = await readIrGraph(target.graphShard);
@@ -193,9 +361,12 @@ Deno.test({
     const linears = summary.weights.filter((weight) => weight.op === "linear");
     const byStorage = new Map<string, number>();
     for (const weight of linears) {
-      byStorage.set(weight.storage, (byStorage.get(weight.storage) ?? 0) + weight.count);
+      const signature = weight.storage_signature;
+      byStorage.set(signature, (byStorage.get(signature) ?? 0) + weight.count);
     }
     assertEquals(byStorage.get("f32+i4g32"), 276);
+    // 276 本が畳まれて残る相異なる形は 12（attrs を加重キーに入れても linear は割れない）。
+    assertEquals(linears.filter((weight) => weight.storage_signature === "f32+i4g32").length, 12);
     // lm_head だけが i8 重み（+ f32 bias）。
     assertEquals(byStorage.get("f32+i8"), 1);
     assertEquals(linears.reduce((total, weight) => total + weight.count, 0), 277);

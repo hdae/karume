@@ -6,12 +6,11 @@
  * 形」が確定する（ADR 0004 の静的形状 — 全ノードの出力 shape は 1 dispatch も出す前に決まる）。
  *
  * 用途は 2 つ。①候補起票の根拠を外挿から実数へ置き換える（strided 実体化の kind 別内訳など）
- * ②単体マイクロベンチの **census 加重**（同じ (op, shape, dtype, 格納) が実行 1 回に何本
- * 出るか）を与える。
+ * ②単体マイクロベンチの **census 加重**（同じ (op, shape, dtype, attrs, 格納) が実行 1 回に
+ * 何本出るか）を与える。
  */
 
 import type { IrDtype, IrGraph } from "../../packages/runtime/src/format/ir.ts";
-import { parseDim } from "../../packages/runtime/src/format/dims.ts";
 import {
   bindSymbols,
   countUses,
@@ -22,23 +21,15 @@ import {
 import {
   type ExecStep,
   type FusionCounts,
-  type FusionLimits,
   planFusions,
 } from "../../packages/runtime/src/runtime/fusion.ts";
-import type { ComponentTarget } from "./assets.ts";
-import { bindingsFor, type Scenario } from "./scenario.ts";
-
-/**
- * 融合判定に使う device 能力。**WebGPU core の既定値**（128MiB / 65535）を固定で使う。
- *
- * MUST: 実機の granted limit を読まない。census は機に依らない静的な表であるべきで、
- * 行ブロック枚数の分かれ目（`rowBlockAttention`）が測った機ごとに動くと、別の機で採った表と
- * 融合の有無が黙って食い違う。実機の値で見たいときは実行時の `lastRunFusions` が正本。
- */
-const CORE_LIMITS: FusionLimits = {
-  maxStorageBufferBindingSize: 128 * 1024 * 1024,
-  maxComputeWorkgroupsPerDimension: 65535,
-};
+import {
+  type AssetTargets,
+  type ComponentTarget,
+  CORE_LIMITS,
+  type SessionDeclaration,
+} from "../_shared/assets.ts";
+import { resolveComponentBindings, type Scenario } from "../_shared/scenario.ts";
 
 /** 初期化子の格納（census 行の `storage` 欄 1 要素）。 */
 export type StorageRef = {
@@ -98,22 +89,6 @@ export type AssetIdentity = {
   readonly quant: string;
 };
 
-/** 宣言 shape に現れる記号を集める。 */
-const symbolsOf = (shape: readonly (number | string)[], into: Set<string>): void => {
-  for (const dim of shape) {
-    if (typeof dim === "string") into.add(parseDim(dim).sym);
-  }
-};
-
-/** グラフのどこか（入力 / 値 / state スロット）の shape が実際に使う記号。 */
-const usedSymbols = (graph: IrGraph): ReadonlySet<string> => {
-  const used = new Set<string>();
-  for (const spec of graph.inputs) symbolsOf(spec.shape, used);
-  for (const value of Object.values(graph.values)) symbolsOf(value.shape, used);
-  for (const slot of Object.values(graph.states)) symbolsOf(slot.shape, used);
-  return used;
-};
-
 /** ノード index → 融合ルール名 / 別名化フラグ。 */
 type NodeFate = {
   readonly owners: ReadonlyMap<number, string>;
@@ -169,29 +144,13 @@ export const censusComponent = (
   identity: AssetIdentity,
   scenario: Scenario,
 ): ComponentCensus => {
-  const bound = bindingsFor(scenario, target.component);
-  const symbols = new Set(graph.symbols);
-  for (const key of Object.keys(scenario.bindings)) {
-    const dot = key.indexOf(".");
-    if (dot < 0 || key.slice(0, dot) !== target.component) continue;
-    const sym = key.slice(dot + 1);
-    if (!symbols.has(sym)) {
-      throw new Error(
-        `シナリオ '${scenario.name}' の束縛 '${key}': ${target.component} に記号 '${sym}' が無い` +
-          `（既知: ${graph.symbols.join(", ") || "なし"}）`,
-      );
-    }
-  }
-  const used = usedSymbols(graph);
-  const missing = [...used].filter((sym) => !Object.hasOwn(bound, sym));
-  if (missing.length > 0) {
-    throw new Error(
-      `${target.component}: 記号 ${missing.join(" / ")} が未束縛` +
-        `（シナリオ '${scenario.name}' の束縛: ${JSON.stringify(bound)}）` +
-        " — --scenario で与える（記号のまま census を出さない）",
-    );
-  }
-  const unusedBindings = Object.keys(bound).filter((sym) => symbols.has(sym) && !used.has(sym));
+  // 束縛の判定（修飾キーの記号側の誤綴り・未束縛）は tools/_shared/scenario.ts の 1 本
+  // （fusion-hints と同じ関数 = 同じ文言で落ちる）。
+  const { bindings: bound, unused: unusedBindings } = resolveComponentBindings(
+    scenario,
+    target.component,
+    graph,
+  );
 
   const inputShapes = Object.fromEntries(
     graph.inputs.map((spec) => [spec.name, resolveShape(spec.shape, bound)]),
@@ -286,6 +245,26 @@ const outElements = (row: CensusRow): number =>
   row.out_shapes.reduce((total, shape) => total + shape.reduce((size, dim) => size * dim, 1), 0);
 
 /**
+ * 加重行 1 入力スロットぶんの格納。census 行の {@link StorageRef} から**テンソル名**
+ * （`tensor` / `scale`）を落としてある — 加重行は層をまたいで畳んだ行なので、代表 1 本の
+ * safetensors キーを載せると「この行のテンソル」と読めてしまう。カーネルの分かれ目になるのは
+ * dtype と group 長だけで、そこは残す。
+ */
+export type WeightStorage = {
+  readonly dtype: string;
+  readonly group_size?: number;
+};
+
+/** census 行の格納列 → 加重行の格納列（`ins` 同順・初期化子でない入力は null）。 */
+const weightStorage = (row: CensusRow): readonly (WeightStorage | null)[] =>
+  row.storage.map((ref) =>
+    ref === null ? null : {
+      dtype: ref.dtype,
+      ...(ref.group_size === undefined ? {} : { group_size: ref.group_size }),
+    }
+  );
+
+/**
  * ノードの格納シグネチャ（初期化子入力の格納 dtype を重複無しで並べたもの）。
  * `i4g32` のように group 長まで含める — 同じ i4 でも group 長でカーネルが変わる。
  */
@@ -298,7 +277,12 @@ const storageSignature = (row: CensusRow): string => {
   return tokens.size === 0 ? "none" : [...tokens].sort().join("+");
 };
 
-/** census 加重の 1 行（同一の (op, shape, dtype, 格納, 融合) が実行 1 回に何本出るか）。 */
+/**
+ * census 加重の 1 行（同一の (op, shape, dtype, attrs, 格納, 融合) が実行 1 回に何本出るか）。
+ *
+ * MUST: 行が名乗る欄は全て {@link tallyKey} に入っている（= 畳んだ行の中で値が割れない）。
+ * 代表 1 本の値を全体の値として載せると、単体ベンチが実在しない形を測ることになる。
+ */
 export type WeightRow = {
   readonly component: string;
   readonly op: string;
@@ -306,7 +290,15 @@ export type WeightRow = {
   readonly out_shapes: readonly (readonly number[])[];
   readonly in_dtypes: readonly IrDtype[];
   readonly out_dtypes: readonly IrDtype[];
-  readonly storage: string;
+  /**
+   * op の属性（IR そのまま）。**加重キーの一部** — 同じ shape / dtype でも `permute` の `dims`
+   * や `slice` の範囲が違えばメモリアクセス形が別物で、単体ベンチでは別ケースになる。
+   */
+  readonly attrs: Readonly<Record<string, unknown>>;
+  /** `ins` 同順の格納（初期化子でない入力は null）。 */
+  readonly storage: readonly (WeightStorage | null)[];
+  /** 格納の集合シグネチャ（`f32+i4g32` など — `by_storage` の集計キーと同じ綴り）。 */
+  readonly storage_signature: string;
   readonly fused_by: string | null;
   readonly aliases_input: boolean;
   /** census 加重（この形のノード本数）。 */
@@ -351,9 +343,59 @@ export type CensusSummary = {
   readonly family: string;
   readonly model: string;
   readonly quant: string;
+  /**
+   * この quant が宣言した実行変種の**逐語の写し**（manifest 所有の綴りのまま）。系列出力は
+   * manifest を持たないので `null` = 実行変種は宣言されていない（呼び手が与える）。
+   */
+  readonly session: SessionDeclaration | null;
   readonly scenarios: readonly ScenarioSummary[];
 };
 
+/**
+ * summary.json のヘッダを組む（1 実行 = 1 資産）。
+ *
+ * `session` の `null` は「宣言が無い」であって「ノブ指定なし」ではない — 配布形は宣言の欄が
+ * 空でも `{}` を写す（{@link AssetTargets} の `session` を参照）。
+ */
+export const buildCensusSummary = (
+  source: string,
+  asset: AssetTargets,
+  scenarios: readonly ScenarioSummary[],
+): CensusSummary => ({
+  generated_at: new Date().toISOString(),
+  source,
+  family: asset.family,
+  model: asset.model,
+  quant: asset.quant,
+  session: asset.session ?? null,
+  scenarios,
+});
+
+/**
+ * キー順に依存しない JSON 文字列化（{@link tallyKey} が attrs を混ぜるため）。
+ *
+ * MUST: オブジェクトはキーを並べ替えてから綴る。attrs は IR の JSON をそのまま持つので、
+ * 同じ属性でも書いた側のキー順が違えば `JSON.stringify` の結果は割れる。加重キーが綴り順で
+ * 割れると「相異なる形の本数」が資産の書き出し順に依存してしまう。
+ */
+const stableJson = (value: unknown): string => {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  return `{${
+    Object.entries(value)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([key, nested]) => `${JSON.stringify(key)}:${stableJson(nested)}`)
+      .join(",")
+  }}`;
+};
+
+/**
+ * 加重を畳むキー。
+ *
+ * 格納はシグネチャ（集合）ではなく**スロット同順の列**で持つ — `linear` の `[x, W, bias]` で
+ * どのスロットが i4 でどれが f32 かは単体ベンチのカーネル選択そのもので、集合に潰すと
+ * 割り当ての違う 2 形が 1 行に畳まれて代表 1 本の割り当てだけが残る。
+ */
 const tallyKey = (row: CensusRow): string =>
   JSON.stringify([
     row.component,
@@ -362,7 +404,8 @@ const tallyKey = (row: CensusRow): string =>
     row.out_shapes,
     row.in_dtypes,
     row.out_dtypes,
-    storageSignature(row),
+    stableJson(row.attrs),
+    weightStorage(row),
     row.fused_by,
     row.aliases_input,
   ]);
@@ -407,7 +450,9 @@ export const summarizeScenario = (
       out_shapes: row.out_shapes,
       in_dtypes: row.in_dtypes,
       out_dtypes: row.out_dtypes,
-      storage: storageSignature(row),
+      attrs: row.attrs,
+      storage: weightStorage(row),
+      storage_signature: storageSignature(row),
       fused_by: row.fused_by,
       aliases_input: row.aliases_input,
       count,
