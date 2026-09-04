@@ -316,7 +316,7 @@ Deno.test("シナリオ: --scenario の綴りと、実在しない component 名
  * 実資産の合格線。資産（配布ミラー）は git 追跡外なので、無い環境は**明示 SKIP** する
  * （テストを消して無音で緑にしない — ADR 0005）。
  */
-const GEMMA4_DIR = new URL("../../models/karume-gemma4-e2b/", import.meta.url);
+const GEMMA4_DIR = new URL("../../models/karume-gemma4/", import.meta.url);
 const exists = (url: URL): boolean => {
   try {
     return Deno.statSync(url).isFile;

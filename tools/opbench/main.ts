@@ -2,10 +2,10 @@
  * opbench — OP マイクロベンチ基盤の CLI（1 段目 = 静的 census）。
  *
  *     deno run -A tools/opbench/main.ts census \
- *         --source models/karume-gemma4-e2b --out outputs/bench/karume-gemma4-e2b/2026-09-03_op-census
+ *         --source models/karume-gemma4 --out outputs/bench/karume-gemma4/2026-09-03_op-census
  *     deno run -A tools/opbench/main.ts census --source outputs/series/birefnet-hr-1024 \
  *         --out outputs/bench/birefnet-hr-1024/2026-09-03_op-census
- *     deno run -A tools/opbench/main.ts census --source models/karume-gemma4-e2b \
+ *     deno run -A tools/opbench/main.ts census --source models/karume-gemma4 \
  *         --scenario long=M:1,C:8192 --out <dir>
  *
  * 1 実行 = 1 資産 = `census.jsonl` 1 本 + `summary.json` 1 本（先例 = tools/ram-peak/measure.ts の

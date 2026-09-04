@@ -171,7 +171,7 @@ const pinnedLocalSource = (
  * import { localDirectory, loadManifest } from "@karume/hub";
  * import { denoDirectory } from "@karume/hub/deno";
  *
- * const loaded = await loadManifest(denoDirectory("./models/karume-gemma4-e2b"));
+ * const loaded = await loadManifest(denoDirectory("./models/karume-gemma4"));
  * ```
  *
  * 越境参照の相対サブディレクトリは**別の取得元を作って渡す**（`crossRepo: { "owner/name":

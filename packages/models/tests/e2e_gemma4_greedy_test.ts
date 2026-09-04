@@ -185,7 +185,7 @@ const FULL_HEAD_DIM = 512;
  * 配布形なら `karume.json` の `pipelineConfig.rope` が宣言するが、decode 系列は検収用の裸の IR
  * なので `karume.json` を持たない（台本は config から導いて例示入力に使うだけ —
  * `gemma4/rope.py` の `rope_specs`）。よってここに定数として置く。値は E2B の config 由来で、
- * 配布形（`models/karume-gemma4-e2b/karume.json` の `pipelineConfig.rope`）の宣言と同値:
+ * 配布形（`models/karume-gemma4/karume.json` の `pipelineConfig.rope`）の宣言と同値:
  * sliding = `rope_local_base_freq` 10,000 / `head_dim` 256（全次元を回す）、
  * full = `rope_theta` 1,000,000 / `global_head_dim` 512 / `partial_rotary_factor` 0.25 → 128。
  *

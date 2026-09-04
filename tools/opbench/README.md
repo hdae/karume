@@ -36,8 +36,8 @@ Examples:
 ```sh
 # Distribution mirror, default scenarios (gemma4 = decode and prefill)
 deno run -A tools/opbench/main.ts census \
-  --source models/karume-gemma4-e2b \
-  --out outputs/bench/karume-gemma4-e2b/2026-09-03_op-census
+  --source models/karume-gemma4 \
+  --out outputs/bench/karume-gemma4/2026-09-03_op-census
 
 # Series output (no manifest — components are discovered from the directory tree)
 deno run -A tools/opbench/main.ts census \
@@ -46,7 +46,7 @@ deno run -A tools/opbench/main.ts census \
 
 # Explicit binding: a longer full-attention capacity
 deno run -A tools/opbench/main.ts census \
-  --source models/karume-gemma4-e2b --scenario long=M:1,C:8192 --out <dir>
+  --source models/karume-gemma4 --scenario long=M:1,C:8192 --out <dir>
 ```
 
 ## Scenario bindings

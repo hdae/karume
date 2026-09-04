@@ -15,7 +15,7 @@
 //
 // ## 資産
 //
-// 配布形ミラー `models/karume-gemma4-e2b/`（`dist.py --pipeline gemma4` が組む）。リポジトリ
+// 配布形ミラー `models/karume-gemma4/`（`dist.py --pipeline gemma4` が組む）。リポジトリ
 // 管理外なので、無い環境では**明示 SKIP** する。取得元がローカルなので、この門は約 4GiB を
 // 永続キャッシュへ**残さない**（疑似 HF 経路との違い）。
 
@@ -28,7 +28,7 @@ import { type Gemma4ChatMessage, Gemma4Pipeline } from "../gemma.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { allResidentPleBytesOfMirror } from "./helpers/ple-budget.ts";
 
-const MIRROR_DIR = new URL("../../../models/karume-gemma4-e2b/", import.meta.url);
+const MIRROR_DIR = new URL("../../../models/karume-gemma4/", import.meta.url);
 
 /** SKIP 時にそのまま貼れる組み立てコマンド。 */
 const ASSEMBLE_COMMAND = "cd tools/export-recipes && uv run python dist.py --pipeline gemma4";
@@ -83,7 +83,7 @@ const AVAILABLE = manifestExists();
 
 if (!AVAILABLE) {
   console.warn(
-    `[karume] 配布形ミラー models/karume-gemma4-e2b/ が無いためディレクトリ直読み検収を SKIP する。` +
+    `[karume] 配布形ミラー models/karume-gemma4/ が無いためディレクトリ直読み検収を SKIP する。` +
       `組み立て: ${ASSEMBLE_COMMAND}`,
   );
 }

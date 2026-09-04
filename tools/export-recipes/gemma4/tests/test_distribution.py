@@ -563,7 +563,9 @@ class TestGemma4Naming:
     def test_the_series_and_repo_names_come_from_one_word(self) -> None:
         assert gemma4_series_name("e2b", "product") == "gemma4-e2b-product"
         assert gemma4_series_name("e2b", "tokenizer") == "gemma4-e2b-tokenizer"
-        assert gemma4_repo_name("e2b") == "karume-gemma4-e2b"
+        assert gemma4_repo_name("e2b") == "karume-gemma4"
+        # 家族 1 リポ（ADR 0092 決定 1）— どのモデルを組んでも行き先は 1 つ。
+        assert gemma4_repo_name("e4b") == gemma4_repo_name("e2b")
 
     def test_the_sources_follow_the_repo_topology(self, tmp_path: Path) -> None:
         sources = gemma4_sources(tmp_path, GEMMA4_DEFAULT_MODEL)
@@ -585,7 +587,7 @@ class TestGemma4Card:
 
     def test_it_renders_the_attribution_and_the_declared_defaults(self, gemma4_assembled) -> None:
         _, manifest = gemma4_assembled
-        card = render_gemma4_model_card(manifest, "hdae/karume-gemma4-e2b")
+        card = render_gemma4_model_card(manifest, "hdae/karume-gemma4")
         assert "license: apache-2.0" in card
         assert GEMMA4_UPSTREAM[GEMMA4_DEFAULT_MODEL] in card
         # 使われ方は上流カードへ誘導する（2026-09-01 のライセンス方針）。
@@ -600,7 +602,7 @@ class TestGemma4Card:
         other = json.loads(json.dumps(manifest))
         other["models"][GEMMA4_DEFAULT_MODEL]["pipeline"] = "anima/1"
         with pytest.raises(ValueError, match="gemma4/1"):
-            render_gemma4_model_card(other, "hdae/karume-gemma4-e2b")
+            render_gemma4_model_card(other, "hdae/karume-gemma4")
 
     def test_it_refuses_a_model_outside_the_attribution_table(self, gemma4_assembled) -> None:
         _, manifest = gemma4_assembled
@@ -608,7 +610,7 @@ class TestGemma4Card:
         other["models"]["e4b"] = other["models"].pop(GEMMA4_DEFAULT_MODEL)
         other["defaultModel"] = "e4b"
         with pytest.raises(ValueError, match="帰属表に無い"):
-            render_gemma4_model_card(other, "hdae/karume-gemma4-e2b")
+            render_gemma4_model_card(other, "hdae/karume-gemma4")
 
 
 class TestGemma4LegalText:

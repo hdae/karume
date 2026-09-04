@@ -15,7 +15,7 @@
 //  ④ **グラフ宣言との突合**（`rope.<層種>.headDim` = `rope_*` 入力の最終次元）— 宣言だけが
 //     正しくてもグラフと食い違えば表の幅が違う。落ちる位置を初 `run` から admission へ引き戻す
 //
-// ③ の資産（`models/karume-gemma4-e2b/`）はリポジトリ管理外なので、無い環境では**その 1 本だけ**
+// ③ の資産（`models/karume-gemma4/`）はリポジトリ管理外なので、無い環境では**その 1 本だけ**
 // を明示 SKIP する（①② は常に走る）。
 
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
@@ -53,7 +53,7 @@ const SHIPPED_MAX_POSITION = 131072;
 /** 上流 `gemma-4-E2B-it` の `generation_config.json` の推奨（ADR 0083 決定 7）。 */
 const RECOMMENDED = { temperature: 1, topK: 64, topP: 0.95 } as const;
 
-const MIRROR = new URL("../../../models/karume-gemma4-e2b/karume.json", import.meta.url);
+const MIRROR = new URL("../../../models/karume-gemma4/karume.json", import.meta.url);
 
 const readMirror = (): string | undefined => {
   try {
@@ -374,7 +374,7 @@ Deno.test("gemma4 pipelineConfig: 配布形ミラーの宣言がこのパーサ�
   const text = readMirror();
   if (text === undefined) {
     console.warn(
-      "[karume] models/karume-gemma4-e2b/ が無いため配布形の宣言の門を SKIP する。" +
+      "[karume] models/karume-gemma4/ が無いため配布形の宣言の門を SKIP する。" +
         "生成: cd tools/export-recipes && uv run python dist.py --pipeline gemma4",
     );
     return;

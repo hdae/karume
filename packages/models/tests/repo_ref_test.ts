@@ -10,7 +10,7 @@
 //     役に立たない。
 //  ③ 公開配布リポを持たないファミリには存在しない識別子を案内しない。
 //  ④ **綴りが HF の `owner/name` であること**（パスにしか見えない文字列を URL へ綴り込まない）。
-//     救えない綴り（`models/karume-gemma4-e2b` のような合法な `owner/name`）も対で固定する。
+//     救えない綴り（`models/karume-gemma4` のような合法な `owner/name`）も対で固定する。
 //  ⑤ **取得元ハンドル**（`localDirectory` / `denoDirectory`）はこの門を通さず素通りし、かつ
 //     素通りの席を作ったことで HF 側の門が緩んでいないこと。
 // 正常系（文字列 = main 追従 / オブジェクトはそのまま）も同じ 1 本が担うので合わせて縛る。
@@ -60,15 +60,15 @@ Deno.test("toRepoRef: パスにしか見えない綴りは HF へ投げる前に
   // ローカルのディレクトリを渡した呼び出しは、門が無いとその文字列が URL へ綴り込まれ、
   // 返るのは 401 / 404 —「取得先が存在しない」という原因の遠い診断になる。
   const paths = [
-    "./models/karume-gemma4-e2b", // 先頭 './'
-    "../karume-gemma4-e2b", // 先頭 '../'
+    "./models/karume-gemma4", // 先頭 './'
+    "../karume-gemma4", // 先頭 '../'
     "/home/me/models/dist", // 絶対パス
     "hdae/karume-anima/", // 末尾 '/'
     "a/b/c", // スラッシュ 2 個以上
     "hdae//karume-anima", // 空セグメント
     "hdae/karume anima", // 許可外の文字
     ".hidden/name", // 先頭ドット
-    "karume-gemma4-e2b", // セグメント 1 つ（`owner/name` でない）
+    "karume-gemma4", // セグメント 1 つ（`owner/name` でない）
   ];
   for (const repo of paths) {
     assertThrows(
@@ -83,8 +83,8 @@ Deno.test("toRepoRef: パスにしか見えない綴りは HF へ投げる前に
 Deno.test("toRepoRef: `owner/name` に見えるローカルパスは救えない（仕様）", () => {
   // 綴りとして完全に合法な HF repo 名なので、この引数の中に区別できる情報が無い。
   // 「実在するか」は取得層の仕事で、ここが見るのは綴りだけである。
-  assertEquals(toRepoRef("models/karume-gemma4-e2b", "Gemma4Pipeline.fromPretrained"), {
-    repo: "models/karume-gemma4-e2b",
+  assertEquals(toRepoRef("models/karume-gemma4", "Gemma4Pipeline.fromPretrained"), {
+    repo: "models/karume-gemma4",
   });
 });
 
@@ -115,7 +115,7 @@ Deno.test("toManifestSource: 取得元ハンドルでない値は従来どおり
     repo: "someone/karume-fork",
   });
   assertThrows(
-    () => toManifestSource("./models/karume-gemma4-e2b", "X.fromPretrained"),
+    () => toManifestSource("./models/karume-gemma4", "X.fromPretrained"),
     Error,
     "'owner/name' でない",
   );

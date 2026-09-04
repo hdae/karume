@@ -36,10 +36,6 @@ export const GEMMA4_PIPELINE_MAJOR = 1;
  * basename に戻る — この不変条件は `tests/sources_test.ts` の門が見る）。同一家族 = 1 リポなので、
  * 将来の E4B / 12B もこの 1 本（`"gemma4"`）に同居する（既定以外は `{ model }` で選ぶ）。
  *
- * MUST: この revision は**改名前**のリポを指す — 公開は
- * `hdae/karume-gemma4-e2b` → `hdae/karume-gemma4` の改名（HF の rename・旧名はリダイレクト）を
- * 済ませてから行う（手順はリリース手順書）。改名前にこの表の綴りで取りに行くと 404 になる。
- *
  * **パッケージ版に合わせて自動追従したい場合のオプトイン**として渡す — 再現性を自分で
  * 固定したい場合は、この表ではなく自分の `{ repo, revision }` を書く（`fromPretrained` に
  * 既定は無い）。

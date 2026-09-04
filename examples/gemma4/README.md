@@ -27,7 +27,7 @@ One line is one user turn. While a turn is generating, the reply streams out as 
 forms are mutually exclusive:
 
 - `--source <dir>` reads a local distribution directory (one that carries `karume.json`) directly.
-  This is the default, at `models/karume-gemma4-e2b` — the layout that
+  This is the default, at `models/karume-gemma4` — the layout that
   `tools/export-recipes/gemma4` produces.
 - `--repo <owner/name[@revision]>` fetches from Hugging Face. Gemma 4 has no published repository
   yet, so there is no pinned revision constant for it; write the revision yourself when you want a
@@ -38,19 +38,19 @@ forms are mutually exclusive:
 All options are `--key value` pairs except `--diagnostics`, which is a bare switch. Unknown keys are
 rejected rather than silently ignored.
 
-| Option                           | Default                    | What it does                                                                                                       |
-| -------------------------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `--source <dir>`                 | `models/karume-gemma4-e2b` | Read a local distribution directory.                                                                               |
-| `--repo <owner/name[@revision]>` | —                          | Fetch from Hugging Face instead.                                                                                   |
-| `--system <text>`                | none                       | System turn placed at the head of the conversation.                                                                |
-| `--max-new-tokens <n>`           | `256`                      | Per-turn generation cap (stop tokens are not counted).                                                             |
-| `--temperature <x>`              | asset default              | Sampling temperature; `0` is greedy.                                                                               |
-| `--top-k <n>` / `--top-p <x>`    | asset default              | Candidate truncation.                                                                                              |
-| `--seed <n>`                     | asset default              | Sampling seed.                                                                                                     |
-| `--capacity <n>`                 | asset default              | Logical positions this conversation reserves KV for.                                                               |
-| `--chunk-length <n>`             | asset default              | Rows per prefill run.                                                                                              |
-| `--max-resident-ple-bytes <n>`   | twice the largest shard    | Host RAM budget for the resident PLE sidecar.                                                                      |
-| `--diagnostics`                  | off                        | Print the per-op GPU time breakdown of the last run of each turn to stderr. Not usable on macOS/Metal — see below. |
+| Option                           | Default                 | What it does                                                                                                       |
+| -------------------------------- | ----------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `--source <dir>`                 | `models/karume-gemma4`  | Read a local distribution directory.                                                                               |
+| `--repo <owner/name[@revision]>` | —                       | Fetch from Hugging Face instead.                                                                                   |
+| `--system <text>`                | none                    | System turn placed at the head of the conversation.                                                                |
+| `--max-new-tokens <n>`           | `256`                   | Per-turn generation cap (stop tokens are not counted).                                                             |
+| `--temperature <x>`              | asset default           | Sampling temperature; `0` is greedy.                                                                               |
+| `--top-k <n>` / `--top-p <x>`    | asset default           | Candidate truncation.                                                                                              |
+| `--seed <n>`                     | asset default           | Sampling seed.                                                                                                     |
+| `--capacity <n>`                 | asset default           | Logical positions this conversation reserves KV for.                                                               |
+| `--chunk-length <n>`             | asset default           | Rows per prefill run.                                                                                              |
+| `--max-resident-ple-bytes <n>`   | twice the largest shard | Host RAM budget for the resident PLE sidecar.                                                                      |
+| `--diagnostics`                  | off                     | Print the per-op GPU time breakdown of the last run of each turn to stderr. Not usable on macOS/Metal — see below. |
 
 Any sampling flag you pass is layered on top of the recommended values the asset declares; the ones
 you leave out keep their declared value.

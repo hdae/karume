@@ -18,7 +18,7 @@
 //
 // ## 資産と経路
 //
-// ローカルの配布形ミラー `models/karume-gemma4-e2b/`（`dist.py --pipeline gemma4` が組む）を
+// ローカルの配布形ミラー `models/karume-gemma4/`（`dist.py --pipeline gemma4` が組む）を
 // **HF 形の HTTP** で配る使い捨てサーバ越しに読む（`examples/shared/local-dist-server.ts` —
 // デモが `--source <ローカルのパス>` で通るのと同じ 1 本）。ミラーはリポジトリ管理外なので、
 // 無い環境では**明示 SKIP** する。
@@ -37,7 +37,7 @@ import { serveLocalDist } from "../../../examples/shared/local-dist-server.ts";
 import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE } from "./helpers/gpu.ts";
 import { allResidentPleBytesOfMirror } from "./helpers/ple-budget.ts";
 
-const MIRROR_DIR = new URL("../../../models/karume-gemma4-e2b/", import.meta.url);
+const MIRROR_DIR = new URL("../../../models/karume-gemma4/", import.meta.url);
 
 /** SKIP 時にそのまま貼れる組み立てコマンド。 */
 const ASSEMBLE_COMMAND = "cd tools/export-recipes && uv run python dist.py --pipeline gemma4";
@@ -98,7 +98,7 @@ const AVAILABLE = MANIFEST_TEXT !== undefined;
 
 if (!AVAILABLE) {
   console.warn(
-    `[karume] 配布形ミラー models/karume-gemma4-e2b/ が無いため段 5 の疎通検収を SKIP する。` +
+    `[karume] 配布形ミラー models/karume-gemma4/ が無いため段 5 の疎通検収を SKIP する。` +
       `組み立て: ${ASSEMBLE_COMMAND}`,
   );
 }

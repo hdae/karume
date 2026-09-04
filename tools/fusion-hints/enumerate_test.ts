@@ -164,8 +164,8 @@ Deno.test("シナリオ: component が宣言しない記号を名指した修飾
 Deno.test("CLI: 廃止した --bind / --default-symbol は理由つきで落ちる（互換シムを置かない）", () => {
   for (
     const argv of [
-      ["enumerate", "--source", "models/karume-gemma4-e2b", "--bind", "M=1"],
-      ["enumerate", "--source", "models/karume-gemma4-e2b", "--default-symbol", "64"],
+      ["enumerate", "--source", "models/karume-gemma4", "--bind", "M=1"],
+      ["enumerate", "--source", "models/karume-gemma4", "--default-symbol", "64"],
     ]
   ) {
     const error = assertThrows(() => parseArgs(argv), Error);
@@ -177,7 +177,7 @@ Deno.test("CLI: 廃止した --bind / --default-symbol は理由つきで落ち�
     parseArgs([
       "enumerate",
       "--source",
-      "models/karume-gemma4-e2b",
+      "models/karume-gemma4",
       "--scenario",
       "decode=M:1,C:640",
       "--scenario",
@@ -185,13 +185,13 @@ Deno.test("CLI: 廃止した --bind / --default-symbol は理由つきで落ち�
     ]).scenarios.map((scenario) => [scenario.name, scenario.bindings]),
     [["decode", { M: 1, C: 640 }], ["prefill", { M: 768, C: 640 }]],
   );
-  assertEquals(parseArgs(["enumerate", "--source", "models/karume-gemma4-e2b"]).scenarios, []);
+  assertEquals(parseArgs(["enumerate", "--source", "models/karume-gemma4"]).scenarios, []);
 });
 
 Deno.test("CLI: 未知のオプションは USAGE つきで落ちる（黙って既定シナリオへ落ちない）", () => {
   // `--scenarios`（複数形）は 1 文字違いで、捨てられると家族の既定シナリオで走ってしまう。
   const error = assertThrows(
-    () => parseArgs(["enumerate", "--source", "models/karume-gemma4-e2b", "--scenarios", "x=M:1"]),
+    () => parseArgs(["enumerate", "--source", "models/karume-gemma4", "--scenarios", "x=M:1"]),
     Error,
   );
   assertStringIncludes(error.message, "未知のオプション '--scenarios'");
@@ -204,7 +204,7 @@ Deno.test("CLI: --scenario の名前が重複したら落ちる（census と名�
       parseArgs([
         "enumerate",
         "--source",
-        "models/karume-gemma4-e2b",
+        "models/karume-gemma4",
         "--scenario",
         "a=M:1",
         "--scenario",
@@ -419,7 +419,7 @@ Deno.test({
  * 期待値は opbench の census 側の門（tools/opbench/census_test.ts）と同じ資産・同じシナリオ
  * なので、両道具が同じ束縛で同じグラフを見ていることがここで揃う。
  */
-const GEMMA4_DIR = new URL("../../models/karume-gemma4-e2b/", import.meta.url);
+const GEMMA4_DIR = new URL("../../models/karume-gemma4/", import.meta.url);
 const GEMMA4_AVAILABLE = await exists(new URL("karume.json", GEMMA4_DIR));
 if (!GEMMA4_AVAILABLE) {
   console.warn(

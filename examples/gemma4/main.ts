@@ -3,8 +3,8 @@
  *
  *     deno task demo:gemma4
  *     deno task demo:gemma4 --system "Answer in one short sentence." --max-new-tokens 128
- *     deno task demo:gemma4 --source models/karume-gemma4-e2b --temperature 0
- *     deno task demo:gemma4 --repo someone/karume-gemma4-e2b@1a2b3c4 --seed 7
+ *     deno task demo:gemma4 --source models/karume-gemma4 --temperature 0
+ *     deno task demo:gemma4 --repo someone/karume-gemma4@1a2b3c4 --seed 7
  *     deno task demo:gemma4 --capacity 16384 --chunk-length 1536
  *     deno task demo:gemma4 --diagnostics
  *
@@ -90,7 +90,7 @@ const KNOWN = new Set([
 const FLAGS = new Set(["diagnostics"]);
 
 /** 取得元の既定（`dist.py --pipeline gemma4` が組むローカルミラー — `docs/assets-layout.md`）。 */
-const DEFAULT_SOURCE = "models/karume-gemma4-e2b";
+const DEFAULT_SOURCE = "models/karume-gemma4";
 
 /** 1 ターンで生成する token 数の上限（停止 token は含まれない）。 */
 const DEFAULT_MAX_NEW_TOKENS = 256;

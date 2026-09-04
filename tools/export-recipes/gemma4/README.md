@@ -316,7 +316,7 @@ rather than declared as a dependency group.
 
 ```sh
 cd tools/export-recipes
-uv run python dist.py --pipeline gemma4        # → models/karume-gemma4-e2b/ (~4.0 GiB)
+uv run python dist.py --pipeline gemma4        # → models/karume-gemma4/ (~4.0 GiB)
 ```
 
 The distribution folds **two series** into one HF repository: the product container

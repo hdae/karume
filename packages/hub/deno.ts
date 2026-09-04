@@ -42,7 +42,7 @@ const asDirectory = (root: string | URL): string | URL => {
  * import { loadManifest } from "@karume/hub";
  * import { denoDirectory } from "@karume/hub/deno";
  *
- * const loaded = await loadManifest(denoDirectory("./models/karume-gemma4-e2b"));
+ * const loaded = await loadManifest(denoDirectory("./models/karume-gemma4"));
  * ```
  *
  * 必要な権限は root 以下への `--allow-read` だけ（network も CacheStorage も通らない）。

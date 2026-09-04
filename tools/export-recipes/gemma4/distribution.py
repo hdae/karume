@@ -77,12 +77,16 @@ from .rope import (
 #: `GEMMA4_PIPELINE_NAME` / `GEMMA4_PIPELINE_MAJOR`（`packages/models/src/gemma/config.ts`）。
 GEMMA4_PIPELINE = "gemma4/1"
 
-#: 既定のモデル名（= 既定のリポ名 `karume-gemma4-e2b` の末尾）。綴りの受理集合は帰属表
+#: 既定のモデル名（`--model` を省いた組み立てが入れるモデル）。綴りの受理集合は帰属表
 #: （`gemma4.card.GEMMA4_UPSTREAM`）が持つ。
 GEMMA4_DEFAULT_MODEL = "e2b"
 
-#: 系列名とリポ名の接頭辞（`karume-gemma4-<モデル名>`）。
+#: 系列名の接頭辞（`gemma4-<モデル名>-<接尾>`）。
 GEMMA4_PREFIX = "gemma4"
+
+#: 配布リポ名（ADR 0092 決定 1 の `karume-<family>`）。**モデル名から導かない** — 家族 1 リポ
+#: なので、E2B / E4B / 12B のどれを組んでも行き先は 1 つ。
+GEMMA4_REPO_NAME = "karume-gemma4"
 
 #: 上流の手置き資産の親（`inputs/gemma4/<チェックポイント名>/` — assets-layout）。
 GEMMA4_INPUTS_DIRNAME = "gemma4"
@@ -255,9 +259,14 @@ def gemma4_checkpoint(model: str) -> str:
     return repo.split("/", 1)[1]
 
 
-def gemma4_repo_name(model: str) -> str:
-    """単一モデルの配布リポ名（`karume-` prefix はリポ名裁定 2026-08-09）。"""
-    return f"karume-{GEMMA4_PREFIX}-{model}"
+def gemma4_repo_name(_model: str) -> str:
+    """配布リポ名（家族 1 リポなので、どのモデルでも同じ 1 つ — `karume-` prefix はリポ名裁定
+    2026-08-09）。
+
+    `Pipeline.repo_name` は「単一モデルを組んだときの既定の出力先」を答える席で、家族が
+    1 リポに畳まれた今はモデル名を見ない。
+    """
+    return GEMMA4_REPO_NAME
 
 
 def gemma4_series_name(model: str, suffix: str) -> str:

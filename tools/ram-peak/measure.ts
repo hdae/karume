@@ -4,7 +4,7 @@
  *     # パイプライン面（fromPretrained → 最小生成 1 回）
  *     deno run -A tools/ram-peak/measure.ts --family anima --source models/karume-anima \
  *         --model anima-turbo-v1.1 --quant f16 --steps 2 --size 512
- *     deno run -A tools/ram-peak/measure.ts --family gemma4 --source models/karume-gemma4-e2b
+ *     deno run -A tools/ram-peak/measure.ts --family gemma4 --source models/karume-gemma4
  *     # コンポーネント面（createSessionFromShards 直叩き・1 コンポーネントだけ・刻みノブ付き）
  *     deno run -A tools/ram-peak/measure.ts --mode component --source models/karume-anima \
  *         --model anima-turbo-v1.1 --quant f16 --component transformer --vessel true

@@ -17,7 +17,7 @@
 //
 // ## 資産と経路
 //
-// 配布形ミラー `models/karume-gemma4-e2b/` を `denoDirectory` で直読みする（HTTP も永続キャッシュ
+// 配布形ミラー `models/karume-gemma4/` を `denoDirectory` で直読みする（HTTP も永続キャッシュ
 // も要らない — ADR 0086）。ミラーが無い環境では**明示 SKIP**。
 
 import { assert, assertEquals } from "@std/assert";
@@ -27,7 +27,7 @@ import { Gemma4Pipeline } from "../gemma.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { allResidentPleBytesOfMirror } from "./helpers/ple-budget.ts";
 
-const MIRROR_DIR = new URL("../../../models/karume-gemma4-e2b/", import.meta.url);
+const MIRROR_DIR = new URL("../../../models/karume-gemma4/", import.meta.url);
 
 /** SKIP 時にそのまま貼れる組み立てコマンド。 */
 const ASSEMBLE_COMMAND = "cd tools/export-recipes && uv run python dist.py --pipeline gemma4";
@@ -73,7 +73,7 @@ const AVAILABLE = ((): boolean => {
 
 if (!AVAILABLE) {
   console.warn(
-    `[karume] 配布形ミラー models/karume-gemma4-e2b/ が無いため ③PV 縮約順の A/B を SKIP する。` +
+    `[karume] 配布形ミラー models/karume-gemma4/ が無いため ③PV 縮約順の A/B を SKIP する。` +
       `組み立て: ${ASSEMBLE_COMMAND}`,
   );
 }

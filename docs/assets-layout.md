@@ -58,7 +58,7 @@ uv run python dist.py --pipeline sbv2 --card-profile jvnv \
 uv run python dist.py --pipeline sbv2 --card-profile fn \
     --model FN1 --model FN2 --model FN3 --model FN4 --model FN5 --model FN6 \
     --model FN7 --model FN8 --model FN9 --model FN10 --out ../../models/karume-sbv2-fn
-uv run python dist.py --pipeline gemma4              # → models/karume-gemma4-e2b/（約 4.0GiB）
+uv run python dist.py --pipeline gemma4              # → models/karume-gemma4/（約 4.0GiB）
 uv run python dist.py --pipeline siglip2 \
     --model base --model so400m \
     --out ../../models/karume-siglip2                # 1 リポ 2 モデル（既定 base — ADR 0092 決定 8）
@@ -73,16 +73,16 @@ uv run python dist.py --pipeline vowel-detector      # → models/karume-vowel-d
   （siglip2 = Apache-2.0 / birefnet 系 = MIT / depth-anything small = Apache-2.0）に応じて
   `LICENSE.md` / `NOTICE.md` をリポ直下へ同梱する（決定 7）。
 
-- `karume-gemma4-e2b` は**系列 2 本**（`gemma4-e2b-product` の製品コンテナ + PLE sidecar と
+- `karume-gemma4` は**系列 2 本**（`gemma4-e2b-product` の製品コンテナ + PLE sidecar と
   `gemma4-e2b-tokenizer` の compile 済み資産）を 1 リポへ畳む。PLE sidecar は `assets` の席に載り、
   **asset 名は `ple.json` が書いた shard のファイル名そのもの**（読み手が索引 1 本で取得キーも
   引けるようにするため — 詳細は `tools/export-recipes/gemma4/README.md`）。上流が Apache 2.0 なので
-  リポ直下に `LICENSE.md` / `NOTICE.md` が入る（`karume.dist` の法的テキスト席）。公開先は
-  **次リリースで `karume-gemma4` へ改名**する（家族 1 リポの規則 — E4B / 12B が同居する器になる。
-  ADR [0092](decisions/0092-distribution-repos-and-sources.md) 決定 1・改名手順は
-  [release-runbook](release-runbook.md) §2）。**recipe の `repo_name`（= 上のコマンドの出力
-  ディレクトリ名）も同時に追随させる** — カードの Usage の repo 名は出力ディレクトリ名から
-  導出されるため。公開 revision の在処は models の対応表
+  リポ直下に `LICENSE.md` / `NOTICE.md` が入る（`karume.dist` の法的テキスト席）。リポ名は
+  家族 1 リポの規則（E4B / 12B が同居する器 — ADR
+  [0092](decisions/0092-distribution-repos-and-sources.md) 決定 1）で `karume-gemma4`
+  （0.9.0 で `karume-gemma4-e2b` から改名 — 旧名は HF 側でリダイレクトされる）。**recipe の
+  `repo_name` = 上のコマンドの出力ディレクトリ名 = カードの Usage の repo 名**（後の 2 つは前から
+  導出される）ので、改名は recipe の定数 1 つで揃う。公開 revision の在処は models の対応表
   `GEMMA4_SOURCES["gemma4"]`（同 決定 3 — docs には写さない）。
 
 - `karume-sbv2-fn` のミラーは**常設しない**（2026-08-30 裁定 — e2e の門はライセンス記述が正の
