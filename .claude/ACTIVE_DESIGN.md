@@ -7,212 +7,49 @@
 > [docs/perf-ledger.md](../docs/perf-ledger.md)。ここは「今この瞬間の文脈」だけを持つ —
 > 履歴・完了記録は ADR / research / git へ。
 >
-> Last updated: 2026-09-03
+> Last updated: 2026-09-04
 
 ## Now
 
-- **可変 capacity 波 + K-12（2026-09-03 — 実装済み・リリース前・[ADR 0091](../docs/decisions/0091-gemma4-host-rope-variable-capacity.md)）**:
-  gemma4 の RoPE 表は配布物に無く、cos / sin は chunk ごとにホストが派生入力で供給する
-  （`packages/models/src/gemma/rope.ts` が正本・上流 f32 とはビット同一でない = 位置比例 parity）。
-  `position_ids` 入力は消え、capacity は sequence / ChatSession 生成時のノブ・chunkLength は
-  PipelineOptions（既定 768 / 4,096・上限 = maxPosition 131,072）。K-12 = states 形 ③PV の KV
-  並列縮約（`stateAttentionReduce: "parallel"`・opt-in・decode 16K ×2）。**落とし穴**: ①旧配布形
-  （表を焼いた karume/4 gemma4）は読めない ②`GreedySpec` / `GenerationProgramSpec` は `positionIds`
-  を持たない（派生入力 `derive` が位置の唯一の供給口）③states 形 attention を持つグラフの見積りは
-  `maxStorageBufferBindingSize` 必須 ④K-12 は `Gemma4Pipeline` の既定（`"parallel"`）— runtime / 低レベル面の既定は `"sequential"` のまま（参照経路）。
-  ②③ の 1 段目（`tools/opbench` census / `tools/fusion-hints` 列挙 — GPU 不要）は消化済み
-  （[research](../docs/research/2026-09-03-op-census-fusion-hints.md)）。次 = リリース（gemma4 のアップまで）→ ②③ 2 段目 → K-13 / K-14。
-
-- **並列作業（2026-09-02 深夜 — 裁定済み優先順）**: ①DL 改善 = 実測で b+a を kill（[research](../docs/research/2026-09-02-cold-load-dl-timeline.md)・残る問い = 実回線の同時本数）②gemma4 対話 example 第 2 弾 = **全消化**（②〜⑧ `f7f0b66` `c659dd9`・① ChatSession `d72bd9d` = 溢れ処理は注入 + 既定 `dropOldestTurns`〈最古の user / assistant の対を落とす・system は残す〉・prefill 進捗の口は `Gemma4ChatTurnOptions.onPrefill` で消化〈`4ff238f`・ADR 0091 決定 6〉）③perf: P-1 採用（`3175161`・短い行 ×4.1）・P-2 採用（`e7b4489`・submit −95%・壁は揺れ内・no-ref 追試済み・残は Chrome のみ）・P-3 採用（`9591783`・視認裁定 OK 2026-09-03） ④可変 capacity 波 = **実装済み（2026-09-03・ADR 0091 — 下の新項）** ⑤TurboQuant = 記録のみ（perf-ledger Q-11 / L-10）。hub HF `into` 配線はコミット済み（fetch-cache 0.6.0）。
-- **モデル更新波（2026-09-01 裁定 — 実装中・詳細は [backlog](../docs/backlog.md) now の
-  「モデル更新波」）**: **N1 Irodori v4.1-small = ローカル完了**（凍結をバイトで確証・
-  全系列 export + dist + スモーク緑・pin 新設と examples 既定切替はリリース時 = runbook §3。
-  副産物: full-loop 検証を 2 段化 — 誤差増幅 37,107 倍の実測は
-  [research](../docs/research/2026-09-01-irodori-v41-euler-sensitivity.md)）→
-  **N2 Anima 再構造 = ローカル完了（ADR 0087）**: karume-anima = 公式 5 変種同居（既定 =
-  turbo-v1.1・aesthetic 既定 30step/CFG4 視認裁定・i4 席は全モデル退役）・breaking =
-  `ANIMA_TURBO_CURRENT` / `--pipeline anima-turbo` 廃止・e2e は turbo-v1.1 で参照 sha
-  新規凍結（base 側 sha 不変 = v1.0 バイト不変の証明）・extra（wai/copycat）の組み立ては
-  リリース時の越境焼き → **N3 Civitai AIR 取り込み = 完了（ADR 0088）**: `anima.civitai`
-  コマンド（AIR / URL → sha256 突合 DL → `inputs/anima/civitai-<versionId>/` +
-  `civitai.json`・命名は機械正規化 = 0077 改訂・ライセンスはエージェント事前確認形 =
-  判定せず記録 + `license-review.md`・実 DL 疎通済み）。**モデル更新波クローズ**（HF 一括
-  アップはメモリ管理波を含むリリースの直前 — 2026-09-01 裁定。**範囲は 2026-09-03 裁定で
-  gemma4 のアップまでへ改訂** = 6 リポ + pin 3 新設・3 更新 — **HF 公開と pin 焼き込みは 2026-09-03 に実施済み**。BiRefNet / DepthAnything /
-  SigLIP2 / vowel-detector の初回公開はリリース後）。
-- **メモリ管理波 Phase A（2026-09-01・ADR 0089 — 波 1〜4 実装済み = Phase A クローズ）**:
-  GPU メモリ適合を「絶対上限との決定論的比較」へ昇格 — runtime 重み/state の確保前検査
-  （`assertWeightsWithinLimits` = 席→バッファ写像 `planWeightBuffers` を見積りと共有）・
-  exporter `requiredLimits` 一括導出（常駐前提・既定超過のみ・手書き拒否）・hub shard
-  ≤1GiB 読み手検査・**models 読み手結線**（`requiredLimits` を重み DL 前に検査 — 共有 GPU は
-  `GpuContext.limits`、自前経路は `readAdapterLimits` でアダプタを読んで捨てる = 案 A・
-  既存 5 ミラー再生成済み・**M2 検証消化 2026-09-02** = 赤は既知 12 + sha 参照門 15 のみ・DL 前
-  検査は gemma4 / anima で通過・chat golden 緑 = gemv margin 命題成立〈ADR 0082 追記 3〉。
-  **Mac リリース前検証も消化 2026-09-03**〈macOS 26・フル verify 1856/13/139 = 既知 12 +
-  census 1 本・③' stdout 3.58e-7 / 2.38e-7 が Linux と桁一致 — backlog now〉）。
-  空き VRAM・合計は比較しない（ADR 0070 決定 5 維持 — Metal
-  errorScope 沈黙で残る限界は limitations 記録）。**Phase B へ持ち越し = `estimateSessionMemory`
-  のロード面結線**（ロード時に束縛値を持つ家族が gemma4 だけ — 実測後に席を決める）→
-  **Phase B 実測済み → Phase C-1 器の使い回しを実装（2026-09-02・ADR 0070 追記）= ピーク ≈ 0.45GB + 最大
-  shard 1 本（anima 4,069 → 1,402 MiB）・HF 経路は取得層側の対応待ち。**shard 目標 256MiB も反映済み**（ADR 0081
-  追記・実効目標 = max(目標, 最大単位)・全ミラー再生成 — anima 1GiB shard → 256MiB で 1,402 → 約 0.7GB 見込み）。
-  C-2 テンソル分割も実装済み（2026-09-02・ADR 0090 — piece・受理上限 256MiB 1 本をファイル長で・書き手容量
-  255MiB・実資産は 4 コンポーネント + 256MiB ちょうどの transformer 系列を再 repack）。HF 経路の器も
-  消化（2026-09-02 夜 — fetch-cache 0.6.0 `into` + hub HF アダプター配線・gemma4 warm 1,408 → 684 MiB。
-  0.6.0 公開後にコミット済み 2026-09-03）。残 = Chrome 追試** → export-recipes 切り出し（案 A = レシピのみ・
-  core 残留）。
-- **OP 数値レビュー波 + 修正波（2026-08-31 — 波クローズ・Mac 検証込み）**:
-  Codex 全滅→Opus サルベージ + ChatGPT 外部レビューを敵対検証で統合（C 0 / E 0 確定・
-  台帳 = [research/2026-08-31-op-numerics-review.md](../docs/research/2026-08-31-op-numerics-review.md)・
-  原本 `.claude/reviews/2026-08-31_b35cf5c/`）。修正 12 コミット消化:
-  **gru_scan tanh_stable 化**（is_nan_bits/nan_max 正本化・キー v2）/ **softmax 族 nan_max
-  統一 + 融合 attention 空行ガード**（breaking 2 点 — ADR 0044 追記・limitations が消費側 doc）/
-  **DEFAULT_TOLERANCE 退役 = op 別実測表 + ビット同一門**（M1 宿題消化 —
-  [research/2026-08-31-op-tolerance-measurement.md](../docs/research/2026-08-31-op-tolerance-measurement.md)・
-  表 = `tests/helpers/op-tolerance.ts`・表に無い op は fail loudly）/ 飽和域の厳密カナリア /
-  L 群軽微修正 + fma 契約 doc 訂正（ADR 0076 追記）/ exporter act_quant 鏡像化 /
-  **GPTQ 掃引軸**（opt-in 実装 + 実測 → **既定現状維持を封印** —
-  [research/2026-08-31-gptq-axes-sweep.md](../docs/research/2026-08-31-gptq-axes-sweep.md)）。
-  **Mac（M2）検証も消化して波クローズ（2026-08-31）**: 飽和域門・格子門・vowel golden 全緑 =
-  根治実証。新規 known-issue = gru_scan 分解 parity の Metal 1〜64 ULP（変更前 HEAD と同一署名 =
-  既存・known-issues Metal 節）。GPTQ 掃引軸は**既定現状維持で確定**（復活 = 多モデル ×
-  校正量 16×）。プローブ群削除済み。
-- **LLM（gemma4 E2B）トラック（2026-08-30〜31）**: 先行波（L-0/L-1/L-10）クローズ →
-  **K-11 も消化済み**（ADR [0082](../docs/decisions/0082-linear-gemv-decode.md) — decode M=1 の
-  i4 linear を GEMV 族へ・**ビット同一のまま ×8.45・decode 84.2→32.5ms/token = 30.8 tok/s**。
-  律速はフェンス床 ≈11ms 側へ戻った — 機序と方法論は
-  [research 2026-08-30](../docs/research/2026-08-30-gemma4-decode-wallclock.md) §7）。
-  **生成 API 波は段 0〜5 完了 = 波クローズ（2026-08-31〜09-01）**: 設計正本 = ADR
-  [0083](../docs/decisions/0083-generation-api-surface.md) /
-  [0084](../docs/decisions/0084-gemma-tokenizer-chat.md) /
-  [0085](../docs/decisions/0085-ple-host-gather.md) + ADR 0068 追記 6。**gemma4 の chat が
-  文字列 in → 文字列 out で実重み完走**（`Gemma4Pipeline.fromAssets` → `chat()` → streaming
-  detokenizer・温度 0 golden 固定・EOS `<turn|>` 自停止・多ターン日本語込み）。公開面 =
-  barrel + `./gemma`（**breaking 1 件 = `generateGreedy` の公開 export 削除** — limitations が
-  消費側 doc）。製品系列 = `outputs/series/gemma4-e2b-product/`（容器 1,512MiB + PLE sidecar
-  2,275MiB・GPU 常駐実測 1,504MiB）。**段 5（配布形）も 2026-09-01 に消化 = 波クローズ**:
-  配布ミラー `models/karume-gemma4-e2b/`（3.8GiB）+ カード（Apache 2.0 帰属 + 上流誘導 —
-  ライセンス門は現物確認 + ユーザー裁定で消化・「Gemma ToU」記述は撤回）+ `fromPretrained`
-  （hub 遅延資産席 `eagerAssets`）+ 疑似 HF 疎通。**残 = HF 公開のみ（新規リポ作成 —
-  ユーザー確認待ち・pin `GEMMA4_CURRENT` は公開時に焼く）**。
-  **対話 example 波もほぼクローズ（2026-08-31・10 コミット e7e53dd〜dce91c7）**: 公開面レビュー
-  （Opus2+Codex3 → 敵対検証 15 判定 refuted 0 — 正本 `.claude/reviews/2026-08-31_182ced7/`）→
-  **取得元抽象 DistributionSource**（ADR
-  [0086](../docs/decisions/0086-distribution-source.md) — `denoDirectory` でローカルミラー直読・
-  CacheStorage 複製ゼロ・越境は明示 mapping・`@karume/hub/deno` carve-out）+ 検証済みバグ修正
-  （PLE 解放口 / 生成 signal の PLE 伝播 / headers doc 8 家族訂正ほか）+ 公開面調整
-  （`gemma4ChatTurn` 増分描画 = turn-local 契約の正本化・`parseGemma4PipelineConfig` 公開・
-  `GenerationProgram` 凍結絞り込み・`defaultSampler` 改名・`used` + `GenerationCapacityError`
-  構造化欄・`GenerationStop.tokens`）+ `examples/gemma4/` 対話 chat（sequence KV 継続の
-  写経見本・デモ 4 本も denoDirectory 移行）。**capacity の dist 再生成は消化済み**
-  （`4ff238f`・ADR 0091 で capacity は実行時ノブになり、宣言の既定は 4,096）。実行計画は
-  [backlog](../docs/backlog.md) now、候補比較は
-  [research 2026-08-31](../docs/research/2026-08-31-generation-api-design-draft.md)。
-  **スケール戦略は調査 + 裁定とも完了** =
-  [research 2026-08-31](../docs/research/2026-08-31-freetoken-moe-over-arraybuffer.md)
-  （FreeToken 中核は WebGPU へ移植不能 / 真の壁は VRAM 総量 / MoE 動的常駐は IR 語彙級の
-  再設計）→ 4 分岐は①IR 値依存実行選択 = 入れない（backlog parked・MoE は全 expert 常駐前提を
-  limitations へ恒久記載）②未着荷 initializer 席 = ①従属で見送り③companion scale f16 =
-  perf-ledger Q-10 起票のみ④admission 空き比較 = 現状維持（ADR 0070 のまま）。L-11 裁定済み:
-  技術先行 = gemma4 E2B・公開はライセンス門（ADR 0065 stage 6）後で、**配布対象は gemma4 のみ**
-  （裁定 10 — minicpm5 の配布経路先行は不採用）。
-- **全体レビューの修正波 A〜E クローズ（2026-08-30）**: 網羅レビュー（Opus 15 + レンズ 2 →
-  敵対検証 → Codex / ブラウザ第 2 波）の確定 50 件（E4 / W46）+ 追補を 5 波で全消化。裁定と
-  台帳の正本 = `.claude/reviews/2026-08-29_9614ba9/`（git 追跡外）。**破壊的変更 2 件**
-  （`BatchScope.finish()` のホスト側失敗 throw / 同一 `GenerationContext` への並行発行拒否）と
-  **`fromAssets` の shard 分割形受け口**（追加）は [limitations](../docs/limitations.md) が
-  消費側 doc。レンズ E-1 / E-2 / L-11 は裁定済み（backlog now に反映）。M2 実機の手動確認
-  2 点は**消化済み（2026-09-01 実測 — カナリア 16/16 緑・軸 reduce パリティ 2/2 緑。新規 =
-  gemv u32 門の 1 ULP は既定維持を裁定済み — ADR 0082 追記 1）**。残り = anima-web DL
-  スロット改善（`FamilyAdmission` 席は実装済み）。残件と隣接発見の一覧 =
-  [backlog](../docs/backlog.md) now。
-- **R1 統合波はコード完了（2026-08-29）**: API 工事 4 件（union/プランナ・`ModelShard` 実名
-  帰属・`prepareModel` 2 段境界・`AdmissionReport`）+ hub `prefetchAssets` + models 7 pipelines
-  の graph-first 接続 + exporter 1GiB 分割（`karume.shards`）+ デモの疑似 HF サーバ化。
-  **受け入れ実証済み**: Base f16 3.9GB → 4 shard で実ロード + 生成完走。正本 = ADR
-  [0070](../docs/decisions/0070-shard-loading-admission.md) 追記 2026-08-29。
-  **HF 更新系まで完了（2026-08-29）**: 全席分割ビット同一・base / turbo とも公開済み
-  （**公開 revision の正本は pin 定数** `ANIMA_CURRENT` — 値は
-  `packages/models/src/anima/config.ts` を見る。docs に SHA を写さない）・**shard ごとの
-  越境参照**（ADR 0038 §7 追記 2026-08-29）初適用・pin 焼き込み + 実 DL
-  疎通済み。実資産テストとローカル配信は越境 + 分割ミラーへ追随済み（fromAssets の実 GPU
-  生成経路は anima e2e から消滅 — 契約面と他家族が担保）。**0.7.0 は Release → JSR publish
-  まで完了（2026-08-29・リリースノートは検証ワークフロー通過済み）**。
-- **fetch-cache 0.5.0 追従（2026-08-28 実装済み）**: 検証責務を取得層へ移譲（記録ハッシュ
-  信頼・knob なし）・認証隔離の撤去・`verifying` 撤去・旧名前空間 purge。正本 = ADR
-  [0080](../docs/decisions/0080-hub-fetch-cache-050.md)（旧 CAS ドラフトを置換 —
-  `archive/hub-cas-0.5.0` の再適用は不要）。anima-web への追随 3 点（`verifying` 消滅・
-  sha256 不一致が `HubFetchError`+`cause`・`clearHubCache` の対象拡大）+ R1 分の 1 点
-  （`StreamedAsset.path`→`id`）。
-- **既知問題 3 件 + anima 素版 i4 感度の波（2026-08-25〜28 消化済み — 残 = Pixel 実機
-  `err.cause` 再判定のみ）**: ①Pixel の
-  BodyStreamBuffer abort — 真因マスキング解消 + バイト予算 1.5GiB + 検証直列化**コミット済み**
-  （実機再判定はリリース後 — known-issues）②NVIDIA の 2GiB 天井 — 融合 attention の
-  行ブロック化**コミット済み**（1824×1248 実生成 27.9s 完走を確認）③Chromium の単一
-  ArrayBuffer 上限 2,145,386,496B で Base f16 が原理的に不可（limitations 恒久記載。根本 =
-  R1 shard 配布を next へ昇格・DL 前即エラーは hub 側では実装しない — プローブは
-  fetch-cache 次版で実装予定〈2026-08-25 裁定〉）④素版 i4 — adaLN-i8 変種は**不採用**・**i4 系は保留**（2026-08-28 裁定 — サイズ動機は
-  R1 shard 化が根治・速度は i4 が遅い。perf-ledger Q-9 / research 2026-08-28）。GPU 校正は
-  **実用採用**（探索 3.6 倍速・配布焼きは CPU — research cuda-calibration）。
-- **0.6.0（yomi 依存分離）リリース完了（2026-08-25）**: JSR 3 パッケージ = 0.6.0・Release
-  v0.6.0・**公開依存から `@hdae/yomi` の消滅を API 実測で確定**（hub / runtime の 2 本のみ）・
-  消費者ストーリー疎通緑。設計の正本 = ADR
-  [0079](../docs/decisions/0079-sbv2-two-layer-input.md)。**0.6.0 で変わった面**（breaking・SBV2 のみ
-  — 消費側の doc はここが索引）:
-  - `Sbv2Pipeline.generate(utterance, options?)` — 第 1 引数は解析済みの `Sbv2Utterance`
-    （フレーズ層 `Sbv2Phrases` = yomi `analyzeWithWords` の返り値が構造的に満たす →
-    `toSbv2Utterance` で変換）。テキスト解析・辞書 19MB・修正辞書は**呼び手の責務**。
-  - 撤去（シム無し）: `text` / `dictionary` / `overlay` 席・`analyzeProsody`・`Sbv2Prosody` /
-    下書き型・`givenTone`・`OverlayDictionary` 再 export。編集は「フレーズ層で核を直して
-    再変換」or「モーラ層で `tone` を直指定」。写経見本 = `examples/sbv2/`。
-  - 検証 = **WAV 門 3 sha 不変**（吸収のビット同一性）・verify 1771/0/5。配布形・pin 値は不変。
-- **0.5.x は全てクローズ**（0.5.1 = サンプラー再裁定 ADR
-  [0078](../docs/decisions/0078-anima-sampler-selection.md) — 既定 Euler 維持・
-  `AnimaGenerateRequest.sampler` で DPM++ 2M。記録 = [backlog](../docs/backlog.md)
-  消化済み節）。
-- **0.5.0 で変わった面**（消費側の doc はここが索引）:
-  - **quant 席名が全て改名された**（ADR [0074](../docs/decisions/0074-quant-seat-naming.md)
-    決定 6 の移行表が正本 — 例 `w8a8-s16` → `f16+dit8-a8-attn8-s16` / sbv2 `w8-bert4` →
-    `i8+bert4` / irodori `w4` → `i8+dit4`）。`linearCompute` / `attentionCompute` の**値**も
-    `"i8a8"` → `"a8"`（カーネル内部識別子・ファイル名・WGSL は実行変種の名前なので不変）。
-  - **manifest は `karume/4`**（ADR [0075](../docs/decisions/0075-quant-presentation.md)）—
-    quant の `label` / `description`、`requiredLimits`、ファイル参照の越境 `repo` / `revision`
-    （ADR [0038](../docs/decisions/0038-manifest-v1.md) 追記 2026-08-25）。旧 format は読めない。
-  - **`fromPretrained` の `ref` は必須**（既定ソースの廃止 — ADR
-    [0073](../docs/decisions/0073-models-source-pin.md) 追記 2026-08-25）。pin 定数は
-    `<FAMILY>[_<VARIANT>]_CURRENT`（**公開リポ 1 つにつき 1 定数** — 現物は
-    `packages/models/mod.ts` の re-export が正本）で、位置づけは「**パッケージ版に合わせて自動追従
-    したい場合のオプトイン**」= bump のたびに pin 更新 + 動作確認の義務つき。hub は revision 未指定の
-    暗黙 `main` 解決に 1 回だけ warn（解決 SHA 印字 + pin / `*_CURRENT` の 2 択案内）。
-  - anima に `pipelineConfig.scheduler.type` 席（`euler` / `dpmpp-2m`・省略時 euler）。
-    **配布既定は euler**（再裁定 2026-08-25 — ADR 0078。0.5.0 期の公開 revision
-    `ebb27bc4` / `6215f965` だけが dpmpp-2m 宣言）。DPM++ 2M は 0.5.1 の
-    `AnimaGenerateRequest.sampler` で選ぶ。
-  - 0.4.3 で配られた面（消費側 doc の注意点）: `animaLatents()`（途中 latent の逆正規化素材
-    — プレビューには要らない）/ `approximatePreview()`（途中 latent → RGB の線形近似。係数は
-    **正規化空間**で較正済みなので `copyLatents()` の返り値をそのまま渡す — 逆正規化した値を
-    渡すと白飛びする）/ `AssetProgress` の per-file 欄 `fileLoaded` / `fileTotal`（必須欄・
-    `verifying` / `complete` では常に等しい）。
-- **anima の受理解像度の縮小（E-2）は撤回した**（2026-09-02・P-3）: 縮小の原因はタイル配置の
-  整除制約（開始位置を厳密な等間隔に取る → 本数が `extent − tile` の約数からしか選べない →
-  約数の乏しい辺で 60 本超に跳ねる）で、入口の本数上限はその対症だった。配置を**丸め等間隔**
-  （重なりの下限だけを制約に最小本数・開始位置は丸めて等分・ブレンド幅は対ごと）へ替えて
-  根治し、1456/1488/1584/1648/1680/1776/1840/1936px は受理へ復帰・受理集合は 4 条件へ戻った。
-  正本は [ADR 0033 の追記](../docs/decisions/0033-vae-fixed-tile-decode.md)。**本数が変わらない
-  辺は配置も同一 = 出荷バイト不変**（1024² / 1344×768 系）。1824×1248 は 15 → 12 枚。
-- **波 J / 波 L はどちらも 2026-08-24 に全クローズ**（波順の正本 =
-  [backlog](../docs/backlog.md)）。**教訓 2 件**は現役: ①sim の A/B は同一リグ内でのみ有効 —
-  **出荷リグでは GPTQ の丸め解が変わり発話実現が再抽選される**（繊細な性質は転移しない・
-  最終裁定は必ず出荷バイトで）②adaLN（modulation の scale/shift/gate）は量子化感度が高い
-  （irodori 実測 — 他 DiT へは未実測の仮説）。実測の正本 =
-  [research/2026-08-24-gptq-expansion-quality.md](../docs/research/2026-08-24-gptq-expansion-quality.md)。
-- PyPI `karume` は未リリース。クローズ済みの波の履歴は
-  [backlog](../docs/backlog.md) と各 ADR / research が正本。
+- **0.8.0 リリース済み（2026-09-04）**: JSR 3 パッケージ（runtime / hub / models）= 0.8.0・HF 6 リポ
+  公開（`karume-anima` / `karume-anima-extra` / `karume-irodori-v4-small` /
+  `karume-irodori-v4.1-small` / `karume-sbv2-jvnv` / `karume-gemma4-e2b`）・pin 定数 6 本を焼き込み
+  済み。未配布は 4 家族（siglip2 / birefnet / depth-anything / vowel-detector）。
+- **次の作業波（2026-09-04 裁定の順）** — 内容と残件の正本は [backlog](../docs/backlog.md) now:
+  a) OP マイクロベンチ 2 段目 + Fusion 半自動発見 2 段目（1 段目は消化済み）
+  b) 未配布 4 家族の初回公開
+  c) perf K-13 / K-14（[perf-ledger](../docs/perf-ledger.md) が起票の正本）
+  d) `tools/export-recipes/` の切り出し（案 A = レシピのみ・汎用 core は wheel に残す）
+- **可変 capacity（[ADR 0091](../docs/decisions/0091-gemma4-host-rope-variable-capacity.md)）の
+  意図的な現状 4 点** — 欠落に見えるが設計どおり: ①RoPE 表を焼いた旧配布形は読めない
+  ②`GreedySpec` / `GenerationProgramSpec` は `positionIds` を持たない（位置の唯一の供給口は
+  派生入力 `derive`）③states 形 attention を持つグラフの見積りは `maxStorageBufferBindingSize`
+  が必須 ④K-12（③PV の KV 並列縮約）は `Gemma4Pipeline` の既定が `"parallel"` — runtime 低レベル
+  面の既定は `"sequential"` のまま。
+- **shard 仕様**: 受理上限は 256MiB 1 本をファイル長で検査し、超える単位はテンソル分割（piece）で
+  割る（[ADR 0081](../docs/decisions/0081-shard-spec-v2.md) /
+  [0090](../docs/decisions/0090-shard-spec-v3-tensor-pieces.md)）。単一ファイルの配布形は無い。
+- **取得元抽象 `DistributionSource`**（[ADR 0086](../docs/decisions/0086-distribution-source.md)）:
+  `denoDirectory` はローカルミラーを複製せず直読し、越境参照は明示 mapping と明示 fallback だけを
+  経路に持つ。
+- **GPU メモリ適合は絶対上限との決定論的比較**
+  （[ADR 0089](../docs/decisions/0089-memory-limits-preflight.md)）: 重み / state の確保前検査・
+  exporter の `requiredLimits` 一括導出・models は重み DL 前に検査。合計と物理空き VRAM は比較
+  しない（原理的に不能 — [limitations](../docs/limitations.md)）。
+- **破壊的変更の消費側 doc は [limitations](../docs/limitations.md) が索引** — 席の撤去・改名・
+  throw 化はそこと各 ADR / リリースノートが正本。
 
 ## Open decisions
 
 - MiniMax-H3（動画生成・オープンウェイト 33.1B/42.5GB 級）は遠期の関心として記録のみ —
   ブラウザ実行はメモリ規模的に現行スコープ外（レビュー DS-4）。
+- 差分レビュー見送り分の中優先 3 件（正本 = `.claude/reviews/2026-09-03_7fc4ada/ROADMAP.md`）:
+  W-G5-7 = `tools/opbench` / `tools/fusion-hints` の資産解決を `tools/_shared/assets.ts` へ統合
+  するか / W-G4-4 = chunk 上限の出所を provenance の `sym_max` 欄へ移すか（再 export に同乗）/
+  [ADR 0033](../docs/decisions/0033-vae-fixed-tile-decode.md) 決定 5「TS 側が幾何そのものを突合
+  する」経路を作るか、決定 5 を実態へ追記するか。
+- Metal で `--diagnostics`（`gpuTiming: true`）を付けると device ごと落ちる件の改修投資判断 —
+  切り分け実験が先（[known-issues](../docs/known-issues.md) の Metal `--diagnostics` 節）。
 
 ## Pitfalls（現役のみ）
 
@@ -232,18 +69,32 @@
   正しいまま性能だけ落ちる。観測 = `Diagnostics.lastRunFusions` +
   `assets_fusion_counts_test.ts`。**row-block だけは外れ方が性能でなく資源** — 128MiB 級
   device で resource-limit failure に戻る（**分解経路の matcher だけの話** — 保存 attention は
-  states 形・融合 attention とも行ブロックを op 内蔵で持つ〈ADR 0067 決定 7・波 D /
-  2026-08-25 融合側〉）。分解形が matcher から外れると `bmm [H,S,S]` が**ノード出力スロット**
-  になり原理的に分割不能 — 現状の該当（anima text_encoder / conditioner）は T=512 固定
-  16MiB で無害（2026-08-25 棚卸し）。
+  states 形・融合 attention とも行ブロックを op 内蔵で持つ〈ADR 0067 決定 7〉）。分解形が
+  matcher から外れると `bmm [H,S,S]` が**ノード出力スロット**になり原理的に分割不能 — 現状の
+  該当（anima text_encoder / conditioner）は T=512 固定 16MiB で無害。
 - **RoPE / SiLU 融合の丸め障壁（workgroup memory 往復）は実測依存** — バックエンド更新で
   PNG 門が割れたらまずここを疑う。
+- **sim の A/B は同一リグ内でのみ有効** — 出荷リグでは GPTQ の丸め解が変わり、発話実現が
+  再抽選される（最終裁定は必ず出荷バイトで）。**adaLN（modulation の scale/shift/gate）は
+  量子化感度が高い**（irodori 実測 — 他 DiT へは未実測の仮説）。実測の正本 =
+  [research/2026-08-24-gptq-expansion-quality.md](../docs/research/2026-08-24-gptq-expansion-quality.md)。
 - **`deno task verify` はリポ内に worktree を置くと worktree 側まで test を拾う** — worktree は
   リポ外に作る（CLAUDE.md 検証コマンド節。deno.json に exclude は設けない — 2026-08-16 裁定）。
 - **Session 構築の重みアップロード後 submit 1 回は瞬間ピーク +2.7GiB を抑えている** — 消さない。
 - **資産の置き場**: `models/` = HF へそのまま上げる配布形のみ・系列出力は `outputs/series/`・
   入力素材は `inputs/<ファミリ>/<名前>/` — 綴りの正本は
   `tools/export-recipes/_shared/paths.py` と [assets-layout](../docs/assets-layout.md)。
-  格納 dtype はヘッダが正（dist の門が検査）。旧識別子以前の資産は開けない（互換シム無し）。
+  格納 dtype はヘッダが正（dist の門が検査）。旧識別子以前の資産は開けない（互換シム無し・
+  席名の移行表 = ADR [0074](../docs/decisions/0074-quant-seat-naming.md) 決定 6）。
 - models パッケージの tree-shaking は「全モジュール副作用ゼロ」不変条件が前提。JSR npm 互換層の
   `sideEffects: false` 出力は未検証（backlog release）。
+
+## Stable invariants
+
+- **公開 revision の正本は pin 定数** `<FAMILY>[_<VARIANT>]_CURRENT`（現物 =
+  `packages/models/src/*/config.ts`・re-export は `packages/models/mod.ts`）。docs・モデルカード・
+  テストに SHA を写さない。`fromPretrained` の `ref` は必須（既定ソースは無い）。
+- **op ごとの tolerance は実測表が正本** — `packages/runtime/tests/helpers/op-tolerance.ts`。
+  表に無い op は fail loudly（共通既定値での掃引は退役）。
+- **manifest は `karume/4`** — それ以外の `format` は unsupported で落とす（互換シム無し）。
+- **PyPI `karume` は未リリース** — exporter / recipes に移行シムは置かない。
