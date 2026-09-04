@@ -12,3 +12,8 @@ Status: **pre-1.0** (this page is a stub; the current design's source of truth i
 [docs/decisions/](docs/decisions/))
 
 License: MIT ([LICENSE](LICENSE))
+
+**Carve-out**: [`tools/export-recipes/`](tools/export-recipes/README.md) contains upstream-derived
+model code (patch layers, export scripts, reference pipelines). That directory is **not** covered by
+the project's MIT license — each family there carries its own `THIRD_PARTY_NOTICES.md` recording
+what the recipe derives from, and the upstream terms recorded there govern it.

@@ -91,9 +91,12 @@
 
 ## Stable invariants
 
-- **公開 revision の正本は pin 定数** `<FAMILY>[_<VARIANT>]_CURRENT`（現物 =
-  `packages/models/src/*/config.ts`・re-export は `packages/models/mod.ts`）。docs・モデルカード・
-  テストに SHA を写さない。`fromPretrained` の `ref` は必須（既定ソースは無い）。
+- **公開 revision の正本は家族ごとの取得元対応表** `<FAMILY>_SOURCES`（ADR
+  [0092](../docs/decisions/0092-distribution-repos-and-sources.md) 決定 3・現物 =
+  `packages/models/src/*/config.ts`・re-export は `packages/models/mod.ts` と家族サブパス）。
+  **キー = 公開リポ名から `karume-` を落としたもの**（`IRODORI_SOURCES["irodori-v4.1-small"]`）。
+  全家族を畳んだ `KARUME_SOURCES` は barrel だけが出す。docs・モデルカード・テストに SHA を
+  写さない。`fromPretrained` の `ref` は必須（既定ソースは無い）。
 - **op ごとの tolerance は実測表が正本** — `packages/runtime/tests/helpers/op-tolerance.ts`。
   表に無い op は fail loudly（共通既定値での掃引は退役）。
 - **manifest は `karume/4`** — それ以外の `format` は unsupported で落とす（互換シム無し）。

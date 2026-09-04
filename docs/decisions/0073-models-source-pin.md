@@ -103,3 +103,11 @@ satisfies HubRepoRef` を置き、サブパス export で公開する。対象 =
   `isDistributionSource` 1 本（`toManifestSource`）に集約し、ハンドルは `loadManifest` へ直行する。
   pin（`*_CURRENT`）に対応するものはハンドル側に無い — 世代の概念を持たない取得元なので、手元に
   あるバイト列がそのまま正である（ADR 0086 決定 1・暗黙 `main` の警告も出ない）。
+- 2026-09-04: **決定 1 の「定数の形」と 2026-08-25 の `*_CURRENT` 命名は、ADR
+  [0092](0092-distribution-repos-and-sources.md) 決定 3 の家族別対応表
+  `<FAMILY>_SOURCES`（+ barrel の `KARUME_SOURCES`）で置換**した（0.9.0 breaking）。
+  「1 公開リポ = 1 定数」は決定 2（`ref` の optional 化 = 既定 1 つ）時代の形で、既定席を
+  撤回した後も残っていたもの — 家族に公開リポが増えるたびトップレベル定数が増え、
+  「この家族の公開リポ一覧」を表す席が型に無かった。**pin そのものの理由（Context）と、
+  決定 3 の更新手順〈手書き + 手順書ゲート〉・2026-08-25 の維持義務〈bump のたびに更新し、
+  検証してから名乗る〉は本 ADR のまま継承する** — 変わったのは入れ物だけである。

@@ -9,8 +9,9 @@
 
 ## now — 0.8.0 リリース後（2026-09-04 棚卸し）
 
-0.8.0 は公開済み（内容は下の「消化済み（0.8.0 リリース）」節）。以降の作業波は a → d の順
-（2026-09-04 ユーザー裁定）。波と独立に消化してよい残件はその下。
+0.8.0 は公開済み（内容は下の「消化済み（0.8.0 リリース）」節）。以降の作業波は a → c の順
+（d は ADR [0092](decisions/0092-distribution-repos-and-sources.md) でクローズ・2026-09-04
+ユーザー裁定）。波と独立に消化してよい残件はその下。
 
 1. ~~**a. OP マイクロベンチ 2 段目 + Fusion 半自動発見 2 段目**~~ **消化（2026-09-04 — 段 0〜4・実測正本 =
    [research 2026-09-04](research/2026-09-04-opbench-stage2.md)）**: `tools/opbench` に `single`
@@ -22,20 +23,36 @@
    normalize が合成する linear / rms_norm / rope が unobserved に落ちる — exporter normalize に出自 1 欄）
    ③`graph` の他家族（現状 gemma4 / anima）④`single` の Metal 実走（wall モードは実装済み・timing は
    Metal の timestamp 不能）。K-7 の再評価材料は perf-ledger へ記入済み（adaLN 側は Inductor も畳む）。
-2. **b. 未配布 4 家族の初回公開**（siglip2 / birefnet / depth-anything / vowel-detector）:
-   家族ごとに dist 組み立て + モデルカード + ライセンス門 + pin 定数の新設。手順の正本 =
-   [release-runbook](release-runbook.md) §2 / §3。合格線 = 断片化検証（§2 の目安
-   ≥10 MiB/term）+ `fromPretrained(<FAMILY>_CURRENT)` の実 DL 疎通。
+2. **b. 未配布家族の初回公開**（リポ割り・命名・対応表の規則の正本 = ADR
+   [0092](decisions/0092-distribution-repos-and-sources.md)）。**対象** = `karume-siglip2`
+   （**1 リポ 2 モデル**・base / so400m 同居・既定 base — ADR 0092 決定 8）/ `karume-birefnet-hr`
+   と `karume-lucida`（**2048² 対応の実現性の確認が前提** — 前回の export は 1024² のみ）/
+   `karume-depth-anything-v2`。**vowel-detector は今回の波から外す**（上流の体裁整備が先 —
+   2026-09-04 ユーザー裁定）。**手順** = 段 0 docs（ADR 0092 + runbook / assets-layout /
+   README 追随）→ 段 1 models（`<FAMILY>_SOURCES` + `KARUME_SOURCES` へ移行・旧 pin 定数の
+   廃止 = breaking）→ 段 2 recipes（siglip2 の同居対応・リポ命名・`LICENSE.md` / `NOTICE.md` 同梱）
+   → 段 3 ライセンスの人間門（siglip2 ×2 / depth-anything small = Apache-2.0、birefnet-hr /
+   lucida = MIT〈著作権者 2 名〉— **2026-09-04 に確認済み**）→ dist 組み立て →
+   lockstep 0.9.0 → HF アップ（**`karume-gemma4-e2b` → `karume-gemma4` の改名も同乗** —
+   [release-runbook](release-runbook.md) §2）→ 対応表へ記入（§3）→ 疎通（§5）。
+   合格線 = 断片化検証（§2 の目安 ≥10 MiB/term）+ 記入した SHA での実 DL 疎通 +
+   `deno task smoke:published` が `KARUME_SOURCES` を総なめして緑。
 3. **c. perf K-13 / K-14**（prefill attention の K/V タイル再利用 / decode ①QK の並列化）:
    起票・合格線・kill 基準とも [perf-ledger](perf-ledger.md) が正本。
-4. **d. export-recipes 切り出し（裁定済み・案 A）**: 切り出すのは**レシピ部分のみ**で
-   exporter core（tools/exporter）は本リポ残留。sibling checkout + path 依存 + 資産根 /
-   fixture 書き先の注入形。論点の一覧は parked「export-recipes の別リポジトリ分離」。
-   合格線 = 両側の `uv run pytest` 緑（ADR
-   [0065](decisions/0065-exporter-core-recipe-split.md)）。
+4. ~~**d. export-recipes 切り出し（裁定済み・案 A）**~~ **クローズ（2026-09-04 — ADR
+   [0092](decisions/0092-distribution-repos-and-sources.md) 決定 5。切り出さない）**:
+   分離の動機はライセンスの見え方であって構造ではなく（構造の分離は ADR
+   [0065](decisions/0065-exporter-core-recipe-split.md) が machine gate 込みで済ませている）、
+   README 2 か所の carve-out + family 別 `THIRD_PARTY_NOTICES.md` で同じ目的を果たす。
+   uv workspace の解体・資産根 / fixture 書き先の注入は払わずに済む。
 
 **残件**:
 
+- **既公開 2 リポの `LICENSE.md` / `NOTICE.md` 同梱是正**（起票 2026-09-04 — ADR
+  [0092](decisions/0092-distribution-repos-and-sources.md) 決定 7）: `karume-irodori-v4-small` /
+  `karume-irodori-v4.1-small`（MIT = 全文 + 著作権行）と `karume-sbv2-jvnv`（CC BY-SA）は
+  法的テキストの同梱が漏れている（`verify_dist` の `LEGAL_PATHS` 席）。**次にこの 2 リポを
+  上げ直す回に同乗**させる（2026-09-04 ユーザー裁定 — 是正単独の再アップはしない）。
 - **Metal `--diagnostics` の切り分け実験**: query set の同時生存本数と `destroy()` 滞留の
   どちらが支配かの A/B。手順①②と修正候補は [known-issues](known-issues.md) の該当節が正本。
   実機が要るのでユーザー実行。
@@ -81,6 +98,11 @@
   streaming mode（26B A4B 級の前提 — CacheStorage quota が先に壁）。
 - **layer_norm の悪条件入力（分散 ≈0）**: ケース個別 tolerance の席で扱う
   （[research 2026-08-31](research/2026-08-31-op-tolerance-measurement.md) §7 注記）。
+- **exporter core の `karume/__init__` が torch を eager import する**: `karume.dist` / `karume.modelcard`
+  だけを使う配布・カード層（recipes の dist ドライバ）でも `import dist` で torch が丸ごと読まれる
+  （2026-09-04 実測 — recipes 側は torch 非依存の `measurements.py` へ寄せ済み）。`__init__` の
+  re-export を遅延化するか、`karume.dist` / `karume.modelcard` を本体から独立に import できる形にする
+  （PyPI `karume` の公開面の設計判断 — ADR 0065 の境界）。
 - **examples/ の README 整備**: 現状は gemma4 のみ。残るファミリのデモにも README を置く
   （リポ直下 / models / exporter と同じく英語 — CLAUDE.md）。
 - **MoE page-fault**: リポ外 spike で PoC 済み（2026-09-01）— 機構は成立する（miss の readback
@@ -200,7 +222,8 @@ HF 更新系は**完了（2026-08-29）**: 全席分割の再 export 8 本（**�
 LoRA scale=1.0 も同時証明）→ base 3 モデル family 再生成 → HF 上げ → turbo を**shard ごとの
 越境参照**（新機構の初適用）で焼き直し → HF 上げ → pin 2 本焼き込み + 実 DL 疎通
 （turbo = demo 完走 / base = fromPretrained + 生成完走）。**公開 revision の正本は pin 定数**
-（`ANIMA_CURRENT` / `ANIMA_TURBO_CURRENT` — `packages/models/src/anima/config.ts`）で、docs には
+（当時は 1 公開リポ = 1 定数の形。現在の在処は ADR
+[0092](decisions/0092-distribution-repos-and-sources.md) 決定 3 の対応表）で、docs には
 写さない（尾部スラック則の反映で両リポとも焼き直したように、SHA は後から動く）。断片化検証:
 全 shard 26.5〜30.4 MiB/term（健全）— 例外は base の `shared/text_encoder` shard1 =
 **4.5 MiB/term（旧公開バイトの xorb へ部分ヒットした継承断片化** — 同バイト再アップは
@@ -259,7 +282,7 @@ hf CLI が転送スキップするため runbook の処方が効かない。dele
   `88357344`〈越境参照を追随・カード Usage の repo 誤記も修正〉・重みバイト不変を sha256
   全数突合で証明）+ `AnimaGenerateRequest.sampler` 席（DPM++ 2M は選択肢）+ anima 2 pin 更新
 - CI 緑 → GitHub Release v0.5.1 → JSR publish（hub / runtime / models = 0.5.1）。事後疎通 =
-  0.5.1 消費グラフ解決 + pin 4 定数の期待値一致 + `fromPretrained(*_CURRENT)` 実 DL 構築 +
+  0.5.1 消費グラフ解決 + pin 4 定数の期待値一致 + pin 済み `fromPretrained` の実 DL 構築 +
   公開バイトからの e2e golden ビット再現（pin 更新前の同一 revision 実測）
 
 **0.5.0**:
@@ -268,7 +291,7 @@ hf CLI が転送スキップするため runbook の処方が効かない。dele
   `attentionCompute` の値 `"i8a8"` → `"a8"`・`karume/4` 繰り上げ + 表示欄 + `requiredLimits` +
   越境コンポーネント参照（ADR [0075](decisions/0075-quant-presentation.md) /
   [0038](decisions/0038-manifest-v1.md) 追記。`requiredLimits` の DL 前チェック結線は
-  release 節に残置）・`fromPretrained` の `ref` 必須化 + `*_CURRENT` 公開 + 暗黙 main warn
+  release 節に残置）・`fromPretrained` の `ref` 必須化 + pin 定数の公開面出し + 暗黙 main warn
   （ADR [0073](decisions/0073-models-source-pin.md) 追記）
 - anima の `scheduler.type` 席 + DPM++ 2M（出荷バイトの視認 A/B で base / turbo 両採用）・
   base の i4 席 2 つは配布から除外（復活条件つき — later 節）・受理解像度 8 通り縮小（E-2）・
@@ -279,7 +302,7 @@ hf CLI が転送スキップするため runbook の処方が効かない。dele
   の既存水準で受理）。非公開 `karume-sbv2-fn` も焼き直しのみ実施（公開は parked のまま）
 - lockstep 0.5.0（`uv.lock` 追随込み）→ CI 緑 → GitHub Release v0.5.0 → JSR publish
   （hub / runtime / models = 0.5.0）
-- 事後疎通（runbook §5）: JSR 0.5.0 の消費グラフ解決と `fromPretrained(*_CURRENT)` の
+- 事後疎通（runbook §5）: JSR 0.5.0 の消費グラフ解決と pin 済み `fromPretrained` の
   実 DL + 合成を 4 ファミリで確認
 
 ## 消化済み（波 K・リリース + 公開 — 2026-08-20〜21）
@@ -424,10 +447,11 @@ autoregressive 波の**残項目（波外へ送り）**:
   arXiv:2411.01433）の一次精読（読み戻しは消せてもホスト側プール常駐の壁は残る、が現時点の読み）。
   page-fault 機構は**リポ外 spike で PoC 済み・実用可否は uncertain**（復活時は spike の実測を
   research へ転記してから設計スパイクに入る — now 節「MoE page-fault」）。
-- **export-recipes の別リポジトリ分離**（ユーザー意向 2026-08-15 — 現時点では何もしない）。
-  ADR 0065 案 B〈別配布物化〉のリポ版。切り出し時の論点 = `_shared/paths.py` の REPO_ROOT
-  導出・runtime 適合 fixture（packages/runtime/tests/fixtures/）の共有・goldens の出力先・
-  uv workspace の解体。復活 = ユーザー裁定。
+- ~~**export-recipes の別リポジトリ分離**~~ **クローズ（ADR
+  [0092](decisions/0092-distribution-repos-and-sources.md) 決定 5 — 分離しない。動機だった
+  ライセンスの見え方は README 2 か所の carve-out と family 別 `THIRD_PARTY_NOTICES.md` で解く）**。
+  切り出し時の論点だった `_shared/paths.py` の REPO_ROOT 導出・runtime 適合 fixture の共有・
+  uv workspace の解体は、いずれも払わずに済む。
 
 - **karume-sbv2-fn の HF 公開**（2026-08-20 保留裁定 — 波 K で一時「出典表記つき公開」へ
   振れたが撤回）。upstream の書面条件 = Booth 頒布ページの「商用可・クレジット不要・マージ

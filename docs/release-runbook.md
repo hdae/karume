@@ -17,8 +17,9 @@
   古い表記のままでよい（e2e が読むのはバイト列で generator ではない）が、**公開する 1 回は
   bump 後に焼き直す**。以下の節の並びは作業のまとまりであって時系列ではない — **§4 の
   lockstep bump コミットだけは §1〜§3 より前**に置く（残りの §4 = push / Release は最後）。
-- pin の SHA はアップロードが済むまで存在しない（ADR 0073 — models の `*_CURRENT` は
-  「公開時点の最新コミット」に固定する）。
+- pin の SHA はアップロードが済むまで存在しない（ADR 0073 — models の対応表
+  `<FAMILY>_SOURCES` は「公開時点の最新コミット」に固定する。表の形は ADR
+  [0092](decisions/0092-distribution-repos-and-sources.md) 決定 3）。
 - manifest format を上げた場合、旧 JSR クライアントは新リポを読めない（hub は単一形パース —
   ADR 0041/0071）。JSR publish を最後に置くことで「新 hub が読める資産が既に HF にある」
   状態で公開される。
@@ -106,6 +107,12 @@ export HF_XET_DEDUPLICATION_NRANGES_IN_STREAMING_FRAGMENTATION_ESTIMATOR=1
       （断片化した祖先 shard がローカルに残っていると dedup ヒットで元に戻る）
 - [ ] アップロード: `hf upload <owner>/<repo> models/<repo> . --repo-type model`
       （`models/` は 1 ディレクトリ = 1 HF リポ — assets-layout）
+- [ ] **リポ名の改名（該当回のみ）**: HF の Settings → Rename で改める。旧名は HF 側で
+      リダイレクトされるので既公開の参照は切れないが、**リダイレクトが生きていることを実際に
+      叩いて確認**し、対応表の値（repo とキーの両方）とモデルカードを新名で発行し直す。
+      **次リリースの該当分 = `hdae/karume-gemma4-e2b` → `hdae/karume-gemma4`**（家族 1 リポの
+      規則で E4B / 12B が同居する器になるため — ADR
+      [0092](decisions/0092-distribution-repos-and-sources.md) 決定 1・Consequences）
 
 ### アップロード直後の断片化検証（必須）
 
@@ -124,30 +131,34 @@ curl -sS -H "Authorization: Bearer <accessToken>" "<casUrl>/v1/reconstructions/<
       不発（2026-08-29 実測 — 上の NOTE と同じ結論）。恒久対処の候補 3 案は
       [known-issues](known-issues.md)。観測値は §5 の記録へ残す
 
-## 3. pin 焼き込み（ADR 0073）
+## 3. pin 焼き込み（対応表への記入 — ADR 0073 / 0092）
+
+在処は `packages/models` の家族別対応表 `<FAMILY>_SOURCES`（キー = HF リポ名の basename から
+`karume-` を落としたもの）と、barrel が全家族を畳んだ `KARUME_SOURCES`（ADR
+[0092](decisions/0092-distribution-repos-and-sources.md) 決定 3）。
 
 - [ ] 公開した各リポの main の SHA（40hex）を取得:
       `curl -sS "https://huggingface.co/api/models/<owner>/<repo>/revision/main"` の `sha` 欄
-- [ ] `packages/models` の pin 定数（`<FAMILY>[_<VARIANT>]_CURRENT` — ADR 0073 追記
-      2026-08-25）の `revision` へ記入。**公開リポ 1 つにつき 1 定数**なので、上げたリポの
-      定数を漏れなく: `ANIMA_CURRENT` / `ANIMA_EXTRA_CURRENT` / `SBV2_JVNV_CURRENT` /
-      `IRODORI_V4_SMALL_CURRENT` / `IRODORI_V4_1_SMALL_CURRENT` / `GEMMA4_CURRENT`
-      （旧 `ANIMA_TURBO_CURRENT` は廃止 — ADR 0087）
-- [ ] **初公開リポの pin 定数はこの時点で新設**（ADR 0073 決定 1 — 公開前に置くと 404 にしか
-      ならない定数が公開面に生える）。`GEMMA4_CURRENT`・`IRODORI_V4_1_SMALL_CURRENT`・
-      `ANIMA_EXTRA_CURRENT` は **0.8.0 で新設済み**（以後の初公開リポも同じ手順 — 各 config.ts
-      + `mod.ts` / サブパス barrel の re-export + `current_source_test.ts` の SOURCES と実 URL
-      の門 1 本）。0.8.0 では `examples/irodori/main.ts` の台本既定も
-      `IRODORI_V4_1_SMALL_CURRENT` へ切替済み（2026-09-01 裁定 — 旧 pin は温存）
-- [ ] pin の更新は **bump のたびの義務**（`*_CURRENT` = 「このパッケージ版が**検証した**
-      取得元」— ADR 0073 追記 2026-08-25）。下の疎通に加え、席や既定 quant が動いたなら
+- [ ] 上げたリポの**該当キーの `revision` へ記入**する
+      （例: `IRODORI_SOURCES["irodori-v4.1-small"].revision`）。キーはリポ名から機械的に決まる
+      ので、リポ名を見れば書き先が一意に決まる
+- [ ] **`KARUME_SOURCES` の網羅を確認**: 今回上げたリポが全て表に載っていること。
+      不変条件（`"karume-" + key === repo の basename`・owner `hdae`・`revision` は 40hex）は
+      テストが門になっているので、`deno task test` で落ちる
+- [ ] **初公開リポのエントリはこの時点で新設**（ADR 0073 決定 1 の理由を継承 — 公開前に置くと
+      404 にしかならないキーが公開面に生える）。手順は各 family の `config.ts` の
+      `<FAMILY>_SOURCES` へ 1 エントリ足すだけで、barrel の re-export は表単位なので追随不要
+- [ ] pin の更新は **bump のたびの義務**（対応表 = 「このパッケージ版が**検証した**取得元」—
+      ADR 0073 追記 2026-08-25 の維持義務を継承）。下の疎通に加え、席や既定 quant が動いたなら
       動作テストまで通してから「検証した」と名乗る
-- [ ] 疎通: pin 済み SHA での `fromPretrained` が実 URL で通ること（SHA 指定は revision 解決
-      リクエストが発生しない = オフライン起動可 — ADR 0038）
-- [ ] **pin 定数が公開 revision の唯一の在処**であること: `rg '\b[0-9a-f]{8,40}\b' docs
+- [ ] 疎通: 記入した SHA での `fromPretrained` が実 URL で通ること（SHA 指定は revision 解決
+      リクエストが発生しない = オフライン起動可 — ADR 0038）。**表の全エントリを横断する疎通は
+      §5 の `deno task smoke:published`** — 公開版 `@karume/hub` で `KARUME_SOURCES` を総なめ
+      するので、JSR publish 後にしか打てない（§0 の順序）
+- [ ] **対応表の値が公開 revision の唯一の在処**であること: `rg '\b[0-9a-f]{8,40}\b' docs
       .claude/ACTIVE_DESIGN.md` 相当で、docs 側へ SHA を写していないか確認する（写しは焼き直しの
-      たびに古びる — 記録は `ANIMA_CURRENT` のような定数名で綴る。2 リリース連続で食い違った
-      2026-08-24 / 08-29 の再発防止）
+      たびに古びる — 記録は `ANIMA_SOURCES["anima"]` のようなキーで綴る。2 リリース連続で
+      食い違った 2026-08-24 / 08-29 の再発防止）
 - [ ] `deno task verify` → コミット
 
 ## 4. JSR publish
@@ -171,7 +182,8 @@ PyPI `karume`（tools/exporter）は**未リリース**。公開を始める時�
 - [ ] docs 同期: ACTIVE_DESIGN・backlog（release 節の消化状況）・リリース記録・
       プロジェクトメモリ
 - [ ] 公開パッケージからの疎通: `deno task smoke:published`（tools/published-smoke — 公開版
-      `@karume/hub` で全 pin 定数の manifest を解決し、sbv2 を `fromPretrained` まで通す。GPU が
+      `@karume/hub` で `KARUME_SOURCES` 全エントリの manifest を解決し、sbv2 を
+      `fromPretrained` まで通す。GPU が
       無い機体は `--manifests-only`）。ワークスペース配下の `jsr:@karume/*` はローカル member に
       解決されるため、疎通は必ずこの task で打つ（自前の deno.json で registry を引く）
 - [ ] 断片化検証の結果（§2）を research か backlog へ 1 行記録
