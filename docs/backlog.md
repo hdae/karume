@@ -12,16 +12,16 @@
 0.8.0 は公開済み（内容は下の「消化済み（0.8.0 リリース）」節）。以降の作業波は a → d の順
 （2026-09-04 ユーザー裁定）。波と独立に消化してよい残件はその下。
 
-1. **a. OP マイクロベンチ 2 段目 + Fusion 半自動発見 2 段目**（1 段目の実測正本 =
-   [research 2026-09-03](research/2026-09-03-op-census-fusion-hints.md)）
-   - OP マイクロベンチ 2 段目 = `tools/opbench single`（計測規約を実装として内蔵・timing /
-     wall の 2 モード）→ `graph` → **PyTorch 対照**（CUDA venv・列 B「torch が実際に速い形」を
-     基準・常駐バイト併記）→ **CPU/TS 側配置の系統評価**（先例 = PLE host
-     gather / relattn のホスト生成）。合格線 = K-11 と P-1 の再現
-     （[perf-ledger](perf-ledger.md)）。
-   - Fusion 2 段目 = Inductor の融合決定を候補ヒント化し census の実形状と突合する（基盤は
-     OP 2 段目）。K-7 / K-5b の棄却実測は現行資産限定なのでここで再評価する。合格線 =
-     Inductor の融合決定と census の実形状が突合でき、候補表の各行に採否の裏付けが付くこと。
+1. ~~**a. OP マイクロベンチ 2 段目 + Fusion 半自動発見 2 段目**~~ **消化（2026-09-04 — 段 0〜4・実測正本 =
+   [research 2026-09-04](research/2026-09-04-opbench-stage2.md)）**: `tools/opbench` に `single`
+   （計測規約を実装として内蔵 — クロック張り付けの filler を新規に規約化）/ `graph` / `torch`（列 B）を、
+   `tools/fusion-hints` に `inductor` を追加。合格線 = K-11 の census 加重 9.05ms（ADR 0082 の 7.38ms に
+   +22.6%・帯内）・single / graph 1.01・P-1 の変種キーと dispatch 数の一致、で達成。**残（起票）**:
+   ①**CPU/TS 側配置の系統評価**は未着手（先例 = PLE host gather / relattn のホスト生成 — 次の性能波で
+   `single` の形別表を入口にする）②Inductor 突合の join を normalize の**出自**で行う（現状は fx 名で、
+   normalize が合成する linear / rms_norm / rope が unobserved に落ちる — exporter normalize に出自 1 欄）
+   ③`graph` の他家族（現状 gemma4 / anima）④`single` の Metal 実走（wall モードは実装済み・timing は
+   Metal の timestamp 不能）。K-7 の再評価材料は perf-ledger へ記入済み（adaLN 側は Inductor も畳む）。
 2. **b. 未配布 4 家族の初回公開**（siglip2 / birefnet / depth-anything / vowel-detector）:
    家族ごとに dist 組み立て + モデルカード + ライセンス門 + pin 定数の新設。手順の正本 =
    [release-runbook](release-runbook.md) §2 / §3。合格線 = 断片化検証（§2 の目安
