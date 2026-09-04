@@ -97,7 +97,8 @@ export HF_XET_DEDUPLICATION_NRANGES_IN_STREAMING_FRAGMENTATION_ESTIMATOR=1
       （`GLOBAL_DEDUP_QUERY_ENABLED`）は**存在しない**（後継 =
       `HF_XET_MIN_SPACING_BETWEEN_GLOBAL_DEDUP_QUERIES` を巨大値に — ただし下記には効かない）。
       さらに**リポ自身の履歴に同一 chunk がある場合の repo 内 dedup はどのノブでも止まらない**
-      （[known-issues](known-issues.md) の text_encoder 断片化）。
+      （2026-08-29 に anima の text_encoder で実測。shard 分割後の 0.8.0 では再現せず — 結果は
+      backlog の 0.8.0 消化済み節）。
 - [ ] **書き込みトークンへ切替**: `hf auth switch --token-name "Karume Release"` —
       既定の読み取りトークン（Karume Gated Read）のままだと LFS batch が 403 になる
       （2026-08-21 実測）。アップロードが済んだら読み取りトークンへ戻す
