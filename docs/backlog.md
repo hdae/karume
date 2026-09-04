@@ -16,7 +16,7 @@
    [research 2026-09-03](research/2026-09-03-op-census-fusion-hints.md)）
    - OP マイクロベンチ 2 段目 = `tools/opbench single`（計測規約を実装として内蔵・timing /
      wall の 2 モード）→ `graph` → **PyTorch 対照**（CUDA venv・列 B「torch が実際に速い形」を
-     基準・常駐バイト併記）→ ブラウザ実測 → **CPU/TS 側配置の系統評価**（先例 = PLE host
+     基準・常駐バイト併記）→ **CPU/TS 側配置の系統評価**（先例 = PLE host
      gather / relattn のホスト生成）。合格線 = K-11 と P-1 の再現
      （[perf-ledger](perf-ledger.md)）。
    - Fusion 2 段目 = Inductor の融合決定を候補ヒント化し census の実形状と突合する（基盤は
@@ -79,10 +79,7 @@
   sidecar は `extras` 席で shard 門の外 / `estimateSessionMemory` のロード面結線（Phase B
   持ち越し）/ `fromAssets` の位置づけ / large asset の reference-first 一般則 / cache-less
   streaming mode（26B A4B 級の前提 — CacheStorage quota が先に壁）。
-- **perf-ledger へ起票が要る候補**: レンズ L-7 / L-12 の再評価（decode がフェンス床支配へ戻った
-  ため — [research 2026-08-30](research/2026-08-30-gemma4-decode-wallclock.md) §7・perf-ledger の
-  L-7 とは別番号系）/ lm_head `wi8` M=1（decode GPU 時間の新 2 位）/ layer_norm の悪条件入力
-  （分散 ≈0）はケース個別 tolerance の席で扱う
+- **layer_norm の悪条件入力（分散 ≈0）**: ケース個別 tolerance の席で扱う
   （[research 2026-08-31](research/2026-08-31-op-tolerance-measurement.md) §7 注記）。
 - **examples/ の README 整備**: 現状は gemma4 のみ。残るファミリのデモにも README を置く
   （リポ直下 / models / exporter と同じく英語 — CLAUDE.md）。
@@ -96,6 +93,10 @@
 
 - Chrome での HF 経路の RAM ピーク追試（Deno 側は実測済み —
   [research 2026-09-02](research/2026-09-02-shard-size-ram-peak.md)）。
+  **性能のブラウザ計測はこの波（a）から外す（2026-09-04 ユーザー裁定）** — ブラウザで採れるのは
+  Dawn / wgpu の実装差だけで、カーネル候補の採否には効かない。代替 = TS パッケージ側に性能情報を
+  収集する機能を足し、ユーザーが複数環境でサンプル集（名称・置き場は未定）を回した結果を集める
+  （**起票のみ** — 収集する項目・置き場・オプトインの形は未設計）。
 - Pixel（8GB 級 Android Chrome）の `err.cause` 再判定 — [known-issues](known-issues.md)。
 
 ## 消化済み（0.8.0 リリース — 2026-08-30〜09-04）

@@ -197,3 +197,20 @@ anima・irodori・gemma4 は `packages/runtime/tests/assets_fusion_counts_test.t
 - 2 段目（GPU）: `tools/opbench single`（計測規約を実装として内蔵・timing / wall 2 モード・K-11 と P-1
   の再現が合格線）→ `graph` → PyTorch 対照（CUDA venv・列 B「torch が実際に速い形」を基準・常駐
   バイト併記 — 2026-09-03 裁定）→ ブラウザ面 → CPU/TS 配置評価。Inductor は候補の裏付け役（2 段目）。
+
+## 追記（2026-09-04）— §1.2 の anima 行のラベル訂正
+
+§1.2 の「anima / 1024px（DiT 1 step ぶん）」というラベルは実体と食い違う。同行の 847 本 /
+1,550.9M 要素 / 5,916MiB は **4 コンポーネント合算**（各 1 run — text_encoder 227 /
+text_conditioner 136 / transformer 479 / vae_decoder 5 本）で、DiT だけなら 479 本 /
+1,468.5M 要素（5,602MiB・うち `permute` が 224 本 / 1,468.0M 要素）。数値は正しくラベルだけが
+誤りなので、時点スナップショットの規約に従い本文は書き換えない。
+
+## 追記（2026-09-04）— census 加重のキーに attrs を含めた
+
+`tools/opbench` の加重キー（`summary.json` の `weights[]` を畳む単位）に op の attrs を足した。
+同じ shape / dtype / 格納でも `permute` の `dims` や `slice` の範囲が違えばメモリアクセス形が
+別物で、単体ベンチでは別ケースになるのに 1 行へ畳まれていたため（実測で割れる op は
+`slice` / `permute` / `conv1d` / `leaky_relu`）。**この変更で「相異なる形の本数」は 1 段目で採った
+`summary.json` の `weights[]` 行数から上振れする**（例: gemma4 は 77 → 115 行。本文の総ノード数・
+op 別本数・出力要素は加重キーに依らないので不変）。再計測後の値は 2 段目の research が持つ。時点スナップショットの規約に従い本文は書き換えない。
