@@ -23,21 +23,25 @@
    normalize が合成する linear / rms_norm / rope が unobserved に落ちる — exporter normalize に出自 1 欄）
    ③`graph` の他家族（現状 gemma4 / anima）④`single` の Metal 実走（wall モードは実装済み・timing は
    Metal の timestamp 不能）。K-7 の再評価材料は perf-ledger へ記入済み（adaLN 側は Inductor も畳む）。
-2. **b. 未配布家族の初回公開**（リポ割り・命名・対応表の規則の正本 = ADR
-   [0092](decisions/0092-distribution-repos-and-sources.md)）。**対象** = `karume-siglip2`
-   （**1 リポ 2 モデル**・base / so400m 同居・既定 base — ADR 0092 決定 8）/ `karume-depth-anything-v2`。
+2. ~~**b. 未配布家族の初回公開**~~ **消化（2026-09-04 — 0.9.0。リポ割り・命名・対応表の規則の
+   正本 = ADR [0092](decisions/0092-distribution-repos-and-sources.md)）**: `karume-siglip2`
+   （**1 リポ 2 モデル**・base / so400m 同居・既定 base — 決定 8）と `karume-depth-anything-v2`
+   を初公開し、`karume-gemma4-e2b` → `karume-gemma4` の改名を同乗させた（改名後はカードと
+   `karume.json` を焼き直したので revision が動いている）。対応表は **6 家族 8 エントリ**
+   （anima 2 / irodori 2 / sbv2 1 / gemma4 1 / siglip2 1 / depth-anything 1）で、公開 revision の
+   正本は `packages/models/src/*/config.ts` の pin 8 本（docs には写さない）。
+   **断片化**: siglip2 の初回アップロードが global dedup のヒットで断片化し（so400m の 7 shard 中
+   5 本が 4.2〜8.9 MiB/term）、hf_xet 1.6.0 の停止ノブ + shard-cache 退避 + リポ再作成で
+   46〜61 MiB/term へ回復させた（機序と実測 =
+   [research 2026-08-09 の 2026-09-04 追記](research/2026-08-09-xet-fragmentation.md)・恒久手順 =
+   [release-runbook](release-runbook.md) §2）。**合格線の実績** = 断片化検証は siglip2 46〜61 /
+   depth-anything 47 MiB/term で目安 ≥10 を全て満たす。**残** = `deno task smoke:published`
+   による `KARUME_SOURCES` の総なめ（JSR publish 後にしか打てない — runbook §0 の順序）。
    `karume-birefnet-hr` と `karume-lucida` は**後回し**（2026-09-04 ユーザー裁定 — 2048² は現状
    不成立〈[limitations](limitations.md) の BiRefNet 節〉。プールの再利用方式の見直しと中間
-   テンソルの `requiredLimits` 宣言が前提で、公開する時は 1024² の配布形のまま）。**vowel-detector は今回の波から外す**（上流の体裁整備が先 —
-   2026-09-04 ユーザー裁定）。**手順** = 段 0 docs（ADR 0092 + runbook / assets-layout /
-   README 追随）→ 段 1 models（`<FAMILY>_SOURCES` + `KARUME_SOURCES` へ移行・旧 pin 定数の
-   廃止 = breaking）→ 段 2 recipes（siglip2 の同居対応・リポ命名・`LICENSE.md` / `NOTICE.md` 同梱）
-   → 段 3 ライセンスの人間門（siglip2 ×2 / depth-anything small = Apache-2.0、birefnet-hr /
-   lucida = MIT〈著作権者 2 名〉— **2026-09-04 に確認済み**）→ dist 組み立て →
-   lockstep 0.9.0 → HF アップ（**`karume-gemma4-e2b` → `karume-gemma4` の改名も同乗** —
-   [release-runbook](release-runbook.md) §2）→ 対応表へ記入（§3）→ 疎通（§5）。
-   合格線 = 断片化検証（§2 の目安 ≥10 MiB/term）+ 記入した SHA での実 DL 疎通 +
-   `deno task smoke:published` が `KARUME_SOURCES` を総なめして緑。
+   テンソルの `requiredLimits` 宣言が前提で、公開する時は 1024² の配布形のまま。上流ライセンス
+   の人間確認は 2026-09-04 に済み — 両方 MIT・著作権者 2 名・`LICENSE.md` は recipe が同梱）。
+   **vowel-detector も今回の波から外した**（上流の体裁整備が先 — 2026-09-04 ユーザー裁定）。
 3. **c. perf K-13 / K-14**（prefill attention の K/V タイル再利用 / decode ①QK の並列化）:
    起票・合格線・kill 基準とも [perf-ledger](perf-ledger.md) が正本。
 4. ~~**d. export-recipes 切り出し（裁定済み・案 A）**~~ **クローズ（2026-09-04 — ADR

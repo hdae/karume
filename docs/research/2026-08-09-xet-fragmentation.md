@@ -274,3 +274,54 @@ curl -sS -H "Authorization: Bearer <accessToken>" "<casUrl>/v1/reconstructions/<
   [assets-layout.md](../assets-layout.md) の「公開」節に従うこと。
 - Range 並列を `@karume/hub` の `fetch` 経路で実装したときに同じ数値が出るかは未検証
   （E1 §7 から引き継ぎ）。並列度は 16 を基準に再測が要る。
+
+## 追記 2026-09-04 — hf_xet 1.6.0 での global dedup 停止と回復
+
+0.9.0 の初回公開（`hdae/karume-siglip2` / `hdae/karume-depth-anything-v2`）で断片化が再発した。
+使ったのは nix の `hf`（huggingface_hub 1.10.2 / hf_xet 1.4.3）+ 当時の手順どおりの env 3 本。
+
+### 初回アップロードの断片化（env 3 本・hf_xet 1.4.3）
+
+| リポ / 対象               | 対象 shard | MiB/term                        | global dedup 照会 |  ヒット |
+| ------------------------- | ---------: | ------------------------------- | ----------------: | ------: |
+| siglip2 `so400m`          |          7 | 5 本が **4.2〜8.9**（目安未達） |    19（リポ全体） | 8（同） |
+| siglip2 `base`            |          — | 10.7 / 20.3                     |                〃 |      〃 |
+| depth-anything-v2 `small` |          — | **47**（健全）                  |                 2 |       0 |
+
+ヒットの内訳: reconstruction 全 1988 MiB のうち **1128 MiB（57%）が自分の上げていない 36 個の
+xorb** を指していた。ヒット先のリポは特定できていない（上流 `google` の so400m f32 safetensors
+とは xorb 共有ゼロ = 別物）。§4 の「ヒット元は特定できていない」と同型の観測である。
+
+### 実害（single-stream 実測）
+
+| 対象                        |    per-stream |
+| --------------------------- | ------------: |
+| siglip2 の断片化 shard      |  **4.0 MB/s** |
+| 同リポの健全 shard          | 8.9〜9.7 MB/s |
+| gemma4 の健全 shard（対照） |     14.1 MB/s |
+
+### 停止ノブは 1.6.0 で復活している
+
+`HF_XET_DEDUPLICATION_GLOBAL_DEDUP_QUERY_ENABLED=false` は **hf_xet 1.4.3 には無く、1.6.0
+（`tools/.venv` の `hf` = huggingface_hub 1.27.0）にはある**。バイナリの env 名一覧で確認し、
+実行時も hf_xet のログに `global_dedup_query_enabled = false (user set)` が出た。
+1.4.3 で後継とされた `HF_XET_MIN_SPACING_BETWEEN_GLOBAL_DEDUP_QUERIES` のほうは、巨大値に
+しても効かない（2026-08-29 実測）。
+
+### 回復は可能（1.4.3 での「片道ラチェット」は 1.6.0 では覆る）
+
+shard-cache（`~/.cache/huggingface/xet/*/shard-cache`）を退避し、env 4 本 + `tools/.venv` の
+`hf` で**同一バイト**を上げ直すと、CAS 照会 0 回で xorb を新規に書く。
+
+| 段階                                               | CAS 照会         |   MiB/term |
+| -------------------------------------------------- | ---------------- | ---------: |
+| 初回（1.4.3・env 3 本）                            | 19 回中 8 ヒット |  4.2〜20.3 |
+| 同一バイトの private probe リポ（1.6.0・env 4 本） | 0 回             |   **46.4** |
+| 本番（リポ削除 → 再作成 → 再アップロード）         | 0 回             | **46〜61** |
+
+- 実施した回復手順は**リポ削除 → 再作成・再アップロード**（2026-09-04 ユーザー裁定）。
+- **同一リポ内の 2 コミット法（delete → 再 up）は未検証**。probe と同じ機構なので効く見込みだが
+  実測していない。
+- したがって §3 / §5 の「片道ラチェット・回復手段なし」は **hf_xet 1.4.3 での結論**であり、
+  1.6.0 + 停止ノブ + shard-cache 退避の組では成立しない。恒久手順は
+  [release-runbook](../release-runbook.md) §2。

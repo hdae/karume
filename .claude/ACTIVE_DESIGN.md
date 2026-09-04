@@ -11,15 +11,18 @@
 
 ## Now
 
-- **0.8.0 リリース済み（2026-09-04）**: JSR 3 パッケージ（runtime / hub / models）= 0.8.0・HF 6 リポ
-  公開（`karume-anima` / `karume-anima-extra` / `karume-irodori-v4-small` /
-  `karume-irodori-v4.1-small` / `karume-sbv2-jvnv` / `karume-gemma4-e2b`）・pin 定数 6 本を焼き込み
-  済み。未配布は 4 家族（siglip2 / birefnet / depth-anything / vowel-detector）。
+- **0.9.0 はローカル完了（2026-09-04）** — push / GitHub Release / JSR publish はユーザー。
+  配布は **HF 8 リポ**（`karume-anima` / `karume-anima-extra` / `karume-irodori-v4-small` /
+  `karume-irodori-v4.1-small` / `karume-sbv2-jvnv` / `karume-gemma4`〈`-e2b` から改名済み〉/
+  `karume-siglip2`〈base + so400m 同居〉/ `karume-depth-anything-v2`）で、取得元対応表は
+  **6 家族 8 エントリ**。未配布は 2 家族（birefnet 系 / vowel-detector）。
 - **次の作業波（2026-09-04 裁定の順）** — 内容と残件の正本は [backlog](../docs/backlog.md) now:
-  a) OP マイクロベンチ 2 段目 + Fusion 半自動発見 2 段目（1 段目は消化済み）
-  b) 未配布 4 家族の初回公開
+  a) OP マイクロベンチ 2 段目 + Fusion 半自動発見 2 段目（消化済み — research 2026-09-04）
+  b) 未配布家族の初回公開（0.9.0 で siglip2 / depth-anything を消化・birefnet 系と
+  vowel-detector は後回し）
   c) perf K-13 / K-14（[perf-ledger](../docs/perf-ledger.md) が起票の正本）
-  d) `tools/export-recipes/` の切り出し（案 A = レシピのみ・汎用 core は wheel に残す）
+  d) `tools/export-recipes/` の切り出し — クローズ（ADR 0092 決定 5: recipes は本リポに残し、
+  ライセンスは carve-out で分ける）
 - **可変 capacity（[ADR 0091](../docs/decisions/0091-gemma4-host-rope-variable-capacity.md)）の
   意図的な現状 4 点** — 欠落に見えるが設計どおり: ①RoPE 表を焼いた旧配布形は読めない
   ②`GreedySpec` / `GenerationProgramSpec` は `positionIds` を持たない（位置の唯一の供給口は

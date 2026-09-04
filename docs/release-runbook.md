@@ -82,42 +82,50 @@ NOTE（次リリース限り）: 旧 `hdae/karume-anima-turbo` は ADR 0087 で�
 ## 2. HF アップロード（断片化対策 — MUST）
 
 **背景**: env を付けずに上げると Xet の chunk dedup が効きすぎて再構成が断片化し、DL が
-5〜6 倍遅くなる。断片化は一度 CAS に載ると戻らない（**片道ラチェット** — 初回で防ぐのが
-唯一の手）。
+5〜6 倍遅くなる。dedup には **global dedup**（CAS 全体への chunk 照会 — 自分が上げていない
+他人の xorb にもヒットする）が含まれ、これを止めないと**初回アップロードでも**断片化する。
+
+- [ ] **使う `hf` を固定する**: `tools/.venv/bin/hf`（huggingface_hub 1.27 / hf_xet 1.6.0）。
+      **nix の `hf`（hf_xet 1.4.3）は使わない** — global dedup の停止ノブ（下の 4 本目）が
+      その版には無く、断片化を止める手段が無い
 
 ```sh
 export HF_XET_DEDUPLICATION_MIN_N_CHUNKS_PER_RANGE=1000000
 export HF_XET_DEDUPLICATION_MIN_N_CHUNKS_PER_RANGE_HYSTERESIS_FACTOR=1.0
 export HF_XET_DEDUPLICATION_NRANGES_IN_STREAMING_FRAGMENTATION_ESTIMATOR=1
+export HF_XET_DEDUPLICATION_GLOBAL_DEDUP_QUERY_ENABLED=false
 ```
 
-- [ ] 上の env 3 本を**同一シェルで** export してから `hf upload` を実行する
-      （正本: [assets-layout.md](assets-layout.md) 公開節）。**新規バイトにはこれで効く**
-      （26〜30 MiB/term 実測）。
-      **NOTE（2026-08-29 退行・hf_xet 1.4.3）**: 旧・4 本目
-      （`GLOBAL_DEDUP_QUERY_ENABLED`）は**存在しない**（後継 =
-      `HF_XET_MIN_SPACING_BETWEEN_GLOBAL_DEDUP_QUERIES` を巨大値に — ただし下記には効かない）。
-      さらに**リポ自身の履歴に同一 chunk がある場合の repo 内 dedup はどのノブでも止まらない**
-      （2026-08-29 に anima の text_encoder で実測。shard 分割後の 0.8.0 では再現せず — 結果は
-      backlog の 0.8.0 消化済み節）。
+- [ ] 上の env 4 本を**同一シェルで** export してから `hf upload` を実行する
+      （正本: [assets-layout.md](assets-layout.md) 公開節）。4 本目が読まれたことは hf_xet の
+      ログの `global_dedup_query_enabled = false (user set)` 行で確認する。
+      **NOTE（hf_xet の版差）**: 4 本目 `GLOBAL_DEDUP_QUERY_ENABLED` は
+      **1.4.3 には無く 1.6.0 にはある**（2026-09-04 にバイナリの env 名一覧で確認）。
+      1.4.3 で後継とされた `HF_XET_MIN_SPACING_BETWEEN_GLOBAL_DEDUP_QUERIES` を巨大値にする形は
+      **効かない**（2026-08-29 実測）。さらに 1.4.3 では**リポ自身の履歴に同一 chunk がある
+      場合の repo 内 dedup がどのノブでも止まらない**（同日 anima の text_encoder で実測。
+      shard 分割後の 0.8.0 では再現せず — 結果は backlog の 0.8.0 消化済み節）。
+- [ ] **`~/.cache/huggingface/xet/*/shard-cache` を毎回退避する**（再アップロードだけでなく
+      **初回でも**）。global dedup のヒットでサーバから取り寄せた shard がここに残り、
+      次のアップロードはそれを引き当てて断片化を継承する
 - [ ] **書き込みトークンへ切替**: `hf auth switch --token-name "Karume Release"` —
       既定の読み取りトークン（Karume Gated Read）のままだと LFS batch が 403 になる
       （2026-08-21 実測）。アップロードが済んだら読み取りトークンへ戻す
-- [ ] **再アップロード時**は先に `~/.cache/huggingface/xet/*/shard-cache` を退避する
-      （断片化した祖先 shard がローカルに残っていると dedup ヒットで元に戻る）
-- [ ] アップロード: `hf upload <owner>/<repo> models/<repo> . --repo-type model`
+- [ ] アップロード: `tools/.venv/bin/hf upload <owner>/<repo> models/<repo> . --repo-type model`
       （`models/` は 1 ディレクトリ = 1 HF リポ — assets-layout）
-- [ ] **リポ名の改名（該当回のみ）**: HF の Settings → Rename で改める。旧名は HF 側で
-      リダイレクトされるので既公開の参照は切れないが、**リダイレクトが生きていることを実際に
-      叩いて確認**し、対応表の値（repo とキーの両方）とモデルカードを新名で発行し直す。
-      **次リリースの該当分 = `hdae/karume-gemma4-e2b` → `hdae/karume-gemma4`**（家族 1 リポの
-      規則で E4B / 12B が同居する器になるため — ADR
-      [0092](decisions/0092-distribution-repos-and-sources.md) 決定 1・Consequences）
+- [ ] **リポ名の改名（該当回のみ）**: `hf repos move <old> <new>` で改める。旧名は API /
+      resolve とも **HTTP 307** で新名へリダイレクトするので既公開の参照は切れないが、
+      **リダイレクトが生きていることを実際に叩いて確認**する —
+      `curl -sS -o /dev/null -w '%{http_code} %{redirect_url}' "https://huggingface.co/api/models/<old>"`
+      が `307` と新名の URL を返せばよい。
+      改名後はモデルカードと `karume.json` を焼き直して上げ直す（カードの Usage の repo 名が
+      旧名のまま残るため）ので **revision が動く** — §3 の対応表を新名 + 新 SHA で更新する
 
 ### アップロード直後の断片化検証（必須）
 
-大きいファイル（重み safetensors）を代表 2〜3 本サンプルして reconstruction を確認する
-（research §9 の再現手順）:
+**全 safetensors を表にする**（代表 2〜3 本のサンプルでは足りない — 2026-09-04 の siglip2 は
+so400m の 7 shard 中 5 本だけが断片化しており、サンプルの当たり外れで見落とす）。
+research §9 の再現手順:
 
 ```sh
 curl -sS -I "https://huggingface.co/<repo>/resolve/main/<path>" | grep -i x-xet-hash
@@ -126,10 +134,13 @@ curl -sS -H "Authorization: Bearer <accessToken>" "<casUrl>/v1/reconstructions/<
 ```
 
 - [ ] `terms[]` を数え **MiB/レンジ ≥ 10 目安**（健全なら 1 xorb = 1 term に近い）。
-      大きく下回っていたら断片化 — **現行クライアント（hf_xet 1.4.3）では回復手段が無い**。
-      同バイト上げ直しは hf CLI が転送ごとスキップして効かず、delete→再 up の 2 コミット法でも
-      不発（2026-08-29 実測 — 上の NOTE と同じ結論）。恒久対処の候補 3 案は
-      [known-issues](known-issues.md)。観測値は §5 の記録へ残す
+      大きく下回っていたら断片化 — **hf_xet 1.6.0 + 上の env 4 本なら回復できる**。
+      手順 = shard-cache を退避 → **リポを削除して再作成** → 同一バイトを上げ直す。CAS 照会が
+      0 回になり xorb を新規に書くので健全形に戻る（2026-09-04・siglip2 で 46〜61 MiB/term へ
+      回復 — [research](research/2026-08-09-xet-fragmentation.md) の 2026-09-04 追記）。
+      同一リポ内の delete → 再 up の 2 コミット法は**未検証**。
+      **hf_xet 1.4.3 では回復手段が無い**（片道ラチェット — 同バイト上げ直しは hf CLI が転送ごと
+      スキップし、2 コミット法も不発。2026-08-29 実測）。観測値は §5 の記録へ残す
 
 ## 3. pin 焼き込み（対応表への記入 — ADR 0073 / 0092）
 

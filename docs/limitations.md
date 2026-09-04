@@ -72,9 +72,10 @@ re-export は置いていない）。置換は家族ごとの対応表で、キ�
 | `SBV2_JVNV_CURRENT`          | `SBV2_SOURCES["sbv2-jvnv"]`             |
 | `GEMMA4_CURRENT`             | `GEMMA4_SOURCES["gemma4"]`              |
 
-gemma4 のエントリは**リポ名も改名する** — `karume-gemma4-e2b` → `karume-gemma4`（E4B / 12B が
-同居する器にするため — ADR 0092 決定 1）。HF の rename は旧名をリダイレクトするので、
-0.8.0 までの `GEMMA4_CURRENT` に焼かれた pin は解決し続ける。
+gemma4 のエントリは**リポ名も改名した** — `karume-gemma4-e2b` → `karume-gemma4`（E4B / 12B が
+同居する器にするため — ADR 0092 決定 1。0.9.0 の公開時に実施）。HF の rename は旧名を
+リダイレクトするので（API / resolve とも HTTP 307）、0.8.0 までの `GEMMA4_CURRENT` に焼かれた
+pin は解決し続ける。
 
 値（`{ repo, revision }`）は従来と同じ形で、`fromPretrained` の第 1 引数へそのまま渡せる。
 barrel（`@karume/models`）はさらに全家族を畳んだ `KARUME_SOURCES` を出す（**同じキー・同じ

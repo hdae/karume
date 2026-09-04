@@ -105,34 +105,34 @@ uv run python dist.py --pipeline vowel-detector      # → models/karume-vowel-d
 
 ## 公開（HF へのアップロード）
 
-**MUST: モデルファイルを HF へ上げるときは、以下の env を必ず付ける。**
+**MUST: モデルファイルを HF へ上げるときは、`tools/.venv/bin/hf`（huggingface_hub 1.27 /
+hf_xet 1.6.0）を使い、以下の env 4 本を同一シェルで必ず付ける。**
 
 ```sh
 export HF_XET_DEDUPLICATION_MIN_N_CHUNKS_PER_RANGE=1000000
 export HF_XET_DEDUPLICATION_MIN_N_CHUNKS_PER_RANGE_HYSTERESIS_FACTOR=1.0
 export HF_XET_DEDUPLICATION_NRANGES_IN_STREAMING_FRAGMENTATION_ESTIMATOR=1
+export HF_XET_DEDUPLICATION_GLOBAL_DEDUP_QUERY_ENABLED=false
 ```
 
-付けないと Xet の chunk 単位 dedup が効きすぎて**再構成が断片化し、DL が 5〜6 倍遅くなる**。
-断片化は一度 CAS に載ると戻せない（片道ラチェット）ので、**初回アップロードで防ぐのが唯一の手**
-である。機序と実測は
+付けないと Xet の chunk 単位 dedup が効きすぎて**再構成が断片化し、DL が数倍遅くなる**。
+4 本目は CAS 全体への chunk 照会（global dedup）を止める — これが無いと、上げた覚えの無い
+他リポの xorb へヒットして**初回アップロードでも断片化する**（2026-09-04 の siglip2 で実測）。
+機序と実測は
 [research/2026-08-09-xet-fragmentation.md](research/2026-08-09-xet-fragmentation.md)。
 
-- 上げたら**必ず検証する** — reconstruction の term 数を数え、`MiB/レンジ` が 10 を大きく
-  下回っていないか見る（手順は同ドキュメント §9）。健全なら 1 xorb = 1 term に近くなる。
-- 再アップロードの前には `~/.cache/huggingface/xet/*/shard-cache` を退避する（断片化した祖先の
-  shard がローカルに残っていると、そこへ dedup ヒットして元に戻る）。
+- 上げたら**必ず検証する** — 全 safetensors について reconstruction の term 数を数え、
+  `MiB/レンジ` が 10 を下回っていないか見る（手順は同ドキュメント §9・サンプル数本では
+  shard 間の偏りを見落とす）。健全なら 1 xorb = 1 term に近くなる。
+- アップロードの前には**毎回** `~/.cache/huggingface/xet/*/shard-cache` を退避する（初回でも
+  global dedup のヒットで取り寄せた shard が残り、次のアップロードでそこへ dedup ヒットする）。
 
-**env が効く範囲は hf_xet の版に依存する。** 実測で確定している 2026-08-29 時点（hf_xet 1.4.3）
-の線引き:
+**env が効く範囲は hf_xet の版に依存する。**
 
-- **新規バイトのアップロードには依然として有効**（実測 26〜30 MiB/term = 健全）。上の 3 本は
-  必ず付ける。
-- 旧・4 本目の `HF_XET_DEDUPLICATION_GLOBAL_DEDUP_QUERY_ENABLED` は **1.4.3 で消滅**した
-  （後継は `HF_XET_MIN_SPACING_BETWEEN_GLOBAL_DEDUP_QUERIES` を巨大値にする形だが、下の
-  repo 内 dedup には効かない）。存在しない env を export しても何も起きないので、
-  「対策済み」と読まないこと。
-- **リポ自身の履歴に同一 chunk がある場合の repo 内 dedup はどのノブでも止まらない**。
-  したがって**既に断片化したファイルは現行クライアントでは回復不能** — 同じバイト列を同じ
-  パスへ上げ直しても hf CLI が転送ごとスキップし、delete → 再 up の 2 コミット法でも不発
-  （実測）。恒久対処の候補 3 案は [known-issues](known-issues.md) の text_encoder 断片化節。
+- 4 本目の `GLOBAL_DEDUP_QUERY_ENABLED` は hf_xet **1.4.3（nix の hf）には無く、1.6.0
+  （tools/.venv の hf）にはある**。効いたことは hf_xet のログの
+  `global_dedup_query_enabled = false (user set)` 行で確認できる。1.4.3 では存在しない env を
+  export しても何も起きないので、nix の hf ではアップロードしない。
+- **回復は可能**: shard-cache を退避し、4 本の env と 1.6.0 の hf で同一バイトを上げ直すと
+  健全な xorb が新規に書かれる（実施した形はリポ削除 → 再作成・再アップ。同一リポ内の
+  delete → 再 up の 2 コミット法は未検証）。1.4.3 では回復手段が無かった（片道ラチェット）。
