@@ -185,6 +185,32 @@ single-op time × the census weight is what a kernel candidate is worth.
 cases, and `weighted_ms_by_op_storage` — the census-weighted total per `(op, storage signature)`,
 which is the number the K-11 acceptance line (gemma4 decode `linear/f32+i4g32`) is checked against.
 
+## `graph` — one real run, per-key GPU time, compared with the census
+
+```
+deno run -A tools/opbench/main.ts graph --source <mirror> --family <gemma4|anima> --out <dir> \
+    [--census <census dir> --scenario <name>] [--single <single dir>] [--mode timing|wall]
+```
+
+Drives one real inference through the family's pipeline (`gemma4` = one short chat turn, `anima` =
+one image) with `acquireGpu({ gpuTiming: true })` injected, and records every `onRunDiagnostics`
+callback as one row of `graph.jsonl`: the run's label (`prefill` / `decode-n`, or
+`<component>-n`), its dispatch count, total GPU time and the per-pipeline-key breakdown. Production
+code is untouched; the observation point is the same one P-1 was measured through.
+
+With `--census` and `--scenario`, the runs whose label starts with `--runs` (default `decode` for
+gemma4, `transformer` for anima) are averaged and compared per op with the census's plain node
+count (rows that are neither fused nor aliased). Pipeline keys are mapped to ops by their leading
+word; variant names that differ from the op (`linear_gemv` → `linear`, `attention_state_*` →
+`attention`) go through a small table, `quantize_rows` is counted as `aux` (the a8 path's activation
+quantisation has no census node), and any key that maps to nothing the census knows is listed under
+`unmapped_keys` rather than dropped. With `--single`, the census-weighted totals of a `single` run
+are joined per op and reported as `single_over_graph` — the ratio that says how far the single-op
+model is from the in-graph time (K-11 measured 0.75–0.85).
+
+Other families fail loudly for now: the two acceptance lines of this stage (K-11 on gemma4, P-1 on
+anima) are the assets that exist here.
+
 ## Notes
 
 - Fusion is planned against the **WebGPU core default limits** (128 MiB storage binding, 65535
