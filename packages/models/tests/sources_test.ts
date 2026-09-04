@@ -16,8 +16,8 @@
 // 綴りの正しさを見るのは①だけ（③は期待 URL をエントリから導くので、値が間違っていても通る）。
 // 2 本セットで「正しい repo が / 実際に使われる」を挟む。
 //
-// 公開リポを持たないファミリ（birefnet / depth-anything / siglip2 / vowel-detector）は表自体を
-// 持たないので、この門の対象外（ADR 0073 決定 1）。
+// 公開リポを持たないファミリ（birefnet / vowel-detector）は表自体を持たないので、この門の
+// 対象外（ADR 0073 決定 1）。
 
 import { assert, assertEquals, assertMatch, assertRejects } from "@std/assert";
 import type { HubRepoRef } from "@karume/hub";
@@ -25,11 +25,15 @@ import { ANIMA_SOURCES } from "../src/anima/config.ts";
 import { IRODORI_SOURCES } from "../src/irodori/config.ts";
 import { SBV2_SOURCES } from "../src/sbv2/config.ts";
 import { GEMMA4_SOURCES } from "../src/gemma/config.ts";
+import { SIGLIP2_SOURCES } from "../src/siglip2/config.ts";
+import { DEPTH_ANYTHING_SOURCES } from "../src/depth-anything/config.ts";
 import { KARUME_SOURCES } from "../src/sources.ts";
 import { AnimaPipeline } from "../src/anima/pipeline.ts";
 import { IrodoriPipeline } from "../src/irodori/pipeline.ts";
 import { Sbv2Pipeline } from "../src/sbv2/pipeline.ts";
 import { Gemma4Pipeline } from "../src/gemma/pipeline.ts";
+import { Siglip2Pipeline } from "../src/siglip2/pipeline.ts";
+import { DepthAnythingPipeline } from "../src/depth-anything/pipeline.ts";
 import { MemoryCacheStorage } from "./helpers/memory-cache.ts";
 
 /** hub が解決要求を出さずに済む形（`@hdae/fetch-cache` の `isCommitSha` と同じ綴り）。 */
@@ -101,6 +105,20 @@ const FAMILIES: readonly Family[] = [
     keys: ["gemma4"],
     load: (ref, options) => Gemma4Pipeline.fromPretrained(ref, options),
   },
+  {
+    name: "SIGLIP2_SOURCES",
+    sources: SIGLIP2_SOURCES,
+    // base と so400m は寸法だけが違う同じ経路なので 1 リポに同居する（既定 = base）。
+    keys: ["siglip2"],
+    load: (ref, options) => Siglip2Pipeline.fromPretrained(ref, options),
+  },
+  {
+    name: "DEPTH_ANYTHING_SOURCES",
+    sources: DEPTH_ANYTHING_SOURCES,
+    // 世代はリポ名に入る（ADR 0092 決定 1）— V3 は別アーキなので別キーとして並ぶ。
+    keys: ["depth-anything-v2"],
+    load: (ref, options) => DepthAnythingPipeline.fromPretrained(ref, options),
+  },
 ];
 
 // キーは repo 名から機械導出される（`"karume-" + key` === basename）ので、①の門は「キーと repo が
@@ -113,16 +131,18 @@ for (const { name, sources, keys } of FAMILIES) {
   });
 }
 
-// 家族と公開リポの総数も名指しで置く。リポの新設（波 b の siglip2 / birefnet-hr / lucida /
-// depth-anything-v2）はここを落とすので、`KARUME_SOURCES` への畳み込み漏れが黙って通らない。
-Deno.test("取得元対応表を持つのは 4 家族・公開リポは 6 本", () => {
+// 家族と公開リポの総数も名指しで置く。リポの新設（波 b の birefnet-hr / lucida）はここを
+// 落とすので、`KARUME_SOURCES` への畳み込み漏れが黙って通らない。
+Deno.test("取得元対応表を持つのは 6 家族・公開リポは 8 本", () => {
   assertEquals(FAMILIES.map(({ name }) => name), [
     "ANIMA_SOURCES",
     "IRODORI_SOURCES",
     "SBV2_SOURCES",
     "GEMMA4_SOURCES",
+    "SIGLIP2_SOURCES",
+    "DEPTH_ANYTHING_SOURCES",
   ]);
-  assertEquals(Object.keys(KARUME_SOURCES).length, 6);
+  assertEquals(Object.keys(KARUME_SOURCES).length, 8);
 });
 
 for (const { name, sources } of FAMILIES) {
@@ -150,7 +170,7 @@ Deno.test("KARUME_SOURCES: 家族表の和集合でキーの重複が無い", ()
     "キーが重なって畳み込みで消えたエントリがある",
   );
   // 陽性対照 — 空の表を回して緑になる形にしない。
-  assert(entries.length >= 6, `家族表が痩せている（${entries.length} 件）`);
+  assert(entries.length >= 8, `家族表が痩せている（${entries.length} 件）`);
   for (const [key, source] of entries) assertEquals(merged[key], source);
 });
 

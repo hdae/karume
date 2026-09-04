@@ -28,11 +28,51 @@
  * （`Rgb8Image`）で閉じており、`rescale_factor` が 1/255 でないチェックポイントは
  * **配布形を組む段**で落ちる（`tools/exporter/karume/dist.py` の SigLIP2 節）。実行時に
  * 選べない数を宣言だけ持たせても、二重の正本が増えるだけになる。
+ *
+ * NOTE: 公開配布リポの対応表（{@link SIGLIP2_SOURCES}）もここに置く。上の MUST が禁じる
+ * 「モデル固有の数」ではなく「どの manifest を取りに行くか」の側で、そもそも配布形が持てない
+ * 値だから（ADR 0073）。
  */
+
+import type { HubRepoRef } from "@karume/hub";
 
 /** `pipeline` の契約名と、この実装が受け付ける major（ADR 0038 §1）。 */
 export const SIGLIP2_PIPELINE_NAME = "siglip2";
 export const SIGLIP2_PIPELINE_MAJOR = 1;
+
+/**
+ * SigLIP2 ファミリの**公開配布リポ対応表**（ADR 0092 — 家族 1 つにつき 1 表・**既定の席は
+ * 無い**）。値は**このパッケージ版が検証した取得元**（pin 済み commit SHA — ADR 0073）。
+ *
+ * キーは HF リポ名の basename から `karume-` を落とした綴り（`"karume-" + key` がリポ名の
+ * basename に戻る — この不変条件は `tests/sources_test.ts` の門が見る）。同一家族 = 1 リポで、
+ * 寸法だけが違う 2 モデルが同居する:
+ *
+ * - `"siglip2"` = `hdae/karume-siglip2`（base 224 / hidden 768 と so400m 384 / hidden 1152 が
+ *   同居・既定 = base）
+ *
+ * 1 リポ = 複数モデルなので、リポ参照だけでは 1 本に決まらない — so400m を使うときは
+ * `fromPretrained(SIGLIP2_SOURCES["siglip2"], { model: "so400m" })` と綴る
+ * （`Siglip2PipelineOptions.model` — `./pipeline.ts`）。
+ *
+ * **パッケージ版に合わせて自動追従したい場合のオプトイン**として渡す — 再現性を自分で
+ * 固定したい場合は、この表ではなく自分の `{ repo, revision }` を書く（`fromPretrained` に
+ * 既定は無い）。
+ *
+ * MUST: revision は commit SHA で固定する — ブランチ・タグは配布側で付け替えられるので、
+ * 公開済みのこのパッケージが読むバイト列がネットワーク側の都合で黙って変わる（回復不能側の
+ * 事故）。SHA 指定は revision 解決要求そのものを消すため、完全キャッシュ時のオフライン起動も
+ * 同時に成立する（ADR 0038）。main 追従が要る利用者は
+ * `{ ...SIGLIP2_SOURCES["siglip2"], revision: "main" }` を明示的に選ぶ。
+ */
+// NOTE: revision はリリース手順書（docs/release-runbook.md）§3 で、アップロード後の main の
+// SHA に更新する（ADR 0073 決定 3 の維持義務を継承 — 手書き + 手順書ゲート）。
+export const SIGLIP2_SOURCES = {
+  "siglip2": {
+    repo: "hdae/karume-siglip2",
+    revision: "7734105ee2f8b598b4591a34f31a79fc9714d0a0",
+  },
+} as const satisfies Record<string, HubRepoRef>;
 
 const ROOT_KEYS: readonly string[] = [
   "imageWidth",

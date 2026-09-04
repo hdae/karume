@@ -36,11 +36,51 @@
  * グラフが**正方 1 点**（518² = patch 14 × 37）でしか受け取らないので、アスペクト比を保つ
  * 経路には行き先が無い（伸縮しか選べない）。宣言だけ置くと「保てるのに保っていない」と
  * 読める欄になるため、事実はモデルカードの散文が持つ。
+ *
+ * NOTE: 公開配布リポの対応表（{@link DEPTH_ANYTHING_SOURCES}）もここに置く。manifest から
+ * 導ける値ではなく「どの manifest を取りに行くか」の側なので、配布形が持てない（ADR 0073）。
  */
+
+import type { HubRepoRef } from "@karume/hub";
 
 /** `pipeline` の契約名と、この実装が受け付ける major（ADR 0038 §1）。 */
 export const DEPTH_ANYTHING_PIPELINE_NAME = "depth-anything";
 export const DEPTH_ANYTHING_PIPELINE_MAJOR = 1;
+
+/**
+ * Depth Anything ファミリの**公開配布リポ対応表**（ADR 0092 — 家族 1 つにつき 1 表・
+ * **既定の席は無い**）。値は**このパッケージ版が検証した取得元**（pin 済み commit SHA —
+ * ADR 0073）。
+ *
+ * キーは HF リポ名の basename から `karume-` を落とした綴り（`"karume-" + key` がリポ名の
+ * basename に戻る — この不変条件は `tests/sources_test.ts` の門が見る）:
+ *
+ * - `"depth-anything-v2"` = `hdae/karume-depth-anything-v2`（既定 = Small — 上流で Apache-2.0
+ *   なのがこのサイズだけ）
+ *
+ * 世代・版は別リポ = 別エントリ（ADR 0092 決定 1）で、世代の綴りはリポ名に入っている。V3 は
+ * 単一画像 depth の後継ではなく別アーキなので、出ても既存の値を上書きせず**別キー**として
+ * 並ぶ（旧世代のリポはそのまま公開が続く）。サイズは世代の中のモデル軸なので、配れる
+ * サイズが増えたらこの 1 本に同居する（`{ model }` で選ぶ）。
+ *
+ * **パッケージ版に合わせて自動追従したい場合のオプトイン**として渡す — 再現性を自分で
+ * 固定したい場合は、この表ではなく自分の `{ repo, revision }` を書く（`fromPretrained` に
+ * 既定は無い）。
+ *
+ * MUST: revision は commit SHA で固定する — ブランチ・タグは配布側で付け替えられるので、
+ * 公開済みのこのパッケージが読むバイト列がネットワーク側の都合で黙って変わる（回復不能側の
+ * 事故）。SHA 指定は revision 解決要求そのものを消すため、完全キャッシュ時のオフライン起動も
+ * 同時に成立する（ADR 0038）。main 追従が要る利用者は
+ * `{ ...DEPTH_ANYTHING_SOURCES["depth-anything-v2"], revision: "main" }` を明示的に選ぶ。
+ */
+// NOTE: revision はリリース手順書（docs/release-runbook.md）§3 で、アップロード後の main の
+// SHA に更新する（ADR 0073 決定 3 の維持義務を継承 — 手書き + 手順書ゲート）。
+export const DEPTH_ANYTHING_SOURCES = {
+  "depth-anything-v2": {
+    repo: "hdae/karume-depth-anything-v2",
+    revision: "70c8138f328311b3f145b695e34399ca42649b01",
+  },
+} as const satisfies Record<string, HubRepoRef>;
 
 const ROOT_KEYS: readonly string[] = [
   "imageWidth",

@@ -30,6 +30,11 @@ export type {
   DepthAnythingPipelineOptions,
   DepthMap,
 } from "./src/depth-anything/pipeline.ts";
+/**
+ * このパッケージ版が検証した取得元の対応表（`./depth-anything` を参照 — 追従したい場合の
+ * オプトイン）。世代・版は別リポなので今は 1 エントリ（ADR 0092）。
+ */
+export { DEPTH_ANYTHING_SOURCES } from "./src/depth-anything/config.ts";
 
 export { AnimaPipeline } from "./src/anima/pipeline.ts";
 export type {
@@ -116,6 +121,11 @@ export type {
   Siglip2FromPretrainedOptions,
   Siglip2PipelineOptions,
 } from "./src/siglip2/pipeline.ts";
+/**
+ * このパッケージ版が検証した取得元の対応表（`./siglip2` を参照 — 追従したい場合の
+ * オプトイン）。base と so400m が 1 リポに同居するので 1 エントリ（ADR 0092）。
+ */
+export { SIGLIP2_SOURCES } from "./src/siglip2/config.ts";
 
 export { Gemma4Pipeline } from "./src/gemma/pipeline.ts";
 export type {
@@ -209,7 +219,7 @@ export type { LabSegment } from "./src/vowel-detector/postprocess.ts";
  * 全ファミリの取得元対応表を 1 つに畳んだ表（家族ごとの `*_SOURCES` と**同じキー・同じ値** —
  * ADR 0092）。**barrel にしか無い**面で、「公開している配布リポを全部なめる」側（疎通スモーク・
  * 事前取得・一覧）のために置く。1 家族しか使わない消費者はサブパスの家族表を引く
- * （barrel を引くと 4 家族の config が繋がる）。
+ * （barrel を引くと 6 家族の config が繋がる）。
  */
 export { KARUME_SOURCES } from "./src/sources.ts";
 

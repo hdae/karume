@@ -453,9 +453,12 @@ export class Siglip2Pipeline {
   /**
    * 配布形から取得して組む（`loadManifest` → `resolveFiles` → **各コンポーネントの
    * グラフ shard だけ**を取って `prepareModel` → 残り資産の `fetchAssets` → 構築）。重み shard は
-   * Session を組むときに 1 本ずつ流れる（ADR 0070 — `src/hub/components.ts`）。文字列の
-   * `ref` は `{ repo }` と読む（= `main` 追従）。**`ref` は必須**（取得元に既定は無い —
-   * `src/hub/repo-ref.ts` の MUST。このファミリは公開配布リポを持たないので pin 定数も無い）。
+   * Session を組むときに 1 本ずつ流れる（ADR 0070 — `src/hub/components.ts`）。
+   *
+   * **`ref` は必須**（取得元に既定は無い — `src/hub/repo-ref.ts` の MUST）。パッケージ版が
+   * 検証した取得元は {@link SIGLIP2_SOURCES}（`./config.ts`）の `"siglip2"` — 再現性を自分で
+   * 固定するなら `{ repo, revision }` を呼び手が明示する。文字列の `ref` は `{ repo }` と読む
+   * （= `main` 追従）。
    *
    * 手元の配布形は**取得元ハンドル**で渡す（`localDirectory` / `@karume/hub/deno` の
    * `denoDirectory`）。HF の `owner/name` の綴りの門は通らず、network も CacheStorage も
@@ -465,7 +468,11 @@ export class Siglip2Pipeline {
     ref: string | HubRepoRef | DistributionSource,
     options: Siglip2FromPretrainedOptions = {},
   ): Promise<Siglip2Pipeline> {
-    const source = toManifestSource(ref, "Siglip2Pipeline.fromPretrained");
+    const source = toManifestSource(
+      ref,
+      "Siglip2Pipeline.fromPretrained",
+      'SIGLIP2_SOURCES["siglip2"]（@karume/models/siglip2）',
+    );
     const hubOptions = {
       ...(options.signal === undefined ? {} : { signal: options.signal }),
       ...(options.headers === undefined ? {} : { headers: options.headers }),

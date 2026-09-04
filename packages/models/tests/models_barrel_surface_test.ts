@@ -124,6 +124,8 @@ Deno.test("barrel: 取得元対応表はサブパスと barrel の両方から�
     // gemma も 1 家族 1 表の対象（表そのものは上の `GEMMA_VALUES` でも縛るが、`KARUME_SOURCES`
     // の漏れは家族サブパスを全部並べないと見えない — 1 本でも漏れれば全家族が繋がる）。
     { name: "./gemma", surface: Object.keys(await import("../gemma.ts")) },
+    { name: "./siglip2", surface: Object.keys(await import("../siglip2.ts")) },
+    { name: "./depth-anything", surface: Object.keys(await import("../depth-anything.ts")) },
   ];
   for (const { name, surface } of subpaths) {
     const tables = surface.filter((exported) => exported.endsWith("_SOURCES"));
@@ -132,7 +134,16 @@ Deno.test("barrel: 取得元対応表はサブパスと barrel の両方から�
     for (const table of tables) assert(barrel.includes(table), `barrel に ${table} が無い`);
   }
   // サブパス側の足し忘れは上の filter では見えないので、家族の表を名指しでも縛る。
-  for (const table of ["ANIMA_SOURCES", "IRODORI_SOURCES", "SBV2_SOURCES", "GEMMA4_SOURCES"]) {
+  for (
+    const table of [
+      "ANIMA_SOURCES",
+      "IRODORI_SOURCES",
+      "SBV2_SOURCES",
+      "GEMMA4_SOURCES",
+      "SIGLIP2_SOURCES",
+      "DEPTH_ANYTHING_SOURCES",
+    ]
+  ) {
     assert(
       subpaths.some(({ surface }) => surface.includes(table)),
       `サブパス barrel に ${table} が無い`,

@@ -51,7 +51,7 @@ export const GEMMA4_PIPELINE_MAJOR = 1;
 export const GEMMA4_SOURCES = {
   "gemma4": {
     repo: "hdae/karume-gemma4",
-    revision: "6dd16e5af7367707288c9e14b323da7b747f4bd9",
+    revision: "94d6222bb96ab1b84ede787dd93083bc7e0261dc",
   },
 } as const satisfies Record<string, HubRepoRef>;
 
