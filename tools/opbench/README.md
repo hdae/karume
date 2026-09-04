@@ -126,6 +126,65 @@ Per scenario:
     describe a row that collapsed many. `storage_signature` is the set signature (`f32+i4g32`) that
     `by_storage` counts by.
 
+## `single` — measure one census row on the GPU
+
+```
+deno run -A tools/opbench/main.ts single --census <census dir> --out <dir> [options]
+```
+
+Reads the `summary.json` a `census` run wrote, turns each row of the weight table into a graph that
+holds the same op `reps` times (all nodes read the same inputs; only the outputs differ), and measures
+it on a real GPU under the protocol implemented in `bench.ts`. This is stage 2 of the harness: the
+single-op time × the census weight is what a kernel candidate is worth.
+
+| Option                     | Meaning                                                                                                                                       |
+| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--census <dir>`           | Output directory of `census` (`summary.json` is read: the weight table and the quant's `session`)                                             |
+| `--out <dir>`              | Where `single.jsonl` (one row per case) and `summary.json` are written                                                                        |
+| `--mode timing\|wall`      | `timing` = GPU timestamps, one pass per dispatch (default when the adapter has `timestamp-query`); `wall` = submit-to-fence wall clock        |
+| `--op <name>`              | Only this op (repeatable)                                                                                                                     |
+| `--scenario <name>`        | Only this scenario                                                                                                                            |
+| `--component <name>`       | Only this component                                                                                                                           |
+| `--limit <n>`              | Only the first n cases by weight (`count × output elements`)                                                                                  |
+| `--session <knob>=<value>` | Override the execution variant (`linearCompute` / `attentionCompute` / `attentionScoreStorage`; repeatable). Default = the census's `session` |
+| `--rounds <n>`             | Rounds per case; the reported value is the **min** (default 5)                                                                                |
+
+### What is measured, and what is not
+
+- **Cases**: rows that are not fused, not aliased, whose activation inputs are f32, and whose
+  initializers have a storage dtype the tool can synthesize (f32 / f16 / i8 / i4). Everything else is
+  excluded with a reason and counted in `summary.json` — nothing is dropped silently. Ops that read
+  KV state (`state_append`, windowed `attention`) need a generation context and are excluded too. A
+  row that still cannot be built or run is recorded under `failed` with the runtime's message and the
+  sweep continues.
+- **Execution variant**: the census's `session` (the quant's declaration) is mapped to the runtime's
+  `SessionOptions` with the same explicit mapping `@karume/models` uses, so a linear in an `a8`
+  quant is measured on the `a8` kernel, not the f32 one. The pipeline keys that actually ran are in
+  each record (`keys`) — the plan phase decides the kernel, the tool only reports it.
+- **Weights** are synthetic (periodic tiles, constant scales). Values do not change the speed of the
+  kernels this tool measures; they are not valid for numerics.
+
+### Protocol (`bench.ts`)
+
+1. Build the case with one node, warm the pipeline once, then estimate the cost of one dispatch.
+2. Choose `reps` so that one pass takes about 80 ms (capped at 1024 reps and 256 MiB of readback),
+   and rebuild the graph with that many nodes.
+3. Pin the clocks with a **heater** (an f32 `linear` of 2048×4096×4096, ~20 ms at full clocks) until
+   three consecutive heater runs agree within 5%, and run the heater again between rounds. Light
+   dispatches alone do not raise the power state: a decode GEMV measured without the heater sat at
+   P8 / P5 and read 20× slower than at P0 (measured 2026-09-04 with `nvidia-smi` alongside; with the
+   heater the RTX 3080 Ti holds P3, SM ≈1.35 GHz / memory 5 GHz).
+4. Take `rounds` samples and report the **min**. `timing` reports `ns_per_node_min` (the GPU time of
+   one node — an `a8` linear is `quantize_rows` + `linear`, two dispatches, and both count) with
+   `dispatches_per_node`, and `weighted_ms = ns × count`; `wall` reports `wall_ms_per_rep_min` for a batch of `reps` enqueues
+   behind a single fence. The two modes measure different quantities (timing opens one pass per
+   dispatch), so a record carries only one of them and no ratio between them is ever formed.
+5. Absolute times are comparable only within one rig and one session; compare ratios across runs.
+
+`summary.json` records the adapter (`rig`), the mode, the counts of measured / excluded / failed
+cases, and `weighted_ms_by_op_storage` — the census-weighted total per `(op, storage signature)`,
+which is the number the K-11 acceptance line (gemma4 decode `linear/f32+i4g32`) is checked against.
+
 ## Notes
 
 - Fusion is planned against the **WebGPU core default limits** (128 MiB storage binding, 65535
