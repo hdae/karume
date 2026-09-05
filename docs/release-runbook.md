@@ -153,7 +153,9 @@ curl -sS -H "Authorization: Bearer <accessToken>" "<casUrl>/v1/reconstructions/<
       手順 = shard-cache を退避 → **リポを削除して再作成** → 同一バイトを上げ直す。CAS 照会が
       0 回になり xorb を新規に書くので健全形に戻る（2026-09-04・siglip2 で 46〜61 MiB/term へ
       回復 — [research](research/2026-08-09-xet-fragmentation.md) の 2026-09-04 追記）。
-      同一リポ内の delete → 再 up の 2 コミット法は**未検証**。
+      同一リポ内の delete → 再 up の 2 コミット法は**効かない**（2026-09-05 実測 — 同一バイトは転送されず元の
+      xorb を参照したまま）。同一 checkpoint の 2 解像度を同居させたリポでは削除 → 再作成でも 2048 側の shard
+      1 本が回復しなかった（[research 2026-08-09 の 2026-09-05 追記](research/2026-08-09-xet-fragmentation.md)）。
       **hf_xet 1.4.3 では回復手段が無い**（片道ラチェット — 同バイト上げ直しは hf CLI が転送ごと
       スキップし、2 コミット法も不発。2026-08-29 実測）。観測値は §5 の記録へ残す
 

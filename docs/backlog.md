@@ -23,8 +23,12 @@
    **④ も消化（2026-09-05 ユーザー裁定）**: 配布形は 1 リポ 2 モデル（モデル名 = 解像度・既定
    `"1024"` — ADR [0092](decisions/0092-distribution-repos-and-sources.md) 決定 9）で
    `models/karume-birefnet-hr` と `models/karume-lucida` を組み立て済み、e2e `SERIES` に 2048² 2 本を
-   実測 tolerance つきで追加済み。**残るのは公開作業だけ**（[release-runbook](release-runbook.md)
-   §2 のアップロード → §3 の `BIREFNET_SOURCES` 新設〈キー `birefnet-hr` / `lucida`〉— ユーザー実施）。
+   実測 tolerance つきで追加済み。**公開済み（2026-09-05）**: `karume-birefnet-hr` / `karume-lucida` を
+   HF へアップロードし、`BIREFNET_SOURCES`（キー `birefnet-hr` / `lucida`）を pin 付きで新設。
+   公開面（JSR）へ出るのは次の bump。断片化は両リポとも 2048 側の shard 1 本が目安割れのまま
+   （削除 → 再作成でも 2 コミット法でも回復せず・DL 2.4 倍遅い —
+   [research 2026-08-09 の 2026-09-05 追記](research/2026-08-09-xet-fragmentation.md)。回復手段が
+   見つかったら上げ直す）。
 
 **残件**:
 

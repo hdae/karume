@@ -80,9 +80,8 @@ uv run python dist.py --pipeline depth-anything      # → models/karume-depth-a
 uv run python dist.py --pipeline vowel-detector      # → models/karume-vowel-detector/
 ```
 
-- **初回公開前なのは `birefnet` / `lucida` / `vowel-detector` の 3 コマンドぶん**（siglip2 と
-  depth-anything は 0.9.0 で初公開済み。birefnet / lucida は 2026-09-05 に 1024² + 2048² の
-  2 モデル形で組み立て済み — 公開手順は [release-runbook](release-runbook.md) §2 / §3）。
+- **初回公開前なのは `vowel-detector` だけ**（siglip2 と depth-anything は 0.9.0 で、birefnet /
+  lucida は 2026-09-05 に 1024² + 2048² の 2 モデル形で初公開済み）。
   `karume-sbv2-fn` はミラーを常設しない別扱い（下の bullet）。リポ名と同居の規則は ADR
   [0092](decisions/0092-distribution-repos-and-sources.md) 決定 1 / 2 / 8 / 9 が正本。
 - 上流ライセンス（siglip2 = Apache-2.0 / birefnet 系 = MIT / depth-anything small =
