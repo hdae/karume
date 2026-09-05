@@ -40,7 +40,10 @@ Phase 0 の sweep が既に持っている）。
 decoder の外なので、上の `linear` 対象より 2 本少ない別集合になる（{@link CALIB_TARGET}）。
 校正入力は {@link embeddinggemma.calib_texts.CALIB_TEXTS} の 48 文で、layer_type ごとの
 mask / RoPE 表ごと先頭 decoder layer への呼び出しを捕まえて stage 列へ流す
-（{@link capture_stage_batches}）。
+（{@link capture_stage_batches}）。流す前に **stage 分解一致門**
+（{@link assert_stage_split}）で「stage 列の逐次 forward = 本体の最終 hidden」をビット一致で
+実測する — 分解がずれても数値は普通に出るので、門が無いと方式の採否を別経路の測定で決める
+ことになる。
 
 MUST: **方式を積み重ねない** — 全ての丸めは in-place なので、構成ごとに pristine（素の f32
 重み）へ戻してから当てる（{@link restore}）。戻さずに当てると測っているのが「NF4 の上の
@@ -90,6 +93,7 @@ from karume.quant_calib import (
     StageBatch,
     StageSpec,
     calibrate_stages,
+    first_tensor_output,
 )
 from karume.quant_methods import (
     DEFAULT_CODEBOOK_LEVELS,
@@ -647,11 +651,47 @@ class CalibRig:
     batches: tuple[StageBatch, ...]
 
 
+def assert_stage_split(
+    wrapper: nn.Module,
+    probe: torch.Tensor,
+    batch: StageBatch,
+    stages: Sequence[StageSpec],
+) -> None:
+    """stage 列の逐次 forward が本体の最終 hidden と**ビット一致**することを見る。
+
+    `probe` は捕捉に使った id 列そのもの、`batch` は**同じ入力**で捕まえた先頭 stage への入力。
+    stage 列は最終 `norm` を含まない（{@link decoder_stages}）ので、逐次結果へ `norm` を当てて
+    から `Gemma3TextModel` の `last_hidden_state`（= `EmbeddingWrapper.forward` の 1 行目）と
+    比べる。stage の駆動は core（`_advance_batch`）と同じ形 — 位置引数は hidden 1 本だけ、
+    kwargs は stage 間で不変。
+
+    MUST: 丸める前に実測し、近似 tolerance ではなく `torch.equal` で見る — 同じモジュールを
+    同じ順で呼んでいる以上、一致しないなら分解が本物と違う経路を通っている。校正は「その層に
+    実際に流れる活性」から丸め先を選ぶ方式なので、分解がずれると方式の採否を別経路の測定で
+    決めることになる（数値は普通に出るので表からは読めない）。
+    """
+    args, kwargs = batch
+    with torch.no_grad():
+        reference = wrapper.model(input_ids=probe, use_cache=False).last_hidden_state
+        hidden = args[0]
+        for _prefix, stage in stages:
+            hidden = first_tensor_output(stage(hidden, **kwargs))
+        hidden = wrapper.model.norm(hidden)
+    if not torch.equal(hidden, reference):
+        raise AssertionError(
+            "stage 分解の最終 hidden が本体の last_hidden_state とビット一致しない"
+            f"（最大絶対差 {float((hidden - reference).abs().max()):.4e}）"
+            " — LayerStage 列が Gemma3TextModel.forward の経路とずれている"
+        )
+
+
 def build_calib_rig(wrapper: nn.Module, model_dir: Path, limit: int | None) -> CalibRig:
-    """校正の足場を組む（stage 分解 → 走査 → tokenize → Catcher）。"""
+    """校正の足場を組む（stage 分解 → 走査 → tokenize → Catcher → 分解一致門）。"""
     stages = decoder_stages(wrapper)
     scan, stats = calib_targets(stages)
-    batches = capture_stage_batches(wrapper, calib_inputs(model_dir, limit))
+    inputs = calib_inputs(model_dir, limit)
+    batches = capture_stage_batches(wrapper, inputs)
+    assert_stage_split(wrapper, inputs[0], batches[0], stages)
     return CalibRig(stages=stages, scan=scan, stats=stats, batches=batches)
 
 

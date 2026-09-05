@@ -102,14 +102,42 @@ recipe's expectation table, which is what ties the two graphs together.
 
 ## What `sweep_w4.py` measures
 
-The Phase 0 fake-quant sweep for ADR
-[0069](../../../docs/decisions/0069-packed-w4-storage.md) (packed 4-bit storage): quality under
-`group_size` {32, 64, 128} × symmetric / asymmetric on this checkpoint. The reference sequences are
-the wave-E greedy records (`greedy.<case>.safetensors`), so no tokenizer is involved, and the
-baseline run has to reproduce them exactly before any quantized configuration is measured. It
-touches no runtime code and writes no files — stdout is two markdown tables meant to be pasted into
-`docs/research/`. The asymmetric column keeps its zero-point continuous, so it is the upper bound
-of what a stored `zero_point` companion could recover, not a storable form (ADR 0069 decision 3).
+A fake-quant screening rig for ADR
+[0069](../../../docs/decisions/0069-packed-w4-storage.md) (packed 4-bit storage). It touches no
+runtime code: weights are rounded in torch and the quality loss is measured, so a storage form is
+implemented only after the numbers are in. Three grids run in one pass:
+
+- **Phase 0 grid** — `group_size` {32, 64, 128} × symmetric / asymmetric, plus a baseline and one
+  run that leaves `lm_head` alone. The asymmetric column keeps its zero-point continuous, so it is
+  the upper bound of what a stored `zero_point` companion could recover, not a storable form
+  (ADR 0069 decision 3).
+- **Method grid** — 7 rounding methods (RTN i4 / FP4 / NF4 / MXFP4 / k-means at three table
+  granularities) × 2 target sets (the 169 decoder linears, or those plus `embed_tokens` = 170).
+  `group_size` is fixed at 32 here: Phase 0 already answers the `g` axis, and sweeping both at once
+  mixes the method difference with the `g` difference.
+- **Calibration grid** — 5 calibrated roundings (GPTQ against each of the three storage grids /
+  AWQ / AWQ+GPTQ) on the same lattices as the method grid; only _where inside the lattice_ a value
+  lands changes. Its target set is the decoder linears alone, because the calibration driver works
+  on the `nn.Linear` modules inside a stage. Calibration inputs are the 48 sentences of
+  `calib_texts.py`.
+
+The reference sequences are the wave-E greedy records (`greedy.<case>.safetensors`), so no
+tokenizer is involved, and the baseline run has to reproduce them exactly before any quantized
+configuration is measured. stdout ends with **four markdown tables** (summary / quality / per-family
+weight RMSE / projected size) meant to be pasted into `docs/research/`; the size column is a
+projection from each method's formula, not a measurement.
+
+Four knobs:
+
+- `--json <path>` — also write the measurements as JSON, **rewritten after every configuration**, so
+  a run of tens of minutes that dies partway still leaves what it had measured. Without it the run
+  writes no files.
+- `--only <name>` — run just these configurations (repeatable, for partial re-runs); the baseline
+  always runs first. The GPTQ sweep-axis experiment points only run when named here.
+- `--calib-limit N` — calibrate on the first N sentences only (a smoke knob; affects the calibrated
+  configurations only).
+- `--kmeans-shared-stride N` — fit the `kmeans:shared` table on an evenly strided subsample, for
+  machines where the full sample does not fit in RAM. The rounding itself always sees everything.
 
 ## Requirements
 

@@ -157,15 +157,36 @@ class TestExportProvenance:
 
 
 class TestActQuantCli:
-    @pytest.mark.parametrize("dtype", ["f32"])
+    @pytest.mark.parametrize("dtype", ["f32", "i4"])
     def test_act_quant_requires_i8_weights(self, monkeypatch, dtype):
-        """活性 i8 は i8 常駐重みの linear にしか効かない（ADR 0025 決定 1）。"""
+        """活性 i8 は i8 常駐重みの linear にしか効かない（ADR 0025 決定 1）。
+
+        i4 も拒否側 — 混成系列の linear は group32 i4 常駐なので、per-token i8 の鏡像は
+        ランタイムで再現されない期待値になる。
+        """
         monkeypatch.setattr(
             "sys.argv", ["export_deberta.py", "--dtype", dtype, "--act-quant", "--layers", "2"]
         )
 
         with pytest.raises(SystemExit, match="--dtype i8"):
             export_deberta.main()
+
+    def test_act_quant_passes_the_gate_with_i8_weights(self, monkeypatch):
+        """受理側 — 門が「常に落とす」形になっていないことの裏取り（実重みは引かない）。"""
+        calls: list[dict[str, object]] = []
+        monkeypatch.setattr(
+            export_deberta,
+            "export_variant",
+            lambda *args, **kwargs: calls.append(kwargs) or {"variant": "stub"},
+        )
+        monkeypatch.setattr(
+            "sys.argv", ["export_deberta.py", "--dtype", "i8", "--act-quant", "--layers", "2"]
+        )
+
+        export_deberta.main()
+
+        assert [call["dtype"] for call in calls] == ["i8"]
+        assert calls[0]["act_quant"] is True
 
 
 class TestMirrorIoPrefix:

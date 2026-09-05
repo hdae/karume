@@ -159,8 +159,10 @@ there, so padding rows of the graph outputs must not be read.
 The `greedy.*` files are the acceptance record for the decode path — `prompt` i32 `[T]`, `expected`
 i32 `[K]` and `margin` f32 `[K]`. The continuation is recomputed from scratch at every step (a full
 re-forward, never a KV cache: the expectation must not come out of the mechanism under test). Every
-step has to keep a top1−top2 logit margin above `1e-2` so that GPU-side deviation cannot flip the
-sequence; a case that fails the gate is removed from `GREEDY_CASES` rather than shortened, and the
+step has to keep a top1−top2 logit margin above `2.5e-2` so that GPU-side deviation cannot flip the
+sequence — the floor MUST sit above the acceptance gate's own premise of `2 × atol` (atol = 1e-2),
+otherwise a case the recipe accepts could still fail the gate. A case that fails it is removed from
+`GREEDY_CASES` rather than shortened, and the
 gate reports every offending case at once so one run settles the set. The first continuation token
 is additionally checked against the 1-shot recipe's expectation table, which is what ties the two
 graphs together.
@@ -178,7 +180,7 @@ rows (the ones the split check reads).
 
 The golden files are large: `io.context-en.safetensors` alone holds 624 MB of logits, and the three
 cases come to roughly 640 MB. The decode series writes the same io files plus three small greedy
-records, and its container additionally carries the 6 MiB of RoPE tables.
+records.
 
 `export_decode.py` needs the same machine, and takes considerably longer: the greedy record is
 `3 cases × 16 steps` of full re-forwards, and the long case re-forwards ~600 tokens each time.
@@ -230,9 +232,13 @@ makes one token's PLE a single contiguous 9,100-byte read; a table-major layout 
 scattered reads per token the moment a host wants to read rows instead of whole files. Splitting is
 not an optimization here: the full int8 table is 2,348,810,240 bytes and a single Chromium
 `ArrayBuffer` tops out at 2,145,386,496. The per-shard ceiling is the one constant from ADR
-[0081](../../../docs/decisions/0081-shard-spec-v2.md) (1 GiB), which puts the real model at three
-shards of ~758 MiB. The sidecar is not an IR container, so the graph-shard contract does not apply
-to it — only the byte ceiling and the `-NNNNN-of-NNNNN` spelling are shared.
+[0090](../../../docs/decisions/0090-shard-spec-v3-tensor-pieces.md) (256 MiB, measured as the file
+length), and the writer fills at most `SHARD_DATA_CAPACITY` = 256 MiB − 1 MiB of header allowance,
+which puts the real model at nine shards. The count is not a constant of this document: it moves
+with every re-export, and the value that holds today is pinned by
+`tests/test_export_product.py::test_the_real_model_lands_on_nine_shards`. The sidecar is not an IR
+container, so the graph-shard contract does not apply to it — only the byte ceiling and the
+`-NNNNN-of-NNNNN` spelling are shared.
 
 Two properties are checked inside the export, because both fail with the right shape, dtype and
 element count:
@@ -320,7 +326,8 @@ uv run python dist.py --pipeline gemma4        # → models/karume-gemma4/ (~4.0
 ```
 
 The distribution folds **two series** into one HF repository: the product container
-(`gemma4-e2b-product`, three shards) plus its PLE sidecar, and the compiled tokenizer asset
+(`gemma4-e2b-product`, split at the same 256 MiB ceiling — seven shards as it is exported today)
+plus its PLE sidecar, and the compiled tokenizer asset
 (`gemma4-e2b-tokenizer`). The acceptance-only files that live beside the product container
 (`ple.probe.safetensors`, `reference.json`) are not in the placement table and therefore never
 reach the output. Layout inside the repository:

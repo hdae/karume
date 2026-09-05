@@ -13,11 +13,14 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import pytest
 import torch
 from torch import nn
 
 from karume.quantize import QuantizeError
+from minicpm5 import export as one_shot
 from minicpm5 import sweep_w4 as sweep
 
 
@@ -173,6 +176,10 @@ class TinyAttention(nn.Module):
         return self.o_proj(self.q_proj(hidden))
 
 
+#: 全層へ同じ値で渡す kwargs（Llama の mask / position_ids 相当の代役）。
+TINY_SHIFT = 0.0
+
+
 class TinyLayer(nn.Module):
     """decoder layer 相当の stage（kwargs の効きは `shift` の**加算**で観測する）。"""
 
@@ -184,13 +191,41 @@ class TinyLayer(nn.Module):
         return self.self_attn(hidden + shift)
 
 
+@dataclass(frozen=True)
+class TinyInnerOutput:
+    """`BaseModelOutputWithPast` の代役（`last_hidden_state` だけを持つ）。"""
+
+    last_hidden_state: torch.Tensor
+
+
 class TinyInner(nn.Module):
-    """`LlamaModel` 相当（`.layers` と `.embed_tokens` を持つ層）。"""
+    """`LlamaModel` 相当（`.layers` / `.embed_tokens` / `.norm`）。
+
+    `forward` は上流と同じ「embedding → 層を順に → 最終 norm」で、返り値も同じ席
+    （`last_hidden_state`）— {@link sweep.assert_stage_split} の突合先がこれ。
+    """
 
     def __init__(self, vocab: int, features: int, layers: int) -> None:
         super().__init__()
         self.embed_tokens = nn.Embedding(vocab, features)
         self.layers = nn.ModuleList(TinyLayer(features) for _ in range(layers))
+        self.norm = nn.LayerNorm(features)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+        use_cache: bool = False,
+    ) -> TinyInnerOutput:
+        """kwargs は**全層で同一**（Llama の形 — `calibrate_stages` が stage 間で不変に運ぶ前提）。
+
+        層どうしの違いは各 `TinyLayer` の重み（乱数初期化）が持つので、段落としは kwargs に
+        依らず検出できる。
+        """
+        hidden = self.embed_tokens(input_ids)
+        for layer in self.layers:
+            hidden = layer(hidden, shift=TINY_SHIFT)
+        return TinyInnerOutput(self.norm(hidden))
 
 
 class TinyCausal(nn.Module):
@@ -209,10 +244,10 @@ class TinyWrapper(nn.Module):
         self.model = TinyCausal(vocab, features, layers)
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
-        hidden = self.model.model.embed_tokens(input_ids)
-        for index, layer in enumerate(self.model.model.layers):
-            hidden = layer(hidden, shift=float(index))
-        return hidden
+        mask = one_shot.additive_causal_mask(int(input_ids.shape[1]))
+        return self.model.model(
+            input_ids=input_ids, attention_mask=mask, use_cache=False
+        ).last_hidden_state
 
 
 class SilentWrapper(TinyWrapper):
@@ -394,3 +429,27 @@ class TestCalibrationRun:
 
         with pytest.raises(AssertionError, match="一致しない"):
             sweep.assert_calib_covers_scan(report, widened, "gptq-rtn")
+
+
+class TestStageSplit:
+    """分解一致門（{@link sweep.assert_stage_split}）— 校正が「本物と同じ活性」を見る前提。"""
+
+    def test_the_sequential_stages_reproduce_the_model_bit_for_bit(self):
+        torch.manual_seed(4)
+        wrapper = TinyWrapper()
+        inputs = tiny_inputs(1)
+        stages = sweep.decoder_stages(wrapper)
+        batches = sweep.capture_stage_batches(wrapper, stages[0][1], inputs)
+
+        sweep.assert_stage_split(wrapper, inputs[0], batches[0], stages)
+
+    def test_a_dropped_stage_is_caught(self):
+        """段が 1 枚落ちても数値は普通に出る — 一致門だけがそれを落とす。"""
+        torch.manual_seed(5)
+        wrapper = TinyWrapper()
+        inputs = tiny_inputs(1)
+        stages = sweep.decoder_stages(wrapper)
+        batches = sweep.capture_stage_batches(wrapper, stages[0][1], inputs)
+
+        with pytest.raises(AssertionError, match="ビット一致しない"):
+            sweep.assert_stage_split(wrapper, inputs[0], batches[0], stages[:-1])

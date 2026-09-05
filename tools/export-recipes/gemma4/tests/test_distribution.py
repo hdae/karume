@@ -111,6 +111,13 @@ def _model(manifest: Mapping[str, Any]) -> Mapping[str, Any]:
     return manifest["models"][GEMMA4_DEFAULT_MODEL]
 
 
+def _assert_notice_names(notice: str, repos: Iterable[str]) -> None:
+    """改変告知が上流チェックポイントを名指ししていること（org を落とした綴りで見る）。"""
+    for repo in repos:
+        checkpoint = repo.split("/", 1)[1]
+        assert checkpoint in notice, f"改変告知が '{checkpoint}' を名指ししていない"
+
+
 class TestGemma4Layout:
     def test_it_places_the_graph_sidecar_and_tokenizer_under_the_model_subtree(
         self, gemma4_assembled
@@ -612,6 +619,49 @@ class TestGemma4Card:
         with pytest.raises(ValueError, match="帰属表に無い"):
             render_gemma4_model_card(other, "hdae/karume-gemma4")
 
+    def test_neither_the_title_nor_the_overview_names_a_model(self, gemma4_assembled) -> None:
+        """家族 1 リポ（ADR 0092 決定 1）— 名乗る綴りは manifest から引く。
+
+        モデルの綴りを題や概要へ焼くと、2 つ目のモデルを足した日に「E2B と名乗りながら
+        E4B も配る」カードが黙って出る（`_gemma4_metadata` の帰属表の門はモデルが**既知**なら
+        素通りする）。
+        """
+        _, manifest = gemma4_assembled
+        card = render_gemma4_model_card(manifest, "hdae/karume-gemma4")
+        title = next(line for line in card.splitlines() if line.startswith("# "))
+        overview = card.split("## What is this", 1)[1].split("\n## ", 1)[0]
+
+        assert "E2B" not in title
+        # 概要が名乗る綴りは manifest から引いたもの（焼き込みではない）。
+        assert GEMMA4_UPSTREAM[GEMMA4_DEFAULT_MODEL] in overview
+
+    def test_it_names_the_device_limits_a_quant_declares(self, gemma4_assembled) -> None:
+        """`requiredLimits` は「載らない device を先に知る」ための欄なので本文に出す。
+
+        合成の系列は寸法が小さく core が欄を焼かないので、欄そのものを差し込んで見る。
+        """
+        _, manifest = gemma4_assembled
+        other = json.loads(json.dumps(manifest))
+        other["models"][GEMMA4_DEFAULT_MODEL]["quants"]["i4"]["requiredLimits"] = {
+            "maxStorageBufferBindingSize": 134_217_728,
+        }
+        card = render_gemma4_model_card(other, "hdae/karume-gemma4")
+
+        assert "device limits" in card
+        assert "maxStorageBufferBindingSize" in card
+        assert "134,217,728" in card
+
+    def test_it_omits_the_device_limits_line_when_no_quant_declares_one(
+        self, gemma4_assembled
+    ) -> None:
+        """逆枝 — 欄が無いときは節ごと消える（情報が黙って落ちる形の記録）。"""
+        _, manifest = gemma4_assembled
+        assert not _model(manifest)["quants"]["i4"].get("requiredLimits")
+
+        card = render_gemma4_model_card(manifest, "hdae/karume-gemma4")
+
+        assert "device limits" not in card
+
 
 class TestGemma4LegalText:
     def test_it_ships_the_license_text_byte_identical(self, gemma4_assembled) -> None:
@@ -629,3 +679,30 @@ class TestGemma4LegalText:
         notice = (out_dir / "NOTICE.md").read_text(encoding="utf-8")
         assert "gemma-4-E2B-it" in notice
         assert "int4" in notice
+
+    def test_the_notice_names_every_model_the_manifest_carries(self, gemma4_assembled) -> None:
+        """§4(b) の告知は「この配布形が実際に再配布した上流」を 1 つ残らず名指しすること。
+
+        告知は `Pipeline.root_files` の席（core の型は `Mapping[str, str]`）なので manifest を
+        見て組めない — 焼き込んだ散文と実際に配ったモデルの対応は、ここでしか見られない。
+        """
+        out_dir, manifest = gemma4_assembled
+        notice = (out_dir / "NOTICE.md").read_text(encoding="utf-8")
+
+        _assert_notice_names(notice, [GEMMA4_UPSTREAM[name] for name in manifest["models"]])
+
+    def test_the_notice_covers_the_whole_attribution_table(self) -> None:
+        """帰属表へモデルを足した瞬間に赤くする門（`GEMMA4_NOTICE_MARKDOWN` の MUST）。
+
+        散文は手で書くほかない（法的テキストの文面レビューは人が読む前提）ので、忘れを
+        組み立て時ではなくここで受ける。
+        """
+        _assert_notice_names(gemma4_distribution.GEMMA4_NOTICE_MARKDOWN, GEMMA4_UPSTREAM.values())
+
+    def test_a_model_the_notice_does_not_mention_is_caught(self, gemma4_assembled) -> None:
+        """恒真でないことの裏取り — 2 件目を足した組で上の 2 本が落ちる。"""
+        out_dir, _ = gemma4_assembled
+        notice = (out_dir / "NOTICE.md").read_text(encoding="utf-8")
+
+        with pytest.raises(AssertionError, match="gemma-4-E4B-it"):
+            _assert_notice_names(notice, [*GEMMA4_UPSTREAM.values(), "google/gemma-4-E4B-it"])

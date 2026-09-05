@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 
 import pytest
 import torch
@@ -429,14 +430,32 @@ class TinyConfig:
         self.layer_types = layer_types
 
 
+@dataclass(frozen=True)
+class TinyTextOutput:
+    """`BaseModelOutputWithPast` の代役（`last_hidden_state` だけを持つ）。"""
+
+    last_hidden_state: torch.Tensor
+
+
 class TinyText(nn.Module):
-    """`Gemma3TextModel` 相当（`.config.layer_types` / `.layers` / `.embed_tokens`）。"""
+    """`Gemma3TextModel` 相当（`.config.layer_types` / `.layers` / `.embed_tokens` / `.norm`）。
+
+    `forward` は上流と同じ「embedding → 層を順に → 最終 norm」で、返り値も同じ席
+    （`last_hidden_state`）— {@link mq.assert_stage_split} の突合先がこれ。
+    """
 
     def __init__(self, vocab: int, features: int, layer_types: tuple[str, ...]) -> None:
         super().__init__()
         self.config = TinyConfig(layer_types)
         self.embed_tokens = nn.Embedding(vocab, features)
         self.layers = nn.ModuleList(TinyDecoderLayer(features) for _ in layer_types)
+        self.norm = nn.LayerNorm(features)
+
+    def forward(self, input_ids: torch.Tensor, use_cache: bool = False) -> TinyTextOutput:
+        hidden = self.embed_tokens(input_ids)
+        for kind, layer in zip(self.config.layer_types, self.layers, strict=True):
+            hidden = layer(hidden, bias=TINY_BIAS[kind])
+        return TinyTextOutput(self.norm(hidden))
 
 
 #: layer_type ごとの kwargs（Gemma3 の sliding / full 2 系統の代役）。
@@ -455,9 +474,7 @@ class TinyWrapper(nn.Module):
         self.dense2 = nn.Linear(features, features, bias=False)
 
     def forward(self, input_ids: torch.Tensor, pool_mask: torch.Tensor) -> torch.Tensor:
-        hidden = self.model.embed_tokens(input_ids)
-        for kind, layer in zip(self.model.config.layer_types, self.model.layers, strict=True):
-            hidden = layer(hidden, bias=TINY_BIAS[kind])
+        hidden = self.model(input_ids=input_ids, use_cache=False).last_hidden_state
         pooled = torch.sum(hidden * pool_mask.unsqueeze(-1), dim=1)
         return self.dense2(pooled)
 
@@ -597,6 +614,47 @@ class TestCatcher:
         mq.capture_stage_batches(wrapper, tiny_inputs(1))
 
         assert not any(layer._forward_pre_hooks for layer in wrapper.model.layers)
+
+
+class TestStageSplit:
+    """分解一致門（{@link mq.assert_stage_split}）— 校正が「本物と同じ活性」を見る前提。"""
+
+    def test_the_sequential_stages_reproduce_the_model_bit_for_bit(self):
+        torch.manual_seed(6)
+        wrapper = TinyWrapper()
+        inputs = tiny_inputs(1)
+        batches = mq.capture_stage_batches(wrapper, inputs)
+
+        mq.assert_stage_split(wrapper, inputs[0], batches[0], mq.decoder_stages(wrapper))
+
+    def test_a_dropped_stage_is_caught(self):
+        """段が 1 枚落ちても数値は普通に出る — 一致門だけがそれを落とす。"""
+        torch.manual_seed(7)
+        wrapper = TinyWrapper()
+        inputs = tiny_inputs(1)
+        batches = mq.capture_stage_batches(wrapper, inputs)
+        stages = mq.decoder_stages(wrapper)
+
+        with pytest.raises(AssertionError, match="ビット一致しない"):
+            mq.assert_stage_split(wrapper, inputs[0], batches[0], stages[:-1])
+
+    def test_a_stage_carrying_the_wrong_layer_type_is_caught(self):
+        """embeddinggemma 固有 — 層ごとに違う kwargs を取り違えた列を落とす。"""
+        torch.manual_seed(8)
+        wrapper = TinyWrapper()
+        inputs = tiny_inputs(1)
+        batches = mq.capture_stage_batches(wrapper, inputs)
+        swapped = {
+            "sliding_attention": "full_attention",
+            "full_attention": "sliding_attention",
+        }
+        stages = tuple(
+            (prefix, mq.LayerStage(index, wrapper.model.layers[index], swapped[stage.layer_type]))
+            for index, (prefix, stage) in enumerate(mq.decoder_stages(wrapper))
+        )
+
+        with pytest.raises(AssertionError, match="ビット一致しない"):
+            mq.assert_stage_split(wrapper, inputs[0], batches[0], stages)
 
 
 class TestCalibrationRun:

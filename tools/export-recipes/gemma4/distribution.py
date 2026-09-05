@@ -789,6 +789,13 @@ def gemma4_dist_plan(series_dir: Path, model: str) -> ModelPlan:
 #:
 #: MUST: 文面は配布形の中身と対応していること — 値としては妥当な散文なので `verify_dist` も
 #: manifest 検査も素通りし、配ってからでないと食い違いに気づけない。
+#:
+#: MUST: **`GEMMA4_UPSTREAM` へモデルを足す日は、名指しの 1 行もここで足す** — §4(b) の告知は
+#: 「再配布した全上流の改変」を述べる義務なので、モデルが増えたのに文面が据え置かれると
+#: 告知が 1 モデルぶん欠ける。この席は `Pipeline.root_files`（core の型は `Mapping[str, str]`）で、
+#: 組み立てる manifest を見られない — 散文を機械導出できないぶんを門で受ける
+#: （`tests/test_distribution.py::TestGemma4LegalText` が帰属表と manifest の両方から検査し、
+#: 2 件目が入った瞬間に赤くなる）。
 GEMMA4_NOTICE_MARKDOWN = """# NOTICE
 
 This repository redistributes a modified form of `google/gemma-4-E2B-it`, which is licensed under

@@ -19,7 +19,7 @@ front uses (HF `ku-nlp/deberta-v2-large-japanese-char-wwm`).
 ```sh
 # 1. generate (transformers fetches the weights and tokenizer from HF; ~1.3GB download on the first run)
 cd tools/export-recipes
-uv run --with 'transformers==5.14.1' python -m deberta.export            # 2 layers + 24 layers
+uv run --with 'transformers==5.14.1' python -m deberta.export            # every variant: 2 + 22 + 24 layers
 uv run --with 'transformers==5.14.1' python -m deberta.export --layers 2 # 2 layers only (development)
 
 # 1b. i8 series (ADR 0019 storage + ADR 0025 w8a8 mirror goldens)
@@ -59,9 +59,13 @@ uv run --with 'transformers==5.14.1' python -m deberta.export --dtype i4 --layer
 ```
 outputs/series/deberta/dev-2layer/model.safetensors      2 layers (130 nodes / 208MB)
 outputs/series/deberta/dev-2layer/io.<case>.safetensors
+outputs/series/deberta/sbv2-22layer/model.safetensors    22 layers (1 output) — the f32 counterpart
+                                                         of the shipped i8 / i4 series
+outputs/series/deberta/sbv2-22layer/io.<case>.safetensors
 outputs/series/deberta/full-24layer/model.safetensors    24 layers (1230 nodes / 1.32GB / 25 outputs)
 outputs/series/deberta/full-24layer/io.<case>.safetensors
 
+outputs/series/deberta-i8/dev-2layer/model.safetensors        2 layers in i8 storage
 outputs/series/deberta-i8/sbv2-22layer/model.safetensors      22 layers in i8 storage (1130 nodes /
                                                               294.5MB / 1 output) — shipped
 outputs/series/deberta-i8/full-24layer/model.safetensors      24 layers in i8 storage (319MB)

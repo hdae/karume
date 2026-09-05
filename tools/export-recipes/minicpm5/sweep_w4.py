@@ -29,6 +29,9 @@ AWQ / AWQ+GPTQ）。丸めは core の `karume.quant_calib` の共有で、**格
 stage 内の `nn.Linear` に閉じているため、既存の「方式 7 種 × 対象 2 形」の表とは対象集合が
 違う（{@link CalibConfig}）。校正入力は {@link minicpm5.calib_texts.CALIB_TEXTS} の 48 文で、
 先頭 decoder layer への呼び出しを捕まえて stage 列へ流す（{@link capture_stage_batches}）。
+流す前に **stage 分解一致門**（{@link assert_stage_split}）で「stage 列の逐次 forward =
+本体の最終 hidden」をビット一致で実測する — 分解がずれても数値は普通に出るので、門が無いと
+方式の採否を別経路の測定で決めることになる。
 
 config ごとに 4 列を採る（先の 3 列は Phase 0 と同じ・4 列目は方式グリッドと校正グリッド）:
 
@@ -89,6 +92,7 @@ from karume.quant_calib import (
     StageBatch,
     StageSpec,
     calibrate_stages,
+    first_tensor_output,
 )
 from karume.quant_methods import (
     DEFAULT_CODEBOOK_LEVELS,
@@ -804,11 +808,52 @@ class CalibRig:
     batches: tuple[StageBatch, ...]
 
 
+def assert_stage_split(
+    wrapper: nn.Module,
+    probe: torch.Tensor,
+    batch: StageBatch,
+    stages: Sequence[StageSpec],
+) -> None:
+    """stage 列の逐次 forward が本体の最終 hidden と**ビット一致**することを見る。
+
+    `probe` は捕捉に使った id 列そのもの、`batch` は**同じ入力**で捕まえた先頭 stage への入力。
+    stage 列は最終 `norm` と `lm_head` を含まない（{@link decoder_stages}）ので、逐次結果へ
+    `norm` を当ててから `LlamaModel` の `last_hidden_state` と比べる（wrapper の出力は logits
+    なので直接は比べられない）。stage の駆動は core（`_advance_batch`）と同じ形 — 位置引数は
+    hidden 1 本だけ、kwargs は stage 間で不変。
+
+    MUST: 丸める前に実測し、近似 tolerance ではなく `torch.equal` で見る — 同じモジュールを
+    同じ順で呼んでいる以上、一致しないなら分解が本物と違う経路を通っている。校正は「その層に
+    実際に流れる活性」から丸め先を選ぶ方式なので、分解がずれると方式の採否を別経路の測定で
+    決めることになる（数値は普通に出るので表からは読めない）。
+    """
+    inner = wrapper.model.model
+    args, kwargs = batch
+    with torch.no_grad():
+        reference = inner(
+            input_ids=probe,
+            attention_mask=one_shot.additive_causal_mask(int(probe.shape[1])),
+            use_cache=False,
+        ).last_hidden_state
+        hidden = args[0]
+        for _prefix, stage in stages:
+            hidden = first_tensor_output(stage(hidden, **kwargs))
+        hidden = inner.norm(hidden)
+    if not torch.equal(hidden, reference):
+        raise AssertionError(
+            "stage 分解の最終 hidden が本体の last_hidden_state とビット一致しない"
+            f"（最大絶対差 {float((hidden - reference).abs().max()):.4e}）"
+            " — decoder stage 列が LlamaModel.forward の経路とずれている"
+        )
+
+
 def build_calib_rig(wrapper: nn.Module, model_dir: Path, limit: int | None) -> CalibRig:
-    """校正の足場を組む（stage 分解 → 走査 → tokenize → Catcher）。"""
+    """校正の足場を組む（stage 分解 → 走査 → tokenize → Catcher → 分解一致門）。"""
     stages = decoder_stages(wrapper)
     scan, counts = calib_targets(stages)
-    batches = capture_stage_batches(wrapper, stages[0][1], calib_inputs(model_dir, limit))
+    inputs = calib_inputs(model_dir, limit)
+    batches = capture_stage_batches(wrapper, stages[0][1], inputs)
+    assert_stage_split(wrapper, inputs[0], batches[0], stages)
     return CalibRig(stages=stages, scan=scan, counts=counts, batches=batches)
 
 

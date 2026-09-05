@@ -7,14 +7,17 @@
 - 長さが散っている（GPTQ の `H = Σ XᵀX` はトークン数で重み付くので、長さが揃うと
   その長さの活性だけが支配する）
 - 先頭を切っても役割の混合が保たれる（縮小 smoke の入力が朗読調だけにならない）
+- 台本自身が持つ golden 文（{@link deberta.export.GOLDEN_SENTENCES}）と 1 文も重ならない
 
-評価文との分離は**資産（dump）が正本**なので、ここではなく実行時の
+最後の 1 本だけは**静的に確かめられる**（golden 文は台本の定数で、資産を読まない）。実行時の
+評価文との分離は別の話で、そちらは**資産（dump）が正本**なので、ここではなく実行時の
 {@link sbv2.measure_quant.assert_calib_disjoint} が見る（写しをコーパス側へ置くと dump を
 録り直したときに片方だけ古くなる）。その門自体の検出力は `test_measure_quant.py` が試す。
 """
 
 from __future__ import annotations
 
+from deberta import export as export_deberta
 from deberta.calib_texts import CALIB_TEXTS
 
 #: 数字読みの席の判定に使う漢数字（トークナイザは通さない — 文字の有無だけで見る）。
@@ -35,6 +38,15 @@ class TestCorpus:
     def test_it_holds_forty_eight_distinct_texts(self):
         assert len(CALIB_TEXTS) == 48
         assert len(set(CALIB_TEXTS)) == 48
+
+    def test_no_text_is_a_golden_sentence(self):
+        """校正文が golden 文と重なると、丸め先を「測る文そのもの」から選ぶことになる。"""
+        assert not set(export_deberta.GOLDEN_SENTENCES) & set(CALIB_TEXTS)
+
+    def test_no_text_quotes_a_golden_sentence(self):
+        """部分一致でも重なりは重なり（`in` で片方向ずつ見る）。"""
+        for golden in export_deberta.GOLDEN_SENTENCES:
+            assert not any(golden in text or text in golden for text in CALIB_TEXTS)
 
     def test_the_lengths_are_spread(self):
         """短文と長文の両方が要る（char-wwm なので文字数がほぼトークン数）。"""

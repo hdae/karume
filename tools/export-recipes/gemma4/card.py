@@ -42,7 +42,11 @@ GEMMA4_SUPPORTED_PIPELINE = "gemma4/1"
 #: `any-to-any`（画像・音声タワー込み）は名乗れない。
 GEMMA4_PIPELINE_TAG = "text-generation"
 
-GEMMA4_TITLE = "Gemma 4 E2B Instruct — Karume"
+#: 題は**この配布形が何を持つか**だけを名乗る。MUST: モデルの綴り（`E2B` など）を焼かない —
+#: gemma4 は家族 1 リポ（ADR 0092 決定 1）で manifest に並ぶモデルは増えうるので、題が 1 つの
+#: モデルを名乗ると別のモデルを足した日に嘘になる。名乗るべき綴りは
+#: {@link _gemma4_upstream_spellings} が manifest から引く。
+GEMMA4_TITLE = "Gemma 4 Text Decoder — Karume"
 
 #: モデル名 → 上流チェックポイントの HF リポ ID。**この 1 表が「どのモデルが何の重みか」の
 #: 唯一の事実**で、`gemma4.distribution` は系列名 / 入力素材のディレクトリ名をここから導く。
@@ -84,14 +88,23 @@ def _gemma4_metadata(manifest: Mapping[str, Any]) -> CardMetadata:
     )
 
 
+def _gemma4_upstream_spellings(manifest: Mapping[str, Any]) -> str:
+    """散文が名乗る上流の綴り — **この配布形が実際に運んでいるモデル**だけを manifest から引く。
+
+    MUST: 散文にモデルの綴りを焼かない（{@link GEMMA4_TITLE} の MUST と同じ理由）。
+    """
+    return " / ".join(f"`{GEMMA4_UPSTREAM[name]}`" for name in manifest["models"])
+
+
 def _gemma4_overview(manifest: Mapping[str, Any]) -> list[str]:
     config = default_model(manifest)["pipelineConfig"]
     return [
         "## What is this",
         "",
-        "A chat distribution: the **text decoder** of Gemma 4 E2B Instruct, converted into the",
-        "WebGPU inference runtime **Karume**'s container format (safetensors files carrying the",
-        "graph in `__metadata__`). Runs as-is in the browser and in Deno — string in, string out.",
+        f"A chat distribution: the **text decoder** of {_gemma4_upstream_spellings(manifest)},",
+        "converted into the WebGPU inference runtime **Karume**'s container format (safetensors",
+        "files carrying the graph in `__metadata__`). Runs as-is in the browser and in Deno —",
+        "string in, string out.",
         "",
         "- **Tokenizer and chat format ship with the weights.** `chat()` renders the turns,",
         "  encodes them, samples, and decodes incrementally, so callers hand over messages and",
