@@ -86,12 +86,16 @@ def _vowel_detector_metadata() -> CardMetadata:
 #: 入力フレームの hop（10ms 格子）。特徴抽出の契約そのもので、`pipelineConfig` には無い
 #: （実行時に選べない数を宣言だけ持たせない — `src/vowel-detector/config.ts` の判断）。
 #: ここが要るのは**秒に直して説明する**ためだけ。
-_VOWEL_DETECTOR_HOP = 160
+#:
+#: 上流 config の `hop` と一致することは組み立て段が突き合わせる
+#: （{@link vowel_detector.distribution.vowel_detector_pipeline_config}）— 突き合わせが無いと、
+#: 上流が hop を変えた日にカードだけが黙って間違った秒数を書く。
+VOWEL_DETECTOR_HOP = 160
 
 
 def _vowel_detector_seconds(config: Mapping[str, Any], frames: int) -> str:
     """フレーム数 → 秒（`sampleRate` から導く — 秒を宣言として持たない）。"""
-    per_second = config["sampleRate"] / _VOWEL_DETECTOR_HOP
+    per_second = config["sampleRate"] / VOWEL_DETECTOR_HOP
     return f"{frames / per_second:.1f}"
 
 

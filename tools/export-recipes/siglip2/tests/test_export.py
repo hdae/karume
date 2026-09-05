@@ -12,7 +12,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 from safetensors import safe_open
@@ -281,3 +283,148 @@ class TestVerifyCli:
         sg.main(["--model-dir", "/tmp/siglip2-so400m-patch14-384"])
 
         assert seen == [SERIES_ROOT / "siglip2-so400m-patch14-384"]
+
+
+class _RecordingVision(nn.Module):
+    """呼び出しの段（参照 / 段 1 / 段 2）を記録するだけの骨格。
+
+    `verify_patches` が触るのは `model(pixel_values=…).pooler_output` と `model.embeddings` /
+    `model.head` の 2 席だけ。既定では段によらず同じ値を返す（1 段目のビット一致は通る）。
+    """
+
+    def __init__(self, calls: list[str], drift: float = 0.0) -> None:
+        super().__init__()
+        self.calls = calls
+        self.stage = "reference"
+        self.drift = drift
+        self.config = Config()
+        self.embeddings = nn.Identity()
+        self.head = nn.Identity()
+
+    def forward(self, pixel_values: torch.Tensor):
+        if not self.calls or self.calls[-1] != self.stage:
+            self.calls.append(self.stage)
+        offset = 0.0 if self.stage == "reference" else self.drift
+        return SimpleNamespace(pooler_output=pixel_values.flatten(1).sum(dim=1) + offset)
+
+
+def _stage_verify(monkeypatch, model: _RecordingVision) -> list[str]:
+    """`verify_patches` を実重み無しで 1 周させる（段の記録を返す）。"""
+    calls = model.calls
+    monkeypatch.setattr(sg.patch, "patches_applied", lambda: False)
+    monkeypatch.setattr(sg, "load_model", lambda _dir: model)
+    monkeypatch.setattr(sg, "build_cases", lambda _config: CASES)
+
+    def _apply_shape(_embeddings) -> None:
+        calls.append("apply_shape")
+        model.stage = "shape-folds"
+
+    def _apply_map_head(_head) -> None:
+        calls.append("apply_map_head")
+        model.stage = "map-head"
+
+    monkeypatch.setattr(sg.patch, "apply_shape_patches", _apply_shape)
+    monkeypatch.setattr(sg.patch, "apply_map_head_patch", _apply_map_head)
+    return calls
+
+
+class TestVerifyOrder:
+    """偽 PASS を作る 2 経路（参照の恒真化 / 非ビット一致の素通り）を実際に踏む。"""
+
+    def test_a_patched_process_cannot_take_the_reference(self, monkeypatch):
+        """MUST: 適用済みプロセスでは参照を採らない（採ると同値検証が差 0 で恒真化する）。
+
+        重い `load_model` より前に落ちるので実重みは要らない。
+        """
+        monkeypatch.setattr(sg.patch, "_SHAPE_APPLIED", True)
+
+        with pytest.raises(SystemExit, match="恒真化"):
+            sg.verify_patches(Path("/nonexistent"))
+
+    def test_the_reference_is_taken_once_before_any_patch(self, monkeypatch):
+        """段ごとに参照を採り直す退行（2 段目の参照がパッチ後の値になる）を落とす。"""
+        model = _RecordingVision([])
+        calls = _stage_verify(monkeypatch, model)
+
+        entries = sg.verify_patches(Path("/nonexistent"))
+
+        assert calls == [
+            "reference",
+            "apply_shape",
+            "shape-folds",
+            "apply_map_head",
+            "map-head",
+        ]
+        assert [entry["stage"] for entry in entries] == ["shape-folds", "map-head"]
+
+    def test_a_shape_fold_that_is_not_bit_exact_stops_the_run(self, monkeypatch):
+        """1 段目の主張は**ビット一致**そのもの。
+
+        「差が小さい」で通す形にすると、寸法の取り違えが素通りする。
+        """
+        model = _RecordingVision([], drift=1e-7)
+        _stage_verify(monkeypatch, model)
+
+        with pytest.raises(AssertionError, match="形の畳み込みがビット同一でない"):
+            sg.verify_patches(Path("/nonexistent"))
+
+
+class TestRealCaseShapeGate:
+    """`preprocessor_config.json` と `config.json` が別世代のときに落ちること。"""
+
+    @staticmethod
+    def _write_real_images(root: Path) -> None:
+        image_module = pytest.importorskip("PIL.Image")
+        array = np.zeros((8, 8, 3), dtype=np.uint8)
+        for index, (_name, file_name, _why) in enumerate(sg.REAL_CASES):
+            array[:, :, 0] = 10 * index + 7
+            image_module.fromarray(array).save(root / file_name)
+
+    def test_a_preprocessor_of_another_generation_fails_loudly(self, monkeypatch, tmp_path):
+        """前処理が 8² を返すのに vision config は 32² — golden だけ別解像度で焼かれる形。"""
+        self._write_real_images(tmp_path)
+        monkeypatch.setattr(
+            sg,
+            "load_image_processor",
+            lambda _dir: lambda **_kwargs: {"pixel_values": torch.zeros((1, 3, 8, 8))},
+        )
+
+        with pytest.raises(AssertionError, match=r"config 由来の \(1, 3, 32, 32\) と違う"):
+            sg.build_real_cases(tmp_path, Config(), tmp_path)
+
+
+class TestStagedPublication:
+    """MUST: 全ての門を通してから据える（落ちた実走は席ごと消える）。"""
+
+    @staticmethod
+    def _stage_tiny(monkeypatch) -> None:
+        torch.manual_seed(0)
+        wrapper = TinyVisionPooler()
+        wrapper.model = SimpleNamespace(config=Config())
+        monkeypatch.setattr(sg, "load_wrapper", lambda _dir: wrapper)
+        monkeypatch.setattr(sg, "build_cases", lambda _config: CASES)
+
+    def test_a_passing_run_leaves_the_series_in_place(self, monkeypatch, tmp_path):
+        """恒真でないことの対（門が通れば据わる）— これが無いと下の主張が恒真になる。"""
+        self._stage_tiny(monkeypatch)
+        monkeypatch.setattr(sg, "_sanity", lambda _pooled: {})
+        out_dir = tmp_path / "series"
+
+        summary = sg.export_series(sg.DEFAULT_MODEL_DIR, out_dir)
+
+        assert out_dir.is_dir()
+        assert summary["dir"] == str(out_dir)
+
+    def test_a_failing_sanity_leaves_nothing_behind(self, monkeypatch, tmp_path):
+        self._stage_tiny(monkeypatch)
+
+        def _reject(_pooled):
+            raise AssertionError("判別の順序が壊れている")
+
+        monkeypatch.setattr(sg, "_sanity", _reject)
+        out_dir = tmp_path / "series"
+
+        with pytest.raises(AssertionError, match="判別の順序が壊れている"):
+            sg.export_series(sg.DEFAULT_MODEL_DIR, out_dir)
+
+        assert not out_dir.exists()

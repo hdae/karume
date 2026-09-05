@@ -204,12 +204,14 @@ class SubPixelUpsample(nn.Module):
                 "（重なる窓は 1×1 conv へ分解できない）"
             )
         (stride,) = strides
-        for what, value in (
-            ("padding", source.padding),
-            ("output_padding", source.output_padding),
-            ("dilation", tuple(dim - 1 for dim in source.dilation)),
+        # 期待集合は欄ごとに違う（dilation の既定は 1・他は 0）。値を変換してから見ると、
+        # 文言が**上流の実値**でなく変換後の数を名乗る。
+        for what, value, expected in (
+            ("padding", source.padding, {0}),
+            ("output_padding", source.output_padding, {0}),
+            ("dilation", source.dilation, {1}),
         ):
-            if set(value) != {0}:
+            if set(value) != expected:
                 raise NotImplementedError(f"{what}={value} の ConvTranspose2d は差し替え対象外")
         if source.groups != 1:
             raise NotImplementedError(f"groups={source.groups} の ConvTranspose2d は差し替え対象外")

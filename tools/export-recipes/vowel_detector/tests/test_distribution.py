@@ -26,6 +26,7 @@ from ir_fixtures import ir_container
 from safetensors.numpy import load_file
 from shard_series import placed_paths, write_component
 
+from _shared.licenses import MIT_COPYRIGHT_PLACEHOLDER, MIT_LICENSE_PATH
 from dist import default_out_dir, main
 from karume.dist import (
     MANIFEST_FILENAME,
@@ -38,9 +39,11 @@ from karume.dist import (
 from karume.ir import IR_METADATA_KEY
 from vowel_detector.distribution import (
     PIPELINE,
+    VOWEL_DETECTOR_COPYRIGHTS,
     VOWEL_DETECTOR_DEFAULT_MODEL,
     VOWEL_DETECTOR_GRAPH_ROLE,
     VOWEL_DETECTOR_MAX_FRAMES,
+    VOWEL_DETECTOR_MIN_FRAMES,
     VOWEL_DETECTOR_OUTPUT_PATHS,
     VOWEL_DETECTOR_WEIGHTS,
     VowelDetectorSources,
@@ -98,10 +101,17 @@ def _present(out_dir: Path) -> list[str]:
 #: `pipelineConfig` の欄名（TS 側 `packages/models/src/vowel-detector/config.ts` の `ROOT_KEYS`
 #: の写し）。**ロード側は未知キーも欠落も parse 時に落とす**ので、焼く側とロード側の欄名は
 #: 完全一致が要る。
-_VOWEL_DETECTOR_CONFIG_KEYS = ("sampleRate", "featureDim", "classes", "maxFrames")
+_VOWEL_DETECTOR_CONFIG_KEYS = (
+    "sampleRate",
+    "featureDim",
+    "classes",
+    "minFrames",
+    "maxFrames",
+)
 
 _VOWEL_DETECTOR_N_MELS = 80
 _VOWEL_DETECTOR_N_FFT = 512
+_VOWEL_DETECTOR_HOP = 160
 _VOWEL_DETECTOR_CLASSES = ("a", "i", "u", "e", "o", "N", "pau", "cons")
 
 
@@ -115,6 +125,7 @@ def _vowel_detector_feature_config(**patch: Any) -> dict[str, Any]:
     return {
         "sample_rate": 16000,
         "n_fft": _VOWEL_DETECTOR_N_FFT,
+        "hop": _VOWEL_DETECTOR_HOP,
         "n_mels": _VOWEL_DETECTOR_N_MELS,
         "feature_dim": _VOWEL_DETECTOR_N_MELS + 3,
         "classes": list(_VOWEL_DETECTOR_CLASSES),
@@ -219,6 +230,7 @@ def vowel_detector_assembled(tmp_path: Path) -> tuple[Path, dict]:
         [vowel_detector_plan(sources, VOWEL_DETECTOR_DEFAULT_MODEL)],
         out_dir,
         VOWEL_DETECTOR_DEFAULT_MODEL,
+        root_files=PIPELINE.root_files,
     )
     return out_dir, manifest
 
@@ -231,7 +243,8 @@ class TestVowelDetectorLayout:
     def test_it_places_the_graph_under_the_model_subtree(self, vowel_detector_assembled) -> None:
         out_dir, _ = vowel_detector_assembled
         expected = _in_subtree(VOWEL_DETECTOR_DEFAULT_MODEL, _placed_paths())
-        assert _present(out_dir) == sorted([*expected, MANIFEST_FILENAME])
+        # MIT の許諾表示（ADR 0092 決定 7）は manifest が宣言しないメタ席。
+        assert _present(out_dir) == sorted([*expected, MANIFEST_FILENAME, "LICENSE.md"])
 
     def test_it_never_carries_the_io_fixtures(self, vowel_detector_assembled) -> None:
         out_dir, _ = vowel_detector_assembled
@@ -560,3 +573,144 @@ class TestVowelDetectorCli:
         out_dir = tmp_path / "models" / "karume-vowel-detector"
         expected = _in_subtree(VOWEL_DETECTOR_DEFAULT_MODEL, _placed_paths())
         assert sorted(verify_dist(out_dir)) == sorted(expected)
+
+
+class TestVowelDetectorLegalText:
+    """配布リポ直下の MIT 許諾表示（ADR 0092 決定 7）。"""
+
+    def test_it_ships_the_license_text_byte_identical(self, vowel_detector_assembled) -> None:
+        """本文は原本の逐語 — 差し込み口（著作権行）より外は 1 バイトも動かさない。
+
+        組み立ての経路のどこかで整形や改行変換が入ると 1 バイト動くが、散文としては妥当な
+        ままなので他の門は素通りする。
+        """
+        out_dir, _ = vowel_detector_assembled
+        template = MIT_LICENSE_PATH.read_text(encoding="utf-8")
+        rendered = (out_dir / "LICENSE.md").read_text(encoding="utf-8")
+
+        assert rendered == template.replace(
+            MIT_COPYRIGHT_PLACEHOLDER, "\n".join(VOWEL_DETECTOR_COPYRIGHTS)
+        )
+
+    def test_it_names_a_copyright_holder(self, vowel_detector_assembled) -> None:
+        """著作権行の無い MIT は「上記の著作権表示」が指す先を持たない。"""
+        out_dir, _ = vowel_detector_assembled
+        rendered = (out_dir / "LICENSE.md").read_text(encoding="utf-8")
+
+        assert MIT_COPYRIGHT_PLACEHOLDER not in rendered
+        for line in VOWEL_DETECTOR_COPYRIGHTS:
+            assert line in rendered
+
+
+class TestVowelDetectorFeatureContract:
+    """特徴抽出の寸法は**唯一の読み手が焼き込んでいる値**と突き合わせる（W-P7-5）。
+
+    突き合わせが無いと「組み立ては緑・`verify_dist` も緑・ロード時に拒まれる配布形」が
+    出来上がる（HF へ上げてから実機で落ちる）。
+    """
+
+    @pytest.mark.parametrize(
+        ("key", "value"),
+        [
+            ("sample_rate", 22050),
+            ("n_fft", 1024),
+            ("hop", 256),
+            ("n_mels", 64),
+        ],
+    )
+    def test_it_refuses_a_dimension_the_loader_cannot_read(
+        self, tmp_path: Path, key: str, value: int
+    ) -> None:
+        config = _vowel_detector_feature_config(**{key: value})
+        if key == "n_mels":
+            # 内訳検査より先にここで落ちることを見たいので、feature_dim も揃えておく。
+            config["feature_dim"] = value + 3
+        sources = _build_vowel_detector_sources(tmp_path, feature_config=config)
+
+        with pytest.raises(DistError, match=f"{key} が {value}"):
+            vowel_detector_plan(sources)
+
+    def test_the_card_and_the_gate_use_the_same_hop(self) -> None:
+        """カードの秒換算が使う hop は、組み立てが上流と突き合わせる数と同じ 1 つ。"""
+        from vowel_detector.card import VOWEL_DETECTOR_HOP
+
+        assert VOWEL_DETECTOR_HOP == 160
+
+    @pytest.mark.parametrize(
+        ("key", "value"),
+        [("sample_rate", True), ("n_mels", 0), ("n_fft", "512"), ("hop", -160)],
+    )
+    def test_it_refuses_a_dimension_that_is_not_a_positive_integer(
+        self, tmp_path: Path, key: str, value: object
+    ) -> None:
+        """`True` は Python では `int` の部分型 — 型検査が緩いと bool が寸法として通る。"""
+        sources = _build_vowel_detector_sources(
+            tmp_path, feature_config=_vowel_detector_feature_config(**{key: value})
+        )
+
+        with pytest.raises(DistError, match=f"{key}"):
+            vowel_detector_plan(sources)
+
+
+class TestVowelDetectorClasses:
+    """クラス語彙の構造検査（並びがそのままクラス id なので、欠けも重複もラベルの置換）。"""
+
+    def test_it_refuses_a_vocabulary_of_another_length(self, tmp_path: Path) -> None:
+        sources = _build_vowel_detector_sources(
+            tmp_path,
+            feature_config=_vowel_detector_feature_config(
+                classes=list(_VOWEL_DETECTOR_CLASSES[:-1])
+            ),
+        )
+
+        with pytest.raises(DistError, match="長さ 8 の配列でない"):
+            vowel_detector_plan(sources)
+
+    def test_it_refuses_a_duplicated_label(self, tmp_path: Path) -> None:
+        """重複は「片方のクラスが黙って別のラベルを名乗る」形になる。"""
+        duplicated = ["a", *_VOWEL_DETECTOR_CLASSES[2:], "a"]
+        sources = _build_vowel_detector_sources(
+            tmp_path, feature_config=_vowel_detector_feature_config(classes=duplicated)
+        )
+
+        with pytest.raises(DistError, match="重複がある"):
+            vowel_detector_plan(sources)
+
+    @pytest.mark.parametrize("bad", ["", 1, None])
+    def test_it_refuses_a_label_that_is_not_a_non_empty_string(
+        self, tmp_path: Path, bad: object
+    ) -> None:
+        classes = [bad, *_VOWEL_DETECTOR_CLASSES[1:]]
+        sources = _build_vowel_detector_sources(
+            tmp_path, feature_config=_vowel_detector_feature_config(classes=classes)
+        )
+
+        with pytest.raises(DistError, match="空でない文字列でない"):
+            vowel_detector_plan(sources)
+
+
+class TestVowelDetectorFrameFloor:
+    """入力長の**下端**も配布形の宣言（E-M5-2）— IR は記号の値域を持たない。"""
+
+    def test_it_declares_the_operating_floor_the_loader_requires(
+        self, vowel_detector_assembled
+    ) -> None:
+        _, manifest = vowel_detector_assembled
+        config = _vowel_detector_model(manifest)["pipelineConfig"]
+
+        assert config["minFrames"] == VOWEL_DETECTOR_MIN_FRAMES
+
+    def test_the_floor_is_the_symbolic_minimum_the_export_script_baked(self) -> None:
+        """配る下限と焼いた記号次元の下限が同じ 1 組であること。
+
+        `SYM_MIN` は 20ms 格子の本数、配る `minFrames` は 10ms 格子の本数（入力は `2T`）。
+        ずれると、宣言より短い音声が `T = 1` を束縛して traced 範囲外で走る（例外は出ない）。
+        """
+        from vowel_detector import export
+
+        assert VOWEL_DETECTOR_MIN_FRAMES == 2 * export.SYM_MIN
+        assert VOWEL_DETECTOR_MIN_FRAMES == export.MIN_LENGTH
+
+    def test_the_floor_is_below_the_limit(self) -> None:
+        """値域として成立すること（逆転した宣言は受理集合が空になる）。"""
+        assert VOWEL_DETECTOR_MIN_FRAMES < VOWEL_DETECTOR_MAX_FRAMES

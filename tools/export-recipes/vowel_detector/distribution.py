@@ -41,6 +41,7 @@ from typing import Any
 
 import numpy as np
 
+from _shared.licenses import mit_license
 from _shared.paths import INPUTS_ROOT
 from karume.dist import (
     Artifact,
@@ -57,7 +58,7 @@ from karume.dist import (
     table_payload,
 )
 
-from .card import render_vowel_detector_model_card
+from .card import VOWEL_DETECTOR_HOP, render_vowel_detector_model_card
 
 #: パイプライン契約（ADR 0041 §2 — モデル単位）。TS 側の受理集合は
 #: `VOWEL_DETECTOR_PIPELINE_NAME` / `VOWEL_DETECTOR_PIPELINE_MAJOR`。
@@ -86,6 +87,14 @@ VOWEL_DETECTOR_GRAPH_ROLE = "crnn"
 #: 手元の確保失敗として出る。
 VOWEL_DETECTOR_MAX_FRAMES = 60_000
 
+#: `pipelineConfig` に載る**運用下限**（10ms フレーム数 = 40ms）。焼いたグラフの記号次元 `T` の
+#: 下限 `vowel_detector.export.SYM_MIN` を入力側の単位へ直したもの（= `export.MIN_LENGTH`）。
+#:
+#: MUST: 上限と同じ理由でここが要る。IR は記号の値域を持たないので、`Dim(min=…)` より短い入力を
+#: 止められるのは**この数を読むパイプラインだけ**。宣言が無いと、10ms フレーム 2〜3 本の音声が
+#: `T = 1` を束縛して **traced 範囲外**で走る（例外は出ず、値だけが保証の外へ出る）。
+VOWEL_DETECTOR_MIN_FRAMES = 4
+
 #: グラフ入力の名前（`vowel_detector.export.INPUT_NAME`）と、出力の時間軸の刻み（conv の
 #: stride 2 — 入力 2 フレームで出力 1 フレーム）。
 VOWEL_DETECTOR_INPUT = "features"
@@ -109,6 +118,13 @@ VOWEL_DETECTOR_DSP_DIM = 3
 #: 出力クラスの本数（`feature_config.json` の `classes` — 並びは配らない側の関心事で、
 #: **並びが id** であることの検査は TS 側 `config.ts` が持つ）。
 VOWEL_DETECTOR_CLASS_COUNT = 8
+
+#: 唯一の読み手（`packages/models/src/vowel-detector/features.ts`）が**焼き込んでいる**
+#: 特徴抽出の寸法。上流 config がこれと違う値を名乗る配布形は、組み上がっても実機ロードで
+#: 拒まれる — 組み立て段で落とすのが {@link _vowel_detector_expects}。
+VOWEL_DETECTOR_SAMPLE_RATE = 16_000
+VOWEL_DETECTOR_N_FFT = 512
+VOWEL_DETECTOR_N_MELS = 80
 
 
 #: 出力の相対 path（**モデルサブツリー内**）— 配置表と manifest が共有する 1 箇所。格納 dtype を
@@ -293,15 +309,45 @@ def vowel_detector_mel_basis(raw: Mapping[str, Any], where: str) -> np.ndarray:
     return basis
 
 
+def _vowel_detector_expects(raw: Mapping[str, Any], key: str, expected: int, where: str) -> int:
+    """特徴抽出の契約を、**読み手が焼き込んでいる値**と突き合わせて読む。
+
+    MUST: 落とさない。外れた値でも組み立ては通り `verify_dist` も緑になるが、唯一の読み手が
+    ロード時に拒む配布形が出来上がる（組み立て → HF アップロード → 実機ロードまで進んでから
+    落ちる）。
+    """
+    value = _vowel_detector_int(raw, key, where)
+    if value != expected:
+        raise DistError(
+            f"{where} の {key} が {value} — karume の特徴抽出は {expected} で焼き込んであり"
+            "（packages/models/src/vowel-detector/features.ts）、この配布形はロード時に拒まれる"
+        )
+    return value
+
+
 def vowel_detector_pipeline_config(feature_config: Mapping[str, Any], where: str) -> dict[str, Any]:
     """`pipelineConfig`（TS 側スキーマの 4 欄）を上流 config と台本の宣言から組む。
 
-    `maxFrames` だけが**焼いたグラフ側の数**（{@link VOWEL_DETECTOR_MAX_FRAMES}）で、
+    `minFrames` / `maxFrames` だけが**焼いたグラフ側の数**（{@link VOWEL_DETECTOR_MIN_FRAMES} /
+    {@link VOWEL_DETECTOR_MAX_FRAMES} = 記号次元 `T` の値域を入力側の単位へ直したもの）で、
     残り 3 欄は上流 config の逐語。
+
+    寸法 4 欄（`sample_rate` / `n_fft` / `n_mels` / `hop`）は読み手の焼き込み値と突き合わせる
+    （{@link _vowel_detector_expects}）。{@link vowel_detector_classes} が「上流 config を写した
+    2 つ目の表を置かない」と言っているのは**語彙**の話で、こちらは上流の写しではなく
+    **karume 側の実装が受けられる値**（上流が寸法を変えれば TS の焼き込みも同時に動く）—
+    siglip2 の `SIGLIP2_RESAMPLE` / `SIGLIP2_RESCALE_FACTOR` と同じ形。
     """
-    sample_rate = _vowel_detector_int(feature_config, "sample_rate", where)
+    sample_rate = _vowel_detector_expects(
+        feature_config, "sample_rate", VOWEL_DETECTOR_SAMPLE_RATE, where
+    )
+    _vowel_detector_expects(feature_config, "n_fft", VOWEL_DETECTOR_N_FFT, where)
+    # hop は `pipelineConfig` に載らないが、カードの秒換算がこの数を使う（card.py の
+    # {@link vowel_detector.card.VOWEL_DETECTOR_HOP}）— 突き合わせ相手が居ないと、上流が
+    # 変えた日にカードだけが静かに間違った秒数を書く。
+    _vowel_detector_expects(feature_config, "hop", VOWEL_DETECTOR_HOP, where)
     feature_dim = _vowel_detector_int(feature_config, "feature_dim", where)
-    n_mels = _vowel_detector_int(feature_config, "n_mels", where)
+    n_mels = _vowel_detector_expects(feature_config, "n_mels", VOWEL_DETECTOR_N_MELS, where)
     if feature_dim != n_mels + VOWEL_DETECTOR_DSP_DIM:
         raise DistError(
             f"{where} の feature_dim {feature_dim} が n_mels {n_mels} +"
@@ -311,6 +357,7 @@ def vowel_detector_pipeline_config(feature_config: Mapping[str, Any], where: str
         "sampleRate": sample_rate,
         "featureDim": feature_dim,
         "classes": vowel_detector_classes(feature_config, where),
+        "minFrames": VOWEL_DETECTOR_MIN_FRAMES,
         "maxFrames": VOWEL_DETECTOR_MAX_FRAMES,
     }
 
@@ -403,6 +450,13 @@ def vowel_detector_dist_plan(series_dir: Path, model: str) -> ModelPlan:
     return vowel_detector_plan(vowel_detector_sources(series_dir, model), model)
 
 
+#: 配布リポ直下の `LICENSE.md` に載せる著作権行（上流 `LICENSE` / `NOTICE.txt` の逐語 —
+#: 綴りの出どころは {@link vowel_detector.card.VOWEL_DETECTOR_LICENSE} の注記と同じ）。
+#:
+#: MUST: MIT は「全文 + 著作権行」を配布リポ直下へ置くことを要求する（ADR 0092 決定 7）—
+#: 著作権行が欠けた MIT は「上記の著作権表示」が指す先を持たない。
+VOWEL_DETECTOR_COPYRIGHTS: tuple[str, ...] = ("Copyright (c) 2026 Spectopathy",)
+
 #: `--pipeline vowel-detector` の 1 行（ドライバが core の PIPELINES へ合成する）。
 PIPELINE = Pipeline(
     default_model=VOWEL_DETECTOR_DEFAULT_MODEL,
@@ -411,4 +465,7 @@ PIPELINE = Pipeline(
     # 帰属は 1 通りだけ（上流 1 リポ・1 ライセンス — 学習素材の帰属も重みに紐づいた
     # 1 組）。選択肢が無いので省略で通る。
     card_profiles={"vowel-detector": render_vowel_detector_model_card},
+    # 改変告知（`NOTICE.md`）は置かない — MIT は要求せず、上流と著作権者が同じなので
+    # 「誰に対する告知か」の宛先が無い（Apache 家族の席とはそこが違う）。
+    root_files={"LICENSE.md": mit_license(VOWEL_DETECTOR_COPYRIGHTS)},
 )

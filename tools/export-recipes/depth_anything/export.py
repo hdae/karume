@@ -112,6 +112,7 @@ from karume.pipeline import export_to_file
 from karume.shards import resolve_shards
 
 from . import patch
+from .measurements import CONVT_MAXDIFF
 
 #: 実重みの親（`inputs/depth-anything/<名前>/` に HF の 3 ファイルを展開した先）。
 MODELS_ROOT = INPUTS_ROOT / "depth-anything"
@@ -578,7 +579,10 @@ def export_series(
             raise AssertionError(f"グラフ入力の並びが {declared} で、期待の {(INPUT_NAME,)} と違う")
         written, depths = _write_io(wrapper, graph, cases, staged, metadata)
         # MUST: 公開より前に評価する（この系列で唯一の非恒真な検査 — 落ちたら席ごと消える）。
+        # 実画像の遠近順序も同じ席の中で見る: 合成側の相関は幾何の手掛かりしか見ないので、
+        # 実写構図の遠近を捉えられなくなった回帰はこの門だけが検出する。
         sanity = _sanity({name: depths[name] for name, _pixel_values in synthetic})
+        real_sanity = _real_sanity({name: depths[name] for name in metadata}) if metadata else None
     summary = {
         "dir": str(out_dir),
         "resolution": resolution,
@@ -594,8 +598,8 @@ def export_series(
         "real_images": {name: md[SOURCE_IMAGE_KEY] for name, md in metadata.items()},
         "sanity": sanity,
     }
-    if metadata:
-        summary["real_sanity"] = _real_sanity({name: depths[name] for name in metadata})
+    if real_sanity is not None:
+        summary["real_sanity"] = real_sanity
     return summary
 
 
@@ -652,7 +656,17 @@ def verify_patches(model_dir: Path) -> list[dict[str, Any]]:
             f"演算列が 1 対 1 の書き換えがビット同一でない: maxdiff={layout['maxdiff']}"
         )
     patch.apply_module_patches(wrapper.model)
-    return [layout, _diff_entry("modules", "max-abs-diff", depths(), reference)]
+    modules = _diff_entry("modules", "max-abs-diff", depths(), reference)
+    # MUST: 公開している実測上限（`measurements.CONVT_MAXDIFF` — カードと NOTICE.md が名乗る数）を
+    # 再実測と突き合わせる。報告だけだと、パッチや上流の更新で差が広がっても配布テキストが古い
+    # 数を名乗り続ける（W-P6-3）。
+    worst = max(modules["maxdiff"].values())
+    if worst > CONVT_MAXDIFF:
+        raise AssertionError(
+            f"ConvTranspose2d 分解の maxdiff {worst:g} が公開値 CONVT_MAXDIFF {CONVT_MAXDIFF:g} を"
+            " 超えた — measurements.py を実測へ更新し、カードと NOTICE.md を再発行する"
+        )
+    return [layout, modules]
 
 
 def main(argv: Sequence[str] | None = None) -> None:

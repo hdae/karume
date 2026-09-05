@@ -184,3 +184,41 @@ class TestReference:
         monkeypatch.setattr(backend.TorchvisionBackend, "rescale_and_normalize", unfused)
         with pytest.raises(SystemExit, match="pixel_values"):
             pre.reference(_processor(), self.IMAGE, 4, 6)
+
+
+class TestCommittedFixture:
+    """git 追跡のフィクスチャと `build_cases()` の対応（再生成漏れを赤にする）。
+
+    Python 側は `build_cases()` の幾何被覆を、Deno 側（`packages/models/tests/
+    image_preprocess_test.ts`）は committed JSON を検査する — 突き合わせが無いと、**両者が
+    別物になっても両方緑**のまま回り続ける（片方だけ編集して再生成し忘れた形）。
+    """
+
+    @staticmethod
+    def _fixture() -> dict:
+        # git 追跡ファイルなので、無ければ skip ではなく失敗させる。
+        return json.loads(pre.DEFAULT_FIXTURE_PATH.read_text(encoding="utf-8"))
+
+    def test_the_case_names_match_in_order(self) -> None:
+        fixture = self._fixture()
+
+        assert [case["name"] for case in fixture["cases"]] == [
+            case["name"] for case in pre.build_cases()
+        ]
+
+    def test_every_case_carries_the_geometry_it_was_built_from(self) -> None:
+        """入出力の寸法がずれると、Deno 側は別の縮尺で参照と突き合わせる。"""
+        fixture = self._fixture()
+
+        for baked, case in zip(fixture["cases"], pre.build_cases(), strict=True):
+            image = case["image"]
+            out_height, out_width = case["out"]
+            assert (baked["height"], baked["width"]) == image.shape[:2], baked["name"]
+            assert (baked["outHeight"], baked["outWidth"]) == (out_height, out_width), baked["name"]
+
+    def test_the_baked_constants_are_the_expected_ones(self) -> None:
+        constants = self._fixture()["constants"]
+
+        assert tuple(constants["imageMean"]) == pre.EXPECTED_MEAN
+        assert tuple(constants["imageStd"]) == pre.EXPECTED_STD
+        assert constants["rescaleFactor"] == pre.EXPECTED_RESCALE

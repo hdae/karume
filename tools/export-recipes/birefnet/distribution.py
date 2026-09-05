@@ -100,9 +100,10 @@ BIREFNET_IMAGE_MEAN: tuple[float, float, float] = (0.485, 0.456, 0.406)
 BIREFNET_IMAGE_STD: tuple[float, float, float] = (0.229, 0.224, 0.225)
 
 #: 配る解像度。系列は解像度ごとに別（`birefnet/export.py` の「解像度軸」）なので、系列名を
-#: 引くのにこの数が要る。**2048²（本家 handler の General-HR）は配らない** — conv2d の
-#: dispatch 上限と中間 3.22GB で実行段が未実測（docs/limitations.md）。焼かれたグラフが別の
-#: 解像度なら {@link birefnet_pipeline_config} が落とす。
+#: 引くのにこの数が要る。**2048²（本家 handler の General-HR）は配らない** — 最大の中間
+#: テンソルが `[1, 240, 2048, 2048]`（decoder の cat 出力）= 4.03GB になり、実行段が未実測。
+#: 制約の正本は docs/limitations.md の「BiRefNet 系の配布形は 1024² だけ」節。焼かれた
+#: グラフが別の解像度なら {@link birefnet_pipeline_config} が落とす。
 BIREFNET_RESOLUTION = 1024
 
 #: 出力の相対 path（**モデルサブツリー内**）— 配置表と manifest が共有する 1 箇所。

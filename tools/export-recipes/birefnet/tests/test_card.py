@@ -17,8 +17,11 @@ from typing import Any
 import pytest
 
 from birefnet.card import (
+    BIREFNET_MAX_BINDING_TEXT,
     BIREFNET_MODELS,
+    BIREFNET_RESOURCE_MEASUREMENT,
     BIREFNET_SUPPORTED_PIPELINE,
+    BIREFNET_TOTAL_GPU_TEXT,
     BIREFNET_UPSTREAM,
     render_birefnet_model_card,
 )
@@ -111,3 +114,21 @@ class TestBirefnetEntryPoint:
         card = render_birefnet_model_card(_birefnet_manifest(), REPO)
         assert "fromAssets" not in card
         assert "BirefnetPipeline.fromPretrained" in card
+
+
+class TestBirefnetResourceNote:
+    """実行資源の注記（利用者が「渡す前に知りたい事実」— manifest に無いので定数）。"""
+
+    def test_the_card_names_the_gpu_memory_it_needs(self) -> None:
+        """MUST: 1 binding の大きさと総確保の両方を名乗る。
+
+        WebGPU の `maxStorageBufferBindingSize` の仕様既定は 128MiB なので、1GiB 級の
+        binding は「端末によっては要求自体が通らない」制約。カードが黙っていると、読み手は
+        `requiredLimits` が空なこと（= 常駐分は既定内）を「既定スペックで動く」と読む。
+        """
+        card = render_birefnet_model_card(_birefnet_manifest(), REPO)
+
+        assert BIREFNET_MAX_BINDING_TEXT in card
+        assert BIREFNET_TOTAL_GPU_TEXT in card
+        assert BIREFNET_RESOURCE_MEASUREMENT in card
+        assert "maxStorageBufferBindingSize" in card

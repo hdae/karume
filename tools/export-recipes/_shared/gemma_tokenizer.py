@@ -391,17 +391,17 @@ SHARED_ENCODE_CASES: tuple[EncodeCase, ...] = (
     EncodeCase(
         "emoji",
         "非 BMP + 地域表示子 + 異体字セレクタ（byte_fallback を踏む）",
-        "a cat \U0001f408 and a flag \U0001f1ef\U0001f1f5 and ❤️ love",
+        "a cat \U0001f408 and a flag \U0001f1ef\U0001f1f5 and \u2764\ufe0f love",
     ),
     EncodeCase(
         "zwj",
         "ZWJ 連結（1 書記素が複数コードポイント — 記号は**コードポイント**単位で始まる）",
-        "family \U0001f468‍\U0001f469‍\U0001f466 photo",
+        "family \U0001f468\u200d\U0001f469\u200d\U0001f466 photo",
     ),
     EncodeCase(
         "combining",
         "結合文字 — NFC を掛けない（掛けると id 列が変わる）",
-        "Á vs Á and Ấ",
+        "A\u0301 vs \u00c1 and A\u0302\u0301",
     ),
     EncodeCase("thai", "結合文字を持つタイ語（語彙内と byte fallback が混ざる）", "กำลังทดสอบ"),
     EncodeCase(

@@ -11,6 +11,9 @@ core は綴りを持たないので、{@link dist.default_out_dir} の規則は�
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 import pytest
 
 import dist
@@ -96,12 +99,16 @@ class TestRegistry:
         assert base.root_files["NOTICE.md"] != derived.root_files["NOTICE.md"]
 
     def test_every_distribution_pipeline_ships_its_legal_text(self) -> None:
-        """配布リポ直下の `LICENSE.md` / `NOTICE.md`（ADR 0092 決定 7）。
+        """配布リポ直下に `LICENSE.md` と `NOTICE.md` の**両方**を置く席（ADR 0092 決定 7）。
 
-        既公開の irodori（MIT）/ sbv2-jvnv（CC BY-SA）と、波から外れた vowel-detector は
-        まだ同梱していない — 次に上げ直す回で是正する（backlog）ので、ここは**今揃っている
-        席**を名指しで固定する。名指しにするのは、新しい family が黙って同梱なしで生えるのを
-        「表に載せ忘れた」形で見えるようにするため。
+        既公開の irodori（MIT）/ sbv2-jvnv（CC BY-SA）はまだ同梱していない — 次に上げ直す
+        回で是正する（backlog）ので、ここは**今揃っている席**を名指しで固定する。名指しに
+        するのは、新しい family が黙って同梱なしで生えるのを「表に載せ忘れた」形で見える
+        ようにするため。
+
+        vowel-detector はここに入らない: MIT が要求するのは「全文 + 著作権行」だけで、
+        改変告知（`NOTICE.md`）の宛先が無い（上流と著作権者が同じ）。許諾表示そのものは
+        下の `test_the_mit_only_pipeline_still_ships_its_permission_notice` が見る。
         """
         expected = {
             "anima",
@@ -118,6 +125,18 @@ class TestRegistry:
             if set(spec.root_files) == {"LICENSE.md", "NOTICE.md"}
         }
         assert carried == expected
+
+    def test_the_mit_only_pipeline_still_ships_its_permission_notice(self) -> None:
+        """MUST: MIT の席も許諾表示は落とさない（`NOTICE.md` が無いことと別の話）。
+
+        `karume.dist.LEGAL_PATHS` は受理集合であって**在ることを要求しない**ので、
+        `root_files` が空のまま組み上がっても `verify_dist` も manifest 検査も何も言わない。
+        """
+        root_files = dist.PIPELINES["vowel-detector"].root_files
+
+        assert set(root_files) == {"LICENSE.md"}
+        assert "MIT License" in root_files["LICENSE.md"]
+        assert "Copyright (c) " in root_files["LICENSE.md"]
 
     def test_every_pipeline_renders_its_own_model_card(self) -> None:
         """カードは pipeline ごとのテンプレート — 描き手が他 pipeline の manifest を拒む。"""
@@ -143,3 +162,31 @@ class TestDefaultPlaces:
         """ファミリーリポの名前（例 `karume-sbv2-jvnv`）はモデル名の並びからは決まらない。"""
         with pytest.raises(DistError, match="--out"):
             dist.default_out_dir(SBV2_PIPELINE, ["jvnv-F1", "jvnv-F2"])
+
+
+#: README の受理集合を綴る 1 文（`--pipeline` の引数として叩ける名前がバッククォートで並ぶ）。
+#: 同じ節の「10 pipeline seats across 8 families」は**家族数**を語る別の文なので拾わない。
+README_ACCEPTED_SET = re.compile(r"The accepted set is (?P<names>[^.]+)\.")
+
+
+class TestReadme:
+    """README（英語 MUST）の受理集合が実装から乖離しないこと。
+
+    README どおりに `--pipeline <名前>` を叩いて argparse が落ちる状態は、利用者が最初に
+    踏む地面が抜けている形。ADR 0092 決定 5 でこの README はライセンス carve-out の宣言
+    文書でもあるので、他の記述の信頼性がそのまま carve-out の信頼性に見える。
+    """
+
+    @staticmethod
+    def _accepted_names() -> list[str]:
+        readme = (Path(dist.__file__).resolve().parent / "README.md").read_text(encoding="utf-8")
+        match = README_ACCEPTED_SET.search(readme)
+        assert match is not None, "README の受理集合の 1 文が見つからない（綴りが動いた）"
+        return re.findall(r"`([^`]+)`", match.group("names"))
+
+    def test_the_readme_lists_every_accepted_pipeline(self) -> None:
+        assert sorted(self._accepted_names()) == sorted(dist.PIPELINES)
+
+    def test_the_readme_lists_them_in_the_help_order(self) -> None:
+        """並びは `--help` の並び（既定が先頭）— 読み手が CLI と突き合わせられる形にする。"""
+        assert self._accepted_names() == list(dist.PIPELINES)

@@ -21,6 +21,7 @@ export 台本側の責務で、ここは「どの書き換えがどの強さで�
 from __future__ import annotations
 
 import copy
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -465,3 +466,206 @@ def test_lift_relative_position_index_keeps_values() -> None:
     assert "relative_position_index" not in dict(attention.named_buffers())
     assert torch.equal(attention.relative_position_index, before)
     assert patch_birefnet._lift_relative_position_index(attention) == 0
+
+
+# ---- 構成の検査（外れても shape エラーにならない欄） ------------------------
+
+
+def _supported_config(**overrides: object) -> SimpleNamespace:
+    """`assert_supported` が通す構成（上流クラスは `trust_remote_code` 由来で import 不可）。"""
+    config = SimpleNamespace(
+        bb="swin_v1_l",
+        dec_att="ASPPDeformable",
+        dec_blk="BasicDecBlk",
+        mul_scl_ipt="cat",
+        squeeze_block="BasicDecBlk_x1",
+        refine="",
+        dec_ipt=True,
+        dec_ipt_split=True,
+        batch_size=2,
+    )
+    for key, value in overrides.items():
+        setattr(config, key, value)
+    return config
+
+
+def _supported_model(ape: bool = False, **overrides: object) -> SimpleNamespace:
+    """`assert_supported` が触るのは `config.<key>` と `model.bb.ape` だけ。"""
+    return SimpleNamespace(config=_supported_config(**overrides), bb=SimpleNamespace(ape=ape))
+
+
+class TestAssertSupported:
+    """差し替え版が前提にする構成の検査（外れても別の**数値経路**へ落ちるものだけ）。"""
+
+    def test_the_reference_configuration_passes(self) -> None:
+        """正常系（これが無いと以下の否定形が恒真になる）。"""
+        patch_birefnet.assert_supported(_supported_model())
+
+    @pytest.mark.parametrize(
+        ("key", "value"),
+        [
+            ("bb", "swin_v1_b"),
+            ("dec_att", "ASPP"),
+            ("dec_blk", "ResBlk"),
+            ("mul_scl_ipt", "add"),
+            ("squeeze_block", "BasicDecBlk_x3"),
+            ("refine", "RefUNet"),
+        ],
+    )
+    def test_a_different_component_is_rejected(self, key: str, value: str) -> None:
+        """6 欄はどれも「外れると別の重み・別のグラフ」— 文言に欄名と期待値が出る。"""
+        with pytest.raises(ValueError, match=f"config.{key}"):
+            patch_birefnet.assert_supported(_supported_model(**{key: value}))
+
+    def test_the_expected_backbone_is_named_in_the_message(self) -> None:
+        with pytest.raises(ValueError, match="swin_v1_l"):
+            patch_birefnet.assert_supported(_supported_model(bb="swin_v1_b"))
+
+    @pytest.mark.parametrize("key", ["dec_ipt", "dec_ipt_split"])
+    def test_the_patch_split_input_path_is_required(self, key: str) -> None:
+        """`dec_ipt` 系が False だと image2patches の書き換えが噛み合わない。"""
+        with pytest.raises(ValueError, match="image2patches"):
+            patch_birefnet.assert_supported(_supported_model(**{key: False}))
+
+    def test_a_batch_size_of_one_is_rejected(self) -> None:
+        """`batch_size <= 1` では上流の `BatchNorm2d` が Identity になり重みの前提と違う。"""
+        with pytest.raises(ValueError, match="BatchNorm2d"):
+            patch_birefnet.assert_supported(_supported_model(batch_size=1))
+
+    def test_absolute_position_embeddings_are_rejected(self) -> None:
+        """`ape=True` は bicubic の位置埋め込み補間（語彙に無い）を出す経路。"""
+        with pytest.raises(ValueError, match="ape"):
+            patch_birefnet.assert_supported(_supported_model(ape=True))
+
+
+# ---- BasicLayer.forward（焼いたマスクを引く） ------------------------------
+
+
+class _NoopDownsample(nn.Module):
+    """`BasicLayer.downsample` の席（戻り値の形は問わない — 見るのは末尾の 2 数）。"""
+
+    def forward(self, x: torch.Tensor, height: int, width: int) -> torch.Tensor:
+        return x
+
+
+class _MinimalBasicLayer(nn.Module):
+    """`BasicLayer` の最小の骨格（`_basic_layer_forward` が触る属性だけ）。"""
+
+    def __init__(self, use_checkpoint: bool = False, downsample: nn.Module | None = None) -> None:
+        super().__init__()
+        self.window_size = 4
+        self.shift_size = 2
+        self.use_checkpoint = use_checkpoint
+        self.blocks = nn.ModuleList([RefSwinBlock(12, 3, 4, 0), RefSwinBlock(12, 3, 4, 2)])
+        self.downsample = downsample
+
+
+class TestBasicLayerForward:
+    """マスクは**焼いたバッファ**からしか引かない / 分岐が正しく並ぶ。"""
+
+    HEIGHT = 10
+    WIDTH = 6
+    PADDED_HEIGHT = 12
+    PADDED_WIDTH = 8
+
+    @staticmethod
+    def _input(height: int = HEIGHT, width: int = WIDTH) -> torch.Tensor:
+        torch.manual_seed(5)
+        return torch.randn(1, height * width, 12)
+
+    def test_an_unbaked_mask_fails_loudly(self) -> None:
+        """MUST: export 中に `register_buffer` が走る（定数が黙って生える）形を作らない。"""
+        layer = _MinimalBasicLayer()
+
+        with pytest.raises(RuntimeError, match=r"12×8 の窓マスクが焼かれていない"):
+            patch_birefnet._basic_layer_forward(layer, self._input(), self.HEIGHT, self.WIDTH)
+
+        with pytest.raises(RuntimeError, match="prepare"):
+            patch_birefnet._basic_layer_forward(layer, self._input(), self.HEIGHT, self.WIDTH)
+
+    def test_the_build_window_bakes_the_reference_mask(self, monkeypatch) -> None:
+        """ビルド窓を開けた 1 回だけバッファが生え、値は `_build_attn_mask` と一致する。"""
+        monkeypatch.setattr(patch_birefnet, "_MASK_BUILD_ENABLED", True)
+        layer = _MinimalBasicLayer()
+
+        with torch.no_grad():
+            patch_birefnet._basic_layer_forward(layer, self._input(), self.HEIGHT, self.WIDTH)
+
+        name = f"karume_attn_mask_{self.PADDED_HEIGHT}x{self.PADDED_WIDTH}"
+        baked = getattr(layer, name)
+        assert torch.equal(
+            baked,
+            patch_birefnet._build_attn_mask(
+                self.PADDED_HEIGHT,
+                self.PADDED_WIDTH,
+                layer.window_size,
+                layer.shift_size,
+                baked.dtype,
+                baked.device,
+            ),
+        )
+
+    def test_checkpointing_is_rejected(self, monkeypatch) -> None:
+        """`use_checkpoint=True` は差し替え版が持たない経路（黙って通さない）。"""
+        monkeypatch.setattr(patch_birefnet, "_MASK_BUILD_ENABLED", True)
+        layer = _MinimalBasicLayer(use_checkpoint=True)
+
+        with pytest.raises(NotImplementedError, match="use_checkpoint"):
+            patch_birefnet._basic_layer_forward(layer, self._input(), self.HEIGHT, self.WIDTH)
+
+    def test_without_a_downsample_the_six_slots_repeat_the_input_resolution(
+        self, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(patch_birefnet, "_MASK_BUILD_ENABLED", True)
+        layer = _MinimalBasicLayer()
+
+        with torch.no_grad():
+            got = patch_birefnet._basic_layer_forward(layer, self._input(), self.HEIGHT, self.WIDTH)
+
+        assert got[1:3] == (self.HEIGHT, self.WIDTH)
+        assert got[4:] == (self.HEIGHT, self.WIDTH)
+        assert got[0] is got[3]
+
+    def test_a_downsample_halves_the_trailing_resolution(self, monkeypatch) -> None:
+        """`(H+1)//2` / `(W+1)//2` — 奇数側の切り上げが落ちると次の段の形がずれる。"""
+        monkeypatch.setattr(patch_birefnet, "_MASK_BUILD_ENABLED", True)
+        layer = _MinimalBasicLayer(downsample=_NoopDownsample())
+
+        with torch.no_grad():
+            got = patch_birefnet._basic_layer_forward(layer, self._input(9, 7), 9, 7)
+
+        assert got[1:3] == (9, 7)
+        assert got[4:] == (5, 4)
+
+
+# ---- prepare / apply の門 ---------------------------------------------------
+
+
+class _ExplodingModel(nn.Module):
+    """`prepare` の中で落ちるモデル（`finally` の復元を観測するための席）。"""
+
+    def forward(self, sample: torch.Tensor) -> torch.Tensor:
+        raise RuntimeError("上流の forward が落ちた")
+
+
+class TestPrepareGate:
+    """`apply` より先に `prepare` を呼べない / ビルド窓は例外経路でも閉じる。"""
+
+    def test_prepare_before_apply_fails_loudly(self, monkeypatch) -> None:
+        """素の forward はマスクバッファを引かないので、焼く前に落とす。"""
+        monkeypatch.setattr(patch_birefnet, "_APPLIED", False)
+
+        with pytest.raises(RuntimeError, match=r"apply\(model\)"):
+            patch_birefnet.prepare(_ExplodingModel(), torch.zeros(1))
+
+    def test_the_build_window_closes_even_when_prepare_raises(self, monkeypatch) -> None:
+        """MUST: 窓が開いたままだと、以後どこでもマスクが黙って焼ける。"""
+        monkeypatch.setattr(patch_birefnet, "_APPLIED", True)
+        monkeypatch.setattr(patch_birefnet, "_MASK_BUILD_ENABLED", False)
+
+        with pytest.raises(RuntimeError, match="上流の forward が落ちた"):
+            patch_birefnet.prepare(_ExplodingModel(), torch.zeros(1))
+
+        layer = _MinimalBasicLayer()
+        with pytest.raises(RuntimeError, match="焼かれていない"):
+            patch_birefnet._basic_layer_forward(layer, TestBasicLayerForward._input(), 10, 6)

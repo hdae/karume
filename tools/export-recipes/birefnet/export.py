@@ -185,8 +185,9 @@ DISC_RADIUS = 0.3
 DISC_FOREGROUND: tuple[float, float, float] = (0.92, 0.78, 0.35)
 DISC_BACKGROUND: tuple[float, float, float] = (0.12, 0.16, 0.24)
 
-#: `checker` ケースの市松の 1 マス（画素）。Swin の窓（12）とも patch（4）とも割り切れない
-#: 幅にして、格子と窓が同位相になる偶然を避ける。
+#: `checker` ケースの市松の 1 マス（画素）。Swin の窓（12）と割り切れない幅にして、格子と
+#: 窓が同位相になる偶然を避ける（`40 % 12 == 4`）。patch（4）とは割り切れる = パッチ格子とは
+#: 同位相なので、そちらの偶然は避けていない — 判別は `disc` ケースが担う。
 CHECKER_CELL = 40
 
 #: {@link _sanity} が判別に使うケース名（顕著物体を置いた 1 枚）。

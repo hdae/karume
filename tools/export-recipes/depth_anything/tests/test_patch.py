@@ -17,6 +17,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 from torch import nn
@@ -24,8 +26,12 @@ from torch import nn
 from depth_anything import patch as patch_depth_anything
 from depth_anything.patch import SubPixelUpsample
 
-#: 乱数 f32 での `ConvTranspose2d` 分解の許容差（実重み 518² の実測 max 6.1e-06 —
-#: Cin 方向の縮約順序の差。深度の値域は [0, 5] 前後）。
+#: 乱数 f32 での `ConvTranspose2d` 分解の許容差（Cin 方向の縮約順序の差の丸め幅）。
+#:
+#: MUST: 実重み 518² 端から端の実測幅をここで名乗らない — その綴りは
+#: {@link depth_anything.measurements.CONVT_MAXDIFF} の 1 つだけ（同ファイルの MUST。カードと
+#: `NOTICE.md` が名乗る数と分かれると、片方だけ動いても散文としては妥当なままになる）。ここは
+#: **合成モジュール**での上限で、実重みの実測幅を上回るよう余裕を取ってある。
 SUB_PIXEL_ATOL = 1e-5
 
 
@@ -105,22 +111,47 @@ class TestSubPixelUpsample:
         assert torch.equal(got, nn.functional.pixel_shuffle(x, scale))
 
     @pytest.mark.parametrize(
-        ("kwargs", "why"),
+        ("kwargs", "why", "match"),
         [
-            ({"kernel_size": 3, "stride": 2}, "kernel != stride は窓が重なる"),
-            ({"kernel_size": 2, "stride": 2, "padding": 1}, "padding は端を落とす"),
-            ({"kernel_size": 2, "stride": 2, "output_padding": 1}, "output_padding は端を伸ばす"),
-            ({"kernel_size": 2, "stride": 2, "dilation": 2}, "dilation は窓を飛ばす"),
-            ({"kernel_size": 2, "stride": 2, "groups": 2}, "groups は Cin を分ける"),
-            ({"kernel_size": 2, "stride": 2, "bias": False}, "bias 無しは実測に無い形"),
+            (
+                {"kernel_size": 3, "stride": 2},
+                "kernel != stride は窓が重なる",
+                r"kernel_size=\(3, 3\) と stride=\(2, 2\)",
+            ),
+            (
+                {"kernel_size": 2, "stride": 2, "padding": 1},
+                "padding は端を落とす",
+                r"padding=\(1, 1\)",
+            ),
+            (
+                {"kernel_size": 2, "stride": 2, "output_padding": 1},
+                "output_padding は端を伸ばす",
+                r"output_padding=\(1, 1\)",
+            ),
+            (
+                {"kernel_size": 2, "stride": 2, "dilation": 2},
+                "dilation は窓を飛ばす",
+                r"dilation=\(2, 2\)",
+            ),
+            ({"kernel_size": 2, "stride": 2, "groups": 2}, "groups は Cin を分ける", r"groups=2"),
+            (
+                {"kernel_size": 2, "stride": 2, "bias": False},
+                "bias 無しは実測に無い形",
+                r"bias 無し",
+            ),
         ],
     )
     def test_forms_outside_the_decomposition_are_rejected(
-        self, kwargs: dict[str, object], why: str
+        self, kwargs: dict[str, object], why: str, match: str
     ) -> None:
-        """分解が成り立たない形は fail loudly（黙って別の数値へ落とさない）。"""
+        """分解が成り立たない形は fail loudly（黙って別の数値へ落とさない）。
+
+        文言まで見るのは、拒否理由が**上流の実値**を名乗ることが読み手の次の一手を決めるから。
+        型だけを見ていると、検査の側で値を変換してから報告する退行（`dilation=(2, 2)` を
+        `dilation=(1, 1)` と報告する形）が素通りする。
+        """
         source = nn.ConvTranspose2d(4, 4, **kwargs)
-        with pytest.raises(NotImplementedError):
+        with pytest.raises(NotImplementedError, match=match):
             SubPixelUpsample(source)
 
 
@@ -286,3 +317,30 @@ class TestAssertSupported:
 
         with pytest.raises(ValueError, match=match):
             patch_depth_anything.assert_supported(model)
+
+
+class TestPretrainedResolution:
+    """位置埋め込みの補間が起きない唯一の入力解像度（正方 1 点）の読み取り。"""
+
+    @staticmethod
+    def _model(image_size: object) -> nn.Module:
+        """`config.backbone_config.image_size` だけを持つ最小の骨格（合成で足りる）。"""
+        model = nn.Module()
+        model.config = SimpleNamespace(backbone_config=SimpleNamespace(image_size=image_size))
+        return model
+
+    def test_a_square_image_size_is_returned_as_an_int(self) -> None:
+        resolution = patch_depth_anything.pretrained_resolution(self._model(518))
+
+        assert resolution == 518
+        assert isinstance(resolution, int)
+
+    @pytest.mark.parametrize("image_size", [[518, 392], (518, 392), [518, 518]])
+    def test_a_pair_shaped_image_size_is_rejected(self, image_size: object) -> None:
+        """MUST: 非正方は差し替え版が持たない経路 — 対の綴りは値が揃っていても落とす。
+
+        list / tuple で来た時点で「補間が起きない 1 点」の前提が別の経路（上流の
+        `interpolate_pos_encoding`）へ移るので、値が正方でも受けない。
+        """
+        with pytest.raises(ValueError, match="正方のみ"):
+            patch_depth_anything.pretrained_resolution(self._model(image_size))

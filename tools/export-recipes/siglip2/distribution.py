@@ -51,7 +51,12 @@ from karume.dist import (
     preprocessor_int,
 )
 
-from .card import SIGLIP2_MAP_HEAD_DIFF, SIGLIP2_UPSTREAM, render_siglip2_model_card
+from .card import (
+    SIGLIP2_MAP_HEAD_DIFF,
+    SIGLIP2_MAP_HEAD_NORM,
+    SIGLIP2_UPSTREAM,
+    render_siglip2_model_card,
+)
 
 #: パイプライン契約（ADR 0041 §2 — モデル単位）。TS 側の受理集合は
 #: `SIGLIP2_PIPELINE_NAME` / `SIGLIP2_PIPELINE_MAJOR`。
@@ -341,8 +346,9 @@ def siglip2_dist_plan(series_dir: Path, model: str) -> ModelPlan:
 #:
 #: MUST: 文面は配布形の中身と対応していること — 値としては妥当な散文なので `verify_dist` も
 #: manifest 検査も素通りし、配ってからでないと食い違いに気づけない。MAP head の実測幅は
-#: 焼き込まず、モデルカードと**同じ綴り**（{@link siglip2.card.SIGLIP2_MAP_HEAD_DIFF} —
-#: 数も書式も `siglip2.measurements` が正本）から組む。
+#: 焼き込まず、モデルカードと**同じ綴り**（{@link siglip2.card.SIGLIP2_MAP_HEAD_DIFF} と
+#: {@link siglip2.card.SIGLIP2_MAP_HEAD_NORM} — 数も書式も `siglip2.measurements` が正本）
+#: から組む。差の大小はスケール（L2 ノルム）との比でしか読めないので、両方が同じ経路で入る。
 SIGLIP2_NOTICE_MARKDOWN = f"""# NOTICE
 
 This repository redistributes a modified form of the SigLIP2 checkpoints listed in `README.md`,
@@ -358,7 +364,7 @@ were made:
   direct addition.
 - The pooling (MAP) head's packed attention was rewritten with explicit q/k/v projections. That
   is equivalent up to floating-point rounding, **not bit-exact**: measured on the pooled vector,
-  whose L2 norm is around 13, the difference is {SIGLIP2_MAP_HEAD_DIFF}.
+  whose L2 norm is {SIGLIP2_MAP_HEAD_NORM}, the difference is {SIGLIP2_MAP_HEAD_DIFF}.
 - **No quantization**: the stored weights are the source checkpoints' own f32 values.
 
 No retraining and no fine-tuning were performed. The original checkpoints are not distributed here.

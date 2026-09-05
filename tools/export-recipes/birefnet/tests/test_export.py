@@ -490,3 +490,69 @@ class TestVerifyCli:
         bn.main(argv)
 
         assert seen == [expected]
+
+
+class _RecordingMatte(nn.Module):
+    """呼び出しの段（参照 / 段 1 / 段 2）を記録するだけの骨格。
+
+    出力は入力から決まる（段によらず同一）ので、`verify_patches` の 1 段目のビット一致
+    assert は通る — ここで見たいのは**順序**だけ。
+    """
+
+    def __init__(self, calls: list[str]) -> None:
+        super().__init__()
+        self.calls = calls
+        self.stage = "reference"
+
+    def forward(self, pixel_values: torch.Tensor) -> list[torch.Tensor]:
+        if not self.calls or self.calls[-1] != self.stage:
+            self.calls.append(self.stage)
+        return [pixel_values.mean(dim=1, keepdim=True)]
+
+
+class TestVerifyOrder:
+    """`verify_patches` の順序不変条件（参照 → 段 1 → 段 2）。"""
+
+    RESOLUTION = 64
+
+    def test_a_patched_process_cannot_take_the_reference(self, monkeypatch):
+        """MUST: パッチ適用済みのプロセスでは参照を採らない（差 0 の恒真化）。"""
+        monkeypatch.setattr(bn.patch, "patches_applied", lambda: True)
+
+        with pytest.raises(SystemExit, match="恒真化"):
+            bn.verify_patches(Path("/nonexistent"), self.RESOLUTION)
+
+    def test_the_reference_is_taken_once_before_any_patch(self, monkeypatch):
+        """段ごとに参照を採り直す退行（2 段目の参照がパッチ後の値になる）を落とす。"""
+        calls: list[str] = []
+        recorder = _RecordingMatte(calls)
+        monkeypatch.setattr(bn.patch, "patches_applied", lambda: False)
+        monkeypatch.setattr(bn, "load_model", lambda _dir: recorder)
+
+        def _apply_layout(model: nn.Module) -> dict[str, int]:
+            calls.append("apply_layout")
+            model.stage = "layout"
+            return {}
+
+        def _apply_modules(model: nn.Module) -> dict[str, int]:
+            calls.append("apply_modules")
+            model.stage = "modules"
+            return {}
+
+        monkeypatch.setattr(bn.patch, "apply_layout_patches", _apply_layout)
+        monkeypatch.setattr(bn.patch, "apply_module_patches", _apply_modules)
+        monkeypatch.setattr(
+            bn.patch, "prepare", lambda _wrapper, _sample: calls.append("prepare") or None
+        )
+
+        entries = bn.verify_patches(Path("/nonexistent"), self.RESOLUTION)
+
+        assert calls == [
+            "reference",
+            "apply_layout",
+            "prepare",
+            "layout",
+            "apply_modules",
+            "modules",
+        ]
+        assert [entry["stage"] for entry in entries] == ["layout", "modules"]

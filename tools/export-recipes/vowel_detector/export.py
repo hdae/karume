@@ -138,14 +138,18 @@ MIN_LENGTH = 4
 #: 0 / 1 特殊化を避ける線でもある（convert の 2 点評価は下限 2 以上を要求する）。
 SYM_MIN = MIN_LENGTH // LENGTH_MULTIPLE
 
-#: 記号 `T` の上限 = **配布形が宣言する運用上限**（`karume/dist.py` の
+#: 記号 `T` の上限 = **配布形が宣言する運用上限**（`vowel_detector/distribution.py` の
 #: `VOWEL_DETECTOR_MAX_FRAMES` が 10ms フレームへ直したものを配り、パイプラインが
 #: 超過を fail loudly にする）。
 #:
-#: 30,000 × 20ms = **10 分**の音声。導出は最大中間テンソルの大きさ: conv 出力
-#: `[1, 160, 2T]` f32 = 640 B / 10ms フレームなので、10 分で 38.4MiB。WebGPU の仕様既定
-#: `maxStorageBufferBindingSize` 128MiB に対して 3.4 倍の余裕がある（karume はアダプタの
-#: 実測値を要求するので実機ではさらに広い — `gpu/device.ts`）。
+#: 30,000 × 20ms = **10 分**の音声。導出は最大中間テンソルの大きさ: GRU の入力側 GEMM の
+#: 出力 `gates = [T, 1, 3H] = [T, 1, 384]` f32（{@link vowel_detector.patch.gru_forward} —
+#: 層 × 方向で 4 本作られる）で 1,536 B / 20ms フレームなので、10 分で **46.1 MB**。WebGPU の
+#: 仕様既定 `maxStorageBufferBindingSize` 128 MiB = 134.2 MB に対して 2.9 倍の余裕がある
+#: （karume はアダプタの実測値を要求するので実機ではさらに広い — `gpu/device.ts`）。
+#:
+#: NOTE: conv 段の実形は入力 `[1, 83, 2T]`（19.2 MB）と conv 出力 `[1, 160, T]`（19.2 MB）で、
+#: どちらも gates より小さい（conv は時間方向を 1/2 に畳むので、出力の長さは `2T` ではない）。
 #:
 #: MUST: 上げるときは中間テンソルの上限を測り直す。宣言だけ伸ばすと、超過は配布形の門ではなく
 #: **利用者の手元の確保失敗**として出る。
@@ -313,8 +317,14 @@ def build_cases(length: int) -> tuple[tuple[str, torch.Tensor], ...]:
     実音声を使わないのは、特徴抽出（log-mel + DSP）がグラフの外だから — この台本の主張は
     「同じ特徴を入れたら同じロジットが出る」で、音声の decode は含まない。
 
-    値は実発話（1.1 秒）の実測レンジに収める: log-mel の z 値 −1.04〜3.72 / 有声性
-    0.08〜0.90 / log エネルギー比 −0.73〜0 / 零交差率 0.04〜0.85。
+    DSP 3 次元は 4 ケースとも実発話（1.1 秒）の実測レンジに収める: 有声性 0.08〜0.90 /
+    log エネルギー比 −0.73〜0 / 零交差率 0.04〜0.85。log-mel の z 値についても
+    {@link SILENCE_CASE} / {@link VOICED_CASE} / `noise` の 3 本は実測レンジ（−1.04〜3.72）の
+    内側で、これが「学習時と同じ分布での突合」を担う。
+
+    `ramp` だけは例外で、値域 **−2.0〜4.0** と実測レンジの**両端の外側まで踏む**回帰用。
+    分布の外を通す 1 本を残すのは、勾配と飽和側の丸めが動く退行を捕まえるため（判別の主張は
+    `ramp` に載せない）。
 
     {@link SILENCE_CASE} と {@link VOICED_CASE} は {@link _sanity} の順序が恒真にならない
     ための対で、`noise` / `ramp` は数値回帰の検出用（値域の端と勾配を踏む）。

@@ -34,7 +34,7 @@ from karume.dist import (
     verify_dist,
 )
 from karume.ir import IR_METADATA_KEY
-from siglip2.card import SIGLIP2_MAP_HEAD_DIFF, SIGLIP2_UPSTREAM
+from siglip2.card import SIGLIP2_MAP_HEAD_DIFF, SIGLIP2_MAP_HEAD_NORM, SIGLIP2_UPSTREAM
 from siglip2.distribution import (
     PIPELINE,
     SIGLIP2_DEFAULT_MODEL,
@@ -43,6 +43,7 @@ from siglip2.distribution import (
     SIGLIP2_WEIGHTS,
     Siglip2Sources,
     siglip2_checkpoint,
+    siglip2_hidden_dim,
     siglip2_plan,
     siglip2_repo_name,
     siglip2_sources,
@@ -608,6 +609,8 @@ class TestSiglip2LegalText:
         # 「text tower は入っていない」と、ビット同一でない書き換えの実測幅が告知に出る。
         assert "vision tower only" in notice
         assert SIGLIP2_MAP_HEAD_DIFF in notice
+        # 差に意味を与えるスケール（L2 ノルム）も、カードと同じ 1 語を名乗る。
+        assert f"L2 norm is {SIGLIP2_MAP_HEAD_NORM}" in notice
         assert "No quantization" in notice
 
 
@@ -651,3 +654,38 @@ class TestSiglip2Cli:
         out_dir = tmp_path / "models" / siglip2_repo_name(SIGLIP2_DEFAULT_MODEL)
         expected = _in_subtree(SIGLIP2_DEFAULT_MODEL, _placed_paths())
         assert sorted(verify_dist(out_dir)) == sorted(expected)
+
+
+class TestSiglip2HiddenDim:
+    """出力宣言の**構造**が壊れているときに `DistError` で止まること。
+
+    幅は `pipelineConfig` の `hiddenSize` と weights の形の両方へ効くので、ここが緩いと
+    「幅だけが静かに別の意味の数」になった配布形が組み上がる。
+    """
+
+    @staticmethod
+    def _graph(shape: object, outputs: int = 1) -> dict:
+        names = [f"out_{index}" for index in range(outputs)]
+        return {
+            "outputs": names,
+            "values": {name: {"dtype": "f32", "shape": shape} for name in names},
+        }
+
+    def test_the_reference_declaration_gives_the_width(self) -> None:
+        assert siglip2_hidden_dim(self._graph([1, 768]), Path("g")) == 768
+
+    @pytest.mark.parametrize("shape", [[768], [2, 768], [1, 768, 1], "1,768"])
+    def test_a_shape_that_is_not_one_by_hidden_is_rejected(self, shape: object) -> None:
+        with pytest.raises(DistError, match=r"\[1, hidden\] でない"):
+            siglip2_hidden_dim(self._graph(shape), Path("g"))
+
+    @pytest.mark.parametrize("hidden", [True, 0, -768, 768.0, "768"])
+    def test_a_width_that_is_not_a_positive_integer_is_rejected(self, hidden: object) -> None:
+        """`True` は Python では `int` の部分型 — 型検査が緩いと bool が幅として通る。"""
+        with pytest.raises(DistError, match="正の整数でない"):
+            siglip2_hidden_dim(self._graph([1, hidden]), Path("g"))
+
+    def test_more_than_one_output_is_rejected(self) -> None:
+        """`last_hidden_state` 込みの別 export が混ざると、幅が別の意味の数になる。"""
+        with pytest.raises(DistError, match="pooler_output 1 本だけ"):
+            siglip2_hidden_dim(self._graph([1, 768], outputs=2), Path("g"))

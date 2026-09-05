@@ -23,6 +23,11 @@ from __future__ import annotations
 MAP_HEAD_MAXDIFF: tuple[float, float] = (7.75e-07, 2.38e-06)
 
 
+#: 差を割るスケール = pooled ベクトルの L2 ノルムの実測幅（下限・上限）。同じ `--verify` の
+#: 実走から採る対で、**この数が無いと maxdiff の大小が読めない**（相対 ~1e-7 の根拠）。
+MAP_HEAD_VECTOR_NORM: tuple[float, float] = (12.7, 13.1)
+
+
 def map_head_diff_text() -> str:
     """{@link MAP_HEAD_MAXDIFF} を散文へ埋める綴り（`"7.75e-07 to 2.38e-06"`）。
 
@@ -31,3 +36,14 @@ def map_head_diff_text() -> str:
     """
     low, high = MAP_HEAD_MAXDIFF
     return f"{low:g} to {high:g}"
+
+
+def map_head_norm_text() -> str:
+    """{@link MAP_HEAD_VECTOR_NORM} を配布テキストへ埋める綴り（`"around 13"`）。
+
+    内部は幅（対）で持ち、配布文では丸めたスカラで語る — 幅のまま出すと「差が無視できる」と
+    いう主張に要らない精度が付く。{@link map_head_diff_text} と同じ 2 段（定数 + 文字列化）に
+    してあるので、カードと `NOTICE.md` は同じ 1 語を引く。
+    """
+    low, high = MAP_HEAD_VECTOR_NORM
+    return f"around {round((low + high) / 2):g}"

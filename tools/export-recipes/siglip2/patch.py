@@ -30,7 +30,8 @@ MUST: パッチはどちらも fallback を持たない（`deberta.patch` と同
 MUST: ③ は式としては同値だが**ビット一致ではない** — `nn.MultiheadAttention` は q にだけ
 1/√d を掛けるのに対し、SDPA は q と k に √(1/√d) を対称に割る。実測の幅は
 {@link siglip2.measurements.MAP_HEAD_MAXDIFF} が唯一の綴りで持つ（**torch を読まない側**に
-置いてある — 配布側がそこから引く。ベクトルの L2 ノルムは 12.7〜13.1 なので相対 ~1e-7）。
+置いてある — 配布側がそこから引く。差を割るスケール〈ベクトルの L2 ノルム〉も同じ側の
+{@link siglip2.measurements.MAP_HEAD_VECTOR_NORM} が持つ。相対では ~1e-7）。
 golden の期待値は**差し替え後**のモジュールから採る（`siglip2/export.py`）ので、e2e の門は
 この差を跨がない。差し替え前後の実測は `siglip2.export.py --verify` が
 2 点評価で毎回採る。

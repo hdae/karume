@@ -42,6 +42,13 @@ TINY_GRU_HIDDEN = 3
 #: tiny な export で使う長さ（`MIN_LENGTH` より上で、GRU の展開が数十ノードに収まる）。
 TINY_LENGTH = 8
 
+#: 実発話（1.1 秒）で実測した log-mel z 値のレンジ（{@link vd.build_cases} の docstring）。
+MEASURED_LOG_MEL_MIN = -1.04
+MEASURED_LOG_MEL_MAX = 3.72
+
+#: 値域の外側まで踏む回帰用ケース（上のレンジの主張から名指しで外れる唯一の 1 本）。
+RAMP_CASE = "ramp"
+
 #: 上流 `training/src/vowel_detector/crnn.py` + 学習済み `.pt` が持つ 22 本の重み
 #: （鍵と形）。**写しの契約表**で、写しが構造ごとずれたらここで落ちる。
 UPSTREAM_PARAMETERS: dict[str, tuple[int, ...]] = {
@@ -297,6 +304,26 @@ class TestGoldenCases:
             assert -1.0 <= log_energy <= 0.0, name
             assert 0.0 <= zcr <= 1.0, name
 
+    def test_the_log_mel_plane_stays_in_the_measured_range_except_for_the_ramp(self) -> None:
+        """log-mel も同じ主張の対象（DSP 3 次元だけ見ていると 80 次元が野放しになる）。
+
+        `ramp` だけは値域の外側まで踏む回帰用ケースなので名指しで除く
+        （{@link vowel_detector.export.build_cases} の docstring と同じ切り分け）。
+        """
+        for name, features in vd.build_cases(TINY_LENGTH):
+            if name == RAMP_CASE:
+                continue
+            log_mel = features[0, :, : vd.N_MELS]
+            assert float(log_mel.min()) >= MEASURED_LOG_MEL_MIN, name
+            assert float(log_mel.max()) <= MEASURED_LOG_MEL_MAX, name
+
+    def test_the_ramp_case_deliberately_leaves_the_measured_range(self) -> None:
+        """除外が「実は全部内側だった」に退化していないこと（上の除外を恒真にしない）。"""
+        ramp = dict(vd.build_cases(TINY_LENGTH))[RAMP_CASE][0, :, : vd.N_MELS]
+
+        assert float(ramp.min()) < MEASURED_LOG_MEL_MIN
+        assert float(ramp.max()) > MEASURED_LOG_MEL_MAX
+
     def test_every_case_is_a_different_input(self) -> None:
         """MUST: 同じ特徴を 2 度使わない — sanity の順序が恒真になる。"""
         cases = vd.build_cases(TINY_LENGTH)
@@ -486,3 +513,66 @@ class TestCheckpointBytesOfASplitComponent:
 
         with pytest.raises(AssertionError, match="バイト列が一致しない"):
             vd.assert_checkpoint_bytes(path, state_dict)
+
+
+class TestStagedPublication:
+    """MUST: 全ての門を通してから据える（落ちた実走は席ごと消える）。
+
+    `staged_publication` 単体の規律は core が実測で持つが、family 側の配線
+    （`staged.mkdir()` の位置・門の評価順）はここでしか踏まない。落ちた実走が final に
+    資産を残すと、io golden が同じ壊れたモジュールから採られるので TS 側の突合は緑になる。
+    """
+
+    @staticmethod
+    def _stage_tiny(monkeypatch, module: vd.Crnn) -> None:
+        """実重み無しで `export_series` を 1 本通せる状態にする。"""
+        monkeypatch.setattr(vd, "load_checkpoint", lambda _ckpt: {})
+        monkeypatch.setattr(vd, "load_module", lambda _state: module)
+        monkeypatch.setattr(vd, "assert_checkpoint_bytes", lambda _path, _state: 0)
+
+    def test_a_passing_run_leaves_the_series_in_place(
+        self, monkeypatch, tmp_path: Path, tiny_module: vd.Crnn
+    ) -> None:
+        """恒真でないことの対（門が通れば据わる）— これが無いと下の主張が恒真になる。"""
+        self._stage_tiny(monkeypatch, tiny_module)
+        monkeypatch.setattr(vd, "_sanity", lambda _logits: {})
+        out_dir = tmp_path / "series"
+
+        summary = vd.export_series(tmp_path / "ckpt.pt", out_dir, TINY_LENGTH)
+
+        assert out_dir.is_dir()
+        assert summary["dir"] == str(out_dir)
+
+    def test_a_failing_sanity_leaves_nothing_behind(
+        self, monkeypatch, tmp_path: Path, tiny_module: vd.Crnn
+    ) -> None:
+        self._stage_tiny(monkeypatch, tiny_module)
+
+        def _reject(_logits):
+            raise AssertionError("順序が壊れている")
+
+        monkeypatch.setattr(vd, "_sanity", _reject)
+        out_dir = tmp_path / "series"
+
+        with pytest.raises(AssertionError, match="順序が壊れている"):
+            vd.export_series(tmp_path / "ckpt.pt", out_dir, TINY_LENGTH)
+
+        assert not out_dir.exists()
+
+    def test_a_failing_checkpoint_byte_gate_leaves_nothing_behind(
+        self, monkeypatch, tmp_path: Path, tiny_module: vd.Crnn
+    ) -> None:
+        """ビット一致門（写しが値を変えていないこと）も据える前に評価する。"""
+        self._stage_tiny(monkeypatch, tiny_module)
+
+        def _reject(_path, _state):
+            raise AssertionError("バイト列が一致しない")
+
+        monkeypatch.setattr(vd, "assert_checkpoint_bytes", _reject)
+        monkeypatch.setattr(vd, "_sanity", lambda _logits: {})
+        out_dir = tmp_path / "series"
+
+        with pytest.raises(AssertionError, match="バイト列が一致しない"):
+            vd.export_series(tmp_path / "ckpt.pt", out_dir, TINY_LENGTH)
+
+        assert not out_dir.exists()

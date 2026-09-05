@@ -45,7 +45,7 @@ def mit_license(copyright_lines: Sequence[str]) -> str:
     §「著作権表示と許諾表示を含めること」を満たさない。散文としては成立してしまうので、
     ここが唯一の検出器になる。
     """
-    if not copyright_lines:
+    if not copyright_lines or any(not line.strip() for line in copyright_lines):
         raise ValueError("MIT の著作権行が空 — 権利者を名乗らないライセンス文は組まない")
     template = MIT_LICENSE_PATH.read_text(encoding="utf-8")
     return template.replace(MIT_COPYRIGHT_PLACEHOLDER, "\n".join(copyright_lines))

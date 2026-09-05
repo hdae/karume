@@ -42,14 +42,23 @@ WRITER_CALLS = frozenset(
         "_write_lora_provenance",
         "_write_calib_provenance",
         "save_file",
+        # gemma4 の product 台本が使う 2 本（PLE の shard 書き出しと出所記録）。名前が
+        # 表に無いと、その台本を表へ載せても「書いている場所」を 1 つも見ないまま緑になる。
+        "write_ple_shards",
+        "write_record",
     }
 )
 
-#: (台本, emit を行う関数)。1-shot 台本 12 本 + 手本の decode 台本 2 本。
+#: (台本, emit を行う関数)。1-shot 台本 + 手本の decode 台本。
+#:
+#: MUST: 実在する台本が 1 本残らずここに載っていること（表 → 実在の
+#: {@link TestTheGateItselfCanFail.test_every_listed_script_exists} と、実在 → 表 の
+#: {@link TestEveryStagingScriptIsListed} の両方向）。片方向だけだと**載せ忘れが永久に沈黙する**。
 EMIT_ENTRIES: tuple[tuple[str, str], ...] = (
     ("irodori/export.py", "export_series"),
     ("gemma4/export.py", "export_series"),
     ("gemma4/export_decode.py", "export_series"),
+    ("gemma4/export_product.py", "export_series"),
     ("minicpm5/export.py", "export_series"),
     ("minicpm5/export_decode.py", "export_series"),
     ("embeddinggemma/export.py", "export_series"),
@@ -153,3 +162,43 @@ class TestTheGateItselfCanFail:
         """対象表の綴りが動いたら（ファイル名変更・移動）ここで落ちる。"""
         for script, _function in EMIT_ENTRIES:
             assert (RECIPES_ROOT / script).is_file(), script
+
+
+#: `_staged_target` の**定義そのもの**（ラッパは中で `staged_publication` を開くので、
+#: 走査すると「席を開くモジュール直下関数」として拾われる）。
+STAGING_WRAPPER_DEFINITIONS = frozenset({"_staged_target"})
+
+
+def _staging_functions() -> set[tuple[str, str]]:
+    """作業席を開くモジュール直下関数を、ソース走査で列挙する（実在 → 表 の側）。
+
+    走査対象を `export*.py` に限るのは、テスト用の疑似 `with` を偽陽性にしないため
+    （`sbv2/tests/test_export.py` は綴りが `test_` 始まりなので拾われない）。
+    """
+    found: set[tuple[str, str]] = set()
+    for path in sorted(RECIPES_ROOT.glob("*/**/export*.py")):
+        if "tests" in path.parts or "__pycache__" in path.parts:
+            continue
+        for node in ast.parse(path.read_text(encoding="utf-8")).body:
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            if node.name in STAGING_WRAPPER_DEFINITIONS or not _staged_bodies(node):
+                continue
+            found.add((str(path.relative_to(RECIPES_ROOT)), node.name))
+    return found
+
+
+class TestEveryStagingScriptIsListed:
+    """実在 → 表 の逆方向（表 → 実在 だけだと、載せ忘れが永久に沈黙する）。"""
+
+    def test_the_scan_finds_the_scripts(self) -> None:
+        """走査が 0 本なら、この門は恒真になる。"""
+        assert len(_staging_functions()) >= 18
+
+    def test_no_staging_script_is_missing_from_the_table(self) -> None:
+        missing = sorted(_staging_functions() - set(EMIT_ENTRIES))
+
+        assert missing == [], (
+            f"作業席を開いているのに公開規律の門が掛かっていない台本がある: {missing} —"
+            " EMIT_ENTRIES へ足す（表に無い台本は「門より前に final へ置く」形に戻せる）"
+        )

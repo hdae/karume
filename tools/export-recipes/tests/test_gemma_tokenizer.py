@@ -17,16 +17,20 @@
 from __future__ import annotations
 
 import json
+import unicodedata
+from pathlib import Path
 from typing import Any
 
 import pytest
 from gemma_synthetic import PIECES
 from gemma_synthetic import tokenizer_json as _tokenizer_json
 
+from _shared import gemma_tokenizer as shared_tokenizer
 from _shared.gemma_tokenizer import (
     ASSET_FORMAT,
     POST_BOS_EOS,
     POST_NONE,
+    SHARED_ENCODE_CASES,
     UnsupportedTokenizerError,
     asset_payload,
     build_fixture,
@@ -234,3 +238,63 @@ class TestFixture:
         assert [row for row in fixture["asset"]["merges"] if row[2] == 0]
         assert fixture["decode"][0]["name"] == "roundtrip-abc"
         assert fixture["decode"][0]["text"] == "abc"
+
+
+#: 異体字セレクタ（`Mn` だが結合クラスは 0 — 幅ゼロで、目でも隣の絵文字と区別できない）。
+#: `SHARED_ENCODE_CASES` を綴っているソース（門はランタイムの文字列ではなく**綴り**を見る —
+#: `\u200d` は実行時には生の U+200D になるので、`case.text` を見ても書き分けは判らない）。
+SHARED_CASES_SOURCE = Path(shared_tokenizer.__file__)
+
+VARIATION_SELECTORS = frozenset(
+    [*range(0xFE00, 0xFE10), *range(0xE0100, 0xE01F0)],
+)
+
+
+def _must_be_escaped(char: str) -> bool:
+    """ソースへ生で書いたら「編集で消えても気づけない」文字か。
+
+    3 分類で切る（`Cf`/`Mn` の一括ではない — タイ語の `U+0E31` のように、`Mn` でも**字形と
+    して見える**印は生で書いてよい）:
+
+    1. `Cf`（書式制御 — ZWJ / ZWNJ など。幅ゼロ）
+    2. 結合クラスが 0 でない結合文字（`A` + `U+0301` は `U+00C1` と**視覚的に完全に同一**で、
+       どちらが書かれているか目視で判定できない = ケースの主張が検証不能になる）
+    3. 異体字セレクタ（1 の親戚で、`Mn` かつ結合クラス 0 なので 1・2 では拾えない）
+    """
+    return (
+        unicodedata.category(char) == "Cf"
+        or unicodedata.combining(char) != 0
+        or ord(char) in VARIATION_SELECTORS
+    )
+
+
+class TestCaseSpelling:
+    """MUST: 目に見えない文字は `\\uXXXX` で書く（`SHARED_ENCODE_CASES` の注記）。
+
+    生で書くと、編集の途中で 1 文字消えても**赤くならない**: 期待値は常に上流 `tokenizers`
+    から採り直すので、fixture はその弱くなったケースで焼き直され、`zwj` という名前のケースが
+    ZWJ を 1 つも踏まないまま緑で回り続ける（ケース名と `why` だけが元の主張を名乗る）。
+    """
+
+    def test_the_source_spells_invisible_characters_as_escapes(self) -> None:
+        source = SHARED_CASES_SOURCE.read_text(encoding="utf-8")
+        raw = sorted({f"U+{ord(char):04X}" for char in source if _must_be_escaped(char)})
+
+        assert raw == [], f"生の不可視文字がソースに居る: {raw}"
+
+    @pytest.mark.parametrize(
+        ("name", "codepoint", "count"),
+        [
+            ("zwj", 0x200D, 2),
+            ("emoji", 0xFE0F, 1),
+            ("combining", 0x0301, 2),
+            ("combining", 0x0302, 1),
+        ],
+    )
+    def test_the_cases_still_carry_the_boundary_they_name(
+        self, name: str, codepoint: int, count: int
+    ) -> None:
+        """エスケープへ書き換えたことで境界が消えていないこと（上の門を恒真にしない対）。"""
+        case = next(entry for entry in SHARED_ENCODE_CASES if entry.name == name)
+
+        assert case.text.count(chr(codepoint)) == count

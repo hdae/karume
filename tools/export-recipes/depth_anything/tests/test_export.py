@@ -19,8 +19,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -396,3 +398,181 @@ class TestRealCases:
         """MUST: `--real-images` は明示の意思表示 — 3 枚で黙って書かない。"""
         with pytest.raises(SystemExit, match="demo:eval-images"):
             da.build_real_cases(da.DEFAULT_MODEL_DIR, 518, tmp_path)
+
+
+class TestRealCasesMetadata:
+    """実画像 golden の `__metadata__`（元画像の同定）と入力形の門。"""
+
+    @staticmethod
+    def _real_array(index: int) -> torch.Tensor:
+        """tiny な実画像 1 枚の画素（`[S, S, 3]` の u8）。ケースとチャネルで値をずらす。"""
+        array = torch.zeros((8, 8, 3), dtype=torch.uint8)
+        for channel in range(3):
+            array[:, :, channel] = 10 * index + 30 * channel + 7
+        return array
+
+    @classmethod
+    def _write_real_images(cls, root: Path) -> dict[str, bytes]:
+        """`REAL_CASES` の綴りで tiny な PNG を書き、ケース名 → 生バイトを返す。"""
+        image_module = pytest.importorskip("PIL.Image")
+        written: dict[str, bytes] = {}
+        for index, (name, file_name, _why) in enumerate(da.REAL_CASES):
+            path = root / file_name
+            image_module.fromarray(cls._real_array(index).numpy()).save(path)
+            written[name] = path.read_bytes()
+        return written
+
+    @staticmethod
+    def _install_processor(monkeypatch, processor) -> None:
+        """`build_real_cases` が引く `AutoImageProcessor` を合成 processor へ差し替える。"""
+        transformers = pytest.importorskip("transformers")
+        monkeypatch.setattr(
+            transformers.AutoImageProcessor, "from_pretrained", staticmethod(lambda _dir: processor)
+        )
+
+    def test_it_records_the_source_image_and_its_digest(self, monkeypatch, tmp_path) -> None:
+        """MUST: 焼き直した画像で golden を採り直し忘れた環境を、突合の前に落とすための欄。
+
+        TS 側 `packages/models/tests/e2e_depth_anything_real_test.ts` がこの 2 欄を
+        突き合わせるので、欄が欠けると突合そのものが黙って恒真になる。
+        """
+        raw = self._write_real_images(tmp_path)
+        self._install_processor(monkeypatch, _processor())
+
+        cases = da.build_real_cases(da.DEFAULT_MODEL_DIR, 518, tmp_path)
+
+        files = {name: file for name, file, _why in da.REAL_CASES}
+        assert [name for name, _pixels, _md in cases] == list(files)
+        for name, pixel_values, metadata in cases:
+            assert tuple(pixel_values.shape) == (1, 3, 518, 518), name
+            assert metadata[da.SOURCE_IMAGE_KEY] == files[name], name
+            assert metadata[da.SOURCE_SHA256_KEY] == hashlib.sha256(raw[name]).hexdigest(), name
+
+    def test_a_processor_that_returns_another_size_fails_loudly(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """前処理の出力形がグラフの入力形と違うなら、1 枚も書かずに落とす。"""
+        self._write_real_images(tmp_path)
+        self._install_processor(monkeypatch, _processor(size={"height": 28, "width": 28}))
+
+        with pytest.raises(AssertionError, match="keep_aspect_ratio"):
+            da.build_real_cases(da.DEFAULT_MODEL_DIR, 518, tmp_path)
+
+
+class TestSeriesNameAgreement:
+    def test_the_distribution_looks_for_the_same_series_name(self) -> None:
+        """MUST: 系列名の綴りが**書く側と読む側で一致**する。
+
+        今は両側とも「小文字化」だけで一致しているが、片方に `_` → `-` の置換が入った日に、
+        組み立てが**別のモデルの系列**を掴む綴りへずれても誰も気づけない
+        （birefnet 側の同名テストの移植）。
+        """
+        from depth_anything.card import DEPTH_ANYTHING_UPSTREAM
+        from depth_anything.distribution import depth_anything_series_name
+
+        for model, repo in DEPTH_ANYTHING_UPSTREAM.items():
+            model_dir = da.MODELS_ROOT / repo.split("/", 1)[1]
+            assert da.default_out_dir(model_dir).name == depth_anything_series_name(model)
+
+
+class _RecordingDepth(nn.Module):
+    """呼び出しの段（参照 / 段 1 / 段 2）を記録するだけの骨格。
+
+    出力は入力から決まる（段によらず同一）ので、`verify_patches` の 1 段目の
+    ビット一致 assert は通る — ここで見たいのは**順序**だけ。
+    """
+
+    def __init__(self, calls: list[str]) -> None:
+        super().__init__()
+        self.calls = calls
+        self.stage = "reference"
+
+    def forward(self, pixel_values: torch.Tensor):
+        if not self.calls or self.calls[-1] != self.stage:
+            self.calls.append(self.stage)
+        return SimpleNamespace(predicted_depth=pixel_values.sum(dim=1))
+
+
+class TestVerifyOrder:
+    """`verify_patches` の順序不変条件（参照 → 段 1 → 段 2）。"""
+
+    def test_a_patched_process_cannot_take_the_reference(self, monkeypatch) -> None:
+        """MUST: パッチ適用済みのプロセスでは参照を採らない（差 0 の恒真化）。"""
+        monkeypatch.setattr(da.patch, "patches_applied", lambda: True)
+
+        with pytest.raises(SystemExit, match="恒真化"):
+            da.verify_patches(Path("/nonexistent"))
+
+    def test_the_reference_is_taken_once_before_any_patch(self, monkeypatch) -> None:
+        """段ごとに参照を採り直す退行（2 段目の参照がパッチ後の値になる）を落とす。"""
+        calls: list[str] = []
+        recorder = _RecordingDepth(calls)
+        monkeypatch.setattr(da.patch, "patches_applied", lambda: False)
+        monkeypatch.setattr(da, "load_model", lambda _dir: recorder)
+        monkeypatch.setattr(da.patch, "pretrained_resolution", lambda _model: SMALL)
+
+        def _apply_layout(model: nn.Module) -> None:
+            calls.append("apply_layout")
+            model.stage = "layout"
+
+        def _apply_modules(model: nn.Module) -> None:
+            calls.append("apply_modules")
+            model.stage = "modules"
+
+        monkeypatch.setattr(da.patch, "apply_layout_patches", _apply_layout)
+        monkeypatch.setattr(da.patch, "apply_module_patches", _apply_modules)
+
+        entries = da.verify_patches(Path("/nonexistent"))
+
+        assert calls == ["reference", "apply_layout", "layout", "apply_modules", "modules"]
+        assert [entry["stage"] for entry in entries] == ["layout", "modules"]
+
+
+class TestStagedPublication:
+    """MUST: 全ての門を通してから据える（落ちた実走は席ごと消える）。"""
+
+    @staticmethod
+    def _stage_tiny(monkeypatch) -> None:
+        """実重み無しで `export_series` を 1 本通せる状態にする。"""
+        torch.manual_seed(0)
+        wrapper = TinyDepth()
+        monkeypatch.setattr(da, "load_wrapper", lambda _dir: (wrapper, TINY_SIZE))
+        monkeypatch.setattr(da, "build_cases", lambda _resolution: TINY_CASES)
+        monkeypatch.setattr(
+            da,
+            "build_real_cases",
+            lambda *_a, **_kw: (
+                (
+                    "photo-portrait",
+                    TINY_CASES[0][1],
+                    {da.SOURCE_IMAGE_KEY: "portrait.png", da.SOURCE_SHA256_KEY: "0" * 64},
+                ),
+            ),
+        )
+        monkeypatch.setattr(da, "_sanity", lambda _depths: {"depth_range": {}})
+
+    def test_a_passing_run_leaves_the_series_in_place(self, monkeypatch, tmp_path) -> None:
+        """恒真でないことの対（門が通れば据わる）— これが無いと下の主張が恒真になる。"""
+        self._stage_tiny(monkeypatch)
+        monkeypatch.setattr(da, "_real_sanity", lambda _depths: {"photo-portrait": {}})
+        out_dir = tmp_path / "series"
+
+        summary = da.export_series(da.DEFAULT_MODEL_DIR, out_dir, real_images=True)
+
+        assert out_dir.is_dir()
+        assert "real_sanity" in summary
+
+    def test_a_failing_real_image_gate_leaves_nothing_behind(self, monkeypatch, tmp_path) -> None:
+        """実画像の遠近門が落ちたら `out_dir` は存在しない（据えてから評価しない）。"""
+        self._stage_tiny(monkeypatch)
+
+        def _reject(_depths):
+            raise AssertionError("遠近の順序が逆")
+
+        monkeypatch.setattr(da, "_real_sanity", _reject)
+        out_dir = tmp_path / "series"
+
+        with pytest.raises(AssertionError, match="遠近"):
+            da.export_series(da.DEFAULT_MODEL_DIR, out_dir, real_images=True)
+
+        assert not out_dir.exists()

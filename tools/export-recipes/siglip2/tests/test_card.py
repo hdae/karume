@@ -18,6 +18,7 @@ import pytest
 
 from siglip2.card import (
     SIGLIP2_MAP_HEAD_DIFF,
+    SIGLIP2_MAP_HEAD_NORM,
     SIGLIP2_SUPPORTED_PIPELINE,
     render_siglip2_model_card,
 )
@@ -95,9 +96,18 @@ class TestSiglip2LegalPointers:
         assert "also listed in `NOTICE.md`, per Apache 2.0 §4(b)" in card
 
     def test_it_reports_the_measured_map_head_difference(self) -> None:
-        """帰属節が名乗る差は実測の綴り 1 つきり（正本は `siglip2.patch`）。"""
+        """帰属節が名乗る差は実測の綴り 1 つきり（正本は `siglip2.measurements`）。"""
         card = render_siglip2_model_card(_siglip2_manifest(), REPO)
         assert SIGLIP2_MAP_HEAD_DIFF in card
+
+    def test_it_reports_the_scale_that_gives_the_difference_its_meaning(self) -> None:
+        """差の大小はスケール（L2 ノルム）との比でしか読めない — その数も綴りは 1 つきり。
+
+        カードと `NOTICE.md` が別々に直書きすると、片方だけ動いた日に「告知だけが古い数を
+        主張する」形が黙って作れる（`siglip2.measurements` の MUST）。
+        """
+        card = render_siglip2_model_card(_siglip2_manifest(), REPO)
+        assert f"L2 norm is {SIGLIP2_MAP_HEAD_NORM}" in card
 
 
 class TestSiglip2EntryPoint:

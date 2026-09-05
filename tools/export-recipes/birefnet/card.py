@@ -38,6 +38,19 @@ BIREFNET_SUPPORTED_PIPELINE = "birefnet/1"
 #: インスタンス分割も持たない。
 BIREFNET_PIPELINE_TAG = "image-segmentation"
 
+#: 実行に要る GPU 資源（配布形 1024² の実測。正本は docs/limitations.md の「BiRefNet 系の
+#: 配布形は 1024² だけ」節 — 重み 919MiB + workspace 6,283MiB）。
+#:
+#: 冒頭の MUST の例外ではない: `requiredLimits` は常駐分（重み・state）しか数えないので、
+#: 中間テンソルが要求する binding の大きさも総確保も **manifest に存在しない事実**にあたる
+#: （ADR 0089 決定 3 の意味論）。読み手が最初に確かめたい制約なので、カードが持つ。
+BIREFNET_MAX_BINDING_TEXT = "about 1 GiB"
+BIREFNET_TOTAL_GPU_TEXT = "about 7.3 GiB"
+
+#: 上の 2 つを採った条件（実測の性格そのものなので、`pipelineConfig` からは導出しない —
+#: 別の解像度で描いたカードが実測していない数を名乗らないための綴り）。
+BIREFNET_RESOURCE_MEASUREMENT = "measured 2026-09-04 at 1024 × 1024"
+
 #: 上流の論文（BiRefNet — 系列の共通の出典）。
 BIREFNET_PAPER = "arxiv.org/abs/2401.03407"
 
@@ -265,6 +278,12 @@ def _birefnet_shape(model: Mapping[str, Any]) -> list[str]:
         f"- **normalization**: `(pixel / 255 - mean) / std`, mean {mean}, std {std}",
         "- **output**: one alpha byte per pixel at the size of the image you passed in (the graph",
         "  itself emits pre-sigmoid logits; the sigmoid and the resize back happen on the host).",
+        f"- **required GPU memory**: {BIREFNET_MAX_BINDING_TEXT} for the largest single storage",
+        f"  buffer, and {BIREFNET_TOTAL_GPU_TEXT} allocated in total"
+        f" ({BIREFNET_RESOURCE_MEASUREMENT}). WebGPU's default `maxStorageBufferBindingSize` is",
+        "  128 MiB, so this is in practice a desktop-class GPU requirement. `karume.json` does",
+        "  not declare it: the declared limits cover the resident weights and state, not the",
+        "  intermediate tensors a run allocates.",
     ]
 
 

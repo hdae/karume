@@ -29,7 +29,7 @@ from karume.modelcard import (
     require_pipeline,
 )
 
-from .measurements import map_head_diff_text
+from .measurements import map_head_diff_text, map_head_norm_text
 
 #: このテンプレートが説明できるパイプライン契約（ADR 0041 §2 — モデル単位）。
 SIGLIP2_SUPPORTED_PIPELINE = "siglip2/1"
@@ -62,6 +62,11 @@ SIGLIP2_LICENSE_TEXT_LINK = "https://www.apache.org/licenses/LICENSE-2.0"
 #: 毎回実測する値）。数も書式も持たない — 正本は
 #: {@link siglip2.measurements.map_head_diff_text}。
 SIGLIP2_MAP_HEAD_DIFF = map_head_diff_text()
+
+#: 上の差に意味を与えるスケール（pooled ベクトルの L2 ノルム）。差の大小はこの数との比でしか
+#: 読めないので、告知とカードが**同じ 1 語**を名乗る必要がある。正本は
+#: {@link siglip2.measurements.map_head_norm_text}。
+SIGLIP2_MAP_HEAD_NORM = map_head_norm_text()
 
 
 def _siglip2_metadata(manifest: Mapping[str, Any]) -> CardMetadata:
@@ -138,7 +143,7 @@ def _siglip2_base_weights(manifest: Mapping[str, Any]) -> list[str]:
         "  operations (bit-exact), and the pooling head's attention was rewritten with explicit",
         "  q/k/v projections, which is equivalent up to floating-point rounding"
         f" ({SIGLIP2_MAP_HEAD_DIFF}",
-        "  measured on the pooled vector, whose L2 norm is around 13).",
+        f"  measured on the pooled vector, whose L2 norm is {SIGLIP2_MAP_HEAD_NORM}).",
     ]
     return lines
 
