@@ -79,8 +79,13 @@ export type LocalDirectoryOptions = {
    */
   readonly crossRepo?: Readonly<Record<string, DistributionSource>>;
   /**
-   * mapping に無い越境参照の委譲先（例: リモートの取得元）。**明示した場合だけ**降格する
-   * （暗黙のリモート降格は禁止 — オフライン前提の配布が黙って network へ出る）。
+   * mapping に無い越境参照の委譲先（例: 別のローカルディレクトリの取得元 — Deno なら
+   * `denoDirectory`）。**明示した場合だけ**降格する（暗黙のリモート降格は禁止 —
+   * オフライン前提の配布が黙って network へ出る）。
+   *
+   * NOTE: HF リポを {@link DistributionSource} のハンドルとして組む公開 API は無い
+   * （`loadManifest` / `fromPretrained` が `HubRepoRef` を内部で解決する）ので、ここでリモートへ
+   * 降格させる構成は現在の公開面では作れない。
    */
   readonly fallback?: DistributionSource;
 };

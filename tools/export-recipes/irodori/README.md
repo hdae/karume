@@ -44,8 +44,9 @@ so nothing else is re-exported for it. Only the DiT block weights outside the ad
 stored as i4 (168 linears); the 144 adaLN linears (`attention_adaln`, `mlp_adaln`) and the five
 linears outside the blocks (`in_proj`, `out_proj`, `cond_module.{0,2,4}`) are stored as i8 in the
 same container — both exclusions come from listening judgements. Step 7 requires this series; the
-rounding is GPTQ-calibrated by default and takes hours of CPU time (twelve calibration cases × the
-full reference loop):
+rounding is GPTQ-calibrated by default and takes about 20–25 minutes of CPU time (twelve
+calibration cases × the full reference loop — 1,447 s for v4-small and 1,183 s for v4.1-small,
+measured 2026-09-05):
 
 ```sh
 uv run --with 'transformers==5.14.1' python -m irodori.export --dtype i4   # 2''. dit only, calibrated
