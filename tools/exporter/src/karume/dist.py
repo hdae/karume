@@ -317,7 +317,8 @@ class Artifact:
     出所は 2 通りだけ: 系列からの**配置**（`source`）と、組み立てが作る**生成物**（`payload`
     — `.npy` / ckpt から移した表など）。どちらか一方だけを持つ。生成物をバイト列で持つのは、
     「置く前に中身が確定している」ことを共有判定（{@link assemble_family}）と同じ規律で
-    扱えるようにするため。
+    扱えるようにするため。生成物を据えられるのは `assets` / `extras` の席だけで、weights が
+    指す役割は配置に限る（{@link ModelPlan.__post_init__}）。
     """
 
     rel_path: str
@@ -455,6 +456,25 @@ class ModelPlan:
     default_quant: str
     pipeline_config: Mapping[str, Any]
 
+    def __post_init__(self) -> None:
+        """weights の席が指す役割は**系列からの配置**（`source`）だけ MUST。
+
+        生成物（`payload`）は IR コンテナではないので、weights に据わると
+        {@link expand_weight_shards} の分割解決も {@link bake_required_limits} の需要も
+        {@link assert_weight_components_verified} の IR v1 全検証も掛からないまま
+        `shards: [1 要素]` として宣言される（表・sidecar の役割名を weights へ渡す綴り誤りが
+        全門緑で通り、利用者の `createSession` で初めて落ちる）。計画の受け口で落とす。
+        """
+        for labels in self.weights.values():
+            for files in labels.values():
+                # 役割そのものの欠落は展開が役割名を綴って落とす（{@link expand_weight_shards}）。
+                artifact = self.artifacts.get(files.file)
+                if artifact is not None and artifact.source is None:
+                    raise DistError(
+                        f"{self.name}.weights: 役割 '{files.file}' が生成物（payload）を指す"
+                        f"（{artifact.rel_path}）— weights は系列からの配置（source）だけ"
+                    )
+
 
 class ShardedPlan(NamedTuple):
     """{@link expand_weight_shards} の出力 — shard 展開済みの計画と、その振り分け表。"""
@@ -476,9 +496,9 @@ def expand_weight_shards(plan: ModelPlan) -> ShardedPlan:
     書いたバイト数で決まるので、pipeline の表にも recipe の定数にも書けない。表に書かせると
     「再 export で本数が変わったのに宣言は前回のまま」という、形も型も合う沈黙誤宣言が作れる。
 
-    連番になっていない役割（生成物 `payload` の役割と、旧規則で焼かれた単一ファイルの系列）は
-    1 要素の列として素通しする — 後者は組み立ての IR v1 全検証
-    （{@link assert_weight_components_verified} のグラフ shard 空の門）が名指しで落とす。
+    連番になっていない役割（旧規則で焼かれた単一ファイルの系列）は 1 要素の列として素通しする
+    — 組み立ての IR v1 全検証（{@link assert_weight_components_verified} のグラフ shard 空の門）
+    が名指しで落とす。
     展開が起きた役割は代表役割を**artifacts から外し**、shard 1 本ごとに `Artifact` を作る
     （相対 path は代表 path へ同じ連番規則を掛けたもの — 系列側のファイル名と配布形の
     ファイル名が同じ 1 本の綴りから出る）。
@@ -501,9 +521,7 @@ def expand_weight_shards(plan: ModelPlan) -> ShardedPlan:
                 f"{plan.name}: weights が役割 '{role}' を指しているが artifacts に無い"
                 f"（役割: {sorted(plan.artifacts)}）"
             )
-        if artifact.source is None:
-            shards[role] = (role,)
-            continue
+        assert artifact.source is not None  # ModelPlan.__post_init__ の不変条件
         sources = component_shards(artifact.source)
         if len(sources) == 1:
             shards[role] = (role,)
@@ -710,11 +728,9 @@ def bake_required_limits(plan: ModelPlan) -> ModelPlan:
             artifact = plan.artifacts.get(files.file)
             if artifact is None:
                 raise DistError(f"{where}.weights: 役割 '{files.file}' が artifacts に無い")
-            # 出所が生成物（`payload`）の役割は IR コンテナではない（{@link weight_components}
-            # と同じ扱い）。extras / assets も同様に見ない — 表・tokenizer・sidecar が GPU の
-            # 常駐バッファになるかは family 側の事情で、コンテナの宣言からは決まらない。
-            if artifact.source is None:
-                continue
+            # extras / assets は見ない — 表・tokenizer・sidecar が GPU の常駐バッファになるかは
+            # family 側の事情で、コンテナの宣言からは決まらない。
+            assert artifact.source is not None  # ModelPlan.__post_init__ の不変条件
             demand = max(
                 demand, component_demand_bytes(artifact.source, plan.pipeline_config, memo)
             )
@@ -939,8 +955,8 @@ def weight_components(sharded: Sequence[ShardedPlan]) -> list[tuple[Path, ...]]:
     """weights が指す**ローカル**コンポーネントの shard 列（読む順）を全部集める。
 
     共有コンポーネント（複数モデルが同じ系列を指す席）は shard 列**そのもの**で dedupe する
-    — 同じバイト列を 2 度検証しても結論は変わらない。出所が生成物（`payload`）の役割は
-    対象外（IR コンテナではない）。
+    — 同じバイト列を 2 度検証しても結論は変わらない。生成物（`payload`）の役割は weights に
+    現れない（{@link ModelPlan.__post_init__} が入口で落とす）ので、ここは全役割を集める。
 
     NOTE: 見るのは weights だけ。`assets` / `extras`（tokenizer・スタイル表・rope 素表などの
     table safetensors）は IR コンテナではないので、IR の門を掛ける先ではない。
@@ -952,13 +968,13 @@ def weight_components(sharded: Sequence[ShardedPlan]) -> list[tuple[Path, ...]]:
             {files.file for labels in item.plan.weights.values() for files in labels.values()}
         )
         for role in roles:
-            sources = [
-                artifact.source
-                for member in item.shards[role]
-                if (artifact := item.plan.artifacts[member]).source is not None
-            ]
+            sources: list[Path] = []
+            for member in item.shards[role]:
+                source = item.plan.artifacts[member].source
+                assert source is not None  # ModelPlan.__post_init__ の不変条件
+                sources.append(source)
             shards = tuple(sources)
-            if not shards or shards in seen:
+            if shards in seen:
                 continue
             seen.add(shards)
             components.append(shards)
