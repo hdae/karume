@@ -17,8 +17,11 @@ from karume.convert import (
     Converter,
     UnsupportedAtenOpsError,
     _bitwise_equal,
+    convert,
+    curated_decompositions,
     normalize_boundary_tensor,
 )
+from karume.normalize import normalize_graph
 from karume.ops import EMITTABLE_OPS, NON_EMITTABLE_OPS, TOPK_OP
 from karume.pipeline import export_to_file
 
@@ -554,6 +557,74 @@ class TestOutputs:
             convert_module(Accumulating(), (torch.randn(4, 3),))
 
         assert "BUFFER_MUTATION" in str(err.value)
+
+
+class TestDuplicateOutputs:
+    """同じ IR 値を 2 つの出力へ割り当てる形は `convert()` の時点で落とす。
+
+    出力名は集合（docs/ir-v1.md）で、受理側 `verify.parse_ir_graph` は重複を拒否する。
+    検出を受理側まで遅らせると、検証を挟まない `emit.write_model` の直呼びが
+    「書けたが読めない」配布形をそのまま据える。
+    """
+
+    def test_returning_the_same_value_twice_fails_loudly(self, convert_module):
+        """同一 Node の 2 度返し（`_user_outputs` は出力引数を位置でそのまま返す）。"""
+
+        class SameTwice(nn.Module):
+            def forward(self, x):
+                y = x + 1
+                return y, y
+
+        with pytest.raises(NotImplementedError) as err:
+            convert_module(SameTwice(), (torch.randn(3, 4),))
+
+        assert "出力" in str(err.value)
+        assert "重複" in str(err.value)
+
+    def test_two_structurally_identical_outputs_fail_loudly(self, convert_module):
+        """CSE が畳む経路 — 別々の部分木でも `(op, ins, attrs, shape)` が同じなら 1 本になる。"""
+
+        class SameShape(nn.Module):
+            def forward(self, x):
+                return x + 1, x + 1
+
+        with pytest.raises(NotImplementedError) as err:
+            convert_module(SameShape(), (torch.randn(3, 4),))
+
+        assert "重複" in str(err.value)
+
+    def test_distinct_outputs_still_convert(self, convert_module):
+        """回帰の逆側 — 値が違えば 2 出力はそのまま通る（門の恒真化を防ぐ検出器）。"""
+
+        class TwoValues(nn.Module):
+            def forward(self, x):
+                return x + 1, x + 2
+
+        graph, _ = convert_module(TwoValues(), (torch.randn(3, 4),))
+
+        assert len(set(graph.outputs)) == len(graph.outputs) == 2
+
+
+class TestOutputSpecAgreement:
+    """`output_specs` と output 引数の対応は**位置**でしか有効でない（normalize は
+    `graph_signature` を更新しないので `output_specs[].arg.name` は実在しない名前を指しうる）。
+
+    本数が食い違ったまま `zip(strict=True)` へ渡すと出力列が黙ってずれるので、その前に落とす。
+    """
+
+    def test_a_signature_with_fewer_output_specs_fails_loudly(self):
+        class TwoOutputs(nn.Module):
+            def forward(self, x):
+                return torch.relu(x), torch.tanh(x)
+
+        exported = torch.export.export(TwoOutputs(), (torch.randn(3, 4),), strict=False)
+        decomposed = exported.run_decompositions(curated_decompositions())
+        normalize_graph(decomposed)
+        # user 出力を 1 件削った偽物（specs だけが減り、output 引数は 2 本のまま）。
+        decomposed.graph_signature.output_specs = list(decomposed.graph_signature.output_specs)[:-1]
+
+        with pytest.raises(AssertionError, match="本数不一致"):
+            convert(decomposed)
 
 
 class TestDtypeBoundary:

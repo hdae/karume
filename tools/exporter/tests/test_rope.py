@@ -61,3 +61,41 @@ class TestLiftRopeBuffers:
         """走査が空振りする形は落とす（恒真化の門 — 上流の属性名が変わると静かに壊れる）。"""
         with pytest.raises(ValueError, match="1 本も見つからない"):
             rope.assert_rope_lifted(nn.Linear(2, 2), "テスト")
+
+
+class Rotary(nn.Module):
+    """`inv_freq` バッファを 1 本だけ持つ合成モジュール。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.register_buffer("inv_freq", torch.arange(4.0), persistent=False)
+
+
+class TestAssertRopeLiftedIsIdempotent:
+    """門が落とすのは「RoPE の周波数種がバッファにも素の属性にも 1 本も無い」ときだけ。
+
+    降格は `_buffers.pop` の破壊的操作なので、「降格できた本数」で判定すると同じ module への
+    2 度目が必ず 0 本になり、事実と違う「上流で属性名が変わった」で export が止まる。
+    """
+
+    def test_applying_it_twice_to_the_same_module_still_passes(self) -> None:
+        """2 度目は降格対象が 0 本でも通る（1 度目が素の属性へ移しただけなので）。"""
+        root = nn.Sequential(Rotary())
+
+        rope.assert_rope_lifted(root, "テスト")
+        rope.assert_rope_lifted(root, "テスト")
+
+        assert "inv_freq" not in dict(root.named_buffers())
+
+    def test_a_child_passes_after_the_parent_was_lifted(self) -> None:
+        """親へ掛けた後に子へ掛けても通る（親の走査が子の席まで降格させている）。"""
+        child = Rotary()
+        parent = nn.Sequential(child)
+
+        rope.assert_rope_lifted(parent, "親")
+        rope.assert_rope_lifted(child, "子")
+
+    def test_a_module_that_never_had_rope_buffers_is_still_rejected(self) -> None:
+        """冪等化しても否定側は生きている（門が恒真化していないことの検出器）。"""
+        with pytest.raises(ValueError, match="1 本も見つからない"):
+            rope.assert_rope_lifted(nn.Sequential(nn.Linear(2, 2)), "テスト")

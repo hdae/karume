@@ -99,22 +99,30 @@ UPSTREAM_MODEL_PACKAGES = frozenset(
     {"diffusers", "style_bert_vits2", "torchvision", "transformers"}
 )
 
-#: 検査 2 の一時除外。**検査を弱めるのではなく、既知の違反を明示して残す**。
+#: 検査 2 の一時除外 — **モジュール → 許可する上流パッケージ**の写像。
+#:
+#: MUST: モジュール単位の全免除にしない。免除の根拠は 1 パッケージぶんしか無いので、集合で
+#: 外すと「免除された 2 本に `transformers` を書けば門が 1 件も報告しない」形になり、core wheel
+#: へ上流モデル実装の provenance 義務が入る最短の道が開く。
 #:
 #: NOTE: `aten_handlers` は `torch.ops.torchvision.*`（deform_conv2d）のハンドラキーを引くために
 #: torchvision を基本依存として素で import する（ADR 0055 決定 7）。`golden_models` は同 op の
 #: torch 突合に `torchvision.ops.deform_conv2d` を呼ぶ。どちらも「上流モデル実装のコピー」では
 #: ないが、core wheel の依存として妥当かは ADR 0065 段 6（packaging / provenance）の裁定事項。
-UPSTREAM_CHECK_EXEMPT = frozenset({"aten_handlers", "golden_models"})
+UPSTREAM_CHECK_EXEMPT: dict[str, frozenset[str]] = {
+    "aten_handlers": frozenset({"torchvision"}),
+    "golden_models": frozenset({"torchvision"}),
+}
 
 #: 検査 1 の一時除外。**空** — core は 1 本残らず検査 1 に掛かる（ADR 0065 段 5 完了）。
 #:
-#: NOTE: 席を残すのは検査 2 の {@link UPSTREAM_CHECK_EXEMPT} と形を揃えるため。除外を足すのは
-#: 「既知の違反を明示して残す」ときだけで、緑にするための逃げ道にはしない。
+#: NOTE: 検査 2 の {@link UPSTREAM_CHECK_EXEMPT} と形が違う（あちらは「許可するパッケージ」を
+#: 持つ写像）のは、検査 1 に「一部だけ許す」という単位が無いため — 禁止側は `karume.<名前>` の
+#: 名簿そのもので、部分免除は「そのモジュール名の import を許す」= 全免除と同じになる。
+#: 除外を足すのは「既知の違反を明示して残す」ときだけで、緑にするための逃げ道にはしない。
 RECIPE_CHECK_EXEMPT: frozenset[str] = frozenset()
 
 RECIPE_GATED_MODULES = tuple(name for name in CORE_MODULES if name not in RECIPE_CHECK_EXEMPT)
-UPSTREAM_GATED_MODULES = tuple(name for name in CORE_MODULES if name not in UPSTREAM_CHECK_EXEMPT)
 
 
 def core_module(module_name: str) -> Path:
@@ -180,13 +188,76 @@ def recipe_imports(path: Path) -> list[str]:
     return violations
 
 
-def upstream_imports(path: Path) -> list[str]:
-    """上流モデル系パッケージへの import を「行:import 名」の一覧で返す（無ければ空）。"""
+def upstream_imports(path: Path, allowed: frozenset[str] = frozenset()) -> list[str]:
+    """上流モデル系パッケージへの import を「行:import 名」の一覧で返す（無ければ空）。
+
+    `allowed` はそのモジュールに限って許すパッケージ（{@link UPSTREAM_CHECK_EXEMPT}）。
+    既定は空なので、免除表に載っていないモジュールは全パッケージが違反になる。
+    """
+    gated = UPSTREAM_MODEL_PACKAGES - allowed
     return [
         f"{_label(path)}:{lineno} -> {dotted}"
         for lineno, dotted in imported_modules(path)
-        if dotted.split(".")[0] in UPSTREAM_MODEL_PACKAGES
+        if dotted.split(".")[0] in gated
     ]
+
+
+class TestTheModuleRoster:
+    """名簿（{@link CORE_MODULES}）が現物を 1 本残らず名指ししている。
+
+    名簿は手書きのまま（新しいモジュールを足すときに「core なのか recipe なのか」の判断を
+    素通りさせない MUST）で、ここが見るのは**一致だけ**。書き忘れた新モジュールは検査 2 の
+    parametrize から丸ごと落ちるので、上流モデル系 import を黙って通す席になる。
+    """
+
+    def test_the_roster_names_every_module_on_disk(self) -> None:
+        on_disk = {path.stem for path in KARUME_ROOT.glob("*.py")}
+        roster = set(CORE_MODULES)
+
+        assert on_disk == roster, (
+            f"名簿に無い: {sorted(on_disk - roster)} / 名簿だけにある: {sorted(roster - on_disk)}"
+        )
+
+    def test_the_package_has_no_subpackage_outside_the_scan(self) -> None:
+        """走査は `src/karume` 直下だけ — サブパッケージができた日に穴を知らせる。
+
+        `core_module` が `KARUME_ROOT / f"{name}.py"` を返す以上、`karume/xxx/yyy.py` は
+        名簿にも検査にも載らない（`__pycache__` は成果物なので除く）。
+        """
+        subdirectories = sorted(
+            path.name
+            for path in KARUME_ROOT.iterdir()
+            if path.is_dir() and path.name != "__pycache__"
+        )
+
+        assert subdirectories == []
+
+
+class TestThePublicSurface:
+    """パッケージの公開面（`karume.__all__`）が実在し、配布形の 1 本道が辿れる。
+
+    公開面の正本は `__all__` 1 つ（docstring の列挙はその説明）— 2 つに割れると、docstring
+    だけを読んだ書き手が「書き出し → 検証 → 据え替え」の 3 段を自分で綴り直す。
+    """
+
+    def test_every_exported_name_resolves(self) -> None:
+        import karume
+
+        missing = [name for name in karume.__all__ if not hasattr(karume, name)]
+
+        assert missing == []
+
+    def test_the_one_way_to_publish_is_exported(self) -> None:
+        """`publish_model` が公開面に居る（配布形を作る経路はこの 1 本 — pipeline の MUST）。"""
+        import karume
+
+        assert "publish_model" in karume.__all__
+
+    def test_the_export_list_is_sorted(self) -> None:
+        """未ソートを足したら赤（並びの主張ではなく、追記の位置を機械が決める検出器）。"""
+        import karume
+
+        assert list(karume.__all__) == sorted(karume.__all__)
 
 
 class TestCoreDoesNotImportRecipeModules:
@@ -200,10 +271,16 @@ class TestCoreDoesNotImportRecipeModules:
 
 
 class TestCoreDoesNotImportUpstreamModelPackages:
-    @pytest.mark.parametrize("module_name", UPSTREAM_GATED_MODULES)
+    @pytest.mark.parametrize("module_name", CORE_MODULES)
     def test_a_core_module_imports_no_upstream_model_package(self, module_name: str) -> None:
-        """core wheel は上流モデル実装（とその provenance 義務）を引き込まない。"""
-        assert upstream_imports(core_module(module_name)) == []
+        """core wheel は上流モデル実装（とその provenance 義務）を引き込まない。
+
+        免除された 2 本も**検査に掛かる**（許可するのは torchvision 1 つだけ）— 除外リストで
+        丸ごと外すと、その 2 本が上流モデル実装の入口として開いたままになる。
+        """
+        allowed = UPSTREAM_CHECK_EXEMPT.get(module_name, frozenset())
+
+        assert upstream_imports(core_module(module_name), allowed) == []
 
 
 class TestTheBoundaryCheckItself:
@@ -237,6 +314,23 @@ class TestTheBoundaryCheckItself:
         assert upstream_imports(path) == [
             "karume/sneaky.py:2 -> transformers",
             "karume/sneaky.py:2 -> transformers.AutoModel",
+        ]
+
+    def test_an_exemption_covers_only_the_package_it_names(self, tmp_path: Path) -> None:
+        """免除は「そのモジュール × そのパッケージ」— 免除された席でも他の上流は違反。
+
+        免除をモジュール単位の集合に戻すとここが緑のまま素通りする（= core wheel へ上流
+        モデル実装を持ち込む最短の道が開く）。
+        """
+        path = self._violator(
+            tmp_path,
+            "exempted",
+            "import torchvision\n\nfrom transformers import AutoModel\n",
+        )
+
+        assert upstream_imports(path, frozenset({"torchvision"})) == [
+            "karume/exempted.py:3 -> transformers",
+            "karume/exempted.py:3 -> transformers.AutoModel",
         ]
 
     def test_it_stays_quiet_on_a_module_that_imports_nothing_forbidden(

@@ -650,15 +650,27 @@ def _plan_weight_dtype(
             conversion = _Conversion(dtype=dtype, name=name, scale=scale)
         plan.conversions[key] = conversion
         plan.declarations[name] = declaration
-    committed = {**graph.initializers, **plan.declarations}
-    if weight_dtype != "f32" and not any(
-        init.storage.dtype == weight_dtype for init in committed.values()
-    ):
+    if weight_dtype != "f32" and not plan.declarations:
         # ADR 0006 の「圧縮指定なのに適格 0MB を沈黙させない」をエクスポータ側でも張る。
-        # 明示指定側は 1 本単位で計画済みか fail loudly 済みなので、ここで見るのは既定だけ。
+        # 見るのは「**圧縮格納が 1 本も計画されなかったか**」— 既定 dtype と同じ格納 dtype が
+        # 0 本でも、明示指定が適格な全件を別 dtype で覆っていれば意図は果たされている
+        # （混成格納を 1 本単位で書き切った形をここで落とさない）。
+        explicit = sorted({dtype for dtype in weight_dtype_overrides.values() if dtype != "f32"})
+        # 原因は 1 つに断定しない（i4 は「展開経路を持つ消費先が無い」と「格納行長が group 長で
+        # 割り切れない」の両方が同じ枝に落ちる）。
+        if weight_dtype == "i4":
+            cause = (
+                "i4 の展開経路（linear / embedding / conv1d の groups==1）を持つ消費先が無いか、"
+                "格納行長が group 長で割り切れない可能性がある"
+            )
+        else:
+            cause = (
+                f"融合 op の重みスロットを持たないグラフに {weight_dtype} を"
+                "指定していないか確認する"
+            )
         raise EmitError(
-            f"格納 {weight_dtype} を指定したが適格な重みスロットが 1 本も無い"
-            f"（融合 op の重みを持たないグラフに {weight_dtype} を指定していないか確認する）"
+            f"圧縮格納が 1 本も計画されなかった（既定 {weight_dtype} / 明示指定"
+            f" {explicit or 'なし'}）— {cause}"
         )
     return plan
 
@@ -1114,6 +1126,10 @@ def write_model(
 
     NOTE: 書き出し中の検査（f16 の往復・i8 / i4 の逆変換）が落ちると書きかけのファイルが残る
     — 配布物の原子性は `pipeline.export_to_file` の一時ファイル層が持つ。
+
+    NOTE: この関数は**書き出しだけ**で、受理側の門（`verify.verify_shards`）は通さない。
+    配布形を作るなら `pipeline.publish_model`（書き出し → 検証 → 据え替えの 3 段）を通す —
+    直呼びは「書けたが読めない」配布形をそのまま据えられる面。
 
     `weight_scales` は `quantize.fake_quant_int8` / `quantize.fake_quant_int4` が返した
     **FQN → scale** の台帳（`"i8"` / `"i4"` のときだけ要る）。キーは safetensors のテンソル

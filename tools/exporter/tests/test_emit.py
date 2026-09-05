@@ -294,7 +294,7 @@ class TestF16Storage:
         """「f16 指定なのに適格 0MB」を沈黙させない（ADR 0006 の常設診断の書き出し側）。"""
         graph, tensors = sample_graph()
 
-        with pytest.raises(EmitError, match="適格な重みスロットが 1 本も無い"):
+        with pytest.raises(EmitError, match="圧縮格納が 1 本も計画されなかった"):
             write_model(tmp_path / "model.safetensors", graph, tensors, weight_dtype="f16")
 
     def test_an_unknown_weight_dtype_fails_loudly(self, tmp_path):
@@ -537,7 +537,7 @@ class TestI8Storage:
     def test_a_graph_without_eligible_weights_fails_loudly(self, tmp_path):
         graph, tensors = sample_graph()
 
-        with pytest.raises(EmitError, match="適格な重みスロットが 1 本も無い"):
+        with pytest.raises(EmitError, match="圧縮格納が 1 本も計画されなかった"):
             write_model(tmp_path / "model.safetensors", graph, tensors, weight_dtype="i8")
 
     def test_the_breakdown_counts_i8_bytes_and_the_scale_overhead(self, tmp_path):
@@ -1111,7 +1111,7 @@ class TestI4Storage:
         graph.values["c"] = IrValue(dtype="f32", shape=["T", 3])
         graph.outputs.append("c")
 
-        with pytest.raises(EmitError, match="適格な重みスロットが 1 本も無い"):
+        with pytest.raises(EmitError, match="圧縮格納が 1 本も計画されなかった"):
             write_int4(tmp_path / "model.safetensors", graph, tensors, scales)
 
     def test_a_missing_scale_fails_loudly(self, tmp_path):
@@ -1186,7 +1186,7 @@ class TestI4Storage:
     def test_a_graph_without_eligible_weights_fails_loudly(self, tmp_path):
         graph, tensors = sample_graph()
 
-        with pytest.raises(EmitError, match="適格な重みスロットが 1 本も無い"):
+        with pytest.raises(EmitError, match="圧縮格納が 1 本も計画されなかった"):
             write_model(tmp_path / "model.safetensors", graph, tensors, weight_dtype="i4")
 
 
@@ -1651,6 +1651,83 @@ class TestMixedStorage:
                 weight_scales=scales,
                 weight_dtype_overrides={"enc.emb": "i8"},
             )
+
+
+def conv2d_only_graph() -> tuple[IrGraph, dict[str, torch.Tensor]]:
+    """重みスロットは在るが **i4 の展開経路が無い**グラフ（conv2d 1 本 — VAE の最小形）。"""
+    graph = IrGraph(
+        symbols=[],
+        inputs=[IrInput(name="x", dtype="f32", shape=[1, 2, 4, 4])],
+        outputs=["y"],
+        initializers={
+            "w": IrInitializer(tensor="enc.w", storage=IrStorage(dtype="f32")),
+            "b": IrInitializer(tensor="enc.b", storage=IrStorage(dtype="f32")),
+        },
+        values={
+            "w": IrValue(dtype="f32", shape=[3, 2, 3, 3]),
+            "b": IrValue(dtype="f32", shape=[3]),
+            "y": IrValue(dtype="f32", shape=[1, 3, 2, 2]),
+        },
+        nodes=[
+            IrNode(
+                op="conv2d",
+                ins=["x", "w", "b"],
+                outs=["y"],
+                attrs={"stride": [1, 1], "padding": [0, 0], "dilation": [1, 1], "groups": 1},
+            )
+        ],
+    )
+    return graph, {"enc.w": rounded(3, 2, 3, 3), "enc.b": rounded(3)}
+
+
+class TestThePlannedCompressionGate:
+    """「圧縮指定なのに適格 0MB」の門は **圧縮格納が 1 本も計画されなかったか**で見る
+    （ADR 0006 の常設診断）。
+
+    既定 dtype と同じ格納 dtype が 0 本でも、明示指定が適格な全件を別 dtype で覆っていれば
+    意図は果たされている — その形まで落とすと、混成格納を 1 本単位で書き切った配布形が
+    書けなくなる。真に 0 本の形で従来どおり落ちることは
+    {@link TestF16Storage.test_a_graph_without_eligible_weights_fails_loudly} 以下 3 本が持つ。
+    """
+
+    def test_overrides_covering_every_eligible_weight_pass_the_gate(self, tmp_path):
+        """既定 i8 の宣言が 1 本も無くても、明示指定の i4 が計画されていれば通る。"""
+        graph, tensors, scales = int4_weight_graph()
+
+        path = write_component(
+            tmp_path / "model.safetensors",
+            graph,
+            tensors,
+            weight_dtype="i8",
+            weight_scales=scales,
+            weight_dtype_overrides={"enc.w": "i4"},
+        )
+
+        assert verify_model(path).initializers["w"].storage.dtype == "i4"
+
+    def test_the_i4_message_names_the_expansion_path(self, tmp_path):
+        """i4 適格が 0 本のとき、原因は「重みスロットが無い」ではなく「展開経路が無い」。
+
+        conv2d の重みは一般適格でも i4 で展開できるカーネルが無い（ADR 0069 決定 5）。
+        「融合 op の重みを持たないグラフに i4 を指定していないか」ではグラフの構造を疑って
+        空振りする。
+        """
+        graph, tensors = conv2d_only_graph()
+
+        with pytest.raises(EmitError) as err:
+            write_model(tmp_path / "model.safetensors", graph, tensors, weight_dtype="i4")
+
+        assert "i4 の展開経路（linear / embedding / conv1d" in str(err.value)
+
+    def test_the_message_reports_the_default_and_the_explicit_dtypes(self, tmp_path):
+        """診断は既定と明示指定の内訳を出す（どちらの指定が空振りしたかを読ませる）。"""
+        graph, tensors = sample_graph()
+
+        with pytest.raises(EmitError) as err:
+            write_model(tmp_path / "model.safetensors", graph, tensors, weight_dtype="f16")
+
+        assert "既定 f16" in str(err.value)
+        assert "明示指定 なし" in str(err.value)
 
 
 class TestInitializerKeyInjectivity:

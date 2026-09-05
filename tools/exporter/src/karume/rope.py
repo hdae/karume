@@ -46,13 +46,35 @@ def lift_rope_buffers(root: nn.Module) -> int:
     return lifted
 
 
+def _rope_attribute_count(root: nn.Module) -> int:
+    """RoPE の周波数種が載っている席の本数（バッファ席 + 降格済みの素の属性）。
+
+    降格は `_buffers.pop` の破壊的操作なので、バッファ席だけを数えると**同じ module への
+    2 度目**が必ず 0 本になる。`lift_rope_buffers` は pop の**後**に `setattr` するので
+    `nn.Module.__setattr__` は buffer 席を見つけられず、降格済みの名前は素の `__dict__` に
+    入る — 両方を数えれば「走査が空振りしている（上流で属性名が変わった）」の検出力は
+    保ったまま冪等になる。判定規則は降格側と同じ接尾一致（{@link ROPE_BUFFER_NAMES}）。
+    """
+    return sum(
+        1
+        for module in root.modules()
+        for names in (module._buffers, module.__dict__)
+        for key in names
+        if key.endswith(ROPE_BUFFER_NAMES)
+    )
+
+
 def assert_rope_lifted(root: nn.Module, where: str) -> None:
-    """{@link lift_rope_buffers} を掛け、1 本も降格できなければ落とす（恒真化の門）。
+    """{@link lift_rope_buffers} を掛け、RoPE の周波数種が 1 本も無ければ落とす（恒真化の門）。
 
     `where` は失敗したときにどのモデル / コンポーネントの話かを示す呼び出し側の文脈。
+
+    降格済みの module へ 2 度目を掛けても通る（数えるのは {@link _rope_attribute_count} =
+    バッファ席と素の属性の総数）。「降格の戻り本数」で見ると 2 度目が必ず 0 本になり、
+    事実と違う「上流で属性名が変わった」で export が止まる。
     """
-    lifted = lift_rope_buffers(root)
-    if lifted == 0:
+    lift_rope_buffers(root)
+    if _rope_attribute_count(root) == 0:
         raise ValueError(
             f"{where}: RoPE バッファ {ROPE_BUFFER_NAMES} が 1 本も見つからない"
             " — 降格の走査が空振りしている（上流で属性名が変わった可能性）。"

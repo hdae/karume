@@ -15,7 +15,8 @@ from torch.export import Dim
 from torchvision.ops import deform_conv2d
 
 from karume.aten_handlers import ATEN_HANDLERS
-from karume.convert import UnsupportedAtenOpsError
+from karume.convert import UnsupportedAtenOpsError, convert, curated_decompositions
+from karume.normalize import normalize_graph
 from karume.ops import EMITTABLE_OPS
 
 
@@ -1870,3 +1871,40 @@ class TestDeformConv2d:
             convert_module(module, args)
 
         assert "f32" in str(err.value)
+
+
+class TestCoefficientAdd:
+    """係数付き加算（`alpha != 1`）は IR 語彙に無い — 変換が fail loudly する。
+
+    正規化側は触らない（`normalize` の 3 つの alpha ガード）ので、係数を黙って落とした
+    IR が書かれるのを止める最後の門がここ。alpha が分解で畳まれるかは torch 版次第なので、
+    FX ノードの kwargs へ**注入**して torch 版に依存させない。
+    """
+
+    @staticmethod
+    def _decomposed_add(alpha: int):
+        class Alpha(nn.Module):
+            def forward(self, x, y):
+                return torch.add(x, y, alpha=alpha)
+
+        decomposed = torch.export.export(
+            Alpha(), (torch.randn(3, 4), torch.randn(3, 4)), strict=False
+        ).run_decompositions(curated_decompositions())
+        node = next(
+            node
+            for node in decomposed.graph_module.graph.nodes
+            if node.op == "call_function" and node.target is torch.ops.aten.add.Tensor
+        )
+        node.kwargs = {**node.kwargs, "alpha": alpha}
+        normalize_graph(decomposed)
+        return decomposed
+
+    def test_a_coefficient_is_rejected_instead_of_being_dropped(self):
+        with pytest.raises(NotImplementedError, match="alpha != 1"):
+            convert(self._decomposed_add(2))
+
+    def test_the_same_add_converts_when_the_coefficient_is_one(self):
+        """対照 — `alpha == 1` なら普通の add（上の拒否が恒真でないことの検出器）。"""
+        graph, _ = convert(self._decomposed_add(1))
+
+        assert node_ops(graph) == ["add"]

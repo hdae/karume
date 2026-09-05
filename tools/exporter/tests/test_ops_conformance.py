@@ -99,6 +99,22 @@ class TestFixtureTable:
     def test_the_strided_rank_limit_matches_the_implementation(self):
         assert OP_CONTRACT_TABLE["strided_rank_max"] == STRIDED_RANK
 
+    def test_every_value_range_entry_has_both_an_accepted_and_a_rejected_case(self):
+        """値域ケースは受理側・拒否側とも最低 1 件（空リストは検査 0 回で緑になる）。
+
+        {@link TestAttrValues} の 2 本はリストを `for` で回すだけなので、`accept: []` /
+        `reject: []` を書いたエントリは何も検査せずに通る。存在の門
+        （`test_every_declared_attr_has_a_value_range_case`）はエントリの**有無**しか見ないので、
+        ある attr の値域検査を実質無効化する変更が Python 側でも TS 側でも検出されない。
+        """
+        empty = [
+            f"{entry['op']}.{entry['attr']}"
+            for entry in ATTR_VALUES
+            if not entry["accept"] or not entry["reject"]
+        ]
+
+        assert empty == []
+
 
 class TestDeclaredContract:
     """ops 節: アリティ / スロット dtype / attrs キー集合が契約表と一致する。"""

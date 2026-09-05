@@ -125,6 +125,20 @@ def _static_size(dim: Any) -> int | None:
     return int(dim)
 
 
+def _static_index(value: Any) -> int | None:
+    """添字・区間端の具体値（記号・FX Node・`None` なら None）。
+
+    MUST: {@link _static_size} と同じ理由で SymInt を `int()` で採らない。加えて 2 つの表現を
+    明示的に None へ倒す — ①記号値が **FX Node** で渡る形（`_static_size` は `int(Node)` で
+    TypeError になるので、素通しすると診断でなく素のクラッシュになる）②`slice(start=None)` の
+    ように省略が実引数として来る形。`aten.select.int` の index も `aten.slice.Tensor` の
+    start / end もスキーマ上 SymInt なので、ヒント値で採ると実行時に無言の誤値になる。
+    """
+    if isinstance(value, Node) or value is None:
+        return None
+    return _static_size(value)
+
+
 def _numel(shape: Any) -> Any:
     return math.prod([1, *shape])
 
@@ -389,6 +403,37 @@ _NEG_INF_SANITIZERS = (
     aten.exp.default,
 )
 
+#: 有限の入力から -inf を**生む** op — 引数に -inf リテラルを持たないので
+#: {@link _introduces_neg_inf} では源として数えられない。
+#:
+#: `log(0)` / `log1p(-1)` は -inf が定義どおりの出力なので無条件に源。
+#: MUST: `rsqrt` / `pow(x, -0.5)` は入れない — `x == 0` は **+inf**・`x < 0` は NaN で
+#: -inf を作らない（`_pow_neg_half_to_rsqrt` の定義域の観察と同じ）。源をここへ広げると
+#: rms_norm に畳まれ残った rsqrt がスコア側の -inf 源に化け、全ての attention が
+#: `safe_softmax` への置換（分岐②）へ倒れる。
+_NEG_INF_PRODUCERS = (aten.log.default, aten.log1p.default)
+
+#: 除数が 0 のときだけ ±inf を生む op（源かどうかは**除数**で決まる）。
+_NEG_INF_DIVISIONS = (aten.div.Tensor, aten.div.Scalar)
+
+
+def _produces_neg_inf(node: Node) -> bool:
+    """有限の入力から -inf を生みうる op か（-inf リテラルを持たない源）。
+
+    除算は「除数が 0 と示せない形」だけを源に数える。判定を op 名だけで下すと
+    attention の通常経路（`scores / sqrt(d)`）まで源になり、事実上すべてのガード地点が
+    分岐②へ倒れる — それは「分岐①を廃す」案そのもので、ここで採る話ではない。
+    非ゼロの数値リテラルは除数が 0 でないことの証明になるので源から外す。
+    """
+    if node.target in _NEG_INF_PRODUCERS:
+        return True
+    if node.target not in _NEG_INF_DIVISIONS:
+        return False
+    divisor = node.args[1] if len(node.args) > 1 else None
+    if isinstance(divisor, bool) or not isinstance(divisor, (int, float)):
+        return True  # テンソル除数・読めない形は「0 かもしれない」に倒す（保守側）
+    return divisor == 0
+
 
 class _Placeholders:
     """placeholder の実値表（safe-softmax ガードの不活性証明が使う — ADR 0016）。
@@ -449,7 +494,9 @@ def _can_be_neg_inf(node: Node, placeholders: _Placeholders) -> bool:
 
     多層 attention では下段の softmax 経由でマスクが上段の依存錐に入るため、「依存錐に
     -inf 定数があるか」だけでは全段が偽陽性になる。値域が有限な op を伝播の壁として扱い、
-    実際に -inf になり得る経路だけを見る。持ち上げられた定数 / buffer / parameter は
+    実際に -inf になり得る経路だけを見る。源は -inf リテラルを持つノード
+    （{@link _introduces_neg_inf}）だけでなく、有限の入力から -inf を**生む** op
+    （{@link _produces_neg_inf}）も数える。持ち上げられた定数 / buffer / parameter は
     {@link _Placeholders} が実値で判定し、それ以外の非 call_function ノードは
     「-inf 源かもしれない」に倒す。
     """
@@ -471,7 +518,7 @@ def _can_be_neg_inf(node: Node, placeholders: _Placeholders) -> bool:
             continue
         if current.target in _NEG_INF_SANITIZERS:
             continue
-        if _introduces_neg_inf(current):
+        if _introduces_neg_inf(current) or _produces_neg_inf(current):
             return True
         stack.extend(current.all_input_nodes)
     return False
@@ -731,9 +778,13 @@ def _lower_unit_expand(graph: Graph, stats: Counter) -> None:
         axis = int(unsqueeze.args[1]) % _rank(unsqueeze)
         src_shape = list(_val(src).shape)
         expanded_shape = list(_val(expand).shape)
-        if expanded_shape[:axis] != src_shape[:axis]:
+        # MUST: shape の突合は `extent_keys`（sympy 式の構造等価）で見る。素の list `!=` は
+        # 要素ごとに `SymInt.__eq__` を呼んでヒント値で真偽を決めるうえ、その評価が
+        # export 済みの ShapeEnv へ後付けの guard 置換を積む（置換は `convert._dim` まで
+        # 届き、次元が黙って静的に焼かれる — extents.py 冒頭の MUST）。
+        if extent_keys(expanded_shape[:axis]) != extent_keys(src_shape[:axis]):
             continue
-        if expanded_shape[axis + 1 :] != src_shape[axis:]:
+        if extent_keys(expanded_shape[axis + 1 :]) != extent_keys(src_shape[axis:]):
             continue
         count = _static_size(expanded_shape[axis])
         if count is None:
@@ -771,7 +822,11 @@ def _unbind_consumers(view: Node, *, split_dim: int) -> list[tuple[Node, int, in
             return None
         if int(user.args[1]) % rank != split_dim:
             return None
-        start, end = int(user.args[2]), int(user.args[3])
+        # start / end はスキーマ上 `SymInt?` — 記号（生 SymInt / FX Node）と `None` 明示は
+        # ヒント値へ特殊化せず**この view には触れずスキップ**へ倒す（この関数の MUST）。
+        start, end = _static_index(user.args[2]), _static_index(user.args[3])
+        if start is None or end is None:
+            return None
         squeeze = _sole_user(user)
         if end - start != 1 or squeeze is None:
             return None
@@ -1194,6 +1249,9 @@ def _select_to_squeeze(graph: Graph, stats: Counter) -> None:
     MUST: **記号次元の軸は fail loudly**。長さを export 時のヒント値で採ると「ヒント値 1 の
     記号次元」が squeeze に化け、実行時（ヒント以外の束縛）で無言の誤値になる — 静かに
     間違える形なので、ここで止める以外に検出器が無い。
+    MUST: **記号の添字も同じく fail loudly**。`aten.select.int(self, int dim, SymInt index)` の
+    index はスキーマ上 SymInt で、ヒント値で採ると `slice(hint, hint+1)` が焼かれる — 軸長側と
+    同じ沈黙誤値が添字の側から入る。
     """
     for node in list(graph.nodes):
         if node.op != "call_function" or node.target is not aten.select.int:
@@ -1203,10 +1261,16 @@ def _select_to_squeeze(graph: Graph, stats: Counter) -> None:
             continue
         src_val = _val(src)
         rank = src_val.dim()
-        raw_dim, index = int(node.args[1]), int(node.args[2])
+        raw_dim = int(node.args[1])
         if not -rank <= raw_dim < rank:
             continue
         dim = raw_dim % rank
+        index = _static_index(node.args[2])
+        if index is None:
+            raise NotImplementedError(
+                f"記号次元の添字で切る select は未対応: {node.name} dim={raw_dim}"
+                f" index={node.args[2]}（ヒント値で添字を採ると実行時に無言の誤値になる）"
+            )
         size = _static_size(src_val.shape[dim])
         if size is None:
             raise NotImplementedError(

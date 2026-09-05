@@ -839,6 +839,18 @@ class Converter:
         # 宣言するのは実際に shape へ出たシンボルだけ（静的グラフは []）。使わないシンボルを
         # 載せるとランタイムが「束縛する入力が無い」で落ちる。
         self.graph.symbols = list(self.sym_names.values())
+        # MUST: 出力名は**集合**（docs/ir-v1.md の outputs 欄・受理側 `verify.parse_ir_graph` が
+        # 重複を拒否する）。重複は ①同じ値を 2 度返す forward ②構造同一の 2 出力を `_emit` の
+        # CSE が 1 本へ畳んだ形、の 2 経路で出る。検証を挟まない `emit.write_model` の直呼びは
+        # 受理側の門を通らないので、「書けたが読めない」配布形が残る — 組み立ての出口で落とす。
+        duplicated = sorted(
+            {name for name in self.graph.outputs if self.graph.outputs.count(name) > 1}
+        )
+        if duplicated:
+            raise NotImplementedError(
+                "同じ値を複数の出力へ割り当てる形は IR v1 非対応（出力名は集合）:"
+                f" 重複 {duplicated}"
+            )
         # MUST: 変換の出口で全ノードの出力 shape を契約から計算し直して宣言と突き合わせる。
         # 宣言は torch の meta 由来なので、契約の規則（gather の先行次元一致 / conv1d の
         # 出力長 / reshape の要素数など）と食い違う形が「torch 的には合法」として素通りし、
