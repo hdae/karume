@@ -444,6 +444,12 @@ Deno.test("適合表の attrs 値域を契約表の検査関数がそのとお�
     );
     const check = contract.attrs[entry.attr] ?? contract.optionalAttrs?.[entry.attr];
     assert(check !== undefined, `${entry.op}: attr '${entry.attr}' の検査関数が契約表に無い`);
+    // MUST: accept / reject が空のエントリは検査 0 回で緑になる（恒真）— 表の側で落とす
+    // （Python 側 tests/test_ops_conformance.py の同じ門と対）。
+    assert(
+      entry.accept.length > 0 && entry.reject.length > 0,
+      `${entry.op}.${entry.attr}: accept / reject のどちらかが空（検査 0 回で緑になる）`,
+    );
     for (const value of entry.accept) {
       check(value, `${entry.op}.${entry.attr}`);
     }

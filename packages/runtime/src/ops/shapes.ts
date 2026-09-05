@@ -661,6 +661,12 @@ export const computeOutputShape = (
       if (q[0] !== k[0] || q[0] !== v[0]) {
         throw new OpContractError(`${where}: attention の軸 0（B）が不一致 ${show}`);
       }
+      // MUST: `B >= 1` は 2 形共通（states 形の分岐より前）。B = 0 は上の完全一致を満たすので
+      // 素通りし、実行相の行ブロック planner が「1 行のバイト数 は正整数（0）」という
+      // **attention を名乗らない**診断で落ちる（fusion.ts の planRowBlocks）。
+      if (q[0] < 1) {
+        throw new OpContractError(`${where}: attention の B ${q[0]} が正でない ${show}`);
+      }
       // MUST: k / v の Hkv も**完全一致**（GQA で緩めるのは q との関係だけ — ADR 0067 決定 1 は
       // 「k/v 間の Hkv 一致・D 3 者同一・N=0 拒否は取り違え検出線としてそのまま維持」）。
       if (k[1] !== v[1]) {
@@ -740,6 +746,11 @@ export const computeOutputShape = (
       // 空軸の softmax は amax の identity が定義できない（softmax / 行 reduce と同じ理由）。
       if (k[2] === 0) {
         throw new OpContractError(`${where}: attention は長さ 0 の N を縮約できない ${show}`);
+      }
+      // 従来形にも M >= 1 を置く（states 形は同じ形を上で明示拒否している）。M = 0 は
+      // planRowBlocks が「行数 は正整数（0）」で落とすので、attention を名乗る文言にならない。
+      if (q[2] < 1) {
+        throw new OpContractError(`${where}: attention は M が 0 の q を扱えない ${show}`);
       }
       if (mask !== undefined) {
         // MUST: mask は **[1,1,M,N] ちょうど**。B·H へ broadcast する加算項なので、

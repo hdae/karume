@@ -1623,6 +1623,27 @@ Deno.test("states 欄を持たない op に states を書けない", () => {
   );
 });
 
+Deno.test("attention は B = 0 / M = 0 の退化した q を契約層で名指しして落とす（W-R8-1）", () => {
+  const contract = resolveOpContract("attention");
+  const shape = (ins: readonly (readonly number[])[]) =>
+    computeOutputShape(contract, ins, "t", { attrs: { scale: 0.5 } })[0];
+  // 対照: 正常形は出力 [B,H,M,D] を返す
+  assertEquals(shape([[1, 2, 4, 8], [1, 2, 4, 8], [1, 2, 4, 8]]), [1, 2, 4, 8]);
+  // B = 0 は「完全一致」を満たすので素通りしていた — 実行相の行ブロック planner が attention を
+  // 名乗らない診断で落ちる前に、契約層で名指しする
+  assertThrows(
+    () => shape([[0, 2, 4, 8], [0, 2, 4, 8], [0, 2, 4, 8]]),
+    OpContractError,
+    "attention の B",
+  );
+  // 従来形の M = 0（states 形は元から拒否していた）
+  assertThrows(
+    () => shape([[1, 2, 0, 8], [1, 2, 4, 8], [1, 2, 4, 8]]),
+    OpContractError,
+    "M が 0",
+  );
+});
+
 Deno.test("attention の states 形は欄の有無で判別され、従来形の受理集合は動かない", () => {
   const contract = resolveOpContract("attention");
   const states = { k: "kv.k", v: "kv.v" };
