@@ -11,7 +11,9 @@
  * O(最大 shard)。`docs/decisions/0070-shard-loading-admission.md` 決定 2）/ 資産を先に永続
  * キャッシュへ落とす（{@link prefetchAssets} — 逐次面の相 1 単体）/ 失敗を型で捌く
  * （{@link HubError} 以下）/ キャッシュの診断を受け取る（{@link CacheDiagnostic}）/
- * キャッシュを消して容量を空ける（{@link clearHubCache}）。
+ * キャッシュを消して容量を空ける（{@link clearHubCache}）/ 選択が落とし済みかを照会する
+ * （{@link listCachedAssets} — 取りには行かない）/ 選択 1 つぶんの在庫を消す
+ * （{@link evictCachedAssets} — 他の選択が使うファイルと越境参照は残す）。
  *
  * 仕様の正本は `docs/decisions/0041-manifest-v2.md`（取得層は `0038-manifest-v1.md` §5）。
  *
@@ -66,6 +68,13 @@ export { isDistributionSource } from "./src/source.ts";
 export type { DistributionSource } from "./src/source.ts";
 
 export { clearHubCache } from "./src/cache.ts";
+export { evictCachedAssets, listCachedAssets } from "./src/inventory.ts";
+export type {
+  CachedAssets,
+  CacheInventoryOptions,
+  EvictedAssets,
+  KeptAsset,
+} from "./src/inventory.ts";
 export { fetchAssets, loadManifest, prefetchAssets, streamAssets } from "./src/fetch.ts";
 export type { StreamedAsset } from "./src/fetch.ts";
 export type { AssetPhase, AssetProgress } from "./src/progress.ts";

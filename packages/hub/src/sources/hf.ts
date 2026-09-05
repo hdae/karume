@@ -13,11 +13,14 @@
  *   0 回）。記録が食い違うエントリは自動で evict → 取り直し（self-heal）。
  * - 受信バイトの門（`transport.ts` の予算付き `fetch`）— content-length と実受信の両方を見る。
  * - 相 1（streaming prefetch）— **RAM に載せずに永続キャッシュへ落とす** HTTP 固有の最適化。
+ * - キャッシュ在庫の照会と削除（`source.ts` ⑥⑦）— 溜めているのがこの取得元なので、
+ *   「何が手元にあるか」「これを消せるか」に答えられるのもここだけ。
  *
  * MUST NOT: ここでエラーを組み立てない（診断の文脈を持つのは共通層 — `context.ts`）。
  * 例外は「取得層の不変条件破れ」を告げる素の `Error` だけ。
  */
 
+import { evict as evictKey, listKeys } from "@hdae/fetch-cache";
 import {
   fetchHfFile,
   hfResolveUrl,
@@ -25,7 +28,7 @@ import {
   prefetchHfFile,
   resolveHfRevision,
 } from "@hdae/fetch-cache/hf";
-import { MANIFEST_FILENAME, MAX_MANIFEST_BYTES } from "../manifest.ts";
+import { type FileRef, fileRefKey, MANIFEST_FILENAME, MAX_MANIFEST_BYTES } from "../manifest.ts";
 import type { HubRepoRef, LoadManifestOptions } from "../session.ts";
 import {
   DistributionSource,
@@ -79,6 +82,24 @@ const exactBudget = (size: number, violation: ByteBudget["violation"]): ByteBudg
   exact: true,
   violation,
 });
+
+/**
+ * 資産 1 本のキャッシュキー（取得層 HF 層の**内容キー**）。hub は `kind` を渡さないので
+ * 第 2 要素は常に `"model"`。
+ *
+ * MUST: 綴りをここ 1 箇所に閉じる — 在庫の照会（プレフィックス `["hf", "model", repo]`）と
+ * 削除（5 要素の完全キー）が同じ式から外れると、消したつもりのエントリが残る。
+ */
+const contentKey = (repo: string, ref: FileRef): readonly string[] => [
+  "hf",
+  "model",
+  repo,
+  ref.path,
+  ref.sha256,
+];
+
+/** 在庫の突合キー。repo はプレフィックスで絞り込み済みなので (path, sha256) の組で足りる。 */
+const stockKey = (path: string, sha256: string): string => `${path} ${sha256}`;
 
 const pinnedHfSource = (
   repo: string,
@@ -162,12 +183,19 @@ const pinnedHfSource = (
     // （素 fetch へ縮退する余地が無い — 縮退させると RAM ピークの目標が壊れる）。
     prefetchFile: async (ref, { signal, onProgress, sizeViolation }) => {
       const url = hfResolveUrl({ ...target, path: ref.path });
-      await prefetchHfFile(target, { path: ref.path, sha256: ref.sha256 }, {
-        init: requestInit(options.headers, signal),
-        fetch: guardedFetchFor(baseFetch, url, exactBudget(ref.size, violationOf(sizeViolation))),
-        onProgress: (progress) => onProgress(progress.loaded),
-        ...shared,
-      });
+      // `expectedBytes` は現行の取得層（0.6.0）の相 1 では無視される。それでも申告するのは
+      // 0.7.0 の HF 層がこれを**受信の上限**として使うため（取得層 ADR 0011）— 申告が先に
+      // 入っていれば、hub 側の受信バイトの門（`transport.ts`）を後で撤去しても上限が消えない。
+      await prefetchHfFile(
+        target,
+        { path: ref.path, sha256: ref.sha256, expectedBytes: ref.size },
+        {
+          init: requestInit(options.headers, signal),
+          fetch: guardedFetchFor(baseFetch, url, exactBudget(ref.size, violationOf(sizeViolation))),
+          onProgress: (progress) => onProgress(progress.loaded),
+          ...shared,
+        },
+      );
     },
 
     // 越境先も同じアダプター（参照先は commit SHA 固定が必須なので、越境側で解決は起きない）。
@@ -175,6 +203,30 @@ const pinnedHfSource = (
     // 跨いでも 1 エントリを共有する。別リポの同名 path はキーに `repo` が入るぶん別エントリ。
     originFor: (crossRepo, crossRevision) =>
       pinnedHfSource(crossRepo, crossRevision, hubUrl, options),
+
+    // ⑥在庫。**listKeys は repo プレフィックスで 1 回だけ引く** — 参照ごとに引くと、参照の
+    // 本数だけキャッシュ全体の列挙が走る（数十コンポーネントの manifest で効く差）。
+    inventory: async (refs) => {
+      const keys = await listKeys(["hf", "model", repo], shared);
+      // 内容キーは 5 要素固定（`contentKey`）。それ以外の形はこの取得元が書いたものではない。
+      const stock = new Set(
+        keys.filter((key) => key.length === 5).map((key) => stockKey(`${key[3]}`, `${key[4]}`)),
+      );
+      return new Set(
+        refs.filter((ref) => stock.has(stockKey(ref.path, ref.sha256))).map(fileRefKey),
+      );
+    },
+
+    // ⑦削除。プレフィックス意味論だが完全キーを渡すので、対象はそのエントリ 1 件だけ
+    // （件数 > 0 = 実在して消えた）。
+    evict: async (refs) => {
+      const removed: FileRef[] = [];
+      for (const ref of refs) {
+        const count = await evictKey(contentKey(repo, ref), shared);
+        if (count > 0) removed.push(ref);
+      }
+      return removed;
+    },
   };
 };
 

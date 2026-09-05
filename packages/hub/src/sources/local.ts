@@ -15,13 +15,15 @@
  *   見合う脅威が無い。size は読み終えた時点でタダで分かるので門として残す（途中で切れた
  *   コピー・別 quant の取り違えはここで落ちる）。
  * - **越境は明示 mapping だけ** — 隣接する同名ディレクトリを推測しない（`originFor`）。
+ * - **在庫の削除を持たない** — 消せるのは「取ってきて溜めたもの」だけで、ディレクトリの中身は
+ *   利用者の資産。在庫の照会（`source.ts` ⑥）の方は「全部ある」と答える。
  *
  * MUST NOT: ここでエラーを組み立てない（診断の文脈を持つのは共通層 — `context.ts`）。例外は
  * 「呼び手の設定が足りない」ことを告げる素の `Error`（未 mapping の越境）で、共通層がそれを
  * 取得失敗として `cause` に残したまま包む。
  */
 
-import { MANIFEST_FILENAME, MAX_MANIFEST_BYTES } from "../manifest.ts";
+import { fileRefKey, MANIFEST_FILENAME, MAX_MANIFEST_BYTES } from "../manifest.ts";
 import type { LoadManifestOptions } from "../session.ts";
 import {
   DistributionSource,
@@ -169,6 +171,12 @@ const pinnedLocalSource = (
       // 寄せてから開く（mapping と違い、fallback は特定の repo に紐付いていない）。
       return pinTarget(fallback, revision, options).originFor(repo, revision);
     },
+
+    // ⑥在庫は常に「渡された全部がある」— 相 1 を持たないのと同じ理屈で、直接読める取得元では
+    // 「後の読みが安く済む状態」が最初から満たされている。実体の欠損は読む時に落ちる
+    // （在庫の照会でディレクトリを舐めると、資産数ぶんの I/O を照会のたびに払うことになる）。
+    inventory: (refs) => Promise.resolve(new Set(refs.map(fileRefKey))),
+    // ⑦削除は持たない — ディレクトリの中身は取得物ではなく利用者の資産。
   };
 };
 

@@ -14,6 +14,10 @@
  *    取得元が正当 — HTTP + 永続キャッシュ固有の最適化で、直接読める取得元には意味がない）
  * 5. 越境 (repo, revision) → 別の取得元（{@link PinnedSource.originFor}）
  *
+ * 取得経路の外側に、キャッシュ在庫の管理面（`inventory.ts` の照会と削除）がもう 2 つ乗る
+ * （⑥{@link PinnedSource.inventory} / ⑦{@link PinnedSource.evict}）。どちらも**optional 能力**で、
+ * 「取ってきたものを溜めている」取得元だけが本当に答えられる質問。
+ *
  * MUST: 進捗・並行度（in-flight バイト予算）・中断の透過・tight view の検査・エラーの文脈は
  * 取得元固有の能力ではなく**共通層の作法**として `fetch.ts` に残す。取得元へ降ろすと、
  * 取得元が増えるたびに同じ不変条件を書き直すことになる。
@@ -133,6 +137,21 @@ export type PinnedSource = {
    * 取得失敗として文脈付きで包む。
    */
   readonly originFor: (repo: string, revision: string) => PinnedSource;
+  /**
+   * ⑥在庫の照会（**optional 能力**）— 渡した参照のうち、**network に出ずに読める**ものの
+   * {@link ../manifest.ts fileRefKey} の集合を返す。
+   *
+   * MUST: 渡る参照は全て**この取得元の座標のもの**（越境参照は共通層が `originFor` で origin
+   * ごとに分けてから渡す）。取得元側で越境を捌き直すと、同じ参照が 2 通りのキーで数えられる。
+   */
+  readonly inventory?: (refs: readonly FileRef[]) => Promise<ReadonlySet<string>>;
+  /**
+   * ⑦在庫の削除（**optional 能力**）— 渡した参照の在庫を消し、**実際に消えたもの**を返す。
+   *
+   * 持たない取得元が正当（手元のディレクトリの中身は取得物ではなく利用者の資産で、hub が
+   * 消してよいものが 1 つも無い）。共通層はその場合に fail loud で断る。
+   */
+  readonly evict?: (refs: readonly FileRef[]) => Promise<readonly FileRef[]>;
 };
 
 /**

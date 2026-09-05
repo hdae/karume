@@ -40,8 +40,10 @@ type HubErrorOptions = {
 };
 
 /**
- * hub が投げる全エラーの基底。直接 throw はしない（`instanceof HubError` で一括して
- * 捌けるようにするためだけに公開する）。
+ * hub が投げる全エラーの基底（`instanceof HubError` で一括して捌けるように公開する）。
+ *
+ * 直接 throw するのは「下の 5 分類のどれでもない、利用者が分岐すべき失敗」だけ — 現状は
+ * `evictCachedAssets` が取得元の能力不足（キャッシュを持たない取得元）を断る 1 箇所。
  */
 export class HubError extends Error {
   /** 失敗時点で判明している利用可能 model / quant / dtype ラベル。 */
