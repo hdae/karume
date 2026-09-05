@@ -11,17 +11,15 @@
 
 ## Now
 
-- **0.10.0 はローカル完了（2026-09-05・lockstep bump `3f875e4`）** — push / GitHub Release /
-  JSR publish / `deno task smoke:published` はユーザー（runbook §4 / §5）。ノート草稿 =
-  `outputs/release/release-notes-v0.10.0.draft.md`。中身 = ADR 0093（中間バッファの静的 liveness
-  パッキング）+ BiRefNet HR / Lucida の初公開（`BIREFNET_SOURCES`）+ 網羅レビューの修正波。
-- **0.9.0 公開完了（2026-09-04）** — GitHub Release v0.9.0 → JSR 0.9.0 →
-  `deno task smoke:published` 緑。配布は **HF 10 リポ**（`karume-anima` / `karume-anima-extra` /
+- **0.10.0 公開完了（2026-09-05）** — lockstep bump `3f875e4` → GitHub Release v0.10.0 → JSR 0.10.0 →
+  `deno task smoke:published` 緑。中身 = ADR 0093（中間バッファの静的 liveness パッキング）+ BiRefNet
+  HR / Lucida の初公開（`BIREFNET_SOURCES`）+ 網羅レビューの修正波（公開面の差分の正本は
+  リリースノート v0.10.0）。配布は **HF 10 リポ**（`karume-anima` / `karume-anima-extra` /
   `karume-irodori-v4-small` / `karume-irodori-v4.1-small` / `karume-sbv2-jvnv` /
   `karume-gemma4`〈`-e2b` から改名済み〉/ `karume-siglip2`〈base + so400m 同居〉/
-  `karume-depth-anything-v2` / `karume-birefnet-hr`〈1024 + 2048 同居・2026-09-05 公開〉/
-  `karume-lucida`〈同〉）で、取得元対応表は **7 家族 10 エントリ**（birefnet 2 本は JSR 未リリース
-  = 次の bump で公開面へ）。未配布は vowel-detector だけ（[backlog](../docs/backlog.md)）。
+  `karume-depth-anything-v2` / `karume-birefnet-hr`〈1024 + 2048 同居〉/ `karume-lucida`〈同〉）で、
+  取得元対応表は **7 家族 10 エントリ**（全て JSR の公開面に出ている）。未配布は vowel-detector
+  だけ（[backlog](../docs/backlog.md)）。
 - **次の作業波は perf K-13 / K-14 だけ**（2026-09-04 裁定の c — a / b / d は消化・クローズ済み）。
   起票の正本は [perf-ledger](../docs/perf-ledger.md)、残件の正本は
   [backlog](../docs/backlog.md) now。
@@ -30,7 +28,7 @@
   パッチ ⑨（A）で decoder 末尾の巨大中間を消した。実測: 1024² 中間 6,283 → 749 MiB / 2048² 中間
   2,948 MiB・総確保 ≈ 4.1 GiB・run 7.5〜8.6 s。配布形は 1 リポ 2 モデル（モデル名 = 解像度・既定
   1024 — ADR 0092 決定 9）で `karume-birefnet-hr` / `karume-lucida` を **HF へ公開済み**
-  （2026-09-05・pin は `BIREFNET_SOURCES`）。残 = JSR bump で公開面へ出すこと。
+  （2026-09-05・pin は `BIREFNET_SOURCES`・0.10.0 で JSR の公開面へ出た）。
 - **可変 capacity（[ADR 0091](../docs/decisions/0091-gemma4-host-rope-variable-capacity.md)）の
   意図的な現状 4 点** — 欠落に見えるが設計どおり: ①RoPE 表を焼いた旧配布形は読めない
   ②`GreedySpec` / `GenerationProgramSpec` は `positionIds` を持たない（位置の唯一の供給口は

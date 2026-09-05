@@ -7,31 +7,15 @@
 > [perf-ledger](perf-ledger.md) が正本で、ここは波として参照するだけ ④by-design 制約の正本は
 > [limitations](limitations.md) — 作業化が裁定された時だけここに載る。
 
-## now — 0.10.0 リリース準備（2026-09-05）
+## now — 0.10.0 リリース後（2026-09-05）
 
-0.10.0 は lockstep bump（`3f875e4`）までローカル完了 — push → CI → GitHub Release → JSR publish →
-`deno task smoke:published` はユーザー（[release-runbook](release-runbook.md) §4 / §5）。事後の
-docs 同期（この見出しを「0.10.0 リリース後」へ・消化済み節の新設）は公開後に行う。2026-09-04 裁定の
-作業波 a〜d のうち残るのは **c だけ**（a / b は消化・d はクローズ）。波と独立に消化してよい残件は
-その下。
+0.10.0 は**公開完了**（2026-09-05 — lockstep bump `3f875e4` → GitHub Release v0.10.0 → JSR 0.10.0 →
+`deno task smoke:published` 緑・`KARUME_SOURCES` 10 本の疎通を確認。中身は下の消化済み節）。
+2026-09-04 裁定の作業波 a〜d のうち残るのは **c だけ**（a / b は消化・d はクローズ）。波と独立に
+消化してよい残件はその下。
 
 1. **c. perf K-13 / K-14**（prefill attention の K/V タイル再利用 / decode ①QK の並列化）:
    起票・合格線・kill 基準とも [perf-ledger](perf-ledger.md) が正本。
-2. **BiRefNet 2048² 工事 — 残るのは ④ の公開裁定だけ**（起票 2026-09-05 — ユーザー裁定。設計の
-   正本は ADR [0093](decisions/0093-transient-liveness-packing.md)）: A（recipe パッチ ⑨ = 1×1 conv と
-   bilinear upsample の順序交換で `cat` を消す・`--verify` 3 段・1024² / 2048² の系列と golden
-   再採取済み）/ B（静的 liveness パッキング — runtime へ結線済み）/ C（上限 preflight — B と同じ
-   計画関数）は **2026-09-05 に消化**。実測 = 1024² の中間 6,283 → 749 MiB（run 1.8 s）・2048² の
-   中間 2,948 MiB・総確保 ≈ 4.1 GiB・run 7.5〜8.6 s（RTX 3080 Ti — ADR 0093 Consequences）。
-   **④ も消化（2026-09-05 ユーザー裁定）**: 配布形は 1 リポ 2 モデル（モデル名 = 解像度・既定
-   `"1024"` — ADR [0092](decisions/0092-distribution-repos-and-sources.md) 決定 9）で
-   `models/karume-birefnet-hr` と `models/karume-lucida` を組み立て済み、e2e `SERIES` に 2048² 2 本を
-   実測 tolerance つきで追加済み。**公開済み（2026-09-05）**: `karume-birefnet-hr` / `karume-lucida` を
-   HF へアップロードし、`BIREFNET_SOURCES`（キー `birefnet-hr` / `lucida`）を pin 付きで新設。
-   公開面（JSR）へ出るのは次の bump。断片化は両リポとも 2048 側の shard 1 本が目安割れのまま
-   （削除 → 再作成でも 2 コミット法でも回復せず・DL 2.4 倍遅い —
-   [research 2026-08-09 の 2026-09-05 追記](research/2026-08-09-xet-fragmentation.md)。回復手段が
-   見つかったら上げ直す）。
 
 **残件**:
 
@@ -122,6 +106,34 @@ docs 同期（この見出しを「0.10.0 リリース後」へ・消化済み�
   収集する機能を足し、ユーザーが複数環境でサンプル集（名称・置き場は未定）を回した結果を集める
   （**起票のみ** — 収集する項目・置き場・オプトインの形は未設計）。
 - Pixel（8GB 級 Android Chrome）の `err.cause` 再判定 — [known-issues](known-issues.md)。
+
+## 消化済み（0.10.0 リリース — 2026-09-05）
+
+0.10.0 の中身（結果だけ残す — 設計の正本は各 ADR・実測は research・公開面の差分はリリースノート
+v0.10.0）:
+
+- **BiRefNet 2048² 工事 A / B / C / ④**（設計の正本 = ADR
+  [0093](decisions/0093-transient-liveness-packing.md)）: A（recipe パッチ ⑨ = 1×1 conv と bilinear
+  upsample の順序交換で `cat` を消す・`--verify` 3 段・1024² / 2048² の系列と golden 再採取）/
+  B（静的 liveness パッキング — runtime へ結線）/ C（上限 preflight — B と同じ計画関数）。実測 =
+  1024² の中間 6,283 → 749 MiB（run 1.8 s）・2048² の中間 2,948 MiB・総確保 ≈ 4.1 GiB・run 7.5〜8.6 s
+  （RTX 3080 Ti — ADR 0093 Consequences）。④ = 配布形は 1 リポ 2 モデル（モデル名 = 解像度・既定
+  `"1024"` — ADR [0092](decisions/0092-distribution-repos-and-sources.md) 決定 9）で
+  `karume-birefnet-hr` / `karume-lucida` を HF へ初公開し、`BIREFNET_SOURCES`（キー `birefnet-hr` /
+  `lucida`）を pin 付きで新設 — 0.10.0 で JSR の公開面へ出た（対応表は **7 家族 10 エントリ**）。
+  e2e `SERIES` に 2048² 2 本を実測 tolerance つきで追加。
+  **断片化**: 両リポとも 2048 側の shard 1 本が目安割れのまま（削除 → 再作成でも 2 コミット法でも
+  回復せず・DL 2.4 倍遅い —
+  [research 2026-08-09 の 2026-09-05 追記](research/2026-08-09-xet-fragmentation.md)。回復手段が
+  見つかったら上げ直す）。bump 後の焼き直し（runbook §0 — `generator` = `karume/0.10.0`）は
+  `karume.json` + `README.md` の 2 ファイルだけを上げ、shard は再アップロードしていない（断片化の
+  実測値は不変・pin はその revision）。
+- **網羅レビューの修正波**（所見の正本 = `.claude/reviews/` の 2026-09-03 以降の SUMMARY — git
+  追跡外）: 受理集合を変えず拒否集合を広げる向きの breaking（runtime の実行形ノブ 4 本の綴り検査・
+  見積りの入口 range-check・models の家族別引数 / manifest 検査の呼び出し口への移動・exporter の
+  配布計画の拒否）と修正多数 — 公開面の差分はリリースノート v0.10.0 が正本。安全 softmax ガード
+  変更の A/B は 0.9.0 公開資産 46 系列で差分ゼロ
+  （[research 2026-09-05](research/2026-09-05-softmax-guard-ab.md) — 上げ直し不要）。
 
 ## 消化済み（0.9.0 リリース — 2026-09-04）
 
