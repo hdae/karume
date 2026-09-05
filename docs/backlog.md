@@ -16,6 +16,14 @@
 
 1. **c. perf K-13 / K-14**（prefill attention の K/V タイル再利用 / decode ①QK の並列化）:
    起票・合格線・kill 基準とも [perf-ledger](perf-ledger.md) が正本。
+2. **キャッシュ保守 + 429 再試行（anima-web 要望・2026-09-05 裁定）**: hub に `listCachedAssets` /
+   `evictCachedAssets`（ADR [0094](decisions/0094-hub-cache-inventory-and-eviction.md) — 参照勘定は
+   manifest 1 本の中だけ・越境参照は残す）を実装済み。429 / 503 の再試行と HF 層の受信上限は取得層
+   `@hdae/fetch-cache` 側に実装済み（その ADR 0010 / 0011 — レビューと 0.7.0 公開は別セッション）。
+   **残 = fetch-cache 0.7.0 公開後の hub フォロー**: 依存を `^0.7.0` へ・`LoadManifestOptions.onRetry`
+   の透過・`transport.ts` の撤去（宣言超過の打ち切りは fetch-cache へ移った。content-length の事前
+   突合は移植しない — 汎用では Content-Encoding 越しの誤検知）。相 1（`prefetchFile`）は既に
+   `expectedBytes` を申告済みなので、`transport.ts` を撤去しても受信の上限は落ちない。
 
 **残件**:
 

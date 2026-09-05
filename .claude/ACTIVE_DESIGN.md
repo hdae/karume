@@ -20,6 +20,11 @@
   `karume-depth-anything-v2` / `karume-birefnet-hr`〈1024 + 2048 同居〉/ `karume-lucida`〈同〉）で、
   取得元対応表は **7 家族 10 エントリ**（全て JSR の公開面に出ている）。未配布は vowel-detector
   だけ（[backlog](../docs/backlog.md)）。
+- **キャッシュ保守面が入った（2026-09-05）** — `listCachedAssets` / `evictCachedAssets`（ADR
+  [0094](../docs/decisions/0094-hub-cache-inventory-and-eviction.md)）。参照勘定は manifest 1 本の中
+  だけで、全在庫の他の選択が守る・越境参照は残す。429 / 503 の再試行と HF 層の受信上限は取得層
+  `@hdae/fetch-cache` 側（その ADR 0010 / 0011・未公開）。fetch-cache 0.7.0 公開後に hub の `onRetry`
+  透過と `transport.ts` の撤去が残る（[backlog](../docs/backlog.md) now 2）。
 - **次の作業波は perf K-13 / K-14 だけ**（2026-09-04 裁定の c — a / b / d は消化・クローズ済み）。
   起票の正本は [perf-ledger](../docs/perf-ledger.md)、残件の正本は
   [backlog](../docs/backlog.md) now。

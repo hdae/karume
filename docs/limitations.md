@@ -1237,3 +1237,23 @@ known-issues「Metal で out-of-memory errorScope が沈黙する」）。つま
 事前見積り（`estimateSessionMemory`）を呼び手へ渡すことだが、見積りはグラフ入力の記号次元が全て
 束縛されていることを要し、ロード時に束縛値を持つ家族は gemma4 だけなので、席の設計は Phase B の
 実測後に行う（ADR 0089 追記 2026-09-01 — 未実装）。
+
+## hub: キャッシュ在庫の照会と選択単位の削除は manifest 1 本の中でしか勘定しない（by-design — 2026-09-05 裁定）
+
+`listCachedAssets` / `evictCachedAssets`（ADR
+[0094](decisions/0094-hub-cache-inventory-and-eviction.md)）の参照勘定は、渡した `LoadedManifest`
+1 本の (model, quant) の組だけを数える。
+
+- **越境参照は参照元からは消さない**（`kept: "cross-repo"`）。逆向きに、参照先 repo の選択を消すと
+  それを借りている別 repo の選択（例: anima-extra が anima の text stack を参照する形）は部分在庫に
+  戻る — hub は参照元の manifest を知らないので守れない。壊れはしない: 次のロードで足りない分だけ
+  再取得になる（キャッシュは最適化であって正しさの要件ではない）。
+- **部分在庫の選択は共有ファイルを守らない**。守るのは全参照が在庫にある選択だけ（アプリが
+  「ダウンロード済み」と表示する選択と一致させる）。
+- **ローカル取得元は「全て在庫あり」と答え、削除は `HubError` で断る**。実体の欠損は読む時に
+  落ちる（照会のたびにディレクトリを舐める I/O は払わない）。ディレクトリの中身は取得物ではなく
+  利用者の資産なので、hub が消してよいものが無い。
+- **`CacheStorage` が無い環境では、キャッシュを持つ取得元（HF）が全て `missing`・削除は空**
+  （取得層の契約どおり）。ローカル取得元は上のとおりキャッシュを介さないので、`CacheStorage` の
+  有無に関わらず「全て在庫あり」と答える。`Cache.keys()` 未実装のランタイム（Deno 2.8 以前）では
+  取得層が fail loud に throw する。

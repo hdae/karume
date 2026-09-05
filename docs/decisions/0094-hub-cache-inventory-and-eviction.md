@@ -1,0 +1,107 @@
+# 0094: hub のキャッシュ在庫照会と選択単位の削除（参照勘定）— ADR 0080 決定 5 の消化
+
+- Status: accepted（2026-09-05 — ユーザー裁定: 参照勘定は「同じ manifest の全在庫ありの他の選択が
+  守る」・manifest を跨ぐ勘定は持たず、足りない分は次のロードで再取得する形で一旦実装）
+- Date: 2026-09-05
+- 関連: ADR [0080](0080-hub-fetch-cache-050.md)（決定 5 — repo 単位の細粒度掃除
+  `pruneHubCache` をキャッシュ保守波へ先送り。**本 ADR がその波**）/
+  [0086](0086-distribution-source.md)（取得元契約の optional 能力 — 本 ADR が ⑥⑦ を足す）/
+  [0038](0038-manifest-v1.md) §7（越境参照 — 実体の持ち主は参照先 repo）/
+  取得層 `@hdae/fetch-cache` の ADR 0010（429 / 503 の再試行）・0011（HF 層の受信上限）
+
+## Context
+
+anima-web がモデルマネージャー（ダウンロードとロードの分離）を実装し、「model × quant が
+ダウンロード済みか」を判定するために取得層 `@hdae/fetch-cache` へ直依存して `listKeys` の内容キー
+`["hf", kind, repo, path, sha256]` を manifest の `FileRef` と突合していた。公開 API と文書化された
+キー式だけを使ってはいるが、**取得層のキー設計がアプリ側へ漏れている**（越境参照の repo 解決や
+`fileRefKey` の一意化まで、hub が既に持つ規則をアプリが再現している）。あわせて「モデル単位で
+キャッシュを消したい」要望があり、こちらは quant / モデル間でファイルを共有する（quant を替えても
+tokenizer や f16 の text encoder は同じ 1 本）ため参照勘定が要る。
+
+hub の掃除 API は名前空間まるごとの `clearHubCache` だけで、細粒度は ADR 0080 決定 5 が
+「キャッシュ保守波の `pruneHubCache`」へ先送りしていた。
+
+同じ要望の 3 件目「shard 分割で要求数が増え HF の 429 が出やすくなった — `Retry-After` に従って
+再接続してほしい」は取得層の話なので、hub ではなく fetch-cache 側で実装した（その ADR 0010）。
+その際に hub の受信バイトの門（`transport.ts`）のうち移植する価値のある部分（宣言を超えた時点での
+打ち切り）も fetch-cache の HF 層へ寄せた（その ADR 0011）。
+
+## Decision
+
+### 1. 公開面は 2 本 — 単位は取得と同じ「model / quant の 1 組」
+
+```ts
+listCachedAssets(loaded: LoadedManifest, selection?: ResolveOptions, options?: { caches? })
+  → { cached: FileRef[]; missing: FileRef[] }
+evictCachedAssets(loaded: LoadedManifest, selection?: ResolveOptions, options?: { caches? })
+  → { evicted: FileRef[]; kept: { ref; reason: "shared" | "cross-repo"; sharedWith: string[] }[] }
+```
+
+第 1 引数を `LoadedManifest` にするのは、repo と取得元（HF かローカルか）を持つのがこの値だけ
+だから（`session.ts`）。素の `Manifest` を受けると repo を別引数で渡させることになり、越境参照の
+規則を呼び手が再現する今の形へ戻る。参照列は `resolveFiles` の値を `fileRefKey` で一意化したもの
+（`fetchAssets` と同じ規則・同じ順）。boolean の便宜関数は足さない（`missing.length === 0` で足りる）。
+
+### 2. 在庫と削除は取得元の optional 能力（⑥ `inventory` / ⑦ `evict`）
+
+キャッシュキーの綴りは取得層の所有物で、hub の共通層が組み立てると取得層の版が上がるたびに
+「消したつもりで残る」形が生まれる。そこで `PinnedSource` に optional 能力を 2 つ足し、共通層は
+参照を origin ごと（`crossRefOf` の (repo, revision) の組・無ければセッションの取得元）に分けて
+問い合わせるだけにする。
+
+- **HF 取得元**: `listKeys(["hf", "model", repo])` を repo ごとに **1 回**引いて (path, sha256) で
+  突合する（参照ごとに引くと参照の本数だけキャッシュ全体の列挙が走る）。削除は 5 要素の完全キーで
+  `evict`（プレフィックス意味論だが完全キーなので対象はそのエントリ 1 件）。キー式を綴るのは
+  `sources/hf.ts` の 1 か所だけ。
+- **ローカル取得元**: `inventory` は「渡された全部がある」と答える（相 1 を持たないのと同じ
+  理屈 — 直接読める取得元では「後の読みが安く済む状態」が最初から満たされている。実体の欠損は
+  読む時に落ちる）。`evict` は持たない — ディレクトリの中身は取得物ではなく利用者の資産で、hub が
+  消してよいものが 1 つも無い。共通層は `HubError` で断る。
+
+### 3. 参照勘定は manifest 1 本の中で、全在庫の他の選択だけが守る
+
+- 同じ manifest の他の (model, quant) のうち**全参照が在庫にあるもの**が使うファイルは残す
+  （`kept: "shared"`・`sharedWith` に `"<model>/<quant>"`）。アプリが「ダウンロード済み」と表示する
+  選択と一致させる。
+- **部分在庫の選択は守らない**。どのみち次に使うとき残りを取りに行くので、守らせると「消せないのに
+  使えないファイル」だけが残る。
+- **越境参照は参照元からは消さない**（`kept: "cross-repo"`）。実体の持ち主は参照先 repo で、参照元の
+  都合で他人のリポの在庫を消すことになる。消したいときは参照先 repo の manifest を開いて消す。
+- **manifest を跨ぐ勘定はしない**。例えば anima-extra は anima の text stack を越境参照しているので、
+  anima 側の選択を消すと extra は部分在庫に戻り、次のロードで足りない分だけ再取得になる
+  （キャッシュは正しさの要件ではなく最適化 — 壊れはしない）。より完全な形（複数 manifest を渡す・
+  守る選択を明示する）は必要になったときに足す。
+- もともと在庫に無い参照は結果に載らない。manifest 本体（`karume.json`）のエントリは対象外
+  （URL キー・小さい — 丸ごと消すのは `clearHubCache`）。
+
+### 4. 429 / 503 の再試行と受信上限は取得層側（hub は公開後に追随）
+
+fetch-cache 本体に入れた（既定で有効・`Retry-After` 優先・無ければ 1 / 2 / 4 / 8 / 16 秒・最大
+5 回・`onRetry` 通知・`signal` で中断・`retry: false` で従来どおり）。hub 側の追随 — 依存を
+`^0.7.0` へ・`LoadManifestOptions.onRetry` の透過・`transport.ts` の撤去（宣言超過の打ち切りは
+fetch-cache の HF 層へ移った。content-length の事前突合は汎用ライブラリでは Content-Encoding 越しの
+誤検知になるので移植しない）— は fetch-cache 0.7.0 の公開後に別波で行う。
+
+## 検討した代替案
+
+- **anima-web の現行形（fetch-cache 直依存）を認める**: 公開 API だけを使ってはいるが、越境参照の
+  repo 解決と一意化をアプリが再現している。hub が同じ規則を内側で持てば直依存を返上できる。
+- **`isSelectionCached` の boolean 版**: API 面が増えるだけ（`missing.length === 0`）。
+- **参照勘定を「1 ファイルでも在庫がある選択が守る」/「全選択が守る」**: 前者は削除で空く容量が
+  減り、後者は共有ファイルが事実上消えない（「共有しなくなったら消せる」の要望を満たさない）。
+- **429 の再試行を hub の transport ラッパに置く**: hub に継ぎ目はあるが、他の下流（yomi /
+  sbv2-web）に効かず、取得層が既に持つ「HTTP エラーの扱い」と二重になる（ユーザー裁定で
+  fetch-cache 側）。
+
+## Consequences
+
+- hub の公開 API は追加のみ（次の minor）。取得元契約は内部（`mod.ts` は輸出しない）。
+- `CacheStorage` が無い環境では、キャッシュを持つ取得元（HF）が全て `missing`・削除は空（取得層の
+  契約どおり。hub で特別扱いしない）。ローカル取得元は決定 2 のとおりキャッシュを介さないので、
+  `CacheStorage` の有無に関わらず「全て在庫あり」と答える。`Cache.keys()` 未実装のランタイム
+  （Deno 2.8 以前）では取得層が fail loud に throw する。
+- anima-web は `@hdae/fetch-cache` への直依存を返上できる。
+- 将来席: manifest を跨ぐ参照勘定（複数 manifest・守る選択の明示）/ 参照先 repo だけを対象にする
+  削除面 / 「取得元の能力不足」を専用エラー型へ切り出す（今は基底 `HubError`）/ ローカル取得元の
+  在庫を実在検査にする（照会のたびにディレクトリを舐める I/O を払うなら）。
