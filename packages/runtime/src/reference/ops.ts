@@ -469,6 +469,15 @@ export const referenceGather = (src: RefTensor, index: RefTensor): RefTensor => 
 };
 
 /**
+ * f32 の最大有限値。`amax` / `amin` の縮約 identity（GPU 側は WGSL に無限大リテラルが無いため
+ * この値を identity に使う — 参照もそちらへ揃える）。
+ *
+ * MUST: codegen の定数を輸入しない（`src/codegen/reduce.ts` とは別に十進表記から書き下す —
+ * 参照と codegen の二重実装を保つ規律）。
+ */
+const F32_MAX = Math.fround(3.402823466e38);
+
+/**
  * 1 軸の reduce（keepdim 無し）。縮約軸 `axis` は attrs の `dim`（既定値補完はしない）。
  *
  * 走査は「出力要素ごとに縮約軸を `inner` 送りで舐める」形で、最終次元（`inner == 1`）は
@@ -477,6 +486,11 @@ export const referenceGather = (src: RefTensor, index: RefTensor): RefTensor => 
  *
  * bool 入力の `sum` は**真の個数**（出力 i32 — 契約表の写像）。f64 で数えてから整数配列へ
  * 落とすので、縮約長が 2^24 を超えても丸まらない。
+ *
+ * MUST: `amax` / `amin` は identity（∓{@link F32_MAX}）**始まり**で畳む。先頭要素始まりにすると
+ * 縮約軸が全て −Infinity の行で参照だけが −Infinity を返し、識別子を identity として畳む GPU
+ * 側（−F32_MAX）と例外なしに値が割れる（tolerance は EXACT なので吸収されない）。有限入力は
+ * 全て [−F32_MAX, F32_MAX] に入るので、この始点で値は 1 ビットも動かない。
  */
 export const referenceRowReduce = (
   op: ReduceOpName,
@@ -504,8 +518,8 @@ export const referenceRowReduce = (
       values[index] = outDtype === "f32" ? Math.fround(acc) : acc;
       continue;
     }
-    let acc = x.data[base];
-    for (let i = 1; i < dim; i += 1) {
+    let acc = op === "amax" ? -F32_MAX : F32_MAX;
+    for (let i = 0; i < dim; i += 1) {
       const value = x.data[base + i * inner];
       acc = op === "amax" ? Math.max(acc, value) : Math.min(acc, value);
     }

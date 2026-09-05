@@ -16,10 +16,12 @@
 // - 量子化格子を ±128 にする → 絶対値最大が 128（= i8 では −128）へ乗り ③が落ちる
 // - 乗算順序を逐次形へ崩す → ⑤が落ちる（畳み形と値が割れるデータを選んである）
 // - group を跨いで i32 のまま足し込む（丸めが 1 回に減る）→ ⑤c が落ちる（w4a8 の畳み順）
+// - w4a8 の group 整除の門を外す → ⑤d が落ちる（端数の k が NaN / 隣の行の混入を返す）
 // - `roundTiesToEven` を `Math.round` にする → ⑦が落ちる（同点が +∞ 方向へ倒れる）
 
-import { assert, assertEquals, assertNotEquals } from "@std/assert";
+import { assert, assertEquals, assertNotEquals, assertThrows } from "@std/assert";
 import {
+  I8a8Error,
   quantizeRowsReference,
   referenceAttentionPvI8a8Core,
   referenceAttentionPvQuant,
@@ -182,6 +184,29 @@ Deno.test("w4a8 参照: group ごとに f32 へ畳む（全 group を 1 本の�
   });
   assertEquals(out[0], -33.45867156982422, "group ごとの畳み");
   assertNotEquals(out[0], -33.45866775512695, "全 group を 1 本の和にまとめている");
+});
+
+// ⑤d group 整除の門
+Deno.test("w4a8 参照: k が group 長で割り切れない入力は計算に入る前に落ちる", () => {
+  // groups = 48 / 32 = 1.5。門が無いと group ループが `group = 1` まで回り、内側が
+  // `q[row·48 + 32..63]` を読む — 実測では m=1 で全要素 NaN（q の範囲外 = undefined）、
+  // m ≥ 2 では row 0 / col 0 だけが**次の行の活性**を足し込んだ有限の誤値になる
+  // （どちらも「オラクルが黙って別の数を返す」形で、atol=0 の主張が意味を失う）。
+  assertThrows(
+    () =>
+      referenceLinearW4a8({
+        x: new Array(48).fill(1),
+        weight: new Array(96).fill(1),
+        weightScale: new Array(4).fill(1),
+        bias: [0, 0],
+        m: 1,
+        n: 2,
+        k: 48,
+        groupSize: 32,
+      }),
+    I8a8Error,
+    "group",
+  );
 });
 
 // ---------------------------------------------------------------------------

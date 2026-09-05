@@ -526,13 +526,18 @@ export const createShardValidator = (graph: IrGraph): ShardValidator => {
 };
 
 /**
- * scale キーが**どの** initializer の実体キーとも衝突せず、かつ 2 本の initializer で
- * **共有されていない**ことを検査する。
+ * initializer どうしのキーの取り違え 3 種を落とす: scale キーが**どの** initializer の実体キーと
+ * も衝突しないこと、scale キーが 2 本の initializer で**共有されていない**こと、そして
+ * **実体キーが共有されていない**こと。
  *
  * MUST: 別の initializer の実体を scale として読むと、dtype も shape も偶然合う組で沈黙誤値に
  * なる。共有も同じ機序で、チャネル数（i4 なら行数と group 数）さえ揃えば形検査を両方が通り、
  * 後発の重みが先発の scale で逆量子化される。IR v1 は重み tying を表現する語彙を持たない
  * （`storage.scale` はキー 1 本きり）ので、共有形は取り違えだけを意味する。
+ * MUST: 実体キーの共有も同じ理由で落とす（**1 実体 1 initializer**）。エクスポータ側が
+ * 1:1 を MUST として発行している規則の読み手側の鏡像で、通すと実行層が initializer 名ごとに
+ * 確保・転送するため同じバイト列が 2 度 GPU へ上がり（無診断の VRAM 倍化）、i8 / i4 では
+ * **同じ量子化バイトが 2 つの別 scale で逆量子化される**。
  * グラフ単体で決まる規則なので shard を見る前（validator 構築時）に 1 回だけ掛ける —
  * shard ごとに掛けると、衝突相手が別 shard にいる配布形で検出が「たまたま同居したときだけ」に
  * なる。
@@ -548,6 +553,12 @@ const assertNoScaleKeyCollision = (graph: IrGraph): void => {
     if (earlierScale !== undefined) {
       throw new ContainerError(
         `initializer '${earlierScale}': scale テンソル '${initializer.tensor}' が initializer '${name}' の実体と同じキー`,
+      );
+    }
+    const earlierEntity = entityOwner.get(initializer.tensor);
+    if (earlierEntity !== undefined) {
+      throw new ContainerError(
+        `initializer '${name}': 実体テンソル '${initializer.tensor}' が initializer '${earlierEntity}' と共有されている（1 実体 1 initializer MUST）`,
       );
     }
     entityOwner.set(initializer.tensor, name);

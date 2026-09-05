@@ -345,6 +345,35 @@ Deno.test("reduce は attrs.dim の軸だけを畳む（軸ごとに答えが割
 });
 
 /**
+ * amax / amin の縮約 identity（裁定 4a）— 全 −Infinity 行 / 全 +Infinity 行で、CPU 参照が GPU
+ * 側（`codegen/reduce.ts` の identity ∓F32_MAX）と**同じ値**を返すことを固定する。
+ *
+ * MUST: 期待値は参照からも codegen からも輸入せず、f32 の最大有限値のリテラルで持つ
+ * （どちらかの定数を引くと identity を動かす退行が期待値へも乗って恒真になる）。
+ * 契約層は長さ 0 の軸だけを拒む（`ops/shapes.ts`）ので、全 −inf 行は正規の入力。
+ */
+Deno.test("amax / amin は identity 始まりで畳む（全 ±inf 行が GPU と同じ ∓F32_MAX になる）", () => {
+  const f32Max = 3.4028234663852886e38;
+  const negInf = Number.NEGATIVE_INFINITY;
+  const posInf = Number.POSITIVE_INFINITY;
+
+  // 行 0 = 全 −inf（identity がそのまま残る）/ 行 1 = 有限混じり（identity は勝たない）
+  const amax = referenceRowReduce("amax", t([2, 3], [negInf, negInf, negInf, -5, -1, -9]), 1);
+  assertEquals([...amax.data], [-f32Max, -1]);
+
+  const amin = referenceRowReduce("amin", t([2, 3], [posInf, posInf, posInf, 5, 1, 9]), 1);
+  assertEquals([...amin.data], [f32Max, 1]);
+
+  // +inf を含む行の amax は +inf のまま（identity は上端を切り詰めない）
+  assertEquals([...referenceRowReduce("amax", t([1, 2], [posInf, 1]), 1).data], [posInf]);
+  // NaN の伝播は identity 始まりでも変わらない（GPU 側の NaN 伝播 max/min と同じ）
+  assertEquals(
+    Number.isNaN(referenceRowReduce("amax", t([1, 2], [Number.NaN, 1]), 1).data[0]),
+    true,
+  );
+});
+
+/**
  * argmax の CPU 参照（ADR 0068 決定 2）— タイブレーク / NaN / 全 −inf 行を torch の実測値
  * リテラルで固定する。
  *
@@ -1569,6 +1598,23 @@ Deno.test("applyReferenceOp は契約表の kind で分岐し、アリティ違�
   );
 });
 
+// state を触る op は CPU 参照を持たない（値ではなく context 所有バッファへの effect）。素通り
+// させて 0 本の出力列を返すと「参照と GPU が一致した」と見なす parity テストが書けてしまうので、
+// 統一入口の**両方**（複数形・単数形）でここが落ちることを縛る。
+Deno.test("applyReferenceOp は state_append を素通りさせず CPU 参照の不在で落とす", () => {
+  const x = t([1, 1, 1, 1], [1]);
+  assertThrows(
+    () => applyReferenceOpOutputs("state_append", [x], {}),
+    ReferenceOpError,
+    "CPU 参照を持たない",
+  );
+  assertThrows(
+    () => applyReferenceOp("state_append", [x], {}),
+    ReferenceOpError,
+    "CPU 参照を持たない",
+  );
+});
+
 Deno.test("compareTensors は dtype で許容誤差を選び、dtype 混在を拒否する", () => {
   assertEquals(EXACT_TOLERANCE, { atol: 0, rtol: 0 });
   // f32 は既定の許容誤差で通る差
@@ -1606,4 +1652,28 @@ Deno.test("allclose は NaN / Inf をどちらの側でも不合格にする", (
   assertEquals(DEFAULT_TOLERANCE.atol, 1e-5);
   assertEquals(DEFAULT_TOLERANCE.rtol, 1e-3);
   assertThrows(() => allclose(expected, Float32Array.from([1])), AllcloseError);
+});
+
+// 報告欄の**意味**を縛る（pass だけを見ると、worstIndex / maxRelError が何を指すかは誰も
+// 固定していない）。非有限が「後から」現れる形と、参照 0 の相対誤差の床が対象。
+Deno.test("allclose の報告欄は非有限を優先し、参照 0 の相対誤差に床を置く", () => {
+  // 先に絶対誤差 10 を見ていても、非有限が出た時点で worstIndex はそちらへ移る
+  const mixed = allclose(Float32Array.from([10, Number.NaN, 0]), Float32Array.from([0, 1, 2]));
+  assertEquals(mixed.failCount, 3);
+  assertEquals(mixed.nonFiniteCount, 1);
+  assertEquals(mixed.worstIndex, 1);
+  assertEquals(mixed.maxAbsError, Number.POSITIVE_INFINITY);
+
+  // 参照 0 の相対誤差は |y| の床 1e-12 で割る（0 除算で Infinity にしない）
+  const atZero = allclose(Float32Array.from([0, 10]), Float32Array.from([0, 0]));
+  assertEquals(atZero.maxRelError, 10 / 1e-12);
+
+  // NOTE: 長さ 0 どうしは**現状** pass:true（ループが 1 度も回らない）。空を許すか
+  // AllcloseError にするかは未裁定（レビュー L-R3-4）なので、ここは現状の観測値を記録して
+  // 意図しない変化だけを捕まえる — 裁定が出たらこの 1 本を意図的に反転する。
+  const empty = allclose(new Float32Array(0), new Float32Array(0));
+  assertEquals(
+    { pass: empty.pass, failCount: empty.failCount, worstIndex: empty.worstIndex },
+    { pass: true, failCount: 0, worstIndex: 0 },
+  );
 });

@@ -84,8 +84,22 @@ const SBV2_TOLERANCE: Tolerance = { atol: 1e-6, rtol: 1e-5 };
  * | p512     | 512 | 1.55e-5  | 5.25e-6 | 1.06e-5 | 2.15e-6 | 3.61         |
  * | padded   | 16  | 7.33e-6  | 5.36e-6 | 1.20e-5 | 2.21e-6 | 2.07         |
  *
- * atol 1e-4 は実測最悪 1.75e-5 の約 5.7 倍。rtol 1e-5 の寄与は値域上端 |y| = 3.61 でも
- * 3.6e-5（atol の 1/3 弱）で、判定を主導しない。
+ * **閾値は出力位置ごとに導く**（irodori / dacvae と同じ形）。1 本の定数を 4 出力へ当てると、
+ * 実測の小さい `logs_p` だけ実効余裕が桁で開き（1e-4 は 3.22e-6 の 31 倍 — 他 3 本は約 5.7 倍）、
+ * そこに閉じた 5 倍規模の回帰が緑のまま通る。並びの正本は `sbv2/export.py` の
+ * `FRONT_OUTPUT_NAMES = (logw_sdp, logw_dp, m_p, logs_p)`（golden の `output.2` が
+ * `[1,192,P]` で \|ref\| 上端 3.32 = 下の p203 行と一致することを実測で確認）。
+ * 各出力の実測最悪 × 5〜10 で丸めた値:
+ *
+ * | 出力     | 実測最悪 | atol | 倍率 |
+ * | -------- | -------- | ---- | ---- |
+ * | logw_sdp | 1.55e-5  | 1e-4 | 6.5  |
+ * | logw_dp  | 1.75e-5  | 1e-4 | 5.7  |
+ * | m_p      | 1.57e-5  | 1e-4 | 6.4  |
+ * | logs_p   | 3.22e-6  | 2e-5 | 6.2  |
+ *
+ * rtol 1e-5 の寄与は値域上端 |y| = 3.61 でも 3.6e-5 で、判定を主導しない。`logs_p` は出力
+ * 自身の値域上端が 1.07（golden 実測）なので寄与は 1.1e-5 に留まる。
  *
  * 誤差が dp 単体（maxAbs 2.62e-6）より 1 桁大きいのは、front が 6 層の相対位置注意 Encoder と
  * sdp の spline 4 段（softmax / cumsum / 逆二次解）を通す深いグラフだから。出所は tiny golden と
@@ -95,7 +109,12 @@ const SBV2_TOLERANCE: Tolerance = { atol: 1e-6, rtol: 1e-5 };
  * 実装バグ（添字ずれ・軸取り違え・マスク経路の取りこぼし・窓幅の取り違え）の誤差は出力の
  * 値域と同じ O(1) で、この閾値の 4 桁上に出る。
  */
-const SBV2_FRONT_TOLERANCE: Tolerance = { atol: 1e-4, rtol: 1e-5 };
+const SBV2_FRONT_TOLERANCES: readonly Tolerance[] = [
+  { atol: 1e-4, rtol: 1e-5 }, // logw_sdp
+  { atol: 1e-4, rtol: 1e-5 }, // logw_dp
+  { atol: 1e-4, rtol: 1e-5 }, // m_p
+  { atol: 2e-5, rtol: 1e-5 }, // logs_p
+];
 
 /**
  * 実重み SBV2 flow（TransformerCouplingBlock reverse）の許容誤差。
@@ -221,8 +240,16 @@ const SBV2_F16_TOLERANCE: Tolerance = { atol: 1e-6, rtol: 1e-5 };
  * | p512     | 512 | 3.62e-5  | 6.91e-6 | 7.73e-6 | 1.28e-6 | 3.61         |
  * | padded   | 16  | 2.27e-6  | 1.55e-6 | 3.64e-6 | 1.01e-6 | 2.07         |
  *
- * atol 3e-4 は実測最悪 3.62e-5（p512 の `logw_sdp`）の約 8.3 倍。rtol 1e-5 の寄与は値域上端
- * \|y\| = 3.61 でも 3.6e-5（atol の 1/8）で、判定を主導しない。
+ * **閾値は出力位置ごとに導く**（f32 系列と同じ規律）。各出力の実測最悪 × 5〜10 で丸めた値:
+ *
+ * | 出力     | 実測最悪 | atol | 倍率 |
+ * | -------- | -------- | ---- | ---- |
+ * | logw_sdp | 3.62e-5  | 3e-4 | 8.3  |
+ * | logw_dp  | 6.91e-6  | 5e-5 | 7.2  |
+ * | m_p      | 1.06e-5  | 1e-4 | 9.4  |
+ * | logs_p   | 1.52e-6  | 1e-5 | 6.6  |
+ *
+ * rtol 1e-5 の寄与は値域上端 \|y\| = 3.61 でも 3.6e-5 で、判定を主導しない。
  *
  * **5 ターゲットで唯一、f32 系列より実測が有意に大きい**（1.75e-5 → 3.62e-5 の 2.1 倍）。
  * 伸びているのは `logw_sdp` = sdp の spline（softmax / cumsum / 逆二次解）を通る出力だけで、
@@ -231,7 +258,12 @@ const SBV2_F16_TOLERANCE: Tolerance = { atol: 1e-6, rtol: 1e-5 };
  * 同じ fma 融合・縮約順序・超越関数の実装差で、増えたのは増幅率）。実装バグ（添字ずれ・
  * 軸取り違え・マスク経路の取りこぼし）の誤差は出力の値域と同じ O(1) で、この閾値の 3 桁上。
  */
-const SBV2_F16_FRONT_TOLERANCE: Tolerance = { atol: 3e-4, rtol: 1e-5 };
+const SBV2_F16_FRONT_TOLERANCES: readonly Tolerance[] = [
+  { atol: 3e-4, rtol: 1e-5 }, // logw_sdp
+  { atol: 5e-5, rtol: 1e-5 }, // logw_dp
+  { atol: 1e-4, rtol: 1e-5 }, // m_p
+  { atol: 1e-5, rtol: 1e-5 }, // logs_p
+];
 
 /**
  * **f16 系列**の flow（TransformerCouplingBlock reverse）の許容誤差。
@@ -339,8 +371,16 @@ const SBV2_I8_TOLERANCE: Tolerance = { atol: 1e-6, rtol: 2e-5 };
  * | p512     | 512 | 2.37e-5  | 7.63e-6 | 2.16e-5 | 6.47e-6 | 3.65         |
  * | padded   | 16  | 4.29e-6  | 4.65e-6 | 3.31e-6 | 1.40e-6 | 2.12         |
  *
- * atol 2e-4 は実測最悪 2.37e-5（p512 の `logw_sdp`）の約 8.4 倍。rtol 1e-5 の寄与は値域上端
- * \|y\| = 3.65 でも 3.7e-5（atol の 1/5）で、判定を主導しない。
+ * **閾値は出力位置ごとに導く**（f32 系列と同じ規律）。各出力の実測最悪 × 5〜10 で丸めた値:
+ *
+ * | 出力     | 実測最悪 | atol | 倍率 |
+ * | -------- | -------- | ---- | ---- |
+ * | logw_sdp | 2.37e-5  | 2e-4 | 8.4  |
+ * | logw_dp  | 9.06e-6  | 5e-5 | 5.5  |
+ * | m_p      | 2.16e-5  | 2e-4 | 9.3  |
+ * | logs_p   | 6.47e-6  | 5e-5 | 7.7  |
+ *
+ * rtol 1e-5 の寄与は値域上端 \|y\| = 3.65 でも 3.7e-5 で、判定を主導しない。
  *
  * **5 ターゲットで唯一 f32 系列より実測が有意に大きい**のは f16 系列と同じ構造（f32 1.75e-5 →
  * i8 2.37e-5 = 1.4 倍、f16 は 2.1 倍）で、伸びているのは `logw_sdp`（sdp の spline 経路）と
@@ -348,7 +388,12 @@ const SBV2_I8_TOLERANCE: Tolerance = { atol: 1e-6, rtol: 2e-5 };
  * 縮約順序差の増幅率が上がる、という f16 系列で立てた読みと整合する（i8 のほうが丸めは粗いのに
  * 増幅は小さい — 丸め幅そのものではなく分点の動き方で決まることの傍証）。
  */
-const SBV2_I8_FRONT_TOLERANCE: Tolerance = { atol: 2e-4, rtol: 1e-5 };
+const SBV2_I8_FRONT_TOLERANCES: readonly Tolerance[] = [
+  { atol: 2e-4, rtol: 1e-5 }, // logw_sdp
+  { atol: 5e-5, rtol: 1e-5 }, // logw_dp
+  { atol: 2e-4, rtol: 1e-5 }, // m_p
+  { atol: 5e-5, rtol: 1e-5 }, // logs_p
+];
 
 /**
  * **i8 系列**の flow（TransformerCouplingBlock reverse）の許容誤差。
@@ -415,34 +460,36 @@ const SBV2_I8_DEC_TOLERANCE: Tolerance = { atol: 5e-5, rtol: 1e-6 };
 const SBV2_I8_VOICE_TOLERANCE: Tolerance = { atol: 1.5e-5, rtol: 1e-6 };
 
 /**
- * ターゲット → 許容誤差。**ターゲットごとに実測から導く**（`SBV2_TOLERANCE` の MUST）ので、
- * 1 本の定数を共有しない。表の網羅性は下の「資産の完全性」テストが EXPECTED_TARGETS と
- * 突き合わせて固定する — 新しいターゲットを足して tolerance を導き忘れると赤になる。
+ * ターゲット → 許容誤差（**出力位置ごとの配列**）。**ターゲットごとに実測から導く**
+ * （`SBV2_TOLERANCE` の MUST）ので、1 本の定数を共有しない。表の穴は「別ターゲット / 別出力の
+ * 値で突合する」沈黙誤りになるので、本数が IR の出力数と合っているかもケースごとに検査する。
+ * 表の網羅性は下の「資産の完全性」テストが EXPECTED_TARGETS と突き合わせて固定する —
+ * 新しいターゲットを足して tolerance を導き忘れると赤になる。
  */
-const TOLERANCES: Readonly<Record<string, Tolerance>> = {
-  dp: SBV2_TOLERANCE,
-  front: SBV2_FRONT_TOLERANCE,
-  flow: SBV2_FLOW_TOLERANCE,
-  dec: SBV2_DEC_TOLERANCE,
-  voice: SBV2_VOICE_TOLERANCE,
+const TOLERANCES: Readonly<Record<string, readonly Tolerance[]>> = {
+  dp: [SBV2_TOLERANCE],
+  front: SBV2_FRONT_TOLERANCES,
+  flow: [SBV2_FLOW_TOLERANCE],
+  dec: [SBV2_DEC_TOLERANCE],
+  voice: [SBV2_VOICE_TOLERANCE],
 };
 
 /** f16 系列の表。**f32 の表を流用しない**（系列間の tolerance 流用禁止 — 上の MUST）。 */
-const F16_TOLERANCES: Readonly<Record<string, Tolerance>> = {
-  dp: SBV2_F16_TOLERANCE,
-  front: SBV2_F16_FRONT_TOLERANCE,
-  flow: SBV2_F16_FLOW_TOLERANCE,
-  dec: SBV2_F16_DEC_TOLERANCE,
-  voice: SBV2_F16_VOICE_TOLERANCE,
+const F16_TOLERANCES: Readonly<Record<string, readonly Tolerance[]>> = {
+  dp: [SBV2_F16_TOLERANCE],
+  front: SBV2_F16_FRONT_TOLERANCES,
+  flow: [SBV2_F16_FLOW_TOLERANCE],
+  dec: [SBV2_F16_DEC_TOLERANCE],
+  voice: [SBV2_F16_VOICE_TOLERANCE],
 };
 
 /** i8 系列の表。**他系列の表を流用しない**（同上）。 */
-const I8_TOLERANCES: Readonly<Record<string, Tolerance>> = {
-  dp: SBV2_I8_TOLERANCE,
-  front: SBV2_I8_FRONT_TOLERANCE,
-  flow: SBV2_I8_FLOW_TOLERANCE,
-  dec: SBV2_I8_DEC_TOLERANCE,
-  voice: SBV2_I8_VOICE_TOLERANCE,
+const I8_TOLERANCES: Readonly<Record<string, readonly Tolerance[]>> = {
+  dp: [SBV2_I8_TOLERANCE],
+  front: SBV2_I8_FRONT_TOLERANCES,
+  flow: [SBV2_I8_FLOW_TOLERANCE],
+  dec: [SBV2_I8_DEC_TOLERANCE],
+  voice: [SBV2_I8_VOICE_TOLERANCE],
 };
 
 const MODEL_FILE = "model.safetensors";
@@ -458,8 +505,8 @@ type Sbv2Series = {
   /** テスト名に出る系列名。 */
   readonly name: string;
   readonly root: URL;
-  /** ターゲット → 許容誤差（**系列ごとに実測導出**）。 */
-  readonly tolerances: Readonly<Record<string, Tolerance>>;
+  /** ターゲット → 出力位置ごとの許容誤差（**系列ごとに実測導出**）。 */
+  readonly tolerances: Readonly<Record<string, readonly Tolerance[]>>;
   /**
    * この系列の資産が宣言しているべき圧縮格納 dtype（無ければ `undefined` = 全て f32）。
    *
@@ -627,7 +674,14 @@ for (const series of SERIES) {
           Object.hasOwn(series.tolerances, target),
           `${series.name} 系列の ${target} の tolerance が無い`,
         );
-        const tolerance = series.tolerances[target];
+        const tolerances = series.tolerances[target];
+        // 出力ごとに値域が違う（front の logs_p は他 3 本より 1 桁小さい）ので、本数が
+        // 合っていない表は「別の出力の閾値で突合する」形で静かに通ってしまう。
+        assertEquals(
+          tolerances.length,
+          parsed.graph.outputs.length,
+          `${series.name}/${target} の tolerance 本数が IR 出力数と違う`,
+        );
 
         // 系列と資産の格納 dtype が一致する（root 取り違え / 圧縮の掛け忘れの唯一の検出器
         // — 上の `compressedStorage` の MUST）。適格スロットは 5 ターゲットとも複数あるので、
@@ -693,7 +747,11 @@ for (const series of SERIES) {
             const declared = parsed.graph.values[name].dtype;
             assertEquals(outputs[name].shape, view.shape, `${where}: shape`);
             assertEquals(outputs[name].dtype, declared, `${where}: dtype`);
-            const report = compareTensors(outputs[name], ioTensor(io, view, declared), tolerance);
+            const report = compareTensors(
+              outputs[name],
+              ioTensor(io, view, declared),
+              tolerances[index],
+            );
             assert(report.pass, `${where}: ${formatAllclose(report)}`);
           });
         } finally {

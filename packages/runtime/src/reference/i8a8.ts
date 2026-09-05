@@ -42,6 +42,18 @@
  */
 
 /**
+ * 参照に渡された値が契約に合わない（`k` が group 長で割り切れない等）。
+ *
+ * MUST: `reference/ops.ts` の `ReferenceOpError` を引かない。本モジュールは import を 1 本も
+ * 持たない自己完結形で、あちらを引くと `../ops.ts` 系のモジュールグラフが本番コード
+ * （src/gpu/attention-dp4a-canary.ts の import 連鎖）まで太る。`format/i4.ts` の `I4Error` と
+ * 同じ「その層だけの軽い Error」を置く。
+ */
+export class I8a8Error extends Error {
+  override readonly name = "I8a8Error";
+}
+
+/**
  * 量子化の格子の端と scale の床。
  *
  * MUST: src/kernels/quantize-rows.ts の定数を**輸入しない**。共有すると「格子を ±128 に
@@ -213,6 +225,14 @@ type LinearW4a8Input = {
 export const referenceLinearW4a8 = (input: LinearW4a8Input): Float32Array<ArrayBuffer> => {
   const { x, weight, weightScale, bias, m, n, k, groupSize } = input;
   const groups = k / groupSize;
+  // MUST: 突合の前に落とす。端数のある `k` は group ループが `[m,k]` 平坦の**次の行**の活性を
+  // 足し込み（col=0）、非整数の scale 添字で NaN を返す（col≥1）— どちらも「オラクルが黙って
+  // 別の数を返す」形なので、atol=0 を主張する門の意味が消える。
+  if (!Number.isSafeInteger(groups)) {
+    throw new I8a8Error(
+      `w4a8 参照: k=${k} が group 長 ${groupSize} で割り切れない（K 方向の量子化軸）`,
+    );
+  }
   const { q, scale } = quantizeRowsReference(x, m, k);
   const out = new Float32Array(m * n);
   for (let row = 0; row < m; row += 1) {

@@ -36,8 +36,10 @@ jobs:
         run: deno task check
       - name: Test (non-GPU)
         # GPU ケースは GPU_AVAILABLE=false で ignore され、全 SKIP 門番は環境変数で抜ける。
+        # 実重み資産（outputs/series/ — git 追跡外）も CI には無いので、資産側の門番も抜ける。
         env:
           KARUME_ALLOW_NO_GPU: "1"
+          KARUME_ALLOW_NO_ASSETS: "1"
         run: deno test -A
       - name: Publish dry-run
         # 認証不要（denoland/deno#22679 修正済み）。3 パッケージの公開グラフを検証する。
