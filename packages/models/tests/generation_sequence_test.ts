@@ -110,6 +110,14 @@ type FakeOptions = {
   readonly tokens?: readonly number[];
   /** この回数目（0 始まり）の run を失敗させる。 */
   readonly failAt?: number;
+  /**
+   * 対抗馬（第 1 候補より低い logit を持つ id）。
+   *
+   * 既定の logits は「狙った id だけ 10・他は全部 0」なので、正値を割る repetition penalty では
+   * 順位が動かず（10/penalty > 0）、温度 0 の argmax では効きが**原理的に観測できない**。
+   * 2 番手を置くと、penalty が第 1 候補を 2 番手の下へ落としたかを決定論的に見られる。
+   */
+  readonly runnerUp?: { readonly id: number; readonly logit: number };
 };
 
 type FakeSession = ReturnType<typeof fakeSession>;
@@ -178,6 +186,7 @@ const fakeSession = (options: FakeOptions = {}) => {
       const id = options.tokens?.[call] ?? (call + 1) % VOCAB;
       const data = new Float32Array(VOCAB);
       data[id] = 10;
+      if (options.runnerUp !== undefined) data[options.runnerUp.id] = options.runnerUp.logit;
       return { [LOGITS]: { dtype: "f32", shape: [1, 1, VOCAB], data } };
     },
   };
@@ -1171,4 +1180,88 @@ Deno.test("GenerationSession: 実 Session の面を型で満たす（綴りの�
   // `createGenerationContext` / `pastLength` の綴りが変わるとコンパイルエラーになる。
   const asGenerationSession = (session: Session): GenerationSession => session;
   assertEquals(typeof asGenerationSession, "function");
+});
+
+// ---- 抽選器へ渡す履歴（repetition penalty の実効性）--------------------------
+//
+// `sampler.next(logits, history)` の第 2 引数は「連結後の prompt + そのターンで抽選済みの
+// token」である（`sampler.ts` の doc — HF が `input_ids` 全体に掛けるのと同じ）。ここを
+// `[]` へ退行させても全テストが緑だったため、repetition penalty は「効かないノブ」として
+// 静かに残りうる。逆に**過去 turn まで**含める退行（ADR 0066 決定 6 の二重簿記）も検出されない。
+//
+// 観測は温度 0（argmax）で採る。第 1 候補 10 / 対抗馬 6 に penalty 2 を掛けると
+// 10 → 5 で順位が**決定論的に**反転するので、seed 依存の抽選に賭けずに期待値を手で書ける。
+
+const PENALTY = { temperature: 0, repetitionPenalty: 2 } as const;
+const RUNNER_UP = { id: 6, logit: 6 } as const;
+
+Deno.test("GenerationSequence: prompt の token に repetition penalty が掛かる", async () => {
+  // prompt に含まれる 3 が第 1 候補（logit 10）。履歴が届いていれば 10/2 = 5 < 6 で 6 へ移る。
+  const penalized = fakeSession({ tokens: [3], runnerUp: RUNNER_UP });
+  const withPenalty = await createGenerationSequence({
+    session: penalized.session,
+    program: programOf(penalized),
+  });
+  const hit = await drain(
+    withPenalty.generate({ prompt: [3], maxNewTokens: 1, sampler: PENALTY }),
+  );
+  assertEquals(tokenIds(hit.events), [RUNNER_UP.id], "prompt の token に penalty が掛かっていない");
+
+  // 対（penalty を外すと第 1 候補がそのまま出る = 上の反転が penalty 由来であることの実証）。
+  const plain = fakeSession({ tokens: [3], runnerUp: RUNNER_UP });
+  const withoutPenalty = await createGenerationSequence({
+    session: plain.session,
+    program: programOf(plain),
+  });
+  const control = await drain(
+    withoutPenalty.generate({ prompt: [3], maxNewTokens: 1, sampler: { temperature: 0 } }),
+  );
+  assertEquals(tokenIds(control.events), [3]);
+});
+
+Deno.test("GenerationSequence: 抽選済み token が次 step の履歴に入る", async () => {
+  // 1 token 目は 5（履歴に無い）。2 token 目も fake の第 1 候補は 5 だが、直前に抽選した
+  // ぶんが履歴へ入っていれば penalty が掛かって対抗馬へ移る。
+  const fake = fakeSession({ tokens: [5, 5], runnerUp: RUNNER_UP });
+  const sequence = await createGenerationSequence({
+    session: fake.session,
+    program: programOf(fake),
+  });
+  const { events } = await drain(
+    sequence.generate({ prompt: [1], maxNewTokens: 2, sampler: PENALTY }),
+  );
+  assertEquals(tokenIds(events), [5, RUNNER_UP.id], "生成済み token が履歴へ入っていない");
+});
+
+Deno.test("GenerationSequence: 履歴は 1 ターンぶん（過去 turn は引きずらない）", async () => {
+  // 1 ターン目に 7 → 5 を出す（停止は max-tokens なので 5 が未 commit frontier に残る）。
+  const fake = fakeSession({ tokens: [7, 5, 7], runnerUp: RUNNER_UP });
+  const sequence = await createGenerationSequence({
+    session: fake.session,
+    program: programOf(fake),
+  });
+  const first = await drain(sequence.generate({ prompt: [1], maxNewTokens: 2, sampler: PENALTY }));
+  assertEquals(tokenIds(first.events), [7, 5]);
+
+  // 2 ターン目の第 1 候補は 7（前ターンで生成した token）。過去 turn を履歴へ引きずっていれば
+  // penalty が掛かって 6 へ移るので、7 が出ることが「引きずっていない」の観測になる。
+  const second = await drain(sequence.generate({ prompt: [1], maxNewTokens: 1, sampler: PENALTY }));
+  assertEquals(tokenIds(second.events), [7], "過去 turn の履歴が残っている");
+});
+
+Deno.test("GenerationSequence: 連結される未 commit frontier はそのターンの prompt として掛かる", async () => {
+  // 上の対。前ターンの最後の token（5）は次ターンの prompt へ**連結される**ので、履歴には
+  // 入る（過去 turn を引きずるのとは別の事実 — ADR 0083 決定 4 の未 commit frontier）。
+  const fake = fakeSession({ tokens: [7, 5, 5], runnerUp: RUNNER_UP });
+  const sequence = await createGenerationSequence({
+    session: fake.session,
+    program: programOf(fake),
+  });
+  await drain(sequence.generate({ prompt: [1], maxNewTokens: 2, sampler: PENALTY }));
+  const second = await drain(sequence.generate({ prompt: [1], maxNewTokens: 1, sampler: PENALTY }));
+  assertEquals(
+    tokenIds(second.events),
+    [RUNNER_UP.id],
+    "連結された未 commit frontier に penalty が掛かっていない",
+  );
 });

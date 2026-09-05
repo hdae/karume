@@ -4,7 +4,8 @@
  * ## MUST: 定数表をここに書かない
  *
  * 音素記号表・tone 基点・言語 ID・add_blank の挿入値は **`style_bert_vits2` の実物から
- * 引いた資産**（`tools/exporter/sbv2_demo.py assets` が出す `symbols.json`）だけを正とする。
+ * 引いた資産**（`tools/export-recipes/sbv2/demo.py` の `assets` サブコマンドが出す `symbols.json`）
+ * だけを正とする。
  * これらは多言語版と JP-Extra で同じに見えて、ずれても **shape は合ったまま音だけが
  * 壊れる**（記号表の並びが 1 つずれれば別の音素、tone 基点がずれれば別の埋め込み行）。
  * TS 側に写した定数表を持つと、その齟齬を検出する手段が消える。
@@ -17,6 +18,7 @@
  */
 
 import { asPositiveInteger } from "../../text/asset-gates.ts";
+import { Sbv2InputError } from "../errors.ts";
 
 /**
  * 相対位置の添字表を作るためのバケット規則（DeBERTa の config 由来）。
@@ -207,7 +209,8 @@ export const phonesToIds = (rules: JpExtraRules, phones: readonly string[]): num
   phones.map((phone) => {
     const id = rules.symbolToId.get(phone);
     if (id === undefined) {
-      throw new Error(
+      // 呼び手の発話だけで到達する（未知の音素を moras / words に書く）ので入力起因 = 400。
+      throw new Sbv2InputError(
         `記号表に無い音素 ${JSON.stringify(phone)} が phones に含まれる（ID 化不能）。` +
           " yomi の音素記号と JP-Extra モデルの記号表の齟齬を疑う。",
       );

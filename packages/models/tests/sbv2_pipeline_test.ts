@@ -15,14 +15,18 @@
 import { assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { parseManifest } from "@karume/hub";
 import {
+  assertBertWidth,
+  assertFrontOutputs,
   assertPhonemeLimit,
   assertSeed,
+  assertTableFits,
   assertTiledBert,
   assertTokenLimit,
   assetJson,
   parseTokenizerAsset,
   Sbv2Pipeline,
 } from "../src/sbv2/pipeline.ts";
+import { stubModel } from "./helpers/stub-model.ts";
 import { Sbv2InputError } from "../src/sbv2/errors.ts";
 import { Randn } from "../src/sbv2/host/random.ts";
 import { parseSbv2PipelineConfig } from "../src/sbv2/config.ts";
@@ -350,8 +354,8 @@ Deno.test("assertTokenLimit: 上限超過は落とし、ちょうど上限は通
 });
 
 Deno.test("assertPhonemeLimit: 上限超過は落とし、ちょうど上限は通る", () => {
-  // 音素次元 P は front の記号次元で、上限は T と同じ 1 つ（`maxTokens`）。P >= 2·T+1 > T が
-  // 常に成り立つので、T 側の門はこの超過を一度も捕まえない — 別の門として要る。
+  // 音素次元 P は front の記号次元で、上限は T と同じ 1 つ（`maxTokens`）。P と T のどちらが
+  // 大きいかは発話依存（0 配分が出る記号語がある）なので、片方の門では超過を通す。
   assertPhonemeLimit(512, 512);
   assertThrows(
     () => assertPhonemeLimit(513, 512),
@@ -416,6 +420,113 @@ Deno.test("assertTiledBert: 故障注入 — 走査が取りこぼした tile �
   );
   // 音素数との不一致（analysis と tile の齟齬）は従来どおり別の文言で落ちる。
   assertThrows(() => assertTiledBert(good, 4), Error, "BERT 展開長 3 が音素数 4 と違う");
+});
+
+// ---- 構築時の資産 × グラフ突合（沈黙誤値クラスの門）------------------------
+//
+// どれも `buildSbv2State` が **GPU を取りに行く前**に通す門。実行時まで残すと、配布形で
+// 334MB の text_encoder を張って 1 run 払ってから、家族も資産も名指ししない汎用文言で落ちる。
+
+/** 名前 → 行番号の表（行番号は表の物理行そのもの）。 */
+const rowNames = (count: number): Map<string, number> =>
+  new Map(Array.from({ length: count }, (_, index) => [`s${index}`, index]));
+
+Deno.test("assertTableFits: 名前表の件数とグラフ入力の幅の両方に合う表だけを通す", () => {
+  const names = rowNames(7);
+  // 正常系（この形が通ることを先に固定 — 下の門が「常に落ちる」形になっていないように）。
+  assertTableFits(
+    { data: new Float32Array(7 * 256), rows: 7, cols: 256 },
+    names,
+    "style_vectors",
+    256,
+  );
+  // 行数がずれても shape は合ったままなので、**別のスタイルの声が出る**だけで沈黙する。
+  assertThrows(
+    () =>
+      assertTableFits(
+        { data: new Float32Array(3 * 256), rows: 3, cols: 256 },
+        names,
+        "style_vectors",
+        256,
+      ),
+    Error,
+    "の行数 3 が pipelineConfig の 7 件",
+  );
+  assertThrows(
+    () =>
+      assertTableFits(
+        { data: new Float32Array(7 * 128), rows: 7, cols: 128 },
+        names,
+        "style_vectors",
+        256,
+      ),
+    Error,
+    "の列数 128 がグラフ入力の 256 と違う",
+  );
+});
+
+/** front の実形（4 出力・`bert` は `[1, 幅, P]`）。出力本数と bert 幅だけ差し替えられる。 */
+const frontStub = (
+  options: { readonly outputs?: number; readonly bertWidth?: number } = {},
+): ReturnType<typeof stubModel> =>
+  stubModel({
+    symbols: ["P"],
+    inputs: [{ name: "bert", shape: [1, options.bertWidth ?? 1024, "P"] }],
+    outputs: Array.from({ length: options.outputs ?? 4 }, (_, index) => `front_out_${index}`),
+    values: {},
+  });
+
+/** text_encoder の実形（出力名は torch のノード名・hidden は `[1, T, 幅]`）。 */
+const textEncoderStub = (
+  options: { readonly width?: number | string; readonly outputs?: number } = {},
+): ReturnType<typeof stubModel> => {
+  const names = Array.from({ length: options.outputs ?? 1 }, (_, index) => `layer_norm_${index}`);
+  return stubModel({
+    symbols: ["T"],
+    inputs: [{ name: "input_ids", shape: [1, "T"] }],
+    outputs: names,
+    values: Object.fromEntries(
+      names.map((name) => [name, [1, "T", options.width ?? 1024] as const]),
+    ),
+  });
+};
+
+Deno.test("assertFrontOutputs: front の出力は 4 本ちょうど（位置引きの前提）", () => {
+  // 正常系（陰性対照）。
+  assertFrontOutputs(frontStub());
+  // 不足は `outputAt` が run の後に落とす — 構築時に前倒しする。
+  assertThrows(
+    () => assertFrontOutputs(frontStub({ outputs: 3 })),
+    Error,
+    "front のグラフ出力が 3 本",
+  );
+  // MUST「4 本以上」で妥協しない: 余分な出力は位置 0..3 しか読まれず静かに無視される。
+  assertThrows(
+    () => assertFrontOutputs(frontStub({ outputs: 5 })),
+    Error,
+    "front のグラフ出力が 5 本",
+  );
+});
+
+Deno.test("assertBertWidth: text_encoder の hidden 幅と front の 'bert' 入力幅を構築時に突き合わせる", () => {
+  // 正常系（陰性対照）。
+  assertBertWidth(textEncoderStub(), frontStub(), 1);
+  // 幅の食い違い = 別の BERT で焼いた 2 本を組み合わせた配布形。実行時まで残すと
+  // `Session.run` の要素数検査（家族を名指ししない汎用文言）で落ちる。
+  const error = assertThrows(
+    () => assertBertWidth(textEncoderStub({ width: 768 }), frontStub(), 1),
+    Error,
+    "の幅 768 が front のグラフ入力 'bert' の 1024 と違う",
+  );
+  assertEquals(error.message.includes("layer_norm_0"), true, error.message);
+  // 見るのは最終軸だけ（`[1, T, dim]` の T は記号次元）。最終軸が記号なら幅が読めない。
+  assertThrows(
+    () => assertBertWidth(textEncoderStub({ width: "D" }), frontStub(), 1),
+    Error,
+    "の最終軸が静的次元でない（D）",
+  );
+  // 出力の選び方は末尾からの相対（`bertHiddenFromEnd`）— 本数が足りない資産はそこで落ちる。
+  assertThrows(() => assertBertWidth(textEncoderStub(), frontStub(), 3), Error, "3 本以上");
 });
 
 // ---- 資産 JSON の decode（不正 UTF-8 を黙って置換しない）------------------

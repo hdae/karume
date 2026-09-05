@@ -37,7 +37,7 @@
  */
 
 import type { GenerationProgram } from "../generation/program.ts";
-import type { SamplerSpec } from "../generation/sampler.ts";
+import { type SamplerSpec, snapshotSpec } from "../generation/sampler.ts";
 import {
   assertGenerationRequestValues,
   type GenerationCapacityDetail,
@@ -274,6 +274,25 @@ export class Gemma4ChatSession {
     this.#sampler = options.sampler;
     this.#onOverflow = options.onOverflow ?? dropOldestTurns;
     this.#capacity = options.capacity ?? host.program.capacity;
+    // MUST: 容量の関係を**構築時**に見る（式は `sequence.ts` の `createGenerationSequence` と
+    // 同じ 2 本）。この層は `#capacity` を溢れ判定の物差しとして sequence の確保より**前**に
+    // 使うので、検査を sequence 側だけに任せると、長いターンでは `#shrink` が履歴を実際に
+    // 切り詰めてから容量エラーになり、真因（宣言ミス）がどの診断にも出ない。
+    if (!Number.isSafeInteger(this.#capacity) || this.#capacity < 1) {
+      throw new Error(`Gemma4ChatSession: capacity ${this.#capacity} が 1 以上の整数でない`);
+    }
+    if (this.#capacity < host.program.chunkLength) {
+      throw new Error(
+        `Gemma4ChatSession: capacity ${this.#capacity} が chunkLength ` +
+          `${host.program.chunkLength} を下回る（1 chunk すら入らない）`,
+      );
+    }
+    if (this.#capacity > host.program.maxPosition) {
+      throw new Error(
+        `Gemma4ChatSession: capacity ${this.#capacity} が maxPosition ` +
+          `${host.program.maxPosition} を超えた（容量いっぱいの会話がモデルの位置上限の外を引く）`,
+      );
+    }
     this.#turns = options.system === undefined ? [] : [{ role: "system", content: options.system }];
   }
 
@@ -308,7 +327,10 @@ export class Gemma4ChatSession {
     // MUST: 要求は**発行時に写す**（ADR 0083 追記 2026-09-02）。本体（async generator）は最初の
     // `next()` まで走らないので、ここで読み切らないと「汲み始めた時点の値」で走る。
     const maxNewTokens = options.maxNewTokens ?? this.#maxNewTokens;
-    const sampler = options.sampler ?? this.#sampler ?? this.#host.defaultSampler;
+    // 抽選指定も配列と同じくここで写す（写し口は `sampler.ts` の {@link snapshotSpec} 1 本 —
+    // `createSampler` の複製は最初の `next()` なので、それだけでは発行〜消費の窓が残る）。
+    const chosen = options.sampler ?? this.#sampler ?? this.#host.defaultSampler;
+    const sampler = chosen === undefined ? undefined : snapshotSpec(chosen);
     const stopTokens = options.stopTokens === undefined ? undefined : [...options.stopTokens];
     const signal = options.signal;
     const onPrefill = options.onPrefill;
@@ -491,6 +513,13 @@ export class Gemma4ChatSession {
       if (detail === undefined) {
         if (held !== undefined) return { sequence: held, prompt };
         const created = await this.#host.sequence({ capacity: this.#capacity });
+        // MUST: `await` 明けにもう一度見る（`Gemma4Pipeline.sequence` と同じ形）。確保の途中で
+        // dispose された実体は `dispose()`（`#sequence` はまだ undefined）からも `#finish` の
+        // eos 枝（`#releaseSequence` を通らない）からも畳まれない — この再検査だけが塞げる窓。
+        if (this.#disposal !== undefined) {
+          await created.dispose();
+          throw new Error("Gemma4ChatSession: dispose 済みでは生成できない");
+        }
         this.#sequence = created;
         this.#committed = 0;
         return { sequence: created, prompt };

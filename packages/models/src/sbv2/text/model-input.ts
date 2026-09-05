@@ -96,7 +96,9 @@ export const buildSbv2ModelInput = (
   // 参照実装 bert_feature.py の `assert len(word2ph) == len(text) + 2` と同じ検査。
   // ここで落とせば、DeBERTa を回した後の shape 不一致（原因が遠い失敗）にならない。
   if (inputIds.length !== baseWord2ph.length) {
-    throw new Error(
+    // words の surface を書き換えた発話（記号語の正規形が別トークン数になる等）だけで到達
+    // するので入力起因 = 400。呼び手が words を解析どおりに戻せば直る。
+    throw new Sbv2InputError(
       `input_ids 長(${inputIds.length}) !== word2ph 長(${baseWord2ph.length})` +
         `（bertText=${JSON.stringify(bertText)}）`,
     );

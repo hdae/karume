@@ -66,6 +66,7 @@ import {
   readCachedAsset,
 } from "../hub/components.ts";
 import { toManifestSource } from "../hub/repo-ref.ts";
+import { disposeSteps } from "../session/dispose-steps.ts";
 import { assertRequiredLimitsBeforeDownload } from "../session/gpu-features.ts";
 import {
   GEMMA4_PIPELINE_MAJOR,
@@ -90,10 +91,11 @@ import {
   type GenerationStop,
   type GenerationStream,
 } from "../generation/sequence.ts";
-import type { SamplerSpec } from "../generation/sampler.ts";
+import { type SamplerSpec, snapshotSpec } from "../generation/sampler.ts";
 import {
   createGemma4Ple,
   type Gemma4Ple,
+  type Gemma4PleIndex,
   type Gemma4PleReadOptions,
   parseGemma4PleIndex,
 } from "./ple.ts";
@@ -450,8 +452,50 @@ type Gemma4Admission = {
  */
 type Gemma4SidecarAssets = {
   readonly tokenizer: Uint8Array<ArrayBuffer>;
-  readonly pleIndex: Uint8Array<ArrayBuffer>;
+  /**
+   * **解析済み**の PLE 索引。
+   *
+   * MUST: 解析は面ごとに 1 回だけ（`ple.json` を 2 度開かない）。`fromPretrained` は遅延資産
+   * との突合にも索引が要るので、その 1 回をここへ持ち上げてある。
+   */
+  readonly pleIndex: Gemma4PleIndex;
   readonly readPleShard: (file: string, options?: Gemma4PleReadOptions) => Promise<ArrayBuffer>;
+};
+
+/** `ple.json` のバイト列を索引へ落とす（fatal decode → JSON → 受理形）。 */
+const parsePleIndexAsset = (bytes: Uint8Array<ArrayBuffer>): Gemma4PleIndex =>
+  parseGemma4PleIndex(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)));
+
+/**
+ * PLE 索引が宣言する shard と、manifest の**遅延資産**が**ちょうど一致**することを見る門。
+ *
+ * MUST: 両方向を見る。索引にあって assets に無い shard は、その token 範囲を初めて引いた
+ * ターン（= 会話の途中・3.7GiB のロード完了後）まで落ちない。assets にあって索引に無い
+ * ファイルは「配布形が宣言した資産を 1 本も読まないまま動く」形で、永久に検出されない。
+ * MUST: 呼ぶのは Session も重み shard も触る前（`#build` の前）。
+ *
+ * MUST: 「遅延資産 = PLE shard」が成り立つのは {@link EAGER_ASSETS} が tokenizer / ple_index の
+ * 2 本ちょうどだからである（`deferred` は「eager に並べなかった残り」— `src/hub/components.ts`）。
+ * eager を増やすときはこの式も直す。
+ *
+ * NOTE: `export` は門を直接叩くテストのため（実経路は配布形ミラー 3.7GiB のロードの後）。
+ * `mod.ts` / サブパス面には出さない（ADR 0008）。
+ */
+export const assertPleShardAssets = (
+  where: string,
+  index: Gemma4PleIndex,
+  deferredFiles: readonly string[],
+): void => {
+  const declared = new Set(index.shards.map((shard) => shard.file));
+  const supplied = new Set(deferredFiles);
+  const missing = [...declared].filter((file) => !supplied.has(file));
+  const extra = [...supplied].filter((file) => !declared.has(file));
+  if (missing.length === 0 && extra.length === 0) return;
+  throw new Error(
+    `${where}: PLE sidecar の索引と manifest の遅延資産が食い違う` +
+      `（索引にあって assets に無い: ${missing.join(" / ") || "なし"} /` +
+      ` assets にあって索引に無い: ${extra.join(" / ") || "なし"}）`,
+  );
 };
 
 /**
@@ -622,8 +666,12 @@ const admitGemma4 = (component: ModelComponent, config: Gemma4PipelineConfig): G
  *
  * NOTE: 容量との関係（`chunkLength ≤ capacity`）はここでは見ない — 容量は sequence ごとに選ぶので、
  * 両者が揃う唯一の場所が `createGenerationSequence` である（同じ式を 2 箇所に持たない）。
+ *
+ * NOTE: `export` は門を直接叩くテストのため（{@link assertRopeInputShapes} と同じ扱い — 実経路は
+ * `fromAssets` / `fromPretrained` / `estimateSessionMemory` の 3 つで、どれも妥当値しか渡さない）。
+ * `mod.ts` / サブパス面には出さない（ADR 0008）。
  */
-const assertChunkLength = (chunkLength: number, config: Gemma4PipelineConfig): number => {
+export const assertChunkLength = (chunkLength: number, config: Gemma4PipelineConfig): number => {
   if (!Number.isSafeInteger(chunkLength) || chunkLength < 2) {
     throw new Error(`Gemma4Pipeline: chunkLength ${chunkLength} が 2 以上の整数でない`);
   }
@@ -667,9 +715,7 @@ const buildGemma4Program = (
   }
   // ③ PLE sidecar の行数（この突合は `createGemma4Ple` が持つ — 同じ検査を 2 実装持たない）。
   const ple = createGemma4Ple({
-    index: parseGemma4PleIndex(
-      JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(assets.pleIndex)),
-    ),
+    index: assets.pleIndex,
     readShard: assets.readPleShard,
     vocabSize,
     ...(options.maxResidentPleBytes === undefined
@@ -852,10 +898,18 @@ export const chatStreamOf = (
  *
  * MUST: 観測席が無ければ**元の列をそのまま返す**（包みを 1 枚も増やさない — 中断や `return()` の
  * 伝播経路を、使わない人にまで足さない）。
+ *
+ * NOTE: 診断の型を型引数にしてあるのは、この関数が診断の**中身を 1 つも読まない**（席へ素通し
+ * するだけ）ことを型で示すためで、同時に呼び出し回数の門（`gemma_chat_test.ts`）が実 Session
+ * 無しで書ける。{@link Gemma4State} は `SessionDiagnostics` でそのまま満たす。
+ * NOTE: `export` は門を直接叩くテストのため（`mod.ts` / サブパス面には出さない — ADR 0008）。
  */
-const withRunDiagnostics = (
+export const withRunDiagnostics = <D>(
   stream: GenerationStream,
-  state: Pick<Gemma4State, "session" | "onRunDiagnostics">,
+  state: {
+    readonly session: { diagnostics: () => D };
+    readonly onRunDiagnostics?: (diagnostics: D) => void;
+  },
 ): GenerationStream => {
   const listener = state.onRunDiagnostics;
   if (listener === undefined) return stream;
@@ -996,6 +1050,9 @@ export class Gemma4Pipeline {
     // MUST: 遅延側は PLE sidecar **ちょうど**であること。索引が知らないファイルが残っていれば
     // 「配布形が宣言した資産を 1 本も読まないまま動く」形で、逆に足りなければ会話の途中で
     // 初めて落ちる（どちらもロードの時点で分かる）。
+    // 突合の本体は {@link assertPleShardAssets}（GPU も重み shard も触っていないこの位置で呼ぶ）。
+    const pleIndex = parsePleIndexAsset(assetBytes(where, assets, PLE_INDEX_ASSET));
+    assertPleShardAssets(where, pleIndex, Object.keys(deferred));
     const readPleShard = (
       file: string,
       readOptions: Gemma4PleReadOptions = {},
@@ -1003,7 +1060,7 @@ export class Gemma4Pipeline {
       if (!Object.hasOwn(deferred, file)) {
         throw new Error(
           `${where}: PLE sidecar の shard '${file}' が manifest の assets に無い` +
-            `（宣言されている shard: ${Object.keys(deferred).join(" / ")}）`,
+            `（manifest が遅延資産として持つ shard: ${Object.keys(deferred).join(" / ")}）`,
         );
       }
       // MUST: 取得層のオプションから `signal` を落とす（`hub/components.ts` の相 2 と同じ理由 —
@@ -1017,11 +1074,7 @@ export class Gemma4Pipeline {
     };
     return await Gemma4Pipeline.#build(
       admitted,
-      {
-        tokenizer: assetBytes(where, assets, TOKENIZER_ASSET),
-        pleIndex: assetBytes(where, assets, PLE_INDEX_ASSET),
-        readPleShard,
-      },
+      { tokenizer: assetBytes(where, assets, TOKENIZER_ASSET), pleIndex, readPleShard },
       options,
     );
   }
@@ -1057,7 +1110,11 @@ export class Gemma4Pipeline {
     // 持たない（バイト列と `config` だけ）ので、宣言そのものへ到達できない。実寸の検査は
     // Session 構築時の `assertWeightsWithinLimits`（ADR 0089 決定 1）が受け持つ。
     const admitted = admitGemma4(open(MODEL), config);
-    return await Gemma4Pipeline.#build(admitted, input, options);
+    return await Gemma4Pipeline.#build(admitted, {
+      tokenizer: input.tokenizer,
+      pleIndex: parsePleIndexAsset(input.pleIndex),
+      readPleShard: input.readPleShard,
+    }, options);
   }
 
   /**
@@ -1128,15 +1185,19 @@ export class Gemma4Pipeline {
     }
     // 受理集合は同期に落とす（GPU にも順番待ちにも入る前）。
     const prompt = gemma4ChatPrompt(this.#state.tokenizer, messages);
-    const sampler = options.sampler ?? this.#state.config.sampler;
+    const chosen = options.sampler ?? this.#state.config.sampler;
     // MUST: 要求は**発行時に写す**（ADR 0083 追記 2026-09-02）。本体（async generator）は最初の
     // `next()` まで走らないので、ここで `options` を読み切らないと `maxNewTokens` / `signal` は
     // 「汲み始めた時点の値」になる — 発行と消費の間に書き換えた option が黙って効く形である。
-    // `prompt` と sampler 指定の複製は受け手の `GenerationSequence.generate` が済ませる。
+    // 配列と sampler 指定も**ここで**写す。受け手の複製（`GenerationSequence.generate` /
+    // `createSampler`）は async generator の本体 = 最初の `next()` なので、それだけに任せると
+    // 「発行してから汲み始めるまで」の窓で書き換えた停止集合・抽選指定が黙って効く。写し口は
+    // `sampler.ts` の {@link snapshotSpec} 1 本を共有する（`Gemma4ChatSession.send` と同じ）。
+    const sampler = chosen === undefined ? undefined : snapshotSpec(chosen);
     const request: GenerationRequest = {
       prompt,
       maxNewTokens: options.maxNewTokens,
-      ...(options.stopTokens === undefined ? {} : { stopTokens: options.stopTokens }),
+      ...(options.stopTokens === undefined ? {} : { stopTokens: [...options.stopTokens] }),
       ...(sampler === undefined ? {} : { sampler }),
       ...(options.signal === undefined ? {} : { signal: options.signal }),
     };
@@ -1375,30 +1436,17 @@ export class Gemma4Pipeline {
    */
   dispose(): Promise<void> {
     this.#disposal ??= this.#chain(async () => {
-      const failures: unknown[] = [];
-      /** 後始末 1 段（失敗を集めて次の段へ進む）。 */
-      const step = async (run: () => void | Promise<void>): Promise<void> => {
-        try {
-          await run();
-        } catch (error) {
-          failures.push(error);
-        }
-      };
-      for (const sequence of this.#handed) await step(() => sequence.dispose());
+      const handed = [...this.#handed];
       this.#handed.clear();
-      await step(() => this.#state.session.dispose());
-      await step(() => {
-        if (this.#state.ownsGpu) this.#state.gpu.destroy();
-      });
-      // 順序は GPU の後（走行中の生成は既に畳んであるので、ここで引き手はもう居ない）。
-      await step(() => this.#state.ple.dispose());
-      if (failures.length === 1) throw failures[0];
-      if (failures.length > 1) {
-        throw new AggregateError(
-          failures,
-          `Gemma4Pipeline.dispose: 後始末が ${failures.length} 件失敗した`,
-        );
-      }
+      await disposeSteps([
+        ...handed.map((sequence) => () => sequence.dispose()),
+        () => this.#state.session.dispose(),
+        () => {
+          if (this.#state.ownsGpu) this.#state.gpu.destroy();
+        },
+        // 順序は GPU の後（走行中の生成は既に畳んであるので、ここで引き手はもう居ない）。
+        () => this.#state.ple.dispose(),
+      ]);
     });
     return this.#disposal;
   }

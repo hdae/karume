@@ -6,7 +6,9 @@
 //
 // 資産（outputs/misc/sbv2-demo/）に依存するのは末尾の 1 本だけで、それ以外は資産なしで走る。
 
-import { assert, assertEquals, assertThrows } from "@std/assert";
+import { assert, assertEquals, assertFalse, assertThrows } from "@std/assert";
+import { Sbv2InputError } from "../src/sbv2/errors.ts";
+import { buildSbv2ModelInput } from "../src/sbv2/text/model-input.ts";
 import {
   addBlankWord2ph,
   intersperse,
@@ -85,7 +87,8 @@ Deno.test("addBlankWord2ph: 空の base は落とす（両端の番兵が欠落�
 Deno.test("phonesToIds: 記号表の添字を返し、未知の音素は落とす", () => {
   const rules = testRules();
   assertEquals(phonesToIds(rules, ["_", "k", "o", "."]), [0, 2, 3, 5]);
-  assertThrows(() => phonesToIds(rules, ["ky"]), Error, "記号表に無い音素");
+  // 呼び手の発話だけで到達する失敗なので入力起因（400 相当）— 素の Error では 500 に化ける。
+  assertThrows(() => phonesToIds(rules, ["ky"]), Sbv2InputError, "記号表に無い音素");
 });
 
 Deno.test("phonesTonesToModelIds: tone 基点の加算・言語 ID の配布・add_blank が同時に効く", () => {
@@ -181,6 +184,42 @@ Deno.test("buildBaseWord2ph: 故障注入 — given_phone 長が 1 ずれると�
   const words = [{ surface: "こん", phones: ["k", "o", "N"] }];
   assertEquals(buildBaseWord2ph(words, tokenizer, 5), [1, 2, 1, 1]);
   assertThrows(() => buildBaseWord2ph(words, tokenizer, 6), Error, "sum(word2ph)");
+});
+
+Deno.test("buildBaseWord2ph: 0 トークンへ正規化される surface は入力起因で落とす", () => {
+  // 空白だけの surface は呼び手が words を直せば直る = Sbv2InputError（400 相当）。
+  const tokenizer = tinyTokenizer(["あ"]);
+  assertThrows(
+    () => buildBaseWord2ph([{ surface: " ", phones: ["a"] }], tokenizer, 3),
+    Sbv2InputError,
+    "0 トークンに正規化された",
+  );
+  // 対: sum(word2ph) の不一致は内部不変条件の破れなので素の Error のまま残す
+  // （errors.ts が名指しで 500 側に置いている経路 — 両方 400 にすると分類が消える）。
+  const sumError = assertThrows(
+    () => buildBaseWord2ph([{ surface: "あ", phones: ["a"] }], tokenizer, 9),
+    Error,
+    "sum(word2ph)",
+  );
+  assertFalse(sumError instanceof Sbv2InputError);
+});
+
+Deno.test("buildSbv2ModelInput: input_ids 長と word2ph 長の食い違いは入力起因で落とす", () => {
+  // 記号語の surface を「正規形と別のトークン数」に書き換えた発話でだけ到達する経路。
+  // 呼び手が words を解析どおりに戻せば直るので 400 側。
+  const rules = testRules();
+  const tokenizer = tinyTokenizer([".", "あ"]);
+  const utterance = {
+    leadingPunctuations: ["."],
+    moras: [],
+    words: [{ surface: "あ あ", phones: ["."] }],
+  };
+  // surface は 2 トークン・正規形 "." は 1 トークンなので word2ph 長 4 と input_ids 長 3 が割れる。
+  assertThrows(
+    () => buildSbv2ModelInput(utterance, tokenizer, rules),
+    Sbv2InputError,
+    "input_ids 長",
+  );
 });
 
 Deno.test("DebertaTokenizer: NFKC で 1 文字が複数トークンへ割れる（… → ...）", () => {

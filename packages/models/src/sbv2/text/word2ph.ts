@@ -15,6 +15,7 @@
 
 import type { DebertaTokenizer } from "./tokenizer.ts";
 import type { Sbv2Word } from "./utterance.ts";
+import { Sbv2InputError } from "../errors.ts";
 
 /**
  * n 個の音素を `wordLength` 文字へ均等分配する（`g2p.py __distribute_phone` の忠実移植）。
@@ -68,7 +69,10 @@ export const buildBaseWord2ph = (
   for (const word of words) {
     const wordLength = tokenizer.tokenize(word.surface).length;
     if (wordLength <= 0) {
-      throw new Error(`語 surface が 0 トークンに正規化された: ${JSON.stringify(word.surface)}`);
+      // 呼び手が渡した surface（空白だけの語など）だけで到達するので入力起因 = 400。
+      throw new Sbv2InputError(
+        `語 surface が 0 トークンに正規化された: ${JSON.stringify(word.surface)}`,
+      );
     }
     tokenTotal += wordLength;
     for (const count of distributePhone(word.phones.length, wordLength)) word2ph.push(count);

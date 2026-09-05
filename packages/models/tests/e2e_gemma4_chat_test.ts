@@ -367,6 +367,88 @@ Deno.test({
         ], "履歴は「流した本文」だけで積まれる");
       });
 
+      await t.step("⑧ 要求は発行時に写す（汲み始める前の書き換えは効かない）", async () => {
+        // 型 doc の MUST。写しが受け手（`GenerationSequence.generate` / `createSampler`）まで
+        // 遅れると、それは async generator の本体 = **最初の `next()`** なので「発行してから
+        // 汲み始めるまで」の窓で書き換えた停止集合・抽選指定が黙って効く。
+        // 観測は**受理集合の外**へ書き換える形で採る（写していれば通る / 写していなければ
+        // 受け手の再検査で落ちる = 分布に頼らない決定的な差）。
+        const { messages } = caseOf(CASES[0].fixture);
+        const stopTokens = [7];
+        const sampler = { temperature: 0 };
+        const stream = pipeline.chat(messages, {
+          maxNewTokens: CASES[0].maxNewTokens,
+          stopTokens,
+          sampler,
+        });
+        stopTokens.push(Number.MAX_SAFE_INTEGER); // 語彙の外（`generate` の再検査が落とす値）
+        sampler.temperature = -1; // `createSampler` の受理集合の外
+        assertEquals(await stream.text(), CASES[0].expected, "発行後の書き換えが効いている");
+      });
+
+      await t.step(
+        "⑨ chat の capacity は sequence へ降りる（既定へ黙って縮退しない）",
+        async () => {
+          // 降ろし忘れは既定（`program.capacity`）でも動くため**例外にならない** — 受理集合の外を
+          // 渡して「落ちること」で降りていることを見る。落ちるのは発行時ではなく最初の `next()`
+          // （`createGenerationSequence` は本体の中で呼ばれる）ので、同期でないことも同時に固定する。
+          const { messages } = caseOf(CASES[0].fixture);
+          const stream = pipeline.chat(messages, {
+            maxNewTokens: 4,
+            capacity: CHUNK_LENGTH - 1,
+          });
+          await assertRejects(
+            () => stream.text(),
+            Error,
+            `capacity ${CHUNK_LENGTH - 1} が chunkLength ${CHUNK_LENGTH} を下回る`,
+          );
+        },
+      );
+
+      await t.step("⑩ estimateSessionMemory は既定を wiring から採り、値域を fail loudly", () => {
+        // 見積りは純関数（`estimateGraphMemory`）だが `gpu.limits` を読むので実パイプラインが
+        // 要る — run は 1 回も足さない。既定引数が配布形の宣言（chunkLength / capacity）を
+        // 使っていることは「明示して呼んだ結果と等しい」で縛る（別の既定へ退行すると割れる）。
+        const implicit = pipeline.estimateSessionMemory();
+        const explicit = pipeline.estimateSessionMemory({
+          chunkLength: CHUNK_LENGTH,
+          capacity: CAPACITY,
+        });
+        assertEquals(implicit, explicit, "既定引数が wiring の 2 数を使っていない");
+        // 恒真でないことの対: 容量を変えれば state のバイト数は動く。
+        const half = pipeline.estimateSessionMemory({ capacity: CAPACITY / 2 });
+        assert(
+          half.resident.stateBytes < implicit.resident.stateBytes,
+          `容量を半分にしても state のバイト数が動かない: ${half.resident.stateBytes}`,
+        );
+        // MUST: `maxStorageBufferBindingSize` を必ず渡す（states 形 attention のノード内一時は
+        // 行ブロック枚数がこの上限だけで決まる — 省くと estimator が fail loudly する）。
+        assert(implicit.peakAccountedBytes > 0, "見積りが 0 バイトを名乗っている");
+
+        // 失敗経路 3 本（どれも Session を張り直す前に落ちる）。
+        assertThrows(
+          () => pipeline.estimateSessionMemory({ capacity: CHUNK_LENGTH - 1 }),
+          Error,
+          `capacity ${CHUNK_LENGTH - 1} が chunkLength ${CHUNK_LENGTH} 未満`,
+        );
+        assertThrows(
+          () => pipeline.estimateSessionMemory({ capacity: MAX_POSITION + 1 }),
+          Error,
+          `capacity ${MAX_POSITION + 1} が maxPosition ${MAX_POSITION} を超えた`,
+        );
+        assertThrows(
+          () => pipeline.estimateSessionMemory({ chunkLength: MAX_CHUNK_LENGTH + 1 }),
+          Error,
+          `chunkLength ${MAX_CHUNK_LENGTH + 1} が配布形の宣言 maxChunkLength`,
+        );
+        // 安全整数でない容量は「chunkLength 未満」の門が受ける（値域の穴を作らない）。
+        assertThrows(
+          () => pipeline.estimateSessionMemory({ capacity: 1.5 }),
+          Error,
+          "capacity 1.5 が chunkLength",
+        );
+      });
+
       // async generator の本体は最初の `next()` まで走らないので、発行時の検査だけでは
       // 「発行 → dispose → 汲み始める」が抜ける。汲まないまま dispose を跨がせる。
       issuedBeforeDispose = pipeline.chat([{ role: "user", content: "hi" }], { maxNewTokens: 4 });

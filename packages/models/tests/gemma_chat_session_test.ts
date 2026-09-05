@@ -36,7 +36,9 @@ import {
   Gemma4ChatSession,
   type Gemma4ChatSessionHost,
 } from "../src/gemma/chat-session.ts";
+import type { Gemma4DefaultSampler } from "../src/gemma/config.ts";
 import type { GenerationProgram } from "../src/generation/program.ts";
+import type { SamplerSpec } from "../src/generation/sampler.ts";
 import {
   GenerationCapacityError,
   type GenerationEvent,
@@ -95,6 +97,18 @@ const SYSTEM = "You are terse.";
 const SYSTEM_MESSAGE: Gemma4ChatMessage = { role: "system", content: SYSTEM };
 const MAX_NEW_TOKENS = 16;
 
+/**
+ * 溢れの門で使う容量 = `chunkLength` ちょうど（構築時の門が通す**最小**の容量）。
+ *
+ * `Gemma4ChatSession` は `chunkLength ≤ capacity ≤ maxPosition` を構築時に見るので、
+ * 「1 chunk すら入らない容量」で溢れを作ると門の方が先に落ちて溢れ経路を踏めない。
+ * 溢れは容量ではなく**発話の長さ**（{@link LONG_ASK}）で作る。
+ */
+const TIGHT_CAPACITY = 32;
+
+/** {@link TIGHT_CAPACITY} を 1 ターンで確実に溢れさせる発話（prompt だけで容量を超える）。 */
+const LONG_ASK = "Name a color, then name another color, then explain the difference between them.";
+
 /** 台本 1 ターンぶん。`closes` = 配布形の停止 token で閉じる（次ターンを差分で継げる）。 */
 type Answer = { readonly text: string; readonly closes: boolean };
 
@@ -121,7 +135,26 @@ type FakeHost = Gemma4ChatSessionHost & {
   prompts(): readonly (readonly number[])[];
   /** `sequence()` が受けた容量を発行順に（セッションのノブが降りているか）。 */
   capacities(): readonly (number | undefined)[];
+  /** `generate` が受けた sampler 指定を発行順に（解決順 3 段の観測点）。 */
+  samplers(): readonly (SamplerSpec | undefined)[];
 };
+
+/** 偽 sequence の故障注入（`sequence()` の保留と `dispose()` の拒否）。 */
+type FakeFaults = {
+  /** `dispose` を拒否させる（device 消失で `flush` が失敗する形の写し）。 */
+  readonly disposeError?: unknown;
+  /**
+   * `sequence()` の解決を保留する（受け取った `release` を呼ぶまで返らない）。
+   *
+   * 「確保の `await` 中に dispose された」窓を作るための口 — 本物でも `createGenerationSequence`
+   * は GPU の確保を挟む非同期なので、この窓は実在する。
+   */
+  readonly holdSequence?: (release: () => void) => void;
+};
+
+/** 中断の識別（本物の `sequence.ts` の `isAbortOf` と同じ分け方を偽側にも写す）。 */
+const isAbortOf = (error: unknown, signal: AbortSignal | undefined): boolean =>
+  signal !== undefined && signal.aborted && error === signal.reason;
 
 /**
  * 台本どおりに答える偽 sequence を配るホスト。
@@ -132,29 +165,32 @@ type FakeHost = Gemma4ChatSessionHost & {
 const fakeHost = (
   answers: readonly Answer[],
   program: GenerationProgram,
-  /** 故障注入: `dispose` を拒否させる（device 消失で `flush` が失敗する形の写し）。 */
-  faults: { readonly disposeError?: unknown } = {},
+  faults: FakeFaults = {},
+  /** 配布形が宣言する推奨サンプラ（解決順の最下段）。 */
+  defaultSampler?: Gemma4DefaultSampler,
 ): FakeHost => {
   const prompts: number[][] = [];
   const capacities: (number | undefined)[] = [];
+  const samplers: (SamplerSpec | undefined)[] = [];
   let created = 0;
   let disposed = 0;
   let turn = 0;
   return {
     tokenizer,
     program,
-    defaultSampler: undefined,
+    defaultSampler,
     created: () => created,
     disposed: () => disposed,
     prompts: () => prompts,
     capacities: () => capacities,
+    samplers: () => samplers,
     sequence: (options = {}): Promise<GenerationSequence> => {
       created += 1;
       capacities.push(options.capacity);
       const capacity = options.capacity ?? program.capacity;
       let used = 0;
       let gone = false;
-      return Promise.resolve({
+      const sequence: GenerationSequence = {
         capacity,
         get used(): number {
           return used;
@@ -162,6 +198,7 @@ const fakeHost = (
         generate(request: GenerationRequest): GenerationStream {
           assert(!gone, "dispose 済みの sequence へ generate した");
           prompts.push([...request.prompt]);
+          samplers.push(request.sampler);
           const answer = answers[turn];
           assert(answer !== undefined, `台本に ${turn + 1} ターン目が無い`);
           turn += 1;
@@ -179,8 +216,11 @@ const fakeHost = (
             let emitted = 0;
             let stopped: GenerationStop | undefined;
             try {
+              request.signal?.throwIfAborted();
               yield { kind: "prefill", chunk: 1, chunks: 1 };
               for (const id of ids) {
+                // 中断は段の境目で見る（本物も run と run の間でしか観測できない）。
+                request.signal?.throwIfAborted();
                 used += 1;
                 emitted += 1;
                 yield { kind: "token", id, position: used };
@@ -188,6 +228,14 @@ const fakeHost = (
               // 停止 token は列に出さないが会話には残る（未 commit frontier）。
               if (answer.closes) used += 1;
               stopped = stop;
+            } catch (error) {
+              // MUST: 中断を捕えた側で `aborted` を立ててから投げ直す（本物の `sequence.ts` と
+              // 同じ形）。ここを写さないと `done` が `closed` で解決してしまい、テストが
+              // 実装ではなく偽側の写し違いを見ることになる。
+              if (isAbortOf(error, request.signal)) {
+                stopped = { reason: "aborted", tokens: emitted };
+              }
+              throw error;
             } finally {
               // `break` / `return()` で畳まれた場合は `closed`（本物と同じ分け方）。
               settle(stopped ?? { reason: "closed", tokens: emitted });
@@ -203,7 +251,10 @@ const fakeHost = (
             ? Promise.resolve()
             : Promise.reject(faults.disposeError);
         },
-      });
+      };
+      const hold = faults.holdSequence;
+      if (hold === undefined) return Promise.resolve(sequence);
+      return new Promise<GenerationSequence>((resolve) => hold(() => resolve(sequence)));
     },
   };
 };
@@ -337,16 +388,16 @@ Deno.test("ChatSession 溢れ: 既定ポリシーが最古の対を落とし、s
 
 Deno.test("ChatSession 溢れ: 落とせるものが尽きたら fail loudly（黙って縮めない）", async () => {
   // system + 今の発話しか無い = 既定ポリシーには落とせるものが無い。
-  const host = fakeHost([{ text: "Blue.", closes: true }], programOf(8));
+  const host = fakeHost([{ text: "Blue.", closes: true }], programOf(TIGHT_CAPACITY));
   const session = new Gemma4ChatSession(host, { system: SYSTEM, maxNewTokens: MAX_NEW_TOKENS });
 
   const error = await assertRejects(
-    () => session.send("Name a color.").text(),
+    () => session.send(LONG_ASK).text(),
     GenerationCapacityError,
     "会話が入り切らない",
   );
   assertEquals(error.constraint, "capacity");
-  assertEquals(error.limit, 8);
+  assertEquals(error.limit, TIGHT_CAPACITY);
   assertEquals(error.requestedNewTokens, MAX_NEW_TOKENS);
   // 「今なら通る maxNewTokens」は負値 = 何 token 溢れているか（ADR 0083 追記 2026-08-31）。
   assert(error.maxNewTokens < 0, `溢れ幅が読めない: ${error.maxNewTokens}`);
@@ -381,7 +432,7 @@ Deno.test("ChatSession 溢れ: ポリシーの注入が効く（履歴を返す 
   });
 
   await t.step("throw はそのまま呼び手へ届く（包まない）", async () => {
-    const host = fakeHost([{ text: "Blue.", closes: true }], programOf(8));
+    const host = fakeHost([{ text: "Blue.", closes: true }], programOf(TIGHT_CAPACITY));
     const refusal = new Error("ホストが切り詰めを拒否した");
     const session = new Gemma4ChatSession(host, {
       maxNewTokens: MAX_NEW_TOKENS,
@@ -389,7 +440,7 @@ Deno.test("ChatSession 溢れ: ポリシーの注入が効く（履歴を返す 
         throw refusal;
       },
     });
-    const caught = await session.send("Name a color.").text().then(
+    const caught = await session.send(LONG_ASK).text().then(
       () => undefined,
       (error: unknown) => error,
     );
@@ -399,14 +450,14 @@ Deno.test("ChatSession 溢れ: ポリシーの注入が効く（履歴を返す 
   await t.step("末尾（今の発話）を落とすポリシーは fail loudly", async () => {
     // 長さは縮むので長さの門は通る。通してしまうと「問いの無い会話」に答えが付く（描画は
     // 末尾 role を制約しないので例外ゼロで確定する）。
-    const host = fakeHost([{ text: "Blue.", closes: true }], programOf(8));
+    const host = fakeHost([{ text: "Blue.", closes: true }], programOf(TIGHT_CAPACITY));
     const session = new Gemma4ChatSession(host, {
       system: SYSTEM,
       maxNewTokens: MAX_NEW_TOKENS,
       onOverflow: ({ turns }) => turns.slice(0, -1),
     });
     await assertRejects(
-      () => session.send("Name a color.").text(),
+      () => session.send(LONG_ASK).text(),
       Error,
       "今の発話（末尾）を落とした",
     );
@@ -429,7 +480,7 @@ Deno.test("ChatSession 溢れ: ポリシーの注入が効く（履歴を返す 
   });
 
   await t.step("縮まない履歴は無限ループにせず fail loudly", async () => {
-    const host = fakeHost([{ text: "Blue.", closes: true }], programOf(8));
+    const host = fakeHost([{ text: "Blue.", closes: true }], programOf(TIGHT_CAPACITY));
     let calls = 0;
     const session = new Gemma4ChatSession(host, {
       maxNewTokens: MAX_NEW_TOKENS,
@@ -439,7 +490,7 @@ Deno.test("ChatSession 溢れ: ポリシーの注入が効く（履歴を返す 
       },
     });
     await assertRejects(
-      () => session.send("Name a color.").text(),
+      () => session.send(LONG_ASK).text(),
       GenerationCapacityError,
       "縮めなかった",
     );
@@ -463,18 +514,18 @@ Deno.test("ChatSession capacity: 省略時は program の既定・渡せばそ�
     let overflows = 0;
     const session = new Gemma4ChatSession(host, {
       maxNewTokens: MAX_NEW_TOKENS,
-      capacity: 8,
+      capacity: TIGHT_CAPACITY,
       onOverflow: (context) => {
         overflows += 1;
         return dropOldestTurns(context);
       },
     });
     const error = await assertRejects(
-      () => session.send("Name a color.").text(),
+      () => session.send(LONG_ASK).text(),
       GenerationCapacityError,
       "会話が入り切らない",
     );
-    assertEquals(error.limit, 8, "選んだ容量が上限として運ばれる");
+    assertEquals(error.limit, TIGHT_CAPACITY, "選んだ容量が上限として運ばれる");
     assertEquals(overflows, 1, "溢れ処理は選んだ容量で呼ばれる");
     // 判定は確保の前なので、入り切らないターンでは sequence を 1 本も取らない。
     assertEquals(host.created(), 0, "溢れると分かったターンは KV を確保しない");
@@ -644,4 +695,186 @@ Deno.test("ChatSession: 停止文字列で切ったターンは chat() と同じ
   // model turn は閉じていない = 差分の前提が無い。
   assertEquals(await session.send("Another one.").text(), "Red.");
   assertEquals(host.created(), 2, "停止文字列で切ったターンの後は sequence を作り直す");
+});
+
+Deno.test("ChatSession capacity: 容量の関係は構築時に見る（設定した場所で落ちる）", async (t) => {
+  // 検査を sequence 側だけに任せると、長いターンでは `#shrink` が履歴を実際に切り詰めてから
+  // 容量エラーになり、真因（宣言ミス）がどの診断にも出ない。式は `sequence.ts` と同じ 2 本。
+  const host = fakeHost([{ text: "Blue.", closes: true }], programOf(640));
+
+  await t.step("chunkLength 未満（1 chunk すら入らない）", () => {
+    assertThrows(
+      () => new Gemma4ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS, capacity: 8 }),
+      Error,
+      "capacity 8 が chunkLength 32 を下回る",
+    );
+  });
+
+  await t.step("maxPosition 超過（容量いっぱいの会話が位置上限の外を引く）", () => {
+    assertThrows(
+      () => new Gemma4ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS, capacity: 4097 }),
+      Error,
+      "capacity 4097 が maxPosition 4096 を超えた",
+    );
+  });
+
+  await t.step("値域（安全整数でない容量）", () => {
+    assertThrows(
+      () => new Gemma4ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS, capacity: 64.5 }),
+      Error,
+      "capacity 64.5 が 1 以上の整数でない",
+    );
+  });
+
+  await t.step(
+    "chunkLength ちょうど / maxPosition ちょうどは通る（門が広すぎない対）",
+    async () => {
+      const edge = new Gemma4ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS, capacity: 32 });
+      new Gemma4ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS, capacity: 4096 });
+      // 構築が通っただけでなく、選んだ容量がそのまま sequence へ降りることまで見る。
+      assertEquals(await edge.send("Name a color.").text(), "Blue.");
+      assertEquals(host.capacities(), [32]);
+    },
+  );
+});
+
+Deno.test("ChatSession: sequence 確保の await 中に dispose されたら、その sequence を畳んで落ちる", async () => {
+  // `dispose()` は `#sequence` がまだ undefined の状態で走るので何も畳まず、その直後に
+  // `this.#sequence = created` が入る — この窓を塞げるのは `await` 明けの再検査だけ。
+  let release!: () => void;
+  const entered = Promise.withResolvers<void>();
+  const host = fakeHost([{ text: "Blue.", closes: true }], programOf(640), {
+    holdSequence: (resume) => {
+      release = resume;
+      entered.resolve();
+    },
+  });
+  const session = new Gemma4ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS });
+
+  const settled = session.send("Name a color.").text().then(
+    () => undefined,
+    (error: unknown) => error,
+  );
+  await entered.promise; // `#host.sequence()` へ入った（返り値はまだ保留）。
+  await session.dispose();
+  assertEquals(host.disposed(), 0, "この時点ではまだ畳む相手が居ない（窓が開いている）");
+  release();
+
+  const caught = await settled;
+  assert(caught instanceof Error, `例外で終わっていない: ${caught}`);
+  assert(
+    caught.message.includes("dispose 済みでは生成できない"),
+    `別の理由で落ちた: ${caught.message}`,
+  );
+  assertEquals(host.created(), 1, "確保そのものは通っている（窓の外で捨てる形ではない）");
+  assertEquals(host.disposed(), 1, "確保できてしまった sequence は畳んでから落とす");
+});
+
+Deno.test("ChatSession sampler: ターン → セッション → 配布形の既定の順に解決する", async (t) => {
+  // 退行すると配布形の推奨サンプラが黙って温度 0（greedy）へ落ちる — 例外は出ず、出力が
+  // 「妙に決定的」になることでしか気づけない。
+  const recommended: Gemma4DefaultSampler = { temperature: 1, topK: 64, topP: 0.95 };
+  const script = [{ text: "Blue.", closes: true }, { text: "Red.", closes: true }] as const;
+
+  await t.step("どちらも省略すれば配布形の宣言が効く", async () => {
+    const host = fakeHost([...script], programOf(640), {}, recommended);
+    const session = new Gemma4ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS });
+    assertEquals(await session.send("Name a color.").text(), "Blue.");
+    assertEquals(host.samplers()[0], recommended);
+  });
+
+  await t.step("セッション指定が配布形の宣言を上書きする", async () => {
+    const host = fakeHost([...script], programOf(640), {}, recommended);
+    const session = new Gemma4ChatSession(host, {
+      maxNewTokens: MAX_NEW_TOKENS,
+      sampler: { temperature: 0.5 },
+    });
+    assertEquals(await session.send("Name a color.").text(), "Blue.");
+    assertEquals(host.samplers()[0], { temperature: 0.5 });
+  });
+
+  await t.step("ターン指定がセッション指定を上書きする", async () => {
+    const host = fakeHost([...script], programOf(640), {}, recommended);
+    const session = new Gemma4ChatSession(host, {
+      maxNewTokens: MAX_NEW_TOKENS,
+      sampler: { temperature: 0.5 },
+    });
+    assertEquals(await session.send("Name a color.").text(), "Blue.");
+    assertEquals(
+      await session.send("Another one.", { sampler: { temperature: 0 } }).text(),
+      "Red.",
+    );
+    assertEquals(host.samplers(), [{ temperature: 0.5 }, { temperature: 0 }]);
+  });
+
+  await t.step("3 段とも無ければ欄そのものを渡さない（低層の既定 = 温度 0）", async () => {
+    const host = fakeHost([...script], programOf(640));
+    const session = new Gemma4ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS });
+    assertEquals(await session.send("Name a color.").text(), "Blue.");
+    assertEquals(host.samplers()[0], undefined);
+  });
+});
+
+Deno.test("ChatSession: 中断したターンは done が aborted で resolve し、KV を継がない", async () => {
+  // 中断も `fail()` する退行が入ると「自分で止めたのに done が reject する」になり、
+  // `error === signal.reason` による中断の識別（ADR 0083 決定 5）が壊れる。逆に中断ターンで
+  // `stop` を立てる退行が入ると、閉じていない model turn の後ろへ差分を継いで会話が静かに壊れる。
+  const host = fakeHost(
+    [{ text: "Blue and red.", closes: true }, { text: "Red.", closes: true }],
+    programOf(640),
+  );
+  const session = new Gemma4ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS });
+  const controller = new AbortController();
+  const reason = new Error("呼び手が止めた");
+
+  const stream = session.send("Name a color.", { signal: controller.signal });
+  const parts: string[] = [];
+  const caught = await (async () => {
+    try {
+      for await (const chunk of stream) {
+        parts.push(chunk);
+        controller.abort(reason);
+      }
+      return undefined;
+    } catch (error) {
+      return error;
+    }
+  })();
+
+  assertEquals(caught, reason, "中断の理由が同一性のまま届く（包まない）");
+  assert(parts.length > 0, "1 片も出ないうちに中断した（このケースの前提が崩れている）");
+  const stop = await stream.done;
+  assertEquals(stop.reason, "aborted", "done は reject せず aborted で resolve する");
+  assert(stop.tokens > 0, `中断までに引いた token 数が運ばれない: ${stop.tokens}`);
+
+  assertEquals(session.turns, [
+    { role: "user", content: "Name a color." },
+    { role: "assistant", content: parts.join("") },
+  ], "出た本文だけを積む");
+  assertEquals(host.disposed(), 1, "中断ターンでも後始末は走る");
+
+  // model turn は閉じていない = 差分の前提が無い（KV を継がない）。
+  assertEquals(await session.send("Another one.").text(), "Red.");
+  assertEquals(host.created(), 2, "中断ターンの後は sequence を作り直す");
+});
+
+Deno.test("ChatSession: 要求は発行時に写す（汲み始める前の書き換えは効かない）", async () => {
+  // 型 doc の MUST。受け手の複製（`createSampler` / `GenerationSequence.generate`）は
+  // async generator の本体 = 最初の `next()` なので、それに任せると「発行してから汲み始める
+  // まで」の窓で書き換えた抽選指定・停止集合が黙って効く。
+  const host = fakeHost([{ text: "Blue.", closes: true }], programOf(640));
+  const sampler = { temperature: 0.5, logitBias: [[7, 1] as const] };
+  const stopTokens = [11, 12];
+  const session = new Gemma4ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS, sampler });
+
+  const stream = session.send("Name a color.", { stopTokens });
+  // 発行済み・まだ 1 片も汲んでいない状態で呼び手側を書き換える。
+  sampler.temperature = 2;
+  stopTokens.length = 0;
+  assertEquals(await stream.text(), "Blue.");
+
+  const recorded = host.samplers()[0];
+  assertEquals(recorded, { temperature: 0.5, logitBias: [[7, 1]] }, "発行時の値で走っている");
+  assertEquals(Object.isFrozen(recorded), true, "写しは凍結して渡す（以後の書き換えを塞ぐ）");
+  assertEquals(sampler.temperature, 2, "呼び手の object は写しの側から触らない");
 });

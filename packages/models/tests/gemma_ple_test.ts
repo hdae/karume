@@ -19,6 +19,7 @@ import {
   defaultGemma4PleResidentBytes,
   type Gemma4PleIndex,
   gemma4PleShardBytes,
+  parseGemma4PleIndex,
 } from "../src/gemma/ple.ts";
 import { type DumpTensor, writeSafetensors } from "./helpers/safetensors-write.ts";
 
@@ -356,4 +357,225 @@ Deno.test("Gemma4Ple: shard 1 本すら載らない予算は構築時に fail lo
     Error,
     "0 以上の整数でない",
   );
+});
+
+// ---- 資産境界の拒否経路（外部入力としての `ple.json` と shard）-----------------
+//
+// `parseGemma4PleIndex` の門・`createGemma4Ple` の vocab 相互照合（ADR 0085 決定 5 の沈黙誤値
+// ガード）・`gather` の id 値域は、実際に呼ぶのが実資産 e2e の**正常系 1 通り**だけだった
+// （しかも資産の無い環境では 1 度も走らない）。索引と shard を片方だけ焼き直した組み合わせ・
+// 別語彙で焼いた sidecar は、この 3 つのガードが唯一の検出線である。
+
+/** `unknown` 境界へ渡す素の索引（`Gemma4PleIndex` 型は `schema` 欄を持たないので別に組む）。 */
+const RAW_INDEX: Record<string, unknown> = {
+  schema: 1,
+  tokens: TOKENS,
+  layers: LAYERS,
+  dim: DIM,
+  embedScale: EMBED_SCALE,
+  shards: INDEX.shards.map((shard) => ({ ...shard })),
+};
+
+Deno.test("parseGemma4PleIndex: 壊れた索引を黙って読まない", async (t) => {
+  await t.step("正常系（陰性対照 — 常に落ちる門になっていない）", () => {
+    assertEquals(parseGemma4PleIndex(RAW_INDEX), INDEX);
+  });
+
+  await t.step("知らない版は読まない", () => {
+    assertThrows(
+      () => parseGemma4PleIndex({ ...RAW_INDEX, schema: 2 }),
+      Error,
+      "ple.json.schema 2 が 1 でない",
+    );
+  });
+
+  await t.step("未知キー（綴り違いが黙って既定へ縮退しない）", () => {
+    assertThrows(
+      () => parseGemma4PleIndex({ ...RAW_INDEX, extra: 1 }),
+      Error,
+      "未知キー 'extra'",
+    );
+  });
+
+  await t.step("embedScale は正の有限数（0 は行が全部 0 になる）", () => {
+    assertThrows(
+      () => parseGemma4PleIndex({ ...RAW_INDEX, embedScale: 0 }),
+      Error,
+      "ple.json.embedScale 0 が正の有限数でない",
+    );
+  });
+
+  await t.step("shard 名の重複（同じ実体を 2 つの範囲が名乗る）", () => {
+    assertThrows(
+      () =>
+        parseGemma4PleIndex({
+          ...RAW_INDEX,
+          tokens: 4,
+          shards: [
+            { file: SHARD_FILES[0], start: 0, stop: 2 },
+            { file: SHARD_FILES[0], start: 2, stop: 4 },
+          ],
+        }),
+      Error,
+      `.file '${SHARD_FILES[0]}' が重複している`,
+    );
+  });
+
+  await t.step("範囲の非連続（引けない id が黙って生まれる）", () => {
+    assertThrows(
+      () =>
+        parseGemma4PleIndex({
+          ...RAW_INDEX,
+          tokens: 5,
+          shards: [
+            { file: SHARD_FILES[0], start: 0, stop: 2 },
+            { file: SHARD_FILES[1], start: 3, stop: 5 },
+          ],
+        }),
+      Error,
+      ".start 3 が直前の shard の末尾 2 と連続しない",
+    );
+  });
+
+  await t.step("空範囲", () => {
+    assertThrows(
+      () =>
+        parseGemma4PleIndex({
+          ...RAW_INDEX,
+          tokens: 2,
+          shards: [
+            { file: SHARD_FILES[0], start: 0, stop: 2 },
+            { file: SHARD_FILES[1], start: 2, stop: 2 },
+          ],
+        }),
+      Error,
+      "範囲 [2, 2) が空",
+    );
+  });
+
+  await t.step("合計行数の不一致（索引だけ焼き直した組み合わせ）", () => {
+    assertThrows(
+      () => parseGemma4PleIndex({ ...RAW_INDEX, tokens: TOKENS + 1 }),
+      Error,
+      `shard の合計 ${TOKENS} 行が tokens ${TOKENS + 1} と違う`,
+    );
+  });
+});
+
+Deno.test("createGemma4Ple: vocab の相互照合は読み口に触る前に落ちる", () => {
+  // ADR 0085 決定 5 — 別語彙で焼いた sidecar は「引ける id が食い違ったまま形は合う」。
+  const reader = fakeReader();
+  assertThrows(
+    () =>
+      createGemma4Ple({
+        index: INDEX,
+        readShard: reader.readShard,
+        vocabSize: TOKENS + 1,
+      }),
+    Error,
+    `PLE sidecar の行数 ${TOKENS} が主 embedding の vocab 行数 ${TOKENS + 1} と違う`,
+  );
+  assertEquals(reader.calls.length, 0, "照合の前に shard を読みに行っている");
+});
+
+Deno.test("Gemma4Ple.gather: id の値域と空列は fail loudly（別 token の有効な行を引かせない）", async () => {
+  const reader = fakeReader();
+  const ple = createGemma4Ple({ index: INDEX, readShard: reader.readShard, vocabSize: TOKENS });
+  for (const bad of [TOKENS, -1, 1.5]) {
+    await assertRejects(
+      () => ple.gather([bad]),
+      Error,
+      `token id[0] ${bad} が PLE sidecar の 0..${TOKENS - 1} の外`,
+    );
+  }
+  await assertRejects(() => ple.gather([]), Error, "PLE gather の token 列が空");
+  assertEquals(reader.calls.length, 0, "値域の門より先に shard を読みに行っている");
+});
+
+/** 1 shard だけの索引（shard 側 metadata の門を 1 本の読みで踏むため）。 */
+const SOLO_FILE = "solo.safetensors";
+const SOLO_INDEX: Gemma4PleIndex = {
+  tokens: 2,
+  layers: LAYERS,
+  dim: DIM,
+  embedScale: EMBED_SCALE,
+  shards: [{ file: SOLO_FILE, start: 0, stop: 2 }],
+};
+
+/** 1 shard ぶんのバイト列を 1 点だけ壊して組む（正常系はそのまま通ることを対で見る）。 */
+const soloBytes = (
+  patch: {
+    readonly metadata?: boolean;
+    readonly start?: number;
+    readonly valuesAsF32?: boolean;
+  } = {},
+): ArrayBuffer => {
+  const rows = 2;
+  const count = rows * LAYERS * DIM;
+  const values: DumpTensor = patch.valuesAsF32 === true
+    ? { dtype: "F32", shape: [rows, LAYERS, DIM], data: new Float32Array(count) }
+    : { dtype: "I8", shape: [rows, LAYERS, DIM], data: new Int8Array(count) };
+  const tensors = new Map<string, DumpTensor>([
+    ["values", values],
+    ["scales", { dtype: "F32", shape: [rows, LAYERS], data: new Float32Array(rows * LAYERS) }],
+  ]);
+  const metadata: Record<string, string> = patch.metadata === false ? {} : {
+    karume_ple: JSON.stringify({
+      schema: 1,
+      tokens: SOLO_INDEX.tokens,
+      layers: LAYERS,
+      dim: DIM,
+      embedScale: EMBED_SCALE,
+      start: patch.start ?? 0,
+      stop: 2,
+    }),
+  };
+  return writeSafetensors(tensors, metadata).buffer;
+};
+
+Deno.test("Gemma4Ple: shard 側 metadata は索引と突き合わせる（片方だけ焼き直した組み合わせ）", async (t) => {
+  const open = (bytes: ArrayBuffer) => {
+    const calls: string[] = [];
+    const ple = createGemma4Ple({
+      index: SOLO_INDEX,
+      readShard: (file) => {
+        calls.push(file);
+        return Promise.resolve(bytes);
+      },
+      vocabSize: SOLO_INDEX.tokens,
+    });
+    return { ple, calls };
+  };
+
+  await t.step("正常系（陰性対照 — 読みは 1 回で通る）", async () => {
+    const { ple, calls } = open(soloBytes());
+    const tensor = await ple.gather([0]);
+    assertEquals(tensor.shape, [1, 1, LAYERS, DIM]);
+    assertEquals(calls, [SOLO_FILE]);
+  });
+
+  await t.step("metadata 欄そのものが無い（別形式の資産）", async () => {
+    const { ple, calls } = open(soloBytes({ metadata: false }));
+    await assertRejects(() => ple.gather([0]), Error, "__metadata__.karume_ple が無い");
+    assertEquals(calls.length, 1, "読んだ後にしか分からない門である");
+  });
+
+  await t.step("範囲が索引とずれている（形も dtype も合ったまま別 token の行を引く）", async () => {
+    const { ple } = open(soloBytes({ start: 1 }));
+    const error = await assertRejects(
+      () => ple.gather([0]),
+      Error,
+      "karume_ple が索引と食い違う",
+    );
+    assert(error.message.includes("start 1 ≠ 0"), error.message);
+  });
+
+  await t.step("values の格納 dtype が違う", async () => {
+    const { ple } = open(soloBytes({ valuesAsF32: true }));
+    await assertRejects(
+      () => ple.gather([0]),
+      Error,
+      "'values' の格納 dtype が F32（I8 でない）",
+    );
+  });
 });

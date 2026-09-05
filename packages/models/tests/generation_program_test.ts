@@ -5,11 +5,12 @@
 // 遠い場所で出る（形の合う別の出力を掴めば、もっともらしい token 列が黙って返る）ので、
 // 検証が抜けた欄はそのまま沈黙劣化の入口になる。
 
-import { assertEquals, assertThrows } from "@std/assert";
+import { assert, assertEquals, assertThrows } from "@std/assert";
 import type { PreparedModel } from "@karume/runtime";
 import {
   createGenerationProgram,
   type GenerationGraph,
+  generationProgramFace,
   type GenerationProgramSpec,
 } from "../src/generation/program.ts";
 
@@ -257,4 +258,48 @@ Deno.test("GenerationGraph: 実 IrGraph がこの面を満たす（綴りのド�
   // 変わるとこの 1 行がコンパイルエラーになる。
   const asGenerationGraph = (graph: PreparedModel["graph"]): GenerationGraph => graph;
   assertEquals(typeof asGenerationGraph, "function");
+});
+
+// ---- 公開の読み口（`generationProgramFace`）----------------------------------
+//
+// `GenerationProgram` は `Gemma4Pipeline.program` としてパッケージの公開面に出る値なので、
+// 守る先は消費者側である。これを叩く門は実資産 + 実 GPU の e2e 1 箇所にしか無く、
+// `Object.freeze` を外す / `[...wiring.stopTokens]` を `wiring.stopTokens` に戻す変更が、
+// 資産の無い環境（CI・多くの開発機）では全部緑のまま通っていた。
+
+Deno.test("generationProgramFace: 出る欄は数 5 つだけ（内部配線を出さない）", () => {
+  const wiring = createGenerationProgram(specOf({ stopTokens: [1, 7] }));
+  const face = generationProgramFace(wiring);
+  assertEquals(Object.keys(face).sort(), [
+    "capacity",
+    "chunkLength",
+    "maxPosition",
+    "stopTokens",
+    "vocabSize",
+  ]);
+  assertEquals(face, {
+    chunkLength: 4,
+    maxPosition: 128,
+    capacity: 64,
+    vocabSize: VOCAB,
+    stopTokens: [1, 7],
+  });
+});
+
+Deno.test("generationProgramFace: 凍結コピーを返す（消費者の書き換えが停止集合へ届かない）", () => {
+  const wiring = createGenerationProgram(specOf({ stopTokens: [1, 7] }));
+  const face = generationProgramFace(wiring);
+  assertEquals(Object.isFrozen(face), true, "face が凍結されていない");
+  assertEquals(Object.isFrozen(face.stopTokens), true, "stopTokens が凍結されていない");
+  // ESM は常に strict mode なので、凍結配列への書き込みは黙って捨てられず TypeError になる。
+  assertThrows(() => {
+    (face.stopTokens as number[]).length = 0;
+  }, TypeError);
+  assertThrows(() => {
+    (face.stopTokens as number[]).sort();
+  }, TypeError);
+  // 別実体であること（凍結だけ残してコピーを落とすと、wiring 側の配列まで凍る副作用が出る）。
+  assert(face.stopTokens !== wiring.stopTokens, "配線の配列をそのまま出している");
+  assertEquals(Object.isFrozen(wiring.stopTokens), false, "配線側まで凍らせている");
+  assertEquals([...wiring.stopTokens], [1, 7], "配線側の停止集合は無傷");
 });

@@ -116,6 +116,12 @@ const SYMBOLS = "symbols";
 const STYLE_VECTORS = "style_vectors";
 const SPEAKER_EMBEDDINGS = "speaker_embeddings";
 
+/**
+ * front のグラフ出力の本数（logw_sdp / logw_dp / m_p / logs_p）。
+ * {@link outputAt} が位置で引く 4 本ちょうどを構築時に検める（{@link buildSbv2State}）。
+ */
+const FRONT_OUTPUTS = 4;
+
 /** 生成結果。`data` は f32 モノラル波形（`encodeWav` にそのまま渡せる）。 */
 export type GeneratedAudio = {
   readonly sampleRate: number;
@@ -303,7 +309,11 @@ const i32 = (values: readonly number[], shape: readonly number[]): Tensor => ({
 
 const ones = (count: number): Float32Array<ArrayBuffer> => new Float32Array(count).fill(1);
 
-/** グラフ出力を**位置**で引く（IR v1 の出力名は `output.<i>` — 名前を決め打ちしない）。 */
+/**
+ * グラフ出力を**位置**で引く（IR v1 の出力名は export 時の torch ノード名 — `slice_54` /
+ * `mul_3780` のように意味を持たないので名前を決め打ちしない）。本数は
+ * {@link buildSbv2State} が構築時に見る。
+ */
 const outputAt = (
   model: GraphOwner,
   outputs: Readonly<Record<string, Tensor>>,
@@ -454,8 +464,11 @@ export const parseTokenizerAsset = (raw: unknown, where: string): DebertaTokeniz
  *
  * MUST: 行数の突合を落とさない。行番号は表の物理行そのものなので、名前表と表の行数がずれても
  * shape は合ったまま**別のスタイル・別の話者の声が出る**（`style.ts` の doc）。
+ *
+ * NOTE: `export` は門を直接叩くテストのため（{@link assertTokenLimit} と同じ事情）。
+ * `mod.ts` / サブパス面には出さない（ADR 0008）。
  */
-const assertTableFits = (
+export const assertTableFits = (
   table: Sbv2Table,
   names: ReadonlyMap<string, number>,
   key: string,
@@ -470,6 +483,62 @@ const assertTableFits = (
   if (table.cols !== cols) {
     throw new Error(
       `Sbv2Pipeline: 資産 '${key}' の列数 ${table.cols} がグラフ入力の ${cols} と違う`,
+    );
+  }
+};
+
+/**
+ * front のグラフ出力が {@link outputAt} の位置引きどおり 4 本ちょうどであることを構築時に見る。
+ *
+ * MUST: 「4 本以上」にしない。位置 0..3 しか読まないので余った出力は静かに無視され、別の
+ * variant（検証用の全層出し等）を front として掴んだことに気づけない。
+ *
+ * NOTE: 出力の**順序**（logw_sdp / logw_dp / m_p / logs_p）は shape が同型なので TS からは
+ * 見分けられない — そこは exporter（`tools/export-recipes/sbv2/export.py` の出力名の並び）と
+ * 参照環境の WAV sha256 門の責務。ここが見るのは本数だけ。
+ * NOTE: `export` は門を直接叩くテストのため（{@link assertTokenLimit} と同じ事情）。
+ */
+export const assertFrontOutputs = (front: GraphOwner): void => {
+  if (front.graph.outputs.length !== FRONT_OUTPUTS) {
+    throw new Error(
+      `Sbv2Pipeline: front のグラフ出力が ${front.graph.outputs.length} 本` +
+        `（logw_sdp / logw_dp / m_p / logs_p の ${FRONT_OUTPUTS} 本ちょうどが要る）`,
+    );
+  }
+};
+
+/**
+ * text_encoder が出す hidden の幅と、front のグラフ入力 `bert` の幅が一致することを構築時に見る。
+ *
+ * MUST: **GPU を取りに行く前**（= text_encoder の Session を張る前）に呼ぶ。実行時まで残すと、
+ * 配布形で 334MB の text_encoder を構築して 1 run 払ってから `Session.run` の要素数検査で
+ * 落ちる — 家族も資産も名指ししない汎用文言になる。
+ * MUST: 見るのは**最終軸だけ**。出力形は `[1, T, dim]` で T が記号次元（トークン数はデータ
+ * 依存）なので、形全体を静的と要求すると正当な配布形が通らない。
+ *
+ * NOTE: `export` は門を直接叩くテストのため（{@link assertTokenLimit} と同じ事情）。
+ */
+export const assertBertWidth = (
+  textEncoder: GraphOwner,
+  front: GraphOwner,
+  bertHiddenFromEnd: number,
+): void => {
+  const name = bertHiddenOutput(textEncoder.graph.outputs, bertHiddenFromEnd);
+  const info = textEncoder.graph.values[name];
+  if (info === undefined) {
+    throw new Error(`Sbv2Pipeline: text_encoder の出力 '${name}' の宣言が graph.values に無い`);
+  }
+  const width = info.shape.at(-1);
+  if (typeof width !== "number") {
+    throw new Error(
+      `Sbv2Pipeline: text_encoder の出力 '${name}' の最終軸が静的次元でない（${String(width)}）`,
+    );
+  }
+  const expected = featureWidth(front, "bert");
+  if (width !== expected) {
+    throw new Error(
+      `Sbv2Pipeline: text_encoder の出力 '${name}' の幅 ${width} が front のグラフ入力 'bert' の` +
+        ` ${expected} と違う（text_encoder と front が別の BERT を前提にしている）`,
     );
   }
 };
@@ -584,9 +653,11 @@ export const assertTokenLimit = (tokens: number, maxTokens: number): void => {
 /**
  * 音素列（front の記号次元 P）の運用上限を見る門。
  *
- * MUST: {@link assertTokenLimit} と**別に**要る。P = 2·sum(baseWord2ph)+1 で、base の各要素は
- * 1 以上・その本数が T なので **P >= 2·T+1 > T** が常に成り立つ。T 側の門だけでは P の超過を
- * 一度も捕まえられない（T <= 上限のまま P > 上限になる長文が実在する）。
+ * MUST: {@link assertTokenLimit} と**別に**要る。P = 2·sum(baseWord2ph)+1 と T = 語 surface の
+ * トークン総数+2 のどちらが大きいかは**発話依存**で、一方が他方を含意しない — `distributePhone`
+ * は音素数が文字数を下回る語に 0 を配るので（記号語 `{surface:"…", phones:["…"]}` は NFKC で
+ * `"..."` の 3 トークンへ割れて `[1,0,0]`）、そういう語を並べれば P < T にもなる。
+ * どちらの門を落としても、片側だけが上限を超える発話が素通りする。
  * MUST: DeBERTa を回す**前**に呼ぶ。後ろに置くと、超過が確定している要求に対して
  * text_encoder（334MB）を張って回し切ってから front の記号次元で落ちる。
  *
@@ -725,6 +796,8 @@ const buildSbv2State = async (
   const speakers = parseSbv2Table(assetBuffer(assets, SPEAKER_EMBEDDINGS), SPEAKER_TENSOR);
   assertTableFits(styles, config.styles, STYLE_VECTORS, featureWidth(front, "style_vec"));
   assertTableFits(speakers, config.speakers, SPEAKER_EMBEDDINGS, featureWidth(front, "g"));
+  assertFrontOutputs(front);
+  assertBertWidth(textEncoder, front, rules.bertHiddenFromEnd);
   // front と voice は同じ `g` を受ける。幅が割れていたら片方だけ別の話者表を要求している。
   const voiceGin = featureWidth(voice, "g");
   if (voiceGin !== speakers.cols) {
@@ -823,7 +896,8 @@ export const synthesizeSbv2 = async (
   const phonemes = input.ids.phoneIds.length;
   const tokens = input.inputIds.length;
   // 表の確保も Session も張る前に落とす（{@link assertTokenLimit} の MUST）。上限は T と P で
-  // 同じ 1 つだが、P > T なので**両方**見ないと P の超過だけが門を素通りする。
+  // 同じ 1 つだが、どちらが大きいかは発話依存（{@link assertPhonemeLimit} の MUST）なので
+  // **両方**見る。
   assertTokenLimit(tokens, state.config.maxTokens);
   assertPhonemeLimit(phonemes, state.config.maxTokens);
 

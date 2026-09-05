@@ -13,7 +13,7 @@
 // GPU は使わない。系列資産（`outputs/series/deberta-i8/sbv2-22layer/`）と配布形の
 // `symbols.json` が無い環境では SKIP する。
 
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertThrows } from "@std/assert";
 import { parseSafetensors, prepareModel } from "@karume/runtime";
 import { readShard, resolveShards } from "../../runtime/tests/helpers/shard-files.ts";
 import { buildRelPosTables } from "../src/sbv2/text/rel-pos-tables.ts";
@@ -144,4 +144,59 @@ Deno.test({
       "グラフ入力の並び",
     );
   },
+});
+
+// ---- 資産の要らない門（上のパリティは golden が無いと 0 本走る）----------------
+//
+// 対の `sbv2_relattn_parity_test.ts` には資産不要のテストが 2 本あるのに、こちら側は
+// golden が無いと `PARITY_CASES` が空になり **1 本も走らない**（引数門も数学的性質も
+// 未検証のまま緑）。Python 側とのバイト一致は上のパリティにしか置けないが、式が満たす
+// べき構造（引数の受理集合・転置・Toeplitz）は資産なしで縛れる。
+
+Deno.test("buildRelPosTables: 引数の受理集合（式が成立する下限を割る値は落とす）", () => {
+  // 長さ 0 は表が空になるだけでなく、対角配列 `2·length-1` が負長になる。
+  assertThrows(() => buildRelPosTables(0, 256, 512), RangeError, "1 以上の整数でない");
+  // bucketSize 1 は mid = 0 で対数の分母（log((maxPosition-1)/mid)）が壊れる。
+  assertThrows(() => buildRelPosTables(4, 1, 512), RangeError, "bucketSize 1 が 2 以上");
+  // maxPosition 1 は log(0/…) で -Infinity を作る。
+  assertThrows(() => buildRelPosTables(4, 256, 1), RangeError, "maxPosition 1 が 2 以上");
+});
+
+Deno.test("buildRelPosTables: p2c は c2p の転置（バケット化が奇関数であることの帰結）", () => {
+  const length = 7;
+  const { c2pPos, p2cPos } = buildRelPosTables(length, 256, 512);
+  for (let i = 0; i < length; i += 1) {
+    for (let j = 0; j < length; j += 1) {
+      assertEquals(
+        p2cPos.data[i * length + j],
+        c2pPos.data[j * length + i],
+        `p2c[${i}][${j}] が c2p[${j}][${i}] と違う`,
+      );
+    }
+  }
+});
+
+Deno.test("buildRelPosTables: 表は i−j にしか依存しない（Toeplitz）", () => {
+  const length = 7;
+  const { c2pPos } = buildRelPosTables(length, 256, 512);
+  for (let i = 0; i + 1 < length; i += 1) {
+    for (let j = 0; j + 1 < length; j += 1) {
+      assertEquals(
+        c2pPos.data[i * length + j],
+        c2pPos.data[(i + 1) * length + (j + 1)],
+        `対角 ${i - j} の値が位置で変わる`,
+      );
+    }
+  }
+  // 上の 2 本が恒真でないことの対: `maxPosition` は遠方（対数域）の値を実際に動かす。
+  // 近傍だけの表（bucketSize 256 に対し length 7）では対数域へ入らないので、
+  // 対数域へ届く形（mid = 4 に対し |i−j| が 4 を超える）で見る。
+  const wide = buildRelPosTables(16, 8, 512);
+  const narrow = buildRelPosTables(16, 8, 64);
+  assert(
+    [...wide.c2pPos.data].some((value, index) => value !== narrow.c2pPos.data[index]),
+    "maxPosition を変えても表が同じ（バケット規則を読んでいない）",
+  );
+  // 近傍（線形域）は maxPosition に依らない — 差が出るのは遠方だけであることの固定。
+  assertEquals(wide.c2pPos.data[0 * 16 + 1], narrow.c2pPos.data[0 * 16 + 1]);
 });

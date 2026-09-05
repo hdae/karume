@@ -358,8 +358,13 @@ export const samplerDistribution = (
  * MUST: `logitBias` は要素まで写す — 配列だけ写すと中のタプルが共有され、`bias[0][1] = -Infinity`
  * が走行中の抽選へ通る。**配列の複製はここ 1 箇所だけ**である（{@link samplerDistribution} は
  * 1 回の呼び出しの中でしか spec を読まないので、写す必要が無い）。
+ *
+ * NOTE: `export` は上層（`Gemma4Pipeline.chat` / `Gemma4ChatSession.send`）が**発行時**に同じ
+ * 写しを取るため。この 2 層は「要求は発行時に写す」を型 doc で約束しており、写しが
+ * {@link createSampler}（= 最初の `next()`）まで遅れると、その間の書き換えが黙って効く。
+ * 写し口をここ 1 本に保つための export で、`mod.ts` / サブパス面には出さない（ADR 0008）。
  */
-const snapshotSpec = (spec: SamplerSpec): SamplerSpec =>
+export const snapshotSpec = (spec: SamplerSpec): SamplerSpec =>
   Object.freeze({
     ...spec,
     ...(spec.logitBias === undefined ? {} : {

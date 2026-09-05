@@ -68,6 +68,7 @@ import { getDictionary } from "@hdae/yomi/loader";
 import {
   encodeWav,
   type GeneratedAudio,
+  Sbv2InputError,
   Sbv2Pipeline,
   type Sbv2Utterance,
   toSbv2Utterance,
@@ -557,6 +558,94 @@ Deno.test({
         Error,
         "の列数 256 がグラフ入力の",
       );
+    });
+
+    // --- 入口ノブの門（run を 1 回も足さない — 既に開いたパイプラインを使う）-----
+    //
+    // `generate` の入口は全て `Sbv2InputError`（= 呼び手が要求を直せば直る 400 側）で、
+    // Session を張る前に落とす。`parseSbv2PipelineConfig` 側の同名の門は**配布形の既定値**に
+    // 対するもので、実行時ノブは誰も見ていなかった。
+
+    await t.step("lengthScale 0 は Session を張る前に入力起因で落ちる", async () => {
+      await assertRejects(
+        () => pipeline.generate(utterance, { lengthScale: 0 }),
+        Sbv2InputError,
+        "lengthScale 0 が正でない",
+      );
+    });
+
+    await t.step("非有限のノブは値そのものを添えて落ちる", async () => {
+      await assertRejects(
+        () => pipeline.generate(utterance, { sdpRatio: Number.NaN }),
+        Sbv2InputError,
+        "sdpRatio NaN が有限の数でない",
+      );
+    });
+
+    await t.step("空の発話は落ちる（0 音素で front を回さない）", async () => {
+      await assertRejects(
+        () => pipeline.generate({ leadingPunctuations: [], moras: [], words: [] }),
+        Sbv2InputError,
+        "utterance が空",
+      );
+    });
+  },
+});
+
+// --- 直列化と寿命（並行 generate / dispose 済み判定）--------------------------
+//
+// `Sbv2Pipeline` は 3 グラフ（text_encoder 334MB / front / voice）を同時常駐させない契約で、
+// それを守るのが `generate` の直列化鎖（モジュール doc の MUST）。並行に呼ぶと run が
+// インターリーブする実装へ退行しても**結果の波形は正しい**ので、観測席の component 列で
+// しか捕まらない。gemma4 側には同型の門がある（`e2e_gemma4_chat_test.ts` の
+// 「dispose 済みのパイプラインは生成を受けない」）。
+
+Deno.test({
+  name: "e2e(実GPU): 並行 generate は直列化され、dispose 後は生成を受けない",
+  ignore: !RUNNABLE,
+  fn: async (t) => {
+    const manifest = readManifest();
+    const assets = await loadLocalAssets(manifest);
+    const seen: string[] = [];
+    const pipeline = await Sbv2Pipeline.fromAssets({ manifest, assets }, {
+      model: MODEL,
+      quant: QUANT,
+      onRunDiagnostics: (component) => seen.push(component),
+    });
+    const utterance = await utteranceOnce();
+
+    try {
+      await t.step("2 本を同時発行しても run はインターリーブしない", async () => {
+        // await せずに 2 本発行する（鎖が無ければ 2 本目の text_encoder が 1 本目の front より
+        // 先に走りうる）。
+        await Promise.all([
+          pipeline.generate(utterance, { seed: SEED }),
+          pipeline.generate(utterance, { seed: SEED }),
+        ]);
+        assertEquals(seen, [
+          "text_encoder",
+          "front",
+          "voice",
+          "text_encoder",
+          "front",
+          "voice",
+        ]);
+      });
+    } finally {
+      // 上の段が落ちても GPU は返す（この後の 2 段は dispose 済みの挙動を見る）。
+      await pipeline.dispose();
+    }
+
+    await t.step("dispose 済みでは生成できない", async () => {
+      await assertRejects(
+        () => pipeline.generate(utterance, { seed: SEED }),
+        Error,
+        "Sbv2Pipeline: dispose 済みでは生成できない",
+      );
+    });
+
+    await t.step("2 度目の dispose は同じ完了を返す（先に返して破棄済みと誤らせない）", () => {
+      assert(pipeline.dispose() === pipeline.dispose(), "dispose() が別の Promise を返した");
     });
   },
 });

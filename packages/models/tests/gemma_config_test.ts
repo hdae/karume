@@ -21,7 +21,12 @@
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { parseManifest } from "@karume/hub";
 import { type Gemma4PipelineConfig, parseGemma4PipelineConfig } from "../src/gemma/config.ts";
-import { assertRopeInputShapes, Gemma4Pipeline } from "../src/gemma/pipeline.ts";
+import {
+  assertChunkLength,
+  assertPleShardAssets,
+  assertRopeInputShapes,
+  Gemma4Pipeline,
+} from "../src/gemma/pipeline.ts";
 import type { GenerationGraph } from "../src/generation/program.ts";
 import { stubModel } from "./helpers/stub-model.ts";
 
@@ -394,4 +399,114 @@ Deno.test("gemma4 pipelineConfig: 配布形ミラーの宣言がこのパーサ�
   assertEquals(config.maxPosition, SHIPPED_MAX_POSITION);
   // RoPE のパラメータは上流 config の実値そのもの（写し損ねると回転が別物になる）。
   assertEquals(config.rope, ROPE, "配布形が宣言する rope");
+});
+
+// ---- 実行時ノブ chunkLength の門 --------------------------------------------
+//
+// `assertChunkLength` の 3 分岐は non-exported だった頃、到達経路が `fromAssets` /
+// `fromPretrained` / `estimateSessionMemory` の 3 つだけで、既存 e2e はどれも**妥当値**しか
+// 渡さない = 門が全部落として緑になっていないことの陰性対照すら無かった。doc が書く退行
+// （門が無かった頃、上限 768 の資産に chunkLength 1024 を渡すと例外なしで走っていた —
+// 2026-09-03 実測）そのものを守る門なので、ここで直接叩く。
+
+Deno.test("assertChunkLength: 実行時ノブの受理集合（宣言との関係を 3 本とも見る）", async (t) => {
+  const config = parseGemma4PipelineConfig(MINIMAL);
+
+  await t.step("decode 形の専用値（1）を prefill 形として通さない", () => {
+    assertThrows(() => assertChunkLength(1, config), Error, "chunkLength 1 が 2 以上の整数でない");
+  });
+
+  await t.step("非整数は落とす", () => {
+    assertThrows(
+      () => assertChunkLength(3.5, config),
+      Error,
+      "chunkLength 3.5 が 2 以上の整数でない",
+    );
+  });
+
+  await t.step("宣言 maxChunkLength ちょうどは通る（門が広すぎないことの対）", () => {
+    assertEquals(assertChunkLength(config.maxChunkLength, config), config.maxChunkLength);
+  });
+
+  await t.step("宣言 maxChunkLength 超過（記号 M を焼いた trace 範囲の外）", () => {
+    assertThrows(
+      () => assertChunkLength(config.maxChunkLength + 1, config),
+      Error,
+      `chunkLength 129 が配布形の宣言 maxChunkLength ${config.maxChunkLength} を超えた`,
+    );
+  });
+
+  await t.step("maxPosition 超過（3 本目の門が到達可能であることの確認）", () => {
+    // maxChunkLength を maxPosition より大きく宣言した配布形でだけ踏める枝。
+    const wide = parseGemma4PipelineConfig({
+      ...MINIMAL,
+      maxChunkLength: 4096,
+      maxPosition: 1024,
+      capacity: 1024,
+    });
+    assertThrows(
+      () => assertChunkLength(1025, wide),
+      Error,
+      "chunkLength 1025 が maxPosition 1024 を超えた",
+    );
+  });
+});
+
+// ---- PLE 索引と manifest の遅延資産の突合 -----------------------------------
+//
+// `fromPretrained` は「遅延側は PLE sidecar **ちょうど**」を MUST に掲げているが、実装は
+// `readPleShard` の中の存在確認だけだった（= 索引が知らない資産は永久に検出されず、索引に
+// あって assets に無い shard はその範囲を初めて引いたターン = 会話の途中・3.7GiB のロード
+// 完了後まで落ちない）。門は `#build` の前（GPU も重み shard も未接触）に置く。
+
+/** 索引 3 本ぶんの最小形（値域は `parseGemma4PleIndex` の受理集合内）。 */
+const pleIndexOf = (files: readonly string[]) => ({
+  tokens: files.length,
+  layers: 1,
+  dim: 1,
+  embedScale: 1,
+  shards: files.map((file, index) => ({ file, start: index, stop: index + 1 })),
+});
+
+Deno.test("assertPleShardAssets: 索引と遅延資産がちょうど一致するときだけ通す", async (t) => {
+  const index = pleIndexOf(["ple/0.safetensors", "ple/1.safetensors"]);
+
+  await t.step("ちょうど一致（陰性対照 — 常に落ちる門になっていない）", () => {
+    assertPleShardAssets("test", index, ["ple/0.safetensors", "ple/1.safetensors"]);
+    // 集合として見る（manifest の並び順は索引の並び順と一致しなくてよい）。
+    assertPleShardAssets("test", index, ["ple/1.safetensors", "ple/0.safetensors"]);
+  });
+
+  await t.step("索引にあって assets に無い（会話の途中で初めて落ちる形）", () => {
+    const error = assertThrows(
+      () => assertPleShardAssets("test", index, ["ple/0.safetensors"]),
+      Error,
+      "PLE sidecar の索引と manifest の遅延資産が食い違う",
+    );
+    assert(error.message.includes("assets に無い: ple/1.safetensors"), error.message);
+  });
+
+  await t.step("assets にあって索引に無い（宣言した資産を 1 本も読まないまま動く形）", () => {
+    const error = assertThrows(
+      () =>
+        assertPleShardAssets("test", index, [
+          "ple/0.safetensors",
+          "ple/1.safetensors",
+          "ple/2.safetensors",
+        ]),
+      Error,
+      "PLE sidecar の索引と manifest の遅延資産が食い違う",
+    );
+    assert(error.message.includes("索引に無い: ple/2.safetensors"), error.message);
+  });
+
+  await t.step("両方向が同時に壊れた配布形は 2 つとも名指しする", () => {
+    const error = assertThrows(
+      () => assertPleShardAssets("test", index, ["ple/0.safetensors", "ple/9.safetensors"]),
+      Error,
+      "食い違う",
+    );
+    assert(error.message.includes("assets に無い: ple/1.safetensors"), error.message);
+    assert(error.message.includes("索引に無い: ple/9.safetensors"), error.message);
+  });
 });

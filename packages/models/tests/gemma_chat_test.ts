@@ -36,8 +36,13 @@ import {
   closeChatTurn,
   decodeChatChunks,
   type Gemma4ChatStop,
+  withRunDiagnostics,
 } from "../src/gemma/pipeline.ts";
-import type { GenerationEvent } from "../src/generation/sequence.ts";
+import type {
+  GenerationEvent,
+  GenerationStop,
+  GenerationStream,
+} from "../src/generation/sequence.ts";
 import { type GemmaTokenizerAssets, parseGemmaTokenizerAsset } from "../src/gemma/text/asset.ts";
 import { GemmaTokenizer } from "../src/gemma/text/tokenizer.ts";
 import {
@@ -639,4 +644,109 @@ Deno.test({
       "実資産から導出した停止 token 集合",
     );
   },
+});
+
+// ---- 観測席の呼び出し規則（`withRunDiagnostics`）----------------------------
+//
+// doc（`src/gemma/pipeline.ts`）は 2 つの非自明な規則を宣言している —— ①prefill 直後の最初の
+// token は「最終 chunk の logits から抽選しただけ」で run を伴わないので席を呼ばない
+// ②停止 token を引いた最後の decode run の診断は列に出ないので**毎ターン 1 本欠ける**。
+// 唯一の観測（`e2e_gemma4_pretrained_test.ts` の census）はキーの集合を集めるだけで**回数**を
+// 見ていないため、規則が壊れても赤くならなかった。
+
+/** イベント列を手で書いた偽 `GenerationStream`（`closed` で早期終了の伝播が読める）。 */
+const fakeStream = (events: readonly GenerationEvent[]) => {
+  const state = { closed: false };
+  const iterable = (async function* (): AsyncGenerator<GenerationEvent, void, undefined> {
+    try {
+      for (const event of events) yield event;
+    } finally {
+      state.closed = true;
+    }
+  })();
+  const stream: GenerationStream = {
+    [Symbol.asyncIterator]: () => iterable,
+    done: Promise.resolve<GenerationStop>({ reason: "closed", tokens: 0 }),
+  };
+  return { stream, state };
+};
+
+const prefill = (chunk: number, chunks: number): GenerationEvent => ({
+  kind: "prefill",
+  chunk,
+  chunks,
+});
+const token = (id: number, position: number): GenerationEvent => ({ kind: "token", id, position });
+
+/** 診断は素通しされるだけ（中身を読まない）ので、席が受けた値をそのまま数える。 */
+const diagnosticsSeat = () => {
+  const seen: number[] = [];
+  let ticket = 0;
+  return {
+    seen,
+    seat: {
+      session: {
+        diagnostics: (): number => {
+          ticket += 1;
+          return ticket;
+        },
+      },
+      onRunDiagnostics: (diagnostics: number): void => {
+        seen.push(diagnostics);
+      },
+    },
+  };
+};
+
+Deno.test("withRunDiagnostics: run を伴わない最初の token では席を呼ばない", async () => {
+  const { stream, state } = fakeStream([
+    prefill(1, 3),
+    prefill(2, 3),
+    prefill(3, 3),
+    token(10, 0),
+    token(11, 1),
+    token(12, 2),
+    token(13, 3),
+  ]);
+  const { seen, seat } = diagnosticsSeat();
+  const wrapped = withRunDiagnostics(stream, seat);
+  const drained: GenerationEvent[] = [];
+  for await (const event of wrapped) drained.push(event);
+
+  assertEquals(drained.length, 7, "イベントは 1 つも落とさず素通しする");
+  // prefill 3 本 + token 4 本のうち最初の 1 本を飛ばす = 6 回。
+  assertEquals(seen.length, 6, "呼び出し回数");
+  assertEquals(seen, [1, 2, 3, 4, 5, 6], "席が受けるのは呼ぶたびの新しい診断");
+  assertEquals(state.closed, true, "内側の列が閉じていない");
+});
+
+Deno.test("withRunDiagnostics: 最初の抽選が停止 token だったターンは prefill ぶんだけ", async () => {
+  // 本文が 1 文字も出ないターン（列に token が 1 つも現れない）。
+  const { stream } = fakeStream([prefill(1, 1)]);
+  const { seen, seat } = diagnosticsSeat();
+  for await (const _event of withRunDiagnostics(stream, seat)) { /* 汲み切る */ }
+  assertEquals(seen.length, 1);
+});
+
+Deno.test("withRunDiagnostics: 席が無ければ元の列をそのまま返す（包みを 1 枚も足さない）", () => {
+  const { stream } = fakeStream([prefill(1, 1), token(10, 0)]);
+  assert(
+    withRunDiagnostics(stream, { session: { diagnostics: () => 0 } }) === stream,
+    "席が無いのに包みが増えている（中断や return() の伝播経路が 1 枚深くなる）",
+  );
+});
+
+Deno.test("withRunDiagnostics: 消費側の break が内側の return() まで伝わる", async () => {
+  const { stream, state } = fakeStream([
+    prefill(1, 1),
+    token(10, 0),
+    token(11, 1),
+    token(12, 2),
+  ]);
+  const { seen, seat } = diagnosticsSeat();
+  for await (const event of withRunDiagnostics(stream, seat)) {
+    if (event.kind === "token") break;
+  }
+  assertEquals(state.closed, true, "包みが中断経路を切っている（内側が走行中のまま残る）");
+  assertEquals(seen.length, 1, "prefill ぶんだけ（最初の token は席を呼ばない）");
 });
