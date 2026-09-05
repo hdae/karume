@@ -234,6 +234,37 @@ Deno.test("parseRopeBase: 軸ごとの行数が揃わない素表は落とす（
   assertThrows(() => parseRopeBase(buffer), Error, "行数");
 });
 
+Deno.test("parseRopeBase: 想定外のテンソルが混ざった素表は落とす", () => {
+  // 余分な 1 本（`karume-anima-extra` のミラーを焼き直すときに踏みうる形）。読み飛ばすと
+  // 「素表と別物の表を同じ資産に同居させたまま気づかない」経路ができる。
+  const buffer = buildSafetensors([
+    { name: "cos_t", ...ropeTable(4, 1, 0) },
+    { name: "sin_t", ...ropeTable(4, 1, 0) },
+    { name: "cos_h", ...ropeTable(4, 2, 0) },
+    { name: "sin_h", ...ropeTable(4, 2, 0) },
+    { name: "cos_w", ...ropeTable(4, 3, 0) },
+    { name: "sin_w", ...ropeTable(4, 3, 0) },
+    { name: "cos_x", ...ropeTable(4, 1, 0) },
+  ]);
+
+  assertThrows(() => parseRopeBase(buffer), Error, "想定外のテンソル 'cos_x'");
+});
+
+Deno.test("parseRopeBase: 同一軸の cos / sin で列幅が違えば落とす（行数一致では捕まらない）", () => {
+  // 行数は全軸 4 で揃えたまま、h 軸の対だけ列幅を割る。行数の門は通り抜けるので、対ごとの
+  // shape 突合が無いと「cos は 2 列 / sin は 3 列」の表が黙って通る。
+  const buffer = buildSafetensors([
+    { name: "cos_t", ...ropeTable(4, 1, 0) },
+    { name: "sin_t", ...ropeTable(4, 1, 0) },
+    { name: "cos_h", ...ropeTable(4, 2, 0) },
+    { name: "sin_h", ...ropeTable(4, 3, 0) },
+    { name: "cos_w", ...ropeTable(4, 3, 0) },
+    { name: "sin_w", ...ropeTable(4, 3, 0) },
+  ]);
+
+  assertThrows(() => parseRopeBase(buffer), Error, "cos / sin で shape が違う");
+});
+
 Deno.test("parseRopeBase: 欠けた表・非 F32・rank 違いは落とす", () => {
   assertThrows(
     () =>

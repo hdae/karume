@@ -34,7 +34,28 @@ const MAX_PERIOD = 10000;
  * 落ちない。**パリティテストが固定しているのは値であって式の形ではない** — 写しにしてあるのは
  * 上流の式と 1 対 1 で追えるようにするためで、丸めの実測に基づく制約ではない。実際に落ちるのは
  * linspace の端点・shift・終端 0 の取り違え（故障注入で確認）。
+ *
+ * ## MUST: 返す前に梯子そのものを構造検査する（`shift` の値域門はここが正本）
+ *
+ * `dpm-solver-multistep.ts` は「梯子の先頭が厳密に 1・末尾が厳密に 0」を明文の前提に置き、
+ * step 0 の `alphaS0 = 0` をそこから導いている。`pipelineConfig.scheduler.shift` の受理集合
+ * （`config.ts` の「正の有限数」）はこの前提より**広い**: f32 の 1.0 近傍の刻みは 2⁻²⁴ ≈
+ * 5.96e-8 なので、`shift ≲ 3e-8` では分母 `f32(shift − 1) + 1` が厳密に 0 へ潰れて
+ * `sigmas[0] = +Inf`（Euler は latent が NaN になり `imageToRgba` の非有限門まで真因が読めない
+ * 形で伝播する）、`shift ≈ 1e-7` では先頭が 1 でなくなる（DPM++ 2M は例外を出さず、前提の
+ * 崩れた別軌道を黙って走る）。受理集合を 2 箇所に書くと必ず片方が緩むので、門は梯子側の
+ * この 1 本に置く。
+ *
+ * NOTE（先頭の門の幅 — 厳密比較にしない理由）: 上流 diffusers も同じ式を f32 で評価しており、
+ * `shift = 1.18 / 1.32 / 1.43 …`（`[1,20]` の 2 桁小数 1,901 通りのうち 111 通り）で先頭が
+ * 1 から 1〜2 ulp ずれる。厳密比較はそれらの**普通の値**まで弾いて配布形の自由度を狭めるので、
+ * 幅は {@link SIGMA_HEAD_TOLERANCE}（4 ulp）に取る。dpm-solver の「先頭が厳密に 1」は
+ * `alphaS0 = 1 − σ₀` を 0 と見なす導出の前提で、ulp 級のずれは `alphaS0 ≈ 6e-8` として
+ * 絵に効かない（弾く対象は +Inf / NaN / 1 から桁で離れる裾）。
  */
+/** 梯子の先頭が 1 から離れてよい幅（f32 の 4 ulp = 2⁻²²）。 */
+const SIGMA_HEAD_TOLERANCE = 2 ** -22;
+
 export const sigmaSchedule = (steps: number, shift: number): Float32Array<ArrayBuffer> => {
   if (!Number.isInteger(steps) || steps < 2) {
     throw new RangeError(`steps ${steps} が 2 以上の整数でない（linspace の分母が 0 になる）`);
@@ -46,6 +67,23 @@ export const sigmaSchedule = (steps: number, shift: number): Float32Array<ArrayB
   for (let index = 0; index < steps; index += 1) {
     const sigma = f32(index === steps - 1 ? stop : index * step + start);
     sigmas[index] = f32(f32(shift * sigma) / f32(f32((shift - 1) * sigma) + 1));
+  }
+  // 先頭は f32 の丸め数 ulp を許す（{@link SIGMA_HEAD_TOLERANCE}）— 弾きたいのは分母が潰れて
+  // +Inf になる / 1 から桁で離れる病的な裾で、上流 diffusers も同じ式を f32 で評価している。
+  // NaN は比較が偽になるので同じ枝で落ちる。
+  if (!(Math.abs(sigmas[0] - 1) <= SIGMA_HEAD_TOLERANCE)) {
+    throw new RangeError(
+      `sigma 梯子の先頭が ${sigmas[0]}（1 から ${SIGMA_HEAD_TOLERANCE} を超えて離れている）— ` +
+        `shift ${shift} は梯子の成立域の外`,
+    );
+  }
+  for (let index = 1; index < sigmas.length; index += 1) {
+    if (!(sigmas[index] < sigmas[index - 1])) {
+      throw new RangeError(
+        `sigma 梯子が狭義単調減少でない（index ${index - 1} → ${index} が` +
+          ` ${sigmas[index - 1]} → ${sigmas[index]}）— shift ${shift} は梯子の成立域の外`,
+      );
+    }
   }
   return sigmas;
 };
@@ -103,6 +141,12 @@ export const timestepsProj = (
  * MUST: `uncond` の有無は {@link needsUncond} とちょうど一致させる（食い違いは fail loudly）。
  * 「CFG=1 なのに uncond を渡す」は呼び出し側の分岐漏れで、素通しすると
  * **参照と 1 ULP 級で割れた値が「GPU の誤差」として tolerance に吸われる**。
+ *
+ * NOTE（長さの突合を持たない理由）: `previous` / `cond` / `uncond` の長さは**呼び手が構造的に
+ * 揃える**。呼び手は `pipeline.ts` の denoise ループ 1 箇所だけで、cond / uncond は同じ dyn
+ * グラフを同じ入力 shape で回した出力なので長さが割れる形が作れず、latent 側と食い違えば
+ * `unpatchifyTokens` が先に名指しで落とす（`dit-tokens.ts`）。ファミリ非依存の共有面
+ * （`generation/dpm-solver-multistep.ts`）は呼び手が増えうるので事情が違う。
  */
 export const cfgEulerStep = (
   previous: Float32Array,

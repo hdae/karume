@@ -107,3 +107,18 @@ export const sequenceLengthFromSeconds = (
   const targetSamples = Math.max(1, Math.trunc(clamped * bounds.sampleRate));
   return { frames: Math.ceil(targetSamples / bounds.hopLength), targetSamples };
 };
+
+/**
+ * 宣言 `maxSeconds` から**到達しうる S の最大**（2 経路の大きいほう）。
+ *
+ * 秒 → S の丸め方は経路ごとに違う（duration 経路は `floor(maxSeconds·frameRate)` の clamp 上限・
+ * 手動秒経路は `ceil(trunc(maxSeconds·sampleRate) / hopLength)`）ので、どちらか片方の式で
+ * 上限を語ると 1 フレーム取りこぼす（実測: frameRate=25 / hopLength=1920 で maxSeconds=30.5 は
+ * duration 762 / 手動秒 763）。`config.ts` が `ditSymMax` との整合を parse 時に見るための面で、
+ * **式の正本はこのモジュールのまま**（config 側に写しを置かない）。
+ */
+export const maxSequenceLength = (bounds: SampleBounds): number => {
+  const { min, max } = clampRange(bounds);
+  // clamp は下限を優先する（`min > max` の宣言では下限側が返る）ので両方を見る。
+  return Math.max(min, max, sequenceLengthFromSeconds(bounds.maxSeconds, bounds).frames);
+};

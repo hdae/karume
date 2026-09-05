@@ -58,6 +58,26 @@ type CodecTilePlanOptions = {
 };
 
 /**
+ * `tileFrames` の受理集合（halo 2 枚ぶんより大きい整数）。
+ *
+ * NOTE: `export` は**生成の入口**（`pipeline.ts` の要求検査）が同じ集合で先に落とすため。
+ * {@link planCodecTiles} を呼ぶのは latent 生成が終わった後なので、ここだけに検査があると
+ * 重み 1.26GB のロードと DiT の全 step を消費してから落ちる。受理集合は 1 本しか持たない
+ * （両側に条件を書くと必ず割れる）。
+ */
+export const assertCodecTileFrames = (tileFrames: number, haloFrames: number): void => {
+  if (!Number.isInteger(haloFrames) || haloFrames < 0) {
+    throw new Error(`planCodecTiles: haloFrames ${haloFrames} が非負整数でない`);
+  }
+  if (!Number.isInteger(tileFrames) || tileFrames <= 2 * haloFrames) {
+    throw new Error(
+      `planCodecTiles: tileFrames ${tileFrames} が halo 2 枚ぶん（${2 * haloFrames}）` +
+        "より大きい整数でない（採用できるフレームが 1 枚も残らない）",
+    );
+  }
+};
+
+/**
  * latent 長 S を、採用区間が隙間なく並ぶタイル列へ割る。
  *
  * `frames <= tileFrames` なら 1 枚（= 単発 decode と同じ実行）。それ以外は
@@ -73,15 +93,7 @@ export const planCodecTiles = (
   if (!Number.isInteger(frames) || frames <= 0) {
     throw new Error(`planCodecTiles: frames ${frames} が正の整数でない`);
   }
-  if (!Number.isInteger(haloFrames) || haloFrames < 0) {
-    throw new Error(`planCodecTiles: haloFrames ${haloFrames} が非負整数でない`);
-  }
-  if (!Number.isInteger(tileFrames) || tileFrames <= 2 * haloFrames) {
-    throw new Error(
-      `planCodecTiles: tileFrames ${tileFrames} が halo 2 枚ぶん（${2 * haloFrames}）` +
-        "より大きい整数でない（採用できるフレームが 1 枚も残らない）",
-    );
-  }
+  assertCodecTileFrames(tileFrames, haloFrames);
   if (frames <= tileFrames) return [{ start: 0, length: frames, offset: 0, take: frames }];
 
   const step = tileFrames - 2 * haloFrames;

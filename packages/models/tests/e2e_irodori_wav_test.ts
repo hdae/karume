@@ -56,7 +56,7 @@
  * のみ（横断不変条件）で、`fromAssets` はバイト列を受け取るだけの面。
  */
 
-import { assertEquals, assertFalse, assertRejects } from "@std/assert";
+import { assertEquals, assertFalse, assertRejects, assertStrictEquals } from "@std/assert";
 import { parseManifest, resolveFiles } from "@karume/hub";
 import type { Manifest, ModelEntry } from "@karume/hub";
 import type { SessionDiagnostics } from "@karume/runtime";
@@ -516,6 +516,37 @@ Deno.test({
         "中断したのに codec decode へ入っている",
       );
       // この後の `await using` の解放が、中断した生成の後でも正常に効くことの検査になる。
+    });
+
+    // --- dispose の直列化（flush-before-destroy）------------------------------
+    //
+    // `concurrency/serial.ts` は `serial_test.ts` が独立に縛っているが、`IrodoriPipeline` が
+    // その鎖へ正しく載っていることは公開面からしか見えない。**この step は最後に置く**
+    // （ここでパイプラインを解放するため）。
+    await t.step("dispose は in-flight の完了を待ち、2 度目も同じ完了を返す", async () => {
+      const order: string[] = [];
+      const running = pipeline.generate({ text: CASES[1].text, seed: CASES[1].seed })
+        .then(() => {
+          order.push("generate");
+        });
+      const disposal = pipeline.dispose();
+      assertStrictEquals(pipeline.dispose(), disposal, "2 度目の dispose が別の完了を返す");
+      await Promise.all([running, disposal.then(() => order.push("dispose"))]);
+      // 破棄が先に解決すると、消費側は「解放済み」と見なして次へ進む（GPU はまだ生成中）。
+      assertEquals(order, ["generate", "dispose"]);
+
+      // dispose 済みの判定は**鎖に入る前**（呼び出し時点）— 先行生成の決着を待たずに落ちる。
+      // `async` メソッドなので観測は reject（同期 throw にはならない）。
+      await assertRejects(
+        () => pipeline.generate({ text: CASES[1].text }),
+        Error,
+        "dispose 済みでは生成できない",
+      );
+      await assertRejects(
+        () => pipeline.generateLatent({ text: CASES[1].text }),
+        Error,
+        "dispose 済みでは生成できない",
+      );
     });
   },
 });

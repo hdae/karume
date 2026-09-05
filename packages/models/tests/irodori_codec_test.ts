@@ -5,9 +5,14 @@
 // 末尾トリムは golden 3 ケース（`outputs/series/dacvae-32dim/host/trim.safetensors` — 上流
 // `find_flattening_point` の実測が焼かれている）との突合。golden が無い環境は明示 SKIP。
 
-import { assertEquals, assertThrows } from "@std/assert";
+import { assertEquals, assertRejects, assertStringIncludes, assertThrows } from "@std/assert";
 import { parseSafetensors } from "@karume/runtime";
-import { type CodecTile, DEFAULT_CODEC_TILE_FRAMES, planCodecTiles } from "../src/irodori/codec.ts";
+import {
+  type CodecTile,
+  decodeTiles,
+  DEFAULT_CODEC_TILE_FRAMES,
+  planCodecTiles,
+} from "../src/irodori/codec.ts";
 import { findFlatteningPoint, trimmedSampleCount } from "../src/irodori/host/trim.ts";
 
 // ---- タイル幾何 -----------------------------------------------------------
@@ -80,6 +85,140 @@ Deno.test("planCodecTiles: S が正の整数でなければ落とす", () => {
     Error,
     "frames 1.5",
   );
+});
+
+// ---- 貼り合わせ（decodeTiles）---------------------------------------------
+//
+// `decodeTiles` は `run` を注入で受ける（本体の貼り合わせそのものを外から測れるようにするため
+// — `codec.ts` のモジュール doc）。実 GPU の門（`e2e_irodori_codec_test.ts`）は decoder 資産と
+// golden が要るので、資産の無い機ではここが唯一の門になる。anima 側の同型 `decodeTiled` は
+// 同じ手で GPU 無しに縛られている（`anima_tiling_test.ts`）。
+
+const TILE_LATENT_DIM = 2;
+const TILE_HOP = 4;
+
+/** latent `[frames, latentDim]`（先頭列がフレーム番号 = 位置が値で読める ramp）。 */
+const rampLatent = (frames: number): Float32Array<ArrayBuffer> => {
+  const latent = new Float32Array(frames * TILE_LATENT_DIM) as Float32Array<ArrayBuffer>;
+  for (let frame = 0; frame < frames; frame += 1) latent[frame * TILE_LATENT_DIM] = frame;
+  return latent;
+};
+
+/**
+ * 平行移動同変な偽 decoder — 出力サンプルが**入力フレームの値だけ**から決まる
+ * （`out[i*hop + s] = slice[i*latentDim]*hop + s`）。ramp を食わせると全長 decode の結果が
+ * 恒等列になるので、貼り合わせが 1 サンプルでもずれれば値で露見する。
+ */
+const equivariantDecoder = (slice: Float32Array<ArrayBuffer>, frames: number) => {
+  const out = new Float32Array(frames * TILE_HOP);
+  for (let index = 0; index < frames; index += 1) {
+    for (let sample = 0; sample < TILE_HOP; sample += 1) {
+      out[index * TILE_HOP + sample] = slice[index * TILE_LATENT_DIM] * TILE_HOP + sample;
+    }
+  }
+  return Promise.resolve(out);
+};
+
+Deno.test("decodeTiles: 採用区間を全長の正しい位置へ貼る（複数枚が単発 decode と一致）", async () => {
+  const frames = 12;
+  const tiles = planCodecTiles(frames, { tileFrames: 8, haloFrames: 2 });
+  assertEquals(tiles.length > 1, true, "1 枚に縮退すると貼り合わせの添字算術を踏まない");
+
+  const waveform = await decodeTiles(
+    rampLatent(frames),
+    { latentDim: TILE_LATENT_DIM, hopLength: TILE_HOP, tiles },
+    equivariantDecoder,
+  );
+
+  assertEquals(waveform.length, frames * TILE_HOP);
+  // offset / take / start のどれかの掛け算が違えば、この恒等列が崩れる。
+  assertEquals([...waveform], Array.from({ length: frames * TILE_HOP }, (_, index) => index));
+});
+
+Deno.test("decodeTiles: 位置を無視する decoder では一致が破れる（門が恒真でない証拠）", async () => {
+  const frames = 12;
+  const tiles = planCodecTiles(frames, { tileFrames: 8, haloFrames: 2 });
+  // 入力フレームの値ではなく**タイル内の添字**から作る（= 平行移動同変でない）decoder。
+  const waveform = await decodeTiles(
+    rampLatent(frames),
+    { latentDim: TILE_LATENT_DIM, hopLength: TILE_HOP, tiles },
+    (_slice, tileFrames) =>
+      Promise.resolve(
+        Float32Array.from({ length: tileFrames * TILE_HOP }, (_, index) => index),
+      ),
+  );
+  assertEquals(
+    [...waveform].some((value, index) => value !== index),
+    true,
+    "位置を無視した decoder でも一致してしまい、この門は何も縛れていない",
+  );
+});
+
+Deno.test("decodeTiles: run へ渡すのはタイル 1 枚ぶんの写し（view でない）", async () => {
+  const frames = 12;
+  const tiles = planCodecTiles(frames, { tileFrames: 8, haloFrames: 2 });
+  let call = 0;
+  await decodeTiles(
+    rampLatent(frames),
+    { latentDim: TILE_LATENT_DIM, hopLength: TILE_HOP, tiles },
+    (slice, tileFrames) => {
+      const tile = tiles[call];
+      call += 1;
+      assertEquals(tileFrames, tile.length, "frames 引数がタイルの decode 長と違う");
+      assertEquals(slice.length, tile.length * TILE_LATENT_DIM);
+      // 写しならバッファ全体をちょうど占める（view のまま渡すと、バッファ全体を占めることを
+      // 前提にした受け渡しの契約から外れる）。
+      assertEquals(slice.buffer.byteLength, slice.length * 4);
+      assertEquals(slice[0], tile.start, "slice の先頭がタイルの開始フレームでない");
+      return equivariantDecoder(slice, tileFrames);
+    },
+  );
+  assertEquals(call, tiles.length);
+});
+
+Deno.test("decodeTiles: latent の要素数が latentDim で割れなければ落とす", async () => {
+  const tiles = planCodecTiles(12, { tileFrames: 8, haloFrames: 2 });
+  await assertRejects(
+    () =>
+      decodeTiles(
+        new Float32Array(5) as Float32Array<ArrayBuffer>,
+        { latentDim: TILE_LATENT_DIM, hopLength: TILE_HOP, tiles },
+        equivariantDecoder,
+      ),
+    Error,
+    "latentDim 2 で割れない",
+  );
+});
+
+Deno.test("decodeTiles: decoder の出力長が合わなければ落とす（期待サンプル数つき）", async () => {
+  const frames = 12;
+  const tiles = planCodecTiles(frames, { tileFrames: 8, haloFrames: 2 });
+  const error = await assertRejects(
+    () =>
+      decodeTiles(
+        rampLatent(frames),
+        { latentDim: TILE_LATENT_DIM, hopLength: TILE_HOP, tiles },
+        (_slice, tileFrames) => Promise.resolve(new Float32Array(tileFrames * TILE_HOP - 1)),
+      ),
+    Error,
+    "decoder の出力が",
+  );
+  assertStringIncludes(error.message, `${tiles[0].length * TILE_HOP} のはず`);
+});
+
+Deno.test("decodeTiles: 1 枚に縮退した計画では単発 decode の写しそのもの", async () => {
+  const frames = 12;
+  const tiles = planCodecTiles(frames, { tileFrames: DEFAULT_CODEC_TILE_FRAMES, haloFrames: HALO });
+  assertEquals(tiles.length, 1);
+  const latent = rampLatent(frames);
+  const waveform = await decodeTiles(
+    latent,
+    { latentDim: TILE_LATENT_DIM, hopLength: TILE_HOP, tiles },
+    equivariantDecoder,
+  );
+  const single = await equivariantDecoder(latent, frames);
+  // ビット一致（f32 のビット列で比べる — 値の等価では NaN / -0 の取り違えが素通りする）。
+  assertEquals(new Uint32Array(waveform.buffer), new Uint32Array(single.buffer));
 });
 
 // ---- 末尾トリム -----------------------------------------------------------

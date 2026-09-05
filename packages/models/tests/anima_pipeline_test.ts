@@ -27,9 +27,11 @@ import {
   assertNotStrictEquals,
   assertRejects,
   assertStrictEquals,
+  assertStringIncludes,
   assertThrows,
 } from "@std/assert";
 import { parseManifest } from "@karume/hub";
+import { assertAnimaSamplerType } from "../src/anima/config.ts";
 import {
   AnimaPipeline,
   denoiseStep,
@@ -281,6 +283,28 @@ Deno.test("denoiseStep: scheduler.type が更新則を選ぶ（同じ入力で e
   const carried = dpm.previousX0;
   assert(carried !== undefined, "DPM++ 2M は x0 を次 step へ持ち回る");
   assertEquals([...carried], [0.5]);
+});
+
+Deno.test("assertAnimaSamplerType: request 側の綴りも 2 語だけを受け、出所を文言に出す", () => {
+  // manifest 側（`where = "pipelineConfig.scheduler.type"`）は `anima_config_test.ts` が見て
+  // いるが、request 側の呼び（`pipeline.ts` の `where = "sampler"`）は `generate()` の内側に
+  // あり、実 GPU + 実資産が無いと踏めない。受理集合そのものは純関数として直接縛る
+  // （`resolveNegativePrompt` と同じ流儀）。配線は実 GPU 門（`e2e_anima_test.ts` の
+  // `sampler: "dpmpp-2m"` ケース）が引き続き担う。
+  assertEquals(assertAnimaSamplerType("euler", "sampler"), "euler");
+  assertEquals(assertAnimaSamplerType("dpmpp-2m", "sampler"), "dpmpp-2m");
+
+  const misspelled = assertThrows(
+    () => assertAnimaSamplerType("dpm++", "sampler"),
+    Error,
+    "sampler: 期待 'euler' / 'dpmpp-2m'",
+  );
+  assertStringIncludes(misspelled.message, "実際 'dpm++'");
+  // 非文字列でも「実際」に何が来たかを出す（型の縁で診断が消えない）。
+  for (const [value, expected] of [[2, "実際 2"], [undefined, "実際 undefined"]] as const) {
+    const thrown = assertThrows(() => assertAnimaSamplerType(value, "sampler"), Error);
+    assertStringIncludes(thrown.message, expected);
+  }
 });
 
 Deno.test("latentSnapshot: 束縛した時点の latent を写す（step を進めても写しは変わらない）", () => {

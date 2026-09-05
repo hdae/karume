@@ -1,9 +1,11 @@
 // Anima のサンプラ（IR に載らない段）の挙動テスト。GPU も資産も要らない純関数。
 //
-// 参照フィクスチャとの数値パリティ（timesteps_proj 表の突合・latents_mean/std のビット一致）は
-// **実 GPU / 実資産の E2E と同じ波**で復帰させる（P3 波 2）。ここは形と不変条件を押さえる。
+// 参照フィクスチャとの数値パリティ（timesteps_proj 表の突合）は **実 GPU / 実資産の E2E と
+// 同じ波**で復帰させる（P3 波 2）。ここは形と不変条件を押さえる。
+// NOTE: `latents_mean` / `latents_std` のビット一致は資産不要の門になった（参照フィクスチャを
+// 切り出して commit してある — `anima_latents_test.ts`）。
 
-import { assert, assertEquals, assertThrows } from "@std/assert";
+import { assert, assertEquals, assertStrictEquals, assertThrows } from "@std/assert";
 import { cfgEulerStep, sigmaSchedule, timestepsProj } from "../src/anima/sampler.ts";
 // `needsUncond` の定義は更新則に依らない共通処理側にある（`sampler.ts` は import して使う）。
 import { needsUncond } from "../src/generation/dpm-solver-multistep.ts";
@@ -39,6 +41,23 @@ Deno.test("sigmaSchedule: shift は manifest の値で効く（1 なら素の li
   ]);
   const shifted = sigmaSchedule(4, SHIFT);
   assert(shifted[1] !== plain[1], "shift が効いていない");
+});
+
+Deno.test("sigmaSchedule: 代表 shift で梯子の先頭が厳密に 1（DPM++ 2M の前提）", () => {
+  // `dpm-solver-multistep.ts` は「先頭が厳密に 1」から step 0 の `alphaS0 = 0` を導く。
+  // ここが 1 ulp でもずれると例外は出ず、前提の崩れた別軌道を黙って走る。
+  for (const shift of [1, 1.5, 3, 12]) {
+    assertStrictEquals(sigmaSchedule(8, shift)[0], 1, `shift=${shift} の先頭`);
+  }
+});
+
+Deno.test("sigmaSchedule: 梯子の成立域の外は fail loudly（黙って別軌道を走らせない）", () => {
+  // 分母 `f32(shift−1)+1` が f32 で厳密に 0 へ潰れる域 → 先頭が +Inf。
+  assertThrows(() => sigmaSchedule(8, 1e-8), RangeError, "梯子の成立域の外");
+  // 潰れはしないが先頭が 1 でなくなる域（実測 0.8388…）。
+  assertThrows(() => sigmaSchedule(8, 1e-7), RangeError, "梯子の成立域の外");
+  // 先頭は 1 のまま、直後が f32 の刻みに潰れて同値になる域（狭義単調減少が破れる側）。
+  assertThrows(() => sigmaSchedule(8, 1e7), RangeError, "狭義単調減少でない");
 });
 
 Deno.test("timestepsProj: 前半 cos・後半 sin（flip_sin_to_cos=true）", () => {

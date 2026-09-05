@@ -92,7 +92,13 @@ import {
   parseIrodoriPipelineConfig,
 } from "./config.ts";
 import { IrodoriTokenizer, parseIrodoriTokenizerAsset } from "./text/tokenizer.ts";
-import { type CodecTile, decodeTiles, DEFAULT_CODEC_TILE_FRAMES, planCodecTiles } from "./codec.ts";
+import {
+  assertCodecTileFrames,
+  type CodecTile,
+  decodeTiles,
+  DEFAULT_CODEC_TILE_FRAMES,
+  planCodecTiles,
+} from "./codec.ts";
 import { packCaptionIds, packIds } from "./host/pack.ts";
 import {
   buildDitMask,
@@ -102,7 +108,7 @@ import {
 } from "./host/mask.ts";
 import { patchReferenceLatent } from "./host/patch.ts";
 import { prependMeanToken, rowMean } from "./host/pooling.ts";
-import { Randn } from "./host/random.ts";
+import { assertAcceptableSeed, Randn } from "./host/random.ts";
 import { normalizeReference, reflectPadToHop } from "./host/reference.ts";
 import {
   type SampleBounds,
@@ -317,6 +323,11 @@ const emitter = (
  * step ごとに**新しい配列へ差し替わる**ので、この束縛がそのまま「その step の潜在」になる。
  * ループ変数を閉じ込めると、後から呼んだ購読側に別 step の潜在が返る。
  *
+ * MUST: `data` だけでなく `shape` も写す。参照のまま返すと同じ step で 2 回呼んだ写しが同一の
+ * 配列を共有し、購読側が 1 回目の `shape` を書き換えると 2 回目の写しが黙って別の形を名乗る。
+ * 公開イベント面の契約（`IrodoriGenerateEvent.copyLatents` / `AnimaGenerateEvent.copyLatents`）
+ * を家族間で 1 本にするための揃え（anima 側 `src/anima/pipeline.ts` の同名関数と同じ形）。
+ *
  * NOTE: `export` は GPU 無しで独立性を縛るテストのため（`mod.ts` / サブパス面には出さない —
  * ADR 0008）。
  */
@@ -324,7 +335,7 @@ export const latentSnapshot = (
   latent: Float32Array<ArrayBuffer>,
   shape: readonly number[],
 ): () => IrodoriLatentSnapshot =>
-(): IrodoriLatentSnapshot => ({ data: new Float32Array(latent), shape });
+(): IrodoriLatentSnapshot => ({ data: new Float32Array(latent), shape: [...shape] });
 
 /** 構築オプション（{@link IrodoriPipeline.fromAssets} / {@link IrodoriPipeline.fromPretrained} 共通）。 */
 export type IrodoriPipelineOptions = {
@@ -668,6 +679,8 @@ type IrodoriState = {
   readonly dit: ModelComponent;
   readonly codecEncoder: ModelComponent;
   readonly codecDecoder: ModelComponent;
+  /** `dit` の記号次元 S の名前（導出は {@link admitIrodori} の 1 度だけ）。 */
+  readonly ditSymbol: string;
   /** 低精度ノブ。**`dit` の Session にだけ**渡す（モジュール doc の MUST）。 */
   readonly ditSessionOptions: SessionOptions;
   readonly onRunDiagnostics?: (
@@ -712,6 +725,14 @@ type IrodoriAdmission = {
   readonly config: IrodoriPipelineConfig;
   readonly quantName: string;
   readonly quant: Quant;
+  /**
+   * `dit` の記号次元 S の名前（admission が唯一の導出点）。
+   *
+   * MUST: 実行時に `graph.symbols` から引き直さない — 「記号は 1 本」を確かめた席と使う席が
+   * 離れると、経路によって検査が走ったり走らなかったりする（CLAUDE.md の「導出値は source of
+   * truth から 1 度だけ導く」）。
+   */
+  readonly ditSymbol: string;
   readonly ditSessionOptions: SessionOptions;
   readonly backbone: ModelComponent;
   readonly textProj: ModelComponent;
@@ -830,6 +851,15 @@ const admitIrodori = async (
   // `hopLength` でないと、ホストが並べた波形が**1 フレームずつずれて**読まれる。
   assertStaticDim(codecEncoder, "wav", 2, config.hopLength, "hopLength");
   assertOutputDim(codecEncoder, 2, config.latentDim, "latentDim");
+  // `dit` の記号次元は S の 1 本だけ（常駐経路は毎 enqueue この名前で束縛を渡す）。家族の門は
+  // この 1 本に集める MUST の一部で、実行時に置くと ①GB 級の重みを落とした後にしか落ちない
+  // ②ホスト経路（`gpuTiming` 有効 device / `onEvent` 購読）では走らず、同じ配布形が観測経路
+  // ごとに違う文言で落ちる、の 2 つが起きる。
+  const ditSymbols = dit.graph.symbols;
+  if (ditSymbols.length !== 1) {
+    throw new Error(`irodori: dit の記号次元が 1 本でない（[${ditSymbols.join(", ")}]）`);
+  }
+  const ditSymbol = ditSymbols[0];
 
   const ditSessionOptions = toSessionOptions(quant.session);
 
@@ -853,6 +883,7 @@ const admitIrodori = async (
     config,
     quantName,
     quant,
+    ditSymbol,
     ditSessionOptions,
     backbone,
     textProj,
@@ -882,6 +913,7 @@ const buildIrodoriState = async (
     config,
     quant,
     quantName,
+    ditSymbol,
     ditSessionOptions,
     backbone,
     textProj,
@@ -925,6 +957,7 @@ const buildIrodoriState = async (
       dit,
       codecEncoder,
       codecDecoder,
+      ditSymbol,
       ditSessionOptions,
       ...(options.onRunDiagnostics === undefined
         ? {}
@@ -1166,11 +1199,8 @@ const runDitLoopResident = async (state: IrodoriState, loop: DitLoop): Promise<D
   const observe = observer(state, "dit");
   const latentBytes = frames * config.latentDim * 4;
   // 記号次元は常駐入力から束縛できない（常駐テンソルは shape を持たない）ので毎 enqueue 明示する。
-  const symbols = state.dit.graph.symbols;
-  if (symbols.length !== 1) {
-    throw new Error(`irodori: dit の記号次元が 1 本でない（[${symbols.join(", ")}]）`);
-  }
-  const bindings = { [symbols[0]]: frames };
+  // 名前は admission が確定させたもの（「記号は 1 本」の検査もそこにある — `admitIrodori`）。
+  const bindings = { [state.ditSymbol]: frames };
   const velocity = outputNameAt(state.dit, 0);
   const residents: ResidentTensor[] = [];
   const sessions: Session[] = [];
@@ -1263,6 +1293,52 @@ const runDitLoopResident = async (state: IrodoriState, loop: DitLoop): Promise<D
   }
 };
 
+/** S の決定に要る数を `pipelineConfig` から引く（入口検査と段 ⑤ が同じ 1 本を読む）。 */
+const sampleBounds = (config: IrodoriPipelineConfig): SampleBounds => ({
+  frameRate: config.frameRate,
+  minSeconds: config.minSeconds,
+  maxSeconds: config.maxSeconds,
+  sampleRate: config.sampleRate,
+  hopLength: config.hopLength,
+});
+
+/**
+ * 要求ノブの受理集合を**生成に入る前**に見る（`generate` / `generateLatent` の入口）。
+ *
+ * MUST: 受理集合そのものはここに書き写さない — 各ノブの正本（`assertCodecTileFrames` /
+ * `assertAcceptableSeed` / `sequenceLengthFromSeconds`）を呼ぶだけにする。条件を写すと、
+ * 片方だけ緩んだときに気づけない。
+ *
+ * なぜ入口なのか: これらの門は本来 latent 生成の**後**（`planCodecTiles` は decode 直前・
+ * `Randn` は段 ⑦・秒指定は段 ⑤）にしかなく、`codecTileFrames: 10` や `seed: 1.5` のような
+ * 綴り違いが重み 1.26GB のロードと DiT 全 step を消費してから落ちていた。呼び手の綴り違いの
+ * 代償を計算時間で払わせない。
+ *
+ * NOTE（公開面の挙動が変わる 2 点）: ①`codecTileFrames` は codec を回さない
+ * {@link IrodoriPipeline.generateLatent} でも検査対象になる（使わない値でも綴り違いなら落ちる）
+ * ②`initialNoise` を渡した生成でも `seed` が検査される（従来は `Randn` を通らないので不正値が
+ * 黙って無視されていた）。どちらも「効かないノブを黙って受けない」側へ倒した意図的な変更。
+ *
+ * NOTE: `export` は GPU 無しで受理集合を縛るテストのため（`mod.ts` / サブパス面には出さない —
+ * ADR 0008・`latentSnapshot` と同じ流儀）。
+ */
+export const assertIrodoriRequest = (
+  request: IrodoriGenerateRequest,
+  config: IrodoriPipelineConfig,
+): void => {
+  // 既定値も検査する — 呼び手は `codecTileFrames` を渡す義務を負っていないので、既定タイルと
+  // `codecHaloFrames` の関係が壊れた配布形は「渡さなければ通る」形にしてはならない。
+  assertCodecTileFrames(
+    request.codecTileFrames ?? DEFAULT_CODEC_TILE_FRAMES,
+    config.codecHaloFrames,
+  );
+  if (request.seed !== undefined) assertAcceptableSeed(request.seed);
+  // 返り値は捨てる（段 ⑤ が改めて同じ関数で S を決める — ここは受理集合を借りるだけ）。
+  if (request.durationSeconds !== undefined) {
+    sequenceLengthFromSeconds(request.durationSeconds, sampleBounds(config));
+  }
+};
+
 /** テキスト 1 本（+ caption / 参照話者）から latent を作る。 */
 const generateLatent = async (
   state: IrodoriState,
@@ -1346,13 +1422,7 @@ const generateLatent = async (
   const hasSpeaker = speakerState.rows > 0;
 
   // --- ⑤ S の決定 --------------------------------------------------------
-  const bounds: SampleBounds = {
-    frameRate: config.frameRate,
-    minSeconds: config.minSeconds,
-    maxSeconds: config.maxSeconds,
-    sampleRate: config.sampleRate,
-    hopLength: config.hopLength,
-  };
+  const bounds = sampleBounds(config);
   let plan: SequencePlan;
   if (request.durationSeconds !== undefined) {
     // 手動指定は duration グラフを回さない（上流 `manual_seconds` 経路）。
@@ -1666,6 +1736,9 @@ export class IrodoriPipeline {
     if (this.#disposal !== undefined) {
       throw new Error("IrodoriPipeline: dispose 済みでは生成できない");
     }
+    // 要求ノブの検査も呼び出し時点（鎖の外）で行う — 鎖に入れると、先行生成の決着まで
+    // 待たされてから綴り違いで落ちる（`createOperationChain` は空の鎖でも 1 microtask 遅れる）。
+    assertIrodoriRequest(request, this.#state.config);
     return await this.#chain(() => generateAudio(this.#state, emitter(request.onEvent), request));
   }
 
@@ -1679,6 +1752,7 @@ export class IrodoriPipeline {
     if (this.#disposal !== undefined) {
       throw new Error("IrodoriPipeline: dispose 済みでは生成できない");
     }
+    assertIrodoriRequest(request, this.#state.config);
     return await this.#chain(async () =>
       (await generateLatent(this.#state, emitter(request.onEvent), request)).latent
     );

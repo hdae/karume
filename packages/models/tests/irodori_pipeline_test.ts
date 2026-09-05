@@ -3,7 +3,7 @@
 //
 // ここで押さえるのは 2 点:
 //  ① `fromAssets` は **manifest の契約違反を、資産を開く前・GPU を取りに行く前**に落とす
-//     （`src/irodori/pipeline.ts` の `openIrodoriState` が掲げる MUST）。順序がずれると、GPU の
+//     （`src/irodori/pipeline.ts` の `admitIrodori` が掲げる MUST）。順序がずれると、GPU の
 //     無い環境では別の例外に化けて「何が悪かったのか」が読み手に伝わらない。
 //  ② 構築の `signal` が**入口でも実行開始後でも**効く（DL 完了後の組み立てが中断不能だと、
 //     UI の中止ボタンが無反応になる窓ができる）。後者は「最初の段境界」までを空資産で見る —
@@ -28,7 +28,13 @@ import {
   assertThrows,
 } from "@std/assert";
 import { parseManifest } from "@karume/hub";
-import { assetJson, IrodoriPipeline, latentSnapshot } from "../src/irodori/pipeline.ts";
+import { parseIrodoriPipelineConfig } from "../src/irodori/config.ts";
+import {
+  assertIrodoriRequest,
+  assetJson,
+  IrodoriPipeline,
+  latentSnapshot,
+} from "../src/irodori/pipeline.ts";
 
 const FILE = {
   path: "dit/model.f32.safetensors",
@@ -250,6 +256,47 @@ Deno.test("assetJson: JSON 構文違反は decode とは別の文言で落ちる
   assertEquals(assetJson({ tokenizer: valid }, "tokenizer"), { unkId: 0, space: "あ" });
 });
 
+Deno.test("assertIrodoriRequest: 要求ノブの綴り違いは重い計算に入る前に落ちる", () => {
+  // これらの門は本来 latent 生成の**後**（`planCodecTiles` は decode 直前・`Randn` は段 ⑦）に
+  // しかなく、重み 1.26GB のロードと DiT の全 step を消費してから落ちていた。入口で同じ
+  // 受理集合を借りることで、綴り違いの代償が計算時間にならない。
+  const config = parseIrodoriPipelineConfig(PIPELINE_CONFIG);
+  const text = "テスト";
+
+  // codecTileFrames は「halo 2 枚ぶんより大きい整数」。既定 halo 8 に対し 10 は採用区間が
+  // 残らない値（`10 <= 16`）で、素通しすると decode 直前まで走ってから落ちる。
+  for (const codecTileFrames of [10, 0, 1.5]) {
+    assertThrows(
+      () => assertIrodoriRequest({ text, codecTileFrames }, config),
+      Error,
+      "より大きい整数でない",
+    );
+  }
+  for (const seed of [-1, 1.5]) {
+    assertThrows(() => assertIrodoriRequest({ text, seed }, config), RangeError, "非負の安全整数");
+  }
+  assertThrows(
+    () => assertIrodoriRequest({ text, durationSeconds: NaN }, config),
+    Error,
+    "durationSeconds",
+  );
+
+  // 正常値は通る（門が恒真に落ちていない証拠は上の 6 ケース側が持つ）。
+  assertIrodoriRequest({ text, codecTileFrames: 182, seed: 0, durationSeconds: 3 }, config);
+  assertIrodoriRequest({ text }, config);
+});
+
+Deno.test("assertIrodoriRequest: codecTileFrames を渡さない要求でも既定タイルを検査する", () => {
+  // 呼び手は `codecTileFrames` を渡す義務を負っていないので、「渡さなければ通る」形にすると
+  // 既定タイルと `codecHaloFrames` の関係が壊れた配布形が**必ず** DiT ループ後に落ちる。
+  const config = parseIrodoriPipelineConfig({ ...PIPELINE_CONFIG, codecHaloFrames: 91 });
+  assertThrows(
+    () => assertIrodoriRequest({ text: "テスト" }, config),
+    Error,
+    "tileFrames 182 が halo 2 枚ぶん（182）より大きい整数でない",
+  );
+});
+
 Deno.test("latentSnapshot: 束縛した時点の潜在を写す（step を進めても写しは変わらない）", () => {
   const shape = [2, 2];
   // DiT ループの再現: `eulerStep` は純関数なので `x` は step ごとに**新しい配列**へ
@@ -273,4 +320,14 @@ Deno.test("latentSnapshot: 束縛した時点の潜在を写す（step を進め
   assertEquals(Array.from(first().data), [1, 2, 3, 4]);
   assertEquals(Array.from(step1), [1, 2, 3, 4]);
   assertNotStrictEquals(copy.data, first().data);
+
+  // `shape` も同じ扱い（anima 側 `latentSnapshot` と同じ MUST）。参照のまま返すと、同じ step の
+  // `copyLatents()` を 2 回呼んだ写しが同一の配列を共有し、購読側が 1 回目の `shape` を
+  // 書き換えると 2 回目の写しが黙って別の形を名乗る。
+  assertNotStrictEquals(copy.shape, shape);
+  // 2 回呼んだ写しが `shape` を共有していない（W-Q6-2 の破れはここに出る — 参照のままだと
+  // 1 回目の写しの書き換えが 2 回目の写しへ波及する）。
+  assertNotStrictEquals(copy.shape, first().shape);
+  shape[0] = 99;
+  assertEquals(copy.shape, [2, 2]);
 });

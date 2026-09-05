@@ -16,6 +16,15 @@ import {
 } from "../src/anima/latents.ts";
 import { imageToRgba } from "../src/anima/image.ts";
 
+/** 参照フィクスチャ（`fixtures/anima-latents/parity.json` — 生成元は同ファイルの `_doc`）。 */
+type LatentsFixture = {
+  readonly mean: readonly number[];
+  readonly std: readonly number[];
+};
+
+const FIXTURE_PATH = new URL("./fixtures/anima-latents/parity.json", import.meta.url);
+const fixture = JSON.parse(await Deno.readTextFile(FIXTURE_PATH)) as LatentsFixture;
+
 Deno.test("denormalizeLatents: B>1 と channel 数の食い違いを落とす", () => {
   const latents = new Float32Array(2 * 2 * 1 * 1);
   const mean = Float32Array.from([0, 0]);
@@ -48,9 +57,19 @@ Deno.test("denormalizeLatents: std の逆数で割る（掛け算に直すと最
   );
 });
 
+Deno.test("デモ定数: latents_mean / latents_std が参照フィクスチャとビット一致する", () => {
+  // `latents.ts` の MUST（手写しの数を検証なしで置かない）の実体。この 32 個は VAE の config
+  // にしかなく IR にも配布資産にも入らないので、写し間違いを捕まえる門はここだけになる
+  // （実 GPU の PNG sha256 門は資産と GPU が揃った参照環境でしか走らない）。
+  // 突合は素の f32 比較でよい — フィクスチャの値は torch の f32 テンソル由来で、
+  // `Float32Array.from` が同じ f32 へ落とす。
+  assertEquals([...ANIMA_LATENTS_MEAN], [...Float32Array.from(fixture.mean)]);
+  assertEquals([...ANIMA_LATENTS_STD], [...Float32Array.from(fixture.std)]);
+});
+
 Deno.test("デモ定数: latents_mean / latents_std は 16 チャネル対で揃っている", () => {
-  // 値そのものの正しさ（参照フィクスチャとのビット一致）は実資産の波で戻す。ここは
-  // 「片方だけ差し替えた」形の取りこぼしを構造で止める。
+  // 値そのものは上のビット一致が固定する。ここは「片方だけ差し替えた」形の取りこぼしを
+  // 構造で止める。
   assertEquals(ANIMA_LATENTS_MEAN.length, 16);
   assertEquals(ANIMA_LATENTS_STD.length, ANIMA_LATENTS_MEAN.length);
   assert(ANIMA_LATENTS_STD.every((value) => value > 0), "std に非正の値がある");

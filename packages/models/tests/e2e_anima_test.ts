@@ -27,8 +27,9 @@
  * 焼く — release-runbook）。それまで越境の検査は hub 側の単体テストが持つ。
  */
 
-import { assertEquals, assertFalse, assertRejects } from "@std/assert";
+import { assertEquals, assertFalse, assertRejects, assertStrictEquals } from "@std/assert";
 import { parseManifest, resolveFiles } from "@karume/hub";
+import { acquireGpu } from "@karume/runtime";
 import type { Manifest } from "@karume/hub";
 import {
   type AnimaGenerateEvent,
@@ -712,5 +713,90 @@ Deno.test({
       Error,
       "dispose 済み",
     );
+  },
+});
+
+// --- 公開契約（直列化 / dispose / 共有 GPU の所有権）--------------------------
+//
+// `AnimaPipeline` が掲げる公開契約は 4 つ: ①並行 `generate` は待たされて順に走る
+// ②`dispose` は in-flight の完了を待つ（flush-before-destroy）③2 度目以降の `dispose` は
+// 同じ完了を返す ④渡された `GpuContext` は破棄しない。GPU 無しの
+// `anima_pipeline_test.ts` はコンストラクタが private なので**結線**を組めず、
+// `serial_test.ts` が縛るのは `createOperationChain` 単体でしかない。結線そのものは
+// パイプライン実体でしか見えないのでここに置く。
+//
+// MUST: 生成は最小構成（512² / 2 step）で回す — ここで見るのは順序であって画素ではない。
+
+Deno.test({
+  name: "e2e(実GPU): 並行 generate は直列に走り、dispose は in-flight を待ってから破棄する",
+  ignore: !RUNNABLE,
+  fn: async (t) => {
+    const { quant } = REFERENCE[1];
+    const resolution: ImageSize = { width: 512, height: 512 };
+    const request = { prompt: PROMPT, resolution, steps: 2, seed: SEED };
+    await withTurbo(quant, {}, async (pipeline) => {
+      await t.step("並行に投げた 2 本の段が交互にならない", async () => {
+        const log: string[] = [];
+        const trace = (tag: string) => (event: AnimaGenerateEvent) => {
+          if (event.kind === "stage") log.push(`${tag}:${event.component}:${event.at}`);
+        };
+        // await せずに 2 本投げる（鎖が外れていれば段が交互に現れる）。
+        await Promise.all([
+          pipeline.generate({ ...request, onEvent: trace("a") }),
+          pipeline.generate({ ...request, onEvent: trace("b") }),
+        ]);
+        const firstEnd = log.indexOf("a:vae_decoder:end");
+        const secondStart = log.indexOf("b:text_encoder:start");
+        assertEquals(firstEnd >= 0 && secondStart >= 0, true, `段の記録が足りない: ${log}`);
+        assertEquals(
+          firstEnd < secondStart,
+          true,
+          `1 本目の最終段より前に 2 本目が始まっている（鎖が外れている）: ${log}`,
+        );
+      });
+
+      await t.step("dispose は生成の完了より後に解決し、2 度目も同じ完了を返す", async () => {
+        const order: string[] = [];
+        const running = pipeline.generate(request).then(() => {
+          order.push("generate");
+        });
+        const disposal = pipeline.dispose();
+        assertStrictEquals(pipeline.dispose(), disposal, "2 度目の dispose が別の完了を返す");
+        await Promise.all([running, disposal.then(() => order.push("dispose"))]);
+        // 破棄が先に解決すると、消費側は「解放済み」と見なして次へ進んでしまう。
+        assertEquals(order, ["generate", "dispose"]);
+      });
+    });
+  },
+});
+
+Deno.test({
+  name: "e2e(実GPU): 渡した GpuContext は dispose で破棄しない（所有権は渡した側）",
+  ignore: !RUNNABLE,
+  fn: async () => {
+    const { quant } = REFERENCE[1];
+    const server = serveAssets(servedOrigins(readManifest(), quant, ASSETS_DIR));
+    // 共有 GPU は呼び出し側の所有物。破棄してしまうと、同じ device を使う他の
+    // パイプライン（examples は 1 つの GpuContext を家族間で回す）が道連れになる。
+    const gpu = await acquireGpu();
+    try {
+      const hub = { repo: REPO, hubUrl: `http://127.0.0.1:${server.addr.port}` };
+      const first = await AnimaPipeline.fromPretrained(hub, {
+        quant,
+        gpu,
+        caches: new MemoryCacheStorage(),
+      });
+      await first.dispose();
+      // device が破棄されていれば、2 本目の構築（Session の重みアップロード）が落ちる。
+      const second = await AnimaPipeline.fromPretrained(hub, {
+        quant,
+        gpu,
+        caches: new MemoryCacheStorage(),
+      });
+      await second.dispose();
+    } finally {
+      gpu.destroy();
+      await server.shutdown();
+    }
   },
 });

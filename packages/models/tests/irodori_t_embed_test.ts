@@ -8,7 +8,7 @@
 // `outputs/series/irodori-v4-small/pipeline/t-embed.safetensors`（`t` `[40]` と
 // `t_embed` `[40,512]`）。生成していない環境では**明示 SKIP** する（ADR 0005）。GPU は要らない。
 
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertThrows } from "@std/assert";
 import { parseSafetensors } from "@karume/runtime";
 import { tSchedule } from "../src/irodori/host/sampler.ts";
 import { timestepEmbedding, timestepFrequencies } from "../src/irodori/host/t-embed.ts";
@@ -77,6 +77,35 @@ const readGolden = (bytes: Uint8Array<ArrayBuffer>) => {
   };
   return { t: view("t"), table: view("t_embed") };
 };
+
+// ---- 構造の門（golden 不要）------------------------------------------------
+//
+// 上の golden 突合は 2 本とも `ignore: !AVAILABLE` なので、資産の無い機では `t_embed` の門が
+// 0 本になる。anima の同型 `timestepsProj` は資産不要の構造テストを持つ（`anima_sampler_test.ts`）
+// ので、こちら側にも同じ密度で置く。
+
+Deno.test("timestepEmbedding: t=0 では前半が全て 1・後半が全て 0（前半 cos / 後半 sin）", () => {
+  // 値域が同じ [-1,1] なので、前後半を取り違えても shape も統計も変わらない（doc の MUST）。
+  // 反転していれば `[0,0,0,0,1,1,1,1]` になってここで落ちる。
+  assertEquals([...timestepEmbedding(0, timestepFrequencies(8))], [1, 1, 1, 1, 0, 0, 0, 0]);
+});
+
+Deno.test("timestepFrequencies: k=0 は厳密に 1000・以降は上流の式順どおり", () => {
+  // `FREQ_SCALE`（1000）の掛け忘れは k=0 が 1 になるのでここで落ちる（golden 突合での実測は
+  // 最大絶対差 2.00e+0）。k=1 は `1000·exp(f32(-ln(10000)·1)/2)` を 1 演算ずつ f32 で踏んだ値。
+  const expected = Math.fround(
+    1000 * Math.fround(Math.exp(Math.fround(Math.fround(-Math.log(10000) * 1) / 2))),
+  );
+  assertEquals([...timestepFrequencies(4)], [1000, expected]);
+});
+
+Deno.test("timestepFrequencies: 幅の受理集合（正の偶数）", () => {
+  // 前半 cos / 後半 sin に割るので奇数幅は組めない（`config.ts` の `timestepEmbedDim` と
+  // 同じ条件がこちら側にもある）。
+  for (const dim of [0, -2, 3, 2.5]) {
+    assertThrows(() => timestepFrequencies(dim), RangeError, "正の偶数でない");
+  }
+});
 
 Deno.test({
   name: "Irodori t_embed: ホスト式が torch 基準の golden 表と一致する",

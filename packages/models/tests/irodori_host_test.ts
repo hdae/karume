@@ -14,6 +14,7 @@ import { prependMeanToken, rowMean } from "../src/irodori/host/pooling.ts";
 import { Randn } from "../src/irodori/host/random.ts";
 import {
   bankerRound,
+  maxSequenceLength,
   type SampleBounds,
   sequenceLengthFromLogFrames,
   sequenceLengthFromSeconds,
@@ -95,6 +96,35 @@ Deno.test("sequenceLengthFromSeconds: 切り出し長は S × hopLength より�
   // 26 フレーム = 49,920 サンプルぶん decode するが、返す波形は 48,192 サンプル。
   const plan = sequenceLengthFromSeconds(1.004, BOUNDS);
   assertEquals(plan.frames * BOUNDS.hopLength - plan.targetSamples, 1728);
+});
+
+Deno.test("bankerRound: 非有限は落とす（丸め先が無い値を黙って通さない）", () => {
+  for (const value of [NaN, Infinity, -Infinity]) {
+    assertThrows(() => bankerRound(value), RangeError, "有限の数でない");
+  }
+});
+
+Deno.test("sequenceLengthFromLogFrames: expm1 が有限でない出力は落とす（clamp で隠さない）", () => {
+  // duration グラフが壊れた値を出したとき、clamp が黙って上限（750）へ倒すと「30 秒の音声が
+  // 出た」だけになって真因が消える。f32 の expm1 は logFrames=1e5 で Infinity になる。
+  assertThrows(() => sequenceLengthFromLogFrames(1e5, BOUNDS), Error, "有限でない");
+});
+
+Deno.test("sequenceLengthFromSeconds: 非有限の秒は落とす", () => {
+  for (const seconds of [NaN, Infinity]) {
+    assertThrows(() => sequenceLengthFromSeconds(seconds, BOUNDS), Error, "durationSeconds");
+  }
+});
+
+Deno.test("maxSequenceLength: 到達しうる S は 2 経路の大きいほう", () => {
+  // 配布形の宣言（`maxSeconds`）と `ditSymMax` の整合を parse 時に見るための面。丸め方が
+  // 経路ごとに違うので、duration 経路（floor）だけを見ると手動秒経路（ceil）を取りこぼす。
+  assertEquals(maxSequenceLength(BOUNDS), 750, "実配布の 30 秒は両経路とも 750");
+  assertEquals(
+    maxSequenceLength({ ...BOUNDS, maxSeconds: 30.02 }),
+    751,
+    "duration 経路は 750 のまま・手動秒経路だけが 751 に出る",
+  );
 });
 
 // ---- 区間マスク -----------------------------------------------------------
@@ -195,6 +225,22 @@ Deno.test("eulerStep: x + v·Δt（Δt は負）", () => {
   const x = Float32Array.from([1, 2]);
   const v = Float32Array.from([0.5, -4]);
   assertEquals([...eulerStep(x, v, -0.5)], [0.75, 4]);
+});
+
+Deno.test("eulerStep: 速度場の長さ不一致は落とす（combineCfg 側の同型テストの対）", () => {
+  // 短い側を素通しすると `undefined` の読み出しが NaN になって伝播し、波形の非有限門まで
+  // 診断が化ける。長い側は余りが黙って捨てられる。
+  assertThrows(
+    () => eulerStep(Float32Array.from([0, 0]), Float32Array.from([1]), -0.1),
+    Error,
+    "速度場の長さ 1",
+  );
+});
+
+Deno.test("tSchedule: steps が 1 以上の整数でなければ落とす", () => {
+  for (const steps of [0, -1, 2.5]) {
+    assertThrows(() => tSchedule(steps, 0.999), RangeError, "1 以上の整数でない");
+  }
 });
 
 // ---- 参照 latent の patch と縮約 -----------------------------------------

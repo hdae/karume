@@ -28,6 +28,7 @@
  */
 
 import type { HubRepoRef } from "@karume/hub";
+import { maxSequenceLength } from "./host/round.ts";
 
 /** `pipeline` の契約名と、この実装が受け付ける major（ADR 0038 §1）。 */
 export const IRODORI_PIPELINE_NAME = "irodori";
@@ -248,12 +249,15 @@ export const parseIrodoriPipelineConfig = (
   const where = "pipelineConfig";
   assertAllowedKeys(raw, ROOT_KEYS, where);
   const positive = "正の整数でない";
-  // token 列は BOS を必ず 1 本置く（`text/tokenizer.ts`）ので、本文の予算が残る 2 以上が要る。
-  const withBos = (value: number): boolean => Number.isInteger(value) && value >= 2;
+  // 前置トークンに 1 本取られる欄（text / caption は BOS・speaker は平均トークン）は、本体の
+  // 予算が残る 2 以上が要る。1 を受けると text は本文 0 token・speaker は参照 latent 0 行で、
+  // 落ちる場所が「参照音声の上限サンプル数 0」→ `integratedLoudness` の「波形が空」のような
+  // 無関係な文言になる。
+  const withLeadingToken = (value: number): boolean => Number.isInteger(value) && value >= 2;
   const config: IrodoriPipelineConfig = {
-    maxTextLen: readNumber(raw, "maxTextLen", where, withBos, "2 以上の整数でない"),
-    maxCaptionLen: readNumber(raw, "maxCaptionLen", where, withBos, "2 以上の整数でない"),
-    speakerRows: readNumber(raw, "speakerRows", where, isPositiveInteger, positive),
+    maxTextLen: readNumber(raw, "maxTextLen", where, withLeadingToken, "2 以上の整数でない"),
+    maxCaptionLen: readNumber(raw, "maxCaptionLen", where, withLeadingToken, "2 以上の整数でない"),
+    speakerRows: readNumber(raw, "speakerRows", where, withLeadingToken, "2 以上の整数でない"),
     ditSymMax: readNumber(raw, "ditSymMax", where, isPositiveInteger, positive),
     frameRate: readNumber(raw, "frameRate", where, isPositiveInteger, positive),
     sampleRate: readNumber(raw, "sampleRate", where, isPositiveInteger, positive),
@@ -312,6 +316,16 @@ export const parseIrodoriPipelineConfig = (
     throw new Error(
       `${where}: sampleRate ${config.sampleRate} が frameRate ${config.frameRate} × hopLength` +
         ` ${config.hopLength} = ${config.frameRate * config.hopLength} と違う`,
+    );
+  }
+  // 秒の上限から到達しうる S が dit の宣言上限を超える宣言は、**長い発話のときだけ**
+  // 「決まった latent 長が dit の宣言上限を超えている」で落ちる（duration 段まで走った後）。
+  // 到達しうる最大は 2 経路の丸めが違うので `host/round.ts` の 1 本から引く（式を写さない）。
+  const reachable = maxSequenceLength(config);
+  if (reachable > config.ditSymMax) {
+    throw new Error(
+      `${where}: maxSeconds ${config.maxSeconds} から到達しうる latent 長 ${reachable} が` +
+        ` ditSymMax ${config.ditSymMax} を超えている`,
     );
   }
   return config;

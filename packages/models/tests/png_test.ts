@@ -108,6 +108,30 @@ Deno.test("encodePng: IDAT を DecompressionStream で戻すと元の画素列�
   }
 });
 
+Deno.test("encodePng: サイズが正の整数でなければ落とす（長さ検査より先）", async () => {
+  // `imageToRgba` 側には同型の門のテストがある（`anima_latents_test.ts`）ので、こちら側だけが
+  // 裸だった。0 / 負 / 端数は行ストライドの計算が破綻するので、長さが合っていても通さない。
+  for (const bad of [0, -1, 1.5]) {
+    await assertRejects(
+      () => encodePng(new Uint8ClampedArray(4), bad, 1),
+      RangeError,
+      "正の整数でない",
+    );
+    await assertRejects(
+      () => encodePng(new Uint8ClampedArray(4), 1, bad),
+      RangeError,
+      "正の整数でない",
+    );
+  }
+  // 門の順序: `width × height × 4` が偶然 RGBA 長と一致する組でも、長さ検査より先に
+  // RangeError で落ちる（後段だと「長さは合っているのに壊れた PNG」を作る経路になる）。
+  await assertRejects(
+    () => encodePng(new Uint8ClampedArray(4), 2, 0.5),
+    RangeError,
+    "正の整数でない",
+  );
+});
+
 Deno.test("encodePng: 不透明でない画素は落とす（黙って不透明化しない）", async () => {
   const rgba = new Uint8ClampedArray([1, 2, 3, 254]);
   await assertRejects(() => encodePng(rgba, 1, 1), Error, "アルファ");

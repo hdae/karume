@@ -175,6 +175,33 @@ Deno.test("parseIrodoriPipelineConfig: sampleRate ÷ hopLength が frameRate と
   );
 });
 
+Deno.test("parseIrodoriPipelineConfig: speakerRows 1 は落とす（参照 latent が 0 行になる）", () => {
+  // speaker 条件は「平均トークン 1 本 + patch した参照」なので、1 行では参照が 1 行も載らない。
+  // 素通しすると参照音声の上限サンプル数が 0 になり、`integratedLoudness` の「波形が空」という
+  // **無関係な文言**で生成の途中に落ちる。maxTextLen / maxCaptionLen と同じ理屈・同じ受理集合。
+  assertThrows(() => parseIrodoriPipelineConfig(withPatch({ speakerRows: 1 })), Error, "2 以上");
+  assertThrows(() => parseIrodoriPipelineConfig(withPatch({ speakerRows: 0 })), Error, "2 以上");
+});
+
+Deno.test("parseIrodoriPipelineConfig: maxSeconds から到達しうる S が ditSymMax を超えたら落とす", () => {
+  // 素通しすると、長い発話のときだけ「決まった latent 長が dit の宣言上限を超えている」で
+  // duration 段まで走ってから落ちる（短い発話では永久に露見しない）。
+  assertThrows(
+    () => parseIrodoriPipelineConfig(withPatch({ maxSeconds: 30.5 })),
+    Error,
+    "到達しうる latent 長 763",
+  );
+  // 手動秒経路（`ceil(trunc(秒×sampleRate) / hopLength)`）だけが 1 フレーム上に出る宣言。
+  // duration 経路の `floor(秒×frameRate)` だけを見る式ではここを取りこぼす。
+  assertThrows(
+    () => parseIrodoriPipelineConfig(withPatch({ maxSeconds: 30.02 })),
+    Error,
+    "到達しうる latent 長 751",
+  );
+  // 実配布の 30 秒 / ditSymMax 750 はちょうど成立する（境界を締めすぎていない）。
+  assertEquals(parseIrodoriPipelineConfig(withPatch({})).ditSymMax, 750);
+});
+
 Deno.test("parseIrodoriPipelineConfig: cfgScales 0 は正規の値（その条件の CFG を回さない）", () => {
   const config = parseIrodoriPipelineConfig(
     withPatch({ cfgScales: { text: 3, speaker: 0, caption: 0 } }),
