@@ -2544,7 +2544,7 @@ class TestEntitySharing:
         graph["initializers"]["w2"] = {"tensor": "enc.w", "storage": {"dtype": "f32"}}
         graph["values"]["w2"] = {"dtype": "f32", "shape": [4]}
         path = write_container(tmp_path / "m.safetensors", graph, {"enc.w": torch.ones(4)})
-        with pytest.raises(ContainerError, match="'enc.w' が initializer 'w' と共有されている"):
+        with pytest.raises(ContainerError, match=r"'enc\.w' が initializer 'w' と共有されている"):
             verify_model(path)
 
     def test_distinct_tensors_still_pass(self, tmp_path):
