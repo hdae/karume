@@ -100,6 +100,84 @@ Deno.test("resolveFiles: 複数 shard は宣言順のまま別々の取得キー
   assertEquals([files["net[0]"], files["net[1]"], files["net[2]"]], [graph, first, second]);
 });
 
+// ---- 取得キーの衝突。parse は weights / extras / assets を**別の名前空間**として読むので、
+// 3 つを 1 枚の表へ畳むこの関数だけが衝突の門になる（素通りすると、片方のキーがもう片方の
+// FileRef で上書きされ、呼び出し側は宣言と違うバイト列を受け取る）。
+
+const fileRefJson = (path: string, size: number, mark: string) => ({
+  path,
+  size,
+  sha256: mark.repeat(32),
+});
+
+/** weights `tokenizer`（1 shard = キーは名前そのもの）と assets の名前が衝突する最小 manifest。 */
+const withAssets = (
+  weights: Record<string, unknown>,
+  assets: Record<string, unknown>,
+  mapping: Record<string, string>,
+) =>
+  parseManifest(JSON.stringify({
+    format: "karume/4",
+    generator: "karume/0.1.0",
+    defaultModel: "m",
+    models: {
+      m: {
+        pipeline: "anima/1",
+        weights,
+        assets,
+        quants: { q: { weights: mapping, session: {} } },
+        defaultQuant: "q",
+        pipelineConfig: {},
+      },
+    },
+  }));
+
+/** 2 shard + extras `0` の weights `net`。shard は `net[i]`・extras は `net.0` へ展開される。 */
+const shardedNet = (assets: Record<string, unknown>) =>
+  withAssets(
+    {
+      net: {
+        f16: {
+          shards: [
+            fileRefJson("net/model.shard0.safetensors", 6, "a1"),
+            fileRefJson("net/model.shard1.safetensors", 8, "b2"),
+          ],
+          extras: { 0: fileRefJson("net/rope_base.safetensors", 4, "c3") },
+        },
+      },
+    },
+    assets,
+    { net: "f16" },
+  );
+
+Deno.test("resolveFiles: weights 名と assets 名の衝突は取得キーの門で落ちる", () => {
+  const colliding = withAssets(
+    { tokenizer: { f16: { shards: [fileRefJson("tokenizer/model.safetensors", 6, "a1")] } } },
+    { tokenizer: fileRefJson("tokenizer/tokenizer.json", 4, "b2") },
+    { tokenizer: "f16" },
+  );
+  // parse は通る（別の名前空間として読むだけ）— 落ちるのは表を畳むここ。
+  assertThrows(
+    () => resolveFiles(colliding),
+    ManifestReferenceError,
+    "取得キー 'tokenizer' が衝突した",
+  );
+});
+
+Deno.test("resolveFiles: shard 展開のキーと extras のキーは名前空間が交わらない", () => {
+  // `[i]` と `.` を分けている理由（`resolveFiles` の MUST）の対照 — extras 名 `0` は `net.0` に
+  // なるので、shard の `net[0]` とは衝突しない。
+  assertEquals(Object.keys(resolveFiles(shardedNet({}))), ["net[0]", "net[1]", "net.0"]);
+});
+
+Deno.test("resolveFiles: assets が shard 展開のキーを主張したら取得キーの門で落ちる", () => {
+  assertThrows(
+    () => resolveFiles(shardedNet({ "net[0]": fileRefJson("shared/net0.safetensors", 4, "d4") })),
+    ManifestReferenceError,
+    "取得キー 'net[0]' が衝突した",
+  );
+});
+
 Deno.test("resolveFiles: 実在しない model は利用可能一覧つきで拒否する", () => {
   const error = assertThrows(
     () => resolveFiles(manifest, { model: "anima-xl" }),

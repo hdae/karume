@@ -7,7 +7,7 @@
  */
 
 import { assertEquals, assertStrictEquals } from "@std/assert";
-import type { FileRef } from "../src/manifest.ts";
+import { type FileRef, fileRefKey } from "../src/manifest.ts";
 import { type PinnedSource, sourceForRef } from "../src/source.ts";
 
 const SHA = "b".repeat(40);
@@ -61,5 +61,25 @@ Deno.test("sourceForRef: 片方だけの宣言では越境しない（対での�
     const { source, calls } = recordingSource();
     assertStrictEquals(sourceForRef(source, ref({ revision: SHA })), source);
     assertEquals(calls, []);
+  });
+});
+
+// 一意化キーは取得元の分岐と**同じ述語**（`crossRefOf`）で越境を見なければならない。片方だけの
+// 宣言をキー側だけが越境として数えると、同じ 1 本のファイルが 2 本の別エントリになり（全量面は
+// 同じ URL を 2 回取得し、進捗の total も二重に積む）、しかもバイト列は正しいので黙って通る。
+
+Deno.test("fileRefKey: 対が揃った越境参照だけが宣言座標つきのキーになる", () => {
+  assertEquals(
+    fileRefKey(ref({ repo: "someone/other", revision: SHA })),
+    `someone/other@${SHA}/transformer/model.safetensors`,
+  );
+});
+
+Deno.test("fileRefKey: 片方だけの宣言は自リポの path キーへ畳まれる（sourceForRef と同じ判定）", async (t) => {
+  await t.step("repo だけ", () => {
+    assertEquals(fileRefKey(ref({ repo: "someone/other" })), ref().path);
+  });
+  await t.step("revision だけ", () => {
+    assertEquals(fileRefKey(ref({ revision: SHA })), ref().path);
   });
 });

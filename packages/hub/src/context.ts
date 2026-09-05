@@ -16,12 +16,20 @@ import {
   IntegrityError,
   ManifestFormatError,
 } from "./errors.ts";
-import { type FileRef, MANIFEST_FILENAME, MAX_MANIFEST_BYTES } from "./manifest.ts";
+import { crossRefOf, type FileRef, MANIFEST_FILENAME, MAX_MANIFEST_BYTES } from "./manifest.ts";
 import type { LoadedManifest } from "./session.ts";
 import type { SizeViolation, SourceOrigin } from "./source.ts";
 
 /** 取得失敗の文言に入る動詞（面によって「取得」と「事前取得」で割れる）。 */
 export type FetchVerb = "取得" | "事前取得";
+
+/**
+ * 名乗りのうち診断が使う部分。**失敗元（{@link ../source.ts SourceOrigin.integrity}）は
+ * 含まない** — 越境参照の名乗りは宣言（repo / revision）から作れるが、実際にバイト列を返した
+ * 取得元がローカルか network かは宣言から決まらない（`localDirectory` は越境先にリモートの
+ * 取得元を正式に受ける）。失敗元は {@link ../source.ts SizeViolation} を呼ぶ取得元が名乗る。
+ */
+type OriginNaming = Omit<SourceOrigin, "integrity">;
 
 /** 資産の取得面が使う診断の組み立て（manifest 取得前の面はこの下の関数群を使う）。 */
 export type FetchContext = {
@@ -33,7 +41,7 @@ export type FetchContext = {
    * 実際に取りに行った先の名乗り。越境参照は**宣言された側**を名乗る（セッションの取得元を
    * 名乗ると、そこには存在しない path を指す診断になる）。
    */
-  readonly originOf: (ref: FileRef) => SourceOrigin;
+  readonly originOf: (ref: FileRef) => OriginNaming;
   /** バイト数が manifest の `size` と食い違ったときのエラー。 */
   readonly sizeViolation: (ref: FileRef) => SizeViolation;
   /** 取得元由来の失敗（404・認証・cache I/O・ローカルの欠損等）を文脈付きで包む。 */
@@ -42,7 +50,7 @@ export type FetchContext = {
 
 /** 名乗りのうち、エラーの構造化欄に載せる部分だけを取り出す（持たない欄は載せない）。 */
 const identityOf = (
-  origin: SourceOrigin,
+  origin: OriginNaming,
 ): { readonly repo?: string; readonly revisionSha?: string } => ({
   ...(origin.repo === undefined ? {} : { repo: origin.repo }),
   ...(origin.revisionSha === undefined ? {} : { revisionSha: origin.revisionSha }),
@@ -53,9 +61,8 @@ const identityOf = (
  * 未 mapping の fail loudly（`sources/local.ts`）がエラーの組み立て中に飛び、真の失敗理由を
  * 覆い隠す。宣言そのもの（ADR 0038 §7 の repo / revision）は manifest が持っている一次情報。
  */
-const crossOrigin = (session: SourceOrigin, repo: string, revision: string): SourceOrigin => ({
+const crossOrigin = (repo: string, revision: string): OriginNaming => ({
   label: `repo ${repo} @ ${revision}`,
-  integrity: session.integrity,
   repo,
   revisionSha: revision,
 });
@@ -65,15 +72,15 @@ export const createFetchContext = (
   session: SourceOrigin,
 ): FetchContext => {
   const available: AvailableLabels = loaded.manifest.available;
-  const originOf = (ref: FileRef): SourceOrigin =>
-    ref.repo === undefined || ref.revision === undefined
-      ? session
-      : crossOrigin(session, ref.repo, ref.revision);
+  const originOf = (ref: FileRef): OriginNaming => {
+    const cross = crossRefOf(ref);
+    return cross === undefined ? session : crossOrigin(cross.repo, cross.revision);
+  };
   return {
     session: session.label,
     available,
     originOf,
-    sizeViolation: (ref) => (actual, where) => {
+    sizeViolation: (ref) => (actual, where, integrity) => {
       const origin = originOf(ref);
       return new IntegrityError(
         `${ref.path}: ${where} が manifest の size と食い違う` +
@@ -83,7 +90,8 @@ export const createFetchContext = (
           path: ref.path,
           expected: String(ref.size),
           actual: String(actual),
-          source: origin.integrity,
+          // 失敗元は**実際に読んだ取得元**が名乗る（越境参照ではセッションと違う）。
+          source: integrity,
           available,
         },
       );

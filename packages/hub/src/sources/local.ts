@@ -119,7 +119,9 @@ const pinnedLocalSource = (
       // NOTE: 全量を読んでから門を見る（アダプターは逐次面を持たない）。HF 側の上限が「受信を
       // 途中で止める」防波堤なのに対し、こちらは手元の実体に対する形式検査 — 送出側の悪意を
       // 想定する門ではないので、読み切ってから落として構わない。
-      if (bytes.byteLength > MAX_MANIFEST_BYTES) throw sizeViolation(bytes.byteLength, "body");
+      if (bytes.byteLength > MAX_MANIFEST_BYTES) {
+        throw sizeViolation(bytes.byteLength, "body", origin.integrity);
+      }
       // MUST: parse の throw をそのまま外へ出す（ローカルには evict すべきキャッシュが無いので、
       // 壊れた manifest は毎回同じ ManifestFormatError で落ちるのが正しい）。
       parse(bytes);
@@ -137,13 +139,15 @@ const pinnedLocalSource = (
           );
         }
         const actual = await adapter.readFileInto(ref.path, vessel.subarray(0, ref.size), abort);
-        if (actual !== ref.size) throw sizeViolation(actual, "body");
+        if (actual !== ref.size) throw sizeViolation(actual, "body", origin.integrity);
         return new Uint8Array(vessel.buffer, 0, ref.size);
       }
       const bytes = await adapter.readFile(ref.path, abort);
       // 検証は size 厳密一致だけ（sha256 は信頼する）。onProgress は 1 度も呼ばない —
       // 受信の途中という状態が無いので、共通層が complete の 1 点で閉じる。
-      if (bytes.byteLength !== ref.size) throw sizeViolation(bytes.byteLength, "body");
+      if (bytes.byteLength !== ref.size) {
+        throw sizeViolation(bytes.byteLength, "body", origin.integrity);
+      }
       return bytes;
     },
 

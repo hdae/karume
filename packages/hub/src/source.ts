@@ -20,7 +20,7 @@
  */
 
 import type { IntegritySource } from "./errors.ts";
-import type { FileRef } from "./manifest.ts";
+import { crossRefOf, type FileRef } from "./manifest.ts";
 import type { LoadManifestOptions } from "./session.ts";
 
 /**
@@ -51,9 +51,19 @@ export type SizeViolationSite = "content-length" | "body";
 /**
  * バイト数が宣言と食い違ったときに投げるエラーの組み立て。**取得元は組み立てない** —
  * 診断の文脈（取得元の名乗り・利用可能ラベル）を持つのは共通層なので、取得元は
- * 「どこで、いくつだったか」だけを渡す（組み立て点は `context.ts` の 1 箇所）。
+ * 「どこで、いくつだったか」と**自分の失敗元**（{@link SourceOrigin.integrity}）だけを渡す
+ * （組み立て点は `context.ts` の 1 箇所）。
+ *
+ * MUST: `integrity` は呼ぶ取得元自身のもの（`origin.integrity` — 定数を書かない）。越境参照は
+ * セッションと違う取得元から来る（ローカルセッション + リモート越境は正当な構成）ので、共通層は
+ * 宣言から失敗元を推定できない — 推定すると「network から来たバイト列が `"local"`（＝再試行は
+ * 無駄）を名乗る」形の嘘が 1 欄だけ混じる。
  */
-export type SizeViolation = (actual: number, where: SizeViolationSite) => Error;
+export type SizeViolation = (
+  actual: number,
+  where: SizeViolationSite,
+  integrity: IntegritySource,
+) => Error;
 
 /** 資産 1 本の読み（{@link PinnedSource.readFile} / {@link PinnedSource.prefetchFile}）の作法。 */
 export type FileReadOptions = {
@@ -197,7 +207,7 @@ export const isDistributionSource = (value: unknown): value is DistributionSourc
  * MUST: 分岐はこの 1 箇所だけに置く — 面ごとに書くと、片方だけ越境を素通ししたときに
  * 「別リポの同名 path を自リポから取る」形の取り違えが黙って成立する。
  */
-export const sourceForRef = (source: PinnedSource, ref: FileRef): PinnedSource =>
-  ref.repo === undefined || ref.revision === undefined
-    ? source
-    : source.originFor(ref.repo, ref.revision);
+export const sourceForRef = (source: PinnedSource, ref: FileRef): PinnedSource => {
+  const cross = crossRefOf(ref);
+  return cross === undefined ? source : source.originFor(cross.repo, cross.revision);
+};

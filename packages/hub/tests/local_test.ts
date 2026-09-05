@@ -22,7 +22,12 @@ import {
 } from "../mod.ts";
 import type { AssetProgress } from "../mod.ts";
 import { type FileRef, MANIFEST_FILENAME } from "../src/manifest.ts";
-import { DistributionSource, type PinnedSource, type SourceDriver } from "../src/source.ts";
+import {
+  DistributionSource,
+  type PinnedSource,
+  type SourceDriver,
+  type SourceOrigin,
+} from "../src/source.ts";
 import {
   buildLocalDist,
   CROSS_PATH,
@@ -236,29 +241,44 @@ Deno.test("localDirectory: 壊れた karume.json は毎回同じ ManifestFormatE
 
 // ---- 越境（ADR 0038 §7）: 明示 mapping / 明示 fallback / どちらも無い の 3 形。
 
-/** 越境先だけを提供する fake の取得元（段③の公開 factory の代役）。 */
+/**
+ * 越境先だけを提供する fake の取得元（段③の公開 factory の代役）。`shortBy` を渡すと、宣言
+ * `size` より短いバイト数を名乗る**リモート**取得元になる（越境先の完全性検証の失敗を踏む形）。
+ */
 const fakeRemote = (
   files: ReadonlyMap<string, Uint8Array<ArrayBuffer>>,
   calls: [string, string][],
+  options: { readonly shortBy?: number } = {},
 ): DistributionSource => {
-  const pinnedFor = (repo: string, revision: string): PinnedSource => ({
-    origin: {
+  const pinnedFor = (repo: string, revision: string): PinnedSource => {
+    const origin: SourceOrigin = {
       label: `fake ${repo} @ ${revision}`,
       integrity: "network",
       repo,
       revisionSha: revision,
-    },
-    readManifest: () => Promise.reject(new Error("fake: manifest は読まれない")),
-    readFile: (ref) => {
-      const bytes = files.get(ref.path);
-      if (bytes === undefined) return Promise.reject(new Error(`fake: ${ref.path} が無い`));
-      return Promise.resolve(new Uint8Array(bytes));
-    },
-    originFor: (crossRepo, crossRevision) => {
-      calls.push([crossRepo, crossRevision]);
-      return pinnedFor(crossRepo, crossRevision);
-    },
-  });
+    };
+    return {
+      origin,
+      readManifest: () => Promise.reject(new Error("fake: manifest は読まれない")),
+      readFile: (ref, { sizeViolation }) => {
+        const bytes = files.get(ref.path);
+        if (bytes === undefined) return Promise.reject(new Error(`fake: ${ref.path} が無い`));
+        const { shortBy } = options;
+        // 取得元は自分の失敗元（`origin.integrity`）を名乗って共通層へ返す — 組み立てるのは
+        // 共通層（`context.ts`）。
+        if (shortBy !== undefined) {
+          return Promise.reject(
+            sizeViolation(bytes.byteLength - shortBy, "body", origin.integrity),
+          );
+        }
+        return Promise.resolve(new Uint8Array(bytes));
+      },
+      originFor: (crossRepo, crossRevision) => {
+        calls.push([crossRepo, crossRevision]);
+        return pinnedFor(crossRepo, crossRevision);
+      },
+    };
+  };
   const driver: SourceDriver = {
     origin: { label: "fake remote", integrity: "network" },
     resolveGeneration: () => Promise.resolve("fake"),
@@ -306,6 +326,26 @@ Deno.test("localDirectory: mapping も fallback も無い越境は推測せず�
     error.cause.message.includes("crossRepo") && error.cause.message.includes(CROSS_REPO),
     `${error.cause.message} が足りない設定を名乗っていない`,
   );
+});
+
+Deno.test("localDirectory: 越境先の完全性検証の失敗は越境先の失敗元を名乗る", async () => {
+  const dist = await buildLocalDist({ cross: true });
+  const calls: [string, string][] = [];
+
+  const error = await assertRejects(
+    () => crossAssets({ fallback: fakeRemote(dist.crossFiles, calls, { shortBy: 1 }) }),
+    IntegrityError,
+  );
+
+  // 診断は宣言された越境先を名乗る（label / repo / revisionSha は既存の門と同じ）。
+  assertEquals(error.path, CROSS_PATH);
+  assertEquals(error.repo, CROSS_REPO);
+  assertEquals(error.revisionSha, CROSS_REVISION);
+  assertEquals(error.actual, String(payloadFor(`${CROSS_REPO}/${CROSS_PATH}`).byteLength - 1));
+  // ローカルセッション + リモート越境（`fallback` が正式に受ける構成）。バイト列は network から
+  // 来たので再試行に意味がある — セッションの分類 "local"（取り直しても同じ）を継ぐと、アプリに
+  // 「回復手段は無い」と嘘を伝える。
+  assertEquals(error.source, "network");
 });
 
 Deno.test("localDirectory: 越境先の取得元は同じハンドルを使い回しても混ざらない", async () => {

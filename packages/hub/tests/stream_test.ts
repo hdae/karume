@@ -601,7 +601,7 @@ Deno.test("streamAssets: 器の途中を指す view を返す取得元は fail l
   );
 });
 
-Deno.test("streamAssets: 器を借りたのに別 buffer の view を返す取得元は fail loudly", async () => {
+Deno.test("streamAssets: 器を借りたのに別 buffer かつ非 tight の view を返す取得元は fail loudly", async () => {
   // 別 buffer は tight view 検査の側へ落ちる（器を使ったかは buffer の同一性でしか分からない）。
   // 中身は正しいバイト列を写しておく — 落ちる理由を view の形だけに絞るため。
   const { loaded, refs, caches } = await openFake((_vessel, ref) => {
@@ -618,6 +618,25 @@ Deno.test("streamAssets: 器を借りたのに別 buffer の view を返す取�
   assert(
     error.message.includes("buffer 全体を占めていない"),
     `${error.message} が tight view 違反を名乗っていない`,
+  );
+});
+
+Deno.test("streamAssets: 器を借りたのに別 buffer の tight view を返す取得元も fail loudly", async () => {
+  // tight view は「自前で確保した取得元」の正当な形なので、view の形だけでは違反にならない。
+  // 器を借りた（`into` を呼んだ）ことがこの形を違反にする — 器は最大 shard ぶん確保済みのまま
+  // 使われずに居座り、ホスト RAM ピークが「最大 shard + 現 shard」へ黙って戻る。
+  const { loaded, refs, caches } = await openFake((_vessel, ref) =>
+    new Uint8Array(payloadFor(ref.path))
+  );
+
+  const error = await assertRejects(
+    () => drain(streamAssets(loaded, refs, { caches })),
+    Error,
+    refs[0].path,
+  );
+  assert(
+    error.message.includes("器（into）を借りたのに別の buffer"),
+    `${error.message} が器の契約違反（借りたのに使わない）を名乗っていない`,
   );
 });
 

@@ -32,6 +32,7 @@ import {
   type PinnedSource,
   type SizeViolation,
   type SourceDriver,
+  type SourceOrigin,
 } from "../source.ts";
 import { type ByteBudget, createGuardedFetch } from "../transport.ts";
 
@@ -73,7 +74,7 @@ const guardedFetchFor = (
 ): typeof globalThis.fetch => createGuardedFetch(base, new Map([[url, budget]]));
 
 /** 資産 1 本の予算: バイト数は manifest の宣言と**厳密一致**でなければならない。 */
-const exactBudget = (size: number, violation: SizeViolation): ByteBudget => ({
+const exactBudget = (size: number, violation: ByteBudget["violation"]): ByteBudget => ({
   maxBytes: size,
   exact: true,
   violation,
@@ -90,15 +91,20 @@ const pinnedHfSource = (
   const shared = {
     ...(options.caches === undefined ? {} : { caches: options.caches }),
   };
+  // 診断の名乗り（HF は repo と commit SHA を持つ取得元 — 完全性検証は network 取得の側）。
+  const origin: SourceOrigin = {
+    label: `repo ${repo} @ ${generation}`,
+    integrity: "network",
+    repo,
+    revisionSha: generation,
+  };
+  // 取得層のバイト門は「どこで、いくつだったか」しか知らないので、**この取得元の失敗元**を
+  // ここで束ねてから渡す（越境参照はセッションと違う取得元から来る — `source.ts` の MUST）。
+  const violationOf = (sizeViolation: SizeViolation): ByteBudget["violation"] => (actual, where) =>
+    sizeViolation(actual, where, origin.integrity);
 
   return {
-    // 診断の名乗り（HF は repo と commit SHA を持つ取得元 — 完全性検証は network 取得の側）。
-    origin: {
-      label: `repo ${repo} @ ${generation}`,
-      integrity: "network",
-      repo,
-      revisionSha: generation,
-    },
+    origin,
 
     readManifest: async ({ parse, signal, sizeViolation }) => {
       const url = hfResolveUrl({ ...target, path: MANIFEST_FILENAME });
@@ -114,7 +120,7 @@ const pinnedHfSource = (
         fetch: guardedFetchFor(baseFetch, url, {
           maxBytes: MAX_MANIFEST_BYTES,
           exact: false,
-          violation: sizeViolation,
+          violation: violationOf(sizeViolation),
         }),
         ...shared,
         ...(options.onCacheError === undefined ? {} : { onCacheError: options.onCacheError }),
@@ -140,7 +146,7 @@ const pinnedHfSource = (
         },
         {
           init: requestInit(options.headers, signal),
-          fetch: guardedFetchFor(baseFetch, url, exactBudget(ref.size, sizeViolation)),
+          fetch: guardedFetchFor(baseFetch, url, exactBudget(ref.size, violationOf(sizeViolation))),
           // network 側だけ発火する（キャッシュヒットは complete の 1 点だけで進む）。
           // `loaded` が `size` を超えないことは受信バイトの門（transport.ts）が保証する。
           onProgress: (progress) => onProgress(progress.loaded),
@@ -158,7 +164,7 @@ const pinnedHfSource = (
       const url = hfResolveUrl({ ...target, path: ref.path });
       await prefetchHfFile(target, { path: ref.path, sha256: ref.sha256 }, {
         init: requestInit(options.headers, signal),
-        fetch: guardedFetchFor(baseFetch, url, exactBudget(ref.size, sizeViolation)),
+        fetch: guardedFetchFor(baseFetch, url, exactBudget(ref.size, violationOf(sizeViolation))),
         onProgress: (progress) => onProgress(progress.loaded),
         ...shared,
       });

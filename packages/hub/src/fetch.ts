@@ -550,6 +550,11 @@ export const streamAssets = async function* (
  * ②取得元が自前で確保した tight view。どちらも runtime の shard 受け口の契約（buffer の先頭からの
  * view）に収まる。器を使ったのに先頭 `ref.size` バイトを指していない view は取得元の実装ミスなので
  * fail loudly。
+ *
+ * MUST: 「器を借りた（{@link FileReadOptions.into} を呼んだ）」の述語は `buffer !== undefined`
+ * ただ 1 つ（代入点は `lease` の 1 箇所）— 借りたのに別 buffer の view を返す取得元は、tight でも
+ * 器 1 本ぶんの RAM を居座らせるので落とす（ホスト RAM ピークが「最大 shard + 現 shard」へ黙って
+ * 戻る = ADR 0070 追記の係数 1 化が壊れる）。
  */
 const shardVessel = (refs: readonly FileRef[]) => {
   const largest = refs.reduce((max, ref) => Math.max(max, ref.size), 0);
@@ -560,8 +565,17 @@ const shardVessel = (refs: readonly FileRef[]) => {
       return buffer;
     },
     assertView: (bytes: Uint8Array, ref: FileRef): Uint8Array<ArrayBuffer> => {
-      if (buffer === undefined || bytes.buffer !== buffer.buffer) {
-        return assertTightView(bytes, ref.path);
+      // 器を 1 度も借りていない取得元は従来どおり自前の tight view（器は未確保）。
+      if (buffer === undefined) return assertTightView(bytes, ref.path);
+      if (bytes.buffer !== buffer.buffer) {
+        // 判定順 MUST: tight 検査が先（非 tight はその文言のまま落ちる）。ここまで来るのは
+        // 「器を借りた上で、器とは別の buffer をちょうどの長さで返した」形だけ。
+        assertTightView(bytes, ref.path);
+        throw new Error(
+          `hub: ${ref.path} の取得元が器（into）を借りたのに別の buffer の view を返した` +
+            `（器 ${buffer.byteLength} バイトが使われないまま居座り、ホスト RAM ピークが` +
+            `「最大 shard + 現 shard」へ戻る）`,
+        );
       }
       if (bytes.byteOffset !== 0 || bytes.byteLength !== ref.size) {
         throw new Error(

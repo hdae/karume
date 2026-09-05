@@ -211,13 +211,30 @@ export type FileRef = {
 };
 
 /**
+ * 越境参照の宣言（`repo` と `revision` の**対**）を取り出す。片方だけの宣言は越境ではない
+ * （`undefined`）— parse は対を強制するが、{@link FileRef} は公開型なので呼び手が手で組める。
+ *
+ * MUST: 越境かどうかの判定はこの述語 1 本を引く（一意化キー・取得元の分岐・診断の名乗り）—
+ * 面ごとに綴ると、片方だけを見る綴りが「キーは越境を名乗るのに取得はセッションの取得元から」
+ * という食い違いを黙って作る（同じファイルが 2 本の別エントリとして数えられる）。
+ */
+export const crossRefOf = (
+  ref: FileRef,
+): { readonly repo: string; readonly revision: string } | undefined =>
+  ref.repo === undefined || ref.revision === undefined
+    ? undefined
+    : { repo: ref.repo, revision: ref.revision };
+
+/**
  * ファイル参照の同一性キー。越境参照（別リポの `repo` / `revision`）が入った以上、
  * **`path` だけでは 1 本のファイルを指さない** — 別リポの同名 path は別のバイト列であり、
  * path で畳むと 3 点セット一致検査が正しい manifest を誤って拒否し、取得層では別のファイルの
  * バイト列を返してしまう。自リポ参照のキーは `path` そのままなので、v3 までの挙動は変わらない。
  */
-export const fileRefKey = (ref: FileRef): string =>
-  ref.repo === undefined ? ref.path : `${ref.repo}@${ref.revision}/${ref.path}`;
+export const fileRefKey = (ref: FileRef): string => {
+  const cross = crossRefOf(ref);
+  return cross === undefined ? ref.path : `${cross.repo}@${cross.revision}/${ref.path}`;
+};
 
 /**
  * weights の 1 dtype ぶんのファイル群（`{shards, extras?}`）。
