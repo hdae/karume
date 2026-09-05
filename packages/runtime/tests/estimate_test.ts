@@ -28,7 +28,8 @@ import {
 } from "../src/runtime/estimate.ts";
 import { type ExecStep, planFusions } from "../src/runtime/fusion.ts";
 import { countUses, ExecutionError, planGraph } from "../src/runtime/plan.ts";
-import { derivePlanSlots, type StepOutput, type StepRecipe } from "../src/runtime/recipe.ts";
+import { planRecipes, type StepOutput, type StepRecipe } from "../src/runtime/recipe.ts";
+import { CORE_TRANSIENT_LIMITS } from "../src/runtime/transient-plan.ts";
 import { planStateAttention } from "../src/runtime/state-attention-plan.ts";
 import { planWeightBuffers, planWeightResidency } from "../src/runtime/weight-residency.ts";
 import { f32Bytes, type GraphJson, type TensorSpec } from "./helpers/format.ts";
@@ -152,8 +153,8 @@ Deno.test("peakAccountedBytes は常駐の総和 + シナリオ側の最大", ()
     report.resident.weights.totalBytes + report.resident.stateBytes +
       scenario.ioBytes + scenario.workspaceBytes,
   );
-  // 116（非圧縮常駐）+ 0（state）+ 220（io）+ 108（workspace）
-  assertEquals(report.peakAccountedBytes, 444);
+  // 116（非圧縮常駐）+ 0（state）+ 220（io）+ 280（workspace — 下の「generation なし」参照）
+  assertEquals(report.peakAccountedBytes, 616);
 });
 
 /** linear の重み（適格）と mul の被演算子（適格外）に同じ格納 dtype を置くグラフ。 */
@@ -603,8 +604,9 @@ Deno.test("chunk 行が数値次元のグラフでは prefill と decode が同�
 
 Deno.test("generation なしの見積りはシナリオ 1 本（io / 中間の導出は従来と同じ）", () => {
   const report = estimateSessionMemory(plainModel(), { bindings: { T: 7 } });
-  // x[7,4]=112 + h[7,3]=84 + g[2,3]=24 = 220 / 中間は h 84 + g 24 = 108（改名前と同値）
-  assertEquals(report.scenarios, [{ name: "run", ioBytes: 220, workspaceBytes: 108 }]);
+  // x[7,4]=112 + h[7,3]=84 + g[2,3]=24 = 220 / 中間は h と g が同時生存（どちらもグラフ出力）で
+  // 1 領域に h [0,84) + g [256,280)（offset は 256 整列 — ADR 0093 決定 1）= 280
+  assertEquals(report.scenarios, [{ name: "run", ioBytes: 220, workspaceBytes: 280 }]);
 });
 
 Deno.test("chunk 行の記号を options.bindings で受けない（束縛点は chunkLength と decode の 1）", () => {
@@ -685,9 +687,11 @@ Deno.test("直列チェーンのピークは同時生存 2 本ぶん（消費が
   );
 });
 
-Deno.test("幅広 fan-out のピークは同時生存 4 本ぶん（解放が効いても畳む直前で重なる）", () => {
-  // s を確保した時点で t1 / t2 / t3 / s の 4 本 = 1024
-  assertEquals(runScenario(estimateSessionMemory(openGraph(fanOutGraph()))).workspaceBytes, 1024);
+Deno.test("幅広 fan-out は同時生存 4 本ぶんに、読み書きの同居禁止で 1 本が上乗せされる", () => {
+  // s を確保した時点で t1 / t2 / t3 / s の 4 本が同時生存（生存ピーク 1024）。加えて s は
+  // t1 / t2 を読む dispatch が書くので同じ領域に置けず、y も s と t3 を読むので両方の領域を
+  // 避ける = 領域 3 本（768 + 256 + 256）= 1280（usage scope の制約 — ADR 0093 決定 1）。
+  assertEquals(runScenario(estimateSessionMemory(openGraph(fanOutGraph()))).workspaceBytes, 1280);
 });
 
 Deno.test("グラフ出力は消費が尽きても pinned のまま（解放されない）", () => {
@@ -697,14 +701,16 @@ Deno.test("グラフ出力は消費が尽きても pinned のまま（解放さ�
 });
 
 Deno.test("initializer とグラフ入力は中間ピークに数えない（重み・io 側の勘定）", () => {
-  // matmul の h（T=7 → 84）と embedding の g（24）だけが中間。x / w / emb / idx は数えない
+  // matmul の h（T=7 → 84）と embedding の g（24 — 256 整列の次の区間）だけが中間。
+  // x / w / emb / idx は数えない
   const report = estimateSessionMemory(plainModel(), { bindings: { T: 7 } });
-  assertEquals(runScenario(report).workspaceBytes, 108);
+  assertEquals(runScenario(report).workspaceBytes, 280);
 });
 
-Deno.test("slot の再利用はサイズクラスの厳密一致だけ（断片化ぶんを過小に数えない）", () => {
-  // 8 → 12 → 4 バイトの 3 段。生存ピークは 20 だが、実行側の exact-size 再利用では
-  // 解放済みの 8 が 12 にも 4 にも使えず slot が 3 本累積する（8 + 12 + 4 = 24）。
+Deno.test("配り直しはサイズに依らない（解放済みの 8 バイトの区間を 4 バイトの出力が掴む）", () => {
+  // 8 → 12 → 4 バイトの 3 段。t2 は t1 を読む dispatch が書くので別領域（12 / 8）。y は t2 を
+  // 読むので t2 の領域には置けず、生存を終えた t1 の区間（8 バイト）を掴む = 12 + 8 = 20
+  // （旧プールの exact-size 再利用では 24 だった — ADR 0093 決定 8）。
   const graph: GraphJson = {
     format: "karume-ir",
     version: 1,
@@ -736,7 +742,7 @@ Deno.test("slot の再利用はサイズクラスの厳密一致だけ（断片�
     { name: "m.w2", dtype: "F32", shape: [2, 3], data: f32Bytes(new Array(6).fill(1)) },
     { name: "m.w3", dtype: "F32", shape: [3, 1], data: f32Bytes([1, 1, 1]) },
   ]);
-  assertEquals(runScenario(estimateSessionMemory(model)).workspaceBytes, 24);
+  assertEquals(runScenario(estimateSessionMemory(model)).workspaceBytes, 20);
 });
 
 // ---------------------------------------------------------------------------
@@ -853,13 +859,14 @@ const TEST_LIMITS = {
 } as const;
 
 /**
- * 素のノード列 → slot 導出用のレシピ列。GPU に触らずに recipe-builder の `#buildStep` の
- * **簿記面だけ**（確保仕様・`uses` / `pinned`・消費の延べ列）を写す — dispatch と一時は
- * slot 導出の別軸なので空で足りる。
+ * 素のノード列 → 計画用のレシピ列。GPU に触らずに recipe-builder の `#buildStep` の
+ * **簿記面だけ**（確保仕様・`uses` / `pinned`・消費の延べ列・dispatch の読み書き）を写す。
+ * dispatch は 1 ノード 1 本（入力を読み・出力を書く）で、estimator が組む確保プログラムと同じ
+ * 向きの usage scope 規則が計画に効く。
  *
  * NOTE: 別名元は `#buildStep` と同じく入力の先頭。initializer を指す形だけは `#buildStep` が
- * `{ kind: "resident" }` を作るが、`derivePlanSlots` は env に載らない値をどちらも
- * 「slot 無し」と扱うので、slot 導出の観点では `{ kind: "value" }` と同値。
+ * `{ kind: "resident" }` を作るが、計画は env に載らない値をどちらも「slot 無し」と扱うので、
+ * 計画の観点では `{ kind: "value" }` と同値。
  */
 const slotRecipes = (steps: readonly ExecStep[], graph: IrGraph): readonly StepRecipe[] => {
   const uses = countUses(graph);
@@ -876,10 +883,28 @@ const slotRecipes = (steps: readonly ExecStep[], graph: IrGraph): readonly StepR
         }
         : { ...bookkeeping, kind: "alloc" as const, byteLength: numel(shape) * 4 };
     });
+    const bindings = [
+      ...step.plan.node.ins.map((name, index) => ({
+        binding: index + 1,
+        source: { kind: "value" as const, name },
+      })),
+      ...outputs.map((output, index) => ({
+        binding: step.plan.node.ins.length + index + 1,
+        source: { kind: "value" as const, name: output.name },
+      })),
+    ];
+    const dispatch = {
+      key: step.plan.node.op,
+      bindings,
+      roles: {
+        reads: new Set(bindings.slice(0, step.plan.node.ins.length).map((b) => b.binding)),
+        writes: new Set(bindings.slice(step.plan.node.ins.length).map((b) => b.binding)),
+      },
+    } as unknown as StepRecipe["dispatches"][number];
     return {
       outputs,
       temps: [],
-      dispatches: [],
+      dispatches: step.aliasesInput ? [] : [dispatch],
       releases: step.plan.node.ins,
       writesState: false,
     };
@@ -948,13 +973,15 @@ const aliasMixGraph = (): GraphJson => ({
 });
 
 /**
- * estimator の中間総量と、実行計画の slot 表（`derivePlanSlots`）の総バイト数を突き合わせる。
+ * estimator の中間総量と、実行計画（`planRecipes` — 同じパッカー ADR 0093 決定 4）の領域総和を
+ * 突き合わせる。
  *
  * 融合が 1 本も掛からない形でだけ主張できる**厳密一致** — 融合が掴む形では実行側が中間を
  * 消し、行ブロック分割が一時を足すので、estimator の `unaccounted` が認めている差になる。
- * 別名の扱いが 2 実装で割れると、ここが例外なしで割れる（それが起票 R6V-2 の姿）。
+ * 別名の扱いや dispatch の読み書きの向きが 2 実装で割れると、ここが例外なしで割れる
+ * （それが起票 R6V-2 の姿）。
  */
-Deno.test("融合が掛からない形では estimator の中間総量と slot 表の総バイトが一致する", () => {
+Deno.test("融合が掛からない形では estimator の中間総量と実行計画の領域総和が一致する", () => {
   const model = openGraph(aliasMixGraph());
   const plan = planGraph(model.graph, {});
   const fusion = planFusions(plan.nodes, {
@@ -966,13 +993,18 @@ Deno.test("融合が掛からない形では estimator の中間総量と slot �
   assertEquals(fusion.steps.every((step) => step.kind === "node"), true, "融合が掛かっている");
   assertEquals(fusion.counts.identityExpand, 1);
 
-  const slots = derivePlanSlots(slotRecipes(fusion.steps, model.graph));
-  const slotTotal = slots.bytes.reduce((sum, size) => sum + size, 0);
-  // 手計算: h 256 + g 16 + w 48 + v 48 + s 256 + y 256 + k 20 + m 20 = 920
-  // （別名 r1 / r2 / e1 / yv / kv は 1 本も生やさない）。
-  assertEquals(slots.bytes, [256, 16, 48, 48, 256, 256, 20, 20]);
-  assertEquals(slotTotal, 920);
-  assertEquals(runScenario(estimateSessionMemory(model)).workspaceBytes, slotTotal);
+  const transientPlan = planRecipes(slotRecipes(fusion.steps, model.graph), CORE_TRANSIENT_LIMITS);
+  // 確保の区間は h / g / w / v / s / y / k / m / p1 / p2 の 10 本（別名 r1 / r2 / e1 / yv / kv は
+  // 1 本も生やさない）。領域総和は estimator と同じパッカーから出るので厳密一致。
+  assertEquals(transientPlan.slots.length, 10);
+  assertEquals(
+    transientPlan.slots.map((slot) => slot.byteLength),
+    [256, 16, 48, 48, 256, 256, 20, 20, 256, 256],
+  );
+  assertEquals(
+    runScenario(estimateSessionMemory(model)).workspaceBytes,
+    transientPlan.totalBytes,
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -1106,27 +1138,28 @@ Deno.test("行ブロックの枚数は maxStorageBufferBindingSize で変わる�
       .workspaceBytes;
   // 1 行 = 4×16×4 = 256B。上限に余裕があれば 1 枚（4 行）: S 1024 + 行統計 128
   assertEquals(at(WIDE_LIMIT), 512 + 1024 + 128);
-  // 512B → 1 枚 2 行の 2 枚。2 枚目は 1 枚目が返した slot を掴むので総バイトは 1 枚ぶん。
+  // 512B → 1 枚 2 行の 2 枚。2 枚目は 1 枚目が生存を終えた区間を掴むので総バイトは 1 枚ぶん。
   assertEquals(at(512), 512 + 512 + 64);
-  // 256B → 1 枚 1 行の 4 枚。
-  assertEquals(at(256), 512 + 256 + 32);
+  // 256B → 1 枚 1 行の 4 枚に割れるが、出力 o（512B）自体が束縛上限に入らないので計画の
+  // preflight（ADR 0093 決定 5）が数を返さず落とす。
+  assertThrows(() => at(256), ExecutionError, "'o' 512B");
 });
 
-Deno.test("端数で 1 行狭いブロックが混ざるとサイズクラス 2 種類ぶんが乗る", () => {
-  // M=3・上限 512B → 1 枚 2 行で 2 枚（等分は 2 行 + 1 行）。exact-size 再利用なので
-  // 2 枚目の 1 行ぶんは 1 枚目の slot を掴めず、新しい slot が生える。
+Deno.test("端数で 1 行狭いブロックが混ざっても広い枚の区間を配り直すので総和は広い枚 1 枚ぶん", () => {
+  // M=3・上限 512B → 1 枚 2 行で 2 枚（等分は 2 行 + 1 行）。2 枚目の狭い S / 行統計は
+  // 1 枚目が生存を終えた区間を掴む（配り直しはサイズに依らない — ADR 0093 決定 8）ので、
+  // 領域は広い枚の S 512 + 行統計 64 + 出力 o [1,4,3,8]=96 要素 → 384 の 3 本。
   const { prefill } = bothScenarios(
     stateAttentionReport({ capacity: 16, chunkLength: 3, limit: 512 }),
   );
   const wide = 4 * 2 * 16 * 4 + 4 * 2 * 2 * 4; // 512 + 64
-  const narrow = 4 * 1 * 16 * 4 + 4 * 1 * 2 * 4; // 256 + 32
-  // 出力 o [1,4,3,8]=96 要素 → 384
-  assertEquals(prefill.workspaceBytes, 384 + wide + narrow);
+  assertEquals(prefill.workspaceBytes, 384 + wide);
 });
 
 Deno.test("上限が動かすのは中間だけ（io・state・重みの欄は 1 バイトも動かない）", () => {
   const wide = stateAttentionReport({ capacity: 16, chunkLength: 4 });
-  const narrow = stateAttentionReport({ capacity: 16, chunkLength: 4, limit: 256 });
+  // 512B = 出力 o（512B）が束縛上限に収まる最小の絞り（S は 2 枚に割れる）
+  const narrow = stateAttentionReport({ capacity: 16, chunkLength: 4, limit: 512 });
   assertEquals(wide.resident, narrow.resident);
   assertEquals(
     wide.scenarios.map((scenario) => scenario.ioBytes),
@@ -1316,7 +1349,8 @@ Deno.test({
       capacity: 16,
       heads: 64,
       chunkLength: 5,
-      limitCap: 8192,
+      // 出力 o [1,64,5,8] = 10240B が束縛上限に収まる最小の絞り（S は 1 行 4096B → 2 行 × 3 枚）
+      limitCap: 10240,
       expectedBlocks: 3,
     }),
 });
@@ -1331,7 +1365,8 @@ Deno.test({
       heads: 64,
       window: 8,
       chunkLength: 4,
-      limitCap: 5632,
+      // 出力 o [1,64,4,8] = 8192B が束縛上限に収まる絞り（S は 1 行 64×11×4 = 2816B → 2 行 × 2 枚）
+      limitCap: 8192,
       expectedBlocks: 2,
     }),
 });

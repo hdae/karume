@@ -21,6 +21,53 @@ export class PipelineKeyConflictError extends Error {
   override readonly name = "PipelineKeyConflictError";
 }
 
+/** WGSL の storage 束縛宣言が矛盾している（同じ binding 番号が read と read_write の両方で現れる）。 */
+export class StorageRoleError extends Error {
+  override readonly name = "StorageRoleError";
+}
+
+/**
+ * group 0 の storage 束縛の**役割**（binding 番号 → 読み / 読み書き）。WGSL の
+ * `var<storage, read>` / `var<storage, read_write>` 宣言から機械的に採る（手書きの表を持たない）。
+ *
+ * 使い道は中間バッファの領域計画（src/runtime/transient-plan.ts — ADR 0093 決定 1）: 同じ
+ * dispatch で片方が読まれ他方が書かれる 2 テンソルは同じ GPUBuffer に置けない（WebGPU の usage
+ * scope 検証はバッファ単位で束縛範囲を見ない）。役割を dispatch から採らずに計画側が推測すると、
+ * 推測が外れた dispatch だけが validation で落ちる（例外にならず、出力が全て 0 になる）。
+ */
+export type StorageRoles = {
+  readonly reads: ReadonlySet<number>;
+  readonly writes: ReadonlySet<number>;
+};
+
+const STORAGE_DECLARATION =
+  /@group\(0\)\s*@binding\((\d+)\)\s*var<storage\s*,\s*(read|read_write)\s*>/g;
+
+/**
+ * WGSL から {@link StorageRoles} を採る（純関数）。
+ *
+ * MUST: 宣言の形は `@group(0) @binding(N) var<storage, read|read_write>` の 1 行（codegen / kernels の
+ * 全宣言がこの形 — 2026-09-05 に 157 宣言を数えて確認）。別の書き方（`var<storage>` の既定 read や
+ * 改行を挟む形）を codegen が出し始めるとここが拾えず、その dispatch は「役割不明」として
+ * 計画側で fail loudly になる（{@link SessionPipelines} の消費者が束縛の全件に役割があることを検査する）。
+ */
+export const parseStorageRoles = (wgsl: string): StorageRoles => {
+  const reads = new Set<number>();
+  const writes = new Set<number>();
+  for (const match of wgsl.matchAll(STORAGE_DECLARATION)) {
+    const binding = Number(match[1]);
+    const target = match[2] === "read_write" ? writes : reads;
+    const other = match[2] === "read_write" ? reads : writes;
+    if (other.has(binding)) {
+      throw new StorageRoleError(
+        `WGSL の binding ${binding} が read と read_write の両方で宣言されている`,
+      );
+    }
+    target.add(binding);
+  }
+  return { reads, writes };
+};
+
 /**
  * {@link PipelineCache.get} が返す解決済みの組。layout はパイプラインごとに不変なので、
  * パイプライン生成解決時に `getBindGroupLayout(0)` を 1 回だけ呼んで保持する（毎 dispatch の
@@ -29,6 +76,8 @@ export class PipelineKeyConflictError extends Error {
 type CachedPipeline = {
   readonly pipeline: GPUComputePipeline;
   readonly layout: GPUBindGroupLayout;
+  /** storage 束縛の役割（WGSL から 1 度だけ採る — {@link parseStorageRoles}）。 */
+  readonly roles: StorageRoles;
 };
 
 type CacheEntry = {
@@ -79,6 +128,8 @@ export class PipelineCache {
     // MUST: 失敗したエントリは残さない（残すと同じ拒否 Promise を全員が受け取り続け、
     // 再試行の余地が消える）。この handler は生成時に登録済みなので、待ち手が拒否を
     // 観測するより先に走る = 削除の後に来た get() だけが作り直す。
+    // MUST: 役割は生成の前に採る（宣言の矛盾はコンパイルを待たずに落とす）。
+    const roles = parseStorageRoles(wgsl);
     const resolved = withPipelineScope(
       this.#device,
       `createComputePipeline(${key})`,
@@ -94,7 +145,7 @@ export class PipelineCache {
         // 生成の検出網を二重化する役目を兼ねている（例えば internal エラーで無効化された
         // パイプラインは、ここで立つ派生エラーによっても捕捉され、下の eviction 経路へ落ちる）。
         // スコープの外へ出すとこの偶然の防御が黙って消える。
-        return { pipeline, layout: pipeline.getBindGroupLayout(0) };
+        return { pipeline, layout: pipeline.getBindGroupLayout(0), roles };
       },
     ).catch((cause: unknown) => {
       this.#entries.delete(key);

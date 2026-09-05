@@ -19,7 +19,7 @@ export const gridStrideWorkgroups = (
 /**
  * 1 workgroup = 1 タイルで全域を覆うカーネル（matmul）の dispatch 数。
  * MUST: 上限超過は fail loudly — 縮退させるとタイルが欠落し、例外なしに出力の一部が
- * 未書き込み（プール再利用なら前の値）のまま残る。
+ * 未書き込み（配り直しなら前の値）のまま残る。
  */
 export const tiledWorkgroups = (
   items: number,

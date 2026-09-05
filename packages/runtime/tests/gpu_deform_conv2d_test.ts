@@ -177,8 +177,7 @@ const runBoth = async (
     ): GPUBindGroup => {
       const paramsBuffer = arena.allocHostWritten(params.byteLength, UNIFORM_IN);
       gpu.device.queue.writeBuffer(paramsBuffer, 0, params);
-      const out = arena.allocStorage(Math.max(4, count * 4));
-      arena.retain(out, 0, { pinned: true });
+      const out = arena.allocRegion(Math.max(4, count * 4));
       outputs.push(out);
       return gpu.device.createBindGroup({
         layout,

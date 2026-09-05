@@ -87,17 +87,18 @@ import {
 } from "./plan.ts";
 import {
   assertGenerationRun,
+  bakeAllBindGroups,
   bakeBindGroups,
   type BakedGroups,
   bakeGenerationBindGroups,
-  derivePlanSlots,
   executeBakedPlan,
-  executeStepRecipe,
   type GenerationEncoding,
   type GenerationLimits,
-  type PlanSlots,
+  planRecipes,
   type StepRecipe,
+  type ValueBinding,
 } from "./recipe.ts";
+import type { TransientLimits, TransientPlan } from "./transient-plan.ts";
 import { RecipeBuilder } from "./recipe-builder.ts";
 import {
   assertWeightsWithinLimits,
@@ -234,6 +235,10 @@ const hostTensor = (
 /** MUST: `queue.writeBuffer` で書くバッファはプール外（アリーナの不変条件）。 */
 const HOST_WRITTEN_USAGE = BUFFER_USAGE.STORAGE | BUFFER_USAGE.COPY_DST |
   BUFFER_USAGE.COPY_SRC;
+
+/** run 末尾に生存している中間 = pin されたグラフ出力の総バイト数（`ArenaStats.transientBytes`）。 */
+const pinnedBytes = (plan: TransientPlan): number =>
+  [...plan.pinned].reduce((total, slot) => total + plan.slots[slot].byteLength, 0);
 
 /**
  * 発行時点で固定した入力の束（{@link captureInputs} の成果物）。実行本体が読むのは**この写し
@@ -674,10 +679,10 @@ type ActiveBacking = {
    */
   readonly build: number;
   /**
-   * transient slot の常駐バイト数（**入力バッファは含まない**）。
-   * MUST: この定義を変えない — 「slot 表の総バイト数 = 非 backed run のプール確保」という
-   * footprint 不変の門（tests/gpu_plan_backing_test.ts）がこの値そのもので、入力ぶんを混ぜると
-   * 門が観測しているものが変わる（入力は signature ごとに固定サイズで、slot に比べれば桁が違う）。
+   * 中間バッファの常駐バイト数 = 計画の領域の総和（**入力バッファは含まない**）。
+   * MUST: この定義を変えない — 「backed の領域総和 = ミス run の領域確保」という footprint 不変の
+   * 門（tests/gpu_plan_backing_test.ts）がこの値そのもので（同じ計画を使うので恒等 — ADR 0093
+   * 決定 6）、入力ぶんを混ぜると門が観測しているものが変わる。
    */
   readonly bytes: number;
   /**
@@ -697,27 +702,23 @@ type ActiveBacking = {
    */
   readonly groups: BakedGroups;
   /**
-   * slot 表と slot 添字 → 常駐バッファ。**context 側の焼き込みが同じ値解決を再現する**ための
+   * 計画と領域添字 → 常駐領域バッファ。**context 側の焼き込みが同じ値解決を再現する**ための
    * 材料で、Session 側の焼き込み（構築時 1 度）にはもう要らない。
    * MUST: 焼き込みに使ったものをそのまま持つ（作り直して渡すと、2 つの焼き込みが別々の実体を
    * 束ねうる）。
    */
-  readonly slots: PlanSlots;
-  readonly buffers: readonly GPUBuffer[];
-  /** グラフ出力名 → 実体（読み戻し先 — 構築時に確定。backed run は env を組まない）。 */
-  readonly outputs: ReadonlyMap<string, GPUBuffer>;
+  readonly plan: TransientPlan;
+  readonly regions: readonly GPUBuffer[];
   /**
-   * backing が所有する全バッファ（slot + **通常入力** — 破棄と readback 適格判定の分岐に使う）。
+   * グラフ出力名 → 束縛先（読み戻し先 — 構築時に確定。backed run は env を組まない）。
+   * readback の適格（pin された slot / 入力の別名）は {@link ValueBinding.readable} が持つ。
+   */
+  readonly outputs: ReadonlyMap<string, ValueBinding>;
+  /**
+   * backing が所有する全バッファ（領域 + **通常入力** — 退役時の破棄に使う）。
    * MUST: 常駐入力の実体は含めない — 所有者は GpuContext 側で、寿命は Session を跨ぐ。
    */
   readonly owned: ReadonlySet<GPUBuffer>;
-  /**
-   * readback を許す唯一の集合 = pin された slot + 入力バッファ。
-   * MUST: 入力を含める — グラフ出力が入力の別名になる形（reshape(入力)）では読み戻し先が
-   * 入力バッファそのものになる。非 backed 経路の入力はプール外（`allocHostWritten`）で
-   * `RunArena.isReadable` が素通しにしていたので、これはその同値の再現。
-   */
-  readonly readable: ReadonlySet<GPUBuffer>;
 };
 
 /**
@@ -741,7 +742,7 @@ type PlannedCopy = {
 
 /** 写し元まで解決した `copyOutputs` 1 件（{@link Session.#resolveCopyOutputs}）。 */
 type ResolvedCopy = {
-  readonly source: GPUBuffer;
+  readonly source: ValueBinding;
   readonly target: GPUBuffer;
   readonly size: number;
 };
@@ -812,6 +813,11 @@ type SessionState = {
    */
   readonly cache: SessionPipelines;
   readonly scheduler: SubmitScheduler;
+  /**
+   * 中間バッファ計画の上限（device の granted 値 — ADR 0093 決定 1）。計画は Session 構築後に
+   * 変わらない値だけを見るので、ここで 1 度固定する。
+   */
+  readonly transientLimits: TransientLimits;
   readonly weights: RunArena;
   readonly weightBuffers: ReadonlyMap<string, GPUBuffer>;
   /**
@@ -1323,6 +1329,11 @@ export class Session {
       // 全て初回 run のミス経路（RecipeBuilder）= ロックの内側で起きる。
       cache: new SessionPipelines(gpu[RUNTIME_INTERNAL].pipelines()),
       scheduler,
+      transientLimits: {
+        maxBufferSize: gpu.limits.maxBufferSize,
+        maxStorageBufferBindingSize: gpu.limits.maxStorageBufferBindingSize,
+        offsetAlignment: gpu.device.limits.minStorageBufferOffsetAlignment,
+      },
       weights,
       weightBuffers,
       paramsCache: new Map(),
@@ -1812,6 +1823,8 @@ export class Session {
         // 活性化した slot backing（ミス run では undefined のまま）。readback の適格判定が
         // 「その実体が pin された slot か」を見るため、エンコード区間の外まで持ち越す。
         let backing: ActiveBacking | undefined;
+        // ミス run の値名 → 束縛先（読み戻し先）。backing run は backing.outputs を使う。
+        let missValues: ReadonlyMap<string, ValueBinding> | undefined;
         // この run が backing を新規構築したか（失敗時の回復規律 — 下の catch が読む）。
         let builtBacking = false;
         // 単一フェンス経路で run 本体のコマンド列へ積んだ読み戻し（undefined = 二段待ち経路）。
@@ -1895,7 +1908,7 @@ export class Session {
             // 後で取ると、積んだ瞬間の自動 submit を数え損ねて「submit したのに poison
             // しない」= 沈黙破壊になる。逆向きの誤差（積む前の時間予算 submit を数えて
             // しまう過剰 poison）は新しい context で復旧できる安全側。
-            // MUST: 2 経路（アリーナ / 焼き込み）で**同じ位置**から呼ぶ。ずらすと同じグラフの
+            // MUST: ミス run / ヒット run で**同じ位置**から呼ぶ。ずらすと同じグラフの
             // 同じ失敗が、ミス run では poison しヒット run ではしない（またはその逆）になる。
             const noteStateWrite = (recipe: StepRecipe): void => {
               if (recipe.writesState && stateWriteSubmits === undefined) {
@@ -1903,12 +1916,31 @@ export class Session {
               }
             };
             if (backing === undefined) {
-              const run = { device, scheduler, arena, env, generation: encoding };
-              for (const recipe of recipes) {
-                noteStateWrite(recipe);
-                executeStepRecipe(recipe, run);
-              }
-              arena.assertDrained();
+              // ミス run も backing と同じ計画で回す（ADR 0093 決定 3）: 領域を run 寿命で確保し、
+              // 全 dispatch の bind group をここで組む。
+              const plan = planRecipes(recipes, this.#state.transientLimits);
+              const regions = plan.regions.map((bytes) => arena.allocRegion(bytes));
+              const baked = bakeAllBindGroups(
+                recipes,
+                { device, plan, regions, inputs: env },
+                encoding,
+              );
+              missValues = baked.values;
+              arena.recordTransients({
+                reuseCount: plan.sharedSlots,
+                transientBytes: pinnedBytes(plan),
+                peakTransientBytes: plan.peakLiveBytes,
+              });
+              executeBakedPlan(
+                recipes,
+                baked.groups,
+                scheduler,
+                generationFace === undefined ? undefined : {
+                  groups: baked.groups,
+                  encoding: generationFace.encoding,
+                  onStep: noteStateWrite,
+                },
+              );
             } else {
               // slot 経路。積むコマンド列はアリーナ経路と同一で、bind 先の実体が run を跨いで
               // 固定されるだけ（前 run の残骸が残っていてよい根拠は full-write — ADR 0014）。
@@ -1931,11 +1963,11 @@ export class Session {
               // 別 submit にすると submit が 2 本に割れ、mapAsync が「先行 dispatch の完了」を
               // 含意しなくなる（含意の根拠は同一キューでの発行順）。
               staged = this.#stageOutputs(
-                backing?.outputs ?? env,
+                this.#runValues(backing, missValues),
                 shapes,
                 arena,
-                backing,
-                (source, size, staging) => scheduler.copyBuffer(source, 0, staging, 0, size),
+                (source, size, staging) =>
+                  scheduler.copyBuffer(source.buffer, source.offset ?? 0, staging, 0, size),
               );
               // フェンスを張らずに出し切る。待ちは下の mapAsync 1 本に集約される。
               scheduler.submitPending();
@@ -1964,7 +1996,7 @@ export class Session {
 
           // backed run は env を組まない（読み戻し先は焼き込み時に確定した写像）。
           outputs = staged === undefined
-            ? await this.#readOutputs(backing?.outputs ?? env, shapes, arena, backing)
+            ? await this.#readOutputs(this.#runValues(backing, missValues), shapes, arena)
             : await this.#finishStagedRead(staged);
           this.#lastRun = arena.stats;
           this.#lastRunParams = this.#recipeBuilder.paramsStats;
@@ -2146,7 +2178,13 @@ export class Session {
       // 読む」の根拠）。写し先が同じ enqueue の常駐入力を兼ねる形（ループの状態更新）も、
       // 読む dispatch が全て先に積まれているので正しい。
       for (const write of writes) {
-        scheduler.copyBuffer(write.source, 0, write.target, 0, write.size);
+        scheduler.copyBuffer(
+          write.source.buffer,
+          write.source.offset ?? 0,
+          write.target,
+          0,
+          write.size,
+        );
       }
       // MUST: 末尾で必ず submit する。以後の `queue.writeBuffer`（次の enqueue の入力書き込み）は
       // queue timeline へ issue 順に載るので先行 dispatch を追い越さない — 追い越すのは
@@ -2226,7 +2264,7 @@ export class Session {
         );
       }
       const target = copy.target[RUNTIME_INTERNAL].buffer;
-      if (source === target) {
+      if (source.buffer === target) {
         throw new ExecutionError(
           `copyOutputs '${copy.name}': 写し元と写し先が同じバッファ（常駐テンソル ` +
             `'${copy.target.label}'）— グラフ出力がその常駐入力の別名（reshape / 恒等 expand）に` +
@@ -2364,12 +2402,11 @@ export class Session {
    * ため、囲まないと「無効な slot / bind group に dispatch が書く」沈黙故障になる。
    * MUST: 確保から `this.#backing` への代入（= 所有権の確立）までを try/catch で囲み、途中の
    * 同期例外では確保済みを `#retired` へ回す。この窓で漏れた実体は `#retireBacking()` からも
-   * `Session.dispose()` からも到達できず、しかも量はこの Session で最大（slot 表の総バイト）に
+   * `Session.dispose()` からも到達できず、しかも量はこの Session で最大（領域の総和）に
    * なる（ADR 0004「確保と破棄を 1 箇所へ」は失敗経路でも保つ）。
-   * NOTE: run 経路のレシピ列は必ず 1 度アリーナ経路で完走している（run は**ヒット run でしか**
-   * backing を作らない）ので、参照計数が閉じることは `assertDrained` が確かめ済み。
-   * `#enqueueOnce` は MUST として**初回から** backing を作るのでその前提は成り立たないが、
-   * 破れは `derivePlanSlots` 自身の参照計数検査（負値で即 throw）が受け持つ。
+   * NOTE: run 経路のレシピ列は必ず 1 度ミス run で同じ計画（`planRecipes`）を通っている（run は
+   * **ヒット run でしか** backing を作らない）。`#enqueueOnce` は MUST として**初回から** backing を
+   * 作るが、どちらも参照計数の破れは計画自身の閉包検査（負値 / 解放漏れで即 throw）が受け持つ。
    */
   #activateBacking(
     key: string,
@@ -2383,15 +2420,15 @@ export class Session {
     this.#retireBacking();
     const graph = this.#state.graph;
     const device = this.#state.gpu.device;
-    const slots = derivePlanSlots(recipes);
+    const plan = planRecipes(recipes, this.#state.transientLimits);
     // 所有権が確立する（`this.#backing` への代入）までの確保物と retain 済み常駐入力。
     // 途中で同期例外が出たら catch がここから回収する。
-    const buffers: GPUBuffer[] = [];
+    const regions: GPUBuffer[] = [];
     const ownedInputs: GPUBuffer[] = [];
     const retained: ResidentTensor[] = [];
     try {
-      for (const size of slots.bytes) {
-        buffers.push(device.createBuffer({ size, usage: STORAGE_USAGE }));
+      for (const size of plan.regions) {
+        regions.push(device.createBuffer({ size, usage: STORAGE_USAGE }));
       }
       // 通常入力のバッファは backing 所有にする（run ごとの確保と writeBuffer 先の入れ替わりを
       // 消す）。常駐入力は GpuContext 所有の実体をそのまま束ね、**所有しない**。
@@ -2409,13 +2446,13 @@ export class Session {
           return [spec.name, buffer];
         }),
       );
-      const baked = bakeBindGroups(recipes, slots, { device, buffers, inputs });
+      const baked = bakeBindGroups(recipes, { device, plan, regions, inputs });
       // 読み戻し先はここで確定する。initializer がグラフ出力になる形（IR が許す）は値名の
       // 写像に載らないので、`#readOutputs` 側の重みフォールバックがそのまま受け持つ。
-      const outputs = new Map<string, GPUBuffer>();
+      const outputs = new Map<string, ValueBinding>();
       for (const name of graph.outputs) {
-        const buffer = baked.values.get(name);
-        if (buffer !== undefined) outputs.set(name, buffer);
+        const value = baked.values.get(name);
+        if (value !== undefined) outputs.set(name, value);
       }
       const residents = [...residentInputs.values()];
       // MUST: 焼き込みの参照は backing が生きている間ずっと積んでおく（退役で返す）。これが
@@ -2431,18 +2468,14 @@ export class Session {
       const backing: ActiveBacking = {
         key,
         build,
-        bytes: slots.bytes.reduce((total, size) => total + size, 0),
+        bytes: plan.totalBytes,
         inputs,
         residents,
         groups: baked.groups,
-        slots,
-        buffers,
+        plan,
+        regions,
         outputs,
-        owned: new Set([...buffers, ...ownedInputs]),
-        readable: new Set([
-          ...[...slots.pinned].map((slot) => buffers[slot]),
-          ...inputs.values(),
-        ]),
+        owned: new Set([...regions, ...ownedInputs]),
       };
       this.#backing = backing;
       this.#backingBuilds = build;
@@ -2452,7 +2485,7 @@ export class Session {
       // ここで destroy すると破棄の担い手が 2 つになる（ADR 0004）。この時点では bind group を
       // 使う dispatch が 1 本も積まれていない（`#activateBacking` は dispatch より前）ので、
       // 後始末点での破棄が submit 済みコマンドを壊すことはない。
-      for (const buffer of buffers) this.#retired.push(buffer);
+      for (const buffer of regions) this.#retired.push(buffer);
       for (const buffer of ownedInputs) this.#retired.push(buffer);
       for (const resident of retained) resident[RUNTIME_INTERNAL].releaseBaked();
       throw cause;
@@ -2484,11 +2517,11 @@ export class Session {
     const internals = face.context[RUNTIME_INTERNAL];
     const cached = internals.bakedGroups(backing.build);
     if (cached !== undefined) return cached;
-    const groups = bakeGenerationBindGroups(recipes, backing.slots, {
+    const groups = bakeGenerationBindGroups(recipes, {
       device: this.#state.gpu.device,
-      // MUST: backing が焼き込みに使ったものをそのまま渡す（同じ値解決の再現 —
-      // {@link bakeGenerationBindGroups}）。
-      buffers: backing.buffers,
+      // MUST: Session 側の焼き込みと同じ計画・同じ領域・同じ入力（作り直さない）。
+      plan: backing.plan,
+      regions: backing.regions,
       inputs: backing.inputs,
       generation: face.encoding,
     });
@@ -2652,40 +2685,42 @@ export class Session {
   }
 
   /**
-   * 読み戻してよい実体か。
-   *
-   * MUST: slot backing の実体は **pin された slot だけ**（グラフ出力として確保され、プールへ
-   * 返らない slot）。他の slot は run 中に別の値へ配り直されるので、非 backed run で
-   * `RunArena.isReadable` が中間値を拒むのと同じ規律をここで保つ — backing のバッファは
-   * アリーナの所有外なので、放置すると `isReadable` が「プール対象外」として素通しにする。
+   * 読み戻し先の表（backing run は構築時に確定した出力の写像・ミス run は組んだ束縛先）。
+   * 読み戻してよいかは {@link ValueBinding.readable}（pin された slot と slot でない値だけ）が
+   * 持ち、ミス run / ヒット run で判定を 2 本持たない。
    */
-  #isReadable(buffer: GPUBuffer, arena: RunArena, backing: ActiveBacking | undefined): boolean {
-    if (backing !== undefined && backing.owned.has(buffer)) return backing.readable.has(buffer);
-    return arena.isReadable(buffer);
+  #runValues(
+    backing: ActiveBacking | undefined,
+    missValues: ReadonlyMap<string, ValueBinding> | undefined,
+  ): ReadonlyMap<string, ValueBinding> {
+    const values = backing?.outputs ?? missValues;
+    if (values === undefined) throw new ExecutionError("run の束縛先が組まれていない");
+    return values;
   }
 
   /**
    * グラフ出力ごとに staging を確保し、そこへの copy を `copy` に積ませる（**同期**）。
    *
-   * MUST: 読み戻すのはグラフ出力のみ。中間値はプール再利用で内容が入れ替わっている。
+   * MUST: 読み戻すのはグラフ出力のみ。中間値は配り直しで内容が入れ替わっている。
    * NOTE: 積み先を引数に取るのは、単一フェンス経路（run 本体のコマンド列 —
    * {@link SubmitScheduler.copyBuffer}）と二段待ち経路（readback 専用 encoder）で**積む先だけ**
    * が違うため。staging の作り方と読み戻し適格の判定を経路ごとに 2 本持たない。
    */
   #stageOutputs(
-    env: ReadonlyMap<string, GPUBuffer>,
+    env: ReadonlyMap<string, ValueBinding>,
     shapes: ReadonlyMap<string, readonly number[]>,
     arena: RunArena,
-    backing: ActiveBacking | undefined,
-    copy: (source: GPUBuffer, size: number, staging: GPUBuffer) => void,
+    copy: (source: ValueBinding, size: number, staging: GPUBuffer) => void,
   ): readonly StagedOutput[] {
     const staged: StagedOutput[] = [];
     for (const name of this.#state.graph.outputs) {
       // MUST: initializer も引く。IR は graph.outputs に initializer 名を書くことを許して
       // おり（format/ir.ts の定義済み検査）、その値は env（run 寿命）には載らない。
-      const buffer = env.get(name) ?? this.#state.weightBuffers.get(name);
+      const weight = this.#state.weightBuffers.get(name);
+      const buffer = env.get(name) ??
+        (weight === undefined ? undefined : { buffer: weight, readable: true });
       if (buffer === undefined) throw new ExecutionError(`グラフ出力 '${name}' のバッファが無い`);
-      if (!this.#isReadable(buffer, arena, backing)) {
+      if (!buffer.readable) {
         throw new ExecutionError(`グラフ出力 '${name}' がピン留めされておらず読み戻せない`);
       }
       const shape = resolvedShape(shapes, name);
@@ -2754,10 +2789,9 @@ export class Session {
    * `onSubmittedWorkDone` に続く 2 本目になる。
    */
   async #readOutputs(
-    env: ReadonlyMap<string, GPUBuffer>,
+    env: ReadonlyMap<string, ValueBinding>,
     shapes: ReadonlyMap<string, readonly number[]>,
     arena: RunArena,
-    backing: ActiveBacking | undefined,
   ): Promise<RunOutputs> {
     const device = this.#state.gpu.device;
     // MUST: この copy → submit も errorScope に入れる（run 本体のスコープは pop 済みで、
@@ -2774,8 +2808,8 @@ export class Session {
         env,
         shapes,
         arena,
-        backing,
-        (source, size, staging) => encoder.copyBufferToBuffer(source, 0, staging, 0, size),
+        (source, size, staging) =>
+          encoder.copyBufferToBuffer(source.buffer, source.offset ?? 0, staging, 0, size),
       );
       device.queue.submit([encoder.finish()]);
 

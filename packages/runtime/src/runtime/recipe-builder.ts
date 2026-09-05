@@ -250,6 +250,7 @@ import {
   WHERE_OP,
 } from "../ops.ts";
 import { type ExecStep, type FusedOperand, type FusedStep, planRowBlocks } from "./fusion.ts";
+import type { StorageRoles } from "../gpu/pipeline-cache.ts";
 import { ExecutionError, type NodePlan } from "./plan.ts";
 import {
   type BindingRecipe,
@@ -354,6 +355,7 @@ type AttentionStagePipeline = {
   readonly key: string;
   readonly pipeline: GPUComputePipeline;
   readonly layout: GPUBindGroupLayout;
+  readonly roles: StorageRoles;
 };
 
 /**
@@ -456,11 +458,11 @@ export class RecipeBuilder {
    * 実行ステップ 1 つ（素のノード または 融合ステップ）のレシピ。
    *
    * MUST: 確保 → retain → 本体 → 入力の release（延べ）→ 定義ぶんの release、という簿記は
-   * 両者で**1 本**に閉じる（実行側は {@link executeStepRecipe}）。融合ごとに手書きの解放簿記を
-   * 置くと、アリーナの参照計数が融合の本数だけ別実装になり、1 本でもずれると例外なしの
-   * 沈黙誤値になる（早すぎる解放ならプール再利用で値が化け、多すぎれば peak が落ちない）。
+   * 両者で**1 本**に閉じる（再生側は src/runtime/transient-plan.ts）。融合ごとに手書きの解放簿記を
+   * 置くと、計画の参照計数が融合の本数だけ別実装になり、1 本でもずれると例外なしの
+   * 沈黙誤値になる（早すぎる解放なら配り直しで値が化け、多すぎれば peak が落ちない）。
    * MUST: 出力列は**出力 slot 昇順**で組む（{@link StepRecipe.outputs} の順序規約 — 実行・
-   * slot 導出・焼き込みと共有する 1 本）。融合ステップは単一出力（fusion.ts の窓ガード）。
+   * 計画・焼き込みと共有する 1 本）。融合ステップは単一出力（fusion.ts の窓ガード）。
    */
   async #buildStep(
     step: ExecStep,
@@ -532,7 +534,7 @@ export class RecipeBuilder {
    * bind 面の既定は「params, 入力…, 出力」（融合 4 ルール共通）で、`operands` を宣言した
    * ルールだけがステップ内一時を混ぜた並びを取る。**一時の確保・解放は
    * {@link StepRecipeBuilder} に replay させる**（寿命の導出点を 2 つに増やさない）ので、
-   * 実行相の簿記は素のノードと同じ 1 本（{@link executeStepRecipe}）に閉じたままになる。
+   * 計画の簿記は素のノードと同じ 1 本（src/runtime/transient-plan.ts の再生）に閉じたままになる。
    *
    * MUST: {@link FusedStep} は**単一出力**（fusion.ts の窓ガードが契約の出力数 1 を要求する）
    * なので、`{ kind: "output" }` が指すのは常に `outs[0]`。多出力の融合を入れるなら、
@@ -568,7 +570,10 @@ export class RecipeBuilder {
       for (const [id, temp] of step.temps.entries()) {
         if (temp.allocBefore === index) temps[id] = builder.allocTemp(temp.byteLength);
       }
-      const { pipeline, layout } = await this.#state.cache.get(dispatch.key, dispatch.wgsl());
+      const { pipeline, layout, roles } = await this.#state.cache.get(
+        dispatch.key,
+        dispatch.wgsl(),
+      );
       const params = this.#writeParams(
         dispatch.params,
         dispatch.paramsStorage === true ? PARAMS_STORAGE_USAGE : PARAMS_UNIFORM_USAGE,
@@ -583,6 +588,7 @@ export class RecipeBuilder {
         key: dispatch.key,
         pipeline,
         layout,
+        roles,
         params,
         bindings: operands.map((operand, slot) => ({
           binding: slot + 1,
@@ -592,7 +598,7 @@ export class RecipeBuilder {
           ? workgroups.counts
           : [gridStrideWorkgroups(workgroups.items, workgroups.size, limit), 1, 1],
       });
-      // MUST: 同一境界の解放は確保の逆順（{@link executeStepRecipe} と同じ LIFO）。
+      // MUST: 同一境界の解放は確保の逆順（計画の再生と同じ順）。
       for (let id = step.temps.length - 1; id >= 0; id -= 1) {
         if (step.temps[id].releaseAfter === index) builder.releaseTemp(temps[id]);
       }
@@ -600,7 +606,7 @@ export class RecipeBuilder {
   }
 
   /**
-   * 素のノード 1 つの本体（確保・retain・解放は {@link executeStepRecipe} が済ませる）。
+   * 素のノード 1 つの本体（確保・retain・解放は計画の再生が済ませる）。
    *
    * MUST: op 別ビルダは**出力列**（`outs` — 出力 slot 昇順）を受け、単一出力のカーネルは
    * `outs[0]` だけを書く（ADR 0068 決定 1）。多出力 op はスロットを明示して自分の列を書く。
@@ -740,7 +746,7 @@ export class RecipeBuilder {
         break;
       default: {
         // MUST: 未処理の kind をここで止める。switch が素通りすると出力バッファに 1 バイトも
-        // 書かれないまま次のノードへ進み、プール再利用の残骸がそのまま値になる
+        // 書かれないまま次のノードへ進み、配り直しの残骸がそのまま値になる
         // （full-write 不変条件の破れ — ADR 0014）。型としては到達不能で、op を足したときの
         // 結線漏れをコンパイル時に赤くするのがこの分岐の役目。
         const unhandled: never = step.contract;
@@ -763,7 +769,7 @@ export class RecipeBuilder {
       ? { op: CAST_OP, rank, dtype: element.dtype, to: element.to }
       : { op: element.op, rank, dtype: element.dtype };
     const key = elementwiseKey(spec);
-    const { pipeline, layout } = await this.#state.cache.get(key, elementwiseWgsl(spec));
+    const { pipeline, layout, roles } = await this.#state.cache.get(key, elementwiseWgsl(spec));
     // attrs のスカラ（clamp の min/max など）は params の末尾に f32 で載る（並びは契約表）。
     const params = this.#writeParams(
       elementwiseParams(
@@ -783,6 +789,7 @@ export class RecipeBuilder {
       key,
       pipeline,
       layout,
+      roles,
       params,
       bindings: [
         ...binds.map((source, index) => ({ binding: index + 1, source })),
@@ -816,7 +823,7 @@ export class RecipeBuilder {
     const lastDim = axis === inputShape.length - 1;
     const outCount = numel(step.outputs[0].shape);
     const key = lastDim ? reduceKey(spec) : axisReduceKey(spec);
-    const { pipeline, layout } = await this.#state.cache.get(
+    const { pipeline, layout, roles } = await this.#state.cache.get(
       key,
       lastDim ? reduceWgsl(spec) : axisReduceWgsl(spec),
     );
@@ -838,6 +845,7 @@ export class RecipeBuilder {
       key,
       pipeline,
       layout,
+      roles,
       params,
       bindings: [{ binding: 1, source: binds[0] }, { binding: 2, source: outs[0] }],
       workgroups: [groups, 1, 1],
@@ -862,7 +870,7 @@ export class RecipeBuilder {
     const inputShape = step.inputShapes[0];
     const dim = inputShape[inputShape.length - 1];
     const rows = numel(inputShape.slice(0, -1));
-    const { pipeline, layout } = await this.#state.cache.get(ARGMAX_KEY, ARGMAX_WGSL);
+    const { pipeline, layout, roles } = await this.#state.cache.get(ARGMAX_KEY, ARGMAX_WGSL);
     const params = this.#writeParams(argmaxParams(rows, dim), PARAMS_UNIFORM_USAGE);
     // 1 行 = 1 workgroup。上限を超えたら縮退させ、カーネル側の行 grid-stride で回す。
     const groups = gridStrideWorkgroups(
@@ -874,6 +882,7 @@ export class RecipeBuilder {
       key: ARGMAX_KEY,
       pipeline,
       layout,
+      roles,
       params,
       bindings: [{ binding: 1, source: binds[0] }, { binding: 2, source: outs[0] }],
       workgroups: [groups, 1, 1],
@@ -908,7 +917,7 @@ export class RecipeBuilder {
     const k = topkK(step.node.attrs, where);
     assertTopkK(k, this.#state.gpu.limits.maxComputeWorkgroupStorageSize, where);
     const key = topkKey(k);
-    const { pipeline, layout } = await this.#state.cache.get(key, topkWgsl(k));
+    const { pipeline, layout, roles } = await this.#state.cache.get(key, topkWgsl(k));
     const params = this.#writeParams(topkParams(rows, dim), PARAMS_UNIFORM_USAGE);
     // 1 行 = 1 workgroup。上限を超えたら縮退させ、カーネル側の行 grid-stride で回す。
     const groups = gridStrideWorkgroups(
@@ -920,6 +929,7 @@ export class RecipeBuilder {
       key,
       pipeline,
       layout,
+      roles,
       params,
       bindings: [
         { binding: 1, source: binds[0] },
@@ -943,7 +953,7 @@ export class RecipeBuilder {
     const shape = step.outputs[0].shape;
     const dim = shape[shape.length - 1];
     const rows = numel(shape.slice(0, -1));
-    const { pipeline, layout } = await this.#state.cache.get(CUMSUM_KEY, CUMSUM_WGSL);
+    const { pipeline, layout, roles } = await this.#state.cache.get(CUMSUM_KEY, CUMSUM_WGSL);
     const params = this.#writeParams(cumsumParams(rows, dim), PARAMS_UNIFORM_USAGE);
     const groups = gridStrideWorkgroups(
       rows,
@@ -954,6 +964,7 @@ export class RecipeBuilder {
       key: CUMSUM_KEY,
       pipeline,
       layout,
+      roles,
       params,
       bindings: [{ binding: 1, source: binds[0] }, { binding: 2, source: outs[0] }],
       workgroups: [groups, 1, 1],
@@ -996,7 +1007,7 @@ export class RecipeBuilder {
     // 要素型はキーに載る（bool マスク / i32 添字の expand が実測にある — ADR 0009）。
     const spec = { dtype: step.outputs[0].dtype };
     const key = stridedKey(spec);
-    const { pipeline, layout } = await this.#state.cache.get(key, stridedWgsl(spec));
+    const { pipeline, layout, roles } = await this.#state.cache.get(key, stridedWgsl(spec));
     const params = this.#writeParams(
       stridedParams(outShape, srcStrides, offset),
       PARAMS_STORAGE_USAGE,
@@ -1010,6 +1021,7 @@ export class RecipeBuilder {
       key,
       pipeline,
       layout,
+      roles,
       params,
       bindings: [{ binding: 1, source: binds[0] }, { binding: 2, source: outs[0] }],
       workgroups: [groups, 1, 1],
@@ -1021,7 +1033,7 @@ export class RecipeBuilder {
    * 入力は連続で読み、出力へ `(offset, 出力の連続 strides)` で書く（読み族の双対）。
    *
    * MUST: 書き出し位置の総和が連結軸の長さとちょうど一致することを確かめる（full-write）。
-   * 一致しなければ出力のどこかが**未書き込みのまま**残り、プール再利用なら前の値がそのまま
+   * 一致しなければ出力のどこかが**未書き込みのまま**残り、配り直しなら前の値がそのまま
    * 結果になる。契約の shape 規則（軸長 = 入力の軸長の総和）と同じ事実をエンコード側の
    * 積み上げからも確かめる形で、片方だけの誤りを内部矛盾として落とす。
    */
@@ -1037,7 +1049,7 @@ export class RecipeBuilder {
     const outStrides = catOutStrides(outShape);
     const spec = { dtype: step.outputs[0].dtype };
     const key = stridedWriteKey(spec);
-    const { pipeline, layout } = await this.#state.cache.get(key, stridedWriteWgsl(spec));
+    const { pipeline, layout, roles } = await this.#state.cache.get(key, stridedWriteWgsl(spec));
     let written = 0;
     for (const [index, source] of binds.entries()) {
       const srcShape = step.inputShapes[index];
@@ -1054,6 +1066,7 @@ export class RecipeBuilder {
         key,
         pipeline,
         layout,
+        roles,
         params,
         bindings: [{ binding: 1, source }, { binding: 2, source: outs[0] }],
         workgroups: [groups, 1, 1],
@@ -1082,7 +1095,7 @@ export class RecipeBuilder {
     const srcShape = step.inputShapes[0];
     const outShape = step.outputs[0].shape;
     const { left, right } = padAttrs(step.node.attrs, `nodes (${step.node.op})`);
-    const { pipeline, layout } = await this.#state.cache.get(PAD_KEY, PAD_WGSL);
+    const { pipeline, layout, roles } = await this.#state.cache.get(PAD_KEY, PAD_WGSL);
     const params = this.#writeParams(
       padParams(numel(srcShape.slice(0, -1)), srcShape[srcShape.length - 1], left, right),
       PARAMS_UNIFORM_USAGE,
@@ -1096,6 +1109,7 @@ export class RecipeBuilder {
       key: PAD_KEY,
       pipeline,
       layout,
+      roles,
       params,
       bindings: [{ binding: 1, source: binds[0] }, { binding: 2, source: outs[0] }],
       workgroups: [groups, 1, 1],
@@ -1114,7 +1128,7 @@ export class RecipeBuilder {
   ): Promise<void> {
     const shape = step.outputs[0].shape;
     const dim = flipDim(step.node.attrs, `nodes (${step.node.op})`);
-    const { pipeline, layout } = await this.#state.cache.get(FLIP_KEY, FLIP_WGSL);
+    const { pipeline, layout, roles } = await this.#state.cache.get(FLIP_KEY, FLIP_WGSL);
     const params = this.#writeParams(
       // MUST: 軸の前後で分ける（`slice(0, dim)` と `slice(dim + 1)`）。境界を 1 つずらすと
       // 反転する軸が隣にずれ、shape も要素数も変わらないまま値だけが誤る。
@@ -1130,6 +1144,7 @@ export class RecipeBuilder {
       key: FLIP_KEY,
       pipeline,
       layout,
+      roles,
       params,
       bindings: [{ binding: 1, source: binds[0] }, { binding: 2, source: outs[0] }],
       workgroups: [groups, 1, 1],
@@ -1152,7 +1167,7 @@ export class RecipeBuilder {
     const [x, weight] = step.inputShapes;
     const outShape = step.outputs[0].shape;
     const { padding } = deformConv2dAttrs(step.node.attrs, `nodes (${step.node.op})`);
-    const { pipeline, layout } = await this.#state.cache.get(
+    const { pipeline, layout, roles } = await this.#state.cache.get(
       DEFORM_CONV2D_KEY,
       DEFORM_CONV2D_WGSL,
     );
@@ -1181,6 +1196,7 @@ export class RecipeBuilder {
       key: DEFORM_CONV2D_KEY,
       pipeline,
       layout,
+      roles,
       params,
       bindings: [
         ...binds.map((source, index) => ({ binding: index + 1, source })),
@@ -1207,7 +1223,7 @@ export class RecipeBuilder {
   ): Promise<void> {
     const direction = step.node.op === "gru_scan_reverse" ? "reverse" : "forward";
     const key = gruScanKey(direction);
-    const { pipeline, layout } = await this.#state.cache.get(key, gruScanWgsl(direction));
+    const { pipeline, layout, roles } = await this.#state.cache.get(key, gruScanWgsl(direction));
     const [time, batch, hidden] = step.outputs[0].shape;
     const params = this.#writeParams(
       gruScanParams({ time, batch, hidden }),
@@ -1217,6 +1233,7 @@ export class RecipeBuilder {
       key,
       pipeline,
       layout,
+      roles,
       params,
       bindings: [
         ...binds.map((source, index) => ({ binding: index + 1, source })),
@@ -1243,7 +1260,7 @@ export class RecipeBuilder {
   ): Promise<void> {
     const srcShape = step.inputShapes[0];
     const outShape = step.outputs[0].shape;
-    const { pipeline, layout } = await this.#state.cache.get(
+    const { pipeline, layout, roles } = await this.#state.cache.get(
       UPSAMPLE_BILINEAR2D_KEY,
       UPSAMPLE_BILINEAR2D_WGSL,
     );
@@ -1266,6 +1283,7 @@ export class RecipeBuilder {
       key: UPSAMPLE_BILINEAR2D_KEY,
       pipeline,
       layout,
+      roles,
       params,
       bindings: [{ binding: 1, source: binds[0] }, { binding: 2, source: outs[0] }],
       workgroups: [groups, 1, 1],
@@ -1287,7 +1305,7 @@ export class RecipeBuilder {
     // MUST: タイル幾何は行数 M のバケット（src/kernels/gemm-geometry.ts）。キー・WGSL・
     // dispatch の 3 つに**同じ m** を通す — 1 つでも渡し忘れると出力タイルが静かに欠ける。
     const key = matmulKey(v4, m);
-    const { pipeline, layout } = await this.#state.cache.get(key, matmulWgsl(v4, m));
+    const { pipeline, layout, roles } = await this.#state.cache.get(key, matmulWgsl(v4, m));
     const params = this.#writeParams(matmulParams(m, n, k), PARAMS_UNIFORM_USAGE);
     const limit = this.#state.gpu.limits.maxComputeWorkgroupsPerDimension;
     const where = `matmul [${a.join(",")}] × [${b.join(",")}]`;
@@ -1296,6 +1314,7 @@ export class RecipeBuilder {
       key,
       pipeline,
       layout,
+      roles,
       params,
       bindings: [
         { binding: 1, source: binds[0] },
@@ -1326,7 +1345,7 @@ export class RecipeBuilder {
     const v4 = gemmUsesVec4(k, n);
     // 幾何のバケットは**行列 1 枚の m**（バッチは z 軸で、タイル幾何とは独立）。
     const key = bmmKey(v4, m);
-    const { pipeline, layout } = await this.#state.cache.get(key, bmmWgsl(v4, m));
+    const { pipeline, layout, roles } = await this.#state.cache.get(key, bmmWgsl(v4, m));
     const params = this.#writeParams(bmmParams(m, n, k), PARAMS_UNIFORM_USAGE);
     const limit = this.#state.gpu.limits.maxComputeWorkgroupsPerDimension;
     const where = `bmm [${a.join(",")}] × [${b.join(",")}]`;
@@ -1335,6 +1354,7 @@ export class RecipeBuilder {
       key,
       pipeline,
       layout,
+      roles,
       params,
       bindings: [
         { binding: 1, source: binds[0] },
@@ -1363,7 +1383,7 @@ export class RecipeBuilder {
     const srcShape = step.inputShapes[0];
     const outShape = step.outputs[0].shape;
     const count = numel(outShape);
-    const { pipeline, layout } = await this.#state.cache.get(GATHER_KEY, GATHER_WGSL);
+    const { pipeline, layout, roles } = await this.#state.cache.get(GATHER_KEY, GATHER_WGSL);
     const params = this.#writeParams(
       gatherParams(count, outShape[outShape.length - 1], srcShape[srcShape.length - 1]),
       PARAMS_UNIFORM_USAGE,
@@ -1377,6 +1397,7 @@ export class RecipeBuilder {
       key: GATHER_KEY,
       pipeline,
       layout,
+      roles,
       params,
       bindings: [
         { binding: 1, source: binds[0] },
@@ -1475,7 +1496,7 @@ export class RecipeBuilder {
     // MUST: タイル幾何は平坦化後の行数 m のバケット（src/kernels/gemm-geometry.ts）。
     // キー・WGSL・dispatch に**同じ m** を通す。
     const key = linearKey(weightStorage, v4, compute, m, groupSize);
-    const { pipeline, layout } = await this.#state.cache.get(
+    const { pipeline, layout, roles } = await this.#state.cache.get(
       key,
       linearWgsl(weightStorage, v4, compute, m, groupSize),
     );
@@ -1487,6 +1508,7 @@ export class RecipeBuilder {
       key,
       pipeline,
       layout,
+      roles,
       params,
       bindings: [
         ...binds.map((source, index) => ({ binding: index + 1, source })),
@@ -1521,7 +1543,7 @@ export class RecipeBuilder {
   ): Promise<void> {
     const variant = defaultLinearGemvVariant();
     const key = linearGemvKey(groupSize, variant);
-    const { pipeline, layout } = await this.#state.cache.get(
+    const { pipeline, layout, roles } = await this.#state.cache.get(
       key,
       linearGemvWgsl(groupSize, variant),
     );
@@ -1533,6 +1555,7 @@ export class RecipeBuilder {
       key,
       pipeline,
       layout,
+      roles,
       params,
       bindings: [
         ...binds.map((source, index) => ({ binding: index + 1, source })),
@@ -1559,8 +1582,8 @@ export class RecipeBuilder {
    * ① `quantize_rows`（活性を per-token i8 へ・行方向 grid-stride）→ ② 整数内積 GEMM
    * （1 workgroup = 1 出力タイルなので上限超過は fail loudly）。①は重みの格納形に依らず同一。
    *
-   * MUST: 一時バッファ（`xq` / `xs`）は宣言 → ノード末尾で解放する。これで実行相の参照計数が
-   * 閉じ（`assertDrained`）、失敗経路でも `arena.destroy()` が拾う。
+   * MUST: 一時バッファ（`xq` / `xs`）は宣言 → ノード末尾で解放する。これで計画の参照計数が
+   * 閉じ、失敗経路でも `arena.destroy()` が領域ごと拾う。
    * MUST: i32 のオーバフロー門は fail loudly。黙って通すと i32 の巻き戻りで符号ごと化ける。
    * 門の軸は格納形で違う — i8 は **k**（縮約全体が 1 つの i32）、i4 は **group 長**
    * （flush が group ごとなので i32 に載るのは 1 group ぶんだけ）。
@@ -1594,14 +1617,16 @@ export class RecipeBuilder {
     // ① 活性の per-token 量子化（1 行 = 1 workgroup・行方向 grid-stride）
     const quantizeGeometry = quantizeRowsGeometry(k);
     const quantizeKey = quantizeRowsKey(quantizeGeometry);
-    const { pipeline: quantizePipeline, layout: quantizeLayout } = await this.#state.cache.get(
-      quantizeKey,
-      quantizeRowsWgsl(quantizeGeometry),
-    );
+    const { pipeline: quantizePipeline, layout: quantizeLayout, roles: quantizeRoles } = await this
+      .#state.cache.get(
+        quantizeKey,
+        quantizeRowsWgsl(quantizeGeometry),
+      );
     builder.dispatch({
       key: quantizeKey,
       pipeline: quantizePipeline,
       layout: quantizeLayout,
+      roles: quantizeRoles,
       params: this.#writeParams(quantizeRowsParams(m, k), PARAMS_UNIFORM_USAGE),
       bindings: [
         { binding: 1, source: binds[0] },
@@ -1619,7 +1644,7 @@ export class RecipeBuilder {
     // MUST: key / wgsl とも **実際の常駐形**（`weightStorage`）で引く。i8 固定にすると i4 の
     // group scale が per-channel として配られる沈黙誤値になる（数値契約が別 — ADR 0076）。
     const key = linearI8a8Key(v4, dp4a, geometry, weightStorage, groupSize);
-    const { pipeline, layout } = await this.#state.cache.get(
+    const { pipeline, layout, roles } = await this.#state.cache.get(
       key,
       linearI8a8Wgsl(v4, dp4a, geometry, weightStorage, groupSize),
     );
@@ -1627,6 +1652,7 @@ export class RecipeBuilder {
       key,
       pipeline,
       layout,
+      roles,
       params: this.#writeParams(linearI8a8Params(m, n, k, groupSize), PARAMS_UNIFORM_USAGE),
       bindings: [
         { binding: 1, source: xq },
@@ -1662,7 +1688,10 @@ export class RecipeBuilder {
     const dim = shape[shape.length - 1];
     const rows = numel(shape.slice(0, -1));
     const { eps } = layerNormAttrs(step.node.attrs, `nodes (${step.node.op})`);
-    const { pipeline, layout } = await this.#state.cache.get(LAYER_NORM_KEY, LAYER_NORM_WGSL);
+    const { pipeline, layout, roles } = await this.#state.cache.get(
+      LAYER_NORM_KEY,
+      LAYER_NORM_WGSL,
+    );
     const params = this.#writeParams(
       layerNormParams(rows, dim, eps),
       PARAMS_UNIFORM_USAGE,
@@ -1676,6 +1705,7 @@ export class RecipeBuilder {
       key: LAYER_NORM_KEY,
       pipeline,
       layout,
+      roles,
       params,
       bindings: [
         ...binds.map((source, index) => ({ binding: index + 1, source })),
@@ -1699,7 +1729,7 @@ export class RecipeBuilder {
     const dim = shape[shape.length - 1];
     const rows = numel(shape.slice(0, -1));
     const eps = rmsNormEps(step.node.attrs, `nodes (${step.node.op})`);
-    const { pipeline, layout } = await this.#state.cache.get(RMS_NORM_KEY, RMS_NORM_WGSL);
+    const { pipeline, layout, roles } = await this.#state.cache.get(RMS_NORM_KEY, RMS_NORM_WGSL);
     const params = this.#writeParams(rmsNormParams(rows, dim, eps), PARAMS_UNIFORM_USAGE);
     const groups = gridStrideWorkgroups(
       rows,
@@ -1710,6 +1740,7 @@ export class RecipeBuilder {
       key: RMS_NORM_KEY,
       pipeline,
       layout,
+      roles,
       params,
       bindings: [
         ...binds.map((source, index) => ({ binding: index + 1, source })),
@@ -1736,7 +1767,7 @@ export class RecipeBuilder {
     const dim = shape[shape.length - 1];
     const rows = numel(shape.slice(0, -1));
     const key = safe ? SAFE_SOFTMAX_KEY : SOFTMAX_KEY;
-    const { pipeline, layout } = await this.#state.cache.get(
+    const { pipeline, layout, roles } = await this.#state.cache.get(
       key,
       safe ? SAFE_SOFTMAX_WGSL : SOFTMAX_WGSL,
     );
@@ -1750,6 +1781,7 @@ export class RecipeBuilder {
       key,
       pipeline,
       layout,
+      roles,
       params,
       bindings: [{ binding: 1, source: binds[0] }, { binding: 2, source: outs[0] }],
       workgroups: [groups, 1, 1],
@@ -1793,11 +1825,11 @@ export class RecipeBuilder {
    *
    * MUST: ① と ③ は 1 workgroup = 1 タイルなので、3 軸とも上限超過は fail loudly
    * （{@link tiledWorkgroups}）。縮退させるとタイルが欠落し、例外なしに O の一部が
-   * 未書き込み（プール再利用なら前の値）で残る。② だけが行方向 grid-stride。
+   * 未書き込み（配り直しなら前の値）で残る。② だけが行方向 grid-stride。
    * MUST: 一時バッファ（S / 行統計）は**ブロックごとに**確保して返す（全ブロックぶんまとめて
    * 取ると、上限を越えない形にした意味が消える）。量子化の一時だけがループを跨ぎ、ノード末尾で
-   * 確保の逆順に返る。これで実行相の参照計数が閉じ（`assertDrained`）、失敗経路でも
-   * `arena.destroy()` が拾う（確保と破棄を 1 箇所へ — ADR 0004）。
+   * 確保の逆順に返る。これで計画の参照計数が閉じ、失敗経路でも `arena.destroy()` が領域ごと
+   * 拾う（確保と破棄を 1 箇所へ — ADR 0004）。
    */
   async #buildAttention(
     step: NodePlan,
@@ -1969,6 +2001,7 @@ export class RecipeBuilder {
           key: qk.key,
           pipeline: qk.pipeline,
           layout: qk.layout,
+          roles: qk.roles,
           params: this.#writeParams(
             attentionQkI8a8Params(block.rows, cols, depth, scale, window),
             PARAMS_UNIFORM_USAGE,
@@ -1991,6 +2024,7 @@ export class RecipeBuilder {
           key: qk.key,
           pipeline: qk.pipeline,
           layout: qk.layout,
+          roles: qk.roles,
           params: this.#writeParams(
             attentionQkParams(
               block.rows,
@@ -2021,6 +2055,7 @@ export class RecipeBuilder {
         key: statsKey,
         pipeline: stats.pipeline,
         layout: stats.layout,
+        roles: stats.roles,
         params: this.#writeParams(
           attentionStatsParams(batch * block.rows, cols, statsRegCache),
           PARAMS_UNIFORM_USAGE,
@@ -2036,6 +2071,7 @@ export class RecipeBuilder {
           key: pv.key,
           pipeline: pv.pipeline,
           layout: pv.layout,
+          roles: pv.roles,
           params: this.#writeParams(
             attentionPvI8a8Params(block.rows, depth, cols, window),
             PARAMS_UNIFORM_USAGE,
@@ -2058,6 +2094,7 @@ export class RecipeBuilder {
           key: pv.key,
           pipeline: pv.pipeline,
           layout: pv.layout,
+          roles: pv.roles,
           params: this.#writeParams(
             attentionPvParams(block.rows, depth, cols, gqa ? kvRepeat : undefined, window),
             PARAMS_UNIFORM_USAGE,
@@ -2076,8 +2113,8 @@ export class RecipeBuilder {
         });
       }
 
-      // MUST: ノード境界で一時バッファを返す（アリーナの不変条件 — 抜けると assertDrained で
-      // 落ちるか、プール再利用から外れて peak が過大に出る）。確保の逆順（LIFO）。
+      // MUST: ノード境界で一時バッファを返す（計画の不変条件 — 抜けると閉包検査で落ちるか、
+      // 配り直しから外れて peak が過大に出る）。確保の逆順。
       builder.releaseTemp(rowStats);
       builder.releaseTemp(scores);
     }
@@ -2236,6 +2273,7 @@ export class RecipeBuilder {
         key: qkKey,
         pipeline: qk.pipeline,
         layout: qk.layout,
+        roles: qk.roles,
         params,
         bindings: [
           { binding: 1, source: binds[0] },
@@ -2254,6 +2292,7 @@ export class RecipeBuilder {
         key: statsKey,
         pipeline: stats.pipeline,
         layout: stats.layout,
+        roles: stats.roles,
         params: this.#writeParams(
           stateStatsParams(batchHeads, block.rows, block.offset, colCap, window),
           PARAMS_UNIFORM_USAGE,
@@ -2272,6 +2311,7 @@ export class RecipeBuilder {
         key: pvKey,
         pipeline: pv.pipeline,
         layout: pv.layout,
+        roles: pv.roles,
         params,
         bindings: [
           { binding: 1, source: scores },
@@ -2286,7 +2326,7 @@ export class RecipeBuilder {
           : statePvWorkgroups(dispatchGeometry, limit, `${where} ③PV`),
       });
 
-      // MUST: 確保の逆順で返す（{@link executeStepRecipe} の LIFO と同じ順）。
+      // MUST: 確保の逆順で返す（計画の再生と同じ順）。
       builder.releaseTemp(rowStats);
       builder.releaseTemp(scores);
     }
@@ -2322,12 +2362,13 @@ export class RecipeBuilder {
     if (!sliding) states.fullCapacities.set(slot.name, capacity);
 
     const key = stateAppendKey(sliding);
-    const { pipeline, layout } = await this.#state.cache.get(key, stateAppendWgsl(sliding));
+    const { pipeline, layout, roles } = await this.#state.cache.get(key, stateAppendWgsl(sliding));
     const limit = this.#state.gpu.limits.maxComputeWorkgroupsPerDimension;
     builder.dispatch({
       key,
       pipeline,
       layout,
+      roles,
       params: this.#writeParams(stateAppendParams(geometry), PARAMS_UNIFORM_USAGE),
       bindings: [
         { binding: 1, source: binds[0] },
@@ -2387,10 +2428,11 @@ export class RecipeBuilder {
     // 並べて畳む小 D 変種になる — `quantizeRowsGeometry`・perf-ledger P-1）
     const quantizeGeometry = quantizeRowsGeometry(depth);
     const quantizeKey = quantizeRowsKey(quantizeGeometry);
-    const { pipeline: quantizePipeline, layout: quantizeLayout } = await this.#state.cache.get(
-      quantizeKey,
-      quantizeRowsWgsl(quantizeGeometry),
-    );
+    const { pipeline: quantizePipeline, layout: quantizeLayout, roles: quantizeRoles } = await this
+      .#state.cache.get(
+        quantizeKey,
+        quantizeRowsWgsl(quantizeGeometry),
+      );
     const quantize = (
       source: BindingSource,
       payload: TempSource,
@@ -2401,6 +2443,7 @@ export class RecipeBuilder {
         key: quantizeKey,
         pipeline: quantizePipeline,
         layout: quantizeLayout,
+        roles: quantizeRoles,
         params: this.#writeParams(quantizeRowsParams(count, depth), PARAMS_UNIFORM_USAGE),
         bindings: [
           { binding: 1, source },
@@ -2420,11 +2463,11 @@ export class RecipeBuilder {
     const dp4a = this.#state.attentionI8a8Dot === "dp4a";
     const geometry = defaultI8a8Geometry("attention_qk");
     const key = attentionQkI8a8Key(v4, dp4a, scoreStorage, geometry, rowWindow);
-    const { pipeline, layout } = await this.#state.cache.get(
+    const { pipeline, layout, roles } = await this.#state.cache.get(
       key,
       attentionQkI8a8Wgsl(v4, dp4a, scoreStorage, geometry, rowWindow),
     );
-    return { kind: "i8a8", key, pipeline, layout, geometry, qq, qs, kq, ks };
+    return { kind: "i8a8", key, pipeline, layout, roles, geometry, qq, qs, kq, ks };
   }
 
   /**
@@ -2480,14 +2523,16 @@ export class RecipeBuilder {
     // D == N のときだけ一致する。実測形は D != N なので露見するが、単体テストが本来の検出器）。
     const stridedSpec = { dtype: "f32" } as const;
     const permuteKey = stridedKey(stridedSpec);
-    const { pipeline: permutePipeline, layout: permuteLayout } = await this.#state.cache.get(
-      permuteKey,
-      stridedWgsl(stridedSpec),
-    );
+    const { pipeline: permutePipeline, layout: permuteLayout, roles: permuteRoles } = await this
+      .#state.cache.get(
+        permuteKey,
+        stridedWgsl(stridedSpec),
+      );
     builder.dispatch({
       key: permuteKey,
       pipeline: permutePipeline,
       layout: permuteLayout,
+      roles: permuteRoles,
       params: this.#writeParams(
         stridedParams(
           [batch, depth, cols],
@@ -2507,14 +2552,16 @@ export class RecipeBuilder {
     // (b) Vᵀ の量子化（行 = (b,h,d)・行長 N — per-column scale と N 連続パックが同時に出る）
     const quantizeGeometry = quantizeRowsGeometry(cols);
     const quantizeKey = quantizeRowsKey(quantizeGeometry);
-    const { pipeline: quantizePipeline, layout: quantizeLayout } = await this.#state.cache.get(
-      quantizeKey,
-      quantizeRowsWgsl(quantizeGeometry),
-    );
+    const { pipeline: quantizePipeline, layout: quantizeLayout, roles: quantizeRoles } = await this
+      .#state.cache.get(
+        quantizeKey,
+        quantizeRowsWgsl(quantizeGeometry),
+      );
     builder.dispatch({
       key: quantizeKey,
       pipeline: quantizePipeline,
       layout: quantizeLayout,
+      roles: quantizeRoles,
       params: this.#writeParams(quantizeRowsParams(batch * depth, cols), PARAMS_UNIFORM_USAGE),
       bindings: [
         { binding: 1, source: vt },
@@ -2530,11 +2577,11 @@ export class RecipeBuilder {
     const dp4a = this.#state.attentionI8a8Dot === "dp4a";
     const geometry = defaultI8a8Geometry("attention_pv");
     const key = attentionPvI8a8Key(v4, dp4a, scoreStorage, geometry, rowWindow);
-    const { pipeline, layout } = await this.#state.cache.get(
+    const { pipeline, layout, roles } = await this.#state.cache.get(
       key,
       attentionPvI8a8Wgsl(v4, dp4a, scoreStorage, geometry, rowWindow),
     );
-    return { kind: "i8a8", key, pipeline, layout, geometry, vt, vq, vs };
+    return { kind: "i8a8", key, pipeline, layout, roles, geometry, vt, vq, vs };
   }
 
   /**
@@ -2554,7 +2601,7 @@ export class RecipeBuilder {
     // i4 は group 長を WGSL に焼く（キーの g 部と対 — linear と同じ規律・ADR 0069）。
     const groupSize = weightStorage === "i4" ? this.#weightGroupSize(step) : undefined;
     const key = embeddingKey(weightStorage, groupSize);
-    const { pipeline, layout } = await this.#state.cache.get(
+    const { pipeline, layout, roles } = await this.#state.cache.get(
       key,
       embeddingWgsl(weightStorage, groupSize),
     );
@@ -2571,6 +2618,7 @@ export class RecipeBuilder {
       key,
       pipeline,
       layout,
+      roles,
       params,
       bindings: [
         { binding: 1, source: binds[0] },
@@ -2600,7 +2648,7 @@ export class RecipeBuilder {
       out: "masked_fill の出力",
     });
     const value = maskedFillValue(step.node.attrs, `nodes (${step.node.op})`);
-    const { pipeline, layout } = await this.#state.cache.get(
+    const { pipeline, layout, roles } = await this.#state.cache.get(
       MASKED_FILL_KEY,
       MASKED_FILL_WGSL,
     );
@@ -2617,6 +2665,7 @@ export class RecipeBuilder {
       key: MASKED_FILL_KEY,
       pipeline,
       layout,
+      roles,
       params,
       bindings: [
         { binding: 1, source: binds[0] },
@@ -2662,7 +2711,7 @@ export class RecipeBuilder {
       return;
     }
     const key = conv1dKey(weightStorage);
-    const { pipeline, layout } = await this.#state.cache.get(key, conv1dWgsl(weightStorage));
+    const { pipeline, layout, roles } = await this.#state.cache.get(key, conv1dWgsl(weightStorage));
     const params = this.#writeParams(conv1dParams(dims), PARAMS_UNIFORM_USAGE);
     const workgroups = gridStrideWorkgroups(
       numel(outShape),
@@ -2673,6 +2722,7 @@ export class RecipeBuilder {
       key,
       pipeline,
       layout,
+      roles,
       params,
       bindings: [
         ...binds.map((source, index) => ({ binding: index + 1, source })),
@@ -2715,7 +2765,7 @@ export class RecipeBuilder {
     // i4 は group 長を WGSL に焼く（キーの g 部と対 — linear / embedding と同じ規律・ADR 0069）。
     const groupSize = weightStorage === "i4" ? this.#weightGroupSize(step) : undefined;
     const key = conv1dIgemmKey(weightStorage, v4, mTile, groupSize);
-    const { pipeline, layout } = await this.#state.cache.get(
+    const { pipeline, layout, roles } = await this.#state.cache.get(
       key,
       conv1dIgemmWgsl(weightStorage, v4, mTile, groupSize),
     );
@@ -2726,6 +2776,7 @@ export class RecipeBuilder {
       key,
       pipeline,
       layout,
+      roles,
       params,
       bindings: [
         ...binds.map((source, index) => ({ binding: index + 1, source })),
@@ -2783,7 +2834,7 @@ export class RecipeBuilder {
       return;
     }
     const key = conv2dKey(weightStorage);
-    const { pipeline, layout } = await this.#state.cache.get(key, conv2dWgsl(weightStorage));
+    const { pipeline, layout, roles } = await this.#state.cache.get(key, conv2dWgsl(weightStorage));
     const params = this.#writeParams(conv2dParams(dims), PARAMS_UNIFORM_USAGE);
     const workgroups = gridStrideWorkgroups(
       numel(outShape),
@@ -2794,6 +2845,7 @@ export class RecipeBuilder {
       key,
       pipeline,
       layout,
+      roles,
       params,
       bindings: [
         ...binds.map((source, index) => ({ binding: index + 1, source })),
@@ -2832,7 +2884,7 @@ export class RecipeBuilder {
     // 生成・キーと同じ解決点から幾何を引く（dispatch のタイル辺が WGSL の辺と構造的に一致）。
     const geometry = gemmMTileGeometry(mTile);
     const key = conv2dIgemmKey(weightStorage, v4, mTile);
-    const { pipeline, layout } = await this.#state.cache.get(
+    const { pipeline, layout, roles } = await this.#state.cache.get(
       key,
       conv2dIgemmWgsl(weightStorage, v4, mTile),
     );
@@ -2843,6 +2895,7 @@ export class RecipeBuilder {
       key,
       pipeline,
       layout,
+      roles,
       params,
       bindings: [
         ...binds.map((source, index) => ({ binding: index + 1, source })),
@@ -2874,7 +2927,7 @@ export class RecipeBuilder {
     const { stride, padding } = convTranspose1dAttrs(step.node.attrs, `nodes (${step.node.op})`);
     const weightStorage = this.#weightStorage(step);
     const key = convTranspose1dKey(weightStorage);
-    const { pipeline, layout } = await this.#state.cache.get(
+    const { pipeline, layout, roles } = await this.#state.cache.get(
       key,
       convTranspose1dWgsl(weightStorage),
     );
@@ -2900,6 +2953,7 @@ export class RecipeBuilder {
       key,
       pipeline,
       layout,
+      roles,
       params,
       bindings: [
         ...binds.map((source, index) => ({ binding: index + 1, source })),
@@ -2980,7 +3034,7 @@ export class RecipeBuilder {
    * MUST: キャッシュしたバッファは**一度書いたら二度と書き換えない**。ADR 0004 が
    * `allocHostWritten` をプール対象外にしているのは「`queue.writeBuffer` が未 submit の先行
    * エンコードを追い越す」ためだが、ここは同じバッファへの 2 度目の writeBuffer が存在しない
-   * ので追い越しハザードが原理的に生じない（プール再利用とは別レイヤの、内容同一性による
+   * ので追い越しハザードが原理的に生じない（配り直しとは別レイヤの、内容同一性による
    * 共有）。
    * MUST: 破棄は weights アリーナの dispose に相乗りする（`Session.dispose` →
    * `RunArena.destroy` の flush-before-destroy）。キャッシュ専用の破棄経路を新設すると

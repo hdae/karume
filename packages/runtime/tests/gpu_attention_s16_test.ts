@@ -403,8 +403,7 @@ Deno.test({
       };
       const params = arena.allocHostWritten(16, UNIFORM_IN);
       gpu.device.queue.writeBuffer(params, 0, attentionQkParams(m, n, d, 1));
-      const scores = arena.allocStorage(m * n * 2);
-      arena.retain(scores, 0, { pinned: true });
+      const scores = arena.allocRegion(m * n * 2);
       const key = attentionQkKey(true, "f32", "f16");
       const { pipeline, layout } = await cache.get(key, attentionQkWgsl(true, "f32", "f16"));
       const limit = gpu.limits.maxComputeWorkgroupsPerDimension;
@@ -787,8 +786,7 @@ const observeQpS16 = async (
         vs[head * n + row] = INV_P_ABS_MAX;
       }
     }
-    const out = arena.allocStorage(Math.max(4, batch * m * n * 4));
-    arena.retain(out, 0, { pinned: true });
+    const out = arena.allocRegion(Math.max(4, batch * m * n * 4));
     const params = arena.allocHostWritten(16, UNIFORM_IN);
     gpu.device.queue.writeBuffer(params, 0, attentionPvI8a8Params(m, n, n));
     const v4 = attentionPvI8a8UsesVec4(n);

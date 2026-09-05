@@ -188,10 +188,8 @@ const runQuantizeRows = async (
     gpu.device.queue.writeBuffer(params, 0, quantizeRowsParams(rows, dim));
     const src = arena.allocHostWritten(Math.max(4, x.byteLength), STORAGE_IN);
     gpu.device.queue.writeBuffer(src, 0, x);
-    const xq = arena.allocStorage(Math.max(4, rows * dim));
-    arena.retain(xq, 0, { pinned: true });
-    const xs = arena.allocStorage(Math.max(4, rows * 4));
-    arena.retain(xs, 0, { pinned: true });
+    const xq = arena.allocRegion(Math.max(4, rows * dim));
+    const xs = arena.allocRegion(Math.max(4, rows * 4));
     const bindGroup = gpu.device.createBindGroup({
       layout,
       entries: [

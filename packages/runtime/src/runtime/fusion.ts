@@ -152,8 +152,8 @@ type FusedDispatch = {
  * ステップ内一時の確保仕様。形も意味も recipe.ts の `TempRecipe` と同じで、**寿命は
  * dispatch 境界の添字**で表す。
  *
- * MUST: 宣言した一時には必ず解放境界がある（`releaseAfter` が確保より前だと実行相の参照
- * 計数が閉じず、run 末尾の `assertDrained` が落とす）。
+ * MUST: 宣言した一時には必ず解放境界がある（`releaseAfter` が確保より前だと宣言の受け口
+ * （`validateStepRecipe`）が落とす）。
  */
 type FusedTemp = {
   readonly byteLength: number;
@@ -362,7 +362,7 @@ type FusionMatch = {
  *
  * MUST: `allocBefore ≤ releaseAfter < dispatch 数`。外れた宣言は executor の replay で
  * 「未確保の一時を束ねる」か「解放されない一時が残る」になり、前者は bind 面が組めず、
- * 後者は run 末尾の `assertDrained` まで気づけない。ルールの本数だけ手書きさせず、
+ * 後者は計画の閉包検査まで気づけない。ルールの本数だけ手書きさせず、
  * 宣言の受け口 1 箇所で落とす。
  */
 const assertTempLifetimes = (
@@ -1121,7 +1121,7 @@ const ROW_BLOCK_ATTENTION_RULE = defineRule<RowBlockAttentionMatch>({
       const rows = block.rows;
       const bytes = heads * rows * keys * 4;
       // 一時は 3 本とも「次の dispatch が読み終えたら返す」— 同時生存は常に 2 本で、
-      // 3 本目はプール再利用で 1 本目の実体を掴む（ブロックを跨いでも同じ）。
+      // 3 本目は配り直しで 1 本目の実体を掴む（ブロックを跨いでも同じ）。
       const scores = temps.length;
       temps.push({ byteLength: bytes, allocBefore: first, releaseAfter: first + 1 });
       const masked = temps.length;

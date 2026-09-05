@@ -21,8 +21,8 @@
 
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { openModel } from "../src/format/container.ts";
+import { ExecutionError } from "../src/runtime/plan.ts";
 import { acquireGpu, type GpuContext, LIMIT_CAPS } from "../src/gpu/device.ts";
-import { GpuValidationError } from "../src/gpu/error-scope.ts";
 import { planRowBlocks } from "../src/runtime/fusion.ts";
 import { createSession, ROW_BLOCK_SPLIT, type Tensor } from "../src/runtime/executor.ts";
 import type { GraphJson } from "./helpers/format.ts";
@@ -264,11 +264,12 @@ Deno.test({
 
       // 門の効力証明: **同じ device・同じ形**でも、窓を崩して素の 9 ノード列に落とすと
       // S を丸ごと実体化しようとして落ちる。ここが緑のままなら上の緑は行ブロックの
-      // おかげではない。
+      // おかげではない。落とすのは計画時の上限 preflight（ADR 0093 決定 5 — GPU の validation
+      // より前に、上限を超える中間をノード名つきで全件列挙する）。
       await assertRejects(
         () => run(gpu, attentionGraph(OVERSIZE, true), inputs),
-        GpuValidationError,
-        `${scoreBytes} exceeds`,
+        ExecutionError,
+        `中間バッファが device の上限を超える`,
       );
     } finally {
       gpu.destroy();

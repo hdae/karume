@@ -351,8 +351,9 @@ export type PreparedPlanStats = {
 };
 
 /**
- * transient slot の GPU backing（Session 常駐バッファ群）の実績。導出済み計画にヒットした run は
- * 中間バッファをここから配るので、アリーナの確保・参照計数・createBuffer / destroy がゼロになる。
+ * 中間バッファの GPU backing（Session 常駐の領域バッファ群 — ADR 0093）の実績。導出済み計画に
+ * ヒットした run は中間バッファをここから配るので、run ごとの領域確保・createBuffer / destroy が
+ * ゼロになる。
  *
  * MUST: 常設診断として出す。**signature が交互に切り替わる形では毎 run 作り直しになり**、値は
  * 正しいまま run ごとに数百 MiB の createBuffer / destroy が復活する（例外も警告も出ない）。
@@ -360,8 +361,8 @@ export type PreparedPlanStats = {
  */
 export type PlanBackingStats = {
   /**
-   * 活性 backing が常駐させている **slot の**総バイト数（未構築 / 破棄済みなら 0）。
-   * MUST: 定義は「slot 表の総バイト数」— backing が併せて常駐させる入力バッファは含めない
+   * 活性 backing が常駐させている**領域の総和**（未構築 / 破棄済みなら 0）。
+   * MUST: 定義は「計画の領域の総和」— backing が併せて常駐させる入力バッファは含めない
    * （理由と門は {@link ActiveBacking.bytes}）。
    */
   readonly residentBytes: number;
@@ -438,8 +439,9 @@ export type SessionDiagnostics = {
    * 直近 run の中間バッファ実績。未実行なら undefined。
    *
    * NOTE: slot backing に乗った run（{@link PlanBackingStats}）では中間バッファも入力バッファも
-   * アリーナを通らないため、ここに残るのは readback staging のぶんだけになる
-   * （値の意味は不変 — 「その run がアリーナで確保したもの」）。
+   * アリーナを通らないため、ここに残るのは readback staging のぶんだけになり、計画から写す
+   * 3 欄（`reuseCount` / `transientBytes` / `peakTransientBytes`）は 0 になる
+   * （値の意味は不変 — 「その run がアリーナで確保したもの」と「その run の計画」）。
    */
   readonly lastRun: ArenaStats | undefined;
   /**

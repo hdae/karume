@@ -193,8 +193,7 @@ const runBoth = async (
     const limit = gpu.limits.maxComputeWorkgroupsPerDimension;
 
     const allocOut = (): GPUBuffer => {
-      const buffer = arena.allocStorage(Math.max(4, outCount * 4));
-      arena.retain(buffer, 0, { pinned: true });
+      const buffer = arena.allocRegion(Math.max(4, outCount * 4));
       return buffer;
     };
     const bind = (
@@ -219,8 +218,7 @@ const runBoth = async (
     // ① 縮約軸を最終次元へ回す permute（現行のエクスポータが出していた形）→ 行 reduce
     const permuteDims = [...shape.keys()].filter((d) => d !== axis).concat(axis);
     const permutedShape = permuteDims.map((d) => shape[d]);
-    const permuted = arena.allocStorage(Math.max(4, numel(shape) * 4));
-    arena.retain(permuted, 0, { pinned: true });
+    const permuted = arena.allocRegion(Math.max(4, numel(shape) * 4));
     const { pipeline: stridedPipeline, layout: stridedLayout } = await cache.get(
       stridedKey({ dtype }),
       stridedWgsl({ dtype }),

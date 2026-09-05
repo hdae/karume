@@ -1,11 +1,13 @@
-import { assert, assertEquals, assertRejects, assertStrictEquals } from "@std/assert";
+import { assert, assertEquals, assertRejects, assertStrictEquals, assertThrows } from "@std/assert";
 import { openModel } from "../src/format/container.ts";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { GpuInternalError, GpuValidationError } from "../src/gpu/error-scope.ts";
 import {
+  parseStorageRoles,
   PipelineCache,
   PipelineKeyConflictError,
   SessionPipelines,
+  StorageRoleError,
 } from "../src/gpu/pipeline-cache.ts";
 import { createSession } from "../src/runtime/executor.ts";
 import { fill, graphModelBuffer, singleOpGraph } from "./helpers/graph.ts";
@@ -306,4 +308,54 @@ Deno.test({
       gpu.destroy();
     }
   },
+});
+
+// ---------------------------------------------------------------------------
+// storage 束縛の役割（WGSL 宣言 → 計画の材料 — ADR 0093 決定 1）
+// ---------------------------------------------------------------------------
+
+Deno.test("parseStorageRoles は group 0 の storage 宣言から読み / 読み書きの binding を採る", () => {
+  const roles = parseStorageRoles(`
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read> a: array<f32>;
+@group(0)@binding(2)var<storage,read_write> out: array<vec4<f32>>;
+@group(0) @binding(3) var<storage , read > scale: array<f32>;
+  `);
+  assertEquals(roles, { reads: new Set([1, 3]), writes: new Set([2]) });
+  // storage 宣言が 1 本も無い WGSL は空集合（uniform だけのカーネルも合法）。
+  assertEquals(parseStorageRoles("@group(0) @binding(0) var<uniform> p: P;"), {
+    reads: new Set<number>(),
+    writes: new Set<number>(),
+  });
+});
+
+Deno.test("parseStorageRoles は同じ binding の read / read_write 二重宣言を fail loudly にする", () => {
+  assertThrows(
+    () =>
+      parseStorageRoles(`
+@group(0) @binding(1) var<storage, read> a: array<f32>;
+@group(0) @binding(1) var<storage, read_write> b: array<f32>;
+      `),
+    StorageRoleError,
+    "binding 1 が read と read_write の両方",
+  );
+});
+
+Deno.test("PipelineCache.get は役割を WGSL から採って返す（生成の前に宣言の矛盾で落ちる）", async () => {
+  const gpu = createFakeGpu();
+  const cache = new PipelineCache(gpu.device);
+  const { roles } = await cache.get(
+    "k",
+    "@group(0) @binding(1) var<storage, read> a: array<f32>;\n@group(0) @binding(2) var<storage, read_write> o: array<f32>;",
+  );
+  assertEquals(roles, { reads: new Set([1]), writes: new Set([2]) });
+  await assertRejects(
+    () =>
+      cache.get(
+        "bad",
+        "@group(0) @binding(1) var<storage, read> a: array<f32>;\n@group(0) @binding(1) var<storage, read_write> o: array<f32>;",
+      ),
+    StorageRoleError,
+  );
+  assertEquals(gpu.modules.length, 1, "矛盾した WGSL はシェーダモジュールを作らない");
 });

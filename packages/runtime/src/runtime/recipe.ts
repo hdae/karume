@@ -1,25 +1,23 @@
 /**
  * 実行レシピ — エンコード層の中間表現と、その汎用実行ループ。
  *
- * 構造: 「**導出**（executor がステップ列 → レシピ列へ落とす）→ **実行**（ここが順に
- * bind group を組んで dispatch を積む）」。導出相は GPU コマンドを 1 つも出さず、run 寿命の
- * 実体（{@link RunArena} のバッファ）にも触れない — Session 常駐の実体（重み・per-channel
- * scale・params）だけを直参照として畳み込む。
+ * 構造: 「**導出**（executor がステップ列 → レシピ列へ落とす）→ **計画**（{@link planRecipes} が
+ * 中間バッファの領域と offset を決める — ADR 0093）→ **実行**（bind group を組んで dispatch を
+ * 積む）」。導出相は GPU コマンドを 1 つも出さず、run 寿命の実体にも触れない — Session 常駐の
+ * 実体（重み・per-channel scale・params）だけを直参照として畳み込む。
  *
- * MUST: レシピは `GPUBindGroup` を持たない。束ねる相手（ノード出力・一時）はアリーナ経路では
- * run ごとにプール再利用で入れ替わるため、持てるのは「どの位置に何を束ねるか」という**手順**
- * だけ。焼き込んだ bind group（{@link bakeBindGroups}）を持つのは **backing 側**で、レシピ自体は
- * 実体に依らないまま複数の backing から共有される。
+ * MUST: レシピは `GPUBindGroup` を持たない。束ねる相手（ノード出力・一時）は計画が領域の
+ * offset へ配るため、レシピが持てるのは「どの位置に何を束ねるか」という**手順**だけ。焼き込んだ
+ * bind group（{@link bakeBindGroups}）を持つのは **backing 側**で、レシピ自体は実体に依らないまま
+ * 複数の backing から共有される。
  * MUST: 一時バッファの寿命は dispatch 境界で表す（{@link TempRecipe}）。まとめて確保 /
- * まとめて解放に均すと、入れ子の生存区間を持つ形（i8a8 attention）でプール再利用と
- * `peakTransientBytes` が現行と変わる。
+ * まとめて解放に均すと、入れ子の生存区間を持つ形（i8a8 attention）で計画の同時生存が変わる。
  *
- * 実行相は 2 つある。**アリーナ経路**（{@link executeStepRecipe}）は run ごとに
- * {@link RunArena} で確保・参照計数する従来の形。**slot 経路**は {@link derivePlanSlots} が
- * 導いた slot 表を Session 常駐バッファへ割り付け、確保・retain・release・assertDrained を
- * 丸ごと省く。さらに束縛先が run を跨いで固定されるので、{@link bakeBindGroups} が全 dispatch の
- * bind group を**構築時に 1 度だけ**組み、run に残るのは {@link executeBakedPlan} の dispatch
- * だけになる（createBindGroup も env の構築も出ない）。
+ * 実行相は**計画 1 本を共有する 2 経路**。ミス run は run 寿命の領域を確保して
+ * {@link bakeAllBindGroups} で全 dispatch の bind group を組み、ヒット run は Session 常駐の領域
+ * （backing）に {@link bakeBindGroups} で焼き込んだ group を使う。どちらも積むのは
+ * {@link executeBakedPlan} の dispatch だけで、確保・参照計数・解放は実行相から消えている
+ * （計画が再生済み）。束縛は `{ buffer: 領域, offset, size }` で実寸に切る（ADR 0093 決定 2）。
  *
  * MUST: **焼き込みの単位は束ねる相手の所有者で分ける**（ADR 0066 決定 5）。Session 所有の実体
  * （slot / 常駐入力 / 重み）だけを束ねる dispatch は {@link bakeBindGroups} が backing の構築時に
@@ -30,9 +28,16 @@
  * （{@link BakedGroups}）。
  */
 
-import { type RunArena, toSizeClass } from "../gpu/arena.ts";
+import type { StorageRoles } from "../gpu/pipeline-cache.ts";
 import type { SubmitScheduler } from "../gpu/submit.ts";
 import { ExecutionError } from "./plan.ts";
+import {
+  planTransients,
+  type TransientLimits,
+  type TransientPlan,
+  type TransientProgram,
+  type TransientRef,
+} from "./transient-plan.ts";
 
 /**
  * run 寿命に依らない出どころ（Session 常駐の直参照 または 値名）。別名化の元にもなる。
@@ -85,21 +90,27 @@ export type DispatchWorkgroups =
  * なので、{@link BindingRecipe} の列とは別枠で持つ。
  */
 type DispatchRecipe = {
-  /** パイプラインキー（GPU 時間内訳の帰属先 — ADR 0021）。 */
+  /** パイプラインキー（診断ラベルと同一）。 */
   readonly key: string;
   readonly pipeline: GPUComputePipeline;
   readonly layout: GPUBindGroupLayout;
-  /** 内容アドレスキャッシュ済みの params（Session 常駐）。 */
+  /** binding 0 の params（uniform または storage）。Session 常駐（内容アドレスキャッシュ）。 */
   readonly params: GPUBuffer;
   readonly bindings: readonly BindingRecipe[];
   readonly workgroups: DispatchWorkgroups;
+  /**
+   * カーネル WGSL の storage 宣言から採った束縛番号の役割（読み / 読み書き）。計画が
+   * 「同じ dispatch で読まれる値と書かれる値は同じバッファに置けない」を守るための材料
+   * （src/gpu/pipeline-cache.ts の {@link StorageRoles}）。
+   */
+  readonly roles: StorageRoles;
 };
 
 /**
  * ノード内一時の確保仕様。**寿命は dispatch 境界の添字で表す**（モジュール doc の MUST）。
  *
- * 実行相の展開は `allocStorage` → `retain(…, 0)` で、解放は同じ境界に複数あれば**確保の逆順**
- * （現行の各 `#build*` が LIFO で返しているのと同じ順）。
+ * 計画では `allocBefore` の直前に生存を始め、同じ境界に複数あれば**確保の逆順**に生存を終える
+ * （各 `#build*` が返す順と同じ）。
  */
 export type TempRecipe = {
   readonly byteLength: number;
@@ -123,7 +134,7 @@ export type StepOutput = OutputRecipe & {
   readonly name: string;
   /** 出力値の将来の消費回数（`retain` の `uses`）。 */
   readonly uses: number;
-  /** グラフ出力（プールへ返さず readback 可能に保つ）。 */
+  /** グラフ出力（生存を末尾まで延ばし readback 可能に保つ）。 */
   readonly pinned: boolean;
 };
 
@@ -134,11 +145,11 @@ export type StepRecipe = {
    * 融合ステップは常に 1 本）。
    *
    * MUST: **確保 → retain → env 登録 → 定義ぶんの解放を、この列の昇順で**行う。順序を共有する
-   * のは 4 箇所 — 実行（{@link executeStepRecipe}）・slot 導出（{@link derivePlanSlots}）・
+   * のは 4 箇所 — 計画の再生（src/runtime/transient-plan.ts）・確保プログラム（{@link buildTransientProgram}）・
    * 焼き込み（実体は `bakeGroups` 1 本 — 入口は {@link bakeBindGroups} /
    * {@link bakeGenerationBindGroups}）・列の組み立て（recipe-builder の `#buildStep`）。1 箇所でも
-   * 順序が割れると例外は出ず、プール再利用の相手（= slot の本数と総バイト数、別名判定）だけが
-   * 実行と導出で食い違う。
+   * 順序が割れると例外は出ず、配り直しの相手（= 同じバイトを掴む値の組・別名判定）だけが
+   * 焼き込みと計画で食い違う。
    */
   readonly outputs: readonly StepOutput[];
   readonly temps: readonly TempRecipe[];
@@ -164,18 +175,18 @@ type MutableTemp = {
 
 /**
  * 1 ステップぶんのレシピを組み立てる器。**dispatch を積んだ位置**から一時の寿命を導くので、
- * 各 `#build*` は現行の `arena.allocStorage` / `arena.release` と同じ位置で
+ * 各 `#build*` は一時が要る位置と読み終えた位置で
  * {@link StepRecipeBuilder.allocTemp} / {@link StepRecipeBuilder.releaseTemp} を呼べばよい。
  */
 export class StepRecipeBuilder {
   readonly #temps: MutableTemp[] = [];
   readonly #dispatches: DispatchRecipe[] = [];
 
-  /** ノード内一時を 1 本宣言する（実行相で `allocStorage` + `retain(…, 0)` に展開される）。 */
+  /** ノード内一時を 1 本宣言する（計画では dispatch 境界で区切られた生存区間 1 本になる）。 */
   allocTemp(byteLength: number): TempSource {
     const id = this.#temps.length;
-    // 解放位置は releaseTemp が確定させる。宣言だけで解放が来なければ実行相の参照計数が
-    // 閉じず、run 末尾の assertDrained が落とす（沈黙で漏れない）。
+    // 解放位置は releaseTemp が確定させる。宣言だけで解放が来なければ宣言の受け口
+    // （validateStepRecipe）が落とす（沈黙で漏れない）。
     this.#temps.push({ byteLength, allocBefore: this.#dispatches.length, releaseAfter: -1 });
     return { kind: "temp", id };
   }
@@ -204,8 +215,7 @@ export class StepRecipeBuilder {
  *
  * MUST: 一時の寿命は `0 ≤ allocBefore ≤ releaseAfter < dispatch 数`。外れた宣言は実行相で
  * 「未確保の一時を束ねる」（`temps[id]` が `undefined` のまま createBindGroup へ渡り、真因から
- * 遠い validation エラーになる）か「解放されない一時が残る」（アリーナ経路では run 末尾の
- * `assertDrained` まで、slot 経路では {@link derivePlanSlots} の閉包検査まで気づけない）に化ける。
+ * 遠い validation エラーになる）か「解放されない一時が残る」（計画の閉包検査まで気づけない）に化ける。
  * MUST: 束縛が指す一時の添字は宣言済みの範囲内。範囲外は上と同じ `undefined` 束縛で、
  * 「どの dispatch がどの一時を読み損ねたか」が診断から消える。
  * MUST: 呼び口は**レシピの宣言の受け口 1 箇所**（recipe-builder の `#buildStep` の戻り）。
@@ -324,29 +334,35 @@ export const assertGenerationRun = (
   }
 };
 
-/** bind group を組んで dispatch を積むのに要る文脈（アリーナ経路と slot 経路の共通部）。 */
-type EncodeContext = {
-  readonly device: GPUDevice;
-  readonly scheduler: SubmitScheduler;
-  /**
-   * 値名 → 実体（グラフ入力とノード出力のみ）。Session 常駐の重み / scale は `resident` として
-   * 畳み込み済みなので、ここには載らない。
-   */
-  readonly env: Map<string, GPUBuffer>;
-  /** generation run のときだけ渡る context 側の面（1-shot 実行では undefined）。 */
-  readonly generation?: GenerationEncoding;
+/**
+ * 束縛先の実体 1 本。計画が配った slot は領域バッファの `(offset, size)` 区間、それ以外
+ * （グラフ入力・常駐）はバッファ全体。
+ *
+ * `readable` は readback の適格判定 — slot でない値（入力 / 重み）と pin された slot だけが真。
+ * 他の slot は run 中に別の値へ配り直され、次 run では前 run の残骸が居る（中間値 readback 拒否の
+ * 規律 — 旧 `RunArena.isReadable` と同じ）。
+ */
+export type ValueBinding = {
+  readonly buffer: GPUBuffer;
+  readonly offset?: number;
+  readonly size?: number;
+  readonly readable: boolean;
 };
 
-/** レシピ実行に要る run 寿命の文脈（アリーナ簿記あり — {@link executeStepRecipe}）。 */
-type StepExecution = EncodeContext & {
-  readonly arena: RunArena;
-};
+/** {@link ValueBinding} を bind group の resource へ落とす（undefined のキーを持たせない）。 */
+const toResource = (binding: ValueBinding): GPUBufferBinding =>
+  binding.offset === undefined
+    ? { buffer: binding.buffer }
+    : { buffer: binding.buffer, offset: binding.offset, size: binding.size };
 
-const resolveValue = (source: ValueSource, env: ReadonlyMap<string, GPUBuffer>): GPUBuffer => {
-  if (source.kind === "resident") return source.buffer;
-  const buffer = env.get(source.name);
-  if (buffer === undefined) throw new ExecutionError(`値 '${source.name}' のバッファが無い`);
-  return buffer;
+const resolveValue = (
+  source: ValueSource,
+  env: ReadonlyMap<string, ValueBinding>,
+): ValueBinding => {
+  if (source.kind === "resident") return { buffer: source.buffer, readable: true };
+  const binding = env.get(source.name);
+  if (binding === undefined) throw new ExecutionError(`値 '${source.name}' のバッファが無い`);
+  return binding;
 };
 
 /**
@@ -377,18 +393,18 @@ const resolveGeneration = (
 
 const resolveBinding = (
   source: BindingSource,
-  env: ReadonlyMap<string, GPUBuffer>,
-  temps: readonly GPUBuffer[],
+  env: ReadonlyMap<string, ValueBinding>,
+  temps: readonly ValueBinding[],
   generation: GenerationEncoding | undefined,
-): GPUBuffer => {
+): GPUBufferBinding => {
   switch (source.kind) {
     case "temp":
-      return temps[source.id];
+      return toResource(temps[source.id]);
     case "state":
     case "lengths":
-      return resolveGeneration(source, generation);
+      return { buffer: resolveGeneration(source, generation) };
     default:
-      return resolveValue(source, env);
+      return toResource(resolveValue(source, env));
   }
 };
 
@@ -423,7 +439,7 @@ const resolveWorkgroups = (
  * MUST: **静的な 3 つ組は 0 でも積む**（既存契約 — 0 要素テンソルの経路は要素数 0 の dispatch を
  * 「黙って飛ばさない」形で通っており、tests/e2e_public_api_test.ts がその dispatch 数を固定して
  * いる）。省く条件を「値が 0」にすると、非 generation 経路の挙動まで巻き添えで変わる。
- * MUST: 2 経路（アリーナ / 焼き込み）で**この 1 本**を共有する。片方だけ省くと、同じレシピが
+ * MUST: ミス run / ヒット run で**この 1 本**を共有する。片方だけ省くと、同じレシピが
  * 経路で違う dispatch 列を積む。
  */
 const dispatchWithWork = (
@@ -458,14 +474,14 @@ const bindsGeneration = (dispatch: DispatchRecipe): boolean =>
 /**
  * 1 dispatch ぶんの bind group を組む。
  *
- * MUST: アリーナ経路（{@link encodeDispatch}）と焼き込み（{@link bakeBindGroups}）は**この 1 本**
- * を共有する。エントリの並べ方が 2 実装に分かれると、焼き込み側だけ束縛番号や params の位置が
+ * MUST: ミス run（{@link bakeAllBindGroups}）と焼き込み（{@link bakeBindGroups}）は**この 1 本**
+ * を共有する。エントリの並べ方が 2 実装に分かれると、片方だけ束縛番号や params の位置が
  * ずれても validation は通り（layout さえ満たせばよい）、値だけが静かに変わる。
  */
 const createBindGroup = (
   device: GPUDevice,
   recipe: DispatchRecipe,
-  resolve: (source: BindingSource) => GPUBuffer,
+  resolve: (source: BindingSource) => GPUBufferBinding,
 ): GPUBindGroup =>
   device.createBindGroup({
     layout: recipe.layout,
@@ -473,210 +489,80 @@ const createBindGroup = (
       { binding: 0, resource: { buffer: recipe.params } },
       ...recipe.bindings.map((entry) => ({
         binding: entry.binding,
-        resource: { buffer: resolve(entry.source) },
+        resource: resolve(entry.source),
       })),
     ],
   });
 
-const encodeDispatch = (
-  recipe: DispatchRecipe,
-  run: EncodeContext,
-  temps: readonly GPUBuffer[],
-): void => {
-  const bindGroup = createBindGroup(
-    run.device,
-    recipe,
-    (source) => resolveBinding(source, run.env, temps, run.generation),
-  );
-  dispatchWithWork(run.scheduler, recipe, bindGroup, resolveWorkgroups(recipe, run.generation));
-};
-
 /**
- * レシピ 1 ステップぶんの実行（確保 → retain → 全 dispatch のエンコード → 入力の解放 →
- * 定義ぶんの解放）。
- *
- * MUST: 簿記は素のノードと融合ステップで**この 1 本**に閉じる（現行 `#encodeStep` の不変条件を
- * そのまま引き継ぐ）。ステップごとに手書きの解放簿記を置くと、アリーナの参照計数が別実装に
- * 分かれ、1 本でもずれると例外なしの沈黙誤値になる。
- * MUST: 出力の確保は当該ステップのどの dispatch のエンコードよりも前（ADR 0004 の不変条件）。
- * この順序が「まだ読まれる入力が出力として配り直される」事故を構造的に防いでいる。
- * MUST: 出力は**出力 slot 昇順**で確保・retain・env 登録し、定義ぶんの解放も同じ昇順で返す
- * （{@link StepRecipe.outputs} の順序規約 — 導出・焼き込みと共有する 1 本）。
- */
-export const executeStepRecipe = (recipe: StepRecipe, run: StepExecution): void => {
-  const { arena, env } = run;
-  const outs = recipe.outputs.map((output) => {
-    const buffer = output.kind === "alias"
-      ? resolveValue(output.source, env)
-      : arena.allocStorage(output.byteLength);
-    // MUST: 別名でも retain は「定義ぶんの 1 + 出力値の消費回数」を**実バッファに積む**
-    // （別名越しの消費まで数えるため — アリーナのエイリアス節）。
-    arena.retain(buffer, output.uses, { pinned: output.pinned });
-    env.set(output.name, buffer);
-    return buffer;
-  });
-
-  const temps: GPUBuffer[] = [];
-  recipe.dispatches.forEach((dispatch, index) => {
-    recipe.temps.forEach((temp, id) => {
-      if (temp.allocBefore !== index) return;
-      const buffer = arena.allocStorage(temp.byteLength);
-      arena.retain(buffer, 0);
-      temps[id] = buffer;
-    });
-    encodeDispatch(dispatch, run, temps);
-    // MUST: 同一境界の解放は確保の逆順（プールへ戻る順が現行と一致する）。
-    for (let id = recipe.temps.length - 1; id >= 0; id -= 1) {
-      if (recipe.temps[id].releaseAfter === index) arena.release(temps[id]);
-    }
-  });
-
-  // MUST: 解放はステップ境界（当該ステップの全 dispatch をエンコードし終えた後）のみ。
-  for (const name of recipe.releases) {
-    const buffer = env.get(name);
-    if (buffer !== undefined) arena.release(buffer);
-  }
-  // MUST: retain が積んだ定義ぶんの 1 をここで返す。消費者ゼロの中間出力（グラフ出力にも
-  // ならない到達不能な値）が解放されるのはこの 1 本だけで、抜けるとプール再利用から外れて
-  // peakTransientBytes が実際より大きく出る。
-  for (const buffer of outs) arena.release(buffer);
-};
-
-/** 1 ステップぶんの slot 割当（{@link PlanSlots.steps} の要素）。 */
-type StepSlots = {
-  /**
-   * {@link StepRecipe.outputs} と同順・同長の slot 添字。別名の出力（確保が出ない）は
-   * undefined。
-   */
-  readonly outputs: readonly (number | undefined)[];
-  /** {@link StepRecipe.temps} と同順・同長の slot 添字。 */
-  readonly temps: readonly number[];
-};
-
-/**
- * レシピ列 1 本ぶんの transient slot 表（{@link derivePlanSlots}）。
- *
- * slot は「run の間ずっと GPU に存在する中間バッファ 1 本」で、RunArena が run ごとに
- * createBuffer していた実体をそのまま Session 常駐へ移した形。
- */
-export type PlanSlots = {
-  /** slot ごとのバイト数（{@link toSizeClass} 済み — RunArena が実際に確保する大きさ）。 */
-  readonly bytes: readonly number[];
-  /** {@link StepRecipe} 列と同順・同長の割当。 */
-  readonly steps: readonly StepSlots[];
-  /**
-   * グラフ出力として pin された slot（プールへ返らない = 他の値と共有されない）。
-   * MUST: readback を許してよいのはこの集合だけ — 他の slot は run 中に別の値へ配り直され、
-   * 次 run では前 run の残骸が居るため（中間値 readback 拒否の規律）。
-   */
-  readonly pinned: ReadonlySet<number>;
-};
-
-/**
- * レシピ列から transient slot 表を導く。
- *
- * MUST: {@link RunArena} のサイズクラス LIFO を**仮想的に再生**して導く（独自パッキング禁止）。
- * ここが鏡写しである限り slot の本数と総バイト数は現行 run の実確保と一致し、常駐化しても
- * VRAM のピークは新しく生まれない。詰め直して減らそうとした瞬間、①現行の footprint 前提が
- * 崩れ ②「別の値が同じ実体を掴んでよいか」の判断がアリーナと 2 実装に分かれる。
+ * レシピ列から中間バッファの確保プログラムを組む（{@link planTransients} の入力）。
  *
  * MUST: 純関数（GPU 資源を作らず、レシピも変更しない）。
- * NOTE: state スロットと論理長 uniform は slot 表に**現れない**（ADR 0066 決定 5 — 所有者が
- * GenerationContext でプール対象外）。ここが見るのは出力と一時の確保仕様だけなので、束縛の
- * 種別を判別する必要が無い = generation を伴うレシピ列もそのまま通る。
+ * MUST: dispatch ごとの読み / 書きは {@link DispatchRecipe.roles}（WGSL 宣言）から採る。値名 /
+ * 一時を束ねる束縛に役割が無ければ fail loudly — 推測で埋めると、外れた dispatch だけが
+ * usage scope の validation で落ち、出力が全て 0 のまま例外にならない。
+ * NOTE: state スロットと論理長 uniform は計画に**現れない**（ADR 0066 決定 5 — 所有者が
+ * GenerationContext）。常駐（重み / scale）も同様。
  */
-export const derivePlanSlots = (recipes: readonly StepRecipe[]): PlanSlots => {
-  const bytes: number[] = [];
-  // サイズクラス → 空き slot（LIFO — RunArena.#pool と同じ形）。
-  const pool = new Map<number, number[]>();
-  const refs = new Map<number, number>();
-  const pinned = new Set<number>();
-  // 値名 → slot。slot を持たない値（グラフ入力・重み = プール対象外）は載せない。
-  const env = new Map<string, number>();
-  const steps: StepSlots[] = [];
-
-  const alloc = (byteLength: number): number => {
-    const sizeClass = toSizeClass(byteLength);
-    const reused = pool.get(sizeClass)?.pop();
-    if (reused !== undefined) return reused;
-    bytes.push(sizeClass);
-    return bytes.length - 1;
-  };
-  const retain = (slot: number | undefined, uses: number, isPinned: boolean): void => {
-    if (slot === undefined) return;
-    if (isPinned) pinned.add(slot);
-    refs.set(slot, (refs.get(slot) ?? 0) + uses + 1);
-  };
-  const release = (slot: number | undefined): void => {
-    if (slot === undefined) return;
-    const left = (refs.get(slot) ?? 0) - 1;
-    if (left < 0) throw new ExecutionError("slot 導出: 参照カウントが負（消費計数の誤り）");
-    refs.set(slot, left);
-    if (left > 0 || pinned.has(slot)) return;
-    const bucket = pool.get(bytes[slot]);
-    if (bucket === undefined) pool.set(bytes[slot], [slot]);
-    else bucket.push(slot);
-  };
-
-  for (const recipe of recipes) {
-    // MUST: 出力 slot 昇順（{@link StepRecipe.outputs} の順序規約 — 実行相と同順）。
-    const outputs = recipe.outputs.map((output) => {
-      // 別名は「入力の実体をそのまま出力にする」— 元が slot でなければ（グラフ入力・重み）
-      // この値も slot を持たない。
-      const slot = output.kind === "alias"
-        ? (output.source.kind === "value" ? env.get(output.source.name) : undefined)
-        : alloc(output.byteLength);
-      retain(slot, output.uses, output.pinned);
-      if (slot === undefined) env.delete(output.name);
-      else env.set(output.name, slot);
-      return slot;
-    });
-
-    const temps: number[] = [];
-    recipe.dispatches.forEach((_, index) => {
-      recipe.temps.forEach((temp, id) => {
-        if (temp.allocBefore !== index) return;
-        const slot = alloc(temp.byteLength);
-        retain(slot, 0, false);
-        temps[id] = slot;
-      });
-      // MUST: 同一境界の解放は確保の逆順（executeStepRecipe と同じ順で LIFO に戻す）。
-      for (let id = recipe.temps.length - 1; id >= 0; id -= 1) {
-        if (recipe.temps[id].releaseAfter === index) release(temps[id]);
+export const buildTransientProgram = (recipes: readonly StepRecipe[]): TransientProgram =>
+  recipes.map((recipe) => ({
+    outputs: recipe.outputs.map((output) => ({
+      name: output.name,
+      kind: output.kind,
+      byteLength: output.kind === "alloc" ? output.byteLength : 0,
+      source: output.kind === "alias" && output.source.kind === "value"
+        ? output.source.name
+        : undefined,
+      uses: output.uses,
+      pinned: output.pinned,
+    })),
+    temps: recipe.temps,
+    dispatches: recipe.dispatches.map((dispatch) => {
+      const reads: TransientRef[] = [];
+      const writes: TransientRef[] = [];
+      for (const entry of dispatch.bindings) {
+        const { source } = entry;
+        if (source.kind !== "value" && source.kind !== "temp") continue;
+        const ref: TransientRef = source.kind === "value"
+          ? { kind: "value", name: source.name }
+          : { kind: "temp", id: source.id };
+        if (dispatch.roles.writes.has(entry.binding)) writes.push(ref);
+        else if (dispatch.roles.reads.has(entry.binding)) reads.push(ref);
+        else {
+          throw new ExecutionError(
+            `dispatch '${dispatch.key}' の束縛 ${entry.binding} に WGSL の storage 宣言が無い` +
+              "（読み / 読み書きの役割が採れない）",
+          );
+        }
       }
-    });
+      return { reads, writes };
+    }),
+    releases: recipe.releases,
+  }));
 
-    for (const name of recipe.releases) release(env.get(name));
-    for (const slot of outputs) release(slot);
-    steps.push({
-      outputs: recipe.outputs.map((output, slot) =>
-        output.kind === "alias" ? undefined : outputs[slot]
-      ),
-      temps,
-    });
-  }
-  // MUST: 非 pinned の slot に参照が残っていないこと（{@link RunArena.assertDrained} と同じ
-  // 判定）。過多の解放は上の `release` が負値で即落とす一方、**足りない解放**はここまで無症状で
-  // 通り、その slot だけがプール再利用から外れたまま backing に居座る（VRAM が静かに増え、
-  // 症状は「同じグラフなのに enqueue 経路だけ footprint が大きい」になる）。run 経路は
-  // アリーナの `assertDrained` が同じ破れを見るが、`#enqueueOnce` は初回から backing を作って
-  // アリーナを 1 度も通さないので、この 1 本が無いと enqueue だけ検査の外に落ちる。
-  for (const [slot, count] of refs) {
-    if (count > 0 && !pinned.has(slot)) {
-      throw new ExecutionError(
-        `slot 導出: 未解放の参照が残存（slot ${slot}, refs=${count}, ${bytes[slot]}B — ` +
-          "消費計数が実際の解放より多い）",
-      );
-    }
-  }
-  return { bytes, steps, pinned };
-};
+/** レシピ列の中間バッファ計画（{@link buildTransientProgram} → {@link planTransients}）。 */
+export const planRecipes = (
+  recipes: readonly StepRecipe[],
+  limits: TransientLimits,
+): TransientPlan => planTransients(buildTransientProgram(recipes), limits);
 
-/** slot 添字 → 常駐バッファ。引けないのは slot 表とレシピ列の不整合（内部の不変条件破れ）。 */
-const resolveSlot = (slot: number | undefined, buffers: readonly GPUBuffer[]): GPUBuffer => {
-  const buffer = slot === undefined ? undefined : buffers[slot];
-  if (buffer === undefined) throw new ExecutionError(`slot ${slot} のバッファが無い`);
-  return buffer;
+/** slot 添字 → 領域上の束縛。引けないのは計画とレシピ列の不整合（内部の不変条件破れ）。 */
+const resolveSlot = (
+  slot: number | undefined,
+  plan: TransientPlan,
+  regions: readonly GPUBuffer[],
+): ValueBinding => {
+  const placed = slot === undefined ? undefined : plan.slots[slot];
+  const buffer = placed === undefined ? undefined : regions[placed.region];
+  if (slot === undefined || placed === undefined || buffer === undefined) {
+    throw new ExecutionError(`slot ${slot} の領域バッファが無い`);
+  }
+  return {
+    buffer,
+    offset: placed.offset,
+    size: placed.byteLength,
+    readable: plan.pinned.has(slot),
+  };
 };
 
 /**
@@ -689,59 +575,62 @@ const resolveSlot = (slot: number | undefined, buffers: readonly GPUBuffer[]): G
  */
 export type BakedGroups = readonly (readonly (GPUBindGroup | undefined)[])[];
 
-/** 焼き込みに要る Session 側の実体（両方の焼き込みが同じ束を受ける）。 */
-type BakeContext = {
+/** 焼き込みに要る実体（両方の焼き込みが同じ束を受ける）。 */
+export type BakeContext = {
   readonly device: GPUDevice;
-  /** slot 添字 → 常駐バッファ（{@link PlanSlots.bytes} と同順・同長）。 */
-  readonly buffers: readonly GPUBuffer[];
-  /** グラフ入力名 → backing 所有の常駐バッファ。 */
+  /** 中間バッファの計画（{@link planRecipes}）。 */
+  readonly plan: TransientPlan;
+  /** 領域添字 → 領域バッファ（{@link TransientPlan.regions} と同順・同長）。 */
+  readonly regions: readonly GPUBuffer[];
+  /** グラフ入力名 → 実体（backing 所有の常駐バッファ / run 寿命の入力バッファ / 常駐入力）。 */
   readonly inputs: ReadonlyMap<string, GPUBuffer>;
 };
 
-/** 焼き込み済みの slot backing 実行資材（{@link bakeBindGroups}）。 */
-type BakedPlan = {
-  /** Session 所有の実体だけを束ねる dispatch の bind group（残りは `undefined` の穴）。 */
+/** 焼き込みの結果（{@link bakeBindGroups} / {@link bakeAllBindGroups}）。 */
+export type BakedPlan = {
+  /** 選ばれた dispatch の bind group（残りは `undefined` の穴）。 */
   readonly groups: BakedGroups;
   /**
-   * 全ステップを展開し終えた時点の値名 → 実体（アリーナ経路の run 末尾の `env` と同じもの）。
-   * グラフ出力の読み戻し先を構築時に確定するのに使う。
+   * 全ステップを展開し終えた時点の値名 → 束縛先。グラフ出力の読み戻し先をここから引く
+   * （`readable` が真の値だけ読める）。
    */
-  readonly values: ReadonlyMap<string, GPUBuffer>;
+  readonly values: ReadonlyMap<string, ValueBinding>;
 };
 
 /**
- * 焼き込みの**唯一の実装**（Session 側 / context 側はどちらもここを通る）。`select` が真の
- * dispatch だけ bind group を組み、残りは `undefined` の穴で返す。
+ * 焼き込みの**唯一の実装**（Session 側 / context 側 / ミス run はどれもここを通る）。`select` が
+ * 真の dispatch だけ bind group を組み、残りは `undefined` の穴で返す。
  *
- * MUST: 値名 → 実体の写像はアリーナ経路（{@link executeStepRecipe}）と**同じ順で**展開する
+ * MUST: 値名 → 束縛先の写像は計画の再生（{@link planTransients}）と**同じ順で**展開する
  * — 出力を先に env へ載せてから当該ステップの dispatch を解決する順序が崩れると、出力を
  * 自分の入力にも束ねるステップだけが別の実体を掴む。出力が複数ある形では**出力 slot 昇順**まで
  * 揃える（{@link StepRecipe.outputs} の順序規約）。
- * MUST: 2 つの焼き込みで歩き方を分けない。context 側だけ別実装にすると、同じ dispatch の同じ
+ * MUST: 焼き込みで歩き方を分けない。context 側だけ別実装にすると、同じ dispatch の同じ
  * 束縛が「Session 側が焼いた group」と「context 側が焼いた group」で別の実体を指しうる
  * （どちらも layout は満たすので validation は通り、値だけが静かに変わる）。
  */
 const bakeGroups = (
   recipes: readonly StepRecipe[],
-  slots: PlanSlots,
   context: BakeContext,
   select: (dispatch: DispatchRecipe) => boolean,
   generation: GenerationEncoding | undefined,
 ): BakedPlan => {
-  const { device, buffers, inputs } = context;
-  const values = new Map<string, GPUBuffer>(inputs);
+  const { device, plan, regions } = context;
+  const values = new Map<string, ValueBinding>(
+    [...context.inputs].map(([name, buffer]) => [name, { buffer, readable: true }]),
+  );
   const groups: (readonly (GPUBindGroup | undefined)[])[] = [];
   recipes.forEach((recipe, index) => {
-    const step = slots.steps[index];
+    const step = plan.steps[index];
     recipe.outputs.forEach((output, slot) => {
       values.set(
         output.name,
         output.kind === "alias"
           ? resolveValue(output.source, values)
-          : resolveSlot(step.outputs[slot], buffers),
+          : resolveSlot(step.outputs[slot], plan, regions),
       );
     });
-    const temps = step.temps.map((slot) => resolveSlot(slot, buffers));
+    const temps = step.temps.map((slot) => resolveSlot(slot, plan, regions));
     groups.push(
       recipe.dispatches.map((dispatch) =>
         select(dispatch)
@@ -761,7 +650,7 @@ const bakeGroups = (
  * slot backing の bind group を焼き込む（構築時に 1 度だけ）。
  *
  * 焼き込めるのは束縛先が run を跨いで固定だから: params / 重み / per-channel scale は
- * `resident` の直参照、ノード出力・一時は {@link PlanSlots} の常駐 slot、グラフ入力は backing が
+ * `resident` の直参照、ノード出力・一時は計画が配った常駐領域の区間、グラフ入力は backing が
  * 所有する常駐バッファ（`inputs`）。run ごとに変わるのは**入力バッファの中身だけ**で、
  * bind group が指す実体は 1 つも動かない。
  *
@@ -772,12 +661,20 @@ const bakeGroups = (
  * MUST: 呼ぶのは run の errorScope 区間の内側だけ（createBindGroup の validation 失敗は
  * 例外にならない）。
  */
-export const bakeBindGroups = (
+export const bakeBindGroups = (recipes: readonly StepRecipe[], context: BakeContext): BakedPlan =>
+  bakeGroups(recipes, context, (dispatch) => !bindsGeneration(dispatch), undefined);
+
+/**
+ * ミス run の bind group を組む（run 寿命の領域に対して**全 dispatch**）。generation を伴う run は
+ * その run の {@link GenerationEncoding} をそのまま束ねる（run 寿命なので分離焼き込みは要らない）。
+ *
+ * MUST: 呼ぶのは run の errorScope 区間の内側だけ（{@link bakeBindGroups} と同じ理由）。
+ */
+export const bakeAllBindGroups = (
   recipes: readonly StepRecipe[],
-  slots: PlanSlots,
   context: BakeContext,
-): BakedPlan =>
-  bakeGroups(recipes, slots, context, (dispatch) => !bindsGeneration(dispatch), undefined);
+  generation: GenerationEncoding | undefined,
+): BakedPlan => bakeGroups(recipes, context, () => true, generation);
 
 /**
  * generation run の **context 側**の bind group を焼き込む（ADR 0066 決定 5 の分離焼き込み）。
@@ -791,9 +688,8 @@ export const bakeBindGroups = (
  */
 export const bakeGenerationBindGroups = (
   recipes: readonly StepRecipe[],
-  slots: PlanSlots,
   context: BakeContext & { readonly generation: GenerationEncoding },
-): BakedGroups => bakeGroups(recipes, slots, context, bindsGeneration, context.generation).groups;
+): BakedGroups => bakeGroups(recipes, context, bindsGeneration, context.generation).groups;
 
 /**
  * generation run の焼き込み実行面（{@link executeBakedPlan} の第 4 引数）。
@@ -806,7 +702,7 @@ export type BakedGeneration = {
   /**
    * ステップの dispatch を積む**前**に呼ぶ（poison 判定のスナップショット点 — ADR 0066 追記 3）。
    *
-   * MUST: 呼ぶ位置はアリーナ経路（{@link executeStepRecipe} の呼び口）と同じ「各ステップの直前」。
+   * MUST: 呼ぶ位置はミス run と同じ「各ステップの直前」。
    * ずらすと、同じグラフの同じ失敗が経路（ミス run / ヒット run）によって poison したりしなかったり
    * する。
    */
@@ -814,12 +710,11 @@ export type BakedGeneration = {
 };
 
 /**
- * 焼き込み済み backing の実行（slot 経路）。run が出す GPU 操作はこの dispatch だけで、
- * 確保・retain・release も createBindGroup も出ない。
+ * 焼き込み済み bind group の実行。run が出す GPU 操作はこの dispatch だけで、確保・解放も
+ * createBindGroup も出ない（ミス run は {@link bakeAllBindGroups} で組んだ group を渡す）。
  *
- * MUST: 積むコマンド列は {@link executeStepRecipe} と**同一**（bind 先の実体が run を跨いで
- * 同じになるだけ）。前 run の残骸が slot に残っていても正しいのは full-write（ADR 0014 —
- * 全ノードが出力の全バイトを書く）が根拠で、プール再利用の安全性と同じ 1 本の不変条件。
+ * MUST: 前 run の残骸が領域に残っていても正しいのは full-write（ADR 0014 — 全ノードが束縛範囲の
+ * 全バイトを書く）が根拠で、配り直しの安全性と同じ 1 本の不変条件。
  * MUST: 埋まらない位置は fail loudly（generation 面を渡さずに state を束ねる dispatch へ来た形）。
  * 通すと `undefined` を `setBindGroup` へ渡して真因から遠い診断になる。
  */

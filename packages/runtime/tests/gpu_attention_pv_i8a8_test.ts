@@ -333,8 +333,7 @@ const runPvI8a8 = async (
       0,
       stridedParams([batch, d, n], permuteSrcStrides([batch, n, d], [0, 2, 1]), 0),
     );
-    const vt = arena.allocStorage(Math.max(4, batch * d * n * 4));
-    arena.retain(vt, 0, { pinned: true });
+    const vt = arena.allocRegion(Math.max(4, batch * d * n * 4));
     scheduler.dispatch(
       permutePipeline,
       gpu.device.createBindGroup({
@@ -356,10 +355,8 @@ const runPvI8a8 = async (
     );
     const quantizeParams = arena.allocHostWritten(16, UNIFORM_IN);
     gpu.device.queue.writeBuffer(quantizeParams, 0, quantizeRowsParams(batch * d, n));
-    const vq = arena.allocStorage(Math.max(4, batch * d * n));
-    arena.retain(vq, 0, { pinned: true });
-    const vs = arena.allocStorage(Math.max(4, batch * d * 4));
-    arena.retain(vs, 0, { pinned: true });
+    const vq = arena.allocRegion(Math.max(4, batch * d * n));
+    const vs = arena.allocRegion(Math.max(4, batch * d * 4));
     scheduler.dispatch(
       quantizePipeline,
       gpu.device.createBindGroup({
@@ -383,8 +380,7 @@ const runPvI8a8 = async (
     const { pipeline, layout } = await cache.get(pipelineKey, attentionPvI8a8Wgsl(v4, dp4a));
     const params = arena.allocHostWritten(16, UNIFORM_IN);
     gpu.device.queue.writeBuffer(params, 0, attentionPvI8a8Params(m, d, n));
-    const out = arena.allocStorage(Math.max(4, batch * m * d * 4));
-    arena.retain(out, 0, { pinned: true });
+    const out = arena.allocRegion(Math.max(4, batch * m * d * 4));
     scheduler.dispatch(
       pipeline,
       gpu.device.createBindGroup({

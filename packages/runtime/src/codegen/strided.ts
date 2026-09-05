@@ -359,7 +359,7 @@ export const stridedWriteParams = (
  * cat の書き込み stride（出力の連続 stride）と、入力 `k` の書き出し先頭位置。
  *
  * offset は「連結軸の先行入力の長さの総和 × その軸の出力 stride」。ここを取り違えると
- * 出力の一部が二重に書かれ、残りが**未書き込みのまま**（プール再利用なら前の値）残る。
+ * 出力の一部が二重に書かれ、残りが**未書き込みのまま**（配り直しなら前の値）残る。
  */
 export const catOutStrides = (outShape: readonly number[]): number[] => {
   assertRank(outShape, "cat の出力");

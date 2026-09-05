@@ -239,10 +239,8 @@ const runAttentionQkI8a8 = async (
       gpu.device.queue.writeBuffer(params, 0, quantizeRowsParams(rows, d));
       const src = arena.allocHostWritten(Math.max(4, source.byteLength), STORAGE_IN);
       gpu.device.queue.writeBuffer(src, 0, source);
-      const payload = arena.allocStorage(Math.max(4, rows * d));
-      arena.retain(payload, 0, { pinned: true });
-      const scales = arena.allocStorage(Math.max(4, rows * 4));
-      arena.retain(scales, 0, { pinned: true });
+      const payload = arena.allocRegion(Math.max(4, rows * d));
+      const scales = arena.allocRegion(Math.max(4, rows * 4));
       const bindGroup = gpu.device.createBindGroup({
         layout: quantizeLayout,
         entries: [
@@ -268,8 +266,7 @@ const runAttentionQkI8a8 = async (
     const { pipeline, layout } = await cache.get(pipelineKey, attentionQkI8a8Wgsl(v4, dp4a));
     const params = arena.allocHostWritten(16, UNIFORM_IN);
     gpu.device.queue.writeBuffer(params, 0, attentionQkI8a8Params(m, n, d, prepared.scale));
-    const scores = arena.allocStorage(Math.max(4, batch * m * n * 4));
-    arena.retain(scores, 0, { pinned: true });
+    const scores = arena.allocRegion(Math.max(4, batch * m * n * 4));
     const bindGroup = gpu.device.createBindGroup({
       layout,
       entries: [

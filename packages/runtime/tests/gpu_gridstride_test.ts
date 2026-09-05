@@ -129,13 +129,11 @@ const runDegenerate = async (gpu: GpuContext, testCase: DegenerateCase): Promise
       entries.push({ binding: index + 1, resource: { buffer } });
     });
     if (testCase.sideOutputBytes !== undefined) {
-      const side = arena.allocStorage(Math.max(4, testCase.sideOutputBytes));
-      arena.retain(side, 0, { pinned: true });
+      const side = arena.allocRegion(Math.max(4, testCase.sideOutputBytes));
       entries.push({ binding: entries.length, resource: { buffer: side } });
     }
     const count = testCase.expected.data.length;
-    const dst = arena.allocStorage(Math.max(4, count * 4));
-    arena.retain(dst, 0, { pinned: true });
+    const dst = arena.allocRegion(Math.max(4, count * 4));
     entries.push({ binding: entries.length, resource: { buffer: dst } });
     if (testCase.weightScale !== undefined) {
       const scale = arena.allocHostWritten(testCase.weightScale.byteLength, STORAGE_IN);

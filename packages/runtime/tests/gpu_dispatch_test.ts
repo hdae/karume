@@ -44,9 +44,7 @@ Deno.test({
       );
       gpu.device.queue.writeBuffer(src, 0, input);
 
-      const dst = arena.allocStorage(bytes);
-      arena.retain(dst, 0, { pinned: true });
-      assertEquals(arena.isReadable(dst), true);
+      const dst = arena.allocRegion(bytes);
 
       const { pipeline, layout } = await cache.get(
         "test:double_plus_one:f32",
@@ -90,7 +88,8 @@ Deno.test({
 });
 
 Deno.test({
-  name: "アリーナのプール再利用が同じバッファを配り直しても結果が壊れない（実 GPU）",
+  name:
+    "領域の offset 束縛で中間と出力を 1 本のバッファに同居させ、配り直しても結果が壊れない（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
@@ -106,16 +105,17 @@ Deno.test({
       );
       gpu.device.queue.writeBuffer(source, 0, Float32Array.from({ length: count }, () => 1));
 
-      const { pipeline, layout } = await cache.get(
+      const { pipeline, layout, roles } = await cache.get(
         "test:double_plus_one:f32",
         DOUBLE_PLUS_ONE_WGSL,
       );
-      const dispatchInto = (src: GPUBuffer, dst: GPUBuffer): void => {
+      assertEquals(roles, { reads: new Set([0]), writes: new Set([1]) }, "WGSL 宣言から採った役割");
+      const dispatchInto = (src: GPUBufferBinding, dst: GPUBufferBinding): void => {
         const bindGroup = gpu.device.createBindGroup({
           layout,
           entries: [
-            { binding: 0, resource: { buffer: src } },
-            { binding: 1, resource: { buffer: dst } },
+            { binding: 0, resource: src },
+            { binding: 1, resource: dst },
           ],
         });
         scheduler.dispatch(
@@ -126,42 +126,43 @@ Deno.test({
         );
       };
 
-      // 中間値 → 最終出力。executor と同じ規律で、各ノードの境界で「入力の消費ぶん」と
-      // 「自ノード出力の定義ぶん」を解放する。中間値は次の確保で再利用させる。
-      const intermediate = arena.allocStorage(bytes);
-      arena.retain(intermediate, 1);
-      dispatchInto(source, intermediate);
-      arena.release(intermediate); // ノード 1 の境界: 定義ぶん
+      // 計画（ADR 0093）と同じ形: 1 本の領域に中間（offset 0）と出力（256 整列の次の区間）を
+      // 同居させる。同じ dispatch で読む中間と書く出力が同じバッファに載るのは usage scope の
+      // 制約に触れるので、そこだけは別バッファ（source）から読む形で組む。
+      const align = gpu.device.limits.minStorageBufferOffsetAlignment;
+      const outputOffset = Math.ceil(bytes / align) * align;
+      const region = arena.allocRegion(outputOffset + bytes);
+      const intermediate: GPUBufferBinding = { buffer: region, offset: 0, size: bytes };
+      const output: GPUBufferBinding = { buffer: region, offset: outputOffset, size: bytes };
+      const second = arena.allocRegion(bytes);
+      const relay: GPUBufferBinding = { buffer: second, offset: 0, size: bytes };
 
-      const output = arena.allocStorage(bytes);
-      arena.retain(output, 0, { pinned: true });
-      dispatchInto(intermediate, output);
-      arena.release(intermediate); // ノード 2 の境界: 消費 1 回ぶん
-      arena.release(output); // ノード 2 の境界: 定義ぶん
-      arena.assertDrained();
-
-      const recycled = arena.allocStorage(bytes);
-      assertEquals(recycled === intermediate, true, "解放済み中間値が再利用される");
-      assertEquals(arena.stats.reuseCount, 1);
+      dispatchInto({ buffer: source }, intermediate); // 1 → 3（領域の先頭区間へ）
+      dispatchInto(intermediate, relay); // 3 → 7（別バッファへ）
+      // 中間の生存が終わった区間へ別の値を配り直す（同じ offset 0 を出力側として再利用）。
+      dispatchInto(relay, intermediate); // 7 → 15
+      dispatchInto({ buffer: source }, output); // 1 → 3（同じ領域の別区間 — 配り直しに巻き込まれない）
 
       await scheduler.flush();
 
       const staging = gpu.device.createBuffer({
-        size: bytes,
+        size: bytes * 2,
         usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
       });
       const encoder = gpu.device.createCommandEncoder();
-      encoder.copyBufferToBuffer(output, 0, staging, 0, bytes);
+      encoder.copyBufferToBuffer(region, 0, staging, 0, bytes);
+      encoder.copyBufferToBuffer(region, outputOffset, staging, bytes, bytes);
       gpu.device.queue.submit([encoder.finish()]);
       await staging.mapAsync(GPUMapMode.READ);
       const actual = new Float32Array<ArrayBuffer>(staging.getMappedRange().slice(0));
       staging.unmap();
       staging.destroy();
 
-      // 1 → 3 → 7
       for (let i = 0; i < count; i += 1) {
-        assertEquals(actual[i], 7, `index ${i}`);
+        assertEquals(actual[i], 15, `配り直した区間 index ${i}`);
+        assertEquals(actual[count + i], 3, `同居する出力区間 index ${i}`);
       }
+      assertEquals(arena.stats.allocCount, 3);
     } finally {
       await arena.destroy();
       gpu.destroy();

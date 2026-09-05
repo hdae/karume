@@ -9,7 +9,7 @@
  * MUST: 純関数（GPU 資源を作らず、入力も変更しない）。実行（recipe.ts）・焼き込み（backing）・
  * 見積り（estimate.ts）は**この 1 本**を共有する — 規則が 2 箇所に分かれると、確保と見積り
  * （または確保と束縛）が例外なしに別の数を主張する。
- * MUST: 再生の順序は `executeStepRecipe` / 旧 `derivePlanSlots` と同一 — ステップ出力の確保
+ * MUST: 再生の順序は旧 `executeStepRecipe` / 旧 `derivePlanSlots`（2026-09-05 に退役）と同一 — ステップ出力の確保
  * （slot 昇順）→ dispatch ごとに一時の確保（`allocBefore`）→ dispatch → 一時の解放（`releaseAfter`・
  * 確保の逆順）→ 入力の解放（延べ列）→ 定義ぶんの解放（出力 slot 昇順）。順序が割れると
  * 「まだ読まれる入力が出力として配り直される」形が例外なしに生まれる。
@@ -107,6 +107,12 @@ export type TransientPlan = {
   readonly totalBytes: number;
   /** 同時生存バイトの最大（下界 — first-fit がこれに一致すれば断片化ゼロ）。 */
   readonly peakLiveBytes: number;
+  /**
+   * 先に置かれた別の slot とバイト範囲を共有する slot の本数（= 生存区間が重ならないので同じ
+   * バイトを配り直した回数）。旧プールの `reuseCount` に相当する診断値で、full-write（ADR 0014）の
+   * 故障注入テストが「配り直しが実際に起きた」ことを確かめる観測点。
+   */
+  readonly sharedSlots: number;
 };
 
 /** WebGPU core の保証既定（見積りが device 無しで使う）。 */
@@ -264,6 +270,7 @@ export const planTransients = (
   );
   const regions: { placed: number[]; size: number }[] = [];
   const slots: TransientSlot[] = new Array(intervals.length);
+  let sharedSlots = 0;
   const align = (value: number): number =>
     Math.ceil(value / limits.offsetAlignment) * limits.offsetAlignment;
   for (const id of order) {
@@ -283,6 +290,13 @@ export const planTransients = (
       }
       if (offset + iv.byteLength > limits.maxBufferSize) continue;
       slots[id] = { region, offset, byteLength: iv.byteLength };
+      // バイト範囲を先住の slot と共有する（生存が重ならないので合法）= 配り直し 1 回。
+      const end = offset + iv.byteLength;
+      if (
+        entry.placed.some((other) =>
+          slots[other].offset < end && offset < slots[other].offset + slots[other].byteLength
+        )
+      ) sharedSlots += 1;
       entry.placed.push(id);
       entry.size = Math.max(entry.size, offset + iv.byteLength);
       placed = true;
@@ -311,5 +325,6 @@ export const planTransients = (
     pinned: new Set(intervals.flatMap((iv, id) => (iv.pinned ? [id] : []))),
     totalBytes: regionBytes.reduce((total, size) => total + size, 0),
     peakLiveBytes,
+    sharedSlots,
   };
 };
