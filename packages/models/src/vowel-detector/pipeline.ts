@@ -26,10 +26,12 @@
  * 「1 フレーム = 20ms」が末尾だけ崩れる。切り捨てを忘れると `bindSymbols` が
  * 「実測 285 が宣言 '2T' の形をしていない」で落ちる（黙って丸めない）。
  *
- * MUST: **`maxFrames` 超過は fail loudly**（黙って切り詰めない）。切り詰めは音声の末尾を
- * 無言で捨てる = `.lab` が入力より短くなるだけで、呼び出し側からは正常な結果に見える。
- * 上限はグラフを焼いたときの記号次元の上限そのもので、配布形の `pipelineConfig` が持つ
- * （IR は記号の値域を持たないので、ここでしか止められない — `config.ts`）。
+ * MUST: **`minFrames` 未満 / `maxFrames` 超過はどちらも fail loudly**（黙って切り詰めない・
+ * 黙って pad しない）。切り詰めは音声の末尾を無言で捨てる = `.lab` が入力より短くなるだけで、
+ * 呼び出し側からは正常な結果に見える。下限側を通してしまうと記号 `T` を traced 範囲の外側で
+ * 束縛して走る（グラフは `Dim("T", min=…, max=…)` で焼かれている）。両側とも配布形の
+ * `pipelineConfig` が持つ数で、10ms フレーム側の単位（IR は記号の値域を持たないので、
+ * ここでしか止められない — `config.ts`）。
  *
  * ### 右ゼロ pad をしない理由（実測 — ADR 0057 以前の形が抱えていた負債）
  *
@@ -106,10 +108,13 @@ import {
   type ModelComponent,
 } from "../hub/components.ts";
 
-/** manifest の assets 表に現れる取得キーと、その safetensors のテンソル名（`dist.py` と対）。 */
+/**
+ * manifest の assets 表に現れる取得キーと、その safetensors のテンソル名
+ * （`tools/export-recipes/vowel_detector/distribution.py` と対）。
+ */
 const MEL_BASIS = "mel_basis";
 
-/** グラフ入力の名前（`export_vowel_detector.py` の `INPUT_NAME`）。 */
+/** グラフ入力の名前（`tools/export-recipes/vowel_detector/export.py` の `INPUT_NAME`）。 */
 const INPUT_NAME = "features";
 
 /** 出力の時間軸の刻み（入力 2 フレーム = 出力 1 フレーム — conv の stride 2）。 */
@@ -118,7 +123,10 @@ const TIME_STRIDE = 2;
 /** 入力フレームの毎秒本数（hop 160 / 16kHz = 10ms 格子）— 秒で語る文言のためだけに使う。 */
 const FRAMES_PER_SECOND = SAMPLE_RATE / HOP;
 
-/** manifest の weights 表に現れる取得キー（CRNN 1 本 — `dist.py` の `VOWEL_DETECTOR_GRAPH_ROLE`）。 */
+/**
+ * manifest の weights 表に現れる取得キー（CRNN 1 本 —
+ * `tools/export-recipes/vowel_detector/distribution.py` の `VOWEL_DETECTOR_GRAPH_ROLE`）。
+ */
 const GRAPH_ROLE = "crnn";
 
 /** {@link VowelDetectorPipeline.detect} の結果（上流 `@hdae/vowel-detector` の `DetectResult`）。 */
@@ -315,11 +323,18 @@ export const assertGraph = (
   return symbol;
 };
 
+/** 10ms フレーム数を秒へ直す（両側の門の文言で共有 — 小数 2 桁）。 */
+const seconds = (frames: number): string => (frames / FRAMES_PER_SECOND).toFixed(2);
+
 /**
  * 入力長（10ms フレーム数）が配布形の宣言する運用上限に収まっていることを見る。
  *
- * MUST: 上限超過は落とす（モジュール doc の MUST — 黙って切り詰めない）。上限はグラフを
- * 焼いたときの記号次元の上限で、IR は値域を持たないので**ここが唯一の門**。
+ * MUST: 上限超過は落とす（モジュール doc の MUST — 黙って切り詰めない）。
+ *
+ * MUST: 比較するのは **10ms 側**（`config.maxFrames` は記号次元 `T` の上限を入力側の単位へ
+ * 直した数で、`Dim(max=…)` そのものの 2 倍）。20ms 側の本数（`usable / TIME_STRIDE`）と
+ * 比べる形へ直すと、実効上限が黙って 2 倍になる。IR は記号の値域を持たないので**ここが
+ * 唯一の門**。
  *
  * NOTE: `export` はテストのため（境界の振る舞いを実 GPU 無しで名指しできるように）。
  */
@@ -328,12 +343,36 @@ export const assertFrameLimit = (
   frames: number,
 ): void => {
   if (frames <= config.maxFrames) return;
-  const seconds = (value: number): string => (value / FRAMES_PER_SECOND).toFixed(2);
   throw new Error(
     `VowelDetectorPipeline: 音声が長すぎる（10ms フレーム ${frames} 本 = ` +
       `${seconds(frames)} 秒）— この配布形が焼かれている上限は ` +
       `${config.maxFrames} フレーム（${seconds(config.maxFrames)} 秒）。` +
       "切り詰めると末尾が黙って落ちるので、呼び出し側で区切って渡す",
+  );
+};
+
+/**
+ * 入力長（10ms フレーム数）が配布形の宣言する運用**下限**に届いていることを見る
+ * （{@link assertFrameLimit} の対）。
+ *
+ * MUST: 下限未満は落とす（モジュール doc の MUST — 黙って pad しない）。グラフは
+ * `Dim("T", min=…)` で焼かれているので、下限未満の入力は記号を traced 範囲の外側で束縛して
+ * 走る（`bindSymbols` は `bound >= 0` しか見ないので runtime も止めない）。上限側と同じく、
+ * 比較するのは **10ms 側**。
+ *
+ * NOTE: `export` はテストのため（境界の振る舞いを実 GPU 無しで名指しできるように）。
+ */
+export const assertFrameFloor = (
+  config: VowelDetectorPipelineConfig,
+  frames: number,
+): void => {
+  if (frames >= config.minFrames) return;
+  throw new Error(
+    `VowelDetectorPipeline: 音声が短すぎる（10ms フレーム ${frames} 本 = ` +
+      `${seconds(frames)} 秒）— この配布形が焼かれている最小長は ` +
+      `${config.minFrames} フレーム（${seconds(config.minFrames)} 秒）。` +
+      "足りない分を右ゼロ pad で埋めると逆方向 GRU が pad 側から状態を持ち帰るので、" +
+      "呼び出し側で十分な長さを渡す",
   );
 };
 
@@ -518,12 +557,9 @@ const detectAudio = async (
   // 出力は 20ms 格子なので、奇数フレームの端数 1 本は落とす（**切り捨てであって pad ではない**
   // — 半端フレームを 1 本足すと、その 1 本だけが入力 1 フレーム分しか持たない出力になる）。
   const usable = features.frames - (features.frames % TIME_STRIDE);
-  if (usable < TIME_STRIDE) {
-    throw new Error(
-      `VowelDetectorPipeline: 音声が短すぎる（10ms フレーム ${features.frames} 本）— ` +
-        `出力 1 本を作るのに ${TIME_STRIDE} 本が要る`,
-    );
-  }
+  // 端数を落とした後の実長を、配布形が宣言する運用範囲の**両側**と突き合わせる
+  // （下限は「出力 1 本を作れるか」より厳しい — グラフの traced 範囲そのもの）。
+  assertFrameFloor(config, usable);
   assertFrameLimit(config, usable);
   const rows = usable / TIME_STRIDE;
 
@@ -656,7 +692,8 @@ export class VowelDetectorPipeline {
    * 責務で、周波数が違っても**この関数は落ちない**（モジュール doc）。
    *
    * 長さは実長のまま記号次元 `T` に束縛される（pad は 1 要素も入らない）。10ms フレーム数が
-   * 奇数なら端数 1 本を**切り捨てる**。`maxFrames` 超過は fail loudly で落ちる（同）。
+   * 奇数なら端数 1 本を**切り捨てる**。`minFrames` 未満と `maxFrames` 超過はどちらも
+   * fail loudly で落ちる（同）。
    *
    * 並行に呼ばれた場合は**待たされて順に**走る（GPU の破棄と in-flight の run を交差させない）。
    */

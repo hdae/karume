@@ -8,6 +8,8 @@
  * ② **同じ供給口から Session を 2 本続けて張れる**（列を呼ぶたびに作り直しているか — 使い切った
  *    列を使い回すと 2 本目が空の列を受ける）。
  * ③ **添字の欠番は fail loudly**（`[0]` と `[2]` だけの Record を黙って 1 本で読まない）。
+ *    `[0]` が**無い**形（`dit[1]` だけ / 素キー + `dit[1]`）も同じ門で落ちる — 添字つきキーが
+ *    1 本でもあるのに `[0]` が無い並びは、以前は混在検査も欠番検査も飛ばして素の 1 本になった。
  * ④ **素キーと `[i]` の混在は fail loudly**（どちらを正とするかは決められない）。
  *
  * ③④ の診断は `shard` の語と**揃っているキーの列挙**を含むこと（既存の資産診断の流儀）まで
@@ -96,7 +98,9 @@ Deno.test({
       // `m.w` は `[1]` にしか無いので、Session が張れること自体が「shard 列が流れた」証拠。
       // 2 本続けて張るのは、列を呼ぶたびに作り直しているかの門（②）。
       for (let index = 0; index < 2; index += 1) {
-        const session = await open("dit").createSession(gpu);
+        // MUST: `open` を呼び直さない — 呼び直すと供給口ごと作り直されるので、狙っている
+        // 「1 つのコンポーネントの `createSession` が毎回新しい列を流す」を 1 度も踏まない。
+        const session = await component.createSession(gpu);
         await session.dispose();
       }
     } finally {
@@ -135,6 +139,28 @@ Deno.test("assetComponentOpener: 素キーと分割キーの混在は shard を�
   const error = assertThrows(() => open("dit"), Error);
   assertStringIncludes(error.message, "素のキーと shard 分割キー");
   assertStringIncludes(error.message, "dit / dit[0] / dit[1]");
+});
+
+Deno.test("assetComponentOpener: 素キーと [0] 以外の分割キーの混在も落ちる（[0] 欠落で門を素通りしない）", () => {
+  // `assetShardKeys` は `[0]` から連続する範囲だけを拾うので、`[0]` が無いと混在検査を飛ばして
+  // 「素の 1 本」として組んでしまう形があった（`dit[1]` を黙って無視する = 分割配布のつもりで
+  // 組んだ Record が遠くの層から「重みが足りない」で落ちる）。
+  const open = openerOf({ dit: wholeShard(), "dit[1]": weightShard() });
+  const error = assertThrows(() => open("dit"), Error);
+  assertStringIncludes(error.message, "素のキーと shard 分割キー");
+  assertStringIncludes(error.message, "dit / dit[1]");
+});
+
+Deno.test("assetComponentOpener: 添字が [0] から始まらない列は始点を名指しして落ちる", () => {
+  const open = openerOf({ "dit[1]": graphShard(), "dit[2]": weightShard() });
+  const error = assertThrows(() => open("dit"), Error);
+  assertStringIncludes(error.message, "shard 添字が [0] から始まっていない");
+  assertStringIncludes(error.message, "dit[1] / dit[2]");
+});
+
+Deno.test("assetComponentOpener: [0] から連続する列は従来どおり通る（上 2 件が恒真でないこと）", () => {
+  const open = openerOf({ "dit[0]": graphShard(), "dit[1]": weightShard() });
+  assertEquals(open("dit").graph.outputs, ["y"]);
 });
 
 Deno.test("assetComponentOpener: キーがどちらの形でも無ければ家族の診断のまま落ちる", () => {

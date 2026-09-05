@@ -23,9 +23,10 @@
 //    きりで、外れた配布形はパース時に落ちる。とくに `classes` は**並びが id** なので、
 //    置換された宣言が通ると `.lab` は成立したままラベルだけが入れ替わる。
 //
-// ④ **運用上限**（`assertFrameLimit`）— 上限超過は fail loudly。ここは「黙って切り詰め
-//    ない」という配布形の約束そのもので、境界（ちょうどの長さ・1 フレーム超過）を名指しで
-//    踏む。上限は配布形の宣言なので、TS 側に定数を持たない（`config.ts` の MUST）。
+// ④ **運用範囲**（`assertFrameFloor` / `assertFrameLimit`）— 下限未満も上限超過も
+//    fail loudly。ここは「黙って切り詰めない・黙って pad しない」という配布形の約束そのもの
+//    で、境界（ちょうどの長さ・1 フレーム外側）を両側とも名指しで踏む。範囲は配布形の宣言
+//    なので、TS 側に定数を持たない（`config.ts` の MUST）。
 //
 // ⑤ **mel 基底資産**（`parseMelBasis`）— テンソル名・dtype・形の 3 つを見る。基底がずれても
 //    特徴は「それらしい別の値」になるだけで、shape も値域も合ったまま最後まで通る。
@@ -37,6 +38,7 @@ import {
   type VowelDetectorPipelineConfig,
 } from "../src/vowel-detector/config.ts";
 import {
+  assertFrameFloor,
   assertFrameLimit,
   assertGraph,
   parseMelBasis,
@@ -47,16 +49,23 @@ import { LIPSYNC_CLASSES } from "../src/vowel-detector/postprocess.ts";
 import { writeSafetensors } from "./helpers/safetensors-write.ts";
 import { type StubDim, stubModel } from "./helpers/stub-model.ts";
 
-/** 配布形が宣言する運用上限（`karume/dist.py` の `VOWEL_DETECTOR_MAX_FRAMES` と同じ数）。 */
+/**
+ * 配布形が宣言する運用範囲
+ * （`tools/export-recipes/vowel_detector/distribution.py` の `VOWEL_DETECTOR_MIN_FRAMES` /
+ * `VOWEL_DETECTOR_MAX_FRAMES` と同じ数 — 記号 `T` の `Dim(min, max)` を 10ms 側の単位へ
+ * 直したもの）。
+ */
+const MIN_FRAMES = 4;
 const MAX_FRAMES = 60_000;
 
 const fileRef = (path: string) => ({ path, size: 16, sha256: "a".repeat(64) });
 
-/** `models/karume-vowel-detector/karume.json` の `pipelineConfig` 実物（4 欄）。 */
+/** `models/karume-vowel-detector/karume.json` の `pipelineConfig` 実物（5 欄）。 */
 const PIPELINE_CONFIG: Record<string, unknown> = {
   sampleRate: SAMPLE_RATE,
   featureDim: FEATURE_DIM,
   classes: [...LIPSYNC_CLASSES],
+  minFrames: MIN_FRAMES,
   maxFrames: MAX_FRAMES,
 };
 
@@ -214,16 +223,17 @@ Deno.test("assertGraph: 出力のクラス数が宣言と違えば落とす", ()
   );
 });
 
-// ---- pipelineConfig のスキーマ（宣言 3 欄 + 運用上限）------------------------
+// ---- pipelineConfig のスキーマ（宣言 3 欄 + 運用範囲 2 欄）--------------------
 
 const config = (patch: Record<string, unknown> = {}): VowelDetectorPipelineConfig =>
   parseVowelDetectorPipelineConfig({ ...PIPELINE_CONFIG, ...patch });
 
-Deno.test("pipelineConfig: 実物の 4 欄をそのまま読める", () => {
+Deno.test("pipelineConfig: 実物の 5 欄をそのまま読める", () => {
   const parsed = config();
   assertEquals(parsed.sampleRate, SAMPLE_RATE);
   assertEquals(parsed.featureDim, FEATURE_DIM);
   assertEquals([...parsed.classes], [...LIPSYNC_CLASSES]);
+  assertEquals(parsed.minFrames, MIN_FRAMES);
   assertEquals(parsed.maxFrames, MAX_FRAMES);
 });
 
@@ -275,7 +285,36 @@ Deno.test("pipelineConfig: 上限の欠落は落とす（既定へ縮退しな�
   );
 });
 
-// ---- 運用上限（入力長の門）---------------------------------------------------
+Deno.test("pipelineConfig: 奇数・非整数・非正の下限宣言は落とす", () => {
+  // 下限も 10ms フレーム数（グラフ入力は `2T`）なので、上限と同じ刻みの検査が掛かる。
+  for (const value of [3, 0, -2, 2.5, "4"]) {
+    assertThrows(
+      () => config({ minFrames: value }),
+      Error,
+      "pipelineConfig.minFrames: 正の 2 の倍数でない",
+      `minFrames=${JSON.stringify(value)}`,
+    );
+  }
+});
+
+Deno.test("pipelineConfig: 下限の欠落は落とす（既定へ縮退しない）", () => {
+  const { minFrames: _dropped, ...rest } = PIPELINE_CONFIG;
+  assertThrows(
+    () => parseVowelDetectorPipelineConfig(rest),
+    Error,
+    "pipelineConfig.minFrames: 無い",
+  );
+});
+
+Deno.test("pipelineConfig: 下限が上限を超える宣言は落とす（受理集合が空になる）", () => {
+  assertThrows(
+    () => config({ minFrames: MAX_FRAMES + 2 }),
+    Error,
+    "受理できる入力長が 1 本も無い",
+  );
+});
+
+// ---- 運用範囲（入力長の門・両側）---------------------------------------------
 
 Deno.test("運用上限: ちょうどの長さは通り、1 フレーム超過で落ちる（境界は上側に閉じる）", () => {
   const parsed = config();
@@ -289,6 +328,31 @@ Deno.test("運用上限: ちょうどの長さは通り、1 フレーム超過�
   // 何秒までなら通るのかが文言に出ていること（切り詰めの代わりに呼び出し側が区切るため）。
   assert(error.message.includes(`${MAX_FRAMES} フレーム`), error.message);
   assert(error.message.includes("600.00 秒"), error.message);
+});
+
+Deno.test("運用下限: ちょうどの長さは通り、1 フレーム不足で落ちる（境界は下側に閉じる）", () => {
+  const parsed = config();
+  // 焼き込み下限ちょうど（10ms フレーム 4 本 = 記号 T が 2）は通る。
+  assertFrameFloor(parsed, MIN_FRAMES);
+  assertFrameFloor(parsed, MAX_FRAMES);
+  for (const frames of [MIN_FRAMES - 1, MIN_FRAMES - 2]) {
+    const error = assertThrows(
+      () => assertFrameFloor(parsed, frames),
+      Error,
+      "音声が短すぎる",
+      `frames=${frames}`,
+    );
+    // 何本あれば通るのかが文言に出ていること（pad の代わりに呼び出し側が長く渡すため）。
+    assert(error.message.includes(`${MIN_FRAMES} フレーム`), error.message);
+    assert(error.message.includes(`${frames} 本`), error.message);
+  }
+});
+
+Deno.test("運用下限: 下限は配布形の宣言から来る（TS 側の定数ではない）", () => {
+  // 同じ入力長が、宣言の下限が違う配布形では通ったり落ちたりする = 数の出所が manifest 側。
+  const strict = config({ minFrames: 8 });
+  assertThrows(() => assertFrameFloor(strict, 6), Error, "8 フレーム");
+  assertFrameFloor(config({ minFrames: 2 }), 2);
 });
 
 // ---- mel 基底の資産 ----------------------------------------------------------

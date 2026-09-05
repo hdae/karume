@@ -97,33 +97,79 @@ export const wholeComponent = (model: KarumeModel): ModelComponent => ({
 /** `<役割>[<添字>]` の添字部分（10 進整数のみ）。 */
 const SHARD_INDEX = /^\d+$/;
 
-/**
- * 取得済み資産の中で `<役割>[i]` を `[0]` から**連続する範囲だけ**拾う。1 本も無ければ空
- * （= 素の 1 本の配布形）。
- */
-const assetShardKeys = (
-  assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>,
-  componentKey: string,
-): readonly string[] => {
-  const keys: string[] = [];
-  for (let index = 0; Object.hasOwn(assets, `${componentKey}[${index}]`); index += 1) {
-    keys.push(`${componentKey}[${index}]`);
-  }
-  return keys;
-};
-
-/** `<役割>[<添字>]` の形をした取得キーの総数（{@link assetShardKeys} との差が欠番の本数）。 */
-const indexedKeyCount = (
-  assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>,
-  componentKey: string,
-): number => {
+/** `<役割>[<添字>]` の形をした取得キーの総数（連続本数との差が欠番の本数）。 */
+const indexedKeyCount = (keys: readonly string[], componentKey: string): number => {
   const prefix = `${componentKey}[`;
   let count = 0;
-  for (const key of Object.keys(assets)) {
+  for (const key of keys) {
     if (!key.startsWith(prefix) || !key.endsWith("]")) continue;
     if (SHARD_INDEX.test(key.slice(prefix.length, -1))) count += 1;
   }
   return count;
+};
+
+/**
+ * コンポーネント 1 本を「素の 1 本」と「shard 分割形」のどちらで読むか（と、どちらでもない
+ * = キーごと無い）。
+ */
+type ComponentKeyPlan =
+  | { readonly kind: "whole" }
+  | { readonly kind: "shards"; readonly keys: readonly string[] }
+  | { readonly kind: "absent" };
+
+/**
+ * 取得キーの表からコンポーネント 1 本の読み方を決める — **全量面と shard 面が共有する 1 本**。
+ *
+ * MUST: 添字は `[0]` から欠番なく連続していること・素キーと `[i]` を混ぜないこと。どちらも
+ * 取得キーの作り方が壊れている印で、黙って読み飛ばすと遠くの層から「重みが足りない」の形で
+ * 落ちる（未対応・想定外は fail loudly）。
+ *
+ * MUST: 判定を 2 面へ複製しない（`Record` と `ResolvedFiles` の器の違いは述語 `has` と
+ * キー一覧 `keys` で吸収する）。同じ規則を 2 実装持つと、片方だけ直った瞬間に「`fromPretrained`
+ * で読める配布形は `fromAssets` でも読める」（X2-101）が向きを持って破れる。
+ *
+ * NOTE: 「連続本数と添字つきキーの総数が一致する」ことは、`assets` 側に紛れた `<役割>[n]` を
+ * **全部**は排除しない — weights 由来の `[0..n-1]` の直後に続く綴りの資産（`dit[3]`）は連続の
+ * 一部として取り込まれる。取得キーの名前空間そのものを分けない限り閉じない穴で、2 面で同じ形。
+ */
+const planComponentKeys = (
+  where: string,
+  has: (key: string) => boolean,
+  keys: readonly string[],
+  componentKey: string,
+): ComponentKeyPlan => {
+  const shardKeys: string[] = [];
+  for (let index = 0; has(`${componentKey}[${index}]`); index += 1) {
+    shardKeys.push(`${componentKey}[${index}]`);
+  }
+  const indexed = indexedKeyCount(keys, componentKey);
+  const available = `（揃っているキー: ${keys.join(" / ")}）`;
+  if (has(componentKey)) {
+    if (indexed > 0) {
+      throw new Error(
+        `${where}: 資産 '${componentKey}' が素のキーと shard 分割キー` +
+          `（'${componentKey}[0]' 等）の両方で届いている（どちらか一方 MUST — ` +
+          `添字つきのキーは ${indexed} 本）${available}`,
+      );
+    }
+    return { kind: "whole" };
+  }
+  // キーごと無い（素も添字つきも 0 本）— 診断は呼び手の面ごとに違う。
+  if (indexed === 0) return { kind: "absent" };
+  if (shardKeys.length === 0) {
+    throw new Error(
+      `${where}: 資産 '${componentKey}' の shard 添字が [0] から始まっていない` +
+        `（'${componentKey}[0]' が無い / 添字つきのキーは ${indexed} 本）${available}`,
+    );
+  }
+  if (indexed !== shardKeys.length) {
+    throw new Error(
+      `${where}: 資産 '${componentKey}' の shard 添字が [0] から連続していない` +
+        `（連続しているのは ${shardKeys.length} 本 / 添字つきのキーは ${indexed} 本）` +
+        available,
+    );
+  }
+  return { kind: "shards", keys: shardKeys };
 };
 
 /**
@@ -153,7 +199,8 @@ const assetShardStream = (shards: readonly ModelShard[]): AsyncIterable<ModelSha
  *   失敗とフェンスは shard 面の綴り（`shard [n] 'transformer[0]'`）で帰属する（帰属先が複数
  *   あるので名乗るのが正しい）。
  *
- * MUST: 添字は `[0]` から欠番なく連続していること・素キーと `[i]` を混ぜないこと。どちらも
+ * MUST: 添字は `[0]` から欠番なく連続していること・素キーと `[i]` を混ぜないこと（判定の実体は
+ * {@link planComponentKeys} で、shard 面 {@link componentShards} と**同じ 1 本**）。どちらも
  * 取得キーの作り方が壊れている印で、黙って読み飛ばすと遠くの層から「重みが足りない」の形で
  * 落ちる（未対応・想定外は fail loudly）。
  *
@@ -166,24 +213,15 @@ export const assetComponentOpener = (
   buffer: (key: string) => ArrayBuffer,
 ): ComponentOpener =>
 (key) => {
-  const shardKeys = assetShardKeys(assets, key);
+  const plan = planComponentKeys(
+    where,
+    (name) => Object.hasOwn(assets, name),
+    Object.keys(assets),
+    key,
+  );
   // 素の 1 本（キーごと無い場合も含む — 「資産 X が無い」は家族側が揃っているキーつきで言う）。
-  if (shardKeys.length === 0) return wholeComponent(openModel(buffer(key)));
-  if (Object.hasOwn(assets, key)) {
-    throw new Error(
-      `${where}: 資産 '${key}' が素のキーと shard 分割キー（'${key}[0]'）の両方で届いている` +
-        `（どちらか一方 MUST — 揃っているキー: ${Object.keys(assets).join(" / ")}）`,
-    );
-  }
-  const indexed = indexedKeyCount(assets, key);
-  if (indexed !== shardKeys.length) {
-    throw new Error(
-      `${where}: 資産 '${key}' の shard 添字が [0] から連続していない` +
-        `（連続しているのは ${shardKeys.length} 本 / 添字つきのキーは ${indexed} 本）` +
-        `（揃っているキー: ${Object.keys(assets).join(" / ")}）`,
-    );
-  }
-  const shards = shardKeys.map((shardKey) => {
+  if (plan.kind !== "shards") return wholeComponent(openModel(buffer(key)));
+  const shards = plan.keys.map((shardKey) => {
     // 家族の門（bytes が buffer 全体を占めるか）を shard 1 本ずつにも通す。返る buffer は
     // その view の buffer そのものなので、view を作り直しても写しは 1 バイトも起きない。
     const bytes = buffer(shardKey);
@@ -268,6 +306,10 @@ const componentShardStream = (
  * コンポーネント 1 本の shard 列（宣言順 — 先頭がグラフ shard・ADR 0071）を取得キーの表から
  * 引く。キーの綴りは `resolveFiles` の規約そのもの（1 shard なら weights 名・複数なら
  * `<weights>[i]`）。
+ *
+ * MUST: 受理集合は全量面と**同じ 1 本**（{@link planComponentKeys}）から引く。素キーがあれば
+ * `[i]` を見ない形だと、混ぜて届いた取得キーが黙って読み飛ばされ、残りが `consumed` に入らず
+ * 資産として全量取得される（Session の shard 列からは消える）。
  */
 const componentShards = (
   where: string,
@@ -275,23 +317,26 @@ const componentShards = (
   key: string,
   consumed: Set<string>,
 ): readonly FileRef[] => {
-  if (Object.hasOwn(files, key)) {
-    consumed.add(key);
-    return [files[key]];
-  }
-  const shards: FileRef[] = [];
-  for (let index = 0; Object.hasOwn(files, `${key}[${index}]`); index += 1) {
-    const shardKey = `${key}[${index}]`;
-    consumed.add(shardKey);
-    shards.push(files[shardKey]);
-  }
-  if (shards.length === 0) {
+  const plan = planComponentKeys(
+    where,
+    (name) => Object.hasOwn(files, name),
+    Object.keys(files),
+    key,
+  );
+  if (plan.kind === "absent") {
     throw new Error(
       `${where}: コンポーネント '${key}' のファイルが manifest に無い` +
         `（取得キー: ${Object.keys(files).join(" / ")}）`,
     );
   }
-  return shards;
+  if (plan.kind === "whole") {
+    consumed.add(key);
+    return [files[key]];
+  }
+  return plan.keys.map((shardKey) => {
+    consumed.add(shardKey);
+    return files[shardKey];
+  });
 };
 
 /**

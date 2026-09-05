@@ -85,3 +85,22 @@ Deno.test("assertRequiredLimitsSatisfied: 診断に where・limit 名・要求�
     }
   }
 });
+
+Deno.test("assertRequiredLimitsSatisfied: runtime が持たない limit 名は語彙のずれとして落ちる", () => {
+  // hub が受理した名前を runtime が持たない形（防御の二段目）。黙って読み飛ばすと「宣言された
+  // limit が誰にも見られない」= 静かな頭打ちに戻る。`limit_vocabulary_test.ts` が緑である限り
+  // 構造的には到達しないが、その門が外れたときにここが受け止める。
+  //
+  // 未知キーは index signature 経由で組む（`as unknown as` で型を殺すと、この検査が
+  // 「型が緩んだこと」ではなく「実行時に何を言うか」を見ていることが読み取れなくなる）。
+  const spec: Record<string, number> = { maxBufferSize: 1, karumeUnknownLimit: 1 };
+  const error = assertThrows(
+    () => assertRequiredLimitsSatisfied(spec, LIMITS, WHERE),
+    Error,
+  );
+  for (const fragment of [WHERE, "karumeUnknownLimit", "tests/limit_vocabulary_test.ts"]) {
+    if (!error.message.includes(fragment)) {
+      throw new Error(`診断に '${fragment}' が無い: ${error.message}`);
+    }
+  }
+});

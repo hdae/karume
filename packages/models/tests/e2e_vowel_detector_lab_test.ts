@@ -47,7 +47,7 @@ import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
 /** 配布形（`karume dist --pipeline vowel-detector` の出力）。 */
 const DIST_DIR = new URL("../../../models/karume-vowel-detector/", import.meta.url);
-/** 系列（`export_vowel_detector.py` の出力 — 直接経路の相手）。 */
+/** 系列（`tools/export-recipes/vowel_detector/export.py` の出力 — 直接経路の相手）。 */
 const SERIES_DIR = new URL(
   "../../../outputs/series/vowel-detector-crnn-epoch3/",
   import.meta.url,
@@ -94,8 +94,8 @@ const MODEL_AVAILABLE = manifestText !== undefined && modelPresent(SERIES_MODEL)
 if (!MODEL_AVAILABLE) {
   console.warn(
     `[karume] ${DIST_DIR.pathname} / ${SERIES_DIR.pathname} が揃っていないため母音検出の` +
-      "配布形 E2E を SKIP する（生成: cd tools/exporter && uv run --frozen python " +
-      "export_vowel_detector.py && uv run --frozen karume dist --pipeline vowel-detector）",
+      "配布形 E2E を SKIP する（生成: cd tools/export-recipes && uv run python " +
+      "-m vowel_detector.export && uv run python dist.py --pipeline vowel-detector）",
   );
 }
 /**

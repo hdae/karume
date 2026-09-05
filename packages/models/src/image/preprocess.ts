@@ -28,8 +28,8 @@
  * どちらのクラスも `PILImageResampling.BICUBIC` なので「SigLIP は bicubic」と読み違えやすいが、
  * SigLIP2 はチェックポイントの config が既定を上書きしている。取り違えの実測は SigLIP2 側で
  * 最大 47/255、DA-V2 側で `pixel_values` の最大 0.59（1 LSB = 0.0175 の 34 倍）。
- * `resample` の実測は `tools/exporter/siglip2_preprocess.py` と
- * `tools/exporter/export_depth_anything.py` が emit のたびに行う。
+ * `resample` の実測は `tools/export-recipes/siglip2/preprocess.py` と
+ * `tools/export-recipes/depth_anything/export.py` が emit のたびに行う。
  *
  * MUST: 2 パスの**間**で uint8 へ丸め直す（{@link resizeRgb8}）。PIL / torchvision の uint8
  * 経路は中間バッファを uint8 で持つので、f64 のまま縦パスへ渡すと参照とずれる標本が
@@ -147,8 +147,9 @@ const assertRgb8 = (image: Rgb8Image): void => {
  * `keep_aspect_ratio` を立てているが、正方入力 → 正方 `size` では恒等になる（アスペクト比を
  * 保つ経路が要るモデルが出るまで、この関数は寸法を受けるだけに留める）。
  *
- * `filter` の既定が bilinear なのは既存の呼び出し側（SigLIP2 / BiRefNet）の値で、**モデル
- * カードの一部**なので新しいファミリは必ず自分の `resample` を明示する。
+ * `filter` は**モデルカードの一部**なので、家族側の呼び出しは 3 つとも `config.interpolation`
+ * を明示で渡す（既定に頼る呼び出し側はもう無い — 残る既定 bilinear はテストが幾何だけを見る
+ * ときの省略形）。
  */
 export const resizeRgb8 = (
   image: Rgb8Image,

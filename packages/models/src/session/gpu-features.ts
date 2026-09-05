@@ -141,9 +141,17 @@ export const assertRequiredLimitsSatisfied = (
  * 突き合わせる。GPU の無い環境ではここが `GpuUnavailableError` になり、**重みを 1 バイトも
  * 落とさない**（それが席の存在理由 — 従来は数 GiB を転送した後に落ちていた）。
  *
- * MUST: 宣言が無い（`spec === undefined`）配布形ではアダプタを取りに行かない。取りに行くと、
- * 何も要求していない配布形が GPU 無し環境で**ロードすらできなく**なる（既定スペックで動く
- * という「欄なし」の意味論を壊す）。
+ * MUST: 宣言が無い（`spec === undefined`）配布形でもアダプタは 1 度読む。ここで買うのは
+ * **GPU 不在の早期検出だけ**で、limits の比較は spec 無しなら
+ * {@link assertRequiredLimitsSatisfied} の入口で no-op になる（「欄なし = 既定スペックで動く」
+ * という ADR 0089 決定 3 の意味論は 1 文字も変わらない）。読まない形にすると、宣言の無い
+ * 配布形だけが GPU 不在の失敗を**全重みを落とし切った後**に受け取る = この席が消しに来た
+ * 失敗の形がそのまま残る（8 家族の `#build` は `options.gpu` が無ければ必ず `acquireGpu` を
+ * 踏むので、GPU 無し環境で `fromPretrained` が完走することは無い）。
+ *
+ * NOTE: 追加のコストは `requestAdapter` 1 往復だけ（アダプタは持ち回らないので失効の危険は
+ * 増えない — {@link readAdapterLimits}）。共有 GPU を渡された経路ではそもそもアダプタを
+ * 読まない。
  *
  * NOTE: 共有 GPU の経路は各家族の admission 関数が同じ検査を既に通している（あちらは
  * `fromAssets` 面も守る席）。ここが同じ比較をもう一度するのは、`fromPretrained` の 8 家族が
@@ -154,7 +162,6 @@ export const assertRequiredLimitsBeforeDownload = async (
   sharedGpu: GpuContext | undefined,
   where: string,
 ): Promise<void> => {
-  if (spec === undefined) return;
   const limits = sharedGpu === undefined ? await readAdapterLimits() : sharedGpu.limits;
   assertRequiredLimitsSatisfied(spec, limits, where);
 };

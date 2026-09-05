@@ -137,8 +137,9 @@ Deno.test("fromAssets: pipelineConfig の欄が欠けていれば構築時に落
 });
 
 Deno.test("fromAssets: bilinear 以外の補間を宣言した配布形は受理しない", async () => {
-  // 前処理層が持つのは antialias 付き bilinear だけ。bicubic を黙って bilinear で通すと
-  // resize の値が最大 47/255 ずれたまま実行される（config.ts の MUST）。
+  // この配布形の上流 resample は 2（PIL の BILINEAR）。前処理層は bicubic も実装しているが、
+  // 受理集合を広げるのは別の判断で、bicubic を黙って bilinear で通すと resize の値が最大
+  // 47/255 ずれたまま実行される（config.ts の MUST）。
   const manifest = parseManifest(withConfig({ ...PIPELINE_CONFIG, interpolation: "bicubic" }));
   await assertRejects(
     () => Siglip2Pipeline.fromAssets({ manifest, assets: emptyAssets }),

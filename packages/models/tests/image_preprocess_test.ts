@@ -1,6 +1,6 @@
 // 画像前処理層（src/image/preprocess.ts）の Python 正本とのパリティ検証。
 //
-// フィクスチャ `image-preprocess/parity.json` は exporter（tools/exporter/siglip2_preprocess.py）が
+// フィクスチャ `image-preprocess/parity.json` は recipe（tools/export-recipes/siglip2/preprocess.py）が
 // 生成する。正本は transformers 5.14.1 の `SiglipImageProcessor`（`TorchvisionBackend` — v5 の
 // `AutoImageProcessor` が既定で返す fast 側）で、中身は 7 ケースぶんの
 //  ・`input`       合成画像の RGB8（行優先・画素あたり 3 バイト）
@@ -234,6 +234,37 @@ Deno.test("bicubic の overshoot は巻き戻らず飽和する", () => {
 
   assertEquals(Math.min(...got.data), 0);
   assertEquals(Math.max(...got.data), 255);
+});
+
+Deno.test("bicubic の縮小は台を縮尺ぶん伸ばす（DA-V2 の実運用そのもの・手計算タップ突合）", () => {
+  // 資産不要の bicubic ケースは他に 3 本あるが、いずれも `filterScale === 1` の側（恒等と拡大）
+  // なので、`buildTaps` の `filterScale = max(scale, 1) > 1` の枝 = **縮小**が 1 度も踏まれない。
+  // Python 正本との突合は実資産の e2e にしか無いので、ここは Pillow の `ImagingResample` の式を
+  // 手で展開した期待値を置く。
+  //
+  // 幾何: 4 → 2（`scale = 2` / `filterScale = 2` / `support = 2×2 = 4`）。入力は 1 行 4 画素の
+  // `[0, 0, 0, 255]`（最後の 1 点だけが立つ非対称形 — 重みの並びが左右で入れ替わると値が動く）。
+  //
+  // 出力 1（`center = 1.5×2 = 3.0`・`start = 0` / `stop = 4`）の生の重みは
+  // `cubic((j − 2.5) / 2)` = [cubic(−1.25), cubic(−0.75), cubic(−0.25), cubic(0.25)]
+  //   = [−0.0703125, 0.2265625, 0.8671875, 0.8671875]（総和 1.890625）。
+  // 立っているのは j = 3 だけなので 255 × 0.8671875 / 1.890625 = 116.9628… → 四捨五入で **117**。
+  //
+  // 出力 0（`center = 1.0`・`start = 0` / `stop = 4`）は重みが左右反転した並びで、立っている
+  // j = 3 の重みが負のローブ（−0.0703125 / 1.890625）。255 × それ = −9.48… で、`round8` の
+  // clamp が **0** に飽和させる。
+  //
+  // 落ちてほしい改変: `support` から `filterScale` を落とす（→ 出力 1 が 113）/ `weight` の引数
+  // から `/ filterScale` を落とす（→ 135）。どちらも既存 3 本では緑のまま通る。
+  const data = new Uint8Array([0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255, 255]);
+  const image: Rgb8Image = { data, width: 4, height: 1 };
+
+  const got = resizeRgb8(image, 2, 1, "bicubic");
+  assertEquals(Array.from(got.data), [0, 0, 0, 117, 117, 117]);
+
+  // 対照 — 同じ幾何を bilinear で通すと別の値になる（フィルタ指定が黙って無視されていない）。
+  const bilinear = resizeRgb8(image, 2, 1, "bilinear");
+  assertEquals(Array.from(bilinear.data), [0, 0, 0, 109, 109, 109]);
 });
 
 // ---- 入口の契約（想定外は fail loudly）--------------------------------------

@@ -22,7 +22,7 @@
  * ## NOTE: 解像度は宣言であってグラフの正本ではない
  *
  * `imageWidth` / `imageHeight` は焼かれたグラフの入力宣言と**同じ数**で、組み立て段
- * （`tools/exporter/karume/dist.py` の Depth Anything 節）が上流 `preprocessor_config.json` の
+ * （`tools/export-recipes/depth_anything/distribution.py`）が上流 `preprocessor_config.json` の
  * `size` から書き、同じ席でグラフと突き合わせる。それでも宣言を置くのは、①前処理の resize 先は
  * グラフを開く前に読めるべき欄で ②モデルカードが解像度を説明できるようにするため。二重化した
  * 分は {@link DepthAnythingPipelineConfig} を使う側（`pipeline.ts` の `assertStaticDim`）が

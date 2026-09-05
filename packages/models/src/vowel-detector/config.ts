@@ -8,7 +8,7 @@
  * 黙って既定へ縮退すると、配布者の意図した上限と実行が食い違ったまま気づけない）。
  * MUST: マップは `Object.hasOwn` 経由でのみ引く（横断不変条件）。
  *
- * ## ここに並ぶ 4 欄のうち、**実行時に効くのは `maxFrames` だけ**
+ * ## ここに並ぶ 5 欄のうち、**実行時に効くのは `minFrames` / `maxFrames` だけ**
  *
  * 他の 3 欄（`sampleRate` / `featureDim` / `classes`）は BiRefNet の `interpolation` と同じ
  * **宣言**で、受理集合はこの実装が持つ 1 値きり。分岐を持たせるのではなく、外れた配布形を
@@ -21,12 +21,14 @@
  * - `classes` — **並びが id**（`postprocess.ts` の `LIPSYNC_CLASSES`）。並びが違う配布形は
  *   ラベルが置換されるだけで、区間割りも `.lab` の書式も完全に成立する = 最も気づけない。
  *
- * ## MUST: `maxFrames` は配布形が宣言する運用上限（TS 側に定数を持たない）
+ * ## MUST: `minFrames` / `maxFrames` は配布形が宣言する運用範囲（TS 側に定数を持たない）
  *
- * グラフの時間軸は記号なので、**IR は上限を持たない**（`docs/ir-v1.md` の `symbols` は名前の
- * 列挙だけ）。焼くときに `Dim(max=…)` で宣言した値を配布形から受け、`detect` が特徴抽出の
- * 直後に落とす（正本は exporter の `dist.py`）。ここに既定値や定数を置くと、別の上限で焼いた
- * 配布形が来たときにホストだけが古い数を持つ形になる（SBV2 の `maxTokens` と同じ判断）。
+ * グラフの時間軸は記号なので、**IR は値域を持たない**（`docs/ir-v1.md` の `symbols` は名前の
+ * 列挙だけ）。焼くときに `Dim(min=…, max=…)` で宣言した記号 `T`（20ms 格子）の値域を
+ * **入力側の単位（10ms フレーム）へ直したもの**を配布形から受け、`detect` が特徴抽出の直後に
+ * 両側とも落とす（正本は `tools/export-recipes/vowel_detector/distribution.py`）。ここに既定値
+ * や定数を置くと、別の値域で焼いた配布形が来たときにホストだけが古い数を持つ形になる
+ * （SBV2 の `maxTokens` と同じ判断）。
  *
  * ## MUST: 後処理の定数（`switchPenalty` / `minDurationFrames` / `frameSec`）はここに無い
  *
@@ -47,6 +49,7 @@ const ROOT_KEYS: readonly string[] = [
   "sampleRate",
   "featureDim",
   "classes",
+  "minFrames",
   "maxFrames",
 ];
 
@@ -61,8 +64,17 @@ export type VowelDetectorPipelineConfig = {
   /** 出力クラス（**並びが id**）。受理するのは {@link LIPSYNC_CLASSES} と同一の並びだけ。 */
   readonly classes: typeof LIPSYNC_CLASSES;
   /**
-   * 1 回の `detect` が受ける 10ms フレーム数の上限（= グラフを焼いたときの記号次元の上限）。
-   * **2 の倍数**（グラフ入力は `2T`）。
+   * 1 回の `detect` が受ける 10ms フレーム数の**下限** = 記号次元 `T` の下限（20ms 格子）を
+   * 入力側の単位へ直したもの。**2 の倍数**（グラフ入力は `2T`）。
+   */
+  readonly minFrames: number;
+  /**
+   * 1 回の `detect` が受ける 10ms フレーム数の**上限** = 記号次元 `T` の上限（20ms 格子）を
+   * 入力側の単位へ直したもの。**2 の倍数**（グラフ入力は `2T`）。
+   *
+   * NOTE: `Dim(max=…)` の数**そのものではない** — あちらは 20ms 格子の本数で、この欄はその
+   * 2 倍（10ms フレーム数）。比較相手も 10ms 側（{@link parseVowelDetectorPipelineConfig} の
+   * 消費者 = `pipeline.ts` の `assertFrameLimit`）。
    */
   readonly maxFrames: number;
 };
@@ -121,12 +133,12 @@ const readClasses = (
 };
 
 /**
- * 運用上限を読む。
+ * 運用範囲の片側（`minFrames` / `maxFrames`）を読む。どちらも 10ms フレーム数。
  *
- * MUST: 2 の倍数であることまで見る — グラフ入力は `2T` なので、奇数の上限は「その 1 本だけは
- * 通らない上限」という、宣言としては成立するが意味の壊れた数になる。
+ * MUST: 2 の倍数であることまで見る — グラフ入力は `2T` なので、奇数の境界は「その 1 本だけは
+ * 通らない境界」という、宣言としては成立するが意味の壊れた数になる。
  */
-const readMaxFrames = (
+const readFrameBound = (
   raw: Record<string, unknown>,
   key: string,
   where: string,
@@ -151,6 +163,14 @@ export const parseVowelDetectorPipelineConfig = (
 ): VowelDetectorPipelineConfig => {
   const where = "pipelineConfig";
   assertAllowedKeys(raw, ROOT_KEYS, where);
+  const minFrames = readFrameBound(raw, "minFrames", where);
+  const maxFrames = readFrameBound(raw, "maxFrames", where);
+  if (minFrames > maxFrames) {
+    throw new Error(
+      `${where}: minFrames ${minFrames} が maxFrames ${maxFrames} を超えている` +
+        "— 受理できる入力長が 1 本も無い宣言になる",
+    );
+  }
   return {
     sampleRate: readOnlyNumber(
       raw,
@@ -167,6 +187,7 @@ export const parseVowelDetectorPipelineConfig = (
       "80 次元 log-mel + DSP 3 次元は学習時の契約そのもの（src/vowel-detector/features.ts）",
     ),
     classes: readClasses(raw, "classes", where),
-    maxFrames: readMaxFrames(raw, "maxFrames", where),
+    minFrames,
+    maxFrames,
   };
 };

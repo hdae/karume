@@ -18,15 +18,16 @@
  *
  * ## MUST: 補間は**宣言**として持ち、対応外は値を保持せずパース時に拒否する
  *
- * `src/image/preprocess.ts` が実装しているのは antialias 付き **bilinear** だけで、これが
- * 上流と一致するのは `preprocessor_config.json` の `"resample"` が 2（PIL の BILINEAR）の
- * ときだけ。bicubic を要求するチェックポイントを黙って bilinear で通すと、**resize の値が
- * 最大 47/255 ずれたまま**ロードも実行も通る（実測 — 前処理層のモジュール doc）。分岐を
- * 持つのではなく**受理しない**（型としても `"bilinear"` しか表せない）。
+ * 上流 `preprocessor_config.json` の `"resample"` が 2（PIL の BILINEAR）なので、この家族の
+ * 前処理は bilinear が正本。bicubic を要求するチェックポイントを黙って bilinear で通すと、
+ * **resize の値が最大 47/255 ずれたまま**ロードも実行も通る（実測 — 前処理層のモジュール
+ * doc）。分岐を持つのではなく**受理しない**（型としても `"bilinear"` しか表せない）。
+ * 前処理層（`src/image/preprocess.ts`）は bicubic も実装しているので、受理集合を広げるかは
+ * 「この配布形の上流がどの `resample` で学習されたか」の判断であって実装の有無ではない。
  *
  * NOTE: rescale の除数（255）はここに無い。`normalizeToNchw` の入口が 8bit の画素列
  * （`Rgb8Image`）で閉じており、`rescale_factor` が 1/255 でないチェックポイントは
- * **配布形を組む段**で落ちる（`tools/exporter/karume/dist.py` の SigLIP2 節）。実行時に
+ * **配布形を組む段**で落ちる（`tools/export-recipes/siglip2/distribution.py`）。実行時に
  * 選べない数を宣言だけ持たせても、二重の正本が増えるだけになる。
  *
  * NOTE: 公開配布リポの対応表（{@link SIGLIP2_SOURCES}）もここに置く。上の MUST が禁じる
@@ -204,7 +205,8 @@ export const parseSiglip2PipelineConfig = (
       "interpolation",
       where,
       INTERPOLATION,
-      "前処理の resize が antialias 付き bilinear の 1 本しかない（src/image/preprocess.ts）",
+      "上流 preprocessor_config.json の resample は 2（PIL の BILINEAR）で、" +
+        "bicubic で通すと resize の値が最大 47/255 ずれる",
     ),
   };
 };

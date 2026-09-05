@@ -1,5 +1,5 @@
 // `birefnet/1` の `pipelineConfig` スキーマ（`src/birefnet/config.ts`）。**焼く側**は
-// `tools/exporter/karume/dist.py` の BiRefNet 節で、そちらの pytest が同じ欄名を別方向から
+// `tools/export-recipes/birefnet/distribution.py` で、そちらの pytest が同じ欄名を別方向から
 // 押さえている（欄名が片側だけ動くと、配布形はできるのにロードが parse で落ちる）。
 //
 // 見るのは 3 点:
@@ -7,8 +7,8 @@
 // ① 受理集合の**外側**を全部落とす（未知キー・欠落・値域外）。既定へ黙って縮退しない。
 // ② `imageStd` の 0 を落とす — 0 除算は例外を出さず `±Infinity` の `pixel_values` を作り、
 //    グラフは NaN を吐きながら shape だけ合う。
-// ③ `interpolation` は分岐ではなく**宣言**で、受理集合は 1 値だけ（前処理層が antialias 付き
-//    bilinear の 1 本しか持たない）。
+// ③ `interpolation` は分岐ではなく**宣言**で、受理集合は 1 値だけ（上流 `handler.py` の
+//    torchvision Resize が既定の補間 = bilinear で通すから — 前処理層は bicubic も持っている）。
 
 import { assertEquals, assertThrows } from "@std/assert";
 import { parseBirefnetPipelineConfig } from "../src/birefnet/config.ts";

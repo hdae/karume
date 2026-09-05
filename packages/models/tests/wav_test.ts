@@ -9,13 +9,13 @@
 import { assertEquals, assertThrows } from "@std/assert";
 import { decodeWav, encodeWav } from "../src/audio/wav.ts";
 
-/** golden `meta.json` の置き場（`dacvae_host.py` の既定の出力先）。 */
+/** golden `meta.json` の置き場（`tools/export-recipes/irodori/dacvae/host.py` の既定の出力先）。 */
 const HOST_GOLDEN = new URL(
   "../../../outputs/series/dacvae-32dim/host/meta.json",
   import.meta.url,
 );
-const HOST_COMMAND =
-  "cd tools/exporter && uv run --with descript-audiotools --with einops --with 'transformers==5.14.1' python dacvae_host.py";
+const HOST_COMMAND = "cd tools/export-recipes && uv run --with descript-audiotools --with einops " +
+  "--with 'transformers==5.14.1' python -m irodori.dacvae.host";
 
 const goldenText = await Deno.readTextFile(HOST_GOLDEN).catch(() => undefined);
 if (goldenText === undefined) {

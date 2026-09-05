@@ -107,32 +107,57 @@ Deno.test("barrel: gemma の公開面（薄い面 — 組み立ての入口は�
   );
 });
 
-// ---- 取得元対応表の両建て（ADR 0092 — 家族 1 つにつき 1 表）------------------
+// ---- 両建て（ADR 0037）と取得元対応表（ADR 0092 — 家族 1 つにつき 1 表）--------
 //
 // 表の**中身**（キーの規則・repo 名・40 桁 hex）を見るのは `sources_test.ts` で、ここで縛るのは
-// 「サブパスと barrel の両方から出ていること」だけ。片方の barrel へ足し忘れても型検査では
-// 咎められない（export の増減は型に出ない）。
+// 2 点:
 //
-// `KARUME_SOURCES`（全家族の和集合）は**barrel にしか無い**面なので、この両建て門の対象外。
+// ① **subpath ⊆ barrel を 8 面すべてで**見る（`deno.json` の `exports` は `.` + 8 サブパス）。
+//    `./gemma` 1 面だけに掛けていた頃は、他 7 面のどの値 export を `mod.ts` から落としても
+//    全テストが緑のままだった。
+// ② `<FAMILY>_SOURCES` の**畳み込み漏れ**（家族表を新設したのに `src/sources.ts` へ足し忘れる）
+//    を落とす。`src/sources.ts` のスプレッドは実行時に列挙できないので、代わりに
+//    「8 サブパスから集めた表のキーの和集合 === `Object.keys(KARUME_SOURCES)`」を突き合わせる。
+//
+// 未配布家族（`./birefnet` / `./vowel-detector`）は表を 1 本も持たないのが正しい状態なので、
+// 陽性対照（表が 1 本以上ある）は面ごとではなく**全体で 1 回**置く。
+
+/** `deno.json` の `exports` が持つ 8 サブパス（`.` = barrel を除く全部）。 */
+const subpathSurfaces = async (): Promise<readonly { name: string; surface: string[] }[]> => [
+  { name: "./anima", surface: Object.keys(await import("../anima.ts")) },
+  { name: "./birefnet", surface: Object.keys(await import("../birefnet.ts")) },
+  { name: "./depth-anything", surface: Object.keys(await import("../depth-anything.ts")) },
+  { name: "./gemma", surface: Object.keys(await import("../gemma.ts")) },
+  { name: "./irodori", surface: Object.keys(await import("../irodori.ts")) },
+  { name: "./sbv2", surface: Object.keys(await import("../sbv2.ts")) },
+  { name: "./siglip2", surface: Object.keys(await import("../siglip2.ts")) },
+  { name: "./vowel-detector", surface: Object.keys(await import("../vowel-detector.ts")) },
+];
+
+Deno.test("barrel: 8 サブパスの値 export は全部 barrel にも載る（両建ての食い違い）", async () => {
+  const barrel = Object.keys(models);
+  const subpaths = await subpathSurfaces();
+  // 陽性対照 — 空の名前空間を並べて緑になる形にしない。
+  assert(barrel.includes("encodePng"), `barrel の import が壊れている（${barrel.length} 件）`);
+  for (const { name, surface } of subpaths) {
+    assert(surface.length >= 1, `${name} の値 export が 1 つも無い`);
+    assertEquals(
+      surface.filter((exported) => !barrel.includes(exported)),
+      [],
+      `${name} にあって barrel に無い値 export`,
+    );
+  }
+});
 
 Deno.test("barrel: 取得元対応表はサブパスと barrel の両方から出る", async () => {
   const barrel = Object.keys(models);
-  const subpaths = [
-    { name: "./anima", surface: Object.keys(await import("../anima.ts")) },
-    { name: "./irodori", surface: Object.keys(await import("../irodori.ts")) },
-    { name: "./sbv2", surface: Object.keys(await import("../sbv2.ts")) },
-    // gemma も 1 家族 1 表の対象（表そのものは上の `GEMMA_VALUES` でも縛るが、`KARUME_SOURCES`
-    // の漏れは家族サブパスを全部並べないと見えない — 1 本でも漏れれば全家族が繋がる）。
-    { name: "./gemma", surface: Object.keys(await import("../gemma.ts")) },
-    { name: "./siglip2", surface: Object.keys(await import("../siglip2.ts")) },
-    { name: "./depth-anything", surface: Object.keys(await import("../depth-anything.ts")) },
-  ];
-  for (const { name, surface } of subpaths) {
-    const tables = surface.filter((exported) => exported.endsWith("_SOURCES"));
-    // 陽性対照 — 空集合を回して緑になる形にしない。
-    assert(tables.length >= 1, `${name} に取得元対応表が 1 本も無い`);
-    for (const table of tables) assert(barrel.includes(table), `barrel に ${table} が無い`);
-  }
+  const subpaths = await subpathSurfaces();
+  const tables = subpaths.flatMap(({ surface }) =>
+    surface.filter((exported) => exported.endsWith("_SOURCES"))
+  );
+  // 陽性対照は全体で 1 回 — 未配布家族（birefnet 系 / vowel-detector）は表を持たないのが正しい。
+  assert(tables.length >= 1, "サブパスに取得元対応表が 1 本も無い");
+  for (const table of tables) assert(barrel.includes(table), `barrel に ${table} が無い`);
   // サブパス側の足し忘れは上の filter では見えないので、家族の表を名指しでも縛る。
   for (
     const table of [
@@ -144,10 +169,7 @@ Deno.test("barrel: 取得元対応表はサブパスと barrel の両方から�
       "DEPTH_ANYTHING_SOURCES",
     ]
   ) {
-    assert(
-      subpaths.some(({ surface }) => surface.includes(table)),
-      `サブパス barrel に ${table} が無い`,
-    );
+    assert(tables.includes(table), `サブパス barrel に ${table} が無い`);
   }
   // 全家族を畳んだ表は barrel だけが出す（サブパスへ漏れると 1 家族の import が全家族を繋ぐ）。
   assert(barrel.includes("KARUME_SOURCES"), "barrel に KARUME_SOURCES が無い");
@@ -158,4 +180,38 @@ Deno.test("barrel: 取得元対応表はサブパスと barrel の両方から�
       `${name} に KARUME_SOURCES が出ている`,
     );
   }
+});
+
+Deno.test("barrel: KARUME_SOURCES は家族表の和集合ちょうど（畳み込み漏れ・余りの検出）", async () => {
+  const subpaths = await subpathSurfaces();
+  // 家族表そのものを名前空間から引き、キーの和集合を作る（`src/sources.ts` のスプレッドは
+  // 実行時に列挙できないので、突き合わせ相手はサブパスの走査結果で組む）。
+  const namespaces = await Promise.all([
+    import("../anima.ts"),
+    import("../birefnet.ts"),
+    import("../depth-anything.ts"),
+    import("../gemma.ts"),
+    import("../irodori.ts"),
+    import("../sbv2.ts"),
+    import("../siglip2.ts"),
+    import("../vowel-detector.ts"),
+  ]);
+  const keys = new Set<string>();
+  for (const namespace of namespaces) {
+    const exported: Record<string, unknown> = namespace;
+    for (const name of Object.keys(exported)) {
+      if (!name.endsWith("_SOURCES")) continue;
+      const table = exported[name] as Record<string, unknown>;
+      for (const key of Object.keys(table)) keys.add(key);
+    }
+  }
+  // 陽性対照 — 走査が空振りしていない（表を 1 本も拾えていない形で緑にしない）。
+  assert(keys.size >= 1, "サブパスから家族表のキーを 1 本も拾えていない");
+  assertEquals(
+    [...keys].toSorted(),
+    Object.keys(models.KARUME_SOURCES).toSorted(),
+    "KARUME_SOURCES が家族表の和集合と一致しない（src/sources.ts への畳み込み漏れか余り）",
+  );
+  // サブパスの数は `deno.json` の exports と揃っていること（面が増えたら走査も増やす）。
+  assertEquals(subpaths.length, namespaces.length);
 });

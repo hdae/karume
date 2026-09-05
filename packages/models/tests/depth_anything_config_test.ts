@@ -1,5 +1,5 @@
 // `depth-anything/1` の `pipelineConfig` スキーマ（`src/depth-anything/config.ts`）。**焼く側**は
-// `tools/exporter/karume/dist.py` の Depth Anything 節で、そちらの pytest が同じ欄名を別方向から
+// `tools/export-recipes/depth_anything/distribution.py` で、そちらの pytest が同じ欄名を別方向から
 // 押さえている（欄名が片側だけ動くと、配布形はできるのにロードが parse で落ちる）。
 //
 // 見るのは 3 点:

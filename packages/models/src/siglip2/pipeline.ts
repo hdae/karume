@@ -78,6 +78,7 @@ import {
   assertRequiredLimitsSatisfied,
   toAcquireGpuOptions,
 } from "../session/gpu-features.ts";
+import { disposeSteps } from "../session/dispose-steps.ts";
 import { toSessionOptions } from "../session/options.ts";
 import { toManifestSource } from "../hub/repo-ref.ts";
 import {
@@ -91,7 +92,7 @@ import {
 /** manifest の weights 表に現れる取得キー（ADR 0041 §3 の規約名）。 */
 const VISION = "vision";
 
-/** グラフ入力の名前（`export_siglip2.py` の `INPUT_NAME`）。 */
+/** グラフ入力の名前（`tools/export-recipes/siglip2/export.py` の `INPUT_NAME`）。 */
 const PIXEL_VALUES = "pixel_values";
 
 /** 入力のチャネル数（RGB）。batch と併せてグラフ側も静的 1 / 3 で焼かれている。 */
@@ -256,6 +257,11 @@ const asF32 = (tensor: Tensor, where: string): Float32Array<ArrayBuffer> => {
  * 定数で結線することだけ。**`resizeRgb8` は `(width, height)` の順**なので、宣言の 2 欄を
  * 取り違えると非正方の配布形で黙って転置される。
  *
+ * MUST: 補間フィルタも `config.interpolation` から渡す（既定引数に頼らない）。宣言と実効値を
+ * 1 本にすると、受理集合がリテラル型なので**型検査が同一性を保証する** — 新しい家族が渡し
+ * 忘れる経路が構造的に消える（`preprocess.ts` の MUST「モデルカードの一部なので呼び出し側が
+ * 明示する」の実装側）。
+ *
  * NOTE: `export` は結線を直接叩くテストのため（`fromAssets` 経由で此処へ届くには実 IR
  * コンテナが要る）。`mod.ts` / サブパス面には出さない（ADR 0008）。
  */
@@ -264,7 +270,7 @@ export const preprocessPixelValues = (
   image: Rgb8Image,
 ): Float32Array<ArrayBuffer> =>
   normalizeToNchw(
-    resizeRgb8(image, config.imageWidth, config.imageHeight),
+    resizeRgb8(image, config.imageWidth, config.imageHeight, config.interpolation),
     config.imageMean,
     config.imageStd,
   );
@@ -561,12 +567,21 @@ export class Siglip2Pipeline {
    * MUST: in-flight の埋め込みの完了を待ってから破棄する（flush-before-destroy）— 破棄も鎖に
    * 載せることで、待ちと破棄の順序を 1 箇所で決める。2 度目以降も同じ完了を返す（先に返すと
    * 呼び出し側が「破棄済み」と見なして次へ進む）。
+   *
+   * MUST: `Session.dispose()` が失敗しても `gpu.destroy()` は必ず通す（{@link disposeSteps}）—
+   * 直列 `await` だと前段の reject で後段へ到達せず、`openXState` の catch が掲げている
+   * 「内部で取った GPU は必ず返す」が dispose 経路でだけ破れる。しかも `#disposal` に
+   * rejected promise が居座るので、2 度目の `dispose()` は再試行にならない。
    */
   dispose(): Promise<void> {
-    this.#disposal ??= this.#chain(async () => {
-      await this.#state.session.dispose();
-      if (this.#state.ownsGpu) this.#state.gpu.destroy();
-    });
+    this.#disposal ??= this.#chain(() =>
+      disposeSteps([
+        () => this.#state.session.dispose(),
+        () => {
+          if (this.#state.ownsGpu) this.#state.gpu.destroy();
+        },
+      ])
+    );
     return this.#disposal;
   }
 

@@ -1,7 +1,7 @@
 /**
  * 母音検出 CRNN の入力特徴（80 次元 log-mel + DSP 3 次元 = 83）を波形から作る。
- * **グラフの外**にある前段で、`export_vowel_detector.py` が emit するグラフの入力
- * `features f32 [1, T10, 83]` をここが埋める。
+ * **グラフの外**にある前段で、`tools/export-recipes/vowel_detector/export.py` が emit する
+ * グラフの入力 `features f32 [1, T10, 83]` をここが埋める。
  *
  * ## 置き場（`src/audio/` へ上げない）
  *

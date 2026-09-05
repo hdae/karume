@@ -7,7 +7,7 @@
 //
 // 突合の相手は **SigLIP2 の golden に焼かれた Python 側 `pixel_values`**
 // （`outputs/series/<系列>/io.photo-*.safetensors` の `input.pixel_values`）。生成は
-// `tools/exporter/export_siglip2.py --real-images` で、正本は transformers の
+// `tools/export-recipes/siglip2/export.py --real-images` で、正本は transformers の
 // `SiglipImageProcessor`（`TorchvisionBackend`）。画像そのものの正本は
 // `examples/anima/eval-images.ts`（`deno task demo:eval-images` で同じ 4 枚が焼き直せる）。
 //
@@ -89,7 +89,8 @@ const IMAGE_STD: readonly [number, number, number] = [0.5, 0.5, 0.5];
 const SERIES = ["siglip2-base-patch16-224", "siglip2-so400m-patch14-384"] as const;
 
 /**
- * 実画像ケース。ケース名とファイル名の対応の正本は `export_siglip2.py` の `REAL_CASES`、
+ * 実画像ケース。ケース名とファイル名の対応の正本は
+ * `tools/export-recipes/siglip2/export.py` の `REAL_CASES`、
  * 画像そのもの（プロンプト / seed / 解像度）の正本は `examples/anima/eval-images.ts`。
  * **列挙結果ではなくここで固定する** —— 列挙に頼ると、一部だけ生成した環境でケースが黙って
  * 消えて「緑だが未検証」になる。
@@ -101,10 +102,10 @@ const REAL_CASES = [
   { name: "photo-street", file: "anima-default-1024x1024-defaultstep-seed45.png" },
 ] as const;
 
-/** golden の入力テンソルのキー（正本は `export_siglip2.py` の `INPUT_NAME`）。 */
+/** golden の入力テンソルのキー（正本は `tools/export-recipes/siglip2/export.py` の `INPUT_NAME`）。 */
 const PIXEL_INPUT_KEY = "input.pixel_values";
 
-/** 実画像 golden の `__metadata__` の欄（正本は `export_siglip2.py` の同名定数）。 */
+/** 実画像 golden の `__metadata__` の欄（正本は `tools/export-recipes/siglip2/export.py` の同名定数）。 */
 const SOURCE_IMAGE_KEY = "source_image";
 const SOURCE_SHA256_KEY = "source_sha256";
 
@@ -117,7 +118,7 @@ const goldenUrl = (series: string, caseName: string): URL =>
 
 /** golden を採り直すコマンド（`--real-images` はグループが違う）。 */
 const generateCommand = (series: string): string =>
-  "cd tools/exporter && uv run --group siglip2-preprocess python export_siglip2.py" +
+  "cd tools/export-recipes && uv run --group siglip2-preprocess python -m siglip2.export" +
   ` --real-images --model-dir ../../inputs/siglip2/${series}`;
 
 /**

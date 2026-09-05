@@ -18,19 +18,20 @@
  *
  * ## MUST: 補間は**宣言**として持ち、対応外は値を保持せずパース時に拒否する
  *
- * `src/image/preprocess.ts` が実装しているのは antialias 付き **bilinear** だけ。上流
- * （`handler.py` / モデルカードの利用例）は `torchvision.transforms.Resize((S, S))` を既定の
- * 補間で通す = bilinear なので現状は一致するが、bicubic を要求する派生を黙って bilinear で
- * 通すと **resize の値が最大 47/255 ずれたまま**ロードも実行も通る（実測 — 前処理層の
- * モジュール doc）。分岐を持つのではなく**受理しない**（型としても `"bilinear"` しか
- * 表せない）。
+ * 上流（`handler.py` / モデルカードの利用例）は `torchvision.transforms.Resize((S, S))` を
+ * 既定の補間で通す = bilinear なので、この家族の前処理は bilinear が正本。bicubic を要求する
+ * 派生を黙って bilinear で通すと **resize の値が最大 47/255 ずれたまま**ロードも実行も通る
+ * （実測 — 前処理層のモジュール doc）。分岐を持つのではなく**受理しない**（型としても
+ * `"bilinear"` しか表せない）。前処理層（`src/image/preprocess.ts`）は bicubic も実装して
+ * いるので、受理集合を広げるかは「その派生の上流がどの補間で学習されたか」の判断であって
+ * 実装の有無ではない。
  *
  * NOTE: rescale の除数（255）はここに無い。`normalizeToNchw` の入口が 8bit の画素列
  * （`Rgb8Image`）で閉じており、実行時に選べない数を宣言だけ持たせても正本が 2 つ増える
  * （`src/siglip2/config.ts` と同じ判断）。
  *
  * NOTE: `imageWidth` / `imageHeight` は焼かれたグラフの入力宣言と**同じ数**で、組み立て段
- * （`tools/exporter/karume/dist.py` の BiRefNet 節）がグラフから導いて書く。それでも宣言を
+ * （`tools/export-recipes/birefnet/distribution.py`）がグラフから導いて書く。それでも宣言を
  * 置くのは、①前処理の resize 先はグラフを開く前に読めるべき欄で ②モデルカードが解像度を
  * 説明できるようにするため。二重化した分は {@link BirefnetPipelineConfig} を使う側
  * （`pipeline.ts` の `assertStaticDim`）が**毎回グラフと突き合わせる**ので、食い違ったまま
@@ -167,7 +168,8 @@ export const parseBirefnetPipelineConfig = (
       "interpolation",
       where,
       INTERPOLATION,
-      "前処理の resize が antialias 付き bilinear の 1 本しかない（src/image/preprocess.ts）",
+      "上流 handler.py の torchvision Resize は既定の補間（= bilinear）で、" +
+        "bicubic で通すと resize の値が最大 47/255 ずれる",
     ),
   };
 };

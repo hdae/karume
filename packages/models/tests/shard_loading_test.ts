@@ -24,6 +24,10 @@
  *    ADR 0089 決定 5）。突き合わせ相手は渡された `GpuContext.limits`。
  * ⑨ **同じことが自前 GPU 取得の経路でも成り立つ**（突き合わせ相手が `readAdapterLimits()` の
  *    アダプタ実測値に変わる側）。⑨ だけは実 GPU が要る。
+ * ⑩ **取得キーの失敗診断と受理集合**（コンポーネント欠落 / 未取得キー / 素キーと `[i]` の混在 /
+ *    添字が `[0]` から始まらない）。受理集合は全量面と同じ 1 本から来る。
+ * ⑪ **遅延資産**（`eagerAssets` / `deferred` / `readCachedAsset`）— gemma4 の PLE sidecar の
+ *    経路で、実行者が実重み e2e しか無いと CI では 1 度も踏まれない。
  *
  * NOTE: hub / runtime のテスト helper は import しない（向こうの都合がこちらへ漏れる —
  * `helpers/memory-cache.ts` と同じ規律）。モックはこのファイル内で最小限だけ組む。**唯一の
@@ -33,11 +37,11 @@
  * 偽物になる。
  */
 
-import { assertEquals, assertRejects } from "@std/assert";
+import { assertEquals, assertRejects, assertStringIncludes, assertThrows } from "@std/assert";
 import { type AssetProgress, loadManifest, resolveFiles } from "@karume/hub";
 import { acquireGpu } from "@karume/runtime";
 import { fakeDevice, fakeGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
-import { loadShardComponents } from "../src/hub/components.ts";
+import { loadShardComponents, readCachedAsset } from "../src/hub/components.ts";
 import { Siglip2Pipeline } from "../src/siglip2/pipeline.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { MemoryCacheStorage } from "./helpers/memory-cache.ts";
@@ -660,3 +664,243 @@ Deno.test(
     );
   },
 );
+
+// ---- 取得キーの失敗診断と受理集合（⑩）--------------------------------------
+//
+// `componentShards` / `open()` の 2 本の診断と、shard 面の受理集合が全量面
+// （`asset_shard_components_test.ts`）と**同じ 1 本**（`planComponentKeys`）から来ていること。
+// 素キー優先で `[i]` を読み飛ばす形だと、残ったキーは `consumed` に入らず資産として全量取得
+// され、Session の shard 列からは消える（= 重みが黙って 1 本欠ける）。
+
+/** `prepareTwoShard` の manifest を、weights / assets のキーだけ差し替えて組み直す。 */
+const prepareKeyed = async (
+  weights: (refs: { graph: unknown; weights: unknown }) => Record<string, unknown>,
+  assets: (refs: { graph: unknown; weights: unknown }) => Record<string, unknown> = () => ({}),
+) => {
+  const graph = graphShardBytes("linear", [["m.b", f32Tensor([2], 0.25)]]);
+  const weightBytes = weightShardBytes([["m.w", f32Tensor([2, 2], 0.5)]]);
+  const refs = {
+    graph: await fileRef("dit/model-00000.safetensors", graph),
+    weights: await fileRef("dit/model-00001.safetensors", weightBytes),
+  };
+  const declared = weights(refs);
+  const manifest = manifestBytes({
+    test: {
+      pipeline: "test/1",
+      weights: declared,
+      assets: assets(refs),
+      // quant の weights 写像は宣言したコンポーネント名から導く（名前を差し替えるたびに
+      // ここを直すと、テストが見たい形と manifest の整合が別々にずれる）。
+      quants: {
+        f32: {
+          weights: Object.fromEntries(Object.keys(declared).map((key) => [key, "f32"])),
+          session: {},
+        },
+      },
+      defaultQuant: "f32",
+      pipelineConfig: {},
+    },
+  });
+  const mock = createMockFetch(
+    new Map([
+      [MANIFEST_PATH, manifest],
+      [refs.graph.path, graph],
+      [refs.weights.path, weightBytes],
+    ]),
+  );
+  const hubOptions = { fetch: mock.fetch, caches: new MemoryCacheStorage() };
+  const loaded = await loadManifest({ repo: REPO, revision: SHA, hubUrl: HUB_URL }, hubOptions);
+  return { loaded, files: resolveFiles(loaded.manifest), refs, mock, hubOptions };
+};
+
+Deno.test(
+  "loadShardComponents: manifest が持たないコンポーネント名は取得キー一覧つきで落ちる",
+  async () => {
+    const { loaded, files, hubOptions } = await prepareTwoShard();
+    const error = await assertRejects(
+      () =>
+        loadShardComponents("test.fromPretrained", loaded, files, ["dit", "vae"], NO_FAMILY_GATE, {
+          ...hubOptions,
+        }),
+      Error,
+      "コンポーネント 'vae' のファイルが manifest に無い",
+    );
+    // 読み手が現物と突き合わせられる形（既存の資産診断の流儀）。
+    assertStringIncludes(error.message, "dit[0] / dit[1]");
+  },
+);
+
+Deno.test("loadShardComponents: 取得していないキーで open() すると取得済み一覧つきで落ちる", async () => {
+  const { loaded, files, hubOptions } = await prepareTwoShard();
+  const { open } = await loadShardComponents(
+    "test.fromPretrained",
+    loaded,
+    files,
+    ["dit"],
+    NO_FAMILY_GATE,
+    hubOptions,
+  );
+  const error = assertThrows(() => open("vae"), Error, "コンポーネント 'vae' は取得していない");
+  assertStringIncludes(error.message, "取得済み: dit");
+});
+
+Deno.test("loadShardComponents: 素キーと shard 分割キーの混在は shard 面でも落ちる", async () => {
+  // weights が 1 本（= 素キー `dit`）なのに、assets が `dit[0]` の綴りで届く形。以前は素キーを
+  // 優先して `dit[0]` を黙って読み飛ばし、資産として全量取得していた。
+  const { loaded, files, hubOptions } = await prepareKeyed(
+    (refs) => ({ dit: { f32: { shards: [refs.graph] } } }),
+    (refs) => ({ "dit[0]": refs.weights }),
+  );
+  const error = await assertRejects(
+    () =>
+      loadShardComponents("test.fromPretrained", loaded, files, ["dit"], NO_FAMILY_GATE, {
+        ...hubOptions,
+      }),
+    Error,
+    "素のキーと shard 分割キー",
+  );
+  assertStringIncludes(error.message, "dit / dit[0]");
+});
+
+Deno.test("loadShardComponents: 添字が [0] から始まらない取得キーは shard 面でも落ちる", async () => {
+  // 重みは別名（`vae`）で持ち、`dit` の綴りでは添字つきの資産だけが届く形。以前は
+  // 「素キーも `[0]` も無い」= コンポーネント欠落として、始点がずれていることを言わずに落ちた。
+  const { loaded, files, hubOptions } = await prepareKeyed(
+    (refs) => ({ vae: { f32: { shards: [refs.graph] } } }),
+    (refs) => ({ "dit[1]": refs.graph, "dit[2]": refs.weights }),
+  );
+  await assertRejects(
+    () =>
+      loadShardComponents("test.fromPretrained", loaded, files, ["dit"], NO_FAMILY_GATE, {
+        ...hubOptions,
+      }),
+    Error,
+    "shard 添字が [0] から始まっていない",
+  );
+});
+
+// ---- 遅延資産（`eagerAssets` / `deferred` / `readCachedAsset`）⑪ ------------
+//
+// gemma4 の PLE sidecar（1 本 758MB × 3）の経路。実行者が実重み e2e しか無いと CI では 1 度も
+// 踏まれないので、疑似 HF リグで割り振り・prefetch・読み直しの 3 点を縛る。
+
+/** グラフ shard 1 本 + 資産 3 本（`tokenizer` / `ple.0` / `ple.1`）の配布形。 */
+const prepareDeferred = async () => {
+  const graph = graphShardBytes("linear", [
+    ["m.w", f32Tensor([2, 2], 0.5)],
+    ["m.b", f32Tensor([2], 0.25)],
+  ]);
+  const encoder = new TextEncoder();
+  const tokenizer = encoder.encode(JSON.stringify({ vocab: ["a", "b"] }));
+  const ple0 = encoder.encode("ple shard 0 payload");
+  const ple1 = encoder.encode("ple shard 1 payload");
+  const refs = {
+    graph: await fileRef("dit/model.safetensors", graph),
+    tokenizer: await fileRef("tokenizer/tokenizer.json", tokenizer),
+    ple0: await fileRef("ple/ple-00000.bin", ple0),
+    ple1: await fileRef("ple/ple-00001.bin", ple1),
+  };
+  const manifest = manifestBytes({
+    test: {
+      pipeline: "test/1",
+      weights: { dit: { f32: { shards: [refs.graph] } } },
+      assets: { tokenizer: refs.tokenizer, "ple.0": refs.ple0, "ple.1": refs.ple1 },
+      quants: { f32: { weights: { dit: "f32" }, session: {} } },
+      defaultQuant: "f32",
+      pipelineConfig: {},
+    },
+  });
+  const mock = createMockFetch(
+    new Map([
+      [MANIFEST_PATH, manifest],
+      [refs.graph.path, graph],
+      [refs.tokenizer.path, tokenizer],
+      [refs.ple0.path, ple0],
+      [refs.ple1.path, ple1],
+    ]),
+  );
+  const hubOptions = { fetch: mock.fetch, caches: new MemoryCacheStorage() };
+  const loaded = await loadManifest({ repo: REPO, revision: SHA, hubUrl: HUB_URL }, hubOptions);
+  return {
+    loaded,
+    files: resolveFiles(loaded.manifest),
+    refs,
+    mock,
+    hubOptions,
+    bytes: { ple0, ple1 },
+  };
+};
+
+Deno.test(
+  "loadShardComponents: eagerAssets が全量常駐と参照のままを割り振り、遅延側も同じ 1 回で落ちる",
+  async () => {
+    const { loaded, files, refs, mock, hubOptions } = await prepareDeferred();
+    const events: AssetProgress[] = [];
+    const { assets, deferred } = await loadShardComponents(
+      "test.fromPretrained",
+      loaded,
+      files,
+      ["dit"],
+      NO_FAMILY_GATE,
+      { ...hubOptions, eagerAssets: ["tokenizer"], onProgress: (event) => events.push(event) },
+    );
+
+    // 並べたキーだけが全量、残りは参照のまま。
+    assertEquals(Object.keys(assets), ["tokenizer"]);
+    assertEquals(Object.keys(deferred).toSorted(), ["ple.0", "ple.1"]);
+
+    // 遅延側も**同じ prefetch 1 回**に載る（後から無進捗の DL が始まらない）。
+    assertEquals(mock.paths.includes(refs.ple0.path), true, "遅延資産がロード時に落ちない");
+    assertEquals(mock.paths.includes(refs.ple1.path), true, "遅延資産がロード時に落ちない");
+    const completes = events.filter((event) => event.phase === "complete");
+    assertEquals(completes.length, 4);
+    const total = refs.graph.size + refs.tokenizer.size + refs.ple0.size + refs.ple1.size;
+    assertEquals(events[events.length - 1].loaded, total);
+  },
+);
+
+Deno.test("loadShardComponents: eagerAssets 未指定なら deferred は空（従来どおり全量）", async () => {
+  const { loaded, files, hubOptions } = await prepareDeferred();
+  const { assets, deferred } = await loadShardComponents(
+    "test.fromPretrained",
+    loaded,
+    files,
+    ["dit"],
+    NO_FAMILY_GATE,
+    hubOptions,
+  );
+  assertEquals(Object.keys(deferred), []);
+  assertEquals(Object.keys(assets).toSorted(), ["ple.0", "ple.1", "tokenizer"]);
+});
+
+Deno.test("readCachedAsset: 遅延資産をキャッシュから読み直す（network へ出ない）", async () => {
+  const { loaded, files, mock, hubOptions, bytes } = await prepareDeferred();
+  const { deferred } = await loadShardComponents(
+    "test.fromPretrained",
+    loaded,
+    files,
+    ["dit"],
+    NO_FAMILY_GATE,
+    { ...hubOptions, eagerAssets: ["tokenizer"] },
+  );
+
+  const before = mock.paths.length;
+  const buffer = await readCachedAsset("test.readPle", loaded, deferred["ple.0"], hubOptions);
+  assertEquals(new Uint8Array(buffer), bytes.ple0);
+  // キャッシュヒット = 取得層は 1 度も叩かれない（prefetch が効いていることの対偶）。
+  assertEquals(mock.paths.length, before);
+});
+
+Deno.test("readCachedAsset: 届かない参照は「1 本も届かなかった」で落ちる", async () => {
+  const { loaded, files, hubOptions } = await prepareDeferred();
+  const { deferred } = await loadShardComponents(
+    "test.fromPretrained",
+    loaded,
+    files,
+    ["dit"],
+    NO_FAMILY_GATE,
+    { ...hubOptions, eagerAssets: ["tokenizer"] },
+  );
+  const missing = { ...deferred["ple.0"], path: "ple/does-not-exist.bin" };
+  await assertRejects(() => readCachedAsset("test.readPle", loaded, missing, hubOptions), Error);
+});
