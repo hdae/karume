@@ -166,18 +166,19 @@ class TestSeriesLayout:
     def test_the_distribution_looks_for_the_same_series_name(self):
         """MUST: 系列名の綴りが**書く側と読む側で一致**する。
 
-        配布 recipe は「モデル名 → 上流リポ名 → 系列ディレクトリ名」で系列を探す。式が
-        片方だけ動くと、組み立ては「系列が無い」で落ちる（それ自体は安全）が、**別の
+        配布 recipe は「checkpoint → 上流リポ名 → 系列ディレクトリ名 + 解像度」で系列を探す。
+        式が片方だけ動くと、組み立ては「系列が無い」で落ちる（それ自体は安全）が、**別の
         モデルの系列を掴む**綴りにずれた場合は誰も気づけない。
         """
         from birefnet.card import BIREFNET_UPSTREAM
-        from birefnet.distribution import BIREFNET_RESOLUTION, birefnet_series_name
+        from birefnet.distribution import BIREFNET_MODELS, birefnet_series_name
 
-        for model, repo in BIREFNET_UPSTREAM.items():
+        for checkpoint, repo in BIREFNET_UPSTREAM.items():
             model_dir = bn.MODELS_ROOT / repo.split("/", 1)[1]
-            assert bn.default_out_dir(model_dir, BIREFNET_RESOLUTION).name == birefnet_series_name(
-                model
-            )
+            for model in BIREFNET_MODELS:
+                assert bn.default_out_dir(model_dir, int(model)).name == birefnet_series_name(
+                    checkpoint, model
+                )
 
 
 class TestResolution:

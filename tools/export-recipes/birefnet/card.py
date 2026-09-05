@@ -4,9 +4,11 @@
 `karume.modelcard` が持つ。ここが持つのは **BiRefNet 系固有の事実**だけ: 帰属（出所・
 ライセンス・引用・学習データ）と、この pipeline のカードに何を書くか。
 
-帰属は**モデル名から一意に決まる**（{@link BIREFNET_MODELS}）ので、プロファイルの軸には
-割らない — 分けると「Lucida を BiRefNet_HR の帰属で配る」取り違えを操作者が起こせるように
-なる。
+帰属は**checkpoint から一意に決まる**（{@link BIREFNET_CHECKPOINTS}）ので、プロファイルの軸
+には割らない — 分けると「Lucida を BiRefNet_HR の帰属で配る」取り違えを操作者が起こせるように
+なる。checkpoint は配布リポの軸そのもの（1 リポ = 1 checkpoint）なので、manifest からは読まず
+**呼び出し側の pipeline 席が束ねて渡す**（`birefnet.distribution._birefnet_pipeline`）。
+manifest に並ぶモデル名は**解像度**（`"1024"` / `"2048"`）で、帰属の軸ではない。
 
 MUST: **数値・ダウンロード量・quant 表・dtype ラベルは 1 つ残らず manifest から導出する**
 （`karume.modelcard` の同 MUST がそのまま掛かる）。ここが持ってよい定数は、manifest に
@@ -38,30 +40,64 @@ BIREFNET_SUPPORTED_PIPELINE = "birefnet/1"
 #: インスタンス分割も持たない。
 BIREFNET_PIPELINE_TAG = "image-segmentation"
 
-#: 実行に要る GPU 資源（配布形 1024² の実測。正本は docs/limitations.md の「BiRefNet 系の
-#: 配布形は 1024² だけ」節 — 重み 919MiB + workspace 6,283MiB）。
-#:
-#: 冒頭の MUST の例外ではない: `requiredLimits` は常駐分（重み・state）しか数えないので、
-#: 中間テンソルが要求する binding の大きさも総確保も **manifest に存在しない事実**にあたる
-#: （ADR 0089 決定 3 の意味論）。読み手が最初に確かめたい制約なので、カードが持つ。
-BIREFNET_MAX_BINDING_TEXT = "about 1 GiB"
-BIREFNET_TOTAL_GPU_TEXT = "about 7.3 GiB"
 
-#: 上の 2 つを採った条件（実測の性格そのものなので、`pipelineConfig` からは導出しない —
-#: 別の解像度で描いたカードが実測していない数を名乗らないための綴り）。
-BIREFNET_RESOURCE_MEASUREMENT = "measured 2026-09-04 at 1024 × 1024"
+@dataclass(frozen=True)
+class BirefnetResources:
+    """1 モデル（= 1 解像度）ぶんの実行資源の実測。
+
+    冒頭の MUST の例外ではない: `requiredLimits` は常駐分（重み・state）しか数えないので、
+    中間テンソルが要求する binding の大きさも総確保も **manifest に存在しない事実**にあたる
+    （ADR 0089 決定 3 の意味論）。読み手が最初に確かめたい制約なので、カードが持つ。
+    """
+
+    #: GPU 総確保（常駐の重み + 中間の領域）。
+    total: str
+    #: 中間テンソルに要る領域。**常駐の重みは持たない** — その数は manifest の shard 側に
+    #: あり（quant 表が導出する）、ここに写すと同じ量の正本が 2 つになる。
+    intermediates: str
+    #: WebGPU 既定の `maxStorageBufferBindingSize`（128MiB）を超える binding を 1 本、
+    #: **実測されたその正体ごと**名乗る句（読み手が「既定スペックでは走らない」と読める形）。
+    binding: str
+    #: 画像 1 枚あたりの実行時間。
+    run: str
+
+
+#: モデル名（= 解像度）→ 実行資源の実測。ADR 0093 の静的 liveness パッキングと recipe の
+#: パッチ ⑨（decoder 末尾の 1×1 conv と bilinear upsample の順序交換）の後の値で、正本は
+#: docs/limitations.md の BiRefNet 節。
+#:
+#: MUST: 実測していない解像度の席は置かない — カードが名乗る数は 1 つ残らず実測に紐づく。
+#: 引くのは manifest の `imageWidth` なので（{@link _birefnet_resources}）、実測していない
+#: 解像度で描こうとすると落ちる。
+BIREFNET_RESOURCES: Mapping[str, BirefnetResources] = {
+    "1024": BirefnetResources(
+        total="about 1.7 GiB",
+        intermediates="749 MiB",
+        binding="the largest single storage buffer is 256 MiB",
+        run="about 1.8 s",
+    ),
+    "2048": BirefnetResources(
+        total="about 4.1 GiB",
+        intermediates="2,948 MiB",
+        binding="the attention score buffer alone is 878 MiB",
+        run="7.5 – 8.6 s",
+    ),
+}
+
+#: 上の表を採った条件（実測の性格そのものなので、`pipelineConfig` からは導出しない）。
+BIREFNET_RESOURCE_MEASUREMENT = "measured 2026-09-05 on an RTX 3080 Ti"
 
 #: 上流の論文（BiRefNet — 系列の共通の出典）。
 BIREFNET_PAPER = "arxiv.org/abs/2401.03407"
 
 
 @dataclass(frozen=True)
-class BirefnetModel:
-    """1 モデルぶんの**manifest に無い事実**（出所・呼び名・帰属の追加行）。
+class BirefnetCheckpoint:
+    """1 checkpoint ぶんの**manifest に無い事実**（出所・呼び名・帰属の追加行）。
 
-    **この 1 表が「どのモデルが何の重みか」の唯一の事実**で、`birefnet.distribution` は系列名（=
+    **この 1 表が「どのリポが何の重みか」の唯一の事実**で、`birefnet.distribution` は系列名（=
     上流リポ名から導く綴り — `birefnet/export.py` の流儀）と帰属をここから引く。載っていない
-    モデル名は出所を名乗れないので、カードは描かずに落ちる。
+    checkpoint は出所を名乗れないので、カードは描かずに落ちる。
     """
 
     #: 上流チェックポイントの HF リポ ID。
@@ -77,8 +113,8 @@ class BirefnetModel:
 #: 実地確認（2026-08-13 — HF の model API）: どちらも `license: mit`。
 BIREFNET_LICENSE = "mit"
 
-BIREFNET_MODELS: Mapping[str, BirefnetModel] = {
-    "hr": BirefnetModel(
+BIREFNET_CHECKPOINTS: Mapping[str, BirefnetCheckpoint] = {
+    "hr": BirefnetCheckpoint(
         repo="ZhengPeng7/BiRefNet_HR",
         title="BiRefNet HR — Karume",
         tagline="the high-resolution general-purpose BiRefNet checkpoint",
@@ -89,7 +125,7 @@ BIREFNET_MODELS: Mapping[str, BirefnetModel] = {
             " case.",
         ),
     ),
-    "lucida": BirefnetModel(
+    "lucida": BirefnetCheckpoint(
         repo="egeorcun/lucida",
         title="Lucida (BiRefNet) — Karume",
         tagline=(
@@ -112,41 +148,53 @@ BIREFNET_MODELS: Mapping[str, BirefnetModel] = {
     ),
 }
 
-#: モデル名 → 上流リポ ID。**{@link BIREFNET_MODELS} からの導出**で、2 表にしない（片方だけ
-#: 動いたときに「別のモデルの重みを別のモデルとして帰属する」形が黙って作れる）。
-BIREFNET_UPSTREAM: Mapping[str, str] = {name: entry.repo for name, entry in BIREFNET_MODELS.items()}
+#: checkpoint → 上流リポ ID。**{@link BIREFNET_CHECKPOINTS} からの導出**で、2 表にしない
+#: （片方だけ動いたときに「別のリポの重みを別の上流として帰属する」形が黙って作れる）。
+BIREFNET_UPSTREAM: Mapping[str, str] = {
+    name: entry.repo for name, entry in BIREFNET_CHECKPOINTS.items()
+}
 
 
-def _birefnet_entry(manifest: Mapping[str, Any]) -> BirefnetModel:
-    """既定モデルの帰属を引く（1 リポ 1 モデル — {@link birefnet.distribution} の冒頭）。
+def _birefnet_entry(checkpoint: str) -> BirefnetCheckpoint:
+    """このリポが配る checkpoint の帰属を引く（1 リポ 1 checkpoint）。
 
-    MUST: 未知のモデル名では描かない — 帰属の表に無いモデルを黙って落とすと、出所を名乗って
+    MUST: 未知の checkpoint では描かない — 帰属の表に無い重みを黙って落とすと、出所を名乗って
     いない再配布が静かに出る。
     """
-    name = manifest["defaultModel"]
-    entry = BIREFNET_MODELS.get(name)
+    entry = BIREFNET_CHECKPOINTS.get(checkpoint)
     if entry is None:
         raise ValueError(
-            f"モデル '{name}' の上流が帰属表に無い（既知: {sorted(BIREFNET_MODELS)}）"
-            " — 出所を名乗れないカードは描かない"
+            f"checkpoint '{checkpoint}' の上流が帰属表に無い"
+            f"（既知: {sorted(BIREFNET_CHECKPOINTS)}）— 出所を名乗れないカードは描かない"
         )
     return entry
 
 
-def _birefnet_metadata(manifest: Mapping[str, Any]) -> CardMetadata:
-    """frontmatter を manifest に並んだモデルから組む（`base_model` は再配布する上流の全部）。"""
-    upstream: list[str] = []
-    for name in manifest["models"]:
-        entry = BIREFNET_MODELS.get(name)
-        if entry is None:
-            raise ValueError(
-                f"モデル '{name}' の上流が帰属表に無い（既知: {sorted(BIREFNET_MODELS)}）"
-                " — 出所を名乗れないカードは描かない"
-            )
-        upstream.append(entry.repo)
+def _birefnet_resources(config: Mapping[str, Any]) -> BirefnetResources:
+    """このモデルの解像度の実測を引く（{@link BIREFNET_RESOURCES}）。
+
+    キーは manifest 側の `imageWidth` — モデル名の綴りではなく**宣言された解像度**で引くので、
+    名前を付け替えても実測と対応が切れない。
+    """
+    resolution = str(config["imageWidth"])
+    resources = BIREFNET_RESOURCES.get(resolution)
+    if resources is None:
+        raise ValueError(
+            f"入力 {resolution}² の実行資源は実測していない"
+            f"（実測済み: {' / '.join(BIREFNET_RESOURCES)}）— 実測していない数は名乗らない"
+        )
+    return resources
+
+
+def _birefnet_metadata(entry: BirefnetCheckpoint) -> CardMetadata:
+    """frontmatter を組む（`base_model` はこのリポが再配布する上流 1 本）。
+
+    モデルが 2 つ並んでも上流は 1 つ — 同居しているのは同じ checkpoint の**解像度違い**で、
+    別の重みではない。
+    """
     return CardMetadata(
         pipeline_tag=BIREFNET_PIPELINE_TAG,
-        base_model=tuple(upstream),
+        base_model=(entry.repo,),
         # `base_model_relation` は置かない — 格納形を変えず（f32 のまま）コンテナだけを移した
         # もので、adapter / merge / quantized / finetune のどれでもない（CardMetadata の doc）。
         license=BIREFNET_LICENSE,
@@ -154,25 +202,30 @@ def _birefnet_metadata(manifest: Mapping[str, Any]) -> CardMetadata:
     )
 
 
-def _birefnet_overview(manifest: Mapping[str, Any]) -> list[str]:
-    entry = _birefnet_entry(manifest)
+def _birefnet_overview(manifest: Mapping[str, Any], entry: BirefnetCheckpoint) -> list[str]:
     config = default_model(manifest)["pipelineConfig"]
+    default_name = manifest["defaultModel"]
     return [
         "## What is this",
         "",
         "A background-removal distribution, converted into the WebGPU inference runtime",
-        "**Karume**'s container format (a single safetensors file = weights + a graph JSON",
-        "embedded in `__metadata__`). Runs as-is in the browser and in Deno.",
+        "**Karume**'s container format (a graph shard carrying the graph JSON in `__metadata__`,",
+        "followed by the weight shards it names). Runs as-is in the browser and in Deno.",
         "",
         f"The weights are {entry.tagline}.",
         "",
         "- One graph, one call: pixels in, an **8-bit alpha matte** out, at the same size as the",
         "  image you handed over.",
+        "- **One model per input resolution.** The resolution is baked into the graph (window",
+        "  masks and padding constants are per-resolution), so it is picked with `model`, not at",
+        "  call time. Each model declares its own resize target below; the bigger one holds more",
+        "  detail at the edges and costs more GPU memory and time.",
         "- **Pre- and post-processing are included.** The pipeline resizes to"
-        f" {config['imageWidth']} × {config['imageHeight']}, normalizes with the constants below,",
-        "  then takes the sigmoid of the logits and scales the matte back to the original",
-        "  resolution. Decoding PNG / JPEG is *not* part of this — use `createImageBitmap` in the",
-        "  browser, or any decoder in Deno.",
+        f" {config['imageWidth']} × {config['imageHeight']} for the default model"
+        f" `{default_name}`,",
+        "  normalizes with the constants below, then takes the sigmoid of the logits and scales",
+        "  the matte back to the original resolution. Decoding PNG / JPEG is *not* part of this —",
+        "  use `createImageBitmap` in the browser, or any decoder in Deno.",
         "- **Compositing is yours.** The pipeline returns the matte, not a cut-out: whether alpha",
         "  goes into an RGBA buffer, gets composited over a flat colour, or is fed to a colour",
         "  decontamination pass is a decision this repository should not make for you.",
@@ -183,9 +236,8 @@ def _birefnet_overview(manifest: Mapping[str, Any]) -> list[str]:
     ]
 
 
-def _birefnet_base_weights(manifest: Mapping[str, Any]) -> list[str]:
+def _birefnet_base_weights(entry: BirefnetCheckpoint) -> list[str]:
     """帰属節。格納形を変えていないので「変換したもの」としてだけ主張する。"""
-    entry = _birefnet_entry(manifest)
     return [
         "## Base weights and attribution",
         "",
@@ -199,9 +251,11 @@ def _birefnet_base_weights(manifest: Mapping[str, Any]) -> list[str]:
         "  weights are the source checkpoint's own f32 values. The graph is the upstream",
         "  `forward` with layout-only rewrites (windowing, the shifted-window roll, spatial",
         "  padding and the patch merges were folded into equivalent operations — bit-exact),",
-        "  plus two module rewrites that are equivalent up to floating-point rounding:",
-        "  inference-time `BatchNorm2d` became a per-channel affine, and the ASPP image-level",
-        "  pooling became a two-stage sum.",
+        "  plus three rewrites that are equivalent up to floating-point rounding:",
+        "  inference-time `BatchNorm2d` became a per-channel affine, the ASPP image-level",
+        "  pooling became a two-stage sum, and the decoder tail's 1×1 convolution was swapped",
+        "  with the bilinear upsample it used to follow (both are linear, so they commute — this",
+        "  removes two full-resolution intermediates).",
     ]
 
 
@@ -262,8 +316,13 @@ def _birefnet_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
 
 
 def _birefnet_shape(model: Mapping[str, Any]) -> list[str]:
-    """前処理の定数と入出力の形（利用者が渡すもの・受け取るものがここで読める）。"""
+    """前処理の定数と入出力の形（利用者が渡すもの・受け取るものがここで読める）。
+
+    実行資源はモデルごと（= 解像度ごと）に別の実測なので、この節に載る — 1024² と 2048² で
+    総確保が 2 倍以上違い、「どちらを選ぶか」の判断材料そのものである。
+    """
     config = model["pipelineConfig"]
+    resources = _birefnet_resources(config)
     mean = " / ".join(str(value) for value in config["imageMean"])
     std = " / ".join(str(value) for value in config["imageStd"])
     return [
@@ -278,25 +337,31 @@ def _birefnet_shape(model: Mapping[str, Any]) -> list[str]:
         f"- **normalization**: `(pixel / 255 - mean) / std`, mean {mean}, std {std}",
         "- **output**: one alpha byte per pixel at the size of the image you passed in (the graph",
         "  itself emits pre-sigmoid logits; the sigmoid and the resize back happen on the host).",
-        f"- **required GPU memory**: {BIREFNET_MAX_BINDING_TEXT} for the largest single storage",
-        f"  buffer, and {BIREFNET_TOTAL_GPU_TEXT} allocated in total"
-        f" ({BIREFNET_RESOURCE_MEASUREMENT}). WebGPU's default `maxStorageBufferBindingSize` is",
-        "  128 MiB, so this is in practice a desktop-class GPU requirement. `karume.json` does",
-        "  not declare it: the declared limits cover the resident weights and state, not the",
-        "  intermediate tensors a run allocates.",
+        f"- **required GPU memory**: {resources.total} allocated in total — the weights listed",
+        f"  above, resident, plus {resources.intermediates} for the intermediate tensors — and",
+        f"  {resources.binding} ({BIREFNET_RESOURCE_MEASUREMENT});"
+        f" one image takes {resources.run}.",
+        "  WebGPU's default `maxStorageBufferBindingSize` is 128 MiB, so this is in practice a",
+        "  desktop-class GPU requirement. `karume.json` does not declare it: the declared limits",
+        "  cover the resident weights and state, not the intermediate tensors a run allocates.",
     ]
 
 
-def render_birefnet_model_card(manifest: Mapping[str, Any], repo: str) -> str:
-    """BiRefNet 系配布形の `README.md` 本文を組み立てる（純関数・末尾改行つき）。"""
+def render_birefnet_model_card(manifest: Mapping[str, Any], repo: str, checkpoint: str) -> str:
+    """BiRefNet 系配布形の `README.md` 本文を組み立てる（純関数・末尾改行つき）。
+
+    `checkpoint` はこのリポが配る重み（`"hr"` / `"lucida"`）— manifest に並ぶモデル名は
+    解像度なので、帰属はそこからは決まらない。渡すのは pipeline 席（モジュール doc）。
+    """
     require_pipeline(manifest, BIREFNET_SUPPORTED_PIPELINE)
+    entry = _birefnet_entry(checkpoint)
     return render(
         (
-            frontmatter(_birefnet_metadata(manifest)),
-            ["", f"# {_birefnet_entry(manifest).title}", ""],
-            _birefnet_overview(manifest),
+            frontmatter(_birefnet_metadata(entry)),
+            ["", f"# {entry.title}", ""],
+            _birefnet_overview(manifest, entry),
             [""],
-            _birefnet_base_weights(manifest),
+            _birefnet_base_weights(entry),
             [""],
             models(manifest),
             [""],
