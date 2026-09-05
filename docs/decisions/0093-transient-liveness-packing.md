@@ -124,6 +124,10 @@ state スロットは context 所有（ADR 0066）・codegen 決定性。
   1.88 GiB とほぼ一致（差は 256 バイト整列と別領域規則のぶん）。run 時間 1.5〜1.7 s。2048² は
   計画時 preflight が `'upsample_bilinear2d_20' 3221225472B / 'cat_212' 4026531840B` の 2 本を
   列挙して落とす（A 案の代数書き換えで消える 2 本 — そのとおり）。
+- 実測（2026-09-05・A = recipe パッチ ⑨ と併せて・同じ機）: 1024² の中間 749 MiB（見込み 0.63 GiB）・
+  run 1.8 s / 2048² の中間 2,948 MiB（生存ピーク 2,560 MiB・見込み 2.50 GiB）・重み 1,116 MiB・
+  GPU 総確保 ≈ 4.1 GiB・run 7.5〜8.6 s（RTX 3080 Ti 12 GiB）。2048² は preflight を通り、runtime /
+  models の e2e（1024² golden）は緑のまま。
 - 触る面: `packages/runtime/src/runtime/transient-plan.ts`（新設・パッカー）/ `recipe.ts`（`derivePlanSlots`
   → 計画・`createBindGroup` の offset/size・`executeStepRecipe` の確保経路）/ `executor.ts`
   （`#activateBacking` の領域確保・ミス run の領域確保・readback の offset）/ `estimate.ts`

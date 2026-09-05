@@ -20,11 +20,10 @@
 - **次の作業波は perf K-13 / K-14 だけ**（2026-09-04 裁定の c — a / b / d は消化・クローズ済み）。
   起票の正本は [perf-ledger](../docs/perf-ledger.md)、残件の正本は
   [backlog](../docs/backlog.md) now。
-- **BiRefNet 2048² 工事 A→B→C 進行中**（ADR
-  [0093](../docs/decisions/0093-transient-liveness-packing.md)・裁定 2026-09-05）: B（静的
-  liveness パッキング）は **runtime へ結線済み**（計画 1 本を焼き込み / ミス run / 見積りが共有・
-  上限 preflight = C も同じ関数）。次は A = recipe の代数書き換え（conv_out1 の分割と upsample の
-  可換性で `cat` を消す）→ 2048² の実 GPU 実測 → 配布門の解除。
+- **BiRefNet 2048² 工事 A / B / C は消化（2026-09-05）** — ADR
+  [0093](../docs/decisions/0093-transient-liveness-packing.md) を runtime へ結線（B + C）し、recipe の
+  パッチ ⑨（A）で decoder 末尾の巨大中間を消した。実測: 1024² 中間 6,283 → 749 MiB / 2048² 中間
+  2,948 MiB・総確保 ≈ 4.1 GiB・run 7.5〜8.6 s。**残 = ④ 配布門の解除と 2048² 公開の裁定**（backlog now 2）。
 - **可変 capacity（[ADR 0091](../docs/decisions/0091-gemma4-host-rope-variable-capacity.md)）の
   意図的な現状 4 点** — 欠落に見えるが設計どおり: ①RoPE 表を焼いた旧配布形は読めない
   ②`GreedySpec` / `GenerationProgramSpec` は `positionIds` を持たない（位置の唯一の供給口は

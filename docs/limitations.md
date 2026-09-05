@@ -233,27 +233,29 @@ implicit GEMM（[decisions/0024](decisions/0024-conv2d-implicit-gemm.md)）は 1
 [2026-08-03-dynres-vae-tiling](research/2026-08-03-dynres-vae-tiling.md)）side で行う想定。
 枚数の固定は `packages/runtime/tests/codegen_dispatch_test.ts`。
 
-## BiRefNet 系の配布形は 1024² だけ（2048² は未実測・組み立てが拒否する）
+## BiRefNet 系の配布形は 1024² だけ（2048² は実行できるが公開裁定前 — 組み立てが拒否する）
 
 `karume dist --pipeline birefnet` が受け付けるのは入力 `[1,3,1024,1024]` で焼かれた系列だけで、
 それ以外の解像度は `DistError` で落ちる（`tools/export-recipes/birefnet/distribution.py` の
 `BIREFNET_RESOLUTION`）。export 段（`python -m birefnet.export --resolution 2048`）は通るので、
 系列を作ること自体はできる。
 
-配らないのは実行段が通らないから: 最大の中間テンソルが `[1, 240, 2048, 2048]`（decoder の
-cat 出力）= 4.03GB で、その直前の bilinear upsample 出力 3.2GB と併せて 2 本が NVIDIA の束縛上限
-2GiB を超える。2026-09-05 の実測では Session の計画時 preflight（ADR 0093 決定 5）がこの 2 本を
-ノード名つきで列挙して落とす（`'upsample_bilinear2d_20' 3221225472B / 'cat_212' 4026531840B`）。
-解消は recipe 側の代数書き換え（1×1 conv と bilinear upsample の可換性で `cat` を消す — backlog
-now 2 の A）。
+2048² は **2026-09-05 に実行段が通るようになった**（それまでは decoder 末尾の bilinear upsample 出力
+`[1,192,2048,2048]` 3.2GB と cat 出力 `[1,240,2048,2048]` 4.03GB の 2 本が NVIDIA の束縛上限 2GiB を
+超え、Session の計画時 preflight〈ADR 0093 決定 5〉がノード名つきで落としていた）。解消したのは
+recipe 側のパッチ ⑨（`birefnet.patch` — 1×1 conv と bilinear upsample の順序交換で `cat` を消す）と
+runtime 側の静的 liveness パッキング（ADR 0093）の組で、実測（RTX 3080 Ti 12 GiB）は重み 1,116MiB +
+中間の領域 2,948MiB（生存ピーク 2,560MiB）= **GPU 総確保 ≈ 4.1GiB・run 7.5〜8.6 s**。**配らないのは
+公開の裁定が未了だから**（1024² と同居させるか・既定をどちらにするか — backlog now 2 の ④）。
 （かつては「上の conv2d dispatch 上限に decoder の 1×1 conv が当たる」も理由に挙げていたが、
 既定幾何が M128N128 になった `d0afc22` 以降は 2048² の n タイルが 32,768 で上限の内側 —
-残る理由は資源側だけ。）
-配っている 1024² も軽くはない: 実測で重み 919MiB + 中間の領域 2,020MiB（生存ピーク 1,920MiB —
-ADR 0093 の静的 liveness パッキング後・2026-09-05 実測。旧プールでは 6,283MiB）= **1 binding が
-約 1GiB・GPU 総確保が約 2.9GiB** を要するので、実質**デスクトップ級 GPU 限定**である。配布形の `requiredLimits` **欄が空でも既定スペックの device では走らない** —
-欄が名乗るのは常駐分（重み・state）だけで、decoder 末尾の `cat` 出力 1 本が 960MiB の binding を
-要求する（宣言の意味論は下の「DL 前の GPU 適合チェック」節）。
+残る理由は資源側だけだった。）
+配っている 1024² も軽くはない: 実測で重み 919MiB + 中間の領域 749MiB（ADR 0093 のパッキングと
+パッチ ⑨ の後・2026-09-05 実測。旧プール + 旧末尾では 6,283MiB）= **GPU 総確保が約 1.7GiB** を要し、
+最大の binding は ipt 枝内部の `[1,64,1024,1024]` 256MiB と attention のスコア S 230MiB なので、
+実質**デスクトップ級 GPU 限定**である。配布形の `requiredLimits` **欄が空でも既定スペックの
+device では走らない** — 欄が名乗るのは常駐分（重み・state）だけで、中間は 128MiB を超える
+（宣言の意味論は下の「DL 前の GPU 適合チェック」節）。
 分解 attention の**行ブロック融合はこの家族では 96 サイト全てで外れる**（mask `[1,6,144,144]` と
 `softmax` の形が matcher の実測形と合わない）。したがってスコア S は 1 本の binding になり、
 1024² で 230MiB・2048² で 878MiB を要求する — **128MiB 既定の device はこの家族の対象外**
@@ -994,7 +996,7 @@ quant が宣言する GPU 前提のうち、重み shard を取る前（家族 a
   スロット）が既定内に収まることだけ。中間テンソルを数えないのは、融合後の実需要が device の
   granted limit に依存する（行ブロックの刻みがそこで決まる）ため配布形からは原理的に決まらず、
   融合前の最大を焼くと「行ブロックで走る device」を取得の前に誤って拒否するから。中間が既定を
-  超える現物 = BiRefNet 1024²（1 binding 約 1GiB・GPU 総確保 約 2.9GiB — 上の BiRefNet 節）。
+  超える現物 = BiRefNet 1024²（1 binding 256MiB・GPU 総確保 約 1.7GiB — 上の BiRefNet 節）。
   中間の上限超過（slot 実寸 > `maxStorageBufferBindingSize` / 領域 > `maxBufferSize`）は ADR
   [0093](decisions/0093-transient-liveness-packing.md) 決定 5 の計画時 preflight が、Session 構築時と
   `estimateSessionMemory` の**両方で確保の前にノード名つきで全件列挙して落とす**（2026-09-05 結線）。

@@ -14,17 +14,16 @@
 
 1. **c. perf K-13 / K-14**（prefill attention の K/V タイル再利用 / decode ①QK の並列化）:
    起票・合格線・kill 基準とも [perf-ledger](perf-ledger.md) が正本。
-2. **BiRefNet 2048² 工事 A → B → C**（起票 2026-09-05 — ユーザー裁定。設計の正本は ADR
-   [0093](decisions/0093-transient-liveness-packing.md)、実測の正本は
-   `.claude/reviews/2026-09-04_62bdbeb/B1-design-draft.md`〈git 追跡外〉）:
-   ① C = 中間テンソルの上限 preflight（slot > binding 上限 / 領域 > `maxBufferSize` を確保前に
-   ノード名つきで落とす）+ docs の数値訂正 → ② A = recipe の代数書き換え（1×1 conv と bilinear
-   upsample の可換性で `cat` を消す・`--verify` の maxdiff 段と 1024² / 2048² golden の再採取を
-   伴う） → ③ B = 中間バッファの静的 liveness パッキング（**結線済み 2026-09-05** — ADR 0093
-   Status。C の上限 preflight は同じ計画関数に内蔵。実測 = 1024² の中間 6,283 → 2,020 MiB・2048² は
-   preflight が upsample / cat の 2 本を列挙して落とす〈A で消える〉） → ④ 配布門
-   `BIREFNET_RESOLUTION` の解除・実 GPU 実測（VRAM ピーク・時間）・`karume-birefnet-hr` 2048² の
-   公開裁定。
+2. **BiRefNet 2048² 工事 — 残るのは ④ の公開裁定だけ**（起票 2026-09-05 — ユーザー裁定。設計の
+   正本は ADR [0093](decisions/0093-transient-liveness-packing.md)）: A（recipe パッチ ⑨ = 1×1 conv と
+   bilinear upsample の順序交換で `cat` を消す・`--verify` 3 段・1024² / 2048² の系列と golden
+   再採取済み）/ B（静的 liveness パッキング — runtime へ結線済み）/ C（上限 preflight — B と同じ
+   計画関数）は **2026-09-05 に消化**。実測 = 1024² の中間 6,283 → 749 MiB（run 1.8 s）・2048² の
+   中間 2,948 MiB・総確保 ≈ 4.1 GiB・run 7.5〜8.6 s（RTX 3080 Ti — ADR 0093 Consequences）。
+   **残 ④** = 配布門 `BIREFNET_RESOLUTION`（`tools/export-recipes/birefnet/distribution.py`）を
+   2048² へ開けるか（1024² と 2048² を 1 リポに同居させるか・既定をどちらにするか）と
+   `karume-birefnet-hr` の公開裁定。開けるなら e2e の `SERIES`（`packages/runtime/tests/e2e_birefnet_test.ts`）
+   に 2048² を足して tolerance を実測で固定する。
 
 **残件**:
 
