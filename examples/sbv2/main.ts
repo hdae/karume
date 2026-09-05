@@ -28,6 +28,7 @@ import { analyzeWithWords } from "@hdae/yomi";
 import { getDictionary } from "@hdae/yomi/loader";
 import { encodeWav, Sbv2Pipeline, toSbv2Utterance } from "../../packages/models/mod.ts";
 import { distributionSource } from "../shared/local-source.ts";
+import { runMain } from "../shared/run-main.ts";
 
 const USAGE = "--source <パス|HF repo> --source-map <owner/name=パス> --text <文字列>" +
   " --model <名前> --quant <名前>" +
@@ -98,42 +99,52 @@ const noiseScale = number("noise-scale");
 const noiseScaleW = number("noise-scale-w");
 const lengthScale = number("length-scale");
 
-/** 取得元（ローカルの配布形なら `denoDirectory`・それ以外は HF リポジトリ名）。 */
-const from = await distributionSource(source, sourceMaps);
+/**
+ * 台本の本体。
+ *
+ * MUST: `await using` はこの中に置く。モジュール本体で掴むと、本体と解放が両方投げたときの
+ * `SuppressedError` を誰も展開できず、device 消失の理由が画面に出ない（`shared/run-main.ts`）。
+ */
+const main = async (): Promise<void> => {
+  /** 取得元（ローカルの配布形なら `denoDirectory`・それ以外は HF リポジトリ名）。 */
+  const from = await distributionSource(source, sourceMaps);
 
-console.log(
-  `[sbv2] ${source} / model ${model ?? "（manifest の既定）"}` +
-    ` / quant ${quant ?? "（manifest の既定）"} / seed ${seed}\n` +
-    `       ${JSON.stringify(text)}`,
-);
-const started = performance.now();
-// テキスト → 発話（読み・アクセント）は呼び手側。karume には解析済みの構造だけを渡す。
-const utterance = toSbv2Utterance(analyzeWithWords(await getDictionary(), text));
-await using pipeline = await Sbv2Pipeline.fromPretrained(from, {
-  ...selection,
-  onProgress: ({ phase, loaded, total }) =>
-    Deno.stderr.writeSync(encoder.encode(`\r  ${phase} ${(loaded / total * 100).toFixed(1)}%  `)),
-});
-const audio = await pipeline.generate(utterance, {
-  seed,
-  ...(style === undefined ? {} : { style }),
-  ...(styleWeight === undefined ? {} : { styleWeight }),
-  ...(sdpRatio === undefined ? {} : { sdpRatio }),
-  ...(noiseScale === undefined ? {} : { noiseScale }),
-  ...(noiseScaleW === undefined ? {} : { noiseScaleW }),
-  ...(lengthScale === undefined ? {} : { lengthScale }),
-});
-const name = `sbv2-${quant ?? "default"}-${style ?? "default"}-seed${seed}.wav`;
-/** 既定の出力先に使うモデル名（`--source` の末尾要素 — パスでも HF リポ名でも同じ規則）。 */
-const sourceName = source.replace(/\/+$/, "").split("/").at(-1) ?? source;
-const out = args.get("out") ?? `outputs/examples/${sourceName}/${name}`;
-// MUST: `cut > 0` で判定する。`-1`（`/` 無し = cwd 直下）を切ると 1 文字削ったディレクトリを
-// 作り、`0`（絶対パスの根）を切ると空文字列で `mkdir` を呼ぶ。
-const cut = out.lastIndexOf("/");
-if (cut > 0) await Deno.mkdir(out.slice(0, cut), { recursive: true });
-await Deno.writeFile(out, encodeWav(audio.data, audio.sampleRate));
-console.log(
-  `[sbv2] ${out}（${(audio.data.length / audio.sampleRate).toFixed(2)}s / ${
-    ((performance.now() - started) / 1000).toFixed(1)
-  }s）`,
-);
+  console.log(
+    `[sbv2] ${source} / model ${model ?? "（manifest の既定）"}` +
+      ` / quant ${quant ?? "（manifest の既定）"} / seed ${seed}\n` +
+      `       ${JSON.stringify(text)}`,
+  );
+  const started = performance.now();
+  // テキスト → 発話（読み・アクセント）は呼び手側。karume には解析済みの構造だけを渡す。
+  const utterance = toSbv2Utterance(analyzeWithWords(await getDictionary(), text));
+  await using pipeline = await Sbv2Pipeline.fromPretrained(from, {
+    ...selection,
+    onProgress: ({ phase, loaded, total }) =>
+      Deno.stderr.writeSync(encoder.encode(`\r  ${phase} ${(loaded / total * 100).toFixed(1)}%  `)),
+  });
+  const audio = await pipeline.generate(utterance, {
+    seed,
+    ...(style === undefined ? {} : { style }),
+    ...(styleWeight === undefined ? {} : { styleWeight }),
+    ...(sdpRatio === undefined ? {} : { sdpRatio }),
+    ...(noiseScale === undefined ? {} : { noiseScale }),
+    ...(noiseScaleW === undefined ? {} : { noiseScaleW }),
+    ...(lengthScale === undefined ? {} : { lengthScale }),
+  });
+  const name = `sbv2-${quant ?? "default"}-${style ?? "default"}-seed${seed}.wav`;
+  /** 既定の出力先に使うモデル名（`--source` の末尾要素 — パスでも HF リポ名でも同じ規則）。 */
+  const sourceName = source.replace(/\/+$/, "").split("/").at(-1) ?? source;
+  const out = args.get("out") ?? `outputs/examples/${sourceName}/${name}`;
+  // MUST: `cut > 0` で判定する。`-1`（`/` 無し = cwd 直下）を切ると 1 文字削ったディレクトリを
+  // 作り、`0`（絶対パスの根）を切ると空文字列で `mkdir` を呼ぶ。
+  const cut = out.lastIndexOf("/");
+  if (cut > 0) await Deno.mkdir(out.slice(0, cut), { recursive: true });
+  await Deno.writeFile(out, encodeWav(audio.data, audio.sampleRate));
+  console.log(
+    `[sbv2] ${out}（${(audio.data.length / audio.sampleRate).toFixed(2)}s / ${
+      ((performance.now() - started) / 1000).toFixed(1)
+    }s）`,
+  );
+};
+
+await runMain(main);

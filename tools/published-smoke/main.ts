@@ -11,7 +11,8 @@
 // `--manifests-only` で省く）。
 // 起動: deno task smoke:published [--manifests-only]
 
-type PinRef = { readonly repo: string; readonly revision: string };
+import { isPinRef, parseSmokeArgs, type PinRef } from "./cli.ts";
+
 type HubModule = {
   loadManifest: (ref: PinRef) => Promise<{ manifest: { format?: unknown } }>;
 };
@@ -29,11 +30,6 @@ type Sbv2Module = {
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null;
 
-const isPinRef = (value: unknown): value is PinRef =>
-  typeof value === "object" && value !== null &&
-  typeof (value as { repo?: unknown }).repo === "string" &&
-  typeof (value as { revision?: unknown }).revision === "string";
-
 const readPublishedVersion = async (): Promise<string> => {
   const url = new URL("../../packages/models/deno.json", import.meta.url);
   const parsed: unknown = JSON.parse(await Deno.readTextFile(url));
@@ -44,7 +40,7 @@ const readPublishedVersion = async (): Promise<string> => {
   return version;
 };
 
-const manifestsOnly = Deno.args.includes("--manifests-only");
+const { manifestsOnly } = parseSmokeArgs(Deno.args);
 const version = await readPublishedVersion();
 console.log(`published smoke: @karume/* @ ${version}`);
 

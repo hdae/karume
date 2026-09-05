@@ -213,6 +213,35 @@ export const assertBindingKeys = (
   }
 };
 
+/**
+ * 修飾なしキー（`SYM`）のうち、**どのコンポーネントも宣言していない**綴りを落とす。
+ *
+ * MUST: 検査は渡されたグラフ全体の**和集合**に対して行う。1 つでも宣言していれば通るので、
+ * 家族共通の束縛を全コンポーネントへ配る使い方（irodori の `T` と `codec_encoder.T` の併記）は
+ * 壊れない。逆に和集合のどこにも無い綴りは、値が効かないだけでなく `unused_bindings` にも
+ * 出ない（`unused` はグラフが宣言した記号の上でしか回らない）ため、誤綴りの記録が
+ * どこにも残らない — 修飾キー側だけを落としている非対称をここで閉じる。
+ *
+ * NOTE: 渡すのは**読めたグラフ**だけ。読めなかったコンポーネントを外した集合で検査すると、
+ * その 1 本だけが宣言していた記号を誤って落とす（呼び手はそのとき検査を見送る）。
+ */
+export const assertPlainBindingKeys = (
+  scenario: Scenario,
+  graphs: readonly IrGraph[],
+): void => {
+  const declared = new Set(graphs.flatMap((graph) => graph.symbols));
+  const unknown = Object.keys(scenario.bindings).filter((key) =>
+    key.indexOf(".") < 0 && !declared.has(key)
+  );
+  if (unknown.length > 0) {
+    throw new Error(
+      `シナリオ '${scenario.name}' の束縛 ${unknown.join(" / ")}: ` +
+        "どのコンポーネントも宣言しない記号" +
+        `（既知: ${[...declared].sort().join(", ") || "なし"}）`,
+    );
+  }
+};
+
 /** 宣言 shape に現れる記号を集める。 */
 const symbolsOf = (shape: readonly (number | string)[], into: Set<string>): void => {
   for (const dim of shape) {

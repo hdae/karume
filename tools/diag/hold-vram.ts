@@ -18,7 +18,8 @@
 
 const CHUNK_MIB = 256;
 
-const parseMib = (arg: string | undefined): number => {
+/** 保持量 MiB（既定 4608）。門は hold-vram_test.ts が見るので export する。 */
+export const parseMib = (arg: string | undefined): number => {
   if (arg === undefined) return 4608;
   const mib = Number(arg);
   // 診断の道具でも「黙って既定に落ちる」は作らない（測った条件が記録と食い違う）。
@@ -28,31 +29,36 @@ const parseMib = (arg: string | undefined): number => {
   return mib;
 };
 
-const totalMib = parseMib(Deno.args[0]);
-const adapter = await navigator.gpu.requestAdapter();
-if (adapter === null) throw new Error("WebGPU アダプタが無い");
-const device = await adapter.requestDevice();
+// MUST: 本体は `import.meta.main` の内側だけで走らせる（横断の不変条件「全モジュール副作用
+// ゼロ = import 時実行の禁止」）。module スコープに置くと、門をテストから import した瞬間に
+// GPU を掴みに行き、`GPUBufferUsage` の裸参照も import 時に評価される。
+if (import.meta.main) {
+  const totalMib = parseMib(Deno.args[0]);
+  const adapter = await navigator.gpu.requestAdapter();
+  if (adapter === null) throw new Error("WebGPU アダプタが無い");
+  const device = await adapter.requestDevice();
 
-// 256MiB は WebGPU 既定の maxBufferSize と同値なので、limits を要求せずに刻める。
-const chunks: GPUBuffer[] = [];
-let heldMib = 0;
-while (heldMib < totalMib) {
-  const mib = Math.min(CHUNK_MIB, totalMib - heldMib);
-  device.pushErrorScope("out-of-memory");
-  const buffer = device.createBuffer({
-    label: `hold-${heldMib}MiB`,
-    size: mib * 1024 * 1024,
-    usage: GPUBufferUsage.STORAGE,
-  });
-  const failure = await device.popErrorScope();
-  if (failure !== null) {
-    throw new Error(`${heldMib}MiB まで確保して力尽きた: ${failure.message}`);
+  // 256MiB は WebGPU 既定の maxBufferSize と同値なので、limits を要求せずに刻める。
+  const chunks: GPUBuffer[] = [];
+  let heldMib = 0;
+  while (heldMib < totalMib) {
+    const mib = Math.min(CHUNK_MIB, totalMib - heldMib);
+    device.pushErrorScope("out-of-memory");
+    const buffer = device.createBuffer({
+      label: `hold-${heldMib}MiB`,
+      size: mib * 1024 * 1024,
+      usage: GPUBufferUsage.STORAGE,
+    });
+    const failure = await device.popErrorScope();
+    if (failure !== null) {
+      throw new Error(`${heldMib}MiB まで確保して力尽きた: ${failure.message}`);
+    }
+    chunks.push(buffer);
+    heldMib += mib;
   }
-  chunks.push(buffer);
-  heldMib += mib;
-}
 
-console.log(`${heldMib}MiB を ${chunks.length} 本の GPUBuffer で保持中。Ctrl-C で解放する。`);
-// 保持し続けるだけ（プロセスが生きている限り VRAM は返らない）。決して解決しない promise を
-// await すると Deno がイベントループの枯渇を検出して即エラー終了するため、タイマで生かす。
-setInterval(() => {}, 1 << 30);
+  console.log(`${heldMib}MiB を ${chunks.length} 本の GPUBuffer で保持中。Ctrl-C で解放する。`);
+  // 保持し続けるだけ（プロセスが生きている限り VRAM は返らない）。決して解決しない promise を
+  // await すると Deno がイベントループの枯渇を検出して即エラー終了するため、タイマで生かす。
+  setInterval(() => {}, 1 << 30);
+}

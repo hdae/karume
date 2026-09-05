@@ -207,3 +207,35 @@ Deno.test({
     }
   },
 });
+
+Deno.test("buildCaseModel: i4 の行長が group_size で割り切れないと落ちる", () => {
+  assertThrows(
+    () =>
+      buildCaseModel(
+        row({
+          in_shapes: [[1, 128], [64, 100]],
+          in_dtypes: ["f32", "f32"],
+          storage: [null, { dtype: "i4", group_size: 32 }],
+        }),
+        1,
+      ),
+    Error,
+    "行長 100",
+  );
+});
+
+Deno.test("buildCaseModel: i4 なのに group_size 欄が無い行は落ちる", () => {
+  assertThrows(
+    () =>
+      buildCaseModel(
+        row({
+          in_shapes: [[1, 128], [64, 128]],
+          in_dtypes: ["f32", "f32"],
+          storage: [null, { dtype: "i4" }],
+        }),
+        1,
+      ),
+    Error,
+    "i4 に group_size が無い",
+  );
+});

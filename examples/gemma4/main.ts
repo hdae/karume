@@ -67,6 +67,7 @@ import type {
 import { denoDirectory } from "../../packages/hub/deno.ts";
 import type { AssetProgress } from "../../packages/hub/mod.ts";
 import { acquireGpu } from "../../packages/runtime/mod.ts";
+import { runMain } from "../shared/run-main.ts";
 import type { GpuTimingStats, SessionDiagnostics } from "../../packages/runtime/mod.ts";
 
 const USAGE = "--source <配布形のパス> | --repo <owner/name[@revision]>" +
@@ -280,53 +281,12 @@ const observeRun = (diagnostic: SessionDiagnostics): void => {
 };
 
 /**
- * 例外を 1 つ残らず stderr へ展開する（型名 + 文言 + 入れ子の深さ）。
- *
- * `using` / `await using` は、本体が投げたうえに解放も投げると両方を `SuppressedError` に畳む
- * （`.error` = 解放側 / `.suppressed` = 本体側）。Deno の未捕捉ハンドラはその**外皮しか印字
- * しない**ため、そのままだと型も文言も画面に出ない — device 消失のように「本体と解放が同じ
- * 理由で落ちる」故障では診断が丸ごと消える。`cause` 連鎖と `AggregateError` も同じ理由で辿る。
- *
- * MUST: 中身を 1 つも落とさない。ここは台本の最後の出力口で、握り潰せば以後どこにも出ない。
- */
-const printError = (error: unknown, depth = 0): void => {
-  const indent = "  ".repeat(depth);
-  if (!(error instanceof Error)) {
-    note(`${indent}[${depth}] ${typeof error}: ${String(error)}\n`);
-    return;
-  }
-  note(`${indent}[${depth}] ${error.name}: ${error.message}\n`);
-  // 外皮のスタックだけは残す（Deno の既定の未捕捉出力と同じ情報量を下回らないため）。
-  // 1 行目は「名前: 文言」の写しなので落とす — 直前の行と重複する。
-  if (depth === 0 && error.stack !== undefined) {
-    const frames = error.stack.slice(error.stack.indexOf("\n") + 1);
-    if (frames !== error.stack) note(`${frames}\n`);
-  }
-  if (error instanceof SuppressedError) {
-    note(`${indent}  ↳ error（解放側）\n`);
-    printError(error.error, depth + 1);
-    note(`${indent}  ↳ suppressed（本体側）\n`);
-    printError(error.suppressed, depth + 1);
-  }
-  if (error instanceof AggregateError) {
-    for (const [at, inner] of error.errors.entries()) {
-      note(`${indent}  ↳ errors[${at}]\n`);
-      printError(inner, depth + 1);
-    }
-  }
-  if (error.cause !== undefined) {
-    note(`${indent}  ↳ cause\n`);
-    printError(error.cause, depth + 1);
-  }
-};
-
-/**
  * 台本の本体。
  *
  * MUST: `using` / `await using` は全てこの中に置く。トップレベルの `using` が畳んだ
  * `SuppressedError` は自分では捕まえられず（モジュール本体の外に catch を置けない）、Deno の
- * 既定出力では外皮しか読めない。関数に包んで最上位で {@link printError} に渡すのが、
- * 解放時の例外と本体の例外を**両方**読むための唯一の確実な形である。
+ * 既定出力では外皮しか読めない。関数に包んで最上位で `runMain`（`examples/shared/run-main.ts`）
+ * に渡すのが、解放時の例外と本体の例外を**両方**読むための唯一の確実な形である。
  */
 const main = async (): Promise<void> => {
   // 計測は Metal（Apple GPU）では device ごと落とす（timestamp 用の query set を確保できない）。
@@ -577,9 +537,4 @@ const main = async (): Promise<void> => {
   write("\nbye\n");
 };
 
-try {
-  await main();
-} catch (error) {
-  printError(error);
-  Deno.exit(1);
-}
+await runMain(main);

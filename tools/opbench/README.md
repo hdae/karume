@@ -228,9 +228,12 @@ Triton's launcher stub. Weights are synthetic; the numbers say nothing about num
 The protocol mirrors `bench.ts`: a heater matmul pins the clocks, one pass is stacked to about 80 ms,
 and the value is the min over rounds. `comparison.json` joins each torch row with the `single` time
 of the same case and reports, per op, the median of `karume_ms / torch_ms` for every column (above 1
-means karume is slower) and the census-weighted totals of both sides. The IR-op → torch table is
-hand-written in `torch_bench.py`; ops without an entry are counted under `skipped`, and a column
-that fails for a case is recorded under `errors` instead of dropping the row.
+means karume is slower) and the census-weighted totals of both sides. Both the median and the totals
+count only the cases karume itself measured, so every column of one op shares a single denominator.
+The IR-op → torch table is hand-written in `torch_bench.py`; ops without an entry are counted under
+`skipped`, and a column that fails for a case is recorded under `errors` instead of dropping the
+row — those failures are counted per column in `summary.json` and copied into the `column_errors`
+header of `comparison.json`, so a column that failed everywhere cannot be read as a fast one.
 
 ## Notes
 

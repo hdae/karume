@@ -68,5 +68,6 @@ Deno.test("summarizeTorch: op ごとに比の中央値と加重 ms を出し、�
   assertEquals(linear.median_ratio, { f16: 3, bf16: 0.5 });
   assertEquals(linear.weighted_ms, { karume: 35, f16: 15, bf16: 40 });
   assertEquals(gelu.median_ratio, { f16: null, bf16: null });
-  assertEquals(gelu.weighted_ms, { karume: 0, f16: 2, bf16: 0 });
+  // karume 側が測れなかった case は torch 列の合計にも乗らない（母数を揃える — W-T1-10）。
+  assertEquals(gelu.weighted_ms, { karume: 0, f16: 0, bf16: 0 });
 });

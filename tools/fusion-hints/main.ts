@@ -19,6 +19,7 @@ import { parseInductorArgs, runInductor } from "./inductor.ts";
 import { directoryUrl, readIrGraph, resolveAsset } from "../_shared/assets.ts";
 import {
   assertBindingKeys,
+  assertPlainBindingKeys,
   defaultScenarios,
   parseScenarios,
   type Scenario,
@@ -176,7 +177,10 @@ const buildReport = async (options: Options): Promise<SourceReport> => {
       graphs.push({
         component: target.component,
         graph: name,
-        path: target.graphShard.pathname.slice(root.pathname.length),
+        // percent encode を解いてから資産根ぶんを落とす（報告の `path` 欄は人が読む path で、
+        // `%20` の混じった綴りは手で開けない）。根は末尾 `/` なので境界に escape は跨がらない。
+        path: decodeURIComponent(target.graphShard.pathname)
+          .slice(decodeURIComponent(root.pathname).length),
         ir: await readIrGraph(target.graphShard),
       });
     } catch (cause) {
@@ -187,6 +191,14 @@ const buildReport = async (options: Options): Promise<SourceReport> => {
       skipped.push({ name, reason });
       console.error(`[fusion-hints] ${name}: ${reason}`);
     }
+  }
+
+  // 修飾なしキーの誤綴りはグラフを読むまで判らない。読めなかったコンポーネントがあると
+  // 和集合が欠けるので、その回は検査を見送る（欠けた 1 本だけが宣言していた記号を誤って
+  // 落とさないため — 読めなかったこと自体は上の stderr と `skipped` に残っている）。
+  if (skipped.length === 0) {
+    const irs = graphs.map(({ ir }) => ir);
+    for (const scenario of scenarios) assertPlainBindingKeys(scenario, irs);
   }
 
   const reports: ScenarioReport[] = scenarios.map((scenario) =>

@@ -13,7 +13,7 @@
  * ヘッダだけ。
  */
 
-import { directoryUrl, readIrGraph, resolveAsset } from "../_shared/assets.ts";
+import { directoryUrl, externalPath, readIrGraph, resolveAsset } from "../_shared/assets.ts";
 import { acquireGpu } from "../../packages/runtime/mod.ts";
 import { ROUNDS } from "./bench.ts";
 import {
@@ -38,13 +38,14 @@ import { compareWithCensus, driveOnce, type RunRecord } from "./graph.ts";
 import { defaultVenv, runTorchBench, summarizeTorch, type TorchRecord } from "./torch.ts";
 import {
   assertBindingKeys,
+  assertPlainBindingKeys,
   defaultScenarios,
   parseScenarios,
   type Scenario,
 } from "../_shared/scenario.ts";
 
-/** `--key value` の並びを読む（同じキーの繰り返しは全て残す）。 */
-const parseArgs = (
+/** `--key value` の並びを読む（同じキーの繰り返しは全て残す。門は main_test.ts が見る）。 */
+export const parseArgs = (
   argv: readonly string[],
   known: ReadonlySet<string>,
 ): ReadonlyMap<string, readonly string[]> => {
@@ -70,7 +71,7 @@ const parseArgs = (
   return args;
 };
 
-const CENSUS_OPTIONS: ReadonlySet<string> = new Set([
+export const CENSUS_OPTIONS: ReadonlySet<string> = new Set([
   "source",
   "out",
   "model",
@@ -121,7 +122,7 @@ const positiveInteger = (text: string, where: string): number => {
   return value;
 };
 
-const single = (
+export const single = (
   args: ReadonlyMap<string, readonly string[]>,
   name: string,
 ): string | undefined => {
@@ -158,6 +159,9 @@ const runCensus = async (args: ReadonlyMap<string, readonly string[]>): Promise<
       graph: await readIrGraph(target.graphShard),
     })),
   );
+  // 修飾なしキーの誤綴りはグラフを読むまで判らない（記号の宣言集合は IR にしか無い）。
+  const irs = graphs.map(({ graph }) => graph);
+  for (const scenario of scenarios) assertPlainBindingKeys(scenario, irs);
 
   const rows: CensusRow[] = [];
   const summaries = scenarios.map((scenario) => {
@@ -481,6 +485,17 @@ const runGraph = async (args: ReadonlyMap<string, readonly string[]>): Promise<v
   }));
 };
 
+/** torch の summary.json の `errors`（列名 → 失敗件数と代表文言）。 */
+type ColumnErrors = Readonly<Record<string, { readonly count: number; readonly example: string }>>;
+
+const isColumnErrors = (value: unknown): value is ColumnErrors =>
+  typeof value === "object" && value !== null &&
+  Object.values(value as Record<string, unknown>).every((entry) =>
+    typeof entry === "object" && entry !== null &&
+    typeof (entry as { count?: unknown }).count === "number" &&
+    typeof (entry as { example?: unknown }).example === "string"
+  );
+
 const runTorch = async (args: ReadonlyMap<string, readonly string[]>): Promise<void> => {
   const singleDir = single(args, "single");
   if (singleDir === undefined) throw new Error("--single <single の出力ディレクトリ> は必須");
@@ -494,8 +509,10 @@ const runTorch = async (args: ReadonlyMap<string, readonly string[]>): Promise<v
   const limit = single(args, "limit");
   const options = {
     venv: single(args, "venv") ?? defaultVenv(),
-    single: new URL("single.jsonl", directoryUrl(singleDir)).pathname,
-    out: directoryUrl(out).pathname,
+    // python へ渡す 2 本は URL を経由しない（percent encode が子の実 path へ漏れる — 綴りの
+    // 理由は externalPath の doc）。Deno 側の読み書きは従来どおり URL で行う。
+    single: `${externalPath(singleDir)}/single.jsonl`,
+    out: externalPath(out),
     compile: compileArg === "true",
     ...(rounds === undefined ? {} : { rounds: positiveInteger(rounds, "--rounds") }),
     ...(limit === undefined ? {} : { limit: positiveInteger(limit, "--limit") }),
@@ -512,11 +529,23 @@ const runTorch = async (args: ReadonlyMap<string, readonly string[]>): Promise<v
   if (!Array.isArray(columns) || !columns.every((column) => typeof column === "string")) {
     throw new Error("torch の summary.json に columns が無い");
   }
+  // 列ごとの失敗件数を突合表の頭へ写す。これが無いと、ある列が全 case 失敗しても
+  // median_ratio=null / weighted_ms=0 としか出ず「測れなかった」と「速かった」が区別できない。
+  const columnErrors = (torchSummary as { errors?: unknown }).errors;
+  if (!isColumnErrors(columnErrors)) {
+    throw new Error("torch の summary.json に errors（列名 → 件数と代表文言）が無い");
+  }
   const comparison = summarizeTorch(records, columns);
   await Deno.writeTextFile(
     new URL("comparison.json", outDir),
     JSON.stringify(
-      { generated_at: new Date().toISOString(), single: singleDir, columns, ops: comparison },
+      {
+        generated_at: new Date().toISOString(),
+        single: singleDir,
+        columns,
+        column_errors: columnErrors,
+        ops: comparison,
+      },
       null,
       2,
     ) + "\n",

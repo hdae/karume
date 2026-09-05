@@ -31,7 +31,14 @@ export type TorchOpRatio = {
   readonly cases: number;
   /** 列名 → 比の中央値（karume ms / torch ms・>1 は karume が遅い）。列が無い / 失敗した case は除く。 */
   readonly median_ratio: Readonly<Record<string, number | null>>;
-  /** census 加重（count）で足した karume 側の ms と、列ごとの torch 側の ms。 */
+  /**
+   * census 加重（count）で足した karume 側の ms と、列ごとの torch 側の ms。
+   *
+   * MUST: 母数を揃える — **karume 側が測れた case（`karume_ns_per_node_min !== null`）だけ**を
+   * 足す。torch 列だけ全行を足すと、karume が測れなかった case が torch 側にだけ乗り、
+   * 総和の比が実際と違う向きへ動く（比の中央値 {@link TorchOpRatio.median_ratio} は元から
+   * 両側の揃った case でしか採っていないので、2 つの指標の母数が割れる）。
+   */
   readonly weighted_ms: Readonly<Record<string, number>>;
 };
 
@@ -63,11 +70,10 @@ export const summarizeTorch = (
       let total = 0;
       for (const row of rows) {
         const torchMs = row.ms[column];
-        if (torchMs === undefined) continue;
+        // karume 側が測れなかった case は合計にも入れない（karume 列と母数を揃える）。
+        if (torchMs === undefined || row.karume_ns_per_node_min === null) continue;
         total += torchMs * row.count;
-        if (row.karume_ns_per_node_min !== null) {
-          values.push(row.karume_ns_per_node_min / 1e6 / torchMs);
-        }
+        values.push(row.karume_ns_per_node_min / 1e6 / torchMs);
       }
       ratios[column] = median(values);
       weighted[column] = total;
@@ -78,7 +84,9 @@ export const summarizeTorch = (
 
 export type TorchRunOptions = {
   readonly venv: string;
+  /** `single.jsonl` の**素の path**（URL の `pathname` ではない — `_shared/assets.ts` の externalPath）。 */
   readonly single: string;
+  /** 書き出し先ディレクトリの**素の path**（同上）。 */
   readonly out: string;
   readonly rounds?: number;
   readonly compile: boolean;

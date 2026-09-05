@@ -349,6 +349,9 @@ def main() -> int:
     heater = Heater()
     records: list[dict[str, Any]] = []
     skipped: dict[str, int] = {}
+    # 列ごとの失敗を集計へ出す（残した errors が読まれないと、全 case 失敗した列が
+    # median_ratio=null / weighted_ms=0 として「速かった」のと同じ見え方になる）。
+    errors_by_column: dict[str, dict[str, Any]] = {}
     for index, case in enumerate(cases):
         builder = BUILDERS.get(case["op"])
         label = f"[{index + 1}/{len(cases)}] {case['component']} {case['op']} {json.dumps(case['in_shapes'])}"
@@ -415,8 +418,12 @@ def main() -> int:
                 torch._dynamo.reset()
                 torch.cuda.empty_cache()
         records.append(record)
+        for column, message in record["errors"].items():
+            entry = errors_by_column.setdefault(column, {"count": 0, "example": message})
+            entry["count"] += 1
         shown = " ".join(f"{k}={v:.4f}" for k, v in record["ms"].items())
-        print(f"{label} {shown} ms", file=sys.stderr)
+        failed = "".join(f" {column}=FAILED" for column in record["errors"])
+        print(f"{label} {shown} ms{failed}", file=sys.stderr)
 
     (out / "torch.jsonl").write_text("".join(json.dumps(r) + "\n" for r in records))
     summary = {
@@ -429,6 +436,8 @@ def main() -> int:
         "rounds": args.rounds,
         "measured": len(records),
         "skipped": skipped,
+        # 列名 → {count, example}（0 件の列は載らない）。Deno 側が comparison.json の頭へ写す。
+        "errors": errors_by_column,
         "columns": [name for name, _, _ in COLUMNS]
         + (["compile_f16"] if args.compile else []),
     }

@@ -44,6 +44,20 @@ export const directoryUrl = (path: string): URL =>
   new URL(path.endsWith("/") ? path : `${path}/`, `file://${Deno.cwd()}/`);
 
 /**
+ * CLI の path 文字列を、**外部プロセスへ渡せる素の絶対 path** にする（末尾 `/` は落とす）。
+ *
+ * MUST: 子プロセスへ渡す path に {@link directoryUrl} の `pathname` を使わない。URL の
+ * `pathname` は percent encode 済みなので、空白や非 ASCII を含む path は `%20` を含む
+ * **リテラルなディレクトリ名**として子へ渡り、Deno 側の書き出し先と食い違う。`#` / `?` は
+ * さらに悪く、`new URL` の時点で fragment / query として `pathname` から落ちるため、
+ * 警告なく別のディレクトリを指す。
+ */
+export const externalPath = (path: string): string => {
+  const absolute = path.startsWith("/") ? path : `${Deno.cwd()}/${path}`;
+  return absolute.length > 1 ? absolute.replace(/\/+$/, "") : absolute;
+};
+
+/**
  * safetensors のヘッダ JSON だけを読んで IR を取り出す。
  *
  * MUST: `karume_ir` が無い shard は fail loudly。重み shard（metadata 無し）を先頭と取り違えた
@@ -97,12 +111,18 @@ const readExact = async (handle: Deno.FsFile, into: Uint8Array, where: URL): Pro
  */
 export type SessionDeclaration = Readonly<Record<string, string>>;
 
-/** manifest のうち資産解決が引く欄だけ（綴りの正本は配布形なので、ここに焼かず読む）。 */
-type Manifest = {
+/**
+ * manifest のうち資産解決が引く欄だけ（綴りの正本は配布形なので、ここに焼かず読む）。
+ *
+ * NOTE: 道具どうしで綴りを 2 本持たないよう export している（`tools/ram-peak/measure.ts` が
+ * 同じ manifest を別の目的で辿る）。検査は hub の `parseManifest` が持つので、ここは
+ * 「読む欄の形」だけを名乗る型である。
+ */
+export type Manifest = {
   readonly defaultModel: string;
   readonly models: Readonly<Record<string, ManifestModel>>;
 };
-type ManifestModel = {
+export type ManifestModel = {
   readonly pipeline: string;
   readonly defaultQuant: string;
   readonly quants: Readonly<Record<string, ManifestQuant>>;
@@ -110,12 +130,17 @@ type ManifestModel = {
     Record<string, Readonly<Record<string, { readonly shards: readonly ManifestShard[] }>>>
   >;
 };
-type ManifestQuant = {
+export type ManifestQuant = {
   readonly weights: Readonly<Record<string, string>>;
   /** 省略可（hub 側も未宣言を「ノブを 1 つも指定しない」として読む）。 */
   readonly session?: SessionDeclaration;
 };
-type ManifestShard = { readonly path: string; readonly repo?: string };
+/** `size` はヘッダ込みのファイル長（ADR 0038 §2 の 3 点セットの 1 つ — 必ず在る）。 */
+export type ManifestShard = {
+  readonly path: string;
+  readonly size: number;
+  readonly repo?: string;
+};
 
 /** 配布形の model 1 件（`--model` 省略時は `defaultModel`）。 */
 const manifestModel = (

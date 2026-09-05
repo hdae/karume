@@ -22,6 +22,7 @@
 import { AnimaPipeline, encodePng } from "../../packages/models/mod.ts";
 import { ANIMA_SOURCES, parseResolution } from "../../packages/models/anima.ts";
 import { distributionSource } from "../shared/local-source.ts";
+import { runMain } from "../shared/run-main.ts";
 
 const USAGE = "--source <パス|HF repo> --source-map <owner/name=パス> --prompt <文字列>" +
   " --resolution <WxH> --model <名前>" +
@@ -89,42 +90,63 @@ if (rawGuidance !== undefined && !Number.isFinite(Number(rawGuidance))) {
 const guidanceScale = rawGuidance === undefined ? undefined : Number(rawGuidance);
 const negativePrompt = args.get("negative");
 
-/** 取得元（ローカルの配布形なら `denoDirectory`・それ以外は HF リポジトリ名）。 */
-const from = source === undefined
-  ? ANIMA_SOURCES["anima"]
-  : await distributionSource(source, sourceMaps);
+// MUST: 効かないノブを黙って捨てない（`local-source.ts` が HF リポ名 + mapping で落とすのと
+// 同じ線）。`--source` 未指定の取得元は焼き込み pin（`{repo, revision}`）で、越境 mapping を
+// 渡す口が無い — 黙って捨てると「mapping を渡したのに既定 pin を取りに行く」が沈黙する。
+if (source === undefined && sourceMaps.length > 0) {
+  throw new Error(
+    `--source-map は --source を明示したときだけ効く（既定の取得元は HF の pin）（使い方: ${USAGE}）`,
+  );
+}
 
-console.log(
-  `[anima] ${source ?? `${ANIMA_SOURCES["anima"].repo}（台本の既定 = 検証済み pin）`}` +
-    ` / model ${model ?? "（manifest の既定）"}` +
-    ` / quant ${quant ?? "（manifest の既定）"} / seed ${seed}`,
-);
-const started = performance.now();
-await using pipeline = await AnimaPipeline.fromPretrained(
-  from,
-  {
-    ...selection,
-    onProgress: ({ phase, loaded, total }) =>
-      Deno.stderr.writeSync(encoder.encode(`\r  ${phase} ${(loaded / total * 100).toFixed(1)}%  `)),
-  },
-);
-const image = await pipeline.generate({
-  prompt,
-  seed,
-  ...(steps === undefined ? {} : { steps }),
-  ...(resolution === undefined ? {} : { resolution }),
-  ...(guidanceScale === undefined ? {} : { guidanceScale }),
-  ...(negativePrompt === undefined ? {} : { negativePrompt }),
-});
-const png = await encodePng(image.data, image.width, image.height);
-const name = `anima-${quant ?? "default"}-${image.width}x${image.height}` +
-  `-${steps ?? "default"}step-seed${seed}.png`;
-/** 既定の出力先に使うモデル名（取得元の末尾要素 — パスでも HF リポ名でも同じ規則）。 */
-const sourceRef = source ?? ANIMA_SOURCES["anima"].repo;
-const sourceName = sourceRef.replace(/\/+$/, "").split("/").at(-1) ?? sourceRef;
-const outDir = `outputs/examples/${sourceName}`;
-await Deno.mkdir(outDir, { recursive: true });
-await Deno.writeFile(`${outDir}/${name}`, png);
-console.log(
-  `[anima] ${outDir}/${name}（${((performance.now() - started) / 1000).toFixed(1)}s）`,
-);
+/**
+ * 台本の本体。
+ *
+ * MUST: `await using` はこの中に置く。モジュール本体で掴むと、本体と解放が両方投げたときの
+ * `SuppressedError` を誰も展開できず、device 消失の理由が画面に出ない（`shared/run-main.ts`）。
+ */
+const main = async (): Promise<void> => {
+  /** 取得元（ローカルの配布形なら `denoDirectory`・それ以外は HF リポジトリ名）。 */
+  const from = source === undefined
+    ? ANIMA_SOURCES["anima"]
+    : await distributionSource(source, sourceMaps);
+
+  console.log(
+    `[anima] ${source ?? `${ANIMA_SOURCES["anima"].repo}（台本の既定 = 検証済み pin）`}` +
+      ` / model ${model ?? "（manifest の既定）"}` +
+      ` / quant ${quant ?? "（manifest の既定）"} / seed ${seed}`,
+  );
+  const started = performance.now();
+  await using pipeline = await AnimaPipeline.fromPretrained(
+    from,
+    {
+      ...selection,
+      onProgress: ({ phase, loaded, total }) =>
+        Deno.stderr.writeSync(
+          encoder.encode(`\r  ${phase} ${(loaded / total * 100).toFixed(1)}%  `),
+        ),
+    },
+  );
+  const image = await pipeline.generate({
+    prompt,
+    seed,
+    ...(steps === undefined ? {} : { steps }),
+    ...(resolution === undefined ? {} : { resolution }),
+    ...(guidanceScale === undefined ? {} : { guidanceScale }),
+    ...(negativePrompt === undefined ? {} : { negativePrompt }),
+  });
+  const png = await encodePng(image.data, image.width, image.height);
+  const name = `anima-${quant ?? "default"}-${image.width}x${image.height}` +
+    `-${steps ?? "default"}step-seed${seed}.png`;
+  /** 既定の出力先に使うモデル名（取得元の末尾要素 — パスでも HF リポ名でも同じ規則）。 */
+  const sourceRef = source ?? ANIMA_SOURCES["anima"].repo;
+  const sourceName = sourceRef.replace(/\/+$/, "").split("/").at(-1) ?? sourceRef;
+  const outDir = `outputs/examples/${sourceName}`;
+  await Deno.mkdir(outDir, { recursive: true });
+  await Deno.writeFile(`${outDir}/${name}`, png);
+  console.log(
+    `[anima] ${outDir}/${name}（${((performance.now() - started) / 1000).toFixed(1)}s）`,
+  );
+};
+
+await runMain(main);

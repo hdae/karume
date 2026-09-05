@@ -19,18 +19,25 @@ export const runVenvPython = async (
   const python = `${venv}/bin/python`;
   try {
     await Deno.stat(python);
-  } catch {
+  } catch (cause) {
+    // MUST: 「無い」に丸めてよいのは NotFound だけ。PermissionDenied / NotADirectory /
+    // FilesystemLoop まで同じ文言にすると、存在する path を「無い」と報告して利用者を
+    // --venv の付け直しへ誘導する（assets.ts の listDir / isFile と同じ体裁）。
+    if (!(cause instanceof Deno.errors.NotFound)) throw cause;
     throw new Error(
       `${python} が無い — --venv か KARUME_CUDA_VENV で CUDA venv を指す（既定 ~/workspace/karume-cuda-venv）`,
     );
   }
+  // MUST: 外部プロセスへ渡す path に `URL.pathname` をそのまま使わない（percent encode 済み）。
+  // 空白や非 ASCII を含むリポジトリの下では `%20` を含むリテラルな path が python へ渡る。
+  const scriptPath = decodeURIComponent(script.pathname);
   const command = new Deno.Command(python, {
-    args: [script.pathname, ...args],
+    args: [scriptPath, ...args],
     stdout: "inherit",
     stderr: "inherit",
   });
   const status = await command.output();
   if (!status.success) {
-    throw new Error(`${script.pathname} が code ${status.code} で終了した（上の stderr が理由）`);
+    throw new Error(`${scriptPath} が code ${status.code} で終了した（上の stderr が理由）`);
   }
 };

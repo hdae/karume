@@ -26,6 +26,7 @@ import {
 } from "../../packages/models/mod.ts";
 import { IRODORI_SOURCES } from "../../packages/models/irodori.ts";
 import { distributionSource } from "../shared/local-source.ts";
+import { runMain } from "../shared/run-main.ts";
 
 const USAGE = "--source <パス|HF repo> --source-map <owner/name=パス> --text <文字列>" +
   " --caption <文字列> --ref <WAV パス>" +
@@ -88,54 +89,75 @@ const ref = args.get("ref");
 const seconds = number("seconds");
 const seed = integer("seed") ?? 0;
 
-/** 参照音声（任意）。周波数が配布形と違えば `generate` が fail loudly する（リサンプル無し）。 */
-const speaker: IrodoriSpeakerInput | undefined = ref === undefined
-  ? undefined
-  : { audio: decodeWav(await Deno.readFile(ref)) };
+// MUST: 効かないノブを黙って捨てない（`local-source.ts` が HF リポ名 + mapping で落とすのと
+// 同じ線）。`--source` 未指定の取得元は焼き込み pin（`{repo, revision}`）で、越境 mapping を
+// 渡す口が無い — 黙って捨てると「mapping を渡したのに既定 pin を取りに行く」が沈黙する。
+if (source === undefined && sourceMaps.length > 0) {
+  throw new Error(
+    `--source-map は --source を明示したときだけ効く（既定の取得元は HF の pin）（使い方: ${USAGE}）`,
+  );
+}
 
-/** 取得元（ローカルの配布形なら `denoDirectory`・それ以外は HF リポジトリ名）。 */
-const from = source === undefined
-  ? IRODORI_SOURCES["irodori-v4.1-small"]
-  : await distributionSource(source, sourceMaps);
+/**
+ * 台本の本体。
+ *
+ * MUST: `await using` はこの中に置く。モジュール本体で掴むと、本体と解放が両方投げたときの
+ * `SuppressedError` を誰も展開できず、device 消失の理由が画面に出ない（`shared/run-main.ts`）。
+ */
+const main = async (): Promise<void> => {
+  /** 参照音声（任意）。周波数が配布形と違えば `generate` が fail loudly する（リサンプル無し）。 */
+  const speaker: IrodoriSpeakerInput | undefined = ref === undefined
+    ? undefined
+    : { audio: decodeWav(await Deno.readFile(ref)) };
 
-console.log(
-  `[irodori] ${
-    source ?? `${IRODORI_SOURCES["irodori-v4.1-small"].repo}（台本の既定 = 検証済み pin）`
-  }` +
-    ` / model ${model ?? "（manifest の既定）"}` +
-    ` / quant ${quant ?? "（manifest の既定）"} / seed ${seed}` +
-    `${ref === undefined ? "" : ` / 参照 ${ref}`}\n` +
-    `          ${JSON.stringify(text)}` +
-    `${caption === undefined ? "" : `\n          caption ${JSON.stringify(caption)}`}`,
-);
-const started = performance.now();
-await using pipeline = await IrodoriPipeline.fromPretrained(
-  from,
-  {
-    ...selection,
-    onProgress: ({ phase, loaded, total }) =>
-      Deno.stderr.writeSync(encoder.encode(`\r  ${phase} ${(loaded / total * 100).toFixed(1)}%  `)),
-  },
-);
-const audio = await pipeline.generate({
-  text,
-  seed,
-  ...(caption === undefined ? {} : { caption }),
-  ...(speaker === undefined ? {} : { speaker }),
-  ...(seconds === undefined ? {} : { durationSeconds: seconds }),
-});
-const name = `irodori-${quant ?? "default"}-${ref === undefined ? "no-ref" : "cloned"}` +
-  `-seed${seed}.wav`;
-/** 既定の出力先に使うモデル名（取得元の末尾要素 — パスでも HF リポ名でも同じ規則）。 */
-const sourceRef = source ?? IRODORI_SOURCES["irodori-v4.1-small"].repo;
-const sourceName = sourceRef.replace(/\/+$/, "").split("/").at(-1) ?? sourceRef;
-const out = args.get("out") ?? `outputs/examples/${sourceName}/${name}`;
-// MUST: `cut > 0` で判定する。`-1`（`/` 無し = cwd 直下）を切ると 1 文字削ったディレクトリを
-// 作り、`0`（絶対パスの根）を切ると空文字列で `mkdir` を呼ぶ。
-const cut = out.lastIndexOf("/");
-if (cut > 0) await Deno.mkdir(out.slice(0, cut), { recursive: true });
-await Deno.writeFile(out, encodeWav(audio.data, audio.sampleRate));
-console.log(
-  `[irodori] ${out}（${(audio.data.length / audio.sampleRate).toFixed(2)}s / S ${audio.frames}` +
-    ` / dit ${audio.forwards} forward / ${((performance.now() - started) / 1000).toFixed(1)}s）`,
-);
+  /** 取得元（ローカルの配布形なら `denoDirectory`・それ以外は HF リポジトリ名）。 */
+  const from = source === undefined
+    ? IRODORI_SOURCES["irodori-v4.1-small"]
+    : await distributionSource(source, sourceMaps);
+
+  console.log(
+    `[irodori] ${
+      source ?? `${IRODORI_SOURCES["irodori-v4.1-small"].repo}（台本の既定 = 検証済み pin）`
+    }` +
+      ` / model ${model ?? "（manifest の既定）"}` +
+      ` / quant ${quant ?? "（manifest の既定）"} / seed ${seed}` +
+      `${ref === undefined ? "" : ` / 参照 ${ref}`}\n` +
+      `          ${JSON.stringify(text)}` +
+      `${caption === undefined ? "" : `\n          caption ${JSON.stringify(caption)}`}`,
+  );
+  const started = performance.now();
+  await using pipeline = await IrodoriPipeline.fromPretrained(
+    from,
+    {
+      ...selection,
+      onProgress: ({ phase, loaded, total }) =>
+        Deno.stderr.writeSync(
+          encoder.encode(`\r  ${phase} ${(loaded / total * 100).toFixed(1)}%  `),
+        ),
+    },
+  );
+  const audio = await pipeline.generate({
+    text,
+    seed,
+    ...(caption === undefined ? {} : { caption }),
+    ...(speaker === undefined ? {} : { speaker }),
+    ...(seconds === undefined ? {} : { durationSeconds: seconds }),
+  });
+  const name = `irodori-${quant ?? "default"}-${ref === undefined ? "no-ref" : "cloned"}` +
+    `-seed${seed}.wav`;
+  /** 既定の出力先に使うモデル名（取得元の末尾要素 — パスでも HF リポ名でも同じ規則）。 */
+  const sourceRef = source ?? IRODORI_SOURCES["irodori-v4.1-small"].repo;
+  const sourceName = sourceRef.replace(/\/+$/, "").split("/").at(-1) ?? sourceRef;
+  const out = args.get("out") ?? `outputs/examples/${sourceName}/${name}`;
+  // MUST: `cut > 0` で判定する。`-1`（`/` 無し = cwd 直下）を切ると 1 文字削ったディレクトリを
+  // 作り、`0`（絶対パスの根）を切ると空文字列で `mkdir` を呼ぶ。
+  const cut = out.lastIndexOf("/");
+  if (cut > 0) await Deno.mkdir(out.slice(0, cut), { recursive: true });
+  await Deno.writeFile(out, encodeWav(audio.data, audio.sampleRate));
+  console.log(
+    `[irodori] ${out}（${(audio.data.length / audio.sampleRate).toFixed(2)}s / S ${audio.frames}` +
+      ` / dit ${audio.forwards} forward / ${((performance.now() - started) / 1000).toFixed(1)}s）`,
+  );
+};
+
+await runMain(main);

@@ -60,9 +60,17 @@ export const loadLocalAssets = async (
   const byPath = new Map<string, Uint8Array<ArrayBuffer>>();
   let assets: Record<string, Uint8Array<ArrayBuffer>> = {};
   for (const key of Object.keys(files)) {
-    const { path } = files[key];
-    const bytes = byPath.get(path) ?? await Deno.readFile(`${dir}/${path}`);
-    byPath.set(path, bytes);
+    const ref = files[key];
+    // MUST: 越境参照（ADR 0038 §7）は (repo, commit SHA) からしか取れない — 全量面では解けない
+    // ので取得キーごと落とす。`${dir}/${path}` を無条件に開くと、同名 path がローカルにも在る
+    // ときに**別リポのバイト列が黙って差し替わる**（`path` だけでは 1 本のファイルを指さない
+    // — packages/hub/src/manifest.ts の fileRefKey がその理由）。
+    // 双子実装 = packages/models/tests/e2e_anima_test.ts の readLocalAssets。
+    if (ref.repo !== undefined) {
+      throw new Error(`全量面では越境参照 '${ref.repo}' を解けない（取得キー ${key}）`);
+    }
+    const bytes = byPath.get(ref.path) ?? await Deno.readFile(`${dir}/${ref.path}`);
+    byPath.set(ref.path, bytes);
     assets = { ...assets, [key]: bytes };
   }
   return { manifest, assets };

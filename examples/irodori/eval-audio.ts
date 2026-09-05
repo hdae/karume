@@ -87,22 +87,6 @@ const TARGET_DIR = `outputs/bench/vowel-detector/${TODAY}_eval-audio`;
 const sourcePath = (name: string): string => `${TARGET_DIR}/vowel-${name}-48k.wav`;
 const targetPath = (name: string): string => `${TARGET_DIR}/vowel-${name}.wav`;
 
-const USAGE = "--source <Irodori 配布形のパス|HF repo>";
-
-/** `--key value` の対だけを受ける（`main.ts` と同じ規律 — 未知キーは落とす）。 */
-const args = new Map<string, string>();
-for (let at = 0; at < Deno.args.length; at += 2) {
-  const [key, value] = [Deno.args[at], Deno.args[at + 1]];
-  if (!key.startsWith("--") || value === undefined || value.startsWith("--")) {
-    throw new Error(`引数 ${key} が --key value の対になっていない（使い方: ${USAGE}）`);
-  }
-  if (key !== "--source") throw new Error(`未知のオプション ${key}（使い方: ${USAGE}）`);
-  args.set(key.slice(2), value);
-}
-
-const source = args.get("source");
-if (source === undefined) throw new Error(`--source が無い（使い方: ${USAGE}）`);
-
 /**
  * 折り返し防止の低域通過 FIR（Blackman 窓の sinc）。
  *
@@ -110,7 +94,7 @@ if (source === undefined) throw new Error(`--source が無い（使い方: ${USA
  * 3kHz 級）より充分上で、遷移帯を 8kHz までに収める。タップ数は奇数（群遅延が整数サンプルに
  * なる＝畳み込みの中心を素直に取れる）。
  */
-const lowpassTaps = (cutoffHz: number, rate: number, taps: number): Float64Array => {
+export const lowpassTaps = (cutoffHz: number, rate: number, taps: number): Float64Array => {
   if (taps % 2 === 0) throw new Error(`タップ数 ${taps} が奇数でない`);
   const half = (taps - 1) / 2;
   const omega = (2 * Math.PI * cutoffHz) / rate;
@@ -136,7 +120,11 @@ const lowpassTaps = (cutoffHz: number, rate: number, taps: number): Float64Array
  * 整数倍のダウンサンプル（低域通過 → 間引き）。窓の外は 0 として畳む（端 6ms の減衰は
  * 発話の外側なので実害が無い）。積算は f64、出力だけ f32 へ落とす。
  */
-const decimate = (samples: Float32Array, factor: number, filter: Float64Array): Float32Array => {
+export const decimate = (
+  samples: Float32Array,
+  factor: number,
+  filter: Float64Array,
+): Float32Array => {
   const half = (filter.length - 1) / 2;
   const length = Math.floor(samples.length / factor);
   const output = new Float32Array(length);
@@ -158,53 +146,89 @@ const sha256Hex = async (bytes: Uint8Array<ArrayBuffer>): Promise<string> =>
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("");
 
-const main = new URL("./main.ts", import.meta.url);
-const factor = SOURCE_RATE / TARGET_RATE;
-const filter = lowpassTaps(TARGET_RATE * 0.475, SOURCE_RATE, 193);
-await Deno.mkdir(TARGET_DIR, { recursive: true });
+/** 前回実行の残骸を消す（不在は握る）。 */
+const removeIfPresent = async (path: string): Promise<void> => {
+  await Deno.remove(path).catch((error: unknown) => {
+    if (!(error instanceof Deno.errors.NotFound)) throw error;
+  });
+};
 
-for (const entry of CASES) {
-  console.log(`[eval-audio] ${entry.name} — ${entry.why}`);
-  const { code } = await new Deno.Command(Deno.execPath(), {
-    args: [
-      "run",
-      "-A",
-      main.href,
-      "--source",
-      source,
-      "--text",
-      entry.text,
-      "--seed",
-      String(entry.seed),
-      "--out",
-      sourcePath(entry.name),
-    ],
-    stdout: "inherit",
-    stderr: "inherit",
-  }).output();
-  if (code !== 0) throw new Error(`${entry.name}（seed ${entry.seed}）の生成が終了コード ${code}`);
+// MUST: 焼く側の本体は `import.meta.main` の内側だけで走らせる（横断の不変条件「全モジュール
+// 副作用ゼロ = import 時実行の禁止」）。フィルタの門（eval_audio_filter_test.ts）はこのファイル
+// を import するので、module スコープに子プロセスの起動が残っていると走ってしまう。
+if (import.meta.main) {
+  const USAGE = "--source <Irodori 配布形のパス|HF repo>";
 
-  const decoded = decodeWav(await Deno.readFile(sourcePath(entry.name)));
-  // MUST: 周波数を実測して突き合わせる。配布形が別の周波数になったら、黙って 1/3 に
-  // 間引かれた別の速さの音声が素材になる。
-  if (decoded.sampleRate !== SOURCE_RATE) {
-    throw new Error(
-      `${sourcePath(entry.name)} が ${decoded.sampleRate}Hz（${SOURCE_RATE}Hz を期待）` +
-        " — 配布形の sampleRate が変わったなら SOURCE_RATE の前提ごと見直す",
+  /** `--key value` の対だけを受ける（`main.ts` と同じ規律 — 未知キーは落とす）。 */
+  const args = new Map<string, string>();
+  for (let at = 0; at < Deno.args.length; at += 2) {
+    const [key, value] = [Deno.args[at], Deno.args[at + 1]];
+    if (!key.startsWith("--") || value === undefined || value.startsWith("--")) {
+      throw new Error(`引数 ${key} が --key value の対になっていない（使い方: ${USAGE}）`);
+    }
+    if (key !== "--source") throw new Error(`未知のオプション ${key}（使い方: ${USAGE}）`);
+    args.set(key.slice(2), value);
+  }
+
+  const source = args.get("source");
+  if (source === undefined) throw new Error(`--source が無い（使い方: ${USAGE}）`);
+
+  const main = new URL("./main.ts", import.meta.url);
+  const factor = SOURCE_RATE / TARGET_RATE;
+  const filter = lowpassTaps(TARGET_RATE * 0.475, SOURCE_RATE, 193);
+  await Deno.mkdir(TARGET_DIR, { recursive: true });
+
+  for (const entry of CASES) {
+    console.log(`[eval-audio] ${entry.name} — ${entry.why}`);
+    // MUST: 焼く前に前回実行の残骸を消す（`eval-images.ts` と同じ規律）。日付席は同日 2 回目の
+    // 実行で共有されるので、`main.ts` の `--out` の解釈が変われば古い WAV がそのまま 16kHz へ
+    // 落とされ、sha256 まで表示されて凍結候補になる。実際に凍結されるのは 16kHz 側なので、
+    // 48kHz と 16kHz の**両方**を消す。
+    await removeIfPresent(sourcePath(entry.name));
+    await removeIfPresent(targetPath(entry.name));
+    const { code } = await new Deno.Command(Deno.execPath(), {
+      args: [
+        "run",
+        "-A",
+        main.href,
+        "--source",
+        source,
+        "--text",
+        entry.text,
+        "--seed",
+        String(entry.seed),
+        "--out",
+        sourcePath(entry.name),
+      ],
+      stdout: "inherit",
+      stderr: "inherit",
+    }).output();
+    if (code !== 0) {
+      throw new Error(`${entry.name}（seed ${entry.seed}）の生成が終了コード ${code}`);
+    }
+
+    const decoded = decodeWav(await Deno.readFile(sourcePath(entry.name)));
+    // MUST: 周波数を実測して突き合わせる。配布形が別の周波数になったら、黙って 1/3 に
+    // 間引かれた別の速さの音声が素材になる。
+    if (decoded.sampleRate !== SOURCE_RATE) {
+      throw new Error(
+        `${sourcePath(entry.name)} が ${decoded.sampleRate}Hz（${SOURCE_RATE}Hz を期待）` +
+          " — 配布形の sampleRate が変わったなら SOURCE_RATE の前提ごと見直す",
+      );
+    }
+    const resampled = decimate(decoded.data, factor, filter);
+    const bytes = encodeWav(resampled, TARGET_RATE);
+    await Deno.writeFile(targetPath(entry.name), bytes);
+    console.log(
+      `[eval-audio] ${targetPath(entry.name)}` +
+        `（${(resampled.length / TARGET_RATE).toFixed(2)}s / ${resampled.length} サンプル` +
+        ` / sha256 ${await sha256Hex(bytes)}）`,
     );
   }
-  const resampled = decimate(decoded.data, factor, filter);
-  const bytes = encodeWav(resampled, TARGET_RATE);
-  await Deno.writeFile(targetPath(entry.name), bytes);
+
   console.log(
-    `[eval-audio] ${targetPath(entry.name)}` +
-      `（${(resampled.length / TARGET_RATE).toFixed(2)}s / ${resampled.length} サンプル` +
-      ` / sha256 ${await sha256Hex(bytes)}）`,
+    `[eval-audio] ${CASES.length} 本。採用するなら outputs/misc/corpus/ へ凍結コピーする` +
+      "（母音検出 e2e が読むのはそちら）。長さが変わったら期待 `.lab` と sha256 も" +
+      "採り直す（packages/models/tests/e2e_vowel_detector_chain_test.ts）",
   );
 }
-
-console.log(
-  `[eval-audio] ${CASES.length} 本。採用するなら outputs/misc/corpus/ へ凍結コピーする` +
-    "（母音検出 e2e が読むのはそちら）。長さが変わったら期待 `.lab` と sha256 も" +
-    "採り直す（packages/models/tests/e2e_vowel_detector_chain_test.ts）",
-);
