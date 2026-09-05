@@ -292,6 +292,31 @@ class TestCapacity:
 
         assert graph.symbols == ["T"]
 
+    @pytest.mark.parametrize(
+        ("capacity", "diagnosis"),
+        [
+            (0, "次元 0 が正整数でない"),
+            (-1, "次元 -1 が非負整数でない"),
+            (True, "次元が数値でも文字列でもない"),
+            (1.5, "次元が数値でも文字列でもない"),
+        ],
+    )
+    def test_a_capacity_outside_the_value_range_is_caught_only_by_the_parser(
+        self, capacity, diagnosis
+    ):
+        """`window`（`_window` が正整数を要求）と違い `capacity` には手術側の値域検査が無い。
+
+        現状の 2 段を明示的に固定する — 手術は通り、往復の `parse_ir_graph` が落とす
+        （診断は plan の欄ではなく IR の shape を指す）。
+        """
+        spec = StateAttentionSpec(output="a", k_slot="l0.k", v_slot="l0.v", capacity=capacity)
+
+        graph = to_states_form(source(), plan(spec))
+
+        assert graph.states["l0.k"].shape == [1, 2, capacity, 16]
+        with pytest.raises(IrError, match=diagnosis):
+            parse_ir_graph(graph.to_json())
+
     def test_a_mixed_plan_declares_the_symbol_once(self):
         """層ごとに容量が違う形（Gemma 4 の sliding / full 混在）。
 

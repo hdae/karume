@@ -12,6 +12,7 @@ RTN より**小さい**（方式が実際に効く対照）⑤ stage 逐次の**
 from __future__ import annotations
 
 import copy
+import math
 
 import pytest
 import torch
@@ -467,6 +468,33 @@ class TestAwqSearch:
         )
 
         assert search.alpha in {step / AWQ_ALPHA_STEPS for step in range(AWQ_ALPHA_STEPS + 1)}
+
+    def test_a_non_finite_act_amax_silently_collapses_alpha_to_zero(self):
+        """非有限の `act_amax` は α>0 の目的関数を全て NaN にし、黙って α=0 が残る。
+
+        `NaN < best_error` は常に偽なので α>0 は 1 点も採用されない。α=0 だけは
+        `amax.pow(0)` が非有限要素に対しても 1 を返すので有限値のまま残り、返り値は
+        「α=0 が最適だった」形（有限の error・幾何平均 1 の `s`）と区別できない。
+        対照は同じ偏りで α>0 が勝つ test_a_skewed_activation_profile_moves_alpha_off_zero。
+        """
+        torch.manual_seed(19)
+        act_amax = torch.rand(32, dtype=torch.float64) * 0.1 + 0.01
+        act_amax[5] = 20.0
+        act_amax[21] = 12.0
+        control = awq_search_scale(
+            weights(6, 32, seed=20), act_amax, correlated_inputs(64, 32, seed=21), GRID
+        )
+        act_amax[5] = float("inf")
+
+        search = awq_search_scale(
+            weights(6, 32, seed=20), act_amax, correlated_inputs(64, 32, seed=21), GRID
+        )
+
+        assert control.alpha > 0.0, "対照 — 非有限を混ぜる前は α>0 が目的関数を下げる"
+        assert search.alpha == 0.0
+        assert math.isfinite(search.error), "α=0 の目的関数だけは有限（沈黙が見えない所以）"
+        assert torch.equal(search.channel_scale, torch.ones(32, dtype=torch.float64))
+        assert search.channel_scale.device == act_amax.device, "`s` は入力と同じデバイスに出る"
 
     def test_no_sample_fails_loudly(self):
         with pytest.raises(QuantizeError, match="0 行"):

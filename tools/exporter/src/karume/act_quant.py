@@ -25,7 +25,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from .quantize import INT8_MAX
+from .quantize import INT8_MAX, QuantizeError
 
 #: i8 ペイロードの 4 詰め（平坦添字）に由来する `k` の整列条件。
 PACK_ALIGN = 4
@@ -68,12 +68,17 @@ def attach_act_quant(model: nn.Module) -> tuple[list[object], int]:
     handles: list[object] = []
     attached = 0
 
-    def make_pre(_name: str):
-        def pre(_module: nn.Module, args: tuple[torch.Tensor, ...]):
-            if not args:
-                # 位置引数で呼ばれない linear は活性量子化の対象にできない（本数に数えた
-                # うえで素通りするので、差が出れば計数と実測が食い違う形で見える）。
-                return None
+    def make_pre(name: str):
+        def pre(_module: nn.Module, args: tuple[object, ...]):
+            # MUST: 丸められない呼び出しは素通しでなく例外（姉妹の
+            # `quant_calib._make_pre_hook` と同じ規律）。素通しするとその層だけ活性量子化が
+            # 外れた参照が「掛けた本数」の診断を通り抜けて w8 のまま採られ、tolerance 門は
+            # その差を量子化誤差と区別できない。
+            if not args or not isinstance(args[0], torch.Tensor):
+                raise QuantizeError(
+                    f"'{name}': 活性量子化の対象 linear が位置引数の Tensor で呼ばれていない"
+                    "（入力を丸められないので、この層だけ w8 の参照になる）"
+                )
             return (quantize_rows(args[0]), *args[1:])
 
         return pre

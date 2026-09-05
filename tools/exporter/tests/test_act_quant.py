@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import pytest
 import torch
 from torch import nn
 
@@ -18,6 +19,18 @@ from karume.act_quant import (
     is_eligible,
     quantize_rows,
 )
+from karume.quantize import QuantizeError
+
+
+class KeywordOnlyCaller(nn.Module):
+    """適格 linear を keyword 引数だけで呼ぶモデル（pre-hook の `args` が空になる形）。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fc = nn.Linear(8, 4)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.fc(input=x)
 
 
 def test_quantize_rows_keeps_shape_and_dtype() -> None:
@@ -106,6 +119,33 @@ def test_attach_skips_ineligible_linear() -> None:
     handles, attached = attach_act_quant(model)
     try:
         assert attached == 1
+    finally:
+        detach_act_quant(handles)
+
+
+def test_a_linear_called_with_keyword_arguments_only_fails_loudly() -> None:
+    """位置引数を持たない呼び出しは素通しでなく例外（掛けた本数だけが増える形を潰す）。
+
+    素通しするとその層だけ活性量子化が外れた参照が採られ、「掛けた本数」の診断も
+    tolerance 門もその差を量子化誤差と区別できない。診断は対象の FQN を名指しする。
+    """
+    model = KeywordOnlyCaller()
+    handles, attached = attach_act_quant(model)
+    try:
+        assert attached == 1, "適格 linear としては数えられている（素通しの前提）"
+        with pytest.raises(QuantizeError, match="'fc'"), torch.no_grad():
+            model(torch.randn(2, 8, dtype=torch.float32))
+    finally:
+        detach_act_quant(handles)
+
+
+def test_a_non_tensor_first_positional_argument_fails_loudly() -> None:
+    """Tensor でない第 1 位置引数も karume の診断で落とす（torch 由来の内部エラーにしない）。"""
+    model = nn.Sequential(nn.Linear(8, 4))
+    handles, _ = attach_act_quant(model)
+    try:
+        with pytest.raises(QuantizeError, match="'0'"), torch.no_grad():
+            model([0.0] * 8)
     finally:
         detach_act_quant(handles)
 
