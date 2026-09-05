@@ -18,8 +18,8 @@
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { ContainerError, type KarumeModel, openModel } from "../src/format/container.ts";
 import type { IrGraph } from "../src/format/ir.ts";
-import { acquireGpu } from "../src/gpu/device.ts";
-import { numel } from "../src/ops.ts";
+import { acquireGpu, LIMIT_CAPS } from "../src/gpu/device.ts";
+import { numel, OpContractError } from "../src/ops.ts";
 import { createSession } from "../src/runtime/executor.ts";
 import {
   type AdmissionReport,
@@ -29,6 +29,8 @@ import {
 import { type ExecStep, planFusions } from "../src/runtime/fusion.ts";
 import { countUses, ExecutionError, planGraph } from "../src/runtime/plan.ts";
 import { derivePlanSlots, type StepOutput, type StepRecipe } from "../src/runtime/recipe.ts";
+import { planStateAttention } from "../src/runtime/state-attention-plan.ts";
+import { planWeightBuffers, planWeightResidency } from "../src/runtime/weight-residency.ts";
 import { f32Bytes, type GraphJson, type TensorSpec } from "./helpers/format.ts";
 import { f16BytesFromBits, f32ToF16Bits } from "./helpers/f16.ts";
 import { fill, graphModelBuffer } from "./helpers/graph.ts";
@@ -375,6 +377,95 @@ Deno.test("グラフ出力になった i4 は適格外で f32 展開へ回る", 
   assertEquals(weights.compressedBytes, 0);
   assertEquals(weights.uncompressedBytes, 0);
   assertEquals(weights.expandedBytes, 64 * 4);
+});
+
+/**
+ * 5 席（`raw` / `f16` / `i8` / `i4` / `expanded`）を**1 グラフに同居**させた形。
+ *
+ * linear 3 段で圧縮 3 席を重みスロットに置き（bias 3 本が `raw`）、最後の `mul` の被演算子に
+ * f16 を置いて `expanded` を作る。上の各テストは席ごとに別グラフで欄を見ているので、
+ * 「`planWeightBuffers` の全要素が 3 欄のどれかにちょうど 1 度数えられる」= 席を増やして
+ * `weightEstimate` の分岐を直し忘れたら赤くなる、という網羅の主張は誰も見ていない。
+ */
+const allSeatsModel = (): KarumeModel => {
+  const graph: GraphJson = {
+    format: "karume-ir",
+    version: 1,
+    requires: { ops: ["linear", "mul"] },
+    symbols: [],
+    inputs: [{ name: "x", dtype: "f32", shape: [2, 16] }],
+    outputs: ["y"],
+    initializers: {
+      w4: { tensor: "m.w4", storage: { dtype: "i4", scale: "m.s4", group_size: 16 } },
+      b4: { tensor: "m.b4", storage: { dtype: "f32" } },
+      w8: { tensor: "m.w8", storage: { dtype: "i8", scale: "m.s8" } },
+      b8: { tensor: "m.b8", storage: { dtype: "f32" } },
+      w16: { tensor: "m.w16", storage: { dtype: "f16" } },
+      b16: { tensor: "m.b16", storage: { dtype: "f32" } },
+      g: { tensor: "m.g", storage: { dtype: "f16" } },
+    },
+    values: {
+      w4: { dtype: "f32", shape: [4, 16] },
+      b4: { dtype: "f32", shape: [4] },
+      w8: { dtype: "f32", shape: [4, 4] },
+      b8: { dtype: "f32", shape: [4] },
+      w16: { dtype: "f32", shape: [4, 4] },
+      b16: { dtype: "f32", shape: [4] },
+      g: { dtype: "f32", shape: [4] },
+      h: { dtype: "f32", shape: [2, 4] },
+      i: { dtype: "f32", shape: [2, 4] },
+      j: { dtype: "f32", shape: [2, 4] },
+      y: { dtype: "f32", shape: [2, 4] },
+    },
+    nodes: [
+      { op: "linear", ins: ["x", "w4", "b4"], outs: ["h"], attrs: {} },
+      { op: "linear", ins: ["h", "w8", "b8"], outs: ["i"], attrs: {} },
+      { op: "linear", ins: ["i", "w16", "b16"], outs: ["j"], attrs: {} },
+      // 重みスロットではない消費なので、この f16 だけが f32 展開席へ回る。
+      { op: "mul", ins: ["j", "g"], outs: ["y"], attrs: {} },
+    ],
+  };
+  // 整列降順（F32 → F16 → I8 → I4）で詰める。
+  return openGraph(graph, [
+    { name: "m.b4", dtype: "F32", shape: [4], data: f32Bytes([0, 0, 0, 0]) },
+    { name: "m.b8", dtype: "F32", shape: [4], data: f32Bytes([0, 0, 0, 0]) },
+    { name: "m.b16", dtype: "F32", shape: [4], data: f32Bytes([0, 0, 0, 0]) },
+    { name: "m.s4", dtype: "F32", shape: [4, 1], data: f32Bytes([1, 1, 1, 1]) },
+    { name: "m.s8", dtype: "F32", shape: [4, 1], data: f32Bytes([1, 1, 1, 1]) },
+    { name: "m.w16", dtype: "F16", shape: [4, 4], data: f16Zeros(16) },
+    { name: "m.g", dtype: "F16", shape: [4], data: f16Zeros(4) },
+    { name: "m.w8", dtype: "I8", shape: [4, 4], data: new Uint8Array(16) },
+    { name: "m.w4", dtype: "I4", shape: [4, 16], data: new Uint8Array(32) },
+  ]);
+};
+
+Deno.test("5 席同居のグラフで、常駐バッファは 3 欄のどれかにちょうど 1 度数えられる", () => {
+  const model = allSeatsModel();
+  const { weights } = estimateSessionMemory(model).resident;
+
+  // 手計算: i4 payload 32 + i4 scale 16 + i8 payload 16 + i8 scale 16 + f16 payload 32
+  assertEquals(weights.compressedBytes, 112);
+  // bias 3 本（f32 [4]）
+  assertEquals(weights.uncompressedBytes, 48);
+  // mul の被演算子 f16 [4] を f32 展開した 16（整列前の宣言バイト数で数える欄）
+  assertEquals(weights.expandedBytes, 16);
+  assertEquals(weights.totalBytes, 176);
+
+  // 網羅の門: 席の分岐（weightEstimate の switch）を通らなかったバッファが 1 本でもあれば、
+  // 総和がプランナ側の総和と合わなくなる。席を増やして分岐を直し忘れると赤くなる。
+  const buffers = planWeightBuffers(planWeightResidency(model.graph));
+  assertEquals(new Set(buffers.map((buffer) => buffer.seat)).size, 5, "5 席が同居していない");
+  assertEquals(
+    weights.totalBytes,
+    buffers.reduce(
+      (sum, buffer) =>
+        sum +
+        (buffer.seat === "expanded" && buffer.kind === "payload"
+          ? buffer.declaredBytes
+          : buffer.byteLength),
+      0,
+    ),
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -890,11 +981,14 @@ Deno.test("融合が掛からない形では estimator の中間総量と slot �
 
 /**
  * states 形 attention 1 本 + `state_append` 2 本（gpu_state_execution_test の実行形と同じ姿の
- * 最小版）。`B=1` / `H=4` / `Hkv=2`（GQA）/ `D=8` で、`M` が物理 chunk 行・`C` がスロット容量。
+ * 最小版）。`B=1` / `Hkv=2`（GQA）/ `D=8` で、`M` が物理 chunk 行・`C` がスロット容量。
  *
  * `window` を渡すと sliding 変種（読み書き同式 MUST — attention と append の両方に載せる）。
+ * `heads`（既定 4）は **S の 1 行バイト数 `H·colCap·4` だけを動かす**軸 — state スロットは
+ * `Hkv·C·D·4` で H に依らないので、H を上げると「スロットは束縛上限に収まるが S の 1 行は
+ * 収まらない」形（= 行ブロックが複数枚に割れる形）を絞った device 上で作れる。
  */
-const stateAttentionGraph = (window?: number): GraphJson => {
+const stateAttentionGraph = (window?: number, heads = 4): GraphJson => {
   const windowAttrs: Record<string, number> = window === undefined ? {} : { window };
   const append = (name: string, slot: string) => ({
     op: "state_append",
@@ -909,13 +1003,13 @@ const stateAttentionGraph = (window?: number): GraphJson => {
     requires: { ops: ["attention", "state_append"] },
     symbols: ["M", "C"],
     inputs: [
-      { name: "q", dtype: "f32", shape: [1, 4, "M", 8] },
+      { name: "q", dtype: "f32", shape: [1, heads, "M", 8] },
       { name: "k", dtype: "f32", shape: [1, 2, "M", 8] },
       { name: "v", dtype: "f32", shape: [1, 2, "M", 8] },
     ],
     outputs: ["o"],
     initializers: {},
-    values: { o: { dtype: "f32", shape: [1, 4, "M", 8] } },
+    values: { o: { dtype: "f32", shape: [1, heads, "M", 8] } },
     states: {
       kslot: { dtype: "f32", shape: [1, 2, "C", 8] },
       vslot: { dtype: "f32", shape: [1, 2, "C", 8] },
@@ -1060,6 +1154,30 @@ Deno.test("states 形 attention を持たないグラフは上限を渡しても
   );
 });
 
+Deno.test("上限の値域はグラフの形に依らず入口で見る（読まない形でも黙って受理しない）", () => {
+  // 読み手（stateAttentionTemps）の内側だけに置くと、states 形 attention を持たないこの
+  // グラフでは 1 度も実行されず、不正値が「読まないから無害」として黙って通る。
+  for (const limit of [-1, 0, 1.5, Number.NaN]) {
+    assertThrows(
+      () =>
+        estimateSessionMemory(plainModel(), {
+          bindings: { T: 7 },
+          maxStorageBufferBindingSize: limit,
+        }),
+      ExecutionError,
+      "正の安全整数",
+    );
+  }
+  // 対照: 正当値は従来どおり通る（上の 4 本が「何を渡しても落ちる」ではないことの証明）。
+  assertEquals(
+    estimateSessionMemory(plainModel(), {
+      bindings: { T: 7 },
+      maxStorageBufferBindingSize: 256,
+    }).peakAccountedBytes,
+    estimateSessionMemory(plainModel(), { bindings: { T: 7 } }).peakAccountedBytes,
+  );
+});
+
 Deno.test("states 形 attention の見積りに上限を渡さないのは fail loudly", () => {
   assertThrows(
     () =>
@@ -1083,19 +1201,50 @@ Deno.test("states 形 attention の見積りに上限を渡さないのは fail 
  *
  * 呼ぶのは full / sliding の 2 変種（下の 2 本）— `colCap` は変種で式が分かれる唯一の欄なので、
  * 片方だけでは分岐のもう一方が無門のままになる。
+ *
+ * `limitCap` を渡すと device の `maxStorageBufferBindingSize` を絞って**行ブロックを複数枚に
+ * 割る**（estimator は `ROW_BLOCK_SPLIT` の受け口を持たないので、枚数を寄せる手は形と上限しか
+ * 無い）。複数枚でだけ効く 2 つの規則 — ブロック跨ぎのプール再利用と、端数で 1 行狭い
+ * ブロックが混ざったときのサイズクラス 2 種 — は、絞らない呼び方では 1 度も踏まれない。
+ * MUST: 絞ったときは `expectedBlocks` を渡して枚数を先に固定する（1 枚に落ちた形で緑になると
+ * 「複数枚での一致」を見たことにならない）。
  */
 const assertPlanBackingMatchesEstimate = async (
-  variant: { readonly capacity: number; readonly window?: number },
+  variant: {
+    readonly capacity: number;
+    readonly window?: number;
+    readonly heads?: number;
+    readonly chunkLength?: number;
+    readonly limitCap?: number;
+    readonly expectedBlocks?: number;
+  },
 ): Promise<void> => {
-  const gpu = await acquireGpu();
+  const heads = variant.heads ?? 4;
+  const chunkLength = variant.chunkLength ?? 4;
+  const gpu = await acquireGpu(
+    variant.limitCap === undefined
+      ? {}
+      : { [LIMIT_CAPS]: { maxStorageBufferBindingSize: variant.limitCap } },
+  );
   try {
-    const model = openGraph(stateAttentionGraph(variant.window));
-    const generation = { chunkLength: 4, bindings: { C: variant.capacity } };
+    const limit = gpu.limits.maxStorageBufferBindingSize;
+    if (variant.limitCap !== undefined) {
+      assertEquals(limit, variant.limitCap, "requiredLimits が絞られていない（門が空振りする）");
+    }
+    if (variant.expectedBlocks !== undefined) {
+      // 実行と見積りが共有する純関数そのもので枚数を固定する（前提の可視化）。
+      const blocks = planStateAttention({
+        batchHeads: heads,
+        chunkRows: chunkLength,
+        capacity: variant.capacity,
+        window: variant.window,
+      }, limit).blocks;
+      assertEquals(blocks.length, variant.expectedBlocks, "行ブロックの枚数");
+    }
+    const model = openGraph(stateAttentionGraph(variant.window, heads));
+    const generation = { chunkLength, bindings: { C: variant.capacity } };
     const { prefill } = bothScenarios(
-      estimateSessionMemory(model, {
-        generation,
-        maxStorageBufferBindingSize: gpu.limits.maxStorageBufferBindingSize,
-      }),
+      estimateSessionMemory(model, { generation, maxStorageBufferBindingSize: limit }),
     );
     const session = await createSession(gpu, model);
     try {
@@ -1105,12 +1254,12 @@ const assertPlanBackingMatchesEstimate = async (
         for (let step = 0; step < 2; step += 1) {
           await session.run(
             {
-              q: fill([1, 4, 4, 8], (i) => ((i % 5) - 2) / 4),
-              k: fill([1, 2, 4, 8], (i) => ((i % 3) - 1) / 4),
-              v: fill([1, 2, 4, 8], (i) => ((i % 7) - 3) / 4),
+              q: fill([1, heads, chunkLength, 8], (i) => ((i % 5) - 2) / 4),
+              k: fill([1, 2, chunkLength, 8], (i) => ((i % 3) - 1) / 4),
+              v: fill([1, 2, chunkLength, 8], (i) => ((i % 7) - 3) / 4),
             },
             {},
-            { context, queryLength: 4 },
+            { context, queryLength: chunkLength },
           );
         }
       } finally {
@@ -1139,6 +1288,54 @@ Deno.test({
   fn: () => assertPlanBackingMatchesEstimate({ capacity: 8, window: 8 }),
 });
 
+/**
+ * 行ブロック**複数枚**での 2 実装一致。H=64 / Hkv=2 / D=8 / C=16 では S の 1 行が
+ * 64·16·4 = 4096B なのに対し state スロットは 2·16·8·4 = 1024B なので、上限 8192B に絞ると
+ * 「スロットは束縛できるが S 4 行は束縛できない」形になり、行ブロックが必ず割れる。
+ */
+Deno.test({
+  name: "states 形 attention の中間総量が複数枚でも slot 表と厳密一致する（full 変種・実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  // 1 枚 2 行の 2 枚（8192 ÷ 4096 = 2 行／枚・M=4）。
+  fn: () =>
+    assertPlanBackingMatchesEstimate({
+      capacity: 16,
+      heads: 64,
+      chunkLength: 4,
+      limitCap: 8192,
+      expectedBlocks: 2,
+    }),
+});
+
+Deno.test({
+  name: "states 形 attention の中間総量が端数ブロックでも slot 表と厳密一致する（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  // M=5 を 2 行／枚で割ると 3 枚（2 行 + 2 行 + 1 行）— サイズクラスが 2 種同時に生きる唯一の形。
+  fn: () =>
+    assertPlanBackingMatchesEstimate({
+      capacity: 16,
+      heads: 64,
+      chunkLength: 5,
+      limitCap: 8192,
+      expectedBlocks: 3,
+    }),
+});
+
+Deno.test({
+  name: "states 形 attention の中間総量が複数枚でも slot 表と厳密一致する（sliding 変種・実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  // 列容量 = W−1+M = 8−1+4 = 11 → 1 行 64·11·4 = 2816B。上限 5632B で 2 行／枚の 2 枚。
+  fn: () =>
+    assertPlanBackingMatchesEstimate({
+      capacity: 16,
+      heads: 64,
+      window: 8,
+      chunkLength: 4,
+      limitCap: 5632,
+      expectedBlocks: 2,
+    }),
+});
+
 Deno.test("1 行でも上限に入らない形は fail loudly（行ブロックでは割り切れない）", () => {
   assertThrows(
     // 1 行 = 4×16×4 = 256B > 128B
@@ -1158,6 +1355,26 @@ Deno.test("未束縛の記号次元は fail loudly（黙って 0 で埋めない
     ExecutionError,
     "シンボル 'T' が束縛されていない",
   );
+});
+
+Deno.test("契約違反のグラフは常駐計画より先に契約検査で落ちる（nodes[i] (op) を名乗る）", () => {
+  // conv1d の attrs から `groups` を落とした形（ADR 0015 の「既定値補完をしない」）。
+  // 常駐計画（planWeightResidency → i4 適格判定）が先に走ると `nodes (conv1d)` という
+  // 添字を持たない診断になり、実構築（PreparedModel）と別の文言で落ちる。
+  const graph = i4Conv1dGraph(1);
+  const model = openGraph(
+    {
+      ...graph,
+      nodes: [{ ...graph.nodes[0], attrs: { stride: 1, padding: 0, dilation: 1 } }],
+    },
+    [
+      { name: "m.b", dtype: "F32", shape: [4], data: f32Bytes([0, 0, 0, 0]) },
+      { name: "m.s", dtype: "F32", shape: [4, 4], data: f32Bytes(new Array(16).fill(1)) },
+      { name: "m.w", dtype: "I4", shape: [4, 32, 2], data: new Uint8Array(128) },
+    ],
+  );
+  const error = assertThrows(() => estimateSessionMemory(model), OpContractError, "nodes[");
+  assert(error.message.includes("conv1d"), error.message);
 });
 
 Deno.test("states 専用記号を options.bindings で受けない（束縛点は generation の側）", () => {

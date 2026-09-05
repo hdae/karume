@@ -9,7 +9,7 @@ import { defaultGemmGeometry, gemmTileN } from "../src/kernels/gemm-geometry.ts"
 import { DEFAULT_SUBMIT_POLICY } from "../src/gpu/submit.ts";
 import { allclose, compareTensors, formatAllclose } from "../src/reference/allclose.ts";
 import { applyReferenceOp, applyReferenceOpOutputs, refTensor } from "../src/reference/ops.ts";
-import { createSession, type Tensor } from "../src/runtime/executor.ts";
+import { createSession, type SessionOptions, type Tensor } from "../src/runtime/executor.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
 import { f32Bytes, type GraphJson } from "./helpers/format.ts";
 import { fill, graphModelBuffer } from "./helpers/graph.ts";
@@ -456,6 +456,87 @@ Deno.test({
       // h は add のエンコード後に解放され、relu の出力確保で配り直される
       assertEquals((stats.lastRun?.reuseCount ?? 0) >= 1, true);
       assertEquals((stats.lastRun?.peakTransientBytes ?? 0) > 0, true);
+    } finally {
+      await session.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+/**
+ * **型の外から来る呼び手**（JS の消費者・改名前の綴りを残した古いビルド）を作る。TS の型は
+ * この経路を 1 つも守らないので、受理集合の検査はここでしか撃てない。
+ */
+const jsCallerOptions = (options: Readonly<Record<string, string>>): SessionOptions =>
+  options as unknown as SessionOptions;
+
+Deno.test({
+  name: "実行形ノブの union 外の綴りは Session 構築で全件列挙して落ちる（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    try {
+      // `"i8a8"` は 0.5.0 で `"a8"` へ改名した綴り（ADR 0074 決定 3・互換シム無し）。検査が
+      // 無いと下流の等値比較（`=== "a8"`）が全て外れ、opt-in が適用されないまま既定の f32 で
+      // 走る = 「a8 を測った」と読める沈黙。
+      const error = await assertRejects(
+        () =>
+          createSession(
+            gpu,
+            openModel(chainModelBuffer()),
+            jsCallerOptions({ linearCompute: "i8a8", attentionScoreStorage: "s16" }),
+          ),
+        ExecutionError,
+        "実行形ノブ 2 本",
+      );
+      assertEquals(error.message.includes(`linearCompute: "i8a8"`), true, error.message);
+      assertEquals(error.message.includes(`attentionScoreStorage: "s16"`), true, error.message);
+      // 受理集合そのものを文言に出す（何なら通るのかが診断だけで分かる）。
+      assertEquals(error.message.includes("'f32' / 'a8' / 'f16'"), true, error.message);
+
+      // 対照: union 内の綴りは従来どおり構築が通る（上が「何を渡しても落ちる」ではない証明）。
+      const session = await createSession(gpu, openModel(chainModelBuffer()), {
+        linearCompute: "a8",
+        attentionScoreStorage: "f16",
+      });
+      await session.dispose();
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
+  name: "失敗した run の直後の診断は 1 本前の成功 run の実績を残さない（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const session = await createSession(gpu, openModel(chainModelBuffer()));
+    try {
+      // 対照: 成功 run の直後は「直近 run」の 4 席が揃って埋まる。
+      await session.run({ x: fill([8, 4], (i) => i * 0.25) });
+      const success = session.diagnostics();
+      assertEquals(success.lastRun !== undefined, true);
+      assertEquals(success.lastRunParams !== undefined, true);
+      assertEquals(success.lastRunFusions !== undefined, true);
+      assertEquals(success.lastRunPrepared !== undefined, true);
+
+      // 導出（融合判定まで）は通り、入力検査（宣言 f32 に i32 を渡す）で落ちる run。
+      await assertRejects(
+        () => session.run({ x: { dtype: "i32", shape: [8, 4], data: new Int32Array(32) } }),
+        ExecutionError,
+        "宣言 dtype",
+      );
+
+      // 4 席は同じ 1 本の run（= 落ちた run）を映す。融合回数だけは落ちた run 自身の導出結果
+      // なので残り、成功経路でしか埋まらない 3 席は undefined へ倒れる — ここが割れると、
+      // 1 つのスナップショットが「落ちた run の融合回数」と「1 本前の成功 run のアリーナ /
+      // params 実績」を混ぜて語る（失敗の切り分けで最も読みたい瞬間の診断）。
+      const failed = session.diagnostics();
+      assertEquals(failed.lastRun, undefined);
+      assertEquals(failed.lastRunParams, undefined);
+      assertEquals(failed.lastRunPrepared, undefined);
+      assertEquals(failed.lastRunFusions !== undefined, true);
     } finally {
       await session.dispose();
       gpu.destroy();

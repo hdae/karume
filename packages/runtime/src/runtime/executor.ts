@@ -145,6 +145,66 @@ export type {
 } from "./session-types.ts";
 export { I8A8_DOT, ROW_BLOCK_SPLIT } from "./session-types.ts";
 
+/**
+ * 実行形ノブ（{@link SessionOptions} の 4 ノブ）の受理集合。
+ *
+ * MUST: 器は `Record<union, true>` — union に値を足してここを直し忘れると、キーの欠落が
+ * **型検査で**赤くなる（値の配列で持つと、足した値が黙って受理集合から落ちる）。
+ */
+const LINEAR_COMPUTES: Readonly<Record<NonNullable<SessionOptions["linearCompute"]>, true>> = {
+  f32: true,
+  a8: true,
+  f16: true,
+};
+const ATTENTION_COMPUTES: Readonly<Record<ComputePrecision, true>> = {
+  f32: true,
+  f16: true,
+  a8: true,
+};
+const SCORE_STORAGES: Readonly<Record<ScoreStorage, true>> = { f32: true, f16: true };
+const STATE_ATTENTION_REDUCES: Readonly<Record<StateAttentionReduce, true>> = {
+  sequential: true,
+  parallel: true,
+};
+
+/**
+ * 実行形ノブの綴りを {@link Session.build} の入口で検査する。
+ *
+ * MUST: union 外の綴りは fail loudly。下流の消費は全て `=== "a8"` / `=== "f16"` /
+ * `=== "parallel"` の等値比較なので、1 文字でも違えば**既定（f32 / sequential）で黙って走る** —
+ * opt-in が適用されないまま「a8 を測った」と読める形になる。TS の型で守られているのは TS の
+ * 呼び手だけで、JS の呼び手と、改名前の綴りを残したコード（`linearCompute` は 0.5.0 で
+ * `"i8a8"` → `"a8"`・ADR 0074 決定 3・互換シムは置かない）は網の外にある。
+ * MUST: 違反は**全件列挙して 1 回で落とす**（`assertWeightsWithinLimits` と同じ流儀 — 1 本ずつ
+ * 落とすと、直すたびに次の 1 本が現れて何本直せば通るのかが最後まで分からない）。
+ */
+const assertExecutionKnobs = (
+  linearCompute: NonNullable<SessionOptions["linearCompute"]>,
+  attentionCompute: ComputePrecision,
+  attentionScoreStorage: ScoreStorage,
+  stateAttentionReduce: StateAttentionReduce,
+): void => {
+  const knobs: readonly (readonly [string, string, Readonly<Record<string, true>>])[] = [
+    ["linearCompute", linearCompute, LINEAR_COMPUTES],
+    ["attentionCompute", attentionCompute, ATTENTION_COMPUTES],
+    ["attentionScoreStorage", attentionScoreStorage, SCORE_STORAGES],
+    ["stateAttentionReduce", stateAttentionReduce, STATE_ATTENTION_REDUCES],
+  ];
+  const violations = knobs
+    .filter(([, value, accepted]) => !Object.hasOwn(accepted, value))
+    .map(([name, value, accepted]) =>
+      `  - ${name}: ${JSON.stringify(value)}（受理するのは ${
+        Object.keys(accepted).map((accept) => `'${accept}'`).join(" / ")
+      }）`
+    );
+  if (violations.length === 0) return;
+  throw new ExecutionError(
+    `SessionOptions の実行形ノブ ${violations.length} 本が受理集合の外（既定へ黙って縮退させない）:\n` +
+      `${violations.join("\n")}\n` +
+      "綴りを確認すること（linearCompute の 'i8a8' は 0.5.0 で 'a8' へ改名した — ADR 0074 決定 3）",
+  );
+};
+
 /** 意味論 dtype ごとのホスト側 TypedArray（診断と入力検査で使う）。 */
 const HOST_ARRAY: Readonly<
   Record<IrDtype, Float32ArrayConstructor | Int32ArrayConstructor | Uint32ArrayConstructor>
@@ -876,6 +936,9 @@ export class Session {
    * 公開面ではない — mod.ts は Session を型としてのみ出す。
    * MUST: 常駐計画（席）は prepare 相が求めた 1 個を受け取る — 構築側で引き直すと、見積りが
    * 見た席と実際に上げる席が別の計算結果になりうる形が戻る。
+   *
+   * NOTE: `submitPolicy` の構成ミス（gpuTiming 有効 × querySet 容量を超える `maxChunkSize`）は
+   * run の途中ではなくここ（SubmitScheduler の構築）で `SubmitPolicyError` になる。
    */
   static async build(
     gpu: GpuContext,
@@ -888,6 +951,14 @@ export class Session {
     const attentionCompute = options.attentionCompute ?? "f32";
     const attentionScoreStorage = options.attentionScoreStorage ?? "f32";
     const stateAttentionReduce = options.stateAttentionReduce ?? "sequential";
+    // MUST: 綴りの検査は既定代入の直後・以降の全ゲートより前。ここを通った後は s16×c16 ゲートも
+    // f16 feature ゲートも union 内の値だけを見ればよい。
+    assertExecutionKnobs(
+      linearCompute,
+      attentionCompute,
+      attentionScoreStorage,
+      stateAttentionReduce,
+    );
     // MUST: S の格納形は 1 つに決まらなければならない。`:c16` は S を array<f16> で持つ
     // **別の形**（ADR 0028）なので、s16 と併記されたら黙ってどちらかに解釈せず落とす
     // （どちらの丸め列で走ったのかが診断からも数値からも見えなくなる）。
@@ -1682,6 +1753,13 @@ export class Session {
     // 観測点が消えると、融合が外れた状態がヒット run の裏に隠れる）。
     this.#lastRunFusions = derived.fusions;
     this.#lastRunPrepared = undefined;
+    // MUST: 「直近 run」の席は導出の入口で**まとめて**倒す。成功経路でしか代入しない席
+    // （#lastRun / #lastRunParams）を残すと、失敗した run の直後の診断が「落ちた run の
+    // 融合回数」と「1 本前の成功 run のアリーナ / params 実績」を混ぜて 1 つの run として
+    // 語る（診断は融合外れ・params キャッシュ外れの唯一の観測点なので、混ざると読み手が
+    // 別の run を根拠にする）。
+    this.#lastRun = undefined;
+    this.#lastRunParams = undefined;
     this.#recipeBuilder.resetParamsStats();
 
     const device = gpu.device;
@@ -2021,6 +2099,12 @@ export class Session {
     const shapes = derived.shapes;
     this.#lastRunFusions = derived.fusions;
     this.#lastRunPrepared = undefined;
+    // MUST: run と同じく導出の入口でまとめて倒す（失敗した enqueue の直後の診断が 1 本前の
+    // 実行の実績を混ぜないこと）。`#lastRun` は enqueue がアリーナを 1 度も作らないので
+    // **成功しても undefined のまま**が正しい（前の run のものを残すと、enqueue の後に読んだ
+    // 診断が別の実行の話になる）。
+    this.#lastRun = undefined;
+    this.#lastRunParams = undefined;
     this.#recipeBuilder.resetParamsStats();
 
     let builtBacking = false;
@@ -2080,9 +2164,6 @@ export class Session {
     // 破棄済みバッファを参照しないこと）。submit 済みコマンドからの参照は WebGPU 的に安全で、
     // 実解放は完了まで実装が遅延する。
     this.#destroyRetired();
-    // アリーナを 1 度も作らないので、直近 run の中間バッファ実績は「無い」が正しい
-    // （前の run のものを残すと、enqueue の後に読んだ診断が別の実行の話になる）。
-    this.#lastRun = undefined;
     this.#lastRunParams = this.#recipeBuilder.paramsStats;
   }
 

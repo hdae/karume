@@ -10,11 +10,18 @@
  * ADR 0068 決定 1 の受入条件「単一出力ノードのレシピ表現は列化前と同値」がここの 1 本目。
  */
 
-import { assertEquals, assertThrows } from "@std/assert";
+import { assert, assertEquals, assertThrows } from "@std/assert";
+import type { RunArena } from "../src/gpu/arena.ts";
+import type { SubmitScheduler } from "../src/gpu/submit.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
 import {
+  type BakedGeneration,
   type BindingRecipe,
+  type BindingSource,
   derivePlanSlots,
+  type DispatchWorkgroups,
+  executeBakedPlan,
+  executeStepRecipe,
   type StepOutput,
   type StepRecipe,
   type TempRecipe,
@@ -201,5 +208,237 @@ Deno.test("同じ値を二重に解放するレシピ列は参照カウントが
     () => derivePlanSlots([step([alloc("a", 64, 0)]), step([], ["a", "a"])]),
     ExecutionError,
     "参照カウントが負",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// 一時（temps）の slot 割当と LIFO 解放
+// ---------------------------------------------------------------------------
+
+/**
+ * 一時を持つステップ（`dispatches` は境界の本数だけが効くのでスタブで足りる）。
+ *
+ * `StepSlots.temps` は `bakeGroups` が bind group の実体解決にそのまま使うので、
+ * temp → slot の対応が 1 つずれると**同一サイズクラスの別バッファを束ねる**（layout は
+ * 満たすので validation を通り、値だけが静かに変わる）。上の topk のコメントが出力側について
+ * 書いている論法を、そのまま一時側へ当てる。
+ */
+const tempSlotsStep = (
+  temps: readonly TempRecipe[],
+  dispatchCount: number,
+  outputs: readonly StepOutput[] = [],
+  releases: readonly string[] = [],
+): StepRecipe => ({
+  outputs,
+  temps,
+  dispatches: Array.from({ length: dispatchCount }, (_, index) => dispatch(`k${index}`)),
+  releases,
+  writesState: false,
+});
+
+Deno.test("同時生存する入れ子寿命の一時は 3 本とも別 slot を掴む", () => {
+  // i8a8 attention と同型の「ループ外一時（0 と 2）がループ内一時（1）を挟む」形。
+  const slots = derivePlanSlots([
+    tempSlotsStep([
+      { byteLength: 64, allocBefore: 0, releaseAfter: 2 },
+      { byteLength: 64, allocBefore: 1, releaseAfter: 1 },
+      { byteLength: 64, allocBefore: 0, releaseAfter: 2 },
+    ], 3),
+  ]);
+
+  // 3 本とも同時生存するので再利用が起きない。
+  assertEquals(slots.bytes, [64, 64, 64]);
+  // 確保順は「境界ごとに宣言順」— 境界 0 で id 0 / id 2 が slot 0 / 1 を取り、境界 1 で
+  // 生える id 1 が slot 2 になる（宣言順 = slot 順ではない）。
+  assertEquals(slots.steps[0].temps, [0, 2, 1]);
+});
+
+Deno.test("同一境界の一時は確保の逆順で返り、次のステップは最後に返った slot を掴む", () => {
+  const slots = derivePlanSlots([
+    // 境界 0 で 2 本確保し、同じ境界 0 で両方解放する（逆順 = id 1 → id 0 の順にプールへ）。
+    tempSlotsStep([
+      { byteLength: 64, allocBefore: 0, releaseAfter: 0 },
+      { byteLength: 64, allocBefore: 0, releaseAfter: 0 },
+    ], 2),
+    tempSlotsStep([{ byteLength: 64, allocBefore: 0, releaseAfter: 0 }], 1),
+  ]);
+
+  // 2 本目のステップは新しい slot を生やさない。
+  assertEquals(slots.bytes, [64, 64]);
+  assertEquals(slots.steps[0].temps, [0, 1]);
+  // プールへ戻った順は [1, 0] なので LIFO の頂点は**最後に返った slot 0**。ここが 1 になったら
+  // executeStepRecipe（同じ逆順ループ）と食い違っている＝ 2 実装が別の bind group を組む。
+  assertEquals(slots.steps[1].temps, [0]);
+});
+
+Deno.test("出力と一時は同じプールを共有し、pin された slot だけが配り直されない", () => {
+  // 消費者ゼロの出力はステップ末尾でプールへ戻るので、次のステップの一時が掴む。
+  const shared = derivePlanSlots([
+    tempSlotsStep([], 0, [alloc("a", 64, 0)]),
+    tempSlotsStep([{ byteLength: 64, allocBefore: 0, releaseAfter: 0 }], 1),
+  ]);
+  assertEquals(shared.bytes, [64]);
+  assertEquals(shared.steps[1].temps, [0]);
+
+  // pin（グラフ出力）は refs が 0 になってもプールへ返らない。
+  const pinnedSlots = derivePlanSlots([
+    tempSlotsStep([], 0, [alloc("y", 64, 0, true)]),
+    tempSlotsStep([{ byteLength: 64, allocBefore: 0, releaseAfter: 0 }], 1),
+  ]);
+  assertEquals(pinnedSlots.bytes, [64, 64]);
+  assertEquals(pinnedSlots.steps[1].temps, [1]);
+  assertEquals(pinnedSlots.pinned, new Set([0]));
+});
+
+// ---------------------------------------------------------------------------
+// generation 面を欠いた実行の fail loudly（GPU 資源を 1 つも作らない）
+// ---------------------------------------------------------------------------
+
+/** 実行相まで届くスタブ dispatch（`workgroups` は焼き込み実行が読む欄）。 */
+const runnableDispatch = (
+  key: string,
+  workgroups: DispatchWorkgroups,
+  bindings: readonly BindingRecipe[] = [],
+): Dispatch => ({ key, bindings, workgroups }) as unknown as Dispatch;
+
+/** dispatch だけのステップ（出力も一時も持たないので簿記は動かない）。 */
+const dispatchStep = (dispatches: readonly Dispatch[]): StepRecipe => ({
+  outputs: [],
+  temps: [],
+  dispatches,
+  releases: [],
+  writesState: false,
+});
+
+/** 積まれた dispatch を記録するだけのスケジューラ（GPU 資源を持たない）。 */
+const recordingScheduler = (
+  log: string[],
+): SubmitScheduler =>
+  ({
+    dispatch: (
+      _pipeline: unknown,
+      _group: unknown,
+      workgroups: readonly [number, number, number],
+      key: string,
+    ) => {
+      log.push(`${key} [${workgroups.join(",")}]`);
+    },
+  }) as unknown as SubmitScheduler;
+
+const stubGroup = (): GPUBindGroup => ({}) as unknown as GPUBindGroup;
+
+Deno.test("焼き込み経路は context 側の焼き込みを経ていない dispatch で落ちる", () => {
+  const recipes = [dispatchStep([runnableDispatch("attn.qk", [1, 1, 1])])];
+  const log: string[] = [];
+
+  const error = assertThrows(
+    () => executeBakedPlan(recipes, [[undefined]], recordingScheduler(log)),
+    ExecutionError,
+  );
+  assert(error.message.includes("dispatch 'attn.qk'"), error.message);
+  assert(error.message.includes("ADR 0066 決定 5"), error.message);
+  assertEquals(log, []);
+
+  // 対照: 穴が埋まっていれば throw せず 1 本積まれる（上が空振りでない証明）。
+  executeBakedPlan(recipes, [[stubGroup()]], recordingScheduler(log));
+  assertEquals(log, ["attn.qk [1,1,1]"]);
+});
+
+Deno.test("workgroup 数を論理長から算出する dispatch は GenerationContext 無しで落ちる", () => {
+  const log: string[] = [];
+  const derived = [dispatchStep([runnableDispatch("state.pv", (past, query) => [past, query, 1])])];
+
+  const error = assertThrows(
+    () => executeBakedPlan(derived, [[stubGroup()]], recordingScheduler(log)),
+    ExecutionError,
+    "workgroup 数を論理長から算出する dispatch を GenerationContext 無しで",
+  );
+  assert(error.message.includes("dispatch 'state.pv'"), error.message);
+
+  // 対照: 静的な 3 つ組は generation 無しでも積まれる。**0 でも積む**のが既存契約
+  // （0 要素テンソルの経路は要素数 0 の dispatch を黙って飛ばさない）。
+  executeBakedPlan(
+    [dispatchStep([runnableDispatch("elementwise", [0, 1, 1])])],
+    [[stubGroup()]],
+    recordingScheduler(log),
+  );
+  assertEquals(log, ["elementwise [0,1,1]"]);
+});
+
+Deno.test("論理長から算出した workgroup 数が 0 の軸を持つ dispatch だけは積まれない", () => {
+  const log: string[] = [];
+  const recipes = [dispatchStep([runnableDispatch("state.pv", (past, query) => [past, query, 1])])];
+  const generation = (past: number, query: number): BakedGeneration => ({
+    groups: [[undefined]],
+    encoding: {
+      slots: new Map(),
+      lengths: ({}) as unknown as GPUBuffer,
+      past,
+      query,
+    },
+    onStep: () => {},
+  });
+
+  // 有効行ゼロ（この行ブロックが丸ごと pad 行）は積まない。
+  executeBakedPlan(recipes, [[stubGroup()]], recordingScheduler(log), generation(0, 4));
+  assertEquals(log, []);
+  // 対照: 有効行があれば同じレシピが積まれる。
+  executeBakedPlan(recipes, [[stubGroup()]], recordingScheduler(log), generation(2, 4));
+  assertEquals(log, ["state.pv [2,4,1]"]);
+});
+
+Deno.test("generation 面を欠いた実行は state / 論理長の束縛で fail loudly", () => {
+  const execute = (source: BindingSource): void =>
+    executeStepRecipe(
+      dispatchStep([runnableDispatch("attn.pv", [1, 1, 1], [{ binding: 1, source }])]),
+      {
+        arena: ({}) as unknown as RunArena,
+        device: ({}) as unknown as GPUDevice,
+        scheduler: recordingScheduler([]),
+        env: new Map(),
+      },
+    );
+
+  const lengths = assertThrows(() => execute({ kind: "lengths" }), ExecutionError);
+  assert(
+    lengths.message.includes("論理長 uniformを束ねる dispatch を GenerationContext 無しで"),
+    lengths.message,
+  );
+
+  const state = assertThrows(() => execute({ kind: "state", name: "kv.k" }), ExecutionError);
+  assert(
+    state.message.includes("state スロット 'kv.k'を束ねる dispatch を GenerationContext 無しで"),
+    state.message,
+  );
+});
+
+Deno.test("GenerationContext が持たないスロット名は実体解決で fail loudly", () => {
+  const error = assertThrows(
+    () =>
+      executeStepRecipe(
+        dispatchStep([
+          runnableDispatch("attn.pv", [1, 1, 1], [{
+            binding: 1,
+            source: { kind: "state", name: "kv.v" },
+          }]),
+        ]),
+        {
+          arena: ({}) as unknown as RunArena,
+          device: ({}) as unknown as GPUDevice,
+          scheduler: recordingScheduler([]),
+          env: new Map(),
+          generation: {
+            slots: new Map([["kv.k", ({}) as unknown as GPUBuffer]]),
+            lengths: ({}) as unknown as GPUBuffer,
+            past: 0,
+            query: 1,
+          },
+        },
+      ),
+    ExecutionError,
+  );
+  assert(
+    error.message.includes("state スロット 'kv.v' の実体が GenerationContext に無い"),
+    error.message,
   );
 });

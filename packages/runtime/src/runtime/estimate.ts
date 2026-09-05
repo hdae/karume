@@ -163,7 +163,9 @@ export type EstimateOptions = {
    *
    * MUST: states 形 attention を持つグラフでは**必須**（{@link stateAttentionTemps} が
    * fail loudly）。既定値で埋めると、どの device でも実際には出ない枚数を estimator だけが
-   * 主張する。states 形 attention を持たないグラフでは読まない。
+   * 主張する。states 形 attention を持たないグラフでは読まないが、**値域（正の安全整数）は
+   * グラフの形に依らず入口で見る**（読まない形でだけ不正値が黙って通ると、値域門の位置が
+   * 呼び手から見えない）。
    */
   readonly maxStorageBufferBindingSize?: number;
 };
@@ -373,6 +375,14 @@ const weightEstimate = (
       case "i4":
         compressed += buffer.byteLength;
         break;
+      default: {
+        // MUST: 未処理の席をここで止める。switch が素通りすると、そのバッファのバイト数が
+        // 3 欄のどれにも入らないまま `resident.weights.totalBytes` が実ロードより小さい数を
+        // 主張し続ける（見積りは実行を止めない面なので、ずれても赤くならない）。型としては
+        // 到達不能で、席を足したときの結線漏れをコンパイル時に赤くするのがこの分岐の役目。
+        const unhandled: never = buffer.seat;
+        throw new ExecutionError(`未処理の常駐席: ${JSON.stringify(unhandled)}`);
+      }
     }
   }
   return { compressed, uncompressed, expanded };
@@ -400,6 +410,8 @@ const isStateAttention = (node: NodePlan): boolean =>
  * （記号解決済みのスロット shape）を幾何へ翻訳する部分だけ。
  * MUST: `maxStorageBufferBindingSize` が無ければ fail loudly。枚数は device の granted limit
  * だけで決まるので、既定値で埋めると「どの device でも出ない一時の大きさ」を名乗ることになる。
+ * NOTE: 値域（正の安全整数）は {@link estimateGraphMemory} の入口が見る — states 形 attention を
+ * 持たないグラフはここを通らないので、内側に置くと呼び手から見えない位置の門になる。
  */
 const stateAttentionTemps = (
   node: NodePlan,
@@ -412,11 +424,6 @@ const stateAttentionTemps = (
     throw new ExecutionError(
       `${where}: states 形 attention の一時は options.maxStorageBufferBindingSize が要る` +
         "（行ブロックの枚数は device の granted limit だけで決まる — ADR 0060 / ADR 0022）",
-    );
-  }
-  if (!Number.isSafeInteger(limit) || limit < 1) {
-    throw new ExecutionError(
-      `options.maxStorageBufferBindingSize ${limit} は正の安全整数でなければならない`,
     );
   }
   const [batch, heads, chunkRows] = q;
@@ -558,7 +565,16 @@ const transientSlotBytes = (
 export const estimateSessionMemory = (
   model: KarumeModel,
   options: EstimateOptions = {},
-): AdmissionReport => estimateGraphMemory(model.graph, planWeightResidency(model.graph), options);
+): AdmissionReport => {
+  // MUST: 契約検査は常駐計画（`planWeightResidency`）より**先**。引数の評価順に任せると、
+  // 契約違反のグラフは常駐計画の内側（`i4Executable` の attrs 読み）で `nodes (conv1d)` と
+  // 落ち、`nodes[i] (op)` を名乗る `validateGraphContracts` の文言にならない — 実構築
+  // （`PreparedModel`）と同じ門を同じ順で通す、というモジュール doc の MUST が破れる。
+  // 二重に通ることになるが、どちらも純関数・冪等でグラフ 1 走査ぶんの費用しかない。
+  assertRuntimeSupport(model.graph, RUNTIME_SUPPORT);
+  validateGraphContracts(model.graph);
+  return estimateGraphMemory(model.graph, planWeightResidency(model.graph), options);
+};
 
 /**
  * 見積りの本体（グラフと常駐計画だけで完結する — 全量面 {@link estimateSessionMemory} と
@@ -592,6 +608,18 @@ export const estimateGraphMemory = (
   // 静的軸・cat の連結軸・入力の意味論 dtype）も同じ位置で通す。`PreparedModel.estimate` は
   // 構築時と二重に通ることになるが、どちらも純関数・冪等でグラフ 1 走査ぶんの費用しかない。
   validateGraphContracts(graph);
+  // MUST: `maxStorageBufferBindingSize` の値域はグラフの形に依らず**ここで**見る。読み手
+  // （`stateAttentionTemps`）の内側だけに置くと、states 形 attention を持たないグラフでは
+  // -1 / 1.5 / NaN が黙って受理され、値域門の位置が呼び手から見えない。
+  const bindingSizeLimit = options.maxStorageBufferBindingSize;
+  if (
+    bindingSizeLimit !== undefined &&
+    (!Number.isSafeInteger(bindingSizeLimit) || bindingSizeLimit < 1)
+  ) {
+    throw new ExecutionError(
+      `options.maxStorageBufferBindingSize ${bindingSizeLimit} は正の安全整数でなければならない`,
+    );
+  }
   const chunkDims = chunkRowDims(graph);
   const chunkSymbols = new Set(chunkDims.map((dim) => parseDim(dim).sym));
   const bindings = planBindings(graph, options.bindings, chunkSymbols);

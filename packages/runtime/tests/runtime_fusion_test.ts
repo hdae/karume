@@ -1022,3 +1022,101 @@ Deno.test("行ブロック attention の反例（隣接 / mask 形 / op 違い /
     );
   }
 });
+
+/**
+ * BiRefNet の分解 attention（窓 attention）の最小形。実測グラフ 96 本のうち **0 本**が
+ * `rowBlockAttention` に掴まれない形で、外れる理由が 3 つ同時に立っている:
+ *
+ * ① mask が `[1,H,S,S]`（head ごとの相対位置バイアス）で、ルールが要求する `[1,1,1,N]` ではない
+ * ② `safe_softmax` ではなく素の `softmax`
+ * ③ 窓の途中に `embedding`（相対位置表の引き）と、その `reshape` が挟まる
+ *
+ * ACTIVE_DESIGN が「**row-block だけは外れ方が性能でなく資源**」と書いているのはこの形のこと
+ * で、掴めないと `bmm` の出力 `[nW·H,S,S]` が**ノード出力スロット**として実体化する
+ * （原理的に行ブロックへ分割できない）。matcher を広げた／狭めたときにどちらの向きの退行も
+ * 沈黙するので、掴まないこと自体と資源側の帰結を観測点として置く。
+ */
+const birefnetAttentionGraph = (): GraphJson => ({
+  format: "karume-ir",
+  version: 1,
+  requires: { ops: ["bmm", "reshape", "embedding", "add", "softmax", "expand"] },
+  symbols: [],
+  inputs: [
+    { name: "q", dtype: "f32", shape: [6, 4, 5] },
+    { name: "kt", dtype: "f32", shape: [6, 5, 4] },
+    { name: "idx", dtype: "i32", shape: [48] },
+    { name: "v", dtype: "f32", shape: [2, 3, 4, 5] },
+  ],
+  outputs: ["y"],
+  initializers: { table: { tensor: "m.table", storage: { dtype: "f32" } } },
+  values: {
+    table: { dtype: "f32", shape: [8, 1] },
+    scores3: { dtype: "f32", shape: [6, 4, 4] },
+    scores4: { dtype: "f32", shape: [2, 3, 4, 4] },
+    biasFlat: { dtype: "f32", shape: [48, 1] },
+    bias4: { dtype: "f32", shape: [1, 3, 4, 4] },
+    masked: { dtype: "f32", shape: [2, 3, 4, 4] },
+    probs: { dtype: "f32", shape: [2, 3, 4, 4] },
+    probsExpanded: { dtype: "f32", shape: [2, 3, 4, 4] },
+    probs3: { dtype: "f32", shape: [6, 4, 4] },
+    vExpanded: { dtype: "f32", shape: [2, 3, 4, 5] },
+    v3: { dtype: "f32", shape: [6, 4, 5] },
+    y: { dtype: "f32", shape: [6, 4, 5] },
+  },
+  nodes: [
+    { op: "bmm", ins: ["q", "kt"], outs: ["scores3"], attrs: {} },
+    { op: "reshape", ins: ["scores3"], outs: ["scores4"], attrs: {} },
+    // ③ 窓の途中の相対位置表の引き（2 ノード）。
+    { op: "embedding", ins: ["table", "idx"], outs: ["biasFlat"], attrs: { padding_idx: -1 } },
+    { op: "reshape", ins: ["biasFlat"], outs: ["bias4"], attrs: {} },
+    // ① mask は head ごと（`[1,H,S,S]`）。
+    { op: "add", ins: ["scores4", "bias4"], outs: ["masked"], attrs: {} },
+    // ② 素の softmax。
+    { op: "softmax", ins: ["masked"], outs: ["probs"], attrs: { dim: 3 } },
+    { op: "expand", ins: ["probs"], outs: ["probsExpanded"], attrs: {} },
+    { op: "reshape", ins: ["probsExpanded"], outs: ["probs3"], attrs: {} },
+    { op: "expand", ins: ["v"], outs: ["vExpanded"], attrs: {} },
+    { op: "reshape", ins: ["vExpanded"], outs: ["v3"], attrs: {} },
+    { op: "bmm", ins: ["probs3", "v3"], outs: ["y"], attrs: {} },
+  ],
+});
+
+const birefnetInputs: Readonly<Record<string, readonly number[]>> = {
+  q: [6, 4, 5],
+  kt: [6, 5, 4],
+  idx: [48],
+  v: [2, 3, 4, 5],
+};
+
+/** 実体化されるノード出力（別名は確保を出さないので除く）の「名前 → バイト数」。 */
+const allocatedOutputs = (plan: FusionPlan): ReadonlyMap<string, number> => {
+  const bytes = new Map<string, number>();
+  for (const step of plan.steps) {
+    if (step.kind !== "node" || step.aliasesInput) continue;
+    for (const output of step.plan.outputs) {
+      bytes.set(output.name, output.shape.reduce((size, dim) => size * dim, 1) * 4);
+    }
+  }
+  return bytes;
+};
+
+Deno.test("birefnet 形の分解 attention は掴めず、S がノード出力スロットとして実体化する", () => {
+  const plan = fuse(birefnetAttentionGraph(), birefnetInputs);
+  assertEquals(plan.counts.rowBlockAttention, 0, outline(plan.steps).join(","));
+
+  // 資源側の帰結: S = nW·H·S·S·4 = 2·3·4·4·4 が**ノード出力**として並ぶ。融合ステップの
+  // 内側の一時なら行ブロックで 1 枚ぶんまで縮むが、ノード出力スロットは分割できない。
+  assertEquals(allocatedOutputs(plan).get("scores3"), 2 * 3 * 4 * 4 * 4);
+
+  // 対照: mask が [1,1,1,N]・safe_softmax・窓が連続 9 ノードの形は掴み、同じ S は
+  // ステップ内一時（= 行ブロックで縮む側）になる。
+  const fused = fuse(attentionGraph(), attentionInputs());
+  assertEquals(fused.counts.rowBlockAttention, 1);
+  const scoreBytes = ATTENTION.heads * ATTENTION.queries * ATTENTION.keys * 4;
+  assertEquals(
+    fusedAt(fused, 0).temps.filter((temp) => temp.byteLength === scoreBytes).length,
+    3,
+    "S / mask 済み S / P がステップ内一時になっていない",
+  );
+  assertEquals(allocatedOutputs(fused).has("scores3"), false, "S がノード出力として残っている");
+});
