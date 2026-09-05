@@ -11,6 +11,10 @@
 
 ## Now
 
+- **0.10.0 はローカル完了（2026-09-05・lockstep bump `3f875e4`）** — push / GitHub Release /
+  JSR publish / `deno task smoke:published` はユーザー（runbook §4 / §5）。ノート草稿 =
+  `outputs/release/release-notes-v0.10.0.draft.md`。中身 = ADR 0093（中間バッファの静的 liveness
+  パッキング）+ BiRefNet HR / Lucida の初公開（`BIREFNET_SOURCES`）+ 網羅レビューの修正波。
 - **0.9.0 公開完了（2026-09-04）** — GitHub Release v0.9.0 → JSR 0.9.0 →
   `deno task smoke:published` 緑。配布は **HF 10 リポ**（`karume-anima` / `karume-anima-extra` /
   `karume-irodori-v4-small` / `karume-irodori-v4.1-small` / `karume-sbv2-jvnv` /

@@ -7,10 +7,13 @@
 > [perf-ledger](perf-ledger.md) が正本で、ここは波として参照するだけ ④by-design 制約の正本は
 > [limitations](limitations.md) — 作業化が裁定された時だけここに載る。
 
-## now — 0.9.0 リリース後（2026-09-05 棚卸し）
+## now — 0.10.0 リリース準備（2026-09-05）
 
-0.9.0 は公開済み（内容は下の「消化済み（0.9.0 リリース）」節）。2026-09-04 裁定の作業波 a〜d の
-うち残るのは **c だけ**（a / b は消化・d はクローズ）。波と独立に消化してよい残件はその下。
+0.10.0 は lockstep bump（`3f875e4`）までローカル完了 — push → CI → GitHub Release → JSR publish →
+`deno task smoke:published` はユーザー（[release-runbook](release-runbook.md) §4 / §5）。事後の
+docs 同期（この見出しを「0.10.0 リリース後」へ・消化済み節の新設）は公開後に行う。2026-09-04 裁定の
+作業波 a〜d のうち残るのは **c だけ**（a / b は消化・d はクローズ）。波と独立に消化してよい残件は
+その下。
 
 1. **c. perf K-13 / K-14**（prefill attention の K/V タイル再利用 / decode ①QK の並列化）:
    起票・合格線・kill 基準とも [perf-ledger](perf-ledger.md) が正本。
