@@ -29,6 +29,7 @@ from torch import nn
 
 from _shared.paths import REPO_ROOT, SERIES_ROOT
 from karume.dims import parse_dim
+from karume.emit import EmitError
 from karume.ops import EMITTABLE_OPS
 from karume.quantize import (
     QUANT_CHANNEL_AXES,
@@ -806,7 +807,7 @@ class TestWeightDtypeSeries:
 
         assert not _weights_are_f16_exact(conv)
 
-    @pytest.mark.parametrize("dtype", ["f32", "f16", "i8"])
+    @pytest.mark.parametrize("dtype", ["f32", "f16", "i8", "i4"])
     def test_the_dtype_reaches_the_container_and_the_golden(self, monkeypatch, tmp_path, dtype):
         """dtype が export の端（格納宣言）まで通り、golden が**丸め後**の重みで採れている。
 
@@ -814,6 +815,11 @@ class TestWeightDtypeSeries:
         量子化誤差と実装誤差の合成に化ける（tolerance を緩める方向にしか効かないので、
         緑のまま検出力だけが落ちる）。ここでは export 後のモジュール（= 丸め済み）を
         そのまま流し直して golden とビット一致することで、その順序を固定する。
+
+        `i4` は**非空の `weight_dtype_overrides` が emit まで届く唯一の経路**なので、ここに
+        居ないと配布形の `front_i4` / `voice_i4` を作る配線が本モジュールで 1 度も走らない。
+        `_TinyDp` の conv1d 2 本は行長 512 / 576 でどちらも group32 で割り切れるため全本が
+        i4 適格になり、i8 側が「対象 0 本」になる枝も同時に通る。
         """
         torch.manual_seed(0)
         net_g = _TinyNetG()
@@ -825,7 +831,7 @@ class TestWeightDtypeSeries:
 
         graph = verify_model(out / export_sbv2.MODEL_FILE)
         stored = {name: init.storage.dtype for name, init in graph.initializers.items()}
-        compressed = {name for name, storage in stored.items() if storage in ("f16", "i8")}
+        compressed = {name for name, storage in stored.items() if storage in ("f16", "i8", "i4")}
         if dtype == "f32":
             assert compressed == set(), stored
             assert summary["compressed_tensors"] == 0
@@ -834,8 +840,8 @@ class TestWeightDtypeSeries:
             assert {stored[name] for name in compressed} == {dtype}, stored
             assert len(compressed) == 2, stored
             assert summary["compressed_tensors"] == 2
-        if dtype == "i8":
-            # companion scale の宣言（ADR 0019）— 無いと値が復元できない。
+        if dtype in ("i8", "i4"):
+            # companion scale の宣言（ADR 0019 / 0069）— 無いと値が復元できない。
             scale_keys = {graph.initializers[name].storage.scale for name in compressed}
             assert None not in scale_keys, stored
             assert len(scale_keys) == len(compressed), "scale キーが重みごとに分かれていない"
@@ -853,6 +859,34 @@ class TestWeightDtypeSeries:
             with torch.no_grad():
                 fresh = module(tensors["input.h"], tensors["input.x_mask"], tensors["input.g"])
             assert torch.equal(fresh, tensors["output.0"]), name
+
+    def test_dropping_the_overrides_fails_loudly_instead_of_falling_back_to_i8(
+        self, monkeypatch, tmp_path
+    ):
+        """恒真化の遮断: `--dtype i4` の格納は**明示 override**が運んでいる、の直接の証拠。
+
+        i4 系列の基底は i8（{@link export_sbv2.BASE_WEIGHT_DTYPES}）なので、override を落とすと
+        「i4 group の scale 台帳を持ったまま i8 格納を宣言した」形になる。emit はそれを
+        per-channel scale の keepdim 形の食い違いとして落とす — **黙って i8 へ落ちる経路は
+        無い**（上のケースが見ているのが dtype 名ではなく override であることの裏取り）。
+        """
+        torch.manual_seed(0)
+        net_g = _TinyNetG()
+        hps = SimpleNamespace(version="tiny")
+        monkeypatch.setattr(export_sbv2, "load_net_g", lambda _model_dir: (net_g, hps))
+        real = export_sbv2._fake_quant
+        monkeypatch.setattr(
+            export_sbv2,
+            "_fake_quant",
+            lambda dtype, module, target: (real(dtype, module, target)[0], {}),
+        )
+        out = tmp_path / export_sbv2.TARGET_DP
+
+        with pytest.raises(EmitError, match="keepdim 形"):
+            export_sbv2.export_dp(tmp_path, out, cases=_TINY_CASES, dtype="i4")
+
+        # 門より前に final を作らない（`_staged_target` の MUST）。
+        assert not out.exists()
 
 
 @requires_weights

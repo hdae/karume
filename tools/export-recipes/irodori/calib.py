@@ -111,7 +111,7 @@ HIDDEN_ARG = "x"
 
 #: adaLN（modulation の scale / shift / gate を作る層）を指す FQN セグメント。
 #:
-#: w4 席はここに載る block 内 144 本（12 block × 12 本）を i4 から外して **i8 で丸める** —
+#: i8+dit4 席はここに載る block 内 144 本（12 block × 12 本）を i4 から外して **i8 で丸める** —
 #: 聴感裁定 2026-08-23: modulation の scale / shift / gate は量子化感度が高く、i8 へ戻すと
 #: 読み上げ方が f32 へ寄る（コスト +13.1 MiB = dit i4 payload +6.0%）。
 ADALN_SEGMENTS = frozenset({"attention_adaln", "mlp_adaln"})
@@ -512,7 +512,7 @@ def calibrate_i4(
     """stage 逐次の GPTQ を当て、`(レポート, scale 台帳)` を返す（丸めは in-place）。
 
     `include` は**stage 内の局所モジュール FQN** の述語で、core の `calibrate_stages` へ
-    そのまま渡る（None = stage 内の `nn.Linear` 全部）。w4 席は adaLN 144 本を i8 へ戻すので、
+    そのまま渡る（None = stage 内の `nn.Linear` 全部）。i8+dit4 席は adaLN 144 本を i8 へ戻すので、
     呼び出し側（`irodori.export._round_i4_calibrated`）は {@link is_adaln} の否定を渡して
     block 内 168 本だけを GPTQ に載せる。
 
@@ -549,8 +549,8 @@ def calibrate_i4(
 def assert_calib_covers_scan(report: CalibReport, scan: frozenset[str]) -> None:
     """校正が丸めた層が **i4 で格納する集合**と過不足なく一致することを見る。
 
-    `scan` は `.weight` を落としたモジュール名の集合（{@link stage_linear_names} の形で、w4 席
-    では adaLN を除いた 168 本 — {@link calibrate_i4} の `include` が選ぶ集合と同一）。
+    `scan` は `.weight` を落としたモジュール名の集合（{@link stage_linear_names} の形で、
+    i8+dit4 席では adaLN を除いた 168 本 — {@link calibrate_i4} の `include` が選ぶ集合と同一）。
 
     MUST: fail loudly。stage の綴りや対象型が変わって block の一部が校正に載らなくなっても、
     丸め漏れのぶん品質は**良い側**に出る（素通りを数字から読めない）。しかも漏れた重みは

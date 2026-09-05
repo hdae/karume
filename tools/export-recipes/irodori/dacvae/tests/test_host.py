@@ -11,6 +11,9 @@ LUFS 測定と WAV の読み書きは audiotools / soundfile の実経路なの�
 
 from __future__ import annotations
 
+import sys
+import types
+
 import pytest
 import torch
 from safetensors.torch import save_file
@@ -176,3 +179,108 @@ class TestSliceReference:
     def test_a_slice_longer_than_the_source_fails_loudly(self):
         with pytest.raises(SystemExit, match="収まらない"):
             host._slice_reference(torch.ones(10), 2, 9.0, 0, 1.0)
+
+
+class TestReadWav:
+    """int16 → f32 の規約（/32768）と mono 化（チャネル平均）— どちらもホスト移植の前提。"""
+
+    @staticmethod
+    def _write(path, values, *, sample_rate=48000):
+        soundfile = pytest.importorskip("soundfile")
+        import numpy as np
+
+        soundfile.write(str(path), np.array(values, dtype=np.int16), sample_rate, subtype="PCM_16")
+        return path
+
+    def test_int16_is_normalized_by_32768(self, tmp_path):
+        """下端 −32768 が厳密に −1.0 へ写るのが /32768 の側（/32767 なら溢れる）。"""
+        path = self._write(tmp_path / "mono.wav", [-32768, 0, 32767])
+
+        wav, sample_rate = ex.read_wav(path)
+
+        assert sample_rate == 48000
+        assert torch.equal(wav, torch.tensor([-1.0, 0.0, 32767 / 32768]))
+
+    def test_a_stereo_file_is_averaged_into_one_channel(self, tmp_path):
+        """`codec.py` の `encode_waveform` と同じ mono 化（左右の平均・チャネル軸は消える）。"""
+        path = self._write(tmp_path / "stereo.wav", [[16384, -16384], [8192, 16384], [-32768, 0]])
+
+        wav, _sample_rate = ex.read_wav(path)
+
+        assert wav.shape == (3,)
+        assert torch.equal(wav, torch.tensor([0.0, 0.375, -0.5]))
+
+
+class TestWavScaleEvidence:
+    """MUST: 規約は主張ではなく実測（実音声では /32767 との相対差 3e-5 しか出ない）。"""
+
+    def test_the_real_reader_passes_and_records_the_divisor(self, tmp_path):
+        pytest.importorskip("soundfile")
+
+        evidence = host._wav_scale_evidence(48000)
+
+        assert evidence["int16Divisor"] == 32768
+        assert evidence["probeInt16"] == list(host.WAV_SCALE_PROBE)
+
+    def test_a_reader_that_divides_by_32767_fails_loudly(self, monkeypatch):
+        """恒真化の遮断: 門が「読めた」ではなく「規約どおりか」を見ていることの実測。"""
+        pytest.importorskip("soundfile")
+        real = ex.read_wav
+
+        def divided_by_32767(path):
+            wav, sample_rate = real(path)
+            return wav * (32768 / 32767), sample_rate
+
+        monkeypatch.setattr(ex, "read_wav", divided_by_32767)
+
+        with pytest.raises(AssertionError, match="/32768 でない"):
+            host._wav_scale_evidence(48000)
+
+
+class _FakeAudioSignal:
+    """`audiotools.AudioSignal` のうち `_normalize_decomposed` が触る面だけの身代わり。
+
+    `target_db=None` の経路は LUFS 測定を**記録するだけ**で利得には使わない — 身代わりが
+    返す既知の値がそのまま `refDb` に出て、`loudnessGain` は 1.0 のまま、が観測点。
+    """
+
+    GAIN_FACTOR = 0.1
+
+    def __init__(self, data, sample_rate: int) -> None:
+        self.data = data
+        self.sample_rate = sample_rate
+
+    def loudness(self) -> float:
+        return -12.5
+
+
+@pytest.fixture
+def fake_audiotools(monkeypatch):
+    module = types.ModuleType("audiotools")
+    module.AudioSignal = _FakeAudioSignal
+    monkeypatch.setitem(sys.modules, "audiotools", module)
+    return module
+
+
+class TestNormalizeDecomposedWithoutTarget:
+    """`target_db=None` = 上流 `encode_waveform` の peak 安全スケールだけの経路。"""
+
+    def test_a_waveform_inside_unity_is_left_bit_identical(self, fake_audiotools):
+        raw = torch.tensor([0.5, -0.25, 1.0])
+
+        decomposed, scalars = host._normalize_decomposed(raw, 48000, None)
+
+        assert scalars["loudnessGain"] == 1.0
+        assert scalars["peakGain"] == 1.0
+        assert scalars["refDb"] == -12.5, "測ってはいるが None 経路では利得に効かない"
+        assert torch.equal(decomposed, raw)
+
+    def test_a_hot_waveform_is_scaled_by_one_over_the_peak(self, fake_audiotools):
+        raw = torch.tensor([0.5, -2.0, 1.0])
+
+        decomposed, scalars = host._normalize_decomposed(raw, 48000, None)
+
+        assert scalars["peakBeforeScale"] == 2.0
+        assert scalars["peakGain"] == 0.5
+        assert scalars["loudnessGain"] == 1.0
+        assert torch.equal(decomposed, raw * 0.5)

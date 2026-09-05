@@ -13,8 +13,9 @@ contracts live in [`../../exporter/README.md`](../../exporter/README.md).
 
 ## Real-weight Irodori-TTS export and E2E (waves 1–4)
 
-Six text-side graphs plus the DACVAE codec pair, with host-side goldens. The scripts have a
-**required regeneration order** (later ones read earlier outputs):
+Six text-side graphs plus the DACVAE codec pair, with host-side goldens. The numbering below names
+the steps used throughout this file; the scripts read each other's outputs, so a **clean tree** has
+to run them in the order given at the end of this section, not in the listed one:
 
 ```sh
 # 0. one-time inputs: inputs/irodori/{v4-small,v4.1-small,dacvae-32dim,Irodori-TTS,dacvae-src}/
@@ -59,10 +60,12 @@ byte-identical either way, so `dist` — and step 4'' — refuse the result by r
 `calib_provenance.json` the export writes next to the container.
 
 Order caveats measured in practice: step 2 reads step 5's real latent for the speaker cases
-(`SPEAKER_REAL_CASES`), and step 6 reads step 4's `z` for the decoder cases — so a **full** rebuild
-from scratch runs 2 once more after 5 (2 → 3 → 4 → 5 → 2 → 6 → 7). Incremental regeneration of a
-single script is safe as long as its inputs above exist. Design records: ADR 0044 / 0046 / 0047
-(graphs), 0048 (host port), 0049 (codec integration).
+(`SPEAKER_REAL_CASES`) and exits when it is missing, steps 5 and 6 read step 4's `z`, and both of
+them load the codec step 1 converts. A **full** rebuild from scratch therefore runs
+**1 → 4 → 5 → 2 → 3 → 6 → 7**, not the listing order above (that one stops on the first script).
+The i4 series is the one place where the dependency runs the other way (step 4'' reads what step 2''
+wrote, above). Incremental regeneration of a single script is safe as long as its inputs above
+exist. Design records: ADR 0044 / 0046 / 0047 (graphs), 0048 (host port), 0049 (codec integration).
 
 ## Another model of the same architecture (v4.1-small)
 

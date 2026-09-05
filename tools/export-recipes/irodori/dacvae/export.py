@@ -651,6 +651,8 @@ def _fake_quant(dtype: str, model: nn.Module) -> FakeQuantResult:
         print(f"[fake-quant] codec: i8 per-channel へ丸めた — {int8.describe()}", flush=True)
         return FakeQuantResult(int8.describe(), int8.scales)
     report = round_weights_to_f16(model)
+    if report.parameters + report.buffers == 0:
+        raise SystemExit(f"格納 {dtype} を指定したが丸めた重みが 1 本も無い")
     print(f"[fake-quant] codec: f16 表現可能値へ丸めた — {report.describe()}", flush=True)
     return FakeQuantResult(report.describe(), {})
 
@@ -946,6 +948,10 @@ def export_series(
 ) -> dict[str, Any]:
     """IR コンテナと golden io を書き、要約を返す。
 
+    `targets` が絞るのは**書き出しだけ**。decoder / encoder 両方のケース組み立てと 5 門は
+    `targets` に依らず常に通る（下の MUST と同じ理由 — 鎖を丸ごと通す性質があるからこそ、
+    門を通らない資産が据わる経路が生まれない）。
+
     MUST: 生成物は**ターゲットごとの作業席**へ書き、全ての門（snake 畳み込み・境界正規化）を
     通してから据える。門より前に final へ置くと、落ちた実走が「検収門を通れる資産」を残す —
     io golden は同じ壊れたグラフから採るので互いに整合し、TS 側の突合は**緑になる**
@@ -1089,7 +1095,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         "--target",
         action="append",
         choices=TARGETS,
-        help="書き出すターゲット（繰り返し指定可。既定は全て）",
+        help="**書き出しだけ**を絞る（繰り返し指定可。既定は全て）。decoder / encoder 両方の"
+        "ケース組み立てと 5 門は常に走る — 所要時間は 1 ターゲットでも変わらない",
     )
     args = parser.parse_args(argv)
     out_dir = default_out_root(args.model_dir, args.dtype) if args.out is None else args.out

@@ -16,7 +16,7 @@ r"""Irodori-TTS v4 の**ホスト側アルゴリズム**の数の正（full-loop
 `irodori.export.fake_quant` を load 直後に当てるので、golden も上流突合の参照も**同じ丸めた
 重み**で計算される（ADR 0018 / 0019 / 0027 / 0050 — 系列ごとに golden を焼き直す形）。
 
-`--dtype i4`（配布の quant 席 `w4`）だけは丸めが 2 段になる: 段 1 は全役割を **i8 席と同一の
+`--dtype i4`（配布の quant 席 `i8+dit4`）だけは丸めが 2 段になる: 段 1 は全役割を **i8 席と同一の
 fake-quant**、段 2 は **`--dtype i4` で export 済みの `dit` コンテナを読み戻して**ラッパ所有
 パラメタを上書きする（{@link restore_dit_from_i4_series}）。したがってこの系列は
 **export を先に走らせてある**ことが前提。
@@ -732,7 +732,7 @@ def t_embed_table(source: ex.IrodoriSource, schedule: torch.Tensor, dim: int) ->
 #: `karume.emit.unpack_int4`。i8 が並ぶのは **block 外の 5 本**（`in_proj` / `out_proj` /
 #: `cond_module.{0,2,4}`）と **adaLN 144 本**（`attention_adaln` / `mlp_adaln`）の計 149 本
 #: （どちらも聴感裁定 2026-08-23 で i4 から外した。`irodori.export._fake_quant_i4`）。
-#: ここに無い格納（f16 / bf16）が `dit` のコンテナに現れたら、w4 席の混成が想定と違う形で
+#: ここに無い格納（f16 / bf16）が `dit` のコンテナに現れたら、i8+dit4 席の混成が想定と違う形で
 #: 出荷されている（{@link restore_dit_from_i4_series} が落とす）。
 _RESTORE_STORAGE: Mapping[str, tuple[str, torch.dtype]] = {
     "f32": ("F32", torch.float32),
@@ -827,7 +827,7 @@ def _stored_parameters(graph: Mapping[str, Any], where: Path) -> dict[str, tuple
         if dtype not in _RESTORE_STORAGE:
             raise SystemExit(
                 f"{where}: '{key}' の格納 {dtype!r} は読み戻せない"
-                f"（w4 席の dit に並ぶのは {' / '.join(sorted(_RESTORE_STORAGE))} だけ）"
+                f"（i8+dit4 席の dit に並ぶのは {' / '.join(sorted(_RESTORE_STORAGE))} だけ）"
             )
         scale = storage.get("scale")
         if dtype in _SCALED_STORAGE and not isinstance(scale, str):
@@ -1011,9 +1011,9 @@ def _dequantize_stored(dtype: str, raw: torch.Tensor, scale: torch.Tensor) -> to
 def restore_dit_from_i4_series(wrapper: nn.Module, series_dir: Path) -> RestoredDit:
     """i4 系列の**出荷バイト**で、`dit` のラッパ所有パラメタを丸ごと上書きする（丸めの段 2）。
 
-    段 1（{@link emit}）は全役割を **w8 席と同一の fake-quant**（i8）で丸める — quant 席 `w4` は
-    他 7 役に w8 の i8 バイトを共有させる混成席（`irodori.distribution.IRODORI_QUANT_SEATS`）
-    なので、条件エンコーダ側の丸めは w8 golden と同一が正しい。ここはその上に `dit` だけを
+    段 1（{@link emit}）は全役割を **i8 席と同一の fake-quant** で丸める — quant 席 `i8+dit4` は
+    他 7 役に i8 席の i8 バイトを共有させる混成席（`irodori.distribution.IRODORI_QUANT_SEATS`）
+    なので、条件エンコーダ側の丸めは i8 golden と同一が正しい。ここはその上に `dit` だけを
     重ねる段で、**校正をもう 1 度走らせない**: GPTQ の丸め先は捕捉した活性に依るので「2 回の
     校正が同じ丸めを出す」ことはどこも保証していない。golden が見た重みは配布バイトそのもの、
     を機械で言い切れる唯一の形が「エクスポート済みの系列を読み戻す」。
@@ -1032,7 +1032,8 @@ def restore_dit_from_i4_series(wrapper: nn.Module, series_dir: Path) -> Restored
       こと（本数はコンテナが正 — 期待値を焼かない）。**I8 は数えない** — 段 1 と同じ丸めなので
       「i4 系列を読んでいる」の証拠にならず、i4 側の集合一致だけがそれを言える
     - **席の効き**: 上書きで値が動いた i4 パラメタが 1 本も無い、を落とす（読み戻しが効いて
-      いないのに w8 golden を w4 golden と呼ぶ事故は、数値も形も合うので他のどの門にも掛からない）
+      いないのに i8 golden を i8+dit4 golden と呼ぶ事故は、数値も形も合うので他のどの門にも
+      掛からない）
     """
     container = series_dir / ex.MODEL_FILE
     if not all(shard.is_file() for shard in resolve_shards(container)):
@@ -1096,7 +1097,7 @@ def restore_dit_from_i4_series(wrapper: nn.Module, series_dir: Path) -> Restored
     if changed == 0:
         raise SystemExit(
             f"{container}: 読み戻した i4 {len(int4_keys)} 本が段 1（i8 丸め）の値と全て同じ"
-            " — i4 の読み戻しが効いていない（w8 golden を w4 golden と呼ぶ事故）"
+            " — i4 の読み戻しが効いていない（i8 golden を i8+dit4 golden と呼ぶ事故）"
         )
     int8 = sum(1 for dtype, _scale in stored.values() if dtype == "i8")
     plain = len(stored) - len(int4_keys) - int8
@@ -1159,10 +1160,10 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path, dtype: str = "f32") -
     # コピーを内側に持つ）なので、上流突合（`sample_euler_rf_cfg` / `predict_duration_log_frames`）
     # もここで丸めた重みで回る = グラフ経路と上流経路の両辺が同じ丸めを受ける。
     #
-    # MUST（i4 = 配布の quant 席 `w4`）: 丸めを 2 段に割る。段 1 はここで **i8 席と同一の
-    # fake-quant**（w4 席は他 7 役に w8 の i8 バイトを共有させるので、条件エンコーダ側の丸めは
-    # w8 golden と同一が正しい）、段 2 は {@link restore_dit_from_i4_series} が `dit` のラッパ
-    # 所有パラメタだけを出荷バイトで上書きする。`irodori.export.fake_quant` の i4 経路を呼んで
+    # MUST（i4 = 配布の quant 席 `i8+dit4`）: 丸めを 2 段に割る。段 1 はここで **i8 席と同一の
+    # fake-quant**（i8+dit4 席は他 7 役に i8 席の i8 バイトを共有させるので、条件エンコーダ側の
+    # 丸めは i8 golden と同一が正しい）、段 2 は {@link restore_dit_from_i4_series} が `dit` の
+    # ラッパ所有パラメタだけを出荷バイトで上書きする。`irodori.export.fake_quant` の i4 経路を呼んで
     # 校正をここでもう 1 度走らせない理由は段 2 の docstring。
     quantized = ex.fake_quant(
         "i8" if dtype == "i4" else dtype,

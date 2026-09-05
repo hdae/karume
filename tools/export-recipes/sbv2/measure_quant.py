@@ -1649,6 +1649,16 @@ def build_report(
 
     configs = [entry_for(name) for name in CONFIGS if name in results]
     diagnostics = [entry_for(name) for name in DIAGNOSTICS if name in results]
+    # MUST: BERT の丸めは**この実行で実際に走った構成**から導く（定数で書くと、構成が増えた
+    # 日に総論の 1 行だけが古びる — 保存された report.json を後から読む側は「BERT は全部 f32
+    # で測った」と取り違える）。`bert_quant` は `--only` 等で絞れば空にもなる。
+    bert_configs = sorted(w4.get("bert_quant") or {})
+    bert_method = (
+        f"net_g を振る構成は BERT f32 固定 / BERT を振ったのは {', '.join(bert_configs)}"
+        "（内訳は `w4.bert_quant`）"
+        if bert_configs
+        else "この実行では BERT を振っていない（全構成 f32 固定 — 生成ネット側だけを振った）"
+    )
 
     return {
         "generated": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -1659,7 +1669,7 @@ def build_report(
         "knobs": inputs.meta["knobs"],
         "sampling_rate": inputs.meta["samplingRate"],
         "method": {
-            "bert": "f32 固定（全構成共有 — 生成ネット側だけを振る）",
+            "bert": bert_method,
             "act_target_ops": sorted(ACT_ROW_AXIS),
             "act_apply_point": "対象 op の入力（torch.nn.functional の op 自体を差し替え —"
             " モジュールの forward_pre_hook では FFN パッチの直接呼び出しを取り逃す）",

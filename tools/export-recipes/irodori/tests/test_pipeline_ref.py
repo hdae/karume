@@ -12,7 +12,7 @@
 - token 列の前処理が種別で分かれていること（text は `normalize_text` + strip・caption は
   strip のみ）と、上流突合へ渡す caption が**上流の入口から**作られること
 - i4 席（`--dtype i4`）の**出荷バイトからの読み戻し**の門（provenance / 形 / 本数 / 席の効き）が
-  1 つ残らず発火すること — ここが素通りすると「w8 の golden を w4 の golden と呼ぶ」事故が
+  1 つ残らず発火すること — ここが素通りすると「i8 の golden を i8+dit4 の golden と呼ぶ」事故が
   数値も形も合ったまま通る。i4 席は **I4 + I8 + F32 の混成**（block 内の adaLN 以外が i4・
   adaLN と block 外が i8 — 聴感裁定 2026-08-23）なので、i8 の逆変換と「効き門は i4 だけで
   数える」もここで固定する
@@ -549,7 +549,7 @@ class TestRestoreDitFromI4Series:
             ip.restore_dit_from_i4_series(_DitWrapper(), series)
 
     def test_a_storage_dtype_outside_the_seat_fails_loudly(self, tmp_path):
-        """w4 席の dit に f16 は並ばない（並んだら混成が想定と違う形で出荷されている）。
+        """i8+dit4 席の dit に f16 は並ばない（並んだら混成が想定と違う形で出荷されている）。
 
         受理するのは f32 / i8 / i4 の 3 つだけ（{@link irodori.pipeline_ref._RESTORE_STORAGE}）。
         """

@@ -187,7 +187,7 @@ block 外（`in_proj` / `out_proj` / `cond_module`）と残りは i8 の混成�
 **GPTQ 校正付き**（`irodori.calib` — 参照 denoise から採った活性で i4 側の丸め先を選び直す）で、
 `--no-calib`
 だけが opt-out。校正の有無は格納形を 1 バイトも変えないので、条件は `calib_provenance.json`
-（{@link _write_calib_provenance}）に残して組み立て側が突き合わせる。他 7 役は quant 席 `w4`
+（{@link _write_calib_provenance}）に残して組み立て側が突き合わせる。他 7 役は quant 席 `i8+dit4`
 でも i8 系列のバイトを共有するので、i4 系列は書かない。
 
 MUST: `--dtype` は emit 専用（`export_sbv2.py` の `--verify` 排他と同じ性格）。この台本は
@@ -305,7 +305,7 @@ TEXT_TARGETS = (TARGET_BACKBONE, TARGET_TEXT_PROJ, TARGET_CAPTION_PROJ)
 TARGETS = (*TEXT_TARGETS, TARGET_SPEAKER, TARGET_DURATION, TARGET_DIT)
 
 #: 格納 dtype ごとに書き出すターゲット。i4 系列が `dit` だけなのは、i4 の実行経路が linear の
-#: 重みスロット限定（ADR 0069 決定 5）で、DiT 以外の役割は quant 席 `w4` でも **i8 系列の
+#: 重みスロット限定（ADR 0069 決定 5）で、DiT 以外の役割は quant 席 `i8+dit4` でも **i8 系列の
 #: バイトをそのまま共有する**から（`irodori.distribution.IRODORI_QUANT_SEATS`）— 他役割の
 #: i4 系列を書いても配布表が引かない。
 #:
@@ -468,7 +468,7 @@ GOLDEN_CASES: tuple[tuple[str, str, str], ...] = (
     (
         "text-emoji",
         "text",
-        "あははっ🤭、それ本当に言ってるの？…😮‍💨まぁ、君らしいけどね。",
+        "あははっ🤭、それ本当に言ってるの？…😮\u200d💨まぁ、君らしいけどね。",
     ),
     (
         "caption-ja",
@@ -1903,9 +1903,11 @@ def _write_calib_provenance(
     `--no-calib` でも**書く**（消すのではなく `rtn` と記録する）— 不在は「古い export」とも
     読めてしまい、組み立て側が「校正なしを配ろうとした」を名指しで拒否できない。
 
-    MUST: i4 以外では**古い記録を消す**（全域関数）。`export_series` は系列ディレクトリを
-    掃除しないので、i4 で採った系列を別 dtype で採り直すと記録だけが前回のまま生き残り、
-    「校正付き」という事実でない主張が残る。
+    MUST: i4 以外では**古い記録を消す**（全域関数）。ただし記録の不在を実際に保証しているのは
+    据え替えの側 — 呼び手（`export_series`）は常に空の作業席を渡し、`swap_into_place` は元の
+    中身を 1 つも引き継がないディレクトリ丸ごとの rename なので、i4 で採った系列を別 dtype で
+    採り直せば前回の記録は据え替えで消える。したがって下の `unlink` は呼び手の経路では必ず
+    no-op で、staged を経由しない呼び手（テスト・将来の直書き）への防御として残す。
     """
     from . import calib
 
@@ -1977,7 +1979,7 @@ def _fake_quant_i4(
 
     i4 を **block 内に絞る**のは聴感裁定 2026-08-23 の帰属結果。block 外の 5 本
     （`in_proj` / `out_proj` / `cond_module.{0,2,4}`）は校正の駆動が stage 単位である都合で
-    GPTQ に載らず素の RTN i4 で丸まっていたが、それが w4 席のこもりの一因と実測で確定した
+    GPTQ に載らず素の RTN i4 で丸まっていたが、それが i8+dit4 席のこもりの一因と実測で確定した
     （残る 1 軸は校正コーパスの汎化 — {@link irodori.calib_cases}）。
 
     さらに **adaLN 144 本も i8 へ戻す**（同 2026-08-23 の聴感裁定 — A/B sim で「読み上げ方が
@@ -1989,7 +1991,7 @@ def _fake_quant_i4(
     2 つの述語は「block 内 − adaLN」を境に**排他に**割る（`quantize.py` の
     混成 MUST）。`dit` は `TextToLatentRFDiT` **丸ごと**（backbone / projector / speaker /
     duration のコピーを内側に持つ）なので、block の外はどれもここで i8 に落ちる — これは配布の
-    quant 席 `w4` が他 7 役に i8 系列のバイトを充てるのと同じ条件で、**校正入力を配布条件へ
+    quant 席 `i8+dit4` が他 7 役に i8 系列のバイトを充てるのと同じ条件で、**校正入力を配布条件へ
     合わせる**ための要（`irodori.distribution.IRODORI_QUANT_SEATS`）。
 
     NOTE（遅延 import）: `irodori.calib` は `irodori.pipeline_ref` 経由でこのモジュールを
@@ -2129,19 +2131,24 @@ def fake_quant(
         return FakeQuantResult(*_fake_quant_i4(modules, calib_plan))
     reports: dict[str, str] = {}
     scales: dict[str, Mapping[str, torch.Tensor]] = {}
+    rounded = 0
     for name, module in sorted(modules.items()):
         if dtype != "i8":
-            reports[name] = f"格納 f16 へ丸めた — {round_weights_to_f16(module).describe()}"
+            report = round_weights_to_f16(module)
+            rounded += report.parameters + report.buffers
+            reports[name] = f"格納 f16 へ丸めた — {report.describe()}"
         elif _has_quantizable_weights(module):
             int8 = fake_quant_int8(module)
             scales[name] = int8.scales
             reports[name] = f"格納 i8 へ丸めた — {int8.describe()}"
         else:
             reports[name] = "格納 f32 のまま（per-channel の対象型を持たない）"
-    for name, report in reports.items():
-        print(f"[fake-quant] {name}: {report}", flush=True)
+    for name, report_line in reports.items():
+        print(f"[fake-quant] {name}: {report_line}", flush=True)
     if dtype == "i8" and not scales:
         raise SystemExit("格納 i8 を指定したが per-channel 量子化できたモジュールが 1 本も無い")
+    if dtype != "i8" and rounded == 0:
+        raise SystemExit(f"格納 {dtype} を指定したが丸めた重みが 1 本も無い")
     return FakeQuantResult(reports, scales, {})
 
 
@@ -2156,7 +2163,15 @@ def export_series(
     calib_steps: int | None = None,
     no_calib: bool = False,
 ) -> dict[str, Any]:
-    """IR コンテナと golden io を書き、要約を返す。"""
+    """IR コンテナと golden io を書き、要約を返す。
+
+    `targets` が絞るのは**書き出しだけ**（末尾の書き出しループ）。前提資産と参照計算は
+    常に全量走る — 実 latent（`build_real_speaker_cases`）の要求も、speaker / duration /
+    DiT の torch forward も、`targets` に依らない。鎖の下流だけを焼き直せる形にしないのは
+    意図的で、「下流を焼くと上流も必ず焼き直される」性質があるからこそ golden 間の整合が
+    構造的に保たれ、恒真化の門（`_sanity` / `_norm_divergence` / `_dit_uncond_divergence`）を
+    通らない実行経路が生まれない。
+    """
     source = IrodoriSource(source_dir)
     text_config, model_config = read_configs(model_dir)
     if str(model_config["pretrained_projector_type"]) != "residual_mlp":
@@ -2457,7 +2472,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         "--target",
         action="append",
         choices=TARGETS,
-        help="書き出すターゲット（繰り返し指定可。既定は --dtype ごとの全て）",
+        help="**書き出しだけ**を絞る（繰り返し指定可。既定は --dtype ごとの全て）。前提資産"
+        "（step 5 の実 latent）も参照計算（speaker / duration / DiT の torch forward）も常に"
+        "全量走る — 所要時間は 1 ターゲットでも変わらない",
     )
     parser.add_argument(
         "--calib-steps",

@@ -51,14 +51,14 @@ SBV2_TEXT_ENCODER_LICENSE = "cc-by-sa-4.0"
 SBV2_DEMO_TEXT = "こんにちは、これはテストです。"
 
 #: quant ごとの**丸め方**（manifest に無い事実 — 表が持つのは「どの席がどの格納 dtype か」まで
-#: で、その dtype をどう作ったか〈per-tensor RTN / GPTQ 校正 / group-32〉は台本の知識）。
+#: で、その dtype をどう作ったか〈per-channel RTN / GPTQ 校正 / group-32〉は台本の知識）。
 #: 値は箇条 1 つぶんの行の並び。先頭行は quant 名に続く本文で、2 行目以降は Markdown の
 #: 継続行なので自分でインデントを持つ（`attribution` と同じ「行そのもの」の持ち方）。
 #:
 #: 既定マークは書かない — 既定は manifest の `defaultQuant` から引く（{@link _sbv2_quants}）。
 #: ここに書くと、既定が動いたときに表と説明が別々に嘘をつく。
 SBV2_QUANT_ROUNDING: Mapping[str, tuple[str, ...]] = {
-    "i8": ("every weight in `i8`, rounded per tensor (plain RTN).",),
+    "i8": ("every weight in `i8`, rounded per output channel (plain RTN).",),
     "i8+bert4": (
         "`text_encoder` in `i4` group-32: its linear layers rounded with **GPTQ",
         "  calibration** (a 48-sentence Japanese corpus), its embedding table plain RTN.",

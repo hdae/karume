@@ -303,8 +303,18 @@ _SBV2_KNOBS: Mapping[str, Any] = {
     "lengthScale": 1.25,
 }
 
+#: `symbols.json` のモデル固有欄。**実重み（44100 / 512）とは別の数**にしてある — 組み立てが
+#: config.json と突き合わせているのか、実物の数を焼き込んでいるのかを値で見分けるため。
+_SBV2_SAMPLING_RATE = 22050
+_SBV2_HOP_LENGTH = 256
+
 _SBV2_SYMBOLS = json.dumps(
-    {"defaults": dict(_SBV2_KNOBS), "bertHiddenFromEnd": _SBV2_BERT_FROM_END},
+    {
+        "defaults": dict(_SBV2_KNOBS),
+        "bertHiddenFromEnd": _SBV2_BERT_FROM_END,
+        "samplingRate": _SBV2_SAMPLING_RATE,
+        "hopLength": _SBV2_HOP_LENGTH,
+    },
     ensure_ascii=False,
 ).encode("utf-8")
 
@@ -321,6 +331,8 @@ _SBV2_CONFIG: Mapping[str, Any] = {
         "n_speakers": 2,
         "num_styles": 3,
         "style2id": {"Neutral": 0, "Sleepy": 1, "Shout": 2},
+        "sampling_rate": _SBV2_SAMPLING_RATE,
+        "hop_length": _SBV2_HOP_LENGTH,
     },
     "model": {"gin_channels": _SBV2_GIN_CHANNELS},
 }
@@ -510,6 +522,17 @@ class TestSbv2StyleVectors:
         sources = _build_sbv2_sources(tmp_path)
         np.save(sources.model / "style_vectors.npy", np.zeros(256, dtype=np.float32))
         with pytest.raises(DistError, match=r"\[スタイル数, 256\] でない"):
+            sbv2_style_vectors(sources.model, _SBV2_CONFIG)
+
+    def test_it_stops_when_the_table_is_not_256_wide(self, tmp_path: Path) -> None:
+        """行数だけ合った幅違いの表は、配布形が緑で組み上がり利用者の手元で落ちる形。
+
+        同じ `.npy` を読む `sbv2.export.style_vector` は幅を落とすので、ここが素通りすると
+        1 つの資産に対する受理集合が台本間で食い違う。
+        """
+        sources = _build_sbv2_sources(tmp_path)
+        np.save(sources.model / "style_vectors.npy", np.zeros((3, 128), dtype=np.float32))
+        with pytest.raises(DistError, match=r"\(3, 128\) が \[スタイル数, 256\] でない"):
             sbv2_style_vectors(sources.model, _SBV2_CONFIG)
 
 
@@ -1070,6 +1093,59 @@ class TestSbv2BertHiddenGate:
             _assemble_sbv2(sources, tmp_path / "out")
 
 
+class TestSbv2SymbolsModelFields:
+    """`symbols.json` の**モデル固有欄**が今配っているモデルの config と一致すること。
+
+    デモ資産の書き先はモデル名を持たない 1 か所固定なので、別モデルの資産が残っている木で
+    組み立てると `samplingRate` だけが別値のまま配られる（TS 側は `generate()` の戻り
+    `sampleRate` にそのまま載せるので**沈黙**する）。
+    """
+
+    @staticmethod
+    def _symbols(**overrides: Any) -> bytes:
+        payload = {
+            "defaults": dict(_SBV2_KNOBS),
+            "bertHiddenFromEnd": _SBV2_BERT_FROM_END,
+            "samplingRate": _SBV2_SAMPLING_RATE,
+            "hopLength": _SBV2_HOP_LENGTH,
+            **overrides,
+        }
+        return json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+    def test_the_matching_pair_passes(self, tmp_path: Path) -> None:
+        sources = _build_sbv2_sources(tmp_path, symbols=self._symbols())
+
+        assert _assemble_sbv2(sources, tmp_path / "out")["models"][SBV2_DEFAULT_MODEL]
+
+    def test_it_stops_when_the_sampling_rate_disagrees_with_the_config(
+        self, tmp_path: Path
+    ) -> None:
+        sources = _build_sbv2_sources(tmp_path, symbols=self._symbols(samplingRate=44100))
+        out_dir = tmp_path / "out"
+
+        with pytest.raises(DistError, match=r"samplingRate: symbols.json=44100"):
+            _assemble_sbv2(sources, out_dir)
+        # 検査は配置の前 — 途中の配布形を 1 ファイルも残さない。
+        assert not out_dir.exists()
+
+    def test_it_stops_when_the_hop_length_disagrees_with_the_config(self, tmp_path: Path) -> None:
+        sources = _build_sbv2_sources(tmp_path, symbols=self._symbols(hopLength=512))
+
+        with pytest.raises(DistError, match=r"hopLength: symbols.json=512"):
+            _assemble_sbv2(sources, tmp_path / "out")
+
+    def test_it_stops_when_the_field_is_missing_entirely(self, tmp_path: Path) -> None:
+        """欄の欠落は「古い `sbv2.demo assets`」— 突合できない形を通さない。"""
+        payload = json.loads(self._symbols())
+        del payload["samplingRate"]
+        sources = _build_sbv2_sources(
+            tmp_path, symbols=json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        )
+
+        with pytest.raises(DistError, match=r"samplingRate: symbols.json=None"):
+            _assemble_sbv2(sources, tmp_path / "out")
+
+
 class TestSbv2Manifest:
     def test_it_writes_the_envelope_of_adr_0041(self, sbv2_assembled) -> None:
         out_dir, manifest = sbv2_assembled
@@ -1360,7 +1436,13 @@ class TestSbv2Cli:
     def _sources(tmp_path: Path, model: str, offset: float = 0.0):
         knobs = TestSbv2KnobDefaults._package_knobs()
         symbols = json.dumps(
-            {"defaults": knobs, "bertHiddenFromEnd": _SBV2_BERT_FROM_END}, ensure_ascii=False
+            {
+                "defaults": knobs,
+                "bertHiddenFromEnd": _SBV2_BERT_FROM_END,
+                "samplingRate": _SBV2_SAMPLING_RATE,
+                "hopLength": _SBV2_HOP_LENGTH,
+            },
+            ensure_ascii=False,
         ).encode("utf-8")
         return knobs, _build_sbv2_sources(tmp_path, model=model, symbols=symbols, offset=offset)
 

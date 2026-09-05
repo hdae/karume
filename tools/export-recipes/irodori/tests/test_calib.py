@@ -40,6 +40,7 @@ from irodori import calib
 from irodori import export as ir
 from irodori import patch as ir_patch
 from irodori.calib_cases import CALIB_CASES
+from karume.artifacts import staged_publication
 from karume.quantize import channel_scale, quantize_to_int8
 
 #: 量子化軸（= group 長）。i4 は端数 group を作らない（ADR 0069 決定 2）。
@@ -827,11 +828,31 @@ class TestCalibProvenance:
         assert record["steps"] == 0
 
     def test_a_stale_record_is_removed_when_the_series_is_retaken(self, tmp_path):
-        """MUST: 全域関数（i4 以外で採り直すと記録だけが前回のまま生き残る）。"""
+        """MUST: 全域関数（staged を経由しない呼び手にも不在を保証する）。"""
         ir._write_calib_provenance("i4", make_plan(), ir.TARGET_DIT, tmp_path)
 
         assert ir._write_calib_provenance("i8", None, ir.TARGET_DIT, tmp_path) is None
         assert not (tmp_path / "calib_provenance.json").exists()
+
+    def test_the_record_does_not_survive_a_staged_retake(self, tmp_path):
+        """本番の呼び方（作業席へ書いて丸ごと据える）でも記録が持ち越されない。
+
+        不在を実際に保証しているのは `unlink` ではなく据え替え — `export_series` は常に
+        **空の作業席**を渡し、`swap_into_place` は元の中身を 1 つも引き継がない。i4 で採った
+        系列を i8 で採り直す形をここで通す。
+        """
+        final = tmp_path / "irodori-v4-small-i4" / ir.TARGET_DIT
+
+        with staged_publication(final) as staged:
+            staged.mkdir(parents=True)
+            ir._write_calib_provenance("i4", make_plan(), ir.TARGET_DIT, staged)
+        assert (final / "calib_provenance.json").is_file()
+
+        with staged_publication(final) as staged:
+            staged.mkdir(parents=True)
+            ir._write_calib_provenance("i8", None, ir.TARGET_DIT, staged)
+
+        assert not (final / "calib_provenance.json").exists()
 
     def test_it_is_not_written_for_other_targets(self, tmp_path):
         assert ir._write_calib_provenance("i4", make_plan(), ir.TARGET_BACKBONE, tmp_path) is None

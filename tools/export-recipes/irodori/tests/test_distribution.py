@@ -969,7 +969,7 @@ class TestIrodoriCalibProvenance:
         """`--calib-steps 1` は `method` を `gptq` のまま残す — 予算の欄まで見ないと通る。
 
         格納形は 1 バイトも変わらない（格子は RTN i4 g32 のまま）ので、ヘッダ検査も
-        `verify_dist` もこの資産を「正しい w4 席」と読む。
+        `verify_dist` もこの資産を「正しい i8+dit4 席」と読む。
         """
         sources = _build_irodori_sources(
             tmp_path, calib_provenance={**_IRODORI_CALIB_PROVENANCE, "steps": 1}

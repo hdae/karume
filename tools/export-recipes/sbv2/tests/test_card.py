@@ -246,6 +246,18 @@ class TestSbv2QuantRounding:
         assert "`i8+bert4`" not in notes
         assert "- `i4` —" not in notes
 
+    def test_the_i8_note_names_the_granularity_the_implementation_uses(
+        self, sbv2_card: str
+    ) -> None:
+        """丸めは `karume.quantize.fake_quant_int8` = **出力チャネルごとの** scale（ADR 0019）。
+
+        量子化の文脈で "per tensor" は「テンソル全体で scale 1 個」を指す確立した語なので、
+        そう名乗ると実際より粗い方式を配布物が名乗ることになる。
+        """
+        notes = self._notes(sbv2_card)
+        assert "rounded per output channel (plain RTN)" in notes
+        assert "per tensor" not in notes
+
     def test_the_default_mark_follows_default_quant(self, sbv2_card: str) -> None:
         """既定マークは manifest 由来 — 備考に焼くと、既定が動いたとき表とだけ食い違う。"""
         assert "(default)" not in self._notes(sbv2_card)

@@ -108,6 +108,19 @@ SBV2_TOKENIZER_FILE = "deberta-tokenizer.json"
 SBV2_CONFIG_FILE = "config.json"
 SBV2_STYLE_FILE = "style_vectors.npy"
 
+#: `symbols.json` の**モデル固有欄** → `config.json` の `data` のキー（{@link
+#: assert_symbols_match_model} が突き合わせる対）。`style` / `speaker` は TS 側が読まない
+#: （`symbols.ts` の `JpExtraRules` に欄が無い）ので、突合の対象はこの 2 欄だけ。
+SBV2_SYMBOLS_MODEL_FIELDS: Mapping[str, str] = {
+    "samplingRate": "sampling_rate",
+    "hopLength": "hop_length",
+}
+
+#: スタイルベクトルの幅（`front` のグラフ入力 `style_vec[1,256]` の 256）。同じ値を
+#: `sbv2.export.style_vector` も持つ — 幅が違う表を受理すると配布形は緑で組み上がり、
+#: **利用者の手元で初めて**グラフ入力と食い違って落ちる。
+SBV2_STYLE_WIDTH = 256
+
 #: 話者埋め込みの出所（ckpt のテンソルキー）。`front` / `voice` はどちらも `g[1,512,1]` を
 #: グラフ入力に取るので、**この表が無いと配布形だけではグラフを実行できない**。
 SBV2_SPEAKER_TENSOR = "emb_g.weight"
@@ -663,6 +676,34 @@ def assert_bert_hidden(text_encoder: Path, symbols_path: Path) -> None:
         )
 
 
+def assert_symbols_match_model(symbols_path: Path, config: Mapping[str, Any]) -> None:
+    """`symbols.json` の**モデル固有欄**が、今配っているモデルの `config.json` と一致すること。
+
+    `sbv2.demo assets` は `--model-dir` で渡されたモデルの `hps.data` から `samplingRate` /
+    `hopLength` を焼くのに、書き先は `outputs/misc/sbv2-demo/` **1 か所固定**でモデル名が
+    綴りに入らない。したがって別モデルの資産が残っている木で組み立てると、記号表（モデル
+    非依存）はそのままに、この 2 欄だけが別モデルの値で配られる。
+
+    MUST: `samplingRate` の食い違いは**沈黙する** — TS 側は `Sbv2Pipeline` の `generate()` の
+    戻り `sampleRate` にそのまま載せるので、WAV が誤った周波数で書かれて再生速度と音高が
+    ずれるだけで、例外は出ない（`hopLength` の側は長さ検算が loud に落とす）。
+    """
+    data = _sbv2_section(config, "data")
+    shipped = json.loads(symbols_path.read_text(encoding="utf-8"))
+    if not isinstance(shipped, dict):
+        raise DistError(f"{symbols_path}: 最上位がオブジェクトでない")
+    disagreed = [
+        f"{asset_key}: symbols.json={shipped.get(asset_key)!r} / config.json={expected!r}"
+        for asset_key, config_key in SBV2_SYMBOLS_MODEL_FIELDS.items()
+        if shipped.get(asset_key) != (expected := _sbv2_int(data, config_key, "data"))
+    ]
+    if disagreed:
+        raise DistError(
+            f"{symbols_path} のモデル固有欄が config.json と食い違う（{', '.join(disagreed)}）"
+            " — 別モデルのデモ資産が残っている。`sbv2.demo assets` をこのモデルで採り直す"
+        )
+
+
 def sbv2_config(model_dir: Path) -> Mapping[str, Any]:
     """`config.json` を読む（styles / speakers / 表の行数と列数の正本）。"""
     path = model_dir / SBV2_CONFIG_FILE
@@ -749,14 +790,17 @@ def sbv2_style_vectors(model_dir: Path, config: Mapping[str, Any]) -> np.ndarray
     MUST: 行数が `data.num_styles` と `len(data.style2id)` の**両方**に一致すること。
     スタイルの ID は行番号そのものなので、行と名前がずれてもロードも実行も通り、
     **別のスタイルの声が出る**だけで沈黙する（表の行数を合わせる以外に検出手段がない）。
+
+    MUST: 列数も見る（{@link SBV2_STYLE_WIDTH}）— 同じ資産を読む `sbv2.export.style_vector`
+    は幅を落とすので、ここが素通りすると同じ `.npy` に対する受理集合が台本間で食い違う。
     """
     data = _sbv2_section(config, "data")
     path = model_dir / SBV2_STYLE_FILE
     if not path.is_file():
         raise DistError(f"組み立ての入力が無い: {path}")
     table = np.load(path)
-    if table.ndim != 2:
-        raise DistError(f"{path}: 形 {table.shape} が [スタイル数, 256] でない")
+    if table.ndim != 2 or table.shape[1] != SBV2_STYLE_WIDTH:
+        raise DistError(f"{path}: 形 {table.shape} が [スタイル数, {SBV2_STYLE_WIDTH}] でない")
     styles = _sbv2_id_map(data, "style2id")
     num_styles = _sbv2_int(data, "num_styles", "data")
     if table.shape[0] != num_styles or table.shape[0] != len(styles):
@@ -854,6 +898,7 @@ def sbv2_plan(
             assert_sym_provenance(role, source, expectation)
     for role in SBV2_TEXT_ENCODER_ROLES:
         assert_bert_hidden(placements[role], placements["symbols"])
+    assert_symbols_match_model(placements["symbols"], config)
     artifacts = {
         role: Artifact(SBV2_OUTPUT_PATHS[role], source=source)
         for role, source in placements.items()

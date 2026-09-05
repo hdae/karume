@@ -642,3 +642,25 @@ class TestTargetScales:
         wrapper = ex.DecoderGraph(model.quantizer.out_proj, model.decoder)
 
         assert ex._target_scales(ex.TARGET_DECODER, wrapper, {}) == {}
+
+
+class TestFakeQuant:
+    """MUST: 「格納 dtype を指定したのに 1 本も丸まっていない」を沈黙させない。"""
+
+    def test_f16_rounds_the_model_it_is_handed(self):
+        with torch.random.fork_rng():
+            torch.manual_seed(0)
+            model = TinyCodec(weight_norm=False)
+
+            result = ex._fake_quant("f16", model)
+
+            assert result.report is not None
+            assert all(
+                torch.equal(tensor, tensor.to(torch.float16).to(torch.float32))
+                for tensor in model.parameters()
+            )
+
+    def test_f16_refuses_a_model_with_nothing_to_round(self):
+        """入口に「モジュール 0 本」の門が無い側なので、丸めた本数そのものを見る。"""
+        with pytest.raises(SystemExit, match="丸めた重みが 1 本も無い"):
+            ex._fake_quant("f16", nn.Identity())

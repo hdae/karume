@@ -720,6 +720,16 @@ class TestWeightDtypeSeries:
         with pytest.raises(SystemExit, match="1 本も無い"):
             ir.fake_quant("f16", {})
 
+    def test_f16_refuses_a_set_where_nothing_was_actually_rounded(self):
+        """入口の「モジュール 0 本」とは別の穴 — **モジュールは在るが丸めた本数が 0**。
+
+        docstring が名乗る「総数 0 は落とす」は i8 だけの門だったので、f16 は 1 本も丸めずに
+        素通りできた（現行の 9 モジュールは必ず f32 パラメータを持つので今は到達しないが、
+        門としては立っていなかった）。
+        """
+        with pytest.raises(SystemExit, match="丸めた重みが 1 本も無い"):
+            ir.fake_quant("f16", {"text_norm": nn.Identity()})
+
     def test_i8_quantizes_only_the_per_channel_types(self):
         """MUST: i8 が触るのは `QUANT_CHANNEL_AXES` の型の `weight` だけ（ADR 0019）。
 

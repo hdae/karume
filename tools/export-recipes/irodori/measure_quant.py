@@ -6,7 +6,7 @@
 
     **S（フレーム数）は動くか** — duration を i8 にすると発話長が動きうる（SBV2 w8 の
     w_ceil 198→196 と同じ軸・ADR 0029）。latent 門の「S / forwards 完全一致」が壊れるなら、
-    配布形の w8 席は混成（duration だけ据え置き）にする必要がある（ADR 0050 決定 6）。
+    配布形の i8 席は混成（duration だけ据え置き）にする必要がある（ADR 0050 決定 6）。
 
     cd tools/export-recipes
     uv run --with descript-audiotools --with einops --with 'transformers==5.14.1' \

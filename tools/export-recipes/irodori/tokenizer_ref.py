@@ -165,7 +165,7 @@ ENCODE_CASES: tuple[tuple[str, str, str], ...] = (
     (
         "combining-dakuten",
         "k: 結合文字 U+3099 と NFKC の相互作用（か + U+3099 → が）",
-        "がっこいいじゃんけん",
+        "か\u3099っこいいし\u3099ゃんけん",
     ),
     (
         "halfwidth-kana",
@@ -224,7 +224,7 @@ CAPTION_CASES: tuple[tuple[str, str, str], ...] = (
     (
         "caption-surrounding-space",
         "strip は前後の空白だけ — 中の全角空白は caption では残る（normalize なら消える）",
-        "　明るい　声　",
+        "\u3000明るい\u3000声\u3000",
     ),
     (
         "caption-official",
@@ -269,7 +269,7 @@ NORMALIZE_CASES: tuple[tuple[str, str, str], ...] = (
     (
         "ideographic-space",
         "SIMPLE: 全角空白 U+3000 削除（NFKC の前なので半角化されない）",
-        "前　後ろ",
+        "前\u3000後ろ",
     ),
     ("question-bang", "SIMPLE: ？ → ? / ！ → !", "本当？そうだ！"),
     ("heart", "SIMPLE: ♥ → ♡", "だいすき♥"),
@@ -305,7 +305,7 @@ NORMALIZE_CASES: tuple[tuple[str, str, str], ...] = (
     ("nfkc-halfwidth-kana", "NFKC: 半角カナ + 濁点 → 全角合成", "ｶﾞﾝﾊﾞｬﾁ"),
     ("nfkc-square", "NFKC: 組文字 ㈱ ℃ ㌔ の分解", "㈱と℃と㌔"),
     ("nfkc-roman", "NFKC: ローマ数字 Ⅻ と合字 ﬁ と分数 ½", "Ⅻとﬁと½"),
-    ("nfkc-combining", "NFKC: か + U+3099 → が（結合文字の合成）", "がっこいい"),
+    ("nfkc-combining", "NFKC: か + U+3099 → が（結合文字の合成）", "か\u3099っこいい"),
     ("nfkc-dakuten-alone", "NFKC: 単独の濁点 U+309B は空白 + 結合文字へ分解される", "あ゛い"),
     ("dots-three", "末尾: ... → …", "そうですね..."),
     ("dots-two", "末尾: .. → …", "そうですね.."),
@@ -313,7 +313,7 @@ NORMALIZE_CASES: tuple[tuple[str, str, str], ...] = (
     (
         "combined",
         "複合: 全角空白 + ？ + ダッシュ + 括弧 + NFKC + ... が 1 本の文で重なる",
-        "「本当に　そうなの？―ＡＢＣ...」",
+        "「本当に\u3000そうなの？―ＡＢＣ...」",
     ),
 )
 

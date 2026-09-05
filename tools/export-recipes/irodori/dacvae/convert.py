@@ -35,12 +35,18 @@ IR export の入力素材として扱える形に**中身を変えずに**詰め
 書いた直後に `verify.assert_reader_layout` でリーダ規則を写した検査を通す。
 なお本チェックポイントは全 F32 なので整列制約は自明に満たされるが、検査は無条件で通す。
 
+書き先は**作業席**で、門を全部通ってから正規 path へ据える（ADR 0052 — 他の書き手と同じ
+規律）。出力先が手置き資産と同居するディレクトリなので、据え替えは
+{@link karume.artifacts.staged_publication} の**ファイル単位**を 2 回（`weights.safetensors` /
+`metadata.json`）— ディレクトリ単位で据えると隣の `weights.pth` まで据え替え対象になる。
+
 ## 自己検証
 
-この台本は資産依存の一回性ユーティリティなので pytest の門は持たない。かわりに変換の直後に
-**全テンソルを safetensors 側から読み直してバイト一致**を確認し（`safetensors.safe_open` —
-書いた実装とは別実装のリーダで読む）、一致件数と出力の sha256 を要約に出す。ここが落ちたら
-出力は信用しない。
+実重みの変換は手動（一回性ユーティリティ）だが、資産に依存しない部分は
+`dacvae/tests/test_convert.py` が縛る。実走側では変換の直後に**全テンソルを safetensors 側から
+読み直してバイト一致**を確認し（`safetensors.safe_open` — 書いた実装とは別実装のリーダで
+読む）、一致件数と出力の sha256 を要約に出す。ここが落ちたら作業席ごと捨てられ、正規 path は
+1 バイトも動かない。
 """
 
 from __future__ import annotations
@@ -55,6 +61,7 @@ import torch
 from safetensors import safe_open
 
 from _shared.paths import INPUTS_ROOT
+from karume.artifacts import staged_publication
 from karume.emit import _save_ordered, _write_order
 from karume.verify import assert_reader_layout
 
@@ -165,23 +172,29 @@ def convert(ckpt: Path, out: Path | None = None) -> dict[str, object]:
     # detach は保険（weights_only=True の読み込みは requires_grad を持たない）。contiguous は
     # writer が numpy 経由で生バイトを書く前提。どちらも値は変えない。
     tensors = {key: value.detach().contiguous() for key, value in state_dict.items()}
-    _save_ordered(
-        target,
-        tensors,
-        _write_order(tensors),
-        {
-            SOURCE_FILE_KEY: ckpt.name,
-            SOURCE_SHA256_KEY: source_sha256,
-            SOURCE_METADATA_KEY: metadata_text,
-        },
-    )
-    assert_reader_layout(target)
-    matched = _assert_byte_identical(target, tensors)
-
-    metadata_path.write_text(
-        json.dumps(metadata, ensure_ascii=False, indent=1, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    # MUST: 門を通ってから据える（ADR 0052）。出力先は**手置き資産と同居する**
+    # `inputs/<family>/<name>/` なので、ディレクトリ単位ではなく**ファイル単位**で 2 回据える
+    # （ディレクトリごと据え替えると隣の `weights.pth` まで据え替え対象になる）。
+    with (
+        staged_publication(target) as staged_weights,
+        staged_publication(metadata_path) as staged_metadata,
+    ):
+        _save_ordered(
+            staged_weights,
+            tensors,
+            _write_order(tensors),
+            {
+                SOURCE_FILE_KEY: ckpt.name,
+                SOURCE_SHA256_KEY: source_sha256,
+                SOURCE_METADATA_KEY: metadata_text,
+            },
+        )
+        assert_reader_layout(staged_weights)
+        matched = _assert_byte_identical(staged_weights, tensors)
+        staged_metadata.write_text(
+            json.dumps(metadata, ensure_ascii=False, indent=1, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
     return {
         "source": str(ckpt),
         "source_sha256": source_sha256,
