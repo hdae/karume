@@ -4,8 +4,10 @@ Karume の VAE decoder のグラフは**解像度に対して構造不変**な�
 `model.safetensors` はノード列・重みバイトまで完全一致 —
 `docs/research/2026-08-03-dynres-vae-tiling.md` §1.2）、512px 用資産を latent 64×64 の
 **タイル decoder** としてそのまま使い、切り出し / ブレンド / 貼り付けだけをホストで行える。
-その「ホスト側の数の正」がここで、TS 実装（`examples/anima/host/tiling.ts`）は
-`packages/runtime/tests/e2e_anima_tiling_test.ts` でこのフィクスチャと突き合わせる。
+その「ホスト側の数の正」がここで、TS 実装は `packages/models/src/anima/tiling.ts`。
+このフィクスチャと突き合わせる Deno 側の E2E は**まだこのリポへ移植されていない**（幾何の
+一致は Python 側 `MIRRORED_STARTS` と TS 側 `packages/models/tests/anima_tiling_test.ts` の
+`AXIS_STARTS` の二重凍結で守っている）。
 
 MUST: `vae.enable_tiling()` を**呼ばない**。上流（`autoencoder_kl_qwenimage.tiled_decode`）は
 `range(0, H, stride)` で走査するので最後のタイルが短くなり、固定形のタイル decoder では
@@ -53,7 +55,6 @@ from karume.quantize import round_weights_to_f16
 
 from .resolution import format_resolution, parse_resolution, resolution_meta
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_REPO = "circlestone-labs/Anima-Base-v1.0-Diffusers"
 #: 入力 latent を借りる参照フィクスチャ
 #: （`python -m anima.pipeline_ref --dtype f16 --resolution 1024`）。
@@ -281,7 +282,7 @@ def main() -> None:
         raise SystemExit(
             f"入力 latent {args.latents} が無い — 先に `python -m anima.pipeline_ref --dtype f16 "
             f"--resolution {args.resolution} …` でパイプライン参照を採る"
-            "（examples/anima/README.md の資産表）"
+            "（tools/export-recipes/anima/README.md の tiling 節）"
         )
     source = load_file(str(args.latents))
     latents = source["latents_denorm"].to(torch.float32)

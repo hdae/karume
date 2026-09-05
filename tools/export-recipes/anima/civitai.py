@@ -63,8 +63,15 @@ AIR_PATTERN = re.compile(
 #: モデルページの path（`/models/<id>` + 任意のスラグ）。版は query の `modelVersionId`。
 MODEL_PATH_PATTERN = re.compile(r"/models/(?P<model>\d+)(?:/[^/]*)?/?")
 
-#: 配布名の受理集合（ADR 0077 — `karume.dist` の `assert_model_name` と同じ集合）。
-MODEL_NAME_PATTERN = re.compile(r"[A-Za-z0-9._-]+")
+#: 配布名の受理集合（ADR 0077 — `karume.dist` の `MODEL_NAME_RE` の**逐語の写し**）。
+#:
+#: MUST: 写しにするのは上の MUST（torch を import しない）から — `karume.dist` を import すると
+#: `karume/__init__.py` 経由で `karume.convert` が torch を引く（2026-09-05 実測）ので、正本を
+#: 直接呼べない。正本が規則を足したらここも同じ日に直す。
+MODEL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9._-]*$")
+
+#: 配布名に使えない予約名（`karume.dist` の `SHARED_DIRNAME` — 共有ファイルの席と衝突する）。
+RESERVED_MODEL_NAME = "shared"
 
 #: 導出名から落とすファミリ名（`WAI-ANIMA` → `wai` — 前置の `anima-` と二重にしない）。
 FAMILY_TOKEN = "anima"
@@ -140,8 +147,14 @@ def _slug(text: str) -> str:
 
 def _assert_name(name: str) -> str:
     """配布名として通る綴りかを最後に確かめる（ADR 0077 の受理集合）。"""
-    if MODEL_NAME_PATTERN.fullmatch(name) is None:
-        raise SystemExit(f"配布名に使えない文字がある: {name}（受理集合: A-Za-z0-9._-）")
+    if MODEL_NAME_PATTERN.match(name) is None:
+        raise SystemExit(
+            f"配布名に使えない文字がある: {name}（受理集合: A-Za-z0-9._- ・先頭のドット不可）"
+        )
+    if name == RESERVED_MODEL_NAME:
+        raise SystemExit(
+            f"配布名に '{RESERVED_MODEL_NAME}' は使えない（共有ファイルの席と衝突する）"
+        )
     return name
 
 

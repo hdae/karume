@@ -75,6 +75,8 @@ if TYPE_CHECKING:
         pt: PtSummary
         configs: dict[str, ConfigSummary]
         gates: dict[str, str]
+        #: 赤だった門のラベル（判定の正本 — 表示文字列から嗅ぎ直さないための席）。
+        failed: list[str]
         inject: str | None
 
 
@@ -201,9 +203,25 @@ def build_summary(
         }
 
     gates: dict[str, str] = {}
-    gates[f"P̃ 行 peak/rms の median ≤ {PT_MEDIAN_GATE:g}"] = (
-        f"median {pt['median']:.2f} → {'OK' if pt['median'] <= PT_MEDIAN_GATE else 'NG'}"
-        f"（p99 {pt['p99']:.2f} / max {pt['max']:.2f}）"
+    failed: list[str] = []
+
+    def gate(label: str, ok: bool, verdict: str) -> None:
+        """門を 1 つ記録する（判定は**真偽で持ち**、`verdict` はその表示形）。
+
+        MUST: 赤の集計を文字列から嗅ぎ直さない — 判定はここで一度だけ決め、呼び手
+        （`measure_quant.main`）は {@link Summary} の `failed` を読む。文字列の中の `NG` は
+        書式（先頭 / 末尾 / 括弧付き）が門ごとに違うので、後から拾うと取り逃す。
+        """
+        gates[label] = verdict
+        if not ok:
+            failed.append(label)
+
+    pt_ok = pt["median"] <= PT_MEDIAN_GATE
+    gate(
+        f"P̃ 行 peak/rms の median ≤ {PT_MEDIAN_GATE:g}",
+        pt_ok,
+        f"median {pt['median']:.2f} → {'OK' if pt_ok else 'NG'}"
+        f"（p99 {pt['p99']:.2f} / max {pt['max']:.2f}）",
     )
     for name in attn_configs:
         # 設計 doc §5.3 の門は「(c) w8a8 に attention を足したときの相対劣化」なので、
@@ -211,9 +229,12 @@ def build_summary(
         if run.diagnostics[name]["linear_act_i8"]:
             series = configs[name]["latent_ratio_vs_baseline"]
             ratio = max(series)
-            gates[f"`{name}` の latent relRMS ≤ {LATENT_RATIO_GATE:g}× (vs {baseline})"] = (
+            ratio_ok = ratio <= LATENT_RATIO_GATE
+            gate(
+                f"`{name}` の latent relRMS ≤ {LATENT_RATIO_GATE:g}× (vs {baseline})",
+                ratio_ok,
                 f"最大 {ratio:.3f}× (step {1 + series.index(ratio)})"
-                f" → {'OK' if ratio <= LATENT_RATIO_GATE else 'NG'}"
+                f" → {'OK' if ratio_ok else 'NG'}",
             )
         else:
             series = configs[name]["latent_ratio_vs_w8"]
@@ -227,9 +248,11 @@ def build_summary(
         diagnostic = run.diagnostics[name]
         if diagnostic["attn_calls_expected"]:
             ok = diagnostic["attn_calls"] == diagnostic["attn_calls_expected"]
-            gates[f"`{name}` の SDPA 発火計数"] = (
+            gate(
+                f"`{name}` の SDPA 発火計数",
+                ok,
                 f"{diagnostic['attn_calls']} / {diagnostic['attn_calls_expected']}"
-                f" → {'OK' if ok else 'NG'}"
+                f" → {'OK' if ok else 'NG'}",
             )
     for name in config_names:
         diagnostic = run.diagnostics[name]
@@ -239,16 +262,24 @@ def build_summary(
         # 丸め前後で 1 要素以上変わった呼び出しの数を直接見る。
         fired, attempts = diagnostic["s16_fired_calls"], diagnostic["s16_rounded_calls"]
         ok = bool(attempts) and fired == attempts
-        gates[f"`{name}` の S f16 丸めが全呼び出しで発火"] = (
+        gate(
+            f"`{name}` の S f16 丸めが全呼び出しで発火",
+            ok,
             f"{fired} / {attempts}（{diagnostic['s16_elements']:,} 要素・"
             f"|S| 最大 {diagnostic['s16_abs_max']:.1f} < f16 上限 65,504）"
-            f" → {'OK' if ok else 'NG'}"
+            f" → {'OK' if ok else 'NG'}",
         )
     for name in attn_configs:
         differs = not torch.equal(latents[f"{name}/{keys[-1]}"], latents[f"{baseline}/{keys[-1]}"])
-        gates[f"`{name}` が `{baseline}` と異なる"] = "OK" if differs else "NG（素通し）"
+        gate(f"`{name}` が `{baseline}` と異なる", differs, "OK" if differs else "NG（素通し）")
 
-    return {"pt": pt, "configs": configs, "gates": gates, "inject": args.inject}
+    return {
+        "pt": pt,
+        "configs": configs,
+        "gates": gates,
+        "failed": failed,
+        "inject": args.inject,
+    }
 
 
 def _group_by(stats: dict[str, AttnStat], key) -> dict[str, list[AttnStat]]:

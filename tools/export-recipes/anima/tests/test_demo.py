@@ -28,10 +28,9 @@ from anima import demo as anima_demo
 from anima import pipeline_ref as anima_pipeline
 from anima import text as at
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
-FIXTURE_PATH = (
-    REPO_ROOT / "packages" / "models" / "tests" / "fixtures" / "anima-text" / "parity.json"
-)
+#: 台本が書く席をそのまま読む（置き場の綴りを 2 箇所で独立に導かない — 深さ違いの
+#: `parents[N]` を自前で持つと、モジュールを 1 階層動かした日に片方だけ別の根を指す）。
+FIXTURE_PATH = anima_demo.DEFAULT_FIXTURE_PATH
 FIXTURE: dict[str, Any] = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
 
 TABLES = at.SpmTables.from_json(FIXTURE["t5"]["normalizer"])

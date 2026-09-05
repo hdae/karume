@@ -1843,6 +1843,10 @@ def main() -> None:
     for key, value in summary["gates"].items():
         print(f"[gate] {key}: {value}", flush=True)
     print(f"report OK → {args.out / 'report.md'}", flush=True)
+    # ADR 0019 の品質ゲート①を埋める台本なので、赤は終了コードにも出す（`--w4-screen` 経路と
+    # 同じ強さ）。`--inject` は検出力の実証で**赤にすること自体が目的**なので投げない。
+    if args.inject is None and summary["failed"]:
+        raise AssertionError("品質ゲートが赤: " + " / ".join(summary["failed"]))
 
 
 if __name__ == "__main__":

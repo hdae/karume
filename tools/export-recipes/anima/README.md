@@ -489,9 +489,9 @@ legitimately happen, so that is reported through `FuseReport.is_noop` instead (n
 Every target the LoRA is actually fused into also gets a **`lora_provenance.json`** next to its
 `model.safetensors` (the fused file name and its sha256). The fused weights cannot tell you which
 LoRA went in, so the side that fuses it is the only one that can record the fact; at assembly time
-`anima/distribution.py` compares that record against the sha256 the card prints (`LORA_SHA256` in
-`anima/card.py`) and refuses to build on a mismatch or a missing record. Without the comparison,
-swapping the LoRA and re-exporting would publish the old digest in the distributed README — a
+`anima/distribution.py` compares that record against the sha256 the model declares
+(`AnimaModel.lora_sha256`) and refuses to build on a mismatch or a missing record. Without the
+comparison, swapping the LoRA and re-exporting would assemble against the old digest — a
 64-hex-digit value passes every structural check in `verify_dist`, so nothing else would notice.
 The record stays in the series: the distribution only ever receives the roles the placement table
 names.
@@ -528,7 +528,9 @@ uv run --group anima python -m anima.pipeline_ref --resolution 1344x768 …   # 
   of `latents_init [1,16,H/8,W/8]` and `padding_mask [1,1,H,W]` is the one pitfall, since swapping
   them still gives a matching element count. The metadata carries both the spelling (`resolution`)
   and `width` / `height` — **readers should use the latter** (`resolution` stays an int for square,
-  for compatibility with tests that read existing fixtures).
+  because the field is read as a number out of the written
+  `outputs/series/anima-tiling-<dtype>-<resolution>/tiling.json`; the shape of the field is pinned
+  by `anima/tests/test_resolution.py`).
 - The raw DiT outputs (`noise_cond_*` / `noise_uncond_*`) are kept as well. Without them the Deno
   side **cannot parity-check the CFG and Euler host glue in isolation** and can only see it mixed
   with the DiT's error. On top of that, the σ step is only `sigmas[1] − sigmas[0] = −1.064e-2`, so

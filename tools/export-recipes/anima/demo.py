@@ -38,21 +38,22 @@ import time
 from pathlib import Path
 from typing import Any
 
-from _shared.paths import SERIES_ROOT
+from _shared.paths import REPO_ROOT, SERIES_ROOT
 
 from . import text as at
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_REPO = "circlestone-labs/Anima-Base-v1.0-Diffusers"
 
-#: 実行時資産の置き場（`outputs/` は `.gitignore` 済み）。Deno 側 `examples/anima/text/tokenizer.ts`
-#: が同じ名前を読む。
+#: 実行時資産の置き場（`outputs/` は `.gitignore` 済み）。この 2 本が配布形の `tokenizer/` /
+#: `tokenizer_2/` へ入り（`anima/distribution.py` の `ANIMA_TOKENIZER_SERIES`）、Deno 側は
+#: manifest の asset 経由で `packages/models/src/anima/text/{qwen2,t5}-tokenizer.ts` が読む
+#: （この置き場を直接読む TS は無い）。
 DEFAULT_ASSETS_DIR = SERIES_ROOT / "anima-demo" / "text"
 QWEN_ASSET_FILE = "qwen2-tokenizer.json"
 T5_ASSET_FILE = "t5-tokenizer.json"
 
 #: パリティ用フィクスチャ（**git 管理**）。Deno 側
-#: `packages/runtime/tests/anima_tokenizer_test.ts` が読む。
+#: `packages/models/tests/anima_tokenizer_test.ts` が読む。
 DEFAULT_FIXTURE_PATH = (
     REPO_ROOT / "packages" / "models" / "tests" / "fixtures" / "anima-text" / "parity.json"
 )
@@ -63,6 +64,8 @@ MAX_LENGTH = 512
 
 #: パリティ検証のプロンプト集。**素朴な移植が落ちる境界を 1 件ずつ**持たせる設計で、
 #: 目に見えない文字は必ず \uXXXX で書く（編集の途中で消えたり別物が混ざるため）。
+#: **正規化で別の文字へ潰れる綴りも同じ扱い**にする（`hangul` のジャモ列は可視だが、NFC が
+#: 1 度掛かると合成済み音節に化けて「合成済み × 2」になり、ケースの狙いだけが静かに消える）。
 PROMPT_CASES: list[tuple[str, str, str]] = [
     (
         "tags",
@@ -202,7 +205,7 @@ PROMPT_CASES: list[tuple[str, str, str]] = [
     ),
     (
         "hangul",
-        "각 각",
+        "각 \u1100\u1161\u11a8",
         "ハングル合成済み音節と字母列",
     ),
 ]

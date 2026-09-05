@@ -254,6 +254,21 @@ class TestDeriveModelName:
         with pytest.raises(SystemExit, match="配布名に使えない文字がある"):
             civitai._assert_name("anima-wai v1.0")
 
+    @pytest.mark.parametrize("name", [".hidden", "..", ".x"])
+    def test_it_refuses_a_leading_dot(self, name: str) -> None:
+        """`--name` の受理集合は `karume.dist` と同じ — 先頭のドットは組み立て段で落ちる綴り。
+
+        ここが広いと、誤った `--name` は `civitai.json` と「次に叩くコマンド」の案内まで
+        載ってから、数十分後の `karume dist` で初めて落ちる。
+        """
+        with pytest.raises(SystemExit, match="配布名に使えない文字がある"):
+            civitai._assert_name(name)
+
+    def test_it_refuses_the_shared_seat(self) -> None:
+        """`shared` は配布リポの共有ファイルの席（`karume.dist` の `SHARED_DIRNAME`）。"""
+        with pytest.raises(SystemExit, match="共有ファイルの席と衝突する"):
+            civitai._assert_name("shared")
+
     def test_it_gates_the_derived_name_too(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """正規化が上流の綴りを取りこぼしても、受理集合の門は最後に効く。"""
         monkeypatch.setattr(civitai, "_slug", lambda text: "wai v1.0")

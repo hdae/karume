@@ -1699,9 +1699,17 @@ class TestPipelineEntry:
     def test_it_names_the_default_model_and_its_repository(self) -> None:
         assert OFFICIAL_PIPELINE.default_model == ANIMA_TURBO_MODEL_NAME
         assert EXTRA_PIPELINE.default_model == EXTRA_MODELS[0]
-        for pipeline in (OFFICIAL_PIPELINE, EXTRA_PIPELINE):
-            model = pipeline.default_model
-            assert pipeline.repo_name(model) == f"karume-{model}"
+        assert OFFICIAL_PIPELINE.repo_name(OFFICIAL_PIPELINE.default_model) == "karume-anima"
+        assert EXTRA_PIPELINE.repo_name(EXTRA_PIPELINE.default_model) == "karume-anima-extra"
+
+    def test_the_repository_name_does_not_depend_on_the_model(self) -> None:
+        """1 リポ複数モデル（ADR 0087）— どのモデルを組んでも行き先は 1 つ。
+
+        `karume-<モデル名>` を返していた旧規約では、`--out` を省いた単一モデルの組み立てが
+        実在しないリポ名のディレクトリへ出て、カードの Usage 例にもその名が印字された。
+        """
+        assert {OFFICIAL_PIPELINE.repo_name(model) for model in OFFICIAL_MODELS} == {"karume-anima"}
+        assert {EXTRA_PIPELINE.repo_name(model) for model in EXTRA_MODELS} == {"karume-anima-extra"}
 
     def test_one_attribution_needs_no_choice(self) -> None:
         """帰属は 1 リポにつき 1 通りしかない（選びようがないものを聞かない）。"""

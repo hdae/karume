@@ -143,13 +143,16 @@ class TestBlendIsomorphism:
     """上流の `blend_v` / `blend_h` の**逐語移植**であることを本物との突合で固定する。
 
     `enable_tiling` を使わない（走査形が違う）ぶん、式の同型はここでしか担保できない。
-    """
 
-    qwenimage = pytest.importorskip("diffusers.models.autoencoders.autoencoder_kl_qwenimage")
+    `importorskip` は**各テストの中**で受ける — クラス本体（= モジュール import 時）に置くと
+    `Skipped(allow_module_level=True)` がモジュール全体を skip し、diffusers を要さない幾何の
+    ケースまで CI（既定 sync に diffusers は入らない）で 1 度も走らなくなる。
+    """
 
     @pytest.mark.parametrize("blend", [1, 3, 8])
     def test_blend_v_matches_upstream_bitwise(self, blend):
-        upstream = self.qwenimage.AutoencoderKLQwenImage.blend_v
+        qwenimage = pytest.importorskip("diffusers.models.autoencoders.autoencoder_kl_qwenimage")
+        upstream = qwenimage.AutoencoderKLQwenImage.blend_v
         a = torch.randn(1, 3, 1, 8, 8)
         b = torch.randn(1, 3, 1, 8, 8)
 
@@ -160,7 +163,8 @@ class TestBlendIsomorphism:
 
     @pytest.mark.parametrize("blend", [1, 3, 8])
     def test_blend_h_matches_upstream_bitwise(self, blend):
-        upstream = self.qwenimage.AutoencoderKLQwenImage.blend_h
+        qwenimage = pytest.importorskip("diffusers.models.autoencoders.autoencoder_kl_qwenimage")
+        upstream = qwenimage.AutoencoderKLQwenImage.blend_h
         a = torch.randn(1, 3, 1, 8, 8)
         b = torch.randn(1, 3, 1, 8, 8)
 

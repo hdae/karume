@@ -48,9 +48,10 @@ def format_resolution(width: int, height: int) -> str:
 def resolution_meta(width: int, height: int) -> dict[str, int | str]:
     """フィクスチャ JSON の解像度欄（寸法の正本は `width` / `height`）。
 
-    MUST: 正方の run では `resolution` を**これまでどおり int の一辺**で出す。既存の
-    フィクスチャ（`models/anima-tiling-f16-1024/tiling.json`）を読むテストがこの欄を数として
-    使っており、型を動かすと再生成したときだけ黙って壊れる。非正方には一辺が存在しないので
+    MUST: 正方の run では `resolution` を**これまでどおり int の一辺**で出す。書き出し先
+    （`outputs/series/anima-tiling-<dtype>-<解像度>/tiling.json`）の欄を数として読む席が
+    あり（現物は `anima/tests/test_resolution.py` の `TestResolutionMeta`）、型を動かすと
+    再生成したときだけ黙って壊れる。非正方には一辺が存在しないので
     綴り（`"1344x768"`）を入れる — 読み手は `width` / `height` を見ること。
     """
     return {

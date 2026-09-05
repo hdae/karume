@@ -598,3 +598,74 @@ class TestCalibReport:
 
     def test_a_run_without_calibrated_configs_says_nothing_about_them(self):
         assert mq.CALIB_TARGET not in mq.w4_report_markdown(_payload(calibTargets=None))
+
+
+def _stub_run() -> mq.DitRun:
+    """実重み無しで `main()` を通すための最小 `DitRun`（数値は誰も読まない）。"""
+    return mq.DitRun(latents={}, linear_stats={}, attn_stats={}, diagnostics={}, attention_nodes=[])
+
+
+def _stub_the_measurement(monkeypatch: pytest.MonkeyPatch, *, failed: list[str]) -> None:
+    """`main()` の実測段を全て差し替え、集計だけを与えられた判定に固定する。"""
+    monkeypatch.setattr(mq, "run_dit", lambda _args: _stub_run())
+    monkeypatch.setattr(mq, "write_layer_csv", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(mq, "decode_all", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(mq, "save_images", lambda *_args, **_kwargs: "image_*.png")
+    monkeypatch.setattr(
+        mq,
+        "build_summary",
+        lambda *_args, **_kwargs: {
+            "pt": {},
+            "configs": {},
+            "gates": {label: "… → NG" for label in failed} or {"どれか": "OK"},
+            "failed": failed,
+            "inject": None,
+        },
+    )
+    monkeypatch.setattr(mq, "build_report", lambda *_args, **_kwargs: "")
+
+
+class TestTheQualityGateReachesTheExitCode:
+    """ADR 0019 の品質ゲート①を埋める台本なので、赤は印字だけで終わらない。
+
+    `--w4-screen` 経路（`main_w4`）は最初から `AssertionError` を投げる — 同じ台本の 2 経路で
+    強さが割れていると、自動実行では 10 構成側の赤だけが見落とされる。
+    """
+
+    def test_a_red_gate_ends_the_run_with_an_error(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _stub_the_measurement(monkeypatch, failed=["`w8a8` の SDPA 発火計数"])
+        monkeypatch.setattr(
+            "sys.argv", ["measure_quant.py", "--out", str(tmp_path), "--no-latents"]
+        )
+
+        with pytest.raises(AssertionError, match="品質ゲートが赤"):
+            mq.main()
+
+    def test_an_injected_failure_is_allowed_to_be_red(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`--inject` は検出力の実証で、赤にすること自体が目的の経路（塞がない）。"""
+        _stub_the_measurement(monkeypatch, failed=["`w8a8` の SDPA 発火計数"])
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "measure_quant.py",
+                "--out",
+                str(tmp_path),
+                "--no-latents",
+                "--inject",
+                "drop-attn-quant",
+            ],
+        )
+
+        mq.main()
+
+    def test_all_green_ends_normally(self, tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _stub_the_measurement(monkeypatch, failed=[])
+        monkeypatch.setattr(
+            "sys.argv", ["measure_quant.py", "--out", str(tmp_path), "--no-latents"]
+        )
+
+        mq.main()

@@ -159,6 +159,18 @@ RESOLUTION_NOTE = (
     "Resolution — non-square is fine; each side on a 16 px grid, between 512 and 2048 px:"
 )
 
+#: 上限帯（1920px 超）の注記。**受理集合は縮めない**（2026-09-04 裁定 — 実測なしに配布形の
+#: 自由度を削らない）代わりに、宣言外の位置で走ることをカードに書く。素表の行数を決めている
+#: のは **t 軸**の上限（128 行）で、h / w 軸の宣言（`rope.max_size` = 120 トークン = 1920px）は
+#: それより低い。1920px 超の行は上流と同じ式で引けるので数値の定義はあり、静的形とのビット
+#: 一致も保たれる — 差が出るとすれば学習分布外の位置に由来する品質だけ（未実測）。
+#: `packages/models/src/anima/resolution.ts` の `MAX_LATENT_SIDE` の NOTE と同じ事実の写し。
+RESOLUTION_EXTRAPOLATION_NOTE = (
+    "  // Sides above 1920 px sit outside the range this model declares (its RoPE tables",
+    "  // declare 120 tokens = 1920 px per side); those positions are extrapolated with the",
+    "  // same formula, so what can differ there is the image quality.",
+)
+
 #: CFG の代償を 1 行で言ったもの（**両方のカードで同じ文面** — 定数にしないと、片方の行を
 #: 折り返した日にもう片方のカード本文まで動く）。
 CFG_NOTE = "  // Classifier-free guidance runs a second (uncond) branch — twice the work per step."
@@ -280,6 +292,7 @@ def _usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
         "",
         f"  // steps: {defaults['steps']}, // default — {steps_note}",
         f"  // {RESOLUTION_NOTE}",
+        *RESOLUTION_EXTRAPOLATION_NOTE,
         f"  // resolution: {{ width: {resolution['width']},"
         f" height: {resolution['height']} }}, // default",
         "",

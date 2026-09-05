@@ -216,7 +216,7 @@ class TestDitTokens:
 
         両者は同じ演算列を同じ順で通る（差は「patchify / rope をどちら側で作るか」だけ）
         ので、丸め差すら出ないのが期待値。ここが緩むと実 GPU の主門
-        （`packages/runtime/tests/e2e_anima_dyn_test.ts`）も緩む。
+        （`packages/models/tests/e2e_anima_test.ts` の PNG sha256）も緩む。
         """
         model = _tiny_dit()
         latents, timestep, embeds = _tiny_inputs(model)

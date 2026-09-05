@@ -3,7 +3,7 @@
 IR に載るのは `anima/export.py` が書き出す 4 グラフだけで、その外側 — トークナイズ /
 スケジューラ（sigmas）/ timestep 埋め込み表 / CFG / Euler 更新 / latent 逆正規化 / 512
 パディング — は全てホストコードになる。**そのホスト側の「数の正」がここ**で、Deno 側の
-通しチェーン E2E（`packages/runtime/tests/e2e_anima_test.ts`）は TS で書いたグルーを
+通しチェーン E2E（`packages/models/tests/e2e_anima_test.ts`）は TS で書いたグルーを
 このフィクスチャの対応値と突き合わせてから使う。
 
 正本は diffusers 0.39 の `modular_pipelines/anima/`（encoders.py / before_denoise.py /
@@ -80,7 +80,6 @@ from karume.quantize import fake_quant_int8, round_weights_to_f16
 
 from .resolution import parse_resolution, resolution_meta
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_REPO = "circlestone-labs/Anima-Base-v1.0-Diffusers"
 #: この台本が参照を採れる系列。**`export.py` の `WEIGHT_DTYPES` から引かない** MUST — あちらは
 #: 「資産として書ける格納 dtype」の集合で、i4 のように**参照経路を持たない**（下の 3 表に席が

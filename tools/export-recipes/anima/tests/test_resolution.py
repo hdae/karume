@@ -57,7 +57,7 @@ class TestFormatResolution:
 
 class TestResolutionMeta:
     def test_a_square_keeps_the_int_field(self):
-        """MUST: 正方の `resolution` は int のまま（既存の tiling.json を読むテストの欄）。"""
+        """MUST: 正方の `resolution` は int のまま（`tiling.json` のこの欄を数として読む席）。"""
         assert resolution_meta(1024, 1024) == {"resolution": 1024, "width": 1024, "height": 1024}
 
     def test_a_non_square_spells_the_field(self):

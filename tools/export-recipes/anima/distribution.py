@@ -593,10 +593,10 @@ def shared_rope_base(sources: AnimaSources) -> Path:
 def assert_lora_provenance(sources: AnimaSources, expected: str | None) -> None:
     """transformer 系列が記録した LoRA の sha256 が、モデルの宣言と一致することを確かめる。
 
-    MUST: カードの帰属節（`anima/card.py` の `LORA_SHA256`）は HF に公開される事実なのに、
-    融合後の重みからは焼いた LoRA を復元できない。突き合わせが無いと、LoRA を差し替えて
-    再エクスポートしても古い / 誤った sha256 がそのまま印字される — 値は 64 桁 hex として
-    形式が妥当なので `verify_dist` の構造検査も通り、**沈黙する**。「別々の台本が持つ同じ
+    MUST: モデルの宣言（{@link AnimaModel} の `lora_sha256`）が「どの LoRA を焼いた配布物か」の
+    唯一の記録なのに、融合後の重みからは焼いた LoRA を復元できない。突き合わせが無いと、
+    LoRA を差し替えて再エクスポートしても古い / 誤った sha256 のまま組み上がる — 値は 64 桁
+    hex として形式が妥当なので `verify_dist` の構造検査も通り、**沈黙する**。「別々の台本が持つ同じ
     事実は組み立て時に必ず突き合わせる」（rope_base のバイト同一検査と同じ規律）。
 
     MUST: `expected is None`（素のモデル）では**記録が無いことを検査する**。融合済みの重みと
@@ -788,9 +788,26 @@ def root_files(notice: str) -> dict[str, str]:
     }
 
 
-#: `karume-` prefix はリポ名裁定（2026-08-09）— HF org の代わりの名前空間。
-def _repo_name(model: str) -> str:
-    return f"karume-{model}"
+#: 公式リポの配布名（`karume-` prefix はリポ名裁定 2026-08-09 — HF org の代わりの名前空間）。
+OFFICIAL_REPO_NAME = "karume-anima"
+
+#: 追加学習リポの配布名。
+EXTRA_REPO_NAME = "karume-anima-extra"
+
+
+def _official_repo_name(_model: str) -> str:
+    """公式リポ名（ADR 0087 で 5 変種が 1 リポへ畳まれたのでモデル名を見ない）。
+
+    `Pipeline.repo_name` は「単一モデルを組んだときの既定の出力先」を答える席で、ここが
+    `karume-<モデル名>` を返すと `--out` 省略時の出力先とカードの Usage 例が実在しない
+    リポ名になる。
+    """
+    return OFFICIAL_REPO_NAME
+
+
+def _extra_repo_name(_model: str) -> str:
+    """追加学習リポ名（公式と同じく 1 リポ複数モデル）。"""
+    return EXTRA_REPO_NAME
 
 
 #: `--pipeline anima` の 1 行（公式リポ karume-anima — CircleStone の 5 変種同居・既定 =
@@ -800,7 +817,7 @@ def _repo_name(model: str) -> str:
 #: 1 つに畳むと改変告知がどちらかのリポで嘘になる（§3(d)(i) の要件を落とす）。
 OFFICIAL_PIPELINE = Pipeline(
     default_model=ANIMA_TURBO_MODEL_NAME,
-    repo_name=_repo_name,
+    repo_name=_official_repo_name,
     plan=lambda series_dir, model: anima_dist_plan(series_dir, model, OFFICIAL_MODELS),
     card_profiles={"anima": partial(render_base_card, abbreviations=ANIMA_QUANT_ABBREVIATIONS)},
     # 上流ライセンスの再配布条件（§3）は配布リポ 1 つに掛かるので、読みも組み立ての回数に
@@ -812,7 +829,7 @@ OFFICIAL_PIPELINE = Pipeline(
 #: text stack は公式リポへ越境参照して組む: dist の `--ref-*` 5 指定・runbook の公開順序）。
 EXTRA_PIPELINE = Pipeline(
     default_model="anima-wai-v1.0",
-    repo_name=_repo_name,
+    repo_name=_extra_repo_name,
     plan=lambda series_dir, model: anima_dist_plan(series_dir, model, EXTRA_MODELS),
     card_profiles={
         "anima-extra": partial(render_extra_card, abbreviations=ANIMA_QUANT_ABBREVIATIONS)

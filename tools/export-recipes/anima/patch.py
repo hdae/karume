@@ -489,8 +489,9 @@ def dit_patchify(latents: torch.Tensor, patch_size: tuple[int, int, int]) -> tor
 
     MUST: {@link AnimaDit.forward} の入口（padding channel の連結 + patchify）と**逐語で
     同じ並べ替え**であること。ここが 1 軸でもずれると、S 形グラフの出力は静的グラフと
-    別物になる（形は合うので shape 検査では捕まらない）。TS 側の鏡像とのバイト一致は
-    `packages/runtime/tests/e2e_anima_dyn_test.ts` の「S 形 ≡ 静的グラフ」が実 GPU で押さえる。
+    別物になる（形は合うので shape 検査では捕まらない）。TS 側の鏡像（`patchifyLatents` /
+    `unpatchifyTokens`）は `packages/models/tests/anima_dit_tokens_test.ts` が並べ替えの単体で、
+    通しの数値は `packages/models/tests/e2e_anima_test.ts` の PNG sha256 が実 GPU で押さえる。
     """
     patch_t, patch_h, patch_w = patch_size
     batch, _, height, width = latents.shape

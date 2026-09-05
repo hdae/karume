@@ -11,8 +11,8 @@ H'=W' なら表そのものが同じ値になる（ADR 0034 の検出限界 1）
 別の値にした合成構成）を使い、素表からの再構成が上流 `CosmosRotaryPosEmbed` の出力と
 `torch.equal` で一致することを固定する。実重みは要らない（rope はパラメータもバッファも
 持たない純計算）。TS 側の鏡像（`ropeTables`）は
-`packages/runtime/tests/e2e_anima_nonsquare_test.ts` が
-焼いたフィクスチャとの Uint32 完全一致で押さえる。
+`packages/models/tests/anima_dit_tokens_test.ts` が合成素表での `[t,h,w,t,h,w]` の並べ方と
+天井の拒否で押さえる（焼いたフィクスチャとの突合は**まだこのリポへ移植されていない**）。
 """
 
 from __future__ import annotations

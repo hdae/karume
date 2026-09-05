@@ -37,7 +37,6 @@ from _shared.paths import SERIES_ROOT
 from .patch import dit_rope_tables
 from .resolution import format_resolution
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_REPO = "circlestone-labs/Anima-Base-v1.0-Diffusers"
 DEFAULT_OUT = SERIES_ROOT / "anima-rope-nonsquare"
 SPATIAL_COMPRESSION = 8

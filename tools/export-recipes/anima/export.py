@@ -138,7 +138,6 @@ from karume.shards import resolve_shards
 from . import calib, patch
 from .calib_prompts import CALIB_PROMPTS, DEFAULT_CALIB_PROMPTS, calibration_prompts
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
 #: この recipe が扱う格納 dtype（irodori / deberta と同じく **recipe 固有の集合**）。
 #: core の `karume.emit.WEIGHT_DTYPES` から引かない — core が書ける集合（i4 追加 —
 #: ADR 0069）と anima が系列・検収を持つ集合は別の判断で、結合すると core 側の拡張が
@@ -938,8 +937,8 @@ def _write_lora_provenance(args: argparse.Namespace, target: str, out_dir: Path)
     """焼き込んだ LoRA の帰属（ファイル名 + sha256）を系列へ書き、ファイル名を返す。
 
     融合後の重みからは「どの LoRA を焼いたか」が復元できないので、**焼いた側が事実を書き残す**
-    のが唯一の道。配布 README が印字する帰属（`anima/card.py` の `LORA_SHA256`）は
-    `anima/distribution.py` の `assert_lora_provenance` がこの記録と突き合わせる。
+    のが唯一の道。モデルの宣言（`anima/distribution.py` の `AnimaModel.lora_sha256`）は
+    同ファイルの `assert_lora_provenance` がこの記録と突き合わせる。
 
     書くのは実際に焼いたターゲットだけ（`LORA_PREFIXES` に無いターゲットの系列に置くと
     「このモデルにも焼いた」という事実でない主張になる）。配布形には入らない —
