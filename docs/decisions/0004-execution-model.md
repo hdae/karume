@@ -9,9 +9,9 @@
     per-submit `onSubmittedWorkDone` を廃止し、適応制御の観測窓を flush 単位へ再定義。
   - ③ **fence とバッファ寿命** — ADR [0054](0054-resident-loop-and-fence.md): ResidentTensor /
     BatchScope を第 4 の寿命クラスとして追加し、通常 run の fence を `mapAsync` 1 本へ集約。
-  - ④ **置換予告（2026-09-05・ADR [0093](0093-transient-liveness-packing.md)）**: バッファ管理の
-    **サイズ別プール**は区間 + offset 配置（生存区間の first-fit パッキング）へ置換される。
-    実装完了までは現行のまま。
+  - ④ **置換済み（2026-09-05・ADR [0093](0093-transient-liveness-packing.md)）**: バッファ管理の
+    **サイズ別プール**は区間 + offset 配置（生存区間の first-fit パッキング）へ置換された。
+    `RunArena` は領域の所有と flush-before-destroy だけを持つ。
 - 根拠資料: recon §2/§3/§4（不変条件 14 項目は全て先行実験プロジェクト（以下プロトタイプ）
   の実測障害由来）
 

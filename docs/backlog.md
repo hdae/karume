@@ -20,10 +20,11 @@
    ① C = 中間テンソルの上限 preflight（slot > binding 上限 / 領域 > `maxBufferSize` を確保前に
    ノード名つきで落とす）+ docs の数値訂正 → ② A = recipe の代数書き換え（1×1 conv と bilinear
    upsample の可換性で `cat` を消す・`--verify` の maxdiff 段と 1024² / 2048² golden の再採取を
-   伴う） → ③ B = 中間バッファの静的 liveness パッキング（ADR 0093 は起票済み・土台
-   `packages/runtime/src/runtime/transient-plan.ts` と単体テストは入ったが **`recipe.ts` /
-   `executor.ts` / `estimate.ts` へは未結線**） → ④ 配布門 `BIREFNET_RESOLUTION` の解除・実 GPU
-   実測（VRAM ピーク・時間）・`karume-birefnet-hr` 2048² の公開裁定。
+   伴う） → ③ B = 中間バッファの静的 liveness パッキング（**結線済み 2026-09-05** — ADR 0093
+   Status。C の上限 preflight は同じ計画関数に内蔵。実測 = 1024² の中間 6,283 → 2,020 MiB・2048² は
+   preflight が upsample / cat の 2 本を列挙して落とす〈A で消える〉） → ④ 配布門
+   `BIREFNET_RESOLUTION` の解除・実 GPU 実測（VRAM ピーク・時間）・`karume-birefnet-hr` 2048² の
+   公開裁定。
 
 **残件**:
 

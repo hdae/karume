@@ -1,7 +1,10 @@
 # 0093: 中間バッファ（transient）の静的 liveness パッキング — サイズ別プールから区間 + offset 配置へ
 
-- Status: accepted（2026-09-05 — 網羅レビュー 2026-09-04_62bdbeb の要判断 2 をユーザーが推奨案 a
-  〈A 代数書き換え → B 本 ADR → C 上限 preflight〉で裁定。実測の正本 =
+- Status: implemented（2026-09-05 — 決定 1〜8 を runtime へ結線: `transient-plan.ts` の計画を
+  `recipe.ts` の焼き込み / ミス run・`executor.ts` の backing・`estimate.ts` の見積りが共有し、
+  `RunArena` のプールと `derivePlanSlots` は退役。dispatch の読み書きは `PipelineCache` が WGSL 宣言
+  から採る。裁定は網羅レビュー 2026-09-04_62bdbeb の要判断 2 をユーザーが推奨案 a
+  〈A 代数書き換え → B 本 ADR → C 上限 preflight〉で下したもの。実測の正本 =
   `.claude/reviews/2026-09-04_62bdbeb/B1-design-draft.md` / `findings/module-B1-birefnet-2048.md`）
 - Date: 2026-09-05
 - 関連: ADR [0004](0004-execution-model.md)（バッファ管理「per-run アリーナ（サイズ別プール +
@@ -88,9 +91,12 @@ errorScope 頼み」の起票を閉じる。
 
 ### 6. 診断欄の意味
 
-- `ArenaStats.peakTransientBytes` / `transientBytes` = **生存ピーク**（計画の同時生存バイトの最大）。
-  `allocatedBytes` = 領域の総和 + host / staging。`reuseCount` は計画経路では意味を持たないので 0
-  （欄は据え置き・doc で「領域計画では 0」と明記）。`PlanBackingStats.residentBytes` = 領域の総和。
+- `ArenaStats.peakTransientBytes` = **生存ピーク**（計画の同時生存バイトの最大 —
+  `TransientPlan.peakLiveBytes`）。`transientBytes` = run 末尾に生存している中間 = pin されたグラフ出力の
+  総バイト数。`allocatedBytes` = 領域の総和 + host / staging。`reuseCount` = 先に置かれた別の slot と
+  バイト範囲を共有した slot の本数（`TransientPlan.sharedSlots` — 旧プールの「配り直し回数」に相当し、
+  full-write の故障注入テストが配り直しの発生を確かめる観測点として残す。実装時 2026-09-05 に「0 固定」
+  から改めた）。`PlanBackingStats.residentBytes` = 領域の総和。
 - 「slot の総バイト数 = 非 backed run のプール確保」（footprint 不変の門）は「backed の領域総和 =
   ミス run の領域総和」へ読み替える（同じ計画を使うので恒等）。
 
@@ -113,6 +119,11 @@ state スロットは context 所有（ADR 0066）・codegen 決定性。
 - 見込み（実 IR の模擬・重なり検査済み・first-fit は生存ピークちょうどに到達）: BiRefNet 2048² の
   workspace 23.76 → 7.50 GiB（decoder 末尾の代数書き換え〈レビュー A 案〉と併せて 2.50 GiB）、1024² は
   6.14 → 1.88 GiB（併せて 0.63 GiB）。他家族も同じ規則で縮む（perf ではなくメモリ管理の是正）。
+- 実測（2026-09-05・結線後・RTX 3080 Ti / Deno wgpu Vulkan）: BiRefNet 1024² の中間の領域総和
+  2,020 MiB（生存ピーク 1,920 MiB・領域 5 本・共有 slot 2,060 本・dispatch 2,308）で、見込み
+  1.88 GiB とほぼ一致（差は 256 バイト整列と別領域規則のぶん）。run 時間 1.5〜1.7 s。2048² は
+  計画時 preflight が `'upsample_bilinear2d_20' 3221225472B / 'cat_212' 4026531840B` の 2 本を
+  列挙して落とす（A 案の代数書き換えで消える 2 本 — そのとおり）。
 - 触る面: `packages/runtime/src/runtime/transient-plan.ts`（新設・パッカー）/ `recipe.ts`（`derivePlanSlots`
   → 計画・`createBindGroup` の offset/size・`executeStepRecipe` の確保経路）/ `executor.ts`
   （`#activateBacking` の領域確保・ミス run の領域確保・readback の offset）/ `estimate.ts`
