@@ -128,6 +128,27 @@ const HR_SYNTHETIC_TOLERANCE: Tolerance = { atol: 1e-3, rtol: 0 };
 const HR_REAL_TOLERANCE: Tolerance = { atol: 5e-3, rtol: 0 };
 
 /**
+ * **BiRefNet_HR 2048² / 合成画像**ケースの突合に使う許容誤差（系列 `birefnet-hr-2048` —
+ * recipe パッチ ⑨ + ADR 0093 で実行段が通るようになった 2026-09-05 に新設）。
+ *
+ * 実測（`atol=rtol=0` の素の突合、4 ケース × 出力 1 本 `[1,1,2048,2048]`・RTX 3080 Ti）:
+ *
+ * | ケース  | maxAbs  | maxRel  | \|ref\| 上端 | \|ref\| 最小非ゼロ |
+ * | ------- | ------- | ------- | ------------ | ------------------ |
+ * | checker | 4.29e-5 | 4.92e-6 | 12.121       | 3.61               |
+ * | disc    | 8.60e-4 | 6.33e-3 | 47.904       | 1.06e-3            |
+ * | noise   | 5.72e-5 | 6.62e-6 | 16.170       | 2.51               |
+ * | ramp    | 1.15e-4 | 6.51e-3 | 10.696       | 6.84e-4            |
+ *
+ * atol 4e-3 は実測最悪 8.60e-4（disc）の約 4.7 倍。1024² の 1e-3 より広いのは**値域**（disc の
+ * \|ref\| 上端が 23.1 → 47.9 と 2 倍）で、相対量は 8.60e-4 / 47.9 ≈ 1.8e-5 と 1024² の 2.0e-5 と
+ * 同じ桁。**rtol は 0**（理由は {@link HR_SYNTHETIC_TOLERANCE} と同じ）。二値マスクの不一致は
+ * 4 ケースとも 0。実画像 golden は 2048² では採らない（コーパスが 1024² で resize が恒等に
+ * ならない — 実画像の門は 1024² 系列が持つ）。
+ */
+const HR_2048_SYNTHETIC_TOLERANCE: Tolerance = { atol: 4e-3, rtol: 0 };
+
+/**
  * **Lucida / 合成画像**ケースの突合に使う許容誤差。
  *
  * 実測（`atol=rtol=0` の素の突合、4 ケース × 出力 1 本 `[1,1,1024,1024]`）:
@@ -170,6 +191,26 @@ const LUCIDA_SYNTHETIC_TOLERANCE: Tolerance = { atol: 5e-4, rtol: 0 };
 const LUCIDA_REAL_TOLERANCE: Tolerance = { atol: 3e-2, rtol: 0 };
 
 /**
+ * **Lucida 2048² / 合成画像**ケースの突合に使う許容誤差（系列 `lucida-2048` — 2026-09-05 新設）。
+ *
+ * 実測（`atol=rtol=0` の素の突合、4 ケース × 出力 1 本 `[1,1,2048,2048]`・RTX 3080 Ti）:
+ *
+ * | ケース  | maxAbs  | maxRel  | \|ref\| 上端 | \|ref\| 最小非ゼロ |
+ * | ------- | ------- | ------- | ------------ | ------------------ |
+ * | checker | 3.48e-5 | 4.65e-6 | 13.710       | 2.86               |
+ * | disc    | 2.86e-4 | 8.44e-1 | 16.182       | 3.05e-5            |
+ * | noise   | 5.34e-5 | 1.06e-5 | 13.084       | 9.35e-1            |
+ * | ramp    | 1.39e-4 | 3.89e-5 | 12.868       | 1.43               |
+ *
+ * atol 1.5e-3 は実測最悪 2.86e-4（disc）の約 5.2 倍。1024² の 5e-4 より広いのは 2048² で disc の
+ * 境界画素が増え、\|ref\| が 3.05e-5 まで薄く落ちるところで絶対誤差が積むため（maxRel 0.844 は
+ * その境界画素 — 絶対誤差は 2.9e-4 でしかない）。**rtol は 0**（理由は
+ * {@link HR_SYNTHETIC_TOLERANCE} と同じ）。二値マスクの不一致は 4 ケースとも 0。実画像 golden は
+ * 2048² では採らない（{@link HR_2048_SYNTHETIC_TOLERANCE} と同じ理由）。
+ */
+const LUCIDA_2048_SYNTHETIC_TOLERANCE: Tolerance = { atol: 1.5e-3, rtol: 0 };
+
+/**
  * 二値マスク（`logit > 0` = `sigmoid > 0.5`）が torch と食い違ってよい画素の割合。
  *
  * この門が出力側の tolerance と別に要るのは、**成果物がマスクだから**。tolerance は「値が
@@ -201,8 +242,9 @@ const EXPORT_PREFIX =
   "cd tools/export-recipes && uv run --group birefnet python -m birefnet.export";
 
 /**
- * 実走する系列（どちらも 1024²）。**列挙結果ではなくここで固定する** — 列挙だけに頼ると
- * 生成を一部だけ流した環境でテストが黙って消え、「緑だが未検証」になる。
+ * 実走する系列（モデル × 解像度）。**列挙結果ではなくここで固定する** — 列挙だけに頼ると
+ * 生成を一部だけ流した環境でテストが黙って消え、「緑だが未検証」になる。2048² は実画像 golden を
+ * 持たないので実画像ケースは SKIP になる（`realTolerance` は 1024² の値を形式上共有するが読まれない）。
  */
 const SERIES: readonly Series[] = [
   {
@@ -212,9 +254,21 @@ const SERIES: readonly Series[] = [
     realTolerance: HR_REAL_TOLERANCE,
   },
   {
+    name: "birefnet-hr-2048",
+    generate: `${EXPORT_PREFIX} --resolution 2048`,
+    tolerance: HR_2048_SYNTHETIC_TOLERANCE,
+    realTolerance: HR_REAL_TOLERANCE,
+  },
+  {
     name: "lucida-1024",
     generate: `${EXPORT_PREFIX} --model-dir <リポ>/inputs/birefnet/lucida --real-images`,
     tolerance: LUCIDA_SYNTHETIC_TOLERANCE,
+    realTolerance: LUCIDA_REAL_TOLERANCE,
+  },
+  {
+    name: "lucida-2048",
+    generate: `${EXPORT_PREFIX} --model-dir <リポ>/inputs/birefnet/lucida --resolution 2048`,
+    tolerance: LUCIDA_2048_SYNTHETIC_TOLERANCE,
     realTolerance: LUCIDA_REAL_TOLERANCE,
   },
 ];
