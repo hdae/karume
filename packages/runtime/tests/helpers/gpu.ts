@@ -69,6 +69,24 @@ export const TIMING_ACQUIRE_OPTIONS: { readonly gpuTiming: boolean } = {
  */
 export const ALLOW_NO_GPU: boolean = Deno.env.get("KARUME_ALLOW_NO_GPU") === "1";
 
+/**
+ * 「`shader-f16` 不在での SKIP」を明示的に許可する opt-out（{@link ALLOW_NO_GPU} と同型）。
+ *
+ * MUST: 既定は fail loudly。この feature が無い機では f16 計算変種（ADR 0028）のケースが
+ * 丸ごと消え、書き出しガードを 1 度も検証しないまま verify が緑になる。機を替えた瞬間に
+ * 検証範囲が黙って縮むのを止めるのがこの門（門番は `tests/gpu_gate_test.ts`）。
+ */
+export const ALLOW_NO_SHADER_F16: boolean = Deno.env.get("KARUME_ALLOW_NO_SHADER_F16") === "1";
+
+/**
+ * 「`timestamp-query` 不在での SKIP」を明示的に許可する opt-out（同上）。
+ *
+ * この feature が無い機では GPU 時間診断（ADR 0021）のケースが消えるだけでなく、
+ * `if (keys.length > 0)` で守られたキー検査が**黙って空振り**する（数値だけ見て緑になる）。
+ */
+export const ALLOW_NO_TIMESTAMP_QUERY: boolean =
+  Deno.env.get("KARUME_ALLOW_NO_TIMESTAMP_QUERY") === "1";
+
 if (!GPU_AVAILABLE) {
   console.warn(
     "[karume] GPUAdapter が無いため実 GPU テストを SKIP する（リリース判定は実 GPU 緑が必須）。" +
@@ -78,13 +96,15 @@ if (!GPU_AVAILABLE) {
   if (!SHADER_F16_AVAILABLE) {
     console.warn(
       "[karume] アダプタが 'shader-f16' を列挙しないため f16 計算変種（ADR 0028）の実 GPU " +
-        "テストを SKIP する。既定の f32 経路の検証には影響しない",
+        "テストを SKIP する。既定の f32 経路の検証には影響しない。" +
+        "この機で意図的に通すには KARUME_ALLOW_NO_SHADER_F16=1 を設定する",
     );
   }
   if (!TIMESTAMP_QUERY_AVAILABLE) {
     console.warn(
       "[karume] アダプタが 'timestamp-query' を列挙しないため GPU 時間診断（ADR 0021）の " +
-        "実 GPU テストを SKIP する。数値の検証には影響しない（キー検査だけが落ちる）",
+        "実 GPU テストを SKIP する。数値の検証には影響しない（キー検査だけが落ちる）。" +
+        "この機で意図的に通すには KARUME_ALLOW_NO_TIMESTAMP_QUERY=1 を設定する",
     );
   }
 }

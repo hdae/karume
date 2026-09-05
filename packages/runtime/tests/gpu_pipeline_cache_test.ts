@@ -1,7 +1,7 @@
 import { assert, assertEquals, assertRejects, assertStrictEquals } from "@std/assert";
 import { openModel } from "../src/format/container.ts";
 import { acquireGpu } from "../src/gpu/device.ts";
-import { GpuValidationError } from "../src/gpu/error-scope.ts";
+import { GpuInternalError, GpuValidationError } from "../src/gpu/error-scope.ts";
 import {
   PipelineCache,
   PipelineKeyConflictError,
@@ -19,14 +19,22 @@ type FakeGpu = {
   readonly modules: string[];
   /** 次の popErrorScope が返す検証エラー。差し替えて「失敗 → 再試行で成功」を作る。 */
   scopeError: GPUError | null;
+  /**
+   * 次の popErrorScope が **internal スコープ**で返すエラー。実 GPU では作れない失敗
+   * （シェーダが複雑すぎてコンパイルできない等）を踏むための面。
+   */
+  internalError: GPUError | null;
 };
 
-const createFakeGpu = (scopeError: GPUError | null = null): FakeGpu => {
+const createFakeGpu = (
+  scopeError: GPUError | null = null,
+  internalError: GPUError | null = null,
+): FakeGpu => {
   const calls: string[] = [];
   const modules: string[] = [];
   // 実 device はフィルタに一致したスコープのエラーしか返さないため、フェイクも push された
-  // フィルタを LIFO で追跡し、validation スコープの pop にだけ scopeError を返す（internal
-  // スコープにも同じエラーを返すと、withPipelineScope の internal 優先規則が誤発火する）。
+  // フィルタを LIFO で追跡し、フィルタ別に返し分ける（両方に同じエラーを返すと、
+  // withPipelineScope の internal 優先規則が誤発火する）。
   const filters: string[] = [];
   const device = {
     pushErrorScope: (filter: string): void => {
@@ -36,7 +44,8 @@ const createFakeGpu = (scopeError: GPUError | null = null): FakeGpu => {
     popErrorScope: (): Promise<GPUError | null> => {
       calls.push("pop");
       const filter = filters.pop();
-      return Promise.resolve(filter === "validation" ? fake.scopeError : null);
+      if (filter === "validation") return Promise.resolve(fake.scopeError);
+      return Promise.resolve(filter === "internal" ? fake.internalError : null);
     },
     createShaderModule: (descriptor: { readonly code: string }) => {
       calls.push("createShaderModule");
@@ -48,7 +57,13 @@ const createFakeGpu = (scopeError: GPUError | null = null): FakeGpu => {
       return { id: modules.length, getBindGroupLayout: () => ({ id: modules.length }) };
     },
   };
-  const fake: FakeGpu = { device: device as unknown as GPUDevice, calls, modules, scopeError };
+  const fake: FakeGpu = {
+    device: device as unknown as GPUDevice,
+    calls,
+    modules,
+    scopeError,
+    internalError,
+  };
   return fake;
 };
 
@@ -151,6 +166,43 @@ Deno.test("PipelineCache は errorScope が捕捉した検証エラーを例外�
     () => cache.get("too-large", WGSL_A),
     GpuValidationError,
     "workgroup size exceeds limit",
+  );
+  assertEquals(cache.size, 0);
+});
+
+// GpuInternalError は実 GPU では作れない（internal エラーは実装都合の失敗）ため、この型を
+// 生成する経路はフェイクでしか踏めない。環境の限界（internal）と WGSL の記述不正（validation）
+// の分岐先が違うことが公開面の意味なので、型のマッピングをここで固定する。
+Deno.test("PipelineCache は internal スコープの捕捉を GpuInternalError に変換する", async () => {
+  const internal = { message: "shader too complex" } as unknown as GPUError;
+  const gpu = createFakeGpu(null, internal);
+  const cache = new PipelineCache(gpu.device);
+
+  const error = await assertRejects(() => cache.get("k", WGSL_A), GpuInternalError);
+  assert(error.message.includes("k"), error.message);
+  assert(error.message.includes("shader too complex"), error.message);
+  assertEquals(cache.size, 0, "失敗したエントリは残さない");
+
+  // 積み残しが無いことの裏（2 本とも pop されていれば直後の正常な生成が通る）。
+  gpu.internalError = null;
+  assert(await cache.get("k", WGSL_A) !== undefined);
+});
+
+// 優先順位の門: internal で無効化されたパイプラインを触る後続の操作は**派生の** validation を
+// 立てるので、validation を先に返すと根因の internal が捨てられる。この 2 本同時の形だけが
+// 「internal 優先」を落とす（internal 単独のケースは順序を戻しても緑のまま通る）。
+Deno.test("PipelineCache は internal と validation を同時に捕捉したら internal を返す", async () => {
+  const gpu = createFakeGpu(
+    { message: "derived: pipeline is invalid" } as unknown as GPUError,
+    { message: "shader too complex" } as unknown as GPUError,
+  );
+  const cache = new PipelineCache(gpu.device);
+
+  const error = await assertRejects(() => cache.get("both", WGSL_A), GpuInternalError);
+  assert(error.message.includes("shader too complex"), error.message);
+  assert(
+    !error.message.includes("derived"),
+    `派生の validation が根因を上書きしている: ${error.message}`,
   );
   assertEquals(cache.size, 0);
 });

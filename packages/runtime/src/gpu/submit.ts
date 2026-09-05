@@ -375,6 +375,21 @@ export class SubmitScheduler {
     this.#policy = policy;
     this.#now = now;
     this.#timingEnabled = gpu.gpuTimingEnabled;
+    // MUST: 計測有効時の querySet 容量（チャンクの dispatch 数 × 2）は構築時に検査する。
+    // エンコード時の門（{@link SubmitScheduler.#encodeTimedChunk}）だけだと、実測の裏付けが
+    // 付くまで #chunkSizeLimit が initialChunkSize を返すため、maxChunkSize > 1024 の政策は
+    // 最初の run では落ちず**後の run**で初めて落ちる（公開ノブ `SessionOptions.submitPolicy`
+    // の構成ミスが動作中に化ける）。既定政策（1024 → query 2048 = 上限ちょうど）は通る。
+    if (this.#timingEnabled && policy.maxChunkSize * 2 > MAX_TIMESTAMP_QUERIES) {
+      throw new SubmitPolicyError(
+        `GPU 時間計測が有効な device では SubmitPolicy.maxChunkSize (${policy.maxChunkSize}) が ` +
+          `querySet 容量を超える（query ${
+            policy.maxChunkSize * 2
+          } 件 > ${MAX_TIMESTAMP_QUERIES}）。` +
+          `maxChunkSize を ${MAX_TIMESTAMP_QUERIES / 2} 以下にするか、gpuTiming: false で` +
+          "計測を切ること",
+      );
+    }
   }
 
   /**

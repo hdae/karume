@@ -130,14 +130,19 @@ type LimitCaps = Partial<Record<RequiredLimitKey, number>>;
  * MUST: 仕様上 `maxStorageBufferBindingSize ≤ maxBufferSize`。片方だけ引き上げると
  * requestDevice が丸ごと失敗するため、両者は必ず同時に計画する。
  *
- * `caps` は**テスト専用の絞り**（{@link LIMIT_CAPS}）。要求値を下げるだけなので
- * `maxStorageBufferBindingSize ≤ maxBufferSize` の関係は崩れない。
+ * `caps` は**テスト専用の絞り**（{@link LIMIT_CAPS}）。要求値を下げるだけだが、
+ * `maxBufferSize` を絞る cap は `maxStorageBufferBindingSize` の clamp 元そのものを動かす。
+ * MUST: `maxBufferSize` には cap を**先に**適用し、その値で束縛上限を clamp する。後から
+ * 掛けると `maxBufferSize` だけを絞った caps で計画値が
+ * `maxStorageBufferBindingSize > maxBufferSize` になり、「core 既定機の再現」という
+ * この面の目的が黙って外れる（束縛上限が絞られないままバッファ上限だけ下がる）。
+ * 残りのキーは互いに独立なので、cap の適用順に依らない。
  */
 export const planRequiredLimits = (
   adapterLimits: GPUSupportedLimits,
   caps: LimitCaps = {},
 ): RequiredLimits => {
-  const maxBufferSize = adapterLimits.maxBufferSize;
+  const maxBufferSize = Math.min(adapterLimits.maxBufferSize, caps.maxBufferSize ?? Infinity);
   // Record<RequiredLimitKey, number> の網羅性検査で、キー一覧との同期は型で保証される。
   const planned: Record<RequiredLimitKey, number> = {
     maxBufferSize,
@@ -1094,11 +1099,17 @@ export class ResidentTensor {
    * MUST: 呼ぶのは {@link BatchScope.finish} の**後**。queue の順序は保たれるので値としては
    * 正しいが、batch の内側で呼ぶとフェンスが 1 本増え、しかもこの submit の失敗が batch の
    * errorScope に帰属して原因の切り分けができなくなる。
+   *
+   * MUST: 消失済み device では読まない（{@link assertDeviceUsable} — `write` /
+   * {@link GpuContext.createResident} と同じ門）。`destroy()` 直後の窓（フラグは同期に立つが
+   * `device.lost` の reaction は次のタスク）では破棄済み device 上で staging を確保して copy を
+   * submit してしまい、消失後の `popErrorScope` は null で resolve するので失敗は捕まらない。
    */
   async read(): Promise<ArrayBuffer> {
     this.#assertUsable("read");
     const device = this.#gpu.device;
     const where = `resident '${this.label}' の読み戻し`;
+    assertDeviceUsable(this.#gpu, where);
     // MUST: copy → submit も errorScope の両建てで囲む。COPY_SRC 欠落等の validation 失敗も
     // staging の確保失敗も例外にならず、読み戻しが全 0 のまま静かに返る（#readOutputs と同じ）。
     // MUST NOT: push から pop の発行までに await を挟まない（同期区間で完結するのでロック不要）。
@@ -1434,6 +1445,18 @@ export class BatchScope {
       void this.#settled.catch(() => undefined);
     }
     return this.#settled;
+  }
+
+  /**
+   * `await using` 対応（Explicit Resource Management）— {@link BatchScope.finish} の別名。
+   *
+   * 区間は device 単位の errorScope 区間ロックを握り続けるので、`finish()` を通らずに抜けると
+   * ロックが恒久保持され、以後その device の {@link Session.run} が例外も診断も出さずに待ち
+   * 続ける。この面は「その取りこぼしを起こしにくい書き方（`await using`）を可能にする」もので、
+   * 平文の `try`/`finally` を書き忘れた場合の無診断ハングそのものは塞がない。
+   */
+  [Symbol.asyncDispose](): Promise<void> {
+    return this.finish();
   }
 
   /**

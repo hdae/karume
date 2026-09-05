@@ -60,6 +60,31 @@ Deno.test("planRequiredLimits は maxStorageBufferBindingSize を maxBufferSize 
   assertEquals(planned.maxBufferSize, 512);
 });
 
+// LIMIT_CAPS（テスト専用の絞り）は「core 既定機の再現」に使う。maxBufferSize だけを絞った
+// caps で束縛上限が絞られないままだと、絞ったつもりの機が再現されず試験目的が黙って外れる。
+Deno.test("planRequiredLimits は caps が maxBufferSize だけを絞っても束縛上限を超えさせない", () => {
+  const adapter = fakeAdapterLimits({
+    maxBufferSize: 256 * 1024 * 1024,
+    maxStorageBufferBindingSize: 128 * 1024 * 1024,
+  });
+
+  const planned = planRequiredLimits(adapter, { maxBufferSize: 64 * 1024 * 1024 });
+
+  assertEquals(planned.maxBufferSize, 64 * 1024 * 1024);
+  assertEquals(
+    planned.maxStorageBufferBindingSize,
+    64 * 1024 * 1024,
+    "cap 後の maxBufferSize で clamp していない（束縛上限だけ絞られないまま残る）",
+  );
+
+  // 束縛上限側だけを絞る既存の使い方は 1 バイトも動かない（cap の適用順に依らない）。
+  const narrowBinding = planRequiredLimits(adapter, {
+    maxStorageBufferBindingSize: 32 * 1024 * 1024,
+  });
+  assertEquals(narrowBinding.maxBufferSize, 256 * 1024 * 1024);
+  assertEquals(narrowBinding.maxStorageBufferBindingSize, 32 * 1024 * 1024);
+});
+
 Deno.test("planRequiredLimits は compute 系をアダプタ値まで引き上げる", () => {
   const planned = planRequiredLimits(fakeAdapterLimits());
 

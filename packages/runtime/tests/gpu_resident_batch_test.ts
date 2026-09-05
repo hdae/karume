@@ -12,16 +12,18 @@ import { assert, assertEquals, assertRejects, assertStrictEquals, assertThrows }
 import { openModel } from "../src/format/container.ts";
 import {
   acquireGpu,
+  type BatchScope,
   BatchScopeError,
   type GpuContext,
   GpuDeviceLostError,
   ResidentTensorError,
   RUNTIME_INTERNAL,
 } from "../src/gpu/device.ts";
+import { GpuValidationError, popFailureScopes, pushFailureScopes } from "../src/gpu/error-scope.ts";
 import { createSession, type Session, type Tensor } from "../src/runtime/executor.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
 import { countFences } from "./helpers/fences.ts";
-import type { GraphJson } from "./helpers/format.ts";
+import { f32Bytes, type GraphJson } from "./helpers/format.ts";
 import { graphModelBuffer } from "./helpers/graph.ts";
 import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE } from "./helpers/gpu.ts";
 import { DEFAULT_SUBMIT_POLICY } from "../src/gpu/submit.ts";
@@ -459,6 +461,10 @@ Deno.test({
       GpuDeviceLostError,
       "device が失われた",
     );
+    // read も同じ門を通る。無いと破棄済み device 上で staging を確保して copy を submit し、
+    // 消失後の popErrorScope は null で resolve するので失敗が捕まらない（この 1 本だけが
+    // 門の証拠 — 下の lost 記録後は raceDeviceLost が既に同じ型で落としている）。
+    await assertRejects(() => resident.read(), GpuDeviceLostError, "device が失われた");
     await assertRejects(
       () => gpu.createResident(BYTES, "after-destroy"),
       GpuDeviceLostError,
@@ -468,6 +474,7 @@ Deno.test({
     await gpu.device.lost;
     assert(gpu.lost !== undefined, "消失が記録されていない（門が空振りする）");
     assertThrows(() => resident.write(new Float32Array(COUNT)), GpuDeviceLostError);
+    await assertRejects(() => resident.read(), GpuDeviceLostError);
     await assertRejects(() => gpu.createResident(BYTES, "after-lost"), GpuDeviceLostError);
   },
 });
@@ -921,6 +928,145 @@ Deno.test({
       assertEquals(spare.disposed, true);
     } finally {
       await session.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+// createResident が async なのは errorScope で囲むため（上限超過の createBuffer は同期例外を
+// 投げず**無効なバッファを返す**）。push/pop を外しても値は正しいままなので、この門が無いと
+// 「無効な resident が成功として返り、以後の write が沈黙 no-op になる」退行が全緑で通る。
+Deno.test({
+  name: "上限超過の createResident は errorScope 経由で型付き例外になる（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    try {
+      // MUST: 4 の倍数を保つ（崩れると同期の引数検査が先に出て、別の門を検査してしまう）。
+      const tooBig = gpu.limits.maxBufferSize + 4;
+      assertEquals(tooBig % 4, 0, "上限が 4 の倍数でないので要求が同期検査で落ちる");
+      // 仕様上 size > maxBufferSize は**確保を伴わない** validation エラー（実メモリを食わない）。
+      const error = await assertRejects(
+        () => gpu.createResident(tooBig, "too-big"),
+        GpuValidationError,
+      );
+      assert(error.message.startsWith("resident 'too-big' の確保: "), error.message);
+
+      // スコープ残高 0（失敗経路で pop を積み残していればここが赤くなる）。
+      pushFailureScopes(gpu.device);
+      assertEquals(await popFailureScopes(gpu.device, "残高検査"), undefined);
+
+      // 恒真化の門: 門が「常に落ちる」形になっていないこと。
+      const ok = await gpu.createResident(BYTES, "ok");
+      ok.write(input(0).data);
+      assertEquals(bits(await ok.read()), bits(input(0).data));
+      ok.dispose();
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+// 区間は device 単位の errorScope 区間ロックを握り続けるので、finish() を通らずに抜けると
+// 以後の run が例外も診断も無く待ち続ける。`await using` はその取りこぼしを起こしにくくする
+// 書き方で、asyncDispose が無いと TS では型エラー・JS では TypeError（しかもロック取得後）。
+Deno.test({
+  name: "await using で開いた batch 区間は抜けた時点で決着している（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const session = await producerSession(gpu);
+    const sink = await gpu.createResident(BYTES, "sink");
+    let scope: BatchScope | undefined;
+    try {
+      {
+        await using batch = await gpu.beginBatch();
+        scope = batch;
+        await session.enqueue({ x: input(0) }, { batch, copyOutputs: { y: sink } });
+        assertEquals(batch.finished, false, "区間の途中で決着している（門が空振りする）");
+      }
+      assertEquals(scope.finished, true, "区間を抜けても finish() が呼ばれていない");
+      assertEquals(bits(await sink.read()), bits(doubled(0)), "区間のぶんは完了している");
+
+      // 区間ロックが返っている証拠。返っていなければこの run は永久に待つ（例外も診断も無い）。
+      const outputs = await session.run({ x: input(1) });
+      assertEquals(bits(outputs["y"].data), bits(doubled(1)));
+    } finally {
+      await session.dispose();
+      sink.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+/**
+ * グラフ出力に initializer 名を書いた形（IR が許す）。その値は焼き込みの値写像に載らないので
+ * `copyOutputs` の相手にはできない（実行のたびに同じ定数を GPU 内でコピーするだけ）。
+ */
+const INITIALIZER_OUTPUT: GraphJson = {
+  format: "karume-ir",
+  version: 1,
+  requires: { ops: ["add"] },
+  symbols: [],
+  inputs: [{ name: "x", dtype: "f32", shape: [ROWS, COLS] }],
+  outputs: ["y", "c"],
+  initializers: { c: { tensor: "const.c", storage: { dtype: "f32" } } },
+  values: {
+    c: { dtype: "f32", shape: [ROWS, COLS] },
+    y: { dtype: "f32", shape: [ROWS, COLS] },
+  },
+  nodes: [{ op: "add", ins: ["x", "x"], outs: ["y"], attrs: {} }],
+};
+
+const initializerOutputModel = (): ArrayBuffer =>
+  graphModelBuffer(INITIALIZER_OUTPUT, [{
+    name: "const.c",
+    dtype: "F32",
+    shape: [ROWS, COLS],
+    data: f32Bytes(Array.from({ length: COUNT }, (_, i) => i * 0.25)),
+  }]);
+
+Deno.test({
+  name:
+    "initializer 由来のグラフ出力への copyOutputs は積む前に落ち、区間の他を巻き添えにしない（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const session = await createSession(gpu, openModel(initializerOutputModel()));
+    const healthy = await producerSession(gpu);
+    const constSink = await gpu.createResident(BYTES, "const-sink");
+    const sink = await gpu.createResident(BYTES, "sink");
+    try {
+      const batch = await gpu.beginBatch();
+      // MUST: どちらも await しない（失敗の帰属を finish に集める既存の形と同じ）。
+      const pending = [
+        session.enqueue({ x: input(0) }, { batch, copyOutputs: { c: constSink } }),
+        healthy.enqueue({ x: input(1) }, { batch, copyOutputs: { y: sink } }),
+      ];
+      const settled = Promise.allSettled(pending);
+
+      const attributed = await assertRejects(
+        () => batch.finish(),
+        ExecutionError,
+        "ノード出力ではない",
+      );
+
+      const results = await settled;
+      assert(results[0].status === "rejected", "落ちた enqueue の戻り Promise は reject する");
+      assertStrictEquals(results[0].reason, attributed);
+      assertEquals(results[1].status, "fulfilled", "同じ区間の別 enqueue は巻き添えで落ちない");
+      assertEquals(
+        session.diagnostics().submit.dispatchCount,
+        0,
+        "dispatch を 1 本も積む前に落ちていない",
+      );
+      assertEquals(session.diagnostics().submit.discardedDispatches, 0);
+      assertEquals(bits(await sink.read()), bits(doubled(1)), "正常な enqueue の写し先は更新済み");
+    } finally {
+      await session.dispose();
+      await healthy.dispose();
+      constSink.dispose();
+      sink.dispose();
       gpu.destroy();
     }
   },

@@ -7,6 +7,7 @@ import {
   SubmitPolicyError,
   SubmitScheduler,
 } from "../src/gpu/submit.ts";
+import { BUFFER_USAGE } from "../src/gpu/webgpu-constants.ts";
 import { fakeGpuContext } from "./helpers/fake-gpu.ts";
 
 /** SubmitScheduler が触る面だけを持つフェイク。DOM 型全体は再現しないため cast で渡す。 */
@@ -29,15 +30,23 @@ type FakeGpu = {
 type FakeOptions = {
   readonly lost?: Promise<GPUDeviceLostInfo>;
   readonly workDone?: () => Promise<void>;
+  /**
+   * 渡すと **GPU 時間計測が有効な device**（`timestamp-query` を持つ）になり、チャンクごとに
+   * 1 組ずつ、この timestamp（query 番号順 = dispatch ごとに begin, end）を回収させる。
+   * 実 GPU では非単調な値も querySet 容量超過も作れないため、丸めと容量の門はここでだけ踏める。
+   */
+  readonly timestamps?: readonly (readonly bigint[])[];
 };
 
 const createFakeGpu = (options: FakeOptions = {}): FakeGpu => {
   const submitted: number[] = [];
   const calls = { workDone: 0 };
   const workDone = options.workDone ?? ((): Promise<void> => Promise.resolve());
+  const timing = options.timestamps !== undefined;
+  const stamps = [...options.timestamps ?? []];
   const device = {
     lost: options.lost ?? new Promise<GPUDeviceLostInfo>(() => {}),
-    features: new Set<string>(),
+    features: new Set<string>(timing ? ["timestamp-query"] : []),
     queue: {
       submit: (buffers: readonly { readonly count: number }[]): void => {
         for (const buffer of buffers) {
@@ -48,6 +57,20 @@ const createFakeGpu = (options: FakeOptions = {}): FakeGpu => {
         calls.workDone += 1;
         return workDone();
       },
+    },
+    createQuerySet: () => ({ destroy: (): void => {} }),
+    // 計測経路は resolve 用と MAP_READ 用の 2 本を作る。timestamp を載せるのは後者だけで、
+    // 回収の順（チャンク順）にこの列から 1 組ずつ配る。
+    createBuffer: (descriptor: GPUBufferDescriptor) => {
+      const mapped = (descriptor.usage & BUFFER_USAGE.MAP_READ) === 0
+        ? new BigUint64Array(0)
+        : BigUint64Array.from(stamps.shift() ?? []);
+      return {
+        mapAsync: (): Promise<void> => Promise.resolve(),
+        getMappedRange: (): ArrayBuffer => mapped.buffer,
+        unmap: (): void => {},
+        destroy: (): void => {},
+      };
     },
     createCommandEncoder: () => {
       let count = 0;
@@ -60,12 +83,18 @@ const createFakeGpu = (options: FakeOptions = {}): FakeGpu => {
           },
           end: (): void => {},
         }),
+        copyBufferToBuffer: (): void => {},
+        resolveQuerySet: (): void => {},
         finish: () => ({ count }),
       };
     },
   };
   return { context: fakeGpuContext(device as unknown as GPUDevice), submitted, calls };
 };
+
+/** copy の面だけを見るテスト用の実体（フェイク encoder は中身に触れない）。 */
+const fakeSource = {} as unknown as GPUBuffer;
+const fakeTarget = {} as unknown as GPUBuffer;
 
 /**
  * 「窓の間に GPU が `elapsedMs` だけ走った」を作るフェイク時計。
@@ -196,6 +225,83 @@ Deno.test("SubmitScheduler はチャンクサイズ 0 相当の政策を構築�
       }),
     SubmitPolicyError,
   );
+});
+
+// 計測有効時の querySet 容量（チャンクの dispatch 数 × 2）は構築時に落とす。エンコード時の
+// 門だけだと、実測の裏付けが付いて上限が maxChunkSize へ切り替わった**後の run**で初めて
+// 落ちる（動いていたものが途中から落ちる形）。
+Deno.test("計測が有効な device では querySet 容量を超える maxChunkSize を構築時に拒否する", () => {
+  const timed = createFakeGpu({ timestamps: [] });
+
+  assertThrows(
+    () => new SubmitScheduler(timed.context, { ...DEFAULT_SUBMIT_POLICY, maxChunkSize: 2048 }),
+    SubmitPolicyError,
+    "maxChunkSize",
+  );
+  // 既定政策（1024 → query 2,048 = 容量ちょうど）は通る（後方影響なし）。
+  const ok = new SubmitScheduler(timed.context, DEFAULT_SUBMIT_POLICY);
+  assertEquals(ok.stats.currentChunkSize, DEFAULT_SUBMIT_POLICY.initialChunkSize);
+
+  // 計測が無効な device では querySet を 1 本も作らないので、同じ政策が通る。
+  const plain = createFakeGpu();
+  const wide = new SubmitScheduler(plain.context, {
+    ...DEFAULT_SUBMIT_POLICY,
+    maxChunkSize: 2048,
+  });
+  assertEquals(wide.timing, undefined, "計測が無効な device では内訳を持たない");
+});
+
+// copy は仕事量 0（時間予算には効かない）だが、チャンクの dispatch 数上限には 1 件として
+// 数えられる（submit.ts の copyBuffer の NOTE）。落としても出力は正しいままなので、
+// 「チャンクが想定より育つ」退行は submit の**本数**でしか捉えられない。
+Deno.test("copyBuffer は仕事量 0 のままチャンクの件数上限に 1 件として数えられる", async () => {
+  const gpu = createFakeGpu();
+  const scheduler = new SubmitScheduler(gpu.context, fixedPolicy(2));
+
+  dispatchMany(scheduler, 1);
+  assertEquals(gpu.submitted, [], "1 件目ではチャンクが埋まらない");
+
+  scheduler.copyBuffer(fakeSource, 0, fakeTarget, 0, 16);
+  assertEquals(gpu.submitted, [1], "copy が 2 件目として上限に達する（中身は dispatch 1 件ぶん）");
+  assertEquals(scheduler.stats.dispatchCount, 1, "copy は dispatch 数には数えない");
+
+  dispatchMany(scheduler, 1);
+  assertEquals(gpu.submitted, [1], "残り 1 件では上限に達しない");
+  await scheduler.flush();
+  assertEquals(gpu.submitted, [1, 1], "flush が端数を出し切る");
+});
+
+Deno.test("discard は copy を discardedDispatches に数えない", () => {
+  const gpu = createFakeGpu();
+  const scheduler = new SubmitScheduler(gpu.context, fixedPolicy(4));
+
+  dispatchMany(scheduler, 1);
+  scheduler.copyBuffer(fakeSource, 0, fakeTarget, 0, 16);
+  scheduler.discard();
+
+  assertEquals(gpu.submitted, [], "捨てたぶんは submit しない");
+  assertEquals(
+    scheduler.stats.discardedDispatches,
+    1,
+    "copy は「実行されなかった dispatch」ではない",
+  );
+});
+
+// 非単調な timestamp（begin > end）は実 GPU では作れないため、この分岐は実測 0 の assert
+// （gpu_timing_test.ts）では 1 度も踏まれない。丸めた側を踏むのはこのフェイクだけ。
+Deno.test("非単調な timestamp は 0 に丸めたうえで丸めた件数を残す", async () => {
+  // 2 dispatch のチャンク = query 4 件。1 本目が begin > end（負）、2 本目が 60ns。
+  const gpu = createFakeGpu({ timestamps: [[100n, 50n, 200n, 260n]] });
+  const scheduler = new SubmitScheduler(gpu.context, fixedPolicy(2));
+
+  dispatchMany(scheduler, 2);
+  await scheduler.flush();
+
+  const timing = scheduler.timing;
+  assertEquals(timing?.totalNs, 60, "負の delta は 0 として足す（60ns の 1 本だけが残る）");
+  assertEquals(timing?.clampedNegativeSamples, 1, "丸めた件数を黙って捨てない");
+  assertEquals(timing?.dispatchCount, 2, "件数は丸めと無関係に数える");
+  assertEquals(timing?.entries.length, 1, "同じキーの 2 本は 1 エントリへ畳む");
 });
 
 Deno.test("SubmitScheduler の flush は device 消失を待ち続けずに例外にする", async () => {

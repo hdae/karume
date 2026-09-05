@@ -9,9 +9,10 @@
 // ③LRU 追い出しで返る ④slot の総バイト数が現行 run のプール確保と一致する（footprint 不変）
 // を固定する。④が崩れると VRAM の前提（常駐化しても新しいピークは生まれない）が崩れる。
 
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertRejects } from "@std/assert";
 import { openModel } from "../src/format/container.ts";
 import { acquireGpu } from "../src/gpu/device.ts";
+import { BUFFER_USAGE } from "../src/gpu/webgpu-constants.ts";
 import { createSession, type Session, type Tensor } from "../src/runtime/executor.ts";
 import { f32Bytes, type GraphJson } from "./helpers/format.ts";
 import { fill, graphModelBuffer } from "./helpers/graph.ts";
@@ -372,6 +373,131 @@ Deno.test({
       assertEquals(second.shape, [ROWS, 4]);
     } finally {
       await session.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+/** storage バッファ 1 本ぶんの記録（確保の順に 1 要素 = その実体の destroy 回数）。 */
+type BufferRecord = { readonly destroyCounts: number[] };
+
+/**
+ * `#activateBacking` の確保途中失敗を撃つ注入。
+ *
+ * 実 GPU では「N 本目の createBuffer だけ落とす」形も「確保済みがちょうど 1 回返ったか」も
+ * 作れないので、device の `createBuffer` を包む（生産コードに注入面を開けないための代替 —
+ * `gpu_generation_context_test.ts` の `injectFaults` と同型）。
+ * MUST: 返す実体は**本物の GPUBuffer のまま**にする（`destroy` だけを包む）。差し替えると
+ * bind group 生成に渡す実体がテスト側の作り物になり、門が実装を検査しなくなる。
+ */
+const injectStorageFault = (device: GPUDevice): {
+  /** 以後の storage 確保を新しい記録へ載せる（`failAt` 本目で同期 throw）。 */
+  readonly record: (failAt?: number) => BufferRecord;
+  readonly restore: () => void;
+} => {
+  const original = device.createBuffer.bind(device);
+  let current: BufferRecord = { destroyCounts: [] };
+  let creations = 0;
+  let failAt: number | undefined;
+  device.createBuffer = ((descriptor: GPUBufferDescriptor): GPUBuffer => {
+    // 数えるのは slot / 入力の storage だけ（readback staging は MAP_READ で別経路）。
+    if ((descriptor.usage & BUFFER_USAGE.STORAGE) === 0) return original(descriptor);
+    creations += 1;
+    if (creations === failAt) {
+      throw new Error(`注入: storage ${creations} 本目の createBuffer が同期 throw`);
+    }
+    const buffer = original(descriptor);
+    const counts = current.destroyCounts;
+    const index = counts.push(0) - 1;
+    const destroy = buffer.destroy.bind(buffer);
+    buffer.destroy = (): undefined => {
+      counts[index] += 1;
+      return destroy();
+    };
+    return buffer;
+  }) as typeof device.createBuffer;
+  return {
+    record: (next?: number): BufferRecord => {
+      creations = 0;
+      failAt = next;
+      current = { destroyCounts: [] };
+      return current;
+    },
+    restore: (): void => {
+      device.createBuffer = original;
+    },
+  };
+};
+
+// executor.ts の `#activateBacking` は「確保 → `this.#backing` への代入（所有権の確立）」まで
+// を try/catch で囲む。この窓で漏れた実体は `#retireBacking()` からも `dispose()` からも
+// 到達できず、しかも量はこの Session で最大（slot 表の総バイト）になる。同型の門は
+// `GenerationContext.create` 側にあるが executor 側には無かった。
+Deno.test({
+  name:
+    "backing 確保の途中失敗は確保済みをちょうど 1 回ずつ返し、次の run で作り直せる（故障注入・実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const session = await createSession(gpu, openModel(modelBytes()));
+    // 常駐入力（焼き込み参照が retain / release される側）。backing は入力バッファを所有
+    // しないので、storage の記録は slot 表そのものになる。
+    const narrow = await gpu.createResident(4 * 3 * 4, "narrow");
+    const wide = await gpu.createResident(9 * 3 * 4, "wide");
+    const fault = injectStorageFault(gpu.device);
+    try {
+      narrow.write(input(4, 0).data);
+      wide.write(input(9, 0).data);
+
+      // ミス run（アリーナ経路）の確保は別の記録へ逃がす。以後 backing の構築だけを数える。
+      // MUST: 記号 T は明示で束縛する（常駐入力は shape を持たないので束縛源にならない）。
+      fault.record();
+      await session.run({ x: narrow }, { T: 4 });
+
+      // T=4 のヒット run = backing の構築。この窓の storage 確保は slot 表そのもの
+      // （常駐入力は backing 所有ではなく、readback staging は MAP_READ で別経路）。
+      const built = fault.record();
+      await session.run({ x: narrow }, { T: 4 });
+      assertEquals(session.diagnostics().planBacking.buildCount, 1);
+      assertEquals(narrow.bakedReferences, 1, "焼き込み参照が立っていない（門が空振りする）");
+      const slots = built.destroyCounts.length;
+      assert(slots >= 2, `slot が ${slots} 本しかなく「途中で落とす」形にならない`);
+
+      // T=9 はミス run では backing を作らない。次のヒット run が作り直しの窓。
+      fault.record();
+      await session.run({ x: wide }, { T: 9 });
+
+      const partial = fault.record(2);
+      await assertRejects(
+        () => session.run({ x: wide }, { T: 9 }),
+        Error,
+        "注入: storage 2 本目",
+      );
+
+      assertEquals(partial.destroyCounts, [1], "確保済みの 1 本がちょうど 1 回だけ返る");
+      assertEquals(
+        built.destroyCounts,
+        Array(slots).fill(1),
+        "退役した旧 backing もちょうど 1 回ずつ返る",
+      );
+      assertEquals(
+        session.diagnostics().planBacking,
+        { residentBytes: 0, buildCount: 1 },
+        "失敗した構築が backing として据わっている",
+      );
+      assertEquals(narrow.bakedReferences, 0, "退役で焼き込み参照が返っていない");
+      assertEquals(wide.bakedReferences, 0, "失敗した構築が焼き込み参照を残している");
+
+      // 同一 signature の次の run は作り直して完走し、非 backed 実行とビット一致する。
+      fault.restore();
+      const actual = (await session.run({ x: wide }, { T: 9 }))["y"];
+      assertEquals(session.diagnostics().planBacking.buildCount, 2, "作り直していない");
+      assertEquals(bits(actual), bits(await runFresh(gpu, { x: input(9, 0) })));
+    } finally {
+      fault.restore();
+      await session.dispose();
+      narrow.dispose();
+      wide.dispose();
       gpu.destroy();
     }
   },
