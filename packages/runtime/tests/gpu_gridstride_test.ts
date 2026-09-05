@@ -37,6 +37,7 @@ import { compareTensors, formatAllclose } from "../src/reference/allclose.ts";
 import { refTensor } from "../src/reference/ops.ts";
 import { WEIGHT_STORAGES } from "../src/kernels/weight-storage.ts";
 import {
+  adalnNormCase,
   argmaxCase,
   attentionStatsCase,
   attentionStatsF16Case,
@@ -60,10 +61,12 @@ import {
   quantizeRowsGroupedCase,
   reduceCase,
   rmsNormCase,
+  siluCase,
   softmaxCase,
   stridedCase,
   stridedWriteCase,
   topkCase,
+  upsample2xCase,
   upsampleBilinear2dCase,
 } from "./helpers/gridstride_cases.ts";
 import { GPU_AVAILABLE, SHADER_F16_AVAILABLE } from "./helpers/gpu.ts";
@@ -197,6 +200,11 @@ const CASES: readonly DegenerateCase[] = [
   layerNormCase(),
   rmsNormCase(),
   gruScanCase(),
+  // 融合カーネル（op 語彙の外 — src/runtime/fusion.ts が置換で挿す 3 族）。担当テストは形が
+  // 小さく必要数の workgroup がそのまま割り当たるので、縮退経路はここでしか踏まれない。
+  upsample2xCase(),
+  siluCase(),
+  adalnNormCase(),
 ];
 
 Deno.test({

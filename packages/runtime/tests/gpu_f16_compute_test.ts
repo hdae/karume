@@ -36,7 +36,12 @@ import { assert, assertEquals, assertRejects } from "@std/assert";
 import { openModel } from "../src/format/container.ts";
 import { f16BitsToF32, roundToF16 } from "../src/format/f16.ts";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
-import { attentionPvKey, attentionQkKey, attentionStatsKey } from "../src/kernels/attention.ts";
+import {
+  attentionPvKey,
+  attentionQkKey,
+  attentionStatsKey,
+  attentionStatsRegCache,
+} from "../src/kernels/attention.ts";
 import { linearKey } from "../src/kernels/linear.ts";
 import { createSession, type SessionOptions, type Tensor } from "../src/runtime/executor.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
@@ -44,7 +49,7 @@ import { f32Bytes, type GraphJson, type TensorSpec } from "./helpers/format.ts";
 import { f32ToF16Bits, quantizeF16 } from "./helpers/f16.ts";
 import { fill, type FilledTensor, graphModelBuffer, singleOpGraph } from "./helpers/graph.ts";
 import { quantizeI8 } from "./helpers/i8.ts";
-import { GPU_AVAILABLE, SHADER_F16_AVAILABLE } from "./helpers/gpu.ts";
+import { GPU_AVAILABLE, SHADER_F16_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
 
 // ---------------------------------------------------------------------------
 // 丸めの正本（GPU 非依存）
@@ -260,7 +265,7 @@ Deno.test({
   name: "linear の f16 計算変種は「入力を f16 に丸めた f32 変種」とビット単位で一致する（実 GPU）",
   ignore: !F16_GPU,
   fn: async () => {
-    const gpu = await acquireGpu({ shaderF16: true });
+    const gpu = await acquireGpu({ shaderF16: true, ...TIMING_ACQUIRE_OPTIONS });
     try {
       for (const shape of LINEAR_SHAPES) {
         const { name, m, n, k } = shape;
@@ -285,13 +290,16 @@ Deno.test({
 
         if (actual.keys.length > 0) {
           const v4 = k % 4 === 0 && n % 4 === 0;
+          // MUST: 期待キーにも **m** を通す（executor は linearKey(..., m, ...) で行数から
+          // 幾何を解決する — src/runtime/recipe-builder.ts）。省くと既定幾何の綴りになり、
+          // 幾何が違うキーと突き合わせることになる。
           assertEquals(
-            actual.keys.filter((key) => key === linearKey("f32", v4, "f16")).length,
+            actual.keys.filter((key) => key === linearKey("f32", v4, "f16", m)).length,
             1,
             `linear ${name}: f16 変種のキーが走っていない（${actual.keys.join(", ")}）`,
           );
           assertEquals(
-            actual.keys.filter((key) => key === linearKey("f32", v4)).length,
+            actual.keys.filter((key) => key === linearKey("f32", v4, "f32", m)).length,
             0,
             `linear ${name}: f32 変種のキーが残っている`,
           );
@@ -307,7 +315,7 @@ Deno.test({
   name: "重み f16 格納 × f16 計算の組は往復恒等（unpack2x16float の値は f16 に厳密に戻る）",
   ignore: !F16_GPU,
   fn: async () => {
-    const gpu = await acquireGpu({ shaderF16: true });
+    const gpu = await acquireGpu({ shaderF16: true, ...TIMING_ACQUIRE_OPTIONS });
     try {
       for (const shape of LINEAR_SHAPES) {
         const { name, m, n, k } = shape;
@@ -334,7 +342,7 @@ Deno.test({
         if (actual.keys.length > 0) {
           const v4 = k % 4 === 0 && n % 4 === 0;
           assertEquals(
-            actual.keys.filter((key) => key === linearKey("f16", v4, "f16")).length,
+            actual.keys.filter((key) => key === linearKey("f16", v4, "f16", m)).length,
             1,
             `linear wf16 ${name}: f16 計算のキーが走っていない`,
           );
@@ -436,7 +444,7 @@ Deno.test({
   name: "融合 attention の f16 変種は分解経路 + 丸め 3 点とビット単位で一致する（実 GPU）",
   ignore: !F16_GPU,
   fn: async () => {
-    const gpu = await acquireGpu({ shaderF16: true });
+    const gpu = await acquireGpu({ shaderF16: true, ...TIMING_ACQUIRE_OPTIONS });
     try {
       for (const shape of ATTENTION_SHAPES) {
         const { name, b, h, m, n, d } = shape;
@@ -468,10 +476,14 @@ Deno.test({
           const qkV4 = d % 4 === 0 && n % 4 === 0;
           const pvV4 = n % 4 === 0 && d % 4 === 0;
           const running = new Set(actual.keys);
+          // MUST: ②行統計の期待キーにも regcache を通す（executor は列数から
+          // `attentionStatsRegCache(n)` を導いてキーへ載せる）。省くと `:rc` 無しの綴りに
+          // なり、走ったキーと必ず食い違う。
+          const regCache = attentionStatsRegCache(n);
           for (
             const key of [
               attentionQkKey(qkV4, "f16"),
-              attentionStatsKey("f16"),
+              attentionStatsKey("f16", "f32", regCache),
               attentionPvKey(pvV4, "f16"),
             ]
           ) {
@@ -481,7 +493,7 @@ Deno.test({
           for (
             const key of [
               attentionQkKey(qkV4),
-              attentionStatsKey(),
+              attentionStatsKey("f32", "f32", regCache),
               attentionPvKey(pvV4),
             ]
           ) {

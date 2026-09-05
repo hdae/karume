@@ -1191,3 +1191,84 @@ Deno.test({
     }
   },
 });
+
+/**
+ * ③'（KV 並列縮約）を **`Session.run` 経由で値まで**見る門。
+ *
+ * 現状 runtime の検証は「直接 dispatch の帯」（tests/gpu_state_attention_parallel_test.ts）と
+ * 「executor 経由のキー検査」（上の census — `runStep` の戻りを捨てている）に割れており、
+ * **その間**（レシピが ③' 用の workgroup 数・束縛・S / stats の確保を正しく組むか）は資産つきの
+ * models e2e にしか落ちていない（ミラー無しの環境では明示 SKIP される）。ここはその隙間を
+ * 資産なしで塞ぐ。
+ *
+ * MUST: ビット同一は要求しない（③ と ③' は縮約順が違う — 形が小さいと差が出ないだけで、
+ * 一致を契約にすると別の主張になる）。見るのは「オラクルと帯で一致」と「席をまたいでも
+ * 同じ帯に収まる」の 2 点。
+ */
+Deno.test({
+  name: "stateAttentionReduce:'parallel' は Session.run 経由でも参照鎖と一致する（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const parallel = await stateSession(gpu, GQA, { stateAttentionReduce: "parallel" });
+    const sequential = await stateSession(gpu, GQA);
+    const parallelContext = await parallel.createGenerationContext({ chunkLength: 4 });
+    const sequentialContext = await sequential.createGenerationContext({ chunkLength: 4 });
+    const state = newOracle(GQA, 8);
+    try {
+      // prefill（M=4 / Q=4）→ decode ×3（M=1 / Q=1）。salt は step ごとに変える
+      for (
+        const [chunkRows, query, salt, label] of [
+          [4, 4, 2, "prefill"],
+          [1, 1, 17, "decode 1"],
+          [1, 1, 29, "decode 2"],
+          [1, 1, 43, "decode 3"],
+        ] as const
+      ) {
+        const inputs = stepInputs(GQA, chunkRows, salt);
+        const actual = await runStep(parallel, parallelContext, GQA, inputs, chunkRows, query);
+        const baseline = await runStep(
+          sequential,
+          sequentialContext,
+          GQA,
+          inputs,
+          chunkRows,
+          query,
+        );
+        const expected = advanceOracle(GQA, 8, state, inputs, chunkRows, query);
+        // 恒真化の門: 期待出力が自明でない（両側が全 0 なら突合は何も見ていない）
+        assert(
+          expected.some((value) => Math.abs(value) > 1e-3),
+          `${label}: 期待出力が自明（全 ~0）`,
+        );
+        // ① ③' が参照鎖と一致する
+        const against = compareTensors(
+          { dtype: "f32", data: actual },
+          { dtype: "f32", data: expected },
+          STATE_TOLERANCE,
+        );
+        assertEquals(against.pass, true, `${label} parallel: ${formatAllclose(against)}`);
+        // ② ③' と ③ が同じ帯に収まる（席の違いが値へ漏れない）
+        const cross = compareTensors(
+          { dtype: "f32", data: actual },
+          { dtype: "f32", data: baseline },
+          STATE_TOLERANCE,
+        );
+        assertEquals(cross.pass, true, `${label} parallel vs sequential: ${formatAllclose(cross)}`);
+        // ③ 論理長の進行は席に依らない
+        assertEquals(parallelContext.pastLength, state.past, `${label}: parallel の pastLength`);
+        assertEquals(
+          sequentialContext.pastLength,
+          state.past,
+          `${label}: sequential の pastLength`,
+        );
+      }
+    } finally {
+      await parallelContext.dispose();
+      await sequentialContext.dispose();
+      await parallel.dispose();
+      await sequential.dispose();
+      gpu.destroy();
+    }
+  },
+});

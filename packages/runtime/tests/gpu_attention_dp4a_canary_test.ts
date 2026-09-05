@@ -64,7 +64,7 @@ import {
 import { createSession, type SessionOptions } from "../src/runtime/executor.ts";
 import type { I8a8Dot } from "../src/runtime/session-types.ts";
 import { fill, graphModelBuffer, singleOpGraph } from "./helpers/graph.ts";
-import { GPU_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
+import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
 
 /** `127·exp(S−m)` が半整数から離れているべき最小の余裕（WGSL の `exp` 誤差 ~1e-5 の桁上）。 */
 const QUANT_MARGIN = 0.3;
@@ -460,15 +460,9 @@ Deno.test({
       );
       assertEquals(seeded.dot, "emu");
 
-      for (const pass of [1, 2]) {
-        const keys = new Set(await runAttention(gpu, { attentionCompute: "a8" }));
-        if (keys.size === 0) continue; // 計測が無い環境ではキー検査ごと空振りする
-        const qkV4 = attentionQkI8a8UsesVec4(16);
-        const pvV4 = attentionPvI8a8UsesVec4(8);
-        assert(keys.has(attentionQkI8a8Key(qkV4, false)), `${pass} 本目: ①QK が emu 変種でない`);
-        assert(!keys.has(attentionQkI8a8Key(qkV4, true)), `${pass} 本目: dp4a 変種が残っている`);
-        assert(keys.has(attentionPvI8a8Key(pvV4, false)), `${pass} 本目: ③PV が emu 変種でない`);
-        assert(!keys.has(attentionPvI8a8Key(pvV4, true)), `${pass} 本目: dp4a 変種が残っている`);
+      // 席が Session へ配られていること（キーでしか見えない）は下の census が持つ
+      for (const _pass of [1, 2]) {
+        await runAttention(gpu, { attentionCompute: "a8" });
       }
 
       // 2 本目まで走らせてもカナリアは 1 度きり（メモが Promise で効いている）
@@ -479,6 +473,43 @@ Deno.test({
       });
       assertEquals(extraRuns, 0, "Session ごとにカナリアが走り直している");
       assertEquals(memoized.dot, "emu", "メモが最初の判定を配っていない");
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+/**
+ * **census**（ADR 0058 決定 4）。注入した席（`BREAK_DP4A` で emu へ倒した判定）が Session の
+ * 変種選択に届いていることは**キーでしか観測できない**（dp4a と emu は同じ整数を返すので
+ * 値は 1 ビットも変わらない）。
+ *
+ * MUST: 計測を要求しない device（`TIMESTAMP_QUERY_AVAILABLE` が偽）では**明示 SKIP** し、
+ * 走るときは空の内訳を無条件に FAIL にする（「keys が空なら次の形へ」で守ると変種選択の
+ * 検査が 1 つも走らないまま緑になる — gpu_attention_gqa_test.ts の census と同じ形）。
+ * `acquireGpu` は呼ぶたび新しい device を作るのでメモの席もこのテスト専用。
+ */
+Deno.test({
+  name:
+    "注入した席（emu）は a8 Session の ①QK / ③PV の両方に届く（実 GPU / timestamp-query・故障注入）",
+  ignore: !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    try {
+      const seeded = await gpu[RUNTIME_INTERNAL].attentionI8a8Dot(() =>
+        decideAttentionI8a8Dot(gpu, BREAK_DP4A)
+      );
+      assertEquals(seeded.dot, "emu");
+      for (const pass of [1, 2]) {
+        const keys = new Set(await runAttention(gpu, { attentionCompute: "a8" }));
+        assert(keys.size > 0, `${pass} 本目: 内訳が空（キー検査が空振りしている）`);
+        const qkV4 = attentionQkI8a8UsesVec4(16);
+        const pvV4 = attentionPvI8a8UsesVec4(8);
+        assert(keys.has(attentionQkI8a8Key(qkV4, false)), `${pass} 本目: ①QK が emu 変種でない`);
+        assert(!keys.has(attentionQkI8a8Key(qkV4, true)), `${pass} 本目: dp4a 変種が残っている`);
+        assert(keys.has(attentionPvI8a8Key(pvV4, false)), `${pass} 本目: ③PV が emu 変種でない`);
+        assert(!keys.has(attentionPvI8a8Key(pvV4, true)), `${pass} 本目: dp4a 変種が残っている`);
+      }
     } finally {
       gpu.destroy();
     }

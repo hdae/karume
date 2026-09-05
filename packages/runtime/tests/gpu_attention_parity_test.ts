@@ -24,7 +24,7 @@ import { ExecutionError } from "../src/runtime/plan.ts";
 import type { GraphJson } from "./helpers/format.ts";
 import { fill, type FilledTensor, graphModelBuffer, singleOpGraph } from "./helpers/graph.ts";
 import { attentionPvKey, attentionQkKey } from "../src/kernels/attention.ts";
-import { GPU_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
+import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
 
 /** 半スケール（torch math decomp の `√scale_factor`）。D から導く契約どおりの値。 */
 const halfScale = (depth: number): number => Math.fround(Math.sqrt(1 / Math.sqrt(depth)));
@@ -337,42 +337,34 @@ Deno.test({
  * i8a8 の ①QK は別カーネルで epilogue を持たないので、組み合わせは **fail loudly**
  * （黙って f32 へ縮退すると「i8a8 を頼んだのに効かない」沈黙になり、mask を落とすと値が壊れる）。
  */
+const MASK_WIRING_SHAPE = { b: 1, h: 2, m: 8, n: 8, d: 8 };
+
+/** mask 付き 1 ノードのグラフと入力（結線テストと census が同じ形を撃つ）。 */
+const maskedAttention = (): {
+  graph: ReturnType<typeof singleOpGraph>;
+  inputs: Record<string, Tensor>;
+} => {
+  const { b, h, m, n, d } = MASK_WIRING_SHAPE;
+  const q = fill([b, h, m, d], QUERY);
+  const k = fill([b, h, n, d], KEY);
+  const v = fill([b, h, n, d], VALUE);
+  const mask = { dtype: "f32" as const, shape: [1, 1, m, n], data: bandMask(m, n, 2, -1e30) };
+  const graph = singleOpGraph(
+    "attention",
+    [q.shape, k.shape, v.shape, mask.shape],
+    [[b, h, m, d]],
+    { attrs: { scale: halfScale(d) } },
+  );
+  return { graph, inputs: { x0: q, x1: k, x2: v, x3: mask } };
+};
+
 Deno.test({
-  name: "加算 mask は ①QK のキーと束縛だけを増やし、i8a8 とは組めない（実 GPU）",
+  name: "加算 mask は i8a8 とは組めない（黙って縮退しない・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
     try {
-      const { b, h, m, n, d } = { b: 1, h: 2, m: 8, n: 8, d: 8 };
-      const q = fill([b, h, m, d], QUERY);
-      const k = fill([b, h, n, d], KEY);
-      const v = fill([b, h, n, d], VALUE);
-      const mask = { dtype: "f32" as const, shape: [1, 1, m, n], data: bandMask(m, n, 2, -1e30) };
-      const graph = singleOpGraph(
-        "attention",
-        [q.shape, k.shape, v.shape, mask.shape],
-        [[b, h, m, d]],
-        { attrs: { scale: halfScale(d) } },
-      );
-      const inputs = { x0: q, x1: k, x2: v, x3: mask };
-
-      const session = await createSession(gpu, openModel(graphModelBuffer(graph)));
-      try {
-        await session.run(inputs);
-        const entries = session.diagnostics().lastRunTiming?.entries ?? [];
-        if (entries.length > 0) {
-          const keys = entries.map((entry) => entry.key);
-          // 1 ノード = 3 dispatch のまま（mask で dispatch は増えない）
-          assertEquals(entries.reduce((sum, entry) => sum + entry.dispatchCount, 0), 3);
-          assertEquals(keys.includes(attentionQkKey(true, "f32", "f32", true)), true, "mask 変種");
-          assertEquals(keys.includes(attentionQkKey(true)), false, "mask 無しの ①QK が残っている");
-          // ②③ は mask なしと同じキー（生成物も同じ = スナップショットが固定）
-          assertEquals(keys.includes(attentionPvKey(true)), true, "③PV は mask で変わらない");
-        }
-      } finally {
-        await session.dispose();
-      }
-
+      const { graph, inputs } = maskedAttention();
       // i8a8 との組み合わせは fail loudly（縮退しない）
       const i8a8 = await createSession(gpu, openModel(graphModelBuffer(graph)), {
         attentionCompute: "a8",
@@ -381,6 +373,43 @@ Deno.test({
         await assertRejects(() => i8a8.run(inputs), ExecutionError, "attentionCompute 'a8'");
       } finally {
         await i8a8.dispose();
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+/**
+ * **census**（ADR 0058 決定 4）。mask 変種が実際に走ったか・dispatch が増えていないかは
+ * キーと本数でしか見えない（mask を丸ごと落としても形は通る）。
+ *
+ * MUST: 計測を要求しない device（`TIMESTAMP_QUERY_AVAILABLE` が偽）では**明示 SKIP** し、
+ * 走るときは空の内訳を無条件に FAIL にする（`TIMING_ACQUIRE_OPTIONS` は feature 不在で
+ * `gpuTiming: false` に落ちるので、「entries が空なら何も見ない」で守ると検査が 1 つも
+ * 走らないまま緑になる — gpu_attention_gqa_test.ts の census と同じ形）。
+ */
+Deno.test({
+  name: "加算 mask は ①QK のキーと束縛だけを増やす（実 GPU / timestamp-query）",
+  ignore: !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    try {
+      const { graph, inputs } = maskedAttention();
+      const session = await createSession(gpu, openModel(graphModelBuffer(graph)));
+      try {
+        await session.run(inputs);
+        const entries = session.diagnostics().lastRunTiming?.entries ?? [];
+        assert(entries.length > 0, "内訳が空（キー検査が空振りしている）");
+        const keys = entries.map((entry) => entry.key);
+        // 1 ノード = 3 dispatch のまま（mask で dispatch は増えない）
+        assertEquals(entries.reduce((sum, entry) => sum + entry.dispatchCount, 0), 3);
+        assertEquals(keys.includes(attentionQkKey(true, "f32", "f32", true)), true, "mask 変種");
+        assertEquals(keys.includes(attentionQkKey(true)), false, "mask 無しの ①QK が残っている");
+        // ②③ は mask なしと同じキー（生成物も同じ = スナップショットが固定）
+        assertEquals(keys.includes(attentionPvKey(true)), true, "③PV は mask で変わらない");
+      } finally {
+        await session.dispose();
       }
     } finally {
       gpu.destroy();

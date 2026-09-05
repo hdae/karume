@@ -188,6 +188,79 @@ Deno.test("parseSafetensors: __metadata__ の非文字列値を拒否する", ()
   assertThrows(() => parseSafetensors(buffer), SafetensorsError, "文字列でない");
 });
 
+/**
+ * 残りのガード節（ヘッダ長 / ヘッダの文字コード / 宣言の型 / 要素数）。いずれも下流の検査が
+ * 別の文言で落とす見込みが高く沈黙誤値にはならないが、**配布形を組み直す側が読む診断の
+ * 帰属**が変わる（「ヘッダの型が違う」が「サイズ不一致」として出ると直す場所を取り違える）。
+ */
+Deno.test("parseSafetensors: ヘッダ長とヘッダ表の型のガードを個別の文言で落とす", () => {
+  // ① ヘッダ長が安全整数を超える（Number へ落とすより前に見る）
+  const huge = new ArrayBuffer(16);
+  new DataView(huge).setBigUint64(0, 2n ** 60n, true);
+  assertThrows(() => parseSafetensors(huge), SafetensorsError, "安全整数を超える");
+
+  // ② ヘッダが UTF-8 として不正（0xff は単独では不正なバイト）
+  const invalidUtf8 = new ArrayBuffer(16);
+  new DataView(invalidUtf8).setBigUint64(0, 8n, true);
+  new Uint8Array(invalidUtf8, 8).fill(0xff);
+  assertThrows(() => parseSafetensors(invalidUtf8), SafetensorsError, "UTF-8 として不正");
+
+  // ③ ヘッダ項目がオブジェクトでない
+  assertThrows(
+    () => parseSafetensors(packSafetensors({ a: 5 }, new Uint8Array(0))),
+    SafetensorsError,
+    "ヘッダ項目がオブジェクトでない",
+  );
+
+  // ④ shape が配列でない
+  assertThrows(
+    () =>
+      parseSafetensors(
+        packSafetensors({ a: { dtype: "F32", shape: "x", data_offsets: [0, 4] } }, F32_2),
+      ),
+    SafetensorsError,
+    "shape が配列でない",
+  );
+
+  // ⑤ data_offsets が配列でない / 要素数が 2 でない
+  assertThrows(
+    () =>
+      parseSafetensors(
+        packSafetensors({ a: { dtype: "F32", shape: [1], data_offsets: 0 } }, new Uint8Array(4)),
+      ),
+    SafetensorsError,
+    "data_offsets が配列でない",
+  );
+  assertThrows(
+    () =>
+      parseSafetensors(
+        packSafetensors({ a: { dtype: "F32", shape: [1], data_offsets: [0] } }, new Uint8Array(4)),
+      ),
+    SafetensorsError,
+    "data_offsets の要素数が 1",
+  );
+
+  // ⑥ 要素数が安全整数を超える（宣言だけで踏める — 実データは要らない）
+  assertThrows(
+    () =>
+      parseSafetensors(
+        packSafetensors(
+          { a: { dtype: "F32", shape: [2 ** 30, 2 ** 30], data_offsets: [0, 0] } },
+          new Uint8Array(0),
+        ),
+      ),
+    SafetensorsError,
+    "要素数が安全整数を超える",
+  );
+
+  // ⑦ __metadata__ がオブジェクトでない（配列は JSON では object 型だが表ではない）
+  assertThrows(
+    () => parseSafetensors(packSafetensors({ __metadata__: [] }, new Uint8Array(0))),
+    SafetensorsError,
+    "__metadata__ がオブジェクトでない",
+  );
+});
+
 Deno.test("parseSafetensors: data_offsets の逆転を拒否する", () => {
   const buffer = packSafetensors(
     { a: { dtype: "F32", shape: [1], data_offsets: [8, 4] } },

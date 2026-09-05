@@ -53,7 +53,7 @@ import { createSession } from "../src/runtime/executor.ts";
 import { quantizeF16 } from "./helpers/f16.ts";
 import { quantizeI8 } from "./helpers/i8.ts";
 import { fill, type FilledTensor, graphModelBuffer, singleOpGraph } from "./helpers/graph.ts";
-import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE } from "./helpers/gpu.ts";
 
 const STORAGE_IN = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
 const UNIFORM_IN = GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST;
@@ -679,7 +679,7 @@ const conv1dKeysUsed = async (
 
 Deno.test({
   name: "executor は groups で 2 カーネルを踏み分ける（1 = igemm / >1 = 直接・実 GPU）",
-  ignore: !GPU_AVAILABLE,
+  ignore: !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
   fn: async () => {
     // Cin = Cout = 6・K=3 → kFlat = 18（groups=1）で 4 の倍数でないのでスカラ変種。
     // Cout=6 は `6 % 64 == 6` なので m タイルは 32 行。
@@ -701,7 +701,7 @@ Deno.test({
  */
 Deno.test({
   name: "conv1d の executor は M%64 で m タイル 64/32 を踏み分ける（実 GPU）",
-  ignore: !GPU_AVAILABLE,
+  ignore: !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
   fn: async () => {
     // Cout = 96（`96 % 64 == 32`）→ 32 行。kFlat = 288・Lout = 8 なので v4。
     assertEquals(

@@ -286,6 +286,16 @@ const checkConv2dDims = (dims: Conv2dDims): readonly number[] => {
   assertU32Params("conv2d params", dimensions);
   const values = Object.values(dimensions);
   const positive: readonly (readonly [string, number])[] = [
+    // MUST: テンソルの実寸も正整数に限る。0 の辺は縮約を 1 度も回さず、出力が bias 一色に
+    // なるのに例外が出ない（GPU は 0 要素バッファの束縛で validation に落ちるが、カーネル
+    // 直呼びはそこまで届かない）— deform_conv2d が同じ集合を持つのと対。
+    ["batch", dims.batch],
+    ["channels_in", dims.channelsIn],
+    ["channels_out", dims.channelsOut],
+    ["height_in", dims.heightIn],
+    ["width_in", dims.widthIn],
+    ["height_out", dims.heightOut],
+    ["width_out", dims.widthOut],
     ["stride_h", dims.strideH],
     ["stride_w", dims.strideW],
     ["kernel_h", dims.kernelH],

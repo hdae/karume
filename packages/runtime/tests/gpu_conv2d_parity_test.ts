@@ -52,7 +52,7 @@ import { createSession } from "../src/runtime/executor.ts";
 import { quantizeF16 } from "./helpers/f16.ts";
 import { quantizeI8 } from "./helpers/i8.ts";
 import { fill, type FilledTensor, graphModelBuffer, singleOpGraph } from "./helpers/graph.ts";
-import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE } from "./helpers/gpu.ts";
 
 const STORAGE_IN = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
 const UNIFORM_IN = GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST;
@@ -598,6 +598,28 @@ const CASES: readonly ParityCase[] = [
     storage: "f32",
     expectVec4: true,
   },
+  {
+    // **v4 判定 3 条件目（`strideW == 1`）の唯一の検出器**。kFlat = 4·1·4 = 16（%4==0）・
+    // Wout = (16−4)/4 + 1 = 4（%4==0）で他 2 条件は満たすが、strideW = 4 なので v4 は選べない
+    // （4 列連続読みは stride 飛びの位置を連続として読む = 例外の出ない誤値になる）。
+    // 述語から `strideW === 1` を外すとこの 1 本だけが赤くなる。
+    name: "strideW=4 で v4 に落ちない [1,4,4,16] * W[8,4,1,4]",
+    batch: 1,
+    channelsIn: 4,
+    channelsOut: 8,
+    heightIn: 4,
+    widthIn: 16,
+    kernelH: 1,
+    kernelW: 4,
+    strideH: 1,
+    strideW: 4,
+    paddingH: 0,
+    paddingW: 0,
+    dilationH: 1,
+    dilationW: 1,
+    storage: "f32",
+    expectVec4: false,
+  },
 ];
 
 /** ビット列の食い違い（先頭 4 件）を人が読める形にする。 */
@@ -735,7 +757,7 @@ const conv2dKeysUsed = async (
 
 Deno.test({
   name: "executor は groups で 2 カーネルを踏み分ける（1 = igemm / >1 = 直接・実 GPU）",
-  ignore: !GPU_AVAILABLE,
+  ignore: !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
   fn: async () => {
     // Cin = Cout = 6・3×3 → kFlat = 54（groups=1）で 4 の倍数でないのでスカラ変種。
     // Cout=6 は `6 % 64 == 6` なので m タイルは 32 行（{@link conv2dIgemmMTile}）。
@@ -757,7 +779,7 @@ Deno.test({
  */
 Deno.test({
   name: "executor は M%64 で m タイル 64/32 を踏み分ける（実 GPU）",
-  ignore: !GPU_AVAILABLE,
+  ignore: !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
   fn: async () => {
     // Cout = 96（census の本命 — `96 % 64 == 32`）→ 32 行
     assertEquals(

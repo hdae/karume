@@ -26,7 +26,7 @@
  */
 
 import type { IrDtype } from "../format/ir.ts";
-import { IS_NAN_BITS_WGSL, NAN_MAX_WGSL } from "./elementwise.ts";
+import { IS_NAN_BITS_WGSL, NAN_MAX_WGSL, NAN_MIN_WGSL } from "./numerics-wgsl.ts";
 import { outputDtypeOf, REDUCE_OPS, type ReduceOpName, resolveOpContract } from "../ops.ts";
 import { CodegenError } from "./errors.ts";
 import { assertU32Params } from "./params.ts";
@@ -81,9 +81,7 @@ const IDENTITY: Readonly<Record<ReduceOpName, Readonly<Partial<Record<IrDtype, s
  */
 const NAN_PROPAGATING_FN: Readonly<Partial<Record<ReduceOpName, string>>> = {
   amax: NAN_MAX_WGSL,
-  amin: `fn nan_min(a: f32, b: f32) -> f32 {
-  return select(select(min(a, b), b, is_nan_bits(b)), a, is_nan_bits(a));
-}`,
+  amin: NAN_MIN_WGSL,
 };
 
 const COMBINE: Readonly<Record<ReduceOpName, (a: string, b: string) => string>> = {
@@ -186,14 +184,28 @@ export const reduceParams = (rows: number, dim: number): Uint32Array<ArrayBuffer
   return params;
 };
 
-/** 軸 reduce の並列形（1 スレッド = 1 出力）。行 reduce と同じ 256。 */
-export const AXIS_REDUCE_WORKGROUP_SIZE = 256;
+/**
+ * 軸 reduce の並列形（1 スレッド = 1 出力）。**行 reduce と同じサイズであること**が縮約順序
+ * 一致の条件なので、別の数として書かずに {@link REDUCE_WORKGROUP_SIZE} から定義する。
+ */
+export const AXIS_REDUCE_WORKGROUP_SIZE = REDUCE_WORKGROUP_SIZE;
 
 /**
- * 軸 reduce の carry-stack の段数。256 回 push した後に有効なのは最上段 1 つだけなので、
- * `log2(256) + 1 = 9` 段要る。
+ * workgroup サイズの log2（2 冪でなければ生成の入口で落とす）。
+ *
+ * MUST: carry-stack の段数（`log2 + 1`）とビット反転の shift（`32 − log2`）はサイズから導く。
+ * 手写しの定数を並べると片方だけずれた形が**例外なしの沈黙誤値**になる（段数が足りなければ
+ * 一度も書かれていない段を読み、shift がずれれば葉の並びが行 reduce の木と食い違う）。
+ * 2 冪でないサイズは段数が小数になるだけでなく、行 reduce のツリー縮約（stride の半減）も
+ * 成立しない。
  */
-const AXIS_REDUCE_STACK_DEPTH = 9;
+const workgroupSizeBits = (size: number): number => {
+  const bits = Math.log2(size);
+  if (!Number.isInteger(bits)) {
+    throw new CodegenError(`reduce codegen: workgroup サイズ ${size} が 2 の冪でない`);
+  }
+  return bits;
+};
 
 /**
  * 軸 reduce 変種のキー。行 reduce（{@link reduceKey}）とは**別のパイプライン**で、既存の
@@ -234,6 +246,9 @@ export const axisReduceWgsl = (spec: ReduceSpec): string => {
   const propagate = NAN_PROPAGATING_FN[op];
   const helpers = propagate === undefined ? [] : [IS_NAN_BITS_WGSL, propagate];
   const size = AXIS_REDUCE_WORKGROUP_SIZE;
+  const bits = workgroupSizeBits(size);
+  // size 回 push した後に有効なのは最上段 1 つだけなので `log2(size) + 1` 段要る。
+  const stackDepth = bits + 1;
   return [
     `// karume axis reduce ${op} (non-last dim, ${label}, generated)`,
     "struct Params {",
@@ -258,10 +273,10 @@ export const axisReduceWgsl = (spec: ReduceSpec): string => {
     "  while (t < params.out_count) {",
     "    // 出力添字 t = outer·inner + i。縮約軸だけを外した先頭アドレスへ戻す。",
     "    let base = (t / inner) * axis_len * inner + (t % inner);",
-    `    var acc: array<${accumulator}, ${AXIS_REDUCE_STACK_DEPTH}>;`,
+    `    var acc: array<${accumulator}, ${stackDepth}>;`,
     `    for (var m = 0u; m < ${size}u; m = m + 1u) {`,
     "      // 行 reduce の葉の並び（ビット反転）を 1 スレッドで再現する",
-    "      let slot = reverseBits(m) >> 24u;",
+    `      let slot = reverseBits(m) >> ${32 - bits}u;`,
     `      var v = ${identity};`,
     "      var c = slot;",
     "      while (c < axis_len) {",
@@ -275,7 +290,7 @@ export const axisReduceWgsl = (spec: ReduceSpec): string => {
     "      }",
     "      acc[k] = v;",
     "    }",
-    `    out[t] = acc[${AXIS_REDUCE_STACK_DEPTH - 1}u];`,
+    `    out[t] = acc[${stackDepth - 1}u];`,
     "    t = t + stride;",
     "  }",
     "}",

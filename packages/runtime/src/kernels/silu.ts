@@ -20,7 +20,7 @@
  * primitive と融合版で丸め列が割れうる）。
  */
 
-import { SIGMOID_STABLE_WGSL } from "../codegen/elementwise.ts";
+import { SIGMOID_STABLE_WGSL } from "../codegen/numerics-wgsl.ts";
 import { CodegenError } from "../codegen/errors.ts";
 import { assertU32Params } from "../codegen/params.ts";
 

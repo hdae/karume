@@ -40,6 +40,7 @@ import {
   TOPK_CASES,
   UNARY_CASES,
   UPSAMPLE_CASES,
+  UPSAMPLE_FRACTIONAL_CASES,
 } from "./helpers/gpu_op_cases.ts";
 import { BIT_IDENTICAL_OPS, opTolerance } from "./helpers/op-tolerance.ts";
 import { fill, graphModelBuffer, outputName, singleOpGraph } from "./helpers/graph.ts";
@@ -343,8 +344,14 @@ Deno.test({
         ...UPSAMPLE_CASES,
         ...REDUCE_CASES,
       ].filter((testCase) => BIT_IDENTICAL_OPS.has(testCase.op));
-      // 対象 9 op が 1 ケースも拾えていない形（リスト構成の変更で門が空転する形）を塞ぐ
-      assertEquals(cases.length >= 15, true, `ビット同一門の対象が ${cases.length} ケースしかない`);
+      // 対象 op が 1 ケースも拾えていない形（リスト構成の変更で門が空転する形）を塞ぐ。
+      // MUST: 総数の下限では足りない（UPSAMPLE / DEFORM を丸ごと外しても数は残る）— op の
+      // 集合そのものを突き合わせ、BIT_IDENTICAL_OPS へ足したらケースを足すまで赤にする。
+      assertEquals(
+        new Set(cases.map((testCase) => testCase.op)),
+        new Set(BIT_IDENTICAL_OPS),
+        "ビット同一門の対象 op がケース集合と食い違う",
+      );
       for (const testCase of cases) {
         const actual = await runOutputs(gpu, testCase);
         const expected = applyReferenceOpOutputs(
@@ -1270,6 +1277,19 @@ Deno.test({
   fn: () => checkAll(UPSAMPLE_CASES),
 });
 
+/**
+ * 非厳密 scale（`fl((in−1)/(out−1))` が f32 で往復しない形）の突合。**ビット同一門とは別立て**
+ * にするのは、この形が定義上ビット同一を満たさないため（helpers/gpu_op_cases.ts の
+ * UPSAMPLE_FRACTIONAL_CASES の MUST）。ここが見るのは実測表の帯での一致で、λ が 0 / 1 に
+ * 潰れない丸め列を GPU と CPU 参照の双方に踏ませる唯一のケース。
+ */
+Deno.test({
+  name:
+    "双線形 resample は scale が f32 で厳密でない形でも CPU 参照と実測表の帯で一致する（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: () => checkAll(UPSAMPLE_FRACTIONAL_CASES),
+});
+
 Deno.test({
   name: "DCNv2（k の 2 形 / バッチ 2 / 非対称形）が CPU 参照と一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -1319,6 +1339,48 @@ Deno.test({
       // 中は補間される（端だけ見ると恒等コピーでも通ってしまう）。scale_h = 3/8 なので
       // 出力行 4 の源座標は 1.5 = 入力行 1 と 2 の中点 — 端の厳密一致と両立する内点。
       assertEquals(at(4, 0), Math.fround((src(1, 0) + src(2, 0)) / 2), "H の中点");
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+/**
+ * 上の門の**裏**（by-design の非厳密端点）。`scale = fl((in−1)/(out−1))` が f32 で往復しない形
+ * では、最終出力の源座標が `fl(fl(1/41)·41) = 0.9999999403953552` に留まり、**出力の端は入力の
+ * 端と厳密には一致しない**（docs/limitations.md・src/kernels/upsample-bilinear2d.ts の NOTE で
+ * 公開している by-design 契約 — torch と同じ式を同じ順で踏む代償）。
+ *
+ * MUST: 「端をクランプして厳密化する」変更が必ず赤くなる形にする。他の全ケースは scale が
+ * f32 で厳密なので、クランプを足しても値が 1 ビットも動かず緑のまま通る。
+ */
+Deno.test({
+  name:
+    "双線形 resample は scale が f32 で往復しない形で端を厳密一致させない（クランプしない・実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const rows = 42;
+    // 端の 2 値を 0 / 1 にする（λ = 1 − 2⁻²⁴ の差が f32 の格子上で表せる値域 — 値が大きいと
+    // 補間結果が端の値へ丸め戻り、非厳密が観測できなくなる）。
+    const input = fill([1, 1, 2, 1], (i) => i);
+    const attrs = { output_size: [rows, 1] };
+    const gpu = await acquireGpu();
+    try {
+      const actual = await runCase(gpu, {
+        name: "upsample_bilinear2d 非厳密端点",
+        op: "upsample_bilinear2d",
+        inputs: [input],
+        outShapes: [[1, 1, rows, 1]],
+        attrs,
+      });
+      const last = actual.data[rows - 1];
+      assertNotEquals(last, input.data[1], "最終行が入力の端へクランプされている");
+      // λ = fl(fl(1/41)·41)（源座標が 1 に届かない量そのもの）
+      assertEquals(last, Math.fround(Math.fround(1 / 41) * 41), "最終行の λ");
+      // CPU 参照も同じ非厳密端点を出す（片側だけクランプする退行も落ちる）
+      const expected = applyReferenceOp("upsample_bilinear2d", [input], attrs, [1, 1, rows, 1]);
+      const report = compareTensors(actual, expected, opTolerance("upsample_bilinear2d"));
+      assertEquals(report.pass, true, `非厳密端点: ${formatAllclose(report)}`);
     } finally {
       gpu.destroy();
     }
@@ -1477,7 +1539,12 @@ Deno.test({
             graph.nodes[0].attrs as Record<string, unknown>,
             testCase.resolved,
           );
-          const report = compareTensors(outputs["y"], expected);
+          // MUST: 帯は実測表から引く（既定帯へ落とすと EXACT の op が 1e-5 級の汚れを通す）
+          const report = compareTensors(
+            outputs["y"],
+            expected,
+            opTolerance("sym_prefix_slice"),
+          );
           assertEquals(report.pass, true, `${testCase.name}: ${formatAllclose(report)}`);
         } finally {
           await session.dispose();
@@ -1546,7 +1613,8 @@ Deno.test({
             { dim: testCase.dim },
             testCase.resolved,
           );
-          const report = compareTensors(outputs["y"], expected);
+          // MUST: 帯は実測表から引く（既定帯へ落とすと EXACT の op が 1e-5 級の汚れを通す）
+          const report = compareTensors(outputs["y"], expected, opTolerance("cat"));
           assertEquals(report.pass, true, `${testCase.name}: ${formatAllclose(report)}`);
         } finally {
           await session.dispose();

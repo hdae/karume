@@ -88,7 +88,7 @@ import { createSession, type SessionOptions, type Tensor } from "../src/runtime/
 import { ExecutionError } from "../src/runtime/plan.ts";
 import { f32ToF16Bits } from "./helpers/f16.ts";
 import { fill, type FilledTensor, graphModelBuffer, singleOpGraph } from "./helpers/graph.ts";
-import { GPU_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
+import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
 
 const STORAGE_IN = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
 const UNIFORM_IN = GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST;
@@ -489,35 +489,64 @@ Deno.test({
             `${name}: head 0 と head 1 の出力が同一（base の取り違えが値に出ない）`,
           );
         }
-        if (actual.entries.length > 0) {
-          const running = new Map(actual.entries.map((entry) => [entry.key, entry.dispatchCount]));
-          // 3 カーネルは**同時に**切り替わる（S の格納形が書き手と読み手で一致する条件）
-          for (
-            const key of [
-              attentionQkKey(true, "f32", "f16"),
-              attentionStatsKey("f32", "f16", attentionStatsRegCache(n)),
-              attentionPvKey(true, "f32", "f16"),
-            ]
-          ) {
-            assertEquals(running.get(key), 1, `${name}: '${key}' が 1 本走っていない`);
-          }
-          for (
-            const key of [
-              attentionQkKey(true),
-              attentionStatsKey("f32", "f32", attentionStatsRegCache(n)),
-              attentionPvKey(true),
-            ]
-          ) {
-            assertEquals(running.has(key), false, `${name}: f32 格納の '${key}' が残っている`);
-          }
+        // S の確保が半分になっている（案 γ の本体価値 — RunArena の実測で見える形）。
+        // MUST: 差分比較を条件で包まない（peakTransientBytes は計測 feature に依らず実 run なら
+        // 常に正 — 0 に落ちたらそれ自体が診断面の退行で、門が黙って消える形になる）。
+        assert(
+          plain.peakTransientBytes > 0,
+          `${name}: peakTransient の観測点が空振りしている`,
+        );
+        assertEquals(
+          plain.peakTransientBytes - actual.peakTransientBytes,
+          b * h * m * n * 2,
+          `${name}: peakTransient の差が S の半減ぶんと一致しない`,
+        );
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+/**
+ * **census**（ADR 0058 決定 4）。3 カーネルが**同時に** s16 へ切り替わったことをキーで見る。
+ *
+ * MUST: 計測を要求しない device（`TIMESTAMP_QUERY_AVAILABLE` が偽）では**明示 SKIP** し、
+ * 走るときは空の内訳を無条件に FAIL にする（`TIMING_ACQUIRE_OPTIONS` は feature 不在で
+ * `gpuTiming: false` に落ちるので、「entries が空なら何も見ない」で守ると変種選択の検査が
+ * 1 つも走らないまま緑になる — gpu_attention_gqa_test.ts の census と同じ形）。数値契約
+ * （atol=0 / peakTransient）は上のテストが計測なし機でも走り続ける。
+ */
+Deno.test({
+  name:
+    "attentionScoreStorage:'f16' は ①QK / ②行統計 / ③PV が同時に s16 へ切り替わる（実 GPU / timestamp-query）",
+  ignore: !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    try {
+      for (const shape of S16_SHAPES) {
+        const { name, n } = shape;
+        const actual = await runAttention(gpu, shape, { attentionScoreStorage: "f16" });
+        assert(actual.entries.length > 0, `${name}: 内訳が空（キー検査が空振りしている）`);
+        const running = new Map(actual.entries.map((entry) => [entry.key, entry.dispatchCount]));
+        // 3 カーネルは**同時に**切り替わる（S の格納形が書き手と読み手で一致する条件）
+        for (
+          const key of [
+            attentionQkKey(true, "f32", "f16"),
+            attentionStatsKey("f32", "f16", attentionStatsRegCache(n)),
+            attentionPvKey(true, "f32", "f16"),
+          ]
+        ) {
+          assertEquals(running.get(key), 1, `${name}: '${key}' が 1 本走っていない`);
         }
-        // S の確保が半分になっている（案 γ の本体価値 — RunArena の実測で見える形）
-        if (plain.peakTransientBytes > 0) {
-          assertEquals(
-            plain.peakTransientBytes - actual.peakTransientBytes,
-            b * h * m * n * 2,
-            `${name}: peakTransient の差が S の半減ぶんと一致しない`,
-          );
+        for (
+          const key of [
+            attentionQkKey(true),
+            attentionStatsKey("f32", "f32", attentionStatsRegCache(n)),
+            attentionPvKey(true),
+          ]
+        ) {
+          assertEquals(running.has(key), false, `${name}: f32 格納の '${key}' が残っている`);
         }
       }
     } finally {
@@ -538,24 +567,40 @@ Deno.test({
     const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
     try {
       for (const shape of DEGRADED_SHAPES) {
-        const { name, why, d, n } = shape;
+        const { name, d, n } = shape;
         assertEquals(attentionScoreUsesF16(d, n), false, `${name}: 非適格形のはず`);
         const requested = await runAttention(gpu, shape, { attentionScoreStorage: "f16" });
         const plain = await runAttention(gpu, shape, {});
         // 縮退は**沈黙**（値は f32 経路とビット同一 — 丸めが 1 度も起きない）
         assertBitEqual(requested.output, plain.output, `${name}: 縮退が f32 経路と一致しない`);
         assert(new Set(bits(plain.output)).size > 1, `${name}: 出力が定数`);
-        if (requested.entries.length > 0) {
-          const keys = new Set(requested.entries.map((entry) => entry.key));
-          for (const key of [...keys]) {
-            assertEquals(key.endsWith(":s16"), false, `${name}（${why} 側）: s16 キーが走っている`);
-          }
-          assertEquals(
-            keys.has(attentionStatsKey("f32", "f32", attentionStatsRegCache(n))),
-            true,
-            `${name}: f32 格納の ②行統計`,
-          );
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+/** 非適格形の縮退を見る唯一の検出器（キー検査）。SKIP / 無条件 assert の理由は上の census と同じ。 */
+Deno.test({
+  name: "非適格形は s16 キーを 1 本も出さず f32 格納の ②行統計が走る（実 GPU / timestamp-query）",
+  ignore: !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    try {
+      for (const shape of DEGRADED_SHAPES) {
+        const { name, why, n } = shape;
+        const requested = await runAttention(gpu, shape, { attentionScoreStorage: "f16" });
+        assert(requested.entries.length > 0, `${name}: 内訳が空（キー検査が空振りしている）`);
+        const keys = new Set(requested.entries.map((entry) => entry.key));
+        for (const key of [...keys]) {
+          assertEquals(key.endsWith(":s16"), false, `${name}（${why} 側）: s16 キーが走っている`);
         }
+        assertEquals(
+          keys.has(attentionStatsKey("f32", "f32", attentionStatsRegCache(n))),
+          true,
+          `${name}: f32 格納の ②行統計`,
+        );
       }
     } finally {
       gpu.destroy();
@@ -608,6 +653,8 @@ Deno.test({
 // (5) 本命の組（i8a8 × s16）— 直交していることのキー検査
 // ---------------------------------------------------------------------------
 
+const A8_S16_SHAPE: AttentionShape = { name: "B2 H3 M65 N68 D20", b: 2, h: 3, m: 65, n: 68, d: 20 };
+
 Deno.test({
   name:
     "attentionCompute:'a8' × attentionScoreStorage:'f16' は直交して同時に立つ（shader-f16 不要・実 GPU）",
@@ -615,7 +662,7 @@ Deno.test({
   fn: async () => {
     const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
     try {
-      const shape: AttentionShape = { name: "B2 H3 M65 N68 D20", b: 2, h: 3, m: 65, n: 68, d: 20 };
+      const shape = A8_S16_SHAPE;
       const both = await runAttention(gpu, shape, {
         attentionCompute: "a8",
         attentionScoreStorage: "f16",
@@ -623,38 +670,55 @@ Deno.test({
       const i8a8Only = await runAttention(gpu, shape, { attentionCompute: "a8" });
       // S の丸めが 1 段増えるので値は動く（opt-in が効いていることの数値側の証拠）
       assertDiffers(both.output, i8a8Only.output, "i8a8 × s16");
-      // S が半分になっている（i8a8 でも同じ 1 箇所の確保が効く）
-      if (i8a8Only.peakTransientBytes > 0) {
-        assertEquals(
-          i8a8Only.peakTransientBytes - both.peakTransientBytes,
-          shape.b * shape.h * shape.m * shape.n * 2,
-          "peakTransient の差が S の半減ぶんと一致しない",
-        );
+      // S が半分になっている（i8a8 でも同じ 1 箇所の確保が効く）。上と同じ理由で無条件。
+      assert(i8a8Only.peakTransientBytes > 0, "peakTransient の観測点が空振りしている");
+      assertEquals(
+        i8a8Only.peakTransientBytes - both.peakTransientBytes,
+        shape.b * shape.h * shape.m * shape.n * 2,
+        "peakTransient の差が S の半減ぶんと一致しない",
+      );
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+/** 直交（3 軸が同時に立つ）を見る唯一の検出器。SKIP / 無条件 assert の理由は上の census と同じ。 */
+Deno.test({
+  name:
+    "attentionCompute:'a8' × attentionScoreStorage:'f16' は ①③ が i8a8・② だけ s16 のキーで走る（実 GPU / timestamp-query）",
+  ignore: !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    try {
+      const shape = A8_S16_SHAPE;
+      const both = await runAttention(gpu, shape, {
+        attentionCompute: "a8",
+        attentionScoreStorage: "f16",
+      });
+      assert(both.entries.length > 0, "内訳が空（キー検査が空振りしている）");
+      const byKey = new Map(both.entries.map((entry) => [entry.key, entry.dispatchCount]));
+      // ①QK / ③PV は i8a8 のまま、S だけが f16 格納（3 つの軸が同時に立つ）
+      assertEquals(byKey.get(attentionQkI8a8Key(true, true, "f16")), 1);
+      assertEquals(byKey.get(attentionPvI8a8Key(true, true, "f16")), 1);
+      // ②行統計は f32 計算のまま s16 を読む
+      assertEquals(
+        byKey.get(attentionStatsKey("f32", "f16", attentionStatsRegCache(shape.n))),
+        1,
+      );
+      // f32 格納の変種は 1 本も残らない
+      for (
+        const key of [
+          attentionQkI8a8Key(true, true),
+          attentionPvI8a8Key(true, true),
+          attentionStatsKey("f32", "f32", attentionStatsRegCache(shape.n)),
+        ]
+      ) {
+        assertEquals(byKey.has(key), false, `f32 格納の '${key}' が残っている`);
       }
-      if (both.entries.length > 0) {
-        const byKey = new Map(both.entries.map((entry) => [entry.key, entry.dispatchCount]));
-        // ①QK / ③PV は i8a8 のまま、S だけが f16 格納（3 つの軸が同時に立つ）
-        assertEquals(byKey.get(attentionQkI8a8Key(true, true, "f16")), 1);
-        assertEquals(byKey.get(attentionPvI8a8Key(true, true, "f16")), 1);
-        // ②行統計は f32 計算のまま s16 を読む
-        assertEquals(
-          byKey.get(attentionStatsKey("f32", "f16", attentionStatsRegCache(shape.n))),
-          1,
-        );
-        // f32 格納の変種は 1 本も残らない
-        for (
-          const key of [
-            attentionQkI8a8Key(true, true),
-            attentionPvI8a8Key(true, true),
-            attentionStatsKey("f32", "f32", attentionStatsRegCache(shape.n)),
-          ]
-        ) {
-          assertEquals(byKey.has(key), false, `f32 格納の '${key}' が残っている`);
-        }
-        // i8a8 の前段（q / k / Vᵀ の量子化と Vᵀ の permute）は s16 に影響されない
-        assertEquals(quantizeRowsDispatches(byKey), 3, "quantize_rows が q / k / v の 3 本でない");
-        assertEquals(byKey.get(stridedKey({ dtype: "f32" })), 1, "Vᵀ の permute が 1 本でない");
-      }
+      // i8a8 の前段（q / k / Vᵀ の量子化と Vᵀ の permute）は s16 に影響されない
+      assertEquals(quantizeRowsDispatches(byKey), 3, "quantize_rows が q / k / v の 3 本でない");
+      assertEquals(byKey.get(stridedKey({ dtype: "f32" })), 1, "Vᵀ の permute が 1 本でない");
     } finally {
       gpu.destroy();
     }

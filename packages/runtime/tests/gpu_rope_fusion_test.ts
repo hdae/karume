@@ -1,14 +1,14 @@
 // half-split RoPE の exact peephole（融合ルール rope — src/runtime/fusion.ts）:
 // 既存 primitive 列とのビット parity と dispatch 削減を直接固定する。
 
-import { assertEquals } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import { openModel } from "../src/format/container.ts";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { ROPE_KEY } from "../src/kernels/rope.ts";
 import { createSession, type Tensor } from "../src/runtime/executor.ts";
 import type { GraphJson } from "./helpers/format.ts";
 import { fill, graphModelBuffer } from "./helpers/graph.ts";
-import { GPU_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
+import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
 
 // H=1, S=3 では n=384 となり、256 スレッド workgroup の末尾端数も通る。
 const TABLE_SHAPE = [1, 1, "S", 128] as const;
@@ -157,13 +157,44 @@ Deno.test({
             0,
             `${order}: 反例のカウンタは 0`,
           );
-          const timing = fused.diagnostics().lastRunTiming;
-          if (timing !== undefined) {
-            assertEquals(timing.entries.map((entry) => entry.key), [ROPE_KEY]);
-          }
         } finally {
           await fused.dispose();
           await split.dispose();
+        }
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+/**
+ * **census**（ADR 0058 決定 4）。融合が RoPE カーネル 1 本だけで済んでいることはキーでしか
+ * 見えない（dispatch 数だけでは別カーネル 1 本へ化けた形を見逃す）。
+ *
+ * MUST: 計測を要求しない device（`TIMESTAMP_QUERY_AVAILABLE` が偽）では**明示 SKIP** し、
+ * 走るときは内訳を無条件に検査する（`timing !== undefined` で守ると、計測なし機では
+ * キー検査が 1 つも走らないまま緑になる — gpu_attention_gqa_test.ts の census と同じ形）。
+ */
+Deno.test({
+  name: "half-split RoPE 融合が走らせるのは RoPE カーネル 1 本だけ（実 GPU / timestamp-query）",
+  ignore: !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    const inputs = ropeInputs(1, 3);
+    try {
+      for (const order of ["slice-first", "direct-first"] as const) {
+        const fused = await createSession(
+          gpu,
+          openModel(graphModelBuffer(ropeGraph(order, false))),
+        );
+        try {
+          await fused.run(inputs);
+          const timing = fused.diagnostics().lastRunTiming;
+          assert(timing !== undefined, `${order}: 内訳が空（キー検査が空振りしている）`);
+          assertEquals(timing.entries.map((entry) => entry.key), [ROPE_KEY]);
+        } finally {
+          await fused.dispose();
         }
       }
     } finally {

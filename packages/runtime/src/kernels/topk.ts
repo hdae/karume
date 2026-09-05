@@ -58,7 +58,7 @@
  * 実装がありうる）。
  */
 
-import { IS_NAN_BITS_WGSL } from "../codegen/elementwise.ts";
+import { IS_NAN_BITS_WGSL } from "../codegen/numerics-wgsl.ts";
 import { CodegenError } from "../codegen/errors.ts";
 import { assertU32Params } from "../codegen/params.ts";
 

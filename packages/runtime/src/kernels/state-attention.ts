@@ -103,7 +103,7 @@
  * (−inf))` = `exp(NaN)` = NaN が分母へ入る）。
  */
 
-import { IS_NAN_BITS_WGSL, NAN_MAX_WGSL } from "../codegen/elementwise.ts";
+import { IS_NAN_BITS_WGSL, NAN_MAX_WGSL } from "../codegen/numerics-wgsl.ts";
 import { CodegenError } from "../codegen/errors.ts";
 import { gridStrideWorkgroups, tiledWorkgroups } from "../codegen/dispatch.ts";
 import { assertU32Params } from "../codegen/params.ts";

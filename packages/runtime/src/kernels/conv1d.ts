@@ -263,6 +263,18 @@ const checkConv1dDims = (dims: Conv1dDims): readonly number[] => {
       `conv1d params: stride / kernel / dilation / groups は正整数（${dims.stride}, ${dims.kernel}, ${dims.dilation}, ${dims.groups}）`,
     );
   }
+  // MUST: テンソルの実寸も正整数に限る。0 の辺は縮約を 1 度も回さず、出力が bias 一色に
+  // なるのに例外が出ない（deform_conv2d が同じ集合を持つのと対）。
+  const positive: readonly (readonly [string, number])[] = [
+    ["batch", dims.batch],
+    ["channels_in", dims.channelsIn],
+    ["channels_out", dims.channelsOut],
+    ["length_in", dims.lengthIn],
+    ["length_out", dims.lengthOut],
+  ];
+  for (const [name, value] of positive) {
+    if (value < 1) throw new CodegenError(`conv1d params: ${name} は正整数（${value}）`);
+  }
   // MUST: グループの割り切れは params 層でも見る（シェーダの除算が切り捨てになり、
   // 読む入力チャネル帯が黙ってずれる — 契約検査と二重だが、カーネル直呼びの経路も塞ぐ）。
   if (dims.channelsIn % dims.groups !== 0 || dims.channelsOut % dims.groups !== 0) {

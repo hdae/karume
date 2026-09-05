@@ -55,7 +55,11 @@
  * この op の存在理由の 1 つ — ADR 0056 決定 2）。
  */
 
-import { IS_NAN_BITS_WGSL, SIGMOID_STABLE_WGSL, TANH_STABLE_WGSL } from "../codegen/elementwise.ts";
+import {
+  IS_NAN_BITS_WGSL,
+  SIGMOID_STABLE_WGSL,
+  TANH_STABLE_WGSL,
+} from "../codegen/numerics-wgsl.ts";
 import { CodegenError } from "../codegen/errors.ts";
 import { GRU_SCAN_MAX_HIDDEN } from "../codegen/limits.ts";
 import { assertU32Params } from "../codegen/params.ts";

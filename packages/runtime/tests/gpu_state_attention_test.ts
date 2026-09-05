@@ -839,3 +839,218 @@ Deno.test({
     }
   },
 });
+
+// ---------------------------------------------------------------------------
+// 非有限値の伝播（ADR 0020 の NaN 伝播契約が states 形でも成立していること）
+// ---------------------------------------------------------------------------
+
+/** `[B·H, M, D]` の平坦添字（q と out で共通）。 */
+const rowBase = (spec: StateCase, plane: number, row: number): number =>
+  (plane * spec.chunkRows + row) * spec.depth;
+
+/**
+ * ins（`[B·Hkv, M, D]`）の**今 step の先頭行**を全 kv 平面で `value` にする。全平面へ置くのは、
+ * GQA では出力平面 `z` が `z / r` の kv 平面しか読まないため（片方だけ汚すと、汚れていない
+ * 平面まで「非有限になるはず」と主張することになる）。
+ */
+const poisonFirstInsRow = (
+  spec: StateCase,
+  ins: Float32Array<ArrayBuffer>,
+  value: number,
+): void => {
+  for (let plane = 0; plane < spec.batch * spec.kvHeads; plane += 1) {
+    const base = plane * spec.chunkRows * spec.depth;
+    for (let d = 0; d < spec.depth; d += 1) ins[base + d] = value;
+  }
+};
+
+/**
+ * ② が行 max に `nan_max`（ビット列 NaN 判定 — ADR 0020）を使うことの**唯一の実 GPU 門**。
+ *
+ * 素の `max` は仕様レベルで NaN を落とす（「e1 < e2 なら e2、さもなくば e1」）ので、全 NaN 行の
+ * `amax` が identity の −inf に留まり、②が**空行と判定して stats (0,0) を書き**、③ が
+ * 厳密 0 を出す。例外も NaN も出ないので、キー `attention_state_stats:v2` の存在理由
+ * （src/kernels/state-attention.ts の MUST）が丸ごと沈黙で失われる。
+ *
+ * MUST: 恒真化しないこと。NaN を入れない対照 run で同じ行が**非 0 の有限値**になることを
+ * 併せて見る（「その行はもともと 0」で緑になる形を塞ぐ）。
+ */
+Deno.test({
+  name: "states 形は全 NaN の q 行を NaN のまま出し、他の行へ漏らさない（②の nan_max・実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const spec = PARITY_CASES[1]; // full r1 prefill B2（B2 H4 M6 D8 C32 P0 Q6・pad 行なし）
+    const plane = 1;
+    const row = 2;
+    const gpu = await acquireGpu();
+    const cache: StatePipelineCache = new Map();
+    try {
+      // 対照（NaN なし）— 同じ行が非 0 の有限値であることが門の前提
+      const clean = makeInputs(spec);
+      const control = await runStateAttention(gpu.device, spec, clean, { cache });
+      const at = rowBase(spec, plane, row);
+      assert(
+        [...control.out.slice(at, at + spec.depth)].every(Number.isFinite),
+        "対照 run の対象行が有限でない",
+      );
+      assert(
+        [...control.out.slice(at, at + spec.depth)].some((value) => value !== 0),
+        "対照 run の対象行が全て 0（NaN 門が恒真になる）",
+      );
+
+      for (const pvReduce of ["sequential", "parallel"] as const) {
+        const inputs = makeInputs(spec);
+        for (let d = 0; d < spec.depth; d += 1) inputs.q[at + d] = Number.NaN;
+        const actual = await runStateAttention(gpu.device, spec, inputs, { cache, pvReduce });
+        const where = `③ ${pvReduce}`;
+        // ① NaN を入れた (z, row) の D 成分は全て NaN
+        for (let d = 0; d < spec.depth; d += 1) {
+          assert(
+            Number.isNaN(actual.out[at + d]),
+            `${where}: NaN 行の出力 [${d}] が ${actual.out[at + d]}（NaN が保存されていない）`,
+          );
+        }
+        // ③ 厳密 0 へ化けていない（素の max へ戻すとここが 0 になる）
+        for (let d = 0; d < spec.depth; d += 1) {
+          assertEquals(
+            Object.is(actual.out[at + d], 0),
+            false,
+            `${where}: NaN 行の出力 [${d}] が厳密 0（空行判定へ化けている）`,
+          );
+        }
+        // ② 他の行・他の z は有限のまま（states 形は行ごとに独立な統計を持つ）
+        for (let p = 0; p < spec.batch * spec.heads; p += 1) {
+          for (let r = 0; r < spec.chunkRows; r += 1) {
+            if (p === plane && r === row) continue;
+            const other = rowBase(spec, p, r);
+            for (let d = 0; d < spec.depth; d += 1) {
+              assert(
+                Number.isFinite(actual.out[other + d]),
+                `${where}: 平面 ${p} 行 ${r} の出力へ NaN が漏れた`,
+              );
+            }
+          }
+        }
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+/**
+ * ③PV の pad 行 0 書きが **0·NaN の穴も閉じている**こと（src/kernels/state-attention.ts の
+ * 「値が契約上無意味」を 0 で固定する分岐）。非有限な V が混ざっても、pad 行は live を 1 度も
+ * 走査しないので厳密 0 のまま — 走査してから 0 を掛ける実装だと `0 · ±Inf = NaN` になる。
+ */
+Deno.test({
+  name: "states 形は非有限な V を有効行だけへ伝え、pad 行 / 空行は厳密 0 のまま（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const cache: StatePipelineCache = new Map();
+    try {
+      // ② +Infinity（pad 行を持つ形）— ins の**今 step の先頭行**を全 kv 平面で非有限にする
+      const padSpec = PARITY_CASES[2]; // full r2 pad B2 D6（M6 Q3 P5）
+      const padInputs = makeInputs(padSpec);
+      poisonFirstInsRow(padSpec, padInputs.insV, Number.POSITIVE_INFINITY);
+      const padOut = await runStateAttention(gpu.device, padSpec, padInputs, { cache });
+      for (let plane = 0; plane < padSpec.batch * padSpec.heads; plane += 1) {
+        for (let r = 0; r < padSpec.query; r += 1) {
+          const at = rowBase(padSpec, plane, r);
+          assert(
+            [...padOut.out.slice(at, at + padSpec.depth)].some((value) => !Number.isFinite(value)),
+            `+Inf: 平面 ${plane} 有効行 ${r} が有限のまま（V が読まれていない）`,
+          );
+        }
+      }
+      for (const row of padRows(padSpec)) {
+        for (let d = 0; d < padSpec.depth; d += 1) {
+          assertEquals(
+            Object.is(padOut.out[row * padSpec.depth + d], 0),
+            true,
+            `+Inf: pad 行 ${row} の出力が厳密 0 でない（0·Inf の穴）`,
+          );
+        }
+      }
+
+      // ③ −Infinity（空行が正規に出る形）— 空行 ⊂ pad 行なので同じ分岐が守る
+      const emptySpec = PARITY_CASES[13]; // sliding W2 empty rows（M4 Q1）
+      const emptyInputs = makeInputs(emptySpec);
+      poisonFirstInsRow(emptySpec, emptyInputs.insV, Number.NEGATIVE_INFINITY);
+      const emptyOut = await runStateAttention(gpu.device, emptySpec, emptyInputs, { cache });
+      assert(emptyRows(emptySpec).length > 0, "空行が 1 本も無い（門が空振りしている）");
+      for (const row of emptyRows(emptySpec)) {
+        for (let d = 0; d < emptySpec.depth; d += 1) {
+          assertEquals(
+            Object.is(emptyOut.out[row * emptySpec.depth + d], 0),
+            true,
+            `−Inf: 空行 ${row} の出力が厳密 0 でない`,
+          );
+        }
+      }
+      for (let plane = 0; plane < emptySpec.batch * emptySpec.heads; plane += 1) {
+        const at = rowBase(emptySpec, plane, 0);
+        assert(
+          [...emptyOut.out.slice(at, at + emptySpec.depth)].some((value) =>
+            !Number.isFinite(value)
+          ),
+          `−Inf: 平面 ${plane} の有効行が有限のまま（V が読まれていない）`,
+        );
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+/**
+ * ② の**空行ガード**（`amax == -inf` の行は Σ ループを 1 度も回さない + stats (0,0) を書く）の
+ * 検出器。波 D-7 以降 ①② が有効行だけを覆うので空行は構造的に生じない — そこで
+ * **①QK の述語を常に偽へ落とす故障注入**で「全有効行が空行」の状態を作り、ガードを直接叩く。
+ *
+ * ガードが無いと `exp(-inf - (-inf))` = `exp(NaN)` = NaN が分母へ入り、行全体が NaN になる。
+ */
+Deno.test({
+  name: "①QK の述語を常に偽へ落としても ② の空行ガードで出力は厳密 0（NaN を出さない・実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const spec = PARITY_CASES[2]; // full r2 pad B2 D6（P5 Q3 M6）
+    const gpu = await acquireGpu();
+    const cache: StatePipelineCache = new Map();
+    try {
+      const inputs = makeInputs(spec);
+      const injected = await runStateAttention(gpu.device, spec, inputs, {
+        cache,
+        mutate: replaceIn(["qk"], "if (in_window(col, past + row)) {", "if (false) {"),
+      });
+      // ① 全要素が厳密 0（空行 → (0,0) → exp(-inf - 0) · 0 = 0）
+      const nonZero = [...injected.out].findIndex((value) => !Object.is(value, 0));
+      assertEquals(
+        nonZero,
+        -1,
+        `空行ガード: 添字 ${nonZero} が厳密 0 でない（${injected.out[nonZero] ?? ""}）`,
+      );
+      // ② NaN が 1 つも無い（exp(-inf - (-inf)) 回避の直接の裏）
+      assertEquals(
+        injected.out.some(Number.isNaN),
+        false,
+        "空行ガード: 出力に NaN が残っている",
+      );
+      // ③ 毒値も残っていない（③PV が全行を書いた = full-write は空行でも保たれる）
+      assertEquals(
+        injected.out.some((value) => value === STATE_S_POISON),
+        false,
+        "空行ガード: 出力に毒値が残っている",
+      );
+      // 対照: 注入なしなら出力は非 0（この注入が「何でも 0 にする」形でないことの裏）
+      const control = await runStateAttention(gpu.device, spec, inputs, { cache });
+      assert(
+        [...control.out].some((value) => value !== 0),
+        "対照 run の出力が全て 0（注入の効果が見えない）",
+      );
+    } finally {
+      gpu.destroy();
+    }
+  },
+});

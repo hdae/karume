@@ -1462,6 +1462,28 @@ export const UPSAMPLE_CASES: readonly OpCase[] = [
   },
 ];
 
+/**
+ * **scale が f32 で厳密に表せない形**（{@link UPSAMPLE_CASES} の 6 本は scale が全て
+ * {0, 0.5, 1, 2.5, 3, 3.5} で厳密なので、λ が 0 / 1 に潰れて丸め列を 1 度も作らない）。
+ * H: in=4 → out=6 で `scale = fl(3/5) = 0.6` / W: in=5 → out=4 で `scale = fl(4/3)` と、
+ * H と W で別の非厳密 scale を踏むので軸の取り違えも同時に見える。
+ *
+ * MUST: {@link UPSAMPLE_CASES} へ**混ぜない**。あちらは
+ * {@link "./op-tolerance.ts"} `BIT_IDENTICAL_OPS` のビット同一門にも流れており、非厳密 scale は
+ * 定義上そこを満たさない — GPU は各段を f32 で丸め、CPU 参照は `top` / `bottom` を f64 で
+ * 持って最後に 1 度だけ丸めるので、この形は 48 要素中 11 要素が 1 ulp 割れる（実測）。
+ * 突合の帯は `upsample_bilinear2d` の実測表（SMALL_REDUCE）で、そちらは満たす。
+ */
+export const UPSAMPLE_FRACTIONAL_CASES: readonly OpCase[] = [
+  {
+    name: "upsample_bilinear2d 非厳密 scale [1,2,4,5] → 6×4",
+    op: "upsample_bilinear2d",
+    inputs: [fill([1, 2, 4, 5], SIGNED)],
+    outShapes: [[1, 2, 6, 4]],
+    attrs: { output_size: [6, 4] },
+  },
+];
+
 /** deform の offset（±2.5 の非整数 — 入力平面の外まで振る）。 */
 const OFFSET = (i: number): number => ((i % 11) - 5) * 0.5;
 /** deform の modulator（BiRefNet の `2·sigmoid(...)` と同じ値域 [0,2]）。 */

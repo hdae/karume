@@ -190,6 +190,18 @@ export const convTranspose1dParams = (dims: {
       `conv_transpose1d params: stride / kernel は正整数（${dims.stride}, ${dims.kernel}）`,
     );
   }
+  // MUST: テンソルの実寸も正整数に限る。0 の辺は縮約を 1 度も回さず、出力が bias 一色に
+  // なるのに例外が出ない（deform_conv2d が同じ集合を持つのと対）。
+  const positive: readonly (readonly [string, number])[] = [
+    ["batch", dims.batch],
+    ["channels_in", dims.channelsIn],
+    ["channels_out", dims.channelsOut],
+    ["length_in", dims.lengthIn],
+    ["length_out", dims.lengthOut],
+  ];
+  for (const [name, value] of positive) {
+    if (value < 1) throw new CodegenError(`conv_transpose1d params: ${name} は正整数（${value}）`);
+  }
   const n = dims.batch * dims.channelsOut * dims.lengthOut;
   assertU32Params("conv_transpose1d params", { n });
   const params = new Uint32Array(12);

@@ -90,6 +90,14 @@ import {
   DEFORM_CONV2D_WORKGROUP_SIZE,
   deformConv2dParams,
 } from "../../src/kernels/deform-conv2d.ts";
+import { ADALN_NORM_KEY, ADALN_NORM_WGSL, adalnNormParams } from "../../src/kernels/adaln-norm.ts";
+import { SILU_WORKGROUP_SIZE, siluKey, siluParams, siluWgsl } from "../../src/kernels/silu.ts";
+import {
+  upsample2xParams,
+  UPSAMPLE_2X_KEY,
+  UPSAMPLE_2X_WGSL,
+  UPSAMPLE_2X_WORKGROUP_SIZE,
+} from "../../src/kernels/upsample2x.ts";
 import { SOFTMAX_KEY, SOFTMAX_WGSL, softmaxParams } from "../../src/kernels/softmax.ts";
 import {
   QUANTIZE_ROWS_KEY,
@@ -1001,6 +1009,117 @@ export const rmsNormCase = (): DegenerateCase => {
     uniformParams: true,
     inputs: [input, weight],
     expected: applyReferenceOp("rms_norm", [input, weight], { eps }, [rows, dim]),
+    natural: rows,
+    groups: 2,
+  };
+};
+
+// ---------------------------------------------------------------------------
+// 融合カーネル（op 語彙の外・src/runtime/fusion.ts が置換で挿す 3 族）
+//
+// MUST: 融合カーネルも grid-stride を謳う以上ここに載せる。担当テスト
+// （gpu_upsample2x_fusion_test.ts / gpu_silu_fusion_test.ts / gpu_adaln_fusion_test.ts）は
+// 形が小さく必要数の workgroup がそのまま割り当たるので、`stride` を定数化する退行が
+// 緑のまま通る。
+// ---------------------------------------------------------------------------
+
+/**
+ * `upsample2x`（NCHW nearest 2 倍・融合ルール upsample2x）。要素方向の族で、1 invocation が
+ * 入力 1 要素を出力の 2×2 block へ書く。期待値は**ホストで組む**（op 語彙に無いので
+ * `applyReferenceOp` を通せない）。
+ */
+export const upsample2xCase = (): DegenerateCase => {
+  const rows = 700;
+  const width = 240;
+  const count = rows * width;
+  const outWidth = width * 2;
+  const input = fill([rows, width], SIGNED);
+  const expected = new Float32Array(count * 4);
+  for (let row = 0; row < rows; row += 1) {
+    for (let col = 0; col < width; col += 1) {
+      const value = input.data[row * width + col];
+      const base = 2 * row * outWidth + 2 * col;
+      expected[base] = value;
+      expected[base + 1] = value;
+      expected[base + outWidth] = value;
+      expected[base + outWidth + 1] = value;
+    }
+  }
+  return {
+    name: "upsample2x（融合）",
+    key: UPSAMPLE_2X_KEY,
+    wgsl: UPSAMPLE_2X_WGSL,
+    params: upsample2xParams(count, width),
+    uniformParams: true,
+    inputs: [input],
+    expected: refTensor([rows * 2, outWidth], expected),
+    natural: Math.ceil(count / UPSAMPLE_2X_WORKGROUP_SIZE),
+    groups: 2,
+  };
+};
+
+/**
+ * `silu`（`x · sigmoid(x)`・融合ルール silu）。**block ループ**の族（workgroup memory 往復の
+ * 丸め障壁を持つので `gid.x` ではなく `wid.x` を `nwg.x` で送る）。期待値は素の列と同じ
+ * 2 段（sigmoid → mul）で組む。
+ */
+export const siluCase = (): DegenerateCase => {
+  const count = 100_000;
+  const input = fill([count], SIGNED);
+  const sigmoid = applyReferenceOp("sigmoid", [input], {}, [count]);
+  const expected = Float32Array.from(
+    { length: count },
+    (_, i) => Math.fround(input.data[i] * sigmoid.data[i]),
+  );
+  return {
+    name: "silu（融合）",
+    key: siluKey("x-sigmoid"),
+    wgsl: siluWgsl("x-sigmoid"),
+    params: siluParams(count),
+    uniformParams: true,
+    inputs: [input],
+    expected: refTensor([count], expected),
+    natural: Math.ceil(count / SILU_WORKGROUP_SIZE),
+    groups: 3,
+  };
+};
+
+/**
+ * `adaln_norm`（`layer_norm → (1 + scale) → mul → add`・融合ルール adaln）。行方向 grid-stride の
+ * 族で、束縛は 6 入力（x / weight / bias / scale_vec / one / shift）+ 出力。
+ *
+ * MUST: 行ごとに違う統計にする（全行同じだと「別の行を読む」誤りが値に出ない）。
+ */
+export const adalnNormCase = (): DegenerateCase => {
+  const rows = 5_000;
+  const dim = 4;
+  const eps = 1e-5;
+  const input = fill([rows, dim], (i) => ((i * 5) % 17) * 0.5 - 4);
+  const weight = fill([dim], POSITIVE);
+  const bias = fill([dim], SIGNED);
+  const scaleVec = fill([dim], (i) => ((i % 7) - 3) * 0.25);
+  const one = fill([1], () => 1);
+  const shift = fill([dim], (i) => ((i % 5) - 2) * 0.375);
+  const normalized = applyReferenceOp("layer_norm", [input, weight, bias], {
+    normalized_shape: [dim],
+    eps,
+  }, [rows, dim]);
+  const expected = new Float32Array(rows * dim);
+  for (let row = 0; row < rows; row += 1) {
+    for (let col = 0; col < dim; col += 1) {
+      const modulation = Math.fround(scaleVec.data[col] + one.data[0]);
+      const scaled = Math.fround(normalized.data[row * dim + col] * modulation);
+      expected[row * dim + col] = Math.fround(scaled + shift.data[col]);
+    }
+  }
+  return {
+    name: "adaln_norm（融合）",
+    key: ADALN_NORM_KEY,
+    wgsl: ADALN_NORM_WGSL,
+    params: adalnNormParams(rows, dim, eps),
+    uniformParams: true,
+    inputs: [input, weight, bias, scaleVec, one, shift],
+    expected: refTensor([rows, dim], expected),
     natural: rows,
     groups: 2,
   };

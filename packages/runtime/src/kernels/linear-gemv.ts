@@ -42,6 +42,7 @@
  */
 
 import { CodegenError } from "../codegen/errors.ts";
+import { gemmParams } from "./gemm.ts";
 import { i4GroupKeyPart, i4GroupShift, weightKeyPart } from "./weight-storage.ts";
 
 /**
@@ -99,6 +100,35 @@ const gemvGroupShift = (groupSize: number): number => {
     );
   }
   return shift;
+};
+
+/**
+ * uniform の Dims（既定経路の `linearParams(1, n, k)` とバイト単位で同一 — 束縛レイアウトを
+ * 分けない契約）。族固有なのは検査だけで、m / n / k の u32 域は {@link gemmParams} へ委譲する。
+ *
+ * MUST: k を **{@link LINEAR_GEMV_UNIT} の倍数**に限る。WGSL の `units = dims.k / 32u` は
+ * 端数を切り捨てるので、外すと縮約が行の末尾を黙って落とした値を返す（例外は出ない）。
+ * MUST: k を **group_size の倍数**にも限る（:210 の `scale_base = col * (k >> shift)` が
+ * 行あたりの scale 本数を割り算で導くため）。宣言層（ADR 0069 決定 2）と recipe-builder の
+ * 適格判定が同じ条件を保証しているが、カーネル直呼びはそこを通らない。
+ */
+export const linearGemvParams = (
+  n: number,
+  k: number,
+  groupSize: number,
+): Uint32Array<ArrayBuffer> => {
+  gemvGroupShift(groupSize);
+  if (!Number.isSafeInteger(k) || k < 0 || k % LINEAR_GEMV_UNIT !== 0) {
+    throw new CodegenError(
+      `linear_gemv params: k は ${LINEAR_GEMV_UNIT} の倍数の非負整数（${k}）`,
+    );
+  }
+  if (k % groupSize !== 0) {
+    throw new CodegenError(
+      `linear_gemv params: k=${k} が group_size ${groupSize} で割り切れない`,
+    );
+  }
+  return gemmParams("linear", 1, n, k);
 };
 
 /**

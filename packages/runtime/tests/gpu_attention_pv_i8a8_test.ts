@@ -81,7 +81,7 @@ import {
 } from "../src/runtime/executor.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
 import { fill, graphModelBuffer, singleOpGraph } from "./helpers/graph.ts";
-import { GPU_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
+import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
 
 const STORAGE_IN = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
 const UNIFORM_IN = GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST;
@@ -710,31 +710,6 @@ Deno.test({
       // 広く softmax が鋭いので P̃ の peak/rms が大きい = 設計 §2.2 の理論どおり誤差も大きい
       const rms = relativeRms(i8a8.output, plain.output);
       assert(rms < 0.1, `i8a8 と f32 の相対 RMS が ${rms}（結線を疑う）`);
-      if (i8a8.entries.length > 0) {
-        const byKey = new Map(i8a8.entries.map((entry) => [entry.key, entry.dispatchCount]));
-        // ①QK / ③PV とも i8a8 変種で、f32 変種は 1 本も走らない
-        assertEquals(byKey.get(attentionQkI8a8Key(attentionQkI8a8UsesVec4(shape.n), true)), 1);
-        assertEquals(byKey.get(attentionPvI8a8Key(attentionPvI8a8UsesVec4(d), true)), 1);
-        for (const v4 of [false, true]) {
-          assertEquals(byKey.has(attentionQkKey(v4)), false, "f32 の attention_qk が残っている");
-          assertEquals(byKey.has(attentionPvKey(v4)), false, "f32 の attention_pv が残っている");
-        }
-        // ②行統計は f32 のまま（S の格納形も f32 のまま — 設計 §4.3 の分母量子化は不採用）。
-        // regcache（S 1 回読み）は dim 依存の生成なので epc がキーに載る（値はビット同一）
-        assertEquals(
-          byKey.get(attentionStatsKey("f32", "f32", attentionStatsRegCache(shape.n))),
-          1,
-          "②行統計は f32 のまま",
-        );
-        // 量子化は q / k / Vᵀ の 3 本、permute は Vᵀ の 1 本（ノード全体で 7 dispatch）
-        assertEquals(quantizeRowsDispatches(byKey), 3, "quantize_rows が q / k / v の 3 本でない");
-        assertEquals(byKey.get(stridedKey({ dtype: "f32" })), 1, "Vᵀ の permute が 1 本でない");
-        assertEquals(
-          [...byKey.values()].reduce((sum, count) => sum + count, 0),
-          7,
-          "1 ノード = 7 dispatch",
-        );
-      }
 
       // 整数内積変種のノブは attention の**両段**に効く（linear と同じ 1 つのノブ）
       const emu = await runAttention(gpu, shape, d, {
@@ -742,11 +717,65 @@ Deno.test({
         [I8A8_DOT]: "emu",
       });
       assertExact(emu.output, i8a8.output, "dp4a vs エミュ（Session 経路）");
-      if (emu.entries.length > 0) {
-        const keys = new Set(emu.entries.map((entry) => entry.key));
-        assertEquals(keys.has(attentionPvI8a8Key(attentionPvI8a8UsesVec4(d), false)), true);
-        assertEquals(keys.has(attentionPvI8a8Key(attentionPvI8a8UsesVec4(d), true)), false);
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+/**
+ * **census**（ADR 0058 決定 4）。どの変種が実際に走ったかはキーでしか見えない
+ * （i8a8 縮退も dp4a ↔ エミュも値はビット同一のまま経路だけが変わる）。
+ *
+ * MUST: 計測を要求しない device（`TIMESTAMP_QUERY_AVAILABLE` が偽）では**明示 SKIP** し、
+ * 走るときは空の内訳を無条件に FAIL にする（`TIMING_ACQUIRE_OPTIONS` は feature 不在で
+ * `gpuTiming: false` に落ちるので、「entries が空なら何も見ない」で守ると変種選択の検査が
+ * 1 つも走らないまま緑になる — gpu_attention_gqa_test.ts の census と同じ形）。数値契約は
+ * 上のテストが計測なし機でも走り続ける。
+ */
+Deno.test({
+  name:
+    "attentionCompute:'a8' の変種選択（①③ i8a8 / ②行統計 f32 / dp4a ↔ エミュ）をキーで見る（実 GPU / timestamp-query）",
+  ignore: !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    try {
+      const shape = { b: 2, h: 3, m: 65, n: 68 };
+      const d = 20;
+      const i8a8 = await runAttention(gpu, shape, d, { attentionCompute: "a8" });
+      assert(i8a8.entries.length > 0, "内訳が空（キー検査が空振りしている）");
+      const byKey = new Map(i8a8.entries.map((entry) => [entry.key, entry.dispatchCount]));
+      // ①QK / ③PV とも i8a8 変種で、f32 変種は 1 本も走らない
+      assertEquals(byKey.get(attentionQkI8a8Key(attentionQkI8a8UsesVec4(shape.n), true)), 1);
+      assertEquals(byKey.get(attentionPvI8a8Key(attentionPvI8a8UsesVec4(d), true)), 1);
+      for (const v4 of [false, true]) {
+        assertEquals(byKey.has(attentionQkKey(v4)), false, "f32 の attention_qk が残っている");
+        assertEquals(byKey.has(attentionPvKey(v4)), false, "f32 の attention_pv が残っている");
       }
+      // ②行統計は f32 のまま（S の格納形も f32 のまま — 設計 §4.3 の分母量子化は不採用）。
+      // regcache（S 1 回読み）は dim 依存の生成なので epc がキーに載る（値はビット同一）
+      assertEquals(
+        byKey.get(attentionStatsKey("f32", "f32", attentionStatsRegCache(shape.n))),
+        1,
+        "②行統計は f32 のまま",
+      );
+      // 量子化は q / k / Vᵀ の 3 本、permute は Vᵀ の 1 本（ノード全体で 7 dispatch）
+      assertEquals(quantizeRowsDispatches(byKey), 3, "quantize_rows が q / k / v の 3 本でない");
+      assertEquals(byKey.get(stridedKey({ dtype: "f32" })), 1, "Vᵀ の permute が 1 本でない");
+      assertEquals(
+        [...byKey.values()].reduce((sum, count) => sum + count, 0),
+        7,
+        "1 ノード = 7 dispatch",
+      );
+
+      const emu = await runAttention(gpu, shape, d, {
+        attentionCompute: "a8",
+        [I8A8_DOT]: "emu",
+      });
+      assert(emu.entries.length > 0, "エミュ側の内訳が空（キー検査が空振りしている）");
+      const keys = new Set(emu.entries.map((entry) => entry.key));
+      assertEquals(keys.has(attentionPvI8a8Key(attentionPvI8a8UsesVec4(d), false)), true);
+      assertEquals(keys.has(attentionPvI8a8Key(attentionPvI8a8UsesVec4(d), true)), false);
     } finally {
       gpu.destroy();
     }
@@ -754,56 +783,69 @@ Deno.test({
 });
 
 Deno.test({
-  name:
-    "attentionCompute:'a8' の適格判定は段ごとに独立で、片方だけ f32 へ縮退する混成が起こる（実 GPU）",
+  name: "attentionCompute:'a8' の両段縮退（D%4 / N%4 とも不適格）は f32 経路とビット同一（実 GPU）",
   ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    try {
+      // 縮退は沈黙（検出器はキーと値の 2 本 — キー側は下の census が持つ）
+      const both = { b: 1, h: 2, m: 17, n: 19 };
+      const degraded = await runAttention(gpu, both, 13, { attentionCompute: "a8" });
+      const plain = await runAttention(gpu, both, 13, {});
+      assertExact(degraded.output, plain.output, "両段の縮退が f32 経路と一致しない");
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+/** 段ごとに独立な適格判定（混成）は値に出ないのでキーが唯一の検出器。SKIP の理由は上の census と同じ。 */
+Deno.test({
+  name:
+    "attentionCompute:'a8' の適格判定は段ごとに独立で、片方だけ f32 へ縮退する混成が起こる（実 GPU / timestamp-query）",
+  ignore: !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
     try {
       // ① N % 4 != 0 → ③PV だけ f32（①QK は D=20 で i8a8 のまま）
       const mixedPv = { b: 1, h: 2, m: 17, n: 19 };
       const pvF32 = await runAttention(gpu, mixedPv, 20, { attentionCompute: "a8" });
-      if (pvF32.entries.length > 0) {
-        const byKey = new Map(pvF32.entries.map((entry) => [entry.key, entry.dispatchCount]));
-        assertEquals(byKey.get(attentionQkI8a8Key(attentionQkI8a8UsesVec4(19), true)), 1);
-        assertEquals(byKey.get(attentionPvKey(gemmUsesVec4(19, 20))), 1, "③PV は f32 へ縮退する");
-        for (const v4 of [false, true]) {
-          assertEquals(byKey.has(attentionPvI8a8Key(v4, true)), false);
-        }
-        // 量子化は q / k の 2 本だけ・Vᵀ の permute は走らない
-        assertEquals(quantizeRowsDispatches(byKey), 2, "quantize_rows が q / k の 2 本でない");
-        assertEquals(byKey.has(stridedKey({ dtype: "f32" })), false, "Vᵀ の permute が走っている");
+      assert(pvF32.entries.length > 0, "内訳が空（キー検査が空振りしている）");
+      const pvKeys = new Map(pvF32.entries.map((entry) => [entry.key, entry.dispatchCount]));
+      assertEquals(pvKeys.get(attentionQkI8a8Key(attentionQkI8a8UsesVec4(19), true)), 1);
+      assertEquals(pvKeys.get(attentionPvKey(gemmUsesVec4(19, 20))), 1, "③PV は f32 へ縮退する");
+      for (const v4 of [false, true]) {
+        assertEquals(pvKeys.has(attentionPvI8a8Key(v4, true)), false);
       }
+      // 量子化は q / k の 2 本だけ・Vᵀ の permute は走らない
+      assertEquals(quantizeRowsDispatches(pvKeys), 2, "quantize_rows が q / k の 2 本でない");
+      assertEquals(pvKeys.has(stridedKey({ dtype: "f32" })), false, "Vᵀ の permute が走っている");
 
       // ② D % 4 != 0 → ①QK だけ f32（③PV は N=20 で i8a8 のまま）— 逆向きの混成
       const mixedQk = { b: 1, h: 2, m: 17, n: 20 };
       const qkF32 = await runAttention(gpu, mixedQk, 13, { attentionCompute: "a8" });
-      if (qkF32.entries.length > 0) {
-        const byKey = new Map(qkF32.entries.map((entry) => [entry.key, entry.dispatchCount]));
-        assertEquals(byKey.get(attentionQkKey(gemmUsesVec4(13, 20))), 1, "①QK は f32 へ縮退する");
-        assertEquals(byKey.get(attentionPvI8a8Key(attentionPvI8a8UsesVec4(13), true)), 1);
-        for (const v4 of [false, true]) {
-          assertEquals(byKey.has(attentionQkI8a8Key(v4, true)), false);
-        }
-        // 量子化は Vᵀ の 1 本だけ（q / k は f32 のまま読まれる）
-        assertEquals(quantizeRowsDispatches(byKey), 1, "quantize_rows が Vᵀ の 1 本でない");
-        assertEquals(byKey.get(stridedKey({ dtype: "f32" })), 1, "Vᵀ の permute が 1 本でない");
+      assert(qkF32.entries.length > 0, "内訳が空（キー検査が空振りしている）");
+      const qkKeys = new Map(qkF32.entries.map((entry) => [entry.key, entry.dispatchCount]));
+      assertEquals(qkKeys.get(attentionQkKey(gemmUsesVec4(13, 20))), 1, "①QK は f32 へ縮退する");
+      assertEquals(qkKeys.get(attentionPvI8a8Key(attentionPvI8a8UsesVec4(13), true)), 1);
+      for (const v4 of [false, true]) {
+        assertEquals(qkKeys.has(attentionQkI8a8Key(v4, true)), false);
       }
+      // 量子化は Vᵀ の 1 本だけ（q / k は f32 のまま読まれる）
+      assertEquals(quantizeRowsDispatches(qkKeys), 1, "quantize_rows が Vᵀ の 1 本でない");
+      assertEquals(qkKeys.get(stridedKey({ dtype: "f32" })), 1, "Vᵀ の permute が 1 本でない");
 
-      // ③ 両方満たさない形は f32 経路とビット同一（縮退は沈黙 — 検出器はキーと値の 2 本）
+      // ③ 両方満たさない形は前段も後段も走らない（値の側は上のテストが持つ）
       const both = { b: 1, h: 2, m: 17, n: 19 };
       const degraded = await runAttention(gpu, both, 13, { attentionCompute: "a8" });
-      const plain = await runAttention(gpu, both, 13, {});
-      assertExact(degraded.output, plain.output, "両段の縮退が f32 経路と一致しない");
-      if (degraded.entries.length > 0) {
-        const keys = new Set(degraded.entries.map((entry) => entry.key));
-        assertEquals(
-          [...keys].some((key) => key.startsWith(QUANTIZE_ROWS_KEY)),
-          false,
-          "縮退したのに量子化が走っている",
-        );
-        assertEquals(keys.has(stridedKey({ dtype: "f32" })), false, "縮退したのに permute が走る");
-      }
+      assert(degraded.entries.length > 0, "内訳が空（キー検査が空振りしている）");
+      const keys = new Set(degraded.entries.map((entry) => entry.key));
+      assertEquals(
+        [...keys].some((key) => key.startsWith(QUANTIZE_ROWS_KEY)),
+        false,
+        "縮退したのに量子化が走っている",
+      );
+      assertEquals(keys.has(stridedKey({ dtype: "f32" })), false, "縮退したのに permute が走る");
     } finally {
       gpu.destroy();
     }

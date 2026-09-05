@@ -21,6 +21,7 @@ import { type IrGraph, parseIrGraph } from "../src/format/ir.ts";
 import { GpuContext, readAdapterInfo, type RequiredLimits } from "../src/gpu/device.ts";
 import { createSession } from "../src/runtime/executor.ts";
 import {
+  assertChunkLength,
   GenerationContext,
   type GenerationContextHost,
 } from "../src/runtime/generation-context.ts";
@@ -144,6 +145,30 @@ const spyDevice = (spy: AllocSpy): GPUDevice =>
 
 const spyGpu = (spy: AllocSpy, gpuLimits: RequiredLimits): GpuContext =>
   new GpuContext(spyDevice(spy), readAdapterInfo({}), gpuLimits, new Set());
+
+// ---------------------------------------------------------------------------
+// chunkLength の値域門（GPU 非依存の純関数 — src/runtime/generation-context.ts）
+// ---------------------------------------------------------------------------
+
+/**
+ * 論理長の搬送先が u32 なので上限は 0xffffffff（ADR 0066 決定 4 / 追記 4）。ここに書くのは
+ * 実装の private 定数の**写し**ではなく、文言に出る上限をそのまま観測する形にしてある
+ * （実装が上限を変えれば下の assertStringIncludes が落ちる）。
+ */
+const MAX_LOGICAL_LENGTH = 0xffffffff;
+
+Deno.test("assertChunkLength は 1..u32 上限の整数だけを通す", () => {
+  // 境界の内側（下端・上端とも通る）
+  assertChunkLength(1);
+  assertChunkLength(MAX_LOGICAL_LENGTH);
+  // 0 / 負 / 非整数 / 上限超え / NaN は全て同じ門で落ちる。estimator も同じ門を通るので、
+  // ここが緩むと「実構築が拒否する指定に見積りだけが正常値を返す」形になる。
+  for (const bad of [0, -1, 1.5, MAX_LOGICAL_LENGTH + 1, Number.NaN]) {
+    const error = assertThrows(() => assertChunkLength(bad), ExecutionError, "chunkLength");
+    assertStringIncludes(error.message, `chunkLength ${bad}`);
+    assertStringIncludes(error.message, `1..${MAX_LOGICAL_LENGTH}`);
+  }
+});
 
 // ---------------------------------------------------------------------------
 // 寸法の取り方（純関数の門）
@@ -308,6 +333,22 @@ Deno.test("state スロットの maxBufferSize 超過も createBuffer より前�
   assertStringIncludes(
     error.message,
     "state 'kv': 容量 [8] の 32 バイトが maxBufferSize 16 バイトを超える",
+  );
+  assertEquals(spy.createBuffer, 0, "確保に 1 本も到達しない");
+});
+
+Deno.test("state スロットの maxStorageBufferBindingSize 超過も createBuffer より前に落ちる", async () => {
+  const spy: AllocSpy = { createBuffer: 0 };
+  // バッファ上限には収まるが束縛上限を超える形（上の maxBufferSize 側と対 — 2 本を独立に
+  // 見ていなければ、どちらか片方だけが検出器になる）。
+  const gpu = spyGpu(spy, limits(16, 1024));
+  const error = await assertRejects(
+    () => GenerationContext.create(stateHost(gpu, stateGraph([8])), { chunkLength: 1 }),
+    ExecutionError,
+  );
+  assertStringIncludes(
+    error.message,
+    "state 'kv': 容量 [8] の 32 バイトが maxStorageBufferBindingSize 16 バイトを超える",
   );
   assertEquals(spy.createBuffer, 0, "確保に 1 本も到達しない");
 });

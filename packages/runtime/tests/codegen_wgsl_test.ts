@@ -5,11 +5,12 @@ import {
   elementwiseParams,
   type ElementwiseSpec,
   elementwiseWgsl,
-  TANH_SATURATION,
 } from "../src/codegen/elementwise.ts";
 import { CodegenError } from "../src/codegen/errors.ts";
 import { GRU_SCAN_MAX_HIDDEN } from "../src/codegen/limits.ts";
+import { TANH_SATURATION } from "../src/codegen/numerics-wgsl.ts";
 import {
+  AXIS_REDUCE_WORKGROUP_SIZE,
   axisReduceKey,
   axisReduceParams,
   axisReduceWgsl,
@@ -42,7 +43,7 @@ import {
   ARGMAX_WORKGROUP_SIZE,
   argmaxParams,
 } from "../src/kernels/argmax.ts";
-import { bmmKey, bmmParams, bmmWgsl } from "../src/kernels/bmm.ts";
+import { bmmKey, bmmParams, bmmRowWindowParams, bmmWgsl } from "../src/kernels/bmm.ts";
 import {
   statePvParallelWgsl,
   statePvWgsl,
@@ -350,6 +351,9 @@ Deno.test("生成した WGSL がスナップショットとバイト単位で一
     ["reduce_axis_sum.wgsl", axisReduceWgsl({ op: "sum", dtype: "f32" })],
     ["reduce_axis_sum_bool.wgsl", axisReduceWgsl({ op: "sum", dtype: "bool" })],
     ["reduce_axis_amax.wgsl", axisReduceWgsl({ op: "amax", dtype: "f32" })],
+    // amin も対で置く（行 reduce の reduce_amax / reduce_amin と同じ理由 — NaN 伝播の形は
+    // nan_max / nan_min の 2 本があり、片方だけの凍結では注入の取り違えが素通りする）。
+    ["reduce_axis_amin.wgsl", axisReduceWgsl({ op: "amin", dtype: "f32" })],
     ["cumsum.wgsl", CUMSUM_WGSL],
     // argmax（ADR 0068 決定 2）。**reduce 3 本と対で置く**のが条件で、行 reduce と同型の
     // 骨格を持つぶん「新族を足したら既存 reduce のバイト列が動いた」が最大の事故
@@ -523,6 +527,13 @@ Deno.test("生成した WGSL がスナップショットとバイト単位で一
     // 小 D 変種（perf-ledger P-1 — D=128 の QK 前段が使う 8 行 × 32 レーン）。**上の従来形と
     // 対で置く**のが条件で、変種追加で従来形のバイト列が動くのが最大の事故。
     ["quantize_rows_r8w32.wgsl", quantizeRowsWgsl(quantizeRowsGeometry(128))],
+    // 幾何は dim から決まる 9 通り（lanesPerRow は 1..256 の 2 冪）で、呼び出し元の dim は
+    // **実行時 shape**（linear の k / attention の head 幅 / 実行時の key 本数）。縮退の両端と
+    // 実配布形の head 幅 256 を凍結する: dim 4 は木 reduce が 1 段も回らない形（lanesPerRow 1・
+    // rowsPerGroup 256）、dim 512 は逆端に近い r2w128。
+    ["quantize_rows_r256w1.wgsl", quantizeRowsWgsl(quantizeRowsGeometry(4))],
+    ["quantize_rows_r4w64.wgsl", quantizeRowsWgsl(quantizeRowsGeometry(256))],
+    ["quantize_rows_r2w128.wgsl", quantizeRowsWgsl(quantizeRowsGeometry(512))],
     ["linear_i8a8.wgsl", linearI8a8Wgsl(false, true)],
     ["linear_i8a8_v4.wgsl", linearI8a8Wgsl(true, true)],
     ["linear_i8a8_emu.wgsl", linearI8a8Wgsl(false, false)],
@@ -716,6 +727,70 @@ Deno.test("同じ生成入力からは常に同一の WGSL が出る（全 op ×
         `attention_pv i8a8:v4=${v4}:dp4a=${dp4a}`,
       );
     }
+  }
+  // 上のスナップショットが 1 点しか呼ばない生成関数（**2 回目に違う文字列を返す**形 =
+  // モジュールスコープの可変状態やキャッシュは、1 点 1 回の比較では原理的に見えない）。
+  // 「全モジュール副作用ゼロ」「同一キー → バイト単位同一 WGSL」が直接掛かる面。
+  for (const dim of [4, 128, 256, 1024]) {
+    const geometry = quantizeRowsGeometry(dim);
+    assertEquals(
+      quantizeRowsWgsl(geometry),
+      quantizeRowsWgsl(geometry),
+      `quantize_rows:dim=${dim}`,
+    );
+  }
+  for (const sliding of [false, true]) {
+    assertEquals(
+      stateStatsWgsl(sliding),
+      stateStatsWgsl(sliding),
+      `state_stats:sliding=${sliding}`,
+    );
+    assertEquals(
+      stateAppendWgsl(sliding),
+      stateAppendWgsl(sliding),
+      `state_append:sliding=${sliding}`,
+    );
+    for (const gqa of [false, true]) {
+      const where = `sliding=${sliding}:gqa=${gqa}`;
+      assertEquals(stateQkWgsl(sliding, gqa), stateQkWgsl(sliding, gqa), `state_qk:${where}`);
+      assertEquals(statePvWgsl(sliding, gqa), statePvWgsl(sliding, gqa), `state_pv:${where}`);
+      assertEquals(
+        statePvParallelWgsl(sliding, gqa),
+        statePvParallelWgsl(sliding, gqa),
+        `state_pv_par:${where}`,
+      );
+    }
+  }
+  for (const epc of [undefined, 16]) {
+    assertEquals(
+      attentionStatsWgsl("f32", "f32", epc),
+      attentionStatsWgsl("f32", "f32", epc),
+      `attention_stats:epc=${epc}`,
+    );
+  }
+  for (const k of [1, 4, TOPK_CORE_LIMIT_MAX_K]) {
+    assertEquals(topkWgsl(k), topkWgsl(k), `topk:k=${k}`);
+  }
+  for (const direction of (["forward", "reverse"] as const)) {
+    assertEquals(gruScanWgsl(direction), gruScanWgsl(direction), `gru_scan:${direction}`);
+  }
+  for (const order of (["x-sigmoid", "sigmoid-x"] as const)) {
+    assertEquals(siluWgsl(order), siluWgsl(order), `silu:${order}`);
+  }
+  assertEquals(
+    embeddingWgsl("i4", 32),
+    embeddingWgsl("i4", 32),
+    "embedding:i4:g32",
+  );
+  for (const weight of WEIGHT_STORAGES) {
+    assertEquals(embeddingWgsl(weight), embeddingWgsl(weight), `embedding:${weight}`);
+    assertEquals(conv1dWgsl(weight), conv1dWgsl(weight), `conv1d:${weight}`);
+    assertEquals(conv2dWgsl(weight), conv2dWgsl(weight), `conv2d:${weight}`);
+    assertEquals(
+      convTranspose1dWgsl(weight),
+      convTranspose1dWgsl(weight),
+      `conv_transpose1d:${weight}`,
+    );
   }
 });
 
@@ -1161,6 +1236,29 @@ Deno.test("clamp / clamp_min / relu / amax / amin は NaN を比較ではなく�
   }
   assertEquals(reduceWgsl({ op: "sum", dtype: "f32" }).includes("is_nan_bits"), false);
   assertEquals(axisReduceWgsl({ op: "sum", dtype: "f32" }).includes("is_nan_bits"), false);
+});
+
+/**
+ * 軸 reduce が行 reduce とビット同一になる条件は 3 つの数の同時成立 —「workgroup サイズが
+ * 両変種で同じ」「carry-stack が log2(size) + 1 段」「ビット反転の shift が 32 − log2(size)」。
+ * どれか 1 つがずれても**例外は出ない**（段が足りなければ一度も書かれていない段を読み、
+ * shift がずれれば葉の並びが木と食い違って sum の丸め列だけが静かに変わる）ので、生成物の
+ * 側から算術で突き合わせる。GPU パリティ門（tests/gpu_reduce_axis_parity_test.ts）と違い
+ * アダプタ無し環境でも走ることがこの門の目的。
+ */
+Deno.test("軸 reduce の段数とビット反転幅は workgroup サイズから導かれる", () => {
+  const size = AXIS_REDUCE_WORKGROUP_SIZE;
+  const bits = Math.log2(size);
+  assertEquals(Number.isInteger(bits), true, "2 冪でないと行 reduce の木も成立しない");
+  const axis = axisReduceWgsl({ op: "sum", dtype: "f32" });
+  assertEquals(axis.includes(`for (var m = 0u; m < ${size}u;`), true);
+  assertEquals(axis.includes(`let slot = reverseBits(m) >> ${32 - bits}u;`), true);
+  assertEquals(axis.includes(`var acc: array<f32, ${bits + 1}>;`), true);
+  assertEquals(axis.includes(`out[t] = acc[${bits}u];`), true);
+  // 行 reduce 側が同じサイズであること（葉の並びの一致はサイズ一致が前提）
+  const row = reduceWgsl({ op: "sum", dtype: "f32" });
+  assertEquals(row.includes(`@workgroup_size(${size})`), true);
+  assertEquals(row.includes(`i = i + ${size}u;`), true);
 });
 
 // MUST: 素朴な log(1 + x) は |x| ≪ 1 で有効桁が消える。補正式が入っていることを生成物で
@@ -1757,6 +1855,30 @@ Deno.test("elementwise params は右詰め broadcast の stride を 0 にする"
 Deno.test("elementwise params はスカラ入力を右詰めで吸収する", () => {
   const params = elementwiseParams({ op: "add", rank: 1, dtype: "f32" }, [5], [[5], [1]]);
   assertEquals([...params], [5, 5, 1, 0]);
+});
+
+/**
+ * MUST: 入力の各軸は「出力と一致」か「1」のどちらか。stride 組み立ては「1 でなければ連続
+ * stride」と決め打つので、broadcast 不能な組を渡すと**入力バッファの**範囲外を指す params が
+ * 黙って作られる（WebGPU の境界付きアクセスは例外を出さずクランプ値を返す）。契約層
+ * （src/ops/shapes.ts の broadcastShapes）が 1 段抜けたときの検出器はこの 1 本だけ。
+ */
+Deno.test("elementwise params は broadcast 不能な軸長を受理しない", () => {
+  assertThrows(
+    () => elementwiseParams({ op: "neg", rank: 1, dtype: "f32" }, [5], [[3]]),
+    CodegenError,
+    "一致せず 1 でもない",
+  );
+  assertThrows(
+    () => elementwiseParams({ op: "add", rank: 2, dtype: "f32" }, [2, 3], [[2, 3], [2, 4]]),
+    CodegenError,
+    "一致せず 1 でもない",
+  );
+  // 適合形は 1 語も動かない（門を広げすぎていないことの対）
+  assertEquals(
+    [...elementwiseParams({ op: "add", rank: 2, dtype: "f32" }, [2, 3], [[2, 3], [1, 3]])],
+    [6, 2, 3, 3, 1, 0, 1],
+  );
 });
 
 Deno.test("uniform で渡す params は 16 バイト整列を満たす", () => {
@@ -2364,6 +2486,35 @@ Deno.test("融合 attention の行窓変種は片側の base と mask の行添�
   ) {
     assertThrows(build, CodegenError, "をはみ出す");
   }
+});
+
+/**
+ * bmm の行窓変種（分解 attention の行ブロック実行 — src/runtime/fusion.ts）。融合 attention の
+ * 4 本と**同じ 2 語・同じ門**を使うのに params 側の観測点が無く、検出器は実 GPU 経由の
+ * tests/gpu_row_block_attention_test.ts だけだった（アダプタ無し環境では素通りする）。
+ */
+Deno.test("bmm の行窓 params は 5 語 32 バイトで、はみ出す窓を fail loudly にする", () => {
+  const params = bmmRowWindowParams(4, 7, 8, 2, 9);
+  assertEquals([...params.slice(0, 5)], [4, 7, 8, 2, 9]);
+  // 5 語 = 20 バイトを uniform struct の 16 バイト整列で 32 バイトへ切り上げる
+  assertEquals(params.byteLength, 32);
+  assertEquals(bmmParams(4, 7, 8).byteLength, 16, "窓なしは従来どおり 16B");
+  // MUST: ブロックが全 M をはみ出す組は fail loudly（黙って通すと隣のバッチを読み書きする）
+  assertThrows(() => bmmRowWindowParams(5, 7, 8, 5, 9), CodegenError, "をはみ出す");
+  assertThrows(() => bmmRowWindowParams(4, 7, 8, -1, 9), CodegenError, "row_offset");
+  // 語位置と WGSL の読み口は対（A 側 = 入力行 / C 側 = 出力行のどちらが全 M ストライドか）
+  assertEquals(
+    bmmWgsl(true, 4, "a").includes(
+      "  let abase = wid.z * dims.rows_full * k4 + dims.row_offset * k4;",
+    ),
+    true,
+  );
+  assertEquals(
+    bmmWgsl(true, 4, "c").includes(
+      "  let cbase = wid.z * dims.rows_full * n4 + dims.row_offset * n4;",
+    ),
+    true,
+  );
 });
 
 /**
@@ -2996,6 +3147,24 @@ Deno.test("w4a8 linear は group 境界でだけ f32 へ flush し、xs を最�
     () => linearI8a8Wgsl(true, true, { regM: 8, regN: 8, wgX: 8, wgY: 16, tileK: 32 }, "i4", 16),
     CodegenError,
     "K タイル 32 の倍数でない",
+  );
+  // 正例（門が広すぎないことの対）: group が K タイルの倍数なら通り、内側ループの
+  // `tilesPerGroup = group / tileK` がそのまま焼かれる。tileK を動かした幾何でも同じ。
+  assertEquals(
+    linearI8a8Wgsl(true, true, { regM: 8, regN: 8, wgX: 8, wgY: 16, tileK: 32 }, "i4", 32)
+      .includes("let gbase = gi * 1u;"),
+    true,
+    "tileK 32 × group 32 は 1 group = 1 タイル",
+  );
+  assertEquals(
+    linearI8a8Wgsl(true, true, undefined, "i4", 16).includes("let gbase = gi * 1u;"),
+    true,
+    "既定幾何（tileK 16）× group 16 は 1 group = 1 タイル",
+  );
+  assertEquals(
+    linearI8a8Wgsl(true, true, undefined, "i4", 64).includes("let gbase = gi * 4u;"),
+    true,
+    "既定幾何（tileK 16）× group 64 は 1 group = 4 タイル",
   );
   // params の門は k ではなく **group 長**（i8 の k 門は w4a8 に適用しない）
   assertEquals([...linearI8a8Params(5, 8, 64, 32)], [5, 8, 64, 0]);

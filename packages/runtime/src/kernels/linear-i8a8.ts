@@ -172,9 +172,17 @@ export const linearI8a8Key = (
   geometry: I8a8Geometry = defaultI8a8Geometry("linear"),
   weight: WeightStorage = "i8",
   groupSize?: number,
-): string =>
-  `linear:v4:i8a8:${i8a8GeometryKeyPart(geometry, v4)}:${dp4a ? "dp4a" : "dp4aEmu"}` +
-  (weight === "i8" ? "" : `${weightKeyPart(weight)}${i4GroupKeyPart(groupSize)}`);
+): string => {
+  // MUST: 検査は {@link linearI8a8Wgsl} と同じ 2 本を同じ文言で通す（副作用のみ — 有効な
+  // 入力の返り値は 1 バイトも変わらない）。i8 以外の格納は上の断片を空にするので、放置すると
+  // f32 格納が i8 とキーで区別できず、席を共有した別経路が同じ資産で走る。
+  if (weight !== "i8" && weight !== "i4") {
+    throw new CodegenError(`linear i8a8: 重み格納は i8 / i4 のみ（${weight}）`);
+  }
+  i4GroupShift("linear i8a8", weight, groupSize);
+  return `linear:v4:i8a8:${i8a8GeometryKeyPart(geometry, v4)}:${dp4a ? "dp4a" : "dp4aEmu"}` +
+    (weight === "i8" ? "" : `${weightKeyPart(weight)}${i4GroupKeyPart(groupSize)}`);
+};
 
 /**
  * 整数内積の 2 変種。**返す整数は完全に同じ**で、違いは速度だけ（上の docstring）。

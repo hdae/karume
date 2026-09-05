@@ -51,7 +51,7 @@ import { allclose } from "../src/reference/allclose.ts";
 import { referenceRowReduce, refTensor } from "../src/reference/ops.ts";
 import { createSession } from "../src/runtime/executor.ts";
 import { fill, graphModelBuffer, singleOpGraph } from "./helpers/graph.ts";
-import { GPU_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
+import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
 
 const STORAGE_IN = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
 const UNIFORM_IN = GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST;
@@ -80,6 +80,27 @@ const BOOLEAN = (i: number): number => ((i * 5) % 7 < 3 ? 1 : 0);
  * 振り分ける。MUST: **NaN を含まない対照列**を必ず混ぜる — 位置の一致だけを見ると
  * 「常に NaN を返す」実装が落ちない（tests/gpu_ops_test.ts の `NAN_REDUCE_ROWS` と同じ理由）。
  */
+/**
+ * 縮約列を**丸ごと ±Infinity** にする入力生成器（`amax` / `amin` の identity の門 — E-R2-2）。
+ *
+ * 出力 1 要素ぶんの縮約列を、偶数番目は全要素 `sign`·Infinity、奇数番目は有限の対照列にする。
+ * MUST: 全 −Inf の列の `amax` は GPU・CPU 参照とも **−F32_MAX**（identity 始まりで畳む —
+ * `reference/ops.ts` の MUST）。参照が先頭要素始まりだった頃は −Infinity を返し、GPU と
+ * 例外なしに割れていた。
+ */
+const infAlongAxis = (
+  shape: readonly number[],
+  axis: number,
+  sign: -1 | 1,
+): (i: number) => number => {
+  const axisLen = shape[axis];
+  const inner = numel(shape.slice(axis + 1));
+  return (i: number): number => {
+    const out = Math.floor(i / (axisLen * inner)) * inner + (i % inner);
+    return out % 2 === 0 ? sign * Number.POSITIVE_INFINITY : SIGNED(i);
+  };
+};
+
 const nanAlongAxis = (
   shape: readonly number[],
   axis: number,
@@ -105,6 +126,8 @@ type ParityCase = {
   readonly dtype: IrDtype;
   /** NaN 入り入力（{@link nanAlongAxis}）を使うか。既定は NaN を含まない決定的な列。 */
   readonly nan?: true;
+  /** 縮約列を丸ごと ±Infinity にする（{@link infAlongAxis} — identity の門）。 */
+  readonly inf?: -1 | 1;
 };
 
 const readbackBits = async (
@@ -150,6 +173,8 @@ const runBoth = async (
   try {
     const generator = testCase.nan === true
       ? nanAlongAxis(shape, axis)
+      : testCase.inf !== undefined
+      ? infAlongAxis(shape, axis, testCase.inf)
       : dtype === "bool"
       ? BOOLEAN
       : SIGNED;
@@ -385,6 +410,25 @@ const CASES: readonly ParityCase[] = [
     nan: true,
   },
   {
+    // **identity の門（E-R2-2）**: 縮約列が丸ごと −Inf の `amax` は −F32_MAX を返す（GPU は
+    // identity 始まりで畳む。CPU 参照も同じ始点でなければ −Infinity を返して例外なしに割れる —
+    // 有限の対照列を混ぜて `SIGNED` 側の値も同時に見る）。
+    name: "amax 全 −Inf 列 [4,9,6] axis=1（identity −F32_MAX の門）",
+    shape: [4, 9, 6],
+    axis: 1,
+    op: "amax",
+    dtype: "f32",
+    inf: -1,
+  },
+  {
+    name: "amin 全 +Inf 列 [4,9,6] axis=1（identity +F32_MAX の門）",
+    shape: [4, 9, 6],
+    axis: 1,
+    op: "amin",
+    dtype: "f32",
+    inf: 1,
+  },
+  {
     // bool → i32（真の個数）。累算器の型と `load` の真偽化が軸変種にも入っていること。
     name: "bool sum [3,13,5] axis=1（真の個数 → i32）",
     shape: [3, 13, 5],
@@ -495,7 +539,7 @@ const reduceKeysUsed = async (
 
 Deno.test({
   name: "executor は縮約軸で 2 カーネルを踏み分ける（最終次元 = 行 / それ以外 = 軸・実 GPU）",
-  ignore: !GPU_AVAILABLE,
+  ignore: !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
   fn: async () => {
     assertEquals(
       await reduceKeysUsed([4, 6, 8], 2),
