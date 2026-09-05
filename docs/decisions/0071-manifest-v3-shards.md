@@ -26,6 +26,11 @@ co-shard MUST・**振り分け表は manifest が正本**）を runtime / hub �
 スキーマ形を識別しなくなる／「hub は 1 形だけを読む」原則（ADR 0041 決定 1）に反する。
 公開済みの v2 資産は HF 上の 2 リポのみで、どちらも本波で上げ直すため移行コストは今がゼロ点。
 
+> **繰り上げ（ADR [0075](0075-quant-presentation.md) 決定 4 — 0.5.0 / 2026-08-25 実施）**:
+> format は `karume/4`。決定 2 のスキーマは無改変で、繰り上げの理由は quant 側の表示欄
+> （`label` / `description`）の追加。
+> 本 ADR の題とファイル名は当時の綴りのまま据え置く。
+
 ### 2. dtype エントリ: `{file, extras?}` → `{shards, extras?}`
 
 ```json
@@ -105,3 +110,19 @@ MUST: **分割が新しい family へ及んだら、その family の `card.py` 
 `karume-sbv2-fn` とも `maxShards = 1`）現行の文面が正しいが、この追随には機械検査が無い —
 `verify_dist` も manifest 検査も散文を見ないので、配ってから露見する類の破れである。
 anima の文面（分割の有無に依らず正しい 1 本）が雛形。
+
+> **前提の失効と未履行（2026-09-05 — 網羅レビュー W-D2-3）**: 上の「anima 以外は分割が
+> 発生していない（`maxShards = 1`）から現行の文面が正しい」という前提は、**同じ 2026-08-30 に
+> 裁定された ADR [0081](0081-shard-spec-v2.md) 決定 3（常時分割）でその日のうちに失効した** —
+> テンソルを 1 本でも持つ全 family が 2 ファイル以上になるので、この MUST は全 family に掛かる。
+> **未履行**: `card.py` の overview 6 本（sbv2 / irodori / siglip2 / depth_anything /
+> birefnet / vowel_detector）と `distribution.py` の NOTICE 改変列挙 4 本（siglip2 /
+> depth_anything / birefnet / gemma4）が今も単一ファイルの綴りで、**anima 以外の公開済みリポ**
+> （siglip2 / depth-anything / irodori 2 本 / sbv2-jvnv・gemma4 は NOTICE 側だけ）で散文が
+> 配布形の実態と食い違う（いずれも MIT / CC BY-SA / Apache で改変告知義務の形ではないため、
+> 実害は説明の正確さに留まる）。birefnet / vowel-detector は未配布なので先回りの是正。
+> 雛形自身（anima の `CONTAINER_MODIFICATION`）の「1 ファイルに収まらないときだけ分割」も、
+> 0081 決定 3 に照らすと条件つきで誤り。
+> 是正はカードの焼き直し（= HF 再アップロード）とセットでしか公開物に届かないので、ADR
+> [0092](0092-distribution-repos-and-sources.md) 決定 7 の LICENSE / NOTICE 是正と同じ
+> **次の上げ直し波**で行う（2026-09-05 裁定）。

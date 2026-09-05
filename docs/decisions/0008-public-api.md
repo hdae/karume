@@ -41,3 +41,9 @@
   `*_test.ts` も収集する（root `deno.json` の `exclude` は `inputs/ outputs/ models/` のみ・
   2026-09-03 のフル verify ログで実測）。`packages/*/tests/` から `tools/` を import する形
   （層の逆流）は採らない。
+- 2026-09-05: 上の射程に **`packages/runtime/tests/helpers/`** を含める — 道具は
+  `shard-files.ts` の解決規則（Python `karume.shards.resolve_shards` の鏡像）を掴んでよい
+  （`tools/_shared/assets.ts`）。この規則は `Deno` API（ファイルシステム走査）に依るため
+  `src/` へは昇格できない（横断不変条件「ランタイム依存は Web 標準 API のみ」）。道具側へ
+  写すと**同じ規則の 3 実装目**（Python / runtime のテスト補助 / 道具）ができ、ずれても
+  どこも赤くならないので、掴む形を追認する（2026-09-05 裁定）。

@@ -277,7 +277,9 @@ full スロットの `P + Q ≤ C` 超過は今日「汎用メッセージで fa
     走らないので、写さないと「受理集合を検査した値」と「実際に流す値」が別物になり得た — 検査後に
     `prompt` へ語彙外 id を足す / 走行中に `maxNewTokens` を伸ばす / `logitBias` を差し替える、の
     どれも例外にならない。複製はレイヤごとに 1 箇所（`generate` が prompt・`createSampler` が
-    sampler 指定）で、`samplerDistribution` は 1 回の呼び出しの中でしか spec を読まないので写さない。
+    sampler 指定）で、〈訂正 2026-09-05: sampler 指定の写しは `sampler.ts` の `snapshotSpec` 1 本に
+    集約し、発行時（`Gemma4Pipeline.chat` / `Gemma4ChatSession.send`）と `createSampler` の双方が
+    同じ 1 本を呼ぶ〉`samplerDistribution` は 1 回の呼び出しの中でしか spec を読まないので写さない。
     観測できる変化は「発行後の書き換えが効かなくなる」ことだけで、消費側の doc は
     `docs/limitations.md`。
 

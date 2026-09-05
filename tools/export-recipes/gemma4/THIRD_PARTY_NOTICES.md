@@ -48,11 +48,11 @@ published.
 
 ### transformers (model implementation)
 
-| Item                     | Value                                                                                      |
-| ------------------------ | ------------------------------------------------------------------------------------------ |
-| Upstream repository      | <https://github.com/huggingface/transformers>                                              |
-| Revision used            | `transformers==5.14.1` (ad hoc `--with`, not in `pyproject.toml`)                          |
-| Form of copy             | Imported and used as-is; key renaming happens on the loaded state dict, no patch, no copy. |
-| Code license             | Unverified                                                                                 |
-| Weights license          | n/a                                                                                        |
-| Attribution requirements | Unverified                                                                                 |
+| Item                     | Value                                                                                                                                                              |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Upstream repository      | <https://github.com/huggingface/transformers>                                                                                                                      |
+| Revision used            | `transformers==5.14.1` (ad hoc `--with`, not in `pyproject.toml`)                                                                                                  |
+| Form of copy             | Imported and used as-is; key renaming happens on the loaded state dict, no patch, no copy.                                                                         |
+| Code license             | Apache-2.0 — read from the installed wheel's own `LICENSE` (`transformers 5.14.1`, checked 2026-09-05; "Copyright 2018- The Hugging Face team").                   |
+| Weights license          | n/a                                                                                                                                                                |
+| Attribution requirements | None attach here: no `transformers` code is copied into this directory or redistributed (import-time dependency only), and Apache 2.0 §4 starts at redistribution. |

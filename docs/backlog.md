@@ -7,49 +7,23 @@
 > [perf-ledger](perf-ledger.md) が正本で、ここは波として参照するだけ ④by-design 制約の正本は
 > [limitations](limitations.md) — 作業化が裁定された時だけここに載る。
 
-## now — 0.8.0 リリース後（2026-09-04 棚卸し）
+## now — 0.9.0 リリース後（2026-09-05 棚卸し）
 
-0.8.0 は公開済み（内容は下の「消化済み（0.8.0 リリース）」節）。以降の作業波は a → c の順
-（d は ADR [0092](decisions/0092-distribution-repos-and-sources.md) でクローズ・2026-09-04
-ユーザー裁定）。波と独立に消化してよい残件はその下。
+0.9.0 は公開済み（内容は下の「消化済み（0.9.0 リリース）」節）。2026-09-04 裁定の作業波 a〜d の
+うち残るのは **c だけ**（a / b は消化・d はクローズ）。波と独立に消化してよい残件はその下。
 
-1. ~~**a. OP マイクロベンチ 2 段目 + Fusion 半自動発見 2 段目**~~ **消化（2026-09-04 — 段 0〜4・実測正本 =
-   [research 2026-09-04](research/2026-09-04-opbench-stage2.md)）**: `tools/opbench` に `single`
-   （計測規約を実装として内蔵 — クロック張り付けの filler を新規に規約化）/ `graph` / `torch`（列 B）を、
-   `tools/fusion-hints` に `inductor` を追加。合格線 = K-11 の census 加重 9.05ms（ADR 0082 の 7.38ms に
-   +22.6%・帯内）・single / graph 1.01・P-1 の変種キーと dispatch 数の一致、で達成。**残（起票）**:
-   ①**CPU/TS 側配置の系統評価**は未着手（先例 = PLE host gather / relattn のホスト生成 — 次の性能波で
-   `single` の形別表を入口にする）②Inductor 突合の join を normalize の**出自**で行う（現状は fx 名で、
-   normalize が合成する linear / rms_norm / rope が unobserved に落ちる — exporter normalize に出自 1 欄）
-   ③`graph` の他家族（現状 gemma4 / anima）④`single` の Metal 実走（wall モードは実装済み・timing は
-   Metal の timestamp 不能）。K-7 の再評価材料は perf-ledger へ記入済み（adaLN 側は Inductor も畳む）。
-2. ~~**b. 未配布家族の初回公開**~~ **消化（2026-09-04 — 0.9.0。リポ割り・命名・対応表の規則の
-   正本 = ADR [0092](decisions/0092-distribution-repos-and-sources.md)）**: `karume-siglip2`
-   （**1 リポ 2 モデル**・base / so400m 同居・既定 base — 決定 8）と `karume-depth-anything-v2`
-   を初公開し、`karume-gemma4-e2b` → `karume-gemma4` の改名を同乗させた（改名後はカードと
-   `karume.json` を焼き直したので revision が動いている）。対応表は **6 家族 8 エントリ**
-   （anima 2 / irodori 2 / sbv2 1 / gemma4 1 / siglip2 1 / depth-anything 1）で、公開 revision の
-   正本は `packages/models/src/*/config.ts` の pin 8 本（docs には写さない）。
-   **断片化**: siglip2 の初回アップロードが global dedup のヒットで断片化し（so400m の 7 shard 中
-   5 本が 4.2〜8.9 MiB/term）、hf_xet 1.6.0 の停止ノブ + shard-cache 退避 + リポ再作成で
-   46〜61 MiB/term へ回復させた（機序と実測 =
-   [research 2026-08-09 の 2026-09-04 追記](research/2026-08-09-xet-fragmentation.md)・恒久手順 =
-   [release-runbook](release-runbook.md) §2）。**合格線の実績** = 断片化検証は siglip2 46〜61 /
-   depth-anything 47 MiB/term で目安 ≥10 を全て満たす。**公開完了**（2026-09-04 — GitHub Release
-   v0.9.0 → JSR 0.9.0 → `deno task smoke:published` 緑・`KARUME_SOURCES` 8 本の疎通を確認）。
-   `karume-birefnet-hr` と `karume-lucida` は**後回し**（2026-09-04 ユーザー裁定 — 2048² は現状
-   不成立〈[limitations](limitations.md) の BiRefNet 節〉。プールの再利用方式の見直しと中間
-   テンソルの `requiredLimits` 宣言が前提で、公開する時は 1024² の配布形のまま。上流ライセンス
-   の人間確認は 2026-09-04 に済み — 両方 MIT・著作権者 2 名・`LICENSE.md` は recipe が同梱）。
-   **vowel-detector も今回の波から外した**（上流の体裁整備が先 — 2026-09-04 ユーザー裁定）。
-3. **c. perf K-13 / K-14**（prefill attention の K/V タイル再利用 / decode ①QK の並列化）:
+1. **c. perf K-13 / K-14**（prefill attention の K/V タイル再利用 / decode ①QK の並列化）:
    起票・合格線・kill 基準とも [perf-ledger](perf-ledger.md) が正本。
-4. ~~**d. export-recipes 切り出し（裁定済み・案 A）**~~ **クローズ（2026-09-04 — ADR
-   [0092](decisions/0092-distribution-repos-and-sources.md) 決定 5。切り出さない）**:
-   分離の動機はライセンスの見え方であって構造ではなく（構造の分離は ADR
-   [0065](decisions/0065-exporter-core-recipe-split.md) が machine gate 込みで済ませている）、
-   README 2 か所の carve-out + family 別 `THIRD_PARTY_NOTICES.md` で同じ目的を果たす。
-   uv workspace の解体・資産根 / fixture 書き先の注入は払わずに済む。
+2. **BiRefNet 2048² 工事 A → B → C**（起票 2026-09-05 — ユーザー裁定。設計の正本は ADR
+   [0093](decisions/0093-transient-liveness-packing.md)、実測の正本は
+   `.claude/reviews/2026-09-04_62bdbeb/B1-design-draft.md`〈git 追跡外〉）:
+   ① C = 中間テンソルの上限 preflight（slot > binding 上限 / 領域 > `maxBufferSize` を確保前に
+   ノード名つきで落とす）+ docs の数値訂正 → ② A = recipe の代数書き換え（1×1 conv と bilinear
+   upsample の可換性で `cat` を消す・`--verify` の maxdiff 段と 1024² / 2048² golden の再採取を
+   伴う） → ③ B = 中間バッファの静的 liveness パッキング（ADR 0093 は起票済み・土台
+   `packages/runtime/src/runtime/transient-plan.ts` と単体テストは入ったが **`recipe.ts` /
+   `executor.ts` / `estimate.ts` へは未結線**） → ④ 配布門 `BIREFNET_RESOLUTION` の解除・実 GPU
+   実測（VRAM ピーク・時間）・`karume-birefnet-hr` 2048² の公開裁定。
 
 **残件**:
 
@@ -58,6 +32,21 @@
   `karume-irodori-v4.1-small`（MIT = 全文 + 著作権行）と `karume-sbv2-jvnv`（CC BY-SA）は
   法的テキストの同梱が漏れている（`verify_dist` の `LEGAL_PATHS` 席）。**次にこの 2 リポを
   上げ直す回に同乗**させる（2026-09-04 ユーザー裁定 — 是正単独の再アップはしない）。
+  未公開の vowel-detector は同梱済み（2026-09-05 — `PIPELINE.root_files` に MIT 全文 +
+  著作権行）なので、初回公開時に漏れることはない。
+  同じ上げ直し波に**カード / NOTICE の常時分割の文面是正**も乗せる（ADR
+  [0071](decisions/0071-manifest-v3-shards.md) 末尾の未履行記録）: `card.py` の overview 6 本
+  （sbv2 / irodori / siglip2 / depth_anything / birefnet / vowel_detector）と `distribution.py` の
+  NOTICE 改変列挙 4 本（siglip2 / depth_anything / birefnet / gemma4）が単一ファイルの綴りのまま、
+  anima の `CONTAINER_MODIFICATION` は「収まらないときだけ分割」の条件つき文面のまま。
+- **公開済み `karume-depth-anything-v2` のカード / NOTICE.md 再発行**（起票 2026-09-05）:
+  depth-anything の `CONVT_MAXDIFF` は実重み `--verify` の再実測で 1.4e-06 → 6.1e-06 へ確定した
+  （合成 4 ケースの最大 — 旧値は 1 ケースぶん。`verify_patches` に上限比較の門も入った）ので、
+  公開済みカードと NOTICE.md が名乗る 1.4e-06 は古い。次にこのリポを上げ直す回に同乗させる
+  （是正単独の再アップはしない — 上の 2 リポと同じ扱い）。
+- **テスト被覆の残（起票 2026-09-05）**: `packages/runtime/tests/helpers/shard-files.ts` の
+  `readExact` 短読みと `shardTensorNames` の非オブジェクトヘッダ、`SubmitScheduler` の
+  `#encodeTimedChunk` 内の copy 分岐（`packages/runtime/src/gpu/submit.ts`）は依然として未検証。
 - **Metal `--diagnostics` の切り分け実験**: query set の同時生存本数と `destroy()` 滞留の
   どちらが支配かの A/B。手順①②と修正候補は [known-issues](known-issues.md) の該当節が正本。
   実機が要るのでユーザー実行。
@@ -126,6 +115,46 @@
   （**起票のみ** — 収集する項目・置き場・オプトインの形は未設計）。
 - Pixel（8GB 級 Android Chrome）の `err.cause` 再判定 — [known-issues](known-issues.md)。
 
+## 消化済み（0.9.0 リリース — 2026-09-04）
+
+2026-09-04 裁定の作業波 a / b / d（結果だけ残す — 設計の正本は各 ADR・実測は research）:
+
+- **a. OP マイクロベンチ 2 段目 + Fusion 半自動発見 2 段目**（段 0〜4・実測正本 =
+  [research 2026-09-04](research/2026-09-04-opbench-stage2.md)）: `tools/opbench` に `single`
+  （計測規約を実装として内蔵 — クロック張り付けの filler を新規に規約化）/ `graph` / `torch`（列 B）を、
+  `tools/fusion-hints` に `inductor` を追加。合格線 = K-11 の census 加重 9.05ms（ADR 0082 の 7.38ms に
+  +22.6%・帯内）・single / graph 1.01・P-1 の変種キーと dispatch 数の一致、で達成。**残（起票）**:
+  ①**CPU/TS 側配置の系統評価**は未着手（先例 = PLE host gather / relattn のホスト生成 — 次の性能波で
+  `single` の形別表を入口にする）②Inductor 突合の join を normalize の**出自**で行う（現状は fx 名で、
+  normalize が合成する linear / rms_norm / rope が unobserved に落ちる — exporter normalize に出自 1 欄）
+  ③`graph` の他家族（現状 gemma4 / anima）④`single` の Metal 実走（wall モードは実装済み・timing は
+  Metal の timestamp 不能）。K-7 の再評価材料は perf-ledger へ記入済み（adaLN 側は Inductor も畳む）。
+- **b. 未配布家族の初回公開**（リポ割り・命名・対応表の規則の正本 = ADR
+  [0092](decisions/0092-distribution-repos-and-sources.md)）: `karume-siglip2`
+  （**1 リポ 2 モデル**・base / so400m 同居・既定 base — 決定 8）と `karume-depth-anything-v2`
+  を初公開し、`karume-gemma4-e2b` → `karume-gemma4` の改名を同乗させた（改名後はカードと
+  `karume.json` を焼き直したので revision が動いている）。対応表は **6 家族 8 エントリ**
+  （anima 2 / irodori 2 / sbv2 1 / gemma4 1 / siglip2 1 / depth-anything 1）で、公開 revision の
+  正本は `packages/models/src/*/config.ts` の pin 8 本（docs には写さない）。
+  **断片化**: siglip2 の初回アップロードが global dedup のヒットで断片化し（so400m の 7 shard 中
+  5 本が 4.2〜8.9 MiB/term）、hf_xet 1.6.0 の停止ノブ + shard-cache 退避 + リポ再作成で
+  46〜61 MiB/term へ回復させた（機序と実測 =
+  [research 2026-08-09 の 2026-09-04 追記](research/2026-08-09-xet-fragmentation.md)・恒久手順 =
+  [release-runbook](release-runbook.md) §2）。**合格線の実績** = 断片化検証は siglip2 46〜61 /
+  depth-anything 47 MiB/term で目安 ≥10 を全て満たす。**公開完了**（2026-09-04 — GitHub Release
+  v0.9.0 → JSR 0.9.0 → `deno task smoke:published` 緑・`KARUME_SOURCES` 8 本の疎通を確認）。
+  `karume-birefnet-hr` と `karume-lucida` は**後回し**（2026-09-04 ユーザー裁定 — 2048² は現状
+  不成立〈[limitations](limitations.md) の BiRefNet 節〉。プールの再利用方式の見直しと中間
+  テンソルの `requiredLimits` 宣言が前提で、公開する時は 1024² の配布形のまま。上流ライセンス
+  の人間確認は 2026-09-04 に済み — 両方 MIT・著作権者 2 名・`LICENSE.md` は recipe が同梱）。
+  **vowel-detector も今回の波から外した**（上流の体裁整備が先 — 2026-09-04 ユーザー裁定）。
+- **d. export-recipes 切り出し（裁定済み・案 A）→ クローズ**（ADR
+  [0092](decisions/0092-distribution-repos-and-sources.md) 決定 5。切り出さない）:
+  分離の動機はライセンスの見え方であって構造ではなく（構造の分離は ADR
+  [0065](decisions/0065-exporter-core-recipe-split.md) が machine gate 込みで済ませている）、
+  README 2 か所の carve-out + family 別 `THIRD_PARTY_NOTICES.md` で同じ目的を果たす。
+  uv workspace の解体・資産根 / fixture 書き先の注入は払わずに済む。
+
 ## 消化済み（0.8.0 リリース — 2026-08-30〜09-04）
 
 結果だけ残す（設計の正本は各 ADR・実測は research）:
@@ -189,9 +218,12 @@
   [0082](decisions/0082-linear-gemv-decode.md) で消化。sliding スロットの window 実数宣言と、
   融合カウント門の decode 資産への拡張も同波。
 
-断片化検証（2026-09-04・最終 SHA・各リポ最大 safetensors 2 本 — `outputs/release/frag-check.zsh`）:
-anima 63 / 63・anima-extra 16 / 36・irodori-v4-small 25 / 31・irodori-v4.1-small 25 / 31・
-sbv2-jvnv 20 / 16・gemma4-e2b 63 / 28 MiB/term = 目安 ≥10 を全て満たす。
+断片化検証（2026-09-04 時点の各リポの revision・**各リポ最大 safetensors 2 本だけ**を見た当時の
+使い捨て台本による）: anima 63 / 63・anima-extra 16 / 36・irodori-v4-small 25 / 31・
+irodori-v4.1-small 25 / 31・sbv2-jvnv 20 / 16・gemma4-e2b（0.9.0 で `karume-gemma4` へ改名 —
+改名後は焼き直しで revision が動いている）63 / 28 MiB/term = 目安 ≥10 を全て満たす。
+追試は恒久台本 `tools/release/hf-upload.zsh check <repo>` で行う（**全 safetensors** を回すので
+本数が増える — 代表 2〜3 本では shard 間の偏りを見落とす。[release-runbook](release-runbook.md) §2）。
 
 ## 消化済み（既知問題 3 件 + anima 素版 i4 感度 — 2026-08-25〜28）
 
@@ -428,7 +460,9 @@ autoregressive 波の**残項目（波外へ送り）**:
 
 - ~~R1 の残り~~ **消化済み（2026-08-29 — R1 統合波の節を参照）**: ロード面 API 工事 4 件も
   exporter 自動分割規則も実装完了（ADR 0070 追記 2026-08-29 / ADR 0071 決定 4 撤回）。
-- 実資産 CI gate（GitHub CI はローカル資産を踏まない問題）
+- 実資産 CI gate（GitHub CI はローカル資産を踏まない問題）。**門番は消化済み**
+  （`packages/runtime/tests/assets_gate_test.ts` + CI env `KARUME_ALLOW_NO_ASSETS=1` —
+  2026-09-05）。残るのは golden の fixture 昇格 / release gate での資産取得の判断
 - HF 公開: **jvnv / irodori / anima の 3 リポは波 K-4 で公開済み**（2026-08-21）。FN は parked
   （再配布の書面根拠なし）。以後の新モデルは runbook に従う
 - リポ直下 README の書き上げ・JSR npm 互換層の sideEffects 検証。**0.8.0 の範囲外
@@ -436,7 +470,14 @@ autoregressive 波の**残項目（波外へ送り）**:
   対外アナウンス時**で、着手にはバンドルサイズの再実測が前提（2026-08-16 の gzip 実測は
   gemma4 生成 API・GEMV 族・tokenizer の追加で失効している）
 - ライセンス interview（export-recipes の family 別 provenance を upstream revision 単位で
-  人間確認 — 再編の release gate。**公開 4 リポぶんは波 K-4 の人間ゲートで先行実施**）
+  人間確認 — 再編の release gate。**公開 4 リポぶんは波 K-4 の人間ゲートで先行実施**）。
+  **公開済み 6 家族（anima / irodori / sbv2 / siglip2 / gemma4 / depth_anything）の重み行
+  （Revision used / Weights license）は未記録**（公開時点の人間確認は K-4 の 4 リポぶんだけ）。
+  コード依存ブロック（transformers / PyTorch 等）の Code license / Attribution は上流 LICENSE の
+  現物で 2026-09-05 に記入済み。重み行が埋まらない構造要因 = **上流 revision を機械可読に残す席が
+  リポに無い**（`<FAMILY>_SOURCES` は karume 配布リポの pin であって上流ではない）ので、
+  `provenance.py` 系へ `upstream_revision` 欄を足す（**再 export 同乗** — W-G4-4 の `sym_max` 欄と
+  同じ回に）
 - 「semantic surface と実装済み subset の分離」方針の再裁定（attention / deform_conv2d /
   gather / conv_transpose1d / upsample_bilinear2d — 観測 subset を op 意味論にしない統一規約）
 

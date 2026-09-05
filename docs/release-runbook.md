@@ -61,7 +61,13 @@ NOTE（次リリース限り）: 旧 `hdae/karume-anima-turbo` は ADR 0087 で�
 ## 1. 事前検証
 
 - [ ] `deno task verify` 緑（GPU テスト込み — アダプタ無し環境の SKIP はリリース判定では不可・
-      ADR 0005）
+      ADR 0005）。**リリース判定機の条件**: アダプタが `shader-f16` と `timestamp-query` を
+      **列挙する**実 HW であること（ソフトウェアアダプタ〈lavapipe 等〉は f16 を f32 で計算する
+      ので実 HW レーンと区別する）と、実重み系列（`outputs/series/`）が置いてあること。
+      列挙・資産が欠けた機で verify を通すには意図表明の env
+      （`KARUME_ALLOW_NO_SHADER_F16` / `KARUME_ALLOW_NO_TIMESTAMP_QUERY` /
+      `KARUME_ALLOW_NO_ASSETS`）が要るが、**それらを設定した環境の緑はリリース判定に使わない**
+      （既定では `gpu_gate_test.ts` / `assets_gate_test.ts` が FAIL にする）
 - [ ] exporter: `uv run --no-sync pytest` + `uv run --no-sync ruff check` +
       `uv run --no-sync ruff format --check` を
       **tools/exporter と tools/export-recipes の両方**で緑（CI は lint と format を
@@ -114,6 +120,10 @@ export HF_XET_DEDUPLICATION_GLOBAL_DEDUP_QUERY_ENABLED=false
 - [ ] **書き込みトークンへ切替**: `hf auth switch --token-name "Karume Release"` —
       既定の読み取りトークン（Karume Gated Read）のままだと LFS batch が 403 になる
       （2026-08-21 実測）。アップロードが済んだら読み取りトークンへ戻す
+- [ ] **台本は機械の門も兼ねる**（人の目視に依存しない）: `upload` は shard-cache の退避に
+      失敗した時点で非 0 終了し、アップロード後に `global_dedup_query_enabled = false` と
+      CAS 照会 0 回を検査して不一致なら非 0 終了する。`check` は `models/<repo>` に
+      `.safetensors` が 1 本も無ければ非 0 で落ちる（空表を「検証したが問題なし」として出さない）
 - [ ] アップロード: `tools/release/hf-upload.zsh upload <repo>`（中身は
       `tools/.venv/bin/hf upload hdae/<repo> models/<repo> . --repo-type model` —
       `models/` は 1 ディレクトリ = 1 HF リポ — assets-layout。追加引数はそのまま hf へ渡る）
@@ -195,8 +205,10 @@ PyPI `karume`（tools/exporter）は**未リリース**。公開を始める時�
 
 ## 5. 事後
 
-- [ ] docs 同期: ACTIVE_DESIGN・backlog（release 節の消化状況）・リリース記録・
-      プロジェクトメモリ
+- [ ] docs 同期: ACTIVE_DESIGN の Now・backlog（now 見出しと release 節の消化状況）・
+      リリース記録・プロジェクトメモリ。**この項目が済むまでリリースは「完了」ではない** —
+      台帳の同期はここ 1 か所を唯一の門として扱う（0.9.0 では backlog だけが更新され
+      ACTIVE_DESIGN が「publish はユーザー」のまま残った。同型の漏れは 2 度目）
 - [ ] 公開パッケージからの疎通: `deno task smoke:published`（tools/published-smoke — 公開版
       `@karume/hub` で `KARUME_SOURCES` 全エントリの manifest を解決し、sbv2 を
       `fromPretrained` まで通す。GPU が

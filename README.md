@@ -5,8 +5,8 @@ A general-purpose NN inference stack running on WebGPU (Deno + browser, pure Typ
 packages built from Web-standard APIs). Composed of three JSR packages — `@karume/runtime`
 (IR execution) / `@karume/hub` (model resolution, fetch, and caching) / `@karume/models`
 (pipelines and tokenizer) — plus the PyPI package `karume` that lowers PyTorch models to IR
-(the installed CLI ships `dist` / `verify`; the `export*` commands run from the repository
-work tree only).
+(the installed CLI ships `dist` / `repack` / `verify` — see `karume --help`; the `export*`
+commands run from the repository work tree only).
 
 Status: **pre-1.0** (this page is a stub; the current design's source of truth is
 [docs/decisions/](docs/decisions/))

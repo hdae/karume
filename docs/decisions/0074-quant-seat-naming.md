@@ -3,9 +3,10 @@
 - Status: implemented（2026-08-25・0.5.0 の breaking 波 — 決定 6 の移行表どおりに適用済み。
   recipe 側の席名一斉改名と `karume/4` emit、deno 側の `linearCompute` / `attentionCompute` の値
   `"i8a8"` → `"a8"` 改名まで完了し、[0075](0075-quant-presentation.md) の繰り上げと同乗した。
-  **公開 4 リポの再アップロードと pin 更新（[0073](0073-models-source-pin.md)）は未** —
-  リリース段で行う（[release-runbook](../release-runbook.md)）。SBV2 の yomi 依存分離は同乗せず
-  0.6.0 へ送った〈backlog〉。起票は 2026-08-21 のユーザー裁定「起票お願いします」）
+  公開リポの再アップロードと pin 更新（[0073](0073-models-source-pin.md)）は **0.5.0 で
+  消化済み**（4 リポの revision は [backlog](../backlog.md) の 0.5.0 節が記録）。SBV2 の
+  yomi 依存分離は同乗せず 0.6.0 へ送った〈backlog〉。起票は 2026-08-21 のユーザー裁定
+  「起票お願いします」）
 - Date: 2026-08-21
 - 関連: ADR [0041](0041-manifest-v2.md)（`presets` → `quants` の語彙）/
   [0025](0025-w8a8-linear-execution.md)・[0030](0030-attention-a8-execution.md)（`i8a8` の出自）/
@@ -108,7 +109,8 @@ text_conditioner / vae_decoder が f16 固定で、圧縮が掛かるのは tran
 
 **適用は 0.5.0 の breaking 波でまとめて行う**（Status 参照）— この表は「移行時にこう変える」の
 記録であって、現行コード（`ANIMA_QUANTS` / `SBV2_QUANTS` / `IRODORI_QUANT_SEATS`）はまだ旧名の
-まま。公開済み 4 リポの manifest は再アップロード + pin 更新（[0073](0073-models-source-pin.md)）
+まま〈時点記録 — **適用済み**（0.5.0・2026-08-25）。recipes の散文とエラー文言・perf-ledger の
+SBV2 席名は 2026-09-05 に追随〉。公開済み 4 リポの manifest は再アップロード + pin 更新（[0073](0073-models-source-pin.md)）
 と同時に切り替える。
 
 新しい名前は長くなる（`i8-a8-attn8-s16`）が、**id は機械の都合で、人が読むのは

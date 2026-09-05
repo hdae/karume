@@ -8,6 +8,11 @@
   **削除済み**。現行の検出器は `packages/models/tests/e2e_anima_test.ts` の PNG sha256
   完全一致門 + `packages/runtime/tests/gpu_attention_i8a8_test.ts` /
   `gpu_attention_pv_i8a8_test.ts`。**旧 E2E の tolerance / 床の記録は歴史値**として読むこと。
+- ノブ値の改名（2026-09-05 記録）: ADR [0074](0074-quant-seat-naming.md)（0.5.0 で
+  `attentionCompute` の値を `"a8"` へ改名）— 決定 1 ほか本文の `"i8a8"` は**当時の綴り**で、
+  現行の型は `ComputePrecision = "f32" | "f16" | "a8"`
+  （`packages/runtime/src/runtime/session-types.ts`）。手書きの `SessionOptions` へここから
+  綴りを写さない。
 - 関連: ADR 0023（融合 attention — 3 dispatch 構造の土台）/ 0025（linear w8a8 — 量子化部品と
   atol=0 契約の前例）/ 0028（計算精度ノブ `ComputePrecision` の型）/ 設計 recon =
   [2026-08-04-attention-a8-design.md](../research/2026-08-04-attention-a8-design.md)（qk/stats/pv

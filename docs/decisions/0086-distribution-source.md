@@ -138,6 +138,9 @@ HF 固有の語彙が診断の**必須欄**だったのを、取得元ごとに�
 - `IntegritySource` に `"local"` を足す（`"cache" | "network" | "local"`）。ローカルは取り直しても
   同じバイト列が返るので、`"network"` と違って**再試行が回復手段にならない**ことを型で分ける。
 - `IntegrityError` / `HubFetchError` の `repo` / `revisionSha` を optional 化する。
+  追記（2026-09-05）: 越境参照の `IntegrityError.source` は**越境先の取得元の分類**を名乗る
+  （セッションの分類を継がない）。ローカルセッション + リモート越境が正当な構成である以上、
+  宣言からは失敗元が決まらないので、失敗元は `SizeViolation` を呼ぶ取得元自身が渡す。
 - `LoadedManifest` を**クラス**にし、`repo` / `revisionSha` を optional・`hubUrl` を**削除**する。
   取得元そのものを内部欄（`#session`）として運び、資産 3 面（`fetchAssets` / `prefetchAssets` /
   `streamAssets`）は識別欄から取得元を**組み立て直さない** — 組み立て直す形は「HF なら repo と

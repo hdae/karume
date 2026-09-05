@@ -356,7 +356,7 @@ The script that provides the **host-side assets** required by `examples/sbv2/` (
 real text to WAV) and takes on the **numerical parity** of its output. It does not touch the model
 graphs (neither the emit path nor the goldens change).
 
-The torch side reads the raw ckpt via `--model-dir` (default `inputs/sbv2/FN4`) — **pair it
+The torch side reads the raw ckpt via `--model-dir` (default `inputs/sbv2/F1`) — **pair it
 explicitly with the dist / model the Deno side uses**, or the comparison silently runs two
 different voices (the style assets from ① are also baked per ckpt).
 

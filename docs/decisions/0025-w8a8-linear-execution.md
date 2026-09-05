@@ -7,6 +7,10 @@
   現行の検出器は `packages/models/tests/e2e_anima_test.ts` の PNG sha256 完全一致門 +
   `packages/runtime/tests/gpu_i8a8_test.ts`（atol=0）。**旧 E2E の tolerance / 判別帯は歴史値**
   として読むこと。
+- ノブ値の改名（2026-09-05 記録）: ADR [0074](0074-quant-seat-naming.md)（0.5.0 で
+  `linearCompute` の値を `"a8"` へ改名）— 本文 5 箇所の `"i8a8"` は**当時の綴り**で、現行の型は
+  `ComputePrecision = "f32" | "f16" | "a8"`（`packages/runtime/src/runtime/session-types.ts`）。
+  手書きの `SessionOptions` へここから綴りを写さない。
 - 対象: `SessionOptions.linearCompute: "i8a8"`（packages/runtime/src/kernels/quantize-rows.ts /
   packages/runtime/src/kernels/linear-i8a8.ts / packages/runtime/src/reference/i8a8.ts / executor `#encodeLinearI8a8`）
 - 需要の実測: GEMM 置換（ADR 0022）後も linear が DiT GPU の 69.8%（1024px wi8）/

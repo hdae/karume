@@ -44,6 +44,16 @@ model.safetensors はノード列・重みバイトまで完全一致・差は�
    `vae.enable_tiling()` は使わず `use_tiling` 真は fail loudly。ブレンド式は上流の逐語移植で
    本物とのビット一致を pytest が固定）。幾何メタ（開始位置列/stride/ブレンド幅）を
    tiling.json に出し、TS 側が数値だけでなく**幾何そのもの**を突合する。
+
+   > **追記（2026-09-05 裁定 9a）**: **TS 側の幾何突合は未実装**。TS は資産の入出力 shape から
+   > 幾何を再導出し（`packages/models/src/anima/tiling.ts` の `planTileAxis` /
+   > `blendExtentAt`）、Python の `MIRRORED_STARTS`
+   > （`tools/export-recipes/anima/tests/test_tiling.py`）と TS の受理集合 97 辺 literal 表
+   > （`packages/models/tests/anima_tiling_test.ts` の `AXIS_STARTS`）の**二重凍結**で一致を
+   > 守る（2026-09-03 レビュー 1-13）。`tiling.json` の突合経路は作らない。
+   > 併せて上の Python 側パスの綴りを訂正: `tools/exporter/anima_tiling.py` は ADR
+   > [0065](0065-exporter-core-recipe-split.md) の core / recipe 分離で
+   > `tools/export-recipes/anima/tiling.py` へ移動している。
 6. タイル時は解像度に依らず **512 用 vae_decoder 資産（f16 系列）を開く**（資産選択は
    デモ側 — タイルの形は開いた資産の入出力 shape から引き、literal の 8 や 64 を
    デモに置かない）。

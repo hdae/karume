@@ -130,7 +130,8 @@ f32 で厳密恒等。**実測で成立を確認**（H = 19 = タイル 16 の�
 のと同じ罠）。
 
 **(c) `sigmoid` の WGSL 本体を素の elementwise と共有する** — `SIGMOID_STABLE_WGSL` を
-`codegen/elementwise.ts` から import する（silu.ts と同じ規律。書き写すと primitive と
+`codegen/numerics-wgsl.ts` から import する（置き場は 2026-09-05 に `codegen/elementwise.ts` から
+共有 WGSL 断片のファイルへ移した — 規律は同じ。silu.ts と同じ規律。書き写すと primitive と
 融合版で丸め列が割れうる）。`tanh` は WGSL 組込なので共有の問題は無い。
 
 **(d) 演算の並びと括り方を分解形の逐語にする** — 更新式は **`h' = (h − n)·z + n`**。

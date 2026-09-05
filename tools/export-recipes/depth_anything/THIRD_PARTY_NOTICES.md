@@ -41,11 +41,11 @@ published.
 
 ### transformers (model implementation)
 
-| Item                     | Value                                                                                          |
-| ------------------------ | ---------------------------------------------------------------------------------------------- |
-| Upstream repository      | <https://github.com/huggingface/transformers>                                                  |
-| Revision used            | `transformers==5.14.1` (pinned in `pyproject.toml`)                                            |
-| Form of copy             | Monkeypatch of imported classes; `export.py` ports `DPTImageProcessor` normalization verbatim. |
-| Code license             | Unverified                                                                                     |
-| Weights license          | n/a                                                                                            |
-| Attribution requirements | Unverified                                                                                     |
+| Item                     | Value                                                                                                                                                                                                                                                                                                       |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Upstream repository      | <https://github.com/huggingface/transformers>                                                                                                                                                                                                                                                               |
+| Revision used            | `transformers==5.14.1` (pinned in `pyproject.toml`)                                                                                                                                                                                                                                                         |
+| Form of copy             | Monkeypatch of imported classes; `export.py` ports `DPTImageProcessor` normalization verbatim.                                                                                                                                                                                                              |
+| Code license             | Apache-2.0 — read from the installed wheel's own `LICENSE` (`transformers 5.14.1`, checked 2026-09-05; "Copyright 2018- The Hugging Face team").                                                                                                                                                            |
+| Weights license          | n/a                                                                                                                                                                                                                                                                                                         |
+| Attribution requirements | Apache 2.0 §4(a)/(b) attaches to the ported normalization, which lives only in this repo-only directory and is attributed here and in `export.py`. Nothing from `transformers` enters the published distribution (import-time dependency), so the distribution's `LICENSE.md` / `NOTICE.md` are unaffected. |

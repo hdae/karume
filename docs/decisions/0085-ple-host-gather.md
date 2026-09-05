@@ -134,6 +134,10 @@ ADR 0079（テキスト解析は呼び手の責務）。「未着荷 initializer
 - 本方式は freetoken 調査の **c-1（ホスト gather）の初適用**であり、スケール軸の公式スタンス
   （MoE は全 expert VRAM 常駐・総パラメータで予算 — limitations）と整合する。embedding / lm_head
   級の**行疎な表**には効くが、expert FFN には効かない（同調査 §4）ことは既に記録済み。
+- 追記（2026-09-05）: `fromPretrained` は PLE 索引の `shards[].file` 集合と manifest の遅延資産
+  キー集合の**対称差**を `#build` の前に見る（索引が名指す shard が manifest に無い / manifest の
+  遅延資産を索引が名指さない、のどちらも構築前に落とす）。この式は `EAGER_ASSETS` が tokenizer と
+  ple_index の 2 本ちょうどであることに依存する。
 - ホスト側の PLE アップロードが毎 step 増えるので、将来 decode がさらに速くなった場合は
   この転送（decode 35,840 B/token）が観測対象に入りうる — 現時点の壁に対しては無視できる。
 

@@ -59,14 +59,14 @@ published.
 
 ### Aratako/Irodori-TTS (model implementation)
 
-| Item                     | Value                                                            |
-| ------------------------ | ---------------------------------------------------------------- |
-| Upstream repository      | <https://github.com/Aratako/Irodori-TTS>                         |
-| Revision used            | Unverified                                                       |
-| Form of copy             | Imported from a clone via `sys.path`; no copy in this directory. |
-| Code license             | `card.py` records MIT. Unverified against the revision used.     |
-| Weights license          | n/a                                                              |
-| Attribution requirements | Unverified                                                       |
+| Item                     | Value                                                                                                                                                                                                                                                                                   |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Upstream repository      | <https://github.com/Aratako/Irodori-TTS>                                                                                                                                                                                                                                                |
+| Revision used            | Unverified                                                                                                                                                                                                                                                                              |
+| Form of copy             | Imported from a clone via `sys.path`; no copy in this directory.                                                                                                                                                                                                                        |
+| Code license             | MIT — read from the `LICENSE` of the clone this recipe imports (`inputs/irodori/Irodori-TTS`, checked 2026-09-05; "Copyright (c) 2026 Aratako").                                                                                                                                        |
+| Weights license          | n/a                                                                                                                                                                                                                                                                                     |
+| Attribution requirements | MIT requires the copyright notice and permission text to travel with copies of the software. Nothing is copied into this directory and no upstream source enters the published distribution, so no obligation attaches to this block (the codec / weight blocks are judged separately). |
 
 ### sbintuitions/modernbert-ja-310m (text backbone)
 
@@ -92,22 +92,22 @@ published.
 
 ### facebookresearch/dacvae (codec implementation)
 
-| Item                     | Value                                                                     |
-| ------------------------ | ------------------------------------------------------------------------- |
-| Upstream repository      | <https://github.com/facebookresearch/dacvae>                              |
-| Revision used            | `414c20785fc3a28373073ea8ef7a1316eeeaca6e` (pinned in `dacvae/export.py`) |
-| Form of copy             | Imported from a clone via `sys.path`; no copy in this directory.          |
-| Code license             | Unverified                                                                |
-| Weights license          | n/a                                                                       |
-| Attribution requirements | Unverified                                                                |
+| Item                     | Value                                                                                                                                                                                                                            |
+| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Upstream repository      | <https://github.com/facebookresearch/dacvae>                                                                                                                                                                                     |
+| Revision used            | `414c20785fc3a28373073ea8ef7a1316eeeaca6e` (pinned in `dacvae/export.py`)                                                                                                                                                        |
+| Form of copy             | Imported from a clone via `sys.path`; no copy in this directory.                                                                                                                                                                 |
+| Code license             | Apache-2.0 — read from the `LICENSE` of the pinned clone (`inputs/irodori/dacvae-src`, whose HEAD is the pinned `414c2078…`; checked 2026-09-05). The upstream tree carries no `NOTICE` file, so §4(d) has nothing to propagate. |
+| Weights license          | n/a                                                                                                                                                                                                                              |
+| Attribution requirements | None attach here: nothing is copied into this directory and no upstream source enters the published distribution (import-time only), and Apache 2.0 §4 starts at redistribution. The codec **weights** are the block above.      |
 
 ### transformers (ModernBERT implementation)
 
-| Item                     | Value                                                       |
-| ------------------------ | ----------------------------------------------------------- |
-| Upstream repository      | <https://github.com/huggingface/transformers>               |
-| Revision used            | `transformers==5.14.1`                                      |
-| Form of copy             | Monkeypatch of imported classes; no copy in this directory. |
-| Code license             | Unverified                                                  |
-| Weights license          | n/a                                                         |
-| Attribution requirements | Unverified                                                  |
+| Item                     | Value                                                                                                                                                              |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Upstream repository      | <https://github.com/huggingface/transformers>                                                                                                                      |
+| Revision used            | `transformers==5.14.1`                                                                                                                                             |
+| Form of copy             | Monkeypatch of imported classes; no copy in this directory.                                                                                                        |
+| Code license             | Apache-2.0 — read from the installed wheel's own `LICENSE` (`transformers 5.14.1`, checked 2026-09-05; "Copyright 2018- The Hugging Face team").                   |
+| Weights license          | n/a                                                                                                                                                                |
+| Attribution requirements | None attach here: no `transformers` code is copied into this directory or redistributed (import-time dependency only), and Apache 2.0 §4 starts at redistribution. |

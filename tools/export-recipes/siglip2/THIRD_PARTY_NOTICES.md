@@ -44,22 +44,22 @@ published.
 
 ### transformers (model implementation)
 
-| Item                     | Value                                               |
-| ------------------------ | --------------------------------------------------- |
-| Upstream repository      | <https://github.com/huggingface/transformers>       |
-| Revision used            | `transformers==5.14.1` (pinned in `pyproject.toml`) |
-| Form of copy             | Monkeypatch of imported classes. Nothing is copied. |
-| Code license             | Unverified                                          |
-| Weights license          | n/a                                                 |
-| Attribution requirements | Unverified                                          |
+| Item                     | Value                                                                                                                                                              |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Upstream repository      | <https://github.com/huggingface/transformers>                                                                                                                      |
+| Revision used            | `transformers==5.14.1` (pinned in `pyproject.toml`)                                                                                                                |
+| Form of copy             | Monkeypatch of imported classes. Nothing is copied.                                                                                                                |
+| Code license             | Apache-2.0 — read from the installed wheel's own `LICENSE` (`transformers 5.14.1`, checked 2026-09-05; "Copyright 2018- The Hugging Face team").                   |
+| Weights license          | n/a                                                                                                                                                                |
+| Attribution requirements | None attach here: no `transformers` code is copied into this directory or redistributed (import-time dependency only), and Apache 2.0 §4 starts at redistribution. |
 
 ### PyTorch (packed-projection split)
 
-| Item                     | Value                                                                                            |
-| ------------------------ | ------------------------------------------------------------------------------------------------ |
-| Upstream repository      | <https://github.com/pytorch/pytorch>                                                             |
-| Revision used            | The `torch` version resolved by `uv.lock` (`torch>=2.13.0`, a base dependency of the core).      |
-| Form of copy             | `patch.py` follows `torch.nn.functional._in_projection_packed`'s q / k / v split order verbatim. |
-| Code license             | Unverified                                                                                       |
-| Weights license          | n/a                                                                                              |
-| Attribution requirements | Unverified                                                                                       |
+| Item                     | Value                                                                                                                                                                                         |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Upstream repository      | <https://github.com/pytorch/pytorch>                                                                                                                                                          |
+| Revision used            | The `torch` version resolved by `uv.lock` (`torch>=2.13.0`, a base dependency of the core).                                                                                                   |
+| Form of copy             | `patch.py` follows `torch.nn.functional._in_projection_packed`'s q / k / v split order verbatim.                                                                                              |
+| Code license             | BSD-3-Clause — read from the installed wheel's own `LICENSE` (`torch 2.13.0`, checked 2026-09-05; that file lists the copyright holders, Facebook / Deepmind / NYU / NEC / IDIAP among them). |
+| Weights license          | n/a                                                                                                                                                                                           |
+| Attribution requirements | None attach here: what `patch.py` follows is the split _order_, not copied source, and no `torch` code is redistributed. BSD-3 clauses 1 / 2 start at redistribution of source or binary.     |

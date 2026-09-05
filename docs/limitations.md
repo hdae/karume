@@ -89,9 +89,10 @@ barrel（`@karume/models`）はさらに全家族を畳んだ `KARUME_SOURCES` �
 
 ## 生成 API は公開前に 7 点変わった（ADR 0083 / 0084 の初版記述に対する破壊的変更）
 
-生成 API（`GenerationSequence` / `Gemma4Pipeline`）は **JSR にはまだ出ていない**（`@karume/models`
-の最新公開は 0.7.0 で gemma を含まない）。ただし ADR・examples・デモ台本は波の途中の面で書かれて
-いるので、公開面レビュー（2026-08-31 / 第 2 波 2026-09-02）の消化で変わった 7 点をここに残す。
+生成 API（`GenerationSequence` / `Gemma4Pipeline`）が JSR へ出たのは **0.9.0 が初めて**（0.8.0 の
+`@karume/models` は `./gemma` を export していない）。ADR・examples・デモ台本は波の途中の面で
+書かれているので、公開面レビュー（2026-08-31 / 第 2 波 2026-09-02）の消化で**公開前に**変わった
+7 点をここに残す。
 追記の正本は ADR
 [0083](decisions/0083-generation-api-surface.md) / [0084](decisions/0084-gemma-tokenizer-chat.md)。
 
@@ -163,9 +164,9 @@ Karume 側の Record は null プロトタイプで `"__proto__"` キーを保�
 
 入力・重みの非有限値はコストの理由で検査せず、そのまま演算に流れる。**GPU と CPU 参照の
 伝播一致が担保されるのは下の NOTE に列挙した op だけ**で、全称の保証ではない。付随して
-`amax` / `amin` の縮約 identity は ±F32_MAX で、全要素が -Infinity の行の `amax` は
--Infinity ではなく -F32_MAX を返す。非有限値を含むモデルを扱う場合は呼び出し側で事前検査
-すること。
+`amax` / `amin` の縮約 identity は **GPU・CPU 参照とも** ±F32_MAX で、全要素が -Infinity の行の
+`amax` は -Infinity ではなく -F32_MAX を返す（torch は -Infinity を返すので、そこは by-design の
+不一致）。非有限値を含むモデルを扱う場合は呼び出し側で事前検査すること。
 
 NOTE: 伝播一致の保証は `clamp` / `clamp_min` / `relu` / `amax` / `amin` に加え、
 **softmax / safe_softmax / attention の行統計（融合・states 形とも）**もビット列 NaN 判定
@@ -246,7 +247,13 @@ cat 出力）= 4.03GB になる。
 残る理由は資源側だけ。）
 配っている 1024² も軽くはない: 見積りで重み 919MiB + workspace 6,283MiB = **1 binding が
 約 1GiB・GPU 総確保が約 7.3GiB** を要する（2026-09-04 実測）ので、実質**デスクトップ級 GPU
-限定**である。
+限定**である。配布形の `requiredLimits` **欄が空でも既定スペックの device では走らない** —
+欄が名乗るのは常駐分（重み・state）だけで、decoder 末尾の `cat` 出力 1 本が 960MiB の binding を
+要求する（宣言の意味論は下の「DL 前の GPU 適合チェック」節）。
+分解 attention の**行ブロック融合はこの家族では 96 サイト全てで外れる**（mask `[1,6,144,144]` と
+`softmax` の形が matcher の実測形と合わない）。したがってスコア S は 1 本の binding になり、
+1024² で 230MiB・2048² で 878MiB を要求する — **128MiB 既定の device はこの家族の対象外**
+（1024² では S 以外にも 128MiB を超える中間が 24 本ある）。
 本家（同梱 `handler.py` の General-HR）の推論解像度は 2048² なので、**上流と同じ設定では
 ない**点は配布形の制約として明示しておく。回避策は入れていない（実測して判断する側の話）。
 
@@ -360,6 +367,8 @@ ArrayBuffer の大きさ**（Chromium の壁 — 下記）であって合計の�
 読む」口 — Linux 実測: gemma4 cold 1,740 → 703 MiB・warm 1,408 → 684 MiB・anima f16 warm 2,242 → 743
 MiB）。外部実装の `DistributionSource` は `FileReadOptions.into` を呼んで器へ読むときだけ同じ係数に
 なり、呼ばずに tight view を返す実装は従来の係数のまま（契約は `packages/hub/src/source.ts`）。
+**器を呼んだ上で別の buffer の view を返す実装は fail loudly**（借りた器が使われないまま居座る形
+なので、`streamAssets` が器の契約違反として落とす）。呼ばない実装は従来どおり通る。
 
 ## MoE は全エキスパート VRAM 常駐が前提（エキスパート単位の動的ロード/退避はしない）
 
@@ -529,12 +538,15 @@ fail loudly（実行上限そのものは緩めない）。
   末尾 1 本を**切り捨てて**渡す（`VowelDetectorPipeline.detect` と実重み E2E がそうしている）。
   右ゼロ pad で長さを合わせるのは**禁じ手**（逆方向 GRU が pad から状態を持ち帰り、`.lab` が
   発話のどこででも変わる — 実測は ADR 0056 追記）。
-- 長さの上限は `pipelineConfig.maxFrames`（配布形の宣言 = 焼いたときの記号次元の上限）。
-  **IR は記号の値域を持たない**ので、超過を止められるのはパイプラインのこの門だけ。超過は
-  fail loudly（切り詰めない — 末尾が黙って落ちた `.lab` は正常な結果と区別できない）。
-  現在の配布形は 60,000 フレーム = 10 分で、根拠は最大中間テンソル `[1,160,2T]` f32 =
-  640 B/フレーム → 38.4MiB（仕様既定の `maxStorageBufferBindingSize` 128MiB に対し 3.4 倍の
-  余裕）。**それ以上の長さは未実測**。
+- 長さの範囲は `pipelineConfig.minFrames` / `maxFrames`（配布形の宣言 = 焼いたときの記号次元
+  `T` の値域を、入力側の 10ms フレーム単位へ直したもの — `Dim(min, max)` の数そのものではなく
+  **2 倍**）。**IR は記号の値域を持たない**ので、範囲外を止められるのはパイプラインのこの門
+  だけ。上限超過も**下限未満も** fail loudly（切り詰めない — 末尾が黙って落ちた `.lab` は正常な
+  結果と区別できない。下限側を右ゼロ pad で埋めるのも同じ理由で禁じ手 — 逆方向 GRU が pad から
+  状態を持ち帰る）。現在の配布形は 60,000 フレーム = 10 分で、根拠は最大中間テンソル =
+  GRU 入力側の gates `[T,1,384]` f32 = 1,536 B/20ms フレーム → 46.1MB（仕様既定の
+  `maxStorageBufferBindingSize` 128MiB = 134.2MB に対し 2.9 倍の余裕）。**それ以上の長さは
+  未実測**。
 - 上限内でも実行時間は長さに比例する（時間ループは 1 workgroup 内の逐次 — 性能は未計測）。
 
 ## flow / voice の相対位置表はグラフ入力 — 生成はホスト側の責務
@@ -624,6 +636,15 @@ VOICEVOX 系の `is_interrogative` / `enable_interrogative_upspeak` は AudioQue
   合う（AivisSpeech Engine も同じ扱い — 2026-08-21 のソース調査）。ただし
   「`？` をモーラから剥がして `is_interrogative` フラグへ畳む」正規化を入れると疑問形の情報が
   完全に消えるので、そちらは入れないこと。
+
+## Anima: `pipelineConfig.scheduler.shift` は sigma 梯子が成立する値しか受けない
+
+配布形が宣言する `shift` は「正の有限数」を通るだけでなく、そこから作った sigma 梯子そのものが
+`sigmaSchedule` の構造検査を通らなければ fail loudly になる — **先頭が f32 で 1 から 4 ulp を
+超えて離れる値**と、**狭義単調減少にならない値**は拒否する（受理集合を 2 箇所へ書くと片方が必ず
+緩むので、門は梯子側の 1 か所だけが持つ）。下流の `dpm-solver-multistep` が「先頭 = 1・末尾 = 0」を
+明文の前提に置いているためで、通すと NaN や別軌道が真因不明のまま走る。実配布の shift = 3 系は
+通る。
 
 ## Anima: 生成中のプレビュー画像は出せない（途中結果は生 latent のみ）
 
@@ -774,6 +795,13 @@ DiT ループは既定で GPU 常駐（[ADR 0054](decisions/0054-resident-loop-a
   発生しない差として受容する（golden の normalize 33 ケースはこの領域を含まない）。
 - WAV の読み（/32768）と書き（×32767）は非対称のまま固定（それぞれ外部との一致が正 —
   `src/audio/wav.ts` の MUST。往復は 1LSB 級でずれる）。
+- **要求ノブ（`codecTileFrames` / `seed` / `durationSeconds`）は呼び出し時点で検査する**（段の
+  途中まで進んでから落ちない）。公開面の挙動として①codec を回さない `generateLatent` でも
+  `codecTileFrames` の不正値で落ちる ②`initialNoise` を渡した生成でも `seed` の値域が検査される
+  （従来はその経路が乱数を引かないので黙って無視されていた）。
+- **配布形の宣言側の要件が 2 つ増えた**: `speakerRows` は 2 以上（平均トークン 1 本 + 参照
+  latent）、`maxSeconds` から到達しうる latent 長（duration 経路の floor と手動秒経路の ceil の
+  大きいほう）が `ditSymMax` を超えないこと。どちらも `pipelineConfig` のパース時に落ちる。
 
 ## 融合 attention の加算 mask: 静的 `[1,1,M,N]` のみ・a8 と非併用・ビット同一門は f32 経路
 
@@ -839,6 +867,29 @@ loudly の横断規約）。
 落ちる（`linearCompute` に依らない — 2026-08-13 実測）。沈黙誤値にはならない。解除するなら
 確保下限を 16 へ統一する（全 op 共通の確保方針の変更 — 需要が出たら別波）。
 
+NOTE: `attention` だけは例外で、退化した軸（B = 0 / M = 0 / N = 0）を**契約層で明示拒否**する
+（`OpContractError`）。行ブロック planner（`planRowBlocks`）が正整数を要求するので、通しても
+attention を名乗らない `ExecutionError` になってしまうのが理由。0 要素次元が契約 valid なのは
+linear 族など残りの op の話。
+
+## 公開面: 0.9.0 の後に拒否集合が増えた 3 点（受理集合は不変）
+
+いずれも「今まで黙って別のものへ縮退・または遅れて落ちていた」入力を、入口で fail loudly に
+した変更。正しい呼び出しの挙動は 1 ビットも変わらない。
+
+- **`SessionOptions` の実行形 4 ノブ**（`linearCompute` / `attentionCompute` /
+  `attentionScoreStorage` / `stateAttentionReduce`）は union 外の綴りを `Session` 構築時に拒否する
+  （全件を列挙した 1 つの `ExecutionError`）。従来は既定（f32 / sequential）へ黙って縮退していた
+  ため、`linearCompute: "i8a8"`（0.5.0 で `"a8"` へ改名した旧綴り）が例外も警告も無く f32 で
+  走っていた。
+- **`EstimateOptions.maxStorageBufferBindingSize` の値域検査**（正の安全整数）は
+  `estimateSessionMemory` / `estimateGraphMemory` の**入口**で走る。従来は states 形 attention の
+  一時を数える経路の内側にしか無く、states 形を持たないグラフでは −1 / 1.5 / NaN が黙って
+  受理されていた（読まないので数字は変わらなかった）。
+- **`SubmitPolicy.maxChunkSize` の実効上限は gpuTiming 有効な device で 1,024**（query 2,048 =
+  querySet 容量）。超える政策は `createSession` の `SubmitScheduler` 構築時に `SubmitPolicyError`
+  で落ちる（0.9.0 までは run の途中で落ちていた）。
+
 ## GitHub CI はローカル資産（`outputs/`）依存のテストを踏まない（検証範囲の制約）
 
 `outputs/` は git 追跡外のため、実系列資産を golden に使うテスト群 — GPU e2e に加え、
@@ -847,6 +898,10 @@ relattn / demo 資産、wav の実資産 scale）— は GitHub Actions では�
 これらの門はローカル / self-hosted の `deno task verify`（資産あり）が担い、リリース判定は
 実資産 + 実 GPU の緑を必須とする（ADR 0005）。CI 側へ寄せるなら golden の fixture 昇格
 （リポ肥大とのトレードオフ）か release gate での資産取得が要る — リリース準備波で再訪。
+
+**資産不在の全 SKIP は `packages/runtime/tests/assets_gate_test.ts` が FAIL にする**（GPU 不在の
+`gpu_gate_test.ts` と同形の門番）。CI は資産を持てないので `KARUME_ALLOW_NO_ASSETS=1` を
+意図表明として設定して抜ける。この env を設定した環境の緑は**リリース判定には使えない**。
 
 ## `karume dist` はディスクピークが配布形の約 2 倍（staging→swap の代償）
 
@@ -902,6 +957,8 @@ device was lost` で、`message` は Metal 側の汎用文言だけ。`Device::c
 フル verify の census 門 `packages/models/tests/e2e_gemma4_pretrained_test.ts`）。3 経路目の観測は
 **macOS 26 実機・2026-09-03 のフル verify**（赤 1 本 — アダプタが `timestamp-query` を列挙するので
 Metal でも skip されない）。先行 2 経路の macOS 版は記録が無いので、この版を 3 経路すべてへ被せない。
+アダプタが列挙する以上、**`KARUME_ALLOW_NO_TIMESTAMP_QUERY`（列挙しない機で全 SKIP を許す
+opt-out）は Metal では発火しない** — 発火先はソフトウェアアダプタや timestamp-query を持たない機。
 
 **現状の Deno では回避策が無い**（query set を 1 本に固定して使い回す案は未実験 —
 [known-issues](known-issues.md) 参照）。op 別の内訳が要る計測は Linux / Vulkan 機で行う。
@@ -928,11 +985,30 @@ quant が宣言する GPU 前提のうち、重み shard を取る前（家族 a
   （`requestAdapter` は呼ぶたび別オブジェクトを返し、同じ物理アダプタを選ぶとは定めない）。
   DL 前検査は事前判定で、最終の検査は Session 構築時の実バッファ検査（ADR 0089 決定 1）。
 - `requiredLimits` は**常駐前提の寸法**（既定超過分だけ — ADR 0089 決定 3）。実行時の一時確保や
-  f32 展開のワーストは含まない（そちらは構築時・実行時の検査が担う）。
+  f32 展開のワーストは含まない（そちらは構築時・実行時の検査が担う）。つまり**欄が空でも
+  「既定スペックの device で走る」ことは保証しない** — 保証するのは常駐分（格納テンソルと state
+  スロット）が既定内に収まることだけ。中間テンソルを数えないのは、融合後の実需要が device の
+  granted limit に依存する（行ブロックの刻みがそこで決まる）ため配布形からは原理的に決まらず、
+  融合前の最大を焼くと「行ブロックで走る device」を取得の前に誤って拒否するから。中間が既定を
+  超える現物 = BiRefNet 1024²（1 binding 約 1GiB・GPU 総確保 約 7.3GiB — 上の BiRefNet 節）。
+  中間の上限超過を確保前にノード名つきで落とす門は ADR
+  [0093](decisions/0093-transient-liveness-packing.md) の C 段の計画で、**まだ入っていない**。
 - gemma4 の `fromAssets` は manifest を受け取らない（`Gemma4Assets` はバイト列と config だけ）
   ため宣言に到達できず、この面の守りは構築時検査のみ。`fromAssets` 一般は DL が無いので
   事前判定の席自体が無い（共有 GPU を渡した場合だけ admission で見る）。
 - 合計 vs 物理空き容量は見ない（下の「GPU メモリの事前検査は…」節）。
+
+## ブラウザ: 非表示タブでは生成が timer throttling の刻みに釘付けになる（外部制約・by-design の選択）
+
+構築と生成の段境界に置く中断検査（`packages/models/src/concurrency/abort.ts` の `settleAbort`）は
+**`setTimeout(0)` でイベントループへ 1 度譲る**。Chrome の非表示タブはタイマーを 1 秒間隔へ、
+5 分以上非表示なら 1 分に 1 回へ落とすので、1 段（生成なら 1 token）ごとに 1 タイマーを踏む
+処理はその刻みまで遅くなる。
+
+譲り先を `MessageChannel`（throttling の対象外）へ替えれば速度は戻るが、**採らない** — message
+タスクは先に仕掛けた timer より先に配送されうるため、timer で届く中断（`setTimeout(() =>
+abort())` / `AbortSignal.timeout`）との順序が失われ、「実行開始後に届いた中断は最初の段境界で
+効く」という門が負荷次第で破れる（2026-09-05 実測）。中断を確実に観測できることを速度より優先する。
 
 ## ブラウザ: Chromium は単一 ArrayBuffer を 2,145,386,496 バイトで打ち切る（分割前の旧資産のみ該当）
 
@@ -1051,6 +1127,9 @@ Deno 側の実 GPU テストはもともと tolerance 判定なので影響し�
 [0091](decisions/0091-gemma4-host-rope-variable-capacity.md) 決定 4）。門は 2 本 —
 `chunkLength ≤ maxChunkLength`（記号 `M` の trace 上限の宣言・E2B は 768）と
 `chunkLength ≤ capacity ≤ maxPosition`（位置の排他的上限の宣言・E2B は 131,072）。
+`Gemma4ChatSession` はこの 2 本の関係を**構築時にも**見る（この層は `capacity` を溢れ判定の
+物差しとして sequence の確保より前に使うので、sequence 側だけに任せると長いターンで履歴を
+切り詰めてから容量エラーになり、真因が出ない）。
 VRAM は容量に比例して伸びる（full 層 KV
 12,288 B/token + states 形 attention の一時 S = `8 × 行ブロック行数 × capacity × 4 B`）ので、
 `Gemma4Pipeline.estimateSessionMemory({ capacity, chunkLength })` で確保前に見積もれる（必要側の

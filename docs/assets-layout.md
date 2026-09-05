@@ -1,9 +1,10 @@
 # 資産の置き場（models / outputs / inputs）
 
-ローカル資産 3 根の規約（outputs の 4 分割は 2026-08-30 裁定）。綴りの正本は
-`tools/export-recipes/_shared/paths.py`（`DIST_ROOT` / `SERIES_ROOT` / `EXAMPLES_ROOT` /
-`BENCH_ROOT` / `MISC_ROOT` / `INPUTS_ROOT` / `OUTPUTS_ROOT`）。**3 根とも git 追跡しない**
-（全て再生成可能な生成物か手置きの実重みで、リポジトリが持つのは作り方だけ）。
+ローカル資産 3 根の規約（outputs の 4 分割は 2026-08-30 裁定・`outputs/release/` は公開作業で
+後から生えた 5 つ目の席）。綴りの正本は `tools/export-recipes/_shared/paths.py`（`DIST_ROOT` /
+`SERIES_ROOT` / `EXAMPLES_ROOT` / `BENCH_ROOT` / `MISC_ROOT` / `INPUTS_ROOT` / `OUTPUTS_ROOT`）。
+**3 根とも git 追跡しない**（全て再生成可能な生成物か手置きの実重みで、リポジトリが持つのは
+作り方だけ）。
 
 | 根                                     | 中身                                                               | 例                                                        |
 | -------------------------------------- | ------------------------------------------------------------------ | --------------------------------------------------------- |
@@ -12,6 +13,7 @@
 | `outputs/examples/<model>/`            | examples 台本の既定出力先（`<model>` = `--source` の basename）    | `outputs/examples/karume-sbv2-jvnv/*.wav`                 |
 | `outputs/bench/<model>/<日付>_<目的>/` | e2e ダンプ・ベンチ・視認評価（**消して安全** — 旧 `demo/` の後継） | `outputs/bench/karume-anima/2026-08-30_e2e-mismatch/`     |
 | `outputs/misc/<名前>/`                 | ホスト資産（**消すと再取得・再エミットが要る**）                   | `outputs/misc/sbv2-demo/` / `outputs/misc/corpus/`        |
+| `outputs/release/`                     | 公開作業の作業机（**中身で 2 性格** — 下の bullet）                | `outputs/release/upload-karume-siglip2.log`               |
 | `inputs/<family>/<name>/`              | 手置きの実重み（ckpt・config — 生成物ではない）                    | `inputs/sbv2/F1/`                                         |
 | `inputs/anima/civitai-<versionId>/`    | Civitai 取り込み（重み + `civitai.json` — ADR 0088）               | `inputs/anima/civitai-2983680/`                           |
 
@@ -35,6 +37,12 @@
   上書きする事故を断つ。
 - `outputs/misc/yomi/` の日本語辞書（`*.jtd`）の取得: HF dataset `hdae/yomi-dict` の
   `naist-jdic.jtd.gz` を解いて置く（無いと models の修正辞書テストは SKIP される）。
+- `outputs/release/` は**消してよいものと消せないものが同居する**ので、一括削除しない。
+  台本 `tools/release/hf-upload.zsh` が書く `upload-<repo>.log`（アップロードの実行ログ）は
+  `bench/` と同じ**消して安全**な側。同じ席に手置きされたリリースノートの下書き・上流カードの
+  原本控え・調査メモは**再生成できない**（`misc/` と同じ性格）。捨てるときはファイル単位で見る。
+  この席の綴りは台本が**手写し**で持つ（zsh から `paths.py` の定数を読めないため `RELEASE_ROOT`
+  は無い）ので、変えるなら台本と本表の 2 か所を同時に直す。
 - 旧 `outputs/series-archive/`（裁定済み系列の退避先）は 2026-08-30 の掃除裁定で**廃止**
   （base i4 の復活レバーは `outputs/series/` の `*-i4-dyn` 系列が引き続き担う —
   `anima/distribution.py` の NOTE）。
@@ -68,10 +76,13 @@ uv run python dist.py --pipeline depth-anything      # → models/karume-depth-a
 uv run python dist.py --pipeline vowel-detector      # → models/karume-vowel-detector/
 ```
 
-- 下 4 家族はまだ**初回公開前**（波 b — backlog）。リポ名と同居の規則は ADR
-  [0092](decisions/0092-distribution-repos-and-sources.md) 決定 1 / 2 / 8 が正本。上流ライセンス
-  （siglip2 = Apache-2.0 / birefnet 系 = MIT / depth-anything small = Apache-2.0）に応じて
-  `LICENSE.md` / `NOTICE.md` をリポ直下へ同梱する（決定 7）。
+- **初回公開前なのは `birefnet` / `lucida` / `vowel-detector` の 3 コマンドぶん**（siglip2 と
+  depth-anything は 0.9.0 で初公開済み・後回しの裁定は [backlog](backlog.md)）。
+  `karume-sbv2-fn` はミラーを常設しない別扱い（下の bullet）。リポ名と同居の規則は ADR
+  [0092](decisions/0092-distribution-repos-and-sources.md) 決定 1 / 2 / 8 が正本。
+- 上流ライセンス（siglip2 = Apache-2.0 / birefnet 系 = MIT / depth-anything small =
+  Apache-2.0）に応じて `LICENSE.md` / `NOTICE.md` をリポ直下へ同梱する（決定 7 — 公開状態に
+  依らず効く常設ルール）。
 
 - `karume-gemma4` は**系列 2 本**（`gemma4-e2b-product` の製品コンテナ + PLE sidecar と
   `gemma4-e2b-tokenizer` の compile 済み資産）を 1 リポへ畳む。PLE sidecar は `assets` の席に載り、

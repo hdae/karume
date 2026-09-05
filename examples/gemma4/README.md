@@ -84,11 +84,12 @@ is created, so the script acquires its own device in this mode. A device with ti
 one pass per dispatch, which stretches wall-clock time. Do not read the `tok/s` figure of a
 `--diagnostics` run as a speed measurement; take speed numbers without the flag.
 
-On macOS/Metal the flag currently loses the whole device: the driver cannot allocate the counter
-sample buffers this many query sets need, and wgpu turns that failure into a lost device rather than
-an error you can catch. The run dies on the first turn. Take the breakdown on a Vulkan or D3D12
-machine instead; the details and the state of the workaround are in
-[`docs/limitations.md`](../../docs/limitations.md). The script warns on stderr at startup when you
+On macOS/Metal the flag currently loses the whole device: the counter sample buffers fail to
+allocate — whether the trigger is the number of live query sets or their retention is not yet
+isolated — and wgpu turns that failure into a lost device rather than an error you can catch. The run
+dies on the first turn. Take the breakdown on a Vulkan or D3D12 machine instead; the details are in
+[`docs/limitations.md`](../../docs/limitations.md) and the state of the workaround (and the ruling
+on when it gets investigated) in [`docs/known-issues.md`](../../docs/known-issues.md). The script warns on stderr at startup when you
 pass the flag on macOS, and any fatal error is unwrapped in full — `SuppressedError` pairs,
 `AggregateError` members, and `cause` chains — to stderr before the script exits with status 1.
 

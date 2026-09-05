@@ -4,6 +4,13 @@
   〈`karume/2`〉が全面置換。v1 パーサは持たない。本文は「なぜ現在形へ移ったか」を説明する
   当時の記録として保存 — §4 の Anima 配布形〈S 形のみ + 常時 tiling〉と §5 の取得層
   〈`@hdae/fetch-cache`〉は引き続き現行の正本）
+- 訂正（2026-09-05）: 上の「§5 は引き続き現行の正本」は**取得元非依存の契約に限る**。§5 が
+  並べた接続契約のうち**取得元固有の 4 点**（`verifying` フェーズ / `karume/1` 系キャッシュ
+  名前空間と credential 隔離 / キャッシュヒット毎の全量 sha256 / 依存 pin `^0.3`）は ADR
+  [0080](0080-hub-fetch-cache-050.md) で撤去・変更済みで、§5 の該当箇所に個別の打ち消しを
+  置いた。取得元非依存の契約（進捗の算出と `AbortSignal` の透過・同時取得数と in-flight
+  バイト予算・`openModel` へ渡す前の tight view assert・エラーの形と利用可能ラベル・
+  `onCacheError` のアプリ配達）は追記 2026-08-31 のとおり §5 のまま全取得元に掛かる。
 - Date: 2026-08-05（pre-mortem 3 レンズ・44 指摘を反映した改訂版）
 - 関連: ADR [0037](0037-karume-monorepo.md)（配布形の親決定）/
   [0033](0033-vae-fixed-tile-decode.md)（タイル VAE）/
@@ -173,6 +180,11 @@ manifest はリポジトリ直下の固定名 **`karume.json`**。
 
 ### 5. hub の取得層 — `@hdae/fetch-cache`（^0.3）の採用と接続契約
 
+**改訂（2026-09-05・ADR [0080](0080-hub-fetch-cache-050.md)）**: 依存 pin は
+`jsr:@hdae/fetch-cache@^0.6.0`（`packages/hub/deno.json`）。以下の接続契約は「取得元固有」と
+「取得元非依存」に割れており（追記 2026-08-31）、固有側の 3 点は 0080 で撤去・変更済み —
+該当の箇条に個別の打ち消しがある。打ち消しの無い箇条は共通層の契約として現行。
+
 実行時依存ゼロ（fetch / caches / crypto.subtle のみ）の URL キー DL キャッシュ。適合点:
 `./hf` 層の mutable ref → commit SHA 解決 + SHA ピン URL キャッシュ / ファイル仕様
 `{path, sha256, expectedBytes}` が manifest の 3 点セットを直接消費 / validate のキャッシュ
@@ -193,11 +205,21 @@ manifest はリポジトリ直下の固定名 **`karume.json`**。
   （`karume/1:auth:<Authorization 値の sha256 先頭 16 hex>` — 2026-08-13 追記参照）へ隔離し、
   gated 資産が無認証経路にも**別 credential の写し**にもキャッシュヒットで供されないことを
   契約とする。`hubUrl` は manifest からは与えられない（アプリが明示指定した場合のみ有効）。
+  **撤去（2026-09-05・ADR [0080](0080-hub-fetch-cache-050.md) 決定 3 / 5）**: 名前空間の所有は
+  取得層へ移り、hub 側は固定 1 本（`packages/hub/src/cache.ts`）。`karume/1` 系は purge 対象の
+  旧名（同 `LEGACY_CACHE_NAMESPACE`）で、credential ごとの隔離も撤去された（帰結は
+  [limitations](../limitations.md) が by-design として持つ）。これに伴い追記 2026-08-05
+  （`clearHubCache` が消す 2 名前空間）と追記 2026-08-13（credential 別分離）の記述も失効。
 - **進捗とキャンセル**: 進捗総量は content-length ではなく manifest の `size` 合計（path
   一意化後）から算出。`AbortSignal` を全取得へ透過する。キャッシュヒットの sha256 検証中
   （3.7GB で数秒）は `verifying` フェーズとして進捗イベントに出す（無言のハングにしない）。
   同一プロセスの並行取得では single-flight の合流者に signal が効かない（キャンセル粒度が
   leader 単位）— `docs/limitations.md` に起票する既知制約。
+  **撤去（2026-09-05・ADR [0080](0080-hub-fetch-cache-050.md) 決定 4）**: `verifying` フェーズは
+  無い（`AssetPhase` は `"downloading" | "complete"` の 2 値 — `packages/hub/src/progress.ts`）。
+  照合が全量再ハッシュでなくなり「進行中」と名乗る区間が消えたため。追記 2026-08-13 の
+  phase 順序契約（`downloading`* → `verifying` → `complete`）も同時に失効。進捗総量の算出と
+  `AbortSignal` の透過は共通層の契約として現行。
 - **同時取得数は 4 に制限**（`fetchHfFiles` の一括発火に任せず hub 側でバッチ — 数十
   コンポーネントの manifest で接続と RAM が破綻しないため）。
 - `openModel` への受け渡しは `bytes.buffer` を渡す前に
@@ -216,6 +238,9 @@ manifest はリポジトリ直下の固定名 **`karume.json`**。
   既定は整合性優先で常時検証とし、opt-down（size のみ）は必要が実測されてから足す。既知の
   コスト: streaming 組み立てとハッシュ時コピーで**一時的に約 2 倍の RAM**（`openModel` が
   全量 ArrayBuffer を要求する契約に由来）。
+  **改訂（2026-09-05・ADR [0080](0080-hub-fetch-cache-050.md) 決定 1）**: キャッシュヒットは
+  記録済みハッシュの文字列比較で判定し、全量 sha256 は再計算しない（network 取得時の照合は
+  従来どおり）。
 - 依存の扱い: 横断不変条件「ランタイム依存は Web 標準 API のみ」は「**Web 標準 API のみで
   構成された依存パッケージに限る**」と読む。fetch-cache はこれを満たす（同パッケージ自身が
   同じ MUST を掲げる）。`CLAUDE.md` の文言をこの形に更新した。

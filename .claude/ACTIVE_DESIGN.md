@@ -7,22 +7,23 @@
 > [docs/perf-ledger.md](../docs/perf-ledger.md)。ここは「今この瞬間の文脈」だけを持つ —
 > 履歴・完了記録は ADR / research / git へ。
 >
-> Last updated: 2026-09-04
+> Last updated: 2026-09-05
 
 ## Now
 
-- **0.9.0 はローカル完了（2026-09-04）** — push / GitHub Release / JSR publish はユーザー。
-  配布は **HF 8 リポ**（`karume-anima` / `karume-anima-extra` / `karume-irodori-v4-small` /
-  `karume-irodori-v4.1-small` / `karume-sbv2-jvnv` / `karume-gemma4`〈`-e2b` から改名済み〉/
-  `karume-siglip2`〈base + so400m 同居〉/ `karume-depth-anything-v2`）で、取得元対応表は
-  **6 家族 8 エントリ**。未配布は 2 家族（birefnet 系 / vowel-detector）。
-- **次の作業波（2026-09-04 裁定の順）** — 内容と残件の正本は [backlog](../docs/backlog.md) now:
-  a) OP マイクロベンチ 2 段目 + Fusion 半自動発見 2 段目（消化済み — research 2026-09-04）
-  b) 未配布家族の初回公開（0.9.0 で siglip2 / depth-anything を消化・birefnet 系と
-  vowel-detector は後回し）
-  c) perf K-13 / K-14（[perf-ledger](../docs/perf-ledger.md) が起票の正本）
-  d) `tools/export-recipes/` の切り出し — クローズ（ADR 0092 決定 5: recipes は本リポに残し、
-  ライセンスは carve-out で分ける）
+- **0.9.0 公開完了（2026-09-04）** — GitHub Release v0.9.0 → JSR 0.9.0 →
+  `deno task smoke:published` 緑。配布は **HF 8 リポ**（`karume-anima` / `karume-anima-extra` /
+  `karume-irodori-v4-small` / `karume-irodori-v4.1-small` / `karume-sbv2-jvnv` /
+  `karume-gemma4`〈`-e2b` から改名済み〉/ `karume-siglip2`〈base + so400m 同居〉/
+  `karume-depth-anything-v2`）で、取得元対応表は **6 家族 8 エントリ**。未配布は 2 家族
+  （birefnet 系 / vowel-detector — 後回しの裁定は [backlog](../docs/backlog.md)）。
+- **次の作業波は perf K-13 / K-14 だけ**（2026-09-04 裁定の c — a / b / d は消化・クローズ済み）。
+  起票の正本は [perf-ledger](../docs/perf-ledger.md)、残件の正本は
+  [backlog](../docs/backlog.md) now。
+- **BiRefNet 2048² 工事 A→B→C 進行中**（ADR
+  [0093](../docs/decisions/0093-transient-liveness-packing.md)・裁定 2026-09-05）: 土台
+  （`packages/runtime/src/runtime/transient-plan.ts` + 単体テスト）は入ったが**まだ結線して
+  いない** — `recipe.ts` / `executor.ts` / `estimate.ts` への結線と recipe の代数書き換え（A）が次。
 - **可変 capacity（[ADR 0091](../docs/decisions/0091-gemma4-host-rope-variable-capacity.md)）の
   意図的な現状 4 点** — 欠落に見えるが設計どおり: ①RoPE 表を焼いた旧配布形は読めない
   ②`GreedySpec` / `GenerationProgramSpec` は `positionIds` を持たない（位置の唯一の供給口は
@@ -46,11 +47,10 @@
 
 - MiniMax-H3（動画生成・オープンウェイト 33.1B/42.5GB 級）は遠期の関心として記録のみ —
   ブラウザ実行はメモリ規模的に現行スコープ外（レビュー DS-4）。
-- 差分レビュー見送り分の中優先 3 件（正本 = `.claude/reviews/2026-09-03_7fc4ada/ROADMAP.md`）:
+- 差分レビュー見送り分の中優先 2 件（正本 = `.claude/reviews/2026-09-03_7fc4ada/ROADMAP.md`）:
   W-G5-7 = `tools/opbench` / `tools/fusion-hints` の資産解決を `tools/_shared/assets.ts` へ統合
-  するか / W-G4-4 = chunk 上限の出所を provenance の `sym_max` 欄へ移すか（再 export に同乗）/
-  [ADR 0033](../docs/decisions/0033-vae-fixed-tile-decode.md) 決定 5「TS 側が幾何そのものを突合
-  する」経路を作るか、決定 5 を実態へ追記するか。
+  するか / W-G4-4 = chunk 上限の出所を provenance の `sym_max` 欄へ移すか（再 export に同乗）。
+  （3 件目だった ADR 0033 決定 5 の幾何突合は 2026-09-05 に「実態へ追記」で閉じた）
 - Metal で `--diagnostics`（`gpuTiming: true`）を付けると device ごと落ちる件の改修投資判断 —
   切り分け実験が先（[known-issues](../docs/known-issues.md) の Metal `--diagnostics` 節）。
 

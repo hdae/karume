@@ -10,7 +10,7 @@
  *
  * ## MUST: Python 側とバイト一致であること
  *
- * 正本は `tools/exporter/karume/patch_deberta.py` の `build_rel_pos_tables`。式が割れても
+ * 正本は `tools/export-recipes/deberta/patch.py` の `build_rel_pos_tables`。式が割れても
  * **shape は合う**ので、モデルは落ちずに黙って別の位置埋め込みを gather する（沈黙誤値）。
  * `packages/models/tests/sbv2_rel_pos_parity_test.ts` が golden io に格納された Python 生成の表と
  * バイト一致を実データで固定する。

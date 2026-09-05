@@ -50,6 +50,17 @@ shard 1GiB 上限（ADR 0081）の門は書き手側にしか無かった。
    （256MiB / 128MiB）を超える席だけ**（「欄なし = 既定スペックで動く」の意味論）。
    workgroup 系はカーネル設計依存なので焼かない。**計画側の手書きは二重管理として拒否**
    （gemma4 recipe の手書き席は退役 — core 導出値と完全一致を確認済み）。
+
+   > **意味論の限定（2026-09-05 裁定 3b）**: 「欄なし = 既定スペックで動く」は**常駐分
+   > （重み・state）が既定内**という主張で、**中間テンソル（ノード出力）は含まない**。
+   > 中間を静的に数えて焼く案は採らない — 融合後の実需要は granted limit に依存する
+   > （行ブロック attention は S を全幅で実体化しない）ので配布形からは原理的に決まらず、
+   > 融合前の最大を焼くと**動く device を DL 前に誤拒否する** = 決定 3 の MUST が禁じる
+   > 失敗形になる。実例: BiRefNet 1024² は最大 initializer 38MiB で欄が空になるが、
+   > 実行時は 1 binding 約 1GiB が要る。中間の上限超過は ADR
+   > [0093](0093-transient-liveness-packing.md) 決定 5 の計画時 preflight（Session 構築時に
+   > 全件列挙して落とす）が受け、それより前の段では「落としてから落ちる」に留まる
+   > （資源の目安はモデルカードの注記で告知する）。
 4. **shard 上限の読み手検査**（hub — 当時 1GiB・ADR 0090 で 256MiB のファイル長へ）: manifest parse
    時に `shards` の各 `size` を検査（閉区間・Python 正本 `shards.py` と同値）。`assets` / `extras` は
    対象外 — 上限は shard 分割の契約で、上限超の単一付帯資産は合法。
@@ -68,6 +79,9 @@ shard 1GiB 上限（ADR 0081）の門は書き手側にしか無かった。
 - 残る同型の弱点（起票のみ・本 ADR 対象外）: `GpuContext.createResident` と run 時 transient
   の確保は依然 errorScope 頼み。gemma4 PLE sidecar は shard 連番形だが `extras` 席なので
   決定 4 の門の外（現物は上限内）。
+  - **閉じ（2026-09-05・ADR [0093](0093-transient-liveness-packing.md) 決定 5）**: run 時
+    transient のぶんは、計画時に「slot 実寸 > `maxStorageBufferBindingSize`」「領域 >
+    `maxBufferSize`」を確保の前に全件列挙して落とす形で閉じる（`createResident` の席は残る）。
 
 ## 追記 2026-09-01（波 2 = models 読み手結線の実装）
 
@@ -79,6 +93,10 @@ shard 1GiB 上限（ADR 0081）の門は書き手側にしか無かった。
   - 8 家族の `fromPretrained` admission 閉包（重み prefetch の前）。gemma4 は
     `gemma4ManifestConfig` が quant を返す形へ変更して閉包側に席を置き、`fromAssets`
     （manifest 無し）は対象外（limitations 記録）。
+  - 追記（2026-09-05・W-M6-2）: `assertRequiredLimitsBeforeDownload` は宣言の有無に依らず、共有 GPU が
+    無ければ `readAdapterLimits()` を 1 度読む（比較は宣言が無ければ no-op のまま = 「欄なし =
+    既定スペックで動く」の意味論は不変）。買うのは GPU 不在の早期検出だけで、limits 検査の強化
+    ではない。
 - 案 B（device を DL 前に取る）/ 案 C（アダプタを持ち回る）を採らなかった理由: 8 家族の
   「資産の解析は GPU を取りに行く前」の順序 MUST と衝突する。加えて WebGPU 仕様はアダプタが
   「いつでも失効しうる」（システム変化が無くても数秒〜数分後でも可、と Note が明記）と定め、

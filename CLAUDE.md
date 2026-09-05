@@ -25,12 +25,14 @@ torch.export → IR v1・uv 管理）。設計の正本は [docs/decisions/](doc
 
 - `packages/runtime/` — 公開 API は mod.ts の**薄い面のみ**（ADR 0008）。`src/` が本体
   （gpu / codegen / kernels / format / ops / reference / runtime）
-- `packages/hub/` — manifest 解決・fetch・cache（仕様の正本は ADR 0038）
+- `packages/hub/` — manifest 解決・fetch・cache（仕様の正本は ADR 0038 §4 + 0041 / 0071 /
+  0075〈manifest は `karume/4`〉+ 0080〈取得層〉+ 0086〈取得元抽象〉）
 - `packages/models/` — **barrel（mod.ts）+ ファミリ別サブパス export の両建て**
 - `tools/exporter/` — PyPI `karume` = **汎用 core のみ**（src layout・境界は machine gate —
   ADR 0065）/ `tools/export-recipes/` — モデル別 recipe（wheel 外・uv workspace 共有 venv・
   起動は `python -m <family>.<mod>`・dist は `export-recipes/dist.py`）。`examples/` は
-  README 整備予定（実装は 4 ファミリ済み・`deno task verify` の対象）
+  README 整備予定（実装済みの範囲は `deno.json` の check タスクの列挙が正本・
+  `deno task verify` の対象）
 
 ## 検証コマンド（変更後は全て）
 

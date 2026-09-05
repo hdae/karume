@@ -32,3 +32,9 @@
 - CI マトリクスに「バックエンド × dtype 経路」の緑条件を定義する必要がある
   （lavapipe 等ソフトウェアアダプタは f16 を f32 計算するため、実 HW レーンと区別する）。
   具体値は M0 実測後に追記する。
+- 追記（2026-09-05）: リリース判定機は `shader-f16` と `timestamp-query` を列挙するアダプタで
+  あること。列挙しない機で verify を通すには `KARUME_ALLOW_NO_SHADER_F16=1` /
+  `KARUME_ALLOW_NO_TIMESTAMP_QUERY=1` を意図表明として設定する（既定は
+  `packages/runtime/tests/gpu_gate_test.ts` が全 SKIP を FAIL にする）。実資産不在も同形で
+  `assets_gate_test.ts` が FAIL にし、opt-out は `KARUME_ALLOW_NO_ASSETS=1`。これらを設定した
+  環境の緑はリリース判定に使わない（[release-runbook](../release-runbook.md) §1）。

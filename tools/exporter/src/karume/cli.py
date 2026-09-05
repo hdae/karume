@@ -1,7 +1,7 @@
-"""`karume` コマンド — dist / verify のサブコマンド式ディスパッチ。
+"""`karume` コマンド — dist / repack / verify のサブコマンド式ディスパッチ。
 
     karume dist --pipeline siglip2   # 受理集合が空の core 単体では落ちる（下の NOTE）
-    karume verify ../../models/anima-turbo/transformer/model.f16.safetensors
+    karume verify ../../models/karume-anima/shared/transformer/model.f16-00001-of-00017.safetensors
 
 MUST: CLI は**引数を解釈しない**。先頭の 1 語でディスパッチし、残りはそのまま対応する
 `main(argv)` へ渡す（`--help` も素通しするので、使い方は各本体の parser が出す）。ここに
