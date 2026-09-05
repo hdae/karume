@@ -493,7 +493,7 @@ class TestVerifyCli:
 
 
 class _RecordingMatte(nn.Module):
-    """呼び出しの段（参照 / 段 1 / 段 2）を記録するだけの骨格。
+    """呼び出しの段（参照 / 段 1 / 段 2 / 段 3）を記録するだけの骨格。
 
     出力は入力から決まる（段によらず同一）ので、`verify_patches` の 1 段目のビット一致
     assert は通る — ここで見たいのは**順序**だけ。
@@ -511,7 +511,7 @@ class _RecordingMatte(nn.Module):
 
 
 class TestVerifyOrder:
-    """`verify_patches` の順序不変条件（参照 → 段 1 → 段 2）。"""
+    """`verify_patches` の順序不変条件（参照 → 段 1 → 段 2 → 段 3）。"""
 
     RESOLUTION = 64
 
@@ -539,8 +539,14 @@ class TestVerifyOrder:
             model.stage = "modules"
             return {}
 
+        def _apply_tail(model: nn.Module) -> dict[str, int]:
+            calls.append("apply_tail")
+            model.stage = "tail"
+            return {}
+
         monkeypatch.setattr(bn.patch, "apply_layout_patches", _apply_layout)
         monkeypatch.setattr(bn.patch, "apply_module_patches", _apply_modules)
+        monkeypatch.setattr(bn.patch, "apply_tail_patches", _apply_tail)
         monkeypatch.setattr(
             bn.patch, "prepare", lambda _wrapper, _sample: calls.append("prepare") or None
         )
@@ -554,5 +560,7 @@ class TestVerifyOrder:
             "layout",
             "apply_modules",
             "modules",
+            "apply_tail",
+            "tail",
         ]
-        assert [entry["stage"] for entry in entries] == ["layout", "modules"]
+        assert [entry["stage"] for entry in entries] == ["layout", "modules", "tail"]

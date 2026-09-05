@@ -287,7 +287,7 @@ class TestBirefnetGraphGate:
     """組み立て門 — ずれても配布形としては成立してしまう組み合わせを、配置の前に落とす。"""
 
     def test_it_refuses_a_graph_baked_for_another_resolution(self, tmp_path: Path) -> None:
-        """配るのは 1024² だけ（2048² は実行段が未実測 — docs/limitations.md）。"""
+        """配るのは 1024² だけ（2048² は実行できるが公開裁定前 — docs/limitations.md）。"""
         sources = _build_birefnet_sources(tmp_path, graph=_birefnet_graph(shape=(1, 3, 512, 512)))
         with pytest.raises(DistError, match="配るのは"):
             birefnet_plan(sources)

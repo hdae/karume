@@ -31,10 +31,16 @@
      torch 側と一致させる手段は無い（torch の eager `x*a+b` 自体が一致しない）
   ⑧ `nn.AdaptiveAvgPool2d((1, 1))` を `sum(dim=3) → sum(dim=2) → div(H·W)` へ。
      縮約の順序が torch の 2 軸同時縮約と違うぶん最下位ビットが違う（実測 max 1.1e-08）
+  ⑨ `Decoder` 末尾の「全解像度へ伸ばす → `cat` → 1×1 conv」を「1×1 conv → 伸ばす →
+     もう片側の 1×1 conv を足す」へ組み替える（{@link TailConv}）。1×1 conv も bilinear
+     upsample も線形なので実数の上で可換で、全解像度の巨大な中間 2 本（2048² で
+     `[1,192,2048,2048]` 3.2GB と `[1,240,2048,2048]` 4.0GB）が消える。縮約の順序が
+     変わるぶん最下位ビットが違うが、寄与は ⑦⑧ の丸めに埋もれる大きさ（1024² を端から
+     端まで通した実測 maxdiff は ⑦⑧ まで 5.3e-05 → ⑨ まで 5.8e-05・`export.py --verify`）
 
-入口は 2 群に対応して分かれている（{@link apply_layout_patches} / {@link apply_module_patches}
-・両方当てるのが {@link apply}）— 一括でしか当てられないと、①〜⑥ のビット同一を単体で
-実測できない。
+入口は 3 群に対応して分かれている（{@link apply_layout_patches} / {@link apply_module_patches}
+/ {@link apply_tail_patches}・全て当てるのが {@link apply}）— 一括でしか当てられないと、
+①〜⑥ のビット同一を単体で実測できず、⑦⑧ と ⑨ の丸めの寄与も分けて採れない。
 
 MUST: どのパッチも fallback を持たない（`siglip2.patch` / `deberta.patch` と同じ規律）。
 前提（B = 1 / 偶数解像度 / `dec_att='ASPPDeformable'` 等）を外したモデルは黙って別の数値
@@ -51,6 +57,7 @@ NOTE: 動的モジュールのクラス属性をプロセス全域で差し替�
 from __future__ import annotations
 
 import sys
+from collections.abc import Sequence
 from typing import Any
 
 import torch
@@ -476,6 +483,161 @@ def _replace_modules(model: nn.Module) -> dict[str, int]:
     return counts
 
 
+# ---- ⑨decoder 末尾（1×1 conv と bilinear upsample の順序交換） -------------
+
+
+def _resize(x: torch.Tensor, size: Any) -> torch.Tensor:
+    """上流の `F.interpolate(..., mode='bilinear', align_corners=True)` の綴り違い。"""
+    return nn.functional.interpolate(x, size=size, mode="bilinear", align_corners=True)
+
+
+class TailConv(nn.Module):
+    """`Decoder.conv_out1`（1×1 conv 240→1）を「先に潰してから伸ばす」順序へ組み替えた同値形。
+
+    上流の末尾は全解像度の中間を 2 本作る（`decoder_block1` の出力を伸ばした `[1,192,S,S]` と、
+    そこへ ipt 枝 48 チャネルを継いだ `[1,240,S,S]`）。S = 2048 では 3.2GB / 4.0GB になり、
+    どちらも NVIDIA の束縛上限 2GiB を超える。
+
+    1×1 conv はチャネル方向の線形結合、bilinear upsample は空間方向の線形結合で、掛かる軸が
+    互いに素なので**実数の上で可換**。さらに `cat` の後の 1×1 conv は 2 つの部分和に割れる
+    ので、重みを head 側（`[1,192,1,1]`）と ipt 側（`[1,48,1,1]`）へ分けて
+
+        p1_out = interpolate(conv1x1(head, W_head)) + conv1x1(ipt, W_ipt, b)
+
+    と書ける。全解像度で残る中間は `[1,1,S,S]`（4MB）と ipt 枝の内部だけになる。
+
+    式は同値だが縮約の順序が変わる（192 チャネルの積和を伸ばす前に畳む）ので**ビット一致は
+    しない** — ⑦⑧ と同じ「丸めだけ違う」群（単体の実測 max 2.0e-05 = 出力の絶対値 ~55 に
+    対する相対 3.5e-07・`birefnet/tests/test_patch.py`）。
+    """
+
+    def __init__(self, source: nn.Module, head_channels: int) -> None:
+        super().__init__()
+        conv = _tail_conv2d(source)
+        if not 0 < head_channels < conv.in_channels:
+            raise NotImplementedError(
+                f"head 側 {head_channels} チャネルが conv_out1 の入力 {conv.in_channels} と"
+                " 噛み合わない（重みをチャネルで割れない）"
+            )
+        weight = conv.weight.detach()
+        self.register_buffer("head_weight", weight[:, :head_channels].clone())
+        self.register_buffer("ipt_weight", weight[:, head_channels:].clone())
+        self.register_buffer("bias", conv.bias.detach().clone())
+
+    def forward(self, head: torch.Tensor, size: Any, ipt: torch.Tensor) -> torch.Tensor:
+        """`head`（低解像度）を `size` へ伸ばした結果と `ipt`（全解像度）の寄与を足す。
+
+        bias は片側にだけ足す（両方に足すと 2 回効く）。
+        """
+        pooled = nn.functional.conv2d(head, self.head_weight)
+        return _resize(pooled, size) + nn.functional.conv2d(ipt, self.ipt_weight, self.bias)
+
+
+def _tail_conv2d(source: nn.Module) -> nn.Conv2d:
+    """`conv_out1` から 1×1 conv を取り出す（前提を外れたら落とす — fallback 無し）。"""
+    if not isinstance(source, nn.Sequential) or len(source) != 1:
+        raise NotImplementedError(f"conv_out1 が長さ 1 の nn.Sequential でない（{source!r}）")
+    conv = source[0]
+    if not isinstance(conv, nn.Conv2d):
+        raise NotImplementedError(f"conv_out1[0] が nn.Conv2d でない（{type(conv).__name__}）")
+    if (
+        tuple(conv.kernel_size) != (1, 1)
+        or tuple(conv.stride) != (1, 1)
+        or tuple(conv.padding) != (0, 0)
+        or tuple(conv.dilation) != (1, 1)
+        or conv.groups != 1
+    ):
+        raise NotImplementedError(
+            "conv_out1[0] が 1×1・stride 1・pad 0・groups 1 の conv でない"
+            f"（kernel={conv.kernel_size} stride={conv.stride} padding={conv.padding}"
+            f" dilation={conv.dilation} groups={conv.groups}）— upsample と可換にならない"
+        )
+    if conv.bias is None:
+        raise NotImplementedError("conv_out1[0] が bias を持たない — 差し替え版の前提と違う")
+    return conv
+
+
+def _tail_head_channels(decoder: nn.Module) -> int:
+    """`conv_out1` の入力のうち `decoder_block1` 由来の本数（残りが ipt 枝）。
+
+    同じ数が 2 通りに導ける（`decoder_block1` の出力 conv / `conv_out1` の入力から ipt 枝の
+    出力を引く）ので両方を採って突き合わせる — 食い違ったら重みをチャネルで割る位置が
+    前提と違うので、黙って別の分け方をせずに落とす。
+    """
+    from_block = decoder.decoder_block1.conv_out.out_channels
+    from_split = decoder.conv_out1[0].in_channels - decoder.ipt_blk1.conv_out.out_channels
+    if from_block != from_split:
+        raise NotImplementedError(
+            f"decoder_block1 の出力 {from_block} と conv_out1 の残り {from_split} が食い違う"
+            " — 末尾の重みをチャネルで割れない"
+        )
+    return from_block
+
+
+def _decoder_forward(self: nn.Module, features: Sequence[torch.Tensor]) -> list[torch.Tensor]:
+    """`Decoder.forward` の eval 経路の同値実装（末尾だけ {@link TailConv} へ差し替え）。
+
+    上流 2145〜2224 行（x4 → p4 → p3 → p2 → _p1 の 4 段）は逐語で、`config.out_ref` の gdt
+    attention（`p4 = p4 * gdt_attn_4` など）は eval でも走るのでそのまま写す。書き換えたのは
+    末尾 2225〜2231 行だけ（理屈は {@link TailConv}）。
+
+    学習経路（`ms_supervision` の中間予測 append / gdt の GT 側）は写していないので、
+    `self.training` が真ならその場で落とす。
+    """
+    if self.training:
+        raise RuntimeError(
+            "学習モードの Decoder.forward は差し替え版が持たない経路"
+            "（ms_supervision の中間予測と gdt の GT を写していない）"
+        )
+    x, x1, x2, x3, x4 = features
+
+    if self.config.dec_ipt:
+        patches_batch = _image2patches(x, patch_ref=x4) if self.split else x
+        x4 = torch.cat((x4, self.ipt_blk5(_resize(patches_batch, x4.shape[2:]))), 1)
+    p4 = self.decoder_block4(x4)
+    if self.config.out_ref:
+        p4_gdt = self.gdt_convs_4(p4)
+        gdt_attn_4 = self.gdt_convs_attn_4(p4_gdt).sigmoid()
+        p4 = p4 * gdt_attn_4
+    _p4 = _resize(p4, x3.shape[2:])
+    _p3 = _p4 + self.lateral_block4(x3)
+
+    if self.config.dec_ipt:
+        patches_batch = _image2patches(x, patch_ref=_p3) if self.split else x
+        _p3 = torch.cat((_p3, self.ipt_blk4(_resize(patches_batch, x3.shape[2:]))), 1)
+    p3 = self.decoder_block3(_p3)
+    if self.config.out_ref:
+        p3_gdt = self.gdt_convs_3(p3)
+        gdt_attn_3 = self.gdt_convs_attn_3(p3_gdt).sigmoid()
+        p3 = p3 * gdt_attn_3
+    _p3 = _resize(p3, x2.shape[2:])
+    _p2 = _p3 + self.lateral_block3(x2)
+
+    if self.config.dec_ipt:
+        patches_batch = _image2patches(x, patch_ref=_p2) if self.split else x
+        _p2 = torch.cat((_p2, self.ipt_blk3(_resize(patches_batch, x2.shape[2:]))), 1)
+    p2 = self.decoder_block2(_p2)
+    if self.config.out_ref:
+        p2_gdt = self.gdt_convs_2(p2)
+        gdt_attn_2 = self.gdt_convs_attn_2(p2_gdt).sigmoid()
+        p2 = p2 * gdt_attn_2
+    _p2 = _resize(p2, x1.shape[2:])
+    _p1 = _p2 + self.lateral_block2(x1)
+
+    if self.config.dec_ipt:
+        patches_batch = _image2patches(x, patch_ref=_p1) if self.split else x
+        _p1 = torch.cat((_p1, self.ipt_blk2(_resize(patches_batch, x1.shape[2:]))), 1)
+    # 以下が書き換えた末尾。上流は head を全解像度へ伸ばして `_p1` に代入し（2226 行）、その
+    # `[1, 192, S, S]` を次の `patch_ref` に渡す（2229 行）。`image2patches` が `patch_ref` から
+    # 読むのは空間サイズだけで、伸ばした後の形は `x` と同じ `(S, S)` — 格子は 1×1 になるので、
+    # 伸ばす前に `x` 自身を渡しても上流と同じ `patches_batch` になる。
+    head = self.decoder_block1(_p1)
+    patches_batch = _image2patches(x, patch_ref=x) if self.split else x
+    ipt = self.ipt_blk1(_resize(patches_batch, x.shape[2:]))
+    p1_out = self.conv_out1(head, x.shape[2:], ipt)
+    return [p1_out]
+
+
 # ---- 適用と準備 ------------------------------------------------------------
 
 
@@ -503,12 +665,30 @@ def apply_module_patches(model: nn.Module) -> dict[str, int]:
     return _replace_modules(model)
 
 
+def apply_tail_patches(model: nn.Module) -> dict[str, int]:
+    """decoder 末尾の代数書き換え ⑨ を当てる（`conv_out1` の差し替え + `Decoder.forward`）。
+
+    `dec_ipt` / `dec_ipt_split` / `mul_scl_ipt == 'cat'` は {@link assert_supported} が保証
+    済みなので、ここで足すのは `conv_out1` の形の検査だけ（{@link _tail_conv2d}）。⑦⑧ と
+    別の入口にしているのは、`birefnet.export.py --verify` が段ごとに maxdiff を採るため。
+    """
+    decoder = model.decoder
+    decoder.conv_out1 = TailConv(decoder.conv_out1, _tail_head_channels(decoder))
+    module = sys.modules[type(model).__module__]
+    module.Decoder.forward = _decoder_forward
+    return {"tail_conv": 1}
+
+
 def apply(model: nn.Module) -> dict[str, int]:
-    """差し替えを全て当てる（export 経路 — {@link apply_layout_patches} + ⑦⑧）。
+    """差し替えを全て当てる（export 経路 — ①〜⑥ + ⑦⑧ + ⑨）。
 
     戻り値は差し替えたモジュール数。
     """
-    return {**apply_layout_patches(model), **apply_module_patches(model)}
+    return {
+        **apply_layout_patches(model),
+        **apply_module_patches(model),
+        **apply_tail_patches(model),
+    }
 
 
 def prepare(model: nn.Module, sample: torch.Tensor) -> Any:

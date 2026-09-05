@@ -23,13 +23,21 @@ fine-tune Lucida — identical structure, different weights and attribution), so
 ```sh
 cd tools/export-recipes
 uv run --group birefnet python -m birefnet.export
-uv run --group birefnet python -m birefnet.export --verify     # eager equivalence vs the unpatched model
+uv run --group birefnet python -m birefnet.export --verify     # eager equivalence vs the unpatched model (3 stages)
 uv run --group birefnet python -m birefnet.export --resolution 2048
 uv run --group birefnet python -m birefnet.export --model-dir ../../inputs/birefnet/lucida
 uv run --group birefnet python -m birefnet.export --real-images
 uv run python dist.py --pipeline birefnet                      # distribution (karume-birefnet-hr)
 uv run python dist.py --pipeline lucida                        # distribution (karume-lucida)
 ```
+
+`patch.py` rewrites the upstream model in place before the export; its docstring is the
+authoritative list. The last rewrite folds the decoder tail's 1×1 convolution through the bilinear
+upsample it used to follow — the two are linear on disjoint axes, so they commute, and the two
+full-resolution intermediates the upstream tail materialized (3.22GB and 4.03GB at 2048²) are gone.
+`--verify` therefore measures the equivalence against the unpatched eager model in **three stages**:
+the layout-only rewrites must be bit-exact, while the module and tail rewrites report a maximum
+absolute difference.
 
 One `--model` axis for the export script, but **two distribution pipelines**: Lucida is a
 derivative and ships as its own repository (ADR

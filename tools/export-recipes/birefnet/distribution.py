@@ -100,10 +100,10 @@ BIREFNET_IMAGE_MEAN: tuple[float, float, float] = (0.485, 0.456, 0.406)
 BIREFNET_IMAGE_STD: tuple[float, float, float] = (0.229, 0.224, 0.225)
 
 #: 配る解像度。系列は解像度ごとに別（`birefnet/export.py` の「解像度軸」）なので、系列名を
-#: 引くのにこの数が要る。**2048²（本家 handler の General-HR）は配らない** — 最大の中間
-#: テンソルが `[1, 240, 2048, 2048]`（decoder の cat 出力）= 4.03GB になり、実行段が未実測。
-#: 制約の正本は docs/limitations.md の「BiRefNet 系の配布形は 1024² だけ」節。焼かれた
-#: グラフが別の解像度なら {@link birefnet_pipeline_config} が落とす。
+#: 引くのにこの数が要る。**2048²（本家 handler の General-HR）はまだ配らない** — 実行段は
+#: 通る（recipe のパッチ ⑨ + runtime の ADR 0093・2026-09-05 実測）が、1024² との同居と既定の
+#: 公開裁定が未了。制約の正本は docs/limitations.md の「BiRefNet 系の配布形は 1024² だけ」
+#: 節。焼かれたグラフが別の解像度なら {@link birefnet_pipeline_config} が落とす。
 BIREFNET_RESOLUTION = 1024
 
 #: 出力の相対 path（**モデルサブツリー内**）— 配置表と manifest が共有する 1 箇所。
@@ -229,7 +229,7 @@ def birefnet_pipeline_config(graph: Mapping[str, Any], path: Path) -> dict[str, 
     if (height, width) != (BIREFNET_RESOLUTION, BIREFNET_RESOLUTION):
         raise DistError(
             f"{path} は {height}×{width} で焼かれている — 配るのは"
-            f" {BIREFNET_RESOLUTION}² だけ（それ以外は実行段が未実測 — docs/limitations.md）"
+            f" {BIREFNET_RESOLUTION}² だけ（2048² は公開裁定前 — docs/limitations.md）"
         )
     return {
         "imageWidth": width,

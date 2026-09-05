@@ -39,10 +39,11 @@ MUST: lucida の `lucida-m35-comfy.safetensors` は**対象外**（`hf download`
 書いている実験枝の重みで、グラフ 1 本の配布形では再現できない ②そのために配布形の前処理を
 分岐させると、全モデルが 2 通りの前処理を持つ設計になる — ので**受け入れない**。
 
-**既定は 1024²**。本家の推論解像度（同梱 `handler.py` の General-HR）は 2048² だが、2048² は
-最大の中間テンソルが `[1, 240, 2048, 2048]`（decoder の cat 出力）= 4.03GB になるので karume 側の
-別工事が要る（export 段は 2048² でも通る — 落ちるとすれば実行段）。制約の正本は
-docs/limitations.md の「BiRefNet 系の配布形は 1024² だけ」節。
+**既定は 1024²**。本家の推論解像度（同梱 `handler.py` の General-HR）は 2048²。2048² の
+decoder 末尾には束縛上限 2GiB を超える中間が 2 本あった（`[1, 192, 2048, 2048]` = 3.22GB と
+`[1, 240, 2048, 2048]` = 4.03GB）が、`birefnet.patch` の ⑨（1×1 conv と bilinear upsample の
+順序交換）でどちらも消える。実行段で 2048² が通るかは karume 側の割り付け（ADR 0093）と実測
+次第で、制約の正本は docs/limitations.md の「BiRefNet 系の配布形は 1024² だけ」節。
 
 `--resolution` は **64 の倍数**だけを受ける: 本体側の `PatchMerging` が各段で偶数 H/W を
 要求し（S/4・S/8・S/16 が偶数 = S%32）、`mul_scl_ipt='cat'` の半解像度枝が同じ要求を
@@ -407,6 +408,9 @@ def load_model(model_dir: Path) -> nn.Module:
 def load_wrapper(model_dir: Path, resolution: int) -> MatteLogits:
     """パッチを当て、解像度依存の定数を焼いた export 可能なラッパを返す。
 
+    当てるのは `patch.apply` の全て（①〜⑥ + ⑦⑧ + **⑨ の decoder 末尾**）— 段を分けて
+    当てるのは {@link verify_patches} だけで、emit は常に全部乗せで書き出す。
+
     MUST: 差し替えも {@link patch.prepare} も golden を採る**前**。後に当てると
     期待値だけが元の経路で計算され、グラフと食い違ったまま緑になる。
     """
@@ -599,7 +603,7 @@ def _diff_entry(
 
 
 def verify_patches(model_dir: Path, resolution: int) -> list[dict[str, Any]]:
-    """パッチ前 eager との同値を **2 点**で実測する（`siglip2.export.py --verify` と同じ形）。
+    """パッチ前 eager との同値を **3 点**で実測する（`siglip2.export.py --verify` と同じ形）。
 
     1. 並べ替えだけの書き換え（窓 / qkv / roll / pad / PatchMerging / image2patches / 窓
        マスク）→ **bit_exact が主張の中身**。演算列が 1 対 1 で対応するので差は 0 でなければ
@@ -607,9 +611,12 @@ def verify_patches(model_dir: Path, resolution: int) -> list[dict[str, Any]]:
     2. `BatchNorm2d` → per-channel affine と `AdaptiveAvgPool2d` → 2 段 sum まで →
        **maxdiff を報告**。ATen 側が積和を FMA で畳む / 2 軸を同時に縮約するぶんだけ最下位
        ビットが動く（`birefnet.patch` の docstring ⑦⑧）。
+    3. decoder 末尾の 1×1 conv と bilinear upsample の順序交換まで → **maxdiff を報告**。
+       2 と同じ「式は同値・丸めだけ違う」群で、2 の差に上乗せされた分がこの段の寄与
+       （`birefnet.patch` の docstring ⑨）。
 
-    MUST: 順序は「**全ケースの参照値を確定** → 1 → 2」。パッチはクラス属性のプロセス全域
-    差し替えなので、段ごとに参照を採り直すと 2 段目の参照がパッチ後の値になる（恒真化）。
+    MUST: 順序は「**全ケースの参照値を確定** → 1 → 2 → 3」。パッチはクラス属性のプロセス全域
+    差し替えなので、段ごとに参照を採り直すと 2 段目以降の参照がパッチ後の値になる（恒真化）。
     """
     assert_resolution(resolution)
     if patch.patches_applied():
@@ -634,7 +641,9 @@ def verify_patches(model_dir: Path, resolution: int) -> list[dict[str, Any]]:
             f"並べ替えだけの書き換えがビット同一でない: maxdiff={layout['maxdiff']}"
         )
     patch.apply_module_patches(wrapper.model)
-    return [layout, _diff_entry("modules", "max-abs-diff", mattes(), reference)]
+    modules = _diff_entry("modules", "max-abs-diff", mattes(), reference)
+    patch.apply_tail_patches(wrapper.model)
+    return [layout, modules, _diff_entry("tail", "max-abs-diff", mattes(), reference)]
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -662,7 +671,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument(
         "--verify",
         action="store_true",
-        help="パッチ前 eager との同値を 2 点で実測する（emit はしない — 同一プロセスでは"
+        help="パッチ前 eager との同値を 3 点で実測する（emit はしない — 同一プロセスでは"
         "クラス属性の差し替えが参照を汚染するので併用できない）",
     )
     args = parser.parse_args(argv)
