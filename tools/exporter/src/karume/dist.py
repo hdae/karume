@@ -84,6 +84,10 @@ from karume.artifacts import ArtifactSwapError, staged_publication
 from karume.ir import IR_METADATA_KEY
 from karume.limits import LimitsError, max_state_slot_bytes, max_tensor_payload, required_limits
 from karume.modelcard import HF_OWNER
+
+# `MAX_SHARDS`（1 dtype エントリが並べられる shard 数の上限）は import で引く — 書く側〈分割〉と
+# 宣言側〈manifest 検査〉が同じ綴りを見るため。{@link verify_dist} は手元のどの配布形にも掛け
+# られる門なので、上限を知らない検査になっていると受理集合が 2 つに割れる。
 from karume.shards import MAX_SHARDS, ShardError, resolve_shards, shard_name
 
 # ---- ① 共有部: 置き場の綴り・共有席の決定・配置・ハッシュ・宣言と現物の突合 -------
@@ -127,11 +131,20 @@ MAX_MODELS = 32
 MAX_WEIGHTS = 32
 MAX_ASSETS = 32
 MAX_QUANTS = 32
-#: 1 dtype エントリが並べられる shard 数の上限（`karume.shards.MAX_SHARDS` を再輸出 — 書く側
-#: 〈分割〉と宣言側〈manifest 検査〉が同じ綴りを引く）。{@link verify_dist} は手元のどの配布形に
-#: も掛けられる門なので、上限を知らない検査になっていると受理集合が 2 つに割れる。
 MAX_PIPELINE_CONFIG_BYTES = 256 * 1024
 MAX_MANIFEST_BYTES = 1024 * 1024
+
+#: weights の dtype ラベルの受理語彙 = runtime の**格納 dtype 語彙**。
+#:
+#: NOTE: 正本は `packages/runtime/src/format/ir.ts` の `STORAGE_DTYPES` だが、あちらは export
+#: されていないモジュール私有定数で、op 契約表のような機械突合の正本ファイルも無い — ここは
+#: **人手の写し**（食い違えば片方だけが古びる）。
+#:
+#: 縛るのは、モデルカードの「`I4` は safetensors の方言」注記（{@link karume.modelcard.quants}）
+#: が**ラベルの綴り**で条件を立てるため。ラベルを `w4` のような席名で綴った家族では、i4 を含む
+#: 配布形なのに注記が黙って消える — カード自身が「ラベルは格納 dtype 語彙」と主張している以上、
+#: その主張を保証する門が要る。
+STORAGE_DTYPE_LABELS = frozenset({"f32", "f16", "bf16", "i8", "i4", "i32"})
 
 #: quant の表示欄（ADR 0075 決定 1）の文字数上限。`label` は選択肢に出す短い表示名、
 #: `description` は 1 行の説明で、どちらも optional。hub は同じ値で境界検査するので
@@ -1263,6 +1276,12 @@ def _assert_manifest_shape(manifest: Mapping[str, Any]) -> None:
         quants = model["quants"]
         for name, labels in weights.items():
             for label, entry in labels.items():
+                # MUST: dtype ラベルは格納 dtype 語彙（{@link STORAGE_DTYPE_LABELS}）の内側。
+                if label not in STORAGE_DTYPE_LABELS:
+                    raise DistError(
+                        f"{model_name}.weights.{name} の dtype ラベル '{label}' が格納 dtype"
+                        f" 語彙 {sorted(STORAGE_DTYPE_LABELS)} に無い"
+                    )
                 # MUST: shard 列は**非空**（先頭がグラフ shard = `karume_ir` を持つコンテナ）。
                 # v2 の `{file}` を持ったままの manifest もここで落ちる — 形式識別子だけ書き換え
                 # て中身が旧形の配布形は、hub が読めないのに焼く側では通ってしまう。

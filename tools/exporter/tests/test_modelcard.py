@@ -225,6 +225,39 @@ class TestQuantsDownload:
         assert "of assets" not in _row(lines, "f16")
 
 
+class TestDownloadSizeUnits:
+    """単位は**丸めた後**の値で選ぶ（`3.24 GiB` / `248 MiB` — 単位を跨いでも精度が揃う）。
+
+    丸める前に選ぶと、繰り上がる帯で `1024 MiB` という有効 3 桁でも単位でもない綴りが出る。
+    繰り上がりの閾値は 1000 ではなく **1024**（= 1 段上の単位のちょうど 1）— `1000 MiB` は
+    MiB として正しい綴りで、上げると「1 単位未満」の `0.977 GiB` になる。
+    """
+
+    @pytest.mark.parametrize(
+        ("size", "spelled"),
+        [
+            # 繰り上がる帯（丸める前に単位を選ぶ実装ではここが `1024 MiB` / `1024 KiB` になる）。
+            (1_073_741_823, "1.00 GiB"),
+            (1_048_575, "1.00 MiB"),
+            # 境界の逆側 — 丸めても 1024 に届かないので単位はそのまま。
+            (1_073_217_535, "1023 MiB"),
+            # 4 桁でも MiB として正しい帯（1 段上げると 1 単位未満の綴りになる）。
+            (1_048_576_000, "1000 MiB"),
+            # 既存の綴りが動かないことの対照（docstring の 2 例と、単位未満の生バイト）。
+            (3_479_000_000, "3.24 GiB"),
+            (260_000_000, "248 MiB"),
+            (512, "512 B"),
+        ],
+    )
+    def test_it_spells_the_download_cell_at_three_significant_digits(
+        self, size: int, spelled: str
+    ) -> None:
+        manifest = _manifest()
+        manifest["models"]["alpha"]["weights"]["front"]["f16"]["shards"][0]["size"] = size
+
+        assert f"| {spelled} |" in _row(quants(manifest["models"]["alpha"]), "f16")
+
+
 class TestQuantsNotes:
     """廃止したファイル表から引き継いだ注記 — **掛かるときだけ**出す（条件は manifest 由来）。"""
 

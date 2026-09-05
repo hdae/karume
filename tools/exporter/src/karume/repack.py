@@ -33,8 +33,9 @@ piece 列）で並べ直す。**再 export ではない** — GPTQ 校正はリ�
 （E2E フィクスチャ）や provenance の類には 1 バイトも触らない — 拾うのは
 {@link karume.shards.shard_siblings} が名前の形で拾うファイルだけ。
 
-`--out` を渡すと別ディレクトリへ書く（入力は読むだけ）— 実適用の前に「同じバイトが出るか」を
-確かめる経路。
+`--out` を渡すと**別**ディレクトリへ書く（入力は読むだけ）— 実適用の前に「同じバイトが出るか」を
+確かめる経路。宛先が入力の代表 path へ畳まれる指定は fail loudly（後片付けが入力側の旧 shard を
+消し、確かめるつもりの呼び出しが実適用になるため）。
 
 MUST: torch を持ち込まない。ここが扱うのは**バイト列と宣言だけ**で、テンソルを torch へ
 起こして書き戻すと dtype の往復（f16 / i4 の器）で沈黙誤値を作る余地が生まれる。読みは
@@ -445,6 +446,15 @@ def repack_component(
     `out_dir` を渡すとそこへ同名で書く（入力は読むだけ）。渡さなければ**インプレース**で、
     旧ファイル群は据え替えの後に消える。
 
+    MUST: `out_dir` の宛先が入力の代表 path と同じになる指定は `RepackError`。後片付けは
+    宛先基準で走るので、そのまま進むと「入力は読むだけ」という `--out` の契約が破れ、実適用の
+    前に確かめるつもりの呼び出しが黙ってインプレースの詰め替えになる。
+
+    MUST: 据える名前は**常に** `-NNNNN-of-NNNNN` の連番（`karume.emit.write_model` と同じ規律
+    — 単一ファイル配布形は廃止・ADR 0081）。テンソル 0 本のコンポーネントは 1 本の shard に
+    なるが、そこで連番を落とすと同じコンポーネントを書き手が焼き直したときとファイル名が
+    食い違い、両方が残った瞬間に `resolve_shards` が「単一ファイルと連番の同居」で止まる。
+
     `_shard_capacity` は**テストからのみ触る**データ節容量の差し込み（合成の小コンポーネントで
     分割を起こすため）— 公開ノブではない（配布形の不変条件・
     {@link karume.shards.SHARD_DATA_CAPACITY}）。
@@ -459,6 +469,12 @@ def repack_component(
     groups = plan_shards(stored, metadata[IR_METADATA_KEY], capacity)
 
     final = Path(path) if out_dir is None else Path(out_dir) / Path(path).name
+    if out_dir is not None and final.resolve() == Path(path).resolve():
+        raise RepackError(
+            f"--out の宛先 {final} が入力の代表 path と同じ"
+            " — `--out` は別ディレクトリへ書く経路（入力は読むだけ）で、"
+            "インプレースで詰め替えるなら `--out` を外す"
+        )
     # 一意 suffix — 同じ final を狙う別プロセスの一時ファイルと衝突させない。
     staged = final.with_name(f"{final.name}.{uuid4().hex}.partial")
     before = _fingerprints(stored)
@@ -474,10 +490,7 @@ def repack_component(
             )
         _assert_same_bytes(before, _fingerprints(after_stored))
         total = len(written)
-        published = [
-            final if total == 1 else shard_path(final, index, total)
-            for index in range(1, total + 1)
-        ]
+        published = [shard_path(final, index, total) for index in range(1, total + 1)]
         for staged_shard, target in zip(written, published, strict=True):
             os.replace(staged_shard, target)
     except BaseException:

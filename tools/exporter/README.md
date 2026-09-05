@@ -3,15 +3,22 @@
 Python tooling that lowers `torch.export`-ed models into Karume's **IR v1**
 ([../../docs/ir-v1.md](../../docs/ir-v1.md)). Managed with uv; CPU-only torch (no GPU required).
 
-The distribution form is a single safetensors file — tensors (weights and constants) plus the graph
-JSON under the `__metadata__` key `karume_ir`.
+The distribution form is a **graph shard followed by a sequence of weight shards**, always numbered
+`-NNNNN-of-NNNNN`. The leading shard carries the graph JSON under the `__metadata__` key `karume_ir`
+and nothing else (its data section is empty, and `karume_ir` appears in that shard only); the
+tensors (weights and constants) live in the weight shards after it. Every shard is at most **256 MiB
+measured as the file length**, and a tensor that does not fit one shard is split into row-range
+pieces spread over consecutive shards. The single-file distribution form was retired (ADR
+[0081](../../docs/decisions/0081-shard-spec-v2.md) /
+[0090](../../docs/decisions/0090-shard-spec-v3-tensor-pieces.md)).
 
-The PyPI distribution `karume` is the **generic exporter core only**: dims / ir / ops / shapes /
-convert / aten_handlers / normalize / quantize / act_quant / emit / verify / pipeline / goldens /
-golden_models, plus the generic dist engine and the generic model-card renderer. Model-specific recipes — patch layers, export
-scripts, reference pipelines, dist recipes, card templates and their provenance — live outside the
-wheel in [`../export-recipes/`](../export-recipes/README.md), and the dependency direction is
-**recipe → core only** (ADR
+The PyPI distribution `karume` is the **generic exporter core only** — the export path (dims / ir /
+ops / shapes / convert / aten_handlers / normalize / quantize / act_quant / emit / verify /
+pipeline / goldens / golden_models), the sharding and distribution layer, and the generic
+model-card renderer; the full list is the module table below. Model-specific recipes — patch
+layers, export scripts, reference pipelines, dist recipes, card templates and their provenance —
+live outside the wheel in [`../export-recipes/`](../export-recipes/README.md), and the dependency
+direction is **recipe → core only** (ADR
 [0065](../../docs/decisions/0065-exporter-core-recipe-split.md), enforced by
 `tests/test_architecture_boundary.py`).
 
@@ -56,10 +63,11 @@ the CLI — for example `karume dist --card-profile`, which is required only whe
 offers more than one attribution profile, a rule the body derives from the registry it is handed.
 Dispatch is a lazy import.
 
-| Subcommand      | Wrapped body                                                                            |
-| --------------- | --------------------------------------------------------------------------------------- |
-| `karume dist`   | `karume.dist` (assembles the distribution form from the pipeline registry it is handed) |
-| `karume verify` | `karume.verify` (validates the distribution form against every IR v1 rule)              |
+| Subcommand      | Wrapped body                                                                              |
+| --------------- | ----------------------------------------------------------------------------------------- |
+| `karume dist`   | `karume.dist` (assembles the distribution form from the pipeline registry it is handed)   |
+| `karume verify` | `karume.verify` (validates the distribution form against every IR v1 rule)                |
+| `karume repack` | `karume.repack` (repacks a component into the current shard rules — no tensor byte moves) |
 
 There is no `export-*` among them: every export script left the wheel for
 `tools/export-recipes/<family>/`, and so did the loader that used to read a script by path (ADR
@@ -70,7 +78,7 @@ and the repository's own spellings for `--series` and `--out`. The seat stays he
 assembly engine itself is core (ADR 0065 decision 1).
 
 ```sh
-uv run karume verify ../../models/karume-anima-turbo/anima-turbo/transformer/model.f16-00001-of-00004.safetensors
+uv run karume verify ../../models/karume-anima/shared/transformer/model.f16-00001-of-00017.safetensors
 ```
 
 ### `karume dist` — the assembly engine
@@ -394,34 +402,45 @@ That is mandatory for the RoPE position tables of the decode series, which land 
 weight slot and would otherwise be rounded by an i8 default — unlike weight rounding, angle error
 there accumulates along the position axis.
 
+**`write_model` alone does not run the reader-side gate.** It writes the container; a distribution
+form must go through `publish_model`, which is the one path that writes, verifies and only then
+swaps the result into place.
+
 ## Module structure
 
-| Module          | Role                                                                                                                          |
-| --------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| `dims`          | dimension language `coeff·sym+offset`. The grammar is authoritative in `packages/runtime/tests/fixtures/dim-grammar.json`     |
-| `ir`            | IR v1 graph representation and JSON serialization (`allow_nan=False`)                                                         |
-| `ops`           | op contract table (the counterpart of TS-side `packages/runtime/src/ops.ts`)                                                  |
-| `shapes`        | output shape rules (the counterpart of TS-side `computeOutputShape`; declared shapes are compared on every node)              |
-| `convert`       | ExportedProgram → IR graph engine (graph traversal, constant folding, CSE — dispatches to the handler table)                  |
-| `aten_handlers` | the aten op → IR mapping table (per-op handlers + fused ops; the growth point when a model family is added)                   |
-| `normalize`     | FX equivalence rewrites that do not grow the vocabulary (pass registration)                                                   |
-| `emit`          | writing to safetensors                                                                                                        |
-| `verify`        | all IR v1 rules + distribution-form comparison + runtime capability comparison                                                |
-| `pipeline`      | `export_module` / `export_to_file`, the above laid out as one straight path                                                   |
-| `goldens`       | the golden spec table and generation driver                                                                                   |
-| `golden_models` | the tiny golden fixtures themselves — `nn.Module` definitions and input generators                                            |
-| `quantize`      | weight fake-quant for the storage dtypes (f16 rounding / per-channel symmetric i8)                                            |
-| `act_quant`     | per-token symmetric i8 fake-quant for activations (the torch mirror of the w8a8 execution path)                               |
-| `extents`       | identity of dimension lengths — the one place symbolic (`SymInt`) lengths are compared without a guard                        |
-| `rope`          | model-independent export check that RoPE frequency buffers were lifted out to constant-folding leaves                         |
-| `custom_ops`    | the `karume::` operators (`gru_scan` / `gru_scan_reverse`) registered with `torch.library`                                    |
-| `dist`          | generic assembly engine: series directories → one distribution directory (ADR 0041 / 0052; the pipeline registry is injected) |
-| `modelcard`     | generic model-card rendering — pure functions deriving the card from the manifest (ADR 0037 §3 frontmatter)                   |
-| `cli`           | the `karume` entry point (`dist` / `verify`, lazy dispatch)                                                                   |
+| Module          | Role                                                                                                                                                                                   |
+| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `dims`          | dimension language `coeff·sym+offset`. The grammar is authoritative in `packages/runtime/tests/fixtures/dim-grammar.json`                                                              |
+| `ir`            | IR v1 graph representation and JSON serialization (`allow_nan=False`)                                                                                                                  |
+| `ops`           | op contract table (the counterpart of TS-side `packages/runtime/src/ops.ts`)                                                                                                           |
+| `shapes`        | output shape rules (the counterpart of TS-side `computeOutputShape`; declared shapes are compared on every node)                                                                       |
+| `convert`       | ExportedProgram → IR graph engine (graph traversal, constant folding, CSE — dispatches to the handler table)                                                                           |
+| `aten_handlers` | the aten op → IR mapping table (per-op handlers + fused ops; the growth point when a model family is added)                                                                            |
+| `normalize`     | FX equivalence rewrites that do not grow the vocabulary (pass registration)                                                                                                            |
+| `emit`          | writing to safetensors                                                                                                                                                                 |
+| `verify`        | all IR v1 rules + distribution-form comparison + runtime capability comparison                                                                                                         |
+| `pipeline`      | `export_module` / `export_to_file` / `publish_model`, the above laid out as one straight path (`publish_model` is the only way a distribution form is produced: write → verify → swap) |
+| `goldens`       | the golden spec table and generation driver                                                                                                                                            |
+| `golden_models` | the tiny golden fixtures themselves — `nn.Module` definitions and input generators                                                                                                     |
+| `quantize`      | weight fake-quant for the storage dtypes (f16 rounding / per-channel symmetric i8)                                                                                                     |
+| `act_quant`     | per-token symmetric i8 fake-quant for activations (the torch mirror of the w8a8 execution path)                                                                                        |
+| `extents`       | identity of dimension lengths — the one place symbolic (`SymInt`) lengths are compared without a guard                                                                                 |
+| `rope`          | model-independent export check that RoPE frequency buffers were lifted out to constant-folding leaves                                                                                  |
+| `custom_ops`    | the `karume::` operators (`gru_scan` / `gru_scan_reverse`) registered with `torch.library`                                                                                             |
+| `quant_calib`   | calibration-driven rounding on the storage grid `quantize` defines (GPTQ ships; AWQ is measurement only)                                                                               |
+| `quant_methods` | **measurement-only** rounding methods with no storage path (FP4 / NF4 / MXFP4 / k-means codebooks)                                                                                     |
+| `states`        | the post-export surgery that rewrites an attention graph into the states form (ADR 0067)                                                                                               |
+| `shards`        | the shard rules — reader contract, packing policy and tensor pieces (ADR 0081 / 0090)                                                                                                  |
+| `limits`        | derivation of a quant's `requiredLimits` from the assets themselves (residency only — ADR 0089)                                                                                        |
+| `repack`        | repacking an existing component into the current shard rules without moving a tensor byte                                                                                              |
+| `artifacts`     | transactional publication: build in staging, swap into place only after every gate is green (ADR 0052)                                                                                 |
+| `dist`          | generic assembly engine: series directories → one distribution directory (ADR 0041 / 0052; the pipeline registry is injected)                                                          |
+| `modelcard`     | generic model-card rendering — pure functions deriving the card from the manifest (ADR 0037 §3 frontmatter)                                                                            |
+| `cli`           | the `karume` entry point (`dist` / `verify` / `repack`, lazy dispatch)                                                                                                                 |
 
-No module here is model-specific: the wheel carries no `patch_*`, no export script and no family
-name table. That is a machine gate, not a convention — `tests/test_architecture_boundary.py` fails
-the moment core imports a recipe (ADR 0065 decision 3).
+That table is the whole wheel (27 modules). No module here is model-specific: the wheel carries no
+`patch_*`, no export script and no family name table. That is a machine gate, not a convention —
+`tests/test_architecture_boundary.py` fails the moment core imports a recipe (ADR 0065 decision 3).
 
 ### Contract synchronization with the TS side
 
@@ -447,14 +466,17 @@ and Python-side `ops.py` compare against it). What follows is a copy, so on any 
 conformance table is the correct one.
 
 - **The semantic dtypes are f32 / i32 / bool** (ADR 0009). torch's i64 is normalized to i32 at the
-  exporter boundary (out of range fails loudly). **The storage dtypes are f32 and i32** (i32 is raw
-  int32 — the explicit exception of ADR 0010). An initializer's semantic dtype is f32 or i32, and
-  the semantic/storage pairs are only `f32 × {f32,f16,bf16,i8}` and `i32 × i32` (the cross products
-  fail loudly).
-- There are **57** IR ops (ADR 0017 added `rms_norm` / `conv2d` / `clamp_min`, ADR 0023 added
-  `attention`, `gelu_tanh` was added for EmbeddingGemma, `sin` for the Snake activation,
-  `safe_softmax` for runtime attention masks — ADR 0044 — `upsample_bilinear2d` for the
-  segmentation / depth family, `deform_conv2d` for the BiRefNet family — ADR 0055 — and
+  exporter boundary (out of range fails loudly). **The storage dtypes are f32 / f16 / bf16 / i8 /
+  i4 / i32** (i32 is raw int32 — the explicit exception of ADR 0010). An initializer's semantic
+  dtype is f32 or i32, and the semantic/storage pairs are only `f32 × {f32,f16,bf16,i8,i4}` and
+  `i32 × i32` (the cross products fail loudly).
+- The IR vocabulary has **60** ops, of which the exporter can emit **58**: `topk` and `state_append`
+  are in the vocabulary but no `torch.export` graph produces them (`topk` waits on the multi-output
+  getitem wiring, and `state_append` is the effect op the decode-graph script emits — ADR 0067
+  decision 5). The list below is those 58 (ADR 0017 added `rms_norm` / `conv2d` / `clamp_min`,
+  ADR 0023 added `attention`, `gelu_tanh` was added for EmbeddingGemma, `sin` for the Snake
+  activation, `safe_softmax` for runtime attention masks — ADR 0044 — `upsample_bilinear2d` for
+  the segmentation / depth family, `deform_conv2d` for the BiRefNet family — ADR 0055 — and
   `gru_scan` / `gru_scan_reverse` for recurrent models — ADR 0056):
   - unary `neg abs exp log log1p sqrt sin tanh sigmoid relu gelu gelu_tanh` (f32) / `bitwise_not`
     (bool) / unary with attrs `clamp` / `clamp_min` / `leaky_relu` (f32). `sin` is the **only**
@@ -465,7 +487,8 @@ conformance table is the correct one.
     ternary `where` (cond is bool) — all with torch's right-aligned broadcast
   - `cast` (among f32 / i32 / bool) / `matmul` (rank-2) / `bmm` (rank-3) / `gather` (fixed to the
     last dim) / reduce `sum amax amin` (**1 axis**, the `dim` attr is mandatory, no keepdim; `sum`
-    also accepts bool input → i32) / `cumsum` (last dim)
+    also accepts bool input → i32) / `argmax` (fixed to the last dim as well — it collapses to
+    length 1, so the rank is preserved; f32 → i32, no attrs) / `cumsum` (last dim)
   - layout (ADR 0011 / 0014): `reshape` / `permute` / `expand` (f32 unlocked as well) / `slice` /
     `cat` (**the only variadic-arity op in IR v1**) / `pad` / `flip`
   - symbolic prefix slice (ADR 0010): `sym_prefix_slice`
@@ -612,8 +635,13 @@ the attrs are placed here.
   unchanged byte for byte**.
 - **Guard removal comes with a proof** (ADR 0016): only when either ① the dependency cone contains
   no -inf source, or ② the -inf comes from a single additive mask and evaluation at two symbolic
-  lengths (5 / 9) leaves a finite element in every row. If neither holds, `NotImplementedError`
-  (removing it would let NaN flow downstream).
+  lengths (5 / 9) leaves a finite element in every row. **If neither holds the guard subtree is
+  rewritten into a single `safe_softmax` node** (ADR 0044 decision 2) — that op is `softmax` plus
+  "a row whose max is −inf is written as all zeros", which is exactly what torch's guard means, so
+  the rewrite is not an approximation. The proof step still raises `NotImplementedError`, but that
+  is an **internal signal** the rewriting pass catches (it is split into its own subclass so an
+  unproven guard is counted separately from a real bug, rather than being swallowed); nothing
+  propagates to the caller, and no model becomes un-exportable because of a runtime mask.
 - Promoted constants are inserted as `aten.full.default([1], value, dtype=…)`. That op is on the
   folding allowlist, so if the consumer is a folding candidate the constant is folded along with it,
   and otherwise it becomes a rank-1 initializer (an i32 initializer for i32) absorbed by broadcast.

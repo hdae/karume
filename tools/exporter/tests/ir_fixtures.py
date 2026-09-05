@@ -118,6 +118,7 @@ def ir_container(
     outputs: Sequence[Shape] = ([1],),
     weights: Sequence[str] = ("weight",),
     baked: tuple[str, int] | None = None,
+    capacity: int | None = None,
 ) -> list[bytes]:
     """正当な IR コンポーネント 1 つぶんの shard バイト列（読む順 — 先頭がグラフ shard）。
 
@@ -139,9 +140,16 @@ def ir_container(
     `weights` は linear の重みになる initializer 名（層数を数える門が読む綴り）。
     `baked` は `(記号名, 焼き込み上限)` で、`sym_prefix_slice` の焼き込み定数を 1 本足す
     （記号は `inputs` の次元位置で束縛されている必要がある）。
+
+    `capacity` は書き手のデータ節容量の差し込み（`write_model` の `_shard_capacity`）— 合成の
+    小さい重みを**テンソル分割**（piece — ADR 0090）まで割らせるための席で、既定（`None`）は
+    実物と同じ容量。何本の shard・何本の piece になるかは現物のバイト数が決めるので、渡した
+    側は本数を仮定せず**ヘッダを観測する**こと。
     """
     graph, tensors, scales, overrides = _spec(mark, storage, inputs, outputs, weights, baked)
-    return _write(graph, tensors, storage=storage, scales=scales, overrides=overrides)
+    return _write(
+        graph, tensors, storage=storage, scales=scales, overrides=overrides, capacity=capacity
+    )
 
 
 def ir_shards(count: int, *, mark: str) -> list[bytes]:

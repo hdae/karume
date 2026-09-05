@@ -22,9 +22,17 @@ import pytest
 from ir_fixtures import ir_container
 
 from karume import repack
-from karume.emit import ContainerEntry, container_order, write_container
-from karume.ir import IR_METADATA_KEY
-from karume.shards import pack_shards, parse_piece_key, piece_key, shard_name, shard_path
+from karume.emit import ContainerEntry, container_order, write_container, write_model
+from karume.ir import IR_METADATA_KEY, IrGraph
+from karume.shards import (
+    ShardError,
+    pack_shards,
+    parse_piece_key,
+    piece_key,
+    resolve_shards,
+    shard_name,
+    shard_path,
+)
 from karume.verify import ContainerError, verify_shards
 
 #: コンポーネントの代表 path のファイル名（系列の綴りと同じ）。
@@ -267,6 +275,56 @@ class TestIdempotence:
         assert listing(series) == before
 
 
+class TestATensorlessComponent:
+    """初期化子を 1 本も持たないコンポーネント（`karume_ir` だけ・データ節 0 テンソル）。
+
+    書き手（`emit.write_model`）はこの形でも `-00001-of-00001` を書く（連番は常時 — ADR 0081）。
+    詰め替えが連番を落とすと、同じコンポーネントを焼き直した瞬間に 2 つの綴りが同居し、
+    `resolve_shards` が「どちらのバイト列を配るか」を決められずに止まる。
+    """
+
+    def graph_only(self, directory: Path) -> Path:
+        """テンソル 0 本の正当なコンポーネントを書き、代表 path を返す。"""
+        directory.mkdir(parents=True, exist_ok=True)
+        written = write_model(directory / COMPONENT, IrGraph(), {})
+        assert [entry.name for entry in written] == ["model-00001-of-00001.safetensors"]
+        return directory / COMPONENT
+
+    def test_the_single_shard_keeps_its_sequence_number(self, tmp_path):
+        series = tmp_path / "series"
+        path = self.graph_only(series)
+
+        published = repack.repack_component(path)
+
+        assert [entry.name for entry in published] == ["model-00001-of-00001.safetensors"]
+        assert not path.exists()
+        assert sorted(listing(series)) == ["model-00001-of-00001.safetensors"]
+
+    def test_the_result_passes_the_full_verification(self, tmp_path):
+        """テンソル 0 本でも読み手契約は同じ（グラフ shard の器がそのまま 1 本目）。"""
+        path = self.graph_only(tmp_path / "series")
+
+        published = repack.repack_component(path)
+
+        verify_shards(published)  # 例外が出なければ合格
+        assert tensors_of(published) == {}
+
+    def test_the_unnumbered_name_beside_the_sequence_cannot_be_resolved(self, tmp_path):
+        """故障注入 — 連番を落として据えた場合に壊れる不変条件そのものを名指しで観測する。
+
+        詰め替えの後に連番なしの綴りが現れると、旧連番と同居して `resolve_shards` が止まる
+        （どちらのバイト列を配るかが一意に決まらない）。
+        """
+        series = tmp_path / "series"
+        path = self.graph_only(series)
+        published = repack.repack_component(path)
+
+        path.write_bytes(published[0].read_bytes())
+
+        with pytest.raises(ShardError, match="同居"):
+            resolve_shards(path)
+
+
 class TestWritingElsewhere:
     def test_the_out_directory_gets_the_sequence_and_the_source_is_untouched(self, tmp_path):
         series = tmp_path / "series"
@@ -278,6 +336,35 @@ class TestWritingElsewhere:
         assert [entry.parent for entry in published] == [tmp_path / "out"] * len(published)
         assert listing(series) == before
         verify_shards(published)
+
+    def test_an_out_directory_that_lands_on_the_input_fails_loudly(self, tmp_path):
+        """`--out` の宛先が入力の代表 path と同じになる指定は fail loudly（W-E3-7）。
+
+        後片付けは宛先基準で走るので、そのまま進むと「入力は読むだけ」という契約が破れ、
+        実適用の前に確かめるつもりの呼び出しが黙ってインプレースの詰め替えになる。
+        """
+        series = tmp_path / "series"
+        path = split_component(series, ir_container())
+        before = listing(series)
+
+        with pytest.raises(repack.RepackError, match="入力の代表 path と同じ") as error:
+            repack.repack_component(path, series)
+
+        # 診断は宛先 path を綴る（どの綴りが畳まれたかが呼び手から見えないと直せない）。
+        assert str(series / COMPONENT) in str(error.value)
+        # 入力側は 1 バイトも動かない（一時ファイル `.partial` も残らない）。
+        assert listing(series) == before
+
+    def test_a_relative_spelling_of_the_input_directory_is_caught_as_well(self, tmp_path):
+        """宛先の綴りが違っても指すものが同じなら同じ（比較は解決後の path で行う）。"""
+        series = tmp_path / "series"
+        path = legacy_single(series, ir_container())
+        before = listing(series)
+
+        with pytest.raises(repack.RepackError, match="入力の代表 path と同じ"):
+            repack.repack_component(path, series / "." / ".." / series.name)
+
+        assert listing(series) == before
 
     def test_two_inputs_that_land_on_the_same_name_fail_loudly(self, tmp_path):
         """`--out` は宛先を 1 ディレクトリへ畳むので、同名のコンポーネントは共存できない。"""

@@ -102,12 +102,26 @@ def _download_size(size: int) -> str:
 
     生バイトは併記しない。ここで読み手が決めたいのは「この回線とこのディスクで現実的か」の
     1 点で、per-file の正確な値は `karume.json` が持つ（その所在は表の注記が指す）。
+
+    MUST: 単位は**丸めた後**の値で選び直す。丸める前に選ぶと、繰り上がる帯（1023.5 MiB 以上
+    1 GiB 未満など）で `1024 MiB` という有効 3 桁でも単位でもない綴りが出る。繰り上がりの
+    閾値は 1000 ではなく **1 段上の単位のちょうど 1**（= 1024）— `1000 MiB` は MiB として
+    正しい綴りで、上げると「1 単位未満」の `0.977 GiB` になる。
     """
-    for unit, scale in _UNITS:
-        if size >= scale:
-            value = size / scale
-            return f"{value:.{max(0, 3 - len(str(int(value))))}f} {unit}"
+    for index, (unit, scale) in enumerate(_UNITS):
+        if size < scale:
+            continue
+        spelled = _significant(size / scale)
+        if float(spelled) >= 1024 and index > 0:
+            unit, scale = _UNITS[index - 1]
+            spelled = _significant(size / scale)
+        return f"{spelled} {unit}"
     return f"{size:,} B"
+
+
+def _significant(value: float) -> str:
+    """有効 3 桁の綴り（整数部が 3 桁を超える帯は小数を持たない）。"""
+    return f"{value:.{max(0, 3 - len(str(int(value))))}f}"
 
 
 def _is_shared(ref: Mapping[str, Any]) -> bool:

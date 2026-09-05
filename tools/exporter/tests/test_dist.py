@@ -57,10 +57,11 @@ from karume.dist import (
     preprocessor_channels,
     resolve_card_renderer,
     resolve_external_components,
+    safetensors_header,
     verify_dist,
 )
 from karume.ir import IR_METADATA_KEY
-from karume.shards import shard_name
+from karume.shards import parse_piece_key, shard_name
 
 
 def _write_series(root: Path, payloads: Sequence[bytes], name: str = "model.safetensors") -> Path:
@@ -283,6 +284,44 @@ class TestShardDeclaration:
         self._rewrite_weights(out_dir, {"shards": shards})
         with pytest.raises(DistError, match=f"1〜{MAX_SHARDS} 要素の配列でない"):
             verify_dist(out_dir)
+
+
+class TestDtypeLabelVocabulary:
+    """weights の dtype ラベルは runtime の**格納 dtype 語彙**の内側
+    （{@link karume.dist.STORAGE_DTYPE_LABELS}）。
+
+    ラベルは manifest の自由キーで hub も文字列としか見ないが、モデルカードは
+    「`I4` は公式 safetensors ライブラリで開けない」注記を**ラベルの綴り**で出すか出さないか
+    決める（`modelcard.quants`）。語彙を縛らないと、i4 を含む配布形をラベル `w4` で綴った
+    家族で注記が黙って消え、カード自身の「ラベルは格納 dtype 語彙」という主張も裏づけを失う。
+    """
+
+    def _distribution(self, tmp_path: Path, label: str) -> Path:
+        """据わった配布形の manifest だけを `label` の dtype 席へ書き換えて返す。"""
+        out_dir = tmp_path / "models" / "labelled"
+        assemble_family([_synthetic_plan("A", "w/model.safetensors", b"weights-A")], out_dir, "A")
+        manifest = json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+        model = manifest["models"]["A"]
+        model["weights"]["w"] = {label: model["weights"]["w"]["f16"]}
+        model["quants"]["f16"]["weights"]["w"] = label
+        (out_dir / MANIFEST_FILENAME).write_text(
+            json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+        return out_dir
+
+    def test_it_refuses_a_label_outside_the_storage_dtype_vocabulary(self, tmp_path: Path) -> None:
+        """席名を dtype ラベルへ持ち込む綴り（`w4`）は fail loudly — 許可語彙を文言に出す。"""
+        out_dir = self._distribution(tmp_path, "w4")
+
+        with pytest.raises(DistError, match="dtype ラベル 'w4'") as error:
+            verify_dist(out_dir)
+        assert "'i4'" in str(error.value)
+
+    def test_it_accepts_the_packed_int4_label(self, tmp_path: Path) -> None:
+        """`i4` は語彙の内側（カード側の i4 注記の pin と対になる綴り）。"""
+        out_dir = self._distribution(tmp_path, "i4")
+
+        assert verify_dist(out_dir) == {"A/w/model.safetensors": len(b"weights-A")}
 
 
 class TestPlanGates:
@@ -1347,15 +1386,19 @@ class TestRequiredLimits:
     #: フィクスチャの最大テンソル = linear 重み 4×32 の f32 = 512 バイト（`ir_fixtures`）。
     _LARGEST_TENSOR: ClassVar[int] = 512
 
+    #: 上の 512 バイトの重み（1 行 128 バイト）を **2 piece** へ割る書き手容量（ADR 0090）。
+    _PIECE_CAPACITY: ClassVar[int] = 256
+
     def _plan(
         self,
         series: Path,
         *,
         pipeline_config: Mapping[str, Any] | None = None,
         quant: Mapping[str, Any] | None = None,
+        capacity: int | None = None,
     ) -> ModelPlan:
         """1 役だけの計画（weights の席は正当な IR コンテナ = 導出の入口）。"""
-        source = _write_series(series, ir_container(mark="w"))
+        source = _write_series(series, ir_container(mark="w", capacity=capacity))
         return ModelPlan(
             name="A",
             pipeline="anima/1",
@@ -1400,6 +1443,41 @@ class TestRequiredLimits:
             (tmp_path / "models" / "limits" / MANIFEST_FILENAME).read_text(encoding="utf-8")
         )
         assert written["models"]["A"]["quants"]["f16"]["requiredLimits"] == {
+            "maxBufferSize": self._LARGEST_TENSOR,
+            "maxStorageBufferBindingSize": self._LARGEST_TENSOR,
+        }
+
+    def test_a_tensor_split_across_shards_is_baked_as_its_whole_parent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """分割テンソル（ADR 0090 決定 1）の需要は**親の全長**（GPU は piece を知らない）。
+
+        導出は全 shard のヘッダを 1 枚へ畳んでから最大を採る（`dist.component_demand_bytes`）。
+        shard ごとに最大を採る形へ退化すると、ここは断片 1 本ぶん（256 バイト）になり
+        `maxBufferSize` の欄が消える — 「宣言は満たすのに `createSession` で落ちる」形。
+        対照は直上の {@link test_it_bakes_the_largest_tensor_of_the_container}（piece ゼロの
+        同じ系列でも同じ 512 が出る）。
+        """
+        monkeypatch.setattr(
+            limits,
+            "WEBGPU_DEFAULT_LIMITS",
+            {"maxBufferSize": 400, "maxStorageBufferBindingSize": 200},
+        )
+        out_dir = tmp_path / "models" / "limits"
+        plan = self._plan(tmp_path / "series", capacity=self._PIECE_CAPACITY)
+
+        manifest = self._assemble(tmp_path, plan)
+
+        # 被験体が本当に割れていること — 割れなかった日に主張が黙って恒真化しないための観測。
+        entry = manifest["models"]["A"]["weights"]["w"]["f16"]
+        pieces = [
+            name
+            for ref in entry["shards"]
+            for name in safetensors_header(out_dir / ref["path"])
+            if parse_piece_key(name) is not None
+        ]
+        assert len(pieces) == 2
+        assert manifest["models"]["A"]["quants"]["f16"]["requiredLimits"] == {
             "maxBufferSize": self._LARGEST_TENSOR,
             "maxStorageBufferBindingSize": self._LARGEST_TENSOR,
         }

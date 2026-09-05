@@ -86,6 +86,59 @@ class TestRequiredLimitsSelection:
             required_limits(-1)
 
 
+class TestWhatTheDeclarationDoesNotCover:
+    """宣言が保証するのは**常駐分**（格納テンソルと state スロット）だけ — 中間は含まない。
+
+    規則と理由の正本は `karume.limits` のモジュール docstring 冒頭の MUST。融合後の実需要は
+    device が実際に granted した limit に依存する（行ブロック化の刻みがそこで決まる）ので
+    配布形からは原理的に決まらず、融合**前**のノード出力の最大を焼くと「行ブロックで走る
+    デバイス」を取得の前に誤って拒否する。中間が上限を超える形は Session 構築時の実行時検査
+    が受ける。
+
+    ここは 2026-09-04 の裁定（「常駐分だけ」）**そのもの**を名乗るテスト — 逆へ倒す（中間も
+    数える）なら、下の期待値が `{}` から両上限入りへ変わる。
+    """
+
+    #: 重みは 1 本 1 MiB（既定の内側）。
+    _WEIGHT_BYTES: ClassVar[int] = 1024 * 1024
+    #: 中間ノード出力の宣言 shape（f32 で 960 MiB = binding 既定の 7.5 倍・birefnet 1024² の形）。
+    _INTERMEDIATE_SHAPE: ClassVar[list[int]] = [1, 240, 1024, 1024]
+
+    def test_a_graph_whose_intermediates_dwarf_its_weights_declares_nothing(self) -> None:
+        """重みが既定の内側なら、ノード出力が既定の 7.5 倍でも欄は生えない。"""
+        header = {
+            "w0": _tensor(0, self._WEIGHT_BYTES),
+            "w1": _tensor(self._WEIGHT_BYTES, 2 * self._WEIGHT_BYTES),
+        }
+        graph = {
+            "values": {"cat": {"dtype": "f32", "shape": self._INTERMEDIATE_SHAPE}},
+            "nodes": [{"op": "cat", "ins": ["w0", "w1"], "outs": ["cat"], "attrs": {}}],
+        }
+
+        demand = max(
+            max_tensor_payload(header, "where"),
+            max_state_slot_bytes(graph, {}, "where"),
+        )
+
+        assert demand == self._WEIGHT_BYTES
+        assert required_limits(demand) == {}
+
+    def test_the_same_number_would_be_declared_if_it_came_from_a_stored_tensor(self) -> None:
+        """恒真化の門 — 落としているのは「値が小さいから」ではなく「入口に無いから」。
+
+        同じバイト数が**格納**テンソルとして現れれば両欄とも焼かれる。上のケースが `{}` に
+        なるのは、ノード出力が需要の入口（ヘッダと state 宣言）のどちらにも居ないため。
+        """
+        intermediate = 240 * 1024 * 1024 * 4
+
+        assert intermediate == 960 * 1024 * 1024
+        assert intermediate > _BUFFER
+        assert required_limits(intermediate) == {
+            "maxBufferSize": intermediate,
+            "maxStorageBufferBindingSize": intermediate,
+        }
+
+
 class TestTensorPayloadDemand:
     """需要の 1 本目 — **格納 payload そのままの**最大テンソル。"""
 

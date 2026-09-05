@@ -76,6 +76,15 @@ class TestTheByteLimit:
         assert SHARD_DATA_CAPACITY == SHARD_BYTE_LIMIT - SHARD_HEADER_ALLOWANCE
         assert SHARD_DATA_CAPACITY < SHARD_BYTE_LIMIT
 
+    def test_the_shard_count_ceiling_matches_the_reader(self) -> None:
+        """1 dtype エントリの shard 本数の上限は hub の `MAX_SHARDS` と**同値**。
+
+        焼く側が先に落とすための値なので（`karume.dist` はこれを import して manifest 検査に
+        使う）、片方だけが動くと「書けるが読めない」または「読めるが焼けない」配布形が生まれる。
+        綴りの正本は `packages/hub/src/manifest.ts` の `MAX_SHARDS`。
+        """
+        assert MAX_SHARDS == 1024
+
     def test_it_leaves_room_under_the_single_arraybuffer_ceiling(self) -> None:
         """Chromium の単一 `ArrayBuffer` 上限（docs/limitations）を割るのが必要条件。
 
