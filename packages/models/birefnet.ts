@@ -16,6 +16,7 @@
  */
 
 export { BirefnetPipeline } from "./src/birefnet/pipeline.ts";
+export { BIREFNET_SOURCES } from "./src/birefnet/config.ts";
 export type {
   AlphaMatte,
   BirefnetAssets,

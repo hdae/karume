@@ -38,9 +38,51 @@
  * 走ることはない。
  */
 
+import type { HubRepoRef } from "@karume/hub";
+
 /** `pipeline` の契約名と、この実装が受け付ける major（ADR 0038 §1）。 */
 export const BIREFNET_PIPELINE_NAME = "birefnet";
 export const BIREFNET_PIPELINE_MAJOR = 1;
+
+/**
+ * BiRefNet 系の**公開配布リポ対応表**（ADR 0092 — 家族 1 つにつき 1 表・**既定の席は無い**）。
+ * 値は**このパッケージ版が検証した取得元**（pin 済み commit SHA — ADR 0073）。
+ *
+ * キーは HF リポ名の basename から `karume-` を落とした綴り（`"karume-" + key` がリポ名の
+ * basename に戻る — この不変条件は `tests/sources_test.ts` の門が見る）。checkpoint ごとに
+ * 1 リポで、各リポに**解像度ごとの別グラフ**が 2 モデル同居する（ADR 0092 決定 9）:
+ *
+ * - `"birefnet-hr"` = `hdae/karume-birefnet-hr`（上流 BiRefNet_HR — モデル `"1024"` / `"2048"`・
+ *   既定 `"1024"`）
+ * - `"lucida"` = `hdae/karume-lucida`（BiRefNet_HR の派生 Lucida — 同じ 2 モデル・既定 `"1024"`）
+ *
+ * 1 リポ = 2 モデルなので、2048² を使うときは
+ * `fromPretrained(BIREFNET_SOURCES["birefnet-hr"], { model: "2048" })` と綴る
+ * （`BirefnetPipelineOptions.model` — `./pipeline.ts`）。モデル名は入力解像度そのもので、
+ * 前処理の resize 先は `pipelineConfig.imageWidth` / `imageHeight` がモデルごとに宣言する。
+ *
+ * **パッケージ版に合わせて自動追従したい場合のオプトイン**として渡す — 再現性を自分で
+ * 固定したい場合は、この表ではなく自分の `{ repo, revision }` を書く（`fromPretrained` に
+ * 既定は無い）。
+ *
+ * MUST: revision は commit SHA で固定する — ブランチ・タグは配布側で付け替えられるので、
+ * 公開済みのこのパッケージが読むバイト列がネットワーク側の都合で黙って変わる（回復不能側の
+ * 事故）。SHA 指定は revision 解決要求そのものを消すため、完全キャッシュ時のオフライン起動も
+ * 同時に成立する（ADR 0038）。main 追従が要る利用者は
+ * `{ ...BIREFNET_SOURCES["birefnet-hr"], revision: "main" }` を明示的に選ぶ。
+ */
+// NOTE: revision はリリース手順書（docs/release-runbook.md）§3 で、アップロード後の main の
+// SHA に更新する（ADR 0073 決定 3 の維持義務を継承 — 手書き + 手順書ゲート）。
+export const BIREFNET_SOURCES = {
+  "birefnet-hr": {
+    repo: "hdae/karume-birefnet-hr",
+    revision: "2d5e77046303cf97e3d1bb9910a7f227dbf59819",
+  },
+  "lucida": {
+    repo: "hdae/karume-lucida",
+    revision: "dcfea2eb9733fba19573abc85e728910099afc31",
+  },
+} as const satisfies Record<string, HubRepoRef>;
 
 const ROOT_KEYS: readonly string[] = [
   "imageWidth",

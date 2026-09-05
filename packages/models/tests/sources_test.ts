@@ -16,8 +16,8 @@
 // 綴りの正しさを見るのは①だけ（③は期待 URL をエントリから導くので、値が間違っていても通る）。
 // 2 本セットで「正しい repo が / 実際に使われる」を挟む。
 //
-// 公開リポを持たないファミリ（birefnet / vowel-detector）は表自体を持たないので、この門の
-// 対象外（ADR 0073 決定 1）。
+// 公開リポを持たないファミリ（vowel-detector）は表自体を持たないので、この門の対象外
+// （ADR 0073 決定 1）。
 
 import { assert, assertEquals, assertMatch, assertRejects } from "@std/assert";
 import type { HubRepoRef } from "@karume/hub";
@@ -27,6 +27,7 @@ import { SBV2_SOURCES } from "../src/sbv2/config.ts";
 import { GEMMA4_SOURCES } from "../src/gemma/config.ts";
 import { SIGLIP2_SOURCES } from "../src/siglip2/config.ts";
 import { DEPTH_ANYTHING_SOURCES } from "../src/depth-anything/config.ts";
+import { BIREFNET_SOURCES } from "../src/birefnet/config.ts";
 import { KARUME_SOURCES } from "../src/sources.ts";
 import { AnimaPipeline } from "../src/anima/pipeline.ts";
 import { IrodoriPipeline } from "../src/irodori/pipeline.ts";
@@ -34,6 +35,7 @@ import { Sbv2Pipeline } from "../src/sbv2/pipeline.ts";
 import { Gemma4Pipeline } from "../src/gemma/pipeline.ts";
 import { Siglip2Pipeline } from "../src/siglip2/pipeline.ts";
 import { DepthAnythingPipeline } from "../src/depth-anything/pipeline.ts";
+import { BirefnetPipeline } from "../src/birefnet/pipeline.ts";
 import { MemoryCacheStorage } from "./helpers/memory-cache.ts";
 
 /** hub が解決要求を出さずに済む形（`@hdae/fetch-cache` の `isCommitSha` と同じ綴り）。 */
@@ -119,6 +121,14 @@ const FAMILIES: readonly Family[] = [
     keys: ["depth-anything-v2"],
     load: (ref, options) => DepthAnythingPipeline.fromPretrained(ref, options),
   },
+  {
+    name: "BIREFNET_SOURCES",
+    sources: BIREFNET_SOURCES,
+    // checkpoint ごとに 1 リポ（派生 Lucida は別リポ — ADR 0092 決定 1）。各リポには解像度ごとの
+    // 別グラフが "1024" / "2048" の 2 モデルとして同居する（決定 9）。
+    keys: ["birefnet-hr", "lucida"],
+    load: (ref, options) => BirefnetPipeline.fromPretrained(ref, options),
+  },
 ];
 
 // キーは repo 名から機械導出される（`"karume-" + key` === basename）ので、①の門は「キーと repo が
@@ -133,7 +143,7 @@ for (const { name, sources, keys } of FAMILIES) {
 
 // 家族と公開リポの総数も名指しで置く。リポの新設（波 b の birefnet-hr / lucida）はここを
 // 落とすので、`KARUME_SOURCES` への畳み込み漏れが黙って通らない。
-Deno.test("取得元対応表を持つのは 6 家族・公開リポは 8 本", () => {
+Deno.test("取得元対応表を持つのは 7 家族・公開リポは 10 本", () => {
   assertEquals(FAMILIES.map(({ name }) => name), [
     "ANIMA_SOURCES",
     "IRODORI_SOURCES",
@@ -141,8 +151,9 @@ Deno.test("取得元対応表を持つのは 6 家族・公開リポは 8 本", 
     "GEMMA4_SOURCES",
     "SIGLIP2_SOURCES",
     "DEPTH_ANYTHING_SOURCES",
+    "BIREFNET_SOURCES",
   ]);
-  assertEquals(Object.keys(KARUME_SOURCES).length, 8);
+  assertEquals(Object.keys(KARUME_SOURCES).length, 10);
 });
 
 for (const { name, sources } of FAMILIES) {
