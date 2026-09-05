@@ -1463,8 +1463,19 @@ def verify_shards(paths: Sequence[str | Path]) -> IrGraph:
         channel_axes = weight_channel_axes(graph)
     except EmitError as cause:
         raise ContainerError(str(cause)) from cause
+    # MUST: 1 実体 1 initializer。2 本の initializer が同じテンソルを指す形は IR v1 に重み tying
+    # の語彙が無い以上取り違えでしかなく、runtime（container.ts の createShardValidator）も
+    # 同じ理由で落とす — こちらが通すと「karume verify は緑・ロードだけ落ちる」が復活する。
+    entity_owner: dict[str, str] = {}
     for name, initializer in graph.initializers.items():
         where = f"initializer '{name}'"
+        earlier = entity_owner.get(initializer.tensor)
+        if earlier is not None:
+            raise ContainerError(
+                f"{where}: 実体テンソル '{initializer.tensor}' が initializer '{earlier}' と"
+                "共有されている（1 実体 1 initializer MUST）"
+            )
+        entity_owner[initializer.tensor] = name
         view = stored.get(initializer.tensor)
         if view is None:
             raise ContainerError(f"{where}: テンソル '{initializer.tensor}' がファイルに無い")

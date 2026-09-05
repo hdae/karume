@@ -2530,3 +2530,29 @@ class TestTensorPieces:
             ContainerError, match=r"参照されないテンソル \(1\): enc.w#00003-of-00002"
         ):
             verify_model(path)
+
+
+class TestEntitySharing:
+    """1 実体 1 initializer（runtime の `createShardValidator` と鏡像 — W-R3-1）。
+
+    2 本の initializer が同じテンソルを指す形は IR v1 に重み tying の語彙が無い以上取り違えで
+    しかなく、通すと `karume verify` は緑のままロードだけが落ちる（verify_shards の MUST）。
+    """
+
+    def test_two_initializers_sharing_one_tensor_are_rejected(self, tmp_path):
+        graph = base_graph()
+        graph["initializers"]["w2"] = {"tensor": "enc.w", "storage": {"dtype": "f32"}}
+        graph["values"]["w2"] = {"dtype": "f32", "shape": [4]}
+        path = write_container(tmp_path / "m.safetensors", graph, {"enc.w": torch.ones(4)})
+        with pytest.raises(ContainerError, match="'enc.w' が initializer 'w' と共有されている"):
+            verify_model(path)
+
+    def test_distinct_tensors_still_pass(self, tmp_path):
+        """対照: 実体が別なら 2 本でも通る（門が広すぎない）。"""
+        graph = base_graph()
+        graph["initializers"]["w2"] = {"tensor": "enc.w2", "storage": {"dtype": "f32"}}
+        graph["values"]["w2"] = {"dtype": "f32", "shape": [4]}
+        path = write_container(
+            tmp_path / "m.safetensors", graph, {"enc.w": torch.ones(4), "enc.w2": torch.ones(4)}
+        )
+        assert verify_model(path).initializers["w2"].tensor == "enc.w2"
