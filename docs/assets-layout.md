@@ -70,16 +70,21 @@ uv run python dist.py --pipeline gemma4              # → models/karume-gemma4/
 uv run python dist.py --pipeline siglip2 \
     --model base --model so400m \
     --out ../../models/karume-siglip2                # 1 リポ 2 モデル（既定 base — ADR 0092 決定 8）
-uv run python dist.py --pipeline birefnet            # → models/karume-birefnet-hr/
-uv run python dist.py --pipeline lucida              # → models/karume-lucida/（別モデル = 別リポ）
+uv run python dist.py --pipeline birefnet \
+    --model 1024 --model 2048 \
+    --out ../../models/karume-birefnet-hr            # 1 リポ 2 モデル（モデル名 = 解像度・既定 1024 — ADR 0092 決定 9）
+uv run python dist.py --pipeline lucida \
+    --model 1024 --model 2048 \
+    --out ../../models/karume-lucida                 # 派生 = 別リポ・同じ 2 モデル
 uv run python dist.py --pipeline depth-anything      # → models/karume-depth-anything-v2/
 uv run python dist.py --pipeline vowel-detector      # → models/karume-vowel-detector/
 ```
 
 - **初回公開前なのは `birefnet` / `lucida` / `vowel-detector` の 3 コマンドぶん**（siglip2 と
-  depth-anything は 0.9.0 で初公開済み・後回しの裁定は [backlog](backlog.md)）。
+  depth-anything は 0.9.0 で初公開済み。birefnet / lucida は 2026-09-05 に 1024² + 2048² の
+  2 モデル形で組み立て済み — 公開手順は [release-runbook](release-runbook.md) §2 / §3）。
   `karume-sbv2-fn` はミラーを常設しない別扱い（下の bullet）。リポ名と同居の規則は ADR
-  [0092](decisions/0092-distribution-repos-and-sources.md) 決定 1 / 2 / 8 が正本。
+  [0092](decisions/0092-distribution-repos-and-sources.md) 決定 1 / 2 / 8 / 9 が正本。
 - 上流ライセンス（siglip2 = Apache-2.0 / birefnet 系 = MIT / depth-anything small =
   Apache-2.0）に応じて `LICENSE.md` / `NOTICE.md` をリポ直下へ同梱する（決定 7 — 公開状態に
   依らず効く常設ルール）。

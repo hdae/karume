@@ -233,20 +233,21 @@ implicit GEMM（[decisions/0024](decisions/0024-conv2d-implicit-gemm.md)）は 1
 [2026-08-03-dynres-vae-tiling](research/2026-08-03-dynres-vae-tiling.md)）side で行う想定。
 枚数の固定は `packages/runtime/tests/codegen_dispatch_test.ts`。
 
-## BiRefNet 系の配布形は 1024² だけ（2048² は実行できるが公開裁定前 — 組み立てが拒否する）
+## BiRefNet 系の配布形は 1024² と 2048² の 2 モデル（モデル名 = 解像度・既定 1024²）
 
-`karume dist --pipeline birefnet` が受け付けるのは入力 `[1,3,1024,1024]` で焼かれた系列だけで、
-それ以外の解像度は `DistError` で落ちる（`tools/export-recipes/birefnet/distribution.py` の
-`BIREFNET_RESOLUTION`）。export 段（`python -m birefnet.export --resolution 2048`）は通るので、
-系列を作ること自体はできる。
+`karume dist --pipeline birefnet` は `--model 1024` / `--model 2048` の 2 モデルを 1 リポに
+畳む（ADR [0092](decisions/0092-distribution-repos-and-sources.md) 決定 9 — モデル名が名乗る
+解像度と系列の入力寸法が食い違えば `DistError`）。他の解像度は配らない（export 段
+`python -m birefnet.export --resolution <64 の倍数>` は通るので、系列を作ること自体はできる —
+配るには受理集合 `BIREFNET_MODELS` と実測の追加が要る）。
 
 2048² は **2026-09-05 に実行段が通るようになった**（それまでは decoder 末尾の bilinear upsample 出力
 `[1,192,2048,2048]` 3.2GB と cat 出力 `[1,240,2048,2048]` 4.03GB の 2 本が NVIDIA の束縛上限 2GiB を
 超え、Session の計画時 preflight〈ADR 0093 決定 5〉がノード名つきで落としていた）。解消したのは
 recipe 側のパッチ ⑨（`birefnet.patch` — 1×1 conv と bilinear upsample の順序交換で `cat` を消す）と
 runtime 側の静的 liveness パッキング（ADR 0093）の組で、実測（RTX 3080 Ti 12 GiB）は重み 1,116MiB +
-中間の領域 2,948MiB（生存ピーク 2,560MiB）= **GPU 総確保 ≈ 4.1GiB・run 7.5〜8.6 s**。**配らないのは
-公開の裁定が未了だから**（1024² と同居させるか・既定をどちらにするか — backlog now 2 の ④）。
+中間の領域 2,948MiB（生存ピーク 2,560MiB）= **GPU 総確保 ≈ 4.1GiB・run 7.5〜8.6 s**。同じ日に
+1024² との同居（既定 1024²）で配布形へ入った。
 （かつては「上の conv2d dispatch 上限に decoder の 1×1 conv が当たる」も理由に挙げていたが、
 既定幾何が M128N128 になった `d0afc22` 以降は 2048² の n タイルが 32,768 で上限の内側 —
 残る理由は資源側だけだった。）

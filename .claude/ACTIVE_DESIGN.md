@@ -23,7 +23,9 @@
 - **BiRefNet 2048² 工事 A / B / C は消化（2026-09-05）** — ADR
   [0093](../docs/decisions/0093-transient-liveness-packing.md) を runtime へ結線（B + C）し、recipe の
   パッチ ⑨（A）で decoder 末尾の巨大中間を消した。実測: 1024² 中間 6,283 → 749 MiB / 2048² 中間
-  2,948 MiB・総確保 ≈ 4.1 GiB・run 7.5〜8.6 s。**残 = ④ 配布門の解除と 2048² 公開の裁定**（backlog now 2）。
+  2,948 MiB・総確保 ≈ 4.1 GiB・run 7.5〜8.6 s。配布形は 1 リポ 2 モデル（モデル名 = 解像度・既定
+  1024 — ADR 0092 決定 9）で `models/karume-birefnet-hr` / `models/karume-lucida` を組み立て済み。
+  **残 = 公開作業（runbook §2 / §3・ユーザー）**。
 - **可変 capacity（[ADR 0091](../docs/decisions/0091-gemma4-host-rope-variable-capacity.md)）の
   意図的な現状 4 点** — 欠落に見えるが設計どおり: ①RoPE 表を焼いた旧配布形は読めない
   ②`GreedySpec` / `GenerationProgramSpec` は `positionIds` を持たない（位置の唯一の供給口は

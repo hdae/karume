@@ -135,6 +135,19 @@ backlog parked の「export-recipes の別リポジトリ分離」は本決定�
 `karume-siglip2` に base と so400m を同居させる（決定 1 の家族 1 リポがそのまま掛かる）。
 これに伴い、siglip2 recipe の「1 モデル 1 リポ」制約は**撤回**する。
 
+### 9. BiRefNet 系は 1 リポ 2 モデルで、モデル名 = 解像度（追記 2026-09-05・ユーザー裁定）
+
+BiRefNet は解像度ごとに**別グラフ**（shifted-window マスクと padding 定数が解像度依存 —
+`birefnet/export.py` の「解像度軸」）なので、同じ checkpoint の 1024² と 2048² は決定 8 と同じ
+「1 リポ 2 モデル」の器で同居させる。**manifest のモデル名は解像度そのもの `"1024"` / `"2048"`**
+（既定 `"1024"`・正方形しか焼けないので `x` は付けない）。リポは決定 1 / 2 のとおり 2 本 —
+`karume-birefnet-hr`（上流 BiRefNet_HR）と `karume-lucida`（派生）— で、`karume-birefnet` は
+無印 BiRefNet 用に空けておく。利用側は
+`fromPretrained(BIREFNET_SOURCES["birefnet-hr"], { model: "2048" })` と綴る（TS 側の
+`BirefnetPipeline` は `model` / `defaultModel` を既に読む — 変更なし）。
+2048² が配れるようになった根拠は recipe パッチ ⑨ + ADR
+[0093](0093-transient-liveness-packing.md)（実測は同 ADR の Consequences）。
+
 ## Consequences
 
 - **0.9.0 の breaking**: `*_CURRENT` 6 本が消え `<FAMILY>_SOURCES` + `KARUME_SOURCES` になる。

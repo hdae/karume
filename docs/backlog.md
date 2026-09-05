@@ -20,10 +20,11 @@
    再採取済み）/ B（静的 liveness パッキング — runtime へ結線済み）/ C（上限 preflight — B と同じ
    計画関数）は **2026-09-05 に消化**。実測 = 1024² の中間 6,283 → 749 MiB（run 1.8 s）・2048² の
    中間 2,948 MiB・総確保 ≈ 4.1 GiB・run 7.5〜8.6 s（RTX 3080 Ti — ADR 0093 Consequences）。
-   **残 ④** = 配布門 `BIREFNET_RESOLUTION`（`tools/export-recipes/birefnet/distribution.py`）を
-   2048² へ開けるか（1024² と 2048² を 1 リポに同居させるか・既定をどちらにするか）と
-   `karume-birefnet-hr` の公開裁定。開けるなら e2e の `SERIES`（`packages/runtime/tests/e2e_birefnet_test.ts`）
-   に 2048² を足して tolerance を実測で固定する。
+   **④ も消化（2026-09-05 ユーザー裁定）**: 配布形は 1 リポ 2 モデル（モデル名 = 解像度・既定
+   `"1024"` — ADR [0092](decisions/0092-distribution-repos-and-sources.md) 決定 9）で
+   `models/karume-birefnet-hr` と `models/karume-lucida` を組み立て済み、e2e `SERIES` に 2048² 2 本を
+   実測 tolerance つきで追加済み。**残るのは公開作業だけ**（[release-runbook](release-runbook.md)
+   §2 のアップロード → §3 の `BIREFNET_SOURCES` 新設〈キー `birefnet-hr` / `lucida`〉— ユーザー実施）。
 
 **残件**:
 
