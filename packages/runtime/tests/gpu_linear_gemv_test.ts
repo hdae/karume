@@ -1,4 +1,4 @@
-// linear の **GEMV 族**（M=1 × 重み i4 — ADR 0082）の実 GPU 門。
+// linear の **GEMV 族**（M=1 × 重み i4 / i8 — ADR 0082 / perf-ledger K-16）の実 GPU 門。
 //
 // この族の存在理由は速度だけで、**値は既定経路（src/kernels/gemm.ts の linear）と 1 ビットも
 // 違ってはならない**（ADR 0022 決定 3 が自由と認めるのは担当割りだけ）。よって見るのは 3 つ:
@@ -19,9 +19,15 @@
 //   - `n % 32 != 0` — 最終 workgroup が部分的（`col >= dims.n` の早期 return が効く）
 //   - `units % 4 != 0`（`units = k / 32`）— 先読み 4 本のループが端数を残す
 //   - `units < 4` — 先読みループが**一度も回らず**端数ループだけで縮約が終わる
-// MUST: 重みは **group ごとに大きさを変える**（scale が全 group で同じだと、group scale の
-// 添字〈`(unit · 32) >> shift`〉の取り違えが一切値に出ない — gpu_i4_weights_test.ts と同じ罠）。
-// MUST: 隣接要素の符号を交互にする（pack の上下 nibble の取り違えは対称パターンでは値が合う）。
+// MUST: 重みは **scale の単位ごとに大きさを変える**（i4 = group ごと・i8 = 出力チャネルごと）。
+// 全単位で同じ scale だと、添字〈i4 は `(unit · 32) >> shift`・i8 は `wscale[col]`〉の
+// 取り違えが一切値に出ない（gpu_i4_weights_test.ts / gpu_i8_weights_test.ts と同じ罠）。
+// MUST: 隣接要素の符号を交互にする（i4 は pack の上下 nibble・i8 は語内レーンの取り違えが、
+// 対称パターンでは値の上で打ち消し合う）。
+//
+// 格納 2 種は**同じ 3 観点を別々に**踏む（i4 = 1 語 32 要素 × 語ごとの group scale /
+// i8 = 1 語 16 要素 × 縮約の外で 1 度だけ引くチャネル scale — 生成の別枝なので片方の緑は
+// もう片方の根拠にならない）。i8 の `units` は `k / 16` で、端の 3 条件は同じ意味を持つ。
 //
 // 検出できる変異（設計時に確認した故障注入 — 2026-08-31）:
 // - group scale の shift を 1 段ずらす（`>> shift` → `>> shift+1`）→ 1 が落ちる
@@ -42,6 +48,7 @@ import { createSession, type Tensor } from "../src/runtime/executor.ts";
 import { buildSafetensors, f32Bytes, type GraphJson } from "./helpers/format.ts";
 import { fill, type FilledTensor } from "./helpers/graph.ts";
 import { quantizeI4 } from "./helpers/i4.ts";
+import { quantizeI8 } from "./helpers/i8.ts";
 import { GPU_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
 
 /**
@@ -135,16 +142,16 @@ type RunResult = {
   readonly keys: readonly string[];
 };
 
+/** 組み上げたモデル 1 本を走らせて出力と走ったキーを返す（格納 2 種で共有）。 */
 const runLinear = async (
   gpu: GpuContext,
-  testCase: GemvCase,
+  model: ArrayBuffer,
   m: number,
-  quantized: ReturnType<typeof quantizeI4>,
-  bias: FilledTensor,
+  k: number,
 ): Promise<RunResult> => {
-  const session = await createSession(gpu, openModel(linearI4Model(testCase, m, quantized, bias)));
+  const session = await createSession(gpu, openModel(model));
   try {
-    const output = (await session.run({ x: fill([m, testCase.k], XS) }))["y"];
+    const output = (await session.run({ x: fill([m, k], XS) }))["y"];
     const entries = session.diagnostics().lastRunTiming?.entries ?? [];
     return { output, keys: entries.map((entry) => entry.key) };
   } finally {
@@ -168,11 +175,11 @@ Deno.test({
         const bias = fill([n], BS);
         const quantized = quantizeI4(weight.data, weight.shape, groupSize);
 
-        const gemv = await runLinear(gpu, testCase, 1, quantized, bias);
+        const gemv = await runLinear(gpu, linearI4Model(testCase, 1, quantized, bias), 1, k);
         // 比較相手は M=2（既定の M16N16 幾何）。1 出力要素あたりの K 縮約順は M に依らないので
         // （ADR 0022 決定 3 — gpu_gemm_skinny_test.ts のバケット跨ぎ門が同じ命題を見ている）、
         // 先頭行が GEMV の全出力に対する参照になる。
-        const gemm = await runLinear(gpu, testCase, 2, quantized, bias);
+        const gemm = await runLinear(gpu, linearI4Model(testCase, 2, quantized, bias), 2, k);
 
         assertEquals(gemv.output.shape, [1, n], `${name}: 出力の形`);
         const actual = bits(gemv.output);
@@ -265,11 +272,232 @@ Deno.test({
         const weight = fill([n, k], weightAt(k, groupSize));
         const bias = fill([n], BS);
         const quantized = quantizeI4(weight.data, weight.shape, groupSize);
-        const { keys } = await runLinear(gpu, door.shape, door.m, quantized, bias);
+        const { keys } = await runLinear(
+          gpu,
+          linearI4Model(door.shape, door.m, quantized, bias),
+          door.m,
+          k,
+        );
         // MUST: 列挙が無い device では診断が空になる（キー検査は数値側の門に任せて素通り）。
         if (keys.length === 0) continue;
         const shown = keys.join(" / ");
-        const gemvKey = linearGemvKey(groupSize >= 32 ? groupSize : 32);
+        const gemvKey = linearGemvKey("i4", groupSize >= 32 ? groupSize : 32);
+        assertEquals(
+          keys.includes(gemvKey),
+          door.gemv,
+          `${door.name}: GEMV 族のキー（${gemvKey}）の有無が期待と違う（走った内訳: ${shown}）`,
+        );
+        if (!door.gemv) {
+          assert(
+            door.fallback !== undefined && keys.includes(door.fallback),
+            `${door.name}: 既定経路のキー ${door.fallback} で走っていない（内訳: ${shown}）`,
+          );
+        }
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+// ---------------------------------------------------------------------------
+// i8 格納（lm_head — perf-ledger K-16）。i4 と同じ 3 観点を、別枝の生成（1 語 16 要素・
+// scale は出力チャネルごと 1 本）に対して独立に踏む。
+// ---------------------------------------------------------------------------
+
+type GemvI8Case = {
+  readonly name: string;
+  readonly k: number;
+  readonly n: number;
+};
+
+/**
+ * 出力チャネルごとに振幅（= scale）が違い、隣接要素の符号が交互になる重み。
+ * MUST: チャネルで振幅を変える — 全チャネル同じ scale だと `wscale[col]` の添字取り違えが
+ * 一切値に出ない（i4 の group ごと MUST と同型の罠）。
+ */
+const weightAtI8 = (k: number) => (index: number): number => {
+  const row = Math.floor(index / k);
+  const base = (0.125 + (index % 11) * 0.5) * (index % 2 === 0 ? 1 : -1);
+  return base * (1 + (row % 7) * 0.5);
+};
+
+/**
+ * 形の選定。`units = k / 16`（重み語の本数）と `n % 32`（最終 workgroup の埋まり方）が
+ * 独立の軸で、本番形（n 262,144 × k 1,536 = units 96・n % 32 == 0）はどの端も踏まない。
+ * MUST: `n % 4 == 0`（門が v4 を要求する — recipe-builder の `#buildLinear`）。
+ */
+const I8_CASES: readonly GemvI8Case[] = [
+  // 端がどこにも無い基準形（units = 4 ちょうど・n は workgroup 2 枚ちょうど）
+  { name: "整除形 k64 n64", k: 64, n: 64 },
+  // units = 5 → 先読み 4 本の後に端数 1 本 / n = 100 は最終 workgroup が 4 列だけ
+  { name: "端数 units5 n100", k: 80, n: 100 },
+  // units = 6（端数 2 本）・n = 36 も最終 workgroup が部分的
+  { name: "端数 units6 n36", k: 96, n: 36 },
+  // units = 8（整除）・n = 68 は workgroup 2 枚 + 4 列
+  { name: "整除形 units8 n68", k: 128, n: 68 },
+  // units = 3 < 先読み 4 → 先読みループが一度も回らない（端数ループだけで縮約が終わる）
+  { name: "先読み不成立 units3 n4", k: 48, n: 4 },
+  // units = 7（端数 3 本）・n = 32 は workgroup ちょうど 1 枚
+  { name: "端数 units7 n32", k: 112, n: 32 },
+];
+
+/** `linear(x, w, b)` 1 本のグラフ（w は i8 + 出力チャネルごとの scale）。`m` だけが経路を分ける。 */
+const linearI8Model = (
+  testCase: GemvI8Case,
+  m: number,
+  quantized: ReturnType<typeof quantizeI8>,
+  bias: FilledTensor,
+): ArrayBuffer => {
+  const { k, n } = testCase;
+  const graph: GraphJson = {
+    format: "karume-ir",
+    version: 1,
+    requires: { ops: ["linear"] },
+    symbols: [],
+    inputs: [{ name: "x", dtype: "f32", shape: [m, k] }],
+    outputs: ["y"],
+    initializers: {
+      w: { tensor: "m.w", storage: { dtype: "i8", scale: "m.s" } },
+      b: { tensor: "m.b", storage: { dtype: "f32" } },
+    },
+    values: {
+      w: { dtype: "f32", shape: [n, k] },
+      b: { dtype: "f32", shape: [n] },
+      y: { dtype: "f32", shape: [m, n] },
+    },
+    nodes: [{ op: "linear", ins: ["x", "w", "b"], outs: ["y"], attrs: {} }],
+  };
+  return buildSafetensors(
+    [
+      { name: "m.w", dtype: "I8", shape: [n, k], data: quantized.bytes },
+      {
+        name: "m.s",
+        dtype: "F32",
+        shape: [...quantized.scaleShape],
+        data: f32Bytes([...quantized.scale]),
+      },
+      { name: "m.b", dtype: "F32", shape: [n], data: f32Bytes([...bias.data]) },
+    ],
+    { karume_ir: JSON.stringify(graph) },
+  );
+};
+
+Deno.test({
+  name: "M=1 の i8 linear は GEMV 族で走っても既定経路と 1 ビットも違わない（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    try {
+      for (const testCase of I8_CASES) {
+        const { name, k, n } = testCase;
+        const weight = fill([n, k], weightAtI8(k));
+        const bias = fill([n], BS);
+        // チャネル軸は 0（linear の重みは [n,k] — ADR 0019 / 0024 の MUST ④）。
+        const quantized = quantizeI8(weight.data, weight.shape, 0);
+
+        const gemv = await runLinear(gpu, linearI8Model(testCase, 1, quantized, bias), 1, k);
+        const gemm = await runLinear(gpu, linearI8Model(testCase, 2, quantized, bias), 2, k);
+
+        assertEquals(gemv.output.shape, [1, n], `${name}: 出力の形`);
+        const actual = bits(gemv.output);
+        const expected = bits(gemm.output);
+        for (let col = 0; col < n; col += 1) {
+          assert(
+            actual[col] === expected[col],
+            `${name}: 列 ${col} が既定経路と別ビット（0x${actual[col].toString(16)} vs ` +
+              `0x${expected[col].toString(16)} = ${gemv.output.data[col]} vs ` +
+              `${gemm.output.data[col]}）`,
+          );
+        }
+
+        // 「両経路が同じだけ壊れている」を排除する（比較相手が GEMV へ流れていれば 1 は恒真）。
+        const reference = applyReferenceOp(
+          "linear",
+          [
+            fill([1, k], XS) as RefTensor,
+            refTensor(weight.shape, quantized.values),
+            bias as RefTensor,
+          ],
+          {},
+          [1, n],
+        );
+        const report = compareTensors(gemv.output, reference, GEMM_TOLERANCE);
+        assertEquals(report.pass, true, `${name}: ${formatAllclose(report)}`);
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+/** 門（i8 側）1 件ぶんの期待キー。i8 は group を持たないので軸は M / k / n の 3 本。 */
+type DoorI8Case = {
+  readonly name: string;
+  readonly shape: GemvI8Case;
+  readonly m: number;
+  readonly gemv: boolean;
+  readonly fallback?: string;
+};
+
+/**
+ * MUST: 門の**各条件を 1 つずつだけ外した形**を並べる（i4 側と同じ規律）。
+ * `k % 16 != 0` は i8 固有の軸で、外すと 1 語 16 要素の縮約が行の末尾を黙って落とす。
+ */
+const DOOR_I8_CASES: readonly DoorI8Case[] = [
+  {
+    name: "M=1 × i8 × k%16 × v4",
+    shape: { name: "", k: 64, n: 64 },
+    m: 1,
+    gemv: true,
+  },
+  {
+    // 行数だけを外す（decode 以外は従来どおり）
+    name: "M=2（行数の条件だけ外す）",
+    shape: { name: "", k: 64, n: 64 },
+    m: 2,
+    gemv: false,
+    fallback: linearKey("i8", true, "f32", 2),
+  },
+  {
+    // 縮約の刻みだけを外す（k=68 は 4 の倍数なので v4 は立ったまま）
+    name: "k=68（k % 16 の条件だけ外す）",
+    shape: { name: "", k: 68, n: 64 },
+    m: 1,
+    gemv: false,
+    fallback: linearKey("i8", true, "f32", 1),
+  },
+  {
+    // v4 だけを外す（n % 4 != 0 — 既定のスカラ変種へ）
+    name: "n=33（v4 の条件だけ外す）",
+    shape: { name: "", k: 64, n: 33 },
+    m: 1,
+    gemv: false,
+    fallback: linearKey("i8", false, "f32", 1),
+  },
+];
+
+Deno.test({
+  name: "GEMV 族の門は M=1 × i8 × k%16 × v4 でだけ開く（実 GPU / 診断キー）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    const gemvKey = linearGemvKey("i8");
+    try {
+      for (const door of DOOR_I8_CASES) {
+        const { k, n } = door.shape;
+        const weight = fill([n, k], weightAtI8(k));
+        const bias = fill([n], BS);
+        const quantized = quantizeI8(weight.data, weight.shape, 0);
+        const { keys } = await runLinear(
+          gpu,
+          linearI8Model(door.shape, door.m, quantized, bias),
+          door.m,
+          k,
+        );
+        // MUST: 列挙が無い device では診断が空になる（キー検査は数値側の門に任せて素通り）。
+        if (keys.length === 0) continue;
+        const shown = keys.join(" / ");
         assertEquals(
           keys.includes(gemvKey),
           door.gemv,

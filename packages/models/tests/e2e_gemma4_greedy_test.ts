@@ -938,13 +938,18 @@ Deno.test({
         { context, queryLength: 1 },
       );
       const decodeCensus = assertStateCensus(session.diagnostics(), "decode");
-      // decode（M=1）の i4 linear 276 本が GEMV 族に乗ったこと（ADR 0082）。キー単位の門は
-      // gpu_linear_gemv_test — ここは実グラフの run が実際にその族で走ったことの検査で、
-      // 分岐述語が黙って狭まる退行（値は正しいまま速度だけ戻る）の検出線。
+      // decode（M=1）の linear 277 本が GEMV 族に乗ったこと（ADR 0082 — i4 276 本 +
+      // lm_head の i8 1 本〈perf-ledger K-16〉）。キー単位の門は gpu_linear_gemv_test —
+      // ここは実グラフの run が実際にその族で走ったことの検査で、分岐述語が黙って狭まる退行
+      // （値は正しいまま速度だけ戻る）の検出線。
       const gemvDispatches = (session.diagnostics().lastRunTiming?.entries ?? [])
         .filter((entry) => entry.key.startsWith("linear_gemv:"))
         .reduce((total, entry) => total + entry.dispatchCount, 0);
-      assertEquals(gemvDispatches, 276, "decode の linear_gemv dispatch 本数（i4 linear 276 本）");
+      assertEquals(
+        gemvDispatches,
+        277,
+        "decode の linear_gemv dispatch 本数（i4 linear 276 本 + lm_head の i8 1 本）",
+      );
       console.log(
         `[e2e] gemma4 decode census: prefill ${JSON.stringify(prefillCensus)} / ` +
           `decode ${JSON.stringify(decodeCensus)}`,

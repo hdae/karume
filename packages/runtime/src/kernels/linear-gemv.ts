@@ -1,5 +1,5 @@
 /**
- * linear の **GEMV 変種**（M=1・重み i4 格納 — ADR 0082）。`linear` の 2 本目のカーネル族で、
+ * linear の **GEMV 変種**（M=1・重み i4 / i8 格納 — ADR 0082）。`linear` の 2 本目のカーネル族で、
  * 出力・束縛・uniform は既定経路（src/kernels/gemm.ts の linear）と同じまま、**担当割りだけ**が
  * 「1 スレッド = 1 出力列」へ変わる。
  *
@@ -18,12 +18,21 @@
  * 本変種は共有メモリと barrier を丸ごと落とし、重み語を先読みしてメモリ並列度を作る。
  * `n` 本の独立した縮約が同時に走るので、遅延は列方向の並列で隠れる。
  *
+ * ## 格納の軸（i4 / i8）
+ *
+ * 機序（barrier による発行の逐次化）は格納 dtype に依らないので、族の内側では格納が**変種軸**に
+ * なる。重み 1 語は**どちらも `vec4<u32>` = 16 B** で、運ぶ要素数（= 縮約の刻み
+ * {@link linearGemvUnit}）だけが違う: i4 は 32 要素・i8 は 16 要素。scale の引き方も違い、
+ * i4 は group ごと（k 依存なので語ごとに引き直す）・i8 は出力チャネルごと 1 本
+ * （k 不変なので縮約の外で 1 度だけ束ねる — ADR 0019 のループ不変巻き上げ）。
+ *
  * ## 数値契約（ビット同一 MUST）
  *
- * MUST: 1 出力要素あたりの縮約は **k 昇順の逐次**・積和の字面は `acc = acc + a * b`・重みの
- * 復元は `f32(i32(u) − 8) * scale` の成分ごと f32 乗算・bias は最後に 1 度だけ加算。すべて
- * 既定経路（gemm.ts の `accumulatorUpdate` と weight-storage.ts の `dequant4`）と同一で、
- * 変わるのは ADR 0022 決定 3 が自由と認めた**担当割り**だけ = **既定経路とビット同一**。
+ * MUST: 1 出力要素あたりの縮約は **k 昇順の逐次**・積和の字面は `acc = acc + a * b`・bias は
+ * 最後に 1 度だけ加算。重みの復元は既定経路（weight-storage.ts の `dequant4`）と**同じ字面**で、
+ * i4 は `f32(i32(u) − 8) * scale`・i8 は `f32(q) * scale` の成分ごと f32 乗算
+ * （scale を縮約の外へ括り出さない — ADR 0019）。変わるのは ADR 0022 決定 3 が自由と認めた
+ * **担当割り**だけ = **既定経路とビット同一**。
  * MUST: 先読み（`unroll`）は「語をまとめて読む」だけで、**積和の順序は語の昇順のまま**。
  * 語をまたいで積和を混ぜると 1 出力要素あたりの加算順が動き、契約が割れる。
  * NOTE: f32 の縮約に順序非依存の理論保証は無いので、ビット同一は gemm-geometry と同じく
@@ -43,15 +52,29 @@
 
 import { CodegenError } from "../codegen/errors.ts";
 import { gemmParams } from "./gemm.ts";
-import { i4GroupKeyPart, i4GroupShift, weightKeyPart } from "./weight-storage.ts";
+import {
+  i4GroupKeyPart,
+  i4GroupShift,
+  WEIGHT_SCALE_VAR,
+  weightKeyPart,
+  weightNote,
+  weightScaleWgsl,
+  type WeightStorage,
+} from "./weight-storage.ts";
 
 /**
- * 重み 1 語（`vec4<u32>` = 16 B）が運ぶ i4 要素数 = **縮約の刻み**。
+ * 重み 1 語（`vec4<u32>` = 16 B）が運ぶ要素数 = **縮約の刻み**（格納ごと）。
  *
  * 適格判定（src/runtime/recipe-builder.ts の `#buildLinear`）が k と group 長へ課す整除の
- * 単位でもあるので、門とカーネルが同じ 1 個の定数を読む。
+ * 単位でもあるので、門とカーネルが格納ごとに同じ 1 個の導出点を読む。
+ * MUST: f32 / f16 格納は fail loudly — 本族は圧縮格納 2 種でしか実測していない（ADR 0082
+ * 決定 4 の「実測した範囲に留める」）。
  */
-export const LINEAR_GEMV_UNIT = 32;
+export const linearGemvUnit = (storage: WeightStorage): number => {
+  if (storage === "i4") return 32;
+  if (storage === "i8") return 16;
+  throw new CodegenError(`linear_gemv: 重み ${storage} 格納は本族に無い（i4 / i8 のみ）`);
+};
 
 /** WebGPU core が保証する 1 workgroup のスレッド数上限（`cols` の上界）。 */
 const MAX_THREADS = 256;
@@ -85,18 +108,24 @@ const assertVariant = (variant: LinearGemvVariant): void => {
 };
 
 /**
- * group 長 → WGSL に焼く shift。
+ * group 長 → WGSL に焼く shift（i8 は group を持たないので `undefined`）。
  *
- * 2 冪 ≥ 16 は {@link i4GroupShift}（宣言層と同じ導出点）が見る。本族はさらに
- * **group ≥ {@link LINEAR_GEMV_UNIT}** を要求する — 1 語 32 要素が group を跨ぐと
+ * 2 冪 ≥ 16 と「格納と group 長は対」は {@link i4GroupShift}（宣言層と同じ導出点）が見る。
+ * 本族はさらに **group ≥ {@link linearGemvUnit}** を要求する — 1 語ぶんの要素が group を跨ぐと
  * 語あたり 1 個の scale では足りず、黙って別の scale が掛かった値が出るため。
  */
-const gemvGroupShift = (groupSize: number): number => {
-  const shift = i4GroupShift("linear_gemv", "i4", groupSize);
-  if (shift === undefined || groupSize < LINEAR_GEMV_UNIT) {
+const gemvGroupShift = (
+  storage: WeightStorage,
+  groupSize: number | undefined,
+): number | undefined => {
+  const unit = linearGemvUnit(storage);
+  const shift = i4GroupShift("linear_gemv", storage, groupSize);
+  // i8 は group を持たない（対の検査は i4GroupShift が済ませている）
+  if (groupSize === undefined) return shift;
+  if (shift === undefined || groupSize < unit) {
     throw new CodegenError(
-      `linear_gemv: group_size ${groupSize} が ${LINEAR_GEMV_UNIT} 以上の 2 冪でない` +
-        `（1 語 = ${LINEAR_GEMV_UNIT} 要素が group を跨ぐ）`,
+      `linear_gemv: group_size ${groupSize} が ${unit} 以上の 2 冪でない` +
+        `（1 語 = ${unit} 要素が group を跨ぐ）`,
     );
   }
   return shift;
@@ -106,24 +135,26 @@ const gemvGroupShift = (groupSize: number): number => {
  * uniform の Dims（既定経路の `linearParams(1, n, k)` とバイト単位で同一 — 束縛レイアウトを
  * 分けない契約）。族固有なのは検査だけで、m / n / k の u32 域は {@link gemmParams} へ委譲する。
  *
- * MUST: k を **{@link LINEAR_GEMV_UNIT} の倍数**に限る。WGSL の `units = dims.k / 32u` は
+ * MUST: k を **{@link linearGemvUnit} の倍数**に限る。WGSL の `units = dims.k / <刻み>u` は
  * 端数を切り捨てるので、外すと縮約が行の末尾を黙って落とした値を返す（例外は出ない）。
- * MUST: k を **group_size の倍数**にも限る（:210 の `scale_base = col * (k >> shift)` が
+ * MUST: i4 では k を **group_size の倍数**にも限る（WGSL の `scale_base = col * (k >> shift)` が
  * 行あたりの scale 本数を割り算で導くため）。宣言層（ADR 0069 決定 2）と recipe-builder の
  * 適格判定が同じ条件を保証しているが、カーネル直呼びはそこを通らない。
  */
 export const linearGemvParams = (
+  storage: WeightStorage,
   n: number,
   k: number,
-  groupSize: number,
+  groupSize?: number,
 ): Uint32Array<ArrayBuffer> => {
-  gemvGroupShift(groupSize);
-  if (!Number.isSafeInteger(k) || k < 0 || k % LINEAR_GEMV_UNIT !== 0) {
+  const unit = linearGemvUnit(storage);
+  gemvGroupShift(storage, groupSize);
+  if (!Number.isSafeInteger(k) || k < 0 || k % unit !== 0) {
     throw new CodegenError(
-      `linear_gemv params: k は ${LINEAR_GEMV_UNIT} の倍数の非負整数（${k}）`,
+      `linear_gemv params: k は ${unit} の倍数の非負整数（${k}）`,
     );
   }
-  if (k % groupSize !== 0) {
+  if (groupSize !== undefined && k % groupSize !== 0) {
     throw new CodegenError(
       `linear_gemv params: k=${k} が group_size ${groupSize} で割り切れない`,
     );
@@ -132,19 +163,20 @@ export const linearGemvParams = (
 };
 
 /**
- * パイプラインキー。族名 `linear_gemv` が既定経路（`linear`）との判別子で、変種と group 長は
- * どちらも WGSL に焼かれるのでキーに載せる（同一キー → バイト同一 WGSL の codegen 決定性）。
+ * パイプラインキー。族名 `linear_gemv` が既定経路（`linear`）との判別子で、変種・格納・group 長は
+ * どれも WGSL に焼かれるのでキーに載せる（同一キー → バイト同一 WGSL の codegen 決定性）。
  *
- * 格納判別子（`:wi4`）と group 断片（`g32`）は weight-storage.ts の綴りをそのまま使う —
- * 診断・census が `:wi4g32` で経路を識別する既存の読み方（ADR 0069 決定 5）に揃える。
+ * 格納判別子（`:wi4` / `:wi8`）と group 断片（`g32`）は weight-storage.ts の綴りをそのまま使う —
+ * 診断・census が `:wi4g32` / `:wi8` で経路を識別する既存の読み方（ADR 0069 決定 5）に揃える。
  */
 export const linearGemvKey = (
-  groupSize: number,
+  storage: WeightStorage,
+  groupSize?: number,
   variant: LinearGemvVariant = defaultLinearGemvVariant(),
 ): string => {
   assertVariant(variant);
-  gemvGroupShift(groupSize);
-  return `linear_gemv:v1:f32:c${variant.cols}u${variant.unroll}${weightKeyPart("i4")}${
+  gemvGroupShift(storage, groupSize);
+  return `linear_gemv:v1:f32:c${variant.cols}u${variant.unroll}${weightKeyPart(storage)}${
     i4GroupKeyPart(groupSize)
   }`;
 };
@@ -153,25 +185,42 @@ export const linearGemvKey = (
  * 束縛。**既定経路の linear と同じ番号・同じ意味**（0 dims / 1 x / 2 w / 3 bias / 4 out /
  * 5 wscale）で、`#buildLinear` が組む束縛列をそのまま受ける。
  *
- * 変わるのは要素型 2 つだけ: 重みは `vec4<u32>`（16 B = i4 32 要素を 1 度に読む）、出力は
- * `f32`（1 スレッド 1 列のスカラ書き — 既定 v4 経路の `vec4<f32>` と違い n の整除を要らない）。
+ * 変わるのは要素型 2 つだけ: 重みは `vec4<u32>`（16 B = i4 32 要素 / i8 16 要素を 1 度に読む）、
+ * 出力は `f32`（1 スレッド 1 列のスカラ書き — 既定 v4 経路の `vec4<f32>` と違い n の整除を
+ * 要らない）。
  */
-const BINDINGS = `@group(0) @binding(1) var<storage, read> x: array<vec4<f32>>;
-// 行頭が 16 B 整列なのは k % ${LINEAR_GEMV_UNIT} == 0 から（適格判定が保証する）
+const bindings = (unit: number): string =>
+  `@group(0) @binding(1) var<storage, read> x: array<vec4<f32>>;
+// 行頭が 16 B 整列なのは k % ${unit} == 0 から（適格判定が保証する）
 @group(0) @binding(2) var<storage, read> w: array<vec4<u32>>;
 @group(0) @binding(3) var<storage, read> bias: array<f32>;
 @group(0) @binding(4) var<storage, read_write> out: array<f32>;
 @group(0) @binding(5) var<storage, read> wscale: array<f32>;`;
 
-/** 語 1 本ぶんの読み（重み語 + group scale + x の quad 先頭）。 */
-const unitLoads = (slot: string, unitExpr: string, shift: number): string =>
-  `    let unit${slot} = ${unitExpr};
-    let pw${slot} = w[row_base + unit${slot}];
-    let ws${slot} = wscale[scale_base + ((unit${slot} * ${LINEAR_GEMV_UNIT}u) >> ${shift}u)];
-    let xq${slot} = unit${slot} * ${LINEAR_GEMV_UNIT / 4}u;`;
+/**
+ * 語 1 本ぶんの読み（重み語 + x の quad 先頭 + i4 だけ group scale）。
+ *
+ * i8 の scale は出力チャネルごとで K ループ不変なので、ここではなく縮約の外で 1 度だけ束ねる
+ * （{@link weightScaleWgsl} — ADR 0019 と同じ巻き上げ）。
+ */
+const unitLoads = (
+  storage: WeightStorage,
+  slot: string,
+  unitExpr: string,
+  shift: number | undefined,
+): string => {
+  const unit = linearGemvUnit(storage);
+  const groupScale = storage === "i4"
+    ? `
+    let ws${slot} = wscale[scale_base + ((unit${slot} * ${unit}u) >> ${shift}u)];`
+    : "";
+  return `    let unit${slot} = ${unitExpr};
+    let pw${slot} = w[row_base + unit${slot}];${groupScale}
+    let xq${slot} = unit${slot} * ${unit / 4}u;`;
+};
 
 /**
- * 語 1 本（i4 {@link LINEAR_GEMV_UNIT} 要素）の積和展開。
+ * 語 1 本（i4 32 要素）の積和展開。
  *
  * nibble の並びは weight-storage.ts の `dequant4` と同一（要素 2i = 下位 / 2i+1 = 上位・
  * 格納値 `u = q + 8` — 正本はエクスポータ `karume/emit.py: pack_int4`）。
@@ -180,7 +229,7 @@ const unitLoads = (slot: string, unitExpr: string, shift: number): string =>
  * MUST: x は `vec4<f32>` 束縛から**静的成分**で引く（動的成分添字は Metal でローカル領域へ
  * 落ちる — gemm.ts の `storeBTransposed` と同じ規律）。
  */
-const unitMacs = (slot: string): string => {
+const unitMacsI4 = (slot: string): string => {
   const lanes = ["x", "y", "z", "w"] as const;
   return lanes.map((component, quad) => {
     const bytes = `b${slot}_${quad}`;
@@ -204,29 +253,63 @@ ${macs}`;
 };
 
 /**
- * GEMV の WGSL（`out[n] = x[k] · wᵀ[n,k] + bias[n]`・M=1・重み i4 格納）。
+ * 語 1 本（i8 16 要素）の積和展開。
+ *
+ * レーンの並びは weight-storage.ts の `dequant4`（i8 quad 版 = `vec4<f32>(unpack4xI8(…)) * scale`）
+ * と同一で、成分 `quad` の 4 要素がちょうど x の 1 quad に対応する（i4 の 2 quad と違う唯一の点）。
+ * MUST: 展開順は語内の要素昇順（成分 x→w × レーン x→w）・字面は `f32(q) * ws` の要素ごと乗算。
+ * MUST: x は `vec4<f32>` 束縛から**静的成分**で引く（i4 版と同じ Metal の規律）。
+ */
+const unitMacsI8 = (slot: string): string => {
+  const lanes = ["x", "y", "z", "w"] as const;
+  return lanes.map((component, quad) => {
+    const bytes = `b${slot}_${quad}`;
+    const xa = `xa${slot}_${quad}`;
+    const macs = lanes.map((lane) =>
+      `    acc = acc + ${xa}.${lane} * (f32(${bytes}.${lane}) * ${WEIGHT_SCALE_VAR});`
+    ).join("\n");
+    return `    let ${bytes} = unpack4xI8(pw${slot}.${component});
+    let ${xa} = x[xq${slot} + ${quad}u];
+${macs}`;
+  }).join("\n");
+};
+
+const unitMacs = (storage: WeightStorage, slot: string): string =>
+  storage === "i4" ? unitMacsI4(slot) : unitMacsI8(slot);
+
+/**
+ * GEMV の WGSL（`out[n] = x[k] · wᵀ[n,k] + bias[n]`・M=1・重み i4 / i8 格納）。
  *
  * 1 スレッドが 1 出力列の縮約を丸ごと持つので、並列度の上限は `n`。これはビット同一の代償
  * そのもので、k 方向へ割れば並列度は上がるが縮約順が動く（MUST NOT — モジュール doc）。
  */
 export const linearGemvWgsl = (
-  groupSize: number,
+  storage: WeightStorage,
+  groupSize?: number,
   variant: LinearGemvVariant = defaultLinearGemvVariant(),
 ): string => {
   assertVariant(variant);
-  const shift = gemvGroupShift(groupSize);
+  const unit = linearGemvUnit(storage);
+  const shift = gemvGroupShift(storage, groupSize);
   const { cols, unroll } = variant;
   const slots = Array.from({ length: unroll }, (_, slot) => `${slot}`);
-  const loads = slots.map((slot) => unitLoads(slot, `unit + ${slot}u`, shift)).join("\n");
-  const macs = slots.map((slot) => unitMacs(slot)).join("\n");
-  return `// karume linear gemv (M=1: out[n] = x[k] · wᵀ[n,k] + bias[n], f32, 重み i4 格納, ${cols} 列 / wg, 語 ${unroll} 本先読み)
+  const loads = slots.map((slot) => unitLoads(storage, slot, `unit + ${slot}u`, shift)).join("\n");
+  const macs = slots.map((slot) => unitMacs(storage, slot)).join("\n");
+  // i4 は行あたりの scale 本数から group の先頭を導く / i8 は出力チャネル 1 本を巻き上げる
+  const scaleSetup = storage === "i4"
+    ? `
+  let scale_base = col * (dims.k >> ${shift}u);`
+    : weightScaleWgsl(storage, "col", "  ");
+  return `// karume linear gemv (M=1: out[n] = x[k] · wᵀ[n,k] + bias[n], f32${
+    weightNote(storage)
+  }, ${cols} 列 / wg, 語 ${unroll} 本先読み)
 struct Dims {
   m: u32,
   n: u32,
   k: u32,
 }
 @group(0) @binding(0) var<uniform> dims: Dims;
-${BINDINGS}
+${bindings(unit)}
 
 @compute @workgroup_size(${cols})
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -235,9 +318,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (col >= dims.n) {
     return;
   }
-  let units = dims.k / ${LINEAR_GEMV_UNIT}u;
-  let row_base = col * units;
-  let scale_base = col * (dims.k >> ${shift}u);
+  let units = dims.k / ${unit}u;
+  let row_base = col * units;${scaleSetup}
   var acc = 0.0;
   var unit = 0u;
   // 先読みぶんの重み語を**先に**全て発行してから積和へ入る（メモリ並列度）。語の処理順は
@@ -248,8 +330,8 @@ ${macs}
   }
   // 端数の語（units % ${unroll} 本）— 上と同じ順序を 1 語ずつ辿る
   for (; unit < units; unit = unit + 1u) {
-${unitLoads("t", "unit", shift)}
-${unitMacs("t")}
+${unitLoads(storage, "t", "unit", shift)}
+${unitMacs(storage, "t")}
   }
   out[col] = acc + bias[col];
 }
