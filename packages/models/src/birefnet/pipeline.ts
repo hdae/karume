@@ -526,7 +526,9 @@ export class BirefnetPipeline {
    * グラフ shard だけ**を取って `prepareModel` → 残り資産の `fetchAssets` → 構築）。重み shard は
    * Session を組むときに 1 本ずつ流れる（ADR 0070 — `src/hub/components.ts`）。文字列の
    * `ref` は `{ repo }` と読む（= `main` 追従）。**`ref` は必須**（取得元に既定は無い —
-   * `src/hub/repo-ref.ts` の MUST。このファミリは公開配布リポを持たないので pin 定数も無い）。
+   * `src/hub/repo-ref.ts` の MUST）。検証済み pin は {@link BIREFNET_SOURCES}（`./config.ts`）の
+   * `"birefnet-hr"` / `"lucida"` — 1 リポに 1024² / 2048² の 2 モデルが同居し、2048² は
+   * `{ model: "2048" }` で選ぶ。
    *
    * 手元の配布形は**取得元ハンドル**で渡す（`localDirectory` / `@karume/hub/deno` の
    * `denoDirectory`）。HF の `owner/name` の綴りの門は通らず、network も CacheStorage も
@@ -536,7 +538,11 @@ export class BirefnetPipeline {
     ref: string | HubRepoRef | DistributionSource,
     options: BirefnetFromPretrainedOptions = {},
   ): Promise<BirefnetPipeline> {
-    const source = toManifestSource(ref, "BirefnetPipeline.fromPretrained");
+    const source = toManifestSource(
+      ref,
+      "BirefnetPipeline.fromPretrained",
+      'BIREFNET_SOURCES["birefnet-hr"]（@karume/models/birefnet）',
+    );
     const hubOptions = hubLoadOptions(options);
     const loaded = await loadManifest(source, hubOptions);
     const selection = {

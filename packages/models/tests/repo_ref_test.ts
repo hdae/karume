@@ -25,6 +25,7 @@ import {
 import { localDirectory } from "@karume/hub";
 import { toManifestSource, toRepoRef } from "../src/hub/repo-ref.ts";
 import { AnimaPipeline } from "../src/anima/pipeline.ts";
+import { BirefnetPipeline } from "../src/birefnet/pipeline.ts";
 
 Deno.test("toRepoRef: 取得元が無ければ『repo が必須』+ 記述例 2 択で落ちる", () => {
   // JS からの引数なし呼び出しの形（TS では型検査が先に落とす）。
@@ -42,7 +43,7 @@ Deno.test("toRepoRef: 取得元が無ければ『repo が必須』+ 記述例 2 
 Deno.test("toRepoRef: 公開配布リポを持たないファミリには対応表を案内しない", () => {
   // 存在しない識別子を案内すると、読んだ人は import できないものを探しに行く。
   const error = assertThrows(
-    () => toRepoRef(undefined, "BirefnetPipeline.fromPretrained"),
+    () => toRepoRef(undefined, "VowelDetectorPipeline.fromPretrained"),
     Error,
     "repo が必須",
   );
@@ -136,4 +137,17 @@ Deno.test("fromPretrained: 取得元の綴りが空なら fetch を 1 度も呼�
     "AnimaPipeline.fromPretrained: repo が必須",
   );
   assertEquals(calls, 0);
+});
+
+Deno.test("fromPretrained: birefnet も ref 欠落時に対応表（BIREFNET_SOURCES）を案内する", async () => {
+  // 0.10.0 で公開 pin（`BIREFNET_SOURCES`）が入ったのに、案内だけが「公開リポを持たない」時代の
+  // ままだった（下流の報告）。他家族と同じ文言に揃っていることを公開面から見る。
+  const fetchStub: typeof globalThis.fetch = (input) =>
+    Promise.reject(new Error(`repo_ref_test: 取得層まで進んだ（${String(input)}）`));
+  const error = await assertRejects(
+    () => BirefnetPipeline.fromPretrained({ repo: "" }, { fetch: fetchStub }),
+    Error,
+    "BirefnetPipeline.fromPretrained: repo が必須",
+  );
+  assertStringIncludes(error.message, 'BIREFNET_SOURCES["birefnet-hr"]（@karume/models/birefnet）');
 });
