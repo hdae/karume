@@ -4,6 +4,7 @@
  * | 段 | キー                                     | 役割                                            |
  * | -- | ---------------------------------------- | ----------------------------------------------- |
  * | ①  | `attention_state_qk:v1:f32:wg16x4`       | 論理 col 空間の `S` を**行ブロック窓で実体化**  |
+ * | ①' | `attention_state_qk:v1:f32:wg16x16:par`  | ① の **D 並列縮約**変種（opt-in — 下記）       |
  * | ②  | `attention_state_stats:v2:f32:wg256`     | 行ごとの `m = amax S` と `inv = 1/Σexp(S−m)`    |
  * | ③  | `attention_state_pv:v1:f32:wg16x4`       | `O = P @ V`（`P = exp(S−m)·inv` は**非実体化**）|
  * | ③' | `attention_state_pv:v1:f32:wg16x16:par`  | ③ の **KV 並列縮約**変種（opt-in — 下記）      |
@@ -40,6 +41,27 @@
  * MUST: pad 行の分岐は **workgroup 一様**（局所行は `workgroup_id.y` 由来）なので barrier の
  * 手前で返してよいが、`d ≥ D` のレーンは barrier に参加させる（return しない — 走査を空回り
  * させて `0.0` を寄与する）。WGSL の barrier は一様制御流の外に置けない。
+ *
+ * ## ①' D 並列縮約変種（**席は ③' と同じ** `stateAttentionReduce: "parallel"` — perf-ledger K-14）
+ *
+ * ① は 1 invocation が S の 1 要素（`(局所行, live 列)`）を持ち、内積が `D` の**逐次ループ**
+ * （1 スレッドが D 本の積和）。decode（M=1）では live 列が伸びるほど invocation 数は増えるが、
+ * 1 invocation の遅延は D 逐次のまま長く、P=16K で ①QK が decode GPU 時間の 17% を占める
+ * （K-12 後の内訳 — docs/research/2026-09-03-gemma4-chunklength-k12-sweep.md）。①' は ③' と
+ * **対称**に workgroup を `TILE_X（列方向 = S の cl）× D_LANES（D 方向）` へ組み替え、1 workgroup =
+ * 局所行 1 本（`workgroup_id.y`）× `TILE_X` 本の列。レーン `l` が `d = l, l + D_LANES, …` を
+ * 昇順に部分累積し、workgroup 共有メモリで**固定順の木縮約**（stride 8 → 4 → 2 → 1）に畳んで
+ * レーン 0 が S の 1 語を書く。dispatch 数・束縛・params・中間バッファは ① と同じ
+ * （増えるのは workgroup 内のレーンだけ・行軸だけが `⌈有効行 / TILE_M⌉` から「有効行」へ変わる）。
+ *
+ * MUST: 縮約順が ① と違うので**ビット同一ではない**（決定性は保つ）。**席は ③' と同じ 1 つ**
+ * （`"parallel"` を指定すると ①' と ③' が一緒に選ばれる — 2026-09-06 裁定。新しいノブは作らない）。
+ * MUST: ① の契約は 1 つも動かさない — 述語（causal + sliding 下限）外は live 範囲内なら
+ * **必ず −inf を書く**（② が残骸を食わないため）・`cl ≥ live` の列と pad 行は書かない・
+ * scale の掛け方（半スケールを q 側と k 側の両方へ）と −inf のビット（`params.neg_inf`）は ① と同一。
+ * MUST: pad 行の分岐は **workgroup 一様**（`workgroup_id.y` 由来）なので barrier の手前で
+ * 返してよいが、`cl ≥ live` の列と `d ≥ D` のレーンは return せず**空回りで 0 を寄与する**
+ * （③' と同じ理由 — WGSL の barrier は一様制御流の外に置けない）。
  *
  * ## 記号（正本 = ADR 0067 決定 4）
  *
@@ -151,6 +173,18 @@ export const stateSliding = (window: number): boolean => window > 0;
 
 export const stateQkKey = (sliding: boolean, gqa: boolean): string =>
   `attention_state_qk:v1:f32:wg${STATE_ATTENTION_TILE_X}x${STATE_ATTENTION_TILE_M}${
+    stateVariantKeyPart(sliding, gqa)
+  }`;
+
+/**
+ * ①' の D 方向レーン数（workgroup = `TILE_X × D_LANES` = 256 スレッド — ③' と同じ
+ * ポータビリティの床 `maxComputeInvocationsPerWorkgroup` の仕様既定 256 に収める）。
+ */
+export const STATE_QK_D_LANES = 16;
+
+/** ①' のキー（`:par` が census 門の目印 — ① と同じ変種ビットを後置）。 */
+export const stateQkParallelKey = (sliding: boolean, gqa: boolean): string =>
+  `attention_state_qk:v1:f32:wg${STATE_ATTENTION_TILE_X}x${STATE_QK_D_LANES}:par${
     stateVariantKeyPart(sliding, gqa)
   }`;
 
@@ -292,11 +326,16 @@ const stateEffectiveRowsWgsl = `fn effective_rows(query: u32) -> u32 {
  * MUST: 生成の実体は 1 箇所（この関数）。K の出どころがスロットと ins の 2 つあるぶん本文は
  * 2 つ生成されるが、式が 2 箇所に書かれていると片方だけ「内積の後に 1 度掛ける」形へ
  * 直された時に、スロット由来の列と ins 由来の列で丸めが変わる。
+ * MUST: ①' の**部分和**（`lanes` 指定 — `d = lane, lane + lanes, …`）も同じ 1 箇所から出す。
+ * 積の式を ① と ①' で別々に書くと、片方だけ半スケールを畳む形へ直された時に A/B 帯の根拠
+ * （「同じ積を違う順に足しているだけ」）が黙って崩れる。走査の**開始と刻み**だけが変わる。
  */
-const stateScoreFn = (name: string, array: string): string =>
-  `fn ${name}(q_base: u32, k_base: u32) -> f32 {
+const stateScoreFn = (name: string, array: string, lanes?: number): string =>
+  `fn ${name}(q_base: u32, k_base: u32${lanes === undefined ? "" : ", lane: u32"}) -> f32 {
   var acc = 0.0;
-  for (var d = 0u; d < params.depth; d = d + 1u) {
+  for (var d = ${lanes === undefined ? "0u" : "lane"}; d < params.depth; d = d + ${
+    lanes === undefined ? "1u" : `${lanes}u`
+  }) {
     acc = acc + (q[q_base + d] * params.scale) * (${array}[k_base + d] * params.scale);
   }
   return acc;
@@ -380,6 +419,100 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
   }
   s[(z * params.rows_block + local_row) * params.col_cap + cl] = value;
+}
+`;
+
+/**
+ * ①' D 並列縮約変種（ファイル冒頭「①' D 並列縮約変種」節）。束縛と params は ① と**同一**
+ * （差し替え可能 — 呼び手はキーと WGSL と workgroup 算出だけを切り替える）。
+ *
+ * 1 workgroup = 局所行 1 本 × `TILE_X` 本の列 `cl`。レーン `lane` は `d = lane, lane + D_LANES, …`
+ * を昇順に部分累積し、`scratch[lane][x]` に置いてから固定順の木で畳んで**レーン 0 が S を書く**。
+ *
+ * MUST: 書く条件は ① と同一 — `cl < live` なら述語外でも `-inf` を書き、`cl ≥ live` と pad 行は
+ * 1 語も書かない。`cl ≥ live` は workgroup 一様でない（端数タイル）ので、そのレーンは
+ * **return せず**内積を空回りして barrier に参加する。
+ */
+export const stateQkParallelWgsl = (sliding: boolean, gqa: boolean): string =>
+  `// karume attention_state_qk (states 形の S 実体化, f32, D 並列縮約${
+    sliding ? ", sliding window" : ""
+  }${gqa ? ", GQA" : ""})
+${STATE_PARAMS_STRUCT}
+${STATE_LENGTHS_STRUCT}
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read> q: array<f32>;
+@group(0) @binding(2) var<storage, read> ins_k: array<f32>;
+@group(0) @binding(3) var<storage, read> slot_k: array<f32>;
+@group(0) @binding(4) var<storage, read_write> s: array<f32>;
+@group(0) @binding(5) var<uniform> lengths: Lengths;
+
+${stateSlotRowWgsl(sliding)}
+
+${stateLiveWgsl(sliding)}
+
+${stateWindowFn(sliding)}
+
+${stateEffectiveRowsWgsl}
+
+${stateScoreFn("score_slot", "slot_k", STATE_QK_D_LANES)}
+
+${stateScoreFn("score_ins", "ins_k", STATE_QK_D_LANES)}
+
+var<workgroup> scratch: array<f32, ${STATE_ATTENTION_TILE_X * STATE_QK_D_LANES}>;
+
+@compute @workgroup_size(${STATE_ATTENTION_TILE_X}, ${STATE_QK_D_LANES})
+fn main(
+  @builtin(workgroup_id) wid: vec3<u32>,
+  @builtin(local_invocation_id) lid: vec3<u32>,
+) {
+  let local_row = wid.y;
+  // pad 行の S は誰も読まない（③ が 0 を書いて返す）ので 1 語も書かずに返る。局所行は
+  // workgroup 一様なので barrier の手前で返してよい
+  if (local_row >= effective_rows(lengths.query)) {
+    return;
+  }
+  let past = lengths.past;
+  let live = live_columns(past, lengths.query);
+  let cl = wid.x * ${STATE_ATTENTION_TILE_X}u + lid.x;
+  let lane = lid.y;
+  let z = wid.z;
+  let col = column_base(past) + cl;
+  let row = params.row_offset + local_row;
+  let q_base = (z * params.chunk_rows + row) * params.depth;
+  let kv_plane = ${kvPlaneWgsl(gqa)};
+  // 端数タイル（cl ≥ live）と述語外の列は内積を回さない。**return はしない** — この分岐は
+  // workgroup 一様でなく、下の barrier は一様制御流の中だけに置けるため（0.0 を寄与する）
+  let inside = cl < live && in_window(col, past + row);
+  var acc = 0.0;
+  if (inside) {
+    if (col < past) {
+      // past（col < P）はスロットから。物理行は読み書き同式の slot_row
+      acc = score_slot(q_base, (kv_plane * params.capacity + slot_row(col)) * params.depth, lane);
+    } else {
+      // current（col ≥ P）は今 step の ins の行 col − P から
+      acc = score_ins(q_base, (kv_plane * params.chunk_rows + (col - past)) * params.depth, lane);
+    }
+  }
+  scratch[lane * ${STATE_ATTENTION_TILE_X}u + lid.x] = acc;
+  workgroupBarrier();
+  // 固定順の木縮約（stride 8 → 4 → 2 → 1）— 決定性の根拠
+  var stride = ${STATE_QK_D_LANES / 2}u;
+  while (stride > 0u) {
+    if (lane < stride) {
+      let mine = lane * ${STATE_ATTENTION_TILE_X}u + lid.x;
+      scratch[mine] = scratch[mine] + scratch[(lane + stride) * ${STATE_ATTENTION_TILE_X}u + lid.x];
+    }
+    workgroupBarrier();
+    stride = stride / 2u;
+  }
+  // 述語外は -inf。live 範囲は**述語外でも必ず書く**（書かないと ② が前回の残骸を食う）
+  if (lane == 0u && cl < live) {
+    var value = bitcast<f32>(params.neg_inf);
+    if (inside) {
+      value = scratch[lid.x];
+    }
+    s[(z * params.rows_block + local_row) * params.col_cap + cl] = value;
+  }
 }
 `;
 
@@ -938,6 +1071,31 @@ export const stateQkWorkgroups = (
     tiledWorkgroups(live, STATE_ATTENTION_TILE_X, limit, `${where} ①QK`),
     tiledWorkgroups(rows, STATE_ATTENTION_TILE_M, limit, `${where} ①QK`),
     tiledWorkgroups(geometry.batchHeads, 1, limit, `${where} ①QK`),
+  ];
+};
+
+/**
+ * ①' の workgroup 数 `[⌈live / TILE_X⌉, 有効行, B·H]`（行軸は **1 行 = 1 workgroup**）。
+ *
+ * ① と同じく列軸は **live 列数**・行軸は**有効行数**（`colCap` / `rowsBlock` にすると仕事量
+ * 合格条件を落とし、pad 行の S を書いてしまう）。上限超過は fail loudly も ① と同じ。
+ * 変わるのは行のタイル幅だけで、D 方向は workgroup 内のレーンに畳まれるので dispatch に出ない。
+ */
+export const stateQkParallelWorkgroups = (
+  geometry: StateDispatchGeometry,
+  past: number,
+  query: number,
+  limit: number,
+  where: string,
+): [number, number, number] => {
+  assertDispatchGeometry(`${where} ①'QK`, geometry);
+  assertLengths(`${where} ①'QK`, past, query);
+  const live = stateLiveColumns(geometry.window, past, query);
+  const rows = stateEffectiveRows(geometry.rowsBlock, geometry.rowOffset, query);
+  return [
+    tiledWorkgroups(live, STATE_ATTENTION_TILE_X, limit, `${where} ①'QK`),
+    tiledWorkgroups(rows, 1, limit, `${where} ①'QK`),
+    tiledWorkgroups(geometry.batchHeads, 1, limit, `${where} ①'QK`),
   ];
 };
 

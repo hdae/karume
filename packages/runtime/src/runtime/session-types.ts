@@ -147,7 +147,7 @@ export const ROW_BLOCK_SPLIT: unique symbol = Symbol("karume.rowBlockSplit");
  */
 export type ComputePrecision = "f32" | "f16" | "a8";
 
-/** states 形 attention ③PV の縮約形（{@link SessionOptions.stateAttentionReduce}）。 */
+/** states 形 attention ①QK / ③PV の縮約形（{@link SessionOptions.stateAttentionReduce}）。 */
 export type StateAttentionReduce = "sequential" | "parallel";
 
 export type SessionOptions = {
@@ -218,14 +218,18 @@ export type SessionOptions = {
    */
   readonly attentionScoreStorage?: ScoreStorage;
   /**
-   * states 形 attention（ADR 0067 決定 4 — 生成 context の KV スロットを読む形）の ③PV の
-   * 縮約形（既定 `"sequential"` = 参照経路）。
+   * states 形 attention（ADR 0067 決定 4 — 生成 context の KV スロットを読む形）の **①QK と
+   * ③PV の縮約形**（既定 `"sequential"` = 参照経路）。**1 つのノブが 2 段を一緒に切り替える**
+   * （2026-09-06 裁定 — 段ごとに席を割らない）。
    *
-   * `"parallel"` は KV 長方向を workgroup 内の 16 レーンで分担し固定順の木で畳む変種
-   * （perf-ledger K-12 — src/kernels/state-attention.ts「③' KV 並列縮約変種」節）。decode
-   * （M=1）で 1 スレッドの逐次長が KV 長に比例して伸びる形を潰す。縮約順が変わるので
-   * **参照経路とビット同一ではない**（決定性は保つ）。融合 attention（`attentionCompute`）
-   * とは別族なので直交する。
+   * `"parallel"` はどちらの段も**縮約を workgroup 内の 16 レーンで分担し固定順の木で畳む**変種:
+   * - ③PV は KV 長方向を分担（perf-ledger K-12 — src/kernels/state-attention.ts「③' KV 並列
+   *   縮約変種」節）。decode（M=1）で 1 スレッドの逐次長が KV 長に比例して伸びる形を潰す。
+   * - ①QK は内積の D 方向を分担（perf-ledger K-14 — 同「①' D 並列縮約変種」節）。1 invocation
+   *   が D 本の積和を逐次で回す遅延を縮める。
+   *
+   * どちらも縮約順が変わるので **参照経路とビット同一ではない**（決定性は保つ）。融合
+   * attention（`attentionCompute`）とは別族なので直交する。
    * MUST: 既定は `"sequential"`（ADR 0058 決定 2 — 数値を変える経路の自動選択禁止）。
    */
   readonly stateAttentionReduce?: StateAttentionReduce;

@@ -16,6 +16,8 @@ import {
   statePvParallelWorkgroups,
   statePvWgsl,
   statePvWorkgroups,
+  stateQkParallelWgsl,
+  stateQkParallelWorkgroups,
   stateQkWgsl,
   stateQkWorkgroups,
   stateSliding,
@@ -196,10 +198,19 @@ export const runStateAttention = async (
     readonly cache?: StatePipelineCache;
     /** ③ の縮約形（既定 sequential = 参照経路・parallel = ③' の KV 並列縮約変種）。 */
     readonly pvReduce?: "sequential" | "parallel";
+    /**
+     * ① の縮約形（既定 sequential = 参照経路・parallel = ①' の D 並列縮約変種）。
+     *
+     * NOTE: 実行 Session の席（`stateAttentionReduce`）は ① と ③ を**一緒に**切り替えるが、
+     * この直接 dispatch ハーネスは 2 段を**別々に**選べる。①' の帯を測るときに ③ を参照経路に
+     * 固定できないと、差が ①' 由来か ③' 由来か分けられない。
+     */
+    readonly qkReduce?: "sequential" | "parallel";
   } = {},
 ): Promise<StateRunResult> => {
   const { mutate } = options;
   const parallel = options.pvReduce === "parallel";
+  const qkParallel = options.qkReduce === "parallel";
   const sliding = stateSliding(spec.window);
   const gqa = spec.heads !== spec.kvHeads;
   const colCap = caseColCap(spec);
@@ -267,7 +278,11 @@ export const runStateAttention = async (
         0,
         seeded(batchHeads * block * colCap, () => STATE_S_POISON),
       );
-      const qk = pipelineOf(device, cache, wgsl("qk", stateQkWgsl(sliding, gqa)));
+      const qk = pipelineOf(
+        device,
+        cache,
+        wgsl("qk", qkParallel ? stateQkParallelWgsl(sliding, gqa) : stateQkWgsl(sliding, gqa)),
+      );
       const st = pipelineOf(device, cache, wgsl("stats", stateStatsWgsl(sliding)));
       const pv = pipelineOf(
         device,
@@ -278,7 +293,9 @@ export const runStateAttention = async (
       const pass = encoder.beginComputePass();
       pass.setPipeline(qk);
       pass.setBindGroup(0, bind(device, qk, [params, q, insK, slotK, scores, lengths]));
-      const qkGroups = stateQkWorkgroups(dispatchGeometry, spec.past, spec.query, limit, spec.name);
+      const qkGroups = qkParallel
+        ? stateQkParallelWorkgroups(dispatchGeometry, spec.past, spec.query, limit, spec.name)
+        : stateQkWorkgroups(dispatchGeometry, spec.past, spec.query, limit, spec.name);
       pass.dispatchWorkgroups(qkGroups[0], qkGroups[1], qkGroups[2]);
       pass.setPipeline(st);
       pass.setBindGroup(0, bind(device, st, [statsParams, scores, stats, lengths]));

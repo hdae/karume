@@ -23,7 +23,12 @@
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { compareTensors, formatAllclose, type Tolerance } from "../src/reference/allclose.ts";
 import { referenceStateAppend, referenceStateAttention } from "../src/reference/state-attention.ts";
-import { statePvKey, statePvParallelKey, stateQkKey } from "../src/kernels/state-attention.ts";
+import {
+  statePvKey,
+  statePvParallelKey,
+  stateQkKey,
+  stateQkParallelKey,
+} from "../src/kernels/state-attention.ts";
 import { acquireGpu, type GpuContext, RUNTIME_INTERNAL } from "../src/gpu/device.ts";
 import { openModel } from "../src/format/container.ts";
 import {
@@ -452,12 +457,16 @@ Deno.test({
 });
 
 /**
- * **census**（ADR 0058 決定 4 ③）— `stateAttentionReduce: "parallel"` を指定したとき ③' の
- * キー（`:par`）が**実際に走り**、③ のキーが 1 本も出ないことを見る。逆に既定では ③ だけが出る
- * （opt-in が黙って既定へ落ちる / 既定が黙って変種へ上がる、の両方向を塞ぐ）。
+ * **census**（ADR 0058 決定 4 ③）— `stateAttentionReduce: "parallel"` を指定したとき ①' と ③' の
+ * キー（`:par`）が**両方とも実際に走り**、① ③ のキーが 1 本も出ないことを見る。逆に既定では
+ * ① ③ だけが出る（opt-in が黙って既定へ落ちる / 既定が黙って変種へ上がる、の両方向を塞ぐ）。
+ *
+ * MUST: 2 段を**両方**見る（席は 1 つで 2 段を一緒に切り替えるので、片方だけの検査だと
+ * 「①' が結線から落ちて ① が走っている」が素通りする — 値は帯の内側なので数値門も鳴らない）。
  */
 Deno.test({
-  name: "states 形 attention ③PV の縮約形は席どおりに走る（census・実 GPU / timestamp-query）",
+  name:
+    "states 形 attention ①QK / ③PV の縮約形は席どおりに走る（census・実 GPU / timestamp-query）",
   ignore: !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
@@ -476,22 +485,32 @@ Deno.test({
           const keys = session.diagnostics().lastRunTiming?.entries.map((entry) => entry.key) ?? [];
           assert(keys.length > 0, `${label}: 内訳が空（キー検査が空振りしている）`);
           const gqa = model.heads !== model.kvHeads;
-          const expected = reduce === "parallel"
-            ? statePvParallelKey(sliding, gqa)
-            : statePvKey(sliding, gqa);
-          const other = reduce === "parallel"
-            ? statePvKey(sliding, gqa)
-            : statePvParallelKey(sliding, gqa);
-          assertEquals(
-            keys.includes(expected),
-            true,
-            `${label}: 期待した ③ のキーが出ていない（${keys.join(" / ")}）`,
-          );
-          assertEquals(
-            keys.includes(other),
-            false,
-            `${label}: 席と違う ③ のキーが混ざっている（${keys.join(" / ")}）`,
-          );
+          const parallel = reduce === "parallel";
+          for (
+            const [stage, expected, other] of [
+              [
+                "①QK",
+                parallel ? stateQkParallelKey(sliding, gqa) : stateQkKey(sliding, gqa),
+                parallel ? stateQkKey(sliding, gqa) : stateQkParallelKey(sliding, gqa),
+              ],
+              [
+                "③PV",
+                parallel ? statePvParallelKey(sliding, gqa) : statePvKey(sliding, gqa),
+                parallel ? statePvKey(sliding, gqa) : statePvParallelKey(sliding, gqa),
+              ],
+            ] as const
+          ) {
+            assertEquals(
+              keys.includes(expected),
+              true,
+              `${label}: 期待した ${stage} のキーが出ていない（${keys.join(" / ")}）`,
+            );
+            assertEquals(
+              keys.includes(other),
+              false,
+              `${label}: 席と違う ${stage} のキーが混ざっている（${keys.join(" / ")}）`,
+            );
+          }
         } finally {
           await context.dispose();
           await session.dispose();
@@ -1193,15 +1212,17 @@ Deno.test({
 });
 
 /**
- * ③'（KV 並列縮約）を **`Session.run` 経由で値まで**見る門。
+ * 席 `"parallel"`（①' の D 並列縮約 + ③' の KV 並列縮約）を **`Session.run` 経由で値まで**
+ * 見る門。
  *
  * 現状 runtime の検証は「直接 dispatch の帯」（tests/gpu_state_attention_parallel_test.ts）と
  * 「executor 経由のキー検査」（上の census — `runStep` の戻りを捨てている）に割れており、
- * **その間**（レシピが ③' 用の workgroup 数・束縛・S / stats の確保を正しく組むか）は資産つきの
- * models e2e にしか落ちていない（ミラー無しの環境では明示 SKIP される）。ここはその隙間を
- * 資産なしで塞ぐ。
+ * **その間**（レシピが ①' / ③' 用の workgroup 数・束縛・S / stats の確保を正しく組むか）は
+ * 資産つきの models e2e にしか落ちていない（ミラー無しの環境では明示 SKIP される）。ここは
+ * その隙間を資産なしで塞ぐ。
  *
- * MUST: ビット同一は要求しない（③ と ③' は縮約順が違う — 形が小さいと差が出ないだけで、
+ * MUST: ビット同一は要求しない（参照経路と ①' / ③' は縮約順が違う — 形が小さいと差が出ない
+ * だけで、
  * 一致を契約にすると別の主張になる）。見るのは「オラクルと帯で一致」と「席をまたいでも
  * 同じ帯に収まる」の 2 点。
  */

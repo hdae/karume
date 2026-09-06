@@ -188,6 +188,9 @@ import {
   statePvWgsl,
   statePvWorkgroups,
   stateQkKey,
+  stateQkParallelKey,
+  stateQkParallelWgsl,
+  stateQkParallelWorkgroups,
   stateQkWgsl,
   stateQkWorkgroups,
   stateSliding,
@@ -2242,13 +2245,17 @@ export class RecipeBuilder {
       this.#state.rowBlockSplit,
     );
 
-    const qkKey = stateQkKey(sliding, gqa);
-    const statsKey = stateStatsKey(sliding);
-    // ③ の縮約形は opt-in 席（ADR 0058）。③' は束縛・params が ③ と同一で、キー・WGSL・
-    // workgroup 算出の 3 点だけが替わる（キーの `:par` が census 門の目印）。
+    // ①QK / ③PV の縮約形は**同じ** opt-in 席（ADR 0058・2026-09-06 裁定でノブは 1 つのまま）。
+    // ①' / ③' はどちらも束縛・params が参照経路と同一で、キー・WGSL・workgroup 算出の 3 点
+    // だけが替わる（キーの `:par` が census 門の目印）。
     const parallel = this.#state.stateAttentionReduce === "parallel";
+    const qkKey = parallel ? stateQkParallelKey(sliding, gqa) : stateQkKey(sliding, gqa);
+    const statsKey = stateStatsKey(sliding);
     const pvKey = parallel ? statePvParallelKey(sliding, gqa) : statePvKey(sliding, gqa);
-    const qk = await this.#state.cache.get(qkKey, stateQkWgsl(sliding, gqa));
+    const qk = await this.#state.cache.get(
+      qkKey,
+      parallel ? stateQkParallelWgsl(sliding, gqa) : stateQkWgsl(sliding, gqa),
+    );
     const stats = await this.#state.cache.get(statsKey, stateStatsWgsl(sliding));
     const pv = await this.#state.cache.get(
       pvKey,
@@ -2298,7 +2305,9 @@ export class RecipeBuilder {
           { binding: 5, source: { kind: "lengths" } },
         ],
         workgroups: (past, query) =>
-          stateQkWorkgroups(dispatchGeometry, past, query, limit, `${where} ①QK`),
+          parallel
+            ? stateQkParallelWorkgroups(dispatchGeometry, past, query, limit, `${where} ①QK`)
+            : stateQkWorkgroups(dispatchGeometry, past, query, limit, `${where} ①QK`),
       });
 
       // ② 行統計 — 1 行 = 1 workgroup の行方向 grid-stride（live の走査は行ループの内側）。

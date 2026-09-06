@@ -47,6 +47,7 @@ import { bmmKey, bmmParams, bmmRowWindowParams, bmmWgsl } from "../src/kernels/b
 import {
   statePvParallelWgsl,
   statePvWgsl,
+  stateQkParallelWgsl,
   stateQkWgsl,
   stateStatsWgsl,
 } from "../src/kernels/state-attention.ts";
@@ -605,6 +606,12 @@ Deno.test("生成した WGSL がスナップショットとバイト単位で一
     ["attention_state_qk_gqa.wgsl", stateQkWgsl(false, true)],
     ["attention_state_qk_sliding.wgsl", stateQkWgsl(true, false)],
     ["attention_state_qk_sliding_gqa.wgsl", stateQkWgsl(true, true)],
+    // ①' D 並列縮約変種（opt-in — ③' と**同じ席** `stateAttentionReduce: "parallel"`・
+    // perf-ledger K-14）。
+    ["attention_state_qk_par.wgsl", stateQkParallelWgsl(false, false)],
+    ["attention_state_qk_par_gqa.wgsl", stateQkParallelWgsl(false, true)],
+    ["attention_state_qk_par_sliding.wgsl", stateQkParallelWgsl(true, false)],
+    ["attention_state_qk_par_sliding_gqa.wgsl", stateQkParallelWgsl(true, true)],
     ["attention_state_stats.wgsl", stateStatsWgsl(false)],
     ["attention_state_stats_sliding.wgsl", stateStatsWgsl(true)],
     ["attention_state_pv.wgsl", statePvWgsl(false, false)],
@@ -763,6 +770,11 @@ Deno.test("同じ生成入力からは常に同一の WGSL が出る（全 op ×
         statePvParallelWgsl(sliding, gqa),
         statePvParallelWgsl(sliding, gqa),
         `state_pv_par:${where}`,
+      );
+      assertEquals(
+        stateQkParallelWgsl(sliding, gqa),
+        stateQkParallelWgsl(sliding, gqa),
+        `state_qk_par:${where}`,
       );
     }
   }

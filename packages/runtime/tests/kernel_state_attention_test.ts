@@ -13,6 +13,7 @@ import {
   STATE_ATTENTION_TILE_M,
   STATE_ATTENTION_TILE_X,
   STATE_NEG_INF_BITS,
+  STATE_QK_D_LANES,
   STATE_STATS_WORKGROUP_SIZE,
   stateAttentionParams,
   stateColumnBase,
@@ -22,6 +23,9 @@ import {
   statePvWgsl,
   statePvWorkgroups,
   stateQkKey,
+  stateQkParallelKey,
+  stateQkParallelWgsl,
+  stateQkParallelWorkgroups,
   stateQkWgsl,
   stateQkWorkgroups,
   stateSliding,
@@ -553,5 +557,49 @@ Deno.test("CPU 参照: 形の取り違えは突合の前で落ちる", () => {
     () => referenceStateAttention({ ...probe, query: 2 }),
     ReferenceOpError,
     "queryLength",
+  );
+});
+
+Deno.test("①' の並列縮約変種はキーに `:par` を持ち、① の契約断片をそのまま共有する", () => {
+  // 席の目印（census 門がこの `:par` を見る）。幾何は `wg16x16` = TILE_X × D レーン
+  assertEquals(stateQkParallelKey(false, false), "attention_state_qk:v1:f32:wg16x16:par");
+  assertEquals(
+    stateQkParallelKey(true, true),
+    "attention_state_qk:v1:f32:wg16x16:par:sliding:gqa",
+  );
+  assertEquals(STATE_QK_D_LANES, 16);
+  for (const [sliding, gqa] of VARIANTS) {
+    // ① と ①' は別キー（同じ構成が 2 通りのキーを持たない / 別構成が同じキーを持たない）
+    assertNotEquals(stateQkParallelKey(sliding, gqa), stateQkKey(sliding, gqa));
+    assertEquals(stateQkParallelWgsl(sliding, gqa), stateQkParallelWgsl(sliding, gqa), "決定性");
+    const wgsl = stateQkParallelWgsl(sliding, gqa);
+    // MUST: 縮約の並べ方だけが違う。読み書き同式・有効行・−inf の書き・u32 の巻き戻り回避は
+    // ① と**同一の断片**（片方だけ直る形を文字列で拒む）
+    assertEquals(wgsl.includes(stateSlotRowWgsl(sliding)), true, "slot_row");
+    assertEquals(wgsl.includes("fn effective_rows(query: u32) -> u32 {"), true, "effective_rows");
+    assertEquals(wgsl.includes("bitcast<f32>(params.neg_inf)"), true, "述語外の −inf");
+    assertEquals(wgsl.includes("col + params.window"), false, "u32 で巻き戻る加算形");
+  }
+  assertEquals(stateQkParallelWgsl(true, false).includes("(limit - col) < params.window"), true);
+  assertEquals(stateQkParallelWgsl(false, false).includes("(limit - col) < params.window"), false);
+});
+
+Deno.test("①' の dispatch 幾何は ① と同じ 2 軸（列 = live・行 = 有効行）で、行のタイル幅だけが 1", () => {
+  // 列軸は ① と同じ ⌈live / TILE_X⌉（D 方向は workgroup 内のレーンなので dispatch に出ない）
+  assertEquals(stateQkParallelWorkgroups(DISPATCH, 1008, 16, LIMIT, "t")[0], 64);
+  const first = { ...DISPATCH, rowsBlock: 4, rowOffset: 0 };
+  // 行軸は 1 行 = 1 workgroup（① は ⌈有効行 / TILE_M⌉ = 1）
+  assertEquals(stateQkParallelWorkgroups(first, 0, 4, LIMIT, "t")[1], 4);
+  assertEquals(stateQkWorkgroups(first, 0, 4, LIMIT, "t")[1], 1);
+  assertEquals(stateQkParallelWorkgroups(first, 0, 1, LIMIT, "t")[1], 1, "decode は 1 行");
+  // pad だけのブロックは 0（呼び手は dispatch そのものを積まない）
+  const second = { ...DISPATCH, rowsBlock: 4, rowOffset: 4 };
+  assertEquals(stateQkParallelWorkgroups(second, 0, 4, LIMIT, "t")[1], 0);
+  // z 軸は B·H・列軸は容量に依らない（live だけが効く = 仕事量合格条件）
+  assertEquals(stateQkParallelWorkgroups(DISPATCH, 100, 4, LIMIT, "t")[2], 6);
+  // MUST: 上限超過は fail loudly（タイル系 — 縮退させると S のタイルが欠け、②③ が残骸を読む）
+  assertThrows(
+    () => stateQkParallelWorkgroups(DISPATCH, 4096, 1, 8, "t"),
+    DispatchLimitError,
   );
 });

@@ -852,7 +852,10 @@ type SessionState = {
   readonly attentionCompute: ComputePrecision;
   /** S の格納形（opt-in — {@link SessionOptions.attentionScoreStorage}）。計算形と直交する軸。 */
   readonly attentionScoreStorage: ScoreStorage;
-  /** states 形 attention ③PV の縮約形（opt-in — {@link SessionOptions.stateAttentionReduce}）。 */
+  /**
+   * states 形 attention ①QK / ③PV の縮約形（opt-in —
+   * {@link SessionOptions.stateAttentionReduce}）。
+   */
   readonly stateAttentionReduce: StateAttentionReduce;
   /**
    * **linear の** i8a8 整数内積変種。既定は `navigator.gpu.wgslLanguageFeatures` の列挙から
