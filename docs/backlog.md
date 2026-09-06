@@ -17,6 +17,11 @@
 波と独立に消化してよい残件はその下。
 
 1. **c. perf K-13 / K-14 は 2026-09-06 に消化**（[perf-ledger](perf-ledger.md) ✅）。次の性能候補は未起票。
+2. **下流フィードバック 4 件は 2026-09-06 に消化**: anima-web ⑪ `onRetry` の透過（8 家族の hub オプション
+   透過を `src/hub/load-options.ts` へ 1 本化 — `f81cc6a`）/ ⑫ `evictCachedAssets` の `protect`・同一集合の
+   除外・`alsoEvicted`（ADR [0094](decisions/0094-hub-cache-inventory-and-eviction.md) 追記 — `2fc3587`）/
+   karume-samples: BiRefNet 最大 binding の訂正（cat_211 320 / 1280MiB — `d116d7e`）・birefnet の
+   `BIREFNET_SOURCES` 案内（`8ae0b71`）。hub / models は公開 API の追加（欄の追加のみ）なので次の minor。
 
 **残件**:
 
@@ -37,6 +42,10 @@
   （合成 4 ケースの最大 — 旧値は 1 ケースぶん。`verify_patches` に上限比較の門も入った）ので、
   公開済みカードと NOTICE.md が名乗る 1.4e-06 は古い。次にこのリポを上げ直す回に同乗させる
   （是正単独の再アップはしない — 上の 2 リポと同じ扱い）。
+- **公開済み `karume-birefnet-hr` / `karume-lucida` のカード再発行**（起票 2026-09-06）: `card.py` の
+  資源表の「最大 binding」を 256 / 878 MiB から cat_211 込みの 320 / 1,280 MiB へ訂正した（`d116d7e`）ので、
+  公開済みカードの数値は古い。次にこの 2 リポを上げ直す回に同乗させる（是正単独の再アップはしない —
+  上と同じ扱い）。
 - **テスト被覆の残（起票 2026-09-05）**: `packages/runtime/tests/helpers/shard-files.ts` の
   `readExact` 短読みと `shardTensorNames` の非オブジェクトヘッダ、`SubmitScheduler` の
   `#encodeTimedChunk` 内の copy 分岐（`packages/runtime/src/gpu/submit.ts`）は依然として未検証。
