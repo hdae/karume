@@ -184,6 +184,16 @@ export const assertGemmGeometry = (geometry: GemmGeometry, where: string): void 
 export const gemmGeometryKeyPart = (geometry: GemmGeometry): string =>
   `r${geometry.regM}x${geometry.regN}w${geometry.wgX}`;
 
+/**
+ * 「タイル辺 + 幾何」のキー断片（`reg128x128r8x8w16`）。
+ *
+ * gemm.ts の `gemmKeyPart`（v4 ビットを後置する）と states 形 ①ₜ のキー
+ * （src/kernels/state-attention.ts の `stateQkTiledKey`）が共有する**唯一の綴り**。2 箇所に
+ * 書き写すと、幾何を足したときに片方のキーだけが判別力を失う。
+ */
+export const gemmGeometryTileKeyPart = (geometry: GemmGeometry): string =>
+  `reg${gemmTileM(geometry)}x${gemmTileN(geometry)}${gemmGeometryKeyPart(geometry)}`;
+
 /** 生成コメント用の幾何注記（WGSL ヘッダ 1 行に載せる形）。 */
 export const gemmGeometryNote = (geometry: GemmGeometry): string =>
   `レジスタ ${gemmTileM(geometry)}x${

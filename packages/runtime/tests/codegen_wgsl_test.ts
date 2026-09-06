@@ -63,7 +63,12 @@ import {
   topkWgsl,
   topkWorkgroupStorageBytes,
 } from "../src/kernels/topk.ts";
-import { ATTENTION_QK_MASK_BINDING, GEMM_MTILE_SMALL, gemmUsesVec4 } from "../src/kernels/gemm.ts";
+import {
+  ATTENTION_QK_MASK_BINDING,
+  GEMM_MTILE_SMALL,
+  gemmUsesVec4,
+  stateQkTiledWgsl,
+} from "../src/kernels/gemm.ts";
 import { defaultGemmGeometry, GEMM_TILE } from "../src/kernels/gemm-geometry.ts";
 import {
   CONV1D_SCALE_BINDING,
@@ -612,6 +617,17 @@ Deno.test("生成した WGSL がスナップショットとバイト単位で一
     ["attention_state_qk_par_gqa.wgsl", stateQkParallelWgsl(false, true)],
     ["attention_state_qk_par_sliding.wgsl", stateQkParallelWgsl(true, false)],
     ["attention_state_qk_par_sliding_gqa.wgsl", stateQkParallelWgsl(true, true)],
+    // ①ₜ K 行タイル共有変種（**既定経路**・perf-ledger K-13）。GEMM 骨格に states の断片を
+    // 差した唯一のカーネルなので、ここが「骨格へ断片を足しても既存 6 op の生成バイト列が
+    // 1 バイトも動かない」の検出器になる（上の attention_* / bmm_* / linear_* / conv*_ が正）。
+    // MUST: **幾何バケットを 2 段**（最小 M16N16 と既定 M128N128）置く — 幾何は担当割りだけを
+    // 変えるはずなので、段の間で store のガード構造や内積ループが変わっていないことを固定する。
+    ["attention_state_qk_tiled.wgsl", stateQkTiledWgsl(false, false, 16)],
+    ["attention_state_qk_tiled_gqa.wgsl", stateQkTiledWgsl(false, true, 16)],
+    ["attention_state_qk_tiled_sliding.wgsl", stateQkTiledWgsl(true, false, 16)],
+    ["attention_state_qk_tiled_sliding_gqa.wgsl", stateQkTiledWgsl(true, true, 16)],
+    ["attention_state_qk_tiled_m768.wgsl", stateQkTiledWgsl(false, false, 768)],
+    ["attention_state_qk_tiled_m768_sliding_gqa.wgsl", stateQkTiledWgsl(true, true, 768)],
     ["attention_state_stats.wgsl", stateStatsWgsl(false)],
     ["attention_state_stats_sliding.wgsl", stateStatsWgsl(true)],
     ["attention_state_pv.wgsl", statePvWgsl(false, false)],
@@ -776,6 +792,13 @@ Deno.test("同じ生成入力からは常に同一の WGSL が出る（全 op ×
         stateQkParallelWgsl(sliding, gqa),
         `state_qk_par:${where}`,
       );
+      for (const rows of [16, 100, 768]) {
+        assertEquals(
+          stateQkTiledWgsl(sliding, gqa, rows),
+          stateQkTiledWgsl(sliding, gqa, rows),
+          `state_qk_tiled:${where}:M=${rows}`,
+        );
+      }
     }
   }
   for (const epc of [undefined, 16]) {

@@ -1,6 +1,7 @@
 /**
- * GEMM 族（matmul / bmm / linear + 融合 attention の QK / PV + conv1d / conv2d の
- * implicit GEMM — ADR 0022 / 0023 / 0024）が共有する **レジスタブロッキング + vec4** の骨格。
+ * GEMM 族（matmul / bmm / linear + 融合 attention の QK / PV + states 形 attention の ①ₜ +
+ * conv1d / conv2d の implicit GEMM — ADR 0022 / 0023 / 0024 / 0067）が共有する
+ * **レジスタブロッキング + vec4** の骨格。
  *
  * 1 スレッドが {@link GemmGeometry} の `regM`×`regN` の出力を持ち（`acc{行}_{列 quad}` の
  * 名前付き変数へ codegen 時に静的展開する — {@link gemmAccumulatorInit}）、共有 B タイルは
@@ -61,8 +62,8 @@ import {
   gemmColumnSlots,
   type GemmGeometry,
   gemmGeometryForRows,
-  gemmGeometryKeyPart,
   gemmGeometryNote,
+  gemmGeometryTileKeyPart,
   gemmQuadFillStride,
   gemmQuadSlots,
   gemmQuadsPerThread,
@@ -72,6 +73,12 @@ import {
   gemmTileM,
   gemmTileN,
 } from "./gemm-geometry.ts";
+import {
+  STATE_LENGTHS_STRUCT,
+  STATE_QK_TILED_DIMS_EXTRA,
+  stateTiledGeometryWgsl,
+  stateTiledKvPlaneWgsl,
+} from "./state-attention.ts";
 import {
   assertScoreStorageSupported,
   scoreArrayType,
@@ -167,12 +174,8 @@ const rowsGeometry = (rows: number | undefined): GemmGeometry =>
  * キーと生成物の幾何が食い違い、キャッシュに載った別幾何の WGSL が dispatch 数と噛み合わずに
  * 出力タイルが欠落する（例外の出ない誤値）。
  */
-export const gemmKeyPart = (v4: boolean, rows?: number): string => {
-  const geometry = rowsGeometry(rows);
-  return `reg${gemmTileM(geometry)}x${gemmTileN(geometry)}${gemmGeometryKeyPart(geometry)}${
-    v4 ? "v4" : ""
-  }`;
-};
+export const gemmKeyPart = (v4: boolean, rows?: number): string =>
+  `${gemmGeometryTileKeyPart(rowsGeometry(rows))}${v4 ? "v4" : ""}`;
 
 /**
  * 内積の**計算**変種（ADR 0028）。`"f16"` は共有タイルを f16 に落とす形で、
@@ -240,6 +243,9 @@ export type GemmRowWindow = "a" | "c";
  * `attention_qk` / `attention_pv` は融合 attention の ① と ③（ADR 0023）。②（行統計）は
  * GEMM 骨格ではないので src/kernels/attention.ts が別に持つ。`conv1d` / `conv2d` は
  * implicit GEMM（ADR 0024）で、**groups == 1 専用**（groups > 1 は直接カーネルが受ける）。
+ * `attention_state_qk` は states 形 ①ₜ（K 行タイル共有 — ADR 0067 決定 4 / perf-ledger K-13）で、
+ * uniform は骨格の `Dims` に states の欄を足した形（キー・workgroup 算出・切替条件は
+ * src/kernels/state-attention.ts が持つ）。
  */
 type GemmSpec =
   | {
@@ -279,6 +285,21 @@ type GemmSpec =
      * 1 バイトも動かない MUST。
      */
     readonly rowWindow?: boolean;
+  }
+  | {
+    /**
+     * states 形 attention の ①ₜ（**K 行タイル共有** — perf-ledger K-13 / ADR 0067 決定 4）。
+     * 融合 attention の `attention_qk` と違うのは B タイル（K の出どころが論理 col で 2 つに
+     * 分かれる）と store（述語 + live 切り）だけで、A タイル・共有タイル・内積ループは同一。
+     * v4 は取らない（実効 N が実行時の live なので quad 書きが `[live, col_cap)` を潰す）。
+     */
+    readonly op: "attention_state_qk";
+    /** sliding window 変種（`W > 0` — `stateSliding` の 1 ビット）。 */
+    readonly sliding: boolean;
+    /** GQA 変種（`r > 1`）。 */
+    readonly gqa: boolean;
+    /** `M`（物理 chunk 行数 — 幾何のバケット）。 */
+    readonly rows: number;
   }
   | {
     readonly op: "linear";
@@ -375,6 +396,7 @@ export const assertGemmRowWindow = (
 const BATCHED_OPS: ReadonlySet<GemmSpec["op"]> = new Set([
   "bmm",
   "attention_qk",
+  "attention_state_qk",
   "attention_pv",
   "conv1d",
   "conv2d",
@@ -1242,6 +1264,201 @@ ${fillBDense(geometry, "v", "attention_pv", v4, compute)}`,
   );
 };
 
+/**
+ * states 形 ①ₜ の K 読み（**2 源** — 論理 col < P はスロット・以降は今 step の `ins`）。
+ *
+ * MUST: 束縛の選択だけをここに置き、行頭は列ごとに prologue で畳む（{@link prologueBStateQk}）。
+ * 行頭の 2 源分岐を充填側へ持ち込むと、K タイルループの回数ぶん同じ分岐を回すことになる。
+ */
+const STATE_QK_K_READ_WGSL = `
+// K の 2 源（① の score_slot / score_ins と同じ踏み分け）。行頭は列ごとに畳んであるので、
+// ここは束縛の選択だけ
+fn k_read(from_slot: bool, index: u32) -> f32 {
+  if (from_slot) {
+    return slot_k[index];
+  }
+  return ins_k[index];
+}
+`;
+
+/**
+ * states 形 ①ₜ の B タイル（Kᵀ `[depth, live]` — 列 = 論理 col）の担当。
+ *
+ * 構造は融合 attention の {@link prologueBAttentionQk} と同じ「k 連続で読んで共有側で転置」で、
+ * 違うのは**行頭が論理 col の 2 源で分かれる**ことだけ。2 源の式は ① と同一
+ * （`col < P` はスロット `(kv_plane · C + slot_row(col)) · D`・以降は ins
+ * `(kv_plane · M + (col − P)) · D`）。
+ *
+ * MUST: 行頭も出どころも **K タイルループ不変**なので prologue で 1 度だけ畳む。
+ * NOTE: `wcol >= live` の列でも行頭は計算される（u32 の算術は wrap するだけで、その値は
+ * 充填側の `wcol < live` ガードに阻まれて一度も読みに使われない）。
+ */
+const prologueBStateQk = (geometry: GemmGeometry): string => {
+  const stride = gemmRowFillStride(geometry);
+  const nQuads = gemmColumnQuads(geometry);
+  const columns = slots(gemmColumnSlots(geometry)).map((slot) =>
+    slot === 0
+      ? `  let wc0 = tid / ${GEMM_K_QUADS}u;
+  let wq = tid % ${GEMM_K_QUADS}u;
+  let wcol0 = wid.x * ${gemmTileN(geometry)}u + wc0;
+  let wsq0 = wc0 / ${GEMM_QUAD}u;
+  let wsl0 = wc0 % ${GEMM_QUAD}u;
+  let sb_base0 = (wq * ${GEMM_QUAD}u) * ${nQuads}u + wsq0;`
+      : `  let wc${slot} = wc0 + ${slot * stride}u;
+  let wcol${slot} = wcol0 + ${slot * stride}u;
+  let wsq${slot} = wc${slot} / ${GEMM_QUAD}u;
+  let wsl${slot} = wc${slot} % ${GEMM_QUAD}u;
+  let sb_base${slot} = (wq * ${GEMM_QUAD}u) * ${nQuads}u + wsq${slot};`
+  ).join("\n");
+  const bases = slots(gemmColumnSlots(geometry)).map((slot) =>
+    `  let kcol${slot} = base_col + wcol${slot};
+  let kpast${slot} = kcol${slot} < past;
+  var krow_base${slot} = 0u;
+  if (kpast${slot}) {
+    krow_base${slot} = (kv_plane * dims.capacity + slot_row(kcol${slot})) * dims.k;
+  } else {
+    krow_base${slot} = (kv_plane * dims.chunk_rows + (kcol${slot} - past)) * dims.k;
+  }`
+  ).join("\n");
+  return `  // K タイルの担当（${gemmTileN(geometry)} 列（論理 col）× ${GEMM_K_QUADS} quad を ${
+    gemmThreads(geometry)
+  } スレッドで ${gemmColumnSlots(geometry)} 巡）。
+  // K は [行, D] のまま読み、**共有メモリ側で転置して置く**（融合 attention の k 読みと同じ構造）
+${columns}
+  // 列ごとの K 行頭と出どころ（K タイルループ不変なのでここで 1 度だけ畳む）。
+  // 式は ① と同一 — col < P はスロット（物理行は読み書き同式の slot_row）・以降は ins の col − P
+${bases}`;
+};
+
+/**
+ * states 形 ①ₜ の B タイル充填。
+ *
+ * MUST: 実効 `N` は**実行時の live**（`dims.n` = `col_cap` は S のストライドの静的上界）。
+ * `dims.n` で切ると `[live, col_cap)` に当たる論理 col の K を読み、S へ寄与させてしまう。
+ * MUST: 半スケールは k 側にも掛ける（① の `stateScoreFn` が持つ 1 項の式
+ * `(q·scale) · (k·scale)` と字面を揃える — 片側 1 回に畳むと丸めが変わってビット同一が崩れる）。
+ * 範囲外は 0 のままで `0 · scale = 0` なので端数タイルの結論は変わらない。
+ */
+const fillBStateQk = (geometry: GemmGeometry): string => {
+  const filled = slots(gemmColumnSlots(geometry)).map((slot) =>
+    `    var wv${slot} = vec4<f32>(0.0);
+    if (wcol${slot} < live) {
+      if (wk0 < dims.k) {
+        wv${slot}.x = k_read(kpast${slot}, krow_base${slot} + wk0);
+      }
+      if (wk0 + 1u < dims.k) {
+        wv${slot}.y = k_read(kpast${slot}, krow_base${slot} + wk0 + 1u);
+      }
+      if (wk0 + 2u < dims.k) {
+        wv${slot}.z = k_read(kpast${slot}, krow_base${slot} + wk0 + 2u);
+      }
+      if (wk0 + 3u < dims.k) {
+        wv${slot}.w = k_read(kpast${slot}, krow_base${slot} + wk0 + 3u);
+      }
+    }
+    // 半スケール契約（① と同じ）: scale は q 側と k 側の**両方**へ掛ける
+    wv${slot} = wv${slot} * dims.scale;
+${storeBTransposed(geometry, "f32", slot)}`
+  ).join("\n");
+  return `    let wk0 = t * ${GEMM_TILE_K}u + wq * ${GEMM_QUAD}u;
+${filled}`;
+};
+
+/**
+ * states 形 ①ₜ の書き出し（S `[B·H, rows_block, col_cap]` — 添字は ① と同一）。
+ *
+ * 共通の {@link store} を使わないのは、境界と値が states 固有の 3 点で違うため:
+ * 行は `dims.m`（`rows_block`）ではなく**有効行**まで・列は `dims.n`（`col_cap`）ではなく
+ * **live** まで・値は述語外なら **−inf のビット列**（`bitcast<f32>(dims.neg_inf)`）。
+ *
+ * MUST: live 範囲は**述語外でも必ず書く**（S は一時バッファで、書かないと ② の amax が前回の
+ * 残骸を食う）。逆に `[live, col_cap)` と pad 行は 1 語も書かない（① と同じ — 読者が live と
+ * 有効行で切ることと対）。
+ * MUST: 述語は ① と同じ `in_window(col, past + row)`（`row` は chunk 内のグローバル行 =
+ * `row_offset` + 局所行）。上限だけの実装は sliding で沈黙混入になる。
+ */
+const storeStateQk = (geometry: GemmGeometry): string => {
+  const rows = slots(geometry.regM).map((row) =>
+    row === 0
+      ? `  let orow0 = wid.y * ${gemmTileM(geometry)}u + lid.y * ${geometry.regM}u;`
+      : `  let orow${row} = orow0 + ${row}u;`
+  ).join("\n");
+  const write = (row: number, col: number): string => {
+    const acc = `acc${row}_${Math.floor(col / GEMM_QUAD)}.${TILE_COMPONENTS[col % GEMM_QUAD]}`;
+    return `    if (ocol${at(col)} < live) {
+      s[obase + ocol${at(col)}] = select(neg_inf, ${acc}, in_window(base_col + ocol${
+      at(col)
+    }, limit));
+    }`;
+  };
+  const rowStores = slots(geometry.regM).map((row) =>
+    `  if (orow${row} < rows_live) {
+    let obase = cbase + orow${row} * dims.n;
+    let limit = past + dims.row_offset + orow${row};
+${slots(geometry.regN).map((col) => write(row, col)).join("\n")}
+  }`
+  ).join("\n");
+  return `  // 行は**有効行**まで（pad 行の S は誰も読まない — ③ が 0 を書いて返す）。列は live まで
+  // （[live, col_cap) の残骸は ① と同じく触らないのが正）
+  let rows_live = effective_rows(lengths.query);
+  let ocol = wid.x * ${gemmTileN(geometry)}u + lid.x * ${geometry.regN}u;
+${rows}
+${rowStores}`;
+};
+
+/**
+ * states 形 attention ①ₜ（**K 行タイル共有** — perf-ledger K-13）。
+ * `S[z, 局所行, cl] = Σ_d (q·scale)[z, row_offset + 局所行, d] · (k·scale)[列 cl の K 行, d]`。
+ *
+ * A は q（`[B·H, M, D]` の行ブロック）で融合 attention の A 充填そのまま、B は K を
+ * 「D 連続で読んで共有側で転置」（{@link prologueBStateQk} — 違いは行頭の 2 源だけ）。
+ * **縮約は K 昇順・K タイル 16 の逐次**なので、1 出力要素あたりの加算順が ①（`stateScoreFn` の
+ * `d` 逐次）と厳密に一致する = **① とビット同一**（ADR 0022 決定 3 の数値契約）。
+ *
+ * MUST: `Lengths` は**ヘッダ側**（`struct Dims` より前）で宣言する。骨格の `enable f16`
+ * ディレクティブ位置の MUST と同居させないため、この経路は f16 計算変種を取らない。
+ * MUST: 束縛番号は ①（0 params / 1 q / 2 ins_k / 3 slot_k / 4 s / 5 lengths）と同一に保つ —
+ * runtime 側は キー・WGSL・params・workgroup の 4 点だけを差し替える。
+ */
+const attentionStateQkTiledWgsl = (
+  geometry: GemmGeometry,
+  sliding: boolean,
+  gqa: boolean,
+): string =>
+  skeleton(
+    geometry,
+    `// karume attention_state_qk (states 形の S 実体化, f32, GEMM 骨格の K 行タイル共有${
+      sliding ? ", sliding window" : ""
+    }${gqa ? ", GQA" : ""}, ${gemmGeometryNote(geometry)})
+${STATE_LENGTHS_STRUCT}`,
+    `@group(0) @binding(1) var<storage, read> q: array<f32>;
+@group(0) @binding(2) var<storage, read> ins_k: array<f32>;
+@group(0) @binding(3) var<storage, read> slot_k: array<f32>;
+@group(0) @binding(4) var<storage, read_write> s: array<f32>;
+@group(0) @binding(5) var<uniform> lengths: Lengths;`,
+    `
+${stateTiledGeometryWgsl(sliding)}
+${STATE_QK_K_READ_WGSL}`,
+    `  // 論理長は uniform（context 所有）なので workgroup 一様 — 内側の workgroupBarrier が
+  // WGSL の一様性要件を満たすための前提
+  let past = lengths.past;
+  let live = live_columns(past, lengths.query);
+  let base_col = column_base(past);
+  let neg_inf = bitcast<f32>(dims.neg_inf);
+  let z = wid.z;
+  let kv_plane = ${stateTiledKvPlaneWgsl(gqa)};
+  // A（q）は chunk 全体 [B·H, M, D] の row_offset 行目から読み、S はブロック相対で 0 行目から
+  // 書く（① の添字 (z · rows_block + 局所行) · col_cap + cl と同じ）
+  let abase = (z * dims.chunk_rows + dims.row_offset) * dims.k;
+  let cbase = z * dims.m * dims.n;
+${prologueA(geometry, "attention_state_qk", false)}
+${prologueBStateQk(geometry)}`,
+    `${fillA(geometry, "q", false, (expr) => `${expr} * dims.scale`)}
+${fillBStateQk(geometry)}`,
+    storeStateQk(geometry),
+    STATE_QK_TILED_DIMS_EXTRA,
+  );
+
 const linearVariantWgsl = (
   geometry: GemmGeometry,
   weight: WeightStorage,
@@ -1757,6 +1974,10 @@ const resolveGeometry = (spec: GemmSpec): GemmGeometry => {
     case "attention_qk":
     case "attention_pv":
       return defaultGemmGeometry();
+    // states 形 ①ₜ は**行数バケットを通す**（融合 attention が通さないのは Anima の実測選定を
+    // 動かさないためで、①ₜ にはその前提が無い — 実効 M は chunk 行数そのもの）。
+    case "attention_state_qk":
+      return gemmGeometryForRows(spec.rows);
     default:
       return rowsGeometry(spec.rows);
   }
@@ -1811,6 +2032,8 @@ export const gemmWgsl = (spec: GemmSpec): string => {
         spec.gqa,
         spec.rowWindow,
       );
+    case "attention_state_qk":
+      return attentionStateQkTiledWgsl(geometry, spec.sliding, spec.gqa);
     case "attention_pv":
       return attentionPvWgsl(geometry, spec.v4, spec.compute, spec.score, spec.gqa, spec.rowWindow);
     case "bmm":
@@ -1819,3 +2042,16 @@ export const gemmWgsl = (spec: GemmSpec): string => {
       return denseWgsl(geometry, spec.op, spec.v4);
   }
 };
+
+/**
+ * states 形 ①ₜ の WGSL（{@link gemmWgsl} の states 枝への薄い面 — attention.ts の
+ * `attentionQkWgsl` と同じ役回り）。
+ *
+ * MUST: `chunkRows` はキー（src/kernels/state-attention.ts の `stateQkTiledKey`）と dispatch
+ * （同 `stateQkTiledWorkgroups`）へ渡すものと**同じ値**。3 者とも `gemmGeometryForRows` の
+ * 1 純関数を通るので、値が同じなら幾何は必ず一致する。
+ * NOTE: 生成が gemm.ts 側に居るのは骨格の断片を所有するのがこのファイルだから（キー・
+ * workgroup 算出・切替条件は state-attention.ts が持つ）。逆向きの import は作らない。
+ */
+export const stateQkTiledWgsl = (sliding: boolean, gqa: boolean, chunkRows: number): string =>
+  gemmWgsl({ op: "attention_state_qk", sliding, gqa, rows: chunkRows });

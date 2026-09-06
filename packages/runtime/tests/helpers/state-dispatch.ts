@@ -18,6 +18,8 @@ import {
   statePvWorkgroups,
   stateQkParallelWgsl,
   stateQkParallelWorkgroups,
+  stateQkTiledParams,
+  stateQkTiledWorkgroups,
   stateQkWgsl,
   stateQkWorkgroups,
   stateSliding,
@@ -25,6 +27,7 @@ import {
   stateStatsWgsl,
   stateStatsWorkgroups,
 } from "../../src/kernels/state-attention.ts";
+import { stateQkTiledWgsl } from "../../src/kernels/gemm.ts";
 import {
   stateAppendParams,
   stateAppendWgsl,
@@ -119,11 +122,11 @@ const uniformBuffer = (device: GPUDevice, data: Uint32Array<ArrayBuffer>): GPUBu
 const lengthsBuffer = (device: GPUDevice, past: number, query: number): GPUBuffer =>
   uniformBuffer(device, new Uint32Array([past, query]));
 
-const readFloats = async (
+const readRaw = async (
   device: GPUDevice,
   buffer: GPUBuffer,
   count: number,
-): Promise<Float32Array<ArrayBuffer>> => {
+): Promise<ArrayBuffer> => {
   const size = Math.max(4, count * 4);
   const staging = device.createBuffer({
     size,
@@ -136,8 +139,26 @@ const readFloats = async (
   const copy = staging.getMappedRange().slice(0);
   staging.unmap();
   staging.destroy();
-  return new Float32Array(copy, 0, count);
+  return copy;
 };
+
+const readFloats = async (
+  device: GPUDevice,
+  buffer: GPUBuffer,
+  count: number,
+): Promise<Float32Array<ArrayBuffer>> =>
+  new Float32Array(await readRaw(device, buffer, count), 0, count);
+
+/**
+ * **語（u32）のまま**読み戻す。①ₜ と ① のビット同一門は f32 比較では組めない — `-inf` も
+ * 毒値も NaN も `===` で比べられない値が正規に混ざるので、語で突き合わせる唯一の形。
+ */
+const readWords = async (
+  device: GPUDevice,
+  buffer: GPUBuffer,
+  count: number,
+): Promise<Uint32Array<ArrayBuffer>> =>
+  new Uint32Array(await readRaw(device, buffer, count), 0, count);
 
 const pipelineOf = (
   device: GPUDevice,
@@ -316,6 +337,115 @@ export const runStateAttention = async (
       scores: await readFloats(device, scores, batchHeads * lastBlock * colCap),
       stats: await readFloats(device, stats, batchHeads * lastBlock * STATE_STATS_STRIDE),
     };
+  } finally {
+    for (const buffer of buffers) buffer.destroy();
+  }
+};
+
+/**
+ * ①QK の 3 経路（`sequential` = ① 参照経路 / `parallel` = ①' D 並列縮約 /
+ * `tiled` = ①ₜ K 行タイル共有）。束縛番号は 3 経路とも同じで、替わるのは WGSL・params・
+ * workgroup 算出の 3 点だけ。
+ */
+export type StateQkVariant = "sequential" | "parallel" | "tiled";
+
+/**
+ * ①QK **だけ**を行ブロックごとに撃ち、各ブロックの S を**語（u32）のまま**返す。
+ *
+ * ②③ を積まないのは、①ₜ と ① の一致を S そのもので見るため（O まで通すと softmax の
+ * 正規化が差を潰し、`[live, col_cap)` の残骸も pad 行の非書き込みも観測できなくなる）。
+ *
+ * MUST: ブロックごとに S を毒値へ戻す（前ブロックの残りが「書き切らない誤り」を塗り潰す）。
+ * MUST: パイプラインは**最終 WGSL 文字列**でキャッシュする（{@link runStateAttention} と同文 —
+ * 故障注入の変異版が正常版のパイプラインを引くと注入が常に緑になる）。
+ */
+export const runStateQk = async (
+  device: GPUDevice,
+  spec: StateCase,
+  inputs: StateInputs,
+  variant: StateQkVariant,
+  options: { readonly mutate?: StateMutation; readonly cache?: StatePipelineCache } = {},
+): Promise<readonly Uint32Array<ArrayBuffer>[]> => {
+  const { mutate } = options;
+  const sliding = stateSliding(spec.window);
+  const gqa = spec.heads !== spec.kvHeads;
+  const colCap = caseColCap(spec);
+  const rowsBlock = spec.rowsBlock ?? spec.chunkRows;
+  const batchHeads = spec.batch * spec.heads;
+  const cache = options.cache ?? new Map<string, GPUComputePipeline>();
+  const source = variant === "parallel"
+    ? stateQkParallelWgsl(sliding, gqa)
+    : variant === "tiled"
+    ? stateQkTiledWgsl(sliding, gqa, spec.chunkRows)
+    : stateQkWgsl(sliding, gqa);
+  const buffers: GPUBuffer[] = [];
+  const track = <T extends GPUBuffer>(buffer: T): T => {
+    buffers.push(buffer);
+    return buffer;
+  };
+  try {
+    const q = track(storageBuffer(device, inputs.q));
+    const insK = track(storageBuffer(device, inputs.insK));
+    const slotK = track(storageBuffer(device, inputs.slotK));
+    const lengths = track(lengthsBuffer(device, spec.past, spec.query));
+    const scores = track(
+      storageBuffer(device, seeded(batchHeads * rowsBlock * colCap, () => STATE_S_POISON)),
+    );
+    const pipeline = pipelineOf(
+      device,
+      cache,
+      mutate === undefined ? source : mutate("qk", source),
+    );
+    const limit = device.limits.maxComputeWorkgroupsPerDimension;
+    const blocks: Uint32Array<ArrayBuffer>[] = [];
+    for (let rowOffset = 0; rowOffset < spec.chunkRows; rowOffset += rowsBlock) {
+      const block = Math.min(rowsBlock, spec.chunkRows - rowOffset);
+      const geometry = {
+        rowsBlock: block,
+        rowOffset,
+        chunkRows: spec.chunkRows,
+        depth: spec.depth,
+        kvRepeat: spec.heads / spec.kvHeads,
+        window: spec.window,
+        capacity: spec.capacity,
+        colCap,
+        scale: halfScale(spec.depth),
+      };
+      const dispatchGeometry = {
+        batchHeads,
+        rowsBlock: block,
+        rowOffset,
+        depth: spec.depth,
+        window: spec.window,
+      };
+      const params = track(uniformBuffer(
+        device,
+        variant === "tiled" ? stateQkTiledParams(geometry) : stateAttentionParams(geometry),
+      ));
+      const words = batchHeads * block * colCap;
+      device.queue.writeBuffer(scores, 0, seeded(words, () => STATE_S_POISON));
+      const groups = variant === "parallel"
+        ? stateQkParallelWorkgroups(dispatchGeometry, spec.past, spec.query, limit, spec.name)
+        : variant === "tiled"
+        ? stateQkTiledWorkgroups(
+          dispatchGeometry,
+          spec.chunkRows,
+          spec.past,
+          spec.query,
+          limit,
+          spec.name,
+        )
+        : stateQkWorkgroups(dispatchGeometry, spec.past, spec.query, limit, spec.name);
+      const encoder = device.createCommandEncoder();
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, bind(device, pipeline, [params, q, insK, slotK, scores, lengths]));
+      pass.dispatchWorkgroups(groups[0], groups[1], groups[2]);
+      pass.end();
+      device.queue.submit([encoder.finish()]);
+      blocks.push(await readWords(device, scores, words));
+    }
+    return blocks;
   } finally {
     for (const buffer of buffers) buffer.destroy();
   }

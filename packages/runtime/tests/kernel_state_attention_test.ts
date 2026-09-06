@@ -27,6 +27,10 @@ import {
   stateQkParallelKey,
   stateQkParallelWgsl,
   stateQkParallelWorkgroups,
+  stateQkTiledEligible,
+  stateQkTiledKey,
+  stateQkTiledParams,
+  stateQkTiledWorkgroups,
   stateQkWgsl,
   stateQkWorkgroups,
   stateSliding,
@@ -36,6 +40,7 @@ import {
   stateStatsWgsl,
   stateStatsWorkgroups,
 } from "../src/kernels/state-attention.ts";
+import { stateQkTiledWgsl } from "../src/kernels/gemm.ts";
 import {
   STATE_APPEND_WORKGROUP_SIZE,
   stateAppendKey,
@@ -613,5 +618,132 @@ Deno.test("①' の適用条件は M（chunkRows）=== 1 だけ — 近傍の M 
   // prefill が逆行するが、値は帯の内側なので数値門も census 門の decode 側も鳴らない
   for (const chunkRows of [2, 3, 4, 8, 768]) {
     assertEquals(stateQkParallelEligible(chunkRows), false, `M=${chunkRows} は ① のまま`);
+  }
+});
+
+const TILED_DISPATCH = { batchHeads: 6, rowsBlock: 40, rowOffset: 0, depth: 32, window: 0 };
+
+Deno.test("①ₜ のキーは M の幾何バケットを載せる（辺だけでなく幾何そのもの）", () => {
+  // 綴りは gemm の幾何断片（`reg{tileM}x{tileN}r{regM}x{regN}w{wgX}`）と同一。変種ビットは
+  // ① と同じ順で後置する
+  assertEquals(stateQkTiledKey(false, false, 16), "attention_state_qk:v1:f32:reg16x16r1x4w4");
+  assertEquals(
+    stateQkTiledKey(true, true, 16),
+    "attention_state_qk:v1:f32:reg16x16r1x4w4:sliding:gqa",
+  );
+  // バケット境界（64 / 512）を跨ぐと**キーが変わる**（= 別パイプライン）。跨がないと、同じキーで
+  // 別幾何の WGSL がキャッシュから配られ、dispatch の辺と噛み合わずにタイルが欠落する
+  assertEquals(stateQkTiledKey(false, false, 64), stateQkTiledKey(false, false, 16));
+  assertEquals(stateQkTiledKey(false, false, 65), "attention_state_qk:v1:f32:reg64x32r4x4w8");
+  assertEquals(stateQkTiledKey(false, false, 512), stateQkTiledKey(false, false, 65));
+  assertEquals(stateQkTiledKey(false, false, 513), "attention_state_qk:v1:f32:reg128x128r8x8w16");
+  assertEquals(stateQkTiledKey(false, false, 768), stateQkTiledKey(false, false, 513));
+  // 3 経路が全て別キー（同じ構成が 2 通りのキーを持たない / 別構成が同じキーを持たない）
+  const keys = [
+    ...VARIANTS.map(([sliding, gqa]) => stateQkKey(sliding, gqa)),
+    ...VARIANTS.map(([sliding, gqa]) => stateQkParallelKey(sliding, gqa)),
+    ...VARIANTS.flatMap(([sliding, gqa]) =>
+      [16, 100, 768].map((rows) => stateQkTiledKey(sliding, gqa, rows))
+    ),
+  ];
+  assertEquals(new Set(keys).size, keys.length);
+});
+
+Deno.test("①ₜ は ① の契約断片（読み書き同式・述語・有効行・−inf）を uniform 名だけ替えて共有する", () => {
+  for (const [sliding, gqa] of VARIANTS) {
+    const wgsl = stateQkTiledWgsl(sliding, gqa, 16);
+    assertEquals(stateQkTiledWgsl(sliding, gqa, 16), wgsl, "決定性");
+    // MUST: 断片は ① と**同じ生成器**から出る（uniform 名が `params` → `dims` に替わるだけ）。
+    // 書き写した実装だと ring 写像・窓の下限・有効行のどれかが片方だけ直る形が通ってしまう
+    assertEquals(wgsl.includes(stateSlotRowWgsl(sliding, "dims")), true, "slot_row");
+    assertEquals(wgsl.includes("fn effective_rows(query: u32) -> u32 {"), true, "effective_rows");
+    assertEquals(wgsl.includes("bitcast<f32>(dims.neg_inf)"), true, "述語外の −inf");
+    // MUST: u32 で巻き戻る加算形を持たない（① と同文）
+    assertEquals(wgsl.includes("col + dims.window"), false, "u32 で巻き戻る加算形");
+    // 実効 N は live。`col_cap`（= dims.n）で B タイルを切ると残骸を読む
+    assertEquals(wgsl.includes("if (wcol0 < live) {"), true, "B ローダの live 切り");
+    assertEquals(wgsl.includes("if (ocol < live) {"), true, "store の live 切り");
+    // 半スケールは q 側と k 側の**両方**（① の 1 項の式と同じ丸め列）
+    assertEquals(wgsl.includes("* dims.scale;"), true, "A 側の半スケール");
+    assertEquals(wgsl.includes("wv0 = wv0 * dims.scale;"), true, "B 側の半スケール");
+    // K の 2 源が 1 箇所に畳まれている（① の score_slot / score_ins と同じ踏み分け）
+    assertEquals(wgsl.includes("fn k_read(from_slot: bool, index: u32) -> f32 {"), true, "k_read");
+  }
+  assertEquals(stateQkTiledWgsl(true, false, 16).includes("(limit - col) < dims.window"), true);
+  assertEquals(stateQkTiledWgsl(false, false, 16).includes("(limit - col) < dims.window"), false);
+  // 変種もバケットも実際に別物（キーだけ分けて中身が同じ = 変種 / 幾何が効いていない）
+  assertNotEquals(stateQkTiledWgsl(false, false, 16), stateQkTiledWgsl(false, true, 16));
+  assertNotEquals(stateQkTiledWgsl(false, false, 16), stateQkTiledWgsl(true, false, 16));
+  assertNotEquals(stateQkTiledWgsl(false, false, 16), stateQkTiledWgsl(false, false, 768));
+});
+
+Deno.test("①ₜ の params は語順どおりに詰まる（骨格の m/n/k は rows_block / col_cap / depth）", () => {
+  const params = stateQkTiledParams({ ...GEOMETRY, rowOffset: 4 });
+  assertEquals(params.length, 12, "uniform 整列で 48 バイト");
+  assertEquals([...params.slice(0, 9)], [
+    GEOMETRY.rowsBlock,
+    GEOMETRY.colCap,
+    GEOMETRY.depth,
+    4,
+    GEOMETRY.chunkRows,
+    GEOMETRY.kvRepeat,
+    GEOMETRY.window,
+    GEOMETRY.capacity,
+    STATE_NEG_INF_BITS,
+  ]);
+  assertEquals(new Float32Array(params.buffer)[9], GEOMETRY.scale);
+  // 値域門は ① と同じ 1 本（別に持つと片方だけ通る形ができる）
+  assertThrows(
+    () => stateQkTiledParams({ ...GEOMETRY, kvRepeat: 0 }),
+    CodegenError,
+    "kv_repeat",
+  );
+  assertThrows(
+    () => stateQkTiledParams({ ...GEOMETRY, rowOffset: 6, rowsBlock: 4 }),
+    CodegenError,
+    "行ブロック",
+  );
+  assertThrows(
+    () => stateQkTiledParams({ ...GEOMETRY, colCap: 31 }),
+    CodegenError,
+    "col_cap",
+  );
+});
+
+Deno.test("①ₜ の dispatch の辺は M の幾何バケットから出る（定数で持ち回らない）", () => {
+  // M ≤ 64 → M16N16。列 ⌈40/16⌉ = 3・行 ⌈40/16⌉ = 3
+  assertEquals(stateQkTiledWorkgroups(TILED_DISPATCH, 40, 0, 40, LIMIT, "t"), [3, 3, 6]);
+  // 65..512 → M64N32。列 ⌈40/32⌉ = 2・行 ⌈40/64⌉ = 1
+  assertEquals(stateQkTiledWorkgroups(TILED_DISPATCH, 100, 0, 40, LIMIT, "t"), [2, 1, 6]);
+  // 513.. → 既定 M128N128。列も行も 1 タイル
+  assertEquals(stateQkTiledWorkgroups(TILED_DISPATCH, 768, 0, 40, LIMIT, "t"), [1, 1, 6]);
+  // 列軸は live（容量には依らない）・行軸は有効行（pad 行を覆わない）
+  assertEquals(stateQkTiledWorkgroups(TILED_DISPATCH, 40, 88, 40, LIMIT, "t")[0], 8, "live 128");
+  const tail = { ...TILED_DISPATCH, rowsBlock: 40, rowOffset: 40 };
+  assertEquals(stateQkTiledWorkgroups(tail, 40, 0, 40, LIMIT, "t")[1], 0, "丸ごと pad は 0");
+  assertEquals(stateQkTiledWorkgroups(tail, 40, 0, 41, LIMIT, "t")[1], 1, "1 行だけ有効");
+  // MUST: 上限超過は fail loudly（タイル系 — 縮退させると S のタイルが欠け、②③ が残骸を読む）
+  assertThrows(
+    () => stateQkTiledWorkgroups(TILED_DISPATCH, 40, 4096, 1, 8, "t"),
+    DispatchLimitError,
+  );
+});
+
+Deno.test("①ₜ の適用条件は M ≥ 16（最小の行タイル辺）— ①' の M=1 とは重ならない", () => {
+  // 最小バケット M16N16 の tileM が 16。それ未満はタイルの大半が空振りして ① と同じ traffic の
+  // まま barrier と共有メモリのぶんだけ損になる
+  for (const chunkRows of [1, 2, 4, 8, 15]) {
+    assertEquals(stateQkTiledEligible(chunkRows), false, `M=${chunkRows} は ① のまま`);
+  }
+  for (const chunkRows of [16, 17, 40, 100, 768]) {
+    assertEquals(stateQkTiledEligible(chunkRows), true, `M=${chunkRows} は ①ₜ`);
+  }
+  // MUST: 2 つの適用条件が重ならない（重なると runtime 側の優先順が値に効いてしまう）
+  for (const chunkRows of [1, 2, 15, 16, 768]) {
+    assertEquals(
+      stateQkTiledEligible(chunkRows) && stateQkParallelEligible(chunkRows),
+      false,
+      `M=${chunkRows} で ①ₜ と ①' の適用条件が重なった`,
+    );
   }
 });

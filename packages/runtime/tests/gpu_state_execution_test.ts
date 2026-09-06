@@ -28,6 +28,7 @@ import {
   statePvParallelKey,
   stateQkKey,
   stateQkParallelKey,
+  stateQkTiledKey,
 } from "../src/kernels/state-attention.ts";
 import { acquireGpu, type GpuContext, RUNTIME_INTERNAL } from "../src/gpu/device.ts";
 import { openModel } from "../src/format/container.ts";
@@ -527,6 +528,81 @@ Deno.test({
               `${label}: 席と計画から期待されない ${stage} のキーが混ざっている（${
                 keys.join(" / ")
               }）`,
+            );
+          }
+        } finally {
+          await context.dispose();
+          await session.dispose();
+        }
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+/** ①ₜ（`M ≥ 16` で選ぶ K 行タイル共有経路）を踏ませるための形（`M = 16` が入る容量）。 */
+const TILED: StateModel = { heads: 4, kvHeads: 2, depth: 4, capacity: 64 };
+
+const TILED_SLIDING: StateModel = { heads: 2, kvHeads: 2, depth: 4, capacity: 16, window: 16 };
+
+/**
+ * **census**（ADR 0058 決定 4 ③ の ①ₜ 版 — perf-ledger K-13）— ①QK の **3 経路**が計画の `M` と
+ * 席どおりに走ることを見る。
+ *
+ * ①ₜ（K 行タイル共有）は **① とビット同一**なので**席に依らない既定経路**で、`M ≥ 16` の計画
+ * だけが選ぶ（適用条件は src/kernels/state-attention.ts の `stateQkTiledEligible`）。したがって
+ * 期待は「M ≥ 16 → ①ₜ（席が `"parallel"` でも変わらない）・M = 1 → 席どおり ① / ①'」。
+ *
+ * MUST: 3 経路を**全て**見る（期待した 1 本が出ていることと、残り 2 本が 1 本も出ていないことの
+ * 両方）。片側だけだと「①ₜ が結線から落ちて ① が走っている」が素通りする — ①ₜ は ① と値が
+ * 1 ビットも違わないので、数値門は原理的に鳴らない。
+ * MUST: 期待は行ごとに直書きする（判定を輸入すると実装と一緒に間違える）。
+ */
+Deno.test({
+  name:
+    "states 形 attention ①QK の 3 経路は計画の M と席どおりに走る（census・実 GPU / timestamp-query）",
+  ignore: !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    try {
+      for (
+        const [label, model, sliding, reduce, chunkRows, expected] of [
+          ["full r=2 prefill M=16", TILED, false, "sequential", 16, "tiled"],
+          // 席は ①ₜ を動かさない（ビット同一なので既定経路 — 席で切り替える対象ではない）
+          ["full r=2 parallel prefill M=16", TILED, false, "parallel", 16, "tiled"],
+          ["sliding r=1 prefill M=16", TILED_SLIDING, true, "sequential", 16, "tiled"],
+          // M=1 は ①ₜ の適用外。席どおりに ① / ①' へ分かれる
+          ["full r=2 decode M=1", TILED, false, "sequential", 1, "sequential"],
+          ["full r=2 parallel decode M=1", TILED, false, "parallel", 1, "parallel"],
+        ] as const
+      ) {
+        const session = await stateSession(gpu, model, { stateAttentionReduce: reduce });
+        const context = await session.createGenerationContext({ chunkLength: chunkRows });
+        try {
+          await runStep(
+            session,
+            context,
+            model,
+            stepInputs(model, chunkRows, 7),
+            chunkRows,
+            chunkRows,
+          );
+          const keys = session.diagnostics().lastRunTiming?.entries.map((entry) => entry.key) ?? [];
+          assert(keys.length > 0, `${label}: 内訳が空（キー検査が空振りしている）`);
+          const gqa = model.heads !== model.kvHeads;
+          const shown = keys.join(" / ");
+          for (
+            const [route, key] of [
+              ["sequential", stateQkKey(sliding, gqa)],
+              ["parallel", stateQkParallelKey(sliding, gqa)],
+              ["tiled", stateQkTiledKey(sliding, gqa, chunkRows)],
+            ] as const
+          ) {
+            assertEquals(
+              keys.includes(key),
+              route === expected,
+              `${label}: ①QK の ${route} 経路キー ${key} の有無が期待と違う（走った内訳: ${shown}）`,
             );
           }
         } finally {

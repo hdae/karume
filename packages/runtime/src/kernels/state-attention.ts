@@ -5,6 +5,7 @@
  * | -- | ---------------------------------------- | ----------------------------------------------- |
  * | ①  | `attention_state_qk:v1:f32:wg16x4`       | 論理 col 空間の `S` を**行ブロック窓で実体化**  |
  * | ①' | `attention_state_qk:v1:f32:wg16x16:par`  | ① の **D 並列縮約**変種（opt-in — 下記）       |
+ * | ①ₜ | `attention_state_qk:v1:f32:reg<幾何>`     | ① の **K 行タイル共有**変種（既定 — 下記）      |
  * | ②  | `attention_state_stats:v2:f32:wg256`     | 行ごとの `m = amax S` と `inv = 1/Σexp(S−m)`    |
  * | ③  | `attention_state_pv:v1:f32:wg16x4`       | `O = P @ V`（`P = exp(S−m)·inv` は**非実体化**）|
  * | ③' | `attention_state_pv:v1:f32:wg16x16:par`  | ③ の **KV 並列縮約**変種（opt-in — 下記）      |
@@ -68,6 +69,29 @@
  * MUST: pad 行の分岐は **workgroup 一様**（`workgroup_id.y` 由来）なので barrier の手前で
  * 返してよいが、`cl ≥ live` の列と `d ≥ D` のレーンは return せず**空回りで 0 を寄与する**
  * （③' と同じ理由 — WGSL の barrier は一様制御流の外に置けない）。
+ *
+ * ## ①ₜ K 行タイル共有変種（**席に依らない既定経路** — perf-ledger K-13）
+ *
+ * ① は 1 invocation = S の 1 要素なので、K の 1 行を**行の本数ぶん**読み直す。prefill
+ * （M = 768）では 14.7K token の chunk で ①QK が chunk GPU 時間の 40% を占める traffic 律速
+ * （docs/research/2026-09-06-state-qk-parallel-k14.md の内訳）。①ₜ は融合 attention の
+ * `attention_qk` が既に持つ **GEMM 骨格**（共有メモリのタイル・レジスタブロック・M バケット幾何
+ * — src/kernels/gemm.ts）に states 用の断片を差した 1 本で、K を行タイルへ 1 度だけ載せて
+ * `tileM` 行の q で使い回す。行列の対応は A = この行ブロックの q（`[rows_block × depth]`）・
+ * B = Kᵀ（`[depth × live]`・列 = 論理 col の 2 源）・出力 = S（① と同じ添字）。
+ *
+ * MUST: **① とビット同一**。1 出力要素あたりの加算順は骨格側で `d` 昇順の逐次に固定されており
+ * （K タイル 16 昇順 — ADR 0022 決定 3）、① の `stateScoreFn` の逐次と厳密に一致する。半スケールも
+ * 1 項の式（`(q·scale) · (k·scale)`）で揃える（A ローダで q 側・B ローダで k 側）。だから席
+ * （`stateAttentionReduce`）に依らない**既定経路**で選べる — 縮約順が変わる ①' とは性格が違う。
+ * MUST: 実効 `N` は**実行時の live**。骨格の `Dims.n` には静的上界 `col_cap` を入れるが、B ローダは
+ * `cl < live` の列しか読まず store も `cl < live` しか書かない（`[live, col_cap)` の残骸は ① と
+ * 同じく触らない）。行は `local_row < effective_rows(query)` まで（pad 行は 1 語も書かない）。
+ * MUST: 述語は ① と同じ `in_window(col, past + row)`。live 範囲内なら述語外でも **−inf を必ず
+ * 書く**（② が残骸を食わないため）。述語外の列の積和は回してよい（読む K 行は範囲内なので安全で、
+ * 値は書き出しの `select` で捨てる）。
+ * MUST: 適用条件は {@link stateQkTiledEligible}（`M ≥ 16`）。優先順は M=1 かつ席が `"parallel"` →
+ * ①' / `M ≥ 16` → ①ₜ / それ以外 → ①（判定は runtime 側 `#buildStateAttention` の 1 箇所）。
  *
  * ## 記号（正本 = ADR 0067 決定 4）
  *
@@ -135,6 +159,12 @@ import { IS_NAN_BITS_WGSL, NAN_MAX_WGSL } from "../codegen/numerics-wgsl.ts";
 import { CodegenError } from "../codegen/errors.ts";
 import { gridStrideWorkgroups, tiledWorkgroups } from "../codegen/dispatch.ts";
 import { assertU32Params } from "../codegen/params.ts";
+import {
+  gemmGeometryForRows,
+  gemmGeometryTileKeyPart,
+  gemmTileM,
+  gemmTileN,
+} from "./gemm-geometry.ts";
 
 /** ①QK / ③PV の workgroup 幅（① は列方向・③ は D 方向）。 */
 export const STATE_ATTENTION_TILE_X = 16;
@@ -212,6 +242,37 @@ export const stateQkParallelKey = (sliding: boolean, gqa: boolean): string =>
  */
 export const stateQkParallelEligible = (chunkRows: number): boolean => chunkRows === 1;
 
+/**
+ * ①ₜ のキー（GEMM 骨格のタイル経路 — perf-ledger K-13）。幾何の綴りは gemm 側と同じ断片
+ * （{@link gemmGeometryTileKeyPart}）で、`M` のバケットがそのまま載る。
+ *
+ * MUST: 幾何を載せる（① の `wg16x4` に当たる位置）。載せないと、`M` バケットの違う 2 つの計画が
+ * 同じキーで別の WGSL を要求し、「同一キー → バイト同一 WGSL」が崩れる。
+ * MUST: `chunkRows` は生成（gemm.ts の `attentionStateQkTiledWgsl`）へ渡すものと**同じ値**
+ * （gemm.ts の `gemmKeyPart` の MUST と同文 — 片方だけ渡し忘れるとキャッシュに載った別幾何の WGSL が
+ * dispatch 数と噛み合わずに出力タイルが欠落する）。
+ */
+export const stateQkTiledKey = (sliding: boolean, gqa: boolean, chunkRows: number): string =>
+  `attention_state_qk:v1:f32:${gemmGeometryTileKeyPart(gemmGeometryForRows(chunkRows))}${
+    stateVariantKeyPart(sliding, gqa)
+  }`;
+
+/**
+ * ①ₜ の**適用条件** — `M`（物理 chunk 行数）が最小の行タイル辺 16 以上の計画だけ。
+ *
+ * WHY: ① は 1 invocation = S の 1 要素で、K の 1 行を**行の本数ぶん**読み直す traffic 律速。
+ * ①ₜ は GEMM 骨格の共有メモリタイルへ K を 1 度だけ載せ、その行タイル（`M` バケットの
+ * `tileM`）ぶんの q 行で使い回す。読み直しが減るのは行タイルに 2 行以上載るときで、
+ * 最小バケット M16N16 の `tileM` が 16 なので、`M < 16` はタイルの大半が空振りして
+ * ① と同じ traffic のまま barrier と共有メモリのぶんだけ損になる。
+ * MUST: **① とビット同一**（1 出力要素あたりの加算順が d 昇順の逐次で一致 — ADR 0022 決定 3 の
+ * 数値契約が骨格側の不変条件）。だから席（`stateAttentionReduce`）に依らない**既定経路**で、
+ * 縮約順が変わる ①' とは性格が違う。
+ * MUST: `M = 1` の計画では ①' の適用条件（{@link stateQkParallelEligible}）と重ならない
+ * （1 < 16）。優先順は runtime 側 `#buildStateAttention` が 1 箇所で持つ。
+ */
+export const stateQkTiledEligible = (chunkRows: number): boolean => chunkRows >= 16;
+
 // v2: 行 max を nan_max へ（全 NaN 行が空行判定へ化けて stats (0,0) になる穴を塞ぐ —
 // ADR 0020。非 NaN 入力ではビット不変）
 export const stateStatsKey = (sliding: boolean): string =>
@@ -285,15 +346,24 @@ export const STATE_LENGTHS_STRUCT = `struct Lengths {
 }`;
 
 /**
+ * 述語・幾何の断片が読む uniform 変数名の既定（① ①' ② ③ ③' と `state_append` の `params`）。
+ *
+ * ①ₜ（GEMM 骨格のタイル経路）だけは骨格が持つ `dims` を binding 0 に置くので、断片へ
+ * {@link STATE_TILED_UNIFORM} を渡して**同じ 1 つの式**から生成する（式を書き写すと、片方だけ
+ * 直された時に読み書きが黙ってずれる）。
+ */
+const STATE_UNIFORM = "params";
+
+/**
  * 論理 col → スロット物理行の写像（**読み書き同式 MUST** — ADR 0067 決定 4）。
  *
- * ①QK / ③PV の**読み**と `state_append` の**書き**がこの 1 文字列を共有する
+ * ①QK / ①ₜ / ③PV の**読み**と `state_append` の**書き**がこの 1 文字列を共有する
  * （src/kernels/state-append.ts が import する）。読み側だけ別式にすると、ring が一周した
  * 後の全読みが黙って別の行を指す（例外も NaN も出ない沈黙誤読）。
  */
-export const stateSlotRowWgsl = (sliding: boolean): string =>
+export const stateSlotRowWgsl = (sliding: boolean, uniform = STATE_UNIFORM): string =>
   `fn slot_row(col: u32) -> u32 {
-  return ${sliding ? "col % params.window" : "col"};
+  return ${sliding ? `col % ${uniform}.window` : "col"};
 }`;
 
 /**
@@ -302,13 +372,13 @@ export const stateSlotRowWgsl = (sliding: boolean): string =>
  * `column_base` = full: `0` / sliding: `P − min(P, W−1)`（append 前なので row 0 の窓まで
  * 全行 resident — ADR 0067 決定 4）。`live_columns` = `(P − column_base) + Q`。
  */
-const stateLiveWgsl = (sliding: boolean): string =>
+const stateLiveWgsl = (sliding: boolean, uniform = STATE_UNIFORM): string =>
   `fn column_base(past: u32) -> u32 {
-  return ${sliding ? "past - min(past, params.window - 1u)" : "0u"};
+  return ${sliding ? `past - min(past, ${uniform}.window - 1u)` : "0u"};
 }
 
 fn live_columns(past: u32, query: u32) -> u32 {
-  return ${sliding ? "min(past, params.window - 1u)" : "past"} + query;
+  return ${sliding ? `min(past, ${uniform}.window - 1u)` : "past"} + query;
 }`;
 
 /**
@@ -322,9 +392,9 @@ fn live_columns(past: u32, query: u32) -> u32 {
  * まで窓外と判定して行が静かに空になる。`limit − W + 1` を直接計算する形も
  * `limit < W−1` でアンダーフローするので採らない。
  */
-const stateWindowFn = (sliding: boolean): string =>
+const stateWindowFn = (sliding: boolean, uniform = STATE_UNIFORM): string =>
   `fn in_window(col: u32, limit: u32) -> bool {
-  return col <= limit${sliding ? " && (limit - col) < params.window" : ""};
+  return col <= limit${sliding ? ` && (limit - col) < ${uniform}.window` : ""};
 }`;
 
 /**
@@ -335,13 +405,15 @@ const stateWindowFn = (sliding: boolean): string =>
  * なる（例外も NaN も出ない）。
  * MUST: 引き算はアンダーフローを避けて分岐で切る（`query - row_offset` は u32 で巻き戻る）。
  * NOTE: 3 カーネルとも params の欄名を `rows_block` / `row_offset` で揃えてあるので、この
- * 1 文字列をそのまま共有できる。
+ * 1 文字列をそのまま共有できる。①ₜ だけは行数が骨格の `dims.m` に居る（Dims の先頭 3 語は
+ * `m` / `n` / `k` 固定）ので、欄名も引数で受ける。
  */
-const stateEffectiveRowsWgsl = `fn effective_rows(query: u32) -> u32 {
-  if (query <= params.row_offset) {
+const stateEffectiveRowsWgsl = (uniform = STATE_UNIFORM, rows = "rows_block"): string =>
+  `fn effective_rows(query: u32) -> u32 {
+  if (query <= ${uniform}.row_offset) {
     return 0u;
   }
-  return min(params.rows_block, query - params.row_offset);
+  return min(${uniform}.${rows}, query - ${uniform}.row_offset);
 }`;
 
 /**
@@ -373,7 +445,60 @@ const stateScoreFn = (name: string, array: string, lanes?: number): string =>
  * 値域門（{@link assertStateGeometry}）が `r ≥ 1` を保証するので、GQA 変種のゼロ除算は
  * 起こらない。
  */
-const kvPlaneWgsl = (gqa: boolean): string => gqa ? "z / params.kv_repeat" : "z";
+const kvPlaneWgsl = (gqa: boolean, uniform = STATE_UNIFORM): string =>
+  gqa ? `z / ${uniform}.kv_repeat` : "z";
+
+/**
+ * ①ₜ（GEMM 骨格のタイル経路 — src/kernels/gemm.ts の `attentionStateQkTiledWgsl`）が読む
+ * uniform 変数名。骨格が binding 0 に `dims: Dims` を置くので、① の `params` とは名前だけが違う。
+ */
+const STATE_TILED_UNIFORM = "dims";
+
+/**
+ * ①ₜ が使う述語・幾何関数の一式（`slot_row` / `column_base` / `live_columns` / `in_window` /
+ * `effective_rows`）。
+ *
+ * MUST: 生成の実体は ① と**同じ 4 つの断片**（この関数は uniform 名と行数の欄名を差し替えて
+ * 呼ぶだけ）。①ₜ 用に式を書き写すと、ring 写像・窓の下限・live の切り方のどれかが片方だけ
+ * 直された時に**例外も NaN も出ない**まま読み書きがずれる。
+ * NOTE: `effective_rows` の行数は骨格の `dims.m`（= `rows_block`）。Dims の先頭 3 語は
+ * `m` / `n` / `k` 固定なので、states の欄名をそのまま置けない唯一の欄。
+ */
+export const stateTiledGeometryWgsl = (sliding: boolean): string =>
+  `${stateSlotRowWgsl(sliding, STATE_TILED_UNIFORM)}
+
+${stateLiveWgsl(sliding, STATE_TILED_UNIFORM)}
+
+${stateWindowFn(sliding, STATE_TILED_UNIFORM)}
+
+${stateEffectiveRowsWgsl(STATE_TILED_UNIFORM, "m")}`;
+
+/** ①ₜ の kv 平面（{@link kvPlaneWgsl} の uniform 差し替え版 — `z` は `wid.z` の別名）。 */
+export const stateTiledKvPlaneWgsl = (gqa: boolean): string =>
+  kvPlaneWgsl(gqa, STATE_TILED_UNIFORM);
+
+/**
+ * ①ₜ が骨格の `Dims`（`{m, n, k}`）へ足す 7 語。先頭 3 語は
+ * **`m` = `rows_block` / `n` = `col_cap` / `k` = `depth`** で、行列としての M / N / K そのもの
+ * （実効 N は実行時の live なので `col_cap` は**ストライドの静的上界**にしか使わない）。
+ *
+ * MUST: 並びは {@link stateQkTiledParams} と対（この 2 つが唯一の対 — gemm.ts 側の
+ * `ROW_WINDOW_DIMS_EXTRA` / `GQA_DIMS_EXTRA` と同じ規律）。
+ * MUST: ① ③ が共有する {@link STATE_PARAMS_STRUCT} とは**別の並び**にしてよい（①ₜ は束縛の
+ * 番号だけを ① と揃えた差し替え可能なカーネルで、params は自分専用の 1 本を持つ）。逆に
+ * `STATE_PARAMS_STRUCT` の語順は動かさない — ③ と見積りが同じ表を読む。
+ * MUST: 変種（sliding / GQA）で欄を出し入れしない。1 つの struct を全変種で使うことで、
+ * ホスト側の params 組み立てが 1 本で済む（欄が変種依存だと、片方の変種だけ語位置がずれた
+ * params を書いても例外が出ない）。
+ */
+export const STATE_QK_TILED_DIMS_EXTRA = `  row_offset: u32,
+  chunk_rows: u32,
+  kv_repeat: u32,
+  window: u32,
+  capacity: u32,
+  neg_inf: u32,
+  scale: f32,
+`;
 
 /**
  * ①QK。1 invocation = S の 1 要素（`(局所行, live 列)`）で、内積は D の逐次ループ。
@@ -408,7 +533,7 @@ ${stateLiveWgsl(sliding)}
 
 ${stateWindowFn(sliding)}
 
-${stateEffectiveRowsWgsl}
+${stateEffectiveRowsWgsl()}
 
 ${stateScoreFn("score_slot", "slot_k")}
 
@@ -476,7 +601,7 @@ ${stateLiveWgsl(sliding)}
 
 ${stateWindowFn(sliding)}
 
-${stateEffectiveRowsWgsl}
+${stateEffectiveRowsWgsl()}
 
 ${stateScoreFn("score_slot", "slot_k", STATE_QK_D_LANES)}
 
@@ -581,7 +706,7 @@ ${STATE_LENGTHS_STRUCT}
 
 ${stateLiveWgsl(sliding)}
 
-${stateEffectiveRowsWgsl}
+${stateEffectiveRowsWgsl()}
 
 ${IS_NAN_BITS_WGSL}
 
@@ -705,7 +830,7 @@ ${stateSlotRowWgsl(sliding)}
 
 ${stateLiveWgsl(sliding)}
 
-${stateEffectiveRowsWgsl}
+${stateEffectiveRowsWgsl()}
 
 @compute @workgroup_size(${STATE_ATTENTION_TILE_X}, ${STATE_ATTENTION_TILE_M})
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -773,7 +898,7 @@ ${stateSlotRowWgsl(sliding)}
 
 ${stateLiveWgsl(sliding)}
 
-${stateEffectiveRowsWgsl}
+${stateEffectiveRowsWgsl()}
 
 var<workgroup> scratch: array<f32, ${STATE_ATTENTION_TILE_X * STATE_PV_KV_LANES}>;
 
@@ -941,6 +1066,32 @@ export const stateAttentionParams = (
   params[5] = geometry.window;
   params[6] = geometry.capacity;
   params[7] = geometry.colCap;
+  params[8] = STATE_NEG_INF_BITS;
+  new Float32Array(params.buffer)[9] = geometry.scale;
+  return params;
+};
+
+/**
+ * ①ₜ の uniform（{@link STATE_QK_TILED_DIMS_EXTRA} と骨格の `{m, n, k}` を合わせた 10 語 —
+ * uniform struct の整列で 48 バイト確保する）。
+ *
+ * MUST: 幾何の値域門は ① と**同じ 1 本**（{@link assertStateGeometry}）。①ₜ は ① と同じ
+ * 静的幾何から出るので、門を別に持つと片方だけ通る形ができる。
+ * MUST: 並びは {@link STATE_QK_TILED_DIMS_EXTRA} と対（この 2 つが唯一の対）。
+ */
+export const stateQkTiledParams = (
+  geometry: StateAttentionGeometry,
+): Uint32Array<ArrayBuffer> => {
+  assertStateGeometry("attention_state_qk (tiled) params", geometry);
+  const params = new Uint32Array(12);
+  params[0] = geometry.rowsBlock;
+  params[1] = geometry.colCap;
+  params[2] = geometry.depth;
+  params[3] = geometry.rowOffset;
+  params[4] = geometry.chunkRows;
+  params[5] = geometry.kvRepeat;
+  params[6] = geometry.window;
+  params[7] = geometry.capacity;
   params[8] = STATE_NEG_INF_BITS;
   new Float32Array(params.buffer)[9] = geometry.scale;
   return params;
@@ -1120,6 +1271,38 @@ export const stateQkParallelWorkgroups = (
     tiledWorkgroups(live, STATE_ATTENTION_TILE_X, limit, `${where} ①'QK`),
     tiledWorkgroups(rows, 1, limit, `${where} ①'QK`),
     tiledWorkgroups(geometry.batchHeads, 1, limit, `${where} ①'QK`),
+  ];
+};
+
+/**
+ * ①ₜ の workgroup 数 `[⌈live / tileN⌉, ⌈有効行 / tileM⌉, B·H]`（1 workgroup = 1 出力タイル）。
+ *
+ * MUST: タイル辺は**幾何から導く**（gemm 骨格の MUST と同文 — 定数で持ち回ると幾何と食い違い
+ * うる値が 2 つになり、`ceil(dim / 定数)` が実タイル辺での本数を下回った瞬間に**タイルが欠落
+ * して沈黙誤値**になる）。幾何を解決するのはキー・生成・ここの 3 者で、全部 `chunkRows` 1 値の
+ * 純関数（{@link gemmGeometryForRows}）を通る。
+ * MUST: ① と同じく列軸は **live 列数**・行軸は**有効行数**（`colCap` / `rowsBlock` にすると
+ * 仕事量合格条件〈ADR 0066 決定 3〉を落とし、pad 行の S を書いてしまう）。
+ * MUST: 上限超過は fail loudly（タイル系 — 縮退させると S のタイルが欠落し、②③ が残骸を
+ * 読んだまま例外なしに進む）。
+ */
+export const stateQkTiledWorkgroups = (
+  geometry: StateDispatchGeometry,
+  chunkRows: number,
+  past: number,
+  query: number,
+  limit: number,
+  where: string,
+): [number, number, number] => {
+  assertDispatchGeometry(`${where} ①ₜQK`, geometry);
+  assertLengths(`${where} ①ₜQK`, past, query);
+  const tile = gemmGeometryForRows(chunkRows);
+  const live = stateLiveColumns(geometry.window, past, query);
+  const rows = stateEffectiveRows(geometry.rowsBlock, geometry.rowOffset, query);
+  return [
+    tiledWorkgroups(live, gemmTileN(tile), limit, `${where} ①ₜQK`),
+    tiledWorkgroups(rows, gemmTileM(tile), limit, `${where} ①ₜQK`),
+    tiledWorkgroups(geometry.batchHeads, 1, limit, `${where} ①ₜQK`),
   ];
 };
 

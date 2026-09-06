@@ -192,6 +192,10 @@ import {
   stateQkParallelKey,
   stateQkParallelWgsl,
   stateQkParallelWorkgroups,
+  stateQkTiledEligible,
+  stateQkTiledKey,
+  stateQkTiledParams,
+  stateQkTiledWorkgroups,
   stateQkWgsl,
   stateQkWorkgroups,
   stateSliding,
@@ -217,6 +221,7 @@ import {
   type GemmCompute,
   gemmMTileGeometry,
   gemmUsesVec4,
+  stateQkTiledWgsl,
 } from "../kernels/gemm.ts";
 import {
   defaultGemmGeometry,
@@ -2261,12 +2266,27 @@ export class RecipeBuilder {
     // MUST: 判定材料は計画時に決まる静的値だけ（`chunkRows` は宣言 shape 由来）— 実行時の論理長で
     // 分岐すると、同じ計画鍵が run ごとに違うパイプラインを指すことになる。
     const qkParallel = parallel && stateQkParallelEligible(chunkRows);
-    const qkKey = qkParallel ? stateQkParallelKey(sliding, gqa) : stateQkKey(sliding, gqa);
+    // ①ₜ（GEMM 骨格の K 行タイル共有 — perf-ledger K-13）は **① とビット同一**なので席に依らず、
+    // `M ≥ 16` の計画で既定として選ぶ（適用条件と WHY は `stateQkTiledEligible`）。2 つの適用条件は
+    // 重ならない（1 < 16）ので、この優先順は読みやすさのためだけにある。
+    // MUST: ①QK の 3 経路の優先順を持つのは**この 1 箇所**（キー・WGSL・params・workgroup の
+    // 4 点がここで揃う）。分散させると「キーは ①ₜ・dispatch は ① の辺」のような組がありえて、
+    // タイルが欠落したまま例外が出ない。
+    const qkTiled = !qkParallel && stateQkTiledEligible(chunkRows);
+    const qkKey = qkParallel
+      ? stateQkParallelKey(sliding, gqa)
+      : qkTiled
+      ? stateQkTiledKey(sliding, gqa, chunkRows)
+      : stateQkKey(sliding, gqa);
     const statsKey = stateStatsKey(sliding);
     const pvKey = parallel ? statePvParallelKey(sliding, gqa) : statePvKey(sliding, gqa);
     const qk = await this.#state.cache.get(
       qkKey,
-      qkParallel ? stateQkParallelWgsl(sliding, gqa) : stateQkWgsl(sliding, gqa),
+      qkParallel
+        ? stateQkParallelWgsl(sliding, gqa)
+        : qkTiled
+        ? stateQkTiledWgsl(sliding, gqa, chunkRows)
+        : stateQkWgsl(sliding, gqa),
     );
     const stats = await this.#state.cache.get(statsKey, stateStatsWgsl(sliding));
     const pv = await this.#state.cache.get(
@@ -2277,20 +2297,23 @@ export class RecipeBuilder {
     for (const block of blocks) {
       // ①③ が共有する静的 params（内容アドレスキャッシュ適格 — ブロック間の差は rowOffset /
       // rowsBlock だけ）。
-      const params = this.#writeParams(
-        stateAttentionParams({
-          rowsBlock: block.rows,
-          rowOffset: block.offset,
-          chunkRows,
-          depth,
-          kvRepeat,
-          window,
-          capacity,
-          colCap,
-          scale,
-        }),
-        PARAMS_UNIFORM_USAGE,
-      );
+      const geometry = {
+        rowsBlock: block.rows,
+        rowOffset: block.offset,
+        chunkRows,
+        depth,
+        kvRepeat,
+        window,
+        capacity,
+        colCap,
+        scale,
+      };
+      const params = this.#writeParams(stateAttentionParams(geometry), PARAMS_UNIFORM_USAGE);
+      // ①ₜ だけは骨格の `Dims`（先頭 3 語が m / n / k）を binding 0 に置くので、**同じ静的幾何を
+      // 別の語順で**組み直す（値の出どころは 1 つ — 上の `geometry`）。①③ 共有の語順は動かさない。
+      const qkParams = qkTiled
+        ? this.#writeParams(stateQkTiledParams(geometry), PARAMS_UNIFORM_USAGE)
+        : params;
       const dispatchGeometry = {
         batchHeads,
         rowsBlock: block.rows,
@@ -2308,7 +2331,7 @@ export class RecipeBuilder {
         pipeline: qk.pipeline,
         layout: qk.layout,
         roles: qk.roles,
-        params,
+        params: qkParams,
         bindings: [
           { binding: 1, source: binds[0] },
           { binding: 2, source: binds[1] },
@@ -2319,6 +2342,15 @@ export class RecipeBuilder {
         workgroups: (past, query) =>
           qkParallel
             ? stateQkParallelWorkgroups(dispatchGeometry, past, query, limit, `${where} ①QK`)
+            : qkTiled
+            ? stateQkTiledWorkgroups(
+              dispatchGeometry,
+              chunkRows,
+              past,
+              query,
+              limit,
+              `${where} ①QK`,
+            )
             : stateQkWorkgroups(dispatchGeometry, past, query, limit, `${where} ①QK`),
       });
 
