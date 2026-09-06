@@ -228,6 +228,11 @@ export type SessionOptions = {
    * - ①QK は内積の D 方向を分担（perf-ledger K-14 — 同「①' D 並列縮約変種」節）。1 invocation
    *   が D 本の積和を逐次で回す遅延を縮める。
    *
+   * **2 段で適用範囲が違う**（席は 1 つのまま）: ③' は全ての計画に効くが、**①' が選ばれるのは
+   * `M`（物理 chunk 行数）が 1 の計画だけ**で、prefill 計画（M > 1）は `"parallel"` を指定しても
+   * ①（逐次）のまま走る。prefill では ① が既に行 × 列で埋まっており、①' に替えると遅くなると
+   * 実測したため（2026-09-06 — 適用条件と実測は `stateQkParallelEligible` の WHY）。
+   *
    * どちらも縮約順が変わるので **参照経路とビット同一ではない**（決定性は保つ）。融合
    * attention（`attentionCompute`）とは別族なので直交する。
    * MUST: 既定は `"sequential"`（ADR 0058 決定 2 — 数値を変える経路の自動選択禁止）。

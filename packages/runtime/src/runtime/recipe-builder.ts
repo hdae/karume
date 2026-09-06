@@ -188,6 +188,7 @@ import {
   statePvWgsl,
   statePvWorkgroups,
   stateQkKey,
+  stateQkParallelEligible,
   stateQkParallelKey,
   stateQkParallelWgsl,
   stateQkParallelWorkgroups,
@@ -2249,12 +2250,23 @@ export class RecipeBuilder {
     // ①' / ③' はどちらも束縛・params が参照経路と同一で、キー・WGSL・workgroup 算出の 3 点
     // だけが替わる（キーの `:par` が census 門の目印）。
     const parallel = this.#state.stateAttentionReduce === "parallel";
-    const qkKey = parallel ? stateQkParallelKey(sliding, gqa) : stateQkKey(sliding, gqa);
+    // ①' だけは席に**適用条件**が掛かる: この計画の `M`（= chunkRows）が 1 のときだけ選ぶ。
+    // WHY: ①' が縮めるのは 1 invocation の D 逐次の遅延で、それが律速なのは有効 invocation が
+    // 「live 列 × 1 行」しか無い decode（M=1）だけ。prefill（M=768）では ① が既に行 × 列で
+    // 埋まっており、①' は行タイル幅を 4 → 1 に落として 4 倍の workgroup と barrier を積むだけに
+    // なる。実測（2026-09-06）でも decode は ×1.55〜1.72 で効いた一方、prefill の ①QK は GPU
+    // 時間が 1.5〜1.9 倍に伸び、prefill 全体で +30〜60% 逆行した。条件は**実測した範囲に留める**
+    // （ADR 0082 決定 4 と同じ規律 — M ≤ 4 などへ外挿しない）。③' は prefill でも逆行しないことを
+    // 2026-09-03 に実測しているので門を掛けず、席どおり全 M で従う（席は 1 つのまま）。
+    // MUST: 判定材料は計画時に決まる静的値だけ（`chunkRows` は宣言 shape 由来）— 実行時の論理長で
+    // 分岐すると、同じ計画鍵が run ごとに違うパイプラインを指すことになる。
+    const qkParallel = parallel && stateQkParallelEligible(chunkRows);
+    const qkKey = qkParallel ? stateQkParallelKey(sliding, gqa) : stateQkKey(sliding, gqa);
     const statsKey = stateStatsKey(sliding);
     const pvKey = parallel ? statePvParallelKey(sliding, gqa) : statePvKey(sliding, gqa);
     const qk = await this.#state.cache.get(
       qkKey,
-      parallel ? stateQkParallelWgsl(sliding, gqa) : stateQkWgsl(sliding, gqa),
+      qkParallel ? stateQkParallelWgsl(sliding, gqa) : stateQkWgsl(sliding, gqa),
     );
     const stats = await this.#state.cache.get(statsKey, stateStatsWgsl(sliding));
     const pv = await this.#state.cache.get(
@@ -2305,7 +2317,7 @@ export class RecipeBuilder {
           { binding: 5, source: { kind: "lengths" } },
         ],
         workgroups: (past, query) =>
-          parallel
+          qkParallel
             ? stateQkParallelWorkgroups(dispatchGeometry, past, query, limit, `${where} ①QK`)
             : stateQkWorkgroups(dispatchGeometry, past, query, limit, `${where} ①QK`),
       });

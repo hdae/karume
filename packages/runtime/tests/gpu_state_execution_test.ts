@@ -457,46 +457,62 @@ Deno.test({
 });
 
 /**
- * **census**（ADR 0058 決定 4 ③）— `stateAttentionReduce: "parallel"` を指定したとき ①' と ③' の
- * キー（`:par`）が**両方とも実際に走り**、① ③ のキーが 1 本も出ないことを見る。逆に既定では
- * ① ③ だけが出る（opt-in が黙って既定へ落ちる / 既定が黙って変種へ上がる、の両方向を塞ぐ）。
+ * **census**（ADR 0058 決定 4 ③）— `stateAttentionReduce: "parallel"` を指定したとき、①' と ③'
+ * のキー（`:par`）が**期待した計画で実際に走り**、対の逐次キーが 1 本も出ないことを見る。逆に
+ * 既定では ① ③ だけが出る（opt-in が黙って既定へ落ちる / 既定が黙って変種へ上がる、の両方向を
+ * 塞ぐ）。
  *
  * MUST: 2 段を**両方**見る（席は 1 つで 2 段を一緒に切り替えるので、片方だけの検査だと
  * 「①' が結線から落ちて ① が走っている」が素通りする — 値は帯の内側なので数値門も鳴らない）。
+ * MUST: **①' だけは席に適用条件が掛かる**ので、`M = 1`（decode 計画）と `M > 1`（prefill 計画）
+ * の**両方**を表に持つ。期待は「M=1 の計画では ①' + ③'・M>1 の計画では ① + ③'」の対で、
+ * ③' は M に依らない（適用条件と実測は src/kernels/state-attention.ts の
+ * `stateQkParallelEligible`）。門を条件式から独立させるため、期待は行ごとに `qkParallel` の
+ * 真偽で直書きする（判定を輸入すると実装と一緒に間違える）。
  */
 Deno.test({
   name:
-    "states 形 attention ①QK / ③PV の縮約形は席どおりに走る（census・実 GPU / timestamp-query）",
+    "states 形 attention ①QK / ③PV の縮約形は席と計画の M どおりに走る（census・実 GPU / timestamp-query）",
   ignore: !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
     try {
       for (
-        const [label, model, sliding, reduce] of [
-          ["full r=2 parallel", GQA, false, "parallel"],
-          ["sliding r=1 parallel", SLIDING, true, "parallel"],
-          ["full r=2 sequential", GQA, false, "sequential"],
+        const [label, model, sliding, reduce, chunkRows, qkParallel, pvParallel] of [
+          ["full r=2 parallel decode M=1", GQA, false, "parallel", 1, true, true],
+          ["full r=2 parallel prefill M=2", GQA, false, "parallel", 2, false, true],
+          ["sliding r=1 parallel decode M=1", SLIDING, true, "parallel", 1, true, true],
+          ["sliding r=1 parallel prefill M=2", SLIDING, true, "parallel", 2, false, true],
+          // 席が既定なら M=1 でも上がらない（適用条件だけを見て席を無視する実装を落とす）
+          ["full r=2 sequential decode M=1", GQA, false, "sequential", 1, false, false],
+          ["full r=2 sequential prefill M=2", GQA, false, "sequential", 2, false, false],
         ] as const
       ) {
         const session = await stateSession(gpu, model, { stateAttentionReduce: reduce });
         const context = await session.createGenerationContext({ chunkLength: 2 });
         try {
-          await runStep(session, context, model, stepInputs(model, 2, 7), 2, 2);
+          await runStep(
+            session,
+            context,
+            model,
+            stepInputs(model, chunkRows, 7),
+            chunkRows,
+            chunkRows,
+          );
           const keys = session.diagnostics().lastRunTiming?.entries.map((entry) => entry.key) ?? [];
           assert(keys.length > 0, `${label}: 内訳が空（キー検査が空振りしている）`);
           const gqa = model.heads !== model.kvHeads;
-          const parallel = reduce === "parallel";
           for (
             const [stage, expected, other] of [
               [
                 "①QK",
-                parallel ? stateQkParallelKey(sliding, gqa) : stateQkKey(sliding, gqa),
-                parallel ? stateQkKey(sliding, gqa) : stateQkParallelKey(sliding, gqa),
+                qkParallel ? stateQkParallelKey(sliding, gqa) : stateQkKey(sliding, gqa),
+                qkParallel ? stateQkKey(sliding, gqa) : stateQkParallelKey(sliding, gqa),
               ],
               [
                 "③PV",
-                parallel ? statePvParallelKey(sliding, gqa) : statePvKey(sliding, gqa),
-                parallel ? statePvKey(sliding, gqa) : statePvParallelKey(sliding, gqa),
+                pvParallel ? statePvParallelKey(sliding, gqa) : statePvKey(sliding, gqa),
+                pvParallel ? statePvKey(sliding, gqa) : statePvParallelKey(sliding, gqa),
               ],
             ] as const
           ) {
@@ -508,7 +524,9 @@ Deno.test({
             assertEquals(
               keys.includes(other),
               false,
-              `${label}: 席と違う ${stage} のキーが混ざっている（${keys.join(" / ")}）`,
+              `${label}: 席と計画から期待されない ${stage} のキーが混ざっている（${
+                keys.join(" / ")
+              }）`,
             );
           }
         } finally {

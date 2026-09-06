@@ -56,6 +56,12 @@
  *
  * MUST: 縮約順が ① と違うので**ビット同一ではない**（決定性は保つ）。**席は ③' と同じ 1 つ**
  * （`"parallel"` を指定すると ①' と ③' が一緒に選ばれる — 2026-09-06 裁定。新しいノブは作らない）。
+ * MUST: **①' が選ばれるのは `M = 1` の計画だけ**（適用条件は
+ * {@link stateQkParallelEligible}）。prefill 計画（M > 1）は席が `"parallel"` でも ① のまま走る
+ * — prefill では ① が既に行 × 列で埋まっており、①' は行タイル幅を落として barrier を積む
+ * ぶんだけ遅くなると実測した（2026-09-06 — 詳細は同関数の WHY）。③' には門を掛けない
+ * （prefill でも逆行しないことを 2026-09-03 に実測済み）ので、**席 1 つで 2 段の適用範囲が
+ * 違う**形になる。
  * MUST: ① の契約は 1 つも動かさない — 述語（causal + sliding 下限）外は live 範囲内なら
  * **必ず −inf を書く**（② が残骸を食わないため）・`cl ≥ live` の列と pad 行は書かない・
  * scale の掛け方（半スケールを q 側と k 側の両方へ）と −inf のビット（`params.neg_inf`）は ① と同一。
@@ -187,6 +193,24 @@ export const stateQkParallelKey = (sliding: boolean, gqa: boolean): string =>
   `attention_state_qk:v1:f32:wg${STATE_ATTENTION_TILE_X}x${STATE_QK_D_LANES}:par${
     stateVariantKeyPart(sliding, gqa)
   }`;
+
+/**
+ * ①' の**適用条件** — `M`（物理 chunk 行数）が 1 の計画だけ。席（`stateAttentionReduce`）が
+ * `"parallel"` でも、この条件を満たさない計画は ① のまま走る（席の判定は runtime 側
+ * `#buildStateAttention` が持ち、ここは計画の形だけを見る純関数）。
+ *
+ * WHY: ①' が縮めるのは「1 invocation が `D` 本の積和を逐次で回す遅延」で、それが律速なのは
+ * 有効 invocation が `live 列 × 1 行` しか無い decode（M=1）だけ。prefill（M=768）では ① が
+ * 既に行 × 列で埋まっており、①' は行タイル幅を `TILE_M` = 4 から 1 へ落として 4 倍の
+ * workgroup と barrier を積むだけになる（1 workgroup = 1 行なので K 行の行間再利用も失う）。
+ * 実測（2026-09-06）でも decode は 6.3 → 3.7〜4.1 ms/token（×1.55〜1.72）で効いた一方、
+ * prefill の ①QK は GPU 時間が 1.5〜1.9 倍に伸び、prefill 全体で +30〜60% 逆行した。
+ * MUST: 条件は**実測した範囲に留める**（ADR 0082 決定 4 と同じ規律 — 「M が小さければ得だろう」
+ * の外挿で `M <= 4` などに広げない。効くと測ったのは M=1 だけ）。③'（PV）はこの門を持たない
+ * ことが対称でないように見えるが、③' は prefill でも逆行しないことを 2026-09-03 の実測で
+ * 確かめてある（縮約するのが KV 長方向で、prefill でも 1 スレッドの逐次長が伸びるため）。
+ */
+export const stateQkParallelEligible = (chunkRows: number): boolean => chunkRows === 1;
 
 // v2: 行 max を nan_max へ（全 NaN 行が空行判定へ化けて stats (0,0) になる穴を塞ぐ —
 // ADR 0020。非 NaN 入力ではビット不変）
