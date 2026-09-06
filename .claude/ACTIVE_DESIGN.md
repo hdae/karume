@@ -7,20 +7,16 @@
 > [docs/perf-ledger.md](../docs/perf-ledger.md)。ここは「今この瞬間の文脈」だけを持つ —
 > 履歴・完了記録は ADR / research / git へ。
 >
-> Last updated: 2026-09-06（0.12.0 リリース準備）
+> Last updated: 2026-09-06（0.12.0 公開完了）
 
 ## Now
 
-- **0.12.0 リリース準備（2026-09-06）** — lockstep bump `a24d656` までローカル完了。中身 = runtime の
-  K-16 / K-14 / K-13（下の OP / Fusion 節）+ hub の `evictCachedAssets` 修正（同一参照集合の兄弟席を既定の
-  守る側から外す・`protect` / `alsoEvicted` — ADR [0094](../docs/decisions/0094-hub-cache-inventory-and-eviction.md)
-  追記）+ models の `onRetry` 透過（8 家族の hub オプションを `FromPretrainedHubOptions` に 1 本化）。
-  breaking なし・配布形は 0.10.0 のまま（焼き直し無し）。push → CI → GitHub Release → JSR publish は
-  ユーザー、`smoke:published` と事後の docs 同期は公開後（runbook §4 / §5）。
-- **0.11.0 公開完了（2026-09-06）** — lockstep bump `ec60a31` → GitHub Release v0.11.0 → JSR 0.11.0 →
-  `deno task smoke:published` 緑。中身 = hub のキャッシュ保守面 + fetch-cache 0.7.0 追従（hub に
-  breaking 1 件 = HF 取得元の受信超過が `HubFetchError` へ。公開面の差分の正本はリリースノート
-  v0.11.0）。配布形は 0.10.0 のまま **HF 10 リポ**（`karume-anima` / `karume-anima-extra` /
+- **0.12.0 公開完了（2026-09-06）** — lockstep bump `a24d656` → GitHub Release v0.12.0 → JSR 0.12.0 →
+  `deno task smoke:published` 緑。中身 = runtime の K-16 / K-14 / K-13（下の OP / Fusion 節）+ hub の
+  `evictCachedAssets` 修正（同一参照集合の兄弟席を既定の守る側から外す・`protect` / `alsoEvicted` — ADR
+  [0094](../docs/decisions/0094-hub-cache-inventory-and-eviction.md) 追記）+ models の `onRetry` 透過
+  （8 家族の hub オプションを `FromPretrainedHubOptions` に 1 本化）。breaking なし（公開面の差分の正本は
+  リリースノート v0.12.0）。配布形は 0.10.0 のまま **HF 10 リポ**（`karume-anima` / `karume-anima-extra` /
   `karume-irodori-v4-small` / `karume-irodori-v4.1-small` / `karume-sbv2-jvnv` /
   `karume-gemma4`〈`-e2b` から改名済み〉/ `karume-siglip2`〈base + so400m 同居〉/
   `karume-depth-anything-v2` / `karume-birefnet-hr`〈1024 + 2048 同居〉/ `karume-lucida`〈同〉）で、
@@ -28,7 +24,8 @@
   だけ（[backlog](../docs/backlog.md)）。
 - **キャッシュ保守面が入った（2026-09-05）** — `listCachedAssets` / `evictCachedAssets`（ADR
   [0094](../docs/decisions/0094-hub-cache-inventory-and-eviction.md)）。参照勘定は manifest 1 本の中
-  だけで、全在庫の他の選択が守る・越境参照は残す。429 / 503 の再試行と HF 層の受信上限は取得層
+  だけで、全在庫の他の選択が守る・越境参照は残す・**対象と参照集合が同一の兄弟席は既定で守らない**
+  （守る側の明示は `protect`・巻き添えは `alsoEvicted` — ADR 0094 追記 2026-09-06）。429 / 503 の再試行と HF 層の受信上限は取得層
   `@hdae/fetch-cache` 0.7.0 側（その ADR 0010 / 0011）。hub は 2026-09-06 に追従済み（依存 `^0.7.0`・
   `LoadManifestOptions.onRetry` の透過・`transport.ts` の撤去 — ADR 0094 決定 4。`karume.json` の
   1 MiB 上限は全量受信後の判定になった — [limitations](../docs/limitations.md)）。

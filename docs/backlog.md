@@ -7,26 +7,15 @@
 > [perf-ledger](perf-ledger.md) が正本で、ここは波として参照するだけ ④by-design 制約の正本は
 > [limitations](limitations.md) — 作業化が裁定された時だけここに載る。
 
-## now — 0.12.0 リリース準備（2026-09-06）
+## now — 0.12.0 リリース後（2026-09-06）
 
-0.12.0 は lockstep bump（`a24d656`）までローカル完了 — 中身は下の 1 / 2（runtime の K-16 / K-14 / K-13・
-hub の evict 修正・models の `onRetry` 透過。breaking なし・配布形の変更は無いので HF の焼き直し・pin の
-更新は無し）。push → CI → GitHub Release v0.12.0（本文 = `outputs/release/release-notes-v0.12.0.draft.md`・
-主張突合 / 両方向網羅の独立レッグで検証済み）→ JSR publish はユーザー、`deno task smoke:published` と事後の
-docs 同期（この見出しを「0.12.0 リリース後」へ・消化済み節の新設）は公開後に行う
-（[release-runbook](release-runbook.md) §4 / §5）。
-0.11.0 は公開完了（2026-09-06 — 中身は下の消化済み節）。2026-09-04 裁定の作業波 a〜d のうち残るのは
+0.12.0 は**公開完了**（2026-09-06 — lockstep bump `a24d656` → GitHub Release v0.12.0 → JSR 0.12.0 →
+`deno task smoke:published` 緑・`KARUME_SOURCES` 10 本の疎通を確認。中身は下の消化済み節）。
+2026-09-04 裁定の作業波 a〜d のうち残るのは
 **c だけ**（a / b は消化・d はクローズ）。**OP / Fusion の波（2026-09-06）**: 在庫の融合候補 3 件（P-5 / K-15 / K-7）は実測で閉じた（採否と数値は
 [perf-ledger](perf-ledger.md)・記録は [research 2026-09-06](research/2026-09-06-fusion-spikes-k15-k7.md)）。続きは
-大所 = **gemma4 decode の GEMV 並列度**（2026-09-06 ユーザー裁定の a 案）: K-16 / K-14 / K-13 は済（perf-ledger ✅）。次の候補は着手時に起票（ACTIVE_DESIGN の候補欄）。
-波と独立に消化してよい残件はその下。
-
-1. **c. perf K-13 / K-14 は 2026-09-06 に消化**（[perf-ledger](perf-ledger.md) ✅）。次の性能候補は未起票。
-2. **下流フィードバック 4 件は 2026-09-06 に消化**: anima-web ⑪ `onRetry` の透過（8 家族の hub オプション
-   透過を `src/hub/load-options.ts` へ 1 本化 — `f81cc6a`）/ ⑫ `evictCachedAssets` の `protect`・同一集合の
-   除外・`alsoEvicted`（ADR [0094](decisions/0094-hub-cache-inventory-and-eviction.md) 追記 — `2fc3587`）/
-   karume-samples: BiRefNet 最大 binding の訂正（cat_211 320 / 1280MiB — `d116d7e`）・birefnet の
-   `BIREFNET_SOURCES` 案内（`8ae0b71`）。hub / models は公開 API の追加（欄の追加のみ）なので次の minor。
+大所 = **gemma4 decode の GEMV 並列度**（2026-09-06 ユーザー裁定の a 案）: K-16 / K-14 / K-13 は済（perf-ledger ✅・
+0.12.0 で公開）。次の候補は着手時に起票（ACTIVE_DESIGN の候補欄）。波と独立に消化してよい残件はその下。
 
 **残件**:
 
@@ -117,6 +106,32 @@ docs 同期（この見出しを「0.12.0 リリース後」へ・消化済み�
   収集する機能を足し、ユーザーが複数環境でサンプル集（名称・置き場は未定）を回した結果を集める
   （**起票のみ** — 収集する項目・置き場・オプトインの形は未設計）。
 - Pixel（8GB 級 Android Chrome）の `err.cause` 再判定 — [known-issues](known-issues.md)。
+
+## 消化済み（0.12.0 リリース — 2026-09-06）
+
+0.12.0 の中身（結果だけ残す — 設計の正本は ADR 0067 / 0082 / 0058 / 0094 の追記・実測は research 2026-09-06・
+公開面の差分はリリースノート v0.12.0）:
+
+- **runtime: 長文脈 gemma4 の高速化 3 件**（OP / Fusion の波・a 案）: K-16 = lm_head（i8 × M=1）を GEMV 族へ
+  （ビット同一・単体 ×5.0・decode GPU −21〜24% — `5ddd186`・[research](research/2026-09-06-gemv-i8-k16.md)）/
+  K-14 = ①QK の D 並列縮約 ①′（opt-in 席 `stateAttentionReduce: "parallel"`・M=1 の計画だけ・decode 壁 P=16K
+  −9〜15% — `cce129d` `4182b8b`・[research](research/2026-09-06-state-qk-parallel-k14.md)）/ K-13 = prefill 計画
+  （M ≥ 16）の GEMM 骨格タイル経路 ①ₜ / ③ₜ（席に依らない既定・参照経路とビット同一・prefill 壁 P=16K −64% —
+  `ad8a4b9` `39d5e4e`・[research](research/2026-09-06-state-attention-tiled-k13.md)）。幾何表は ADR 0067 追記。
+  `Gemma4Pipeline`（既定 parallel）の prefill 中間値は 0.11.0 と変わる（golden / token 列は不変）。
+- **融合候補 3 件は実測で閉じた**: K-15（gelu_tanh+mul）/ K-7（ゲート付き残差）は実装 → ABBA → 判定線に届かず
+  revert（`5277306` `1e674e6`）、P-5（permute 畳み込み）は保留（[research](research/2026-09-06-fusion-spikes-k15-k7.md)・
+  ベースラインは [research](research/2026-09-06-op-fusion-baseline.md)・`opbench graph` は 4 家族 + `--capacity`）。
+- **hub: `evictCachedAssets` の参照勘定**（anima-web ⑫）: 対象と参照集合が同一の兄弟席を既定の守る側から外す・
+  `CacheInventoryOptions.protect`・`EvictedAssets.alsoEvicted`（`2fc3587`・ADR
+  [0094](decisions/0094-hub-cache-inventory-and-eviction.md) 追記・[limitations](limitations.md)）。
+- **models: `onRetry` の透過**（anima-web ⑪）: 8 家族の hub オプション透過を `src/hub/load-options.ts`
+  （`FromPretrainedHubOptions` + `hubLoadOptions`）へ 1 本化（`f81cc6a`）。birefnet の `fromPretrained` が
+  `BIREFNET_SOURCES` を案内（`8ae0b71`）。
+- **docs**（karume-samples）: BiRefNet の最大 binding を cat_211 込み（1024² 320MiB / 2048² 1280MiB）へ訂正
+  （limitations + card.py — `d116d7e`。公開済みカードの再発行は now の残件）。
+- 配布形の変更なし = HF の焼き直し・pin 更新なし（公開済み manifest の `generator` は `karume/0.10.0` のまま）。
+  公開後の疎通 `smoke:published` は追加設定なしで緑。
 
 ## 消化済み（0.11.0 リリース — 2026-09-06）
 
