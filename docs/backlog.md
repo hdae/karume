@@ -16,14 +16,15 @@
 
 1. **c. perf K-13 / K-14**（prefill attention の K/V タイル再利用 / decode ①QK の並列化）:
    起票・合格線・kill 基準とも [perf-ledger](perf-ledger.md) が正本。
-2. **キャッシュ保守 + 429 再試行（anima-web 要望・2026-09-05 裁定）**: hub に `listCachedAssets` /
-   `evictCachedAssets`（ADR [0094](decisions/0094-hub-cache-inventory-and-eviction.md) — 参照勘定は
-   manifest 1 本の中だけ・越境参照は残す）を実装済み。429 / 503 の再試行と HF 層の受信上限は取得層
-   `@hdae/fetch-cache` 側に実装済み（その ADR 0010 / 0011 — レビューと 0.7.0 公開は別セッション）。
-   **残 = fetch-cache 0.7.0 公開後の hub フォロー**: 依存を `^0.7.0` へ・`LoadManifestOptions.onRetry`
-   の透過・`transport.ts` の撤去（宣言超過の打ち切りは fetch-cache へ移った。content-length の事前
-   突合は移植しない — 汎用では Content-Encoding 越しの誤検知）。相 1（`prefetchFile`）は既に
-   `expectedBytes` を申告済みなので、`transport.ts` を撤去しても受信の上限は落ちない。
+2. **キャッシュ保守 + 429 再試行（anima-web 要望・2026-09-05 裁定）— 2026-09-06 消化**: hub に
+   `listCachedAssets` / `evictCachedAssets`（ADR
+   [0094](decisions/0094-hub-cache-inventory-and-eviction.md) — 参照勘定は manifest 1 本の中だけ・
+   越境参照は残す）。429 / 503 の再試行と HF 層の受信上限は取得層 `@hdae/fetch-cache` 0.7.0（その ADR
+   0010 / 0011・2026-09-05 公開）。hub の追従 = 依存 `^0.7.0`・`LoadManifestOptions.onRetry` の透過・
+   `transport.ts` の撤去（受信超過の打ち切りは取得層へ・content-length の事前突合は移植しない・
+   `karume.json` の 1 MiB 上限は全量受信後の判定 — [limitations](limitations.md)）。公開面の差分
+   （`onRetry` / `RetryDiagnostic` の追加・HF の受信超過が `IntegrityError` から `HubFetchError` へ）は
+   次の bump のリリースノートへ。
 
 **残件**:
 

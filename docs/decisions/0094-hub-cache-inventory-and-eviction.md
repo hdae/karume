@@ -75,13 +75,25 @@ evictCachedAssets(loaded: LoadedManifest, selection?: ResolveOptions, options?: 
 - もともと在庫に無い参照は結果に載らない。manifest 本体（`karume.json`）のエントリは対象外
   （URL キー・小さい — 丸ごと消すのは `clearHubCache`）。
 
-### 4. 429 / 503 の再試行と受信上限は取得層側（hub は公開後に追随）
+### 4. 429 / 503 の再試行と受信上限は取得層側（hub は 0.7.0 に追随済み — 2026-09-06）
 
 fetch-cache 本体に入れた（既定で有効・`Retry-After` 優先・無ければ 1 / 2 / 4 / 8 / 16 秒・最大
-5 回・`onRetry` 通知・`signal` で中断・`retry: false` で従来どおり）。hub 側の追随 — 依存を
-`^0.7.0` へ・`LoadManifestOptions.onRetry` の透過・`transport.ts` の撤去（宣言超過の打ち切りは
-fetch-cache の HF 層へ移った。content-length の事前突合は汎用ライブラリでは Content-Encoding 越しの
-誤検知になるので移植しない）— は fetch-cache 0.7.0 の公開後に別波で行う。
+5 回・`onRetry` 通知・`signal` で中断・`retry: false` で従来どおり）。hub 側の追随は fetch-cache 0.7.0 の
+公開（2026-09-05）後に行った:
+
+- 依存を `^0.7.0` へ。これだけで HF の rate limit は取得層が既定で取り直す。
+- `LoadManifestOptions.onRetry` を revision 解決・`karume.json`・資産（相 1 / 相 2）・越境先の全取得へ
+  透過する。通知の型は hub 所有の `RetryDiagnostic`（`CacheDiagnostic` と同じく取得層の型を再輸出せず
+  構造で一致させる）。再試行の方針は取得層の既定のままで、`retry` は hub の公開面に出していない。
+- `transport.ts`（hub 自前の `fetch` ラッパ = content-length の事前突合 + 受信超過の打ち切り）を撤去。
+  受信超過の打ち切りは取得層 HF 層の `expectedBytes` 上限へ移った。content-length の事前突合は
+  移植しない（汎用ライブラリでは Content-Encoding 越しの誤検知になる）。これに伴い ADR 0038 §2 の
+  「`content-length` が `size` と食い違った時点で abort」と「manifest 本体は取得中に 1MiB 超過で
+  abort」は本決定が上書きする — `karume.json` の 1 MiB 上限は取得層に厳密一致なしの上限が無いため
+  **全量受信後の判定**（`parseManifest`）になる（limitations に記載）。
+- HF 取得元の受信超過は `IntegrityError` ではなく `HubFetchError`（`cause` = 取得層のエラー）になる
+  （sha256 不一致と同じ形）。`IntegrityError` を投げるのはローカル取得元だけになり、`SizeViolation` から
+  発見場所（content-length / body）の引数を落とした。
 
 ## 検討した代替案
 

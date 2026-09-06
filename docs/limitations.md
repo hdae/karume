@@ -1257,3 +1257,19 @@ known-issues「Metal で out-of-memory errorScope が沈黙する」）。つま
   （取得層の契約どおり）。ローカル取得元は上のとおりキャッシュを介さないので、`CacheStorage` の
   有無に関わらず「全て在庫あり」と答える。`Cache.keys()` 未実装のランタイム（Deno 2.8 以前）では
   取得層が fail loud に throw する。
+
+## hub: HF 取得元の受信上限は取得層の `expectedBytes`（`karume.json` だけは全量受信後の判定・content-length の事前突合はしない — 2026-09-06）
+
+fetch-cache 0.7.0 への追従（ADR [0094](decisions/0094-hub-cache-inventory-and-eviction.md) 決定 4）で
+hub 自前の受信バイトの門（`fetch` ラッパ）を撤去した。HF 取得元でバイト数に掛かる門は次のとおり:
+
+- **資産**: 取得層 HF 層の `expectedBytes`（manifest の `size`）が受信の上限で、宣言を超えた時点で
+  打ち切る。全量受信後の厳密一致と sha256 の照合は従来どおり。どちらの不一致も hub からは
+  `HubFetchError`（`cause` に取得層のエラー）として上がる — `IntegrityError` を投げるのはローカル
+  取得元だけ。
+- **`karume.json`**: 事前の期待 sha256 も size も持てないので、1 MiB の上限は**全量受信後**に
+  `parseManifest` が見る（取得層に「厳密一致なしの上限」が無い）。上限超の応答を返すミラーに対しては、
+  その応答を受信し切るまでのメモリを払う。
+- **content-length の事前突合はしない**（by-design）: Fetch 仕様上 Content-Length は信頼できず、
+  Content-Encoding 越しでは宣言と実受信が食い違うのが正常なので、汎用の取得層に入れると誤検知になる。
+  size の食い違いは受信で捕まる（超過は途中で・不足は全量受信後に）。
