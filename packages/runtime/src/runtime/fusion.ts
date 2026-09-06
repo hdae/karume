@@ -22,30 +22,21 @@
  *
  * ## 畳む先は 1 dispatch とは限らない
  *
- * 6 ルール（silu / geluTanhMul / upsample2x / rope / gatedResidual / adaln）は「N ノード →
- * private カーネル 1 dispatch」だが、{@link ROW_BLOCK_ATTENTION_RULE} は**演算ではなく中間の
- * 実体化幅**を畳むので、ステップ内で閉じた一時（{@link FusedStep.temps}）を挟んだ dispatch 列に
- * なる。どちらも {@link FusedStep} 1 つ = 実行ステップ 1 つで、解放簿記の合流点は変わらない。
+ * 5 ルール（silu / geluTanhMul / upsample2x / rope / adaln）は「N ノード → private カーネル
+ * 1 dispatch」だが、{@link ROW_BLOCK_ATTENTION_RULE} は**演算ではなく中間の実体化幅**を畳むので、
+ * ステップ内で閉じた一時（{@link FusedStep.temps}）を挟んだ dispatch 列になる。どちらも
+ * {@link FusedStep} 1 つ = 実行ステップ 1 つで、解放簿記の合流点は変わらない。
  *
  * ## 適用順
  *
- * {@link FUSION_RULES} の**宣言順**（silu → geluTanhMul → upsample2x → rope → gatedResidual →
- * adaln → rowBlockAttention）。7 ルールの先頭 op は `sigmoid` / `gelu_tanh` / `reshape` /
- * `mul|slice` / `mul` / `layer_norm` / `bmm`。
- *
- * **`mul` だけが 2 ルールで重なる**（rope の direct-mul-first 形と gatedResidual）。重なった
- * 先頭 op では宣言順が意味を持ちうるので、2 ルールの match が**同じ位置で同時に成立しない**
- * ことを別に押さえる: rope の direct-first は `mul` の**直後が `slice`**（`nodes[index+1]` が
- * slice でなければ即 undefined）で、gatedResidual は**直後が `add`**なので、1 つの位置で
- * 両方が掴むことはありえない。それ以外の先頭 op は互いに素で、どちらも
- * tests/runtime_fusion_test.ts が {@link FusionRule.heads} と実際の match から機械的に検査する。
- * gatedResidual を rope の**後ろ**に置いたのは、掴む窓が広い rope に先に機会を与えるため
- * （rope の 7 ノード窓の末尾は `mul, add` なので、rope が外れた位置では gatedResidual が
- * その 2 ノードだけを畳みうる — 値は同じで、rope の取りこぼしは
- * tests/assets_fusion_counts_test.ts の `gatedResidual` 欄に印として残る）。
- *
- * 窓の**内側**に他ルールの先頭 op が現れる形（rowBlockAttention の窓は `reshape` / `expand` を
- * 5 本含む）は、掴めた時点で走査が窓幅ぶん進むので発火しえない。
+ * {@link FUSION_RULES} の**宣言順**（silu → geluTanhMul → upsample2x → rope → adaln →
+ * rowBlockAttention）。6 ルールの先頭 op は `sigmoid` / `gelu_tanh` / `reshape` / `mul|slice` /
+ * `layer_norm` / `bmm` で互いに素なので、この順序は結果に効かない（geluTanhMul を silu の直後に
+ * 置いたのは「活性ゲートの 2 ノード peephole」という同族を並べて読ませるためだけの理由。
+ * 順序が意味を持つのは先頭 op が重なったときだけ —
+ * 重なりが生じていないことは tests/runtime_fusion_test.ts が {@link FusionRule.heads} から
+ * 機械的に検査する）。窓の**内側**に他ルールの先頭 op が現れる形（rowBlockAttention の窓は
+ * `reshape` / `expand` を 5 本含む）は、掴めた時点で走査が窓幅ぶん進むので発火しえない。
  *
  * ## 窓内 passthrough
  *
@@ -81,13 +72,6 @@ import {
 import { ADALN_NORM_KEY, ADALN_NORM_WGSL, adalnNormParams } from "../kernels/adaln-norm.ts";
 import { bmmKey, bmmParams, bmmRowWindowParams, bmmWgsl } from "../kernels/bmm.ts";
 import {
-  GATED_RESIDUAL_WORKGROUP_SIZE,
-  gatedResidualKey,
-  type GatedResidualOrder,
-  gatedResidualParams,
-  gatedResidualWgsl,
-} from "../kernels/gated-residual.ts";
-import {
   GELU_TANH_MUL_WORKGROUP_SIZE,
   geluTanhMulKey,
   type GeluTanhMulOrder,
@@ -119,12 +103,11 @@ type FusionRuleName =
   | "geluTanhMul"
   | "upsample2x"
   | "rope"
-  | "gatedResidual"
   | "adaln"
   | "rowBlockAttention";
 
 /**
- * 診断カウンタの見出し。融合 7 ルールに加えて、0 dispatch の別名化のうち**条件付きで外れうる**
+ * 診断カウンタの見出し。融合 6 ルールに加えて、0 dispatch の別名化のうち**条件付きで外れうる**
  * 恒等 expand（{@link ExecStep} の `aliasesInput`）を数える。reshape の別名化は無条件なので
  * 数えない（外れようがない = 観測する意味がない）。
  */
@@ -147,7 +130,7 @@ export type FusedOperand =
 /**
  * dispatch の workgroup 数の決め方。
  *
- * - `gridStride` = 要素 / 行の被覆数を割る形（elementwise・reduce・融合 6 ルール）。上限を
+ * - `gridStride` = 要素 / 行の被覆数を割る形（elementwise・reduce・融合 5 ルール）。上限を
  *   超えたら縮退し、カーネル側の grid-stride が残りを回す。
  * - `tiled` = **1 workgroup = 1 出力タイル**の GEMM 族。grid-stride で縮退できないので、
  *   上限超過は宣言側（`tiledWorkgroups`）が fail loudly にする。
@@ -174,7 +157,7 @@ type FusedDispatch = {
   readonly paramsStorage?: boolean;
   /**
    * binding 1 以降のオペランド列。**省略できるのは 1 dispatch のルールだけ**で、そのときは
-   * 「{@link FusedStep.binds} を宣言順 → 末尾に出力」（融合 6 ルール共通の形）になる。
+   * 「{@link FusedStep.binds} を宣言順 → 末尾に出力」（融合 5 ルール共通の形）になる。
    */
   readonly operands?: readonly FusedOperand[];
   readonly workgroups: FusedWorkgroups;
@@ -880,130 +863,6 @@ const ROPE_RULE = defineRule<RopeMatch>({
   },
 });
 
-/**
- * 行に broadcast されるベクトルの形（先行軸を全て 1 にした `[1,…,1,dim]`）。adaLN の変調
- * ベクトルとゲート付き残差のゲートが**同じ綴り**を要求するので、判定は 1 本を共有する。
- */
-const modulationShape = (rowShape: readonly number[], dim: number): readonly number[] => [
-  ...rowShape.slice(0, -1).map(() => 1),
-  dim,
-];
-
-type GatedResidualMatch = FusionMatch & {
-  readonly gateName: string;
-  readonly xName: string;
-  readonly residualName: string;
-  readonly outputName: string;
-  readonly outputShape: readonly number[];
-  readonly dim: number;
-  readonly multiplyOrder: GatedResidualOrder;
-};
-
-/**
- * DiT のゲート付き残差: `mul(gate, x) → add(residual, ·)` の連続 2 ノード（anima transformer の
- * 84 対と irodori DiT の 24 対が出す実測形）。ゲートだけが行方向 broadcast `[1,…,1,dim]` で、
- * x / residual / 出力は同じ `[…, dim]`。
- *
- * MUST: 中間 mul 値は唯一の consumer が直後の add で、graph output でないこと（add 出力の
- * consumer は何本でもよい — 残差は次のブロックと skip の両方へ流れる）。
- * MUST: ゲートは**厳密な broadcast**（`[1,…,1,dim]` かつ x の shape と一致しない）だけを受理
- * する。全スロット同 shape の `mul,add`（= 素の 2 項演算）や、変調形
- * （`mul(t, 1+scale) → add(·, shift)` — add の他入力まで broadcast）へ広げない。後者は
- * ADALN_RULE が `layer_norm` 側から掴む形で、rms_norm 版はどのルールも掴まない
- * （「式が似ている」で受理集合を広げると、fallback が正しいという保証の外へ出る）。
- * MUST: mul の入力順は両方受理するが、順序はパイプラインキーと WGSL の両方に残す（silu と
- * 同じ理由 — 有限値では可換でも NaN payload の選ばれ方がバックエンドで違いうる）。実測は
- * anima / irodori が `mul(gate, x)`、gemma4 / MiniCPM5 の RoPE 末尾が `mul(x, gate)` の 2 順序。
- * MUST: add の入力順は実測形どおり `add(residual, mul)` の 1 通りに固定する（全資産で残差が
- * slot 0）。受理集合を広げないので、キーにも WGSL にも順序変種を載せない。
- *
- * 外部入力の延べ回数: gate / x が mul で各 1 回、residual が add で 1 回 = 3 回。
- */
-const GATED_RESIDUAL_RULE = defineRule<GatedResidualMatch>({
-  name: "gatedResidual",
-  heads: ["mul"],
-  match: (nodes, index, context) => {
-    const multiply = nodes[index];
-    if (multiply?.node.op !== "mul") return undefined;
-    const offset = nodes[index + 1];
-    if (offset?.node.op !== "add") return undefined;
-    const chain = [multiply, offset];
-    if (!allF32(chain)) return undefined;
-
-    const rowShape = multiply.outputs[0].shape;
-    if (rowShape.length < 2 || rowShape.some((extent) => extent < 1)) return undefined;
-    const dim = rowShape[rowShape.length - 1];
-    const gateShape = modulationShape(rowShape, dim);
-    // 先行軸が全て 1 の行（`[1,…,1,dim]`）は broadcast と非 broadcast の区別が付かないので、
-    // ゲート側の slot が一意に決まらない。ここで落とす（素の elementwise mul が正しい）。
-    if (sameShape(rowShape, gateShape)) return undefined;
-
-    let multiplyOrder: GatedResidualOrder;
-    if (
-      sameShape(multiply.inputShapes[0], gateShape) &&
-      sameShape(multiply.inputShapes[1], rowShape)
-    ) {
-      multiplyOrder = "gate-x";
-    } else if (
-      sameShape(multiply.inputShapes[0], rowShape) &&
-      sameShape(multiply.inputShapes[1], gateShape)
-    ) {
-      multiplyOrder = "x-gate";
-    } else {
-      return undefined;
-    }
-    const gateName = multiply.node.ins[multiplyOrder === "gate-x" ? 0 : 1];
-    const xName = multiply.node.ins[multiplyOrder === "gate-x" ? 1 : 0];
-
-    // add は残差が slot 0・中間が slot 1 の 1 順序だけ（実測形）。
-    if (offset.node.ins[1] !== multiply.outputs[0].name) return undefined;
-    const residualName = offset.node.ins[0];
-    if (
-      !sameShape(offset.inputShapes[0], rowShape) ||
-      !sameShape(offset.outputs[0].shape, rowShape)
-    ) return undefined;
-    if (!internalsArePrivate(chain, context)) return undefined;
-
-    // bind 面はカーネルの binding 1〜3 と 1 対 1 なので**重複を許さない**（同じ値名が 2 スロットに
-    // 来る形は実測に無く、{@link FusedStep.binds} の「重複無し」も崩す）。
-    const binds = [gateName, xName, residualName];
-    if (new Set(binds).size !== binds.length) return undefined;
-
-    return {
-      window: chain,
-      chain,
-      gateName,
-      xName,
-      residualName,
-      outputName: offset.outputs[0].name,
-      outputShape: offset.outputs[0].shape,
-      dim,
-      multiplyOrder,
-    };
-  },
-  build: (matched) => {
-    const count = numel(matched.outputShape);
-    return {
-      // MUST: 並びは [gate, x, residual] 固定（カーネルの binding 1 / 2 / 3）。mul の入力順は
-      // WGSL 側の積の綴りが持つので、bind 面は順序変種で動かさない。
-      binds: [matched.gateName, matched.xName, matched.residualName],
-      outputName: matched.outputName,
-      outputShape: matched.outputShape,
-      temps: [],
-      dispatches: [{
-        key: gatedResidualKey(matched.multiplyOrder),
-        wgsl: () => gatedResidualWgsl(matched.multiplyOrder),
-        params: gatedResidualParams(count, matched.dim),
-        workgroups: {
-          kind: "gridStride",
-          items: count,
-          size: GATED_RESIDUAL_WORKGROUP_SIZE,
-        },
-      }],
-    };
-  },
-});
-
 type AdalnMatch = FusionMatch & {
   readonly binds: readonly string[];
   readonly outputName: string;
@@ -1012,6 +871,12 @@ type AdalnMatch = FusionMatch & {
   readonly dim: number;
   readonly eps: number;
 };
+
+/** 変調ベクトルの broadcast 形（先行軸を全て 1 にした `[1,…,1,dim]`）。 */
+const modulationShape = (rowShape: readonly number[], dim: number): readonly number[] => [
+  ...rowShape.slice(0, -1).map(() => 1),
+  dim,
+];
 
 /**
  * adaLN（DiT の変調）: エクスポータが出す**窓 6 / 7 ノード**。
@@ -1245,7 +1110,7 @@ type RowBlockAttentionMatch = FusionMatch & {
  *
  * ## 適用順と head 衝突
  *
- * 先頭 op は `bmm` で、既存 6 ルールの先頭 op（`sigmoid` / `gelu_tanh` / `reshape` / `mul` /
+ * 先頭 op は `bmm` で、既存 5 ルールの先頭 op（`sigmoid` / `gelu_tanh` / `reshape` / `mul` /
  * `slice` / `layer_norm`）と互いに素なので宣言順は結果に効かない。窓の内側には `reshape` /
  * `expand` が 5 本あるが、掴んだ時点で走査は窓幅ぶん進むので内側で別ルールが発火する余地は
  * 無い（掴めなかったときだけ内側の `reshape` が upsample2x の先頭として試され、6 ノードの
@@ -1472,7 +1337,6 @@ export const FUSION_RULES: readonly FusionRule[] = [
   GELU_TANH_MUL_RULE,
   UPSAMPLE_2X_RULE,
   ROPE_RULE,
-  GATED_RESIDUAL_RULE,
   ADALN_RULE,
   ROW_BLOCK_ATTENTION_RULE,
 ];
@@ -1503,7 +1367,6 @@ export const planFusions = (
     geluTanhMul: 0,
     upsample2x: 0,
     rope: 0,
-    gatedResidual: 0,
     adaln: 0,
     rowBlockAttention: 0,
     identityExpand: 0,

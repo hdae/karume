@@ -11,11 +11,6 @@ import { elementwiseKey } from "../src/codegen/elementwise.ts";
 import { type IrGraph, parseIrGraph } from "../src/format/ir.ts";
 import { ADALN_NORM_KEY, adalnNormParams } from "../src/kernels/adaln-norm.ts";
 import { bmmKey } from "../src/kernels/bmm.ts";
-import {
-  gatedResidualKey,
-  type GatedResidualOrder,
-  gatedResidualParams,
-} from "../src/kernels/gated-residual.ts";
 import { geluTanhMulKey, type GeluTanhMulOrder } from "../src/kernels/gelu-tanh-mul.ts";
 import { ROPE_KEY } from "../src/kernels/rope.ts";
 import { siluKey } from "../src/kernels/silu.ts";
@@ -66,27 +61,23 @@ const fusedAt = (plan: FusionPlan, index: number) => {
   return step;
 };
 
-/**
- * 先頭 op の重なりは **`mul` の 1 つだけ**（rope の direct-mul-first 形と gatedResidual）。
- * 重なった先頭 op では宣言順が結果に効きうるので、この門は「重なりが 1 つに閉じている」ことだけを
- * 見る。**同じ位置で 2 ルールが同時に掴まない**ことは、下の
- * 「どのグラフのどの位置でも掴むルールは高々 1 本」が全 fixture で機械的に確かめる。
- */
-Deno.test("ルール表の先頭 op の重なりは rope / gatedResidual の `mul` だけ", () => {
+Deno.test("ルール表の先頭 op は互いに素で、適用順が結果に効かない", () => {
   assertEquals(FUSION_RULES.map((rule) => rule.name), [
     "silu",
     "geluTanhMul",
     "upsample2x",
     "rope",
-    "gatedResidual",
     "adaln",
     "rowBlockAttention",
   ]);
-  const owners = new Map<string, string[]>();
+  const seen = new Set<string>();
   for (const rule of FUSION_RULES) {
-    for (const head of rule.heads) owners.set(head, [...(owners.get(head) ?? []), rule.name]);
+    for (const head of rule.heads) {
+      assertEquals(seen.has(head), false, `先頭 op '${head}' が複数ルールで重なっている`);
+      seen.add(head);
+    }
   }
-  assertEquals([...owners.keys()].sort(), [
+  assertEquals([...seen].sort(), [
     "bmm",
     "gelu_tanh",
     "layer_norm",
@@ -95,10 +86,6 @@ Deno.test("ルール表の先頭 op の重なりは rope / gatedResidual の `mu
     "sigmoid",
     "slice",
   ]);
-  assertEquals(
-    [...owners].filter(([, names]) => names.length > 1),
-    [["mul", ["rope", "gatedResidual"]]],
-  );
 });
 
 // ---------------------------------------------------------------- SiLU
@@ -641,166 +628,6 @@ Deno.test("RoPE の反例（別名 / 内部 output / 別 consumer / 分割位置
   }
 });
 
-// ------------------------------------------------------- gatedResidual
-
-const GATED_ROWS = 4;
-const GATED_DIM = 8;
-
-type GatedResidualOptions = {
-  /** mul の入力順（既定 = 実測の anima / irodori 形 `mul(gate, x)`）。 */
-  readonly order?: GatedResidualOrder;
-  /** rank 4 で作る（実測は rank 3 の DiT 形と rank 4 の RoPE 末尾形の両方）。 */
-  readonly rank4?: boolean;
-  /** 中間 mul の直後に 0 dispatch の別名を 1 本挟む（隣接条件だけを外す）。 */
-  readonly interpose?: boolean;
-  /** 中間 mul を graph output にする。 */
-  readonly productOutput?: boolean;
-  /** 中間 mul に別 consumer を足す。 */
-  readonly extraConsumer?: boolean;
-  /** ゲートを x と同 shape にする（broadcast でない素の mul）。 */
-  readonly denseGate?: boolean;
-  /** 残差も broadcast にする（rms_norm ベース adaLN 変調形の `add(·, shift)`）。 */
-  readonly broadcastResidual?: boolean;
-  /** 行そのものを `[1,…,1,dim]` にする（mul の両入力が broadcast = ゲート slot が一意でない）。 */
-  readonly flatRow?: boolean;
-  /** add の入力順を入れ替える（観測外の slot 順）。 */
-  readonly swappedAdd?: boolean;
-  /** 残差に x と同じ値名を渡す（bind 面が重複する形）。 */
-  readonly residualIsX?: boolean;
-};
-
-/**
- * 実 IR（anima transformer / irodori DiT）のゲート付き残差
- * `mul(gate[1,…,1,dim], x) → add(residual, ·)`。
- */
-const gatedResidualGraph = (options: GatedResidualOptions = {}): GraphJson => {
-  const dtype = "f32";
-  const lead = options.rank4 ? [1, 2] : [1];
-  const row = options.flatRow
-    ? [...lead.map(() => 1), GATED_DIM]
-    : [...lead, GATED_ROWS, GATED_DIM];
-  const gate = options.denseGate ? row : [...row.slice(0, -1).map(() => 1), GATED_DIM];
-  const residual = options.broadcastResidual ? [...row.slice(0, -1).map(() => 1), GATED_DIM] : row;
-  const values: GraphJson["values"] = {
-    p: { dtype, shape: [...row] },
-    y: { dtype, shape: [...row] },
-  };
-  const inputs: GraphJson["inputs"] = [
-    { name: "gate", dtype, shape: [...gate] },
-    { name: "x", dtype, shape: [...row] },
-    ...(options.residualIsX ? [] : [{ name: "residual", dtype, shape: [...residual] }]),
-  ];
-  const nodes: GraphJson["nodes"] = [{
-    op: "mul",
-    ins: options.order === "x-gate" ? ["x", "gate"] : ["gate", "x"],
-    outs: ["p"],
-    attrs: {},
-  }];
-  let product = "p";
-  if (options.interpose) {
-    values.p_alias = { dtype, shape: [...row] };
-    nodes.push({ op: "reshape", ins: ["p"], outs: ["p_alias"], attrs: {} });
-    product = "p_alias";
-  }
-  const residualName = options.residualIsX ? "x" : "residual";
-  nodes.push({
-    op: "add",
-    ins: options.swappedAdd ? [product, residualName] : [residualName, product],
-    outs: ["y"],
-    attrs: {},
-  });
-  const extraOutputs: string[] = [];
-  if (options.extraConsumer) {
-    values.p_copy = { dtype, shape: [...row] };
-    nodes.push({ op: "neg", ins: ["p"], outs: ["p_copy"], attrs: {} });
-    extraOutputs.push("p_copy");
-  }
-  return {
-    format: "karume-ir",
-    version: 1,
-    requires: { ops: [...new Set(nodes.map((node) => node.op))] },
-    symbols: [],
-    inputs,
-    outputs: [...(options.productOutput ? ["p"] : []), "y", ...extraOutputs],
-    initializers: {},
-    values,
-    nodes,
-  };
-};
-
-/** 宣言 shape がそのまま実 shape（記号次元を使っていない）。 */
-const gatedResidualInputs = (
-  options: GatedResidualOptions = {},
-): Readonly<Record<string, readonly number[]>> =>
-  Object.fromEntries(
-    gatedResidualGraph(options).inputs.map((spec) => [spec.name, spec.shape as readonly number[]]),
-  );
-
-const fuseGatedResidual = (options: GatedResidualOptions = {}): FusionPlan =>
-  fuse(gatedResidualGraph(options), gatedResidualInputs(options));
-
-Deno.test("gatedResidual は mul の両順を掴み、bind 面を [gate, x, residual] に固定する", () => {
-  for (const order of ["gate-x", "x-gate"] as const) {
-    for (const rank4 of [false, true]) {
-      const label = `${order} rank${rank4 ? 4 : 3}`;
-      const plan = fuseGatedResidual({ order, rank4 });
-      assertEquals(outline(plan.steps), ["fused:gatedResidual"], label);
-      const step = fusedAt(plan, 0);
-      // 外部入力の延べ列は**元のノード順**（mul の入力順がそのまま出る）。bind 面は
-      // カーネルの binding 1〜3 に固定なので、順序変種でも動かない。
-      assertEquals(
-        step.ins,
-        order === "gate-x" ? ["gate", "x", "residual"] : ["x", "gate", "residual"],
-        `${label}: 延べ列`,
-      );
-      assertEquals(step.binds, ["gate", "x", "residual"], `${label}: bind 順`);
-      assertEquals(step.nodeCount, 2, label);
-      assertEquals(step.outputName, "y", label);
-      assertEquals(step.dispatches.length, 1, label);
-      assertEquals(step.dispatches[0].key, gatedResidualKey(order), label);
-      const rows = rank4 ? 2 * GATED_ROWS : GATED_ROWS;
-      assertEquals(
-        [...step.dispatches[0].params],
-        [...gatedResidualParams(rows * GATED_DIM, GATED_DIM)],
-        `${label}: n と dim`,
-      );
-      assertEquals(
-        step.dispatches[0].workgroups,
-        { kind: "gridStride", items: rows * GATED_DIM, size: 256 },
-        label,
-      );
-      assertEquals(plan.counts.gatedResidual, 1, label);
-    }
-  }
-});
-
-// NOTE: dtype 違いの反例は**構成できない** — mul / add の契約が dtype 一様を要求するので、
-// planGraph が融合パスより先に落とす（adaLN と同じ理由）。
-Deno.test(
-  "gatedResidual の反例（別名 / 内部 output / 別 consumer / 同 shape ゲート / 両方 broadcast / 残差が broadcast / add の順 / bind 重複）は素の列へ落ちる",
-  () => {
-    const cases: readonly (readonly [string, GatedResidualOptions])[] = [
-      ["interposed alias", { interpose: true }],
-      ["mul が graph output", { productOutput: true }],
-      ["mul に別 consumer", { extraConsumer: true }],
-      ["ゲートが x と同 shape", { denseGate: true }],
-      ["行そのものが broadcast 形（両方 broadcast）", { flatRow: true }],
-      ["残差が broadcast（adaLN 変調形）", { broadcastResidual: true }],
-      ["add(mul, residual)", { swappedAdd: true }],
-      ["残差が x と同じ値名", { residualIsX: true }],
-    ];
-    for (const [label, options] of cases) {
-      const plan = fuseGatedResidual(options);
-      assertEquals(plan.counts.gatedResidual, 0, `${label}: 融合カウンタ`);
-      assertEquals(
-        plan.steps.every((step) => step.kind === "node"),
-        true,
-        `${label}: ${outline(plan.steps).join(",")}`,
-      );
-    }
-  },
-);
-
 // -------------------------------------------------------- identity expand
 
 const expandGraph = (outShape: readonly number[]): GraphJson => ({
@@ -1068,7 +895,6 @@ Deno.test("カウンタは融合が並んだグラフでルール別に積み上
     geluTanhMul: 0,
     upsample2x: 0,
     rope: 1,
-    gatedResidual: 0,
     adaln: 0,
     rowBlockAttention: 0,
     identityExpand: 0,
@@ -1416,63 +1242,4 @@ Deno.test("birefnet 形の分解 attention は掴めず、S がノード出力�
     "S / mask 済み S / P がステップ内一時になっていない",
   );
   assertEquals(allocatedOutputs(fused).has("scores3"), false, "S がノード出力として残っている");
-});
-
-/**
- * **どのグラフのどの位置でも、掴むルールは高々 1 本**。
- *
- * ADR 0040 決定 1 は「適用順は宣言順・先頭 op が互いに素なので順序は結果に効かない」と書いて
- * いたが、gatedResidual の追加で `mul` が rope と重なった（rope の direct-mul-first 形）。
- * 重なった以上、順序が効かないことは先頭 op の宣言だけでは言えない — そこで**実際の match**を
- * 全 fixture の全位置で突き合わせ、2 本以上が同時に掴む位置が 1 つも無いことを門にする
- * （rope の direct-first は `mul` の直後が `slice`、gatedResidual は `add` なので排他）。
- * これが緑である限り、{@link FUSION_RULES} の並べ替えは結果を変えない。
- */
-Deno.test("どのグラフのどの位置でも掴むルールは高々 1 本（適用順は結果に効かない）", () => {
-  const fixtures:
-    readonly (readonly [string, GraphJson, Readonly<Record<string, readonly number[]>>])[] = [
-      ["silu", siluGraph(), siluInputs()],
-      ["geluTanhMul", geluTanhMulGraph(), geluTanhMulInputs()],
-      ["geluTanhMul(u-gelu)", geluTanhMulGraph({ order: "u-gelu" }), geluTanhMulInputs()],
-      ["upsample2x", upsampleGraph(), { x: [2, 3, 5, 7] }],
-      ["rope(direct-first)", ropeGraph(), ropeInputs()],
-      [
-        "rope(slice-first)",
-        ropeGraph({ order: "slice-first" }),
-        ropeInputs({ order: "slice-first" }),
-      ],
-      [
-        "rope(passthrough)",
-        ropeGraph({ prefixSlicedSin: true }),
-        ropeInputs({ prefixSlicedSin: true }),
-      ],
-      ["gatedResidual", gatedResidualGraph(), gatedResidualInputs()],
-      ["gatedResidual(x-gate)", gatedResidualGraph({ order: "x-gate" }), gatedResidualInputs()],
-      [
-        "gatedResidual(rank4)",
-        gatedResidualGraph({ rank4: true }),
-        gatedResidualInputs({ rank4: true }),
-      ],
-      ["adaln", adalnGraph(), adalnInputs(adalnGraph())],
-      ["attention", attentionGraph(), attentionInputs()],
-    ];
-  for (const [label, graph, inputShapes] of fixtures) {
-    const ir = parse(graph);
-    const plan = planGraph(ir, bindSymbols(ir, inputShapes));
-    const context = {
-      useCounts: countUses(ir),
-      outputNames: new Set(ir.outputs),
-      limits: TEST_LIMITS,
-    };
-    let hits = 0;
-    for (let index = 0; index < plan.nodes.length; index += 1) {
-      const matched = FUSION_RULES
-        .filter((rule) => rule.apply(plan.nodes, index, context) !== undefined)
-        .map((rule) => rule.name);
-      assertEquals(matched.length <= 1, true, `${label}: nodes[${index}] で ${matched} が競合`);
-      hits += matched.length;
-    }
-    // 対照: どの fixture も少なくとも 1 箇所は掴む（上の「高々 1 本」が空振りでない裏）。
-    assertEquals(hits >= 1, true, `${label}: どの位置でも掴めていない`);
-  }
 });
