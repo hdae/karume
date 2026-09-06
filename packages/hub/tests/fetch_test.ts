@@ -11,6 +11,7 @@ import {
   loadManifest,
   ManifestFormatError,
   resolveFiles,
+  type RetryDiagnostic,
 } from "../mod.ts";
 import {
   createMockFetch,
@@ -62,6 +63,32 @@ const tamper = (bytes: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer> => {
   const copy = new Uint8Array(bytes);
   copy[copy.length - 1] ^= 0xff;
   return copy;
+};
+
+/**
+ * URL 述語に一致する取得の**最初の 1 回だけ**を `429 Too Many Requests`（`retry-after: 0`）へ
+ * 差し替え、以後は元の `fetch` へ委譲するラッパ（取得層の再試行を 1 回だけ踏ませる）。
+ *
+ * 差し替えの前に元の `fetch` を必ず 1 回呼ぶ — こうしないと 429 になった要求が mock の
+ * 呼び出し記録に残らず、「取り直したか」を要求回数で見られない。
+ */
+const rateLimitOnce = (
+  base: typeof globalThis.fetch,
+  matches: (url: string) => boolean,
+): typeof globalThis.fetch => {
+  let fired = false;
+  return async (input, init) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    const response = await base(input, init);
+    if (fired || !matches(url)) return response;
+    fired = true;
+    await response.body?.cancel().catch(() => {});
+    return new Response(null, {
+      status: 429,
+      statusText: "Too Many Requests",
+      headers: { "retry-after": "0" },
+    });
+  };
 };
 
 /** `console.warn` を差し替えて `body` を走らせ、必ず元へ戻す（出た文言をそのまま返す）。 */
@@ -211,6 +238,43 @@ Deno.test("loadManifest: 取得層の 404 は repo / SHA / path の文脈を付�
   assertEquals(error.revisionSha, SHA);
   assertEquals(error.path, MANIFEST_PATH);
   assert(error.cause instanceof Error, "取得層のエラーを cause に残す");
+});
+
+Deno.test("loadManifest: revision 解決の 429 は onRetry で届き、取り直して manifest が揃う", async () => {
+  const caches = new MemoryCacheStorage();
+  const mock = createMockFetch({ sha: SHA, files: serveAll() });
+  const retries: RetryDiagnostic[] = [];
+  let loaded!: LoadedManifest;
+  await captureWarnings(async () => {
+    loaded = await loadManifest({ repo: REPO, hubUrl: HUB_URL }, {
+      fetch: rateLimitOnce(mock.fetch, (url) => url === revisionUrl("main")),
+      caches,
+      onRetry: (diagnostic) => retries.push(diagnostic),
+    });
+  });
+  assertEquals(loaded.revisionSha, SHA, "429 の後に解決できていない");
+  assertEquals(
+    retries,
+    [{ url: revisionUrl("main"), status: 429, attempt: 1, delayMs: 0, retryAfter: "0" }],
+    "再試行の通知が届いていない / 中身が欠けている",
+  );
+});
+
+Deno.test("loadManifest: karume.json の 429 も onRetry で届く", async () => {
+  const caches = new MemoryCacheStorage();
+  const mock = createMockFetch({ files: serveAll() });
+  const target = resolveUrl(MANIFEST_PATH);
+  const retries: RetryDiagnostic[] = [];
+  const loaded = await loadManifest({ repo: REPO, hubUrl: HUB_URL, revision: SHA }, {
+    fetch: rateLimitOnce(mock.fetch, (url) => url === target),
+    caches,
+    onRetry: (diagnostic) => retries.push(diagnostic),
+  });
+  assertEquals(loaded.manifest.available.models, ["anima-turbo", "anima-lite"]);
+  assertEquals(retries.length, 1, "再試行の通知が 1 回だけ届いていない");
+  assertEquals(retries[0].url, target, "通知が karume.json 以外の URL を名乗っている");
+  assertEquals(retries[0].status, 429);
+  assertEquals(countCalls(mock.calls, target), 2, "429 の後に取り直していない");
 });
 
 Deno.test("loadManifest: 破損した cached karume.json は self-heal で 1 往復だけ取り直す", async () => {
@@ -672,6 +736,24 @@ Deno.test("fetchAssets: content-length は正しいのに body が足りない�
   assertEquals(hasEntry(hubCache(caches), short), false, "検証を通らないバイト列を格納している");
 });
 
+Deno.test("fetchAssets: 資産の 429 は onRetry で届き、取り直したバイト列が返る", async () => {
+  const caches = new MemoryCacheStorage();
+  const path = "vae_decoder/model.safetensors";
+  const target = resolveUrl(path);
+  const { mock, loaded } = await load({ files: serveAll() }, caches);
+  const retries: RetryDiagnostic[] = [];
+  const assets = await fetchAssets(loaded, resolveFiles(loaded.manifest), {
+    fetch: rateLimitOnce(mock.fetch, (url) => url === target),
+    caches,
+    onRetry: (diagnostic) => retries.push(diagnostic),
+  });
+  assertEquals(retries.length, 1, "再試行の通知が 1 回だけ届いていない");
+  assertEquals(retries[0].url, target, "通知が別の資産の URL を名乗っている");
+  assertEquals(retries[0].status, 429);
+  assertEquals(assets["vae_decoder"], payloadFor(path), "取り直したバイト列が返っていない");
+  assertEquals(countCalls(mock.calls, target), 2, "429 の後に取り直していない");
+});
+
 Deno.test("fetchAssets: 完全キャッシュ済みでも中断済み signal なら資産を返さない", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: serveAll() }, caches);
@@ -1024,6 +1106,20 @@ Deno.test("fetchAssets: 越境参照の検証失敗は越境先の repo / SHA �
   assertEquals(error.repo, FOREIGN_REPO);
   assertEquals(error.revisionSha, FOREIGN_SHA);
   assertEquals(error.path, CROSS_PATH);
+});
+
+Deno.test("fetchAssets: 越境先の 429 も onRetry で届く（越境先の URL を名乗る）", async () => {
+  const caches = new MemoryCacheStorage();
+  const { mock, loaded } = await load({ files: crossRepoFiles() }, caches);
+  const retries: RetryDiagnostic[] = [];
+  const assets = await fetchAssets(loaded, resolveFiles(loaded.manifest), {
+    fetch: rateLimitOnce(mock.fetch, (url) => url === foreignUrl),
+    caches,
+    onRetry: (diagnostic) => retries.push(diagnostic),
+  });
+  assertEquals(retries.map((diagnostic) => diagnostic.url), [foreignUrl]);
+  assertEquals(assets["borrowed"], foreignBytes, "取り直した越境ぶんが返っていない");
+  assertEquals(countCalls(mock.calls, foreignUrl), 2, "429 の後に取り直していない");
 });
 
 Deno.test("fetchAssets: 同じ path の自リポ / 越境は進捗でも別の 1 本として数える", async () => {

@@ -11,6 +11,7 @@
  * O(最大 shard)。`docs/decisions/0070-shard-loading-admission.md` 決定 2）/ 資産を先に永続
  * キャッシュへ落とす（{@link prefetchAssets} — 逐次面の相 1 単体）/ 失敗を型で捌く
  * （{@link HubError} 以下）/ キャッシュの診断を受け取る（{@link CacheDiagnostic}）/
+ * 取得層の再試行（429 / 503 の `Retry-After` 追従）の通知を受け取る（{@link RetryDiagnostic}）/
  * キャッシュを消して容量を空ける（{@link clearHubCache}）/ 選択が落とし済みかを照会する
  * （{@link listCachedAssets} — 取りには行かない）/ 選択 1 つぶんの在庫を消す
  * （{@link evictCachedAssets} — 他の選択が使うファイルと越境参照は残す）。
@@ -84,6 +85,7 @@ export type {
   HubRepoRef,
   LoadedManifest,
   LoadManifestOptions,
+  RetryDiagnostic,
   StreamAssetsOptions,
 } from "./src/session.ts";
 

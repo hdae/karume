@@ -145,6 +145,7 @@ const pinnedHfSource = (
         }),
         ...shared,
         ...(options.onCacheError === undefined ? {} : { onCacheError: options.onCacheError }),
+        ...(options.onRetry === undefined ? {} : { onRetry: options.onRetry }),
       });
     },
 
@@ -173,6 +174,7 @@ const pinnedHfSource = (
           onProgress: (progress) => onProgress(progress.loaded),
           ...shared,
           ...(options.onCacheError === undefined ? {} : { onCacheError: options.onCacheError }),
+          ...(options.onRetry === undefined ? {} : { onRetry: options.onRetry }),
         },
       );
     },
@@ -194,6 +196,7 @@ const pinnedHfSource = (
           fetch: guardedFetchFor(baseFetch, url, exactBudget(ref.size, violationOf(sizeViolation))),
           onProgress: (progress) => onProgress(progress.loaded),
           ...shared,
+          ...(options.onRetry === undefined ? {} : { onRetry: options.onRetry }),
         },
       );
     },
@@ -249,6 +252,7 @@ export const createHfSource = (ref: HubRepoRef): DistributionSource => {
       const revisionSha = await resolveHfRevision(hfTarget(ref.repo, requested, ref.hubUrl), {
         ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
         init: requestInit(options.headers, options.signal),
+        ...(options.onRetry === undefined ? {} : { onRetry: options.onRetry }),
       });
       // 解決の**後**に出す — 印字する SHA が確定するのがここで、解決に失敗した場合は警告ではなく
       // 失敗そのものが報告されるべきだから（fail loudly が先）。

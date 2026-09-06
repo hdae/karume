@@ -9,6 +9,7 @@ import {
   ManifestReferenceError,
   prefetchAssets,
   resolveFiles,
+  type RetryDiagnostic,
   streamAssets,
   type StreamedAsset,
 } from "../mod.ts";
@@ -96,6 +97,32 @@ const prepare = async (
     caches,
   });
   return { loaded, refs: shardRefs(loaded), mock: createMockFetch(routes) };
+};
+
+/**
+ * URL 述語に一致する取得の**最初の 1 回だけ**を `429 Too Many Requests`（`retry-after: 0`）へ
+ * 差し替え、以後は元の `fetch` へ委譲するラッパ（取得層の再試行を 1 回だけ踏ませる）。
+ *
+ * 差し替えの前に元の `fetch` を必ず 1 回呼ぶ — こうしないと 429 になった要求が mock の
+ * 呼び出し記録に残らず、「取り直したか」を要求回数で見られない。
+ */
+const rateLimitOnce = (
+  base: typeof globalThis.fetch,
+  matches: (url: string) => boolean,
+): typeof globalThis.fetch => {
+  let fired = false;
+  return async (input, init) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    const response = await base(input, init);
+    if (fired || !matches(url)) return response;
+    fired = true;
+    await response.body?.cancel().catch(() => {});
+    return new Response(null, {
+      status: 429,
+      statusText: "Too Many Requests",
+      headers: { "retry-after": "0" },
+    });
+  };
 };
 
 /**
@@ -200,6 +227,24 @@ Deno.test("streamAssets: キャッシュも真実源も壊れていれば fail l
   assertEquals(error.revisionSha, SHA);
   assertEquals(error.available.models, ["anima-turbo", "anima-lite"]);
   assert(error.cause instanceof Error, "取得層の不一致を cause に残す");
+});
+
+Deno.test("streamAssets: 相 1 の 429 は onRetry で届き、温め直した shard が yield される", async () => {
+  const caches = new MemoryCacheStorage();
+  const { loaded, refs, mock } = await prepare({ files: serveAll() }, caches);
+  const target = resolveUrl(refs[0].path);
+  const retries: RetryDiagnostic[] = [];
+  const seen = await drain(streamAssets(loaded, refs, {
+    fetch: rateLimitOnce(mock.fetch, (url) => url === target),
+    caches,
+    onRetry: (diagnostic) => retries.push(diagnostic),
+  }));
+
+  assertEquals(retries.length, 1, "再試行の通知が 1 回だけ届いていない");
+  assertEquals(retries[0].url, target, "通知が別の shard の URL を名乗っている");
+  assertEquals(retries[0].status, 429);
+  assertEquals(seen[0].bytes, payloadFor(refs[0].path), "温め直した shard の中身が違う");
+  assertEquals(countCalls(mock.calls, target), 2, "429 の後に温め直していない");
 });
 
 Deno.test("streamAssets: 相 1 の sha256 不一致は fail loud で、キャッシュにエントリを残さない", async () => {

@@ -2,10 +2,11 @@
  * セッションの語彙 — 「どの取得元の、どの世代を、どんな作法で読むか」。取得元の実装
  * （`sources/`）にも共通層（`fetch.ts`）にも属さない、面と面の間で受け渡す型だけを置く。
  *
- * NOTE: `fetch` / `caches` / `headers` は HTTP 取得元の語彙がそのまま公開面に出ているもの。
- * 直接読める取得元（ローカルディレクトリ等）はこれらを**無視する**（`caches` を通らない・
- * `fetch` を呼ばない）。全取得元に共通の作法は `signal` / `onProgress` / `onCacheError` の側で、
- * 取得元ごとの設定は取得元を作る factory（`localDirectory(...)` 等）が受け取る。
+ * NOTE: `fetch` / `caches` / `headers` / `onRetry` は HTTP 取得元の語彙がそのまま公開面に出て
+ * いるもの。直接読める取得元（ローカルディレクトリ等）はこれらを**無視する**（`caches` を
+ * 通らない・`fetch` を呼ばない）。全取得元に共通の作法は `signal` / `onProgress` /
+ * `onCacheError` の側で、取得元ごとの設定は取得元を作る factory（`localDirectory(...)` 等）が
+ * 受け取る。
  */
 
 import type { Manifest } from "./manifest.ts";
@@ -29,6 +30,18 @@ export type CacheDiagnostic = {
   readonly error: unknown;
 };
 
+/** 取得層が 429 / 503 を `Retry-After` に従って取り直す 1 回ごとの通知（待機の前に届く）。 */
+export type RetryDiagnostic = {
+  readonly url: string;
+  readonly status: number;
+  /** 何回目の再試行か（1 始まり）。 */
+  readonly attempt: number;
+  /** これから待つ ms。 */
+  readonly delayMs: number;
+  /** 応答の `Retry-After` ヘッダ（無ければ undefined）。 */
+  readonly retryAfter?: string;
+};
+
 export type LoadManifestOptions = {
   readonly signal?: AbortSignal;
   /**
@@ -44,6 +57,18 @@ export type LoadManifestOptions = {
    * アプリは受け取って `navigator.storage.persist()` の案内などに使う。
    */
   readonly onCacheError?: (diagnostic: CacheDiagnostic) => void;
+  /**
+   * 再試行 1 回ごとの通知先。アプリが「rate limit 中・あと N 秒待つ」を表示できるように出す
+   * （沈黙のまま数十秒止まって見えるのを避ける）。
+   *
+   * 呼ぶのは**HTTP 取得元だけ**（ローカル取得元は取得層を通らないので呼ばない）。届く範囲は
+   * その面の全取得 — revision 解決・`karume.json`・資産（全量面と逐次面の相 1 / 相 2）・
+   * 越境先のファイル。再試行の方針（既定 429 / 503・最大 5 回・`Retry-After` 優先）は取得層の
+   * 既定のままで hub は変えない。
+   *
+   * NOTE: このリスナーが throw しても取得は落ちない（取得層が隔離して warn する）。
+   */
+  readonly onRetry?: (diagnostic: RetryDiagnostic) => void;
   /** `fetch` の差し替え（テスト・カスタム輸送用）。 */
   readonly fetch?: typeof globalThis.fetch;
   /** `CacheStorage` の差し替え（テスト用）。 */
