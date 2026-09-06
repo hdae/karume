@@ -7,10 +7,16 @@
 > [docs/perf-ledger.md](../docs/perf-ledger.md)。ここは「今この瞬間の文脈」だけを持つ —
 > 履歴・完了記録は ADR / research / git へ。
 >
-> Last updated: 2026-09-05
+> Last updated: 2026-09-06
 
 ## Now
 
+- **0.11.0 リリース準備中（2026-09-06）** — lockstep bump `ec60a31` までローカル完了。中身 = hub の
+  キャッシュ保守面（`listCachedAssets` / `evictCachedAssets` — ADR
+  [0094](../docs/decisions/0094-hub-cache-inventory-and-eviction.md)）+ fetch-cache 0.7.0 追従
+  （`LoadManifestOptions.onRetry`・`transport.ts` 撤去 — hub に breaking 1 件 = HF 取得元の受信超過が
+  `HubFetchError` へ）。配布形の変更は無く HF の焼き直し・pin 更新は無し。push → CI → GitHub Release →
+  JSR → `deno task smoke:published` はユーザー（[runbook](../docs/release-runbook.md) §4 / §5）。
 - **0.10.0 公開完了（2026-09-05）** — lockstep bump `3f875e4` → GitHub Release v0.10.0 → JSR 0.10.0 →
   `deno task smoke:published` 緑。中身 = ADR 0093（中間バッファの静的 liveness パッキング）+ BiRefNet
   HR / Lucida の初公開（`BIREFNET_SOURCES`）+ 網羅レビューの修正波（公開面の差分の正本は

@@ -7,12 +7,15 @@
 > [perf-ledger](perf-ledger.md) が正本で、ここは波として参照するだけ ④by-design 制約の正本は
 > [limitations](limitations.md) — 作業化が裁定された時だけここに載る。
 
-## now — 0.10.0 リリース後（2026-09-05）
+## now — 0.11.0 リリース準備（2026-09-06）
 
-0.10.0 は**公開完了**（2026-09-05 — lockstep bump `3f875e4` → GitHub Release v0.10.0 → JSR 0.10.0 →
-`deno task smoke:published` 緑・`KARUME_SOURCES` 10 本の疎通を確認。中身は下の消化済み節）。
-2026-09-04 裁定の作業波 a〜d のうち残るのは **c だけ**（a / b は消化・d はクローズ）。波と独立に
-消化してよい残件はその下。
+0.11.0 は lockstep bump（`ec60a31`）までローカル完了 — 中身は下の 2（hub のキャッシュ保守面 +
+fetch-cache 0.7.0 追従。hub に breaking 1 件 = HF 取得元の受信超過が `IntegrityError` から
+`HubFetchError` へ）。配布形の変更は無いので HF の焼き直し・pin の更新は無し。push → CI → GitHub
+Release → JSR publish → `deno task smoke:published` はユーザー（[release-runbook](release-runbook.md)
+§4 / §5）。事後の docs 同期（この見出しを「0.11.0 リリース後」へ・消化済み節の新設）は公開後に行う。
+0.10.0 は公開完了（2026-09-05 — 中身は下の消化済み節）。2026-09-04 裁定の作業波 a〜d のうち残るのは
+**c だけ**（a / b は消化・d はクローズ）。波と独立に消化してよい残件はその下。
 
 1. **c. perf K-13 / K-14**（prefill attention の K/V タイル再利用 / decode ①QK の並列化）:
    起票・合格線・kill 基準とも [perf-ledger](perf-ledger.md) が正本。
