@@ -33,8 +33,10 @@
   融合は「中間 1 本の往復ぶん」しか効かず、dispatch 削減は壁に出ない。P-5（`permute` 畳み込み）は
   実装せず保留。続く a 案の 1 本目 **K-16（lm_head i8 を GEMV 族へ・ビット同一）は済**（`5ddd186` —
   単体 ×5.0・decode GPU −21〜24% — [research](../docs/research/2026-09-06-gemv-i8-k16.md)・ADR 0082 追記 4）。
-  **次 = K-14**（decode ①QK の D 逐次の並列化 — 縮約順が変わるので opt-in 席の設計から。
-  [perf-ledger](../docs/perf-ledger.md)）。perf K-13 は [backlog](../docs/backlog.md) now に残る。
+  **K-14（①QK の D 並列縮約 ①′）も済**（`cce129d` + M=1 門 `4182b8b` — decode 壁 P=16K −9〜15%・prefill は
+  逆行するため ① のまま — [research](../docs/research/2026-09-06-state-qk-parallel-k14.md)）。席は K-12 と同じ
+  `stateAttentionReduce` 1 つで、①′ は M=1 の計画だけ。**次 = K-13**（prefill の K タイル共有 — M でバケットする
+  幾何表の 2 行目・[backlog](../docs/backlog.md) now 1）。
 - **BiRefNet 2048² 工事 A / B / C は消化（2026-09-05）** — ADR
   [0093](../docs/decisions/0093-transient-liveness-packing.md) を runtime へ結線（B + C）し、recipe の
   パッチ ⑨（A）で decoder 末尾の巨大中間を消した。実測: 1024² 中間 6,283 → 749 MiB / 2048² 中間

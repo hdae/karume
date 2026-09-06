@@ -1149,8 +1149,10 @@ VRAM は容量に比例して伸びる（full 層 KV
   32 / 256 / 512 / 768 で一致したが、余裕の小さい step では反転しうる。検収の golden は配布形の
   宣言値で採る。
 - **`capacity` は token 列に効かない**（仕事量は論理長で切られ、値は容量非依存 — ビット門あり）。
-- **decode の attention ③PV は `Gemma4Pipeline` では KV 並列縮約（perf-ledger K-12）が既定**
-  （`GEMMA4_STATE_ATTENTION_REDUCE = "parallel"`）。runtime の参照経路 `"sequential"` とは縮約順が
+- **decode の attention は `Gemma4Pipeline` では並列縮約（③PV の KV 並列 = perf-ledger K-12・①QK の D 並列 =
+  K-14〈M=1 の計画だけ〉）が既定**（`GEMMA4_STATE_ATTENTION_REDUCE = "parallel"`）。①′ の帯は ① との差
+  3.58e-7 / f64 参照との差 4.17e-7（帯 5e-6・[research 2026-09-06](research/2026-09-06-state-qk-parallel-k14.md)）。
+  ③′ について:runtime の参照経路 `"sequential"` とは縮約順が
   違い（A/B 帯 5e-6・実測は ③ との差 2.4e-7・f64 参照との差 3.99e-7）、gemma4 の golden は両者で同一。
   帯の実測範囲は縮約長 live 1〜16,384（`gpu_state_attention_parallel_test.ts` の門 — 最悪値は live が
   小さい側で出る）+ 65,536（手実測）: live 4,096 / 16,384 / 65,536 で ③' vs f64 = 8.6e-9 / 1.5e-8 /

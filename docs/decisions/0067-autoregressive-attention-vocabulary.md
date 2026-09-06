@@ -211,3 +211,33 @@ KV 長が 1 スレッドの逐次長にしか効かない — P=16K で attentio
   バッファも増やさず実装が最小で、③' を段 A の中身として流用する形で split-KV へ伸ばせる。
   online 形は S 一時を消す別の価値を持つが decode の並列度を単体では解かない。subgroup はアダプタが
   feature を広告せず入場不可（2026-08-10 プローブ）。
+
+## 追記（2026-09-06）— ①QK の D 方向並列縮約変種 ①′（perf-ledger K-14）
+
+決定 4 の states 形 ①QK（S の 1 要素 = D の逐次内積）に、③′ と同じ手筋で **D 方向を workgroup 内
+16 レーンで分担する変種**（`attention_state_qk:v1:f32:wg16x16:par`）を足した。decode（M=1）では
+1 invocation の遅延が D 逐次で長く、P=16K で ①QK が decode GPU の 17%（K-12 後の最大の attention 項）
+だった（[research 2026-09-06](../research/2026-09-06-state-qk-parallel-k14.md)）。
+
+- **契約**: 束縛・params・dispatch 本数は ① と同一。1 workgroup = 局所行 1 本 × 16 列で、レーン `l` が
+  `d ≡ l (mod 16)` を昇順に部分累積し、共有メモリで固定順の木（stride 8 → 4 → 2 → 1）に畳む。
+  書く条件（live 範囲は述語外でも −inf・`cl ≥ live` と pad 行は書かない）と半スケールは ① と同一。
+  縮約順が違うので **① とビット同一ではない**。決定性・容量非依存・行ブロック非依存・述語外 −inf の
+  ビット一致・pad 行非書き込みはビット門で保つ。
+- **席**: ③′ と**同じ** `SessionOptions.stateAttentionReduce: "parallel"`（ノブは 1 つ — 2026-09-06
+  ユーザー裁定）。ただし **①′ が選ばれるのは M（chunkRows）= 1 の計画だけ**
+  （`stateQkParallelEligible`）: prefill 計画（M=768）では ① が既に行 × 列で埋まっており、①′ は行タイル幅
+  4 → 1 で workgroup と barrier を 4 倍積むだけになって ①QK が 1.5〜1.9 倍・壁が +30〜60% 逆行した。
+  ③′ は全 M で席に従う（K-12 の実測で prefill も逆行しない）。判定材料は計画時の静的値だけ
+  （実行時の論理長で分岐すると同じ計画鍵が run ごとに違うパイプラインを指す）。
+- **検証門**: ① の既存門は無変更・①′ の A/B 帯門（`tests/gpu_state_attention_parallel_test.ts`・帯
+  5e-6・実測最悪は ① との差 3.58e-7 / f64 参照との差 4.17e-7・故障注入 2 種で落ちる）・census 門
+  （`tests/gpu_state_execution_test.ts` — M=1 / M>1 × 席の 6 行）・非 GPU の適用条件の真理値表
+  （`tests/kernel_state_attention_test.ts`）。
+- **実測**（同 research）: decode ①QK 6.3 → 3.7〜4.1 ms/token（×1.55〜1.72）・decode 壁 P=16K
+  37.2〜39.4 → 33.0〜35.4 ms/token（−9〜15%）・P=256 −4.5%・門の後の prefill は ① と同等。
+  `Gemma4Pipeline` の既定は `"parallel"` のまま（追記 2026-09-03 の昇格に ①′ が乗る — golden /
+  reduce_parity の token 列は不変）。
+- **prefill 側**: 律速が traffic（K 行を M 行ぶん読み直す）なので D レーン分割は効かない。M でバケット
+  する幾何表（M=1: D レーン / M ≥ 16: K タイル共有）が「同じ族・同じ席」で両方を持つ形で、後者は
+  perf-ledger K-13 の設計。
