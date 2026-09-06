@@ -7,10 +7,15 @@
 > [perf-ledger](perf-ledger.md) が正本で、ここは波として参照するだけ ④by-design 制約の正本は
 > [limitations](limitations.md) — 作業化が裁定された時だけここに載る。
 
-## now — 0.11.0 リリース後（2026-09-06）
+## now — 0.12.0 リリース準備（2026-09-06）
 
-0.11.0 は**公開完了**（2026-09-06 — lockstep bump `ec60a31` → GitHub Release v0.11.0 → JSR 0.11.0 →
-`deno task smoke:published` 緑。中身は下の消化済み節）。2026-09-04 裁定の作業波 a〜d のうち残るのは
+0.12.0 は lockstep bump（`a24d656`）までローカル完了 — 中身は下の 1 / 2（runtime の K-16 / K-14 / K-13・
+hub の evict 修正・models の `onRetry` 透過。breaking なし・配布形の変更は無いので HF の焼き直し・pin の
+更新は無し）。push → CI → GitHub Release v0.12.0（本文 = `outputs/release/release-notes-v0.12.0.draft.md`・
+主張突合 / 両方向網羅の独立レッグで検証済み）→ JSR publish はユーザー、`deno task smoke:published` と事後の
+docs 同期（この見出しを「0.12.0 リリース後」へ・消化済み節の新設）は公開後に行う
+（[release-runbook](release-runbook.md) §4 / §5）。
+0.11.0 は公開完了（2026-09-06 — 中身は下の消化済み節）。2026-09-04 裁定の作業波 a〜d のうち残るのは
 **c だけ**（a / b は消化・d はクローズ）。**OP / Fusion の波（2026-09-06）**: 在庫の融合候補 3 件（P-5 / K-15 / K-7）は実測で閉じた（採否と数値は
 [perf-ledger](perf-ledger.md)・記録は [research 2026-09-06](research/2026-09-06-fusion-spikes-k15-k7.md)）。続きは
 大所 = **gemma4 decode の GEMV 並列度**（2026-09-06 ユーザー裁定の a 案）: K-16 / K-14 / K-13 は済（perf-ledger ✅）。次の候補は着手時に起票（ACTIVE_DESIGN の候補欄）。

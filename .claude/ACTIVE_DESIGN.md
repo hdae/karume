@@ -7,10 +7,16 @@
 > [docs/perf-ledger.md](../docs/perf-ledger.md)。ここは「今この瞬間の文脈」だけを持つ —
 > 履歴・完了記録は ADR / research / git へ。
 >
-> Last updated: 2026-09-06（OP / Fusion 波）
+> Last updated: 2026-09-06（0.12.0 リリース準備）
 
 ## Now
 
+- **0.12.0 リリース準備（2026-09-06）** — lockstep bump `a24d656` までローカル完了。中身 = runtime の
+  K-16 / K-14 / K-13（下の OP / Fusion 節）+ hub の `evictCachedAssets` 修正（同一参照集合の兄弟席を既定の
+  守る側から外す・`protect` / `alsoEvicted` — ADR [0094](../docs/decisions/0094-hub-cache-inventory-and-eviction.md)
+  追記）+ models の `onRetry` 透過（8 家族の hub オプションを `FromPretrainedHubOptions` に 1 本化）。
+  breaking なし・配布形は 0.10.0 のまま（焼き直し無し）。push → CI → GitHub Release → JSR publish は
+  ユーザー、`smoke:published` と事後の docs 同期は公開後（runbook §4 / §5）。
 - **0.11.0 公開完了（2026-09-06）** — lockstep bump `ec60a31` → GitHub Release v0.11.0 → JSR 0.11.0 →
   `deno task smoke:published` 緑。中身 = hub のキャッシュ保守面 + fetch-cache 0.7.0 追従（hub に
   breaking 1 件 = HF 取得元の受信超過が `HubFetchError` へ。公開面の差分の正本はリリースノート
