@@ -23,8 +23,6 @@ Deno.test("opOfKey: 先頭語を op に写す（変種名は表で・表に無�
   assertEquals(opOfKey("strided_write:v1:f32:r4:wg256"), "strided");
   assertEquals(opOfKey("rope:v1:half:f32:wg256"), "fused");
   assertEquals(opOfKey("silu:v1:x-sigmoid:f32:wg256"), "fused");
-  // 融合キーの先頭語は素の `ew:v3:gelu_tanh:…`（op 名は 3 語目）と別語で、こちらは fused。
-  assertEquals(opOfKey("gelu_tanh_mul:v1:gelu-u:f32:wg256"), "fused");
   assertEquals(opOfKey("something_new:v1"), "something_new");
 });
 

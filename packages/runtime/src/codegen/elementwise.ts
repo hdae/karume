@@ -33,7 +33,6 @@ import {
 import { CodegenError } from "./errors.ts";
 import {
   f32Literal,
-  geluTanhExpr,
   IS_NAN_BITS_WGSL,
   nanGuard,
   SIGMOID_STABLE_WGSL,
@@ -287,9 +286,14 @@ const UNARY_WGSL: Readonly<
   relu: (a) => nanGuard(a, `max(${a}, 0.0)`),
   // 0.7071067811865476 = 1/√2
   gelu: (a) => `0.5 * ${a} * (1.0 + erf_approx(${a} * 0.7071067811865476))`,
-  // torch の approximate="tanh"。式と MUST は {@link geluTanhExpr}（融合カーネル
-  // src/kernels/gelu-tanh-mul.ts と**同じ文字列**を共有するので、ここには書き写さない）。
-  gelu_tanh: (a) => geluTanhExpr(a),
+  // torch の approximate="tanh"。0.7978845608028654 = √(2/π)。式そのものが定義なので
+  // （erf 形と違い）近似の精度を上げる余地は無い。
+  // MUST: 内側は {@link TANH_STABLE_WGSL} を通す。素の `tanh` だと 3 次項が効いて
+  // 前活性 x ≳ 10.05 で内側引数が 44.36 を超え、exp 経由実装が沈黙 NaN を返す。
+  // NaN の外殻（{@link nanGuard}）は式全体には掛けない — 外側に因子 `x` が残るので
+  // `0.5 · NaN · (…)` が NaN のままで、伝播は畳み込みの有無に依らない（erf 形の gelu と同じ扱い）。
+  gelu_tanh: (a) =>
+    `0.5 * ${a} * (1.0 + tanh_stable(0.7978845608028654 * (${a} + 0.044715 * ${a} * ${a} * ${a})))`,
   // bool は u32 の 0 / 1。`1u - x` にすると格納規約が破れたときに 0/1 の外へ出る。
   bitwise_not: (a) => `select(1u, 0u, ${a} != 0u)`,
   clamp: (a, scalar) =>

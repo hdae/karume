@@ -220,7 +220,6 @@ const ditShapes = (sequence: number): Readonly<Record<string, readonly number[]>
 
 const NONE: FusionCounts = {
   silu: 0,
-  geluTanhMul: 0,
   upsample2x: 0,
   rope: 0,
   adaln: 0,
@@ -278,9 +277,6 @@ Deno.test({
  *
  * identityExpand は **0**。SDPA を保存した資産（ADR 0023 改訂 — mask 付き attention）では
  * 分解由来の恒等 expand が IR ごと消える（決定 6 と同じ機序。分解資産の頃は 96 だった）。
- *
- * `geluTanhMul` も **0**: `gelu_tanh` は 24 本あるが FFN はゲート無し（直後は down 射影の
- * `linear`）で、gemma4 のような `gelu_tanh → mul` の対を 1 つも持たない。
  */
 Deno.test({
   name: "実資産の EmbeddingGemma は rope 48（head 幅 256・窓内 passthrough 込み）を掴む",
@@ -338,16 +334,9 @@ if (!MINICPM5_DECODE_AVAILABLE) {
  * この門が守るのは他と同じ 2 方向: **掴めている 15 本が黙って外れない**こと（exporter の
  * 発行順退行 — dispatch が値の正しいまま +200 本級に増える）と、**数字が動いたら受理集合か
  * 発行形が変わった**と気づけること（増える側は改善 — その時この期待値を更新する）。
- *
- * `geluTanhMul` は **35（M に依らない）**。グラフには `gelu_tanh` が 70 本あるが、直後が `mul`
- * なのは per-layer 入力ゲート（35 層 × 1 本・`mul(gelu, squeeze_dims)` で shape は `[1,M,256]`）
- * だけで、残る 35 本の MLP（`[1,M,6144]` 15 本 + `[1,M,12288]` 20 本）は **gelu_tanh と mul の間に
- * up 射影の `linear` が 1 本挟まる**（`gelu_tanh → linear → mul`）ので隣接 2 ノードの受理集合に
- * 入らない。35 = 全 35 層ぶんで取りこぼしは無く、70 との差は「掴めていない別の形」。
  */
 Deno.test({
-  name:
-    "実資産の Gemma 4 E2B decode は M=1 で rope 15 / geluTanhMul 35 を掴む（token-only 形も同一・rope は M=32 で 0）",
+  name: "実資産の Gemma 4 E2B decode は M=1 で rope 15 を掴む（token-only 形も同一・M=32 は 0）",
   ignore: !GEMMA4_DECODE_AVAILABLE,
   fn: async () => {
     for (
@@ -357,17 +346,8 @@ Deno.test({
       ] as const
     ) {
       const graph = await readIrGraph(source);
-      assertEquals(
-        decodeFusionCounts(graph, 1),
-        { ...NONE, rope: 15, geluTanhMul: 35 },
-        `${name} decode（M=1）`,
-      );
-      // prefill 形で残るのは geluTanhMul だけ（rope の 15 本は M=1 の発行形にしか出ない）。
-      assertEquals(
-        decodeFusionCounts(graph, 32),
-        { ...NONE, geluTanhMul: 35 },
-        `${name} prefill 形（M=32）`,
-      );
+      assertEquals(decodeFusionCounts(graph, 1), { ...NONE, rope: 15 }, `${name} decode（M=1）`);
+      assertEquals(decodeFusionCounts(graph, 32), NONE, `${name} prefill 形（M=32）`);
     }
   },
 });

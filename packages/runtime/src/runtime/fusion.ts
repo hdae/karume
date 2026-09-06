@@ -22,18 +22,16 @@
  *
  * ## 畳む先は 1 dispatch とは限らない
  *
- * 5 ルール（silu / geluTanhMul / upsample2x / rope / adaln）は「N ノード → private カーネル
- * 1 dispatch」だが、{@link ROW_BLOCK_ATTENTION_RULE} は**演算ではなく中間の実体化幅**を畳むので、
- * ステップ内で閉じた一時（{@link FusedStep.temps}）を挟んだ dispatch 列になる。どちらも
+ * 4 ルール（silu / upsample2x / rope / adaln）は「N ノード → private カーネル 1 dispatch」だが、
+ * {@link ROW_BLOCK_ATTENTION_RULE} は**演算ではなく中間の実体化幅**を畳むので、ステップ内で
+ * 閉じた一時（{@link FusedStep.temps}）を挟んだ dispatch 列になる。どちらも
  * {@link FusedStep} 1 つ = 実行ステップ 1 つで、解放簿記の合流点は変わらない。
  *
  * ## 適用順
  *
- * {@link FUSION_RULES} の**宣言順**（silu → geluTanhMul → upsample2x → rope → adaln →
- * rowBlockAttention）。6 ルールの先頭 op は `sigmoid` / `gelu_tanh` / `reshape` / `mul|slice` /
- * `layer_norm` / `bmm` で互いに素なので、この順序は結果に効かない（geluTanhMul を silu の直後に
- * 置いたのは「活性ゲートの 2 ノード peephole」という同族を並べて読ませるためだけの理由。
- * 順序が意味を持つのは先頭 op が重なったときだけ —
+ * {@link FUSION_RULES} の**宣言順**（silu → upsample2x → rope → adaln → rowBlockAttention）。
+ * 5 ルールの先頭 op は `sigmoid` / `reshape` / `mul|slice` / `layer_norm` / `bmm` で互いに素
+ * なので、この順序は結果に効かない（順序が意味を持つのは先頭 op が重なったときだけ —
  * 重なりが生じていないことは tests/runtime_fusion_test.ts が {@link FusionRule.heads} から
  * 機械的に検査する）。窓の**内側**に他ルールの先頭 op が現れる形（rowBlockAttention の窓は
  * `reshape` / `expand` を 5 本含む）は、掴めた時点で走査が窓幅ぶん進むので発火しえない。
@@ -71,13 +69,6 @@ import {
 } from "../codegen/elementwise.ts";
 import { ADALN_NORM_KEY, ADALN_NORM_WGSL, adalnNormParams } from "../kernels/adaln-norm.ts";
 import { bmmKey, bmmParams, bmmRowWindowParams, bmmWgsl } from "../kernels/bmm.ts";
-import {
-  GELU_TANH_MUL_WORKGROUP_SIZE,
-  geluTanhMulKey,
-  type GeluTanhMulOrder,
-  geluTanhMulParams,
-  geluTanhMulWgsl,
-} from "../kernels/gelu-tanh-mul.ts";
 import { gemmUsesVec4 } from "../kernels/gemm.ts";
 import { gemmGeometryForRows, gemmTileM, gemmTileN } from "../kernels/gemm-geometry.ts";
 import { SAFE_SOFTMAX_KEY, SAFE_SOFTMAX_WGSL, softmaxParams } from "../kernels/softmax.ts";
@@ -98,16 +89,10 @@ import {
 import { ExecutionError, type NodePlan } from "./plan.ts";
 
 /** 融合ルールの識別子（{@link FUSION_RULES} の宣言順と 1 対 1）。 */
-type FusionRuleName =
-  | "silu"
-  | "geluTanhMul"
-  | "upsample2x"
-  | "rope"
-  | "adaln"
-  | "rowBlockAttention";
+type FusionRuleName = "silu" | "upsample2x" | "rope" | "adaln" | "rowBlockAttention";
 
 /**
- * 診断カウンタの見出し。融合 6 ルールに加えて、0 dispatch の別名化のうち**条件付きで外れうる**
+ * 診断カウンタの見出し。融合 4 ルールに加えて、0 dispatch の別名化のうち**条件付きで外れうる**
  * 恒等 expand（{@link ExecStep} の `aliasesInput`）を数える。reshape の別名化は無条件なので
  * 数えない（外れようがない = 観測する意味がない）。
  */
@@ -130,7 +115,7 @@ export type FusedOperand =
 /**
  * dispatch の workgroup 数の決め方。
  *
- * - `gridStride` = 要素 / 行の被覆数を割る形（elementwise・reduce・融合 5 ルール）。上限を
+ * - `gridStride` = 要素 / 行の被覆数を割る形（elementwise・reduce・融合 4 ルール）。上限を
  *   超えたら縮退し、カーネル側の grid-stride が残りを回す。
  * - `tiled` = **1 workgroup = 1 出力タイル**の GEMM 族。grid-stride で縮退できないので、
  *   上限超過は宣言側（`tiledWorkgroups`）が fail loudly にする。
@@ -157,7 +142,7 @@ type FusedDispatch = {
   readonly paramsStorage?: boolean;
   /**
    * binding 1 以降のオペランド列。**省略できるのは 1 dispatch のルールだけ**で、そのときは
-   * 「{@link FusedStep.binds} を宣言順 → 末尾に出力」（融合 5 ルール共通の形）になる。
+   * 「{@link FusedStep.binds} を宣言順 → 末尾に出力」（融合 4 ルール共通の形）になる。
    */
   readonly operands?: readonly FusedOperand[];
   readonly workgroups: FusedWorkgroups;
@@ -525,99 +510,6 @@ const SILU_RULE = defineRule<SiluMatch>({
         wgsl: () => siluWgsl(matched.multiplyOrder),
         params: siluParams(count),
         workgroups: { kind: "gridStride", items: count, size: SILU_WORKGROUP_SIZE },
-      }],
-    };
-  },
-});
-
-type GeluTanhMulMatch = FusionMatch & {
-  readonly geluInputName: string;
-  readonly otherName: string;
-  readonly outputName: string;
-  readonly outputShape: readonly number[];
-  readonly multiplyOrder: GeluTanhMulOrder;
-};
-
-/**
- * GeGLU の活性側: `gelu_tanh(g) → mul(·, u)` の連続 2 ノード（gemma4 decode の per-layer 入力
- * ゲートが出す実測形）。
- *
- * MUST: 中間 gelu_tanh 値は唯一の consumer が直後の mul で、graph output でないこと。
- * MUST: 全スロットが同 shape の f32 だけ。broadcast されたゲートや erf 型 `gelu`（別 op）へ
- * 一般化しない（「式が似ている」で受理集合を広げると、fallback が正しいという保証の外へ出る）。
- * MUST: mul の入力順は両方受理するが、順序はパイプラインキーと WGSL の両方に残す（silu と
- * 同じ理由 — 有限値では可換でも NaN payload の選ばれ方がバックエンドで違いうる）。
- *
- * NOTE: `mul(gelu, gelu)` は中間の consumer が 2 本になるので {@link internalsArePrivate} が
- * 落とす（内部値を bind 面へ出す形が構造的に作れない）。
- *
- * 外部入力の延べ回数: g が gelu_tanh で 1 回、u が mul で 1 回 = 2 回。
- */
-const GELU_TANH_MUL_RULE = defineRule<GeluTanhMulMatch>({
-  name: "geluTanhMul",
-  heads: ["gelu_tanh"],
-  match: (nodes, index, context) => {
-    const gelu = nodes[index];
-    if (gelu?.node.op !== "gelu_tanh") return undefined;
-    const mul = nodes[index + 1];
-    if (mul?.node.op !== "mul") return undefined;
-    const chain = [gelu, mul];
-    if (!allF32(chain)) return undefined;
-
-    const geluInputName = gelu.node.ins[0];
-    const intermediateName = gelu.outputs[0].name;
-    let multiplyOrder: GeluTanhMulOrder;
-    let otherName: string;
-    if (mul.node.ins[0] === intermediateName) {
-      multiplyOrder = "gelu-u";
-      otherName = mul.node.ins[1];
-    } else if (mul.node.ins[1] === intermediateName) {
-      multiplyOrder = "u-gelu";
-      otherName = mul.node.ins[0];
-    } else {
-      return undefined;
-    }
-    // bind 面はカーネルの binding 1 / 2 と 1 対 1 なので**重複を許さない**（`u === g` =
-    // `g · gelu_tanh(g)` は実測に無く、{@link FusedStep.binds} の「重複無し」も崩す）。
-    if (otherName === geluInputName) return undefined;
-
-    const shape = gelu.inputShapes[0];
-    if (shape.length < 1 || shape.some((dim) => dim < 1)) return undefined;
-    if (
-      !sameShape(gelu.outputs[0].shape, shape) ||
-      mul.inputShapes.some((inputShape) => !sameShape(inputShape, shape)) ||
-      !sameShape(mul.outputs[0].shape, shape)
-    ) return undefined;
-    if (!internalsArePrivate(chain, context)) return undefined;
-
-    return {
-      window: chain,
-      chain,
-      geluInputName,
-      otherName,
-      outputName: mul.outputs[0].name,
-      outputShape: mul.outputs[0].shape,
-      multiplyOrder,
-    };
-  },
-  build: (matched) => {
-    const count = numel(matched.outputShape);
-    return {
-      // MUST: 並びは [g, u] 固定（カーネルの binding 1 = gelu_tanh の入力・2 = mul の他入力）。
-      // mul の入力順は WGSL 側の積の綴りが持つので、bind 面は順序変種で動かさない。
-      binds: [matched.geluInputName, matched.otherName],
-      outputName: matched.outputName,
-      outputShape: matched.outputShape,
-      temps: [],
-      dispatches: [{
-        key: geluTanhMulKey(matched.multiplyOrder),
-        wgsl: () => geluTanhMulWgsl(matched.multiplyOrder),
-        params: geluTanhMulParams(count),
-        workgroups: {
-          kind: "gridStride",
-          items: count,
-          size: GELU_TANH_MUL_WORKGROUP_SIZE,
-        },
       }],
     };
   },
@@ -1110,8 +1002,8 @@ type RowBlockAttentionMatch = FusionMatch & {
  *
  * ## 適用順と head 衝突
  *
- * 先頭 op は `bmm` で、既存 5 ルールの先頭 op（`sigmoid` / `gelu_tanh` / `reshape` / `mul` /
- * `slice` / `layer_norm`）と互いに素なので宣言順は結果に効かない。窓の内側には `reshape` /
+ * 先頭 op は `bmm` で、既存 4 ルールの先頭 op（`sigmoid` / `reshape` / `mul` / `slice` /
+ * `layer_norm`）と互いに素なので宣言順は結果に効かない。窓の内側には `reshape` /
  * `expand` が 5 本あるが、掴んだ時点で走査は窓幅ぶん進むので内側で別ルールが発火する余地は
  * 無い（掴めなかったときだけ内側の `reshape` が upsample2x の先頭として試され、6 ノードの
  * 綴りが違うので落ちる）。
@@ -1334,7 +1226,6 @@ const ROW_BLOCK_ATTENTION_RULE = defineRule<RowBlockAttentionMatch>({
 /** MUST: この配列の順が適用順（冒頭「適用順」節）。 */
 export const FUSION_RULES: readonly FusionRule[] = [
   SILU_RULE,
-  GELU_TANH_MUL_RULE,
   UPSAMPLE_2X_RULE,
   ROPE_RULE,
   ADALN_RULE,
@@ -1364,7 +1255,6 @@ export const planFusions = (
   const steps: ExecStep[] = [];
   const counts: Record<FusionCounterName, number> = {
     silu: 0,
-    geluTanhMul: 0,
     upsample2x: 0,
     rope: 0,
     adaln: 0,

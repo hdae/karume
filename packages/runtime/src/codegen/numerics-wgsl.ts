@@ -122,19 +122,3 @@ export const TANH_STABLE_WGSL = `fn tanh_stable(x: f32) -> f32 {
   let t = select(lo, ${f32Literal(TANH_SATURATION)}, x > ${f32Literal(TANH_SATURATION)});
   return ${nanGuard("x", "tanh(t)")};
 }`;
-
-/**
- * `gelu_tanh`（torch の `approximate="tanh"`）の**値式**。0.7978845608028654 = √(2/π)。
- * 式そのものが定義なので（erf 形と違い）近似の精度を上げる余地は無い。
- *
- * MUST: 内側は {@link TANH_STABLE_WGSL} を通す（素の `tanh` だと 3 次項が効いて前活性
- * x ≳ 10.05 で内側引数が 44.36 を超え、exp 経由実装が沈黙 NaN を返す）。呼ぶ側が
- * `tanh_stable` の本体を並べる（{@link nanGuard} と同じ「依存は注入側」の流儀）。
- * MUST: NaN の外殻は式全体には掛けない — 外側に因子 `a` が残るので `0.5 · NaN · (…)` が NaN の
- * ままで、伝播は畳み込みの有無に依らない（erf 形の gelu と同じ扱い）。
- * MUST: elementwise codegen（`gelu_tanh` op）と融合カーネル（src/kernels/gelu-tanh-mul.ts）は
- * この 1 本を共有する。書き写すと primitive と融合版で丸め列が割れうる
- * （{@link SIGMOID_STABLE_WGSL} が silu.ts と共有されているのと同じ理由）。
- */
-export const geluTanhExpr = (a: string): string =>
-  `0.5 * ${a} * (1.0 + tanh_stable(0.7978845608028654 * (${a} + 0.044715 * ${a} * ${a} * ${a})))`;

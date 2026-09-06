@@ -370,8 +370,7 @@ Deno.test({
     // lm_head だけが i8 重み（+ f32 bias）。
     assertEquals(byStorage.get("f32+i8"), 1);
     assertEquals(linears.reduce((total, weight) => total + weight.count, 0), 277);
-    // 融合ヒットは既設の実資産の門（assets_fusion_counts_test.ts）と同じ（M=1）— rope 15 と、
-    // per-layer 入力ゲートの gelu_tanh·mul 35（MLP 側の 35 本は up 射影を挟むので受理集合の外）。
-    assertEquals(summary.by_fusion.hits, { geluTanhMul: 35, rope: 15 });
+    // 融合ヒットは既設の実資産の門（assets_fusion_counts_test.ts）と同じ 15（M=1）。
+    assertEquals(summary.by_fusion.hits, { rope: 15 });
   },
 });

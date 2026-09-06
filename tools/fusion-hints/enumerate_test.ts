@@ -238,9 +238,6 @@ type AssetCase = {
 };
 
 const SILU = "sigmoid,mul";
-/** geluTanhMul の 2 ノード鎖と、up 射影を挟む取りこぼし側（受理集合の外）。 */
-const GELU_TANH_MUL = "gelu_tanh,mul";
-const GELU_TANH_LINEAR_MUL = "gelu_tanh,linear,mul";
 /** RoPE の 7 ノード窓（`mul` 先行形と、後置形 = 実際のノード順が違う 2 綴り）。 */
 const ROPE_DIRECT_FIRST = "mul,slice,slice,neg,cat,mul,add";
 const ROPE_DIRECT_LAST = "slice,slice,neg,cat,mul,mul,add";
@@ -323,19 +320,8 @@ const ASSET_CASES: readonly AssetCase[] = [
     binds: { M: 1, C: 640 },
     // **既知の穴**: 綴りは 50 箇所とも並ぶのに計画は 15 本しか掴まない（機序は未特定 —
     // docs/research/2026-08-30-gemma4-decode-wallclock.md §4）。残る 35 本が候補に出る。
-    // `gelu_tanh,mul` 35 は per-layer 入力ゲート（融合済みなので現行計画では 0）。MLP 側の 35 本は
-    // up 射影を挟む `gelu_tanh,linear,mul` で、**受理集合の外なので融合の前後で 35 のまま**残る
-    // — 候補表がこの取りこぼしを名指ししていることを、この 2 行が対で固定する。
-    expected: {
-      [ROPE_DIRECT_FIRST]: 50,
-      [GELU_TANH_MUL]: 35,
-      [GELU_TANH_LINEAR_MUL]: 35,
-    },
-    fusedExpected: {
-      [ROPE_DIRECT_FIRST]: 35,
-      [GELU_TANH_MUL]: 0,
-      [GELU_TANH_LINEAR_MUL]: 35,
-    },
+    expected: { [ROPE_DIRECT_FIRST]: 50 },
+    fusedExpected: { [ROPE_DIRECT_FIRST]: 35 },
   },
 ];
 
