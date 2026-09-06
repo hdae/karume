@@ -7,27 +7,15 @@
 > [perf-ledger](perf-ledger.md) が正本で、ここは波として参照するだけ ④by-design 制約の正本は
 > [limitations](limitations.md) — 作業化が裁定された時だけここに載る。
 
-## now — 0.11.0 リリース準備（2026-09-06）
+## now — 0.11.0 リリース後（2026-09-06）
 
-0.11.0 は lockstep bump（`ec60a31`）までローカル完了 — 中身は下の 2（hub のキャッシュ保守面 +
-fetch-cache 0.7.0 追従。hub に breaking 1 件 = HF 取得元の受信超過が `IntegrityError` から
-`HubFetchError` へ）。配布形の変更は無いので HF の焼き直し・pin の更新は無し。push → CI → GitHub
-Release → JSR publish → `deno task smoke:published` はユーザー（[release-runbook](release-runbook.md)
-§4 / §5）。事後の docs 同期（この見出しを「0.11.0 リリース後」へ・消化済み節の新設）は公開後に行う。
-0.10.0 は公開完了（2026-09-05 — 中身は下の消化済み節）。2026-09-04 裁定の作業波 a〜d のうち残るのは
-**c だけ**（a / b は消化・d はクローズ）。波と独立に消化してよい残件はその下。
+0.11.0 は**公開完了**（2026-09-06 — lockstep bump `ec60a31` → GitHub Release v0.11.0 → JSR 0.11.0 →
+`deno task smoke:published` 緑。中身は下の消化済み節）。2026-09-04 裁定の作業波 a〜d のうち残るのは
+**c だけ**（a / b は消化・d はクローズ）。次の波は **OP / Fusion 関連**（2026-09-06 ユーザー指示 —
+起票は着手時に [perf-ledger](perf-ledger.md) で行う）。波と独立に消化してよい残件はその下。
 
 1. **c. perf K-13 / K-14**（prefill attention の K/V タイル再利用 / decode ①QK の並列化）:
    起票・合格線・kill 基準とも [perf-ledger](perf-ledger.md) が正本。
-2. **キャッシュ保守 + 429 再試行（anima-web 要望・2026-09-05 裁定）— 2026-09-06 消化**: hub に
-   `listCachedAssets` / `evictCachedAssets`（ADR
-   [0094](decisions/0094-hub-cache-inventory-and-eviction.md) — 参照勘定は manifest 1 本の中だけ・
-   越境参照は残す）。429 / 503 の再試行と HF 層の受信上限は取得層 `@hdae/fetch-cache` 0.7.0（その ADR
-   0010 / 0011・2026-09-05 公開）。hub の追従 = 依存 `^0.7.0`・`LoadManifestOptions.onRetry` の透過・
-   `transport.ts` の撤去（受信超過の打ち切りは取得層へ・content-length の事前突合は移植しない・
-   `karume.json` の 1 MiB 上限は全量受信後の判定 — [limitations](limitations.md)）。公開面の差分
-   （`onRetry` / `RetryDiagnostic` の追加・HF の受信超過が `IntegrityError` から `HubFetchError` へ）は
-   次の bump のリリースノートへ。
 
 **残件**:
 
@@ -118,6 +106,25 @@ Release → JSR publish → `deno task smoke:published` はユーザー（[relea
   収集する機能を足し、ユーザーが複数環境でサンプル集（名称・置き場は未定）を回した結果を集める
   （**起票のみ** — 収集する項目・置き場・オプトインの形は未設計）。
 - Pixel（8GB 級 Android Chrome）の `err.cause` 再判定 — [known-issues](known-issues.md)。
+
+## 消化済み（0.11.0 リリース — 2026-09-06）
+
+0.11.0 の中身（結果だけ残す — 設計の正本は ADR 0094・公開面の差分はリリースノート v0.11.0）:
+
+- **hub のキャッシュ保守面**（anima-web 要望・2026-09-05 裁定）: `listCachedAssets` /
+  `evictCachedAssets`（ADR [0094](decisions/0094-hub-cache-inventory-and-eviction.md) — 参照勘定は
+  manifest 1 本の中だけ・全在庫の他の選択が守る・越境参照は残す。by-design の制約は
+  [limitations](limitations.md)）。anima-web は `@hdae/fetch-cache` への直依存を返上できる。
+- **fetch-cache 0.7.0 追従**: 429 / 503 の再試行（`Retry-After` 追従・既定 5 回）と HF 層の受信上限は
+  取得層 0.7.0（その ADR 0010 / 0011・2026-09-05 公開）。hub は依存 `^0.7.0`・
+  `LoadManifestOptions.onRetry`（`RetryDiagnostic`）の透過・`transport.ts` の撤去。**breaking 1 件** =
+  HF 取得元の受信超過が `IntegrityError` から `HubFetchError`（cause = 取得層のエラー）へ。
+  content-length の事前突合は移植せず、`karume.json` の 1 MiB 上限は全量受信後の判定（ADR 0094
+  決定 4）。
+- 配布形の変更なし = HF の焼き直し・pin 更新なし（公開済み manifest の `generator` は
+  `karume/0.10.0` のまま — hub は読まない）。公開後の疎通で `tools/published-smoke/deno.json` の
+  `minimumDependencyAge.exclude` に `jsr:@hdae/fetch-cache` を追加（公開 1 日の依存が最低経過日数に
+  引っかかるため — runbook §5 に追記）。
 
 ## 消化済み（0.10.0 リリース — 2026-09-05）
 

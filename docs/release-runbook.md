@@ -215,5 +215,9 @@ PyPI `karume`（tools/exporter）は**未リリース**。公開を始める時�
       `@karume/hub` で `KARUME_SOURCES` 全エントリの manifest を解決し、sbv2 を
       `fromPretrained` まで通す。GPU が
       無い機体は `--manifests-only`）。ワークスペース配下の `jsr:@karume/*` はローカル member に
-      解決されるため、疎通は必ずこの task で打つ（自前の deno.json で registry を引く）
+      解決されるため、疎通は必ずこの task で打つ（自前の deno.json で registry を引く）。
+      **公開したての依存は `minimumDependencyAge` に引っかかる** — `tools/published-smoke/deno.json`
+      の `exclude` に `jsr:@karume/*` と hub が引く `jsr:@hdae/fetch-cache` を載せてある（0.11.0 で
+      公開 1 日の fetch-cache 0.7.0 が止まった実例・2026-09-06）。新しい `@hdae/*` 依存を足したら
+      ここにも足す
 - [ ] 断片化検証の結果（§2）を research か backlog へ 1 行記録

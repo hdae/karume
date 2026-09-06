@@ -11,16 +11,10 @@
 
 ## Now
 
-- **0.11.0 リリース準備中（2026-09-06）** — lockstep bump `ec60a31` までローカル完了。中身 = hub の
-  キャッシュ保守面（`listCachedAssets` / `evictCachedAssets` — ADR
-  [0094](../docs/decisions/0094-hub-cache-inventory-and-eviction.md)）+ fetch-cache 0.7.0 追従
-  （`LoadManifestOptions.onRetry`・`transport.ts` 撤去 — hub に breaking 1 件 = HF 取得元の受信超過が
-  `HubFetchError` へ）。配布形の変更は無く HF の焼き直し・pin 更新は無し。push → CI → GitHub Release →
-  JSR → `deno task smoke:published` はユーザー（[runbook](../docs/release-runbook.md) §4 / §5）。
-- **0.10.0 公開完了（2026-09-05）** — lockstep bump `3f875e4` → GitHub Release v0.10.0 → JSR 0.10.0 →
-  `deno task smoke:published` 緑。中身 = ADR 0093（中間バッファの静的 liveness パッキング）+ BiRefNet
-  HR / Lucida の初公開（`BIREFNET_SOURCES`）+ 網羅レビューの修正波（公開面の差分の正本は
-  リリースノート v0.10.0）。配布は **HF 10 リポ**（`karume-anima` / `karume-anima-extra` /
+- **0.11.0 公開完了（2026-09-06）** — lockstep bump `ec60a31` → GitHub Release v0.11.0 → JSR 0.11.0 →
+  `deno task smoke:published` 緑。中身 = hub のキャッシュ保守面 + fetch-cache 0.7.0 追従（hub に
+  breaking 1 件 = HF 取得元の受信超過が `HubFetchError` へ。公開面の差分の正本はリリースノート
+  v0.11.0）。配布形は 0.10.0 のまま **HF 10 リポ**（`karume-anima` / `karume-anima-extra` /
   `karume-irodori-v4-small` / `karume-irodori-v4.1-small` / `karume-sbv2-jvnv` /
   `karume-gemma4`〈`-e2b` から改名済み〉/ `karume-siglip2`〈base + so400m 同居〉/
   `karume-depth-anything-v2` / `karume-birefnet-hr`〈1024 + 2048 同居〉/ `karume-lucida`〈同〉）で、
@@ -32,9 +26,9 @@
   `@hdae/fetch-cache` 0.7.0 側（その ADR 0010 / 0011）。hub は 2026-09-06 に追従済み（依存 `^0.7.0`・
   `LoadManifestOptions.onRetry` の透過・`transport.ts` の撤去 — ADR 0094 決定 4。`karume.json` の
   1 MiB 上限は全量受信後の判定になった — [limitations](../docs/limitations.md)）。
-- **次の作業波は perf K-13 / K-14 だけ**（2026-09-04 裁定の c — a / b / d は消化・クローズ済み）。
-  起票の正本は [perf-ledger](../docs/perf-ledger.md)、残件の正本は
-  [backlog](../docs/backlog.md) now。
+- **次の作業波 = OP / Fusion 関連**（2026-09-06 ユーザー指示 — 起票は着手時に
+  [perf-ledger](../docs/perf-ledger.md) で）。perf K-13 / K-14（2026-09-04 裁定の c）は
+  [backlog](../docs/backlog.md) now に残る。
 - **BiRefNet 2048² 工事 A / B / C は消化（2026-09-05）** — ADR
   [0093](../docs/decisions/0093-transient-liveness-packing.md) を runtime へ結線（B + C）し、recipe の
   パッチ ⑨（A）で decoder 末尾の巨大中間を消した。実測: 1024² 中間 6,283 → 749 MiB / 2048² 中間
