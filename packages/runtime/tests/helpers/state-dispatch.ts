@@ -14,6 +14,8 @@ import {
   stateAttentionParams,
   statePvParallelWgsl,
   statePvParallelWorkgroups,
+  statePvTiledParams,
+  statePvTiledWorkgroups,
   statePvWgsl,
   statePvWorkgroups,
   stateQkParallelWgsl,
@@ -27,7 +29,7 @@ import {
   stateStatsWgsl,
   stateStatsWorkgroups,
 } from "../../src/kernels/state-attention.ts";
-import { stateQkTiledWgsl } from "../../src/kernels/gemm.ts";
+import { statePvTiledWgsl, stateQkTiledWgsl } from "../../src/kernels/gemm.ts";
 import {
   stateAppendParams,
   stateAppendWgsl,
@@ -446,6 +448,137 @@ export const runStateQk = async (
       blocks.push(await readWords(device, scores, words));
     }
     return blocks;
+  } finally {
+    for (const buffer of buffers) buffer.destroy();
+  }
+};
+
+/**
+ * ③PV の 3 経路（`sequential` = ③ 参照経路 / `parallel` = ③' KV 並列縮約 /
+ * `tiled` = ③ₜ V 行タイル共有）。束縛番号は 3 経路とも同じで、替わるのは WGSL・params・
+ * workgroup 算出の 3 点だけ。
+ */
+export type StatePvVariant = "sequential" | "parallel" | "tiled";
+
+/**
+ * ①②③ を行ブロックごとに撃ち、**O バッファ全体を語（u32）のまま**返す。①② は常に参照経路
+ * （①QK 逐次 + ②stats）で、切り替わるのは ③ だけ — ③ₜ と ③ の突合で、差の出どころが ③ 以外に
+ * 無いことを構造で保証する（① も決定的なので、2 回の run が食う S / 行統計は同一）。
+ *
+ * MUST: O は**毒値で初期化**して行ブロックを跨いで塗り直さない（③ の full-write 不変条件 —
+ * pad 行を書かない実装は残った毒値として語比較に出る）。
+ * MUST: パイプラインは**最終 WGSL 文字列**でキャッシュする（{@link runStateAttention} と同文 —
+ * 故障注入の変異版が正常版のパイプラインを引くと注入が常に緑になる）。
+ */
+export const runStatePv = async (
+  device: GPUDevice,
+  spec: StateCase,
+  inputs: StateInputs,
+  variant: StatePvVariant,
+  options: { readonly mutate?: StateMutation; readonly cache?: StatePipelineCache } = {},
+): Promise<Uint32Array<ArrayBuffer>> => {
+  const { mutate } = options;
+  const sliding = stateSliding(spec.window);
+  const gqa = spec.heads !== spec.kvHeads;
+  const colCap = caseColCap(spec);
+  const rowsBlock = spec.rowsBlock ?? spec.chunkRows;
+  const batchHeads = spec.batch * spec.heads;
+  const cache = options.cache ?? new Map<string, GPUComputePipeline>();
+  const wgsl = (kernel: "qk" | "stats" | "pv", source: string): string =>
+    mutate === undefined ? source : mutate(kernel, source);
+  const pvSource = variant === "parallel"
+    ? statePvParallelWgsl(sliding, gqa)
+    : variant === "tiled"
+    ? statePvTiledWgsl(sliding, gqa, spec.chunkRows)
+    : statePvWgsl(sliding, gqa);
+  const outCount = batchHeads * spec.chunkRows * spec.depth;
+  const buffers: GPUBuffer[] = [];
+  const track = <T extends GPUBuffer>(buffer: T): T => {
+    buffers.push(buffer);
+    return buffer;
+  };
+  try {
+    const q = track(storageBuffer(device, inputs.q));
+    const insK = track(storageBuffer(device, inputs.insK));
+    const insV = track(storageBuffer(device, inputs.insV));
+    const slotK = track(storageBuffer(device, inputs.slotK));
+    const slotV = track(storageBuffer(device, inputs.slotV));
+    const out = track(storageBuffer(device, seeded(outCount, () => STATE_S_POISON)));
+    const lengths = track(lengthsBuffer(device, spec.past, spec.query));
+    const scores = track(
+      storageBuffer(device, seeded(batchHeads * rowsBlock * colCap, () => STATE_S_POISON)),
+    );
+    const stats = track(
+      storageBuffer(
+        device,
+        seeded(batchHeads * rowsBlock * STATE_STATS_STRIDE, () => STATE_S_POISON),
+      ),
+    );
+    const qk = pipelineOf(device, cache, wgsl("qk", stateQkWgsl(sliding, gqa)));
+    const st = pipelineOf(device, cache, wgsl("stats", stateStatsWgsl(sliding)));
+    const pv = pipelineOf(device, cache, wgsl("pv", pvSource));
+    const limit = device.limits.maxComputeWorkgroupsPerDimension;
+    for (let rowOffset = 0; rowOffset < spec.chunkRows; rowOffset += rowsBlock) {
+      const block = Math.min(rowsBlock, spec.chunkRows - rowOffset);
+      const geometry = {
+        rowsBlock: block,
+        rowOffset,
+        chunkRows: spec.chunkRows,
+        depth: spec.depth,
+        kvRepeat: spec.heads / spec.kvHeads,
+        window: spec.window,
+        capacity: spec.capacity,
+        colCap,
+        scale: halfScale(spec.depth),
+      };
+      const dispatchGeometry = {
+        batchHeads,
+        rowsBlock: block,
+        rowOffset,
+        depth: spec.depth,
+        window: spec.window,
+      };
+      const params = track(uniformBuffer(device, stateAttentionParams(geometry)));
+      const pvParams = variant === "tiled"
+        ? track(uniformBuffer(device, statePvTiledParams(geometry)))
+        : params;
+      const statsParams = track(
+        uniformBuffer(device, stateStatsParams(batchHeads, block, rowOffset, colCap, spec.window)),
+      );
+      // MUST: ブロックごとに S / 行統計を毒値へ戻す（前ブロックの残りが「書き切らない誤り」を
+      // 塗り潰す）。O だけは全ブロックの書き込みを積むので触らない。
+      device.queue.writeBuffer(
+        scores,
+        0,
+        seeded(batchHeads * block * colCap, () => STATE_S_POISON),
+      );
+      device.queue.writeBuffer(
+        stats,
+        0,
+        seeded(batchHeads * block * STATE_STATS_STRIDE, () => STATE_S_POISON),
+      );
+      const encoder = device.createCommandEncoder();
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(qk);
+      pass.setBindGroup(0, bind(device, qk, [params, q, insK, slotK, scores, lengths]));
+      const qkGroups = stateQkWorkgroups(dispatchGeometry, spec.past, spec.query, limit, spec.name);
+      pass.dispatchWorkgroups(qkGroups[0], qkGroups[1], qkGroups[2]);
+      pass.setPipeline(st);
+      pass.setBindGroup(0, bind(device, st, [statsParams, scores, stats, lengths]));
+      const statsGroups = stateStatsWorkgroups(dispatchGeometry, spec.query, limit, spec.name);
+      pass.dispatchWorkgroups(statsGroups[0], statsGroups[1], statsGroups[2]);
+      pass.setPipeline(pv);
+      pass.setBindGroup(0, bind(device, pv, [pvParams, scores, stats, insV, slotV, out, lengths]));
+      const pvGroups = variant === "parallel"
+        ? statePvParallelWorkgroups(dispatchGeometry, limit, spec.name)
+        : variant === "tiled"
+        ? statePvTiledWorkgroups(dispatchGeometry, spec.chunkRows, limit, spec.name)
+        : statePvWorkgroups(dispatchGeometry, limit, spec.name);
+      pass.dispatchWorkgroups(pvGroups[0], pvGroups[1], pvGroups[2]);
+      pass.end();
+      device.queue.submit([encoder.finish()]);
+    }
+    return await readWords(device, out, outCount);
   } finally {
     for (const buffer of buffers) buffer.destroy();
   }

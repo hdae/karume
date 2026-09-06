@@ -26,6 +26,7 @@ import { referenceStateAppend, referenceStateAttention } from "../src/reference/
 import {
   statePvKey,
   statePvParallelKey,
+  statePvTiledKey,
   stateQkKey,
   stateQkParallelKey,
   stateQkTiledKey,
@@ -541,40 +542,45 @@ Deno.test({
   },
 });
 
-/** ①ₜ（`M ≥ 16` で選ぶ K 行タイル共有経路）を踏ませるための形（`M = 16` が入る容量）。 */
+/** ①ₜ / ③ₜ（`M ≥ 16` で選ぶ行タイル共有経路）を踏ませるための形（`M = 16` が入る容量）。 */
 const TILED: StateModel = { heads: 4, kvHeads: 2, depth: 4, capacity: 64 };
 
 const TILED_SLIDING: StateModel = { heads: 2, kvHeads: 2, depth: 4, capacity: 16, window: 16 };
 
 /**
- * **census**（ADR 0058 決定 4 ③ の ①ₜ 版 — perf-ledger K-13）— ①QK の **3 経路**が計画の `M` と
- * 席どおりに走ることを見る。
+ * **census**（ADR 0058 決定 4 ③ のタイル経路版 — perf-ledger K-13）— ①QK と ③PV の
+ * **3 経路ずつ**が計画の `M` と席どおりに走ることを見る。
  *
- * ①ₜ（K 行タイル共有）は **① とビット同一**なので**席に依らない既定経路**で、`M ≥ 16` の計画
- * だけが選ぶ（適用条件は src/kernels/state-attention.ts の `stateQkTiledEligible`）。したがって
- * 期待は「M ≥ 16 → ①ₜ（席が `"parallel"` でも変わらない）・M = 1 → 席どおり ① / ①'」。
+ * ①ₜ / ③ₜ（K / V の行タイル共有）は **① / ③ とビット同一**なので**席に依らない既定経路**で、
+ * `M ≥ 16` の計画だけが選ぶ（適用条件は src/kernels/state-attention.ts の
+ * `stateQkTiledEligible` / `statePvTiledEligible`）。したがって期待は「M ≥ 16 → タイル経路
+ * （席が `"parallel"` でも変わらない）・M < 16 → 席どおり」。**①' だけは席の中でさらに M=1 に
+ * 限られる**ので、`M = 2` の parallel は「①QK は逐次・③PV は ③'」という**段で違う**行になる。
  *
  * MUST: 3 経路を**全て**見る（期待した 1 本が出ていることと、残り 2 本が 1 本も出ていないことの
- * 両方）。片側だけだと「①ₜ が結線から落ちて ① が走っている」が素通りする — ①ₜ は ① と値が
- * 1 ビットも違わないので、数値門は原理的に鳴らない。
- * MUST: 期待は行ごとに直書きする（判定を輸入すると実装と一緒に間違える）。
+ * 両方）。片側だけだと「タイル経路が結線から落ちて参照経路が走っている」が素通りする —
+ * ①ₜ / ③ₜ は参照経路と値が 1 ビットも違わないので、数値門は原理的に鳴らない。
+ * MUST: 期待は行ごとに**段ごとに**直書きする（判定を輸入すると実装と一緒に間違える）。
  */
 Deno.test({
   name:
-    "states 形 attention ①QK の 3 経路は計画の M と席どおりに走る（census・実 GPU / timestamp-query）",
+    "states 形 attention ①QK / ③PV の 3 経路は計画の M と席どおりに走る（census・実 GPU / timestamp-query）",
   ignore: !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
     try {
       for (
-        const [label, model, sliding, reduce, chunkRows, expected] of [
-          ["full r=2 prefill M=16", TILED, false, "sequential", 16, "tiled"],
-          // 席は ①ₜ を動かさない（ビット同一なので既定経路 — 席で切り替える対象ではない）
-          ["full r=2 parallel prefill M=16", TILED, false, "parallel", 16, "tiled"],
-          ["sliding r=1 prefill M=16", TILED_SLIDING, true, "sequential", 16, "tiled"],
-          // M=1 は ①ₜ の適用外。席どおりに ① / ①' へ分かれる
-          ["full r=2 decode M=1", TILED, false, "sequential", 1, "sequential"],
-          ["full r=2 parallel decode M=1", TILED, false, "parallel", 1, "parallel"],
+        const [label, model, sliding, reduce, chunkRows, qkExpected, pvExpected] of [
+          ["full r=2 prefill M=16", TILED, false, "sequential", 16, "tiled", "tiled"],
+          // 席はタイル経路を動かさない（ビット同一なので既定経路 — 席で切り替える対象ではない）
+          ["full r=2 parallel prefill M=16", TILED, false, "parallel", 16, "tiled", "tiled"],
+          ["sliding r=1 prefill M=16", TILED_SLIDING, true, "sequential", 16, "tiled", "tiled"],
+          // M=2 はどちらのタイル経路も適用外。①' は M=1 限定なので ①QK は逐次のまま、
+          // ③PV だけが席どおり ③' へ上がる（段で適用範囲が違うことの直接の観測点）
+          ["full r=2 parallel M=2", TILED, false, "parallel", 2, "sequential", "parallel"],
+          // M=1 も適用外。席どおりに 2 段とも分かれる
+          ["full r=2 decode M=1", TILED, false, "sequential", 1, "sequential", "sequential"],
+          ["full r=2 parallel decode M=1", TILED, false, "parallel", 1, "parallel", "parallel"],
         ] as const
       ) {
         const session = await stateSession(gpu, model, { stateAttentionReduce: reduce });
@@ -593,17 +599,26 @@ Deno.test({
           const gqa = model.heads !== model.kvHeads;
           const shown = keys.join(" / ");
           for (
-            const [route, key] of [
-              ["sequential", stateQkKey(sliding, gqa)],
-              ["parallel", stateQkParallelKey(sliding, gqa)],
-              ["tiled", stateQkTiledKey(sliding, gqa, chunkRows)],
+            const [stage, expected, routes] of [
+              ["①QK", qkExpected, [
+                ["sequential", stateQkKey(sliding, gqa)],
+                ["parallel", stateQkParallelKey(sliding, gqa)],
+                ["tiled", stateQkTiledKey(sliding, gqa, chunkRows)],
+              ]],
+              ["③PV", pvExpected, [
+                ["sequential", statePvKey(sliding, gqa)],
+                ["parallel", statePvParallelKey(sliding, gqa)],
+                ["tiled", statePvTiledKey(sliding, gqa, chunkRows)],
+              ]],
             ] as const
           ) {
-            assertEquals(
-              keys.includes(key),
-              route === expected,
-              `${label}: ①QK の ${route} 経路キー ${key} の有無が期待と違う（走った内訳: ${shown}）`,
-            );
+            for (const [route, key] of routes) {
+              assertEquals(
+                keys.includes(key),
+                route === expected,
+                `${label}: ${stage} の ${route} 経路キー ${key} の有無が期待と違う（走った内訳: ${shown}）`,
+              );
+            }
           }
         } finally {
           await context.dispose();

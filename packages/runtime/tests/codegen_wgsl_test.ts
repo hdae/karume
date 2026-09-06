@@ -67,6 +67,7 @@ import {
   ATTENTION_QK_MASK_BINDING,
   GEMM_MTILE_SMALL,
   gemmUsesVec4,
+  statePvTiledWgsl,
   stateQkTiledWgsl,
 } from "../src/kernels/gemm.ts";
 import { defaultGemmGeometry, GEMM_TILE } from "../src/kernels/gemm-geometry.ts";
@@ -639,6 +640,17 @@ Deno.test("生成した WGSL がスナップショットとバイト単位で一
     ["attention_state_pv_par_gqa.wgsl", statePvParallelWgsl(false, true)],
     ["attention_state_pv_par_sliding.wgsl", statePvParallelWgsl(true, false)],
     ["attention_state_pv_par_sliding_gqa.wgsl", statePvParallelWgsl(true, true)],
+    // ③ₜ V 行タイル共有変種（**既定経路**・perf-ledger K-13 段 2）。①ₜ と同じ骨格の 2 本目
+    // なので、ここは「骨格の断片（A 境界・K ループ上限）をパラメタ化しても既存 6 op と ①ₜ の
+    // 生成バイト列が 1 バイトも動かない」の検出器も兼ねる。
+    // MUST: **幾何バケットを 2 段**（最小 M16N16 と既定 M128N128）置く — ①ₜ と同文で、段の
+    // 間で store のガード構造や内積ループが変わっていないことを固定する。
+    ["attention_state_pv_tiled.wgsl", statePvTiledWgsl(false, false, 16)],
+    ["attention_state_pv_tiled_gqa.wgsl", statePvTiledWgsl(false, true, 16)],
+    ["attention_state_pv_tiled_sliding.wgsl", statePvTiledWgsl(true, false, 16)],
+    ["attention_state_pv_tiled_sliding_gqa.wgsl", statePvTiledWgsl(true, true, 16)],
+    ["attention_state_pv_tiled_m768.wgsl", statePvTiledWgsl(false, false, 768)],
+    ["attention_state_pv_tiled_m768_sliding_gqa.wgsl", statePvTiledWgsl(true, true, 768)],
     ["state_append.wgsl", stateAppendWgsl(false)],
     ["state_append_sliding.wgsl", stateAppendWgsl(true)],
   ];
@@ -797,6 +809,11 @@ Deno.test("同じ生成入力からは常に同一の WGSL が出る（全 op ×
           stateQkTiledWgsl(sliding, gqa, rows),
           stateQkTiledWgsl(sliding, gqa, rows),
           `state_qk_tiled:${where}:M=${rows}`,
+        );
+        assertEquals(
+          statePvTiledWgsl(sliding, gqa, rows),
+          statePvTiledWgsl(sliding, gqa, rows),
+          `state_pv_tiled:${where}:M=${rows}`,
         );
       }
     }

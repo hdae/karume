@@ -9,6 +9,7 @@
  * | ②  | `attention_state_stats:v2:f32:wg256`     | 行ごとの `m = amax S` と `inv = 1/Σexp(S−m)`    |
  * | ③  | `attention_state_pv:v1:f32:wg16x4`       | `O = P @ V`（`P = exp(S−m)·inv` は**非実体化**）|
  * | ③' | `attention_state_pv:v1:f32:wg16x16:par`  | ③ の **KV 並列縮約**変種（opt-in — 下記）      |
+ * | ③ₜ | `attention_state_pv:v1:f32:reg<幾何>`     | ③ の **V 行タイル共有**変種（既定 — 下記）      |
  *
  * 既存の融合 attention（src/kernels/attention.ts + GEMM 骨格）とは**別族**で、1 バイトも共有
  * しない。理由は 3 つで、どれも既存側を触らずに済ませるためではなく、意味論が違うため:
@@ -39,6 +40,11 @@
  * ADR 0058 の opt-in 席で、既定は ③（参照経路）。検証門は 3 点セット（参照経路の門は無変更・
  * ③' の A/B 帯門 = tests/gpu_state_attention_parallel_test.ts・census 門 =
  * tests/gpu_state_execution_test.ts）。
+ * MUST: **③' が選ばれるのは `M < 16` の計画だけ**（適用条件は {@link statePvTiledEligible} の
+ * 裏側）。`M ≥ 16` は席に依らず ③ₜ（下記・③ とビット同一）が取る — 席が `"parallel"` でも
+ * prefill 計画の値は参照経路のものになる。K-12 の実測で ③' の利得は decode に閉じており
+ * （prefill 側は誤差内 — docs/research/2026-09-03-gemma4-chunklength-k12-sweep.md）、
+ * traffic を削る ③ₜ を優先しても失うものが無い。
  * MUST: pad 行の分岐は **workgroup 一様**（局所行は `workgroup_id.y` 由来）なので barrier の
  * 手前で返してよいが、`d ≥ D` のレーンは barrier に参加させる（return しない — 走査を空回り
  * させて `0.0` を寄与する）。WGSL の barrier は一様制御流の外に置けない。
@@ -60,9 +66,9 @@
  * MUST: **①' が選ばれるのは `M = 1` の計画だけ**（適用条件は
  * {@link stateQkParallelEligible}）。prefill 計画（M > 1）は席が `"parallel"` でも ① のまま走る
  * — prefill では ① が既に行 × 列で埋まっており、①' は行タイル幅を落として barrier を積む
- * ぶんだけ遅くなると実測した（2026-09-06 — 詳細は同関数の WHY）。③' には門を掛けない
- * （prefill でも逆行しないことを 2026-09-03 に実測済み）ので、**席 1 つで 2 段の適用範囲が
- * 違う**形になる。
+ * ぶんだけ遅くなると実測した（2026-09-06 — 詳細は同関数の WHY）。③' の側は `M < 16` の計画
+ * だけが取る（`M ≥ 16` は席に依らず ③ₜ）ので、**席 1 つで 2 段の適用範囲が違う**形になる
+ * （M=1 の decode では ①' と ③' が揃って選ばれる）。
  * MUST: ① の契約は 1 つも動かさない — 述語（causal + sliding 下限）外は live 範囲内なら
  * **必ず −inf を書く**（② が残骸を食わないため）・`cl ≥ live` の列と pad 行は書かない・
  * scale の掛け方（半スケールを q 側と k 側の両方へ）と −inf のビット（`params.neg_inf`）は ① と同一。
@@ -92,6 +98,33 @@
  * 値は書き出しの `select` で捨てる）。
  * MUST: 適用条件は {@link stateQkTiledEligible}（`M ≥ 16`）。優先順は M=1 かつ席が `"parallel"` →
  * ①' / `M ≥ 16` → ①ₜ / それ以外 → ①（判定は runtime 側 `#buildStateAttention` の 1 箇所）。
+ *
+ * ## ③ₜ V 行タイル共有変種（**席に依らない既定経路** — perf-ledger K-13 段 2）
+ *
+ * ③ は 1 invocation = O の 1 要素なので、V の 1 行を**行の本数ぶん**読み直す（①ₜ が K で潰した
+ * のと同じ traffic 律速が、prefill では V 側にもそのまま居る）。③ₜ は ①ₜ と同じ GEMM 骨格
+ * （src/kernels/gemm.ts）に states 用の断片を差した 1 本で、V を行タイルへ 1 度だけ載せて
+ * `tileM` 行の P で使い回す。行列の対応は A = P（`[rows_block × live]`・**S と行統計から充填時に
+ * 計算**して実体化しない）・B = V（`[live × depth]`・行 = 論理 col の 2 源）・出力 = O
+ * （③ と同じ添字）。
+ *
+ * MUST: **③ とビット同一**。1 項の式は ③ と同じ `p = exp(S − m) · inv` を A ローダで組み
+ * （融合 attention ③PV の `probability` と同じ形）、縮約は骨格側で **col 昇順の逐次**に固定
+ * されている（K タイル 16 昇順 — ADR 0022 決定 3）ので、③ の col 昇順逐次と加算順が厳密に
+ * 一致する。だから席（`stateAttentionReduce`）に依らない**既定経路**で選べる。
+ * MUST: 実効 `K`（縮約長）は**実行時の live**。骨格の `Dims.k` には S の列ストライド `col_cap` を
+ * 入れるが、K タイルループの上限は live から作る（`col_cap` で回すと容量比例の仕事量になり
+ * ADR 0066 決定 3 の合格条件を落とす）。A ローダは `cl < live` の列しか読まない。
+ * MUST: 行は `rows_block` **全て**を書く（③ と同じ full-write 不変条件 — dispatch の行軸も
+ * `rowsBlock`）。ただし pad 行（`local_row ≥ 有効行`）は **`acc` ではなく厳密 `0.0`** を書く
+ * （③ の「pad 行は live を 1 列も走査せず 0」と同値。A を 0 で埋めるだけでは、非有限な V が
+ * 混ざったとき `0 · NaN` で pad 行が NaN 化して ③ と 1 語違う）。
+ * MUST: 行タイルが有効行を 1 行も含まないなら **K ループを 1 周も回さない**（③ の pad 行が
+ * live を走査しないことの写し — 仕事量が Q に比例する機構）。判定は `workgroup_id.y` 由来で
+ * workgroup 一様なので、内側の `workgroupBarrier` の一様性要件を壊さない。
+ * MUST: 適用条件は {@link statePvTiledEligible}（`M ≥ 16`）。優先順は `M ≥ 16` → ③ₜ（席に
+ * 依らない）/ `M < 16` かつ席が `"parallel"` → ③' / それ以外 → ③（判定は runtime 側
+ * `#buildStateAttention` の 1 箇所）。
  *
  * ## 記号（正本 = ADR 0067 決定 4）
  *
@@ -298,6 +331,38 @@ export const statePvParallelKey = (sliding: boolean, gqa: boolean): string =>
   }`;
 
 /**
+ * ③ₜ のキー（GEMM 骨格のタイル経路 — perf-ledger K-13 段 2）。綴りの規律は ①ₜ の
+ * {@link stateQkTiledKey} と同文で、幾何断片（{@link gemmGeometryTileKeyPart}）に `M` の
+ * バケットがそのまま載る。
+ *
+ * MUST: 幾何を載せる（③ の `wg16x4` に当たる位置）。載せないと、`M` バケットの違う 2 つの計画が
+ * 同じキーで別の WGSL を要求し、「同一キー → バイト同一 WGSL」が崩れる。
+ * MUST: `chunkRows` は生成（gemm.ts の `attentionStatePvTiledWgsl`）と dispatch
+ * （{@link statePvTiledWorkgroups}）へ渡すものと**同じ値**。
+ */
+export const statePvTiledKey = (sliding: boolean, gqa: boolean, chunkRows: number): string =>
+  `attention_state_pv:v1:f32:${gemmGeometryTileKeyPart(gemmGeometryForRows(chunkRows))}${
+    stateVariantKeyPart(sliding, gqa)
+  }`;
+
+/**
+ * ③ₜ の**適用条件** — `M`（物理 chunk 行数）が最小の行タイル辺 16 以上の計画だけ。
+ *
+ * WHY: ③ は 1 invocation = O の 1 要素で、V の 1 行を**行の本数ぶん**読み直す traffic 律速
+ * （①ₜ が K で潰したのと同じ形が V 側に残っている）。③ₜ は GEMM 骨格の共有メモリタイルへ V を
+ * 1 度だけ載せ、その行タイル（`M` バケットの `tileM`）ぶんの P の行で使い回す。読み直しが減るのは
+ * 行タイルに 2 行以上載るときで、最小バケット M16N16 の `tileM` が 16 なので、`M < 16` は
+ * タイルの大半が空振りして ③ と同じ traffic のまま barrier と共有メモリのぶんだけ損になる。
+ * MUST: **③ とビット同一**（1 項の式が `exp(S − m)·inv` で同じ・加算順が col 昇順の逐次で
+ * 一致 — ADR 0022 決定 3 の数値契約が骨格側の不変条件）。だから席（`stateAttentionReduce`）に
+ * 依らない**既定経路**で、縮約順が変わる ③' とは性格が違う。
+ * MUST: しきい値は ①ₜ（{@link stateQkTiledEligible}）と**同じ 16**だが、関数は別に持つ
+ * （①ₜ と ③ₜ は別カーネルで、片方だけ適用範囲を動かせる形にしておく）。`M = 1` の decode は
+ * どちらの条件も満たさないので、席どおり ①' / ③' が選ばれる。
+ */
+export const statePvTiledEligible = (chunkRows: number): boolean => chunkRows >= 16;
+
+/**
  * ①③ が共有する静的 params（**内容アドレスキャッシュ適格** — 毎 step 変わる値を含まない）。
  *
  * 語順（**この表が正本**。ホスト側は {@link stateAttentionParams} 1 本だけが組む）:
@@ -473,7 +538,23 @@ ${stateWindowFn(sliding, STATE_TILED_UNIFORM)}
 
 ${stateEffectiveRowsWgsl(STATE_TILED_UNIFORM, "m")}`;
 
-/** ①ₜ の kv 平面（{@link kvPlaneWgsl} の uniform 差し替え版 — `z` は `wid.z` の別名）。 */
+/**
+ * ③ₜ が使う述語・幾何関数の一式（`slot_row` / `column_base` / `live_columns` /
+ * `effective_rows`）。①ₜ の {@link stateTiledGeometryWgsl} から **`in_window` を落とした**もので、
+ * 生成の実体は同じ断片。
+ *
+ * WHY: ③ 系は述語を自分で評価しない — 述語外の列は ① が S へ −inf を書いており、
+ * `p = exp(−inf − m)·inv = 0` が厳密に出ることで落ちる（ADR 0067 決定 6）。使わない
+ * `in_window` を生成物へ残すと、読者が「③ₜ も窓を切っている」と誤読する。
+ */
+export const stateTiledPvGeometryWgsl = (sliding: boolean): string =>
+  `${stateSlotRowWgsl(sliding, STATE_TILED_UNIFORM)}
+
+${stateLiveWgsl(sliding, STATE_TILED_UNIFORM)}
+
+${stateEffectiveRowsWgsl(STATE_TILED_UNIFORM, "m")}`;
+
+/** ①ₜ / ③ₜ の kv 平面（{@link kvPlaneWgsl} の uniform 差し替え版 — `z` は `wid.z` の別名）。 */
 export const stateTiledKvPlaneWgsl = (gqa: boolean): string =>
   kvPlaneWgsl(gqa, STATE_TILED_UNIFORM);
 
@@ -498,6 +579,25 @@ export const STATE_QK_TILED_DIMS_EXTRA = `  row_offset: u32,
   capacity: u32,
   neg_inf: u32,
   scale: f32,
+`;
+
+/**
+ * ③ₜ が骨格の `Dims`（`{m, n, k}`）へ足す 5 語。先頭 3 語は
+ * **`m` = `rows_block` / `n` = `depth` / `k` = `col_cap`** で、行列としての M / N / K
+ * （実効 K は実行時の live なので `col_cap` は **S の行ストライドと K の静的上界**にしか使わない）。
+ *
+ * MUST: 並びは {@link statePvTiledParams} と対（この 2 つが唯一の対）。
+ * MUST: ①ₜ の {@link STATE_QK_TILED_DIMS_EXTRA} から `neg_inf` / `scale` を**落とす**
+ * （③ 系はどちらも読まない — ① が S へ焼いた −inf を `exp` が 0 にするだけ）。読まない語を
+ * 残すと「③ₜ も述語や半スケールを持つ」という誤読が params 側にも生える。
+ * MUST: 変種（sliding / GQA）で欄を出し入れしない（①ₜ と同文 — ホスト側の params 組み立てが
+ * 1 本で済む）。
+ */
+export const STATE_PV_TILED_DIMS_EXTRA = `  row_offset: u32,
+  chunk_rows: u32,
+  kv_repeat: u32,
+  window: u32,
+  capacity: u32,
 `;
 
 /**
@@ -1098,6 +1198,30 @@ export const stateQkTiledParams = (
 };
 
 /**
+ * ③ₜ の uniform（{@link STATE_PV_TILED_DIMS_EXTRA} と骨格の `{m, n, k}` を合わせた 8 語 —
+ * uniform struct の整列で 32 バイト確保する）。
+ *
+ * MUST: 幾何の値域門は ③ と**同じ 1 本**（{@link assertStateGeometry}）。③ₜ は ③ と同じ
+ * 静的幾何から出るので、門を別に持つと片方だけ通る形ができる。
+ * MUST: 並びは {@link STATE_PV_TILED_DIMS_EXTRA} と対（この 2 つが唯一の対）。
+ */
+export const statePvTiledParams = (
+  geometry: StateAttentionGeometry,
+): Uint32Array<ArrayBuffer> => {
+  assertStateGeometry("attention_state_pv (tiled) params", geometry);
+  const params = new Uint32Array(8);
+  params[0] = geometry.rowsBlock;
+  params[1] = geometry.depth;
+  params[2] = geometry.colCap;
+  params[3] = geometry.rowOffset;
+  params[4] = geometry.chunkRows;
+  params[5] = geometry.kvRepeat;
+  params[6] = geometry.window;
+  params[7] = geometry.capacity;
+  return params;
+};
+
+/**
  * ② の uniform（`{batch_heads, rows_block, row_offset, col_cap, window, neg_inf}` の 6 語 —
  * uniform struct の整列で 32 バイト確保する）。
  *
@@ -1361,5 +1485,34 @@ export const statePvParallelWorkgroups = (
     tiledWorkgroups(geometry.depth, STATE_ATTENTION_TILE_X, limit, `${where} ③'PV`),
     tiledWorkgroups(geometry.rowsBlock, 1, limit, `${where} ③'PV`),
     tiledWorkgroups(geometry.batchHeads, 1, limit, `${where} ③'PV`),
+  ];
+};
+
+/**
+ * ③ₜ の workgroup 数 `[⌈D / tileN⌉, ⌈rows_block / tileM⌉, B·H]`（1 workgroup = 1 出力タイル）。
+ *
+ * MUST: タイル辺は**幾何から導く**（①ₜ の {@link stateQkTiledWorkgroups} と同文 — 定数で
+ * 持ち回ると幾何と食い違いうる値が 2 つになり、`ceil(dim / 定数)` が実タイル辺での本数を
+ * 下回った瞬間に**タイルが欠落して沈黙誤値**になる）。幾何を解決するのはキー・生成・ここの
+ * 3 者で、全部 `chunkRows` 1 値の純関数（{@link gemmGeometryForRows}）を通る。
+ * MUST: 行軸は **`rows_block` 全て**（① 系と違って有効行で切らない — pad 行も書くのが ③ の
+ * full-write 不変条件）。仕事量が Q に比例するのはカーネル側で、有効行を 1 行も含まない
+ * 行タイルは K ループを 1 周も回さずに `0.0` を書いて終わる。
+ * MUST: 論理長を受け取らない（③ / ③' と同じく出力側の形だけで決まる）。
+ * MUST: 上限超過は fail loudly（タイル系 — 縮退させると O の一部が未書き込みのまま残り、
+ * full-write 不変条件が黙って崩れる）。
+ */
+export const statePvTiledWorkgroups = (
+  geometry: StateDispatchGeometry,
+  chunkRows: number,
+  limit: number,
+  where: string,
+): [number, number, number] => {
+  assertDispatchGeometry(`${where} ③ₜPV`, geometry);
+  const tile = gemmGeometryForRows(chunkRows);
+  return [
+    tiledWorkgroups(geometry.depth, gemmTileN(tile), limit, `${where} ③ₜPV`),
+    tiledWorkgroups(geometry.rowsBlock, gemmTileM(tile), limit, `${where} ③ₜPV`),
+    tiledWorkgroups(geometry.batchHeads, 1, limit, `${where} ③ₜPV`),
   ];
 };

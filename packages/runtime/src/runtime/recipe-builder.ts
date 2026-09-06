@@ -185,6 +185,10 @@ import {
   statePvParallelKey,
   statePvParallelWgsl,
   statePvParallelWorkgroups,
+  statePvTiledEligible,
+  statePvTiledKey,
+  statePvTiledParams,
+  statePvTiledWorkgroups,
   statePvWgsl,
   statePvWorkgroups,
   stateQkKey,
@@ -221,6 +225,7 @@ import {
   type GemmCompute,
   gemmMTileGeometry,
   gemmUsesVec4,
+  statePvTiledWgsl,
   stateQkTiledWgsl,
 } from "../kernels/gemm.ts";
 import {
@@ -2261,8 +2266,8 @@ export class RecipeBuilder {
     // 埋まっており、①' は行タイル幅を 4 → 1 に落として 4 倍の workgroup と barrier を積むだけに
     // なる。実測（2026-09-06）でも decode は ×1.55〜1.72 で効いた一方、prefill の ①QK は GPU
     // 時間が 1.5〜1.9 倍に伸び、prefill 全体で +30〜60% 逆行した。条件は**実測した範囲に留める**
-    // （ADR 0082 決定 4 と同じ規律 — M ≤ 4 などへ外挿しない）。③' は prefill でも逆行しないことを
-    // 2026-09-03 に実測しているので門を掛けず、席どおり全 M で従う（席は 1 つのまま）。
+    // （ADR 0082 決定 4 と同じ規律 — M ≤ 4 などへ外挿しない）。③' の側は `M < 16` の計画だけが
+    // 取る（`M ≥ 16` は席に依らず ③ₜ — 下記）ので、席 1 つで 2 段の適用範囲が違う形は続く。
     // MUST: 判定材料は計画時に決まる静的値だけ（`chunkRows` は宣言 shape 由来）— 実行時の論理長で
     // 分岐すると、同じ計画鍵が run ごとに違うパイプラインを指すことになる。
     const qkParallel = parallel && stateQkParallelEligible(chunkRows);
@@ -2273,13 +2278,26 @@ export class RecipeBuilder {
     // 4 点がここで揃う）。分散させると「キーは ①ₜ・dispatch は ① の辺」のような組がありえて、
     // タイルが欠落したまま例外が出ない。
     const qkTiled = !qkParallel && stateQkTiledEligible(chunkRows);
+    // ③ₜ（GEMM 骨格の V 行タイル共有 — perf-ledger K-13 段 2）も **③ とビット同一**なので
+    // 席に依らず、`M ≥ 16` の計画で既定として選ぶ。①ₜ と違って**席より優先する**のがここの
+    // 要点で、席が `"parallel"` の prefill 計画は ③' ではなく ③ₜ（= 参照経路の値）になる。
+    // WHY: ③' の利得は decode に閉じており prefill 側は K-12 の実測で誤差内だった一方、
+    // ③ₜ は traffic を削る。ビット同一の経路を既定に置ける方が数値契約が単純になる。
+    // MUST: ③PV の 3 経路の優先順を持つのも**この 1 箇所**（①QK と同文 — キー・WGSL・
+    // params・workgroup の 4 点がここで揃う）。
+    const pvTiled = statePvTiledEligible(chunkRows);
+    const pvParallel = parallel && !pvTiled;
     const qkKey = qkParallel
       ? stateQkParallelKey(sliding, gqa)
       : qkTiled
       ? stateQkTiledKey(sliding, gqa, chunkRows)
       : stateQkKey(sliding, gqa);
     const statsKey = stateStatsKey(sliding);
-    const pvKey = parallel ? statePvParallelKey(sliding, gqa) : statePvKey(sliding, gqa);
+    const pvKey = pvTiled
+      ? statePvTiledKey(sliding, gqa, chunkRows)
+      : pvParallel
+      ? statePvParallelKey(sliding, gqa)
+      : statePvKey(sliding, gqa);
     const qk = await this.#state.cache.get(
       qkKey,
       qkParallel
@@ -2291,12 +2309,16 @@ export class RecipeBuilder {
     const stats = await this.#state.cache.get(statsKey, stateStatsWgsl(sliding));
     const pv = await this.#state.cache.get(
       pvKey,
-      parallel ? statePvParallelWgsl(sliding, gqa) : statePvWgsl(sliding, gqa),
+      pvTiled
+        ? statePvTiledWgsl(sliding, gqa, chunkRows)
+        : pvParallel
+        ? statePvParallelWgsl(sliding, gqa)
+        : statePvWgsl(sliding, gqa),
     );
 
     for (const block of blocks) {
-      // ①③ が共有する静的 params（内容アドレスキャッシュ適格 — ブロック間の差は rowOffset /
-      // rowsBlock だけ）。
+      // 静的幾何の**唯一の出どころ**（内容アドレスキャッシュ適格 — ブロック間の差は rowOffset /
+      // rowsBlock だけ）。ここから段ごとに params を組む。
       const geometry = {
         rowsBlock: block.rows,
         rowOffset: block.offset,
@@ -2308,12 +2330,20 @@ export class RecipeBuilder {
         colCap,
         scale,
       };
-      const params = this.#writeParams(stateAttentionParams(geometry), PARAMS_UNIFORM_USAGE);
-      // ①ₜ だけは骨格の `Dims`（先頭 3 語が m / n / k）を binding 0 に置くので、**同じ静的幾何を
-      // 別の語順で**組み直す（値の出どころは 1 つ — 上の `geometry`）。①③ 共有の語順は動かさない。
+      // ①③ が共有する語順の params。**タイル経路の段は 1 語も読まない**ので、2 段ともタイルの
+      // 計画では 1 本も組まない（組んでも誰も束縛しない死んだ uniform になる）。
+      let shared: GPUBuffer | undefined;
+      const sharedParams = (): GPUBuffer =>
+        shared ??= this.#writeParams(stateAttentionParams(geometry), PARAMS_UNIFORM_USAGE);
+      // ①ₜ / ③ₜ は骨格の `Dims`（先頭 3 語が m / n / k）を binding 0 に置くので、**同じ静的幾何を
+      // 別の語順で**組み直す（③ₜ は `neg_inf` / `scale` を読まないので語数も違う）。①③ 共有の
+      // 語順は動かさない — ③ と見積りが同じ表を読む。
       const qkParams = qkTiled
         ? this.#writeParams(stateQkTiledParams(geometry), PARAMS_UNIFORM_USAGE)
-        : params;
+        : sharedParams();
+      const pvParams = pvTiled
+        ? this.#writeParams(statePvTiledParams(geometry), PARAMS_UNIFORM_USAGE)
+        : sharedParams();
       const dispatchGeometry = {
         batchHeads,
         rowsBlock: block.rows,
@@ -2380,7 +2410,7 @@ export class RecipeBuilder {
         pipeline: pv.pipeline,
         layout: pv.layout,
         roles: pv.roles,
-        params,
+        params: pvParams,
         bindings: [
           { binding: 1, source: scores },
           { binding: 2, source: rowStats },
@@ -2389,7 +2419,9 @@ export class RecipeBuilder {
           { binding: 5, source: outs[0] },
           { binding: 6, source: { kind: "lengths" } },
         ],
-        workgroups: parallel
+        workgroups: pvTiled
+          ? statePvTiledWorkgroups(dispatchGeometry, chunkRows, limit, `${where} ③PV`)
+          : pvParallel
           ? statePvParallelWorkgroups(dispatchGeometry, limit, `${where} ③PV`)
           : statePvWorkgroups(dispatchGeometry, limit, `${where} ③PV`),
       });

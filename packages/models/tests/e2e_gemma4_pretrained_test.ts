@@ -195,6 +195,10 @@ Deno.test({
  * `"parallel"`・K-12 昇格）で ③' のキー（`:par`）が**実際に走り**、③（逐次）のキーが 1 本も出ない
  * こと。`stateAttentionReduce: "sequential"` を渡せば逆になる（戻す口が生きていること）。
  *
+ * NOTE: 席が効くのは **decode（M = 1）の dispatch だけ**になった（perf-ledger K-13 段 2）。
+ * prefill 計画（M = `chunkLength` ≥ 16）は席に依らず ③ₜ（V 行タイル共有・キーに幾何断片
+ * `:f32:reg…` が載る）を選ぶ — ③ とビット同一なので既定経路に置ける。したがって 1 回の chat は
+ * **必ず ③ₜ を含み**、席で入れ替わるのは残りの ③ / ③' の側になる。
  * MUST: 計測を要求しない device では明示 SKIP し、走るときは空の内訳を無条件に FAIL にする
  * （`entries` が空なら素通り、にすると無検査のまま緑になる）。
  */
@@ -234,8 +238,12 @@ Deno.test({
         }
         const pv = [...keys].filter((key) => key.startsWith("attention_state_pv"));
         assert(pv.length > 0, `内訳に ③PV のキーが無い（${[...keys].join(" / ")}）`);
+        // 3 経路へ分ける（幾何断片 `:f32:reg…` = ③ₜ / `:par` = ③' / 残り = ③ 参照経路）。
+        const tiled = pv.filter((key) => key.includes(":f32:reg"));
         const parallel = pv.filter((key) => key.includes(":par"));
-        const sequential = pv.filter((key) => !key.includes(":par"));
+        const sequential = pv.filter((key) => !key.includes(":f32:reg") && !key.includes(":par"));
+        // prefill 計画は席に依らず ③ₜ（席の指定は decode 側にしか効かない）。
+        assert(tiled.length > 0, `③ₜ のキーが走っていない（${pv.join(" / ")}）`);
         if (reduce === "parallel") {
           assert(parallel.length > 0, `③' のキーが走っていない（${pv.join(" / ")}）`);
           assertEquals(sequential, [], `既定なのに ③（逐次）のキーが混ざっている`);
