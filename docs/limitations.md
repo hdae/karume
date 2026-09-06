@@ -253,13 +253,13 @@ runtime 側の静的 liveness パッキング（ADR 0093）の組で、実測（
 残る理由は資源側だけだった。）
 配っている 1024² も軽くはない: 実測で重み 919MiB + 中間の領域 749MiB（ADR 0093 のパッキングと
 パッチ ⑨ の後・2026-09-05 実測。旧プール + 旧末尾では 6,283MiB）= **GPU 総確保が約 1.7GiB** を要し、
-最大の binding は ipt 枝内部の `[1,64,1024,1024]` 256MiB と attention のスコア S 230MiB なので、
+最大の binding は decoder の `cat_211` `[1,1280,256,256]` 320MiB（次いで ipt 枝内部の `[1,64,1024,1024]` 256MiB と attention のスコア S 230MiB）なので、
 実質**デスクトップ級 GPU 限定**である。配布形の `requiredLimits` **欄が空でも既定スペックの
 device では走らない** — 欄が名乗るのは常駐分（重み・state）だけで、中間は 128MiB を超える
 （宣言の意味論は下の「DL 前の GPU 適合チェック」節）。
 分解 attention の**行ブロック融合はこの家族では 96 サイト全てで外れる**（mask `[1,6,144,144]` と
 `softmax` の形が matcher の実測形と合わない）。したがってスコア S は 1 本の binding になり、
-1024² で 230MiB・2048² で 878MiB を要求する — **128MiB 既定の device はこの家族の対象外**
+1024² で 230MiB・2048² で 878MiB を要求する。最大の binding はそれでもなく decoder の `cat_211`（1024² で 320MiB・2048² で 1280MiB — DL 前の適合チェックはこの値で作る）— **128MiB 既定の device はこの家族の対象外**
 （1024² では S 以外にも 128MiB を超える中間が 24 本ある）。
 本家（同梱 `handler.py` の General-HR）の推論解像度は 2048² なので、**上流と同じ設定では
 ない**点は配布形の制約として明示しておく。回避策は入れていない（実測して判断する側の話）。
@@ -997,7 +997,7 @@ quant が宣言する GPU 前提のうち、重み shard を取る前（家族 a
   スロット）が既定内に収まることだけ。中間テンソルを数えないのは、融合後の実需要が device の
   granted limit に依存する（行ブロックの刻みがそこで決まる）ため配布形からは原理的に決まらず、
   融合前の最大を焼くと「行ブロックで走る device」を取得の前に誤って拒否するから。中間が既定を
-  超える現物 = BiRefNet 1024²（1 binding 256MiB・GPU 総確保 約 1.7GiB — 上の BiRefNet 節）。
+  超える現物 = BiRefNet 1024²（1 binding 320MiB・GPU 総確保 約 1.7GiB — 上の BiRefNet 節）。
   中間の上限超過（slot 実寸 > `maxStorageBufferBindingSize` / 領域 > `maxBufferSize`）は ADR
   [0093](decisions/0093-transient-liveness-packing.md) 決定 5 の計画時 preflight が、Session 構築時と
   `estimateSessionMemory` の**両方で確保の前にノード名つきで全件列挙して落とす**（2026-09-05 結線）。

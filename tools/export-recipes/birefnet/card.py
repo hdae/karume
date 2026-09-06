@@ -73,13 +73,13 @@ BIREFNET_RESOURCES: Mapping[str, BirefnetResources] = {
     "1024": BirefnetResources(
         total="about 1.7 GiB",
         intermediates="749 MiB",
-        binding="the largest single storage buffer is 256 MiB",
+        binding="the largest single storage buffer is 320 MiB",
         run="about 1.8 s",
     ),
     "2048": BirefnetResources(
         total="about 4.1 GiB",
         intermediates="2,948 MiB",
-        binding="the attention score buffer alone is 878 MiB",
+        binding="the largest single storage buffer is 1,280 MiB",
         run="7.5 – 8.6 s",
     ),
 }
