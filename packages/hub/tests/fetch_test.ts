@@ -200,7 +200,7 @@ Deno.test("loadManifest: 可変 ref の解決失敗はオフライン不可と�
   assert(error.message.includes("オフライン"), "オフライン不可であることを明示する");
 });
 
-Deno.test("loadManifest: 1MiB を超える karume.json は受信前に弾く", async () => {
+Deno.test("loadManifest: 1MiB を超える karume.json は ManifestFormatError で弾く（判定は全量受信後）", async () => {
   const oversized = new TextEncoder().encode(" ".repeat(2 * 1024 * 1024));
   const mock = createMockFetch({
     sha: SHA,

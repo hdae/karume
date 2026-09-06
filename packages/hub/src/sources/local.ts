@@ -123,9 +123,10 @@ const pinnedLocalSource = (
       const bytes = await adapter.readFile(MANIFEST_FILENAME, {
         ...(signal === undefined ? {} : { signal }),
       });
-      // NOTE: 全量を読んでから門を見る（アダプターは逐次面を持たない）。HF 側の上限が「受信を
-      // 途中で止める」防波堤なのに対し、こちらは手元の実体に対する形式検査 — 送出側の悪意を
-      // 想定する門ではないので、読み切ってから落として構わない。
+      // NOTE: 全量を読んでから門を見る（アダプターは逐次面を持たない）。手元の実体に対する
+      // 形式検査で、送出側の悪意を想定する門ではないので、読み切ってから落として構わない
+      // （HF 取得元の `karume.json` も取得層に厳密一致なしの上限が無いため、同じく全量受信後に
+      // `parseManifest` が見る — `sources/hf.ts`）。
       if (bytes.byteLength > MAX_MANIFEST_BYTES) {
         throw sizeViolation(bytes.byteLength, origin.integrity);
       }
