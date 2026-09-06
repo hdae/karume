@@ -10,13 +10,15 @@
  * 変わる — 壁は timing 無効の別プロセスで採る = `single` と同じ二本立て）。
  *
  * 家族ごとの「1 回」: gemma4 = 短い chat 1 ターン（prefill 1 run + decode N run）、anima = 1 枚
- * （text_encoder / text_conditioner / transformer step / vae_decoder タイル）。他家族は未対応で
- * fail loudly（波 a の対象 = 合格線 K-11 / P-1 の 2 資産）。
+ * （text_encoder / text_conditioner / transformer step / vae_decoder タイル）、siglip2 = 画像
+ * 1 枚の embed（vision 1 run）、irodori = 発話 1 本（条件エンコーダ各 1 run + dit の step 群 +
+ * codec）。他家族は未対応で fail loudly。
  */
 
 import type { GpuContext, SessionDiagnostics } from "../../packages/runtime/mod.ts";
 import { denoDirectory } from "../../packages/hub/deno.ts";
-import { AnimaPipeline } from "../../packages/models/mod.ts";
+import type { IrodoriRunComponent, Rgb8Image } from "../../packages/models/mod.ts";
+import { AnimaPipeline, IrodoriPipeline, Siglip2Pipeline } from "../../packages/models/mod.ts";
 import { Gemma4Pipeline } from "../../packages/models/gemma.ts";
 import type { CensusSummary } from "./census.ts";
 import type { SingleSummary } from "./single.ts";
@@ -25,7 +27,7 @@ import type { SingleSummary } from "./single.ts";
 export type RunRecord = {
   readonly index: number;
   readonly component: string;
-  /** 家族ごとの意味づけ（gemma4 = prefill / decode-n・anima = <component>-n）。 */
+  /** 家族ごとの意味づけ（gemma4 = prefill / decode-n・他家族は <component>-n）。 */
   readonly label: string;
   readonly dispatch_count: number;
   /** 計測無効なら null（wall プロセス）。 */
@@ -199,10 +201,69 @@ export const compareWithCensus = (
   };
 };
 
+/**
+ * siglip2 のコンポーネント名 — 配布形 `karume.json` の `models.<model>.weights` のキー
+ * （vision tower 1 本だけ）。census 側もこの綴りで出るので、`compareWithCensus` が
+ * record.component と weights[].component を同じ綴りで突き合わせられる。
+ */
+const SIGLIP2_COMPONENT = "vision";
+
+/**
+ * irodori の観測席のコンポーネント名（ハイフン綴り）→ census の綴り（アンダースコア）。
+ * 突合は綴りの一致で行うので、写さないと census 側が 1 行も当たらず census_nodes が全て null に
+ * なる（`text-proj` と `text_proj` は別物として扱われる）。
+ */
+export const irodoriCensusComponent = (component: IrodoriRunComponent): string =>
+  component.replaceAll("-", "_");
+
+/** irodori の既定の発話文（examples/irodori/main.ts の DEFAULT_TEXT と同じ）。 */
+const DEFAULT_IRODORI_TEXT = "こんにちは、これはテストです。";
+
+/**
+ * siglip2 へ入れる合成画像（RGB 勾配）。前処理が宣言寸法へ resize するので辺は任意でよく、
+ * 画素値は速度に影響しない — リポは PNG / JPEG デコーダを持たない（デコードは karume の
+ * 責務外 — siglip2/pipeline.ts のモジュール doc）ので、実画像を読む口は作らない。
+ */
+const SYNTHETIC_IMAGE_SIDE = 256;
+
+const syntheticImage = (): Rgb8Image => {
+  const data = new Uint8Array(SYNTHETIC_IMAGE_SIDE * SYNTHETIC_IMAGE_SIDE * 3);
+  for (let y = 0; y < SYNTHETIC_IMAGE_SIDE; y += 1) {
+    for (let x = 0; x < SYNTHETIC_IMAGE_SIDE; x += 1) {
+      const at = (y * SYNTHETIC_IMAGE_SIDE + x) * 3;
+      data[at] = x;
+      data[at + 1] = y;
+      data[at + 2] = (x + y) >> 1;
+    }
+  }
+  return { data, width: SYNTHETIC_IMAGE_SIDE, height: SYNTHETIC_IMAGE_SIDE };
+};
+
+/** 実走できる家族（CLI の `--family` の値でもある）。 */
+export const DRIVE_FAMILIES = ["gemma4", "anima", "siglip2", "irodori"] as const;
+export type DriveFamily = typeof DRIVE_FAMILIES[number];
+
+export const isDriveFamily = (name: string | undefined): name is DriveFamily =>
+  DRIVE_FAMILIES.some((known) => known === name);
+
+/**
+ * 突合に使う run の label 接頭辞の既定 — 家族ごとに「その 1 回の主役」が違う。gemma4 は
+ * decode（prefill は形が違うので別勘定）、anima は transformer の step、siglip2 は run が
+ * vision の 1 本だけ、irodori は step 数だけ回る dit。
+ */
+const DEFAULT_RUNS_PREFIX: Readonly<Record<DriveFamily, string>> = {
+  gemma4: "decode",
+  anima: "transformer",
+  siglip2: SIGLIP2_COMPONENT,
+  irodori: "dit",
+};
+
+export const defaultRunsPrefix = (family: DriveFamily): string => DEFAULT_RUNS_PREFIX[family];
+
 export type DriveOptions = {
   readonly gpu: GpuContext;
   readonly source: string;
-  readonly family: "gemma4" | "anima";
+  readonly family: DriveFamily;
   readonly model?: string;
   readonly quant?: string;
   /** gemma4: 生成 token 数（decode run の本数 − 1 に近い — 最後の run の診断は届かない）。 */
@@ -211,6 +272,10 @@ export type DriveOptions = {
   readonly steps?: number;
   readonly size?: number;
   readonly prompt?: string;
+  /** irodori: 読み上げる文（既定は examples/irodori/main.ts と同じ 1 文）。 */
+  readonly text?: string;
+  /** irodori: 発話長（秒）。省略すると duration グラフが決める（= その run も 1 本増える）。 */
+  readonly durationSeconds?: number;
 };
 
 export type DriveResult = {
@@ -245,6 +310,54 @@ export const driveOnce = async (options: DriveOptions): Promise<DriveResult> => 
         [{ role: "user", content: options.prompt ?? "Explain WebGPU in one sentence." }],
         { maxNewTokens: options.newTokens ?? 8 },
       ).text();
+      return { records, wall_ms: performance.now() - started, load_ms: loadMs };
+    } finally {
+      await pipeline.dispose();
+    }
+  }
+  if (options.family === "siglip2") {
+    let runs = 0;
+    const pipeline = await Siglip2Pipeline.fromPretrained(denoDirectory(options.source), {
+      ...selection,
+      gpu: options.gpu,
+      onRunDiagnostics: (diagnostics) => {
+        records.push(
+          recordRun(runs, SIGLIP2_COMPONENT, `${SIGLIP2_COMPONENT}-${runs}`, diagnostics),
+        );
+        runs += 1;
+      },
+    });
+    const loadMs = performance.now() - loadStarted;
+    try {
+      const started = performance.now();
+      await pipeline.embed(syntheticImage());
+      return { records, wall_ms: performance.now() - started, load_ms: loadMs };
+    } finally {
+      await pipeline.dispose();
+    }
+  }
+  if (options.family === "irodori") {
+    const seen = new Map<string, number>();
+    const pipeline = await IrodoriPipeline.fromPretrained(denoDirectory(options.source), {
+      ...selection,
+      gpu: options.gpu,
+      onRunDiagnostics: (component, diagnostics) => {
+        const name = irodoriCensusComponent(component);
+        const n = seen.get(name) ?? 0;
+        seen.set(name, n + 1);
+        records.push(recordRun(records.length, name, `${name}-${n}`, diagnostics));
+      },
+    });
+    const loadMs = performance.now() - loadStarted;
+    try {
+      const started = performance.now();
+      await pipeline.generate({
+        text: options.text ?? DEFAULT_IRODORI_TEXT,
+        seed: 0,
+        ...(options.durationSeconds === undefined
+          ? {}
+          : { durationSeconds: options.durationSeconds }),
+      });
       return { records, wall_ms: performance.now() - started, load_ms: loadMs };
     } finally {
       await pipeline.dispose();

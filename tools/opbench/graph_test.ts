@@ -1,9 +1,17 @@
 // opbench graph のテスト（GPU 不要）: パイプラインキー → op の写像と、census との突合表。
 
 import { assertEquals, assertThrows } from "@std/assert";
+import type { IrodoriRunComponent } from "../../packages/models/mod.ts";
 import type { CensusSummary, WeightRow } from "./census.ts";
 import type { SingleSummary } from "./single.ts";
-import { compareWithCensus, opOfKey, type RunRecord } from "./graph.ts";
+import {
+  compareWithCensus,
+  defaultRunsPrefix,
+  DRIVE_FAMILIES,
+  irodoriCensusComponent,
+  opOfKey,
+  type RunRecord,
+} from "./graph.ts";
 
 Deno.test("opOfKey: 先頭語を op に写す（変種名は表で・表に無ければ先頭語そのまま）", () => {
   assertEquals(opOfKey("linear_gemv:v1:f32:c32u4:wi4g32"), "linear");
@@ -16,6 +24,39 @@ Deno.test("opOfKey: 先頭語を op に写す（変種名は表で・表に無�
   assertEquals(opOfKey("rope:v1:half:f32:wg256"), "fused");
   assertEquals(opOfKey("silu:v1:x-sigmoid:f32:wg256"), "fused");
   assertEquals(opOfKey("something_new:v1"), "something_new");
+});
+
+Deno.test("irodoriCensusComponent: 観測席のハイフン綴りを census のアンダースコア綴りへ写す", () => {
+  // 8 名の全部を固定する（写し漏れが 1 つでもあると、その段だけ census と当たらない）。
+  const components: readonly IrodoriRunComponent[] = [
+    "backbone",
+    "text-proj",
+    "caption-proj",
+    "speaker",
+    "duration",
+    "dit",
+    "codec-encoder",
+    "codec-decoder",
+  ];
+  assertEquals(components.map(irodoriCensusComponent), [
+    "backbone",
+    "text_proj",
+    "caption_proj",
+    "speaker",
+    "duration",
+    "dit",
+    "codec_encoder",
+    "codec_decoder",
+  ]);
+});
+
+Deno.test("defaultRunsPrefix: 家族ごとに突合する run の接頭辞が決まる", () => {
+  assertEquals(DRIVE_FAMILIES.map(defaultRunsPrefix), [
+    "decode",
+    "transformer",
+    "vision",
+    "dit",
+  ]);
 });
 
 const weight = (op: string, count: number, extra: Partial<WeightRow> = {}): WeightRow => ({

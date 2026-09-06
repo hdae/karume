@@ -188,18 +188,38 @@ which is the number the K-11 acceptance line (gemma4 decode `linear/f32+i4g32`) 
 ## `graph` — one real run, per-key GPU time, compared with the census
 
 ```
-deno run -A tools/opbench/main.ts graph --source <mirror> --family <gemma4|anima> --out <dir> \
-    [--census <census dir> --scenario <name>] [--single <single dir>] [--mode timing|wall]
+deno run -A tools/opbench/main.ts graph --source <mirror> --family <gemma4|anima|siglip2|irodori> \
+    --out <dir> [--census <census dir> --scenario <name>] [--single <single dir>] [--mode timing|wall]
 ```
 
-Drives one real inference through the family's pipeline (`gemma4` = one short chat turn, `anima` =
-one image) with `acquireGpu({ gpuTiming: true })` injected, and records every `onRunDiagnostics`
-callback as one row of `graph.jsonl`: the run's label (`prefill` / `decode-n`, or
-`<component>-n`), its dispatch count, total GPU time and the per-pipeline-key breakdown. Production
-code is untouched; the observation point is the same one P-1 was measured through.
+Drives one real inference through the family's pipeline with `acquireGpu({ gpuTiming: true })`
+injected, and records every `onRunDiagnostics` callback as one row of `graph.jsonl`: the run's label
+(`prefill` / `decode-n`, or `<component>-n`), its dispatch count, total GPU time and the
+per-pipeline-key breakdown. Production code is untouched; the observation point is the same one P-1
+was measured through.
+
+What "one run" means per family:
+
+| Family    | One run                                                                          | Input flags                                        |
+| --------- | -------------------------------------------------------------------------------- | -------------------------------------------------- |
+| `gemma4`  | one short chat turn (one `prefill` run + N `decode` runs)                        | `--prompt`, `--new-tokens` (default 8)             |
+| `anima`   | one image (`text_encoder` / `text_conditioner` / `transformer` step / VAE tiles) | `--prompt`, `--steps` (default 2), `--size` (1024) |
+| `siglip2` | one image embedded (`vision`, a single run)                                      | none — the image is synthetic (see below)          |
+| `irodori` | one utterance (each conditioner once, `dit` per step, then the codec)            | `--text`, `--seconds` (fractional, optional)       |
+
+The siglip2 image is a synthetic 256×256 RGB gradient built in memory: the preprocessor resizes to
+the declared input size anyway, pixel values do not change kernel speed, and karume ships no PNG
+decoder (decoding is not its job). Omitting `--seconds` for irodori lets the `duration` graph decide
+the utterance length, which adds one `duration` run to the trace.
+
+**irodori runs slower under `--mode timing`.** A timing-enabled device forces the DiT loop onto the
+host path (a readback per forward, because the resident path's batching is incompatible with the
+timing windows), so the wall clock is close to twice the untimed one. The GPU times per key are
+still the ones to read; take the wall from a `--mode wall` process.
 
 With `--census` and `--scenario`, the runs whose label starts with `--runs` (default `decode` for
-gemma4, `transformer` for anima) are averaged and compared per op with the census's plain node
+gemma4, `transformer` for anima, `vision` for siglip2, `dit` for irodori) are averaged and compared
+per op with the census's plain node
 count (rows that are neither fused nor aliased). Pipeline keys are mapped to ops by their leading
 word; variant names that differ from the op (`linear_gemv` → `linear`, `attention_state_*` →
 `attention`) go through a small table, `quantize_rows` is counted as `aux` (the a8 path's activation
@@ -208,8 +228,10 @@ quantisation has no census node), and any key that maps to nothing the census kn
 are joined per op and reported as `single_over_graph` — the ratio that says how far the single-op
 model is from the in-graph time (K-11 measured 0.75–0.85).
 
-Other families fail loudly for now: the two acceptance lines of this stage (K-11 on gemma4, P-1 on
-anima) are the assets that exist here.
+Component names in `graph.jsonl` are always the census spelling, because the comparison joins them
+by name: irodori's callback spells its stages with hyphens (`text-proj`, `codec-encoder`) and the
+tool writes the census's underscores (`text_proj`, `codec_encoder`). A family outside the four above
+fails loudly.
 
 ## `torch` — the PyTorch reference (column B)
 

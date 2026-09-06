@@ -34,7 +34,14 @@ import {
   type SingleRecord,
   type SingleSummary,
 } from "./single.ts";
-import { compareWithCensus, driveOnce, type RunRecord } from "./graph.ts";
+import {
+  compareWithCensus,
+  defaultRunsPrefix,
+  DRIVE_FAMILIES,
+  driveOnce,
+  isDriveFamily,
+  type RunRecord,
+} from "./graph.ts";
 import { defaultVenv, runTorchBench, summarizeTorch, type TorchRecord } from "./torch.ts";
 import {
   assertBindingKeys,
@@ -94,6 +101,8 @@ const GRAPH_OPTIONS: ReadonlySet<string> = new Set([
   "steps",
   "size",
   "prompt",
+  "text",
+  "seconds",
 ]);
 const TORCH_OPTIONS: ReadonlySet<string> = new Set([
   "single",
@@ -119,6 +128,13 @@ const SINGLE_OPTIONS: ReadonlySet<string> = new Set([
 const positiveInteger = (text: string, where: string): number => {
   const value = Number(text);
   if (!Number.isInteger(value) || value <= 0) throw new Error(`${where} は正の整数（'${text}'）`);
+  return value;
+};
+
+/** 秒だけは小数を取る（発話長は整数秒に丸める意味が無い）。 */
+const positiveNumber = (text: string, where: string): number => {
+  const value = Number(text);
+  if (!Number.isFinite(value) || value <= 0) throw new Error(`${where} は正の数（'${text}'）`);
   return value;
 };
 
@@ -226,18 +242,20 @@ const USAGE = `使い方: deno run -A tools/opbench/main.ts <census|single> …
     --limit <n>          加重（count × 出力要素）の降順で先頭 n 件だけ
     --session <knob>=<value>   実行変種の上書き（linearCompute / attentionCompute / attentionScoreStorage・繰り返し可）
     --rounds <n>         代表値（min）を採る反復回数（既定 ${ROUNDS}）
-  graph --source <dir> --family <gemma4|anima> --out <dir> [--census <dir> --scenario <name>]
+  graph --source <dir> --family <gemma4|anima|siglip2|irodori> --out <dir> [--census <dir> --scenario <name>]
     --source <dir>       配布形（karume.json あり）— pipeline の fromPretrained で読む
-    --family <name>      gemma4（chat 1 ターン）か anima（1 枚）
+    --family <name>      gemma4（chat 1 ターン）/ anima（1 枚）/ siglip2（合成画像 1 枚の embed）/ irodori（発話 1 本）
     --out <dir>          graph.jsonl（run ごと）/ summary.json の書き出し先
     --mode timing|wall   timing = op 別 GPU 時間（既定・timestamp-query が要る）/ wall = 計測無効で壁だけ
     --census <dir>       突合する census の出力（--scenario と組で・省略時は突合しない）
-    --scenario <name>    census のシナリオ（gemma4 = decode / prefill・anima = 1024px）
-    --runs <prefix>      突合に使う run の label 接頭辞（既定 gemma4 = decode / anima = transformer）
+    --scenario <name>    census のシナリオ（gemma4 = decode / prefill・anima = 1024px・siglip2 = native・irodori = representative）
+    --runs <prefix>      突合に使う run の label 接頭辞（既定 gemma4 = decode / anima = transformer / siglip2 = vision / irodori = dit）
     --single <dir>       single の出力（op 別の single / graph 比を出す）
     --model / --quant    配布形の選択（既定 = manifest）
     --new-tokens <n>     gemma4 の生成 token 数（既定 8）/ --steps <n> --size <px> anima の step と辺（既定 2 / 1024・step は 2 以上）
-    --prompt <text>      入力文（既定あり）
+    --prompt <text>      gemma4 / anima の入力文（既定あり）
+    --text <text>        irodori の発話文（既定あり）
+    --seconds <n>        irodori の発話長（秒・小数可・省略時は duration グラフが決める）
   torch --single <dir> --out <dir> [--venv <dir>] [--compile true] [--rounds <n>] [--limit <n>] [--op <name>]
     --single <dir>       single の出力（single.jsonl の各行を torch eager で組んで測る）
     --out <dir>          torch.jsonl / summary.json / comparison.json の書き出し先
@@ -391,8 +409,8 @@ const runGraph = async (args: ReadonlyMap<string, readonly string[]>): Promise<v
   const source = single(args, "source");
   if (source === undefined) throw new Error("--source <配布形ディレクトリ> は必須");
   const family = single(args, "family");
-  if (family !== "gemma4" && family !== "anima") {
-    throw new Error(`--family は gemma4 か anima（'${family}'）— 他家族は未対応`);
+  if (!isDriveFamily(family)) {
+    throw new Error(`--family は ${DRIVE_FAMILIES.join(" / ")}（'${family}'）— 他家族は未対応`);
   }
   const out = single(args, "out");
   if (out === undefined) throw new Error("--out <ディレクトリ> は必須");
@@ -406,11 +424,12 @@ const runGraph = async (args: ReadonlyMap<string, readonly string[]>): Promise<v
   if ((censusDir === undefined) !== (scenario === undefined)) {
     throw new Error("--census と --scenario は組で渡す");
   }
-  const runsPrefix = single(args, "runs") ?? (family === "gemma4" ? "decode" : "transformer");
+  const runsPrefix = single(args, "runs") ?? defaultRunsPrefix(family);
   const singleDir = single(args, "single");
   const newTokens = single(args, "new-tokens");
   const steps = single(args, "steps");
   const size = single(args, "size");
+  const seconds = single(args, "seconds");
 
   const gpu = await acquireGpu({ gpuTiming: mode === "timing" });
   let result: Awaited<ReturnType<typeof driveOnce>>;
@@ -425,6 +444,8 @@ const runGraph = async (args: ReadonlyMap<string, readonly string[]>): Promise<v
       ...(steps === undefined ? {} : { steps: positiveInteger(steps, "--steps") }),
       ...(size === undefined ? {} : { size: positiveInteger(size, "--size") }),
       ...(single(args, "prompt") === undefined ? {} : { prompt: single(args, "prompt") }),
+      ...(single(args, "text") === undefined ? {} : { text: single(args, "text") }),
+      ...(seconds === undefined ? {} : { durationSeconds: positiveNumber(seconds, "--seconds") }),
     });
   } finally {
     gpu.destroy();
