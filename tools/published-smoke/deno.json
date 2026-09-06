@@ -5,6 +5,6 @@
     "proseWrap": "preserve"
   },
   "minimumDependencyAge": {
-    "exclude": ["jsr:@karume/*"]
+    "exclude": ["jsr:@karume/*", "jsr:@hdae/fetch-cache"]
   }
 }
