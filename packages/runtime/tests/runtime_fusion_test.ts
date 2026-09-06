@@ -11,6 +11,7 @@ import { elementwiseKey } from "../src/codegen/elementwise.ts";
 import { type IrGraph, parseIrGraph } from "../src/format/ir.ts";
 import { ADALN_NORM_KEY, adalnNormParams } from "../src/kernels/adaln-norm.ts";
 import { bmmKey } from "../src/kernels/bmm.ts";
+import { geluTanhMulKey, type GeluTanhMulOrder } from "../src/kernels/gelu-tanh-mul.ts";
 import { ROPE_KEY } from "../src/kernels/rope.ts";
 import { siluKey } from "../src/kernels/silu.ts";
 import { SAFE_SOFTMAX_KEY } from "../src/kernels/softmax.ts";
@@ -29,7 +30,7 @@ const parse = (graph: GraphJson): IrGraph => parseIrGraph(JSON.stringify(graph))
 
 /**
  * 判定に使う device の能力（WebGPU core 既定 — 128MiB / 65535）。行ブロック分割の枚数だけが
- * これを読む（既存 4 ルールは device の能力に依らない）。
+ * これを読む（既存 5 ルールは device の能力に依らない）。
  */
 const TEST_LIMITS = {
   maxStorageBufferBindingSize: 128 * 1024 * 1024,
@@ -63,6 +64,7 @@ const fusedAt = (plan: FusionPlan, index: number) => {
 Deno.test("ルール表の先頭 op は互いに素で、適用順が結果に効かない", () => {
   assertEquals(FUSION_RULES.map((rule) => rule.name), [
     "silu",
+    "geluTanhMul",
     "upsample2x",
     "rope",
     "adaln",
@@ -75,7 +77,15 @@ Deno.test("ルール表の先頭 op は互いに素で、適用順が結果に�
       seen.add(head);
     }
   }
-  assertEquals([...seen].sort(), ["bmm", "layer_norm", "mul", "reshape", "sigmoid", "slice"]);
+  assertEquals([...seen].sort(), [
+    "bmm",
+    "gelu_tanh",
+    "layer_norm",
+    "mul",
+    "reshape",
+    "sigmoid",
+    "slice",
+  ]);
 });
 
 // ---------------------------------------------------------------- SiLU
@@ -184,7 +194,7 @@ Deno.test("SiLU の反例（別名 / 内部 output / 別 consumer / 別 gate / b
  * 二重に読む」が例外なしに出る）。
  *
  * NOTE: 現行の op 語彙では `states` 欄を持てるのが `attention` / `state_append` の 2 本だけで、
- * どちらも既存 5 ルールの窓の綴りに現れない — つまり**実グラフからは踏めない**。それでも窓の
+ * どちらも既存 6 ルールの窓の綴りに現れない — つまり**実グラフからは踏めない**。それでも窓の
  * 仕組み側の不変条件として置いてある門なので、掴めることが確定している窓（SiLU）の片方に
  * `states` 欄を差した合成ノードで、判定点が実際に効いていることを固定する。
  */
@@ -212,6 +222,118 @@ Deno.test("state を触るノードを含む窓はどのルールも掴まない
     );
   }
 });
+
+// -------------------------------------------------------- geluTanhMul
+
+type GeluTanhMulOptions = {
+  readonly order?: GeluTanhMulOrder;
+  readonly interpose?: boolean;
+  readonly geluOutput?: boolean;
+  readonly extraConsumer?: boolean;
+  readonly broadcast?: boolean;
+  /** erf 型の `gelu`（別 op — 受理集合の外）。 */
+  readonly erf?: boolean;
+  /** ゲート側に gelu の入力そのものを渡す（bind 面が重複する形）。 */
+  readonly gateWithGeluInput?: boolean;
+};
+
+/**
+ * `gelu_tanh(g) → mul(·, u)` の実 export 形（gemma4 decode の per-layer 入力ゲート）。
+ * ゲート `u` は既定で別テンソル（実測形）。
+ */
+const geluTanhMulGraph = (options: GeluTanhMulOptions = {}): GraphJson => {
+  const shape = [4, 8];
+  const gateShape = options.broadcast ? [1, 8] : shape;
+  const values: GraphJson["values"] = {
+    a: { dtype: "f32", shape: [...shape] },
+    y: { dtype: "f32", shape: [...shape] },
+  };
+  const inputs: GraphJson["inputs"] = [{ name: "g", dtype: "f32", shape: [...shape] }];
+  if (!options.gateWithGeluInput) {
+    inputs.push({ name: "u", dtype: "f32", shape: [...gateShape] });
+  }
+  const nodes: GraphJson["nodes"] = [
+    { op: options.erf ? "gelu" : "gelu_tanh", ins: ["g"], outs: ["a"], attrs: {} },
+  ];
+  let mulGelu = "a";
+  if (options.interpose) {
+    values.a_alias = { dtype: "f32", shape: [...shape] };
+    nodes.push({ op: "reshape", ins: ["a"], outs: ["a_alias"], attrs: {} });
+    mulGelu = "a_alias";
+  }
+  const gate = options.gateWithGeluInput ? "g" : "u";
+  nodes.push({
+    op: "mul",
+    ins: options.order === "u-gelu" ? [gate, mulGelu] : [mulGelu, gate],
+    outs: ["y"],
+    attrs: {},
+  });
+  if (options.extraConsumer) {
+    values.a_copy = { dtype: "f32", shape: [...shape] };
+    nodes.push({ op: "neg", ins: ["a"], outs: ["a_copy"], attrs: {} });
+  }
+  return {
+    format: "karume-ir",
+    version: 1,
+    requires: { ops: [...new Set(nodes.map((node) => node.op))] },
+    symbols: [],
+    inputs,
+    outputs: [
+      ...(options.geluOutput ? ["a"] : []),
+      "y",
+      ...(options.extraConsumer ? ["a_copy"] : []),
+    ],
+    initializers: {},
+    values,
+    nodes,
+  };
+};
+
+const geluTanhMulInputs = (
+  options: GeluTanhMulOptions = {},
+): Readonly<Record<string, readonly number[]>> => ({
+  g: [4, 8],
+  ...(options.gateWithGeluInput ? {} : { u: options.broadcast ? [1, 8] : [4, 8] }),
+});
+
+Deno.test("geluTanhMul は gelu_tanh→mul の両順を掴み、bind 面を [g, u] に固定する", () => {
+  for (const order of ["gelu-u", "u-gelu"] as const) {
+    const plan = fuse(geluTanhMulGraph({ order }), geluTanhMulInputs());
+    assertEquals(outline(plan.steps), ["fused:geluTanhMul"], order);
+    const step = fusedAt(plan, 0);
+    // 外部入力の延べ列は g（gelu_tanh）→ u（mul）の**元のノード順**。mul の入力順は WGSL 側の
+    // 積の綴りが持つので、ここは順序変種で動かない。
+    assertEquals(step.ins, ["g", "u"], `${order}: 延べ列`);
+    assertEquals(step.binds, ["g", "u"], `${order}: bind 順`);
+    assertEquals(step.nodeCount, 2, order);
+    assertEquals(step.outputName, "y", order);
+    assertEquals(step.dispatches[0].key, geluTanhMulKey(order), order);
+    assertEquals(plan.counts.geluTanhMul, 1, order);
+  }
+});
+
+Deno.test(
+  "geluTanhMul の反例（別名 / 内部 output / 別 consumer / broadcast / erf 型 gelu / 自己ゲート）は素の列へ落ちる",
+  () => {
+    const cases: readonly (readonly [string, GeluTanhMulOptions])[] = [
+      ["interposed alias", { interpose: true }],
+      ["internal output", { geluOutput: true }],
+      ["extra consumer", { extraConsumer: true }],
+      ["broadcast mul", { broadcast: true }],
+      ["erf 型 gelu", { erf: true }],
+      ["mul(a,g)", { gateWithGeluInput: true }],
+    ];
+    for (const [label, options] of cases) {
+      const plan = fuse(geluTanhMulGraph(options), geluTanhMulInputs(options));
+      assertEquals(plan.counts.geluTanhMul, 0, `${label}: 融合カウンタ`);
+      assertEquals(
+        plan.steps.every((step) => step.kind === "node"),
+        true,
+        `${label}: ${outline(plan.steps).join(",")}`,
+      );
+    }
+  },
+);
 
 // ---------------------------------------------------------- upsample2x
 
@@ -770,6 +892,7 @@ Deno.test("カウンタは融合が並んだグラフでルール別に積み上
   assertEquals(outline(plan.steps), ["fused:rope", "fused:silu"]);
   assertEquals(plan.counts, {
     silu: 1,
+    geluTanhMul: 0,
     upsample2x: 0,
     rope: 1,
     adaln: 0,

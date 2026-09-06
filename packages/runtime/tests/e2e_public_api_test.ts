@@ -108,6 +108,7 @@ Deno.test({
       // このグラフ（matmul / add / sum）はどのルールにも掛からない = 全カウンタ 0。
       assertEquals(fusions, {
         silu: 0,
+        geluTanhMul: 0,
         upsample2x: 0,
         rope: 0,
         adaln: 0,

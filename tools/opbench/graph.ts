@@ -96,6 +96,8 @@ const KEY_TO_OP: Readonly<Record<string, string>> = {
   // silu ルールは x·sigmoid(x) の 2 ノードを 1 カーネルに畳む（census 側に silu の op は無い）。
   silu: "fused",
   silu_mul: "fused",
+  // geluTanhMul ルールは gelu_tanh + mul の 2 ノードを 1 カーネルに畳む（census では fused_by）。
+  gelu_tanh_mul: "fused",
   upsample2x: "fused",
 };
 
