@@ -80,10 +80,10 @@ export const createFetchContext = (
     session: session.label,
     available,
     originOf,
-    sizeViolation: (ref) => (actual, where, integrity) => {
+    sizeViolation: (ref) => (actual, integrity) => {
       const origin = originOf(ref);
       return new IntegrityError(
-        `${ref.path}: ${where} が manifest の size と食い違う` +
+        `${ref.path}: バイト数が manifest の size と食い違う` +
           `（期待 ${ref.size} / 実際 ${actual} — ${origin.label}）`,
         {
           ...identityOf(origin),
@@ -126,10 +126,10 @@ export const revisionResolutionFailure = (
   );
 
 /** `karume.json` が上限バイト数を超えた。 */
-export const manifestOversize = (origin: SourceOrigin): SizeViolation => (actual, where) =>
+export const manifestOversize = (origin: SourceOrigin): SizeViolation => (actual) =>
   new ManifestFormatError(
     `manifest: ${MANIFEST_FILENAME} が上限 ${MAX_MANIFEST_BYTES} バイトを超えた` +
-      `（${where} = ${actual} — ${origin.label}）`,
+      `（${actual} バイト — ${origin.label}）`,
   );
 
 /** `karume.json` そのものの取得に失敗した。 */

@@ -6,7 +6,6 @@ import {
   clearHubCache,
   fetchAssets,
   HubFetchError,
-  IntegrityError,
   type LoadedManifest,
   loadManifest,
   ManifestFormatError,
@@ -721,7 +720,7 @@ Deno.test("fetchAssets: content-length は正しいのに body が足りない�
   const path = "text_conditioner/model.safetensors";
   const full = payloadFor(path);
   const short = full.slice(0, full.byteLength - 2);
-  // content-length は manifest の size を主張しつつ、body だけ短く流す（受信バイトの門は
+  // content-length は manifest の size を主張しつつ、body だけ短く流す（取得層の上限は
   // 超過しか見ないので、ここを止めるのは取得層の検証だけ）。
   const { mock, loaded } = await load({
     files: serveAll(new Map([[path, short]])),
@@ -856,55 +855,7 @@ Deno.test("fetchAssets: sha256 の食い違いは fail loudly（真実源が壊�
   assertEquals(hasEntry(hubCache(caches), corrupt), false, "不一致のバイト列を格納している");
 });
 
-Deno.test("fetchAssets: content-length が size と食い違えば受信前に止める", async () => {
-  const caches = new MemoryCacheStorage();
-  const path = "tokenizer/qwen2-tokenizer.json";
-  const { mock, loaded } = await load({
-    files: serveAll(),
-    contentLength: (target) => target === path ? payloadFor(path).byteLength + 1 : undefined,
-  }, caches);
-  const error = await assertRejects(
-    () => fetchAssets(loaded, resolveFiles(loaded.manifest), { fetch: mock.fetch, caches }),
-    IntegrityError,
-  );
-  assertEquals(error.path, path);
-  assertEquals(error.actual, String(payloadFor(path).byteLength + 1));
-  assert(error.message.includes("content-length"));
-});
-
-Deno.test("fetchAssets: ミラー URL の表記が正規化を跨いでも size の門は生きている", async (t) => {
-  // 予算表のキーは hubUrl をそのまま載せた `hfResolveUrl` の出力だが、下層が `fetch` へ渡すのは
-  // 正規化済みの文字列。門が外れると「全量受信してから落ちる」どころか、size の食い違いが
-  // content-length にしか出ない形は**沈黙で通ってしまう**。
-  const path = "tokenizer/qwen2-tokenizer.json";
-  const mirrors: readonly (readonly [string, string])[] = [
-    ["既定ポートの明記", `${HUB_URL}:443`],
-    ["大文字ホスト", "https://HUB.test"],
-  ];
-
-  for (const [label, hubUrl] of mirrors) {
-    await t.step(label, async () => {
-      const caches = new MemoryCacheStorage();
-      const mock = createMockFetch({
-        files: serveAll(),
-        contentLength: (target) => target === path ? payloadFor(path).byteLength + 1 : undefined,
-      });
-      const loaded = await loadManifest({ repo: REPO, hubUrl, revision: SHA }, {
-        fetch: mock.fetch,
-        caches,
-      });
-
-      const error = await assertRejects(
-        () => fetchAssets(loaded, resolveFiles(loaded.manifest), { fetch: mock.fetch, caches }),
-        IntegrityError,
-      );
-      assertEquals(error.path, path);
-      assert(error.message.includes("content-length"), `${error.message} が門の由来を示していない`);
-    });
-  }
-});
-
-Deno.test("fetchAssets: 受信バイトが size を超えた時点で abort する", async () => {
+Deno.test("fetchAssets: 受信バイトが size を超えれば取得層の上限で fail loudly（キャッシュに残さない）", async () => {
   const caches = new MemoryCacheStorage();
   const path = "text_encoder/model.safetensors";
   const declared = payloadFor(path).byteLength;
@@ -916,11 +867,17 @@ Deno.test("fetchAssets: 受信バイトが size を超えた時点で abort す�
   }, caches);
   const error = await assertRejects(
     () => fetchAssets(loaded, resolveFiles(loaded.manifest), { fetch: mock.fetch, caches }),
-    IntegrityError,
+    HubFetchError,
   );
   assertEquals(error.path, path);
-  assertEquals(error.expected, String(declared));
-  assert(Number(error.actual) > declared);
+  assert(error.cause instanceof Error, "取得層のエラーを cause に残す");
+  // 文言は取得層 ADR 0011 が定めている（`受信が申告 N バイトを超えた`）。sha256 不一致ではなく
+  // **受信の上限**で落ちたことを、この 1 語で見分ける。
+  assert(
+    error.cause.message.includes("超えた"),
+    `${error.cause.message} が受信上限での打ち切りを示していない`,
+  );
+  assertEquals(hasEntry(hubCache(caches), bloated), false, "上限を超えたバイト列を格納している");
 });
 
 Deno.test("fetchAssets: AbortSignal は全取得へ透過する", async () => {

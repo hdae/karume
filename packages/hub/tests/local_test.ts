@@ -267,9 +267,7 @@ const fakeRemote = (
         // 取得元は自分の失敗元（`origin.integrity`）を名乗って共通層へ返す — 組み立てるのは
         // 共通層（`context.ts`）。
         if (shortBy !== undefined) {
-          return Promise.reject(
-            sizeViolation(bytes.byteLength - shortBy, "body", origin.integrity),
-          );
+          return Promise.reject(sizeViolation(bytes.byteLength - shortBy, origin.integrity));
         }
         return Promise.resolve(new Uint8Array(bytes));
       },

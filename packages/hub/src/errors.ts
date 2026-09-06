@@ -5,7 +5,9 @@
  * - {@link ManifestFormatError} — JSON / 構造 / 規模（manifest が形として壊れている）
  * - {@link ManifestReferenceError} — 参照と語彙（defaultModel / defaultQuant・weights 写像・未知キー）
  * - {@link ManifestPathError} — path 許可リスト違反（SHA ピン外への traversal 防波堤）
- * - {@link IntegrityError} — 取得物が 3 点セットと食い違う（size / sha256 / content-length）
+ * - {@link IntegrityError} — ローカル取得元が読んだ実体のバイト数が manifest の `size` と
+ *   食い違う（HF 取得元の size / sha256 不一致は取得層が検出し、{@link HubFetchError} の
+ *   `cause` に載る）
  * - {@link HubFetchError} — 取得層由来（404・認証・revision 解決失敗）の文脈付き透過
  *
  * MUST: 全エラーに**利用可能な model / quant / dtype ラベル一覧**（{@link AvailableLabels}）を
@@ -109,8 +111,9 @@ type IntegrityErrorOptions = HubErrorOptions & {
 /**
  * 取得物が manifest の 3 点セットと食い違った（ADR 0038 §5）。
  *
- * NOTE: キャッシュ読出し側の不一致は取得層が self-heal（evict → 取り直し・1 往復まで）に
- * 使うため通常は外へ出ない。外へ出るのは network 取得物の不一致（`source: "network"`）が主。
+ * NOTE: 外へ出るのはローカル取得元が読んだ実体の不一致（`source: "local"`）。HF 取得元の
+ * 不一致はキャッシュ読出し側なら取得層が self-heal（evict → 取り直し・1 往復まで）に使い、
+ * network 取得物なら取得層の検証失敗として {@link HubFetchError} の `cause` に載る。
  */
 export class IntegrityError extends HubError {
   /** 取得元が repo という概念を持つ場合のみ（HF）。ローカル取得元では**名乗らない**。 */

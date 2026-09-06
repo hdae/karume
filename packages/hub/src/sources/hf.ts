@@ -10,8 +10,8 @@
  *   まま読める。manifest だけは事前の期待 sha が無いので SHA 固定 resolve URL がキー。
  * - **資産の完全性検証**（spec の `sha256` / `expectedBytes` を取得層へ委ねる）。取得時に検証して
  *   記録ハッシュをエントリへ焼き、以後のヒットは記録との文字列比較だけで済ませる（全量ハッシュ
- *   0 回）。記録が食い違うエントリは自動で evict → 取り直し（self-heal）。
- * - 受信バイトの門（`transport.ts` の予算付き `fetch`）— content-length と実受信の両方を見る。
+ *   0 回）。記録が食い違うエントリは自動で evict → 取り直し（self-heal）。受信バイトの上限も
+ *   同じ `expectedBytes` が兼ねる — 宣言を超えた時点で取得層が受信を打ち切る（取得層 ADR 0011）。
  * - 相 1（streaming prefetch）— **RAM に載せずに永続キャッシュへ落とす** HTTP 固有の最適化。
  * - キャッシュ在庫の照会と削除（`source.ts` ⑥⑦）— 溜めているのがこの取得元なので、
  *   「何が手元にあるか」「これを消せるか」に答えられるのもここだけ。
@@ -21,23 +21,15 @@
  */
 
 import { evict as evictKey, listKeys } from "@hdae/fetch-cache";
-import {
-  fetchHfFile,
-  hfResolveUrl,
-  isCommitSha,
-  prefetchHfFile,
-  resolveHfRevision,
-} from "@hdae/fetch-cache/hf";
-import { type FileRef, fileRefKey, MANIFEST_FILENAME, MAX_MANIFEST_BYTES } from "../manifest.ts";
+import { fetchHfFile, isCommitSha, prefetchHfFile, resolveHfRevision } from "@hdae/fetch-cache/hf";
+import { type FileRef, fileRefKey, MANIFEST_FILENAME } from "../manifest.ts";
 import type { HubRepoRef, LoadManifestOptions } from "../session.ts";
 import {
   DistributionSource,
   type PinnedSource,
-  type SizeViolation,
   type SourceDriver,
   type SourceOrigin,
 } from "../source.ts";
-import { type ByteBudget, createGuardedFetch } from "../transport.ts";
 
 /** HF 上の 1 つの座標（世代は解決済み）。`hubUrl` は**ホストの選択**なので越境先にも効かせる。 */
 type HfTarget = { readonly repo: string; readonly revision: string; readonly hubUrl?: string };
@@ -68,20 +60,6 @@ const warnImplicitMain = (repo: string, revisionSha: string): void => {
       `  ② @karume/models の *_SOURCES（公開配布リポの対応表 — パッケージ検証済みの pin）を使う`,
   );
 };
-
-/** URL 1 本ぶんのバイト門を被せた `fetch`。予算の無い URL（revision 解決 API 等）は素通しする。 */
-const guardedFetchFor = (
-  base: typeof globalThis.fetch,
-  url: string,
-  budget: ByteBudget,
-): typeof globalThis.fetch => createGuardedFetch(base, new Map([[url, budget]]));
-
-/** 資産 1 本の予算: バイト数は manifest の宣言と**厳密一致**でなければならない。 */
-const exactBudget = (size: number, violation: ByteBudget["violation"]): ByteBudget => ({
-  maxBytes: size,
-  exact: true,
-  violation,
-});
 
 /**
  * 資産 1 本のキャッシュキー（取得層 HF 層の**内容キー**）。hub は `kind` を渡さないので
@@ -119,16 +97,13 @@ const pinnedHfSource = (
     repo,
     revisionSha: generation,
   };
-  // 取得層のバイト門は「どこで、いくつだったか」しか知らないので、**この取得元の失敗元**を
-  // ここで束ねてから渡す（越境参照はセッションと違う取得元から来る — `source.ts` の MUST）。
-  const violationOf = (sizeViolation: SizeViolation): ByteBudget["violation"] => (actual, where) =>
-    sizeViolation(actual, where, origin.integrity);
-
   return {
     origin,
 
-    readManifest: async ({ parse, signal, sizeViolation }) => {
-      const url = hfResolveUrl({ ...target, path: MANIFEST_FILENAME });
+    readManifest: async ({ parse, signal }) => {
+      // manifest は正本の根なので**事前の期待 sha256 も期待バイト数も持てない**。取得層に
+      // 「厳密一致なしの上限」は無いので、1 MiB の上限は `parse`（`parseManifest`）が全量を
+      // 受け取ってから見る（受信を途中で止める門はここには無い）。
       // MUST: UTF-8 decode と parse は取得層の `validate` フックの中で行う — 取得の外でやると
       // 破損したキャッシュエントリが evict されず、`clearHubCache` を手で叩くまで毎回同じ
       // ManifestFormatError を返し続ける（資産側と同じ self-heal 経路に揃える）。
@@ -136,30 +111,23 @@ const pinnedHfSource = (
       // 健全なキャッシュエントリの evict と取り直しを招く。
       await fetchHfFile(target, { path: MANIFEST_FILENAME, validate: parse }, {
         init: requestInit(options.headers, signal),
-        // manifest は正本の根なので**事前の期待 sha256 を持てない**。上限だけを課す
-        // （`exact: false` — 実際のバイト数は manifest ごとに違う）。
-        fetch: guardedFetchFor(baseFetch, url, {
-          maxBytes: MAX_MANIFEST_BYTES,
-          exact: false,
-          violation: violationOf(sizeViolation),
-        }),
+        fetch: baseFetch,
         ...shared,
         ...(options.onCacheError === undefined ? {} : { onCacheError: options.onCacheError }),
         ...(options.onRetry === undefined ? {} : { onRetry: options.onRetry }),
       });
     },
 
-    readFile: async (ref, { signal, onProgress, sizeViolation, into }) => {
-      const url = hfResolveUrl({ ...target, path: ref.path });
+    readFile: async (ref, { signal, onProgress, into }) => {
       return await fetchHfFile(
         target,
         {
           path: ref.path,
           // 検証は取得層が持つ（受信中のハッシュ / 記録ハッシュの突合 / 不一致の self-heal）。
           sha256: ref.sha256,
-          // バイト数の門であり、同時に受信バッファの前確保サイズでもある。確保自体が失敗する
-          // 大きさ（Chromium の単一 ArrayBuffer 上限超え）なら受信前に throw されるので、
-          // 数 GB を撃ち終わってから落ちることがない。
+          // バイト数の門（受信の上限 + 全量受信後の厳密一致）であり、同時に受信バッファの
+          // 前確保サイズでもある。確保自体が失敗する大きさ（Chromium の単一 ArrayBuffer 上限
+          // 超え）なら受信前に throw されるので、数 GB を撃ち終わってから落ちることがない。
           expectedBytes: ref.size,
           // 逐次面の器（最大 shard 長 1 本）があれば取得層にそこへ書かせる — 受信もキャッシュ
           // 読出しも器の先頭へ入り、shard 毎のバッファ確保が消える（取得層 `into`・ADR 0070 追記）。
@@ -168,9 +136,9 @@ const pinnedHfSource = (
         },
         {
           init: requestInit(options.headers, signal),
-          fetch: guardedFetchFor(baseFetch, url, exactBudget(ref.size, violationOf(sizeViolation))),
+          fetch: baseFetch,
           // network 側だけ発火する（キャッシュヒットは complete の 1 点だけで進む）。
-          // `loaded` が `size` を超えないことは受信バイトの門（transport.ts）が保証する。
+          // `loaded` が `size` を超えないことは取得層の受信上限（`expectedBytes`）が保証する。
           onProgress: (progress) => onProgress(progress.loaded),
           ...shared,
           ...(options.onCacheError === undefined ? {} : { onCacheError: options.onCacheError }),
@@ -183,17 +151,15 @@ const pinnedHfSource = (
     // （取得層 0.5.0）— 記録が期待 sha256 と一致すれば network に出ずそのまま温存し、記録が
     // 無い / 食い違うエントリは検証付きで温め直す。`caches` 不在・put 失敗は fail loud
     // （素 fetch へ縮退する余地が無い — 縮退させると RAM ピークの目標が壊れる）。
-    prefetchFile: async (ref, { signal, onProgress, sizeViolation }) => {
-      const url = hfResolveUrl({ ...target, path: ref.path });
-      // `expectedBytes` は現行の取得層（0.6.0）の相 1 では無視される。それでも申告するのは
-      // 0.7.0 の HF 層がこれを**受信の上限**として使うため（取得層 ADR 0011）— 申告が先に
-      // 入っていれば、hub 側の受信バイトの門（`transport.ts`）を後で撤去しても上限が消えない。
+    prefetchFile: async (ref, { signal, onProgress }) => {
+      // 相 1 でも `expectedBytes` は**受信の上限**として効く（取得層 ADR 0011）— 宣言を超えた
+      // 時点で打ち切るので、バイト列を手元に持たないこの面でも上限が抜けない。
       await prefetchHfFile(
         target,
         { path: ref.path, sha256: ref.sha256, expectedBytes: ref.size },
         {
           init: requestInit(options.headers, signal),
-          fetch: guardedFetchFor(baseFetch, url, exactBudget(ref.size, violationOf(sizeViolation))),
+          fetch: baseFetch,
           onProgress: (progress) => onProgress(progress.loaded),
           ...shared,
           ...(options.onRetry === undefined ? {} : { onRetry: options.onRetry }),

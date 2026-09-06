@@ -49,13 +49,10 @@ export type SourceOrigin = {
   readonly revisionSha?: string;
 };
 
-/** バイト数の門を破ったと気づいた場所（診断の文言に載る）。 */
-export type SizeViolationSite = "content-length" | "body";
-
 /**
  * バイト数が宣言と食い違ったときに投げるエラーの組み立て。**取得元は組み立てない** —
  * 診断の文脈（取得元の名乗り・利用可能ラベル）を持つのは共通層なので、取得元は
- * 「どこで、いくつだったか」と**自分の失敗元**（{@link SourceOrigin.integrity}）だけを渡す
+ * 「いくつだったか」と**自分の失敗元**（{@link SourceOrigin.integrity}）だけを渡す
  * （組み立て点は `context.ts` の 1 箇所）。
  *
  * MUST: `integrity` は呼ぶ取得元自身のもの（`origin.integrity` — 定数を書かない）。越境参照は
@@ -63,11 +60,7 @@ export type SizeViolationSite = "content-length" | "body";
  * 宣言から失敗元を推定できない — 推定すると「network から来たバイト列が `"local"`（＝再試行は
  * 無駄）を名乗る」形の嘘が 1 欄だけ混じる。
  */
-export type SizeViolation = (
-  actual: number,
-  where: SizeViolationSite,
-  integrity: IntegritySource,
-) => Error;
+export type SizeViolation = (actual: number, integrity: IntegritySource) => Error;
 
 /** 資産 1 本の読み（{@link PinnedSource.readFile} / {@link PinnedSource.prefetchFile}）の作法。 */
 export type FileReadOptions = {
