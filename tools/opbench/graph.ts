@@ -268,6 +268,8 @@ export type DriveOptions = {
   readonly quant?: string;
   /** gemma4: 生成 token 数（decode run の本数 − 1 に近い — 最後の run の診断は届かない）。 */
   readonly newTokens?: number;
+  /** gemma4: このターンが確保する KV 容量（省略時は配布形の既定）— 長い prompt の内訳を採るときに要る。 */
+  readonly capacity?: number;
   /** anima: step 数（sigma の linspace のため 2 以上）と正方の辺。 */
   readonly steps?: number;
   readonly size?: number;
@@ -308,7 +310,10 @@ export const driveOnce = async (options: DriveOptions): Promise<DriveResult> => 
       const started = performance.now();
       await pipeline.chat(
         [{ role: "user", content: options.prompt ?? "Explain WebGPU in one sentence." }],
-        { maxNewTokens: options.newTokens ?? 8 },
+        {
+          maxNewTokens: options.newTokens ?? 8,
+          ...(options.capacity === undefined ? {} : { capacity: options.capacity }),
+        },
       ).text();
       return { records, wall_ms: performance.now() - started, load_ms: loadMs };
     } finally {

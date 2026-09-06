@@ -98,6 +98,7 @@ const GRAPH_OPTIONS: ReadonlySet<string> = new Set([
   "model",
   "quant",
   "new-tokens",
+  "capacity",
   "steps",
   "size",
   "prompt",
@@ -252,7 +253,7 @@ const USAGE = `使い方: deno run -A tools/opbench/main.ts <census|single> …
     --runs <prefix>      突合に使う run の label 接頭辞（既定 gemma4 = decode / anima = transformer / siglip2 = vision / irodori = dit）
     --single <dir>       single の出力（op 別の single / graph 比を出す）
     --model / --quant    配布形の選択（既定 = manifest）
-    --new-tokens <n>     gemma4 の生成 token 数（既定 8）/ --steps <n> --size <px> anima の step と辺（既定 2 / 1024・step は 2 以上）
+    --new-tokens <n>     gemma4 の生成 token 数（既定 8）/ --capacity <n> gemma4 の KV 容量（既定 = 配布形）/ --steps <n> --size <px> anima の step と辺（既定 2 / 1024・step は 2 以上）
     --prompt <text>      gemma4 / anima の入力文（既定あり）
     --text <text>        irodori の発話文（既定あり）
     --seconds <n>        irodori の発話長（秒・小数可・省略時は duration グラフが決める）
@@ -427,6 +428,7 @@ const runGraph = async (args: ReadonlyMap<string, readonly string[]>): Promise<v
   const runsPrefix = single(args, "runs") ?? defaultRunsPrefix(family);
   const singleDir = single(args, "single");
   const newTokens = single(args, "new-tokens");
+  const capacity = single(args, "capacity");
   const steps = single(args, "steps");
   const size = single(args, "size");
   const seconds = single(args, "seconds");
@@ -441,6 +443,7 @@ const runGraph = async (args: ReadonlyMap<string, readonly string[]>): Promise<v
       ...(single(args, "model") === undefined ? {} : { model: single(args, "model") }),
       ...(single(args, "quant") === undefined ? {} : { quant: single(args, "quant") }),
       ...(newTokens === undefined ? {} : { newTokens: positiveInteger(newTokens, "--new-tokens") }),
+      ...(capacity === undefined ? {} : { capacity: positiveInteger(capacity, "--capacity") }),
       ...(steps === undefined ? {} : { steps: positiveInteger(steps, "--steps") }),
       ...(size === undefined ? {} : { size: positiveInteger(size, "--size") }),
       ...(single(args, "prompt") === undefined ? {} : { prompt: single(args, "prompt") }),
