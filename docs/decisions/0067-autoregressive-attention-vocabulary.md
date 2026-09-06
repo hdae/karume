@@ -241,3 +241,35 @@ KV 長が 1 スレッドの逐次長にしか効かない — P=16K で attentio
 - **prefill 側**: 律速が traffic（K 行を M 行ぶん読み直す）なので D レーン分割は効かない。M でバケット
   する幾何表（M=1: D レーン / M ≥ 16: K タイル共有）が「同じ族・同じ席」で両方を持つ形で、後者は
   perf-ledger K-13 の設計。
+
+## 追記（2026-09-06）— 幾何表: prefill 計画（M ≥ 16）は GEMM 骨格のタイル経路 ①ₜ / ③ₜ（perf-ledger K-13）
+
+決定 4 の ①QK / ③PV は 1 invocation = 1 要素で、prefill 計画（M = chunk 行数 768）では K / V 行を M 行
+ぶん読み直す traffic 律速だった（14.7K token の chunk 1 本で attention が GPU の 79% —
+[research 2026-09-06](../research/2026-09-06-state-attention-tiled-k13.md)）。融合 attention（ADR 0023 系）
+が持つ GEMM 骨格（共有タイル・レジスタブロック・M バケット幾何・K タイル 16 昇順 — ADR 0022 決定 3）に
+states 用の断片を差した ①ₜ / ③ₜ を足し、**M ≥ 16 の計画で席に依らず選ぶ**。
+
+- **契約（ビット同一）**: ①ₜ は A = q·scale / B = k·scale を共有タイルに置き骨格が d 昇順に
+  `acc = acc + a * b` を回す = ① の 1 項の式（半スケールを双方に）と加算順に一致。③ₜ は A = P
+  （S と行統計から充填時に `exp(S − m)·inv`・非実体化）/ B = V を col 昇順に回す = ③ と一致。
+  境界は実効 live で切り（`dims.n` / `dims.k` は col_cap の静的上界）、S は live 範囲を述語で
+  −inf / 値に埋めて `[live, col_cap)` と pad 行は書かない（① と同じ残骸）、O は full-write で pad 行は
+  `select` の厳密 +0.0（③ と同じ — V に非有限が混ざっても NaN 化しない）。有効行を含まない行タイルは
+  K ループ 0 周（仕事量 ∝ Q — ADR 0066 決定 3）。門 = S / O 全語の u32 一致（17 / 19 ケース・述語外 −inf・
+  残骸・pad 行込み）+ 故障注入 + gemma4 golden 厳密一致。
+- **幾何表**（この波の帰結 — GEMM の `gemmGeometryForRows` と同じ「M で選ぶ」型）:
+
+  | 計画の M        | ①QK                  | ③PV                  | 数値                                 |
+  | --------------- | -------------------- | -------------------- | ------------------------------------ |
+  | 1（decode）     | ①′（席 parallel）/ ① | ③′（席 parallel）/ ③ | 席で選ぶ（並列縮約は A/B 帯門）      |
+  | 2〜15           | ①                    | ③′（席 parallel）/ ③ | 同上                                 |
+  | ≥ 16（prefill） | ①ₜ                   | ③ₜ                   | 参照経路とビット同一（席に依らない） |
+
+  ③′（追記 2026-09-03）の適用は M < 16 へ狭まる（prefill での ③′ の利得は誤差内だった）。適用条件は
+  純関数（`stateQkTiledEligible` / `statePvTiledEligible` = `chunkRows >= 16`）で、計画時の静的値だけで決まる。
+- **実測**（同 research）: prefill 20 chunk の GPU 35.2 / 40.9 → 10.3 / 11.0 s（①QK ×13・③PV ×11〜12）・
+  P=16K の prefill 壁 53.6 / 56.8 → 19.5 / 20.6 s（−64%）・decode 不変・token 列一致。残る prefill の GPU は
+  linear が 72%。
+- why-not（online softmax）: S の実体化を消す価値は別軸で、今の律速は traffic だった。①ₜ / ③ₜ の断片は
+  online 形の段の中身として流用できる（追記 2026-09-03 の why-not と同じ筋）。

@@ -35,8 +35,11 @@
   単体 ×5.0・decode GPU −21〜24% — [research](../docs/research/2026-09-06-gemv-i8-k16.md)・ADR 0082 追記 4）。
   **K-14（①QK の D 並列縮約 ①′）も済**（`cce129d` + M=1 門 `4182b8b` — decode 壁 P=16K −9〜15%・prefill は
   逆行するため ① のまま — [research](../docs/research/2026-09-06-state-qk-parallel-k14.md)）。席は K-12 と同じ
-  `stateAttentionReduce` 1 つで、①′ は M=1 の計画だけ。**次 = K-13**（prefill の K タイル共有 — M でバケットする
-  幾何表の 2 行目・[backlog](../docs/backlog.md) now 1）。
+  `stateAttentionReduce` 1 つで、①′ は M=1 の計画だけ。**K-13 も済**（`ad8a4b9` ①ₜ + `39d5e4e` ③ₜ — prefill 計画
+  M ≥ 16 は GEMM 骨格のタイル経路で ①/③ とビット同一・P=16K の prefill 壁 −64% —
+  [research](../docs/research/2026-09-06-state-attention-tiled-k13.md)）。幾何表 = M=1 → ①′ / ③′（席）・M ≥ 16 → ①ₜ / ③ₜ
+  （既定）。**次は未起票**（候補: prefill の linear 72%・decode の linear_gemv 57%〈split-K は席が要る〉・anima の
+  attention 27% + VAE 29%・siglip2 の分解 attention）。
 - **BiRefNet 2048² 工事 A / B / C は消化（2026-09-05）** — ADR
   [0093](../docs/decisions/0093-transient-liveness-packing.md) を runtime へ結線（B + C）し、recipe の
   パッチ ⑨（A）で decoder 末尾の巨大中間を消した。実測: 1024² 中間 6,283 → 749 MiB / 2048² 中間
