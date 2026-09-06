@@ -244,6 +244,16 @@ const GELU_TANH_LINEAR_MUL = "gelu_tanh,linear,mul";
 /** RoPE の 7 ノード窓（`mul` 先行形と、後置形 = 実際のノード順が違う 2 綴り）。 */
 const ROPE_DIRECT_FIRST = "mul,slice,slice,neg,cat,mul,add";
 const ROPE_DIRECT_LAST = "slice,slice,neg,cat,mul,mul,add";
+/**
+ * RoPE 窓から**末尾 2 ノードを抜いた残り**。gatedResidual が rope の取りこぼしの末尾
+ * （`mul(x, sin) → add(direct, ·)`）だけを畳むと、候補側の綴りはここへ縮む。
+ */
+const ROPE_HEAD_ONLY = "slice,slice,neg,cat";
+/** gatedResidual の 2 ノード鎖と、ゲートを作る linear まで含めた窓。 */
+const GATED_RESIDUAL = "mul,add";
+const LINEAR_GATED_RESIDUAL = "linear,mul,add";
+/** rms_norm ベース adaLN の変調（`mul(t, 1+scale) → add(·, shift)` — 受理集合の外）。 */
+const ADALN_MODULATION = "add,mul,add";
 /** adaLN の鎖（窓内 passthrough の reshape を除いた並び）。 */
 const ADALN = "layer_norm,reshape,reshape,add,mul,add";
 const ROW_BLOCK_ATTENTION = "bmm,reshape,add,safe_softmax,expand,reshape,expand,reshape,bmm";
@@ -256,8 +266,23 @@ const ASSET_CASES: readonly AssetCase[] = [
     component: "transformer",
     graph: "anima-turbo-v1.1/transformer",
     binds: { S: 4096 },
-    expected: { [ROPE_DIRECT_LAST]: 56, [ADALN]: 85, [SILU]: 2 },
-    fusedExpected: { [ROPE_DIRECT_LAST]: 0, [ADALN]: 0, [SILU]: 0 },
+    // `mul,add` 225 = rope 56 + adaln 85 + gatedResidual 84 で、現行計画では 1 本も残らない
+    // （op 名列の n-gram はルールの受理集合より広いので、3 ルールの合計とだけ一致する）。
+    // `linear,mul,add` 84 はゲート付き残差だけを切り出した綴り。
+    expected: {
+      [ROPE_DIRECT_LAST]: 56,
+      [ADALN]: 85,
+      [SILU]: 2,
+      [GATED_RESIDUAL]: 225,
+      [LINEAR_GATED_RESIDUAL]: 84,
+    },
+    fusedExpected: {
+      [ROPE_DIRECT_LAST]: 0,
+      [ADALN]: 0,
+      [SILU]: 0,
+      [GATED_RESIDUAL]: 0,
+      [LINEAR_GATED_RESIDUAL]: 0,
+    },
   },
   {
     source: "models/karume-anima",
@@ -286,8 +311,23 @@ const ASSET_CASES: readonly AssetCase[] = [
     binds: { S: 750 },
     // silu 29 = 掴めている 17 + ゲート 12（`mul(v, sigmoid(u))` — 自分自身に掛からないので
     // SILU_RULE の受理集合の外）。op 名列の n-gram はルールの受理集合より広い。
-    expected: { [SILU]: 29, [ROW_BLOCK_ATTENTION]: 12 },
-    fusedExpected: { [SILU]: 12, [ROW_BLOCK_ATTENTION]: 0 },
+    // `mul,add` 72 → 48 の差 24 が gatedResidual（= `linear,mul,add` 24）。**残る
+    // `add,mul,add` 24 は融合の前後で動かない** — rms_norm ベース adaLN の変調は add の
+    // 他入力まで broadcast なので受理集合の外で、その 1 行が「変調形へ広がっていない」印。
+    expected: {
+      [SILU]: 29,
+      [ROW_BLOCK_ATTENTION]: 12,
+      [GATED_RESIDUAL]: 72,
+      [LINEAR_GATED_RESIDUAL]: 24,
+      [ADALN_MODULATION]: 24,
+    },
+    fusedExpected: {
+      [SILU]: 12,
+      [ROW_BLOCK_ATTENTION]: 0,
+      [GATED_RESIDUAL]: 48,
+      [LINEAR_GATED_RESIDUAL]: 0,
+      [ADALN_MODULATION]: 24,
+    },
   },
   {
     source: "models/karume-irodori-v4-small",
@@ -323,16 +363,25 @@ const ASSET_CASES: readonly AssetCase[] = [
     binds: { M: 1, C: 640 },
     // **既知の穴**: 綴りは 50 箇所とも並ぶのに計画は 15 本しか掴まない（機序は未特定 —
     // docs/research/2026-08-30-gemma4-decode-wallclock.md §4）。残る 35 本が候補に出る。
+    // 取りこぼしの**印は綴りごと動いた**: gatedResidual が rope 窓の末尾 2 ノード
+    // （`mul(x, sin[1,1,1,D]) → add(direct, ·)`）を畳むので、7 ノード窓は候補から消え、
+    // 残りが `slice,slice,neg,cat` 35 として出る（先頭の direct `mul` は出力が融合ステップへ
+    // 流れるので鎖の先頭になれず、窓ごと落ちる）。**35 という本数は動いていない**ので、
+    // rope の穴はこの行で引き続き名指しされている。
     // `gelu_tanh,mul` 35 は per-layer 入力ゲート（融合済みなので現行計画では 0）。MLP 側の 35 本は
     // up 射影を挟む `gelu_tanh,linear,mul` で、**受理集合の外なので融合の前後で 35 のまま**残る
     // — 候補表がこの取りこぼしを名指ししていることを、この 2 行が対で固定する。
     expected: {
       [ROPE_DIRECT_FIRST]: 50,
+      [ROPE_HEAD_ONLY]: 50,
+      [GATED_RESIDUAL]: 50,
       [GELU_TANH_MUL]: 35,
       [GELU_TANH_LINEAR_MUL]: 35,
     },
     fusedExpected: {
-      [ROPE_DIRECT_FIRST]: 35,
+      [ROPE_DIRECT_FIRST]: 0,
+      [ROPE_HEAD_ONLY]: 35,
+      [GATED_RESIDUAL]: 0,
       [GELU_TANH_MUL]: 0,
       [GELU_TANH_LINEAR_MUL]: 35,
     },

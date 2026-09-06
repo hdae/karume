@@ -531,7 +531,7 @@ export class RecipeBuilder {
   /**
    * 融合ステップの dispatch 列。
    *
-   * bind 面の既定は「params, 入力…, 出力」（融合 5 ルール共通）で、`operands` を宣言した
+   * bind 面の既定は「params, 入力…, 出力」（融合 6 ルール共通）で、`operands` を宣言した
    * ルールだけがステップ内一時を混ぜた並びを取る。**一時の確保・解放は
    * {@link StepRecipeBuilder} に replay させる**（寿命の導出点を 2 つに増やさない）ので、
    * 計画の簿記は素のノードと同じ 1 本（src/runtime/transient-plan.ts の再生）に閉じたままになる。

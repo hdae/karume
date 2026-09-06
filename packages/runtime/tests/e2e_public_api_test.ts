@@ -111,6 +111,7 @@ Deno.test({
         geluTanhMul: 0,
         upsample2x: 0,
         rope: 0,
+        gatedResidual: 0,
         adaln: 0,
         rowBlockAttention: 0,
         identityExpand: 0,

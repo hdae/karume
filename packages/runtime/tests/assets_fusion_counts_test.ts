@@ -223,16 +223,30 @@ const NONE: FusionCounts = {
   geluTanhMul: 0,
   upsample2x: 0,
   rope: 0,
+  gatedResidual: 0,
   adaln: 0,
   rowBlockAttention: 0,
   identityExpand: 0,
 };
 
+/**
+ * `gatedResidual` は **84** = `mul(gate[1,1,2048], x[1,S,2048]) → add(residual, ·)`。adaln の
+ * **窓 7 の本数とちょうど同じ**なのは偶然ではない: adaln が窓内 passthrough として通す
+ * `reshape` は shift / scale / gate の 3 本で、**gate だけが鎖の外**で消費される（gate 無しの
+ * 窓 6 は末層の 1 鎖だけ = 85 − 84）。その消費先がここで、内訳も
+ * attention 出力側 56（前置は `permute → reshape → linear`）+ MLP 側 28（`linear → gelu →
+ * linear`）で 28 ブロック × 3 本に割れる。
+ *
+ * **adaln 85 は動かない** — adaln の窓は `layer_norm` から始まって自分の `mul` / `add` を
+ * 飲み込むので、gatedResidual が先に掴む余地が無い。仮に adaln が外れても、変調形の
+ * `add(p, shift)` は他入力が `[1,1,2048]` の broadcast なので gatedResidual の受理集合の外。
+ */
 Deno.test({
-  name: "実資産の DiT は run 1 回で adaln 85 / rope 56 / silu 2 を掴む（w8a8 と f16 で同一）",
+  name:
+    "実資産の DiT は run 1 回で adaln 85 / gatedResidual 84 / rope 56 / silu 2 を掴む（w8a8 と f16 で同一）",
   ignore: !ASSETS_AVAILABLE,
   fn: async () => {
-    const expected: FusionCounts = { ...NONE, silu: 2, rope: 56, adaln: 85 };
+    const expected: FusionCounts = { ...NONE, silu: 2, rope: 56, gatedResidual: 84, adaln: 85 };
     for (const quant of ["i8", "f16"] as const) {
       const graph = await readAnimaGraph("transformer", quant);
       // 融合は f32 の計算経路だけを見るので、重みの格納形が変わってもヒット数は動かない。
@@ -281,6 +295,10 @@ Deno.test({
  *
  * `geluTanhMul` も **0**: `gelu_tanh` は 24 本あるが FFN はゲート無し（直後は down 射影の
  * `linear`）で、gemma4 のような `gelu_tanh → mul` の対を 1 つも持たない。
+ *
+ * `gatedResidual` も **0**。RoPE の末尾 `mul(x, sin[1,1,1,D]) → add(direct, ·)` は
+ * gatedResidual の受理集合に入る綴りだが、**48 鎖すべてを rope が先に窓ごと掴む**ので
+ * 残らない（掴めなくなった鎖の本数がそのまま gatedResidual 側へ移る — gemma4 の対照は下）。
  */
 Deno.test({
   name: "実資産の EmbeddingGemma は rope 48（head 幅 256・窓内 passthrough 込み）を掴む",
@@ -344,10 +362,19 @@ if (!MINICPM5_DECODE_AVAILABLE) {
  * だけで、残る 35 本の MLP（`[1,M,6144]` 15 本 + `[1,M,12288]` 20 本）は **gelu_tanh と mul の間に
  * up 射影の `linear` が 1 本挟まる**（`gelu_tanh → linear → mul`）ので隣接 2 ノードの受理集合に
  * 入らない。35 = 全 35 層ぶんで取りこぼしは無く、70 との差は「掴めていない別の形」。
+ *
+ * `gatedResidual` は **M=1 で 35 / M=32 で 0**。これは**上の rope の穴の裏返し**で、
+ * ゲート付き残差ではない: rope の 7 ノード窓の末尾 `mul(x, sin[1,1,1,D]) → add(direct, ·)` は
+ * gatedResidual の綴り（一方だけ行 broadcast・他は同 shape）にそのまま一致するので、rope が
+ * 掴み損ねた 35 鎖の末尾 2 ノードだけがここで畳まれる（15 + 35 = 50 = 全鎖）。値は同じで
+ * dispatch が 2 → 1 に減るだけだが、**rope の穴が塞がればこの 35 は 0 へ戻る**（rope が窓ごと
+ * 先に掴むため）。M=32 で 0 なのは、prefill 形では表が `[1,32,1,256]`（broadcast する軸が
+ * head 軸で、先行軸に 32 が残る）になり、`[1,…,1,dim]` の**行 broadcast** の綴りから外れる
+ * ため。MiniCPM5 が同じ末尾形を 1 本も残さない（rope 48 で全鎖適合）のが対照。
  */
 Deno.test({
   name:
-    "実資産の Gemma 4 E2B decode は M=1 で rope 15 / geluTanhMul 35 を掴む（token-only 形も同一・rope は M=32 で 0）",
+    "実資産の Gemma 4 E2B decode は M=1 で rope 15 / geluTanhMul 35 / gatedResidual 35 を掴む（token-only 形も同一・rope は M=32 で 0）",
   ignore: !GEMMA4_DECODE_AVAILABLE,
   fn: async () => {
     for (
@@ -359,10 +386,11 @@ Deno.test({
       const graph = await readIrGraph(source);
       assertEquals(
         decodeFusionCounts(graph, 1),
-        { ...NONE, rope: 15, geluTanhMul: 35 },
+        { ...NONE, rope: 15, geluTanhMul: 35, gatedResidual: 35 },
         `${name} decode（M=1）`,
       );
-      // prefill 形で残るのは geluTanhMul だけ（rope の 15 本は M=1 の発行形にしか出ない）。
+      // prefill 形で残るのは geluTanhMul だけ（rope の 15 本と、その取りこぼしの裏返しである
+      // gatedResidual の 35 本は、どちらも M=1 の発行形にしか出ない）。
       assertEquals(
         decodeFusionCounts(graph, 32),
         { ...NONE, geluTanhMul: 35 },
@@ -377,9 +405,13 @@ Deno.test({
  * 適合する** — 同じ表引き RoPE でもここまで割れる、という gemma4 側の対照実証でもある
  * （片方だけ動いたら、どちらの発行形が変わったのかがこの対で割れる）。silu 24 は 24 層の
  * gate MLP。
+ *
+ * `gatedResidual` は **0**（M=1 でも）。M=1 の RoPE 末尾はここでも gatedResidual の綴りに
+ * 一致するが、48 鎖すべてを rope が窓ごと先に掴むので 1 本も残らない — gemma4 の 35 との差が
+ * そのまま「rope が掴み損ねた本数」になる。
  */
 Deno.test({
-  name: "実資産の MiniCPM5 decode は rope 48 / silu 24 を掴む（M 非依存）",
+  name: "実資産の MiniCPM5 decode は rope 48 / silu 24 を掴む（M 非依存・gatedResidual は 0）",
   ignore: !MINICPM5_DECODE_AVAILABLE,
   fn: async () => {
     const graph = await readIrGraph(MINICPM5_DECODE_MODEL);
@@ -411,6 +443,12 @@ const irodoriDitShapes = (sequence: number): Readonly<Record<string, readonly nu
  *   `layer_norm` は 1 本も無い。
  * - silu 17: 前段の条件 MLP 5 本 + 12 ブロック × 1 本。残る sigmoid 12 本は
  *   `mul(v, sigmoid(u))` のゲート（自分自身に掛からないので SiLU ではない）。
+ * - **gatedResidual 24**: 12 ブロック × 2 本（attention 側 + MLP 側）の
+ *   `mul(gate[1,1,1280], x[1,S,1280]) → add(residual, ·)`。ゲートは anima の `unsqueeze` と違い
+ *   `tanh` の出力で、行 broadcast の綴りは同じ。**別形の変調 24 本は掴まない** — DiT の
+ *   adaLN は rms_norm ベースの `mul(t, 1+scale[1,1,1280]) → add(·, shift[1,1,1280])` で、
+ *   `add` の他入力まで broadcast なので受理集合の外（adaln も先頭 op が `rms_norm` なので 0）。
+ *   この 24 対 24 の対は「受理集合が変調形へ広がっていないか」の観測点でもある。
  * - **rowBlockAttention 12**: 12 ブロックの分解 attention（`bmm → reshape → add(mask) →
  *   safe_softmax → expand → reshape → expand → reshape → bmm`）を全て掴む。この綴りを出すのは
  *   実資産では DiT だけで、他の 7 パートは `attention` op（ADR 0023）を持つ。
@@ -424,13 +462,14 @@ const irodoriDitShapes = (sequence: number): Readonly<Record<string, readonly nu
  */
 Deno.test({
   name:
-    "実資産の Irodori DiT は run 1 回で rowBlockAttention 12 / silu 17 / identityExpand 24 を掴む（rope / adaln は綴りが違って 0）",
+    "実資産の Irodori DiT は run 1 回で rowBlockAttention 12 / silu 17 / gatedResidual 24 / identityExpand 24 を掴む（rope / adaln は綴りが違って 0）",
   ignore: !IRODORI_AVAILABLE,
   fn: async () => {
     const graph = await readIrodoriGraph("dit");
     const expected: FusionCounts = {
       ...NONE,
       silu: 17,
+      gatedResidual: 24,
       rowBlockAttention: 12,
       identityExpand: 24,
     };
@@ -470,6 +509,9 @@ Deno.test({
       { ...NONE, silu: 8 },
       "speaker",
     );
+    // duration の gatedResidual 3 は DiT と同じゲート付き残差（`tanh` ゲート・`[1,1,1024]`）が
+    // 継続長予測側にも 3 本ある、という記録。DiT の 24 と同じ綴りなので、片方だけ動いたら
+    // エクスポータの発行形が家族の中で割れたということ。
     assertEquals(
       fusionCounts(await readIrodoriGraph("duration"), {
         text_state: [1, 256, 512],
@@ -478,7 +520,7 @@ Deno.test({
         caption_vec: [1, 512],
         has_caption: [1, 1],
       }),
-      { ...NONE, silu: 5 },
+      { ...NONE, silu: 5, gatedResidual: 3 },
       "duration",
     );
     // codec は Snake 活性（`sin` 29 本 — sigmoid ではない）と `conv_transpose1d` 4 本で、

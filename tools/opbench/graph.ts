@@ -98,6 +98,8 @@ const KEY_TO_OP: Readonly<Record<string, string>> = {
   silu_mul: "fused",
   // geluTanhMul ルールは gelu_tanh + mul の 2 ノードを 1 カーネルに畳む（census では fused_by）。
   gelu_tanh_mul: "fused",
+  // gatedResidual ルールは broadcast ゲートの mul + 残差の add を 1 カーネルに畳む。
+  gated_residual: "fused",
   upsample2x: "fused",
 };
 
