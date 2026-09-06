@@ -11,8 +11,10 @@
 
 0.11.0 は**公開完了**（2026-09-06 — lockstep bump `ec60a31` → GitHub Release v0.11.0 → JSR 0.11.0 →
 `deno task smoke:published` 緑。中身は下の消化済み節）。2026-09-04 裁定の作業波 a〜d のうち残るのは
-**c だけ**（a / b は消化・d はクローズ）。次の波は **OP / Fusion 関連**（2026-09-06 ユーザー指示 —
-起票は着手時に [perf-ledger](perf-ledger.md) で行う）。波と独立に消化してよい残件はその下。
+**c だけ**（a / b は消化・d はクローズ）。**OP / Fusion の波（2026-09-06）**: 在庫の融合候補 3 件（P-5 / K-15 / K-7）は実測で閉じた（採否と数値は
+[perf-ledger](perf-ledger.md)・記録は [research 2026-09-06](research/2026-09-06-fusion-spikes-k15-k7.md)）。続きは
+大所 = **gemma4 decode の GEMV 並列度（K-16 → K-14）**（2026-09-06 ユーザー裁定の a 案）で、下の 1 と同席。
+波と独立に消化してよい残件はその下。
 
 1. **c. perf K-13 / K-14**（prefill attention の K/V タイル再利用 / decode ①QK の並列化）:
    起票・合格線・kill 基準とも [perf-ledger](perf-ledger.md) が正本。
@@ -55,10 +57,6 @@
 - **モデルカードのピーク VRAM 列（起票 2026-09-04）**: `karume dist` が TS 側の見積り
   （`estimateSessionMemory` 系）をカード生成時に呼び、quant 表へピーク VRAM 列を出す。現状の
   カードは格納バイトしか出さないので、読み手が自分の GPU で動くかを判断できない。
-- **fusion-hints の窓幅の採り直し**: 既定の窓幅 9 では 9 ノードを超える鎖が切り詰められ、同じ
-  構造が資産ごとに違う op 名列になって横断突合が効かない。`--max-window 10`〜`12` で採り直し、
-  掃引対象に siglip2-base-patch16-224 と karume-irodori-v4.1-small を足す
-  （[research 2026-09-03](research/2026-09-03-op-census-fusion-hints.md) の起票）。
 - **ChatSession の要約型 overflow ポリシー**: `onOverflow` は差し替え可能なのでポリシー実装
   1 本として入る。再検討条件「窓を広げた後」は ADR
   [0091](decisions/0091-gemma4-host-rope-variable-capacity.md)（capacity が実行時ノブ）で成立

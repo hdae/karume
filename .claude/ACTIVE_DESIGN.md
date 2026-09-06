@@ -7,7 +7,7 @@
 > [docs/perf-ledger.md](../docs/perf-ledger.md)。ここは「今この瞬間の文脈」だけを持つ —
 > 履歴・完了記録は ADR / research / git へ。
 >
-> Last updated: 2026-09-06
+> Last updated: 2026-09-06（OP / Fusion 波）
 
 ## Now
 
@@ -26,9 +26,13 @@
   `@hdae/fetch-cache` 0.7.0 側（その ADR 0010 / 0011）。hub は 2026-09-06 に追従済み（依存 `^0.7.0`・
   `LoadManifestOptions.onRetry` の透過・`transport.ts` の撤去 — ADR 0094 決定 4。`karume.json` の
   1 MiB 上限は全量受信後の判定になった — [limitations](../docs/limitations.md)）。
-- **次の作業波 = OP / Fusion 関連**（2026-09-06 ユーザー指示 — 起票は着手時に
-  [perf-ledger](../docs/perf-ledger.md) で）。perf K-13 / K-14（2026-09-04 裁定の c）は
-  [backlog](../docs/backlog.md) now に残る。
+- **OP / Fusion の波（2026-09-06）— 融合候補は実測で閉じ、次は GEMV**: 4 家族の実走ベースライン
+  （[research](../docs/research/2026-09-06-op-fusion-baseline.md)・`opbench graph` は 4 家族対応）の上で
+  K-15（`gelu_tanh`+`mul`）/ K-7（ゲート付き残差）を融合ルールとして実装 → ABBA → **判定線に届かず revert**
+  （壁 −0.4% / 全 GPU −0.6% — [research](../docs/research/2026-09-06-fusion-spikes-k15-k7.md)）。要素ごと op の
+  融合は「中間 1 本の往復ぶん」しか効かず、dispatch 削減は壁に出ない。P-5（`permute` 畳み込み）は
+  実装せず保留。次 = gemma4 decode の linear（GPU の 69%）— **K-16（lm_head i8 を GEMV 族へ・ビット同一）
+  → K-14**（[perf-ledger](../docs/perf-ledger.md)）。perf K-13 は [backlog](../docs/backlog.md) now に残る。
 - **BiRefNet 2048² 工事 A / B / C は消化（2026-09-05）** — ADR
   [0093](../docs/decisions/0093-transient-liveness-packing.md) を runtime へ結線（B + C）し、recipe の
   パッチ ⑨（A）で decoder 末尾の巨大中間を消した。実測: 1024² 中間 6,283 → 749 MiB / 2048² 中間
