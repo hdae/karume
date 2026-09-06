@@ -31,8 +31,10 @@
   K-15（`gelu_tanh`+`mul`）/ K-7（ゲート付き残差）を融合ルールとして実装 → ABBA → **判定線に届かず revert**
   （壁 −0.4% / 全 GPU −0.6% — [research](../docs/research/2026-09-06-fusion-spikes-k15-k7.md)）。要素ごと op の
   融合は「中間 1 本の往復ぶん」しか効かず、dispatch 削減は壁に出ない。P-5（`permute` 畳み込み）は
-  実装せず保留。次 = gemma4 decode の linear（GPU の 69%）— **K-16（lm_head i8 を GEMV 族へ・ビット同一）
-  → K-14**（[perf-ledger](../docs/perf-ledger.md)）。perf K-13 は [backlog](../docs/backlog.md) now に残る。
+  実装せず保留。続く a 案の 1 本目 **K-16（lm_head i8 を GEMV 族へ・ビット同一）は済**（`5ddd186` —
+  単体 ×5.0・decode GPU −21〜24% — [research](../docs/research/2026-09-06-gemv-i8-k16.md)・ADR 0082 追記 4）。
+  **次 = K-14**（decode ①QK の D 逐次の並列化 — 縮約順が変わるので opt-in 席の設計から。
+  [perf-ledger](../docs/perf-ledger.md)）。perf K-13 は [backlog](../docs/backlog.md) now に残る。
 - **BiRefNet 2048² 工事 A / B / C は消化（2026-09-05）** — ADR
   [0093](../docs/decisions/0093-transient-liveness-packing.md) を runtime へ結線（B + C）し、recipe の
   パッチ ⑨（A）で decoder 末尾の巨大中間を消した。実測: 1024² 中間 6,283 → 749 MiB / 2048² 中間

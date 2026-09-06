@@ -13,7 +13,7 @@
 `deno task smoke:published` 緑。中身は下の消化済み節）。2026-09-04 裁定の作業波 a〜d のうち残るのは
 **c だけ**（a / b は消化・d はクローズ）。**OP / Fusion の波（2026-09-06）**: 在庫の融合候補 3 件（P-5 / K-15 / K-7）は実測で閉じた（採否と数値は
 [perf-ledger](perf-ledger.md)・記録は [research 2026-09-06](research/2026-09-06-fusion-spikes-k15-k7.md)）。続きは
-大所 = **gemma4 decode の GEMV 並列度（K-16 → K-14）**（2026-09-06 ユーザー裁定の a 案）で、下の 1 と同席。
+大所 = **gemma4 decode の GEMV 並列度**（2026-09-06 ユーザー裁定の a 案）: K-16 は済（perf-ledger ✅）・次は K-14（下の 1 と同席）。
 波と独立に消化してよい残件はその下。
 
 1. **c. perf K-13 / K-14**（prefill attention の K/V タイル再利用 / decode ①QK の並列化）:
