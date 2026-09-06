@@ -9,6 +9,12 @@
  * 他の選択が在庫として成立している（＝全参照が揃っている）なら、その選択が使うファイルは
  * 消さずに残す。
  *
+ * ただし**対象と参照集合がまったく同じ選択は守る側に数えない**（例: 重みは同じで session の
+ * 計算ノブだけ違う `f16` と `f16-c16`）。キャッシュの粒度では両者を区別できず「片方だけ消す」は
+ * 定義上できないので、守る側に数えると 1 本も消えないのに「守った」と名乗る嘘の答えになる。
+ * どの選択が巻き添えで部分在庫に落ちたかは {@link EvictedAssets.alsoEvicted} が名乗る。
+ * 守る側をアプリが決めたいときは {@link CacheInventoryOptions.protect} で明示する。
+ *
  * MUST: 在庫の問い合わせは**取得元へ委ねる**（`source.ts` ⑥⑦）— キャッシュキーの綴りは取得層の
  * 所有物で、hub が組み立てると取得層の版が上がるたびに「消したつもりで残る」形が生まれる。
  * MUST: 参照の同一性は {@link fileRefKey}（越境参照は別リポの同名 path を別の 1 本として数える）。
@@ -27,6 +33,18 @@ import { type PinnedSource, sourceForRef } from "./source.ts";
 export type CacheInventoryOptions = {
   /** `CacheStorage` の差し替え（テスト用）。無指定は取得層の既定 = `globalThis.caches`。 */
   readonly caches?: CacheStorage;
+  /**
+   * 守る側の選択を明示する（**{@link evictCachedAssets} だけが読む** — 在庫の照会に守る側は
+   * 無い）。無指定なら manifest の全選択が候補（ただし対象と参照集合が同じものは除く）で、
+   * 指定するとこの一覧だけが候補になる。「全参照が在庫にあるものだけが実際に守る」のは
+   * どちらも同じ。
+   *
+   * 指定時は同一集合の除外を**しない** — 兄弟の選択を名指しで守れば `kept: "shared"` になる。
+   * 「同一集合をどう扱うか」の方針をアプリ側に残すための席。対象自身が入っていても無視する
+   * （対象を自分から守ることはできない）。存在しない model / quant は
+   * `ManifestReferenceError`。
+   */
+  readonly protect?: readonly ResolveOptions[];
 };
 
 /** {@link listCachedAssets} の結果。合わせると選択の全参照（`fileRefKey` で一意化済み）になる。 */
@@ -41,8 +59,11 @@ export type CachedAssets = {
 export type KeptAsset = {
   readonly ref: FileRef;
   /**
-   * `"shared"` = 同じ manifest の他の選択（全ファイルが在庫にあるもの）が参照している /
+   * `"shared"` = 守る側の選択（全ファイルが在庫にあるもの）が参照している /
    * `"cross-repo"` = 越境参照で、実体の持ち主は参照先 repo。
+   *
+   * 守る側の候補は既定では「同じ manifest の他の選択のうち、対象と参照集合が同一でないもの」、
+   * {@link CacheInventoryOptions.protect} 指定時はその一覧だけ。
    */
   readonly reason: "shared" | "cross-repo";
   /** `reason` が `"shared"` のとき、守っている選択のラベル `"<model>/<quant>"` の一覧。 */
@@ -55,6 +76,16 @@ export type EvictedAssets = {
   readonly evicted: readonly FileRef[];
   /** 消さなかった参照と理由（`resolveFiles` の順）。 */
   readonly kept: readonly KeptAsset[];
+  /**
+   * この削除で**巻き添えに部分在庫へ落ちた選択**のラベル `"<model>/<quant>"`（manifest の
+   * 宣言順）。対象を除く manifest の全選択のうち、呼び出し前は全参照が在庫にあり、かつ
+   * {@link EvictedAssets.evicted} の 1 本以上を使っていたもの。
+   *
+   * 候補ではなく**実際に消えた参照**で決まる（`evicted` と同じ契約 — 取得元が消したと名乗った
+   * ものだけ）。既定では対象と同一集合の兄弟がここに載り、`protect` 指定時は守らなかった
+   * 全在庫の選択が載る。アプリは「落とし済み」表示をこの一覧ぶん取り下げればよい。
+   */
+  readonly alsoEvicted: readonly string[];
 };
 
 /** (model, quant) の実名 1 組（既定を解決した後の名前）。 */
@@ -95,6 +126,39 @@ const namedSelection = (manifest: Manifest, selection: ResolveOptions): Selectio
     throw new Error(`hub: model '${model}' が resolveFiles 通過後に引けない（不変条件破れ）`);
   }
   return { model, quant: selection.quant ?? manifest.models[model].defaultQuant };
+};
+
+/** 選択 1 つと、その参照列（在庫の突合と守る側の判定で 1 組にして持ち回る）。 */
+type SelectionRefs = { readonly selection: Selection; readonly refs: readonly FileRef[] };
+
+/**
+ * 2 つの参照列が**同じ集合**か（順は問わない）。どちらも {@link uniqueRefs} 済みなので、本数が
+ * 同じで片側が全部含まれていれば集合として等しい。
+ */
+const sameRefSet = (left: readonly FileRef[], right: readonly FileRef[]): boolean => {
+  if (left.length !== right.length) return false;
+  const keys = new Set(left.map(fileRefKey));
+  return right.every((ref) => keys.has(fileRefKey(ref)));
+};
+
+/**
+ * `protect` の一覧を守る側の候補へ正規化する。`resolveFiles` を通してから実名化するので、
+ * 存在しない model / quant はここで `ManifestReferenceError`。重複はラベルで一意化し、対象自身は
+ * 落とす（対象を自分から守ることはできない）。
+ */
+const protectorsOf = (
+  manifest: Manifest,
+  entries: readonly ResolveOptions[],
+  target: Selection,
+): readonly SelectionRefs[] => {
+  const byLabel = new Map<string, SelectionRefs>();
+  for (const entry of entries) {
+    const refs = refsOf(manifest, entry);
+    const selection = namedSelection(manifest, entry);
+    if (selection.model === target.model && selection.quant === target.quant) continue;
+    byLabel.set(labelOf(selection), { selection, refs });
+  }
+  return [...byLabel.values()];
 };
 
 /**
@@ -163,9 +227,15 @@ export const listCachedAssets = async (
 /**
  * 選択 1 つぶんの在庫を消して容量を空ける。**他の選択が壊れない範囲でだけ**消す:
  *
- * - 他の選択（同じ manifest の別 model / 別 quant）が**全参照を在庫に持っている**なら、その
- *   選択が使うファイルは残す（`kept: "shared"`）。部分在庫の選択は守らない — どのみち次に
- *   使うとき残りを取りに行くので、守らせると「消せないのに使えないファイル」だけが残る。
+ * - 守る側の選択が**全参照を在庫に持っている**なら、その選択が使うファイルは残す
+ *   （`kept: "shared"`）。部分在庫の選択は守らない — どのみち次に使うとき残りを取りに行くので、
+ *   守らせると「消せないのに使えないファイル」だけが残る。
+ * - 守る側の候補は既定では「同じ manifest の他の選択」から**対象と参照集合が同一のものを
+ *   除いた**もの。同一集合の選択（重みは同じで session の設定だけ違う quant）はキャッシュの
+ *   粒度で区別できず、守る側に数えると 1 本も消えない。`protect` を渡すとその一覧だけが候補に
+ *   なり、同一集合の除外もしない（守り方の方針をアプリが決める席）。
+ * - 巻き添えで部分在庫に落ちた選択は `alsoEvicted` が名乗る（消えた参照を 1 本以上使っていた、
+ *   呼び出し前は全在庫だった選択）。次のロードで足りない分だけ取り直せば復旧する。
  * - 越境参照は残す（`kept: "cross-repo"`）。実体の持ち主は参照先 repo で、参照元の manifest
  *   から消すのは「他人のリポの在庫を、たまたま参照している側の都合で消す」ことになる。
  *   消したいときは参照先 repo の manifest を開いて消す。
@@ -196,11 +266,18 @@ export const evictCachedAssets = async (
   }
 
   const target = namedSelection(manifest, selection);
-  const others = allSelections(manifest)
+  const others: readonly SelectionRefs[] = allSelections(manifest)
     .filter((other) => other.model !== target.model || other.quant !== target.quant)
     .map((other) => ({ selection: other, refs: refsOf(manifest, other) }));
+  // 守る側の候補。既定で同一集合の選択を外すのは、キャッシュの粒度では対象と区別できず
+  // 「片方だけ消す」が定義上できないため — 守る側に数えると必ず全ファイルが `shared` になり、
+  // 1 本も消えないのに「守った」と名乗る嘘になる。真部分集合・上位集合は従来どおり守る。
+  const protectors = options.protect === undefined
+    ? others.filter((other) => !sameRefSet(other.refs, targets))
+    : protectorsOf(manifest, options.protect, target);
   // 在庫の問い合わせは**全選択の和集合に対して 1 回**（origin ごと）。選択ごとに引くと、
-  // 同じ repo の全列挙を選択の数だけ繰り返すことになる。
+  // 同じ repo の全列挙を選択の数だけ繰り返すことになる。守る側は manifest の選択なので、
+  // その参照はこの和集合に必ず含まれる。
   const stock = await queryInventory(
     source,
     uniqueRefs([...targets, ...others.flatMap(({ refs }) => refs)]),
@@ -208,7 +285,7 @@ export const evictCachedAssets = async (
   const isCached = (ref: FileRef): boolean => stock.has(fileRefKey(ref));
 
   const sharedWith = new Map<string, string[]>();
-  for (const other of others) {
+  for (const other of protectors) {
     if (!other.refs.every(isCached)) continue;
     for (const ref of other.refs) {
       const key = fileRefKey(ref);
@@ -236,5 +313,15 @@ export const evictCachedAssets = async (
 
   // 消えた事実は取得元が名乗る（件数 0 = 誰かが先に消していた）。順は対象の列に揃える。
   const removed = new Set((await evictRefs(evictable)).map(fileRefKey));
-  return { evicted: evictable.filter((ref) => removed.has(fileRefKey(ref))), kept };
+  const evicted = evictable.filter((ref) => removed.has(fileRefKey(ref)));
+  // 巻き添えの判定も**実際に消えた集合**（= `evicted` そのもの）で行う。候補で数えると、
+  // 取得元が消せなかった参照の利用者まで「部分在庫に落ちた」と名乗ることになる。在庫の有無は
+  // 呼び出し前の観測（`stock`）で見る。
+  const evictedKeys = new Set(evicted.map(fileRefKey));
+  const alsoEvicted = others
+    .filter((other) =>
+      other.refs.every(isCached) && other.refs.some((ref) => evictedKeys.has(fileRefKey(ref)))
+    )
+    .map((other) => labelOf(other.selection));
+  return { evicted, kept, alsoEvicted };
 };

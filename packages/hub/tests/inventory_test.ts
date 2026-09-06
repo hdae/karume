@@ -197,6 +197,139 @@ Deno.test("evictCachedAssets: 部分在庫の選択は守らない（共有フ�
   );
 });
 
+// ---- 参照集合が**まったく同じ**選択（fixture の anima-turbo/f16 と f16-c16 — 重みファイルは
+// 同じで session の設定だけ違う）。守る側に数えると互いに守り合って 1 本も消えず、どの席を
+// どの順で消しても evicted が 0 件になる（下流 anima-web の報告）。
+
+/** 同一の参照集合を指す 2 席と、その巻き添え表示に出るラベル。 */
+const F16: ResolveOptions = { quant: "f16" };
+const F16_C16: ResolveOptions = { quant: "f16-c16" };
+const F16_C16_LABEL = "anima-turbo/f16-c16";
+const W8A8_LABEL = "anima-turbo/w8a8-s16";
+const LITE_LABEL = "anima-lite/w8";
+
+/** f16 の 6 本（`resolveFiles` の順 — transformer は f16 shard）。 */
+const F16_PATHS = [
+  TEXT_ENCODER,
+  TEXT_CONDITIONER,
+  TRANSFORMER_F16,
+  ROPE_BASE,
+  VAE_DECODER,
+  TOKENIZER,
+];
+
+/** 既定選択（w8a8-s16）と f16 の両方を温める = fixture の 4 席すべてが全在庫。 */
+const prefetchAll = async (
+  loaded: LoadedManifest,
+  mock: ReturnType<typeof createMockFetch>,
+  caches: MemoryCacheStorage,
+): Promise<void> => {
+  await prefetchAssets(loaded, refsOf(loaded, TURBO), { fetch: mock.fetch, caches });
+  await prefetchAssets(loaded, refsOf(loaded, F16), { fetch: mock.fetch, caches });
+};
+
+Deno.test("evictCachedAssets: 参照集合が同一の選択は守る側に数えない", async () => {
+  const caches = new MemoryCacheStorage();
+  const { loaded, mock } = await load(caches);
+  await prefetchAll(loaded, mock, caches);
+
+  const result = await evictCachedAssets(loaded, F16, { caches });
+
+  // f16 固有の 1 本は消える（f16-c16 が守ると 0 件になり、兄弟同士でどの順でも解けない）。
+  assertEquals(paths(result.evicted), [TRANSFORMER_F16]);
+  assertEquals(paths(result.kept.map((entry) => entry.ref)), [
+    TEXT_ENCODER,
+    TEXT_CONDITIONER,
+    ROPE_BASE,
+    VAE_DECODER,
+    TOKENIZER,
+  ]);
+  for (const entry of result.kept) {
+    assertEquals(entry.reason, "shared", `${entry.ref.path} の理由が違う`);
+    assert(
+      !entry.sharedWith.includes(F16_C16_LABEL),
+      `${entry.ref.path} を同一集合の兄弟が守っている`,
+    );
+  }
+  // 守るのは真部分集合 / 別集合の席だけ（順は manifest の宣言順）。
+  assertEquals(result.kept[0].sharedWith, [W8A8_LABEL, LITE_LABEL], "text_encoder を守る選択");
+  assertEquals(result.kept[1].sharedWith, [W8A8_LABEL], "text_conditioner を守る選択");
+  assertEquals(result.alsoEvicted, [F16_C16_LABEL]);
+
+  // 巻き添えの中身 — 兄弟は部分在庫に落ちる（次のロードで足りない 1 本だけ取り直す）。
+  assertEquals(paths((await listCachedAssets(loaded, F16_C16, { caches })).missing), [
+    TRANSFORMER_F16,
+  ]);
+  assertEquals((await listCachedAssets(loaded, LITE, { caches })).missing, []);
+});
+
+Deno.test("evictCachedAssets: 同一集合の兄弟しか居なければ全部消える", async () => {
+  const caches = new MemoryCacheStorage();
+  const { loaded, mock } = await load(caches);
+  // f16 だけを温める（w8a8-s16 と anima-lite は i8 shard を欠くので部分在庫）。
+  await prefetchAssets(loaded, refsOf(loaded, F16), { fetch: mock.fetch, caches });
+
+  const result = await evictCachedAssets(loaded, F16, { caches });
+
+  assertEquals(paths(result.evicted), F16_PATHS);
+  assertEquals(result.kept, []);
+  // 部分在庫の 2 席は巻き添えに数えない（もともと「落とし済み」ではない）。
+  assertEquals(result.alsoEvicted, [F16_C16_LABEL]);
+});
+
+Deno.test("evictCachedAssets: protect の一覧だけが守る（同一集合の兄弟も明示すれば守れる）", async () => {
+  const caches = new MemoryCacheStorage();
+  const { loaded, mock } = await load(caches);
+  await prefetchAssets(loaded, refsOf(loaded, F16), { fetch: mock.fetch, caches });
+
+  const result = await evictCachedAssets(loaded, F16, { caches, protect: [F16_C16] });
+
+  assertEquals(result.evicted, []);
+  assertEquals(paths(result.kept.map((entry) => entry.ref)), F16_PATHS);
+  for (const entry of result.kept) {
+    assertEquals(entry.reason, "shared", `${entry.ref.path} の理由が違う`);
+    assertEquals(entry.sharedWith, [F16_C16_LABEL], `${entry.ref.path} を守る選択が違う`);
+  }
+  assertEquals(result.alsoEvicted, [], "1 本も消えていないのに巻き添えを名乗っている");
+});
+
+Deno.test("evictCachedAssets: protect が空なら全在庫の他の選択も守らない", async () => {
+  const caches = new MemoryCacheStorage();
+  const { loaded, mock } = await load(caches);
+  await prefetchAll(loaded, mock, caches);
+
+  const result = await evictCachedAssets(loaded, F16, { caches, protect: [] });
+
+  assertEquals(paths(result.evicted), F16_PATHS);
+  assertEquals(result.kept, []);
+  // 守らなかった全在庫の 3 席が巻き添え（manifest の宣言順）。
+  assertEquals(result.alsoEvicted, [W8A8_LABEL, F16_C16_LABEL, LITE_LABEL]);
+});
+
+Deno.test("evictCachedAssets: protect に対象自身を混ぜても無視される", async () => {
+  const caches = new MemoryCacheStorage();
+  const { loaded, mock } = await load(caches);
+  await prefetchAll(loaded, mock, caches);
+
+  // 対象を自分から守ることはできない — `protect: []` と同じ結果になる。
+  const result = await evictCachedAssets(loaded, F16, { caches, protect: [F16, F16] });
+
+  assertEquals(paths(result.evicted), F16_PATHS);
+  assertEquals(result.kept, []);
+  assertEquals(result.alsoEvicted, [W8A8_LABEL, F16_C16_LABEL, LITE_LABEL]);
+});
+
+Deno.test("evictCachedAssets: protect の存在しない quant は ManifestReferenceError", async () => {
+  const caches = new MemoryCacheStorage();
+  const { loaded } = await load(caches);
+
+  await assertRejects(
+    () => evictCachedAssets(loaded, F16, { caches, protect: [{ quant: "w4" }] }),
+    ManifestReferenceError,
+    "w4",
+  );
+});
+
 // ---- `evicted` は**取得元が「消えた」と名乗ったもの**だけ（消せる候補をそのまま返さない）。
 // 組み込みの HF 取得元は候補と実際に消えたものが常に一致するので、差が出る取得元を被せないと
 // この契約は観測できない（実装が `evicted: 候補` に退化しても既存テストは全て緑のまま）。
@@ -240,6 +373,54 @@ Deno.test("evictCachedAssets: evicted は取得元が消したと名乗ったも
     hasEntry(hubCache(caches), payloadFor(VAE_DECODER)),
     "取得元が消していない参照のエントリが消えている",
   );
+});
+
+/** 候補を 1 本も消さない HF 取得元（「誰かが先に消していた」= 件数 0 の形）。 */
+const noEvictSource = (): DistributionSource => {
+  const base = driverOf(createHfSource({ repo: REPO, hubUrl: HUB_URL, revision: SHA }));
+  return new DistributionSource({
+    ...base,
+    pin: (generation, options) => ({
+      ...base.pin(generation, options),
+      evict: () => Promise.resolve([]),
+    }),
+  });
+};
+
+Deno.test("evictCachedAssets: alsoEvicted は実際に消えた参照を使う選択だけ", async () => {
+  const caches = new MemoryCacheStorage();
+  const mock = createMockFetch({ files: serveAll() });
+  const loaded = await loadManifest(firstOnlyEvictSource(), { fetch: mock.fetch, caches });
+  await prefetchAll(loaded, mock, caches);
+
+  // anima-lite/w8 だけを守る = 候補は turbo 固有の 3 本。取得元はその先頭（text_conditioner）だけ消す。
+  const result = await evictCachedAssets(loaded, F16, { caches, protect: [LITE] });
+
+  assertEquals(paths(result.evicted), [TEXT_CONDITIONER]);
+  assertEquals(paths(result.kept.map((entry) => entry.ref)), [TEXT_ENCODER, ROPE_BASE, TOKENIZER]);
+  // anima-lite/w8 は全在庫のまま text_encoder を共有しているが、その 1 本は消えていないので
+  // 巻き添えには載らない（候補で数えると載ってしまう）。
+  assertEquals(result.alsoEvicted, [W8A8_LABEL, F16_C16_LABEL]);
+  assertEquals((await listCachedAssets(loaded, LITE, { caches })).missing, []);
+  assert(
+    hasEntry(hubCache(caches), payloadFor(VAE_DECODER)),
+    "取得元が消していない候補のエントリが消えている",
+  );
+});
+
+Deno.test("evictCachedAssets: 1 本も消えなければ alsoEvicted は空", async () => {
+  const caches = new MemoryCacheStorage();
+  const mock = createMockFetch({ files: serveAll() });
+  const loaded = await loadManifest(noEvictSource(), { fetch: mock.fetch, caches });
+  await prefetchAssets(loaded, refsOf(loaded, F16), { fetch: mock.fetch, caches });
+
+  const result = await evictCachedAssets(loaded, F16, { caches });
+
+  // 候補は 6 本（同一集合の f16-c16 は守らない）だが、取得元は 1 本も消したと名乗らない。
+  assertEquals(result.evicted, []);
+  assertEquals(result.kept, []);
+  assertEquals(result.alsoEvicted, [], "誰も部分在庫に落ちていないのに巻き添えを名乗っている");
+  assertEquals((await listCachedAssets(loaded, F16_C16, { caches })).missing, []);
 });
 
 // ---- 内容キーの同一性。在庫は (path, sha256) の組で突合する — path だけで畳むと、リポの
