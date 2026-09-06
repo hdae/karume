@@ -51,8 +51,6 @@ import {
   type Tensor,
 } from "@karume/runtime";
 import {
-  type AssetProgress,
-  type CacheDiagnostic,
   type DistributionSource,
   type HubRepoRef,
   loadManifest,
@@ -95,6 +93,7 @@ import {
 } from "../session/gpu-features.ts";
 import { toSessionOptions } from "../session/options.ts";
 import { toManifestSource } from "../hub/repo-ref.ts";
+import { type FromPretrainedHubOptions, hubLoadOptions } from "../hub/load-options.ts";
 import {
   assetComponentOpener,
   type ComponentOpener,
@@ -177,26 +176,11 @@ export type Sbv2PipelineOptions = {
 /**
  * {@link Sbv2Pipeline.fromPretrained} だけが使う取得層のオプション（hub へ透過する）。
  *
- * NOTE: `headers` / `fetch` / `caches` は **HTTP 取得元専用**のノブで、取得元ハンドル
- * （`localDirectory` / `denoDirectory`）を渡した呼び出しでは 1 つも効かない — 手元の配布形は
- * network も CacheStorage も通らない。
+ * NOTE: `headers` / `fetch` / `caches` / `onRetry` が **HTTP 取得元専用**であることを含め、
+ * 取得層のノブの説明は {@link FromPretrainedHubOptions} に 1 本化してある。
  */
-export type Sbv2FromPretrainedOptions = Sbv2PipelineOptions & {
+export type Sbv2FromPretrainedOptions = Sbv2PipelineOptions & FromPretrainedHubOptions & {
   readonly signal?: AbortSignal;
-  /**
-   * `Authorization` 等。取得（revision 解決・ファイル）へそのまま透過する。
-   *
-   * NOTE: **キャッシュは credential で分けない**（by-design — キーにヘッダは入らないので、
-   * 認証付きで取得したバイト列は以後の無認証呼び出しにもヒットする）。ADR 0080 決定 3 /
-   * `docs/limitations.md` の「hub: キャッシュは credential で隔離しない」が正本。
-   */
-  readonly headers?: HeadersInit;
-  readonly onProgress?: (progress: AssetProgress) => void;
-  readonly onCacheError?: (diagnostic: CacheDiagnostic) => void;
-  /** `fetch` の差し替え（テスト・カスタム輸送用）。 */
-  readonly fetch?: typeof globalThis.fetch;
-  /** `CacheStorage` の差し替え（テスト用）。 */
-  readonly caches?: CacheStorage;
 };
 
 /** 取得済み資産から直接組むときの入力（hub の `fetchAssets` の返り値をそのまま渡す）。 */
@@ -1092,13 +1076,7 @@ export class Sbv2Pipeline {
       "Sbv2Pipeline.fromPretrained",
       'SBV2_SOURCES["sbv2-jvnv"]（@karume/models/sbv2）',
     );
-    const hubOptions = {
-      ...(options.signal === undefined ? {} : { signal: options.signal }),
-      ...(options.headers === undefined ? {} : { headers: options.headers }),
-      ...(options.onCacheError === undefined ? {} : { onCacheError: options.onCacheError }),
-      ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
-      ...(options.caches === undefined ? {} : { caches: options.caches }),
-    };
+    const hubOptions = hubLoadOptions(options);
     const loaded = await loadManifest(source, hubOptions);
     const selection = {
       ...(options.model === undefined ? {} : { model: options.model }),

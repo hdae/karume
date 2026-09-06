@@ -15,6 +15,14 @@
  * 段取りを事前に読むための表）。
  */
 
+/**
+ * 8 家族の `fromPretrained` オプション型が**共有する**取得層のノブ（`headers` / `onProgress` /
+ * `onCacheError` / `onRetry` / `fetch` / `caches`）。家族ごとの型はこれと構築オプションの交差なので
+ * 家族の数だけ輸出する意味は無く、ここに 1 本だけ置く — 複数の家族を同じ取得設定でロードする側が
+ * その設定に名前を付けられる（付けられないと 8 家族ぶんの型から欄を写し直すことになる）。
+ */
+export type { FromPretrainedHubOptions } from "./src/hub/load-options.ts";
+
 export { BirefnetPipeline } from "./src/birefnet/pipeline.ts";
 export { BIREFNET_SOURCES } from "./src/birefnet/config.ts";
 export type {

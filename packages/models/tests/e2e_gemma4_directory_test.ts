@@ -127,6 +127,7 @@ Deno.test({
       );
     };
     const cacheDiagnostics: string[] = [];
+    const retryDiagnostics: string[] = [];
 
     const pipeline = await Gemma4Pipeline.fromPretrained(denoDirectory(MIRROR_DIR), {
       // 予算は索引から導く（= sidecar 全量常駐 → 読み直しゼロ）。定数で書くと資産世代で
@@ -136,6 +137,7 @@ Deno.test({
       fetch: fetchStub,
       caches,
       onCacheError: (diagnostic) => cacheDiagnostics.push(diagnostic.url),
+      onRetry: (diagnostic) => retryDiagnostics.push(diagnostic.url),
     });
     try {
       await t.step(
@@ -164,6 +166,8 @@ Deno.test({
         assertEquals(caches.calls, 0, "ローカル取得元が CacheStorage を触った");
         // 触っていないので診断も 1 本も来ない（キャッシュ失敗を握り潰す経路に落ちていない）。
         assertEquals(cacheDiagnostics, [], "キャッシュ診断が飛んでいる");
+        // 再試行も HTTP 取得元だけのもの（ローカル取得元は取得層を通らない）。
+        assertEquals(retryDiagnostics, [], "再試行の通知が飛んでいる");
       });
     } finally {
       await pipeline.dispose();

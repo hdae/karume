@@ -46,8 +46,6 @@ import {
   type StateAttentionReduce,
 } from "@karume/runtime";
 import {
-  type AssetProgress,
-  type CacheDiagnostic,
   type DistributionSource,
   type HubRepoRef,
   loadManifest,
@@ -65,6 +63,7 @@ import {
   type ModelComponent,
   readCachedAsset,
 } from "../hub/components.ts";
+import { type FromPretrainedHubOptions, hubLoadOptions } from "../hub/load-options.ts";
 import { toManifestSource } from "../hub/repo-ref.ts";
 import { disposeSteps } from "../session/dispose-steps.ts";
 import { assertRequiredLimitsBeforeDownload } from "../session/gpu-features.ts";
@@ -241,32 +240,20 @@ export const GEMMA4_STATE_ATTENTION_REDUCE: StateAttentionReduce = "parallel";
 /**
  * {@link Gemma4Pipeline.fromPretrained} が追加で受けるもの（選択軸 + 取得層へ透過するノブ）。
  *
- * NOTE: `headers` / `fetch` / `caches` は **HTTP 取得元専用**のノブで、取得元ハンドル
- * （`localDirectory` / `denoDirectory`）を渡した呼び出しでは 1 つも効かない — 手元の配布形は
- * network も CacheStorage も通らない。
+ * NOTE: `headers` / `fetch` / `caches` / `onRetry` が **HTTP 取得元専用**であることを含め、
+ * 取得層のノブの説明は {@link FromPretrainedHubOptions} に 1 本化してある。
  */
-export type Gemma4FromPretrainedOptions = Gemma4PipelineOptions & {
-  /** manifest のモデル名（省略時は `defaultModel`）。 */
-  readonly model?: string;
-  /** quant 名（省略時はそのモデルの `defaultQuant`）。 */
-  readonly quant?: string;
-  /**
-   * `Authorization` 等。取得（revision 解決・ファイル）へそのまま透過する。
-   *
-   * NOTE: **キャッシュは credential で分けない**（by-design — キーにヘッダは入らないので、
-   * 認証付きで取得したバイト列は以後の無認証呼び出しにもヒットする）。ADR 0080 決定 3 /
-   * `docs/limitations.md` の「hub: キャッシュは credential で隔離しない」が正本。
-   */
-  readonly headers?: HeadersInit;
-  readonly onProgress?: (progress: AssetProgress) => void;
-  readonly onCacheError?: (diagnostic: CacheDiagnostic) => void;
-  /** `fetch` の差し替え（テスト・カスタム輸送用）。 */
-  readonly fetch?: typeof globalThis.fetch;
-  /** `CacheStorage` の差し替え（テスト用）。 */
-  readonly caches?: CacheStorage;
-  /** 取得の中断（構築側へは渡らない — `chat` / `sequence` の中断は要求ごとの `signal`）。 */
-  readonly signal?: AbortSignal;
-};
+export type Gemma4FromPretrainedOptions =
+  & Gemma4PipelineOptions
+  & FromPretrainedHubOptions
+  & {
+    /** manifest のモデル名（省略時は `defaultModel`）。 */
+    readonly model?: string;
+    /** quant 名（省略時はそのモデルの `defaultQuant`）。 */
+    readonly quant?: string;
+    /** 取得の中断（構築側へは渡らない — `chat` / `sequence` の中断は要求ごとの `signal`）。 */
+    readonly signal?: AbortSignal;
+  };
 
 /** {@link Gemma4Pipeline.sequence} の指定（1 会話ぶんの寿命に効く唯一のノブ）。 */
 export type Gemma4SequenceOptions = {
@@ -1008,13 +995,7 @@ export class Gemma4Pipeline {
   ): Promise<Gemma4Pipeline> {
     const where = "Gemma4Pipeline.fromPretrained";
     const source = toManifestSource(ref, where, 'GEMMA4_SOURCES["gemma4"]（@karume/models/gemma）');
-    const hubOptions: StreamAssetsOptions = {
-      ...(options.signal === undefined ? {} : { signal: options.signal }),
-      ...(options.headers === undefined ? {} : { headers: options.headers }),
-      ...(options.onCacheError === undefined ? {} : { onCacheError: options.onCacheError }),
-      ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
-      ...(options.caches === undefined ? {} : { caches: options.caches }),
-    };
+    const hubOptions: StreamAssetsOptions = hubLoadOptions(options);
     const loaded = await loadManifest(source, hubOptions);
     const selection = {
       ...(options.model === undefined ? {} : { model: options.model }),
