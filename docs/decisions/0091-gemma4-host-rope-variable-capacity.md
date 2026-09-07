@@ -98,6 +98,13 @@ state 記号の束縛源を `capacity` → `maxPosition` へ。既定容量で�
 `Gemma4ChatOptions.onPrefill?: ({chunk, chunks}) => void`（chat / send 共通・非破壊）と
 `Gemma4PipelineOptions.onRunDiagnostics?: (SessionDiagnostics) => void`（他 7 家族と同型）。
 
+追記（2026-09-07）: 診断の席は **第 2 引数 `Gemma4RunPhase`**（`{kind:"prefill", chunk, chunks}` /
+`{kind:"decode", step}`）を受ける — gemma4 だけが 1 グラフを prefill 形と decode 形の 2 形で回すので、
+「1 通目 = prefill・以降 = decode」という回数からの推定は複数 chunk の prompt で崩れる（2 本目以降の
+prefill が decode に化ける — 2026-09-06 性能調査 F-01）。他 7 家族は同型のまま（1 グラフ 1 形なので
+phase が無い）。停止 token を引いた最後の decode run は `token` イベントを伴わないが、その run の
+診断も列が尽きた後に 1 通届く（通知数 = `GenerationStop.tokens − 1 + prefill chunk 数`）。
+
 ### 7. K-12（③PV の KV 並列縮約）との関係
 
 decode の線形項は本 ADR の外（perf-ledger K-12・ADR 0067 追記 2026-09-03）。opt-in 席で実装済み

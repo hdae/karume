@@ -48,6 +48,20 @@ factory（`localDirectory` / `@karume/hub/deno` の `denoDirectory`）だけで�
    ADR 0070 決定 2 の相 1。**optional 能力**）
 5. 越境 (repo, revision) → 別の取得元（`PinnedSource.originFor` — ADR 0038 §7）
 
+追記（2026-09-07）: 質問は以後 3 つ増えた。⑥⑦ = 在庫の照会と削除（`PinnedSource.listCached` /
+`evictCached` — ADR [0094](0094-hub-cache-inventory-and-eviction.md)・optional 能力）。⑧ = **ある `FileRef` の
+一部区間を読む**（`PinnedSource.openFile` → `AssetRangeReader { cost, read(offset, length) }` — optional 能力・
+公開面は `openAsset(loaded, ref, options)`）。動機は gemma4 の PLE（層ごとの埋め込み表・253 MB × 9 本の
+token-major shard）で、decode 1 token ごとに shard を全量読み直すと自然文 400 token で 137 回・約 42 s の読みに
+なる実測（2026-09-07）から、行（8,960 B + 140 B）だけを読む経路が要る。読み口は**費用の型**を名乗る:
+`"seek"` = offset に依らず小さい（ファイルの位置読み・ブラウザの遅延 Blob の slice — Chrome 152 実測 0.1〜0.3 ms）
+/ `"scan"` = offset に比例（本文ストリームの読み飛ばし — Deno の CacheStorage は `blob()` が全量を読むため・
+実測 17〜76 ms）。消費側はこの型で「行読みにする行数の上限」を変える。⑧ は宣言 size の境界だけを見る面で、
+全量面の size 門も sha256 も掛からない（実体の破損は行の値として現れる）。共通層の作法（中断の透過・
+tight view 検査・作法の透過）は ③ と同じく `src/fetch.ts` が持つ。`denoDirectory` は `Deno.open` の位置読み
+（seek）で持ち、HF 取得元は取得層 `@hdae/fetch-cache` の次版（`openHfFile` — 戦略 blob → seek / stream → scan）で
+載せる（それまでは持たない = 全量読み + LRU のまま）。
+
 MUST: 進捗・並行度（in-flight バイト予算）・中断の透過・tight view 検査・エラー文脈の組み立ては
 **共通層の作法**として `src/fetch.ts` / `src/context.ts` に残す。取得元へ降ろすと、取得元が増える
 たびに同じ不変条件を書き直すことになる。

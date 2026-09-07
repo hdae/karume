@@ -154,3 +154,32 @@ ADR 0079（テキスト解析は呼び手の責務）。「未着荷 initializer
 ない」という正当な指定（読み終えた shard を即座に落とす）で、それ以外で **shard 1 本すら載らない
 予算は構築時に fail loudly** にする — 黙って超過すれば予算が意味を失い、黙って守れば gather が
 引けないため、どちらも呼び手の指定を裏切る。
+
+## 追記（2026-09-07 — 決定 3 の LRU は「1 回の gather の中では hit 先行」）
+
+1 回の gather が触る shard は束ねて 1 本ずつ引くが、**常駐している shard を先に処理する**。初出順に
+引くと、未常駐 shard の読みが起こす LRU の追い出しが「この gather がまだ触っていない常駐 shard」を
+落とし、同じ gather の中で読み直しになる（実測 2026-09-06: 予算 = 最大 shard 2 本・shard 1 / 2 が常駐
+の状態から `[0,1,2]` 順に引くと 3 load、`[1,2,0]` 順なら 1 load — 順序依存）。hit を先に触れば LRU の
+末尾へ回るので、1 回の gather の load 数は miss 数（= 理論最小）になる。走行中に掴んだ shard の実体は
+ローカル変数が持つので、途中で追い出されても値は揃う（決定 3 の「値も token 列も変わらない」は不変）。
+
+併せて、同じ id が並ぶ列（prefill の pad 行 id 0 が典型）は最初の位置だけ逆量子化し、残りの位置へは
+f32 バイト列を複写する。再計算ではなく複写なので決定 4 の 2 段丸めとビット同一である。gather を
+またぐ行キャッシュ（token 行の LRU）は**入れない** — 実利用の測定（同日・自然文 2 ターン × 200 token・既定予算）で
+shard の読み直しが 137 回・約 42 s / 壁 58 s と p50 の問題であり、オフラインの方針比較で行キャッシュは 71 回にしか
+減らなかった（初出 token の miss は減らない）。対処は**行読み**（下の追記）。
+
+## 追記（2026-09-07 — 代替案 b「行だけ読む」を採る: 読み口を区間読みの handle へ）
+
+決定 3 が「実需が出たときにホスト側だけ差し替える」と予定していた代替案 b を採る。読み口を
+`Gemma4Assets.openPleShard(file) → { bytes, readAll, range?: { cost: "seek" | "scan", read(offset, length) } }` に
+置き換え（`readPleShard` からの**破壊的変更** — limitations）、`Gemma4Ple` は shard ごとに header を 1 度だけ小読みして行の
+位置を持ち、小さい gather（decode の 1 id など）は values 8,960 B + scales 140 B の 2 区間だけを読む。方針は shard ごとに
+束ねた一意行数 rows で決める: 常駐（pending 含む）→ hit / range 無し → 全量 + LRU（従来）/ cost "scan" → rows ≤ 2 なら行読み・
+それ以外は全量 + LRU / cost "seek" → rows ≥ 32 かつ予算に**追い出し無しで**載るなら全量 + LRU・それ以外は行読み。range が
+あるなら LRU の追い出しは起こさない（9 shard に散る自然文で回り続けるのが実測の 137 回の正体）。行の値は同じ bytes から
+同じ 2 段丸めで組むので決定 4 のビット一致は不変（torch 突合門で確認）。読み口の実装: `denoDirectory` = `Deno.open` の位置読み
+（seek・実測 46 µs/read）/ ブラウザの HF 取得元 = CacheStorage の `response.blob().slice()`（Chrome 152 実測 0.1〜0.3 ms・
+Range 要求は 200 全量で無視される）/ Deno の HF 取得元 = 本文ストリームの読み飛ばし（`blob()` が全量を読むため・17〜76 ms・scan）。
+取得層 `@hdae/fetch-cache` の `openCachedUrl` / `openHfFile`（その ADR 0012）と hub の能力 ⑧（ADR 0086 追記）がこれを支える。

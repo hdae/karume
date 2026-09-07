@@ -351,6 +351,22 @@ broadcast できない形・実テンソルとの名前衝突・チャネル軸�
 可否の最終門はこれまでどおり out-of-memory errorScope で、`peakAccountedBytes` も名前どおり
 「勘定に入れた分のピーク」= 上限保証ではない。
 
+## prefill バケット（`chunkBuckets`）: 見積りの非勘定窓が広がる・16 未満は tiled 経路に乗らない
+
+gemma4 の prefill は chunk ごとに「`queryLength` 以上の最小バケット」の物理行数で走る（ADR
+[0066](decisions/0066-generation-context-state-slots.md) 追記 10・既定 `GEMMA4_CHUNK_BUCKETS`）。by-design の
+制約 2 点:
+
+- **VRAM の瞬間ピークは見積りの外側で広がる**: slot backing（run の中間バッファ束）は容量 1 でヒット run に
+  しか作られないため、末尾 chunk のバケット run は chunkLength 形の backing が載ったまま arena に一時を確保する。
+  `estimateSessionMemory` の `unaccounted` が言う「退役から destroy までの窓で 2 本ぶんが同時に載る」の幅が、
+  従来の「decode 形と prefill 形の和」から「最大バケット形と prefill 形の和」へ広がる（既定の梯子なら 512 形 +
+  768 形 ≈ 1.67 倍）。見積りのシナリオ自体は prefill / decode の 2 本のまま（ピークの**勘定側**は最大 M で不変）。
+  複数 chunk のターンでは backing の作り直しも 1 回増える（2 → 3 回/ターン）。
+- **16 未満のバケットは K-13 の tiled 経路に乗らない**: states 形 attention の ①ₜ / ③ₜ は M ≥ 16 の計画にしか
+  選ばれず、それ未満は参照経路 ① / ③（`stateAttentionReduce: "parallel"` なら ③′）に落ちる。値は正しいが遅く、
+  `parallel` × M ∈ [2, 16) の組は実測していない。gemma4 の既定は全て 16 以上で、この域は明示指定でしか入らない。
+
 ## `fromAssets`（全量面）に分割配布形を渡すと、全 shard がホスト RAM に同時常駐する
 
 `fromPretrained` で読める配布形は `fromAssets` でも読める（取得キーが `<役割>[i]` の shard 列は

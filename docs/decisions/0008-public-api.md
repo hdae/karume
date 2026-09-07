@@ -47,3 +47,8 @@
   `src/` へは昇格できない（横断不変条件「ランタイム依存は Web 標準 API のみ」）。道具側へ
   写すと**同じ規則の 3 実装目**（Python / runtime のテスト補助 / 道具）ができ、ずれても
   どこも赤くならないので、掴む形を追認する（2026-09-05 裁定）。
+- 2026-09-07: `parseSafetensorsHeader` / `safetensorsHeaderLength`（+ 型 `SafetensorsHeader`）を公開面へ追加。
+  2026-08-05 に出した `parseSafetensors` の**部分適用**（buffer 全量を要求せず、先頭 8 + N バイトとファイル全長から
+  同じ検査で同じ表を組む）で、models の PLE 行読み（ADR 0085 追記 2026-09-07）が「ヘッダを 1 度小読みして行の
+  位置を持つ」ために要る。検査の実装は 1 本（`parseSafetensors` がこれを呼ぶ）。hub 側は `openAsset` と型
+  `AssetRangeReader`（ADR 0086 追記 ⑧）、`DirectoryAdapter.readFileRange?` を追加した。

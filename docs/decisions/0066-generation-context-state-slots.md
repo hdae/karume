@@ -61,7 +61,7 @@ IR v1 に **`states{}` セクション**を追加する: `name → { dtype, shap
 
 - 「鍵は容量」は**トレードオフの選択であって業界の既定ではない**と明記する — llama.cpp は
   逆に「256 境界へ量子化した論理 extent」を鍵に入れて成立している（調査 §1.1 (a)）。karume
-  が容量鍵を選ぶ理由は、PreparedPlan（ADR 0042）が bindings 完全一致鍵 + LRU 4 であり、
+  が容量鍵を選ぶ理由は、PreparedPlan（ADR 0042）が bindings 完全一致鍵 + LRU（上限は 0042 決定 2 — 現行 8）であり、
   extent を鍵に入れると decode が毎 token 別計画になるため。
 - **論理長は「値」**: `pastLength`（確定済み KV の論理長）と `queryLength`（今回 step の
   実 token 数）は**独立の実行時スカラ**として渡す。shape symbol にも attrs にもしない
@@ -87,7 +87,8 @@ IR v1 に **`states{}` セクション**を追加する: `name → { dtype, shap
   `queryLength`。
 - **decode**: `queryLength = 1` 固定形。
 - 採らなかった形と理由: 可変長 chunk（web-llm / MLC 型 — 調査 §1.3）は記号コンパイル 1 本で
-  済む処理系の解で、karume では chunk 長ごとに PreparedPlan が増えて LRU 4 を汚す。
+  済む処理系の解で、karume では chunk 長ごとに PreparedPlan が増えて LRU を汚す（→ 追記 10 は
+  「宣言した本数だけ」の固定集合で計画を増やす形にし、可変長そのものは採らないまま）。
   全 prompt 一括（ORT GenAI 既定）は長 prompt で計画・transient が prompt 長に比例して
   単発化する。固定長 chunk + pad は ORT Windowed / vLLM バケット型の選択（調査 §1.3）。
 - 結果として **PreparedPlan は prefill-chunk / decode の 2 本が定常**（+既存の 1-shot 面）。
@@ -226,3 +227,26 @@ accepted 直後の第 3 巡（Codex 独立レビュー・5 本セット照合）
    別スロット」の実適用で、機能は不変（token 列 parity が検収 — gemma4 で 3 ケース不変を
    実測）。form 検査は「full = 記号 / sliding = window 実数」の層種別で分ける（一色に緩めると
    どちらかの退行が素通りする — `export_decode.assert_ir_form_decode`）。
+
+10. **prefill 形の物理 chunk 行数を「宣言した集合」へ広げる（決定 4 の narrowing の緩和 — バケット・
+    2026-09-07）**: 決定 4 の「実行形は 2 本（prefill 形 M = chunkLength / decode 形 M = 1）」を、
+    **context 生成時に宣言した集合 `{1} ∪ chunkBuckets ∪ {chunkLength}`** へ広げる
+    （`GenerationContextSpec.chunkBuckets` — 2 以上 chunkLength 未満の整数の狭義昇順・省略 = 追加なし）。
+    呼び出し側（`generation/sequence.ts` の `physicalChunkRows`）は chunk ごとに `queryLength` 以上の
+    **最小**の値を物理行数に選ぶ（有効行 1 本は従来どおり decode 形）。chunk の**割り方**は
+    `chunkLength` のまま — 変えるのは末尾 chunk（短い prompt では唯一の chunk）を載せる行数だけ。
+    きっかけは 2026-09-06 の性能調査 F-02（`.claude/reviews/2026-09-06_performance-investigation/`
+    — git 追跡外）: 32 token の発話 1 本 + 1 token 生成の壁が chunk 768 → 32 で 385 → 106 ms（linear
+    −73%）。chat の user 発話は短いのに context の chunkLength は途中で変えられず、多ターンでは毎ターン
+    pad 行の linear を払っていた。一方で長い prompt は 768 一括が最速（research 2026-09-03 §2）なので
+    「既定を下げる」は採らず、可変長 chunk（決定 4 が退けた形）も採らない — 集合を宣言で固定するのは、
+    増える PreparedPlan を宣言された本数で頭打ちにするため（run 前検査 `assertGenerationRun` が集合外の
+    M を拒否する形は不変）。帰結: ①PreparedPlan の LRU 上限を 4 → 8（ADR 0042 決定 2 追記 — 定常本数 =
+    prefill 形 + decode 形 + バケット本数、**1 つの容量あたり**）②M ≥ 16 のバケットは K-13 の tiled 経路
+    （①ₜ / ③ₜ）に乗り、chunkRows で特殊化した WGSL バリアントが本数ぶん増える（PipelineCache は追い出し
+    無し・初回使用時にコンパイル）。16 未満は tiled 経路に乗らず ① / ③ に落ちる ③**数値**: 行局所な op と
+    tiled attention は M によらず同じ式・同じ加算順だが、GEMM の幾何（`gemm-geometry.ts` — ≤64 / ≤512 /
+    上）は M で変わるので、**バケット形と 768 固定で logits のビット一致は保証しない**（K-13 と同じく
+    token 列 golden で縛る — `e2e_gemma4_sequence_test.ts` ⑤）④**VRAM**: slot backing は容量 1 でヒット
+    run にしか作られないため、末尾 chunk のバケット run は chunkLength 形の backing が載ったまま arena に
+    一時を確保する。見積り（ADR 0089）の unaccounted 側の窓が「decode 形と prefill 形の和」から「最大バケット形と prefill 形の和」へ広がる（limitations に記載）。複数 chunk のターンでは backing の作り直しが 1 回増える（2 → 3 回/ターン）。gemma4 の既定の梯子（`GEMMA4_CHUNK_BUCKETS`）は実測で確定する（research 2026-09-07）。

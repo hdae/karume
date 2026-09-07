@@ -38,7 +38,7 @@ StepRecipe 列 — dispatch ごとに pipeline / layout / params（いずれも 
 MUST: レシピは GPUBindGroup と run 寿命バッファを持たない。持てるのは Session 常駐の実体と
 「どの位置に何を束ねるか」だけ（これが破れると本 ADR §2 のキャッシュが成立しない）。
 
-### 2. 導出済み計画（PreparedPlan）は解決済み bindings をキーに Session 常駐（LRU 4）
+### 2. 導出済み計画（PreparedPlan）は解決済み bindings をキーに Session 常駐（LRU — 上限は追記 2026-09-07）
 
 - キー = graph.symbols 宣言順の bindings 値の連結。シンボル無しグラフはキー "" の 1 本。
 - 器は SessionState（モジュールスコープ禁止 — 副作用ゼロ不変条件）。持つのは後段が実際に
@@ -48,7 +48,10 @@ MUST: レシピは GPUBindGroup と run 寿命バッファを持たない。持�
 - ヒット run は planGraph / planFusions / レシピ導出を丸ごと飛ばす。**bindSymbols
   （入力 shape 検証）は毎 run 走らせる**。契約検査を飛ばせる根拠は「キーが解決済み bindings の
   完全一致なら、同じ入力に対する同じ検査の再実行を省くだけ」— fail loudly は緩まない。
-- LRU 上限 4 は定数（設定ノブにしない）。追い出しはホストオブジェクトのみ（GPU 資源は
+- LRU 上限は定数（設定ノブにしない — 初版 4・**2026-09-07 に 8 へ**: ADR 0066 追記 10 の prefill バケットで
+  定常する実行形が prefill 形 + decode 形 + バケット数本になったため。「連続する run が同じ bindings を
+  使い回す局所性だけを拾う器」という位置づけは不変で、増やしても効かない形〈run ごとに shape が変わる〉は
+  1 本目から効かない）。追い出しはホストオブジェクトのみ（GPU 資源は
   paramsCache / PipelineCache が所有 — ここで destroy すると別計画の直参照が破棄済みを掴む）。
 
 ### 3. 常設診断 `lastRunPrepared {hit, cachedPlans}`
