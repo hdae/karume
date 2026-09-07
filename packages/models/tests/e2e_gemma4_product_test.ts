@@ -58,6 +58,8 @@ import {
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 // 全量常駐の予算は helper が正本（同じ式を e2e ごとに写さない）。
 import { allResidentBytes } from "./helpers/ple-budget.ts";
+// 実ファイルの読み口（`Deno.open` の位置読み = 費用の型 seek）も helper が正本。
+import { openPleShardAt } from "./helpers/ple-source.ts";
 
 const PRODUCT_ROOT = new URL("../../../outputs/series/gemma4-e2b-product/", import.meta.url);
 const GOLDEN_ROOT = new URL("../../../outputs/series/gemma4-e2b-decode/", import.meta.url);
@@ -296,14 +298,26 @@ const goldenF32 = (file: SafetensorsFile, name: string): Float32Array<ArrayBuffe
   return new Float32Array(file.buffer, view.byteOffset, view.byteLength / 4);
 };
 
-/** 索引を読んで loader を組む（shard の読みは実ファイル — hub は通さない）。 */
-const openPle = async (maxResidentBytes: number): Promise<Gemma4Ple> => {
+/**
+ * 索引を読んで loader を組む（shard の読みは実ファイル — hub は通さない）。
+ *
+ * `range: false` は**区間読みを持たない読み口**（従来経路 = 全量読み + LRU）。②の突合門が
+ * 両方を回すのは、行読みが入っても値が 1 bit も動かないことを実資産で見るためである。
+ */
+const openPle = async (
+  maxResidentBytes: number,
+  options: { readonly range?: boolean } = {},
+): Promise<Gemma4Ple> => {
   const index = parseGemma4PleIndex(
     JSON.parse(await Deno.readTextFile(new URL(PLE_INDEX_FILE, PRODUCT_ROOT))),
   );
   return createGemma4Ple({
     index,
-    readShard: (file) => readBuffer(PRODUCT_ROOT, file),
+    openShard: async (file) => {
+      const source = await openPleShardAt(PRODUCT_ROOT, file);
+      if (options.range === false) return { bytes: source.bytes, readAll: source.readAll };
+      return source;
+    },
     vocabSize: VOCAB,
     maxResidentBytes,
   });
@@ -352,43 +366,68 @@ Deno.test({
 
     // 既定の予算（= 最大 shard 2 本ぶん）で引く。本数ではなくバイトで頭打ちになることを見る。
     const budget = defaultGemma4PleResidentBytes(index);
-    const ple = await openPle(budget);
-    const gathered = await ple.gather(tokens);
-    assertEquals(gathered.dtype, "f32", "gather の dtype");
-    assertEquals(gathered.shape, [1, tokens.length, LAYERS, PLE_DIM], "gather の shape");
+    /** torch の 35 表経路との厳密一致（tolerance を持たない）。 */
+    const assertProbeMatch = (data: Float32Array, where: string): void => {
+      let mismatches = 0;
+      let first = "";
+      for (let element = 0; element < expected.length; element += 1) {
+        if (data[element] === expected[element]) continue;
+        mismatches += 1;
+        if (first !== "") continue;
+        const token = tokens[Math.floor(element / (LAYERS * PLE_DIM))];
+        const layer = Math.floor(element / PLE_DIM) % LAYERS;
+        first = `token ${token} / 層 ${layer} / 列 ${element % PLE_DIM}: ` +
+          `${data[element]} ≠ ${expected[element]}`;
+      }
+      assertEquals(
+        mismatches,
+        0,
+        `${where}: PLE 逆量子化が torch の 35 表経路と違う` +
+          `（${mismatches} 要素 / 最初の食い違い ${first}）`,
+      );
+    };
 
-    // 厳密一致（tolerance を持たない）。1 要素でも違えば最初の位置を名指しで落とす。
-    let mismatches = 0;
-    let first = "";
-    for (let element = 0; element < expected.length; element += 1) {
-      if (gathered.data[element] === expected[element]) continue;
-      mismatches += 1;
-      if (first !== "") continue;
-      const token = tokens[Math.floor(element / (LAYERS * PLE_DIM))];
-      const layer = Math.floor(element / PLE_DIM) % LAYERS;
-      first = `token ${token} / 層 ${layer} / 列 ${element % PLE_DIM}: ` +
-        `${gathered.data[element]} ≠ ${expected[element]}`;
-    }
-    assertEquals(
-      mismatches,
-      0,
-      `PLE 逆量子化が torch の 35 表経路と違う（${mismatches} 要素 / 最初の食い違い ${first}）`,
-    );
-
-    // 決定 3 の実測: 触った shard だけ読み、LRU がバイト予算で落とす。
-    const stats = ple.stats();
-    assertEquals(stats.loads, index.shards.length, "取りに行った shard 数（触ったぶんだけ）");
-    assertEquals(stats.resident, 2, "常駐 shard 数（既定 = 最大 shard 2 本ぶんで頭打ち）");
+    // ②-a 従来経路（区間読みを持たない読み口）— 触った shard だけ読み、LRU がバイト予算で落とす。
+    const full = await openPle(budget, { range: false });
+    const byFull = await full.gather(tokens);
+    assertEquals(byFull.dtype, "f32", "gather の dtype");
+    assertEquals(byFull.shape, [1, tokens.length, LAYERS, PLE_DIM], "gather の shape");
+    assert("data" in byFull && byFull.data instanceof Float32Array);
+    assertProbeMatch(byFull.data, "全量経路");
+    const fullStats = full.stats();
+    assertEquals(fullStats.loads, index.shards.length, "取りに行った shard 数（触ったぶんだけ）");
+    assertEquals(fullStats.rowReads, 0, "区間読みを持たない口で行読みが起きている");
+    assertEquals(fullStats.resident, 2, "常駐 shard 数（既定 = 最大 shard 2 本ぶんで頭打ち）");
     assert(
-      stats.residentBytes <= budget,
-      `常駐 ${stats.residentBytes} バイトが予算 ${budget} を超えている`,
+      fullStats.residentBytes <= budget,
+      `常駐 ${fullStats.residentBytes} バイトが予算 ${budget} を超えている`,
     );
+
+    // ②-b 行読み経路（seek の読み口）— probe は shard あたり数行なので方針表は全段が行読み。
+    // 253MiB の全量読みは 1 本も起きず、値は ②-a と**ビット同一**であること。
+    const distinct = new Set(tokens).size;
+    const rows = await openPle(budget, { range: true });
+    const byRows = await rows.gather(tokens);
+    assert("data" in byRows && byRows.data instanceof Float32Array);
+    assertProbeMatch(byRows.data, "行読み経路");
+    assertEquals(
+      [...new Uint32Array(byRows.data.buffer)],
+      [...new Uint32Array(byFull.data.buffer)],
+      "行読みの値が全量経路とビット一致しない",
+    );
+    const rowStats = rows.stats();
+    assertEquals(rowStats.loads, 0, "行読みで済む gather なのに shard 全量を読んでいる");
+    assertEquals(rowStats.rowReads, distinct, "行読みの行数が一意 token 数と違う");
+    assertEquals(rowStats.resident, 0, "行読みなのに常駐している");
+
     console.log(
-      `[e2e] gemma4 product PLE: probe ${tokens.length} token × ${LAYERS} 層 × ${PLE_DIM} 次元が` +
-        `ビット一致 / shard ${stats.loads} 本ロード・常駐 ${stats.resident} 本` +
-        `（${(stats.residentBytes / 1024 / 1024).toFixed(0)} / 予算 ${
+      `[e2e] gemma4 product PLE: probe ${tokens.length} token（一意 ${distinct}）× ${LAYERS} 層 ×` +
+        ` ${PLE_DIM} 次元が torch とビット一致 / 全量経路 = shard ${fullStats.loads} 本ロード・` +
+        `常駐 ${fullStats.resident} 本（${(fullStats.residentBytes / 1024 / 1024).toFixed(0)} / ` +
+        `予算 ${
           (budget / 1024 / 1024).toFixed(0)
-        } MiB）`,
+        } MiB）/ 行読み経路 = 全量 ${rowStats.loads} 本・` +
+        `行 ${rowStats.rowReads} 本`,
     );
   },
 });

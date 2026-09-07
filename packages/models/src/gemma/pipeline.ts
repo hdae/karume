@@ -52,6 +52,7 @@ import {
   loadManifest,
   type Manifest,
   type ModelEntry,
+  openAsset,
   type Quant,
   resolveFiles,
   type StreamAssetsOptions,
@@ -97,6 +98,7 @@ import {
   type Gemma4Ple,
   type Gemma4PleIndex,
   type Gemma4PleReadOptions,
+  type Gemma4PleShardSource,
   parseGemma4PleIndex,
 } from "./ple.ts";
 import {
@@ -154,13 +156,26 @@ export type Gemma4Assets = {
   /** PLE sidecar の索引（`ple.json` のバイト列）。 */
   readonly pleIndex: Uint8Array<ArrayBuffer>;
   /**
-   * PLE sidecar shard 1 本を取る（ファイル読み / hub の `streamAssets` — 呼び手の責務）。
+   * PLE sidecar shard 1 本の**読み口を開く**（ファイル / hub の `openAsset` — 呼び手の責務）。
    *
-   * `options.signal` は**その読みを起こした生成**の中断で、**best-effort**（無視しても壊れない
-   * — 中断が「この shard を読み終わってから」効くだけ）。1 本 250MiB 級なので、対話的に止める
-   * 使い方をするなら見る価値がある。
+   * 返す読み口は全量（`readAll`）が必須で、区間読み（`range`）は任意能力である。`range` を
+   * 持たせない読み口では従来どおり「触った shard を全量読み → LRU 常駐」だけが起き、持たせると
+   * decode の 1 token が 253MiB の全量読みではなく 9,100 B の 2 読みになる（ADR 0085 追記
+   * 2026-09-07 — 方針表は `src/gemma/ple.ts` の `createGemma4Ple`）。
+   *
+   * 返した読み口の `readAll` / `range.read` が受ける `options.signal` は**その読みを起こした
+   * 生成**の中断で、**best-effort**（無視しても壊れない — 中断が「この shard を読み終わって
+   * から」効くだけ）。全量読みは 1 本 250MiB 級なので、対話的に止める使い方をするなら見る
+   * 価値がある。
+   *
+   * MUST NOT: **開いた読み口が open 時の `options.signal` を保持しない**。handle は
+   * pipeline の寿命ぶんキャッシュされるので、最初の生成の signal を握った読み口を作ると、
+   * その生成が終わった後の読みが全部その中断に道連れになる。中断は読みごとの signal が担う。
    */
-  readonly readPleShard: (file: string, options?: Gemma4PleReadOptions) => Promise<ArrayBuffer>;
+  readonly openPleShard: (
+    file: string,
+    options?: Gemma4PleReadOptions,
+  ) => Promise<Gemma4PleShardSource>;
 };
 
 export type Gemma4PipelineOptions = {
@@ -178,6 +193,10 @@ export type Gemma4PipelineOptions = {
    *
    * NOTE: 本数ではなくバイトで受ける — shard 幅は資産世代で変わるので、「N 本」は世代ごとに
    * 違う RAM を意味する（ADR 0085 追記 2026-09-02）。
+   * NOTE: **区間読みを持つ取得元**（`denoDirectory` など）では意味が変わる — この予算は
+   * 「空きがあるときだけ全量で載せる」上限であって、追い出しは起きない（載らない shard は
+   * 行だけを読む）。絞っても読み直しは増えず、常駐が温まらないだけである（ADR 0085 追記
+   * 2026-09-07 の方針表）。
    */
   readonly maxResidentPleBytes?: number;
   /**
@@ -512,7 +531,10 @@ type Gemma4SidecarAssets = {
    * との突合にも索引が要るので、その 1 回をここへ持ち上げてある。
    */
   readonly pleIndex: Gemma4PleIndex;
-  readonly readPleShard: (file: string, options?: Gemma4PleReadOptions) => Promise<ArrayBuffer>;
+  readonly openPleShard: (
+    file: string,
+    options?: Gemma4PleReadOptions,
+  ) => Promise<Gemma4PleShardSource>;
 };
 
 /** `ple.json` のバイト列を索引へ落とす（fatal decode → JSON → 受理形）。 */
@@ -795,7 +817,7 @@ const buildGemma4Program = (
   // ③ PLE sidecar の行数（この突合は `createGemma4Ple` が持つ — 同じ検査を 2 実装持たない）。
   const ple = createGemma4Ple({
     index: assets.pleIndex,
-    readShard: assets.readPleShard,
+    openShard: assets.openPleShard,
     vocabSize,
     ...(options.maxResidentPleBytes === undefined
       ? {}
@@ -1156,28 +1178,46 @@ export class Gemma4Pipeline {
     // 突合の本体は {@link assertPleShardAssets}（GPU も重み shard も触っていないこの位置で呼ぶ）。
     const pleIndex = parsePleIndexAsset(assetBytes(where, assets, PLE_INDEX_ASSET));
     assertPleShardAssets(where, pleIndex, Object.keys(deferred));
-    const readPleShard = (
-      file: string,
-      readOptions: Gemma4PleReadOptions = {},
-    ): Promise<ArrayBuffer> => {
+    // MUST: 取得層のオプションから `signal` を落とす（`hub/components.ts` の相 2 と同じ理由 —
+    // ロード 1 回の寿命を表す signal を、以後の生成が使う読み口へ持ち越さない）。載せ直すのは
+    // **その読みを起こした生成**の signal だけで、寿命が読み 1 回と一致する。
+    const { signal: _load, onProgress: _progress, ...streamOptions } = hubOptions;
+    // MUST NOT: open へ生成の `signal` を渡さない。開くのは口を作るだけで安く、読み 1 回の
+    // 中断は `readAll` / `range.read` の `signal` が担う。handle は pipeline の寿命ぶん
+    // キャッシュされる（`ple.ts` の `sources`）ので、**最初の**生成の signal を保持する読み口を
+    // 作ると、その生成が終わった後の読みが全部その中断に道連れになる。
+    const openPleShard = async (file: string): Promise<Gemma4PleShardSource> => {
       if (!Object.hasOwn(deferred, file)) {
         throw new Error(
           `${where}: PLE sidecar の shard '${file}' が manifest の assets に無い` +
             `（manifest が遅延資産として持つ shard: ${Object.keys(deferred).join(" / ")}）`,
         );
       }
-      // MUST: 取得層のオプションから `signal` を落とす（`hub/components.ts` の相 2 と同じ理由 —
-      // ロード 1 回の寿命を表す signal を、以後の生成が使う読み口へ持ち越さない）。載せ直すのは
-      // **その読みを起こした生成**の signal だけで、寿命が読み 1 回と一致する。
-      const { signal: _load, onProgress: _progress, ...streamOptions } = hubOptions;
-      return readCachedAsset(where, loaded, deferred[file], {
-        ...streamOptions,
-        ...(readOptions.signal === undefined ? {} : { signal: readOptions.signal }),
-      });
+      const ref = deferred[file];
+      // 区間読みは**任意能力**（`openAsset` は取得元が持たなければ `undefined` を返す）。持たない
+      // 取得元では `range` を生やさず、従来どおり全量読み + LRU へ倒れる。
+      const reader = await openAsset(loaded, ref, streamOptions);
+      return {
+        // 行の位置検査は**宣言 size** で行う（実体長ではない — `Gemma4PleShardSource.bytes`）。
+        bytes: ref.size,
+        readAll: (options: Gemma4PleReadOptions = {}) =>
+          readCachedAsset(where, loaded, ref, {
+            ...streamOptions,
+            ...(options.signal === undefined ? {} : { signal: options.signal }),
+          }),
+        ...(reader === undefined ? {} : {
+          range: {
+            cost: reader.cost,
+            read: async (offset: number, length: number, options: Gemma4PleReadOptions = {}) =>
+              // hub が tight view を保証しているので、`buffer` がそのまま要求区間ちょうどになる。
+              (await reader.read(offset, length, options)).buffer,
+          },
+        }),
+      };
     };
     return await Gemma4Pipeline.#build(
       admitted,
-      { tokenizer: assetBytes(where, assets, TOKENIZER_ASSET), pleIndex, readPleShard },
+      { tokenizer: assetBytes(where, assets, TOKENIZER_ASSET), pleIndex, openPleShard },
       options,
     );
   }
@@ -1216,7 +1256,7 @@ export class Gemma4Pipeline {
     return await Gemma4Pipeline.#build(admitted, {
       tokenizer: input.tokenizer,
       pleIndex: parsePleIndexAsset(input.pleIndex),
-      readPleShard: input.readPleShard,
+      openPleShard: input.openPleShard,
     }, options);
   }
 

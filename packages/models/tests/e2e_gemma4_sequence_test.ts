@@ -52,6 +52,8 @@ import {
   streamShards,
 } from "../../runtime/tests/helpers/shard-files.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+// PLE shard の読み口（`Deno.open` の位置読み = 費用の型 seek）は helper が正本。
+import { openPleShardAt } from "./helpers/ple-source.ts";
 
 const PRODUCT_ROOT = new URL("../../../outputs/series/gemma4-e2b-product/", import.meta.url);
 const GOLDEN_ROOT = new URL("../../../outputs/series/gemma4-e2b-decode/", import.meta.url);
@@ -198,7 +200,7 @@ Deno.test({
     );
     const ple = createGemma4Ple({
       index,
-      readShard: (file) => readBuffer(PRODUCT_ROOT, file),
+      openShard: (file) => openPleShardAt(PRODUCT_ROOT, file),
       vocabSize: VOCAB,
       // 全 shard 常駐（生成の往復で読み直さない）= sidecar 全量ぶんの予算。
       maxResidentBytes: index.shards.reduce(

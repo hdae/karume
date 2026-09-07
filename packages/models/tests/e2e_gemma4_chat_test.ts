@@ -44,6 +44,8 @@ import {
   Gemma4Pipeline,
 } from "../gemma.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+// PLE shard の読み口（`Deno.open` の位置読み = 費用の型 seek）は helper が正本。
+import { openPleShardAt } from "./helpers/ple-source.ts";
 import { allResidentPleBytesAt } from "./helpers/ple-budget.ts";
 
 const PRODUCT_ROOT = new URL("../../../outputs/series/gemma4-e2b-product/", import.meta.url);
@@ -183,7 +185,7 @@ const openPipeline = async (): Promise<Gemma4Pipeline> => {
     model,
     tokenizer: await Deno.readFile(TOKENIZER_ASSET),
     pleIndex: await Deno.readFile(new URL(PLE_INDEX_FILE, PRODUCT_ROOT)),
-    readPleShard: (file) => readBuffer(PRODUCT_ROOT, file),
+    openPleShard: (file) => openPleShardAt(PRODUCT_ROOT, file),
     // 予算は索引から導く（= sidecar 全量常駐 → 範囲をまたぐ会話でも読み直しゼロ）。定数で
     // 書くと資産世代で shard 幅が変われば別の本数を意味してしまう — helper の doc。
   }, { maxResidentPleBytes: allResidentPleBytesAt(new URL(PLE_INDEX_FILE, PRODUCT_ROOT)) });

@@ -274,7 +274,7 @@ Deno.test("gemma4 fromAssets: config は fromPretrained と同じ門を、バイ
       model: [junk],
       tokenizer: junk,
       pleIndex: junk,
-      readPleShard: () => Promise.reject(new Error("gemma_config_test: PLE を読みに行った")),
+      openPleShard: () => Promise.reject(new Error("gemma_config_test: PLE を読みに行った")),
     });
 
   await t.step("未知キー", async () => {
@@ -506,7 +506,7 @@ Deno.test("assertGemma4ChunkBuckets: 受理集合は runtime に委ね、入口�
 // ---- PLE 索引と manifest の遅延資産の突合 -----------------------------------
 //
 // `fromPretrained` は「遅延側は PLE sidecar **ちょうど**」を MUST に掲げているが、実装は
-// `readPleShard` の中の存在確認だけだった（= 索引が知らない資産は永久に検出されず、索引に
+// 読み口を開くときの存在確認だけだった（= 索引が知らない資産は永久に検出されず、索引に
 // あって assets に無い shard はその範囲を初めて引いたターン = 会話の途中・3.7GiB のロード
 // 完了後まで落ちない）。門は `#build` の前（GPU も重み shard も未接触）に置く。
 

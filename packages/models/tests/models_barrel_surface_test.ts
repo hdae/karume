@@ -11,6 +11,25 @@
 
 import { assert, assertEquals } from "@std/assert";
 import * as models from "../mod.ts";
+import type {
+  Gemma4PleReadOptions as BarrelPleReadOptions,
+  Gemma4PleShardSource as BarrelPleSource,
+} from "../mod.ts";
+import type {
+  Gemma4PleReadOptions as SubpathPleReadOptions,
+  Gemma4PleShardSource as SubpathPleSource,
+} from "../gemma.ts";
+
+// 型 export の両建て（`Gemma4PleShardSource` と、その関数引数に現れる `Gemma4PleReadOptions` —
+// どちらも `fromAssets` の呼び手が**実装する**面）。値ではないので `Object.keys` には出ず、
+// 実行時のアサートでは縛れない。落とせるのは **`deno test`（`verify` の test 段）の型検査**
+// だけ（`deno task check` はテストを対象に含めない）なので、両面から取った型を突き合わせる
+// 束縛をここに置く（片方の 1 行が消えれば test 段が赤）。
+const _bothSurfacesExportPleSource: BarrelPleSource = {
+  bytes: 0,
+  readAll: () => Promise.resolve(new ArrayBuffer(0)),
+} satisfies SubpathPleSource;
+const _bothSurfacesExportPleReadOptions: BarrelPleReadOptions = {} satisfies SubpathPleReadOptions;
 
 Deno.test("barrel: 生成ループは公開面に無い（ADR 0083 決定 9 の格下げ）", () => {
   const surface = Object.keys(models);

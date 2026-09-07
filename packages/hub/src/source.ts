@@ -170,6 +170,9 @@ export type PinnedSource = {
    *
    * MUST NOT: ここでバイト列を取りに行かない — 開くのは読み口だけで、実際の読みは
    * {@link AssetRangeReader.read} が呼ばれたときに起きる。
+   * MUST NOT: 開いた handle が open 時の `signal` を保持しない — 読み口は消費側が寿命ぶん
+   * 掴み続ける前提なので、開いたときの中断を握ると以後の読みが全部それに道連れになる
+   * （中断は {@link AssetRangeReader.read} の `signal` が読み 1 回ごとに担う）。
    */
   readonly openFile?: (
     ref: FileRef,

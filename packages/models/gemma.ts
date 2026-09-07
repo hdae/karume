@@ -35,6 +35,17 @@ export type {
   Gemma4SequenceOptions,
 } from "./src/gemma/pipeline.ts";
 /**
+ * PLE sidecar shard 1 本の読み口（{@link Gemma4Assets.openPleShard} が返す形）。
+ *
+ * `fromAssets` を使う消費者がこれを**実装する**ので公開面に要る。全量（`readAll`）は必須、
+ * 区間読み（`range`）は任意能力で、持たせると decode の 1 token が 253MiB の全量読みではなく
+ * 9,100 B の 2 読みになる（ADR 0085 追記 2026-09-07）。読みへ透過するノブは `signal` 1 本で、
+ * **best-effort**（無視しても壊れない — 中断がその読みを終えてから効くだけ）。
+ */
+export type { Gemma4PleShardSource } from "./src/gemma/ple.ts";
+/** {@link Gemma4PleShardSource} の読み 1 回へ透過するノブ（`signal` 1 本・best-effort）。 */
+export type { Gemma4PleReadOptions } from "./src/gemma/ple.ts";
+/**
  * 多ターンの会話を持ち回る中間層（`chat` と `sequence` の間 — ADR 0083 追記 2026-09-02）。
  *
  * `chat` は 1 ターン = 1 sequence で過去 turn を毎回描き直し（会話が伸びるほど prefill が

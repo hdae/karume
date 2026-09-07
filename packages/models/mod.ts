@@ -140,7 +140,7 @@ export { Gemma4Pipeline } from "./src/gemma/pipeline.ts";
 /**
  * gemma4 の prefill バケットの既定（`Gemma4PipelineOptions.chunkBuckets` の省略時の値 —
  * `chunkLength` に加えて許す物理 chunk 行数の梯子）。短い発話を pad 無しで流すための列で、
- * 自分で足し引きするときの起点として出す。**暫定値**（`./gemma` を参照）。
+ * 自分で足し引きするときの起点として出す。実測で確定した列（`./gemma` を参照）。
  */
 export { GEMMA4_CHUNK_BUCKETS } from "./src/gemma/pipeline.ts";
 export type {
@@ -160,6 +160,16 @@ export type {
   /** `sequence()` の指定（この会話が確保する容量）。 */
   Gemma4SequenceOptions,
 } from "./src/gemma/pipeline.ts";
+/**
+ * PLE sidecar shard 1 本の読み口（`Gemma4Assets.openPleShard` が返す形 — `fromAssets` を使う
+ * 消費者が**実装する**側。区間読み `range` は任意能力で、持たせると decode の 1 token が
+ * 全量読みではなく行 2 区間の読みになる。`./gemma` を参照）。
+ */
+export type { Gemma4PleShardSource } from "./src/gemma/ple.ts";
+/**
+ * `Gemma4PleShardSource` の読み 1 回へ透過するノブ（`signal` 1 本・best-effort。`./gemma` を参照）。
+ */
+export type { Gemma4PleReadOptions } from "./src/gemma/ple.ts";
 /**
  * 多ターンの会話を持ち回る中間層（`chat` と `sequence` の間 — 会話の履歴を持ち、KV を継ぎ、
  * 容量が足りないターンは送る前に切り詰める。既定の切り詰めは `dropOldestTurns` =

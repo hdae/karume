@@ -415,7 +415,7 @@ def gemma4_assets(index: Mapping[str, Any]) -> dict[str, str]:
     """assets の宣言（asset 名 → 役割名）。
 
     MUST: PLE shard の asset 名は**索引が書いたファイル名そのもの**。読み手は
-    `readPleShard(shard.file)` で引くので、ここに別の綴り（連番や意味名）を挟むと索引と
+    `openPleShard(shard.file)` で引くので、ここに別の綴り（連番や意味名）を挟むと索引と
     取得キーの対応が「並び順で合わせる」形になり、片方だけ並べ替えた組が黙って通る。
     """
     assets = {
