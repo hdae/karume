@@ -1,5 +1,11 @@
 import { assertEquals, assertStrictEquals, assertThrows } from "@std/assert";
-import { parseSafetensors, SafetensorsError, tensorBytes } from "../src/format/safetensors.ts";
+import {
+  parseSafetensors,
+  parseSafetensorsHeader,
+  SafetensorsError,
+  safetensorsHeaderLength,
+  tensorBytes,
+} from "../src/format/safetensors.ts";
 import {
   buildSafetensors,
   f32Bytes,
@@ -267,4 +273,114 @@ Deno.test("parseSafetensors: data_offsets の逆転を拒否する", () => {
     new Uint8Array(8),
   );
   assertThrows(() => parseSafetensors(buffer), SafetensorsError, "逆転");
+});
+
+/**
+ * ヘッダだけを解く面（区間読みする呼び手のための部分適用）。データ節を 1 バイトも持たずに
+ * 全量解析と同じ表が出ること、prefix / ファイル長の取り違えが黙って通らないことを縛る。
+ */
+const HEADER_FIXTURE = buildSafetensors(
+  [
+    { name: "a", dtype: "F32", shape: [2, 1], data: f32Bytes([1, 2]) },
+    { name: "b", dtype: "I8", shape: [3], data: new Uint8Array([7, 8, 9]) },
+  ],
+  { karume_ir: "{}", extra: "x" },
+);
+
+Deno.test("parseSafetensorsHeader: ヘッダ区間だけで全量解析と同じ表を返す", () => {
+  const full = parseSafetensors(HEADER_FIXTURE);
+
+  // 呼び手の 2 段読み: 8 バイト読む → ヘッダ長 N を知る → 8+N バイトを読み直す。
+  const headerLength = safetensorsHeaderLength(new Uint8Array(HEADER_FIXTURE, 0, 8));
+  const prefix = new Uint8Array(HEADER_FIXTURE, 0, 8 + headerLength);
+  const header = parseSafetensorsHeader(prefix, HEADER_FIXTURE.byteLength);
+
+  assertEquals(header.dataStart, 8 + headerLength);
+  assertEquals([...header.metadata], [...full.metadata]);
+  // byteOffset はファイル先頭からの絶対値のまま — 呼び手はこれをそのまま区間読みへ渡す。
+  assertEquals([...header.tensors], [...full.tensors]);
+
+  // 固定長読み（例 64KiB）で余分に読んだ prefix でも同じ表 — 切り出しは 8+N の内側で閉じている。
+  assertEquals(
+    [
+      ...parseSafetensorsHeader(
+        new Uint8Array(HEADER_FIXTURE, 0, 8 + headerLength + 2),
+        HEADER_FIXTURE.byteLength,
+      ).tensors,
+    ],
+    [...full.tensors],
+  );
+  // prefix を `ArrayBuffer` のまま渡す成功経路（view 版と同じ表）。
+  assertEquals(
+    [
+      ...parseSafetensorsHeader(
+        HEADER_FIXTURE.slice(0, 8 + headerLength),
+        HEADER_FIXTURE.byteLength,
+      )
+        .tensors,
+    ],
+    [...full.tensors],
+  );
+
+  // 器の途中に置いた prefix（view の byteOffset 越し）でも同じ結果になる。
+  const vessel = new Uint8Array(new ArrayBuffer(16 + prefix.byteLength));
+  vessel.set(prefix, 16);
+  const offsetPrefix = vessel.subarray(16);
+  assertEquals(safetensorsHeaderLength(offsetPrefix), headerLength);
+  assertEquals(
+    [...parseSafetensorsHeader(offsetPrefix, HEADER_FIXTURE.byteLength).tensors],
+    [...full.tensors],
+  );
+});
+
+Deno.test("parseSafetensorsHeader: prefix がヘッダ途中で切れていれば必要長を文言に載せて落ちる", () => {
+  const need = 8 + safetensorsHeaderLength(HEADER_FIXTURE);
+  assertThrows(
+    () =>
+      parseSafetensorsHeader(
+        new Uint8Array(HEADER_FIXTURE, 0, need - 1),
+        HEADER_FIXTURE.byteLength,
+      ),
+    SafetensorsError,
+    `先頭 ${need} バイトが必要`,
+  );
+});
+
+Deno.test("parseSafetensorsHeader: ファイル長の取り違えは全量解析と同じ文言で落ちる", () => {
+  // 実長より長い = 覆えていない末尾がある / 短い = 宣言がデータ節をはみ出す。
+  assertThrows(
+    () => parseSafetensorsHeader(HEADER_FIXTURE, HEADER_FIXTURE.byteLength + 8),
+    SafetensorsError,
+    "末尾に未使用領域",
+  );
+  assertThrows(
+    () => parseSafetensorsHeader(HEADER_FIXTURE, HEADER_FIXTURE.byteLength - 4),
+    SafetensorsError,
+    "範囲外",
+  );
+  assertThrows(
+    () => parseSafetensors(HEADER_FIXTURE, HEADER_FIXTURE.byteLength - 4),
+    SafetensorsError,
+    "範囲外",
+  );
+
+  assertThrows(
+    () => parseSafetensorsHeader(HEADER_FIXTURE, -1),
+    SafetensorsError,
+    "非負整数でない",
+  );
+  assertThrows(() => parseSafetensorsHeader(HEADER_FIXTURE, 4), SafetensorsError, "短すぎる");
+});
+
+Deno.test("safetensorsHeaderLength: 8 バイト未満の prefix を拒否する", () => {
+  assertThrows(
+    () => safetensorsHeaderLength(new ArrayBuffer(7)),
+    SafetensorsError,
+    "先頭 8 バイトが必要",
+  );
+  assertThrows(
+    () => safetensorsHeaderLength(new Uint8Array(new ArrayBuffer(7))),
+    SafetensorsError,
+    "先頭 8 バイトが必要",
+  );
 });

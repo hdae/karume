@@ -4,11 +4,14 @@ import {
   type AssetProgress,
   type CacheDiagnostic,
   clearHubCache,
+  type DirectoryAdapter,
   fetchAssets,
   HubFetchError,
   type LoadedManifest,
   loadManifest,
+  localDirectory,
   ManifestFormatError,
+  openAsset,
   resolveFiles,
   type RetryDiagnostic,
 } from "../mod.ts";
@@ -1225,4 +1228,65 @@ Deno.test("clearHubCache: CacheStorage が無い環境は fail loudly（黙っ�
     const error = await assertRejects(() => clearHubCache(), Error);
     assert(error.message.includes("CacheStorage"), `${error.message} が原因を名指ししていない`);
   });
+});
+
+// ---- 区間読み（`openAsset` — `source.ts` ⑧）。HF 取得元は取得層の `openHfFile` 待ちでまだ
+// 能力を持たないので、この面は「持たない取得元での答え方」だけをここで固定する。
+
+Deno.test("openAsset: HF 取得元は区間読みを持たないので undefined（取得は 1 度も起きない）", async () => {
+  const mock = createMockFetch({ files: serveAll() });
+  const caches = new MemoryCacheStorage();
+  const loaded = await loadManifest({ repo: REPO, hubUrl: HUB_URL, revision: SHA }, {
+    fetch: mock.fetch,
+    caches,
+  });
+  const files = resolveFiles(loaded.manifest);
+  const ref = files[Object.keys(files)[0]];
+  const calls = mock.calls.length;
+  const entries = hubCache(caches).entries.size;
+
+  // 能力の差であって失敗ではない（呼び手は undefined を見て全量読みへ倒す）。
+  assertEquals(await openAsset(loaded, ref), undefined);
+  // 口を開くだけの面なので、network にもキャッシュにも触れない。
+  assertEquals(mock.calls.length, calls, "openAsset が取得を起こしている");
+  assertEquals(hubCache(caches).entries.size, entries, "openAsset がキャッシュへ書いている");
+});
+
+Deno.test("openAsset: abort 済み signal は口の有無に依らず reason をそのまま上げる", async () => {
+  const mock = createMockFetch({ files: serveAll() });
+  const remote = await loadManifest({ repo: REPO, hubUrl: HUB_URL, revision: SHA }, {
+    fetch: mock.fetch,
+    caches: new MemoryCacheStorage(),
+  });
+  const files = resolveFiles(remote.manifest);
+  const ref = files[Object.keys(files)[0]];
+
+  // 口を持つ取得元（位置読みのアダプター）を同じ manifest で 1 本作る。
+  const served = serveAll();
+  const lookup = (path: string): Uint8Array<ArrayBuffer> => {
+    const bytes = served.get(path);
+    if (bytes === undefined) throw new Error(`test-directory: ${path} を読めない`);
+    return bytes;
+  };
+  const adapter: DirectoryAdapter = {
+    readFile: (path) => Promise.resolve(new Uint8Array(lookup(path))),
+    readFileRange: (path, offset, length) =>
+      Promise.resolve(new Uint8Array(lookup(path).subarray(offset, offset + length))),
+  };
+  const local = await loadManifest(localDirectory(adapter, { label: "./models/test" }), {
+    caches: new MemoryCacheStorage(),
+  });
+
+  const controller = new AbortController();
+  const reason = new Error("test: 呼び出し側の中断");
+  controller.abort(reason);
+
+  // 中断は能力の差より先に見る — 口を持たない取得元でも `undefined` ではなく reason で落ちる。
+  for (const loadedSource of [remote, local]) {
+    const error = await assertRejects(
+      () => openAsset(loadedSource, ref, { signal: controller.signal }),
+      Error,
+    );
+    assertStrictEquals(error, reason);
+  }
 });

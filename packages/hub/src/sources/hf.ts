@@ -118,6 +118,10 @@ const pinnedHfSource = (
       });
     },
 
+    // NOTE: 区間読み（`source.ts` ⑧ `openFile`）はまだ持たない。取得層 `@hdae/fetch-cache` 0.8 の
+    // `openHfFile` が入った時点で、費用の型 = 戦略（blob → "seek" / stream → "scan"）として載せる。
+    // それまでこの取得元では `openAsset` が `undefined` を返し、呼び手は全量読みへ倒す。
+
     readFile: async (ref, { signal, onProgress, into }) => {
       return await fetchHfFile(
         target,

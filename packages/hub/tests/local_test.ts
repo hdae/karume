@@ -16,11 +16,12 @@ import {
   localDirectory,
   ManifestFormatError,
   ManifestReferenceError,
+  openAsset,
   prefetchAssets,
   resolveFiles,
   streamAssets,
 } from "../mod.ts";
-import type { AssetProgress } from "../mod.ts";
+import type { AssetProgress, DirectoryAdapter } from "../mod.ts";
 import { type FileRef, MANIFEST_FILENAME } from "../src/manifest.ts";
 import {
   DistributionSource,
@@ -369,4 +370,148 @@ Deno.test("localDirectory: 取得元ハンドルは不透明（loadManifest が�
   // 同じハンドルから何セッション開いても、取得元の状態は共有されない（毎回読み直す）。
   assertStrictEquals(first === second, false);
   assertEquals(directory.reads, [MANIFEST_FILENAME, MANIFEST_FILENAME]);
+});
+
+// ---- 区間読み（`openAsset` — `source.ts` ⑧）。ローカル取得元では**アダプターが位置読みを
+// 持つときだけ**口が生える。取得元側の責務は「宣言 size での検査」と「短い戻りを通さない」の
+// 2 つで、実体の読み方（`Deno.open` → `seek`）は `deno_directory_test.ts` の担当。
+
+/**
+ * 記録つきの位置読み。`short` を渡すと要求より 1 バイト少なく返し、`loose` を渡すと中身は
+ * 正しいまま余白のある buffer の中程を指す view（非 tight view）を返すアダプターになる。
+ */
+type RangeDirectoryOptions = { readonly short?: boolean; readonly loose?: boolean };
+
+const rangeDirectory = (
+  files: ReadonlyMap<string, Uint8Array<ArrayBuffer>>,
+  options: RangeDirectoryOptions = {},
+) => {
+  const base = memoryDirectory(files);
+  /** `readFileRange` に降りてきた要求（path / offset / length）。 */
+  const ranges: [string, number, number][] = [];
+  const adapter: DirectoryAdapter = {
+    ...base.adapter,
+    readFileRange: (path, offset, length) => {
+      ranges.push([path, offset, length]);
+      const bytes = files.get(path);
+      if (bytes === undefined) {
+        return Promise.reject(new Error(`test-directory: ${path} を読めない`));
+      }
+      const served = options.short === true ? Math.max(length - 1, 0) : length;
+      const slice = bytes.subarray(offset, offset + served);
+      if (options.loose !== true) return Promise.resolve(new Uint8Array(slice));
+      // 余白のある buffer の中程へ写した view（中身も長さも正しい — 落ちる理由を view の形だけ
+      // に絞る）。
+      const padded = new Uint8Array(new ArrayBuffer(slice.byteLength + 8));
+      padded.set(slice, 4);
+      return Promise.resolve(padded.subarray(4, 4 + slice.byteLength));
+    },
+  };
+  return { ...base, adapter, ranges };
+};
+
+const openRangeLocal = async (
+  files: ReadonlyMap<string, Uint8Array<ArrayBuffer>>,
+  options: Parameters<typeof localDirectory>[1] = {},
+  directoryOptions: RangeDirectoryOptions = {},
+) => {
+  const directory = rangeDirectory(files, directoryOptions);
+  const loaded = await loadManifest(
+    localDirectory(directory.adapter, { label: LABEL, ...options }),
+    { caches: new HostileCacheStorage() },
+  );
+  return { directory, loaded };
+};
+
+Deno.test("openAsset: 位置読みを持たないアダプターでは undefined（全量読みへ倒す）", async () => {
+  const dist = await buildLocalDist();
+  const { directory, loaded } = await openLocal(dist.files);
+  const ref = resolveFiles(loaded.manifest)["tokenizer"];
+  directory.reads.length = 0;
+
+  // 能力の差であって失敗ではない（口が無いことを fail loudly にすると、取得元を差し替えられる
+  // はずのアプリが取得元ごとに分岐する羽目になる）。
+  assertEquals(await openAsset(loaded, ref), undefined);
+  assertEquals(directory.reads, [], "口を開くだけで実体を読んでいる");
+});
+
+Deno.test("openAsset: 位置読みを持つアダプターでは seek の口が開き、要求区間だけが降りる", async () => {
+  const dist = await buildLocalDist();
+  const { directory, loaded } = await openRangeLocal(dist.files);
+  const ref = resolveFiles(loaded.manifest)["tokenizer"];
+  directory.reads.length = 0;
+
+  const reader = await openAsset(loaded, ref);
+  assert(reader !== undefined, "位置読みを持つのに口が開かない");
+  assertEquals(reader.cost, "seek");
+  assertEquals(directory.ranges, [], "開いただけで実体を読んでいる");
+
+  const bytes = await reader.read(4, 3);
+  assertEquals(bytes, payloadFor(TOKENIZER_PATH).subarray(4, 7).slice());
+  // 全量読み（`readFile`）へ降りていないこと = 行だけを引く面が成立していること。
+  assertEquals(directory.ranges, [[TOKENIZER_PATH, 4, 3]]);
+  assertEquals(directory.reads, [], "区間読みが全量読みへ降りている");
+});
+
+Deno.test("openAsset: 宣言 size の外はアダプターを 1 度も呼ばずに落ちる", async () => {
+  const dist = await buildLocalDist();
+  const { directory, loaded } = await openRangeLocal(dist.files);
+  const ref = resolveFiles(loaded.manifest)["tokenizer"];
+  const reader = await openAsset(loaded, ref);
+  assert(reader !== undefined, "口が開かない");
+
+  // 実体は宣言より長いことがある（別 quant の取り違え）ので、実体長ではなく宣言 size が門。
+  const error = await assertRejects(() => reader.read(ref.size - 1, 2), Error);
+  assert(error.message.includes(TOKENIZER_PATH), `${error.message} が path を名乗っていない`);
+  assert(error.message.includes(String(ref.size)), `${error.message} が宣言 size を名乗っていない`);
+  assertEquals(directory.ranges, [], "範囲外の要求がアダプターへ降りている");
+});
+
+Deno.test("openAsset: 短い戻りは throw（0 埋めの行を正常な値として配らない）", async () => {
+  const dist = await buildLocalDist();
+  const { loaded } = await openRangeLocal(dist.files, {}, { short: true });
+  const ref = resolveFiles(loaded.manifest)["tokenizer"];
+  const reader = await openAsset(loaded, ref);
+  assert(reader !== undefined, "口が開かない");
+
+  const error = await assertRejects(() => reader.read(0, 8), Error);
+  assert(error.message.includes(TOKENIZER_PATH), `${error.message} が path を名乗っていない`);
+  assert(error.message.includes("7"), `${error.message} が実際のバイト数を名乗っていない`);
+});
+
+Deno.test("openAsset: 非 tight view を返すアダプターは fail loudly（余白つきの view を配らない）", async () => {
+  const dist = await buildLocalDist();
+  const { loaded } = await openRangeLocal(dist.files, {}, { loose: true });
+  const ref = resolveFiles(loaded.manifest)["tokenizer"];
+  const reader = await openAsset(loaded, ref);
+  assert(reader !== undefined, "口が開かない");
+
+  // 消費側は返ったバイト列をそのまま TypedArray として読むので、余白のある view は値が
+  // ずれる。検査は共通層（`fetch.ts`）— 取得元ごとに置くと同じ不変条件の写しが増える。
+  const error = await assertRejects(() => reader.read(0, 8), Error);
+  assert(
+    error.message.includes("buffer 全体を占めていない"),
+    `${error.message} が tight view 違反を名乗っていない`,
+  );
+  assert(error.message.includes(TOKENIZER_PATH), `${error.message} が path を名乗っていない`);
+});
+
+Deno.test("openAsset: 越境参照は参照先の取得元の口で解決する", async () => {
+  const dist = await buildLocalDist({ cross: true });
+  // セッション側は位置読みを持たず、越境先だけが持つ形（能力は取得元ごとに違う）。
+  const cross = rangeDirectory(dist.crossFiles);
+  const { loaded } = await openLocal(dist.files, {
+    crossRepo: { [CROSS_REPO]: localDirectory(cross.adapter, { label: "./models/共有" }) },
+  });
+  const files = resolveFiles(loaded.manifest);
+
+  assertEquals(await openAsset(loaded, files["tokenizer"]), undefined, "自リポの口が生えている");
+  const reader = await openAsset(loaded, files["text_encoder"]);
+  assert(reader !== undefined, "越境先の口が開かない");
+  assertEquals(reader.cost, "seek");
+
+  // 越境先の実体（同じ path 文字列でもセッション側とはバイト列が違う）から引けている。
+  const bytes = await reader.read(0, 5);
+  assertEquals(bytes, payloadFor(`${CROSS_REPO}/${CROSS_PATH}`).subarray(0, 5).slice());
+  assertEquals(cross.ranges, [[CROSS_PATH, 0, 5]]);
 });

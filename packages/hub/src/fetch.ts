@@ -42,6 +42,7 @@ import {
   type StreamAssetsOptions,
 } from "./session.ts";
 import {
+  type AssetRangeReader,
   type DistributionSource,
   driverOf,
   isDistributionSource,
@@ -539,6 +540,54 @@ export const streamAssets = async function* (
     // （runtime の `ModelShard.bytes`）。器を使わない取得元では従来どおり束縛ごと到達不能になる。
     yield { id: ref.path, bytes: asset };
   }
+};
+
+/**
+ * 資産 1 本の**区間読み口**を開く（`source.ts` ⑧）。全量面 {@link fetchAssets} / 逐次面
+ * {@link streamAssets} が「宣言 size を丸ごと 1 本」を単位にするのに対し、この面は同じ 1 本から
+ * `[offset, offset + length)` だけを引く — 数百 MiB の表から数 KB の行だけが要る消費側のための面。
+ *
+ * **取得元がその能力を持たなければ `undefined`**（HF 取得元は現状持たない）。fail loudly に
+ * しないのは相 1（{@link prefetchAssets}）と同じ理由で、持たないことは失敗ではなく能力の差
+ * だから — 呼び手は `undefined` を見て全量読みへ倒す（分岐は 1 箇所で済む）。
+ *
+ * 読み口は**費用の型**を名乗る（{@link AssetRangeReader.cost}）。呼び手はそれで「行読みに
+ * 切り替えてよい行数の上限」を変える — `"scan"` の取得元では offset に比例した読み飛ばしが
+ * 1 行ごとに乗るので、行数が増えると全量 1 回の方が安くなる。
+ *
+ * ref の取得元は逐次面と同じ解決（越境参照は宣言された (repo, revision) の取得元）で決まる。
+ * **network にもキャッシュにも書かない** — 開くのは読み口だけで、実体に触れるのは
+ * {@link AssetRangeReader.read} を呼んだときだけ。取得の文脈付け（{@link HubError} 系への
+ * 包み直し）は通らない: この面は取得ではないので、失敗は取得元の素の `Error` として上がる。
+ *
+ * この面が見るのは**宣言 `size` の境界だけ**で、全量面の size 門（`sizeViolation` →
+ * `IntegrityError`）も sha256 の照合も掛からない（区間だけを読む以上、宣言と照合できる
+ * 全量が手元に無い）。実体の破損は読んだ行の値として現れる。
+ *
+ * 面ごとの作法（`fetch` / `caches` / `headers` / `onCacheError` / `onRetry`）は他の面と同じく
+ * **この呼び出しに渡した分だけ**が効く（ADR 0086 決定 1 — 取得元は生成時ではなく `pin` ごとに
+ * 作法を受け取る）。ローカル取得元では 1 つも効かない（HTTP 取得元専用の語彙）。
+ */
+export const openAsset = async (
+  loaded: LoadedManifest,
+  ref: FileRef,
+  options: LoadManifestOptions = {},
+): Promise<AssetRangeReader | undefined> => {
+  // 中断は口の有無より先に見る（取得元の能力差で中断の見え方が変わらない — 共通層の作法）。
+  options.signal?.throwIfAborted();
+  const source = sourceForRef(pinnedSourceOf(loaded, options), ref);
+  const openFile = source.openFile;
+  if (openFile === undefined) return undefined;
+  const reader = await openFile(ref, {
+    ...(options.signal === undefined ? {} : { signal: options.signal }),
+  });
+  // tight view の検査も共通層の作法（`source.ts` の MUST）— 取得元ごとに置くと、取得元が
+  // 増えるたびに同じ不変条件を書き直すことになる。
+  return {
+    cost: reader.cost,
+    read: async (offset, length, readOptions) =>
+      assertTightView(await reader.read(offset, length, readOptions), ref.path),
+  };
 };
 
 /**

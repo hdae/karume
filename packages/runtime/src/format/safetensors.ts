@@ -59,7 +59,7 @@ export type TensorView = {
   readonly name: string;
   readonly dtype: SafetensorsDtype;
   readonly shape: readonly number[];
-  /** buffer 先頭からの絶対 byte offset（データ節相対ではない）。 */
+  /** ファイル先頭からの絶対 byte offset（データ節相対ではない）。 */
   readonly byteOffset: number;
   readonly byteLength: number;
 };
@@ -67,6 +67,20 @@ export type TensorView = {
 export type SafetensorsFile = {
   readonly buffer: ArrayBuffer;
   readonly metadata: ReadonlyMap<string, string>;
+  readonly tensors: ReadonlyMap<string, TensorView>;
+};
+
+/**
+ * ヘッダだけを解いた結果（データ節のバイトは持たない）。
+ *
+ * テンソル表の検査（被覆・整列・末尾）は宣言とファイル長だけで完結するので、区間読みする
+ * 呼び手はファイル全量を持たずにこの表を得られる。
+ */
+export type SafetensorsHeader = {
+  /** データ節の先頭（ファイル先頭からの絶対 byte offset = 8 + ヘッダ長）。 */
+  readonly dataStart: number;
+  readonly metadata: ReadonlyMap<string, string>;
+  /** byteOffset は {@link TensorView} どおりファイル先頭からの絶対値。 */
   readonly tensors: ReadonlyMap<string, TensorView>;
 };
 
@@ -176,8 +190,11 @@ const parseDeclaration = (name: string, raw: unknown): DeclaredTensor => {
   return { name, dtype, shape, begin, end };
 };
 
-const decodeHeader = (buffer: ArrayBuffer, headerLength: number): Record<string, unknown> => {
-  const bytes = new Uint8Array(buffer, HEADER_LENGTH_BYTES, headerLength);
+const decodeHeader = (
+  prefix: Uint8Array<ArrayBuffer>,
+  headerLength: number,
+): Record<string, unknown> => {
+  const bytes = prefix.subarray(HEADER_LENGTH_BYTES, HEADER_LENGTH_BYTES + headerLength);
   let text: string;
   try {
     text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
@@ -194,42 +211,73 @@ const decodeHeader = (buffer: ArrayBuffer, headerLength: number): Record<string,
   return parsed;
 };
 
-/**
- * ファイル全体を 1 本の ArrayBuffer で受け取り、テンソル表を厳密に検査して view を返す。
- * view はコピーを作らず buffer 上の byteOffset / byteLength で参照する。
- *
- * `byteLength` はファイルの実長（既定 = buffer 全体）。供給側が **器を使い回す**（最大 shard 長の
- * buffer へ毎回の shard を先頭から読む — ADR 0070 追記の RAM ピーク係数 1 化）と buffer の末尾に
- * 前回の残りが居るので、ファイル長を別に受けて「データ節末尾の未使用領域」の検査をその長さで
- * 行う。buffer より長い指定は fail loudly（ファイルが器に収まっていない）。
- */
-export const parseSafetensors = (
-  buffer: ArrayBuffer,
-  byteLength: number = buffer.byteLength,
-): SafetensorsFile => {
-  if (!Number.isInteger(byteLength) || byteLength < 0 || byteLength > buffer.byteLength) {
-    throw new SafetensorsError(
-      `ファイル長 ${byteLength} が buffer（${buffer.byteLength} バイト）に収まっていない`,
-    );
-  }
-  if (byteLength < HEADER_LENGTH_BYTES) {
-    throw new SafetensorsError(
-      `ファイルが短すぎる: ${byteLength} バイト（ヘッダ長すら無い）`,
-    );
-  }
-  const rawHeaderLength = new DataView(buffer).getBigUint64(0, true);
-  if (rawHeaderLength > BigInt(Number.MAX_SAFE_INTEGER)) {
-    throw new SafetensorsError(`ヘッダ長 ${rawHeaderLength} が安全整数を超える`);
-  }
-  const headerLength = Number(rawHeaderLength);
-  const dataStart = HEADER_LENGTH_BYTES + headerLength;
-  if (dataStart > byteLength) {
-    throw new SafetensorsError(
-      `ヘッダ長 ${headerLength} がファイル長 ${byteLength} を超える`,
-    );
-  }
+// 判別は `ArrayBuffer.isView`（`instanceof ArrayBuffer` は realm を跨ぐと false になり、
+// 別 realm の ArrayBuffer が view として扱われて `SafetensorsError` ではなく TypeError で落ちる）。
+const asPrefixBytes = (prefix: Uint8Array<ArrayBuffer> | ArrayBuffer): Uint8Array<ArrayBuffer> =>
+  ArrayBuffer.isView(prefix) ? prefix : new Uint8Array(prefix);
 
-  const header = decodeHeader(buffer, headerLength);
+/**
+ * 先頭 8 バイトからヘッダ長（ヘッダ JSON のバイト数）を読む。
+ *
+ * 区間読みする呼び手が「8 バイト読む → N を知る → 8+N バイトを読み直す」の 2 段を踏むための
+ * 入口。prefix はファイル先頭からの連続した区間で、8 バイト以上あればよい。
+ *
+ * MUST: 2 段目の読みは**既知のファイル長で clamp する** — この面はファイル長を受け取らないので
+ * 見られるのは安全整数超えだけで、長さの妥当性は {@link parseSafetensorsHeader} が唯一検査する。
+ * 壊れたヘッダ長（例: 1 TiB）をそのまま読み長にすると、確保か読みが先に RangeError / OOM で
+ * 落ち、`SafetensorsError` に到達できない。呼び手はファイル長を必ず持っている
+ * （{@link parseSafetensorsHeader} の必須引数）。
+ */
+export const safetensorsHeaderLength = (prefix: Uint8Array<ArrayBuffer> | ArrayBuffer): number => {
+  const bytes = asPrefixBytes(prefix);
+  if (bytes.byteLength < HEADER_LENGTH_BYTES) {
+    throw new SafetensorsError(
+      `ヘッダ長を読むには先頭 ${HEADER_LENGTH_BYTES} バイトが必要（prefix は ${bytes.byteLength} バイト）`,
+    );
+  }
+  const raw = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getBigUint64(0, true);
+  if (raw > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new SafetensorsError(`ヘッダ長 ${raw} が安全整数を超える`);
+  }
+  return Number(raw);
+};
+
+/**
+ * ファイル先頭の区間（8 + ヘッダ長バイト以上）と**ファイル全長**からヘッダを解く。
+ *
+ * データ節のバイトを 1 つも読まずに済むのは、被覆・整列・末尾の検査が「宣言の集合」と
+ * 「ファイル長」だけで閉じているため。行だけを区間読みする呼び手（PLE の decode 経路）は
+ * この表の byteOffset / byteLength をそのまま読み口へ渡す。
+ *
+ * prefix が足りない場合は必要な長さを文言に載せて fail loudly — 呼び手が読み足す長さを
+ * 例外から決められる MUST（勝手に 0 埋めして解くと壊れたヘッダを黙って受理する）。
+ */
+export const parseSafetensorsHeader = (
+  prefix: Uint8Array<ArrayBuffer> | ArrayBuffer,
+  fileLength: number,
+): SafetensorsHeader => {
+  if (!Number.isInteger(fileLength) || fileLength < 0) {
+    throw new SafetensorsError(`ファイル長 ${fileLength} が非負整数でない`);
+  }
+  if (fileLength < HEADER_LENGTH_BYTES) {
+    throw new SafetensorsError(
+      `ファイルが短すぎる: ${fileLength} バイト（ヘッダ長すら無い）`,
+    );
+  }
+  const bytes = asPrefixBytes(prefix);
+  const headerLength = safetensorsHeaderLength(bytes);
+  const dataStart = HEADER_LENGTH_BYTES + headerLength;
+  if (dataStart > fileLength) {
+    throw new SafetensorsError(
+      `ヘッダ長 ${headerLength} がファイル長 ${fileLength} を超える`,
+    );
+  }
+  if (bytes.byteLength < dataStart) {
+    throw new SafetensorsError(
+      `ヘッダを解くには先頭 ${dataStart} バイトが必要（prefix は ${bytes.byteLength} バイト）`,
+    );
+  }
+  const header = decodeHeader(bytes, headerLength);
   const metadata = new Map<string, string>();
   const declared: DeclaredTensor[] = [];
   for (const [name, value] of Object.entries(header)) {
@@ -246,7 +294,7 @@ export const parseSafetensors = (
     declared.push(parseDeclaration(name, value));
   }
 
-  const dataLength = byteLength - dataStart;
+  const dataLength = fileLength - dataStart;
   const ordered = [...declared].sort((a, b) => a.begin - b.begin || a.end - b.end);
   const tensors = new Map<string, TensorView>();
   // データ節は宣言の集合で隙間なく覆われる MUST — 重複は同一バイトの二重意味、隙間と
@@ -291,6 +339,31 @@ export const parseSafetensors = (
   if (cursor !== dataLength) {
     throw new SafetensorsError(`データ節末尾に未使用領域が ${dataLength - cursor} バイトある`);
   }
+  return { dataStart, metadata, tensors };
+};
+
+/**
+ * ファイル全体を 1 本の ArrayBuffer で受け取り、テンソル表を厳密に検査して view を返す。
+ * view はコピーを作らず buffer 上の byteOffset / byteLength で参照する。
+ *
+ * `byteLength` はファイルの実長（既定 = buffer 全体）。供給側が **器を使い回す**（最大 shard 長の
+ * buffer へ毎回の shard を先頭から読む — ADR 0070 追記の RAM ピーク係数 1 化）と buffer の末尾に
+ * 前回の残りが居るので、ファイル長を別に受けて「データ節末尾の未使用領域」の検査をその長さで
+ * 行う。buffer より長い指定は fail loudly（ファイルが器に収まっていない）。
+ *
+ * 検査そのものは {@link parseSafetensorsHeader} の 1 実装だけが持つ MUST — 全量経路と区間読み
+ * 経路で受理する形が食い違わないため。
+ */
+export const parseSafetensors = (
+  buffer: ArrayBuffer,
+  byteLength: number = buffer.byteLength,
+): SafetensorsFile => {
+  if (!Number.isInteger(byteLength) || byteLength < 0 || byteLength > buffer.byteLength) {
+    throw new SafetensorsError(
+      `ファイル長 ${byteLength} が buffer（${buffer.byteLength} バイト）に収まっていない`,
+    );
+  }
+  const { metadata, tensors } = parseSafetensorsHeader(buffer, byteLength);
   return { buffer, metadata, tensors };
 };
 

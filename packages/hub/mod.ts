@@ -9,7 +9,8 @@
  * 資産を取る
  * （{@link fetchAssets}）/ shard を 2 相で逐次受け取る（{@link streamAssets} — RAM ピーク
  * O(最大 shard)。`docs/decisions/0070-shard-loading-admission.md` 決定 2）/ 資産を先に永続
- * キャッシュへ落とす（{@link prefetchAssets} — 逐次面の相 1 単体）/ 失敗を型で捌く
+ * キャッシュへ落とす（{@link prefetchAssets} — 逐次面の相 1 単体）/ 資産 1 本の区間だけを読む
+ * （{@link openAsset} — 取得元が持たなければ `undefined`）/ 失敗を型で捌く
  * （{@link HubError} 以下）/ キャッシュの診断を受け取る（{@link CacheDiagnostic}）/
  * 取得層の再試行（429 / 503 の `Retry-After` 追従）の通知を受け取る（{@link RetryDiagnostic}）/
  * キャッシュを消して容量を空ける（{@link clearHubCache}）/ 選択が落とし済みかを照会する
@@ -78,6 +79,13 @@ export type {
 } from "./src/inventory.ts";
 export { fetchAssets, loadManifest, prefetchAssets, streamAssets } from "./src/fetch.ts";
 export type { StreamedAsset } from "./src/fetch.ts";
+/**
+ * 資産 1 本の区間読み（{@link openAsset} — 全量ではなく `[offset, offset + length)` だけを引く。
+ * **任意能力**なので、持たない取得元では `undefined` が返り、呼び手は全量読みへ倒す）。
+ * 作法（{@link LoadManifestOptions}）は他の面と同じくこの呼び出しに渡した分だけが効く。
+ */
+export { openAsset } from "./src/fetch.ts";
+export type { AssetRangeReader } from "./src/source.ts";
 export type { AssetPhase, AssetProgress } from "./src/progress.ts";
 export type {
   CacheDiagnostic,

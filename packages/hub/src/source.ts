@@ -18,6 +18,11 @@
  * （⑥{@link PinnedSource.inventory} / ⑦{@link PinnedSource.evict}）。どちらも**optional 能力**で、
  * 「取ってきたものを溜めている」取得元だけが本当に答えられる質問。
  *
+ * さらに ⑧ある `FileRef` の**区間だけ**を読む（{@link PinnedSource.openFile} =
+ * {@link AssetRangeReader}）。これも**optional 能力**で、「全量を読まずに数 KB を引く」ことが
+ * 成立する取得元だけが名乗る（③との違いは、返すのが宣言 size 全部ではなく `[offset, offset+length)`
+ * だけという点だけ）。
+ *
  * MUST: 進捗・並行度（in-flight バイト予算）・中断の透過・tight view の検査・エラーの文脈は
  * 取得元固有の能力ではなく**共通層の作法**として `fetch.ts` に残す。取得元へ降ろすと、
  * 取得元が増えるたびに同じ不変条件を書き直すことになる。
@@ -85,6 +90,43 @@ export type FileReadOptions = {
   readonly into?: () => Uint8Array<ArrayBuffer>;
 };
 
+/**
+ * 資産 1 本の**区間読み口**（{@link PinnedSource.openFile} が返す ⑧の能力）。全量読み
+ * （{@link PinnedSource.readFile}）と違い、宣言 size のうち欲しい `[offset, offset + length)` だけを
+ * 返す — 数百 MiB の shard から数 KB の行だけを引く消費側（層ごとの埋め込み表の decode）のための面。
+ *
+ * {@link cost} が**費用の型**を名乗るのは、消費側が「行読みに切り替えてよい行数の上限」をそれで
+ * 変えるから: `"scan"` の取得元では 1 行が offset に比例した読み飛ばしを伴うので、全量 1 回の方が
+ * 安くなる行数がある。数値（ms / バイト毎秒）ではなく型で名乗るのは、実測値が環境（ブラウザ /
+ * ランタイム / ディスク）で 2 桁動く一方、**どちらの型か**は取得元の実装で決まって動かないため。
+ *
+ * 読み口は**読みごとに開き直してよい**（fd や handle を保持しない — `denoDirectory` は read の
+ * たびに `Deno.open` する）。実測 9,100 B × 2,000 回で 46 µs/read に対し fd 保持は 23 µs/read で、
+ * 差は decode 1 token の壁（数十 ms）に対して無視できる。したがって**閉じる面は持たない** —
+ * 開きっぱなしの資源が無いので、呼び手に解放の責務が生えない。
+ */
+export type AssetRangeReader = {
+  /**
+   * `"seek"` = offset に依らず小さい（ファイルの位置読み・ブラウザの遅延 Blob の `slice`）/
+   * `"scan"` = offset に比例する（本文ストリームの読み飛ばし）。
+   */
+  readonly cost: "seek" | "scan";
+  /**
+   * `[offset, offset + length)` を返す。
+   *
+   * MUST: `length` ちょうどを返す（短く返さない）。要求が実体の外へ出る・実体が宣言より短くて
+   * 埋まらない、いずれも fail loudly — 短い戻りを黙って通すと、消費側は「0 埋めされた行」を
+   * 正常な値として読む。
+   * MUST: buffer 全体を占める view（tight view）を返す — 消費側は返ったバイト列をそのまま
+   * TypedArray として読む。
+   */
+  readonly read: (
+    offset: number,
+    length: number,
+    options?: { readonly signal?: AbortSignal },
+  ) => Promise<Uint8Array<ArrayBuffer>>;
+};
+
 /** manifest 1 本の読みの作法。 */
 export type ManifestReadOptions = {
   readonly signal?: AbortSignal;
@@ -121,6 +163,18 @@ export type PinnedSource = {
    * 満たす（ADR 0070 決定 2 の読み替え）。
    */
   readonly prefetchFile?: (ref: FileRef, options: FileReadOptions) => Promise<void>;
+  /**
+   * ⑧区間読み口を開く（**optional 能力**）— {@link prefetchFile} と同じ流儀で、**持たない取得元が
+   * 正当**（HTTP + 永続キャッシュのように、区間だけを安く取り出す口をまだ持たない取得元がある）。
+   * 共通層はその場合 `openAsset` から `undefined` を返し、消費側は全量読みへ倒す。
+   *
+   * MUST NOT: ここでバイト列を取りに行かない — 開くのは読み口だけで、実際の読みは
+   * {@link AssetRangeReader.read} が呼ばれたときに起きる。
+   */
+  readonly openFile?: (
+    ref: FileRef,
+    options: { readonly signal?: AbortSignal },
+  ) => Promise<AssetRangeReader>;
   /**
    * ⑤越境参照（`FileRef` の `repo` / `revision` — ADR 0038 §7）の取得元。参照先は世代識別子
    * 固定が必須なので、越境先で世代の解決は起きない。

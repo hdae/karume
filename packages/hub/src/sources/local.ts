@@ -10,6 +10,11 @@
  * - **相 1（prefetch）を持たない** — CacheStorage を通らないので「温める」に意味がない。
  *   逐次面は相 2 だけで同じ RAM ピーク（O(最大 shard)）を満たす（`source.ts` ④）。バイト列の
  *   複製が 1 つも増えないのがローカル取得元の最大の利点で、キャッシュへ写すのは害でしかない。
+ * - **区間読み（`source.ts` ⑧）を持てる** — アダプターが位置読み（`readFileRange`）を持つときだけ
+ *   `openFile` が生え、費用の型は `"seek"`（offset に依らない）。HF 取得元は現状これを持たない。
+ *   ⑧ が見るのは**宣言 size の境界だけ**で、全量面の size 門（`sizeViolation`）も sha256 も
+ *   掛からない（区間だけを読む以上、宣言と照合できる全量が手元に無い）— 実体の破損は読んだ行の
+ *   値として現れる。
  * - **検証は size 厳密一致のみ**（sha256 は信頼する）。手元の
  *   ファイルは配布元と同じ「取得物」ではなく利用者の資産で、毎起動の全量ハッシュ（数 GiB）に
  *   見合う脅威が無い。size は読み終えた時点でタダで分かるので門として残す（途中で切れた
@@ -23,9 +28,10 @@
  * 取得失敗として `cause` に残したまま包む。
  */
 
-import { fileRefKey, MANIFEST_FILENAME, MAX_MANIFEST_BYTES } from "../manifest.ts";
+import { type FileRef, fileRefKey, MANIFEST_FILENAME, MAX_MANIFEST_BYTES } from "../manifest.ts";
 import type { LoadManifestOptions } from "../session.ts";
 import {
+  type AssetRangeReader,
   DistributionSource,
   driverOf,
   type PinnedSource,
@@ -51,6 +57,11 @@ import {
  * **ファイルの実長**を返す。`target` に収まらないファイルは読まずに（または途中で止めて）実長だけ
  * を返す — size 違反を名乗るのは共通層（`sizeViolation`）で、アダプターは判定しない。持たない
  * アダプターは `readFile` だけで従来どおり動く（器は確保されない）。
+ *
+ * `readFileRange`（任意）は**区間読み**（`source.ts` ⑧）の実体側: `[offset, offset + length)` を
+ * `length` ちょうど返す（足りなければ throw — 短い戻りを返さない）。ディレクトリの実体は位置読みが
+ * できるので、これを持つアダプターの読み口は費用の型 `"seek"` を名乗る。持たないアダプター
+ * （区間だけを安く取れない読み口）では `openFile` ごと生えず、消費側は全量読みへ倒す。
  */
 export type DirectoryAdapter = {
   readonly readFile: (
@@ -62,6 +73,12 @@ export type DirectoryAdapter = {
     target: Uint8Array<ArrayBuffer>,
     options: { readonly signal?: AbortSignal },
   ) => Promise<number>;
+  readonly readFileRange?: (
+    path: string,
+    offset: number,
+    length: number,
+    options: { readonly signal?: AbortSignal },
+  ) => Promise<Uint8Array<ArrayBuffer>>;
 };
 
 /** {@link localDirectory} の設定。 */
@@ -106,11 +123,56 @@ const missingCrossRepo = (label: string, repo: string, revision: string): Error 
       `（宣言 revision ${revision} — 隣接する同名ディレクトリを推測して読むことはしない）`,
   );
 
+/**
+ * ⑧区間読み口（`source.ts`）。**開く時点では実体に触れない** — 読みは `read` ごとに起きるので、
+ * 開いたまま使わなければ I/O は 1 回も走らない。
+ *
+ * 区間の検査を**アダプターへ降ろさない**のは、アダプターが知っているのが実体だけだから: 実体は
+ * 宣言 `size` より長いことがある（別 quant の取り違え・書きかけのコピー）ので、実体長で検査すると
+ * manifest の外側のバイト列が黙って読める。宣言 size を持っているのはここ（取得元）だけ。
+ */
+const localRangeReader = (
+  readRange: NonNullable<DirectoryAdapter["readFileRange"]>,
+  ref: FileRef,
+): AssetRangeReader => ({
+  // ディレクトリの実体は位置読みができるので、費用は offset に依らない。
+  cost: "seek",
+  read: async (offset, length, options = {}) => {
+    if (
+      !Number.isInteger(offset) || !Number.isInteger(length) || offset < 0 || length < 0 ||
+      offset + length > ref.size
+    ) {
+      throw new Error(
+        `hub: ${ref.path} の区間 [${offset}, ${offset + length}) が不正` +
+          `（宣言 size ${ref.size} — 非負整数で size に収まる区間だけを読める）`,
+      );
+    }
+    const { signal } = options;
+    const bytes = await readRange(ref.path, offset, length, {
+      ...(signal === undefined ? {} : { signal }),
+    });
+    // MUST: 長さ違いを黙って通さない（短ければ消費側が 0 埋めの行を正常な値として読み、
+    // 長ければ要求の外のバイト列が混じる）。短い / 長いで原因が別なので文言を分ける。
+    if (bytes.byteLength !== length) {
+      const cause = bytes.byteLength < length
+        ? `実体が宣言 size ${ref.size} より短い`
+        : "アダプターが要求より長い戻りを返した（`readFileRange` の契約違反）";
+      throw new Error(
+        `hub: ${ref.path} の区間読みが offset ${offset} の ${length} バイト要求に` +
+          ` ${bytes.byteLength} バイトを返した（${cause}）`,
+      );
+    }
+    return bytes;
+  },
+});
+
 const pinnedLocalSource = (
   adapter: DirectoryAdapter,
   settings: LocalDirectoryOptions & { readonly label: string },
   options: LoadManifestOptions,
 ): PinnedSource => {
+  // 能力の有無はここで 1 度だけ見る（束縛にしておくと、口の中でも型が絞れたまま使える）。
+  const readRange = adapter.readFileRange;
   const origin: SourceOrigin = {
     label: `ディレクトリ ${settings.label}`,
     // 取り直しても同じバイト列が返る失敗元（network のような再試行の余地が無い）。
@@ -160,6 +222,14 @@ const pinnedLocalSource = (
     },
 
     // 相 1（prefetchFile）は持たない — 上のモジュール doc を参照。
+
+    // ⑧区間読みは、アダプターが位置読みを持つときだけ生やす（`prefetchFile` と同じ流儀で
+    // optional 能力 — 持たないアダプターでは口ごと現れず、消費側は全量読みへ倒す）。
+    ...(readRange === undefined ? {} : {
+      // 開く側の中断確認は共通層（`fetch.ts` の `openAsset`）の作法なのでここには置かない。
+      // 読みごとの中断は `AssetRangeReader.read` の signal がアダプターへ透過する。
+      openFile: (ref: FileRef) => Promise.resolve(localRangeReader(readRange, ref)),
+    }),
 
     originFor: (repo, revision) => {
       const mapped = settings.crossRepo;

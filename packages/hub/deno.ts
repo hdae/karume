@@ -94,6 +94,40 @@ export const denoDirectory = (
         file.close();
       }
     },
+    // 区間読み（`DirectoryAdapter.readFileRange` の契約）: 位置読みで `[offset, offset + length)` を
+    // ちょうど返す。`readFileInto` と同じ流儀 — signal は読みの切れ目で見る・finally で close・
+    // 実体パスを名乗る。宣言 size に対する検査は取得元（`sources/local.ts`）が済ませているので、
+    // ここが落とすのは「実体が宣言より短い」場合だけ。
+    readFileRange: async (path, offset, length, { signal }) => {
+      // 中断済みなら fd を開かない（開いてからループの先頭で気づく形だと、長さ 0 の読みで
+      // 中断が素通しになる — 実体に触れる前に 1 度見る）。
+      signal?.throwIfAborted();
+      const at = locate(base, path);
+      let file: Deno.FsFile;
+      try {
+        file = await Deno.open(at);
+      } catch (error) {
+        throw new Error(`@karume/hub/deno: ${at} を読めない`, { cause: error });
+      }
+      try {
+        await file.seek(offset, Deno.SeekMode.Start);
+        const target = new Uint8Array(new ArrayBuffer(length));
+        let filled = 0;
+        while (filled < length) {
+          signal?.throwIfAborted();
+          const read = await file.read(target.subarray(filled));
+          if (read === null) {
+            throw new Error(
+              `@karume/hub/deno: ${at} が offset ${offset} からの ${length} バイトに足りない`,
+            );
+          }
+          filled += read;
+        }
+        return target;
+      } finally {
+        file.close();
+      }
+    },
   };
   return localDirectory(adapter, { label: String(root), ...options });
 };

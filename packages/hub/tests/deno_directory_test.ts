@@ -15,6 +15,7 @@ import {
   IntegrityError,
   type LoadedManifest,
   loadManifest,
+  openAsset,
   resolveFiles,
   streamAssets,
   type StreamedAsset,
@@ -228,5 +229,102 @@ Deno.test("denoDirectory: 逐次面の中断は reason を素通しし、以降�
     // 中断が取得失敗（HubFetchError）に化けない — 呼び手が渡した reason がそのまま上がる。
     assertStrictEquals(error, reason);
     assertEquals(ids, [refs[0].path], "中断後の shard が渡されている");
+  });
+});
+
+// ---- 区間読み（`openAsset` — `source.ts` ⑧）。`Deno.open` → `seek` → 読みループの実装は実 fs
+// 側のここにしかないので、fake アダプター（`local_test.ts`）では代替できない。
+
+Deno.test("denoDirectory: 区間読みは実体の同区間と一致する（先頭 / 中央 / 末尾ちょうど）", async () => {
+  await withDistribution(async (root) => {
+    const loaded = await loadManifest(denoDirectory(root));
+    const ref = resolveFiles(loaded.manifest)["tokenizer"];
+    const whole = await Deno.readFile(`${root}/${ref.path}`);
+    const reader = await openAsset(loaded, ref);
+    assert(reader !== undefined, "位置読みを持つアダプターなのに読み口が開かない");
+    // ディレクトリの実体は位置読みなので offset に依らない費用。
+    assertEquals(reader.cost, "seek");
+
+    const middle = Math.floor(ref.size / 2);
+    for (const [offset, length] of [[0, 4], [middle, 3], [ref.size - 5, 5]]) {
+      const bytes = await reader.read(offset, length);
+      assertEquals(
+        bytes,
+        new Uint8Array(whole.subarray(offset, offset + length)),
+        `[${offset}, ${offset + length}) の中身が化けている`,
+      );
+      // 消費側はそのまま TypedArray として読むので、buffer 全体を占めている必要がある。
+      assertEquals(bytes.byteOffset, 0);
+      assertEquals(bytes.buffer.byteLength, length);
+    }
+  });
+});
+
+Deno.test("denoDirectory: 長さ 0 の区間は空のバイト列（呼び手の誤りにしない）", async () => {
+  await withDistribution(async (root) => {
+    const loaded = await loadManifest(denoDirectory(root));
+    const ref = resolveFiles(loaded.manifest)["tokenizer"];
+    const reader = await openAsset(loaded, ref);
+    assert(reader !== undefined, "読み口が開かない");
+    // 0 バイト要求は「読むものが無い」であって誤りではない（末尾ちょうどの位置も含めて許す）。
+    for (const offset of [0, ref.size]) {
+      assertEquals((await reader.read(offset, 0)).byteLength, 0);
+    }
+  });
+});
+
+Deno.test("denoDirectory: 宣言 size の外はアダプターへ降ろす前に落ちる", async () => {
+  await withDistribution(async (root) => {
+    const loaded = await loadManifest(denoDirectory(root));
+    const ref = resolveFiles(loaded.manifest)["tokenizer"];
+    const reader = await openAsset(loaded, ref);
+    assert(reader !== undefined, "読み口が開かない");
+
+    for (const [offset, length] of [[ref.size - 1, 2], [ref.size, 1], [-1, 2], [0, 1.5]]) {
+      const error = await assertRejects(() => reader.read(offset, length), Error);
+      assert(error.message.includes(ref.path), `${error.message} が path を名乗っていない`);
+      assert(
+        error.message.includes(String(ref.size)),
+        `${error.message} が宣言 size を名乗っていない`,
+      );
+    }
+  });
+});
+
+Deno.test("denoDirectory: 実体が宣言より短ければ埋まらない区間で落ちる（0 埋めを返さない）", async () => {
+  await withDistribution(async (root) => {
+    const loaded = await loadManifest(denoDirectory(root));
+    const ref = resolveFiles(loaded.manifest)["tokenizer"];
+    const reader = await openAsset(loaded, ref);
+    assert(reader !== undefined, "読み口が開かない");
+    // 途中で切れたコピー（manifest の size はそのまま = 全量読みの size 門と同じ形）。
+    await Deno.writeFile(`${root}/${ref.path}`, payloadFor(ref.path).subarray(0, 3));
+
+    const error = await assertRejects(() => reader.read(0, ref.size), Error);
+    assert(
+      error.message.includes(`${root}/${ref.path}`),
+      `${error.message} が読めなかった実体を名乗っていない`,
+    );
+  });
+});
+
+Deno.test("denoDirectory: 区間読みは abort 済み signal で 1 バイトも返さない", async () => {
+  await withDistribution(async (root) => {
+    const loaded = await loadManifest(denoDirectory(root));
+    const ref = resolveFiles(loaded.manifest)["tokenizer"];
+    const reader = await openAsset(loaded, ref);
+    assert(reader !== undefined, "読み口が開かない");
+    const controller = new AbortController();
+    const reason = new Error("test: 呼び出し側の中断");
+    controller.abort(reason);
+
+    // 長さ 0 も同じ（読みループが 1 度も回らない形でも、中断は実体に触れる前に見る）。
+    for (const length of [4, 0]) {
+      // 中断は取得失敗に化けない（呼び手が渡した reason がそのまま上がる）。
+      assertStrictEquals(
+        await assertRejects(() => reader.read(0, length, { signal: controller.signal }), Error),
+        reason,
+      );
+    }
   });
 });
