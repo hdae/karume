@@ -227,7 +227,7 @@ export type Gemma4PipelineOptions = {
    * `assertChunkBuckets` — この層は「どの入口の指定か」を文言に足すだけ）。
    *
    * NOTE: 本数ぶんだけ PreparedPlan の定常本数が増える（実行形 1 本 = 別鍵の計画 1 本 —
-   * ADR 0042 決定 2 の LRU）。既定の 5 本 + prefill 形 + decode 形 = **1 つの容量あたり** 7 形で、
+   * ADR 0042 決定 2 の LRU）。既定の 4 本 + prefill 形 + decode 形 = **1 つの容量あたり** 6 形で、
    * PreparedPlan の LRU 上限（runtime の `PREPARED_PLAN_CAPACITY`）に収まる — 鍵は解決済みスロット
    * 容量を含む（ADR 0066 決定 3）ので、容量の違う sequence を交互に回すと形は容量の数だけ倍になる。
    * さらに足すと、生成ループの中で最古が毎回落ちて decode が静かに再導出へ落ちる（例外は出ない —
@@ -287,14 +287,22 @@ export const GEMMA4_STATE_ATTENTION_REDUCE: StateAttentionReduce = "parallel";
  * gemma4 パイプラインが使う prefill バケットの既定
  * （{@link Gemma4PipelineOptions.chunkBuckets}）— 2 冪の梯子。
  *
- * NOTE: **暫定値**である。刻みは「pad の無駄」と「定常する計画本数」の交換で、どの段が要るかは
- * 実測で決める（chat の 1 発話は数十 token に寄るので下の段が効き、長文の要約は上の段を通って
- * `chunkLength` に着く）。実測が出たらこの列を確定させる。
+ * 実測で確定した列である（2026-09-07・RTX 3080 Ti / Vulkan・梯子 5 種 × prompt 5 長の ABBA）。
+ * 効くのは短い発話で、20 token の prompt 1 本 + 1 token 生成の壁が `chunkLength` 768 固定の
+ * 434 ms からこの梯子で 129 ms（−70%）になる。
+ *
+ * **512 を入れないのは実測で 768 より遅いからである**（310 行の prompt で 550 ms 対 411 ms）。
+ * GEMM の幾何は `M ≤ 512` で `M64N32`・それより上で `reg128x128` へ切り替わる
+ * （`gemm-geometry.ts`）ので、512 行の小タイル形は 768 行の大タイル形に負ける。256 も同じ
+ * `M64N32` だが、130 行の prompt で 305 ms 対 410 ms と勝つので梯子に残す。
+ *
+ * NOTE: 既定の 4 本 + prefill 形 + decode 形 = **1 つの容量あたり 6 形**が定常する
+ * （{@link Gemma4PipelineOptions.chunkBuckets} の PreparedPlan の勘定）。
  *
  * MUST: 凍結する — この配列は module スコープの共有物で、消費者が並べ替えると以後に組む
  * pipeline の物理行数の選び方まで変わる（`chunkBuckets` は昇順前提で先頭一致を採る）。
  */
-export const GEMMA4_CHUNK_BUCKETS: readonly number[] = Object.freeze([32, 64, 128, 256, 512]);
+export const GEMMA4_CHUNK_BUCKETS: readonly number[] = Object.freeze([32, 64, 128, 256]);
 
 /**
  * 既定のバケット列を、選ばれた `chunkLength` に載る段だけへ切り詰める。
