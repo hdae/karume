@@ -36,6 +36,7 @@ import {
   closeChatTurn,
   decodeChatChunks,
   type Gemma4ChatStop,
+  type Gemma4RunPhase,
   withRunDiagnostics,
 } from "../src/gemma/pipeline.ts";
 import type {
@@ -648,14 +649,19 @@ Deno.test({
 
 // ---- 観測席の呼び出し規則（`withRunDiagnostics`）----------------------------
 //
-// doc（`src/gemma/pipeline.ts`）は 2 つの非自明な規則を宣言している —— ①prefill 直後の最初の
+// doc（`src/gemma/pipeline.ts`）は 3 つの非自明な規則を宣言している —— ①prefill 直後の最初の
 // token は「最終 chunk の logits から抽選しただけ」で run を伴わないので席を呼ばない
-// ②停止 token を引いた最後の decode run の診断は列に出ないので**毎ターン 1 本欠ける**。
-// 唯一の観測（`e2e_gemma4_pretrained_test.ts` の census）はキーの集合を集めるだけで**回数**を
-// 見ていないため、規則が壊れても赤くならなかった。
+// ②停止 token を引いた最後の decode run は `token` を yield せずに終わるので、その 1 本だけは
+// 列ではなく `done` の決着から補う（補わないと普通に喋り終わったターンで毎回 1 本欠ける）
+// ③どの run だったかは回数ではなく `phase` が言う（複数 chunk の prefill では「1 通目だけが
+// prefill」が成り立たない）。唯一の観測（`e2e_gemma4_pretrained_test.ts` の census）はキーの
+// 集合を集めるだけで**回数**を見ていないため、規則が壊れても赤くならなかった。
 
 /** イベント列を手で書いた偽 `GenerationStream`（`closed` で早期終了の伝播が読める）。 */
-const fakeStream = (events: readonly GenerationEvent[]) => {
+const fakeStream = (
+  events: readonly GenerationEvent[],
+  stop: GenerationStop = { reason: "closed", tokens: 0 },
+) => {
   const state = { closed: false };
   const iterable = (async function* (): AsyncGenerator<GenerationEvent, void, undefined> {
     try {
@@ -666,7 +672,7 @@ const fakeStream = (events: readonly GenerationEvent[]) => {
   })();
   const stream: GenerationStream = {
     [Symbol.asyncIterator]: () => iterable,
-    done: Promise.resolve<GenerationStop>({ reason: "closed", tokens: 0 }),
+    done: Promise.resolve(stop),
   };
   return { stream, state };
 };
@@ -681,9 +687,11 @@ const token = (id: number, position: number): GenerationEvent => ({ kind: "token
 /** 診断は素通しされるだけ（中身を読まない）ので、席が受けた値をそのまま数える。 */
 const diagnosticsSeat = () => {
   const seen: number[] = [];
+  const phases: Gemma4RunPhase[] = [];
   let ticket = 0;
   return {
     seen,
+    phases,
     seat: {
       session: {
         diagnostics: (): number => {
@@ -691,12 +699,21 @@ const diagnosticsSeat = () => {
           return ticket;
         },
       },
-      onRunDiagnostics: (diagnostics: number): void => {
+      onRunDiagnostics: (diagnostics: number, phase: Gemma4RunPhase): void => {
         seen.push(diagnostics);
+        phases.push(phase);
       },
     },
   };
 };
+
+/** `phase` の期待値を 1 行で書くための短縮（`prefill(1, 3)` / `decode(2)`）。 */
+const prefillPhase = (chunk: number, chunks: number): Gemma4RunPhase => ({
+  kind: "prefill",
+  chunk,
+  chunks,
+});
+const decodePhase = (step: number): Gemma4RunPhase => ({ kind: "decode", step });
 
 Deno.test("withRunDiagnostics: run を伴わない最初の token では席を呼ばない", async () => {
   const { stream, state } = fakeStream([
@@ -708,7 +725,7 @@ Deno.test("withRunDiagnostics: run を伴わない最初の token では席を�
     token(12, 2),
     token(13, 3),
   ]);
-  const { seen, seat } = diagnosticsSeat();
+  const { seen, phases, seat } = diagnosticsSeat();
   const wrapped = withRunDiagnostics(stream, seat);
   const drained: GenerationEvent[] = [];
   for await (const event of wrapped) drained.push(event);
@@ -717,15 +734,21 @@ Deno.test("withRunDiagnostics: run を伴わない最初の token では席を�
   // prefill 3 本 + token 4 本のうち最初の 1 本を飛ばす = 6 回。
   assertEquals(seen.length, 6, "呼び出し回数");
   assertEquals(seen, [1, 2, 3, 4, 5, 6], "席が受けるのは呼ぶたびの新しい診断");
+  assertEquals(
+    phases,
+    [prefillPhase(1, 3), prefillPhase(2, 3), prefillPhase(3, 3), ...[1, 2, 3].map(decodePhase)],
+    "phase",
+  );
   assertEquals(state.closed, true, "内側の列が閉じていない");
 });
 
 Deno.test("withRunDiagnostics: 最初の抽選が停止 token だったターンは prefill ぶんだけ", async () => {
   // 本文が 1 文字も出ないターン（列に token が 1 つも現れない）。
   const { stream } = fakeStream([prefill(1, 1)]);
-  const { seen, seat } = diagnosticsSeat();
+  const { seen, phases, seat } = diagnosticsSeat();
   for await (const _event of withRunDiagnostics(stream, seat)) { /* 汲み切る */ }
   assertEquals(seen.length, 1);
+  assertEquals(phases, [prefillPhase(1, 1)], "phase");
 });
 
 Deno.test("withRunDiagnostics: 席が無ければ元の列をそのまま返す（包みを 1 枚も足さない）", () => {
@@ -743,10 +766,72 @@ Deno.test("withRunDiagnostics: 消費側の break が内側の return() まで�
     token(11, 1),
     token(12, 2),
   ]);
-  const { seen, seat } = diagnosticsSeat();
+  const { seen, phases, seat } = diagnosticsSeat();
   for await (const event of withRunDiagnostics(stream, seat)) {
     if (event.kind === "token") break;
   }
   assertEquals(state.closed, true, "包みが中断経路を切っている（内側が走行中のまま残る）");
   assertEquals(seen.length, 1, "prefill ぶんだけ（最初の token は席を呼ばない）");
+  assertEquals(phases, [prefillPhase(1, 1)], "phase");
+});
+
+Deno.test("withRunDiagnostics: 停止 token を引いた最後の decode run も 1 通届く（eos）", async () => {
+  // 3 回抽選したターン: ①prefill の logits（run 無し）②decode run 1 ③decode run 2 = 停止 token
+  // で、③は `token` を yield せずに終わる。届くのは prefill 1 + decode 2 = 3 通。
+  const { stream } = fakeStream(
+    [prefill(1, 1), token(10, 0), token(11, 1)],
+    { reason: "eos", token: 1, tokens: 3 },
+  );
+  const { seen, phases, seat } = diagnosticsSeat();
+  for await (const _event of withRunDiagnostics(stream, seat)) { /* 汲み切る */ }
+  assertEquals(seen.length, 3, "停止 run のぶんが欠けている");
+  assertEquals(phases, [prefillPhase(1, 1), decodePhase(1), decodePhase(2)], "phase");
+});
+
+Deno.test("withRunDiagnostics: 停止 token を引いた最後の decode run も 1 通届く（stop-token）", async () => {
+  // 要求が足した停止集合で閉じた枝も同じ形（理由が違うだけで run の欠け方は同一）。
+  const { stream } = fakeStream(
+    [prefill(1, 1), token(10, 0), token(11, 1)],
+    { reason: "stop-token", token: 7, tokens: 3 },
+  );
+  const { seen, phases, seat } = diagnosticsSeat();
+  for await (const _event of withRunDiagnostics(stream, seat)) { /* 汲み切る */ }
+  assertEquals(seen.length, 3);
+  assertEquals(phases, [prefillPhase(1, 1), decodePhase(1), decodePhase(2)], "phase");
+});
+
+Deno.test("withRunDiagnostics: max-tokens で終わるターンは補わない（最後の token も列に出る）", async () => {
+  // 抽選 3 回とも `token` が出るので、決着後に足すと同じ run が 2 度届く。
+  const { stream } = fakeStream(
+    [prefill(1, 1), token(10, 0), token(11, 1), token(12, 2)],
+    { reason: "max-tokens", tokens: 3 },
+  );
+  const { seen, phases, seat } = diagnosticsSeat();
+  for await (const _event of withRunDiagnostics(stream, seat)) { /* 汲み切る */ }
+  assertEquals(seen.length, 3, "決着後の追加呼び出しが混ざっている");
+  assertEquals(phases, [prefillPhase(1, 1), decodePhase(1), decodePhase(2)], "phase");
+});
+
+Deno.test("withRunDiagnostics: 最初の抽選が停止 token（eos・tokens 1）なら decode は 0 本", async () => {
+  // 抽選 1 回だけで閉じたターン — decode run は 1 本も走っていないので補ってはならない。
+  const { stream } = fakeStream([prefill(1, 1)], { reason: "eos", token: 1, tokens: 1 });
+  const { seen, phases, seat } = diagnosticsSeat();
+  for await (const _event of withRunDiagnostics(stream, seat)) { /* 汲み切る */ }
+  assertEquals(seen.length, 1);
+  assertEquals(phases, [prefillPhase(1, 1)], "phase");
+});
+
+Deno.test("withRunDiagnostics: 複数 chunk の prefill は 2 本目以降も prefill として届く", async () => {
+  // F-01 の再現形 — 回数で決めると 2 本目の prefill が decode-1 に化ける。
+  const { stream } = fakeStream(
+    [prefill(1, 2), prefill(2, 2), token(10, 0), token(11, 1)],
+    { reason: "eos", token: 1, tokens: 3 },
+  );
+  const { phases, seat } = diagnosticsSeat();
+  for await (const _event of withRunDiagnostics(stream, seat)) { /* 汲み切る */ }
+  assertEquals(
+    phases,
+    [prefillPhase(1, 2), prefillPhase(2, 2), decodePhase(1), decodePhase(2)],
+    "phase",
+  );
 });

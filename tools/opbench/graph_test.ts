@@ -1,6 +1,6 @@
 // opbench graph のテスト（GPU 不要）: パイプラインキー → op の写像と、census との突合表。
 
-import { assertEquals, assertThrows } from "@std/assert";
+import { assert, assertEquals, assertThrows } from "@std/assert";
 import type { IrodoriRunComponent } from "../../packages/models/mod.ts";
 import type { CensusSummary, WeightRow } from "./census.ts";
 import type { SingleSummary } from "./single.ts";
@@ -8,6 +8,7 @@ import {
   compareWithCensus,
   defaultRunsPrefix,
   DRIVE_FAMILIES,
+  gemma4RunLabel,
   irodoriCensusComponent,
   opOfKey,
   type RunRecord,
@@ -48,6 +49,21 @@ Deno.test("irodoriCensusComponent: 観測席のハイフン綴りを census の�
     "codec_encoder",
     "codec_decoder",
   ]);
+});
+
+Deno.test("gemma4RunLabel: label は観測席の phase から作る（回数からではない）", () => {
+  // 単一 chunk のターン: prefill-1 → decode-1 → decode-2。
+  assertEquals(gemma4RunLabel({ kind: "prefill", chunk: 1, chunks: 1 }), "prefill-1");
+  assertEquals(gemma4RunLabel({ kind: "decode", step: 1 }), "decode-1");
+  assertEquals(gemma4RunLabel({ kind: "decode", step: 2 }), "decode-2");
+  // 複数 chunk のターン: 2 通目も prefill（回数で決めると decode-1 に化ける — F-01）。
+  assertEquals(gemma4RunLabel({ kind: "prefill", chunk: 2, chunks: 2 }), "prefill-2");
+  // 突合は接頭辞一致（main.ts の `--runs`）: gemma4 の既定接頭辞は decode 群だけを拾い、prefill 群は
+  // chunk が何本でも `prefill` で全部拾える（複数 chunk の 2 通目が decode 側へ混ざらない）。
+  const decodePrefix = defaultRunsPrefix("gemma4");
+  assert(gemma4RunLabel({ kind: "decode", step: 7 }).startsWith(decodePrefix));
+  assert(!gemma4RunLabel({ kind: "prefill", chunk: 2, chunks: 2 }).startsWith(decodePrefix));
+  assert(gemma4RunLabel({ kind: "prefill", chunk: 3, chunks: 4 }).startsWith("prefill"));
 });
 
 Deno.test("defaultRunsPrefix: 家族ごとに突合する run の接頭辞が決まる", () => {

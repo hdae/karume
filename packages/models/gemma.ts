@@ -27,6 +27,8 @@ export type {
   Gemma4PipelineOptions,
   /** prefill の進捗 1 通（`chunk / chunks` — `onPrefill` が受ける）。 */
   Gemma4PrefillProgress,
+  /** 観測席の 1 通がどの run か（prefill の chunk / decode の step — `onRunDiagnostics` が受ける）。 */
+  Gemma4RunPhase,
   /** `sequence()` の指定（この会話が確保する容量）。 */
   Gemma4SequenceOptions,
 } from "./src/gemma/pipeline.ts";

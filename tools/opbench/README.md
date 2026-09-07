@@ -194,15 +194,17 @@ deno run -A tools/opbench/main.ts graph --source <mirror> --family <gemma4|anima
 
 Drives one real inference through the family's pipeline with `acquireGpu({ gpuTiming: true })`
 injected, and records every `onRunDiagnostics` callback as one row of `graph.jsonl`: the run's label
-(`prefill` / `decode-n`, or `<component>-n`), its dispatch count, total GPU time and the
-per-pipeline-key breakdown. Production code is untouched; the observation point is the same one P-1
-was measured through.
+(`prefill-n` / `decode-n`, or `<component>-n`), its dispatch count, total GPU time and the
+per-pipeline-key breakdown. For gemma4 the label comes from the phase the pipeline hands to the
+callback, so a prompt split across several prefill chunks records `prefill-1`, `prefill-2`, … rather
+than mislabelling the later chunks as decode runs. Production code is untouched; the observation
+point is the same one P-1 was measured through.
 
 What "one run" means per family:
 
 | Family    | One run                                                                          | Input flags                                          |
 | --------- | -------------------------------------------------------------------------------- | ---------------------------------------------------- |
-| `gemma4`  | one short chat turn (one `prefill` run + N `decode` runs)                        | `--prompt`, `--new-tokens` (default 8), `--capacity` |
+| `gemma4`  | one short chat turn (`prefill` runs, one per chunk, + N `decode` runs)           | `--prompt`, `--new-tokens` (default 8), `--capacity` |
 | `anima`   | one image (`text_encoder` / `text_conditioner` / `transformer` step / VAE tiles) | `--prompt`, `--steps` (default 2), `--size` (1024)   |
 | `siglip2` | one image embedded (`vision`, a single run)                                      | none — the image is synthetic (see below)            |
 | `irodori` | one utterance (each conditioner once, `dit` per step, then the codec)            | `--text`, `--seconds` (fractional, optional)         |

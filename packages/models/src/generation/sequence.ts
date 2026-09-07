@@ -245,6 +245,10 @@ export const assertGenerationRequestValues = (
  * MUST: `done` は**二次的な**通知路である。失敗（run の失敗・容量超過）は iterable 側が throw
  * するのが一次で、`done` は同じ例外で reject するだけ。汲まない呼び手のために内部で 1 度
  * 握ってあるので、`done` を読まなくても unhandled rejection にはならない。
+ * MUST: `done` は反復の終端（最後の `next()` が `done: true` を返す）より**前**に決着する —
+ * 列を包む側（gemma4 の `withRunDiagnostics`）が、列が尽きた直後に `done` を待たずに読める
+ * ことへ依存している。決着が終端より後ろへずれると、その `await` が消費側の `for await` ごと
+ * 止まる。
  */
 export type GenerationStream = AsyncIterable<GenerationEvent> & {
   readonly done: Promise<GenerationStop>;

@@ -198,21 +198,24 @@ export type Gemma4PipelineOptions = {
    * 実行 1 回ごとの診断を受け取る観測席（他 7 家族と同型）。op 別 GPU 時間（`lastRunTiming`）が
    * 要るときは `gpu` に `acquireGpu({ gpuTiming: true })` を渡す（ADR 0021 — 既定は計測しない）。
    *
-   * 呼ばれるのは **run 1 本ごと**（prefill は chunk ごと・decode は step ごと）で、その run の
-   * 完了後である。prefill 直後の最初の token は最終 chunk の logits から抽選するだけで run を
+   * 呼ばれるのは **run 1 本ごとに 1 通**（prefill は chunk ごと・decode は step ごと）で、その
+   * run の完了後である。何の run だったかは第 2 引数 {@link Gemma4RunPhase} が運ぶ — 回数から
+   * 推定しない（複数 chunk の prefill があるターンでは、2 本目以降の prefill を decode と
+   * 取り違える）。prefill 直後の最初の token は最終 chunk の logits から抽選するだけで run を
    * 伴わないので、そこでは呼ばない（呼ぶと同じ run の診断が 2 度届く）。
    *
-   * MUST NOT: 届いた件数を走った run 数の代理に使わない。この席は生成イベント列に挟んで呼ぶ
-   * ので、**停止 token を引いた最後の decode run** の診断は届かない（その run は `token` を
-   * yield せずに終わる）。普通に喋り終わったターン（`eos` / `stop-token`）は必ずこの形なので、
-   * 実運用では毎ターン 1 本欠ける。積算した GPU 時間も同じぶん過小になる。
+   * 中断せず走り切ったターンの通知数は
+   * `GenerationStop.tokens − 1 + prefill chunk 数`（`tokens` は停止 token も 1 個数えるので、
+   * 引く 1 が「run を伴わない最初の抽選」ぶんである）。停止 token を引いた最後の decode run は
+   * `token` を yield せずに終わるが、その run のぶんも `done` の決着後に 1 通届く。消費側の
+   * `break` / `return()` / 中断で閉じたターンは、そこまでに完了した run のぶんだけが届く。
    *
    * NOTE: 他ファミリと違ってコンポーネント名を渡さない — グラフが 1 本しかないので、名前が
    * 常に同じ 1 値になる（受け手が分岐できない引数を渡さない）。
    *
    * コールバックの例外は握らない（fail loudly — そのターンごと落ちる）。
    */
-  readonly onRunDiagnostics?: (diagnostics: SessionDiagnostics) => void;
+  readonly onRunDiagnostics?: (diagnostics: SessionDiagnostics, phase: Gemma4RunPhase) => void;
   /**
    * states 形 attention ③PV の縮約形（省略時は {@link GEMMA4_STATE_ATTENTION_REDUCE} =
    * `"parallel"`）。
@@ -338,6 +341,21 @@ export type Gemma4PrefillProgress = {
 };
 
 /**
+ * 観測席（{@link Gemma4PipelineOptions.onRunDiagnostics}）が受ける「その 1 通がどの run か」。
+ *
+ * 席が受けるのは **run 1 本につき 1 通**で、この値はその run が何だったかを言う（順番の勘定
+ * ではない）。`prefill` の `chunk` / `chunks` は `GenerationEvent` の `prefill` と同じ数
+ * （1 始まりの commit 済み chunk 数）で、`decode` の `step` は**そのターンの** decode run の
+ * 番号（1 始まり）である。
+ *
+ * MUST: 受け手は通知の回数ではなくこの値で分岐する — 複数 chunk に割れた prompt では
+ * 「1 通目だけが prefill」が成り立たない。
+ */
+export type Gemma4RunPhase =
+  | { readonly kind: "prefill"; readonly chunk: number; readonly chunks: number }
+  | { readonly kind: "decode"; readonly step: number };
+
+/**
  * chat 1 ターンの停止理由。
  *
  * sequence 層の理由（`eos` / `stop-token` / `max-tokens` / `aborted` / `closed`）に、この層でしか
@@ -414,7 +432,7 @@ type Gemma4State = {
   readonly tokenizer: GemmaTokenizer;
   readonly config: Gemma4PipelineConfig;
   /** 実行 1 回ごとの観測席（{@link Gemma4PipelineOptions.onRunDiagnostics}）。 */
-  readonly onRunDiagnostics?: (diagnostics: SessionDiagnostics) => void;
+  readonly onRunDiagnostics?: (diagnostics: SessionDiagnostics, phase: Gemma4RunPhase) => void;
 };
 
 /**
@@ -883,6 +901,14 @@ export const chatStreamOf = (
  * prefill 直後の最初の token は「最終 chunk の logits から抽選しただけ」で run を伴わない。そこで
  * 呼ぶと同じ run の診断が 2 度届くので、最初の token だけ飛ばす（`tokens === 1`）。
  *
+ * 逆に、**停止 token を引いた最後の decode run** は `token` を yield せずに終わるのでイベント列に
+ * 出ない。その 1 本は列が正常に尽きた後に `done` を読んで補う（`eos` / `stop-token` で
+ * `tokens > 1` のときだけ）— 普通に喋り終わったターンは必ずこの形なので、補わないと毎ターン
+ * 1 本欠けたまま積算される。`done` は内側の generator の `finally` で決着済みなので、この
+ * `await` は待たない。中断・失敗は for-await 側が先に throw するのでここへは来ず、消費側の
+ * `break` / `return()` はループを飛ばして generator を畳むのでやはり通らない（= 完了した run の
+ * ぶんだけが届く、という規則がそのまま保たれる）。
+ *
  * MUST: 観測席が無ければ**元の列をそのまま返す**（包みを 1 枚も増やさない — 中断や `return()` の
  * 伝播経路を、使わない人にまで足さない）。
  *
@@ -895,17 +921,34 @@ export const withRunDiagnostics = <D>(
   stream: GenerationStream,
   state: {
     readonly session: { diagnostics: () => D };
-    readonly onRunDiagnostics?: (diagnostics: D) => void;
+    readonly onRunDiagnostics?: (diagnostics: D, phase: Gemma4RunPhase) => void;
   },
 ): GenerationStream => {
   const listener = state.onRunDiagnostics;
   if (listener === undefined) return stream;
   const events = async function* (): AsyncGenerator<GenerationEvent, void, undefined> {
+    /** 列に出た token の数。decode run の番号はここから導く（n 個目の token = decode run n − 1）。 */
     let tokens = 0;
     for await (const event of stream) {
-      if (event.kind === "token") tokens += 1;
-      if (event.kind !== "token" || tokens > 1) listener(state.session.diagnostics());
+      if (event.kind === "prefill") {
+        listener(state.session.diagnostics(), {
+          kind: "prefill",
+          chunk: event.chunk,
+          chunks: event.chunks,
+        });
+      } else if (event.kind === "token") {
+        tokens += 1;
+        if (tokens > 1) listener(state.session.diagnostics(), { kind: "decode", step: tokens - 1 });
+      } else {
+        // MUST: 知らない種別を decode run に数えない（黙って step がずれる）。
+        throw new Error(`withRunDiagnostics: 未知の生成イベント ${JSON.stringify(event)}`);
+      }
       yield event;
+    }
+    const stop = await stream.done;
+    if ((stop.reason === "eos" || stop.reason === "stop-token") && stop.tokens > 1) {
+      // 停止 token を引いた run は列に出た最後の token の次 = decode run `tokens` 番。
+      listener(state.session.diagnostics(), { kind: "decode", step: tokens });
     }
   };
   const iterable = events();

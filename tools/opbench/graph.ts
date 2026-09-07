@@ -19,6 +19,7 @@ import type { GpuContext, SessionDiagnostics } from "../../packages/runtime/mod.
 import { denoDirectory } from "../../packages/hub/deno.ts";
 import type { IrodoriRunComponent, Rgb8Image } from "../../packages/models/mod.ts";
 import { AnimaPipeline, IrodoriPipeline, Siglip2Pipeline } from "../../packages/models/mod.ts";
+import type { Gemma4RunPhase } from "../../packages/models/gemma.ts";
 import { Gemma4Pipeline } from "../../packages/models/gemma.ts";
 import type { CensusSummary } from "./census.ts";
 import type { SingleSummary } from "./single.ts";
@@ -27,7 +28,7 @@ import type { SingleSummary } from "./single.ts";
 export type RunRecord = {
   readonly index: number;
   readonly component: string;
-  /** 家族ごとの意味づけ（gemma4 = prefill / decode-n・他家族は <component>-n）。 */
+  /** 家族ごとの意味づけ（gemma4 = prefill-n / decode-n・他家族は <component>-n）。 */
   readonly label: string;
   readonly dispatch_count: number;
   /** 計測無効なら null（wall プロセス）。 */
@@ -260,13 +261,28 @@ const DEFAULT_RUNS_PREFIX: Readonly<Record<DriveFamily, string>> = {
 
 export const defaultRunsPrefix = (family: DriveFamily): string => DEFAULT_RUNS_PREFIX[family];
 
+/**
+ * gemma4 の run 1 本の label（`prefill-<chunk>` / `decode-<step>`）。
+ *
+ * MUST: 観測席が渡す `phase` だけから作る。呼ばれた回数で決めると、複数 chunk に割れた prompt
+ * （`chunkLength` を超える長さ）の 2 本目以降の prefill が `decode-1` として記録される — 値は
+ * 正しいまま突合表だけが混ざるので、赤くならずに壊れる。
+ */
+export const gemma4RunLabel = (phase: Gemma4RunPhase): string =>
+  phase.kind === "prefill" ? `prefill-${phase.chunk}` : `decode-${phase.step}`;
+
 export type DriveOptions = {
   readonly gpu: GpuContext;
   readonly source: string;
   readonly family: DriveFamily;
   readonly model?: string;
   readonly quant?: string;
-  /** gemma4: 生成 token 数（decode run の本数 − 1 に近い — 最後の run の診断は届かない）。 */
+  /**
+   * gemma4: 生成 token 数（= 抽選回数の上限）。decode run の本数は多くてもこれより 1 少ない
+   * （最初の 1 回は prefill の logits からの抽選で run を伴わず、停止 token で早く終わればさらに
+   * 減る）。停止 token を引いて終わった run の診断も届く（`Gemma4PipelineOptions.onRunDiagnostics`
+   * の通知数の式）。
+   */
   readonly newTokens?: number;
   /** gemma4: このターンが確保する KV 容量（省略時は配布形の既定）— 長い prompt の内訳を採るときに要る。 */
   readonly capacity?: number;
@@ -299,9 +315,8 @@ export const driveOnce = async (options: DriveOptions): Promise<DriveResult> => 
     const pipeline = await Gemma4Pipeline.fromPretrained(denoDirectory(options.source), {
       ...selection,
       gpu: options.gpu,
-      onRunDiagnostics: (diagnostics) => {
-        const label = runs === 0 ? "prefill" : `decode-${runs}`;
-        records.push(recordRun(runs, "model", label, diagnostics));
+      onRunDiagnostics: (diagnostics, phase) => {
+        records.push(recordRun(runs, "model", gemma4RunLabel(phase), diagnostics));
         runs += 1;
       },
     });
