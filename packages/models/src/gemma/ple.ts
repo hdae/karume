@@ -30,6 +30,19 @@
  * 証明が使えなくなる。門は `packages/models/tests/e2e_gemma4_product_test.ts` の
  * `ple.probe.safetensors` 突合（torch が 35 表経路で計算した値との**厳密一致**）。
  *
+ * ## gather の順序（hit 先行）と重複 id
+ *
+ * 1 回の gather は触る shard を束ねて 1 本ずつ引くが、**常駐している shard を先に処理する**。
+ * 未常駐を先に読むと、その読みの LRU 追い出しが「この gather がまだ触っていない hit」を落とし、
+ * 同じ gather の中で読み直しになる（実測: 予算 = 2 本で shard 1/2 が常駐している状態から
+ * `[0,1,2]` 順に処理すると 3 load・`[1,2,0]` 順なら 1 load）。hit を先に触ると LRU の末尾へ
+ * 回るので、後続の miss の追い出し先が「この gather で用の済んだ shard」側へ寄る。
+ * 走行中に掴んだ shard の実体はローカル変数が持つので、途中で追い出されても値は揃う。
+ *
+ * 同じ id が並ぶ列（prefill の pad 行 id 0 が典型 — 768 行のうち大半が同じ id）は、**最初の
+ * 1 位置だけ逆量子化して残りへ f32 バイト列を複写**する。再計算ではなく複写なので 2 段丸めの
+ * 結果とビット同一で、`(q × scale) × embedScale` の契約はそのまま保たれる。
+ *
  * ## MUST: id 空間を相互照合する（ADR 0085 決定 5）
  *
  * sidecar の行数 / 主 embedding の vocab 行数 / 実際に引く id を突き合わせる。ここがずれると
@@ -463,21 +476,37 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
         }
       });
       const data = new Float32Array(ids.length * stride);
-      // shard ごとに束ねて引く（同じ shard の行が散っていても取得は 1 回）。
-      const grouped = new Map<number, number[]>();
+      // shard ごとに束ねて引き（同じ shard の行が散っていても取得は 1 回）、その中で同じ id の
+      // 位置をさらに束ねる（逆量子化は id ごとに 1 回で済む）。
+      const grouped = new Map<number, Map<number, number[]>>();
       ids.forEach((id, position) => {
         const shard = shardOf(id);
-        const rows = grouped.get(shard);
-        if (rows === undefined) grouped.set(shard, [position]);
-        else rows.push(position);
+        let rows = grouped.get(shard);
+        if (rows === undefined) {
+          rows = new Map<number, number[]>();
+          grouped.set(shard, rows);
+        }
+        const positions = rows.get(id);
+        if (positions === undefined) rows.set(id, [position]);
+        else positions.push(position);
       });
-      for (const [shard, positions] of grouped) {
+      // hit 先行（モジュール doc「gather の順序」）— 未常駐を先に読むと、その追い出しで
+      // 「まだ触っていない hit」が落ち、同じ gather の中で読み直しになる。hit を先に触れば
+      // LRU の末尾へ回るので、後続の miss に追い出されにくくなる。
+      const hits: [number, Map<number, number[]>][] = [];
+      const misses: [number, Map<number, number[]>][] = [];
+      for (const entry of grouped) {
+        if (resident.has(entry[0])) hits.push(entry);
+        else misses.push(entry);
+      }
+      for (const [shard, rows] of hits.concat(misses)) {
         const loaded = await acquire(shard, options);
-        for (const position of positions) {
-          const row = ids[position] - loaded.start;
+        for (const [id, positions] of rows) {
+          const row = id - loaded.start;
           const source = row * stride;
           const scaleRow = row * index.layers;
-          let target = position * stride;
+          const first = positions[0] * stride;
+          let target = first;
           for (let layer = 0; layer < index.layers; layer += 1) {
             const scale = loaded.scales[scaleRow + layer];
             const base = source + layer * index.dim;
@@ -490,6 +519,11 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
                 index.embedScale;
             }
             target += index.dim;
+          }
+          // 同じ id の残りの位置へは**計算済みの f32 バイト列を複写**する（再計算ではないので
+          // ビット同一であることが構造で保証される）。
+          for (let rest = 1; rest < positions.length; rest += 1) {
+            data.copyWithin(positions[rest] * stride, first, first + stride);
           }
         }
       }

@@ -283,6 +283,113 @@ Deno.test("Gemma4Ple: 追い出しは LRU（参照した shard は予算内に�
   assertEquals(ple.stats().loads, 4);
 });
 
+/** 各 shard の先頭 id（shard 0 → 0 / shard 1 → 2 / shard 2 → 4）。 */
+const FIRST_ID = INDEX.shards.map((shard) => shard.start);
+
+Deno.test("Gemma4Ple.gather: 常駐している shard を先に処理する（1 回の gather が自分の hit を追い出さない）", async (t) => {
+  const warmed = async () => {
+    const reader = fakeReader();
+    const ple = createGemma4Ple({
+      index: INDEX,
+      readShard: reader.readShard,
+      vocabSize: TOKENS,
+      maxResidentBytes: 2 * SHARD_BUDGET,
+    });
+    // shard 1 と 2 を常駐させる（予算ちょうど = 次の miss が必ず 1 本追い出す状態）。
+    await ple.gather([FIRST_ID[1], FIRST_ID[2]]);
+    assertEquals(ple.stats(), { loads: 2, resident: 2, residentBytes: 2 * SHARD_BUDGET });
+    return ple;
+  };
+
+  await t.step("miss を先頭に置いた順（0,1,2）でも読みは未常駐の 1 本だけ", async () => {
+    const ple = await warmed();
+    const tensor = await ple.gather([FIRST_ID[0], FIRST_ID[1], FIRST_ID[2]]);
+    // 未常駐は shard 0 の 1 本だけ。hit を後回しにすると shard 0 の読みが 1 を、1 の読みが 2 を
+    // 追い出して 3 本読むことになる（この gather の中で自分の hit を捨てている形）。
+    assertEquals(ple.stats().loads, 3, "1 回の gather の中で常駐 shard を読み直している");
+    assertEquals(tensor.shape, [1, 3, LAYERS, DIM]);
+    assert("data" in tensor && tensor.data instanceof Float32Array);
+    assertEquals(tensor.data[0], expectedValue(FIRST_ID[0], 0, 0));
+    assertEquals(tensor.data[LAYERS * DIM], expectedValue(FIRST_ID[1], 0, 0));
+    assertEquals(tensor.data[2 * LAYERS * DIM], expectedValue(FIRST_ID[2], 0, 0));
+  });
+
+  await t.step(
+    "hit を先頭に置いた順（1,2,0）も同じ読み回数（順序で結果が変わらない）",
+    async () => {
+      const ple = await warmed();
+      await ple.gather([FIRST_ID[1], FIRST_ID[2], FIRST_ID[0]]);
+      assertEquals(ple.stats().loads, 3);
+    },
+  );
+});
+
+Deno.test("Gemma4Ple.gather: 同じ id が並ぶ列でも各行は単発 gather とビット一致する", async () => {
+  const reader = fakeReader();
+  const ple = createGemma4Ple({
+    index: INDEX,
+    readShard: reader.readShard,
+    vocabSize: TOKENS,
+    // 3 本とも常駐させる（読み回数ではなく行の値だけを見るため）。
+    maxResidentBytes: 3 * SHARD_BUDGET,
+  });
+  const stride = LAYERS * DIM;
+
+  // 参照 = 各 id をちょうど 1 件ずつ引いた行。
+  const reference = await ple.gather([0, 1, 2, 3, 4, 5]);
+  assert("data" in reference && reference.data instanceof Float32Array);
+
+  // prefill の pad 行と同じ形（大半が id 0・数十箇所だけ別の id）。
+  const input = Array.from({ length: 768 }, (_value, position) => (
+    position % 41 === 7 ? position % TOKENS : 0
+  ));
+  const duplicated = input.filter((id) => id === 0).length;
+  assert(duplicated > 700, `重複していない列を測っている（id 0 は ${duplicated} 件）`);
+
+  const bulk = await ple.gather(input);
+  assertEquals(bulk.shape, [1, input.length, LAYERS, DIM]);
+  assert("data" in bulk && bulk.data instanceof Float32Array);
+  // 陰性対照 — 全部 0 の配列同士を比べて緑になっていない。
+  assertEquals(bulk.data[1], expectedValue(0, 0, 1));
+
+  const bulkWords = new Uint32Array(bulk.data.buffer);
+  const referenceWords = new Uint32Array(reference.data.buffer);
+  let mismatch = -1;
+  for (let word = 0; word < bulkWords.length; word += 1) {
+    const id = input[Math.floor(word / stride)];
+    if (bulkWords[word] !== referenceWords[id * stride + (word % stride)]) {
+      mismatch = word;
+      break;
+    }
+  }
+  assertEquals(
+    mismatch,
+    -1,
+    `複写した行が単発 gather の行とビット一致しない（word ${mismatch} = 位置 ${
+      Math.floor(mismatch / stride)
+    }）`,
+  );
+});
+
+Deno.test("Gemma4Ple.gather: 同じ未常駐 shard を同時に要求しても読みは 1 回", async () => {
+  const reader = fakeReader({ honorSignal: true });
+  const ple = createGemma4Ple({ index: INDEX, readShard: reader.readShard, vocabSize: TOKENS });
+  // 中断しない signal を渡して fake を「読みに時間がかかる」分岐へ入れる（pending の窓を実際に
+  // 開ける — signal 無しだと即時解決で窓が 1 microtask しか無い）。
+  const { signal } = new AbortController();
+
+  // 2 本目の gather は 1 本目が登録した **pending** を掴む（解決を待たずに hit と見なす）。
+  const [first, second] = await Promise.all([
+    ple.gather([0], { signal }),
+    ple.gather([1], { signal }),
+  ]);
+  assertEquals(reader.calls.length, 1, "同じ shard を 2 度読みに行っている（758MB 級の二重読み）");
+  assertEquals(ple.stats(), { loads: 1, resident: 1, residentBytes: SHARD_BUDGET });
+  assert("data" in first && "data" in second);
+  assertEquals(first.data[0], expectedValue(0, 0, 0));
+  assertEquals(second.data[0], expectedValue(1, 0, 0));
+});
+
 Deno.test("Gemma4Ple: 予算 0 は常駐なし（値は揃うが毎回読み直す）", async () => {
   const reader = fakeReader();
   const ple = createGemma4Ple({
