@@ -93,8 +93,25 @@ export type GenerationContextSpec = {
   /**
    * 固定長 prefill chunk の行数（ADR 0066 決定 4 — 計画時定数で、末尾 chunk は pad で埋める）。
    * decode は `queryLength = 1` 固定形なので、この値とは独立に走る。
+   *
+   * 短い chunk を pad 無しで回す追加の物理形は {@link GenerationContextSpec.chunkBuckets}。
    */
   readonly chunkLength: number;
+  /**
+   * prefill 形として `chunkLength` に**加えて**許す物理 chunk 行数（ADR 0066 決定 4 /
+   * 追記〈バケット〉）。各要素は 2 以上 `chunkLength` 未満の整数で、**狭義昇順**。
+   * 省略 / 空配列 = 追加なし（従来どおり prefill 形 1 本 + decode 形の 2 本）。
+   *
+   * 短い prompt は `chunkLength` 行へ pad すると pad 行ぶんの仕事がそのまま無駄になる
+   * （行局所な linear / pointwise / norm は物理行数に比例する）。バケットを宣言すると、
+   * 呼び出し側は chunk ごとに `queryLength` 以上の最小バケットを物理行数に選べる。
+   * 既定を下げる形を採らないのは、長い prompt では大きい chunk の一括が最速だから。
+   *
+   * MUST: 本数は「同時に定常化させてよい PreparedPlan の本数」でもある（実行形 1 本 =
+   * 別鍵の計画 1 本 — ADR 0042 決定 2 の LRU）。増やしすぎると decode のホットパスが
+   * 追い出しで静かに再導出へ落ちる。
+   */
+  readonly chunkBuckets?: readonly number[];
 };
 
 /**

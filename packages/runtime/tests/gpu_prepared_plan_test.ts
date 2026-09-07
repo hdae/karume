@@ -136,13 +136,13 @@ Deno.test({
 });
 
 Deno.test({
-  name: "導出済み計画は上限 4 本で頭打ちになり、最古のものから追い出される（実 GPU）",
+  name: "導出済み計画は上限 8 本で頭打ちになり、最古のものから追い出される（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
     const session = await createSession(gpu, openModel(modelBytes()));
     try {
-      for (const rows of [1, 2, 3, 4]) {
+      for (const rows of [1, 2, 3, 4, 5, 6, 7, 8]) {
         await session.run({ x: input(rows) });
         assertEquals(
           session.diagnostics().lastRunPrepared,
@@ -151,20 +151,20 @@ Deno.test({
         );
       }
 
-      // 5 種類目で上限に当たる。載せてから最古（T=1）を落とすので本数は 4 のまま。
-      await session.run({ x: input(5) });
-      assertEquals(session.diagnostics().lastRunPrepared, { hit: false, cachedPlans: 4 });
+      // 9 種類目で上限に当たる。載せてから最古（T=1）を落とすので本数は 8 のまま。
+      await session.run({ x: input(9) });
+      assertEquals(session.diagnostics().lastRunPrepared, { hit: false, cachedPlans: 8 });
 
       // 追い出しの証明: 一度当たっていた T=1 が再びミスになる。
       await session.run({ x: input(1) });
       assertEquals(
         session.diagnostics().lastRunPrepared,
-        { hit: false, cachedPlans: 4 },
+        { hit: false, cachedPlans: 8 },
         "最古の bindings は落ちている",
       );
-      // 残り 3 本は健在（追い出しが 1 本ずつであることの裏）。
-      await session.run({ x: input(4) });
-      assertEquals(session.diagnostics().lastRunPrepared, { hit: true, cachedPlans: 4 });
+      // 残り 7 本は健在（追い出しが 1 本ずつであることの裏）。
+      await session.run({ x: input(8) });
+      assertEquals(session.diagnostics().lastRunPrepared, { hit: true, cachedPlans: 8 });
     } finally {
       await session.dispose();
       gpu.destroy();

@@ -656,8 +656,18 @@ type PlannedSteps = {
  * 定数で固定するのは、これが「連続する run が同じ bindings を使い回す」局所性だけを拾う
  * 器で、増やしても効かない形（run ごとに shape が変わる）では 1 本目から効かないため —
  * 設定ノブにすると当たらないキャッシュを太らせる調整に化ける。
+ *
+ * 4 → 8: prefill 形 + decode 形 + prefill のバケット数本（ADR 0066 追記〈バケット〉）+ 既存の
+ * 1-shot 面が**同時に定常**になる形が出たため。定常本数が上限を超えると、生成ループの中で
+ * 最古が毎回落ちて decode のホットパスが静かに再導出へ落ちる（例外も警告も出ず、
+ * `diagnostics().lastRunPrepared.hit` が false に張り付くだけ）。上の論（run ごとに shape が
+ * 変わる形では増やしても効かない）は本数に依らないので不変。
+ *
+ * バケット 1 本の費用は PreparedPlan 1 本 + M ≥ 16 なら ①ₜ / ③ₜ の WGSL バリアント 2 本
+ * （`PipelineCache` は追い出しを持たず、初回使用時にコンパイルする）。16 未満のバケットは
+ * tiled 経路に乗らず ① / ③ に落ちるので、バリアントは増えない。
  */
-const PREPARED_PLAN_CAPACITY = 4;
+const PREPARED_PLAN_CAPACITY = 8;
 
 /**
  * 活性 signature の transient slot backing（**容量 1**）。
@@ -1593,6 +1603,10 @@ export class Session {
    * 確定して物理確保する。Session 側（不変重み・計画キャッシュ・slot backing）は**何も変わらない**
    * — 決定 5 の所有権分離により、レシピと計画鍵は context を知らない。
    *
+   * `spec.chunkBuckets` を宣言すると、prefill 形の物理 chunk 行数として `chunkLength` に加えて
+   * その値も許す（ADR 0066 追記〈バケット〉）— 短い prompt を pad 無しで回すための追加の実行形で、
+   * どれを使うかは呼び出し側が chunk ごとに選ぶ。
+   *
    * MUST: state スロットは Session のアリーナにも {@link ResidentTensor} にも載せない（寿命の
    * 粒度が違う — 詳細は generation-context.ts のモジュール doc）。
    * MUST: 確保は out-of-memory / validation の errorScope 区間で行い、失敗は fail loudly
@@ -1899,7 +1913,7 @@ export class Session {
               // 載るので、先行 submit を追い越さない（ADR 0004 不変条件④ / ADR 0066 追記 4）。
               assertGenerationRun(
                 limits,
-                generation.context.chunkLength,
+                generation.context[RUNTIME_INTERNAL].allowedRows,
                 pastLength,
                 generation.queryLength,
               );

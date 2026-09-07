@@ -155,5 +155,14 @@ export type {
   StorageDiagnostics,
   Tensor,
 } from "./src/runtime/executor.ts";
+/**
+ * `GenerationContextSpec.chunkBuckets` の値域・順序検査（ADR 0066 追記〈バケット〉）。
+ *
+ * GPU も Session も要らない純関数を**あえて**公開面に出しているのは、prefill 形の物理行数を
+ * 選ぶ側（models のパイプライン）が同じ規則を独立に持たないため — 規則を写すと、context が
+ * 許す集合と呼び出し側が選ぶ集合が別々に育ち、食い違いは `Session.run` の run 前検査という
+ * 真因から遠い場所で出る。受理集合の正本は 1 本だけにする。
+ */
+export { assertChunkBuckets } from "./src/runtime/generation-context.ts";
 export { ExecutionError } from "./src/runtime/plan.ts";
 export type { SymbolBindings } from "./src/runtime/plan.ts";

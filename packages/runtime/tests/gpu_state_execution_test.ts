@@ -883,10 +883,11 @@ Deno.test({
 /**
  * 実行形の門（ADR 0066 決定 4 — 固定長 chunk / decode の 2 本だけ）。
  *
- * `M ∈ {chunkLength, 1}` を実行時に課すようになった（波 D-7）ので、`queryLength` の上限は
+ * `M ∈ 許可集合`（この context は `chunkBuckets` を宣言していないので `{chunkLength, 1}`）を
+ * 実行時に課すようになった（波 D-7）ので、`queryLength` の上限は
  * `Q ≤ M` の 1 本に**畳まれている**: `M = chunkLength` なら `Q ≤ M` が `Q ≤ chunkLength` を
  * 含意し、`M = 1` なら `Q = 1` を含意する。つまり `Session.run` 経由で `Q > chunkLength` だけを
- * 単独で踏む形は**構造的に作れない**（作るには M ∉ {chunkLength, 1} が要り、それは先に落ちる）。
+ * 単独で踏む形は**構造的に作れない**（作るには M ∉ 許可集合が要り、それは先に落ちる）。
  * `GenerationContext` 側の `queryLength ≤ chunkLength` 検査は内部面の防波堤として残っており、
  * 直接駆動する門は tests/gpu_generation_context_test.ts が持つ（二重簿記にしない）。
  */
@@ -920,9 +921,10 @@ Deno.test({
       );
       assert(zero.message.includes("queryLength"), zero.message);
 
-      // ④ M ∉ {chunkLength, 1}: 任意の M を通すと M の種類ぶん別鍵の計画が増え、LRU 4 を
-      //    汚して decode のホットパスが静かに再導出へ落ちる（ADR 0066 決定 4 の
-      //    「PreparedPlan は 2 本が定常」）。
+      // ④ M ∉ 許可集合（この context は chunkBuckets を宣言していないので {1, chunkLength}）:
+      //    任意の M を通すと M の種類ぶん別鍵の計画が増え、PreparedPlan の LRU を汚して
+      //    decode のホットパスが静かに再導出へ落ちる（ADR 0066 決定 4 の「PreparedPlan は
+      //    2 本が定常」— 追記〈バケット〉が広げるのは「宣言した本数だけ」）。
       for (const chunkRows of [3, 4]) {
         const wrongForm = await assertRejects(
           () => runStep(session, context, FULL, stepInputs(FULL, chunkRows, 0), chunkRows, 1),
@@ -961,11 +963,163 @@ Deno.test({
           ExecutionError,
         );
         assert(error.message.includes(`物理 chunk 行数 ${chunkRows}`), error.message);
-        assert(error.message.includes("chunkLength 4"), error.message);
+        // 診断は許可集合を列挙する（バケット宣言が無いので prefill 形は chunkLength の 1 本）。
+        assert(error.message.includes("prefill 形の {4}"), error.message);
       }
       assertEquals(context.pastLength, 0, "拒否された run は 1 つも進めない");
     } finally {
       await context.dispose();
+      await session.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+/**
+ * 有効行 `query` 行ぶんの値を物理 `rows` 行の `[1, planes, rows, depth]` へ 0 詰めで並べる
+ * （pad 領域の入力値は 0 埋め MUST — ADR 0066 追記 6）。
+ *
+ * バケット形（M=4）と prefill 形（M=8）で**同じ有効行**を渡すのに要る。`stepInputs` の平坦列は
+ * M ごとに行の切れ目が変わるので、そのまま両方へ渡すと別の値を比べることになる。
+ */
+const scatterRows = (
+  planes: number,
+  rows: number,
+  depth: number,
+  query: number,
+  valid: Float32Array<ArrayBuffer>,
+): Float32Array<ArrayBuffer> => {
+  const out = new Float32Array(planes * rows * depth);
+  for (let plane = 0; plane < planes; plane += 1) {
+    const from = plane * query * depth;
+    out.set(valid.subarray(from, from + query * depth), plane * rows * depth);
+  }
+  return out as Float32Array<ArrayBuffer>;
+};
+
+/** `[1, planes, rows, depth]` の先頭 `query` 行だけを取り出す（pad 行を落とした比較用）。 */
+const takeRows = (
+  planes: number,
+  rows: number,
+  depth: number,
+  query: number,
+  data: Float32Array<ArrayBuffer>,
+): Float32Array<ArrayBuffer> => {
+  const out = new Float32Array(planes * query * depth);
+  for (let plane = 0; plane < planes; plane += 1) {
+    const from = plane * rows * depth;
+    out.set(data.subarray(from, from + query * depth), plane * query * depth);
+  }
+  return out as Float32Array<ArrayBuffer>;
+};
+
+/** 同じ有効行を持つ M 行ぶんの入力（`stepInputs` の `salt` 規則をそのまま使う）。 */
+const bucketInputs = (
+  model: StateModel,
+  chunkRows: number,
+  query: number,
+  salt: number,
+): StepInputs => ({
+  q: scatterRows(
+    model.heads,
+    chunkRows,
+    model.depth,
+    query,
+    seeded(model.heads * query * model.depth, (i) => QUERY(i + salt)),
+  ),
+  k: scatterRows(
+    model.kvHeads,
+    chunkRows,
+    model.depth,
+    query,
+    seeded(model.kvHeads * query * model.depth, (i) => KEY(i + salt)),
+  ),
+  v: scatterRows(
+    model.kvHeads,
+    chunkRows,
+    model.depth,
+    query,
+    seeded(model.kvHeads * query * model.depth, (i) => VALUE(i + salt)),
+  ),
+});
+
+/**
+ * chunkBuckets が許す追加の prefill 形（ADR 0066 追記〈バケット〉）。
+ *
+ * 見るのは 3 つ: ①バケット行が通る ②同じ行数がバケット無しの context では落ちる（許可が
+ * バケット由来であることの裏）③バケット形の**有効行の出力が prefill 形（M=chunkLength）と
+ * 一致する** — 短い chunk を pad 無しで回すのはこの一致が成り立つ限りでの高速化なので、
+ * 一致が崩れたら「速いが違う値」になる（例外も警告も出ない）。
+ */
+Deno.test({
+  name: "chunkBuckets の物理行数は通り、有効行の出力は M=chunkLength と一致する（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const session = await stateSession(gpu, FULL);
+    // chunkLength=8 / バケット [4]。許可集合は {1, 4, 8}。
+    const bucketed = await session.createGenerationContext({ chunkLength: 8, chunkBuckets: [4] });
+    const plain = await session.createGenerationContext({ chunkLength: 8 });
+    try {
+      // ② 集合の隙間（3）は落ちる。
+      const gap = await assertRejects(
+        () => runStep(session, bucketed, FULL, stepInputs(FULL, 3, 0), 3, 3),
+        ExecutionError,
+      );
+      assert(gap.message.includes("prefill 形の {4, 8}"), gap.message);
+
+      // ② 同じ M=4 が、バケットを宣言していない context では落ちる。
+      const withoutBuckets = await assertRejects(
+        () => runStep(session, plain, FULL, bucketInputs(FULL, 4, 3, 0), 4, 3),
+        ExecutionError,
+      );
+      assert(withoutBuckets.message.includes("prefill 形の {8}"), withoutBuckets.message);
+      assertEquals(bucketed.pastLength, 0, "拒否された run は 1 つも進めない");
+      assertEquals(plain.pastLength, 0);
+
+      // ① / ③ 同じ有効行 3 行を M=4（バケット）と M=8（prefill 形）で回す。
+      const QUERY_ROWS = 3;
+      const bucketState = newOracle(FULL, 8);
+      const plainState = newOracle(FULL, 8);
+      const bucketIn = bucketInputs(FULL, 4, QUERY_ROWS, 0);
+      const plainIn = bucketInputs(FULL, 8, QUERY_ROWS, 0);
+
+      const bucketOut = await runStep(session, bucketed, FULL, bucketIn, 4, QUERY_ROWS);
+      const plainOut = await runStep(session, plain, FULL, plainIn, 8, QUERY_ROWS);
+      assertEquals(bucketed.pastLength, QUERY_ROWS);
+      assertEquals(plain.pastLength, QUERY_ROWS);
+
+      // 両方とも CPU 参照と一致する（片側だけ見ると「同じように壊れた」形を見逃す）。
+      for (
+        const [label, state, inputs, actual, chunkRows] of [
+          ["バケット形（M=4）", bucketState, bucketIn, bucketOut, 4],
+          ["prefill 形（M=8）", plainState, plainIn, plainOut, 8],
+        ] as const
+      ) {
+        const expected = advanceOracle(FULL, 8, state, inputs, chunkRows, QUERY_ROWS);
+        const valid = takeRows(FULL.heads, chunkRows, FULL.depth, QUERY_ROWS, expected);
+        assert(valid.some((value) => Math.abs(value) > 1e-3), `${label}: 期待出力が自明（全 ~0）`);
+        const report = compareTensors(
+          { dtype: "f32", data: actual },
+          { dtype: "f32", data: expected },
+          STATE_TOLERANCE,
+        );
+        assertEquals(report.pass, true, `${label}: ${formatAllclose(report)}`);
+      }
+
+      // ③ 有効行そのものの突合（pad 行を落として直接比べる）。
+      const report = compareTensors(
+        { dtype: "f32", data: takeRows(FULL.heads, 4, FULL.depth, QUERY_ROWS, bucketOut) },
+        { dtype: "f32", data: takeRows(FULL.heads, 8, FULL.depth, QUERY_ROWS, plainOut) },
+        STATE_TOLERANCE,
+      );
+      assertEquals(report.pass, true, `バケット形と prefill 形の有効行: ${formatAllclose(report)}`);
+
+      // decode 形（M=1）はバケットを宣言しても従来どおり通る。
+      await assertStep(session, bucketed, FULL, 8, bucketState, 1, 1, 37, "decode 形（M=1）");
+    } finally {
+      await bucketed.dispose();
+      await plain.dispose();
       await session.dispose();
       gpu.destroy();
     }

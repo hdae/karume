@@ -118,6 +118,14 @@ export type GenerationContextHost = {
 type GenerationContextInternals = {
   /** state スロットの実体（generation run の bind group はここから束ねる — 決定 5）。 */
   readonly slots: ReadonlyMap<string, StateSlotBacking>;
+  /**
+   * この context が許す物理 chunk 行数の集合 = `{1} ∪ chunkBuckets ∪ {chunkLength}`
+   * （run 前検査 `assertGenerationRun` — src/runtime/recipe.ts が読む唯一の形）。
+   *
+   * MUST: 構築は context 生成時の 1 度きり。run ごとに組み直すと、decode のホットパスに
+   * バケット本数ぶんの Set 構築が毎 step 乗る（実行形の本数はここでは固定なのに）。
+   */
+  readonly allowedRows: ReadonlySet<number>;
   /** 論理長 uniform（レシピは固定束縛でこれを参照する — 追記 4）。 */
   readonly lengths: GPUBuffer;
   /** この context が常駐させている GPU バイト数（診断 `stateBacking.residentBytes` の元）。 */
@@ -217,6 +225,41 @@ export const assertChunkLength = (chunkLength: number): void => {
   }
 };
 
+/**
+ * `chunkBuckets` の値域・順序検査（GPU 非依存の純関数 — {@link assertChunkLength} と同じ流儀）。
+ *
+ * 受理するのは「2 以上 `chunkLength` 未満の整数の**狭義昇順**列」だけ。3 つの拒否理由:
+ * `1` は decode 形そのもので追加の実行形にならない・`chunkLength` 以上は
+ * {@link GenerationContext} の `queryLength ≤ chunkLength` 契約の外（宣言 shape に載らない行が
+ * 出る）・重複と降順は「`queryLength` 以上の最小バケット」という選び方が線形走査で決まらなく
+ * なる（呼び出し側が並べ替えを持つと、context が許す集合と選ぶ集合が別々に育つ）。
+ *
+ * MUST: 見積り（estimate.ts）も同じ門を通す — 実構築が拒否する指定に見積りだけが正常値を
+ * 返すと、作れない構成へ admission の数字が与えられる。
+ */
+export const assertChunkBuckets = (
+  chunkBuckets: readonly number[] | undefined,
+  chunkLength: number,
+): void => {
+  if (chunkBuckets === undefined) return;
+  let previous = 1;
+  for (const [index, rows] of chunkBuckets.entries()) {
+    if (!Number.isSafeInteger(rows) || rows < 2 || rows >= chunkLength) {
+      throw new ExecutionError(
+        `chunkBuckets[${index}] ${rows} が 2..${chunkLength - 1} の整数でない` +
+          "（1 は decode 形・chunkLength は prefill 形そのもの — ADR 0066 決定 4 / 追記〈バケット〉）",
+      );
+    }
+    if (rows <= previous) {
+      throw new ExecutionError(
+        `chunkBuckets[${index}] ${rows} が直前の ${previous} 以下（狭義昇順でない）` +
+          "。queryLength 以上の最小バケットを選ぶ側が並べ替えを持たない前提",
+      );
+    }
+    previous = rows;
+  }
+};
+
 export const resolveBindings = (
   graph: IrGraph,
   bindings: SymbolBindings | undefined,
@@ -274,6 +317,15 @@ export class GenerationContext {
    * `queryLength`）。
    */
   readonly chunkLength: number;
+  /**
+   * prefill 形として `chunkLength` に加えて許す物理 chunk 行数（狭義昇順・凍結コピー —
+   * ADR 0066 決定 4 / 追記〈バケット〉）。宣言していなければ空。
+   *
+   * 呼び出し側は chunk ごとに `queryLength` 以上の最小の値を物理行数に選ぶ（無ければ
+   * `chunkLength`）。`chunkLength` はバケットを足しても**最大値のまま**で、
+   * `queryLength ≤ chunkLength` の上限も動かない。
+   */
+  readonly chunkBuckets: readonly number[];
   /** ランタイム内部面（利用者が触る面ではない）。 */
   readonly [RUNTIME_INTERNAL]: GenerationContextInternals;
   readonly #host: GenerationContextHost;
@@ -319,6 +371,7 @@ export class GenerationContext {
     slidingSlots: ReadonlySet<string>,
     lengths: GPUBuffer,
     chunkLength: number,
+    chunkBuckets: readonly number[],
     bindings: SymbolBindings,
   ) {
     this.#host = host;
@@ -326,8 +379,12 @@ export class GenerationContext {
     this.#slidingSlots = slidingSlots;
     this.#lengths = lengths;
     this.chunkLength = chunkLength;
+    // 凍結コピー: 呼び出し側の配列を後から書き換えられると、許可集合（下）と公開面が割れる。
+    this.chunkBuckets = Object.freeze([...chunkBuckets]);
     this[RUNTIME_INTERNAL] = {
       slots,
+      // 昇順のまま入れる（`assertGenerationRun` の診断がこの反復順をそのまま列挙する）。
+      allowedRows: new Set([1, ...this.chunkBuckets, chunkLength]),
       lengths,
       // 容量は確定済み（静的物理格納 — ADR 0066 決定 3）なので、ここで 1 度畳んで持つ。
       bytes: [...slots.values()].reduce((total, slot) => total + slot.byteLength, 0) +
@@ -404,6 +461,11 @@ export class GenerationContext {
       );
     }
     assertChunkLength(spec.chunkLength);
+    // MUST: 検査した実体をそのまま持ち回る（`spec` から読み直さない）。検査点と下の
+    // constructor 渡しの間には確保の await（`raceDeviceLost`）があり、その窓で呼び手が渡した
+    // 配列を書き換えると、未検査の M が許可集合に載る（TOCTOU）。
+    const chunkBuckets = Object.freeze([...(spec.chunkBuckets ?? [])]);
+    assertChunkBuckets(chunkBuckets, spec.chunkLength);
     const bindings = resolveBindings(graph, spec.bindings);
     // MUST: 上限は 2 本とも見る。`maxStorageBufferBindingSize ≤ maxBufferSize` は device を計画
     // する側（gpu/device.ts の `planRequiredLimits`）が保っている関係であって、外から渡された
@@ -468,6 +530,7 @@ export class GenerationContext {
         slidingSlotNames(graph),
         lengths,
         spec.chunkLength,
+        chunkBuckets,
         bindings,
       );
       return context;

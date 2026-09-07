@@ -575,6 +575,88 @@ Deno.test({
 });
 
 Deno.test({
+  name: "spec の chunkBuckets は凍結コピーで公開され、許可集合を組む（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const session = await stateSession(gpu);
+    try {
+      // 呼び出し側の配列は**写す**（後から書き換えても許可集合と公開面が割れない）。
+      const buckets = [2, 4];
+      const context = await session.createGenerationContext({
+        chunkLength: 8,
+        chunkBuckets: buckets,
+      });
+      try {
+        assertEquals(context.chunkBuckets, [2, 4]);
+        assert(Object.isFrozen(context.chunkBuckets), "公開面は凍結コピー");
+        buckets.push(6);
+        assertEquals(context.chunkBuckets, [2, 4], "後からの書き換えは context に届かない");
+
+        // 許可集合 = {1} ∪ chunkBuckets ∪ {chunkLength}（run 前検査が読む唯一の形）。
+        assertEquals([...internals(context).allowedRows], [1, 2, 4, 8]);
+        // chunkLength は最大値のまま（queryLength の上限も動かない）。
+        assertEquals(context.chunkLength, 8);
+        assertThrows(() => internals(context).writeLengths(0, 9), ExecutionError, "chunkLength");
+      } finally {
+        await context.dispose();
+      }
+
+      // 省略した context は従来どおり prefill 形 1 本 + decode 形。
+      const plain = await session.createGenerationContext({ chunkLength: 8 });
+      try {
+        assertEquals(plain.chunkBuckets, []);
+        assertEquals([...internals(plain).allowedRows], [1, 8]);
+      } finally {
+        await plain.dispose();
+      }
+
+      // 値域・順序の違反は確保の前に落ちる（受理集合の正本は assertChunkBuckets）。
+      for (const chunkBuckets of [[1], [8], [4, 3]]) {
+        const error = await assertRejects(
+          () => session.createGenerationContext({ chunkLength: 8, chunkBuckets }),
+          ExecutionError,
+        );
+        assert(error.message.includes("chunkBuckets"), error.message);
+      }
+      // 累計は上の 2 本のまま（拒否された spec は 1 本も確保していない）。
+      assertEquals(session.diagnostics().stateBacking.contextCount, 2);
+    } finally {
+      await session.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
+  name: "確保の await を跨いだ chunkBuckets の push は許可集合に届かない（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const session = await stateSession(gpu);
+    try {
+      // 検査点（assertChunkBuckets）と constructor 渡しの間には state 確保の await があるので、
+      // spec から読み直す形だと**この窓**の書き換えが未検査のまま許可集合へ載る。写しを持ち回る
+      // 実装であることを、window の中で push して固定する（同期の push だけを見る上のテストとは
+      // 別の窓 — こちらは create が中断している最中）。
+      const buckets = [2, 4];
+      const pending = session.createGenerationContext({ chunkLength: 8, chunkBuckets: buckets });
+      buckets.push(6);
+      const context = await pending;
+      try {
+        assertEquals(context.chunkBuckets, [2, 4], "確保の await を跨いだ push は届かない");
+        assertEquals([...internals(context).allowedRows], [1, 2, 4, 8]);
+      } finally {
+        await context.dispose();
+      }
+    } finally {
+      await session.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
   name: "論理長は run の成功で進み、rewind は 0..pastLength の整数だけを受ける（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {

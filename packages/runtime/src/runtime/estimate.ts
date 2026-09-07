@@ -40,6 +40,7 @@ import { toSizeClass } from "../gpu/arena.ts";
 import { numel, RUNTIME_SUPPORT, stateWindow } from "../ops.ts";
 import { aliasesInput } from "./fusion.ts";
 import {
+  assertChunkBuckets,
   assertChunkLength,
   LENGTHS_BYTES,
   resolveBindings,
@@ -144,7 +145,7 @@ export type AdmissionReport = {
    *
    * **上限保証ではなく「勘定に入れた分のピーク」**を名乗る欄（名前の由来）。シナリオ側を和では
    * なく max で足すのは、Session が抱える slot backing が**同時に 1 本**だから — 計画
-   * （`PreparedPlan`）は `PREPARED_PLAN_CAPACITY = 4` 本まで LRU で残るが、実体を持つ
+   * （`PreparedPlan`）は `PREPARED_PLAN_CAPACITY = 8` 本まで LRU で残るが、実体を持つ
    * `ActiveBacking` は容量 1 で、別 signature の run はまず現行 backing を退役させてから
    * 確保し直す（executor の `Session.#activateBacking` / `#retireBacking`）。退役から実際の
    * `destroy()` までの窓で 2 本ぶんが同時に載る点は {@link AdmissionReport.unaccounted} 側。
@@ -333,8 +334,9 @@ const stateEstimate = (
     );
   }
   // MUST: 実構築（GenerationContext.create）が拒否する spec に見積りを返さない — 値域は
-  // 同じ門（assertChunkLength）を通す。
+  // 同じ門（assertChunkLength / assertChunkBuckets）を通す。
   assertChunkLength(spec.chunkLength);
+  assertChunkBuckets(spec.chunkBuckets, spec.chunkLength);
   const bindings = resolveBindings(graph, spec.bindings);
   const shapes = new Map<string, readonly number[]>();
   let bytes = 0;
@@ -617,6 +619,15 @@ export const estimateGraphMemory = (
     );
   }
   // ADR 0066 決定 4 の実行 2 形をそれぞれ独立に計算する（chunk 行だけが違う同じグラフ）。
+  // NOTE: `chunkBuckets`（追記〈バケット〉）はシナリオを増やさない。バケットが変えるのは物理
+  // chunk 行数 M だけで、一時領域・入出力・attention の S 一時はいずれも M に単調なので、
+  // ピークは必ず最大 M = chunkLength の prefill 形にある。ただし「バケット形と prefill 形が
+  // 同時に載らない」とまでは言えない — slot backing はヒット run でしか作られないので、末尾
+  // chunk のバケット run は chunkLength 形の backing が載ったままミス run として arena に一時を
+  // 確保する（ヒットしても退役 → 新規確保 → run 末尾の destroy の順なので同じ）。これは
+  // `peakAccountedBytes` の doc が言う「退役から destroy までの窓で 2 本ぶんが同時に載る点は
+  // unaccounted 側」と同型で、バケット導入でその幅が（decode 形 + prefill 形）から（最大
+  // バケット形 + prefill 形）へ広がる。
   const plans: readonly (readonly [AdmissionScenarioName, SymbolBindings])[] =
     chunkLength === undefined ? [["run", bindings]] : [
       ["prefill", bindChunkRows(bindings, chunkDims, chunkLength, "prefill")],

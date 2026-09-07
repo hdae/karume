@@ -125,9 +125,9 @@ Deno.test({
         "別 shape は作り直す",
       );
 
-      // T=4 を導出済み計画（LRU 上限 4）から確実に追い出す。params キャッシュは無上限なので
+      // T=4 を導出済み計画（LRU 上限 8）から確実に追い出す。params キャッシュは無上限なので
       // ここで作られた params が消えることはない。
-      for (const rows of [5, 6, 7, 8, 10]) {
+      for (const rows of [5, 6, 7, 8, 10, 11, 12]) {
         await session.run({ x: input(rows) });
       }
 
@@ -166,8 +166,8 @@ Deno.test({
       assertEquals(session.diagnostics().weights.allocCount, 2);
 
       // 記号次元 T を毎回変える = params の内容が毎回変わる = 1 度も当たらない。
-      // 導出済み計画（LRU 上限 4）からは追い出されるが、params の実体は 1 本も返らない。
-      const RUNS = 5;
+      // 導出済み計画（LRU 上限 8）からは追い出されるが、params の実体は 1 本も返らない。
+      const RUNS = 9;
       for (let i = 0; i < RUNS; i += 1) {
         await session.run({ x: input(2 + i) });
         assertEquals(
@@ -184,7 +184,7 @@ Deno.test({
       );
       assertEquals(
         session.diagnostics().lastRunPrepared?.cachedPlans,
-        4,
+        8,
         "導出済み計画だけが上限で頭打ちになる（params キャッシュとは寿命が独立）",
       );
     } finally {

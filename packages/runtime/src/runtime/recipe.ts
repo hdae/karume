@@ -295,26 +295,29 @@ export type GenerationLimits = {
  * 読み書きする形で、`pastLength + queryLength > C` の full スロットは `state_append` の書きが
  * 範囲外へ落ちる（robustness で捨てられる = **静かに書かれない**）— どちらも例外も警告も
  * 出ないまま、次 step の読者が残骸を過去 KV として食う。
- * MUST: **物理 chunk 行数 `M` は `chunkLength`（prefill 形）か `1`（decode 形）だけ**
- * （ADR 0066 決定 4 の「実行形は 2 本」+「PreparedPlan は 2 本が定常」の実行時執行）。任意の
- * `M` を通すと、`M` の種類ぶん別鍵の計画が増えて LRU 4 を汚し、decode のホットパスが静かに
- * 再導出へ落ちる。`chunkLength` は context の計画時定数なので、判定はこの 1 箇所で足りる。
+ * MUST: **物理 chunk 行数 `M` は context が許す集合（`allowedRows`）の中だけ** —
+ * `{1}`（decode 形）∪ `chunkBuckets` ∪ `{chunkLength}`（prefill 形。ADR 0066 決定 4 の
+ * 「実行形は 2 本」を追記〈バケット〉が「宣言した本数だけ」へ広げたもの）の実行時執行。任意の
+ * `M` を通すと、`M` の種類ぶん別鍵の計画が増えて PreparedPlan の LRU を汚し、decode のホット
+ * パスが静かに再導出へ落ちる — 集合を context の計画時定数にしてあるのは、増える本数を宣言
+ * された数で頭打ちにするため。判定はこの 1 箇所で足りる。
  * MUST: `queryLength ≤ chunkLength` と u32 値域はここで重ねて見ない（`GenerationContext` の
  * `writeLengths` / `advance` が持つ — 二重簿記の禁止）。`M = 1` では `Q ≤ M` が `Q = 1` を
  * 含意するので、decode 形の `Q` 検査も別途は要らない。
  */
 export const assertGenerationRun = (
   limits: GenerationLimits,
-  chunkLength: number,
+  allowedRows: ReadonlySet<number>,
   pastLength: number,
   queryLength: number,
 ): void => {
   for (const rows of limits.chunkRows) {
-    if (rows !== chunkLength && rows !== 1) {
+    if (!allowedRows.has(rows)) {
+      const prefill = [...allowedRows].filter((allowed) => allowed !== 1);
       throw new ExecutionError(
         `state ノードの物理 chunk 行数 ${rows} が固定 chunk 契約に合わない` +
-          `（許されるのは prefill 形の chunkLength ${chunkLength} か decode 形の 1 だけ — ` +
-          "ADR 0066 決定 4）",
+          `（許されるのは prefill 形の {${prefill.join(", ")}} か decode 形の 1 だけ — ` +
+          "ADR 0066 決定 4 / 追記〈バケット〉）",
       );
     }
     if (queryLength > rows) {

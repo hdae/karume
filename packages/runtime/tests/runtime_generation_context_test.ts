@@ -1,11 +1,12 @@
-// GenerationContext の GPU 非依存な純関数 3 本（`assertChunkLength` / `resolveBindings` /
-// `resolveSlotShape`）の受理集合。3 本は**見積り（estimate.ts）と実構築が共有する唯一の
-// 受理集合**なので、門の正本は device を要らない側に置く — 実 GPU 経由の同じ門
+// GenerationContext の GPU 非依存な純関数 4 本（`assertChunkLength` / `assertChunkBuckets` /
+// `resolveBindings` / `resolveSlotShape`）の受理集合。4 本は**見積り（estimate.ts）と実構築が
+// 共有する唯一の受理集合**なので、門の正本は device を要らない側に置く — 実 GPU 経由の同じ門
 // （gpu_generation_context_test.ts）はアダプタ無しの環境では 1 本も走らない。
 
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { type IrGraph, parseIrGraph } from "../src/format/ir.ts";
 import {
+  assertChunkBuckets,
   assertChunkLength,
   resolveBindings,
   resolveSlotShape,
@@ -42,6 +43,32 @@ Deno.test("assertChunkLength は 1..0xffffffff の整数だけを受理する", 
   }
   assertChunkLength(1);
   assertChunkLength(0xffffffff);
+});
+
+Deno.test("assertChunkBuckets は 2..chunkLength-1 の狭義昇順だけを受理する", () => {
+  // 省略と空は「追加の実行形なし」— 従来どおり prefill 形 1 本 + decode 形。
+  assertChunkBuckets(undefined, 8);
+  assertChunkBuckets([], 8);
+  assertChunkBuckets([2], 8);
+  assertChunkBuckets([2, 3, 5, 7], 8);
+
+  // 値域外: 1（= decode 形そのもの）/ 0 / 負 / 非整数 / chunkLength / chunkLength 超。
+  for (const buckets of [[1], [0], [-2], [2.5], [8], [9]]) {
+    const error = assertThrows(() => assertChunkBuckets(buckets, 8), ExecutionError);
+    assert(error.message.includes("chunkBuckets[0]"), error.message);
+    assert(error.message.includes("2..7 の整数でない"), error.message);
+  }
+
+  // 順序: 重複も降順も「queryLength 以上の最小」を線形走査で決められなくする。
+  for (const buckets of [[2, 2], [4, 3]]) {
+    const error = assertThrows(() => assertChunkBuckets(buckets, 8), ExecutionError);
+    assert(error.message.includes("chunkBuckets[1]"), error.message);
+    assert(error.message.includes("狭義昇順でない"), error.message);
+  }
+
+  // chunkLength = 1（decode 形しか無い context）ではどんなバケットも値域に入らない。
+  assertChunkBuckets(undefined, 1);
+  assertThrows(() => assertChunkBuckets([2], 1), ExecutionError);
 });
 
 Deno.test("resolveBindings は未知の記号と非負整数でない値を拒否する", () => {

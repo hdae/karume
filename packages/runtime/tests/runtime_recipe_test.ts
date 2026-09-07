@@ -17,6 +17,7 @@ import type { StorageRoles } from "../src/gpu/pipeline-cache.ts";
 import type { SubmitScheduler } from "../src/gpu/submit.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
 import {
+  assertGenerationRun,
   bakeAllBindGroups,
   type BakedGeneration,
   type BindingRecipe,
@@ -24,6 +25,7 @@ import {
   buildTransientProgram,
   type DispatchWorkgroups,
   executeBakedPlan,
+  type GenerationLimits,
   planRecipes,
   type StepOutput,
   type StepRecipe,
@@ -521,4 +523,75 @@ Deno.test("GenerationContext が持たないスロット名は実体解決で fa
     error.message.includes("state スロット 'kv.v' の実体が GenerationContext に無い"),
     error.message,
   );
+});
+
+/**
+ * 実行形の門（`assertGenerationRun` — ADR 0066 決定 4 / 追記〈バケット〉）。
+ *
+ * 第 2 引数は context が構築済みの**許可集合** `{1} ∪ chunkBuckets ∪ {chunkLength}` で、
+ * ここは「集合に入っていれば通す・入っていなければ落とす」だけを見る（集合の作り方は
+ * runtime_generation_context_test.ts の `assertChunkBuckets`、実 GPU の結線は
+ * gpu_state_execution_test.ts）。
+ */
+const chunkLimits = (rows: readonly number[]): GenerationLimits => ({
+  chunkRows: new Set(rows),
+  fullCapacities: new Map(),
+});
+
+Deno.test("assertGenerationRun は許可集合の物理 chunk 行数だけを通す", () => {
+  // chunkLength=8 / バケット [2,4] の context が作る集合。
+  const allowed = new Set([1, 2, 4, 8]);
+
+  // decode 形・バケット 2 本・prefill 形の 4 つがそのまま通る。
+  for (const rows of [1, 2, 4, 8]) {
+    assertGenerationRun(chunkLimits([rows]), allowed, 0, 1);
+  }
+  // 同一 run に複数の state ノードが居ても、全ノードが集合の中なら通る。
+  assertGenerationRun(chunkLimits([4]), allowed, 3, 4);
+
+  // 集合外は落ちる（バケットの隙間 3 / バケットより上の 5 / chunkLength 超の 9）。
+  for (const rows of [3, 5, 9]) {
+    const error = assertThrows(
+      () => assertGenerationRun(chunkLimits([rows]), allowed, 0, 1),
+      ExecutionError,
+    );
+    assert(error.message.includes("固定 chunk 契約"), error.message);
+    // 診断は許可集合を列挙する（何が許されているのかを呼び出し点で見せる）。
+    assert(error.message.includes("{2, 4, 8}"), error.message);
+  }
+
+  // バケット無しの集合では、同じ 2 / 4 が落ちる（許可がバケット由来であることの裏）。
+  const plain = new Set([1, 8]);
+  for (const rows of [2, 4]) {
+    const error = assertThrows(
+      () => assertGenerationRun(chunkLimits([rows]), plain, 0, 1),
+      ExecutionError,
+    );
+    assert(error.message.includes("{8}"), error.message);
+  }
+});
+
+Deno.test("assertGenerationRun は queryLength が物理 chunk 行数を超える run を拒否する", () => {
+  const allowed = new Set([1, 4, 8]);
+  // バケット行（4）の上限は 4 まで — chunkLength の 8 ではない。
+  assertGenerationRun(chunkLimits([4]), allowed, 0, 4);
+  const error = assertThrows(
+    () => assertGenerationRun(chunkLimits([4]), allowed, 0, 5),
+    ExecutionError,
+  );
+  assert(error.message.includes("物理 chunk 行数 4 を超える"), error.message);
+});
+
+Deno.test("assertGenerationRun は full スロットの容量超過を許可集合に依らず拒否する", () => {
+  const limits: GenerationLimits = {
+    chunkRows: new Set([4]),
+    fullCapacities: new Map([["kslot", 6]]),
+  };
+  const allowed = new Set([1, 4, 8]);
+  assertGenerationRun(limits, allowed, 2, 4);
+  const error = assertThrows(
+    () => assertGenerationRun(limits, allowed, 3, 4),
+    ExecutionError,
+  );
+  assert(error.message.includes("state 'kslot'"), error.message);
 });

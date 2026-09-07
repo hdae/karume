@@ -281,8 +281,8 @@ Deno.test({
       await session.run({ x: input(4) });
       assert(session.diagnostics().planBacking.residentBytes > 0);
 
-      // 上限 4 本。T=4 は最古なので、5 種類目（T=5）の登録で追い出される。
-      for (const rows of [1, 2, 3, 5]) await session.run({ x: input(rows) });
+      // 上限 8 本。T=4 は最古なので、9 種類目（T=10）の登録で追い出される。
+      for (const rows of [1, 2, 3, 5, 6, 7, 8, 10]) await session.run({ x: input(rows) });
       assertEquals(
         session.diagnostics().planBacking,
         { residentBytes: 0, buildCount: 1 },
