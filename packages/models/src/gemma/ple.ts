@@ -154,11 +154,14 @@ export type Gemma4PleOptions = {
   /**
    * shard 1 本の読み口を開く（ファイル / hub の `openAsset` — 呼び手の責務）。
    *
-   * MUST NOT: ここでバイト列を取りに行かない — 開くのは口だけである（`Gemma4Ple` は shard
-   * ごとに 1 度だけ開いて handle を持つので、ここで全量を読むと「触っていない shard まで
-   * 読む」形になる）。
+   * MUST NOT: 開いた口へ全量を載せない — 返すのは口だけである（`Gemma4Ple` は shard ごとに
+   * 1 度だけ開いて handle を持つので、ここで全量を RAM へ持つと「触っていない shard まで
+   * 常駐する」形になる）。取得元が在庫を作るための温め（hub ⑧ の HF 取得元は在庫の無い参照で
+   * 相 1 の全量 DL を 1 度だけ挟む）は口を開く費用そのもので、これには当たらない。
+   * MAY: open に渡った `options.signal` をその温めの中断に使う。
    * MUST NOT: 開いた読み口が open 時の `options.signal` を保持しない。handle は最初に触った
-   * gather のものが以後ずっと使われるので、その生成の中断に後続の読みまで道連れになる。
+   * gather のものが以後ずっと使われるので、保持すると open に使った signal が以後の読みへも
+   * 効き、最初の生成の中断に後続の読みまで道連れになる。
    */
   readonly openShard: (
     file: string,

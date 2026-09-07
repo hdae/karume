@@ -159,6 +159,29 @@ export const overwriteEntry = (
   });
 };
 
+/**
+ * 2 件のエントリの**記録（ヘッダ）だけを入れ替える** — どちらも「記録ハッシュ ≠ manifest の
+ * 宣言」になる形の模擬。{@link overwriteEntry} が作れるのは「記録一致のまま中身が壊れた」
+ * （信じられる）「記録が無い」（実ハッシュで突合される）の 2 形だけで、**記録が食い違う**
+ * 3 つ目の形（読出し側が evict して取り直す）はこちらでしか作れない。
+ *
+ * MUST: ヘッダは丸ごと持ち回る — 綴りをテスト側で解釈しない（{@link CacheEntry} の MUST）。
+ */
+export const swapRecords = (cache: MemoryCache, left: Uint8Array, right: Uint8Array): void => {
+  const keys = [left, right].map((bytes) => {
+    const key = keyOf(cache, bytes);
+    if (key === undefined) throw new Error("test: 指定のバイト列を持つキャッシュエントリが無い");
+    return key;
+  });
+  const entries = keys.map((key) => {
+    const entry = cache.entries.get(key);
+    if (entry === undefined) throw new Error(`test: ${key} のエントリが消えている`);
+    return entry;
+  });
+  cache.entries.set(keys[0], { bytes: entries[0].bytes, headers: entries[1].headers });
+  cache.entries.set(keys[1], { bytes: entries[1].bytes, headers: entries[0].headers });
+};
+
 export const HUB_URL = "https://hub.test";
 export const REPO = "someone/anima";
 export const SHA = "0123456789abcdef0123456789abcdef01234567";

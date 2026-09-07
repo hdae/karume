@@ -165,11 +165,15 @@ export type PinnedSource = {
   readonly prefetchFile?: (ref: FileRef, options: FileReadOptions) => Promise<void>;
   /**
    * ⑧区間読み口を開く（**optional 能力**）— {@link prefetchFile} と同じ流儀で、**持たない取得元が
-   * 正当**（HTTP + 永続キャッシュのように、区間だけを安く取り出す口をまだ持たない取得元がある）。
+   * 正当**（位置読みを持たないディレクトリアダプターを差したローカル取得元がその形）。
    * 共通層はその場合 `openAsset` から `undefined` を返し、消費側は全量読みへ倒す。
    *
-   * MUST NOT: ここでバイト列を取りに行かない — 開くのは読み口だけで、実際の読みは
-   * {@link AssetRangeReader.read} が呼ばれたときに起きる。
+   * MUST NOT: 温め以外でバイト列を取りに行かない — 区間の実体に触れるのは
+   * {@link AssetRangeReader.read} が呼ばれたときである。ただし HTTP + 永続キャッシュの取得元は、
+   * 在庫が無い参照に対して**相 1（{@link prefetchFile}）の温めを 1 度だけ**挟んでよい —
+   * 初回の 1 区間を引くにはどの経路でも全量取得が 1 度は要るので、呼び手に「先に相 1 を通せ」を
+   * 負わせるより開く側で済ませる（開いた後は常駐させずに区間読みだけで足りる）。
+   * MAY: open が受けた `signal` を**その温めの中断**に使う。
    * MUST NOT: 開いた handle が open 時の `signal` を保持しない — 読み口は消費側が寿命ぶん
    * 掴み続ける前提なので、開いたときの中断を握ると以後の読みが全部それに道連れになる
    * （中断は {@link AssetRangeReader.read} の `signal` が読み 1 回ごとに担う）。

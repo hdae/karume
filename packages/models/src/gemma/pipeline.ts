@@ -168,6 +168,9 @@ export type Gemma4Assets = {
    * から」効くだけ）。全量読みは 1 本 250MiB 級なので、対話的に止める使い方をするなら見る
    * 価値がある。
    *
+   * open 自身が受ける `options.signal` も**その open を起こした生成**の中断で、開く動作が待つ
+   * ぶん（hub の HF 取得元は在庫の無い参照で相 1 の温めを 1 度だけ挟む）に効く。
+   *
    * MUST NOT: **開いた読み口が open 時の `options.signal` を保持しない**。handle は
    * pipeline の寿命ぶんキャッシュされるので、最初の生成の signal を握った読み口を作ると、
    * その生成が終わった後の読みが全部その中断に道連れになる。中断は読みごとの signal が担う。
@@ -1190,11 +1193,16 @@ export class Gemma4Pipeline {
     // ロード 1 回の寿命を表す signal を、以後の生成が使う読み口へ持ち越さない）。載せ直すのは
     // **その読みを起こした生成**の signal だけで、寿命が読み 1 回と一致する。
     const { signal: _load, onProgress: _progress, ...streamOptions } = hubOptions;
-    // MUST NOT: open へ生成の `signal` を渡さない。開くのは口を作るだけで安く、読み 1 回の
-    // 中断は `readAll` / `range.read` の `signal` が担う。handle は pipeline の寿命ぶん
-    // キャッシュされる（`ple.ts` の `sources`）ので、**最初の**生成の signal を保持する読み口を
-    // 作ると、その生成が終わった後の読みが全部その中断に道連れになる。
-    const openPleShard = async (file: string): Promise<Gemma4PleShardSource> => {
+    // open に渡す `signal` は**温めの中断**用で、返る handle はそれを保持しない（hub ⑧ の契約）。
+    // HF 取得元は在庫の無い参照を開くとき相 1 の温めを 1 度だけ挟むので、全量 DL 1 本ぶんの待ちが
+    // open に乗る — その待ちを起こした生成の signal で降りられるようにする。handle は pipeline の
+    // 寿命ぶんキャッシュされる（`ple.ts` の `sources`）ので、handle 側が signal を保持していたら
+    // **最初の**生成の中断で以後の読みが全部道連れになる。読み 1 回の中断は `readAll` /
+    // `range.read` の `signal` が担う。
+    const openPleShard = async (
+      file: string,
+      readOptions: Gemma4PleReadOptions = {},
+    ): Promise<Gemma4PleShardSource> => {
       if (!Object.hasOwn(deferred, file)) {
         throw new Error(
           `${where}: PLE sidecar の shard '${file}' が manifest の assets に無い` +
@@ -1204,7 +1212,10 @@ export class Gemma4Pipeline {
       const ref = deferred[file];
       // 区間読みは**任意能力**（`openAsset` は取得元が持たなければ `undefined` を返す）。持たない
       // 取得元では `range` を生やさず、従来どおり全量読み + LRU へ倒れる。
-      const reader = await openAsset(loaded, ref, streamOptions);
+      const reader = await openAsset(loaded, ref, {
+        ...streamOptions,
+        ...(readOptions.signal === undefined ? {} : { signal: readOptions.signal }),
+      });
       return {
         // 行の位置検査は**宣言 size** で行う（実体長ではない — `Gemma4PleShardSource.bytes`）。
         bytes: ref.size,

@@ -547,7 +547,8 @@ export const streamAssets = async function* (
  * {@link streamAssets} が「宣言 size を丸ごと 1 本」を単位にするのに対し、この面は同じ 1 本から
  * `[offset, offset + length)` だけを引く — 数百 MiB の表から数 KB の行だけが要る消費側のための面。
  *
- * **取得元がその能力を持たなければ `undefined`**（HF 取得元は現状持たない）。fail loudly に
+ * **取得元がその能力を持たなければ `undefined`**（位置読みを持たないディレクトリアダプターを
+ * 差したローカル取得元がその形）。fail loudly に
  * しないのは相 1（{@link prefetchAssets}）と同じ理由で、持たないことは失敗ではなく能力の差
  * だから — 呼び手は `undefined` を見て全量読みへ倒す（分岐は 1 箇所で済む）。
  *
@@ -556,7 +557,10 @@ export const streamAssets = async function* (
  * 1 行ごとに乗るので、行数が増えると全量 1 回の方が安くなる。
  *
  * ref の取得元は逐次面と同じ解決（越境参照は宣言された (repo, revision) の取得元）で決まる。
- * **network にもキャッシュにも書かない** — 開くのは読み口だけで、実体に触れるのは
+ * **開く動作が何に触るかは取得元による**（`source.ts` ⑧）— ローカル取得元は読み口を作るだけで
+ * network にもキャッシュにも書かない。HF 取得元は在庫が無い参照に限り、相 1 と同じ温め
+ * （全量 DL → 永続キャッシュ）を 1 度だけ挟んでから開く（この呼び出しの `signal` はその温めの
+ * 中断に効く）。温め以外のバイト取得は起きず、区間の実体に触れるのは
  * {@link AssetRangeReader.read} を呼んだときだけ。取得の文脈付け（{@link HubError} 系への
  * 包み直し）は通らない: この面は取得ではないので、失敗は取得元の素の `Error` として上がる。
  *

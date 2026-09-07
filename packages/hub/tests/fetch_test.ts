@@ -6,12 +6,14 @@ import {
   clearHubCache,
   type DirectoryAdapter,
   fetchAssets,
+  type FileRef,
   HubFetchError,
   type LoadedManifest,
   loadManifest,
   localDirectory,
   ManifestFormatError,
   openAsset,
+  prefetchAssets,
   resolveFiles,
   type RetryDiagnostic,
 } from "../mod.ts";
@@ -21,11 +23,13 @@ import {
   HUB_URL,
   hubCache,
   MemoryCacheStorage,
+  type MockFetch,
   type MockRoutes,
   overwriteEntry,
   payloadFor,
   REPO,
   SHA,
+  swapRecords,
   withChromeAbortShape,
 } from "./helpers/mock.ts";
 
@@ -1230,26 +1234,116 @@ Deno.test("clearHubCache: CacheStorage が無い環境は fail loudly（黙っ�
   });
 });
 
-// ---- 区間読み（`openAsset` — `source.ts` ⑧）。HF 取得元は取得層の `openHfFile` 待ちでまだ
-// 能力を持たないので、この面は「持たない取得元での答え方」だけをここで固定する。
+// ---- 区間読み（`openAsset` — `source.ts` ⑧）。HF 取得元の口は**キャッシュの中身**しか開けない
+// （`openHfFile` は network に出ない）ので、ここで固定するのは「温まっていれば取得ゼロで読める」
+// 「温まっていなければ開く側が 1 度だけ温める」の 2 点。
 
-Deno.test("openAsset: HF 取得元は区間読みを持たないので undefined（取得は 1 度も起きない）", async () => {
+/** 区間読みのテストが共有する下ごしらえ（manifest だけ読んだ状態 + 対象の 1 本）。 */
+const openable = async (): Promise<{
+  mock: MockFetch;
+  caches: MemoryCacheStorage;
+  loaded: LoadedManifest;
+  ref: FileRef;
+}> => {
   const mock = createMockFetch({ files: serveAll() });
   const caches = new MemoryCacheStorage();
   const loaded = await loadManifest({ repo: REPO, hubUrl: HUB_URL, revision: SHA }, {
     fetch: mock.fetch,
     caches,
   });
-  const files = resolveFiles(loaded.manifest);
-  const ref = files[Object.keys(files)[0]];
-  const calls = mock.calls.length;
-  const entries = hubCache(caches).entries.size;
+  return { mock, caches, loaded, ref: resolveFiles(loaded.manifest)["tokenizer"] };
+};
 
-  // 能力の差であって失敗ではない（呼び手は undefined を見て全量読みへ倒す）。
-  assertEquals(await openAsset(loaded, ref), undefined);
-  // 口を開くだけの面なので、network にもキャッシュにも触れない。
-  assertEquals(mock.calls.length, calls, "openAsset が取得を起こしている");
-  assertEquals(hubCache(caches).entries.size, entries, "openAsset がキャッシュへ書いている");
+Deno.test("openAsset: 温め済みの参照は取得を起こさずに区間だけを返す", async () => {
+  const { mock, caches, loaded, ref } = await openable();
+  const access = { fetch: mock.fetch, caches };
+  await prefetchAssets(loaded, [ref], access);
+  const payload = payloadFor(ref.path);
+  const calls = mock.calls.length;
+
+  const reader = await openAsset(loaded, ref, access);
+  assert(reader !== undefined, "温め済みなのに区間読み口が開かない");
+  // Deno には `globalThis.Deno` があるので取得層の既定戦略は "stream"（`blob()` が全量を
+  // ヒープへ載せるため）= 読み飛ばしが offset に比例する費用。
+  assertEquals(reader.cost, "scan");
+
+  const middle = Math.floor(ref.size / 2);
+  for (const [offset, length] of [[0, 4], [middle, 3], [ref.size - 5, 5]]) {
+    const bytes = await reader.read(offset, length);
+    assertEquals(
+      bytes,
+      new Uint8Array(payload.subarray(offset, offset + length)),
+      `[${offset}, ${offset + length}) の中身が化けている`,
+    );
+    // 消費側はそのまま TypedArray として読むので、buffer 全体を占めている必要がある。
+    assertEquals(bytes.byteOffset, 0);
+    assertEquals(bytes.buffer.byteLength, length);
+  }
+  assertEquals(mock.calls.length, calls, "温め済みなのに取得が起きている");
+});
+
+Deno.test("openAsset: 未取得の参照は開く側が 1 度だけ温めてから開く", async () => {
+  const { mock, caches, loaded, ref } = await openable();
+  const access = { fetch: mock.fetch, caches };
+  const calls = mock.calls.length;
+
+  // 呼び手に「先に prefetchAssets を通せ」という手順を負わせない（消費側は行を要求するだけ）。
+  const reader = await openAsset(loaded, ref, access);
+  assert(reader !== undefined, "未取得の参照で区間読み口が開かない");
+  assertEquals(mock.calls.length - calls, 1, "温め直しが 1 往復で済んでいない");
+
+  assertEquals(await reader.read(0, ref.size), payloadFor(ref.path));
+  // 開いた後の読みはキャッシュの中だけで完結する（読みごとに network へ出ない）。
+  assertEquals(mock.calls.length - calls, 1, "読みが取得を起こしている");
+});
+
+Deno.test("openAsset: 記録ハッシュを持たないエントリは読まずに取り直す", async () => {
+  const { mock, caches, loaded, ref } = await openable();
+  const access = { fetch: mock.fetch, caches };
+  await prefetchAssets(loaded, [ref], access);
+  const payload = payloadFor(ref.path);
+  // 記録を落としたうえで中身を壊す（照合するものが無いので開く側は開けない）。
+  overwriteEntry(hubCache(caches), payload, new Uint8Array(ref.size), { keepRecord: false });
+  const calls = mock.calls.length;
+
+  const reader = await openAsset(loaded, ref, access);
+  assert(reader !== undefined, "取り直したのに区間読み口が開かない");
+  assertEquals(mock.calls.length - calls, 1, "壊れたエントリを取り直していない");
+  assertEquals(await reader.read(0, ref.size), payload, "壊れたバイト列がそのまま読めている");
+});
+
+Deno.test("openAsset: 記録ハッシュが宣言と食い違うエントリも読まずに取り直す", async () => {
+  const { mock, caches, loaded, ref } = await openable();
+  const access = { fetch: mock.fetch, caches };
+  const other = resolveFiles(loaded.manifest)["vae_decoder"];
+  await prefetchAssets(loaded, [ref, other], access);
+  const payload = payloadFor(ref.path);
+  // 2 件の記録を入れ替える = どちらも「記録ハッシュ ≠ manifest の宣言」になる。開く側はこれを
+  // 「内容が変わった」と見て evict するので、記録なしと同じ取り直しの経路へ倒れる。
+  swapRecords(hubCache(caches), payload, payloadFor(other.path));
+  const calls = mock.calls.length;
+
+  const reader = await openAsset(loaded, ref, access);
+  assert(reader !== undefined, "取り直したのに区間読み口が開かない");
+  // 取り直すのは開いた 1 本だけ（記録を壊したもう 1 本は触らない）。
+  assertEquals(mock.calls.length - calls, 1, "食い違うエントリを 1 往復で取り直していない");
+  assertEquals(await reader.read(0, ref.size), payload, "取り直した中身が読めていない");
+});
+
+Deno.test("openAsset: 越境参照は宣言された (repo, revision) の口で開く", async () => {
+  const caches = new MemoryCacheStorage();
+  const { mock, loaded } = await load({ files: crossRepoFiles() }, caches);
+  const access = { fetch: mock.fetch, caches };
+  // 自リポと越境先が**同じ path** を主張する manifest なので、path で畳んでいれば自リポの
+  // バイト列が読めてしまう（区間読みの口も `originFor` 経由で越境先から生えることの検出器）。
+  const ref = resolveFiles(loaded.manifest)["borrowed"];
+  const calls = mock.calls.length;
+
+  const reader = await openAsset(loaded, ref, access);
+  assert(reader !== undefined, "越境先でも能力は継承されるはずなのに口が開かない");
+  assertEquals(countCalls(mock.calls, foreignUrl), 1, "越境先の URL を温めていない");
+  assertEquals(mock.calls.length - calls, 1, "越境の温めが 1 往復で済んでいない");
+  assertEquals(await reader.read(0, ref.size), foreignBytes, "自リポのバイト列が読めている");
 });
 
 Deno.test("openAsset: abort 済み signal は口の有無に依らず reason をそのまま上げる", async () => {
@@ -1261,7 +1355,7 @@ Deno.test("openAsset: abort 済み signal は口の有無に依らず reason を
   const files = resolveFiles(remote.manifest);
   const ref = files[Object.keys(files)[0]];
 
-  // 口を持つ取得元（位置読みのアダプター）を同じ manifest で 1 本作る。
+  // 口を持たない取得元（位置読みを持たないアダプター）を同じ manifest で 1 本作る。
   const served = serveAll();
   const lookup = (path: string): Uint8Array<ArrayBuffer> => {
     const bytes = served.get(path);
@@ -1270,8 +1364,6 @@ Deno.test("openAsset: abort 済み signal は口の有無に依らず reason を
   };
   const adapter: DirectoryAdapter = {
     readFile: (path) => Promise.resolve(new Uint8Array(lookup(path))),
-    readFileRange: (path, offset, length) =>
-      Promise.resolve(new Uint8Array(lookup(path).subarray(offset, offset + length))),
   };
   const local = await loadManifest(localDirectory(adapter, { label: "./models/test" }), {
     caches: new MemoryCacheStorage(),

@@ -15,16 +15,26 @@
  * - 相 1（streaming prefetch）— **RAM に載せずに永続キャッシュへ落とす** HTTP 固有の最適化。
  * - キャッシュ在庫の照会と削除（`source.ts` ⑥⑦）— 溜めているのがこの取得元なので、
  *   「何が手元にあるか」「これを消せるか」に答えられるのもここだけ。
+ * - 区間読み（`source.ts` ⑧）— 溜めたエントリの中を `[offset, offset + length)` だけ開く
+ *   （取得層 0.8.0 の `openHfFile`）。読めるのはキャッシュの中身だけなので、未取得の参照は
+ *   相 1 と同じ温めを 1 度挟んでから開き直す。
  *
  * MUST NOT: ここでエラーを組み立てない（診断の文脈を持つのは共通層 — `context.ts`）。
  * 例外は「取得層の不変条件破れ」を告げる素の `Error` だけ。
  */
 
 import { evict as evictKey, listKeys } from "@hdae/fetch-cache";
-import { fetchHfFile, isCommitSha, prefetchHfFile, resolveHfRevision } from "@hdae/fetch-cache/hf";
+import {
+  fetchHfFile,
+  isCommitSha,
+  openHfFile,
+  prefetchHfFile,
+  resolveHfRevision,
+} from "@hdae/fetch-cache/hf";
 import { type FileRef, fileRefKey, MANIFEST_FILENAME } from "../manifest.ts";
 import type { HubRepoRef, LoadManifestOptions } from "../session.ts";
 import {
+  type AssetRangeReader,
   DistributionSource,
   type PinnedSource,
   type SourceDriver,
@@ -97,6 +107,28 @@ const pinnedHfSource = (
     repo,
     revisionSha: generation,
   };
+  /**
+   * 相 1 の実体（④`prefetchFile` と ⑧`openFile` の温め直しが共用する）。バイト列を手元に持たず
+   * 永続キャッシュへ落とすだけの面で、`expectedBytes` は**受信の上限**として効く（取得層 ADR 0011）
+   * — 宣言を超えた時点で打ち切るので、この面でも上限が抜けない。
+   */
+  const warmFile = async (
+    ref: FileRef,
+    { signal, onProgress }: {
+      readonly signal?: AbortSignal;
+      readonly onProgress?: (loaded: number) => void;
+    },
+  ): Promise<void> => {
+    await prefetchHfFile(target, { path: ref.path, sha256: ref.sha256, expectedBytes: ref.size }, {
+      init: requestInit(options.headers, signal),
+      fetch: baseFetch,
+      ...(onProgress === undefined
+        ? {}
+        : { onProgress: (progress) => onProgress(progress.loaded) }),
+      ...shared,
+      ...(options.onRetry === undefined ? {} : { onRetry: options.onRetry }),
+    });
+  };
   return {
     origin,
 
@@ -117,10 +149,6 @@ const pinnedHfSource = (
         ...(options.onRetry === undefined ? {} : { onRetry: options.onRetry }),
       });
     },
-
-    // NOTE: 区間読み（`source.ts` ⑧ `openFile`）はまだ持たない。取得層 `@hdae/fetch-cache` 0.8 の
-    // `openHfFile` が入った時点で、費用の型 = 戦略（blob → "seek" / stream → "scan"）として載せる。
-    // それまでこの取得元では `openAsset` が `undefined` を返し、呼び手は全量読みへ倒す。
 
     readFile: async (ref, { signal, onProgress, into }) => {
       return await fetchHfFile(
@@ -156,19 +184,55 @@ const pinnedHfSource = (
     // 無い / 食い違うエントリは検証付きで温め直す。`caches` 不在・put 失敗は fail loud
     // （素 fetch へ縮退する余地が無い — 縮退させると RAM ピークの目標が壊れる）。
     prefetchFile: async (ref, { signal, onProgress }) => {
-      // 相 1 でも `expectedBytes` は**受信の上限**として効く（取得層 ADR 0011）— 宣言を超えた
-      // 時点で打ち切るので、バイト列を手元に持たないこの面でも上限が抜けない。
-      await prefetchHfFile(
-        target,
-        { path: ref.path, sha256: ref.sha256, expectedBytes: ref.size },
-        {
-          init: requestInit(options.headers, signal),
-          fetch: baseFetch,
-          onProgress: (progress) => onProgress(progress.loaded),
-          ...shared,
-          ...(options.onRetry === undefined ? {} : { onRetry: options.onRetry }),
+      await warmFile(ref, { ...(signal === undefined ? {} : { signal }), onProgress });
+    },
+
+    // ⑧区間読み。開くのはキャッシュの中身だけで、`openHfFile` は**network に出ない**（revision の
+    // 解決もしない）ので、未取得・記録なし・記録不一致（開く側が self-heal で消す）はどれも
+    // `undefined` として返る。そこで**相 1 と同じ温め**を 1 度だけ挟んでから開き直す — 呼び手に
+    // 「先に prefetchAssets を通せ」という手順を負わせないため（消費側は行を要求するだけでよい）。
+    openFile: async (ref, { signal }): Promise<AssetRangeReader> => {
+      const spec = { path: ref.path, sha256: ref.sha256, expectedBytes: ref.size };
+      const openOptions = {
+        ...shared,
+        ...(options.onCacheError === undefined ? {} : { onCacheError: options.onCacheError }),
+      };
+      let opened = await openHfFile(target, spec, openOptions);
+      if (opened === undefined) {
+        await warmFile(ref, { ...(signal === undefined ? {} : { signal }) });
+        opened = await openHfFile(target, spec, openOptions);
+      }
+      if (opened === undefined) {
+        // 温めが成功した直後に開けないのは取得層の不変条件破れ（相 1 は検証付きで記録ハッシュを
+        // 焼くので、そこを通れば同じ内容キーで開けるはず）か、温めと開き直しの間に在庫が
+        // 消されたか（在庫削除 ⑦ との競合）のどれかなので、候補を全て名指しして落とす。
+        throw new Error(
+          `@karume/hub: ${ref.path} の区間読み口が温め直した直後も開かない` +
+            `（記録ハッシュを保持しないキャッシュ / CacheStorage が使えない / 温めと開き直しの` +
+            `間に在庫が消された〈evictCachedAssets・clearHubCache との競合〉の可能性）`,
+        );
+      }
+      const entry = opened;
+      return {
+        // 費用の型は取得層の読み出し戦略そのもの: "blob" は遅延 Blob の slice（offset に依らない）・
+        // "stream" は本文の読み飛ばし（offset に比例）。Deno の既定は "stream"（`blob()` が全量を
+        // ヒープへ載せるため）なので、Deno では "scan"・ブラウザでは "seek" になる。
+        cost: entry.strategy === "blob" ? "seek" : "scan",
+        read: async (offset, length, readOptions) => {
+          const bytes = await entry.read(offset, length, readOptions);
+          const { buffer } = bytes;
+          // 取得層の戻り型は buffer の種別を持たない（`Uint8Array<ArrayBufferLike>`）。消費側は
+          // 返ったバイト列をそのまま TypedArray として読むので、SharedArrayBuffer は黙って
+          // 通さない（`as` で潰すと、共有メモリ由来の view が型だけ健全に見える）。
+          if (!(buffer instanceof ArrayBuffer)) {
+            throw new Error(
+              `@karume/hub: ${ref.path} の区間読みが ArrayBuffer 以外の buffer を返した`,
+            );
+          }
+          // 長さ検査（`length` ちょうどか）と tight view 検査は取得層と共通層が持つので重ねない。
+          return new Uint8Array(buffer, bytes.byteOffset, bytes.byteLength);
         },
-      );
+      };
     },
 
     // 越境先も同じアダプター（参照先は commit SHA 固定が必須なので、越境側で解決は起きない）。
