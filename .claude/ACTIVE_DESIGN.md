@@ -7,10 +7,23 @@
 > [docs/perf-ledger.md](../docs/perf-ledger.md)。ここは「今この瞬間の文脈」だけを持つ —
 > 履歴・完了記録は ADR / research / git へ。
 >
-> Last updated: 2026-09-06（0.12.0 公開完了）
+> Last updated: 2026-09-07（Codex 性能調査の消化 — 行読み・M バケット）
 
 ## Now
 
+- **Codex 性能調査（2026-09-06）の消化波（2026-09-07）** — 実測と設計の正本は
+  [research 2026-09-07](../docs/research/2026-09-07-codex-perf-review-followup.md)・採否は perf-ledger H-11 / H-12 / H-13 /
+  H-14 / K-17 / K-18 / K-19。入ったもの: ①観測席 `onRunDiagnostics` に **phase 第 2 引数**（`Gemma4RunPhase`）+ 停止 token の
+  最終 decode run も通知（`95dfe71` — opbench の decode 平均は停止 run を含むようになり過去値と厳密には比較不可）②sampler の
+  top-k は**有界 heap 一本**（`86fdbe5`・`SELECTION_LIMIT` 撤去）③PLE gather の hit 先行 + 重複 id 複写（`4d39c79`）
+  ④**prefill の M バケット**（ADR [0066](../docs/decisions/0066-generation-context-state-slots.md) 追記 10・runtime `chunkBuckets`
+  - PreparedPlan LRU 8・models `physicalChunkRows`・既定 `GEMMA4_CHUNK_BUCKETS` = [32, 64, 128, 256] — **512 は 768 より遅い**〈GEMM
+    幾何の段〉）⑤**PLE 行読み**（ADR [0085](../docs/decisions/0085-ple-host-gather.md) 追記 2026-09-07 — 自然文 400 token で shard 読み直し
+    137 回・42 s が原因の p50 問題。`Gemma4Assets.readPleShard` → `openPleShard`〈破壊的・limitations〉・hub 能力 ⑧ `openAsset` / `AssetRangeReader
+  {cost: seek | scan}`（ADR [0086](../docs/decisions/0086-distribution-source.md) 追記）・runtime `parseSafetensorsHeader`・取得層
+    `@hdae/fetch-cache` の `openCachedUrl` / `openHfFile`〈その ADR 0012・**0.8.0 の publish はレビュー待ち**・hub の HF 追従は公開後〉）。
+    **落とし穴**: Chrome の CacheStorage は Range 要求を無視する（200 全量）— 区間は `blob().slice()` で取る。Deno の `blob()` は
+    全量を読む（stream 読み飛ばし = scan）。次 = **Gemma 4 の MTP（drafter）**（backlog 先頭・ユーザー要望）。
 - **0.12.0 公開完了（2026-09-06）** — lockstep bump `a24d656` → GitHub Release v0.12.0 → JSR 0.12.0 →
   `deno task smoke:published` 緑。中身 = runtime の K-16 / K-14 / K-13（下の OP / Fusion 節）+ hub の
   `evictCachedAssets` 修正（同一参照集合の兄弟席を既定の守る側から外す・`protect` / `alsoEvicted` — ADR

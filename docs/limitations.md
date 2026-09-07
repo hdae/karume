@@ -360,12 +360,22 @@ gemma4 の prefill は chunk ごとに「`queryLength` 以上の最小バケッ�
 - **VRAM の瞬間ピークは見積りの外側で広がる**: slot backing（run の中間バッファ束）は容量 1 でヒット run に
   しか作られないため、末尾 chunk のバケット run は chunkLength 形の backing が載ったまま arena に一時を確保する。
   `estimateSessionMemory` の `unaccounted` が言う「退役から destroy までの窓で 2 本ぶんが同時に載る」の幅が、
-  従来の「decode 形と prefill 形の和」から「最大バケット形と prefill 形の和」へ広がる（既定の梯子なら 512 形 +
-  768 形 ≈ 1.67 倍）。見積りのシナリオ自体は prefill / decode の 2 本のまま（ピークの**勘定側**は最大 M で不変）。
+  従来の「decode 形と prefill 形の和」から「最大バケット形と prefill 形の和」へ広がる（既定の梯子 [32, 64, 128, 256]
+  なら 256 形 + 768 形 ≈ 1.33 倍）。見積りのシナリオ自体は prefill / decode の 2 本のまま（ピークの**勘定側**は最大 M で不変）。
   複数 chunk のターンでは backing の作り直しも 1 回増える（2 → 3 回/ターン）。
 - **16 未満のバケットは K-13 の tiled 経路に乗らない**: states 形 attention の ①ₜ / ③ₜ は M ≥ 16 の計画にしか
   選ばれず、それ未満は参照経路 ① / ③（`stateAttentionReduce: "parallel"` なら ③′）に落ちる。値は正しいが遅く、
   `parallel` × M ∈ [2, 16) の組は実測していない。gemma4 の既定は全て 16 以上で、この域は明示指定でしか入らない。
+
+## gemma4 `fromAssets`: PLE の読み口は `readPleShard`（全量バイト列）から `openPleShard`（handle）へ変わった（次のリリース・破壊的変更）
+
+`Gemma4Assets.readPleShard(file) → ArrayBuffer` は **`openPleShard(file) → Gemma4PleShardSource`**（`{ bytes, readAll,
+range?: { cost: "seek" | "scan", read(offset, length) } }`）に置き換わった（ADR
+[0085](decisions/0085-ple-host-gather.md) 追記 2026-09-07）。`fromAssets` の呼び手は読み口を実装し直す — 全量しか出せない
+読み口は `range` を省けばよく（従来どおり shard 全量 + LRU で動く）、ファイルや遅延 Blob を持つ読み口は `range` を
+出すと decode の 1 token が行 2 区間（8,960 B + 140 B）の読みで済む。`fromPretrained` は取得元の能力（hub の `openAsset`）
+から自動で組む: `denoDirectory` は位置読み（seek）、HF 取得元は取得層の次版まで `range` 無し。テスト用の実装例は
+`packages/models/tests/helpers/ple-source.ts`。
 
 ## `fromAssets`（全量面）に分割配布形を渡すと、全 shard がホスト RAM に同時常駐する
 
