@@ -19,15 +19,9 @@
 
 **残件**:
 
-- **Gemma 4 の MTP（drafter・投機的デコード）を早いうちに試す**（ユーザー要望 2026-09-07 — 性能レビュー消化の波の
-  **次**）: 公式 MTP（target の最終 activation + 共有 embedding — [Google の概要](https://ai.google.dev/gemma/docs/mtp/overview)）
-  を draft / verify の損益で評価する。先に測るのは verification 経路: M = 1 / 2 / 4 / 8 / 16 で target 本体・全候補 head・
-  target hidden の搬送・draft・PLE 派生入力の時間を別々に取る（現状の最速経路は M=1 の ①′ / ③′ と M ≥ 16 の tiled で、
-  候補数 4〜8 はその間にある）。速度倍率 ≈ (1 token の通常費用 × 1 cycle で確定する平均 token 数) / (draft + verify + commit +
-  host 境界の 1 cycle 費用)。KV は tentative K/V を scratch に置き accepted prefix だけを state へ commit する形が要る
-  （ring に書いて position を戻す形は上書きした過去 KV を復元できない）。EOS / 容量末尾 / sliding wrap / abort 中の commit の
-  テストを先に定義する。中間 prefill の head 省略（perf-ledger H-14）と複数行 head を共通化できるならそのときに（2026-09-06
-  Codex 性能調査 04_NEXT_EXPERIMENTS.md）。
+- **次の性能波 = K-21 → H-15**（2026-09-07 ユーザー裁定 a・[perf-ledger](perf-ledger.md)）: ①小 M（2〜32）の linear を GEMV 族へ
+  拡張（M ≥ 2 で GEMM 経路に落ちる +55 ms を消す — 短い chat ターンの prefill 129 ms の大半）②generation 形の slot backing を
+  複数保持（prefill 形 ↔ decode 形の切替で毎ターン ≈ 80 ms 作り直している）。どちらも TTFT に直に効き、MTP の復活条件 ①② でもある。
 - **Anima: DiT stage 内だけの反復常駐**（起票 2026-09-07 — Codex 性能調査 04 §Anima）: Session を stage ごとに作って返す
   現設計（VRAM の不変条件）を保ったまま、DiT stage の中で初期 latent の patchify を 1 度にし、RoPE / cond・uncond embedding /
   timestep 材料を反復間で再利用し、DiT 出力 → CFG → Euler / DPM++2M 更新を同じ token layout で回し、最後だけ unpatchify する。
@@ -567,6 +561,13 @@ autoregressive 波の**残項目（波外へ送り）**:
   gather / conv_transpose1d / upsample_bilinear2d — 観測 subset を op 意味論にしない統一規約）
 
 ## parked（復活条件つき）
+
+- **Gemma 4 MTP（公式 drafter による投機的デコード）— 目標は実用レベルまで到達させる（ユーザー方針 2026-09-07）**。実装前の採算実測
+  （[research 2026-09-07](research/2026-09-07-codex-perf-review-followup.md) §7）で予測倍率 0.35〜0.57× と出たので順序を後ろにした
+  （kill ではない）。復活条件と順序 = perf-ledger K-20（①K-21 ②H-15 ③i4 target の E[a] 再実測〈長文脈の抽出的要約で ≥ 2〉④設計:
+  部分 commit と sliding ring の巻き戻し / Session 跨ぎの埋め込み表と KV スロットの読み共有 / 最終 hidden の出口 / drafter の配布形 /
+  exporter の topk）。重みは `google/gemma-4-E2B-it-assistant`（Apache-2.0・非 gated・158 MB・4 層 hidden 256・target の KV へ
+  cross-attention・自前 KV 無し・verify は k+1 行）。
 
 - **IR への値依存実行選択（MoE エキスパート動的常駐の前提）**（2026-08-31 裁定 — 入れない）。
   エキスパート単位のロード/退避は ①`ShardValidator` 全件門 ②重み常駐の不変 Map ③IR v1 の

@@ -23,7 +23,8 @@
   {cost: seek | scan}`（ADR [0086](../docs/decisions/0086-distribution-source.md) 追記）・runtime `parseSafetensorsHeader`・取得層
     `@hdae/fetch-cache` の `openCachedUrl` / `openHfFile`〈その ADR 0012・0.8.0 公開済み・hub の HF 取得元も追従済み〉）。
     **落とし穴**: Chrome の CacheStorage は Range 要求を無視する（200 全量）— 区間は `blob().slice()` で取る。Deno の `blob()` は
-    全量を読む（stream 読み飛ばし = scan）。次 = **Gemma 4 の MTP（drafter）**（backlog 先頭・ユーザー要望）。
+    全量を読む（stream 読み飛ばし = scan）。**MTP（Gemma 4 drafter）は実装前の採算実測で予測倍率 0.35〜0.57× → parked（目標は実用レベル・復活条件 = perf-ledger K-20）**。
+    次の波 = **K-21（小 M linear の GEMV 族拡張）→ H-15（generation 形の backing 複数保持）**（research 2026-09-07 §7.5）。
 - **0.12.0 公開完了（2026-09-06）** — lockstep bump `a24d656` → GitHub Release v0.12.0 → JSR 0.12.0 →
   `deno task smoke:published` 緑。中身 = runtime の K-16 / K-14 / K-13（下の OP / Fusion 節）+ hub の
   `evictCachedAssets` 修正（同一参照集合の兄弟席を既定の守る側から外す・`protect` / `alsoEvicted` — ADR
