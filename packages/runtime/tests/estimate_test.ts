@@ -7,8 +7,9 @@
 //
 // 報告は常駐（`resident`）+ run の形ごと（`scenarios`）の 2 段。generation を渡さない見積りは
 // `"run"` の 1 本で、渡すと ADR 0066 決定 4 の実行 2 形（`"prefill"` / `"decode"`）が別々に
-// 並ぶ。`peakAccountedBytes` は常駐 + シナリオ側の**最大**（和ではない — slot backing が
-// 同時に 1 本だから）。
+// 並ぶ。`peakAccountedBytes` は常駐 + **`max(予算, 最大シナリオ)`**（シナリオの和ではない —
+// slot backing の保持集合はこの量を超えない: ADR 0095 決定 1 / 4。予算 0 = 常に 1 本なので、
+// 従来どおりシナリオ側の最大になる）。
 //
 // 実 GPU 突合は 1 本だけ置く（アダプタ無しは明示 SKIP）。厳密一致を主張できるのは診断が
 // 実測している 2 カテゴリ（圧縮常駐・展開）と state 容量で、中間ピークは**近似**なので
@@ -32,6 +33,7 @@ import { planRecipes, type StepOutput, type StepRecipe } from "../src/runtime/re
 import { CORE_TRANSIENT_LIMITS } from "../src/runtime/transient-plan.ts";
 import { planStateAttention } from "../src/runtime/state-attention-plan.ts";
 import { planWeightBuffers, planWeightResidency } from "../src/runtime/weight-residency.ts";
+import { DEFAULT_PLAN_BACKING_BUDGET_BYTES } from "../src/runtime/session-types.ts";
 import { f32Bytes, type GraphJson, type TensorSpec } from "./helpers/format.ts";
 import { f16BytesFromBits, f32ToF16Bits } from "./helpers/f16.ts";
 import { fill, graphModelBuffer } from "./helpers/graph.ts";
@@ -145,8 +147,13 @@ Deno.test("io は入力バッファ + 出力 readback staging（0 要素は 4 �
   assertEquals(runScenario(estimateSessionMemory(model, { bindings: { T: 0 } })).ioBytes, 32);
 });
 
-Deno.test("peakAccountedBytes は常駐の総和 + シナリオ側の最大", () => {
-  const report = estimateSessionMemory(plainModel(), { bindings: { T: 7 } });
+Deno.test("予算 0 の peakAccountedBytes は常駐の総和 + シナリオ側の最大（従来の勘定）", () => {
+  // 予算 0 = slot backing を常に 1 本しか持たない形（ADR 0095 決定 1）。この形でだけ
+  // 「勘定側 = 常駐 + 最大シナリオ 1 本」が成り立つ。
+  const report = estimateSessionMemory(plainModel(), {
+    bindings: { T: 7 },
+    planBackingBudgetBytes: 0,
+  });
   const scenario = runScenario(report);
   assertEquals(
     report.peakAccountedBytes,
@@ -155,6 +162,73 @@ Deno.test("peakAccountedBytes は常駐の総和 + シナリオ側の最大", ()
   );
   // 116（非圧縮常駐）+ 0（state）+ 220（io）+ 280（workspace — 下の「generation なし」参照）
   assertEquals(report.peakAccountedBytes, 616);
+});
+
+// ---------------------------------------------------------------------------
+// slot backing の保持予算（ADR 0095）
+// ---------------------------------------------------------------------------
+
+Deno.test("既定予算の peakAccountedBytes は常駐 + 予算（シナリオが予算に収まる形）", () => {
+  const report = estimateSessionMemory(plainModel(), { bindings: { T: 7 } });
+  assertEquals(report.planBackingBudgetBytes, DEFAULT_PLAN_BACKING_BUDGET_BYTES);
+  // 最大シナリオ 500（io 220 + workspace 280）は 256 MiB の予算に収まるので、勘定側に立つのは
+  // 予算のほう（保持集合はこの量を超えない = 過大側に倒した「勘定に入れた分のピーク」）。
+  assertEquals(report.peakAccountedBytes, 116 + DEFAULT_PLAN_BACKING_BUDGET_BYTES);
+});
+
+Deno.test("予算はシナリオごとの数字を動かさない（効くのはピークだけ）", () => {
+  const at = (planBackingBudgetBytes: number): AdmissionReport =>
+    estimateSessionMemory(plainModel(), { bindings: { T: 7 }, planBackingBudgetBytes });
+  // 予算は「保持本数の側」の量なので、1 本の形の必要量（io / workspace / 常駐）には効かない。
+  assertEquals(at(0).scenarios, at(DEFAULT_PLAN_BACKING_BUDGET_BYTES).scenarios);
+  assertEquals(at(0).resident, at(DEFAULT_PLAN_BACKING_BUDGET_BYTES).resident);
+});
+
+Deno.test("予算が最大シナリオより小さいときは最大シナリオが立つ（max の切り替わり）", () => {
+  const peak = (planBackingBudgetBytes: number): number =>
+    estimateSessionMemory(plainModel(), { bindings: { T: 7 }, planBackingBudgetBytes })
+      .peakAccountedBytes;
+  // 最大シナリオは 500（io 220 + workspace 280）。新規 1 本だけで予算を超える形は他を全て
+  // 退役させて 1 本だけ持つので、予算より大きいシナリオはそのまま勘定側に立つ。
+  assertEquals(peak(0), 616);
+  assertEquals(peak(499), 616);
+  assertEquals(peak(500), 616);
+  // 500 を超えた予算からは予算側が立つ（境界の 1 バイトで切り替わる）。
+  assertEquals(peak(501), 116 + 501);
+});
+
+Deno.test("報告は使った予算をそのまま載せる（呼び手が組み直さずに読める）", () => {
+  assertEquals(
+    estimateSessionMemory(plainModel(), { bindings: { T: 7 }, planBackingBudgetBytes: 4096 })
+      .planBackingBudgetBytes,
+    4096,
+  );
+  assertEquals(
+    estimateSessionMemory(plainModel(), { bindings: { T: 7 }, planBackingBudgetBytes: 0 })
+      .planBackingBudgetBytes,
+    0,
+  );
+});
+
+Deno.test("予算の値域は createSession と同じ門（非負の安全な整数以外は fail loudly）", () => {
+  // MUST: 見積りだけが「Session の作れない予算」を受けると、見積れたのに構築が落ちる形になる。
+  for (const budget of [-1, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 2]) {
+    assertThrows(
+      () =>
+        estimateSessionMemory(plainModel(), {
+          bindings: { T: 7 },
+          planBackingBudgetBytes: budget,
+        }),
+      ExecutionError,
+      "非負の安全な整数",
+    );
+  }
+  // 対照: 0 は正当値（従来の容量 1）— 上の 4 本が「何を渡しても落ちる」ではないことの証明。
+  assertEquals(
+    estimateSessionMemory(plainModel(), { bindings: { T: 7 }, planBackingBudgetBytes: 0 })
+      .peakAccountedBytes,
+    616,
+  );
 });
 
 /** linear の重み（適格）と mul の被演算子（適格外）に同じ格納 dtype を置くグラフ。 */
@@ -572,6 +646,9 @@ const chunkSymbolGraph = (): GraphJson => ({
 Deno.test("generation ありは prefill / decode の 2 本を自動導出する（chunk 記号だけが動く）", () => {
   const report = estimateSessionMemory(openGraph(chunkSymbolGraph()), {
     generation: { chunkLength: 4, bindings: { C: 8 } },
+    // 予算 0 = 保持 1 本。シナリオ側の足し方（和ではなく max）だけを見たいので、予算の項が
+    // 立たない形で測る（予算そのものの門は「slot backing の保持予算」の節）。
+    planBackingBudgetBytes: 0,
   });
   // prefill は M=4: x / y とも 1×2×4×4=32 要素 → io 128+128、中間は h と y の 128 ずつ
   // （h は append と 2 本目の neg に消費されるので、y の確保時点でプールへ返っていない）。

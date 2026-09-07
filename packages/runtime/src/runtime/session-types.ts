@@ -258,6 +258,20 @@ export type SessionOptions = {
    * MUST: 既定は `"sequential"`（ADR 0058 決定 2 — 数値を変える経路の自動選択禁止）。
    */
   readonly stateAttentionReduce?: StateAttentionReduce;
+  /**
+   * slot backing（導出済み計画にヒットした run が使う中間バッファ束）を**同時に保持する予算**
+   * （バイト・既定 {@link DEFAULT_PLAN_BACKING_BUDGET_BYTES} = 256 MiB）。
+   *
+   * run の形（signature）ごとに 1 本の backing があり、生成では prefill 形 ↔ decode 形の切替が
+   * 毎ターン起きる。予算内なら切り替えても作り直さず保持し（切替 1 回 ≈ 40 ms の作り直しが
+   * 消える — perf-ledger H-15）、超える分は古い順に退役する。**新規 1 本だけで予算を超える形は
+   * 他を全て退役させてその 1 本だけを持つ**（= 従来の容量 1 の挙動）ので、常駐は
+   * `max(予算, 最大 1 本)` を超えない。予算 0 は従来どおり常に 1 本。
+   * 勘定するのは各 backing が抱える VRAM = **領域の総和 + 所有する入力バッファ**
+   * （{@link PlanBackingStats.residentBytes} + {@link PlanBackingStats.inputBytes}）。
+   * MUST: 非負の安全な整数でなければ fail loudly。
+   */
+  readonly planBackingBudgetBytes?: number;
   /** テスト専用（{@link I8A8_DOT}）。既定は wgslLanguageFeatures の列挙から決める。 */
   readonly [I8A8_DOT]?: I8a8Dot;
   /** テスト専用（{@link ROW_BLOCK_SPLIT}）。既定は device の limit から静的に決まる枚数。 */
@@ -390,14 +404,29 @@ export type PreparedPlanStats = {
  */
 export type PlanBackingStats = {
   /**
-   * 活性 backing が常駐させている**領域の総和**（未構築 / 破棄済みなら 0）。
+   * 保持中の backing 全てが常駐させている**領域の総和**（未構築 / 破棄済みなら 0）。
    * MUST: 定義は「計画の領域の総和」— backing が併せて常駐させる入力バッファは含めない
-   * （理由と門は {@link ActiveBacking.bytes}）。
+   * （理由と門は {@link ActiveBacking.bytes}）。{@link SessionOptions.planBackingBudgetBytes} が
+   * 勘定するのも同じ量。
    */
   readonly residentBytes: number;
+  /**
+   * 保持中の backing が所有する入力バッファの総和（常駐入力は所有しないので含めない）。
+   * 予算（{@link SessionOptions.planBackingBudgetBytes}）が勘定するのは `residentBytes + inputBytes`。
+   */
+  readonly inputBytes: number;
+  /** 保持中の backing の本数（予算内で複数保持する — {@link SessionOptions.planBackingBudgetBytes}）。 */
+  readonly retainedCount: number;
   /** Session の生存中に backing を構築した累計回数（run ごとではなく累計）。 */
   readonly buildCount: number;
 };
+
+/**
+ * {@link SessionOptions.planBackingBudgetBytes} の既定（256 MiB）。gemma4 E2B では decode 形
+ * （3 MiB）と prefill バケット 32 / 64 / 128 形（capacity 16K で 23 / 45 / 89 MiB）が収まり、
+ * chunk 768 形（capacity 16K で ≈ 500 MiB）は 1 本だけ持つ側に落ちる。
+ */
+export const DEFAULT_PLAN_BACKING_BUDGET_BYTES = 256 * 1024 * 1024;
 
 /**
  * state backing（{@link GenerationContext} 所有バッファ群）の実績。ADR 0066 決定 5 が
@@ -499,7 +528,7 @@ export type SessionDiagnostics = {
   readonly lastRunPrepared: PreparedPlanStats | undefined;
   /**
    * transient slot の GPU backing の実績（run ごとではなく Session の現況 + 累計）。
-   * 未構築の Session では `{ residentBytes: 0, buildCount: 0 }`。
+   * 未構築の Session では `{ residentBytes: 0, retainedCount: 0, buildCount: 0 }`。
    */
   readonly planBacking: PlanBackingStats;
   /**

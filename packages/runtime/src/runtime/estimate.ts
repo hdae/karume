@@ -24,7 +24,9 @@
  *   `weights.allocatedBytes` — params 込み — でしか観測できない）
  * - {@link AdmissionReport.resident}`.stateBytes` ↔ `stateBacking.residentBytes`（context 1 本のとき）
  * - {@link AdmissionScenario.workspaceBytes} ↔ `planBacking.residentBytes` /
- *   `lastRun.peakTransientBytes`（そのシナリオの形で回した run のもの）
+ *   `lastRun.peakTransientBytes`（そのシナリオの形で回した run のもの — 診断の
+ *   `residentBytes` は**保持中の backing 全ての総和**なので、対応するのは 1 形だけを回した
+ *   Session か `retainedCount === 1` のとき。予算つきの保持は ADR 0095 決定 1）
  *
  * MUST: 分類も算式も**実装と同じ導出元**から引く（重みの席と宣言由来バイト数は
  * weight-residency.ts の純関数プランナ、整列とサイズクラスは `toSizeClass`、state の 1 要素
@@ -66,7 +68,7 @@ import {
   type TransientStepSpec,
   type TransientTempSpec,
 } from "./transient-plan.ts";
-import type { GenerationContextSpec } from "./session-types.ts";
+import { DEFAULT_PLAN_BACKING_BUDGET_BYTES, type GenerationContextSpec } from "./session-types.ts";
 import { planStateAttention, type StateAttentionBlock } from "./state-attention-plan.ts";
 import {
   planWeightBuffers,
@@ -140,15 +142,27 @@ export type AdmissionReport = {
   /** run の形ごとの必要バイト数（1 要素以上 — 名前の決まり方は {@link AdmissionScenarioName}）。 */
   readonly scenarios: readonly AdmissionScenario[];
   /**
-   * 常駐の総和 + シナリオ側の最大（= `resident.weights.totalBytes + resident.stateBytes +
-   * max(ioBytes + workspaceBytes)`）。
+   * この見積りが使った slot backing の保持予算（{@link EstimateOptions.planBackingBudgetBytes} —
+   * 省略時は `DEFAULT_PLAN_BACKING_BUDGET_BYTES`）。{@link AdmissionReport.peakAccountedBytes} の
+   * 片側の項がそのまま読めるように報告する（同じ数を呼び手が組み直さずに済む）。
+   */
+  readonly planBackingBudgetBytes: number;
+  /**
+   * 常駐の総和 + **保持集合の上限**（= `resident.weights.totalBytes + resident.stateBytes +
+   * max(planBackingBudgetBytes, max(ioBytes + workspaceBytes))`）。
    *
    * **上限保証ではなく「勘定に入れた分のピーク」**を名乗る欄（名前の由来）。シナリオ側を和では
-   * なく max で足すのは、Session が抱える slot backing が**同時に 1 本**だから — 計画
-   * （`PreparedPlan`）は `PREPARED_PLAN_CAPACITY = 8` 本まで LRU で残るが、実体を持つ
-   * `ActiveBacking` は容量 1 で、別 signature の run はまず現行 backing を退役させてから
-   * 確保し直す（executor の `Session.#activateBacking` / `#retireBacking`）。退役から実際の
-   * `destroy()` までの窓で 2 本ぶんが同時に載る点は {@link AdmissionReport.unaccounted} 側。
+   * なく `max(予算, 最大シナリオ)` で足すのは、Session が抱える slot backing の保持集合が
+   * **その量を超えないから**（ADR 0095 決定 1 / 4）: 新しい signature のヒット run は
+   * 「保持分 + 新規 ≤ 予算」になるまで古い順に退役させてから確保し、新規 1 本だけで予算を
+   * 超える形は保持中を全て退役させてその 1 本だけを持つ（executor の
+   * `Session.#evictBackingsFor`）。計画（`PreparedPlan`）が `PREPARED_PLAN_CAPACITY = 8` 本まで
+   * LRU で残るのとは別の勘定である。
+   *
+   * models 側の prefill バケット形（`chunkBuckets`）は{@link AdmissionReport.scenarios}に
+   * 列挙しないが、予算の内側で同時に保持されうる形なので**予算で上から押さえる**（過大側へ
+   * 倒す — 「勘定に入れた分のピーク」の意味論はそのまま）。退役から実際の `destroy()` までの窓と、
+   * 予算は各 backing の領域 + 所有する入力バッファを勘定する（診断の `residentBytes + inputBytes`）。
    */
   readonly peakAccountedBytes: number;
   /** 勘定に入っていないもの（見積りが絶対保証でないことを形式が認める欄 — ADR 0070 決定 5）。 */
@@ -178,6 +192,17 @@ export type EstimateOptions = {
    * 呼び手から見えない）。
    */
   readonly maxStorageBufferBindingSize?: number;
+  /**
+   * slot backing の保持予算（`SessionOptions.planBackingBudgetBytes` と同じ値・既定
+   * `DEFAULT_PLAN_BACKING_BUDGET_BYTES` = 256 MiB）。
+   *
+   * MUST: 検査は `createSession` と同じ（非負の安全な整数以外は fail loudly）。見積りだけが
+   * Session の作れない予算を受けると、「見積れたのに構築が落ちる」形になる。
+   * 効くのは {@link AdmissionReport.peakAccountedBytes} だけで、シナリオごとの数字は動かない
+   * （予算は保持**本数**の側の量で、1 本の形の必要量ではない）。予算 0 = 常に 1 本なので、
+   * ピークは従来どおりシナリオ側の最大になる。
+   */
+  readonly planBackingBudgetBytes?: number;
 };
 
 /**
@@ -191,7 +216,7 @@ const UNACCOUNTED: readonly string[] = Object.freeze([
   "states 形でない attention のノード内一時（スコアの行ブロックと i8a8 の量子化中間）と、linear i8a8 の量子化中間 — どれも数値変種と device limit に依存する。states 形 attention のスコア S と行統計は勘定に入っている（融合の成立に依存せず必ず出るため）",
   "params バッファ（カーネル定数 — Session 常駐・内容アドレスキャッシュ）",
   "queue.writeBuffer の実装 staging（submit の完了まで解放されない）",
-  "シナリオ切替の窓（退役した slot backing は次の計画の確保より前に destroy されず flush 後の後始末まで生きるので、prefill ⇄ decode の切替 run では 2 シナリオぶんの io + workspace が同時に載る）",
+  "退役の窓（予算超過 / 計画の LRU 追い出しで退役した slot backing は、次の計画の確保より前に destroy されず flush 後の後始末まで生きるので、その run では退役分 + 新規が同時に載る）",
 ]);
 
 /** 解決済み shape を引く（planGraph が全値を載せているので、欠けは簿記の破れ）。 */
@@ -543,6 +568,8 @@ const transientSlotBytes = (
  *   `"prefill"` / `"decode"` の 2 本になる。
  * @param options.maxStorageBufferBindingSize device の granted 上限。states 形 attention を
  *   持つグラフでは必須（ノード内一時の行ブロック枚数がこれだけで決まる）。
+ * @param options.planBackingBudgetBytes slot backing の保持予算（`SessionOptions` と同じ値）。
+ *   {@link AdmissionReport.peakAccountedBytes} の片側の項になる。
  */
 export const estimateSessionMemory = (
   model: KarumeModel,
@@ -602,6 +629,14 @@ export const estimateGraphMemory = (
       `options.maxStorageBufferBindingSize ${bindingSizeLimit} は正の安全整数でなければならない`,
     );
   }
+  // MUST: 予算の値域も**ここで**見る（`createSession` と同じ検査 — ADR 0095 決定 1）。読む位置
+  // （下のピーク）だけに置くと、Session が作れない予算で見積りだけが数を返す。
+  const budgetBytes = options.planBackingBudgetBytes ?? DEFAULT_PLAN_BACKING_BUDGET_BYTES;
+  if (!Number.isSafeInteger(budgetBytes) || budgetBytes < 0) {
+    throw new ExecutionError(
+      `options.planBackingBudgetBytes ${budgetBytes} は非負の安全な整数でなければならない`,
+    );
+  }
   const chunkDims = chunkRowDims(graph);
   const chunkSymbols = new Set(chunkDims.map((dim) => parseDim(dim).sym));
   const bindings = planBindings(graph, options.bindings, chunkSymbols);
@@ -622,12 +657,11 @@ export const estimateGraphMemory = (
   // NOTE: `chunkBuckets`（追記〈バケット〉）はシナリオを増やさない。バケットが変えるのは物理
   // chunk 行数 M だけで、一時領域・入出力・attention の S 一時はいずれも M に単調なので、
   // ピークは必ず最大 M = chunkLength の prefill 形にある。ただし「バケット形と prefill 形が
-  // 同時に載らない」とまでは言えない — slot backing はヒット run でしか作られないので、末尾
-  // chunk のバケット run は chunkLength 形の backing が載ったままミス run として arena に一時を
-  // 確保する（ヒットしても退役 → 新規確保 → run 末尾の destroy の順なので同じ）。これは
-  // `peakAccountedBytes` の doc が言う「退役から destroy までの窓で 2 本ぶんが同時に載る点は
-  // unaccounted 側」と同型で、バケット導入でその幅が（decode 形 + prefill 形）から（最大
-  // バケット形 + prefill 形）へ広がる。
+  // 同時に載らない」とまでは言えない — backing は予算内なら複数保持されるので、バケット形と
+  // prefill 形が同時に常駐しうる（ADR 0095 決定 1）。その同時分は `peakAccountedBytes` が
+  // シナリオの max ではなく `max(予算, 最大シナリオ)` を載せることで上から押さえてある
+  // （欄の doc）。予算超過 / LRU 追い出しで退役した実体が destroy までの窓で残る点だけが
+  // 非勘定側に残る。
   const plans: readonly (readonly [AdmissionScenarioName, SymbolBindings])[] =
     chunkLength === undefined ? [["run", bindings]] : [
       ["prefill", bindChunkRows(bindings, chunkDims, chunkLength, "prefill")],
@@ -674,7 +708,9 @@ export const estimateGraphMemory = (
       stateBytes: state.bytes,
     },
     scenarios,
-    peakAccountedBytes: weightBytes + state.bytes + peakScenarioBytes,
+    planBackingBudgetBytes: budgetBytes,
+    // 保持集合は `max(予算, 最大 1 本)` を超えない（executor の `#evictBackingsFor`）。
+    peakAccountedBytes: weightBytes + state.bytes + Math.max(budgetBytes, peakScenarioBytes),
     unaccounted: UNACCOUNTED,
   };
 };

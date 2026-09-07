@@ -507,6 +507,38 @@ Deno.test({
 });
 
 Deno.test({
+  name: "planBackingBudgetBytes は非負の安全な整数だけを受ける（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    try {
+      // 予算は「保持集合の上限」（ADR 0095 決定 1）で、見積り（estimate.ts）が勘定側に載せる量
+      // でもある。負 / 非整数 / NaN を黙って受けると、`#evictBackingsFor` の比較が常に偽 /
+      // 常に真になって「毎 run 全退役」か「無制限保持」へ静かに化ける。
+      for (const budget of [-1, 1.5, Number.NaN]) {
+        await assertRejects(
+          () =>
+            createSession(gpu, openModel(chainModelBuffer()), {
+              planBackingBudgetBytes: budget,
+            }),
+          ExecutionError,
+          "非負の安全な整数",
+        );
+      }
+      // 対照: 0（従来の容量 1）と正の整数は通る（上の 3 本が「何を渡しても落ちる」ではない証明）。
+      for (const budget of [0, 4096]) {
+        const session = await createSession(gpu, openModel(chainModelBuffer()), {
+          planBackingBudgetBytes: budget,
+        });
+        await session.dispose();
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
   name: "失敗した run の直後の診断は 1 本前の成功 run の実績を残さない（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {

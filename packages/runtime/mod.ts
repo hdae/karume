@@ -88,6 +88,7 @@ export type { RuntimeCapabilities } from "./src/ops.ts";
 export { DispatchLimitError } from "./src/codegen/errors.ts";
 
 export { createSession, createSessionFromShards, prepareModel } from "./src/runtime/executor.ts";
+export { DEFAULT_PLAN_BACKING_BUDGET_BYTES } from "./src/runtime/session-types.ts";
 /**
  * 重み DL 前の admission の入口（ADR 0070 決定 5 / graph-first）。グラフ shard
  * （配布形の先頭 shard = `karume_ir` + 小テンソル）だけで「実行できない」を先に落とし、

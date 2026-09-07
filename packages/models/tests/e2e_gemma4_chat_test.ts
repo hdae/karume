@@ -42,7 +42,11 @@ import {
   type Gemma4ChatStream,
   gemma4ChatTurn,
   Gemma4Pipeline,
+  type Gemma4PipelineOptions,
+  type Gemma4RunPhase,
 } from "../gemma.ts";
+// 予算の既定は runtime の**公開面**から取る（写すと家族側だけ古い値を名乗れる）。
+import { DEFAULT_PLAN_BACKING_BUDGET_BYTES, type SessionDiagnostics } from "@karume/runtime";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 // PLE shard の読み口（`Deno.open` の位置読み = 費用の型 seek）は helper が正本。
 import { openPleShardAt } from "./helpers/ple-source.ts";
@@ -171,7 +175,9 @@ const readBuffer = async (root: URL, file: string): Promise<ArrayBuffer> => {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
 };
 
-const openPipeline = async (): Promise<Gemma4Pipeline> => {
+const openPipeline = async (
+  options: Gemma4PipelineOptions = {},
+): Promise<Gemma4Pipeline> => {
   const model: Uint8Array<ArrayBuffer>[] = [];
   for (const file of MODEL_SHARDS) model.push(new Uint8Array(await readBuffer(PRODUCT_ROOT, file)));
   return await Gemma4Pipeline.fromAssets({
@@ -188,7 +194,10 @@ const openPipeline = async (): Promise<Gemma4Pipeline> => {
     openPleShard: (file) => openPleShardAt(PRODUCT_ROOT, file),
     // 予算は索引から導く（= sidecar 全量常駐 → 範囲をまたぐ会話でも読み直しゼロ）。定数で
     // 書くと資産世代で shard 幅が変われば別の本数を意味してしまう — helper の doc。
-  }, { maxResidentPleBytes: allResidentPleBytesAt(new URL(PLE_INDEX_FILE, PRODUCT_ROOT)) });
+  }, {
+    maxResidentPleBytes: allResidentPleBytesAt(new URL(PLE_INDEX_FILE, PRODUCT_ROOT)),
+    ...options,
+  });
 };
 
 Deno.test({
@@ -426,6 +435,12 @@ Deno.test({
         // MUST: `maxStorageBufferBindingSize` を必ず渡す（states 形 attention のノード内一時は
         // 行ブロック枚数がこの上限だけで決まる — 省くと estimator が fail loudly する）。
         assert(implicit.peakAccountedBytes > 0, "見積りが 0 バイトを名乗っている");
+        // slot backing の保持予算（ADR 0095）は pipeline options を省けば runtime の既定が効く。
+        assertEquals(
+          implicit.planBackingBudgetBytes,
+          DEFAULT_PLAN_BACKING_BUDGET_BYTES,
+          "予算の既定が報告に載っていない（pipeline が別の値を渡している）",
+        );
 
         // 失敗経路 3 本（どれも Session を張り直す前に落ちる）。
         assertThrows(
@@ -495,5 +510,156 @@ Deno.test({
         (program.stopTokens as number[]).length = 0;
       }, TypeError);
     });
+  },
+});
+
+/**
+ * slot backing の保持予算（ADR 0095）の**透過**— pipeline options の値が
+ * `estimateSessionMemory` の前提としてそのまま効くこと。
+ *
+ * ⑩ が押さえるのは「省略時は runtime の既定」で、こちらは「明示すればその値」。Session 側
+ * （`createSession` への透過）は観測席が無いので、ここが見るのは見積り側だけである
+ * （両者へ同じ値を渡すことは pipeline の 1 本の実装で、握った値は `Gemma4State` に 1 つしかない）。
+ */
+Deno.test({
+  name: "planBackingBudgetBytes は pipeline options から見積りへ透過する（実 GPU）",
+  ignore: !AVAILABLE || !GPU_AVAILABLE,
+  fn: async () => {
+    // 既定（256 MiB）とも最大シナリオとも違う値を選ぶ（どちらの既定へ落ちても落ちる形）。
+    const budget = 4 * 1024 * 1024 * 1024;
+    const pipeline = await openPipeline({ planBackingBudgetBytes: budget });
+    try {
+      const report = pipeline.estimateSessionMemory();
+      assertEquals(report.planBackingBudgetBytes, budget, "予算が見積りへ降りていない");
+      const scenario = Math.max(
+        ...report.scenarios.map((one) => one.ioBytes + one.workspaceBytes),
+      );
+      // 門が空振らないことの対: この予算はどのシナリオよりも大きい（= max の予算側が立つ）。
+      assert(scenario < budget, `最大シナリオ ${scenario} が予算 ${budget} を下回っていない`);
+      assertEquals(
+        report.peakAccountedBytes,
+        report.resident.weights.totalBytes + report.resident.stateBytes + budget,
+        "ピークが予算を勘定に入れていない（既定へ落ちている）",
+      );
+    } finally {
+      await pipeline.dispose();
+    }
+  },
+});
+
+/**
+ * slot backing の保持予算（ADR 0095）の**透過（Session 側）**— pipeline options の値が
+ * `createSession` へ降り、生成の run 診断にそのまま現れること。
+ *
+ * 上の門が見るのは見積り側（報告に載る数）だけで、Session に効いているかは見ていない。こちらは
+ * 観測席（{@link Gemma4PipelineOptions.onRunDiagnostics}）から run ごとの `planBacking` を直接
+ * 読む。見るのは 2 通の対:
+ *
+ * ① **予算 0**（従来の容量 1）: どの run でも保持は 1 本きりで、prefill → decode の切替で
+ *    作り直す（`buildCount` が 1 増える）
+ * ② **既定予算**: prefill バケット形と decode 形の**2 本**が保持され、decode の 2 本目以降は
+ *    作り直しが起きない（生成 1 ターンの切替コストが消えた点そのもの）
+ *
+ * MUST: 観測するのは**2 ターン目**。run は「ヒット run でしか backing を作らない」（単発 run に
+ * slot メモリを払わせない — ADR 0095）ので、1 ターン目の各 run は計画の導出（ミス run）で
+ * 終わり、保持も切替も観測点に出てこない。1 ターン目は同じ会話で回して 2 つの鍵を導出させる
+ * ためだけに使う。
+ */
+type ObservedRun = {
+  readonly kind: Gemma4RunPhase["kind"];
+  readonly retainedCount: number;
+  readonly buildCount: number;
+};
+
+/** 観測に使うターンの生成 token 数（EOS の 9 個より手前で止める = 停止理由は `max-tokens`）。 */
+const OBSERVED_NEW_TOKENS = 4;
+
+/** 同じ会話を 2 ターン回し、**2 ターン目**の run だけを拾う。 */
+const observeSecondTurn = async (options: Gemma4PipelineOptions): Promise<ObservedRun[]> => {
+  const { messages } = caseOf("single-user");
+  const runs: ObservedRun[] = [];
+  const pipeline = await openPipeline({
+    ...options,
+    onRunDiagnostics: (diagnostics: SessionDiagnostics, phase: Gemma4RunPhase) => {
+      runs.push({
+        kind: phase.kind,
+        retainedCount: diagnostics.planBacking.retainedCount,
+        buildCount: diagnostics.planBacking.buildCount,
+      });
+    },
+  });
+  try {
+    for (const turn of [0, 1]) {
+      const stream = pipeline.chat(messages, { maxNewTokens: OBSERVED_NEW_TOKENS });
+      for await (const _chunk of stream) { /* 片は使わない（回すことが目的） */ }
+      assertEquals((await stream.done).reason, "max-tokens", `ターン ${turn} が途中で止まった`);
+      // 1 ターン目は導出（ミス run）専用。捨てて 2 ターン目だけを残す。
+      if (turn === 0) runs.length = 0;
+    }
+    return runs;
+  } finally {
+    await pipeline.dispose();
+  }
+};
+
+Deno.test({
+  name: "planBackingBudgetBytes は Session へ透過する（予算 0 は保持 1 本・既定は 2 本・実 GPU）",
+  ignore: !AVAILABLE || !GPU_AVAILABLE,
+  fn: async () => {
+    /** 観測列の形（prefill 1 本 + decode 複数）を先に固定する — 門が空振らないことの対。 */
+    const assertShape = (runs: readonly ObservedRun[], label: string): ObservedRun[] => {
+      assertEquals(
+        runs.filter((run) => run.kind === "prefill").length,
+        1,
+        `${label}: prefill が 1 本でない`,
+      );
+      assertEquals(runs[0]?.kind, "prefill", `${label}: 先頭が prefill run でない`);
+      const decodes = runs.filter((run) => run.kind === "decode");
+      assert(decodes.length >= 2, `${label}: decode run が ${decodes.length} 本しかない`);
+      return decodes;
+    };
+
+    // ① 予算 0 — 保持は常に 1 本で、切替のたびに作り直す。
+    const zero = await observeSecondTurn({ planBackingBudgetBytes: 0 });
+    const zeroDecodes = assertShape(zero, "予算 0");
+    for (const run of zero) {
+      assertEquals(
+        run.retainedCount,
+        1,
+        `予算 0 が Session へ降りていない: ${JSON.stringify(zero)}`,
+      );
+    }
+    assertEquals(
+      zeroDecodes[0].buildCount,
+      zero[0].buildCount + 1,
+      `予算 0 で prefill → decode の切替が作り直しになっていない: ${JSON.stringify(zero)}`,
+    );
+    for (const run of zeroDecodes.slice(1)) {
+      assertEquals(
+        run.buildCount,
+        zeroDecodes[0].buildCount,
+        `同じ decode 形の連続 run で作り直している: ${JSON.stringify(zero)}`,
+      );
+    }
+
+    // ② 既定予算 — prefill バケット形と decode 形の 2 本が保持され、2 ターン目は作り直しゼロ。
+    const budgeted = await observeSecondTurn({});
+    const budgetedDecodes = assertShape(budgeted, "既定予算");
+    for (const run of budgeted) {
+      assertEquals(
+        run.retainedCount,
+        2,
+        `既定予算で 2 形が保持されていない（切替のたびに退役している）: ${
+          JSON.stringify(budgeted)
+        }`,
+      );
+    }
+    for (const run of budgetedDecodes) {
+      assertEquals(
+        run.buildCount,
+        budgeted[0].buildCount,
+        `既定予算の decode で backing を作り直している: ${JSON.stringify(budgeted)}`,
+      );
+    }
   },
 });

@@ -108,6 +108,7 @@ import {
 } from "./weight-residency.ts";
 import {
   type ComputePrecision,
+  DEFAULT_PLAN_BACKING_BUDGET_BYTES,
   type EnqueueOptions,
   type GenerationContextSpec,
   I8A8_DOT,
@@ -670,11 +671,13 @@ type PlannedSteps = {
 const PREPARED_PLAN_CAPACITY = 8;
 
 /**
- * 活性 signature の transient slot backing（**容量 1**）。
+ * signature（導出済み計画のキー）ごとの transient slot backing。
  *
- * 容量 1 なのは、slot は run の中間バッファそのもの（DiT で ~1GiB 規模）で、signature ごとに
- * 抱えると VRAM が本数倍になるため — 導出済み計画（ホストのオブジェクトだけ）を 4 本持てる
- * のとは前提が違う。
+ * Session は複数を**バイト予算つき**で保持する（{@link SessionOptions.planBackingBudgetBytes}・
+ * perf-ledger H-15）: slot は run の中間バッファそのもの（DiT で ~1GiB 規模）なので本数で
+ * 持つと VRAM が本数倍になるが、生成の prefill バケット形 / decode 形は数〜数十 MiB で、
+ * 切替のたびに作り直す ≈ 40 ms の方が高くつく。予算に入らない大きい形は従来どおり 1 本だけ
+ * （他を全て退役させる）。導出済み計画（ホストのオブジェクトだけ）を 8 本持てるのとは前提が違う。
  */
 type ActiveBacking = {
   /** この backing が属する導出済み計画のキー（{@link Session.#preparedKey}）。 */
@@ -695,6 +698,13 @@ type ActiveBacking = {
    * 決定 6）、入力ぶんを混ぜると門が観測しているものが変わる。
    */
   readonly bytes: number;
+  /**
+   * backing が所有する入力バッファの総和（常駐入力は所有しないので含めない）。予算
+   * （{@link SessionOptions.planBackingBudgetBytes}）が勘定するのは `bytes + inputBytes` —
+   * 保持集合が実際に抱える VRAM。`bytes` を分けて持つのは footprint 不変の門（ADR 0093 決定 6）が
+   * 領域の総和だけを見る量だから。
+   */
+  readonly inputBytes: number;
   /**
    * グラフ入力名 → 束ねる実体。通常入力は backing 所有の常駐バッファ（`HOST_WRITTEN_USAGE`・
    * サイズは解決済み shape から確定するので同一 signature では作り直す理由が無い）、常駐入力は
@@ -858,6 +868,8 @@ type SessionState = {
   readonly buildStats: SessionBuildStats;
   /** linear の実行形（opt-in — {@link SessionOptions.linearCompute}）。 */
   readonly linearCompute: "f32" | "a8" | "f16";
+  /** slot backing を同時に保持する予算（{@link SessionOptions.planBackingBudgetBytes}）。 */
+  readonly planBackingBudgetBytes: number;
   /** 融合 attention の実行形（opt-in — {@link SessionOptions.attentionCompute}）。 */
   readonly attentionCompute: ComputePrecision;
   /** S の格納形（opt-in — {@link SessionOptions.attentionScoreStorage}）。計算形と直交する軸。 */
@@ -900,8 +912,11 @@ export class Session {
    * 状態は自身の {@link Session.#state} をそのまま渡す（run 寿命の器は面に載らない）。
    */
   readonly #recipeBuilder: RecipeBuilder;
-  /** 活性 signature の slot backing（容量 1 — {@link ActiveBacking}）。 */
-  #backing: ActiveBacking | undefined;
+  /**
+   * 保持中の slot backing（計画キー → 実体 — {@link ActiveBacking}）。**挿入順 = 古い順**で、
+   * ヒットしたキーは削除 → 再挿入で最新へ動かす（LRU）。予算は {@link Session.#evictBackingsFor}。
+   */
+  readonly #backings = new Map<string, ActiveBacking>();
   #backingBuilds = 0;
   /**
    * 破棄待ちの slot バッファ。切替・追い出し・dispose はここへ積むだけで、実際の `destroy()` は
@@ -972,6 +987,8 @@ export class Session {
     const attentionCompute = options.attentionCompute ?? "f32";
     const attentionScoreStorage = options.attentionScoreStorage ?? "f32";
     const stateAttentionReduce = options.stateAttentionReduce ?? "sequential";
+    const planBackingBudgetBytes = options.planBackingBudgetBytes ??
+      DEFAULT_PLAN_BACKING_BUDGET_BYTES;
     // MUST: 綴りの検査は既定代入の直後・以降の全ゲートより前。ここを通った後は s16×c16 ゲートも
     // f16 feature ゲートも union 内の値だけを見ればよい。
     assertExecutionKnobs(
@@ -980,6 +997,13 @@ export class Session {
       attentionScoreStorage,
       stateAttentionReduce,
     );
+    // 値域の検査（union を読まない）は綴りの門の後 — 文言は estimate.ts の同じ門と揃える。
+    if (!Number.isSafeInteger(planBackingBudgetBytes) || planBackingBudgetBytes < 0) {
+      throw new ExecutionError(
+        `options.planBackingBudgetBytes ${String(planBackingBudgetBytes)} は非負の安全な整数で` +
+          "なければならない",
+      );
+    }
     // MUST: S の格納形は 1 つに決まらなければならない。`:c16` は S を array<f16> で持つ
     // **別の形**（ADR 0028）なので、s16 と併記されたら黙ってどちらかに解釈せず落とす
     // （どちらの丸め列で走ったのかが診断からも数値からも見えなくなる）。
@@ -1368,6 +1392,7 @@ export class Session {
       attentionCompute,
       attentionScoreStorage,
       stateAttentionReduce,
+      planBackingBudgetBytes,
       // linear の拡張の有無は**速度にしか効かない**（両変種は同じ整数を返す）ので、機能検出では
       // なく経路選択としてここで 1 度だけ決める（src/kernels/linear-i8a8.ts の docstring）。
       linearI8a8Dot: options[I8A8_DOT] ?? (dp4a ? "dp4a" : "emu"),
@@ -1673,7 +1698,7 @@ export class Session {
       try {
         await this.#state.weights.destroy();
       } finally {
-        this.#retireBacking();
+        this.#retireAllBackings();
         this.#destroyRetired();
       }
     });
@@ -1694,7 +1719,16 @@ export class Session {
       lastRunParams: this.#lastRunParams,
       lastRunPrepared: this.#lastRunPrepared,
       planBacking: {
-        residentBytes: this.#backing?.bytes ?? 0,
+        // MUST: 保持集合から毎回導出する（独立に足し引きするカウンタで持たない — #contexts と同じ規律）。
+        residentBytes: [...this.#backings.values()].reduce(
+          (total, backing) => total + backing.bytes,
+          0,
+        ),
+        inputBytes: [...this.#backings.values()].reduce(
+          (total, backing) => total + backing.inputBytes,
+          0,
+        ),
+        retainedCount: this.#backings.size,
         buildCount: this.#backingBuilds,
       },
       stateBacking: {
@@ -1845,7 +1879,7 @@ export class Session {
         // ミス run の値名 → 束縛先（読み戻し先）。backing run は backing.outputs を使う。
         let missValues: ReadonlyMap<string, ValueBinding> | undefined;
         // この run が backing を新規構築したか（失敗時の回復規律 — 下の catch が読む）。
-        let builtBacking = false;
+        let builtBacking: string | undefined;
         // 単一フェンス経路で run 本体のコマンド列へ積んだ読み戻し（undefined = 二段待ち経路）。
         let staged: readonly StagedOutput[] | undefined;
         try {
@@ -1882,7 +1916,7 @@ export class Session {
                 residentInputs,
               );
               backing = activated.backing;
-              builtBacking = activated.built;
+              builtBacking = activated.built ? activated.backing.key : undefined;
               graph.inputs.forEach((spec, index) => {
                 // 常駐入力は writeBuffer を出さない（実体がそのまま焼き込まれている）。
                 const values = data[index];
@@ -2028,7 +2062,7 @@ export class Session {
           // backing が後続 run に居座らない。既存 backing での失敗 run は退役させない — 無関係な
           // 失敗のたびに ~GiB 規模の再構築を強いるスラッシングになる（そちらの回復手段は
           // signature 切替と LRU 追い出し）。
-          if (builtBacking) this.#retireBacking();
+          if (builtBacking !== undefined) this.#retireBacking(builtBacking);
           // MUST: 破棄待ちの slot は arena.destroy（= flush / discard 済み）の**後**に返す。
           this.#destroyRetired();
           throw cause;
@@ -2158,7 +2192,7 @@ export class Session {
     this.#lastRunParams = undefined;
     this.#recipeBuilder.resetParamsStats();
 
-    let builtBacking = false;
+    let builtBacking: string | undefined;
     try {
       let recipes: readonly StepRecipe[];
       if ("recipes" in derived) {
@@ -2181,7 +2215,7 @@ export class Session {
       );
       const copies = this.#planCopyOutputs(options.copyOutputs, shapes);
       const activated = this.#activateBacking(preparedKey, recipes, shapes, residentInputs);
-      builtBacking = activated.built;
+      builtBacking = activated.built ? activated.backing.key : undefined;
       // MUST: 写し元の解決（実体に依存する検査）は dispatch を 1 本も積む前に済ませる。
       const writes = this.#resolveCopyOutputs(copies, activated.backing);
       graph.inputs.forEach((spec, index) => {
@@ -2213,7 +2247,7 @@ export class Session {
     } catch (cause) {
       // MUST: 失敗した enqueue の残 pending は submit せずに捨てる（run と同じ規律）。
       scheduler.discard();
-      if (builtBacking) this.#retireBacking();
+      if (builtBacking !== undefined) this.#retireBacking(builtBacking);
       this.#destroyRetired();
       throw cause;
     }
@@ -2407,20 +2441,21 @@ export class Session {
         // MUST: 追い出された計画の slot backing は宙に浮く（次にその bindings が来ても
         // ミス run になり backing は使われない）。持ち続けると、二度と当たらない signature の
         // 中間バッファぶんの VRAM を Session の寿命いっぱい抱え込む。
-        if (this.#backing?.key === oldest) this.#retireBacking();
+        this.#retireBacking(oldest);
       }
     }
   }
 
   /**
-   * ヒット run の slot backing を活性化する（無ければ構築・別 signature なら作り直す）。
+   * ヒット run の slot backing を活性化する（保持していればそれ・無ければ予算内に収めてから構築 —
+   * 別 signature は予算内なら**追加**、超過なら古い順に退役させてから確保）。
    * `built` は「この run が新規構築したか」— 失敗時の回復規律（{@link Session.#runOnce}）が読む。
    *
    * MUST: 呼ぶのは run の `withScopeLock` / errorScope 区間の内側だけ。createBuffer は上限超過で
    * 同期例外を投げずに無効バッファを返し、createBindGroup の validation 失敗も例外にならない
    * ため、囲まないと「無効な slot / bind group に dispatch が書く」沈黙故障になる。
-   * MUST: 確保から `this.#backing` への代入（= 所有権の確立）までを try/catch で囲み、途中の
-   * 同期例外では確保済みを `#retired` へ回す。この窓で漏れた実体は `#retireBacking()` からも
+   * MUST: 確保から `#backings` への登録（= 所有権の確立）までを try/catch で囲み、途中の
+   * 同期例外では確保済みを `#retired` へ回す。この窓で漏れた実体は `#retireBacking(key)` からも
    * `Session.dispose()` からも到達できず、しかも量はこの Session で最大（領域の総和）に
    * なる（ADR 0004「確保と破棄を 1 箇所へ」は失敗経路でも保つ）。
    * NOTE: run 経路のレシピ列は必ず 1 度ミス run で同じ計画（`planRecipes`）を通っている（run は
@@ -2433,14 +2468,30 @@ export class Session {
     shapes: ReadonlyMap<string, readonly number[]>,
     residentInputs: ReadonlyMap<string, ResidentTensor>,
   ): { readonly backing: ActiveBacking; readonly built: boolean } {
-    const current = this.#backing;
-    if (current !== undefined && current.key === key) return { backing: current, built: false };
-    // MUST: 旧 backing は destroy せず破棄待ちへ積む（この run の flush 後にだけ返す）。
-    this.#retireBacking();
+    const current = this.#backings.get(key);
+    if (current !== undefined) {
+      // LRU: ヒットしたキーを最新へ動かす（Map の挿入順が古い順）。
+      this.#backings.delete(key);
+      this.#backings.set(key, current);
+      return { backing: current, built: false };
+    }
     const graph = this.#state.graph;
     const device = this.#state.gpu.device;
     const plan = planRecipes(recipes, this.#state.transientLimits);
-    // 所有権が確立する（`this.#backing` への代入）までの確保物と retain 済み常駐入力。
+    // 所有する入力バッファの大きさ（常駐入力は所有しないので載らない）。
+    // MUST: 大きさはアリーナ経路の `#bindInput` と同じ算式（4 バイト床込み — 0 要素入力で
+    // 0 サイズバッファを束縛しない）。予算の勘定と確保の**両方がこの 1 表を読む**（式を 2 つ
+    // 持つと片方だけ動いて予算の勘定が静かにずれる）。
+    const ownedInputSizes = new Map<string, number>(
+      graph.inputs
+        .filter((spec) => !residentInputs.has(spec.name))
+        .map((spec) => [spec.name, Math.max(4, numel(resolvedShape(shapes, spec.name)) * 4)]),
+    );
+    const inputBytes = [...ownedInputSizes.values()].reduce((total, size) => total + size, 0);
+    // MUST: 確保の**前**に予算へ収める（退役は destroy せず破棄待ちへ積むだけ — この run の
+    // flush 後にだけ返す）。確保の後に退役すると、予算に収まる形でも一時的に予算 + 新規が載る。
+    this.#evictBackingsFor(plan.totalBytes + inputBytes);
+    // 所有権が確立する（`#backings` への登録）までの確保物と retain 済み常駐入力。
     // 途中で同期例外が出たら catch がここから回収する。
     const regions: GPUBuffer[] = [];
     const ownedInputs: GPUBuffer[] = [];
@@ -2451,16 +2502,16 @@ export class Session {
       }
       // 通常入力のバッファは backing 所有にする（run ごとの確保と writeBuffer 先の入れ替わりを
       // 消す）。常駐入力は GpuContext 所有の実体をそのまま束ね、**所有しない**。
-      // MUST: 大きさはアリーナ経路の `#bindInput` と同じ算式（4 バイト床込み — 0 要素入力で
-      // 0 サイズバッファを束縛しない）。同一 signature なら不変。
+      // 大きさは上の `ownedInputSizes`（予算の勘定と同じ表）。同一 signature なら不変。
       const inputs = new Map<string, GPUBuffer>(
         graph.inputs.map((spec) => {
           const resident = residentInputs.get(spec.name);
           if (resident !== undefined) return [spec.name, resident[RUNTIME_INTERNAL].buffer];
-          const buffer = device.createBuffer({
-            size: Math.max(4, numel(resolvedShape(shapes, spec.name)) * 4),
-            usage: HOST_WRITTEN_USAGE,
-          });
+          const size = ownedInputSizes.get(spec.name);
+          if (size === undefined) {
+            throw new ExecutionError(`入力 '${spec.name}' の大きさが表に無い（簿記の破れ）`);
+          }
+          const buffer = device.createBuffer({ size, usage: HOST_WRITTEN_USAGE });
           ownedInputs.push(buffer);
           return [spec.name, buffer];
         }),
@@ -2488,6 +2539,7 @@ export class Session {
         key,
         build,
         bytes: plan.totalBytes,
+        inputBytes,
         inputs,
         residents,
         groups: baked.groups,
@@ -2496,7 +2548,7 @@ export class Session {
         outputs,
         owned: new Set([...regions, ...ownedInputs]),
       };
-      this.#backing = backing;
+      this.#backings.set(key, backing);
       this.#backingBuilds = build;
       return { backing, built: true };
     } catch (cause) {
@@ -2550,17 +2602,49 @@ export class Session {
   }
 
   /**
-   * 活性 backing を破棄待ちへ移す（実際の `destroy()` は flush / submit 後の後始末点で 1 回だけ）。
+   * 保持中の backing 1 本を破棄待ちへ移す（実際の `destroy()` は flush / submit 後の後始末点で
+   * 1 回だけ）。保持していないキーは no-op。
    *
    * 常駐入力の焼き込み参照はここで返す。返してよいのは、退役した backing の bind group を
-   * 使う dispatch がこれ以降 1 本も積まれないため（積むのは活性 backing だけ）。
+   * 使う dispatch がこれ以降 1 本も積まれないため（積むのは保持中の backing だけ）。
+   * MUST: 生存中の context が焼いた束（{@link Session.#generationGroups}）も**ここで**捨てる —
+   * 束は退役した実体を掴んでいるので、世代 token で照合していても参照ぶんの寿命が延びる。
    */
-  #retireBacking(): void {
-    const current = this.#backing;
+  #retireBacking(key: string): void {
+    const current = this.#backings.get(key);
     if (current === undefined) return;
+    this.#backings.delete(key);
     for (const buffer of current.owned) this.#retired.push(buffer);
     for (const resident of current.residents) resident[RUNTIME_INTERNAL].releaseBaked();
-    this.#backing = undefined;
+    for (const context of this.#contexts) {
+      context[RUNTIME_INTERNAL].dropBakedGroups(current.build);
+    }
+  }
+
+  /** 保持中の backing を全て破棄待ちへ移す（dispose）。 */
+  #retireAllBackings(): void {
+    for (const key of [...this.#backings.keys()]) this.#retireBacking(key);
+  }
+
+  /**
+   * 新規 backing（領域 `bytes`）が予算に収まるまで**古い順**に退役させる。
+   *
+   * 予算 = {@link SessionOptions.planBackingBudgetBytes}。新規 1 本だけで超える形は保持中を全て
+   * 退役させてその 1 本だけを持つ（従来の容量 1 と同じ形）ので、常駐は `max(予算, 最大 1 本)` を
+   * 超えない — 見積り（src/runtime/estimate.ts）が勘定側に載せる量そのもの。
+   */
+  #evictBackingsFor(bytes: number): void {
+    const budget = this.#state.planBackingBudgetBytes;
+    let resident = [...this.#backings.values()].reduce(
+      (total, backing) => total + backing.bytes + backing.inputBytes,
+      0,
+    );
+    // 反復中に退役で map を縮めるので、写しを回す（古い順はそのまま）。
+    for (const [key, backing] of [...this.#backings]) {
+      if (resident + bytes <= budget) break;
+      this.#retireBacking(key);
+      resident -= backing.bytes + backing.inputBytes;
+    }
   }
 
   /**

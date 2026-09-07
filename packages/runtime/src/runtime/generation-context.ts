@@ -164,8 +164,13 @@ type GenerationContextInternals = {
    * 1 箇所に閉じるための引数（executor の `#generationGroups`）。
    */
   bakedGroups(token: number): BakedGroups | undefined;
-  /** 焼き直した束を預ける（前の束は捨てる — 退役した backing への参照を残さない）。 */
+  /** 焼いた束を預ける（`token` の backing が保持されている間だけ引ける）。 */
   setBakedGroups(token: number, groups: BakedGroups): void;
+  /**
+   * `token` の backing の束を捨てる（Session が backing を退役させるときに呼ぶ）。
+   * MUST: 退役と同時に捨てる — 束は退役した実体を掴んでいるので、残すと参照ぶんの寿命が延びる。
+   */
+  dropBakedGroups(token: number): void;
   /**
    * 論理長を書き出す（毎 run の encode 前 — {@link GenerationContext} の doc）。
    * `pastLength` は**呼び出し側が run の頭で捕捉した値**（内部の現在値との一致を照合する）。
@@ -340,11 +345,12 @@ export class GenerationContext {
   readonly #lengthValues = new Uint32Array(2);
   #pastLength = 0;
   /**
-   * context 側で焼いた bind group 束と、それを焼いた相手の backing の世代識別子
-   * （ADR 0066 決定 5）。**GPUBindGroup は destroy 不要**（GC 任せ）だが、掴んでいる backing 所有の
-   * バッファの寿命を延ばすので、焼き直しでは必ず前の束ごと置き換える。
+   * context 側で焼いた bind group 束（backing の世代識別子 → 束 — ADR 0066 決定 5）。Session が
+   * backing を複数保持する（perf-ledger H-15）ので、保持中の backing ごとに 1 束を持ち、退役した
+   * backing の束は Session が `dropBakedGroups` で捨てる。**GPUBindGroup は destroy 不要**
+   * （GC 任せ）だが、掴んでいる backing 所有のバッファの寿命を延ばすので、退役と同時に手放す。
    */
-  #baked: { readonly token: number; readonly groups: BakedGroups } | undefined;
+  readonly #baked = new Map<number, BakedGroups>();
   /** 汚染の理由（追記 3）。立つと `dispose` 以外の全操作を拒否する（読みも含む）。 */
   #poisoned: string | undefined;
   /**
@@ -419,10 +425,12 @@ export class GenerationContext {
         this.#assertInternalUsable("pastLength");
         return this.#pastLength;
       },
-      bakedGroups: (token: number): BakedGroups | undefined =>
-        this.#baked?.token === token ? this.#baked.groups : undefined,
+      bakedGroups: (token: number): BakedGroups | undefined => this.#baked.get(token),
       setBakedGroups: (token: number, groups: BakedGroups): void => {
-        this.#baked = { token, groups };
+        this.#baked.set(token, groups);
+      },
+      dropBakedGroups: (token: number): void => {
+        this.#baked.delete(token);
       },
       writeLengths: (pastLength: number, queryLength: number): void =>
         this.#writeLengths(pastLength, queryLength),
@@ -630,7 +638,7 @@ export class GenerationContext {
         // MUST: 焼いた束もここで手放す。以後 run は来ない（`#assertUsable` が落とす）ので
         // 正しさには効かないが、掴んだままだと破棄済みバッファを参照する bind group が
         // context の参照ぶんだけ生き残る。
-        this.#baked = undefined;
+        this.#baked.clear();
         this.#host.forget(this);
       }
     });

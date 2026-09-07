@@ -274,6 +274,14 @@ export type Gemma4PipelineOptions = {
    * 「順序依存の差を疑う」ときに戻す口。
    */
   readonly stateAttentionReduce?: StateAttentionReduce;
+  /**
+   * slot backing（run の形ごとの中間バッファ束）を同時に保持するバイト予算。意味・既定・値域は
+   * runtime の `SessionOptions.planBackingBudgetBytes` が正本で、この pipeline はそこへ素通しする
+   * （`createSession` と {@link Gemma4Pipeline.estimateSessionMemory} の両方に同じ値が効く）。
+   * 生成は prefill バケット形 ↔ decode 形の切替が毎ターン起きるので、既定（256 MiB）では
+   * その両方が保持されて切替ごとの作り直しが消える。
+   */
+  readonly planBackingBudgetBytes?: number;
 };
 
 /**
@@ -509,6 +517,14 @@ type Gemma4State = {
   readonly ple: Gemma4Ple;
   readonly tokenizer: GemmaTokenizer;
   readonly config: Gemma4PipelineConfig;
+  /**
+   * Session に渡した slot backing の保持予算（{@link Gemma4PipelineOptions.planBackingBudgetBytes}・
+   * 未指定なら runtime の既定）。
+   *
+   * MUST: 席を持つのは {@link Gemma4Pipeline.estimateSessionMemory} が**同じ値**を見積りへ渡す
+   * ため — 握った値と見積りの前提が割れると、報告のピークが実際の保持集合と別の予算を名乗る。
+   */
+  readonly planBackingBudgetBytes?: number;
   /** 実行 1 回ごとの観測席（{@link Gemma4PipelineOptions.onRunDiagnostics}）。 */
   readonly onRunDiagnostics?: (diagnostics: SessionDiagnostics, phase: Gemma4RunPhase) => void;
 };
@@ -1303,6 +1319,11 @@ export class Gemma4Pipeline {
         // ③PV の縮約形は家族の既定（K-12 昇格済み）— 呼び手が明示すればそれに従う。
         session: await admitted.component.createSession(gpu, {
           stateAttentionReduce: options.stateAttentionReduce ?? GEMMA4_STATE_ATTENTION_REDUCE,
+          // 予算は runtime の既定に任せる（未指定は欄ごと渡さない — 既定値をここに写すと、
+          // runtime 側で既定が動いたときにこの家族だけ古い値で走る）。
+          ...(options.planBackingBudgetBytes === undefined
+            ? {}
+            : { planBackingBudgetBytes: options.planBackingBudgetBytes }),
         }),
         graph: admitted.component.graph,
         wiring,
@@ -1310,6 +1331,9 @@ export class Gemma4Pipeline {
         ple,
         tokenizer,
         config: admitted.config,
+        ...(options.planBackingBudgetBytes === undefined
+          ? {}
+          : { planBackingBudgetBytes: options.planBackingBudgetBytes }),
         ...(options.onRunDiagnostics === undefined
           ? {}
           : { onRunDiagnostics: options.onRunDiagnostics }),
@@ -1523,7 +1547,9 @@ export class Gemma4Pipeline {
    *
    * NOTE: {@link Gemma4PipelineOptions.chunkBuckets} は見積りを動かさない（欄も持たない）—
    * 一時領域も入出力も attention の一時も物理行数 `M` に単調で、ピークは最大 `M` = prefill 形に
-   * ある。バケットはその `M` より小さい形を足すだけである。
+   * ある。バケットはその `M` より小さい形を足すだけである。バケット形の backing が decode 形と
+   * **同時に常駐する**ぶんは、{@link Gemma4PipelineOptions.planBackingBudgetBytes} が
+   * `peakAccountedBytes` の片側の項として上から押さえる（ADR 0095 決定 4）。
    *
    * NOTE: `AdmissionReport` は runtime の型で、`@karume/models` は再輸出しない（ADR 0008 の薄い面 —
    * 見積りを読む消費者は runtime の型をそのまま使う）。
@@ -1551,6 +1577,11 @@ export class Gemma4Pipeline {
       // MUST: 渡す（states 形 attention のノード内一時は行ブロック枚数がこの上限だけで決まるので、
       // 省くと estimator が fail loudly する — 既定値で埋めない）。
       maxStorageBufferBindingSize: gpu.limits.maxStorageBufferBindingSize,
+      // MUST: Session に渡したのと同じ予算を渡す（片方だけ既定に落ちると、報告のピークが実際の
+      // 保持集合と別の予算を名乗る）。未指定は欄ごと渡さず runtime の既定に任せる。
+      ...(this.#state.planBackingBudgetBytes === undefined
+        ? {}
+        : { planBackingBudgetBytes: this.#state.planBackingBudgetBytes }),
     });
   }
 

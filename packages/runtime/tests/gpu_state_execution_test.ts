@@ -12,7 +12,10 @@
 // 波 D-4（ADR 0066 決定 5 の焼き込み単位の分離）で足したのは次の 4 本:
 //
 //   ⑩ 切替 A/B（再導出ゼロ + backing 再構築ゼロ + 焼き直しは context ごと 1 度 + 取り違えゼロ）
-//   ⑪ backing が別 signature に入れ替わったときの復帰（世代識別子で焼き直す）
+//   ⑪ backing が退役して作り直されたときの復帰（世代識別子で焼き直す）— ADR 0095（予算つきの
+//      複数保持）で 3 本になった: 予算 0 は切替のたびに作り直して焼き直す / 予算内で保持した形の
+//      往復は焼き直しを増やさない / 退役（予算超過）した形は束ごと捨てられ、戻った run で 1 回
+//      だけ焼き直す
 //   ⑫ 故障注入（context 側の束を取り違えると parity が落ちる = ⑩ が空振りでない証明）
 //   ⑬ ①の backed 移行（3 run 目以降は slot backing で走り、移行点で値が変わらない）
 //
@@ -41,6 +44,7 @@ import {
   type Tensor,
 } from "../src/runtime/executor.ts";
 import type { GenerationContext } from "../src/runtime/generation-context.ts";
+import type { PlanBackingStats } from "../src/runtime/session-types.ts";
 import type { BakedGroups } from "../src/runtime/recipe.ts";
 import { OpContractError } from "../src/ops.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
@@ -1374,19 +1378,20 @@ Deno.test({
 });
 
 /**
- * backing が**別 signature に入れ替わった**後の復帰（ADR 0066 決定 5 の世代識別子）。
+ * backing が**退役して作り直された**後の復帰（ADR 0066 決定 5 の世代識別子）。
  *
- * M=4（prefill 形）と M=1（decode 形）は別鍵なので、容量 1 の slot backing を奪い合う。退役した
- * backing の slot / 入力バッファは run の後始末で `destroy()` されるため、context 側が古い束を
- * 掴んだまま回れば**破棄済みバッファを束ねた dispatch**になる（値か例外のどちらかで必ず壊れる）。
- * 焼き直しが backing の再構築に追随していることを、値の正しさと回数の両方で押さえる。
+ * M=4（prefill 形）と M=1（decode 形）は別鍵で、予算 0 の Session では 1 本の slot backing を
+ * 奪い合う（従来の容量 1 — ADR 0095 決定 1）。退役した backing の slot / 入力バッファは run の
+ * 後始末で `destroy()` されるため、context 側が古い束を掴んだまま回れば**破棄済みバッファを
+ * 束ねた dispatch** になる（値か例外のどちらかで必ず壊れる）。焼き直しが backing の再構築に
+ * 追随していることを、値の正しさと回数の両方で押さえる。
  */
 Deno.test({
-  name: "backing の入れ替わりに追随して context 側 bind group を焼き直す（実 GPU）",
+  name: "予算 0 では切替のたびに backing を作り直し、context 側も焼き直す（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
-    const session = await stateSession(gpu, FULL);
+    const session = await stateSession(gpu, FULL, { planBackingBudgetBytes: 0 });
     const context = await session.createGenerationContext({ chunkLength: 4 });
     const state = newOracle(FULL, 8);
     try {
@@ -1403,7 +1408,7 @@ Deno.test({
         const diagnostics = session.diagnostics();
         builds.push([diagnostics.planBacking.buildCount, diagnostics.stateBacking.rebindCount]);
       }
-      // 鍵が交互に変わるので backing は毎 run 作り直しになり、context 側も毎 run 焼き直す。
+      // 予算 0 では鍵が変わるたびに退役 → 再構築なので、context 側も毎 run 焼き直す。
       // MUST: 焼き直し回数が backing の構築回数に追随すること — 追随しないなら、退役した
       // backing のバッファを束ねた束が使い回されている。
       assertEquals(
@@ -1411,8 +1416,221 @@ Deno.test({
         [[1, 1], [2, 2], [3, 3], [4, 4]],
         "backing の再構築に context 側の焼き直しが追随していない",
       );
+      assertEquals(
+        session.diagnostics().planBacking.retainedCount,
+        1,
+        "予算 0 で 2 本以上保持した",
+      );
       assertEquals(context.pastLength, 6);
     } finally {
+      await context.dispose();
+      await session.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+/**
+ * 予算内で**保持した形**の間の行き来では焼き直しが増えない（ADR 0095 決定 3）。
+ *
+ * 束の寿命は (context, backing 実体) の組のままで、保持中の backing ごとに 1 束持つ。上の
+ * 予算 0 の門と同じ往復を既定予算で回して、`rebindCount` が形ごとの初回 1 回ずつで止まること
+ * を見る（生成 1 ターンの prefill ⇄ decode の切替で毎回焼き直す形が、この波で消えた点）。
+ */
+Deno.test({
+  name: "予算内で保持した 2 形の往復は焼き直しを増やさない（既定予算・実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const session = await stateSession(gpu, FULL);
+    const context = await session.createGenerationContext({ chunkLength: 4 });
+    const state = newOracle(FULL, 8);
+    try {
+      await assertStep(session, context, FULL, 8, state, 4, 1, 0, "M=4 初回（導出）");
+      await assertStep(session, context, FULL, 8, state, 1, 1, 11, "M=1 初回（導出）");
+
+      const builds: [number, number][] = [];
+      for (const [rows, salt] of [[1, 23], [4, 31], [1, 43], [4, 53], [1, 61], [4, 71]] as const) {
+        await assertStep(session, context, FULL, 8, state, rows, 1, salt, `M=${rows} へ切替`);
+        assertEquals(session.diagnostics().lastRunPrepared?.hit, true, "レシピは再導出しない");
+        const diagnostics = session.diagnostics();
+        builds.push([diagnostics.planBacking.buildCount, diagnostics.stateBacking.rebindCount]);
+      }
+      // 3 往復しても構築は形ごとに 1 回・焼き直しも形ごとに 1 回で止まる。値の正しさは
+      // 各 step の突合（`assertStep`）が持つので、「焼き直さないまま別の形の実体を束ねている」
+      // 形はここが緑でも値で落ちる。
+      assertEquals(
+        builds,
+        [[1, 1], [2, 2], [2, 2], [2, 2], [2, 2], [2, 2]],
+        "保持した形の往復で backing の作り直し / 焼き直しが起きている",
+      );
+      assertEquals(session.diagnostics().planBacking.retainedCount, 2, "2 形が保持されていない");
+      assertEquals(context.pastLength, 8);
+    } finally {
+      await context.dispose();
+      await session.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+/** backing 1 本ぶんの実測（領域 = `residentBytes` / 所有する入力バッファ = `inputBytes`）。 */
+type Measured = { readonly residentBytes: number; readonly inputBytes: number };
+
+/**
+ * 予算が勘定する量（`#evictBackingsFor` と同じ算式 — 領域と所有入力バッファの両方）。
+ * 領域だけで組むと、入力バッファのぶんだけ実際の勘定が予算を上回り、「予算ちょうど」の
+ * つもりの Session が最初から超過側（= 常に全退役）で回る。
+ */
+const accountedBytes = (measured: readonly Measured[]): number =>
+  measured.reduce((total, one) => total + one.residentBytes + one.inputBytes, 0);
+
+/** 保持集合が `retained` のときの診断（**全欄** — 部分一致に逃げない）。 */
+const expectStats = (retained: readonly Measured[], buildCount: number): PlanBackingStats => ({
+  residentBytes: retained.reduce((total, one) => total + one.residentBytes, 0),
+  inputBytes: retained.reduce((total, one) => total + one.inputBytes, 0),
+  retainedCount: retained.length,
+  buildCount,
+});
+
+/**
+ * 形（M=`rows`）1 本ぶんの slot backing のバイト数を、**その形だけを回した別 Session** で
+ * 測る（予算の門をこの実測から組むのは `gpu_plan_backing_test.ts` の同名 helper と同じ理由 —
+ * 定数で書くと slot 表の詰め方が変わったときに「予算ちょうど」の意味が黙ってずれる）。
+ */
+const stateBackingBytes = async (
+  gpu: GpuContext,
+  model: StateModel,
+  spec: Parameters<Session["createGenerationContext"]>[0],
+  rows: number,
+): Promise<Measured> => {
+  const session = await stateSession(gpu, model);
+  const context = await session.createGenerationContext(spec);
+  try {
+    const inputs = stepInputs(model, rows, 0);
+    // 1 run 目 = ミス（導出）/ 2 run 目 = ヒット（backing の構築）。
+    await runStep(session, context, model, inputs, rows, 1);
+    await runStep(session, context, model, inputs, rows, 1);
+    const stats = session.diagnostics().planBacking;
+    assertEquals(stats.retainedCount, 1, `M=${rows} を 1 形だけ回した Session の保持が 1 本でない`);
+    assert(stats.residentBytes > 0, `M=${rows} の backing が 0 バイト（門が空振る）`);
+    // q / k / v は常駐でない `Tensor` なので、そのバッファは backing 所有 = 予算の勘定に入る。
+    assert(stats.inputBytes > 0, `M=${rows} の所有入力バッファが 0 バイト（予算が勘定していない）`);
+    return { residentBytes: stats.residentBytes, inputBytes: stats.inputBytes };
+  } finally {
+    await context.dispose();
+    await session.dispose();
+  }
+};
+
+/** 予算の門で使う形（capacity は往復 10 step ぶんの論理長を飲む余裕を取る）。 */
+const BUDGET_MODEL: StateModel = { heads: 4, kvHeads: 4, depth: 4, capacity: 32 };
+/** M ∈ {1, 2, 4} の 3 形を 1 つの context から出す指定（バケットは ADR 0066 追記〈バケット〉）。 */
+const BUDGET_SPEC = { chunkLength: 4, chunkBuckets: [2] } as const;
+
+/**
+ * **退役 → 再構築で焼き直しが 1 回増える**（= 退役と同時に束を捨てている — ADR 0095 決定 3 の MUST）。
+ *
+ * 予算を 2 形（M=4 + M=1）ちょうどに絞り、3 形目（M=2）を入れて最古の M=4 を 1 本だけ
+ * 退役させる。見るのは 2 つ:
+ * ①退役した backing の世代の束が context から**消えている**（`bakedGroups` が undefined）—
+ * 捨てないと、破棄済みバッファを束ねた group が context の参照ぶんだけ生き残る ②戻った run が
+ * 焼き直しを 1 回増やす。保持したままの形の束は残っている（①が「全部捨てる」ではないことの対）。
+ */
+Deno.test({
+  name: "退役した backing の束は捨てられ、戻った run で 1 回だけ焼き直す（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const wide = await stateBackingBytes(gpu, BUDGET_MODEL, BUDGET_SPEC, 4);
+    const decode = await stateBackingBytes(gpu, BUDGET_MODEL, BUDGET_SPEC, 1);
+    const mid = await stateBackingBytes(gpu, BUDGET_MODEL, BUDGET_SPEC, 2);
+    // 予算 = M=4 + M=1 に対し、最古（M=4）を 1 本退役させれば M=2 が必ず収まる条件
+    // （`M=1 + M=2 ≤ M=4 + M=1` ⟺ `M=2 ≤ M=4`）。崩れると退役が 2 本に及んで、見ているのが
+    // 「最古 1 本の退役」ではなくなる。比べるのは予算が勘定する量（領域 + 所有入力）。
+    assert(
+      accountedBytes([mid]) <= accountedBytes([wide]),
+      `M=2 の実測 ${JSON.stringify(mid)} が M=4 の ${
+        JSON.stringify(wide)
+      } 以下でない（門が空振る）`,
+    );
+
+    const session = await stateSession(gpu, BUDGET_MODEL, {
+      planBackingBudgetBytes: accountedBytes([wide, decode]),
+    });
+    const context = await session.createGenerationContext(BUDGET_SPEC);
+    const state = newOracle(BUDGET_MODEL, BUDGET_MODEL.capacity as number);
+    const capacity = BUDGET_MODEL.capacity as number;
+    /** 焼いた束の世代識別子（`#generationGroups` が預ける token を順に拾う）。 */
+    const tokens: number[] = [];
+    const inner = internals(context);
+    const setBaked = inner.setBakedGroups;
+    inner.setBakedGroups = (token, groups) => {
+      tokens.push(token);
+      setBaked(token, groups);
+    };
+    try {
+      // M=4 と M=1 を 2 本ずつ回して両方を保持させる（1 本目は導出 = backing 不使用）。
+      for (const [rows, salt] of [[4, 0], [4, 7], [1, 13], [1, 19]] as const) {
+        await assertStep(
+          session,
+          context,
+          BUDGET_MODEL,
+          capacity,
+          state,
+          rows,
+          1,
+          salt,
+          `M=${rows}`,
+        );
+      }
+      assertEquals(
+        session.diagnostics().planBacking,
+        expectStats([wide, decode], 2),
+        "予算ちょうどの 2 形が保持されていない",
+      );
+      assertEquals(tokens.length, 2, "焼き直しが形ごとに 1 回で収まっていない");
+      const [wideToken, decodeToken] = tokens;
+
+      // M=1 を触り直しても焼き直しは増えない（束が生きている）。LRU の順は [M=4, M=1] のまま。
+      await assertStep(session, context, BUDGET_MODEL, capacity, state, 1, 1, 23, "M=1 触り直し");
+      assertEquals(session.diagnostics().stateBacking.rebindCount, 2, "保持中の形を焼き直した");
+
+      // 3 形目（M=2 のバケット形）。予算ちょうどなので最古の M=4 が 1 本だけ退役する。
+      for (const salt of [29, 31]) {
+        await assertStep(session, context, BUDGET_MODEL, capacity, state, 2, 1, salt, "M=2");
+      }
+      assertEquals(
+        session.diagnostics().planBacking,
+        expectStats([decode, mid], 3),
+        "退役したのが最古（M=4）1 本ではない",
+      );
+      // 3 形目そのものの焼き込みが 1 回（保持中の M=1 は焼き直さない）。
+      assertEquals(
+        session.diagnostics().stateBacking.rebindCount,
+        3,
+        "3 形目の焼き込みが 1 回でない",
+      );
+      // ① 退役した世代の束は context から消えている（捨てなければ実体の寿命が延びる）。
+      assertEquals(
+        inner.bakedGroups(wideToken),
+        undefined,
+        "退役した backing の束が context に残っている（破棄済みバッファを束ねた group が生き残る）",
+      );
+      assert(
+        inner.bakedGroups(decodeToken) !== undefined,
+        "保持中の backing の束まで捨てている（往復のたびに焼き直す形へ戻る）",
+      );
+
+      // ② 戻った run は作り直し + 焼き直しをちょうど 1 回ずつ増やす。
+      await assertStep(session, context, BUDGET_MODEL, capacity, state, 4, 1, 37, "M=4 へ復帰");
+      assertEquals(session.diagnostics().lastRunPrepared?.hit, true, "レシピは再導出しない");
+      assertEquals(session.diagnostics().planBacking.buildCount, 4, "退役した形を作り直していない");
+      assertEquals(session.diagnostics().stateBacking.rebindCount, 4, "復帰で焼き直していない");
+      assertEquals(tokens.length, 4);
+      assert(tokens[3] !== wideToken, "作り直した backing が同じ世代識別子を名乗っている");
+    } finally {
+      inner.setBakedGroups = setBaked;
       await context.dispose();
       await session.dispose();
       gpu.destroy();
