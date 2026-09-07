@@ -233,42 +233,78 @@ const argmax = (logits: Float32Array<ArrayBuffer>): number => {
  * 上位 `k` 件の token id を**降順**で選ぶ（同値は id の小さい方が上 — {@link argmax} と同じ
  * tie-break）。
  *
- * 全体ソートを避けるのは V = 262,144 に対して毎 step 走るため。長さ ≤ k の降順配列へ挿入する
- * だけなので、走査 V 回 + 改善が起きたときだけ O(k) の押し出しで済む。
+ * 全体ソートを避けるのは V = 262,144 に対して毎 step 走るため。**最悪要素を根に置く二分 heap**
+ * を長さ k で持ち、根より良い token だけを差し替える — 走査 V 回 + 採用が起きたときだけ
+ * O(log k) の沈め直しで済む。長さ ≤ k の降順配列へ挿入する形だと、値が改善し続ける入力
+ * （昇順）で押し出しが毎回 O(k) になり V·k まで伸びる。
+ *
+ * 順位の決着は比較器 `better` 1 本で、heap の整列と最終 sort が共有する（2 箇所に書くと
+ * tie-break がずれても「値としては上位 k 件」なので、並びの契約が壊れても静かに通る）。
+ *
+ * 定常相の足切りが `logits[token] <= logits[heap[0]]` の 1 比較で済むのは、走査が id 昇順で
+ * heap 内の id が必ず現 token より小さいため — 同値なら tie-break（id 昇順）で現 token が
+ * 負けるので、`better(token, heap[0])` は `logits[token] > logits[heap[0]]` と同値になる。
+ * この足切りが無いと、同値が密な入力（語彙の大半が同じ logit）で挿入形に負ける。
+ *
+ * MUST: NaN は {@link assertNoNaN} が先に落としている前提（{@link argmax} と同じ）。NaN が根に
+ * 入ると足切りの比較が常に false になり、以後の全 token が根を差し替える（結果も不正）。
+ * `k` の語彙数への丸めも呼び手（{@link samplerDistribution}）の責務で、ここでは繰り返さない。
  *
  * NOTE: HF の `TopKLogitsWarper` は「k 番目の値**未満**を落とす」閾値形なので、同値が並ぶと
  * k 件より多く残る。こちらは id で決着させて厳密に k 件に絞る — HF との token 列 parity は
  * どのみち取れない（RNG が別物）ので、`topK: 1` が greedy と厳密に一致する側を採る。
  */
-const selectTopK = (logits: Float32Array<ArrayBuffer>, k: number): number[] => {
-  const selected: number[] = [];
-  let floor = Number.NEGATIVE_INFINITY;
-  for (let token = 0; token < logits.length; token += 1) {
-    const value = logits[token];
-    if (selected.length === k && !(value > floor)) continue;
-    let at = selected.length;
-    // 同値では止まる（`<` が厳密）ので、先に入った小さい id が上に残る。
-    while (at > 0 && logits[selected[at - 1]] < value) at -= 1;
-    selected.splice(at, 0, token);
-    if (selected.length > k) selected.pop();
-    floor = logits[selected[selected.length - 1]];
+const selectTopKHeap = (logits: Float32Array<ArrayBuffer>, k: number): number[] => {
+  // 「left が right より上位」— 値の降順、同値は id の昇順。
+  const better = (left: number, right: number): boolean =>
+    logits[left] > logits[right] || (logits[left] === logits[right] && left < right);
+
+  // 根が**最悪**（= 次に押し出される候補）になる heap。
+  const heap: number[] = [];
+  const siftDown = (from: number): void => {
+    let at = from;
+    for (;;) {
+      const left = at * 2 + 1;
+      if (left >= heap.length) break;
+      const right = left + 1;
+      const worst = right < heap.length && better(heap[left], heap[right]) ? right : left;
+      if (!better(heap[at], heap[worst])) break;
+      const swap = heap[at];
+      heap[at] = heap[worst];
+      heap[worst] = swap;
+      at = worst;
+    }
+  };
+
+  // 充填相: 先頭 k 件をそのまま積む。
+  let token = 0;
+  for (; token < k; token += 1) {
+    heap.push(token);
+    let at = heap.length - 1;
+    while (at > 0) {
+      const parent = (at - 1) >> 1;
+      if (!better(heap[parent], heap[at])) break;
+      const swap = heap[parent];
+      heap[parent] = heap[at];
+      heap[at] = swap;
+      at = parent;
+    }
   }
-  return selected;
+  // 定常相: 根より良い token だけを差し替える。
+  for (; token < logits.length; token += 1) {
+    if (logits[token] <= logits[heap[0]]) continue;
+    heap[0] = token;
+    siftDown(0);
+  }
+  return heap.sort((left, right) => (better(left, right) ? -1 : 1));
 };
 
-/** 全 token id を logit の降順（同値は id 昇順 — {@link selectTopK} と同じ決着）に並べる。 */
+/** 全 token id を logit の降順（同値は id 昇順 — {@link selectTopKHeap} と同じ決着）に並べる。 */
 const sortAllDescending = (logits: Float32Array<ArrayBuffer>): number[] => {
   const order = Array.from({ length: logits.length }, (_unused, token) => token);
   order.sort((left, right) => logits[right] - logits[left] || left - right);
   return order;
 };
-
-/**
- * {@link selectTopK} を使う `k` の上限。押し出しが k² 級になるので、これを超える k は全体ソート
- * （O(V log V)）へ倒す。`topK` に上限を設けない（ADR 0083 決定 7）以上、大きな k でも
- * 語彙サイズに対して線形近くに留まる必要がある。
- */
-const SELECTION_LIMIT = 1024;
 
 /**
  * 加工後 logits → 抽選対象（正規化済み。並びの契約は {@link SamplerDistribution}）。
@@ -301,8 +337,7 @@ export const samplerDistribution = (
   const topK = spec.topK === undefined ? undefined : Math.min(spec.topK, processed.length);
   const topP = spec.topP;
   let candidates: readonly number[];
-  if (topK !== undefined && topK <= SELECTION_LIMIT) candidates = selectTopK(processed, topK);
-  else if (topK !== undefined) candidates = sortAllDescending(processed).slice(0, topK);
+  if (topK !== undefined) candidates = selectTopKHeap(processed, topK);
   else if (topP !== undefined && topP < 1) candidates = sortAllDescending(processed);
   else candidates = Array.from({ length: processed.length }, (_unused, token) => token);
 

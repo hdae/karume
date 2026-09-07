@@ -146,15 +146,63 @@ Deno.test("sampler: topK が語彙数以上なら全件（HF の min(top_k, voca
   }
 });
 
-Deno.test("sampler: 大きな topK でも上位 k 件の中身と並びが変わらない（選び方の切替点）", () => {
-  // 実装は k が閾値を超えると挿入法から全体ソートへ倒す。切替点をまたいでも結果が同じで
-  // あることを、同じ語彙で 2 つの経路を踏ませて見る（並びと確率まで一致）。
-  const size = 4096;
-  const logits = new Float32Array(size);
-  for (let token = 0; token < size; token += 1) logits[token] = Math.sin(token) * 10;
-  const small = samplerDistribution(logits, { temperature: 1, topK: 8 }, []);
-  const large = samplerDistribution(logits, { temperature: 1, topK: 2048 }, []);
-  assertEquals([...small.tokens], [...large.tokens].slice(0, 8), "上位 8 件の並び");
+/**
+ * 参照の上位 k 件 — **契約の言葉どおり**「全件を値の降順（同値は token id の昇順）に並べて
+ * 先頭 k」。実装（有界 heap）とは別の形で書く（全件ソートなので恒真化しない）。
+ */
+const referenceTopK = (logits: Float32Array<ArrayBuffer>, k: number): number[] =>
+  Array.from({ length: logits.length }, (_unused, token) => token)
+    .sort((left, right) => {
+      if (logits[left] === logits[right]) return left - right;
+      return logits[left] > logits[right] ? -1 : 1;
+    })
+    .slice(0, k);
+
+/**
+ * 選択の形を変える 3 分布（語彙 8,192）。**昇順**は「値が改善し続ける」最悪形で、**同値**は
+ * 足切りが効かないと候補の入れ替えが毎回起きる形 — どちらも上位 k 件の中身より先に並びが
+ * 壊れる入力である。
+ */
+const SELECTION_LOGITS = (() => {
+  const size = 8_192;
+  let state = 20_260_907;
+  const random = (): number => {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    return state / 2 ** 32;
+  };
+  const build = (value: (token: number) => number): Float32Array<ArrayBuffer> => {
+    const logits = new Float32Array(size);
+    for (let token = 0; token < size; token += 1) logits[token] = value(token);
+    return logits;
+  };
+  return {
+    uniform: build(() => random() * 16 - 8),
+    ascending: build((token) => token / size),
+    ties: build(() => Math.floor(random() * 8)),
+  };
+})();
+
+Deno.test("sampler: topK はどの k でも参照（全件を並べた先頭 k）と中身も並びも一致する", () => {
+  // 選び方が k で切り替わる形（k の境界の前後で並びや tie-break が変わりうる）への逆戻りを縛る
+  // ため、離れた k と隣接する 2 値（1024 / 1025）を並べて同じ参照と突き合わせる。
+  for (const [shape, logits] of Object.entries(SELECTION_LOGITS)) {
+    for (const topK of [64, 1024, 1025, 4096]) {
+      const distribution = samplerDistribution(logits, { temperature: 1, topK }, []);
+      assertEquals(
+        [...distribution.tokens],
+        referenceTopK(logits, topK),
+        `${shape} / topK ${topK}`,
+      );
+    }
+  }
+});
+
+Deno.test("sampler: 大きな topK の確率は参照の上位 k 件だけで正規化される", () => {
+  const logits = SELECTION_LOGITS.uniform;
+  const topK = 1025;
+  const distribution = samplerDistribution(logits, { temperature: 1, topK }, []);
+  const expected = softmax(referenceTopK(logits, topK).map((token) => logits[token]));
+  assertProbabilities(distribution.probabilities, expected, `topK ${topK}`);
 });
 
 // ---------------------------------------------------------------------------
