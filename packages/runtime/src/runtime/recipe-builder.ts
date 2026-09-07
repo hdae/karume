@@ -109,8 +109,13 @@ import { LAYER_NORM_KEY, LAYER_NORM_WGSL, layerNormParams } from "../kernels/lay
 import { RMS_NORM_KEY, RMS_NORM_WGSL, rmsNormParams } from "../kernels/rms-norm.ts";
 import { LINEAR_SCALE_BINDING, linearKey, linearParams, linearWgsl } from "../kernels/linear.ts";
 import {
+  defaultLinearGemvRowsVariant,
   defaultLinearGemvVariant,
+  LINEAR_GEMV_MAX_ROWS,
   linearGemvKey,
+  linearGemvParams,
+  linearGemvRowsKey,
+  linearGemvRowsWgsl,
   linearGemvUnit,
   linearGemvWgsl,
 } from "../kernels/linear-gemv.ts";
@@ -1481,15 +1486,18 @@ export class RecipeBuilder {
     // i4 は group 長がキーと WGSL（shift の焼き込み）の両方に効く（ADR 0069 — 同一キー →
     // バイト同一 WGSL の codegen 決定性）。
     const groupSize = weightStorage === "i4" ? this.#weightGroupSize(step) : undefined;
-    // **decode（M=1）は GEMV 族へ分岐する**（ADR 0082 — perf-ledger K-11 / i8 は K-16）。
-    // 既定の GEMM 骨格は
-    // M=1 のバケット（M16N16）で 64 スレッド中 4 本しか出力を書かず、K タイル 16 ごとの二重
+    // **小 M（1 ≤ M ≤ LINEAR_GEMV_MAX_ROWS）は GEMV 族へ分岐する**（ADR 0082 — perf-ledger
+    // K-11 / i8 は K-16 / M ≥ 2 の行ブロックは K-21）。既定の GEMM 骨格は
+    // M ≤ 64 のバケット（M16N16）で 64 スレッド中 4 本しか出力を書かず、K タイル 16 ごとの二重
     // barrier が重み読みのレイテンシを逐次に露出させる（k 比例・n 非依存・L2 常駐形でも同じ —
-    // 帯域飢餓ではない）。gemma4 E2B decode で対既定 ×8.45。
+    // 帯域飢餓ではない）。この費用は M に無関係（M=2〜16 で GEMM 経路 65〜67 ms が不変 —
+    // research 2026-09-07 §7.2）。gemma4 E2B decode で対既定 ×8.45・M=8 で ×5.0・M=32 で ×2.8・
+    // M=64 で ×2.7（census 加重 — research 2026-09-07-gemv-rows-k21）。
     // MUST: 縮約順・積和の字面・bias の足し順は既定経路と同一 = **ビット同一**
     // （src/kernels/linear-gemv.ts の数値契約・門は tests/gpu_linear_gemv_test.ts）。
     // 門の内訳:
-    // - `m === 1` — GEMV そのものの前提（1 スレッドが 1 出力列の縮約を丸ごと持つ）。
+    // - `1 ≤ m ≤ LINEAR_GEMV_MAX_ROWS` — 1 スレッドが 1 出力列（× 行ブロック）の縮約を丸ごと持つ
+    //   形で実測した範囲。上限の外は既定の GEMM 骨格のまま。
     // - `i4` / `i8` 格納 × `f32` 計算 — 実測して採った組み合わせはここだけ。f16 格納にも同じ
     //   機序は効くはずだが、**実測の無い区間を選択で埋めない**（gemm-geometry
     //   `gemmGeometryForRows` の MUST と同じ規律）。i8 × f16 計算（w8a16）は上で落ちている。
@@ -1503,21 +1511,22 @@ export class RecipeBuilder {
     //   掃引した実形が全て v4 なので門を実測の範囲に留める。n % 4 != 0 の M=1 は既定の
     //   スカラ変種のまま（値は同じ・速度だけ従来どおり）。
     const i4Unit = linearGemvUnit("i4");
+    const gemvRows = m >= 1 && m <= LINEAR_GEMV_MAX_ROWS;
     if (
-      m === 1 && weightStorage === "i4" && compute === "f32" && v4 &&
+      gemvRows && weightStorage === "i4" && compute === "f32" && v4 &&
       groupSize !== undefined && groupSize % i4Unit === 0 &&
       k % i4Unit === 0
     ) {
-      await this.#buildLinearGemv(step, binds, outs, builder, "i4", n, k, groupSize);
+      await this.#buildLinearGemv(step, binds, outs, builder, "i4", m, n, k, groupSize);
       return;
     }
     // i8 格納（lm_head — perf-ledger K-16）。i4 と同じ族・同じ変種で、違うのは 1 語が運ぶ
     // 要素数（16）と scale の引き方（出力チャネルごと 1 本 = 縮約の外で 1 度だけ束ねる）だけ。
     if (
-      m === 1 && weightStorage === "i8" && compute === "f32" && v4 &&
+      gemvRows && weightStorage === "i8" && compute === "f32" && v4 &&
       k % linearGemvUnit("i8") === 0
     ) {
-      await this.#buildLinearGemv(step, binds, outs, builder, "i8", n, k);
+      await this.#buildLinearGemv(step, binds, outs, builder, "i8", m, n, k);
       return;
     }
     // MUST: タイル幾何は平坦化後の行数 m のバケット（src/kernels/gemm-geometry.ts）。
@@ -1551,14 +1560,17 @@ export class RecipeBuilder {
   }
 
   /**
-   * linear の **GEMV 族**（M=1 × 重み i4 / i8 — ADR 0082）。
+   * linear の **GEMV 族**（1 ≤ M ≤ LINEAR_GEMV_MAX_ROWS × 重み i4 / i8 — ADR 0082）。
    *
    * 束縛・uniform・出力実体は既定経路と同一で、変わるのは「どのスレッドがどの出力を担当するか」
-   * だけ（1 スレッド = 1 出力列・共有タイルと barrier を持たない）。1 出力要素あたりの K 縮約順は
-   * k 昇順の逐次のままなので**ビット同一**（src/kernels/linear-gemv.ts の数値契約）。
+   * だけ（1 スレッド = 1 出力列〈M ≥ 2 は × 行ブロック〉・共有タイルと barrier を持たない）。
+   * 1 出力要素あたりの K 縮約順は k 昇順の逐次のままなので**ビット同一**（src/kernels/linear-gemv.ts
+   * の数値契約）。
+   * MUST: M=1 は M=1 変種（decode の生成物を動かさない）、M ≥ 2 は行ブロック変種で、行数 `rows` は
+   * (格納, m, n) の純関数 `defaultLinearGemvRowsVariant`（キーに載る）。
    * MUST: `groupSize` は i4 のときだけ渡す（i8 は group を持たない — カーネル側が対を検査する）。
-   * MUST: 1 スレッド 1 出力なので dispatch は `ceil(n / cols)` の 1 次元。grid-stride ではない
-   * ので上限超過は fail loudly（既定経路と同じ規律）。
+   * MUST: 1 スレッド 1 出力（列 × 行ブロック）なので dispatch は `[ceil(n / cols), ceil(m / rows), 1]`。
+   * grid-stride ではないので上限超過は fail loudly（既定経路と同じ規律）。
    */
   async #buildLinearGemv(
     step: NodePlan,
@@ -1566,20 +1578,32 @@ export class RecipeBuilder {
     outs: readonly BindingSource[],
     builder: StepRecipeBuilder,
     storage: WeightStorage,
+    m: number,
     n: number,
     k: number,
     groupSize?: number,
   ): Promise<void> {
-    const variant = defaultLinearGemvVariant();
-    const key = linearGemvKey(storage, groupSize, variant);
-    const { pipeline, layout, roles } = await this.#state.cache.get(
-      key,
-      linearGemvWgsl(storage, groupSize, variant),
-    );
-    // uniform は既定経路と同じ 3 語（m は 1 固定 — 束縛レイアウトを分けない）。
-    const params = this.#writeParams(linearParams(1, n, k), PARAMS_UNIFORM_USAGE);
+    const limit = this.#state.gpu.limits.maxComputeWorkgroupsPerDimension;
     const [x, weight] = step.inputShapes;
     const where = `linear gemv [${x.join(",")}] × [${weight.join(",")}]`;
+    // M=1 は M=1 変種（行ブロック無し）、M ≥ 2 は行ブロック変種（rows は (m, n) の純関数）。
+    const rowsVariant = m === 1 ? undefined : defaultLinearGemvRowsVariant(storage, m, n);
+    const variant = rowsVariant ?? defaultLinearGemvVariant();
+    const rows = rowsVariant?.rows ?? 1;
+    const key = rowsVariant === undefined
+      ? linearGemvKey(storage, groupSize, variant)
+      : linearGemvRowsKey(storage, groupSize, rowsVariant);
+    const { pipeline, layout, roles } = await this.#state.cache.get(
+      key,
+      rowsVariant === undefined
+        ? linearGemvWgsl(storage, groupSize, variant)
+        : linearGemvRowsWgsl(storage, groupSize, rowsVariant),
+    );
+    // uniform は既定経路と同じ 3 語（束縛レイアウトを分けない）。整除の検査は族側の 1 箇所。
+    const params = this.#writeParams(
+      linearGemvParams(storage, m, n, k, groupSize),
+      PARAMS_UNIFORM_USAGE,
+    );
     builder.dispatch({
       key,
       pipeline,
@@ -1592,13 +1616,8 @@ export class RecipeBuilder {
         ...this.#weightScaleBindings(step, LINEAR_SCALE_BINDING),
       ],
       workgroups: [
-        tiledWorkgroups(
-          n,
-          variant.cols,
-          this.#state.gpu.limits.maxComputeWorkgroupsPerDimension,
-          where,
-        ),
-        1,
+        tiledWorkgroups(n, variant.cols, limit, where),
+        tiledWorkgroups(m, rows, limit, where),
         1,
       ],
     });

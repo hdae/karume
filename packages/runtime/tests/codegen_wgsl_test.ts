@@ -1,4 +1,4 @@
-import { assertEquals, assertNotEquals, assertThrows } from "@std/assert";
+import { assert, assertEquals, assertNotEquals, assertThrows } from "@std/assert";
 import {
   ELEMENTWISE_WORKGROUP_SIZE,
   elementwiseKey,
@@ -162,7 +162,13 @@ import {
 } from "../src/kernels/rms-norm.ts";
 import { ROPE_KEY, ROPE_WGSL, ROPE_WORKGROUP_SIZE, ropeParams } from "../src/kernels/rope.ts";
 import { linearKey, linearParams, linearWgsl } from "../src/kernels/linear.ts";
-import { linearGemvKey, linearGemvWgsl } from "../src/kernels/linear-gemv.ts";
+import {
+  linearGemvKey,
+  linearGemvRowsKey,
+  type LinearGemvRowsVariant,
+  linearGemvRowsWgsl,
+  linearGemvWgsl,
+} from "../src/kernels/linear-gemv.ts";
 import {
   DP4A_WGSL_FEATURE,
   dp4aAvailable,
@@ -487,6 +493,27 @@ Deno.test("生成した WGSL がスナップショットとバイト単位で一
     ["linear_gemv_g32.wgsl", linearGemvWgsl("i4", 32)],
     ["linear_gemv_g64.wgsl", linearGemvWgsl("i4", 64)],
     ["linear_gemv_wi8.wgsl", linearGemvWgsl("i8")],
+    // 同族の **行ブロック変種**（M ≥ 2 — ADR 0082 追記 5 / perf-ledger K-21）。上の M=1 の 3 本と
+    // **対で置く**のが条件で、行ブロック化で decode（M=1）の生成物が 1 バイトも動かないことは
+    // この対でしか見えない。
+    // MUST: `r1` を置く — rows=1 は「M=1 のカーネルを y に M 枚並べた形」だが**別テキスト**
+    // （行の先頭 `xr0` を足して x を引き、書き戻しに `row0 < dims.m` のガードが付く）。同じ
+    // テキストに退化すると M ≥ 2 の dispatch が 1 行しか書かない沈黙誤値になる。
+    // MUST: group 2 種を対で置く（M=1 側と同文 — g32 では scale 添字が恒等式に縮むので、
+    // shift の焼き込みが効いていることは g64 側でしか見えない）。
+    // MUST: i8 側も置く（1 語 16 要素 × チャネル scale の別枝 — 片方の緑はもう片方の根拠に
+    // ならない）。
+    ["linear_gemv_r1_g32.wgsl", linearGemvRowsWgsl("i4", 32, { cols: 32, unroll: 4, rows: 1 })],
+    ["linear_gemv_r4_g32.wgsl", linearGemvRowsWgsl("i4", 32, { cols: 32, unroll: 4, rows: 4 })],
+    ["linear_gemv_r4_g64.wgsl", linearGemvRowsWgsl("i4", 64, { cols: 32, unroll: 4, rows: 4 })],
+    [
+      "linear_gemv_r4_wi8.wgsl",
+      linearGemvRowsWgsl("i8", undefined, {
+        cols: 32,
+        unroll: 4,
+        rows: 4,
+      }),
+    ],
     ["embedding_wi4.wgsl", embeddingWgsl("i4", 32)],
     ["embedding_wi8.wgsl", embeddingWgsl("i8")],
     ["conv1d_wi8.wgsl", conv1dWgsl("i8")],
@@ -709,6 +736,42 @@ Deno.test("同じ生成入力からは常に同一の WGSL が出る（全 op ×
     );
   }
   assertEquals(linearGemvWgsl("i8"), linearGemvWgsl("i8"), "linear gemv:i8");
+  // 行ブロック変種は生成入力に `rows` が増えるだけ（rows は (格納, m, n) の純関数から来る値で、
+  // 生成側は受け取った数をそのまま焼く）。rows ごとに展開本数が変わるので、状態を持たないことは
+  // 高さを跨いで固定する。
+  for (const rows of [1, 2, 4, 16]) {
+    const i4: LinearGemvRowsVariant = { cols: 32, unroll: 4, rows };
+    assertEquals(
+      linearGemvRowsWgsl("i4", 32, i4),
+      linearGemvRowsWgsl("i4", 32, i4),
+      `linear gemv rows:i4:r${rows}`,
+    );
+    assertEquals(
+      linearGemvRowsWgsl("i8", undefined, i4),
+      linearGemvRowsWgsl("i8", undefined, i4),
+      `linear gemv rows:i8:r${rows}`,
+    );
+  }
+  // MUST: 選ばれうる最大形（i4 8 行 / i8 16 行 = 天井 256 要素/語）の生成テキストに上限を置く。
+  // テキスト量がそのままシェーダの解析・検証費（naga はテキスト量に超線形）で、8 行 73 KB ≈ 55 ms が
+  // 黙って 100 KB / 200 ms へ戻る退行を止める検出器（perf-ledger K-21・research 2026-09-07-gemv-rows-k21 §6）。
+  for (
+    const [label, text] of [
+      ["i4 r8", linearGemvRowsWgsl("i4", 32, { cols: 32, unroll: 4, rows: 8 })],
+      ["i8 r16", linearGemvRowsWgsl("i8", undefined, { cols: 32, unroll: 4, rows: 16 })],
+    ] as const
+  ) {
+    assert(
+      text.length <= 80_000,
+      `linear gemv rows ${label}: 生成テキスト ${text.length} 文字が上限 80,000 を超えた`,
+    );
+  }
+  // MUST: rows=1 の行ブロックは M=1 変種と**別テキスト**（同じなら y タイル化が消えている）。
+  assertNotEquals(
+    linearGemvRowsWgsl("i4", 32, { cols: 32, unroll: 4, rows: 1 }),
+    linearGemvWgsl("i4", 32),
+    "linear gemv:r1 と M=1 変種が同一テキスト",
+  );
   // GEMM は 6 op × 重み格納 × v4 が 1 本の骨格を共有する（生成が状態を持たないことの固定）
   for (const v4 of [false, true]) {
     assertEquals(matmulWgsl(v4), matmulWgsl(v4), `matmul:v4=${v4}`);
@@ -917,6 +980,15 @@ Deno.test("パイプラインキーは生成入力ごとに一意（別カーネ
     linearGemvKey("i4", 32, { cols: 64, unroll: 4 }),
     linearGemvKey("i4", 32, { cols: 32, unroll: 2 }),
     linearGemvKey("i8", undefined, { cols: 64, unroll: 4 }),
+    // 行ブロック変種（perf-ledger K-21）は `r<rows>` もキーに載る — 載っていないと rows 4 の
+    // 資産が rows 16 の dispatch へ配られ、アキュムレータ本数と y タイルの高さが食い違って
+    // 即座に誤値になる。`r1`（= 上の M=1 変種 `c32u4` と**別テキスト**）が M=1 のキーと
+    // 衝突しないことも同じ列挙で見る。
+    ...[1, 2, 4, 16].flatMap((rows) => [
+      linearGemvRowsKey("i4", 32, { cols: 32, unroll: 4, rows }),
+      linearGemvRowsKey("i4", 64, { cols: 32, unroll: 4, rows }),
+      linearGemvRowsKey("i8", undefined, { cols: 32, unroll: 4, rows }),
+    ]),
     ...[16, 32, 64].map((groupSize) => embeddingKey("i4", groupSize)),
     // w8a8: v4 × 整数内積変種の 4 本 + 活性量子化。**dp4a とエミュを別キーにする**のが条件で、
     // 同じキーに割り当たると診断でどちらが走ったか分からなくなる（設計 §4.4-5）。

@@ -388,15 +388,19 @@ const dispatches = (of: readonly TimingEntry[]): number =>
  * 落ちて CPU で f32 展開された重みも、正しく実装されていれば同じ値を出す。**キーだけがこの
  * 区別をする**。
  *
- * - `linear:` は全て `:wi4g32`（i4 群量子化）か `:wi8`（tied `lm_head`）を含む。裸の
- *   `linear:v2:f32:…` が 1 本でも出たら、その重みは適格判定を外れて f32 に展開されている。
+ * - linear 族（既定 GEMM 骨格の `linear:` と GEMV 族の `linear_gemv:` — 後者は 1 ≤ M ≤ 64 の
+ *   全 linear が通る〈ADR 0082〉ので、短い prefill / decode ではこちらだけになる）は全て `:wi4g32`
+ *   （i4 群量子化）か `:wi8`（tied `lm_head`）を含む。裸の `linear:v2:f32:…` が 1 本でも
+ *   出たら、その重みは適格判定を外れて f32 に展開されている（GEMV 族は圧縮格納でしか開かない）。
  * - `embedding:` は全て `:wi8`（主 embedding + PLE 35 表）。i4 の実行経路は embedding にも
  *   あるが、**この系列は embedding を i8 に割り付けている**（`gemma4/export.py` の混成指定）—
  *   ここに `:wi4g32` が出たら割り付けが黙って変わったということ。
  * - 両方の linear 変種が出ること = 混成そのもの（片側だけなら「一様格納が通っただけ」）。
  */
 const assertStorageKeys = (entries: readonly TimingEntry[], shown: string): void => {
-  const linear = entries.filter((entry) => entry.key.startsWith("linear:"));
+  const linear = entries.filter((entry) =>
+    entry.key.startsWith("linear:") || entry.key.startsWith("linear_gemv:")
+  );
   assert(linear.length > 0, `linear の内訳が無い（走った内訳: ${shown}）`);
   assertEquals(
     linear
