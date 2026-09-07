@@ -7,7 +7,7 @@
 > [docs/perf-ledger.md](../docs/perf-ledger.md)。ここは「今この瞬間の文脈」だけを持つ —
 > 履歴・完了記録は ADR / research / git へ。
 >
-> Last updated: 2026-09-07（Codex 性能調査の消化 — 行読み・M バケット）
+> Last updated: 2026-09-07（K-21 — GEMV 行ブロック変種・次は H-15）
 
 ## Now
 
@@ -24,7 +24,16 @@
     `@hdae/fetch-cache` の `openCachedUrl` / `openHfFile`〈その ADR 0012・0.8.0 公開済み・hub の HF 取得元も追従済み〉）。
     **落とし穴**: Chrome の CacheStorage は Range 要求を無視する（200 全量）— 区間は `blob().slice()` で取る。Deno の `blob()` は
     全量を読む（stream 読み飛ばし = scan）。**MTP（Gemma 4 drafter）は実装前の採算実測で予測倍率 0.35〜0.57× → parked（目標は実用レベル・復活条件 = perf-ledger K-20）**。
-    次の波 = **K-21（小 M linear の GEMV 族拡張）→ H-15（generation 形の backing 複数保持）**（research 2026-09-07 §7.5）。
+    次の波 = **~~K-21~~（済・`5701262`）→ H-15（generation 形の backing 複数保持）**（research 2026-09-07 §7.5）。
+    **K-21（2026-09-07）**: linear の GEMV 族に**行ブロック変種**（1 スレッド = 1 列 × rows 行・y タイル）を足し、門を
+    1 ≤ M ≤ 64 へ（ADR 0082 追記 5・[research 2026-09-07-gemv-rows-k21](../docs/research/2026-09-07-gemv-rows-k21.md)）。
+    rows は (格納, m, n) の純関数（並列度目標 16384 スレッド・天井 256 要素/語）でキー `…c32u4r<rows>…` に載る。
+    既定経路と u32 完全一致。20 token prompt の prefill 135 → 80 ms・M=8 の linear 65 → 13 ms・decode 不変。
+    **落とし穴**: 行ブロックの WGSL は行数ぶん展開するので、naga の解析費がテキスト量に超線形 — 天井を 512 → 256 に
+    下げて初回ターン ≈ 1.3 s → +85 ms（codegen 門に 80,000 文字の上限）。行ループを `for` に畳む形は 2〜7 倍遅い
+    （private 配列がローカルメモリへ）。カーネル単体 A/B は submit 先頭にスピンアップ pass を置く（アイドル 210 MHz
+    からの立ち上がりで最初の pass が 2〜15 倍遅く出る）。診断・census で linear を数えるときは `linear:` と
+    `linear_gemv:` の**両方**を見る（M ≤ 64 は全て後者）。
 - **0.12.0 公開完了（2026-09-06）** — lockstep bump `a24d656` → GitHub Release v0.12.0 → JSR 0.12.0 →
   `deno task smoke:published` 緑。中身 = runtime の K-16 / K-14 / K-13（下の OP / Fusion 節）+ hub の
   `evictCachedAssets` 修正（同一参照集合の兄弟席を既定の守る側から外す・`protect` / `alsoEvicted` — ADR

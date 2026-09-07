@@ -19,9 +19,14 @@
 
 **残件**:
 
-- **次の性能波 = K-21 → H-15**（2026-09-07 ユーザー裁定 a・[perf-ledger](perf-ledger.md)）: ①小 M（2〜32）の linear を GEMV 族へ
-  拡張（M ≥ 2 で GEMM 経路に落ちる +55 ms を消す — 短い chat ターンの prefill 129 ms の大半）②generation 形の slot backing を
-  複数保持（prefill 形 ↔ decode 形の切替で毎ターン ≈ 80 ms 作り直している）。どちらも TTFT に直に効き、MTP の復活条件 ①② でもある。
+- **次の性能波 = ~~K-21~~ → H-15**（2026-09-07 ユーザー裁定 a・[perf-ledger](perf-ledger.md)）: ①**K-21 は済**（`5701262` —
+  小 M〈1 ≤ M ≤ 64〉の linear を GEMV 族の行ブロック変種へ・20 token prompt の prefill 135 → 80 ms・M=8 の linear 65 → 13 ms・
+  ビット同一。[research 2026-09-07-gemv-rows-k21](research/2026-09-07-gemv-rows-k21.md)）②**H-15**（次）= generation 形の slot
+  backing を複数保持（prefill 形 ↔ decode 形の切替で毎ターン ≈ 80 ms 作り直している — K-21 後の T(M) 計測でも切替 run の
+  backing 作り直しは両側で同数）。どちらも TTFT に直に効き、MTP の復活条件 ①（済）②でもある。
+- **GEMV 行ブロックの残件（起票 2026-09-07・K-21 の帰結）**: ①並列度の目標 16384 は RTX 3080 Ti の飽和点（limitations）—
+  M2 / 内蔵 GPU での再掃引は定数の差し替えで済む形 ②ブラウザ（Chrome / Tint）のシェーダ解析費は未測（Deno / naga で初回ターン
+  +85 ms）③Metal の u32 門は行ブロック 11 形も未実測（known-issues）。
 - **Anima: DiT stage 内だけの反復常駐**（起票 2026-09-07 — Codex 性能調査 04 §Anima）: Session を stage ごとに作って返す
   現設計（VRAM の不変条件）を保ったまま、DiT stage の中で初期 latent の patchify を 1 度にし、RoPE / cond・uncond embedding /
   timestep 材料を反復間で再利用し、DiT 出力 → CFG → Euler / DPM++2M 更新を同じ token layout で回し、最後だけ unpatchify する。

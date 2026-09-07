@@ -367,6 +367,21 @@ gemma4 の prefill は chunk ごとに「`queryLength` 以上の最小バケッ�
   選ばれず、それ未満は参照経路 ① / ③（`stateAttentionReduce: "parallel"` なら ③′）に落ちる。値は正しいが遅く、
   `parallel` × M ∈ [2, 16) の組は実測していない。gemma4 の既定は全て 16 以上で、この域は明示指定でしか入らない。
 
+## linear の GEMV 族（1 ≤ M ≤ 64）: 行ブロックの高さは参照 device の定数で選ぶ・初回ターンにシェーダ解析費が乗る
+
+i4 / i8 格納 × f32 計算の linear は 1 ≤ M ≤ 64 で GEMV 族（ADR [0082](decisions/0082-linear-gemv-decode.md)
+追記 5）が受け、既定の GEMM 骨格と u32 完全一致のまま M=8 で ×6・M=32 で ×3 速い。by-design の制約 2 点:
+
+- **行ブロックの高さ `rows` は (格納, m, n) の純関数で、並列度の目標 16384 スレッドは参照 device
+  （RTX 3080 Ti）の飽和点を焼いた値**。飽和点が 1 桁小さい GPU（内蔵 GPU・Apple M 系）では y タイルを
+  買いすぎて重みの読み直しが最適より増えるが、値は正しく、選択は device で変えない — 純関数で選ぶことが
+  「同一キー → バイト同一 WGSL」と実行時オートチューン禁止（ADR 0022）の前提。他 device での再掃引は
+  定数の差し替えで済む形にしてある。
+- **初回ターンにシェーダの解析費が乗る**: 行ブロック変種は行数ぶん展開した WGSL で、解析・検証費が
+  テキスト量に超線形。天井（256 要素/語）でも i4 8 行 / i8 16 行が 1 本 ≈ 55〜60 ms、gemma4 E2B の M=32
+  バケット prefill が初回に作る 5 本で合計 ≈ 150 ms（Deno / naga 実測）。パイプラインは device ごとに
+  1 度だけ作られるので 2 ターン目以降には乗らない。ブラウザ（Tint）の解析費は未測。
+
 ## gemma4 `fromAssets`: PLE の読み口は `readPleShard`（全量バイト列）から `openPleShard`（handle）へ変わった（次のリリース・破壊的変更）
 
 `Gemma4Assets.readPleShard(file) → ArrayBuffer` は **`openPleShard(file) → Gemma4PleShardSource`**（`{ bytes, readAll,
