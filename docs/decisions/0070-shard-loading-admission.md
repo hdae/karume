@@ -192,8 +192,10 @@ await が無い」ことで従来どおり保たれ、区間が短くなるだ�
   - **estimator（CX-4.3）**: 返り値は `AdmissionReport`（`resident`〈重み内訳 + state〉+
     `scenarios[]`〈generation 指定時は prefill / decode を chunk 記号の再束縛で独立計算〉+
     `peakAccountedBytes` = resident + max(シナリオ)）。max の根拠 = `ActiveBacking` 同時 1 本。
-    切替窓（退役 backing が flush 後始末まで生きる）は unaccounted へ明文化。追記 2026-08-19 の
-    カテゴリ写像は欄名だけ読み替え（導出式は不変・診断との厳密一致門は新欄名で維持）。
+    切替窓（退役 backing が flush 後始末まで生きる）は unaccounted へ明文化。
+    > 追記（2026-09-07）: ADR [0095](0095-plan-backing-budget.md) で backing は予算つき保持になり、
+    > 勘定は `resident + max(予算, max(シナリオ))`・非勘定の窓は「退役 → destroy」へ言い直した。追記 2026-08-19 の
+    > カテゴリ写像は欄名だけ読み替え（導出式は不変・診断との厳密一致門は新欄名で維持）。
   - **hub `prefetchAssets`（相 1 単体の公開面）+ models 接続**: 7 pipelines の `fromPretrained`
     は「全コンポーネントのグラフ shard 1 回取得 → admission → 重み shard を 1 回で prefetch →
     Session 構築時にキャッシュから逐次流し」。進捗はモデル全体 1 本のストリームを維持

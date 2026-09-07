@@ -80,6 +80,9 @@ lastRunParams はヒット run で {0,0} になる（導出相が走らない事
 
 ### 4. transient slot の GPU backing（容量 1・初ヒットで遅延構築）
 
+> 追記（2026-09-07）: 容量 1 は ADR [0095](0095-plan-backing-budget.md) で**バイト予算つきの LRU 集合**（既定
+> 256 MiB・予算 0 = 容量 1）に改めた。遅延構築・退役 → flush 後 destroy・footprint 不変は不変。
+
 `derivePlanSlots` がレシピ列から **RunArena のサイズクラス LIFO を仮想再生**して slot 表を導く
 （独自パッキング禁止 — footprint 一致がテストで固定され、常駐化しても VRAM の新ピークは
 生まれない）。backing（slot + 入力バッファ + 焼き込み bind group）は**初ヒット run で遅延構築**

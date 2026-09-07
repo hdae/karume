@@ -347,9 +347,30 @@ broadcast できない形・実テンソルとの名前衝突・チャネル軸�
 `scenarios[].workspaceBytes` は融合**前**のノード列に対する生存区間シミュレーションで、実構築が
 畳む / 割る形は勘定に入らない。非勘定は `unaccounted` 欄が逐語で列挙する — ①融合が畳んで消す
 中間と行ブロック分割の一時 ②states 形 attention のノード内一時（スコア S と行統計 — 融合の
-成立に依存せず必ず出る）③params バッファ ④`queue.writeBuffer` の実装 staging ⑤シナリオ切替の窓。
+成立に依存せず必ず出る）③params バッファ ④`queue.writeBuffer` の実装 staging ⑤退役の窓（予算超過 /
+計画の LRU 追い出しで退役した slot backing は flush 後の後始末まで生きる）。
 可否の最終門はこれまでどおり out-of-memory errorScope で、`peakAccountedBytes` も名前どおり
 「勘定に入れた分のピーク」= 上限保証ではない。
+
+**slot backing の予算は下限として載る**: `peakAccountedBytes` は `weights + state + max(予算, 最大シナリオ)`
+（ADR [0095](decisions/0095-plan-backing-budget.md) 決定 4）で、既定 256 MiB の予算がシナリオより大きい小さな
+モデルでは、実際に保持する量が数 MiB でも 256 MiB が勘定に載る（過大側）。報告の `planBackingBudgetBytes`
+で引き算できる・`planBackingBudgetBytes: 0` なら従来の `max(シナリオ)` に戻る。
+
+## slot backing の予算つき保持: 予算より大きい形は保持されない・常駐入力の破棄は保持中は拒否される
+
+slot backing は予算（既定 256 MiB・`SessionOptions.planBackingBudgetBytes` / `Gemma4Pipeline` の options）の
+内側で複数保持する（ADR [0095](decisions/0095-plan-backing-budget.md)）。by-design の制約 3 点:
+
+- **予算より大きい形は 1 本だけ**（他を全て退役させて持つ = 従来の容量 1）。gemma4 の chunk 768 形は
+  capacity 16K で ≈ 528 MiB・capacity 2K で 192 MiB なので、既定では 768 token 以上のプロンプトを含む
+  ターンで 768 形 ↔ バケット形 ↔ decode 形の作り直し（≈ 40 ms/回）が従来どおり起きる。短いターン
+  （バケット形 ↔ decode 形）の往復だけが消える。長い prompt を毎ターン流すなら予算を上げる。
+- **常駐入力（`ResidentTensor`）を焼き込んだ backing が保持されている間、その `dispose()` は fail loudly**。
+  容量 1 のときは別の形へ切り替えれば解けた窓が、予算内では Session の `dispose()` か予算超過による
+  退役まで続く。`planBackingBudgetBytes: 0` で従来の挙動に戻る。
+- **他家族の透過は未**: gemma4 以外は manifest の `session` から Session options を組むため予算を変える口が
+  無く、既定 256 MiB が効く（形が予算より小さい家族は複数保持側・最大 +256 MiB は見積りに載る）。
 
 ## prefill バケット（`chunkBuckets`）: 見積りの非勘定窓が広がる・16 未満は tiled 経路に乗らない
 
@@ -357,12 +378,12 @@ gemma4 の prefill は chunk ごとに「`queryLength` 以上の最小バケッ�
 [0066](decisions/0066-generation-context-state-slots.md) 追記 10・既定 `GEMMA4_CHUNK_BUCKETS`）。by-design の
 制約 2 点:
 
-- **VRAM の瞬間ピークは見積りの外側で広がる**: slot backing（run の中間バッファ束）は容量 1 でヒット run に
-  しか作られないため、末尾 chunk のバケット run は chunkLength 形の backing が載ったまま arena に一時を確保する。
-  `estimateSessionMemory` の `unaccounted` が言う「退役から destroy までの窓で 2 本ぶんが同時に載る」の幅が、
-  従来の「decode 形と prefill 形の和」から「最大バケット形と prefill 形の和」へ広がる（既定の梯子 [32, 64, 128, 256]
-  なら 256 形 + 768 形 ≈ 1.33 倍）。見積りのシナリオ自体は prefill / decode の 2 本のまま（ピークの**勘定側**は最大 M で不変）。
-  複数 chunk のターンでは backing の作り直しも 1 回増える（2 → 3 回/ターン）。
+- **VRAM の瞬間ピークは見積りの外側で広がる**: slot backing（run の中間バッファ束）はヒット run にしか作られないため、
+  末尾 chunk のバケット run の**初回**（ミス run）は保持中の backing が載ったまま arena に一時を確保する。backing は
+  バイト予算つきで複数保持する（ADR [0095](decisions/0095-plan-backing-budget.md)・既定 256 MiB）ので、勘定側は
+  `max(予算, 最大シナリオ)`（バケット形はシナリオに列挙しないが予算の内側）、非勘定側の窓は「退役（予算超過 / LRU
+  追い出し）から destroy まで」と「ミス run の arena 一時（最大でバケット形 1 本ぶん）」。見積りのシナリオ自体は
+  prefill / decode の 2 本のまま。2 ターン目以降はバケット形も decode 形も保持されるので作り直しは起きない（予算内なら）。
 - **16 未満のバケットは K-13 の tiled 経路に乗らない**: states 形 attention の ①ₜ / ③ₜ は M ≥ 16 の計画にしか
   選ばれず、それ未満は参照経路 ① / ③（`stateAttentionReduce: "parallel"` なら ③′）に落ちる。値は正しいが遅く、
   `parallel` × M ∈ [2, 16) の組は実測していない。gemma4 の既定は全て 16 以上で、この域は明示指定でしか入らない。

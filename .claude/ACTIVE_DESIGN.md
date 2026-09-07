@@ -7,7 +7,7 @@
 > [docs/perf-ledger.md](../docs/perf-ledger.md)。ここは「今この瞬間の文脈」だけを持つ —
 > 履歴・完了記録は ADR / research / git へ。
 >
-> Last updated: 2026-09-07（K-21 — GEMV 行ブロック変種・次は H-15）
+> Last updated: 2026-09-07（K-21 + H-15 — GEMV 行ブロック変種・backing の予算つき保持・次は MTP 復活条件 ③）
 
 ## Now
 
@@ -24,7 +24,14 @@
     `@hdae/fetch-cache` の `openCachedUrl` / `openHfFile`〈その ADR 0012・0.8.0 公開済み・hub の HF 取得元も追従済み〉）。
     **落とし穴**: Chrome の CacheStorage は Range 要求を無視する（200 全量）— 区間は `blob().slice()` で取る。Deno の `blob()` は
     全量を読む（stream 読み飛ばし = scan）。**MTP（Gemma 4 drafter）は実装前の採算実測で予測倍率 0.35〜0.57× → parked（目標は実用レベル・復活条件 = perf-ledger K-20）**。
-    次の波 = **~~K-21~~（済・`5701262`）→ H-15（generation 形の backing 複数保持）**（research 2026-09-07 §7.5）。
+    次の波 = **~~K-21~~（済・`5701262`）→ ~~H-15~~（済・`c7120f2`）→ MTP 復活条件 ③（i4 target の E[a] 再実測）**。
+    **H-15（2026-09-07）**: slot backing を容量 1 から**バイト予算つき LRU 集合**へ（ADR
+    [0095](../docs/decisions/0095-plan-backing-budget.md)・`SessionOptions.planBackingBudgetBytes` 既定 256 MiB・0 = 従来・
+    Gemma4Pipeline の options に透過）。勘定 = 領域 + 所有する入力バッファ・常駐は max(予算, 最大 1 本) を超えない・見積りは
+    `max(予算, 最大シナリオ)` を勘定側へ・context の焼き込み束は backing の世代ごとの表。実測: prefill run 壁 80 → 46 ms・
+    定常ターン 646 → 581 ms・作り直し 10 → 1 回 / 5 ターン。**落とし穴**: 予算より大きい形（gemma4 chunk 768 = capacity 16K で
+    528 MiB）は 1 本だけ = 長い prompt のターンは従来どおり作り直す / 常駐入力を焼き込んだ backing が保持されている間は
+    `ResidentTensor.dispose()` が fail loudly（予算 0 で従来へ）/ 見積りに既定 256 MiB の下限が載る / 他家族は予算を変える口が無い。
     **K-21（2026-09-07）**: linear の GEMV 族に**行ブロック変種**（1 スレッド = 1 列 × rows 行・y タイル）を足し、門を
     1 ≤ M ≤ 64 へ（ADR 0082 追記 5・[research 2026-09-07-gemv-rows-k21](../docs/research/2026-09-07-gemv-rows-k21.md)）。
     rows は (格納, m, n) の純関数（並列度目標 16384 スレッド・天井 256 要素/語）でキー `…c32u4r<rows>…` に載る。

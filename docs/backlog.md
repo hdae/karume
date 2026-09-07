@@ -19,11 +19,14 @@
 
 **残件**:
 
-- **次の性能波 = ~~K-21~~ → H-15**（2026-09-07 ユーザー裁定 a・[perf-ledger](perf-ledger.md)）: ①**K-21 は済**（`5701262` —
-  小 M〈1 ≤ M ≤ 64〉の linear を GEMV 族の行ブロック変種へ・20 token prompt の prefill 135 → 80 ms・M=8 の linear 65 → 13 ms・
-  ビット同一。[research 2026-09-07-gemv-rows-k21](research/2026-09-07-gemv-rows-k21.md)）②**H-15**（次）= generation 形の slot
-  backing を複数保持（prefill 形 ↔ decode 形の切替で毎ターン ≈ 80 ms 作り直している — K-21 後の T(M) 計測でも切替 run の
-  backing 作り直しは両側で同数）。どちらも TTFT に直に効き、MTP の復活条件 ①（済）②でもある。
+- **性能波 K-21 → H-15 は済**（2026-09-07 ユーザー裁定 a・[perf-ledger](perf-ledger.md)）: ①K-21 `5701262`（小 M〈1 ≤ M ≤ 64〉の
+  linear を GEMV 族の行ブロック変種へ・ビット同一）②H-15 `c7120f2`（slot backing をバイト予算つき LRU 保持へ — ADR
+  [0095](decisions/0095-plan-backing-budget.md)）。合計で 20 token prompt の prefill run 壁 **135 → 46 ms**・定常ターン壁
+  **701 → 581 ms**（[research](research/2026-09-07-gemv-rows-k21.md) §8〜9）。MTP の復活条件 ①② は満ちた —
+  **次 = 復活条件 ③（i4 target で E[a] を再実測・長文脈の抽出的要約で E[a] ≥ 2 か）→ ④ 設計**（perf-ledger K-20）。
+- **`planBackingBudgetBytes` を共通の options へ**（起票 2026-09-07 — ADR 0095 帰結）: gemma4 以外は manifest の `session` から
+  Session options を組むため予算を変える口が無い（既定 256 MiB が効く）。`onRetry` を `FromPretrainedHubOptions` へ 1 本化した形に
+  倣って載せる。併せて executor / estimate に二重にある予算の値域検査を 1 関数へ寄せる。
 - **GEMV 行ブロックの残件（起票 2026-09-07・K-21 の帰結）**: ①並列度の目標 16384 は RTX 3080 Ti の飽和点（limitations）—
   M2 / 内蔵 GPU での再掃引は定数の差し替えで済む形 ②ブラウザ（Chrome / Tint）のシェーダ解析費は未測（Deno / naga で初回ターン
   +85 ms）③Metal の u32 門は行ブロック 11 形も未実測（known-issues）。

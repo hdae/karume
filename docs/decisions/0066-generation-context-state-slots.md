@@ -247,6 +247,6 @@ accepted 直後の第 3 巡（Codex 独立レビュー・5 本セット照合）
     無し・初回使用時にコンパイル）。16 未満は tiled 経路に乗らず ① / ③ に落ちる ③**数値**: 行局所な op と
     tiled attention は M によらず同じ式・同じ加算順だが、GEMM の幾何（`gemm-geometry.ts` — ≤64 / ≤512 /
     上）は M で変わるので、**バケット形と 768 固定で logits のビット一致は保証しない**（K-13 と同じく
-    token 列 golden で縛る — `e2e_gemma4_sequence_test.ts` ⑤）④**VRAM**: slot backing は容量 1 でヒット
+    token 列 golden で縛る — `e2e_gemma4_sequence_test.ts` ⑤）④**VRAM**（ADR [0095](0095-plan-backing-budget.md) で backing は予算つき保持へ — 以下は容量 1 当時の記述）: slot backing は容量 1 でヒット
     run にしか作られないため、末尾 chunk のバケット run は chunkLength 形の backing が載ったまま arena に
     一時を確保する。見積り（ADR 0089）の unaccounted 側の窓が「decode 形と prefill 形の和」から「最大バケット形と prefill 形の和」へ広がる（limitations に記載）。複数 chunk のターンでは backing の作り直しが 1 回増える（2 → 3 回/ターン）。gemma4 の既定の梯子（`GEMMA4_CHUNK_BUCKETS`）は実測で確定する（research 2026-09-07）。
