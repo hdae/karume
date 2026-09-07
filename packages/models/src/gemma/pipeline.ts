@@ -38,6 +38,7 @@
 import {
   acquireGpu,
   type AdmissionReport,
+  assertChunkBuckets,
   estimateGraphMemory,
   type GpuContext,
   planWeightResidency,
@@ -195,6 +196,29 @@ export type Gemma4PipelineOptions = {
    */
   readonly chunkLength?: number;
   /**
+   * prefill 形として `chunkLength` に**加えて**使う物理 chunk 行数（省略時は
+   * {@link GEMMA4_CHUNK_BUCKETS} のうち `chunkLength` 未満のもの・`[]` で無効）。
+   *
+   * 短い prompt を `chunkLength`（配布既定 768）行へ pad すると、pad 行は出力にも KV にも
+   * 寄与しないのに行局所な op（linear / pointwise / norm）の仕事だけを物理行数に比例して積む。
+   * バケットがあると、その chunk は `queryLength` 以上の最小バケット行だけで流れる。長い
+   * prompt では 768 一括が最速なので、既定を下げるのではなく**実行形を増やす**形を採っている。
+   *
+   * MUST: 2 以上 `chunkLength` 未満の整数の**狭義昇順**（受理集合の正本は runtime の
+   * `assertChunkBuckets` — この層は「どの入口の指定か」を文言に足すだけ）。
+   *
+   * NOTE: 本数ぶんだけ PreparedPlan の定常本数が増える（実行形 1 本 = 別鍵の計画 1 本 —
+   * ADR 0042 決定 2 の LRU）。既定の 5 本 + prefill 形 + decode 形 = **1 つの容量あたり** 7 形で、
+   * PreparedPlan の LRU 上限（runtime の `PREPARED_PLAN_CAPACITY`）に収まる — 鍵は解決済みスロット
+   * 容量を含む（ADR 0066 決定 3）ので、容量の違う sequence を交互に回すと形は容量の数だけ倍になる。
+   * さらに足すと、生成ループの中で最古が毎回落ちて decode が静かに再導出へ落ちる（例外は出ない —
+   * 観測点は `SessionDiagnostics.lastRunPrepared`）。
+   *
+   * NOTE: 複数 chunk のターンでは末尾 chunk だけが別の M になるので、slot backing（容量 1）の
+   * 作り直しが 1 回増える（prefill → decode の 2 回 / ターンが 3 回になる）。
+   */
+  readonly chunkBuckets?: readonly number[];
+  /**
    * 実行 1 回ごとの診断を受け取る観測席（他 7 家族と同型）。op 別 GPU 時間（`lastRunTiming`）が
    * 要るときは `gpu` に `acquireGpu({ gpuTiming: true })` を渡す（ADR 0021 — 既定は計測しない）。
    *
@@ -239,6 +263,30 @@ export type Gemma4PipelineOptions = {
  * 呼ぶ消費者・decode 系列の検収門）は参照経路のまま。
  */
 export const GEMMA4_STATE_ATTENTION_REDUCE: StateAttentionReduce = "parallel";
+
+/**
+ * gemma4 パイプラインが使う prefill バケットの既定
+ * （{@link Gemma4PipelineOptions.chunkBuckets}）— 2 冪の梯子。
+ *
+ * NOTE: **暫定値**である。刻みは「pad の無駄」と「定常する計画本数」の交換で、どの段が要るかは
+ * 実測で決める（chat の 1 発話は数十 token に寄るので下の段が効き、長文の要約は上の段を通って
+ * `chunkLength` に着く）。実測が出たらこの列を確定させる。
+ *
+ * MUST: 凍結する — この配列は module スコープの共有物で、消費者が並べ替えると以後に組む
+ * pipeline の物理行数の選び方まで変わる（`chunkBuckets` は昇順前提で先頭一致を採る）。
+ */
+export const GEMMA4_CHUNK_BUCKETS: readonly number[] = Object.freeze([32, 64, 128, 256, 512]);
+
+/**
+ * 既定のバケット列を、選ばれた `chunkLength` に載る段だけへ切り詰める。
+ *
+ * `chunkLength` は実行時ノブ（{@link Gemma4PipelineOptions.chunkLength}）なので、既定の梯子を
+ * そのまま渡すと `chunkLength: 64` のような指定が「既定同士の食い違い」で落ちる。切り詰めるのは
+ * **既定だけ**で、呼び手が明示したバケットは 1 つも落とさず fail loudly させる（黙って捨てると
+ * 「宣言したのに効かないバケット」が例外なしで残る）。
+ */
+const defaultChunkBuckets = (chunkLength: number): readonly number[] =>
+  GEMMA4_CHUNK_BUCKETS.filter((rows) => rows < chunkLength);
 
 /**
  * {@link Gemma4Pipeline.fromPretrained} が追加で受けるもの（選択軸 + 取得層へ透過するノブ）。
@@ -695,6 +743,32 @@ export const assertChunkLength = (chunkLength: number, config: Gemma4PipelineCon
 };
 
 /**
+ * 実行時ノブの `chunkBuckets` を検査して返す（{@link Gemma4PipelineOptions.chunkBuckets} の門）。
+ *
+ * MUST: 受理集合の規則（2 以上 `chunkLength` 未満・狭義昇順）は**写さない** — 正本は runtime の
+ * `assertChunkBuckets` 1 本で、そこが拒否する指定を context 生成まで通さないためにここで先に
+ * 通す。この層が足すのは入口の名前だけで、`Gemma4PipelineOptions` に渡した呼び手が
+ * 「自分のどの指定が落ちたか」を読めるようにする（`assertChunkLength` と同じ流儀）。
+ *
+ * NOTE: `maxChunkLength` の門は要らない（バケットは `chunkLength` 未満で、その `chunkLength`
+ * 自体が {@link assertChunkLength} の門を通っている）。
+ */
+export const assertGemma4ChunkBuckets = (
+  chunkBuckets: readonly number[],
+  chunkLength: number,
+): readonly number[] => {
+  try {
+    assertChunkBuckets(chunkBuckets, chunkLength);
+  } catch (cause) {
+    throw new Error(
+      `Gemma4Pipeline: ${cause instanceof Error ? cause.message : String(cause)}`,
+      { cause },
+    );
+  }
+  return chunkBuckets;
+};
+
+/**
  * admission を通った材料 + 資産から静的配線を組む（`fromAssets` と `fromPretrained` が共有）。
  *
  * ここが id 空間の相互照合（ADR 0085 決定 5）を全部通す — ①tokenizer が生成しうる id
@@ -728,12 +802,17 @@ const buildGemma4Program = (
       : { maxResidentBytes: options.maxResidentPleBytes }),
   });
 
+  const chunkLength = assertChunkLength(options.chunkLength ?? config.chunkLength, config);
   const wiring = createGenerationProgram({
     graph: component.graph,
     inputIds: INPUT_IDS,
     lastRow: LAST_ROW,
     logits: component.graph.outputs[0],
-    chunkLength: assertChunkLength(options.chunkLength ?? config.chunkLength, config),
+    chunkLength,
+    chunkBuckets: assertGemma4ChunkBuckets(
+      options.chunkBuckets ?? defaultChunkBuckets(chunkLength),
+      chunkLength,
+    ),
     maxPosition: config.maxPosition,
     capacity: config.capacity,
     vocabSize,
@@ -1382,6 +1461,10 @@ export class Gemma4Pipeline {
    *
    * MUST: 返るのは**必要側のカテゴリ別合計だけ**で、空き側との比較も可否判定もしない（同 決定 5）。
    * 判定の最終門は out-of-memory errorScope のままで、この見積りは事前診断である。
+   *
+   * NOTE: {@link Gemma4PipelineOptions.chunkBuckets} は見積りを動かさない（欄も持たない）—
+   * 一時領域も入出力も attention の一時も物理行数 `M` に単調で、ピークは最大 `M` = prefill 形に
+   * ある。バケットはその `M` より小さい形を足すだけである。
    *
    * NOTE: `AdmissionReport` は runtime の型で、`@karume/models` は再輸出しない（ADR 0008 の薄い面 —
    * 見積りを読む消費者は runtime の型をそのまま使う）。

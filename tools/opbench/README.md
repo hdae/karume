@@ -202,12 +202,15 @@ point is the same one P-1 was measured through.
 
 What "one run" means per family:
 
-| Family    | One run                                                                          | Input flags                                          |
-| --------- | -------------------------------------------------------------------------------- | ---------------------------------------------------- |
-| `gemma4`  | one short chat turn (`prefill` runs, one per chunk, + N `decode` runs)           | `--prompt`, `--new-tokens` (default 8), `--capacity` |
-| `anima`   | one image (`text_encoder` / `text_conditioner` / `transformer` step / VAE tiles) | `--prompt`, `--steps` (default 2), `--size` (1024)   |
-| `siglip2` | one image embedded (`vision`, a single run)                                      | none — the image is synthetic (see below)            |
-| `irodori` | one utterance (each conditioner once, `dit` per step, then the codec)            | `--text`, `--seconds` (fractional, optional)         |
+| Family    | One run                                                                          | Input flags                                                             |
+| --------- | -------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| `gemma4`  | one short chat turn (`prefill` runs, one per chunk, + N `decode` runs)           | `--prompt`, `--new-tokens` (default 8), `--capacity`, `--chunk-buckets` |
+| `anima`   | one image (`text_encoder` / `text_conditioner` / `transformer` step / VAE tiles) | `--prompt`, `--steps` (default 2), `--size` (1024)                      |
+| `siglip2` | one image embedded (`vision`, a single run)                                      | none — the image is synthetic (see below)                               |
+| `irodori` | one utterance (each conditioner once, `dit` per step, then the codec)            | `--text`, `--seconds` (fractional, optional)                            |
+
+`--chunk-buckets 32,64,128` (or `none` to disable) overrides the prefill buckets the gemma4 pipeline
+declares, so the pad cost of a short prompt can be measured as a two-run A/B against `none`.
 
 The siglip2 image is a synthetic 256×256 RGB gradient built in memory: the preprocessor resizes to
 the declared input size anyway, pixel values do not change kernel speed, and karume ships no PNG

@@ -99,6 +99,7 @@ const GRAPH_OPTIONS: ReadonlySet<string> = new Set([
   "quant",
   "new-tokens",
   "capacity",
+  "chunk-buckets",
   "steps",
   "size",
   "prompt",
@@ -131,6 +132,16 @@ const positiveInteger = (text: string, where: string): number => {
   if (!Number.isInteger(value) || value <= 0) throw new Error(`${where} は正の整数（'${text}'）`);
   return value;
 };
+
+/**
+ * `--chunk-buckets 32,64,128`（`none` = 無効）を読む。
+ *
+ * `none` を用意するのは、既定が空でない値だと「無効にする」指定が空文字列でしか書けず、
+ * `--chunk-buckets ''` は引数の対の検査（値の書き忘れ検出）と区別が付かないため。
+ * 値そのものの受理集合（2 以上 chunkLength 未満・狭義昇順）はパイプライン側が見る。
+ */
+const chunkBucketList = (text: string): readonly number[] =>
+  text === "none" ? [] : text.split(",").map((rows) => positiveInteger(rows, "--chunk-buckets"));
 
 /** 秒だけは小数を取る（発話長は整数秒に丸める意味が無い）。 */
 const positiveNumber = (text: string, where: string): number => {
@@ -254,6 +265,7 @@ const USAGE = `使い方: deno run -A tools/opbench/main.ts <census|single> …
     --single <dir>       single の出力（op 別の single / graph 比を出す）
     --model / --quant    配布形の選択（既定 = manifest）
     --new-tokens <n>     gemma4 の生成 token 数（既定 8）/ --capacity <n> gemma4 の KV 容量（既定 = 配布形）/ --steps <n> --size <px> anima の step と辺（既定 2 / 1024・step は 2 以上）
+    --chunk-buckets <n,n,...>  gemma4 の prefill バケット（既定 = パイプラインの GEMMA4_CHUNK_BUCKETS・none で無効 = 全 prefill が chunkLength 行）
     --prompt <text>      gemma4 / anima の入力文（既定あり）
     --text <text>        irodori の発話文（既定あり）
     --seconds <n>        irodori の発話長（秒・小数可・省略時は duration グラフが決める）
@@ -429,6 +441,7 @@ const runGraph = async (args: ReadonlyMap<string, readonly string[]>): Promise<v
   const singleDir = single(args, "single");
   const newTokens = single(args, "new-tokens");
   const capacity = single(args, "capacity");
+  const chunkBuckets = single(args, "chunk-buckets");
   const steps = single(args, "steps");
   const size = single(args, "size");
   const seconds = single(args, "seconds");
@@ -444,6 +457,7 @@ const runGraph = async (args: ReadonlyMap<string, readonly string[]>): Promise<v
       ...(single(args, "quant") === undefined ? {} : { quant: single(args, "quant") }),
       ...(newTokens === undefined ? {} : { newTokens: positiveInteger(newTokens, "--new-tokens") }),
       ...(capacity === undefined ? {} : { capacity: positiveInteger(capacity, "--capacity") }),
+      ...(chunkBuckets === undefined ? {} : { chunkBuckets: chunkBucketList(chunkBuckets) }),
       ...(steps === undefined ? {} : { steps: positiveInteger(steps, "--steps") }),
       ...(size === undefined ? {} : { size: positiveInteger(size, "--size") }),
       ...(single(args, "prompt") === undefined ? {} : { prompt: single(args, "prompt") }),

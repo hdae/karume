@@ -35,6 +35,7 @@ import {
   type GenerationRequest,
   type GenerationSession,
   type GenerationStop,
+  physicalChunkRows,
 } from "../src/generation/sequence.ts";
 
 const VOCAB = 16;
@@ -226,6 +227,8 @@ Deno.test("GenerationSequence: prefill は固定長 chunk・pad 0・位置は絶
   assertEquals(fake.specs.length, 1);
   assertEquals(fake.specs[0].bindings, { C: 64 });
   assertEquals(fake.specs[0].chunkLength, CHUNK_LENGTH);
+  // バケットを宣言しない配線は空配列を渡す（context の実行形は prefill 1 本 + decode の 2 本）。
+  assertEquals(fake.specs[0].chunkBuckets, []);
   assertEquals(fake.calls.map((call) => call.bindings), [undefined, undefined, undefined]);
   assertEquals(fake.calls.every((call) => call.sameContext), true);
 
@@ -276,6 +279,83 @@ Deno.test("GenerationSequence: 長い prompt は chunk ごとに prefill イベ�
     { kind: "prefill", chunk: 2, chunks: 2 },
     { kind: "token", id: 2, position: 6 },
   ]);
+});
+
+// ---- prefill バケット（ADR 0066 追記〈バケット〉）------------------------------
+//
+// pad 行は出力にも KV にも寄与しないのに、行局所な op の仕事だけは物理行数に比例する。短い
+// chunk をバケット行で流す選択が外れても**値は正しいまま**（pad 行は 0 で無害）なので、
+// 退行は性能にしか出ない = ここが唯一の門である。
+
+/** バケット付きの配線（chunkLength 8 / バケット 4 — 1 / 4 / 8 の 3 形が出る）。 */
+const BUCKET_CHUNK_LENGTH = 8;
+const BUCKETS = [4] as const;
+
+const bucketProgram = (fake: FakeSession): GenerationWiring =>
+  programOf(fake, { chunkLength: BUCKET_CHUNK_LENGTH, chunkBuckets: [...BUCKETS] });
+
+Deno.test("physicalChunkRows: 有効行 1 は decode 形・他は queryLength 以上の最小バケット", () => {
+  const fake = fakeSession();
+  const program = bucketProgram(fake);
+  // 1 行は decode 形（バケットがあっても変わらない — 多ターン再開のビット同一性の要）。
+  assertEquals(physicalChunkRows(1, program), 1);
+  // バケットに収まる chunk はバケット行（2..4 は 4 行）。
+  assertEquals(physicalChunkRows(2, program), 4);
+  assertEquals(physicalChunkRows(4, program), 4);
+  // はみ出したら次の形へ（バケットが尽きたら chunkLength）。
+  assertEquals(physicalChunkRows(5, program), BUCKET_CHUNK_LENGTH);
+  assertEquals(physicalChunkRows(BUCKET_CHUNK_LENGTH, program), BUCKET_CHUNK_LENGTH);
+  // 宣言の無い配線は従来どおり 1 か chunkLength の 2 形だけ。
+  const plain = programOf(fake);
+  assertEquals(physicalChunkRows(1, plain), 1);
+  assertEquals(physicalChunkRows(2, plain), CHUNK_LENGTH);
+});
+
+Deno.test("GenerationSequence: chunkBuckets を宣言すると短い chunk がバケット行で流れる", async () => {
+  /** prompt 長 → その生成が出した run の物理行数（`[1, rows]`）。 */
+  const rowsFor = async (promptLength: number): Promise<readonly number[]> => {
+    const fake = fakeSession();
+    const sequence = await createGenerationSequence({
+      session: fake.session,
+      program: bucketProgram(fake),
+    });
+    // 宣言は context 生成時にそのまま渡る（run 前検査が許す集合はここで決まる）。
+    assertEquals(fake.specs[0].chunkBuckets, [...BUCKETS]);
+    assertEquals(fake.specs[0].chunkLength, BUCKET_CHUNK_LENGTH);
+    await drain(sequence.generate({
+      prompt: Array.from({ length: promptLength }, (_unused, index) => index + 1),
+      maxNewTokens: 1,
+    }));
+    return fake.calls.map((call) => {
+      assertEquals(call.idsShape[0], 1);
+      return call.idsShape[1];
+    });
+  };
+
+  // 2..4 行はバケットに載り、5 行からは chunkLength へ上がる。9 行は chunk が 2 本に割れ、
+  // 有効行 1 本の末尾 chunk は decode 形（バケットではなく 1 行）。
+  assertEquals(await rowsFor(2), [4]);
+  assertEquals(await rowsFor(3), [4]);
+  assertEquals(await rowsFor(4), [4]);
+  assertEquals(await rowsFor(5), [BUCKET_CHUNK_LENGTH]);
+  assertEquals(await rowsFor(BUCKET_CHUNK_LENGTH), [BUCKET_CHUNK_LENGTH]);
+  assertEquals(await rowsFor(9), [BUCKET_CHUNK_LENGTH, 1]);
+});
+
+Deno.test("GenerationSequence: バケット行でも pad は id 0 / 位置 0 のまま", async () => {
+  const fake = fakeSession({ tokens: [5] });
+  const sequence = await createGenerationSequence({
+    session: fake.session,
+    program: bucketProgram(fake),
+  });
+  await drain(sequence.generate({ prompt: [1, 2], maxNewTokens: 1 }));
+
+  // 有効 2 行 + pad 2 行（pad の値契約は物理行数が縮んでも同じ — ADR 0066 追記 6 / 8）。
+  assertEquals(fake.calls[0].idsShape, [1, 4]);
+  assertEquals(fake.calls[0].ids, [1, 2, 0, 0]);
+  assertEquals(fake.calls[0].positions, [0, 1, 0, 0]);
+  assertEquals(fake.calls[0].lastRow, 1);
+  assertEquals(fake.calls[0].queryLength, 2);
 });
 
 // ---- 多ターン: 「直前 assistant の最後の token が落ちない」直接門（3 経路） ----

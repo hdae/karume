@@ -20,11 +20,14 @@
 
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { parseManifest } from "@karume/hub";
+import { ExecutionError } from "@karume/runtime";
 import { type Gemma4PipelineConfig, parseGemma4PipelineConfig } from "../src/gemma/config.ts";
 import {
   assertChunkLength,
+  assertGemma4ChunkBuckets,
   assertPleShardAssets,
   assertRopeInputShapes,
+  GEMMA4_CHUNK_BUCKETS,
   Gemma4Pipeline,
 } from "../src/gemma/pipeline.ts";
 import type { GenerationGraph } from "../src/generation/program.ts";
@@ -448,6 +451,54 @@ Deno.test("assertChunkLength: 実行時ノブの受理集合（宣言との関�
       () => assertChunkLength(1025, wide),
       Error,
       "chunkLength 1025 が maxPosition 1024 を超えた",
+    );
+  });
+});
+
+// ---- 実行時ノブ chunkBuckets の門 -------------------------------------------
+//
+// `assertGemma4ChunkBuckets` は「runtime の受理集合へ素通しして入口の名前だけを足す」層で、
+// 規則そのものは 1 行も持たない（正本は runtime の `assertChunkBuckets`）。門としてここで
+// 押さえるのは 2 つ — ①素通しが実際に効いていること（拒否が `Gemma4Pipeline:` を名乗り、
+// 元の診断が `cause` で残ること）②既定の梯子が自分の規則を満たすこと。既定が規則を破ると
+// 「明示指定していないのに fromAssets が落ちる」形になり、落ちる場所が入口から遠い。
+
+Deno.test("assertGemma4ChunkBuckets: 受理集合は runtime に委ね、入口の名前だけを足す", async (t) => {
+  await t.step("配布既定の chunkLength に載る指定はそのまま返る", () => {
+    const buckets: readonly number[] = [32, 64];
+    assertEquals(assertGemma4ChunkBuckets(buckets, SHIPPED_CHUNK_LENGTH), buckets);
+  });
+
+  await t.step("chunkLength ちょうどは prefill 形と重なるので落ちる（cause に元の診断）", () => {
+    const error = assertThrows(
+      () => assertGemma4ChunkBuckets([SHIPPED_CHUNK_LENGTH], SHIPPED_CHUNK_LENGTH),
+      Error,
+    );
+    assert(
+      error.message.startsWith("Gemma4Pipeline: "),
+      `入口の名前で始まらない: ${error.message}`,
+    );
+    assert(
+      error.cause instanceof ExecutionError,
+      "runtime の診断を cause で残す（包み直しで出どころを消さない）",
+    );
+  });
+
+  await t.step("既定の梯子 GEMMA4_CHUNK_BUCKETS 自身が受理集合の中にある", () => {
+    assert(Object.isFrozen(GEMMA4_CHUNK_BUCKETS), "module スコープの共有配列は凍結");
+    for (const [index, rows] of GEMMA4_CHUNK_BUCKETS.entries()) {
+      if (index > 0) {
+        assert(
+          rows > GEMMA4_CHUNK_BUCKETS[index - 1],
+          `狭義昇順でない: ${GEMMA4_CHUNK_BUCKETS.join(",")}`,
+        );
+      }
+      // 配布既定の chunkLength で 1 段も切り詰められない = 既定同士が食い違わない。
+      assert(rows < SHIPPED_CHUNK_LENGTH, `既定 ${rows} が配布既定の chunkLength 以上`);
+    }
+    assertEquals(
+      assertGemma4ChunkBuckets(GEMMA4_CHUNK_BUCKETS, SHIPPED_CHUNK_LENGTH),
+      GEMMA4_CHUNK_BUCKETS,
     );
   });
 });

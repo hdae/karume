@@ -71,6 +71,34 @@ Deno.test("createGenerationProgram: stopTokens は複製する（呼び手の配
   assertEquals(program.stopTokens, [1, 7]);
 });
 
+Deno.test("createGenerationProgram: chunkBuckets は複製し、省略は空配列へ畳む", () => {
+  const chunkBuckets = [2, 3];
+  const program = createGenerationProgram(specOf({ chunkBuckets }));
+  assertEquals(program.chunkBuckets, [2, 3]);
+  // 呼び手の配列と縁を切る（後から足された段は「context が許さない物理行数」になる）。
+  chunkBuckets.push(3);
+  assertEquals(program.chunkBuckets, [2, 3]);
+  // 省略 = 追加なし。`undefined` のまま持ち回すと、選ぶ側が `?? []` を書き忘れても赤くならない。
+  assertEquals(createGenerationProgram(specOf()).chunkBuckets, []);
+});
+
+Deno.test("createGenerationProgram: chunkBuckets の受理集合は runtime の門をそのまま通す", () => {
+  // 規則（2 以上 chunkLength 未満・狭義昇順）は models 側に写していないので、ここで縛るのは
+  // 「context を作る前に落ちる」こと自体である（写した規則が育つと context と食い違う）。
+  const cases: readonly (readonly [readonly number[], string])[] = [
+    // 1 は decode 形そのもの / chunkLength 以上は queryLength ≤ chunkLength 契約の外。
+    [[1], "chunkBuckets[0] 1 が 2..3 の整数でない"],
+    [[4], "chunkBuckets[0] 4 が 2..3 の整数でない"],
+    [[2.5], "chunkBuckets[0] 2.5 が 2..3 の整数でない"],
+    // 重複と降順は「queryLength 以上の最小バケット」を線形走査で選べなくする。
+    [[2, 2], "chunkBuckets[1] 2 が直前の 2 以下"],
+    [[3, 2], "chunkBuckets[1] 2 が直前の 3 以下"],
+  ];
+  for (const [chunkBuckets, message] of cases) {
+    assertThrows(() => createGenerationProgram(specOf({ chunkBuckets })), Error, message);
+  }
+});
+
 Deno.test("createGenerationProgram: 派生入力の無いグラフは derivedInputs 省略で通る", () => {
   const program = createGenerationProgram(
     specOf({ graph: graphOf({ derived: false }), derivedInputs: undefined }),
@@ -267,11 +295,12 @@ Deno.test("GenerationGraph: 実 IrGraph がこの面を満たす（綴りのド�
 // `Object.freeze` を外す / `[...wiring.stopTokens]` を `wiring.stopTokens` に戻す変更が、
 // 資産の無い環境（CI・多くの開発機）では全部緑のまま通っていた。
 
-Deno.test("generationProgramFace: 出る欄は数 5 つだけ（内部配線を出さない）", () => {
-  const wiring = createGenerationProgram(specOf({ stopTokens: [1, 7] }));
+Deno.test("generationProgramFace: 出る欄は数 6 つだけ（内部配線を出さない）", () => {
+  const wiring = createGenerationProgram(specOf({ stopTokens: [1, 7], chunkBuckets: [2] }));
   const face = generationProgramFace(wiring);
   assertEquals(Object.keys(face).sort(), [
     "capacity",
+    "chunkBuckets",
     "chunkLength",
     "maxPosition",
     "stopTokens",
@@ -279,6 +308,7 @@ Deno.test("generationProgramFace: 出る欄は数 5 つだけ（内部配線を�
   ]);
   assertEquals(face, {
     chunkLength: 4,
+    chunkBuckets: [2],
     maxPosition: 128,
     capacity: 64,
     vocabSize: VOCAB,
@@ -287,10 +317,16 @@ Deno.test("generationProgramFace: 出る欄は数 5 つだけ（内部配線を�
 });
 
 Deno.test("generationProgramFace: 凍結コピーを返す（消費者の書き換えが停止集合へ届かない）", () => {
-  const wiring = createGenerationProgram(specOf({ stopTokens: [1, 7] }));
+  const wiring = createGenerationProgram(specOf({ stopTokens: [1, 7], chunkBuckets: [2, 3] }));
   const face = generationProgramFace(wiring);
   assertEquals(Object.isFrozen(face), true, "face が凍結されていない");
   assertEquals(Object.isFrozen(face.stopTokens), true, "stopTokens が凍結されていない");
+  // バケットも同じ扱い（並べ替えられると物理行数の選び方そのものが変わる）。
+  assertEquals(Object.isFrozen(face.chunkBuckets), true, "chunkBuckets が凍結されていない");
+  assertThrows(() => {
+    (face.chunkBuckets as number[]).reverse();
+  }, TypeError);
+  assert(face.chunkBuckets !== wiring.chunkBuckets, "配線の配列をそのまま出している");
   // ESM は常に strict mode なので、凍結配列への書き込みは黙って捨てられず TypeError になる。
   assertThrows(() => {
     (face.stopTokens as number[]).length = 0;

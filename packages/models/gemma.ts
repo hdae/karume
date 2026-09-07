@@ -15,6 +15,8 @@
  */
 
 export { Gemma4Pipeline } from "./src/gemma/pipeline.ts";
+/** {@link Gemma4PipelineOptions.chunkBuckets} の省略時の既定（`chunkLength` 未満の段だけが載る）。 */
+export { GEMMA4_CHUNK_BUCKETS } from "./src/gemma/pipeline.ts";
 export type {
   Gemma4Assets,
   Gemma4ChatOptions,

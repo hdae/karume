@@ -27,7 +27,7 @@
  * MUST: program は可変状態を持たない（ADR 0083 決定 1）。
  */
 
-import type { RunInputs } from "@karume/runtime";
+import { assertChunkBuckets, type RunInputs } from "@karume/runtime";
 
 /**
  * program が結線検証に使うグラフの面（`PreparedModel["graph"]` の部分集合）。
@@ -118,6 +118,19 @@ export type GenerationProgramSpec = {
   /** 固定長 prefill chunk の行数（ADR 0066 決定 4 — context の計画時定数）。 */
   readonly chunkLength: number;
   /**
+   * prefill 形として `chunkLength` に**加えて**許す物理 chunk 行数（ADR 0066 決定 4 /
+   * 追記〈バケット〉）。省略 / 空 = 追加なし（prefill 形 1 本 + decode 形の従来どおり）。
+   *
+   * 短い prompt を `chunkLength` 行へ pad すると、pad 行ぶんの仕事（行局所な linear /
+   * pointwise / norm は物理行数に比例する）がそのまま無駄になる。宣言しておくと chunk ごとに
+   * `queryLength` 以上の最小バケットを物理行数に選べる（`sequence.ts` の `physicalChunkRows`）。
+   *
+   * MUST: 受理集合（2 以上 `chunkLength` 未満の整数・狭義昇順）の検査は runtime の
+   * `assertChunkBuckets` 1 本に任せる — 同じ規則をここで写すと、context が許す集合と
+   * 呼び出し側が選ぶ集合が別々に育つ。
+   */
+  readonly chunkBuckets?: readonly number[];
+  /**
    * 引ける絶対位置の**排他的上限**（位置は `0..maxPosition-1` — モデルが宣言する位置上限）。
    *
    * MUST: 省略可能にしない（`greedy.ts` の `maxPosition` と同じ理由 — 上限の外の位置は例外を
@@ -161,7 +174,17 @@ export type GenerationProgramSpec = {
  * MUST: フィールドを足すときは {@link createGenerationProgram} の検証も同時に足す — 検証されない
  * 配線欄は「setup 時に全結線を検証する」という本型の存在理由を静かに壊す。
  */
-export type GenerationWiring = Omit<GenerationProgramSpec, "graph">;
+export type GenerationWiring =
+  & Omit<GenerationProgramSpec, "graph" | "chunkBuckets">
+  & {
+    /**
+     * 検証済みの prefill バケット（**省略できない** — 宣言の無い spec は空配列へ畳んである）。
+     *
+     * 省略可能なまま持ち回すと、物理行数を選ぶ側（`sequence.ts`）が毎回 `?? []` を書くことに
+     * なり、その 1 つが欠けても「バケットが黙って効かない」だけで例外は出ない。
+     */
+    readonly chunkBuckets: readonly number[];
+  };
 
 /**
  * 検証済み静的配線の**読み口**（公開面 — `Gemma4Pipeline.program`）。
@@ -177,6 +200,14 @@ export type GenerationWiring = Omit<GenerationProgramSpec, "graph">;
 export type GenerationProgram = {
   /** 固定長 prefill chunk の行数（ADR 0066 決定 4 — この pipeline が使う値）。 */
   readonly chunkLength: number;
+  /**
+   * prefill 形として `chunkLength` に加えて使う物理 chunk 行数（狭義昇順・空なら無し）。
+   *
+   * 短い chunk はこの中から `queryLength` 以上の最小値を物理行数に選ぶ（無ければ
+   * `chunkLength`）。自分で `sequence()` を回す側が「この prompt 長は何行に載るか」を
+   * 読める唯一の値である。
+   */
+  readonly chunkBuckets: readonly number[];
   /** 引ける絶対位置の排他的上限（位置は `0..maxPosition-1` — モデルの宣言）。 */
   readonly maxPosition: number;
   /**
@@ -201,6 +232,9 @@ export type GenerationProgram = {
 export const generationProgramFace = (wiring: GenerationWiring): GenerationProgram =>
   Object.freeze({
     chunkLength: wiring.chunkLength,
+    // `stopTokens` と同じ理由で凍結コピー（消費者の `sort()` / `length = 0` が物理行数の
+    // 選び方そのものを書き換えないようにする）。
+    chunkBuckets: Object.freeze([...wiring.chunkBuckets]),
     maxPosition: wiring.maxPosition,
     capacity: wiring.capacity,
     vocabSize: wiring.vocabSize,
@@ -359,6 +393,9 @@ const assertSymbols = (graph: GenerationGraph, capacitySymbol: string): void => 
 export const createGenerationProgram = (spec: GenerationProgramSpec): GenerationWiring => {
   const { graph } = spec;
   assertPositiveInteger(spec.chunkLength, "chunkLength");
+  // 受理集合の正本は runtime（`createGenerationContext` が同じ関数で拒否する）。ここで通すのは
+  // 「context を作る前に落とす」ためで、規則そのものは持たない。
+  assertChunkBuckets(spec.chunkBuckets, spec.chunkLength);
   assertPositiveInteger(spec.maxPosition, "maxPosition");
   assertPositiveInteger(spec.capacity, "capacity");
   assertPositiveInteger(spec.vocabSize, "vocabSize");
@@ -383,6 +420,9 @@ export const createGenerationProgram = (spec: GenerationProgramSpec): Generation
     lastRow: spec.lastRow,
     logits: spec.logits,
     chunkLength: spec.chunkLength,
+    // 凍結コピー: 配線は不変オブジェクトなので、呼び手の配列を後から書き換えられると
+    // 「context が許す集合」と「物理行数を選ぶ集合」が実行中に割れる。
+    chunkBuckets: Object.freeze([...(spec.chunkBuckets ?? [])]),
     maxPosition: spec.maxPosition,
     capacity: spec.capacity,
     vocabSize: spec.vocabSize,

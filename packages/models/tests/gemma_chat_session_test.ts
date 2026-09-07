@@ -124,6 +124,8 @@ const programOf = (capacity: number): GenerationProgram =>
     capacity,
     vocabSize: 262144,
     stopTokens: Object.freeze([...STOP_TOKENS]),
+    // chunkLength 32 の fake なので追加の prefill 形は要らない（セッションはこの欄を読まない）。
+    chunkBuckets: Object.freeze([]),
   });
 
 type FakeHost = Gemma4ChatSessionHost & {

@@ -137,6 +137,12 @@ export type {
 export { SIGLIP2_SOURCES } from "./src/siglip2/config.ts";
 
 export { Gemma4Pipeline } from "./src/gemma/pipeline.ts";
+/**
+ * gemma4 の prefill バケットの既定（`Gemma4PipelineOptions.chunkBuckets` の省略時の値 —
+ * `chunkLength` に加えて許す物理 chunk 行数の梯子）。短い発話を pad 無しで流すための列で、
+ * 自分で足し引きするときの起点として出す。**暫定値**（`./gemma` を参照）。
+ */
+export { GEMMA4_CHUNK_BUCKETS } from "./src/gemma/pipeline.ts";
 export type {
   Gemma4Assets,
   Gemma4ChatOptions,

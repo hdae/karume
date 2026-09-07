@@ -351,6 +351,30 @@ const i32Row = (rows: number, data: Int32Array<ArrayBuffer>): Tensor => ({
   data,
 });
 
+/**
+ * この chunk を流す**物理行数**（宣言 shape の行数 = `M`）を選ぶ。
+ *
+ * - 有効行 1 本は **decode 形（M=1）**で流す。計画を増やさないうえ、中断からの再開が
+ *   「中断しなかった走り」と**同じ run** になる（`pendingToken` の再投入は常に 1 行なので、
+ *   ここが多ターンのビット同一性の要）。
+ * - それ以外は `chunkBuckets` の中で `queryLength` 以上の**最小**の値。無ければ `chunkLength`。
+ *
+ * バケットを引く理由: 短い prompt を `chunkLength`（配布既定 768）行へ pad すると、pad 行は
+ * 出力にも KV にも寄与しないのに行局所な op（linear / pointwise / norm）の仕事だけは物理行数に
+ * 比例して積む。32 token の発話 1 本 + 1 token 生成の壁が 385 → 106 ms（linear −73%）になる実測
+ * （`.claude/reviews/2026-09-06_performance-investigation/02_HOST_GENERATION.md` F-02）があり、
+ * chat の user 発話は短いのに context の `chunkLength` は途中で変えられないので、多ターンでは
+ * 毎ターンこの pad を払う。一方で長い prompt は 768 一括が最速なので「既定を下げる」形は採らず、
+ * **許す物理行数を複数持って chunk ごとに選ぶ**（ADR 0066 決定 4 / 追記〈バケット〉）。
+ *
+ * MUST: 昇順の前提で先頭一致を採る（ここは順序を検査しない — 検査は
+ * `createGenerationProgram` が通す runtime の `assertChunkBuckets` が持つ）。
+ */
+export const physicalChunkRows = (queryLength: number, program: GenerationWiring): number =>
+  queryLength === 1
+    ? 1
+    : program.chunkBuckets.find((rows) => rows >= queryLength) ?? program.chunkLength;
+
 /** 行選択入力（`[1]` の i32 — ADR 0068 決定 4）。 */
 const lastRowInput = (row: number): Tensor => ({
   dtype: "i32",
@@ -470,6 +494,9 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
   const context = await session.createGenerationContext({
     bindings: { [program.capacitySymbol]: capacity },
     chunkLength: program.chunkLength,
+    // 許す物理行数は context 生成時にしか宣言できない（run 前検査が読む集合はここで畳まれる）。
+    // 空配列 = 追加なしなので、宣言の無い配線でも従来どおりの 2 本になる。
+    chunkBuckets: program.chunkBuckets,
   });
 
   // 「generate 1 回ぶん」の直列化（ADR 0083 決定 2）— 自前ロックは作らない。
@@ -612,10 +639,10 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
         let logits: Float32Array<ArrayBuffer> | undefined;
         for (const [index, chunk] of chunks.entries()) {
           await settleAbort(signal);
-          // 有効行 1 本の chunk は decode 形（M=1）で流す — 計画を増やさず、かつ中断からの
-          // 再開が「中断しなかった走り」と**同じ run** になる（`pendingToken` の再投入は
-          // 常に 1 行なので、ここが多ターンのビット同一性の要）。
-          const rows = chunk.queryLength === 1 ? 1 : program.chunkLength;
+          // 物理行数は有効行数から決める（decode 形 / バケット / chunkLength — 理由は
+          // {@link physicalChunkRows}）。chunk の**割り方**は `chunkLength` のままで、
+          // 変えるのは末尾 chunk を載せる行数だけである。
+          const rows = physicalChunkRows(chunk.queryLength, program);
           const ids = new Int32Array(rows);
           const positions = new Int32Array(rows);
           // MUST: pad 行は 0 のまま（ADR 0066 追記 6 の値契約）。

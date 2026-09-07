@@ -20,6 +20,10 @@
 // ④ **要求が足した停止 token**（ADR 0083 追記 2026-09-02）: program の集合が**空**でも、
 //    `GenerationRequest.stopTokens` だけで③と同じ添字・同じ列で止まる（理由は `stop-token`）。
 //    和集合の判定が program 側しか見ていないと、ここだけが max-tokens まで走る。
+// ⑤ **prefill バケット**（ADR 0066 追記〈バケット〉）: 末尾 chunk を pad 無しの小さい物理行数で
+//    流しても、①と同じ golden token 列が出る。物理行数を変えると GEMM の幾何が変わる（M の段で
+//    骨格が切り替わる）ので**ビット同一は契約しない** — 実重みで token 列が動かないことがこの
+//    最適化の合格線であり、外れても値は正しいまま（pad 行は 0 で無害）なので他に門が無い。
 //
 // NOTE: golden の出所（`reference.json` が束ねた digest）を突き合わせる門は
 // `e2e_gemma4_product_test.ts` の④が同じ 3 本に対して持っている — 同じ資産に 2 つ置かない。
@@ -39,6 +43,7 @@ import {
   createGenerationSequence,
   type GenerationEvent,
   type GenerationSequence,
+  physicalChunkRows,
 } from "../src/generation/sequence.ts";
 import {
   modelPresent,
@@ -93,6 +98,15 @@ const STOP_TOKENS = [1, 106, 50] as const;
  * 全長 full re-forward で採ってあり刻みに依存しない。
  */
 const CHUNK_LENGTH = 32;
+
+/**
+ * ⑤で宣言する prefill バケット（`chunkLength` 未満の段だけ — ADR 0066 追記〈バケット〉）。
+ *
+ * 3 ケースの末尾 chunk は 6 / 10 / 22 有効行なので、この列だと 8 / 16 / 24 行に載る。**16 を
+ * またぐように選んである** — states 形 attention は M ≥ 16 でタイル経路（K-13 の ①ₜ / ③ₜ）へ
+ * 切り替わるので、その両側を 1 度ずつ通す。
+ */
+const CHUNK_BUCKETS = [4, 8, 16, 24] as const;
 
 /** 容量まわりの実行条件は既存の門と同値（同じ資産世代の裁定をそのまま使う）。 */
 const CAPACITY_SYMBOL = "C";
@@ -193,14 +207,18 @@ Deno.test({
       ),
     });
 
-    /** 静的配線（停止集合だけを変えて 2 本作る — 他は同じ資産の同じ結線）。 */
-    const programOf = (stopTokens: readonly number[]): GenerationWiring =>
+    /** 静的配線（停止集合とバケットだけを変えて作る — 他は同じ資産の同じ結線）。 */
+    const programOf = (
+      stopTokens: readonly number[],
+      chunkBuckets: readonly number[] = [],
+    ): GenerationWiring =>
       createGenerationProgram({
         graph: parsed.graph,
         inputIds: INPUT_IDS,
         lastRow: LAST_ROW,
         logits: parsed.graph.outputs[0],
         chunkLength: CHUNK_LENGTH,
+        chunkBuckets,
         maxPosition: MAX_POSITION,
         capacity: CAPACITY,
         vocabSize: VOCAB,
@@ -223,10 +241,11 @@ Deno.test({
     const withSequence = async <T>(
       stopTokens: readonly number[],
       body: (sequence: GenerationSequence) => Promise<T>,
+      chunkBuckets: readonly number[] = [],
     ): Promise<T> => {
       const sequence = await createGenerationSequence({
         session,
-        program: programOf(stopTokens),
+        program: programOf(stopTokens, chunkBuckets),
       });
       try {
         return await body(sequence);
@@ -393,6 +412,55 @@ Deno.test({
           );
           console.log(`[e2e] gemma4 sequence ${name}: 要求の停止 token @${firstStop}`);
         }
+      });
+      await t.step("⑤ prefill バケットを宣言しても token 列が動かない", async () => {
+        // 末尾 chunk を pad 無しの小さい物理行数で流す（ADR 0066 追記〈バケット〉）。行局所な
+        // op（linear / pointwise / norm）は物理行数を変えても有効行の値を変えないが、GEMM の
+        // 幾何は M で変わる（`gemm-geometry.ts` の段）ので**ビット同一は契約しない** — 縛るのは
+        // ①と同じ golden token 列である。
+        let sawBucketRows = false;
+        for (const { name } of EXPECTED_CASES) {
+          const { prompt, expected } = await readCase(name);
+          const tail = prompt.length % CHUNK_LENGTH;
+          // 末尾 chunk がバケットに載ったか（載らない刻みだと、この step は①の再走に化ける）。
+          const rows = physicalChunkRows(
+            tail === 0 ? CHUNK_LENGTH : tail,
+            programOf([], CHUNK_BUCKETS),
+          );
+          // M=1 は decode 形であってバケットではない（有効行 1 本の chunk は
+          // `physicalChunkRows` が常に 1 を返す）ので、陽性対照から外す。
+          if (rows > 1 && rows < CHUNK_LENGTH) sawBucketRows = true;
+
+          const started = performance.now();
+          const { events, stop } = await withSequence([], async (sequence) => {
+            const stream = sequence.generate({ prompt, maxNewTokens: GREEDY_STEPS });
+            const collected: GenerationEvent[] = [];
+            for await (const event of stream) collected.push(event);
+            return { events: collected, stop: await stream.done };
+          }, CHUNK_BUCKETS);
+
+          assertEquals(tokenIds(events), expected, `${name}: バケット付きの生成 token 列`);
+          assertEquals(
+            stop,
+            { reason: "max-tokens", tokens: GREEDY_STEPS },
+            `${name}: 停止理由と生成 token 数`,
+          );
+          // chunk の**割り方**は chunkLength のまま（変わるのは末尾 chunk を載せる行数だけ）。
+          assertEquals(
+            events.filter((event) => event.kind === "prefill").length,
+            Math.ceil(prompt.length / CHUNK_LENGTH),
+            `${name}: prefill イベント数（割り方はバケットで変わらない）`,
+          );
+          console.log(
+            `[e2e] gemma4 sequence バケット ${name}: T=${prompt.length} / 末尾 chunk ${rows} 行 / ` +
+              `${(performance.now() - started).toFixed(0)}ms`,
+          );
+        }
+        assert(
+          sawBucketRows,
+          `バケット [${CHUNK_BUCKETS.join(",")}] にどのケースの末尾 chunk も載らない` +
+            `（この step が①の再走になっている）`,
+        );
       });
     } finally {
       await session.dispose();

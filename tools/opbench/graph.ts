@@ -286,6 +286,13 @@ export type DriveOptions = {
   readonly newTokens?: number;
   /** gemma4: このターンが確保する KV 容量（省略時は配布形の既定）— 長い prompt の内訳を採るときに要る。 */
   readonly capacity?: number;
+  /**
+   * gemma4: prefill バケット（省略時はパイプラインの既定 `GEMMA4_CHUNK_BUCKETS`・`[]` で無効）。
+   *
+   * 短い prompt の prefill run が何行で流れるかがこれで変わるので、pad の無駄を測る A/B は
+   * 「既定」と「`[]`」の 2 走で採る。
+   */
+  readonly chunkBuckets?: readonly number[];
   /** anima: step 数（sigma の linspace のため 2 以上）と正方の辺。 */
   readonly steps?: number;
   readonly size?: number;
@@ -315,6 +322,7 @@ export const driveOnce = async (options: DriveOptions): Promise<DriveResult> => 
     const pipeline = await Gemma4Pipeline.fromPretrained(denoDirectory(options.source), {
       ...selection,
       gpu: options.gpu,
+      ...(options.chunkBuckets === undefined ? {} : { chunkBuckets: options.chunkBuckets }),
       onRunDiagnostics: (diagnostics, phase) => {
         records.push(recordRun(runs, "model", gemma4RunLabel(phase), diagnostics));
         runs += 1;
