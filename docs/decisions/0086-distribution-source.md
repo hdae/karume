@@ -59,8 +59,8 @@ token-major shard）で、decode 1 token ごとに shard を全量読み直す�
 実測 17〜76 ms）。消費側はこの型で「行読みにする行数の上限」を変える。⑧ は宣言 size の境界だけを見る面で、
 全量面の size 門も sha256 も掛からない（実体の破損は行の値として現れる）。共通層の作法（中断の透過・
 tight view 検査・作法の透過）は ③ と同じく `src/fetch.ts` が持つ。`denoDirectory` は `Deno.open` の位置読み
-（seek）で持ち、HF 取得元は取得層 `@hdae/fetch-cache` の次版（`openHfFile` — 戦略 blob → seek / stream → scan）で
-載せる（それまでは持たない = 全量読み + LRU のまま）。
+（seek）で持ち、HF 取得元は取得層 `@hdae/fetch-cache` 0.8.0 の `openHfFile`（戦略 blob → seek / stream → scan・キャッシュに
+無ければ相 1 と同じ prefetch を挟んでから開く）で持つ（2026-09-07 追従）。
 
 MUST: 進捗・並行度（in-flight バイト予算）・中断の透過・tight view 検査・エラー文脈の組み立ては
 **共通層の作法**として `src/fetch.ts` / `src/context.ts` に残す。取得元へ降ろすと、取得元が増える

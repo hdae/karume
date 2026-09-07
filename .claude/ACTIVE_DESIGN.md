@@ -21,7 +21,7 @@
     幾何の段〉）⑤**PLE 行読み**（ADR [0085](../docs/decisions/0085-ple-host-gather.md) 追記 2026-09-07 — 自然文 400 token で shard 読み直し
     137 回・42 s が原因の p50 問題。`Gemma4Assets.readPleShard` → `openPleShard`〈破壊的・limitations〉・hub 能力 ⑧ `openAsset` / `AssetRangeReader
   {cost: seek | scan}`（ADR [0086](../docs/decisions/0086-distribution-source.md) 追記）・runtime `parseSafetensorsHeader`・取得層
-    `@hdae/fetch-cache` の `openCachedUrl` / `openHfFile`〈その ADR 0012・**0.8.0 の publish はレビュー待ち**・hub の HF 追従は公開後〉）。
+    `@hdae/fetch-cache` の `openCachedUrl` / `openHfFile`〈その ADR 0012・0.8.0 公開済み・hub の HF 取得元も追従済み〉）。
     **落とし穴**: Chrome の CacheStorage は Range 要求を無視する（200 全量）— 区間は `blob().slice()` で取る。Deno の `blob()` は
     全量を読む（stream 読み飛ばし = scan）。次 = **Gemma 4 の MTP（drafter）**（backlog 先頭・ユーザー要望）。
 - **0.12.0 公開完了（2026-09-06）** — lockstep bump `a24d656` → GitHub Release v0.12.0 → JSR 0.12.0 →

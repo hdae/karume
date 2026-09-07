@@ -28,10 +28,6 @@
   （ring に書いて position を戻す形は上書きした過去 KV を復元できない）。EOS / 容量末尾 / sliding wrap / abort 中の commit の
   テストを先に定義する。中間 prefill の head 省略（perf-ledger H-14）と複数行 head を共通化できるならそのときに（2026-09-06
   Codex 性能調査 04_NEXT_EXPERIMENTS.md）。
-- **PLE 行読みの HF 取得元への追従**（起票 2026-09-07）: `@hdae/fetch-cache` に `openCachedUrl` / `openHfFile`（区間読み・
-  戦略 blob / stream・その ADR 0012）を足してコミット済み（`6f586e2`・**0.8.0 の bump と publish はユーザーのレビュー後**）。
-  公開後に hub の HF 取得元へ `openFile`（cost = blob → "seek" / stream → "scan"）を載せ、依存を `^0.8.0` へ。それまで
-  ブラウザの HF 経路は shard 全量 + LRU のまま（`denoDirectory` と `fromAssets` は行読みが効く）。
 - **Anima: DiT stage 内だけの反復常駐**（起票 2026-09-07 — Codex 性能調査 04 §Anima）: Session を stage ごとに作って返す
   現設計（VRAM の不変条件）を保ったまま、DiT stage の中で初期 latent の patchify を 1 度にし、RoPE / cond・uncond embedding /
   timestep 材料を反復間で再利用し、DiT 出力 → CFG → Euler / DPM++2M 更新を同じ token layout で回し、最後だけ unpatchify する。

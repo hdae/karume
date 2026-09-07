@@ -374,7 +374,8 @@ range?: { cost: "seek" | "scan", read(offset, length) } }`）に置き換わっ�
 [0085](decisions/0085-ple-host-gather.md) 追記 2026-09-07）。`fromAssets` の呼び手は読み口を実装し直す — 全量しか出せない
 読み口は `range` を省けばよく（従来どおり shard 全量 + LRU で動く）、ファイルや遅延 Blob を持つ読み口は `range` を
 出すと decode の 1 token が行 2 区間（8,960 B + 140 B）の読みで済む。`fromPretrained` は取得元の能力（hub の `openAsset`）
-から自動で組む: `denoDirectory` は位置読み（seek）、HF 取得元は取得層の次版まで `range` 無し。テスト用の実装例は
+から自動で組む: `denoDirectory` は位置読み（seek）、HF 取得元は取得層 0.8.0 の `openHfFile`（ブラウザ = 遅延 Blob の slice で seek /
+Deno = 本文ストリームの読み飛ばしで scan）。テスト用の実装例は
 `packages/models/tests/helpers/ple-source.ts`。
 
 ## `fromAssets`（全量面）に分割配布形を渡すと、全 shard がホスト RAM に同時常駐する
