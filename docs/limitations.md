@@ -426,6 +426,32 @@ i4 / i8 格納 × f32 計算の linear は 1 ≤ M ≤ 64 で GEMV 族（ADR [00
 - R の torch 側 trace 上限は 9（draft 8 + bonus 1）。IR は記号の範囲を持たないので runtime の
   束縛を縛らない — runtime 側の上限は上の `slidingSlack + 1`。
 
+## 投機デコードの入口（MTP 段 2・ADR 0096）: drafter は借り手で貸し手より先に畳む・読み専用の sliding は 512 列・k は 3 固定
+
+- **借り手 context**（`createGenerationContext({ chunkLength: 1, borrow: 貸し手 })`）の run は
+  **貸し手の run リースを取る** — 貸し手に進行中の run・未 commit の deferred run・poison があれば
+  同期区間で fail loudly。借り手は論理長を進めない（external スロットは読むだけで append を持てない）
+  し、deferred な run も発行できない。同じ context に借り手は複数張れる。
+- **寿命は借り手 → 貸し手の順が MUST**: 借り手 context が生きている間の貸し手 context の
+  `dispose()`、借り手 Session が生きている間の貸し手 Session の `dispose()` は **Promise.reject**
+  （dispose の冪等契約からの意図的な逸脱 — 借り手の bind group が貸し手のバッファを掴んでいる）。
+  `Gemma4Pipeline.dispose()` は drafter Session → target Session の順で畳む。貸し手側の重みの貸し出しは
+  `Session.exportWeight` の借用計数で数える。
+- **readonly attention（drafter の cross-attention）が読む sliding の列は `[P−W, P)` の 512 列**。HF の
+  drafter は bidirectional SWA が inclusive で 513 列を見るが、513 列目（位置 P−513）は余裕 8 の ring で
+  kmax = 8 の棄却が起きると潰されうる行なので採らない。受理率への影響は未計測（同一入力の draft 突合は
+  3 ケース × 200 サイクル × 3 段で 100% 一致）。
+- **`speculative` は `k: 3` だけ**（配布形の drafter が 3 段展開で焼かれている — 動的 k は段 4）。
+  `fromAssets` は `speculative` を受けない（`Gemma4Assets` に drafter の席が無い）。段 2 に投機ループは
+  無く、`speculative` を渡しても生成は非投機と同一（drafter Session が載るだけ）。
+- **`estimateSessionMemory` は target ぶんだけ**。drafter の常駐（借りる埋め込み表を除いて i8 ≈ 76 MB）
+  と借り手 context の一時ぶんは載らない（段 3 で verify の R > 1 と一緒に足す）。
+- **drafter の格納は i8 単一**（linear まで i8 per-channel）。linear を i4 g32 に落とした資産は
+  `dist.py` が拒否する（受理数 E[a] が丸め無し比 −15〜−33% 落ちる — ADR 0096 追記 2026-09-08）。
+- **hub の `ResolveOptions.weights: []` は assets だけを解決する**（weights を 1 本も取らない形）。
+  意味のある用途は無いが、空を「全数」に読み替えると `speculative` の絞り込みの退行が黙って通るので
+  空は空のまま。
+
 ## gemma4 `fromAssets`: PLE の読み口は `readPleShard`（全量バイト列）から `openPleShard`（handle）へ変わった（次のリリース・破壊的変更）
 
 `Gemma4Assets.readPleShard(file) → ArrayBuffer` は **`openPleShard(file) → Gemma4PleShardSource`**（`{ bytes, readAll,
@@ -1343,6 +1369,12 @@ known-issues「Metal で out-of-memory errorScope が沈黙する」）。つま
   （ADR 0094 追記 2026-09-06）。キャッシュの粒度では区別できないので、対象を消すと兄弟は部分在庫に
   落ちる — どれが落ちたかは `alsoEvicted` が名乗る。兄弟も守りたいアプリは `protect` で名指しする
   （指定時は一覧だけが候補で、同一集合の除外はしない）。
+- **`weights` で役割を絞った選択は、同じ (model, quant) の残りと勘定を共有しない**（ADR
+  [0096](decisions/0096-speculative-decoding.md) 段 2 で入った `ResolveOptions.weights`）。守る側の
+  候補は「label（`<model>/<quant>`）が対象と違う選択」なので、同じ label の別の部分集合は守らないし
+  `alsoEvicted` にも載らない。これは意図で、「本体は残して drafter だけ消す」がそのまま書ける
+  （逆に、同じ label の残りが部分在庫に落ちたかどうかは `listCachedAssets` をもう一度引いて見る —
+  label に部分集合を名乗る欄は無い）。`protect` に同じ label の部分集合を複数並べれば全部が守る。
 - **ローカル取得元は「全て在庫あり」と答え、削除は `HubError` で断る**。実体の欠損は読む時に
   落ちる（照会のたびにディレクトリを舐める I/O は払わない）。ディレクトリの中身は取得物ではなく
   利用者の資産なので、hub が消してよいものが無い。

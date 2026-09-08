@@ -28,9 +28,12 @@
   （自由文 0.9〜1.0×）。④ 設計は ADR [0096](decisions/0096-speculative-decoding.md) で裁定済み（2026-09-08）。
   **段 1（verify 形の準備）は済**（runtime `63a3d98` / exporter `a809e06` / models `46dfbbd` — ring の法を capacity へ・
   deferred commit・`last_row [R]` + 出口 2 本〈logits + hidden〉・バケット 4 / 8・配布形は焼き直し済み・verify 緑）。
-  **次 = 段 2（drafter の入口）**: IR の external スロット + 共有 initializer の宣言・Session 跨ぎの束ね（`sharedStates` /
-  `sharedWeights`）・読み専用 attention カーネル（ins 無し・GQA 4:1・scaling 1.0）・drafter recipe（実重み・k=3 展開・
-  lm_head + argmax）・manifest の role `drafter` → 段 3（投機ループ）→ 段 4（実測・動的 k・GPU argmax・fence 削減）。
+  **段 2（drafter の入口）は済**（runtime `e4957cc` / `57413ac`・exporter `38f88e1`・models / hub `066402d` — IR の external
+  スロット + 共有 initializer の宣言・借り手 context〈`createGenerationContext({ borrow })`〉・readonly attention・drafter recipe
+  〈i8 単一・k=3 展開・lm_head + argmax〉・role `drafter`・`ResolveOptions.weights`・`speculative` オプション。draft の一致
+  1800 / 1800）。**次 = 段 3（投機ループ）**: `Gemma4Pipeline` の `speculative` 経路（draft → verify〈deferred run・R = k+1〉→
+  受理・棄却・`context.commit`）・frontier / 位置 / 予算 / 停止 token / 容量末尾 / abort・診断 phase draft / verify・見積りの
+  合算 → 段 4（実測・動的 k・GPU argmax・fence 削減）。
 - **`planBackingBudgetBytes` を共通の options へ**（起票 2026-09-07 — ADR 0095 帰結）: gemma4 以外は manifest の `session` から
   Session options を組むため予算を変える口が無い（既定 256 MiB が効く）。`onRetry` を `FromPretrainedHubOptions` へ 1 本化した形に
   倣って載せる。併せて executor / estimate に二重にある予算の値域検査を 1 関数へ寄せる。

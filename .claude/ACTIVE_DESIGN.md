@@ -7,7 +7,7 @@
 > [docs/perf-ledger.md](../docs/perf-ledger.md)。ここは「今この瞬間の文脈」だけを持つ —
 > 履歴・完了記録は ADR / research / git へ。
 >
-> Last updated: 2026-09-08（MTP ④ = ADR 0096・段 1〈verify 形の準備〉済・次は段 2〈drafter の入口〉）
+> Last updated: 2026-09-08（MTP ④ = ADR 0096・段 1〈verify 形の準備〉・段 2〈drafter の入口〉済・次は段 3〈投機ループ〉）
 
 ## Now
 
@@ -30,12 +30,16 @@
     **読むだけ**（IR の external スロット + `sharedStates`）・埋め込み表は Session 跨ぎの**共有 initializer**・部分 commit は
     **deferred commit**（`GenerationRun.commit: "deferred"` → `context.commit(rows)`）・sliding ring は capacity = window + 8・
     出口は logits `[1,R,V]` + hidden `[1,R,H]`（`last_row [R]`）・バケット 4 / 8 + PreparedPlan LRU 12・k は固定 3 から・
-    greedy 先行。**段 1（verify 形の準備）済**（runtime `63a3d98` / exporter `a809e06` / models `46dfbbd`・配布形は
-    焼き直し済み — `models/karume-gemma4` は `dist.py` で組み直す）→ **段 2（drafter の入口）が次** → 段 3（投機ループ）→
-    段 4（実測・調整）。
+    greedy 先行。**段 1（verify 形の準備）済**（runtime `63a3d98` / exporter `a809e06` / models `46dfbbd`）→ **段 2（drafter の
+    入口）済**（runtime `e4957cc` / `57413ac`・exporter `38f88e1`・models / hub `066402d` — drafter は借り手 context
+    〈`createGenerationContext({ chunkLength: 1, borrow: targetContext })`〉で target の KV スロットを読み、埋め込み表は
+    `Session.exportWeight` → `sharedWeights` で借りる・drafter Session は pipeline に 1 本・drafter の格納は i8 単一・draft の
+    一致 1800 / 1800・配布形は `dist.py` で組み直し済み）→ **段 3（投機ループ）が次** → 段 4（実測・調整）。
     **落とし穴**: 1 cycle は run 2 本が下限（PLE のホスト gather があるので draft token はホストを経由する）/ deferred run の
     `queryLength ≤ slidingSlack + 1`（gemma4 は 9）/ 出口 1 本の旧配布形は models が拒否する / 既定バケット 6 本で
-    1 容量あたり 8 形（LRU 12）— 容量の違う sequence を交互に回すと溢れる。
+    1 容量あたり 8 形（LRU 12）— 容量の違う sequence を交互に回すと溢れる / 寿命は借り手 → 貸し手の順（逆順の dispose は
+    reject）/ 借り手の run は貸し手の run リースを取る（貸し手の未 commit・進行中 run・poison が拒否理由）/ drafter の linear を
+    i4 にしない（E[a] −15〜−33%）/ readonly の sliding は 512 列（HF は 513）/ `estimateSessionMemory` は target ぶんだけ。
     **H-15（2026-09-07）**: slot backing を容量 1 から**バイト予算つき LRU 集合**へ（ADR
     [0095](../docs/decisions/0095-plan-backing-budget.md)・`SessionOptions.planBackingBudgetBytes` 既定 256 MiB・0 = 従来・
     Gemma4Pipeline の options に透過）。勘定 = 領域 + 所有する入力バッファ・常駐は max(予算, 最大 1 本) を超えない・見積りは

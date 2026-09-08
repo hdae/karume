@@ -128,3 +128,28 @@ lm_head + argmax（centroid 疎 softmax の topk は exporter に無い — 受�
 - M ∈ [2, 16) の attention は「①′ も ①ₜ も効かない帯」（T(4)=27.6 / T(8)=37.2 ms は既にその値）。
 - verify 形が定常形に 2 本足されるので PreparedPlan と backing 予算の勘定が増える（H-15 の既定 256 MiB
   に収まる — verify 形は decode 形と同じ桁）。
+
+## 追記（2026-09-08・段 2 の実装で改めた点）
+
+- **決定 1 の束ね口は `createSession` ではなく context**: drafter Session は pipeline に 1 本
+  （`createSession(model, { sharedWeights })` — 決定 2 の共有はここ）、会話ごとに
+  `drafterSession.createGenerationContext({ chunkLength: 1, borrow: targetContext })` で**借り手 context**を
+  作る。理由は 2 つ — GenerationContext は sequence ごと（ADR 0083 決定 3）なので Session で束ねると drafter の
+  出力ヘッド（i8 ≈ 67 MB）を会話ごとに再アップロードすること、backing の世代 token が Session ごとの採番
+  （executor.ts）で 2 つの Session が同じ context に bind group を焼くと衝突すること。借り手の run は貸し手の
+  run リースを取る（貸し手の進行中 run / 未 commit / poison が拒否理由）ので直列化は runtime が持つ。
+  IR の宣言は external スロット（`states[].external: true`・append 0 本・読者は readonly attention だけ・
+  全スロット external）・readonly attention（`attrs.readonly: true`・`ins: [q]`・M = 1）・共有 initializer
+  （`initializers[].shared: { tensor }`・バイト無し）の 3 種。寿命は借り手 → 貸し手の順で、逆順の dispose は
+  Promise.reject（冪等契約からの意図的な逸脱）。
+- **決定 8 の「既定は DL しない」は hub の `ResolveOptions.weights`**（取得する weights の部分集合・
+  karume/4 据え置き）。`resolveFiles` は ModelEntry の weights を全数展開するので、drafter を第 2 role に置いた
+  だけでは必ず DL される — gemma4 は `speculative` 指定時だけ `["model", "drafter"]` を取る。
+- **drafter の linear は i8（i4 g32 ではない）**: 同一 target 軌跡での実測（2026-09-08・N=200 × 3 ケース）で
+  i4 g32 の linear は E[a](k=3) を丸め無し比 −15〜−33% 落とし、i8 なら −2〜3%（共有する主表の i8 化は ±0）。
+  損は drafter 自身の linear（22 本・10.1M 要素・全体の 13%）に集中する。配布は +4 MB 弱。
+- **readonly の sliding は 512 列**（`[P−W, P)` — mlx の `|q−k| < W`・target 自身の述語と同じ）。HF の
+  bidirectional SWA は inclusive（513 列）だが、513 列目（位置 P−513）は余裕 8 の ring で kmax=8 の棄却が
+  起きると潰されうる行なので採らない。同一入力での drafter の突合（HF 正規経路と 150/150 一致）には効かない。
+- 段 2 の範囲: k は 3 固定（配布形の drafter が 3 段で焼かれている）・`estimateSessionMemory` は target のみ・
+  `fromAssets` は `speculative` を受けない・投機ループ（draft → verify → 受理・棄却）は段 3。
