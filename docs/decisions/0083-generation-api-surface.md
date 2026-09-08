@@ -374,3 +374,24 @@ full スロットの `P + Q ≤ C` 超過は今日「汎用メッセージで fa
   `readLogits` は行の view を返す形（`{ rows, row(i) }`）になった。
 - 決定 1 / 4（可変状態は `context` と `pendingToken`・未 commit の frontier は最大 1 token）は段 1 では
   不変 — 段 3（投機ループ）で「cycle の起点 P + 受理済み列」へ一般化する（ADR 0096 段 3）。
+
+## 追記（2026-09-08）— 投機ループの DI と run 単位の観測席（ADR 0096 段 3）
+
+- 決定 1 / 4 の一般化は**「frontier は依然 1 token」**の形で閉じた: 投機の verify（deferred run）は
+  受理列 `[d₁..d_a, b']` を 1 個ずつ配送し、`pendingToken` を yield の前に更新する MUST に乗せて
+  **配送した frontier まで**を `commit(rows)` する（ADR 0096 追記〈段 3〉）。可変状態は
+  `context` / `pendingToken` に、導出できない **drafter 入力の hidden の写し（1 行）**が増えただけで、
+  進行の記録は `context.pastLength` のまま（二重簿記は無い）。
+- 決定 3（`GenerationContext` を外へ出さない）は不変。drafter は `GenerationSequenceOptions.speculative =
+  { open(context) → DraftFace, k }` の DI で、借り手 context は sequence の**内側**で開き・先に畳む。
+  `DraftFace`（`draft` / `dispose` / `steps`）は Session も context も知らない狭い面で、GPU 無しの fake
+  が受理 0 / 停止 token / 中断 / 例外 / 途中 `break` を踏む（テスト専用の口を公開面へ出さない）。
+- 観測は **run 単位の hook** `GenerationSequenceOptions.onRun(phase)` に移した（`GenerationRunPhase` =
+  prefill / decode / draft / verify・番号 1 始まり・verify は commit 直後の同期区間）。sequence は
+  依然 Session も診断も知らず、pipeline 層が hook の中で `Session.diagnostics()` を読む。イベント列
+  から run 数を導出していた `withRunDiagnostics` は投機（1 run が 0〜k+1 token）で成立しないので
+  置き換えた。公開型 `Gemma4RunPhase` は `GenerationRunPhase` の別名になり、枝が 2 → 4 に増える
+  （未リリースの破壊的変更）。
+- 決定 7（sampling はホスト）: 投機は温度に依らず張る。受理の抽選は行ごとに `sampler.next` を非投機と
+  同じ logits・history・順序で 1 回ずつ呼ぶので、RNG の消費列も token 列も非投機と厳密一致する
+  （温度 > 0 では one-hot draft の speculative sampling と同値）。

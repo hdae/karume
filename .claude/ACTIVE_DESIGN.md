@@ -7,7 +7,7 @@
 > [docs/perf-ledger.md](../docs/perf-ledger.md)。ここは「今この瞬間の文脈」だけを持つ —
 > 履歴・完了記録は ADR / research / git へ。
 >
-> Last updated: 2026-09-08（MTP ④ = ADR 0096・段 1〈verify 形の準備〉・段 2〈drafter の入口〉済・次は段 3〈投機ループ〉）
+> Last updated: 2026-09-08（MTP ④ = ADR 0096・段 1〜3 済〈投機ループ着地〉・次は段 4〈実測・調整〉）
 
 ## Now
 
@@ -34,12 +34,19 @@
     入口）済**（runtime `e4957cc` / `57413ac`・exporter `38f88e1`・models / hub `066402d` — drafter は借り手 context
     〈`createGenerationContext({ chunkLength: 1, borrow: targetContext })`〉で target の KV スロットを読み、埋め込み表は
     `Session.exportWeight` → `sharedWeights` で借りる・drafter Session は pipeline に 1 本・drafter の格納は i8 単一・draft の
-    一致 1800 / 1800・配布形は `dist.py` で組み直し済み）→ **段 3（投機ループ）が次** → 段 4（実測・調整）。
+    一致 1800 / 1800・配布形は `dist.py` で組み直し済み）→ **段 3（投機ループ）済**（runtime `4c4e2a5` / exporter `b63421d` /
+    generation `c31af36` / models・tools `757d734` — 投機ループは `src/generation/sequence.ts` の内側に DI〈`speculative
+    { open, k }` → `DraftFace`〉・verify は deferred run で「配送した frontier まで」commit（`finishCycle` が配送直後と finally）・
+    run 単位の `onRun` hook が `withRunDiagnostics` を置換・`GenerationStop.speculation`・drafter 呼び出し規約は
+    `(token = frontier b@P, hidden = h@P−1, position P)` に訂正〈段 2 は 1 段ずれていた〉・受理 1.51 / 2.01 / 2.14 token/cycle）
+    → **段 4（実測・調整）が次**（温度に依らず投機が張れる — 受理の抽選は非投機と同じ順で RNG を消費・token 列は厳密一致）。
     **落とし穴**: 1 cycle は run 2 本が下限（PLE のホスト gather があるので draft token はホストを経由する）/ deferred run の
-    `queryLength ≤ slidingSlack + 1`（gemma4 は 9）/ 出口 1 本の旧配布形は models が拒否する / 既定バケット 6 本で
+    `queryLength ≤ slidingSlack`（gemma4 は 8 — 借り手は列 P−W まで読むので段 3 で 1 列締めた）/ 出口 1 本の旧配布形は models が拒否する / 既定バケット 6 本で
     1 容量あたり 8 形（LRU 12）— 容量の違う sequence を交互に回すと溢れる / 寿命は借り手 → 貸し手の順（逆順の dispose は
     reject）/ 借り手の run は貸し手の run リースを取る（貸し手の未 commit・進行中 run・poison が拒否理由）/ drafter の linear を
-    i4 にしない（E[a] −15〜−33%）/ readonly の sliding は 512 列（HF は 513）/ `estimateSessionMemory` は target ぶんだけ。
+    i4 にしない（E[a] −15〜−33%）/ readonly の sliding は 512 列（HF は 513）/ 投機は温度に依らず張る（token 列は非投機と厳密一致・温度 1.0 の受理率は未計測）/ 既定席 parallel では ①′（M=1）と ①（M=4）が非ビット同一（600 token で相違 0・u32 は 94% 違う）
+    — 厳密一致の門は sequential / drafter Session は pipeline に 1 本（会話 2 本の同時実行は draft が直列化）/ 短文脈では
+    投機が遅い（short-en 7.0 vs 6.1 s）。
     **H-15（2026-09-07）**: slot backing を容量 1 から**バイト予算つき LRU 集合**へ（ADR
     [0095](../docs/decisions/0095-plan-backing-budget.md)・`SessionOptions.planBackingBudgetBytes` 既定 256 MiB・0 = 従来・
     Gemma4Pipeline の options に透過）。勘定 = 領域 + 所有する入力バッファ・常駐は max(予算, 最大 1 本) を超えない・見積りは

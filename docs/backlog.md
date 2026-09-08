@@ -31,9 +31,11 @@
   **段 2（drafter の入口）は済**（runtime `e4957cc` / `57413ac`・exporter `38f88e1`・models / hub `066402d` — IR の external
   スロット + 共有 initializer の宣言・借り手 context〈`createGenerationContext({ borrow })`〉・readonly attention・drafter recipe
   〈i8 単一・k=3 展開・lm_head + argmax〉・role `drafter`・`ResolveOptions.weights`・`speculative` オプション。draft の一致
-  1800 / 1800）。**次 = 段 3（投機ループ）**: `Gemma4Pipeline` の `speculative` 経路（draft → verify〈deferred run・R = k+1〉→
-  受理・棄却・`context.commit`）・frontier / 位置 / 予算 / 停止 token / 容量末尾 / abort・診断 phase draft / verify・見積りの
-  合算 → 段 4（実測・動的 k・GPU argmax・fence 削減）。
+  1800 / 1800）。**段 3（投機ループ）は済**（runtime `4c4e2a5`・exporter `b63421d`〈drafter 呼び出し規約の訂正 + golden〉・
+  generation core `c31af36`・models / tools `757d734` — 投機ループは `sequence.ts` の内側に DI・verify は deferred で
+  「配送した frontier まで」commit・onRun hook・`GenerationStop.speculation`・温度に依らず張る〈token 列は非投機と厳密一致〉。門 =
+  sequential 席で投機 / 非投機の 200 token × 3 ケース厳密一致・受理 1.51 / 2.01 / 2.14 token/cycle）。**次 = 段 4**（実測 Deno / Metal・温度 1.0 での受理率・投機を張る文脈長の閾値・動的 k・GPU argmax・
+  fence 削減・①′ の位置不変化）。
 - **`planBackingBudgetBytes` を共通の options へ**（起票 2026-09-07 — ADR 0095 帰結）: gemma4 以外は manifest の `session` から
   Session options を組むため予算を変える口が無い（既定 256 MiB が効く）。`onRetry` を `FromPretrainedHubOptions` へ 1 本化した形に
   倣って載せる。併せて executor / estimate に二重にある予算の値域検査を 1 関数へ寄せる。

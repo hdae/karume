@@ -403,11 +403,13 @@ i4 / i8 格納 × f32 計算の linear は 1 ≤ M ≤ 64 で GEMV 族（ADR [00
   バケット prefill が初回に作る 5 本で合計 ≈ 150 ms（Deno / naga 実測）。パイプラインは device ごとに
   1 度だけ作られるので 2 ターン目以降には乗らない。ブラウザ（Tint）の解析費は未測。
 
-## 投機デコードの足場（MTP 段 1・ADR 0096）: deferred run は sliding の余裕 + 1 行まで・gemma4 の配布形は焼き直しが要る
+## 投機デコードの足場（MTP 段 1・ADR 0096）: deferred run は sliding の余裕まで・gemma4 の配布形は焼き直しが要る
 
-- `GenerationRun.commit: "deferred"` で発行した run は **`queryLength ≤ context.slidingSlack + 1`**
-  （gemma4 の配布形は余裕 8 なので 9 行まで）。超える発行は同期区間で fail loudly — 受理 0 行の
-  とき棄却行が sliding ring の live 窓を潰す条件で、通すと例外も NaN も出ずに過去 KV が壊れる。
+- `GenerationRun.commit: "deferred"` で発行した run は **`queryLength ≤ context.slidingSlack`**
+  （gemma4 の配布形は余裕 8 なので 8 行まで — 段 3 で `+ 1` から 1 列締めた: 借り手〈readonly 読者〉は
+  貸し手より 1 列古い列 `P−W` まで読むので、`commit(0)` を含む全ケースで棄却行が窓に入らない条件が
+  `Q ≤ 余裕`。借り手の有無で分岐しない）。超える発行は同期区間で fail loudly — 棄却行が sliding ring の
+  live 窓を潰す条件で、通すと例外も NaN も出ずに過去 KV が壊れる。
   immediate な run（prefill / decode）は全行を確定させるので上限は `chunkLength` のまま。
   保留（`pendingCommit`）が残る間は次の run と `rewind` を拒否する（`commit(rows)` で畳む）。
 - gemma4 の配布形（product 系列）は **sliding スロットの物理行数が `window + 8`・出口が 2 本
@@ -424,9 +426,9 @@ i4 / i8 格納 × f32 計算の linear は 1 ≤ M ≤ 64 で GEMV 族（ADR [00
 - verify 形（M = 4 / 8）の attention は ① + ③′（①′ は M=1・①ₜ / ③ₜ は M ≥ 16 のまま）。
   T(4) = 27.6 / T(8) = 37.2 ms（P ≈ 14.7K・GPU 実時間）はこの帯の値で、詰めるのは段 4。
 - R の torch 側 trace 上限は 9（draft 8 + bonus 1）。IR は記号の範囲を持たないので runtime の
-  束縛を縛らない — runtime 側の上限は上の `slidingSlack + 1`。
+  束縛を縛らない — runtime 側の上限は上の `slidingSlack`。
 
-## 投機デコードの入口（MTP 段 2・ADR 0096）: drafter は借り手で貸し手より先に畳む・読み専用の sliding は 512 列・k は 3 固定
+## 投機デコードの入口（MTP 段 2・ADR 0096）: drafter は借り手で貸し手より先に畳む・読み専用の sliding は 512 列・k は 1..3
 
 - **借り手 context**（`createGenerationContext({ chunkLength: 1, borrow: 貸し手 })`）の run は
   **貸し手の run リースを取る** — 貸し手に進行中の run・未 commit の deferred run・poison があれば
@@ -441,16 +443,38 @@ i4 / i8 格納 × f32 計算の linear は 1 ≤ M ≤ 64 で GEMV 族（ADR [00
   drafter は bidirectional SWA が inclusive で 513 列を見るが、513 列目（位置 P−513）は余裕 8 の ring で
   kmax = 8 の棄却が起きると潰されうる行なので採らない。受理率への影響は未計測（同一入力の draft 突合は
   3 ケース × 200 サイクル × 3 段で 100% 一致）。
-- **`speculative` は `k: 3` だけ**（配布形の drafter が 3 段展開で焼かれている — 動的 k は段 4）。
-  `fromAssets` は `speculative` を受けない（`Gemma4Assets` に drafter の席が無い）。段 2 に投機ループは
-  無く、`speculative` を渡しても生成は非投機と同一（drafter Session が載るだけ）。
-- **`estimateSessionMemory` は target ぶんだけ**。drafter の常駐（借りる埋め込み表を除いて i8 ≈ 76 MB）
-  と借り手 context の一時ぶんは載らない（段 3 で verify の R > 1 と一緒に足す）。
+- **`speculative.k` は 1..3**（配布形の drafter が 3 段展開で焼かれている — k を増やすのは再 export・動的 k は
+  段 4）。`fromAssets` は `speculative` を受けない（`Gemma4Assets` に drafter の席が無い）。
+- **`estimateSessionMemory`** は target の prefill / decode に verify 形（M = R = k+1）を足し、drafter の常駐重み
+  （借りる埋め込み表を除く）と借り手 context の lengths 8 バイトを合算する（段 3）。
 - **drafter の格納は i8 単一**（linear まで i8 per-channel）。linear を i4 g32 に落とした資産は
   `dist.py` が拒否する（受理数 E[a] が丸め無し比 −15〜−33% 落ちる — ADR 0096 追記 2026-09-08）。
 - **hub の `ResolveOptions.weights: []` は assets だけを解決する**（weights を 1 本も取らない形）。
   意味のある用途は無いが、空を「全数」に読み替えると `speculative` の絞り込みの退行が黙って通るので
   空は空のまま。
+
+## 投機デコード（MTP 段 3・ADR 0096）: 投機は温度に依らず張る・既定席では argmax が稀に割れうる・drafter Session は pipeline に 1 本
+
+- **投機は温度に依らず張られ、token 列は非投機と同一**（受理の抽選は行ごとに `sampler.next` を非投機と同じ
+  logits・history・順序で 1 回ずつ呼ぶので RNG の消費列まで一致する）。受理率は温度で変わる — 配布形の
+  推奨 sampler（温度 1.0）での値は未計測（段 4）。
+- **「投機あり = 非投機」の厳密一致は `stateAttentionReduce: "sequential"` でだけ保証する**。gemma4 の既定席
+  `"parallel"` では decode（M=1）が ①′・verify（M=4）が ① で ①QK の縮約順が違い、ビット同一ではない —
+  近い値の token では argmax が割れうる（chunk 分割の prefill と decode の間に元からある数値差と同じ種類）。
+  既定席での相違数は e2e の実測に載る（`e2e_gemma4_speculative_test.ts` — 2026-09-08・RTX 3080 Ti: 3 ケース × 200 token で相違 0、u32 では
+  262,144 語のうち 94% が違い最大絶対差 1.1e-4）。
+- **verify の commit は「配送した token の frontier まで」**。消費者が `break` すると受理済みでも未配送の token は
+  会話に入らない（frontier 1 個だけが残る — 非投機と同じ形）。verify 戻り〜配送の同期区間で例外が出た場合は
+  `commit(0)`（frontier は未投入のまま・棄却行は次の run が上書き）で、sequence はその後も使える。
+- **`k + 1 ≤ slidingSlack`**（gemma4: 4 ≤ 8）を sequence 生成時に検査する。verify の `last_row` は k′ が縮んでも
+  R = k+1 に pad する（PreparedPlan の形を増やさない）。
+- **drafter Session は pipeline に 1 本**で、同じ pipeline の 2 本の会話を同時に回すと draft run が直列化される
+  （head-of-line 待ち）。借り手 context は sequence ごと（`chat()` はターンごと）に開閉するので、drafter Session の
+  `stateBacking.rebindCount` はターン数に比例して伸びる。
+- **公開型 `Gemma4RunPhase` の枝が 2 → 4**（`draft` / `verify` — 未リリースの破壊的変更）。`onRunDiagnostics` は
+  run 1 本につき 1 通のまま（draft は drafter Session の診断・他は target の診断）。
+- **配送の粒度**: 1 verify で最大 k+1 個の `token` イベントが続けて届く（position は `pastLength + 1 + i`）。
+  `GenerationStop.tokens` は配送した数（停止 token 含む）で、run 数は `speculation.cycles + draftRuns`。
 
 ## gemma4 `fromAssets`: PLE の読み口は `readPleShard`（全量バイト列）から `openPleShard`（handle）へ変わった（次のリリース・破壊的変更）
 

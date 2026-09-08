@@ -153,3 +153,51 @@ lm_head + argmax（centroid 疎 softmax の topk は exporter に無い — 受�
   起きると潰されうる行なので採らない。同一入力での drafter の突合（HF 正規経路と 150/150 一致）には効かない。
 - 段 2 の範囲: k は 3 固定（配布形の drafter が 3 段で焼かれている）・`estimateSessionMemory` は target のみ・
   `fromAssets` は `speculative` を受けない・投機ループ（draft → verify → 受理・棄却）は段 3。
+
+## 追記（2026-09-08・段 3 の実装で改めた点）
+
+- **段 2 の drafter 呼び出し規約は 1 段ずれていた（訂正）**: 段 2 の golden / e2e は drafter に
+  `(token@P−1, hidden@P−1, position P−1)` を渡していたが、HF の `SinglePositionMultiTokenCandidateGenerator`
+  と drafter 自身の段間再帰（token と「それを出した行の hidden」の組を次段へ送る）が定める組は
+  **`token = b`（最後に確定した token = 位置 P・KV 未投入の frontier）・`hidden = h@(P−1)`（b を出した行）・
+  `position = P`** である。ずれた組では d₁ が「target が logits@P−1 から無料で出す bonus」を当て直し、実効 k が
+  1 減る（golden の再計算: d₁ → 位置 P の一致 0.39〜0.53・位置 P+1 は 0.03〜0.08）。グラフは無傷で、訂正は
+  ホスト（`speculative.ts` の意味）と台本（`draft_case` の 3 行）・golden の焼き直し（container のバイトは同一・
+  配布形は不変）。訂正後の golden（greedy target・k=3・N=200）: short-en 1.50 / readme-recipes 2.13 /
+  readme-exporter 2.11 token/cycle（位置別一致 d₁ 36 / 56 / 62%）。段 2 の「1800/1800」「HF 150/150」は
+  **torch の移植の同値性**の門であって受理率の裏づけではない。
+- **決定 4 の門を 1 列締める**: deferred run は **`queryLength ≤ slidingSlack`**（段 1 の `slack + 1` から）。
+  借り手（readonly 読者）は貸し手より 1 列古い列 `P−W` まで読むので、棄却行 j が潰す論理列 `P+j−C` が
+  借り手の窓に入らない条件は `j − m < C − W = slack`（m = commit した行数・`commit(0)` を含む）⟺ `Q ≤ slack`。
+  借り手の有無で分岐しない（借り手は deferred + `commit(0)` の後にも開ける）。MUST: `k + 1 ≤ slidingSlack`
+  （gemma4: 4 ≤ 8）。
+- **決定 3 の commit は「配送した frontier まで」**: verify（deferred）の受理列 `[d₁..d_a, b']` を 1 個ずつ
+  配送し、`pendingToken` を yield の前に更新する既存の MUST に乗せて、**消費者に届いた token の frontier まで**を
+  `commit(rows)` する（`rows` = frontier にした token の数 = target が消費した行数）。配送ループの直後と
+  generator の `finally` の両方で畳むので、消費者の `break` は「配送した token まで」、verify 戻り〜配送の同期区間の
+  例外は `commit(0)` になり、どちらも「会話 = 受け取った列 + frontier 1 個」という非投機と同じ形に閉じる
+  （保留を残すと context は dispose しか受け付けない）。
+- **決定 5 の R は k+1 固定**: verify の `last_row` は `[0..k']` を末尾添字で `k+1` 本に pad する（R は
+  PreparedPlan の鍵に入るので、予算末尾で k' が縮む cycle ごとに別形を作らない）。`k' = 0` は `[0]`（decode 形
+  そのもの）。
+- **決定 7 は「温度に依らない」形で閉じた（訂正）**: 受理は行ごとに `sampler.next` を非投機の decode と
+  同じ logits・同じ history・同じ順で 1 回ずつ呼ぶ（確定 token 1 個につき 1 回）ので、RNG の消費列も
+  token 列も温度に依らず非投機と**厳密に一致**する。温度 > 0 では「draft と同じ token を引いたら受理」が
+  one-hot draft の speculative sampling そのもの（受理確率 = target 分布での draft の確率・棄却時は
+  引いた token がそのまま新しい frontier）で、drafter の logits は要らない。設計時に置いた「温度 ≠ 0 は
+  非投機へ落とす」は根拠が誤り（レビューで反証）で撤回、**段 3b は不要**。配布形の推奨 sampler
+  （温度 1.0）での受理率は段 4 の実測項目。
+- **投機ループの置き場と観測**: ループは `src/generation/sequence.ts` の内側で、drafter は
+  `GenerationSequenceOptions.speculative = { open(context) → DraftFace, k }` の DI（`DraftFace` = draft と
+  dispose だけの狭い面 — GPU 無しの fake で受理 0 / 停止 token / 中断 / 例外 / 途中 break を全部踏む）。
+  観測は run 単位の hook `onRun(phase)`（prefill / decode / draft / verify・番号 1 始まり・verify は commit の
+  直後の同期区間）で、イベント列から run 数を導出していた `withRunDiagnostics` は置き換える。
+  `GenerationStop.speculation`（cycles / draftRuns / drafted / accepted / acceptedHistogram）が勘定。
+- **同一性の門**: gemma4 の既定席（`stateAttentionReduce: "parallel"`）では decode（M=1）が ①′・verify（M=4）が
+  ① で縮約順が違い、ビット同一ではない（設計どおり）。厳密一致の門は `"sequential"` 席（M=1 も M=4 も ① + ③）で
+  採り、既定席は同じケースで相違数を報告する（limitations）。①′ の位置不変化（既定席でも u32 門）は段 4 の候補。
+- **見積り**: `estimateSessionMemory` は target の prefill / decode に verify 形 `{ M: k+1, R: k+1 }` を足し
+  （runtime の `generation.scenarios`）、drafter の常駐重み（共有 initializer は除外）と借り手 context の
+  lengths 8 バイトを合算する。
+- **readonly の sliding 512 列は据え置き**（HF は inclusive 513 列 — 意図的な差。追記 2026-09-08〈段 2〉の
+  理由のとおり）。受理率への影響は G2 の実測に含まれる。
