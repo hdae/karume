@@ -7,9 +7,11 @@
 - 再配置（table-major → token-major）が 35 表経路と**ビット一致**すること、および
   {@link product.assert_ple_sidecar} が scale の層ずれ・範囲の off-by-one を**実際に検出**すること
 - 逆量子化の順序（`f32(i8) * per-row scale` → `* embed_scale`）が fake-quant 済みの表と一致すること
-- 製品ラッパの eager 同値（`argmax(logits)` が token-only 形の token と全行で一致）
-- {@link product.assert_ir_form_product} が製品形の 3 本（PLE 外出し・argmax 不在・最終行
-  logits）と、既存 2 系列と共有の規律（states / 層種別 / 残骸 / 格納）を実際に見ること
+- 製品ラッパの eager 同値（R = 1 の `argmax(logits)` が token-only 形の token と全行で一致）と、
+  R > 1 が「R 回の 1 行 run」を積んだものと厳密一致すること（投機 verify の前提）
+- {@link product.assert_ir_form_product} が製品形の門（PLE 外出し・argmax 不在・選択行の
+  logits / hidden 2 本と順序）と、既存 2 系列と共有の規律（states / 層種別 / 残骸 / 格納）を
+  実際に見ること
 - 系列 driver の一周（sidecar → 索引 → 参照 → コンテナ → 出所記録を 1 回の据え替えで置く）
 
 transformers を要するケースだけ `importorskip` で SKIP する（ADR 0065 の 2 job 構成）。
@@ -34,7 +36,7 @@ from gemma4 import export_decode as decode
 from gemma4 import export_product as product
 from gemma4 import export_token as token_only
 from gemma4 import ple
-from gemma4.tests.test_export import PLE_DIM, TINY_SYM_MAX, VOCAB, WINDOW
+from gemma4.tests.test_export import HIDDEN, PLE_DIM, TINY_SYM_MAX, VOCAB, WINDOW
 from gemma4.tests.test_export_decode import (
     DECODE_LAYER_TYPES,
     OWNER_LAYERS,
@@ -334,7 +336,11 @@ def tiny_model_trio():
 
 class TestEagerEquivalence:
     def test_the_argmax_of_the_product_logits_matches_the_token_only_exit(self, tiny_model_trio):
-        """出口の差は argmax の有無だけ（ADR 0083 決定 6）— 全行を踏む。"""
+        """出口の差は argmax の有無だけ（ADR 0083 決定 6）— 全行を踏む。
+
+        R = 1（通常の decode / prefill の束縛）で token-only 形とビット同一であることが、
+        投機 verify のために出口を広げても既存経路が動くことの実証。
+        """
         token_form, product_form, tables = tiny_model_trio
         torch.manual_seed(1)
         ids = torch.randint(0, VOCAB, (1, 7), dtype=torch.int64)
@@ -345,10 +351,57 @@ class TestEagerEquivalence:
         with torch.no_grad():
             for row in range(int(ids.shape[1])):
                 last_row = torch.tensor([row], dtype=torch.int64)
-                logits = product_form(ids, *rope, stacked, last_row)
+                logits, hidden = product_form(ids, *rope, stacked, last_row)
                 expected = token_form(ids, *rope, last_row)
                 assert tuple(logits.shape) == (1, 1, VOCAB), f"row {row} の出力形"
+                assert tuple(hidden.shape) == (1, 1, HIDDEN), f"row {row} の hidden 形"
                 assert int(logits[0, 0].argmax()) == int(expected[0, 0, 0]), f"row {row} の token"
+
+    def test_multiple_rows_are_the_per_row_single_row_results_stacked(self, tiny_model_trio):
+        """R > 1 は「R 回の 1 行 run」を積んだものと**厳密に**一致する（verify の前提）。
+
+        行ごとに独立でなければ、投機 verify が採点する行と実際に採用する行が別物になる。
+        """
+        _, product_form, tables = tiny_model_trio
+        torch.manual_seed(5)
+        ids = torch.randint(0, VOCAB, (1, 7), dtype=torch.int64)
+        specs = decode.rope_specs(product_form.model.config)
+        rope = decode.rope_args(specs, decode.positions_for(ids))
+        stacked = ple.per_layer_inputs(tables, ids, product_form.per_layer_scale)
+        rows = decode.last_rows_for(ids, 3)
+
+        with torch.no_grad():
+            logits, hidden = product_form(ids, *rope, stacked, rows)
+            singles = [product_form(ids, *rope, stacked, row.reshape(1)) for row in rows]
+
+        assert tuple(logits.shape) == (1, 3, VOCAB)
+        assert tuple(hidden.shape) == (1, 3, HIDDEN)
+        for index, (one_logits, one_hidden) in enumerate(singles):
+            # hidden は同じ本体 forward の gather なのでビット同一。logits は lm_head の GEMM の
+            # M が 3 と 1 で変わり、縮約順が動きうるので近傍で見る（1 位は厳密に一致する）。
+            assert torch.equal(hidden[:, index : index + 1], one_hidden), f"行 {index} の hidden"
+            assert torch.allclose(logits[:, index : index + 1], one_logits, atol=1e-5, rtol=1e-5), (
+                f"行 {index} の logits"
+            )
+            assert int(logits[0, index].argmax()) == int(one_logits[0, 0].argmax()), (
+                f"行 {index} の 1 位"
+            )
+
+    def test_the_second_output_is_the_hidden_the_lm_head_consumed(self, tiny_model_trio):
+        """MUST: 出力 1 は lm_head の**入力そのもの**（別の中間値でも [1,R,H] は合う）。"""
+        _, product_form, tables = tiny_model_trio
+        torch.manual_seed(6)
+        ids = torch.randint(0, VOCAB, (1, 5), dtype=torch.int64)
+        specs = decode.rope_specs(product_form.model.config)
+        rope = decode.rope_args(specs, decode.positions_for(ids))
+        stacked = ple.per_layer_inputs(tables, ids, product_form.per_layer_scale)
+
+        with torch.no_grad():
+            logits, hidden = product_form(ids, *rope, stacked, decode.last_rows_for(ids, 2))
+            cap = float(product_form.model.config.final_logit_softcapping)
+            replayed = torch.tanh(product_form.model.lm_head(hidden) / cap) * cap
+
+        assert torch.equal(replayed, logits)
 
     def test_the_host_supplied_ple_is_what_the_graph_used_to_compute(self, tiny_model_trio):
         """ホスト供給の PLE が 35 表経路と同じ値なら、logits も token-only 形と一致する。
@@ -364,8 +417,8 @@ class TestEagerEquivalence:
         stacked = ple.per_layer_inputs(tables, ids, product_form.per_layer_scale)
 
         with torch.no_grad():
-            correct = product_form(ids, *rope, stacked, last_row)
-            swapped = product_form(ids, *rope, stacked.flip(2), last_row)
+            correct, _ = product_form(ids, *rope, stacked, last_row)
+            swapped, _ = product_form(ids, *rope, stacked.flip(2), last_row)
             expected = token_form(ids, *rope, last_row)
 
         assert int(correct[0, 0].argmax()) == int(expected[0, 0, 0])
@@ -373,6 +426,47 @@ class TestEagerEquivalence:
 
 
 # ---- tiny な実モデルでの一周 -----------------------------------------------
+
+
+class TestRowSymbolBinding:
+    """例示 2 行で焼いた製品グラフが **R = 1 と R = kmax の両方で走る**こと（transformers 要）。
+
+    段 1 の合格線そのもの: 通常の prefill / decode は R = 1 で走るので、torch.export が
+    `Dim(min=1)` を 1 へ特殊化していれば既存経路が動かない。IR の `symbols` は名前の列だけで
+    上限を持たない（`docs/ir-v1.md`）ので、この性質を見られるのは焼いた ExportedProgram を
+    実際に別の行数で回す形だけ。
+    """
+
+    def test_the_exported_program_runs_at_one_row_and_at_the_maximum(self, tiny_model_trio):
+        _, wrapper, tables = tiny_model_trio
+        torch.manual_seed(7)
+        ids = torch.randint(0, VOCAB, (1, 2 * product.ROW_SYM_MAX), dtype=torch.int64)
+        stacked = ple.per_layer_inputs(tables, ids, wrapper.per_layer_scale)
+        specs = decode.rope_specs(wrapper.model.config)
+        rope = decode.rope_args(specs, decode.positions_for(ids))
+        del wrapper.per_layer
+        seq = Dim(decode.SEQ_SYMBOL, min=2, max=TINY_SYM_MAX)
+        rows = Dim(product.ROW_SYMBOL, min=1, max=product.ROW_SYM_MAX)
+
+        program = torch.export.export(
+            wrapper,
+            (ids, *rope, stacked, decode.last_rows_for(ids, product.EXAMPLE_ROWS)),
+            dynamic_shapes=(*({1: seq} for _ in range(2 + len(rope))), {0: rows}),
+            strict=False,
+        )
+
+        module = program.module()
+        for count in (1, product.ROW_SYM_MAX):
+            with torch.no_grad():
+                logits, hidden = module(ids, *rope, stacked, decode.last_rows_for(ids, count))
+            assert tuple(logits.shape) == (1, count, VOCAB), f"R = {count} の logits 形"
+            assert tuple(hidden.shape) == (1, count, HIDDEN), f"R = {count} の hidden 形"
+
+    def test_the_slack_is_what_bounds_the_row_symbol(self):
+        """R の上限は sliding ring の余裕そのもの（別々に動かせる 2 つの数にしない）。"""
+        # verify は draft k 行 + bonus 1 行で、k の上限が ring の余裕（棄却されうる行数）。
+        assert product.ROW_SYM_MAX == decode.SLIDING_SLACK_ROWS + 1
+        assert 1 < product.EXAMPLE_ROWS <= product.ROW_SYM_MAX
 
 
 class TestExportedProductForm:
@@ -385,17 +479,18 @@ class TestExportedProductForm:
         torch.manual_seed(4)
         ids = torch.randint(0, VOCAB, (1, WINDOW + 3), dtype=torch.int64)
         stacked = ple.per_layer_inputs(tables, ids, wrapper.per_layer_scale)
-        last_row = decode.last_row_for(ids)
+        last_row = decode.last_rows_for(ids, product.EXAMPLE_ROWS)
         specs = decode.rope_specs(wrapper.model.config)
         rope = decode.rope_args(specs, decode.positions_for(ids))
         # PLE はホストが供給する入力になったので、export の前に席ごと落とす（台本と同じ順序）。
         del wrapper.per_layer
         seq = Dim(decode.SEQ_SYMBOL, min=2, max=TINY_SYM_MAX)
+        rows = Dim(product.ROW_SYMBOL, min=1, max=product.ROW_SYM_MAX)
         graph, tensors = export_module(
             wrapper,
             (ids, *rope, stacked, last_row),
-            dynamic_shapes=(*({1: seq} for _ in range(2 + len(rope))), None),
-            symbol_names=(decode.SEQ_SYMBOL,),
+            dynamic_shapes=(*({1: seq} for _ in range(2 + len(rope))), {0: rows}),
+            symbol_names=(decode.SEQ_SYMBOL, product.ROW_SYMBOL),
             preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
         )
         config = wrapper.model.config
@@ -425,11 +520,51 @@ class TestExportedProductForm:
             product.PER_LAYER_INPUTS,
             decode.TOKEN_ONLY_LAST_ROW,
         ]
-        assert len(verified.outputs) == 1
+        assert len(verified.outputs) == 2
         assert "argmax" not in verified.required_ops
         assert form["attention_nodes"] == len(DECODE_LAYER_TYPES)
         assert form["state_append_nodes"] == 2 * OWNER_LAYERS
-        assert form["logits"] == [1, 1, VOCAB]
+        assert form["logits"] == [1, product.ROW_SYMBOL, VOCAB]
+        assert form["hidden"] == [1, product.ROW_SYMBOL, HIDDEN]
+
+    def test_the_row_count_stays_a_symbol_the_runtime_can_bind_to_one(self, tiny_container):
+        """MUST: R が記号のまま残ること（例示 2 行で焼いても行数が定数化しない）。
+
+        R が焼かれると通常の decode（R = 1）が走れない。束縛点は `last_row[R]` 1 本だけで、
+        IR の `symbols` は名前の列しか持たない（上限は記録されない）ので、ランタイムは 1 でも
+        8 でも束縛できる。
+        """
+        verified, _, _ = tiny_container
+
+        last_row = next(spec for spec in verified.inputs if spec.name == decode.TOKEN_ONLY_LAST_ROW)
+        assert list(last_row.shape) == [product.ROW_SYMBOL]
+        assert sorted(verified.symbols) == sorted(
+            {decode.SEQ_SYMBOL, decode.CAPACITY_SYMBOL, product.ROW_SYMBOL}
+        )
+
+    def test_the_sliding_slots_carry_the_speculative_slack(self, tiny_container):
+        """sliding スロットの物理行数が `window + 余裕`（棄却行が live 窓を潰さない条件）。"""
+        verified, config, _ = tiny_container
+
+        capacities = [list(slot.shape)[2] for slot in verified.states.values()]
+        baked = [value for value in capacities if not isinstance(value, str)]
+
+        assert baked, "sliding スロット（容量が実数の側）が見つからない"
+        assert set(baked) == {WINDOW + decode.SLIDING_SLACK_ROWS}
+        assert decode.sliding_capacity(config) == WINDOW + decode.SLIDING_SLACK_ROWS
+
+    def test_swapped_outputs_are_detected(self, tiny_container):
+        """出力の入れ替えを落とす。
+
+        tiny な被験体は `VOCAB == HIDDEN` なので**幅では見分けがつかない**（実物は 262,144 と
+        2,048 で幅の門が先に落ちる）。それでも落ちるのは、出力 0 の祖先を遡って lm_head に
+        当たることを見る構造検査があるから — hidden 側は行選択の `embedding` で行き止まる。
+        """
+        verified, config, storage = tiny_container
+        swapped = replace(verified, outputs=list(reversed(verified.outputs)))
+
+        with pytest.raises(AssertionError, match="lm_head（linear）が無い"):
+            product.assert_ir_form_product(swapped, config, storage, VOCAB)
 
     def test_the_ple_tables_are_gone_from_the_container(self, tiny_container):
         """常駐削減そのもの（ADR 0085）— PLE 表を引く embedding が 1 本も残らない。"""
@@ -501,13 +636,20 @@ class TestExportedProductForm:
             product.assert_ir_form_product(with_argmax, config, storage, VOCAB)
 
     def test_a_full_row_lm_head_is_detected(self, tiny_container):
-        """行選択が lm_head の**後ろ**へ回った形（値は一致するので構造でしか見えない）。"""
+        """行選択が lm_head の**後ろ**へ回った形（値は一致するので形と構造でしか見えない）。
+
+        lm_head の入力は hidden 出口そのものなので、行軸を chunk 行 `M` へ広げると出力 1 の
+        宣言が先に食い違う（`[1, R, H]` でなくなる）。行選択が後ろへ回れば必ずここを通るので、
+        退行はこの 1 本目の門で止まる — 宣言だけ正しく配線が壊れた形は
+        {@link TestExportedProductForm.test_swapped_outputs_are_detected} の構造検査が受ける。
+        """
         verified, config, storage = tiny_container
         producer = {out: node for node in verified.nodes for out in node.outs}
         linear = next(
             node
             for node in verified.nodes
-            if node.op == "linear" and list(verified.values[node.outs[0]].shape)[:2] == [1, 1]
+            if node.op == "linear"
+            and list(verified.values[node.outs[0]].shape)[:2] == [1, product.ROW_SYMBOL]
         )
         widened = replace(
             verified,
@@ -521,7 +663,7 @@ class TestExportedProductForm:
         )
         assert producer.get(linear.ins[0]) is not None
 
-        with pytest.raises(AssertionError, match="選択済みの 1 行"):
+        with pytest.raises(AssertionError, match=r"出力 1 の宣言 shape"):
             product.assert_ir_form_product(widened, config, storage, VOCAB)
 
 
@@ -622,7 +764,7 @@ class TestExportSeries:
             ]
         )
         assert list(summary) == PRODUCT_SUMMARY_KEYS
-        assert summary["outputs"] == 1
+        assert summary["outputs"] == 2
         assert set(seen["greedy"]) == {name for name, _ in cases}
         # 作業席も退避席も残らない（据え替えの後片付けは core の原語の担当）。
         assert list(tmp_path.iterdir()) == [out_dir]

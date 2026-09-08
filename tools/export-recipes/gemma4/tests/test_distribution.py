@@ -321,6 +321,17 @@ class TestGemma4Config:
 
         assert GEMMA4_MAX_CHUNK_LENGTH == SYM_MAX
 
+    def test_the_row_symbol_mirrors_the_export_script(self) -> None:
+        """MUST: 出口の行数記号の綴りは焼く側（`export_product.ROW_SYMBOL`）と同じ。
+
+        配布 recipe は torch を読まないので写しを持つ（`M` の上限と同じ理由）。綴りが割れると
+        「行軸が記号でない資産」を落とす門（{@link gemma4_vocab_size}）が空振りする。
+        """
+        pytest.importorskip("torch")
+        from gemma4.export_product import ROW_SYMBOL
+
+        assert gemma4_distribution.GEMMA4_ROW_SYMBOL == ROW_SYMBOL
+
 
 class TestGemma4Graph:
     """製品グラフの形 — 入力の並びと、PLE 索引との噛み合い。"""
@@ -330,8 +341,11 @@ class TestGemma4Graph:
         wrong = ir_container(
             mark="other",
             storage="i4",
-            inputs=(("input_ids", [1, "M"]),),
-            outputs=([1, 1, fixture.VOCAB],),
+            inputs=(("input_ids", [1, "M"]), ("last_row", [fixture.ROW_SYMBOL])),
+            outputs=(
+                [1, fixture.ROW_SYMBOL, fixture.VOCAB],
+                [1, fixture.ROW_SYMBOL, fixture.HIDDEN],
+            ),
         )
         sources = _build(tmp_path)
         replace_component(sources.product / "model.safetensors", wrong)
@@ -344,7 +358,7 @@ class TestGemma4Graph:
             sources.product,
             sources.tokenizer,
             sources.model,
-            # 全語彙 logits（`[1, M, V]` 相当の 3 軸だが先頭 2 軸が [1, 1] でない）。
+            # 行軸が記号でない logits（`[1, 4, V]` — 焼いた行数の資産）。
             container=fixture.product_container(vocab=fixture.VOCAB),
         )
         write_component(
@@ -353,10 +367,26 @@ class TestGemma4Graph:
                 mark="rows",
                 storage="i4",
                 inputs=(("input_ids", [1, "M"]),),
-                outputs=([1, 4, fixture.VOCAB],),
+                outputs=([1, 4, fixture.VOCAB], [1, 4, fixture.HIDDEN]),
             ),
         )
-        with pytest.raises(DistError, match=r"\[1, 1, V\] でない"):
+        with pytest.raises(DistError, match=r"\[1, R, \*\] でない"):
+            gemma4_plan(sources)
+
+    def test_it_refuses_a_graph_whose_outputs_are_swapped(self, tmp_path: Path) -> None:
+        """MUST: logits と hidden は行軸まで同型 — 入れ替えは幅でしか捕まらない。
+
+        取り違えたまま通すと、語彙数のつもりで hidden_size を読んだ manifest が組み上がる
+        （PLE 索引・トークナイザとの相互照合がその数で回る）。
+        """
+        sources = _sources(tmp_path)
+        fixture.write_series(
+            sources.product,
+            sources.tokenizer,
+            sources.model,
+            container=fixture.product_container(swap_outputs=True),
+        )
+        with pytest.raises(DistError, match="出力 1（hidden）の幅"):
             gemma4_plan(sources)
 
     def test_it_refuses_rope_inputs_whose_width_is_not_the_declared_head_dim(

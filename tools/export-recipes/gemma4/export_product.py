@@ -1,13 +1,13 @@
-"""実重み Gemma 4 E2B を **製品グラフ**（PLE 外出し + 最終行 logits 出口）へ書き出す台本。
+"""実重み Gemma 4 E2B を **製品グラフ**（PLE 外出し + 選択行の logits / hidden）へ書き出す台本。
 
-ADR [0083](../../../docs/decisions/0083-generation-api-surface.md) 決定 6（出口は
-`logits[1,1,V]`・sampling はホスト維持）と ADR
+ADR [0083](../../../docs/decisions/0083-generation-api-surface.md) 決定 6（出口は選択行の
+logits・sampling はホスト維持）と ADR
 [0085](../../../docs/decisions/0085-ple-host-gather.md)（PLE をホスト gather へ外出し）を
 **1 回の再 export に載せる**（案 α — ADR 0083 Consequences / backlog now の段 1b）。
 
     uv run --with 'transformers==5.14.1' python -m gemma4.export_product
 
-## 既存 2 系列との差は入口 2 本・出口 1 本
+## 既存 2 系列との差は入口 2 本・出口 2 本
 
 chunk 系列の経路（素材の読み方・RoPE のホスト供給・KV 共有の手術・混成量子化・門の順序）は
 {@link gemma4.export_decode} の中核をそのまま通す（import して使う — 同じ規律を 2 箇所に
@@ -17,11 +17,15 @@ chunk 系列の経路（素材の読み方・RoPE のホスト供給・KV 共有
   引数に取る純粋な行 lookup なので、グラフから外してホストが供給する通常のグラフ入力に
   なる（ADR 0085 決定 6 — ランタイムの契約は 1 文字も変わらない）。容器からは i8 35 表
   2,240MiB + per-row scale 35MiB が消える。
-- 入力に **`last_row[1]` i32** が増える（token-only 系列と同じ行選択の配線 —
-  {@link gemma4.export_decode.TOKEN_ONLY_LAST_ROW}）。
-- 出口は **`logits[1,1,V]`**（最終**行**のみ・argmax なし）。token-only 系列の
-  `TokenOnlyChunkWrapper` から argmax を外した形そのもので、sampling / RNG はホストが持つ
-  （ADR 0083 決定 6 の MUST）。prefill の読み戻しは `[1,M,V]` 形の 32MiB から 1MiB へ減る。
+- 入力に **`last_row[R]` i32** が増える（token-only 系列と同じ行選択の配線 —
+  {@link gemma4.export_decode.TOKEN_ONLY_LAST_ROW}）。行数が記号 {@link ROW_SYMBOL} なのは
+  投機デコードの verify run が 1 回で複数行を採点するため。**通常の prefill / decode は
+  R = 1** で、その束縛では従来の 1 行出口と値も token 列もビット同一のまま。
+- 出口は **`logits[1,R,V]`（出力 0）と最終 norm 後の hidden `[1,R,H]`（出力 1）**
+  （選択**行**のみ・argmax なし）。token-only 系列の `TokenOnlyChunkWrapper` から argmax を
+  外し、drafter が食う hidden を並べた形で、sampling / RNG はホストが持つ（ADR 0083 決定 6 の
+  MUST）。prefill の読み戻しは `[1,M,V]` 形の 32MiB から 1MiB へ減る。
+  MUST: 出力順は **logits → hidden** 固定（ランタイムはスロット番号で読む）。
 
 ## PLE sidecar（token-major + vocab レンジ shard）
 
@@ -101,6 +105,23 @@ REFERENCE_DIR = decode.DEFAULT_OUT_DIR
 #: 参照する。
 PER_LAYER_INPUTS = "per_layer_inputs"
 
+#: 行選択の記号名（`last_row[R]` / 出口 2 本の行軸）。投機デコードの verify run が 1 回で
+#: 採点する行数で、通常の prefill / decode は R = 1 に束縛する（従来と同じ 1 行出口）。
+ROW_SYMBOL = "R"
+
+#: 記号 R の trace 上限。verify が 1 回に採点する行数 = draft k 行 + 直前に確定した bonus 1 行で、
+#: k の上限が sliding ring の余裕（{@link decode.SLIDING_SLACK_ROWS} — 棄却されうる行数の上限）
+#: なので R ≤ 余裕 + 1。余裕と切り離して決めると「棄却行が live 窓を潰さない」設計が成立しない。
+#:
+#: NOTE: IR の `symbols` は名前の列だけで上限を持たない（`docs/ir-v1.md`）ので、この数は
+#: **torch の guard を張る範囲**にしか効かない。ランタイム側の上限は context の `slidingSlack`
+#: （deferred run の `queryLength ≤ slidingSlack + 1`）が持つ。
+ROW_SYM_MAX = decode.SLIDING_SLACK_ROWS + 1
+
+#: 例示入力の行数。**2 以上**でなければ torch.export が R を 1 に特殊化しうるし、記号として
+#: 生きていることを IR で確かめられない。上限側（{@link ROW_SYM_MAX}）は Dim の宣言が持つ。
+EXAMPLE_ROWS = 2
+
 #: PLE sidecar の代表 path（実ファイルは常に連番 — {@link karume.shards.shard_name}）と、
 #: 索引・逆量子化参照のファイル名。読み手は `packages/models/src/gemma/ple.ts`。
 PLE_FILE = "ple.safetensors"
@@ -123,7 +144,7 @@ PLE_METADATA_KEY = "karume_ple"
 
 
 class ProductChunkWrapper(decode.DecodeChunkWrapper):
-    """`(input_ids, RoPE 4 本, per_layer_inputs, last_row) → logits[1,1,V]` の製品ラッパ。
+    """`(input_ids, RoPE 4 本, per_layer_inputs, last_row[R]) → (logits[1,R,V], hidden[1,R,H])`。
 
     MUST: `DecodeChunkWrapper` の**派生**（モジュール FQN 空間の同一性 — 量子化の対象述語
     `is_int8_module` / `is_int4_module` と scale 台帳のキーの再利用条件。
@@ -135,6 +156,11 @@ class ProductChunkWrapper(decode.DecodeChunkWrapper):
     渡す形は `aten.index.Tensor` = IR 語彙外の advanced indexing に落ちる）。lm_head と
     softcap の 3 行は {@link gemma4.export_token.TokenOnlyChunkWrapper} の逐語同型で、
     **違いは argmax を置かないことだけ**（ADR 0083 決定 6 — sampling はホスト維持）。
+    MUST: 返す順は **(logits, hidden)** 固定 — ランタイムは出力スロット番号で読むので、
+    入れ替えると形も dtype も合ったまま別のテンソルが sampling へ渡る。
+    MUST: 第 2 出力は**最終 norm の後・lm_head の前**の行選択済み hidden そのもの
+    （`rowed`）。lm_head を通す前の値であることが drafter 側の入力条件で、別の中間値を
+    返しても shape は `[1,R,H]` のまま合う。
     """
 
     def forward(  # type: ignore[override]
@@ -146,7 +172,7 @@ class ProductChunkWrapper(decode.DecodeChunkWrapper):
         rope_full_attention_sin: torch.Tensor,
         per_layer_inputs: torch.Tensor,
         last_row: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         length = input_ids.shape[1]
         mask = {
             one_shot.FULL_ATTENTION: one_shot.additive_causal_mask(length),
@@ -167,12 +193,12 @@ class ProductChunkWrapper(decode.DecodeChunkWrapper):
                 position_ids=None,
                 use_cache=False,
             ).last_hidden_state
-        # 行選択のあと [1,1,H] へ上げてから lm_head へ通す（token-only 形と同文 — 1 行 lm_head の
-        # 構造検査が「選択済みの 1 行」を見るのはこの形が前提）。
+        # 行選択のあと [1,R,H] へ上げてから lm_head へ通す（token-only 形と同文 — 行選択済み
+        # lm_head の構造検査が「選択済みの行」を見るのはこの形が前提）。
         rowed = functional.embedding(last_row, hidden[0]).unsqueeze(0)
         logits = self.model.lm_head(rowed)
         cap = float(self.model.config.final_logit_softcapping)
-        return torch.tanh(logits / cap) * cap
+        return torch.tanh(logits / cap) * cap, rowed
 
 
 #: {@link decode.load_wrapper} へ渡す variant。**読まれるのは `wrapper` 欄だけ**（素材の読み方と
@@ -433,6 +459,7 @@ def assert_ir_form_product(
     *,
     seq_symbol: str = decode.SEQ_SYMBOL,
     capacity_symbol: str = decode.CAPACITY_SYMBOL,
+    row_symbol: str = ROW_SYMBOL,
 ) -> dict[str, Any]:
     """製品グラフの形を検査する（**数値が合ったまま静かに壊れる**性質を全部見る）。
 
@@ -441,7 +468,7 @@ def assert_ir_form_product(
     共有部分だけを関数に括れば入口 / 出口の引数化は要らない）。ここが綴るのは製品形に固有の
     入口・出口だけである。
 
-    製品形に固有の 3 本（PLE 外出しと logits 出口の実証）:
+    製品形に固有の門（PLE 外出しと、選択行の logits / hidden 出口の実証）:
 
     - グラフ入力に **`per_layer_inputs` が居る**こと。居なければ PLE がグラフに残っている
       （常駐は 2,240MiB 戻り、ホスト gather の入力は誰にも読まれない）。
@@ -454,9 +481,15 @@ def assert_ir_form_product(
       PLE の一部だけが残る形（35 本中 1 本の刈り漏れ）を数で捕まえるため。RoPE は
       ホスト供給の入力になったので、表を引く `embedding` はもう 1 本も居ない。
     - 出口が **argmax でない**こと。`argmax` が 1 本でも残っていれば sampling の余地が消える
-      （ADR 0083 決定 6 — GPU 側は最終行 logits まで）。
-    - 出力の宣言 shape が `[1, 1, vocab_size]`（最終**行**のみ）であること。全行 logits へ
-      退行しても token 列は一致するので、構造検査でしか固定できない（ADR 0068 の実効）。
+      （ADR 0083 決定 6 — GPU 側は選択行の logits まで）。
+    - 出力が **2 本で、順序は logits → hidden** であること。ランタイムはスロット番号で読むので、
+      入れ替わっても両方 `[1, R, *]` の f32 で軸は合う。順序を固定するのは幅の突合と、
+      **出力 0 の祖先が lm_head に届く**という構造検査の 2 本（幅が偶然一致しても後者が残る）。
+    - 出力の宣言 shape が `[1, R, vocab_size]` / `[1, R, hidden_size]`（選択**行**のみ）である
+      こと。全行 logits へ退行しても token 列は一致するので、構造検査でしか固定できない
+      （ADR 0068 の実効）。
+    - `last_row` の宣言 shape が `[R]` であること。R を束縛できる入力はこれ 1 本なので、
+      静的 `[1]` へ退行すると「記号が居るのに束縛点が無い」形が書ける。
     """
     decode.assert_layer_type_count(config)
     layers = int(config.num_hidden_layers)
@@ -476,6 +509,12 @@ def assert_ir_form_product(
             "いる可能性）"
         )
     decode.assert_rope_inputs(graph, config, seq_symbol=seq_symbol)
+    last_row_spec = next(spec for spec in graph.inputs if spec.name == decode.TOKEN_ONLY_LAST_ROW)
+    if list(last_row_spec.shape) != [row_symbol]:
+        raise AssertionError(
+            f"'{decode.TOKEN_ONLY_LAST_ROW}' の宣言 shape が {list(last_row_spec.shape)} —"
+            f" [{row_symbol}] でない（記号 {row_symbol} の唯一の束縛点）"
+        )
     per_layer_spec = next(spec for spec in graph.inputs if spec.name == PER_LAYER_INPUTS)
     expected_shape = [1, seq_symbol, layers, ple_dim]
     if per_layer_spec.dtype != "f32" or list(per_layer_spec.shape) != expected_shape:
@@ -508,28 +547,35 @@ def assert_ir_form_product(
             f" {expected_embeddings} 本でない"
         )
 
-    if len(graph.outputs) != 1:
+    if len(graph.outputs) != 2:
         raise AssertionError(
-            f"IR 出力が {len(graph.outputs)} 本（製品出口は logits の 1 本 — ADR 0083 決定 6）"
+            f"IR 出力が {len(graph.outputs)} 本"
+            "（製品出口は logits + hidden の 2 本 — ADR 0083 決定 6 / 投機 verify の足場）"
         )
     if ARGMAX_OP in graph.required_ops:
         raise AssertionError(
             f"`{ARGMAX_OP}` がグラフに残っている"
-            "（製品出口は最終行 logits で、sampling / argmax はホスト側 — ADR 0083 決定 6）"
+            "（製品出口は選択行 logits で、sampling / argmax はホスト側 — ADR 0083 決定 6）"
         )
     logits_shape = list(declared_shape(graph, graph.outputs[0]))
-    expected_logits = [1, 1, int(config.vocab_size)]
-    if logits_shape != expected_logits:
-        raise AssertionError(
-            f"出力 0 の宣言 shape が {logits_shape} — {expected_logits}（最終行のみ）でない"
-        )
+    hidden_shape = list(declared_shape(graph, graph.outputs[1]))
+    expected_logits = [1, row_symbol, int(config.vocab_size)]
+    expected_hidden = [1, row_symbol, int(config.hidden_size)]
+    # MUST: 順序まで見る（幅が違うだけで両方 f32 [1,R,*] なので、入れ替えは形では落ちない）。
+    for slot, (found, expected, what) in enumerate(
+        ((logits_shape, expected_logits, "logits"), (hidden_shape, expected_hidden, "hidden"))
+    ):
+        if found != expected:
+            raise AssertionError(
+                f"出力 {slot} の宣言 shape が {found} — {expected}（選択行の {what}）でない"
+            )
 
-    # 1 行 lm_head の固定は token-only 形と**同じ構造検査**（decode 側の 1 本を通す）。
+    # 行選択済み lm_head の固定は token-only 形と**同じ構造検査**（decode 側の 1 本を通す）。
     producer = {out: node for node in graph.nodes for out in node.outs}
     logits_source = producer.get(graph.outputs[0])
     if logits_source is None:
         raise AssertionError(f"出力 0 ('{graph.outputs[0]}') がノード出力でない")
-    decode.assert_single_row_lm_head(graph, producer, logits_source)
+    decode.assert_row_selected_lm_head(graph, producer, logits_source, rows=row_symbol)
 
     form = decode.assert_ir_form_common(
         graph,
@@ -537,8 +583,14 @@ def assert_ir_form_product(
         storage_expectation,
         seq_symbol=seq_symbol,
         capacity_symbol=capacity_symbol,
+        extra_symbols=(row_symbol,),
     )
-    return {**form, "embedding_nodes": len(embeddings), "logits": logits_shape}
+    return {
+        **form,
+        "embedding_nodes": len(embeddings),
+        "logits": logits_shape,
+        "hidden": hidden_shape,
+    }
 
 
 # ---- 系列 ------------------------------------------------------------------
@@ -598,6 +650,9 @@ def export_series(
 
     example_name, example_ids = max(cases, key=lambda case: case[1].shape[1])
     seq = Dim(decode.SEQ_SYMBOL, min=2, max=sym_max)
+    # min=1 は MUST — 通常の prefill / decode は R = 1 で走るので、そこを特殊化されると
+    # 従来経路が動かない。torch.export は size 1 を含む Dim を記号のまま保つ（2.13 で実測）。
+    rows = Dim(ROW_SYMBOL, min=1, max=ROW_SYM_MAX)
 
     out_dir.parent.mkdir(parents=True, exist_ok=True)
     with staged_publication(out_dir) as staged:
@@ -628,10 +683,12 @@ def export_series(
                 example_ids,
                 *example_rope,
                 case_inputs[example_name],
-                decode.last_row_for(example_ids),
+                decode.last_rows_for(example_ids, EXAMPLE_ROWS),
             ),
-            dynamic_shapes=(*({1: seq} for _ in range(2 + len(example_rope))), None),
-            symbol_names=(decode.SEQ_SYMBOL,),
+            dynamic_shapes=(*({1: seq} for _ in range(2 + len(example_rope))), {0: rows}),
+            # 割り当ては user 入力 placeholder の出現順（`karume.convert._assign_input_symbols`）
+            # なので、`input_ids[1,M]` → `last_row[R]` の順で並べる。
+            symbol_names=(decode.SEQ_SYMBOL, ROW_SYMBOL),
             preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
         )
         print("[export] states 形へ手術 → 書き出し", file=sys.stderr, flush=True)
@@ -657,13 +714,15 @@ def export_series(
         first: dict[str, int] = {}
         for name, ids in cases:
             with torch.no_grad():
-                logits = wrapper(
+                # 例示入力と同じ R 行で引き、**最終行**の 1 位を見る（R > 1 の行選択そのものを
+                # sanity でも 1 度踏む — 期待表と突き合わせるのは prompt 最終行の継続だけ）。
+                logits, _hidden = wrapper(
                     ids,
                     *decode.rope_args(specs, positions_for(ids)),
                     case_inputs[name],
-                    decode.last_row_for(ids),
+                    decode.last_rows_for(ids, EXAMPLE_ROWS),
                 )
-            first[name] = int(logits[0, 0].argmax())
+            first[name] = int(logits[0, -1].argmax())
 
         # 第 1 継続 token を 1-shot 台本の期待表と突き合わせる（機構横断の突合 — 台本が別物
         # なので、同じ重み・同じ prompt で 1 位が一致することが交差検証になる）。

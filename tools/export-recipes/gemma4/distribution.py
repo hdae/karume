@@ -109,6 +109,7 @@ GEMMA4_GENERATION_CONFIG_FILE = "generation_config.json"
 GEMMA4_CONFIG_FILE = "config.json"
 GEMMA4_TEXT_CONFIG_KEY = "text_config"
 GEMMA4_MAX_POSITION_KEY = "max_position_embeddings"
+GEMMA4_HIDDEN_SIZE_KEY = "hidden_size"
 
 #: 役割名（manifest の weights / assets が指す内部キー）。
 GEMMA4_ROLE = "model"
@@ -206,6 +207,11 @@ GEMMA4_CHUNK_LENGTH = 768
 #: 資産からは導けない数（IR の `symbols` は名前の列だけ）なので、宣言が無いと読み手は
 #: `chunkLength` の上書きが trace 範囲の内側かどうかを判定できない。
 GEMMA4_MAX_CHUNK_LENGTH = 768
+
+#: 出口の行数記号（`last_row[R]` と出力 2 本の行軸）。焼く側の `gemma4.export_product.ROW_SYMBOL`
+#: の鏡像で、こちらは torch を読まない側に置いた写し（同値は `tests/test_distribution.py` が
+#: 突き合わせる）。R は入力 shape が束縛するので、容量記号と違って配布形の宣言には載らない。
+GEMMA4_ROW_SYMBOL = "R"
 
 #: full スロットの容量（会話が使える最大の論理長）の**既定値**。同じく実行時ノブで、上限は
 #: {@link gemma4_pipeline_config} がモデルの宣言（`maxPosition`）で押さえる。
@@ -428,26 +434,44 @@ def gemma4_assets(index: Mapping[str, Any]) -> dict[str, str]:
 
 
 def gemma4_vocab_size(graph: Mapping[str, Any], path: Path) -> int:
-    """最終行 logits 出口の語彙数をグラフの出力宣言から読む（`[1, 1, V]` — ADR 0083 決定 6）。
+    """選択行 logits 出口の語彙数をグラフの出力宣言から読む（`[1, R, V]` — ADR 0083 決定 6）。
 
-    出力が 1 本であることまで見るのは、検収用の 2 系列（logits opt-in / token-only）が同じ
-    系列名の下に紛れ込むと**幅だけが別の意味の数**になるため。V は主 embedding の行数そのもの
-    で、PLE sidecar とトークナイザの相互照合（ADR 0085 決定 5）の基準になる。
+    出力が **2 本**（`logits[1, R, V]` → `hidden[1, R, H]` の順）であることまで見るのは、
+    検収用の 2 系列（logits opt-in / token-only）が同じ系列名の下に紛れ込むと**幅だけが別の
+    意味の数**になるため。行軸が記号 `R` なのは投機 verify が 1 回で複数行を採点するからで、
+    通常の decode はそこを 1 に束縛する。V は主 embedding の行数そのもので、PLE sidecar と
+    トークナイザの相互照合（ADR 0085 決定 5）の基準になる。
+
+    MUST: 順序まで見る（logits と hidden は行軸まで同型で、幅だけが違う）— 入れ替わった資産を
+    受けると、V のつもりで hidden_size を読んだまま manifest が組み上がる。
     """
     outputs = graph.get("outputs")
-    if not isinstance(outputs, list) or len(outputs) != 1:
+    if not isinstance(outputs, list) or len(outputs) != 2:
         raise DistError(
-            f"{path}: グラフ出力が {outputs!r} — 製品グラフの出口は最終行 logits の 1 本だけ"
+            f"{path}: グラフ出力が {outputs!r} — 製品グラフの出口は選択行の logits + hidden の 2 本"
         )
     values = graph.get("values")
-    value = values.get(outputs[0]) if isinstance(values, dict) else None
-    shape = value.get("shape") if isinstance(value, dict) else None
-    if not isinstance(shape, list) or len(shape) != 3 or shape[0] != 1 or shape[1] != 1:
-        raise DistError(f"{path}: グラフ出力 '{outputs[0]}' の形が [1, 1, V] でない（{shape!r}）")
-    vocab = shape[2]
-    if not isinstance(vocab, int) or isinstance(vocab, bool) or vocab <= 0:
-        raise DistError(f"{path}: グラフ出力の語彙数が正の整数でない（{vocab!r}）")
-    return vocab
+    widths: list[int] = []
+    for slot, what in enumerate(("logits", "hidden")):
+        value = values.get(outputs[slot]) if isinstance(values, dict) else None
+        shape = value.get("shape") if isinstance(value, dict) else None
+        if (
+            not isinstance(shape, list)
+            or len(shape) != 3
+            or shape[0] != 1
+            or shape[1] != GEMMA4_ROW_SYMBOL
+        ):
+            raise DistError(
+                f"{path}: グラフ出力 '{outputs[slot]}'（{what}）の形が"
+                f" [1, {GEMMA4_ROW_SYMBOL}, *] でない（{shape!r}）"
+            )
+        width = shape[2]
+        if not isinstance(width, int) or isinstance(width, bool) or width <= 0:
+            raise DistError(
+                f"{path}: グラフ出力 '{outputs[slot]}' の幅が正の整数でない（{width!r}）"
+            )
+        widths.append(width)
+    return widths[0]
 
 
 def gemma4_text_config(model_dir: Path) -> SimpleNamespace:
@@ -478,6 +502,19 @@ def gemma4_max_position(text_config: SimpleNamespace, where: str) -> int:
     return declared
 
 
+def gemma4_hidden_size(text_config: SimpleNamespace, where: str) -> int:
+    """モデルが宣言する hidden 幅（製品グラフの出力 1 = 選択行 hidden の幅）。
+
+    MUST: 写経しない（上流 `text_config.hidden_size` が唯一の出どころ）。宣言とグラフは別々の
+    正本から来るので、噛み合わせは {@link assert_gemma4_graph} でしか見られない — 出力 2 本は
+    行軸まで同型なので、入れ替えを落とせるのは**幅を宣言と突き合わせる**この 1 点だけ。
+    """
+    declared = getattr(text_config, GEMMA4_HIDDEN_SIZE_KEY, None)
+    if isinstance(declared, bool) or not isinstance(declared, int) or declared < 1:
+        raise DistError(f"{where}: {GEMMA4_HIDDEN_SIZE_KEY} が正の整数でない（{declared!r}）")
+    return declared
+
+
 def gemma4_rope(text_config: SimpleNamespace, where: str) -> dict[str, Any]:
     """`pipelineConfig.rope`（層種別ごとの theta / headDim / rotaryDim）を config から導く。
 
@@ -502,6 +539,7 @@ def assert_gemma4_graph(
     path: Path,
     index: Mapping[str, Any],
     rope: Mapping[str, Any],
+    hidden_size: int,
 ) -> None:
     """グラフ入力の並び・形・記号の割れ方を、配置の前に実測する。
 
@@ -513,12 +551,20 @@ def assert_gemma4_graph(
     グラフは別々の正本（config / コンテナ）から来るので、噛み合わせはここでしか見られない
     — ホストが宣言どおりに組んだ表が入力の幅と違えば、実行時まで誰も気づけない。
 
+    MUST: 出力 1（hidden）の幅は上流の `hidden_size` と一致すること。出力 2 本は行軸まで
+    同型（どちらも f32 `[1, R, *]`）なので、**入れ替わりを落とせるのはこの幅の突合だけ**
+    — 取り違えたまま通すと、語彙数のつもりで hidden_size を読んだ manifest が組み上がる。
+
     MUST: 表の initializer が 1 本も残っていないこと。派生入力を足したのに表も残っている形は
     常駐が戻るうえ、位置の上限が資産側へ逆戻りする。
 
-    MUST: 記号は 2 本で、**入力 shape から決まらないもの**がちょうど 1 本（full スロットの
-    容量記号）。TS 側 `Gemma4Pipeline` はこの 1 本を容量の束縛点にするので、割れ方が変わると
-    ロード時に落ちる（`capacitySymbolOf` の同じ検査）。
+    MUST: 呼び手は {@link gemma4_vocab_size} を**先に**通していること（出力が 2 本で、どちらも
+    `[1, R, 幅]` の 3 軸であることを前提に幅だけを読む）。
+
+    MUST: 記号は 3 本（chunk 行数 `M` / 出口の行数 `R` / full スロットの容量）で、**入力 shape
+    から決まらないもの**がちょうど 1 本（容量記号）。TS 側 `Gemma4Pipeline` はこの 1 本を容量の
+    束縛点にするので、割れ方が変わるとロード時に落ちる（`capacitySymbolOf` の同じ検査）。
+    `R` は `last_row[R]` が束縛するので、この勘定では自由記号に数えない。
     """
     inputs = graph_inputs(graph, path)
     names = tuple(inputs)
@@ -561,6 +607,16 @@ def assert_gemma4_graph(
                 f"{GEMMA4_PLE_INDEX_FILE} の {field} は {index[field]}"
                 " — グラフと PLE sidecar が別世代"
             )
+    outputs = graph.get("outputs")
+    values = graph.get("values")
+    hidden = values.get(outputs[1]) if isinstance(values, dict) else None
+    found = hidden.get("shape")[2] if isinstance(hidden, dict) else None
+    if found != hidden_size:
+        raise DistError(
+            f"{path} の出力 1（hidden）の幅が {found!r} — 上流の"
+            f" {GEMMA4_HIDDEN_SIZE_KEY} {hidden_size} と違う（出力 2 本が入れ替わっている"
+            "／グラフと宣言が別世代）"
+        )
     symbols = graph.get("symbols")
     if not isinstance(symbols, list):
         raise DistError(f"{path}: IR メタデータに symbols が無い")
@@ -752,7 +808,7 @@ def gemma4_plan(sources: Gemma4Sources, model: str = GEMMA4_DEFAULT_MODEL) -> Mo
     container = placements[GEMMA4_ROLE]
     graph = ir_graph(container)
     vocab_size = gemma4_vocab_size(graph, container)
-    assert_gemma4_graph(graph, container, index, rope)
+    assert_gemma4_graph(graph, container, index, rope, gemma4_hidden_size(text_config, where))
     if index["tokens"] != vocab_size:
         raise DistError(
             f"{sources.product / GEMMA4_PLE_INDEX_FILE}: tokens {index['tokens']} が製品グラフの"
@@ -807,7 +863,7 @@ the Apache License, Version 2.0 (see `LICENSE.md`). The following changes were m
 - **Linear weights were quantized** to packed int4 (group 32) and the embedding tables to int8.
   The values are therefore not bit-identical to the source checkpoint.
 - The **per-layer embedding tables were moved out of the graph** into a sidecar that the host
-  gathers, and the exit was narrowed to the last row's logits.
+  gathers, and the exit was narrowed to the selected rows' logits and final hidden states.
 - **Rotary position embeddings were moved out of the graph**: the cosine and sine rows are built
   by the host from the declared parameters and passed in as ordinary graph inputs.
 

@@ -179,6 +179,17 @@ SEQ_SYMBOL = "M"
 #: **値 shape には現れない states 専用記号**で、export 時に容量を焼かないための席。
 CAPACITY_SYMBOL = "C"
 
+#: sliding スロットの物理行数を `window` から積み増す余裕（= 投機 verify の draft 上限 kmax）。
+#:
+#: WHY: 投機デコードの verify run は論理長より**先**の行を ring へ書く。棄却された行は論理長を
+#: 進めないので、その物理行は次の run が同じ位置へ上書きするまで残る。行写像は
+#: `slot_row(col) = col % capacity`（runtime 側も capacity 基準 — window ではない）なので、
+#: 容量が window ちょうどだと棄却行 `P+i` が潰す論理列 `P+i−window` が live 窓
+#: `[P+a+2−window, …)` の内側に入りうる（a = 受理数）。容量を `window + kmax` にすると潰れる
+#: 列は常に `P+i−window−kmax < P+a+2−window` で窓の外になり、読める行集合が変わらない。
+#: MUST: `window` attrs は据え置き（余裕は物理行だけの話で、読む窓幅は不変）。
+SLIDING_SLACK_ROWS = 8
+
 #: greedy golden の継続 step 数（ADR 0068 決定 4 の出口を多 step で踏む）。
 GREEDY_STEPS = 16
 
@@ -552,6 +563,16 @@ def attention_nodes(graph: IrGraph, config: Any) -> list[IrNode]:
     return nodes
 
 
+def sliding_capacity(config: Any) -> int:
+    """sliding スロットの物理行数（`window + SLIDING_SLACK_ROWS`）。
+
+    手術指定（{@link states_plan}）と形検査（{@link assert_ir_form_common}）が同じ数を読む
+    ための 1 箇所。式を 2 箇所に綴ると、余裕を動かした日に片方だけが古びて「検査が実物と
+    別の容量を期待する」形になる。
+    """
+    return int(config.sliding_window) + SLIDING_SLACK_ROWS
+
+
 def states_plan(
     graph: IrGraph, config: Any, *, capacity_symbol: str = CAPACITY_SYMBOL
 ) -> StatesPlan:
@@ -562,14 +583,15 @@ def states_plan(
     - 層 15..34（共有読者）: 自分のスロットを作らず、layer_type の所有層のスロットを読む。
       sliding の読者は同じ `window` を宣言する（states.py の `_register` が完全一致を検査）。
 
-    容量は層種別で分ける: **sliding スロットは `window` 実数**（ring は window ちょうどで
-    閉じる — ADR 0067 決定 4 の「全読者が past を読み終えてから append」保証。記号のままだと
-    容量 C ぶんの行を確保して window 超の行が死蔵になるだけで、読める行集合は変わらない）・
-    **full スロットは記号のまま**（全 context を保持する側だけが「容量を実行時に選ぶ」自由 —
-    ADR 0066 決定 3 — を必要とする）。
+    容量は層種別で分ける: **sliding スロットは `window + SLIDING_SLACK_ROWS` の実数**（ring は
+    window ではなくこの容量で閉じる — 余裕そのものの理由は {@link SLIDING_SLACK_ROWS}。記号の
+    ままだと容量 C ぶんの行を確保して余裕を超えた行が死蔵になるだけで、読める行集合は
+    変わらない）・**full スロットは記号のまま**（全 context を保持する側だけが「容量を実行時に
+    選ぶ」自由 — ADR 0066 決定 3 — を必要とする）。
     """
     nodes = attention_nodes(graph, config)
     window = int(config.sliding_window)
+    capacity = sliding_capacity(config)
     return StatesPlan(
         capacity_symbol=capacity_symbol,
         attentions=tuple(
@@ -578,7 +600,7 @@ def states_plan(
                 k_slot=slot_name(owner, "k"),
                 v_slot=slot_name(owner, "v"),
                 window=window if layer_type == one_shot.SLIDING_ATTENTION else None,
-                capacity=window if layer_type == one_shot.SLIDING_ATTENTION else None,
+                capacity=capacity if layer_type == one_shot.SLIDING_ATTENTION else None,
             )
             for node, layer_type, owner in zip(
                 nodes, config.layer_types, slot_layers(config), strict=True
@@ -593,14 +615,25 @@ def states_plan(
 TOKEN_ONLY_LAST_ROW = "last_row"
 
 
-def last_row_for(ids: torch.Tensor) -> torch.Tensor:
-    """無 pad 全長 prompt の最終有効行の添字 `[T−1]`（token-only 出口の `last_row` 入力）。
+def last_rows_for(ids: torch.Tensor, rows: int) -> torch.Tensor:
+    """無 pad 全長 prompt の**末尾 `rows` 行**の添字 `[T−rows, …, T−1]`（`last_row` 入力）。
 
     {@link positions_for} と対の「1 chunk で全 prompt を食う」形の値で、例示入力にも sanity の
     全長 forward にも同じものが要る（綴りが 2 箇所に割れると、行選択が最後の行を指さない形が
-    片方だけで作れてしまう）。
+    片方だけで作れてしまう）。製品形の投機 verify は複数行を選ぶので、行数を引数で受ける。
     """
-    return torch.tensor([int(ids.shape[1]) - 1], dtype=torch.int64)
+    length = int(ids.shape[1])
+    if not 1 <= rows <= length:
+        raise AssertionError(f"選択行数 {rows} が prompt 長 {length} に収まらない")
+    return torch.arange(length - rows, length, dtype=torch.int64)
+
+
+def last_row_for(ids: torch.Tensor) -> torch.Tensor:
+    """最終有効行 1 本の添字 `[T−1]`（token-only 出口の `last_row` 入力）。
+
+    行数 1 の {@link last_rows_for} — 添字の算術を 2 箇所に綴らないために委譲する。
+    """
+    return last_rows_for(ids, 1)
 
 
 def assert_layer_type_count(config: Any) -> None:
@@ -651,18 +684,24 @@ def assert_rope_inputs(graph: IrGraph, config: Any, *, seq_symbol: str = SEQ_SYM
         )
 
 
-def assert_single_row_lm_head(
+def assert_row_selected_lm_head(
     graph: IrGraph,
     producer: Mapping[str, IrNode],
     start: IrNode,
+    *,
+    rows: int | str = 1,
 ) -> None:
-    """**1 行 lm_head の固定**（Codex 波 H 指摘 H-01）。
+    """**行選択済み lm_head の固定**（Codex 波 H 指摘 H-01）。
 
     行ごとの lm_head と行選択は可換なので「全行 lm_head → softcap → 行選択」でも token 列は
-    一致する — ADR 0068 の実効（lm_head 1 行・`[M,V]` バッファ消滅）はこの構造検査でしか
-    固定できない。`start`（token-only なら argmax ノード / 製品形なら logits 出力の生産者）
-    から softcap 鎖（div/tanh/mul — いずれも `ins[0]` が本流）を遡って最初の linear が
-    lm_head で、その入力が `[1,1,H]`（行 1 本）かつ祖先に `last_row` 入力を持つこと。
+    一致する — ADR 0068 の実効（lm_head を選択済みの行だけに掛ける・`[M,V]` バッファ消滅）は
+    この構造検査でしか固定できない。`start`（token-only なら argmax ノード / 製品形なら
+    logits 出力の生産者）から softcap 鎖（div/tanh/mul — いずれも `ins[0]` が本流）を遡って
+    最初の linear が lm_head で、その入力が `[1, rows, H]` かつ祖先に `last_row` 入力を持つこと。
+
+    `rows` は期待する選択行数。token-only 出口は常に 1 行（`last_row[1]`）で、製品形は
+    投機 verify の記号 R 行（`last_row[R]`）— 数え方が違うだけで「行選択が lm_head より前に
+    居る」という規律は同一なので、検査は 1 本のまま引数で受ける。
     """
     node = start
     for _ in range(8):
@@ -677,9 +716,9 @@ def assert_single_row_lm_head(
     else:
         raise AssertionError(f"出力の 8 段以内に lm_head（{LINEAR_OP}）が無い")
     row_shape = declared_shape(graph, node.ins[0])
-    if list(row_shape[:2]) != [1, 1]:
+    if list(row_shape[:2]) != [1, rows]:
         raise AssertionError(
-            f"lm_head の入力が {row_shape} — [1,1,H]（選択済みの 1 行）でない"
+            f"lm_head の入力が {row_shape} — [1,{rows},H]（選択済みの {rows} 行）でない"
             "（全行 lm_head へ退行している）"
         )
     input_names = {spec.name for spec in graph.inputs}
@@ -711,6 +750,7 @@ def assert_ir_form_common(
     *,
     seq_symbol: str,
     capacity_symbol: str,
+    extra_symbols: Sequence[str] = (),
 ) -> dict[str, Any]:
     """入口・出口**以外**の全規律（3 形が共有する本体）。
 
@@ -725,8 +765,9 @@ def assert_ir_form_common(
     - `window` の有無が層種別と食い違うと、full 層が窓外を捨てる / sliding 層が窓を無視する
     - スロットの割り当てを間違えると、共有層が別の層の KV を読む（形も型も合う）
     - full スロットの容量が記号でなく数値だと、context 生成時に容量を選べない（ADR 0066
-      決定 3）。sliding スロットは逆に window 実数ちょうどでないと死蔵行が戻る
-      （states_plan docstring — 層種別で理由が違うので検査も分けている）
+      決定 3）。sliding スロットは逆に `window + SLIDING_SLACK_ROWS` の実数ちょうどでないと、
+      余裕が足りなければ投機 verify の棄却行が live 窓を潰し、余りが増えれば死蔵行が戻る
+      （{@link states_plan} / {@link SLIDING_SLACK_ROWS} — 層種別で理由が違うので検査も分けている）
     - `sym_prefix_slice` / `sin` が残ると、誰も読まない Tmax 定数や畳み残しが配布物に居座る
     - 圧縮の適格判定を外した重みは**黙って f32 のまま**残る（`emit._plan_weight_dtype` の
       既定側は静かに落とす経路を持つ）ので、格納 dtype の本数を数えないと気づけない
@@ -735,6 +776,10 @@ def assert_ir_form_common(
     違う）。片方の値で全層を見ると、もう片方の層が丸ごと無検査になる。
     MUST: 呼び手は {@link assert_layer_type_count} を**先に**通していること（本数が合って
     いる前提で `zip(..., strict=True)` を張る）。
+
+    `extra_symbols` は形ごとに増える記号（製品形の行数記号 R — 投機 verify の
+    `last_row[R]`）。記号の集合は**完全一致**で見るので、形ごとの差は引数で受けるほかない
+    （集合の検査を部分集合へ緩めると、束縛できない記号が紛れ込んでも素通りする）。
     """
     heads = int(config.num_attention_heads)
     kv_heads = int(config.num_key_value_heads)
@@ -742,6 +787,7 @@ def assert_ir_form_common(
     layers = int(config.num_hidden_layers)
     owners = slot_layers(config)
     window = int(config.sliding_window)
+    capacity = sliding_capacity(config)
 
     attentions = [node for node in graph.nodes if node.op == ATTENTION_OP]
     if len(attentions) != layers:
@@ -801,15 +847,15 @@ def assert_ir_form_common(
         depth = one_shot._attention_depth(config, layer_type)
         # 容量の検査は層種別で分ける MUST — 記号一色に緩めると「全部数値に焼かれた資産」
         # （容量を実行時に選べない — ADR 0066 決定 3）が素通りし、数値一色に緩めると full の
-        # 容量自由が黙って消える。sliding は window 実数ちょうど（states_plan docstring）。
+        # 容量自由が黙って消える。sliding は window + 余裕の実数（{@link sliding_capacity}）。
         sliding = layer_type == one_shot.SLIDING_ATTENTION
-        slot_shape = [1, kv_heads, window if sliding else capacity_symbol, depth]
+        slot_shape = [1, kv_heads, capacity if sliding else capacity_symbol, depth]
         for part in ("k", "v"):
             name = slot_name(layer, part)
             slot = graph.states[name]
             if slot.dtype != "f32" or list(slot.shape) != slot_shape:
                 kind = (
-                    "sliding は window 実数ちょうど"
+                    f"sliding は window {window} + 余裕 {SLIDING_SLACK_ROWS} の実数ちょうど"
                     if sliding
                     else "full の容量は記号のまま残す MUST"
                 )
@@ -819,10 +865,9 @@ def assert_ir_form_common(
                 )
 
     symbols = sorted(graph.symbols)
-    if symbols != sorted({seq_symbol, capacity_symbol}):
-        raise AssertionError(
-            f"symbols が {symbols} — {sorted({seq_symbol, capacity_symbol})} でない"
-        )
+    expected_symbols = sorted({seq_symbol, capacity_symbol, *extra_symbols})
+    if symbols != expected_symbols:
+        raise AssertionError(f"symbols が {symbols} — {expected_symbols} でない")
     residue = sorted(set(graph.required_ops) & set(RESIDUE_OPS))
     if residue:
         raise AssertionError(
@@ -880,7 +925,7 @@ def assert_ir_form_decode(
     - グラフ入力に mask が残ると「ホストが毎 chunk T² を作って渡す」別物になる
     - `position_ids` が残ると位置がグラフの内側へ戻る（RoPE の外出しが半端）
     - 出口が argmax でなければ decode 出口（ADR 0068 決定 4）ではない
-    - `token_only` では行選択が lm_head より**前**に居ること（{@link assert_single_row_lm_head}）
+    - `token_only` では行選択が lm_head より**前**に居ること（{@link assert_row_selected_lm_head}）
     """
     assert_layer_type_count(config)
 
@@ -909,7 +954,7 @@ def assert_ir_form_decode(
             "（ADR 0068 決定 4 の decode 出口）"
         )
     if token_only:
-        assert_single_row_lm_head(graph, producer, token_source)
+        assert_row_selected_lm_head(graph, producer, token_source)
 
     return assert_ir_form_common(
         graph,

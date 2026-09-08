@@ -8,8 +8,8 @@ gemma4 の門が読む形（full スロットの容量記号 `C` が **states �
 MUST: safetensors のバイト列も IR の規則も手で綴らない（`ir_fixtures` の同 MUST）— 規則の
 写しを持つと、規則が動いた日にフィクスチャだけが古びて「テストは緑・実物だけ落ちる」になる。
 
-MUST: **実物と違う数**にする（語彙 6・層 2・次元 3・位置上限 37・headDim 4/8）— 寸法を
-焼き込んでいれば落ちる。
+MUST: **実物と違う数**にする（語彙 6・層 2・次元 3・hidden 5・位置上限 37・headDim 4/8）—
+寸法を焼き込んでいれば落ちる。
 """
 
 from __future__ import annotations
@@ -41,10 +41,14 @@ from karume.quantize import (
 )
 from karume.verify import verify_shards
 
-#: 合成の寸法（実物は 262144 / 35 / 256）。
+#: 合成の寸法（実物は 262144 / 35 / 256 / 2048）。`HIDDEN` は hidden 出口の幅で、**VOCAB とも
+#: DIM とも違う数**にする（logits と hidden を取り違えた組が幅で落ちる）。
+#: MUST: `HIDDEN` は {@link TEXT_CONFIG} の `hidden_size` と同じ数 — 配布 recipe は上流の宣言と
+#: グラフの幅を突き合わせるので、フィクスチャの中で割れていると正当な組が組めない。
 VOCAB = 6
 LAYERS = 2
 DIM = 3
+HIDDEN = 16
 
 #: 上流 `config.json` の `text_config` のうち、配布 recipe が読む欄だけを持つ最小形。
 #: **実物と違う数**（位置上限 131072 → 37・head_dim 256/512 → 4/8・theta も別値）。
@@ -57,7 +61,7 @@ PARTIAL_ROTARY_FACTOR = 0.5
 
 TEXT_CONFIG: Mapping[str, Any] = {
     "max_position_embeddings": MAX_POSITION,
-    "hidden_size": 16,
+    "hidden_size": HIDDEN,
     "num_attention_heads": 4,
     "head_dim": SLIDING_HEAD_DIM,
     "global_head_dim": FULL_HEAD_DIM,
@@ -82,6 +86,9 @@ ROPE_HEAD_DIMS: Mapping[str, int] = {
 SYM_MAX = 4
 CAPACITY_SYMBOL = "C"
 SEQ_SYMBOL = "M"
+
+#: 出口の行数記号（`last_row[R]` が束縛する — `gemma4.export_product.ROW_SYMBOL` の綴り）。
+ROW_SYMBOL = "R"
 
 #: i4 の group 長と linear 重みの形（`ir_fixtures` と同じ理由 — 行長が group_size で割り切れる
 #: 最小の形。ADR 0069 決定 2）。
@@ -123,16 +130,20 @@ def product_container(
     vocab: int = VOCAB,
     layers: int = LAYERS,
     dim: int = DIM,
+    hidden_size: int = HIDDEN,
     head_dims: Mapping[str, int] | None = None,
     baked_rope: bool = False,
     free_symbol: bool = True,
+    swap_outputs: bool = False,
 ) -> list[bytes]:
     """製品グラフ 1 本ぶんの shard バイト列（読む順 — 先頭がグラフ shard）。
 
     `head_dims` は RoPE 派生入力の幅の上書き（宣言と食い違う世代を作る門のため）。
     `baked_rope` は退役した「表を焼く」形の initializer を 1 本混ぜる（残骸の門）。
-    `free_symbol` を偽にすると容量記号を states から外し、`M` の 1 本だけにする
-    （記号の割れ方の門）。
+    `free_symbol` を偽にすると容量記号を states から外し、入力 shape が束縛する `M` / `R` の
+    2 本だけにする（記号の割れ方の門 — 自由記号がちょうど 1 本であることを見る側）。
+    `swap_outputs` は出口 2 本の順序だけを入れ替える（行軸まで同型なので、幅の突合以外は
+    素通りする組 — 順序の門）。
     """
     widths = {**ROPE_HEAD_DIMS, **dict(head_dims or {})}
     initializers: dict[str, IrInitializer] = {}
@@ -200,17 +211,23 @@ def product_container(
     nodes.append(IrNode(op="cast", ins=[prefix], outs=[kv], attrs={"to": "f32"}))
     nodes.append(IrNode(op="state_append", ins=[kv], outs=[], attrs={}, states={"slot": "l0.k"}))
 
-    # ⑤ 出口は最終行 logits 1 本（`[1, 1, V]` — ADR 0083 決定 6）。
+    # ⑤ 出口は選択行の logits と hidden の 2 本（`[1, R, V]` / `[1, R, H]` — ADR 0083 決定 6 +
+    #    投機 verify の足場）。順序は logits → hidden 固定。
     seed = "logits_seed"
     declare(seed, _ramp(1, 1, 1))
     logits = "logits"
-    values[logits] = IrValue(dtype="f32", shape=[1, 1, vocab])
+    values[logits] = IrValue(dtype="f32", shape=[1, ROW_SYMBOL, vocab])
     nodes.append(IrNode(op="expand", ins=[seed], outs=[logits], attrs={}))
+    hidden = "hidden"
+    values[hidden] = IrValue(dtype="f32", shape=[1, ROW_SYMBOL, hidden_size])
+    nodes.append(IrNode(op="expand", ins=[seed], outs=[hidden], attrs={}))
 
     # `free_symbol` を偽にすると容量が具体数になり、記号は `M` の 1 本だけになる。
     capacity_dim: str | int = CAPACITY_SYMBOL if free_symbol else SYM_MAX
     graph = IrGraph(
-        symbols=[CAPACITY_SYMBOL, SEQ_SYMBOL] if free_symbol else [SEQ_SYMBOL],
+        symbols=(
+            [CAPACITY_SYMBOL, SEQ_SYMBOL, ROW_SYMBOL] if free_symbol else [SEQ_SYMBOL, ROW_SYMBOL]
+        ),
         inputs=[
             IrInput(name="input_ids", dtype="i32", shape=[1, SEQ_SYMBOL]),
             *(
@@ -223,9 +240,9 @@ def product_container(
                 for part in GEMMA4_ROPE_PARTS
             ),
             IrInput(name="per_layer_inputs", dtype="f32", shape=[1, SEQ_SYMBOL, layers, dim]),
-            IrInput(name="last_row", dtype="i32", shape=[1]),
+            IrInput(name="last_row", dtype="i32", shape=[ROW_SYMBOL]),
         ],
-        outputs=[logits],
+        outputs=[hidden, logits] if swap_outputs else [logits, hidden],
         initializers=initializers,
         values=values,
         states={"l0.k": IrState(dtype="f32", shape=[1, 1, capacity_dim, 1])},

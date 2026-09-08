@@ -467,15 +467,18 @@ class TestStatesPlan:
         plan = decode.states_plan(_pre_surgery_graph(), TINY_IR_CONFIG)
 
         assert [spec.window for spec in plan.attentions] == [WINDOW, WINDOW, None, WINDOW, None]
-        # 容量は層種別で分かれる: sliding = window 実数（ring は window ちょうどで閉じる）/
-        # full = 記号（実行時に選ぶ — ADR 0066 決定 3）。states_plan docstring が正本。
-        assert [spec.capacity for spec in plan.attentions] == [
-            WINDOW,
-            WINDOW,
-            None,
-            WINDOW,
-            None,
-        ]
+        # 容量は層種別で分かれる: sliding = window + 余裕の実数（棄却行が live 窓を潰さない
+        # ための余裕 — SLIDING_SLACK_ROWS）/ full = 記号（実行時に選ぶ — ADR 0066 決定 3）。
+        slack = WINDOW + decode.SLIDING_SLACK_ROWS
+        assert [spec.capacity for spec in plan.attentions] == [slack, slack, None, slack, None]
+
+    def test_the_sliding_capacity_leaves_room_for_the_speculative_rows(self):
+        """MUST: 余裕は window 基準ではなく容量に載る（`window` attrs は据え置き）。"""
+        plan = decode.states_plan(_pre_surgery_graph(), TINY_IR_CONFIG)
+
+        sliding = [spec for spec in plan.attentions if spec.window is not None]
+        assert all(spec.capacity == spec.window + decode.SLIDING_SLACK_ROWS for spec in sliding)
+        assert decode.SLIDING_SLACK_ROWS >= 1
 
     def test_a_layer_count_mismatch_fails_loudly(self):
         """MUST: 取りこぼした層は chunk 局所 causal のまま残る（沈黙誤値）。"""
@@ -616,7 +619,7 @@ class TestAssertIrFormDecode:
             )
 
     def test_a_symbolic_sliding_capacity_is_rejected(self):
-        """sliding の容量が記号のままだと window 超の死蔵行が戻る（緩めると素通りする側）。"""
+        """sliding の容量が記号のままだと余裕を超えた死蔵行が戻る（緩めると素通りする側）。"""
         graph = _pre_surgery_graph()
         symbolic = StatesPlan(
             capacity_symbol=decode.CAPACITY_SYMBOL,
@@ -626,9 +629,29 @@ class TestAssertIrFormDecode:
             ),
         )
 
-        with pytest.raises(AssertionError, match="sliding は window 実数ちょうど"):
+        with pytest.raises(AssertionError, match=r"sliding は window .* の実数ちょうど"):
             decode.assert_ir_form_decode(
                 to_states_form(graph, symbolic), TINY_IR_CONFIG, STORAGE_COUNTS
+            )
+
+    def test_a_sliding_capacity_without_the_slack_is_rejected(self):
+        """余裕を落として window ちょうどに戻した形（投機 verify の棄却行が live 窓を潰す側）。
+
+        `window` attrs も宣言も動かないので、shape も型も IR 検証も全部通る — 検査を
+        {@link decode.sliding_capacity} と同じ数に固定しておくことでしか捕まらない。
+        """
+        graph = _pre_surgery_graph()
+        tight = StatesPlan(
+            capacity_symbol=decode.CAPACITY_SYMBOL,
+            attentions=tuple(
+                replace(spec, capacity=spec.window) if spec.window is not None else spec
+                for spec in decode.states_plan(graph, TINY_IR_CONFIG).attentions
+            ),
+        )
+
+        with pytest.raises(AssertionError, match=r"sliding は window .* の実数ちょうど"):
+            decode.assert_ir_form_decode(
+                to_states_form(graph, tight), TINY_IR_CONFIG, STORAGE_COUNTS
             )
 
     def test_a_missing_state_append_is_rejected(self):

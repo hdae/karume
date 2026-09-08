@@ -112,8 +112,11 @@ carries a sliding window, shared KV and mixed storage at once.
 `M` is the physical chunk extent — `chunkLength` when prefilling, 1 when decoding — and only its
 leading `queryLength` rows are valid. Capacity is declared per layer type: the 6 full slots carry
 the symbol `C`, chosen by `createGenerationContext` at run time, while the 24 sliding slots bake
-`sliding_window` as a literal — their ring closes at exactly `window` rows, so a symbolic capacity
-would only reserve rows that can never be read (ADR 0066 addendum 9).
+`sliding_window + SLIDING_SLACK_ROWS` as a literal — their ring closes at that capacity, so a
+symbolic capacity would only reserve rows that can never be read (ADR 0066 addendum 9). The slack
+is the speculative draft bound: a verify pass writes rows ahead of the committed length, and the
+extra physical rows keep a rejected row from overwriting a column that is still inside the live
+window. The declared `window` attribute itself does not move — only the physical row count does.
 
 Three structural differences from the 1-shot recipe, and the export fails loudly when any is lost:
 
@@ -215,8 +218,13 @@ two changes that ship together in a single re-export (ADR
   [0085](../../../docs/decisions/0085-ple-host-gather.md) decision 6). The container drops from
   3,787 MiB to **1,512 MiB** (measured), because every initializer is given a resident GPU slot at
   session build time and 2,240 MiB of int8 tables plus 35 MiB of per-row scales were exactly that.
-- The **exit is the final-row logits** `logits[1, 1, 262144]`, i.e. `export_token.py`'s wiring with
-  the `argmax` removed. Sampling, temperature, top-k and the RNG stay on the host (ADR 0083
+- The **exit is the selected rows' logits and hidden states**, `logits[1, R, 262144]` (output 0)
+  and the post-final-norm `hidden[1, R, 1536]` (output 1), i.e. `export_token.py`'s wiring with the
+  `argmax` removed and the row select widened. `R` is a symbol bound by the `last_row[R]` input:
+  ordinary prefill and decode bind it to 1 and are bit-identical to the single-row exit, while a
+  speculative-decoding verify pass scores up to `SLIDING_SLACK_ROWS` rows in one run and feeds the
+  hidden states to the drafter. Output **order is part of the contract** — the runtime reads
+  outputs by slot number. Sampling, temperature, top-k and the RNG stay on the host (ADR 0083
   decision 6); the read-back for a prefill chunk drops from 32 MiB (`[1, M, V]`) to 1 MiB.
 
 The tables are redistributed as a **sidecar** next to the container:
