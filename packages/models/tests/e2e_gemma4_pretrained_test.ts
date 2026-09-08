@@ -110,10 +110,13 @@ Deno.test({
     const manifest = parseManifest(MANIFEST_TEXT ?? "");
     const entry = manifest.models[manifest.defaultModel];
     assertEquals(entry.pipeline, { name: "gemma4", major: 1 }, "pipeline 契約");
+    // weights の役割は製品グラフ + 投機の drafter の 2 本ちょうど（ADR 0096 段 2 で
+    // `drafter` が増えた）。PLE も tokenizer も**依然 assets の席**で、weights には来ない —
+    // ここが増えたら「sidecar を weights へ戻した」退行である。
     assertEquals(
       Object.keys(entry.weights),
-      ["model"],
-      "weights は製品グラフ 1 本（PLE も tokenizer も assets の席）",
+      ["model", "drafter"],
+      "weights は製品グラフ + drafter の 2 本（PLE も tokenizer も assets の席）",
     );
     // ④ 索引が名指しする shard ファイル名が、そのまま manifest の asset 名（= 取得キー）。
     const index = JSON.parse(

@@ -21,6 +21,25 @@
  *
  * NOTE: manifest 本体（`karume.json`）のエントリは対象外 — URL キーで小さく、選択の所有物でも
  * ない（丸ごと消すのは `clearHubCache`）。
+ *
+ * ## weights の絞り込み（{@link ResolveOptions.weights}）が勘定に効く形
+ *
+ * 選択は {@link ResolveOptions} なので、対象にも `protect` にも「weights の部分集合」を渡せる。
+ * 効き方は 1 つ — **参照の集合が絞ったぶんだけ小さくなる**（`resolveFiles` の結果がそのまま
+ * 勘定の材料）:
+ *
+ * - 照会（{@link listCachedAssets}）… `cached` / `missing` は絞った参照だけを数える。ある役割
+ *   （gemma4 の `drafter`）を落とし済みかを、本体の在庫と独立に問える。
+ * - 削除（{@link evictCachedAssets}）… 消す候補が絞った参照だけになる。**同じ (model, quant) の
+ *   残りは守る側に数えない**（守る側の候補は「対象と label の違う選択」で、同じ label の
+ *   別の部分集合は候補に上がらない）ので、「本体は残して drafter だけ消す」が書ける。
+ * - 巻き添え（{@link EvictedAssets.alsoEvicted}）… 数えるのは**他の (model, quant)** だけで、
+ *   同じ選択の残りは載らない。同じ label の中で部分在庫になったかどうかは、必要なら
+ *   {@link listCachedAssets} をもう一度引いて見る（label は `"<model>/<quant>"` のままで、
+ *   部分集合を名乗る欄は持たない）。
+ * - ラベル（{@link KeptAsset.sharedWith} / {@link EvictedAssets.alsoEvicted}）は絞っても
+ *   `"<model>/<quant>"` のまま。`protect` に同じ label の部分集合を 2 つ並べると**両方が守る**
+ *   （同じ label が 2 度出ないよう `sharedWith` は一意化する）。
  */
 
 import { HubError } from "./errors.ts";
@@ -41,8 +60,8 @@ export type CacheInventoryOptions = {
    *
    * 指定時は同一集合の除外を**しない** — 兄弟の選択を名指しで守れば `kept: "shared"` になる。
    * 「同一集合をどう扱うか」の方針をアプリ側に残すための席。対象自身が入っていても無視する
-   * （対象を自分から守ることはできない）。存在しない model / quant は
-   * `ManifestReferenceError`。
+   * （= 同じ (model, quant) は `weights` で絞っていても候補にならない）。存在しない
+   * model / quant / weights は `ManifestReferenceError`。
    */
   readonly protect?: readonly ResolveOptions[];
 };
@@ -143,22 +162,30 @@ const sameRefSet = (left: readonly FileRef[], right: readonly FileRef[]): boolea
 
 /**
  * `protect` の一覧を守る側の候補へ正規化する。`resolveFiles` を通してから実名化するので、
- * 存在しない model / quant はここで `ManifestReferenceError`。重複はラベルで一意化し、対象自身は
+ * 存在しない model / quant / weights はここで `ManifestReferenceError`。重複は落とし、対象自身も
  * 落とす（対象を自分から守ることはできない）。
+ *
+ * MUST: 一意化の鍵は label ではなく**label + 参照集合**にする。`weights` で絞った選択は同じ
+ * label のまま別の集合を守るので、label だけで畳むと後勝ちで片方の指定が黙って消える
+ * （「守ったはずのファイルが消えている」= 診断の出ない取り違え）。
  */
 const protectorsOf = (
   manifest: Manifest,
   entries: readonly ResolveOptions[],
   target: Selection,
 ): readonly SelectionRefs[] => {
-  const byLabel = new Map<string, SelectionRefs>();
+  const byKey = new Map<string, SelectionRefs>();
   for (const entry of entries) {
     const refs = refsOf(manifest, entry);
     const selection = namedSelection(manifest, entry);
     if (selection.model === target.model && selection.quant === target.quant) continue;
-    byLabel.set(labelOf(selection), { selection, refs });
+    // 参照の並びは `resolveFiles` の宣言順なので、同じ部分集合は同じ鍵になる。
+    byKey.set(`${labelOf(selection)} ${refs.map(fileRefKey).join(" ")}`, {
+      selection,
+      refs,
+    });
   }
-  return [...byLabel.values()];
+  return [...byKey.values()];
 };
 
 /**
@@ -287,11 +314,14 @@ export const evictCachedAssets = async (
   const sharedWith = new Map<string, string[]>();
   for (const other of protectors) {
     if (!other.refs.every(isCached)) continue;
+    const label = labelOf(other.selection);
     for (const ref of other.refs) {
       const key = fileRefKey(ref);
       const labels = sharedWith.get(key);
-      if (labels === undefined) sharedWith.set(key, [labelOf(other.selection)]);
-      else labels.push(labelOf(other.selection));
+      if (labels === undefined) sharedWith.set(key, [label]);
+      // 同じ label の部分集合が 2 つ守っていても、名乗る label は 1 つ（`protect` に
+      // `weights` 違いを並べたときだけ起きる — 同じ名前を 2 度出しても読み手に何も足さない）。
+      else if (!labels.includes(label)) labels.push(label);
     }
   }
 

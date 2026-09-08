@@ -1,11 +1,12 @@
 // `resolveFiles` の 2 軸（model / quant）。取得層は通さず、manifest から取得キー表を作るところ
 // だけを見る。
 //
-// ここで押さえるのは 4 つ:
+// ここで押さえるのは 5 つ:
 //  ① 省略時は `defaultModel` / `defaultQuant` に落ちる（v2 で model 軸が増えた）。
 //  ② weights は選んだ dtype、assets は quant に依らず常に同じ実体が入る。
 //  ③ 未知の model / quant は**利用可能な一覧**を添えて落ちる（ADR 0041 §8）。
 //  ④ 複数 shard は宣言順のまま `<weights>[i]` へ展開される（v3 の shards 欄）。
+//  ⑤ `weights` の部分集合を渡すとその役割だけが表に出る（並びは宣言順・未知名と重複は拒否）。
 
 import { assertEquals, assertThrows } from "@std/assert";
 import { ManifestReferenceError, parseManifest, resolveFiles } from "../mod.ts";
@@ -175,6 +176,58 @@ Deno.test("resolveFiles: assets が shard 展開のキーを主張したら取�
     () => resolveFiles(shardedNet({ "net[0]": fileRefJson("shared/net0.safetensors", 4, "d4") })),
     ManifestReferenceError,
     "取得キー 'net[0]' が衝突した",
+  );
+});
+
+// ---- ⑤ weights の部分集合（`ResolveOptions.weights`）。1 つのモデルが「本体だけでも動き、
+// 追加の役割を足すこともできる」形（gemma4 の model + drafter）を、配布形を割らずに扱う軸。
+
+Deno.test("resolveFiles: weights を絞ると指定した役割だけが表に出る（assets は全数）", () => {
+  const files = resolveFiles(manifest, { weights: ["transformer"] });
+  // transformer の shard + その extras + assets 2 本。他の 3 役割は 1 本も出ない。
+  assertEquals(Object.keys(files), [
+    "transformer",
+    "transformer.rope_base",
+    "tokenizer",
+    "rope_alias",
+  ]);
+  // 絞っても dtype の選び方は変わらない（既定 quant の i8）。
+  assertEquals(files["transformer"].path, "transformer/model.i8.safetensors");
+});
+
+Deno.test("resolveFiles: weights の並びは宣言順（指定した順ではない）", () => {
+  const files = resolveFiles(manifest, { weights: ["vae_decoder", "text_encoder"] });
+  // 呼び手が逆順に並べても、表は manifest の宣言順のまま（位置で引き当てる層のため）。
+  assertEquals(Object.keys(files), ["text_encoder", "vae_decoder", "tokenizer", "rope_alias"]);
+});
+
+Deno.test("resolveFiles: weights の空配列は 1 本も取らない（assets だけ）", () => {
+  assertEquals(Object.keys(resolveFiles(manifest, { weights: [] })), ["tokenizer", "rope_alias"]);
+});
+
+Deno.test("resolveFiles: 実在しない weights 名は利用可能一覧つきで拒否する", () => {
+  const error = assertThrows(
+    () => resolveFiles(manifest, { weights: ["transformer", "drafter"] }),
+    ManifestReferenceError,
+    "weights 'drafter' は manifest に無い",
+  );
+  assertEquals(error.available.models, ["anima-turbo", "anima-lite"]);
+});
+
+Deno.test("resolveFiles: weights の重複は拒否する", () => {
+  assertThrows(
+    () => resolveFiles(manifest, { weights: ["transformer", "transformer"] }),
+    ManifestReferenceError,
+    "weights 'transformer' が 2 度指定された",
+  );
+});
+
+Deno.test("resolveFiles: weights の実在はモデルごとに見る", () => {
+  // anima-lite に text_conditioner は無い（anima-turbo にはある）。
+  assertThrows(
+    () => resolveFiles(manifest, { model: "anima-lite", weights: ["text_conditioner"] }),
+    ManifestReferenceError,
+    "利用可能: text_encoder / transformer",
   );
 });
 

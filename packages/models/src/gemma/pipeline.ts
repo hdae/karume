@@ -44,6 +44,8 @@ import {
   planWeightResidency,
   type Session,
   type SessionDiagnostics,
+  type SessionOptions,
+  type SharedWeight,
   type StateAttentionReduce,
 } from "@karume/runtime";
 import {
@@ -109,6 +111,12 @@ import {
   gemma4RopeInputs,
 } from "./rope.ts";
 import {
+  admitGemma4Drafter,
+  GEMMA4_DRAFT_STEPS,
+  type Gemma4Drafter,
+  type Gemma4DrafterAdmission,
+} from "./speculative.ts";
+import {
   createStopStringFilter,
   type StopStringFilter,
   type StreamingDetokenizer,
@@ -145,6 +153,15 @@ const GRAPH_OUTPUTS = 2;
  * 「eager に並べなかった残り」として自動的に PLE shard だけになる。
  */
 const MODEL = "model";
+/**
+ * 投機（MTP drafter）を使うときだけ足す weights の役割（ADR 0096 段 2 §5）。
+ *
+ * MUST: 既定では**取得キーの表に載せない**（`resolveFiles` の `weights` で `model` だけに
+ * 絞る）。載せると shard 面がこれを「用途不明の資産」として全量取得したうえ、遅延資産の
+ * 突合（{@link assertPleShardAssets} は「遅延側 = PLE shard ちょうど」を要求する）が
+ * **投機を使わないロードで**落ちる。
+ */
+const DRAFTER = "drafter";
 const TOKENIZER_ASSET = "tokenizer";
 const PLE_INDEX_ASSET = "ple_index";
 const EAGER_ASSETS: readonly string[] = [TOKENIZER_ASSET, PLE_INDEX_ASSET];
@@ -292,6 +309,25 @@ export type Gemma4PipelineOptions = {
    * その両方が保持されて切替ごとの作り直しが消える。
    */
   readonly planBackingBudgetBytes?: number;
+  /**
+   * 投機デコード用の **MTP drafter を一緒に組む**（ADR 0096 段 2 — 省略時は組まない）。
+   *
+   * 指定すると配布形の `drafter` weights も取得し、target Session の埋め込み表 1 本を借りる
+   * drafter Session を 1 本張る（バイトは複製されない）。**指定しない限り drafter の shard は
+   * 1 バイトも落ちない** — 取得キーの表そのものから外れる（{@link DRAFTER} の MUST）。
+   *
+   * MUST: 段 2 の `k` は **3 固定**（配布形の drafter グラフが 3 段で焼かれている — 出口の
+   * 本数がそのまま k）。3 以外は fail loudly で、動的な k は段 3 の投機ループと同じ波で入る。
+   *
+   * NOTE: 段 2 が用意するのは drafter を**載せる**ところまでで、投機ループ（draft → verify →
+   * 受理・棄却）はまだ無い。`chat` / `sequence` の振る舞いはこの指定で 1 つも変わらない。
+   * NOTE: {@link Gemma4Pipeline.estimateSessionMemory} は段 2 では**target ぶんだけ**を返す
+   * （drafter の常駐と借り物スロットの合算は段 3）。
+   */
+  readonly speculative?: {
+    /** draft する token 数（段 2 は 3 固定・省略時も 3）。 */
+    readonly k?: number;
+  };
 };
 
 /**
@@ -534,6 +570,14 @@ type Gemma4State = {
   readonly tokenizer: GemmaTokenizer;
   readonly config: Gemma4PipelineConfig;
   /**
+   * 投機の drafter（{@link Gemma4PipelineOptions.speculative} を渡したときだけ）。
+   *
+   * MUST: dispose は**貸し手（target Session）より先**（借り手が生きている間の貸し手
+   * `dispose()` は runtime が fail loudly で断る — 借り手の bind group が貸し手の重みを
+   * 掴んでいる）。
+   */
+  readonly drafter?: Gemma4Drafter;
+  /**
    * Session に渡した slot backing の保持予算（{@link Gemma4PipelineOptions.planBackingBudgetBytes}・
    * 未指定なら runtime の既定）。
    *
@@ -558,6 +602,11 @@ type Gemma4Admission = {
   readonly vocabSize: number;
   /** full スロットの容量記号（`createGenerationContext` の束縛点）。 */
   readonly capacitySymbol: string;
+  /** 投機を指定したときだけ確定する drafter の材料（コンポーネント + 突合の結果）。 */
+  readonly drafter?: {
+    readonly component: ModelComponent;
+    readonly admission: Gemma4DrafterAdmission;
+  };
 };
 
 /**
@@ -688,6 +737,27 @@ const vocabSizeOf = (graph: GenerationGraph): number => {
 };
 
 /**
+ * 最終 norm 後 hidden 出口の幅をグラフから引く（`[1, R, H]` — 出力 1・ADR 0083 決定 6）。
+ *
+ * 呼ぶのは投機のときだけ（drafter の入力 `hidden` の幅がこれと一致する MUST）。本数と順序は
+ * {@link vocabSizeOf} が既に見ている。
+ */
+const hiddenSizeOf = (graph: GenerationGraph): number => {
+  const name = graph.outputs[1];
+  if (!Object.hasOwn(graph.values, name)) {
+    throw new Error(`Gemma4Pipeline: グラフ出力 '${name}' の値情報が無い`);
+  }
+  const shape = graph.values[name].shape;
+  const hidden = shape[2];
+  if (shape.length !== 3 || typeof hidden !== "number") {
+    throw new Error(
+      `Gemma4Pipeline: グラフ出力 '${name}' の shape [${shape.join(",")}] が [1,R,H] でない`,
+    );
+  }
+  return hidden;
+};
+
+/**
  * full スロットの容量記号をグラフから引く。
  *
  * 記号は「入力 shape から決まらないもの」がちょうど 1 本のはずで（chunk 長の記号は
@@ -763,15 +833,53 @@ export const assertRopeInputShapes = (
  * 同じ検査を 2 実装持たない）。ここが見るのは宣言**とグラフの突合**だけで、
  * {@link assertRopeInputShapes} がその 1 本である（グラフはこの席で初めて手に入る）。
  */
-const admitGemma4 = (component: ModelComponent, config: Gemma4PipelineConfig): Gemma4Admission => {
+const admitGemma4 = (
+  component: ModelComponent,
+  config: Gemma4PipelineConfig,
+  drafter?: ModelComponent,
+): Gemma4Admission => {
   const { graph } = component;
   assertRopeInputShapes(graph, config);
+  const vocabSize = vocabSizeOf(graph);
+  const capacitySymbol = capacitySymbolOf(graph);
   return {
     component,
     config,
-    vocabSize: vocabSizeOf(graph),
-    capacitySymbol: capacitySymbolOf(graph),
+    vocabSize,
+    capacitySymbol,
+    // drafter の門は `./speculative.ts` が持つ（借り物スロット・共有 initializer の綴りは
+    // 投機の知識で、target の門とは別の 1 本）。target の材料は**確定したもの**を渡す。
+    ...(drafter === undefined ? {} : {
+      drafter: {
+        component: drafter,
+        admission: admitGemma4Drafter("Gemma4Pipeline", drafter.graph, {
+          graph,
+          rope: config.rope,
+          hiddenSize: hiddenSizeOf(graph),
+          capacitySymbol,
+        }),
+      },
+    }),
   };
+};
+
+/**
+ * {@link Gemma4PipelineOptions.speculative} の門（**資産を 1 バイトも取る前**に同期で落とす）。
+ *
+ * MUST: 段 2 は `k = 3` 固定。配布形の drafter グラフは 3 段で焼かれていて、出口の本数がそのまま
+ * k である — 別の値を受けると「宣言と違う本数の draft を採る」形が黙って通る。動的な k は段 3。
+ */
+const assertSpeculative = (
+  where: string,
+  speculative: NonNullable<Gemma4PipelineOptions["speculative"]>,
+): void => {
+  const k = speculative.k ?? GEMMA4_DRAFT_STEPS;
+  if (k !== GEMMA4_DRAFT_STEPS) {
+    throw new Error(
+      `${where}: speculative.k ${k} は段 2 では受けられない` +
+        `（配布形の drafter は k = ${GEMMA4_DRAFT_STEPS} 段で焼かれている — 動的な k は段 3）`,
+    );
+  }
 };
 
 /**
@@ -1188,6 +1296,7 @@ export class Gemma4Pipeline {
     options: Gemma4FromPretrainedOptions = {},
   ): Promise<Gemma4Pipeline> {
     const where = "Gemma4Pipeline.fromPretrained";
+    if (options.speculative !== undefined) assertSpeculative(where, options.speculative);
     const source = toManifestSource(ref, where, 'GEMMA4_SOURCES["gemma4"]（@karume/models/gemma）');
     const hubOptions: StreamAssetsOptions = hubLoadOptions(options);
     const loaded = await loadManifest(source, hubOptions);
@@ -1195,16 +1304,23 @@ export class Gemma4Pipeline {
       ...(options.model === undefined ? {} : { model: options.model }),
       ...(options.quant === undefined ? {} : { quant: options.quant }),
     };
-    const files = resolveFiles(loaded.manifest, selection);
+    // MUST: 取る weights を役割で絞る（`ResolveOptions.weights`）。投機を使わないロードで
+    // drafter の shard が表に残ると、遅延資産の突合（{@link assertPleShardAssets}）が落ちる。
+    const componentKeys = options.speculative === undefined ? [MODEL] : [MODEL, DRAFTER];
+    const files = resolveFiles(loaded.manifest, { ...selection, weights: componentKeys });
     const { admitted, assets, deferred } = await loadShardComponents(
       where,
       loaded,
       files,
-      [MODEL],
+      componentKeys,
       // 家族の門は admission 席で通す（重み shard を取る前 — `src/hub/components.ts`）。
       async (open) => {
         const { config, quantName, quant } = gemma4ManifestConfig(loaded.manifest, selection);
-        const admitted = admitGemma4(open(MODEL), config);
+        const admitted = admitGemma4(
+          open(MODEL),
+          config,
+          options.speculative === undefined ? undefined : open(DRAFTER),
+        );
         // 配布形が宣言した `requiredLimits` は**重み shard を取る前**にここで見る
         // （ADR 0089 決定 5 — 共有 GPU ならその limits、自前で取る経路はアダプタ実測値）。
         // 他 7 家族と違って席が閉包側にあるのは、{@link admitGemma4} が構築オプションを
@@ -1298,6 +1414,14 @@ export class Gemma4Pipeline {
     options: Gemma4PipelineOptions = {},
   ): Promise<Gemma4Pipeline> {
     const where = "Gemma4Pipeline.fromAssets";
+    // MUST: この面に drafter の席は無い（{@link Gemma4Assets} が持つのは製品グラフ 1 本）。
+    // 黙って投機なしで組むと「指定したのに効かない」形になるので fail loudly で断る。
+    if (options.speculative !== undefined) {
+      throw new Error(
+        `${where}: speculative は受けられない` +
+          `（Gemma4Assets に drafter の shard 列が無い — 投機は fromPretrained から組む）`,
+      );
+    }
     const config = parseGemma4PipelineConfig(input.config);
     if (input.model.length === 0) {
       throw new Error(`${where}: 製品グラフの shard 列が空（先頭がグラフ shard）`);
@@ -1326,6 +1450,9 @@ export class Gemma4Pipeline {
    *
    * Session を 1 本持ち続けるのは siglip2 と同じ理由で、畳む相手（同時に載せられない別の
    * 巨大グラフ）が居ないため — 会話ごとに張り直すと 1.5GiB の重みを毎回アップロードし直す。
+   *
+   * 投機を指定したときは drafter Session も**ここで 1 本**張る（会話ごとではない — ADR 0096
+   * 段 2 の裁定「束ね口は context」）。順序は target が先で、drafter はその埋め込み表を借りる。
    */
   static async #build(
     admitted: Gemma4Admission,
@@ -1335,25 +1462,30 @@ export class Gemma4Pipeline {
     const { wiring, tokenizer, ple } = buildGemma4Program(admitted, assets, options);
     const gpu = options.gpu ?? await acquireGpu();
     const ownsGpu = options.gpu === undefined;
+    // ③PV の縮約形は家族の既定（K-12 昇格済み）— 呼び手が明示すればそれに従う。予算は
+    // 未指定なら欄ごと渡さない（既定値をここに写すと、runtime 側で既定が動いたときに
+    // この家族だけ古い値で走る）。drafter Session にも同じノブを渡す。
+    const sessionOptions = {
+      stateAttentionReduce: options.stateAttentionReduce ?? GEMMA4_STATE_ATTENTION_REDUCE,
+      ...(options.planBackingBudgetBytes === undefined
+        ? {}
+        : { planBackingBudgetBytes: options.planBackingBudgetBytes }),
+    };
+    let session: Session | undefined;
     try {
+      session = await admitted.component.createSession(gpu, sessionOptions);
+      const drafter = await Gemma4Pipeline.#buildDrafter(admitted, session, gpu, sessionOptions);
       return new Gemma4Pipeline({
         gpu,
         ownsGpu,
-        // ③PV の縮約形は家族の既定（K-12 昇格済み）— 呼び手が明示すればそれに従う。
-        session: await admitted.component.createSession(gpu, {
-          stateAttentionReduce: options.stateAttentionReduce ?? GEMMA4_STATE_ATTENTION_REDUCE,
-          // 予算は runtime の既定に任せる（未指定は欄ごと渡さない — 既定値をここに写すと、
-          // runtime 側で既定が動いたときにこの家族だけ古い値で走る）。
-          ...(options.planBackingBudgetBytes === undefined
-            ? {}
-            : { planBackingBudgetBytes: options.planBackingBudgetBytes }),
-        }),
+        session,
         graph: admitted.component.graph,
         wiring,
         program: generationProgramFace(wiring),
         ple,
         tokenizer,
         config: admitted.config,
+        ...(drafter === undefined ? {} : { drafter }),
         ...(options.planBackingBudgetBytes === undefined
           ? {}
           : { planBackingBudgetBytes: options.planBackingBudgetBytes }),
@@ -1362,10 +1494,48 @@ export class Gemma4Pipeline {
           : { onRunDiagnostics: options.onRunDiagnostics }),
       });
     } catch (error) {
-      // 内部で取った GPU は、構築に失敗したら誰も解放できなくなるのでここで返す。
-      if (ownsGpu) gpu.destroy();
+      // 構築に失敗したら誰も解放できなくなるので、ここで返す。順序は借り手（drafter は
+      // 張れていない = 借用計数は既に戻っている）→ 貸し手 → 内部で取った GPU。
+      await disposeSteps([
+        () => {
+          if (session !== undefined) return session.dispose();
+        },
+        () => {
+          if (ownsGpu) gpu.destroy();
+        },
+      ]).catch(() => {});
       throw error;
     }
+  }
+
+  /**
+   * drafter Session を 1 本張る（投機を指定したときだけ）。
+   *
+   * 借りるのは target Session が既に GPU へ載せた埋め込み表で、`shared.tensor` →
+   * 貸し手 initializer 名の対応は admission が確定させてある（`./speculative.ts`）。
+   * バイトは 1 つも複製されない。
+   */
+  static async #buildDrafter(
+    admitted: Gemma4Admission,
+    target: Session,
+    gpu: GpuContext,
+    sessionOptions: SessionOptions,
+  ): Promise<Gemma4Drafter | undefined> {
+    const { drafter } = admitted;
+    if (drafter === undefined) return undefined;
+    let sharedWeights: Record<string, SharedWeight> = {};
+    for (const borrower of Object.keys(drafter.admission.sharedWeights)) {
+      sharedWeights = {
+        ...sharedWeights,
+        [borrower]: target.exportWeight(drafter.admission.sharedWeights[borrower]),
+      };
+    }
+    return {
+      session: await drafter.component.createSession(gpu, { ...sessionOptions, sharedWeights }),
+      outputs: drafter.admission.outputs,
+      rope: admitted.config.rope,
+      hiddenSize: drafter.admission.hiddenSize,
+    };
   }
 
   /**
@@ -1576,6 +1746,10 @@ export class Gemma4Pipeline {
    *
    * NOTE: `AdmissionReport` は runtime の型で、`@karume/models` は再輸出しない（ADR 0008 の薄い面 —
    * 見積りを読む消費者は runtime の型をそのまま使う）。
+   * NOTE: {@link Gemma4PipelineOptions.speculative} を渡していても、返るのは**target ぶんだけ**
+   * である（段 2 の範囲 — ADR 0096）。drafter の常駐重み（借り物の埋め込み表を除いた ~76MB）と
+   * 借り手 context の一時ぶんを足した合算は、投機ループ（段 3）で verify の R > 1 シナリオと
+   * 一緒に足す。
    */
   estimateSessionMemory(options: Gemma4EstimateOptions = {}): AdmissionReport {
     const { wiring, graph, gpu } = this.#state;
@@ -1642,8 +1816,8 @@ export class Gemma4Pipeline {
   }
 
   /**
-   * 解放する。渡した sequence を先に畳み、Session を畳み、**内部で取得した GPU だけ**破棄し、
-   * 最後に PLE sidecar のホストキャッシュを返す。
+   * 解放する。渡した sequence を先に畳み、**drafter Session（居れば）→ target Session** の順に
+   * 畳み、**内部で取得した GPU だけ**破棄し、最後に PLE sidecar のホストキャッシュを返す。
    *
    * MUST: in-flight の生成の完了を待ってから破棄する（flush-before-destroy）— 破棄も鎖に
    * 載せることで、待ちと破棄の順序を 1 箇所で決める。2 度目以降も同じ完了を返す。
@@ -1663,6 +1837,11 @@ export class Gemma4Pipeline {
       this.#handed.clear();
       await disposeSteps([
         ...handed.map((sequence) => () => sequence.dispose()),
+        // MUST: 借り手（drafter Session）を貸し手より先に畳む — 借り手が生きている間の
+        // 貸し手 `dispose()` は runtime が fail loudly で断る（借り手の bind group が貸し手の
+        // 重みバッファを掴んでいる）。順序を逆にすると、この 1 本が必ず失敗して残りの段は
+        // 通るものの、報告に毎回「貸し出している」が載る。
+        () => this.#state.drafter?.session.dispose(),
         () => this.#state.session.dispose(),
         () => {
           if (this.#state.ownsGpu) this.#state.gpu.destroy();

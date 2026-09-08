@@ -333,15 +333,18 @@ if (!GEMMA4_AVAILABLE) {
 }
 
 Deno.test({
-  name: "実資産 census: gemma4 は linear 277 / rms_norm 242 / attention 35 / state_append 30",
+  name:
+    "実資産 census: gemma4 は linear 277 / rms_norm 242 / attention 35 / state_append 30・drafter は linear 68 / attention 12 / argmax 3",
   ignore: !GEMMA4_AVAILABLE,
   fn: async () => {
     const asset = await resolveAsset(GEMMA4_DIR, undefined, undefined, undefined);
     assertEquals(asset.family, "gemma4");
     // 既定 quant `i4` はノブを 1 つも宣言していない（実行変種は呼び手の既定のまま）。
     assertEquals(asset.session, {});
-    assertEquals(asset.components.map((target) => target.component), ["model"]);
-    const [target] = asset.components;
+    // 第 2 role `drafter`（ADR 0096 段 2）も静的 census の対象 — 借り手グラフでも IR は単独で
+    // 読める（実行に貸し手が要るのは opbench run の話で、数える側には効かない）。
+    assertEquals(asset.components.map((target) => target.component), ["model", "drafter"]);
+    const [target, drafterTarget] = asset.components;
     const graph = await readIrGraph(target.graphShard);
     const [decode] = defaultScenarios("gemma4");
     assertEquals(decode.name, "decode");
@@ -372,5 +375,26 @@ Deno.test({
     assertEquals(linears.reduce((total, weight) => total + weight.count, 0), 277);
     // 融合ヒットは既設の実資産の門（assets_fusion_counts_test.ts）と同じ 15（M=1）。
     assertEquals(summary.by_fusion.hits, { rope: 15 });
+
+    // drafter（4 層 × k=3 段展開）: linear 68 / rms_norm 63 / attention 12（全部 readonly —
+    // state_append は 0 本）/ argmax 3。記号は C だけなので既定表の M / R は未使用に数えない。
+    const drafterCensus = censusComponent(
+      await readIrGraph(drafterTarget.graphShard),
+      drafterTarget,
+      asset,
+      decode,
+    );
+    assertEquals(drafterCensus.unusedBindings, []);
+    const drafterSummary = summarizeScenario(
+      decode,
+      drafterCensus.rows,
+      drafterCensus.unusedBindings,
+      drafterCensus.fusionHits,
+    );
+    assertEquals(drafterSummary.by_op.linear.nodes, 68);
+    assertEquals(drafterSummary.by_op.rms_norm.nodes, 63);
+    assertEquals(drafterSummary.by_op.attention.nodes, 12);
+    assertEquals(drafterSummary.by_op.state_append?.nodes ?? 0, 0);
+    assertEquals(drafterSummary.by_op.argmax.nodes, 3);
   },
 });

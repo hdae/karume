@@ -330,6 +330,101 @@ Deno.test("evictCachedAssets: protect の存在しない quant は ManifestRefer
   );
 });
 
+// ---- weights の絞り込み（`ResolveOptions.weights`）が在庫の勘定に効く形。選択の参照集合が
+// 小さくなるだけなので、照会も削除も「絞ったぶん」を数える。同じ (model, quant) の残りは
+// 守る側の候補にならない（label が同じものは候補から外れる）ので、**本体を残して 1 役割だけ
+// 消す**が書ける — gemma4 の `drafter` を投機を使わなくなった後に落とす席。
+
+/** 既定選択の 1 役割ぶん（絞った選択も `ResolveOptions` そのもの）。 */
+const TURBO_VAE: ResolveOptions = { weights: ["vae_decoder"] };
+
+Deno.test("listCachedAssets: weights を絞ると絞ったぶんだけを数える", async () => {
+  const caches = new MemoryCacheStorage();
+  const { loaded, mock } = await load(caches);
+  await prefetchAssets(loaded, refsOf(loaded, LITE), { fetch: mock.fetch, caches });
+
+  // 既定選択は 2 本欠けているが、text_encoder に絞れば「落とし済み」と答える。
+  const encoder = await listCachedAssets(loaded, { weights: ["text_encoder"] }, { caches });
+  assertEquals(encoder.missing, [], "絞った役割の在庫に欠けがある");
+  assertEquals(paths(encoder.cached), [TEXT_ENCODER, TOKENIZER, ROPE_BASE]);
+
+  // 欠けている役割に絞れば、その 1 本だけが missing に出る（assets は絞りの対象外）。
+  const vae = await listCachedAssets(loaded, TURBO_VAE, { caches });
+  assertEquals(paths(vae.cached), [TOKENIZER, ROPE_BASE]);
+  assertEquals(paths(vae.missing), [VAE_DECODER]);
+
+  assertEquals(paths((await listCachedAssets(loaded, TURBO, { caches })).missing), [
+    TEXT_CONDITIONER,
+    VAE_DECODER,
+  ]);
+});
+
+Deno.test("listCachedAssets: 存在しない weights は ManifestReferenceError", async () => {
+  const caches = new MemoryCacheStorage();
+  const { loaded } = await load(caches);
+
+  await assertRejects(
+    () => listCachedAssets(loaded, { weights: ["drafter"] }, { caches }),
+    ManifestReferenceError,
+    "drafter",
+  );
+  await assertRejects(
+    () => evictCachedAssets(loaded, { weights: ["drafter"] }, { caches }),
+    ManifestReferenceError,
+    "drafter",
+  );
+});
+
+Deno.test("evictCachedAssets: weights を絞ると同じ選択の残りは消えない", async () => {
+  const caches = new MemoryCacheStorage();
+  const { loaded, mock } = await load(caches);
+  await prefetchAssets(loaded, refsOf(loaded, TURBO), { fetch: mock.fetch, caches });
+
+  const result = await evictCachedAssets(loaded, TURBO_VAE, { caches });
+
+  // 消えるのは絞った役割の固有ファイルだけ。assets 2 本は全在庫の anima-lite/w8 が守る。
+  assertEquals(paths(result.evicted), [VAE_DECODER]);
+  assertEquals(paths(result.kept.map((entry) => entry.ref)), [TOKENIZER, ROPE_BASE]);
+  for (const entry of result.kept) {
+    assertEquals(entry.sharedWith, [LITE_LABEL], `${entry.ref.path} を守る選択が違う`);
+  }
+  // 同じ (model, quant) の残りは対象ですらない（守る側にも巻き添えにも出ない）。
+  assertEquals(result.alsoEvicted, []);
+  assert(
+    hasEntry(hubCache(caches), payloadFor(TEXT_CONDITIONER)),
+    "絞りの外にある text_conditioner まで消えている",
+  );
+  assertEquals(paths((await listCachedAssets(loaded, TURBO, { caches })).missing), [VAE_DECODER]);
+});
+
+Deno.test("evictCachedAssets: protect は同じ label の部分集合を 2 つとも守る", async () => {
+  const caches = new MemoryCacheStorage();
+  const { loaded, mock } = await load(caches);
+  await prefetchAll(loaded, mock, caches);
+
+  // 同じ席（w8a8-s16）を 2 つの部分集合で守る。label で畳む実装だと後勝ちで text_encoder が消える。
+  const result = await evictCachedAssets(loaded, F16, {
+    caches,
+    protect: [
+      { quant: "w8a8-s16", weights: ["text_encoder"] },
+      { quant: "w8a8-s16", weights: ["vae_decoder"] },
+    ],
+  });
+
+  assertEquals(paths(result.evicted), [TEXT_CONDITIONER, TRANSFORMER_F16]);
+  assertEquals(paths(result.kept.map((entry) => entry.ref)), [
+    TEXT_ENCODER,
+    ROPE_BASE,
+    VAE_DECODER,
+    TOKENIZER,
+  ]);
+  for (const entry of result.kept) {
+    // 同じ label が 2 度出ない（2 つの部分集合が守っていても名乗りは 1 つ）。
+    assertEquals(entry.sharedWith, [W8A8_LABEL], `${entry.ref.path} を守る選択が違う`);
+  }
+  assertEquals(result.alsoEvicted, [W8A8_LABEL, F16_C16_LABEL]);
+});
+
 // ---- `evicted` は**取得元が「消えた」と名乗ったもの**だけ（消せる候補をそのまま返さない）。
 // 組み込みの HF 取得元は候補と実際に消えたものが常に一致するので、差が出る取得元を被せないと
 // この契約は観測できない（実装が `evicted: 候補` に退化しても既存テストは全て緑のまま）。

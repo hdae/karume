@@ -448,9 +448,12 @@ Deno.test({
     );
     assertEquals(decode.scenario, "decode");
     assertEquals(decode.binding_source, "default");
-    assertEquals(decode.graphs.map((graph) => graph.graph), ["e2b/model"]);
-    // 束縛は既定表の decode（M=1・R=1・C=4096）がそのまま入る。
+    // 第 2 role `drafter`（ADR 0096 段 2）も候補表に載る（借り手グラフでも IR は単独で読める）。
+    assertEquals(decode.graphs.map((graph) => graph.graph), ["e2b/model", "e2b/drafter"]);
+    // 束縛は既定表の decode（M=1・R=1・C=4096）がそのまま入る。drafter の記号は容量 C だけ
+    // （M / R を宣言しないので、既定表の残りは束縛に載らない）。
     assertEquals(decode.graphs[0].symbols, { M: 1, R: 1, C: 4096 });
+    assertEquals(decode.graphs[1].symbols, { C: 4096 });
     // ヒット数は census 側の門と同じ 15（M=1 の rope）。
     assertEquals(decode.graphs[0].counts.rope, 15);
   },
