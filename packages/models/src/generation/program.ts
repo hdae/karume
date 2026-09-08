@@ -19,8 +19,8 @@
  * グラフ入力が 1 本結線されないまま run へ行けば診断は真因から遠い場所で出る。よって
  * {@link createGenerationProgram} は**グラフと突き合わせて**次を全部見る:
  *
- * - 名前の実在（入力 2 本 + 派生入力の名前 + 出力 1 本）
- * - 形と dtype（`[1,M]` の i32・`[1]` の i32・`[1,1,V]` の f32）
+ * - 名前の実在（入力 2 本 + 派生入力の名前 + 出力 2 本）
+ * - 形と dtype（`[1,M]` の i32・`[R]` の i32・`[1,R,V]` の f32・`[1,R,H]` の f32）
  * - **グラフ入力の完全被覆**（program が結線しない入力が 1 本も残らない・余分な名前も無い）
  * - 記号（入力 shape から決まらない記号は容量記号ちょうど 1 本であること）
  *
@@ -111,10 +111,24 @@ export type GenerationProgramSpec = {
   readonly graph: GenerationGraph;
   /** token id 列を受けるグラフ入力の名前（`[1,M]` の i32）。 */
   readonly inputIds: string;
-  /** 最終有効行の添字を受けるグラフ入力の名前（`[1]` の i32 — ADR 0068 決定 4 の行選択）。 */
+  /**
+   * 選ぶ行の添字**列**を受けるグラフ入力の名前（`[R]` の i32 — ADR 0068 決定 4 の行選択）。
+   *
+   * R は記号で、その run で選ぶ行数そのものである（この入力の要素数が R を束縛する唯一の源）。
+   * 通常の prefill / decode は R=1（最終有効行 1 本）で、値も token 列も従来と同一である。
+   * R を固定数 1 で焼くと、投機の verify（draft 行を一度に検証する run）が同じグラフで回せない。
+   */
   readonly lastRow: string;
-  /** 最終行 logits を出すグラフ出力の名前（`[1,1,V]` の f32 — ADR 0083 決定 6）。 */
+  /** 選んだ行の logits を出すグラフ出力の名前（`[1,R,V]` の f32 — ADR 0083 決定 6）。 */
   readonly logits: string;
+  /**
+   * 選んだ行の**最終 norm 後 hidden** を出すグラフ出力の名前（`[1,R,H]` の f32）。
+   *
+   * MUST: 省略可能にしない。drafter は「本体が実際に置いた行の hidden」を入力に取るので、
+   * ここが欠けた配布形では投機が組めない。省略可能にすると「hidden の無いグラフでも program は
+   * 組める」形になり、欠けは drafter を繋ぐ段まで落ちない（配布形の焼き直しが要る所まで）。
+   */
+  readonly hidden: string;
   /** 固定長 prefill chunk の行数（ADR 0066 決定 4 — context の計画時定数）。 */
   readonly chunkLength: number;
   /**
@@ -184,6 +198,20 @@ export type GenerationWiring =
      * なり、その 1 つが欠けても「バケットが黙って効かない」だけで例外は出ない。
      */
     readonly chunkBuckets: readonly number[];
+    /**
+     * hidden 出口の最終軸 H（{@link GenerationProgramSpec.hidden} の宣言形から**導出**した値）。
+     *
+     * MUST: 呼び手に宣言させない（`vocabSize` と違い、突き合わせる相手が資産側に無い）。
+     * グラフが唯一の源なので、宣言を受けると「配線の H」と「グラフの H」が独立に更新される
+     * 二重持ちになる。
+     */
+    readonly hiddenSize: number;
+    /**
+     * 行数記号 R の名前（`last_row` 入力の宣言形 `[R]` から**導出**）。run では `last_row` の要素数が
+     * これを束縛するが、run を伴わない見積り（`estimateGraphMemory` の `bindings`）は入力 shape を
+     * 持たないので、この名前で R = 1 を明示して渡す。
+     */
+    readonly rowSymbol: string;
   };
 
 /**
@@ -287,40 +315,97 @@ const assertRowInput = (
   }
 };
 
-const assertLastRowInput = (graph: GenerationGraph, name: string): void => {
+/**
+ * 行選択入力（`[R]` の i32）であることを見て、その**記号名 R** を返す。
+ *
+ * MUST: 次元が**記号**であることまで見る。固定数 1 だと「1 run = 1 行」しか焼かれておらず、
+ * 投機の verify（draft 行をまとめて検証する run）が同じグラフで回せない。R=1 の run
+ * （通常の prefill / decode）は要素 1 本の入力で従来と同じ形に畳まれる。
+ *
+ * NOTE: R が入力 shape に現れることが {@link assertSymbols} の前提でもある — 行数は run の
+ * 入力（この列の長さ）から決まり、容量記号のように context の束縛を要らない。
+ */
+const assertLastRowInput = (graph: GenerationGraph, name: string): string => {
   const spec = findInput(graph, name, "last_row 入力");
   assertDtype(spec.dtype, "i32", `last_row 入力 '${name}'`);
-  if (spec.shape.length !== 1 || spec.shape[0] !== 1) {
-    throw new Error(`last_row 入力 '${name}' の shape ${showShape(spec.shape)} が [1] でない`);
+  const rowSymbol = spec.shape[0];
+  if (spec.shape.length !== 1 || typeof rowSymbol !== "string") {
+    throw new Error(
+      `last_row 入力 '${name}' の shape ${showShape(spec.shape)} が [<記号>] でない` +
+        `（R=1 の prefill / decode と R>1 の verify を同じグラフで回せない）`,
+    );
   }
+  return rowSymbol;
 };
 
 /**
- * logits 出口（`[1,1,V]` の f32）であることを見る。
+ * グラフ**出力**に載っている名前の値情報を引く。
  *
  * MUST: **グラフ出力に載っていること**まで見る。ノード出力として存在するだけの名前は run から
  * 返ってこないので、「出力 '…' が無い」という真因から遠い実行時例外になる。
  */
-const assertLogitsOutput = (graph: GenerationGraph, name: string, vocabSize: number): void => {
+const findOutputValue = (graph: GenerationGraph, name: string, role: string) => {
   if (!graph.outputs.includes(name)) {
     throw new Error(
-      `logits 出口 '${name}' がグラフ出力に無い（実在するのは ${graph.outputs.join(" / ")}）`,
+      `${role} '${name}' がグラフ出力に無い（実在するのは ${graph.outputs.join(" / ")}）`,
     );
   }
   if (!Object.hasOwn(graph.values, name)) {
-    throw new Error(`logits 出口 '${name}' の値情報がグラフに無い`);
+    throw new Error(`${role} '${name}' の値情報がグラフに無い`);
   }
-  const info = graph.values[name];
+  return graph.values[name];
+};
+
+/**
+ * logits 出口（`[1,R,V]` の f32）であることを見る。
+ *
+ * MUST: 2 次元目が **`last_row` と同じ記号**であることまで見る。別記号なら「選んだ行数」と
+ * 「返る行数」が別々に決まる形で、run は形が合う限り通ってしまう（verify で `R` 行渡したのに
+ * 1 行しか返らない、が例外なしで起きる）。
+ */
+const assertLogitsOutput = (
+  graph: GenerationGraph,
+  name: string,
+  vocabSize: number,
+  rowSymbol: string,
+): void => {
+  const info = findOutputValue(graph, name, "logits 出口");
   assertDtype(info.dtype, "f32", `logits 出口 '${name}'`);
   if (
-    info.shape.length !== 3 || info.shape[0] !== 1 || info.shape[1] !== 1 ||
+    info.shape.length !== 3 || info.shape[0] !== 1 || info.shape[1] !== rowSymbol ||
     info.shape[2] !== vocabSize
   ) {
     throw new Error(
-      `logits 出口 '${name}' の shape ${showShape(info.shape)} が [1,1,${vocabSize}] でない` +
-        `（最終**行**のみの出口であること — ADR 0083 決定 6）`,
+      `logits 出口 '${name}' の shape ${showShape(info.shape)} が ` +
+        `[1,${rowSymbol},${vocabSize}] でない` +
+        `（選んだ**行**だけの出口であること — ADR 0083 決定 6）`,
     );
   }
+};
+
+/**
+ * hidden 出口（`[1,R,H]` の f32）であることを見て、H を返す。
+ *
+ * `vocabSize` に当たる宣言を受けないのは、H を突き合わせる相手が資産側に無いためである
+ * （語彙数は tokenizer と PLE sidecar の相互照合の基準になるが、hidden 幅はグラフだけが持つ）。
+ * よってここが見るのは「正整数の固定次元であること」まで — 記号のままなら run ごとに幅が
+ * 変わる形で、drafter 側の重みと繋がらない。
+ */
+const assertHiddenOutput = (graph: GenerationGraph, name: string, rowSymbol: string): number => {
+  const info = findOutputValue(graph, name, "hidden 出口");
+  assertDtype(info.dtype, "f32", `hidden 出口 '${name}'`);
+  const hiddenSize = info.shape[2];
+  if (
+    info.shape.length !== 3 || info.shape[0] !== 1 || info.shape[1] !== rowSymbol ||
+    typeof hiddenSize !== "number"
+  ) {
+    throw new Error(
+      `hidden 出口 '${name}' の shape ${showShape(info.shape)} が [1,${rowSymbol},<H>] でない` +
+        `（選んだ行の最終 norm 後 hidden であること）`,
+    );
+  }
+  assertPositiveInteger(hiddenSize, `hidden 出口 '${name}' の H`);
+  return hiddenSize;
 };
 
 /**
@@ -406,8 +491,14 @@ export const createGenerationProgram = (spec: GenerationProgramSpec): Generation
   });
 
   assertRowInput(graph, spec.inputIds, "token id 入力");
-  assertLastRowInput(graph, spec.lastRow);
-  assertLogitsOutput(graph, spec.logits, spec.vocabSize);
+  const rowSymbol = assertLastRowInput(graph, spec.lastRow);
+  // 同じ名前を 2 本の出口に結線した形は、V = H のときだけ両方の形検査を通ってしまう
+  // （drafter が logits を hidden として食う = 例外の出ない取り違え）。
+  if (spec.logits === spec.hidden) {
+    throw new Error(`logits 出口と hidden 出口が同じ名前 '${spec.logits}' を指している`);
+  }
+  assertLogitsOutput(graph, spec.logits, spec.vocabSize, rowSymbol);
+  const hiddenSize = assertHiddenOutput(graph, spec.hidden, rowSymbol);
   assertInputCoverage(graph, [
     spec.inputIds,
     spec.lastRow,
@@ -419,6 +510,9 @@ export const createGenerationProgram = (spec: GenerationProgramSpec): Generation
     inputIds: spec.inputIds,
     lastRow: spec.lastRow,
     logits: spec.logits,
+    hidden: spec.hidden,
+    hiddenSize,
+    rowSymbol,
     chunkLength: spec.chunkLength,
     // 凍結コピー: 配線は不変オブジェクトなので、呼び手の配列を後から書き換えられると
     // 「context が許す集合」と「物理行数を選ぶ集合」が実行中に割れる。

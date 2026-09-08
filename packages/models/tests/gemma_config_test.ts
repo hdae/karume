@@ -496,6 +496,15 @@ Deno.test("assertGemma4ChunkBuckets: 受理集合は runtime に委ね、入口�
       // 配布既定の chunkLength で 1 段も切り詰められない = 既定同士が食い違わない。
       assert(rows < SHIPPED_CHUNK_LENGTH, `既定 ${rows} が配布既定の chunkLength 以上`);
     }
+    // verify 用の段（draft 上限 8 行 + 確定 1 行が載る梯子）。この 2 段が落ちると、投機の
+    // verify run が 32 行へ pad され、削った仕事を pad で払い直す — 値は正しいままなので
+    // 性能にしか出ない退行である。
+    for (const rows of [4, 8]) {
+      assert(
+        GEMMA4_CHUNK_BUCKETS.includes(rows),
+        `verify 用の段 ${rows} が既定の梯子に無い: ${GEMMA4_CHUNK_BUCKETS.join(",")}`,
+      );
+    }
     assertEquals(
       assertGemma4ChunkBuckets(GEMMA4_CHUNK_BUCKETS, SHIPPED_CHUNK_LENGTH),
       GEMMA4_CHUNK_BUCKETS,

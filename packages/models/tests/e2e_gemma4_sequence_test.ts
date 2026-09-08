@@ -218,7 +218,9 @@ Deno.test({
         graph: parsed.graph,
         inputIds: INPUT_IDS,
         lastRow: LAST_ROW,
+        // 出口 2 本（順序が契約 — 出力 0 = logits・出力 1 = 最終 norm 後 hidden）。
         logits: parsed.graph.outputs[0],
+        hidden: parsed.graph.outputs[1],
         chunkLength: CHUNK_LENGTH,
         chunkBuckets,
         maxPosition: MAX_POSITION,

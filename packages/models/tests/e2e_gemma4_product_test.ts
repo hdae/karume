@@ -6,9 +6,9 @@
 //
 // 門は 4 本:
 //
-// ① 形の前提（入力 7 本 = input_ids / **per_layer_inputs** / **rope 4 本** / last_row・出力 1 本 =
-//    最終行 logits `[1,1,V]`・**argmax はグラフに無い**・PLE 表を引く embedding が無い・
-//    states 30 スロットは既存 2 系列と同一）
+// ① 形の前提（入力 7 本 = input_ids / **per_layer_inputs** / **rope 4 本** / last_row[R]・出力 2 本 =
+//    選んだ行の logits `[1,R,V]` + 最終 norm 後 hidden `[1,R,H]`・**argmax はグラフに無い**・
+//    PLE 表を引く embedding が無い・states 30 スロットは既存 2 系列と同一〈sliding は window + 8〉）
 // ② **PLE 逆量子化のビット一致**（ADR 0085 決定 4）: ホスト loader の gather が、台本が torch の
 //    35 表経路で採った `ple.probe.safetensors`（= PLE をグラフに残していたら `embedding` +
 //    直後の `mul` が出していた値そのもの）と**厳密一致**する。GPU を要さない。
@@ -115,6 +115,10 @@ const LAST_ROW = "last_row";
 const LAYERS = 35;
 const PLE_DIM = 256;
 const VOCAB = 262144;
+/** 最終 norm 後 hidden の幅（config `hidden_size` — 出力 1 の最終軸）。 */
+const HIDDEN = 1536;
+/** 行数記号（`last_row[R]` と出力 2 本の行軸 — exporter の `ROW_SYMBOL`）。 */
+const ROW_SYMBOL = "R";
 /** states スロット本数（所有層 15 × k/v — 既存 2 系列と同一）。 */
 const SLOTS = 30;
 
@@ -455,12 +459,22 @@ const assertProductForm = (parsed: PreparedModel): void => {
     `'${PER_LAYER_INPUTS}' の shape（ホストが供給する [1,M,35,256]）`,
   );
 
-  assertEquals(graph.outputs.length, 1, "graph.outputs の本数（最終行 logits の 1 本）");
+  // 出口は 2 本・順序が契約（出力 0 = 選んだ行の logits・出力 1 = 同じ行の最終 norm 後 hidden —
+  // ADR 0068 追記 7 / 0096 決定 5）。行軸は `last_row[R]` が束縛する記号 R で、通常の decode は R=1。
+  assertEquals(graph.outputs.length, 2, "graph.outputs の本数（logits + hidden の 2 本）");
   assertEquals(
     graph.values[graph.outputs[0]].shape,
-    [1, 1, VOCAB],
-    "出力 0 の shape（最終**行**のみ — 全行 logits への退行検出）",
+    [1, ROW_SYMBOL, VOCAB],
+    "出力 0 の shape（選んだ**行**のみ — 全行 logits への退行検出）",
   );
+  assertEquals(
+    graph.values[graph.outputs[1]].shape,
+    [1, ROW_SYMBOL, HIDDEN],
+    "出力 1 の shape（選んだ行の最終 norm 後 hidden — logits と入れ替わっていないこと）",
+  );
+  const lastRow = graph.inputs.find((spec) => spec.name === LAST_ROW);
+  assert(lastRow !== undefined, `'${LAST_ROW}' が無い`);
+  assertEquals(lastRow.shape, [ROW_SYMBOL], `'${LAST_ROW}' の shape（記号 R の唯一の束縛点）`);
   const producer = new Map<string, (typeof graph.nodes)[number]>();
   for (const node of graph.nodes) {
     for (const out of node.outs) producer.set(out, node);
@@ -501,7 +515,8 @@ const assertProductForm = (parsed: PreparedModel): void => {
     SLOTS,
     "states スロットの本数（既存 2 系列と同一）",
   );
-  assertEquals([...graph.symbols].sort(), ["C", "M"], "graph.symbols");
+  // 記号は 3 本（chunk 行 M / 選ぶ行 R / full スロット容量 C）。
+  assertEquals([...graph.symbols].sort(), ["C", "M", ROW_SYMBOL], "graph.symbols");
 };
 
 /** i32 の入力テンソル 1 本（token id 列も絶対位置列も `[1, rows]`）。 */

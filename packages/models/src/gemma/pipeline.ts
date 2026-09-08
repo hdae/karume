@@ -128,6 +128,15 @@ const PER_LAYER_INPUTS = "per_layer_inputs";
 const LAST_ROW = "last_row";
 
 /**
+ * 製品グラフの出口の本数（**順序が契約** — 出力 0 = 選んだ行の logits `[1,R,V]`・
+ * 出力 1 = 同じ行の最終 norm 後 hidden `[1,R,H]`）。
+ *
+ * 名前ではなく順序で引く（`vocabSizeOf` / {@link buildGemma4Program}）— 出口の綴りは
+ * 焼き手の内部名で、配布形ごとに動きうるためである。
+ */
+const GRAPH_OUTPUTS = 2;
+
+/**
  * 配布形（manifest）の取得キー — weights 1 本と、全量で受け取る assets 2 本。
  *
  * MUST: PLE sidecar の shard は {@link EAGER_ASSETS} に**入れない**。1 本 250MiB 級 × 9 本で、全量常駐
@@ -230,9 +239,10 @@ export type Gemma4PipelineOptions = {
    * `assertChunkBuckets` — この層は「どの入口の指定か」を文言に足すだけ）。
    *
    * NOTE: 本数ぶんだけ PreparedPlan の定常本数が増える（実行形 1 本 = 別鍵の計画 1 本 —
-   * ADR 0042 決定 2 の LRU）。既定の 4 本 + prefill 形 + decode 形 = **1 つの容量あたり** 6 形で、
-   * PreparedPlan の LRU 上限（runtime の `PREPARED_PLAN_CAPACITY`）に収まる — 鍵は解決済みスロット
-   * 容量を含む（ADR 0066 決定 3）ので、容量の違う sequence を交互に回すと形は容量の数だけ倍になる。
+   * ADR 0042 決定 2 の LRU）。既定の 6 本 + prefill 形 + decode 形 = **1 つの容量あたり** 8 形で、
+   * PreparedPlan の LRU 上限（runtime の `PREPARED_PLAN_CAPACITY` — verify 波で 12 へ広げた）に
+   * 収まる — 鍵は解決済みスロット容量を含む（ADR 0066 決定 3）ので、容量の違う sequence を
+   * 交互に回すと形は容量の数だけ倍になる。
    * さらに足すと、生成ループの中で最古が毎回落ちて decode が静かに再導出へ落ちる（例外は出ない —
    * 観測点は `SessionDiagnostics.lastRunPrepared`）。
    *
@@ -307,13 +317,19 @@ export const GEMMA4_STATE_ATTENTION_REDUCE: StateAttentionReduce = "parallel";
  * （`gemm-geometry.ts`）ので、512 行の小タイル形は 768 行の大タイル形に負ける。256 も同じ
  * `M64N32` だが、130 行の prompt で 305 ms 対 410 ms と勝つので梯子に残す。
  *
- * NOTE: 既定の 4 本 + prefill 形 + decode 形 = **1 つの容量あたり 6 形**が定常する
+ * **4 / 8 は投機の verify 用の段である**。verify は「draft した k 行 + 直前に確定した 1 行」を
+ * 1 本の run で流す形（R = k+1 行）で、k=3 なら 4 行・k ≤ 7 なら 8 行に収まる（k の上限そのものは
+ * sliding ring の余裕 = 棄却されうる行数の上限 8 で、context の `slidingSlack` が公開する）。
+ * この段が無いと 4 行の verify が 32 行へ pad され、投機で削った仕事の一部をそのまま pad で
+ * 払い直す。段そのものは通常の生成でも効く（4 token 以下の追い発話）。
+ *
+ * NOTE: 既定の 6 本 + prefill 形 + decode 形 = **1 つの容量あたり 8 形**が定常する
  * （{@link Gemma4PipelineOptions.chunkBuckets} の PreparedPlan の勘定）。
  *
  * MUST: 凍結する — この配列は module スコープの共有物で、消費者が並べ替えると以後に組む
  * pipeline の物理行数の選び方まで変わる（`chunkBuckets` は昇順前提で先頭一致を採る）。
  */
-export const GEMMA4_CHUNK_BUCKETS: readonly number[] = Object.freeze([32, 64, 128, 256]);
+export const GEMMA4_CHUNK_BUCKETS: readonly number[] = Object.freeze([4, 8, 32, 64, 128, 256]);
 
 /**
  * 既定のバケット列を、選ばれた `chunkLength` に載る段だけへ切り詰める。
@@ -639,17 +655,22 @@ const assetBytes = (
 };
 
 /**
- * 最終行 logits 出口の語彙数をグラフから引く（`[1, 1, V]` — ADR 0083 決定 6）。
+ * 選んだ行の logits 出口の語彙数をグラフから引く（`[1, R, V]` — ADR 0083 決定 6）。
  *
  * MUST: 呼び手に宣言させない。V は主 embedding の行数そのもので、宣言と食い違えば PLE
  * sidecar との相互照合（ADR 0085 決定 5）が**間違った基準**で通ってしまう。形の検査は
  * `createGenerationProgram` が同じ値でもう一度行う。
+ *
+ * MUST: 出口は**2 本ちょうど**（出力 0 = logits・出力 1 = 最終 norm 後 hidden）。順序は IR の
+ * 契約で、名前で引かないのは配布形の綴りに依存しないためである（`capacitySymbolOf` と同じ
+ * 流儀）。出口 1 本の旧配布形は**ここで**落とす — 互換分岐を書くと「hidden の無い資産で
+ * 投機が黙って組めない」形が残る。
  */
 const vocabSizeOf = (graph: GenerationGraph): number => {
-  if (graph.outputs.length !== 1) {
+  if (graph.outputs.length !== GRAPH_OUTPUTS) {
     throw new Error(
       `Gemma4Pipeline: グラフ出力が ${graph.outputs.length} 本` +
-        `（製品グラフの出口は最終行 logits の 1 本 — ADR 0083 決定 6）`,
+        `（製品グラフの出口は logits + hidden の ${GRAPH_OUTPUTS} 本 — ADR 0083 決定 6）`,
     );
   }
   const name = graph.outputs[0];
@@ -660,7 +681,7 @@ const vocabSizeOf = (graph: GenerationGraph): number => {
   const vocab = shape[2];
   if (shape.length !== 3 || typeof vocab !== "number") {
     throw new Error(
-      `Gemma4Pipeline: グラフ出力 '${name}' の shape [${shape.join(",")}] が [1,1,V] でない`,
+      `Gemma4Pipeline: グラフ出力 '${name}' の shape [${shape.join(",")}] が [1,R,V] でない`,
     );
   }
   return vocab;
@@ -856,7 +877,9 @@ const buildGemma4Program = (
     graph: component.graph,
     inputIds: INPUT_IDS,
     lastRow: LAST_ROW,
+    // 出口は順序で引く（{@link GRAPH_OUTPUTS} — 本数は admission が既に見ている）。
     logits: component.graph.outputs[0],
+    hidden: component.graph.outputs[1],
     chunkLength,
     chunkBuckets: assertGemma4ChunkBuckets(
       options.chunkBuckets ?? defaultChunkBuckets(chunkLength),
@@ -1572,7 +1595,10 @@ export class Gemma4Pipeline {
       );
     }
     return estimateGraphMemory(graph, planWeightResidency(graph), {
-      bindings: {},
+      // 行数記号 R は run では `last_row` の要素数が束縛する（入力 shape 由来）。見積りは入力を
+      // 持たないので R = 1（通常の prefill / decode の形）を明示する — 投機 verify の R > 1 は
+      // 段 3 でシナリオとして足す。
+      bindings: { [wiring.rowSymbol]: 1 },
       generation: { chunkLength, bindings: { [wiring.capacitySymbol]: capacity } },
       // MUST: 渡す（states 形 attention のノード内一時は行ブロック枚数がこの上限だけで決まるので、
       // 省くと estimator が fail loudly する — 既定値で埋めない）。

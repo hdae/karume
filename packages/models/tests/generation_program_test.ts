@@ -15,25 +15,44 @@ import {
 } from "../src/generation/program.ts";
 
 const VOCAB = 64;
+const HIDDEN_SIZE = 8;
 const IDS = "input_ids";
 const LAST_ROW = "last_row";
 const LOGITS = "logits";
+const HIDDEN = "hidden";
 const DERIVED = "per_layer_inputs";
 
 type GraphInput = GenerationGraph["inputs"][number];
 
-/** 製品グラフ（gemma4 の実形を縮めたもの）— 派生入力の有無だけ選べる。 */
+/**
+ * 製品グラフ（gemma4 の実形を縮めたもの）— 派生入力の有無だけ選べる。
+ *
+ * 行選択は `[R]`（記号）で、出口 2 本の 2 次元目は**同じ R** である（R=1 が通常の
+ * prefill / decode・R>1 が投機の verify）。
+ */
 const graphOf = (options: { readonly derived?: boolean } = {}): GenerationGraph => ({
-  symbols: ["C", "M"],
+  symbols: ["C", "M", "R"],
   inputs: [
     { name: IDS, dtype: "i32", shape: [1, "M"] },
     ...(options.derived === false
       ? []
       : [{ name: DERIVED, dtype: "f32", shape: [1, "M", 2, 3] } satisfies GraphInput]),
-    { name: LAST_ROW, dtype: "i32", shape: [1] },
+    { name: LAST_ROW, dtype: "i32", shape: ["R"] },
   ],
-  outputs: [LOGITS],
-  values: { [LOGITS]: { dtype: "f32", shape: [1, 1, VOCAB] } },
+  outputs: [LOGITS, HIDDEN],
+  values: {
+    [LOGITS]: { dtype: "f32", shape: [1, "R", VOCAB] },
+    [HIDDEN]: { dtype: "f32", shape: [1, "R", HIDDEN_SIZE] },
+  },
+});
+
+/** `graphOf()` の `values` を 1 本だけ差し替えたグラフ（形の退行を作るための小道具）。 */
+const graphWithValue = (
+  name: string,
+  info: { readonly dtype: string; readonly shape: readonly (number | string)[] },
+): GenerationGraph => ({
+  ...graphOf(),
+  values: { ...graphOf().values, [name]: info },
 });
 
 const specOf = (
@@ -43,6 +62,7 @@ const specOf = (
   inputIds: IDS,
   lastRow: LAST_ROW,
   logits: LOGITS,
+  hidden: HIDDEN,
   chunkLength: 4,
   maxPosition: 128,
   capacity: 64,
@@ -57,6 +77,9 @@ Deno.test("createGenerationProgram: 製品形の配線をそのまま通し、gr
   const program = createGenerationProgram(specOf());
   assertEquals(program.inputIds, IDS);
   assertEquals(program.logits, LOGITS);
+  assertEquals(program.hidden, HIDDEN);
+  // H はグラフからの導出値（宣言を受けない = 二重持ちにしない）。
+  assertEquals(program.hiddenSize, HIDDEN_SIZE);
   assertEquals(program.chunkLength, 4);
   assertEquals(program.capacity, 64);
   assertEquals(program.stopTokens, [7]);
@@ -153,7 +176,7 @@ Deno.test("createGenerationProgram: 入力名 / dtype / 形が違えば fail lou
       "の shape [1,4] が [1,<記号>] でない",
     ],
     [
-      "last_row の形が [1] でない",
+      "last_row が 1 次元でない",
       {
         graph: {
           ...graphOf(),
@@ -162,7 +185,20 @@ Deno.test("createGenerationProgram: 入力名 / dtype / 形が違えば fail lou
           ),
         },
       },
-      "last_row 入力 'last_row' の shape [1,1] が [1] でない",
+      "last_row 入力 'last_row' の shape [1,1] が [<記号>] でない",
+    ],
+    [
+      // 旧配布形（行選択が固定 1 行）— verify の R 行を同じグラフで回せない。
+      "last_row が固定数 [1]",
+      {
+        graph: {
+          ...graphOf(),
+          inputs: graphOf().inputs.map((input) =>
+            input.name === LAST_ROW ? { ...input, shape: [1] } : input
+          ),
+        },
+      },
+      "last_row 入力 'last_row' の shape [1] が [<記号>] でない",
     ],
   ];
   for (const [name, override, message] of cases) {
@@ -180,44 +216,100 @@ Deno.test("createGenerationProgram: logits 出口の実在 / 形 / 語彙数を�
   assertThrows(
     () =>
       createGenerationProgram(
-        specOf({
-          graph: {
-            ...graphOf(),
-            outputs: ["hidden"],
-            values: { hidden: { dtype: "f32", shape: [1, 1, VOCAB] } },
-          },
-          logits: LOGITS,
-        }),
+        specOf({ graph: { ...graphOf(), outputs: [HIDDEN] } }),
       ),
     Error,
     "logits 出口 'logits' がグラフ出力に無い",
   );
-  // 全行 logits（`[1,M,V]`）への退行 = 最終行出口でない。
+  // 全行 logits（`[1,M,V]`）への退行 = 行選択の出口でない。M は行選択とは別の記号なので、
+  // 「選んだ行数」と「返る行数」が別々に決まる形になる。
   assertThrows(
     () =>
       createGenerationProgram(
-        specOf({
-          graph: { ...graphOf(), values: { [LOGITS]: { dtype: "f32", shape: [1, "M", VOCAB] } } },
-        }),
+        specOf({ graph: graphWithValue(LOGITS, { dtype: "f32", shape: [1, "M", VOCAB] }) }),
       ),
     Error,
-    "が [1,1,64] でない",
+    "が [1,R,64] でない",
+  );
+  // 旧配布形（最終行 1 本固定）— R=1 の run では値が同じでも、verify の R 行が焼かれていない。
+  assertThrows(
+    () =>
+      createGenerationProgram(
+        specOf({ graph: graphWithValue(LOGITS, { dtype: "f32", shape: [1, 1, VOCAB] }) }),
+      ),
+    Error,
+    "が [1,R,64] でない",
   );
   // 語彙数の食い違い（別世代の資産と program の組み合わせ）。
   assertThrows(
     () => createGenerationProgram(specOf({ vocabSize: 32, stopTokens: [7] })),
     Error,
-    "が [1,1,32] でない",
+    "が [1,R,32] でない",
   );
   assertThrows(
     () =>
       createGenerationProgram(
-        specOf({
-          graph: { ...graphOf(), values: { [LOGITS]: { dtype: "i32", shape: [1, 1, VOCAB] } } },
-        }),
+        specOf({ graph: graphWithValue(LOGITS, { dtype: "i32", shape: [1, "R", VOCAB] }) }),
       ),
     Error,
     "logits 出口 'logits' の dtype が i32",
+  );
+});
+
+Deno.test("createGenerationProgram: hidden 出口の実在 / 形 / H を見る", () => {
+  // 出口 1 本の旧配布形は「hidden がグラフ出力に無い」として落ちる（互換分岐は無い）。
+  assertThrows(
+    () =>
+      createGenerationProgram(
+        specOf({ graph: { ...graphOf(), outputs: [LOGITS] } }),
+      ),
+    Error,
+    "hidden 出口 'hidden' がグラフ出力に無い",
+  );
+  assertThrows(
+    () => createGenerationProgram(specOf({ hidden: "states" })),
+    Error,
+    "hidden 出口 'states' がグラフ出力に無い",
+  );
+  assertThrows(
+    () =>
+      createGenerationProgram(
+        specOf({ graph: graphWithValue(HIDDEN, { dtype: "i32", shape: [1, "R", HIDDEN_SIZE] }) }),
+      ),
+    Error,
+    "hidden 出口 'hidden' の dtype が i32",
+  );
+  // 行が logits と別記号 = 2 本の出口が違う行集合を返す形。
+  assertThrows(
+    () =>
+      createGenerationProgram(
+        specOf({ graph: graphWithValue(HIDDEN, { dtype: "f32", shape: [1, "M", HIDDEN_SIZE] }) }),
+      ),
+    Error,
+    "が [1,R,<H>] でない",
+  );
+  // H が記号のままだと run ごとに幅が変わる（drafter の重みと繋がらない）。
+  assertThrows(
+    () =>
+      createGenerationProgram(
+        specOf({ graph: graphWithValue(HIDDEN, { dtype: "f32", shape: [1, "R", "H"] }) }),
+      ),
+    Error,
+    "が [1,R,<H>] でない",
+  );
+  assertThrows(
+    () =>
+      createGenerationProgram(
+        specOf({ graph: graphWithValue(HIDDEN, { dtype: "f32", shape: [1, "R", 0] }) }),
+      ),
+    Error,
+    "hidden 出口 'hidden' の H 0 が 1 以上の整数でない",
+  );
+  // 同じ名前を 2 本の出口に結線した形（V = H のときだけ両方の形検査を通ってしまう）。
+  assertThrows(
+    () => createGenerationProgram(specOf({ hidden: LOGITS })),
+    Error,
+    "logits 出口と hidden 出口が同じ名前 'logits' を指している",
   );
 });
 
@@ -259,7 +351,7 @@ Deno.test("createGenerationProgram: 記号は入力 shape か容量記号のど�
   assertThrows(
     () => createGenerationProgram(specOf({ capacitySymbol: "K" })),
     Error,
-    "容量記号 K がグラフの symbols [C, M] に無い",
+    "容量記号 K がグラフの symbols [C, M, R] に無い",
   );
   // 入力 shape から決まる記号を容量記号に選ぶと、run の束縛と context の束縛が分裂する。
   assertThrows(
@@ -267,16 +359,22 @@ Deno.test("createGenerationProgram: 記号は入力 shape か容量記号のど�
     Error,
     "容量記号 M は入力 shape から決まる記号である",
   );
+  // R も同じ（行数は last_row 入力の要素数から決まる = context の束縛を要らない）。
+  assertThrows(
+    () => createGenerationProgram(specOf({ capacitySymbol: "R" })),
+    Error,
+    "容量記号 R は入力 shape から決まる記号である",
+  );
   // 容量記号が 1 本足りない形（states の記号が 2 本ある資産）。
   assertThrows(
     () =>
       createGenerationProgram(
-        specOf({ graph: { ...graphOf(), symbols: ["C", "D", "M"] } }),
+        specOf({ graph: { ...graphOf(), symbols: ["C", "D", "M", "R"] } }),
       ),
     Error,
     "記号 D が入力 shape からも容量記号からも決まらない",
   );
-  // M は入力 shape から決まるので容量記号に要らない（C だけで通る）。
+  // M / R は入力 shape から決まるので容量記号に要らない（C だけで通る）。
   assertEquals(createGenerationProgram(specOf()).capacitySymbol, "C");
 });
 

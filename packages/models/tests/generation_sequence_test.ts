@@ -39,21 +39,27 @@ import {
 } from "../src/generation/sequence.ts";
 
 const VOCAB = 16;
+const HIDDEN_SIZE = 4;
 const IDS = "input_ids";
 const LAST_ROW = "last_row";
 const LOGITS = "logits";
+const HIDDEN = "hidden";
 const DERIVED = "per_layer_inputs";
 const CHUNK_LENGTH = 4;
 
 const graphOf = (): GenerationGraph => ({
-  symbols: ["C", "M"],
+  symbols: ["C", "M", "R"],
   inputs: [
     { name: IDS, dtype: "i32", shape: [1, "M"] },
     { name: DERIVED, dtype: "f32", shape: [1, "M", 2] },
-    { name: LAST_ROW, dtype: "i32", shape: [1] },
+    // 行選択は添字**列**（`R` = その run で選ぶ行数）。この経路は常に 1 本渡す。
+    { name: LAST_ROW, dtype: "i32", shape: ["R"] },
   ],
-  outputs: [LOGITS],
-  values: { [LOGITS]: { dtype: "f32", shape: [1, 1, VOCAB] } },
+  outputs: [LOGITS, HIDDEN],
+  values: {
+    [LOGITS]: { dtype: "f32", shape: [1, "R", VOCAB] },
+    [HIDDEN]: { dtype: "f32", shape: [1, "R", HIDDEN_SIZE] },
+  },
 });
 
 /**
@@ -71,6 +77,7 @@ const programOf = (
     inputIds: IDS,
     lastRow: LAST_ROW,
     logits: LOGITS,
+    hidden: HIDDEN,
     chunkLength: CHUNK_LENGTH,
     maxPosition: 128,
     capacity: 64,
@@ -119,6 +126,13 @@ type FakeOptions = {
    * 2 番手を置くと、penalty が第 1 候補を 2 番手の下へ落としたかを決定論的に見られる。
    */
   readonly runnerUp?: { readonly id: number; readonly logit: number };
+  /**
+   * logits を**この行数**で返す（既定は渡った `last_row` の本数 = 正しい実装）。
+   *
+   * 故障注入用の席である — 「1 行頼んだのに R 行返る」形はグラフの宣言としては正しい
+   * （R は記号）ので、`readLogits` の行数検査だけが検出線になる。
+   */
+  readonly logitsRows?: number;
 };
 
 type FakeSession = ReturnType<typeof fakeSession>;
@@ -185,10 +199,21 @@ const fakeSession = (options: FakeOptions = {}) => {
       // 論理長の進行は run の成功で起きる（実 context と同じ順序）。
       pastLength += generation.queryLength;
       const id = options.tokens?.[call] ?? (call + 1) % VOCAB;
-      const data = new Float32Array(VOCAB);
+      // 返す行数は渡った `last_row` の本数（実グラフと同じ = R は入力が束縛する）。
+      const rows = options.logitsRows ?? lastRow.values.length;
+      const data = new Float32Array(rows * VOCAB);
       data[id] = 10;
       if (options.runnerUp !== undefined) data[options.runnerUp.id] = options.runnerUp.logit;
-      return { [LOGITS]: { dtype: "f32", shape: [1, 1, VOCAB], data } };
+      return {
+        [LOGITS]: { dtype: "f32", shape: [1, rows, VOCAB], data },
+        // hidden も宣言どおり返す（生成ループが**読まない**ことの陰性対照 — 出口 2 本の
+        // グラフで logits を位置で掴む実装に退行すれば、ここが効く）。
+        [HIDDEN]: {
+          dtype: "f32",
+          shape: [1, rows, HIDDEN_SIZE],
+          data: new Float32Array(rows * HIDDEN_SIZE),
+        },
+      };
     },
   };
   return {
@@ -279,6 +304,22 @@ Deno.test("GenerationSequence: 長い prompt は chunk ごとに prefill イベ�
     { kind: "prefill", chunk: 2, chunks: 2 },
     { kind: "token", id: 2, position: 6 },
   ]);
+});
+
+Deno.test("GenerationSequence: 頼んだ行数と返った行数の食い違いは run の直後に落ちる", async () => {
+  // 出口の行数 R はグラフでは記号なので、「1 行頼んで 2 行返る」形は**宣言としては正しい**
+  // （形の検査を素通りする）。この経路が渡す添字は常に 1 本なので、返り値の行数との突合だけが
+  // 「program が検証したのとは別のグラフで組まれた Session」の検出線である。
+  const fake = fakeSession({ logitsRows: 2 });
+  const sequence = await createGenerationSequence({
+    session: fake.session,
+    program: programOf(fake),
+  });
+  await assertRejects(
+    () => drain(sequence.generate({ prompt: [1, 2, 3], maxNewTokens: 1 })),
+    Error,
+    `prefill@0: '${LOGITS}' の形 [1,2,${VOCAB}] が [1,1,${VOCAB}] でない`,
+  );
 });
 
 // ---- prefill バケット（ADR 0066 追記〈バケット〉）------------------------------

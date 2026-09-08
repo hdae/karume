@@ -375,25 +375,47 @@ export const physicalChunkRows = (queryLength: number, program: GenerationWiring
     ? 1
     : program.chunkBuckets.find((rows) => rows >= queryLength) ?? program.chunkLength;
 
-/** 行選択入力（`[1]` の i32 — ADR 0068 決定 4）。 */
-const lastRowInput = (row: number): Tensor => ({
+/**
+ * 行選択入力（`[R]` の i32 — ADR 0068 決定 4）。
+ *
+ * 渡すのは**行添字の列**である（要素数がその run の R を束縛する）。この経路が渡すのは常に
+ * 1 本（prefill = 最終有効行 / decode = 行 0）なので、形は従来どおり `[1]` に畳まれる。
+ */
+const lastRowInput = (rows: readonly number[]): Tensor => ({
   dtype: "i32",
-  shape: [1],
-  data: Int32Array.of(row),
+  shape: [rows.length],
+  data: Int32Array.from(rows),
 });
 
+/** 選んだ行の logits の読み口（{@link readLogits} が返す — 行ごとの view）。 */
+type LogitsRows = {
+  /** 返ってきた行数（= `last_row` に渡した添字の本数 R）。 */
+  readonly rows: number;
+  /**
+   * 行 `index` の生 logits（`vocabSize` 要素の view — 写さない）。
+   *
+   * MUST: 返るのは出力バッファの subarray なので、**次の run まで**しか有効でない
+   * （readback バッファは run ごとに作り直される — 保存するなら呼び手が写す）。
+   */
+  row(index: number): Float32Array<ArrayBuffer>;
+};
+
 /**
- * 最終行 logits `[1,1,V]` の生データを読む。
+ * 選んだ行の logits `[1,R,V]` の生データを読む。
  *
  * 名前と宣言形は program の setup が検証済みだが、ここでも見るのは「program が検証したのとは
  * **別のグラフ**で組まれた Session」を掴んだ場合の唯一の検出線だから（形が合う別の出力を掴むと
  * 例外も警告も出ないまま別の token 列が出る）。
+ *
+ * MUST: 行数は**渡した添字の本数**（`expectedRows`）と突き合わせる。R はグラフでは記号なので、
+ * 「1 行頼んだのに R 行返る」形も宣言としては正しく、ここが唯一の門である。
  */
 const readLogits = (
   outputs: RunOutputs,
   program: GenerationWiring,
   where: string,
-): Float32Array<ArrayBuffer> => {
+  expectedRows: number,
+): LogitsRows => {
   if (!Object.hasOwn(outputs, program.logits)) {
     throw new Error(`${where}: グラフ出力 '${program.logits}' が無い`);
   }
@@ -403,15 +425,25 @@ const readLogits = (
   }
   const shape = tensor.shape;
   if (
-    shape.length !== 3 || shape[0] !== 1 || shape[1] !== 1 || shape[2] !== program.vocabSize
+    shape.length !== 3 || shape[0] !== 1 || shape[1] !== expectedRows ||
+    shape[2] !== program.vocabSize
   ) {
     throw new Error(
       `${where}: '${program.logits}' の形 [${
         shape.join(",")
-      }] が [1,1,${program.vocabSize}] でない`,
+      }] が [1,${expectedRows},${program.vocabSize}] でない`,
     );
   }
-  return tensor.data;
+  const data = tensor.data;
+  return {
+    rows: expectedRows,
+    row: (index: number): Float32Array<ArrayBuffer> => {
+      if (!Number.isSafeInteger(index) || index < 0 || index >= expectedRows) {
+        throw new Error(`${where}: 行 ${index} が 0..${expectedRows - 1} の外`);
+      }
+      return data.subarray(index * program.vocabSize, (index + 1) * program.vocabSize);
+    },
+  };
 };
 
 /**
@@ -636,7 +668,7 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
         // context と pendingToken の 2 つだけ = 会話全体の transcript は持たない）。
         const history = [...promptIds];
 
-        let logits: Float32Array<ArrayBuffer> | undefined;
+        let logits: LogitsRows | undefined;
         for (const [index, chunk] of chunks.entries()) {
           await settleAbort(signal);
           // 物理行数は有効行数から決める（decode 形 / バケット / chunkLength — 理由は
@@ -659,7 +691,8 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
           const outputs = await session.run(
             {
               [program.inputIds]: i32Row(rows, ids),
-              [program.lastRow]: lastRowInput(chunk.queryLength - 1),
+              // 選ぶのは最終有効行 1 本（R=1 — この経路は投機を張らない）。
+              [program.lastRow]: lastRowInput([chunk.queryLength - 1]),
               ...extra,
             },
             undefined,
@@ -667,13 +700,13 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
           );
           // 先頭 chunk が通った時点で frontier は KV に入った（= もう連結してはならない）。
           if (index === 0) pendingToken = undefined;
-          logits = readLogits(outputs, program, `prefill@${chunk.position}`);
+          logits = readLogits(outputs, program, `prefill@${chunk.position}`, 1);
           yield { kind: "prefill", chunk: index + 1, chunks: chunks.length };
         }
         if (logits === undefined) throw new Error("prefill が 1 回も走っていない");
 
-        // 生成の起点は最終 chunk の最終有効行（`last_row` で選んだ 1 行）。
-        let token = sampler.next(logits, history);
+        // 生成の起点は最終 chunk の最終有効行（`last_row` で選んだ 1 行 = 行 0）。
+        let token = sampler.next(logits.row(0), history);
         generated += 1;
         history.push(token);
         pendingToken = token;
@@ -697,13 +730,13 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
           const outputs = await session.run(
             {
               [program.inputIds]: i32Row(1, ids),
-              [program.lastRow]: lastRowInput(0),
+              [program.lastRow]: lastRowInput([0]),
               ...extra,
             },
             undefined,
             { context, queryLength: 1 },
           );
-          token = sampler.next(readLogits(outputs, program, `decode@${step}`), history);
+          token = sampler.next(readLogits(outputs, program, `decode@${step}`, 1).row(0), history);
           generated += 1;
           history.push(token);
           pendingToken = token;

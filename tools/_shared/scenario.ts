@@ -40,16 +40,18 @@ const DEFAULT_SCENARIOS: Readonly<Record<string, readonly Scenario[]>> = {
   gemma4: [
     {
       name: "decode",
-      bindings: { M: 1, C: 4096 },
+      bindings: { M: 1, R: 1, C: 4096 },
       source: "default",
-      provenance: "decode 1 トークン（M=1）。C は full attention スロットの容量記号で、" +
-        "sliding 側は配布形が 512 で焼き込み済み（ADR 0066）",
+      provenance:
+        "decode 1 トークン（M=1・選ぶ行 R=1）。C は full attention スロットの容量記号で、" +
+        "sliding 側は配布形が window 512 + 余裕 8 = 520 で焼き込み済み（ADR 0066 / 0096）",
     },
     {
       name: "prefill",
-      bindings: { M: 768, C: 4096 },
+      bindings: { M: 768, R: 1, C: 4096 },
       source: "default",
-      provenance: "prefill の物理 chunk 行数 M=768（可変 capacity 波の掃引で使った刻み）",
+      provenance: "prefill の物理 chunk 行数 M=768（可変 capacity 波の掃引で使った刻み）・" +
+        "選ぶ行は最終行 1 本（R=1）",
     },
   ],
   anima: [

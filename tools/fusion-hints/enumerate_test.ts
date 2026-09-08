@@ -449,8 +449,8 @@ Deno.test({
     assertEquals(decode.scenario, "decode");
     assertEquals(decode.binding_source, "default");
     assertEquals(decode.graphs.map((graph) => graph.graph), ["e2b/model"]);
-    // 束縛は既定表の decode（M=1・C=4096）がそのまま入る。
-    assertEquals(decode.graphs[0].symbols, { M: 1, C: 4096 });
+    // 束縛は既定表の decode（M=1・R=1・C=4096）がそのまま入る。
+    assertEquals(decode.graphs[0].symbols, { M: 1, R: 1, C: 4096 });
     // ヒット数は census 側の門と同じ 15（M=1 の rope）。
     assertEquals(decode.graphs[0].counts.rope, 15);
   },
