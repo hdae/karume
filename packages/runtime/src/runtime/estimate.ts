@@ -15,6 +15,8 @@
  * （prefill / decode）ごとに変わるものは {@link AdmissionReport.scenarios} に**別々の計算**
  * として並ぶ。同じ数字を 1 本に潰すと、prefill 形でしか出ない中間の山を decode しか回さない
  * 呼び手に押しつけるか、その逆に decode の数字で prefill を通すかのどちらかになる。
+ * 2 形のどちらでもない形（投機デコードの verify run — ADR 0096）は、呼び手が
+ * {@link AdmissionScenarioSpec} で**同じ計算経路に**足す（式を呼び手側で組み直させない）。
  *
  * 実測（{@link SessionDiagnostics}）との対応:
  * - {@link AdmissionReport.resident}`.weights.compressedBytes` ↔ `storage.residentCompressedBytes`
@@ -77,10 +79,37 @@ import {
 } from "./weight-residency.ts";
 
 /**
- * シナリオの名前。`generation` を渡さない見積りは `"run"` の 1 本、渡した見積りは
- * ADR 0066 決定 4 の実行 2 形（`"prefill"` / `"decode"`）。
+ * **予約名**のシナリオ。`generation` を渡さない見積りは `"run"` の 1 本、渡した見積りは
+ * ADR 0066 決定 4 の実行 2 形（`"prefill"` / `"decode"`）で、この 3 つは呼び手が
+ * {@link AdmissionScenarioSpec.name} に使えない。
  */
 export type AdmissionScenarioName = "run" | "prefill" | "decode";
+
+/**
+ * 呼び手が足す追加シナリオの仕様（{@link EstimateOptions}`.generation.scenarios`）。
+ *
+ * 既存 2 形（prefill / decode）と**同じ計算経路**を、物理 chunk 行だけ差し替えて 1 本増やす口。
+ * 投機デコードの verify run（`queryLength = k+1` 行を 1 回で流す形 — ADR 0096）のように、
+ * ADR 0066 決定 4 の 2 形のどちらでもない形の必要量を、呼び手が式を組み直さずに引くためにある。
+ */
+export type AdmissionScenarioSpec = {
+  /**
+   * 報告に載る名前。予約名（{@link AdmissionScenarioName} の 3 つ）と、同じ列の他の追加名との
+   * 重複は fail loudly（名前で引く呼び手が黙って先頭だけを見る形を作らない）。
+   */
+  readonly name: string;
+  /**
+   * この形の物理 chunk 行 `M`。`1..generation.chunkLength` の整数（外は fail loudly —
+   * `queryLength ≤ chunkLength` の契約の外にある行数を名乗らせない）。
+   */
+  readonly chunkLength: number;
+  /**
+   * グラフ入力側の記号次元の**上書き**（`options.bindings` の写しに重ねる）。省略すると
+   * `options.bindings` そのまま。値域と束縛点の門は既存 2 形と同じ（states 専用記号と物理
+   * chunk 行の記号は受けない）。
+   */
+  readonly bindings?: SymbolBindings;
+};
 
 /**
  * run の形 1 つぶんの必要バイト数（{@link AdmissionReport.scenarios} の 1 要素）。
@@ -89,7 +118,8 @@ export type AdmissionScenarioName = "run" | "prefill" | "decode";
  * {@link AdmissionReport.resident} の側にある。
  */
 export type AdmissionScenario = {
-  readonly name: AdmissionScenarioName;
+  /** 予約名（{@link AdmissionScenarioName}）か、呼び手が足した {@link AdmissionScenarioSpec.name}。 */
+  readonly name: string;
   /** グラフ入力バッファ + 出力 readback staging（厳密）。 */
   readonly ioBytes: number;
   /**
@@ -139,7 +169,11 @@ export type AdmissionReport = {
      */
     readonly stateBytes: number;
   };
-  /** run の形ごとの必要バイト数（1 要素以上 — 名前の決まり方は {@link AdmissionScenarioName}）。 */
+  /**
+   * run の形ごとの必要バイト数（1 要素以上 — 名前の決まり方は {@link AdmissionScenarioName}）。
+   * 呼び手が {@link EstimateOptions}`.generation.scenarios` を渡すと、既存 2 形の**後ろ**に
+   * 宣言順で並ぶ。
+   */
   readonly scenarios: readonly AdmissionScenario[];
   /**
    * この見積りが使った slot backing の保持予算（{@link EstimateOptions.planBackingBudgetBytes} —
@@ -159,6 +193,9 @@ export type AdmissionReport = {
    * `Session.#evictBackingsFor`）。計画（`PreparedPlan`）が `PREPARED_PLAN_CAPACITY` 本まで
    * LRU で残るのとは別の勘定である。
    *
+   * 「最大シナリオ」は**追加シナリオも含めた** {@link AdmissionReport.scenarios} 全体の最大
+   * （追加分だけ勘定から漏れると、verify 形が最大のときにピークが過小になる）。
+   *
    * models 側の prefill バケット形（`chunkBuckets`）は{@link AdmissionReport.scenarios}に
    * 列挙しないが、予算の内側で同時に保持されうる形なので**予算で上から押さえる**（過大側へ
    * 倒す — 「勘定に入れた分のピーク」の意味論はそのまま）。退役から実際の `destroy()` までの窓と、
@@ -176,8 +213,16 @@ export type EstimateOptions = {
    * ここでは受けない（前者は `generation.bindings`・後者は `generation.chunkLength`）。
    */
   readonly bindings?: SymbolBindings;
-  /** 見積る `GenerationContext` の仕様（省略すると state を数えない）。 */
-  readonly generation?: GenerationContextSpec;
+  /**
+   * 見積る `GenerationContext` の仕様（省略すると state を数えない）。
+   *
+   * `scenarios` は ADR 0066 決定 4 の 2 形に**加えて**数える形の列（{@link AdmissionScenarioSpec}）—
+   * `GenerationContext` の形には 1 バイトも効かない見積り専用の欄で、常駐側（state スロット）は
+   * どの形でも同じなので動かない。
+   */
+  readonly generation?: GenerationContextSpec & {
+    readonly scenarios?: readonly AdmissionScenarioSpec[];
+  };
   /**
    * `maxStorageBufferBindingSize` の granted 値（`GPUDevice.limits` / `readAdapterLimits`）。
    *
@@ -317,7 +362,7 @@ const bindChunkRows = (
   base: SymbolBindings,
   dims: readonly string[],
   rows: number,
-  scenario: AdmissionScenarioName,
+  scenario: string,
 ): SymbolBindings => {
   const bindings: Record<string, number> = Object.assign(Object.create(null), base);
   for (const dim of dims) {
@@ -532,6 +577,9 @@ const transientSlotBytes = (
     if (isStateAttention(node)) {
       // 行ブロックごとに実行相（recipe-builder の states 形 attention）と同じ 3 dispatch を写す。
       // scores は ① の直前に確保・stats は ② の直前に確保し、どちらも ③ の直後に解放する。
+      // readonly 変種（借り手の cross-attention — ADR 0096・ins は q だけ）は K/V を external
+      // スロットから読み、今 step の k / v 入力を持たない。読みの参照は**在る入力だけ**にする
+      // （無い名前を参照に載せると transient 計画が未定義の参照で落ちる）。
       const [q, k, v] = reads;
       for (const temp of stateAttentionTemps(node, stateShapes, limit)) {
         const base = dispatches.length;
@@ -539,9 +587,12 @@ const transientSlotBytes = (
         temps.push({ byteLength: temp.scoreBytes, allocBefore: base, releaseAfter: base + 2 });
         const stats: TransientRef = { kind: "temp", id: temps.length };
         temps.push({ byteLength: temp.statsBytes, allocBefore: base + 1, releaseAfter: base + 2 });
-        dispatches.push({ reads: [q, k], writes: [scores] });
+        dispatches.push({ reads: k === undefined ? [q] : [q, k], writes: [scores] });
         dispatches.push({ reads: [scores], writes: [stats] });
-        dispatches.push({ reads: [scores, stats, v], writes: outputRefs });
+        dispatches.push({
+          reads: v === undefined ? [scores, stats] : [scores, stats, v],
+          writes: outputRefs,
+        });
       }
     } else if (!isAlias) {
       dispatches.push({ reads, writes: outputRefs });
@@ -569,7 +620,8 @@ const transientSlotBytes = (
  * @param options.generation 見積る `GenerationContext` の仕様。省略すると
  *   `resident.stateBytes` は 0・シナリオは `"run"` の 1 本（states 形グラフでは省略できない —
  *   中間ピークの計画がスロットの解決済み shape を要求する）。渡すとシナリオは
- *   `"prefill"` / `"decode"` の 2 本になる。
+ *   `"prefill"` / `"decode"` の 2 本になり、`generation.scenarios` を足すとその後ろに宣言順で
+ *   並ぶ（{@link AdmissionScenarioSpec}）。
  * @param options.maxStorageBufferBindingSize device の granted 上限。states 形 attention を
  *   持つグラフでは必須（ノード内一時の行ブロック枚数がこれだけで決まる）。
  * @param options.planBackingBudgetBytes slot backing の保持予算（`SessionOptions` と同じ値）。
@@ -666,11 +718,46 @@ export const estimateGraphMemory = (
   // シナリオの max ではなく `max(予算, 最大シナリオ)` を載せることで上から押さえてある
   // （欄の doc）。予算超過 / LRU 追い出しで退役した実体が destroy までの窓で残る点だけが
   // 非勘定側に残る。
-  const plans: readonly (readonly [AdmissionScenarioName, SymbolBindings])[] =
-    chunkLength === undefined ? [["run", bindings]] : [
+  const plans: [name: string, bindings: SymbolBindings][] = chunkLength === undefined
+    ? [["run", bindings]]
+    : [
       ["prefill", bindChunkRows(bindings, chunkDims, chunkLength, "prefill")],
       ["decode", bindChunkRows(bindings, chunkDims, 1, "decode")],
     ];
+  // 呼び手が足す形（ADR 0096 の verify run など）は既存 2 形の後ろに宣言順で並ぶ。計算経路は
+  // 同じ 1 本で、変わるのは物理 chunk 行と（渡されたなら）グラフ入力側の束縛だけ。
+  const generation = options.generation;
+  if (generation?.scenarios !== undefined) {
+    // MUST: 名前の重複は fail loudly（予約名 3 つ + 追加名どうし）。同名が 2 本並ぶと、
+    // 名前で引く呼び手が黙って先頭だけを見る。
+    const taken = new Set<string>(["run", "prefill", "decode"] satisfies AdmissionScenarioName[]);
+    for (const spec of generation.scenarios) {
+      if (taken.has(spec.name)) {
+        throw new ExecutionError(
+          `シナリオ名 '${spec.name}' が既にある（予約名は run / prefill / decode）`,
+        );
+      }
+      taken.add(spec.name);
+      // MUST: 値域は `1..chunkLength`（`queryLength ≤ chunkLength` の契約と同じ上限 —
+      // 宣言 shape に載らない行数の見積りを返さない）。
+      if (
+        !Number.isSafeInteger(spec.chunkLength) || spec.chunkLength < 1 ||
+        spec.chunkLength > generation.chunkLength
+      ) {
+        throw new ExecutionError(
+          `シナリオ '${spec.name}': 物理 chunk 行 ${spec.chunkLength} が ` +
+            `1..${generation.chunkLength}（generation.chunkLength）の整数でない`,
+        );
+      }
+      // 束縛は既定の写しに上書きしてから、既存 2 形と同じ門（`planBindings`）を通す。
+      const base = planBindings(
+        graph,
+        { ...options.bindings, ...spec.bindings },
+        chunkSymbols,
+      );
+      plans.push([spec.name, bindChunkRows(base, chunkDims, spec.chunkLength, spec.name)]);
+    }
+  }
 
   const scenarios = plans.map(([name, scenarioBindings]): AdmissionScenario => {
     // MUST: states と入力の両方に現れる記号は 2 つの束縛点で同じ値（run が拒否する分裂 —

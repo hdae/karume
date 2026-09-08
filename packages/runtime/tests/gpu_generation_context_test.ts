@@ -1257,20 +1257,20 @@ Deno.test({
 });
 
 Deno.test({
-  name:
-    "deferred run の queryLength は sliding の余裕 + 1 まで（超える発行は同期区間で拒否・実 GPU）",
+  name: "deferred run の queryLength は sliding の余裕まで（超える発行は同期区間で拒否・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
     const sliding = await stateSession(gpu, slidingGraph());
-    // 容量 9 / 窓 8 → 余裕 1。deferred は「余裕 + 1」= 2 行まで。
+    // 容量 9 / 窓 8 → 余裕 1。deferred は「余裕」= 1 行まで（借り手 = readonly 読者の窓の
+    // 下端は貸し手より 1 列低い `P+m−W` なので、条件は `Q ≤ 余裕`）。
     const context = await sliding.createGenerationContext({ chunkLength: 4, bindings: { C: 9 } });
     try {
       assertEquals(context.slidingSlack, 1);
-      // 3 行の deferred は発行の同期区間で落ち、リースも保留も残らない（受理 0 行でも棄却行が
-      // live 窓の外に落ちる、という余裕の条件を超える）。
+      // 2 行の deferred は発行の同期区間で落ち、リースも保留も残らない（受理 0 行でも棄却行が
+      // 借り手の live 窓の外に落ちる、という余裕の条件を超える）。
       const rejected = await assertRejects(
-        () => sliding.run({ x: RUN_INPUT }, {}, { context, queryLength: 3, commit: "deferred" }),
+        () => sliding.run({ x: RUN_INPUT }, {}, { context, queryLength: 2, commit: "deferred" }),
         ExecutionError,
       );
       assert(rejected.message.includes("余裕 1"), rejected.message);
@@ -1279,9 +1279,9 @@ Deno.test({
       // immediate は全行を確定させるので上限は chunkLength のまま。
       await sliding.run({ x: RUN_INPUT }, {}, { context, queryLength: 3 });
       assertEquals(context.pastLength, 3);
-      // 余裕 + 1 ちょうどは通る。
-      await sliding.run({ x: RUN_INPUT }, {}, { context, queryLength: 2, commit: "deferred" });
-      assertEquals(context.pendingCommit, { pastLength: 3, queryLength: 2 });
+      // 余裕ちょうどは通る。
+      await sliding.run({ x: RUN_INPUT }, {}, { context, queryLength: 1, commit: "deferred" });
+      assertEquals(context.pendingCommit, { pastLength: 3, queryLength: 1 });
       context.commit(0);
       assertEquals(context.pastLength, 3);
     } finally {

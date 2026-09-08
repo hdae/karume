@@ -419,8 +419,10 @@ export class GenerationContext {
    * 良い（= `commit` で受理しない）行が live な過去 KV を潰さない。
    *
    * 投機デコード（draft を検証してから受理行数を確定する形）の `queryLength` の上限がこれで、
-   * 超えた run は例外を出さずに過去 KV を壊す — 上限の執行はホスト側の責務（ランタイムは
-   * `queryLength ≤ chunkLength` までしか見ない）。
+   * `commit: "deferred"` の run は `queryLength ≤ slidingSlack` を発行の同期区間で執行する
+   * （`Session.run`）。下端が最も低い読者は**借り手**（readonly = drafter）の
+   * `P+m−W` で、棄却行 `j` が潰す論理列 `P+j−C` がそこより下に落ちる条件が
+   * `j − m < capacity − window` = この余裕（`m` = commit した行数・`commit(0)` を含む）。
    */
   readonly slidingSlack: number | undefined;
   /** ランタイム内部面（利用者が触る面ではない）。 */
@@ -887,7 +889,8 @@ export class GenerationContext {
    * `rows` は `0 ≤ rows ≤ pendingCommit.queryLength` の整数で、`0` は「1 行も受理しない」
    * （論理長は動かず、保留だけが畳まれる）。物理 ring には `queryLength` 行が書かれたままだが、
    * 受理しなかった行が潰した論理列は sliding の余裕（{@link GenerationContext.slidingSlack}）の
-   * 外に落ちる — 余裕を超える `queryLength` を投げないのはホスト側の契約。
+   * 外に落ちる — 余裕を超える `queryLength` の deferred run は `Session.run` の同期区間で
+   * 落ちている（`queryLength ≤ slidingSlack`）。
    *
    * MUST: **進行中の generation run が居る間は fail loudly**（`rewind` と同じ根拠 — run は頭で
    * 捕捉した P で uniform と dispatch 数を決めるので、横から動かすと GPU が見た論理長と進行の

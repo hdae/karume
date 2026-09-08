@@ -397,13 +397,14 @@ Deno.test({
 
 /**
  * 余裕の行数（sliding スロットの `capacity − window`）。`Q` 行を論理長より先に書いて `a` 行だけ
- * 受理する形が成立する条件は `C ≥ W + Q − 1`（棄却行 `P+i` が潰す論理列 `P+i−C` が、次 run の
- * live 窓の下端 `P+a−(W−1)` より必ず小さい）。したがって余裕 8 が支える `Q` の上限は 9。
+ * 受理する形が成立する条件は `C ≥ W + Q`（棄却行 `P+i` が潰す論理列 `P+i−C` が、確定後の読者の
+ * 窓の下端より必ず小さい — 下端が最も低いのは借り手 = readonly 読者の `P+a−W`）。したがって
+ * 余裕 8 が支える `Q` の上限は 8。
  */
 const VERIFY_SLACK = 8;
 const VERIFY_WINDOW = 8;
-const VERIFY_QUERY = VERIFY_SLACK + 1;
-/** 受理行数（残り 6 行は棄却 = 物理 ring に書かれたまま論理長に載らない）。 */
+const VERIFY_QUERY = VERIFY_SLACK;
+/** 受理行数（残り 5 行は棄却 = 物理 ring に書かれたまま論理長に載らない）。 */
 const VERIFY_COMMIT = 3;
 /** verify 形の前に積む past（`P > W` — 窓の下限述語が効いている状態から始める）。 */
 const VERIFY_PREFILL = 12;
@@ -440,7 +441,7 @@ const bitsOfF32 = (data: Float32Array<ArrayBuffer>): Uint32Array =>
  * 「`Q` 行を deferred で書いて `a` 行だけ commit した context」の次 step の出力を返す。
  *
  * 参照側（`speculate = false`）は同じ token 列を **1 行ずつ通常 run** で流す（= 投機を使わない
- * 生成そのもの）。両者がビット同一なら、棄却された 6 行の書き込みが live な過去 KV を 1 語も
+ * 生成そのもの）。両者がビット同一なら、棄却された 5 行の書き込みが live な過去 KV を 1 語も
  * 壊していないことになる。
  */
 const runVerifyChain = async (
@@ -522,13 +523,169 @@ Deno.test({
 
       // 余裕を 0（capacity = window）に戻すと、棄却行が live 窓の中の論理列を潰す（例外も NaN も
       // 出ない沈黙破壊）。その形は run 発行の同期区間で落ちる — deferred run の queryLength は
-      // 「余裕 + 1」まで（`GenerationContext.slidingSlack` の門）。潰れる値そのものは公開面から
+      // 「余裕」まで（`GenerationContext.slidingSlack` の門）。潰れる値そのものは公開面から
       // 到達できないので、ここで見るのは「守りが効いていること」= 発行が拒否されること。
       const noSlack = await assertRejects(
         () => runVerifyChain(gpu, VERIFY_WINDOW, true),
         ExecutionError,
       );
       assert(noSlack.message.includes("余裕 0"), noSlack.message);
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+/**
+ * 借り手（drafter 相当）: 貸し手と**同名**の external スロットを readonly attention 1 本が
+ * 読むだけのグラフ（ADR 0096 段 2 §2.1）。書き手（`state_append`）を持たないので、論理長を
+ * 進めるのも確定させるのも貸し手の側。
+ */
+const verifyBorrowerGraph = (capacity: number): GraphJson => {
+  const model = verifyModel(capacity);
+  return {
+    format: "karume-ir",
+    version: 1,
+    requires: { ops: ["attention"] },
+    symbols: [],
+    inputs: [{ name: "q", dtype: "f32", shape: [1, model.heads, 1, model.depth] }],
+    outputs: ["o"],
+    initializers: {},
+    values: { o: { dtype: "f32", shape: [1, model.heads, 1, model.depth] } },
+    states: {
+      kslot: { dtype: "f32", shape: [1, model.kvHeads, capacity, model.depth], external: true },
+      vslot: { dtype: "f32", shape: [1, model.kvHeads, capacity, model.depth], external: true },
+    },
+    nodes: [{
+      op: "attention",
+      ins: ["q"],
+      outs: ["o"],
+      attrs: { scale: halfScale(model.depth), window: VERIFY_WINDOW, readonly: true },
+      states: { k: "kslot", v: "vslot" },
+    }],
+  };
+};
+
+/**
+ * 「`Q = 余裕` 行を deferred で書いて `m` 行だけ commit した貸し手」を、**借り手**（readonly
+ * 読者）が 1 回読んだ出力を返す。参照側（`speculate = false`）は同じ token 列の先頭 `m` 行を
+ * 1 行ずつ通常 run で流す（= 棄却行を 1 語も書かなかった走行）。
+ *
+ * `runVerifyChain` との違いは読者の種類だけ。states 形の読者は今 step の ins のぶん窓の下端が
+ * 1 列高い（`P+m−(W−1)`）のに対し、借り手の readonly 読者は `P+m−W` まで下がる（
+ * `src/kernels/state-attention.ts` の readonly 節 `column_base = P − min(P, W)`）。門を
+ * `Q ≤ slack + 1` から `Q ≤ slack` へ締めた根拠はこの 1 列で、それを踏むのはこちらの形だけ。
+ */
+const runBorrowedVerifyChain = async (
+  gpu: GpuContext,
+  speculate: boolean,
+  commitRows: number,
+): Promise<Float32Array<ArrayBuffer>> => {
+  const capacity = VERIFY_WINDOW + VERIFY_SLACK;
+  const model = verifyModel(capacity);
+  const lender = await stateSession(gpu, model);
+  const borrower = await createSession(
+    gpu,
+    openModel(graphModelBuffer(verifyBorrowerGraph(capacity))),
+  );
+  const lenderContext = await lender.createGenerationContext({
+    chunkLength: 16,
+    chunkBuckets: [VERIFY_QUERY],
+  });
+  const borrowed = await borrower.createGenerationContext({
+    chunkLength: 1,
+    borrow: lenderContext,
+  });
+  try {
+    // ① 共通の prefill（P = 12 > W = 8）
+    await runStep(lender, lenderContext, model, stepInputs(model, 16, 5), 16, VERIFY_PREFILL);
+
+    // ② draft 8 行ぶんの入力（両側で**同じ値**を使う — 参照側は先頭 m 行を 1 行ずつ流す）
+    const draft = stepInputs(model, VERIFY_QUERY, 41);
+    if (speculate) {
+      await lender.run(
+        {
+          q: tensor([1, model.heads, VERIFY_QUERY, model.depth], draft.q),
+          k: tensor([1, model.kvHeads, VERIFY_QUERY, model.depth], draft.k),
+          v: tensor([1, model.kvHeads, VERIFY_QUERY, model.depth], draft.v),
+        },
+        {},
+        { context: lenderContext, queryLength: VERIFY_QUERY, commit: "deferred" },
+      );
+      lenderContext.commit(commitRows);
+    } else {
+      for (let row = 0; row < commitRows; row += 1) {
+        await runStep(
+          lender,
+          lenderContext,
+          model,
+          {
+            q: takeRow(draft.q, model.heads, VERIFY_QUERY, model.depth, row),
+            k: takeRow(draft.k, model.kvHeads, VERIFY_QUERY, model.depth, row),
+            v: takeRow(draft.v, model.kvHeads, VERIFY_QUERY, model.depth, row),
+          },
+          1,
+          1,
+        );
+      }
+    }
+    assertEquals(
+      lenderContext.pastLength,
+      VERIFY_PREFILL + commitRows,
+      "論理長が受理行数と合わない",
+    );
+
+    // ③ 借り手の 1 run（`[P−W, P)` を読む — 棄却行が混ざっていないか）
+    const outputs = await borrower.run(
+      {
+        q: tensor(
+          [1, model.heads, 1, model.depth],
+          seeded(model.heads * model.depth, (i) => QUERY(i + 97)),
+        ),
+      },
+      {},
+      { context: borrowed, queryLength: 1 },
+    );
+    assertEquals(
+      borrowed.pastLength,
+      VERIFY_PREFILL + commitRows,
+      "借り手が写した P が貸し手とずれた",
+    );
+    return outputs["o"].data as Float32Array<ArrayBuffer>;
+  } finally {
+    await borrowed.dispose();
+    await lenderContext.dispose();
+    await borrower.dispose();
+    await lender.dispose();
+  }
+};
+
+Deno.test({
+  name:
+    "deferred commit + 借り手の readonly 窓: 棄却行は drafter が読む列を 1 語も動かさない（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    try {
+      // `m = 0`（全棄却 = 例外復旧の `commit(0)`）が最悪ケース。C = 16 / W = 8 / P = 12 で
+      // 棄却行 j = 0..7 が潰す物理 row は 12,13,14,15,0,1,2,3、借り手が読む列 `[4,12)` の
+      // 物理 row は 4..11 で、**ちょうど 1 行だけ空いている**（`Q` を 9 に緩めると 9 本目の
+      // 論理列 20 が物理 row 4 = 借り手の窓の下端を潰す）。この形が緑であることが、締めた門
+      // `Q ≤ slidingSlack` の安全性そのもの。`m = VERIFY_COMMIT` は受理行が混じる側の対照。
+      for (const commitRows of [0, VERIFY_COMMIT]) {
+        const speculative = await runBorrowedVerifyChain(gpu, true, commitRows);
+        const sequential = await runBorrowedVerifyChain(gpu, false, commitRows);
+        // MUST: 期待値が自明でない（両側が全 0 なら突合は恒真）。
+        assert(
+          speculative.some((value) => Math.abs(value) > 1e-3),
+          `commit(${commitRows}): 借り手の出力が自明（全 ~0）`,
+        );
+        assertEquals(
+          [...bitsOfF32(speculative)],
+          [...bitsOfF32(sequential)],
+          `commit(${commitRows}): 棄却行が借り手の読む列を壊した`,
+        );
+      }
     } finally {
       gpu.destroy();
     }

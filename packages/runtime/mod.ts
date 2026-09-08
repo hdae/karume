@@ -115,6 +115,7 @@ export type {
   AdmissionReport,
   AdmissionScenario,
   AdmissionScenarioName,
+  AdmissionScenarioSpec,
   EstimateOptions,
 } from "./src/runtime/estimate.ts";
 /**

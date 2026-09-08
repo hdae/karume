@@ -1546,10 +1546,18 @@ export class Session {
         ),
       );
     }
-    // MUST: deferred run が sliding ring へ書ける行数は「余裕 + 1」まで（受理 0 行でも棄却行が
-    // live 窓の外に落ちる条件 — `GenerationContext.slidingSlack` の doc）。超えた run は例外も
-    // NaN も出さずに過去 KV を潰すので、発行の同期区間で落とす。immediate な run（prefill /
-    // decode）は全行を確定させるので上限は `chunkLength` のまま。
+    // MUST: deferred run が sliding ring へ書ける行数は**余裕まで**（`Q ≤ slidingSlack`）。
+    // 棄却行 j（commit した行数 m に対し j ≥ m）は物理 ring 上で論理列 `P+j−C` を潰すので、
+    // 確定後の読者の窓の下端より下に落ちる条件が要る。読者は 2 種類あり、下端が低いのは
+    // **借り手（readonly 読者 — drafter）**の `P+m−W`（`src/kernels/state-attention.ts` の
+    // readonly 節 `column_base = P − min(P, W)`。states 形の読者は今 step の ins があるぶん
+    // 1 列高い `P+m−(W−1)`）。条件 `P+j−C < P+m−W` ⟺ `j − m < C − W = slidingSlack` を
+    // 全ての `m ≥ 0`（`commit(0)` を含む）・`j ≤ Q−1` で満たすには `Q ≤ slidingSlack`。
+    // MUST: 借り手の有無で分岐しない（借り手は deferred + `commit(0)` の**後**に開くこともでき、
+    // run 発行時点の有無で緩めると「後から借り手を開く順」に穴が残る）。貸し手自身の読者しか
+    // 居ない場合は 1 列ぶん厳しいだけで、壊れる形は生まない。
+    // 超えた run は例外も NaN も出さずに過去 KV を潰すので、発行の同期区間で落とす。immediate な
+    // run（prefill / decode）は全行を確定させるので上限は `chunkLength` のまま。
     if (capturedGeneration?.commit === "deferred") {
       // 借り手 context は論理長を持たない（進行も確定も貸し手の側 — ADR 0096 段 2 §2.1）ので、
       // 確定させる相手が居ない deferred は発行の同期区間で落とす。
@@ -1562,11 +1570,11 @@ export class Session {
         );
       }
       const slack = capturedGeneration.context.slidingSlack;
-      if (slack !== undefined && capturedGeneration.queryLength > slack + 1) {
+      if (slack !== undefined && capturedGeneration.queryLength > slack) {
         return Promise.reject(
           new ExecutionError(
             `run: deferred な generation run の queryLength ${capturedGeneration.queryLength} が ` +
-              `sliding ring の余裕 ${slack} + 1 を超える（棄却行が live な過去 KV を潰す）`,
+              `sliding ring の余裕 ${slack} を超える（棄却行が live な過去 KV を潰す）`,
           ),
         );
       }

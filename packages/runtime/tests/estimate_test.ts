@@ -707,6 +707,153 @@ Deno.test("chunk 記号を持つグラフを generation 無しで見積らない
 });
 
 // ---------------------------------------------------------------------------
+// 追加シナリオ（`generation.scenarios` — 投機デコードの verify 形）
+// ---------------------------------------------------------------------------
+
+/**
+ * verify 形と同じ姿の最小グラフ — 物理 chunk 行 `M` の本体に、**行選択の記号 `R`** が載る
+ * 出口 2 本（`logits[R,V]` / `hidden[R,H]`）と添字入力 `rows[R]` が付く（配布形は
+ * `last_row[R]` → `logits[1,R,V]` + `hidden[1,R,H]` — ADR 0096）。
+ *
+ * `R` は states 専用記号でも物理 chunk 行の記号でもないので、束縛点は `options.bindings` 側
+ * （= 追加シナリオが `bindings` で上書きする軸）。`V=6` / `H=4` は 3 本の増え方を別々の
+ * 定数で見分けるために違う値にしてある。
+ */
+const verifyRowsGraph = (): GraphJson => ({
+  format: "karume-ir",
+  version: 1,
+  requires: { ops: ["neg", "state_append", "embedding"] },
+  symbols: ["M", "C", "R"],
+  inputs: [
+    { name: "x", dtype: "f32", shape: [1, 2, "M", 4] },
+    { name: "rows", dtype: "i32", shape: ["R"] },
+  ],
+  outputs: ["y", "logits", "hidden"],
+  initializers: {
+    vocab: { tensor: "m.vocab", storage: { dtype: "f32" } },
+    hid: { tensor: "m.hid", storage: { dtype: "f32" } },
+  },
+  values: {
+    vocab: { dtype: "f32", shape: [8, 6] },
+    hid: { dtype: "f32", shape: [8, 4] },
+    h: { dtype: "f32", shape: [1, 2, "M", 4] },
+    y: { dtype: "f32", shape: [1, 2, "M", 4] },
+    logits: { dtype: "f32", shape: ["R", 6] },
+    hidden: { dtype: "f32", shape: ["R", 4] },
+  },
+  states: { k: { dtype: "f32", shape: [1, 2, "C", 4] } },
+  nodes: [
+    { op: "neg", ins: ["x"], outs: ["h"], attrs: {} },
+    { op: "state_append", ins: ["h"], outs: [], attrs: {}, states: { slot: "k" } },
+    { op: "neg", ins: ["h"], outs: ["y"], attrs: {} },
+    { op: "embedding", ins: ["vocab", "rows"], outs: ["logits"], attrs: { padding_idx: -1 } },
+    { op: "embedding", ins: ["hid", "rows"], outs: ["hidden"], attrs: { padding_idx: -1 } },
+  ],
+});
+
+const verifyRowsModel = (): KarumeModel =>
+  openGraph(verifyRowsGraph(), [
+    { name: "m.vocab", dtype: "F32", shape: [8, 6], data: f32Bytes(new Array(48).fill(0)) },
+    { name: "m.hid", dtype: "F32", shape: [8, 4], data: f32Bytes(new Array(32).fill(0)) },
+  ]);
+
+/** 追加シナリオつきの見積り（`R` の既定は 1 = 非投機の decode と同じ行数）。 */
+const verifyRowsReport = (
+  scenarios: readonly { name: string; chunkLength: number; bindings?: { R: number } }[],
+  planBackingBudgetBytes?: number,
+): AdmissionReport =>
+  estimateSessionMemory(verifyRowsModel(), {
+    bindings: { R: 1 },
+    generation: { chunkLength: 4, bindings: { C: 8 }, scenarios },
+    planBackingBudgetBytes,
+  });
+
+Deno.test("generation.scenarios は既存 2 形の後ろに宣言順で並ぶ（同じ計算経路・束縛は上書き）", () => {
+  const report = verifyRowsReport([
+    { name: "verify", chunkLength: 4, bindings: { R: 4 } },
+    { name: "verify-tail", chunkLength: 1 },
+  ]);
+  assertEquals(
+    report.scenarios.map((scenario) => scenario.name),
+    ["prefill", "decode", "verify", "verify-tail"],
+  );
+  const [prefill, decode, verify, tail] = report.scenarios;
+  // io = x / y の 1×2×M×4 要素ずつ（32M バイト）+ rows 4R + logits 6R×4 + hidden 4R×4
+  //    = 64M + 44R。prefill は M=4 / R=1、decode は M=1 / R=1。
+  assertEquals(prefill.ioBytes, 64 * 4 + 44);
+  assertEquals(decode.ioBytes, 64 + 44);
+  // R を 4 へ上げて増えるのは行軸に載る 3 本だけ: 出口 2 本 (R−1)·(V+H)·4 = 3×40 = 120 と
+  // 添字入力 (R−1)·4 = 12。M は prefill と同じなので本体側は 1 バイトも動かない。
+  assertEquals(verify.ioBytes, prefill.ioBytes + 120 + 12);
+  assertEquals(verify.ioBytes, 432);
+  // 陰性対照: 束縛を上書きしなければ（R=1 のまま）同じ chunk 行の decode と 1 バイトも違わない。
+  assertEquals(tail, { ...decode, name: "verify-tail" });
+});
+
+Deno.test("追加シナリオの名前・物理 chunk 行・束縛は既存 2 形と同じ門を通る", () => {
+  // 予約名（generation ありでは並ばない "run" も含む）との衝突は fail loudly。
+  for (const name of ["run", "prefill", "decode"]) {
+    assertThrows(
+      () => verifyRowsReport([{ name, chunkLength: 2 }]),
+      ExecutionError,
+      "予約名は run / prefill / decode",
+    );
+  }
+  // 追加名どうしの重複も同じ門（名前で引く呼び手が先頭だけを見る形を作らない）。
+  assertThrows(
+    () =>
+      verifyRowsReport([{ name: "verify", chunkLength: 2 }, { name: "verify", chunkLength: 3 }]),
+    ExecutionError,
+    "既にある",
+  );
+  // 物理 chunk 行は 1..generation.chunkLength の整数。
+  for (const chunkLength of [0, -1, 1.5, 5]) {
+    assertThrows(
+      () => verifyRowsReport([{ name: "verify", chunkLength }]),
+      ExecutionError,
+      "1..4（generation.chunkLength）の整数でない",
+    );
+  }
+  // 両端ちょうどは通る。
+  assertEquals(verifyRowsReport([{ name: "verify", chunkLength: 1 }]).scenarios.length, 3);
+  assertEquals(verifyRowsReport([{ name: "verify", chunkLength: 4 }]).scenarios.length, 3);
+  // 束縛の上書きも既存 2 形と同じ門 — 物理 chunk 行の記号は受けない（束縛点は chunkLength）。
+  assertThrows(
+    () =>
+      estimateSessionMemory(verifyRowsModel(), {
+        bindings: { R: 1 },
+        generation: {
+          chunkLength: 4,
+          bindings: { C: 8 },
+          scenarios: [{ name: "verify", chunkLength: 2, bindings: { M: 2 } }],
+        },
+      }),
+    ExecutionError,
+    "物理 chunk 行 M の記号",
+  );
+});
+
+Deno.test("追加シナリオも peakAccountedBytes の最大に入る（予算 0）", () => {
+  const without = estimateSessionMemory(verifyRowsModel(), {
+    bindings: { R: 1 },
+    generation: { chunkLength: 4, bindings: { C: 8 } },
+    planBackingBudgetBytes: 0,
+  });
+  // prefill と同じ chunk 行で R だけ 8 行 → io も中間も prefill より大きい形。
+  const withVerify = verifyRowsReport([{ name: "verify", chunkLength: 4, bindings: { R: 8 } }], 0);
+  // 常駐（重み・state）は run の形に依らないので、追加シナリオでは 1 バイトも動かない。
+  assertEquals(withVerify.resident, without.resident);
+  const verify = withVerify.scenarios[2];
+  const resident = withVerify.resident.weights.totalBytes + withVerify.resident.stateBytes;
+  // 予算 0 = 保持 1 本なので、ピークに立つのは常駐 + 最大シナリオ = verify 形。
+  assertEquals(withVerify.peakAccountedBytes, resident + verify.ioBytes + verify.workspaceBytes);
+  assert(
+    withVerify.peakAccountedBytes > without.peakAccountedBytes,
+    "追加シナリオがピークに効いていない",
+  );
+});
+
+// ---------------------------------------------------------------------------
 // 中間（transient）ピーク
 // ---------------------------------------------------------------------------
 
@@ -1180,6 +1327,46 @@ Deno.test("S は capacity に比例して増える（full 変種は列容量 = �
   assertEquals(at(16), 512 + 1024 + 128);
   assertEquals(at(32), 512 + 2048 + 128);
   assertEquals(at(64), 512 + 4096 + 128);
+});
+
+Deno.test("readonly 変種（借り手の cross-attention・ins は q だけ）の S / 行統計も数える", () => {
+  // drafter の最小形（ADR 0096 段 2）: 借り物の external スロット 2 本を readonly attention 1 本が
+  // 読むだけ。今 step の k / v 入力が無いので、実行相の 3 dispatch の読みは q と一時だけになる —
+  // ここが「k / v が ins に在る」前提で組まれていると、transient 計画が未定義の参照で落ちる。
+  const graph: GraphJson = {
+    format: "karume-ir",
+    version: 1,
+    requires: { ops: ["attention"] },
+    symbols: ["C"],
+    inputs: [{ name: "q", dtype: "f32", shape: [1, 4, 1, 8] }],
+    outputs: ["o"],
+    initializers: {},
+    values: { o: { dtype: "f32", shape: [1, 4, 1, 8] } },
+    states: {
+      kslot: { dtype: "f32", shape: [1, 2, "C", 8], external: true },
+      vslot: { dtype: "f32", shape: [1, 2, "C", 8], external: true },
+    },
+    nodes: [{
+      op: "attention",
+      ins: ["q"],
+      outs: ["o"],
+      attrs: { scale: 0.5, readonly: true },
+      states: { k: "kslot", v: "vslot" },
+    }],
+  };
+  const report = estimateSessionMemory(openGraph(graph), {
+    generation: { chunkLength: 1, bindings: { C: 16 } },
+    maxStorageBufferBindingSize: WIDE_LIMIT,
+  });
+  const { prefill, decode } = bothScenarios(report);
+  // 借り手は自前スロットを持たない — state は lengths（8 バイト）だけ。
+  assertEquals(report.resident.stateBytes, 8);
+  // io は q 128 + o 128（k / v の入力が無い）。中間は o 128 / S = 4×1×16×4 = 256 / 行統計 = 32。
+  assertEquals(decode.ioBytes, 256);
+  assertEquals(decode.workspaceBytes, 128 + 256 + 32);
+  // chunk 行の記号が無いグラフでは 2 形が同じ数字になる（estimator の契約）。
+  assertEquals(prefill.workspaceBytes, decode.workspaceBytes);
+  assertEquals(prefill.ioBytes, decode.ioBytes);
 });
 
 Deno.test("S と行統計は chunkLength に比例して増える（prefill 側だけ・decode は M=1 固定）", () => {
