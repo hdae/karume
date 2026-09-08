@@ -13,20 +13,8 @@
 // 受けるので、fake は素の object 1 個で足りる。
 
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
-import type {
-  GenerationContextSpec,
-  RunInputs,
-  RunOutputs,
-  Session,
-  SymbolBindings,
-} from "@karume/runtime";
-import {
-  createGenerationProgram,
-  type DerivedRunInputs,
-  type GenerationGraph,
-  type GenerationProgramSpec,
-  type GenerationWiring,
-} from "../src/generation/program.ts";
+import type { RunInputs, Session } from "@karume/runtime";
+import type { GenerationWiring } from "../src/generation/program.ts";
 import {
   assertGenerationRequestValues,
   createGenerationSequence,
@@ -34,209 +22,19 @@ import {
   type GenerationEvent,
   type GenerationRequest,
   type GenerationSession,
-  type GenerationStop,
   physicalChunkRows,
 } from "../src/generation/sequence.ts";
-
-const VOCAB = 16;
-const HIDDEN_SIZE = 4;
-const IDS = "input_ids";
-const LAST_ROW = "last_row";
-const LOGITS = "logits";
-const HIDDEN = "hidden";
-const DERIVED = "per_layer_inputs";
-const CHUNK_LENGTH = 4;
-
-const graphOf = (): GenerationGraph => ({
-  symbols: ["C", "M", "R"],
-  inputs: [
-    { name: IDS, dtype: "i32", shape: [1, "M"] },
-    { name: DERIVED, dtype: "f32", shape: [1, "M", 2] },
-    // 行選択は添字**列**（`R` = その run で選ぶ行数）。この経路は常に 1 本渡す。
-    { name: LAST_ROW, dtype: "i32", shape: ["R"] },
-  ],
-  outputs: [LOGITS, HIDDEN],
-  values: {
-    [LOGITS]: { dtype: "f32", shape: [1, "R", VOCAB] },
-    [HIDDEN]: { dtype: "f32", shape: [1, "R", HIDDEN_SIZE] },
-  },
-});
-
-/**
- * 静的配線。**派生入力の席は fake が持つ**（既定は位置列を記録する実装）。
- *
- * 位置は run の入力ではなくなった（`position_ids` はグラフから消え、位置に依存するホスト入力は
- * 派生入力の席が受ける）ので、「どの run にどの位置が渡ったか」を見られる唯一の場所がここである。
- */
-const programOf = (
-  fake: FakeSession,
-  override: Partial<GenerationProgramSpec> = {},
-): GenerationWiring =>
-  createGenerationProgram({
-    graph: graphOf(),
-    inputIds: IDS,
-    lastRow: LAST_ROW,
-    logits: LOGITS,
-    hidden: HIDDEN,
-    chunkLength: CHUNK_LENGTH,
-    maxPosition: 128,
-    capacity: 64,
-    vocabSize: VOCAB,
-    stopTokens: [],
-    capacitySymbol: "C",
-    derivedInputs: fake.derivedInputs,
-    ...override,
-  });
-
-/** run 1 回ぶんの記録（呼び出し列だけで step の形が全部読める粒度）。 */
-type RunCall = {
-  readonly ids: readonly number[];
-  readonly idsShape: readonly number[];
-  readonly positions: readonly number[];
-  readonly lastRow: number;
-  readonly lastRowShape: readonly number[];
-  readonly queryLength: number;
-  readonly pastBefore: number;
-  readonly bindings: SymbolBindings | undefined;
-  readonly extra: readonly string[];
-  readonly sameContext: boolean;
-};
-
-const readRow = (
-  inputs: RunInputs,
-  name: string,
-): { readonly shape: readonly number[]; readonly values: readonly number[] } => {
-  if (!Object.hasOwn(inputs, name)) throw new Error(`fake: 入力 '${name}' が渡っていない`);
-  const tensor = inputs[name];
-  if (!("data" in tensor)) throw new Error(`fake: 入力 '${name}' がホストテンソルでない`);
-  if (tensor.dtype !== "i32") throw new Error(`fake: 入力 '${name}' が i32 でない`);
-  return { shape: tensor.shape, values: [...tensor.data] };
-};
-
-type FakeOptions = {
-  /** run ごとに argmax が指すべき token id（call 番号で引く）。 */
-  readonly tokens?: readonly number[];
-  /** この回数目（0 始まり）の run を失敗させる。 */
-  readonly failAt?: number;
-  /**
-   * 対抗馬（第 1 候補より低い logit を持つ id）。
-   *
-   * 既定の logits は「狙った id だけ 10・他は全部 0」なので、正値を割る repetition penalty では
-   * 順位が動かず（10/penalty > 0）、温度 0 の argmax では効きが**原理的に観測できない**。
-   * 2 番手を置くと、penalty が第 1 候補を 2 番手の下へ落としたかを決定論的に見られる。
-   */
-  readonly runnerUp?: { readonly id: number; readonly logit: number };
-  /**
-   * logits を**この行数**で返す（既定は渡った `last_row` の本数 = 正しい実装）。
-   *
-   * 故障注入用の席である — 「1 行頼んだのに R 行返る」形はグラフの宣言としては正しい
-   * （R は記号）ので、`readLogits` の行数検査だけが検出線になる。
-   */
-  readonly logitsRows?: number;
-};
-
-type FakeSession = ReturnType<typeof fakeSession>;
-
-const fakeSession = (options: FakeOptions = {}) => {
-  const calls: RunCall[] = [];
-  const specs: GenerationContextSpec[] = [];
-  let pastLength = 0;
-  let disposals = 0;
-  /** 直前の `derive` が受けた位置列（run の記録へ合流させる — 位置は run の入力ではない）。 */
-  let derivedPositions: readonly number[] = [];
-  /** 既定の派生入力の席（`[1,M,2]` の f32 を返しつつ、渡った位置列を記録する）。 */
-  const derivedInputs: DerivedRunInputs = {
-    names: [DERIVED],
-    derive: (ids, positions) => {
-      if (ids.length !== positions.length) {
-        throw new Error(`fake: ids ${ids.length} と positions ${positions.length} の長さが違う`);
-      }
-      derivedPositions = [...positions];
-      return Promise.resolve(
-        {
-          [DERIVED]: {
-            dtype: "f32",
-            shape: [1, ids.length, 2],
-            data: new Float32Array(ids.length * 2),
-          },
-        } satisfies RunInputs,
-      );
-    },
-  };
-  const context = {
-    get pastLength(): number {
-      return pastLength;
-    },
-    dispose: (): Promise<void> => {
-      disposals += 1;
-      return Promise.resolve();
-    },
-  };
-  const session: GenerationSession<typeof context> = {
-    createGenerationContext: (spec) => {
-      specs.push(spec);
-      return Promise.resolve(context);
-    },
-    // deno-lint-ignore require-await
-    run: async (inputs, bindings, generation): Promise<RunOutputs> => {
-      const call = calls.length;
-      const ids = readRow(inputs, IDS);
-      const lastRow = readRow(inputs, LAST_ROW);
-      calls.push({
-        ids: ids.values,
-        idsShape: ids.shape,
-        // この run の直前に `derive` が受けた位置列（run の入力には無い）。
-        positions: derivedPositions,
-        lastRow: lastRow.values[0],
-        lastRowShape: lastRow.shape,
-        queryLength: generation.queryLength,
-        pastBefore: pastLength,
-        bindings,
-        extra: Object.keys(inputs).filter((name) => name !== IDS && name !== LAST_ROW),
-        sameContext: generation.context === context,
-      });
-      if (options.failAt === call) throw new Error("run が落ちた");
-      // 論理長の進行は run の成功で起きる（実 context と同じ順序）。
-      pastLength += generation.queryLength;
-      const id = options.tokens?.[call] ?? (call + 1) % VOCAB;
-      // 返す行数は渡った `last_row` の本数（実グラフと同じ = R は入力が束縛する）。
-      const rows = options.logitsRows ?? lastRow.values.length;
-      const data = new Float32Array(rows * VOCAB);
-      data[id] = 10;
-      if (options.runnerUp !== undefined) data[options.runnerUp.id] = options.runnerUp.logit;
-      return {
-        [LOGITS]: { dtype: "f32", shape: [1, rows, VOCAB], data },
-        // hidden も宣言どおり返す（生成ループが**読まない**ことの陰性対照 — 出口 2 本の
-        // グラフで logits を位置で掴む実装に退行すれば、ここが効く）。
-        [HIDDEN]: {
-          dtype: "f32",
-          shape: [1, rows, HIDDEN_SIZE],
-          data: new Float32Array(rows * HIDDEN_SIZE),
-        },
-      };
-    },
-  };
-  return {
-    session,
-    derivedInputs,
-    calls,
-    specs,
-    disposals: (): number => disposals,
-    pastLength: (): number => pastLength,
-  };
-};
-
-/** イベントを全部汲む（`done` も一緒に返す）。 */
-const drain = async (
-  stream: ReturnType<Awaited<ReturnType<typeof createGenerationSequence>>["generate"]>,
-): Promise<{ readonly events: GenerationEvent[]; readonly stop: GenerationStop }> => {
-  const events: GenerationEvent[] = [];
-  for await (const event of stream) events.push(event);
-  return { events, stop: await stream.done };
-};
-
-const tokenIds = (events: readonly GenerationEvent[]): number[] =>
-  events.filter((event) => event.kind === "token").map((event) => event.id);
+import {
+  CHUNK_LENGTH,
+  DERIVED,
+  drain,
+  type FakeSession,
+  fakeSession,
+  LOGITS,
+  programOf,
+  tokenIds,
+  VOCAB,
+} from "./helpers/generation-fake.ts";
 
 Deno.test("GenerationSequence: prefill は固定長 chunk・pad 0・位置は絶対値、decode は 1 行", async () => {
   const fake = fakeSession({ tokens: [5, 6, 7] });

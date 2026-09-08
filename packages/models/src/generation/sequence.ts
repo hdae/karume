@@ -2,13 +2,18 @@
  * 1 会話ぶんの寿命を持つ生成の実体（ADR 0083 決定 1〜5 の `GenerationSequence`）。
  * **パイプライン非依存の共通処理**なので `program.ts` / `sampler.ts` と同じ `src/generation/` に置く。
  *
- * ## 可変状態は 2 つだけ
+ * ## 可変状態は `context` と `pendingToken`（+ 投機の hidden の写し）
  *
  * MUST: sequence が持つ可変状態は **`context` と `pendingToken` の 2 つだけ**である（ADR 0083
  * 決定 1）。position / totalLength といった counter は持たず、run を組む直前に
  * `context.pastLength` を読む — 論理長の進行は run の成功で context が進める（ADR 0066 決定 6 の
  * **二重簿記の禁止**）。イベントに載せる `position` も、その run の**後**の `context.pastLength`
  * をその場で読んだ値で、保存しない。
+ *
+ * 投機経路（ADR 0096 段 3）はこれに **drafter へ渡す hidden の写し**（1 行 — readback は次の run
+ * までしか有効でなく、導出できない）と勘定（`GenerationStop.speculation`）を足す。進行の記録は
+ * 依然 `context.pastLength` だけで、verify は deferred run（論理長を保留）にし、**配送した token の
+ * frontier まで**を `context.commit(rows)` で進める（下の「投機経路」節）。
  *
  * ## `pendingToken` — 最大 1 token の未 commit frontier
  *
@@ -36,6 +41,23 @@
  *
  * 段の境目（各 run の直前）で検査し、`signal.reason` を**包まずそのまま** throw する
  * （ADR 0083 決定 5 — 前例は `AnimaPipelineOptions.signal`）。
+ *
+ * ## 投機経路（ADR 0096 段 3 — `options.speculative` があるとき・温度に依らない）
+ *
+ * 1 cycle = draft（借り手 run・`k' = min(k, 残り予算 − 1)` 本）→ verify（貸し手の deferred run・
+ * `[b, d₁..d_k']` の `k'+1` 行）→ 受理（同期・先頭一致 — `speculation.ts`）→ 停止 token で切り詰め →
+ * 確定列を 1 個ずつ配送（`pendingToken` / `generated` / `history` は yield の前に更新 — 既存の MUST）
+ * → **`settleCommit()` が frontier まで commit**（消費された行数 = frontier にした token の数）。
+ *
+ * MUST: `settleCommit()` は配送ループの直後と generator の `finally` の両方で呼ぶ（保留があれば 1 回だけ
+ * commit する）。消費者の `break` / `return()` は finally で「配送した token まで」を commit し、
+ * verify の戻りから配送までの同期区間で例外が出れば `commit(0)`（frontier `b` は未投入のまま・
+ * 棄却行は次の run が上書き）— どちらも「会話 = 消費者が受け取った列 + frontier 1 個」という
+ * 非投機と同じ形に閉じる（保留を残すと context は dispose しか受け付けなくなる）。
+ * MUST: 受理から最初の yield までに `await` を置かない（readback の subarray は次の run まで —
+ * 貸し手 Session は他の sequence と共有されうる）。次 cycle の hidden は写す。
+ * MUST: `k + 1 ≤ context.slidingSlack`（借り手は sliding ring の最古列まで読む — runtime の門は
+ * `queryLength ≤ slidingSlack` で、`k` はその内側に取る）。
  */
 
 import type {
@@ -48,9 +70,20 @@ import type {
 } from "@karume/runtime";
 import { settleAbort } from "../concurrency/abort.ts";
 import { createOperationChain } from "../concurrency/serial.ts";
+import { disposeSteps } from "../session/dispose-steps.ts";
 import { planPrefillChunks } from "./greedy.ts";
 import { createSampler, isStopToken, type SamplerSpec } from "./sampler.ts";
 import type { GenerationWiring } from "./program.ts";
+import {
+  acceptDrafts,
+  createSpeculationTally,
+  type DraftFace,
+  planDraftLength,
+  type SpeculationTally,
+  takeDrafts,
+  truncateAtStop,
+  verifyRowIndices,
+} from "./speculation.ts";
 
 /** {@link GenerationCapacityError} が踏んだ上限（どちらも「もう入らない」）。 */
 export type GenerationCapacityConstraint = "capacity" | "maxPosition";
@@ -125,7 +158,10 @@ export type GenerationEvent =
     readonly kind: "token";
     /** 選ばれた token id。 */
     readonly id: number;
-    /** この token が会話に置かれる絶対位置（= 直後の `context.pastLength`）。 */
+    /**
+     * この token が会話に置かれる絶対位置（非投機では = 直後の `context.pastLength`。投機では
+     * 1 verify で複数 token が確定するので、commit 前の `pastLength + 1 + i`）。
+     */
     readonly position: number;
   }
   | {
@@ -152,15 +188,22 @@ export type GenerationStop =
     /**
      * このターンが**生成した** token の数（prompt は含まない）。
      *
-     * MUST: 停止 token（`eos` / `stop-token`）も 1 個として数える。抽選 1 回 = run 1 回なので、
-     * この数がそのまま生成に費やした run 数と一致し、`tok/s` を再エンコード無しで書ける
-     * （それがこの欄の目的）。本文だけの数（= `token` イベントの数）が要るなら、停止 token を
-     * 運ぶ 2 枝（`"eos"` / `"stop-token"`）のとき 1 引く。
+     * MUST: 停止 token（`eos` / `stop-token`）も 1 個として数える。非投機では抽選 1 回 = run 1 回
+     * なので、この数がそのまま生成に費やした run 数と一致し、`tok/s` を再エンコード無しで書ける
+     * （それがこの欄の目的）。投機では 1 verify run が最大 `k+1` 個を確定させるので run 数は
+     * `speculation.cycles + speculation.draftRuns` で読む。本文だけの数（= `token` イベントの数）が
+     * 要るなら、停止 token を運ぶ 2 枝（`"eos"` / `"stop-token"`）のとき 1 引く。
      *
      * `max-tokens` なら要求の `maxNewTokens` に一致し、`closed` / `aborted` では打ち切りまでに
-     * 出した数になる（どちらも「成功した run のぶんだけ会話は進んでいる」— 上の節と同じ線）。
+     * 出した数になる（どちらも「成功した run のぶんだけ会話は進んでいる」— 上の節と同じ線。
+     * 投機でも配送した token までしか commit しないので、この数 = 会話に入った生成 token 数）。
      */
     readonly tokens: number;
+    /**
+     * 投機の勘定（`options.speculative` を持つ sequence のターンだけ載る — 非投機の sequence では
+     * 欄ごと無い）。
+     */
+    readonly speculation?: GenerationSpeculation;
   }
   & (
     | { readonly reason: "eos"; readonly token: number }
@@ -169,6 +212,45 @@ export type GenerationStop =
     | { readonly reason: "aborted" }
     | { readonly reason: "closed" }
   );
+
+/**
+ * 投機の勘定（{@link GenerationStop.speculation}）。
+ *
+ * 1 cycle に確定する token 数は `1 + a`（棄却でも frontier 1 個は必ず進む）なので、1 cycle あたりの
+ * 確定数は `(accepted + cycles) / cycles`。予算末尾の `k' = 0` の cycle（draft を採らない）も
+ * `cycles` に数え `acceptedHistogram[0]` に入る — draft あたりの受理数が要るなら `accepted / draftRuns`。
+ */
+export type GenerationSpeculation = {
+  /** verify run の数（= cycle 数）。 */
+  readonly cycles: number;
+  /** draft run の数（`k' = 0` の cycle は draft を採らない）。 */
+  readonly draftRuns: number;
+  /** 出した draft の総数（Σ k'）。 */
+  readonly drafted: number;
+  /** 受理した draft の総数（Σ a）。 */
+  readonly accepted: number;
+  /** 添字 = その cycle の受理数 `a`（長さ `k+1`・`k' = 0` の cycle は添字 0）。 */
+  readonly acceptedHistogram: readonly number[];
+};
+
+/**
+ * run 1 本につき 1 通の観測（{@link GenerationSequenceOptions.onRun}）。
+ *
+ * 番号はすべて **1 始まり**。`prefill` の `chunk` / `chunks` は `GenerationEvent` の `prefill` と
+ * 同じ数、`decode` の `step` はそのターンの decode run の番号、`draft` / `verify` の `cycle` は
+ * 投機の cycle 番号（同じ cycle の draft と verify は同じ番号を名乗る）。`verify.rows` はその
+ * run の有効行数 `k'+1`、`accepted` は受理した draft の数 `a`。
+ */
+export type GenerationRunPhase =
+  | { readonly kind: "prefill"; readonly chunk: number; readonly chunks: number }
+  | { readonly kind: "decode"; readonly step: number }
+  | { readonly kind: "draft"; readonly cycle: number }
+  | {
+    readonly kind: "verify";
+    readonly cycle: number;
+    readonly rows: number;
+    readonly accepted: number;
+  };
 
 /**
  * 1 回ぶんの生成リクエスト（ADR 0083 決定 1）。
@@ -246,7 +328,7 @@ export const assertGenerationRequestValues = (
  * するのが一次で、`done` は同じ例外で reject するだけ。汲まない呼び手のために内部で 1 度
  * 握ってあるので、`done` を読まなくても unhandled rejection にはならない。
  * MUST: `done` は反復の終端（最後の `next()` が `done: true` を返す）より**前**に決着する —
- * 列を包む側（gemma4 の `withRunDiagnostics`）が、列が尽きた直後に `done` を待たずに読める
+ * 列を包む側（gemma4 の chat の締め）が、列が尽きた直後に `done` を待たずに読める
  * ことへ依存している。決着が終端より後ろへずれると、その `await` が消費側の `for await` ごと
  * 止まる。
  */
@@ -304,6 +386,12 @@ export type GenerationSequence = {
 export type GenerationContextFace = {
   /** 会話の論理長（この sequence の唯一の position の出どころ）。 */
   readonly pastLength: number;
+  /** deferred run の保留（無ければ `undefined`）— 投機経路の `settleCommit()` が読む。 */
+  readonly pendingCommit: { readonly pastLength: number; readonly queryLength: number } | undefined;
+  /** sliding ring の余裕（sliding スロットが無ければ `undefined`）— `k + 1 ≤ slidingSlack` の門。 */
+  readonly slidingSlack: number | undefined;
+  /** 保留中の deferred run の先頭 `rows` 行を確定させる（`0 ≤ rows ≤ queryLength`・同期）。 */
+  commit(rows: number): void;
   dispose(): Promise<void>;
 };
 
@@ -323,14 +411,38 @@ export type GenerationSession<C extends GenerationContextFace = GenerationContex
   run(
     inputs: RunInputs,
     bindings: SymbolBindings | undefined,
-    generation: { readonly context: C; readonly queryLength: number },
+    generation: {
+      readonly context: C;
+      readonly queryLength: number;
+      /** `"deferred"` = 論理長を進めず保留する（投機の verify — 受理数が決まってから `commit`）。 */
+      readonly commit?: "deferred";
+    },
   ): Promise<RunOutputs>;
+};
+
+/** 投機の指定（{@link GenerationSequenceOptions.speculative}）。 */
+export type GenerationSpeculativeOptions<C extends GenerationContextFace> = {
+  /**
+   * 貸し手 context を受けて drafter の面を開く（sequence 生成時に 1 度・失敗したら貸し手 context
+   * は sequence が畳んでから投げ直す）。畳む順は **drafter → 貸し手 context**（sequence が持つ）。
+   */
+  open(context: C): Promise<DraftFace>;
+  /** 1 cycle で使う draft の本数（省略時は `DraftFace.steps`・`1 ≤ k ≤ steps`）。 */
+  readonly k?: number;
 };
 
 export type GenerationSequenceOptions<C extends GenerationContextFace> = {
   readonly session: GenerationSession<C>;
   /** 検証済みの静的配線（`createGenerationProgram` の返り値）。 */
   readonly program: GenerationWiring;
+  /** 投機的デコード（ADR 0096 段 3）。無ければ従来の 1 token = 1 run。 */
+  readonly speculative?: GenerationSpeculativeOptions<C>;
+  /**
+   * run 1 本につき 1 回、その run の出力を読み終えた**同期区間**で呼ばれる観測席（verify は commit の
+   * 直後）。診断（`Session.diagnostics()` の `lastRun*`）を「その run」の値として読めるのはこの
+   * 同期区間だけである。無ければ何も呼ばない。
+   */
+  readonly onRun?: (phase: GenerationRunPhase) => void;
   /**
    * この会話が使う full スロットの容量（省略時は {@link GenerationWiring.capacity} = 配布形の既定）。
    *
@@ -401,7 +513,7 @@ type LogitsRows = {
 };
 
 /**
- * 選んだ行の logits `[1,R,V]` の生データを読む。
+ * 選んだ行の出力 `[1,R,width]`（logits なら `V`・hidden なら `H`）の生データを読む。
  *
  * 名前と宣言形は program の setup が検証済みだが、ここでも見るのは「program が検証したのとは
  * **別のグラフ**で組まれた Session」を掴んだ場合の唯一の検出線だから（形が合う別の出力を掴むと
@@ -410,28 +522,27 @@ type LogitsRows = {
  * MUST: 行数は**渡した添字の本数**（`expectedRows`）と突き合わせる。R はグラフでは記号なので、
  * 「1 行頼んだのに R 行返る」形も宣言としては正しく、ここが唯一の門である。
  */
-const readLogits = (
+const readRows = (
   outputs: RunOutputs,
-  program: GenerationWiring,
+  name: string,
+  width: number,
   where: string,
   expectedRows: number,
 ): LogitsRows => {
-  if (!Object.hasOwn(outputs, program.logits)) {
-    throw new Error(`${where}: グラフ出力 '${program.logits}' が無い`);
+  if (!Object.hasOwn(outputs, name)) {
+    throw new Error(`${where}: グラフ出力 '${name}' が無い`);
   }
-  const tensor = outputs[program.logits];
+  const tensor = outputs[name];
   if (tensor.dtype !== "f32") {
-    throw new Error(`${where}: '${program.logits}' が f32 でない（${tensor.dtype}）`);
+    throw new Error(`${where}: '${name}' が f32 でない（${tensor.dtype}）`);
   }
   const shape = tensor.shape;
   if (
     shape.length !== 3 || shape[0] !== 1 || shape[1] !== expectedRows ||
-    shape[2] !== program.vocabSize
+    shape[2] !== width
   ) {
     throw new Error(
-      `${where}: '${program.logits}' の形 [${
-        shape.join(",")
-      }] が [1,${expectedRows},${program.vocabSize}] でない`,
+      `${where}: '${name}' の形 [${shape.join(",")}] が [1,${expectedRows},${width}] でない`,
     );
   }
   const data = tensor.data;
@@ -441,10 +552,26 @@ const readLogits = (
       if (!Number.isSafeInteger(index) || index < 0 || index >= expectedRows) {
         throw new Error(`${where}: 行 ${index} が 0..${expectedRows - 1} の外`);
       }
-      return data.subarray(index * program.vocabSize, (index + 1) * program.vocabSize);
+      return data.subarray(index * width, (index + 1) * width);
     },
   };
 };
+
+/** 選んだ行の logits `[1,R,V]`。 */
+const readLogits = (
+  outputs: RunOutputs,
+  program: GenerationWiring,
+  where: string,
+  expectedRows: number,
+): LogitsRows => readRows(outputs, program.logits, program.vocabSize, where, expectedRows);
+
+/** 選んだ行の最終 norm 後 hidden `[1,R,H]`（投機経路だけが読む — drafter の入力）。 */
+const readHidden = (
+  outputs: RunOutputs,
+  program: GenerationWiring,
+  where: string,
+  expectedRows: number,
+): LogitsRows => readRows(outputs, program.hidden, program.hiddenSize, where, expectedRows);
 
 /**
  * このターンが踏む上限を run の**前**に見る（ADR 0083 決定 10）。
@@ -496,6 +623,51 @@ const isAbortOf = (error: unknown, signal: AbortSignal | undefined): boolean =>
   signal !== undefined && signal.aborted && error === signal.reason;
 
 /**
+ * 投機の指定の受理集合（sequence 生成時・同期）。
+ *
+ * - `1 ≤ k ≤ steps`（配布形の drafter は `steps` 段で焼かれている）。
+ * - `k + 1 ≤ slidingSlack`: verify は `k+1` 行を deferred で書き、棄却行が sliding ring の live 窓を
+ *   潰さない条件は runtime の門 `queryLength ≤ slidingSlack`（借り手は最古列 `P−W` まで読む）。
+ *   ここで見ないと runtime の門に落ちるのは最初の verify で、GB 級のロードの末になる。
+ * - `k + 1 ≤ chunkLength` と「`k+1` 行以上のバケットが在る」: 無ければ `physicalChunkRows` が
+ *   `chunkLength` 行（配布既定 768）へ落ち、例外なしで verify 1 本が 768 行になる。
+ */
+const assertSpeculativeSetup = (
+  k: number,
+  steps: number,
+  slidingSlack: number | undefined,
+  program: GenerationWiring,
+): void => {
+  if (!Number.isSafeInteger(k) || k < 1 || k > steps) {
+    throw new Error(`speculative.k ${k} が 1..${steps}（drafter の段数）の外`);
+  }
+  if (slidingSlack !== undefined && k + 1 > slidingSlack) {
+    throw new Error(
+      `speculative.k ${k} は sliding ring の余裕 ${slidingSlack} に入らない（k + 1 ≤ 余裕 MUST）`,
+    );
+  }
+  if (k + 1 > program.chunkLength) {
+    throw new Error(
+      `speculative.k ${k} の verify ${k + 1} 行が chunkLength ${program.chunkLength} を超える`,
+    );
+  }
+  if (!program.chunkBuckets.some((rows) => rows >= k + 1)) {
+    throw new Error(
+      `verify ${k + 1} 行を載せるバケットが無い（chunkBuckets [${
+        program.chunkBuckets.join(", ")
+      }]）`,
+    );
+  }
+};
+
+/** 出力行の写し（readback の subarray は次の run まで — 次 cycle まで持つ hidden は写す）。 */
+const copyRow = (row: Float32Array<ArrayBuffer>): Float32Array<ArrayBuffer> => {
+  const copy = new Float32Array(new ArrayBuffer(row.byteLength));
+  copy.set(row);
+  return copy;
+};
+
+/**
  * 1 会話ぶんの sequence を組む（context をここで確保し、以後の寿命はこの実体が持つ）。
  *
  * MUST: `GenerationContext` を外へ出さない（ADR 0083 決定 3）— 「最大 1 token の未 commit
@@ -530,6 +702,30 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
     // 空配列 = 追加なしなので、宣言の無い配線でも従来どおりの 2 本になる。
     chunkBuckets: program.chunkBuckets,
   });
+
+  /** drafter の面（投機の指定があるときだけ — 借り手は context の直後に開き、先に畳む）。 */
+  let face: DraftFace | undefined;
+  let k = 0;
+  if (options.speculative !== undefined) {
+    try {
+      face = await options.speculative.open(context);
+      k = options.speculative.k ?? face.steps;
+      assertSpeculativeSetup(k, face.steps, context.slidingSlack, program);
+    } catch (error) {
+      // 借り手 → 貸し手の順で畳んでから投げ直す（開けなかった借り手は無い）。貸し手 context を
+      // 漏らすと Session.dispose は気づかない（生きた context を数えていない）。後始末まで落ちたら
+      // 両方を運ぶ（元の失敗だけにすると「context が返らなかった」ことが無音になる）。
+      try {
+        await disposeSteps([() => face?.dispose(), () => context.dispose()]);
+      } catch (cleanup) {
+        throw new AggregateError(
+          [error, cleanup],
+          "speculative.open が失敗し、貸し手 context の後始末も失敗した",
+        );
+      }
+      throw error;
+    }
+  }
 
   // 「generate 1 回ぶん」の直列化（ADR 0083 決定 2）— 自前ロックは作らない。
   const chain = createOperationChain();
@@ -618,6 +814,29 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
     // 抽選器は 1 生成に 1 つ（RNG 状態を step 越しに持つ）。指定の検査と、その指定の
     // スナップショット（`logitBias` の要素まで写す）も `createSampler` の中で済む。
     const sampler = createSampler(request.sampler);
+    // 投機は drafter が居れば**温度に依らず**張る。受理は行ごとに `sampler.next` を非投機の decode と
+    // 同じ logits・同じ history・同じ順で 1 回ずつ呼ぶ（確定 token 1 個につき 1 回）ので、RNG の消費列も
+    // token 列も非投機と厳密に一致する — 温度 > 0 では「draft と同じ token を引いたら受理」が
+    // one-hot draft の speculative sampling そのものになる（受理確率 = target 分布での draft の確率）。
+    const tally: SpeculationTally | undefined = face === undefined
+      ? undefined
+      : createSpeculationTally(k);
+    const withSpeculation = (stopped: GenerationStop): GenerationStop =>
+      tally === undefined ? stopped : {
+        ...stopped,
+        speculation: { ...tally, acceptedHistogram: [...tally.acceptedHistogram] },
+      };
+    /**
+     * この cycle で frontier にした token の数（= verify の行のうち target が消費した行数）。
+     * {@link settleCommit} が保留中の verify をここまで commit する。
+     */
+    let frontierRows = 0;
+    const settleCommit = (): void => {
+      if (context.pendingCommit === undefined) return;
+      context.commit(frontierRows);
+      frontierRows = 0;
+    };
+    const onRun = options.onRun;
 
     /**
      * 停止判定（配布形の集合と要求の集合の**和集合**）。
@@ -669,6 +888,8 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
         const history = [...promptIds];
 
         let logits: LogitsRows | undefined;
+        /** 最終 chunk の最終有効行の hidden（投機の最初の cycle の drafter 入力 — 写し）。 */
+        let hidden: Float32Array<ArrayBuffer> | undefined;
         for (const [index, chunk] of chunks.entries()) {
           await settleAbort(signal);
           // 物理行数は有効行数から決める（decode 形 / バケット / chunkLength — 理由は
@@ -700,7 +921,10 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
           );
           // 先頭 chunk が通った時点で frontier は KV に入った（= もう連結してはならない）。
           if (index === 0) pendingToken = undefined;
-          logits = readLogits(outputs, program, `prefill@${chunk.position}`, 1);
+          const where = `prefill@${chunk.position}`;
+          logits = readLogits(outputs, program, where, 1);
+          if (tally !== undefined) hidden = copyRow(readHidden(outputs, program, where, 1).row(0));
+          onRun?.({ kind: "prefill", chunk: index + 1, chunks: chunks.length });
           yield { kind: "prefill", chunk: index + 1, chunks: chunks.length };
         }
         if (logits === undefined) throw new Error("prefill が 1 回も走っていない");
@@ -716,6 +940,91 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
           return;
         }
         yield { kind: "token", id: token, position: context.pastLength };
+
+        if (tally !== undefined && face !== undefined) {
+          // ---- 投機経路（モジュール doc の「投機経路」節・ADR 0096 段 3）
+          if (hidden === undefined) throw new Error("prefill が hidden を出していない");
+          const isStop = (id: number): boolean =>
+            isStopToken(id, program.stopTokens) || isStopToken(id, requestStopTokens);
+          for (let cycle = 1; generated < maxNewTokens; cycle += 1) {
+            await settleAbort(signal);
+            // k' = min(k, 残り − 1): 確定は最大 k'+1 個なので予算を超えない。k' = 0 は decode 1 行。
+            const drafted = planDraftLength(k, maxNewTokens - generated);
+            let drafts: number[] = [];
+            if (drafted >= 1) {
+              // drafter は (frontier b, b を出した行の hidden, b の位置 P) から d₁.. を出す。
+              const raw = await face.draft({ token, hidden, position: context.pastLength });
+              // 戻った run は名乗る（値域門で落ちる draft でも run は完了している）。
+              tally.draftRuns += 1;
+              tally.drafted += drafted;
+              onRun?.({ kind: "draft", cycle });
+              drafts = takeDrafts(raw, drafted, program.vocabSize);
+            }
+            // verify = [b, d₁..d_k'] の k'+1 行を位置 P.. に置く（pad 行は 0 のまま）。物理行数 M は
+            // k' が縮んでも `k+1` 行の形に固定する（R と同じく PreparedPlan の形を増やさない —
+            // `k' = 0` だけは decode 形 M=1）。
+            const queryLength = drafted + 1;
+            const rows = physicalChunkRows(drafted === 0 ? 1 : k + 1, program);
+            const ids = new Int32Array(rows);
+            const positions = new Int32Array(rows);
+            const base = context.pastLength;
+            ids[0] = token;
+            positions[0] = base;
+            for (let index = 0; index < drafted; index += 1) {
+              ids[index + 1] = drafts[index];
+              positions[index + 1] = base + 1 + index;
+            }
+            const extra = await deriveInputs(ids, positions, signal);
+            signal?.throwIfAborted();
+            const rowIndices = verifyRowIndices(drafted, k);
+            const where = `verify@${cycle}`;
+            const outputs = await session.run(
+              {
+                [program.inputIds]: i32Row(rows, ids),
+                [program.lastRow]: lastRowInput(rowIndices),
+                ...extra,
+              },
+              undefined,
+              // MUST: deferred — 論理長は受理数が決まってから frontier まで進める（settleCommit）。
+              { context, queryLength, commit: "deferred" },
+            );
+            // ---- ここから最初の yield までは同期（例外は finally の settleCommit が commit(0) で畳む）。
+            frontierRows = 0;
+            const logits = readLogits(outputs, program, where, rowIndices.length);
+            const hiddenRows = readHidden(outputs, program, where, rowIndices.length);
+            const { accepted, confirmed } = acceptDrafts(logits.row, drafts, sampler, history);
+            // 次 cycle の drafter 入力 = 新しい frontier b' を出した行 a（写す — 次の run で消える）。
+            const nextHidden = copyRow(hiddenRows.row(accepted));
+            tally.cycles += 1;
+            tally.accepted += accepted;
+            tally.acceptedHistogram[accepted] += 1;
+            // verify の観測は**この同期区間**（配送の yield をまたぐと、貸し手 Session を共有する
+            // 別 sequence の run が挟まりうる）。commit は配送の後（frontier まで）。
+            onRun?.({ kind: "verify", cycle, rows: queryLength, accepted });
+            const delivered = truncateAtStop(confirmed, isStop);
+            for (let index = 0; index < delivered.length; index += 1) {
+              const id = delivered[index];
+              // MUST: frontier の更新は yield の前（`break` で finally へ入ったとき、frontier までが
+              // commit される = 消費者の受け取った列 + frontier 1 個が会話）。
+              token = id;
+              generated += 1;
+              history.push(id);
+              pendingToken = id;
+              frontierRows = index + 1;
+              const stopped = stopFor(id, generated);
+              if (stopped !== undefined) {
+                stop = stopped;
+                settleCommit();
+                return;
+              }
+              yield { kind: "token", id, position: context.pastLength + 1 + index };
+            }
+            settleCommit();
+            hidden = nextHidden;
+          }
+          stop = { reason: "max-tokens", tokens: generated };
+          return;
+        }
 
         // decode は「位置 P に `g_i` を置くと `g_{i+1}` が出る」形。回るのは `maxNewTokens - 1`
         // 回で、最後の token は未 commit のまま `pendingToken` に残る（決定 4）。
@@ -737,6 +1046,7 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
             { context, queryLength: 1 },
           );
           token = sampler.next(readLogits(outputs, program, `decode@${step}`, 1).row(0), history);
+          onRun?.({ kind: "decode", step: step + 1 });
           generated += 1;
           history.push(token);
           pendingToken = token;
@@ -755,10 +1065,23 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
         // `error === controller.signal.reason` で自分の中断を識別できる）。
         throw error;
       } finally {
-        if (failure !== undefined) fail(failure.error);
-        // `stop` が空のまま `finally` に来るのは `break` / `return()` 経由だけ。
-        else settle(stop ?? { reason: "closed", tokens: generated });
-        release?.();
+        try {
+          // MUST: 保留中の verify を frontier まで commit する（`break` / `return()` / 例外のどれで
+          // 来ても — 保留を残すと context は dispose しか受け付けない）。`commit` 自体は値域内の
+          // 同期呼び出しで、ここで投げるなら簿記の破れ（黙って握らない — 鎖の席だけは返す）。
+          settleCommit();
+        } catch (cleanup) {
+          // 元の失敗（device 消失で context が poison 済み、など）を上書きしない — 保留は
+          // poison 済み context では読めず、dispose がまとめて捨てる。失敗が無いのに commit が
+          // 落ちる形は簿記の破れで、finally からは投げられない（no-unsafe-finally）ので二次経路
+          // （`done` の reject）で運ぶ。
+          failure ??= { error: cleanup };
+        } finally {
+          if (failure !== undefined) fail(failure.error);
+          // `stop` が空のまま `finally` に来るのは `break` / `return()` 経由だけ。
+          else settle(withSpeculation(stop ?? { reason: "closed", tokens: generated }));
+          release?.();
+        }
       }
     };
 
@@ -768,14 +1091,18 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
 
   return {
     capacity,
-    // MUST: getter で毎回導出する（`context.pastLength` と `pendingToken` が唯一の源）。
+    // MUST: getter で毎回導出する（`context.pastLength` と `pendingToken` が唯一の源）。投機の
+    // 配送中は verify が保留のまま（`pastLength` は cycle の起点のまま）なので、cycle の途中で読むと
+    // 最大 k だけ少なく見える — 確定値は生成の合間に読む（決着後は正しい）。
     get used(): number {
       return context.pastLength + (pendingToken === undefined ? 0 : 1);
     },
     generate,
     dispose(): Promise<void> {
       // MUST: 2 度目以降も同じ完了を返す（先に返すと呼び手が破棄前の窓を掴む）。
-      disposal ??= chain(() => context.dispose());
+      // MUST: 借り手（drafter の面）→ 貸し手 context の順。失敗は集めて全段を回す（前段の
+      // reject で後段が走らないと「二度と返せない context」が残る）。
+      disposal ??= chain(() => disposeSteps([() => face?.dispose(), () => context.dispose()]));
       return disposal;
     },
   };
