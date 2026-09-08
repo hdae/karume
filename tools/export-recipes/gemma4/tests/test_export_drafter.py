@@ -154,6 +154,44 @@ class TestTheCaseMaterial:
             assert drafter.truncate_paragraph(path.read_text(encoding="utf-8"), limit)
 
 
+class TestTheAcceptanceStats:
+    """golden から採る受理の見込み（`draft[t][j]` の比較相手は `tokens[t + 1 + j]`）。"""
+
+    @staticmethod
+    def _stats(tokens: list[int], draft: list[list[int]]) -> dict:
+        return drafter.acceptance_stats(
+            {
+                drafter.TOKENS_KEY: torch.tensor(tokens, dtype=torch.int32),
+                drafter.DRAFT_KEY: torch.tensor(draft, dtype=torch.int32),
+            }
+        )
+
+    def test_a_draft_that_hits_every_step_confirms_one_plus_k_tokens(self):
+        """全段当たれば 1 サイクルで `1 + k` 本（bonus 1 本 + 受理 k 本）。"""
+        stats = self._stats([10, 11, 12, 13, 14], [[11, 12, 13], [12, 13, 14]])
+
+        assert stats["per_step"] == [1.0, 1.0, 1.0]
+        assert stats["tokens_per_cycle"] == 4.0
+
+    def test_a_miss_at_the_head_stops_the_run_even_if_later_steps_hit(self):
+        """逐次受理は**先頭からの連**だけを数える（位置別一致率は当たりを数える）。"""
+        stats = self._stats([10, 11, 12, 13], [[99, 12, 13]])
+
+        assert stats["per_step"] == [0.0, 1.0, 1.0]
+        assert stats["tokens_per_cycle"] == 1.0
+
+    def test_a_run_that_stops_midway_confirms_the_prefix_plus_the_bonus(self):
+        stats = self._stats([10, 11, 12, 13], [[11, 99, 13]])
+
+        assert stats["per_step"] == [1.0, 0.0, 1.0]
+        assert stats["tokens_per_cycle"] == 2.0
+
+    def test_a_token_sequence_that_is_too_short_is_rejected(self):
+        """最後の cycle の draft にも比較相手が要る（`cycles + k` 本）。"""
+        with pytest.raises(AssertionError, match="cycles"):
+            self._stats([10, 11, 12], [[11, 12, 13]])
+
+
 class TestTheSpellingsMirrorTheDistribution:
     """焼く側と配る側で綴りが割れないこと（片方だけ動くと束ねられない / 門が空振りする）。"""
 

@@ -168,7 +168,8 @@ GEMMA4_DRAFTER_GRAPH_INPUTS: tuple[str, ...] = (
 )
 
 #: drafter が 1 回の run で出す draft 本数（`gemma4.export_drafter.DRAFT_STEPS` の鏡像 —
-#: 段 2 は k = 3 固定）。出力の本数はこれと一致する MUST。
+#: 配布形の drafter はこの 3 段で焼かれている。実行時の k は `k <= 3` の範囲で選べ、それより
+#: 多い段数が要るなら再 export）。出力の本数はこれと一致する MUST。
 GEMMA4_DRAFT_STEPS = 3
 
 #: 出力の相対 path（**モデルサブツリー内**）— 配置表と manifest が共有する 1 箇所。格納 dtype を
@@ -690,7 +691,7 @@ def assert_gemma4_drafter_graph(
       呼び手が渡す値をどのノードも読まない形になる）
     - `hidden` の幅が上流の `hidden_size`（= 製品グラフの出力 1 の幅）と一致
     - RoPE 派生入力の幅が `pipelineConfig.rope` の `headDim` と一致（貸し手と同じ突合）
-    - 出力が k 本ちょうど（段 2 は {@link GEMMA4_DRAFT_STEPS}）
+    - 出力が k 本ちょうど（配布形は {@link GEMMA4_DRAFT_STEPS} 本）
     - `states` が**全部 external**で、名前も形も**貸し手の宣言と 1 対 1**
     - initializer に**共有宣言が 1 本**で、指し先が貸し手コンテナに実在するテンソルキー
     - 記号は容量記号 1 本だけで、**貸し手と同じ綴り**（借り手の bindings は貸し手を継承する）

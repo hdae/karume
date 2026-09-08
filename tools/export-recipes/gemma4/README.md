@@ -285,7 +285,8 @@ embedding table instead of carrying its own. Three declarations in the container
   the product container's header rather than spelling it out
 
 The graph takes `token[1,1]`, `hidden[1,1536]` (the product graph's output 1, i.e. after the final
-norm and before `lm_head`) and the four rotary rows for position `P − 1`, and returns **k = 3**
+norm and before `lm_head`) and the four rotary rows for position `P`, the position of the token
+being handed in (see _Goldens_ below for the whole calling convention), and returns **k = 3**
 drafted token ids. The three steps are unrolled in Python because the only state carried between
 them is `(token, hidden)` — the drafter has no cache of its own. The clustered sparse output head of
 the upstream checkpoint is replaced by a dense projection over the full vocabulary, because `topk`
@@ -304,20 +305,51 @@ acceptance rate.
 
 ### Goldens
 
-`drafter-golden.<case>.safetensors` carries `prompt[T]`, `tokens[N]` (the target's greedy
+`drafter-golden.<case>.safetensors` carries `prompt[T]`, `tokens[N + 3]` (the target's greedy
 continuation, teacher-forced) and `draft[N, 3]` for three cases and N = 200 cycles. They are taken
 by running the **product series' own rounding** of the target next to the exported drafter wrapper:
-the target is prefilled in chunks of 768 rows through a `DynamicCache`, and at each cycle the
-drafter is handed the token and post-norm hidden of position `P − 1` together with the lender's
-key/value columns **sliced by the recipe** to `[P − min(P, W), P)` / `[0, P)` — the slice is not
-left to the cache's own retention, which differs between a chunked prefill and a single decode
-step. The target runs with upstream SDPA rather than the `karume_gqa` interface for this pass only,
-because the cached path lets upstream drop the mask entirely.
+the target is prefilled in chunks of 768 rows through a `DynamicCache`, and at each cycle — with
+`P` standing for the number of rows the cache holds — the drafter is handed
+
+- `token`: the last token the target committed to. It sits at logical position `P` and is **not in
+  the cache yet**
+- `hidden`: the post-norm hidden of the row that produced that token, i.e. position `P − 1`
+- the four rotary rows for position `P`
+- the lender's key/value columns **sliced by the recipe** to `[P − min(P, W), P)` / `[0, P)` — the
+  slice is not left to the cache's own retention, which differs between a chunked prefill and a
+  single decode step
+
+That pairing — a token together with the hidden of the row that produced it — is the same one the
+drafter carries between its own three steps, and the one the speculative loop hands it on the first
+cycle. So `draft[t][j]` (zero-based `j`) predicts `tokens[t + 1 + j]`: `d₁` predicts the token
+_after_ the bonus token rather than the bonus token itself, which is why the continuation is stored
+three entries longer than the number of cycles — the last cycle needs something to be compared
+against. The target runs with upstream SDPA rather than the `karume_gqa` interface for this pass
+only, because the cached path lets upstream drop the mask entirely.
 
 The case material is **repository documents** (`tools/export-recipes/README.md`,
 `tools/exporter/README.md`) truncated at a paragraph boundary, plus one short prompt. Each golden
 stores the prompt ids it was taken with, so editing those documents does not invalidate an existing
 record — it only changes what a fresh run would produce.
+
+#### What the goldens say about acceptance
+
+Two numbers per case, printed by the export run and stored in `reference.json` (2026-09-08, greedy
+target, k = 3, N = 200 cycles): the per-step hit rate of `d_j` against `tokens[t + j]`, and the
+sequentially accepted tokens per cycle, `1 + mean(a)` where `a` is the length of the leading run of
+hits. The second number is what a speculation cycle actually confirms — the bonus token always
+counts, so it never drops below 1.
+
+| case              | prompt | `d₁`  | `d₂`  | `d₃`  | tokens/cycle |
+| ----------------- | ------ | ----- | ----- | ----- | ------------ |
+| `short-en`        | 25     | 36.0% | 17.5% | 11.0% | 1.50         |
+| `readme-recipes`  | 2335   | 56.0% | 39.0% | 26.0% | 2.13         |
+| `readme-exporter` | 4844   | 61.5% | 37.0% | 21.5% | 2.11         |
+
+These are a property of the drafter against this target, not of the runtime. The acceptance test in
+`packages/models/tests/e2e_gemma4_drafter_test.ts` gates something else: that karume reproduces the
+**torch drafter's own draft ids** (1,800 of them) to within 1%. A perfect score there says the port
+is faithful; it says nothing about how often a draft is accepted.
 
 ## What `tokenizer.py` emits
 

@@ -59,6 +59,15 @@ i8 per-channel（1 バイト + 行ごとの f32 scale）へ上げても配布形
 golden は丸めた後の `wrapper` をそのまま回す（{@link export_series} の順序）ので、配布形の
 重みと golden の重みは同一実体 MUST。
 
+## golden の呼び出し規約（ホストが 1 サイクルで渡す組）
+
+貸し手の論理長を `P`（KV に入っている行数）、最後に確定した token を `b`（位置 `P`・**KV には
+未投入**）とすると、drafter に渡すのは `token = b` / `hidden = h@(P−1)`（`b` を出した行の
+最終 norm 後 hidden）/ RoPE の 1 行 = 位置 `P` / KV の列 `[P−min(P,W), P)`・`[0, P)`。
+これは drafter 自身の段間再帰（`token` と「それを出した行の hidden」の組）と同じ組み方で、
+段 3 の投機ループが 1 サイクル目に渡す組でもある。したがって `draft[t][j]`（`j` は 0 始まり）が
+当てるのは `tokens[t + 1 + j]` — `d₁` は bonus token の**次**を当てる。
+
 ## 出力レイアウト
 
     outputs/series/gemma4-e2b-drafter/model.safetensors        重み + karume_ir（グラフ shard 先頭）
@@ -108,7 +117,8 @@ DEFAULT_PRODUCT_DIR = product.DEFAULT_OUT_DIR
 #: drafter のチェックポイント（HF ハブ — 手置き素材ではない）。
 ASSISTANT_REPO = "google/gemma-4-E2B-it-assistant"
 
-#: 1 forward に展開する draft 段数（段 2 は k = 3 固定 — ADR 0096）。
+#: 1 forward に展開する draft 段数（配布形の drafter はこの 3 段で焼かれている。実行時の k は
+#: `k <= 3` の範囲で選べ、それより多い段数が要るなら再 export — ADR 0096）。
 DRAFT_STEPS = 3
 
 # NOTE: 貸し手が読む KV の層（E2B は sliding 13 / full 14）は**定数で持たない** —
@@ -803,8 +813,19 @@ def draft_case(
     """1 ケースぶんの golden（`prompt` / `tokens` / `draft`）を採る。
 
     貸し手を prompt で prefill（`chunk` 行ずつ）してから、`cycles` 回の greedy 継続を回す。
-    各 cycle で「直前 token（t=0 は prompt 末尾）・その位置の post-norm hidden・貸し手の l13/l14
-    の列 `[column_base, P)`」を drafter へ渡して k 本の draft を採る。
+    各 cycle の入り口は貸し手の論理長 `P`（= KV に入っている行数）で、drafter へ渡すのは
+
+    - `token` = `b`（**最後に確定した token** — 位置 `P` に居るが KV には未投入）
+    - `hidden` = `h@(P−1)`（`b` を出した行の最終 norm 後 hidden）
+    - RoPE の 1 行 = 位置 **`P`**（`b` の位置）
+    - 貸し手の l13 / l14 の列 `[P − min(P, W), P)` / `[0, P)`
+
+    の 4 つ。drafter 自身の段間再帰（`token` と「それを出した行の hidden」の組を次段へ送る）と
+    同じ組で、投機ループが 1 サイクル目に渡す組でもある。したがって `draft[t][j]`（0 始まりの
+    `j`）が当てるのは位置 `P+1+j` の token = `tokens[t + 1 + j]` で、`d₁` は bonus token の
+    次を当てる。
+
+    MUST: `tokens` は `cycles + k` 本採る（最後の cycle の draft にも比較相手が要る）。
 
     MUST: 貸し手へ流す token は **drafter の draft ではなく greedy 継続**（teacher forcing）—
     受理・棄却のループを回すと golden がその実装に依存し、段 3 の投機ループを変えるたびに
@@ -816,28 +837,58 @@ def draft_case(
         hidden = lender.step(ids[:, start : start + chunk])
     tokens: list[int] = []
     drafts: list[list[int]] = []
-    for _ in range(cycles):
+    for cycle in range(cycles + drafter.steps):
         past = lender.length
-        sliding = lender.kv(one_shot.SLIDING_ATTENTION, min(past, window))
-        full = lender.kv(one_shot.FULL_ATTENTION, past)
-        rope = decode.rope_args(specs, torch.tensor([[past - 1]]))
-        current = int(ids[0, -1]) if not tokens else tokens[-1]
-        with torch.no_grad():
-            drafted = drafter(
-                torch.tensor([[current]], dtype=torch.int64, device=device),
-                hidden,
-                *(table.to(device) for table in rope),
-                *sliding,
-                *full,
-            )
-        drafts.append([int(value) for value in drafted])
+        # 位置 P の frontier token（貸し手が h@(P−1) から選んだ 1 本 — まだ KV に無い）。
         nxt = int(lender.logits(hidden).argmax(-1))
         tokens.append(nxt)
+        if cycle < cycles:
+            sliding = lender.kv(one_shot.SLIDING_ATTENTION, min(past, window))
+            full = lender.kv(one_shot.FULL_ATTENTION, past)
+            rope = decode.rope_args(specs, torch.tensor([[past]]))
+            with torch.no_grad():
+                drafted = drafter(
+                    torch.tensor([[nxt]], dtype=torch.int64, device=device),
+                    hidden,
+                    *(table.to(device) for table in rope),
+                    *sliding,
+                    *full,
+                )
+            drafts.append([int(value) for value in drafted])
         hidden = lender.step(torch.tensor([[nxt]], dtype=torch.int64))
     return {
         PROMPT_KEY: ids[0].to(torch.int32).contiguous(),
         TOKENS_KEY: torch.tensor(tokens, dtype=torch.int32).contiguous(),
         DRAFT_KEY: torch.tensor(drafts, dtype=torch.int32).contiguous(),
+    }
+
+
+def acceptance_stats(tensors: Mapping[str, torch.Tensor]) -> dict[str, Any]:
+    """golden が示す受理の見込み（`per_step` = 位置別一致率・`tokens_per_cycle` = 逐次受理）。
+
+    `draft[t][j]` が当てるのは `tokens[t + 1 + j]`（{@link draft_case}）。位置別一致率は段 `j`
+    を独立に見た当たり率で、逐次受理は **先頭から一致が続く長さ `a`** から採る — 投機ループが
+    1 サイクルで確定させるのは `1 + a` 本（棄却行にも bonus token が 1 本乗る）なので、
+    `tokens_per_cycle` = `1 + mean(a)` がそのまま「1 サイクルあたりの確定 token 数」になる。
+    """
+    tokens, draft = tensors[TOKENS_KEY], tensors[DRAFT_KEY]
+    cycles, steps = int(draft.shape[0]), int(draft.shape[1])
+    if int(tokens.shape[0]) != cycles + steps:
+        raise AssertionError(
+            f"tokens が {int(tokens.shape[0])} 本 — cycles {cycles} + steps {steps} でない"
+        )
+    per_step = [0] * steps
+    prefixes = 0
+    for cycle in range(cycles):
+        running = True
+        for step in range(steps):
+            hit = int(draft[cycle][step]) == int(tokens[cycle + 1 + step])
+            per_step[step] += int(hit)
+            running = running and hit
+            prefixes += int(running)
+    return {
+        "per_step": [hits / cycles for hits in per_step],
+        "tokens_per_cycle": 1 + prefixes / cycles,
     }
 
 
@@ -879,12 +930,23 @@ def write_goldens(
         tensors = draft_case(drafter, wrapper, specs, ids, cycles, device=device)
         path = out_dir / f"{GOLDEN_PREFIX}{name}{GOLDEN_SUFFIX}"
         save_file(tensors, str(path))
+        stats = acceptance_stats(tensors)
         summary[name] = {
             "file": path.name,
             "prompt": int(tensors[PROMPT_KEY].shape[0]),
             "cycles": int(tensors[DRAFT_KEY].shape[0]),
             "steps": int(tensors[DRAFT_KEY].shape[1]),
+            **stats,
         }
+        print(
+            f"[golden] {name}: 位置別一致率 "
+            + " / ".join(
+                f"d{step + 1} {rate * 100:.1f}%" for step, rate in enumerate(stats["per_step"])
+            )
+            + f" / 逐次受理 {stats['tokens_per_cycle']:.3f} token/cycle",
+            file=sys.stderr,
+            flush=True,
+        )
     drafter.to("cpu")
     return summary
 
