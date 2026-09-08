@@ -104,7 +104,7 @@ const makeInputs = (spec: StateCase): StateInputs => {
   const resident = new Set<number>();
   const base = stateColumnBase(window, past);
   for (let col = base; col < past; col += 1) {
-    resident.add(stateSliding(window) ? col % window : col);
+    resident.add(stateSliding(window) ? col % capacity : col);
   }
   for (let plane = 0; plane < kvPlanes; plane += 1) {
     for (let row = 0; row < capacity; row += 1) {

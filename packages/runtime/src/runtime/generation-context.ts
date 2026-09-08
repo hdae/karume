@@ -178,28 +178,75 @@ type GenerationContextInternals = {
   writeLengths(pastLength: number, queryLength: number): void;
   /** 論理長を進める（**run の成功でのみ** — 決定 6）。捕捉 P の照合は `writeLengths` と同じ。 */
   advance(pastLength: number, queryLength: number): void;
+  /**
+   * 論理長を**進めずに保留する**（`commit: "deferred"` の run が例外なく返ったとき）。
+   *
+   * 進行の権利をホストへ 1 度だけ渡す形で、渡した先は {@link GenerationContext.commit}。
+   * 保留がある間は新しい run のリースと `rewind` を拒否するので、「GPU が見た論理長」と
+   * 「進行の基準」が割れる窓は開かない（ADR 0066 決定 6 の二重簿記の禁止はこの形でも保たれる —
+   * 論理長を動かせるのは依然 1 経路だけ）。捕捉 P の照合は `advance` と同じ。
+   */
+  defer(pastLength: number, queryLength: number): void;
   /** 汚染する（state 変更 dispatch を含む run の失敗 — 追記 3）。 */
   poison(reason: string): void;
 };
 
 /**
- * sliding なスロットの名前（ノード attrs `window` 由来 — ADR 0067 決定 4）。
+ * sliding なスロットの名前 → 窓幅 `W`（ノード attrs `window` 由来 — ADR 0067 決定 4）。
  *
  * MUST: 判定材料はノード側にしかない（`graph.states` の宣言は容量だけを持ち、窓は
  * **参照するノード**が宣言する）。同一スロットに触れる全ノードで `window` が一致することは
  * `validateGraphContracts` の `assertStateOrder` が Session 構築時に済ませているので、
  * ここは 1 本でも sliding 宣言があれば sliding として拾えばよい。
  */
-const slidingSlotNames = (graph: IrGraph): ReadonlySet<string> => {
-  const sliding = new Set<string>();
+const slidingSlotWindows = (graph: IrGraph): ReadonlyMap<string, number> => {
+  const sliding = new Map<string, number>();
   graph.nodes.forEach((node, index) => {
     const slots = Object.values(node.states);
     if (slots.length === 0) return;
     const window = stateWindow(node.attrs, `nodes[${index}] (${node.op})`);
     if (window === undefined) return;
-    for (const slot of slots) sliding.add(slot);
+    for (const slot of slots) sliding.set(slot, window);
   });
   return sliding;
+};
+
+/**
+ * sliding スロットの**余裕**（`capacity − window` の最小 — sliding が 1 本も無ければ undefined）。
+ *
+ * 余裕は「論理長より先に書かれた行」の置き場で、ring の法が窓ではなく容量であること
+ * （`src/kernels/state-attention.ts` の `stateSlotRowWgsl`）と対で意味を持つ。ホストは
+ * この数を超える行数を投機的に書いてはいけない — 超えると棄却行が live な過去 KV を潰す。
+ *
+ * MUST: 容量軸は**スロット shape の軸 2**（`[B,Hkv,C,D]` — states 形 op の契約。実行計画側
+ * `recipe-builder.ts` の `#buildStateAttention` / `#buildStateAppend` も同じ軸を読む）。
+ * ここで別の軸を読むと、公開する余裕が実際の物理行数と無関係な数になる。
+ */
+const slidingSlackRows = (
+  slots: ReadonlyMap<string, StateSlotBacking>,
+  windows: ReadonlyMap<string, number>,
+): number | undefined => {
+  let slack: number | undefined;
+  for (const [name, window] of windows) {
+    // 参照完全性（states 宣言とノードの states 欄の対応）は IR 層が済ませているので、名前は
+    // 必ず引ける。rank が足りない形は shape 層が run で落とすが、ここで黙って飛ばすと
+    // 「余裕なし」と区別の付かない undefined か、別軸由来の過大な余裕を公開してしまう。
+    const shape = slots.get(name)?.shape;
+    if (shape === undefined || shape.length < 3) {
+      throw new ExecutionError(
+        `state '${name}': sliding 宣言（window ${window}）に対して容量形 ` +
+          `[${shape?.join(",") ?? "?"}] から行容量 C（軸 2）が読めない`,
+      );
+    }
+    const rows = shape[2] - window;
+    if (rows < 0) {
+      throw new ExecutionError(
+        `state '${name}': window ${window} が行容量 ${shape[2]} を超える（ADR 0067 決定 4 ③）`,
+      );
+    }
+    slack = slack === undefined ? rows : Math.min(slack, rows);
+  }
+  return slack;
 };
 
 /**
@@ -331,12 +378,26 @@ export class GenerationContext {
    * `queryLength ≤ chunkLength` の上限も動かない。
    */
   readonly chunkBuckets: readonly number[];
+  /**
+   * sliding スロットの**余裕行数** = `capacity − window` の最小（sliding が 1 本も無ければ
+   * undefined）。ring の法は窓ではなく容量（`src/kernels/state-attention.ts` の
+   * `stateSlotRowWgsl`）なので、この行数までは**論理長より先に**物理 ring へ書いても、棄却して
+   * 良い（= `commit` で受理しない）行が live な過去 KV を潰さない。
+   *
+   * 投機デコード（draft を検証してから受理行数を確定する形）の `queryLength` の上限がこれで、
+   * 超えた run は例外を出さずに過去 KV を壊す — 上限の執行はホスト側の責務（ランタイムは
+   * `queryLength ≤ chunkLength` までしか見ない）。
+   */
+  readonly slidingSlack: number | undefined;
   /** ランタイム内部面（利用者が触る面ではない）。 */
   readonly [RUNTIME_INTERNAL]: GenerationContextInternals;
   readonly #host: GenerationContextHost;
   readonly #slots: ReadonlyMap<string, StateSlotBacking>;
-  /** sliding なスロット名（{@link GenerationContext.rewind} の全拒否条件 — ADR 0066 追記 2）。 */
-  readonly #slidingSlots: ReadonlySet<string>;
+  /**
+   * sliding なスロット名 → 窓幅（{@link GenerationContext.rewind} の全拒否条件 —
+   * ADR 0066 追記 2。窓幅は {@link GenerationContext.slidingSlack} の算出にも使う）。
+   */
+  readonly #slidingSlots: ReadonlyMap<string, number>;
   readonly #lengths: GPUBuffer;
   /**
    * 論理長の書き出し値。**全域を毎回書く**（部分書きにすると、片方だけ更新された組が残って
@@ -344,6 +405,14 @@ export class GenerationContext {
    */
   readonly #lengthValues = new Uint32Array(2);
   #pastLength = 0;
+  /**
+   * commit 待ちの deferred run（{@link GenerationContext.commit} が畳むまで残る）。
+   *
+   * MUST: 立っている間は run のリースと `rewind` を拒否する。物理 ring には `queryLength` 行が
+   * 既に書かれていて論理長だけが止まっている状態で、次の run や巻き戻しを通すと「どこまでが
+   * 確定した KV か」を 2 箇所が別々に決めることになる。
+   */
+  #pending: { readonly pastLength: number; readonly queryLength: number } | undefined;
   /**
    * context 側で焼いた bind group 束（backing の世代識別子 → 束 — ADR 0066 決定 5）。Session が
    * backing を複数保持する（perf-ledger H-15）ので、保持中の backing ごとに 1 束を持ち、退役した
@@ -374,7 +443,7 @@ export class GenerationContext {
   private constructor(
     host: GenerationContextHost,
     slots: ReadonlyMap<string, StateSlotBacking>,
-    slidingSlots: ReadonlySet<string>,
+    slidingSlots: ReadonlyMap<string, number>,
     lengths: GPUBuffer,
     chunkLength: number,
     chunkBuckets: readonly number[],
@@ -383,6 +452,7 @@ export class GenerationContext {
     this.#host = host;
     this.#slots = slots;
     this.#slidingSlots = slidingSlots;
+    this.slidingSlack = slidingSlackRows(slots, slidingSlots);
     this.#lengths = lengths;
     this.chunkLength = chunkLength;
     // 凍結コピー: 呼び出し側の配列を後から書き換えられると、許可集合（下）と公開面が割れる。
@@ -398,6 +468,16 @@ export class GenerationContext {
       bindings,
       acquireRun: (): void => {
         this.#assertUsable("run");
+        // MUST: 未 commit の deferred run がある間は次を発行させない。2 本目は「1 本目が
+        // 書いた物理行のうちどこまでが確定か」が決まらないまま P を捕捉するので、commit(rows)
+        // が後から論理長を動かした時点で GPU が見た P と食い違う（例外の出ない位置ずれ）。
+        if (this.#pending !== undefined) {
+          throw new ExecutionError(
+            `run: commit 待ちの generation run がある（pastLength ${this.#pending.pastLength} + ` +
+              `queryLength ${this.#pending.queryLength} まで書き込み済み）。` +
+              "context.commit(rows) で受理した行数を確定させてから次を発行すること",
+          );
+        }
         // MUST: 同一 context への未決着 run は 1 本まで。2 本目は 1 本目が進めた論理長 P' で
         // uniform と dispatch を組むが、位置入力（RoPE の position_ids 等）は**呼び出し側が
         // 発行時に組んだ通常のグラフ入力**で、ランタイムは中身を見ない。つまり KV の論理長は
@@ -436,6 +516,8 @@ export class GenerationContext {
         this.#writeLengths(pastLength, queryLength),
       advance: (pastLength: number, queryLength: number): void =>
         this.#advance(pastLength, queryLength),
+      defer: (pastLength: number, queryLength: number): void =>
+        this.#defer(pastLength, queryLength),
       poison: (reason: string): void => this.#poison(reason),
     };
   }
@@ -535,7 +617,7 @@ export class GenerationContext {
       context = new GenerationContext(
         host,
         slots,
-        slidingSlotNames(graph),
+        slidingSlotWindows(graph),
         lengths,
         spec.chunkLength,
         chunkBuckets,
@@ -570,6 +652,73 @@ export class GenerationContext {
   }
 
   /**
+   * commit 待ちの deferred run（`GenerationRun.commit: "deferred"` — 無ければ undefined）。
+   *
+   * `pastLength` は run が捕捉した論理長・`queryLength` は物理 ring へ書いた行数で、
+   * {@link GenerationContext.commit} が受け取れる `rows` の上限がそのまま `queryLength`。
+   */
+  get pendingCommit(): { readonly pastLength: number; readonly queryLength: number } | undefined {
+    this.#assertUsable("pendingCommit");
+    return this.#pending;
+  }
+
+  /**
+   * 保留中の deferred run のうち**受理した行数だけ**論理長を進める（ADR 0066 決定 6 の
+   * 「論理長は run の成功で進む」を投機デコードの検証形へ広げた面）。
+   *
+   * `rows` は `0 ≤ rows ≤ pendingCommit.queryLength` の整数で、`0` は「1 行も受理しない」
+   * （論理長は動かず、保留だけが畳まれる）。物理 ring には `queryLength` 行が書かれたままだが、
+   * 受理しなかった行が潰した論理列は sliding の余裕（{@link GenerationContext.slidingSlack}）の
+   * 外に落ちる — 余裕を超える `queryLength` を投げないのはホスト側の契約。
+   *
+   * MUST: **進行中の generation run が居る間は fail loudly**（`rewind` と同じ根拠 — run は頭で
+   * 捕捉した P で uniform と dispatch 数を決めるので、横から動かすと GPU が見た論理長と進行の
+   * 基準が分裂する）。
+   * MUST: 保留が無い呼びは fail loudly（immediate な run の後に呼ばれた commit を黙って
+   * no-op にすると、ホストは「受理行数を伝えた」と信じたまま二重に進んだ論理長で走り続ける）。
+   */
+  commit(rows: number): void {
+    this.#assertUsable("commit");
+    if (this.#runs > 0) {
+      throw new ExecutionError(
+        `commit: 進行中の generation run が ${this.#runs} 本ある間は確定できない` +
+          "（run の決着を await してから呼ぶこと）",
+      );
+    }
+    const pending = this.#pending;
+    if (pending === undefined) {
+      throw new ExecutionError(
+        "commit: 確定待ちの generation run が無い" +
+          "（commit を要するのは GenerationRun.commit を 'deferred' で発行した run だけ）",
+      );
+    }
+    if (!Number.isSafeInteger(rows) || rows < 0) {
+      throw new ExecutionError(`commit: 受理行数 ${rows} が非負整数でない`);
+    }
+    if (rows > pending.queryLength) {
+      throw new ExecutionError(
+        `commit: 受理行数 ${rows} が保留中の run の queryLength ${pending.queryLength} を超える` +
+          "（書いていない行は確定できない）",
+      );
+    }
+    // 保留を立てた run 以降に論理長が動いていないこと（リースと rewind を塞いである以上、
+    // 割れたら実装の不変条件破れ — 沈黙で続けさせない）。
+    this.#assertCapturedPast(pending.pastLength, "commit");
+    const next = pending.pastLength + rows;
+    // MUST: 和の u32 上限は `#advance` と同じ理由でここでも見る（両項が u32 以下でも溢れる）。
+    if (next > MAX_LOGICAL_LENGTH) {
+      throw new ExecutionError(
+        `commit: pastLength ${pending.pastLength} + 受理行数 ${rows} = ${next} が ` +
+          `u32 の上限 ${MAX_LOGICAL_LENGTH} を超える（論理長の搬送先は u32 — ADR 0066 追記 4）`,
+      );
+    }
+    // MUST: 論理長の更新と保留の解除は不可分（先に解除すると、上の検査で落ちた commit の後に
+    // 「保留も無く論理長も進んでいない」状態が残り、書かれた行が誰からも辿れなくなる）。
+    this.#pastLength = next;
+    this.#pending = undefined;
+  }
+
+  /**
    * 論理位置を切り詰める（ADR 0066 決定 6）。`0 ≤ position ≤ pastLength` の整数のみ。
    *
    * MUST: **進行中の generation run が居る間は fail loudly**。run は頭で捕捉した `P` で
@@ -591,9 +740,18 @@ export class GenerationContext {
           "GPU が見た論理長と進行の基準が分裂する）。run の決着を await してから呼ぶこと",
       );
     }
+    if (this.#pending !== undefined) {
+      throw new ExecutionError(
+        `rewind: commit 待ちの generation run がある間は巻き戻せない` +
+          `（pastLength ${this.#pending.pastLength} + queryLength ${this.#pending.queryLength} ` +
+          "まで物理 ring へ書き込み済み）。context.commit(rows) で確定させてから呼ぶこと",
+      );
+    }
     if (this.#slidingSlots.size > 0) {
       throw new ExecutionError(
-        `rewind: sliding スロット [${[...this.#slidingSlots].join(", ")}] を含む context は` +
+        `rewind: sliding スロット [${
+          [...this.#slidingSlots.keys()].join(", ")
+        }] を含む context は` +
           "巻き戻せない（ring はエビクト後に物理配置と論理範囲が一致しないため — ADR 0066 " +
           "追記 2）。有効なのは全スロットが非 sliding の context だけで、復旧は新しい context",
       );
@@ -639,6 +797,8 @@ export class GenerationContext {
         // 正しさには効かないが、掴んだままだと破棄済みバッファを参照する bind group が
         // context の参照ぶんだけ生き残る。
         this.#baked.clear();
+        // 未 commit の保留はここで捨てる（物理バッファごと畳むので、確定させる相手が居ない）。
+        this.#pending = undefined;
         this.#host.forget(this);
       }
     });
@@ -667,6 +827,12 @@ export class GenerationContext {
   /**
    * 論理長を進める（ADR 0066 決定 6 — **run の成功でのみ**呼ぶ）。
    *
+   * WHY 決定 6 の「論理長は run の成功で進む」は 2 形になった: `commit: "immediate"`（既定・
+   * 従来）は run の成功でここが進め、`commit: "deferred"` は成功で {@link GenerationContext.commit}
+   * へ権利を渡す（{@link #defer}）。どちらも論理長を動かす経路は**同時に 1 本**で、未 commit の
+   * 間は次の run も rewind も拒否されるので、二重簿記（ホスト側にもう 1 つの論理長が生まれる形）は
+   * 生まない。
+   *
    * NOTE: full スロットの実行時検査 `pastLength + queryLength ≤ 容量`（ADR 0067 決定 4 の④）は
    * **run のエンコード前**に居る（`assertGenerationRun` — src/runtime/recipe.ts）。容量軸がどの
    * 次元かを決めるのは op 契約なので、導出相が集めた {@link GenerationLimits} が正本で、
@@ -687,6 +853,26 @@ export class GenerationContext {
       );
     }
     this.#pastLength = next;
+  }
+
+  /**
+   * 論理長を進めずに保留する（`commit: "deferred"` の run の成功でのみ — {@link #advance} の対）。
+   *
+   * MUST: 保留は高々 1 本（未 commit の間は `acquireRun` が次の run を拒否するので、2 本目の
+   * `defer` に到達する経路そのものが無い）。到達したらランタイム内部の不変条件破れなので、
+   * 上書きせず即死させる — 上書きすると 1 本目が書いた行がどこからも辿れなくなる。
+   */
+  #defer(pastLength: number, queryLength: number): void {
+    this.#assertInternalUsable("defer");
+    this.#assertCapturedPast(pastLength, "defer");
+    this.#assertQueryLength(queryLength, "defer");
+    if (this.#pending !== undefined) {
+      throw new ExecutionError(
+        `defer: commit 待ちの generation run が既にある（pastLength ${this.#pending.pastLength} / ` +
+          `queryLength ${this.#pending.queryLength}）— 内部の不変条件破れ`,
+      );
+    }
+    this.#pending = { pastLength, queryLength };
   }
 
   /**

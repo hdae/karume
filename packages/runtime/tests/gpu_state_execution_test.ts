@@ -391,6 +391,150 @@ Deno.test({
   },
 });
 
+// ---------------------------------------------------------------------------
+// 投機デコードの verify 形（sliding の余裕 + deferred commit）
+// ---------------------------------------------------------------------------
+
+/**
+ * 余裕の行数（sliding スロットの `capacity − window`）。`Q` 行を論理長より先に書いて `a` 行だけ
+ * 受理する形が成立する条件は `C ≥ W + Q − 1`（棄却行 `P+i` が潰す論理列 `P+i−C` が、次 run の
+ * live 窓の下端 `P+a−(W−1)` より必ず小さい）。したがって余裕 8 が支える `Q` の上限は 9。
+ */
+const VERIFY_SLACK = 8;
+const VERIFY_WINDOW = 8;
+const VERIFY_QUERY = VERIFY_SLACK + 1;
+/** 受理行数（残り 6 行は棄却 = 物理 ring に書かれたまま論理長に載らない）。 */
+const VERIFY_COMMIT = 3;
+/** verify 形の前に積む past（`P > W` — 窓の下限述語が効いている状態から始める）。 */
+const VERIFY_PREFILL = 12;
+
+const verifyModel = (capacity: number): StateModel => ({
+  heads: 2,
+  kvHeads: 2,
+  depth: 4,
+  capacity,
+  window: VERIFY_WINDOW,
+});
+
+/** `[1, planes, M, D]` の 1 行を `[1, planes, 1, D]` として切り出す。 */
+const takeRow = (
+  data: Float32Array<ArrayBuffer>,
+  planes: number,
+  chunkRows: number,
+  depth: number,
+  row: number,
+): Float32Array<ArrayBuffer> => {
+  const out = new Float32Array(planes * depth);
+  for (let plane = 0; plane < planes; plane += 1) {
+    for (let d = 0; d < depth; d += 1) {
+      out[plane * depth + d] = data[(plane * chunkRows + row) * depth + d];
+    }
+  }
+  return out;
+};
+
+const bitsOfF32 = (data: Float32Array<ArrayBuffer>): Uint32Array =>
+  new Uint32Array(data.buffer, data.byteOffset, data.length);
+
+/**
+ * 「`Q` 行を deferred で書いて `a` 行だけ commit した context」の次 step の出力を返す。
+ *
+ * 参照側（`speculate = false`）は同じ token 列を **1 行ずつ通常 run** で流す（= 投機を使わない
+ * 生成そのもの）。両者がビット同一なら、棄却された 6 行の書き込みが live な過去 KV を 1 語も
+ * 壊していないことになる。
+ */
+const runVerifyChain = async (
+  gpu: GpuContext,
+  capacity: number,
+  speculate: boolean,
+): Promise<Float32Array<ArrayBuffer>> => {
+  const model = verifyModel(capacity);
+  const session = await stateSession(gpu, model);
+  const context = await session.createGenerationContext({
+    chunkLength: 16,
+    chunkBuckets: [VERIFY_QUERY],
+  });
+  try {
+    // ① 共通の prefill（P = 12 > W = 8）
+    const prefill = stepInputs(model, 16, 5);
+    await runStep(session, context, model, prefill, 16, VERIFY_PREFILL);
+
+    // ② draft 9 行ぶんの入力（両側で**同じ値**を使う — 参照側は先頭 3 行を 1 行ずつ流す）
+    const draft = stepInputs(model, VERIFY_QUERY, 41);
+    if (speculate) {
+      const outputs = await session.run(
+        {
+          q: tensor([1, model.heads, VERIFY_QUERY, model.depth], draft.q),
+          k: tensor([1, model.kvHeads, VERIFY_QUERY, model.depth], draft.k),
+          v: tensor([1, model.kvHeads, VERIFY_QUERY, model.depth], draft.v),
+        },
+        {},
+        { context, queryLength: VERIFY_QUERY, commit: "deferred" },
+      );
+      assertEquals(outputs["o"].shape, [1, model.heads, VERIFY_QUERY, model.depth]);
+      assertEquals(
+        context.pendingCommit,
+        { pastLength: VERIFY_PREFILL, queryLength: VERIFY_QUERY },
+        "deferred run が保留を作っていない",
+      );
+      context.commit(VERIFY_COMMIT);
+    } else {
+      for (let row = 0; row < VERIFY_COMMIT; row += 1) {
+        await runStep(
+          session,
+          context,
+          model,
+          {
+            q: takeRow(draft.q, model.heads, VERIFY_QUERY, model.depth, row),
+            k: takeRow(draft.k, model.kvHeads, VERIFY_QUERY, model.depth, row),
+            v: takeRow(draft.v, model.kvHeads, VERIFY_QUERY, model.depth, row),
+          },
+          1,
+          1,
+        );
+      }
+    }
+    assertEquals(context.pastLength, VERIFY_PREFILL + VERIFY_COMMIT, "論理長が受理行数と合わない");
+
+    // ③ 受理後の 1 step（ここで読む過去 KV に棄却行が混ざっていないか）
+    const next = stepInputs(model, 1, 97);
+    return await runStep(session, context, model, next, 1, 1);
+  } finally {
+    await context.dispose();
+    await session.dispose();
+  }
+};
+
+Deno.test({
+  name: "deferred commit + sliding の余裕: 棄却行は次 step の出力を 1 語も動かさない（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    try {
+      const slack = VERIFY_WINDOW + VERIFY_SLACK;
+      const speculative = await runVerifyChain(gpu, slack, true);
+      const sequential = await runVerifyChain(gpu, slack, false);
+      assertEquals(
+        [...bitsOfF32(speculative)],
+        [...bitsOfF32(sequential)],
+        "余裕つきの投機 + commit が 1 行ずつの生成とビット同一でない",
+      );
+
+      // 余裕を 0（capacity = window）に戻すと、棄却行が live 窓の中の論理列を潰す（例外も NaN も
+      // 出ない沈黙破壊）。その形は run 発行の同期区間で落ちる — deferred run の queryLength は
+      // 「余裕 + 1」まで（`GenerationContext.slidingSlack` の門）。潰れる値そのものは公開面から
+      // 到達できないので、ここで見るのは「守りが効いていること」= 発行が拒否されること。
+      const noSlack = await assertRejects(
+        () => runVerifyChain(gpu, VERIFY_WINDOW, true),
+        ExecutionError,
+      );
+      assert(noSlack.message.includes("余裕 0"), noSlack.message);
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
 const GQA: StateModel = { heads: 4, kvHeads: 2, depth: 4, capacity: 8 };
 
 Deno.test({

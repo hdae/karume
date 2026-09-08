@@ -15,7 +15,7 @@
 import { assertEquals } from "@std/assert";
 import { openModel } from "../src/format/container.ts";
 import { acquireGpu } from "../src/gpu/device.ts";
-import { createSession, type Tensor } from "../src/runtime/executor.ts";
+import { createSession, PREPARED_PLAN_CAPACITY, type Tensor } from "../src/runtime/executor.ts";
 import { f32Bytes, type GraphJson } from "./helpers/format.ts";
 import { graphModelBuffer } from "./helpers/graph.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
@@ -125,9 +125,11 @@ Deno.test({
         "別 shape は作り直す",
       );
 
-      // T=4 を導出済み計画（LRU 上限 8）から確実に追い出す。params キャッシュは無上限なので
-      // ここで作られた params が消えることはない。
-      for (const rows of [5, 6, 7, 8, 10, 11, 12]) {
+      // T=4 を導出済み計画（LRU 上限）から確実に追い出す — 上限 +1 種類の別 shape を通せば、
+      // 最古の T=4 は必ず落ちる。params キャッシュは無上限なのでここで作られた params は残る。
+      // MUST: 本数は定数から出す（写しを置くと上限を動かしたときに追い出しが起きなくなり、
+      // 「prepared ミスなのに params 全ヒット」という観測点そのものが消える）。
+      for (let rows = 5; rows <= 5 + PREPARED_PLAN_CAPACITY; rows += 1) {
         await session.run({ x: input(rows) });
       }
 
@@ -166,8 +168,8 @@ Deno.test({
       assertEquals(session.diagnostics().weights.allocCount, 2);
 
       // 記号次元 T を毎回変える = params の内容が毎回変わる = 1 度も当たらない。
-      // 導出済み計画（LRU 上限 8）からは追い出されるが、params の実体は 1 本も返らない。
-      const RUNS = 9;
+      // 導出済み計画（LRU 上限）からは追い出されるが、params の実体は 1 本も返らない。
+      const RUNS = PREPARED_PLAN_CAPACITY + 1;
       for (let i = 0; i < RUNS; i += 1) {
         await session.run({ x: input(2 + i) });
         assertEquals(
@@ -184,7 +186,7 @@ Deno.test({
       );
       assertEquals(
         session.diagnostics().lastRunPrepared?.cachedPlans,
-        8,
+        PREPARED_PLAN_CAPACITY,
         "導出済み計画だけが上限で頭打ちになる（params キャッシュとは寿命が独立）",
       );
     } finally {

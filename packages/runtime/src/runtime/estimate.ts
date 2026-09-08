@@ -156,7 +156,7 @@ export type AdmissionReport = {
    * **その量を超えないから**（ADR 0095 決定 1 / 4）: 新しい signature のヒット run は
    * 「保持分 + 新規 ≤ 予算」になるまで古い順に退役させてから確保し、新規 1 本だけで予算を
    * 超える形は保持中を全て退役させてその 1 本だけを持つ（executor の
-   * `Session.#evictBackingsFor`）。計画（`PreparedPlan`）が `PREPARED_PLAN_CAPACITY = 8` 本まで
+   * `Session.#evictBackingsFor`）。計画（`PreparedPlan`）が `PREPARED_PLAN_CAPACITY` 本まで
    * LRU で残るのとは別の勘定である。
    *
    * models 側の prefill バケット形（`chunkBuckets`）は{@link AdmissionReport.scenarios}に

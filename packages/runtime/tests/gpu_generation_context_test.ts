@@ -58,6 +58,8 @@ const CHUNK_SHAPE: readonly number[] = [1, 2, 4, 4];
 const stateGraph = (
   states: GraphJson["states"],
   extra: Partial<GraphJson> = {},
+  /** `state_append` ノードの attrs（sliding にするときだけ `{ window }` を渡す）。 */
+  appendAttrs: Record<string, number> = {},
 ): GraphJson => {
   const slots = Object.keys(states ?? {});
   return {
@@ -83,7 +85,7 @@ const stateGraph = (
         op: "state_append",
         ins: ["chunk"],
         outs: [],
-        attrs: {},
+        attrs: { ...appendAttrs },
         states: { slot },
       })),
     ],
@@ -774,7 +776,9 @@ Deno.test({
       for (
         const operation of [
           () => context.pastLength,
+          () => context.pendingCommit,
           () => context.rewind(0),
+          () => context.commit(0),
           () => internals(context).pastLength(),
           () => internals(context).acquireRun(),
           () => internals(context).advance(2, 1),
@@ -1070,6 +1074,219 @@ Deno.test({
       await context.dispose();
       await other.dispose();
       await session.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+// ---------------------------------------------------------------------------
+// deferred commit（投機デコードの verify 形 — 論理長を run の成功では進めず、受理行数で確定する）
+// ---------------------------------------------------------------------------
+
+Deno.test({
+  name: "deferred run は論理長を保留し、commit(rows) が受理行数だけ進める（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const session = await stateSession(gpu);
+    const context = await session.createGenerationContext({ chunkLength: 4 });
+    /** 論理長 uniform を読み戻す（「GPU が見た past」が commit に追随することの観測点）。 */
+    const readPast = async (): Promise<number> => {
+      const staging = gpu.device.createBuffer({
+        size: LENGTHS_BYTES,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+      });
+      try {
+        const encoder = gpu.device.createCommandEncoder();
+        encoder.copyBufferToBuffer(internals(context).lengths, 0, staging, 0, LENGTHS_BYTES);
+        gpu.device.queue.submit([encoder.finish()]);
+        await staging.mapAsync(GPUMapMode.READ);
+        const words = new Uint32Array(staging.getMappedRange().slice(0));
+        staging.unmap();
+        return words[0];
+      } finally {
+        staging.destroy();
+      }
+    };
+    try {
+      // 既定（commit 欄なし）は従来どおり run の成功で進む。
+      await session.run({ x: RUN_INPUT }, {}, { context, queryLength: 1 });
+      assertEquals(context.pastLength, 1);
+      assertEquals(context.pendingCommit, undefined, "immediate な run は保留を作らない");
+
+      // deferred は 3 行書いて論理長を止める。
+      await session.run({ x: RUN_INPUT }, {}, { context, queryLength: 3, commit: "deferred" });
+      assertEquals(context.pastLength, 1, "deferred は run の成功では進まない");
+      assertEquals(context.pendingCommit, { pastLength: 1, queryLength: 3 });
+
+      // 保留がある間は次の run も rewind も通さない（論理長を動かす経路は 1 本のまま）。
+      const rejected = await assertRejects(
+        () => session.run({ x: RUN_INPUT }, {}, { context, queryLength: 1 }),
+        ExecutionError,
+      );
+      assert(rejected.message.includes("commit 待ち"), rejected.message);
+      const blocked = assertThrows(() => context.rewind(0), ExecutionError);
+      assert(blocked.message.includes("commit 待ち"), blocked.message);
+
+      // 値域: 非負整数 / 書いた行数まで。拒否は保留も論理長も動かさない。
+      for (const rows of [-1, 1.5, 4]) {
+        assertThrows(() => context.commit(rows), ExecutionError, "commit");
+      }
+      assertEquals(context.pendingCommit, { pastLength: 1, queryLength: 3 });
+      assertEquals(context.pastLength, 1);
+
+      // 2 行受理 = 3 行目は棄却（物理 ring には書かれたまま論理長に載らない）。
+      context.commit(2);
+      assertEquals(context.pastLength, 3);
+      assertEquals(context.pendingCommit, undefined, "commit は保留を畳む");
+
+      // 保留が無い commit は fail loudly（黙って no-op にすると受理行数が二重に効く）。
+      const orphan = assertThrows(() => context.commit(1), ExecutionError);
+      assert(orphan.message.includes("確定待ちの generation run が無い"), orphan.message);
+
+      // 次の run が載せる past は commit 後の値（ホストの簿記と GPU が見る値が一致している）。
+      await session.run({ x: RUN_INPUT }, {}, { context, queryLength: 1 });
+      assertEquals(await readPast(), 3, "GPU が見た past が commit を反映していない");
+      assertEquals(context.pastLength, 4);
+
+      // commit(0) は「1 行も受理しない」— 論理長は動かず保留だけが畳まれる。
+      await session.run({ x: RUN_INPUT }, {}, { context, queryLength: 2, commit: "deferred" });
+      context.commit(0);
+      assertEquals(context.pastLength, 4, "commit(0) は論理長を動かさない");
+      assertEquals(context.pendingCommit, undefined);
+
+      // 型の外から来た綴り違いは既定へ倒さず落とす。
+      const spelling = await assertRejects(
+        () =>
+          session.run(
+            { x: RUN_INPUT },
+            {},
+            { context, queryLength: 1, commit: "defered" as "deferred" },
+          ),
+        ExecutionError,
+      );
+      assert(spelling.message.includes("'immediate' か 'deferred'"), spelling.message);
+      assertEquals(context.pastLength, 4, "拒否された run は論理長も保留も動かさない");
+      assertEquals(context.pendingCommit, undefined);
+    } finally {
+      await context.dispose();
+      await session.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
+  name: "失敗した deferred run は保留を作らない / dispose は保留ごと畳む（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const session = await stateSession(gpu);
+    const context = await session.createGenerationContext({ chunkLength: 4 });
+    try {
+      // queryLength の門で落ちる run（dispatch を 1 本も積まない = 物理 ring は無傷）。
+      await assertRejects(
+        () => session.run({ x: RUN_INPUT }, {}, { context, queryLength: 5, commit: "deferred" }),
+        ExecutionError,
+      );
+      assertEquals(context.pendingCommit, undefined, "失敗 run が保留を作った");
+      assertEquals(context.pastLength, 0);
+
+      // 保留を残したまま dispose しても畳める（確定させる相手が居ないので捨てる）。
+      await session.run({ x: RUN_INPUT }, {}, { context, queryLength: 2, commit: "deferred" });
+      assertEquals(context.pendingCommit, { pastLength: 0, queryLength: 2 });
+      await context.dispose();
+      assertThrows(() => context.commit(1), ExecutionError, "dispose 済み");
+      assertThrows(() => context.pendingCommit, ExecutionError, "dispose 済み");
+    } finally {
+      await session.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+/** sliding スロット（窓 8）を 1 本持つグラフ。容量は記号 `C` で context 側から与える。 */
+const slidingGraph = (): GraphJson =>
+  stateGraph(
+    { k: { dtype: "f32", shape: [1, 2, "C", 4] } },
+    { symbols: ["T", "C"] },
+    { window: 8 },
+  );
+
+Deno.test({
+  name: "slidingSlack は sliding スロットの capacity − window の最小（sliding 無しは undefined）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const session = await stateSession(gpu);
+    const sliding = await stateSession(gpu, slidingGraph());
+    try {
+      // full だけの context は余裕という概念を持たない（undefined と 0 を混同させない）。
+      const full = await session.createGenerationContext({ chunkLength: 1 });
+      try {
+        assertEquals(full.slidingSlack, undefined);
+      } finally {
+        await full.dispose();
+      }
+
+      // 容量 16 / 窓 8 → 余裕 8。容量ちょうど（8）なら 0。
+      for (const [capacity, slack] of [[16, 8], [8, 0]] as const) {
+        const context = await sliding.createGenerationContext({
+          chunkLength: 1,
+          bindings: { C: capacity },
+        });
+        try {
+          assertEquals(context.slidingSlack, slack, `C=${capacity}`);
+        } finally {
+          await context.dispose();
+        }
+      }
+
+      // 窓 > 容量 は確保の時点で fail loudly（ADR 0067 決定 4 ③ を run より前で落とす）。
+      const tooNarrow = await assertRejects(
+        () => sliding.createGenerationContext({ chunkLength: 1, bindings: { C: 4 } }),
+        ExecutionError,
+      );
+      assert(tooNarrow.message.includes("window 8"), tooNarrow.message);
+    } finally {
+      await sliding.dispose();
+      await session.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
+  name:
+    "deferred run の queryLength は sliding の余裕 + 1 まで（超える発行は同期区間で拒否・実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const sliding = await stateSession(gpu, slidingGraph());
+    // 容量 9 / 窓 8 → 余裕 1。deferred は「余裕 + 1」= 2 行まで。
+    const context = await sliding.createGenerationContext({ chunkLength: 4, bindings: { C: 9 } });
+    try {
+      assertEquals(context.slidingSlack, 1);
+      // 3 行の deferred は発行の同期区間で落ち、リースも保留も残らない（受理 0 行でも棄却行が
+      // live 窓の外に落ちる、という余裕の条件を超える）。
+      const rejected = await assertRejects(
+        () => sliding.run({ x: RUN_INPUT }, {}, { context, queryLength: 3, commit: "deferred" }),
+        ExecutionError,
+      );
+      assert(rejected.message.includes("余裕 1"), rejected.message);
+      assertEquals(context.pendingCommit, undefined);
+      assertEquals(context.pastLength, 0);
+      // immediate は全行を確定させるので上限は chunkLength のまま。
+      await sliding.run({ x: RUN_INPUT }, {}, { context, queryLength: 3 });
+      assertEquals(context.pastLength, 3);
+      // 余裕 + 1 ちょうどは通る。
+      await sliding.run({ x: RUN_INPUT }, {}, { context, queryLength: 2, commit: "deferred" });
+      assertEquals(context.pendingCommit, { pastLength: 3, queryLength: 2 });
+      context.commit(0);
+      assertEquals(context.pastLength, 3);
+    } finally {
+      await context.dispose();
+      await sliding.dispose();
       gpu.destroy();
     }
   },

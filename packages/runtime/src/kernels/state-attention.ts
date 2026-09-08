@@ -425,10 +425,20 @@ const STATE_UNIFORM = "params";
  * ①QK / ①ₜ / ③PV の**読み**と `state_append` の**書き**がこの 1 文字列を共有する
  * （src/kernels/state-append.ts が import する）。読み側だけ別式にすると、ring が一周した
  * 後の全読みが黙って別の行を指す（例外も NaN も出ない沈黙誤読）。
+ *
+ * WHY 剰余の法が `window` ではなく **`capacity`**: sliding スロットの物理行数は窓ちょうどでは
+ * なく「窓 + 余裕」で、余裕は**論理長より先に書かれた行**（投機デコードの draft — 検証で
+ * 棄却されうる行）の置き場になる。棄却された行 `P+i`（`0 ≤ i < 余裕`）が潰す論理列は
+ * `P+i − capacity` で、次 run の live 窓の下端 `P+a − (W−1)`（`a` = 受理した行数 `≥ 0`）より
+ * 必ず小さい（`i + W − 1 − a ≤ W + 余裕 − 2 < capacity`）。つまり余裕がある限り、棄却行の
+ * 書き込みは live な過去 KV を 1 行も壊さない。法を `window` に戻すと棄却行が窓の内側の列を
+ * 上書きし、**例外も NaN も出ないまま**次の step が別の token の KV を過去として読む。
+ * `window` は `column_base` / `live_columns` / `in_window`（論理列の窓）の側が持ち続ける —
+ * 物理行数と論理窓幅はこの改めで別の量になった。
  */
 export const stateSlotRowWgsl = (sliding: boolean, uniform = STATE_UNIFORM): string =>
   `fn slot_row(col: u32) -> u32 {
-  return ${sliding ? `col % ${uniform}.window` : "col"};
+  return ${sliding ? `col % ${uniform}.capacity` : "col"};
 }`;
 
 /**

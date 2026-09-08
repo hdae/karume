@@ -3,16 +3,17 @@
  * 固定カーネル。1 ノード = 1 dispatch で、値を定義しない **effect op**（出力 0 本）。
  *
  * 入力 `[B,Hkv,M,D]` の**先頭 `queryLength` 行だけ**を、スロット `[B,Hkv,C,D]` の論理行
- * `[P, P+Q)` へ写す。物理行の写像は {@link stateSlotRowWgsl}（sliding は `col % W` のリング）で、
- * **読み側（①QK / ③PV）と同一文字列を共有する MUST**（ADR 0067 決定 4「読み書き同式」— 片方
- * だけ別式にすると ring が一周した後の全読みが黙って別の行を指す）。
+ * `[P, P+Q)` へ写す。物理行の写像は {@link stateSlotRowWgsl}（sliding は `col % C` のリング —
+ * 法が窓 `W` ではなく容量 `C` である理由は同関数の doc）で、**読み側（①QK / ③PV）と同一文字列を
+ * 共有する MUST**（ADR 0067 決定 4「読み書き同式」— 片方だけ別式にすると ring が一周した後の
+ * 全読みが黙って別の行を指す）。
  *
  * MUST: **pad 行（`row ≥ Q`）は書かない**（スロットは full-write 対象外 — ADR 0066 追記 6。
  * 残骸は次 step の append が同じ式で上書きし、読者は resident 範囲外を読まない）。書くと
  * 「窓の中に無意味な値が混ざったスロット」になり、次 step の読者がそれを past として食う。
  * MUST: 仕事量は `B·Hkv·Q·D` に比例する（容量 `C` に比例させない — ADR 0066 決定 3）。
- * MUST: sliding で `Q > W` のとき、同じ物理行へ写る論理行のうち**最後の 1 本だけ**が書く
- * （`row + W ≥ Q`）。ring の意味論では最新の行が残るのが正だが、全行を並列に書かせると
+ * MUST: sliding で `Q > C` のとき、同じ物理行へ写る論理行のうち**最後の 1 本だけ**が書く
+ * （`row + C ≥ Q`）。ring の意味論では最新の行が残るのが正だが、全行を並列に書かせると
  * どちらが勝つかは実装依存 — 沈黙の非決定性になる。full は `dst = P + row` が単射なので
  * 衝突しない（この門は sliding 変種にだけ生成される）。
  *
@@ -83,9 +84,10 @@ fn main(
     let dst = (kv_plane * params.capacity + slot_row(past + row)) * params.depth + d;
 ${
     sliding
-      ? `    // ring が一周する Q > W では同じ物理行へ複数の論理行が写る。**最後の論理行だけ**が
-    // 書く（全行を並列に書かせると勝者が実装依存 = 沈黙の非決定性）
-    if (row + params.window >= query) {
+      ? `    // ring が一周する Q > C では同じ物理行へ複数の論理行が写る。**最後の論理行だけ**が
+    // 書く（全行を並列に書かせると勝者が実装依存 = 沈黙の非決定性）。法は slot_row と同じ
+    // **capacity**（window で切ると C > W のとき誰とも alias しない行が黙って書かれない）
+    if (row + params.capacity >= query) {
       slot[dst] = x[src];
     }`
       : "    slot[dst] = x[src];"

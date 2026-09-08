@@ -11,7 +11,7 @@ import { DispatchLimitError } from "../src/codegen/errors.ts";
 import { openModel } from "../src/format/container.ts";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { defaultGemmGeometry, gemmTileN } from "../src/kernels/gemm-geometry.ts";
-import { createSession, type Tensor } from "../src/runtime/executor.ts";
+import { createSession, PREPARED_PLAN_CAPACITY, type Tensor } from "../src/runtime/executor.ts";
 import { f32Bytes, type GraphJson } from "./helpers/format.ts";
 import { fill, graphModelBuffer } from "./helpers/graph.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
@@ -136,13 +136,16 @@ Deno.test({
 });
 
 Deno.test({
-  name: "導出済み計画は上限 8 本で頭打ちになり、最古のものから追い出される（実 GPU）",
+  // MUST: 上限は定数から読む（数値の写しを持つと、上限を動かしたときに門だけが古い本数を
+  // 主張して「追い出しが起きていない」ことを検出できなくなる）。
+  name: "導出済み計画は上限本数で頭打ちになり、最古のものから追い出される（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
     const session = await createSession(gpu, openModel(modelBytes()));
+    const capacity = PREPARED_PLAN_CAPACITY;
     try {
-      for (const rows of [1, 2, 3, 4, 5, 6, 7, 8]) {
+      for (let rows = 1; rows <= capacity; rows += 1) {
         await session.run({ x: input(rows) });
         assertEquals(
           session.diagnostics().lastRunPrepared,
@@ -151,20 +154,20 @@ Deno.test({
         );
       }
 
-      // 9 種類目で上限に当たる。載せてから最古（T=1）を落とすので本数は 8 のまま。
-      await session.run({ x: input(9) });
-      assertEquals(session.diagnostics().lastRunPrepared, { hit: false, cachedPlans: 8 });
+      // 上限 +1 種類目で頭打ちに当たる。載せてから最古（T=1）を落とすので本数は変わらない。
+      await session.run({ x: input(capacity + 1) });
+      assertEquals(session.diagnostics().lastRunPrepared, { hit: false, cachedPlans: capacity });
 
       // 追い出しの証明: 一度当たっていた T=1 が再びミスになる。
       await session.run({ x: input(1) });
       assertEquals(
         session.diagnostics().lastRunPrepared,
-        { hit: false, cachedPlans: 8 },
+        { hit: false, cachedPlans: capacity },
         "最古の bindings は落ちている",
       );
-      // 残り 7 本は健在（追い出しが 1 本ずつであることの裏）。
-      await session.run({ x: input(8) });
-      assertEquals(session.diagnostics().lastRunPrepared, { hit: true, cachedPlans: 8 });
+      // 残りは健在（追い出しが 1 本ずつであることの裏）。
+      await session.run({ x: input(capacity) });
+      assertEquals(session.diagnostics().lastRunPrepared, { hit: true, cachedPlans: capacity });
     } finally {
       await session.dispose();
       gpu.destroy();

@@ -97,8 +97,11 @@ const assertLength = (name: string, data: Float32Array<ArrayBuffer>, expected: n
  *
  * MUST: `state_append` の書き（{@link referenceStateAppend}）と同じ関数を使う。参照側で
  * 読みと書きの式が割れていると、GPU 側の同じ誤りをオラクルが再現して突合が恒真になる。
+ * MUST: 剰余の法は**容量 `C`**（窓 `W` ではない — `src/kernels/state-attention.ts` の
+ * `stateSlotRowWgsl` の doc。`C > W` の余裕が「論理長より先に書かれた行」の置き場になる）。
  */
-const slotRow = (window: number, col: number): number => stateSliding(window) ? col % window : col;
+const slotRow = (window: number, capacity: number, col: number): number =>
+  stateSliding(window) ? col % capacity : col;
 
 /**
  * states 形 attention。出力は `[B,H,M,D]`（pad 行を含む全 M 行）。
@@ -141,7 +144,7 @@ export const referenceStateAttention = (input: StateAttentionRefInput): RefTenso
           continue;
         }
         const kBase = col < past
-          ? (kvPlane * capacity + slotRow(window, col)) * depth
+          ? (kvPlane * capacity + slotRow(window, capacity, col)) * depth
           : (kvPlane * chunkRows + (col - past)) * depth;
         const source = col < past ? input.slotK : input.insK;
         let acc = 0;
@@ -168,7 +171,7 @@ export const referenceStateAttention = (input: StateAttentionRefInput): RefTenso
         for (let cl = 0; cl < live; cl += 1) {
           const col = base + cl;
           const vBase = col < past
-            ? (kvPlane * capacity + slotRow(window, col)) * depth
+            ? (kvPlane * capacity + slotRow(window, capacity, col)) * depth
             : (kvPlane * chunkRows + (col - past)) * depth;
           const source = col < past ? input.slotV : input.insV;
           acc += weights[cl] * source[vBase + d];
@@ -233,7 +236,7 @@ export const referenceStateAppend = (input: StateAppendRefInput): RefTensor => {
   for (let plane = 0; plane < kvPlanes; plane += 1) {
     for (let row = 0; row < query; row += 1) {
       const src = (plane * chunkRows + row) * depth;
-      const dst = (plane * capacity + slotRow(window, past + row)) * depth;
+      const dst = (plane * capacity + slotRow(window, capacity, past + row)) * depth;
       for (let d = 0; d < depth; d += 1) out[dst + d] = input.x[src + d];
     }
   }

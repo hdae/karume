@@ -23,7 +23,7 @@ struct Dims {
 @group(0) @binding(5) var<uniform> lengths: Lengths;
 
 fn slot_row(col: u32) -> u32 {
-  return col % dims.window;
+  return col % dims.capacity;
 }
 
 fn column_base(past: u32) -> u32 {

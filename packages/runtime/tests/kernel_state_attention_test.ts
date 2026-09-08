@@ -111,7 +111,7 @@ Deno.test("論理 col → スロット物理行の写像は読み（①③）と
     }
   }
   // sliding だけが剰余を持つ（full の写像は恒等）
-  assertEquals(stateSlotRowWgsl(true).includes("col % params.window"), true);
+  assertEquals(stateSlotRowWgsl(true).includes("col % params.capacity"), true);
   assertEquals(stateSlotRowWgsl(false).includes("%"), false);
 });
 
@@ -414,7 +414,7 @@ const windowProbe = (
   // V(col) = col を**論理 col → 物理行**の写像で置く。resident でない物理行は poison のまま
   const base = stateColumnBase(window, past);
   for (let col = base; col < past; col += 1) {
-    slotV[stateSliding(window) ? col % window : col] = col;
+    slotV[stateSliding(window) ? col % capacity : col] = col;
   }
   for (let row = 0; row < query; row += 1) insV[row] = past + row;
   return {

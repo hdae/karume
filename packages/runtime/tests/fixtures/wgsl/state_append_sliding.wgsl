@@ -16,7 +16,7 @@ struct Lengths {
 @group(0) @binding(3) var<uniform> lengths: Lengths;
 
 fn slot_row(col: u32) -> u32 {
-  return col % params.window;
+  return col % params.capacity;
 }
 
 @compute @workgroup_size(256)
@@ -37,9 +37,10 @@ fn main(
     let kv_plane = rest / query;
     let src = (kv_plane * params.chunk_rows + row) * params.depth + d;
     let dst = (kv_plane * params.capacity + slot_row(past + row)) * params.depth + d;
-    // ring が一周する Q > W では同じ物理行へ複数の論理行が写る。**最後の論理行だけ**が
-    // 書く（全行を並列に書かせると勝者が実装依存 = 沈黙の非決定性）
-    if (row + params.window >= query) {
+    // ring が一周する Q > C では同じ物理行へ複数の論理行が写る。**最後の論理行だけ**が
+    // 書く（全行を並列に書かせると勝者が実装依存 = 沈黙の非決定性）。法は slot_row と同じ
+    // **capacity**（window で切ると C > W のとき誰とも alias しない行が黙って書かれない）
+    if (row + params.capacity >= query) {
       slot[dst] = x[src];
     }
     i = i + stride;

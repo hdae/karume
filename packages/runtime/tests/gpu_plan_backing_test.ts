@@ -17,7 +17,12 @@ import { assert, assertEquals, assertRejects } from "@std/assert";
 import { openModel } from "../src/format/container.ts";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { BUFFER_USAGE } from "../src/gpu/webgpu-constants.ts";
-import { createSession, type Session, type Tensor } from "../src/runtime/executor.ts";
+import {
+  createSession,
+  PREPARED_PLAN_CAPACITY,
+  type Session,
+  type Tensor,
+} from "../src/runtime/executor.ts";
 import type { PlanBackingStats } from "../src/runtime/session-types.ts";
 import { f32Bytes, type GraphJson } from "./helpers/format.ts";
 import { fill, graphModelBuffer } from "./helpers/graph.ts";
@@ -446,8 +451,12 @@ Deno.test({
       await session.run({ x: input(4) });
       assert(session.diagnostics().planBacking.residentBytes > 0);
 
-      // 上限 8 本。T=4 は最古なので、9 種類目（T=10）の登録で追い出される。
-      for (const rows of [1, 2, 3, 5, 6, 7, 8, 10]) await session.run({ x: input(rows) });
+      // T=4 は最古。別 shape を**上限ちょうど**通すと、追い出されるのは T=4 の 1 本だけになる
+      // （下で T=5 のヒットを見るので、余分に追い出すと門が別の理由で赤くなる）。本数は定数から
+      // 出す — 写しを置くと上限を動かしたときに追い出しが起きず、この門が空振りする。
+      for (let rows = 5; rows < 5 + PREPARED_PLAN_CAPACITY; rows += 1) {
+        await session.run({ x: input(rows) });
+      }
       assertEquals(
         session.diagnostics().planBacking,
         expectStats([], 1),

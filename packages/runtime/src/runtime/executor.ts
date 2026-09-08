@@ -638,6 +638,16 @@ type PreparedPlan = {
 export type GenerationRun = {
   readonly context: GenerationContext;
   readonly queryLength: number;
+  /**
+   * 論理長を進める時点（既定 `"immediate"` = 従来 — run が例外なく返った時点で `queryLength` 行
+   * ぶん進む）。
+   *
+   * `"deferred"` は進行を保留し、**受理した行数**を後から `GenerationContext.commit(rows)` で
+   * 確定させる（投機デコードの検証形 — draft の何行が受理されるかは、その run の出力を読んで
+   * 初めて決まる）。保留がある間は次の run と `rewind` を拒否するので、論理長を動かす経路は
+   * 依然 1 本のまま（ADR 0066 決定 6 の二重簿記の禁止）。
+   */
+  readonly commit?: "immediate" | "deferred";
 };
 
 /**
@@ -664,11 +674,18 @@ type PlannedSteps = {
  * `diagnostics().lastRunPrepared.hit` が false に張り付くだけ）。上の論（run ごとに shape が
  * 変わる形では増やしても効かない）は本数に依らないので不変。
  *
+ * 8 → 12: 投機デコードの verify 形（draft 長ぶんの小さい `M`）が decode 形と prefill バケット群に
+ * **加えて**定常になるため。models 側の既定バケットが 6 本（`[4, 8, 32, 64, 128, 256]`）＋
+ * 決め打ちの `chunkLength` ＋ decode 形で 8 本ちょうどを埋めるので、8 のままだと verify 形が
+ * 載った瞬間に最古が毎 step 落ちる。
+ *
  * バケット 1 本の費用は PreparedPlan 1 本 + M ≥ 16 なら ①ₜ / ③ₜ の WGSL バリアント 2 本
  * （`PipelineCache` は追い出しを持たず、初回使用時にコンパイルする）。16 未満のバケットは
  * tiled 経路に乗らず ① / ③ に落ちるので、バリアントは増えない。
+ *
+ * MUST: 数値の写しを作らない（テストも見積りの doc もこの定数を参照する）。
  */
-const PREPARED_PLAN_CAPACITY = 8;
+export const PREPARED_PLAN_CAPACITY = 12;
 
 /**
  * signature（導出済み計画のキー）ごとの transient slot backing。
@@ -1460,9 +1477,38 @@ export class Session {
     // 読むので、参照のまま持ち回ると発行直後の書き換えが「dispatch 数の算出元と uniform に載る
     // 値の分裂」「リースは A に立っているが KV を書くのは B」という沈黙誤値になる。リースも
     // この写しから取る（同期区間の取得と本体の読みが同じ 1 つの値から出るのが根拠）。
-    const capturedGeneration: GenerationRun | undefined = generation === undefined
-      ? undefined
-      : { context: generation.context, queryLength: generation.queryLength };
+    const capturedGeneration: GenerationRun | undefined = generation === undefined ? undefined : {
+      context: generation.context,
+      queryLength: generation.queryLength,
+      commit: generation.commit,
+    };
+    // MUST: `commit` の値域は発行の同期区間で見る。型の外から来た綴り違いを既定へ倒すと、
+    // deferred のつもりで発行した run が黙って論理長を進める（例外も警告も出ない位置ずれ）。
+    if (
+      capturedGeneration?.commit !== undefined && capturedGeneration.commit !== "immediate" &&
+      capturedGeneration.commit !== "deferred"
+    ) {
+      return Promise.reject(
+        new ExecutionError(
+          `run: generation.commit '${capturedGeneration.commit}' は 'immediate' か 'deferred' のみ`,
+        ),
+      );
+    }
+    // MUST: deferred run が sliding ring へ書ける行数は「余裕 + 1」まで（受理 0 行でも棄却行が
+    // live 窓の外に落ちる条件 — `GenerationContext.slidingSlack` の doc）。超えた run は例外も
+    // NaN も出さずに過去 KV を潰すので、発行の同期区間で落とす。immediate な run（prefill /
+    // decode）は全行を確定させるので上限は `chunkLength` のまま。
+    if (capturedGeneration?.commit === "deferred") {
+      const slack = capturedGeneration.context.slidingSlack;
+      if (slack !== undefined && capturedGeneration.queryLength > slack + 1) {
+        return Promise.reject(
+          new ExecutionError(
+            `run: deferred な generation run の queryLength ${capturedGeneration.queryLength} が ` +
+              `sliding ring の余裕 ${slack} + 1 を超える（棄却行が live な過去 KV を潰す）`,
+          ),
+        );
+      }
+    }
     const lease = capturedGeneration?.context[RUNTIME_INTERNAL];
     let captured: CapturedInputs;
     let capturedBindings: SymbolBindings;
@@ -2086,9 +2132,16 @@ export class Session {
       const outputs = await encode();
       // MUST: 論理長を進めるのは run が**例外なく返った**ときだけ（ADR 0066 決定 6 —
       // 「論理長は run の成功で進む」の成功はこの意味）。readback や後始末で落ちた run は
-      // 物理 ring だけが進んだ状態なので、進めずに下の poison へ倒す。
+      // 物理 ring だけが進んだ状態なので、進めずに下の poison へ倒す。deferred も同じ「成功」を
+      // 境にするが、進めるのではなく**進行の権利を context.commit へ渡す**（受理行数はこの run の
+      // 出力を読んで初めて決まるので、ランタイムには決められない）。失敗した run は保留も作らない。
       if (generation !== undefined) {
-        generation.context[RUNTIME_INTERNAL].advance(pastLength, generation.queryLength);
+        const internals = generation.context[RUNTIME_INTERNAL];
+        if (generation.commit === "deferred") {
+          internals.defer(pastLength, generation.queryLength);
+        } else {
+          internals.advance(pastLength, generation.queryLength);
+        }
       }
       return outputs;
     } catch (cause) {

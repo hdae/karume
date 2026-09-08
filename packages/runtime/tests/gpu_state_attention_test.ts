@@ -85,7 +85,7 @@ const makeInputs = (spec: StateCase): StateInputs => {
   const resident = new Set<number>();
   const base = stateColumnBase(window, past);
   for (let col = base; col < past; col += 1) {
-    resident.add(stateSliding(window) ? col % window : col);
+    resident.add(stateSliding(window) ? col % capacity : col);
   }
   for (let plane = 0; plane < kvPlanes; plane += 1) {
     for (let row = 0; row < capacity; row += 1) {
@@ -254,7 +254,7 @@ const PARITY_CASES: readonly StateCase[] = [
     past: 10,
     query: 2,
   },
-  // C > W（読み側が `% C` に化けたら落ちる形）
+  // C > W（ring の法は容量 — 読み書きのどちらかが `% W` に化けたら落ちる形）
   {
     name: "sliding W4 C8 wrap",
     batch: 1,
@@ -560,7 +560,8 @@ Deno.test({
     const gpu = await acquireGpu();
     const cache: StatePipelineCache = new Map();
     try {
-      // W=4 / C=8（読み側が `% C` に化けたら落ちる）・P=6 で ring が一周した後の形
+      // W=4 / C=8（ring の法は容量 — 読み書きのどちらかが `% W` に化けたら落ちる）・P=6 で
+      // ring が一周した後の形
       const spec: StateCase = {
         name: "append→attention round trip",
         batch: 2,
@@ -613,6 +614,78 @@ Deno.test({
       const actual = await runStateAttention(gpu.device, spec, inputs, { cache });
       const report = compareTensors({ dtype: "f32", data: actual.out }, expected, STATE_TOLERANCE);
       assertEquals(report.pass, true, `ring 往復: ${formatAllclose(report)}`);
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+/**
+ * `C > W` のスロットで `Q > C` の chunk を書いたときの**重複排除**（ring が 1 回の append の中で
+ * 一周する形）。
+ *
+ * ring の法が窓から容量へ移ったので、重複排除の条件も `row + W ≥ Q` から `row + C ≥ Q` になる。
+ * 窓のまま切ると、`W ≤ row < C` の行は**誰とも alias しないのに書かれない**（例外も警告も出ず、
+ * その物理行だけが前 step の残骸を持ち続ける）。
+ *
+ * MUST: 期待値は参照実装ではなく**論理行から直に**組む（参照も同じ写像を共有しているので、
+ * 両側が同じ誤りを持つと突合が恒真になる）。物理行 `r` の中身は「`r` へ写る論理行のうち最後の
+ * 1 本」= `Q` 未満で `col ≡ r (mod C)` の最大の `col`。
+ */
+Deno.test({
+  name: "Q > C の append は物理行ごとに最後の論理行だけを残す（C > W の重複排除・実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const cache: StatePipelineCache = new Map();
+    try {
+      // 余裕 8 行（投機デコードの draft 上限ぶん）を持つ sliding スロット。
+      const spec = {
+        kvPlanes: 2,
+        chunkRows: 20,
+        depth: 4,
+        capacity: 16,
+        window: 8,
+        past: 0,
+        query: 20,
+      };
+      const x = seeded(spec.kvPlanes * spec.chunkRows * spec.depth, KEY);
+      const slot = seeded(spec.kvPlanes * spec.capacity * spec.depth, () => STATE_S_POISON);
+      const written = await runStateAppend(gpu.device, spec, x, slot, { cache });
+
+      for (let plane = 0; plane < spec.kvPlanes; plane += 1) {
+        for (let row = 0; row < spec.capacity; row += 1) {
+          let last = -1;
+          for (let col = row; col < spec.query; col += spec.capacity) last = col;
+          assert(last >= 0, `物理行 ${row} へ写る論理行が 1 本も無い（格子の作り方が誤り）`);
+          for (let d = 0; d < spec.depth; d += 1) {
+            assertEquals(
+              written[(plane * spec.capacity + row) * spec.depth + d],
+              x[(plane * spec.chunkRows + last) * spec.depth + d],
+              `plane ${plane} row ${row}: 論理行 ${last} が残っていない`,
+            );
+          }
+        }
+      }
+
+      // 故障注入: 重複排除を窓で切ると `8 ≤ row < 16` の論理行が書かれず、毒値が残る。
+      const mutated = await runStateAppend(gpu.device, spec, x, slot, {
+        cache,
+        mutate: replaceIn(
+          ["append"],
+          "row + params.capacity >= query",
+          "row + params.window >= query",
+        ),
+      });
+      assertEquals(
+        [...bitsOf(mutated)].every((value, at) => value === bitsOf(written)[at]),
+        false,
+        "故障注入 '重複排除を窓で切る' が検出されなかった",
+      );
+      assert(
+        mutated.some((value) => value === STATE_S_POISON),
+        "窓で切った変異でも全行が埋まっている（格子が Q > C を満たしていない）",
+      );
     } finally {
       gpu.destroy();
     }
@@ -745,11 +818,12 @@ const INJECTIONS: readonly Injection[] = [
     spec: PARITY_CASES[16],
     apply: replaceIn(["qk"], "(limit - col) < params.window", "col + params.window > limit"),
   },
-  // ② 読み側の ring 写像だけを `% C` に差し替える（読み書き同式 MUST を破る）
+  // ② 読み側の ring 写像だけを `% W` に差し替える（読み書き同式 MUST を破る。法が窓ではなく
+  //   容量になった今、窓へ戻すのがこの規律を破る側 — `C > W` のケースでしか値に出ない）
   {
-    label: "読み側の ring 写像を col % capacity に差し替え",
+    label: "読み側の ring 写像を col % window に差し替え",
     spec: PARITY_CASES[10],
-    apply: replaceIn(["qk", "pv"], "col % params.window", "col % params.capacity"),
+    apply: replaceIn(["qk", "pv"], "col % params.capacity", "col % params.window"),
   },
   // ③ ③PV の pad 行 0 書きを外す（pad 行が live 走査へ落ち、①② が覆っていない S / stats を食う）。
   //   NOTE: 波 D-7 で ①② が有効行だけを覆うようになった結果、**空行は構造的に生じなくなった**
@@ -811,21 +885,23 @@ Deno.test({
           `故障注入 '${injection.label}' が ${spec.name} で検出されなかった`,
         );
       }
-      // ⑦ `state_append` の ring 写像を落とす（書き側 — 往復のビット一致門が検出器）
+      // ⑦ `state_append` の ring 写像を落とす（書き側 — 往復のビット一致門が検出器）。
+      //    MUST: `P` は**容量**を跨がせる（`P ≥ C`）。法が容量になった今、`P < C` では恒等写像と
+      //    区別が付かず、変異が値に出ないまま門が緑になる。
       const appendSpec = {
         kvPlanes: 2,
         chunkRows: 3,
         depth: 4,
         capacity: 8,
         window: 4,
-        past: 6,
+        past: 10,
         query: 2,
       };
       const x = seeded(appendSpec.kvPlanes * appendSpec.chunkRows * appendSpec.depth, KEY);
       const slot = seeded(appendSpec.kvPlanes * appendSpec.capacity * appendSpec.depth, VALUE);
       const mutated = await runStateAppend(gpu.device, appendSpec, x, slot, {
         cache,
-        mutate: replaceIn(["append"], "col % params.window", "col"),
+        mutate: replaceIn(["append"], "col % params.capacity", "col"),
       });
       const expected = referenceStateAppend({ ...appendSpec, x, slot })
         .data as Float32Array<ArrayBuffer>;
