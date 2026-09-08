@@ -250,3 +250,20 @@ accepted 直後の第 3 巡（Codex 独立レビュー・5 本セット照合）
     token 列 golden で縛る — `e2e_gemma4_sequence_test.ts` ⑤）④**VRAM**（ADR [0095](0095-plan-backing-budget.md) で backing は予算つき保持へ — 以下は容量 1 当時の記述）: slot backing は容量 1 でヒット
     run にしか作られないため、末尾 chunk のバケット run は chunkLength 形の backing が載ったまま arena に
     一時を確保する。見積り（ADR 0089）の unaccounted 側の窓が「decode 形と prefill 形の和」から「最大バケット形と prefill 形の和」へ広がる（limitations に記載）。複数 chunk のターンでは backing の作り直しが 1 回増える（2 → 3 回/ターン）。gemma4 の既定の梯子（`GEMMA4_CHUNK_BUCKETS`）は実測で確定する（research 2026-09-07）。
+
+## 追記（2026-09-08）— deferred commit と sliding ring の余裕（ADR 0096 決定 3 / 4・MTP 段 1）
+
+- **決定 6 の「論理長は run の成功で進む」は 2 形になった**: `GenerationRun.commit`（既定
+  `"immediate"` = 従来 — run が例外なく返った時点で `queryLength` 行進む）と `"deferred"`（進行を
+  保留し、ホストが readback で受理行数を決めてから `GenerationContext.commit(rows)`〈`0 ≤ rows ≤
+  queryLength`〉で進める）。保留（`pendingCommit`）がある間は次の run と `rewind` を拒否し、dispose は
+  保留ごと畳む。失敗した run は保留を作らない（追記 3 の poison は不変）。論理長を動かす経路は
+  依然として同時に 1 本なので、二重簿記の禁止は保たれる。
+- **sliding スロットの物理行数は `window + 余裕`**（配布形が焼く — gemma4 は余裕 8）。ring の法は
+  window ではなく capacity（ADR 0067 追記 2026-09-08）で、論理長より先に書かれた行（deferred run の
+  棄却行）は live 窓の外の列にしか当たらない。context は `slidingSlack`（capacity − window の最小）を
+  公開し、**deferred run の `queryLength ≤ slidingSlack + 1`** を run 発行の同期区間で執行する
+  （超えると受理 0 行のとき棄却行が live 窓を潰す — 例外も NaN も出ない沈黙破壊）。immediate な
+  run（prefill / decode）は全行を確定させるので上限は `chunkLength` のまま。
+- 追記 2（sliding を含む context の rewind 全拒否）は不変 — 投機は rewind ではなく「書いてから
+  受理行数だけ進める」形で棄却を扱う。

@@ -364,3 +364,13 @@ full スロットの `P + Q ≤ C` 超過は今日「汎用メッセージで fa
     [0091](0091-gemma4-host-rope-variable-capacity.md) 決定 4 で `capacity` は実行時ノブになり、
     既定 4,096・上限は配布形の宣言 `maxPosition`（E2B は 131,072）。compact は `onOverflow` の
     ポリシー実装 1 本として backlog へ起票済み（数字 640 は当時の値で、現在の既定ではない）。
+
+## 追記（2026-09-08）— 決定 6 の出口は「選んだ R 行」へ一般化（ADR 0096 決定 5・MTP 段 1）
+
+- 決定 6「出口は最終行 logits `[1,1,V]`・sampling はホスト維持」のうち、**出口の形**だけを
+  `logits[1,R,V]` + hidden `[1,R,H]`（`last_row[R]`）へ広げた（ADR 0068 追記 7）。sampling / RNG が
+  ホスト側にあることと GPU 側 argmax の禁止は不変。`GenerationProgramSpec` は `hidden`（必須）を
+  受け、配線は `hiddenSize` をグラフから導出する。R=1 の prefill / decode は従来と同一で、
+  `readLogits` は行の view を返す形（`{ rows, row(i) }`）になった。
+- 決定 1 / 4（可変状態は `context` と `pendingToken`・未 commit の frontier は最大 1 token）は段 1 では
+  不変 — 段 3（投機ループ）で「cycle の起点 P + 受理済み列」へ一般化する（ADR 0096 段 3）。

@@ -216,3 +216,14 @@ sampling の扱いは不変）。
 - 既存 2 系列（logits opt-in / token-only）は**検収 fixture として併存**させる（追記 3 の裁定を
   維持）。製品グラフ 1 系列への集約は生成 API 波の段 1b で、PLE 外出し（ADR
   [0085](0085-ple-host-gather.md)）と同じ再 export に載せる。
+
+## 追記 7（2026-09-08・MTP 段 1 — 製品グラフの出口は「選んだ R 行の logits + hidden」）
+
+追記 6 の「最終行 logits `[1,1,V]`」を一般化した（ADR 0096 決定 5）。`last_row` は `[R]`（第 2 記号
+R・要素数がその run で選ぶ行数を束縛する唯一の源）、グラフ出力は **出力 0 = logits `[1,R,V]`・
+出力 1 = 最終 norm 後の hidden `[1,R,H]`** の 2 本（順序が契約 — ランタイムはスロット番号で読む）。
+通常の prefill / decode は R=1 で、値も token 列も従来の 1 行出口とビット同一。投機 verify は
+R = k+1 行を 1 run で採点し、hidden の受理行を drafter の入力にする。R を chunk 行数 M と共用しない
+（prefill が `[1,768,V]` を readback してしまう）。行選択が lm_head より前に居ることの構造検査
+（H-01）は行数を引数で受ける形（`assert_row_selected_lm_head`）に一般化した。GPU 側 argmax の禁止
+（追記 6・ADR 0083 決定 6）は不変 — 縮約は実測してから。

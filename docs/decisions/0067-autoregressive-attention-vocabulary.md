@@ -273,3 +273,16 @@ states 用の断片を差した ①ₜ / ③ₜ を足し、**M ≥ 16 の計画
   linear が 72%。
 - why-not（online softmax）: S の実体化を消す価値は別軸で、今の律速は traffic だった。①ₜ / ③ₜ の断片は
   online 形の段の中身として流用できる（追記 2026-09-03 の why-not と同じ筋）。
+
+## 追記（2026-09-08）— ring の法は `window` ではなく `capacity`（ADR 0096 決定 4・MTP 段 1）
+
+- 決定 4 の `slot_row(col) = col % window` を **`col % capacity`** に改めた（読み書き同式の MUST は
+  不変 — `stateSlotRowWgsl` の 1 文字列を ①/①′/①ₜ/③/③′/③ₜ/append の全経路と参照実装が共有する）。
+  `column_base` / `live_columns` / `in_window` は window 基準のまま — 物理行数と論理窓幅は別の量に
+  なった。sliding スロットの capacity は配布形が `window + 余裕` で焼き（gemma4 は 8）、余裕は投機
+  verify の棄却行の置き場（ADR 0066 追記 2026-09-08）。`window ≤ capacity` の門（決定 4 ③）は不変。
+- `state_append` の重複排除ガード（Q > capacity で同じ物理行へ写る論理行のうち最後の 1 本だけが
+  書く）も capacity 基準。window 基準のままだと capacity > window のとき、誰とも alias しない行が
+  黙って書かれない（prefill の chunk が行を落とす）。
+- 決定 5（append はスロットにつきちょうど 1 本・最後のノード）は段 1 では不変。段 2 で「読むだけの
+  外部スロット」を第 3 種として足す（ADR 0096 決定 1）。

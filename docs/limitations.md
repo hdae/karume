@@ -403,6 +403,29 @@ i4 / i8 格納 × f32 計算の linear は 1 ≤ M ≤ 64 で GEMV 族（ADR [00
   バケット prefill が初回に作る 5 本で合計 ≈ 150 ms（Deno / naga 実測）。パイプラインは device ごとに
   1 度だけ作られるので 2 ターン目以降には乗らない。ブラウザ（Tint）の解析費は未測。
 
+## 投機デコードの足場（MTP 段 1・ADR 0096）: deferred run は sliding の余裕 + 1 行まで・gemma4 の配布形は焼き直しが要る
+
+- `GenerationRun.commit: "deferred"` で発行した run は **`queryLength ≤ context.slidingSlack + 1`**
+  （gemma4 の配布形は余裕 8 なので 9 行まで）。超える発行は同期区間で fail loudly — 受理 0 行の
+  とき棄却行が sliding ring の live 窓を潰す条件で、通すと例外も NaN も出ずに過去 KV が壊れる。
+  immediate な run（prefill / decode）は全行を確定させるので上限は `chunkLength` のまま。
+  保留（`pendingCommit`）が残る間は次の run と `rewind` を拒否する（`commit(rows)` で畳む）。
+- gemma4 の配布形（product 系列）は **sliding スロットの物理行数が `window + 8`・出口が 2 本
+  （出力 0 = logits `[1,R,V]`・出力 1 = 最終 norm 後 hidden `[1,R,H]`）・`last_row` が `[R]`** に
+  変わった。出口 1 本の旧配布形は `Gemma4Pipeline` が fail loudly（互換分岐は書かない — 未リリース）。
+  手元のミラー（`models/karume-gemma4`）は `dist.py --pipeline gemma4` で焼き直す。decode / token の
+  検収系列は不変（runtime は sliding 容量 = window の資産も従来どおり読む — 法が capacity なので
+  値は変わらない）。
+- decode 1 step ごとに hidden `[1,1,1536]` f32（6 KB）の readback が増える（段 3 で drafter が読む —
+  段 1 の生成ループは読まない）。R 行 verify の readback は logits R MiB + hidden R × 6 KB。
+- PreparedPlan の LRU は 12 本。gemma4 の既定バケット 6 本（4 / 8 / 32 / 64 / 128 / 256）+ prefill 形
+  - decode 形 = **1 容量あたり 8 形**。容量の違う sequence を交互に回すと 16 形で溢れ、decode が
+    静かに再導出へ落ちる（例外は出ない — 観測点は `SessionDiagnostics.lastRunPrepared.hit`）。
+- verify 形（M = 4 / 8）の attention は ① + ③′（①′ は M=1・①ₜ / ③ₜ は M ≥ 16 のまま）。
+  T(4) = 27.6 / T(8) = 37.2 ms（P ≈ 14.7K・GPU 実時間）はこの帯の値で、詰めるのは段 4。
+- R の torch 側 trace 上限は 9（draft 8 + bonus 1）。IR は記号の範囲を持たないので runtime の
+  束縛を縛らない — runtime 側の上限は上の `slidingSlack + 1`。
+
 ## gemma4 `fromAssets`: PLE の読み口は `readPleShard`（全量バイト列）から `openPleShard`（handle）へ変わった（次のリリース・破壊的変更）
 
 `Gemma4Assets.readPleShard(file) → ArrayBuffer` は **`openPleShard(file) → Gemma4PleShardSource`**（`{ bytes, readAll,
