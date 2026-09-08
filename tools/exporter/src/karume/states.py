@@ -24,7 +24,7 @@ NOTE: 結果の正しさの門は verify（states 検査・順序検査・shape 
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 
 from karume.ir import IrDim, IrGraph, IrNode, IrState
@@ -118,6 +118,114 @@ def to_states_form(graph: IrGraph, plan: StatesPlan) -> IrGraph:
             states={"k": spec.k_slot, "v": spec.v_slot},
         )
     return _prune(graph, _with_appends(nodes, slots), slots, _symbols(graph, plan, slots))
+
+
+@dataclass(frozen=True)
+class ExternalAttentionSpec:
+    """**external states 形**（ADR 0096 段 2）へ書き換える attention 1 本の指定。
+
+    `output` は対象ノードの `outs[0]`（SSA 単一代入なのでノードの一意識別子）。`k_input` /
+    `v_input` は trace 用に置いた K / V の**グラフ入力名**で、手術はこの 2 本を落とす
+    （借り手は今 step の k/v を持たない — 過去だけを読む）。
+
+    MUST: スロットの形は `kv_heads` / `head_dim` / `capacity` を**指定で受ける**（k/v 入力の
+    宣言 shape からは導かない）。外部スロットの実体は貸し手 context のもので、借り手の宣言は
+    「貸し手と一致していること」だけが正しさなので、trace 用の使い捨て placeholder の形に
+    引きずられてはならない（placeholder の T を小さくした日に宣言が黙って動く）。
+    """
+
+    output: str
+    k_slot: str
+    v_slot: str
+    k_input: str
+    v_input: str
+    kv_heads: int
+    head_dim: int
+    #: スロット容量（数値、または plan の記号）。
+    capacity: IrDim
+    window: int | None = None
+
+
+@dataclass(frozen=True)
+class ExternalStatesPlan:
+    """1 グラフぶんの external 手術指定（容量記号 + 対象 attention の並び）。"""
+
+    capacity_symbol: str
+    attentions: tuple[ExternalAttentionSpec, ...]
+
+
+def to_external_states_form(graph: IrGraph, plan: ExternalStatesPlan) -> IrGraph:
+    """従来形 attention のグラフを **external states 形**へ書き換えた新しいグラフを返す。
+
+    `to_states_form` との差は 3 点だけで、規律（純関数・`_prune` の根・検査は verify）は同じ:
+
+    1. ノードは `ins=[q]` の **readonly 形**（`attrs.readonly = True`）になる。今 step の k / v も
+       mask も持たない — 借り手は貸し手のスロットの列 `[column_base, P)` だけを読む
+    2. `state_append` を**挿さない**（実体は貸し手のもの）。スロット宣言は `external: True`
+    3. 落とした k / v のグラフ入力は `_prune` の孤児入力拒否から外す（意図して落とす 2 本）
+
+    MUST: 入力 `graph` は読むだけ（純関数 — モジュール docstring）。
+    MUST: mask 入力（第 4 入力）は従来どおり落とす。借り手の q は 1 行で、bidirectional な
+    「全列を見る」形なので mask tensor に情報が無い（列の絞りは window と論理長が持つ）。
+    """
+    nodes = list(graph.nodes)
+    slots: dict[str, _Slot] = {}
+    dropped: set[str] = set()
+    for spec in plan.attentions:
+        where = f"attention '{spec.output}'"
+        index = _target_index(nodes, spec.output, where)
+        node = nodes[index]
+        _assert_convertible(node, where)
+        window = _window(spec.window, where)
+        for slot_name, source in ((spec.k_slot, spec.k_input), (spec.v_slot, spec.v_input)):
+            _assert_dropped_input(graph, node, source, where)
+            dropped.add(source)
+            candidate = _Slot(
+                shape=[1, spec.kv_heads, spec.capacity, spec.head_dim],
+                window=window,
+                source=source,
+                last_reader=index,
+            )
+            _register(slots, slot_name, candidate, where)
+        attrs = dict(node.attrs)
+        attrs["readonly"] = True
+        if window is not None:
+            attrs["window"] = window
+        nodes[index] = IrNode(
+            op=node.op,
+            # q だけを残す（今 step の k / v と mask を落とす）。
+            ins=[node.ins[0]],
+            outs=list(node.outs),
+            attrs=attrs,
+            states={"k": spec.k_slot, "v": spec.v_slot},
+        )
+    return _prune(
+        graph,
+        nodes,
+        slots,
+        _symbols(graph, plan, slots),
+        external=True,
+        droppable_inputs=dropped,
+    )
+
+
+def _assert_dropped_input(graph: IrGraph, node: IrNode, source: str, where: str) -> None:
+    """落とす k / v が**そのノードが実際に読んでいるグラフ入力**であることを見る。
+
+    MUST: 2 点とも見る。ノードの `ins[1]` / `ins[2]` と一致しない指定は「別の値を落として
+    attention は元の k/v を読み続ける」形（`_prune` が読者ごと消すので出力の値だけが変わる）で、
+    グラフ入力でない名前の指定は「計算途中の値を入力扱いで落とす」形（同じく沈黙誤値）。
+    """
+    if source not in (node.ins[1], node.ins[2]):
+        raise StatesFormError(
+            f"{where}: 落とす入力 '{source}' がこのノードの k / v"
+            f"（'{node.ins[1]}' / '{node.ins[2]}'）でない"
+        )
+    if not any(spec.name == source for spec in graph.inputs):
+        raise StatesFormError(
+            f"{where}: 落とす k / v '{source}' がグラフ入力でない"
+            "（external 手術が落とせるのは trace 用に置いた入力だけ）"
+        )
 
 
 def _target_index(nodes: Sequence[IrNode], output: str, where: str) -> int:
@@ -237,7 +345,9 @@ def _append_node(name: str, slot: _Slot) -> IrNode:
     )
 
 
-def _symbols(graph: IrGraph, plan: StatesPlan, slots: Mapping[str, _Slot]) -> list[str]:
+def _symbols(
+    graph: IrGraph, plan: StatesPlan | ExternalStatesPlan, slots: Mapping[str, _Slot]
+) -> list[str]:
     """容量記号は**いずれかのスロットが使うときだけ** `symbols` へ足す。
 
     MUST: 衝突は fail loudly。既存記号との衝突は「入力から束縛される記号を容量としても使う」
@@ -257,7 +367,13 @@ def _symbols(graph: IrGraph, plan: StatesPlan, slots: Mapping[str, _Slot]) -> li
 
 
 def _prune(
-    graph: IrGraph, nodes: Sequence[IrNode], slots: Mapping[str, _Slot], symbols: list[str]
+    graph: IrGraph,
+    nodes: Sequence[IrNode],
+    slots: Mapping[str, _Slot],
+    symbols: list[str],
+    *,
+    external: bool = False,
+    droppable_inputs: Collection[str] = (),
 ) -> IrGraph:
     """生きた値から到達しないノード・initializer・`values` 宣言を落とす。
 
@@ -269,6 +385,10 @@ def _prune(
     MUST: 到達不能になった `inputs` は fail loudly。手術が入力を孤児化するのは配線ミス
     （mask をグラフ入力から作っている export など）で、通すと「呼び手は今までどおり値を渡すのに
     どのノードも読まない」グラフになる — 検査も実行も通るので、誰も気づかない。
+
+    `droppable_inputs` は **意図して落とす入力**（external 手術の k / v placeholder — ADR 0096
+    段 2）。孤児拒否から外すと同時に `inputs` 宣言そのものからも消す。MUST: 落とした後も誰かが
+    読んでいる形は fail loudly — 宣言だけ消すと「未定義の名前を読むノード」が残る。
     """
     live_values = set(graph.outputs)
     live = [False] * len(nodes)
@@ -280,7 +400,18 @@ def _prune(
         live_values.update(node.ins)
     kept = [node for index, node in enumerate(nodes) if live[index]]
 
-    orphans = [spec.name for spec in graph.inputs if spec.name not in live_values]
+    dropped = set(droppable_inputs)
+    still_read = sorted(name for name in dropped if name in live_values)
+    if still_read:
+        raise StatesFormError(
+            f"落とすはずの入力 {still_read} を手術後もどれかのノードが読んでいる"
+            "（宣言だけ消すと未定義参照になる）"
+        )
+    orphans = [
+        spec.name
+        for spec in graph.inputs
+        if spec.name not in live_values and spec.name not in dropped
+    ]
     if orphans:
         raise StatesFormError(
             f"手術で入力 {orphans} が到達不能になった"
@@ -293,7 +424,7 @@ def _prune(
     }
     return IrGraph(
         symbols=symbols,
-        inputs=list(graph.inputs),
+        inputs=[spec for spec in graph.inputs if spec.name not in dropped],
         outputs=list(graph.outputs),
         initializers=initializers,
         values={
@@ -301,6 +432,9 @@ def _prune(
             for name, value in graph.values.items()
             if name in defined or name in initializers
         },
-        states={name: IrState(dtype=_SLOT_DTYPE, shape=slot.shape) for name, slot in slots.items()},
+        states={
+            name: IrState(dtype=_SLOT_DTYPE, shape=slot.shape, external=external)
+            for name, slot in slots.items()
+        },
         nodes=kept,
     )

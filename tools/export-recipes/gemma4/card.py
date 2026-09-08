@@ -53,6 +53,12 @@ GEMMA4_TITLE = "Gemma 4 Text Decoder — Karume"
 #: 載っていないモデル名は帰属を書けないので、カードは描かずに落ちる。
 GEMMA4_UPSTREAM: Mapping[str, str] = {"e2b": "google/gemma-4-E2B-it"}
 
+#: MTP drafter の上流（ADR 0096 段 2）。**モデル名の軸には載らない** — `e2b` 1 モデルが
+#: 2 つの上流チェックポイントから出来ているので、帰属表（モデル名 → 上流）とは別の席で持つ。
+#: 再配布している以上 Apache 2.0 §4(b) の告知対象で、綴りの正本はここ 1 箇所
+#: （`gemma4.export_drafter.ASSISTANT_REPO` / `NOTICE.md` の散文と同じもの）。
+GEMMA4_DRAFTER_UPSTREAM = "google/gemma-4-E2B-it-assistant"
+
 #: ライセンス（実地確認 2026-09-01 — チェックポイント snapshot の README frontmatter が
 #: `license: apache-2.0` を名乗り、その `license_link` 先が Apache 2.0 の本文を載せている）。
 GEMMA4_LICENSE = "apache-2.0"
@@ -74,6 +80,9 @@ def _gemma4_metadata(manifest: Mapping[str, Any]) -> CardMetadata:
                 " — 出所を名乗れないカードは描かない"
             )
         upstream.append(GEMMA4_UPSTREAM[name])
+    # MUST: drafter の上流も `base_model` に載せる — 再配布しているのは 2 本で、片方を
+    # 落とすと「出所を名乗っていない再配布」になる（`GEMMA4_DRAFTER_UPSTREAM` の MUST）。
+    upstream.append(GEMMA4_DRAFTER_UPSTREAM)
     return CardMetadata(
         pipeline_tag=GEMMA4_PIPELINE_TAG,
         base_model=tuple(upstream),
@@ -144,6 +153,15 @@ def _gemma4_base_weights(manifest: Mapping[str, Any]) -> list[str]:
             f" **Apache 2.0** ([license]({GEMMA4_LICENSE_LINK}) /"
             f" [full text]({GEMMA4_LICENSE_TEXT_LINK}); a verbatim copy is in `LICENSE.md`)."
         )
+    lines.append(
+        f"- **`{GEMMA4_DRAFTER_UPSTREAM.rsplit('-', 1)[-1]}`**:"
+        f" [{GEMMA4_DRAFTER_UPSTREAM}](https://huggingface.co/{GEMMA4_DRAFTER_UPSTREAM}), the"
+        " multi-token-prediction drafter head, licensed **Apache 2.0** under the same terms. It"
+        " is redistributed here with its clustered sparse output head replaced by a dense"
+        " projection over the full vocabulary, and it reads the key/value states and embedding"
+        " table of the main model rather than carrying its own. Its own weights are quantized to"
+        " int8 throughout, linear layers included, rather than to packed int4."
+    )
     lines += [
         "- **Changes made here** (also listed in `NOTICE.md`, per Apache 2.0 §4(b)): the text",
         "  decoder was extracted and re-expressed in the Karume container format; linear weights",

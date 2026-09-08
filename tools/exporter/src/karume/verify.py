@@ -33,11 +33,13 @@ from karume.ir import (
     IrInitializer,
     IrInput,
     IrNode,
+    IrShared,
     IrState,
     IrStorage,
     IrValue,
 )
 from karume.ops import (
+    ATTENTION_OP,
     IO_DTYPES,
     M0_STORAGE_DTYPES,
     OP_CONTRACTS,
@@ -45,6 +47,7 @@ from karume.ops import (
     STRIDED_RANK_OPS,
     assert_node_contract,
     assert_strided_rank,
+    attention_readonly,
     resolve_node_dtypes,
     state_window,
     sym_prefix_slice_attrs,
@@ -253,11 +256,22 @@ def _parse_state(value: Any, symbols: set[str], where: str) -> IrState:
     「容量込み」を満たせない）。記号次元は `symbols` 宣言済みならよく、**states の shape も
     束縛点になる**（`createGenerationContext` が決める容量 — ADR 0066 追記 7。
     _check_symbol_bindability）。
+
+    省略可能キー `external`（ADR 0096 段 2）は「実体を自分で確保しない = 借り先 context の
+    スロットを名前で引く」宣言。MUST: 受理するのは `true` だけ — `false` は欄の不存在と同義で、
+    同じ意味に 2 通りの綴りを作ると「どちらの規則で読むべきか」が宣言から決まらなくなる。
     """
     obj = _as_object(value, where)
-    _check_keys(obj, ["dtype", "shape"], [], where)
+    _check_keys(obj, ["dtype", "shape"], ["external"], where)
     dtype = _as_state_dtype(obj["dtype"], f"{where}.dtype")
     shape = _parse_shape(obj["shape"], symbols, f"{where}.shape")
+    external = False
+    if "external" in obj:
+        if obj["external"] is not True:
+            raise IrError(
+                f"{where}.external: true のみ（{obj['external']!r} — false は欄の不存在と同義）"
+            )
+        external = True
     if not 1 <= len(shape) <= MAX_STATE_RANK:
         raise IrError(
             f"{where}.shape: rank {len(shape)} は 1..{MAX_STATE_RANK} の外"
@@ -266,15 +280,29 @@ def _parse_state(value: Any, symbols: set[str], where: str) -> IrState:
     for index, dim in enumerate(shape):
         if isinstance(dim, int) and dim < 1:
             raise IrError(f"{where}.shape[{index}]: 次元 {dim} が正整数でない（容量が取れない）")
-    return IrState(dtype=dtype, shape=shape)
+    return IrState(dtype=dtype, shape=shape, external=external)
 
 
-def _parse_storage(value: Any, where: str) -> IrStorage:
+def _parse_storage(value: Any, where: str, *, shared: bool = False) -> IrStorage:
+    """格納の記述子。
+
+    `shared`（ADR 0096 段 2 の共有 initializer）は **`dtype` の 1 キーだけ**を持つ: 借り手の
+    shard にはバイトが 1 つも無いので、付随実体を記述する欄（`scale`）も group の刻み
+    （`group_size`）も**貸し手側だけが持つ**。写すと同じ事実が 2 箇所に生え、どちらで dequant
+    するかが宣言から決まらない。i8 / i4 の「scale 必須」「i4 は group_size 必須」も
+    この側には掛からない（掛けると共有宣言が原理的に書けない）。
+    """
     obj = _as_object(value, where)
     _check_keys(obj, ["dtype"], ["scale", "group_size"], where)
     dtype = _as_storage_dtype(obj["dtype"], f"{where}.dtype")
     has_scale = "scale" in obj
     has_group_size = "group_size" in obj
+    if shared and (has_scale or has_group_size):
+        extra = sorted(key for key in ("scale", "group_size") if key in obj)
+        raise IrError(
+            f"{where}: 共有 initializer は {extra} を宣言できない"
+            "（バイトを持たない側なので、付随実体と group の刻みは貸し手の常駐重みが正本）"
+        )
     # scale / group_size は量子化格納の記述子。非量子化 dtype に付いているのは
     # エクスポータの取り違えなので受理しない（黙って無視すると格納の意味が二重化する）。
     if dtype not in QUANTIZED_STORAGE_DTYPES and (has_scale or has_group_size):
@@ -283,11 +311,11 @@ def _parse_storage(value: Any, where: str) -> IrStorage:
     # （ADR 0019 / 0069・TS 側 packages/runtime/src/format/ir.ts の鏡像）。
     # 既定 1.0 で補完すると、scale の書き忘れが「全チャネル 1.0 で dequant した重み」に化けて
     # ロードも実行も通ってしまう（差が O(scale) で出るのに、どこにも例外が出ない）。
-    if dtype in QUANTIZED_STORAGE_DTYPES and not has_scale:
+    if dtype in QUANTIZED_STORAGE_DTYPES and not has_scale and not shared:
         raise IrError(f"{where}: 格納 dtype '{dtype}' には scale（scale テンソルのキー）が要る")
     # MUST: i4 は group_size を**明示宣言**する（ADR 0069 決定 2）。group 長が決まらない
     # 4bit 格納は scale の引き直し位置が決まらず、展開が黙って別の値を出す。
-    if dtype == "i4" and not has_group_size:
+    if dtype == "i4" and not has_group_size and not shared:
         raise IrError(f"{where}: 格納 dtype 'i4' には group_size が要る（ADR 0069 決定 2）")
     scale = _as_nonempty_str(obj["scale"], f"{where}.scale") if has_scale else None
     group_size = None
@@ -409,6 +437,20 @@ def parse_ir_graph(text: str) -> IrGraph:
         _as_nonempty_str(name, "graph.initializers の initializer 名")
         where = f"graph.initializers['{name}']"
         obj = _as_object(raw, where)
+        # 共有 initializer（ADR 0096 段 2）は `tensor` の代わりに `shared` を持つ。**排他**で、
+        # 両方書かれた形は「バイトを持つのか借りるのか」が宣言から決まらない
+        # （`_check_keys` の必須キー集合を切り替えることが、そのまま排他の執行になる）。
+        if "shared" in obj:
+            _check_keys(obj, ["shared", "storage"], [], where)
+            shared_obj = _as_object(obj["shared"], f"{where}.shared")
+            _check_keys(shared_obj, ["tensor"], [], f"{where}.shared")
+            initializers[name] = IrInitializer(
+                shared=IrShared(
+                    tensor=_as_nonempty_str(shared_obj["tensor"], f"{where}.shared.tensor")
+                ),
+                storage=_parse_storage(obj["storage"], f"{where}.storage", shared=True),
+            )
+            continue
         _check_keys(obj, ["tensor", "storage"], [], where)
         initializers[name] = IrInitializer(
             tensor=_as_nonempty_str(obj["tensor"], f"{where}.tensor"),
@@ -724,17 +766,49 @@ def _assert_state_order(graph: IrGraph) -> None:
     3. 同一スロットに触れる全ノードの `window` は**存在有無も値も一致**（論理 col → 物理 row の
        写像は読み書き同式 MUST — ADR 0067 決定 4。読み側だけ別式にすると沈黙誤読）
 
+    external スロット（ADR 0096 段 2）には**さらに 3 点**が乗る（TS 側 `plan.ts` の
+    `validateGraphContracts` / `assertStateOrder` と同じ規律）:
+
+    4. external と自前スロットの**混在は拒否**（external が 1 本でもあるグラフは全スロットが
+       external）。借り手 context は自前スロットを持たないので、混ざった宣言は「どちらの
+       確保規則で作るか」がグラフから決まらない
+    5. external への `state_append` は **0 本**（実体は貸し手のもの — 借り手が書くと、貸し手の
+       論理長を進めないまま物理 ring を汚す）
+    6. external の読者は **readonly attention だけ** / 逆に readonly が読むスロットは
+       **external だけ**。普通の states 形 attention が external を読む形は「今 step の k/v を
+       貸し手のスロットへ足したうえで読む」意味になり、5 と正面から食い違う
+
     MUST: fail loudly。3 点とも「順序 / 宣言の誤り」が例外ではなく**別の値**として出る種類の
     破れなので、書き出しの時点でしか止められない。
     """
+    external = {name for name, slot in graph.states.items() if slot.external}
+    if external and external != set(graph.states):
+        owned = sorted(set(graph.states) - external)
+        raise IrError(
+            f"state スロット: external {sorted(external)} と自前 {owned} が混在している"
+            "（external が 1 本でもあるグラフは全スロットが external MUST — ADR 0096 段 2）"
+        )
     touches: dict[str, list[tuple[int, str, int | None]]] = {}
     for index, node in enumerate(graph.nodes):
         if not node.states:
             continue
+        where = f"nodes[{index}] ({node.op})"
         # attrs の値域検査は assert_node_contract が済ませている（ここは引き直すだけ）。
-        window = state_window(node.attrs, f"nodes[{index}] ({node.op})")
+        window = state_window(node.attrs, where)
+        readonly = node.op == ATTENTION_OP and attention_readonly(node.attrs)
         for slot in node.states.values():
             touches.setdefault(slot, []).append((index, node.op, window))
+            if slot in external and not readonly:
+                raise IrError(
+                    f"state スロット '{slot}' は external なのに {where} が readonly でない形で"
+                    "触れている（読者は readonly attention だけ・書き込みは 0 本 MUST —"
+                    " ADR 0096 段 2）"
+                )
+            if readonly and slot not in external:
+                raise IrError(
+                    f"{where}: readonly attention が自前スロット '{slot}' を読んでいる"
+                    "（readonly が読めるのは external スロットだけ — ADR 0096 段 2）"
+                )
     for slot, touched in touches.items():
         appends = [entry for entry in touched if entry[1] == STATE_APPEND_OP]
         if len(appends) > 1:
@@ -1218,6 +1292,10 @@ def _assert_no_surplus_tensors(graph: IrGraph, stored: Mapping[str, _StoredTenso
     """
     declared: set[str] = set()
     for initializer in graph.initializers.values():
+        # 共有 initializer（ADR 0096 段 2）はこのコンテナに実体を持たない — 突合集合に足すと
+        # 「宣言はあるのにファイルに無い」側の門（verify_shards）と鏡像で矛盾する。
+        if initializer.is_shared:
+            continue
         declared.add(initializer.tensor)
         if initializer.storage.scale is not None:
             declared.add(initializer.storage.scale)
@@ -1469,6 +1547,12 @@ def verify_shards(paths: Sequence[str | Path]) -> IrGraph:
     entity_owner: dict[str, str] = {}
     for name, initializer in graph.initializers.items():
         where = f"initializer '{name}'"
+        # 共有 initializer（ADR 0096 段 2）は**このコンテナにバイトを持たない** — 実体との突合
+        # （dtype / shape / co-shard）は貸し手側のコンテナで既に済んでおり、借り手が同じ検査を
+        # 掛ける相手はここに存在しない。宣言の妥当性（storage / values / 消費席）は
+        # グラフ単体の規則が見る。
+        if initializer.is_shared:
+            continue
         earlier = entity_owner.get(initializer.tensor)
         if earlier is not None:
             raise ContainerError(

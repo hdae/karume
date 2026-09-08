@@ -183,6 +183,16 @@ class StorageBreakdown:
         )
 
 
+def bakeable_initializers(graph: IrGraph) -> set[str]:
+    """このコンテナに**実体を書く** initializer の名前（共有宣言を除いた集合）。
+
+    共有 initializer（ADR 0096 段 2）は貸し手のバイトを借りるだけなので、格納の計画・適格判定・
+    宣言と実体の突合はどれもこの集合を走査する（1 箇所に閉じる — 除外を各所に書き写すと、
+    書き足した走査だけが `tensor = None` を引く）。
+    """
+    return {name for name, init in graph.initializers.items() if not init.is_shared}
+
+
 def eligible_compressed_initializers(graph: IrGraph) -> set[str]:
     """圧縮格納のまま GPU 常駐**できる** initializer
     （`packages/runtime/src/runtime/plan.ts` の鏡像）。
@@ -194,8 +204,11 @@ def eligible_compressed_initializers(graph: IrGraph) -> set[str]:
     MUST: `graph.outputs` に載った initializer も適格外（ランタイムの readback は semantic f32
     の 4 バイト / 要素を仮定して重みバッファから写すので、圧縮のまま常駐させると validation で
     落ちるか、極小サイズではビット列の読み替えが黙って返る）。
+    MUST: 共有 initializer（ADR 0096 段 2 — バイトを持たない宣言）は適格集合に載せない。
+    このコンテナに書くバイトが 1 つも無いので「圧縮格納する / しない」の判断対象ではなく、
+    載せると `_plan_weight_dtype` が存在しないテンソルキーを引きにいく。
     """
-    initializers = set(graph.initializers)
+    initializers = bakeable_initializers(graph)
     eligible: set[str] = set()
     disqualified: set[str] = set(graph.outputs)
     for node in graph.nodes:
@@ -218,13 +231,14 @@ def weight_channel_axes(graph: IrGraph) -> dict[str, int]:
     conv_transpose1d `[Cin,Cout,K]` を区別できない）。同じ initializer を軸の違う op が
     消費している場合は 1 つに決まらないので fail loudly。
     """
+    bakeable = bakeable_initializers(graph)
     axes: dict[str, int] = {}
     for node in graph.nodes:
         slot = WEIGHT_SLOTS.get(node.op)
         if slot is None or slot >= len(node.ins):
             continue
         name = node.ins[slot]
-        if name not in graph.initializers:
+        if name not in bakeable:
             continue
         axis = WEIGHT_CHANNEL_AXES[node.op]
         if axes.setdefault(name, axis) != axis:
@@ -318,6 +332,7 @@ def i4_eligible_initializers(
     例外も診断も出ない（ADR 0006 が名指しした「圧縮指定なのに実質 f32」の沈黙）。
     `group_size` は scale を引けない名前だけに掛かる後詰めの既定。
     """
+    bakeable = bakeable_initializers(graph)
     executable: set[str] = set()
     other: set[str] = set()
     for node in graph.nodes:
@@ -325,7 +340,7 @@ def i4_eligible_initializers(
         if slot is None or slot >= len(node.ins):
             continue
         name = node.ins[slot]
-        if name not in graph.initializers:
+        if name not in bakeable:
             continue
         (executable if _has_i4_kernel(node) else other).add(name)
     ledger = scales or {}
@@ -554,8 +569,11 @@ def _plan_weight_dtype(
     書かれている以上、黙って別の格納にする余地は無い。`"f32"` の明示は「圧縮既定からの
     除外」として使える。
     """
-    initializer_by_key = {graph.initializers[name].tensor: name for name in graph.initializers}
-    if len(initializer_by_key) != len(graph.initializers):
+    # MUST: 走査は**実体を書く initializer だけ**（共有宣言は貸し手のバイトを借りるので、
+    # 格納 dtype の計画対象ではない — ADR 0096 段 2）。
+    bakeable = bakeable_initializers(graph)
+    initializer_by_key = {graph.initializers[name].tensor: name for name in bakeable}
+    if len(initializer_by_key) != len(bakeable):
         # MUST: initializer 名 ↔ テンソルキーは 1:1。潰れると適格検査は後勝ちで残った 1 名しか
         # 見ないのに、計画ループは適格な**全ての**名前を回す — 実体は key 単位で packed に
         # 変換され、適格外だった名前の宣言は f32 のまま残るので、形も型も合ったまま値だけが
@@ -563,8 +581,8 @@ def _plan_weight_dtype(
         # は digest 一意）では到達しないが、その 1:1 は上流の実装挙動 1 点に乗っているだけで
         # どこにも書かれていないので、ここを唯一の門にする。
         names_by_key: dict[str, list[str]] = {}
-        for name, initializer in graph.initializers.items():
-            names_by_key.setdefault(initializer.tensor, []).append(name)
+        for name in sorted(bakeable):
+            names_by_key.setdefault(graph.initializers[name].tensor, []).append(name)
         collided = {key: names for key, names in sorted(names_by_key.items()) if len(names) > 1}
         raise EmitError(
             f"initializer 名とテンソルキーが 1:1 でない: {collided}"
@@ -1136,7 +1154,9 @@ def write_model(
     キーと同じ空間で、`id(tensor)` 突合はしない（ADR 0006）。i4 の `storage.group_size` は
     この scale の形から引く（`quantize.group_size_of`）。
     """
-    declared = {init.tensor for init in graph.initializers.values()}
+    # 共有 initializer（ADR 0096 段 2）はこのコンテナに実体を持たないので、宣言 / 格納の
+    # 完全一致からは外す（宣言の storage はそのまま焼く — 計画も変換も掛からない）。
+    declared = {graph.initializers[name].tensor for name in bakeable_initializers(graph)}
     stored = set(tensors)
     if declared != stored:
         raise EmitError(

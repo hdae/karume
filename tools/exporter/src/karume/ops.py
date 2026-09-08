@@ -598,6 +598,36 @@ STATE_WINDOW_ATTRS: AttrSchema = {
     "window": lambda value, where: _assert_integer_attr(value, where, 1)
 }
 
+#: readonly attention（過去だけを読む借り手形 — ADR 0096 段 2）の宣言。**省略可能な attr** で、
+#: 欄の不存在が「今 step の k/v も読む従来の states 形」を意味する。
+#:
+#: MUST: 受理するのは `True` **だけ**。`false` は欄の不存在と同じ意味なので、書ける形を 2 通り
+#: 作ると「readonly: false の 1 本入力」のような、どちらの規則で読むべきか決まらない中間形が
+#: 綴れてしまう（`window` の「欄の不存在それ自体が宣言」と同じ流儀）。
+STATE_READONLY_ATTRS: AttrSchema = {
+    "readonly": lambda value, where: _assert_readonly_attr(value, where)
+}
+
+
+def _assert_readonly_attr(value: Any, where: str) -> bool:
+    """`attrs.readonly` は真の bool ちょうど（{@link STATE_READONLY_ATTRS} の MUST）。"""
+    if value is not True:
+        raise OpContractError(
+            f"{where}: readonly は true のみ（{value!r} — false は欄の不存在と同義で、"
+            "同じ意味に 2 通りの綴りを作らない）"
+        )
+    return True
+
+
+#: readonly 形 attention の入力本数（q の 1 本ちょうど — 今 step の k/v も mask も取らない）。
+READONLY_ATTENTION_ARITY = 1
+
+
+def attention_readonly(attrs: Mapping[str, Any]) -> bool:
+    """readonly 形か（欄の有無が形を判別する — 値域検査は assert_node_contract の担当）。"""
+    return attrs.get("readonly") is True
+
+
 #: torch の padding_idx は**受理するが forward には効かない**（勾配で padding 行を更新しない
 #: ための欄で、順伝播は素の行 gather と同じ）。無視するために契約から落とすと「未知 attr は
 #: fail loudly」の規律に穴が開くので、値域（-1 = 未指定の番兵）だけ検査して運ぶ。
@@ -1177,7 +1207,9 @@ OP_CONTRACTS: dict[str, OpContract] = {
         3,
         ATTENTION_ATTRS,
         max_arity=4,
-        optional_attrs=STATE_WINDOW_ATTRS,
+        # `readonly` は入力本数そのものを変える宣言（q の 1 本 — ADR 0096 段 2）。`window` と
+        # 同じ「states 欄を持つノードでのみ宣言できる」規律に載る。
+        optional_attrs={**STATE_WINDOW_ATTRS, **STATE_READONLY_ATTRS},
         states=StateFieldContract(keys=("k", "v"), required=False),
     ),
     # state スロットへの書き込み（ADR 0067 決定 5）。入力 1 本・**出力 0 本**（_OUTPUT_DTYPES の
@@ -1341,19 +1373,35 @@ def assert_node_contract(node: IrNode, where: str) -> OpContract:
     contract = resolve_op_contract(node.op)
     state_keys = list(node.states)
     _assert_state_field(contract, node, state_keys, where)
-    # MUST: states 形は**省略可能な末尾入力を取らない**（ADR 0067 決定 4 —「causal 固定・
-    # mask tensor は実体化しない」）。上限を絞らないと、mask 付き states 形 attention が
-    # 「mask を誰も読まない形」として受理される。
-    if state_keys and contract.max_arity is not None and len(node.ins) > contract.arity:
-        raise OpContractError(
-            f"{where}: op '{node.op}' の states 形は入力 {contract.arity} 本ちょうど"
-            f"（{len(node.ins)} 本 — 省略可能な末尾入力は取らない・ADR 0067 決定 4）"
-        )
-    if not arity_fits(contract, len(node.ins)):
-        raise OpContractError(
-            f"{where}: op '{node.op}' の入力数が {len(node.ins)}"
-            f"（契約は {describe_arity(contract)}）"
-        )
+    # MUST: `readonly` は attrs の値域検査より**前**にアリティを決める。readonly 形は今 step の
+    # k/v を持たない（過去だけを読む）ので入力は q の 1 本ちょうどで、従来の 3〜4 本の規則を
+    # そのまま当てると「正しい readonly グラフがアリティ違反で落ちる」。
+    readonly = (
+        bool(state_keys)
+        and "readonly" in contract.optional_attrs
+        and attention_readonly(node.attrs)
+    )
+    if readonly:
+        if len(node.ins) != READONLY_ATTENTION_ARITY:
+            raise OpContractError(
+                f"{where}: op '{node.op}' の readonly 形は入力"
+                f" {READONLY_ATTENTION_ARITY} 本ちょうど（{len(node.ins)} 本 — 今 step の k/v も"
+                " mask も取らない・ADR 0096 段 2）"
+            )
+    else:
+        # MUST: states 形は**省略可能な末尾入力を取らない**（ADR 0067 決定 4 —「causal 固定・
+        # mask tensor は実体化しない」）。上限を絞らないと、mask 付き states 形 attention が
+        # 「mask を誰も読まない形」として受理される。
+        if state_keys and contract.max_arity is not None and len(node.ins) > contract.arity:
+            raise OpContractError(
+                f"{where}: op '{node.op}' の states 形は入力 {contract.arity} 本ちょうど"
+                f"（{len(node.ins)} 本 — 省略可能な末尾入力は取らない・ADR 0067 決定 4）"
+            )
+        if not arity_fits(contract, len(node.ins)):
+            raise OpContractError(
+                f"{where}: op '{node.op}' の入力数が {len(node.ins)}"
+                f"（契約は {describe_arity(contract)}）"
+            )
     if len(node.outs) != contract.output_count:
         raise OpContractError(
             f"{where}: op '{node.op}' の出力数が {len(node.outs)}（契約は {contract.output_count}）"

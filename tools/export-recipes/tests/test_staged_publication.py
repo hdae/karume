@@ -59,6 +59,7 @@ EMIT_ENTRIES: tuple[tuple[str, str], ...] = (
     ("gemma4/export.py", "export_series"),
     ("gemma4/export_decode.py", "export_series"),
     ("gemma4/export_product.py", "export_series"),
+    ("gemma4/export_drafter.py", "export_series"),
     ("minicpm5/export.py", "export_series"),
     ("minicpm5/export_decode.py", "export_series"),
     ("embeddinggemma/export.py", "export_series"),
@@ -193,7 +194,7 @@ class TestEveryStagingScriptIsListed:
 
     def test_the_scan_finds_the_scripts(self) -> None:
         """走査が 0 本なら、この門は恒真になる。"""
-        assert len(_staging_functions()) >= 18
+        assert len(_staging_functions()) >= 19
 
     def test_no_staging_script_is_missing_from_the_table(self) -> None:
         missing = sorted(_staging_functions() - set(EMIT_ENTRIES))

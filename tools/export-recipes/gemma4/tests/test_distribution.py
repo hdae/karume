@@ -29,6 +29,7 @@ from gemma4.distribution import (
     GEMMA4_CAPACITY,
     GEMMA4_CHUNK_LENGTH,
     GEMMA4_DEFAULT_MODEL,
+    GEMMA4_DRAFTER_ROLE,
     GEMMA4_MAX_CHUNK_LENGTH,
     GEMMA4_OUTPUT_PATHS,
     GEMMA4_PLE_INDEX_ROLE,
@@ -71,6 +72,7 @@ def _small_runtime_knobs(monkeypatch: pytest.MonkeyPatch) -> None:
 def _sources(root: Path) -> Gemma4Sources:
     return Gemma4Sources(
         product=root / "series" / "gemma4-e2b-product",
+        drafter=root / "series" / "gemma4-e2b-drafter",
         tokenizer=root / "series" / "gemma4-e2b-tokenizer",
         model=root / "inputs" / "gemma-4-E2B-it",
     )
@@ -142,15 +144,28 @@ class TestGemma4Layout:
         assert list(out_dir.rglob("ple.probe.*")) == []
         assert list(out_dir.rglob("reference.json")) == []
 
-    def test_it_declares_one_graph_and_the_sidecar_as_assets(self, gemma4_assembled) -> None:
+    def test_it_declares_two_graphs_and_the_sidecar_as_assets(self, gemma4_assembled) -> None:
+        """weights は**製品グラフと drafter の 2 本**（ADR 0096 段 2）— drafter は assets ではない。
+
+        並びまで見るのは、quant の `weights` 写像が weights の宣言順で埋まるため
+        （`karume.dist.complete_quant_weights` の MUST）— 入れ替わると manifest の 2 節が
+        別の順に並ぶ。
+        """
         _, manifest = gemma4_assembled
         model = _model(manifest)
         assert model["pipeline"] == "gemma4/1"
-        assert list(model["weights"]) == [GEMMA4_ROLE]
+        assert list(model["weights"]) == [GEMMA4_ROLE, GEMMA4_DRAFTER_ROLE]
         assert list(model["quants"]) == ["i4"]
         assert model["defaultQuant"] == "i4"
-        assert model["quants"]["i4"]["weights"] == {GEMMA4_ROLE: "i4"}
+        # 役割ごとに基底格納が違う（drafter は linear まで i8）ので、自動補完が 2 席とも
+        # それぞれの唯一の dtype ラベルで埋める。
+        assert model["quants"]["i4"]["weights"] == {GEMMA4_ROLE: "i4", GEMMA4_DRAFTER_ROLE: "i8"}
         assert model["quants"]["i4"]["session"] == {}
+
+    def test_it_never_carries_the_drafter_goldens(self, gemma4_assembled) -> None:
+        """drafter 系列の golden は検収専用 — `ple.probe` と同じく配布へは入らない。"""
+        out_dir, _ = gemma4_assembled
+        assert list(out_dir.rglob("drafter-golden.*")) == []
 
     def test_the_sidecar_asset_names_are_the_index_file_names(self, gemma4_assembled) -> None:
         """MUST: 取得キー = `ple.json` の `shards[].file`（読み手はそれ 1 本で引く）。"""
@@ -593,6 +608,17 @@ class TestGemma4Storage:
             sources.product / "model.safetensors", ir_container(mark="half", storage="f16")
         )
         with pytest.raises(DistError):
+            gemma4_plan(sources)
+
+    def test_it_refuses_a_drafter_whose_linear_weights_fell_to_int4(self, tmp_path: Path) -> None:
+        """drafter に I4 が在れば落とす — 受理率が 1 〜 3 割落ちるだけの資産の唯一の検出器。
+
+        出力ヘッドは i8 のままなので存在検査（I8 が在る）では素通りし、shape も manifest も
+        正しいまま配れてしまう（`gemma4/export_drafter.py` の 2026-09-08 実測）。
+        """
+        sources = _build(tmp_path, drafter_bytes=fixture.drafter_container(storage="i4"))
+
+        with pytest.raises(DistError, match="I4 がある"):
             gemma4_plan(sources)
 
 

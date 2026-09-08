@@ -4,10 +4,14 @@
 `karume.dist` が持つ。ここが持つのは **gemma4 固有の事実**だけ: どの系列ディレクトリから何を
 拾い、配布形のどの path へ、どの dtype ラベルで並べ、どの quant を既定にするか。
 
-配布するのは**製品グラフ 1 本 + 同じ digest set の付帯資産 2 種**（ADR 0084 決定 5）:
+配布するのは**グラフ 2 本（製品 + 借り手の drafter）+ 同じ digest set の付帯資産 2 種**
+（ADR 0084 決定 5 / 0096 段 2）:
 
 - `model` — 製品グラフのコンテナ（`gemma4/export_product.py` が書く shard 列。PLE を外し、
   出口を最終行 logits にした 1 系列）。格納は**混成**で、埋め込みが i8・linear が packed i4。
+- `drafter` — MTP drafter のコンテナ（`gemma4/export_drafter.py`・ADR 0096 段 2）。格納は
+  **i8 単一**で、linear まで i8（i4 g32 に落とすと受理率が 1 〜 3 割落ちる — 台本の実測）。
+  役割ごとに dtype ラベルが違うので、quant 表の `weights` 写像は 2 席とも埋まる。
 - `tokenizer` — compile 済みトークナイザ資産（`gemma4/tokenizer.py`・ADR 0084 決定 1）
 - PLE sidecar — 索引 `ple.json` と token 範囲 shard（ADR 0085）。**weights ではない**
   （IR コンテナでもグラフでもなく、ホストが `per_layer_inputs` を組むための表）ので
@@ -95,6 +99,8 @@ GEMMA4_INPUTS_DIRNAME = "gemma4"
 #: `ASSET_PATH` — 書き手と読み手が同じ 1 語から組む）。
 GEMMA4_PRODUCT_SUFFIX = "product"
 GEMMA4_TOKENIZER_SUFFIX = "tokenizer"
+#: MTP drafter の系列接尾（`gemma4/export_drafter.py` の `DEFAULT_OUT_DIR`）。
+GEMMA4_DRAFTER_SUFFIX = "drafter"
 
 #: 系列側のファイル名（`gemma4.export.MODEL_FILE` / `export_product.PLE_INDEX_FILE` /
 #: `tokenizer.ASSET_PATH` の綴り）。**代表 path** なので、分割されていれば
@@ -114,6 +120,8 @@ GEMMA4_HIDDEN_SIZE_KEY = "hidden_size"
 #: 役割名（manifest の weights / assets が指す内部キー）。
 GEMMA4_ROLE = "model"
 GEMMA4_TOKENIZER_ROLE = "tokenizer"
+#: MTP drafter の役割名（weights の 2 本目 — 貸し手 `model` が居ないと単独では実行できない）。
+GEMMA4_DRAFTER_ROLE = "drafter"
 GEMMA4_PLE_INDEX_ROLE = "ple_index"
 GEMMA4_PLE_ROLE_PREFIX = "ple_"
 
@@ -148,21 +156,39 @@ GEMMA4_GRAPH_INPUTS: tuple[str, ...] = (
     GEMMA4_LAST_ROW,
 )
 
+#: drafter グラフの入力（正本は `gemma4/export_drafter.py` — ラッパの forward 引数名）。
+#: `token` = 直前に確定した token・`hidden` = target の最終 norm 後 hidden（製品グラフの出力 1）。
+#: K / V は trace 用の入力を手術で external スロットへ置き換えたので、ここには載らない。
+GEMMA4_DRAFTER_TOKEN = "token"
+GEMMA4_DRAFTER_HIDDEN = "hidden"
+GEMMA4_DRAFTER_GRAPH_INPUTS: tuple[str, ...] = (
+    GEMMA4_DRAFTER_TOKEN,
+    GEMMA4_DRAFTER_HIDDEN,
+    *GEMMA4_ROPE_INPUTS,
+)
+
+#: drafter が 1 回の run で出す draft 本数（`gemma4.export_drafter.DRAFT_STEPS` の鏡像 —
+#: 段 2 は k = 3 固定）。出力の本数はこれと一致する MUST。
+GEMMA4_DRAFT_STEPS = 3
+
 #: 出力の相対 path（**モデルサブツリー内**）— 配置表と manifest が共有する 1 箇所。格納 dtype を
 #: ファイル名に出すのは他 family と同じ形（系列が 2 本並んでも取り違えようがない綴り）。
 #: PLE shard は索引が書いたファイル名をそのまま使うので、この表には代表の 3 席だけが載る。
 GEMMA4_OUTPUT_PATHS: Mapping[str, str] = {
     GEMMA4_ROLE: f"{GEMMA4_ROLE}/model.i4.safetensors",
+    GEMMA4_DRAFTER_ROLE: f"{GEMMA4_DRAFTER_ROLE}/model.i8.safetensors",
     GEMMA4_TOKENIZER_ROLE: f"{GEMMA4_TOKENIZER_SUFFIX}/{GEMMA4_TOKENIZER_FILE}",
     GEMMA4_PLE_INDEX_ROLE: f"{GEMMA4_PLE_DIR}/{GEMMA4_PLE_INDEX_FILE}",
 }
 
-#: コンテナのヘッダに**必ず在る**格納 dtype。混成なので 2 つとも要求する（他 family の
-#: {@link assert_storage} は 1 dtype ずつしか見ないので、表を 2 枚持って 2 度掛ける）。
+#: コンテナのヘッダに**必ず在る**格納 dtype。製品グラフは混成なので 2 つとも要求する（他
+#: family の {@link assert_storage} は 1 dtype ずつしか見ないので、表を 2 枚持って 2 度掛ける）。
 #: I8 は埋め込み（i4 適格外・recipe README の "not int4-eligible"）・I4 は linear の重み。
 #: 片方だけを要求すると「埋め込みまで i4 に落ちた系列」「linear が i8 のままの系列」が
 #: それぞれ素通りする — どちらも shape も manifest も正しいまま、品質と速度だけが変わる。
-GEMMA4_STORAGE_REQUIREMENTS: Mapping[str, str] = {GEMMA4_ROLE: "I4"}
+#: drafter は**単一格納**（linear まで i8 — `gemma4/export_drafter.py` の実測）なので、要求は
+#: I8 の 1 枚だけで、2 枚目の表に行を持たない。
+GEMMA4_STORAGE_REQUIREMENTS: Mapping[str, str] = {GEMMA4_ROLE: "I4", GEMMA4_DRAFTER_ROLE: "I8"}
 GEMMA4_STORAGE_ALSO_REQUIRED: Mapping[str, str] = {GEMMA4_ROLE: "I8"}
 
 #: 各役割の safetensors ヘッダに**あってはならない**格納 dtype（{@link assert_storage_absent}）。
@@ -170,15 +196,27 @@ GEMMA4_STORAGE_ALSO_REQUIRED: Mapping[str, str] = {GEMMA4_ROLE: "I8"}
 #: 指した」印にしかならない（系列 root の取り違えは数値の門では原理的に検出できない —
 #: ADR 0027 / 0029。他 family と同じ規律で、書き出しうる圧縮格納のうち**在ってはならない側を
 #: 全部**名指しする）。
-GEMMA4_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {GEMMA4_ROLE: ("F16",)}
+#: drafter は I4 も禁止側 — 存在検査（I8 が在る）は「linear だけ i4 に落ちた drafter」を
+#: 素通りさせる（出力ヘッドの i8 で要求が満たされる）。受理率が 1 〜 3 割落ちるだけの資産は
+#: 形も manifest も正しいままなので、ここが唯一の検出器になる。
+GEMMA4_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {
+    GEMMA4_ROLE: ("F16",),
+    GEMMA4_DRAFTER_ROLE: ("F16", "I4"),
+}
 
-#: 格納 dtype のラベル（quant 席の綴りでもある）。**基底格納は 1 つ**なので
-#: {@link complete_quant_weights} の自動補完が quant 表の weights を埋める。
+#: 格納 dtype のラベル（quant 席の綴りでもある）。役割ごとに**基底格納が 1 つずつ**なので
+#: {@link complete_quant_weights} の自動補完が quant 表の weights を 2 席とも埋める
+#: （`{model: "i4", drafter: "i8"}`）。
 GEMMA4_DTYPE = "i4"
+GEMMA4_DRAFTER_DTYPE = "i8"
 
 #: weights の宣言（dtype ラベル → 役割名）。分割は現物が決めるので、ここが指すのは代表 1 役。
+#: MUST: drafter を **weights の 2 本目**として宣言する（assets ではない）— IR コンテナで
+#: グラフを持ち、`createSession` が食う側の資産だからで、hub の `ResolveOptions.weights` が
+#: 「既定では取らない」を表せる軸もここ 1 本しかない。
 GEMMA4_WEIGHTS: Mapping[str, Mapping[str, WeightFiles]] = {
-    GEMMA4_ROLE: {GEMMA4_DTYPE: WeightFiles(GEMMA4_ROLE)}
+    GEMMA4_ROLE: {GEMMA4_DTYPE: WeightFiles(GEMMA4_ROLE)},
+    GEMMA4_DRAFTER_ROLE: {GEMMA4_DRAFTER_DTYPE: WeightFiles(GEMMA4_DRAFTER_ROLE)},
 }
 
 #: quant 席（ADR 0074 の文法 `<格納>[+<部品><ビット>]…[-<ノブ>]…`）。1 席だけなのは格納系列が
@@ -189,8 +227,9 @@ GEMMA4_QUANTS: Mapping[str, Any] = {
         "weights": {},
         "session": {},
         "label": "Packed int4 linear, int8 embeddings",
-        "description": "The only storage series: linear weights in packed int4 (group 32) and the"
-        " embedding tables in int8, which are not int4-eligible.",
+        "description": "The only storage series: the main model's linear weights in packed int4"
+        " (group 32) and its embedding tables in int8, which are not int4-eligible. The drafter"
+        " head is int8 throughout.",
     }
 }
 
@@ -288,6 +327,7 @@ class Gemma4Sources:
     """
 
     product: Path
+    drafter: Path
     tokenizer: Path
     model: Path
 
@@ -296,6 +336,7 @@ def gemma4_sources(series_dir: Path, model: str = GEMMA4_DEFAULT_MODEL) -> Gemma
     """系列の親ディレクトリ（`outputs/series/`）と `_shared.paths` の綴りから入力を引く。"""
     return Gemma4Sources(
         product=series_dir / gemma4_series_name(model, GEMMA4_PRODUCT_SUFFIX),
+        drafter=series_dir / gemma4_series_name(model, GEMMA4_DRAFTER_SUFFIX),
         tokenizer=series_dir / gemma4_series_name(model, GEMMA4_TOKENIZER_SUFFIX),
         model=INPUTS_ROOT / GEMMA4_INPUTS_DIRNAME / gemma4_checkpoint(model),
     )
@@ -405,10 +446,12 @@ def gemma4_placements(sources: Gemma4Sources, index: Mapping[str, Any]) -> dict[
     """役割名 → 出所のファイル。出力の path は {@link gemma4_output_paths} が持つ。
 
     この表に無いものは出力へ入らない（製品系列に同居する `ple.probe.safetensors` と
-    `reference.json` はこれで落ちる — どちらも検収と出所記録のためのもので実行に要らない）。
+    `reference.json`・drafter 系列の `drafter-golden.*.safetensors` はこれで落ちる — どれも
+    検収と出所記録のためのもので実行に要らない）。
     """
     placements = {
         GEMMA4_ROLE: sources.product / GEMMA4_MODEL_FILE,
+        GEMMA4_DRAFTER_ROLE: sources.drafter / GEMMA4_MODEL_FILE,
         GEMMA4_TOKENIZER_ROLE: sources.tokenizer / GEMMA4_TOKENIZER_FILE,
         GEMMA4_PLE_INDEX_ROLE: sources.product / GEMMA4_PLE_INDEX_FILE,
     }
@@ -629,6 +672,113 @@ def assert_gemma4_graph(
         )
 
 
+def assert_gemma4_drafter_graph(
+    graph: Mapping[str, Any],
+    path: Path,
+    lender: Mapping[str, Any],
+    lender_path: Path,
+    rope: Mapping[str, Any],
+    hidden_size: int,
+) -> None:
+    """drafter グラフ（借り手）の形と、**貸し手との噛み合わせ**を配置の前に実測する。
+
+    借り手は単独では実行できない資産なので、見るべき性質の半分は「貸し手と一致していること」に
+    なる。食い違ったまま配ると、ロード時に落ちるか（名前が違う）、**形も型も合ったまま別の列を
+    読む**（容量が違う）。
+
+    - グラフ入力が `token` / `hidden` / RoPE 4 本ちょうど（K/V の placeholder が残っていれば、
+      呼び手が渡す値をどのノードも読まない形になる）
+    - `hidden` の幅が上流の `hidden_size`（= 製品グラフの出力 1 の幅）と一致
+    - RoPE 派生入力の幅が `pipelineConfig.rope` の `headDim` と一致（貸し手と同じ突合）
+    - 出力が k 本ちょうど（段 2 は {@link GEMMA4_DRAFT_STEPS}）
+    - `states` が**全部 external**で、名前も形も**貸し手の宣言と 1 対 1**
+    - initializer に**共有宣言が 1 本**で、指し先が貸し手コンテナに実在するテンソルキー
+    - 記号は容量記号 1 本だけで、**貸し手と同じ綴り**（借り手の bindings は貸し手を継承する）
+    """
+    inputs = graph_inputs(graph, path)
+    names = tuple(inputs)
+    if names != GEMMA4_DRAFTER_GRAPH_INPUTS:
+        raise DistError(
+            f"{path} のグラフ入力が {list(names)} で、期待の"
+            f" {list(GEMMA4_DRAFTER_GRAPH_INPUTS)} と違う"
+            " — K/V の placeholder が手術で落ちていない世代の資産"
+        )
+    hidden = inputs[GEMMA4_DRAFTER_HIDDEN]
+    if list(hidden) != [1, hidden_size]:
+        raise DistError(
+            f"{path} の入力 '{GEMMA4_DRAFTER_HIDDEN}' が {list(hidden)!r} —"
+            f" [1, {hidden_size}]（target の最終 norm 後 hidden 1 行）でない"
+        )
+    for layer_type in GEMMA4_ROPE_LAYER_TYPES:
+        head_dim = rope[layer_type][HEAD_DIM_FIELD]
+        for part in GEMMA4_ROPE_PARTS:
+            name = gemma4_rope_input_name(layer_type, part)
+            declared = inputs[name]
+            if list(declared) != [1, 1, head_dim]:
+                raise DistError(
+                    f"{path} の入力 '{name}' が {list(declared)!r} — 宣言した headDim から組んだ"
+                    f" 期待 {[1, 1, head_dim]} と違う（表とグラフが別世代）"
+                )
+    outputs = graph.get("outputs")
+    if not isinstance(outputs, list) or len(outputs) != GEMMA4_DRAFT_STEPS:
+        raise DistError(f"{path} の IR 出力が {outputs!r} — draft {GEMMA4_DRAFT_STEPS} 本でない")
+
+    borrowed = graph.get("states")
+    lent = lender.get("states")
+    if not isinstance(borrowed, dict) or not isinstance(lent, dict):
+        raise DistError(f"{path}: IR メタデータに states が無い（借り手 / 貸し手のどちらか）")
+    for name, slot in sorted(borrowed.items()):
+        if not slot.get("external"):
+            raise DistError(
+                f"{path}: state スロット '{name}' が external でない"
+                "（借り手は実体を持たない — 全スロットが external MUST）"
+            )
+        owner = lent.get(name)
+        if owner is None:
+            raise DistError(
+                f"{path}: state スロット '{name}' が貸し手 {lender_path} に無い"
+                f"（貸し手の宣言: {sorted(lent)}）"
+            )
+        if owner.get("dtype") != slot.get("dtype") or owner.get("shape") != slot.get("shape"):
+            raise DistError(
+                f"{path}: state スロット '{name}' が {slot.get('dtype')} {slot.get('shape')} —"
+                f" 貸し手の {owner.get('dtype')} {owner.get('shape')} と違う（別世代の組）"
+            )
+
+    initializers = graph.get("initializers") or {}
+    shared = sorted(
+        name
+        for name, entry in initializers.items()
+        if isinstance(entry, dict) and isinstance(entry.get("shared"), dict)
+    )
+    if len(shared) != 1:
+        raise DistError(f"{path}: 共有 initializer が {len(shared)} 本 {shared}（1 本ちょうど）")
+    tensor = initializers[shared[0]]["shared"].get("tensor")
+    lent_tensors = {
+        entry.get("tensor")
+        for entry in (lender.get("initializers") or {}).values()
+        if isinstance(entry, dict)
+    }
+    if tensor not in lent_tensors:
+        raise DistError(
+            f"{path}: 共有 initializer の指し先 '{tensor}' が貸し手 {lender_path} に無い"
+            "（貸し手を焼き直した世代と噛み合っていない）"
+        )
+
+    symbols = graph.get("symbols")
+    lent_symbols = lender.get("symbols")
+    if not isinstance(symbols, list) or len(symbols) != 1:
+        raise DistError(
+            f"{path}: symbols が {symbols!r} — 容量記号 1 本だけであること"
+            "（借り手の入力はどの記号も束縛しない）"
+        )
+    if not isinstance(lent_symbols, list) or symbols[0] not in lent_symbols:
+        raise DistError(
+            f"{path}: 容量記号 '{symbols[0]}' が貸し手 {lender_path} の symbols"
+            f" {lent_symbols!r} に無い — 借り手の束縛は貸し手から継承する"
+        )
+
+
 def assert_gemma4_ple_shards(placements: Mapping[str, Path], index: Mapping[str, Any]) -> None:
     """sidecar shard の現物が索引と同じ資産世代を名乗ることを、配置の前に見る。
 
@@ -808,7 +958,12 @@ def gemma4_plan(sources: Gemma4Sources, model: str = GEMMA4_DEFAULT_MODEL) -> Mo
     container = placements[GEMMA4_ROLE]
     graph = ir_graph(container)
     vocab_size = gemma4_vocab_size(graph, container)
-    assert_gemma4_graph(graph, container, index, rope, gemma4_hidden_size(text_config, where))
+    hidden_size = gemma4_hidden_size(text_config, where)
+    assert_gemma4_graph(graph, container, index, rope, hidden_size)
+    drafter_container = placements[GEMMA4_DRAFTER_ROLE]
+    assert_gemma4_drafter_graph(
+        ir_graph(drafter_container), drafter_container, graph, container, rope, hidden_size
+    )
     if index["tokens"] != vocab_size:
         raise DistError(
             f"{sources.product / GEMMA4_PLE_INDEX_FILE}: tokens {index['tokens']} が製品グラフの"
@@ -867,7 +1022,15 @@ the Apache License, Version 2.0 (see `LICENSE.md`). The following changes were m
 - **Rotary position embeddings were moved out of the graph**: the cosine and sine rows are built
   by the host from the declared parameters and passed in as ordinary graph inputs.
 
-No retraining and no fine-tuning were performed. The original checkpoint is not distributed here.
+This repository also redistributes a modified form of `google/gemma-4-E2B-it-assistant` (the
+multi-token-prediction drafter head), which is licensed under the same Apache License, Version 2.0.
+The same changes apply — text decoder re-expressed in the Karume container format, weights
+quantized — with two more: the drafter's clustered sparse output head was replaced by a dense
+projection over the full vocabulary, and the drafter reads the key/value states and the embedding
+table of the main model instead of carrying its own. **The drafter's weights are quantized to
+int8 throughout**, linear layers included, rather than to packed int4 as the main model's are.
+
+No retraining and no fine-tuning were performed. The original checkpoints are not distributed here.
 """
 
 

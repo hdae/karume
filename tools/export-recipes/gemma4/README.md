@@ -18,7 +18,7 @@ repository yet — the distribution form is assembled locally and publication is
 (`docs/release-runbook.md`).
 
 The authority for the design decisions is the module docstrings (`export.py`, `export_decode.py`,
-`export_product.py`); this file is the entry point only.
+`export_product.py`, `export_drafter.py`); this file is the entry point only.
 
 Four scripts export a graph from the same checkpoint (`tokenizer.py` below reads only its
 `tokenizer.json`). `export.py` emits the 1-shot (prefill-equivalent) graph and
@@ -268,6 +268,57 @@ through the host loader (`packages/models/src/gemma/ple.ts`), takes `argmax` on 
 requires the resulting token sequence to match the logits opt-in series' `greedy.<case>` records
 exactly for 3 cases × 16 steps.
 
+## What `export_drafter.py` emits
+
+The **MTP drafter** series, `outputs/series/gemma4-e2b-drafter/` — a _borrower_ graph that cannot
+run on its own. It is the head from `google/gemma-4-E2B-it-assistant` (4 layers, hidden 256, no key
+or value projections at all), re-expressed so that it reads the _product_ series' state slots and
+embedding table instead of carrying its own. Three declarations in the container say so (ADR
+[0096](../../../docs/decisions/0096-speculative-decoding.md) stage 2):
+
+- the four state slots are **`external`** — the physical rings belong to the lender's
+  `GenerationContext`, and the borrower writes none of them (no `state_append` survives)
+- every attention node is **`readonly`** — its `ins` is the single query row, and the columns it
+  reads are `[P − min(P, W), P)` for the sliding slot and `[0, P)` for the full one
+- the main embedding table is a **`shared`** initializer — no bytes are written for it; the
+  declaration names the lender's tensor key (`model.lm_head.weight`), which the recipe reads out of
+  the product container's header rather than spelling it out
+
+The graph takes `token[1,1]`, `hidden[1,1536]` (the product graph's output 1, i.e. after the final
+norm and before `lm_head`) and the four rotary rows for position `P − 1`, and returns **k = 3**
+drafted token ids. The three steps are unrolled in Python because the only state carried between
+them is `(token, hidden)` — the drafter has no cache of its own. The clustered sparse output head of
+the upstream checkpoint is replaced by a dense projection over the full vocabulary, because `topk`
+has no `aten` handler in this exporter; `use_ordered_embeddings` is turned off **before** the
+checkpoint is read, since `masked_embedding` is built in `__init__`.
+
+Storage is **int8 throughout** — every `nn.Linear` including the tied output head, plus the shared
+table declaration, all per-channel int8; only the norms and the layer scalars stay f32. This is
+where the drafter departs from the product series, which packs its linear weights into int4. The
+reason is measured (2026-09-08, same target trajectory, N = 200 cycles × 3 cases): rounding the
+drafter's 22 linear layers (10.1M elements) to int4 group-32 drops E[a], the expected number of
+tokens confirmed per speculation cycle at k = 3, by 33% / 21% / 15% against no rounding at all,
+while per-channel int8 costs 2–3%. Rounding the shared table changes E[a] by nothing measurable.
+The int4 → int8 step adds under 4 MB to the distribution, which is not a trade worth a fifth of the
+acceptance rate.
+
+### Goldens
+
+`drafter-golden.<case>.safetensors` carries `prompt[T]`, `tokens[N]` (the target's greedy
+continuation, teacher-forced) and `draft[N, 3]` for three cases and N = 200 cycles. They are taken
+by running the **product series' own rounding** of the target next to the exported drafter wrapper:
+the target is prefilled in chunks of 768 rows through a `DynamicCache`, and at each cycle the
+drafter is handed the token and post-norm hidden of position `P − 1` together with the lender's
+key/value columns **sliced by the recipe** to `[P − min(P, W), P)` / `[0, P)` — the slice is not
+left to the cache's own retention, which differs between a chunked prefill and a single decode
+step. The target runs with upstream SDPA rather than the `karume_gqa` interface for this pass only,
+because the cached path lets upstream drop the mask entirely.
+
+The case material is **repository documents** (`tools/export-recipes/README.md`,
+`tools/exporter/README.md`) truncated at a paragraph boundary, plus one short prompt. Each golden
+stores the prompt ids it was taken with, so editing those documents does not invalidate an existing
+record — it only changes what a fresh run would produce.
+
 ## What `tokenizer.py` emits
 
 The **compiled tokenizer asset**, `outputs/series/gemma4-e2b-tokenizer/tokenizer.json` (~9.6 MB):
@@ -315,6 +366,7 @@ uv run --with 'transformers==5.14.1' python -m gemma4.export
 uv run --with 'transformers==5.14.1' python -m gemma4.export_decode
 uv run --with 'transformers==5.14.1' python -m gemma4.export_token
 uv run --with 'transformers==5.14.1' python -m gemma4.export_product
+uv run --with 'transformers==5.14.1' python -m gemma4.export_drafter --device cpu
 uv run python -m gemma4.tokenizer   # tokenizer asset + parity fixture (no transformers needed)
 uv run --with 'transformers==5.14.1' python -m gemma4.chat   # chat parity fixture
 ```
@@ -333,19 +385,21 @@ cd tools/export-recipes
 uv run python dist.py --pipeline gemma4        # → models/karume-gemma4/ (~4.0 GiB)
 ```
 
-The distribution folds **two series** into one HF repository: the product container
+The distribution folds **three series** into one HF repository: the product container
 (`gemma4-e2b-product`, split at the same 256 MiB ceiling — seven shards as it is exported today)
-plus its PLE sidecar, and the compiled tokenizer asset
-(`gemma4-e2b-tokenizer`). The acceptance-only files that live beside the product container
-(`ple.probe.safetensors`, `reference.json`) are not in the placement table and therefore never
-reach the output. Layout inside the repository:
+plus its PLE sidecar, the MTP drafter container (`gemma4-e2b-drafter` — two shards in the second
+`weights` role, fetched only when a pipeline asks for `speculative`), and the compiled tokenizer
+asset (`gemma4-e2b-tokenizer`). The acceptance-only files that live beside the containers
+(`ple.probe.safetensors`, `reference.json`, `drafter-golden.*.safetensors`) are not in the
+placement table and therefore never reach the output. Layout inside the repository:
 
-| Manifest seat                        | Path                                            |
-| ------------------------------------ | ----------------------------------------------- |
-| `weights.model.i4.shards`            | `e2b/model/model.i4-NNNNN-of-NNNNN.safetensors` |
-| `assets.tokenizer`                   | `e2b/tokenizer/tokenizer.json`                  |
-| `assets.ple_index`                   | `e2b/ple/ple.json`                              |
-| `assets.<the index's own file name>` | `e2b/ple/ple-NNNNN-of-NNNNN.safetensors`        |
+| Manifest seat                        | Path                                              |
+| ------------------------------------ | ------------------------------------------------- |
+| `weights.model.i4.shards`            | `e2b/model/model.i4-NNNNN-of-NNNNN.safetensors`   |
+| `weights.drafter.i8.shards`          | `e2b/drafter/model.i8-NNNNN-of-NNNNN.safetensors` |
+| `assets.tokenizer`                   | `e2b/tokenizer/tokenizer.json`                    |
+| `assets.ple_index`                   | `e2b/ple/ple.json`                                |
+| `assets.<the index's own file name>` | `e2b/ple/ple-NNNNN-of-NNNNN.safetensors`          |
 
 The PLE sidecar rides in the `assets` seat rather than `weights` — it is not an IR container, and
 the host reads only the vocabulary ranges a conversation touches (ADR
@@ -373,10 +427,18 @@ full-attention KV slots are the only thing that grows with capacity (12 KiB per 
 Gates that run **before a single byte is placed** (each one covers a mismatch that leaves shape,
 dtype and manifest all correct, and shows up only as wrong values):
 
-- the container carries both `I4` (linear weights) and `I8` (embeddings) and no `F16`
+- the product container carries both `I4` (linear weights) and `I8` (embeddings) and no `F16`;
+  the drafter container carries `I8` only — an `I4` or `F16` tensor in it is refused (int4
+  group-32 linears cost 15–33 % of E[a], see above)
 - graph inputs are exactly `input_ids` / `rope_{sliding,full}_attention_{cos,sin}` /
-  `per_layer_inputs` / `last_row`, in that order, the exit
-  is `[1, 1, V]`, and exactly one symbol is free of the input shapes (the full slot's capacity)
+  `per_layer_inputs` / `last_row`, in that order, the two exits are logits `[1, R, V]` and the
+  post-norm hidden `[1, R, H]` (`H` checked against `hidden_size` — the only thing that tells the
+  two apart), and of the three symbols (`M`, `R`, capacity) exactly one is free of the input
+  shapes (the full slot's capacity)
+- the drafter graph takes exactly `token` / `hidden` / the four RoPE inputs and emits exactly
+  `k = 3` draft tokens; every one of its state slots is `external` and matches a lender slot by
+  name, dtype and shape; exactly one initializer is `shared` and names a tensor key the product
+  container really carries; its single symbol is the lender's capacity symbol, same spelling
 - `per_layer_inputs`' layer and dim axes match the sidecar index
 - the sidecar index is a gap-free ascending partition of `[0, tokens)`, `tokens` equals `V`, and
   every shard's tensors and `__metadata__.karume_ple` name the same generation as the index

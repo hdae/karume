@@ -25,13 +25,26 @@ import torch
 from safetensors.numpy import save_file
 
 from gemma4.distribution import (
+    GEMMA4_DEFAULT_MODEL,
+    GEMMA4_DRAFT_STEPS,
+    GEMMA4_DRAFTER_SUFFIX,
     GEMMA4_ROPE_LAYER_TYPES,
     GEMMA4_ROPE_PARTS,
     gemma4_rope_input_name,
+    gemma4_series_name,
 )
 from gemma4.rope import FULL_ATTENTION, SLIDING_ATTENTION
 from karume.emit import write_model
-from karume.ir import IrGraph, IrInitializer, IrInput, IrNode, IrState, IrStorage, IrValue
+from karume.ir import (
+    IrGraph,
+    IrInitializer,
+    IrInput,
+    IrNode,
+    IrShared,
+    IrState,
+    IrStorage,
+    IrValue,
+)
 from karume.quantize import (
     channel_scale,
     dequantize_int4,
@@ -104,6 +117,10 @@ PLE_INDEX_FILE = "ple.json"
 PLE_SCHEMA = 1
 PLE_METADATA_KEY = "karume_ple"
 PLE_EMBED_SCALE = 2.0
+
+#: 貸し手の主表テンソルキー（{@link product_container} の `declare` が組む綴り）。借り手の
+#: 共有 initializer はこれを名指す — 食い違えば配布の門が落とす。
+LENDER_SHARED_TENSOR = "gemma4.embed_i8"
 
 #: compile 済みトークナイザ資産の形式識別子（`_shared/gemma_tokenizer.py`）。
 TOKENIZER_FORMAT = "karume-gemma-tokenizer/1"
@@ -209,7 +226,8 @@ def product_container(
     kv = "kv"
     values[kv] = IrValue(dtype="f32", shape=[1, 1, SEQ_SYMBOL, 1])
     nodes.append(IrNode(op="cast", ins=[prefix], outs=[kv], attrs={"to": "f32"}))
-    nodes.append(IrNode(op="state_append", ins=[kv], outs=[], attrs={}, states={"slot": "l0.k"}))
+    for slot in ("l0.k", "l0.v"):
+        nodes.append(IrNode(op="state_append", ins=[kv], outs=[], attrs={}, states={"slot": slot}))
 
     # ⑤ 出口は選択行の logits と hidden の 2 本（`[1, R, V]` / `[1, R, H]` — ADR 0083 決定 6 +
     #    投機 verify の足場）。順序は logits → hidden 固定。
@@ -245,7 +263,11 @@ def product_container(
         outputs=[hidden, logits] if swap_outputs else [logits, hidden],
         initializers=initializers,
         values=values,
-        states={"l0.k": IrState(dtype="f32", shape=[1, 1, capacity_dim, 1])},
+        # k / v の対で持つ — 借り手（drafter）の readonly attention は `{k, v}` ちょうどを
+        # 要求するので、貸し手が k だけを宣言していると正当な組が作れない。
+        states={
+            name: IrState(dtype="f32", shape=[1, 1, capacity_dim, 1]) for name in ("l0.k", "l0.v")
+        },
         nodes=nodes,
     )
     with TemporaryDirectory() as staging:
@@ -254,6 +276,145 @@ def product_container(
             graph,
             tensors,
             weight_dtype="i4",
+            weight_scales=scales,
+            weight_dtype_overrides=overrides,
+        )
+        verify_shards(written)
+        return [path.read_bytes() for path in written]
+
+
+def drafter_container(
+    *,
+    vocab: int = VOCAB,
+    hidden_size: int = HIDDEN,
+    head_dims: Mapping[str, int] | None = None,
+    steps: int = GEMMA4_DRAFT_STEPS,
+    external: bool = True,
+    shared: bool = True,
+    capacity_symbol: str | None = CAPACITY_SYMBOL,
+    storage: str = "i8",
+) -> list[bytes]:
+    """**借り手**グラフ 1 本ぶんの shard バイト列（ADR 0096 段 2 — 単独では実行できない資産）。
+
+    貸し手（{@link product_container}）と噛み合う形にする: 同じスロット名 `l0.k` / `l0.v` を
+    **external** で宣言し、共有 initializer が貸し手の主表テンソルキーを名指し、記号は容量の
+    1 本だけ。`external` / `shared` / `capacity_symbol` は配布の門
+    （{@link gemma4.distribution.assert_gemma4_drafter_graph}）の故障注入の口。
+
+    実物の drafter は **linear まで i8 の単一格納**（`gemma4/export_drafter.py` の実測 — i4 に
+    落とすと受理率が 1 〜 3 割落ちる）なので、既定の `storage` は `"i8"`。`"i4"` は格納の門
+    （`GEMMA4_STORAGE_FORBIDDEN`）の故障注入の口で、**出力ヘッドだけ i8 のまま linear が i4 に
+    落ちた資産**を作る — 存在検査（I8 が在る）では素通りする側。
+    """
+    widths = {**ROPE_HEAD_DIMS, **dict(head_dims or {})}
+    initializers: dict[str, IrInitializer] = {}
+    values: dict[str, IrValue] = {}
+    tensors: dict[str, torch.Tensor] = {}
+    scales: dict[str, torch.Tensor] = {}
+    overrides: dict[str, str] = {}
+    nodes: list[IrNode] = []
+
+    def declare(name: str, tensor: torch.Tensor, dtype: str = "f32") -> str:
+        key = f"drafter.{name}"
+        initializers[name] = IrInitializer(tensor=key, storage=IrStorage(dtype=dtype))
+        values[name] = IrValue(dtype="f32", shape=list(tensor.shape))
+        tensors[key] = tensor
+        return key
+
+    # ① 実物の格納形（linear が `storage`・出力ヘッドは常に i8）— ヘッダの dtype 集合が
+    #    そのまま格納の門の入力になる。
+    declare("x", _ramp(1, _IN))
+    declare("bias", _ramp(_OUT))
+    for name, slot_storage in ((f"linear_{storage}", storage), ("head_i8", "i8")):
+        weight = _ramp(_OUT, _IN)
+        if slot_storage == "i4":
+            scale = group_scale(weight, GROUP_SIZE)
+            weight = dequantize_int4(quantize_to_int4(weight, scale), scale)
+            scales[declare(name, weight)] = scale
+        else:
+            scale = channel_scale(weight, 0)
+            weight = quantize_to_int8(weight, scale).to(torch.float32) * scale
+            key = declare(name, weight)
+            scales[key] = scale
+            overrides[key] = "i8"
+        out = f"h_{name}"
+        values[out] = IrValue(dtype="f32", shape=[1, _OUT])
+        nodes.append(IrNode(op="linear", ins=["x", name, "bias"], outs=[out], attrs={}))
+
+    # ② 共有 initializer（バイト無し）— 指し先は貸し手コンテナのテンソルキー。
+    embedded = "embedded"
+    if shared:
+        initializers["target_embed"] = IrInitializer(
+            shared=IrShared(tensor=LENDER_SHARED_TENSOR), storage=IrStorage(dtype="i8")
+        )
+        values["target_embed"] = IrValue(dtype="f32", shape=[vocab, hidden_size])
+        values[embedded] = IrValue(dtype="f32", shape=[1, 1, hidden_size])
+        nodes.append(
+            IrNode(
+                op="embedding",
+                ins=["target_embed", "token"],
+                outs=[embedded],
+                attrs={"padding_idx": -1},
+            )
+        )
+
+    # ③ readonly attention（q 1 本・external スロットの k / v を読む）。
+    seed = "q_seed"
+    declare(seed, _ramp(1, 1, 1, 1))
+    query = "q"
+    values[query] = IrValue(dtype="f32", shape=[1, 1, 1, 1])
+    nodes.append(IrNode(op="expand", ins=[seed], outs=[query], attrs={}))
+    attended = "attended"
+    values[attended] = IrValue(dtype="f32", shape=[1, 1, 1, 1])
+    nodes.append(
+        IrNode(
+            op="attention",
+            ins=[query],
+            outs=[attended],
+            attrs={"scale": 1.0, "readonly": True},
+            states={"k": "l0.k", "v": "l0.v"},
+        )
+    )
+
+    # ④ 出口は draft k 本（実物は argmax の token 3 本 — 本数だけが配布の門の関心事）。
+    outputs: list[str] = []
+    for index in range(steps):
+        name = f"token_{index}"
+        values[name] = IrValue(dtype="f32", shape=[1, 1, 1])
+        nodes.append(IrNode(op="reshape", ins=[attended], outs=[name], attrs={}))
+        outputs.append(name)
+
+    capacity_dim: str | int = capacity_symbol if capacity_symbol is not None else SYM_MAX
+    graph = IrGraph(
+        symbols=[capacity_symbol] if capacity_symbol is not None else [],
+        inputs=[
+            IrInput(name="token", dtype="i32", shape=[1, 1]),
+            IrInput(name="hidden", dtype="f32", shape=[1, hidden_size]),
+            *(
+                IrInput(
+                    name=gemma4_rope_input_name(layer_type, part),
+                    dtype="f32",
+                    shape=[1, 1, widths[layer_type]],
+                )
+                for layer_type in GEMMA4_ROPE_LAYER_TYPES
+                for part in GEMMA4_ROPE_PARTS
+            ),
+        ],
+        outputs=outputs,
+        initializers=initializers,
+        values=values,
+        states={
+            name: IrState(dtype="f32", shape=[1, 1, capacity_dim, 1], external=external)
+            for name in ("l0.k", "l0.v")
+        },
+        nodes=nodes,
+    )
+    with TemporaryDirectory() as staging:
+        written = write_model(
+            Path(staging) / "model.safetensors",
+            graph,
+            tensors,
+            weight_dtype=storage,
             weight_scales=scales,
             weight_dtype_overrides=overrides,
         )
@@ -334,6 +495,8 @@ def write_series(
     model_dir: Path,
     *,
     container: Sequence[bytes] | None = None,
+    drafter: Path | None = None,
+    drafter_bytes: Sequence[bytes] | None = None,
     index: Mapping[str, Any] | None = None,
     shard_metadata: Mapping[int, Mapping[str, Any]] | None = None,
     tokenizer: Mapping[str, Any] | None = None,
@@ -350,6 +513,20 @@ def write_series(
 
     shards = list(container if container is not None else product_container())
     write_component(product / "model.safetensors", shards)
+    # 借り手（drafter）系列は既定で product の隣に置く（既存の呼び出しを 1 つも書き換えずに
+    # 済ませるため — 系列名の綴りは配布 recipe が持つ 1 箇所から組む）。
+    borrower = (
+        drafter
+        if drafter is not None
+        else product.parent / gemma4_series_name(GEMMA4_DEFAULT_MODEL, GEMMA4_DRAFTER_SUFFIX)
+    )
+    write_component(
+        borrower / "model.safetensors",
+        list(drafter_bytes if drafter_bytes is not None else drafter_container()),
+    )
+    # 配布へ入らない同居物（golden と出所記録）— 出力 path 表に載らないことの証跡。
+    (borrower / "drafter-golden.short-en.safetensors").write_bytes(b"not distributed")
+    (borrower / "reference.json").write_text("{}\n", encoding="utf-8")
     declared = dict(index if index is not None else ple_index([(0, 4), (4, VOCAB)]))
     (product / PLE_INDEX_FILE).write_text(
         json.dumps(declared, indent=1, ensure_ascii=False) + "\n", encoding="utf-8"

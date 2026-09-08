@@ -42,6 +42,7 @@ from karume.ops import (
     OpContractError,
     arity_fits,
     assert_strided_rank,
+    attention_readonly,
     attention_scale,
     axis_dim,
     conv1d_attrs,
@@ -248,13 +249,16 @@ def compute_output_shape(
     2 つは対で渡す MUST — states 参照ノードに解決済みスロット shape が無ければ fail loudly で、
     黙って従来形として計算すると「過去 KV を読まない別の計算」になる。
     """
-    if not arity_fits(contract, len(input_shapes)):
+    node_attrs: Mapping[str, Any] = attrs if attrs is not None else {}
+    # readonly 形 attention（ADR 0096 段 2）は入力 q の 1 本ちょうど — 本数の門はアームの側が
+    # 持つ（契約表の arity は従来形の 3〜4 本で、こちらへ当てると正しいグラフが落ちる）。
+    readonly = contract.kind == "attention" and bool(states) and attention_readonly(node_attrs)
+    if not readonly and not arity_fits(contract, len(input_shapes)):
         raise OpContractError(
             f"{where}: op '{contract.name}' の入力 shape 数が {len(input_shapes)}"
             f"（契約は {describe_arity(contract)}）"
         )
     ins = [extents(shape, f"{where} の入力 {index}") for index, shape in enumerate(input_shapes)]
-    node_attrs: Mapping[str, Any] = attrs if attrs is not None else {}
     slots = _StateContext(states or {}, state_shapes or {})
     return [
         [extent.to_dim() for extent in slot]
@@ -827,6 +831,108 @@ def _attention_states(
     return list(q)
 
 
+def _assert_kv_head_broadcast(q_heads: Extent, kv_heads: Extent, where: str, show: str) -> None:
+    """`H` と `Hkv` の整除 broadcast（ADR 0067 決定 1 — GQA / MQA の唯一の受理形）。
+
+    従来形 / states 形 / readonly 形の 3 形が同じ規則を課すので 1 本に閉じる（写すと片方だけ
+    緩む — スロットの Hkv は q と一致しないのが正規なので、緩みが値にしか出ない）。
+
+    MUST: `Hkv ≥ 1` は等値短絡より**前**に見る — `(H,Hkv) = (0,0)` は構造等値なので整除枝に
+    落ちず、「head 軸を丸ごと落とした IR」が素通りする。`H = 0` 単独は `Hkv ≥ 1` とのペアに
+    なるので下の `H ≥ Hkv` 枝が落とす（TS 側 computeOutputShape と鏡像）。記号次元は
+    「宣言だけでは決められない」側（下の枝）に任せるので、定数の Hkv だけを見る。
+    MUST: `H ≥ Hkv` を整除と**別条件**で見る — `H = 0` は `0 % Hkv == 0` を満たすので、整除
+    だけだと「H を丸ごと落とした IR」が素通りする。broadcast の向きは常に kv → q。
+    MUST: `Hkv == 0` は上の `Hkv ≥ 1` 枝が剰余より**先**に落とす — Python の `%` は
+    ZeroDivisionError を投げるので、条件順が崩れると TS 側（`4 % 0` が NaN で条件が真になる）と
+    同じ契約エラーで落ちなくなる（ここで `%` を書けるのはその順序が保たれているから）。
+    """
+    if kv_heads.is_const and kv_heads.offset < 1:
+        raise OpContractError(
+            f"{where}: attention の Hkv {kv_heads.offset} が正でない（H は Hkv の正の整数倍 —"
+            f" GQA は H % Hkv == 0 かつ H ≥ Hkv ≥ 1・ADR 0067 決定 1）{show}"
+        )
+    if q_heads == kv_heads:
+        return
+    # 記号次元は「宣言だけでは決められない」として落とす（broadcast_extents と同じ規律 —
+    # 黙って通すと実行してみないと分からない IR が書ける。head 数に記号の実測は無い）。
+    if not q_heads.is_const or not kv_heads.is_const:
+        raise OpContractError(
+            f"{where}: attention の H {q_heads.to_dim()} と Hkv {kv_heads.to_dim()} は"
+            f"宣言だけでは整除 broadcast の可否を決められない {show}"
+        )
+    if q_heads.offset < kv_heads.offset or q_heads.offset % kv_heads.offset != 0:
+        raise OpContractError(
+            f"{where}: attention の H {q_heads.offset} が Hkv {kv_heads.offset} の正の整数倍でない"
+            f"（GQA は H % Hkv == 0 かつ H ≥ Hkv — ADR 0067 決定 1）{show}"
+        )
+
+
+def _assert_readonly_slot_form(
+    name: str, slot: list[Extent], q: list[Extent], window: int | None, where: str
+) -> None:
+    """readonly attention が読むスロットの物理形（ADR 0096 段 2 — 契約 §1.2）。
+
+    比べる相手が今 step の k / v ではなく **q** であることが states 形との唯一の差で、
+    見る軸は B（軸 0）と D（軸 3）+ head 軸の整除 broadcast + `window ≤ C`。
+
+    MUST: 「今 step の k/v が無いから軸を見ない」にはしない — スロット取り違え（別層・別種別の
+    スロットを参照した形）は容量が違えば OOB、同容量なら沈黙誤読になるので、states 形と同じ
+    検出線を q 基準で張り直す。
+    """
+    show = f"state スロット '{name}' [{_show(slot)}] / q [{_show(q)}]"
+    if len(slot) != 4:
+        raise OpContractError(f"{where}: {show} — スロットは [B,Hkv,C,D] の rank-4 のみ")
+    if slot[0] != q[0] or slot[3] != q[3]:
+        raise OpContractError(f"{where}: {show} — スロットと q の B / D が不一致")
+    _assert_kv_head_broadcast(q[1], slot[1], where, show)
+    if window is not None and slot[2].is_const and window > slot[2].offset:
+        raise OpContractError(
+            f"{where}: {show} — attrs.window {window} がスロット容量 {slot[2].offset} を超える"
+        )
+
+
+def _attention_readonly(
+    ins: list[list[Extent]], where: str, attrs: Mapping[str, Any], slots: _StateContext
+) -> list[Extent]:
+    """readonly 形 attention の出力 shape（ADR 0096 段 2・契約 §1.2）。
+
+    `q[B,H,1,D]` **だけ**を取り、過去の列は k / v スロットが持つ → `[B,H,1,D]`。
+
+    MUST: M（軸 2）は **1 ちょうど**。readonly は「論理位置 P−1 の 1 行が列 `[column_base, P)` を
+    読む」形しか意味を持たない（段 2 は ①′ 系のみ）ので、M > 1 を通すと「どの行がどの位置に
+    居るか」を誰も決められないまま実行される。
+    MUST: k / v スロットは**同形**（容量の違うスロットを組にすると、片方だけ先に wrap する
+    ring になって値が静かにずれる — states 形と同じ理由）。
+    """
+    # MUST: scale はここでも引く（`_attention` の共通経路と同じ役割）。
+    attention_scale(attrs, where)
+    if len(ins) != 1:
+        raise OpContractError(
+            f"{where}: readonly 形の attention は q の 1 本ちょうど（{len(ins)} 本 —"
+            " 今 step の k/v も mask も取らない・ADR 0096 段 2）"
+        )
+    q = ins[0]
+    show = f"q [{_show(q)}]"
+    if len(q) != 4:
+        raise OpContractError(
+            f"{where}: readonly 形の attention は q[B,H,1,D] の rank-4 のみ: {show}"
+        )
+    if not q[2].is_value(1):
+        raise OpContractError(f"{where}: readonly 形の attention は M（軸 2）が 1 ちょうど {show}")
+    window = state_window(attrs, where)
+    k_name, k_slot = slots.slot("k", where)
+    v_name, v_slot = slots.slot("v", where)
+    if k_slot != v_slot:
+        raise OpContractError(
+            f"{where}: attention の k / v スロットが同形でない"
+            f"（'{k_name}' [{_show(k_slot)}] / '{v_name}' [{_show(v_slot)}]）"
+        )
+    _assert_readonly_slot_form(k_name, k_slot, q, window, where)
+    _assert_readonly_slot_form(v_name, v_slot, q, window, where)
+    return list(q)
+
+
 def _attention(
     ins: list[list[Extent]], where: str, attrs: Mapping[str, Any], slots: _StateContext
 ) -> list[Extent]:
@@ -848,6 +954,10 @@ def _attention(
     従来形は k/v の N（過去 + 現在の全長）を見るが、states 形の ins は今 step の chunk だけ
     なので **M が 3 者一致**し、過去分はスロットの容量 C が持つ。
     """
+    # readonly 形（ADR 0096 段 2）は今 step の k / v を持たない = **入力が q の 1 本**なので、
+    # q/k/v の展開そのものが成立しない。分岐は展開より前に置く MUST。
+    if slots.referenced and attention_readonly(attrs):
+        return _attention_readonly(ins, where, attrs, slots)
     q, k, v, *rest = ins
     # MUST: scale はここでも引く（TS 側 computeOutputShape と同じ役割 — 全ノードが必ず通る
     # 共通経路はこの計算だけで、attrs スキーマはキー単位の検査しか表せない）。
@@ -862,35 +972,7 @@ def _attention(
     # MUST: k / v の Hkv は**完全一致**（GQA で緩めるのは q との関係だけ — ADR 0067 決定 1）。
     if k[1] != v[1]:
         raise OpContractError(f"{where}: attention の Hkv（k / v の軸 1）が不一致 {show}")
-    # MUST: `Hkv ≥ 1` は下の等値短絡より**前**に見る — `(H,Hkv) = (0,0)` は構造等値なので整除枝に
-    # 落ちず、「head 軸を丸ごと落とした IR」が素通りする。`H = 0` 単独は `Hkv ≥ 1` とのペアになる
-    # ので下の `H ≥ Hkv` 枝が落とす（TS 側 computeOutputShape と鏡像）。記号次元は現行どおり
-    # 「宣言だけでは決められない」側（下の枝）に任せるので、定数の Hkv だけを見る。
-    if k[1].is_const and k[1].offset < 1:
-        raise OpContractError(
-            f"{where}: attention の Hkv {k[1].offset} が正でない（H は Hkv の正の整数倍 —"
-            f" GQA は H % Hkv == 0 かつ H ≥ Hkv ≥ 1・ADR 0067 決定 1）{show}"
-        )
-    # GQA = **整除 broadcast**（ADR 0067 決定 1）。構造等値（記号のままの r=1 を含む）か、
-    # 両方が定数で `H % Hkv == 0` かつ `H ≥ Hkv` だけを受理する。
-    # MUST: `H ≥ Hkv` を整除と**別条件**で見る — `H = 0` は `0 % Hkv == 0` を満たすので、整除
-    # だけだと「H を丸ごと落とした IR」が素通りする。broadcast の向きは常に kv → q。
-    # MUST: `Hkv == 0` は上の `Hkv ≥ 1` 枝が剰余より**先**に落とす — Python の `%` は
-    # ZeroDivisionError を投げるので、条件順が崩れると TS 側（`4 % 0` が NaN で条件が真になる）と
-    # 同じ契約エラーで落ちなくなる（ここで `%` を書けるのはその順序が保たれているから）。
-    if q[1] != k[1]:
-        # 記号次元は「宣言だけでは決められない」として落とす（broadcast_extents と同じ規律 —
-        # 黙って通すと実行してみないと分からない IR が書ける。head 数に記号の実測は無い）。
-        if not q[1].is_const or not k[1].is_const:
-            raise OpContractError(
-                f"{where}: attention の H {q[1].to_dim()} と Hkv {k[1].to_dim()} は"
-                f"宣言だけでは整除 broadcast の可否を決められない {show}"
-            )
-        if q[1].offset < k[1].offset or q[1].offset % k[1].offset != 0:
-            raise OpContractError(
-                f"{where}: attention の H {q[1].offset} が Hkv {k[1].offset} の正の整数倍でない"
-                f"（GQA は H % Hkv == 0 かつ H ≥ Hkv — ADR 0067 決定 1）{show}"
-            )
+    _assert_kv_head_broadcast(q[1], k[1], where, show)
     if q[3] != k[3] or q[3] != v[3]:
         raise OpContractError(f"{where}: attention の D（軸 3）が不一致 {show}")
     if slots.referenced:

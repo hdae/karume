@@ -44,12 +44,43 @@ class IrStorage:
 
 
 @dataclass(frozen=True)
-class IrInitializer:
-    #: safetensors のテンソルキー。
+class IrShared:
+    """共有 initializer の指し先（ADR 0096 段 2 — 借り手グラフはバイトを持たない）。
+
+    `tensor` は**貸し手コンテナのテンソルキー**（配布形の実キー）。借り手 Session はこの鍵で
+    貸し手グラフの initializer を引き、常駐済みの重みバッファをそのまま消費する。
+    """
+
     tensor: str
-    storage: IrStorage
 
     def to_dict(self) -> dict:
+        return {"tensor": self.tensor}
+
+
+@dataclass(frozen=True)
+class IrInitializer:
+    """initializer 1 本の宣言。
+
+    MUST: `tensor`（自前のバイト）と `shared`（貸し手のバイトを借りる）は**排他でどちらか
+    1 つ**。両方 / どちらも無い形は verify が落とす（組み立て層は検査を持たない —
+    モジュール docstring）。共有側は shard に 1 バイトも書かないので `storage.scale` を
+    持たない（scale は貸し手の常駐重みが持つ）。
+    """
+
+    storage: IrStorage
+    #: safetensors のテンソルキー（自前バイトのとき）。
+    tensor: str | None = None
+    #: 貸し手コンテナのテンソルキー参照（共有のとき）。
+    shared: IrShared | None = None
+
+    @property
+    def is_shared(self) -> bool:
+        """バイトを持たない共有宣言か（走査の除外条件 — emit / verify）。"""
+        return self.shared is not None
+
+    def to_dict(self) -> dict:
+        if self.shared is not None:
+            return {"shared": self.shared.to_dict(), "storage": self.storage.to_dict()}
         return {"tensor": self.tensor, "storage": self.storage.to_dict()}
 
 
@@ -68,13 +99,23 @@ class IrState:
 
     shape は容量込みの具体形（rank ≤ 4・数値次元は正整数）。値ではないので `values` に宣言を
     持たず、ノードの `ins` / `outs` からも参照されない（参照の欄は ADR 0067 の担当）。
+
+    `external` は**実体を自分で確保しない**スロット（ADR 0096 段 2）— 借り手 context が貸し手の
+    同名スロットへ束ねる。`state_append` を持てず、読者は readonly attention だけ。
     """
 
     dtype: str
     shape: list[IrDim]
+    external: bool = False
 
     def to_dict(self) -> dict:
-        return {"dtype": self.dtype, "shape": list(self.shape)}
+        # MUST: `external: false` は**書かない**（欄の不存在がそのまま「自前スロット」の宣言 —
+        # 常に出すと既存モデルのグラフ JSON がバイト単位で変わり、配布物の sha 門が全部動く）。
+        return {
+            "dtype": self.dtype,
+            "shape": list(self.shape),
+            **({"external": True} if self.external else {}),
+        }
 
 
 @dataclass(frozen=True)
