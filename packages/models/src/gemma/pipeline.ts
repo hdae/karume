@@ -40,6 +40,7 @@ import {
   type AdmissionReport,
   assertChunkBuckets,
   estimateGraphMemory,
+  type GenerationContext,
   type GpuContext,
   planWeightResidency,
   type Session,
@@ -90,10 +91,15 @@ import {
   createGenerationSequence,
   type GenerationEvent,
   type GenerationRequest,
+  type GenerationRunPhase,
   type GenerationSequence,
+  type GenerationSpeculation,
+  type GenerationSpeculativeOptions,
   type GenerationStop,
   type GenerationStream,
+  physicalChunkRows,
 } from "../generation/sequence.ts";
+import type { DraftFace } from "../generation/speculation.ts";
 import { type SamplerSpec, snapshotSpec } from "../generation/sampler.ts";
 import {
   createGemma4Ple,
@@ -115,6 +121,7 @@ import {
   GEMMA4_DRAFT_STEPS,
   type Gemma4Drafter,
   type Gemma4DrafterAdmission,
+  openGemma4DraftFace,
 } from "./speculative.ts";
 import {
   createStopStringFilter,
@@ -271,20 +278,26 @@ export type Gemma4PipelineOptions = {
    * 実行 1 回ごとの診断を受け取る観測席（他 7 家族と同型）。op 別 GPU 時間（`lastRunTiming`）が
    * 要るときは `gpu` に `acquireGpu({ gpuTiming: true })` を渡す（ADR 0021 — 既定は計測しない）。
    *
-   * 呼ばれるのは **run 1 本ごとに 1 通**（prefill は chunk ごと・decode は step ごと）で、その
-   * run の完了後である。何の run だったかは第 2 引数 {@link Gemma4RunPhase} が運ぶ — 回数から
-   * 推定しない（複数 chunk の prefill があるターンでは、2 本目以降の prefill を decode と
-   * 取り違える）。prefill 直後の最初の token は最終 chunk の logits から抽選するだけで run を
-   * 伴わないので、そこでは呼ばない（呼ぶと同じ run の診断が 2 度届く）。
+   * 呼ばれるのは **run 1 本ごとに 1 通**（prefill は chunk ごと・decode は step ごと・投機では
+   * cycle ごとに draft 1 通 + verify 1 通）で、その run の出力を読み終えた**同期区間**である
+   * （診断の `lastRun*` が「その run」の値であるのはこの区間だけ）。何の run だったかは第 2 引数
+   * {@link Gemma4RunPhase} が運ぶ — 回数から推定しない（複数 chunk の prefill があるターンでは、
+   * 2 本目以降の prefill を decode と取り違える）。prefill 直後の最初の token は最終 chunk の
+   * logits から抽選するだけで run を伴わないので、そこでは呼ばない。
    *
-   * 中断せず走り切ったターンの通知数は
+   * 診断を引く Session は phase で決まる — `draft` は借り手（drafter Session）・それ以外は
+   * 貸し手（target Session）である。
+   *
+   * 中断せず走り切った非投機ターンの通知数は
    * `GenerationStop.tokens − 1 + prefill chunk 数`（`tokens` は停止 token も 1 個数えるので、
    * 引く 1 が「run を伴わない最初の抽選」ぶんである）。停止 token を引いた最後の decode run は
-   * `token` を yield せずに終わるが、その run のぶんも `done` の決着後に 1 通届く。消費側の
-   * `break` / `return()` / 中断で閉じたターンは、そこまでに完了した run のぶんだけが届く。
+   * `token` を yield せずに終わるが、その run のぶんも 1 通届く。消費側の `break` / `return()` /
+   * 中断で閉じたターンは、そこまでに完了した run のぶんだけが届く。投機ターンの通知数は
+   * `prefill chunk 数 + speculation.cycles + speculation.draftRuns` である。
    *
    * NOTE: 他ファミリと違ってコンポーネント名を渡さない — グラフが 1 本しかないので、名前が
-   * 常に同じ 1 値になる（受け手が分岐できない引数を渡さない）。
+   * 常に同じ 1 値になる（受け手が分岐できない引数を渡さない）。drafter が居るときも同じで、
+   * どちらの Session の診断かは `phase.kind` から読む。
    *
    * コールバックの例外は握らない（fail loudly — そのターンごと落ちる）。
    */
@@ -310,22 +323,23 @@ export type Gemma4PipelineOptions = {
    */
   readonly planBackingBudgetBytes?: number;
   /**
-   * 投機デコード用の **MTP drafter を一緒に組む**（ADR 0096 段 2 — 省略時は組まない）。
+   * 投機デコード用の **MTP drafter を一緒に組む**（ADR 0096 — 省略時は組まない）。
    *
    * 指定すると配布形の `drafter` weights も取得し、target Session の埋め込み表 1 本を借りる
    * drafter Session を 1 本張る（バイトは複製されない）。**指定しない限り drafter の shard は
    * 1 バイトも落ちない** — 取得キーの表そのものから外れる（{@link DRAFTER} の MUST）。
    *
-   * MUST: 段 2 の `k` は **3 固定**（配布形の drafter グラフが 3 段で焼かれている — 出口の
-   * 本数がそのまま k）。3 以外は fail loudly で、動的な k は段 3 の投機ループと同じ波で入る。
+   * drafter が居る pipeline の `chat` / `sequence` は**既定で投機を張る**（1 verify run が
+   * 最大 `k+1` token を確定させる）。ターン / 会話ごとに切るノブは
+   * {@link Gemma4ChatOptions.speculative} と {@link Gemma4SequenceOptions.speculative}。
+   * 投機は**温度に依らず**張り、出る token 列は非投機と同一である（受理は行ごとに、非投機の
+   * decode が同じ位置で行う抽選と同じ logits・同じ history で 1 回ずつ引く — ADR 0096 決定 7）。
    *
-   * NOTE: 段 2 が用意するのは drafter を**載せる**ところまでで、投機ループ（draft → verify →
-   * 受理・棄却）はまだ無い。`chat` / `sequence` の振る舞いはこの指定で 1 つも変わらない。
-   * NOTE: {@link Gemma4Pipeline.estimateSessionMemory} は段 2 では**target ぶんだけ**を返す
-   * （drafter の常駐と借り物スロットの合算は段 3）。
+   * MUST: `k` は **1..{@link GEMMA4_DRAFT_STEPS}**（配布形の drafter グラフが 3 段で焼かれていて、
+   * 出口の本数が上限）。範囲外は fail loudly。
    */
   readonly speculative?: {
-    /** draft する token 数（段 2 は 3 固定・省略時も 3）。 */
+    /** 1 cycle で使う draft の本数（省略時は {@link GEMMA4_DRAFT_STEPS} = 配布形の段数）。 */
     readonly k?: number;
   };
 };
@@ -405,6 +419,14 @@ export type Gemma4SequenceOptions = {
    * MUST: `chunkLength ≤ capacity ≤ maxPosition`（`createGenerationSequence` が fail loudly）。
    */
   readonly capacity?: number;
+  /**
+   * この会話で投機デコードを張るか（既定 = pipeline に drafter が居れば `true`）。
+   *
+   * `false` は「drafter は載せたままこの会話だけ従来の 1 token = 1 run で回す」— A/B の突合や、
+   * 受理率が落ちる文脈で投機の取り分が消えたときの逃げ口である。drafter が居ない pipeline では
+   * どちらでも投機は張らない（指定は黙って無視される値ではなく、**元から選択肢が無い**）。
+   */
+  readonly speculative?: boolean;
 };
 
 /** {@link Gemma4Pipeline.estimateSessionMemory} の指定（見積る生成の形）。 */
@@ -465,6 +487,14 @@ export type Gemma4ChatOptions = {
   readonly onPrefill?: (progress: Gemma4PrefillProgress) => void;
   /** 中断（段の境目で検査し `signal.reason` をそのまま throw する — ADR 0083 決定 5）。 */
   readonly signal?: AbortSignal;
+  /**
+   * このターンで投機デコードを張るか（既定 = pipeline に drafter が居れば `true` —
+   * {@link Gemma4SequenceOptions.speculative} と同じ意味）。
+   *
+   * 投機を張るかは sampler の指定に依らない（温度 > 0 でも token 列は非投機と同一）。この層は
+   * 指定をそのまま降ろすだけで、cycle の組み立ては生成面が持つ。
+   */
+  readonly speculative?: boolean;
 };
 
 /**
@@ -482,16 +512,16 @@ export type Gemma4PrefillProgress = {
  * 観測席（{@link Gemma4PipelineOptions.onRunDiagnostics}）が受ける「その 1 通がどの run か」。
  *
  * 席が受けるのは **run 1 本につき 1 通**で、この値はその run が何だったかを言う（順番の勘定
- * ではない）。`prefill` の `chunk` / `chunks` は `GenerationEvent` の `prefill` と同じ数
- * （1 始まりの commit 済み chunk 数）で、`decode` の `step` は**そのターンの** decode run の
- * 番号（1 始まり）である。
+ * ではない）。番号はすべて 1 始まり — `prefill` の `chunk` / `chunks` は `GenerationEvent` の
+ * `prefill` と同じ数（commit 済み chunk 数）、`decode` の `step` は**そのターンの** decode run の
+ * 番号、`draft` / `verify` の `cycle` は投機の cycle 番号（同じ cycle の 2 本は同じ番号を名乗る）。
  *
  * MUST: 受け手は通知の回数ではなくこの値で分岐する — 複数 chunk に割れた prompt では
  * 「1 通目だけが prefill」が成り立たない。
+ * MUST: 生成面の `GenerationRunPhase` **そのもの**である（写した型を持たない — 枝が片方だけ
+ * 増えたときに型検査が通り続ける）。この層が足すのは「どちらの Session の診断を引くか」だけ。
  */
-export type Gemma4RunPhase =
-  | { readonly kind: "prefill"; readonly chunk: number; readonly chunks: number }
-  | { readonly kind: "decode"; readonly step: number };
+export type Gemma4RunPhase = GenerationRunPhase;
 
 /**
  * chat 1 ターンの停止理由。
@@ -508,6 +538,14 @@ export type Gemma4ChatStop =
     /** 一致した停止文字列（出力には含まれない）。 */
     readonly stopString: string;
     readonly tokens: number;
+    /**
+     * 投機の勘定（`GenerationStop.speculation` をそのまま写したもの — 投機 sequence の
+     * ターンだけ載る）。
+     *
+     * MUST: 写す。この枝は理由を差し替えるために object を組み直すので、写さないと
+     * 「停止文字列で閉じたターンだけ勘定が消える」形になる（例外にならない欠落）。
+     */
+    readonly speculation?: GenerationSpeculation;
   };
 
 /**
@@ -577,6 +615,15 @@ type Gemma4State = {
    * 掴んでいる）。
    */
   readonly drafter?: Gemma4Drafter;
+  /**
+   * 1 cycle で使う draft の本数（{@link Gemma4PipelineOptions.speculative} を渡したときだけ —
+   * 省略時は {@link GEMMA4_DRAFT_STEPS}）。
+   *
+   * MUST: 席を持つのは投機の 2 つの消費者（生成の `speculative.k` と
+   * {@link Gemma4Pipeline.estimateSessionMemory} の verify シナリオ `k+1` 行）が**同じ値**を
+   * 見るため — 割れると「見積った形と違う run」が走る。
+   */
+  readonly speculativeK?: number;
   /**
    * Session に渡した slot backing の保持予算（{@link Gemma4PipelineOptions.planBackingBudgetBytes}・
    * 未指定なら runtime の既定）。
@@ -864,22 +911,54 @@ const admitGemma4 = (
 };
 
 /**
- * {@link Gemma4PipelineOptions.speculative} の門（**資産を 1 バイトも取る前**に同期で落とす）。
+ * {@link Gemma4PipelineOptions.speculative} の門（**資産を 1 バイトも取る前**に同期で落とす）—
+ * 通れば解決済みの `k` を返す。
  *
- * MUST: 段 2 は `k = 3` 固定。配布形の drafter グラフは 3 段で焼かれていて、出口の本数がそのまま
- * k である — 別の値を受けると「宣言と違う本数の draft を採る」形が黙って通る。動的な k は段 3。
+ * MUST: `1 ≤ k ≤ {@link GEMMA4_DRAFT_STEPS}`。配布形の drafter グラフは 3 段で焼かれていて出口の
+ * 本数が上限で、下は「draft を 1 本も採らない投機」= 意味を持たない指定である。範囲外を受けると
+ * 「宣言と違う本数の draft を採る」形が黙って通る（生成面の `assertSpeculativeSetup` も同じ関係を
+ * 見るが、そちらが落ちるのは GB 級のロードの**後**である）。
  */
 const assertSpeculative = (
   where: string,
   speculative: NonNullable<Gemma4PipelineOptions["speculative"]>,
-): void => {
+): number => {
   const k = speculative.k ?? GEMMA4_DRAFT_STEPS;
-  if (k !== GEMMA4_DRAFT_STEPS) {
+  if (!Number.isSafeInteger(k) || k < 1 || k > GEMMA4_DRAFT_STEPS) {
     throw new Error(
-      `${where}: speculative.k ${k} は段 2 では受けられない` +
-        `（配布形の drafter は k = ${GEMMA4_DRAFT_STEPS} 段で焼かれている — 動的な k は段 3）`,
+      `${where}: speculative.k ${k} が 1..${GEMMA4_DRAFT_STEPS} の外` +
+        `（配布形の drafter は ${GEMMA4_DRAFT_STEPS} 段で焼かれている — 出口の本数が上限）`,
     );
   }
+  return k;
+};
+
+/**
+ * この会話で投機を張るなら、生成面へ渡す DI 一式を組む（{@link Gemma4SequenceOptions.speculative} /
+ * {@link Gemma4ChatOptions.speculative} の解決 — chat と sequence が共有する 1 本）。
+ *
+ * 既定は「drafter が居れば張る」で、`false` だけが明示的な取り消しである。sampler の指定は
+ * 見ない（投機は温度に依らず張り、token 列は非投機と同一 — ADR 0096 決定 7）。
+ */
+export const speculativeSetup = (
+  state: Pick<Gemma4State, "drafter" | "speculativeK">,
+  enabled: boolean | undefined,
+): GenerationSpeculativeOptions<GenerationContext> | undefined => {
+  const drafter = state.drafter;
+  if (enabled === false) return undefined;
+  if (drafter === undefined) {
+    // 未指定（undefined）は「drafter が居れば張る」、明示の true は drafter を要求する — 黙って
+    // 非投機で回すと、結果（`speculation` 欄の不在）からも無視を読み取れない。
+    if (enabled === true) {
+      throw new Error("speculative: true を渡したが、この pipeline は drafter 無しで開かれている");
+    }
+    return undefined;
+  }
+  return {
+    // 借り手 context は sequence 生成時に 1 本開き、sequence の dispose が**貸し手より先**に畳む。
+    open: (context: GenerationContext): Promise<DraftFace> => openGemma4DraftFace(drafter, context),
+    k: state.speculativeK ?? GEMMA4_DRAFT_STEPS,
+  };
 };
 
 /**
@@ -1153,66 +1232,65 @@ export const chatStreamOf = (
 };
 
 /**
- * 生成イベント列に観測席を挟む（{@link Gemma4PipelineOptions.onRunDiagnostics}）。
+ * 観測席（{@link Gemma4PipelineOptions.onRunDiagnostics}）を生成面の `onRun` hook に仕立てる。
  *
- * 席が pipeline 層にあるのは、`GenerationSequence` が**パイプライン非依存**だからである（Session
- * も診断も知らない — ADR 0083）。イベントは run 1 本ごとに 1 通 …… ただし 1 箇所だけ例外があり、
- * prefill 直後の最初の token は「最終 chunk の logits から抽選しただけ」で run を伴わない。そこで
- * 呼ぶと同じ run の診断が 2 度届くので、最初の token だけ飛ばす（`tokens === 1`）。
+ * 席が pipeline 層にあるのは、`GenerationSequence` が**パイプライン非依存**だからである
+ * （Session も診断も知らない — ADR 0083）。生成面は run 1 本につき 1 回、その run の出力を
+ * 読み終えた**同期区間**でこの hook を呼ぶので、この層がするのは「どちらの Session の診断を
+ * 引くか」を `phase.kind` で決めることだけである。
  *
- * 逆に、**停止 token を引いた最後の decode run** は `token` を yield せずに終わるのでイベント列に
- * 出ない。その 1 本は列が正常に尽きた後に `done` を読んで補う（`eos` / `stop-token` で
- * `tokens > 1` のときだけ）— 普通に喋り終わったターンは必ずこの形なので、補わないと毎ターン
- * 1 本欠けたまま積算される。`done` は内側の generator の `finally` で決着済みなので、この
- * `await` は待たない。中断・失敗は for-await 側が先に throw するのでここへは来ず、消費側の
- * `break` / `return()` はループを飛ばして generator を畳むのでやはり通らない（= 完了した run の
- * ぶんだけが届く、という規則がそのまま保たれる）。
+ * かつてはイベント列（`GenerationEvent`）を包んで run 数を**導出**していた（`withRunDiagnostics`）。
+ * 導出は 2 つの例外を抱えていた — prefill 直後の最初の token は run を伴わない・停止 token を
+ * 引いた最後の decode run は列に出ない（`done` から補っていた）— うえ、投機では 1 verify run が
+ * 複数 token を出すので導出そのものが成り立たない。run の発行元が直接名乗る形（ADR 0083 追記
+ * 〈hook〉）にすると、どちらの例外も消える。
  *
- * MUST: 観測席が無ければ**元の列をそのまま返す**（包みを 1 枚も増やさない — 中断や `return()` の
- * 伝播経路を、使わない人にまで足さない）。
+ * MUST: 観測席が無ければ `undefined` を返す（hook を渡さない = 生成面が 1 回も呼ばない）。
+ * MUST: `draft` は**借り手**（drafter Session）の診断を引く。貸し手のものを渡すと、draft run の
+ * 診断として「その前の verify run」の値が届く（例外にならない取り違え）。
  *
  * NOTE: 診断の型を型引数にしてあるのは、この関数が診断の**中身を 1 つも読まない**（席へ素通し
- * するだけ）ことを型で示すためで、同時に呼び出し回数の門（`gemma_chat_test.ts`）が実 Session
+ * するだけ）ことを型で示すためで、同時に呼び出し規則の門（`gemma_chat_test.ts`）が実 Session
  * 無しで書ける。{@link Gemma4State} は `SessionDiagnostics` でそのまま満たす。
  * NOTE: `export` は門を直接叩くテストのため（`mod.ts` / サブパス面には出さない — ADR 0008）。
  */
-export const withRunDiagnostics = <D>(
-  stream: GenerationStream,
+export const runDiagnosticsHook = <D>(
   state: {
     readonly session: { diagnostics: () => D };
+    readonly drafter?: { readonly session: { diagnostics: () => D } };
     readonly onRunDiagnostics?: (diagnostics: D, phase: Gemma4RunPhase) => void;
   },
-): GenerationStream => {
+): ((phase: Gemma4RunPhase) => void) | undefined => {
   const listener = state.onRunDiagnostics;
-  if (listener === undefined) return stream;
-  const events = async function* (): AsyncGenerator<GenerationEvent, void, undefined> {
-    /** 列に出た token の数。decode run の番号はここから導く（n 個目の token = decode run n − 1）。 */
-    let tokens = 0;
-    for await (const event of stream) {
-      if (event.kind === "prefill") {
-        listener(state.session.diagnostics(), {
-          kind: "prefill",
-          chunk: event.chunk,
-          chunks: event.chunks,
-        });
-      } else if (event.kind === "token") {
-        tokens += 1;
-        if (tokens > 1) listener(state.session.diagnostics(), { kind: "decode", step: tokens - 1 });
-      } else {
-        // MUST: 知らない種別を decode run に数えない（黙って step がずれる）。
-        throw new Error(`withRunDiagnostics: 未知の生成イベント ${JSON.stringify(event)}`);
-      }
-      yield event;
+  if (listener === undefined) return undefined;
+  return (phase: Gemma4RunPhase): void => {
+    if (phase.kind !== "draft") {
+      listener(state.session.diagnostics(), phase);
+      return;
     }
-    const stop = await stream.done;
-    if ((stop.reason === "eos" || stop.reason === "stop-token") && stop.tokens > 1) {
-      // 停止 token を引いた run は列に出た最後の token の次 = decode run `tokens` 番。
-      listener(state.session.diagnostics(), { kind: "decode", step: tokens });
+    const drafter = state.drafter;
+    // draft run は drafter Session でしか起きない（居なければ簿記の破れ — 黙って貸し手の
+    // 診断を渡すと、別の run の値が draft の名前で積算される）。
+    if (drafter === undefined) {
+      throw new Error("Gemma4Pipeline: drafter が居ないのに draft run の観測が届いた");
     }
+    listener(drafter.session.diagnostics(), phase);
   };
-  const iterable = events();
-  return { [Symbol.asyncIterator]: () => iterable, done: stream.done };
 };
+
+/**
+ * 停止文字列で閉じたターンの停止理由（`chat` と `Gemma4ChatSession.send` が共有する 1 本）。
+ *
+ * 理由と綴りはこの層の判定だが、`tokens` と `speculation` は**内側の値をそのまま写す**
+ * （この層で数え直さない）。写す欄が増えたときに片方の入口だけ古いまま残るのを防ぐため、
+ * 組み立てを 1 本にしてある。
+ */
+export const stopStringOf = (stopString: string, inner: GenerationStop): Gemma4ChatStop => ({
+  reason: "stop-string",
+  stopString,
+  tokens: inner.tokens,
+  ...(inner.speculation === undefined ? {} : { speculation: inner.speculation }),
+});
 
 /**
  * ターンの後始末 1 本（`chat` と `Gemma4ChatSession.send` が共有する）。
@@ -1460,6 +1538,10 @@ export class Gemma4Pipeline {
     options: Gemma4PipelineOptions,
   ): Promise<Gemma4Pipeline> {
     const { wiring, tokenizer, ple } = buildGemma4Program(admitted, assets, options);
+    // 投機の `k` は 2 つの消費者（生成と見積り）が同じ値を見るように**ここで 1 度**解決する。
+    const speculativeK = options.speculative === undefined
+      ? undefined
+      : assertSpeculative("Gemma4Pipeline", options.speculative);
     const gpu = options.gpu ?? await acquireGpu();
     const ownsGpu = options.gpu === undefined;
     // ③PV の縮約形は家族の既定（K-12 昇格済み）— 呼び手が明示すればそれに従う。予算は
@@ -1486,6 +1568,7 @@ export class Gemma4Pipeline {
         tokenizer,
         config: admitted.config,
         ...(drafter === undefined ? {} : { drafter }),
+        ...(speculativeK === undefined ? {} : { speculativeK }),
         ...(options.planBackingBudgetBytes === undefined
           ? {}
           : { planBackingBudgetBytes: options.planBackingBudgetBytes }),
@@ -1532,6 +1615,8 @@ export class Gemma4Pipeline {
     }
     return {
       session: await drafter.component.createSession(gpu, { ...sessionOptions, sharedWeights }),
+      // 見積り専用（`estimateSessionMemory` が drafter の常駐重みをこれから引く）。
+      graph: drafter.component.graph,
       outputs: drafter.admission.outputs,
       rope: admitted.config.rope,
       hiddenSize: drafter.admission.hiddenSize,
@@ -1552,6 +1637,10 @@ export class Gemma4Pipeline {
    * 停止条件は 2 層で、要求ごとに足せる（配布形の EOS 集合は常に効く）:
    * {@link Gemma4ChatOptions.stopTokens} は sequence 層（token id）、
    * {@link Gemma4ChatOptions.stopStrings} はこの層（復号後の本文）が判定する。
+   *
+   * drafter を載せた pipeline では**既定で投機を張る**（{@link Gemma4ChatOptions.speculative} で
+   * ターンごとに切れる）。張ったターンは `done` の `speculation` に勘定が載る。配布形の推奨
+   * sampler（温度 1）でも張り、本文は投機なしで回したときと同じ列になる。
    *
    * 並行に呼ばれた場合は**待たされて順に**走る（1 つの Session を 2 本の会話で同時に押さない）。
    */
@@ -1589,6 +1678,9 @@ export class Gemma4Pipeline {
     const stopStrings = createStopStringFilter(options.stopStrings ?? []);
     const capacity = options.capacity;
     const onPrefill = options.onPrefill;
+    // 投機の DI と観測 hook も**発行時に**決める（本体は最初の `next()` まで走らない）。
+    const speculative = speculativeSetup(this.#state, options.speculative);
+    const onRun = runDiagnosticsHook(this.#state);
 
     let settle!: (stop: Gemma4ChatStop) => void;
     let fail!: (error: unknown) => void;
@@ -1622,8 +1714,10 @@ export class Gemma4Pipeline {
           session: state.session,
           program: state.wiring,
           ...(capacity === undefined ? {} : { capacity }),
+          ...(speculative === undefined ? {} : { speculative }),
+          ...(onRun === undefined ? {} : { onRun }),
         });
-        stream = withRunDiagnostics(sequence.generate(request), state);
+        stream = sequence.generate(request);
         matched = yield* decodeChatChunks(
           stream,
           state.tokenizer.createDetokenizer(),
@@ -1651,11 +1745,7 @@ export class Gemma4Pipeline {
             // 記録する**。中断は内側が `aborted` で運ぶ形が正なので、そこだけは触らない。
             if (failure !== undefined && inner.reason !== "aborted") fail(failure.error);
             else {
-              settle(
-                matched === undefined
-                  ? inner
-                  : { reason: "stop-string", stopString: matched, tokens: inner.tokens },
-              );
+              settle(matched === undefined ? inner : stopStringOf(matched, inner));
             }
           } catch (error) {
             fail(error);
@@ -1688,16 +1778,24 @@ export class Gemma4Pipeline {
    *
    * `capacity` はこの会話が確保する容量（省略時は配布形の既定）。KV の物理確保はここで済むので、
    * 短い会話に大きな容量を取らせない / 長い会話に必要なぶんだけ取る、の判断はこの 1 箇所である。
+   *
+   * drafter を載せた pipeline では**既定で投機を張る**（{@link Gemma4SequenceOptions.speculative}
+   * で会話ごとに切れる）。借り手 context はこの sequence の寿命に束ねられ、`dispose()` が
+   * 貸し手より先に畳む。
    */
   async sequence(options: Gemma4SequenceOptions = {}): Promise<GenerationSequence> {
     if (this.#disposal !== undefined) {
       throw new Error("Gemma4Pipeline: dispose 済みでは sequence を作れない");
     }
     const state = this.#state;
+    const speculative = speculativeSetup(state, options.speculative);
+    const onRun = runDiagnosticsHook(state);
     const inner = await createGenerationSequence({
       session: state.session,
       program: state.wiring,
       ...(options.capacity === undefined ? {} : { capacity: options.capacity }),
+      ...(speculative === undefined ? {} : { speculative }),
+      ...(onRun === undefined ? {} : { onRun }),
     });
     // MUST: `await` 明けにもう一度見る。`dispose` の鎖本体は `#handed` を走査してから畳むので、
     // 確保の途中で dispose された実体は**どちらの経路からも畳まれない**（この再検査だけが
@@ -1709,15 +1807,16 @@ export class Gemma4Pipeline {
     // 正しく返された sequence は追跡から外す（外さないと、多ターン UI が会話ごとに作って
     // 畳んでも Set が単調増加し、`dispose` が破棄済みの実体を全数もう一度 await する）。
     // 実体そのものではなく薄い包みを渡すのは、`GenerationSequence` に pipeline を知らせる席を
-    // 作らないため（生成面は最後までパイプライン非依存 — ADR 0083）。
+    // 作らないため（生成面は最後までパイプライン非依存 — ADR 0083）。包みが持つのは**この
+    // 追跡だけ**である（観測席は `onRun` hook として sequence の中へ降りたので、`generate` は
+    // 素通しで足りる）。
     const handed: GenerationSequence = {
       capacity: inner.capacity,
       // 導出値なので包みも getter で素通しする（値を写すと「渡した瞬間の値」で固まる）。
       get used(): number {
         return inner.used;
       },
-      // 観測席（家族固有）はここで挟む — 中の sequence は Session も診断も知らない。
-      generate: (request) => withRunDiagnostics(inner.generate(request), state),
+      generate: inner.generate,
       dispose: async (): Promise<void> => {
         await inner.dispose();
         // 失敗した dispose は外さない（context が返っていないので `dispose` が巻き取る側に残す）。
@@ -1746,13 +1845,23 @@ export class Gemma4Pipeline {
    *
    * NOTE: `AdmissionReport` は runtime の型で、`@karume/models` は再輸出しない（ADR 0008 の薄い面 —
    * 見積りを読む消費者は runtime の型をそのまま使う）。
-   * NOTE: {@link Gemma4PipelineOptions.speculative} を渡していても、返るのは**target ぶんだけ**
-   * である（段 2 の範囲 — ADR 0096）。drafter の常駐重み（借り物の埋め込み表を除いた ~76MB）と
-   * 借り手 context の一時ぶんを足した合算は、投機ループ（段 3）で verify の R > 1 シナリオと
-   * 一緒に足す。
+   *
+   * ## 投機（{@link Gemma4PipelineOptions.speculative} を渡した pipeline）
+   *
+   * 3 つが足される（ADR 0096 段 3 §3.3）:
+   *
+   * 1. **verify シナリオ** — `k+1` 行を 1 run で流す形（`scenarios` に `"verify"` として並ぶ）。
+   *    行選択記号 `R` も `k+1` に束ねる（readback は選んだ行数ぶん要る）。
+   * 2. **drafter の常駐重み** — `resident.weights` の各欄に足す。貸し手から借りている埋め込み表は
+   *    runtime の常駐プランナが `shared` 席として除くので、二重に数えない。
+   * 3. **借り手 context の state** — 借り物スロットは 1 バイトも確保しないので、増えるのは論理長
+   *    uniform の 8 バイトだけである。
+   *
+   * drafter の run 1 本ぶん（入出力と中間）は `unaccounted` 側に置く — draft run は verify run と
+   * 同時には走らないうえ、この形の必要量は `k` にも `capacity` にも依らない小さな定数である。
    */
   estimateSessionMemory(options: Gemma4EstimateOptions = {}): AdmissionReport {
-    const { wiring, graph, gpu } = this.#state;
+    const { wiring, graph, gpu, drafter } = this.#state;
     const capacity = options.capacity ?? wiring.capacity;
     const chunkLength = assertChunkLength(
       options.chunkLength ?? wiring.chunkLength,
@@ -1768,21 +1877,75 @@ export class Gemma4Pipeline {
         `Gemma4Pipeline: capacity ${capacity} が maxPosition ${wiring.maxPosition} を超えた`,
       );
     }
-    return estimateGraphMemory(graph, planWeightResidency(graph), {
+    // MUST: Session に渡したのと同じ予算を渡す（片方だけ既定に落ちると、報告のピークが実際の
+    // 保持集合と別の予算を名乗る）。未指定は欄ごと渡さず runtime の既定に任せる。
+    const budget = this.#state.planBackingBudgetBytes === undefined
+      ? {}
+      : { planBackingBudgetBytes: this.#state.planBackingBudgetBytes };
+    // MUST: 渡す（states 形 attention のノード内一時は行ブロック枚数がこの上限だけで決まるので、
+    // 省くと estimator が fail loudly する — 既定値で埋めない）。
+    const maxStorageBufferBindingSize = gpu.limits.maxStorageBufferBindingSize;
+    // verify の R は k+1・物理行数 M は sequence が流す形と同じ（バケットへ丸めた行数 —
+    // `chunkLength: k+1` を名乗ると k < 3 で実 run より小さい形を見積る）。
+    const rows = (this.#state.speculativeK ?? GEMMA4_DRAFT_STEPS) + 1;
+    const verifyRows = physicalChunkRows(rows, wiring);
+    const target = estimateGraphMemory(graph, planWeightResidency(graph), {
       // 行数記号 R は run では `last_row` の要素数が束縛する（入力 shape 由来）。見積りは入力を
-      // 持たないので R = 1（通常の prefill / decode の形）を明示する — 投機 verify の R > 1 は
-      // 段 3 でシナリオとして足す。
+      // 持たないので R = 1（通常の prefill / decode の形）を明示する。
       bindings: { [wiring.rowSymbol]: 1 },
-      generation: { chunkLength, bindings: { [wiring.capacitySymbol]: capacity } },
-      // MUST: 渡す（states 形 attention のノード内一時は行ブロック枚数がこの上限だけで決まるので、
-      // 省くと estimator が fail loudly する — 既定値で埋めない）。
-      maxStorageBufferBindingSize: gpu.limits.maxStorageBufferBindingSize,
-      // MUST: Session に渡したのと同じ予算を渡す（片方だけ既定に落ちると、報告のピークが実際の
-      // 保持集合と別の予算を名乗る）。未指定は欄ごと渡さず runtime の既定に任せる。
-      ...(this.#state.planBackingBudgetBytes === undefined
-        ? {}
-        : { planBackingBudgetBytes: this.#state.planBackingBudgetBytes }),
+      generation: {
+        chunkLength,
+        bindings: { [wiring.capacitySymbol]: capacity },
+        // 投機の verify は `k+1` 行を 1 run で流す形（prefill / decode のどちらでもない）。
+        ...(drafter === undefined ? {} : {
+          scenarios: [{
+            name: "verify",
+            chunkLength: verifyRows,
+            bindings: { [wiring.rowSymbol]: rows },
+          }],
+        }),
+      },
+      maxStorageBufferBindingSize,
+      ...budget,
     });
+    if (drafter === undefined) return target;
+    // 借り手ぶん（常駐重みと context の state）は drafter グラフを**同じ estimator に掛けて**
+    // 引く（式をこの層で組み直さない — 借り物スロットと共有 initializer を外すのは runtime の
+    // 常駐プランナと `GenerationContext.create` の分岐そのものである）。
+    const borrower = estimateGraphMemory(drafter.graph, planWeightResidency(drafter.graph), {
+      // 借り手 context は `chunkLength` 1 ちょうど・容量記号は貸し手から継承する。
+      generation: { chunkLength: 1, bindings: { [wiring.capacitySymbol]: capacity } },
+      maxStorageBufferBindingSize,
+      ...budget,
+    });
+    const weights = {
+      compressedBytes: target.resident.weights.compressedBytes +
+        borrower.resident.weights.compressedBytes,
+      uncompressedBytes: target.resident.weights.uncompressedBytes +
+        borrower.resident.weights.uncompressedBytes,
+      expandedBytes: target.resident.weights.expandedBytes +
+        borrower.resident.weights.expandedBytes,
+      totalBytes: target.resident.weights.totalBytes + borrower.resident.weights.totalBytes,
+    };
+    const residentBytes = borrower.resident.weights.totalBytes + borrower.resident.stateBytes;
+    return {
+      resident: {
+        weights,
+        stateBytes: target.resident.stateBytes + borrower.resident.stateBytes,
+      },
+      // 形ごとの必要量は貸し手の 3 形（prefill / decode / verify）のまま — drafter の run は
+      // 貸し手の run と同時には走らない（借り手 run は貸し手の run リースを取る）。
+      scenarios: target.scenarios,
+      planBackingBudgetBytes: target.planBackingBudgetBytes,
+      // 常駐は 2 つの Session が同時に抱えるので和。保持集合の上限（予算 vs 最大シナリオ）は
+      // 貸し手の側がそのまま効く。
+      peakAccountedBytes: target.peakAccountedBytes + residentBytes,
+      unaccounted: [
+        ...target.unaccounted,
+        "drafter の run 1 本ぶんの入出力と中間（借り手 Session の slot backing — draft run は" +
+        " verify run と同時に走らず、必要量は k にも capacity にも依らない）",
+      ],
+    };
   }
 
   /**

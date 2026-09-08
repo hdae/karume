@@ -262,14 +262,32 @@ const DEFAULT_RUNS_PREFIX: Readonly<Record<DriveFamily, string>> = {
 export const defaultRunsPrefix = (family: DriveFamily): string => DEFAULT_RUNS_PREFIX[family];
 
 /**
- * gemma4 の run 1 本の label（`prefill-<chunk>` / `decode-<step>`）。
+ * gemma4 の run 1 本の label（`prefill-<chunk>` / `decode-<step>` / 投機の
+ * `draft-<cycle>` / `verify-<cycle>`）。
  *
  * MUST: 観測席が渡す `phase` だけから作る。呼ばれた回数で決めると、複数 chunk に割れた prompt
  * （`chunkLength` を超える長さ）の 2 本目以降の prefill が `decode-1` として記録される — 値は
  * 正しいまま突合表だけが混ざるので、赤くならずに壊れる。
+ * MUST: 網羅 switch（`never` の既定枝）で受ける。枝が増えたときに 2 分岐の三項演算子だと
+ * 新しい種別が黙って `decode-undefined` になる。
  */
-export const gemma4RunLabel = (phase: Gemma4RunPhase): string =>
-  phase.kind === "prefill" ? `prefill-${phase.chunk}` : `decode-${phase.step}`;
+export const gemma4RunLabel = (phase: Gemma4RunPhase): string => {
+  switch (phase.kind) {
+    case "prefill":
+      return `prefill-${phase.chunk}`;
+    case "decode":
+      return `decode-${phase.step}`;
+    // 投機は 1 cycle = draft 1 本 + verify 1 本（同じ cycle 番号を名乗る）。
+    case "draft":
+      return `draft-${phase.cycle}`;
+    case "verify":
+      return `verify-${phase.cycle}`;
+    default: {
+      const unhandled: never = phase;
+      throw new Error(`未知の run phase: ${JSON.stringify(unhandled)}`);
+    }
+  }
+};
 
 export type DriveOptions = {
   readonly gpu: GpuContext;

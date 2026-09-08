@@ -37,13 +37,19 @@ import {
   decodeChatChunks,
   type Gemma4ChatStop,
   type Gemma4RunPhase,
-  withRunDiagnostics,
+  runDiagnosticsHook,
+  speculativeSetup,
+  stopStringOf,
 } from "../src/gemma/pipeline.ts";
-import type {
-  GenerationEvent,
-  GenerationStop,
-  GenerationStream,
+import {
+  createGenerationSequence,
+  type GenerationEvent,
+  type GenerationRequest,
+  type GenerationSpeculation,
+  type GenerationStop,
 } from "../src/generation/sequence.ts";
+import type { GenerationProgramSpec } from "../src/generation/program.ts";
+import { drain, type FakeOptions, fakeSession, programOf } from "./helpers/generation-fake.ts";
 import { type GemmaTokenizerAssets, parseGemmaTokenizerAsset } from "../src/gemma/text/asset.ts";
 import { GemmaTokenizer } from "../src/gemma/text/tokenizer.ts";
 import {
@@ -513,6 +519,43 @@ Deno.test("chat 停止文字列: 複数の停止文字列は本文に先に現�
   assertEquals(parts.join(""), "a");
 });
 
+Deno.test("chat 停止文字列: 停止理由を差し替えても内側の勘定を写す（stopStringOf）", async (t) => {
+  // `chat` と `Gemma4ChatSession.#finish` は、停止文字列で閉じたターンだけ `GenerationStop` を
+  // **別の object へ組み直す**。組み直しで欄が 1 つ落ちても型は通る（`speculation` は optional）
+  // ので、「停止文字列で閉じたターンだけ投機の勘定が消える」形は例外にならない。
+  const speculation: GenerationSpeculation = {
+    cycles: 4,
+    draftRuns: 3,
+    drafted: 9,
+    accepted: 5,
+    acceptedHistogram: [1, 1, 1, 1],
+  };
+
+  await t.step("投機のターン: 勘定はそのまま写る（数え直さない）", () => {
+    const inner: GenerationStop = { reason: "max-tokens", tokens: 9, speculation };
+    const stop = stopStringOf("END", inner);
+    assertEquals(stop, { reason: "stop-string", stopString: "END", tokens: 9, speculation });
+    assert(stop.speculation === speculation, "勘定を組み直している（内側の値をそのまま写さない）");
+  });
+
+  await t.step("非投機のターン: 欄そのものを生やさない", () => {
+    const stop = stopStringOf("END", { reason: "eos", token: 3, tokens: 4 });
+    assertEquals(stop, { reason: "stop-string", stopString: "END", tokens: 4 });
+    assertEquals(Object.hasOwn(stop, "speculation"), false, "非投機のターンに欄が生えている");
+    // 停止 token（`eos` 枝の `token`）は理由ごと差し替わるので運ばない。
+    assertEquals(Object.hasOwn(stop, "token"), false);
+  });
+});
+
+Deno.test("投機の切替（speculativeSetup）: drafter 無しの pipeline に true を渡すと fail loudly", () => {
+  // 未指定は「drafter が居れば張る」なので drafter 無しでは黙って非投機（欄も生えない）。明示の
+  // true は drafter を要求する — 黙って非投機で回すと、結果からも無視を読み取れない。
+  const withoutDrafter = { drafter: undefined, speculativeK: undefined };
+  assertEquals(speculativeSetup(withoutDrafter, undefined), undefined);
+  assertEquals(speculativeSetup(withoutDrafter, false), undefined);
+  assertThrows(() => speculativeSetup(withoutDrafter, true), Error, "drafter 無し");
+});
+
 Deno.test("chat prefill: 進捗は onPrefill が受け、本文の列は 1 文字も変わらない", async () => {
   // 長い prompt では最初の文字が出るまでの無音時間が prefill そのもので、文字列の面には
   // その進捗を運ぶ片が無い（本文はまだ 1 文字も出ていない）。観測席が唯一の経路である。
@@ -647,67 +690,61 @@ Deno.test({
   },
 });
 
-// ---- 観測席の呼び出し規則（`withRunDiagnostics`）----------------------------
+// ---- 観測席の呼び出し規則（`runDiagnosticsHook`）------------------------------
 //
-// doc（`src/gemma/pipeline.ts`）は 3 つの非自明な規則を宣言している —— ①prefill 直後の最初の
-// token は「最終 chunk の logits から抽選しただけ」で run を伴わないので席を呼ばない
-// ②停止 token を引いた最後の decode run は `token` を yield せずに終わるので、その 1 本だけは
-// 列ではなく `done` の決着から補う（補わないと普通に喋り終わったターンで毎回 1 本欠ける）
-// ③どの run だったかは回数ではなく `phase` が言う（複数 chunk の prefill では「1 通目だけが
-// prefill」が成り立たない）。唯一の観測（`e2e_gemma4_pretrained_test.ts` の census）はキーの
-// 集合を集めるだけで**回数**を見ていないため、規則が壊れても赤くならなかった。
+// 観測席（`Gemma4PipelineOptions.onRunDiagnostics`）は run 1 本につき 1 通で、その run の出力を
+// 読み終えた同期区間に届く。通知を出すのは**生成面**（`createGenerationSequence` の `onRun`）で、
+// この層が足すのは「どちらの Session の診断を引くか」だけである。
+//
+// かつてはイベント列を包んで run 数を**導出**していた（`withRunDiagnostics`）。導出は 2 つの
+// 例外を抱えていた —— ①prefill 直後の最初の token は「最終 chunk の logits から抽選しただけ」で
+// run を伴わない ②停止 token を引いた最後の decode run は `token` を yield せずに終わるので列に
+// 出ない（`done` から補っていた）—— うえ、投機では 1 verify run が複数 token を出すので導出
+// そのものが成り立たない。ここで縛るのは、hook 形になっても**観測される run の列が変わって
+// いない**ことと、この層が足した 1 分岐（draft = 借り手の診断）である。
+//
+// 生成面を fake Session で回すので GPU も実資産も要らない（fake の正本は
+// `tests/helpers/generation-fake.ts` — 非投機の契約テストと同じ実体）。
 
-/** イベント列を手で書いた偽 `GenerationStream`（`closed` で早期終了の伝播が読める）。 */
-const fakeStream = (
-  events: readonly GenerationEvent[],
-  stop: GenerationStop = { reason: "closed", tokens: 0 },
-) => {
-  const state = { closed: false };
-  const iterable = (async function* (): AsyncGenerator<GenerationEvent, void, undefined> {
-    try {
-      for (const event of events) yield event;
-    } finally {
-      state.closed = true;
-    }
-  })();
-  const stream: GenerationStream = {
-    [Symbol.asyncIterator]: () => iterable,
-    done: Promise.resolve(stop),
-  };
-  return { stream, state };
-};
-
-const prefill = (chunk: number, chunks: number): GenerationEvent => ({
-  kind: "prefill",
-  chunk,
-  chunks,
-});
-const token = (id: number, position: number): GenerationEvent => ({ kind: "token", id, position });
-
-/** 診断は素通しされるだけ（中身を読まない）ので、席が受けた値をそのまま数える。 */
-const diagnosticsSeat = () => {
+/**
+ * 診断は素通しされるだけ（中身を読まない）ので、席が受けた値をそのまま数える。
+ *
+ * 貸し手は 1, 2, 3, …・借り手は −1, −2, … を返すので、**どちらの Session を引いたか**が
+ * 受けた値の符号で読める。
+ */
+const diagnosticsSeat = (options: { readonly drafter?: boolean } = {}) => {
   const seen: number[] = [];
   const phases: Gemma4RunPhase[] = [];
-  let ticket = 0;
-  return {
-    seen,
-    phases,
-    seat: {
-      session: {
-        diagnostics: (): number => {
-          ticket += 1;
-          return ticket;
-        },
-      },
-      onRunDiagnostics: (diagnostics: number, phase: Gemma4RunPhase): void => {
-        seen.push(diagnostics);
-        phases.push(phase);
+  let lender = 0;
+  let borrower = 0;
+  const state = {
+    session: {
+      diagnostics: (): number => {
+        lender += 1;
+        return lender;
       },
     },
+    ...(options.drafter === true
+      ? {
+        drafter: {
+          session: {
+            diagnostics: (): number => {
+              borrower -= 1;
+              return borrower;
+            },
+          },
+        },
+      }
+      : {}),
+    onRunDiagnostics: (diagnostics: number, phase: Gemma4RunPhase): void => {
+      seen.push(diagnostics);
+      phases.push(phase);
+    },
   };
+  return { seen, phases, state };
 };
 
-/** `phase` の期待値を 1 行で書くための短縮（`prefill(1, 3)` / `decode(2)`）。 */
+/** `phase` の期待値を 1 行で書くための短縮（`prefillPhase(1, 3)` / `decodePhase(2)`）。 */
 const prefillPhase = (chunk: number, chunks: number): Gemma4RunPhase => ({
   kind: "prefill",
   chunk,
@@ -715,123 +752,117 @@ const prefillPhase = (chunk: number, chunks: number): Gemma4RunPhase => ({
 });
 const decodePhase = (step: number): Gemma4RunPhase => ({ kind: "decode", step });
 
-Deno.test("withRunDiagnostics: run を伴わない最初の token では席を呼ばない", async () => {
-  const { stream, state } = fakeStream([
-    prefill(1, 3),
-    prefill(2, 3),
-    prefill(3, 3),
-    token(10, 0),
-    token(11, 1),
-    token(12, 2),
-    token(13, 3),
-  ]);
-  const { seen, phases, seat } = diagnosticsSeat();
-  const wrapped = withRunDiagnostics(stream, seat);
-  const drained: GenerationEvent[] = [];
-  for await (const event of wrapped) drained.push(event);
+/** 観測席を挿した sequence を 1 ターン回す（fake Session なので run は即座に返る）。 */
+const runTurn = async (
+  fakeOptions: FakeOptions,
+  request: GenerationRequest,
+  override: Partial<GenerationProgramSpec> = {},
+) => {
+  const fake = fakeSession(fakeOptions);
+  const { seen, phases, state } = diagnosticsSeat();
+  const onRun = runDiagnosticsHook(state);
+  // 席を渡してあるので hook は必ず組める（組めなければテストの前提が壊れている）。
+  if (onRun === undefined) throw new Error("test: 観測席があるのに hook が undefined");
+  const sequence = await createGenerationSequence({
+    session: fake.session,
+    program: programOf(fake, override),
+    onRun,
+  });
+  const { events, stop } = await drain(sequence.generate(request));
+  await sequence.dispose();
+  return { seen, phases, events, stop };
+};
 
-  assertEquals(drained.length, 7, "イベントは 1 つも落とさず素通しする");
-  // prefill 3 本 + token 4 本のうち最初の 1 本を飛ばす = 6 回。
-  assertEquals(seen.length, 6, "呼び出し回数");
-  assertEquals(seen, [1, 2, 3, 4, 5, 6], "席が受けるのは呼ぶたびの新しい診断");
+Deno.test("観測席: run 1 本につき 1 通（run を伴わない最初の token では呼ばない）", async () => {
+  // prompt 6 token = chunk 2 本（`CHUNK_LENGTH` 4）+ 4 token 生成 = decode run 3 本。
+  // 最初の token は最終 chunk の logits から抽選するだけなので、通知は 2 + 3 = 5 通。
+  const { seen, phases, stop } = await runTurn({}, { prompt: [1, 2, 3, 4, 5, 6], maxNewTokens: 4 });
+
+  assertEquals(stop, { reason: "max-tokens", tokens: 4 });
+  assertEquals(seen.length, 5, "呼び出し回数");
+  assertEquals(seen, [1, 2, 3, 4, 5], "席が受けるのは呼ぶたびの新しい診断（貸し手 Session）");
   assertEquals(
     phases,
-    [prefillPhase(1, 3), prefillPhase(2, 3), prefillPhase(3, 3), ...[1, 2, 3].map(decodePhase)],
-    "phase",
-  );
-  assertEquals(state.closed, true, "内側の列が閉じていない");
-});
-
-Deno.test("withRunDiagnostics: 最初の抽選が停止 token だったターンは prefill ぶんだけ", async () => {
-  // 本文が 1 文字も出ないターン（列に token が 1 つも現れない）。
-  const { stream } = fakeStream([prefill(1, 1)]);
-  const { seen, phases, seat } = diagnosticsSeat();
-  for await (const _event of withRunDiagnostics(stream, seat)) { /* 汲み切る */ }
-  assertEquals(seen.length, 1);
-  assertEquals(phases, [prefillPhase(1, 1)], "phase");
-});
-
-Deno.test("withRunDiagnostics: 席が無ければ元の列をそのまま返す（包みを 1 枚も足さない）", () => {
-  const { stream } = fakeStream([prefill(1, 1), token(10, 0)]);
-  assert(
-    withRunDiagnostics(stream, { session: { diagnostics: () => 0 } }) === stream,
-    "席が無いのに包みが増えている（中断や return() の伝播経路が 1 枚深くなる）",
+    [prefillPhase(1, 2), prefillPhase(2, 2), decodePhase(1), decodePhase(2), decodePhase(3)],
+    "phase（複数 chunk の prefill は 2 本目以降も prefill・decode の step は 1 始まり）",
   );
 });
 
-Deno.test("withRunDiagnostics: 消費側の break が内側の return() まで伝わる", async () => {
-  const { stream, state } = fakeStream([
-    prefill(1, 1),
-    token(10, 0),
-    token(11, 1),
-    token(12, 2),
-  ]);
-  const { seen, phases, seat } = diagnosticsSeat();
-  for await (const event of withRunDiagnostics(stream, seat)) {
+Deno.test("観測席: 停止 token を引いた最後の decode run も 1 通届く", async () => {
+  // 抽選 2 回のターン: ①prefill の logits（run 無し）②decode run 1 = 停止 token で、②は
+  // `token` を yield せずに終わる。列から導出していた頃はこの 1 本が毎ターン欠けた。
+  const { seen, phases, events, stop } = await runTurn(
+    { tokens: [5, 9] },
+    { prompt: [1, 2], maxNewTokens: 4 },
+    { stopTokens: [9] },
+  );
+
+  assertEquals(stop, { reason: "eos", token: 9, tokens: 2 });
+  assertEquals(
+    events.filter((event) => event.kind === "token").length,
+    1,
+    "停止 token は列に出ない",
+  );
+  assertEquals(seen.length, 2, "停止 run のぶんが欠けている");
+  assertEquals(phases, [prefillPhase(1, 1), decodePhase(1)], "phase");
+});
+
+Deno.test("観測席: 消費側の break で閉じたターンは完了した run のぶんだけ届く", async () => {
+  const fake = fakeSession({});
+  const { seen, phases, state } = diagnosticsSeat();
+  const onRun = runDiagnosticsHook(state);
+  if (onRun === undefined) throw new Error("test: 観測席があるのに hook が undefined");
+  const sequence = await createGenerationSequence({
+    session: fake.session,
+    program: programOf(fake),
+    onRun,
+  });
+  const stream = sequence.generate({ prompt: [1, 2], maxNewTokens: 4 });
+  for await (const event of stream) {
     if (event.kind === "token") break;
   }
-  assertEquals(state.closed, true, "包みが中断経路を切っている（内側が走行中のまま残る）");
-  assertEquals(seen.length, 1, "prefill ぶんだけ（最初の token は席を呼ばない）");
+  await sequence.dispose();
+
+  assertEquals(seen.length, 1, "prefill ぶんだけ（最初の token は run を伴わない）");
   assertEquals(phases, [prefillPhase(1, 1)], "phase");
 });
 
-Deno.test("withRunDiagnostics: 停止 token を引いた最後の decode run も 1 通届く（eos）", async () => {
-  // 3 回抽選したターン: ①prefill の logits（run 無し）②decode run 1 ③decode run 2 = 停止 token
-  // で、③は `token` を yield せずに終わる。届くのは prefill 1 + decode 2 = 3 通。
-  const { stream } = fakeStream(
-    [prefill(1, 1), token(10, 0), token(11, 1)],
-    { reason: "eos", token: 1, tokens: 3 },
-  );
-  const { seen, phases, seat } = diagnosticsSeat();
-  for await (const _event of withRunDiagnostics(stream, seat)) { /* 汲み切る */ }
-  assertEquals(seen.length, 3, "停止 run のぶんが欠けている");
-  assertEquals(phases, [prefillPhase(1, 1), decodePhase(1), decodePhase(2)], "phase");
-});
-
-Deno.test("withRunDiagnostics: 停止 token を引いた最後の decode run も 1 通届く（stop-token）", async () => {
-  // 要求が足した停止集合で閉じた枝も同じ形（理由が違うだけで run の欠け方は同一）。
-  const { stream } = fakeStream(
-    [prefill(1, 1), token(10, 0), token(11, 1)],
-    { reason: "stop-token", token: 7, tokens: 3 },
-  );
-  const { seen, phases, seat } = diagnosticsSeat();
-  for await (const _event of withRunDiagnostics(stream, seat)) { /* 汲み切る */ }
-  assertEquals(seen.length, 3);
-  assertEquals(phases, [prefillPhase(1, 1), decodePhase(1), decodePhase(2)], "phase");
-});
-
-Deno.test("withRunDiagnostics: max-tokens で終わるターンは補わない（最後の token も列に出る）", async () => {
-  // 抽選 3 回とも `token` が出るので、決着後に足すと同じ run が 2 度届く。
-  const { stream } = fakeStream(
-    [prefill(1, 1), token(10, 0), token(11, 1), token(12, 2)],
-    { reason: "max-tokens", tokens: 3 },
-  );
-  const { seen, phases, seat } = diagnosticsSeat();
-  for await (const _event of withRunDiagnostics(stream, seat)) { /* 汲み切る */ }
-  assertEquals(seen.length, 3, "決着後の追加呼び出しが混ざっている");
-  assertEquals(phases, [prefillPhase(1, 1), decodePhase(1), decodePhase(2)], "phase");
-});
-
-Deno.test("withRunDiagnostics: 最初の抽選が停止 token（eos・tokens 1）なら decode は 0 本", async () => {
-  // 抽選 1 回だけで閉じたターン — decode run は 1 本も走っていないので補ってはならない。
-  const { stream } = fakeStream([prefill(1, 1)], { reason: "eos", token: 1, tokens: 1 });
-  const { seen, phases, seat } = diagnosticsSeat();
-  for await (const _event of withRunDiagnostics(stream, seat)) { /* 汲み切る */ }
-  assertEquals(seen.length, 1);
-  assertEquals(phases, [prefillPhase(1, 1)], "phase");
-});
-
-Deno.test("withRunDiagnostics: 複数 chunk の prefill は 2 本目以降も prefill として届く", async () => {
-  // F-01 の再現形 — 回数で決めると 2 本目の prefill が decode-1 に化ける。
-  const { stream } = fakeStream(
-    [prefill(1, 2), prefill(2, 2), token(10, 0), token(11, 1)],
-    { reason: "eos", token: 1, tokens: 3 },
-  );
-  const { phases, seat } = diagnosticsSeat();
-  for await (const _event of withRunDiagnostics(stream, seat)) { /* 汲み切る */ }
+Deno.test("観測席: 席が無ければ hook を組まない（生成面は 1 回も呼ばない）", () => {
   assertEquals(
-    phases,
-    [prefillPhase(1, 2), prefillPhase(2, 2), decodePhase(1), decodePhase(2)],
-    "phase",
+    runDiagnosticsHook({ session: { diagnostics: (): number => 0 } }),
+    undefined,
+    "席が無いのに hook が組まれている（使わない人に通知の経路を足さない）",
+  );
+});
+
+Deno.test("観測席: draft は借り手・それ以外は貸し手の診断を引く", () => {
+  const { seen, phases, state } = diagnosticsSeat({ drafter: true });
+  const onRun = runDiagnosticsHook(state);
+  if (onRun === undefined) throw new Error("test: 観測席があるのに hook が undefined");
+  // 1 cycle = draft 1 本 + verify 1 本（同じ cycle 番号）。
+  onRun({ kind: "draft", cycle: 1 });
+  onRun({ kind: "verify", cycle: 1, rows: 4, accepted: 2 });
+  onRun({ kind: "draft", cycle: 2 });
+
+  assertEquals(
+    seen,
+    [-1, 1, -2],
+    "draft が貸し手の診断を引いている（直前の verify run の値が draft の名前で積算される）",
+  );
+  assertEquals(phases, [
+    { kind: "draft", cycle: 1 },
+    { kind: "verify", cycle: 1, rows: 4, accepted: 2 },
+    { kind: "draft", cycle: 2 },
+  ], "phase はそのまま素通しする");
+});
+
+Deno.test("観測席: drafter が居ないのに draft が届いたら fail loudly", () => {
+  const { state } = diagnosticsSeat();
+  const onRun = runDiagnosticsHook(state);
+  if (onRun === undefined) throw new Error("test: 観測席があるのに hook が undefined");
+  assertThrows(
+    () => onRun({ kind: "draft", cycle: 1 }),
+    Error,
+    "drafter が居ないのに draft run の観測が届いた",
   );
 });

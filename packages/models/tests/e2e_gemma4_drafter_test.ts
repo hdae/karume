@@ -2,8 +2,9 @@
 // [0096](../../../docs/decisions/0096-speculative-decoding.md) 段 2。
 //
 // 検収するのは「drafter が target の KV と埋め込み表を**借りて**回り、torch の drafter と同じ
-// draft を出す」ことである。段 2 に投機ループ（verify と受理・棄却）はまだ無いので、ここが見るのは
-// 1 サイクルぶんの draft だけ:
+// draft を出す」ことである。投機ループ（verify・受理・棄却・commit）そのものの門は段 3 の
+// `e2e_gemma4_speculative_test.ts` が持つので、ここが見るのは 1 サイクルぶんの draft と、
+// 配布形の pipeline がその drafter を**既定で**使うことまでである:
 //
 // ① 配布形（GPU 不要）… manifest の weights に `drafter` が居て、既定 quant が両方の役割を指す。
 //    `ResolveOptions.weights` の絞り込みが効き、**投機を使わないロードで drafter の shard が
@@ -363,12 +364,21 @@ Deno.test({
 // ②' pipeline の投機オプション（受理集合は資産を 1 バイトも読む前に落ちる）
 // ---------------------------------------------------------------------------
 
-Deno.test("Gemma4Pipeline: 段 2 の speculative は k = 3 だけ・fromAssets では受けない", async () => {
-  // 受理集合の門は**取得元へ触る前**（`ref` は解決すらされない）。
+Deno.test("Gemma4Pipeline: speculative の k は 1..3・fromAssets では受けない", async () => {
+  // 受理集合の門は**取得元へ触る前**（`ref` は解決すらされない）。上は配布形の段数
+  // （出口の本数がそのまま上限）、下は「draft を 1 本も採らない投機」= 意味を持たない指定。
   await assertRejects(
-    () => Gemma4Pipeline.fromPretrained("owner/name", { speculative: { k: 2 } }),
+    () => Gemma4Pipeline.fromPretrained("owner/name", { speculative: { k: 0 } }),
     Error,
-    "speculative.k 2 は段 2 では受けられない",
+    `speculative.k 0 が 1..${GEMMA4_DRAFT_STEPS} の外`,
+  );
+  await assertRejects(
+    () =>
+      Gemma4Pipeline.fromPretrained("owner/name", {
+        speculative: { k: GEMMA4_DRAFT_STEPS + 1 },
+      }),
+    Error,
+    `speculative.k ${GEMMA4_DRAFT_STEPS + 1} が 1..${GEMMA4_DRAFT_STEPS} の外`,
   );
   // `Gemma4Assets` に drafter の席が無いので、黙って投機なしで組まずに断る。
   const assets: Gemma4Assets = {
@@ -398,7 +408,7 @@ Deno.test("Gemma4Pipeline: 段 2 の speculative は k = 3 だけ・fromAssets �
 // ③④ 実 GPU — golden との突合と寿命
 // ---------------------------------------------------------------------------
 
-/** golden 1 ケース（`prompt [T]` / `tokens [N]` / `draft [N, k]`）。 */
+/** golden 1 ケース（`prompt [T]` / `tokens [N + k]` / `draft [N, k]`）。 */
 type Golden = {
   readonly prompt: Int32Array<ArrayBuffer>;
   readonly tokens: Int32Array<ArrayBuffer>;
@@ -424,12 +434,17 @@ const readGolden = async (name: string): Promise<Golden> => {
   assert(draftView !== undefined, `golden ${name} に 'draft' が無い`);
   assertEquals(draftView.shape[1], GEMMA4_DRAFT_STEPS, `${name}: draft の段数`);
   const tokens = goldenI32(file, "tokens");
-  assertEquals(draftView.shape[0], tokens.length, `${name}: draft のサイクル数`);
+  // 継続列は draft の**比較相手ぶん**（+ k 本）長い — 最後のサイクルの d_k が当てる位置まで。
+  assertEquals(
+    draftView.shape[0] + GEMMA4_DRAFT_STEPS,
+    tokens.length,
+    `${name}: draft のサイクル数`,
+  );
   return {
     prompt: goldenI32(file, "prompt"),
     tokens,
     draft: goldenI32(file, "draft"),
-    cycles: tokens.length,
+    cycles: draftView.shape[0],
   };
 };
 
@@ -490,6 +505,7 @@ Deno.test({
       );
       const drafter: Gemma4Drafter = {
         session: drafterSession,
+        graph: drafterGraph,
         outputs: admitted.outputs,
         rope,
         hiddenSize: admitted.hiddenSize,
@@ -574,21 +590,23 @@ Deno.test({
               );
             }
 
-            // 相 2: サイクル t の draft。直前 token は t=0 が prompt 末尾・以降は継続列
-            // （teacher forcing）で、query は論理位置 P−1 = T+t−1 に居る。
+            // 相 2: サイクル t の draft。渡す token は**最後に確定した 1 本**（継続列の
+            // `tokens[t]` — 位置 P = T+t に居るが KV には未投入）で、hidden はそれを出した行
+            // （位置 P−1）。t>0 では 1 つ前の継続 token を流してその行の hidden を採る
+            // （teacher forcing）。
             for (let cycle = 0; cycle < golden.cycles; cycle += 1) {
-              const position = promptLength + cycle - 1;
-              const token = cycle === 0 ? prompt[promptLength - 1] : golden.tokens[cycle - 1];
+              const position = promptLength + cycle;
+              const token = golden.tokens[cycle];
               if (cycle > 0) {
                 hidden = await runTarget(
                   context,
-                  Int32Array.of(token),
-                  Int32Array.of(position),
+                  Int32Array.of(golden.tokens[cycle - 1]),
+                  Int32Array.of(position - 1),
                   1,
                   `${name} decode@${cycle}`,
                 );
               }
-              assertEquals(context.pastLength, position + 1, `${name}: サイクル ${cycle} の論理長`);
+              assertEquals(context.pastLength, position, `${name}: サイクル ${cycle} の論理長`);
               const draft = await draftOnce(drafter, borrowed, { token, hidden, position });
               assertEquals(draft.length, GEMMA4_DRAFT_STEPS, `${name}: draft の本数`);
               for (let step = 0; step < GEMMA4_DRAFT_STEPS; step += 1) {
@@ -677,11 +695,17 @@ Deno.test({
 // ⑤ pipeline の投機オプション（実 GPU）— drafter Session まで組んで、生成は 1 つも変わらない
 // ---------------------------------------------------------------------------
 
-/** chat の検収ケース（`e2e_gemma4_directory_test.ts` と**同じ golden** — 投機の有無で動かない）。 */
+/**
+ * chat の検収ケース（`e2e_gemma4_directory_test.ts` と**同じ golden** — 投機の有無で動かない）。
+ *
+ * `stop` も同じ値である（投機は `speculation` 欄を**足すだけ**で、理由・停止 token・生成 token 数を
+ * 1 つも動かさない — 動いたら投機経路が会話を別の列にしている）。
+ */
 const CHAT_CASE = {
   fixture: "single-user",
   maxNewTokens: 24,
   expected: "The capital of France is **Paris**.",
+  stop: { reason: "eos", token: 106, tokens: 9 },
 } as const;
 
 type ChatFixture = {
@@ -709,20 +733,54 @@ Deno.test({
           (performance.now() - started).toFixed(0)
         }ms`,
       );
+      // NOTE: この pipeline は drafter を持つので、`chat` は**既定で投機を張る**（段 3）。
+      // 受理率・非投機との token 列一致・phase・見積りの厳密門は `e2e_gemma4_speculative_test.ts`
+      // が持つ — ここが見るのは「既定経路（chat）で投機が実際に張られ、それでも golden が
+      // 1 文字も動かない」ことである。
       await t.step(
-        "① 生成は投機の有無で 1 文字も変わらない（段 2 に投機ループは無い）",
+        "① 投機を張っても chat の golden は 1 文字も動かない",
         async () => {
           const stream = pipeline.chat(chatCase.messages, {
             maxNewTokens: CHAT_CASE.maxNewTokens,
             sampler: { temperature: 0 },
           });
           assertEquals(await stream.text(), CHAT_CASE.expected, "温度 0 の出力");
+          const stop = await stream.done;
+          assertEquals(stop.tokens, CHAT_CASE.stop.tokens, "生成 token 数（停止 token 込み）");
+          assert(stop.reason === "eos", `停止理由が eos でない: ${JSON.stringify(stop)}`);
+          assertEquals(stop.token, CHAT_CASE.stop.token, "停止 token");
+          // MUST: 投機が**実際に張られた**ことをここで見る（張られていなければ①は
+          // 「非投機の golden 再走」に化け、投機経路は 1 度も踏まれない）。`cycles > 0` は
+          // verify run が回ったこと、`accepted > 0` は draft が 1 本以上受理されたこと —
+          // 後者が無いと「毎 cycle 全棄却 = decode と同じ列を遠回りで出しただけ」と区別が付かない。
+          const speculation = stop.speculation;
+          assert(
+            speculation !== undefined,
+            `既定で投機が張られていない: ${JSON.stringify(stop)}`,
+          );
+          assert(speculation.cycles > 0, "verify run が 1 本も回っていない");
+          assert(
+            speculation.accepted > 0,
+            `draft が 1 本も受理されていない（${speculation.cycles} cycle / ` +
+              `drafted ${speculation.drafted}）`,
+          );
+          console.log(
+            `[e2e] gemma4 drafter chat: ${speculation.cycles} cycle / 受理 ` +
+              `${speculation.accepted}/${speculation.drafted} / 配送 ${stop.tokens} token`,
+          );
         },
       );
 
-      await t.step("② 見積りは段 2 では target ぶんだけ", () => {
+      await t.step("② 見積りは target + drafter の常駐を合算する", () => {
         const report = pipeline.estimateSessionMemory();
         assert(report.resident.weights.totalBytes > 0, "常駐重みの見積りが 0 バイト");
+        // 厳密一致の門（2 Session の診断との突合・借り手 state 8 バイト・verify シナリオの
+        // ioBytes）は段 3 の実 GPU レッグが足す。
+        assertEquals(
+          report.scenarios.map((scenario) => scenario.name),
+          ["prefill", "decode", "verify"],
+          "verify シナリオが並んでいない",
+        );
       });
     } finally {
       // 順序（drafter Session → target Session）が正しければ、この 1 本は成功で返る

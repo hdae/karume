@@ -140,7 +140,17 @@ export type {
   GenerationCapacityDetail,
   GenerationEvent,
   GenerationRequest,
+  /**
+   * run 1 本につき 1 通の観測（`onRunDiagnostics` が受ける {@link Gemma4RunPhase} の実体 —
+   * prefill の chunk / decode の step / 投機の draft・verify の cycle）。
+   */
+  GenerationRunPhase,
   GenerationSequence,
+  /**
+   * 投機の勘定（`GenerationStop.speculation` — cycle 数・draft run 数・受理数・受理数の
+   * ヒストグラム。drafter を載せた pipeline のターンにだけ載る）。
+   */
+  GenerationSpeculation,
   GenerationStop,
   GenerationStream,
 } from "./src/generation/sequence.ts";

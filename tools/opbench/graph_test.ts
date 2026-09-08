@@ -58,12 +58,27 @@ Deno.test("gemma4RunLabel: label は観測席の phase から作る（回数か�
   assertEquals(gemma4RunLabel({ kind: "decode", step: 2 }), "decode-2");
   // 複数 chunk のターン: 2 通目も prefill（回数で決めると decode-1 に化ける — F-01）。
   assertEquals(gemma4RunLabel({ kind: "prefill", chunk: 2, chunks: 2 }), "prefill-2");
+  // 投機のターン: 1 cycle = draft 1 本 + verify 1 本で、**同じ cycle 番号**を名乗る（label が
+  // cycle でなく通し番号で振られると、draft と verify の対応が突合表から読めなくなる）。
+  assertEquals(gemma4RunLabel({ kind: "draft", cycle: 1 }), "draft-1");
+  assertEquals(gemma4RunLabel({ kind: "verify", cycle: 1, rows: 4, accepted: 3 }), "verify-1");
+  assertEquals(gemma4RunLabel({ kind: "draft", cycle: 12 }), "draft-12");
+  // `k' = 0` の cycle（予算末尾）は draft を採らず verify 1 行だけ — 行数や受理数は label に
+  // 出さない（同じ形の run が別名になると census との突合が cycle ごとに割れる）。
+  assertEquals(gemma4RunLabel({ kind: "verify", cycle: 12, rows: 1, accepted: 0 }), "verify-12");
   // 突合は接頭辞一致（main.ts の `--runs`）: gemma4 の既定接頭辞は decode 群だけを拾い、prefill 群は
   // chunk が何本でも `prefill` で全部拾える（複数 chunk の 2 通目が decode 側へ混ざらない）。
   const decodePrefix = defaultRunsPrefix("gemma4");
   assert(gemma4RunLabel({ kind: "decode", step: 7 }).startsWith(decodePrefix));
   assert(!gemma4RunLabel({ kind: "prefill", chunk: 2, chunks: 2 }).startsWith(decodePrefix));
   assert(gemma4RunLabel({ kind: "prefill", chunk: 3, chunks: 4 }).startsWith("prefill"));
+  // 投機の run は decode 群に混ざらない（既定接頭辞は非投機の decode だけを拾う）。
+  assert(!gemma4RunLabel({ kind: "draft", cycle: 1 }).startsWith(decodePrefix));
+  assert(
+    !gemma4RunLabel({ kind: "verify", cycle: 1, rows: 4, accepted: 0 }).startsWith(
+      decodePrefix,
+    ),
+  );
 });
 
 Deno.test("defaultRunsPrefix: 家族ごとに突合する run の接頭辞が決まる", () => {

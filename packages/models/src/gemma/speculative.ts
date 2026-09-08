@@ -1,10 +1,11 @@
 /**
  * Gemma 4 の MTP drafter を 1 回回す**内部 API**（ADR
- * [0096](../../../../docs/decisions/0096-speculative-decoding.md) 段 2 §5）。
+ * [0096](../../../../docs/decisions/0096-speculative-decoding.md) 決定 1〜3・段 2 §5）。
  *
- * 段 2 で用意するのは 2 本だけ — 借り手 context を開く {@link openDrafterContext} と、
- * 1 サイクルぶんの draft を採る {@link draftOnce}。**投機ループ（verify と受理・棄却）は段 3** で、
- * この 2 本の上に載る。
+ * 部品は 3 本 — 借り手 context を開く {@link openDrafterContext}、1 サイクルぶんの draft を採る
+ * {@link draftOnce}、その 2 本を 1 つの `DraftFace` に束ねる {@link openGemma4DraftFace}。投機
+ * ループ（`src/generation/sequence.ts`）が見るのは束ねた面だけである（生成面は gemma4 も Session
+ * も知らない — ADR 0083）。
  *
  * MUST: `mod.ts` / `./gemma` サブパスには出さない（ADR 0008 の薄い面）。GenerationContext は
  * sequence ごとの内部実体で公開面に無い（ADR 0083 決定 3）ので、この 2 本を公開面へ出すと
@@ -15,8 +16,8 @@
  * - drafter Session は貸し手 Session の embedding 表 1 本を**借りている**（`sharedWeights` —
  *   バイトは 1 つも複製されない）。束ねるのは `pipeline.ts` の構築で、ここは走らせるだけ。
  * - 借り手 context は貸し手 context の KV スロット（l13 sliding / l14 full）を**名前で**束ねる。
- *   draft の query は論理位置 `P−1`（貸し手が最後に確定させた token）に居るので、ホストが渡す
- *   RoPE の 1 行も同じ位置で作る。
+ *   draft の query は論理位置 `P`（= `context.pastLength`）— 貸し手が最後に確定させた token は
+ *   まだ KV に入っていない frontier で、その位置に居る。ホストが渡す RoPE の 1 行も同じ位置。
  * - 貸し手の run / commit と直列化されるのは runtime の仕事（借り手 run が貸し手の run リースを
  *   取る）。**貸し手に未 commit の run が残っていると draft は拒否される** — draft は commit の
  *   後に採る。
@@ -26,6 +27,7 @@
 
 import type { GenerationContext, KarumeModel, Session, Tensor } from "@karume/runtime";
 
+import type { DraftCycle, DraftFace } from "../generation/speculation.ts";
 import {
   GEMMA4_ROPE_LAYER_TYPES,
   GEMMA4_ROPE_PARTS,
@@ -38,7 +40,9 @@ import {
 /**
  * drafter が 1 サイクルで出す draft token の本数（= MTP head の段数）。
  *
- * 段 2 は**この値で焼いた資産だけ**を受ける（グラフ出口の本数がそのまま k）。動的な k は段 3。
+ * 受けるのは**この値で焼いた資産だけ**である（グラフ出口の本数が段数そのもの）。投機ループが
+ * 1 cycle で使う本数 `k` はこの範囲内で選べる（`1..GEMMA4_DRAFT_STEPS` — 予算末尾ではさらに
+ * 縮む）が、資産側の段数は固定である。
  */
 export const GEMMA4_DRAFT_STEPS = 3;
 
@@ -55,7 +59,7 @@ const TOKEN_INPUT = "token";
 const HIDDEN_INPUT = "hidden";
 
 /**
- * drafter グラフの入力名（**順序が契約** — 直前 token / 直前 hidden / RoPE 4 本）。
+ * drafter グラフの入力名（**順序が契約** — 確定した token / それを出した行の hidden / RoPE 4 本）。
  *
  * 名前ではなく順序まで見るのは、焼く側（`DrafterWrapper.forward` の引数順）と読む側が
  * 同じ列を主張していることの検出器にするため。順序だけずれた資産は名前で引く限り黙って通る。
@@ -71,6 +75,14 @@ const DRAFTER_INPUTS: readonly string[] = [TOKEN_INPUT, HIDDEN_INPUT, ...gemma4R
  */
 export type Gemma4Drafter = {
   readonly session: Session;
+  /**
+   * drafter コンテナのグラフ宣言（**見積り専用** — `Gemma4Pipeline.estimateSessionMemory` が
+   * drafter の常駐重みと借り手 context の state をこれから引く）。
+   *
+   * MUST: `PreparedModel` ではなくグラフだけを持つ（`Gemma4State.graph` と同じ MUST — 全量の
+   * バイト列を掴んだままにしない）。
+   */
+  readonly graph: DrafterGraph;
   /** draft 出口 3 本の名前（**段順** = グラフの宣言順）。 */
   readonly outputs: readonly string[];
   /** 位置 1 行ぶんの cos / sin を作る宣言（貸し手と同じ `pipelineConfig.rope`）。 */
@@ -148,7 +160,7 @@ const assertDrafterOutputs = (where: string, graph: DrafterGraph): readonly stri
   if (graph.outputs.length !== GEMMA4_DRAFT_STEPS) {
     throw new Error(
       `${where}: drafter グラフの出口が ${graph.outputs.length} 本` +
-        `（段 2 は k = ${GEMMA4_DRAFT_STEPS} 固定 — 動的な k は段 3）`,
+        `（配布形の drafter は ${GEMMA4_DRAFT_STEPS} 段で焼かれている — 段数を変えるのは再 export）`,
     );
   }
   for (const name of graph.outputs) {
@@ -302,14 +314,37 @@ export const openDrafterContext = (
 ): Promise<GenerationContext> =>
   drafter.session.createGenerationContext({ chunkLength: 1, borrow: target });
 
-/** 1 サイクルぶんの入力（貸し手が最後に確定させた 1 行から採る）。 */
-export type Gemma4DraftCycle = {
-  /** 直前に確定した token id（論理位置 `P−1` に居る token）。 */
-  readonly token: number;
-  /** その行の最終 norm 後 hidden（貸し手の出力 1・`[1,1,H]` の中身をそのまま渡せる）。 */
-  readonly hidden: Float32Array<ArrayBuffer>;
-  /** その行の論理位置 `P−1`（RoPE の 1 行はこの位置で作る）。 */
-  readonly position: number;
+/**
+ * 1 サイクルぶんの入力（`P = context.pastLength` = KV に入っている行数）。
+ *
+ * 組は「最後に確定した token と、**それを出した行**の hidden」— drafter 自身の段間再帰
+ * （token と、その token を出した段の hidden を次段へ送る）と同じ組み方で、torch drafter の
+ * golden もこの組で採っている。
+ *
+ * MUST: 生成面の `DraftCycle`（`../generation/speculation.ts`）**そのもの**である。写した型を
+ * 持つと、欄の意味が片方だけ改まったときに型検査が通り続ける。
+ */
+export type Gemma4DraftCycle = DraftCycle;
+
+/**
+ * 貸し手 context 1 本ぶんの `DraftFace` を開く（投機ループ〈`createGenerationSequence` の
+ * `speculative.open`〉が sequence 生成時に 1 度だけ呼ぶ席）。
+ *
+ * 束ねるのは 3 つ — 段数（配布形に焼かれた出口の本数）・{@link draftOnce}・借り手 context の
+ * 返却である。生成面は gemma4 も Session も知らないので、借り手 context の寿命はこの閉包が持つ
+ * （`dispose` を呼ぶ順序 = 借り手 → 貸し手 は sequence 側の MUST）。
+ */
+export const openGemma4DraftFace = async (
+  drafter: Gemma4Drafter,
+  target: GenerationContext,
+): Promise<DraftFace> => {
+  const borrowed = await openDrafterContext(drafter, target);
+  return {
+    steps: drafter.outputs.length,
+    draft: (cycle: DraftCycle): Promise<Int32Array<ArrayBuffer>> =>
+      draftOnce(drafter, borrowed, cycle),
+    dispose: (): Promise<void> => borrowed.dispose(),
+  };
 };
 
 /**
@@ -320,7 +355,7 @@ export type Gemma4DraftCycle = {
  * 1 つも動かさない（`state_append` が 0 本 = KV に 1 行も書かない）ので、棄却されても巻き戻す
  * ものが無い。
  *
- * MUST: `hidden` は**貸し手が今の位置で出した行**であること — 別の行を渡しても形は合うので
+ * MUST: `hidden` は**`token` を出した行**（位置 `P−1`）であること — 別の行を渡しても形は合うので
  * 例外にならず、draft の質だけが静かに落ちる（この層で検出できるのは幅だけ）。
  */
 export const draftOnce = async (
@@ -344,7 +379,7 @@ export const draftOnce = async (
   const inputs: Record<string, Tensor> = {
     [TOKEN_INPUT]: { dtype: "i32", shape: [1, 1], data: Int32Array.of(token) },
     [HIDDEN_INPUT]: { dtype: "f32", shape: [1, drafter.hiddenSize], data: hidden },
-    // 位置 P−1 の 1 行（PLE は要らない — drafter は主表も per-layer 表も引かない）。
+    // 位置 P の 1 行（PLE は要らない — drafter は主表も per-layer 表も引かない）。
     ...gemma4RopeInputs(drafter.rope, [position]),
   };
   const outputs = await drafter.session.run(inputs, {}, { context: borrowed, queryLength: 1 });

@@ -55,6 +55,7 @@ import {
   type Gemma4ChatStream,
   type Gemma4PrefillProgress,
   type Gemma4SequenceOptions,
+  stopStringOf,
 } from "./pipeline.ts";
 import { type Gemma4ChatMessage, gemma4ChatPrompt, gemma4ChatTurn } from "./text/chat.ts";
 import type { GemmaTokenizer } from "./text/tokenizer.ts";
@@ -130,6 +131,14 @@ export type Gemma4ChatSessionOptions = {
   readonly sampler?: SamplerSpec;
   /** 容量が足りないときに履歴を作り直す関数（既定 {@link dropOldestTurns}）。 */
   readonly onOverflow?: Gemma4ChatOverflowPolicy;
+  /**
+   * この会話で投機デコードを張るか（既定 = pipeline に drafter が居れば `true`）。
+   *
+   * ターンごとではなく**セッション単位**の席である — この層は 1 本の sequence を多ターン使い
+   * 回し、投機の借り手 context は sequence の寿命に束ねられている（ターンごとに切り替えるには
+   * sequence を作り直す = KV を捨てることになる）。
+   */
+  readonly speculative?: boolean;
 };
 
 /**
@@ -256,6 +265,8 @@ export class Gemma4ChatSession {
   readonly #onOverflow: Gemma4ChatOverflowPolicy;
   /** このセッションが確保する容量（sequence を作り直しても不変 — 溢れ判定の物差しでもある）。 */
   readonly #capacity: number;
+  /** 投機を張るか（`undefined` = pipeline の既定に任せる — sequence を作り直しても不変）。 */
+  readonly #speculative: boolean | undefined;
   /** 会話の履歴（この層の唯一の可変状態 — sequence は transcript を持たない）。 */
   #turns: Gemma4ChatMessage[];
   /** 現在の sequence（`undefined` = 次のターンで作り直す）。 */
@@ -274,6 +285,7 @@ export class Gemma4ChatSession {
     this.#sampler = options.sampler;
     this.#onOverflow = options.onOverflow ?? dropOldestTurns;
     this.#capacity = options.capacity ?? host.program.capacity;
+    this.#speculative = options.speculative;
     // MUST: 容量の関係を**構築時**に見る（式は `sequence.ts` の `createGenerationSequence` と
     // 同じ 2 本）。この層は `#capacity` を溢れ判定の物差しとして sequence の確保より**前**に
     // 使うので、検査を sequence 側だけに任せると、長いターンでは `#shrink` が履歴を実際に
@@ -413,11 +425,9 @@ export class Gemma4ChatSession {
             // （閉じた turn として KV を継がせない）。
             if (failure !== undefined && inner.reason !== "aborted") fail(failure.error);
             else {
-              // 停止文字列だけはこの層の判定なので理由を差し替える（`tokens` は内側の数をそのまま
-              // 使う = この層で数え直さない）。
-              stop = matched === undefined
-                ? inner
-                : { reason: "stop-string", stopString: matched, tokens: inner.tokens };
+              // 停止文字列だけはこの層の判定なので理由を差し替える（`tokens` と投機の勘定は
+              // 内側の値をそのまま写す = この層で数え直さない。組み立ては `chat` と同じ 1 本）。
+              stop = matched === undefined ? inner : stopStringOf(matched, inner);
               settle(stop);
             }
           } catch (error) {
@@ -512,7 +522,11 @@ export class Gemma4ChatSession {
       );
       if (detail === undefined) {
         if (held !== undefined) return { sequence: held, prompt };
-        const created = await this.#host.sequence({ capacity: this.#capacity });
+        const created = await this.#host.sequence({
+          capacity: this.#capacity,
+          // 未指定は欄ごと渡さない（pipeline の既定 = drafter が居れば投機、に倒す）。
+          ...(this.#speculative === undefined ? {} : { speculative: this.#speculative }),
+        });
         // MUST: `await` 明けにもう一度見る（`Gemma4Pipeline.sequence` と同じ形）。確保の途中で
         // dispose された実体は `dispose()`（`#sequence` はまだ undefined）からも `#finish` の
         // eos 枝（`#releaseSequence` を通らない）からも畳まれない — この再検査だけが塞げる窓。

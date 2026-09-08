@@ -137,6 +137,15 @@ type FakeHost = Gemma4ChatSessionHost & {
   prompts(): readonly (readonly number[])[];
   /** `sequence()` が受けた容量を発行順に（セッションのノブが降りているか）。 */
   capacities(): readonly (number | undefined)[];
+  /**
+   * `sequence()` が受けた投機の指定を発行順に。
+   *
+   * `undefined` は**欄ごと渡っていない**ことを表す（`speculative: undefined` を渡す形は
+   * pipeline 側の既定「drafter が居れば張る」を潰すので、値としては同じでも別物である）。
+   */
+  speculatives(): readonly (boolean | undefined)[];
+  /** `sequence()` が受けた指定に `speculative` の欄があったかを発行順に。 */
+  speculativeKeys(): readonly boolean[];
   /** `generate` が受けた sampler 指定を発行順に（解決順 3 段の観測点）。 */
   samplers(): readonly (SamplerSpec | undefined)[];
 };
@@ -173,6 +182,8 @@ const fakeHost = (
 ): FakeHost => {
   const prompts: number[][] = [];
   const capacities: (number | undefined)[] = [];
+  const speculatives: (boolean | undefined)[] = [];
+  const speculativeKeys: boolean[] = [];
   const samplers: (SamplerSpec | undefined)[] = [];
   let created = 0;
   let disposed = 0;
@@ -185,10 +196,14 @@ const fakeHost = (
     disposed: () => disposed,
     prompts: () => prompts,
     capacities: () => capacities,
+    speculatives: () => speculatives,
+    speculativeKeys: () => speculativeKeys,
     samplers: () => samplers,
     sequence: (options = {}): Promise<GenerationSequence> => {
       created += 1;
       capacities.push(options.capacity);
+      speculatives.push(options.speculative);
+      speculativeKeys.push(Object.hasOwn(options, "speculative"));
       const capacity = options.capacity ?? program.capacity;
       let used = 0;
       let gone = false;
@@ -539,6 +554,52 @@ Deno.test("ChatSession capacity: 省略時は program の既定・渡せばそ�
     const session = new Gemma4ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS, capacity: 128 });
     assertEquals(await session.send("Name a color.").text(), "Blue.");
     assertEquals(host.capacities(), [128], "sequence にも同じ容量が降りる");
+  });
+});
+
+Deno.test("ChatSession speculative: 指定はそのまま sequence へ降り、未指定は欄ごと渡さない", async (t) => {
+  // 投機はセッション単位の席（借り手 context が sequence の寿命に束ねられているので、ターン
+  // ごとには切り替えられない）。この層がするのは「降ろすかどうか」だけで、判定は pipeline 側に
+  // ある — `speculative: undefined` を**渡してしまう**退行は、pipeline の既定（drafter が居れば
+  // 張る）を潰す一方で型も値も同じに見えるので、欄の有無で見るしかない。
+  const script = [{ text: "Blue.", closes: true }, { text: "Red.", closes: true }] as const;
+
+  await t.step("未指定: 欄そのものを渡さない（pipeline の既定へ倒す）", async () => {
+    const host = fakeHost([...script], programOf(640));
+    const session = new Gemma4ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS });
+    assertEquals(await session.send("Name a color.").text(), "Blue.");
+    assertEquals(host.speculativeKeys(), [false], "未指定なのに speculative の欄が渡っている");
+    assertEquals(host.speculatives(), [undefined]);
+  });
+
+  await t.step("true / false はそのまま降りる", async () => {
+    for (const speculative of [true, false]) {
+      const host = fakeHost([...script], programOf(640));
+      const session = new Gemma4ChatSession(host, {
+        maxNewTokens: MAX_NEW_TOKENS,
+        speculative,
+      });
+      assertEquals(await session.send("Name a color.").text(), "Blue.");
+      assertEquals(host.speculatives(), [speculative]);
+      assertEquals(host.speculativeKeys(), [true]);
+    }
+  });
+
+  await t.step("sequence を作り直しても同じ値が降りる（会話の途中で切り替わらない）", async () => {
+    // 打ち切ったターン（`closes: false`）の後は KV を継げないので sequence を作り直す — その
+    // 2 本目にも同じ指定が降りることを見る（セッションの設定であってターンの設定ではない）。
+    const host = fakeHost(
+      [{ text: "Blue", closes: false }, { text: "Red.", closes: true }],
+      programOf(640),
+    );
+    const session = new Gemma4ChatSession(host, {
+      maxNewTokens: MAX_NEW_TOKENS,
+      speculative: false,
+    });
+    assertEquals(await session.send("Name a color.").text(), "Blue");
+    assertEquals(await session.send("Another one.").text(), "Red.");
+    assertEquals(host.created(), 2, "作り直しの前提が崩れている");
+    assertEquals(host.speculatives(), [false, false]);
   });
 });
 

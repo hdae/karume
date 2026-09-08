@@ -226,7 +226,11 @@ export type {
   GenerationCapacityDetail,
   GenerationEvent,
   GenerationRequest,
+  /** run 1 本につき 1 通の観測（`Gemma4RunPhase` の実体 — `./gemma` を参照）。 */
+  GenerationRunPhase,
   GenerationSequence,
+  /** 投機の勘定（`GenerationStop.speculation` — `./gemma` を参照）。 */
+  GenerationSpeculation,
   GenerationStop,
   GenerationStream,
 } from "./src/generation/sequence.ts";
