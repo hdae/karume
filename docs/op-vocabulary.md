@@ -328,6 +328,16 @@ NOTE: 2026-08-18 `state_append` を**拡張原子層**（Core ATen 外）に追�
 （`NON_EMITTABLE_OPS` — 発行は decode グラフ台本の担当）。attention に内蔵しない理由・
 `window` attrs・nodes 配列順の効果順序は ADR 決定 5 / 5b が持つ。
 
+NOTE: 2026-09-08 `attention` の states 形に **readonly 形**（省略可能 attrs `readonly` —
+`true` のみ）を足した。契約の正本は ADR
+[0096](decisions/0096-speculative-decoding.md) 段 2 §1.2。**op 名も語彙も増えない**（states 形と
+同じ「欄の有無が形を判別する」拡張の 2 段目）が、`ins` が **q 1 本ちょうど**になる点だけが
+既存の 2 形と違う: 今 step の k / v を持たず、読むのは借り物スロットの列 `[P−min(P,W), P)`
+（full は `[0, P)`）だけ。q は `[B,H,1,D]` で **M = 1 MUST**、参照先は **external スロット限定**
+（`states[].external` — 書き手は貸し手 context の側に居る）。torch.export の経路からは出ない
+（`scaled_dot_product_attention` の分解には「今 step の k/v が無い」形が無い）— 発行は
+エクスポータの手術（`states.to_external_states_form`）の担当。
+
 NOTE: 2026-08-13 に起票した層表の 2 穴（Core ATen 外・モデル由来の原子の行き場 /
 「容量・性能で非成立」の線引きの非等価）は、**2026-08-14 の入場門モデルへの改訂
 （[ADR 0059](decisions/0059-op-vocabulary-entry-doors.md)）で解消済み** — 要求元軸の廃止と

@@ -422,6 +422,39 @@ export const STATE_WINDOW_ATTRS: AttrSchema = {
   },
 };
 
+/**
+ * readonly attention（ADR 0096 段 2 §1.2）の宣言 attr。**省略可能かつ `true` のみ**で、
+ * 欄の不存在が「今 step の k/v も読む従来の states 形」を意味する。
+ *
+ * MUST: `false` を受理しない（`window` と同じ流儀 — 欄の不存在と同義の綴りを 2 つ持たない）。
+ * MUST: 既定値で補完しない。補完すると「ins を持たない past-only 形」と「今 step の k/v を
+ * 足す形」の取り違えが、アリティ検査を抜けたあと値にしか出なくなる。
+ */
+export const STATE_READONLY_ATTRS: AttrSchema = {
+  readonly: (value, where) => {
+    if (value !== true) {
+      throw new OpContractError(
+        `${where}: ${JSON.stringify(value)} は書けない（readonly は true のみ — ` +
+          "欄の不存在が「今 step の k/v も読む states 形」)",
+      );
+    }
+  },
+};
+
+/**
+ * states 形 attention の `attrs` が **readonly**（past だけを読む形）を宣言しているか。
+ *
+ * MUST: 参照は `Object.hasOwn` のみ（Object.prototype 由来のキーが素通りしない）。
+ */
+export const stateReadonly = (
+  attrs: Readonly<Record<string, unknown>>,
+  where: string,
+): boolean => {
+  if (!Object.hasOwn(attrs, "readonly")) return false;
+  STATE_READONLY_ATTRS["readonly"](attrs["readonly"], `${where} の attrs.readonly`);
+  return true;
+};
+
 /** state 参照ノードの `window`（宣言が無ければ `undefined` = 全 context）。 */
 export const stateWindow = (
   attrs: Readonly<Record<string, unknown>>,

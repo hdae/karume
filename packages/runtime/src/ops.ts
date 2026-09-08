@@ -74,6 +74,7 @@ export {
   scalarParamCount,
   sliceAttrs,
   softmaxDim,
+  stateReadonly,
   stateWindow,
   symPrefixSliceAttrs,
   topkK,

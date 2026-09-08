@@ -64,10 +64,19 @@ export type GraphJson = {
   symbols: string[];
   inputs: { name: string; dtype: string; shape: (number | string)[] }[];
   outputs: string[];
-  initializers: Record<string, { tensor: string; storage: Record<string, unknown> }>;
+  initializers: Record<string, {
+    tensor?: string;
+    /** 共有 initializer（ADR 0096 段 2 §1.3）— バイトを配布形に持たない宣言。 */
+    shared?: { tensor: string };
+    storage: Record<string, unknown>;
+  }>;
   values: Record<string, { dtype: string; shape: (number | string)[] }>;
   /** 省略可能な state スロット節（ADR 0066 決定 2）— 既定のグラフは持たない。 */
-  states?: Record<string, { dtype: string; shape: (number | string)[] }>;
+  states?: Record<
+    string,
+    /** `external` は借り物スロット（ADR 0096 段 2 §1.1）。 */
+    { dtype: string; shape: (number | string)[]; external?: boolean }
+  >;
   nodes: {
     op: string;
     ins: string[];

@@ -75,6 +75,13 @@ capability 宣言を加えた非互換改訂。確定範囲を定義し、拡張
   （入力 shape ∪ states shape — ADR 0066 追記 7。states 専用記号が値 shape に現れたら
   fail loudly）③**参照完全性**（宣言したスロットは 1 つ以上のノードから参照される MUST）。
   `states` 欄を持たないグラフ（= 既存の全モデル）の受理集合は 1 バイトも動かない。
+- MTP（2026-09-08）: **借り物の宣言 3 種**を追加（ADR
+  [0096](decisions/0096-speculative-decoding.md) 段 2 — drafter が target の KV と重みを読む形）:
+  ①`states[].external`（省略可能・`true` のみ — 実体は借り先 context にあり自分では確保しない）
+  ②`attention` の省略可能 attrs **`readonly`**（`true` のみ — states 形が **ins を q 1 本**に
+  絞り、今 step の k/v を取らない past-only 形になる）③`initializers[].shared`（`tensor` の
+  代わりに書く借り物宣言 — バイトを配布形に持たない）。3 つとも**欄を持たないグラフは無風**で、
+  既存 IR への影響はゼロ。
 
 ## コンテナ
 
@@ -187,6 +194,23 @@ capability 宣言を加えた非互換改訂。確定範囲を定義し、拡張
 - `initializers[].tensor` は safetensors のテンソルキー。safetensors 側 dtype は
   `storage.dtype` と一致し（`i32` ↔ safetensors `I32`）、shape は宣言 shape と一致しなければ
   ならない（ロード時検証）。
+- **共有 initializer（`shared`）**（ADR [0096](decisions/0096-speculative-decoding.md) 段 2 §1.3）:
+  `tensor` の**代わりに** `{ "shared": { "tensor": <貸し手コンテナのテンソルキー> } }` を書くと、
+  バイトを配布形に持たない宣言になる（実体は貸し手 Session が既に GPU へ載せた重み）。
+
+  ```jsonc
+  "initializers": {
+    "target_embed": { "shared": { "tensor": "model.lm_head.weight" }, "storage": { "dtype": "i8" } }
+  }
+  ```
+
+  - `tensor` と `shared` は**排他**（`shared` を持つ宣言に `tensor` を書くと未知キーで
+    fail loudly）。`values{}` の dtype / shape 宣言は従来どおり**必須**。
+  - `storage.dtype` は宣言（貸し手と一致 MUST）。**`scale` / `group_size` は書かない** —
+    付随実体を持つのは貸し手側だけで、写すと同じ事実が 2 箇所に生える（i8 / i4 の
+    「scale 必須」規則もこの宣言には掛からない）。
+  - コンテナの突合（宣言 ↔ 実テンソルの完全一致・余剰検査）から**外れる**。実体の素性は
+    ロード側の門が見る（同一 device・宣言 shape・格納 dtype・消費席）。
 - **宣言完全性**: 全ての値（inputs・initializers・全ノード出力）はちょうど 1 箇所で宣言される
   — inputs は `inputs[]` で、**initializer と中間値・出力は `values{}` で**。実行時に毎ノード、
   宣言 shape/dtype と照合する。
@@ -240,9 +264,18 @@ capability 宣言を加えた非互換改訂。確定範囲を定義し、拡張
 }
 ```
 
-- 形は `name → { dtype, shape }` の 2 キーちょうど（未知キーは fail loudly）。空オブジェクトも
-  節の省略も同義（= スロット 0 本）。スロット名は**空文字列でない**（参照側の欄が受理しない名前を
-  宣言できると、原理的に参照不能なスロットになる）。
+- 形は `name → { dtype, shape }` の 2 キー + **省略可能な `external`**（未知キーは fail loudly）。
+  空オブジェクトも節の省略も同義（= スロット 0 本）。スロット名は**空文字列でない**（参照側の欄が
+  受理しない名前を宣言できると、原理的に参照不能なスロットになる）。
+- **`external`**（ADR [0096](decisions/0096-speculative-decoding.md) 段 2 §1.1・**`true` のみ**・
+  欄の不存在 = 自分で確保する）: 実体を**借り先の context** が持つスロット。`false` は書けない
+  （欄の不存在と同義の綴りを 2 つ持たない）。規律は 4 点で、どれも破れは例外ではなく
+  「未初期化の過去を読む」「貸し手が確定した KV を上書きする」という別の値として出る:
+  - `state_append` は **0 本**（借り物へ書けるのは貸し手だけ）
+  - 読者は **`attrs.readonly` の attention だけ**（今 step の k/v を足す形は自分で書いた行を
+    読む前提なので、書き手の居ないスロットでは必ず未初期化行を読む）
+  - `readonly` の読者が参照するスロットは **external だけ**（上の対）
+  - external が 1 本でもあれば**全スロットが external**（借り手 context は自前スロットを持たない）
 - `shape` は**固定 rank の容量込み具体形**: rank は **1..4**（ADR 0066 決定 2 の「固定 rank
   （rank ≤ 4）」）、数値次元は**正整数**（`values` の非負とは違う — 容量 0 のスロットは実体を
   持てない）。次元式は値と同じ次元言語で、`symbols` に宣言済みの記号なら使える。**記号の
@@ -288,8 +321,9 @@ capability 宣言を加えた非互換改訂。確定範囲を定義し、拡張
   契約テーブルの出力数突合（他の op に `outs: []` を書くと本数不一致で落ちる）。
 - `nodes` は**トポロジカル順**で格納される（パーサが検証。前方参照は fail loudly）。
 - `attrs` は op ごとの契約テーブルで検証する。未知の attr・契約外の値は fail loudly
-  （近似実行しない）。**省略可能な attrs は `window` の 1 本だけ**（下の「state 参照ノード」）—
-  欄の不存在それ自体が別の宣言（= 全 context）になる欄で、他の attrs は従来どおり
+  （近似実行しない）。**省略可能な attrs は `window` と `readonly` の 2 本だけ**（どちらも
+  states 形専用 — 下の「state 参照ノード」）。欄の不存在それ自体が別の宣言（`window` 不在 =
+  全 context / `readonly` 不在 = 今 step の k/v も読む形）になる欄で、他の attrs は従来どおり
   「宣言済みキーは全て必須・既定値補完なし」。
 - **`states` 欄**（省略可能・下の「state 参照ノード」）: `ins` / `outs` と別の欄で state
   スロットを名前参照する。キーは op 契約が固定し、値は `states{}` で宣言済みのスロット名
@@ -339,6 +373,30 @@ state スロットを読み書きするノードの契約（ADR
   op の不在で得る）。
 - **スロットの物理形は `[B, Hkv, C, D]` 固定**（C = 容量）。参照するノードの `ins` と
   **B / Hkv / D が一致**し、`attention` の k / v スロットは**互いに同形**でなければならない。
+- **readonly 形**（ADR [0096](decisions/0096-speculative-decoding.md) 段 2 §1.2）: states 形の
+  attention が省略可能 attrs **`readonly`**（`true` のみ）を宣言すると、`ins` は **q 1 本
+  ちょうど**（今 step の k / v を取らない past-only 形）になる。
+
+  ```jsonc
+  {
+    "op": "attention",
+    "ins": ["q"],
+    "outs": ["o"],
+    "attrs": { "scale": 1.0, "window": 512, "readonly": true },
+    "states": { "k": "l13.k", "v": "l13.v" }
+  }
+  ```
+
+  - q は `[B, H, M, D]` で **M = 1 MUST**（読むのは論理位置 P−1 の 1 行だけ — M > 1 は
+    2 行目以降が同じ列範囲を読む沈黙誤値になる）。スロット `[B, Hkv, C, D]` とは
+    **B / D が一致**・`H % Hkv == 0` かつ `H ≥ Hkv`・sliding なら `window ≤ C`。出力は
+    `[B, H, 1, D]`（q と同形）。
+  - 意味論: 列 `[column_base, P)` への attention（`column_base` = sliding なら `P − min(P, W)` /
+    full なら `0`）。今 step の `ins` は**無い**ので、live 列数は `min(P, W)` / `P`。
+    softmax の数値契約（半スケール・−inf identity・②統計）は states 形と同じで、**P = 0
+    （列 0 本）は空行 → 出力 0**。
+  - `readonly` は **states 欄を持つノードでのみ**宣言でき、参照先は **external スロットだけ**
+    （上の「state スロット」節）。`state_append` には書けない。
 - 省略可能 attrs **`window`**（正の整数・欄の不存在 = 全 context）= sliding window の幅。
   **`window ≤ C`** MUST。**同一スロットに触れる全ノードで存在有無も値も一致**する MUST
   （論理 col → 物理 row の写像は読み書き同式 — 読み側だけ別式にすると沈黙誤読になる）。
@@ -492,7 +550,9 @@ state スロットを読み書きするノードの契約（ADR
     検査は入れない。その形が正規なのは `safe_softmax` を使う分解経路だけ。ADR
     [0044](decisions/0044-runtime-attention-mask.md) 決定 3）。
     省略可能な **`states` 欄**を持つと autoregressive の states 形になる（上の
-    「state 参照ノード」節 — 同一 op 名の契約拡張で、欄の有無が形を判別する）
+    「state 参照ノード」節 — 同一 op 名の契約拡張で、欄の有無が形を判別する）。
+    states 形がさらに省略可能 attrs **`readonly`** を宣言すると **アリティ 1**（q だけの
+    past-only 形 — ADR [0096](decisions/0096-speculative-decoding.md) 段 2 §1.2）になる
   - `state_append`（f32、**アリティ 1・出力 0 本**、省略可能 attrs `window`、`states` 欄
     `{ slot }` 必須 — ADR
     [0067](decisions/0067-autoregressive-attention-vocabulary.md) 決定 5）— 今 step の k / v を

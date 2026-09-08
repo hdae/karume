@@ -16,8 +16,10 @@
 
 import { declaredPayloadBytes, declaredScaleBytes } from "../format/container.ts";
 import { groupScaleShape } from "../format/i4.ts";
-import type { IrGraph } from "../format/ir.ts";
+import type { IrGraph, IrStorageDtype } from "../format/ir.ts";
 import { toSizeClass } from "../gpu/arena.ts";
+import type { GpuContext } from "../gpu/device.ts";
+import { RUNTIME_INTERNAL } from "../gpu/device.ts";
 import { numel } from "../ops.ts";
 import {
   eligibleCompressedInitializers,
@@ -73,6 +75,24 @@ export type WeightResidency =
     readonly payloadBytes: number;
     /** CPU で f32 へ展開した後のバイト数（常駐するのはこちら）。 */
     readonly expandedBytes: number;
+  }
+  | {
+    /**
+     * **借り物の重み**（ADR 0096 段 2 §1.3 の共有 initializer）。この Session は 1 バイトも
+     * 確保・転送せず、実体は貸し手 Session の GPU バッファをそのまま束ねる
+     * （`SessionOptions.sharedWeights`）。
+     */
+    readonly seat: "shared";
+    /**
+     * 借りる実体に**期待する席**（貸し手の分類と一致 MUST — 借り手 Session 構築の門が突合する）。
+     *
+     * MUST: 借り手側の消費（どの op の重みスロットで食うか）から**独立に**導き直す。貸し手が
+     * i4 常駐でも借り手の消費に展開経路が無ければ席は `expanded` になり、同じバッファが
+     * 「packed i4 のバイト列」と「f32 の値」の 2 通りに読まれる — 例外は 1 つも出ない。
+     */
+    readonly expected: Exclude<WeightResidency["seat"], "shared">;
+    /** i8 の per-channel scale が掛かる軸（`expected === "i8"` のときだけ）。 */
+    readonly channelAxis?: number;
   };
 
 /**
@@ -99,6 +119,26 @@ export const planWeightResidency = (graph: IrGraph): ReadonlyMap<string, WeightR
     const shape = graph.values[name].shape.map(Number);
     const count = numel(shape);
     const storage = initializer.storage.dtype;
+    // 共有 initializer は席だけを決める（バイト数は 1 つも数えない — 確保するのは貸し手）。
+    if (initializer.shared !== undefined) {
+      const resident = storage === "i4"
+        ? eligible.has(name) && i4Eligible.has(name)
+        : eligible.has(name);
+      if (storage === "f32" || storage === "i32" || storage === "bf16") {
+        plan.set(name, { seat: "shared", expected: "raw" });
+      } else if (!resident) {
+        plan.set(name, { seat: "shared", expected: "expanded" });
+      } else if (storage === "i8") {
+        const channelAxis = channelAxes.get(name);
+        if (channelAxis === undefined) {
+          throw new ExecutionError(`${where}: per-channel scale のチャネル軸が決まらない`);
+        }
+        plan.set(name, { seat: "shared", expected: "i8", channelAxis });
+      } else {
+        plan.set(name, { seat: "shared", expected: storage });
+      }
+      continue;
+    }
     const payloadBytes = declaredPayloadBytes(storage, count, where);
     if (storage === "f32" || storage === "i32" || storage === "bf16") {
       // 圧縮しない格納は生バイトがそのまま GPU 表現。
@@ -155,6 +195,126 @@ export const planWeightResidency = (graph: IrGraph): ReadonlyMap<string, WeightR
 };
 
 /**
+ * {@link SharedWeight} のランタイム内部面（利用者が触る面ではない）。
+ *
+ * MUST: 貸し手の実体（バッファ・`ResidentWeight`）は**参照だけ**を持つ。写しを取ると
+ * 「どちらが本物か」が生まれ、貸し手が f16 常駐から展開席へ変わったときに借り手だけが
+ * 古い席で走る。
+ */
+export type SharedWeightInternals = {
+  /** 貸し手の initializer 名（診断用）。 */
+  readonly initializer: string;
+  /** 貸し手の device（借り手と同一 MUST — 別 device のバッファは束縛できない）。 */
+  readonly gpu: GpuContext;
+  /** 貸し手が確保した重み本体のバッファ（借り手は所有しない）。 */
+  readonly buffer: GPUBuffer;
+  /** 圧縮のまま常駐している場合の席と付随実体（f32 / 生バイト席では undefined）。 */
+  readonly resident: ResidentWeight | undefined;
+  /** 貸し手の常駐席（借り手の期待席と一致 MUST）。 */
+  readonly seat: Exclude<WeightResidency["seat"], "shared">;
+  /** i8 席の per-channel scale の軸（それ以外は undefined）。 */
+  readonly channelAxis: number | undefined;
+  /** 貸し手の宣言 格納 dtype。 */
+  readonly storage: IrStorageDtype;
+  /** 貸し手の宣言 shape。 */
+  readonly shape: readonly number[];
+  /** 借用を 1 本積む（借り手 Session の構築が成功したとき）。 */
+  retain(): void;
+  /** 借用を 1 本返す（借り手 Session の dispose / 構築の失敗）。 */
+  release(): void;
+};
+
+/**
+ * 貸し手 Session が GPU へ載せた重み 1 本への**不透明な参照**（ADR 0096 段 2 §2.2）。
+ *
+ * `Session.exportWeight(initializerName)` だけが作り、`SessionOptions.sharedWeights` で
+ * 借り手 Session へ渡す。借り手はバイトを 1 つも持たず、貸し手のバッファをそのまま束ねる。
+ *
+ * MUST: 構築の入口は `Session.exportWeight` だけ（`ResidentTensor` と同じ流儀 — 直接
+ * 構築すると席の突合と借用計数を迂回できる）。
+ */
+export class SharedWeight {
+  /** ランタイム内部面（利用者が触る面ではない）。 */
+  readonly [RUNTIME_INTERNAL]: SharedWeightInternals;
+
+  constructor(internals: SharedWeightInternals) {
+    this[RUNTIME_INTERNAL] = internals;
+  }
+}
+
+/**
+ * 借り手グラフの共有 initializer 宣言と、渡された {@link SharedWeight} を突き合わせる
+ * （ADR 0096 段 2 §2.2 の門）。返すのは注入すべき組（宣言順）。
+ *
+ * 見るのは 5 点:
+ * 1. **過不足なし** — 宣言 1 本につき 1 つ（欠けは「バイトの無い重みで走る」、余りは
+ *    「渡したつもりの重みが誰にも使われない」）
+ * 2. **同一 device** — 別 device のバッファを束ねる bind group は validation で落ちるが、
+ *    診断は真因から遠い
+ * 3. **宣言 shape 一致** — バイト数だけでは `[2,3]` と `[3,2]` の取り違えが通る
+ * 4. **格納 dtype 一致** — 宣言と実バイト列の読み方が割れる
+ * 5. **席の一致**（i8 は per-channel scale の軸まで） — 貸し手が i4 常駐でも借り手の消費に
+ *    展開経路が無ければ席は `expanded` で、同じバッファが packed バイトと f32 の 2 通りに
+ *    読まれる。i8 の軸違い（embedding と linear）も同じ機序で沈黙誤値になる
+ *
+ * MUST: 全て fail loudly。5 点とも破れは例外ではなく**別の値**として出る。
+ */
+export const resolveSharedWeights = (
+  graph: IrGraph,
+  residency: ReadonlyMap<string, WeightResidency>,
+  gpu: GpuContext,
+  provided: Readonly<Record<string, SharedWeight>> | undefined,
+): readonly { readonly name: string; readonly shared: SharedWeight }[] => {
+  const declared = Object.entries(graph.initializers)
+    .filter(([, initializer]) => initializer.shared !== undefined)
+    .map(([name]) => name);
+  const given = Object.keys(provided ?? {});
+  const missing = declared.filter((name) => !Object.hasOwn(provided ?? {}, name));
+  const surplus = given.filter((name) => !declared.includes(name));
+  if (missing.length > 0 || surplus.length > 0) {
+    throw new ExecutionError(
+      `options.sharedWeights がグラフの shared 宣言と一致しない: 不足 [${
+        missing.join(", ")
+      }] / 余剰 [${surplus.join(", ")}]` +
+        "（shared 宣言 1 本につき 1 つ・過不足なく渡す MUST — ADR 0096 段 2 §2.2）",
+    );
+  }
+  return declared.map((name) => {
+    const shared = (provided ?? {})[name][RUNTIME_INTERNAL];
+    const where = `sharedWeights['${name}'（貸し手の initializer '${shared.initializer}'）`;
+    if (shared.gpu !== gpu) {
+      throw new ExecutionError(`${where}: 貸し手と借り手の GpuContext（device）が別`);
+    }
+    const shape = graph.values[name].shape.map(Number);
+    if (shape.length !== shared.shape.length || shape.some((d, i) => d !== shared.shape[i])) {
+      throw new ExecutionError(
+        `${where}: 宣言 shape [${shape.join(",")}] が貸し手の [${shared.shape.join(",")}] と違う`,
+      );
+    }
+    const storage = graph.initializers[name].storage.dtype;
+    if (storage !== shared.storage) {
+      throw new ExecutionError(
+        `${where}: 宣言 格納 dtype '${storage}' が貸し手の '${shared.storage}' と違う`,
+      );
+    }
+    const seat = residency.get(name);
+    if (seat === undefined || seat.seat !== "shared") {
+      throw new ExecutionError(`${where}: 常駐分類が shared でない（簿記の破れ）`);
+    }
+    if (seat.expected !== shared.seat || seat.channelAxis !== shared.channelAxis) {
+      throw new ExecutionError(
+        `${where}: 消費席が貸し手と互換でない（借り手は席 '${seat.expected}'${
+          seat.channelAxis === undefined ? "" : `・チャネル軸 ${seat.channelAxis}`
+        }・貸し手は席 '${shared.seat}'${
+          shared.channelAxis === undefined ? "" : `・チャネル軸 ${shared.channelAxis}`
+        }）— 同じバッファが別の読み方をされる`,
+      );
+    }
+    return { name, shared: (provided ?? {})[name] };
+  });
+};
+
+/**
  * 席 1 つが GPU に確保させるバッファ 1 本（{@link planWeightBuffers} の要素）。
  *
  * MUST: 「席のどのバイト数が GPU バッファになるか」の分岐はここ 1 本 — 上限検査
@@ -163,7 +323,11 @@ export const planWeightResidency = (graph: IrGraph): ReadonlyMap<string, WeightR
  */
 export type WeightBuffer = {
   readonly name: string;
-  readonly seat: WeightResidency["seat"];
+  /**
+   * この確保を出した席。**借り物（`shared`）は現れない** — 型でそれを言うことで、席ごとの
+   * 網羅 switch（見積りの 3 欄振り分け）が「数えない席」を数える形にならない。
+   */
+  readonly seat: Exclude<WeightResidency["seat"], "shared">;
   /** `payload` = 重み本体（`expanded` 席は f32 展開後）/ `scale` = companion scale。 */
   readonly kind: "payload" | "scale";
   /** `createBuffer` に渡るバイト数（`toSizeClass` = 4 バイト整列 + 4 バイト床）。 */
@@ -186,13 +350,16 @@ export const planWeightBuffers = (
   const buffers: WeightBuffer[] = [];
   const add = (
     name: string,
-    seat: WeightResidency["seat"],
+    seat: WeightBuffer["seat"],
     kind: WeightBuffer["kind"],
     declaredBytes: number,
   ): void => {
     buffers.push({ name, seat, kind, byteLength: toSizeClass(declaredBytes), declaredBytes });
   };
   for (const [name, seat] of residency) {
+    // 借り物の席は 1 本も確保しない（実体は貸し手の Session が抱えている）。上限検査からも
+    // 見積りからも外れるのはこの 1 行が唯一の分岐点。
+    if (seat.seat === "shared") continue;
     add(
       name,
       seat.seat,

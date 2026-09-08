@@ -45,10 +45,13 @@ import {
 } from "../src/kernels/argmax.ts";
 import { bmmKey, bmmParams, bmmRowWindowParams, bmmWgsl } from "../src/kernels/bmm.ts";
 import {
+  statePvParallelReadonlyWgsl,
   statePvParallelWgsl,
   statePvWgsl,
+  stateQkParallelReadonlyWgsl,
   stateQkParallelWgsl,
   stateQkWgsl,
+  stateStatsReadonlyWgsl,
   stateStatsWgsl,
 } from "../src/kernels/state-attention.ts";
 import { stateAppendWgsl } from "../src/kernels/state-append.ts";
@@ -678,6 +681,15 @@ Deno.test("生成した WGSL がスナップショットとバイト単位で一
     ["attention_state_pv_tiled_sliding_gqa.wgsl", statePvTiledWgsl(true, true, 16)],
     ["attention_state_pv_tiled_m768.wgsl", statePvTiledWgsl(false, false, 768)],
     ["attention_state_pv_tiled_m768_sliding_gqa.wgsl", statePvTiledWgsl(true, true, 768)],
+    // readonly 変種 3 本（ADR 0096 段 2 §1.2 — drafter が貸し手の KV だけを読む形）。
+    // MUST: 3 本で **live の 2 分岐**（sliding / full）と **窓の述語**（①' だけが持つ）と
+    // **GQA の kv 面**の 3 つを覆う組を選ぶ — 変種ごとに全直積を置くと、readonly 固有の断片
+    // （`column_base` / `live_columns` / `in_window`）の差分がスナップショットの量に埋もれる。
+    // ①' は sliding + GQA（窓の述語と kv 面の両方が出る唯一の組）、② は full（`live = past` の
+    // 側）、③' は sliding の非 GQA（残る 2 分岐）。
+    ["attention_state_qk_par_ro_sliding_gqa.wgsl", stateQkParallelReadonlyWgsl(true, true)],
+    ["attention_state_stats_ro.wgsl", stateStatsReadonlyWgsl(false)],
+    ["attention_state_pv_par_ro_sliding.wgsl", statePvParallelReadonlyWgsl(true, false)],
     ["state_append.wgsl", stateAppendWgsl(false)],
     ["state_append_sliding.wgsl", stateAppendWgsl(true)],
   ];

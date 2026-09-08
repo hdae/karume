@@ -119,6 +119,30 @@ type GenerationContextInternals = {
   /** state スロットの実体（generation run の bind group はここから束ねる — 決定 5）。 */
   readonly slots: ReadonlyMap<string, StateSlotBacking>;
   /**
+   * この context が**借り手**か（ADR 0096 段 2 §2.1）。真のとき論理長は自分では進まず、
+   * スロットの実体も lengths 以外は貸し手のもの。
+   *
+   * MUST: 実行統合（`Session.run`）はこの 1 欄で「進行させない」を判断する。借り手側の
+   * `advance` / `defer` を黙って no-op にすると、貸し手の P だけが動く形と区別が付かない。
+   */
+  readonly borrowing: boolean;
+  /** この context の device（借用時の同一 device 照合 — 別 device のスロットは束縛できない）。 */
+  readonly gpu: GpuContext;
+  /**
+   * sliding なスロット名 → 窓幅（借用時に**貸し手と借り手で一致**を見るための面）。
+   *
+   * MUST: 論理 col → 物理 row の写像は読み書き同式（ADR 0067 決定 4）。グラフ内の一致は
+   * `validateGraphContracts` が見るが、貸し借りは**2 つのグラフに跨る**ので、ここで突き合わせる
+   * 以外に検出点が無い（借り手の窓だけ広いと、窓の外に落ちた行を過去として読む）。
+   */
+  readonly slidingSlots: ReadonlyMap<string, number>;
+  /** 貸し手として使えるか（借り手 context の生成時に 1 度だけ）。 */
+  assertLendable(where: string): void;
+  /** 借り手を登録する（生きている間は貸し手の `dispose` を拒否する）。 */
+  registerBorrower(borrower: GenerationContext): void;
+  /** 借り手の登録を外す（借り手の `dispose`）。 */
+  forgetBorrower(borrower: GenerationContext): void;
+  /**
    * この context が許す物理 chunk 行数の集合 = `{1} ∪ chunkBuckets ∪ {chunkLength}`
    * （run 前検査 `assertGenerationRun` — src/runtime/recipe.ts が読む唯一の形）。
    *
@@ -362,6 +386,16 @@ export const resolveSlotShape = (
     return extent;
   });
 
+/**
+ * 借り手 context が抱える借用の状態（ADR 0096 段 2 §2.1）。**貸し手の実体そのもの**を持つ
+ * （写しではない — 写すと「どちらが本物か」が生まれる）。
+ */
+type BorrowState = {
+  readonly lender: GenerationContext;
+  /** 貸し手の `slidingSlack` の写し（借り手は自前のスロットを持たないので導出できない）。 */
+  readonly slidingSlack: number | undefined;
+};
+
 export class GenerationContext {
   /**
    * 固定長 prefill chunk の行数（ADR 0066 決定 4 — context 生成時に確定する計画時定数）。
@@ -393,6 +427,15 @@ export class GenerationContext {
   readonly [RUNTIME_INTERNAL]: GenerationContextInternals;
   readonly #host: GenerationContextHost;
   readonly #slots: ReadonlyMap<string, StateSlotBacking>;
+  /** 借用の状態（undefined = 自前のスロットを持つ通常の context）。 */
+  readonly #borrow: BorrowState | undefined;
+  /**
+   * この context を借りている context の集合（ADR 0096 段 2 §2.1）。
+   *
+   * MUST: 生きている間の `dispose()` は fail loudly。借り手の bind group は貸し手のスロット
+   * バッファを掴んでいるので、破棄すると次の draft が破棄済みバッファを読む。
+   */
+  readonly #borrowers = new Set<GenerationContext>();
   /**
    * sliding なスロット名 → 窓幅（{@link GenerationContext.rewind} の全拒否条件 —
    * ADR 0066 追記 2。窓幅は {@link GenerationContext.slidingSlack} の算出にも使う）。
@@ -448,24 +491,53 @@ export class GenerationContext {
     chunkLength: number,
     chunkBuckets: readonly number[],
     bindings: SymbolBindings,
+    borrow?: BorrowState,
   ) {
     this.#host = host;
     this.#slots = slots;
     this.#slidingSlots = slidingSlots;
-    this.slidingSlack = slidingSlackRows(slots, slidingSlots);
+    this.#borrow = borrow;
+    // 借り手の余裕は**貸し手の写し**（ADR 0096 段 2 §2.1）。自前で導出すると、貸し手が
+    // sliding 宣言を持つのに借り手の readonly ノードが window を宣言していない形で
+    // 「余裕なし」を名乗り、投機の上限がホスト側で緩む。
+    this.slidingSlack = borrow === undefined
+      ? slidingSlackRows(slots, slidingSlots)
+      : borrow.slidingSlack;
     this.#lengths = lengths;
     this.chunkLength = chunkLength;
     // 凍結コピー: 呼び出し側の配列を後から書き換えられると、許可集合（下）と公開面が割れる。
     this.chunkBuckets = Object.freeze([...chunkBuckets]);
     this[RUNTIME_INTERNAL] = {
       slots,
+      borrowing: borrow !== undefined,
+      gpu: host.gpu,
+      slidingSlots,
       // 昇順のまま入れる（`assertGenerationRun` の診断がこの反復順をそのまま列挙する）。
       allowedRows: new Set([1, ...this.chunkBuckets, chunkLength]),
       lengths,
       // 容量は確定済み（静的物理格納 — ADR 0066 決定 3）なので、ここで 1 度畳んで持つ。
-      bytes: [...slots.values()].reduce((total, slot) => total + slot.byteLength, 0) +
-        LENGTHS_BYTES,
+      // MUST: 借り手はスロットのバイト数を数えない（実体は貸し手 context の所有物で、
+      // 両方が数えると診断 `stateBacking.residentBytes` が同じ VRAM を二重計上する）。
+      bytes: borrow === undefined
+        ? [...slots.values()].reduce((total, slot) => total + slot.byteLength, 0) + LENGTHS_BYTES
+        : LENGTHS_BYTES,
       bindings,
+      assertLendable: (where: string): void => {
+        this.#assertUsable(where);
+        if (this.#borrow !== undefined) {
+          throw new ExecutionError(
+            `${where}: 借り手 context は貸し手になれない（借用の連鎖は持たない — ` +
+              "ADR 0096 段 2 §2.1）",
+          );
+        }
+      },
+      registerBorrower: (borrower: GenerationContext): void => {
+        this.#assertUsable("createGenerationContext(borrow)");
+        this.#borrowers.add(borrower);
+      },
+      forgetBorrower: (borrower: GenerationContext): void => {
+        this.#borrowers.delete(borrower);
+      },
       acquireRun: (): void => {
         this.#assertUsable("run");
         // MUST: 未 commit の deferred run がある間は次を発行させない。2 本目は「1 本目が
@@ -491,6 +563,12 @@ export class GenerationContext {
               "context を分けること",
           );
         }
+        // MUST: 借り手の run は**貸し手のリースも**取る（ADR 0096 段 2 §2.1 — 既存 acquireRun と
+        // 同じ席）。これで貸し手の run / commit / rewind と直列化され、貸し手の poison・未 commit
+        // の deferred run・進行中 run がそのまま借り手の拒否理由になる。
+        // MUST: 自分の検査を全て通してから取る（取ってから落ちると、返し手の居ないリースが
+        // 貸し手に 1 本残って以後の rewind / commit が永久に拒否される）。
+        this.#borrow?.lender[RUNTIME_INTERNAL].acquireRun();
         this.#runs += 1;
       },
       releaseRun: (): void => {
@@ -500,9 +578,16 @@ export class GenerationContext {
           );
         }
         this.#runs -= 1;
+        this.#borrow?.lender[RUNTIME_INTERNAL].releaseRun();
       },
       pastLength: (): number => {
         this.#assertInternalUsable("pastLength");
+        // 借り手の論理長は**貸し手の P の写し**（ADR 0096 段 2 §2.1）。写すのは run の頭の
+        // この 1 点だけで、以後の `writeLengths` はこの値との一致を照合する（リースを握って
+        // いる間は貸し手の P が動かないので、写しと現物は run の決着まで一致し続ける）。
+        if (this.#borrow !== undefined) {
+          this.#pastLength = this.#borrow.lender[RUNTIME_INTERNAL].pastLength();
+        }
         return this.#pastLength;
       },
       bakedGroups: (token: number): BakedGroups | undefined => this.#baked.get(token),
@@ -556,6 +641,26 @@ export class GenerationContext {
     // 配列を書き換えると、未検査の M が許可集合に載る（TOCTOU）。
     const chunkBuckets = Object.freeze([...(spec.chunkBuckets ?? [])]);
     assertChunkBuckets(chunkBuckets, spec.chunkLength);
+    // 借り物スロット（external — ADR 0096 段 2 §1.1）と `borrow` は**対**。片方だけの形は
+    // どちらの向きも fail loudly（external があるのに自前確保すると空の過去を読み、borrow だけ
+    // なら誰も読まないスロットを貸し手から掴む）。
+    const external = names.filter((name) => graph.states[name].external);
+    if (external.length > 0 && spec.borrow === undefined) {
+      throw new ExecutionError(
+        `このグラフは external な state スロット [${external.join(", ")}] を持つ` +
+          "（借り物の実体は貸し手 context にあるので createGenerationContext({ borrow }) が要る" +
+          " — ADR 0096 段 2 §2.1）",
+      );
+    }
+    if (spec.borrow !== undefined) {
+      if (external.length === 0) {
+        throw new ExecutionError(
+          "borrow を指定できるのは全スロットが external なグラフだけ" +
+            `（自前スロット [${names.join(", ")}] を持つ — ADR 0096 段 2 §2.1）`,
+        );
+      }
+      return await GenerationContext.#createBorrowed(host, spec, spec.borrow, names);
+    }
     const bindings = resolveBindings(graph, spec.bindings);
     // MUST: 上限は 2 本とも見る。`maxStorageBufferBindingSize ≤ maxBufferSize` は device を計画
     // する側（gpu/device.ts の `planRequiredLimits`）が保っている関係であって、外から渡された
@@ -638,6 +743,119 @@ export class GenerationContext {
   }
 
   /**
+   * **借り手 context** を作る（ADR 0096 段 2 §2.1 — drafter が target の KV を読む形）。
+   *
+   * 確保するのは論理長 uniform 1 枚だけで、スロットは貸し手の実体をそのまま束ねる。束ね方は
+   * **名前**（借り手の宣言名 = 貸し手の宣言名 MUST）で、形は「借り手の宣言 shape を**貸し手の
+   * bindings**（同名記号 MUST — 容量 `C`）で解いた値」が貸し手スロットの実形と一致すること。
+   *
+   * MUST: `bindings` を受けない（貸し手のものを継承する — 2 つの束縛点を持つと、容量記号が
+   * 割れたまま「貸し手の 131072 行のスロットを 512 行として読む」形が例外なしに成立する）。
+   * MUST: `chunkLength` は 1 ちょうど（借り手の実行形は decode 1 本だけ = readonly attention は
+   * M 1 固定 — §1.2 の形検査と対）。`chunkBuckets` の禁止はここに書かない — `chunkLength = 1`
+   * では既存の {@link assertChunkBuckets}（要素は `2..chunkLength−1`）が空以外を全て落とすので、
+   * 重ねて書くと到達しない分岐になる。
+   */
+  static async #createBorrowed(
+    host: GenerationContextHost,
+    spec: GenerationContextSpec,
+    lender: GenerationContext,
+    names: readonly string[],
+  ): Promise<GenerationContext> {
+    const { gpu, graph } = host;
+    const internals = lender[RUNTIME_INTERNAL];
+    internals.assertLendable("createGenerationContext(borrow)");
+    if (internals.gpu !== gpu) {
+      throw new ExecutionError(
+        "createGenerationContext(borrow): 貸し手 context と GpuContext（device）が別" +
+          "（別 device のスロットは束縛できない）",
+      );
+    }
+    if (spec.chunkLength !== 1) {
+      throw new ExecutionError(
+        `createGenerationContext(borrow): chunkLength ${spec.chunkLength} は 1 ちょうど` +
+          "（借り手の実行形は decode 1 本だけ — ADR 0096 段 2 §2.1）",
+      );
+    }
+    if (spec.bindings !== undefined) {
+      throw new ExecutionError(
+        "createGenerationContext(borrow): bindings は貸し手のものを継承する（渡せない）" +
+          "— 2 つの束縛点を持つと容量記号が割れたまま別容量のスロットを読む",
+      );
+    }
+    const bindings = internals.bindings;
+    const windows = slidingSlotWindows(graph);
+    const slots = new Map<string, StateSlotBacking>();
+    for (const name of names) {
+      const backing = internals.slots.get(name);
+      if (backing === undefined) {
+        throw new ExecutionError(
+          `state '${name}': 貸し手 context に同名のスロットが無い` +
+            "（external スロットは貸し手と同じ名前で宣言する MUST — ADR 0096 段 2 §2.1）",
+        );
+      }
+      // MUST: 窓は貸し手と**存在有無も値も**一致（読み書き同式 — ADR 0067 決定 4 を貸し借りへ
+      // 延長した面）。借り手の窓だけ広いと、貸し手が既に上書きした行を過去として読む。
+      const window = windows.get(name);
+      const lent = internals.slidingSlots.get(name);
+      if (window !== lent) {
+        const show = (value: number | undefined): string => value?.toString() ?? "宣言なし";
+        throw new ExecutionError(
+          `state '${name}': attrs.window が貸し手と食い違う（貸し手 ${show(lent)} / 借り手 ${
+            show(window)
+          }）— 論理 col → 物理 row の写像は読み書き同式 MUST（ADR 0067 決定 4）`,
+        );
+      }
+      const shape = resolveSlotShape(name, graph.states[name].shape, bindings);
+      if (shape.length !== backing.shape.length || shape.some((d, i) => d !== backing.shape[i])) {
+        throw new ExecutionError(
+          `state '${name}': 借り手の宣言 [${shape.join(",")}]（貸し手の bindings で解決）が` +
+            `貸し手スロットの実形 [${backing.shape.join(",")}] と違う`,
+        );
+      }
+      slots.set(name, backing);
+    }
+
+    // 確保するのは lengths 1 枚だけ（スロットは借り物）。errorScope の規律は自前確保の経路と
+    // 同じ — createBuffer は上限超過でも同期例外を投げないため、囲まないと無効なバッファへ
+    // 論理長を書き続ける沈黙 no-op になる。
+    pushFailureScopes(gpu.device);
+    const where = "GenerationContext（借り手）の論理長確保";
+    let popped = false;
+    let created: GPUBuffer | undefined;
+    let context: GenerationContext | undefined;
+    try {
+      created = gpu.device.createBuffer({
+        label: "generation lengths (borrowed)",
+        size: LENGTHS_BYTES,
+        usage: LENGTHS_USAGE,
+      });
+      const pending = popFailureScopes(gpu.device, where);
+      popped = true;
+      const failure = await gpu[RUNTIME_INTERNAL].raceDeviceLost(pending, where);
+      if (failure !== undefined) throw failure;
+      const borrowed = new GenerationContext(
+        host,
+        slots,
+        slidingSlotWindows(graph),
+        created,
+        spec.chunkLength,
+        [],
+        bindings,
+        { lender, slidingSlack: lender.slidingSlack },
+      );
+      // MUST: 登録は構築の**後**（借り手の実体が出来てから貸し手の dispose を塞ぐ）。ここが
+      // 落ちる（await の窓で貸し手が dispose された）なら lengths を返して漏らさない。
+      internals.registerBorrower(borrowed);
+      context = borrowed;
+      return context;
+    } finally {
+      if (!popped) await discardFailureScopes(gpu.device);
+      if (context === undefined) created?.destroy();
+    }
+  }
+
+  /**
    * 確定済み KV の論理長（ADR 0066 決定 6）。
    *
    * 進行は **run の成功でのみ**起きる（ホスト側の手動加算は API にしない — 二重簿記の禁止）。
@@ -679,6 +897,8 @@ export class GenerationContext {
    */
   commit(rows: number): void {
     this.#assertUsable("commit");
+    // 借り手は論理長を持たない（進めるのも確定させるのも貸し手 — ADR 0096 段 2 §2.1）。
+    this.#assertNotBorrowing("commit");
     if (this.#runs > 0) {
       throw new ExecutionError(
         `commit: 進行中の generation run が ${this.#runs} 本ある間は確定できない` +
@@ -733,6 +953,7 @@ export class GenerationContext {
    */
   rewind(position: number): void {
     this.#assertUsable("rewind");
+    this.#assertNotBorrowing("rewind");
     if (this.#runs > 0) {
       throw new ExecutionError(
         `rewind: 進行中の generation run が ${this.#runs} 本ある間は巻き戻せない` +
@@ -785,13 +1006,31 @@ export class GenerationContext {
    * Session の重み・計画キャッシュには手を出さない（順序の依存を作らない）。
    */
   dispose(): Promise<void> {
+    // MUST: 借り手が生きている間は破棄しない（ADR 0096 段 2 §2.1）。借り手の bind group は
+    // このスロットバッファを掴んでおり、破棄すると次の draft が破棄済みバッファを読む。
+    // `dispose` の「冪等・非 throw」契約からの**意図的な逸脱**で、受付終了フラグを立てる前に
+    // 返す（立ててから落とすと、以後どの操作も通らない context が残る）。
+    if (this.#borrowers.size > 0 && this.#disposal === undefined) {
+      return Promise.reject(
+        new ExecutionError(
+          `dispose: この GenerationContext を借りている context が ${this.#borrowers.size} 本ある` +
+            "（借り手の bind group が貸し手のスロットを掴んでいる）。借り手を先に dispose すること",
+        ),
+      );
+    }
     this.#disposeRequested = true;
     this.#disposal ??= this.#host.serialize(async () => {
       this.#disposed = true;
       try {
         await this.#host.flush();
       } finally {
-        for (const slot of this.#slots.values()) slot.buffer.destroy();
+        // MUST: 借り物のスロットは破棄しない（所有者は貸し手 context）。借り手が破棄すると、
+        // 貸し手の次の run が破棄済みバッファへ書く。
+        if (this.#borrow === undefined) {
+          for (const slot of this.#slots.values()) slot.buffer.destroy();
+        } else {
+          this.#borrow.lender[RUNTIME_INTERNAL].forgetBorrower(this);
+        }
         this.#lengths.destroy();
         // MUST: 焼いた束もここで手放す。以後 run は来ない（`#assertUsable` が落とす）ので
         // 正しさには効かないが、掴んだままだと破棄済みバッファを参照する bind group が
@@ -840,6 +1079,7 @@ export class GenerationContext {
    */
   #advance(pastLength: number, queryLength: number): void {
     this.#assertInternalUsable("advance");
+    this.#assertNotBorrowing("advance");
     this.#assertCapturedPast(pastLength, "advance");
     this.#assertQueryLength(queryLength, "advance");
     const next = this.#pastLength + queryLength;
@@ -864,6 +1104,7 @@ export class GenerationContext {
    */
   #defer(pastLength: number, queryLength: number): void {
     this.#assertInternalUsable("defer");
+    this.#assertNotBorrowing("defer");
     this.#assertCapturedPast(pastLength, "defer");
     this.#assertQueryLength(queryLength, "defer");
     if (this.#pending !== undefined) {
@@ -914,6 +1155,19 @@ export class GenerationContext {
       throw new ExecutionError(`${where}: dispose 済みの GenerationContext は使えない`);
     }
     this.#assertLive(where);
+  }
+
+  /**
+   * 借り手 context が触れない面（論理長を動かす 4 つ）— `commit` / `rewind` は利用者面の
+   * 拒否、`advance` / `defer` はランタイム内部の不変条件破れ（実行統合が
+   * {@link GenerationContextInternals.borrowing} を見て呼ばない契約 — ADR 0096 段 2 §2.1）。
+   */
+  #assertNotBorrowing(where: string): void {
+    if (this.#borrow === undefined) return;
+    throw new ExecutionError(
+      `${where}: 借り手 context は論理長を持たない（進行も巻き戻しも貸し手 context の側で` +
+        "起きる — ADR 0096 段 2 §2.1）",
+    );
   }
 
   /** 2 つの遮断面が共有する「背後の物理 state が生きているか」。 */

@@ -10,7 +10,9 @@ import type { BatchScope, ResidentTensor } from "../gpu/device.ts";
 import type { GpuTimingStats, SubmitPolicy, SubmitStats } from "../gpu/submit.ts";
 import type { ScoreStorage } from "../kernels/score-storage.ts";
 import type { FusionCounts } from "./fusion.ts";
+import type { GenerationContext } from "./generation-context.ts";
 import type { SymbolBindings } from "./plan.ts";
+import type { SharedWeight } from "./weight-residency.ts";
 
 type TensorOf<D extends IrDtype, A> = {
   readonly dtype: D;
@@ -112,6 +114,19 @@ export type GenerationContextSpec = {
    * 追い出しで静かに再導出へ落ちる。
    */
   readonly chunkBuckets?: readonly number[];
+  /**
+   * **借り先の context**（ADR 0096 段 2 §2.1 — drafter が読む target の生成 context）。
+   *
+   * 指定できるのは「グラフの全スロットが external」のときだけで、逆も MUST（external が
+   * あるのに `borrow` 無しは fail loudly）。借り手は自前のスロットを 1 本も確保せず、
+   * external スロットを**名前**で貸し手のスロットに束ねる。`bindings` は貸し手のものを継承
+   * するので**渡せない**・`chunkLength` は 1 ちょうど・`chunkBuckets` は宣言できない
+   * （借り手の実行形は decode 1 本だけ）。
+   *
+   * 借り手の run は貸し手の run リースを取るので、貸し手の run / commit / rewind と直列化され、
+   * 貸し手に `pendingCommit` が残っている間は拒否される（draft は commit の後）。
+   */
+  readonly borrow?: GenerationContext;
 };
 
 /**
@@ -272,6 +287,18 @@ export type SessionOptions = {
    * MUST: 非負の安全な整数でなければ fail loudly。
    */
   readonly planBackingBudgetBytes?: number;
+  /**
+   * **共有 initializer の実体**（ADR 0096 段 2 §1.3 / §2.2 — 借り手の initializer 名 →
+   * 貸し手 `Session.exportWeight()` の戻り）。
+   *
+   * グラフの `shared` 宣言**全部**に対して過不足なく与える MUST。門は 5 点（同一 device・
+   * 宣言 shape・格納 dtype・消費席・チャネル軸 — `resolveSharedWeights`）で、どれも破れは
+   * 例外ではなく別の値として出るため fail loudly。
+   *
+   * 寿命: 借り手 Session が生きている間、貸し手 Session の `dispose()` は fail loudly になる
+   * （借用計数 — `dispose` の冪等・非 throw 契約からの意図的な逸脱）。
+   */
+  readonly sharedWeights?: Readonly<Record<string, SharedWeight>>;
   /** テスト専用（{@link I8A8_DOT}）。既定は wgslLanguageFeatures の列挙から決める。 */
   readonly [I8A8_DOT]?: I8a8Dot;
   /** テスト専用（{@link ROW_BLOCK_SPLIT}）。既定は device の limit から静的に決まる枚数。 */

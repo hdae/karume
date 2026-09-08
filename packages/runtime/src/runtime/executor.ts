@@ -104,6 +104,8 @@ import {
   assertWeightsWithinLimits,
   planWeightResidency,
   type ResidentWeight,
+  resolveSharedWeights,
+  SharedWeight,
   type WeightResidency,
 } from "./weight-residency.ts";
 import {
@@ -146,6 +148,12 @@ export type {
   Tensor,
 } from "./session-types.ts";
 export { I8A8_DOT, ROW_BLOCK_SPLIT } from "./session-types.ts";
+/**
+ * 貸し出された重みへの不透明な参照（ADR 0096 段 2 §2.2）。**型としてのみ**公開する —
+ * 入口は {@link Session.exportWeight} だけで、直接構築すると席の突合と借用計数を迂回できる
+ * （`Session` / `GenerationContext` と同じ流儀）。
+ */
+export type { SharedWeight } from "./weight-residency.ts";
 
 /**
  * 実行形ノブ（{@link SessionOptions} の 4 ノブ）の受理集合。
@@ -858,6 +866,16 @@ type SessionState = {
   readonly weights: RunArena;
   readonly weightBuffers: ReadonlyMap<string, GPUBuffer>;
   /**
+   * 重みの常駐分類（prepare 相の純関数の結果 — {@link planWeightResidency}）。
+   * {@link Session.exportWeight} が席を名乗るために構築後も保つ。
+   */
+  readonly residency: ReadonlyMap<string, WeightResidency>;
+  /**
+   * この Session が借りている重み（{@link SessionOptions.sharedWeights} の実体）。
+   * dispose で借用を返す先で、**貸し手の生存はこの計数が保証する**。
+   */
+  readonly sharedWeights: readonly SharedWeight[];
+  /**
    * params バッファの内容アドレスキャッシュ（キー = usage + 全要素の連結 —
    * `RecipeBuilder.#writeParams`）。実体は weights アリーナが所有する Session 常駐バッファで、
    * ここは「内容 → 既に上げてあるバッファ」の索引だけを持つ。
@@ -972,6 +990,11 @@ export class Session {
    * 閉路に参加できない（それらを混ぜると、決着する列まで拒否する過剰な門になる）。
    */
   #pendingRuns = 0;
+  /**
+   * 他 Session へ貸し出している重みの本数（{@link Session.exportWeight} の借用計数 —
+   * ADR 0096 段 2 §2.2）。0 でない間は {@link Session.dispose} を拒否する。
+   */
+  #lentWeights = 0;
   #disposal: Promise<void> | undefined;
 
   private constructor(state: SessionState) {
@@ -1053,6 +1076,10 @@ export class Session {
     // 純粋な比較のままで、総量の可否の最終門は errorScope に残る）。
     assertWeightsWithinLimits(residency, gpu.limits);
 
+    // 共有 initializer（借り物の重み — ADR 0096 段 2 §1.3）の突合。**バイトを 1 つも上げる前**に
+    // 席・宣言 shape・格納 dtype・device を見る（門の中身は `resolveSharedWeights`）。
+    const shared = resolveSharedWeights(graph, residency, gpu, options.sharedWeights);
+
     // 整数内積変種は **linear と attention で別席**（{@link SessionState}）。どちらも
     // `I8A8_DOT` の指定が最優先で、指定が無ければ族ごとの既定に落ちる。
     const dp4a = dp4aAvailable(gpu.wgslLanguageFeatures);
@@ -1121,7 +1148,20 @@ export class Session {
     // 宣言と実テンソルの突合・完全性は shard 進行検証に一本化（ADR 0070 決定 1 — 全量面も
     // 同じ門を通る。openModel 済みの入力には冪等）。
     const validator = createShardValidator(graph);
+    /** 借用を積み終えた共有 initializer（構築が失敗したらここから 1 本ずつ返す）。 */
+    const borrowed: SharedWeight[] = [];
     try {
+      // 借り物の重みは shard を 1 本も読まずに台帳へ載る（バイトは貸し手が既に GPU へ
+      // 上げている）。借用計数を先に積むのは、構築中に貸し手が dispose される窓を塞ぐため。
+      for (const { name, shared: weight } of shared) {
+        const internals = weight[RUNTIME_INTERNAL];
+        internals.retain();
+        borrowed.push(weight);
+        weightBuffers.set(name, internals.buffer);
+        // 圧縮席（f16 / i8 / i4）は貸し手の付随実体（scale・group 長）ごと引き継ぐ。ここに
+        // 載らない名前は f32 として読まれる（重み台帳の既定）ので、席の突合が門になっている。
+        if (internals.resident !== undefined) residentWeights.set(name, internals.resident);
+      }
       // shard の反復待ち（= 供給側の費用）は for await が隠すので、**前の shard を処理し終えた
       // 時刻**との差で測る（次の shard が届くまでの間はこの 2 点の間にしか無い）。
       let shardBoundary = performance.now();
@@ -1156,6 +1196,14 @@ export class Session {
             const seat = residency.get(name);
             if (seat === undefined) {
               throw new ExecutionError(`initializer '${name}': 常駐分類が無い`);
+            }
+            // MUST: 借り物の席に実体が来る形は落とす。共有 initializer は突合集合の外
+            // （format/container.ts）なので `ready` には現れない — 現れたら簿記の破れで、
+            // 通すと貸し手のバッファを指す名前に別のバイト列を上書きすることになる。
+            if (seat.seat === "shared") {
+              throw new ExecutionError(
+                `initializer '${name}': 共有宣言（shared）なのに shard に実体が来た`,
+              );
             }
             // initializer の宣言 shape は数値のみ（parseIrGraph が保証 — 記号次元は拒否）。
             const declaredShape = graph.values[name].shape.map(Number);
@@ -1370,6 +1418,8 @@ export class Session {
       // MUST: 後始末の失敗で本体の例外を上書きしない（run 側と同じ規律）。原因は本体側に
       // あり、destroy の rejection（主因は device 消失）に差し替わると調査の起点が消える。
       await weights.destroy().catch(() => undefined);
+      // MUST: 積んだ借用は必ず返す（返し損ねると貸し手 Session が永久に dispose できない）。
+      for (const weight of borrowed) weight[RUNTIME_INTERNAL].release();
       throw cause;
     }
 
@@ -1392,6 +1442,8 @@ export class Session {
       },
       weights,
       weightBuffers,
+      residency,
+      sharedWeights: borrowed,
       paramsCache: new Map(),
       prepared: new Map(),
       residentWeights,
@@ -1499,6 +1551,16 @@ export class Session {
     // NaN も出さずに過去 KV を潰すので、発行の同期区間で落とす。immediate な run（prefill /
     // decode）は全行を確定させるので上限は `chunkLength` のまま。
     if (capturedGeneration?.commit === "deferred") {
+      // 借り手 context は論理長を持たない（進行も確定も貸し手の側 — ADR 0096 段 2 §2.1）ので、
+      // 確定させる相手が居ない deferred は発行の同期区間で落とす。
+      if (capturedGeneration.context[RUNTIME_INTERNAL].borrowing) {
+        return Promise.reject(
+          new ExecutionError(
+            "run: 借り手 context の run に generation.commit 'deferred' は指定できない" +
+              "（借り手は論理長を進めないので確定させる相手が居ない）",
+          ),
+        );
+      }
       const slack = capturedGeneration.context.slidingSlack;
       if (slack !== undefined && capturedGeneration.queryLength > slack + 1) {
         return Promise.reject(
@@ -1733,8 +1795,87 @@ export class Session {
     return context;
   }
 
+  /**
+   * 常駐済みの重み 1 本を**貸し出す**（ADR 0096 段 2 §2.2）。戻り値は不透明な参照で、
+   * 借り手 Session の `createSession(model, { sharedWeights: { <借り手の名前>: これ } })` へ
+   * 渡す。バイトは 1 つも複製されない（同じ GPU バッファを両方の bind group が束ねる）。
+   *
+   * MUST: 貸し出せるのは**この Session が実際に確保した重み**だけ。共有宣言（借り物）の
+   * 再輸出は拒否する — 連鎖を許すと、寿命の依存が Session をまたいで環状になりうる。
+   * MUST: 借り手が生きている間、この Session の {@link Session.dispose} は fail loudly になる
+   * （借用計数）。`dispose` の冪等・非 throw 契約からの意図的な逸脱で、破棄すると借り手の
+   * bind group が破棄済みバッファを読む（例外も警告も出ない沈黙誤値）。
+   */
+  exportWeight(initializerName: string): SharedWeight {
+    if (this.#disposal !== undefined) {
+      throw new ExecutionError("dispose 済みの Session では重みを貸し出せない");
+    }
+    const { graph, residency, weightBuffers, residentWeights, gpu } = this.#state;
+    if (!Object.hasOwn(graph.initializers, initializerName)) {
+      throw new ExecutionError(
+        `exportWeight: initializer '${initializerName}' がグラフに無い`,
+      );
+    }
+    const seat = residency.get(initializerName);
+    if (seat === undefined) {
+      throw new ExecutionError(`exportWeight: initializer '${initializerName}' の常駐分類が無い`);
+    }
+    if (seat.seat === "shared") {
+      throw new ExecutionError(
+        `exportWeight: initializer '${initializerName}' はこの Session も借りている` +
+          "（借り物の再輸出はしない — 貸し手から直接借りること）",
+      );
+    }
+    const buffer = weightBuffers.get(initializerName);
+    if (buffer === undefined) {
+      throw new ExecutionError(
+        `exportWeight: initializer '${initializerName}' の重みバッファが台帳に無い`,
+      );
+    }
+    return new SharedWeight({
+      initializer: initializerName,
+      gpu,
+      buffer,
+      resident: residentWeights.get(initializerName),
+      seat: seat.seat,
+      channelAxis: seat.seat === "i8" ? seat.channelAxis : undefined,
+      storage: graph.initializers[initializerName].storage.dtype,
+      shape: graph.values[initializerName].shape.map(Number),
+      retain: (): void => {
+        if (this.#disposal !== undefined) {
+          throw new ExecutionError("dispose 済みの Session の重みは借りられない");
+        }
+        this.#lentWeights += 1;
+      },
+      release: (): void => {
+        if (this.#lentWeights < 1) {
+          throw new ExecutionError(
+            `Session: 重みの借用計数の解放が過多（ランタイム内部の簿記の破れ）`,
+          );
+        }
+        this.#lentWeights -= 1;
+      },
+    });
+  }
+
   /** 重みバッファを解放する。実行中の run の完了を待ってから破棄し、以後の run は fail loudly。 */
   dispose(): Promise<void> {
+    // MUST: 借り手が生きている間は破棄しない（ADR 0096 段 2 §2.2）。借り手の bind group は
+    // この Session の重みバッファを掴んでいる。`GenerationContext.dispose` と同じ逸脱で、
+    // 受付終了（`#disposal` の代入）より前に返す。
+    if (this.#lentWeights > 0 && this.#disposal === undefined) {
+      return Promise.reject(
+        new ExecutionError(
+          `dispose: この Session の重みを ${this.#lentWeights} 本貸し出している` +
+            "（借り手 Session の bind group が掴んでいる）。借り手を先に dispose すること",
+        ),
+      );
+    }
+    return this.#disposeOnce();
+  }
+
+  /** {@link Session.dispose} の本体（借用の門を通った後の 1 本きりの破棄）。 */
+  #disposeOnce(): Promise<void> {
     // MUST: 2 度目以降も同じ完了を返す。先に返すと呼び出し側が「破棄済み」と見なして
     // device.destroy() まで進み、flush-before-destroy が崩れる。
     // MUST: slot backing の破棄も**この 1 本に相乗り**させる（破棄経路の担い手を増やさない —
@@ -1746,6 +1887,9 @@ export class Session {
       } finally {
         this.#retireAllBackings();
         this.#destroyRetired();
+        // MUST: 借りていた重みの借用計数は**必ず**返す（破棄の成否に依らない — 返し損ねると
+        // 貸し手 Session が永久に dispose できない）。
+        for (const weight of this.#state.sharedWeights) weight[RUNTIME_INTERNAL].release();
       }
     });
     return this.#disposal;
@@ -2137,7 +2281,11 @@ export class Session {
       // 出力を読んで初めて決まるので、ランタイムには決められない）。失敗した run は保留も作らない。
       if (generation !== undefined) {
         const internals = generation.context[RUNTIME_INTERNAL];
-        if (generation.commit === "deferred") {
+        // 借り手の run は state を 1 行も書かない（append 0 本 — ADR 0096 段 2 §1.1）ので、
+        // 進めるものが無い。貸し手の論理長を動かすのは貸し手自身の run だけ。
+        if (internals.borrowing) {
+          // no-op（進行の権利は貸し手の側にある）
+        } else if (generation.commit === "deferred") {
           internals.defer(pastLength, generation.queryLength);
         } else {
           internals.advance(pastLength, generation.queryLength);

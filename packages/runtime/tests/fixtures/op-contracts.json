@@ -306,7 +306,7 @@
       "max_arity": 4,
       "dtypes": { "kind": "uniform", "accept": ["f32"] },
       "attrs": ["scale"],
-      "optional_attrs": ["window"],
+      "optional_attrs": ["readonly", "window"],
       "states": { "keys": ["k", "v"], "required": false }
     },
     {
@@ -534,6 +534,13 @@
       "why": "sliding window の幅（ADR 0067 決定 4）。**省略可能**で、欄の不存在 = 全 context。宣言されたら 1 以上の整数（Gemma 4 E2B の sliding 層は 512）",
       "accept": [1, 512, 4096],
       "reject": [0, -1, 1.5, "512", null, true, 1000000000000000000]
+    },
+    {
+      "op": "attention",
+      "attr": "readonly",
+      "why": "past だけを読む形の宣言（ADR 0096 段 2 §1.2）。**省略可能で true のみ** — 欄の不存在が「今 step の k/v も読む states 形」で、false は同義の 2 つ目の綴りになるので受理しない",
+      "accept": [true],
+      "reject": [false, 0, 1, "true", null]
     },
     {
       "op": "state_append",
@@ -1942,6 +1949,52 @@
       "state_shapes": { "layer0.k": [1, 1, 512, 128], "layer0.v": [1, 1, 512, 128] },
       "throws": true,
       "why": "window > C（ring 幅が容量を超えると、書いた行が同 step 中に自分で潰れる）"
+    },
+
+    {
+      "op": "attention",
+      "ins": [[1, 8, 1, 128]],
+      "attrs": { "scale": 0.2973017692565918, "window": 512, "readonly": true },
+      "states": { "k": "layer0.k", "v": "layer0.v" },
+      "state_shapes": { "layer0.k": [1, 1, 520, 128], "layer0.v": [1, 1, 520, 128] },
+      "outs": [[1, 8, 1, 128]],
+      "why": "readonly の sliding 層（ADR 0096 段 2 §1.2 — ins は q だけで、過去は借り物スロットが持つ。MQA 8:1・window < C の余裕つき）"
+    },
+    {
+      "op": "attention",
+      "ins": [[1, 8, 1, 128]],
+      "attrs": { "scale": 0.5, "readonly": true },
+      "states": { "k": "layer1.k", "v": "layer1.v" },
+      "state_shapes": { "layer1.k": [1, 1, 4096, 128], "layer1.v": [1, 1, 4096, 128] },
+      "outs": [[1, 8, 1, 128]],
+      "why": "readonly の full 層（window 宣言なし = 全 context・列は [0, P)）"
+    },
+    {
+      "op": "attention",
+      "ins": [[1, 8, 2, 128]],
+      "attrs": { "scale": 0.5, "readonly": true },
+      "states": { "k": "layer1.k", "v": "layer1.v" },
+      "state_shapes": { "layer1.k": [1, 1, 4096, 128], "layer1.v": [1, 1, 4096, 128] },
+      "throws": true,
+      "why": "readonly の M が 1 でない（読むのは論理位置 P−1 の 1 行だけ — 2 行目以降は同じ列範囲を読む沈黙誤値になる）"
+    },
+    {
+      "op": "attention",
+      "ins": [[1, 8, 1, 128], [1, 1, 1, 128], [1, 1, 1, 128]],
+      "attrs": { "scale": 0.5, "readonly": true },
+      "states": { "k": "layer1.k", "v": "layer1.v" },
+      "state_shapes": { "layer1.k": [1, 1, 4096, 128], "layer1.v": [1, 1, 4096, 128] },
+      "throws": true,
+      "why": "readonly なのに今 step の k / v を取っている（ins は q 1 本ちょうど）"
+    },
+    {
+      "op": "attention",
+      "ins": [[1, 8, 1, 128]],
+      "attrs": { "scale": 0.5, "readonly": true },
+      "states": { "k": "layer1.k", "v": "layer1.v" },
+      "state_shapes": { "layer1.k": [1, 3, 4096, 128], "layer1.v": [1, 3, 4096, 128] },
+      "throws": true,
+      "why": "readonly の H (8) が スロットの Hkv (3) の整数倍でない（GQA は整除 broadcast のみ）"
     },
 
     {

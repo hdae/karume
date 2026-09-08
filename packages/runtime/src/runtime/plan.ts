@@ -22,6 +22,7 @@ import {
   resolveNodeDtypes,
   sliceAttrs,
   STATE_APPEND_OP,
+  stateReadonly,
   stateWindow,
   symPrefixSliceAttrs,
   WEIGHT_CHANNEL_AXES,
@@ -118,6 +119,7 @@ export const validateGraphContracts = (graph: IrGraph): void => {
     }
     if (contract.kind === "cat") assertCatAxis(graph, node, where);
   });
+  assertStateOwnership(graph);
   assertStateOrder(graph);
   for (const spec of graph.inputs) {
     if (!IO_DTYPES.includes(spec.dtype)) {
@@ -128,6 +130,59 @@ export const validateGraphContracts = (graph: IrGraph): void => {
       );
     }
   }
+};
+
+/**
+ * 借り物スロット（`states[].external` — ADR 0096 段 2 §1.1）の所有権規律。束縛にも GPU にも
+ * 依存しないので Session 構築時に 1 回、**4 点**を見る:
+ *
+ * 1. external スロットへの `state_append` は **0 本**（実体は借り先の context が持ち、書くのは
+ *    貸し手だけ）。書く形を通すと、貸し手が確定した過去 KV を借り手が上書きする
+ * 2. external スロットの読者は **readonly attention だけ**（今 step の k/v を足す形は
+ *    「自分で書いた行を読む」前提なので、書き手の居ないスロットでは必ず未初期化行を読む）
+ * 3. readonly の読者が参照するスロットは **external だけ**（2 の対 — 自前スロットを
+ *    append 無しで readonly に読む形は、書き手不在の検査〈{@link assertStateOrder}〉を
+ *    すり抜けるための抜け道になる）
+ * 4. external が 1 本でもあれば**全スロットが external**（段 2 の借り手 context は自前スロットを
+ *    持たないので、混在は「確保する側と借りる側が 1 つの context に同居する」形になる）
+ *
+ * MUST: fail loudly。4 点とも破れは例外ではなく**別の値**（未初期化の過去 / 上書きされた KV）
+ * として出る種類なので、実行前のここでしか止められない。
+ */
+const assertStateOwnership = (graph: IrGraph): void => {
+  const names = Object.keys(graph.states);
+  const external = names.filter((name) => graph.states[name].external);
+  graph.nodes.forEach((node, index) => {
+    const slots = Object.values(node.states);
+    if (slots.length === 0) return;
+    const where = `nodes[${index}] (${node.op})`;
+    const readonly = stateReadonly(node.attrs, where);
+    for (const slot of slots) {
+      const isExternal = graph.states[slot].external;
+      if (readonly && !isExternal) {
+        throw new ExecutionError(
+          `${where}: readonly の attention が external でない state スロット '${slot}' を読む` +
+            "（readonly は借り先 context のスロット専用 — ADR 0096 段 2 §1.1）",
+        );
+      }
+      if (readonly || !isExternal) continue;
+      throw new ExecutionError(
+        node.op === STATE_APPEND_OP
+          ? `state スロット '${slot}': external なのに ${STATE_APPEND_OP}（${where}）が居る` +
+            "（借り物のスロットへ書けるのは貸し手だけ — ADR 0096 段 2 §1.1）"
+          : `${where}: external な state スロット '${slot}' を readonly でない ${node.op} が読む` +
+            "（external の読者は attrs.readonly の attention だけ — ADR 0096 段 2 §1.1）",
+      );
+    }
+  });
+  if (external.length === 0 || external.length === names.length) return;
+  throw new ExecutionError(
+    `state スロットに external と非 external が混在している（external: [${
+      external.join(", ")
+    }] / 自前: [${
+      names.filter((name) => !graph.states[name].external).join(", ")
+    }]）— 借り手 context は自前スロットを持たない（ADR 0096 段 2 §1.1）`,
+  );
 };
 
 /** 1 スロットに触れたノード 1 本ぶんの記録（{@link assertStateOrder}）。 */
@@ -158,6 +213,9 @@ type StateTouch = {
  * 破れなので、実行前のここでしか止められない。
  */
 const assertStateOrder = (graph: IrGraph): void => {
+  const externalSlots = new Set(
+    Object.keys(graph.states).filter((name) => graph.states[name].external),
+  );
   const touches = new Map<string, StateTouch[]>();
   graph.nodes.forEach((node, index) => {
     const slots = Object.values(node.states);
@@ -172,6 +230,13 @@ const assertStateOrder = (graph: IrGraph): void => {
   });
   for (const [slot, list] of touches) {
     const appends = list.filter((touch) => touch.appends);
+    // 借り物スロット（external）の書き手は貸し手 context の側に居る。append 0 本が**正規**なので
+    // 下の 3 枝（1 本ちょうど / 終端）は掛けず、window の一致だけを見る（読み書き同式は
+    // 貸し手・借り手を跨いでも成り立たなければならない — 借り手の窓が広いと窓外を読む）。
+    if (externalSlots.has(slot)) {
+      assertSameWindow(slot, list);
+      continue;
+    }
     if (appends.length > 1) {
       throw new ExecutionError(
         `state スロット '${slot}': ${STATE_APPEND_OP} が ${appends.length} 本（nodes[${
@@ -197,17 +262,24 @@ const assertStateOrder = (graph: IrGraph): void => {
           `（append は当該スロットに触れる最後のノード MUST — ADR 0067 決定 5b）`,
       );
     }
-    const first = list[0];
-    const mismatch = list.find((touch) => touch.window !== first.window);
-    if (mismatch !== undefined) {
-      const show = (touch: StateTouch): string =>
-        `nodes[${touch.index}] (${touch.op}) は ${touch.window ?? "宣言なし"}`;
-      throw new ExecutionError(
-        `state スロット '${slot}': attrs.window が食い違う（${show(first)} / ${show(mismatch)}）` +
-          ` — 論理 col → 物理 row の写像は読み書き同式 MUST（ADR 0067 決定 4）`,
-      );
-    }
+    assertSameWindow(slot, list);
   }
+};
+
+/**
+ * 同一スロットに触れる全ノードの `window` が**存在有無も値も**一致すること
+ * （{@link assertStateOrder} の 3 — 論理 col → 物理 row の写像は読み書き同式 MUST）。
+ */
+const assertSameWindow = (slot: string, list: readonly StateTouch[]): void => {
+  const first = list[0];
+  const mismatch = list.find((touch) => touch.window !== first.window);
+  if (mismatch === undefined) return;
+  const show = (touch: StateTouch): string =>
+    `nodes[${touch.index}] (${touch.op}) は ${touch.window ?? "宣言なし"}`;
+  throw new ExecutionError(
+    `state スロット '${slot}': attrs.window が食い違う（${show(first)} / ${show(mismatch)}）` +
+      ` — 論理 col → 物理 row の写像は読み書き同式 MUST（ADR 0067 決定 4）`,
+  );
 };
 
 /**

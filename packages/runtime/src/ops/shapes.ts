@@ -16,12 +16,18 @@ import {
   rmsNormEps,
   sliceAttrs,
   softmaxDim,
+  stateReadonly,
   stateWindow,
   symPrefixSliceAttrs,
   topkK,
   upsampleBilinear2dAttrs,
 } from "./attrs.ts";
-import { assertArity, type OpContract, scalarParamValues } from "./contracts.ts";
+import {
+  assertArity,
+  type OpContract,
+  READONLY_ATTENTION_ARITY,
+  scalarParamValues,
+} from "./contracts.ts";
 import { OpContractError } from "./names.ts";
 
 export const numel = (shape: readonly number[]): number =>
@@ -185,6 +191,85 @@ const assertStateSlotForm = (
 };
 
 /**
+ * このノードが **readonly（past のみ）states 形 attention** か（ADR 0096 段 2 §1.2）。
+ * 判別は「op が readonly を持てる」×「states 欄が非空」×「`attrs.readonly` が true」の 3 つで、
+ * アリティ検査と shape 計算が**同じ 1 本**を読む。
+ */
+const isReadonlyStateAttention = (
+  found: OpContract,
+  context: ShapeContext,
+  where: string,
+): boolean =>
+  found.readonlyArity !== undefined && referencesStates(context) &&
+  stateReadonly(context.attrs ?? {}, where);
+
+/**
+ * readonly states 形 attention の形（ADR 0096 段 2 §1.2）。
+ *
+ * ins は q だけなので、`[B,Hkv,C,D]` の照合相手は**スロットどうし**と q になる:
+ * q は `[B,H,1,D]`（**M = 1 MUST** — 段 2 は「論理位置 P−1 の 1 行」だけ）・スロットは
+ * k / v 同形で B と D が q と一致・`H % Hkv == 0`・sliding は `window ≤ C`。出力は q と同形。
+ *
+ * MUST: `M = 1` をここで落とす。M > 1 の readonly は「1 本の query 行が past 全体を見る」以外の
+ * 意味論（行ごとに違う past）を要求するが、カーネルは行 0 の past だけを見る — 通すと 2 行目
+ * 以降が**同じ列範囲**を読む沈黙誤値になる。
+ */
+const readonlyStateAttentionShape = (
+  q: readonly number[],
+  context: ShapeContext,
+  where: string,
+): number[] => {
+  const kSlot = stateSlotShape(context, "k", where);
+  const vSlot = stateSlotShape(context, "v", where);
+  const show = `q [${q.join(",")}] / slot '${kSlot.name}' [${kSlot.shape.join(",")}]`;
+  if (q.length !== 4) {
+    throw new OpContractError(
+      `${where}: readonly の attention は q[B,H,1,D] の rank-4 のみ: [${q.join(",")}]`,
+    );
+  }
+  if (kSlot.shape.length !== 4 || vSlot.shape.length !== 4) {
+    throw new OpContractError(
+      `${where}: readonly の attention のスロットは [B,Hkv,C,D] の rank-4 のみ ${show}` +
+        ` / slot '${vSlot.name}' [${vSlot.shape.join(",")}]`,
+    );
+  }
+  // MUST: k / v スロットは**同形**（states 形と同じ理由 — 容量の違う組は片方だけ先に wrap する）。
+  if (kSlot.shape.some((dim, axis) => dim !== vSlot.shape[axis])) {
+    throw new OpContractError(
+      `${where}: readonly の attention の k / v スロットが同形でない（'${kSlot.name}' [${
+        kSlot.shape.join(",")
+      }] / '${vSlot.name}' [${vSlot.shape.join(",")}]）`,
+    );
+  }
+  if (q[0] !== kSlot.shape[0] || q[3] !== kSlot.shape[3]) {
+    throw new OpContractError(`${where}: readonly の attention の B / D が不一致 ${show}`);
+  }
+  if (q[0] < 1) {
+    throw new OpContractError(`${where}: readonly の attention の B が正でない ${show}`);
+  }
+  const kvHeads = kSlot.shape[1];
+  if (kvHeads < 1 || q[1] < kvHeads || q[1] % kvHeads !== 0) {
+    throw new OpContractError(
+      `${where}: readonly の attention の H ${q[1]} が Hkv ${kvHeads} の正の整数倍でない` +
+        `（GQA は H % Hkv == 0 かつ H ≥ Hkv ≥ 1 — ADR 0067 決定 1）${show}`,
+    );
+  }
+  if (q[2] !== 1) {
+    throw new OpContractError(
+      `${where}: readonly の attention は q の M（軸 2）が 1 ちょうど（${q[2]}） — ` +
+        "読むのは論理位置 P−1 の 1 行だけ（ADR 0096 段 2 §1.2）",
+    );
+  }
+  const window = stateWindow(context.attrs ?? {}, where);
+  if (window !== undefined && window > kSlot.shape[2]) {
+    throw new OpContractError(
+      `${where}: ${show} — attrs.window ${window} がスロット容量 ${kSlot.shape[2]} を超える`,
+    );
+  }
+  return [...q];
+};
+
+/**
  * 束縛解決済みの入力 shape から**出力 slot 順の shape 列**を計算する（ADR 0068 決定 1）。
  * 列の長さは契約が宣言する出力数（出力 dtype 写像の列長）と一致する — 2 本を返すのは
  * `topk`（値 + 添字 — ADR 0068 決定 3）だけ、**空列**は `state_append`（値を定義しない
@@ -196,7 +281,18 @@ export const computeOutputShape = (
   where: string,
   context: ShapeContext = {},
 ): number[][] => {
-  assertArity(found, inputShapes.length, "入力 shape 数", where);
+  // readonly（past のみ）形は ins が q 1 本だけ（ADR 0096 段 2 §1.2）。契約層でも落ちるが、
+  // CPU 参照や適合表からの直呼びはここを通る（mask 拒否と同じ二重の網）。
+  if (isReadonlyStateAttention(found, context, where)) {
+    if (inputShapes.length !== READONLY_ATTENTION_ARITY) {
+      throw new OpContractError(
+        `${where}: readonly の attention は入力 shape ${READONLY_ATTENTION_ARITY} 本ちょうど` +
+          `（${inputShapes.length} 本）`,
+      );
+    }
+  } else {
+    assertArity(found, inputShapes.length, "入力 shape 数", where);
+  }
   switch (found.kind) {
     case "unary":
       // MUST: スカラ attr の値域と**キーを跨ぐ不変条件**（clamp の min <= max）をここで見る。
@@ -646,10 +742,13 @@ export const computeOutputShape = (
       return sole([...shape]);
     }
     case "attention": {
-      const [q, k, v, mask] = inputShapes;
       // MUST: scale はここでも引く（attrs スキーマを通らない CPU 参照の直呼びでも値域を効かせる
       // ため。rms_norm の eps / unary の scalarParamValues と同じ役割）。
       attentionScale(context.attrs ?? {}, where);
+      if (isReadonlyStateAttention(found, context, where)) {
+        return sole(readonlyStateAttentionShape(inputShapes[0], context, where));
+      }
+      const [q, k, v, mask] = inputShapes;
       const show = `[${q.join(",")}] / [${k.join(",")}] / [${v.join(",")}]`;
       if (q.length !== 4 || k.length !== 4 || v.length !== 4) {
         throw new OpContractError(

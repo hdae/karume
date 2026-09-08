@@ -1683,7 +1683,8 @@ Deno.test("省略可能 attr `window` は states 欄を持つノードでのみ�
   const states = { k: "kv.k", v: "kv.v" };
   // 必須 attrs には出ない（宣言必須の欄と混ざらない）
   assertEquals(attrKeysOf(resolveOpContract("attention")), ["scale"]);
-  assertEquals(optionalAttrKeysOf(resolveOpContract("attention")), ["window"]);
+  // `readonly`（ADR 0096 段 2 §1.2）も states 形専用の省略可能 attr — attention だけが持つ。
+  assertEquals(optionalAttrKeysOf(resolveOpContract("attention")), ["window", "readonly"]);
   assertEquals(optionalAttrKeysOf(resolveOpContract("state_append")), ["window"]);
   assertEquals(optionalAttrKeysOf(resolveOpContract("relu")), []);
 
@@ -1714,7 +1715,7 @@ Deno.test("省略可能 attr `window` は states 欄を持つノードでのみ�
   // capability 射影には必須と省略可能の**和**が載る（列挙門が states 形を拒否しないため）
   assertEquals(
     [...RUNTIME_SUPPORT.ops.get("attention")?.attrKeys ?? []].sort(),
-    ["scale", "window"],
+    ["readonly", "scale", "window"],
   );
   assertEquals([...RUNTIME_SUPPORT.ops.get("state_append")?.attrKeys ?? []], ["window"]);
   // 契約外 attrs の判定は従来どおり（省略可能の受理は window 1 本だけを広げる）

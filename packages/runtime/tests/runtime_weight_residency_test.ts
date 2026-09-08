@@ -71,6 +71,10 @@ const assertDeclaredBytesMatchFile = (model: ResidencyTarget): void => {
   for (const [name, initializer] of Object.entries(graph.initializers)) {
     const seat = plan.get(name);
     assert(seat !== undefined, `initializer '${name}' の席が無い`);
+    // 共有宣言（借り物 — ADR 0096 段 2 §1.3）はバイトを配布形に持たないので、この助手の
+    // 対象外（対象の資産に 1 本も無いことを門にする）。
+    assert(initializer.shared === undefined, `initializer '${name}' が共有宣言`);
+    assert(seat.seat !== "shared", `initializer '${name}' の席が shared`);
     const view = tensors.get(initializer.tensor);
     assert(view !== undefined, `テンソル '${initializer.tensor}' が無い`);
     assertEquals(seat.payloadBytes, view.byteLength, `${name} の payload バイト数`);

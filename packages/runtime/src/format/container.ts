@@ -316,6 +316,10 @@ export const createShardValidator = (graph: IrGraph): ShardValidator => {
   // piece キーの親として認める名前（実体キーだけ — scale は分割しない）。
   const declaredTensors = new Set<string>();
   for (const initializer of Object.values(graph.initializers)) {
+    // 共有 initializer（ADR 0096 段 2 §1.3）はバイトを配布形に持たない — 突合集合に入れると
+    // 「宣言に対して不足するテンソル」で必ず落ちる。実体の素性は借り手 Session 構築時に
+    // `SessionOptions.sharedWeights` の門が見る（貸し手の席・宣言 shape・格納 dtype）。
+    if (initializer.shared !== undefined) continue;
     declaredNames.add(initializer.tensor);
     declaredTensors.add(initializer.tensor);
     if (initializer.storage.scale !== undefined) declaredNames.add(initializer.storage.scale);
@@ -337,6 +341,8 @@ export const createShardValidator = (graph: IrGraph): ShardValidator => {
       // 進行状態の更新は**全検査を通り抜けた後**にまとめて適用する（`seen` と同じ規律）。
       const advanced: { readonly tensor: string; readonly next: PieceProgress | undefined }[] = [];
       for (const [name, initializer] of Object.entries(graph.initializers)) {
+        // 共有 initializer は shard に実体を持たない（突合集合の外 — validator 構築時の doc）。
+        if (initializer.shared !== undefined) continue;
         const where = `initializer '${name}'`;
         // 意味論 dtype と格納 dtype の組（f32 の符号化語彙 / i32 は生の int32）と数値 shape は
         // parseIrGraph が保証済み（グラフ単体で決まる規則はパーサに一本化 — docs/ir-v1.md）。
@@ -496,6 +502,8 @@ export const createShardValidator = (graph: IrGraph): ShardValidator => {
       // 欠けは**全件列挙**する（1 件ずつ落とすと、配布形を組む側が何本足りないのか分からない）。
       const missing: string[] = [];
       for (const [name, initializer] of Object.entries(graph.initializers)) {
+        // 共有 initializer は「欠け」ではない（実体は貸し手が持つ — validator 構築時の doc）。
+        if (initializer.shared !== undefined) continue;
         const where = `initializer '${name}'`;
         const state = progress.get(initializer.tensor);
         if (state !== undefined) {
@@ -549,6 +557,8 @@ const assertNoScaleKeyCollision = (graph: IrGraph): void => {
   const entityOwner = new Map<string, string>();
   const scaleOwner = new Map<string, string>();
   for (const [name, initializer] of Object.entries(graph.initializers)) {
+    // 共有 initializer は実体キーも scale キーも持たない（衝突の当事者になりえない）。
+    if (initializer.shared !== undefined) continue;
     const earlierScale = scaleOwner.get(initializer.tensor);
     if (earlierScale !== undefined) {
       throw new ContainerError(
@@ -598,6 +608,7 @@ const assertNoOrphanScale = (
   seen: ReadonlySet<string>,
 ): void => {
   for (const [name, initializer] of Object.entries(graph.initializers)) {
+    if (initializer.shared !== undefined) continue;
     const scaleKey = initializer.storage.scale;
     if (scaleKey === undefined) continue;
     if (!file.tensors.has(scaleKey) || seen.has(scaleKey)) continue;

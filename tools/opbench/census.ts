@@ -231,7 +231,9 @@ const storageOf = (graph: IrGraph, name: string): StorageRef | null => {
   if (!Object.hasOwn(graph.initializers, name)) return null;
   const initializer = graph.initializers[name];
   return {
-    tensor: initializer.tensor,
+    // 共有 initializer（借り物 — ADR 0096 段 2 §1.3）は自分のバイトを持たないので、
+    // 実体キーは**貸し手コンテナ**のもの（`shared.tensor`）を名乗る。
+    tensor: initializer.shared === undefined ? initializer.tensor : initializer.shared.tensor,
     dtype: initializer.storage.dtype,
     ...(initializer.storage.groupSize === undefined
       ? {}

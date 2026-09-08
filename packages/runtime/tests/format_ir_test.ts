@@ -381,7 +381,11 @@ Deno.test("parseIrGraph: state スロットの宣言を受理する", () => {
     withStateReaders(g);
   });
   assertEquals(Object.keys(slots.states), ["layer0.k", "layer0.v", "layer1.k"]);
-  assertEquals(slots.states["layer0.k"], { dtype: "f32", shape: [1, 2, 512, 128] });
+  assertEquals(slots.states["layer0.k"], {
+    dtype: "f32",
+    shape: [1, 2, 512, 128],
+    external: false,
+  });
   assertEquals(slots.states["layer1.k"].shape, [1, 2, 131072, 128]);
 
   // 記号次元は Session の symbols で解決する（入力にも現れる記号なので、束縛点は従来どおり
@@ -579,7 +583,7 @@ Deno.test("parseIrGraph: '__proto__' という名前の state スロットを ow
 
   assertEquals(Object.getPrototypeOf(graph.states), null);
   assertEquals(Object.hasOwn(graph.states, "__proto__"), true);
-  assertEquals(graph.states["__proto__"], { dtype: "f32", shape: [4] });
+  assertEquals(graph.states["__proto__"], { dtype: "f32", shape: [4], external: false });
   // 参照側の欄も同じ理由で null プロトタイプ（素の `{}` では代入が [[Prototype]] 設定に
   // 化けて欄が黙って消え、参照完全性検査も契約のキー集合検査も素通りする形が作れる）。
   const referring = graph.nodes[1].states;

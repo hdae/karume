@@ -368,6 +368,10 @@ const stateEstimate = (
   for (const name of names) {
     const shape = resolveSlotShape(name, graph.states[name].shape, bindings);
     shapes.set(name, shape);
+    // 借り物スロット（external — ADR 0096 段 2 §1.1）は借り手 context が確保しない。形は
+    // 一時（S / 行統計）の勘定に要るので解決するが、バイト数は 1 つも数えない
+    // （`GenerationContext.create` の確保と同じ分岐 = 見積りと実構築が同じ数を主張する）。
+    if (graph.states[name].external) continue;
     bytes += numel(shape) * STATE_ELEMENT_BYTES;
   }
   // 論理長 uniform は context 1 本につき 1 枚（スロット数に依らない）。

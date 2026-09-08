@@ -188,6 +188,9 @@ import {
   stateAttentionParams,
   statePvKey,
   statePvParallelKey,
+  statePvParallelReadonlyKey,
+  statePvParallelReadonlyWgsl,
+  statePvParallelReadonlyWorkgroups,
   statePvParallelWgsl,
   statePvParallelWorkgroups,
   statePvTiledEligible,
@@ -199,6 +202,9 @@ import {
   stateQkKey,
   stateQkParallelEligible,
   stateQkParallelKey,
+  stateQkParallelReadonlyKey,
+  stateQkParallelReadonlyWgsl,
+  stateQkParallelReadonlyWorkgroups,
   stateQkParallelWgsl,
   stateQkParallelWorkgroups,
   stateQkTiledEligible,
@@ -210,6 +216,9 @@ import {
   stateSliding,
   stateStatsKey,
   stateStatsParams,
+  stateStatsReadonlyKey,
+  stateStatsReadonlyWgsl,
+  stateStatsReadonlyWorkgroups,
   stateStatsWgsl,
   stateStatsWorkgroups,
 } from "../kernels/state-attention.ts";
@@ -262,6 +271,7 @@ import {
   rmsNormEps,
   scalarParamValues,
   sliceAttrs,
+  stateReadonly,
   stateWindow,
   topkK,
   type UnaryOpName,
@@ -729,9 +739,15 @@ export class RecipeBuilder {
       case "attention":
         // 欄の有無が形を判別する（ADR 0067 決定 4）。states 形は別族カーネル
         // （src/kernels/state-attention.ts）で、融合 attention とは 1 バイトも共有しない。
-        await (Object.keys(step.node.states).length > 0
-          ? this.#buildStateAttention(step, binds, outs, builder, states)
-          : this.#buildAttention(step, binds, outs, builder));
+        // states 形はさらに 2 つ: 今 step の k/v も読む従来形と、past だけを読む **readonly**
+        // 形（ADR 0096 段 2 §1.2 — ins が q 1 本で、束縛が 1 本ずつ詰まった別カーネル）。
+        if (Object.keys(step.node.states).length === 0) {
+          await this.#buildAttention(step, binds, outs, builder);
+        } else if (stateReadonly(step.node.attrs, `nodes (${step.node.op})`)) {
+          await this.#buildReadonlyStateAttention(step, binds, outs, builder, states);
+        } else {
+          await this.#buildStateAttention(step, binds, outs, builder, states);
+        }
         break;
       case "embedding":
         await this.#buildEmbedding(step, binds, outs, builder);
@@ -2443,6 +2459,161 @@ export class RecipeBuilder {
           : pvParallel
           ? statePvParallelWorkgroups(dispatchGeometry, limit, `${where} ③PV`)
           : statePvWorkgroups(dispatchGeometry, limit, `${where} ③PV`),
+      });
+
+      // MUST: 確保の逆順で返す（計画の再生と同じ順）。
+      builder.releaseTemp(rowStats);
+      builder.releaseTemp(scores);
+    }
+  }
+
+  /**
+   * **readonly states 形 attention**（ADR 0096 段 2 §1.2 / §2.3 — drafter が貸し手の KV だけを
+   * 読む形）。`#buildStateAttention` との違いは 4 点だけで、骨格（①QK → ②行統計 → ③PV の
+   * 3 dispatch × 行ブロック）は同じ:
+   *
+   * 1. **ins が q 1 本**（今 step の k/v が無い）— 束縛が 1 本ずつ詰まった別カーネル 3 本
+   * 2. `M = 1` 固定（shape 層の MUST）なので行ブロックは常に 1 枚・縮約変種の適用条件を見ない
+   *    （①' / ③' が席に依らず**常に**選ばれる — `M=1` は両者の適用条件そのもの）
+   * 3. **live の式が違う**（`[P−min(P,W), P)` — 今 step のぶんが足されない）ので ①②③ とも
+   *    readonly 専用キー（`:ro`）
+   * 4. `states.chunkRows` / `fullCapacities` を**登録しない** — 借り手には `state_append` が
+   *    1 本も無く（§1.1）、書かない run に「容量に収まるか」の検査は要らない。full の
+   *    `P+Q ≤ C` を借り手でも見ると、貸し手が ring で回している sliding 以外のスロットで
+   *    「貸し手では正規な P」が借り手側の run だけ拒否される
+   *
+   * MUST: `colCap` と行ブロックの割り方は {@link planStateAttention}（見積りと共有する 1 本）
+   * だけから引く（states 形と同じ規律）。`M = 1` を渡すので sliding の列容量は `W` ちょうどに
+   * なり、readonly の live 上限 `min(P, W)` と一致する。
+   */
+  async #buildReadonlyStateAttention(
+    step: NodePlan,
+    binds: readonly BindingSource[],
+    outs: readonly BindingSource[],
+    builder: StepRecipeBuilder,
+    states: StateBuildContext,
+  ): Promise<void> {
+    const q = step.inputShapes[0];
+    const where = `attention (readonly) [${q.join(",")}]`;
+    // q は `[B,H,1,D]`（M = 1 は shape 層が保証済み — ADR 0096 段 2 §1.2）。
+    const [batch, heads, , depth] = q;
+    const kSlot = this.#stateSlot(step, "k", states, where);
+    const vSlot = this.#stateSlot(step, "v", states, where);
+    // k / v スロットが同形であることは shape 層が済ませている（容量は片方から引けばよい）。
+    const capacity = kSlot.shape[2];
+    const kvRepeat = heads / kSlot.shape[1];
+    const gqa = kvRepeat > 1;
+    const window = stateWindow(step.node.attrs, where) ?? 0;
+    const sliding = stateSliding(window);
+    const scale = attentionScale(step.node.attrs, where);
+    // 数値変種 × states 形は fail loudly（`#buildStateAttention` と同じ門 — ADR 0058 決定 3）。
+    if (this.#state.attentionCompute !== "f32") {
+      throw new ExecutionError(
+        `${where}: readonly の attention は attentionCompute ` +
+          `'${this.#state.attentionCompute}' と組めない（f32 の別族カーネルのみ）`,
+      );
+    }
+    if (this.#state.attentionScoreStorage !== "f32") {
+      throw new ExecutionError(
+        `${where}: readonly の attention は attentionScoreStorage ` +
+          `'${this.#state.attentionScoreStorage}' と組めない（S の格納は f32 のみ）`,
+      );
+    }
+
+    const limit = this.#state.gpu.limits.maxComputeWorkgroupsPerDimension;
+    const batchHeads = batch * heads;
+    const { colCap, blocks } = planStateAttention(
+      { batchHeads, chunkRows: 1, capacity, window },
+      this.#state.gpu.limits.maxStorageBufferBindingSize,
+      this.#state.rowBlockSplit,
+    );
+    const qkKey = stateQkParallelReadonlyKey(sliding, gqa);
+    const statsKey = stateStatsReadonlyKey(sliding);
+    const pvKey = statePvParallelReadonlyKey(sliding, gqa);
+    const qk = await this.#state.cache.get(qkKey, stateQkParallelReadonlyWgsl(sliding, gqa));
+    const stats = await this.#state.cache.get(statsKey, stateStatsReadonlyWgsl(sliding));
+    const pv = await this.#state.cache.get(pvKey, statePvParallelReadonlyWgsl(sliding, gqa));
+
+    for (const block of blocks) {
+      const geometry = {
+        rowsBlock: block.rows,
+        rowOffset: block.offset,
+        chunkRows: 1,
+        depth,
+        kvRepeat,
+        window,
+        capacity,
+        colCap,
+        scale,
+      };
+      // ①③ は同じ params 語順（readonly カーネルは states 形と同じ `Params` struct）。
+      const params = this.#writeParams(stateAttentionParams(geometry), PARAMS_UNIFORM_USAGE);
+      const dispatchGeometry = {
+        batchHeads,
+        rowsBlock: block.rows,
+        rowOffset: block.offset,
+        depth,
+        window,
+      };
+      const scores = builder.allocTemp(block.scoreBytes);
+      const rowStats = builder.allocTemp(block.statsBytes);
+
+      // ①'QK(ro) — 束縛は [params, q, slot_k, s, lengths]。**workgroup 数だけが論理長から
+      // 算出**される（`P = 0` は live 0 で列軸が 0 = dispatch そのものが積まれない）。
+      builder.dispatch({
+        key: qkKey,
+        pipeline: qk.pipeline,
+        layout: qk.layout,
+        roles: qk.roles,
+        params,
+        bindings: [
+          { binding: 1, source: binds[0] },
+          { binding: 2, source: { kind: "state", name: kSlot.name } },
+          { binding: 3, source: scores },
+          { binding: 4, source: { kind: "lengths" } },
+        ],
+        workgroups: (past) =>
+          stateQkParallelReadonlyWorkgroups(dispatchGeometry, past, limit, `${where} ①'QK(ro)`),
+      });
+
+      // ② 行統計(ro) — 束縛は [params, s, stats, lengths]。行数は `Q = 1` 固定なので静的。
+      builder.dispatch({
+        key: statsKey,
+        pipeline: stats.pipeline,
+        layout: stats.layout,
+        roles: stats.roles,
+        params: this.#writeParams(
+          stateStatsParams(batchHeads, block.rows, block.offset, colCap, window),
+          PARAMS_UNIFORM_USAGE,
+        ),
+        bindings: [
+          { binding: 1, source: scores },
+          { binding: 2, source: rowStats },
+          { binding: 3, source: { kind: "lengths" } },
+        ],
+        workgroups: stateStatsReadonlyWorkgroups(dispatchGeometry, limit, `${where} ②stats(ro)`),
+      });
+
+      // ③'PV(ro) — 束縛は [params, s, stats, slot_v, out, lengths]。出力は行ブロック全体を
+      // full-write（空行 = P 0 は厳密 0）。
+      builder.dispatch({
+        key: pvKey,
+        pipeline: pv.pipeline,
+        layout: pv.layout,
+        roles: pv.roles,
+        params,
+        bindings: [
+          { binding: 1, source: scores },
+          { binding: 2, source: rowStats },
+          { binding: 3, source: { kind: "state", name: vSlot.name } },
+          { binding: 4, source: outs[0] },
+          { binding: 5, source: { kind: "lengths" } },
+        ],
+        workgroups: statePvParallelReadonlyWorkgroups(
+          dispatchGeometry,
+          limit,
+          `${where} ③'PV(ro)`,
+        ),
       });
 
       // MUST: 確保の逆順で返す（計画の再生と同じ順）。

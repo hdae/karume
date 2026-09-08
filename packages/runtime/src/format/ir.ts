@@ -31,6 +31,17 @@ type IrValueInfo = {
 type IrStateSlot = {
   readonly dtype: IrStateDtype;
   readonly shape: readonly IrDim[];
+  /**
+   * **借り物のスロット**（ADR 0096 段 2 §1.1）。真のとき実体は自分の context ではなく
+   * **借り先 context**（drafter が読む target の KV）にあり、この context は 1 バイトも
+   * 確保しない。書き手（`state_append`）は持てず、読者は readonly attention だけ
+   * （執行は `runtime/plan.ts` の `assertStateOwnership`）。
+   *
+   * MUST: 常在欄にする（省略時は false）。`IrNode.states` と同じ理由 — `?:` にすると消費側が
+   * 毎回 `?? false` を書くことになり、1 箇所の書き忘れが「借り物を自分で確保して空の過去を
+   * 読む」沈黙誤値になる。
+   */
+  readonly external: boolean;
 };
 
 type IrInput = {
@@ -52,11 +63,31 @@ type IrStorage = {
   readonly groupSize?: number;
 };
 
-type IrInitializer = {
+/**
+ * 実体バイトを配布形に持つ通常の initializer。
+ */
+type IrOwnedInitializer = {
   /** safetensors のテンソルキー。 */
   readonly tensor: string;
+  readonly shared?: undefined;
   readonly storage: IrStorage;
 };
+
+/**
+ * **共有 initializer**（ADR 0096 段 2 §1.3）— バイトを配布形に持たず、貸し手 Session が
+ * 既に GPU へ載せた重みをそのまま束ねる宣言。
+ *
+ * `shared.tensor` は**貸し手コンテナのテンソルキー**（配布形の実キー）で、借り手はこの名前で
+ * 貸し手グラフの initializer を引く。`storage.dtype` は貸し手と一致する宣言で、`scale` /
+ * `group_size` は書かない（実体は貸し手の `ResidentWeight` が持つ — 二重簿記の禁止）。
+ */
+type IrSharedInitializer = {
+  readonly tensor?: undefined;
+  readonly shared: { readonly tensor: string };
+  readonly storage: IrStorage;
+};
+
+type IrInitializer = IrOwnedInitializer | IrSharedInitializer;
 
 export type IrNode = {
   readonly op: string;
@@ -265,10 +296,17 @@ const parseShape = (value: unknown, symbols: ReadonlySet<string>, where: string)
     return dim;
   });
 
-const parseStorage = (value: unknown, where: string): IrStorage => {
+/**
+ * @param shared 共有 initializer（{@link IrSharedInitializer}）の storage か。真のとき
+ *   `scale` / `group_size` は**書けない**（付随実体を持つのは貸し手だけ）ので、量子化格納の
+ *   「scale 必須」規則も掛けない — 掛けると借り手が貸し手の scale キーを写して持つ形になり、
+ *   同じ事実が 2 箇所に生える。
+ */
+const parseStorage = (value: unknown, where: string, shared = false): IrStorage => {
   const obj = asPlainObject(value, where);
-  checkKeys(obj, ["dtype"], ["scale", "group_size"], where);
+  checkKeys(obj, ["dtype"], shared ? [] : ["scale", "group_size"], where);
   const dtype = asStorageDtype(obj["dtype"], `${where}.dtype`);
+  if (shared) return { dtype };
   const hasScale = Object.hasOwn(obj, "scale");
   const hasGroupSize = Object.hasOwn(obj, "group_size");
   // scale / group_size は量子化格納の記述子。非量子化 dtype に付いているのはエクスポータの
@@ -336,9 +374,18 @@ const parseStateSlot = (
   where: string,
 ): IrStateSlot => {
   const obj = asPlainObject(value, where);
-  checkKeys(obj, ["dtype", "shape"], [], where);
+  checkKeys(obj, ["dtype", "shape"], ["external"], where);
   const dtype = asStateDtype(obj["dtype"], `${where}.dtype`);
   const shape = parseShape(obj["shape"], symbols, `${where}.shape`);
+  // MUST: 書けるのは `true` だけ。`false` は「欄の不存在」と同じ宣言なので、2 通りの綴りを
+  // 許すと「external を書き忘れた」と「external を明示的に切った」が読み手から区別できない。
+  if (Object.hasOwn(obj, "external") && obj["external"] !== true) {
+    throw new IrError(
+      `${where}.external: ${JSON.stringify(obj["external"])} は書けない` +
+        "（欄の不存在が「自分で確保する」— 借り物のときだけ true を書く）",
+    );
+  }
+  const external = Object.hasOwn(obj, "external");
   if (shape.length < 1 || shape.length > MAX_STATE_RANK) {
     throw new IrError(
       `${where}.shape: rank ${shape.length} は 1..${MAX_STATE_RANK} の外（固定 rank の容量込み具体形 MUST）`,
@@ -349,7 +396,7 @@ const parseStateSlot = (
       throw new IrError(`${where}.shape[${index}]: 次元 ${dim} が正整数でない（容量が取れない）`);
     }
   });
-  return { dtype, shape };
+  return { dtype, shape, external };
 };
 
 /**
@@ -472,6 +519,20 @@ export const parseIrGraph = (json: string): IrGraph => {
     asNonEmptyString(name, "graph.initializers の initializer 名");
     const where = `graph.initializers['${name}']`;
     const obj = asPlainObject(raw, where);
+    // 欄の有無が形を判別する（`states` 欄と同じ流儀 — ADR 0096 段 2 §1.3）。`shared` を持つ
+    // 宣言は `tensor` を持てない（checkKeys の必須集合そのものが違う）ので、「バイトも書いた
+    // うえで借りる」という両義の形は綴れない。
+    if (Object.hasOwn(obj, "shared")) {
+      checkKeys(obj, ["shared", "storage"], [], where);
+      const sharedWhere = `${where}.shared`;
+      const shared = asPlainObject(obj["shared"], sharedWhere);
+      checkKeys(shared, ["tensor"], [], sharedWhere);
+      initializers[name] = {
+        shared: { tensor: asNonEmptyString(shared["tensor"], `${sharedWhere}.tensor`) },
+        storage: parseStorage(obj["storage"], `${where}.storage`, true),
+      };
+      continue;
+    }
     checkKeys(obj, ["tensor", "storage"], [], where);
     initializers[name] = {
       tensor: asNonEmptyString(obj["tensor"], `${where}.tensor`),
@@ -701,7 +762,11 @@ const checkDeclarations = (
     if (values[name].shape.some((dim) => typeof dim !== "number")) {
       throw new IrError(`graph.values['${name}']: initializer の shape に記号次元は使えない`);
     }
-    if (storageDtype === "i4") checkGroupQuantizedShape(name, initializers[name], values[name]);
+    // 共有 initializer は group 長を宣言しない（正本は貸し手の席）ので、行長の整除も
+    // 貸し手側の宣言に対して既に掛かっている — ここで掛けると「group 長が無い」で必ず落ちる。
+    if (storageDtype === "i4" && initializers[name].shared === undefined) {
+      checkGroupQuantizedShape(name, initializers[name], values[name]);
+    }
   }
   for (const node of nodes) {
     for (const out of node.outs) {

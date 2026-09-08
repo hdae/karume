@@ -142,6 +142,9 @@ export type { WeightResidency } from "./src/runtime/weight-residency.ts";
  * `GenerationContext`（1 生成ぶんの可変 state の所有者 — ADR 0066）も同じ理由で型のみ:
  * 入口は `Session.createGenerationContext` だけで、直接構築すると確保の errorScope と容量
  * ゲートを迂回できてしまう（`ResidentTensor` / `BatchScope` と同じ流儀）。
+ *
+ * `SharedWeight`（貸し出された重みへの不透明な参照 — ADR 0096 段 2 §2.2）も同じ理由で型のみ:
+ * 入口は `Session.exportWeight` だけで、直接構築すると席の突合と借用計数を迂回できる。
  */
 export type {
   ComputePrecision,
@@ -161,6 +164,7 @@ export type {
   SessionBuildStats,
   SessionDiagnostics,
   SessionOptions,
+  SharedWeight,
   StateAttentionReduce,
   StateBackingStats,
   StorageDiagnostics,

@@ -27,7 +27,9 @@ import {
   SCALAR_PARAM_ATTRS,
   SLICE_ATTRS,
   SOFTMAX_ATTRS,
+  STATE_READONLY_ATTRS,
   STATE_WINDOW_ATTRS,
+  stateReadonly,
   SYM_PREFIX_SLICE_ATTRS,
   TOPK_ATTRS,
   UPSAMPLE_BILINEAR2D_ATTRS,
@@ -73,6 +75,13 @@ import {
   UPSAMPLE_BILINEAR2D_OP,
   WHERE_OP,
 } from "./names.ts";
+
+/**
+ * readonly（past のみを読む）states 形 attention の入力数 — **q 1 本ちょうど**
+ * （ADR 0096 段 2 §1.2）。契約層（{@link assertNodeContract}）と shape 層
+ * （`computeOutputShape`）が**同じ 1 つの定数**を読む。
+ */
+export const READONLY_ATTENTION_ARITY = 1;
 
 export type OpKind =
   | "unary"
@@ -190,6 +199,15 @@ type ContractBase = {
    */
   readonly optionalAttrs?: AttrSchema;
   /**
+   * `attrs.readonly`（ADR 0096 段 2 §1.2）を宣言した states 形の**入力数ちょうど**
+   * （現状 `attention` の 1 = q だけ）。省略 = readonly を宣言できない op。
+   *
+   * MUST: `arity` / `maxArity` の閉区間とは**別の欄**にする。readonly は「省略可能な末尾入力が
+   * 増える」のではなく「今 step の k/v が**構造ごと消える**」形で、区間で表すと `1..4` の
+   * ような穴だらけの受理集合になり、ins 2 本の壊れた IR が通る。
+   */
+  readonly readonlyArity?: number;
+  /**
    * `states` 欄の契約（省略 = **states 欄を持てない op**）。`keys` は欄が非空のときの
    * キー集合**ちょうど**で、`required` は「欄そのものが必須か」。
    *
@@ -296,6 +314,7 @@ export type OpContract =
     readonly name: typeof ATTENTION_OP;
     readonly arity: 3;
     readonly maxArity: 4;
+    readonly readonlyArity: typeof READONLY_ATTENTION_ARITY;
   })
   // 今 step の k/v を state スロットへ書く effect op（ADR 0067 決定 5）。**出力 0 本**の
   // 最初の入居者で、`states` 欄が必須（`{ slot }` ちょうど）。kind を attention と分けるのは、
@@ -617,7 +636,11 @@ export const OP_CONTRACTS: ReadonlyMap<string, OpContract> = new Map<string, OpC
     name: ATTENTION_OP,
     arity: 3,
     maxArity: 4,
-    optionalAttrs: STATE_WINDOW_ATTRS,
+    // `window` と `readonly` はどちらも states 形専用の省略可能 attr（ADR 0067 決定 4 /
+    // ADR 0096 段 2 §1.2）。`state_append` が共有するのは `window` の 1 本だけ（append に
+    // readonly は無い）なので、合成はここで行い STATE_WINDOW_ATTRS 自体は動かさない。
+    optionalAttrs: { ...STATE_WINDOW_ATTRS, ...STATE_READONLY_ATTRS },
+    readonlyArity: READONLY_ATTENTION_ARITY,
     states: { keys: ["k", "v"], required: false },
   }],
   // state スロットへの書き込み（ADR 0067 決定 5）。入力 1 本・**出力 0 本**（OUTPUT_DTYPES の
@@ -815,16 +838,26 @@ export const assertNodeContract = (node: IrNode, where: string): OpContract => {
   const found = resolveOpContract(node.op);
   const stateKeys = Object.keys(node.states);
   assertStateField(found, node, stateKeys, where);
-  // MUST: states 形は**省略可能な末尾入力を取らない**（ADR 0067 決定 4 —「causal 固定・
-  // mask tensor は実体化しない」）。上限を絞らないと、mask 付き states 形 attention が
-  // 「mask を誰も読まない形」として受理される。
-  if (stateKeys.length > 0 && found.maxArity !== undefined && node.ins.length > found.arity) {
-    throw new OpContractError(
-      `${where}: op '${node.op}' の states 形は入力 ${found.arity} 本ちょうど` +
-        `（${node.ins.length} 本 — 省略可能な末尾入力は取らない・ADR 0067 決定 4）`,
-    );
+  if (assertReadonlyForm(found, node, stateKeys, where)) {
+    // readonly は ins を 1 本（q）へ絞る別形なので、下の閉区間検査は通さない。
+    if (node.ins.length !== found.readonlyArity) {
+      throw new OpContractError(
+        `${where}: op '${node.op}' の readonly（past のみ）形は入力 ${found.readonlyArity} 本` +
+          `ちょうど（${node.ins.length} 本 — 今 step の k / v は取らない・ADR 0096 段 2 §1.2）`,
+      );
+    }
+  } else {
+    // MUST: states 形は**省略可能な末尾入力を取らない**（ADR 0067 決定 4 —「causal 固定・
+    // mask tensor は実体化しない」）。上限を絞らないと、mask 付き states 形 attention が
+    // 「mask を誰も読まない形」として受理される。
+    if (stateKeys.length > 0 && found.maxArity !== undefined && node.ins.length > found.arity) {
+      throw new OpContractError(
+        `${where}: op '${node.op}' の states 形は入力 ${found.arity} 本ちょうど` +
+          `（${node.ins.length} 本 — 省略可能な末尾入力は取らない・ADR 0067 決定 4）`,
+      );
+    }
+    assertArity(found, node.ins.length, "入力数", where);
   }
-  assertArity(found, node.ins.length, "入力数", where);
   if (node.outs.length !== outputCountOf(found)) {
     throw new OpContractError(
       `${where}: op '${node.op}' の出力数が ${node.outs.length}（契約は ${outputCountOf(found)}）`,
@@ -858,6 +891,37 @@ export const assertNodeContract = (node: IrNode, where: string): OpContract => {
     }
   }
   return found;
+};
+
+/**
+ * `attrs.readonly`（ADR 0096 段 2 §1.2）が宣言されているかを、**アリティ検査より前に**確定する。
+ *
+ * 見るのは 3 点だけ（値域は {@link STATE_READONLY_ATTRS} が持つ）:
+ * 契約が readonly を持つ op か・`states` 欄があるか・値が `true` か。
+ *
+ * MUST: 「states 欄を持つノードだけ」をここでも執行する（下の省略可能 attrs のループと同じ
+ * 規則を先に掛ける）。後回しにすると、states 欄の無い readonly ノードが「入力数が 1（契約は
+ * 3 か 4）」という**理由の違う**診断で落ち、直す側が readonly の綴りに辿り着けない。
+ */
+const assertReadonlyForm = (
+  found: OpContract,
+  node: IrNode,
+  stateKeys: readonly string[],
+  where: string,
+): boolean => {
+  if (!Object.hasOwn(node.attrs, "readonly")) return false;
+  if (found.readonlyArity === undefined) {
+    throw new OpContractError(
+      `${where}: op '${found.name}' に attrs.readonly は無い（past のみを読む形を持つのは ` +
+        "states 形 attention だけ — ADR 0096 段 2 §1.2）",
+    );
+  }
+  if (stateKeys.length === 0) {
+    throw new OpContractError(
+      `${where}: op '${found.name}' の attrs.readonly は states 欄を持つノードでのみ宣言できる`,
+    );
+  }
+  return stateReadonly(node.attrs, where);
 };
 
 /**
