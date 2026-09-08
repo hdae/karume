@@ -1526,3 +1526,385 @@ export const statePvTiledWorkgroups = (
     tiledWorkgroups(geometry.batchHeads, 1, limit, `${where} ③ₜPV`),
   ];
 };
+
+// ---- readonly 変種（past だけを読む — ADR 0096 決定 1 / 段 2 の drafter） -----------------
+//
+// drafter（MTP head）は自前の K/V を持たず、貸し手 context の**スロットだけ**を読む。query は
+// 論理位置 `P−1`（直近確定 token）に居る 1 行で、列 `[column_base, P)` を見る。今 step の ins は
+// 無い（append も無い）。3 段（①' ② ③'）の骨格・縮約順・数値契約は states 形と同一で、変わるのは
+// **live 範囲の式と述語、ins 分岐と束縛が無いこと**だけ。
+//
+// MUST: 物理行の写像は {@link stateSlotRowWgsl}（読み書き同式）を共有する。貸し手の append と
+// 別式にすると ring が一周した後の全読みが黙って別の行を指す。
+// MUST: 述語は `col < P`（棄却行 = 論理長より先に書かれた行を**読まない** — ADR 0066 追記
+// 2026-09-08 の余裕は「棄却行が live 窓の外に落ちる」ことしか保証せず、`col ≤ P` にすると
+// 位置 P の未確定行を過去として食う）。
+
+/**
+ * readonly の live 範囲（`column_base = P − min(P, W)` / `live = min(P, W)`・full は `0` / `P`）。
+ *
+ * states 形（{@link stateLiveWgsl}）との違いは「+Q が無い」「窓が W−1 でなく W」の 2 点 —
+ * 今 step の ins が無いので、位置 P−1 の query から見た窓 `[P−W, P)` が W 列ちょうどになる。
+ * `query` 引数は署名を states 形と揃えるためだけに受ける（読まない）。
+ */
+const stateReadonlyLiveWgsl = (sliding: boolean, uniform = STATE_UNIFORM): string =>
+  `fn column_base(past: u32) -> u32 {
+  return ${sliding ? `past - min(past, ${uniform}.window)` : "0u"};
+}
+
+fn live_columns(past: u32, query: u32) -> u32 {
+  return ${sliding ? `min(past, ${uniform}.window)` : "past"};
+}`;
+
+/**
+ * readonly の述語（`col < P` AND sliding `(P−1−col) < W`）。
+ *
+ * MUST: 引き算は `past − 1u − col` の側で、`col < past` が真のときだけ評価される（WGSL の `&&`
+ * は短絡 — `past ≥ 1` かつ `col ≤ past − 1` なので巻き戻らない）。live 範囲の列は構成上すべて
+ * 述語内だが、① と同じ「述語外は −inf を書く」構造を保つために残す（境界の式が 1 箇所にある）。
+ */
+const stateReadonlyWindowFn = (sliding: boolean, uniform = STATE_UNIFORM): string =>
+  `fn in_window(col: u32, past: u32) -> bool {
+  return col < past${sliding ? ` && (past - 1u - col) < ${uniform}.window` : ""};
+}`;
+
+/** ①' readonly のキー（`:par:ro` — 束縛が 1 本少ないので ①' とは別キー MUST）。 */
+export const stateQkParallelReadonlyKey = (sliding: boolean, gqa: boolean): string =>
+  `attention_state_qk:v1:f32:wg${STATE_ATTENTION_TILE_X}x${STATE_QK_D_LANES}:par:ro${
+    stateVariantKeyPart(sliding, gqa)
+  }`;
+
+/** ② readonly のキー（live の式が違うので ② とは別キー MUST）。 */
+export const stateStatsReadonlyKey = (sliding: boolean): string =>
+  `attention_state_stats:v2:f32:wg${STATE_STATS_WORKGROUP_SIZE}:ro${
+    stateVariantKeyPart(sliding, false)
+  }`;
+
+/** ③' readonly のキー（`:par:ro`）。 */
+export const statePvParallelReadonlyKey = (sliding: boolean, gqa: boolean): string =>
+  `attention_state_pv:v1:f32:wg${STATE_ATTENTION_TILE_X}x${STATE_PV_KV_LANES}:par:ro${
+    stateVariantKeyPart(sliding, gqa)
+  }`;
+
+/**
+ * ①' readonly。束縛（**ins が無いので 1 本詰まる** — ①' と同じ番号にしない）:
+ *
+ * | binding | 資源                          |
+ * | ------- | ----------------------------- |
+ * | 0       | `Params`（uniform）           |
+ * | 1       | `q` `[B,H,M,D]`（M = 1）       |
+ * | 2       | `slot_k` `[B,Hkv,C,D]`        |
+ * | 3       | `s` `[B·H, rows_block, colCap]`（書き） |
+ * | 4       | `Lengths`（uniform — `past` だけを読む・`query` は 1） |
+ *
+ * 縮約は ①' と同じ D 方向の固定順の木（{@link stateScoreFn} の部分和を同じ 1 箇所から出す）。
+ */
+export const stateQkParallelReadonlyWgsl = (sliding: boolean, gqa: boolean): string =>
+  `// karume attention_state_qk (states 形の S 実体化, f32, D 並列縮約, readonly = past のみ${
+    sliding ? ", sliding window" : ""
+  }${gqa ? ", GQA" : ""})
+${STATE_PARAMS_STRUCT}
+${STATE_LENGTHS_STRUCT}
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read> q: array<f32>;
+@group(0) @binding(2) var<storage, read> slot_k: array<f32>;
+@group(0) @binding(3) var<storage, read_write> s: array<f32>;
+@group(0) @binding(4) var<uniform> lengths: Lengths;
+
+${stateSlotRowWgsl(sliding)}
+
+${stateReadonlyLiveWgsl(sliding)}
+
+${stateReadonlyWindowFn(sliding)}
+
+${stateEffectiveRowsWgsl()}
+
+${stateScoreFn("score_slot", "slot_k", STATE_QK_D_LANES)}
+
+var<workgroup> scratch: array<f32, ${STATE_ATTENTION_TILE_X * STATE_QK_D_LANES}>;
+
+@compute @workgroup_size(${STATE_ATTENTION_TILE_X}, ${STATE_QK_D_LANES})
+fn main(
+  @builtin(workgroup_id) wid: vec3<u32>,
+  @builtin(local_invocation_id) lid: vec3<u32>,
+) {
+  let local_row = wid.y;
+  if (local_row >= effective_rows(lengths.query)) {
+    return;
+  }
+  let past = lengths.past;
+  let live = live_columns(past, lengths.query);
+  let cl = wid.x * ${STATE_ATTENTION_TILE_X}u + lid.x;
+  let lane = lid.y;
+  let z = wid.z;
+  let col = column_base(past) + cl;
+  let row = params.row_offset + local_row;
+  let q_base = (z * params.chunk_rows + row) * params.depth;
+  let kv_plane = ${kvPlaneWgsl(gqa)};
+  // 読むのはスロット（past）だけ。端数タイル（cl ≥ live）は内積を回さず **return もしない**
+  // （下の barrier は一様制御流の中だけ）
+  let inside = cl < live && in_window(col, past);
+  var acc = 0.0;
+  if (inside) {
+    acc = score_slot(q_base, (kv_plane * params.capacity + slot_row(col)) * params.depth, lane);
+  }
+  scratch[lane * ${STATE_ATTENTION_TILE_X}u + lid.x] = acc;
+  workgroupBarrier();
+  // 固定順の木縮約（stride 8 → 4 → 2 → 1）— 決定性の根拠
+  var stride = ${STATE_QK_D_LANES / 2}u;
+  while (stride > 0u) {
+    if (lane < stride) {
+      let mine = lane * ${STATE_ATTENTION_TILE_X}u + lid.x;
+      scratch[mine] = scratch[mine] + scratch[(lane + stride) * ${STATE_ATTENTION_TILE_X}u + lid.x];
+    }
+    workgroupBarrier();
+    stride = stride / 2u;
+  }
+  // 述語外は -inf。live 範囲は**述語外でも必ず書く**（書かないと ② が前回の残骸を食う）
+  if (lane == 0u && cl < live) {
+    var value = bitcast<f32>(params.neg_inf);
+    if (inside) {
+      value = scratch[lid.x];
+    }
+    s[(z * params.rows_block + local_row) * params.col_cap + cl] = value;
+  }
+}
+`;
+
+/**
+ * ② readonly。② と同じ骨格・束縛・params で、live の式だけ readonly（{@link stateReadonlyLiveWgsl}）。
+ */
+export const stateStatsReadonlyWgsl = (sliding: boolean): string =>
+  `// karume attention_state_stats (states 形の行統計 m = amax(S) と inv = 1/Σexp(S - m), f32, readonly = past のみ${
+    sliding ? ", sliding window" : ""
+  })
+struct Params {
+  batch_heads: u32,
+  rows_block: u32,
+  row_offset: u32,
+  col_cap: u32,
+  window: u32,
+  neg_inf: u32,
+}
+${STATE_LENGTHS_STRUCT}
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read> s: array<f32>;
+@group(0) @binding(2) var<storage, read_write> stats: array<f32>;
+@group(0) @binding(3) var<uniform> lengths: Lengths;
+
+${stateReadonlyLiveWgsl(sliding)}
+
+${stateEffectiveRowsWgsl()}
+
+${IS_NAN_BITS_WGSL}
+
+${NAN_MAX_WGSL}
+
+var<workgroup> scratch: array<f32, ${STATE_STATS_WORKGROUP_SIZE}>;
+
+@compute @workgroup_size(${STATE_STATS_WORKGROUP_SIZE})
+fn main(
+  @builtin(workgroup_id) wid: vec3<u32>,
+  @builtin(local_invocation_id) lid3: vec3<u32>,
+  @builtin(num_workgroups) nwg: vec3<u32>,
+) {
+  let lid = lid3.x;
+  let neg_inf = bitcast<f32>(params.neg_inf);
+  let live = live_columns(lengths.past, lengths.query);
+  let rows = effective_rows(lengths.query);
+  let total = params.batch_heads * rows;
+  var index = wid.x;
+  while (index < total) {
+    let row = (index / rows) * params.rows_block + index % rows;
+    let base = row * params.col_cap;
+
+    // ① 行の最大値。identity は **-inf**（有限 sentinel は MUST NOT — ADR 0067 決定 6）
+    var hi = neg_inf;
+    var i = lid;
+    while (i < live) {
+      hi = nan_max(hi, s[base + i]);
+      i = i + ${STATE_STATS_WORKGROUP_SIZE}u;
+    }
+    scratch[lid] = hi;
+    workgroupBarrier();
+    var stride = ${STATE_STATS_WORKGROUP_SIZE / 2}u;
+    while (stride > 0u) {
+      if (lid < stride) {
+        scratch[lid] = nan_max(scratch[lid], scratch[lid + stride]);
+      }
+      workgroupBarrier();
+      stride = stride / 2u;
+    }
+    let amax = scratch[0u];
+    workgroupBarrier();
+
+    // ② Σ exp(S - amax)。**空行（amax == -inf・P = 0 の列 0 本を含む）は 1 度も回さない**
+    let empty = amax == neg_inf;
+    var acc = 0.0;
+    if (!empty) {
+      var j = lid;
+      while (j < live) {
+        acc = acc + exp(s[base + j] - amax);
+        j = j + ${STATE_STATS_WORKGROUP_SIZE}u;
+      }
+    }
+    scratch[lid] = acc;
+    workgroupBarrier();
+    var stride2 = ${STATE_STATS_WORKGROUP_SIZE / 2}u;
+    while (stride2 > 0u) {
+      if (lid < stride2) {
+        scratch[lid] = scratch[lid] + scratch[lid + stride2];
+      }
+      workgroupBarrier();
+      stride2 = stride2 / 2u;
+    }
+    if (lid == 0u) {
+      var m = 0.0;
+      var inv = 0.0;
+      if (!empty) {
+        m = amax;
+        inv = 1.0 / scratch[0u];
+      }
+      stats[row * ${STATE_STATS_STRIDE}u] = m;
+      stats[row * ${STATE_STATS_STRIDE}u + 1u] = inv;
+    }
+    workgroupBarrier();
+    index = index + nwg.x;
+  }
+}
+`;
+
+/**
+ * ③' readonly。束縛（**ins が無いので 1 本詰まる**）:
+ *
+ * | binding | 資源                          |
+ * | ------- | ----------------------------- |
+ * | 0       | `Params`（uniform — ① と同一 struct）|
+ * | 1       | `s`（読み）                   |
+ * | 2       | `stats`（読み）               |
+ * | 3       | `slot_v` `[B,Hkv,C,D]`        |
+ * | 4       | `out` `[B,H,M,D]`（書き）      |
+ * | 5       | `Lengths`（uniform）          |
+ *
+ * 縮約は ③' と同じ KV 方向の固定順の木。pad 行（`row ≥ Q`）は厳密 0（③ と同じ契約）。
+ */
+export const statePvParallelReadonlyWgsl = (sliding: boolean, gqa: boolean): string =>
+  `// karume attention_state_pv (states 形の O = P @ V, f32, KV 並列縮約, readonly = past のみ${
+    sliding ? ", sliding window" : ""
+  }${gqa ? ", GQA" : ""})
+${STATE_PARAMS_STRUCT}
+${STATE_LENGTHS_STRUCT}
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read> s: array<f32>;
+@group(0) @binding(2) var<storage, read> stats: array<f32>;
+@group(0) @binding(3) var<storage, read> slot_v: array<f32>;
+@group(0) @binding(4) var<storage, read_write> out: array<f32>;
+@group(0) @binding(5) var<uniform> lengths: Lengths;
+
+${stateSlotRowWgsl(sliding)}
+
+${stateReadonlyLiveWgsl(sliding)}
+
+${stateEffectiveRowsWgsl()}
+
+var<workgroup> scratch: array<f32, ${STATE_ATTENTION_TILE_X * STATE_PV_KV_LANES}>;
+
+@compute @workgroup_size(${STATE_ATTENTION_TILE_X}, ${STATE_PV_KV_LANES})
+fn main(
+  @builtin(workgroup_id) wid: vec3<u32>,
+  @builtin(local_invocation_id) lid: vec3<u32>,
+) {
+  let d = wid.x * ${STATE_ATTENTION_TILE_X}u + lid.x;
+  let local_row = wid.y;
+  let lane = lid.y;
+  let z = wid.z;
+  let in_depth = d < params.depth;
+  let at = (z * params.chunk_rows + params.row_offset + local_row) * params.depth + d;
+  if (local_row >= effective_rows(lengths.query)) {
+    if (in_depth) {
+      out[at] = 0.0;
+    }
+    return;
+  }
+  let past = lengths.past;
+  let live = live_columns(past, lengths.query);
+  let base_col = column_base(past);
+  let kv_plane = ${kvPlaneWgsl(gqa)};
+  let s_row = z * params.rows_block + local_row;
+  let s_base = s_row * params.col_cap;
+  let amax = stats[s_row * ${STATE_STATS_STRIDE}u];
+  let inv = stats[s_row * ${STATE_STATS_STRIDE}u + 1u];
+  // レーンごとの部分和（col 昇順・stride KV_LANES）。読むのはスロット（past）だけ
+  var acc = 0.0;
+  if (in_depth) {
+    for (var cl = lane; cl < live; cl = cl + ${STATE_PV_KV_LANES}u) {
+      let col = base_col + cl;
+      let p = exp(s[s_base + cl] - amax) * inv;
+      acc = acc + p * slot_v[(kv_plane * params.capacity + slot_row(col)) * params.depth + d];
+    }
+  }
+  scratch[lane * ${STATE_ATTENTION_TILE_X}u + lid.x] = acc;
+  workgroupBarrier();
+  var stride = ${STATE_PV_KV_LANES / 2}u;
+  while (stride > 0u) {
+    if (lane < stride) {
+      let mine = lane * ${STATE_ATTENTION_TILE_X}u + lid.x;
+      scratch[mine] = scratch[mine] + scratch[(lane + stride) * ${STATE_ATTENTION_TILE_X}u + lid.x];
+    }
+    workgroupBarrier();
+    stride = stride / 2u;
+  }
+  if (lane == 0u && in_depth) {
+    out[at] = scratch[lid.x];
+  }
+}
+`;
+
+/** readonly の resident 範囲の先頭（論理 col）— WGSL {@link stateReadonlyLiveWgsl} と同じ式 MUST。 */
+export const stateColumnBaseReadonly = (window: number, past: number): number =>
+  stateSliding(window) ? past - Math.min(past, window) : 0;
+
+/** readonly の live 列数 `min(P, W)`（full は `P`）— WGSL と同じ式 MUST。 */
+export const stateLiveColumnsReadonly = (window: number, past: number): number =>
+  stateSliding(window) ? Math.min(past, window) : past;
+
+/**
+ * ①' readonly の workgroup 数 `[⌈live / TILE_X⌉, 有効行, B·H]`。
+ *
+ * `query` は 1 固定（借り手 context の契約）なので引数に取らない。`P = 0` は live 0 → 列軸 0 で
+ * dispatch が空になり、S は 1 語も書かれない（② が live 0 で空行 → ③' が厳密 0 を書く）。
+ */
+export const stateQkParallelReadonlyWorkgroups = (
+  geometry: StateDispatchGeometry,
+  past: number,
+  limit: number,
+  where: string,
+): [number, number, number] => {
+  assertDispatchGeometry(`${where} ①'QK(ro)`, geometry);
+  assertU32Params(`${where} ①'QK(ro)`, { past });
+  const live = stateLiveColumnsReadonly(geometry.window, past);
+  const rows = stateEffectiveRows(geometry.rowsBlock, geometry.rowOffset, 1);
+  return [
+    tiledWorkgroups(live, STATE_ATTENTION_TILE_X, limit, `${where} ①'QK(ro)`),
+    tiledWorkgroups(rows, 1, limit, `${where} ①'QK(ro)`),
+    tiledWorkgroups(geometry.batchHeads, 1, limit, `${where} ①'QK(ro)`),
+  ];
+};
+
+/** ② readonly の workgroup 数 `[B·H × 有効行, 1, 1]`（`query` は 1 固定）。 */
+export const stateStatsReadonlyWorkgroups = (
+  geometry: StateDispatchGeometry,
+  limit: number,
+  where: string,
+): [number, number, number] => {
+  assertDispatchGeometry(`${where} ②stats(ro)`, geometry);
+  const rows = stateEffectiveRows(geometry.rowsBlock, geometry.rowOffset, 1);
+  return [gridStrideWorkgroups(geometry.batchHeads * rows, 1, limit), 1, 1];
+};
+
+/** ③' readonly の workgroup 数（③' と同じ — 行軸は `rows_block` 全て・論理長を受けない）。 */
+export const statePvParallelReadonlyWorkgroups = (
+  geometry: StateDispatchGeometry,
+  limit: number,
+  where: string,
+): [number, number, number] => statePvParallelWorkgroups(geometry, limit, `${where}(ro)`);

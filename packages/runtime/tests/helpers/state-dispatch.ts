@@ -12,12 +12,16 @@
 import {
   STATE_STATS_STRIDE,
   stateAttentionParams,
+  statePvParallelReadonlyWgsl,
+  statePvParallelReadonlyWorkgroups,
   statePvParallelWgsl,
   statePvParallelWorkgroups,
   statePvTiledParams,
   statePvTiledWorkgroups,
   statePvWgsl,
   statePvWorkgroups,
+  stateQkParallelReadonlyWgsl,
+  stateQkParallelReadonlyWorkgroups,
   stateQkParallelWgsl,
   stateQkParallelWorkgroups,
   stateQkTiledParams,
@@ -26,6 +30,8 @@ import {
   stateQkWorkgroups,
   stateSliding,
   stateStatsParams,
+  stateStatsReadonlyWgsl,
+  stateStatsReadonlyWorkgroups,
   stateStatsWgsl,
   stateStatsWorkgroups,
 } from "../../src/kernels/state-attention.ts";
@@ -645,5 +651,115 @@ export const runStateAppend = async (
 export const assertMutated = (before: string, after: string, label: string): void => {
   if (before === after) {
     throw new Error(`故障注入 '${label}' が空振りした（置換対象が WGSL に無い）`);
+  }
+};
+
+/** readonly（past だけを読む）の入力 — `q [B,H,1,D]` と貸し手のスロット 2 本。 */
+export type StateReadonlyInputs = {
+  readonly q: Float32Array<ArrayBuffer>;
+  readonly slotK: Float32Array<ArrayBuffer>;
+  readonly slotV: Float32Array<ArrayBuffer>;
+};
+
+/**
+ * readonly 変種（①' ro → ② ro → ③' ro）を直接 dispatch する。`spec.chunkRows` / `spec.query` は
+ * 1 固定（借り手 context の契約）で、`spec.past` が貸し手の論理長 P。
+ *
+ * MUST: 出力と S は毒値で初期化する（{@link runStateAttention} と同じ検出線 — P = 0 の空行が
+ * 厳密 0 で書かれること・live の外を読まないことは毒値でしか見えない）。
+ */
+export const runStateAttentionReadonly = async (
+  device: GPUDevice,
+  spec: StateCase,
+  inputs: StateReadonlyInputs,
+  options: {
+    readonly mutate?: StateMutation;
+    readonly cache?: StatePipelineCache;
+  } = {},
+): Promise<StateRunResult> => {
+  if (spec.chunkRows !== 1 || spec.query !== 1) {
+    throw new Error(
+      `readonly は M = Q = 1 固定（${spec.name}: M=${spec.chunkRows} Q=${spec.query}）`,
+    );
+  }
+  const { mutate } = options;
+  const sliding = stateSliding(spec.window);
+  const gqa = spec.heads !== spec.kvHeads;
+  const colCap = caseColCap(spec);
+  const batchHeads = spec.batch * spec.heads;
+  const cache = options.cache ?? new Map<string, GPUComputePipeline>();
+  const wgsl = (kernel: "qk" | "stats" | "pv", source: string): string =>
+    mutate === undefined ? source : mutate(kernel, source);
+  const outCount = batchHeads * spec.depth;
+  const buffers: GPUBuffer[] = [];
+  const track = <T extends GPUBuffer>(buffer: T): T => {
+    buffers.push(buffer);
+    return buffer;
+  };
+  try {
+    const q = track(storageBuffer(device, inputs.q));
+    const slotK = track(storageBuffer(device, inputs.slotK));
+    const slotV = track(storageBuffer(device, inputs.slotV));
+    const out = track(storageBuffer(device, seeded(outCount, () => STATE_S_POISON)));
+    const lengths = track(lengthsBuffer(device, spec.past, 1));
+    const sCount = batchHeads * colCap;
+    const scores = track(storageBuffer(device, seeded(sCount, () => STATE_S_POISON)));
+    const stats = track(
+      storageBuffer(device, seeded(batchHeads * STATE_STATS_STRIDE, () => STATE_S_POISON)),
+    );
+    const geometry = {
+      rowsBlock: 1,
+      rowOffset: 0,
+      chunkRows: 1,
+      depth: spec.depth,
+      kvRepeat: spec.heads / spec.kvHeads,
+      window: spec.window,
+      capacity: spec.capacity,
+      colCap,
+      scale: halfScale(spec.depth),
+    };
+    const dispatchGeometry = {
+      batchHeads,
+      rowsBlock: 1,
+      rowOffset: 0,
+      depth: spec.depth,
+      window: spec.window,
+    };
+    const limit = device.limits.maxComputeWorkgroupsPerDimension;
+    const params = track(uniformBuffer(device, stateAttentionParams(geometry)));
+    const statsParams = track(
+      uniformBuffer(device, stateStatsParams(batchHeads, 1, 0, colCap, spec.window)),
+    );
+    const qk = pipelineOf(device, cache, wgsl("qk", stateQkParallelReadonlyWgsl(sliding, gqa)));
+    const st = pipelineOf(device, cache, wgsl("stats", stateStatsReadonlyWgsl(sliding)));
+    const pv = pipelineOf(device, cache, wgsl("pv", statePvParallelReadonlyWgsl(sliding, gqa)));
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(qk);
+    pass.setBindGroup(0, bind(device, qk, [params, q, slotK, scores, lengths]));
+    const qkGroups = stateQkParallelReadonlyWorkgroups(
+      dispatchGeometry,
+      spec.past,
+      limit,
+      spec.name,
+    );
+    pass.dispatchWorkgroups(qkGroups[0], qkGroups[1], qkGroups[2]);
+    pass.setPipeline(st);
+    pass.setBindGroup(0, bind(device, st, [statsParams, scores, stats, lengths]));
+    const statsGroups = stateStatsReadonlyWorkgroups(dispatchGeometry, limit, spec.name);
+    pass.dispatchWorkgroups(statsGroups[0], statsGroups[1], statsGroups[2]);
+    pass.setPipeline(pv);
+    pass.setBindGroup(0, bind(device, pv, [params, scores, stats, slotV, out, lengths]));
+    const pvGroups = statePvParallelReadonlyWorkgroups(dispatchGeometry, limit, spec.name);
+    pass.dispatchWorkgroups(pvGroups[0], pvGroups[1], pvGroups[2]);
+    pass.end();
+    device.queue.submit([encoder.finish()]);
+    return {
+      out: await readFloats(device, out, outCount),
+      scores: await readFloats(device, scores, sCount),
+      stats: await readFloats(device, stats, batchHeads * STATE_STATS_STRIDE),
+    };
+  } finally {
+    for (const buffer of buffers) buffer.destroy();
   }
 };

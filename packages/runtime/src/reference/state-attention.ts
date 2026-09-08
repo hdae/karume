@@ -242,3 +242,97 @@ export const referenceStateAppend = (input: StateAppendRefInput): RefTensor => {
   }
   return { dtype: "f32", shape: [kvPlanes, capacity, depth], data: out };
 };
+
+/** readonly（past だけを読む — ADR 0096 決定 1）の形と論理長。`M = Q = 1` 固定なので欄は持たない。 */
+export type StateAttentionReadonlyRefInput = {
+  readonly batch: number;
+  readonly heads: number;
+  readonly kvHeads: number;
+  readonly depth: number;
+  /** `C`（貸し手スロットの行容量）。 */
+  readonly capacity: number;
+  /** `W`（`0` = full）。 */
+  readonly window: number;
+  /** `P`（貸し手の pastLength — query は論理位置 `P−1`）。 */
+  readonly past: number;
+  /** `[B,H,1,D]`。 */
+  readonly q: Float32Array<ArrayBuffer>;
+  /** 貸し手の k スロット `[B,Hkv,C,D]`。 */
+  readonly slotK: Float32Array<ArrayBuffer>;
+  /** 貸し手の v スロット `[B,Hkv,C,D]`。 */
+  readonly slotV: Float32Array<ArrayBuffer>;
+  readonly scale: number;
+};
+
+/**
+ * readonly attention（drafter の cross-attention — ADR 0096 決定 1）。出力は `[B,H,1,D]`。
+ *
+ * 位置 `P−1` の query 1 行が、スロットの列 `[P − min(P, W), P)`（full は `[0, P)`）を読む。
+ * 今 step の ins は**無い**。述語は `col < P`（棄却行 = 論理長より先に書かれた行を読まない）AND
+ * sliding `P−1−col < W`。`P = 0` は空行 → 厳密 0。数値契約（半スケール・−inf identity・f64 で
+ * 積んで格納時に 1 度だけ f32 へ）は {@link referenceStateAttention} と同じ。
+ */
+export const referenceStateAttentionReadonly = (
+  input: StateAttentionReadonlyRefInput,
+): RefTensor => {
+  const { batch, heads, kvHeads, depth, capacity, window, past } = input;
+  if (batch < 1 || heads < 1 || kvHeads < 1 || depth < 1 || capacity < 1) {
+    throw new ReferenceOpError(
+      `readonly の形が正でない（B=${batch} H=${heads} Hkv=${kvHeads} D=${depth} C=${capacity}）`,
+    );
+  }
+  if (heads % kvHeads !== 0) {
+    throw new ReferenceOpError(`H=${heads} が Hkv=${kvHeads} で割り切れない（ADR 0067 決定 1）`);
+  }
+  if (stateSliding(window) ? window > capacity : past > capacity) {
+    throw new ReferenceOpError(
+      `readonly: window ${window} / pastLength ${past} が容量 ${capacity} に収まらない`,
+    );
+  }
+  const repeat = heads / kvHeads;
+  assertLength("q", input.q, batch * heads * depth);
+  assertLength("slotK", input.slotK, batch * kvHeads * capacity * depth);
+  assertLength("slotV", input.slotV, batch * kvHeads * capacity * depth);
+  const scale = Math.fround(input.scale);
+  const base = stateSliding(window) ? past - Math.min(past, window) : 0;
+  const live = stateSliding(window) ? Math.min(past, window) : past;
+  const out = new Float32Array(batch * heads * depth);
+  const scores = new Float32Array(live);
+  const weights = new Float32Array(live);
+  for (let plane = 0; plane < batch * heads; plane += 1) {
+    const kvPlane = Math.floor(plane / repeat);
+    const qBase = plane * depth;
+    for (let cl = 0; cl < live; cl += 1) {
+      const col = base + cl;
+      const inWindow = col < past && (!stateSliding(window) || past - 1 - col < window);
+      if (!inWindow) {
+        scores[cl] = Number.NEGATIVE_INFINITY;
+        continue;
+      }
+      const kBase = (kvPlane * capacity + slotRow(window, capacity, col)) * depth;
+      let acc = 0;
+      for (let d = 0; d < depth; d += 1) {
+        acc += (input.q[qBase + d] * scale) * (input.slotK[kBase + d] * scale);
+      }
+      scores[cl] = Math.fround(acc);
+    }
+    let amax = Number.NEGATIVE_INFINITY;
+    for (let cl = 0; cl < live; cl += 1) amax = Math.max(amax, scores[cl]);
+    if (amax === Number.NEGATIVE_INFINITY) continue;
+    let total = 0;
+    for (let cl = 0; cl < live; cl += 1) total += Math.exp(scores[cl] - amax);
+    for (let cl = 0; cl < live; cl += 1) {
+      weights[cl] = Math.fround(Math.exp(scores[cl] - amax) / total);
+    }
+    for (let d = 0; d < depth; d += 1) {
+      let acc = 0;
+      for (let cl = 0; cl < live; cl += 1) {
+        const col = base + cl;
+        acc += weights[cl] *
+          input.slotV[(kvPlane * capacity + slotRow(window, capacity, col)) * depth + d];
+      }
+      out[qBase + d] = Math.fround(acc);
+    }
+  }
+  return { dtype: "f32", shape: [batch, heads, 1, depth], data: out };
+};
