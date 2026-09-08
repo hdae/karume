@@ -39,7 +39,7 @@
     { open, k }` → `DraftFace`〉・verify は deferred run で「配送した frontier まで」commit（`finishCycle` が配送直後と finally）・
     run 単位の `onRun` hook が `withRunDiagnostics` を置換・`GenerationStop.speculation`・drafter 呼び出し規約は
     `(token = frontier b@P, hidden = h@P−1, position P)` に訂正〈段 2 は 1 段ずれていた〉・受理 1.51 / 2.01 / 2.14 token/cycle）
-    → **段 4（実測・調整）が次**（温度に依らず投機が張れる — 受理の抽選は非投機と同じ順で RNG を消費・token 列は厳密一致）。
+    → **段 4（実測・調整）計画承認済み・4-A の計測 tool から着手**（backlog の段 4 項に手順と事前プローブの数字: cycle 52.7 ms = verify GPU 35.4 + draft GPU 6.5 + ホスト / フェンス 11・decode 29.0 → 24.5 ms/token = 1.18×・verify の +10 ms は attention ①/③′ が +6）。
     **落とし穴**: 1 cycle は run 2 本が下限（PLE のホスト gather があるので draft token はホストを経由する）/ deferred run の
     `queryLength ≤ slidingSlack`（gemma4 は 8 — 借り手は列 P−W まで読むので段 3 で 1 列締めた）/ 出口 1 本の旧配布形は models が拒否する / 既定バケット 6 本で
     1 容量あたり 8 形（LRU 12）— 容量の違う sequence を交互に回すと溢れる / 寿命は借り手 → 貸し手の順（逆順の dispose は
