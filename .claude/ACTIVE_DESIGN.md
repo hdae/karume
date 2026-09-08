@@ -7,7 +7,7 @@
 > [docs/perf-ledger.md](../docs/perf-ledger.md)。ここは「今この瞬間の文脈」だけを持つ —
 > 履歴・完了記録は ADR / research / git へ。
 >
-> Last updated: 2026-09-08（MTP 復活条件 ③ E-4 済 — i4 target の E[a] 再実測・次は ④ 設計）
+> Last updated: 2026-09-08（MTP ④ 設計の裁定 = ADR 0096・段 1〈verify 形の準備〉実装中）
 
 ## Now
 
@@ -25,7 +25,13 @@
     **落とし穴**: Chrome の CacheStorage は Range 要求を無視する（200 全量）— 区間は `blob().slice()` で取る。Deno の `blob()` は
     全量を読む（stream 読み飛ばし = scan）。**MTP（Gemma 4 drafter）は復活条件 ①〜③ が済み、更新した予測倍率は抽出的な長文脈で 1.8〜2.6×・自由文 0.9〜1.0×
     （目標は実用レベル・台帳 = perf-ledger K-20・実測 = research 2026-09-08）**。
-    次の波 = **~~K-21~~（済・`5701262`）→ ~~H-15~~（済・`c7120f2`）→ ~~③ E-4~~（済）→ MTP ④ 設計**。
+    次の波 = **~~K-21~~（済・`5701262`）→ ~~H-15~~（済・`c7120f2`）→ ~~③ E-4~~（済）→ MTP ④（裁定 = ADR
+    [0096](../docs/decisions/0096-speculative-decoding.md)・2026-09-08）**: drafter は別 Session で target の KV スロットを
+    **読むだけ**（IR の external スロット + `sharedStates`）・埋め込み表は Session 跨ぎの**共有 initializer**・部分 commit は
+    **deferred commit**（`GenerationRun.commit: "deferred"` → `context.commit(rows)`）・sliding ring は capacity = window + 8・
+    出口は logits `[1,R,V]` + hidden `[1,R,H]`（`last_row [R]`）・バケット 4 / 8 + PreparedPlan LRU 12・k は固定 3 から・
+    greedy 先行。**段 1（verify 形の準備）実装中** → 段 2（drafter の入口）→ 段 3（投機ループ）→ 段 4（実測・調整）。
+    **落とし穴**: 1 cycle は run 2 本が下限（PLE のホスト gather があるので draft token はホストを経由する）。
     **H-15（2026-09-07）**: slot backing を容量 1 から**バイト予算つき LRU 集合**へ（ADR
     [0095](../docs/decisions/0095-plan-backing-budget.md)・`SessionOptions.planBackingBudgetBytes` 既定 256 MiB・0 = 従来・
     Gemma4Pipeline の options に透過）。勘定 = 領域 + 所有する入力バッファ・常駐は max(予算, 最大 1 本) を超えない・見積りは
