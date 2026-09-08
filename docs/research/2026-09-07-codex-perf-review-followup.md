@@ -170,7 +170,7 @@ heap が全条件で勝ったので挿入配列と `SELECTION_LIMIT`（1024）�
 - 分布は 0 に寄る（0 受理率 0.53〜0.64・中央値 0〜2）。自由文は k を増やしても E[a] が伸びない（HF 壁時計でも k=2 で 1.10×・k=8 で 0.73×）。
 - centroid 疎 softmax（efficient embedder）を切っても受理数は同一（k=2 でラウンド列まで一致）— karume が topk を export できない件は受理率に効かない。
 - **投機ありの出力は 1 行 decode の greedy と一致しない**（24 条件中 1 条件のみ一致）: target 側の M 行まとめ forward が 1 行ずつと argmax 反転を起こす（teacher forcing で初分岐位置を 1 対 1 に同定）。
-- i4 の karume と BF16 の同一 prefix 次 token argmax 一致率は 75.5 / 78.4 / 84.0% → i4 target では E[a] がさらに下がる。生データ: `outputs/bench/karume-gemma4/2026-09-07_mtp-experiments/e1/`。
+- i4 の karume と BF16 の同一 prefix 次 token argmax 一致率は 75.5 / 78.4 / 84.0% → i4 target では E[a] がさらに下がる、と**この時点では見た**（→ 翌日の E-4 [research 2026-09-08](2026-09-08-mtp-ea-i4-target.md) で反証: i4 と同値の重みで測った E[a] は BF16 と同等以上）。生データ: `outputs/bench/karume-gemma4/2026-09-07_mtp-experiments/e1/`。
 
 ### §7.2 E-2 — 検証 run の時間 T(M)（Deno・e2b i4・`chunkBuckets` に小さい値を渡すだけ・中央値 ms）
 

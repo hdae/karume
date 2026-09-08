@@ -22,8 +22,11 @@
 - **性能波 K-21 → H-15 は済**（2026-09-07 ユーザー裁定 a・[perf-ledger](perf-ledger.md)）: ①K-21 `5701262`（小 M〈1 ≤ M ≤ 64〉の
   linear を GEMV 族の行ブロック変種へ・ビット同一）②H-15 `c7120f2`（slot backing をバイト予算つき LRU 保持へ — ADR
   [0095](decisions/0095-plan-backing-budget.md)）。合計で 20 token prompt の prefill run 壁 **135 → 46 ms**・定常ターン壁
-  **701 → 581 ms**（[research](research/2026-09-07-gemv-rows-k21.md) §8〜9）。MTP の復活条件 ①② は満ちた —
-  **次 = 復活条件 ③（i4 target で E[a] を再実測・長文脈の抽出的要約で E[a] ≥ 2 か）→ ④ 設計**（perf-ledger K-20）。
+  **701 → 581 ms**（[research](research/2026-09-07-gemv-rows-k21.md) §8〜9）。MTP の復活条件 ①②③ は満ちた —
+  ③ E-4（2026-09-08・[research](research/2026-09-08-mtp-ea-i4-target.md)）: i4 と同値の重みの代理 target で
+  抽出的な長文脈の E[a] が k=3 で 2.3〜2.6・k=6 で 3.8〜5.0、更新した予測倍率は抽出的長文脈 1.8〜2.6×
+  （自由文 0.9〜1.0×）。**次 = ④ 設計**（perf-ledger K-20: 部分 commit / sliding ring の巻き戻し / Session 跨ぎの
+  埋め込み表と KV スロットの読み共有 / 最終 hidden の出口 / drafter の配布形 / exporter の topk / k の動的選択）。
 - **`planBackingBudgetBytes` を共通の options へ**（起票 2026-09-07 — ADR 0095 帰結）: gemma4 以外は manifest の `session` から
   Session options を組むため予算を変える口が無い（既定 256 MiB が効く）。`onRetry` を `FromPretrainedHubOptions` へ 1 本化した形に
   倣って載せる。併せて executor / estimate に二重にある予算の値域検査を 1 関数へ寄せる。

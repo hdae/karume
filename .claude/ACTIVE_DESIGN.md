@@ -7,7 +7,7 @@
 > [docs/perf-ledger.md](../docs/perf-ledger.md)。ここは「今この瞬間の文脈」だけを持つ —
 > 履歴・完了記録は ADR / research / git へ。
 >
-> Last updated: 2026-09-07（K-21 + H-15 — GEMV 行ブロック変種・backing の予算つき保持・次は MTP 復活条件 ③）
+> Last updated: 2026-09-08（MTP 復活条件 ③ E-4 済 — i4 target の E[a] 再実測・次は ④ 設計）
 
 ## Now
 
@@ -23,8 +23,9 @@
   {cost: seek | scan}`（ADR [0086](../docs/decisions/0086-distribution-source.md) 追記）・runtime `parseSafetensorsHeader`・取得層
     `@hdae/fetch-cache` の `openCachedUrl` / `openHfFile`〈その ADR 0012・0.8.0 公開済み・hub の HF 取得元も追従済み〉）。
     **落とし穴**: Chrome の CacheStorage は Range 要求を無視する（200 全量）— 区間は `blob().slice()` で取る。Deno の `blob()` は
-    全量を読む（stream 読み飛ばし = scan）。**MTP（Gemma 4 drafter）は実装前の採算実測で予測倍率 0.35〜0.57× → parked（目標は実用レベル・復活条件 = perf-ledger K-20）**。
-    次の波 = **~~K-21~~（済・`5701262`）→ ~~H-15~~（済・`c7120f2`）→ MTP 復活条件 ③（i4 target の E[a] 再実測）**。
+    全量を読む（stream 読み飛ばし = scan）。**MTP（Gemma 4 drafter）は復活条件 ①〜③ が済み、更新した予測倍率は抽出的な長文脈で 1.8〜2.6×・自由文 0.9〜1.0×
+    （目標は実用レベル・台帳 = perf-ledger K-20・実測 = research 2026-09-08）**。
+    次の波 = **~~K-21~~（済・`5701262`）→ ~~H-15~~（済・`c7120f2`）→ ~~③ E-4~~（済）→ MTP ④ 設計**。
     **H-15（2026-09-07）**: slot backing を容量 1 から**バイト予算つき LRU 集合**へ（ADR
     [0095](../docs/decisions/0095-plan-backing-budget.md)・`SessionOptions.planBackingBudgetBytes` 既定 256 MiB・0 = 従来・
     Gemma4Pipeline の options に透過）。勘定 = 領域 + 所有する入力バッファ・常駐は max(予算, 最大 1 本) を超えない・見積りは
