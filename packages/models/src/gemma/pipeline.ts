@@ -323,6 +323,13 @@ export type Gemma4PipelineOptions = {
    */
   readonly planBackingBudgetBytes?: number;
   /**
+   * 行ブロック gemv（linear の GEMV 族・M ≥ 2）の並列度目標。意味・既定（16384 = 参照 device の
+   * 飽和点）・値域は runtime の `SessionOptions.linearGemvRowsThreadTarget` が正本で、この
+   * pipeline はそこへ素通しする（target Session と drafter Session の両方に同じ値が効く）。
+   * 飽和点が小さい GPU で下げると M=4 の verify が高い行ブロックを使う（重みの読み直しが減る）。
+   */
+  readonly linearGemvRowsThreadTarget?: number;
+  /**
    * 投機デコード用の **MTP drafter を一緒に組む**（ADR 0096 — 省略時は組まない）。
    *
    * 指定すると配布形の `drafter` weights も取得し、target Session の埋め込み表 1 本を借りる
@@ -1552,6 +1559,9 @@ export class Gemma4Pipeline {
       ...(options.planBackingBudgetBytes === undefined
         ? {}
         : { planBackingBudgetBytes: options.planBackingBudgetBytes }),
+      ...(options.linearGemvRowsThreadTarget === undefined
+        ? {}
+        : { linearGemvRowsThreadTarget: options.linearGemvRowsThreadTarget }),
     };
     let session: Session | undefined;
     try {

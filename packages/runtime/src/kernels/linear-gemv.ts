@@ -27,7 +27,8 @@
  *
  * 1 スレッドが 1 列 × `rows` 行の縮約を持ち、重み語（と i4 の group scale）は 1 回だけ読んで
  * 行ごとの x と積和する。M は `ceil(m / rows)` 枚の y タイルに割る（重みはタイルごとに読み直す）。
- * `rows` は {@link linearGemvRowsForShape} が **(格納, m, n) の純関数**で決める。掃引（RTX 3080 Ti・
+ * `rows` は {@link linearGemvRowsForShape} が **(格納, m, n, 並列度の目標) の純関数**で決める
+ * （目標は Session 生成時に固定される静的なノブ — {@link ROWS_THREAD_TARGET}）。掃引（RTX 3080 Ti・
  * gemma4 E2B の census 13 形 × M ∈ {1..64} — docs/research/2026-09-07-gemv-rows-k21.md）で見えた機序:
  *
  * - スレッド数（= n × y タイル数）が **≈16K を下回る間は、行を 1 スレッドに畳むより y タイルで
@@ -149,10 +150,14 @@ export const LINEAR_GEMV_MAX_ROWS = 64;
  * `rows` で重みの読み直しを減らす方が速かった（モジュール doc の機序）。
  * NOTE: **参照 device（RTX 3080 Ti・80 SM）の飽和点を焼いた値**で、可搬な最適値ではない。
  * 飽和点が 1 桁小さい GPU（内蔵 GPU・Apple M 系）では y タイルを買いすぎて重みの読み直しが
- * 最適より増えるが、値は変わらない（純関数で選ぶことが「同一キー → バイト同一 WGSL」と
- * 実行時オートチューン禁止〈ADR 0022〉の前提 — docs/limitations.md）。
+ * 最適より増える。他 device の値は `SessionOptions.linearGemvRowsThreadTarget` で差し替える
+ * （Session 生成時に固定する**静的**なノブ = {@link linearGemvRowsForShape} の第 4 引数に流れる
+ * 限界値で、選択は純関数のまま）。device を見て自動で選ぶことはしない（実行時オートチューン禁止
+ * 〈ADR 0022〉— docs/limitations.md）。
+ * NOTE: 目標を替えても `rows` はキーに載る（{@link linearGemvRowsKey} の `r<rows>`）ので、
+ * 「同一キー → バイト同一 WGSL」は保たれる — 目標が違えば選ばれる `rows` が変わり、キーも変わる。
  * MUST: 変更は掃引の再実測とセット（tests/gpu_linear_gemv_test.ts の門は値を固定しない —
- * 選択が (格納, m, n) の純関数であることだけを見る）。
+ * 選択が (格納, m, n, 目標) の純関数であることだけを見る）。
  */
 const ROWS_THREAD_TARGET = 16384;
 
@@ -169,15 +174,24 @@ const ROWS_THREAD_TARGET = 16384;
 const ROWS_ELEMENTS_PER_WORD_CAP = 256;
 
 /**
- * 行ブロックの高さ `rows` を **(格納, m, n) の純関数**で選ぶ: m 以下の最大の 2 冪
+ * 行ブロックの高さ `rows` を **(格納, m, n, 目標) の純関数**で選ぶ: m 以下の最大の 2 冪
  * （天井 {@link ROWS_ELEMENTS_PER_WORD_CAP} / 刻み の内側）から始め、スレッド数
- * `n · ceil(m / rows)` が {@link ROWS_THREAD_TARGET} に届くまで半分にする（届かなければ 1）。
+ * `n · ceil(m / rows)` が `threadTarget` に届くまで半分にする（届かなければ 1）。
  * n が小さい形は常に 1（= M=1 のカーネルを y に M 枚並べた形）、lm_head 級の n では天井まで伸びる。
+ *
+ * `threadTarget` は既定が {@link ROWS_THREAD_TARGET}（参照 device の飽和点）で、他 device では
+ * `SessionOptions.linearGemvRowsThreadTarget` が Session 生成時に固定した値がここへ来る。
+ * 値域の門は Session 側 1 箇所（同じ門を 2 実装持たない）。
  *
  * MUST: 返り値はキーに載る（{@link linearGemvRowsKey}）。純関数であることが
  * 「同一キー → バイト同一 WGSL」と実行時オートチューン禁止の両方を担保する。
  */
-export const linearGemvRowsForShape = (storage: WeightStorage, m: number, n: number): number => {
+export const linearGemvRowsForShape = (
+  storage: WeightStorage,
+  m: number,
+  n: number,
+  threadTarget: number = ROWS_THREAD_TARGET,
+): number => {
   if (!Number.isSafeInteger(m) || m < 1 || m > LINEAR_GEMV_MAX_ROWS) {
     throw new CodegenError(`linear_gemv: 行数 ${m} は 1..${LINEAR_GEMV_MAX_ROWS} の外`);
   }
@@ -187,18 +201,22 @@ export const linearGemvRowsForShape = (storage: WeightStorage, m: number, n: num
   const cap = ROWS_ELEMENTS_PER_WORD_CAP / linearGemvUnit(storage);
   let rows = 1;
   while (rows * 2 <= Math.min(m, cap)) rows *= 2;
-  while (rows > 1 && n * Math.ceil(m / rows) < ROWS_THREAD_TARGET) rows /= 2;
+  while (rows > 1 && n * Math.ceil(m / rows) < threadTarget) rows /= 2;
   return rows;
 };
 
-/** 行ブロック変種の既定（`cols` / `unroll` は M=1 の既定と同じ・`rows` は格納と形から）。 */
+/**
+ * 行ブロック変種の既定（`cols` / `unroll` は M=1 の既定と同じ・`rows` は格納と形と目標から）。
+ * `threadTarget` の意味と既定は {@link linearGemvRowsForShape}。
+ */
 export const defaultLinearGemvRowsVariant = (
   storage: WeightStorage,
   m: number,
   n: number,
+  threadTarget?: number,
 ): LinearGemvRowsVariant => ({
   ...defaultLinearGemvVariant(),
-  rows: linearGemvRowsForShape(storage, m, n),
+  rows: linearGemvRowsForShape(storage, m, n, threadTarget),
 });
 
 const assertVariant = (variant: LinearGemvVariant): void => {

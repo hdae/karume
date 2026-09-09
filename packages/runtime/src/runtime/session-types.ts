@@ -274,6 +274,19 @@ export type SessionOptions = {
    */
   readonly stateAttentionReduce?: StateAttentionReduce;
   /**
+   * 行ブロック gemv（linear の GEMV 族・M ≥ 2）の**並列度の目標**（スレッド数 = 出力列 n ×
+   * y タイル数）。既定 16384 = 参照 device（RTX 3080 Ti）の飽和点。
+   *
+   * 飽和点が小さい GPU（内蔵 GPU・Apple M 系）では下げると `rows`（1 スレッドが持つ行数）が
+   * 増えて重みの読み直しが減る（機序は src/kernels/linear-gemv.ts の
+   * `linearGemvRowsForShape`）。**静的**なノブ — Session 生成時に固定し、実行時に変えない・
+   * device を見て自動選択しない（ADR 0022 の実行時オートチューン禁止）。
+   * 目標が変われば選ばれる `rows` が変わり、`rows` はパイプラインキーに載るので
+   * 「同一キー → バイト同一 WGSL」は保たれる。
+   * MUST: 1 以上の安全な整数でなければ fail loudly。
+   */
+  readonly linearGemvRowsThreadTarget?: number;
+  /**
    * slot backing（導出済み計画にヒットした run が使う中間バッファ束）を**同時に保持する予算**
    * （バイト・既定 {@link DEFAULT_PLAN_BACKING_BUDGET_BYTES} = 256 MiB）。
    *

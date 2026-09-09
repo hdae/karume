@@ -69,7 +69,8 @@ import {
 const USAGE = "--source <配布形のパス> --workload <" + WORKLOAD_NAMES.join("|") + ">" +
   " --sampler <greedy|recommended> --seed <整数> --k <整数> --new-tokens <整数>" +
   " --capacity <整数> --document-chars <整数> --rounds <整数>" +
-  " --max-resident-ple-bytes <整数> --out <file.jsonl> --gpu-timing";
+  " --max-resident-ple-bytes <整数> --gemv-rows-target <整数>" +
+  " --out <file.jsonl> --gpu-timing";
 const KNOWN = new Set([
   "source",
   "workload",
@@ -81,6 +82,7 @@ const KNOWN = new Set([
   "document-chars",
   "rounds",
   "max-resident-ple-bytes",
+  "gemv-rows-target",
   "out",
 ]);
 /** 値を取らないスイッチ（`--key value` の対ではなく 1 語で立つ）。 */
@@ -214,6 +216,16 @@ const directoryUrl = (path: string): URL =>
 
 /** 与えられた PLE 常駐上限（省略時は manifest の索引から全量常駐を導く — {@link resolveAsset}）。 */
 const maxResidentPleBytesArg = integer("max-resident-ple-bytes");
+
+/**
+ * 行ブロック gemv の並列度目標（runtime の `SessionOptions.linearGemvRowsThreadTarget` へ素通し）。
+ *
+ * 既定（16384 = 参照 device の飽和点）のままだと、飽和点が小さい GPU では verify（M=k+1）の
+ * 本体 linear が `rows=1`（= M=1 カーネルを y に並べる形 = 重みを M 回読む）に落ちる。
+ * 下げると `rows` が立って読み直しが減る。**静的**なノブなので、値は `config` に残す
+ * （省略は `null` = 「与えていない」— 値域の門は runtime 側 1 箇所）。
+ */
+const gemvRowsTarget = integer("gemv-rows-target");
 
 /**
  * 何を測ったかの同定（`config.asset` — JSON 1 行だけで資産まで辿れるように）。
@@ -440,6 +452,7 @@ const main = async (): Promise<void> => {
     gpu,
     // `k` を渡さない = 配布形の段数（`{}` が「drafter を組む」の綴りそのもの）。
     speculative: kArg === undefined ? {} : { k: kArg },
+    ...(gemvRowsTarget === undefined ? {} : { linearGemvRowsThreadTarget: gemvRowsTarget }),
     maxResidentPleBytes,
     onRunDiagnostics: observeRun,
   });
@@ -580,6 +593,7 @@ const main = async (): Promise<void> => {
       documentChars: documentChars ?? null,
       rounds,
       maxResidentPleBytes,
+      gemvRowsTarget: gemvRowsTarget ?? null,
       gpuTiming,
       out: outPath ?? null,
     },

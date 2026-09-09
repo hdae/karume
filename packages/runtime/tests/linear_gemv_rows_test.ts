@@ -1,7 +1,8 @@
 // linear の GEMV 族・**行ブロック変種の選択**（ADR 0082 追記 5 / perf-ledger K-21）の純関数門。
 // GPU を要らない（生成物とキーだけを見る）。
 //
-// 行ブロックの高さ `rows` は **(格納, m, n) の純関数** `linearGemvRowsForShape` が決める。
+// 行ブロックの高さ `rows` は **(格納, m, n, 並列度の目標) の純関数** `linearGemvRowsForShape` が
+// 決める（目標は Session 生成時に固定される静的なノブで、省略時は参照 device の飽和点 16384）。
 // この純関数性が「同一キー → バイト同一 WGSL」と実行時オートチューン禁止（ADR 0022）の
 // 両方を担保しているので、見るのは 3 つ:
 //
@@ -108,6 +109,35 @@ Deno.test("行ブロックの rows は (格納, m, n) の純関数で、掃引�
       );
     }
   }
+});
+
+Deno.test("並列度の目標を下げると rows が増える（他 device 用の静的ノブ）", () => {
+  // 目標は `SessionOptions.linearGemvRowsThreadTarget` が Session 生成時に固定する限界値で、
+  // 飽和点が小さい GPU では下げて `rows` を立てる（重みの読み直しを減らす）。i4・m=4・n=2048 は
+  // スレッド数 = 2048 × ceil(4 / rows) なので、目標 16384 では rows=1 まで落ち、目標を半分に
+  // するたびに 1 段ずつ止まる位置が上がる。
+  assertEquals(linearGemvRowsForShape("i4", 4, 2048, 16384), 1, "既定の目標");
+  assertEquals(linearGemvRowsForShape("i4", 4, 2048, 4096), 2, "目標 1/4");
+  assertEquals(linearGemvRowsForShape("i4", 4, 2048, 2048), 4, "目標 1/8");
+  // 目標を下げても天井（1 語あたり 256 要素 = i4 8 行）は超えない。
+  assertEquals(linearGemvRowsForShape("i4", 64, 2048, 1), 8, "目標 1 でも i4 の天井 8");
+  // 第 4 引数の省略 = 既定の目標（16384）を渡すのと同じ（既存の呼び出しは無変更で同じ結果）。
+  for (const { storage, n, picks } of ROWS_TABLES) {
+    for (const [m] of picks) {
+      assertEquals(
+        linearGemvRowsForShape(storage, m, n),
+        linearGemvRowsForShape(storage, m, n, 16384),
+        `${storage} n=${n} m=${m}: 省略 = 既定 16384`,
+      );
+      assertEquals(
+        defaultLinearGemvRowsVariant(storage, m, n),
+        defaultLinearGemvRowsVariant(storage, m, n, 16384),
+        `${storage} n=${n} m=${m}: 変種も同じ`,
+      );
+    }
+  }
+  // 変種の側にも目標が通る（キーの `r<rows>` が動く = 生成物が別テキストになる）。
+  assertEquals(defaultLinearGemvRowsVariant("i4", 4, 2048, 2048).rows, 4);
 });
 
 Deno.test("M=1 は n によらず rows=1（decode の生成物を行ブロック化しない）", () => {

@@ -539,6 +539,38 @@ Deno.test({
 });
 
 Deno.test({
+  name: "linearGemvRowsThreadTarget は 1 以上の安全な整数だけを受ける（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    try {
+      // 目標は「スレッド数 = n × y タイル数」がこれに届くまで rows を半分にする限界値
+      // （src/kernels/linear-gemv.ts）。0 / 負 / NaN を黙って受けると比較が常に偽になり、
+      // 「rows が常に天井」という**別の走行**が既定の顔で走る（測った条件が偽られる）。
+      for (const target of [0, -1, 1.5, Number.NaN]) {
+        await assertRejects(
+          () =>
+            createSession(gpu, openModel(chainModelBuffer()), {
+              linearGemvRowsThreadTarget: target,
+            }),
+          ExecutionError,
+          "1 以上の安全な整数",
+        );
+      }
+      // 対照: 正の整数は通る（上の 4 本が「何を渡しても落ちる」ではない証明）。
+      for (const target of [1, 2048]) {
+        const session = await createSession(gpu, openModel(chainModelBuffer()), {
+          linearGemvRowsThreadTarget: target,
+        });
+        await session.dispose();
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
   name: "失敗した run の直後の診断は 1 本前の成功 run の実績を残さない（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {

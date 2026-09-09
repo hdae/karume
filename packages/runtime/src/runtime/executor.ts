@@ -917,6 +917,11 @@ type SessionState = {
    */
   readonly stateAttentionReduce: StateAttentionReduce;
   /**
+   * 行ブロック gemv の並列度目標（opt-in — {@link SessionOptions.linearGemvRowsThreadTarget}）。
+   * 省略（`undefined`）はカーネル側の既定 = 参照 device の飽和点。
+   */
+  readonly linearGemvRowsThreadTarget: number | undefined;
+  /**
    * **linear の** i8a8 整数内積変種。既定は `navigator.gpu.wgslLanguageFeatures` の列挙から
    * 決まり、テストは {@link I8A8_DOT} で強制できる。**どちらでも数値は 1 ビットも変わらない**
    * （linear は Metal を含めて実走で反証されていない — docs/known-issues.md）。
@@ -1042,6 +1047,18 @@ export class Session {
       throw new ExecutionError(
         `options.planBackingBudgetBytes ${String(planBackingBudgetBytes)} は非負の安全な整数で` +
           "なければならない",
+      );
+    }
+    // 行ブロック gemv の並列度目標も同じ形で検査する（0 / 負 / 非整数は「スレッド数の目標」として
+    // 意味を持たず、黙って受けると rows が最大のまま選ばれた走行になる）。
+    const linearGemvRowsThreadTarget = options.linearGemvRowsThreadTarget;
+    if (
+      linearGemvRowsThreadTarget !== undefined &&
+      (!Number.isSafeInteger(linearGemvRowsThreadTarget) || linearGemvRowsThreadTarget < 1)
+    ) {
+      throw new ExecutionError(
+        `options.linearGemvRowsThreadTarget ${String(linearGemvRowsThreadTarget)} は 1 以上の` +
+          "安全な整数でなければならない",
       );
     }
     // MUST: S の格納形は 1 つに決まらなければならない。`:c16` は S を array<f16> で持つ
@@ -1461,6 +1478,7 @@ export class Session {
       attentionCompute,
       attentionScoreStorage,
       stateAttentionReduce,
+      linearGemvRowsThreadTarget,
       planBackingBudgetBytes,
       // linear の拡張の有無は**速度にしか効かない**（両変種は同じ整数を返す）ので、機能検出では
       // なく経路選択としてここで 1 度だけ決める（src/kernels/linear-i8a8.ts の docstring）。

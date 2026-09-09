@@ -342,6 +342,11 @@ type RecipeBuilderContext = {
   /** states 形 attention ③PV の縮約形（executor の {@link SessionState} が既定を決める）。 */
   readonly stateAttentionReduce: StateAttentionReduce;
   /**
+   * 行ブロック gemv の並列度目標（`SessionOptions.linearGemvRowsThreadTarget` — Session 生成時に
+   * 固定される静的なノブ。`undefined` はカーネル側の既定）。
+   */
+  readonly linearGemvRowsThreadTarget: number | undefined;
+  /**
    * i8a8 の整数内積変種（**族ごとに別席** — 「両変種はビット同一」が attention だけ実機で
    * 反証されているため。executor の {@link SessionState} が既定を決める）。
    */
@@ -1583,7 +1588,8 @@ export class RecipeBuilder {
    * 1 出力要素あたりの K 縮約順は k 昇順の逐次のままなので**ビット同一**（src/kernels/linear-gemv.ts
    * の数値契約）。
    * MUST: M=1 は M=1 変種（decode の生成物を動かさない）、M ≥ 2 は行ブロック変種で、行数 `rows` は
-   * (格納, m, n) の純関数 `defaultLinearGemvRowsVariant`（キーに載る）。
+   * (格納, m, n, 並列度の目標) の純関数 `defaultLinearGemvRowsVariant`（キーに載る）。目標は
+   * Session 生成時に固定された静的なノブ（`SessionOptions.linearGemvRowsThreadTarget`）。
    * MUST: `groupSize` は i4 のときだけ渡す（i8 は group を持たない — カーネル側が対を検査する）。
    * MUST: 1 スレッド 1 出力（列 × 行ブロック）なので dispatch は `[ceil(n / cols), ceil(m / rows), 1]`。
    * grid-stride ではないので上限超過は fail loudly（既定経路と同じ規律）。
@@ -1602,8 +1608,10 @@ export class RecipeBuilder {
     const limit = this.#state.gpu.limits.maxComputeWorkgroupsPerDimension;
     const [x, weight] = step.inputShapes;
     const where = `linear gemv [${x.join(",")}] × [${weight.join(",")}]`;
-    // M=1 は M=1 変種（行ブロック無し）、M ≥ 2 は行ブロック変種（rows は (m, n) の純関数）。
-    const rowsVariant = m === 1 ? undefined : defaultLinearGemvRowsVariant(storage, m, n);
+    // M=1 は M=1 変種（行ブロック無し）、M ≥ 2 は行ブロック変種（rows は (m, n, 目標) の純関数）。
+    const rowsVariant = m === 1
+      ? undefined
+      : defaultLinearGemvRowsVariant(storage, m, n, this.#state.linearGemvRowsThreadTarget);
     const variant = rowsVariant ?? defaultLinearGemvVariant();
     const rows = rowsVariant?.rows ?? 1;
     const key = rowsVariant === undefined
