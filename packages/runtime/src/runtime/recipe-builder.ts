@@ -49,7 +49,18 @@ import {
   stridedWriteParams,
   stridedWriteWgsl,
 } from "../codegen/strided.ts";
-import { ARGMAX_KEY, ARGMAX_WGSL, argmaxParams } from "../kernels/argmax.ts";
+import {
+  ARGMAX_KEY,
+  ARGMAX_SPLIT_MERGE_KEY,
+  ARGMAX_SPLIT_MERGE_WGSL,
+  ARGMAX_SPLIT_PARTIAL_KEY,
+  ARGMAX_SPLIT_PARTIAL_WGSL,
+  ARGMAX_WGSL,
+  argmaxParams,
+  argmaxSplitGroups,
+  argmaxSplitParams,
+  argmaxSplitPartialBytes,
+} from "../kernels/argmax.ts";
 import {
   CONV1D_SCALE_BINDING,
   CONV1D_WORKGROUP_SIZE,
@@ -893,13 +904,17 @@ export class RecipeBuilder {
   }
 
   /**
-   * argmax（最終次元・rank 保存・出力 i32 — ADR 0068 決定 2）。**1 dispatch**で、行 reduce と
+   * argmax（最終次元・rank 保存・出力 i32 — ADR 0068 決定 2）。短い行は**1 dispatch**で、行 reduce と
    * 同じ「1 行 = 1 workgroup + 行方向 grid-stride」（形とタイブレークの根拠は
-   * src/kernels/argmax.ts）。
+   * src/kernels/argmax.ts）。長い行（`argmaxSplitGroups(dim) > 0` — 語彙長の lm_head 出口）は
+   * **2 dispatch**（区間ごとの部分最大元 → 行ごとの merge）で、結果は 1 dispatch 形と
+   * ビット同一（同ファイルの「2 相分割」節）。
    *
    * MUST: 軸で踏み分けない（reduce 族と違い最終次元専業 — 契約に `dim` の欄が無い）。
    * 行数は**入力の先行次元の積**から取る（出力の要素数と一致するが、カーネルが読む量は
    * 入力側の形で決まる）。
+   * MUST: 経路の選択は形の純関数（`argmaxSplitGroups`）— 見積り（estimate.ts の argmax の
+   * 一時）と同じ関数を通す。
    */
   async #buildArgmax(
     step: NodePlan,
@@ -910,14 +925,50 @@ export class RecipeBuilder {
     const inputShape = step.inputShapes[0];
     const dim = inputShape[inputShape.length - 1];
     const rows = numel(inputShape.slice(0, -1));
+    const limit = this.#state.gpu.limits.maxComputeWorkgroupsPerDimension;
+    const groups = argmaxSplitGroups(dim);
+    if (groups > 0) {
+      const partialPipeline = await this.#state.cache.get(
+        ARGMAX_SPLIT_PARTIAL_KEY,
+        ARGMAX_SPLIT_PARTIAL_WGSL,
+      );
+      const mergePipeline = await this.#state.cache.get(
+        ARGMAX_SPLIT_MERGE_KEY,
+        ARGMAX_SPLIT_MERGE_WGSL,
+      );
+      const params = this.#writeParams(argmaxSplitParams(rows, dim, groups), PARAMS_UNIFORM_USAGE);
+      // 部分結果 [rows, groups, 2]（u32）。partial の直前に確保し merge の直後に返す。
+      const partial = builder.allocTemp(argmaxSplitPartialBytes(rows, groups));
+      builder.dispatch({
+        key: ARGMAX_SPLIT_PARTIAL_KEY,
+        pipeline: partialPipeline.pipeline,
+        layout: partialPipeline.layout,
+        roles: partialPipeline.roles,
+        params,
+        bindings: [{ binding: 1, source: binds[0] }, { binding: 2, source: partial }],
+        // x 軸 = 区間（1 workgroup = 1 区間・欠落は沈黙誤値なので上限超過は fail loudly）、
+        // y 軸 = 行（grid-stride で縮退可）。
+        workgroups: [
+          tiledWorkgroups(groups, 1, limit, "argmax split partial"),
+          gridStrideWorkgroups(rows, 1, limit),
+          1,
+        ],
+      });
+      builder.dispatch({
+        key: ARGMAX_SPLIT_MERGE_KEY,
+        pipeline: mergePipeline.pipeline,
+        layout: mergePipeline.layout,
+        roles: mergePipeline.roles,
+        params,
+        bindings: [{ binding: 1, source: partial }, { binding: 2, source: outs[0] }],
+        workgroups: [gridStrideWorkgroups(rows, 1, limit), 1, 1],
+      });
+      builder.releaseTemp(partial);
+      return;
+    }
     const { pipeline, layout, roles } = await this.#state.cache.get(ARGMAX_KEY, ARGMAX_WGSL);
     const params = this.#writeParams(argmaxParams(rows, dim), PARAMS_UNIFORM_USAGE);
     // 1 行 = 1 workgroup。上限を超えたら縮退させ、カーネル側の行 grid-stride で回す。
-    const groups = gridStrideWorkgroups(
-      rows,
-      1,
-      this.#state.gpu.limits.maxComputeWorkgroupsPerDimension,
-    );
     builder.dispatch({
       key: ARGMAX_KEY,
       pipeline,
@@ -925,7 +976,7 @@ export class RecipeBuilder {
       roles,
       params,
       bindings: [{ binding: 1, source: binds[0] }, { binding: 2, source: outs[0] }],
-      workgroups: [groups, 1, 1],
+      workgroups: [gridStrideWorkgroups(rows, 1, limit), 1, 1],
     });
   }
 

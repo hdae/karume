@@ -71,6 +71,7 @@ import {
   type TransientTempSpec,
 } from "./transient-plan.ts";
 import { DEFAULT_PLAN_BACKING_BUDGET_BYTES, type GenerationContextSpec } from "./session-types.ts";
+import { argmaxSplitGroups, argmaxSplitPartialBytes } from "../kernels/argmax.ts";
 import { planStateAttention, type StateAttentionBlock } from "./state-attention-plan.ts";
 import {
   planWeightBuffers,
@@ -484,6 +485,20 @@ const isStateAttention = (node: NodePlan): boolean =>
   node.contract.kind === "attention" && Object.keys(node.node.states).length > 0;
 
 /**
+ * 2 相形の argmax（長い行 — src/kernels/argmax.ts の「2 相分割」）が持つ部分結果の一時。
+ * 経路の選択は実行相（recipe-builder の `#buildArgmax`）と同じ純関数 `argmaxSplitGroups` を通す
+ * — ここで閾値を書き直すと、片方だけ直された実装に対して estimator が別の数を主張し続ける。
+ * 1 dispatch 形（短い行）は 0 を返す。
+ */
+const argmaxSplitTempBytes = (node: NodePlan): number => {
+  if (node.node.op !== "argmax") return 0;
+  const input = node.inputShapes[0];
+  const dim = input[input.length - 1];
+  const groups = argmaxSplitGroups(dim);
+  return groups === 0 ? 0 : argmaxSplitPartialBytes(numel(input.slice(0, -1)), groups);
+};
+
+/**
  * states 形 attention 1 ノードが出すノード内一時（スコア S と行統計）を行ブロック順に並べる。
  *
  * 融合の成立に依存せず必ず出て、大きさは列容量（full = スロット容量 `C` / sliding = 窓の
@@ -594,6 +609,12 @@ const transientSlotBytes = (
           writes: outputRefs,
         });
       }
+    } else if (!isAlias && argmaxSplitTempBytes(node) > 0) {
+      // 2 相 argmax: partial が一時へ書き、merge がそれを読んで出力へ書く（実行相と同じ 2 dispatch）。
+      const partial: TransientRef = { kind: "temp", id: temps.length };
+      temps.push({ byteLength: argmaxSplitTempBytes(node), allocBefore: 0, releaseAfter: 1 });
+      dispatches.push({ reads, writes: [partial] });
+      dispatches.push({ reads: [partial], writes: outputRefs });
     } else if (!isAlias) {
       dispatches.push({ reads, writes: outputRefs });
     }

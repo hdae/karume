@@ -749,6 +749,54 @@ Deno.test({
   },
 });
 
+/**
+ * 2 相形 argmax（行長 ≥ 16,384 — src/kernels/argmax.ts の「2 相分割」）の固定挙動を**期待値
+ * リテラル**で固定する。CPU 参照との突合（ARGMAX_CASES の 2 相ケース）は「区間ごとの最大元を
+ * 畳んでも全域の最大元になる」ことを見るが、タイブレークの向き・NaN・全 −inf 行は両側が同じ向きに
+ * 間違えれば緑になる軸なので、1 dispatch 形の門（上）と同じ値をリテラルで置く。
+ *
+ * 行の意味（行長 20,000 = 区間 4,096 × 5 本）:
+ * 0. 同値の最大が区間 1（index 5,000）と区間 2（index 9,000）→ 最小 index 5,000
+ * 1. 区間 0 に有限の最大（index 10・値 99）・区間 3 に NaN（index 13,000）→ **NaN が最大** 13,000
+ * 2. 全要素 −inf → 0（区間ごとの番兵が merge で全部負け、区間 0 の最小 index が残る）
+ * 3. 最大が最終区間の末尾（index 19,999）→ 19,999（端数の区間の走査が末尾まで届く）
+ */
+Deno.test({
+  name: "2 相形 argmax の区間境界 / NaN / 全 −inf 行が 1 dispatch 形と同じ規定どおり（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const dim = 20000;
+    const rows = 4;
+    const input = fill([rows, dim], (index) => {
+      const row = Math.floor(index / dim);
+      const at = index % dim;
+      switch (row) {
+        case 0:
+          return at === 5000 || at === 9000 ? 7 : -1;
+        case 1:
+          return at === 10 ? 99 : at === 13000 ? Number.NaN : -1;
+        case 2:
+          return Number.NEGATIVE_INFINITY;
+        default:
+          return at === 19999 ? 3 : -1;
+      }
+    });
+    const gpu = await acquireGpu();
+    try {
+      const actual = await runCase(gpu, {
+        name: "argmax split fixed",
+        op: "argmax",
+        inputs: [input],
+        outShapes: [[rows, 1]],
+        outDtypes: ["i32"],
+      });
+      assertEquals([...actual.data], [5000, 13000, 0, 19999], "2 相形 argmax の規定");
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
 Deno.test({
   name: "topk（最終次元・static-k・値 + 添字の 2 出力）が CPU 参照と一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,

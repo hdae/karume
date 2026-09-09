@@ -681,6 +681,29 @@ export const ARGMAX_CASES: readonly OpCase[] = [
     outShapes: [[5, 1]],
     outDtypes: ["i32"],
   },
+  {
+    // 2 相形（行長 ≥ 16,384 — src/kernels/argmax.ts の「2 相分割」）。区間 4,096 要素 × 5 本で、
+    // 最大値は**行ごとに別の区間**（行 0 → 区間 1・行 1 → 区間 3・行 2 → 区間 4 の末尾）に置く
+    // （全行が区間 0 に最大値を持つと merge が「区間 0 しか読まない」誤りを値に出さない）。
+    name: "argmax [3,20000]（2 相・最大値が行ごとに別の区間）",
+    op: "argmax",
+    inputs: [fill([3, 20000], (i) => {
+      const row = Math.floor(i / 20000);
+      const at = i % 20000;
+      const peak = [4096 + 7, 3 * 4096 + 4000, 19999][row];
+      return at === peak ? 99 : SIGNED(i);
+    })],
+    outShapes: [[3, 1]],
+    outDtypes: ["i32"],
+  },
+  {
+    // 2 相形の区間境界: 同値の最大が区間 1 の末尾と区間 2 の先頭に並ぶ → 最小 index（区間 1 側）。
+    name: "argmax [1,16384]（2 相・同値が区間境界を跨ぐ）",
+    op: "argmax",
+    inputs: [fill([1, 16384], (i) => (i === 8191 || i === 8192 ? 42 : SIGNED(i)))],
+    outShapes: [[1, 1]],
+    outDtypes: ["i32"],
+  },
 ];
 
 /**

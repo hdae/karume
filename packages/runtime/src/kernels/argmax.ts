@@ -159,3 +159,204 @@ export const argmaxParams = (rows: number, dim: number): Uint32Array<ArrayBuffer
   params[2] = ARGMAX_NEG_INF_BITS;
   return params;
 };
+
+// ---- 2 相分割（長い行 — MTP 段 4-B ③） --------------------------------------------------
+//
+// 1 行 = 1 workgroup の形は、行が語彙長（gemma4 の drafter は 262,144）になると 256 スレッドが
+// 1,024 要素ずつを逐次で畳む遅延が律速になる（実測 2026-09-09・RTX 3080 Ti: 1 行 0.5〜0.6 ms・
+// drafter 3 段で 1.5〜2.1 ms/cycle）。長い行は **2 dispatch** に割る:
+//
+// - **partial**: 行を {@link ARGMAX_SPLIT_SPAN} 要素の区間に切り、区間ごとに 1 workgroup が
+//   区間内の最大元 `(値, index)` を出して一時バッファへ書く（`[rows, groups, 2]` の u32 —
+//   値は f32 のビット列・NaN も保存される）。
+// - **merge**: 行ごとに 1 workgroup が `groups` 本の部分結果を畳んで添字を書く。
+//
+// MUST: 結果は 1 dispatch 形と**ビット同一**（辞書式順序 (値 降順, index 昇順) の最大元は
+// 結合順に依らないので、区間ごとに最大元を取ってから畳んでも全域の最大元に一致する。部分
+// 結果の identity は同じ −inf / 番兵 `dim` で、区間は空にならない〈`groups = ceil(dim / span)`〉
+// ので各部分結果の index は `[0, dim)` に入り、全 −inf 行でも merge は最小 index = 0 を返す）。
+// MUST: 分割の閾値・区間幅は**形の純関数**（{@link argmaxSplitGroups}）— 同じ形は常に同じ
+// 経路・同じキーになる（実行時オートチューン禁止・ADR 0022）。
+
+/** partial 1 workgroup が受け持つ要素数（256 スレッド × 16 要素）。 */
+export const ARGMAX_SPLIT_ELEMENTS = 16;
+export const ARGMAX_SPLIT_SPAN = ARGMAX_WORKGROUP_SIZE * ARGMAX_SPLIT_ELEMENTS;
+/**
+ * 2 相に割る最小の行長（= 区間 4 本以上）。これより短い行は 1 dispatch 形のまま（キー・WGSL
+ * とも不変 — 既存のスナップショット / ビット同一門はそのまま効く）。
+ */
+export const ARGMAX_SPLIT_MIN_DIM = ARGMAX_SPLIT_SPAN * 4;
+
+export const ARGMAX_SPLIT_PARTIAL_KEY =
+  `argmax:v1:f32>i32:lastdim:minindex:split-partial:wg${ARGMAX_WORKGROUP_SIZE}e${ARGMAX_SPLIT_ELEMENTS}`;
+export const ARGMAX_SPLIT_MERGE_KEY =
+  `argmax:v1:f32>i32:lastdim:minindex:split-merge:wg${ARGMAX_WORKGROUP_SIZE}`;
+
+/** 行長 `dim` を 2 相に割るときの区間数（割らない形は 0）。 */
+export const argmaxSplitGroups = (dim: number): number =>
+  dim >= ARGMAX_SPLIT_MIN_DIM ? Math.ceil(dim / ARGMAX_SPLIT_SPAN) : 0;
+
+/** 部分結果の一時バッファの大きさ（`[rows, groups]` × (値 u32 + index u32)）。 */
+export const argmaxSplitPartialBytes = (rows: number, groups: number): number => rows * groups * 8;
+
+/** 木の簡約（scratch の 256 対を 1 対へ）— 1 dispatch 形と同じ骨格。 */
+const ARGMAX_TREE_WGSL = [
+  `    var stride = ${ARGMAX_WORKGROUP_SIZE / 2}u;`,
+  "    while (stride > 0u) {",
+  "      if (lid < stride) {",
+  "        let other = scratch_value[lid + stride];",
+  "        let other_at = scratch_index[lid + stride];",
+  "        if (argmax_beats(other, other_at, scratch_value[lid], scratch_index[lid])) {",
+  "          scratch_value[lid] = other;",
+  "          scratch_index[lid] = other_at;",
+  "        }",
+  "      }",
+  "      workgroupBarrier();",
+  "      stride = stride / 2u;",
+  "    }",
+].join("\n");
+
+export const ARGMAX_SPLIT_PARTIAL_WGSL: string = [
+  "// karume argmax split partial (last dim, f32>i32, min-index tie-break, -inf identity)",
+  "struct Params {",
+  "  rows: u32,",
+  "  dim: u32,",
+  "  groups: u32,",
+  "  neg_inf: u32,",
+  "}",
+  "@group(0) @binding(0) var<uniform> params: Params;",
+  "@group(0) @binding(1) var<storage, read> x: array<f32>;",
+  "@group(0) @binding(2) var<storage, read_write> partial: array<u32>;",
+  "",
+  IS_NAN_BITS_WGSL,
+  "",
+  ARGMAX_BEATS_FN,
+  "",
+  `var<workgroup> scratch_value: array<f32, ${ARGMAX_WORKGROUP_SIZE}>;`,
+  `var<workgroup> scratch_index: array<u32, ${ARGMAX_WORKGROUP_SIZE}>;`,
+  "",
+  `@compute @workgroup_size(${ARGMAX_WORKGROUP_SIZE})`,
+  "fn main(",
+  "  @builtin(workgroup_id) wid: vec3<u32>,",
+  "  @builtin(local_invocation_id) lid3: vec3<u32>,",
+  "  @builtin(num_workgroups) nwg: vec3<u32>,",
+  ") {",
+  "  let lid = lid3.x;",
+  "  let dim = params.dim;",
+  "  let neg_inf = bitcast<f32>(params.neg_inf);",
+  "  // x 軸 = 区間（1 workgroup = 1 区間・上限超過は fail loudly）・y 軸 = 行（grid-stride）",
+  "  let group = wid.x;",
+  `  let start = group * ${ARGMAX_SPLIT_SPAN}u;`,
+  `  let end = min(start + ${ARGMAX_SPLIT_SPAN}u, dim);`,
+  "  var row = wid.y;",
+  "  while (row < params.rows) {",
+  "    let base = row * dim;",
+  "    var best = neg_inf;",
+  "    var best_at = dim;",
+  "    var i = start + lid;",
+  "    while (i < end) {",
+  "      let v = x[base + i];",
+  "      if (argmax_beats(v, i, best, best_at)) {",
+  "        best = v;",
+  "        best_at = i;",
+  "      }",
+  `      i = i + ${ARGMAX_WORKGROUP_SIZE}u;`,
+  "    }",
+  "    scratch_value[lid] = best;",
+  "    scratch_index[lid] = best_at;",
+  "    workgroupBarrier();",
+  ARGMAX_TREE_WGSL,
+  "    if (lid == 0u) {",
+  "      let at = (row * params.groups + group) * 2u;",
+  "      partial[at] = bitcast<u32>(scratch_value[0u]);",
+  "      partial[at + 1u] = scratch_index[0u];",
+  "    }",
+  "    workgroupBarrier();",
+  "    row = row + nwg.y;",
+  "  }",
+  "}",
+  "",
+].join("\n");
+
+export const ARGMAX_SPLIT_MERGE_WGSL: string = [
+  "// karume argmax split merge (partials [rows, groups, 2] -> i32 index per row)",
+  "struct Params {",
+  "  rows: u32,",
+  "  dim: u32,",
+  "  groups: u32,",
+  "  neg_inf: u32,",
+  "}",
+  "@group(0) @binding(0) var<uniform> params: Params;",
+  "@group(0) @binding(1) var<storage, read> partial: array<u32>;",
+  "@group(0) @binding(2) var<storage, read_write> out: array<i32>;",
+  "",
+  IS_NAN_BITS_WGSL,
+  "",
+  ARGMAX_BEATS_FN,
+  "",
+  `var<workgroup> scratch_value: array<f32, ${ARGMAX_WORKGROUP_SIZE}>;`,
+  `var<workgroup> scratch_index: array<u32, ${ARGMAX_WORKGROUP_SIZE}>;`,
+  "",
+  `@compute @workgroup_size(${ARGMAX_WORKGROUP_SIZE})`,
+  "fn main(",
+  "  @builtin(workgroup_id) wid: vec3<u32>,",
+  "  @builtin(local_invocation_id) lid3: vec3<u32>,",
+  "  @builtin(num_workgroups) nwg: vec3<u32>,",
+  ") {",
+  "  let lid = lid3.x;",
+  "  let groups = params.groups;",
+  "  let neg_inf = bitcast<f32>(params.neg_inf);",
+  "  var row = wid.x;",
+  "  while (row < params.rows) {",
+  "    let base = row * groups * 2u;",
+  "    var best = neg_inf;",
+  "    var best_at = params.dim;",
+  "    var g = lid;",
+  "    while (g < groups) {",
+  "      let v = bitcast<f32>(partial[base + g * 2u]);",
+  "      let v_at = partial[base + g * 2u + 1u];",
+  "      if (argmax_beats(v, v_at, best, best_at)) {",
+  "        best = v;",
+  "        best_at = v_at;",
+  "      }",
+  `      g = g + ${ARGMAX_WORKGROUP_SIZE}u;`,
+  "    }",
+  "    scratch_value[lid] = best;",
+  "    scratch_index[lid] = best_at;",
+  "    workgroupBarrier();",
+  ARGMAX_TREE_WGSL,
+  "    if (lid == 0u) {",
+  "      out[row] = i32(scratch_index[0u]);",
+  "    }",
+  "    workgroupBarrier();",
+  "    row = row + nwg.x;",
+  "  }",
+  "}",
+  "",
+].join("\n");
+
+/**
+ * 2 相形の uniform（`{rows, dim, groups, neg_inf}` — partial / merge で同じ 4 語）。
+ *
+ * MUST: `groups` は {@link argmaxSplitGroups} の値（1 以上）— 0 で呼ぶのは 1 dispatch 形を
+ * 選ぶべき形なので fail loudly。
+ */
+export const argmaxSplitParams = (
+  rows: number,
+  dim: number,
+  groups: number,
+): Uint32Array<ArrayBuffer> => {
+  assertU32Params("argmax split params", { rows, dim, groups });
+  if (dim < 1 || groups < 1 || groups !== argmaxSplitGroups(dim)) {
+    throw new CodegenError(
+      `argmax split params: dim ${dim} / groups ${groups} が分割の形に合わない` +
+        `（${argmaxSplitGroups(dim)} 区間が正）`,
+    );
+  }
+  const params = new Uint32Array(4);
+  params[0] = rows;
+  params[1] = dim;
+  params[2] = groups;
+  params[3] = ARGMAX_NEG_INF_BITS;
+  return params;
+};

@@ -39,6 +39,8 @@ import { type IrDtype, SEMANTIC_DTYPES } from "../src/format/ir.ts";
 import {
   ARGMAX_KEY,
   ARGMAX_NEG_INF_BITS,
+  ARGMAX_SPLIT_MERGE_WGSL,
+  ARGMAX_SPLIT_PARTIAL_WGSL,
   ARGMAX_WGSL,
   ARGMAX_WORKGROUP_SIZE,
   argmaxParams,
@@ -375,6 +377,10 @@ Deno.test("生成した WGSL がスナップショットとバイト単位で一
     // 骨格を持つぶん「新族を足したら既存 reduce のバイト列が動いた」が最大の事故
     // （既存 3 本 + 軸変種 3 本がその検出器）。
     ["argmax.wgsl", ARGMAX_WGSL],
+    // 2 相形（長い行 — MTP 段 4-B ③）。partial / merge を対で置く（片方だけ動くと「区間の最大元は
+    // 動いたのに merge は旧形」が同じキーで通り、ビット同一の主張が沈黙で崩れる）。
+    ["argmax_split_partial.wgsl", ARGMAX_SPLIT_PARTIAL_WGSL],
+    ["argmax_split_merge.wgsl", ARGMAX_SPLIT_MERGE_WGSL],
     // topk（ADR 0068 決定 3）。**k=1 と一般形を対で置く**のが条件 — k=1 ではブロックの末尾
     // （最弱）と先頭が同じ語になり、挿入ループが 1 度も回らない縮退形なので、一般形だけを
     // 固定すると `k-1` の焼き込みが 1 ずれても気づけない（k=1 は argmax と同じ答えを返す
