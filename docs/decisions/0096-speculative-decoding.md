@@ -214,3 +214,36 @@ lm_head + argmax（centroid 疎 softmax の topk は exporter に無い — 受�
   （= 受理率 = 速度）だけで、確定する token 列は変わらない — 受理は行ごとに target の logits と
   `sampler.next` が決める（決定 7）ので、draft が違う token を出せば受理数が動くだけである。
   `"sequential"` 席の門は drafter が parallel のままでも成立する。
+
+## 追記（2026-09-09・段 4 の実測と自己採算ゲート — 決定 8・帰結の訂正）
+
+- **実測（段 4-A・[research 2026-09-09](../research/2026-09-09-mtp-stage4.md)）**: 取り分は課題で決まる。
+  RTX 3080 Ti / Deno の decode 相で抽出 1.81× / 要約 1.41× / 対話 1.18× / 自由文 0.96×、Apple M2 で
+  1.27× / 1.03× / 0.93× / 0.76×。倍率 = A / A\*（A = 確定 token / cycle・A\* = cycle 壁 / decode 壁）が
+  8 条件すべて 2% 以内で成立し、A\* は RTX 1.72〜1.88・M2 2.17〜2.6 と host で動く。温度 1.0
+  （配布推奨 sampler）でも受理率は greedy と同じで、token 列は plain / 投機で一致（決定 7 の実証）。
+- **決定 8 — 自己採算ゲート（既定 on）**: `speculative: true`（既定）は**ゲート付き**で、cycle の壁と
+  plain step（M=1）の壁を実行時に自分で測り、**16 cycle のブロック**ごとの `ΣWc / Σdelivered` が
+  `W1 × 1.01` を **2 ブロック連続**で超えたら decode 形へ落ち、plain 中は **8 cycle のバースト**で試して
+  集計が `W1 × 0.97` を下回ったら戻る（バーストの間隔は幾何バックオフ 8 → 256 step・W1 は plain step の
+  壁の EWMA で初回は cycle 2）。閾値を焼かないのは A\* が host と文脈で 0.5 以上動くため。判定を
+  ブロック集計にするのは、受理数の cycle あたりのばらつき（sd 0.88 = 平均の 43%）を 16 本で
+  sd ≈ 0.09（比）まで落としてから比べるため — 1 サンプルの EWMA 種付けで判定した初版は、最初の cycle が
+  受理 0 だと勝つ条件でも即座に抜けて戻らなかった（e2e の実走: 7 cycle 目で落ちて 190 step 戻らず 31% 遅い）。ゲートの plain step は
+  既存の `k' = 0` 経路（verify 形 M=1・deferred）を通す — hidden が繋がり、抽選の失敗でも
+  `commit(0)` で frontier が二重投入されない。守れるのは大きい負け（M2 自由文 −24% 級・32 cycle で抜ける）
+  だけで、3〜4% の差はブロック集計でも判別しない（対話級で誤って抜けるのはターンあたり ≈ 1.5%）。`"always"` は常時投機（A/B・検収・
+  計測の席）。**既定席（parallel）ではゲートの切替が壁時計に依るので、同一 seed でも稀に出力が
+  変わりうる**（M=1 と M=4 の ①QK の縮約順が違うため）— 厳密な再現性は `"always"` か
+  `stateAttentionReduce: "sequential"`（limitations）。純関数モジュール `speculation-gate.ts`。
+- **決定 7 の補足（受理の列挙）**: 確定した token が停止 token なら列挙を**そこで止める**（非投機が
+  触れない先の logits に触れない・RNG の消費数が並ぶ）。`accepted` は配送した受理数、token/cycle
+  の正本は `delivered / cycles`。
+- **帰結「fence 1 本化」は不成立**: 1 cycle は run 2 本（draft → verify）が下限である。draft の id を
+  ホストが読んで PLE を gather しないと verify の入力が組めず、受理判定もホストで行う。Deno では
+  draft の壁 15 ms のうち ≈9.5 ms が round trip の床（ブラウザでは消える見込み）。
+- **段 4-B の裁定（2026-09-09）**: ⑤ ①′ / ③′ の行タイル化は**縮小** — ③′ は既に M=4 で効いており
+  M=1 限定は ①QK の適用条件だけ（効き代は M2 で最大 −4 ms/cycle・実験として残す）。⑧ M2 の小 M
+  linear は行ブロックの並列度目標（静的ノブ `linearGemvRowsThreadTarget`）を振っても既定 r1 が最良で
+  「重み 4 回読み」仮説は外れ（perf-ledger K-22）。⑦ GPU 側の argmax / topk 出口は不採用（ホスト +
+  readback は cycle の 2〜5%）。残りは ③ argmax の 2 相化 → ⑥ k=7 drafter + 3 値ゲート。
