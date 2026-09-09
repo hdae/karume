@@ -227,3 +227,16 @@ R = k+1 行を 1 run で採点し、hidden の受理行を drafter の入力に�
 （prefill が `[1,768,V]` を readback してしまう）。行選択が lm_head より前に居ることの構造検査
 （H-01）は行数を引数で受ける形（`assert_row_selected_lm_head`）に一般化した。GPU 側 argmax の禁止
 （追記 6・ADR 0083 決定 6）は不変 — 縮約は実測してから。
+
+## 追記 8（2026-09-09・MTP 段 4-B ③ — 長い行の argmax は 2 dispatch）
+
+決定 2 の argmax は「1 行 = 1 workgroup」で、行が語彙長（gemma4 262,144）になると 256 スレッドが
+1,024 要素ずつを逐次で畳む遅延が律速だった（drafter の 3 段で 1.5〜2.1 ms/cycle — research
+2026-09-09 §4）。行長 ≥ 16,384（4,096 要素の区間 4 本以上）は **partial（区間ごとの最大元を一時
+バッファへ）→ merge（行ごとに区間の結果を畳む）** の 2 dispatch にする。結果は 1 dispatch 形と
+**ビット同一**（(値 降順, index 昇順) の辞書式順序の最大元は結合順に依らない・区間の identity は
+同じ −inf / 番兵 `dim`・区間は空にならない）。経路の選択は行長の純関数（`argmaxSplitGroups`）で
+実行相と見積り（一時 `[rows, groups] × 8 B`）が同じ関数を通る。短い行はキー・WGSL とも不変。
+タイブレーク / NaN / 全 −inf 行の規定（追記 2）は 2 相形の門（`gpu_ops_test.ts`）でも同じ
+リテラルで固定した。GPU 側 argmax の禁止（追記 6・7）は target の出口の話で不変 — 2 相化は
+drafter が既に持つ argmax 出口の速度だけを変える。
