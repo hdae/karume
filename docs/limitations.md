@@ -449,6 +449,15 @@ i4 / i8 格納 × f32 計算の linear は 1 ≤ M ≤ 64 で GEMV 族（ADR [00
   （借りる埋め込み表を除く）と借り手 context の lengths 8 バイトを合算する（段 3）。
 - **drafter の格納は i8 単一**（linear まで i8 per-channel）。linear を i4 g32 に落とした資産は
   `dist.py` が拒否する（受理数 E[a] が丸め無し比 −15〜−33% 落ちる — ADR 0096 追記 2026-09-08）。
+  ただしこの門（`tools/export-recipes/gemma4/distribution.py`）は safetensors ヘッダの格納 dtype を
+  「I8 が在る / F16・I4 が無い」で見る **混入検出**であって、「全 linear が i8」の保証ではない
+  （norm 用の f32 が要るので f32 の全禁止では塞げず、i8 が 1 本でも在れば存在検査は満たされる —
+  一部の linear だけ f32 で焼いた資産は通る）。
+- **admission が照合するのは構造だけ**（`packages/models/src/gemma/speculative.ts`）— drafter グラフの
+  入力・出口・external スロット・共有 initializer を形・名前・格納 dtype で突合するが、target と
+  drafter が**同じ資産世代**（同じ checkpoint から焼いたもの）かは見ない。同形の別 checkpoint の
+  drafter は admission を通り、受理率が落ちるだけで誤った token 列は出ない（確定するのは target の
+  logits と `sampler.next`）。世代の対を合わせるのは配布形（ミラー）を組む側の責務。
 - **hub の `ResolveOptions.weights: []` は assets だけを解決する**（weights を 1 本も取らない形）。
   意味のある用途は無いが、空を「全数」に読み替えると `speculative` の絞り込みの退行が黙って通るので
   空は空のまま。
@@ -463,6 +472,10 @@ i4 / i8 格納 × f32 計算の linear は 1 ≤ M ≤ 64 で GEMV 族（ADR [00
   近い値の token では argmax が割れうる（chunk 分割の prefill と decode の間に元からある数値差と同じ種類）。
   既定席での相違数は e2e の実測に載る（`e2e_gemma4_speculative_test.ts` — 2026-09-08・RTX 3080 Ti: 3 ケース × 200 token で相違 0、u32 では
   262,144 語のうち 94% が違い最大絶対差 1.1e-4）。
+- **`stateAttentionReduce` は drafter の readonly attention（①′ ③′）には効かない — parallel 固定**
+  （席が効くのは target の states 形 attention だけ）。上の厳密一致は target の同一性の門なので
+  これで崩れない: drafter の縮約順は draft の中身（= 受理率 = 速度）にしか効かず、確定する token 列は
+  行ごとの target の logits と `sampler.next` が決める。
 - **verify の commit は「配送した token の frontier まで」**。消費者が `break` すると受理済みでも未配送の token は
   会話に入らない（frontier 1 個だけが残る — 非投機と同じ形）。verify 戻り〜配送の同期区間で例外が出た場合は
   `commit(0)`（frontier は未投入のまま・棄却行は次の run が上書き）で、sequence はその後も使える。

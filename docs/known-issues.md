@@ -209,3 +209,28 @@ batch>1 のマスク畳み込み対応）で、コア変換基盤への設計判
 終了の報告あり）だが、回線切断・アプリ側 abort と見え方が同一のため、修正版で `err.cause`
 を実機観測するまで確定できない。常駐そのものの削減（shard 配布 + streamAssets 接続 —
 R1 統合波）も 0.7.0 に同梱済み。残タスク = 修正版・分割配布での実機再観測のみ。
+
+## hub: `evictCachedAssets` で weights を `drafter` だけに絞っても共通 assets（tokenizer / PLE）が消える
+
+`evictCachedAssets(loaded, { model, quant, weights: ["drafter"] })` は「本体は残して drafter だけ
+消す」意図で書けるが、**残るのは本体 weights だけで、tokenizer / PLE などの assets は消える** —
+その (model, quant) は「そのまま使える在庫」ではなくなる（次の起動で assets が再 DL される）。
+2026-09-09 にコードを読んで導いた（実機での再現は未観測）。
+
+機序は 2 段:
+
+1. `resolveFiles`（`packages/hub/src/resolve.ts`）は **weights の絞り込みに関わらず assets を
+   全数展開する**（コメント「assets は常に全数」）。絞った選択の参照集合 = drafter の weights
+   ファイル + assets 全数になり、assets が削除候補に入る。
+2. `packages/hub/src/inventory.ts` の参照勘定は「**対象と同じ (model, quant) は守る側に数えない**」
+   （同じ label の別の部分集合は候補に上がらない — `protect` に渡しても対象自身は無視される）。
+   よって「絞らない本体の選択が assets を使っている」ことでは守られず、他の model / quant が
+   在庫として揃っているミラーでしか assets は残らない。
+
+結果は静かで、`EvictedAssets.alsoEvicted` は**他の (model, quant)** しか名乗らない（同じ選択が
+部分在庫に落ちたことは載らない）。確認するには `listCachedAssets` を絞らずに引き直すしかない。
+
+運用の回避 = **drafter だけを消したいときは evict を使わず、drafter の shard を手で消す**
+（`protect` では回避できない）。修正案 = 部分 weights の evict では共通 assets を既定で保持する
+（「絞った選択」の参照集合から assets を外す / 対象と同じ label の残りを守る側に数える、のどちらか）。
+どちらも「選択単位の削除」の粒度の定義を変えるので設計裁定が要る — ここは起票のみ。

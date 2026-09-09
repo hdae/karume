@@ -333,7 +333,8 @@ Deno.test("evictCachedAssets: protect の存在しない quant は ManifestRefer
 // ---- weights の絞り込み（`ResolveOptions.weights`）が在庫の勘定に効く形。選択の参照集合が
 // 小さくなるだけなので、照会も削除も「絞ったぶん」を数える。同じ (model, quant) の残りは
 // 守る側の候補にならない（label が同じものは候補から外れる）ので、**本体を残して 1 役割だけ
-// 消す**が書ける — gemma4 の `drafter` を投機を使わなくなった後に落とす席。
+// 消す**が書ける — gemma4 の `drafter` を投機を使わなくなった後に落とす席。ただし共通 assets
+// は守られない（`docs/known-issues.md` — この下のテストは別 (model, quant) の在庫が守っている）。
 
 /** 既定選択の 1 役割ぶん（絞った選択も `ResolveOptions` そのもの）。 */
 const TURBO_VAE: ResolveOptions = { weights: ["vae_decoder"] };

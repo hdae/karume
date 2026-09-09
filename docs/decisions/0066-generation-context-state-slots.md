@@ -267,3 +267,21 @@ accepted 直後の第 3 巡（Codex 独立レビュー・5 本セット照合）
   run（prefill / decode）は全行を確定させるので上限は `chunkLength` のまま。
 - 追記 2（sliding を含む context の rewind 全拒否）は不変 — 投機は rewind ではなく「書いてから
   受理行数だけ進める」形で棄却を扱う。
+
+## 追記（2026-09-09）— deferred の門を 1 列締めた（`queryLength ≤ slidingSlack`）
+
+直前の追記（2026-09-08）が置いた **`queryLength ≤ slidingSlack + 1`** は、段 3 の実装
+（ADR [0096](0096-speculative-decoding.md) 追記〈段 3〉・2026-09-08）で
+**`queryLength ≤ slidingSlack`** へ 1 列締めた。現行の執行値はこちらで、上の記述はその時点の
+決定として残す。
+
+- 理由: 借り手 context（drafter の readonly attention）は貸し手より 1 列古い最古列 `P−W` まで
+  読む。棄却行 j が潰す論理列は `P+j−capacity` で、これが借り手の窓に入らない条件は
+  `j − m < capacity − window = slidingSlack`（m = `commit` した行数・`commit(0)` を含む）⟺
+  **`Q ≤ slidingSlack`**。借り手が居ない context でも同じ門にする（借り手は deferred +
+  `commit(0)` の後にも開けられるので、有無で分岐すると後から開いた借り手が壊れた窓を読む）。
+- 受理集合の縮小は 2 つ: 余裕 8 の gemma4 配布形は deferred run が 8 行までで、投機の drafter は
+  `k + 1 ≤ 8` から**最大 7 段**（`+ 1` の時代は 8 段が通っていた — これは門の上限であって
+  配布形の値ではない: 配布 drafter は 3 段・limitations 参照）。余裕 0 の context は
+  **`queryLength = 1` の deferred run すら発行できない**（同期区間で fail loudly）。
+- immediate な run（prefill / decode）は全行を確定させるので上限は `chunkLength` のまま不変。

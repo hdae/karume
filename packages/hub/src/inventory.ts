@@ -32,7 +32,8 @@
  *   （gemma4 の `drafter`）を落とし済みかを、本体の在庫と独立に問える。
  * - 削除（{@link evictCachedAssets}）… 消す候補が絞った参照だけになる。**同じ (model, quant) の
  *   残りは守る側に数えない**（守る側の候補は「対象と label の違う選択」で、同じ label の
- *   別の部分集合は候補に上がらない）ので、「本体は残して drafter だけ消す」が書ける。
+ *   別の部分集合は候補に上がらない）ので、weights については「本体は残して drafter だけ消す」が
+ *   書ける（ただし共通 assets〈tokenizer / PLE〉は守られない — `docs/known-issues.md`）。
  * - 巻き添え（{@link EvictedAssets.alsoEvicted}）… 数えるのは**他の (model, quant)** だけで、
  *   同じ選択の残りは載らない。同じ label の中で部分在庫になったかどうかは、必要なら
  *   {@link listCachedAssets} をもう一度引いて見る（label は `"<model>/<quant>"` のままで、
