@@ -13,6 +13,9 @@
 //    NOTE: 席を `"sequential"` に倒すのは、decode（M=1）と verify（M=4）が**同じ縮約カーネル**を
 //    通る形にするためである。既定の `"parallel"` は decode だけ別変種（KV 長を 16 レーンで分担）を
 //    使うので、同じ行でもビット同一にならない（下の②）。
+//    NOTE: 門は `speculative: "always"`（ゲート無しの常時投機）で回す — 床も厳密一致も「常に
+//    投機」の契約だからである。既定の自己採算ゲート（段 4-B ④・`speculative: true`）は最後の
+//    step が別に見る（列の一致だけが門で、落ちた step 数は壁時計依存なのでログのみ）。
 // ② **既定席（`"parallel"`）の実測**（門ではない）… ①と同じ 3 ケースを既定席で回し、投機 /
 //    非投機の相違添字を報告する。①′（decode の変種）と①（verify）の縮約順の差が argmax を
 //    割る位置を数えるための実測席で、門にはしない（`docs/limitations.md`）。
@@ -198,7 +201,11 @@ const runTurn = async (
   pipeline: Gemma4Pipeline,
   prompt: readonly number[],
   options: {
-    readonly speculative: boolean;
+    /**
+     * `"always"` = ゲート無しの常時投機（門はこちら — 床も厳密一致も「常に投機」の契約である）。
+     * `true` は自己採算ゲート付きの既定席で、①の最後の step だけがこちらを回す。
+     */
+    readonly speculative: boolean | "always";
     readonly capacity?: number;
     readonly tokens: number;
     readonly sampler?: SamplerSpec;
@@ -287,7 +294,7 @@ Deno.test({
           const golden = await readGoldenCase(name);
           const capacity = capacityFor(pipeline, golden.prompt.length);
           const speculative = await runTurn(pipeline, golden.prompt, {
-            speculative: true,
+            speculative: "always",
             capacity,
             tokens: MAX_NEW_TOKENS,
           });
@@ -356,7 +363,7 @@ Deno.test({
           const golden = await readGoldenCase("readme-recipes");
           const capacity = capacityFor(pipeline, golden.prompt.length);
           const speculative = await runTurn(pipeline, golden.prompt, {
-            speculative: true,
+            speculative: "always",
             capacity,
             tokens: MAX_NEW_TOKENS,
             sampler,
@@ -390,6 +397,39 @@ Deno.test({
               `topP ${sampler.topP}）: ${plain.ids.length} token / ${speculation.cycles} cycle / ${
                 tokensPerCycle(speculative.stop).toFixed(3)
               } token/cycle / 温度 0 との先頭一致 ${commonPrefix(plain.ids, greedy.ids)}`,
+          );
+        },
+      );
+
+      await t.step(
+        "自己採算ゲート付き（既定の speculative: true）: always と同じ列を出す",
+        async () => {
+          // ゲートは cycle ごとに「投機 / decode 形」を壁時計で選ぶ。sequential 席では両者が
+          // ビット同一（⑤の門）なので、どこで切り替わっても列は変わらない — ここが割れるなら
+          // 切替そのもの（hidden の継ぎ・frontier の commit）が壊れている。
+          const golden = await readGoldenCase("readme-recipes");
+          const capacity = capacityFor(pipeline, golden.prompt.length);
+          const gated = await runTurn(pipeline, golden.prompt, {
+            speculative: true,
+            capacity,
+            tokens: MAX_NEW_TOKENS,
+          });
+          const always = await runTurn(pipeline, golden.prompt, {
+            speculative: "always",
+            capacity,
+            tokens: MAX_NEW_TOKENS,
+          });
+          assertEquals(gated.ids, always.ids, "ゲート付き / always の token id 列");
+          assertEquals(gated.positions, always.positions, "絶対位置列");
+          assertEquals(gated.stop.tokens, always.stop.tokens, "生成 token 数");
+          const speculation = gated.stop.speculation;
+          assert(speculation !== undefined, "ゲート付きのターンに勘定が載っていない");
+          // MUST: 落ちた step 数は**門にしない**（壁時計依存で、host と負荷で変わる）。この機で
+          // どう出たかを記録するだけである。
+          console.log(
+            `[e2e] gemma4 投機① ゲート: ${gated.ids.length} token / ${speculation.cycles} cycle / ` +
+              `plain step ${speculation.plainSteps} / 切替 ${speculation.switches} / ` +
+              `ゲート ${gated.ms.toFixed(0)}ms vs always ${always.ms.toFixed(0)}ms`,
           );
         },
       );
@@ -450,7 +490,7 @@ Deno.test({
             const golden = await readGoldenCase(name);
             const capacity = capacityFor(pipeline, golden.prompt.length);
             const speculative = await runTurn(pipeline, golden.prompt, {
-              speculative: true,
+              speculative: "always",
               capacity,
               tokens: MAX_NEW_TOKENS,
             });
@@ -483,7 +523,7 @@ Deno.test({
       const golden = await readGoldenCase("short-en");
       records = [];
       const turn = await runTurn(pipeline, golden.prompt, {
-        speculative: true,
+        speculative: "always",
         tokens: PHASE_TOKENS,
       });
       const observed = records;
@@ -497,6 +537,12 @@ Deno.test({
         const prefills = ofKind(observed, "prefill");
         // 非投機の decode run は 1 本も混ざらない（投機ターンの decode は `k'=0` の verify として
         // 出る — 種別が混ざると「投機なのに decode へ落ちた cycle」が沈黙する）。
+        //
+        // MUST: この 0 本が成り立つのは上の `speculative: "always"`（ゲート無し）のターンだけ
+        // である。既定の `auto` では自己採算ゲートが落とす plain step が `decode` 通知として
+        // **正当に**出る（本数 = `speculation.plainSteps`・run の形が M=1・R=1 で decode そのもの
+        // だから同じ枝を名乗る）ので、この席と下の総数の式（`plainSteps` の項が無い）はどちらも
+        // ゲート付きのターンには当てはまらない。
         assertEquals(ofKind(observed, "decode").length, 0, "投機ターンに decode 通知が混ざった");
         assertEquals(drafts.length, speculation.draftRuns, "draft 通知の本数 = draftRuns");
         assertEquals(verifies.length, speculation.cycles, "verify 通知の本数 = cycles");

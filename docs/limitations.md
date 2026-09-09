@@ -473,6 +473,14 @@ i4 / i8 格納 × f32 計算の linear は 1 ≤ M ≤ 64 で GEMV 族（ADR [00
   近い値の token では argmax が割れうる（chunk 分割の prefill と decode の間に元からある数値差と同じ種類）。
   既定席での相違数は e2e の実測に載る（`e2e_gemma4_speculative_test.ts` — 2026-09-08・RTX 3080 Ti: 3 ケース × 200 token で相違 0、u32 では
   262,144 語のうち 94% が違い最大絶対差 1.1e-4）。
+- **自己採算ゲートは既定 on で、切るのは壁時計である**（段 4-B ④・`speculative: true` の既定）。ゲートは cycle の壁と
+  decode 1 step の壁を実行時に測り、投機が負けている間は M=1 の decode 形へ落ちる（判定は 16 cycle のブロック集計を
+  2 本連続で見てから・戻るのは 8 cycle のバースト集計で — 1 サンプルでは受理数のばらつきに負ける。取り分は課題と host で決まり、
+  採算閾値も RTX 1.72〜1.88 / M2 2.17〜2.6 と動くので固定値に焼けない — research 2026-09-09）。壁時計は走行ごとに
+  揺れるので、**既定席（`parallel`）では同じ seed でも稀に出力が変わりうる**（落ちた step は M=1・投機の cycle は
+  M=4 で ①QK の縮約順が違い、近い値の token では argmax が割れる — 上の項と同じ種類の差）。厳密な再現性が要るなら
+  `speculative: "always"`（ゲート無し）か `stateAttentionReduce: "sequential"`（M=1 と M=4 が u32 一致）を選ぶ。
+  落ちた step 数は `GenerationStop.speculation.plainSteps`・切替回数は `switches`（どちらも `"always"` では欄ごと無い）。
 - **`stateAttentionReduce` は drafter の readonly attention（①′ ③′）には効かない — parallel 固定**
   （席が効くのは target の states 形 attention だけ）。上の厳密一致は target の同一性の門なので
   これで崩れない: drafter の縮約順は draft の中身（= 受理率 = 速度）にしか効かず、確定する token 列は

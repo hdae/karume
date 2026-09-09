@@ -132,13 +132,16 @@ export type Gemma4ChatSessionOptions = {
   /** 容量が足りないときに履歴を作り直す関数（既定 {@link dropOldestTurns}）。 */
   readonly onOverflow?: Gemma4ChatOverflowPolicy;
   /**
-   * この会話で投機デコードを張るか（既定 = pipeline に drafter が居れば `true`）。
+   * この会話で投機デコードを張るか（既定 = pipeline に drafter が居れば `true` = 自己採算ゲート
+   * 付き。値の意味は {@link Gemma4SequenceOptions.speculative} と同じで、`"always"` は
+   * ゲート無しの常時投機）。
    *
    * ターンごとではなく**セッション単位**の席である — この層は 1 本の sequence を多ターン使い
    * 回し、投機の借り手 context は sequence の寿命に束ねられている（ターンごとに切り替えるには
-   * sequence を作り直す = KV を捨てることになる）。
+   * sequence を作り直す = KV を捨てることになる）。ゲートの移動平均も同じ寿命なので、ターンを
+   * 跨いで測り続ける。
    */
-  readonly speculative?: boolean;
+  readonly speculative?: boolean | "always";
 };
 
 /**
@@ -266,7 +269,7 @@ export class Gemma4ChatSession {
   /** このセッションが確保する容量（sequence を作り直しても不変 — 溢れ判定の物差しでもある）。 */
   readonly #capacity: number;
   /** 投機を張るか（`undefined` = pipeline の既定に任せる — sequence を作り直しても不変）。 */
-  readonly #speculative: boolean | undefined;
+  readonly #speculative: boolean | "always" | undefined;
   /** 会話の履歴（この層の唯一の可変状態 — sequence は transcript を持たない）。 */
   #turns: Gemma4ChatMessage[];
   /** 現在の sequence（`undefined` = 次のターンで作り直す）。 */

@@ -65,6 +65,27 @@
  * 貸し手 Session は他の sequence と共有されうる）。次 cycle の hidden は写す。
  * MUST: `k + 1 ≤ context.slidingSlack`（借り手は sliding ring の最古列まで読む — runtime の門は
  * `queryLength ≤ slidingSlack` で、`k` はその内側に取る）。
+ *
+ * ## 自己採算ゲート（ADR 0096 段 4-B ④ — `policy: "auto"` の既定）
+ *
+ * 投機の取り分は課題と host で決まり、負ける組み合わせがある（実測は `speculation-gate.ts` の
+ * doc）。ゲートは cycle の壁と plain step の壁を自分で測り、負けている間は cycle の先頭で
+ * `"plain"` を返す。その cycle は**既存の `drafted === 0` の経路**（verify 形 M=1・R=1・deferred・
+ * `[b]` 1 行）をそのまま通す — 非投機の decode 経路へ分岐しないのは 3 つとも要るからである:
+ * ① `readHidden` を通るので、次に speculate へ戻るときの drafter 入力（hidden）が繋がる
+ * （decode 経路は logits しか読まない）② deferred なので、抽選が投げても `commit(0)` で frontier が
+ * 二重投入されない ③ M=1・R=1 は PreparedPlan の鍵まで decode と同一で GPU 費用の差が無い。
+ *
+ * ゲート由来の plain step は**投機の勘定に入れない**（`cycles` / `draftRuns` / `drafted` /
+ * `accepted` / `delivered` / `acceptedHistogram` の分母を汚さない）。数えるのは
+ * {@link GenerationSpeculation.plainSteps} で、観測席には `{ kind: "decode", step }` として出る
+ * （公開型に枝を足さない = 網羅 switch の消費者を壊さない）。予算末尾の強制 plain（`k' = 0`）は
+ * 従来どおり verify として数え、ゲートには**諮らないし観測にも入れない**。
+ *
+ * MUST: 壁の観測に混ぜないのは 2 種類 — 各ターンの**最初の cycle**（PLE gather の cold miss を
+ * 含む）と、**予算末尾の強制 plain**（呼び手の予算で形が決まった cycle で、投機の巧拙ではない）。
+ * その 2 種類では観測の代わりに `SpeculationGate.skip()` を呼ぶ（探索の周期だけは進める — 混ぜ
+ * ない cycle でも GPU の仕事は 1 本走っている）。
  */
 
 import type {
@@ -90,6 +111,11 @@ import {
   takeDrafts,
   verifyRowIndices,
 } from "./speculation.ts";
+import {
+  createSpeculationGate,
+  type SpeculationGate,
+  type SpeculationGateOptions,
+} from "./speculation-gate.ts";
 
 /** {@link GenerationCapacityError} が踏んだ上限（どちらも「もう入らない」）。 */
 export type GenerationCapacityConstraint = "capacity" | "maxPosition";
@@ -197,8 +223,9 @@ export type GenerationStop =
      * MUST: 停止 token（`eos` / `stop-token`）も 1 個として数える。非投機では抽選 1 回 = run 1 回
      * なので、この数がそのまま生成に費やした run 数と一致し、`tok/s` を再エンコード無しで書ける
      * （それがこの欄の目的）。投機では 1 verify run が最大 `k+1` 個を確定させるので run 数は
-     * `speculation.cycles + speculation.draftRuns` で読む。本文だけの数（= `token` イベントの数）が
-     * 要るなら、停止 token を運ぶ 2 枝（`"eos"` / `"stop-token"`）のとき 1 引く。
+     * `speculation.cycles + speculation.draftRuns`（ゲート付きのターンは `+ plainSteps`）で読む。
+     * 本文だけの数（= `token` イベントの数）が要るなら、停止 token を運ぶ 2 枝
+     * （`"eos"` / `"stop-token"`）のとき 1 引く。
      *
      * `max-tokens` なら要求の `maxNewTokens` に一致し、`closed` / `aborted` では打ち切りまでに
      * 出した数になる（どちらも「成功した run のぶんだけ会話は進んでいる」— 上の節と同じ線。
@@ -246,6 +273,23 @@ export type GenerationSpeculation = {
   readonly delivered: number;
   /** 添字 = その cycle の受理数 `a`（長さ `k+1`・`k' = 0` の cycle は添字 0）。 */
   readonly acceptedHistogram: readonly number[];
+  /**
+   * 自己採算ゲートが decode 形（M=1）で回した step の数（**このターンぶん**）。
+   *
+   * MUST: `policy: "always"`（ゲート無し）のターンでは**欄ごと無い** — `0` と「ゲートが居ない」は
+   * 別物である（0 は「ゲートが 1 度も落ちなかった」という観測で、欄の不在は観測が無いこと）。
+   * この step は上のどの欄にも入らないので、ターンの run 数は
+   * `cycles + draftRuns + plainSteps` である。
+   */
+  readonly plainSteps?: number;
+  /**
+   * ゲートが speculate ↔ plain を切り替えた回数（**このターンぶん**・探索の 1 回試しは数えない）。
+   *
+   * ゲートそのものの寿命は sequence（移動平均をターンで捨てない）だが、この欄は他の欄と同じく
+   * ターンの勘定である — ターン開始時の累計との差で出す。会話ぜんぶの累計が要るなら呼び手が
+   * 足す（ターンぶんから累計は作れるが、累計からターンぶんは作れない）。
+   */
+  readonly switches?: number;
 };
 
 /**
@@ -255,6 +299,10 @@ export type GenerationSpeculation = {
  * 同じ数、`decode` の `step` はそのターンの decode run の番号、`draft` / `verify` の `cycle` は
  * 投機の cycle 番号（同じ cycle の draft と verify は同じ番号を名乗る）。`verify.rows` はその
  * run の有効行数 `k'+1`、`accepted` は受理した draft の数 `a`。
+ *
+ * 投機ターンで自己採算ゲートが落とした plain step も `decode` を名乗る（`step` はそのターンの
+ * plain step の通し番号 = {@link GenerationSpeculation.plainSteps} と同じ数え方）— run の形が
+ * decode そのもの（M=1・R=1）だからで、枝を足すと公開型の網羅 switch を持つ消費者が壊れる。
  */
 export type GenerationRunPhase =
   | { readonly kind: "prefill"; readonly chunk: number; readonly chunks: number }
@@ -450,6 +498,23 @@ export type GenerationSpeculativeOptions<C extends GenerationContextFace> = {
   open(context: C): Promise<DraftFace>;
   /** 1 cycle で使う draft の本数（省略時は `DraftFace.steps`・`1 ≤ k ≤ steps`）。 */
   readonly k?: number;
+  /**
+   * 投機をいつ張るか（既定 `"auto"`）。
+   *
+   * - `"auto"` … 自己採算ゲート付き（モジュール doc の「自己採算ゲート」節）。負ける文脈では
+   *   cycle ごとに decode 形（M=1）へ落ちる。
+   * - `"always"` … 常に投機（ゲートを作らない = 壁時計を 1 度も読まない）。A/B の突合・検収の門・
+   *   計測のための席で、`GenerationSpeculation` の `plainSteps` / `switches` も生えない。
+   */
+  readonly policy?: "auto" | "always";
+  /** ゲートのノブ（`policy: "auto"` のときだけ効く — 省略時は `speculation-gate.ts` の既定）。 */
+  readonly gate?: SpeculationGateOptions;
+  /**
+   * 壁時計（既定 `performance.now` — テストは偽時計を差す）。
+   *
+   * ゲートの観測だけが読む。`policy: "always"` では 1 度も呼ばれない。
+   */
+  readonly now?: () => number;
 };
 
 export type GenerationSequenceOptions<C extends GenerationContextFace> = {
@@ -733,8 +798,21 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
   /** drafter の面（投機の指定があるときだけ — 借り手は context の直後に開き、先に畳む）。 */
   let face: DraftFace | undefined;
   let k = 0;
+  /**
+   * 自己採算ゲート（`policy: "auto"` のときだけ）。
+   *
+   * MUST: 寿命は sequence である（ターンを跨いで持つ）— 壁と受理数の移動平均はターン 1 本では
+   * 収束せず、会話ごとに測り直すと「最初の数 cycle だけ投機」を毎ターン繰り返す。
+   */
+  let gate: SpeculationGate | undefined;
+  /** 壁時計（ゲートが居るときだけ読む — 既定は `performance.now`）。 */
+  const now = options.speculative?.now ?? ((): number => performance.now());
   if (options.speculative !== undefined) {
     try {
+      // ノブの門は借り手を開く**前**に通す（不正なノブが GB 級のロードの後まで落ちない）。
+      if ((options.speculative.policy ?? "auto") === "auto") {
+        gate = createSpeculationGate(options.speculative.gate);
+      }
       face = await options.speculative.open(context);
       k = options.speculative.k ?? face.steps;
       assertSpeculativeSetup(k, face.steps, context.slidingSlack, program);
@@ -860,10 +938,25 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
     const tally: SpeculationTally | undefined = face === undefined
       ? undefined
       : createSpeculationTally(k);
+    /** ゲートが decode 形で回した step の数（このターンぶん — 投機の勘定には入れない）。 */
+    let plainSteps = 0;
+    /**
+     * ターン開始時のゲートの累計切替回数（差分が {@link GenerationSpeculation.switches}）。
+     *
+     * MUST: 鎖の席を取った**後**に読み直す（発行から本体が回り出すまでの間に、先行するターンが
+     * ゲートを動かしうる）。発行時の値で初期化してあるのは、席を取る前に閉じたターン（順番待ちの
+     * 中断）でも差が 0 になるようにするためである。
+     */
+    let switchesAtStart = gate?.switches ?? 0;
     const withSpeculation = (stopped: GenerationStop): GenerationStop =>
       tally === undefined ? stopped : {
         ...stopped,
-        speculation: { ...tally, acceptedHistogram: [...tally.acceptedHistogram] },
+        speculation: {
+          ...tally,
+          acceptedHistogram: [...tally.acceptedHistogram],
+          // ゲートが居ないターンは欄ごと生やさない（0 と「ゲートが居ない」は別物）。
+          ...(gate === undefined ? {} : { plainSteps, switches: gate.switches - switchesAtStart }),
+        },
       };
     /** 保留中の verify を frontier まで確定させる（保留が無ければ何もしない）。 */
     const settleCommit = (): void => {
@@ -904,6 +997,7 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
         release = await acquire();
         // 順番待ちの間に届いた中断は、ここで閉じる（先行の生成が長ければ待ちも長い）。同期の
         // 検査で足りるのは、待ち自体が `await` = 中断タスクの配送済みを意味するため。
+        switchesAtStart = gate?.switches ?? 0;
         signal?.throwIfAborted();
 
         const past = context.pastLength;
@@ -981,10 +1075,26 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
           if (hidden === undefined) throw new Error("prefill が hidden を出していない");
           const isStop = (id: number): boolean =>
             isStopToken(id, program.stopTokens) || isStopToken(id, requestStopTokens);
-          for (let cycle = 1; generated < maxNewTokens; cycle += 1) {
+          /** 数える cycle の番号（ゲート由来の plain step は cycle 番号を消費しない）。 */
+          let cycle = 0;
+          /** このターンで回した cycle の本数（最初の 1 本を観測から外すための添字）。 */
+          let turnCycles = 0;
+          while (generated < maxNewTokens) {
             await settleAbort(signal);
             // k' = min(k, 残り − 1): 確定は最大 k'+1 個なので予算を超えない。k' = 0 は decode 1 行。
-            const drafted = planDraftLength(k, maxNewTokens - generated);
+            const budget = planDraftLength(k, maxNewTokens - generated);
+            // ゲートに諮るのは draft を採れる cycle だけ（予算末尾の強制 plain は投機の巧拙では
+            // ないので、決定にも観測にも入れない）。MUST: `decide()` は 1 cycle に 1 回。
+            const gated = budget >= 1 && gate?.decide() === "plain";
+            const drafted = gated ? 0 : budget;
+            if (gated) plainSteps += 1;
+            else cycle += 1;
+            /** この cycle を壁の観測に入れるか（モジュール doc の「混ぜない」2 種類）。 */
+            const measured = gate !== undefined && turnCycles >= 1 && budget >= 1;
+            turnCycles += 1;
+            // 壁は cycle ごとに同じ 2 点（先頭 → 受理判定の直後）で採る。観測に入れるかで採る位置を
+            // 変えないのは、偽時計のテストが実装の分岐をなぞるだけにならないようにするためである。
+            const startedAt = gate === undefined ? 0 : now();
             let drafts: number[] = [];
             if (drafted >= 1) {
               // drafter は (frontier b, b を出した行の hidden, b の位置 P) から d₁.. を出す。
@@ -1012,7 +1122,7 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
             const extra = await deriveInputs(ids, positions, signal);
             signal?.throwIfAborted();
             const rowIndices = verifyRowIndices(drafted, k);
-            const where = `verify@${cycle}`;
+            const where = gated ? `plain@${plainSteps}` : `verify@${cycle}`;
             const outputs = await session.run(
               {
                 [program.inputIds]: i32Row(rows, ids),
@@ -1034,15 +1144,34 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
               history,
               isStop,
             );
+            // ゲートの物差しは受理判定の直後に採る（配送の yield も観測席の hook も挟まない位置 —
+            // 消費者の速さが混ざると、遅い消費者ほど投機を切ることになる）。
+            if (gate !== undefined) {
+              const wall = now() - startedAt;
+              // 混ぜない cycle は観測の代わりに `skip()`（ゲートの呼び出し規約 MUST）— 何も
+              // 返さないと探索の周期が止まり、`W1` の初回サンプルがターンの 2 本目ではなく
+              // 「観測に混ぜる最初の cycle」まで遅れる。
+              if (!measured) gate.skip();
+              else if (gated) gate.observePlain(wall);
+              else gate.observeCycle(wall, confirmed.length);
+            }
             // 次 cycle の drafter 入力 = 新しい frontier b' を出した行 a（写す — 次の run で消える）。
+            // ゲート由来の plain step も verify 形の 1 行なので、ここで hidden が繋がる。
             const nextHidden = copyRow(hiddenRows.row(accepted));
-            tally.cycles += 1;
-            tally.accepted += accepted;
-            tally.acceptedHistogram[accepted] += 1;
-            tally.delivered += confirmed.length;
+            // 勘定に入れるのは投機の cycle だけ（ゲートの plain step は `plainSteps` が数える）。
+            if (!gated) {
+              tally.cycles += 1;
+              tally.accepted += accepted;
+              tally.acceptedHistogram[accepted] += 1;
+              tally.delivered += confirmed.length;
+            }
             // verify の観測は**この同期区間**（配送の yield をまたぐと、貸し手 Session を共有する
             // 別 sequence の run が挟まりうる）。commit は配送の後（frontier まで）。
-            onRun?.({ kind: "verify", cycle, rows: queryLength, accepted });
+            onRun?.(
+              gated
+                ? { kind: "decode", step: plainSteps }
+                : { kind: "verify", cycle, rows: queryLength, accepted },
+            );
             // `confirmed` は配送列そのもの（停止 token より後ろは受理の側で列挙していない）。
             for (let index = 0; index < confirmed.length; index += 1) {
               const id = confirmed[index];

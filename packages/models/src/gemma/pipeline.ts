@@ -293,7 +293,9 @@ export type Gemma4PipelineOptions = {
    * 引く 1 が「run を伴わない最初の抽選」ぶんである）。停止 token を引いた最後の decode run は
    * `token` を yield せずに終わるが、その run のぶんも 1 通届く。消費側の `break` / `return()` /
    * 中断で閉じたターンは、そこまでに完了した run のぶんだけが届く。投機ターンの通知数は
-   * `prefill chunk 数 + speculation.cycles + speculation.draftRuns` である。
+   * `prefill chunk 数 + speculation.cycles + speculation.draftRuns + speculation.plainSteps` で
+   * ある（`plainSteps` = 自己採算ゲートが decode 形で回した step — `speculative: "always"` の
+   * ターンでは欄ごと無い）。
    *
    * NOTE: 他ファミリと違ってコンポーネント名を渡さない — グラフが 1 本しかないので、名前が
    * 常に同じ 1 値になる（受け手が分岐できない引数を渡さない）。drafter が居るときも同じで、
@@ -429,11 +431,20 @@ export type Gemma4SequenceOptions = {
   /**
    * この会話で投機デコードを張るか（既定 = pipeline に drafter が居れば `true`）。
    *
-   * `false` は「drafter は載せたままこの会話だけ従来の 1 token = 1 run で回す」— A/B の突合や、
-   * 受理率が落ちる文脈で投機の取り分が消えたときの逃げ口である。drafter が居ない pipeline では
-   * どちらでも投機は張らない（指定は黙って無視される値ではなく、**元から選択肢が無い**）。
+   * - `true`（既定）… **自己採算ゲート付き**の投機。投機が decode に負けている間は cycle ごとに
+   *   decode 形（M=1）へ落ち、勝てそうなら戻る（`src/generation/speculation-gate.ts`）。
+   * - `"always"` … 常に投機（ゲートを作らない）。A/B の突合・検収の門・計測のための席である。
+   * - `false` … 「drafter は載せたままこの会話だけ従来の 1 token = 1 run で回す」。
+   *
+   * drafter が居ない pipeline では `false` / 未指定でだけ通る（`true` / `"always"` は fail loudly —
+   * 指定は黙って無視される値ではなく、**元から選択肢が無い**）。
+   *
+   * NOTE: ゲートは**壁時計**で切るので、既定席（`stateAttentionReduce: "parallel"`）では同じ
+   * seed でも稀に出力が変わりうる（verify 形 M=4 と decode 形 M=1 で ①QK の縮約順が違い、近い
+   * 値の token では argmax が割れる — `docs/limitations.md`）。厳密な再現性が要るなら
+   * `"always"` か `stateAttentionReduce: "sequential"` を選ぶ。
    */
-  readonly speculative?: boolean;
+  readonly speculative?: boolean | "always";
 };
 
 /** {@link Gemma4Pipeline.estimateSessionMemory} の指定（見積る生成の形）。 */
@@ -495,13 +506,13 @@ export type Gemma4ChatOptions = {
   /** 中断（段の境目で検査し `signal.reason` をそのまま throw する — ADR 0083 決定 5）。 */
   readonly signal?: AbortSignal;
   /**
-   * このターンで投機デコードを張るか（既定 = pipeline に drafter が居れば `true` —
-   * {@link Gemma4SequenceOptions.speculative} と同じ意味）。
+   * このターンで投機デコードを張るか（既定 = pipeline に drafter が居れば `true` = ゲート付き —
+   * 値の意味は {@link Gemma4SequenceOptions.speculative} と同じ）。
    *
    * 投機を張るかは sampler の指定に依らない（温度 > 0 でも token 列は非投機と同一）。この層は
    * 指定をそのまま降ろすだけで、cycle の組み立ては生成面が持つ。
    */
-  readonly speculative?: boolean;
+  readonly speculative?: boolean | "always";
 };
 
 /**
@@ -945,19 +956,23 @@ const assertSpeculative = (
  * {@link Gemma4ChatOptions.speculative} の解決 — chat と sequence が共有する 1 本）。
  *
  * 既定は「drafter が居れば張る」で、`false` だけが明示的な取り消しである。sampler の指定は
- * 見ない（投機は温度に依らず張り、token 列は非投機と同一 — ADR 0096 決定 7）。
+ * 見ない（投機は温度に依らず張り、token 列は非投機と同一 — ADR 0096 決定 7）。`"always"` は
+ * 自己採算ゲートを作らない席（A/B・検収の門・計測）で、生成面の `policy` へそのまま降りる。
  */
 export const speculativeSetup = (
   state: Pick<Gemma4State, "drafter" | "speculativeK">,
-  enabled: boolean | undefined,
+  enabled: boolean | "always" | undefined,
 ): GenerationSpeculativeOptions<GenerationContext> | undefined => {
   const drafter = state.drafter;
   if (enabled === false) return undefined;
   if (drafter === undefined) {
-    // 未指定（undefined）は「drafter が居れば張る」、明示の true は drafter を要求する — 黙って
+    // 未指定（undefined）は「drafter が居れば張る」、明示の指定は drafter を要求する — 黙って
     // 非投機で回すと、結果（`speculation` 欄の不在）からも無視を読み取れない。
-    if (enabled === true) {
-      throw new Error("speculative: true を渡したが、この pipeline は drafter 無しで開かれている");
+    if (enabled !== undefined) {
+      throw new Error(
+        `speculative: ${JSON.stringify(enabled)} を渡したが、この pipeline は drafter 無しで` +
+          `開かれている`,
+      );
     }
     return undefined;
   }
@@ -965,6 +980,7 @@ export const speculativeSetup = (
     // 借り手 context は sequence 生成時に 1 本開き、sequence の dispose が**貸し手より先**に畳む。
     open: (context: GenerationContext): Promise<DraftFace> => openGemma4DraftFace(drafter, context),
     k: state.speculativeK ?? GEMMA4_DRAFT_STEPS,
+    policy: enabled === "always" ? "always" : "auto",
   };
 };
 
@@ -1650,7 +1666,8 @@ export class Gemma4Pipeline {
    *
    * drafter を載せた pipeline では**既定で投機を張る**（{@link Gemma4ChatOptions.speculative} で
    * ターンごとに切れる）。張ったターンは `done` の `speculation` に勘定が載る。配布形の推奨
-   * sampler（温度 1）でも張り、本文は投機なしで回したときと同じ列になる。
+   * sampler（温度 1）でも張り、本文は投機なしで回したときと同じ列になる。既定は自己採算ゲート
+   * 付きなので、投機が負ける文脈では途中から decode 形へ落ちる（`speculation.plainSteps`）。
    *
    * 並行に呼ばれた場合は**待たされて順に**走る（1 つの Session を 2 本の会話で同時に押さない）。
    */
@@ -1791,7 +1808,7 @@ export class Gemma4Pipeline {
    *
    * drafter を載せた pipeline では**既定で投機を張る**（{@link Gemma4SequenceOptions.speculative}
    * で会話ごとに切れる）。借り手 context はこの sequence の寿命に束ねられ、`dispose()` が
-   * 貸し手より先に畳む。
+   * 貸し手より先に畳む。自己採算ゲートの状態も sequence の寿命（ターンを跨いで測り続ける）。
    */
   async sequence(options: Gemma4SequenceOptions = {}): Promise<GenerationSequence> {
     if (this.#disposal !== undefined) {

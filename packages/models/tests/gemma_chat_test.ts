@@ -550,11 +550,13 @@ Deno.test("chat 停止文字列: 停止理由を差し替えても内側の勘�
 
 Deno.test("投機の切替（speculativeSetup）: drafter 無しの pipeline に true を渡すと fail loudly", () => {
   // 未指定は「drafter が居れば張る」なので drafter 無しでは黙って非投機（欄も生えない）。明示の
-  // true は drafter を要求する — 黙って非投機で回すと、結果からも無視を読み取れない。
+  // 指定（`true` / `"always"`）は drafter を要求する — 黙って非投機で回すと、結果からも無視を
+  // 読み取れない。
   const withoutDrafter = { drafter: undefined, speculativeK: undefined };
   assertEquals(speculativeSetup(withoutDrafter, undefined), undefined);
   assertEquals(speculativeSetup(withoutDrafter, false), undefined);
   assertThrows(() => speculativeSetup(withoutDrafter, true), Error, "drafter 無し");
+  assertThrows(() => speculativeSetup(withoutDrafter, "always"), Error, "drafter 無し");
 });
 
 Deno.test("chat prefill: 進捗は onPrefill が受け、本文の列は 1 文字も変わらない", async () => {

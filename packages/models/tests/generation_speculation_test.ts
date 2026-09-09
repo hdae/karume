@@ -15,6 +15,10 @@
 // 参照走行との突合を「同じ fake・同じ後続関数」で採れるのは、fake の logits が
 // {@link FakeOptions.successor}（その行の入力 token → その行の argmax）で決まるからである。
 // 実装が verify の行を取り違えれば、参照走行と違う列が出る。
+//
+// T1〜T15 は**ゲート抜き**（`policy: "always"`）の契約である — 自己採算ゲート（段 4-B ④）が
+// 割り込むと 1 cycle = draft + verify の勘定が崩れ、壁時計にも依存する。ゲートの席は T16 が
+// 偽時計で見る（ゲートそのものの判断は `generation_gate_test.ts`）。
 
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import type { GenerationProgramSpec } from "../src/generation/program.ts";
@@ -36,6 +40,7 @@ import {
   takeDrafts,
   verifyRowIndices,
 } from "../src/generation/speculation.ts";
+import type { SpeculationGateOptions } from "../src/generation/speculation-gate.ts";
 import {
   drain,
   type FakeOptions,
@@ -197,6 +202,23 @@ const openSpeculative = async (options: {
   readonly k?: number;
   readonly program?: Partial<GenerationProgramSpec>;
   readonly session?: FakeOptions;
+  /**
+   * 投機の張り方（既定 `"always"`）。
+   *
+   * このファイルの門は**ゲート抜きの契約**（1 cycle = draft + verify）なので、既定を
+   * `"always"` に倒してある — 自己採算ゲートの席は T16 が偽時計で別に見る。
+   */
+  readonly policy?: "auto" | "always";
+  /**
+   * ゲートのノブ（`policy: "auto"` のときだけ効く）。
+   *
+   * 既定のブロックは 16 cycle × 2 本連続なので、20 token のターンでは**一度も判定が出ない**。
+   * ゲートの配線（落ちた step の勘定・hidden の繋がり・観測に混ぜない cycle）を見る席では
+   * ブロックを縮めて、判定そのものは `generation_gate_test.ts` で見る。
+   */
+  readonly gate?: SpeculationGateOptions;
+  /** 偽時計（`policy: "auto"` のときだけ読まれる）。 */
+  readonly now?: () => number;
 }) => {
   const fake = fakeSession({ successor: SUCCESSOR, ...options.session });
   options.drafter.watch(fake);
@@ -204,7 +226,13 @@ const openSpeculative = async (options: {
   const sequence = await createGenerationSequence({
     session: fake.session,
     program: specProgram(fake, options.program),
-    speculative: { open: () => Promise.resolve(options.drafter.face), k: options.k },
+    speculative: {
+      open: () => Promise.resolve(options.drafter.face),
+      k: options.k,
+      policy: options.policy ?? "always",
+      ...(options.gate === undefined ? {} : { gate: options.gate }),
+      ...(options.now === undefined ? {} : { now: options.now }),
+    },
     onRun: (phase) => {
       phases.push(phase);
     },
@@ -218,6 +246,9 @@ const runSpeculative = async (options: {
   readonly k?: number;
   readonly program?: Partial<GenerationProgramSpec>;
   readonly session?: FakeOptions;
+  readonly policy?: "auto" | "always";
+  readonly gate?: SpeculationGateOptions;
+  readonly now?: () => number;
 }) => {
   const opened = await openSpeculative(options);
   const drained = await drain(opened.sequence.generate(options.request));
@@ -402,6 +433,38 @@ Deno.test("T3′ 温度 > 0: 抽選が走るターンでも投機を張り、列
         tokenIds(sampled.events).join(",")
       }`,
     );
+  });
+
+  await t.step("自己採算ゲートが落とす plain step を挟んでも列は同じ", async () => {
+    // 温度 > 0 とゲートの積（負ける壁を偽時計で流す）。ゲートが落とす decode 形の step も、
+    // 抽選は「非投機の decode が同じ位置で行う抽選」そのもの（同じ logits・同じ history・
+    // 同じ順で 1 回）なので、RNG の消費列は投機 cycle と plain step が混ざっても並んだままである。
+    const drafter = oracleDrafter();
+    const opened = await openSpeculative({
+      drafter,
+      policy: "auto",
+      gate: FAST_GATE,
+      session: TWO_WAY,
+      now: fakeClock(drafter, (_cycle, drafted) => drafted ? 100 : 10),
+    });
+    // ブロック（2 cycle）が満ちるまで回す必要があるので、この step だけ予算を伸ばす。
+    const budgeted: GenerationRequest = { ...request(TWO_WAY_SEED), maxNewTokens: 24 };
+    const gated = { ...opened, ...await drain(opened.sequence.generate(budgeted)) };
+    // ゲートが本当に**倒れている**（`W1` の測り直し 1 手だけを見て「落ちた」と読まない）。
+    assertEquals(
+      gated.stop.speculation?.switches,
+      1,
+      `ゲートが plain へ倒れていない: ${JSON.stringify(gated.stop.speculation)}`,
+    );
+    await assertMatchesPlain(budgeted, gated, {}, TWO_WAY);
+
+    // `always`（ゲート無し）とも一致する = ゲートは速さだけを変えている。
+    const always = await runSpeculative({
+      drafter: oracleDrafter(),
+      request: budgeted,
+      session: TWO_WAY,
+    });
+    assertEquals(tokenIds(gated.events), tokenIds(always.events), "ゲート付きと always の列が違う");
   });
 
   await t.step("seed が違えば列も違う（RNG 状態が生成 1 本に張り付いている）", async () => {
@@ -777,7 +840,11 @@ Deno.test("T8 門: 投機の指定は sequence 生成時に落ち、開いた面
         createGenerationSequence({
           session: fake.session,
           program: specProgram(fake, options.program),
-          speculative: { open: () => Promise.resolve(drafter.face), k: options.k },
+          speculative: {
+            open: () => Promise.resolve(drafter.face),
+            k: options.k,
+            policy: "always",
+          },
         }),
       Error,
       message,
@@ -844,7 +911,7 @@ Deno.test("T8 門: 投機の指定は sequence 生成時に落ち、開いた面
       await createGenerationSequence({
         session: fake.session,
         program: specProgram(fake),
-        speculative: { open: () => Promise.reject(reason) },
+        speculative: { open: () => Promise.reject(reason), policy: "always" },
       });
     } catch (error) {
       caught = error;
@@ -869,6 +936,7 @@ Deno.test("T8 門: open は context 確保の直後に、貸し手 context そ�
         assertEquals(fake.calls.length, 0);
         return Promise.resolve(drafter.face);
       },
+      policy: "always",
     },
   });
   assertEquals(seen.length, 1);
@@ -881,7 +949,7 @@ Deno.test("T8 門: open は context 確保の直後に、貸し手 context そ�
   const disposable = await createGenerationSequence({
     session: logged.session,
     program: specProgram(logged),
-    speculative: { open: () => Promise.resolve(loggedDrafter.face) },
+    speculative: { open: () => Promise.resolve(loggedDrafter.face), policy: "always" },
   });
   await disposable.dispose();
   assertEquals(disposeLog, ["drafter", "context"]);
@@ -978,7 +1046,7 @@ Deno.test("T9 onRun: hook を渡さない sequence も同じ列を出す（観�
   const sequence = await createGenerationSequence({
     session: fake.session,
     program: specProgram(fake),
-    speculative: { open: () => Promise.resolve(drafter.face) },
+    speculative: { open: () => Promise.resolve(drafter.face), policy: "always" },
   });
   const request: GenerationRequest = { prompt: PROMPT, maxNewTokens: 9 };
   const run = await drain(sequence.generate(request));
@@ -1304,6 +1372,205 @@ Deno.test("T15 抽選の失敗: run が通った後に抽選が落ちても、�
   const next = await drain(opened.sequence.generate({ prompt: [4], maxNewTokens: 1 }));
   assertEquals(tokenIds(next.events), [SUCCESSOR[4]]);
   assertEquals(placedRows(opened.fake), [[0, 1], [1, 2], [2, 6], [3, 4]]);
+});
+
+// ---- T16: 自己採算ゲート（`policy: "auto"`・偽時計）-------------------------------
+
+/**
+ * 偽時計（生成面は 1 cycle につき 2 回 — cycle の先頭と受理判定の直後 — 読む）。
+ *
+ * 壁は cycle の番号と「その cycle が draft を採ったか」で決める。draft を採らない cycle は
+ * ゲート由来の plain step か予算末尾の強制 plain なので、決定列を先に知らなくても
+ * 「投機は遅い / plain は速い」壁を流せる。
+ */
+const fakeClock = (
+  drafter: FakeDrafter,
+  wallOf: (cycle: number, drafted: boolean) => number,
+): () => number => {
+  let elapsed = 0;
+  let cycle = 0;
+  let head = true;
+  let draftsAtHead = 0;
+  return (): number => {
+    if (head) {
+      draftsAtHead = drafter.calls.length;
+      head = false;
+      return elapsed;
+    }
+    head = true;
+    elapsed += wallOf(cycle, drafter.calls.length > draftsAtHead);
+    cycle += 1;
+    return elapsed;
+  };
+};
+
+/**
+ * ゲートを 2 ブロックぶん待たずに倒すノブ（既定は 16 cycle × 2 本連続）。
+ *
+ * ここで見るのは**配線**（落ちた step の勘定・hidden の繋がり・観測に混ぜない cycle）で、
+ * 「何 cycle 測ってから倒すか」の判断そのものは `generation_gate_test.ts` が持つ。
+ */
+const FAST_GATE: SpeculationGateOptions = { window: 2, confirm: 1 };
+
+Deno.test("T16 ゲート: 投機が負ける壁では decode 形へ落ち、それでも列は非投機と同一", async () => {
+  // 投機 cycle 100ms で 4 個確定（25ms/token）・plain step 10ms/token = 投機が 2.5 倍遅い壁。
+  const drafter = oracleDrafter();
+  const request: GenerationRequest = { prompt: PROMPT, maxNewTokens: 20 };
+  const opened = await openSpeculative({
+    drafter,
+    policy: "auto",
+    gate: FAST_GATE,
+    now: fakeClock(drafter, (_cycle, drafted) => drafted ? 100 : 10),
+  });
+  const run = { ...opened, ...await drain(opened.sequence.generate(request)) };
+
+  // 契約の芯は変わらない（ゲートは速さだけを変え、出力は変えない）。
+  await assertMatchesPlain(request, run);
+  const always = await runSpeculative({ drafter: oracleDrafter(), request });
+  assertEquals(tokenIds(run.events), tokenIds(always.events), "ゲート付きと always の列が違う");
+
+  // 落ちた step は投機の勘定に入らず、`plainSteps` が数える（cycle 番号も消費しない）。
+  // 予算末尾の強制 plain（`k' = 0`）は従来どおり verify として数える = `cycles` は 4 で、
+  // その 1 本が `acceptedHistogram[0]` に入る。
+  assertEquals(run.stop.speculation, {
+    cycles: 4,
+    draftRuns: 3,
+    drafted: 9,
+    accepted: 9,
+    delivered: 13,
+    acceptedHistogram: [1, 0, 0, 3],
+    plainSteps: 6,
+    switches: 1,
+  });
+  // 配送は 4 →（`W1` の初回サンプル）1 → 4 → 4（ここでブロック 2 本目が満ちて倒れる）→
+  // plain 5 本 → 予算末尾の 1（= 20 token）。2 本目が plain なのは「`W1` の初回サンプルは
+  // 2 回目の決定」だからで、ゲートが倒れるのは 2 本目の投機 cycle を**観測した**時である。
+  assertEquals(run.fake.commits, [4, 1, 4, 4, 1, 1, 1, 1, 1, 1]);
+  // ゲートの plain step は `decode` を名乗る（公開型に枝を足さない）。番号は 1 始まりの通し。
+  assertEquals(
+    run.phases.filter((phase) => phase.kind === "decode"),
+    Array.from({ length: 6 }, (_unused, index) => ({ kind: "decode", step: index + 1 })),
+  );
+  // verify の cycle 番号は 1..4（plain step が番号を飛ばさない）。
+  assertEquals(
+    run.phases.filter((phase) => phase.kind === "verify").map((phase) => phase.cycle),
+    [1, 2, 3, 4],
+  );
+});
+
+Deno.test("T16 ゲート: plain step を挟んでも drafter 入力（hidden と frontier）が繋がる", async () => {
+  // ゲートの plain step は verify 形の 1 行（deferred）なので `hidden` が読める。非投機の decode
+  // 経路（logits しか読まない）へ分岐すると、戻った cycle の draft が古い hidden を食う。
+  // 1 ターン（20 token）の中で「倒れる → plain 2 本 → 探索」まで回すため、バーストは 1 cycle・
+  // plain 側の間隔は 2 step に縮める（バーストを何 cycle 測るかは generation_gate_test.ts）。
+  const drafter = oracleDrafter();
+  const opened = await openSpeculative({
+    drafter,
+    policy: "auto",
+    gate: { ...FAST_GATE, burst: 1, exploreBase: 2 },
+    now: fakeClock(drafter, (_cycle, drafted) => drafted ? 100 : 10),
+  });
+  await drain(opened.sequence.generate({ prompt: PROMPT, maxNewTokens: 20 }));
+
+  // 最後の draft は plain 側の探索バーストのもので、その直前は plain step が 2 本続いている
+  // （run 添字 6 と 7 — 添字 0 は prefill）。受け取るのは run 7 の行 0 の hidden と、run 7 が
+  // 配送した frontier（run 7 の入力 token 3 → `SUCCESSOR[3]` = 13）である。
+  const last = opened.drafter.calls[opened.drafter.calls.length - 1];
+  assertEquals(opened.drafter.calls.length, 4);
+  assertEquals(last, { token: SUCCESSOR[3], position: 18, hidden: [hiddenMark(7, 0), 3, 0, 0] });
+});
+
+Deno.test("T16 ゲート: ターン最初の cycle と予算末尾の強制 plain は観測に混ぜない", async (t) => {
+  // 最初の cycle は PLE gather の cold miss を含み、強制 plain は呼び手の予算で形が決まる —
+  // どちらも「投機が遅い」証拠にならない。故障注入で確かめる: その 2 種類にだけ 10,000ms を
+  // 置き、ゲートが 1 度も倒れないこと（混ぜる実装は即座に plain へ落ちる）。
+  const turn1: GenerationRequest = { prompt: PROMPT, maxNewTokens: 6 };
+  const turn2: GenerationRequest = { prompt: [4], maxNewTokens: 20 };
+  /** ターン 1 は cycle 2 本（最初の cycle + 予算末尾の強制 plain）・ターン 2 の頭が 3 本目。 */
+  const excluded = 3;
+  /** ターン 2 で最初に**観測に入る投機 cycle**（頭の 2 本は `W1` を採る plain step）。 */
+  const firstMeasuredCycle = 4;
+
+  const play = async (slow: (cycle: number) => boolean) => {
+    const drafter = oracleDrafter();
+    const opened = await openSpeculative({
+      drafter,
+      policy: "auto",
+      gate: FAST_GATE,
+      now: fakeClock(
+        drafter,
+        (cycle, drafted) => slow(cycle) ? 10_000 : (drafted ? 20 : 10),
+      ),
+    });
+    await drain(opened.sequence.generate(turn1));
+    const second = await drain(opened.sequence.generate(turn2));
+    return second.stop.speculation;
+  };
+
+  await t.step("混ぜない: 2 ターン目も投機のまま（倒れない）", async () => {
+    // ターン 2 の頭 2 本が plain なのは `W1` がまだ未観測だからである（1 本目は混ぜない cycle
+    // なので観測を返さず、2 本目でようやく `W1` を採る）。その後は 8 本ごとの探索が 1 本。
+    assertEquals(await play((cycle) => cycle < excluded), {
+      cycles: 4,
+      draftRuns: 4,
+      drafted: 12,
+      accepted: 12,
+      delivered: 16,
+      acceptedHistogram: [0, 0, 0, 4],
+      plainSteps: 3,
+      switches: 0,
+    });
+  });
+
+  await t.step("対（同じ壁を観測に入る投機 cycle へ置くと落ちる）", async () => {
+    // 10,000ms を 1 本だけ、ターン 2 で最初に観測に入る**投機**の cycle へ置くと、ゲートは
+    // その観測の直後に plain へ倒れる。上の緑が「そもそも倒れない設定」ではないことの対。
+    // plain step（`W1` を採る cycle）へ置いてはいけない — `W1` が 10,000ms になると比が小さく
+    // なり、投機が有利に見えて倒れない = 対にならない。
+    const speculation = await play((cycle) => cycle === firstMeasuredCycle);
+    assertEquals(speculation?.switches, 1, "観測に入る遅い cycle でも倒れない");
+    assert(
+      (speculation?.plainSteps ?? 0) > 3,
+      `倒れた後も plain へ落ちていない: ${JSON.stringify(speculation)}`,
+    );
+  });
+
+  await t.step("skip した cycle はブロックに入らないが、探索の周期は進む", async () => {
+    // 混ぜない cycle でも GPU の仕事は 1 本走っているので、探索の周期はそのぶん進める
+    // （ゲートの `skip()`）。1 ターンで見ると: 頭の cycle は観測に入らないまま周期を 1 進め、
+    // `W1` の初回サンプル（plain 1 手）は**2 本目**に来て、以後の探索は 8 本ごとである。
+    // 周期が止まる実装だと、この 2 つがどちらも 1 本ずつ後ろへずれる。
+    const drafter = oracleDrafter();
+    const opened = await openSpeculative({
+      drafter,
+      policy: "auto",
+      // ブロックが 2 cycle なので、頭の 10,000ms が 1 本でも混ざれば最初のブロックで倒れる。
+      gate: FAST_GATE,
+      now: fakeClock(drafter, (cycle, drafted) => cycle === 0 ? 10_000 : (drafted ? 20 : 10)),
+    });
+    const run = {
+      ...opened,
+      ...await drain(opened.sequence.generate({ prompt: PROMPT, maxNewTokens: 30 })),
+    };
+    assertEquals(
+      run.phases.flatMap((phase) =>
+        phase.kind === "verify" || phase.kind === "decode" ? [phase.kind] : []
+      ),
+      [
+        "verify",
+        "decode",
+        "verify",
+        "verify",
+        "verify",
+        "verify",
+        "verify",
+        "decode",
+        "verify",
+      ],
+      "探索の周期が混ぜない cycle のぶん進んでいない",
+    );
+    assertEquals(run.stop.speculation?.switches, 0, "混ぜない cycle の壁がブロックに入っている");
+  });
 });
 
 // ---- 純関数（`src/generation/speculation.ts`）------------------------------------

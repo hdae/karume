@@ -143,7 +143,7 @@ type FakeHost = Gemma4ChatSessionHost & {
    * `undefined` は**欄ごと渡っていない**ことを表す（`speculative: undefined` を渡す形は
    * pipeline 側の既定「drafter が居れば張る」を潰すので、値としては同じでも別物である）。
    */
-  speculatives(): readonly (boolean | undefined)[];
+  speculatives(): readonly (boolean | "always" | undefined)[];
   /** `sequence()` が受けた指定に `speculative` の欄があったかを発行順に。 */
   speculativeKeys(): readonly boolean[];
   /** `generate` が受けた sampler 指定を発行順に（解決順 3 段の観測点）。 */
@@ -182,7 +182,7 @@ const fakeHost = (
 ): FakeHost => {
   const prompts: number[][] = [];
   const capacities: (number | undefined)[] = [];
-  const speculatives: (boolean | undefined)[] = [];
+  const speculatives: (boolean | "always" | undefined)[] = [];
   const speculativeKeys: boolean[] = [];
   const samplers: (SamplerSpec | undefined)[] = [];
   let created = 0;
@@ -572,8 +572,9 @@ Deno.test("ChatSession speculative: 指定はそのまま sequence へ降り、�
     assertEquals(host.speculatives(), [undefined]);
   });
 
-  await t.step("true / false はそのまま降りる", async () => {
-    for (const speculative of [true, false]) {
+  await t.step('true / false / "always" はそのまま降りる', async () => {
+    // `"always"` は自己採算ゲート抜きの席（段 4-B ④）— この層はどれも解釈せず素通しする。
+    for (const speculative of [true, false, "always"] as const) {
       const host = fakeHost([...script], programOf(640));
       const session = new Gemma4ChatSession(host, {
         maxNewTokens: MAX_NEW_TOKENS,
