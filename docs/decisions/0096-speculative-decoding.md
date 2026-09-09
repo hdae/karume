@@ -243,7 +243,7 @@ lm_head + argmax（centroid 疎 softmax の topk は exporter に無い — 受�
   ホストが読んで PLE を gather しないと verify の入力が組めず、受理判定もホストで行う。Deno では
   draft の壁 15 ms のうち ≈9.5 ms が round trip の床（ブラウザでは消える見込み）。
 - **段 4-B の裁定（2026-09-09）**: ⑤ ①′ / ③′ の行タイル化は**縮小** — ③′ は既に M=4 で効いており
-  M=1 限定は ①QK の適用条件だけ（効き代は M2 で最大 −4 ms/cycle・実験として残す）。⑧ M2 の小 M
+  M=1 限定は ①QK の適用条件だけ。RTX の実測（M=4・P≈4.8K）は中立（①QK full 3.32 → 3.87 / sliding 1.87 → 1.09 ms・壁 −2%）で、**適用条件を M ≤ 8 に広げた**（既定席で verify の行 0 と decode が同じ縮約順 = u32 一致 — ゲートの切替点が行 0 の logits を動かさない）。M2 での効き代は未実測。⑧ M2 の小 M
   linear は行ブロックの並列度目標（静的ノブ `linearGemvRowsThreadTarget`）を振っても既定 r1 が最良で
   「重み 4 回読み」仮説は外れ（perf-ledger K-22）。⑦ GPU 側の argmax / topk 出口は不採用（ホスト +
   readback は cycle の 2〜5%）。残りは ③ argmax の 2 相化 → ⑥ k=7 drafter + 3 値ゲート。

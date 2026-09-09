@@ -90,7 +90,7 @@
   単体 ×5.0・decode GPU −21〜24% — [research](../docs/research/2026-09-06-gemv-i8-k16.md)・ADR 0082 追記 4）。
   **K-14（①QK の D 並列縮約 ①′）も済**（`cce129d` + M=1 門 `4182b8b` — decode 壁 P=16K −9〜15%・prefill は
   逆行するため ① のまま — [research](../docs/research/2026-09-06-state-qk-parallel-k14.md)）。席は K-12 と同じ
-  `stateAttentionReduce` 1 つで、①′ は M=1 の計画だけ。**K-13 も済**（`ad8a4b9` ①ₜ + `39d5e4e` ③ₜ — prefill 計画
+  `stateAttentionReduce` 1 つで、①′ は M ≤ 8 の計画（decode + 投機の verify・2026-09-09 に広げた — RTX で中立・既定席で verify 行 0 が decode と u32 一致）。**K-13 も済**（`ad8a4b9` ①ₜ + `39d5e4e` ③ₜ — prefill 計画
   M ≥ 16 は GEMM 骨格のタイル経路で ①/③ とビット同一・P=16K の prefill 壁 −64% —
   [research](../docs/research/2026-09-06-state-attention-tiled-k13.md)）。幾何表 = M=1 → ①′ / ③′（席）・M ≥ 16 → ①ₜ / ③ₜ
   （既定）。**次は未起票**（候補: prefill の linear 72%・decode の linear_gemv 57%〈split-K は席が要る〉・anima の

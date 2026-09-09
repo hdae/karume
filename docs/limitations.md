@@ -1308,7 +1308,7 @@ VRAM は容量に比例して伸びる（full 層 KV
   宣言値で採る。
 - **`capacity` は token 列に効かない**（仕事量は論理長で切られ、値は容量非依存 — ビット門あり）。
 - **decode の attention は `Gemma4Pipeline` では並列縮約（③PV の KV 並列 = perf-ledger K-12〈M < 16 の計画〉・
-  ①QK の D 並列 = K-14〈M=1 の計画だけ〉）が既定**。prefill 計画（M ≥ 16）は席に依らず GEMM 骨格のタイル経路
+  ①QK の D 並列 = K-14〈M ≤ 8 の計画 — decode と投機の verify・2026-09-09 に M=1 から広げた〉）が既定**。prefill 計画（M ≥ 16）は席に依らず GEMM 骨格のタイル経路
   ①ₜ / ③ₜ（K-13・参照経路とビット同一 — [research 2026-09-06](research/2026-09-06-state-attention-tiled-k13.md)）（`GEMMA4_STATE_ATTENTION_REDUCE = "parallel"`）。①′ の帯は ① との差
   3.58e-7 / f64 参照との差 4.17e-7（帯 5e-6・[research 2026-09-06](research/2026-09-06-state-qk-parallel-k14.md)）。
   ③′ について:runtime の参照経路 `"sequential"` とは縮約順が
