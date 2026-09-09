@@ -268,12 +268,17 @@ export const stateQkParallelKey = (sliding: boolean, gqa: boolean): string =>
  * workgroup と barrier を積むだけになる（1 workgroup = 1 行なので K 行の行間再利用も失う）。
  * 実測（2026-09-06）でも decode は 6.3 → 3.7〜4.1 ms/token（×1.55〜1.72）で効いた一方、
  * prefill の ①QK は GPU 時間が 1.5〜1.9 倍に伸び、prefill 全体で +30〜60% 逆行した。
+ * 投機の verify（M = k+1 ≤ 8・MTP 段 4-B ⑤・2026-09-09 の実測 — research 2026-09-09 §6.2）では
+ * 中立だった: RTX・P≈4.8K・M=4 で ①QK full 3.32 → 3.87 ms・sliding 1.87 → 1.09 ms（合計 −0.2 ms）・
+ * 壁 −2%（誤差内）。中立でも広げるのは、既定席（parallel）で verify の行 0 と decode が**同じ
+ * 縮約順**になり（u32 一致）、投機の on/off がどこで切り替わっても行 0 の logits が動かないため。
  * MUST: 条件は**実測した範囲に留める**（ADR 0082 決定 4 と同じ規律 — 「M が小さければ得だろう」
- * の外挿で `M <= 4` などに広げない。効くと測ったのは M=1 だけ）。③'（PV）はこの門を持たない
+ * の外挿で広げない。測ったのは M=1（効く）と M=4（中立）で、`M <= 8` は verify のバケット
+ * 上限 = sliding 余裕 8 に合わせた範囲。M ≥ 9 は未実測なので ① のまま）。③'（PV）はこの門を持たない
  * ことが対称でないように見えるが、③' は prefill でも逆行しないことを 2026-09-03 の実測で
  * 確かめてある（縮約するのが KV 長方向で、prefill でも 1 スレッドの逐次長が伸びるため）。
  */
-export const stateQkParallelEligible = (chunkRows: number): boolean => chunkRows === 1;
+export const stateQkParallelEligible = (chunkRows: number): boolean => chunkRows <= 8;
 
 /**
  * ①ₜ のキー（GEMM 骨格のタイル経路 — perf-ledger K-13）。幾何の綴りは gemm 側と同じ断片

@@ -771,9 +771,9 @@ Deno.test({
  *
  * MUST: 2 段を**両方**見る（席は 1 つで 2 段を一緒に切り替えるので、片方だけの検査だと
  * 「①' が結線から落ちて ① が走っている」が素通りする — 値は帯の内側なので数値門も鳴らない）。
- * MUST: **①' だけは席に適用条件が掛かる**ので、`M = 1`（decode 計画）と `M > 1`（prefill 計画）
- * の**両方**を表に持つ。期待は「M=1 の計画では ①' + ③'・M>1 の計画では ① + ③'」の対で、
- * ③' は M に依らない（適用条件と実測は src/kernels/state-attention.ts の
+ * MUST: **①' だけは席に適用条件が掛かる**（`M ≤ 8` = decode と投機の verify）。この表は M=1 / M=2 で
+ * 「①' + ③'」を見て、適用外（M=9 → ① + ③'）は下の 3 経路の census が持つ（この模型の full スロットは
+ * 容量 8 で M=9 を載せられない）。③' は M に依らない（適用条件と実測は src/kernels/state-attention.ts の
  * `stateQkParallelEligible`）。門を条件式から独立させるため、期待は行ごとに `qkParallel` の
  * 真偽で直書きする（判定を輸入すると実装と一緒に間違える）。
  */
@@ -787,16 +787,20 @@ Deno.test({
       for (
         const [label, model, sliding, reduce, chunkRows, qkParallel, pvParallel] of [
           ["full r=2 parallel decode M=1", GQA, false, "parallel", 1, true, true],
-          ["full r=2 parallel prefill M=2", GQA, false, "parallel", 2, false, true],
+          // M=2（投機の verify 相当・M ≤ 8）は ①' も ③' も上がる
+          ["full r=2 parallel verify M=2", GQA, false, "parallel", 2, true, true],
           ["sliding r=1 parallel decode M=1", SLIDING, true, "parallel", 1, true, true],
-          ["sliding r=1 parallel prefill M=2", SLIDING, true, "parallel", 2, false, true],
+          ["sliding r=1 parallel verify M=2", SLIDING, true, "parallel", 2, true, true],
           // 席が既定なら M=1 でも上がらない（適用条件だけを見て席を無視する実装を落とす）
           ["full r=2 sequential decode M=1", GQA, false, "sequential", 1, false, false],
           ["full r=2 sequential prefill M=2", GQA, false, "sequential", 2, false, false],
         ] as const
       ) {
         const session = await stateSession(gpu, model, { stateAttentionReduce: reduce });
-        const context = await session.createGenerationContext({ chunkLength: 2 });
+        // chunkLength は行の M そのもの（M=1 の decode 形も M=9 の prefill 形も同じ context 契約の内側）。
+        const context = await session.createGenerationContext({
+          chunkLength: Math.max(chunkRows, 2),
+        });
         try {
           await runStep(
             session,
@@ -859,8 +863,8 @@ const TILED_SLIDING: StateModel = { heads: 2, kvHeads: 2, depth: 4, capacity: 16
  * ①ₜ / ③ₜ（K / V の行タイル共有）は **① / ③ とビット同一**なので**席に依らない既定経路**で、
  * `M ≥ 16` の計画だけが選ぶ（適用条件は src/kernels/state-attention.ts の
  * `stateQkTiledEligible` / `statePvTiledEligible`）。したがって期待は「M ≥ 16 → タイル経路
- * （席が `"parallel"` でも変わらない）・M < 16 → 席どおり」。**①' だけは席の中でさらに M=1 に
- * 限られる**ので、`M = 2` の parallel は「①QK は逐次・③PV は ③'」という**段で違う**行になる。
+ * （席が `"parallel"` でも変わらない）・M < 16 → 席どおり」。**①' だけは席の中でさらに M ≤ 8 に
+ * 限られる**ので、`M = 9` の parallel は「①QK は逐次・③PV は ③'」という**段で違う**行になる。
  *
  * MUST: 3 経路を**全て**見る（期待した 1 本が出ていることと、残り 2 本が 1 本も出ていないことの
  * 両方）。片側だけだと「タイル経路が結線から落ちて参照経路が走っている」が素通りする —
@@ -880,9 +884,11 @@ Deno.test({
           // 席はタイル経路を動かさない（ビット同一なので既定経路 — 席で切り替える対象ではない）
           ["full r=2 parallel prefill M=16", TILED, false, "parallel", 16, "tiled", "tiled"],
           ["sliding r=1 prefill M=16", TILED_SLIDING, true, "sequential", 16, "tiled", "tiled"],
-          // M=2 はどちらのタイル経路も適用外。①' は M=1 限定なので ①QK は逐次のまま、
+          // M=2 はどちらのタイル経路も適用外で ①'（M ≤ 8）も ③' も席どおり上がる
+          ["full r=2 parallel M=2", TILED, false, "parallel", 2, "parallel", "parallel"],
+          // M=9 は ①' の適用外（M ≤ 8 の外・タイル経路の手前）なので ①QK は逐次のまま、
           // ③PV だけが席どおり ③' へ上がる（段で適用範囲が違うことの直接の観測点）
-          ["full r=2 parallel M=2", TILED, false, "parallel", 2, "sequential", "parallel"],
+          ["full r=2 parallel M=9", TILED, false, "parallel", 9, "sequential", "parallel"],
           // M=1 も適用外。席どおりに 2 段とも分かれる
           ["full r=2 decode M=1", TILED, false, "sequential", 1, "sequential", "sequential"],
           ["full r=2 parallel decode M=1", TILED, false, "parallel", 1, "parallel", "parallel"],

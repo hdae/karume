@@ -615,13 +615,17 @@ Deno.test("①' の dispatch 幾何は ① と同じ 2 軸（列 = live・行 = 
   );
 });
 
-Deno.test("①' の適用条件は M（chunkRows）=== 1 だけ — 近傍の M へ外挿しない", () => {
-  // decode 計画（M=1）だけが適格。ここが唯一の適用条件で、席の判定は runtime 側が AND する
-  assertEquals(stateQkParallelEligible(1), true);
-  // MUST: 「M が小さければ得だろう」の外挿を拒む。実測（2026-09-06）で効いたのは M=1 だけで、
-  // prefill 幅（M=768）では ①QK の GPU 時間が 1.5〜1.9 倍に伸びた。`M <= 4` などへ緩めると
-  // prefill が逆行するが、値は帯の内側なので数値門も census 門の decode 側も鳴らない
-  for (const chunkRows of [2, 3, 4, 8, 768]) {
+Deno.test("①' の適用条件は M（chunkRows）≤ 8 — 実測した範囲の外へ外挿しない", () => {
+  // decode 計画（M=1）と投機の verify 計画（M = k+1 ≤ 8）が適格。ここが唯一の適用条件で、
+  // 席の判定は runtime 側が AND する。M=1 は効く（2026-09-06）・M=4 は中立（2026-09-09・
+  // 既定席で verify の行 0 と decode の縮約順が揃う）と測ってあり、8 は verify のバケット上限
+  for (const chunkRows of [1, 2, 3, 4, 8]) {
+    assertEquals(stateQkParallelEligible(chunkRows), true, `M=${chunkRows} は ①'`);
+  }
+  // MUST: 「M が小さければ得だろう」の外挿を拒む。prefill 幅（M=768）では ①QK の GPU 時間が
+  // 1.5〜1.9 倍に伸びた（2026-09-06）。M ≥ 9 は未実測なので ① のまま — 緩めても値は帯の内側で
+  // 数値門も census 門の decode 側も鳴らない
+  for (const chunkRows of [9, 16, 768]) {
     assertEquals(stateQkParallelEligible(chunkRows), false, `M=${chunkRows} は ① のまま`);
   }
 });

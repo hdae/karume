@@ -911,8 +911,8 @@ type SessionState = {
   readonly attentionScoreStorage: ScoreStorage;
   /**
    * states 形 attention ①QK / ③PV の縮約形（opt-in —
-   * {@link SessionOptions.stateAttentionReduce}）。`"parallel"` でも **①' が選ばれるのは M=1 の
-   * 計画だけ**（prefill 計画は ① のまま）で、**③' が選ばれるのは M < 16 の計画だけ**
+   * {@link SessionOptions.stateAttentionReduce}）。`"parallel"` でも **①' が選ばれるのは M ≤ 8 の
+   * 計画だけ**（decode と投機の verify — prefill 計画は ① のまま）で、**③' が選ばれるのは M < 16 の計画だけ**
    * （M ≥ 16 は席に依らず ③ₜ = ③ とビット同一のタイル経路 — 席は 1 つ）。
    */
   readonly stateAttentionReduce: StateAttentionReduce;
