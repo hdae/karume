@@ -11,13 +11,15 @@
  *
  * ## 何をどう測るか
  *
- * **同じプロセス・同じ pipeline・同じ prompt** で「非投機（plain）」と「投機（speculative）」を
- * 交互に回す。別プロセスで測ると、ドライバの clock 状態・PLE の常駐・WGSL の解析結果まで違う
- * 2 つの走行を比べることになり、差が投機のぶんなのか環境のぶんなのか分けられない。
+ * **同じプロセス・同じ pipeline・同じ prompt** で 3 つの構成を交互に回す — `plain`（非投機）/
+ * `always`（常に投機）/ `auto`（自己採算ゲート付き = 既定の席）。別プロセスで測ると、ドライバの
+ * clock 状態・PLE の常駐・WGSL の解析結果まで違う走行を比べることになり、差が投機のぶんなのか
+ * 環境のぶんなのか分けられない。
  *
- * - **暖機 2 本**（各モード 1 本）— 立ち上げ（WGSL の解析・params の生成）を要約から外す。記録には
+ * - **暖機 3 本**（各モード 1 本）— 立ち上げ（WGSL の解析・params の生成）を要約から外す。記録には
  *   残す（立ち上げの費用も後から読めるように）
- * - **ABBA × `rounds`** — plain / spec / spec / plain。順序効果（後のほうが速い / 遅い）を打ち消す
+ * - **ローテーション × `rounds`** — P S S P P A A P（S = always・A = auto）。順序効果（後のほうが
+ *   速い / 遅い）を打ち消し、2 つの投機モードを同じ本数の plain で挟む
  * - **中央値** — 1 ターンの跳ね（PLE shard の読み直し・clock 変化）に引きずられない
  *
  * カーネルも生成ループも 1 行も変更しない。run 1 本の壁は `Session.prototype.run` を**この台本が**
@@ -29,7 +31,9 @@
  * - `--gpu-timing` を付けた走行の**壁は速度の数値として読めない**（計測が有効な device は
  *   1 dispatch = 1 pass に開く）。op 別の内訳だけを読み、倍率は付けない走行から採る。
  * - 投機は速度だけのノブなので、token 列は plain と一致するのが正しい（`summary.identity`）。
- *   食い違ったら倍率より先にそこを見る。
+ *   食い違ったら倍率より先にそこを見る。ただし `auto` の `identicalAuto` だけは**不変条件では
+ *   ない** — ゲートは壁時計で切るので、既定席の縮約順の違いで近い値の token の argmax が割れうる
+ *   （`docs/limitations.md`）。`identical`（plain と always）が落ちたら本物の破れである。
  */
 
 import { gemma4ChatPrompt, Gemma4Pipeline } from "../../packages/models/gemma.ts";
@@ -56,6 +60,7 @@ import {
   type WorkloadName,
 } from "./workloads.ts";
 import {
+  type BenchMode,
   RUN_KINDS,
   type RunKind,
   summarizeTurns,
@@ -350,6 +355,13 @@ const emptyTimingTallies = (): { readonly [K in RunKind]: TimingTally } => {
 
 const secondsOf = (ms: number): string => (ms / 1000).toFixed(1);
 
+/** 進捗行のモード 1 文字（P = plain・S = always〈常時投機〉・A = auto〈ゲート付き〉）。 */
+const MODE_LABEL: { readonly [M in BenchMode]: string } = { plain: "P", always: "S", auto: "A" };
+
+/** そのモードで `Gemma4SequenceOptions.speculative` に渡す値（3 値の対応はここ 1 箇所）。 */
+const speculativeOf = (mode: BenchMode): boolean | "always" =>
+  mode === "plain" ? false : mode === "always" ? "always" : true;
+
 /**
  * 台本の本体。
  *
@@ -479,10 +491,16 @@ const main = async (): Promise<void> => {
       ` / sampler ${samplerName} ${JSON.stringify(sampler)}\n`,
   );
 
-  /** 1 ターン = sequence 1 本（KV は使い回さない — plain と投機で同じ prompt を同じ位置から流す）。 */
+  /**
+   * 1 ターン = sequence 1 本（KV は使い回さない — 3 モードが同じ prompt を同じ位置から流す）。
+   *
+   * `auto` のゲートは sequence と同じ寿命なので、この形では**毎ターン初期状態から**始まる（移動
+   * 平均も探索の周期も持ち越さない）。実アプリの `Gemma4ChatSession` は sequence を使い回すので、
+   * ここで出る `auto` の数字は悲観側である。
+   */
   const runTurn = async (plan: TurnPlan, at: number): Promise<TurnRecord> => {
     const sequence = await pipeline.sequence({
-      speculative: plan.mode === "speculative",
+      speculative: speculativeOf(plan.mode),
       capacity,
     });
     try {
@@ -526,11 +544,16 @@ const main = async (): Promise<void> => {
       const perCycle = speculation === undefined
         ? ""
         : ` · ${tokensPerCycle(speculation).toFixed(2)} tok/cycle`;
+      // ゲートの働きは `auto` のターンにしか無い（`always` の勘定には欄ごと無い）。欠けた欄を 0 と
+      // 書かないのは、簿記の破れを落とす口が要約側（`summary.ts`）の 1 箇所だからである。
+      const gate = speculation?.plainSteps === undefined || speculation.switches === undefined
+        ? ""
+        : ` · plain steps ${speculation.plainSteps} · switches ${speculation.switches}`;
       note(
         `[mtp-bench] ${workload}/${samplerName} turn ${at} ` +
-          `${plan.mode === "speculative" ? "S" : "P"}${plan.warmup ? " warmup" : ""}: ` +
+          `${MODE_LABEL[plan.mode]}${plan.warmup ? " warmup" : ""}: ` +
           `${record.tokens} tok · gen ${secondsOf(record.generationMs)} s · ` +
-          `${perToken.toFixed(1)} ms/tok${perCycle}\n`,
+          `${perToken.toFixed(1)} ms/tok${perCycle}${gate}\n`,
       );
       return record;
     } finally {
@@ -606,11 +629,14 @@ const main = async (): Promise<void> => {
   if (outPath !== undefined) await Deno.writeTextFile(outPath, `${line}\n`, { append: true });
   note(
     `[mtp-bench] plain ${summary.plain.msPerToken.toFixed(2)} ms/tok` +
-      ` / speculative ${summary.speculative.msPerToken.toFixed(2)} ms/tok` +
+      ` / always ${summary.always.msPerToken.toFixed(2)} ms/tok` +
       ` = ${summary.speedup.toFixed(3)}×` +
-      ` · 列一致 ${summary.identity.identical ? "yes" : "NO"}` +
+      ` / auto ${summary.auto.msPerToken.toFixed(2)} ms/tok` +
+      `（${summary.speedupAuto.toFixed(3)}×）` +
+      ` · 列一致 always ${summary.identity.identical ? "yes" : "NO"}` +
+      ` / auto ${summary.identity.identicalAuto ? "yes" : "NO"}` +
       // 実効 k は勘定から出た値（`--k` 省略時は配布形の段数がそのまま出る）。
-      ` · 実効 k ${summary.speculative.k ?? "不明"}\n`,
+      ` · 実効 k ${summary.always.k ?? "不明"}\n`,
   );
 };
 
