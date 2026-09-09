@@ -70,6 +70,7 @@ import {
   turnPlan,
   type TurnRecord,
 } from "./summary.ts";
+import { type TraceBucket, traceOf } from "./trace.ts";
 
 const USAGE = "--source <配布形のパス> --workload <" + WORKLOAD_NAMES.join("|") + ">" +
   " --sampler <greedy|recommended> --seed <整数> --k <整数> --new-tokens <整数>" +
@@ -420,13 +421,21 @@ const main = async (): Promise<void> => {
 
   /** 今走っているターンの器（走行中だけ入る — 席が呼ばれたときに無ければ簿記の破れ）。 */
   let turnTallies: RunTallies | undefined;
+  /**
+   * 今走っているターンの観測 1 通ずつ（局面別の内訳 `trace.ts` の材料）。
+   *
+   * 器を分けてあるのは、run の**形**別の壁（`turnTallies`）は台本が採った壁で、局面別の内訳は
+   * 生成面が名乗る壁（`phase.wallMs` — 配送の yield を挟まない値）だからである。
+   */
+  let turnPhases: Gemma4RunPhase[] | undefined;
   /** 今走っているターンを GPU 内訳に数えるか（暖機は数えない）。 */
   let measured = false;
   const timing = emptyTimingTallies();
 
   const observeRun = (diagnostics: SessionDiagnostics, phase: Gemma4RunPhase): void => {
     const tallies = turnTallies;
-    if (tallies === undefined) {
+    const phases = turnPhases;
+    if (tallies === undefined || phases === undefined) {
       throw new Error(`[mtp-bench] ターンの外で ${phase.kind} run の観測が届いた`);
     }
     if (!Number.isFinite(lastRunWallMs)) {
@@ -435,6 +444,7 @@ const main = async (): Promise<void> => {
     const tally = tallies[phase.kind];
     tally.count += 1;
     tally.wallMs += lastRunWallMs;
+    phases.push(phase);
     if (!gpuTiming) return;
     const stats: GpuTimingStats | undefined = diagnostics.lastRunTiming;
     if (stats === undefined) {
@@ -505,7 +515,9 @@ const main = async (): Promise<void> => {
     });
     try {
       const tallies = emptyTallies();
+      const phases: Gemma4RunPhase[] = [];
       turnTallies = tallies;
+      turnPhases = phases;
       measured = !plan.warmup;
       const ids: number[] = [];
       let firstTokenMs = Number.NaN;
@@ -537,6 +549,7 @@ const main = async (): Promise<void> => {
           draft: { ...tallies.draft },
           verify: { ...tallies.verify },
         },
+        trace: traceOf(phases),
         ...(speculation === undefined ? {} : { speculation }),
       };
       // 分母は要約と同じ 1 本（`summary.ts`）— 画面の数字と JSON の数字を別実装にしない。
@@ -558,6 +571,7 @@ const main = async (): Promise<void> => {
       return record;
     } finally {
       turnTallies = undefined;
+      turnPhases = undefined;
       measured = false;
       await sequence.dispose();
     }
@@ -637,6 +651,24 @@ const main = async (): Promise<void> => {
       ` / auto ${summary.identity.identicalAuto ? "yes" : "NO"}` +
       // 実効 k は勘定から出た値（`--k` 省略時は配布形の段数がそのまま出る）。
       ` · 実効 k ${summary.always.k ?? "不明"}\n`,
+  );
+  // ゲート付きのターンの時間がどの局面に落ちたか（中央値 1 ターンぶん — 正本は JSON の
+  // `summary.auto.trace`）。倍率だけでは「負けを止めた費用」がどこに乗ったか読めない。
+  const trace = summary.auto.trace;
+  const bucket = (label: string, one: TraceBucket): string =>
+    `${label} ${one.runs} run ${secondsOf(one.ms)} s`;
+  note(
+    "[mtp-bench] auto 内訳: " +
+      [
+        bucket("投機", trace.speculate),
+        bucket("復帰投機", trace.speculateAfterReturn),
+        bucket("burst", trace.burst),
+        bucket("W1", trace.w1Probe),
+        bucket("plain", trace.plain),
+        bucket("未観測", trace.unmeasured),
+      ].join(" / ") +
+      (trace.firstExitRun === undefined ? "" : ` · 初回離脱 run ${trace.firstExitRun}`) +
+      "\n",
   );
 };
 

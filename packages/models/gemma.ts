@@ -139,10 +139,15 @@ export type {
   GenerationCapacityConstraint,
   GenerationCapacityDetail,
   GenerationEvent,
+  /**
+   * 観測 1 通に載る自己採算ゲートの状態（`GenerationRunPhase.gate` — 定常モード・そのターン内の
+   * 切替回数・その run を壁の観測に入れたか）。
+   */
+  GenerationGateTrace,
   GenerationRequest,
   /**
    * run 1 本につき 1 通の観測（`onRunDiagnostics` が受ける {@link Gemma4RunPhase} の実体 —
-   * prefill の chunk / decode の step / 投機の draft・verify の cycle）。
+   * prefill の chunk / decode の step / 投機の draft・verify の cycle・run の壁とゲートの状態）。
    */
   GenerationRunPhase,
   GenerationSequence,

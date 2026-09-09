@@ -49,7 +49,13 @@ import {
   type GenerationStop,
 } from "../src/generation/sequence.ts";
 import type { GenerationProgramSpec } from "../src/generation/program.ts";
-import { drain, type FakeOptions, fakeSession, programOf } from "./helpers/generation-fake.ts";
+import {
+  drain,
+  type FakeOptions,
+  fakeSession,
+  programOf,
+  runShape,
+} from "./helpers/generation-fake.ts";
 import { type GemmaTokenizerAssets, parseGemmaTokenizerAsset } from "../src/gemma/text/asset.ts";
 import { GemmaTokenizer } from "../src/gemma/text/tokenizer.ts";
 import {
@@ -785,7 +791,7 @@ Deno.test("観測席: run 1 本につき 1 通（run を伴わない最初の to
   assertEquals(seen.length, 5, "呼び出し回数");
   assertEquals(seen, [1, 2, 3, 4, 5], "席が受けるのは呼ぶたびの新しい診断（貸し手 Session）");
   assertEquals(
-    phases,
+    runShape(phases),
     [prefillPhase(1, 2), prefillPhase(2, 2), decodePhase(1), decodePhase(2), decodePhase(3)],
     "phase（複数 chunk の prefill は 2 本目以降も prefill・decode の step は 1 始まり）",
   );
@@ -807,7 +813,7 @@ Deno.test("観測席: 停止 token を引いた最後の decode run も 1 通届
     "停止 token は列に出ない",
   );
   assertEquals(seen.length, 2, "停止 run のぶんが欠けている");
-  assertEquals(phases, [prefillPhase(1, 1), decodePhase(1)], "phase");
+  assertEquals(runShape(phases), [prefillPhase(1, 1), decodePhase(1)], "phase");
 });
 
 Deno.test("観測席: 消費側の break で閉じたターンは完了した run のぶんだけ届く", async () => {

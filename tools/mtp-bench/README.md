@@ -146,7 +146,7 @@ One JSON line with these top-level keys:
 | `host`    | `os`, `arch`, `deno`, and the `adapter` (`vendor` / `architecture` / `device` / `description`)                                                                                                                                                                                                                                                           |
 | `config`  | The effective value of every option. Knobs that are not in effect are `null` (`k` is `null` when the drafter's own step count was used). `config.asset` identifies what was measured: `defaultModel`, `defaultQuant`, and `manifestSha256` — the SHA-256 of the manifest body, which pins the asset because a distribution carries no version of its own |
 | `prompt`  | `tokens` (the encoded prompt length) and the `messages` that produced it                                                                                                                                                                                                                                                                                 |
-| `turns`   | One record per turn, warm-ups included: `mode` (`plain` / `always` / `auto`), round, `warmup`, `tokens`, `stopReason`, the token `ids` and their decoded `text`, `turnMs` / `firstTokenMs` / `generationMs`, per-kind run counts and wall totals, and `speculation` for `always` and `auto` turns                                                        |
+| `turns`   | One record per turn, warm-ups included: `mode` (`plain` / `always` / `auto`), round, `warmup`, `tokens`, `stopReason`, the token `ids` and their decoded `text`, `turnMs` / `firstTokenMs` / `generationMs`, per-kind run counts and wall totals, the `trace` buckets (see below), and `speculation` for `always` and `auto` turns                       |
 | `summary` | See below                                                                                                                                                                                                                                                                                                                                                |
 | `gpu`     | Present only with `--gpu-timing`                                                                                                                                                                                                                                                                                                                         |
 
@@ -157,6 +157,7 @@ One JSON line with these top-level keys:
 | `plain` / `always` / `auto`           | `turns`, `msPerToken`, `generationMs`, `turnMs`, `firstTokenMs`, `hostMsPerToken`                                                                                       |
 | `<mode>.runs[kind]`                   | `countPerTurn` and `msPerRun` per run kind. A kind with no runs has no `msPerRun` field (writing `0` would read as "measured, and it was 0 ms")                         |
 | `<mode>.hostMsPerToken`               | `(generationMs − decode/draft/verify wall) / (tokens − 1)` — see Denominators                                                                                           |
+| `<mode>.trace`                        | Phase buckets — see below                                                                                                                                               |
 | `always` / `auto`.`tokensPerCycle`    | `delivered / cycles`                                                                                                                                                    |
 | `always` / `auto`.`k`                 | The effective step count, `acceptedHistogram.length − 1` (the tally has one bucket per acceptance count, `0..k`). Turns that disagree are an error, not a median        |
 | `always` / `auto`.`acceptedHistogram` | Element-wise sum of the per-turn histograms (index = accepted drafts in a cycle)                                                                                        |
@@ -177,6 +178,45 @@ and the default seat (`stateAttentionReduce: "parallel"`) reduces ①QK in a dif
 M=4 verify and the M=1 decode shape, so two near-equal logits can split the argmax
 (`docs/limitations.md`). A false `identicalAuto` with a true `identical` is that effect, not a bug in
 the drafter; `firstDivergenceAuto` says where the runs parted.
+
+### Phase buckets (`trace`)
+
+`runs[kind]` splits runs by their **shape** (prefill / decode / draft / verify), which is not enough
+for an `auto` turn: the gate's plain steps are decode-shaped, so they land on top of a `plain` turn's
+runs, and an exploration burst's verify looks exactly like steady speculation. `turns[].trace` (present
+for every mode) and `summary.<mode>.trace` split the same runs by **situation**, from the wall clock and
+gate state the generation seat reports for each run (`GenerationRunPhase`: `wallMs`, `delivered`, `gate`).
+
+Every bucket carries `runs`, `ms` (the sum of `wallMs`) and `delivered` (tokens the run committed —
+the cycle's confirmed count for verify, 1 for decode). Inside a speculative turn the wall runs from the
+head of the cycle (before the draft run is issued) to just after the acceptance decision — the same
+value the gate feeds its own decision, so a slow consumer cannot inflate it. A `plain` turn's decode
+run is measured over the same span — from the head of the step (before the derived inputs) to just
+after sampling — so the `plain` bucket is comparable across modes.
+
+| Bucket                 | The runs in it                                                                                                                                                                                                  |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `speculate`            | verify, with no gate (`always`) or in steady `speculate` with no switch yet in this turn                                                                                                                        |
+| `speculateAfterReturn` | verify, in steady `speculate` after at least one switch in this turn — speculation resumed after a plain stretch                                                                                                |
+| `burst`                | verify, in steady `plain` — an exploration burst. The cycle whose observation _caused_ the exit is here too (the gate state is read after the observation), so expect one such run per switch                   |
+| `w1Probe`              | decode, in steady `speculate` — the plain steps the gate takes to keep `W1` fresh (one per exploration interval)                                                                                                |
+| `plain`                | decode, with no gate (a `plain` turn) or in steady `plain` (the gate's steady state)                                                                                                                            |
+| `unmeasured`           | Runs the gate kept out of its own wall statistics (`gate.measured === false`): the first cycle of every turn and the budget-tail forced plain. The wall is still counted here — it just did not feed a decision |
+| `cold` / `rest`        | A **second, independent** split of the same runs: the turn's first 8 generation runs and everything after them. Reads how far the cold miss reaches (PLE shards, the first PreparedPlan / bind group)           |
+
+Within one turn (`turns[].trace`) the six situation buckets are mutually exclusive and sum to
+`cold + rest`; the per-field medians in `summary.<mode>.trace` do not add up that way. `prefill` and
+`draft` runs are in neither: prefill belongs to `firstTokenMs`, and a draft run sits _inside_ the cycle
+wall.
+
+`firstExitRun` is the 1-based index — in the same decode/verify sequence the buckets count — of the run
+at which `gate.switches` first reached 1. It is absent when the gate never switched (`0` would read as
+"it switched before the first run"). In `summary.<mode>.trace` every bucket field is a median over the
+measured turns taken **per field** (`runs`, `ms` and `delivered` separately, so `ms / runs` is not any
+one turn's per-run wall), and `firstExitRun` is the median over the turns that switched at all.
+
+A run with no `wallMs` is an error, not a zero: the tool refuses to print a breakdown that has quietly
+lost a run's time.
 
 ## `--gpu-timing`
 

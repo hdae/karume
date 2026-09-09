@@ -16,6 +16,7 @@
  */
 
 import type { GenerationSpeculation } from "../../packages/models/gemma.ts";
+import type { TraceBucket, TurnTrace } from "./trace.ts";
 
 /**
  * 測る 3 つの構成（`Gemma4SequenceOptions.speculative` の 3 値そのもの）。
@@ -76,6 +77,13 @@ export type TurnRecord = TurnPlan & {
   /** `turnMs − firstTokenMs`（ms — 生成相だけの壁）。 */
   readonly generationMs: number;
   readonly runs: { readonly [K in RunKind]: RunWall };
+  /**
+   * 局面別の内訳（`trace.ts` — **全モードのターン**に載る）。
+   *
+   * `runs` が run の**形**で分ける表なのに対し、こちらは「投機の定常 / 探索バースト / `W1`
+   * プローブ / plain」で分ける表である（`auto` のターンでは形が同じ run が別の局面にいる）。
+   */
+  readonly trace: TurnTrace;
   /** 投機の勘定（`GenerationStop.speculation` の写し — `always` / `auto` のターンにだけ載る）。 */
   readonly speculation?: GenerationSpeculation;
 };
@@ -93,6 +101,23 @@ export type RunSummary = {
   readonly msPerRun?: number;
 };
 
+/**
+ * 局面別内訳の要約（バケットごとに `runs` / `ms` / `delivered` の**それぞれ**を中央値にしたもの）。
+ *
+ * 3 つを別々に中央値へ落とすので、同じバケットの `ms / runs` は「どれか 1 ターンの 1 本あたりの
+ * 壁」ではない（run 別の要約 {@link RunSummary} が `msPerRun` を per-turn の比の中央値で採るのと
+ * 違う取り方である）。読むのは「ターン 1 本ぶんの内訳がどのくらいの規模か」で、1 本あたりの壁が
+ * 要るなら `turns[].trace` から採る。
+ */
+export type TraceSummary =
+  & {
+    readonly [B in Exclude<keyof TurnTrace, "firstExitRun">]: TraceBucket;
+  }
+  & {
+    /** {@link TurnTrace.firstExitRun} の中央値（切替が起きたターンだけの中央値・無ければ欄ごと無い）。 */
+    readonly firstExitRun?: number;
+  };
+
 /** 1 モードぶんの要約（暖機を除く・全て中央値）。 */
 export type ModeSummary = {
   /** 要約に入ったターン数（暖機を除く）。 */
@@ -103,6 +128,8 @@ export type ModeSummary = {
   readonly turnMs: number;
   readonly firstTokenMs: number;
   readonly runs: { readonly [K in RunKind]: RunSummary };
+  /** 局面別の内訳（**全モード** — {@link TraceSummary}）。 */
+  readonly trace: TraceSummary;
   /**
    * GPU の外で使った時間（ms/token — **全モード**）。
    *
@@ -348,6 +375,34 @@ const effectiveK = (tallies: readonly GenerationSpeculation[]): number => {
   return k;
 };
 
+/**
+ * 局面別内訳の中央値（{@link TraceSummary}）。
+ *
+ * `firstExitRun` は**起きたターンだけ**の中央値である（起きなかったターンを 0 で埋めると
+ * 「1 本目より前に切り替わった」という有り得ない値が中央へ寄る）。
+ */
+const summarizeTrace = (traces: readonly TurnTrace[]): TraceSummary => {
+  const bucket = (of: (trace: TurnTrace) => TraceBucket): TraceBucket => ({
+    runs: median(traces.map((trace) => of(trace).runs)),
+    ms: median(traces.map((trace) => of(trace).ms)),
+    delivered: median(traces.map((trace) => of(trace).delivered)),
+  });
+  const exits = traces.flatMap((trace) =>
+    trace.firstExitRun === undefined ? [] : [trace.firstExitRun]
+  );
+  return {
+    speculate: bucket((trace) => trace.speculate),
+    speculateAfterReturn: bucket((trace) => trace.speculateAfterReturn),
+    burst: bucket((trace) => trace.burst),
+    w1Probe: bucket((trace) => trace.w1Probe),
+    plain: bucket((trace) => trace.plain),
+    unmeasured: bucket((trace) => trace.unmeasured),
+    cold: bucket((trace) => trace.cold),
+    rest: bucket((trace) => trace.rest),
+    ...(exits.length === 0 ? {} : { firstExitRun: median(exits) }),
+  };
+};
+
 const summarizeMode = (measured: readonly TurnRecord[], mode: BenchMode): ModeSummary => {
   const turns = measured.filter((turn) => turn.mode === mode);
   if (turns.length === 0) throw new Error(`mode ${mode} の（暖機を除く）ターンが 1 本も無い`);
@@ -363,6 +418,7 @@ const summarizeMode = (measured: readonly TurnRecord[], mode: BenchMode): ModeSu
       draft: summarizeRun(turns, "draft"),
       verify: summarizeRun(turns, "verify"),
     },
+    trace: summarizeTrace(turns.map((turn) => turn.trace)),
     hostMsPerToken: median(
       turns.map((turn) => (turn.generationMs - generationRunWallMs(turn)) / tokensAfterFirst(turn)),
     ),

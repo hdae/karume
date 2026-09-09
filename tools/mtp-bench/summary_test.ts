@@ -12,6 +12,8 @@
  * 4. **実効 k** — 受理数ヒストグラムの長さ − 1・ターン間で食い違えば落ちる
  * 5. **暖機は要約に入らない** — フォールト注入（暖機の値を 1000 倍にしても中央値が動かない）
  * 6. **token 列の突合** — always / auto それぞれの一致・不一致の最初の添字・接頭辞
+ * 7. **局面別内訳の中央値**（`trace.ts` のバケット）— バケットごとに 3 欄それぞれの中央値・
+ *    `firstExitRun` は起きたターンだけの中央値
  *
  * NOTE: リポの慣習に合わせて `Deno.test`（文脈）+ `t.step`（振る舞い）で書く。
  */
@@ -27,9 +29,33 @@ import {
   turnPlan,
   type TurnRecord,
 } from "./summary.ts";
+import type { TraceBucket, TurnTrace } from "./trace.ts";
 
 /** 合成ターン: 生成 10 token 相当（`tokens - 1 = 10`）で、run 壁だけを与える。 */
 const IDS: readonly number[] = [11, 22, 33];
+
+const bucket = (runs: number, ms: number, delivered: number): TraceBucket => ({
+  runs,
+  ms,
+  delivered,
+});
+
+/**
+ * 合成の局面別内訳（`scale` 倍したもの）。
+ *
+ * 要約が見るのはバケットごとの中央値だけなので、バケットを取り違えた実装が値で分かるように
+ * 6 局面すべてに違う数を置く。`scale` は「ターンごとに違う値」を作るための倍率である。
+ */
+const traceFixture = (scale = 1): TurnTrace => ({
+  speculate: bucket(4 * scale, 40 * scale, 16 * scale),
+  speculateAfterReturn: bucket(1 * scale, 11 * scale, 3 * scale),
+  burst: bucket(2 * scale, 22 * scale, 5 * scale),
+  w1Probe: bucket(3 * scale, 33 * scale, 3 * scale),
+  plain: bucket(5 * scale, 55 * scale, 5 * scale),
+  unmeasured: bucket(6 * scale, 66 * scale, 7 * scale),
+  cold: bucket(8 * scale, 88 * scale, 20 * scale),
+  rest: bucket(13 * scale, 139 * scale, 19 * scale),
+});
 
 const plainTurn = (
   round: number,
@@ -53,6 +79,7 @@ const plainTurn = (
     draft: { count: 0, wallMs: 0 },
     verify: { count: 0, wallMs: 0 },
   },
+  trace: traceFixture(),
   ...over,
 });
 
@@ -79,6 +106,7 @@ const alwaysTurn = (
     draft: { count: 5, wallMs: runWallMs.draft },
     verify: { count: 5, wallMs: runWallMs.verify },
   },
+  trace: traceFixture(),
   speculation: {
     cycles: 5,
     draftRuns: 5,
@@ -118,6 +146,7 @@ const autoTurn = (
     draft: { count: 4, wallMs: runWallMs.draft },
     verify: { count: 4, wallMs: runWallMs.verify },
   },
+  trace: traceFixture(),
   speculation: {
     cycles: 4,
     draftRuns: 4,
@@ -532,5 +561,61 @@ Deno.test("簿記の破れは落とす", async (t) => {
       Error,
       "ms/token",
     );
+  });
+});
+
+Deno.test("局面別内訳の要約", async (t) => {
+  /** auto の 3 ターンだけ内訳をずらす（1 / 2 / 3 倍 → 中央値は 2 倍のターン）。 */
+  const scaled = (): TurnRecord[] => [
+    ...withoutMode(measuredTurns(), "auto"),
+    autoTurn(1, 70, { draft: 10, verify: 24, decode: 6 }, { trace: traceFixture(1) }),
+    autoTurn(1, 80, { draft: 10, verify: 24, decode: 6 }, {
+      trace: { ...traceFixture(2), firstExitRun: 3 },
+    }),
+    autoTurn(2, 90, { draft: 10, verify: 24, decode: 6 }, {
+      trace: { ...traceFixture(3), firstExitRun: 9 },
+    }),
+  ];
+
+  await t.step("バケットごとに runs / ms / delivered それぞれの中央値を採る", () => {
+    const { trace } = summarizeTurns(scaled()).auto;
+    assertEquals(trace.speculate, bucket(8, 80, 32));
+    assertEquals(trace.speculateAfterReturn, bucket(2, 22, 6));
+    assertEquals(trace.burst, bucket(4, 44, 10));
+    assertEquals(trace.w1Probe, bucket(6, 66, 6));
+    assertEquals(trace.plain, bucket(10, 110, 10));
+    assertEquals(trace.unmeasured, bucket(12, 132, 14));
+    assertEquals(trace.cold, bucket(16, 176, 40));
+    assertEquals(trace.rest, bucket(26, 278, 38));
+  });
+
+  await t.step("firstExitRun は切替が起きたターンだけの中央値（偶数本は上側）", () => {
+    // 3 ターンのうち切替は 2 本（3 と 9）→ 上側の 9。起きなかったターンを 0 で埋める実装なら 3。
+    assertEquals(summarizeTurns(scaled()).auto.trace.firstExitRun, 9);
+  });
+
+  await t.step("切替が 1 度も起きなければ欄ごと無い", () => {
+    const summary = summarizeTurns(measuredTurns());
+    assertEquals(Object.hasOwn(summary.auto.trace, "firstExitRun"), false);
+    assertEquals(Object.hasOwn(summary.plain.trace, "firstExitRun"), false);
+  });
+
+  await t.step("内訳は全モードに出る（plain / always も同じ欄を持つ）", () => {
+    const summary = summarizeTurns(measuredTurns());
+    assertEquals(summary.plain.trace.plain, bucket(5, 55, 5));
+    assertEquals(summary.always.trace.speculate, bucket(4, 40, 16));
+  });
+
+  await t.step("暖機の内訳は要約に入らない（フォールト注入）", () => {
+    const baseline = summarizeTurns(measuredTurns()).auto.trace;
+    const withWarmup = summarizeTurns([
+      autoTurn(0, 80, { draft: 10, verify: 24, decode: 6 }, {
+        warmup: true,
+        round: 0,
+        trace: traceFixture(1000),
+      }),
+      ...measuredTurns(),
+    ]).auto.trace;
+    assertEquals(withWarmup, baseline);
   });
 });

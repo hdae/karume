@@ -113,6 +113,7 @@ import {
 } from "./speculation.ts";
 import {
   createSpeculationGate,
+  type SpeculationDecision,
   type SpeculationGate,
   type SpeculationGateOptions,
 } from "./speculation-gate.ts";
@@ -293,26 +294,79 @@ export type GenerationSpeculation = {
 };
 
 /**
+ * 自己採算ゲートの状態（{@link GenerationRunPhase} の `gate` — `policy: "auto"` のときだけ載る）。
+ *
+ * MUST: 読むのはその run を**観測した後**である（観測でモードが倒れる cycle では、倒れた後の値が
+ * 出る）— 「この run の壁を入れた結果どうなったか」が読み手の要る情報だからである。
+ */
+export type GenerationGateTrace = {
+  /**
+   * 定常モード（`SpeculationGate.mode`）。
+   *
+   * 探索で逆側を 1 回試している間も**定常側**を名乗る（探索バーストの cycle は
+   * `mode: "plain"` の verify・`W1` プローブは `mode: "speculate"` の decode として出る）。
+   */
+  readonly mode: SpeculationDecision;
+  /** このターン内の切替回数（{@link GenerationSpeculation.switches} と同じ数え方）。 */
+  readonly switches: number;
+  /**
+   * ゲートがこの run を壁の観測に入れたか。
+   *
+   * `false` はゲートが `skip()` した cycle である（各ターンの最初の cycle と予算末尾の強制 plain —
+   * モジュール doc の「混ぜない」2 種類）。壁は載っているが判定の材料にはなっていない。
+   */
+  readonly measured: boolean;
+};
+
+/**
  * run 1 本につき 1 通の観測（{@link GenerationSequenceOptions.onRun}）。
  *
  * 番号はすべて **1 始まり**。`prefill` の `chunk` / `chunks` は `GenerationEvent` の `prefill` と
  * 同じ数、`decode` の `step` はそのターンの decode run の番号、`draft` / `verify` の `cycle` は
  * 投機の cycle 番号（同じ cycle の draft と verify は同じ番号を名乗る）。`verify.rows` はその
- * run の有効行数 `k'+1`、`accepted` は受理した draft の数 `a`。
+ * run の有効行数 `k'+1`、`accepted` は受理した draft の数 `a`、`delivered` はその cycle が
+ * 確定させた token 数（停止 token で列挙を打ち切った cycle だけ `accepted + 1` より少ない —
+ * {@link GenerationSpeculation.delivered} と同じ量）。
  *
  * 投機ターンで自己採算ゲートが落とした plain step も `decode` を名乗る（`step` はそのターンの
  * plain step の通し番号 = {@link GenerationSpeculation.plainSteps} と同じ数え方）— run の形が
  * decode そのもの（M=1・R=1）だからで、枝を足すと公開型の網羅 switch を持つ消費者が壊れる。
+ *
+ * ## `wallMs` と `gate`（時間の内訳を読む 2 欄）
+ *
+ * `wallMs` は run 1 本ぶんの壁 ms で、投機の cycle は**先頭（draft の発行前）から受理判定の直後**
+ * まで・非投機の decode は**step の先頭（派生入力の前）から抽選の直後**までを測る（区間は投機の
+ * cycle と同じ — 派生入力を片方だけ含めると mode をまたいだ比較に系統差が乗る）。どちらも**配送の yield の
+ * 前**に採るので、消費者の速さは入らない（ゲートが自分の判断に使う壁と同じ値である — 混ぜると
+ * 遅い消費者ほど投機を切ることになる）。ゲートの有無に依らず常に載る。
+ *
+ * `gate` は `policy: "auto"` のターンにだけ載り、`kind` と `gate.mode` の組でその run の局面が
+ * 決まる:
+ *
+ * | kind × gate.mode | 局面 |
+ * | --- | --- |
+ * | verify × speculate | 投機の定常（`switches` が 1 以上なら plain から戻った後） |
+ * | verify × plain | plain 側の探索バースト |
+ * | decode × speculate | speculate 中の `W1` プローブ |
+ * | decode × plain | plain の定常（ゲートが落とした step） |
  */
 export type GenerationRunPhase =
   | { readonly kind: "prefill"; readonly chunk: number; readonly chunks: number }
-  | { readonly kind: "decode"; readonly step: number }
+  | {
+    readonly kind: "decode";
+    readonly step: number;
+    readonly wallMs?: number;
+    readonly gate?: GenerationGateTrace;
+  }
   | { readonly kind: "draft"; readonly cycle: number }
   | {
     readonly kind: "verify";
     readonly cycle: number;
     readonly rows: number;
     readonly accepted: number;
+    readonly delivered?: number;
+    readonly wallMs?: number;
+    readonly gate?: GenerationGateTrace;
   };
 
 /**
@@ -512,7 +566,8 @@ export type GenerationSpeculativeOptions<C extends GenerationContextFace> = {
   /**
    * 壁時計（既定 `performance.now` — テストは偽時計を差す）。
    *
-   * ゲートの観測だけが読む。`policy: "always"` では 1 度も呼ばれない。
+   * 読むのはゲートの観測と観測席の `wallMs`（{@link GenerationRunPhase}）で、`policy: "always"`
+   * でも 1 cycle につき 2 回（cycle の先頭と受理判定の直後）呼ばれる。
    */
   readonly now?: () => number;
 };
@@ -805,7 +860,7 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
    * 収束せず、会話ごとに測り直すと「最初の数 cycle だけ投機」を毎ターン繰り返す。
    */
   let gate: SpeculationGate | undefined;
-  /** 壁時計（ゲートが居るときだけ読む — 既定は `performance.now`）。 */
+  /** 壁時計（ゲートの観測と観測席の `wallMs` が読む — 既定は `performance.now`）。 */
   const now = options.speculative?.now ?? ((): number => performance.now());
   if (options.speculative !== undefined) {
     try {
@@ -1094,7 +1149,8 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
             turnCycles += 1;
             // 壁は cycle ごとに同じ 2 点（先頭 → 受理判定の直後）で採る。観測に入れるかで採る位置を
             // 変えないのは、偽時計のテストが実装の分岐をなぞるだけにならないようにするためである。
-            const startedAt = gate === undefined ? 0 : now();
+            // ゲートの有無にも依らない — 観測席の `wallMs` が同じ値を運ぶ（`GenerationRunPhase`）。
+            const startedAt = now();
             let drafts: number[] = [];
             if (drafted >= 1) {
               // drafter は (frontier b, b を出した行の hidden, b の位置 P) から d₁.. を出す。
@@ -1146,8 +1202,10 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
             );
             // ゲートの物差しは受理判定の直後に採る（配送の yield も観測席の hook も挟まない位置 —
             // 消費者の速さが混ざると、遅い消費者ほど投機を切ることになる）。
+            // MUST: 観測席へ載せる `wallMs` はこの同じ変数である（別に測り直すと、ゲートが見た壁と
+            // 内訳の壁が食い違い、内訳から「なぜ倒れたか」を辿れなくなる）。
+            const wall = now() - startedAt;
             if (gate !== undefined) {
-              const wall = now() - startedAt;
               // 混ぜない cycle は観測の代わりに `skip()`（ゲートの呼び出し規約 MUST）— 何も
               // 返さないと探索の周期が止まり、`W1` の初回サンプルがターンの 2 本目ではなく
               // 「観測に混ぜる最初の cycle」まで遅れる。
@@ -1155,6 +1213,12 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
               else if (gated) gate.observePlain(wall);
               else gate.observeCycle(wall, confirmed.length);
             }
+            // ゲートの状態は**観測の後**に読む（{@link GenerationGateTrace} の MUST）。
+            const gateTrace: GenerationGateTrace | undefined = gate === undefined ? undefined : {
+              mode: gate.mode,
+              switches: gate.switches - switchesAtStart,
+              measured,
+            };
             // 次 cycle の drafter 入力 = 新しい frontier b' を出した行 a（写す — 次の run で消える）。
             // ゲート由来の plain step も verify 形の 1 行なので、ここで hidden が繋がる。
             const nextHidden = copyRow(hiddenRows.row(accepted));
@@ -1169,8 +1233,21 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
             // 別 sequence の run が挟まりうる）。commit は配送の後（frontier まで）。
             onRun?.(
               gated
-                ? { kind: "decode", step: plainSteps }
-                : { kind: "verify", cycle, rows: queryLength, accepted },
+                ? {
+                  kind: "decode",
+                  step: plainSteps,
+                  wallMs: wall,
+                  ...(gateTrace === undefined ? {} : { gate: gateTrace }),
+                }
+                : {
+                  kind: "verify",
+                  cycle,
+                  rows: queryLength,
+                  accepted,
+                  delivered: confirmed.length,
+                  wallMs: wall,
+                  ...(gateTrace === undefined ? {} : { gate: gateTrace }),
+                },
             );
             // `confirmed` は配送列そのもの（停止 token より後ろは受理の側で列挙していない）。
             for (let index = 0; index < confirmed.length; index += 1) {
@@ -1201,6 +1278,9 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
         // 回で、最後の token は未 commit のまま `pendingToken` に残る（決定 4）。
         for (let step = 0; step + 1 < maxNewTokens; step += 1) {
           await settleAbort(signal);
+          // 壁は step の先頭（派生入力の前）から抽選の直後まで — 投機の cycle と同じ区間で、配送の
+          // yield より前に採るので消費者の速さを含まない。観測席の `wallMs` だけが読む値である。
+          const startedAt = now();
           const ids = Int32Array.of(token);
           const positions = Int32Array.of(context.pastLength);
           const extra = await deriveInputs(ids, positions, signal);
@@ -1222,7 +1302,7 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
           // 連結されて**同じ token が 2 つの位置に入る**（例外にならない沈黙劣化）。
           pendingToken = undefined;
           token = sampler.next(readLogits(outputs, program, `decode@${step}`, 1).row(0), history);
-          onRun?.({ kind: "decode", step: step + 1 });
+          onRun?.({ kind: "decode", step: step + 1, wallMs: now() - startedAt });
           generated += 1;
           history.push(token);
           pendingToken = token;

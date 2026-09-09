@@ -225,6 +225,8 @@ export type {
   GenerationCapacityConstraint,
   GenerationCapacityDetail,
   GenerationEvent,
+  /** 観測 1 通に載るゲートの状態（`GenerationRunPhase.gate` — `./gemma` を参照）。 */
+  GenerationGateTrace,
   GenerationRequest,
   /** run 1 本につき 1 通の観測（`Gemma4RunPhase` の実体 — `./gemma` を参照）。 */
   GenerationRunPhase,

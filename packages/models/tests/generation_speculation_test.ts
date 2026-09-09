@@ -19,6 +19,10 @@
 // T1〜T15 は**ゲート抜き**（`policy: "always"`）の契約である — 自己採算ゲート（段 4-B ④）が
 // 割り込むと 1 cycle = draft + verify の勘定が崩れ、壁時計にも依存する。ゲートの席は T16 が
 // 偽時計で見る（ゲートそのものの判断は `generation_gate_test.ts`）。
+//
+// T17 は観測席が運ぶ**壁と局面**（`wallMs` / `delivered` / `gate`）の席である。run の種別と番号
+// だけを見る門（T7 / T9）は `runShape` で壁の欄を落として比べる — 非投機の sequence には偽時計を
+// 差せないので、壁の実値はそれらの門では見られない。
 
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import type { GenerationProgramSpec } from "../src/generation/program.ts";
@@ -26,6 +30,7 @@ import { createSampler, type Sampler } from "../src/generation/sampler.ts";
 import {
   createGenerationSequence,
   type GenerationEvent,
+  type GenerationGateTrace,
   type GenerationRequest,
   type GenerationRunPhase,
   type GenerationSequence,
@@ -49,6 +54,7 @@ import {
   hiddenMark,
   programOf,
   type RunCall,
+  runShape,
   tokenIds,
   VOCAB,
 } from "./helpers/generation-fake.ts";
@@ -736,7 +742,7 @@ Deno.test("T7 中断: verify の後で止めても、その cycle の確定ぶ�
   assertEquals(opened.fake.pendingCommit(), undefined);
   assertEquals(opened.fake.calls.length, 2);
   // run 1 本につき 1 通（中断で 2 度目の verify が出ない）。
-  assertEquals(opened.phases, [
+  assertEquals(runShape(opened.phases), [
     { kind: "prefill", chunk: 1, chunks: 1 },
     { kind: "draft", cycle: 1 },
     { kind: "verify", cycle: 1, rows: 4, accepted: 3 },
@@ -760,7 +766,7 @@ Deno.test("T7′ 例外復旧: verify の戻りで落ちても保留は残らず
   assertEquals(opened.fake.pendingCommit(), undefined, "保留が残っている（次の run が落ちる）");
   assertEquals(opened.fake.pastLength(), PROMPT.length, "論理長が verify のぶん進んでいる");
   // 出力を読み終える前に落ちた run は観測にも出さない（`onRun` は「読み終えた run」の口）。
-  assertEquals(opened.phases, [
+  assertEquals(runShape(opened.phases), [
     { kind: "prefill", chunk: 1, chunks: 1 },
     { kind: "draft", cycle: 1 },
   ]);
@@ -803,7 +809,7 @@ Deno.test("T7″ 途中 break: 配送した token までが commit され、そ�
   assertEquals(opened.fake.commits, [2]);
   assertEquals(opened.fake.pendingCommit(), undefined);
   // 配送が途中で閉じても、走った verify run は 1 通だけ報告される。
-  assertEquals(opened.phases, [
+  assertEquals(runShape(opened.phases), [
     { kind: "prefill", chunk: 1, chunks: 1 },
     { kind: "draft", cycle: 1 },
     { kind: "verify", cycle: 1, rows: 4, accepted: 3 },
@@ -969,7 +975,7 @@ Deno.test("T9 onRun: 投機は prefill → (draft, verify) × cycle（cycle は 
     drafter: oracleDrafter(),
     request: { prompt: PROMPT, maxNewTokens: 9 },
   });
-  assertEquals(run.phases, [
+  assertEquals(runShape(run.phases), [
     { kind: "prefill", chunk: 1, chunks: 1 },
     { kind: "draft", cycle: 1 },
     { kind: "verify", cycle: 1, rows: 4, accepted: 3 },
@@ -983,7 +989,7 @@ Deno.test("T9 onRun: k' = 0 の cycle は draft を名乗らず verify 1 行だ�
     drafter: oracleDrafter(),
     request: { prompt: PROMPT, maxNewTokens: 6 },
   });
-  assertEquals(run.phases, [
+  assertEquals(runShape(run.phases), [
     { kind: "prefill", chunk: 1, chunks: 1 },
     { kind: "draft", cycle: 1 },
     { kind: "verify", cycle: 1, rows: 4, accepted: 3 },
@@ -997,7 +1003,7 @@ Deno.test("T9 onRun: 部分受理の accepted と、chunk が割れた prefill �
     drafter: partialDrafter(1),
     request: { prompt, maxNewTokens: 3 },
   });
-  assertEquals(run.phases, [
+  assertEquals(runShape(run.phases), [
     { kind: "prefill", chunk: 1, chunks: 2 },
     { kind: "prefill", chunk: 2, chunks: 2 },
     { kind: "draft", cycle: 1 },
@@ -1007,7 +1013,7 @@ Deno.test("T9 onRun: 部分受理の accepted と、chunk が割れた prefill �
 
 Deno.test("T9 onRun: 非投機は prefill → decode × (tokens − 1)（step は 1 始まり）", async () => {
   const plain = await runPlain({ prompt: PROMPT, maxNewTokens: 3 });
-  assertEquals(plain.phases, [
+  assertEquals(runShape(plain.phases), [
     { kind: "prefill", chunk: 1, chunks: 1 },
     { kind: "decode", step: 1 },
     { kind: "decode", step: 2 },
@@ -1025,7 +1031,7 @@ Deno.test("T9 onRun: run 1 本につき 1 通 — 停止で閉じた cycle の v
   });
   assertEquals(run.fake.calls.length, 2, "走った run は prefill 1 + verify 1");
   // 受理は停止 token（d₂ = 9）で打ち切られるので `accepted` は 2（配送した draft の数）。
-  assertEquals(run.phases, [
+  assertEquals(runShape(run.phases), [
     { kind: "prefill", chunk: 1, chunks: 1 },
     { kind: "draft", cycle: 1 },
     { kind: "verify", cycle: 1, rows: 4, accepted: 2 },
@@ -1033,7 +1039,7 @@ Deno.test("T9 onRun: run 1 本につき 1 通 — 停止で閉じた cycle の v
 
   // 対（非投機は停止した decode run も 1 通報告する）。
   const plain = await runPlain({ prompt: PROMPT, maxNewTokens: 9 }, { stopTokens });
-  assertEquals(plain.phases, [
+  assertEquals(runShape(plain.phases), [
     { kind: "prefill", chunk: 1, chunks: 1 },
     { kind: "decode", step: 1 },
     { kind: "decode", step: 2 },
@@ -1180,7 +1186,7 @@ Deno.test("T12 値域門: 語彙外・本数不足の draft は verify を出す
     // draft run 自体は**完了している**（借り手は draft を返し切った）ので 1 通名乗る。落ちるのは
     // 戻り値の値域検査で、これは verify の形検査（T7′ — 読み終える前に落ちるので名乗らない）とは
     // 別の位置である。
-    assertEquals(opened.phases, [
+    assertEquals(runShape(opened.phases), [
       { kind: "prefill", chunk: 1, chunks: 1 },
       { kind: "draft", cycle: 1 },
     ]);
@@ -1448,7 +1454,7 @@ Deno.test("T16 ゲート: 投機が負ける壁では decode 形へ落ち、そ�
   assertEquals(run.fake.commits, [4, 1, 4, 4, 1, 1, 1, 1, 1, 1]);
   // ゲートの plain step は `decode` を名乗る（公開型に枝を足さない）。番号は 1 始まりの通し。
   assertEquals(
-    run.phases.filter((phase) => phase.kind === "decode"),
+    runShape(run.phases).filter((phase) => phase.kind === "decode"),
     Array.from({ length: 6 }, (_unused, index) => ({ kind: "decode", step: index + 1 })),
   );
   // verify の cycle 番号は 1..4（plain step が番号を飛ばさない）。
@@ -1570,6 +1576,184 @@ Deno.test("T16 ゲート: ターン最初の cycle と予算末尾の強制 plai
       "探索の周期が混ぜない cycle のぶん進んでいない",
     );
     assertEquals(run.stop.speculation?.switches, 0, "混ぜない cycle の壁がブロックに入っている");
+  });
+});
+
+// ---- T17: 観測席の壁と局面（`wallMs` / `delivered` / `gate`）------------------------
+
+/** 生成相の観測（壁と局面を名乗る 2 種別 — prefill と draft は名乗らない）。 */
+type StepPhase = Extract<GenerationRunPhase, { kind: "decode" | "verify" }>;
+
+const stepsOf = (phases: readonly GenerationRunPhase[]): readonly StepPhase[] =>
+  phases.flatMap((phase) => phase.kind === "decode" || phase.kind === "verify" ? [phase] : []);
+
+/** 期待値 1 通ぶんのゲートの状態。 */
+const gateOf = (
+  mode: "speculate" | "plain",
+  switches: number,
+  measured: boolean,
+): GenerationGateTrace => ({ mode, switches, measured });
+
+Deno.test("T17 観測席の壁: 投機の cycle と plain step の壁が載り、消費者の遅れを含まない", async (t) => {
+  await t.step("T16 と同じ壁を流すと、run ごとの wallMs が偽時計の刻みと一致する", async () => {
+    // T16 と**同じ設定**（投機 cycle 100ms / plain step 10ms・ブロックは 2 cycle）。あちらが
+    // 「勘定と決定列」を見る席で、ここは同じ走行の**壁と局面**を見る席である。
+    const drafter = oracleDrafter();
+    const opened = await openSpeculative({
+      drafter,
+      policy: "auto",
+      gate: FAST_GATE,
+      now: fakeClock(drafter, (_cycle, drafted) => drafted ? 100 : 10),
+    });
+    const run = {
+      ...opened,
+      ...await drain(opened.sequence.generate({ prompt: PROMPT, maxNewTokens: 20 })),
+    };
+    const steps = stepsOf(run.phases);
+
+    // 配送は 4 →（`W1` の初回サンプル）1 → 4 → 4 → plain 5 本 → 予算末尾の 1（T16 の commits）。
+    // 壁はその形のとおり「draft を採った cycle だけ 100ms」である。
+    assertEquals(steps.map((phase) => phase.kind), [
+      "verify",
+      "decode",
+      "verify",
+      "verify",
+      "decode",
+      "decode",
+      "decode",
+      "decode",
+      "decode",
+      "verify",
+    ]);
+    assertEquals(
+      steps.map((phase) => phase.wallMs),
+      [100, 10, 100, 100, 10, 10, 10, 10, 10, 10],
+      "run の壁が偽時計の刻みと一致しない",
+    );
+  });
+
+  await t.step("ゲートの状態は観測の**後**の値（先頭 cycle は measured が立たない）", async () => {
+    const drafter = oracleDrafter();
+    const opened = await openSpeculative({
+      drafter,
+      policy: "auto",
+      gate: FAST_GATE,
+      now: fakeClock(drafter, (_cycle, drafted) => drafted ? 100 : 10),
+    });
+    const run = {
+      ...opened,
+      ...await drain(opened.sequence.generate({ prompt: PROMPT, maxNewTokens: 20 })),
+    };
+
+    // 3 本目の投機 cycle（run 添字 3）でブロック 2 本目が満ちて倒れる = その観測の**結果**が
+    // `mode: "plain"` / `switches: 1` である。観測の前に読む実装だと 1 本ぶん後ろへずれる。
+    assertEquals(stepsOf(run.phases).map((phase) => phase.gate), [
+      // ターン最初の cycle は壁の観測に混ぜない（`skip()` — 混ぜない 2 種類の 1 つ）。
+      gateOf("speculate", 0, false),
+      // `W1` の初回サンプル（2 回目の決定で 1 step だけ plain を挟む）。
+      gateOf("speculate", 0, true),
+      gateOf("speculate", 0, true),
+      gateOf("plain", 1, true),
+      gateOf("plain", 1, true),
+      gateOf("plain", 1, true),
+      gateOf("plain", 1, true),
+      gateOf("plain", 1, true),
+      gateOf("plain", 1, true),
+      // 予算末尾の強制 plain も混ぜない（呼び手の予算で形が決まった cycle）。
+      gateOf("plain", 1, false),
+    ]);
+    assertEquals(run.stop.speculation?.switches, 1, "T16 と同じ位置で倒れていない");
+  });
+
+  await t.step("消費者が配送の合間に時計を進めても壁は動かない（フォールト注入）", async () => {
+    // 壁を「配送の後」で採る実装だと、遅い消費者ほど投機が遅く見える（= ゲートが投機を切る）。
+    // 偽時計を cycle の**中**（draft の中）と配送の**合間**（消費者）の 2 箇所で進め、run の壁に
+    // 前者だけが乗ることを見る。ゲートは要らない（`policy: "always"` でも壁は載る）。
+    const cycleMs = 100;
+    const deliveryMs = 1000;
+    let elapsed = 0;
+    const drafter = fakeDrafter({
+      draft: (cycle) => {
+        elapsed += cycleMs;
+        return chainFrom(cycle.token, K);
+      },
+    });
+    const opened = await openSpeculative({ drafter, now: (): number => elapsed });
+    const stream = opened.sequence.generate({ prompt: PROMPT, maxNewTokens: 9 });
+    let delivered = 0;
+    for await (const event of stream) {
+      if (event.kind !== "token") continue;
+      delivered += 1;
+      elapsed += deliveryMs;
+    }
+    assertEquals((await stream.done).reason, "max-tokens");
+
+    // 故障注入が効いていること（消費者のぶんが時計の大半である）。
+    assertEquals(delivered, 9);
+    assertEquals(elapsed, 2 * cycleMs + 9 * deliveryMs);
+    assertEquals(
+      stepsOf(opened.phases).map((phase) => phase.wallMs),
+      [cycleMs, cycleMs],
+      "run の壁に配送（消費者）の時間が入っている",
+    );
+    // `policy: "always"` はゲートを作らないので、局面の欄も生えない。
+    assertEquals(
+      stepsOf(opened.phases).map((phase) => Object.hasOwn(phase, "gate")),
+      [false, false],
+      "ゲート無しのターンに gate の欄がある",
+    );
+  });
+
+  await t.step("非投機の decode も壁を載せ、ゲートの欄は持たない", async () => {
+    const plain = await runPlain({ prompt: PROMPT, maxNewTokens: 3 });
+    const steps = stepsOf(plain.phases);
+    assertEquals(steps.map((phase) => phase.kind), ["decode", "decode"]);
+    for (const phase of steps) {
+      const wallMs = phase.wallMs;
+      // 非投機の sequence は偽時計を差せない（`now` は投機の指定の欄）ので、実値ではなく
+      // 「載っていること」だけを見る。刻みの一致は上の投機の席が見る。
+      assert(
+        wallMs !== undefined && Number.isFinite(wallMs) && wallMs >= 0,
+        `非投機の decode に壁が載っていない: ${JSON.stringify(phase)}`,
+      );
+      assertEquals(Object.hasOwn(phase, "gate"), false, "非投機の観測にゲートの欄がある");
+    }
+  });
+
+  await t.step(
+    "delivered はその cycle が確定させた token 数（accepted + 1 から作らない）",
+    async () => {
+      // 停止 token で列挙を打ち切った cycle は `accepted + 1` 個を確定させない（T4 と同じ配置 —
+      // 連鎖 6 → 8 → 9 で 9 が停止 token）。導出している実装はここで 1 だけ多く名乗る。
+      const stopTokens = [9];
+      const run = await runSpeculative({
+        drafter: oracleDrafter(),
+        request: { prompt: PROMPT, maxNewTokens: 9 },
+        program: { stopTokens },
+      });
+      const verifies = stepsOf(run.phases).flatMap((phase) =>
+        phase.kind === "verify" ? [phase] : []
+      );
+      assertEquals(verifies.map((phase) => [phase.accepted, phase.delivered]), [[2, 2]]);
+      assertEquals(
+        verifies.reduce((sum, phase) => sum + (phase.delivered ?? 0), 0),
+        run.stop.speculation?.delivered,
+        "観測の delivered の合計が勘定の delivered と合わない",
+      );
+    },
+  );
+
+  await t.step("delivered の合計は勘定と一致する（受理が散るターン）", async () => {
+    // 部分受理（a = 1）の cycle が続くターン: 1 cycle 2 個ずつ = 観測の合計も勘定と並ぶ。
+    const run = await runSpeculative({
+      drafter: partialDrafter(1),
+      request: { prompt: PROMPT, maxNewTokens: 7 },
+    });
+    const delivered = stepsOf(run.phases).flatMap((phase) =>
+      phase.kind === "verify" ? [phase.delivered] : []
+    );
+    assertEquals(delivered, [2, 2, 2]);
+    assertEquals(run.stop.speculation?.delivered, 6);
   });
 });
 

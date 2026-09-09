@@ -29,6 +29,7 @@ import {
 } from "../../src/generation/program.ts";
 import type {
   GenerationEvent,
+  GenerationRunPhase,
   GenerationSession,
   GenerationStop,
   GenerationStream,
@@ -355,3 +356,19 @@ export const drain = async (
 
 export const tokenIds = (events: readonly GenerationEvent[]): number[] =>
   events.filter((event) => event.kind === "token").map((event) => event.id);
+
+/**
+ * 観測席の列から**時間と局面の欄**（`wallMs` / `delivered` / `gate`）を落とす。
+ *
+ * run の種別と番号だけを見る門（「run 1 本につき 1 通」「cycle 番号は 1 始まりの連番」）が壁時計に
+ * 依存しないための口である — 非投機の sequence は偽時計を差せない（`now` は投機の指定の欄）ので、
+ * `wallMs` の実値は走行ごとに違う。壁と局面そのものの門は偽時計を差した席が別に見る。
+ */
+export const runShape = (phases: readonly GenerationRunPhase[]): GenerationRunPhase[] =>
+  phases.map((phase) =>
+    phase.kind === "verify"
+      ? { kind: phase.kind, cycle: phase.cycle, rows: phase.rows, accepted: phase.accepted }
+      : phase.kind === "decode"
+      ? { kind: phase.kind, step: phase.step }
+      : phase
+  );
