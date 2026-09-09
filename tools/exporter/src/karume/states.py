@@ -177,8 +177,13 @@ def to_external_states_form(graph: IrGraph, plan: ExternalStatesPlan) -> IrGraph
         node = nodes[index]
         _assert_convertible(node, where)
         window = _window(spec.window, where)
-        for slot_name, source in ((spec.k_slot, spec.k_input), (spec.v_slot, spec.v_input)):
-            _assert_dropped_input(graph, node, source, where)
+        # 添字は K = 1 / V = 2（`_assert_dropped_input` が個別に照合する — 集合で見ると
+        # K / V の取り違えが通る）。
+        for slot_name, source, kv_index in (
+            (spec.k_slot, spec.k_input, 1),
+            (spec.v_slot, spec.v_input, 2),
+        ):
+            _assert_dropped_input(graph, node, source, kv_index, where)
             dropped.add(source)
             candidate = _Slot(
                 shape=[1, spec.kv_heads, spec.capacity, spec.head_dim],
@@ -209,17 +214,24 @@ def to_external_states_form(graph: IrGraph, plan: ExternalStatesPlan) -> IrGraph
     )
 
 
-def _assert_dropped_input(graph: IrGraph, node: IrNode, source: str, where: str) -> None:
-    """落とす k / v が**そのノードが実際に読んでいるグラフ入力**であることを見る。
+def _assert_dropped_input(
+    graph: IrGraph, node: IrNode, source: str, index: int, where: str
+) -> None:
+    """落とす k / v が**そのノードがその位置で実際に読んでいるグラフ入力**であることを見る。
 
-    MUST: 2 点とも見る。ノードの `ins[1]` / `ins[2]` と一致しない指定は「別の値を落として
-    attention は元の k/v を読み続ける」形（`_prune` が読者ごと消すので出力の値だけが変わる）で、
-    グラフ入力でない名前の指定は「計算途中の値を入力扱いで落とす」形（同じく沈黙誤値）。
+    `index` は期待する `ins` の添字（K = 1 / V = 2）。MUST: 添字ごとに**個別**に照合する
+    （集合 `{ins[1], ins[2]}` で見ると K に元 V・V に元 K を渡した取り違えが通り、同形なら
+    スロット登録まで成立して沈黙誤値になる — 借り手は貸し手の K スロットから V を読む形で走る）。
+
+    MUST: グラフ入力であることも見る。入力でない名前の指定は「計算途中の値を入力扱いで落とす」
+    形で、`_prune` が読者ごと消すので出力の値だけが静かに変わる。
     """
-    if source not in (node.ins[1], node.ins[2]):
+    role = {1: "k", 2: "v"}[index]
+    if source != node.ins[index]:
         raise StatesFormError(
-            f"{where}: 落とす入力 '{source}' がこのノードの k / v"
-            f"（'{node.ins[1]}' / '{node.ins[2]}'）でない"
+            f"{where}: {role} に指定した '{source}' がこのノードの {role}"
+            f"（ins[{index}] = '{node.ins[index]}'）でない"
+            "（k は ins[1] / v は ins[2] ちょうど）"
         )
     if not any(spec.name == source for spec in graph.inputs):
         raise StatesFormError(

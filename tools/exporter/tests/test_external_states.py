@@ -235,7 +235,41 @@ class TestTheSurgeryRejectsMiswiring:
             window=WINDOW,
         )
 
-        with pytest.raises(StatesFormError, match="このノードの k / v"):
+        with pytest.raises(StatesFormError, match=r"k に指定した 'qf'"):
+            to_external_states_form(source(), plan(spec))
+
+    def test_swapping_k_and_v_is_rejected(self):
+        """K に元 V・V に元 K を指定した取り違え — 同形なので通ると値だけが静かに違う。"""
+        spec = ExternalAttentionSpec(
+            output="as",
+            k_slot="l13.k",
+            v_slot="l13.v",
+            k_input="sliding_v",
+            v_input="sliding_k",
+            kv_heads=1,
+            head_dim=256,
+            capacity=SLIDING_CAPACITY,
+            window=WINDOW,
+        )
+
+        with pytest.raises(StatesFormError, match=r"k に指定した 'sliding_v'"):
+            to_external_states_form(source(), plan(spec))
+
+    def test_naming_the_same_input_as_both_k_and_v_is_rejected(self):
+        """K と V に同じ入力を指定した形（V スロットへ K が入る）も添字ごとの照合で落ちる。"""
+        spec = ExternalAttentionSpec(
+            output="as",
+            k_slot="l13.k",
+            v_slot="l13.v",
+            k_input="sliding_k",
+            v_input="sliding_k",
+            kv_heads=1,
+            head_dim=256,
+            capacity=SLIDING_CAPACITY,
+            window=WINDOW,
+        )
+
+        with pytest.raises(StatesFormError, match=r"v に指定した 'sliding_k'"):
             to_external_states_form(source(), plan(spec))
 
     def test_an_already_operated_node_is_rejected(self):
