@@ -1530,8 +1530,10 @@ export const statePvTiledWorkgroups = (
 // ---- readonly 変種（past だけを読む — ADR 0096 決定 1 / 段 2 の drafter） -----------------
 //
 // drafter（MTP head）は自前の K/V を持たず、貸し手 context の**スロットだけ**を読む。query は
-// 論理位置 `P−1`（直近確定 token）に居る 1 行で、列 `[column_base, P)` を見る。今 step の ins は
-// 無い（append も無い）。3 段（①' ② ③'）の骨格・縮約順・数値契約は states 形と同一で、変わるのは
+// 論理位置 `P`（未 commit の frontier token）に居る 1 行で、読むのは過去の列 `[column_base, P)`
+// だけ — 自分の列は貸し手の ring に無い（ADR 0096 追記〈段 3〉: drafter の入力は frontier `b@P`・
+// hidden `h@(P−1)`・RoPE 位置 `P`）。今 step の ins は無い（append も無い）。
+// 3 段（①' ② ③'）の骨格・縮約順・数値契約は states 形と同一で、変わるのは
 // **live 範囲の式と述語、ins 分岐と束縛が無いこと**だけ。
 //
 // MUST: 物理行の写像は {@link stateSlotRowWgsl}（読み書き同式）を共有する。貸し手の append と
@@ -1544,7 +1546,9 @@ export const statePvTiledWorkgroups = (
  * readonly の live 範囲（`column_base = P − min(P, W)` / `live = min(P, W)`・full は `0` / `P`）。
  *
  * states 形（{@link stateLiveWgsl}）との違いは「+Q が無い」「窓が W−1 でなく W」の 2 点 —
- * 今 step の ins が無いので、位置 P−1 の query から見た窓 `[P−W, P)` が W 列ちょうどになる。
+ * 位置 P の query が読むのは過去だけ（自分の列は ring に無い）なので、live 範囲は `[P−W, P)` の
+ * W 列ちょうどになる（states 形は自分の Q 列を窓に含めるぶん過去側が W−1）。最古列が `P−W` で
+ * あることは deferred の門 `queryLength ≤ slidingSlack` の根拠でもある（ADR 0096 追記〈段 3〉）。
  * `query` 引数は署名を states 形と揃えるためだけに受ける（読まない）。
  */
 const stateReadonlyLiveWgsl = (sliding: boolean, uniform = STATE_UNIFORM): string =>

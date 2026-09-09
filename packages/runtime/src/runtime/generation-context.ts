@@ -637,12 +637,15 @@ export class GenerationContext {
           "state の無いモデルでは作れない — 1-shot 実行は Session.run / enqueue をそのまま使う）",
       );
     }
-    assertChunkLength(spec.chunkLength);
     // MUST: 検査した実体をそのまま持ち回る（`spec` から読み直さない）。検査点と下の
     // constructor 渡しの間には確保の await（`raceDeviceLost`）があり、その窓で呼び手が渡した
-    // 配列を書き換えると、未検査の M が許可集合に載る（TOCTOU）。
+    // spec を書き換えると、未検査の値が通る（TOCTOU）— **配列も長さも**ここで捕捉した実体
+    // だけを使う（`chunkLength` を読み直すと、検査は M=8 で通したのに context は M=1 という
+    // 形が例外なしに成立する）。
+    const chunkLength = spec.chunkLength;
+    assertChunkLength(chunkLength);
     const chunkBuckets = Object.freeze([...(spec.chunkBuckets ?? [])]);
-    assertChunkBuckets(chunkBuckets, spec.chunkLength);
+    assertChunkBuckets(chunkBuckets, chunkLength);
     // 借り物スロット（external — ADR 0096 段 2 §1.1）と `borrow` は**対**。片方だけの形は
     // どちらの向きも fail loudly（external があるのに自前確保すると空の過去を読み、borrow だけ
     // なら誰も読まないスロットを貸し手から掴む）。
@@ -726,7 +729,7 @@ export class GenerationContext {
         slots,
         slidingSlotWindows(graph),
         lengths,
-        spec.chunkLength,
+        chunkLength,
         chunkBuckets,
         bindings,
       );
@@ -841,7 +844,9 @@ export class GenerationContext {
         slots,
         slidingSlotWindows(graph),
         created,
-        spec.chunkLength,
+        // MUST: 上の検査を通った値（1 ちょうど）を定数で渡す — 検査点と await の間で `spec` が
+        // 書き換わっても借り手の実行形は 1 のまま（自前確保の経路と同じ TOCTOU の閉じ方）。
+        1,
         [],
         bindings,
         { lender, slidingSlack: lender.slidingSlack },
@@ -865,6 +870,11 @@ export class GenerationContext {
    * 背後の物理 state は回復不能なので、この数値を「ここから再開できる」と読ませない。読めるのは
    * 「どこまで進んだか」であって「そこから続けられるか」ではなく、区別できない形で返すと
    * ホストは必ず後者として使う）。
+   *
+   * 借り手 context（`createGenerationContext({ borrow })` で作ったもの）では、この値は**借り手
+   * run の開始時に貸し手から写した論理長**の snapshot で、貸し手が進んでも更新されない（run を
+   * 1 本も回していなければ `0`）。借り手の現在値が要る場面では貸し手の `pastLength` を読む
+   * こと — 投機デコードの生成面もそうしている（ADR 0096 段 2 §2.1）。
    */
   get pastLength(): number {
     this.#assertUsable("pastLength");
@@ -876,6 +886,9 @@ export class GenerationContext {
    *
    * `pastLength` は run が捕捉した論理長・`queryLength` は物理 ring へ書いた行数で、
    * {@link GenerationContext.commit} が受け取れる `rows` の上限がそのまま `queryLength`。
+   *
+   * 返るのは**凍結済み**の object（`Object.freeze`）— 上限検査が信頼する値なので、書き換えは
+   * strict mode（モジュールは常に strict）で `TypeError` になる。
    */
   get pendingCommit(): { readonly pastLength: number; readonly queryLength: number } | undefined {
     this.#assertUsable("pendingCommit");
@@ -1116,7 +1129,10 @@ export class GenerationContext {
           `queryLength ${this.#pending.queryLength}）— 内部の不変条件破れ`,
       );
     }
-    this.#pending = { pastLength, queryLength };
+    // MUST: 凍結して立てる（getter がこの実体をそのまま返し、`commit` はその `queryLength` を
+    // 受理行数の上限として信頼するので、外から書き換えられると「書いていない行の確定」が
+    // 上限検査を素通りする）。
+    this.#pending = Object.freeze({ pastLength, queryLength });
   }
 
   /**

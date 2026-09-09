@@ -659,6 +659,35 @@ Deno.test({
 });
 
 Deno.test({
+  name: "確保の await を跨いだ chunkLength の書き換えは context に届かない（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const session = await stateSession(gpu);
+    try {
+      // 配列と同じ窓を長さについても閉じる。`spec` から読み直す形だと、検査は 8 で通ったのに
+      // context の上限が 1 になる（許可集合も {1} に縮む）— 例外も警告も出ないまま、以後の
+      // prefill 全部が queryLength の門で落ちる形になる。
+      const spec = { chunkLength: 8 };
+      const pending = session.createGenerationContext(spec);
+      spec.chunkLength = 1;
+      const context = await pending;
+      try {
+        assertEquals(context.chunkLength, 8, "検査を通った値が context の上限");
+        assertEquals([...internals(context).allowedRows], [1, 8]);
+        // 上限が書き換え後の 1 に締まっていないこと（8 行の run は通る）。
+        internals(context).writeLengths(0, 8);
+      } finally {
+        await context.dispose();
+      }
+    } finally {
+      await session.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
   name: "論理長は run の成功で進み、rewind は 0..pastLength の整数だけを受ける（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -1168,6 +1197,40 @@ Deno.test({
       assert(spelling.message.includes("'immediate' か 'deferred'"), spelling.message);
       assertEquals(context.pastLength, 4, "拒否された run は論理長も保留も動かさない");
       assertEquals(context.pendingCommit, undefined);
+    } finally {
+      await context.dispose();
+      await session.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
+  name: "pendingCommit は凍結して返り、受理行数の上限は外から書き換えられない（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const session = await stateSession(gpu);
+    const context = await session.createGenerationContext({ chunkLength: 4 });
+    try {
+      await session.run({ x: RUN_INPUT }, {}, { context, queryLength: 2, commit: "deferred" });
+      const pending = context.pendingCommit;
+      assert(pending !== undefined, "deferred run が保留を立てていない");
+      assert(Object.isFrozen(pending), "commit の上限を運ぶ object は凍結 MUST");
+      // TS の readonly は代入互換性に効かないので、公開面はこの向きで**型検査なしに**書き換え
+      // られる（`commit` はこの `queryLength` を「書いた行数」として信頼する）。凍結だけが
+      // 検出線で、strict mode では代入そのものが TypeError になる。
+      const writable: { pastLength: number; queryLength: number } = pending;
+      assertThrows(() => {
+        writable.queryLength = 4;
+      }, TypeError);
+      assertEquals(context.pendingCommit, { pastLength: 0, queryLength: 2 }, "上限は動いていない");
+
+      // 書いていない行の確定は依然拒否（上限が 4 に開いていたらここが通ってしまう）。
+      const over = assertThrows(() => context.commit(3), ExecutionError);
+      assert(over.message.includes("queryLength 2"), over.message);
+      context.commit(2);
+      assertEquals(context.pastLength, 2);
     } finally {
       await context.dispose();
       await session.dispose();

@@ -605,6 +605,41 @@ Deno.test({
 });
 
 Deno.test({
+  name: "確保の await を跨いだ chunkLength の書き換えは借り手 context に届かない（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const lender = await createSession(gpu, openModel(graphModelBuffer(lenderGraph())));
+    const borrower = await createSession(gpu, openModel(graphModelBuffer(borrowerGraph())));
+    const lenderContext = await lender.createGenerationContext({
+      chunkLength: 4,
+      bindings: { C: 16 },
+    });
+    try {
+      // 「chunkLength は 1 ちょうど」の検査と constructor 渡しの間には論理長確保の await がある。
+      // `spec` から読み直す形だと、検査は 1 で通ったのに実行形が M=4 の借り手ができてしまう
+      // （readonly attention は M 1 固定 — ADR 0096 段 2 §1.2 の形検査と対なので、この形は
+      // 例外なしに崩れる）。
+      const spec = { chunkLength: 1, borrow: lenderContext };
+      const pending = borrower.createGenerationContext(spec);
+      spec.chunkLength = 4;
+      const borrowed = await pending;
+      try {
+        assertEquals(borrowed.chunkLength, 1, "検査を通った 1 のまま");
+        assertEquals([...internals(borrowed).allowedRows], [1], "許可する物理形は decode 1 本だけ");
+      } finally {
+        await borrowed.dispose();
+      }
+    } finally {
+      await lenderContext.dispose();
+      await borrower.dispose();
+      await lender.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
   name: "external スロットの容量は計画鍵に載る（容量の違う貸し手を束ねた 2 本は別鍵・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
