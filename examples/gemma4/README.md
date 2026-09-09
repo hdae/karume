@@ -35,8 +35,8 @@ forms are mutually exclusive:
 
 ## Options
 
-All options are `--key value` pairs except `--diagnostics`, which is a bare switch. Unknown keys are
-rejected rather than silently ignored.
+All options are `--key value` pairs except `--speculative` and `--diagnostics`, which are bare
+switches. Unknown keys are rejected rather than silently ignored.
 
 | Option                           | Default                 | What it does                                                                                                       |
 | -------------------------------- | ----------------------- | ------------------------------------------------------------------------------------------------------------------ |
@@ -50,6 +50,7 @@ rejected rather than silently ignored.
 | `--capacity <n>`                 | asset default           | Logical positions this conversation reserves KV for.                                                               |
 | `--chunk-length <n>`             | asset default           | Rows per prefill run.                                                                                              |
 | `--max-resident-ple-bytes <n>`   | twice the largest shard | Host RAM budget for the resident PLE sidecar.                                                                      |
+| `--speculative`                  | off                     | Build the MTP drafter and speculate while decoding. Speed only — the token sequence does not change.               |
 | `--diagnostics`                  | off                     | Print the per-op GPU time breakdown of the last run of each turn to stderr. Not usable on macOS/Metal — see below. |
 
 Any sampling flag you pass is layered on top of the recommended values the asset declares; the ones
@@ -77,6 +78,23 @@ Both are validated at startup — chunk length when the pipeline is built, capac
 estimate that prints the `GPU 見積り` line. You find out before the first turn, not on the first
 `send`.
 
+### `--speculative` buys speed and nothing else
+
+With the flag the pipeline also fetches the distribution's `drafter` weights and opens one drafter
+session that borrows the target session's embedding table (no bytes are duplicated), and the
+conversation speculates by default. Each cycle drafts `k` tokens on the drafter and confirms them in a
+single verify run of `k + 1` rows, so one target run can commit up to `k + 1` tokens instead of
+exactly one. `k` is the number of steps the distribution's drafter graph was exported with, and the
+script does not expose a knob for it.
+
+Acceptance draws from the same logits, with the same history, in the same order as a plain decode
+would at that position, so the flag moves speed only: the same seed produces the same tokens with and
+without it. Compare wall clock and tok/s, never output.
+
+A distribution that carries no drafter rejects the flag while `fromPretrained` resolves what to fetch.
+The script does not inspect the distribution first — the gate lives in the library, and a second copy
+of it here would be a second thing to keep true.
+
 ### `--diagnostics` is not free
 
 Per-op GPU timing needs the `timestamp-query` feature, which can only be requested when the device
@@ -100,8 +118,13 @@ The banner is shaped like this — the byte figures depend on the asset and the 
 ```
 [gemma4] ready（12.3s） / capacity 4096 / maxPosition 131072 / chunk 768
          GPU 見積り resident 3812 MiB / peakAccounted 4205 MiB（上限ではない — 勘定外 5 項目）
-         sampler {"temperature":1,"topK":64,"topP":0.95} / max-new-tokens 256
+         sampler {"temperature":1,"topK":64,"topP":0.95} / max-new-tokens 256 / 投機なし
 ```
+
+The last field says whether this run carries the drafter: `投機なし` without `--speculative`,
+`投機あり（k は配布形の段数）` with it — the banner does not spell the number, because the effective
+`k` is the step count baked into the drafter graph and the public surface carries no constant for it.
+The per-turn line below does spell it, read out of the acceptance tally.
 
 `resident` is what the session holds for the lifetime of the model (weights plus KV state slots);
 `peakAccounted` adds the largest single run scenario on top. It is an estimate of the accounted
@@ -113,8 +136,11 @@ A long prompt spends its first seconds in prefill, where nothing has been decode
 prompt spans more than one chunk, the script overwrites a `prefill n/m` line on stderr until the
 first piece of the reply arrives.
 
-Each turn closes with a bracketed summary: stop reason, tokens generated, elapsed seconds, tok/s, and
-the number of turns in the conversation. When a turn does not fit, the session drops the oldest
-user/assistant pair and says so; when there is nothing left to drop, it reports the numbers that
-decide the case (limit, past length, prompt length, and the largest `max-new-tokens` that would have
-fit).
+Each turn closes with a bracketed summary: stop reason, tokens generated, elapsed seconds, tok/s,
+then — on a speculating turn — `投機 k=3 · 2.15 tok/cycle（cycles 40）`, and finally the number of
+turns in the conversation. `k` is the drafter's step count, taken from the length of the acceptance
+histogram (the tally is built with one bucket per acceptance count, `0..k`); the tokens committed per
+verify run are `1.00` when nothing was accepted and at most `k + 1`. When a turn does not fit, the
+session drops the oldest user/assistant pair and says so; when there is nothing left to drop, it
+reports the numbers that decide the case (limit, past length, prompt length, and the largest
+`max-new-tokens` that would have fit).

@@ -6,6 +6,7 @@
  *     deno task demo:gemma4 --source models/karume-gemma4 --temperature 0
  *     deno task demo:gemma4 --repo someone/karume-gemma4@1a2b3c4 --seed 7
  *     deno task demo:gemma4 --capacity 16384 --chunk-length 1536
+ *     deno task demo:gemma4 --speculative
  *     deno task demo:gemma4 --diagnostics
  *
  * 1 行 = 1 発話。`/reset` で会話を捨て、`/exit`（または Ctrl+D）で終わる。生成中の Ctrl+C は
@@ -73,7 +74,7 @@ import type { GpuTimingStats, SessionDiagnostics } from "../../packages/runtime/
 const USAGE = "--source <配布形のパス> | --repo <owner/name[@revision]>" +
   " --system <文字列> --max-new-tokens <整数> --temperature <数> --top-k <整数>" +
   " --top-p <数> --seed <整数> --max-resident-ple-bytes <整数> --capacity <整数>" +
-  " --chunk-length <整数> --diagnostics";
+  " --chunk-length <整数> --speculative --diagnostics";
 const KNOWN = new Set([
   "source",
   "repo",
@@ -88,7 +89,7 @@ const KNOWN = new Set([
   "chunk-length",
 ]);
 /** 値を取らないスイッチ（`--key value` の対ではなく 1 語で立つ）。 */
-const FLAGS = new Set(["diagnostics"]);
+const FLAGS = new Set(["speculative", "diagnostics"]);
 
 /** 取得元の既定（`dist.py --pipeline gemma4` が組むローカルミラー — `docs/assets-layout.md`）。 */
 const DEFAULT_SOURCE = "models/karume-gemma4";
@@ -175,6 +176,22 @@ const capacityArg = integer("capacity");
 const chunkLengthArg = integer("chunk-length");
 
 /**
+ * 投機デコード（MTP drafter）を組む（ADR 0096 — 既定は組まない）。
+ *
+ * 立てると配布形の `drafter` weights も取得して drafter Session を 1 本張り、この会話は既定で
+ * 投機を張る（1 verify run が最大 `k+1` token を確定させる）。`k` は渡さない = 配布形の段数
+ * （drafter グラフの出口の本数）で、これがこの台本の唯一の投機ノブである。
+ *
+ * **速度だけのノブである** — 受理は非投機の decode が同じ位置で行う抽選と同じ logits・同じ
+ * history で 1 回ずつ引くので、出る token 列は付けても付けなくても同一（ADR 0096 決定 7）。
+ * A/B は同じ seed で走らせて壁時計と tok/s だけを比べればよい。
+ *
+ * drafter を持たない配布形に付けると `fromPretrained` が取得の解決で落ちる — 門はライブラリ側に
+ * あるので、ここでは配布形を覗かない（同じ門を 2 実装持たない）。
+ */
+const speculative = flags.has("speculative");
+
+/**
  * op 別 GPU 時間の内訳を stderr へ出す（ADR 0021 — 既定は計測しない）。
  *
  * 計測は無償ではない — 有効な device は 1 dispatch = 1 pass に開くので**壁時計が伸びる**。
@@ -229,6 +246,28 @@ const describeStop = (stop: Gemma4ChatStop): string =>
   stop.reason === "eos" || stop.reason === "stop-token"
     ? `${stop.reason}(${stop.token})`
     : stop.reason;
+
+/**
+ * 投機の取り分を締めの行へ 1 語で足す（勘定が載っていないターン = 非投機では何も足さない）。
+ *
+ * 1 cycle は棄却でも frontier を 1 個は進めるので、1 cycle あたりの確定 token 数は
+ * `(accepted + cycles) / cycles` — 受理ゼロなら 1.00（投機の取り分なし）で、上限は `k+1`。
+ * これが「1 verify run で何 token 進んだか」であり、投機の効きはこの 1 数がそのまま示す
+ * （壁時計の得はこれと run 1 本の重さの積で決まるので、tok/s と並べて読む）。
+ *
+ * 実効 k は**受理数ヒストグラムの長さ − 1** から出す（勘定は長さ `k+1` で作られ、添字 = 受理数
+ * `0..k`）。公開面に段数の定数は無いので、この配布形が何段で焼かれているかを名乗れる口はここ
+ * だけである — 上限 `k+1` を知らずに tok/cycle を読むと、取り分の余地がどれだけ残っているのかが
+ * 分からない。
+ *
+ * cycle が 1 本も回らなかったターン（prefill 中の中断など）では割れないので出さない。
+ */
+const describeSpeculation = ({ speculation }: Gemma4ChatStop): string => {
+  if (speculation === undefined || speculation.cycles === 0) return "";
+  const { cycles, accepted, acceptedHistogram } = speculation;
+  return ` · 投機 k=${acceptedHistogram.length - 1}` +
+    ` · ${((accepted + cycles) / cycles).toFixed(2)} tok/cycle（cycles ${cycles}）`;
+};
 
 /** 上書きで描く 1 行の幅（短い行が前の行の尻を残さないよう、ここまで空白で埋める）。 */
 const LINE_WIDTH = 76;
@@ -318,6 +357,8 @@ const main = async (): Promise<void> => {
     {
       ...(maxResidentPleBytes === undefined ? {} : { maxResidentPleBytes }),
       ...(chunkLengthArg === undefined ? {} : { chunkLength: chunkLengthArg }),
+      // `k` は渡さない = 配布形の段数（`{}` が「drafter を組む」の綴りそのもの）。
+      ...(speculative ? { speculative: {} } : {}),
       ...(gpu === undefined ? {} : { gpu }),
       ...(diagnostics ? { onRunDiagnostics: observeRun } : {}),
       onProgress: showProgress,
@@ -367,7 +408,10 @@ const main = async (): Promise<void> => {
       `         sampler ${
         sampler === undefined ? "greedy（配布形の宣言なし）" : JSON.stringify(sampler)
       }` +
-      ` / max-new-tokens ${maxNewTokens}\n` +
+      ` / max-new-tokens ${maxNewTokens}` +
+      // 実効 k は配布形の drafter グラフの出口の本数（この行では数を名乗らない — 段数と
+      // 1 cycle で進んだ token 数はターンの締めの行が勘定から出す）。
+      `${speculative ? " / 投機あり（k は配布形の段数）" : " / 投機なし"}\n` +
       `         /reset で会話を捨てる・/exit か Ctrl+D で終わる・生成中の Ctrl+C はそのターンを中断\n\n`,
   );
 
@@ -455,7 +499,8 @@ const main = async (): Promise<void> => {
     const elapsed = (performance.now() - at) / 1000;
     write(
       `\n  [${describeStop(stop)} · ${stop.tokens} tok · ${elapsed.toFixed(1)}s · ` +
-        `${(stop.tokens / elapsed).toFixed(1)} tok/s · 会話 ${session.turns.length} 発話]\n`,
+        `${(stop.tokens / elapsed).toFixed(1)} tok/s${describeSpeculation(stop)}` +
+        ` · 会話 ${session.turns.length} 発話]\n`,
     );
     showTiming();
   };
