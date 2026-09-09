@@ -185,11 +185,14 @@ export type BenchSummary = {
 /**
  * 1 反復のローテーション（順序効果を打ち消す最小単位）。
  *
- * `plain` を 2 モードそれぞれの前後に置く（P S S P P A A P）。`always` と `auto` を隣り合わせに
- * しないのは、2 つの投機モードの差が「後のほうが速い / 遅い」に乗るのを避けるためで、両者が
- * 挟む `plain` は同じ本数（各 2 本）である。
+ * `plain` を 2 モードそれぞれの前後に置く（奇数 round は P S S P P A A P・偶数 round は
+ * P A A P P S S P）。`always` と `auto` を隣り合わせにしないのは、2 つの投機モードの差が
+ * 「後のほうが速い / 遅い」に乗るのを避けるためで、両者が挟む `plain` は同じ本数（各 2 本）で
+ * ある。round ごとに 2 モードの席を入れ替えるのは、1 プロセスの中で GPU が温まって後半ほど遅く
+ * なる単調な漂流（RTX の実測で 1 プロセス ≈ 3 分の間に plain が +4%）が、固定順だと常に後席の
+ * モードに乗るため — 交互にすれば中央値の比からその偏りが消える。
  */
-const ROTATION: readonly BenchMode[] = [
+const ROTATION_ODD: readonly BenchMode[] = [
   "plain",
   "always",
   "always",
@@ -199,9 +202,20 @@ const ROTATION: readonly BenchMode[] = [
   "auto",
   "plain",
 ];
+const ROTATION_EVEN: readonly BenchMode[] = [
+  "plain",
+  "auto",
+  "auto",
+  "plain",
+  "plain",
+  "always",
+  "always",
+  "plain",
+];
 
 /**
- * 回すターンの台本 — 暖機 3 本（各モード 1 本）の後に `rounds` 回の {@link ROTATION}。
+ * 回すターンの台本 — 暖機 3 本（各モード 1 本）の後に `rounds` 回のローテーション（奇数 round は
+ * {@link ROTATION_ODD}・偶数 round は {@link ROTATION_EVEN}）。
  *
  * 暖機を**記録する**のは、立ち上げの費用がどれだけあったかを後から読めるようにするためで、
  * 要約には入らない（{@link summarizeTurns} が `warmup` で落とす）。
@@ -216,7 +230,8 @@ export const turnPlan = (rounds: number): readonly TurnPlan[] => {
     { mode: "auto", round: 0, warmup: true },
   ];
   for (let round = 1; round <= rounds; round += 1) {
-    for (const mode of ROTATION) plans.push({ mode, round, warmup: false });
+    const rotation = round % 2 === 1 ? ROTATION_ODD : ROTATION_EVEN;
+    for (const mode of rotation) plans.push({ mode, round, warmup: false });
   }
   return plans;
 };

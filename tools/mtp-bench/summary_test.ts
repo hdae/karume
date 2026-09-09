@@ -3,7 +3,7 @@
  *
  * 見る 6 点:
  *
- * 1. **ローテーションの台本** — 暖機 3 本の後に P S S P P A A P が `rounds` 回
+ * 1. **ローテーションの台本** — 暖機 3 本の後に P S S P P A A P / P A A P P S S P が交互に `rounds` 回
  * 2. **分母の 2 本**（`main.ts` の進捗行も呼ぶ口）— `tokensAfterFirst` / `tokensPerCycle`
  *    （正本は `delivered / cycles`）
  * 3. **中央値と派生量** — `msPerToken` / `hostMsPerToken`（3 モード）/ `tokensPerCycle` /
@@ -153,26 +153,48 @@ const withoutMode = (turns: readonly TurnRecord[], mode: TurnRecord["mode"]): Tu
   turns.filter((turn) => turn.mode !== mode);
 
 Deno.test("ローテーションの台本", async (t) => {
-  await t.step("暖機 3 本の後に P S S P P A A P を rounds 回", () => {
-    const plans = turnPlan(1);
-    assertEquals(plans.length, 3 + 8);
-    assertEquals(
-      plans.map((plan) => `${plan.mode}#${plan.round}${plan.warmup ? "w" : ""}`),
-      [
-        "plain#0w",
-        "always#0w",
-        "auto#0w",
-        "plain#1",
-        "always#1",
-        "always#1",
-        "plain#1",
-        "plain#1",
-        "auto#1",
-        "auto#1",
-        "plain#1",
-      ],
-    );
-  });
+  await t.step(
+    "暖機 3 本の後に P S S P P A A P（奇数 round）と P A A P P S S P（偶数 round）を交互に",
+    () => {
+      const plans = turnPlan(2);
+      assertEquals(plans.length, 3 + 16);
+      assertEquals(
+        plans.map((plan) => `${plan.mode}#${plan.round}${plan.warmup ? "w" : ""}`),
+        [
+          "plain#0w",
+          "always#0w",
+          "auto#0w",
+          "plain#1",
+          "always#1",
+          "always#1",
+          "plain#1",
+          "plain#1",
+          "auto#1",
+          "auto#1",
+          "plain#1",
+          "plain#2",
+          "auto#2",
+          "auto#2",
+          "plain#2",
+          "plain#2",
+          "always#2",
+          "always#2",
+          "plain#2",
+        ],
+      );
+    },
+  );
+
+  await t.step(
+    "2 つの投機モードは round を跨いで前席と後席を同じ回数ずつ取る（漂流の偏りを消す）",
+    () => {
+      const seat = (mode: string, round: number): number =>
+        (turnPlan(4).findIndex((plan) => plan.round === round && plan.mode === mode) - 3) % 8;
+      // 奇数 round は always が前席（添字 1）・偶数 round は auto が前席。4 round で 2 回ずつ。
+      assertEquals([1, 2, 3, 4].map((round) => seat("always", round)), [1, 5, 1, 5]);
+      assertEquals([1, 2, 3, 4].map((round) => seat("auto", round)), [5, 1, 5, 1]);
+    },
+  );
 
   await t.step("既定の 3 round は 27 ターン・2 round は 19 ターン", () => {
     assertEquals(turnPlan(3).length, 27);

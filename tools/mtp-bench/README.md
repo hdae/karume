@@ -68,11 +68,12 @@ One process = one configuration (the convention of `tools/ram-peak/measure.ts`).
    the **same prompt token ids** from the same starting position; each turn gets a fresh sequence.
 3. **Warm up** with one turn of each mode. They are recorded (`warmup: true`) but excluded from the
    summary: the first turns include shader translation and params construction.
-4. Run `--rounds` repetitions of the **rotation** — `plain`, `always`, `always`, `plain`, `plain`,
-   `auto`, `auto`, `plain` — which cancels the order effect (later turns being systematically faster
-   or slower). Each speculative mode is bracketed by the same number of `plain` turns (two on each
-   side), and the two of them are never adjacent, so the `always` / `auto` difference does not ride
-   on the drift.
+4. Run `--rounds` repetitions of the **rotation** — odd rounds `plain`, `always`, `always`, `plain`,
+   `plain`, `auto`, `auto`, `plain`; even rounds swap the two speculative pairs (`auto` first) — which
+   cancels the order effect (later turns being systematically faster or slower: on the RTX 3080 Ti a
+   3-minute process warms up by about +4% in `plain`). Each speculative mode is bracketed by the same
+   number of `plain` turns (two on each side), the two of them are never adjacent, and alternating
+   their seats across rounds keeps the monotone drift from landing on one of them.
 5. Summarise with **medians**, never means: a single turn can spike (PLE shard re-reads, clock state
    changes), and a mean carries the spike into the ratio.
 
