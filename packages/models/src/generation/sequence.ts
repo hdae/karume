@@ -51,9 +51,10 @@
  * ## 投機経路（ADR 0096 段 3 — `options.speculative` があるとき・温度に依らない）
  *
  * 1 cycle = draft（借り手 run・`k' = min(k, 残り予算 − 1)` 本）→ verify（貸し手の deferred run・
- * `[b, d₁..d_k']` の `k'+1` 行）→ 受理（同期・先頭一致 — `speculation.ts`）→ 停止 token で切り詰め →
- * 確定列を 1 個ずつ配送（`pendingToken` / `generated` / `history` は yield の前に更新 — 既存の MUST）
- * → **`settleCommit()` が frontier まで commit**（消費された行数 = frontier にした token の数）。
+ * `[b, d₁..d_k']` の `k'+1` 行）→ 受理（同期・先頭一致・**停止 token で列挙を打ち切る** —
+ * `speculation.ts`）→ 確定列を 1 個ずつ配送（`pendingToken` / `generated` / `history` は yield の
+ * 前に更新 — 既存の MUST）→ **`settleCommit()` が frontier まで commit**（消費された行数 =
+ * frontier にした token の数）。
  *
  * MUST: `settleCommit()` は配送ループの直後と generator の `finally` の両方で呼ぶ（保留があれば 1 回だけ
  * commit する）。消費者の `break` / `return()` は finally で「配送した token まで」を commit し、
@@ -87,7 +88,6 @@ import {
   planDraftLength,
   type SpeculationTally,
   takeDrafts,
-  truncateAtStop,
   verifyRowIndices,
 } from "./speculation.ts";
 
@@ -222,8 +222,10 @@ export type GenerationStop =
 /**
  * 投機の勘定（{@link GenerationStop.speculation}）。
  *
- * 1 cycle に確定する token 数は `1 + a`（棄却でも frontier 1 個は必ず進む）なので、1 cycle あたりの
- * 確定数は `(accepted + cycles) / cycles`。予算末尾の `k' = 0` の cycle（draft を採らない）も
+ * 1 cycle あたりの確定数（token/cycle）の**正本は `delivered / cycles`** である。ふつうの cycle は
+ * `1 + a` 個を確定させる（棄却でも frontier 1 個は必ず進む）が、受理した draft が停止 token だった
+ * cycle はそこで列挙を打ち切るので `a` 個しか確定しない — 旧来の `(accepted + cycles) / cycles` は
+ * その cycle 1 本につき分子が 1 だけ過大になる。予算末尾の `k' = 0` の cycle（draft を採らない）も
  * `cycles` に数え `acceptedHistogram[0]` に入る — draft あたりの受理数が要るなら `accepted / draftRuns`。
  */
 export type GenerationSpeculation = {
@@ -233,8 +235,15 @@ export type GenerationSpeculation = {
   readonly draftRuns: number;
   /** 出した draft の総数（Σ k'）。 */
   readonly drafted: number;
-  /** 受理した draft の総数（Σ a）。 */
+  /** 受理して配送した draft の総数（Σ a — 停止 token で打ち切った cycle は打ち切り後の数）。 */
   readonly accepted: number;
+  /**
+   * cycle が確定させた token の総数（Σ `confirmed.length` — token/cycle の分子）。
+   *
+   * 受理が決まった時点で cycle ぶんをまとめて積む（`accepted` と同じ位置）ので、`break` や中断で
+   * 配送が cycle の途中で閉じたターンでは、消費者が受け取った数より多い。
+   */
+  readonly delivered: number;
   /** 添字 = その cycle の受理数 `a`（長さ `k+1`・`k' = 0` の cycle は添字 0）。 */
   readonly acceptedHistogram: readonly number[];
 };
@@ -1018,18 +1027,25 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
             frontierRows = 0;
             const logits = readLogits(outputs, program, where, rowIndices.length);
             const hiddenRows = readHidden(outputs, program, where, rowIndices.length);
-            const { accepted, confirmed } = acceptDrafts(logits.row, drafts, sampler, history);
+            const { accepted, confirmed } = acceptDrafts(
+              logits.row,
+              drafts,
+              sampler,
+              history,
+              isStop,
+            );
             // 次 cycle の drafter 入力 = 新しい frontier b' を出した行 a（写す — 次の run で消える）。
             const nextHidden = copyRow(hiddenRows.row(accepted));
             tally.cycles += 1;
             tally.accepted += accepted;
             tally.acceptedHistogram[accepted] += 1;
+            tally.delivered += confirmed.length;
             // verify の観測は**この同期区間**（配送の yield をまたぐと、貸し手 Session を共有する
             // 別 sequence の run が挟まりうる）。commit は配送の後（frontier まで）。
             onRun?.({ kind: "verify", cycle, rows: queryLength, accepted });
-            const delivered = truncateAtStop(confirmed, isStop);
-            for (let index = 0; index < delivered.length; index += 1) {
-              const id = delivered[index];
+            // `confirmed` は配送列そのもの（停止 token より後ろは受理の側で列挙していない）。
+            for (let index = 0; index < confirmed.length; index += 1) {
+              const id = confirmed[index];
               // MUST: frontier の更新は yield の前（`break` で finally へ入ったとき、frontier までが
               // commit される = 消費者の受け取った列 + frontier 1 個が会話）。
               token = id;

@@ -528,6 +528,7 @@ Deno.test("chat 停止文字列: 停止理由を差し替えても内側の勘�
     draftRuns: 3,
     drafted: 9,
     accepted: 5,
+    delivered: 9,
     acceptedHistogram: [1, 1, 1, 1],
   };
 

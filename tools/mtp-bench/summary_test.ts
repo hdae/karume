@@ -82,6 +82,7 @@ const specTurn = (
     draftRuns: 5,
     drafted: 15,
     accepted: 6,
+    delivered: 11,
     acceptedHistogram: [1, 2, 2],
   },
   ...over,
@@ -148,6 +149,7 @@ Deno.test("分母の 2 本（進捗行と要約が共有する式）", async (t)
     draftRuns: 5,
     drafted: 15,
     accepted: 6,
+    delivered: 11,
     acceptedHistogram: [1, 2, 2],
     ...over,
   });
@@ -226,6 +228,7 @@ Deno.test("実効 k は受理数ヒストグラムの長さから出す", async 
     draftRuns: 5,
     drafted: 15,
     accepted: 6,
+    delivered: 11,
     acceptedHistogram: [1, 2, 1, 1],
   };
   const withThreeStep = (): TurnRecord[] =>

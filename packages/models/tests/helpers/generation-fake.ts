@@ -147,6 +147,13 @@ export type FakeOptions = {
    */
   readonly nanAt?: number;
   /**
+   * {@link FakeOptions.nanAt} の run のうち、この**出力行**だけを汚す（省略時はその run の全行）。
+   *
+   * 投機の verify は 1 run に k+1 行あるので、「非投機なら触れない行」だけを汚せると
+   * 「その行の `sampler.next` を呼んだか」が例外の有無で読める（呼ばない実装だけが緑になる）。
+   */
+  readonly nanRow?: number;
+  /**
    * 対抗馬（第 1 候補より低い logit を持つ id）。
    *
    * 既定の logits は「狙った id だけ 10・他は全部 0」なので、正値を割る repetition penalty では
@@ -308,7 +315,9 @@ export const fakeSession = (options: FakeOptions = {}) => {
           logits[row * VOCAB + options.runnerUp.id] = options.runnerUp.logit;
         }
         // 汚染は行の**別の** id に置く（狙った id を潰すと「行の argmax」の写像が壊れる）。
-        if (options.nanAt === call) logits[row * VOCAB + (id + 1) % VOCAB] = Number.NaN;
+        if (options.nanAt === call && (options.nanRow === undefined || options.nanRow === row)) {
+          logits[row * VOCAB + (id + 1) % VOCAB] = Number.NaN;
+        }
         hidden[row * HIDDEN_SIZE] = hiddenMark(call, inputRow);
         hidden[row * HIDDEN_SIZE + 1] = ids.values[inputRow];
       }

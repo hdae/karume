@@ -1,5 +1,5 @@
 /**
- * 投機的デコードの**純粋部分**（draft の受理・停止 token での切り詰め・verify の行組み立て）。
+ * 投機的デコードの**純粋部分**（draft の受理・停止 token での打ち切り・verify の行組み立て）。
  * `sequence.ts` の投機経路が呼ぶ。**パイプライン非依存・GPU 非依存**なので `sampler.ts` と同じ
  * `src/generation/` に置く（DECIDED: ADR 0096 決定 3 / 5 / 7・追記〈段 3〉）。
  *
@@ -13,6 +13,11 @@
  * 受理は先頭一致: 行 `j` の抽選結果 `t_j` が `d_{j+1}` と一致する間だけ進み、止まった `j` が受理数
  * `a`、その `t_a` が新しい frontier `b'`。確定するのは `[d₁..d_a, b']` の `a+1` 個で、`a = 0` でも
  * `b'` は必ず確定する（= 非投機の decode 1 step に退化する — 投機は遅くなるだけで結果は変えない）。
+ *
+ * ただし**確定した token が停止 token ならその場で列挙を止める**。非投機はそこで生成を終えるので、
+ * その先の行の logits を見ることも `sampler.next` を呼ぶこともない — 止めずに進むと、非投機なら
+ * 触れない logits（範囲外 gather の NaN 汚染など）で落ちる cycle が出るし、RNG の消費数も余分に
+ * 増える。受理した draft が停止 token だった cycle は確定列が `[d₁..d_a]` の `a` 個になる。
  *
  * 抽選は**温度に依らず**非投機と同じ列を出す。row ごとの `sampler.next` は、非投機の decode が同じ
  * 位置で行う抽選と同じ logits・同じ `history`（その行までの確定列）・同じ順で呼ばれ、確定 token
@@ -97,7 +102,13 @@ export const takeDrafts = (
   return drafts;
 };
 
-/** 受理の結果（`confirmed` = `[d₁..d_a, b']` — 長さ `accepted + 1`）。 */
+/**
+ * 受理の結果（`confirmed` = この cycle が配送する確定列そのもの）。
+ *
+ * 長さは `accepted + 1`（`[d₁..d_a, b']`）。ただし**最後の受理 draft が停止 token**なら列挙はそこで
+ * 止まるので `b'` が無く、長さは `accepted`（`[d₁..d_a]`）になる。停止 token 自体は列に残る
+ * （非投機の停止規則と同じ — `pendingToken` として会話に残り、次ターンの prefill 先頭へ連結される）。
+ */
 export type DraftAcceptance = {
   readonly accepted: number;
   readonly confirmed: readonly number[];
@@ -110,12 +121,17 @@ export type DraftAcceptance = {
  * 要る — 全受理のとき行 `drafts.length` が `b'` を出す）。`history` はこのターンの確定列（frontier
  * `b` を含む）で、行 `j` の抽選には `history + [d₁..d_j]` を使う。棄却された行の draft は
  * `history` に積まない（呼び手の `history` は触らない — 確定列は呼び手が配送しながら伸ばす）。
+ *
+ * MUST: 確定した token が `isStop` なら**そこで止める**（モジュール doc の停止の節）。受理した
+ * draft が停止 token だったときは次の行の `sampler.next` を呼ばない = 非投機が止まる位置より先の
+ * logits に触れない。棄却時の `b'` が停止 token なら列はそのまま（もともとそこで返る）。
  */
 export const acceptDrafts = (
   row: (index: number) => Float32Array<ArrayBuffer>,
   drafts: readonly number[],
   sampler: Sampler,
   history: readonly number[],
+  isStop: (token: number) => boolean,
 ): DraftAcceptance => {
   const extended = [...history];
   let accepted = 0;
@@ -124,22 +140,11 @@ export const acceptDrafts = (
     if (accepted < drafts.length && token === drafts[accepted]) {
       extended.push(token);
       accepted += 1;
+      if (isStop(token)) return { accepted, confirmed: drafts.slice(0, accepted) };
       continue;
     }
     return { accepted, confirmed: [...drafts.slice(0, accepted), token] };
   }
-};
-
-/**
- * 確定候補列を最初の停止 token で切り詰める（停止 token 自体は残す — 非投機の停止規則と同じで、
- * 停止 token は `pendingToken` として会話に残り、次ターンの prefill 先頭へ連結される）。
- */
-export const truncateAtStop = (
-  confirmed: readonly number[],
-  isStop: (token: number) => boolean,
-): readonly number[] => {
-  const index = confirmed.findIndex(isStop);
-  return index < 0 ? confirmed : confirmed.slice(0, index + 1);
 };
 
 /** 投機の勘定（`GenerationStop.speculation` の `used: true` 側）— cycle ごとに `record` で積む。 */
@@ -148,6 +153,8 @@ export type SpeculationTally = {
   draftRuns: number;
   drafted: number;
   accepted: number;
+  /** cycle が確定させた token の総数（Σ `confirmed.length`）。 */
+  delivered: number;
   /** 添字 = その cycle の受理数 `a`（長さ `k+1`）。 */
   readonly acceptedHistogram: number[];
 };
@@ -157,5 +164,6 @@ export const createSpeculationTally = (k: number): SpeculationTally => ({
   draftRuns: 0,
   drafted: 0,
   accepted: 0,
+  delivered: 0,
   acceptedHistogram: Array.from({ length: k + 1 }, () => 0),
 });

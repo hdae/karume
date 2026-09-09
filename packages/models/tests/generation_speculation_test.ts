@@ -34,7 +34,6 @@ import {
   type DraftFace,
   planDraftLength,
   takeDrafts,
-  truncateAtStop,
   verifyRowIndices,
 } from "../src/generation/speculation.ts";
 import {
@@ -292,6 +291,7 @@ Deno.test("T1 強制棄却: 全部外れる draft でも非投機と同じ列（
     draftRuns: 3,
     drafted: 6,
     accepted: 0,
+    delivered: 4,
     acceptedHistogram: [4, 0, 0, 0],
   });
   // 予算の残り（`k' = min(k, 残り − 1)`）で本数が縮み、最後の cycle は draft を採らない。
@@ -310,6 +310,7 @@ Deno.test("T2 全受理: 未来をそのまま写す draft は 1 verify で k+1 
     draftRuns: 2,
     drafted: 6,
     accepted: 6,
+    delivered: 8,
     acceptedHistogram: [0, 0, 0, 2],
   });
   // 貸し手の run は prefill 1 + verify 2 の 3 本（非投機は prefill 1 + decode 8 の 9 本）。
@@ -330,6 +331,7 @@ Deno.test("T3 部分受理: 先頭一致で止まった位置が受理数にな�
       draftRuns: 3,
       drafted: 7,
       accepted: 3,
+      delivered: 6,
       acceptedHistogram: [0, 3, 0, 0],
     });
   });
@@ -345,6 +347,7 @@ Deno.test("T3 部分受理: 先頭一致で止まった位置が受理数にな�
       draftRuns: 2,
       drafted: 5,
       accepted: 4,
+      delivered: 6,
       acceptedHistogram: [0, 0, 2, 0],
     });
   });
@@ -422,7 +425,7 @@ Deno.test("T3′ 温度 > 0: 抽選が走るターンでも投機を張り、列
 
 // ---- T4 / T5: 停止 token -------------------------------------------------------
 
-Deno.test("T4 停止 token が draft の途中: そこで切り詰め、後ろの確定候補は会話に入らない", async () => {
+Deno.test("T4 停止 token が draft の途中: そこで受理を打ち切り、後ろの行は確定させない", async () => {
   // 連鎖は 6 → 8 → 9 → 3 → 13。停止 token 9 は cycle 1 の d₂ に当たる。
   const stopTokens = [9];
   const request: GenerationRequest = { prompt: PROMPT, maxNewTokens: 9 };
@@ -436,14 +439,19 @@ Deno.test("T4 停止 token が draft の途中: そこで切り詰め、後ろ�
   // 停止 token 自体は本文でないので `token` イベントに出さず、勘定には 1 個として入る。
   assertEquals(tokenIds(run.events), [6, 8]);
   assertEquals(withoutSpeculation(run.stop), { reason: "eos", token: 9, tokens: 3 });
-  // 受理は 3 本ぜんぶ（切り詰めは受理の**後**）だが、確定するのは停止 token までの 2 個。
-  assertEquals(run.stop.speculation, {
+  // 受理は停止 token の 9 まで（d₃ の行は抽選もしない）= 確定列 `[8, 9]` そのものが配送列。
+  const speculation = run.stop.speculation;
+  assertEquals(speculation, {
     cycles: 1,
     draftRuns: 1,
     drafted: 3,
-    accepted: 3,
-    acceptedHistogram: [0, 0, 0, 1],
+    accepted: 2,
+    delivered: 2,
+    acceptedHistogram: [0, 0, 1, 0],
   });
+  // token/cycle の正本が `delivered / cycles` である理由（この cycle は `1 + a` 個を確定させない）。
+  assert(speculation !== undefined);
+  assertEquals(speculation.accepted + speculation.cycles, 3, "旧式の分子は 1 だけ過大になる");
   assertEquals(run.fake.commits, [2], "停止 token より後ろの確定候補まで commit した");
   assertEquals(verifyCalls(run.fake)[0].queryLength, 4, "物理 ring へは k+1 行が書かれている");
 
@@ -454,9 +462,31 @@ Deno.test("T4 停止 token が draft の途中: そこで切り詰め、後ろ�
   assertEquals(next.positions, [4, 5, 0, 0]);
 });
 
+Deno.test("T4′ 停止 token の先の行は抽選しない（非投機が触れない logits で落ちない）", async () => {
+  // 故障注入: verify（call 1）の**行 2 だけ**に NaN を混ぜる。行 2 は「停止 token 9 を確定した
+  // 後の行」= 非投機なら run そのものが出ない位置である。受理を停止 token で打ち切らない実装は
+  // ここでも `sampler.next` を呼ぶので `assertNoNaN` が投げる（範囲外 gather の行ごと NaN 汚染で
+  // 実際に起きる形 — 「投機のときだけ落ちる」= 出力が変わらないという契約の破れ）。
+  const stopTokens = [9];
+  const session: FakeOptions = { successor: SUCCESSOR, nanAt: 1, nanRow: 2 };
+  const request: GenerationRequest = { prompt: PROMPT, maxNewTokens: 9 };
+  const run = await runSpeculative({
+    drafter: oracleDrafter(),
+    request,
+    program: { stopTokens },
+    session,
+  });
+  // 非投機の参照走行（decode は 1 行なので行 2 が無く、汚染に当たらない）と同じ列で閉じる。
+  await assertMatchesPlain(request, run, { stopTokens }, session);
+
+  assertEquals(tokenIds(run.events), [6, 8]);
+  assertEquals(withoutSpeculation(run.stop), { reason: "eos", token: 9, tokens: 3 });
+  assertEquals(run.fake.commits, [2]);
+});
+
 Deno.test("T5 停止 token が b′: 受理した draft は届き、新 frontier で閉じる", async (t) => {
   await t.step("受理 1 本の後に b′ が停止 token", async () => {
-    // 6 → 8（受理）→ b′ = 9（停止）。切り詰めは起きず、確定列がそのまま停止で閉じる形。
+    // 6 → 8（受理）→ b′ = 9（停止）。打ち切りは起きず、確定列がそのまま停止で閉じる形。
     const stopTokens = [9];
     const request: GenerationRequest = { prompt: PROMPT, maxNewTokens: 9 };
     const run = await runSpeculative({
@@ -473,6 +503,7 @@ Deno.test("T5 停止 token が b′: 受理した draft は届き、新 frontier
       draftRuns: 1,
       drafted: 3,
       accepted: 1,
+      delivered: 2,
       acceptedHistogram: [0, 1, 0, 0],
     });
     assertEquals(run.fake.commits, [2]);
@@ -513,6 +544,7 @@ Deno.test("T6 予算末尾: 残り 1 個の cycle は draft を採らず decode 
     draftRuns: 1,
     drafted: 3,
     accepted: 3,
+    delivered: 5,
     acceptedHistogram: [1, 0, 0, 1],
   });
 });
@@ -550,6 +582,7 @@ Deno.test("T7 中断: draft の前で止めれば run も draft も 1 本増え�
       draftRuns: 0,
       drafted: 0,
       accepted: 0,
+      delivered: 0,
       acceptedHistogram: [0, 0, 0, 0],
     },
   });
@@ -589,6 +622,7 @@ Deno.test("T7 中断: draft の後・verify の前で止めれば保留は 1 つ
       draftRuns: 1,
       drafted: 3,
       accepted: 0,
+      delivered: 0,
       acceptedHistogram: [0, 0, 0, 0],
     },
   });
@@ -631,6 +665,7 @@ Deno.test("T7 中断: verify の後で止めても、その cycle の確定ぶ�
       draftRuns: 1,
       drafted: 3,
       accepted: 3,
+      delivered: 4,
       acceptedHistogram: [0, 0, 0, 1],
     },
   });
@@ -687,6 +722,8 @@ Deno.test("T7″ 途中 break: 配送した token までが commit され、そ�
     if (seen.length === 3) break;
   }
   assertEquals(seen, [6, 8, 9]);
+  // `delivered` は受理が決まった時点で cycle ぶんを積む（`accepted` と同じ位置）ので、`break` で
+  // 配送が途中で閉じたこのターンでは消費者が受け取った数（2）より多い 4 になる。
   assertEquals(await stream.done, {
     reason: "closed",
     tokens: 3,
@@ -695,6 +732,7 @@ Deno.test("T7″ 途中 break: 配送した token までが commit され、そ�
       draftRuns: 1,
       drafted: 3,
       accepted: 3,
+      delivered: 4,
       acceptedHistogram: [0, 0, 0, 1],
     },
   });
@@ -918,10 +956,11 @@ Deno.test("T9 onRun: run 1 本につき 1 通 — 停止で閉じた cycle の v
     program: { stopTokens },
   });
   assertEquals(run.fake.calls.length, 2, "走った run は prefill 1 + verify 1");
+  // 受理は停止 token（d₂ = 9）で打ち切られるので `accepted` は 2（配送した draft の数）。
   assertEquals(run.phases, [
     { kind: "prefill", chunk: 1, chunks: 1 },
     { kind: "draft", cycle: 1 },
-    { kind: "verify", cycle: 1, rows: 4, accepted: 3 },
+    { kind: "verify", cycle: 1, rows: 4, accepted: 2 },
   ]);
 
   // 対（非投機は停止した decode run も 1 通報告する）。
@@ -975,6 +1014,9 @@ Deno.test("T10 勘定: histogram は長さ k+1・添字が受理数・合計が 
       speculation.accepted,
       "histogram の重み付き和が accepted と合わない",
     );
+    // 停止 token で打ち切った cycle が 1 本も無いターンでは `delivered = accepted + cycles`
+    // （どの cycle も `1 + a` 個を確定させる）。停止で打ち切った cycle があるとここが割れる。
+    assertEquals(speculation.delivered, speculation.accepted + speculation.cycles);
   });
 
   await t.step("k = 2（段数より短く取る）", async () => {
@@ -986,6 +1028,7 @@ Deno.test("T10 勘定: histogram は長さ k+1・添字が受理数・合計が 
       draftRuns: 2,
       drafted: 4,
       accepted: 4,
+      delivered: 6,
       acceptedHistogram: [0, 0, 2],
     });
   });
@@ -997,6 +1040,7 @@ Deno.test("T10 勘定: histogram は長さ k+1・添字が受理数・合計が 
       draftRuns: 2,
       drafted: 2,
       accepted: 0,
+      delivered: 3,
       acceptedHistogram: [3, 0],
     });
   });
@@ -1338,11 +1382,14 @@ const recordingSampler = (): { readonly sampler: Sampler; readonly histories: nu
   };
 };
 
+/** 停止 token が 1 つも無いターン（受理は先頭一致だけで決まる）。 */
+const noStop = (): boolean => false;
+
 Deno.test("acceptDrafts: 先頭一致で止まった位置が受理数・その行の抽選が b′", async (t) => {
   await t.step("全受理（行 k' が b′ を出す）", () => {
     const { row, read } = rowsOf([8, 9, 3, 13]);
     const { sampler } = recordingSampler();
-    assertEquals(acceptDrafts(row, [8, 9, 3], sampler, [1, 2, 6]), {
+    assertEquals(acceptDrafts(row, [8, 9, 3], sampler, [1, 2, 6], noStop), {
       accepted: 3,
       confirmed: [8, 9, 3, 13],
     });
@@ -1353,7 +1400,7 @@ Deno.test("acceptDrafts: 先頭一致で止まった位置が受理数・その�
     // 行 1 の抽選は 7 で、draft の 9 と食い違う → そこで止まり b′ = 7。
     const { row, read } = rowsOf([8, 7, 3, 13]);
     const { sampler } = recordingSampler();
-    assertEquals(acceptDrafts(row, [8, 9, 3], sampler, [1, 2, 6]), {
+    assertEquals(acceptDrafts(row, [8, 9, 3], sampler, [1, 2, 6], noStop), {
       accepted: 1,
       confirmed: [8, 7],
     });
@@ -1363,7 +1410,7 @@ Deno.test("acceptDrafts: 先頭一致で止まった位置が受理数・その�
   await t.step("受理 0 でも b′ は必ず 1 個確定する（decode 1 step への退化）", () => {
     const { row, read } = rowsOf([8, 9, 3, 13]);
     const { sampler } = recordingSampler();
-    assertEquals(acceptDrafts(row, [REJECTED, REJECTED, REJECTED], sampler, [1, 2, 6]), {
+    assertEquals(acceptDrafts(row, [REJECTED, REJECTED, REJECTED], sampler, [1, 2, 6], noStop), {
       accepted: 0,
       confirmed: [8],
     });
@@ -1374,7 +1421,7 @@ Deno.test("acceptDrafts: 先頭一致で止まった位置が受理数・その�
     const { row } = rowsOf([8, 9, 3, 13]);
     const { sampler, histories } = recordingSampler();
     const history: readonly number[] = [1, 2, 6];
-    acceptDrafts(row, [8, 9, 3], sampler, history);
+    acceptDrafts(row, [8, 9, 3], sampler, history, noStop);
     assertEquals(histories, [
       [1, 2, 6],
       [1, 2, 6, 8],
@@ -1388,16 +1435,32 @@ Deno.test("acceptDrafts: 先頭一致で止まった位置が受理数・その�
   await t.step("棄却した行の draft は履歴に積まない", () => {
     const { row } = rowsOf([8, 7, 3, 13]);
     const { sampler, histories } = recordingSampler();
-    acceptDrafts(row, [8, 9, 3], sampler, [1, 2, 6]);
+    acceptDrafts(row, [8, 9, 3], sampler, [1, 2, 6], noStop);
     assertEquals(histories, [[1, 2, 6], [1, 2, 6, 8]]);
   });
-});
 
-Deno.test("truncateAtStop: 最初の停止 token までを残す（停止 token 自体は残る）", () => {
-  const isStop = (token: number): boolean => token === 9;
-  assertEquals(truncateAtStop([8, 9, 3, 13], isStop), [8, 9]);
-  assertEquals(truncateAtStop([9, 3, 13], isStop), [9]);
-  assertEquals(truncateAtStop([8, 3, 13], isStop), [8, 3, 13], "停止が無ければそのまま");
-  assertEquals(truncateAtStop([8, 9, 9], isStop), [8, 9], "2 度目の停止 token は見ない");
-  assertEquals(truncateAtStop([], isStop), []);
+  await t.step("受理した draft が停止 token なら列挙を止め、後続行の抽選をしない", () => {
+    // 行 2 以降を**用意しない**読み口（読めば投げる）= 停止で止めない実装だけが赤くなる。
+    // 非投機はこの位置で生成を終えるので、その先の logits には触れないのが正しい。
+    const { row, read } = rowsOf([8, 9]);
+    const { sampler, histories } = recordingSampler();
+    assertEquals(acceptDrafts(row, [8, 9, 3], sampler, [1, 2, 6], (token) => token === 9), {
+      accepted: 2,
+      confirmed: [8, 9],
+    });
+    assertEquals(read, [0, 1], "停止 token の先の行を読んでいる");
+    // 抽選も 2 回だけ（確定 token 1 個につき 1 回 = RNG の消費列が非投機と並ぶ）。
+    assertEquals(histories, [[1, 2, 6], [1, 2, 6, 8]]);
+  });
+
+  await t.step("棄却時の b′ が停止 token なら確定列は accepted + 1 個のまま", () => {
+    // 行 1 で外れて b′ = 7 を引き、その 7 が停止 token。列は `[d₁, b′]` = 長さ accepted + 1。
+    const { row, read } = rowsOf([8, 7, 3, 13]);
+    const { sampler } = recordingSampler();
+    assertEquals(acceptDrafts(row, [8, 9, 3], sampler, [1, 2, 6], (token) => token === 7), {
+      accepted: 1,
+      confirmed: [8, 7],
+    });
+    assertEquals(read, [0, 1]);
+  });
 });
