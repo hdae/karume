@@ -24,7 +24,9 @@ import {
   type GenerationEvent,
   type GenerationRequest,
   type GenerationRunPhase,
+  type GenerationSequence,
   type GenerationStop,
+  type GenerationStream,
 } from "../src/generation/sequence.ts";
 import {
   acceptDrafts,
@@ -223,9 +225,8 @@ const runSpeculative = async (options: {
   return { ...opened, ...drained };
 };
 
-/** 同じ要求を**非投機**（drafter を差さない sequence）で走らせた参照走行。 */
-const runPlain = async (
-  request: GenerationRequest,
+/** **非投機**（drafter を差さない）sequence を組む — 投機と同じ不変条件を見る対の側。 */
+const openPlain = async (
   program: Partial<GenerationProgramSpec> = {},
   session: FakeOptions = {},
 ) => {
@@ -238,8 +239,18 @@ const runPlain = async (
       phases.push(phase);
     },
   });
-  const drained = await drain(sequence.generate(request));
-  return { fake, phases, sequence, ...drained };
+  return { fake, phases, sequence };
+};
+
+/** 同じ要求を**非投機**で走らせた参照走行。 */
+const runPlain = async (
+  request: GenerationRequest,
+  program: Partial<GenerationProgramSpec> = {},
+  session: FakeOptions = {},
+) => {
+  const opened = await openPlain(program, session);
+  const drained = await drain(opened.sequence.generate(request));
+  return { ...opened, ...drained };
 };
 
 /**
@@ -754,6 +765,15 @@ Deno.test("T8 門: 投機の指定は sequence 生成時に落ち、開いた面
     await assertRejected({ k: 0 }, `speculative.k 0 が 1..${K}（drafter の段数）の外`);
   });
 
+  await t.step("drafter が名乗る段数が 1 以上の整数でない", async () => {
+    // `k` を省くと `k = steps` になるので、段数を見ない実装では `k` の検査が素通りする
+    // （NaN はどの比較も false・1.5 は `1.5 > 1.5` が false）。段数の門が `k` の門より
+    // **前**に立っていることを、文言（段数の側）で縛る。
+    await assertRejected({ steps: Number.NaN }, "drafter の段数 NaN が 1 以上の整数でない");
+    await assertRejected({ steps: 0 }, "drafter の段数 0 が 1 以上の整数でない");
+    await assertRejected({ steps: 1.5 }, "drafter の段数 1.5 が 1 以上の整数でない");
+  });
+
   await t.step("k + 1 行が chunkLength を超える", async () => {
     await assertRejected(
       { k: K, program: { chunkLength: K, chunkBuckets: [] } },
@@ -1108,6 +1128,138 @@ Deno.test("T13 last_row: k' が縮んでも R は k+1 のまま（末尾添字�
     assertEquals(call.positions, [2]);
     assertEquals(run.fake.commits, [1]);
   });
+});
+
+// ---- T14: 走行中の `used` -------------------------------------------------------
+
+/**
+ * 配送の**直後**に `used` を読み、`position + 1` であることを見る（返すのは配送した位置の列）。
+ *
+ * yield から戻った同期区間で読むので、投機では**保留中の verify が残っている窓**を観測できる。
+ * ここが崩れると `used` を見て次ターンの予算を決める呼び手（`GenerationSequence.used` の doc の
+ * 式）が、cycle の途中では最大 k だけ甘い上限を通してしまう。
+ */
+const drainAssertingUsed = async (
+  sequence: GenerationSequence,
+  stream: GenerationStream,
+): Promise<number[]> => {
+  const positions: number[] = [];
+  for await (const event of stream) {
+    if (event.kind !== "token") continue;
+    positions.push(event.position);
+    assertEquals(
+      sequence.used,
+      event.position + 1,
+      `位置 ${event.position} の token を配送した直後の used`,
+    );
+  }
+  return positions;
+};
+
+Deno.test("T14 used: 配送の直後は常に「その token の position + 1」", async (t) => {
+  const request: GenerationRequest = { prompt: PROMPT, maxNewTokens: 7 };
+  /** 配送される位置の列（prompt 2 token の直後から 7 個）。 */
+  const expected = [2, 3, 4, 5, 6, 7, 8];
+
+  await t.step("投機（部分受理 — cycle の途中で読む）", async () => {
+    const opened = await openSpeculative({ drafter: partialDrafter(1) });
+    assertEquals(
+      await drainAssertingUsed(opened.sequence, opened.sequence.generate(request)),
+      expected,
+    );
+    // 決着後も同じ式（frontier 1 個は未 commit のまま = 次ターンの先頭へ連結される）。
+    assertEquals(opened.sequence.used, 9);
+    assertEquals(opened.fake.pendingCommit(), undefined);
+  });
+
+  await t.step("非投機（回帰の対）", async () => {
+    const opened = await openPlain();
+    assertEquals(
+      await drainAssertingUsed(opened.sequence, opened.sequence.generate(request)),
+      expected,
+    );
+    assertEquals(opened.sequence.used, 9);
+  });
+
+  await t.step("cycle の途中で break した後も、配送した最後の position + 1", async () => {
+    const opened = await openSpeculative({ drafter: oracleDrafter() });
+    const stream = opened.sequence.generate({ prompt: PROMPT, maxNewTokens: 9 });
+    let last = -1;
+    for await (const event of stream) {
+      if (event.kind !== "token") continue;
+      last = event.position;
+      assertEquals(opened.sequence.used, last + 1, `配送直後（位置 ${last}）`);
+      // cycle 1 の 2 個目（= 保留がまだ残っている窓）で打ち切る。
+      if (last === 4) break;
+    }
+    assertEquals((await stream.done).reason, "closed");
+    // commit は「未 commit 行 → pastLength」の付け替えなので、`used` は commit を跨いで動かない。
+    assertEquals(opened.fake.commits, [2]);
+    assertEquals(opened.sequence.used, 5, "break 後の used が配送した最後の position + 1 でない");
+  });
+
+  await t.step(
+    "配送中に消費者が例外を投げても（finally の commit）、最後の position + 1",
+    async () => {
+      const opened = await openSpeculative({ drafter: oracleDrafter() });
+      const stream = opened.sequence.generate({ prompt: PROMPT, maxNewTokens: 9 });
+      let last = -1;
+      await assertRejects(
+        async () => {
+          for await (const event of stream) {
+            if (event.kind !== "token") continue;
+            last = event.position;
+            // break と同じ窓（cycle 1 の 2 個目 = 保留が残っている）で消費者側が落ちる。
+            if (last === 4) throw new Error("consumer");
+          }
+        },
+        Error,
+        "consumer",
+      );
+      // 消費者の例外は generator には入らない（`return()` 経由 = closed）。frontier までの commit と
+      // `frontierRows` の 0 戻しは同じ finally を通る。
+      assertEquals((await stream.done).reason, "closed");
+      assertEquals(opened.fake.commits, [2]);
+      assertEquals(opened.sequence.used, 5, "例外後の used が配送した最後の position + 1 でない");
+    },
+  );
+});
+
+// ---- T15: 抽選が落ちた decode の後始末 -------------------------------------------
+
+/**
+ * 全 run の有効行を（位置, token）へ畳む = **KV に入った並び**（非投機の走行に限る — deferred な
+ * verify は棄却行も物理 ring へ書くので、投機では commit 行数と併せて読む必要がある）。
+ *
+ * 同じ token が 2 つの位置に居る形は token 列の比較では見えない（次ターンの入力を作るのは
+ * `pendingToken` で、消費者が受け取った列には現れない）。位置つきで畳むのが唯一の検出線である。
+ */
+const placedRows = (fake: FakeSession): number[][] =>
+  fake.calls.flatMap((call) =>
+    call.ids.slice(0, call.queryLength).map((id, row) => [call.positions[row], id])
+  );
+
+Deno.test("T15 抽選の失敗: run が通った後に抽選が落ちても、旧 frontier は次ターンへ再投入されない", async () => {
+  // 故障注入: decode run（call 1）の logits に NaN を混ぜる。run 自体は**成功**しているので
+  // frontier b（= 6）は位置 2 の KV に入っており、`pendingToken` に残したまま次ターンへ行くと
+  // 同じ token が位置 3 にも入る（例外を出さない沈黙劣化 — 会話が 1 token 太る）。
+  const opened = await openPlain({}, { nanAt: 1 });
+  await assertRejects(
+    () => drain(opened.sequence.generate({ prompt: PROMPT, maxNewTokens: 5 })),
+    Error,
+    // 落ちるのは抽選（`assertNoNaN`）— run の失敗ではない（汚染した id は fake の実装事情なので見ない）。
+    "が NaN（非有限）",
+  );
+  assertEquals(
+    opened.fake.pastLength(),
+    3,
+    "抽選が落ちた decode run は成功している（論理長は進む）",
+  );
+
+  // 同じ sequence で次のターン（frontier は既に KV に居るので prompt はそのまま流れる）。
+  const next = await drain(opened.sequence.generate({ prompt: [4], maxNewTokens: 1 }));
+  assertEquals(tokenIds(next.events), [SUCCESSOR[4]]);
+  assertEquals(placedRows(opened.fake), [[0, 1], [1, 2], [2, 6], [3, 4]]);
 });
 
 // ---- 純関数（`src/generation/speculation.ts`）------------------------------------

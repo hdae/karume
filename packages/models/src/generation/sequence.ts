@@ -2,10 +2,11 @@
  * 1 会話ぶんの寿命を持つ生成の実体（ADR 0083 決定 1〜5 の `GenerationSequence`）。
  * **パイプライン非依存の共通処理**なので `program.ts` / `sampler.ts` と同じ `src/generation/` に置く。
  *
- * ## 可変状態は `context` と `pendingToken`（+ 投機の hidden の写し）
+ * ## 可変状態は `context` と `pendingToken`（+ 投機の hidden の写しと未 commit 行数）
  *
- * MUST: sequence が持つ可変状態は **`context` と `pendingToken` の 2 つだけ**である（ADR 0083
- * 決定 1）。position / totalLength といった counter は持たず、run を組む直前に
+ * MUST: sequence が持つ**進行の**可変状態は **`context` と `pendingToken` の 2 つだけ**である
+ * （ADR 0083 決定 1 — 投機が足す hidden の写し・勘定・`frontierRows` は進行の記録ではない: 下の
+ * 2 段落）。position / totalLength といった counter は持たず、run を組む直前に
  * `context.pastLength` を読む — 論理長の進行は run の成功で context が進める（ADR 0066 決定 6 の
  * **二重簿記の禁止**）。イベントに載せる `position` も、その run の**後**の `context.pastLength`
  * をその場で読んだ値で、保存しない。
@@ -14,6 +15,11 @@
  * までしか有効でなく、導出できない）と勘定（`GenerationStop.speculation`）を足す。進行の記録は
  * 依然 `context.pastLength` だけで、verify は deferred run（論理長を保留）にし、**配送した token の
  * frontier まで**を `context.commit(rows)` で進める（下の「投機経路」節）。
+ *
+ * その `commit` に渡す行数（`frontierRows`）だけは sequence スコープの可変状態になる — 保留中の
+ * run のどこまでを target が消費したかは context から導出できず（context が知るのは書いた行数
+ * `queryLength` まで）、`used` の getter も配送中の論理長にこれを足す必要がある。進行の counter で
+ * はない（commit の直後に 0 へ戻り、進行は `context.pastLength` にしか残らない）。
  *
  * ## `pendingToken` — 最大 1 token の未 commit frontier
  *
@@ -331,6 +337,11 @@ export const assertGenerationRequestValues = (
  * 列を包む側（gemma4 の chat の締め）が、列が尽きた直後に `done` を待たずに読める
  * ことへ依存している。決着が終端より後ろへずれると、その `await` が消費側の `for await` ごと
  * 止まる。
+ *
+ * NOTE: 反復を**一度も始めずに** iterator の `return()` を呼ぶと本体が走らないので、`done` は
+ * 決着しない（async generator の本体は最初の `next()` まで走らないため — 直列化の席も取らないので
+ * 他の生成や `dispose` は妨げない）。`for await` では起きない形で、手で iterator を回す消費者
+ * だけの注意である。
  */
 export type GenerationStream = AsyncIterable<GenerationEvent> & {
   readonly done: Promise<GenerationStop>;
@@ -347,10 +358,11 @@ export type GenerationSequence = {
   /**
    * この会話が既に占めている論理位置の数（= 次のターンの `prompt` が積み上がる起点）。
    *
-   * MUST: **導出値**である（`context.pastLength` + 未 commit frontier 1 — ADR 0066 決定 6 の
-   * 二重簿記の禁止）。独立した counter は持たないので、走行中に読むと**その時点で成功済みの
-   * run まで**が反映される（生成が進むにつれ増える）。生成の合間に読めば「直近に完了した生成
-   * までの確定値」で、切り詰めの判断はそこで行う。
+   * MUST: **導出値**である（`context.pastLength` + 未 commit の verify 行 + frontier 1 —
+   * ADR 0066 決定 6 の二重簿記の禁止）。独立した counter は持たないので、走行中に読むと**その
+   * 時点で会話に入った token まで**が反映される（生成が進むにつれ増える — `token` イベントの
+   * 直後に読めば `used === position + 1`）。生成の合間に読めば「直近に完了した生成までの
+   * 確定値」で、切り詰めの判断はそこで行う。
    *
    * 次のターンが通るかは `used + prompt.length + maxNewTokens - 1 ≤ capacity` かつ
    * `used + prompt.length + maxNewTokens - 2 < program.maxPosition`（溢れたときの実値は
@@ -638,6 +650,12 @@ const assertSpeculativeSetup = (
   slidingSlack: number | undefined,
   program: GenerationWiring,
 ): void => {
+  // 段数は借り手の面が名乗る値（配布形の drafter が焼かれた段数）。非整数・0 以下だと `k` の
+  // 検査が**素通りする**（`k` を省けば `k = steps` で NaN 比較が全部 false・`k` を渡せば
+  // `k > steps` が false）ので、`k` より先に見る。
+  if (!Number.isSafeInteger(steps) || steps < 1) {
+    throw new Error(`drafter の段数 ${steps} が 1 以上の整数でない`);
+  }
   if (!Number.isSafeInteger(k) || k < 1 || k > steps) {
     throw new Error(`speculative.k ${k} が 1..${steps}（drafter の段数）の外`);
   }
@@ -730,6 +748,18 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
   // 「generate 1 回ぶん」の直列化（ADR 0083 決定 2）— 自前ロックは作らない。
   const chain = createOperationChain();
   let pendingToken: number | undefined;
+  /**
+   * 保留中の verify のうち frontier にした行数（= target が消費した行数・投機の配送中だけ非 0）。
+   * {@link settleCommit} が保留中の verify をここまで commit する。
+   *
+   * MUST: sequence スコープに置く（`used` の getter が読む）。配送中の `context.pastLength` は
+   * cycle の起点のままなので、これを足さないと**配送済みの token が論理長に現れない**。generate を
+   * 跨いで残らないのは、`settleCommit()` が commit の直後に 0 へ戻し、配送の出口（停止 /
+   * 配送ループの後 / `finally`）が全てそこを通るためである。`context.commit` 自身が投げると
+   * 0 へ戻らないが、それは context が汚染 / dispose 済みのときだけで、以後は `pastLength` の
+   * 読みも落ちる（残った値が観測されることはない）。
+   */
+  let frontierRows = 0;
   let disposal: Promise<void> | undefined;
 
   /**
@@ -826,11 +856,7 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
         ...stopped,
         speculation: { ...tally, acceptedHistogram: [...tally.acceptedHistogram] },
       };
-    /**
-     * この cycle で frontier にした token の数（= verify の行のうち target が消費した行数）。
-     * {@link settleCommit} が保留中の verify をここまで commit する。
-     */
-    let frontierRows = 0;
+    /** 保留中の verify を frontier まで確定させる（保留が無ければ何もしない）。 */
     const settleCommit = (): void => {
       if (context.pendingCommit === undefined) return;
       context.commit(frontierRows);
@@ -883,8 +909,8 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
 
         const chunks = planPrefillChunks(promptIds.length, program.chunkLength);
         // repetition penalty が見る「それまでの token 列」（HF が `input_ids` 全体に掛けるのと
-        // 同じ形）。**このターンのぶんだけ**で、過去 turn は含まない（sequence の可変状態は
-        // context と pendingToken の 2 つだけ = 会話全体の transcript は持たない）。
+        // 同じ形）。**このターンのぶんだけ**で、過去 turn は含まない（sequence は進行の counter も
+        // 会話全体の transcript も持たない — モジュール doc の「可変状態」節）。
         const history = [...promptIds];
 
         let logits: LogitsRows | undefined;
@@ -1045,6 +1071,11 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
             undefined,
             { context, queryLength: 1 },
           );
+          // MUST: run が通った時点で frontier は KV に入った（= もう連結してはならない）— prefill
+          // 側の `index === 0` と同じ理由で、抽選の**前**に落とす。ここを抽選の後に置くと、logits の
+          // NaN などで `sampler.next` が投げたときに旧 frontier が残り、次ターンの prompt 先頭へ
+          // 連結されて**同じ token が 2 つの位置に入る**（例外にならない沈黙劣化）。
+          pendingToken = undefined;
           token = sampler.next(readLogits(outputs, program, `decode@${step}`, 1).row(0), history);
           onRun?.({ kind: "decode", step: step + 1 });
           generated += 1;
@@ -1091,11 +1122,13 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
 
   return {
     capacity,
-    // MUST: getter で毎回導出する（`context.pastLength` と `pendingToken` が唯一の源）。投機の
-    // 配送中は verify が保留のまま（`pastLength` は cycle の起点のまま）なので、cycle の途中で読むと
-    // 最大 k だけ少なく見える — 確定値は生成の合間に読む（決着後は正しい）。
+    // MUST: getter で毎回導出する（`context.pastLength` と `frontierRows` と `pendingToken` が
+    // 唯一の源）。投機の配送中は verify が保留のまま（`pastLength` は cycle の起点のまま）なので、
+    // frontier までの未 commit 行を足す — これで**配送中でも
+    // `used === 配送した token の position + 1`** が投機・非投機の別なく成り立つ（足さないと
+    // cycle の途中では配送済みの token が抜け、次ターンの予算計算が最大 k だけ甘くなる）。
     get used(): number {
-      return context.pastLength + (pendingToken === undefined ? 0 : 1);
+      return context.pastLength + frontierRows + (pendingToken === undefined ? 0 : 1);
     },
     generate,
     dispose(): Promise<void> {

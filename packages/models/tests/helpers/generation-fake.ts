@@ -139,6 +139,14 @@ export type FakeOptions = {
   /** この回数目（0 始まり）の run を失敗させる。 */
   readonly failAt?: number;
   /**
+   * この回数目（0 始まり）の run の logits に NaN を混ぜる（**run は成功し、抽選が落ちる**）。
+   *
+   * {@link FakeOptions.failAt} との違いがこの席の意味である — run は通っているので論理長は進み、
+   * 落ちるのは `sampler.next`（`assertNoNaN`）である。範囲外 gather の行ごと NaN 汚染で実際に
+   * 起きる形で、「run は成功したが token が選べなかった」ときの後始末の唯一の検出線になる。
+   */
+  readonly nanAt?: number;
+  /**
    * 対抗馬（第 1 候補より低い logit を持つ id）。
    *
    * 既定の logits は「狙った id だけ 10・他は全部 0」なので、正値を割る repetition penalty では
@@ -299,6 +307,8 @@ export const fakeSession = (options: FakeOptions = {}) => {
         if (options.runnerUp !== undefined) {
           logits[row * VOCAB + options.runnerUp.id] = options.runnerUp.logit;
         }
+        // 汚染は行の**別の** id に置く（狙った id を潰すと「行の argmax」の写像が壊れる）。
+        if (options.nanAt === call) logits[row * VOCAB + (id + 1) % VOCAB] = Number.NaN;
         hidden[row * HIDDEN_SIZE] = hiddenMark(call, inputRow);
         hidden[row * HIDDEN_SIZE + 1] = ids.values[inputRow];
       }
