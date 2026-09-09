@@ -39,7 +39,7 @@
     { open, k }` → `DraftFace`〉・verify は deferred run で「配送した frontier まで」commit（`finishCycle` が配送直後と finally）・
     run 単位の `onRun` hook が `withRunDiagnostics` を置換・`GenerationStop.speculation`・drafter 呼び出し規約は
     `(token = frontier b@P, hidden = h@P−1, position P)` に訂正〈段 2 は 1 段ずれていた〉・受理 1.51 / 2.01 / 2.14 token/cycle）
-    → **段 4-A（実測）✅ 2026-09-09・次 = 4-B（④ on/off ゲート → ⑤ ①′/③′ 行タイル化 → ③ argmax 2 相化 → ⑥ k=7 + 動的 k・⑦ 不採用）**（[research 2026-09-09](../docs/research/2026-09-09-mtp-stage4.md)・tool `tools/mtp-bench`: 抽出 1.81× / 要約 1.41× / 対話 1.18× / 自由文 0.96×・採算 A\* = cycle 壁 / decode 壁 = 1.72〜1.88〈閾値は P でなく受理率〉・温度 1.0 でも受理率は greedy と同じ・長文脈の verify 超過 +5.7 ms は attention ①・draft 壁 15 ms の ≈9.5 ms は Deno の round trip の床・M2 / ブラウザ未実測）。
+    → **段 4-A（実測）✅ 2026-09-09・次 = 4-B（④ on/off ゲート → ⑤ ①′/③′ 行タイル化 → ③ argmax 2 相化 → ⑥ k=7 + 動的 k・⑦ 不採用）**（[research 2026-09-09](../docs/research/2026-09-09-mtp-stage4.md)・tool `tools/mtp-bench`: 抽出 1.81× / 要約 1.41× / 対話 1.18× / 自由文 0.96×・採算 A\* = cycle 壁 / decode 壁 = 1.72〜1.88〈閾値は P でなく受理率〉・温度 1.0 でも受理率は greedy と同じ・長文脈の verify 超過 +5.7 ms は attention ①・draft 壁 15 ms の ≈9.5 ms は Deno の round trip の床・**M2**〈ユーザー実走〉: 抽出 1.27× / 要約 1.03× / 対話 0.93× / 自由文 0.76×・A\* = 2.17〜2.6・verify が decode の 1.75〜2.2 倍〈短文脈で +39 ms = M=4 の linear 側・K-21 変種は M2 未調整〉・prefill 4.8K が 54 s・ブラウザ未実測）。
     **落とし穴**: 1 cycle は run 2 本が下限（PLE のホスト gather があるので draft token はホストを経由する）/ deferred run の
     `queryLength ≤ slidingSlack`（gemma4 は 8 — 借り手は列 P−W まで読むので段 3 で 1 列締めた）/ 出口 1 本の旧配布形は models が拒否する / 既定バケット 6 本で
     1 容量あたり 8 形（LRU 12）— 容量の違う sequence を交互に回すと溢れる / 寿命は借り手 → 貸し手の順（逆順の dispose は
