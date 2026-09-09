@@ -395,3 +395,14 @@ full スロットの `P + Q ≤ C` 超過は今日「汎用メッセージで fa
 - 決定 7（sampling はホスト）: 投機は温度に依らず張る。受理の抽選は行ごとに `sampler.next` を非投機と
   同じ logits・history・順序で 1 回ずつ呼ぶので、RNG の消費列も token 列も非投機と厳密一致する
   （温度 > 0 では one-hot draft の speculative sampling と同値）。
+
+## 追記（2026-09-09）— 観測 1 通に run の壁とゲートの状態を載せる（MTP 4-B ⑨）
+
+- `GenerationRunPhase` の `decode` / `verify` 枝に optional の `wallMs` / `delivered` / `gate`
+  （`GenerationGateTrace` = 定常モード・ターン内の切替回数・その run をゲートが観測したか）を足した。
+  枝は増やさない（網羅 switch を持つ消費者を壊さない — 上の追記の方針を維持）。
+- `wallMs` は**ゲートが判断に使う同じ変数**（受理判定の直後・配送の yield の前）で、非投機の decode も
+  step の先頭（派生入力の前）から抽選の直後までの同じ区間で測る。消費者の速さを含まないのは、遅い
+  消費者ほど投機を切る誤りを避けるためで、内訳の壁とゲートの壁を別に測ると「なぜ倒れたか」を辿れなく
+  なる。`gate` は観測の**後**の値（倒れた cycle は倒れた後のモードを名乗る）。
+- 用途は時間の内訳（`tools/mtp-bench` の局面別バケット）で、pipeline 層は phase を素通しする。
