@@ -1,7 +1,7 @@
 /**
  * 要約の計算の単体検証（純関数だけ・GPU 不要）。
  *
- * 見る 11 点:
+ * 見る 12 点:
  *
  * 1. **ローテーションの台本** — 暖機 3 本の後に P S S P P A A P / P A A P P S S P が交互に `rounds` 回
  * 2. **分母の 2 本**（`main.ts` の進捗行も呼ぶ口）— `tokensAfterFirst` / `tokensPerCycle`
@@ -19,6 +19,7 @@
  * 10. **warm の前置** — 前ターンの停止から次のターンの前置を決める（打ち切り → 閉じ札 1 個・
  *     閉じ札で閉じた → 前置なし・閉じ札以外の停止 token → 落ちる）
  * 11. **warm の context 長の一致** — 自ターン番号ごとに 3 モードが揃っているか（cold では欄ごと無い）
+ * 12. **warm の追記列の門** — 台本の自ターン数が発話の本数を超えないこと（`assertWarmFollowUps`）
  *
  * NOTE: リポの慣習に合わせて `Deno.test`（文脈）+ `t.step`（振る舞い）で書く。
  */
@@ -27,6 +28,7 @@ import { assert, assertAlmostEquals, assertEquals, assertThrows } from "@std/ass
 import type { GenerationSpeculation } from "../../packages/models/gemma.ts";
 import {
   assertWarmCapacity,
+  assertWarmFollowUps,
   median,
   summarizeTurns,
   tokensAfterFirst,
@@ -840,6 +842,58 @@ Deno.test("warm の容量の門", async (t) => {
           promptTokens: 33,
           turnTokens: 33,
           newTokens: 200,
+        }),
+      Error,
+      "auto",
+    );
+  });
+
+  await t.step("追記の長さが混ざるときは最長で見る（短い方で見ると溢れを見逃す）", () => {
+    // 追記が 10 token と 24 token の 2 本ある走行（`main.ts` が渡すのは最長 + 閉じ札 1 個）。
+    const request = { plans, promptTokens: 33, newTokens: 200 };
+    const capacity = warmPeakPositions({ ...request, turns: 9, turnTokens: 24 + 1 }) - 1;
+    assertThrows(
+      () => assertWarmCapacity({ ...request, capacity, turnTokens: 24 + 1 }),
+      Error,
+      "plain は自ターン 9 本",
+    );
+    // 短い方で見ると同じ容量が通ってしまう — 最長を渡すことが門の前提である。
+    assertWarmCapacity({ ...request, capacity, turnTokens: 10 + 1 });
+  });
+});
+
+Deno.test("warm の追記列の門（発話が尽きる台本を落とす）", async (t) => {
+  await t.step("既定の rounds 3（plain 13 本）は 12 本で通り、11 本では落ちる", () => {
+    // 回せる自ターンは 1 + 本数（1 本目は会話全体を流すので追記を使わない）。
+    assertWarmFollowUps({ plans: turnPlan(3), followUps: 12 });
+    assertThrows(() => assertWarmFollowUps({ plans: turnPlan(3), followUps: 11 }), Error, "plain");
+  });
+
+  await t.step("rounds 4（plain 17 本）は 12 本では落ちる（本数を名指す）", () => {
+    const request = { plans: turnPlan(4), followUps: 12 };
+    assertThrows(() => assertWarmFollowUps(request), Error, "plain は自ターン 17 本");
+    assertThrows(() => assertWarmFollowUps(request), Error, "追記の発話 12 本");
+  });
+
+  await t.step("本数が 1 以上の整数でなければ落ちる", () => {
+    assertThrows(
+      () => assertWarmFollowUps({ plans: turnPlan(1), followUps: 0 }),
+      Error,
+      "1 本以上要る",
+    );
+    assertThrows(
+      () => assertWarmFollowUps({ plans: turnPlan(1), followUps: 1.5 }),
+      Error,
+      "1 本以上要る",
+    );
+  });
+
+  await t.step("台本に居ないモードがあれば落ちる", () => {
+    assertThrows(
+      () =>
+        assertWarmFollowUps({
+          plans: turnPlan(2).filter((plan) => plan.mode !== "auto"),
+          followUps: 12,
         }),
       Error,
       "auto",

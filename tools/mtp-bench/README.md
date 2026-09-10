@@ -92,14 +92,28 @@ the other end of that range — see below.
 ### `--warm`: one conversation per mode
 
 With the switch, each mode gets **one sequence, created on its first turn and disposed after the
-last**, and every later turn of that mode appends the workload's final user message again as a new
-user turn — the same shape a multi-turn chat has. The gate therefore starts cold only once per mode
-(in the warm-up turn), which is what a real conversation does; the cold figure and this one bracket
-what shipping code sees.
+last**, and every later turn of that mode appends **a different user message** as a new user turn —
+one growing conversation, the same shape a multi-turn chat has. The gate therefore starts cold only
+once per mode (in the warm-up turn), which is what a real conversation does; the cold figure and this
+one bracket what shipping code sees.
 
-- The follow-up is drawn with **`gemma4ChatTurn`**, the same helper `Gemma4ChatSession` uses for the
+- **Every turn asks something new.** The follow-ups are `warmFollowUps` in `workloads.ts`: twelve
+  utterances for `freeform` (a different creative request each time — a poem, a letter, a fable) and
+  twelve for `dialogue` (the performance conversation continued, one new question per turn). Turn
+  `n` of a mode sends follow-up `n − 1`.
+- **Why not the same message every turn?** That is what the switch did at first, and it measures the
+  wrong thing: the model copies its own previous answer, the drafter predicts text it has already
+  seen, and acceptance jumps from 1.63 to 3.9 tokens per cycle (measured on the RTX 3080 Ti,
+  `docs/research` 2026-09-09 §6.5). `--warm` exists to warm the **gate** on a workload where
+  speculation still _loses_; a repeated message turns the workload into a copying task instead, so
+  the gate is no longer being asked the question it was built for.
+- **Twelve follow-ups mean `--rounds 3` is the ceiling.** A mode can run `1 + follow-ups` turns at
+  most (the first turn sends the whole conversation and uses no follow-up), and `plain` takes four
+  turns per rotation, so the default gives it exactly 13. A higher `--rounds` is rejected before the
+  first turn runs (after the model has loaded — the same point as the capacity check), naming the mode and the turn count it would need.
+- Each follow-up is drawn with **`gemma4ChatTurn`**, the same helper `Gemma4ChatSession` uses for the
   same purpose — never a hand-written template string, because the chat spellings belong to that
-  function.
+  function. All of them are drawn at start-up, so no turn pays tokenisation inside its wall clock.
 - A turn that ran into `--new-tokens` did **not** close its model turn, so its frontier is an
   ordinary content token rather than the end-of-turn one that `gemma4ChatTurn`'s delta assumes. The
   tool then prepends the end-of-turn id itself, producing exactly the ids the model would have
@@ -110,13 +124,16 @@ what shipping code sees.
   mode. Prepending the end-of-turn id there would push `body <eos> <turn|> delta` into the KV — ids
   no redraw of the conversation would ever produce — and not prepending it breaks what
   `gemma4ChatTurn`'s delta assumes, so neither is measurable.
-- **Capacity is checked after the model loads and before the first turn runs** (the check needs the tokenizer for the follow-up turn). Needed positions for a mode with `n` turns are
-  `prompt + n × new-tokens + (n − 1) × delta − 1`, and `plain` runs four turns per rotation against
-  the two speculative modes' two, so `plain` is always the binding one (13 turns at the default
-  `--rounds 3`). `freeform` (33 prompt tokens) and `dialogue` (230) fit in the default 8192;
-  `extract` / `summarize` (≈4.8K, and their delta is the document itself) do not, and are rejected
-  with the per-mode numbers. That is intended — `--warm` exists for the workloads where the gate
-  _loses_, which are the short-prompt ones.
+- **Capacity is checked after the model loads and before the first turn runs** (the check needs the
+  tokenizer for the follow-up turns). Needed positions for a mode with `n` turns are
+  `prompt + n × new-tokens + (n − 1) × delta − 1`, where `delta` is the **longest** follow-up plus
+  the end-of-turn id — the pessimistic side, since the follow-ups differ in length. `plain` runs four
+  turns per rotation against the two speculative modes' two, so `plain` is always the binding one (13
+  turns at the default `--rounds 3`). `freeform` (33 prompt tokens) and `dialogue` (230) fit in the
+  default 8192. `extract` / `summarize` have no follow-up list at all and are rejected by name: their
+  prompt is a document (≈4.8K), so a growing conversation of them would not fit either. That is
+  intended — `--warm` exists for the workloads where the gate _loses_, which are the short-prompt
+  ones.
 - **The summary only uses own-turn numbers that all three modes reached** (`ownIndex ≤` the smallest
   per-mode turn count, reported as `summary.ownTurnLimit`). Without that, the ratio would compare
   `plain` turns late in a long conversation against `always` turns early in a short one, since

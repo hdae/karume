@@ -59,11 +59,13 @@ import { runMain } from "../../examples/shared/run-main.ts";
 import {
   buildWorkload,
   isDocumentWorkload,
+  warmFollowUps,
   WORKLOAD_NAMES,
   type WorkloadName,
 } from "./workloads.ts";
 import {
   assertWarmCapacity,
+  assertWarmFollowUps,
   BENCH_MODES,
   type BenchMode,
   RUN_KINDS,
@@ -217,7 +219,8 @@ const documentChars = isDocumentWorkload(workload)
 const gpuTiming = flags.has("gpu-timing");
 
 /**
- * モードごとに sequence を 1 本持ち、そのモードの各ターンで同じ発話を追記する（多ターン chat）。
+ * モードごとに sequence を 1 本持ち、そのモードの各ターンで**違う** user 発話（`warmFollowUps`）を
+ * 追記する（多ターン chat）。同じ発話を繰り返すと model が前の答えを写して受理率が跳ねる。
  *
  * 既定（cold）は 1 ターン = 1 sequence なので、`auto` の自己採算ゲートは**毎ターン初期状態から**
  * 始まり、負ける課題では「抜けるまでの探索」を毎ターン払う（悲観側）。実アプリ
@@ -503,46 +506,60 @@ const main = async (): Promise<void> => {
   const prompt = gemma4ChatPrompt(pipeline.tokenizer, messages);
 
   /**
-   * warm の 2 本目以降が追記する差分（会話の**最後の user 発話をもう 1 度**）と閉じ札の id。
+   * warm の 2 本目以降が追記する差分（**ターンごとに違う** user 発話 — `warmFollowUps`）と
+   * 閉じ札の id。自ターン `n` 本目（2 始まり）が流すのは `deltas[n - 2]` である。
+   *
+   * ターンごとに違う発話を流すのは、同じ発話を追記すると model が前のターンの答えを写し、
+   * drafter の受理率が跳ねるためである（実測 1.63 → 3.9 tok/cycle・docs/research 2026-09-09
+   * §6.5）— warm は「投機が負ける課題のまま、ゲートだけを暖める」ための口なので、写しが起きた
+   * 走行は測りたいものを測っていない。理由の正本は `workloads.ts` の `warmFollowUps` の doc。
    *
    * 描くのは `gemma4ChatTurn` — 多ターンを自分で回すときの正本で、`Gemma4ChatSession` も同じ
    * 関数を同じ使い方で呼ぶ（`packages/models/src/gemma/chat-session.ts:518`）。テンプレート
-   * 文字列を手で書かないのは、綴り（`<|turn>` 系）の所有者が chat 関数だからである。
+   * 文字列を手で書かないのは、綴り（`<|turn>` 系）の所有者が chat 関数だからである。全部を
+   * 起動時に描くのは、ターンの中で tokenizer を呼ぶと壁にその費用が乗るためである。
    * cold では `undefined`（追記も閉じ札も要らない）。
    */
-  const warmTurn = (():
-    | { readonly delta: readonly number[]; readonly endOfTurnId: number }
-    | undefined => {
+  const warmTurn = ((): {
+    readonly deltas: readonly (readonly number[])[];
+    readonly longestDelta: number;
+    readonly endOfTurnId: number;
+  } | undefined => {
     if (!warm) return undefined;
-    const followUp = messages.at(-1);
-    if (followUp === undefined || followUp.role !== "user") {
-      throw new Error(
-        `--warm: ワークロード ${workload} の最後の発話が user でない（追記できる形でない）`,
-      );
-    }
     const endOfTurnId = pipeline.tokenizer.addedTokenId(END_OF_TURN);
     if (endOfTurnId === undefined) {
       throw new Error(`--warm: トークナイザの追加語彙に閉じ札 ${END_OF_TURN} が無い`);
     }
-    return { delta: gemma4ChatTurn(pipeline.tokenizer, followUp), endOfTurnId };
+    const deltas = warmFollowUps(workload).map((content) =>
+      gemma4ChatTurn(pipeline.tokenizer, { role: "user", content })
+    );
+    return {
+      deltas,
+      longestDelta: Math.max(...deltas.map((delta) => delta.length)),
+      endOfTurnId,
+    };
   })();
 
   const plans = turnPlan(rounds);
-  // 溢れは**測る前に**落とす（走ってから溢れると、片側だけ短い走行の数字が残る）。追記ぶんを
-  // +1 で見るのは、閉じ札を前置するターンが最も長くなるためである（悲観側）。
   if (warmTurn !== undefined) {
+    // 発話列が尽きる走行も、容量に入らない走行も、**測る前に**落とす（走ってから尽きる／溢れると
+    // 片側だけ短い走行の数字が残る）。追記は最長の 1 本で見て、閉じ札の前置ぶん +1 する
+    // （どちらも悲観側）。
+    assertWarmFollowUps({ plans, followUps: warmTurn.deltas.length });
     assertWarmCapacity({
       plans,
       capacity,
       promptTokens: prompt.length,
-      turnTokens: warmTurn.delta.length + 1,
+      turnTokens: warmTurn.longestDelta + 1,
       newTokens,
     });
   }
   note(
     `[mtp-bench] ready（${secondsOf(performance.now() - started)} s）` +
       ` / prompt ${prompt.length} token / capacity ${capacity}` +
-      (warmTurn === undefined ? "" : ` / warm 追記 ${warmTurn.delta.length} token`) +
+      (warmTurn === undefined
+        ? ""
+        : ` / warm 追記 最長 ${warmTurn.longestDelta} token · ${warmTurn.deltas.length} 本`) +
       ` / sampler ${samplerName} ${JSON.stringify(sampler)}\n`,
   );
 
@@ -600,9 +617,18 @@ const main = async (): Promise<void> => {
         if (prior === undefined) {
           throw new Error("[mtp-bench] 簿記の破れ: 継いだ sequence に前ターンの停止が無い");
         }
+        // 自ターン 2 本目が発話列の 1 本目（起動時の `assertWarmFollowUps` が尽きないことを見た）。
+        // 添字アクセス（`at` は負の添字で末尾へ回り込み、簿記の破れが黙る）。
+        const delta = warmTurn.deltas[ownIndex - 2];
+        if (delta === undefined) {
+          throw new Error(
+            `[mtp-bench] 簿記の破れ: 自ターン ${ownIndex} 本目に対応する追記が無い` +
+              `（追記 ${warmTurn.deltas.length} 本）`,
+          );
+        }
         return [
           ...warmTurnPrefix({ prior, mode: plan.mode, endOfTurnId: warmTurn.endOfTurnId }),
-          ...warmTurn.delta,
+          ...delta,
         ];
       })();
       // 生成の**前**の占有（warm ではここが前ターンまでの積み上がり）。

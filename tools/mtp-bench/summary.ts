@@ -321,6 +321,36 @@ export const turnPlan = (rounds: number): readonly TurnPlan[] => {
 };
 
 /**
+ * warm の走行に追記の発話が足りることを**測る前に**確かめる（足りないなら fail loudly）。
+ *
+ * warm の 2 本目以降のターンは `workloads.ts` の `warmFollowUps` を 1 本ずつ流す（同じ発話を
+ * 繰り返すと model が前の答えを写して受理率が跳ね、測りたい「負ける課題」ではなくなる）。よって
+ * 1 モードが回せる自ターンは **1 + 発話の本数**までで、`--rounds` を上げると 1 round に 4 本回る
+ * `plain` が先に尽きる。走ってから尽きると、途中のターンで追記が無い走行の数字が残る。
+ */
+export const assertWarmFollowUps = (request: {
+  readonly plans: readonly TurnPlan[];
+  /** 追記に流せる発話の**本数**（列の中身は要らない — 尽きるかどうかだけを見る）。 */
+  readonly followUps: number;
+}): void => {
+  if (!Number.isInteger(request.followUps) || request.followUps < 1) {
+    throw new Error(`--warm: 追記の発話 ${request.followUps} 本（1 本以上要る）`);
+  }
+  const limit = request.followUps + 1;
+  const over: string[] = [];
+  for (const mode of BENCH_MODES) {
+    const turns = request.plans.filter((plan) => plan.mode === mode).length;
+    if (turns === 0) throw new Error(`--warm: mode ${mode} のターンが台本に 1 本も無い`);
+    if (turns > limit) over.push(`${mode} は自ターン ${turns} 本`);
+  }
+  if (over.length === 0) return;
+  throw new Error(
+    `--warm: 追記の発話 ${request.followUps} 本では台本が回らない（${over.join(" / ")}` +
+      ` — 1 本目は会話全体なので回せるのは ${limit} 本まで）。--rounds を下げること`,
+  );
+};
+
+/**
  * warm で `turns` 本回したときに要る論理位置の最大（= **最後のターンのピーク**）。
  *
  * 1 本目は `promptTokens`（会話全体の描画）から始まり、2 本目以降は `turnTokens`（`gemma4ChatTurn`
@@ -355,6 +385,12 @@ export const assertWarmCapacity = (request: {
   readonly plans: readonly TurnPlan[];
   readonly capacity: number;
   readonly promptTokens: number;
+  /**
+   * 1 ターンぶんの追記（閉じ札の前置を含む）。
+   *
+   * MUST: 追記はターンごとに違う発話なので、渡すのは**最長**の 1 本である（短い方で見ると、
+   * 長い発話が来るターンで溢れるのを見逃す）。
+   */
   readonly turnTokens: number;
   readonly newTokens: number;
 }): void => {

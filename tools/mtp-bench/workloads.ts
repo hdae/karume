@@ -15,6 +15,9 @@
  * `tools/export-recipes/gemma4/export_drafter.py` の golden 素材と同じ規則である（同じ規則で
  * 焼いた drafter を、同じ規則で組んだ prompt で測る）。
  *
+ * `--warm`（モードごとに 1 本の会話を伸ばす走行）が 2 本目以降のターンで追記する発話列は
+ * {@link warmFollowUps}（ターンごとに違う依頼 — 理由はそこの doc）。
+ *
  * MUST: 全モジュール副作用ゼロ（文書はモジュールスコープで読まない — 読むのは
  * {@link buildWorkload} が呼ばれたときだけ）。
  */
@@ -96,6 +99,85 @@ const DIALOGUE_ANSWER = [
 
 /** 対話ケースの 3 発話目（固定の返答の「2 点目」を指す）。 */
 const DIALOGUE_FOLLOW_UP = "Expand on the second point with a concrete example.";
+
+/**
+ * `--warm` の 2 本目以降が追記する user 発話（自由文）— **ターンごとに違う**依頼である。
+ *
+ * MUST: 同じ発話を繰り返さない。同じ依頼をもう 1 度流すと model は前のターンの答えを写し始め、
+ * drafter の受理率が跳ねる（実測 1.63 → 3.9 tok/cycle・docs/research 2026-09-09 §6.5）。warm は
+ * 「投機が負ける課題のまま、ゲートだけを暖める」ために在る口なので、写しが起きた走行は測りたい
+ * ものを測っていない。主題も形も**文体**（物語 / 説明 / 手順 / 報道 / 皮肉 / 抒情 / 演説 …）も
+ * 変える — 同じ文体の 300 語が KV に積み上がるほど drafter は n-gram を拾いやすくなる。長さの
+ * 指定だけ {@link FREEFORM_PROMPT} と同じ級に揃えてある（詩だけ行数）。
+ */
+const FREEFORM_WARM_FOLLOW_UPS: readonly string[] = [
+  "Write a short story (about 300 words) about a bakery that opens only during thunderstorms.",
+  "Explain to a ten-year-old (about 300 words) why the sea is salty but most rivers are not.",
+  "Write a product review (about 300 words) of an umbrella that only opens when it is not " +
+  "raining.",
+  "Write a letter (about 300 words) from a retired cartographer to the island she never " +
+  "finished mapping.",
+  "Write step-by-step instructions (about 300 words) for teaching a cat to answer the doorbell, " +
+  "in the tone of a serious appliance manual.",
+  "Write a dialogue (about 300 words) between a locksmith and a customer who has forgotten " +
+  "what the key opens.",
+  "Write a newspaper report (about 300 words) on a town that voted to set its clocks back by " +
+  "one hour every Monday.",
+  "Write a poem (about 20 lines) about the last train of the night leaving an empty station.",
+  "Write a persuasive speech (about 300 words) arguing that staircases should count as public " +
+  "art.",
+  "Write a diary entry (about 300 words) by a night-shift museum guard who suspects that one " +
+  "painting changes.",
+  "Write a travel-guide entry (about 300 words) for a village whose streets are renamed every " +
+  "spring.",
+  "Write a folk tale (about 300 words) explaining why the moon owes the sea a favour.",
+];
+
+/**
+ * `--warm` の 2 本目以降が追記する user 発話（対話）— 性能相談の**続き**として自然な 12 問。
+ *
+ * MUST: 1 問ごとに新しい論点を 1 つだけ足す（前の答えの言い換えを頼まない）。言い換えを頼むと
+ * 答えが前のターンの写しになり、{@link FREEFORM_WARM_FOLLOW_UPS} と同じ理由で受理率が跳ねる。
+ * 先頭に置くのは直前の固定返答（buffer pool の展開）と語彙が重ならない問い — 1 本目の実測ターンで
+ * 写しが起きると要約の中央値にそのまま入る。
+ */
+const DIALOGUE_WARM_FOLLOW_UPS: readonly string[] = [
+  "Should the workgroup size be tuned per adapter, or is one value across vendors good enough?",
+  "How do I keep shader translation from becoming the startup bottleneck on the first inference?",
+  "What is a reasonable way to reason about occupancy on WebGPU when there is no profiler for it?",
+  "Is there a safe way to overlap a compute pass with a buffer upload, or does the queue " +
+  "serialise them anyway?",
+  "Which limits should I request at device creation time so that no dispatch fails validation " +
+  "mid-run?",
+  "How should I size the buffer pool's size classes so that pooling does not just trade stalls " +
+  "for wasted memory?",
+  "How much does sharing one bind group layout across pipelines actually buy?",
+  "When is a storage buffer the wrong choice, and a uniform buffer or a texture the right one?",
+  "What is the cleanest way to test that two code paths produce bit-identical outputs on the GPU?",
+  "How should I handle a lost device in the middle of a long generation?",
+  "Does splitting one large matrix multiply into several dispatches ever help, or is it always " +
+  "a loss?",
+  "What should I record per dispatch so that a throughput regression is diagnosable afterwards?",
+];
+
+/**
+ * `--warm` が使う追記の発話列（{@link buildWorkload} の会話の**続き**として流すもの）。
+ *
+ * 文書系（{@link DOCUMENT_WORKLOADS}）は発話列を持たない — 追記が文書そのものになって容量にも
+ * 入らないが、落とす理由は「列が無い」ことなので、そう名指して落とす。
+ */
+export const warmFollowUps = (name: WorkloadName): readonly string[] => {
+  if (isDocumentWorkload(name)) {
+    throw new Error(
+      `ワークロード ${name} は --warm 非対応（追記に流す user 発話の列を持たない — warm の対象: ` +
+        `${WORKLOAD_NAMES.filter((one) => !isDocumentWorkload(one)).join(" / ")}）`,
+    );
+  }
+  if (name === "dialogue") return DIALOGUE_WARM_FOLLOW_UPS;
+  if (name === "freeform") return FREEFORM_WARM_FOLLOW_UPS;
+  // 未知の綴りは落とす（`buildWorkload` と同じ扱い — 型を迂回した呼びを黙って通さない）。
+  throw new Error(`未知のワークロード ${name}（既知: ${WORKLOAD_NAMES.join(" / ")}）`);
+};
 
 /**
  * `limit` 文字を超えない範囲で、**最後の段落境界**（空行）まで切り詰める（末尾は rstrip）。

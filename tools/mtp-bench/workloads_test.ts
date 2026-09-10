@@ -1,12 +1,14 @@
 /**
  * 固定 prompt の組み立ての単体検証（GPU 不要・素材はリポ内の文書）。
  *
- * 見る 3 点:
+ * 見る 4 点:
  *
  * 1. **切るのは段落境界** — 上限手前の最後の空行で切れること・境界が無ければ落ちること
  *    （文字数で切ると生成が退化列になり、prompt 側の理由で受理率が動く）
  * 2. **4 種の形** — role の並びと末尾の指示文（`extract` と `summarize` の差は依頼文だけ）
  * 3. **効かないノブは拒否** — 文書を読まないワークロードに `documentChars` を渡したら落ちること
+ * 4. **warm の追記列** — 12 本・空文字なし・互いに違う・最初の発話とも違う（同じ発話を追記すると
+ *    model が前の答えを写して受理率が跳ねる）・文書系は落ちること
  *
  * NOTE: リポの慣習に合わせて `Deno.test`（文脈）+ `t.step`（振る舞い）で書く
  * （`@std/testing/bdd` はこのリポの依存に無い）。
@@ -17,6 +19,7 @@ import {
   buildWorkload,
   readWorkloadDocument,
   truncateAtParagraph,
+  warmFollowUps,
   WORKLOAD_NAMES,
 } from "./workloads.ts";
 
@@ -103,5 +106,45 @@ Deno.test("documentChars の受け付け", async (t) => {
 
   await t.step("文書系で省略すると落ちる（既定を持つのは CLI 側）", () => {
     assertThrows(() => buildWorkload("extract"), Error, "documentChars が必須");
+  });
+});
+
+Deno.test("warm の追記列（ターンごとに違う発話）", async (t) => {
+  /** warm を受けるワークロード（文書系は列を持たない）。 */
+  const WARM_WORKLOADS = ["dialogue", "freeform"] as const;
+
+  await t.step("自由文 / 対話にそれぞれ 12 本（既定 rounds 3 の plain 13 本ぶん）", () => {
+    for (const name of WARM_WORKLOADS) assertEquals(warmFollowUps(name).length, 12, name);
+  });
+
+  await t.step("空の発話は無い", () => {
+    for (const name of WARM_WORKLOADS) {
+      for (const [at, followUp] of warmFollowUps(name).entries()) {
+        assert(followUp.trim().length > 0, `${name}[${at}] が空`);
+      }
+    }
+  });
+
+  await t.step("互いに違う（同じ発話を 2 度流すと答えの写しで受理率が跳ねる）", () => {
+    for (const name of WARM_WORKLOADS) {
+      const followUps = warmFollowUps(name);
+      assertEquals(new Set(followUps).size, followUps.length, name);
+    }
+  });
+
+  await t.step("会話に既に在る発話とも違う（1 本目の繰り返しにならない）", () => {
+    for (const name of WARM_WORKLOADS) {
+      const conversation = buildWorkload(name).map((message) => message.content);
+      for (const followUp of warmFollowUps(name)) {
+        assert(!conversation.includes(followUp), `${name}: ${followUp}`);
+      }
+    }
+  });
+
+  await t.step("文書系は落ちる（発話列を持たないことを名指す）", () => {
+    for (const name of ["extract", "summarize"] as const) {
+      assertThrows(() => warmFollowUps(name), Error, "--warm 非対応");
+      assertThrows(() => warmFollowUps(name), Error, name);
+    }
   });
 });
