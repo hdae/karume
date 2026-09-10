@@ -1382,3 +1382,28 @@ Deno.test("openAsset: abort 済み signal は口の有無に依らず reason を
     assertStrictEquals(error, reason);
   }
 });
+
+Deno.test("fetchAssets: 特殊キーも own property で返し、同じ参照の bytes を共有する", async () => {
+  const served = serveAll();
+  const reads: string[] = [];
+  const loaded = await loadManifest(localDirectory({
+    readFile: (path) => {
+      reads.push(path);
+      const bytes = served.get(path);
+      if (bytes === undefined) throw new Error(`未定義の資産 ${path}`);
+      return Promise.resolve(bytes);
+    },
+  }, { label: "synthetic" }));
+  const ref = Object.values(resolveFiles(loaded.manifest))[0];
+  const files = Object.fromEntries(
+    ["__proto__", "constructor", "2", "toString"].map((key) => [key, ref]),
+  );
+  const assets = await fetchAssets(loaded, files);
+  assertEquals(Object.keys(assets), Object.keys(files));
+  assertStrictEquals(Object.getPrototypeOf(assets), Object.prototype);
+  for (const key of Object.keys(files)) {
+    assert(Object.hasOwn(assets, key));
+    assertStrictEquals(assets[key], assets["2"]);
+  }
+  assertEquals(reads.filter((path) => path === ref.path).length, 1);
+});

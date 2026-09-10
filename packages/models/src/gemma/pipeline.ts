@@ -1605,10 +1605,12 @@ export class Gemma4Pipeline {
     if (input.model.length === 0) {
       throw new Error(`${where}: 製品グラフの shard 列が空（先頭がグラフ shard）`);
     }
-    let shards: Record<string, Uint8Array<ArrayBuffer>> = {};
-    input.model.forEach((bytes, index) => {
-      shards = { ...shards, [`${MODEL}[${index}]`]: bytes };
-    });
+    const shards = Object.fromEntries(
+      input.model.map((bytes, index): readonly [string, Uint8Array<ArrayBuffer>] => [
+        `${MODEL}[${index}]`,
+        bytes,
+      ]),
+    );
     const open = assetComponentOpener(where, shards, (key) => assetBuffer(where, shards, key));
     // NOTE: `requiredLimits` の検査はこの面には無い — {@link Gemma4Assets} は manifest を
     // 持たない（バイト列と `config` だけ）ので、宣言そのものへ到達できない。実寸の検査は

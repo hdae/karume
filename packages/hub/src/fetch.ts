@@ -280,15 +280,14 @@ export const fetchAssets = async (
   // （この後は同期の組み立てだけなので、これが返却前の最後の関門になる）。
   signal.throwIfAborted();
 
-  let assets: Record<string, Uint8Array<ArrayBuffer>> = {};
-  for (const key of keys) {
+  // 表は一度だけ組む。fromEntries は __proto__ も通常の own property にする。
+  return Object.fromEntries(keys.map((key): readonly [string, Uint8Array<ArrayBuffer>] => {
     const bytes = bytesByRef.get(fileRefKey(files[key]));
     if (bytes === undefined) {
       throw new Error(`hub: ${files[key].path} の bytes が揃っていない（取得層の不変条件破れ）`);
     }
-    assets = { ...assets, [key]: bytes };
-  }
-  return assets;
+    return [key, bytes];
+  }));
 };
 
 /**
