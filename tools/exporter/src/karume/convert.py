@@ -57,7 +57,7 @@ from karume.aten_handlers import (
     aten,
 )
 from karume.dims import MAX_SAFE_INT, DimExpr, format_dim, is_symbol_name
-from karume.extents import same_extents
+from karume.extents import extent_keys, same_extents
 from karume.ir import (
     IrGraph,
     IrInitializer,
@@ -159,12 +159,14 @@ MIN_PROBE_VALUE = 2
 #:
 #: - `arange(T)` は `arange(Tmax)` の先頭 T 要素
 #: - elementwise / 比較 / 選択（where）は要素ごと（broadcast 込み — 対応次元が保たれる）
-#: - slice / squeeze / unsqueeze / view / permute は添字の付け替えのみ
+#: - slice / squeeze / unsqueeze / permute は添字の付け替え。記号 view は
+#:   単位軸の追加・削除だけを許し、軸の分割・結合は実行時へ残す
 #: - `full` / `scalar_tensor` / `clone` / `_to_copy` は値そのものに触らない
 #:
 #: 可換でない使われ方のうち「シンボルを値として消費する形」は {@link SYMBOL_EXTENT_ARGS} が
-#: foldable から外し、残りは _check_prefix_commutes が 2 点評価で落とす — **宣言ではなく
-#: 検査が担保する**。除外の理由は 3 つ: ① 実体化が爆発する op（expand。frontier で止める —
+#: foldable から外し、shape 依存 view は構造で除外する。_check_prefix_commutes の 2 点評価は
+#: 追加の反例検査であり、任意の op の可換性証明にはならない。ほかの除外理由は 3 つ:
+#: ① 実体化が爆発する op（expand。frontier で止める —
 #: ただし no-op expand だけは例外で `_classify_foldable` が通す）② 非決定な op（RNG）
 #: ③ 縮約・反転など prefix と可換でないことが自明な op。
 #: 語彙の増加は明示行為 — 表に無い op は畳まず、消費されれば未対応 op として落ちる。
@@ -584,6 +586,16 @@ class Converter:
                     continue
             elif node.target not in FOLDABLE_OPS:
                 continue
+            if node.target is aten.view.default:
+                source = node.args[0].meta.get("val")
+                if _has_free_symbols(source) or _has_free_symbols(val):
+                    # DECIDED: 動的 view は長さで行境界を変えうる。単位軸の増減だけを
+                    # 畳み、残りは prefix を切った後に runtime で並べ替える。
+                    # [ADR 0010](../../../../docs/decisions/0010-symbolic-constant-folding.md)
+                    source_axes = tuple(d for d in extent_keys(source.shape) if d != 1)
+                    target_axes = tuple(d for d in extent_keys(val.shape) if d != 1)
+                    if source_axes != target_axes:
+                        continue
             if _uses_symbol_as_data(node):
                 # 記号がテンソルデータへ昇格した部分木（`scalar_tensor(T)` 等）。焼くと Tmax
                 # でだけ正しい定数になり、2 点評価は偶然一致しうる（module docstring の反例）。

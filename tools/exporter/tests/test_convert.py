@@ -205,6 +205,33 @@ class TestConstantFolding:
 class TestSymbolicConstantFolding:
     """記号依存の部分木は Tmax で焼き、実行時は sym_prefix_slice で切り出す（ADR 0010）。"""
 
+    @pytest.mark.parametrize("axis", [0, 1, 2])
+    def test_symbolic_reshape_is_applied_after_slicing(self, convert_module, dyn_t, axis):
+        """長さで行境界が動く view は、上限近傍で偶然一致しても定数化しない。"""
+
+        class ReshapedTable(nn.Module):
+            def forward(self, x):
+                length = x.shape[axis]
+                table = (torch.arange(6 * length, dtype=torch.float32) < 25).float()
+                return x + table.reshape(x.shape)
+
+        shape = [2, 3]
+        shape.insert(axis, 6)
+        module = ReshapedTable()
+        graph, tensors = convert_module(module, (torch.zeros(shape),), ({axis: dyn_t},))
+        # 記号長で並べ替える前の表だけを焼く。上限で並べ替えた表の prefix とは異なる。
+        sliced = only_node(graph, "sym_prefix_slice")
+        reshaped = only_node(graph, "reshape")
+        assert reshaped.ins == sliced.outs
+        assert only_node(graph, "add").ins[1] == reshaped.outs[0]
+        baked = tensors[graph.initializers[sliced.ins[0]].tensor]
+        for length in range(2, SYM_MAX + 1):
+            actual_shape = [2, 3]
+            actual_shape.insert(axis, length)
+            x = torch.zeros(actual_shape)
+            actual = x + baked[: 6 * length].reshape(actual_shape)
+            assert torch.equal(actual, module(x)), f"axis={axis}, T={length}"
+
     def test_symbol_dependent_constant_is_baked_at_tmax_and_prefix_sliced(
         self, convert_module, dyn_t
     ):
