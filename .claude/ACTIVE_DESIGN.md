@@ -11,6 +11,10 @@
 
 ## Now
 
+- **9/11 レビュー対応後の再開** — [調査・実測と引き継ぎ](../docs/research/2026-09-10-codex-mtp-optimization.md#分割コミットと再開用の引き継ぎ) を先に読む。
+  現在は `codex/review-and-fix`。次の候補は Anima DiT stage 内の転送・readback の費用計測。
+  利用者の希望により、今後は作業単位で調査・検証を終えて順次コミットする。残件の正本は backlog。
+
 - **Codex 性能調査（2026-09-06）の消化波（2026-09-07）** — 実測と設計の正本は
   [research 2026-09-07](../docs/research/2026-09-07-codex-perf-review-followup.md)・採否は perf-ledger H-11 / H-12 / H-13 /
   H-14 / K-17 / K-18 / K-19。入ったもの: ①観測席 `onRunDiagnostics` に **phase 第 2 引数**（`Gemma4RunPhase`）+ 停止 token の

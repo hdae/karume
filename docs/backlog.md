@@ -9,6 +9,11 @@
 
 ## now — 0.12.0 リリース後（2026-09-06）
 
+- **9/11 レビューの継続検証**（調査 2026-09-10・[対応記録](research/2026-09-10-codex-mtp-optimization.md)）:
+  `artifacts.staged_publication` の同一 final への複数 writer を許容するか決め、必要ならロック・中断復旧を設計する。
+  GPU 端チャネル保護の M2 / ブラウザ追試とモデル全体の性能計測は残る。
+  Anima 常駐化・MTP の性能帰属は下記の既存項目へ統合し、レビュー提案を未検証のまま新規カーネルへしない。
+
 0.12.0 は**公開完了**（2026-09-06 — lockstep bump `a24d656` → GitHub Release v0.12.0 → JSR 0.12.0 →
 `deno task smoke:published` 緑・`KARUME_SOURCES` 10 本の疎通を確認。中身は下の消化済み節）。
 2026-09-04 裁定の作業波 a〜d のうち残るのは
