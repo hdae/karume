@@ -489,12 +489,18 @@ Deno.test("ChatSession 溢れ: ポリシーの注入が効く（履歴を返す 
     const capacity = gemma4ChatPrompt(tokenizer, [SYSTEM_MESSAGE, asked]).length +
       MAX_NEW_TOKENS - 2;
     const host = fakeHost([{ text: "Blue.", closes: true }], programOf(capacity));
+    let returned: { role: Gemma4ChatMessage["role"]; content: string }[] = [];
     const session = new Gemma4ChatSession(host, {
       system: SYSTEM,
       maxNewTokens: MAX_NEW_TOKENS,
-      onOverflow: ({ turns }) => turns.slice(-1).map((turn) => ({ ...turn })),
+      onOverflow: ({ turns }) => {
+        assertEquals(Reflect.set(turns[0], "content", "changed"), false);
+        returned = turns.slice(-1).map((turn) => ({ ...turn }));
+        return returned;
+      },
     });
     assertEquals(await session.send(asked.content).text(), "Blue.");
+    returned[0].content = "changed after overflow";
     assertEquals(session.turns, [asked, { role: "assistant", content: "Blue." }]);
   });
 
@@ -1011,5 +1017,15 @@ Deno.test("ChatSession: done は cleanup を待ち、その直後に次の送信
   const next = session.send("Another one.");
   assertEquals(await text, "Blue");
   assertEquals(await next.text(), "Red.");
+  await session.dispose();
+});
+
+Deno.test("ChatSession: 履歴スナップショットの各発話は外部から変更できない", async () => {
+  const host = fakeHost([{ text: "Blue.", closes: true }], programOf(640));
+  const session = new Gemma4ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS });
+  await session.send("Name a color.").text();
+  const snapshot = session.turns;
+  assertEquals(Reflect.set(snapshot[0], "content", "changed"), false);
+  assertEquals(session.turns[0].content, "Name a color.");
   await session.dispose();
 });

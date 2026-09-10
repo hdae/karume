@@ -318,7 +318,7 @@ export class Gemma4ChatSession {
    * 対応（{@link Gemma4ChatSession} の「KV を継ぐ条件」）を静かに壊す。
    */
   get turns(): readonly Gemma4ChatMessage[] {
-    return Object.freeze([...this.#turns]);
+    return Object.freeze(this.#turns.map((turn) => Object.freeze({ ...turn })));
   }
 
   /**
@@ -544,7 +544,7 @@ export class Gemma4ChatSession {
     const asked = this.#turns[before - 1];
     const needed = neededOf(detail);
     const next = await this.#onOverflow({
-      turns: Object.freeze([...this.#turns]),
+      turns: this.turns,
       system: this.#system,
       capacity: detail.limit,
       needed,
@@ -567,7 +567,7 @@ export class Gemma4ChatSession {
         detail,
       );
     }
-    this.#turns = [...next];
+    this.#turns = next.map((turn) => ({ ...turn }));
     // 切り詰めた履歴は先頭から描き直すことになるので、context は返して組み直す。
     await this.#releaseSequence();
   }
