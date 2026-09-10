@@ -1160,6 +1160,7 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
             // 変えないのは、偽時計のテストが実装の分岐をなぞるだけにならないようにするためである。
             // ゲートの有無にも依らない — 観測席の `wallMs` が同じ値を運ぶ（`GenerationRunPhase`）。
             const startedAt = now();
+            let observerMs = 0;
             let drafts: number[] = [];
             if (drafted >= 1) {
               // drafter は (frontier b, b を出した行の hidden, b の位置 P) から d₁.. を出す。
@@ -1167,7 +1168,12 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
               // 戻った run は名乗る（値域門で落ちる draft でも run は完了している）。
               tally.draftRuns += 1;
               tally.drafted += drafted;
-              onRun?.({ kind: "draft", cycle });
+              if (onRun !== undefined) {
+                // 診断は直前の run に対応付けて即時配送する。その費用だけを採算から除く。
+                const observerStartedAt = now();
+                onRun({ kind: "draft", cycle });
+                observerMs = now() - observerStartedAt;
+              }
               drafts = takeDrafts(raw, drafted, program.vocabSize);
             }
             // verify = [b, d₁..d_k'] の k'+1 行を位置 P.. に置く（pad 行は 0 のまま）。物理行数 M は
@@ -1209,11 +1215,11 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
               history,
               isStop,
             );
-            // ゲートの物差しは受理判定の直後に採る（配送の yield も観測席の hook も挟まない位置 —
-            // 消費者の速さが混ざると、遅い消費者ほど投機を切ることになる）。
+            // ゲートの物差しは受理判定の直後、配送の前に採り、draft の診断費用を除く。
+            // 消費者や観測の速さが混ざると、同じ推論でもゲートの判断が変わる。
             // MUST: 観測席へ載せる `wallMs` はこの同じ変数である（別に測り直すと、ゲートが見た壁と
             // 内訳の壁が食い違い、内訳から「なぜ倒れたか」を辿れなくなる）。
-            const wall = now() - startedAt;
+            const wall = now() - startedAt - observerMs;
             if (gate !== undefined) {
               // 混ぜない cycle は観測の代わりに `skip()`（ゲートの呼び出し規約 MUST）— 何も
               // 返さないと探索の周期が止まり、`W1` の初回サンプルがターンの 2 本目ではなく

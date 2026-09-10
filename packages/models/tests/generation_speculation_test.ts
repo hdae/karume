@@ -231,22 +231,34 @@ const openSpeculative = async (options: {
   readonly gate?: SpeculationGateOptions;
   /** 偽時計（`policy: "auto"` のときだけ読まれる）。 */
   readonly now?: () => number;
+  readonly clock?: { readonly now: () => number; readonly afterRun: () => void };
+  readonly onRun?: (phase: GenerationRunPhase) => void;
 }) => {
   const fake = fakeSession({ successor: SUCCESSOR, ...options.session });
   options.drafter.watch(fake);
   const phases: GenerationRunPhase[] = [];
   const sequence = await createGenerationSequence({
-    session: fake.session,
+    session: {
+      ...fake.session,
+      run: async (...args) => {
+        const result = await fake.session.run(...args);
+        if (args[2]?.commit === "deferred") options.clock?.afterRun();
+        return result;
+      },
+    },
     program: specProgram(fake, options.program),
     speculative: {
       open: () => Promise.resolve(options.drafter.face),
       k: options.k,
       policy: options.policy ?? "always",
       ...(options.gate === undefined ? {} : { gate: options.gate }),
-      ...(options.now === undefined ? {} : { now: options.now }),
+      ...((options.clock?.now ?? options.now) === undefined
+        ? {}
+        : { now: options.clock?.now ?? options.now }),
     },
     onRun: (phase) => {
       phases.push(phase);
+      options.onRun?.(phase);
     },
   });
   return { fake, drafter: options.drafter, phases, sequence };
@@ -457,7 +469,7 @@ Deno.test("T3′ 温度 > 0: 抽選が走るターンでも投機を張り、列
       policy: "auto",
       gate: FAST_GATE,
       session: TWO_WAY,
-      now: fakeClock(drafter, (_cycle, drafted) => drafted ? 100 : 10),
+      clock: fakeClock(drafter, (_cycle, drafted) => drafted ? 100 : 10),
     });
     // ブロック（2 cycle）が満ちるまで回す必要があるので、この step だけ予算を伸ばす。
     const budgeted: GenerationRequest = { ...request(TWO_WAY_SEED), maxNewTokens: 24 };
@@ -1412,31 +1424,21 @@ Deno.test("T15 抽選の失敗: run が通った後に抽選が落ちても、�
 
 // ---- T16: 自己採算ゲート（`policy: "auto"`・偽時計）-------------------------------
 
-/**
- * 偽時計（生成面は 1 cycle につき 2 回 — cycle の先頭と受理判定の直後 — 読む）。
- *
- * 壁は cycle の番号と「その cycle が draft を採ったか」で決める。draft を採らない cycle は
- * ゲート由来の plain step か予算末尾の強制 plain なので、決定列を先に知らなくても
- * 「投機は遅い / plain は速い」壁を流せる。
- */
+/** 時計を読む回数に依存せず、fake target run の完了時に cycle の費用を加える。 */
 const fakeClock = (
   drafter: FakeDrafter,
   wallOf: (cycle: number, drafted: boolean) => number,
-): () => number => {
+): { readonly now: () => number; readonly afterRun: () => void } => {
   let elapsed = 0;
   let cycle = 0;
-  let head = true;
-  let draftsAtHead = 0;
-  return (): number => {
-    if (head) {
-      draftsAtHead = drafter.calls.length;
-      head = false;
-      return elapsed;
-    }
-    head = true;
-    elapsed += wallOf(cycle, drafter.calls.length > draftsAtHead);
-    cycle += 1;
-    return elapsed;
+  let draftsAtLastRun = 0;
+  return {
+    now: (): number => elapsed,
+    afterRun: (): void => {
+      elapsed += wallOf(cycle, drafter.calls.length > draftsAtLastRun);
+      draftsAtLastRun = drafter.calls.length;
+      cycle += 1;
+    },
   };
 };
 
@@ -1456,7 +1458,7 @@ Deno.test("T16 ゲート: 投機が負ける壁では decode 形へ落ち、そ�
     drafter,
     policy: "auto",
     gate: FAST_GATE,
-    now: fakeClock(drafter, (_cycle, drafted) => drafted ? 100 : 10),
+    clock: fakeClock(drafter, (_cycle, drafted) => drafted ? 100 : 10),
   });
   const run = { ...opened, ...await drain(opened.sequence.generate(request)) };
 
@@ -1504,7 +1506,7 @@ Deno.test("T16 ゲート: plain step を挟んでも drafter 入力（hidden と
     drafter,
     policy: "auto",
     gate: { ...FAST_GATE, burst: 1, exploreBase: 2 },
-    now: fakeClock(drafter, (_cycle, drafted) => drafted ? 100 : 10),
+    clock: fakeClock(drafter, (_cycle, drafted) => drafted ? 100 : 10),
   });
   await drain(opened.sequence.generate({ prompt: PROMPT, maxNewTokens: 20 }));
 
@@ -1533,7 +1535,7 @@ Deno.test("T16 ゲート: ターン最初の cycle と予算末尾の強制 plai
       drafter,
       policy: "auto",
       gate: FAST_GATE,
-      now: fakeClock(
+      clock: fakeClock(
         drafter,
         (cycle, drafted) => slow(cycle) ? 10_000 : (drafted ? 20 : 10),
       ),
@@ -1586,7 +1588,7 @@ Deno.test("T16 ゲート: ターン最初の cycle と予算末尾の強制 plai
       // 既定の測り直し間隔（16 観測）は 1 ターンの予算に入らないので、周期そのものは 4 に縮めて
       // 見る（既定値の側は `generation_gate_test.ts` の T5 が持つ）。
       gate: { ...FAST_GATE, exploreBase: 4 },
-      now: fakeClock(drafter, (cycle, drafted) => cycle === 0 ? 10_000 : (drafted ? 20 : 10)),
+      clock: fakeClock(drafter, (cycle, drafted) => cycle === 0 ? 10_000 : (drafted ? 20 : 10)),
     });
     const run = {
       ...opened,
@@ -1638,7 +1640,7 @@ Deno.test("T17 観測席の壁: 投機の cycle と plain step の壁が載り�
       drafter,
       policy: "auto",
       gate: FAST_GATE,
-      now: fakeClock(drafter, (_cycle, drafted) => drafted ? 100 : 10),
+      clock: fakeClock(drafter, (_cycle, drafted) => drafted ? 100 : 10),
     });
     const run = {
       ...opened,
@@ -1673,7 +1675,7 @@ Deno.test("T17 観測席の壁: 投機の cycle と plain step の壁が載り�
       drafter,
       policy: "auto",
       gate: FAST_GATE,
-      now: fakeClock(drafter, (_cycle, drafted) => drafted ? 100 : 10),
+      clock: fakeClock(drafter, (_cycle, drafted) => drafted ? 100 : 10),
     });
     const run = {
       ...opened,
@@ -1949,4 +1951,38 @@ Deno.test("acceptDrafts: 先頭一致で止まった位置が受理数・その�
     });
     assertEquals(read, [0, 1]);
   });
+});
+
+Deno.test("投機の診断負荷は cycle の壁とゲート判断に混ざらない", async () => {
+  const results = [];
+  for (const observerMs of [0, 5, 50]) {
+    let elapsed = 0;
+    const drafter = fakeDrafter({
+      draft: (cycle) => {
+        elapsed += 1;
+        return chainFrom(cycle.token, K);
+      },
+    });
+    const opened = await openSpeculative({
+      drafter,
+      policy: "auto",
+      gate: FAST_GATE,
+      clock: {
+        now: () => elapsed,
+        afterRun: () => {
+          elapsed += 10;
+        },
+      },
+      onRun: () => {
+        elapsed += observerMs;
+      },
+    });
+    const stream = opened.sequence.generate({ prompt: PROMPT, maxNewTokens: 60 });
+    const events = [];
+    for await (const event of stream) events.push(event);
+    results.push({ events, stop: await stream.done, phases: opened.phases });
+    await opened.sequence.dispose();
+  }
+  assertEquals(results[1], results[0]);
+  assertEquals(results[2], results[0]);
 });
