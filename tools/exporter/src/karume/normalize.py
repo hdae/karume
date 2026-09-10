@@ -79,8 +79,8 @@ from karume.ops import STRIDED_RANK
 
 aten = torch.ops.aten
 
-#: safe-softmax ガードの不活性を実測する 2 評価点（記号長のマスク用）。2 点で見るのは
-#: 「たまたま片方の長さで成立した」を弾くため（convert._check_prefix_commutes と同じ流儀）。
+#: safe-softmax ガードの反例を探す 2 評価点。通過だけでは全長の不活性を証明しないため、
+#: 記号依存マスクは別途検出して safe_softmax を維持する。
 GUARD_PROBE_LENGTHS = (5, 9)
 
 NEG_INF = float("-inf")
@@ -627,7 +627,7 @@ def _assert_guard_inactive(src: Node, placeholders: _Placeholders) -> str:
 
     ① softmax 入力の依存錐に -inf を持ち込むノードが無い → 有限値しか来ないので発火し得ない
     ② -inf が「加算マスク 1 本」からのみ入る → そのマスクを 2 つの記号長で実評価し、各行に
-       有限要素が残ることを実測する（因果マスクの対角がこれで通る）
+       有限要素が残ることを実測する。ただし記号依存なら全長での証明には使わない。
 
     MUST: それ以外は `NotImplementedError`。ガードを消すと NaN が下流に流れる形をここで
     受理しない（呼び出し側が `safe_softmax` への構成的置換へ回す — ADR 0044。この関数が
@@ -669,6 +669,22 @@ def _assert_guard_inactive(src: Node, placeholders: _Placeholders) -> str:
                 f"safe-softmax ガードは不活性でない: マスク {mask.name} は記号長 {length} で"
                 " 全要素 -inf の行を持つ"
             )
+    # 2 点一致は未評価の長さを保証しない。記号依存マスクはガードを保ち、
+    # safe_softmax へ置換する（docs/decisions/0044-runtime-attention-mask.md）。
+    seen: set[str] = set()
+    pending = [mask]
+    while pending:
+        current = pending.pop()
+        if current.name in seen:
+            continue
+        seen.add(current.name)
+        value = current.meta.get("val")
+        dimensions = value.shape if isinstance(value, torch.Tensor) else (value,)
+        if any(isinstance(dim, torch.SymInt) and dim.node.expr.free_symbols for dim in dimensions):
+            raise NotImplementedError(
+                f"safe-softmax ガード: 記号依存マスク {mask.name} の全長での不活性は未証明"
+            )
+        pending.extend(current.all_input_nodes)
     return "masked-rows-nonempty"
 
 

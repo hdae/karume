@@ -726,6 +726,27 @@ def _softmax_nodes(decomposed) -> list:
 
 
 class TestDropSafeSoftmaxGuard:
+    def test_a_symbolic_mask_keeps_the_guard_outside_the_probe_lengths(self):
+        """T=5/9 の非空は、T=2..4 の全マスク行を否定しない。"""
+
+        class ShortMaskedRows(nn.Module):
+            def forward(self, x):
+                mask = torch.where(torch.arange(x.shape[1]) >= 4, 0.0, float("-inf"))
+                scores = x + mask
+                probabilities = torch.softmax(scores, dim=-1)
+                empty = torch.logical_not(
+                    torch.any(torch.logical_not(scores == float("-inf")), dim=-1, keepdim=True)
+                )
+                return torch.where(empty, torch.full_like(probabilities, 0), probabilities)
+
+        graph, _ = export_and_convert(
+            ShortMaskedRows(),
+            (torch.zeros(2, 6),),
+            ({1: Dim("T", min=2, max=16)},),
+        )
+        assert "softmax" not in node_ops(graph)
+        assert len([node for node in graph.nodes if node.op == "safe_softmax"]) == 1
+
     def test_a_causal_mask_lets_the_guard_be_removed(self):
         args = (torch.randn(1, 2, 4, 3), torch.randn(1, 2, 4, 3), torch.randn(1, 2, 4, 3))
         decomposed = decompose(CausalAttention(), args)
