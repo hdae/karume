@@ -64,7 +64,7 @@
  *   半分にするのが早抜けで、既定 off の理由は上の節）。
  * - **戻る側**: `burst`（既定 8）cycle のバーストは比の sd ≈ 0.13。M2 自由文で 0.97 を下回る確率
  *   ≈ 0.5% なので、誤って戻らない。負ける側が払うバーストの費用は M2 自由文で +227 ms/バースト
- *   で、間隔が 16 → 256 と伸びるぶん長い会話では消える。
+ *   で、間隔が 16 → 512 と伸びるぶん長い会話では消える。
  * - **早抜け（`earlyLeave` = 0.15 を渡した席）**: 対話級（比 0.85）のブロックの比の sd は上の 0.09
  *   なので、1.16 を超える確率は机上では ≈ 0.03% である。**この見積りが実走と合わない**のが既定
  *   off の理由で、受理がターン内で非定常だと勝つ課題でも 1 ブロックが 1.16 を超える区間が混ざる
@@ -78,7 +78,7 @@
  *
  * ## 探索（負けている側にも「戻る道」を残す）
  *
- * - **plain 中**は幾何バックオフ（16 → 32 → 64 → … → 上限 256 step）で投機を `burst` cycle
+ * - **plain 中**は幾何バックオフ（16 → 32 → 64 → … → 上限 512 step）で投機を `burst` cycle
  *   **連続**で試す。1 cycle 単発の探索では上の sd 0.88 に埋もれて判定できない（EWMA 設計が
  *   戻れなかった第 2 の理由がこれである）。バーストの `ΣWc / Σdelivered < W1 × enter` なら
  *   speculate へ戻し、間隔は `exploreBase` へ戻す。外れたら間隔を倍にする。
@@ -136,7 +136,7 @@ export type SpeculationGateOptions = {
   readonly burstMin?: number;
   /** 探索の基本間隔（既定 16・cycle / step 単位）。 */
   readonly exploreBase?: number;
-  /** plain 側バックオフの上限（既定 256）。 */
+  /** plain 側バックオフの上限（既定 512）。 */
   readonly exploreMax?: number;
   /** speculate へ戻る条件 `ΣWc/Σdelivered < W1 × enter`（既定 0.97・`enter < 1`）。 */
   readonly enter?: number;
@@ -215,7 +215,7 @@ export const createSpeculationGate = (
   // 無い」のが正しい形であり、既定の組み合わせを門で弾く理由が無いためである。
   const burstMin = options.burstMin ?? Math.min(4, burst);
   const exploreBase = options.exploreBase ?? 16;
-  const exploreMax = options.exploreMax ?? 256;
+  const exploreMax = options.exploreMax ?? 512;
   const enter = options.enter ?? 0.97;
   const leave = options.leave ?? 1.01;
   // 早抜けは**未指定 = off**（値を持たないことがそのまま「倒さない」の綴りである）。

@@ -227,10 +227,10 @@ Deno.test("ゲート T4 探索: plain 側はバーストで測り、外れるた
   // なかった理由）。バーストで測り、外れたら遠ざける（固定間隔のままだと探索そのものの
   // 損失が M2 自由文で 0.950× になり、ゲートが救った負けを探索で払い直す）。
   const gate = createSpeculationGate({ window: 2, confirm: 1 });
-  const steps = trace(gate, LOSING, 1200);
+  const steps = trace(gate, LOSING, 2000);
   assertEquals(
     plainModeRuns(steps, "plain").slice(0, 7),
-    [16, 32, 64, 128, 256, 256, 256],
+    [16, 32, 64, 128, 256, 512, 512],
     `探索の間隔が幾何バックオフになっていない: ${plainModeRuns(steps, "plain").join(",")}`,
   );
   // 比 2.0 は `leave + burstAbort` = 1.16 を超えるので、外れが確定したバーストは `burstMin` = 4 本で
