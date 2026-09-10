@@ -35,6 +35,12 @@ export type {
   Gemma4SequenceOptions,
 } from "./src/gemma/pipeline.ts";
 /**
+ * 自己採算ゲートのノブ（{@link Gemma4PipelineOptions.speculative} の `gate` — **計測・検収用の
+ * 静的ノブ**で、既定で十分である）。公開面に在るのは、ノブの A/B（既定 vs 別の閾値）を同じ台本で
+ * 回す側が {@link Gemma4PipelineOptions} を組み立てるのに要るためである。
+ */
+export type { SpeculationGateOptions } from "./src/generation/speculation-gate.ts";
+/**
  * PLE sidecar shard 1 本の読み口（{@link Gemma4Assets.openPleShard} が返す形）。
  *
  * `fromAssets` を使う消費者がこれを**実装する**ので公開面に要る。全量（`readAll`）は必須、

@@ -100,6 +100,10 @@ import {
   physicalChunkRows,
 } from "../generation/sequence.ts";
 import type { DraftFace } from "../generation/speculation.ts";
+import {
+  createSpeculationGate,
+  type SpeculationGateOptions,
+} from "../generation/speculation-gate.ts";
 import { type SamplerSpec, snapshotSpec } from "../generation/sampler.ts";
 import {
   createGemma4Ple,
@@ -350,6 +354,20 @@ export type Gemma4PipelineOptions = {
   readonly speculative?: {
     /** 1 cycle で使う draft の本数（省略時は {@link GEMMA4_DRAFT_STEPS} = 配布形の段数）。 */
     readonly k?: number;
+    /**
+     * 自己採算ゲートのノブ（**計測・検収用の静的ノブ** — 既定で十分。
+     * {@link Gemma4PipelineOptions.linearGemvRowsThreadTarget} と同じ扱いで、素通しする先は
+     * `GenerationSpeculativeOptions.gate` である）。
+     *
+     * 効くのは**ゲートが居るターンだけ**である（`speculative: true` / 未指定 = `policy: "auto"`）。
+     * 同じ pipeline の `speculative: "always"` のターンはゲートを作らないので、このノブは 1 つも
+     * 降りない（`gate` 欄ごと生えない）— 1 本の pipeline で 3 モードを交互に回す A/B の台本
+     * （`tools/mtp-bench`）がその形である。
+     *
+     * MUST: ノブの門は `fromPretrained` の引数検査の段で通す（{@link createSpeculationGate} を
+     * 1 度作って捨てる）— 不正な値が GB 級の重みを読んだ後まで落ちない形にしない。
+     */
+    readonly gate?: SpeculationGateOptions;
   };
 };
 
@@ -642,6 +660,14 @@ type Gemma4State = {
    * 見るため — 割れると「見積った形と違う run」が走る。
    */
   readonly speculativeK?: number;
+  /**
+   * 自己採算ゲートのノブ（{@link Gemma4PipelineOptions.speculative} の `gate` を渡したときだけ —
+   * 省略時は `speculation-gate.ts` の既定）。
+   *
+   * MUST: 値の検査は pipeline を組む段（{@link assertSpeculative}）で済んでいる — この席は
+   * 「生成のたびに素通しする」ためだけで、ここから先で解釈しない。
+   */
+  readonly speculativeGate?: SpeculationGateOptions;
   /**
    * Session に渡した slot backing の保持予算（{@link Gemma4PipelineOptions.planBackingBudgetBytes}・
    * 未指定なら runtime の既定）。
@@ -936,6 +962,9 @@ const admitGemma4 = (
  * 本数が上限で、下は「draft を 1 本も採らない投機」= 意味を持たない指定である。範囲外を受けると
  * 「宣言と違う本数の draft を採る」形が黙って通る（生成面の `assertSpeculativeSetup` も同じ関係を
  * 見るが、そちらが落ちるのは GB 級のロードの**後**である）。
+ *
+ * ゲートのノブ（`gate`）の門も同じ段で通す — {@link createSpeculationGate} を 1 度作って捨てる。
+ * 値域の判断はゲート自身が正本なので、同じ門を 2 実装持たない。
  */
 const assertSpeculative = (
   where: string,
@@ -948,6 +977,7 @@ const assertSpeculative = (
         `（配布形の drafter は ${GEMMA4_DRAFT_STEPS} 段で焼かれている — 出口の本数が上限）`,
     );
   }
+  if (speculative.gate !== undefined) createSpeculationGate(speculative.gate);
   return k;
 };
 
@@ -958,9 +988,15 @@ const assertSpeculative = (
  * 既定は「drafter が居れば張る」で、`false` だけが明示的な取り消しである。sampler の指定は
  * 見ない（投機は温度に依らず張り、token 列は非投機と同一 — ADR 0096 決定 7）。`"always"` は
  * 自己採算ゲートを作らない席（A/B・検収の門・計測）で、生成面の `policy` へそのまま降りる。
+ *
+ * pipeline のゲートのノブ（{@link Gemma4PipelineOptions.speculative} の `gate`）は
+ * **`"auto"` のターンにだけ**降りる（`"always"` はゲートを作らない席なので、渡しても読む相手が
+ * 居ない）。1 本の pipeline で `false` / `"always"` / `true` を交互に回すのが A/B の台本の形
+ * （`tools/mtp-bench`）なので、この組み合わせ自体は誤りではない — ノブが効く範囲を
+ * {@link Gemma4PipelineOptions.speculative} の doc と bench の README（`config.gate`）で名乗る。
  */
 export const speculativeSetup = (
-  state: Pick<Gemma4State, "drafter" | "speculativeK">,
+  state: Pick<Gemma4State, "drafter" | "speculativeK" | "speculativeGate">,
   enabled: boolean | "always" | undefined,
 ): GenerationSpeculativeOptions<GenerationContext> | undefined => {
   const drafter = state.drafter;
@@ -976,11 +1012,15 @@ export const speculativeSetup = (
     }
     return undefined;
   }
+  // ゲートのノブは `"always"` へ渡さない（ゲートが居ないので読む相手が無い）— 欄ごと生やさない
+  // ことが「このターンにゲートは無い」の綴りである。
+  const gate = enabled === "always" ? undefined : state.speculativeGate;
   return {
     // 借り手 context は sequence 生成時に 1 本開き、sequence の dispose が**貸し手より先**に畳む。
     open: (context: GenerationContext): Promise<DraftFace> => openGemma4DraftFace(drafter, context),
     k: state.speculativeK ?? GEMMA4_DRAFT_STEPS,
     policy: enabled === "always" ? "always" : "auto",
+    ...(gate === undefined ? {} : { gate }),
   };
 };
 
@@ -1595,6 +1635,10 @@ export class Gemma4Pipeline {
         config: admitted.config,
         ...(drafter === undefined ? {} : { drafter }),
         ...(speculativeK === undefined ? {} : { speculativeK }),
+        // ゲートのノブは検査済み（`assertSpeculative`）の値をそのまま素通しする。
+        ...(options.speculative?.gate === undefined
+          ? {}
+          : { speculativeGate: options.speculative.gate }),
         ...(options.planBackingBudgetBytes === undefined
           ? {}
           : { planBackingBudgetBytes: options.planBackingBudgetBytes }),

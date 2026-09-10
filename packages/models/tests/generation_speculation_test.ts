@@ -24,7 +24,13 @@
 // だけを見る門（T7 / T9）は `runShape` で壁の欄を落として比べる — 非投機の sequence には偽時計を
 // 差せないので、壁の実値はそれらの門では見られない。
 
-import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertRejects,
+  assertStringIncludes,
+  assertThrows,
+} from "@std/assert";
 import type { GenerationProgramSpec } from "../src/generation/program.ts";
 import { createSampler, type Sampler } from "../src/generation/sampler.ts";
 import {
@@ -908,6 +914,30 @@ Deno.test("T8 門: 投機の指定は sequence 生成時に落ち、開いた面
     });
     assertEquals(run.fake.commits, [4]);
   });
+
+  await t.step(
+    'policy "always" にゲートのノブを渡すと open の前に落ち、貸し手は畳まれる',
+    async () => {
+      const fake = fakeSession({ successor: SUCCESSOR });
+      let caught: unknown;
+      try {
+        await createGenerationSequence({
+          session: fake.session,
+          program: specProgram(fake),
+          speculative: {
+            open: () => Promise.reject(new Error("open まで届いてはいけない")),
+            policy: "always",
+            gate: { strong: 10 },
+          },
+        });
+      } catch (error) {
+        caught = error;
+      }
+      assert(caught instanceof Error, `落ちていない: ${String(caught)}`);
+      assertStringIncludes(caught.message, '"always" にはゲートが居ない');
+      assertEquals(fake.disposals(), 1, "門で落ちた借り手の巻き添えで貸し手が漏れている");
+    },
+  );
 
   await t.step("open が投げたら貸し手 context を畳んでから素通しする", async () => {
     const fake = fakeSession({ successor: SUCCESSOR });

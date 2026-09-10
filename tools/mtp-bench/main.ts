@@ -45,6 +45,7 @@ import type {
   GenerationSpeculation,
   GenerationStop,
   SamplerSpec,
+  SpeculationGateOptions,
 } from "../../packages/models/gemma.ts";
 import { gemma4PleShardBytes, parseGemma4PleIndex } from "../../packages/models/src/gemma/ple.ts";
 import { denoDirectory } from "../../packages/hub/deno.ts";
@@ -85,6 +86,7 @@ const USAGE = "--source <配布形のパス> --workload <" + WORKLOAD_NAMES.join
   " --sampler <greedy|recommended> --seed <整数> --k <整数> --new-tokens <整数>" +
   " --capacity <整数> --document-chars <整数> --rounds <整数>" +
   " --max-resident-ple-bytes <整数> --gemv-rows-target <整数>" +
+  " --gate-strong <数> --gate-burst-min <整数> --gate-explore-base <整数>" +
   " --out <file.jsonl> --gpu-timing --warm";
 const KNOWN = new Set([
   "source",
@@ -98,6 +100,9 @@ const KNOWN = new Set([
   "rounds",
   "max-resident-ple-bytes",
   "gemv-rows-target",
+  "gate-strong",
+  "gate-burst-min",
+  "gate-explore-base",
   "out",
 ]);
 /** 値を取らないスイッチ（`--key value` の対ではなく 1 語で立つ）。 */
@@ -154,6 +159,17 @@ const integer = (key: string): number | undefined => {
   const raw = args.get(key);
   if (raw !== undefined && !/^\d+$/.test(raw)) throw new Error(`--${key} ${raw} が非負整数でない`);
   return raw === undefined ? undefined : Number(raw);
+};
+
+/** 有限の実数を取るノブ（ゲートの比の閾値 — 整数に丸めると `strong 0.15` 級の指定が書けない）。 */
+const number = (key: string): number | undefined => {
+  const raw = args.get(key);
+  if (raw === undefined) return undefined;
+  const value = Number(raw);
+  if (raw.trim() === "" || !Number.isFinite(value)) {
+    throw new Error(`--${key} ${raw} が有限の数でない`);
+  }
+  return value;
 };
 
 const source = args.get("source") ?? DEFAULT_SOURCE;
@@ -250,6 +266,27 @@ const maxResidentPleBytesArg = integer("max-resident-ple-bytes");
  * （省略は `null` = 「与えていない」— 値域の門は runtime 側 1 箇所）。
  */
 const gemvRowsTarget = integer("gemv-rows-target");
+
+/**
+ * 自己採算ゲートのノブ（`Gemma4PipelineOptions.speculative.gate` へ素通し）— **`auto` のモードに
+ * だけ効く**（`always` はゲートを作らない席・`plain` は投機を張らない）。
+ *
+ * 部分指定を許すのは、A/B が動かすのが 1〜3 本のノブだけであり、残りはライブラリの既定に
+ * 従わせたいからである（既定値をここに写すと、ライブラリ側で既定が動いた日にこの台本だけ
+ * 古い値で測る）。値域の門もライブラリ側 1 箇所（`createSpeculationGate`）— 同じ門を 2 実装
+ * 持たない。指定した綴りは `config.gate` に残す（省略は `null` = 「与えていない」）。
+ */
+const gateStrong = number("gate-strong");
+const gateBurstMin = integer("gate-burst-min");
+const gateExploreBase = integer("gate-explore-base");
+const gateKnobs: SpeculationGateOptions | undefined =
+  gateStrong === undefined && gateBurstMin === undefined && gateExploreBase === undefined
+    ? undefined
+    : {
+      ...(gateStrong === undefined ? {} : { strong: gateStrong }),
+      ...(gateBurstMin === undefined ? {} : { burstMin: gateBurstMin }),
+      ...(gateExploreBase === undefined ? {} : { exploreBase: gateExploreBase }),
+    };
 
 /**
  * 何を測ったかの同定（`config.asset` — JSON 1 行だけで資産まで辿れるように）。
@@ -481,8 +518,12 @@ const main = async (): Promise<void> => {
   note(`[mtp-bench] ${source} を読み込む（drafter k=${kArg ?? "配布形の段数"}）\n`);
   await using pipeline = await Gemma4Pipeline.fromPretrained(denoDirectory(source), {
     gpu,
-    // `k` を渡さない = 配布形の段数（`{}` が「drafter を組む」の綴りそのもの）。
-    speculative: kArg === undefined ? {} : { k: kArg },
+    // `k` を渡さない = 配布形の段数（空の `{}` が「drafter を組む」の綴りそのもの）。ゲートの
+    // ノブも渡さなければライブラリの既定で回る（`auto` のターンにだけ降りる）。
+    speculative: {
+      ...(kArg === undefined ? {} : { k: kArg }),
+      ...(gateKnobs === undefined ? {} : { gate: gateKnobs }),
+    },
     ...(gemvRowsTarget === undefined ? {} : { linearGemvRowsThreadTarget: gemvRowsTarget }),
     maxResidentPleBytes,
     onRunDiagnostics: observeRun,
@@ -560,7 +601,9 @@ const main = async (): Promise<void> => {
       (warmTurn === undefined
         ? ""
         : ` / warm 追記 最長 ${warmTurn.longestDelta} token · ${warmTurn.deltas.length} 本`) +
-      ` / sampler ${samplerName} ${JSON.stringify(sampler)}\n`,
+      ` / sampler ${samplerName} ${JSON.stringify(sampler)}` +
+      // ゲートのノブは auto のモードにだけ効く（既定のままなら「既定」と名乗る）。
+      ` / gate ${gateKnobs === undefined ? "既定" : JSON.stringify(gateKnobs)}\n`,
   );
 
   /**
@@ -740,6 +783,8 @@ const main = async (): Promise<void> => {
       warm,
       maxResidentPleBytes,
       gemvRowsTarget: gemvRowsTarget ?? null,
+      // 与えたゲートのノブだけ（`auto` のモードにだけ効く — 既定のままなら null）。
+      gate: gateKnobs ?? null,
       gpuTiming,
       out: outPath ?? null,
     },

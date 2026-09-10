@@ -867,6 +867,14 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
       // ノブの門は借り手を開く**前**に通す（不正なノブが GB 級のロードの後まで落ちない）。
       if ((options.speculative.policy ?? "auto") === "auto") {
         gate = createSpeculationGate(options.speculative.gate);
+      } else if (options.speculative.gate !== undefined) {
+        // ゲートの居ない席にノブを渡すのは「効かないノブ」— 黙って通さない（横断不変条件）。
+        throw new Error(
+          `speculative: policy "always" にゲートのノブ ${
+            JSON.stringify(options.speculative.gate)
+          } を` +
+            `渡したが、"always" にはゲートが居ない`,
+        );
       }
       face = await options.speculative.open(context);
       k = options.speculative.k ?? face.steps;

@@ -24,7 +24,7 @@
 // 実資産（`outputs/series/gemma4-e2b-tokenizer/`）が在れば**全語彙**でも同じ id 列になること
 // を併せて見る（部分集合と full の食い違いを塞ぐ門）。無い環境では SKIP する。
 
-import { assert, assertEquals, assertThrows } from "@std/assert";
+import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { createBpeModel } from "../src/text/bpe.ts";
 import {
   createStopStringFilter,
@@ -36,11 +36,13 @@ import {
   closeChatTurn,
   decodeChatChunks,
   type Gemma4ChatStop,
+  Gemma4Pipeline,
   type Gemma4RunPhase,
   runDiagnosticsHook,
   speculativeSetup,
   stopStringOf,
 } from "../src/gemma/pipeline.ts";
+import type { Gemma4Drafter } from "../src/gemma/speculative.ts";
 import {
   createGenerationSequence,
   type GenerationEvent,
@@ -563,6 +565,60 @@ Deno.test("投機の切替（speculativeSetup）: drafter 無しの pipeline に
   assertEquals(speculativeSetup(withoutDrafter, false), undefined);
   assertThrows(() => speculativeSetup(withoutDrafter, true), Error, "drafter 無し");
   assertThrows(() => speculativeSetup(withoutDrafter, "always"), Error, "drafter 無し");
+});
+
+// drafter は `session: Session`（`#` private を持つ名前的な型）を抱えるので、GPU 無しでは構造的に
+// 満たせない。この門が読むのは返り値の `policy` / `gate` だけで `open` を 1 度も呼ばないので、席を
+// 埋めるだけの偽物を差す（`runtime/tests` が GPU 実体に対して採っている扱いと同じ）。
+const fakeDrafter = {} as unknown as Gemma4Drafter;
+
+Deno.test("投機のゲートのノブ（speculativeSetup）: auto にだけ降り、always には欄ごと生えない", () => {
+  const knobs = { strong: 10, burstMin: 8, exploreBase: 8 };
+  const gated = { drafter: fakeDrafter, speculativeK: 2, speculativeGate: knobs };
+
+  const auto = speculativeSetup(gated, true);
+  assert(auto !== undefined, "drafter が居るのに投機が張られていない");
+  assertEquals(auto.policy, "auto");
+  // 同じ実体をそのまま渡す（写し替えると「pipeline に渡した綴り」と「ゲートが読んだ綴り」が
+  // 別物になり得る）。
+  assert(auto.gate === knobs, "ノブを組み直している");
+  assertEquals(speculativeSetup(gated, undefined)?.gate, knobs, "既定（未指定 = auto）にも降りる");
+
+  const always = speculativeSetup(gated, "always");
+  assert(always !== undefined, "drafter が居るのに投機が張られていない");
+  assertEquals(always.policy, "always");
+  // `"always"` はゲートを作らない席なので、欄ごと生やさないのが「このターンにゲートは無い」の
+  // 綴りである（`undefined` を入れると「既定を上書きした」形と見分けが付かない）。
+  assertEquals(Object.hasOwn(always, "gate"), false, "ゲートが居ない席に gate 欄が生えている");
+
+  const ungated = speculativeSetup(
+    { drafter: fakeDrafter, speculativeK: undefined, speculativeGate: undefined },
+    true,
+  );
+  assert(ungated !== undefined);
+  assertEquals(Object.hasOwn(ungated, "gate"), false, "ノブ未指定で gate 欄が生えている");
+});
+
+Deno.test("投機のゲートのノブ: 不正な値は重みを読む前に落ちる（fromPretrained の引数検査）", async () => {
+  // 門の**位置**がこの test の主題である。`assertSpeculative` は取得元の解釈より前に置いてあるので、
+  // ノブの誤りは network も GPU も触らずに落ちる（GB 級のロードの後まで落ちない形にしない）。
+  // 値域の判断そのものはゲート側（`speculation-gate.ts`）の門で、ここは素通しを確かめる。
+  await assertRejects(
+    () =>
+      Gemma4Pipeline.fromPretrained("karume/gemma4-e2b", {
+        speculative: { gate: { strong: 0 } },
+      }),
+    Error,
+    "strong 0 が正の有限数でない",
+  );
+  await assertRejects(
+    () =>
+      Gemma4Pipeline.fromPretrained("karume/gemma4-e2b", {
+        speculative: { gate: { burst: 8, burstMin: 9 } },
+      }),
+    Error,
+    "burstMin 9 が burst 8 を超えている",
+  );
 });
 
 Deno.test("chat prefill: 進捗は onPrefill が受け、本文の列は 1 文字も変わらない", async () => {

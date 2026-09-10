@@ -106,7 +106,13 @@
 /** 次の 1 cycle を投機で回すか、decode 形（M=1）の 1 step で回すか。 */
 export type SpeculationDecision = "speculate" | "plain";
 
-/** ゲートのノブ（すべて既定値を持つ — 公開面には出さない内部のノブである）。 */
+/**
+ * ゲートのノブ（すべて既定値を持つ — **既定で十分**である）。
+ *
+ * pipeline の静的ノブとして公開面にも出ている（`Gemma4PipelineOptions.speculative` の `gate`）が、
+ * 席の性格は計測・検収用である（`linearGemvRowsThreadTarget` と同じ扱い — ノブの A/B を同じ台本で
+ * 回すためだけに在る）。
+ */
 export type SpeculationGateOptions = {
   /** `W1`（plain step の壁）の EWMA 係数（既定 0.2・`0 < alpha ≤ 1`）。 */
   readonly alpha?: number;

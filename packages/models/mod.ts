@@ -161,6 +161,11 @@ export type {
   Gemma4SequenceOptions,
 } from "./src/gemma/pipeline.ts";
 /**
+ * 自己採算ゲートのノブ（`Gemma4PipelineOptions.speculative` の `gate` — 計測・検収用の静的ノブで
+ * 既定で十分。`./gemma` を参照）。
+ */
+export type { SpeculationGateOptions } from "./src/generation/speculation-gate.ts";
+/**
  * PLE sidecar shard 1 本の読み口（`Gemma4Assets.openPleShard` が返す形 — `fromAssets` を使う
  * 消費者が**実装する**側。区間読み `range` は任意能力で、持たせると decode の 1 token が
  * 全量読みではなく行 2 区間の読みになる。`./gemma` を参照）。
