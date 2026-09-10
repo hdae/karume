@@ -133,6 +133,8 @@ export const acceptDrafts = (
   history: readonly number[],
   isStop: (token: number) => boolean,
 ): DraftAcceptance => {
+  // plain step は履歴を伸ばさない。通常 decode と同じ履歴をそのまま抽選へ渡す。
+  if (drafts.length === 0) return { accepted: 0, confirmed: [sampler.next(row(0), history)] };
   const extended = [...history];
   let accepted = 0;
   for (;;) {

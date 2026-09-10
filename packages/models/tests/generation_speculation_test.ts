@@ -1986,3 +1986,29 @@ Deno.test("投機の診断負荷は cycle の壁とゲート判断に混ざら�
   assertEquals(results[1], results[0]);
   assertEquals(results[2], results[0]);
 });
+
+Deno.test("空 draft の抽選は不要な履歴の読み取りをしない", () => {
+  const history = new Proxy([1, 2, 6], {
+    get: () => {
+      throw new Error("抽選に不要な履歴をコピーした");
+    },
+  });
+  let draws = 0;
+  const { row, read } = rowsOf([8]);
+  const result = acceptDrafts(
+    row,
+    [],
+    {
+      next: (_logits, seen) => {
+        assert(seen === history);
+        draws += 1;
+        return 8;
+      },
+    },
+    history,
+    noStop,
+  );
+  assertEquals(result, { accepted: 0, confirmed: [8] });
+  assertEquals(read, [0]);
+  assertEquals(draws, 1);
+});
