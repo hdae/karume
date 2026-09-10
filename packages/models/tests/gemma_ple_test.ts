@@ -1065,3 +1065,52 @@ Deno.test("Gemma4Ple.gather: 宣言 bytes に収まらない区間は読み口�
   assertEquals(reader.ranges.length, 0, "範囲外の要求を読み口へ渡している");
   assertEquals(reader.readAll.length, 0);
 });
+
+Deno.test("Gemma4Ple: 先行読みが dispose 後に完了しても常駐を復活させない", async (t) => {
+  for (const stage of ["open", "readAll", "range"] as const) {
+    await t.step(stage, async () => {
+      const entered = Promise.withResolvers<void>();
+      const resume = Promise.withResolvers<void>();
+      const pause = async (): Promise<void> => {
+        entered.resolve();
+        await resume.promise;
+      };
+      const bytes = SHARD_BYTES[0].buffer;
+      const ple = createGemma4Ple({
+        index: INDEX,
+        vocabSize: TOKENS,
+        maxResidentBytes: 2 * SHARD_BUDGET,
+        openShard: async () => {
+          if (stage === "open") await pause();
+          return {
+            bytes: bytes.byteLength,
+            readAll: async () => {
+              if (stage === "readAll") await pause();
+              return bytes;
+            },
+            ...(stage !== "range" ? {} : {
+              range: {
+                cost: "seek" as const,
+                read: async (offset: number, length: number) => {
+                  await pause();
+                  return bytes.slice(offset, offset + length);
+                },
+              },
+            }),
+          };
+        },
+      });
+      const pending = ple.gather([0]);
+      await entered.promise;
+      ple.dispose();
+      ple.dispose();
+      resume.resolve();
+      const output = await pending;
+      assert("data" in output);
+      assertEquals([...output.data], [0, 2, 2, 3]);
+      assertEquals(ple.stats().resident, 0);
+      assertEquals(ple.stats().residentBytes, 0);
+      await assertRejects(() => ple.gather([0]), Error, "dispose 済み");
+    });
+  }
+});

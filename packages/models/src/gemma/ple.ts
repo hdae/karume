@@ -720,7 +720,7 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
     pending.catch(() => {
       if (sources.get(position) === pending) sources.delete(position);
     });
-    sources.set(position, pending);
+    if (!disposed) sources.set(position, pending);
     return pending;
   };
 
@@ -737,7 +737,7 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
     pending.catch(() => {
       if (layouts.get(position) === pending) layouts.delete(position);
     });
-    layouts.set(position, pending);
+    if (!disposed) layouts.set(position, pending);
     return pending;
   };
 
@@ -771,6 +771,8 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
     pending.catch(() => {
       if (resident.get(position) === pending) release(position);
     });
+    // dispose 中も先行 gather は完了してよいが、所有者のキャッシュへは戻さない。
+    if (disposed) return pending;
     resident.set(position, pending);
     residentBytes += shardBytes[position];
     // 予算はバイトで測る（本数ではない — shard 幅は資産世代で変わる）。予算 0 では今入れた
