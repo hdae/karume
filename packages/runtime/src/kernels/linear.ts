@@ -39,7 +39,8 @@ export const linearKey = (
   groupSize?: number,
 ): string => {
   i4GroupShift("linear", weight, groupSize);
-  return `linear:v2:f32:${gemmKeyPart(v4, rows)}${weightKeyPart(weight)}${
+  // i8 の scale 読出しを保護した世代。未変更の格納形式のキーは維持する。
+  return `linear:v${weight === "i8" ? 3 : 2}:f32:${gemmKeyPart(v4, rows)}${weightKeyPart(weight)}${
     i4GroupKeyPart(groupSize)
   }${gemmComputeKeyPart(compute)}`;
 };

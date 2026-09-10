@@ -735,7 +735,8 @@ const storeBTransposed = (geometry: GemmGeometry, compute: GemmCompute, slot: nu
  * 内積ループを dense と共有できるのはこの転置のおかげ。i8 の scale は担当チャネル
  * `wcol{スロット}` のもので、K タイルループ不変なので**スロットごとに 1 度だけ**束ねる
  * （ADR 0019 のループ不変巻き上げ。名前は {@link scaleVar}）。端タイルでは `wcol >= n` に
- * なりうるが WGSL の境界付きアクセスで安全で、読んだ値は `wcol < n` のときしか `sb` に載らない。
+ * なりうるため、scale は有効な末尾チャネルの添字へ制限してから読む。無効列の重みは
+ * 充填側で 0 となり、出力も store のガードで捨てる。barrier 前の範囲外読みを起こさない。
  */
 const prologueBLinear = (geometry: GemmGeometry, weight: WeightStorage): string => {
   const stride = gemmRowFillStride(geometry);
@@ -745,7 +746,7 @@ const prologueBLinear = (geometry: GemmGeometry, weight: WeightStorage): string 
       ? `  let wc0 = tid / ${GEMM_K_QUADS}u;
   let wq = tid % ${GEMM_K_QUADS}u;
   let wcol0 = wid.x * ${gemmTileN(geometry)}u + wc0;${
-        weightScaleWgsl(weight, "wcol0", "  ", scaleVar(0))
+        weightScaleWgsl(weight, "min(wcol0, dims.n - 1u)", "  ", scaleVar(0))
       }
   let wrow_base0 = wcol0 * dims.k;
   // 共有メモリ側で転置して置く（列 quad = wc / ${GEMM_QUAD}・成分 = wc % ${GEMM_QUAD}）
@@ -754,7 +755,7 @@ const prologueBLinear = (geometry: GemmGeometry, weight: WeightStorage): string 
   let sb_base0 = (wq * ${GEMM_QUAD}u) * ${nQuads}u + wsq0;`
       : `  let wc${slot} = wc0 + ${slot * stride}u;
   let wcol${slot} = wcol0 + ${slot * stride}u;${
-        weightScaleWgsl(weight, `wcol${slot}`, "  ", scaleVar(slot))
+        weightScaleWgsl(weight, `min(wcol${slot}, dims.n - 1u)`, "  ", scaleVar(slot))
       }
   let wrow_base${slot} = wcol${slot} * dims.k;
   let wsq${slot} = wc${slot} / ${GEMM_QUAD}u;
@@ -1763,12 +1764,35 @@ const CONV2D_DIMS_EXTRA = `  channels_in: u32,
  * 直接カーネルの `var acc = bias[oc];` をそのまま再現する。GEMM の「store で最後に足す」形に
  * 流用すると `(Σ) + bias` になり、丸めの並びが変わってビット同一が崩れる（本設計で最大の
  * 分岐点）。行 = 出力チャネルなので bias は行ごとのスカラ splat になる。
- * 端タイルでは `bias0 + i >= m` を読みうるが、その行の `acc` は `store` の行ガードで捨てられる
- * （範囲外の storage 読み自体は WGSL の境界付きアクセスで安全）。
+ * 端タイルの無効行は、有効な末尾チャネルの bias を読む。出力は store のガードで捨てるが、
+ * 読み自体も範囲内に収める必要がある（範囲外読みは後続 barrier の進行を保証しない）。
  */
-const convAccInit = (geometry: GemmGeometry): string =>
-  `  let bias0 = wid.y * ${gemmTileM(geometry)}u + lid.y * ${geometry.regM}u;
-${gemmAccumulatorInit(geometry, (row) => `vec4<f32>(bias[bias0${at(row)}])`)}`;
+const convAccInit = (geometry: GemmGeometry, fullTileGuard = false): string => {
+  const base = `  let bias0 = wid.y * ${gemmTileM(geometry)}u + lid.y * ${geometry.regM}u;`;
+  const bias = (row: number, bounded: boolean): string =>
+    `vec4<f32>(bias[${bounded ? `min(bias0${at(row)}, dims.m - 1u)` : `bias0${at(row)}`}])`;
+  if (!fullTileGuard) {
+    return `${base}
+${gemmAccumulatorInit(geometry, (row) => bias(row, true))}`;
+  }
+  // 完全なタイルでは全行の読出しが有効。端タイルだけ添字を制限する。
+  // 積で上端を作らず、完全なタイル数で比較すれば u32 の加算 overflow も起こさない。
+  // 適用範囲は呼び手で絞る（docs/research/2026-09-10-codex-mtp-optimization.md）。
+  const assign = (bounded: boolean): string =>
+    Array.from(
+      { length: geometry.regM },
+      (_, row) =>
+        Array.from({ length: gemmQuadsPerThread(geometry) }, (_, quad) =>
+          `    acc${row}_${quad} = ${bias(row, bounded)};`).join("\n"),
+    ).join("\n");
+  return `${base}
+${gemmAccumulatorInit(geometry)}
+  if (wid.y < dims.m / ${gemmTileM(geometry)}u) {
+${assign(false)}
+  } else {
+${assign(true)}
+  }`;
+};
 
 /**
  * `Xcol[k][n]` の 1 要素（x の暗黙 gather — im2col を実体化しない）。
@@ -1813,12 +1837,12 @@ const prologueAConv = (
   const rows = slots(gemmRowSlots(geometry)).map((slot) =>
     slot === 0
       ? `  let arow0 = wid.y * ${gemmTileM(geometry)}u + ar;${
-        weightScaleWgsl(weight, "arow0", "  ", scaleVar(0))
+        weightScaleWgsl(weight, "min(arow0, dims.m - 1u)", "  ", scaleVar(0))
       }
   let arow_base0 = arow0 * dims.k;
   let sa_base0 = ar * ${GEMM_TILE_K}u + aq * ${GEMM_QUAD}u;`
       : `  let arow${slot} = arow0 + ${slot * stride}u;${
-        weightScaleWgsl(weight, `arow${slot}`, "  ", scaleVar(slot))
+        weightScaleWgsl(weight, `min(arow${slot}, dims.m - 1u)`, "  ", scaleVar(slot))
       }
   let arow_base${slot} = arow_base0 + ${slot * stride}u * dims.k;
   let sa_base${slot} = sa_base0 + ${slot * stride * GEMM_TILE_K}u;`
@@ -2183,7 +2207,7 @@ ${prologueBConv1d(geometry, v4)}`,
 ${fillBConv1d(geometry, v4)}`,
     store(geometry, "out", "conv1d", v4, false),
     CONV1D_DIMS_EXTRA,
-    convAccInit(geometry),
+    convAccInit(geometry, weight === "f32" && v4 && gemmTileM(geometry) === 64),
   );
 
 /**

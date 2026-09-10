@@ -3,7 +3,7 @@
  *
  * | 経路          | キー                                                        | 条件        |
  * | ------------- | ----------------------------------------------------------- | ----------- |
- * | implicit GEMM | `conv1d:v3:f32:igemm{tileM}x{tileN}{v4}:wg{x}x{y}{:w…}{g…}` | groups == 1 |
+ * | implicit GEMM | `conv1d:v4:f32:igemm{tileM}x{tileN}{v4}:wg{x}x{y}{:w…}{g…}` | groups == 1 |
  * | 直接畳み込み  | `conv1d:v2:f32:direct:wg256{:w…}`                           | groups > 1  |
  *
  * implicit GEMM のキーの辺と workgroup 形は**幾何から導く**（{@link conv1dIgemmKey} —
@@ -133,7 +133,7 @@ export const conv1dIgemmKey = (
   // MUST: キーの幾何は生成と**同じ解決点**（`gemmMTileGeometry`）から導く。mTile を直に
   // 埋めると、幾何を差し替えたときにキーだけが古い辺を名乗って別物の WGSL へ衝突する。
   const geometry = gemmMTileGeometry(mTile);
-  return `conv1d:v3:f32:igemm${gemmTileM(geometry)}x${gemmTileN(geometry)}${
+  return `conv1d:v4:f32:igemm${gemmTileM(geometry)}x${gemmTileN(geometry)}${
     v4 ? "v4" : ""
   }:wg${geometry.wgX}x${geometry.wgY}${weightKeyPart(weight)}${i4GroupKeyPart(groupSize)}`;
 };

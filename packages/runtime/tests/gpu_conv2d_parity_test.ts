@@ -3,7 +3,7 @@
 // 同じ入力バッファに対し、
 //
 //   ① 直接畳み込みカーネル（`conv2d:v1:…:direct:wg256` — groups > 1 用に恒久で残る）
-//   ② implicit GEMM カーネル（`conv2d:v2:…:igemm64x64…`）
+//   ② implicit GEMM カーネル（`conv2d:v3:…:igemm64x64…`）
 //
 // を**同じ実 GPU**で流し、出力を **f32 のビット列**で突き合わせる。allclose ではなく
 // `Uint32Array` の完全一致で見るのが要点で、tolerance に隠れる丸め列の変化（例: bias を

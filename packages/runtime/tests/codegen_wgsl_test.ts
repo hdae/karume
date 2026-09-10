@@ -2699,11 +2699,13 @@ Deno.test("GEMM 骨格 7 op のタイル辺・キー・TS 定数が既定幾何�
     const tilePart = conv ? "igemm" : "reg";
     assertEquals(key.includes(`${tilePart}${tileM}x128`), true, where);
     assertEquals(key.includes(conv ? "wg16x8" : "r8x8w16"), true, where);
-    // 版番号は op ごと（既存 3 op は 16×16 からの改版で v2・融合 attention は新設なので v1・
-    // conv1d の implicit GEMM は直接カーネルが既に v2 を名乗っているので v3）
+    // 端チャネル読出しの保護で conv と i8 linear の世代を更新する。
+    // WGSL を変えていない格納形式と attention / matmul / bmm の世代は維持する。
     const version = where.startsWith("attention")
       ? ":v1:"
       : where.startsWith("conv1d")
+      ? ":v4:"
+      : where.startsWith("conv2d") || where.startsWith("linear i8")
       ? ":v3:"
       : ":v2:";
     assertEquals(key.includes(version), true, where);
@@ -2716,14 +2718,14 @@ Deno.test("GEMM 骨格 7 op のタイル辺・キー・TS 定数が既定幾何�
   assertEquals(matmulKey(true), "matmul:v2:f32:reg128x128r8x8w16v4");
   assertEquals(matmulKey(false), "matmul:v2:f32:reg128x128r8x8w16");
   assertEquals(bmmKey(true), "bmm:v2:f32:reg128x128r8x8w16v4");
-  assertEquals(linearKey("i8", true), "linear:v2:f32:reg128x128r8x8w16v4:wi8");
+  assertEquals(linearKey("i8", true), "linear:v3:f32:reg128x128r8x8w16v4:wi8");
   assertEquals(linearKey("f16", false), "linear:v2:f32:reg128x128r8x8w16:wf16");
   // conv1d / conv2d は 2 系統（implicit GEMM / 直接カーネル）で、直接側のキーは動かさない
-  assertEquals(conv2dIgemmKey("f32", true), "conv2d:v2:f32:igemm64x128v4:wg16x8");
-  assertEquals(conv2dIgemmKey("i8", false), "conv2d:v2:f32:igemm64x128:wg16x8:wi8");
+  assertEquals(conv2dIgemmKey("f32", true), "conv2d:v3:f32:igemm64x128v4:wg16x8");
+  assertEquals(conv2dIgemmKey("i8", false), "conv2d:v3:f32:igemm64x128:wg16x8:wi8");
   assertEquals(conv2dKey("f32"), "conv2d:v1:f32:direct:wg256");
-  assertEquals(conv1dIgemmKey("f32", true), "conv1d:v3:f32:igemm64x128v4:wg16x8");
-  assertEquals(conv1dIgemmKey("i8", false), "conv1d:v3:f32:igemm64x128:wg16x8:wi8");
+  assertEquals(conv1dIgemmKey("f32", true), "conv1d:v4:f32:igemm64x128v4:wg16x8");
+  assertEquals(conv1dIgemmKey("i8", false), "conv1d:v4:f32:igemm64x128:wg16x8:wi8");
   assertEquals(conv1dKey("f32"), "conv1d:v2:f32:direct:wg256");
 });
 
@@ -2754,7 +2756,11 @@ Deno.test("conv2d の 32 行 m タイル変種は幾何だけが変わる（n �
       // workgroup は 16×4 = 64 スレッド。**1 スレッド 8×8 は不変** = 内積の演算密度が
       // 落ちない（1 スレッドの出力を削って workgroup を保つ形は密度が下がる）
       assertEquals(wgsl.includes("@compute @workgroup_size(16, 4)"), true, where);
-      assertEquals(wgsl.includes("var acc7_0 = vec4<f32>(bias[bias0 + 7u]);"), true, where);
+      assertEquals(
+        wgsl.includes("var acc7_0 = vec4<f32>(bias[min(bias0 + 7u, dims.m - 1u)]);"),
+        true,
+        where,
+      );
       // 共有 A は 32 行ぶんへ縮む（sb は n タイルが同じなので 512 のまま）
       assertEquals(wgsl.includes("var<workgroup> sa: array<f32, 512>;"), true, where);
       assertEquals(wgsl.includes("var<workgroup> sb: array<vec4<f32>, 512>;"), true, where);
@@ -2775,8 +2781,8 @@ Deno.test("conv2d の 32 行 m タイル変種は幾何だけが変わる（n �
   assertEquals(conv2dIgemmWgsl("f32", true).includes("let bk4 ="), false);
   assertEquals(conv2dIgemmWgsl("f32", true).includes("let bk0 = tid / 32u;"), true);
   // キーは別系統（タイル形は生成パラメータなのでキーに載る）
-  assertEquals(conv2dIgemmKey("f32", true, 32), "conv2d:v2:f32:igemm32x128v4:wg16x4");
-  assertEquals(conv2dIgemmKey("i8", false, 32), "conv2d:v2:f32:igemm32x128:wg16x4:wi8");
+  assertEquals(conv2dIgemmKey("f32", true, 32), "conv2d:v3:f32:igemm32x128v4:wg16x4");
+  assertEquals(conv2dIgemmKey("i8", false, 32), "conv2d:v3:f32:igemm32x128:wg16x4:wi8");
 });
 
 /**
@@ -2819,7 +2825,11 @@ Deno.test("conv2d の implicit GEMM は bias-first / 0 埋め / 行 scale を生
     const where = `conv2d igemm v4=${v4}`;
     // MUST ①: bias は acc の初期値（store 側で足す形にすると (Σ)+bias で丸めが変わる）
     assertEquals(wgsl.includes("let bias0 = wid.y * 64u + lid.y * 8u;"), true, where);
-    assertEquals(wgsl.includes("var acc1_0 = vec4<f32>(bias[bias0 + 1u]);"), true, where);
+    assertEquals(
+      wgsl.includes("var acc1_0 = vec4<f32>(bias[min(bias0 + 1u, dims.m - 1u)]);"),
+      true,
+      where,
+    );
     assertEquals(wgsl.includes("+ biasv"), false, `${where}: store 側で bias を足している`);
     assertEquals(wgsl.includes("+ bias[ocol"), false, `${where}: store 側で bias を足している`);
     // MUST ③: 範囲外の x は 0（クランプ添字で読まない）
@@ -2853,8 +2863,8 @@ Deno.test("conv2d の implicit GEMM は bias-first / 0 埋め / 行 scale を生
   // MUST: 充填スロットごとに別名で束ねる（1 スレッドが複数チャネルを埋めるので、
   // スロット 0 の scale を 2 本目にも使うと片方だけが静かに別チャネルの scale で dequant される）
   const i8Wgsl = conv2dIgemmWgsl("i8", true);
-  assertEquals(i8Wgsl.includes("let wscale_v = wscale[arow0];"), true);
-  assertEquals(i8Wgsl.includes("let wscale_v1 = wscale[arow1];"), true);
+  assertEquals(i8Wgsl.includes("let wscale_v = wscale[min(arow0, dims.m - 1u)];"), true);
+  assertEquals(i8Wgsl.includes("let wscale_v1 = wscale[min(arow1, dims.m - 1u)];"), true);
   assertEquals(i8Wgsl.includes("wscale[wcol"), false, "linear の列 scale を持ってきている");
   // 束縛番号は直接カーネルと同じ（executor は 1 本の定数で両方を束ねる）
   assertEquals(
@@ -2894,7 +2904,22 @@ Deno.test("conv1d の implicit GEMM は bias-first / 0 埋め / 行 scale / 1 �
     const where = `conv1d igemm v4=${v4}`;
     // MUST ①: bias は acc の初期値（store 側で足す形にすると (Σ)+bias で丸めが変わる）
     assertEquals(wgsl.includes("let bias0 = wid.y * 64u + lid.y * 8u;"), true, where);
-    assertEquals(wgsl.includes("var acc1_0 = vec4<f32>(bias[bias0 + 1u]);"), true, where);
+    if (v4) {
+      assertEquals(wgsl.includes("if (wid.y < dims.m / 64u) {"), true, where);
+      assertEquals(wgsl.includes("    acc1_0 = vec4<f32>(bias[bias0 + 1u]);"), true, where);
+      assertEquals(
+        wgsl.includes("    acc1_0 = vec4<f32>(bias[min(bias0 + 1u, dims.m - 1u)]);"),
+        true,
+        where,
+      );
+    } else {
+      assertEquals(
+        wgsl.includes("var acc1_0 = vec4<f32>(bias[min(bias0 + 1u, dims.m - 1u)]);"),
+        true,
+        where,
+      );
+    }
+
     assertEquals(wgsl.includes("+ biasv"), false, `${where}: store 側で bias を足している`);
     assertEquals(wgsl.includes("+ bias[ocol"), false, `${where}: store 側で bias を足している`);
     // MUST ③: 範囲外の x は 0（クランプ添字で読まない）
@@ -2941,8 +2966,8 @@ Deno.test("conv1d の implicit GEMM は bias-first / 0 埋め / 行 scale / 1 �
   // MUST ④: i8 の scale は**行**（= 出力チャネル）。linear の `wcol`（列）流用は沈黙誤値で、
   // m タイルが 2 枚以上ある形のテスト（gpu_conv1d_parity_test.ts の Cout=96）だけが検出器
   const i8Wgsl = conv1dIgemmWgsl("i8", true);
-  assertEquals(i8Wgsl.includes("let wscale_v = wscale[arow0];"), true);
-  assertEquals(i8Wgsl.includes("let wscale_v1 = wscale[arow1];"), true);
+  assertEquals(i8Wgsl.includes("let wscale_v = wscale[min(arow0, dims.m - 1u)];"), true);
+  assertEquals(i8Wgsl.includes("let wscale_v1 = wscale[min(arow1, dims.m - 1u)];"), true);
   assertEquals(i8Wgsl.includes("wscale[wcol"), false, "linear の列 scale を持ってきている");
   // 束縛番号は直接カーネルと同じ（executor は 1 本の定数で両方を束ねる）
   assertEquals(
@@ -2987,8 +3012,8 @@ Deno.test("conv1d の 32 行 m タイル変種は幾何だけが変わる（n �
   assertEquals(conv1dIgemmWgsl("f32", true).includes("let bk3 = bk0 + 12u;"), true);
   assertEquals(conv1dIgemmWgsl("f32", true).includes("let bk4 ="), false);
   // キーは別系統（タイル形は生成パラメータなのでキーに載る）
-  assertEquals(conv1dIgemmKey("f32", true, 32), "conv1d:v3:f32:igemm32x128v4:wg16x4");
-  assertEquals(conv1dIgemmKey("i8", false, 32), "conv1d:v3:f32:igemm32x128:wg16x4:wi8");
+  assertEquals(conv1dIgemmKey("f32", true, 32), "conv1d:v4:f32:igemm32x128v4:wg16x4");
+  assertEquals(conv1dIgemmKey("i8", false, 32), "conv1d:v4:f32:igemm32x128:wg16x4:wi8");
 });
 
 /**
@@ -3220,7 +3245,7 @@ Deno.test("w4a8 linear は group 境界でだけ f32 へ flush し、xs を最�
       }
       // group scale は [n, k/g] の平坦を列ごとの行頭 + group 番号で引く（列 scale の per-channel
       // 解釈へ退行すると添字が gi に依らなくなる）
-      assertEquals(wgsl.includes("let wsb1 = (ocol + 1u) * groups;"), true, where);
+      assertEquals(wgsl.includes("let wsb1 = min(ocol + 1u, dims.n - 1u) * groups;"), true, where);
       assertEquals(
         wgsl.includes(
           "let ws0 = vec4<f32>(wscale[wsb0 + gi], wscale[wsb1 + gi], wscale[wsb2 + gi], wscale[wsb3 + gi]);",
@@ -3271,11 +3296,11 @@ Deno.test("w4a8 linear は group 境界でだけ f32 へ flush し、xs を最�
   );
   assertEquals(
     linearI8a8Key(true, true, undefined, "i4", 32),
-    "linear:v4:i8a8:tile128x64r8x8w8x16k16v4:dp4a:wi4g32",
+    "linear:v5:i8a8:tile128x64r8x8w8x16k16v4:dp4a:wi4g32",
   );
   assertEquals(
     linearI8a8Key(false, false, undefined, "i4", 64),
-    "linear:v4:i8a8:tile128x64r8x8w8x16k16:dp4aEmu:wi4g64",
+    "linear:v5:i8a8:tile128x64r8x8w8x16k16:dp4aEmu:wi4g64",
   );
   // MUST: i8 のキーは既定引数で従来のまま（既存キーがバイト不変であることの直接の門）
   assertEquals(linearI8a8Key(true, true, undefined, "i8"), linearI8a8Key(true, true));
@@ -4044,8 +4069,16 @@ Deno.test("linear の v4 変種は重みを quad 展開で読み、他は f32 v4
   assertEquals(i8Wgsl.includes("return vec4<f32>(unpack4xI8(w[i >> 2u])) * scale;"), true);
   // MUST: scale は充填スロットごとに別名で束ねる（スロット 0 の scale を 2 本目にも使うと、
   // 担当チャネルの片方だけが別チャネルの scale で dequant される沈黙誤値になる）
-  assertEquals(i8Wgsl.includes("let wscale_v = wscale[wcol0];"), true, "scale は K ループの外");
-  assertEquals(i8Wgsl.includes("let wscale_v1 = wscale[wcol1];"), true, "スロットごとに別名");
+  assertEquals(
+    i8Wgsl.includes("let wscale_v = wscale[min(wcol0, dims.n - 1u)];"),
+    true,
+    "scale は K ループの外",
+  );
+  assertEquals(
+    i8Wgsl.includes("let wscale_v1 = wscale[min(wcol1, dims.n - 1u)];"),
+    true,
+    "スロットごとに別名",
+  );
   assertEquals(i8Wgsl.includes("wv0 = dequant4(wrow_base0 + wk0, wscale_v);"), true);
   assertEquals(i8Wgsl.includes("wv1 = dequant4(wrow_base1 + wk0, wscale_v1);"), true);
   // acc は `acc{行}_{列 quad}` の静的展開なので、縮約後に掛ける形はこの名前で見る
@@ -4063,7 +4096,7 @@ Deno.test("linear の v4 変種は重みを quad 展開で読み、他は f32 v4
       .replace(/\n@group\(0\) @binding\(5\) var<storage, read> wscale: array<f32>;\n/, "")
       .replace(/\/\/ (f16|i8) 格納の quad 展開:[\s\S]*?\n}\n\n/, "")
       .replaceAll(
-        /\n {2}\/\/ 出力チャネルの scale はループ不変[\s\S]*?\n {2}let wscale_v\d* = wscale\[wcol\d\];/g,
+        /\n {2}\/\/ 出力チャネルの scale はループ不変[\s\S]*?\n {2}let wscale_v\d* = wscale\[min\(wcol\d, dims\.n - 1u\)\];/g,
         "",
       )
       .replace("read> w: array<u32>;", "read> w: array<vec4<f32>>;");
@@ -4428,11 +4461,11 @@ Deno.test("格納判別子はキーの f16 側だけに付く（既存の f32 �
  */
 Deno.test("conv1d の i4 は implicit GEMM 限定で、キーに group 部が乗る", () => {
   // ① f32 / i8 のキーは変種導入の前後で完全に同じ（実キーを直書きして固定する）
-  assertEquals(conv1dIgemmKey("f32", false), "conv1d:v3:f32:igemm64x128:wg16x8");
-  assertEquals(conv1dIgemmKey("i8", true), "conv1d:v3:f32:igemm64x128v4:wg16x8:wi8");
+  assertEquals(conv1dIgemmKey("f32", false), "conv1d:v4:f32:igemm64x128:wg16x8");
+  assertEquals(conv1dIgemmKey("i8", true), "conv1d:v4:f32:igemm64x128v4:wg16x8:wi8");
   assertEquals(
     conv1dIgemmKey("i4", true, undefined, 32),
-    "conv1d:v3:f32:igemm64x128v4:wg16x8:wi4g32",
+    "conv1d:v4:f32:igemm64x128v4:wg16x8:wi4g32",
   );
   // group 長が違えば別キー（同じ WGSL が group 違いの資産で走る沈黙誤値を塞ぐ）
   assertNotEquals(

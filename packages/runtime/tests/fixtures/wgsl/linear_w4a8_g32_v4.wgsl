@@ -70,16 +70,17 @@ fn main(
   let orow5 = orow0 + 5u;
   let orow6 = orow0 + 6u;
   let orow7 = orow0 + 7u;
-  // group scale は [n, k/g] の平坦。行内 group 数と列ごとの行頭はループ不変なので巻き上げる
+  // group scale は [n, k/g] の平坦。無効列は有効な末尾列へ制限し、範囲外を読まない。
+  // 行頭はループ不変なので巻き上げる（無効列の出力は store のガードで捨てる）
   let groups = dims.k >> 5u;
-  let wsb0 = ocol * groups;
-  let wsb1 = (ocol + 1u) * groups;
-  let wsb2 = (ocol + 2u) * groups;
-  let wsb3 = (ocol + 3u) * groups;
-  let wsb4 = (ocol + 4u) * groups;
-  let wsb5 = (ocol + 5u) * groups;
-  let wsb6 = (ocol + 6u) * groups;
-  let wsb7 = (ocol + 7u) * groups;
+  let wsb0 = min(ocol, dims.n - 1u) * groups;
+  let wsb1 = min(ocol + 1u, dims.n - 1u) * groups;
+  let wsb2 = min(ocol + 2u, dims.n - 1u) * groups;
+  let wsb3 = min(ocol + 3u, dims.n - 1u) * groups;
+  let wsb4 = min(ocol + 4u, dims.n - 1u) * groups;
+  let wsb5 = min(ocol + 5u, dims.n - 1u) * groups;
+  let wsb6 = min(ocol + 6u, dims.n - 1u) * groups;
+  let wsb7 = min(ocol + 7u, dims.n - 1u) * groups;
   // f32 accumulator（group 境界でだけ書かれる — 丸めは k/g 回）
   var accf0_0 = vec4<f32>(0.0);
   var accf0_1 = vec4<f32>(0.0);

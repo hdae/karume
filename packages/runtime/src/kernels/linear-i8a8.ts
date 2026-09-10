@@ -180,7 +180,10 @@ export const linearI8a8Key = (
     throw new CodegenError(`linear i8a8: 重み格納は i8 / i4 のみ（${weight}）`);
   }
   i4GroupShift("linear i8a8", weight, groupSize);
-  return `linear:v4:i8a8:${i8a8GeometryKeyPart(geometry, v4)}:${dp4a ? "dp4a" : "dp4aEmu"}` +
+  // w4a8 の group scale を端列でも範囲内に収める世代。i8 の生成物は従来のまま。
+  return `linear:v${weight === "i4" ? 5 : 4}:i8a8:${i8a8GeometryKeyPart(geometry, v4)}:${
+    dp4a ? "dp4a" : "dp4aEmu"
+  }` +
     (weight === "i8" ? "" : `${weightKeyPart(weight)}${i4GroupKeyPart(groupSize)}`);
 };
 
@@ -398,7 +401,7 @@ const prologueW4a8 = (geometry: I8a8Geometry, shift: number): string => {
   ).join("\n");
   const bases = Array.from(
     { length: regN },
-    (_, col) => `  let wsb${col} = ${col === 0 ? "ocol" : `(${columnAt(col)})`} * groups;`,
+    (_, col) => `  let wsb${col} = min(${columnAt(col)}, dims.n - 1u) * groups;`,
   ).join("\n");
   const accf = Array.from({ length: regM }, (_, row) =>
     Array.from(
@@ -408,7 +411,8 @@ const prologueW4a8 = (geometry: I8a8Geometry, shift: number): string => {
   return `  // 出力の担当は**ループの外**（group 境界の flush が列ごとの scale を引く）
   let ocol = wid.x * ${i8a8TileN(geometry)}u + lid.x * ${regN}u;
 ${rows}
-  // group scale は [n, k/g] の平坦。行内 group 数と列ごとの行頭はループ不変なので巻き上げる
+  // group scale は [n, k/g] の平坦。無効列は有効な末尾列へ制限し、範囲外を読まない。
+  // 行頭はループ不変なので巻き上げる（無効列の出力は store のガードで捨てる）
   let groups = dims.k >> ${shift}u;
 ${bases}
   // f32 accumulator（group 境界でだけ書かれる — 丸めは k/g 回）

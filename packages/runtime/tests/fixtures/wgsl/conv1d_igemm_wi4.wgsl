@@ -71,22 +71,22 @@ fn main(
   // WGSL の一様性要件を満たすために必要
   let tiles = (dims.k + 15u) / 16u;
   let bias0 = wid.y * 64u + lid.y * 8u;
-  var acc0_0 = vec4<f32>(bias[bias0]);
-  var acc0_1 = vec4<f32>(bias[bias0]);
-  var acc1_0 = vec4<f32>(bias[bias0 + 1u]);
-  var acc1_1 = vec4<f32>(bias[bias0 + 1u]);
-  var acc2_0 = vec4<f32>(bias[bias0 + 2u]);
-  var acc2_1 = vec4<f32>(bias[bias0 + 2u]);
-  var acc3_0 = vec4<f32>(bias[bias0 + 3u]);
-  var acc3_1 = vec4<f32>(bias[bias0 + 3u]);
-  var acc4_0 = vec4<f32>(bias[bias0 + 4u]);
-  var acc4_1 = vec4<f32>(bias[bias0 + 4u]);
-  var acc5_0 = vec4<f32>(bias[bias0 + 5u]);
-  var acc5_1 = vec4<f32>(bias[bias0 + 5u]);
-  var acc6_0 = vec4<f32>(bias[bias0 + 6u]);
-  var acc6_1 = vec4<f32>(bias[bias0 + 6u]);
-  var acc7_0 = vec4<f32>(bias[bias0 + 7u]);
-  var acc7_1 = vec4<f32>(bias[bias0 + 7u]);
+  var acc0_0 = vec4<f32>(bias[min(bias0, dims.m - 1u)]);
+  var acc0_1 = vec4<f32>(bias[min(bias0, dims.m - 1u)]);
+  var acc1_0 = vec4<f32>(bias[min(bias0 + 1u, dims.m - 1u)]);
+  var acc1_1 = vec4<f32>(bias[min(bias0 + 1u, dims.m - 1u)]);
+  var acc2_0 = vec4<f32>(bias[min(bias0 + 2u, dims.m - 1u)]);
+  var acc2_1 = vec4<f32>(bias[min(bias0 + 2u, dims.m - 1u)]);
+  var acc3_0 = vec4<f32>(bias[min(bias0 + 3u, dims.m - 1u)]);
+  var acc3_1 = vec4<f32>(bias[min(bias0 + 3u, dims.m - 1u)]);
+  var acc4_0 = vec4<f32>(bias[min(bias0 + 4u, dims.m - 1u)]);
+  var acc4_1 = vec4<f32>(bias[min(bias0 + 4u, dims.m - 1u)]);
+  var acc5_0 = vec4<f32>(bias[min(bias0 + 5u, dims.m - 1u)]);
+  var acc5_1 = vec4<f32>(bias[min(bias0 + 5u, dims.m - 1u)]);
+  var acc6_0 = vec4<f32>(bias[min(bias0 + 6u, dims.m - 1u)]);
+  var acc6_1 = vec4<f32>(bias[min(bias0 + 6u, dims.m - 1u)]);
+  var acc7_0 = vec4<f32>(bias[min(bias0 + 7u, dims.m - 1u)]);
+  var acc7_1 = vec4<f32>(bias[min(bias0 + 7u, dims.m - 1u)]);
   for (var t = 0u; t < tiles; t = t + 1u) {
     // 範囲外は 0 で埋める。内積に寄与しないので K 端数でも結果は変わらない
     let ak0 = t * 16u + aq * 4u;

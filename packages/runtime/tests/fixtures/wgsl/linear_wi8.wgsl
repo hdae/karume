@@ -43,7 +43,7 @@ fn main(
   let wq = tid % 4u;
   let wcol0 = wid.x * 128u + wc0;
   // 出力チャネルの scale はループ不変 — 重みの要素ごとに引き直さない（ADR 0019）
-  let wscale_v = wscale[wcol0];
+  let wscale_v = wscale[min(wcol0, dims.n - 1u)];
   let wrow_base0 = wcol0 * dims.k;
   // 共有メモリ側で転置して置く（列 quad = wc / 4・成分 = wc % 4）
   let wsq0 = wc0 / 4u;
@@ -52,7 +52,7 @@ fn main(
   let wc1 = wc0 + 64u;
   let wcol1 = wcol0 + 64u;
   // 出力チャネルの scale はループ不変 — 重みの要素ごとに引き直さない（ADR 0019）
-  let wscale_v1 = wscale[wcol1];
+  let wscale_v1 = wscale[min(wcol1, dims.n - 1u)];
   let wrow_base1 = wcol1 * dims.k;
   let wsq1 = wc1 / 4u;
   let wsl1 = wc1 % 4u;
