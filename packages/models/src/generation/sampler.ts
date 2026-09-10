@@ -299,10 +299,48 @@ const selectTopKHeap = (logits: Float32Array<ArrayBuffer>, k: number): number[] 
   return heap.sort((left, right) => (better(left, right) ? -1 : 1));
 };
 
-/** 全 token id を logit の降順（同値は id 昇順 — {@link selectTopKHeap} と同じ決着）に並べる。 */
-const sortAllDescending = (logits: Float32Array<ArrayBuffer>): number[] => {
-  const order = Array.from({ length: logits.length }, (_unused, token) => token);
-  order.sort((left, right) => logits[right] - logits[left] || left - right);
+/**
+ * 全 token id を f32 logit の降順へ安定に並べる（同値は id 昇順）。
+ *
+ * top-p 単独指定は全語彙の順位が要る。比較ソートの O(V log V) を避け、IEEE 754 のビット列を
+ * 数値の降順キーへ変換して 1 バイトずつ 4 回配る。負数は元のビット列、非負数は符号以外を
+ * 反転すると、キーの unsigned 昇順が logit の降順になる。NaN は入口で拒否済み。
+ *
+ * MUST: +0 と -0 は比較ソートと同じ同順位にする。id 昇順から始めて各桁を安定に配るため、
+ * 同値の tie-break と softmax の加算順は変わらない。top-p の境界も確率もビット同一のまま。
+ * 入力の byteOffset を保ち、キーの正規化で入力 logits 自体を書き換えない。
+ */
+const sortAllDescending = (logits: Float32Array<ArrayBuffer>): Int32Array<ArrayBuffer> => {
+  const length = logits.length;
+  let order = new Int32Array(length);
+  let scratch = new Int32Array(length);
+  const keys = new Uint32Array(length);
+  const bits = new Uint32Array(logits.buffer, logits.byteOffset, length);
+  const counts = new Uint32Array(1024);
+  for (let token = 0; token < length; token += 1) {
+    const raw = logits[token] === 0 ? 0 : bits[token];
+    const key = (raw & 0x80000000) !== 0 ? raw : raw ^ 0x7fffffff;
+    keys[token] = key;
+    order[token] = token;
+    for (let pass = 0; pass < 4; pass += 1) counts[pass * 256 + ((key >>> (pass * 8)) & 255)]++;
+  }
+  for (let pass = 0; pass < 4; pass += 1) {
+    const offset = pass * 256;
+    let total = 0;
+    for (let byte = 0; byte < 256; byte += 1) {
+      const count = counts[offset + byte];
+      counts[offset + byte] = total;
+      total += count;
+    }
+    const shift = pass * 8;
+    for (let index = 0; index < length; index += 1) {
+      const token = order[index];
+      scratch[counts[offset + ((keys[token] >>> shift) & 255)]++] = token;
+    }
+    const swap = order;
+    order = scratch;
+    scratch = swap;
+  }
   return order;
 };
 
@@ -311,8 +349,8 @@ const sortAllDescending = (logits: Float32Array<ArrayBuffer>): number[] => {
  *
  * 温度 0 は argmax の 1 点分布へ縮退する（`greedy.ts` の parity 門と同じ token を出す面）。
  *
- * NOTE: `topP` を `topK` 無しで指定すると語彙全体のソート（O(V log V)）が要る。配布形が宣言する
- * 推奨値は top_k を伴う（gemma-4-E2B-it = top_k 64 / top_p 0.95）ので製品経路はこれを踏まない。
+ * NOTE: `topP` 単独指定は全語彙を radix sort（O(V)）する。top-k 指定時は引き続き有界 heap
+ * で候補を選び、その候補内で top-p を適用する（正規化する集合を変えない）。
  */
 export const samplerDistribution = (
   logits: Float32Array<ArrayBuffer>,
@@ -336,7 +374,7 @@ export const samplerDistribution = (
   // 語彙数を超える topK は語彙数へ丸める（HF の `min(top_k, vocab)`）。
   const topK = spec.topK === undefined ? undefined : Math.min(spec.topK, processed.length);
   const topP = spec.topP;
-  let candidates: readonly number[];
+  let candidates: readonly number[] | Int32Array<ArrayBuffer>;
   if (topK !== undefined) candidates = selectTopKHeap(processed, topK);
   else if (topP !== undefined && topP < 1) candidates = sortAllDescending(processed);
   else candidates = Array.from({ length: processed.length }, (_unused, token) => token);

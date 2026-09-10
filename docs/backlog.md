@@ -52,8 +52,9 @@
   timestep 材料を反復間で再利用し、DiT 出力 → CFG → Euler / DPM++2M 更新を同じ token layout で回し、最後だけ unpatchify する。
   `copyLatents` / onEvent / abort の応答性は公開面の契約なので削らない（数 step ごとに finish する境界も測る）。実測は未着手
   （Irodori の 1.76 倍を転用しない）。
-- **sampler: topP だけ（topK 無し）の指定は全語彙ソートのまま**（起票 2026-09-07・perf-ledger H-11 の残）: k を仮置きして
-  heap で取り、累積が届かなければ倍にして取り直す段階的縮小で置換できる。配布既定は top_k 付きなので製品経路は踏まない。
+- **sampler の top-p 単独指定 ✅ 2026-09-10**（H-11 残件）: f32 の安定 radix sort で順位・確率をビット同一に保ち、
+  全語彙の比較ソートを置換した。Gemma 実 logits 24 行の再生で 7.6〜7.8 倍（CPU 抽選だけ）。
+  [実測と適用範囲](research/2026-09-10-codex-mtp-optimization.md#共通サンプラーの-top-p-単独指定)。top-k 付きの配布既定は変更しない。
 - **slot backing をバケット run の前に退役させるか**（起票 2026-09-07・limitations「prefill バケット」）: 末尾 chunk の
   バケット run は chunkLength 形の backing が載ったまま arena に一時を確保し、非勘定側の窓が「最大バケット形 + prefill 形」に
   なる（既定で ≈1.67 倍）。generation のミス run で活性 backing を先に退役させれば窓は消えるが、次の 768 chunk で作り直しが
