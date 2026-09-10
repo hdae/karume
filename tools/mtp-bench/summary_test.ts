@@ -1,7 +1,7 @@
 /**
  * 要約の計算の単体検証（純関数だけ・GPU 不要）。
  *
- * 見る 6 点:
+ * 見る 11 点:
  *
  * 1. **ローテーションの台本** — 暖機 3 本の後に P S S P P A A P / P A A P P S S P が交互に `rounds` 回
  * 2. **分母の 2 本**（`main.ts` の進捗行も呼ぶ口）— `tokensAfterFirst` / `tokensPerCycle`
@@ -14,6 +14,11 @@
  * 6. **token 列の突合** — always / auto それぞれの一致・不一致の最初の添字・接頭辞
  * 7. **局面別内訳の中央値**（`trace.ts` のバケット）— バケットごとに 3 欄それぞれの中央値・
  *    `firstExitRun` は起きたターンだけの中央値
+ * 8. **warm（`--warm`）の要約** — 3 モードに揃う自ターン番号までしか入らない・列一致は番号ごと
+ * 9. **warm の容量の門** — 走る前に溢れを落とす式（`warmPeakPositions` / `assertWarmCapacity`）
+ * 10. **warm の前置** — 前ターンの停止から次のターンの前置を決める（打ち切り → 閉じ札 1 個・
+ *     閉じ札で閉じた → 前置なし・閉じ札以外の停止 token → 落ちる）
+ * 11. **warm の context 長の一致** — 自ターン番号ごとに 3 モードが揃っているか（cold では欄ごと無い）
  *
  * NOTE: リポの慣習に合わせて `Deno.test`（文脈）+ `t.step`（振る舞い）で書く。
  */
@@ -21,6 +26,7 @@
 import { assert, assertAlmostEquals, assertEquals, assertThrows } from "@std/assert";
 import type { GenerationSpeculation } from "../../packages/models/gemma.ts";
 import {
+  assertWarmCapacity,
   median,
   summarizeTurns,
   tokensAfterFirst,
@@ -28,6 +34,8 @@ import {
   type TurnPlan,
   turnPlan,
   type TurnRecord,
+  warmPeakPositions,
+  warmTurnPrefix,
 } from "./summary.ts";
 import type { TraceBucket, TurnTrace } from "./trace.ts";
 
@@ -66,6 +74,9 @@ const plainTurn = (
   mode: "plain",
   round,
   warmup: false,
+  // cold の要約は自ターン番号も context 長も読まない（warm のケースは `over` で明示する）。
+  ownIndex: 1,
+  contextTokens: 0,
   tokens: 11,
   stopReason: "max-tokens",
   ids: IDS,
@@ -93,6 +104,8 @@ const alwaysTurn = (
   mode: "always",
   round,
   warmup: false,
+  ownIndex: 1,
+  contextTokens: 0,
   tokens: 11,
   stopReason: "max-tokens",
   ids: IDS,
@@ -133,6 +146,8 @@ const autoTurn = (
   mode: "auto",
   round,
   warmup: false,
+  ownIndex: 1,
+  contextTokens: 0,
   tokens: 11,
   stopReason: "max-tokens",
   ids: IDS,
@@ -180,6 +195,44 @@ const measuredTurns = (): TurnRecord[] => [
 
 const withoutMode = (turns: readonly TurnRecord[], mode: TurnRecord["mode"]): TurnRecord[] =>
   turns.filter((turn) => turn.mode !== mode);
+
+/**
+ * warm の合成記録の `ids`（自ターン番号ごとに違う列）。
+ *
+ * warm では各ターンが会話の続きなので、同じモードの中でも列は番号ごとに違う。番号を取り違えた
+ * 突合は「別の番号どうし」を比べることになり、そこで割れる形にしてある。
+ */
+const warmIds = (ownIndex: number): readonly number[] => [11, 22 + ownIndex, 33];
+
+/**
+ * warm の合成記録 — plain 6 本 / always 3 本 / auto 3 本（自ターン番号 1..n）。
+ *
+ * plain の 4〜6 本目（揃わない番号）は ms/token が 10 倍になっている: 要約に混ざれば中央値が
+ * 12 → 100 に動くので、揃える実装だけが緑になる（フォールト注入）。
+ */
+const warmTurns = (): TurnRecord[] => [
+  ...[100, 120, 140, 1000, 1200, 1400].map((generationMs, at) =>
+    plainTurn(1, generationMs, generationMs * 0.8, {
+      ownIndex: at + 1,
+      contextTokens: 1000 * (at + 1),
+      ids: warmIds(at + 1),
+    })
+  ),
+  ...[50, 60, 70].map((generationMs, at) =>
+    alwaysTurn(1, generationMs, { draft: 10, verify: 30 }, {
+      ownIndex: at + 1,
+      contextTokens: 1000 * (at + 1),
+      ids: warmIds(at + 1),
+    })
+  ),
+  ...[70, 80, 90].map((generationMs, at) =>
+    autoTurn(1, generationMs, { draft: 10, verify: 24, decode: 6 }, {
+      ownIndex: at + 1,
+      contextTokens: 1000 * (at + 1),
+      ids: warmIds(at + 1),
+    })
+  ),
+];
 
 Deno.test("ローテーションの台本", async (t) => {
   await t.step(
@@ -617,5 +670,269 @@ Deno.test("局面別内訳の要約", async (t) => {
       ...measuredTurns(),
     ]).auto.trace;
     assertEquals(withWarmup, baseline);
+  });
+});
+
+Deno.test("warm の要約（自ターン番号で揃える）", async (t) => {
+  await t.step(
+    "3 モードに揃う番号までしか入らない（plain 6 / always 3 / auto 3 → 各 3 本）",
+    () => {
+      const summary = summarizeTurns(warmTurns(), { warm: true });
+      assertEquals(summary.ownTurnLimit, 3);
+      assertEquals([summary.plain.turns, summary.always.turns, summary.auto.turns], [3, 3, 3]);
+    },
+  );
+
+  await t.step("揃わない番号のターンは中央値を動かさない（フォールト注入）", () => {
+    const summary = summarizeTurns(warmTurns(), { warm: true });
+    // plain の 1〜3 本目は 10 / 12 / 14 ms/tok。4〜6 本目（100 / 120 / 140）が混ざれば 100 になる。
+    assertAlmostEquals(summary.plain.msPerToken, 12);
+    assertAlmostEquals(summary.always.msPerToken, 6);
+    assertAlmostEquals(summary.auto.msPerToken, 8);
+    assertAlmostEquals(summary.speedup, 2);
+    assertAlmostEquals(summary.speedupAuto, 1.5);
+  });
+
+  await t.step("cold（warm なし）は同じ記録の全ターンを入れる", () => {
+    const summary = summarizeTurns(warmTurns());
+    assertEquals(Object.hasOwn(summary, "ownTurnLimit"), false);
+    assertEquals(summary.plain.turns, 6);
+    // 6 本の中央値は上側 = 100 ms/tok（揃える処理が cold へ漏れていないことの裏返し）。
+    assertAlmostEquals(summary.plain.msPerToken, 100);
+  });
+
+  await t.step("暖機は warm でも要約に入らないが、番号の勘定には入る", () => {
+    // 各モードの 1 本目を暖機にすると、揃う番号は 3 のまま・要約に入るのは 2 本ずつになる。
+    const turns = warmTurns().map((turn) =>
+      turn.ownIndex === 1 ? { ...turn, warmup: true, round: 0 } : turn
+    );
+    const summary = summarizeTurns(turns, { warm: true });
+    assertEquals(summary.ownTurnLimit, 3);
+    assertEquals([summary.plain.turns, summary.always.turns, summary.auto.turns], [2, 2, 2]);
+    // 残るのは 2 / 3 本目 = 12 / 14 → 上側の 14。
+    assertAlmostEquals(summary.plain.msPerToken, 14);
+  });
+
+  await t.step("ターンが 1 本も無いモードがあれば落ちる", () => {
+    assertThrows(
+      () => summarizeTurns(withoutMode(warmTurns(), "auto"), { warm: true }),
+      Error,
+      "auto",
+    );
+  });
+});
+
+Deno.test("warm の token 列の突合（自ターン番号ごと）", async (t) => {
+  /** 指定した番号の always のターンの列を割る。 */
+  const brokenAlways = (ownIndex: number, ids: readonly number[]): TurnRecord[] =>
+    warmTurns().map((turn) =>
+      turn.mode === "always" && turn.ownIndex === ownIndex ? { ...turn, ids } : turn
+    );
+
+  await t.step(
+    "全番号一致なら identical / identicalAuto だけが立つ（モード内の再現性は問わない）",
+    () => {
+      const { identity } = summarizeTurns(warmTurns(), { warm: true });
+      // warm はターンごとに会話が伸びるので、`plainConsistent` 等は**欄ごと無い**
+      // （`false` を書くとビット同一性の破れに読める）。`contextAligned` は warm だけの欄で、
+      // この合成記録は番号ごとに context が揃っている（欄の検証は下の Deno.test）。
+      assertEquals(identity, { identical: true, identicalAuto: true, contextAligned: true });
+    },
+  );
+
+  await t.step("2 本目で割れたら番号と位置の両方を報せる", () => {
+    const { identity } = summarizeTurns(brokenAlways(2, [11, 24, 99]), { warm: true });
+    assertEquals(identity.identical, false);
+    assertEquals(identity.firstDivergenceTurn, 2);
+    assertEquals(identity.firstDivergence, 2);
+    // auto は動いていないので、そちらの突合は立ったまま。
+    assertEquals(identity.identicalAuto, true);
+    assertEquals(identity.firstDivergenceAuto, undefined);
+  });
+
+  await t.step("複数の番号で割れたら最初の番号を報せる", () => {
+    const turns = brokenAlways(3, [11, 25, 77]).map((turn) =>
+      turn.mode === "always" && turn.ownIndex === 2 ? { ...turn, ids: [11, 24, 99] } : turn
+    );
+    const { identity } = summarizeTurns(turns, { warm: true });
+    assertEquals(identity.firstDivergenceTurn, 2);
+  });
+
+  await t.step("番号を無視して並び順で比べる実装は落ちる（plain だけ番号を入れ替える）", () => {
+    // plain の 1 本目と 2 本目を入れ替えても、番号で対を作る限り突合は立つ。
+    const turns = warmTurns();
+    const plain = turns.filter((turn) => turn.mode === "plain");
+    const { identity } = summarizeTurns(
+      [plain[1], plain[0], ...plain.slice(2), ...withoutMode(turns, "plain")],
+      { warm: true },
+    );
+    assertEquals(identity.identical, true);
+    assertEquals(identity.identicalAuto, true);
+  });
+});
+
+Deno.test("warm の容量の門", async (t) => {
+  /** 2 round の台本（plain 9 本・always / auto 5 本ずつ）。 */
+  const plans = turnPlan(2);
+
+  await t.step("ピークは最後のターンの発行後（prompt + 追記 ×(N−1) + 生成 ×N − 1）", () => {
+    assertEquals(
+      warmPeakPositions({ turns: 1, promptTokens: 33, turnTokens: 20, newTokens: 200 }),
+      232,
+    );
+    assertEquals(
+      warmPeakPositions({ turns: 3, promptTokens: 33, turnTokens: 20, newTokens: 200 }),
+      672,
+    );
+  });
+
+  await t.step("自ターン数が 1 以上の整数でなければ落ちる", () => {
+    assertThrows(
+      () => warmPeakPositions({ turns: 0, promptTokens: 33, turnTokens: 20, newTokens: 200 }),
+      Error,
+      "1 以上の整数",
+    );
+  });
+
+  await t.step("長文脈（prompt 4,800）は自ターン 9 本で capacity 8192 に入らない", () => {
+    assertThrows(
+      () =>
+        assertWarmCapacity({
+          plans,
+          capacity: 8192,
+          promptTokens: 4800,
+          turnTokens: 4800,
+          newTokens: 200,
+        }),
+      Error,
+      "plain は自ターン 9 本",
+    );
+  });
+
+  await t.step("自由文（prompt 33）は既定の容量で通る", () => {
+    assertWarmCapacity({
+      plans,
+      capacity: 8192,
+      promptTokens: 33,
+      turnTokens: 33,
+      newTokens: 200,
+    });
+  });
+
+  await t.step("境界はちょうど capacity まで通る", () => {
+    const needed = warmPeakPositions({
+      turns: 9,
+      promptTokens: 33,
+      turnTokens: 33,
+      newTokens: 200,
+    });
+    const request = { plans, promptTokens: 33, turnTokens: 33, newTokens: 200 };
+    assertWarmCapacity({ ...request, capacity: needed });
+    assertThrows(() => assertWarmCapacity({ ...request, capacity: needed - 1 }), Error, "plain");
+  });
+
+  await t.step("台本に居ないモードがあれば落ちる", () => {
+    assertThrows(
+      () =>
+        assertWarmCapacity({
+          plans: plans.filter((plan) => plan.mode !== "auto"),
+          capacity: 8192,
+          promptTokens: 33,
+          turnTokens: 33,
+          newTokens: 200,
+        }),
+      Error,
+      "auto",
+    );
+  });
+});
+
+Deno.test("warm の前置（前ターンの停止から決める）", async (t) => {
+  /** 閉じ札の id は 106 として、それ以外の停止 token と混ざらない数を使う。 */
+  const request = { mode: "plain", endOfTurnId: 106 } as const;
+
+  await t.step("閉じ札で閉じたターンの後は前置しない（frontier がその id）", () => {
+    assertEquals(warmTurnPrefix({ ...request, prior: { reason: "eos", token: 106 } }), []);
+    // 要求が足した停止 token の枝（`stop-token`）でも、閉じ札なら同じ扱いである。
+    assertEquals(warmTurnPrefix({ ...request, prior: { reason: "stop-token", token: 106 } }), []);
+  });
+
+  await t.step("--new-tokens で打ち切ったターンの後は閉じ札を 1 個前置する", () => {
+    assertEquals(warmTurnPrefix({ ...request, prior: { reason: "max-tokens" } }), [106]);
+  });
+
+  await t.step("消費側が閉じたターンの後も打ち切りと同じ（model turn が開いたまま）", () => {
+    assertEquals(warmTurnPrefix({ ...request, prior: { reason: "closed" } }), [106]);
+    assertEquals(warmTurnPrefix({ ...request, prior: { reason: "aborted" } }), [106]);
+  });
+
+  await t.step("閉じ札以外の停止 token で閉じたターンの後は落ちる（token id を名乗る）", () => {
+    // `<eos>` で止まったターン。前置すると `本文 <eos> <turn|> 差分` を KV に積むことになる。
+    assertThrows(
+      () => warmTurnPrefix({ ...request, prior: { reason: "eos", token: 1 } }),
+      Error,
+      "token id 1（eos）",
+    );
+    assertThrows(
+      () => warmTurnPrefix({ ...request, prior: { reason: "stop-token", token: 262144 } }),
+      Error,
+      "token id 262144（stop-token）",
+    );
+  });
+
+  await t.step("落ちるときはモードも名乗る（3 本の会話のどれが壊れたか）", () => {
+    assertThrows(
+      () =>
+        warmTurnPrefix({
+          mode: "auto",
+          endOfTurnId: 106,
+          prior: { reason: "eos", token: 1 },
+        }),
+      Error,
+      "mode auto",
+    );
+  });
+});
+
+Deno.test("warm の context 長の一致（自ターン番号ごと）", async (t) => {
+  /** 指定した番号の auto のターンだけ context 長をずらす（`warmTurns` の既定は 1000 × 番号）。 */
+  const shiftedAuto = (ownIndex: number, contextTokens: number): TurnRecord[] =>
+    warmTurns().map((turn) =>
+      turn.mode === "auto" && turn.ownIndex === ownIndex ? { ...turn, contextTokens } : turn
+    );
+
+  await t.step("番号ごとに 3 モードが揃えば contextAligned が立ち、番号の欄は出ない", () => {
+    const { identity } = summarizeTurns(warmTurns(), { warm: true });
+    assertEquals(identity.contextAligned, true);
+    assertEquals(Object.hasOwn(identity, "firstContextMismatchTurn"), false);
+  });
+
+  await t.step("auto の 2 本目だけずれたら落ちずに false と番号 2 を報せる", () => {
+    const { identity } = summarizeTurns(shiftedAuto(2, 2100), { warm: true });
+    assertEquals(identity.contextAligned, false);
+    assertEquals(identity.firstContextMismatchTurn, 2);
+    // 列そのものは動いていないので、ビット同一性の突合は立ったまま（別の検査である）。
+    assertEquals(identity.identical, true);
+    assertEquals(identity.identicalAuto, true);
+  });
+
+  await t.step("ずれた番号が複数なら最初の番号を報せる", () => {
+    const turns = shiftedAuto(3, 3100).map((turn) =>
+      turn.mode === "auto" && turn.ownIndex === 2 ? { ...turn, contextTokens: 2100 } : turn
+    );
+    assertEquals(summarizeTurns(turns, { warm: true }).identity.firstContextMismatchTurn, 2);
+  });
+
+  await t.step("要約に入らない番号のずれは見ない（plain の 4 本目は上限の外）", () => {
+    const turns = warmTurns().map((turn) =>
+      turn.mode === "plain" && turn.ownIndex === 4 ? { ...turn, contextTokens: 42 } : turn
+    );
+    assertEquals(summarizeTurns(turns, { warm: true }).identity.contextAligned, true);
+  });
+
+  await t.step("cold では欄ごと無い（毎ターン新しい sequence なので問いが立たない）", () => {
+    const { identity } = summarizeTurns(warmTurns());
+    assertEquals(Object.hasOwn(identity, "contextAligned"), false);
+    assertEquals(Object.hasOwn(identity, "firstContextMismatchTurn"), false);
   });
 });

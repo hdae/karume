@@ -5,6 +5,7 @@
  *     deno run -A tools/mtp-bench/main.ts --workload dialogue --sampler recommended --seed 42 \
  *         --new-tokens 200 --rounds 3 --out outputs/bench/karume-gemma4/<日付>_mtp/turns.jsonl
  *     deno run -A tools/mtp-bench/main.ts --workload freeform --sampler greedy --gpu-timing
+ *     deno run -A tools/mtp-bench/main.ts --workload freeform --sampler greedy --warm
  *
  * 1 構成 = 1 プロセス（`tools/ram-peak/measure.ts` の流儀）。stdout は最後の **JSON 1 行**だけで、
  * 進捗はすべて stderr に出る。
@@ -36,11 +37,13 @@
  *   （`docs/limitations.md`）。`identical`（plain と always）が落ちたら本物の破れである。
  */
 
-import { gemma4ChatPrompt, Gemma4Pipeline } from "../../packages/models/gemma.ts";
+import { gemma4ChatPrompt, gemma4ChatTurn, Gemma4Pipeline } from "../../packages/models/gemma.ts";
 import type {
   Gemma4ChatMessage,
   Gemma4RunPhase,
+  GenerationSequence,
   GenerationSpeculation,
+  GenerationStop,
   SamplerSpec,
 } from "../../packages/models/gemma.ts";
 import { gemma4PleShardBytes, parseGemma4PleIndex } from "../../packages/models/src/gemma/ple.ts";
@@ -60,6 +63,8 @@ import {
   type WorkloadName,
 } from "./workloads.ts";
 import {
+  assertWarmCapacity,
+  BENCH_MODES,
   type BenchMode,
   RUN_KINDS,
   type RunKind,
@@ -69,14 +74,16 @@ import {
   type TurnPlan,
   turnPlan,
   type TurnRecord,
+  warmTurnPrefix,
 } from "./summary.ts";
+import { emptyTimingTallies, recordRunTiming, summarizeTiming } from "./timing.ts";
 import { type TraceBucket, traceOf } from "./trace.ts";
 
 const USAGE = "--source <配布形のパス> --workload <" + WORKLOAD_NAMES.join("|") + ">" +
   " --sampler <greedy|recommended> --seed <整数> --k <整数> --new-tokens <整数>" +
   " --capacity <整数> --document-chars <整数> --rounds <整数>" +
   " --max-resident-ple-bytes <整数> --gemv-rows-target <整数>" +
-  " --out <file.jsonl> --gpu-timing";
+  " --out <file.jsonl> --gpu-timing --warm";
 const KNOWN = new Set([
   "source",
   "workload",
@@ -92,7 +99,7 @@ const KNOWN = new Set([
   "out",
 ]);
 /** 値を取らないスイッチ（`--key value` の対ではなく 1 語で立つ）。 */
-const FLAGS = new Set(["gpu-timing"]);
+const FLAGS = new Set(["gpu-timing", "warm"]);
 
 /** 取得元の既定（`dist.py --pipeline gemma4` が組むローカルミラー — `docs/assets-layout.md`）。 */
 const DEFAULT_SOURCE = "models/karume-gemma4";
@@ -112,8 +119,6 @@ const DEFAULT_DOCUMENT_CHARS = 20000;
 const DEFAULT_ROUNDS = 3;
 /** `recommended` sampler の seed。 */
 const DEFAULT_SEED = 42;
-/** GPU 内訳に書く op（パイプラインキー）の本数。 */
-const TIMING_TOP = 12;
 
 /**
  * `--key value` の対と、値を取らない {@link FLAGS} だけを受ける。
@@ -210,6 +215,16 @@ const documentChars = isDocumentWorkload(workload)
  * 1 pass に開くので壁が伸びる）。倍率は付けない走行から採る。
  */
 const gpuTiming = flags.has("gpu-timing");
+
+/**
+ * モードごとに sequence を 1 本持ち、そのモードの各ターンで同じ発話を追記する（多ターン chat）。
+ *
+ * 既定（cold）は 1 ターン = 1 sequence なので、`auto` の自己採算ゲートは**毎ターン初期状態から**
+ * 始まり、負ける課題では「抜けるまでの探索」を毎ターン払う（悲観側）。実アプリ
+ * （`Gemma4ChatSession`）は sequence を会話のあいだ使い回すので、ゲートが 1 度抜けた後の姿を
+ * 見るにはこちらが要る。
+ */
+const warm = flags.has("warm");
 
 const encoder = new TextEncoder();
 const note = (text: string): void => {
@@ -335,29 +350,22 @@ const emptyTallies = (): RunTallies => ({
   verify: { count: 0, wallMs: 0 },
 });
 
-/** GPU 内訳の器（種別ごと・暖機を除く全ターンの合算）。 */
-type TimingTally = {
-  runs: number;
-  totalNs: number;
-  dispatchCount: number;
-  clampedNegativeSamples: number;
-  readonly keys: Map<string, { ns: number; dispatchCount: number }>;
-};
-const emptyTimingTallies = (): { readonly [K in RunKind]: TimingTally } => {
-  const one = (): TimingTally => ({
-    runs: 0,
-    totalNs: 0,
-    dispatchCount: 0,
-    clampedNegativeSamples: 0,
-    keys: new Map(),
-  });
-  return { prefill: one(), decode: one(), draft: one(), verify: one() };
-};
-
 const secondsOf = (ms: number): string => (ms / 1000).toFixed(1);
 
 /** 進捗行のモード 1 文字（P = plain・S = always〈常時投機〉・A = auto〈ゲート付き〉）。 */
 const MODE_LABEL: { readonly [M in BenchMode]: string } = { plain: "P", always: "S", auto: "A" };
+
+/**
+ * 前の model turn を閉じる綴り（正本は `packages/models/src/gemma/text/chat.ts` の `END_OF_TURN`）。
+ *
+ * `--warm` のときだけ要る。多ターンの差分（`gemma4ChatTurn`）は「前 turn を閉じる `<turn|>` は
+ * sequence の frontier が前置する」前提で描かれるが、`--new-tokens` で打ち切ったターンの
+ * frontier は本文の token である（`Gemma4ChatSession` はその場合 KV を捨てて全体を描き直す）。
+ * 台本は KV を継ぎたいので、閉じ札を**自分で 1 個前置して** model turn を閉じる — 生成が出した
+ * ときと同じ id 列になる。綴りを写しているのは公開面に id の口が無いためで（`gemma4StopTokens`
+ * は集合を返すだけ）、欠けていれば fail loudly する。
+ */
+const END_OF_TURN = "<turn|>";
 
 /** そのモードで `Gemma4SequenceOptions.speculative` に渡す値（3 値の対応はここ 1 箇所）。 */
 const speculativeOf = (mode: BenchMode): boolean | "always" =>
@@ -428,6 +436,13 @@ const main = async (): Promise<void> => {
    * 生成面が名乗る壁（`phase.wallMs` — 配送の yield を挟まない値）だからである。
    */
   let turnPhases: Gemma4RunPhase[] | undefined;
+  /**
+   * 今走っているターンのモード（GPU 内訳を mode × kind に割る軸 — `timing.ts`）。
+   *
+   * run の形（`phase.kind`）だけでは足りない: `auto` のゲートが落とした plain step と `W1`
+   * プローブは decode 形なので、`plain` モードの decode と同じ欄に落ちる。
+   */
+  let turnMode: BenchMode | undefined;
   /** 今走っているターンを GPU 内訳に数えるか（暖機は数えない）。 */
   let measured = false;
   const timing = emptyTimingTallies();
@@ -435,7 +450,8 @@ const main = async (): Promise<void> => {
   const observeRun = (diagnostics: SessionDiagnostics, phase: Gemma4RunPhase): void => {
     const tallies = turnTallies;
     const phases = turnPhases;
-    if (tallies === undefined || phases === undefined) {
+    const mode = turnMode;
+    if (tallies === undefined || phases === undefined || mode === undefined) {
       throw new Error(`[mtp-bench] ターンの外で ${phase.kind} run の観測が届いた`);
     }
     if (!Number.isFinite(lastRunWallMs)) {
@@ -452,18 +468,8 @@ const main = async (): Promise<void> => {
       // 検査は**暖機の run でも**する — 積算に入らないだけで、非対応はその場で分かる。
       throw new Error("[mtp-bench] --gpu-timing を付けたが lastRunTiming が空（device が非対応）");
     }
-    if (!measured) return;
-    const bucket = timing[phase.kind];
-    bucket.runs += 1;
-    bucket.totalNs += stats.totalNs;
-    bucket.dispatchCount += stats.dispatchCount;
-    bucket.clampedNegativeSamples += stats.clampedNegativeSamples;
-    for (const entry of stats.entries) {
-      const key = bucket.keys.get(entry.key) ?? { ns: 0, dispatchCount: 0 };
-      key.ns += entry.ns;
-      key.dispatchCount += entry.dispatchCount;
-      bucket.keys.set(entry.key, key);
-    }
+    // 暖機を落とすのは `recordRunTiming` の中（積む器を選ぶ判断と同じ 1 箇所）。
+    recordRunTiming(timing, { mode, kind: phase.kind, measured }, stats);
   };
 
   const { asset, maxResidentPleBytes } = await resolveAsset(directoryUrl(source));
@@ -495,34 +501,122 @@ const main = async (): Promise<void> => {
     ...(documentChars === undefined ? {} : { documentChars }),
   });
   const prompt = gemma4ChatPrompt(pipeline.tokenizer, messages);
+
+  /**
+   * warm の 2 本目以降が追記する差分（会話の**最後の user 発話をもう 1 度**）と閉じ札の id。
+   *
+   * 描くのは `gemma4ChatTurn` — 多ターンを自分で回すときの正本で、`Gemma4ChatSession` も同じ
+   * 関数を同じ使い方で呼ぶ（`packages/models/src/gemma/chat-session.ts:518`）。テンプレート
+   * 文字列を手で書かないのは、綴り（`<|turn>` 系）の所有者が chat 関数だからである。
+   * cold では `undefined`（追記も閉じ札も要らない）。
+   */
+  const warmTurn = (():
+    | { readonly delta: readonly number[]; readonly endOfTurnId: number }
+    | undefined => {
+    if (!warm) return undefined;
+    const followUp = messages.at(-1);
+    if (followUp === undefined || followUp.role !== "user") {
+      throw new Error(
+        `--warm: ワークロード ${workload} の最後の発話が user でない（追記できる形でない）`,
+      );
+    }
+    const endOfTurnId = pipeline.tokenizer.addedTokenId(END_OF_TURN);
+    if (endOfTurnId === undefined) {
+      throw new Error(`--warm: トークナイザの追加語彙に閉じ札 ${END_OF_TURN} が無い`);
+    }
+    return { delta: gemma4ChatTurn(pipeline.tokenizer, followUp), endOfTurnId };
+  })();
+
+  const plans = turnPlan(rounds);
+  // 溢れは**測る前に**落とす（走ってから溢れると、片側だけ短い走行の数字が残る）。追記ぶんを
+  // +1 で見るのは、閉じ札を前置するターンが最も長くなるためである（悲観側）。
+  if (warmTurn !== undefined) {
+    assertWarmCapacity({
+      plans,
+      capacity,
+      promptTokens: prompt.length,
+      turnTokens: warmTurn.delta.length + 1,
+      newTokens,
+    });
+  }
   note(
     `[mtp-bench] ready（${secondsOf(performance.now() - started)} s）` +
       ` / prompt ${prompt.length} token / capacity ${capacity}` +
+      (warmTurn === undefined ? "" : ` / warm 追記 ${warmTurn.delta.length} token`) +
       ` / sampler ${samplerName} ${JSON.stringify(sampler)}\n`,
   );
 
   /**
-   * 1 ターン = sequence 1 本（KV は使い回さない — 3 モードが同じ prompt を同じ位置から流す）。
+   * warm でモードごとに持つ sequence（cold では毎ターン作って畳むので空のまま）。
    *
-   * `auto` のゲートは sequence と同じ寿命なので、この形では**毎ターン初期状態から**始まる（移動
+   * 3 本が同時に生きるので KV の常駐は `capacity` の 3 倍になる。畳むのは全ターンの後で、
+   * pipeline より先（`await using` の解放は宣言の逆順）。取りこぼしても
+   * `Gemma4Pipeline.dispose` が巻き取る。
+   */
+  const heldSequences = new Map<BenchMode, GenerationSequence>();
+  await using _heldOwned = {
+    [Symbol.asyncDispose]: async (): Promise<void> => {
+      for (const sequence of heldSequences.values()) await sequence.dispose();
+    },
+  };
+  /** そのモードで何本目のターンか（1 始まり・暖機を 1 本目として数える）。 */
+  const ownCounts = new Map<BenchMode, number>();
+  /**
+   * 直前のターンの停止（モードごと・warm だけが読む）。
+   *
+   * 次のターンに {@link END_OF_TURN} を前置するかはこの停止だけで決まる。判断そのものは
+   * `summary.ts` の `warmTurnPrefix`（純関数）— 閉じ札以外の停止 token で閉じていたら落ちる。
+   */
+  const lastStops = new Map<BenchMode, GenerationStop>();
+
+  /**
+   * 1 ターンを回す。cold は 1 ターン = sequence 1 本（KV は使い回さない — 3 モードが同じ prompt を
+   * 同じ位置から流す）。warm はモードごとに 1 本を使い回し、2 本目以降は差分だけを流す。
+   *
+   * `auto` のゲートは sequence と同じ寿命なので、cold では**毎ターン初期状態から**始まる（移動
    * 平均も探索の周期も持ち越さない）。実アプリの `Gemma4ChatSession` は sequence を使い回すので、
-   * ここで出る `auto` の数字は悲観側である。
+   * cold で出る `auto` の数字は悲観側である。
    */
   const runTurn = async (plan: TurnPlan, at: number): Promise<TurnRecord> => {
-    const sequence = await pipeline.sequence({
+    const ownIndex = (ownCounts.get(plan.mode) ?? 0) + 1;
+    ownCounts.set(plan.mode, ownIndex);
+    const held = heldSequences.get(plan.mode);
+    const sequence = held ?? await pipeline.sequence({
       speculative: speculativeOf(plan.mode),
       capacity,
     });
+    if (warmTurn !== undefined && held === undefined) heldSequences.set(plan.mode, sequence);
     try {
+      // 1 本目は会話全体（`gemma4ChatPrompt`）・2 本目以降は差分だけ。
+      const turnPrompt = ((): readonly number[] => {
+        if (held === undefined) return prompt;
+        if (warmTurn === undefined) {
+          throw new Error("[mtp-bench] 簿記の破れ: warm でないのに sequence を継いだ");
+        }
+        // 前ターンが閉じ札で終わっていれば frontier がそれを前置する（`gemma4ChatTurn` の前提）。
+        // 打ち切ったターンの後は閉じ札が要り、閉じ札以外の停止 token で閉じていたら
+        // `warmTurnPrefix` が落とす（README の `--warm` 節）。
+        const prior = lastStops.get(plan.mode);
+        if (prior === undefined) {
+          throw new Error("[mtp-bench] 簿記の破れ: 継いだ sequence に前ターンの停止が無い");
+        }
+        return [
+          ...warmTurnPrefix({ prior, mode: plan.mode, endOfTurnId: warmTurn.endOfTurnId }),
+          ...warmTurn.delta,
+        ];
+      })();
+      // 生成の**前**の占有（warm ではここが前ターンまでの積み上がり）。
+      const contextTokens = sequence.used;
       const tallies = emptyTallies();
       const phases: Gemma4RunPhase[] = [];
       turnTallies = tallies;
       turnPhases = phases;
+      turnMode = plan.mode;
       measured = !plan.warmup;
       const ids: number[] = [];
       let firstTokenMs = Number.NaN;
       const turnStarted = performance.now();
-      const stream = sequence.generate({ prompt, maxNewTokens: newTokens, sampler });
+      const stream = sequence.generate({ prompt: turnPrompt, maxNewTokens: newTokens, sampler });
       for await (const event of stream) {
         if (event.kind !== "token") continue;
         if (ids.length === 0) firstTokenMs = performance.now() - turnStarted;
@@ -533,9 +627,13 @@ const main = async (): Promise<void> => {
       if (!Number.isFinite(firstTokenMs)) {
         throw new Error(`[mtp-bench] turn ${at}: token イベントが 1 通も無い（${stop.reason}）`);
       }
+      // 次のターンが差分をどう流せるかは、この停止が model turn を閉じたかで決まる。
+      if (warmTurn !== undefined) lastStops.set(plan.mode, stop);
       const speculation: GenerationSpeculation | undefined = stop.speculation;
       const record: TurnRecord = {
         ...plan,
+        ownIndex,
+        contextTokens,
         tokens: stop.tokens,
         stopReason: stop.reason,
         ids,
@@ -562,50 +660,34 @@ const main = async (): Promise<void> => {
       const gate = speculation?.plainSteps === undefined || speculation.switches === undefined
         ? ""
         : ` · plain steps ${speculation.plainSteps} · switches ${speculation.switches}`;
+      // warm では同じモードの前のターンからの積み上がりが読めないと数字が解釈できない
+      // （後ろのターンほど context が長い）ので、ターン行に生成前の占有を出す。
+      const context = warm ? ` · #${ownIndex} ctx ${record.contextTokens}` : "";
       note(
         `[mtp-bench] ${workload}/${samplerName} turn ${at} ` +
           `${MODE_LABEL[plan.mode]}${plan.warmup ? " warmup" : ""}: ` +
           `${record.tokens} tok · gen ${secondsOf(record.generationMs)} s · ` +
-          `${perToken.toFixed(1)} ms/tok${perCycle}${gate}\n`,
+          `${perToken.toFixed(1)} ms/tok${perCycle}${gate}${context}\n`,
       );
       return record;
     } finally {
       turnTallies = undefined;
       turnPhases = undefined;
+      turnMode = undefined;
       measured = false;
-      await sequence.dispose();
+      // warm の sequence は次のターンが継ぐので畳まない（全ターンの後に `_heldOwned` が畳む）。
+      if (!warm) await sequence.dispose();
     }
   };
 
   const turns: TurnRecord[] = [];
-  for (const [at, plan] of turnPlan(rounds).entries()) {
+  for (const [at, plan] of plans.entries()) {
     turns.push(await runTurn(plan, at + 1));
   }
-  const summary = summarizeTurns(turns);
+  const summary = summarizeTurns(turns, { warm });
 
-  /** 種別ごとの GPU 内訳（`--gpu-timing` のときだけ・暖機を除く）。 */
-  const gpuBreakdown = (): Record<string, unknown> =>
-    Object.fromEntries(
-      RUN_KINDS.filter((kind) => timing[kind].runs > 0).map((kind) => {
-        const bucket = timing[kind];
-        return [kind, {
-          runs: bucket.runs,
-          msPerRun: bucket.totalNs / 1e6 / bucket.runs,
-          dispatchesPerRun: bucket.dispatchCount / bucket.runs,
-          clampedNegativeSamples: bucket.clampedNegativeSamples,
-          keys: [...bucket.keys.entries()]
-            .sort(([leftKey, left], [rightKey, right]) =>
-              right.ns - left.ns || (leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0)
-            )
-            .slice(0, TIMING_TOP)
-            .map(([key, total]) => ({
-              key,
-              msPerRun: total.ns / 1e6 / bucket.runs,
-              dispatchesPerRun: total.dispatchCount / bucket.runs,
-            })),
-        }];
-      }),
-    );
+  /** mode × kind の GPU 内訳（`--gpu-timing` のときだけ・暖機を除く — `timing.ts`）。 */
+  const gpuBreakdown = gpuTiming ? summarizeTiming(timing) : undefined;
 
   const { vendor, architecture, device, description } = gpu.adapterInfo;
   const line = JSON.stringify({
@@ -629,6 +711,7 @@ const main = async (): Promise<void> => {
       capacity,
       documentChars: documentChars ?? null,
       rounds,
+      warm,
       maxResidentPleBytes,
       gemvRowsTarget: gemvRowsTarget ?? null,
       gpuTiming,
@@ -637,7 +720,7 @@ const main = async (): Promise<void> => {
     prompt: { tokens: prompt.length, messages },
     turns,
     summary,
-    ...(gpuTiming ? { gpu: gpuBreakdown() } : {}),
+    ...(gpuBreakdown === undefined ? {} : { gpu: gpuBreakdown }),
   });
   console.log(line);
   if (outPath !== undefined) await Deno.writeTextFile(outPath, `${line}\n`, { append: true });
@@ -650,7 +733,21 @@ const main = async (): Promise<void> => {
       ` · 列一致 always ${summary.identity.identical ? "yes" : "NO"}` +
       ` / auto ${summary.identity.identicalAuto ? "yes" : "NO"}` +
       // 実効 k は勘定から出た値（`--k` 省略時は配布形の段数がそのまま出る）。
-      ` · 実効 k ${summary.always.k ?? "不明"}\n`,
+      ` · 実効 k ${summary.always.k ?? "不明"}` +
+      // warm は 3 モードに揃う自ターン番号までしか要約に入れない（`summary.ts`）— 何本で
+      // 出した数字かが分からないと、上の倍率がどの範囲の話か読めない。
+      (summary.ownTurnLimit === undefined
+        ? ""
+        : ` · warm（要約は自ターン ≤ ${summary.ownTurnLimit}・` +
+          `${summary.plain.turns} / ${summary.always.turns} / ${summary.auto.turns} 本）` +
+          // 同じ自ターン番号で 3 モードの context 長が揃っていたか。揃わない番号が出た後は
+          // 「同じ位置から始まったターン」の比較でなくなるので、倍率の読み方が変わる。
+          ` · ctx aligned ${
+            summary.identity.firstContextMismatchTurn === undefined
+              ? "yes"
+              : `NO@${summary.identity.firstContextMismatchTurn}`
+          }`) +
+      "\n",
   );
   // ゲート付きのターンの時間がどの局面に落ちたか（中央値 1 ターンぶん — 正本は JSON の
   // `summary.auto.trace`）。倍率だけでは「負けを止めた費用」がどこに乗ったか読めない。
@@ -670,6 +767,25 @@ const main = async (): Promise<void> => {
       (trace.firstExitRun === undefined ? "" : ` · 初回離脱 run ${trace.firstExitRun}`) +
       "\n",
   );
+  // GPU 内訳の見出しだけ画面に出す（op 別の表は行数が多いので正本は JSON の `gpu`）。mode を
+  // ラベルに含めるのは、`auto/decode`（ゲートの plain step）と `plain/decode` が別の欄だと
+  // 画面で分かる形にするためである。
+  if (gpuBreakdown !== undefined) {
+    note("[mtp-bench] GPU 内訳（暖機を除く・op 別は JSON の gpu）:\n");
+    for (const mode of BENCH_MODES) {
+      const byKind = gpuBreakdown[mode];
+      if (byKind === undefined) continue;
+      for (const kind of RUN_KINDS) {
+        const one = byKind[kind];
+        if (one === undefined) continue;
+        note(
+          `[mtp-bench]   ${mode}/${kind} ${one.runs} run · ` +
+            `${one.msPerRun.toFixed(2)} ms/run · ` +
+            `${one.dispatchesPerRun.toFixed(1)} dispatch/run\n`,
+        );
+      }
+    }
+  }
 };
 
 await runMain(main);

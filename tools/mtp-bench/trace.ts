@@ -19,8 +19,9 @@ import type { GenerationGateTrace, GenerationRunPhase } from "../../packages/mod
  * ターン先頭の何 run を `cold` に入れるか。
  *
  * 先頭の数 run は PLE shard の cold miss と PreparedPlan / bind group の初出を含む（ゲートが
- * 最初の cycle を観測に混ぜないのも同じ理由 — `speculation-gate.ts`）。8 本なのは既定の探索間隔
- * （`exploreBase` = 8）と同じ粒度で読めるようにするためで、定常の壁はその後ろの `rest` で読む。
+ * 最初の cycle を観測に混ぜないのも同じ理由 — `speculation-gate.ts`）。8 本なのはターン先頭の
+ * 立ち上がりを見る粒度で、既定の探索間隔（`exploreBase` = 16）の半分にあたる。定常の壁はその後ろの
+ * `rest` で読む。
  */
 const COLD_RUNS = 8;
 

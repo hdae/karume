@@ -40,6 +40,7 @@ deno run -A tools/mtp-bench/main.ts --workload <name> --sampler <greedy|recommen
 | `--gemv-rows-target <int>`       | runtime default: 16384                                 | Overrides the runtime's `linearGemvRowsThreadTarget` (default 16384, the RTX 3080 Ti saturation point). Lower it on GPUs with fewer cores so the M=4 verify uses taller row blocks (fewer weight re-reads). Static — the tool records it in `config` |
 | `--out <file.jsonl>`             | —                                                      | Append the JSON line to this file as well (stdout always gets it). The parent directory must exist — it is checked before the model is loaded, and never created                                                                                     |
 | `--gpu-timing` (switch)          | off                                                    | Collect per-op GPU time via `acquireGpu({ gpuTiming: true })`                                                                                                                                                                                        |
+| `--warm` (switch)                | off                                                    | One sequence **per mode**, reused across that mode's turns: the conversation grows instead of restarting, so the gate is only cold in the mode's first turn (see below)                                                                              |
 
 Unknown options fail loudly: a mistyped knob that silently fell back to a default would make the
 recorded configuration disagree with what was actually measured.
@@ -56,6 +57,9 @@ deno run -A tools/mtp-bench/main.ts --workload dialogue --sampler recommended --
 
 # Per-op GPU breakdown (a separate process — see the warning below)
 deno run -A tools/mtp-bench/main.ts --workload freeform --sampler greedy --gpu-timing
+
+# Multi-turn: one conversation per mode, so the gate is cold only once
+deno run -A tools/mtp-bench/main.ts --workload freeform --sampler greedy --warm
 ```
 
 ## Protocol
@@ -65,7 +69,8 @@ One process = one configuration (the convention of `tools/ram-peak/measure.ts`).
 1. Acquire the GPU, wrap `Session.prototype.run`, open the pipeline with the drafter
    (`speculative: {}`, or `{ k }` when `--k` was given) and the full PLE budget.
 2. Build the workload's chat messages, encode them once with `gemma4ChatPrompt`. All three modes send
-   the **same prompt token ids** from the same starting position; each turn gets a fresh sequence.
+   the **same prompt token ids** from the same starting position; each turn gets a fresh sequence
+   (with `--warm`, the first turn of each mode does, and the rest continue that conversation).
 3. **Warm up** with one turn of each mode. They are recorded (`warmup: true`) but excluded from the
    summary: the first turns include shader translation and params construction.
 4. Run `--rounds` repetitions of the **rotation** — odd rounds `plain`, `always`, `always`, `plain`,
@@ -77,11 +82,56 @@ One process = one configuration (the convention of `tools/ram-peak/measure.ts`).
 5. Summarise with **medians**, never means: a single turn can spike (PLE shard re-reads, clock state
    changes), and a mean carries the spike into the ratio.
 
-**The gate starts cold in every `auto` turn.** One turn is one sequence, and the gate lives as long
-as the sequence, so it carries neither its moving averages nor its exploration counter across turns:
-every `auto` turn pays the exploration cost again from scratch. A real application
-(`Gemma4ChatSession`) reuses one sequence across the whole conversation, so `speedupAuto` measured
-here is the **pessimistic** side of what shipping code gets.
+**Without `--warm`, the gate starts cold in every `auto` turn.** One turn is one sequence, and the
+gate lives as long as the sequence, so it carries neither its moving averages nor its exploration
+counter across turns: every `auto` turn pays the exploration cost again from scratch. A real
+application (`Gemma4ChatSession`) reuses one sequence across the whole conversation, so
+`speedupAuto` measured this way is the **pessimistic** side of what shipping code gets. `--warm` is
+the other end of that range — see below.
+
+### `--warm`: one conversation per mode
+
+With the switch, each mode gets **one sequence, created on its first turn and disposed after the
+last**, and every later turn of that mode appends the workload's final user message again as a new
+user turn — the same shape a multi-turn chat has. The gate therefore starts cold only once per mode
+(in the warm-up turn), which is what a real conversation does; the cold figure and this one bracket
+what shipping code sees.
+
+- The follow-up is drawn with **`gemma4ChatTurn`**, the same helper `Gemma4ChatSession` uses for the
+  same purpose — never a hand-written template string, because the chat spellings belong to that
+  function.
+- A turn that ran into `--new-tokens` did **not** close its model turn, so its frontier is an
+  ordinary content token rather than the end-of-turn one that `gemma4ChatTurn`'s delta assumes. The
+  tool then prepends the end-of-turn id itself, producing exactly the ids the model would have
+  emitted had it stopped there. (`Gemma4ChatSession` instead drops the KV and redraws the whole
+  conversation; that is the right call for an app, but it would defeat the point of this switch.)
+- A turn that stopped on **any other stop token** (a distribution `<eos>`, a requested
+  `<|tool_response>`) is **rejected before the next turn is issued**, naming the token id and the
+  mode. Prepending the end-of-turn id there would push `body <eos> <turn|> delta` into the KV — ids
+  no redraw of the conversation would ever produce — and not prepending it breaks what
+  `gemma4ChatTurn`'s delta assumes, so neither is measurable.
+- **Capacity is checked after the model loads and before the first turn runs** (the check needs the tokenizer for the follow-up turn). Needed positions for a mode with `n` turns are
+  `prompt + n × new-tokens + (n − 1) × delta − 1`, and `plain` runs four turns per rotation against
+  the two speculative modes' two, so `plain` is always the binding one (13 turns at the default
+  `--rounds 3`). `freeform` (33 prompt tokens) and `dialogue` (230) fit in the default 8192;
+  `extract` / `summarize` (≈4.8K, and their delta is the document itself) do not, and are rejected
+  with the per-mode numbers. That is intended — `--warm` exists for the workloads where the gate
+  _loses_, which are the short-prompt ones.
+- **The summary only uses own-turn numbers that all three modes reached** (`ownIndex ≤` the smallest
+  per-mode turn count, reported as `summary.ownTurnLimit`). Without that, the ratio would compare
+  `plain` turns late in a long conversation against `always` turns early in a short one, since
+  `plain` accumulates context twice as fast. Token-id identity is likewise compared per own-turn
+  number.
+- `identity.contextAligned` says whether the three modes' `contextTokens` agree at **every own-turn
+  number the summary used**, and `identity.firstContextMismatchTurn` names the first one that did not
+  — once a mode's token ids part, the turns after it no longer start from the same position. It is
+  recorded rather than enforced (the same treatment as a diverged column); the closing stderr line
+  prints `ctx aligned yes` or `ctx aligned NO@<n>`.
+- Three sequences are alive at once, so **KV residency is 3 × `--capacity`** instead of one.
+- Per-mode wall clocks grow over the turns because the context does. Compare across modes at the
+  same own-turn number, not across turns.
+- On stderr, each turn line gains `#<ownIndex> ctx <contextTokens>` and the closing line names the
+  own-turn limit together with the turn count each mode contributed.
 
 ### Denominators
 
@@ -140,34 +190,48 @@ median could cancel that.
 
 One JSON line with these top-level keys:
 
-| Key       | Contents                                                                                                                                                                                                                                                                                                                                                 |
-| --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tool`    | `"mtp-bench"`                                                                                                                                                                                                                                                                                                                                            |
-| `host`    | `os`, `arch`, `deno`, and the `adapter` (`vendor` / `architecture` / `device` / `description`)                                                                                                                                                                                                                                                           |
-| `config`  | The effective value of every option. Knobs that are not in effect are `null` (`k` is `null` when the drafter's own step count was used). `config.asset` identifies what was measured: `defaultModel`, `defaultQuant`, and `manifestSha256` — the SHA-256 of the manifest body, which pins the asset because a distribution carries no version of its own |
-| `prompt`  | `tokens` (the encoded prompt length) and the `messages` that produced it                                                                                                                                                                                                                                                                                 |
-| `turns`   | One record per turn, warm-ups included: `mode` (`plain` / `always` / `auto`), round, `warmup`, `tokens`, `stopReason`, the token `ids` and their decoded `text`, `turnMs` / `firstTokenMs` / `generationMs`, per-kind run counts and wall totals, the `trace` buckets (see below), and `speculation` for `always` and `auto` turns                       |
-| `summary` | See below                                                                                                                                                                                                                                                                                                                                                |
-| `gpu`     | Present only with `--gpu-timing`                                                                                                                                                                                                                                                                                                                         |
+| Key       | Contents                                                                                                                                                                                                                                                                                                                                                                     |
+| --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tool`    | `"mtp-bench"`                                                                                                                                                                                                                                                                                                                                                                |
+| `host`    | `os`, `arch`, `deno`, and the `adapter` (`vendor` / `architecture` / `device` / `description`)                                                                                                                                                                                                                                                                               |
+| `config`  | The effective value of every option. Knobs that are not in effect are `null` (`k` is `null` when the drafter's own step count was used). `config.asset` identifies what was measured: `defaultModel`, `defaultQuant`, and `manifestSha256` — the SHA-256 of the manifest body, which pins the asset because a distribution carries no version of its own                     |
+| `prompt`  | `tokens` (the encoded prompt length) and the `messages` that produced it                                                                                                                                                                                                                                                                                                     |
+| `turns`   | One record per turn, warm-ups included: `mode` (`plain` / `always` / `auto`), round, `warmup`, `ownIndex` / `contextTokens` (see below), `tokens`, `stopReason`, the token `ids` and their decoded `text`, `turnMs` / `firstTokenMs` / `generationMs`, per-kind run counts and wall totals, the `trace` buckets (see below), and `speculation` for `always` and `auto` turns |
+| `summary` | See below                                                                                                                                                                                                                                                                                                                                                                    |
+| `gpu`     | Present only with `--gpu-timing`: the per-op GPU breakdown, folded as `gpu[mode][kind]` (see below)                                                                                                                                                                                                                                                                          |
 
 `summary` (warm-ups excluded, every value a median over turns):
 
-| Field                                 | Meaning                                                                                                                                                                 |
-| ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `plain` / `always` / `auto`           | `turns`, `msPerToken`, `generationMs`, `turnMs`, `firstTokenMs`, `hostMsPerToken`                                                                                       |
-| `<mode>.runs[kind]`                   | `countPerTurn` and `msPerRun` per run kind. A kind with no runs has no `msPerRun` field (writing `0` would read as "measured, and it was 0 ms")                         |
-| `<mode>.hostMsPerToken`               | `(generationMs − decode/draft/verify wall) / (tokens − 1)` — see Denominators                                                                                           |
-| `<mode>.trace`                        | Phase buckets — see below                                                                                                                                               |
-| `always` / `auto`.`tokensPerCycle`    | `delivered / cycles`                                                                                                                                                    |
-| `always` / `auto`.`k`                 | The effective step count, `acceptedHistogram.length − 1` (the tally has one bucket per acceptance count, `0..k`). Turns that disagree are an error, not a median        |
-| `always` / `auto`.`acceptedHistogram` | Element-wise sum of the per-turn histograms (index = accepted drafts in a cycle)                                                                                        |
-| `always.cycleMs`                      | `generationMs / cycles` (`always` only)                                                                                                                                 |
-| `always.hostMsPerCycle`               | `(generationMs − draft wall − verify wall) / cycles` (`always` only)                                                                                                    |
-| `auto.plainSteps`                     | Median number of decode-shaped steps the gate took in a turn. `0` means the gate never fired; the field's absence would mean there was no gate                          |
-| `auto.switches`                       | Median number of speculate ↔ plain transitions in a turn (a one-off exploration probe is not a transition)                                                              |
-| `speedup`                             | `plain.msPerToken / always.msPerToken` — the ceiling                                                                                                                    |
-| `speedupAuto`                         | `plain.msPerToken / auto.msPerToken` — **the acceptance figure: "does leaving it on ever cost anything?"** Below 1 means the gate failed to stop a loss                 |
-| `identity`                            | `plainConsistent`, `alwaysConsistent`, `autoConsistent`, `identical` / `firstDivergence` (plain vs `always`), `identicalAuto` / `firstDivergenceAuto` (plain vs `auto`) |
+| Field                                 | Meaning                                                                                                                                                                                                                                                                                                           |
+| ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `plain` / `always` / `auto`           | `turns`, `msPerToken`, `generationMs`, `turnMs`, `firstTokenMs`, `hostMsPerToken`                                                                                                                                                                                                                                 |
+| `<mode>.runs[kind]`                   | `countPerTurn` and `msPerRun` per run kind. A kind with no runs has no `msPerRun` field (writing `0` would read as "measured, and it was 0 ms")                                                                                                                                                                   |
+| `<mode>.hostMsPerToken`               | `(generationMs − decode/draft/verify wall) / (tokens − 1)` — see Denominators                                                                                                                                                                                                                                     |
+| `<mode>.trace`                        | Phase buckets — see below                                                                                                                                                                                                                                                                                         |
+| `always` / `auto`.`tokensPerCycle`    | `delivered / cycles`                                                                                                                                                                                                                                                                                              |
+| `always` / `auto`.`k`                 | The effective step count, `acceptedHistogram.length − 1` (the tally has one bucket per acceptance count, `0..k`). Turns that disagree are an error, not a median                                                                                                                                                  |
+| `always` / `auto`.`acceptedHistogram` | Element-wise sum of the per-turn histograms (index = accepted drafts in a cycle)                                                                                                                                                                                                                                  |
+| `always.cycleMs`                      | `generationMs / cycles` (`always` only)                                                                                                                                                                                                                                                                           |
+| `always.hostMsPerCycle`               | `(generationMs − draft wall − verify wall) / cycles` (`always` only)                                                                                                                                                                                                                                              |
+| `auto.plainSteps`                     | Median number of decode-shaped steps the gate took in a turn. `0` means the gate never fired; the field's absence would mean there was no gate                                                                                                                                                                    |
+| `auto.switches`                       | Median number of speculate ↔ plain transitions in a turn (a one-off exploration probe is not a transition)                                                                                                                                                                                                        |
+| `speedup`                             | `plain.msPerToken / always.msPerToken` — the ceiling                                                                                                                                                                                                                                                              |
+| `speedupAuto`                         | `plain.msPerToken / auto.msPerToken` — **the acceptance figure: "does leaving it on ever cost anything?"** Below 1 means the gate failed to stop a loss                                                                                                                                                           |
+| `identity`                            | `plainConsistent`, `alwaysConsistent`, `autoConsistent`, `identical` / `firstDivergence` (plain vs `always`), `identicalAuto` / `firstDivergenceAuto` (plain vs `auto`) — and with `--warm` also `contextAligned` / `firstContextMismatchTurn` (the per-own-turn context length agreement across the three modes) |
+| `ownTurnLimit`                        | `--warm` only: the largest own-turn number the summary used (see `--warm` above). Absent without the switch                                                                                                                                                                                                       |
+
+Every turn record carries two fields for `--warm`, and they are written in either mode so that the
+record has one shape: `ownIndex` is the 1-based position of that turn **within its own mode**
+(the warm-up is 1), and `contextTokens` is what the conversation occupied **before** the turn was
+issued (`GenerationSequence.used`, so a pending frontier token counts). Without `--warm` every
+`contextTokens` is 0, since each turn gets a fresh sequence.
+
+With `--warm`, `identity` compares `plain` against `always` / `auto` **per own-turn number**, and
+`firstDivergenceTurn` / `firstDivergenceAutoTurn` name the first number that parted (the existing
+`firstDivergence*` fields still give the index within that turn's ids). The three `*Consistent`
+fields are **absent** there: turns of one mode continue a conversation rather than repeat a prompt,
+so "did the same prompt produce the same ids twice" is not a question that can be asked — and
+`false` would read as a broken invariant.
 
 `identity` is a correctness check, not a performance one: speculation is a speed-only knob, so
 `always` must produce exactly the `plain` token ids. If `identical` is false, read that before the
@@ -220,14 +284,26 @@ lost a run's time.
 
 ## `--gpu-timing`
 
-With the switch, each run's `lastRunTiming` is accumulated per run kind (warm-ups excluded) into
-`gpu[kind]`: `runs`, `msPerRun`, `dispatchesPerRun`, `clampedNegativeSamples`, and the top 12
-pipeline keys by GPU time with their own `msPerRun` and `dispatchesPerRun`.
+With the switch, each run's `lastRunTiming` is accumulated (warm-ups excluded) into
+`gpu[mode][kind]`: `runs`, `msPerRun`, `dispatchesPerRun`, `clampedNegativeSamples`, and the top 12
+pipeline keys by GPU time with their own `msPerRun` and `dispatchesPerRun`. Both levels are ordered
+`plain` / `always` / `auto` and `prefill` / `decode` / `draft` / `verify`.
 
-The buckets are keyed by `phase.kind`, so an `auto` turn's gate steps land in **`decode`** together
-with the `plain` turns' runs — the gate runs the same M=1 shape and the observation seat does not
-distinguish them (no branch was added to the public `Gemma4RunPhase`). Read `gpu.decode` as "M=1
-runs from every mode", and `summary.auto.plainSteps` for how many of them the gate contributed.
+The **mode** level is what makes the table readable. The gate's plain steps and its `W1` probes are
+decode-shaped runs, so folding by `phase.kind` alone puts them in the same bucket as a `plain`
+turn's decodes (the observation seat does not distinguish them — no branch was added to the public
+`Gemma4RunPhase`). Split by mode, `gpu.auto.decode` is the gate's own M=1 runs and `gpu.plain.decode`
+is the non-speculative baseline, so the same kernel can be compared key by key between the two. The
+mode level does not separate the gate's plain steps from its `W1` probes — both are `auto` decodes;
+`summary.auto.trace` (`plain` vs `w1Probe`) is where that split lives.
+
+A `(mode, kind)` pair with no runs has **no field at all** — `always` has no `decode`, `plain` has
+neither `draft` nor `verify` — for the same reason `summary.<mode>.runs[kind].msPerRun` is absent
+there: `0` would read as "measured, and it was 0 ms". A mode with no runs at all is missing
+entirely rather than present as `{}`.
+
+The stderr tail prints one line per `(mode, kind)` (`mode/kind`, runs, ms per run, dispatches per
+run). The per-key table is only in the JSON.
 
 **Never compare a timing-on wall clock with a timing-off one.** A timing-enabled device opens one
 pass per dispatch, so the wall clock (and therefore `speedup`) grows. Take the ratio from a run

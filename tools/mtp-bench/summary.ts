@@ -11,6 +11,9 @@
  *   入ると壁が跳ねる。交互に回すのは順序効果を打ち消すためで、跳ねの側は中央値で落とす。
  * - **暖機は要約から除く**（記録には残す）— 初回ターンはパイプラインの立ち上げ（WGSL の解析・
  *   params の生成）を含み、定常の 1 token とは別物である。
+ * - **warm（`--warm`）では自ターン番号を揃える** — sequence を使い回す走行ではターンごとに
+ *   context が伸びるので、1 round に 4 本回る plain と 2 本の投機モードを全部混ぜると
+ *   「長い会話の plain」と「短い会話の always」の比になる（{@link summarizeTurns}）。
  *
  * MUST: 全モジュール副作用ゼロ（import 時実行・グローバル可変状態の禁止 — CLAUDE.md）。
  */
@@ -30,10 +33,13 @@ import type { TraceBucket, TurnTrace } from "./trace.ts";
  */
 export type BenchMode = "plain" | "always" | "auto";
 
+/** モードの並び（`--gpu-timing` の表がこの順に mode の欄を書く — `timing.ts`）。 */
+export const BENCH_MODES: readonly BenchMode[] = ["plain", "always", "auto"];
+
 /** run の種別（`Gemma4RunPhase.kind` そのもの — 生成面が名乗る 4 つ）。 */
 export type RunKind = "prefill" | "decode" | "draft" | "verify";
 
-/** GPU 内訳の欄の並び（`main.ts` が `--gpu-timing` の表をこの順に読む — 唯一の読み手）。 */
+/** GPU 内訳の欄の並び（`--gpu-timing` の表がこの順に kind の欄を書く — `timing.ts`）。 */
 export const RUN_KINDS: readonly RunKind[] = ["prefill", "decode", "draft", "verify"];
 
 /**
@@ -62,6 +68,22 @@ export type TurnPlan = {
 
 /** 1 ターンの記録（要約の材料 — JSON の `turns[]` にもこのまま載る）。 */
 export type TurnRecord = TurnPlan & {
+  /**
+   * そのモードの何本目のターンか（1 始まり・**暖機を 1 本目として数える**）。
+   *
+   * `--warm`（モードごとに sequence を使い回す多ターン）の要約が揃える軸である。1 round に
+   * plain は 4 本・投機の 2 モードは 2 本ずつ回るので、warm では同じ round の中でも plain の
+   * 後ろのターンほど context が長い — 番号を揃えないと「長い会話の plain」と「短い会話の
+   * always」を比べることになる。cold（1 ターン = 1 sequence）では要約は読まない。
+   */
+  readonly ownIndex: number;
+  /**
+   * 生成を発行する**前**に会話が占めていた論理位置の数（`GenerationSequence.used`）。
+   *
+   * cold では常に 0（毎ターン新しい sequence）。warm では前ターンまでの prompt と生成が
+   * 積み上がった値で、閉じ札の frontier（未 commit の `pendingToken`）も 1 として入る。
+   */
+  readonly contextTokens: number;
   /** 生成した token 数（`GenerationStop.tokens` — 停止 token も 1 個として数える）。 */
   readonly tokens: number;
   /** 停止理由（`GenerationStop.reason`）。 */
@@ -180,17 +202,45 @@ export type ModeSummary = {
 
 /** token 列の一致（投機は「速度だけのノブ」— 列が動いていたら測る意味が無い）。 */
 export type IdentitySummary = {
-  /** 暖機を除く `plain` 同士の `ids` が全て一致するか。 */
-  readonly plainConsistent: boolean;
-  readonly alwaysConsistent: boolean;
-  readonly autoConsistent: boolean;
-  /** `plain` の最初の非暖機ターンと `always` の最初の非暖機ターンの `ids` が一致するか。 */
+  /**
+   * 暖機を除く `plain` 同士の `ids` が全て一致するか。
+   *
+   * warm では**欄ごと無い** — モードの中の各ターンは会話の続きなので、同じ prompt を 2 度流した
+   * ときの再現性という問いがそもそも立たない（`false` を書くと破れの報せに読める）。
+   */
+  readonly plainConsistent?: boolean;
+  readonly alwaysConsistent?: boolean;
+  readonly autoConsistent?: boolean;
+  /**
+   * `plain` と `always` の `ids` が一致するか。
+   *
+   * cold は最初の非暖機ターン同士 1 対。warm は**自ターン番号ごと**（{@link TurnRecord.ownIndex}）
+   * に対を作り、全ての番号で一致したときだけ立つ。
+   */
   readonly identical: boolean;
   /** 一致しないなら最初に食い違った添字（片方が他方の接頭辞なら短い側の長さ）。 */
   readonly firstDivergence?: number;
+  /**
+   * warm で最初に食い違った**自ターン番号**（cold では欄ごと無い — 突合は 1 対だけなので
+   * 番号を名乗る意味が無い）。
+   */
+  readonly firstDivergenceTurn?: number;
   /** 同じ突合を `plain` と `auto` で見たもの。 */
   readonly identicalAuto: boolean;
   readonly firstDivergenceAuto?: number;
+  readonly firstDivergenceAutoTurn?: number;
+  /**
+   * warm で、同じ自ターン番号の 3 モードの context 長（{@link TurnRecord.contextTokens}）が
+   * 全て揃っていたか（cold では**欄ごと無い** — 毎ターン新しい sequence なので常に 0 である）。
+   *
+   * 番号を揃えても、context が揃っていなければ「同じ位置から始まったターン」ではない。ずれるのは
+   * 片側の列が割れた後（生成した token 数が違えば以後の context も違う）で、それ以降のターンは
+   * 別の長さの会話の比較になる。落とさずに記録するのは、列の破れ自体が既知の限界
+   * （`docs/limitations.md`）で、読めるようにするのがこの欄の役目だからである。
+   */
+  readonly contextAligned?: boolean;
+  /** 揃わなかった最初の自ターン番号（揃っていれば・cold では欄ごと無い）。 */
+  readonly firstContextMismatchTurn?: number;
 };
 
 export type BenchSummary = {
@@ -207,6 +257,13 @@ export type BenchSummary = {
    */
   readonly speedupAuto: number;
   readonly identity: IdentitySummary;
+  /**
+   * warm の要約に入れた自ターン番号の上限（cold では欄ごと無い）。
+   *
+   * 3 モードに揃う番号だけを採る（= 各モードの本数の最小 — {@link summarizeTurns}）。倍率も
+   * 列一致もこの範囲の中で出た値である。
+   */
+  readonly ownTurnLimit?: number;
 };
 
 /**
@@ -261,6 +318,101 @@ export const turnPlan = (rounds: number): readonly TurnPlan[] => {
     for (const mode of rotation) plans.push({ mode, round, warmup: false });
   }
   return plans;
+};
+
+/**
+ * warm で `turns` 本回したときに要る論理位置の最大（= **最後のターンのピーク**）。
+ *
+ * 1 本目は `promptTokens`（会話全体の描画）から始まり、2 本目以降は `turnTokens`（`gemma4ChatTurn`
+ * の追記ぶん）だけを積む。1 ターンが会話に足す位置は「追記 + 生成」で、生成は最大
+ * `newTokens`（停止 token を 1 個として数えた上限）である。よって最後のターンの発行時点の
+ * 占有は `promptTokens + (turns − 1) × (newTokens + turnTokens)` で、そのターンが最大まで
+ * 生成すると `+ newTokens − 1` 位置目まで届く（最初の token は prompt の最後の行が出すので
+ * 1 引く — runtime 側の門 `pastLength + promptLength + maxNewTokens − 1 ≤ capacity` と同じ式）。
+ */
+export const warmPeakPositions = (input: {
+  readonly turns: number;
+  readonly promptTokens: number;
+  readonly turnTokens: number;
+  readonly newTokens: number;
+}): number => {
+  if (!Number.isInteger(input.turns) || input.turns < 1) {
+    throw new Error(`warm の自ターン数 ${input.turns} が 1 以上の整数でない`);
+  }
+  return input.promptTokens + input.turns * input.newTokens +
+    (input.turns - 1) * input.turnTokens - 1;
+};
+
+/**
+ * warm の走行が容量に入ることを**測る前に**確かめる（入らないなら fail loudly）。
+ *
+ * 走ってから溢れると、そのモードの途中までのターンだけが記録に残る（要約は 3 モードに揃う番号
+ * しか採らないので、数字は出るのに片側だけ短い走行になる）。長文脈のワークロード（prompt ≈4.8K）は
+ * 既定の `--rounds` では入らない — warm は**負ける課題**（自由文・対話）のための口なので、
+ * それでよい。
+ */
+export const assertWarmCapacity = (request: {
+  readonly plans: readonly TurnPlan[];
+  readonly capacity: number;
+  readonly promptTokens: number;
+  readonly turnTokens: number;
+  readonly newTokens: number;
+}): void => {
+  const over: string[] = [];
+  for (const mode of BENCH_MODES) {
+    const turns = request.plans.filter((plan) => plan.mode === mode).length;
+    if (turns === 0) throw new Error(`--warm: mode ${mode} のターンが台本に 1 本も無い`);
+    const needed = warmPeakPositions({ ...request, turns });
+    if (needed > request.capacity) over.push(`${mode} は自ターン ${turns} 本で ${needed} 位置`);
+  }
+  if (over.length === 0) return;
+  throw new Error(
+    `--warm: 会話が capacity ${request.capacity} に入らない（${over.join(" / ")}` +
+      ` — prompt ${request.promptTokens} + 追記 ${request.turnTokens}/ターン +` +
+      ` 生成 ${request.newTokens}/ターン）。--rounds か --new-tokens を下げるか、` +
+      `--capacity を上げること（長文脈のワークロードは warm の対象外）`,
+  );
+};
+
+/**
+ * 前ターンの停止のうち、次のターンの前置を決めるのに要る枝だけ（`GenerationStop` がそのまま入る）。
+ *
+ * 停止 token で閉じた 2 枝（配布形が宣言した `eos` と、要求が足した `stop-token`）だけが token を
+ * 運ぶ — 残りの 3 枝は「model turn を閉じていない」側である。
+ */
+export type WarmPriorStop =
+  | { readonly reason: "eos" | "stop-token"; readonly token: number }
+  | { readonly reason: "max-tokens" | "aborted" | "closed" };
+
+/**
+ * warm の次のターンの id 列に前置するもの（`[]` = 前置しない）。
+ *
+ * `gemma4ChatTurn` の差分は「前の model turn を閉じる閉じ札は sequence の frontier が前置する」
+ * 前提で描かれる。前ターンの停止で 3 つに分かれる:
+ *
+ * - **閉じ札で閉じた** … frontier がその id なので前置しない。
+ * - **打ち切った**（`--new-tokens` の `max-tokens`・消費側が閉じた `closed` / `aborted` も同じ）…
+ *   frontier は本文の token なので、閉じ札を 1 個前置して model turn を閉じる。生成が閉じ札まで
+ *   出したときと同じ id 列になる。
+ * - **閉じ札以外の停止 token で閉じた**（配布形の `<eos>`・要求が足した `<|tool_response>` など）…
+ *   前置すると `本文 <eos> <turn|> 差分` という、会話を全部描き直しても出ない id 列を KV に積む
+ *   ことになり、前置しなければ `gemma4ChatTurn` の前提が破れる。どちらも黙って測ってはいけない
+ *   ので**落とす**（warm はこの形を扱わない）。
+ */
+export const warmTurnPrefix = (input: {
+  readonly prior: WarmPriorStop;
+  readonly mode: BenchMode;
+  readonly endOfTurnId: number;
+}): readonly number[] => {
+  const { prior, mode, endOfTurnId } = input;
+  if (prior.reason !== "eos" && prior.reason !== "stop-token") return [endOfTurnId];
+  if (prior.token === endOfTurnId) return [];
+  throw new Error(
+    `--warm: mode ${mode} の前のターンが閉じ札（id ${endOfTurnId}）ではない停止 ` +
+      `token id ${prior.token}（${prior.reason}）で閉じた — warm はこの形を扱わない` +
+      `（閉じ札を前置すると、会話を描き直しても出ない id 列を KV に積むことになる）。` +
+      `--warm を外して cold で測ること`,
+  );
 };
 
 /**
@@ -465,7 +617,55 @@ const firstDivergenceOf = (
   return left.length === right.length ? undefined : shared;
 };
 
-const summarizeIdentity = (measured: readonly TurnRecord[]): IdentitySummary => {
+/**
+ * warm の突合 — **自ターン番号ごと**に `plain` と比べ、最初に割れた (番号, 位置) を返す。
+ *
+ * warm ではターンごとに会話が伸びるので、番号を揃えない突合は「別の会話の列」を比べてしまう
+ * （必ず割れる）。番号が片側にしか無いターンは飛ばす（要約に入る範囲は揃っているので、実際に
+ * 飛ぶのは要約の外を渡されたときだけ）。
+ */
+const firstDivergenceByOwnTurn = (
+  plain: readonly TurnRecord[],
+  other: readonly TurnRecord[],
+): { readonly turn: number; readonly at: number } | undefined => {
+  const mates = new Map(other.map((turn) => [turn.ownIndex, turn]));
+  const ordered = [...plain].sort((left, right) => left.ownIndex - right.ownIndex);
+  let compared = 0;
+  for (const turn of ordered) {
+    const mate = mates.get(turn.ownIndex);
+    if (mate === undefined) continue;
+    compared += 1;
+    const at = firstDivergenceOf(turn.ids, mate.ids);
+    if (at !== undefined) return { turn: turn.ownIndex, at };
+  }
+  if (compared === 0) {
+    throw new Error("token 列の突合: plain と揃う自ターン番号が 1 つも無い");
+  }
+  return undefined;
+};
+
+/**
+ * warm の context 長の検査 — 自ターン番号ごとに 3 モードの {@link TurnRecord.contextTokens} を
+ * 比べ、最初に揃わなかった番号を返す（全て揃っていれば `undefined`）。
+ *
+ * 見るのは要約に入るターンだけ（呼び手が絞った集合）で、片側にしか無い番号は 1 本だけの群に
+ * なるので自動的に揃う扱いになる。
+ */
+const firstContextMismatchOf = (turns: readonly TurnRecord[]): number | undefined => {
+  const byOwnTurn = new Map<number, number[]>();
+  for (const turn of turns) {
+    const seen = byOwnTurn.get(turn.ownIndex);
+    if (seen === undefined) byOwnTurn.set(turn.ownIndex, [turn.contextTokens]);
+    else seen.push(turn.contextTokens);
+  }
+  const ordered = [...byOwnTurn.entries()].sort(([left], [right]) => left - right);
+  for (const [ownIndex, contexts] of ordered) {
+    if (contexts.some((one) => one !== contexts[0])) return ownIndex;
+  }
+  return undefined;
+};
+
+const summarizeIdentity = (measured: readonly TurnRecord[], warm: boolean): IdentitySummary => {
   const ofMode = (mode: BenchMode): readonly TurnRecord[] =>
     measured.filter((turn) => turn.mode === mode);
   const plain = ofMode("plain");
@@ -473,6 +673,23 @@ const summarizeIdentity = (measured: readonly TurnRecord[]): IdentitySummary => 
   const auto = ofMode("auto");
   if (plain.length === 0 || always.length === 0 || auto.length === 0) {
     throw new Error("token 列の突合: 暖機を除くターンが無いモードがある");
+  }
+  if (warm) {
+    const divergence = firstDivergenceByOwnTurn(plain, always);
+    const divergenceAuto = firstDivergenceByOwnTurn(plain, auto);
+    const contextMismatch = firstContextMismatchOf(measured);
+    return {
+      identical: divergence === undefined,
+      ...(divergence === undefined
+        ? {}
+        : { firstDivergence: divergence.at, firstDivergenceTurn: divergence.turn }),
+      identicalAuto: divergenceAuto === undefined,
+      ...(divergenceAuto === undefined
+        ? {}
+        : { firstDivergenceAuto: divergenceAuto.at, firstDivergenceAutoTurn: divergenceAuto.turn }),
+      contextAligned: contextMismatch === undefined,
+      ...(contextMismatch === undefined ? {} : { firstContextMismatchTurn: contextMismatch }),
+    };
   }
   const consistent = (turns: readonly TurnRecord[]): boolean =>
     turns.every((turn) => sameIds(turn.ids, turns[0].ids));
@@ -489,18 +706,58 @@ const summarizeIdentity = (measured: readonly TurnRecord[]): IdentitySummary => 
   };
 };
 
+/**
+ * 3 モードに揃う自ターン番号の上限（= 各モードの**本数**の最小・暖機込みで数える）。
+ *
+ * 暖機は各モードちょうど 1 本目なので、本数の最小で切るのと「各モードの測定ターンを頭から
+ * 同じ本数だけ採る」のは同じ集合になる（plain 13 本 / 投機 7 本 → 番号 7 まで = 測定 6 本ずつ）。
+ */
+const sharedOwnTurnLimit = (turns: readonly TurnRecord[]): number => {
+  const counts = BENCH_MODES.map((mode) => ({
+    mode,
+    count: turns.filter((turn) => turn.mode === mode).length,
+  }));
+  const missing = counts.filter((one) => one.count === 0);
+  if (missing.length > 0) {
+    throw new Error(
+      `warm の要約: mode ${missing.map((one) => one.mode).join(" / ")} のターンが 1 本も無い`,
+    );
+  }
+  return Math.min(...counts.map((one) => one.count));
+};
+
+/** {@link summarizeTurns} のノブ。 */
+export type SummarizeOptions = {
+  /**
+   * モードごとに sequence を使い回した走行か（`--warm`）。
+   *
+   * 立つと要約の対象が「3 モードに揃う自ターン番号」に絞られ、列一致は番号ごとの突合になる。
+   */
+  readonly warm?: boolean;
+};
+
 /** ターン記録（暖機込み）→ 要約。暖機はここで落ちる。 */
-export const summarizeTurns = (turns: readonly TurnRecord[]): BenchSummary => {
+export const summarizeTurns = (
+  turns: readonly TurnRecord[],
+  options: SummarizeOptions = {},
+): BenchSummary => {
+  const warm = options.warm ?? false;
+  const ownTurnLimit = warm ? sharedOwnTurnLimit(turns) : undefined;
   const measured = turns.filter((turn) => !turn.warmup);
-  const plain = summarizeMode(measured, "plain");
-  const always = summarizeMode(measured, "always");
-  const auto = summarizeMode(measured, "auto");
+  // warm では context 長がターンごとに伸びるので、モード間で番号が揃うところまでしか採らない。
+  const used = ownTurnLimit === undefined
+    ? measured
+    : measured.filter((turn) => turn.ownIndex <= ownTurnLimit);
+  const plain = summarizeMode(used, "plain");
+  const always = summarizeMode(used, "always");
+  const auto = summarizeMode(used, "auto");
   return {
     plain,
     always,
     auto,
     speedup: plain.msPerToken / always.msPerToken,
     speedupAuto: plain.msPerToken / auto.msPerToken,
-    identity: summarizeIdentity(measured),
+    identity: summarizeIdentity(used, warm),
+    ...(ownTurnLimit === undefined ? {} : { ownTurnLimit }),
   };
 };
