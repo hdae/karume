@@ -196,7 +196,7 @@ const processLogits = (
  * 全部弾き、softmax の分母は NaN になって確率が全滅する。範囲外添字の gather は行ごと NaN 汚染
  * するので（[known-issues] / [limitations]）、これは実際に起きる形である。
  *
- * 代償は V = 262,144 の比較 1 周（0.2ms 級）で、decode の壁（ADR 0082）に対して 1% 未満。
+ * 温度 0 の経路は最大値の探索にこの検査をまとめる。確率を作る経路では順位付けの前に検査する。
  */
 const assertNoNaN = (logits: Float32Array<ArrayBuffer>): void => {
   for (let token = 0; token < logits.length; token += 1) {
@@ -212,14 +212,19 @@ const assertNoNaN = (logits: Float32Array<ArrayBuffer>): void => {
  *
  * MUST: 最大値が非有限なら落とす。位置表の外の gather や壊れた重みは logits を非有限にするが、
  * argmax はそれを**もっともらしい token id に畳む**ので、畳まれる前がここしかない。
- * NaN は {@link assertNoNaN} が先に落としているので、ここで見るのは ±Infinity だけ。
+ * NaN は同じ走査で位置ごとに落とし、最後に最大値の ±Infinity を拒否する。
+ * 検査用に全語彙をもう一度走査せず、同値の先勝ちと最初の NaN のエラーを維持する。
  */
 const argmax = (logits: Float32Array<ArrayBuffer>): number => {
   let best = 0;
-  let bestValue = logits[0];
-  for (let token = 1; token < logits.length; token += 1) {
-    if (logits[token] > bestValue) {
-      bestValue = logits[token];
+  let bestValue = Number.NEGATIVE_INFINITY;
+  for (let token = 0; token < logits.length; token += 1) {
+    const value = logits[token];
+    if (value !== value) {
+      throw new Error(`logits[${token}] が NaN（非有限） — token id へ畳まずここで落とす`);
+    }
+    if (value > bestValue) {
+      bestValue = value;
       best = token;
     }
   }
@@ -362,7 +367,6 @@ export const samplerDistribution = (
   // 加工の**後**で見る（生の logits だけでなく、`+Infinity` の席へ `-Infinity` の bias を
   // 足したような組み合わせもここで捕まる）。
   const processed = processLogits(logits, spec, history);
-  assertNoNaN(processed);
   const temperature = spec.temperature ?? 0;
   if (temperature === 0) {
     return {
@@ -370,6 +374,8 @@ export const samplerDistribution = (
       probabilities: Float64Array.of(1),
     };
   }
+
+  assertNoNaN(processed);
 
   // 語彙数を超える topK は語彙数へ丸める（HF の `min(top_k, vocab)`）。
   const topK = spec.topK === undefined ? undefined : Math.min(spec.topK, processed.length);

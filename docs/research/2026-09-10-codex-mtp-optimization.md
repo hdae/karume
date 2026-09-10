@@ -293,3 +293,26 @@ V=262,144 の中央値は次のとおり。
 本体テストは符号付きゼロ・subnormal・同値・view の範囲・累積境界前後・大語彙の整列で比較ソート参照と照合する。
 検証: 対象 33 tests / 3 steps、全体 `deno task verify` は **2,817 passed / 743 steps / 0 failed / 5 ignored（25m17s）**。
 ログは `sampler-tests.log` と `verify-sampler.log` に保存した。
+
+### greedy の NaN 検査と最大値検索
+
+**採用**: 温度 0 の `samplerDistribution` は、NaN の全語彙検査と argmax の探索を 1 回の走査にまとめた。
+NaN は最大値の位置以外も必ず拒否し、最初の NaN の位置を従来と同じ文言で報告する。
++Infinity / 全 -Infinity の拒否、同値の先勝ち、view の範囲、乱数の消費数を維持する。
+温度が正の確率生成経路は従来の事前検査を使う。追加のキャッシュや作業配列はない。
+
+発端は Gemma freeform / greedy / 128 token / 1 round の V8 CPU profile。
+42.28 秒の取得区間では、自己時間の標本が argmax に約 450 ms、NaN 検査に約 110 ms あった。
+区間にはロードと暖機も含む。native `mapAsync` 約 15.55 秒、idle 約 19.81 秒という標本は
+CPU 使用率ではなく、GPU 待ちを含む呼び出しへの時間帰属である。JS 全体を書き換える根拠にはしない。
+`profile-host.ts` / `profile-target.ts`、`gemma-host.cpuprofile.json`、`gemma-cpu-profile-summary.json` に保存した。
+
+同じ実 logits 24 行を 2 暖機 + 9 回、前後の順序を反転して再生した。
+1 標本は 20 回の平均、各実装 216 標本。token は全件同じで、中央値は
+**0.557 → 0.194 ms（2.87 倍、約 0.36 ms 短縮）**。
+これは CPU の greedy 選択だけの数値で、モデル全体の倍率ではない。
+`prepare-argmax-spike.py` / `argmax-replay.ts`、`argmax-replay.jsonl` / `argmax-replay.log` が再現資料。
+境界テストは先頭・末尾の NaN、NaN と +Infinity の共存、範囲外に NaN を持つ view、±0 の同値を追加した。
+対象検証は **34 passed / 3 steps / 0 failed**（`argmax-tests.log`）。
+全体 `deno task verify` は **2,818 passed / 743 steps / 0 failed / 5 ignored（24m44s）**
+（`verify-argmax.log`）。
