@@ -573,7 +573,7 @@ Deno.test("投機の切替（speculativeSetup）: drafter 無しの pipeline に
 const fakeDrafter = {} as unknown as Gemma4Drafter;
 
 Deno.test("投機のゲートのノブ（speculativeSetup）: auto にだけ降り、always には欄ごと生えない", () => {
-  const knobs = { strong: 10, burstMin: 8, exploreBase: 8 };
+  const knobs = { burstAbort: 10, burstMin: 8, exploreBase: 8 };
   const gated = { drafter: fakeDrafter, speculativeK: 2, speculativeGate: knobs };
 
   const auto = speculativeSetup(gated, true);
@@ -606,10 +606,10 @@ Deno.test("投機のゲートのノブ: 不正な値は重みを読む前に落�
   await assertRejects(
     () =>
       Gemma4Pipeline.fromPretrained("karume/gemma4-e2b", {
-        speculative: { gate: { strong: 0 } },
+        speculative: { gate: { burstAbort: 0 } },
       }),
     Error,
-    "strong 0 が正の有限数でない",
+    "burstAbort 0 が正の有限数でない",
   );
   await assertRejects(
     () =>

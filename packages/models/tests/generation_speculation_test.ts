@@ -927,7 +927,7 @@ Deno.test("T8 門: 投機の指定は sequence 生成時に落ち、開いた面
           speculative: {
             open: () => Promise.reject(new Error("open まで届いてはいけない")),
             policy: "always",
-            gate: { strong: 10 },
+            gate: { burstAbort: 10 },
           },
         });
       } catch (error) {

@@ -86,7 +86,8 @@ const USAGE = "--source <配布形のパス> --workload <" + WORKLOAD_NAMES.join
   " --sampler <greedy|recommended> --seed <整数> --k <整数> --new-tokens <整数>" +
   " --capacity <整数> --document-chars <整数> --rounds <整数>" +
   " --max-resident-ple-bytes <整数> --gemv-rows-target <整数>" +
-  " --gate-strong <数> --gate-burst-min <整数> --gate-explore-base <整数>" +
+  " --gate-early-leave <数> --gate-burst-abort <数>" +
+  " --gate-burst-min <整数> --gate-explore-base <整数>" +
   " --out <file.jsonl> --gpu-timing --warm";
 const KNOWN = new Set([
   "source",
@@ -100,7 +101,8 @@ const KNOWN = new Set([
   "rounds",
   "max-resident-ple-bytes",
   "gemv-rows-target",
-  "gate-strong",
+  "gate-early-leave",
+  "gate-burst-abort",
   "gate-burst-min",
   "gate-explore-base",
   "out",
@@ -161,7 +163,9 @@ const integer = (key: string): number | undefined => {
   return raw === undefined ? undefined : Number(raw);
 };
 
-/** 有限の実数を取るノブ（ゲートの比の閾値 — 整数に丸めると `strong 0.15` 級の指定が書けない）。 */
+/**
+ * 有限の実数を取るノブ（ゲートの比の閾値 — 整数に丸めると `earlyLeave 0.15` 級の指定が書けない）。
+ */
 const number = (key: string): number | undefined => {
   const raw = args.get(key);
   if (raw === undefined) return undefined;
@@ -271,19 +275,22 @@ const gemvRowsTarget = integer("gemv-rows-target");
  * 自己採算ゲートのノブ（`Gemma4PipelineOptions.speculative.gate` へ素通し）— **`auto` のモードに
  * だけ効く**（`always` はゲートを作らない席・`plain` は投機を張らない）。
  *
- * 部分指定を許すのは、A/B が動かすのが 1〜3 本のノブだけであり、残りはライブラリの既定に
+ * 部分指定を許すのは、A/B が動かすのが 1〜数本のノブだけであり、残りはライブラリの既定に
  * 従わせたいからである（既定値をここに写すと、ライブラリ側で既定が動いた日にこの台本だけ
  * 古い値で測る）。値域の門もライブラリ側 1 箇所（`createSpeculationGate`）— 同じ門を 2 実装
  * 持たない。指定した綴りは `config.gate` に残す（省略は `null` = 「与えていない」）。
  */
-const gateStrong = number("gate-strong");
+const gateEarlyLeave = number("gate-early-leave");
+const gateBurstAbort = number("gate-burst-abort");
 const gateBurstMin = integer("gate-burst-min");
 const gateExploreBase = integer("gate-explore-base");
 const gateKnobs: SpeculationGateOptions | undefined =
-  gateStrong === undefined && gateBurstMin === undefined && gateExploreBase === undefined
+  gateEarlyLeave === undefined && gateBurstAbort === undefined && gateBurstMin === undefined &&
+    gateExploreBase === undefined
     ? undefined
     : {
-      ...(gateStrong === undefined ? {} : { strong: gateStrong }),
+      ...(gateEarlyLeave === undefined ? {} : { earlyLeave: gateEarlyLeave }),
+      ...(gateBurstAbort === undefined ? {} : { burstAbort: gateBurstAbort }),
       ...(gateBurstMin === undefined ? {} : { burstMin: gateBurstMin }),
       ...(gateExploreBase === undefined ? {} : { exploreBase: gateExploreBase }),
     };

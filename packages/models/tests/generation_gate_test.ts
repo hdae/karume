@@ -11,10 +11,11 @@
 //    最初の 1 cycle が受理 0 だった会話が即座に plain へ落ちる。実走で観測した欠陥がこれで、
 //    `200 token / 7 cycle / plain step 190 / 切替 1`・always の 7,066 ms に対し 9,262 ms だった。
 //    推定器は `window` 本の非重複ブロックの和で、`confirm` 本連続の負けだけが抜ける根拠になる。
-// 3. **負けの大きさで待つ長さを変える**こと（T2′ / T4″）。比が `leave + strong`（既定 1.16）を
-//    超える「強い負け」は 1 ブロックで抜け、探索バーストは `burstMin` 本目以降で外れが確定した
-//    ら回し切らずに畳む。ノイズで 1.16 に届く確率は勝っている文脈では ≈ 0.03%（ブロック）/
-//    ≈ 5%（4 cycle）で、後者は誤って抜けた後にしか起きないので代償は探索 1 回ぶんである。
+// 3. **「強い負け」のノブが speculate 側と plain 側で別**であること（T2′ / T4″）。speculate 側の
+//    早抜け（`earlyLeave`）は**未指定 = off** で、既定では比 1.30 でも `confirm` 本連続を待つ
+//    （実走では勝つ課題でも 1 ブロックが 1.16 を超える区間が混ざり、warm な会話で 7 ターン中
+//    3 ターンが誤退出した）。plain 側の打ち切り（`burstAbort`・既定 0.15）は残す — 誤発火は
+//    「誤って抜けた後のバースト」でしか起こりえず、代償は探索 1 回ぶんだからである。
 
 import { assert, assertAlmostEquals, assertEquals, assertThrows } from "@std/assert";
 import {
@@ -102,10 +103,10 @@ const WINNING: Walls = { cycle: 100, delivered: 4, plain: 50 };
 const LOSING: Walls = { cycle: 200, delivered: 2, plain: 50 };
 /**
  * 僅かに負ける壁（比 (110/2)/50 = 1.10）— `leave`（1.01）は超えるが「強い負け」の閾値
- * `leave + strong`（1.16）には届かない。この帯だけが `confirm` 本連続の判定を通る。
+ * `leave + 0.15`（1.16 — `burstAbort` の既定・`earlyLeave` を渡す席でも同じ値を使う）には届かない。
  */
 const MILD: Walls = { cycle: 110, delivered: 2, plain: 50 };
-/** 強く負ける壁（比 (130/2)/50 = 1.30 — `leave + strong` = 1.16 を超える）。 */
+/** 強く負ける壁（比 (130/2)/50 = 1.30 — 上の 1.16 を超える）。 */
 const STRONG_LOSS: Walls = { cycle: 130, delivered: 2, plain: 50 };
 
 Deno.test("ゲート T1 起点: 初期は speculate で、W1 は 2 回目の決定で 1 回だけ採る", () => {
@@ -137,7 +138,7 @@ Deno.test("ゲート T2 ブロック: 満ちるまで判定せず、負けブロ
   assertEquals(gate.switches, 0);
 
   // 16 本目でブロック 1 が満ちる（比 1.10 > leave 1.01）が、`confirm` は 2 なのでまだ抜けない
-  // （比 1.10 は「強い負け」1.16 に届かないので早抜けも起きない — T2′）。
+  // （既定では早抜けが off なので、比の大きさで待つ長さは変わらない — T2′）。
   run(gate, MILD, 1);
   assertEquals(gate.mode, "speculate", "負けブロック 1 本だけで抜けている");
   assertEquals(gate.switches, 0);
@@ -155,27 +156,45 @@ Deno.test("ゲート T2 ブロック: 満ちるまで判定せず、負けブロ
   assertEquals(gate.switches, 1);
 });
 
-Deno.test("ゲート T2′ 早抜け: 強い負け（比 > leave + strong）は 1 ブロックで倒れる", () => {
-  // 大きい負けを 2 ブロック（32 cycle）待つ必要は無い。ブロックの比の sd は対話級で 0.09 なので、
-  // 1.16 を超えるブロックが勝っている文脈で出る確率は ≈ 0.03% である（誤発火の代償は探索 1 回）。
-  const gate = createSpeculationGate();
-  const steps = trace(gate, STRONG_LOSS, 18);
+Deno.test("ゲート T2′ 早抜け: 既定は off（比 1.30 でも 2 ブロック）・earlyLeave の席だけ 1 本で倒れる", () => {
+  // 既定 off の根拠は机上の確率ではなく実走である。受理はターン内で定常でなく、勝つ課題
+  // （対話・比 0.90）でも 16 cycle 級で受理が落ちる区間が混ざるので、sequence を使い回した会話で
+  // 7 ターン中 3 ターンが誤って抜けた（research §6.5 表 11″）。利得は「抜けるまでの 1 ブロック」で
+  // sequence の寿命に 1 回、害は勝つ課題の毎ターンなので、既定では取らない。
+  const patient = createSpeculationGate();
+  const steps = trace(patient, STRONG_LOSS, 18);
   assertEquals(speculateCount(steps.map((observed) => observed.decision)), 16);
+  assertEquals(patient.mode, "speculate", "既定で 1 ブロックで倒れている（早抜けは off）");
+  assertEquals(patient.switches, 0);
+  // 2 ブロック目（決定 17 本で投機 cycle 16 本 — T2 と同じ数え）で初めて倒れる。
+  run(patient, STRONG_LOSS, 17);
+  assertEquals(patient.mode, "plain", "2 ブロック連続の負けで倒れていない");
+  assertEquals(patient.switches, 1);
+
+  // ノブを渡した席は 1 ブロックで倒れる（= 早抜けは `earlyLeave` の閾値だけで効いている）。
+  const eager = createSpeculationGate({ earlyLeave: 0.15 });
+  const eagerSteps = trace(eager, STRONG_LOSS, 18);
+  assertEquals(speculateCount(eagerSteps.map((observed) => observed.decision)), 16);
   assertEquals(
-    steps.slice(0, -1).map((observed) => observed.mode),
+    eagerSteps.slice(0, -1).map((observed) => observed.mode),
     Array.from({ length: 17 }, () => "speculate"),
     "ブロックが満ちる前に倒れている（早抜けも満ちた 1 本の判定である）",
   );
-  assertEquals(gate.mode, "plain", "強い負けが 1 ブロックで倒れていない");
-  assertEquals(gate.switches, 1);
+  assertEquals(eager.mode, "plain", "earlyLeave 0.15 の席で 1 ブロックで倒れていない");
+  assertEquals(eager.switches, 1);
 
-  // 対（`strong` を上げると同じ壁が「強い負け」でなくなる = 早抜けは閾値で効いている）。
-  const patient = createSpeculationGate({ strong: 0.5 });
-  run(patient, STRONG_LOSS, 18);
-  assertEquals(patient.mode, "speculate", "strong 0.5 でも 1 ブロックで倒れている");
-  run(patient, STRONG_LOSS, 17);
-  assertEquals(patient.mode, "plain", "2 ブロック目の連続判定で倒れていない");
-  assertEquals(patient.switches, 1);
+  // 対（同じ席でも比 1.10 は `leave + earlyLeave` = 1.16 に届かないので `confirm` を待つ）。
+  const mild = createSpeculationGate({ earlyLeave: 0.15 });
+  run(mild, MILD, 18);
+  assertEquals(mild.mode, "speculate", "1.16 に届かない負けで早抜けしている");
+  assertEquals(mild.switches, 0);
+
+  // 対 2（配線の取り違え）: speculate 側の閾値は `earlyLeave` であって `burstAbort` ではない。
+  // 比 1.30 は `leave + burstAbort` = 1.16 は超えるが `leave + earlyLeave` = 1.31 には届かない。
+  const wired = createSpeculationGate({ earlyLeave: 0.3, burstAbort: 0.15 });
+  run(wired, STRONG_LOSS, 18);
+  assertEquals(wired.mode, "speculate", "speculate 側が burstAbort の閾値を読んでいる");
+  assertEquals(wired.switches, 0);
 });
 
 /** 最初の cycle だけ配送 1（受理 0）— 旧 EWMA 設計が 1 サンプルで種付けされた形。 */
@@ -194,8 +213,8 @@ Deno.test("ゲート T3 種付け: 最初の cycle が受理 0 でも、勝っ�
   assertEquals(gate.mode, "speculate", "1 サンプルの種付けで抜けている");
   assertEquals(gate.switches, 0);
 
-  // 対（フォールト注入）: 同じ種付けでも、定常が本当に負けていれば抜ける（比 (100/2)/40 = 1.25
-  // は強い負けなので 1 ブロック）。これが無いと上の緑は「そもそも抜けないゲート」でも通る。
+  // 対（フォールト注入）: 同じ種付けでも、定常が本当に負けていれば抜ける（比 (100/2)/40 = 1.25 が
+  // `confirm` = 2 ブロック続く）。これが無いと上の緑は「そもそも抜けないゲート」でも通る。
   const losing = createSpeculationGate();
   step(losing, SEED_FIRST);
   run(losing, { cycle: 100, delivered: 2, plain: 40 }, 59);
@@ -214,7 +233,8 @@ Deno.test("ゲート T4 探索: plain 側はバーストで測り、外れるた
     [16, 32, 64, 128, 256, 256, 256],
     `探索の間隔が幾何バックオフになっていない: ${plainModeRuns(steps, "plain").join(",")}`,
   );
-  // 比 2.0 は「強い負け」なので、外れが確定したバーストは `burstMin` = 4 本で畳まれる（T4″）。
+  // 比 2.0 は `leave + burstAbort` = 1.16 を超えるので、外れが確定したバーストは `burstMin` = 4 本で
+  // 畳まれる（T4″）。
   assertEquals(
     plainModeRuns(steps, "speculate").slice(0, 6),
     [4, 4, 4, 4, 4, 4],
@@ -256,7 +276,7 @@ Deno.test("ゲート T4′ 戻る: バーストの集計が enter を下回っ�
   );
 });
 
-Deno.test("ゲート T4″ 打ち切り: 強い負けが出たバーストは burstMin 本目で畳む", () => {
+Deno.test("ゲート T4″ 打ち切り: 強い負け（burstAbort）が出たバーストは burstMin 本目で畳む", () => {
   // 負ける文脈が払う探索費の主はここである（バースト 8 cycle × 間隔 16 → 32 → …）。当たりの
   // 判定は満ちたバーストのままなので、`burst` そのものを縮めるのとは違って戻る精度は落ちない。
   const gate = createSpeculationGate({ window: 2, confirm: 1 });
@@ -299,6 +319,18 @@ Deno.test("ゲート T4″ 打ち切り: 強い負けが出たバーストは bu
     `弱い負けのバーストを打ち切っている: ${plainModeRuns(mild, "speculate").join(",")}`,
   );
   assertEquals(full.mode, "plain", "比 1.10 のバーストで speculate へ戻っている");
+
+  // 対 3（閾値は `burstAbort` が持つ — 上げれば同じ比 1.30 のバーストが回り切る。speculate 側の
+  // `earlyLeave` とは別のノブであることの対でもある）。
+  const lenient = createSpeculationGate({ window: 2, confirm: 1, burstAbort: 0.5 });
+  run(lenient, LOSING, 3);
+  const kept = trace(lenient, STRONG_LOSS, 25);
+  assertEquals(
+    plainModeRuns(kept, "speculate"),
+    [8],
+    `burstAbort を上げてもバーストを打ち切っている: ${plainModeRuns(kept, "speculate").join(",")}`,
+  );
+  assertEquals(lenient.mode, "plain", "比 1.30 のバーストで speculate へ戻っている");
 });
 
 Deno.test("ゲート T5 定常: 16 観測に 1 回 plain を測り、その step はブロックに数えない", () => {
@@ -414,15 +446,16 @@ type Condition = Walls & {
   readonly name: string;
   /** 表から導いた比 `(Wc/A)/W1`（1 未満なら投機が速い）。 */
   readonly ratio: number;
-  /** ブロック 2 本ぶん回した後に居るべきモード。 */
+  /** ブロック 2 本ぶん回した後に居るべきモード（既定の席 = 早抜け off）。 */
   readonly mode: SpeculationDecision;
   /**
-   * plain へ倒れるまでに要るブロック数（倒れない条件は持たない）。
+   * `earlyLeave: 0.15` を渡した席で plain へ倒れるまでに要るブロック数（`mode` が plain の条件だけ
+   * 持つ）。
    *
-   * 1 = 比が「強い負け」`leave + strong` = 1.16 を超えるので早抜けする条件・2 = `leave` は
-   * 超えるが 1.16 に届かないので `confirm` 本連続を待つ条件。
+   * 1 = 比が `leave + earlyLeave` = 1.16 を超えるので早抜けする条件・2 = `leave` は超えるが 1.16 に
+   * 届かないので `confirm` 本連続を待つ条件。**既定の席ではどの条件も 2 である**（早抜けが off）。
    */
-  readonly blocks?: 1 | 2;
+  readonly eagerBlocks?: 1 | 2;
 };
 
 const CONDITIONS: readonly Condition[] = [
@@ -436,7 +469,7 @@ const CONDITIONS: readonly Condition[] = [
     plain: 27.02,
     ratio: 1.037,
     mode: "plain",
-    blocks: 2,
+    eagerBlocks: 2,
   },
   { name: "M2 抽出", cycle: 172.4, delivered: 3.39, plain: 66.03, ratio: 0.770, mode: "speculate" },
   { name: "M2 要約", cycle: 170.7, delivered: 2.65, plain: 66.39, ratio: 0.970, mode: "speculate" },
@@ -447,7 +480,7 @@ const CONDITIONS: readonly Condition[] = [
     plain: 56.14,
     ratio: 1.079,
     mode: "plain",
-    blocks: 2,
+    eagerBlocks: 2,
   },
   {
     name: "M2 自由文",
@@ -456,7 +489,7 @@ const CONDITIONS: readonly Condition[] = [
     plain: 54.45,
     ratio: 1.308,
     mode: "plain",
-    blocks: 1,
+    eagerBlocks: 1,
   },
 ];
 
@@ -472,13 +505,13 @@ Deno.test("ゲート T8 実測: 8 条件のうち負ける 3 本だけが plain 
       );
       const gate = createSpeculationGate();
       // 決定 18 本 = 投機 cycle 16 本 = ブロックちょうど 1 本（plain は `W1` の測り直しだけで、
-      // 決定 1 / 15 の 2 本 ≒ 1/16）。ここで倒れるのは「強い負け」の条件だけである。
+      // 決定 1 / 15 の 2 本 ≒ 1/16）。既定は早抜け off なので、**どの条件もここでは倒れない**。
       const decisions = run(gate, condition, 18);
       assertEquals(plainAt(decisions), [1, 15], `${condition.name}: 測り直しの本数`);
       assertEquals(
         gate.mode,
-        condition.blocks === 1 ? "plain" : "speculate",
-        `${condition.name}: ブロック 1 本ぶんの後のモード`,
+        "speculate",
+        `${condition.name}: ブロック 1 本ぶんの後のモード（既定は早抜け off）`,
       );
 
       // 続く決定 17 本（測り直しは決定 31 の 1 本）でブロック 2 本目が満ちる。
@@ -488,6 +521,22 @@ Deno.test("ゲート T8 実測: 8 条件のうち負ける 3 本だけが plain 
         gate.switches,
         condition.mode === "plain" ? 1 : 0,
         `${condition.name}: 切替回数`,
+      );
+
+      // 早抜けを渡した席では、比 1.16 を超える条件だけが 1 ブロックで倒れる（勝つ 5 条件は
+      // どちらの席でも倒れない — 早抜けは「抜けるまでの費用」しか動かさない）。
+      const eager = createSpeculationGate({ earlyLeave: 0.15 });
+      run(eager, condition, 18);
+      assertEquals(
+        eager.mode,
+        condition.eagerBlocks === 1 ? "plain" : "speculate",
+        `${condition.name}: earlyLeave 0.15 の席でブロック 1 本ぶんの後のモード`,
+      );
+      run(eager, condition, 17);
+      assertEquals(
+        eager.mode,
+        condition.mode,
+        `${condition.name}: earlyLeave 0.15 の席でブロック 2 本ぶんの後のモード`,
       );
     });
   }
@@ -580,22 +629,27 @@ Deno.test("ゲート T9 門: ノブの値域は生成時に fail loudly", async 
     assertEquals(createSpeculationGate({ burst: 1 }).mode, "speculate");
   });
 
-  await t.step("強い負けの上乗せは正の有限数", () => {
-    assertThrows(
-      () => createSpeculationGate({ strong: 0 }),
-      Error,
-      "strong 0 が正の有限数でない",
-    );
-    assertThrows(
-      () => createSpeculationGate({ strong: -1 }),
-      Error,
-      "strong -1 が正の有限数でない",
-    );
-    assertThrows(
-      () => createSpeculationGate({ strong: Number.POSITIVE_INFINITY }),
-      Error,
-      "strong Infinity が正の有限数でない",
-    );
+  await t.step("強い負けの上乗せは 2 本とも正の有限数（早抜けは未指定 = off）", () => {
+    for (
+      const [name, value] of [
+        ["earlyLeave", 0],
+        ["earlyLeave", -1],
+        ["earlyLeave", Number.POSITIVE_INFINITY],
+        ["burstAbort", 0],
+        ["burstAbort", -1],
+        ["burstAbort", Number.POSITIVE_INFINITY],
+      ] as const
+    ) {
+      assertThrows(
+        () => createSpeculationGate({ [name]: value }),
+        Error,
+        `${name} ${value} が正の有限数でない`,
+      );
+    }
+    // 未指定の `earlyLeave` は「off」であって門の対象ではない（`0` を渡す形と混ぜない — 0 は
+    // 「閾値 = `leave` の早抜け」を意味してしまうので落とす）。
+    assertEquals(createSpeculationGate({}).mode, "speculate");
+    assertEquals(createSpeculationGate({ earlyLeave: undefined }).mode, "speculate");
   });
 
   await t.step("探索の間隔は 1 以上の整数・上限は基本間隔以上", () => {
@@ -645,7 +699,8 @@ Deno.test("ゲート T9 門: ノブの値域は生成時に fail loudly", async 
       exploreMax: 1,
       enter: 0.5,
       leave: 2,
-      strong: 0.5,
+      earlyLeave: 0.5,
+      burstAbort: 0.5,
     });
     assert(gate.mode === "speculate");
   });

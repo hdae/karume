@@ -27,10 +27,14 @@
  * 空にする）。`msPerTokenSpec > W1 × leave` が `confirm`（既定 2）ブロック**連続**で成り立った
  * ときだけ plain へ倒す。
  *
- * 例外は**強い負け**である。比が `leave + strong`（既定 1.01 + 0.15 = 1.16）を超えたブロックは
- * 1 本で plain へ倒す（{@link SpeculationGateOptions.strong}）。ノイズで 1.16 に届くのは
- * 勝っている文脈ではまず起きないので（下の机上の根拠）、大きい負けが「抜けるまでに払う費用」を
- * 1 ブロックぶん削れる。
+ * **強い負けの早抜けは既定 off である**（{@link SpeculationGateOptions.earlyLeave} — 渡した席だけ、
+ * ブロック 1 本の比が `leave + earlyLeave` を超えた時点で `confirm` の連続を待たずに倒す）。受理は
+ * ターン内で定常でなく、勝つ課題（対話・比 0.90）でも 16 cycle 級で受理が落ちる区間が混ざる。
+ * 早抜けが削るのは「抜けるまでの費用」1 ブロックぶん = sequence の寿命に 1 回だけで、誤発火の害は
+ * 勝つ課題の毎ターンに出る（sequence を使い回した実測で 7 ターン中 3 ターンが誤って抜け、auto が
+ * always の 0.96× まで落ちた — 早抜けを止めた席〈v2 のノブ一式・バースト側のノブは plain 側にしか効かない
+ * ので差は早抜けに帰属する〉では 0 / 7 で 1.00×・
+ * `docs/research/2026-09-09-mtp-stage4.md` §6.5 表 11″）。よって既定では取らない。
  *
  * **EWMA を使わないのは種付けの欠陥のため**である。`ewma(undefined, sample) = sample` なので、
  * 受理数の EWMA は**最初の 1 サンプルで種付けされる** — 最初に観測した cycle が受理 0
@@ -56,19 +60,20 @@
  *   ≈ 6 ブロックなので、**誤って抜けるのはターンあたり ≈ 1.5%** である。EWMA の 1 サンプル
  *   種付け（上）だと同じ条件でほぼ確実に抜けるので、ここが `confirm = 2` の効き所である。
  * - **M2 自由文（比 1.31）**: 1 ブロックが 1.01 を下回る確率 ≈ 0.1%。よって 2 ブロック =
- *   32 cycle（≈ 3.8 秒）で確実に抜ける — 比 1.31 は「強い負け」なので、実際はその半分の
- *   1 ブロックで抜ける（次の項）。sequence 寿命で 1 回払えばよい費用である。
+ *   32 cycle（≈ 3.8 秒）で確実に抜ける。sequence 寿命で 1 回払えばよい費用である（この 1 回を
+ *   半分にするのが早抜けで、既定 off の理由は上の節）。
  * - **戻る側**: `burst`（既定 8）cycle のバーストは比の sd ≈ 0.13。M2 自由文で 0.97 を下回る確率
  *   ≈ 0.5% なので、誤って戻らない。負ける側が払うバーストの費用は M2 自由文で +227 ms/バースト
  *   で、間隔が 16 → 256 と伸びるぶん長い会話では消える。
- * - **強い負けの早抜け（`strong` = 0.15）**: 対話級（比 0.85）のブロックの比の sd は上の 0.09
- *   なので、1.16 を超える確率は ≈ 0.03%（`confirm` の 2 本連続を待たずに倒しても、勝っている
- *   文脈を誤って落とす確率はこの桁である）。損益分岐（比 1.0）のブロックなら ≈ 4% で発火するが、
- *   **そこで抜けても損は 0** なので許容する。
- * - **バーストの早期打ち切り（`burstMin` = 4）**: 比 0.85 のとき 4 cycle の比（sd ≈ 0.19）が
- *   1.16 を超える確率は ≈ 5%。この誤発火は「誤って抜けた後のバースト」でしか起こりえず、代償は
- *   戻りがバースト 1 回ぶん遅れることだけである。効き側は比 1.27（M2 自由文級）で 4 cycle の比が
- *   1.16 を超える確率 ≈ 0.72 なので、負ける文脈のバーストの平均長は 8 cycle → **≈ 4.8 cycle**（実測分布でゲート本体を回した値・打ち切りの 7 割は 4 本目）
+ * - **早抜け（`earlyLeave` = 0.15 を渡した席）**: 対話級（比 0.85）のブロックの比の sd は上の 0.09
+ *   なので、1.16 を超える確率は机上では ≈ 0.03% である。**この見積りが実走と合わない**のが既定
+ *   off の理由で、受理がターン内で非定常だと勝つ課題でも 1 ブロックが 1.16 を超える区間が混ざる
+ *   （上の節の 3 / 7 ターン）。机上の確率の小ささは根拠にならない。
+ * - **バーストの早期打ち切り（`burstMin` = 4・`burstAbort` = 0.15）**: 比 0.85 のとき 4 cycle の比
+ *   （sd ≈ 0.19）が 1.16 を超える確率は ≈ 5%。この誤発火は「誤って抜けた後のバースト」でしか
+ *   起こりえず、代償は戻りがバースト 1 回ぶん遅れることだけである（ここが早抜けと違って既定 on の
+ *   ままな理由 — 害の上限が探索 1 回で、勝っている文脈には触れない）。効き側は比 1.27（M2 自由文
+ *   級）で 4 cycle の比が 1.16 を超える確率 ≈ 0.72 なので、負ける文脈のバーストの平均長は 8 cycle → **≈ 4.8 cycle**（実測分布でゲート本体を回した値・打ち切りの 7 割は 4 本目）
  *   に縮む。
  *
  * ## 探索（負けている側にも「戻る道」を残す）
@@ -78,8 +83,9 @@
  *   戻れなかった第 2 の理由がこれである）。バーストの `ΣWc / Σdelivered < W1 × enter` なら
  *   speculate へ戻し、間隔は `exploreBase` へ戻す。外れたら間隔を倍にする。
  * - **外れが確定したバーストは回し切らない**。`burstMin`（既定 4）本目以降の各観測で比が
- *   `leave + strong` を超えていたら、残りの cycle を回さずにそのバーストを「外れ」として畳む
- *   （{@link SpeculationGateOptions.burstMin}）。負ける文脈が払う探索費はここが主で、`burst`
+ *   `leave + burstAbort`（既定 1.16）を超えていたら、残りの cycle を回さずにそのバーストを「外れ」
+ *   として畳む（{@link SpeculationGateOptions.burstMin} /
+ *   {@link SpeculationGateOptions.burstAbort}）。負ける文脈が払う探索費はここが主で、`burst`
  *   そのものを縮めるのと違って**戻れる側の判定精度は落ちない**（当たりの判定は満ちたバーストの
  *   集計のままである）。
  * - **speculate 中**は {@link SpeculationGateOptions.exploreBase} 観測ごとに 1 回 plain を測る
@@ -124,7 +130,7 @@ export type SpeculationGateOptions = {
   readonly burst?: number;
   /**
    * バーストを早期に打ち切れる最小の cycle 数（既定 `min(4, burst)`・`1 ≤ burstMin ≤ burst` の
-   * 整数）。ここから `burst - 1` 本目までの各観測で比が `leave + strong` を超えていたら、
+   * 整数）。ここから `burst - 1` 本目までの各観測で比が `leave + burstAbort` を超えていたら、
    * 残りを回さずに「外れたバースト」として畳む。
    */
   readonly burstMin?: number;
@@ -137,11 +143,18 @@ export type SpeculationGateOptions = {
   /** plain へ抜ける条件 `ΣWc/Σdelivered > W1 × leave`（既定 1.01・`1 < leave`）。 */
   readonly leave?: number;
   /**
-   * 「強い負け」の上乗せ（既定 0.15・正の有限数）。比が `leave + strong` を超えたブロックは
-   * `confirm` の連続を待たずに 1 本で plain へ倒し、進行中の探索バーストは `burstMin` 本目以降で
-   * 打ち切る。
+   * speculate 側の**早抜け**の上乗せ（**未指定 = off**・指定するなら正の有限数）。渡した席では、
+   * ブロック 1 本の比が `leave + earlyLeave` を超えた時点で `confirm` の連続を待たずに plain へ
+   * 倒す。既定で持たないのは、実走では勝つ課題でも誤発火が毎ターン出るのに対し、利得は
+   * 「抜けるまでの 1 ブロック」= sequence の寿命に 1 回しかないからである（モジュール doc）。
    */
-  readonly strong?: number;
+  readonly earlyLeave?: number;
+  /**
+   * plain 側の探索バーストを畳む「強い負け」の上乗せ（既定 0.15・正の有限数）。`burstMin` 本目
+   * 以降の観測で比が `leave + burstAbort` を超えたバーストは、残りの cycle を回さずに「外れ」と
+   * して畳む。speculate 側の判定（`leave` / `confirm`）には効かない。
+   */
+  readonly burstAbort?: number;
 };
 
 export type SpeculationGate = {
@@ -205,7 +218,9 @@ export const createSpeculationGate = (
   const exploreMax = options.exploreMax ?? 256;
   const enter = options.enter ?? 0.97;
   const leave = options.leave ?? 1.01;
-  const strong = options.strong ?? 0.15;
+  // 早抜けは**未指定 = off**（値を持たないことがそのまま「倒さない」の綴りである）。
+  const earlyLeave = options.earlyLeave;
+  const burstAbort = options.burstAbort ?? 0.15;
   assertPositive("alpha", alpha);
   // α > 1 の EWMA は過去へ負の重みを載せる（平均ではなくなる）ので上も閉じる。
   if (alpha > 1) throw new Error(`speculation gate: alpha ${alpha} が 0 < α ≤ 1 の外`);
@@ -222,7 +237,8 @@ export const createSpeculationGate = (
   assertInterval("exploreMax", exploreMax, exploreBase);
   assertPositive("enter", enter);
   assertPositive("leave", leave);
-  assertPositive("strong", strong);
+  if (earlyLeave !== undefined) assertPositive("earlyLeave", earlyLeave);
+  assertPositive("burstAbort", burstAbort);
   // 不感帯は 1 を挟む（`enter ≥ 1` だと負けている最中に戻り、`leave ≤ 1` だと勝っていても抜ける）。
   if (!(enter < 1 && 1 < leave)) {
     throw new Error(`speculation gate: enter ${enter} < 1 < leave ${leave} でない`);
@@ -268,7 +284,10 @@ export const createSpeculationGate = (
       ? undefined
       : (batchWall / batchDelivered) / plainWall;
 
-  /** plain へ倒す（ブロックが `confirm` 本連続で負けた / 1 本が強い負けだったとき）。 */
+  /**
+   * plain へ倒す（ブロックが `confirm` 本連続で負けた / `earlyLeave` の席で 1 本が強い負けだった
+   * とき）。
+   */
   const leaveSpeculation = (): void => {
     mode = "plain";
     switches += 1;
@@ -323,7 +342,7 @@ export const createSpeculationGate = (
         if (batchCycles < burst) {
           if (batchCycles < burstMin) return;
           const probe = batchRatio();
-          if (probe !== undefined && probe > leave + strong) missBurst();
+          if (probe !== undefined && probe > leave + burstAbort) missBurst();
           return;
         }
         const measured = batchRatio();
@@ -338,8 +357,8 @@ export const createSpeculationGate = (
       if (batchCycles < window) return;
       // 満ちたブロック 1 本ぶんの判定（`W1` 未観測なら判定を持たない = 連続を切る）。
       const measured = batchRatio();
-      // 強い負けは `confirm` の連続を待たない（1 本で倒す）。
-      if (measured !== undefined && measured > leave + strong) {
+      // 早抜けを渡した席だけ、強い負けは `confirm` の連続を待たない（1 本で倒す）。
+      if (earlyLeave !== undefined && measured !== undefined && measured > leave + earlyLeave) {
         leaveSpeculation();
         return;
       }
