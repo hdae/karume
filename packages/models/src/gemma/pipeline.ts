@@ -35,6 +35,7 @@
  * ## MUST: 全モジュール副作用ゼロ（import 時実行・グローバル可変状態の禁止 — CLAUDE.md）
  */
 
+import { closeableGenerator } from "../concurrency/closeable-generator.ts";
 import {
   acquireGpu,
   type AdmissionReport,
@@ -1391,6 +1392,43 @@ export const closeChatTurn = async (
   }
 };
 
+/** 後始末とリース返却が終わってから、iterable と同じ成否を done へ通知する。 */
+export const completeChatTurn = async (options: {
+  readonly where: string;
+  readonly stream?: GenerationStream;
+  readonly matched?: string;
+  readonly failure?: { readonly error: unknown };
+  readonly cleanup: (stop: Gemma4ChatStop | undefined) => Promise<void>;
+  readonly release?: () => void;
+  readonly settle: (stop: Gemma4ChatStop) => void;
+  readonly fail: (error: unknown) => void;
+}): Promise<void> => {
+  let failure = options.failure;
+  let stop: Gemma4ChatStop | undefined;
+  try {
+    const inner = options.stream === undefined
+      ? { reason: "closed", tokens: 0 } satisfies Gemma4ChatStop
+      : await options.stream.done;
+    // 中断は iterable が reason を投げ、done は aborted を返す既存契約を維持する。
+    if (failure === undefined || inner.reason === "aborted") {
+      stop = options.matched === undefined ? inner : stopStringOf(options.matched, inner);
+    }
+  } catch (error) {
+    failure ??= { error };
+  }
+  try {
+    await closeChatTurn(options.where, failure, () => options.cleanup(stop), options.release);
+  } catch (error) {
+    options.fail(error);
+    throw error;
+  }
+  if (stop === undefined && failure !== undefined) {
+    options.fail(failure.error);
+    throw failure.error;
+  }
+  options.settle(stop ?? { reason: "closed", tokens: 0 });
+};
+
 /** 片を汲み切って連結する（{@link Gemma4ChatStream.text} の本体）。 */
 const joinChunks = async (chunks: AsyncIterable<string>): Promise<string> => {
   let text = "";
@@ -1801,36 +1839,28 @@ export class Gemma4Pipeline {
         // 自分の中断を識別できる）。
         throw error;
       } finally {
-        // 停止理由は**内側の `done` をそのまま**運ぶ（中断は resolve `aborted`・失敗は reject
-        // という sequence 側の分け方を、ここで作り直さない）。停止文字列だけはこの層の判定なので
-        // 理由を差し替えるが、`tokens` は内側の数をそのまま使う（この層で数え直さない）。
-        if (stream === undefined) {
-          if (failure !== undefined) fail(failure.error);
-          else settle({ reason: "closed", tokens: 0 });
-        } else {
-          try {
-            const inner = await stream.done;
-            // MUST: この層で起きた失敗（`onPrefill` / `onRunDiagnostics` / 復号器の未知 id・
-            // 不正 UTF-8）は内側からは見えない — 内側は `return()` で閉じられて `closed` で
-            // resolve するので、そのまま運ぶと `done` だけを読む呼び手が**失敗を成功として
-            // 記録する**。中断は内側が `aborted` で運ぶ形が正なので、そこだけは触らない。
-            if (failure !== undefined && inner.reason !== "aborted") fail(failure.error);
-            else {
-              settle(matched === undefined ? inner : stopStringOf(matched, inner));
-            }
-          } catch (error) {
-            fail(error);
-          }
-        }
-        // 1 ターン = 1 sequence（context を抱えたままにしない）。席は無条件に返す
-        // （{@link closeChatTurn} の MUST）。
-        await closeChatTurn("Gemma4Pipeline.chat", failure, async () => {
-          if (sequence !== undefined) await sequence.dispose();
-        }, release);
+        await completeChatTurn({
+          where: "Gemma4Pipeline.chat",
+          stream,
+          matched,
+          failure,
+          settle,
+          fail,
+          release,
+          cleanup: async () => {
+            await sequence?.dispose();
+          },
+        });
       }
     };
 
-    return chatStreamOf(chunks(), done);
+    return chatStreamOf(
+      closeableGenerator(chunks(), (failure) => {
+        if (failure !== undefined) fail(failure.error);
+        else settle({ reason: "closed", tokens: 0 });
+      }),
+      done,
+    );
   }
 
   /**

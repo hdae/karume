@@ -1184,3 +1184,17 @@ Deno.test("GenerationSequence: 連結される未 commit frontier はそのタ�
     "連結された未 commit frontier に penalty が掛かっていない",
   );
 });
+
+Deno.test("GenerationSequence: 未開始 return は run を発行せず done を閉じる", async () => {
+  const fake = fakeSession();
+  const sequence = await createGenerationSequence({
+    session: fake.session,
+    program: programOf(fake),
+  });
+  const stream = sequence.generate({ prompt: [1, 2], maxNewTokens: 2 });
+  await stream[Symbol.asyncIterator]().return?.();
+  assertEquals(await stream.done, { reason: "closed", tokens: 0 });
+  assertEquals(fake.calls, []);
+  assertEquals(sequence.used, 0);
+  await sequence.dispose();
+});

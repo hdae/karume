@@ -154,6 +154,7 @@ type FakeHost = Gemma4ChatSessionHost & {
 type FakeFaults = {
   /** `dispose` を拒否させる（device 消失で `flush` が失敗する形の写し）。 */
   readonly disposeError?: unknown;
+  readonly holdDispose?: () => Promise<void>;
   /**
    * `sequence()` の解決を保留する（受け取った `release` を呼ぶまで返らない）。
    *
@@ -261,8 +262,9 @@ const fakeHost = (
           const iterable = events();
           return { [Symbol.asyncIterator]: () => iterable, done };
         },
-        dispose(): Promise<void> {
+        async dispose(): Promise<void> {
           gone = true;
+          await faults.holdDispose?.();
           disposed += 1;
           return faults.disposeError === undefined
             ? Promise.resolve()
@@ -685,6 +687,7 @@ Deno.test("ChatSession: sequence.dispose が失敗してもセッションは次
   const first = session.send("Name a color.");
   const caught = await first.text().then(() => undefined, (error: unknown) => error);
   assertEquals(caught, boom, "後始末の失敗はそのまま届く（本体は成功している）");
+  assertEquals(await first.done.catch((error: unknown) => error), caught);
   assertEquals(await session.send("Another one.").text(), "Red.", "セッションは固まらない");
 
   // 本体も失敗したターンは 2 本とも運ぶ（どちらの事実も消さない）。
@@ -693,11 +696,13 @@ Deno.test("ChatSession: sequence.dispose が失敗してもセッションは次
   });
   const body = new Error("onPrefill が投げた");
   const session2 = new Gemma4ChatSession(failing, { maxNewTokens: MAX_NEW_TOKENS });
-  const both = await session2.send("Name a color.", {
+  const bothStream = session2.send("Name a color.", {
     onPrefill: () => {
       throw body;
     },
-  }).text().then(() => undefined, (error: unknown) => error);
+  });
+  const both = await bothStream.text().then(() => undefined, (error: unknown) => error);
+  assertEquals(await bothStream.done.catch((error: unknown) => error), both);
   assert(both instanceof AggregateError, `AggregateError でない: ${both}`);
   assertEquals(both.errors, [body, boom], "errors[0] が本体・errors[1] が後始末");
 });
@@ -941,4 +946,70 @@ Deno.test("ChatSession: 要求は発行時に写す（汲み始める前の書�
   assertEquals(recorded, { temperature: 0.5, logitBias: [[7, 1]] }, "発行時の値で走っている");
   assertEquals(Object.isFrozen(recorded), true, "写しは凍結して渡す（以後の書き換えを塞ぐ）");
   assertEquals(sampler.temperature, 2, "呼び手の object は写しの側から触らない");
+});
+
+Deno.test("ChatSession: 未開始 return は仮発話だけを戻し、前ターンの KV を継げる", async () => {
+  const host = fakeHost(
+    [{ text: "Blue.", closes: true }, { text: "Red.", closes: true }],
+    programOf(640),
+  );
+  const session = new Gemma4ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS });
+  await session.send("Name a color.").text();
+  const turns = session.turns;
+  const unused = session.send("Cancelled.");
+  const iterator = unused[Symbol.asyncIterator]();
+  await iterator.return?.();
+  assertEquals(await unused.done, { reason: "closed", tokens: 0 });
+  assertEquals(session.turns, turns);
+  assertEquals(host.created(), 1);
+  assertEquals(host.disposed(), 0);
+  assertEquals(await session.send("Another one.").text(), "Red.");
+  assertEquals(host.created(), 1);
+  await session.dispose();
+});
+
+Deno.test("ChatSession: 未開始 throw は done に同じ例外を通知し、次の送信を妨げない", async () => {
+  const host = fakeHost([{ text: "Blue.", closes: true }], programOf(640));
+  const session = new Gemma4ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS });
+  const stream = session.send("Cancelled.");
+  const error = new Error("consumer failure");
+  await stream[Symbol.asyncIterator]().throw?.(error).catch((caught: unknown) =>
+    assertEquals(caught, error)
+  );
+  assertEquals(await stream.done.catch((caught: unknown) => caught), error);
+  assertEquals(session.turns, []);
+  assertEquals(host.created(), 0);
+  assertEquals(await session.send("Name a color.").text(), "Blue.");
+  await session.dispose();
+});
+
+Deno.test("ChatSession: done は cleanup を待ち、その直後に次の送信ができる", async () => {
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const host = fakeHost(
+    [{ text: "Blue", closes: false }, { text: "Red.", closes: true }],
+    programOf(640),
+    {
+      holdDispose: () => {
+        entered.resolve();
+        return release.promise;
+      },
+    },
+  );
+  const session = new Gemma4ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS });
+  const stream = session.send("Name a color.");
+  let settled = false;
+  stream.done.then(() => {
+    settled = true;
+  });
+  const text = stream.text();
+  await entered.promise;
+  await Promise.resolve();
+  assertEquals(settled, false);
+  release.resolve();
+  await stream.done;
+  const next = session.send("Another one.");
+  assertEquals(await text, "Blue");
+  assertEquals(await next.text(), "Red.");
+  await session.dispose();
 });

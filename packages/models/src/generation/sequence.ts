@@ -88,6 +88,7 @@
  * ない cycle でも GPU の仕事は 1 本走っている）。
  */
 
+import { closeableGenerator } from "../concurrency/closeable-generator.ts";
 import type {
   GenerationContext,
   GenerationContextSpec,
@@ -1349,7 +1350,10 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
       }
     };
 
-    const iterable = events();
+    const iterable = closeableGenerator(events(), (failure) => {
+      if (failure !== undefined) fail(failure.error);
+      else settle(withSpeculation({ reason: "closed", tokens: 0 }));
+    });
     return { [Symbol.asyncIterator]: () => iterable, done };
   };
 

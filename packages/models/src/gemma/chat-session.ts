@@ -36,6 +36,7 @@
  * MUST: 全モジュール副作用ゼロ（import 時実行・グローバル可変状態の禁止 — CLAUDE.md）。
  */
 
+import { closeableGenerator } from "../concurrency/closeable-generator.ts";
 import type { GenerationProgram } from "../generation/program.ts";
 import { type SamplerSpec, snapshotSpec } from "../generation/sampler.ts";
 import {
@@ -49,13 +50,12 @@ import { createStopStringFilter } from "../text/detokenizer.ts";
 import type { Gemma4DefaultSampler } from "./config.ts";
 import {
   chatStreamOf,
-  closeChatTurn,
+  completeChatTurn,
   decodeChatChunks,
   type Gemma4ChatStop,
   type Gemma4ChatStream,
   type Gemma4PrefillProgress,
   type Gemma4SequenceOptions,
-  stopStringOf,
 } from "./pipeline.ts";
 import { type Gemma4ChatMessage, gemma4ChatPrompt, gemma4ChatTurn } from "./text/chat.ts";
 import type { GemmaTokenizer } from "./text/tokenizer.ts";
@@ -414,40 +414,28 @@ export class Gemma4ChatSession {
         // 自分の中断を識別できる）。
         throw error;
       } finally {
-        let stop: Gemma4ChatStop | undefined;
-        if (stream === undefined) {
-          if (failure !== undefined) fail(failure.error);
-          else settle({ reason: "closed", tokens: 0 });
-        } else {
-          try {
-            const inner = await stream.done;
-            // MUST: この層で起きた失敗（`onPrefill` / 復号器の未知 id・不正 UTF-8）は内側からは
-            // 見えない — 内側は `return()` で閉じられて `closed` で resolve するので、そのまま
-            // 運ぶと `done` だけを読む呼び手が失敗を成功として記録する。中断は内側が `aborted`
-            // で運ぶ形が正なので触らない。`stop` は **undefined のまま**にして `#finish` へ渡す
-            // （閉じた turn として KV を継がせない）。
-            if (failure !== undefined && inner.reason !== "aborted") fail(failure.error);
-            else {
-              // 停止文字列だけはこの層の判定なので理由を差し替える（`tokens` と投機の勘定は
-              // 内側の値をそのまま写す = この層で数え直さない。組み立ては `chat` と同じ 1 本）。
-              stop = matched === undefined ? inner : stopStringOf(matched, inner);
-              settle(stop);
-            }
-          } catch (error) {
-            fail(error);
-          }
-        }
-        // ターンの締めは**必ず**通す（`#finish` の `finally` が `#busy` を戻すので、後始末が
-        // 失敗してもセッションは次のターンを受けられる）。失敗の畳み方は `chat` と同じ 1 本。
-        await closeChatTurn(
-          "Gemma4ChatSession.send",
+        await completeChatTurn({
+          where: "Gemma4ChatSession.send",
+          stream,
+          matched,
           failure,
-          () => finish(asked, reply, stop),
-        );
+          settle,
+          fail,
+          cleanup: (stop) => finish(asked, reply, stop),
+        });
       }
     };
 
-    return chatStreamOf(chunks(), done);
+    return chatStreamOf(
+      closeableGenerator(chunks(), (failure) => {
+        // prepare は未実行なので仮追加の発話だけを戻す。前ターンの KV はそのまま継げる。
+        this.#turns.pop();
+        this.#busy = false;
+        if (failure !== undefined) fail(failure.error);
+        else settle({ reason: "closed", tokens: 0 });
+      }),
+      done,
+    );
   }
 
   /**
