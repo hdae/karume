@@ -1,7 +1,7 @@
 // 投機の自己採算ゲート（ADR 0096 段 4-B ④）の挙動テスト。純関数なので GPU も時計も要らない
 // （壁は呼び手が渡す = このテストが渡す定数そのもの）。
 //
-// ここで縛るのは 2 点である:
+// ここで縛るのは 3 点である:
 //
 // 1. 「負ける文脈では decode 形へ落ち、勝てる文脈では投機のまま」— その判断が**実測の数字**
 //    （`docs/research/2026-09-09-mtp-stage4.md` §2 表 1 / §5.1）で正しい側へ倒れること（T8）。
@@ -11,6 +11,10 @@
 //    最初の 1 cycle が受理 0 だった会話が即座に plain へ落ちる。実走で観測した欠陥がこれで、
 //    `200 token / 7 cycle / plain step 190 / 切替 1`・always の 7,066 ms に対し 9,262 ms だった。
 //    推定器は `window` 本の非重複ブロックの和で、`confirm` 本連続の負けだけが抜ける根拠になる。
+// 3. **負けの大きさで待つ長さを変える**こと（T2′ / T4″）。比が `leave + strong`（既定 1.16）を
+//    超える「強い負け」は 1 ブロックで抜け、探索バーストは `burstMin` 本目以降で外れが確定した
+//    ら回し切らずに畳む。ノイズで 1.16 に届く確率は勝っている文脈では ≈ 0.03%（ブロック）/
+//    ≈ 5%（4 cycle）で、後者は誤って抜けた後にしか起きないので代償は探索 1 回ぶんである。
 
 import { assert, assertAlmostEquals, assertEquals, assertThrows } from "@std/assert";
 import {
@@ -96,10 +100,17 @@ const plainModeRuns = (
 const WINNING: Walls = { cycle: 100, delivered: 4, plain: 50 };
 /** 投機が明らかに負ける壁（比 (200/2)/50 = 2.0 — plain の壁は WINNING と同じ 50）。 */
 const LOSING: Walls = { cycle: 200, delivered: 2, plain: 50 };
+/**
+ * 僅かに負ける壁（比 (110/2)/50 = 1.10）— `leave`（1.01）は超えるが「強い負け」の閾値
+ * `leave + strong`（1.16）には届かない。この帯だけが `confirm` 本連続の判定を通る。
+ */
+const MILD: Walls = { cycle: 110, delivered: 2, plain: 50 };
+/** 強く負ける壁（比 (130/2)/50 = 1.30 — `leave + strong` = 1.16 を超える）。 */
+const STRONG_LOSS: Walls = { cycle: 130, delivered: 2, plain: 50 };
 
 Deno.test("ゲート T1 起点: 初期は speculate で、W1 は 2 回目の決定で 1 回だけ採る", () => {
   // `W1`（decode の 1 token あたりの壁）を測るまでは「抜けるべきか」を判断できない。未観測の
-  // まま 8 cycle 回すと、M2 自由文（0.76×）では 2% を先に失う。
+  // まま 16 cycle 回すと、M2 自由文（0.76×）では 2% を先に失う。
   const gate = createSpeculationGate();
   assertEquals(gate.mode, "speculate", "初期モード");
   assertEquals(gate.switches, 0);
@@ -118,29 +129,53 @@ Deno.test("ゲート T1 起点: 初期は speculate で、W1 は 2 回目の決�
 
 Deno.test("ゲート T2 ブロック: 満ちるまで判定せず、負けブロック 2 本連続で初めて抜ける", () => {
   const gate = createSpeculationGate();
-  // 既定の window は 16。`W1` の測り直しは決定 1 / 7 / 15 に入るので、決定 18 本で投機 cycle は
-  // ちょうど 15 本 = ブロックはまだ満ちない。比 2.0 の壁でもここでは倒れない。
-  const first = run(gate, LOSING, 18);
+  // 既定の window は 16。`W1` の測り直しは決定 1 / 15 に入るので、決定 17 本で投機 cycle は
+  // ちょうど 15 本 = ブロックはまだ満ちない。負けの壁でもここでは倒れない。
+  const first = run(gate, MILD, 17);
   assertEquals(speculateCount(first), 15, "ブロックが満ちない前提が崩れている");
   assertEquals(gate.mode, "speculate", "ブロックが満ちる前に抜けている");
   assertEquals(gate.switches, 0);
 
-  // 16 本目でブロック 1 が満ちる（比 2.0 > leave 1.01）が、`confirm` は 2 なのでまだ抜けない。
-  run(gate, LOSING, 1);
+  // 16 本目でブロック 1 が満ちる（比 1.10 > leave 1.01）が、`confirm` は 2 なのでまだ抜けない
+  // （比 1.10 は「強い負け」1.16 に届かないので早抜けも起きない — T2′）。
+  run(gate, MILD, 1);
   assertEquals(gate.mode, "speculate", "負けブロック 1 本だけで抜けている");
   assertEquals(gate.switches, 0);
 
-  // 続く 18 本（決定 19..36）で投機 cycle が 16 本 = ブロック 2 が満ちる。最後の 1 本の観測まで
-  // speculate のままで、その観測で倒れる。
-  const second = trace(gate, LOSING, 18);
+  // 続く 17 本（決定 18..34・測り直しは決定 31 の 1 本）で投機 cycle が 16 本 = ブロック 2 が
+  // 満ちる。最後の 1 本の観測まで speculate のままで、その観測で倒れる。
+  const second = trace(gate, MILD, 17);
   assertEquals(speculateCount(second.map((observed) => observed.decision)), 16);
   assertEquals(
     second.slice(0, -1).map((observed) => observed.mode),
-    Array.from({ length: 17 }, () => "speculate"),
+    Array.from({ length: 16 }, () => "speculate"),
     "ブロック 2 が満ちる前に倒れている",
   );
   assertEquals(gate.mode, "plain");
   assertEquals(gate.switches, 1);
+});
+
+Deno.test("ゲート T2′ 早抜け: 強い負け（比 > leave + strong）は 1 ブロックで倒れる", () => {
+  // 大きい負けを 2 ブロック（32 cycle）待つ必要は無い。ブロックの比の sd は対話級で 0.09 なので、
+  // 1.16 を超えるブロックが勝っている文脈で出る確率は ≈ 0.03% である（誤発火の代償は探索 1 回）。
+  const gate = createSpeculationGate();
+  const steps = trace(gate, STRONG_LOSS, 18);
+  assertEquals(speculateCount(steps.map((observed) => observed.decision)), 16);
+  assertEquals(
+    steps.slice(0, -1).map((observed) => observed.mode),
+    Array.from({ length: 17 }, () => "speculate"),
+    "ブロックが満ちる前に倒れている（早抜けも満ちた 1 本の判定である）",
+  );
+  assertEquals(gate.mode, "plain", "強い負けが 1 ブロックで倒れていない");
+  assertEquals(gate.switches, 1);
+
+  // 対（`strong` を上げると同じ壁が「強い負け」でなくなる = 早抜けは閾値で効いている）。
+  const patient = createSpeculationGate({ strong: 0.5 });
+  run(patient, STRONG_LOSS, 18);
+  assertEquals(patient.mode, "speculate", "strong 0.5 でも 1 ブロックで倒れている");
+  run(patient, STRONG_LOSS, 17);
+  assertEquals(patient.mode, "plain", "2 ブロック目の連続判定で倒れていない");
+  assertEquals(patient.switches, 1);
 });
 
 /** 最初の cycle だけ配送 1（受理 0）— 旧 EWMA 設計が 1 サンプルで種付けされた形。 */
@@ -159,8 +194,8 @@ Deno.test("ゲート T3 種付け: 最初の cycle が受理 0 でも、勝っ�
   assertEquals(gate.mode, "speculate", "1 サンプルの種付けで抜けている");
   assertEquals(gate.switches, 0);
 
-  // 対（フォールト注入）: 同じ種付けでも、定常が本当に負けていれば 2 ブロックで抜ける。
-  // これが無いと上の緑は「そもそも抜けないゲート」でも通ってしまう。
+  // 対（フォールト注入）: 同じ種付けでも、定常が本当に負けていれば抜ける（比 (100/2)/40 = 1.25
+  // は強い負けなので 1 ブロック）。これが無いと上の緑は「そもそも抜けないゲート」でも通る。
   const losing = createSpeculationGate();
   step(losing, SEED_FIRST);
   run(losing, { cycle: 100, delivered: 2, plain: 40 }, 59);
@@ -168,62 +203,110 @@ Deno.test("ゲート T3 種付け: 最初の cycle が受理 0 でも、勝っ�
   assertEquals(losing.switches, 1);
 });
 
-Deno.test("ゲート T4 探索: plain 側は 8 cycle のバーストで測り、外れるたび間隔が倍になる", () => {
+Deno.test("ゲート T4 探索: plain 側はバーストで測り、外れるたび間隔が倍になる", () => {
   // 1 cycle 単発の探索では受理数の sd 0.88 に埋もれて判定できない（旧設計が plain から戻れ
-  // なかった理由）。バーストで測り、外れたら遠ざける（固定間隔 8 のままだと探索そのものの
+  // なかった理由）。バーストで測り、外れたら遠ざける（固定間隔のままだと探索そのものの
   // 損失が M2 自由文で 0.950× になり、ゲートが救った負けを探索で払い直す）。
   const gate = createSpeculationGate({ window: 2, confirm: 1 });
   const steps = trace(gate, LOSING, 1200);
   assertEquals(
     plainModeRuns(steps, "plain").slice(0, 7),
-    [8, 16, 32, 64, 128, 256, 256],
+    [16, 32, 64, 128, 256, 256, 256],
     `探索の間隔が幾何バックオフになっていない: ${plainModeRuns(steps, "plain").join(",")}`,
   );
+  // 比 2.0 は「強い負け」なので、外れが確定したバーストは `burstMin` = 4 本で畳まれる（T4″）。
   assertEquals(
     plainModeRuns(steps, "speculate").slice(0, 6),
-    [8, 8, 8, 8, 8, 8],
-    `探索バーストが 8 cycle 続いていない: ${plainModeRuns(steps, "speculate").join(",")}`,
+    [4, 4, 4, 4, 4, 4],
+    `探索バーストが 4 cycle で畳まれていない: ${plainModeRuns(steps, "speculate").join(",")}`,
   );
   assertEquals(gate.mode, "plain", "外れ続ける探索で戻ってしまっている");
   assertEquals(gate.switches, 1, "探索バーストを切替に数えている");
 });
 
-Deno.test("ゲート T4′ 戻る: バーストの集計が enter を下回ったら戻り、間隔は 8 に戻る", () => {
+Deno.test("ゲート T4′ 戻る: バーストの集計が enter を下回ったら戻り、間隔は 16 に戻る", () => {
   const gate = createSpeculationGate({ window: 2, confirm: 1 });
   run(gate, LOSING, 3);
   assertEquals(gate.mode, "plain", "負けの壁で plain へ落ちる前提が崩れている");
   assertEquals(gate.switches, 1);
 
-  // 課題が変わって投機が勝つようになる → 間隔 8 ぶん plain を回した後、8 cycle のバーストで測る。
-  const steps = trace(gate, WINNING, 16);
+  // 課題が変わって投機が勝つようになる → 間隔 16 ぶん plain を回した後、8 cycle のバーストで
+  // 測る（当たりのバーストは満ちるまで回る = 打ち切りは負け側にしか効かない）。
+  const steps = trace(gate, WINNING, 24);
   assertEquals(steps.map((observed) => observed.decision), [
-    ...Array.from({ length: 8 }, () => "plain"),
+    ...Array.from({ length: 16 }, () => "plain"),
     ...Array.from({ length: 8 }, () => "speculate"),
   ]);
   assertEquals(
-    steps.slice(8, 15).map((observed) => observed.mode),
+    steps.slice(16, 23).map((observed) => observed.mode),
     Array.from({ length: 7 }, () => "plain"),
     "バーストが満ちる前に戻っている（1 cycle の当たりで戻してはならない）",
   );
   assertEquals(gate.mode, "speculate", "当たりのバーストで戻っていない");
   assertEquals(gate.switches, 2);
 
-  // もう一度負けさせると plain へ落ち、探索は**8 から**やり直す（伸びた間隔を持ち越さない）。
+  // もう一度負けさせると plain へ落ち、探索は**16 から**やり直す（伸びた間隔を持ち越さない）。
   const again = trace(gate, LOSING, 40);
   assertEquals(gate.mode, "plain", "負けに戻ったのに plain へ落ちていない");
   assertEquals(gate.switches, 3);
   assertEquals(
     plainModeRuns(again, "plain")[0],
-    8,
-    `戻った後の探索間隔が 8 でない: ${plainModeRuns(again, "plain").join(",")}`,
+    16,
+    `戻った後の探索間隔が 16 でない: ${plainModeRuns(again, "plain").join(",")}`,
   );
 });
 
-Deno.test("ゲート T5 定常: 8 観測に 1 回 plain を測り、その step はブロックに数えない", () => {
-  // `W1` が古いと「抜けるべきか」の判断材料が古いままになる。損失は 1〜3% で、これは払う。
+Deno.test("ゲート T4″ 打ち切り: 強い負けが出たバーストは burstMin 本目で畳む", () => {
+  // 負ける文脈が払う探索費の主はここである（バースト 8 cycle × 間隔 16 → 32 → …）。当たりの
+  // 判定は満ちたバーストのままなので、`burst` そのものを縮めるのとは違って戻る精度は落ちない。
+  const gate = createSpeculationGate({ window: 2, confirm: 1 });
+  run(gate, LOSING, 3);
+  assertEquals(gate.mode, "plain", "負けの壁で plain へ落ちる前提が崩れている");
+  assertEquals(gate.switches, 1);
+
+  // 間隔 16 ぶん plain を回してバースト → 4 本目の観測で比 1.30 > 1.16 なので畳み、以後は
+  // 倍の間隔（32 step）まで plain である。
+  const steps = trace(gate, STRONG_LOSS, 53);
+  assertEquals(
+    plainModeRuns(steps, "plain"),
+    [16, 32],
+    `打ち切ったバーストの後の間隔が倍になっていない: ${plainModeRuns(steps, "plain").join(",")}`,
+  );
+  assertEquals(
+    plainModeRuns(steps, "speculate"),
+    [4],
+    `バーストが 4 本目で畳まれていない: ${plainModeRuns(steps, "speculate").join(",")}`,
+  );
+  assertEquals(gate.mode, "plain");
+  assertEquals(gate.switches, 1, "打ち切ったバーストを切替に数えている");
+
+  // 対 1（打ち切りの位置は `burstMin` が決める — 同じ壁でも 5 本目までは畳まない）。
+  const later = createSpeculationGate({ window: 2, confirm: 1, burstMin: 5 });
+  run(later, LOSING, 3);
+  assertEquals(
+    plainModeRuns(trace(later, STRONG_LOSS, 22), "speculate"),
+    [5],
+    "burstMin を上げてもバーストが 4 本で畳まれている",
+  );
+
+  // 対 2（`leave` は超えるが強い負けでない比 1.10 のバーストは 8 cycle 回り切る）。
+  const full = createSpeculationGate({ window: 2, confirm: 1 });
+  run(full, LOSING, 3);
+  const mild = trace(full, MILD, 25);
+  assertEquals(
+    plainModeRuns(mild, "speculate"),
+    [8],
+    `弱い負けのバーストを打ち切っている: ${plainModeRuns(mild, "speculate").join(",")}`,
+  );
+  assertEquals(full.mode, "plain", "比 1.10 のバーストで speculate へ戻っている");
+});
+
+Deno.test("ゲート T5 定常: 16 観測に 1 回 plain を測り、その step はブロックに数えない", () => {
+  // `W1` が古いと「抜けるべきか」の判断材料が古いままになる。間隔は判定ブロックと同じ 16 で、
+  // 費用は 16 cycle につき plain 価格の 1 token（always 比 1% 前後）— これは払う。
   const gate = createSpeculationGate();
   const decisions = run(gate, WINNING, 40);
-  assertEquals(plainAt(decisions), [1, 7, 15, 23, 31, 39]);
+  assertEquals(plainAt(decisions), [1, 15, 31]);
   assertEquals(gate.mode, "speculate");
   assertEquals(gate.switches, 0);
 
@@ -293,16 +376,9 @@ Deno.test("ゲート T7 冪等: decide は状態を動かさない（切替は�
     assertEquals([gate.decide(), gate.decide(), gate.decide()], ["plain", "plain", "plain"]);
     assertEquals(gate.switches, 1, "決定を読んだだけで切替が進んでいる");
 
-    // 読みの回数は周期に効かないので、探索バーストはきっかり 9 手目に始まる。
-    assertEquals(run(gate, LOSING, 9), [
-      "plain",
-      "plain",
-      "plain",
-      "plain",
-      "plain",
-      "plain",
-      "plain",
-      "plain",
+    // 読みの回数は周期に効かないので、探索バーストはきっかり 17 手目に始まる。
+    assertEquals(run(gate, LOSING, 17), [
+      ...Array.from({ length: 16 }, () => "plain"),
       "speculate",
     ], "重複読みが探索の周期を進めている");
     assertEquals(gate.switches, 1);
@@ -311,8 +387,8 @@ Deno.test("ゲート T7 冪等: decide は状態を動かさない（切替は�
 
   await t.step("観測を返せば次の決定は作り直される", () => {
     const gate = createSpeculationGate();
-    // 8 手目 = 定常の `W1` の測り直し。
-    run(gate, WINNING, 7);
+    // 16 手目 = 定常の `W1` の測り直し。
+    run(gate, WINNING, 15);
     assertEquals(gate.decide(), "plain");
     assertEquals(gate.decide(), "plain", "観測を返す前に決定が動いた");
     gate.observePlain(WINNING.plain);
@@ -338,19 +414,50 @@ type Condition = Walls & {
   readonly name: string;
   /** 表から導いた比 `(Wc/A)/W1`（1 未満なら投機が速い）。 */
   readonly ratio: number;
-  /** 60 step 回した後に居るべきモード。 */
+  /** ブロック 2 本ぶん回した後に居るべきモード。 */
   readonly mode: SpeculationDecision;
+  /**
+   * plain へ倒れるまでに要るブロック数（倒れない条件は持たない）。
+   *
+   * 1 = 比が「強い負け」`leave + strong` = 1.16 を超えるので早抜けする条件・2 = `leave` は
+   * 超えるが 1.16 に届かないので `confirm` 本連続を待つ条件。
+   */
+  readonly blocks?: 1 | 2;
 };
 
 const CONDITIONS: readonly Condition[] = [
   { name: "RTX 抽出", cycle: 53.7, delivered: 3.39, plain: 29.22, ratio: 0.542, mode: "speculate" },
   { name: "RTX 要約", cycle: 55.8, delivered: 2.65, plain: 29.67, ratio: 0.710, mode: "speculate" },
   { name: "RTX 対話", cycle: 46.8, delivered: 2.03, plain: 27.13, ratio: 0.850, mode: "speculate" },
-  { name: "RTX 自由文", cycle: 46.5, delivered: 1.66, plain: 27.02, ratio: 1.037, mode: "plain" },
+  {
+    name: "RTX 自由文",
+    cycle: 46.5,
+    delivered: 1.66,
+    plain: 27.02,
+    ratio: 1.037,
+    mode: "plain",
+    blocks: 2,
+  },
   { name: "M2 抽出", cycle: 172.4, delivered: 3.39, plain: 66.03, ratio: 0.770, mode: "speculate" },
   { name: "M2 要約", cycle: 170.7, delivered: 2.65, plain: 66.39, ratio: 0.970, mode: "speculate" },
-  { name: "M2 対話", cycle: 123.0, delivered: 2.03, plain: 56.14, ratio: 1.079, mode: "plain" },
-  { name: "M2 自由文", cycle: 118.2, delivered: 1.66, plain: 54.45, ratio: 1.308, mode: "plain" },
+  {
+    name: "M2 対話",
+    cycle: 123.0,
+    delivered: 2.03,
+    plain: 56.14,
+    ratio: 1.079,
+    mode: "plain",
+    blocks: 2,
+  },
+  {
+    name: "M2 自由文",
+    cycle: 118.2,
+    delivered: 1.66,
+    plain: 54.45,
+    ratio: 1.308,
+    mode: "plain",
+    blocks: 1,
+  },
 ];
 
 Deno.test("ゲート T8 実測: 8 条件のうち負ける 3 本だけが plain へ落ちる", async (t) => {
@@ -364,15 +471,19 @@ Deno.test("ゲート T8 実測: 8 条件のうち負ける 3 本だけが plain 
         `${condition.name}: 壁の定数から出る比が表の値と違う`,
       );
       const gate = createSpeculationGate();
-      const decisions = run(gate, condition, 30);
-      // 30 手では投機 cycle が 26 本 = 2 ブロック（32 本）に届かないので、どの条件でも
-      // まだ speculate である（負ける条件が数手で落ちる旧設計との違いがここに出る）。
-      assertEquals(gate.mode, "speculate", `${condition.name}: 2 ブロック未満で抜けている`);
-      // plain は `W1` の測り直しだけ（決定 1 / 7 / 15 / 23 = 30 手で 4 本 ≒ 1/8）。
-      assertEquals(plainAt(decisions), [1, 7, 15, 23], `${condition.name}: 測り直しの本数`);
+      // 決定 18 本 = 投機 cycle 16 本 = ブロックちょうど 1 本（plain は `W1` の測り直しだけで、
+      // 決定 1 / 15 の 2 本 ≒ 1/16）。ここで倒れるのは「強い負け」の条件だけである。
+      const decisions = run(gate, condition, 18);
+      assertEquals(plainAt(decisions), [1, 15], `${condition.name}: 測り直しの本数`);
+      assertEquals(
+        gate.mode,
+        condition.blocks === 1 ? "plain" : "speculate",
+        `${condition.name}: ブロック 1 本ぶんの後のモード`,
+      );
 
-      run(gate, condition, 30);
-      assertEquals(gate.mode, condition.mode, `${condition.name}: 60 step 後のモード`);
+      // 続く決定 17 本（測り直しは決定 31 の 1 本）でブロック 2 本目が満ちる。
+      run(gate, condition, 17);
+      assertEquals(gate.mode, condition.mode, `${condition.name}: ブロック 2 本ぶんの後のモード`);
       assertEquals(
         gate.switches,
         condition.mode === "plain" ? 1 : 0,
@@ -448,6 +559,45 @@ Deno.test("ゲート T9 門: ノブの値域は生成時に fail loudly", async 
     );
   });
 
+  await t.step("打ち切りの下限は 1 以上 burst 以下の整数", () => {
+    assertThrows(
+      () => createSpeculationGate({ burstMin: 0 }),
+      Error,
+      "burstMin 0 が 1 以上の整数でない",
+    );
+    assertThrows(
+      () => createSpeculationGate({ burstMin: 4.5 }),
+      Error,
+      "burstMin 4.5 が 1 以上の整数でない",
+    );
+    // `burstMin > burst` は一度も発火しない死んだノブ（既定の `burst` は 8）。
+    assertThrows(
+      () => createSpeculationGate({ burstMin: 9 }),
+      Error,
+      "burstMin 9 が burst 8 を超えている",
+    );
+    // 既定の `burstMin` は `burst` で抑えてある（バースト 1 cycle の席が門で落ちない）。
+    assertEquals(createSpeculationGate({ burst: 1 }).mode, "speculate");
+  });
+
+  await t.step("強い負けの上乗せは正の有限数", () => {
+    assertThrows(
+      () => createSpeculationGate({ strong: 0 }),
+      Error,
+      "strong 0 が正の有限数でない",
+    );
+    assertThrows(
+      () => createSpeculationGate({ strong: -1 }),
+      Error,
+      "strong -1 が正の有限数でない",
+    );
+    assertThrows(
+      () => createSpeculationGate({ strong: Number.POSITIVE_INFINITY }),
+      Error,
+      "strong Infinity が正の有限数でない",
+    );
+  });
+
   await t.step("探索の間隔は 1 以上の整数・上限は基本間隔以上", () => {
     assertThrows(
       () => createSpeculationGate({ exploreBase: 0 }),
@@ -490,10 +640,12 @@ Deno.test("ゲート T9 門: ノブの値域は生成時に fail loudly", async 
       window: 2,
       confirm: 1,
       burst: 1,
+      burstMin: 1,
       exploreBase: 1,
       exploreMax: 1,
       enter: 0.5,
       leave: 2,
+      strong: 0.5,
     });
     assert(gate.mode === "speculate");
   });

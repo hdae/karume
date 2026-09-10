@@ -1515,15 +1515,17 @@ Deno.test("T16 ゲート: ターン最初の cycle と予算末尾の強制 plai
 
   await t.step("混ぜない: 2 ターン目も投機のまま（倒れない）", async () => {
     // ターン 2 の頭 2 本が plain なのは `W1` がまだ未観測だからである（1 本目は混ぜない cycle
-    // なので観測を返さず、2 本目でようやく `W1` を採る）。その後は 8 本ごとの探索が 1 本。
+    // なので観測を返さず、2 本目でようやく `W1` を採る）。定常の測り直しは 16 観測ごとなので、
+    // 20 token のターンには入らない = plain step は頭の 2 本だけである。最後の 1 本は予算末尾の
+    // 強制 plain（`k' = 0`）で、verify として数えつつ `acceptedHistogram[0]` に入る。
     assertEquals(await play((cycle) => cycle < excluded), {
-      cycles: 4,
+      cycles: 5,
       draftRuns: 4,
       drafted: 12,
       accepted: 12,
-      delivered: 16,
-      acceptedHistogram: [0, 0, 0, 4],
-      plainSteps: 3,
+      delivered: 17,
+      acceptedHistogram: [1, 0, 0, 4],
+      plainSteps: 2,
       switches: 0,
     });
   });
@@ -1544,14 +1546,16 @@ Deno.test("T16 ゲート: ターン最初の cycle と予算末尾の強制 plai
   await t.step("skip した cycle はブロックに入らないが、探索の周期は進む", async () => {
     // 混ぜない cycle でも GPU の仕事は 1 本走っているので、探索の周期はそのぶん進める
     // （ゲートの `skip()`）。1 ターンで見ると: 頭の cycle は観測に入らないまま周期を 1 進め、
-    // `W1` の初回サンプル（plain 1 手）は**2 本目**に来て、以後の探索は 8 本ごとである。
+    // `W1` の初回サンプル（plain 1 手）は**2 本目**に来て、以後の探索は `exploreBase` ごとである。
     // 周期が止まる実装だと、この 2 つがどちらも 1 本ずつ後ろへずれる。
     const drafter = oracleDrafter();
     const opened = await openSpeculative({
       drafter,
       policy: "auto",
       // ブロックが 2 cycle なので、頭の 10,000ms が 1 本でも混ざれば最初のブロックで倒れる。
-      gate: FAST_GATE,
+      // 既定の測り直し間隔（16 観測）は 1 ターンの予算に入らないので、周期そのものは 4 に縮めて
+      // 見る（既定値の側は `generation_gate_test.ts` の T5 が持つ）。
+      gate: { ...FAST_GATE, exploreBase: 4 },
       now: fakeClock(drafter, (cycle, drafted) => cycle === 0 ? 10_000 : (drafted ? 20 : 10)),
     });
     const run = {
@@ -1566,11 +1570,12 @@ Deno.test("T16 ゲート: ターン最初の cycle と予算末尾の強制 plai
         "verify",
         "decode",
         "verify",
-        "verify",
+        "decode",
         "verify",
         "verify",
         "verify",
         "decode",
+        "verify",
         "verify",
       ],
       "探索の周期が混ぜない cycle のぶん進んでいない",

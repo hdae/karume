@@ -27,6 +27,11 @@
  * 空にする）。`msPerTokenSpec > W1 × leave` が `confirm`（既定 2）ブロック**連続**で成り立った
  * ときだけ plain へ倒す。
  *
+ * 例外は**強い負け**である。比が `leave + strong`（既定 1.01 + 0.15 = 1.16）を超えたブロックは
+ * 1 本で plain へ倒す（{@link SpeculationGateOptions.strong}）。ノイズで 1.16 に届くのは
+ * 勝っている文脈ではまず起きないので（下の机上の根拠）、大きい負けが「抜けるまでに払う費用」を
+ * 1 ブロックぶん削れる。
+ *
  * **EWMA を使わないのは種付けの欠陥のため**である。`ewma(undefined, sample) = sample` なので、
  * 受理数の EWMA は**最初の 1 サンプルで種付けされる** — 最初に観測した cycle が受理 0
  * （配送 1 個）だと `A = 1` になり、比 = `Wc / 1 / W1 ≈ 1.7 > leave` で即座に plain へ抜ける。
@@ -44,28 +49,44 @@
  *
  * ## 机上の根拠（既定のノブがこの値である理由）
  *
- * 受理数の cycle あたりの標準偏差を 0.88（RTX 対話の実測分布）として:
+ * 受理数の cycle あたりの標準偏差を 0.88（RTX 自由文の実測分布 — 対話は 1.14 でさらに散る）として:
  *
  * - **対話級（比 0.85・A 2.03）**: 16 cycle ブロックの `A` の sd ≈ 0.22 なので、比の sd ≈ 0.09。
  *   1 ブロックが 1.01 を超える確率 ≈ 5%・2 ブロック連続で ≈ 0.3%。200 token のターンは
  *   ≈ 6 ブロックなので、**誤って抜けるのはターンあたり ≈ 1.5%** である。EWMA の 1 サンプル
  *   種付け（上）だと同じ条件でほぼ確実に抜けるので、ここが `confirm = 2` の効き所である。
  * - **M2 自由文（比 1.31）**: 1 ブロックが 1.01 を下回る確率 ≈ 0.1%。よって 2 ブロック =
- *   32 cycle（≈ 3.8 秒）で確実に抜ける。sequence 寿命で 1 回払えばよい費用である。
+ *   32 cycle（≈ 3.8 秒）で確実に抜ける — 比 1.31 は「強い負け」なので、実際はその半分の
+ *   1 ブロックで抜ける（次の項）。sequence 寿命で 1 回払えばよい費用である。
  * - **戻る側**: `burst`（既定 8）cycle のバーストは比の sd ≈ 0.13。M2 自由文で 0.97 を下回る確率
  *   ≈ 0.5% なので、誤って戻らない。負ける側が払うバーストの費用は M2 自由文で +227 ms/バースト
- *   で、間隔が 8 → 256 と伸びるぶん長い会話では消える。
+ *   で、間隔が 16 → 256 と伸びるぶん長い会話では消える。
+ * - **強い負けの早抜け（`strong` = 0.15）**: 対話級（比 0.85）のブロックの比の sd は上の 0.09
+ *   なので、1.16 を超える確率は ≈ 0.03%（`confirm` の 2 本連続を待たずに倒しても、勝っている
+ *   文脈を誤って落とす確率はこの桁である）。損益分岐（比 1.0）のブロックなら ≈ 4% で発火するが、
+ *   **そこで抜けても損は 0** なので許容する。
+ * - **バーストの早期打ち切り（`burstMin` = 4）**: 比 0.85 のとき 4 cycle の比（sd ≈ 0.19）が
+ *   1.16 を超える確率は ≈ 5%。この誤発火は「誤って抜けた後のバースト」でしか起こりえず、代償は
+ *   戻りがバースト 1 回ぶん遅れることだけである。効き側は比 1.27（M2 自由文級）で 4 cycle の比が
+ *   1.16 を超える確率 ≈ 0.72 なので、負ける文脈のバーストの平均長は 8 cycle → **≈ 4.8 cycle**（実測分布でゲート本体を回した値・打ち切りの 7 割は 4 本目）
+ *   に縮む。
  *
  * ## 探索（負けている側にも「戻る道」を残す）
  *
- * - **plain 中**は幾何バックオフ（8 → 16 → 32 → … → 上限 256 step）で投機を `burst` cycle
+ * - **plain 中**は幾何バックオフ（16 → 32 → 64 → … → 上限 256 step）で投機を `burst` cycle
  *   **連続**で試す。1 cycle 単発の探索では上の sd 0.88 に埋もれて判定できない（EWMA 設計が
  *   戻れなかった第 2 の理由がこれである）。バーストの `ΣWc / Σdelivered < W1 × enter` なら
  *   speculate へ戻し、間隔は `exploreBase` へ戻す。外れたら間隔を倍にする。
+ * - **外れが確定したバーストは回し切らない**。`burstMin`（既定 4）本目以降の各観測で比が
+ *   `leave + strong` を超えていたら、残りの cycle を回さずにそのバーストを「外れ」として畳む
+ *   （{@link SpeculationGateOptions.burstMin}）。負ける文脈が払う探索費はここが主で、`burst`
+ *   そのものを縮めるのと違って**戻れる側の判定精度は落ちない**（当たりの判定は満ちたバーストの
+ *   集計のままである）。
  * - **speculate 中**は {@link SpeculationGateOptions.exploreBase} 観測ごとに 1 回 plain を測る
- *   （`W1` の鮮度が「抜ける」判断の材料そのもの）。損失は n=8 で 1〜3% で、許容する。この
+ *   （`W1` の鮮度が「抜ける」判断の材料そのもの）。既定は判定ブロックと同じ 16 で、費用は
+ *   16 cycle につき plain 価格の 1 token（実測の壁では always 比 1% 前後）である。この
  *   plain step は**ブロックの cycle 数に数えない**（投機 cycle の集計だけがブロックである）。
- * - **`W1` の初回サンプルは 2 回目の decide**（1 cycle 回した直後）。未観測のまま 8 cycle 回すと
+ * - **`W1` の初回サンプルは 2 回目の decide**（1 cycle 回した直後）。未観測のまま 16 cycle 回すと
  *   M2 自由文で 2% を先に失う。`W1` は plain step の壁なので host で安定しており、ここだけは
  *   EWMA（係数 {@link SpeculationGateOptions.alpha}）でよい。
  *
@@ -95,7 +116,13 @@ export type SpeculationGateOptions = {
   readonly confirm?: number;
   /** plain 側の探索バーストの cycle 数（既定 8・1 以上の整数）。 */
   readonly burst?: number;
-  /** 探索の基本間隔（既定 8・cycle / step 単位）。 */
+  /**
+   * バーストを早期に打ち切れる最小の cycle 数（既定 `min(4, burst)`・`1 ≤ burstMin ≤ burst` の
+   * 整数）。ここから `burst - 1` 本目までの各観測で比が `leave + strong` を超えていたら、
+   * 残りを回さずに「外れたバースト」として畳む。
+   */
+  readonly burstMin?: number;
+  /** 探索の基本間隔（既定 16・cycle / step 単位）。 */
   readonly exploreBase?: number;
   /** plain 側バックオフの上限（既定 256）。 */
   readonly exploreMax?: number;
@@ -103,6 +130,12 @@ export type SpeculationGateOptions = {
   readonly enter?: number;
   /** plain へ抜ける条件 `ΣWc/Σdelivered > W1 × leave`（既定 1.01・`1 < leave`）。 */
   readonly leave?: number;
+  /**
+   * 「強い負け」の上乗せ（既定 0.15・正の有限数）。比が `leave + strong` を超えたブロックは
+   * `confirm` の連続を待たずに 1 本で plain へ倒し、進行中の探索バーストは `burstMin` 本目以降で
+   * 打ち切る。
+   */
+  readonly strong?: number;
 };
 
 export type SpeculationGate = {
@@ -118,7 +151,8 @@ export type SpeculationGate = {
   /**
    * 投機 cycle の観測（壁 ms と、その cycle が配送した token 数 = `confirmed.length`）。
    *
-   * speculate 中はブロックへ、plain 中は探索バーストへ積む。満ちた時だけ判定が動く。
+   * speculate 中はブロックへ、plain 中は探索バーストへ積む。判定が動くのは満ちた時と、
+   * バーストが `burstMin` 本目以降で強い負けを出した時（そのバーストの打ち切り）だけである。
    */
   observeCycle(wallMs: number, delivered: number): void;
   /** plain step（M=1）の観測（壁 ms）— `W1` の EWMA だけを動かす。 */
@@ -158,10 +192,14 @@ export const createSpeculationGate = (
   const window = options.window ?? 16;
   const confirm = options.confirm ?? 2;
   const burst = options.burst ?? 8;
-  const exploreBase = options.exploreBase ?? 8;
+  // 既定を `burst` で抑えるのは、`burst` を縮めた席（バースト 1 cycle など）で「打ち切る余地が
+  // 無い」のが正しい形であり、既定の組み合わせを門で弾く理由が無いためである。
+  const burstMin = options.burstMin ?? Math.min(4, burst);
+  const exploreBase = options.exploreBase ?? 16;
   const exploreMax = options.exploreMax ?? 256;
   const enter = options.enter ?? 0.97;
   const leave = options.leave ?? 1.01;
+  const strong = options.strong ?? 0.15;
   assertPositive("alpha", alpha);
   // α > 1 の EWMA は過去へ負の重みを載せる（平均ではなくなる）ので上も閉じる。
   if (alpha > 1) throw new Error(`speculation gate: alpha ${alpha} が 0 < α ≤ 1 の外`);
@@ -169,10 +207,16 @@ export const createSpeculationGate = (
   assertInterval("window", window, 2);
   assertInterval("confirm", confirm, 1);
   assertInterval("burst", burst, 1);
+  assertInterval("burstMin", burstMin, 1);
+  // `burstMin > burst` は「打ち切りが一度も発火しない」死んだノブなので、黙って通さない。
+  if (burstMin > burst) {
+    throw new Error(`speculation gate: burstMin ${burstMin} が burst ${burst} を超えている`);
+  }
   assertInterval("exploreBase", exploreBase, 1);
   assertInterval("exploreMax", exploreMax, exploreBase);
   assertPositive("enter", enter);
   assertPositive("leave", leave);
+  assertPositive("strong", strong);
   // 不感帯は 1 を挟む（`enter ≥ 1` だと負けている最中に戻り、`leave ≤ 1` だと勝っていても抜ける）。
   if (!(enter < 1 && 1 < leave)) {
     throw new Error(`speculation gate: enter ${enter} < 1 < leave ${leave} でない`);
@@ -218,7 +262,7 @@ export const createSpeculationGate = (
       ? undefined
       : (batchWall / batchDelivered) / plainWall;
 
-  /** plain へ倒す（ブロックの判定が `confirm` 本連続で負けたとき）。 */
+  /** plain へ倒す（ブロックが `confirm` 本連続で負けた / 1 本が強い負けだったとき）。 */
   const leaveSpeculation = (): void => {
     mode = "plain";
     switches += 1;
@@ -226,6 +270,14 @@ export const createSpeculationGate = (
     sinceProbe = 0;
     overRuns = 0;
     resetBatch();
+  };
+
+  /** 外れたバースト（満ちても `enter` を下回らない / 途中で強い負けが出た）を畳む。 */
+  const missBurst = (): void => {
+    resetBatch();
+    // 次の探索を遠ざけ、間隔を数え直す。
+    sinceProbe = 0;
+    backoff = Math.min(backoff * 2, exploreMax);
   };
 
   /** speculate へ戻す（探索バーストが `enter` を下回ったとき）。 */
@@ -247,7 +299,8 @@ export const createSpeculationGate = (
      */
     decide: (): SpeculationDecision => {
       if (mode === "plain") {
-        // `batchCycles > 0` = 探索バーストが進行中（満ちた時に 0 へ戻る）。
+        // `batchCycles > 0` = 探索バーストが進行中（満ちた時と、`burstMin` 以降の打ち切りで
+        // 0 へ戻る）。打ち切りが即座に plain へ返るのはこの読みだけで成り立つ。
         return batchCycles > 0 || sinceProbe >= backoff ? "speculate" : "plain";
       }
       // `W1` を 1 度も測っていないなら、1 cycle 回した直後に 1 step だけ plain を挟む。
@@ -259,23 +312,31 @@ export const createSpeculationGate = (
       batchWall += wallMs;
       batchDelivered += delivered;
       if (mode === "plain") {
-        // plain 中の探索バースト — 満ちるまでは判定も周期の数え直しもしない。
-        if (batchCycles < burst) return;
+        // plain 中の探索バースト — 満ちるまでは「戻る」判定も周期の数え直しもしない。ただし
+        // `burstMin` 本目からは強い負けだけを見て、外れが確定したバーストを畳む。
+        if (batchCycles < burst) {
+          if (batchCycles < burstMin) return;
+          const probe = batchRatio();
+          if (probe !== undefined && probe > leave + strong) missBurst();
+          return;
+        }
         const measured = batchRatio();
         if (measured !== undefined && measured < enter) {
           enterSpeculation();
           return;
         }
-        // 外れたバースト: 次の探索を遠ざけ、間隔を数え直す。
-        resetBatch();
-        sinceProbe = 0;
-        backoff = Math.min(backoff * 2, exploreMax);
+        missBurst();
         return;
       }
       sinceProbe += 1;
       if (batchCycles < window) return;
       // 満ちたブロック 1 本ぶんの判定（`W1` 未観測なら判定を持たない = 連続を切る）。
       const measured = batchRatio();
+      // 強い負けは `confirm` の連続を待たない（1 本で倒す）。
+      if (measured !== undefined && measured > leave + strong) {
+        leaveSpeculation();
+        return;
+      }
       overRuns = measured !== undefined && measured > leave ? overRuns + 1 : 0;
       if (overRuns >= confirm) leaveSpeculation();
       else resetBatch();
