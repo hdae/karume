@@ -264,3 +264,21 @@ lm_head + argmax（centroid 疎 softmax の topk は exporter に無い — 受�
   （研究 §6.5 表 11）— ターンごとに違う発話を流す形に直す。
 - 残件 ⑩: ゲートが落とす plain step（verify 形・有効行 1）は長文脈で真の decode より +17〜30% 高く、GPU 時間ではなく
   host / readback 側（表 12）。帰属は run 内の相の壁を採ってから。
+
+## 追記（2026-09-10・自己採算ゲート v3.1 — 早抜けは既定 off・ノブを speculate 側と plain 側に分ける）
+
+- 上の v3 の「強い負け」ノブ `strong` は 2 箇所（speculate 側の 1 ブロック早抜け・plain 側のバースト打ち切り）で
+  使っていた。同じ warm 台本（ターンごとに違う発話・sequence 使い回し）で v2 のノブと v3 既定を A/B すると、勝つ
+  課題（RTX 対話・比 0.90）で v3 は 7 ターン中 3 ターン誤って抜け auto / always 0.96、v2 のノブでは 0 / 7 で 1.00
+  （research 2026-09-09 §6.5 表 11″）。バースト側のノブは plain 側にしか効かないので、差は早抜けに帰属する —
+  受理はターン内で定常でなく、16 cycle 級で A < 1.4 に落ちる区間があると 1 ブロックで倒してしまう。
+- 早抜けの利得は「抜けるまで」1 ブロックぶんで sequence の寿命に 1 回、害は勝つ課題の毎ターンに出る。よって
+  **早抜けは既定 off**（`earlyLeave?`・渡した席だけ効く）とし、plain 側は `burstAbort`（既定 0.15・`burstMin` 4 本目
+  以降で畳む）として残す。`exploreBase` 16 / `exploreMax` 256 は据え置き。
+- M2 の v3 検収（research §6.5.1・早抜け on の値）: cold 自由文 0.934×・対話 0.959×・抽出 1.361×、warm（違う発話）
+  自由文 0.978×・対話 0.972×（always は 0.80 / 0.85 — 文脈が伸びる M2 では対話も負ける課題）。warm ではゲートは
+  1 ターン目で抜けたあと plain に居続け、残る 2〜3% は backoff 64〜256 の間隔のバースト 1 回 / ターン。早抜け off
+  で変わるのは cold の「抜けるまで」（16 → 32 cycle・sequence に 1 回）だけである。
+- ノブは pipeline の静的ノブ `Gemma4PipelineOptions.speculative.gate` として公開（計測・検収用・既定で十分・
+  `"always"` のターンには降りない）。mtp-bench の `--gate-early-leave / --gate-burst-abort / --gate-burst-min /
+  --gate-explore-base` で A/B できる。
