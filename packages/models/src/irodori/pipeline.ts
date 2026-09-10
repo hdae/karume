@@ -63,6 +63,7 @@
  * 担保する。
  */
 
+import { disposeSteps } from "../session/dispose-steps.ts";
 import {
   acquireGpu,
   type GpuContext,
@@ -1187,6 +1188,7 @@ const runDitLoopResident = async (state: IrodoriState, loop: DitLoop): Promise<D
   const velocity = outputNameAt(state.dit, 0);
   const residents: ResidentTensor[] = [];
   const sessions: Session[] = [];
+  let failure: { readonly error: unknown } | undefined;
   try {
     const createResident = async (bytes: number, label: string): Promise<ResidentTensor> => {
       const tensor = await gpu.createResident(bytes, label);
@@ -1222,6 +1224,7 @@ const runDitLoopResident = async (state: IrodoriState, loop: DitLoop): Promise<D
 
     let forwards = 0;
     const batch = await gpu.beginBatch();
+    let batchFailure: { readonly error: unknown } | undefined;
     try {
       for (let step = 0; step < config.steps; step += 1) {
         const t = loop.schedule[step];
@@ -1264,15 +1267,32 @@ const runDitLoopResident = async (state: IrodoriState, loop: DitLoop): Promise<D
           ),
         }, { batch, copyOutputs: { [EULER_OUTPUT]: xT } });
       }
+    } catch (error) {
+      batchFailure = { error };
+      throw error;
     } finally {
       // MUST: 区間は必ず閉じる（開いたままだと device 単位のロックが返らず、以後の run が
       // 永久に待つ）。
-      await batch.finish();
+      await disposeSteps([
+        () => {
+          if (batchFailure !== undefined) throw batchFailure.error;
+        },
+        () => batch.finish(),
+      ]);
     }
     return { x: new Float32Array(await xT.read()), forwards };
+  } catch (error) {
+    failure = { error };
+    throw error;
   } finally {
-    for (const session of sessions) await session.dispose();
-    for (const tensor of residents) tensor.dispose();
+    // Session の焼き込み参照を先に外す。失敗しても全資源の解放を試み、元の故障も残す。
+    await disposeSteps([
+      () => {
+        if (failure !== undefined) throw failure.error;
+      },
+      ...sessions.map((session) => () => session.dispose()),
+      ...residents.map((tensor) => () => tensor.dispose()),
+    ]);
   }
 };
 
