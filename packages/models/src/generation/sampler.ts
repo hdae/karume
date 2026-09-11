@@ -251,7 +251,7 @@ const argmax = (logits: Float32Array<ArrayBuffer>): number => {
  * 負けるので、`better(token, heap[0])` は `logits[token] > logits[heap[0]]` と同値になる。
  * この足切りが無いと、同値が密な入力（語彙の大半が同じ logit）で挿入形に負ける。
  *
- * MUST: NaN は {@link assertNoNaN} が先に落としている前提（{@link argmax} と同じ）。NaN が根に
+ * MUST: NaN は充填・定常相とも、heap に触る前に token id 順で拒否する。NaN が根に
  * 入ると足切りの比較が常に false になり、以後の全 token が根を差し替える（結果も不正）。
  * `k` の語彙数への丸めも呼び手（{@link samplerDistribution}）の責務で、ここでは繰り返さない。
  *
@@ -300,15 +300,17 @@ const selectTopKHeap = (logits: Float32Array<ArrayBuffer>, k: number): number[] 
       at = parent;
     }
   }
-  // 定常相: 根より良い token だけを差し替える。
+  // 定常相: 根より良い token だけを差し替える。根の値は差し替え時だけ変わる。
+  let cutoff = logits[heap[0]];
   for (; token < logits.length; token += 1) {
     const value = logits[token];
     if (value !== value) {
       throw new Error(`logits[${token}] が NaN（非有限） — token id へ畳まずここで落とす`);
     }
-    if (value <= logits[heap[0]]) continue;
+    if (value <= cutoff) continue;
     heap[0] = token;
     siftDown(0);
+    cutoff = logits[heap[0]];
   }
   return heap.sort((left, right) => (better(left, right) ? -1 : 1));
 };
