@@ -15,7 +15,7 @@ from uuid import uuid4
 import torch
 
 from karume.convert import PRESERVED_OP_PREFIXES, convert, curated_decompositions
-from karume.emit import write_model
+from karume.emit import FixedQuantizedWeight, write_model
 from karume.ir import IrGraph
 from karume.normalize import normalize_graph
 from karume.shards import shard_path, shard_siblings
@@ -51,6 +51,7 @@ def publish_model(
     weight_dtype: str = "f32",
     weight_scales: Mapping[str, torch.Tensor] | None = None,
     weight_dtype_overrides: Mapping[str, str] | None = None,
+    fixed_weights: Mapping[str, FixedQuantizedWeight] | None = None,
 ) -> IrGraph:
     """書き出し → 検証 → 据え替えの 3 段（変換済みのグラフを受ける入口）。
 
@@ -93,6 +94,7 @@ def publish_model(
             weight_dtype=weight_dtype,
             weight_scales=weight_scales,
             weight_dtype_overrides=weight_dtype_overrides,
+            fixed_weights=fixed_weights,
         )
         verified = verify_shards(written)
         total = len(written)

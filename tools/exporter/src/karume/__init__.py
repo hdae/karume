@@ -1,9 +1,9 @@
 """Karume exporter — torch.export 済みモデルを IR v1（docs/ir-v1.md）へ落とす。
 
-公開面は `__all__` の 11 件が正本（列挙とここの説明は 1:1 — 機械門は
+公開面は `__all__` の 12 件が正本（列挙とここの説明は 1:1 — 機械門は
 `tests/test_architecture_boundary.py` の TestThePublicSurface）:
 IR の型と metadata キー（`IR_METADATA_KEY` / `IrGraph`）・変換（`convert` /
-`curated_decompositions` / `normalize_graph`）・書き出し（`write_model`）・
+`curated_decompositions` / `normalize_graph`）・書き出し（`FixedQuantizedWeight` / `write_model`）・
 検証（`parse_ir_graph` / `verify_model`）・一本道（`export_module` / `export_to_file` /
 `publish_model`）。
 
@@ -12,13 +12,15 @@ IR の型と metadata キー（`IR_METADATA_KEY` / `IrGraph`）・変換（`conv
 """
 
 from karume.convert import convert, curated_decompositions
-from karume.emit import write_model
+from karume.emit import FixedQuantizedWeight, write_model
 from karume.ir import IR_METADATA_KEY, IrGraph
 from karume.normalize import normalize_graph
 from karume.pipeline import export_module, export_to_file, publish_model
 from karume.verify import parse_ir_graph, verify_model
 
-__all__ = [
+# 既存の公開面テストは ASCII 昇順を要求する。RUF022 の「定数優先」と区別する。
+__all__ = [  # noqa: RUF022
+    "FixedQuantizedWeight",
     "IR_METADATA_KEY",
     "IrGraph",
     "convert",

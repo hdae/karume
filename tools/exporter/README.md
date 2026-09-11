@@ -474,6 +474,12 @@ conformance table is the correct one.
   Fixed `i2` uses low-bit-first packing of `q+2` for `q ∈ [-2,1]`, rank-2 weights with
   a row width divisible by 16, and F32 `[rows,1]` scales (ADR 0097). It is supported by
   the low-level writer and reader; `write_model` does not add automatic INT2 quantization.
+  To preserve existing quantized values, pass `fixed_weights={key: FixedQuantizedWeight(dtype,
+  packed, scale)}` to `write_model` or `publish_model`. The corresponding `tensors[key]` must be a
+  shape-only f32 meta tensor. This accepts rank-2 linear/embedding weights in fixed I2/I4/I8,
+  retains their bytes through row sharding, and rejects simultaneous automatic quantization
+  options or real f32 values. The model recipe remains responsible for validating the upstream
+  quantization and activation rounding (ADR 0097).
 - The IR vocabulary has **61** ops, of which the exporter can emit **59**: `topk` and `state_append`
   are in the vocabulary but no `torch.export` graph produces them (`topk` waits on the multi-output
   getitem wiring, and `state_append` is the effect op the decode-graph script emits — ADR 0067

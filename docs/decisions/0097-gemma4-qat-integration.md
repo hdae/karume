@@ -104,3 +104,27 @@ IR に `static_quantize` を追加する。入力・出力は f32 各 1 本、sh
 検収は公式 CPU の境界両隣・ランダム値・特殊値を保存した fixture、独立 CPU 参照、実 GPU の u32 比較、
 共有した TS/Python 契約表、codegen snapshot、torch.export から生成した新しい tiny golden で行う。
 既存の golden と数値許容差は変更しない。
+
+## 追記 3 — 固定量子化 writer の入口（2026-09-11）
+
+汎用 exporter に `FixedQuantizedWeight(dtype, packed, scale)` を公開し、`write_model` と
+`publish_model` に任意の `fixed_weights` mapping を追加する。既存呼び出しの動作は変更しない。
+
+- mapping のキーは initializer の tensor キー（FQN）。対応する `tensors` は同じ論理形の
+  f32/meta テンソルとし、meta の集合と固定 mapping の集合は完全一致を要求する。
+  実 f32 値と固定 payload の両方を渡して一方を黙って無視する入力は拒否する。
+- 対象は正の rank 2 `[N,K]`、linear / embedding の重みとしてだけ消費される initializer。
+  graph 出力、重み以外の消費、同じキーへの複数宣言は拒否する。
+- 固定 dtype は I2 / I4 / I8。packed は CPU の連続配置で、I2 / I4 は U8 の `[N,K/4]` /
+  `[N,K/2]`、I8 は I8 の `[N,K]`。全符号値を保持し、量子化・再 pack・f32 展開を行わない。
+  I2 は K が 16 の倍数、scale は I2 / I8 が F32 `[N,1]`。
+  I4 は F32 `[N,groups]` から group_size を導き、K を割り切る 16 以上の 2 冪を要求する。
+- 固定 mapping 内の混成 I2 / I4 / I8 は受理する。従来の `weight_dtype`（f32 以外）、
+  `weight_scales`、`weight_dtype_overrides` との同時指定は拒否する。
+  空 mapping は追加の値指定を持たず、従来の経路を変えない。
+- scale の生成キー、同居規則、行分割、整列、reader 検証、公開時の据え替えは既存処理を使う。
+  行分割では packed payload を同じ先頭軸の行範囲で切り、親の f32 実体を作らない。
+  graph 宣言と入力テンソルは変更しない。固定値の上流由来の検証はモデル recipe が担当する。
+
+検収は全 byte 値を含む payload と異なる scale の分割前後一致、reader の受理、曖昧な入力の拒否、
+公開失敗時の既存成果物保持、既存自動量子化の回帰検査で行う。QAT recipe はこの入口を使う後続の単位。

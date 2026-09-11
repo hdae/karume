@@ -1629,3 +1629,60 @@ CPU 同士の比較なので、SRQ の GPU カーネルの問題とも断定で�
 SRQ は未コミットで停止した。E4B の原因調査と正式 QAT 統合は未完で、GPU ジョブは終了済み。
 
 利用者から原因調査の継続承認を受けた。検証済み SRQ を独立コミットし、E4B の CPU 比較差から再開する。
+
+## 固定 writer と E4B 比較差の帰属（2026-09-11）
+
+SRQ は `f4752c6` に独立コミットした。次の単位で `FixedQuantizedWeight` と
+`write_model` / `publish_model` の `fixed_weights` を実装した。契約は ADR 0097 追記 3。
+固定 I2 / I4 / I8 の保存値を f32 へ展開せず、既存の shard 分割と reader 検証を通す。
+`fixed-writer-targeted-v4.log` は **26 passed**。全 byte 値、行分割、異なる scale、混成格納、
+embedding / linear の共有、通常 f32 定数、曖昧な値指定の拒否、公開失敗時の旧成果物保持を検査した。
+
+初期テストの失敗は新規配線の 2 点だった。公開面の ASCII 昇順と Ruff RUF022 の定数優先が競合したため、
+既存テストの順序を保つ局所注記を付けた。また、新しい合成 linear に必須 bias 入力を追加した。
+既存テストの期待値・許容差・検証条件は変更していない。
+
+### E4B の差は host RoPE から SRQ 境界へ伝わっていた
+
+`e4b-cpu-attribution.py/json` で、同じ公式固定重みと英語 prompt に対し条件を一つずつ変えた。
+保存済み `generate` の初回 logits と、公式 forward の cache あり / なし、text だけの抽出、
+PLE 入力の外出し、明示 mask への交換までは **全ビット一致**。
+既存 host RoPE の f64 式へ交換した段だけ、最大絶対差 **2.6703062057495117** が再現した。
+head の選択を 1 行から 2 行へ変えても、この最大差は同じだった。
+
+`e4b-rope-boundary.py/json` は、wrapper に公式 RoPE 表を注入すると logits が全ビット一致することも確認した。
+最初に量子化層の出力が違った箇所は 0 起点 layer 8 の `self_attn.o_proj`。
+この層への入力の最大差は **1.9669532775878906e-6** だが、入力 SRQ の相違は 1 要素だけだった。
+
+- 座標 `[0,4,1287]` の丸め前: 公式 **0.596088171005249**、host **0.5960877537727356**。
+- 丸め後: 公式 **0.6077758073806763**、host **0.5843998193740845**（差 **0.023375988006591797**）。
+- その投影の出力 SRQ では 14 要素に差があり、最大差 **0.04781544208526611**。後続層で差が拡大した。
+
+従来 Gemma の RoPE が f64 計算・最後に f32 格納なのは明示された設計で、未知の重み破損やSRQ opの誤実装ではない。
+QAT の不連続な丸めにはこの小差が効く。通常 Gemma の既存数値契約を変更せず、QAT 向けの候補を OUT 内で試す。
+
+候補は `1 / f32(theta ** exponent)` の逆周波数、位置との積を f32 に丸め、三角関数の結果を f32 格納するもの。
+公式の CPU 三角関数とは一部に最下位ビット差が残るが、上の英語 prompt の logits は **全ビット一致**になった。
+この 1 ケースだけで採用とはせず、E2B / E4B の英語・日本語 12 token 生成まで比較する。
+数値列と中間テンソルは同じ OUT の `e4b-rope-boundary-*.safetensors` に保存した。
+
+### 12 token 生成までの CPU 比較
+
+OUT の `qat-f32-rope-reference.py` と `e2b/e4b-f32-rope-reference.json` で、英語・日本語を各 12 token
+まで自由な greedy 生成で比較した。**4 ケースすべてで公式 CPU と token 列が一致**した。
+logits の全ビット一致は E2B 英語 12/12、日本語 10/12、E4B 英語 10/12、日本語 0/12 step。
+各ケースの最大絶対差は順に **0 / 4.10981559753418 / 3.653777599334717 / 5.871218681335449**。
+RoPE の最下位ビット差が SRQ 境界へ届く性質は残るため、完全な数値一致や広い品質検収とは扱わない。
+
+対照の従来 f64 式でも、E4B の英語・日本語の各 12 token は公式と一致した
+（`qat-f64-rope-reference.py`、`e4b-f64-rope-reference.json`）。logits は両ケースの全 step で差があり、
+最大絶対差は英語 **5.152186870574951**、日本語 **5.631443977355957**。
+f32 候補は一部の差を除いたが、token 一致に必須と証明したわけではない。製品 RoPE はまだ変更していない。
+
+固定 writer の Python 全体検証は exporter **3,227 passed / 1 skipped**
+（`fixed-writer-exporter-pytest.log`）、recipes **2,757 passed / 4 skipped**
+（`fixed-writer-recipes-pytest.log`）。
+
+`deno task verify` は **2,862 passed / 743 steps / 0 failed / 5 ignored、26m59s** で終了した
+（`fixed-writer-verify.log`、終了コード 0）。実行中の製品コードは固定し、追記した研究記録だけを再整形・確認した。
+固定 writer を独立コミットし、次は変換候補の Deno GPU 生成と packed PLE の正式対応へ進む。

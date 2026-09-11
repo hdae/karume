@@ -74,6 +74,7 @@ from collections.abc import Buffer, Callable, Iterable, Iterator, Mapping, Seque
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
+from typing import Literal
 
 import torch
 
@@ -138,6 +139,7 @@ _STORAGE_ENCODING: Mapping[str, tuple[str, int]] = {
     "f16": ("F16", 16),
     "i8": ("I8", 8),
     "i4": ("I4", 4),
+    "i2": ("I2", 2),
 }
 
 #: 書き出し順の第 1 キー（safetensors dtype → 群）。**整列単位の降順** — 4 バイト整列を必要と
@@ -434,6 +436,15 @@ def _unrounded(name: str, tensor_key: str, detail: str) -> EmitError:
 
 
 @dataclass(frozen=True)
+class FixedQuantizedWeight:
+    """固定整数の packed 実体と scale。論理形は対応する f32/meta Tensor が持つ。"""
+
+    dtype: Literal["i2", "i4", "i8"]
+    packed: torch.Tensor
+    scale: torch.Tensor
+
+
+@dataclass(frozen=True)
 class _Conversion:
     """格納の直前に 1 本ずつ掛ける圧縮変換（計画段では**掛けない**）。
 
@@ -444,6 +455,7 @@ class _Conversion:
     dtype: str
     name: str
     scale: torch.Tensor | None = None
+    fixed_payload: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -571,6 +583,87 @@ def _plan_i4(
             storage=IrStorage(dtype="i4", scale=scale_key, group_size=group_size),
         ),
     )
+
+
+def _plan_fixed_weights(
+    graph: IrGraph,
+    tensors: Mapping[str, torch.Tensor],
+    fixed_weights: Mapping[str, FixedQuantizedWeight],
+) -> _StoragePlan:
+    """固定 bytes を唯一の値として扱い、再量子化・f32 実体化をしない（ADR 0097）。"""
+    bakeable = bakeable_initializers(graph)
+    names = {graph.initializers[name].tensor: name for name in bakeable}
+    if len(names) != len(bakeable):
+        raise EmitError("固定格納の initializer 名とテンソルキーが 1:1 でない")
+    unknown = sorted(set(fixed_weights) - set(names))
+    if unknown:
+        raise EmitError(f"fixed_weights の未知キー: {unknown}")
+    eligible = eligible_compressed_initializers(graph)
+    plan = _StoragePlan(declarations={}, scales={}, conversions={})
+    reserved = set(tensors)
+    for key, fixed in fixed_weights.items():
+        name = names[key]
+        tensor = tensors[key]
+        shape = list(tensor.shape)
+        if (
+            not tensor.is_meta
+            or tensor.dtype != torch.float32
+            or len(shape) != 2
+            or any(dim <= 0 for dim in shape)
+            or graph.values[name].dtype != "f32"
+            or graph.values[name].shape != shape
+            or graph.initializers[name].storage.dtype != "f32"
+        ):
+            raise EmitError(f"fixed_weights['{key}']: 宣言と同形の正の rank2 f32/meta が必要")
+        consumers = [node for node in graph.nodes if name in node.ins]
+        if name not in eligible or any(
+            node.op not in (LINEAR_OP, EMBEDDING_OP) for node in consumers
+        ):
+            raise EmitError(f"fixed_weights['{key}']: linear/embedding の重み専用")
+        if fixed.dtype not in ("i2", "i4", "i8"):
+            raise EmitError(f"fixed_weights['{key}']: dtype は i2/i4/i8 が必要")
+        rows, width = shape
+        factor = {"i2": 4, "i4": 2, "i8": 1}[fixed.dtype]
+        packed_dtype = torch.int8 if fixed.dtype == "i8" else torch.uint8
+        packed = fixed.packed
+        if (
+            packed.device.type != "cpu"
+            or packed.dtype != packed_dtype
+            or not packed.is_contiguous()
+            or width % factor
+            or list(packed.shape) != [rows, width // factor]
+        ):
+            raise EmitError(f"fixed_weights['{key}']: packed の CPU dtype・形・連続配置が違う")
+        scale = fixed.scale
+        if (
+            scale.device.type != "cpu"
+            or scale.dtype != torch.float32
+            or scale.ndim != 2
+            or scale.shape[0] != rows
+            or scale.shape[1] <= 0
+        ):
+            raise EmitError(f"fixed_weights['{key}']: scale は CPU F32 [rows,groups] が必要")
+        group_size = None
+        if fixed.dtype == "i4":
+            groups = scale.shape[1]
+            group_size = width // groups
+            if width % groups or group_size < 16 or group_size & (group_size - 1):
+                raise EmitError(f"fixed_weights['{key}']: I4 group は行を割り切る2冪・16以上が必要")
+        elif list(scale.shape) != [rows, 1] or (fixed.dtype == "i2" and width % 16):
+            raise EmitError(f"fixed_weights['{key}']: 行 scale [rows,1] と I2 の16要素整列が必要")
+        scale_key = _scale_key(key)
+        if scale_key in reserved:
+            raise EmitError(f"fixed_weights['{key}']: scale キーが衝突する: {scale_key}")
+        scale = scale.detach().contiguous()
+        reserved.add(scale_key)
+        plan.scales[scale_key] = scale
+        plan.declarations[name] = IrInitializer(
+            tensor=key, storage=IrStorage(dtype=fixed.dtype, scale=scale_key, group_size=group_size)
+        )
+        plan.conversions[key] = _Conversion(
+            dtype=fixed.dtype, name=name, scale=scale, fixed_payload=packed.detach()
+        )
+    return plan
 
 
 def _plan_weight_dtype(
@@ -725,6 +818,8 @@ def _convert_for_storage(key: str, tensor: torch.Tensor, conversion: _Conversion
 
     ここで落ちるとデータ節を書きかけたファイルが残る（`write_model` の docstring）。
     """
+    if conversion.fixed_payload is not None:
+        return conversion.fixed_payload
     if conversion.dtype == "f16":
         if not _is_f16_exact(tensor):
             raise _unrounded(conversion.name, key, "f16 で表現できない値を含む")
@@ -1023,6 +1118,10 @@ def _piece_conversion(conversion: _Conversion, tensor: torch.Tensor, piece: Piec
     broadcast される scale はそのまま」が決まる。切り方を間違えると形も型も合ったまま
     値だけがずれる（変換の逆変換ビット一致門は断片ごとに掛かるので、そこで落ちる）。
     """
+    if conversion.fixed_payload is not None:
+        conversion = replace(
+            conversion, fixed_payload=conversion.fixed_payload[piece.begin : piece.end]
+        )
     scale = conversion.scale
     if scale is None or not scale.shape or int(scale.shape[0]) != int(tensor.shape[0]):
         return conversion
@@ -1133,6 +1232,7 @@ def write_model(
     weight_dtype: str = "f32",
     weight_scales: Mapping[str, torch.Tensor] | None = None,
     weight_dtype_overrides: Mapping[str, str] | None = None,
+    fixed_weights: Mapping[str, FixedQuantizedWeight] | None = None,
     _shard_capacity: int | None = None,
 ) -> list[Path]:
     """グラフと格納テンソルを配布形へ書き、書いた shard の path を**順に**返す。
@@ -1151,6 +1251,11 @@ def write_model(
     作れる）。i4 の適格は {@link I4_WEIGHT_OPS}（linear / embedding / conv1d）の重みスロット
     限定で、conv1d はさらに `groups == 1` と格納行長の整除が要る
     （{@link i4_eligible_initializers} — ADR 0069 決定 5 とその追補）。
+
+    `fixed_weights` は固定 packed 値を再量子化せず保存する入口（ADR 0097）。
+    対応する `tensors` は論理形だけの f32/meta とし、meta のキー集合と完全一致させる。
+    linear / embedding の rank2 重みに限り、I2 / I4 / I8 の混成を保持する。
+    実 f32 値との二重指定と、自動量子化の dtype / scale / override 指定との混在は拒否する。
 
     `weight_dtype_overrides`（テンソルキー → 格納 dtype）は 1 本単位の明示指定で、既定
     `weight_dtype` に**優先**する（混成格納 — 意味と fail loudly の線引きは
@@ -1192,10 +1297,20 @@ def write_model(
             "宣言テンソルと格納テンソルが一致しない: "
             f"欠落 {sorted(declared - stored)} / 余剰 {sorted(stored - declared)}"
         )
+    fixed = {} if fixed_weights is None else fixed_weights
+    meta_keys = {key for key, value in tensors.items() if value.is_meta}
+    if meta_keys != set(fixed):
+        raise EmitError("f32/meta の論理重みと fixed_weights のキー集合が一致しない")
+    if fixed and (weight_dtype != "f32" or weight_scales or weight_dtype_overrides):
+        raise EmitError("fixed_weights と自動量子化指定は同時に使えない")
     out = Path(path)
     contiguous = {key: value.detach().contiguous() for key, value in tensors.items()}
-    plan = _plan_weight_dtype(
-        graph, contiguous, weight_dtype, weight_scales or {}, weight_dtype_overrides or {}
+    plan = (
+        _plan_fixed_weights(graph, contiguous, fixed)
+        if fixed
+        else _plan_weight_dtype(
+            graph, contiguous, weight_dtype, weight_scales or {}, weight_dtype_overrides or {}
+        )
     )
     source = {**contiguous, **plan.scales}
     committed = replace(graph, initializers={**graph.initializers, **plan.declarations})
