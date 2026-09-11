@@ -1482,3 +1482,22 @@ MTP drafter の I8 共有重みはその後の別設計にする。
 この文書コミット前の `deno task verify` は **2,849 passed / 743 steps / 0 failed / 5 ignored、24m26s**
 （`host-verify.log`）。追加文書のリンク・数値・保存データとの対応も確認した。
 全体検証は終了し、実験用 HTTP / Xvfb / Chrome も停止済み。実行中の GPU ジョブはない。
+
+## M2 の利用者報告と QAT 統合の承認（2026-09-11）
+
+利用者から、M2 で複数モデルの動作を確認したとの報告を受けた。
+Anima は約 **400 → 390 秒**（約 2.5% 短縮）、Irodori は約 **35 → 33 秒**（約 5.7% 短縮）。
+これは利用者の概算実測で、主担当が M2 を実行した結果ではない。
+量子化形式・入力・反復回数・測定ログはこの報告には含まれないため、個々の最適化への寄与を分離せず、
+u32 / golden / SHA の自動検収まで完了したという意味にも扱わない。
+
+同じ追加指示で、上記 QAT 製品化の段階案が承認された。
+配布・利用者から見える family は **`gemma4-qat`** とし、その内側で **`e2b` / `e4b`** を選ぶ。
+公式 mobile 形式は両方存在する（[E2B](https://huggingface.co/google/gemma-4-E2B-it-qat-mobile-transformers) /
+[E4B](https://huggingface.co/google/gemma-4-E4B-it-qat-mobile-transformers)）。
+通常 Gemma との共通実行部は再利用し、固定量子化の意味を別 family の明示した契約にする。
+決定と実装の分割は [ADR 0097](../decisions/0097-gemma4-qat-integration.md) に記録した。
+新しい生データは `outputs/bench/karume/2026-09-11_qat-integration/` に保存する。
+
+AGENTS.md の該当箇所は、無説明の仕様変更を防ぐ意図に合わせて改訂した。
+承認された統合範囲は段階ごとに聞き直さず進め、範囲外の変更や前提を覆す問題が出たときに再確認する。

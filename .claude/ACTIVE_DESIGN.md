@@ -14,10 +14,10 @@
 - **9/11 レビュー対応後の再開** — [調査・実測と引き継ぎ](../docs/research/2026-09-10-codex-mtp-optimization.md#分割コミットと再開用の引き継ぎ) を先に読む。
   現在は `codex/review-and-fix`。CPU 参照の RoPE 不一致は解消。Anima / drafter の既存形状比較は不採用。
   f16 / f32 M=1 GEMV は RTX の実 LLM で検収して採用（K-25 / K-26）。INT2 / SRQ は実形状の単体試作済み（K-27）。
-  QAT の公開形式・固定丸め・PLE 対応は統合案の判断待ち。Anima の RMS128 を適用（K-28）。
+  QAT の公開形式・固定丸め・PLE 対応は承認済み。別 family `gemma4-qat` の E2B / E4B として統合中（[ADR 0097](../docs/decisions/0097-gemma4-qat-integration.md)）。Anima の RMS128 を適用（K-28）。
   TypeScript の CPU profile / token-only 比較も記録済み（H-18）。Chrome のみ利得があり、製品変更は保留。
-  次は [QAT 統合案](../docs/research/2026-09-10-codex-mtp-optimization.md#製品化の段階案判断待ち)の判断。
-  追加 LLM の配布・長文・品質検収と f16 / f32 / RMS128 の M2 追試は残る。E4B / Qwen / MiniCPM のローカル実行と
+  QAT は格納・固定丸め → recipe / PLE → family / 通常生成の順に、主担当で実装・検収する。
+  M2 は利用者から Anima / Irodori などの動作・短縮報告あり。形状別の自動数値検収と追加 LLM の配布・長文・品質検収は残る。E4B / Qwen / MiniCPM のローカル実行と
   Chrome の Gemma 自由文比較は済。QAT mobile の重み共有宣言は通常 E2B と異なり、INT2 / SRQ の設計が必要。
   ローカル実験 CLI は [MiniCPM5](../examples/minicpm5/README.md) / [Qwen3](../examples/qwen3/README.md)。
   Gemma 準拠の対話・reset・中断に対応。容量 128 の多ターン検収は research に記録。公開 pipeline は未追加。
