@@ -577,9 +577,9 @@ Deno.test("parseGemma4PleIndex: 壊れた索引を黙って読まない", async 
 
   await t.step("知らない版は読まない", () => {
     assertThrows(
-      () => parseGemma4PleIndex({ ...RAW_INDEX, schema: 2 }),
+      () => parseGemma4PleIndex({ ...RAW_INDEX, schema: 3 }),
       Error,
-      "ple.json.schema 2 が 1 でない",
+      "ple.json.schema 3 が 1 / 2 でない",
     );
   });
 

@@ -128,3 +128,22 @@ IR に `static_quantize` を追加する。入力・出力は f32 各 1 本、sh
 
 検収は全 byte 値を含む payload と異なる scale の分割前後一致、reader の受理、曖昧な入力の拒否、
 公開失敗時の既存成果物保持、既存自動量子化の回帰検査で行う。QAT recipe はこの入口を使う後続の単位。
+
+## 追記 4 — packed PLE sidecar（2026-09-11）
+
+PLE の索引と shard metadata に schema 2 を追加し、`storage: "i2" | "i4"` を必須とする。
+schema 1 / I8 の索引・復元・読み方は維持する。旧 reader は schema 2 を拒否する。
+
+- 値は token-major、safetensors `values` の論理 shape は `[rows,layers,dim]`、dtype は I2 / I4。
+  dim は正の 16 の倍数。値の byte 数はそれぞれ `rows*layers*dim/4` / `/2`。
+  各 byte の下位 bit から `q+2` / `q+8` を詰め、全符号値を使う。
+- `scales` は F32 `[rows,layers]`。index と shard metadata の schema / storage / token 範囲 / shape を突合する。
+  グラフ外の sidecar なので IR initializer の rank 2 制限は適用しない。
+- 復元は既存と同じ二段 f32 乗算 `(q*scale)*embedScale`。全量・常駐・区間読みに共通の復元処理を使う。
+  byte 予算・行 offset は packed の実 byte 数、返す shape と重複 id の複写は論理要素数で計算する。
+- `Gemma4PleIndex.storage` の欠如は旧 I8 を意味する。schema 1 に storage を付ける入力、schema 2 の storage 欠如、
+  未知 schema / dtype は拒否する。中断・排他・寿命の既存契約は変更しない。
+
+公式 E2B INT4 / E4B INT2 の probe との全ビット一致、およびモデルに依存しない独立 Torch fixture で
+全量・行読取・常駐・重複 token・境界を検査する。既存の未知 schema 拒否テストは未対応版を 2 から 3 へ進め、
+拒否そのものは保つ。正式 recipe はこの sidecar を後続単位で書く。

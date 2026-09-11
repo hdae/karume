@@ -1686,3 +1686,67 @@ f32 候補は一部の差を除いたが、token 一致に必須と証明した�
 `deno task verify` は **2,862 passed / 743 steps / 0 failed / 5 ignored、26m59s** で終了した
 （`fixed-writer-verify.log`、終了コード 0）。実行中の製品コードは固定し、追記した研究記録だけを再整形・確認した。
 固定 writer を独立コミットし、次は変換候補の Deno GPU 生成と packed PLE の正式対応へ進む。
+
+## packed PLE の正式対応と初回 GPU 生成（2026-09-11）
+
+固定 writer は `449e7e1` にコミットした。次の単位は ADR 0097 追記 4 の PLE schema 2。
+I2 / I4 の論理 shape、格納 byte 数、層別 scale、全量・行読みを共通実装へ追加した。
+schema 1 / I8 は維持し、未知版拒否テストの未対応版を 2 から 3 へ進めた。
+合成 fixture は実モデルの値を含まず、符号付き整数から Torch の二段 f32 乗算で期待値を作る
+（`tools/export-recipes/gemma4/tests/ple_fixture.py`）。packed を展開する TS と同じ式を期待値には使わない。
+
+正式実装の `e2b/e4b-ple-product-proof.json` は公式 probe（E2B 17 token / E4B 11 token）に対し、
+全量・行読みとも **全ビット一致**。packed payload の容量は E2B **1,211,105,280 B**、E4B **748,683,264 B**。
+各 probe の読み取り総量は全量経路で **1,695,547,012 / 1,247,808,096 B**、行経路で **89,492 / 38,152 B**。
+これは重複確認を含む probe の I/O 量であり、速度比較ではない。中断を尊重する読み口と解放も検査した。
+既存 I8 と新 packed の対象テストは **26 passed / 29 steps / 0 failed**（`ple-product-targeted-v2.log`）。
+
+### Deno GPU と公式 CPU の生成比較
+
+`qat-gpu-candidate.ts` は正式 runtime と変換候補の固定 packed 重みを使う。容量 128、prefill 物理 32 行、
+decode 1 行、head 1 行、linearCompute=f32、greedy 各 12 token。GPU ベンチや他 GPU テストと並走させなかった。
+初回の報告で日本語ログだけを見て全ケース一致と述べたが、JSON 全件の集計で誤りと判明したため訂正した。
+**CPU 同士の 4 ケース一致と、CPU/GPU 比較の成否を混同しない。**
+
+| GPU 条件                        | E2B 英語           | E2B 日本語    | E4B 英語           | E4B 日本語    |
+| ------------------------------- | ------------------ | ------------- | ------------------ | ------------- |
+| f32 RoPE / sequential attention | 2 token 目で不一致 | 12 token 一致 | 12 token 一致      | 12 token 一致 |
+| f64 RoPE / sequential attention | 2 token 目で不一致 | 12 token 一致 | 4 token 目で不一致 | 12 token 一致 |
+| f32 RoPE / parallel attention   | 2 token 目で不一致 | 12 token 一致 | 12 token 一致      | 12 token 一致 |
+
+生データは `e2b/e4b-gpu-candidate-{f32,f64,f32-parallel}.json` と同名 log。
+E2B の最初の不一致は公式 CPU の id 16254（score **23.141639709472656**）に対して GPU が id 19656 を選ぶ。
+CPU での id 19656 の score は **22.78113555908203**、首位との差は **0.360504150390625**。
+E4B f64 の最初の不一致は CPU id 10824 に対し GPU id 496、CPU 側の差は **0.2856578826904297**。
+不一致後の logits は異なる token 接頭辞に対する値なので、同条件の誤差として比較しない。
+
+生成後の重み・params アリーナは E2B **828,338,872 B**、E4B **2,306,405,884 B**。
+会話用 state はそれぞれ **14,352,392 / 46,792,712 B** で、context.dispose 後には両方 **0 B**。
+これは runtime の所有バッファ診断であり、ドライバ全体の VRAM や解放後の OS RSS と同じ量ではない。
+通常生成の検収は未完。E2B の最初の相違を中間値まで調べ、正式 family の前に原因と品質上の限界を記録する。
+
+### 中間値と追加検証の準備
+
+E2B の CPU で量子化層の入力・入力丸め後・出力を採取した
+（`e2b-gpu-cpu-reference.py`、`e2b-gpu-cpu-reference-v2.log`）。
+英語 prompt の自然長 16 行と、GPU と同じ物理 32 行に埋めた入力を比較すると、
+有効行の **829 本の保存テンソルが全ビット一致**した（`e2b-cpu-padding-differences.json` は空配列）。
+最初の保存試行は Q/K/V などが共有する観測値を safetensors が拒否したため、hook 内で独立コピーして再採取した。
+これは観測ファイルの保存方法の修正で、モデルの計算や期待値は変えていない。
+
+GPU 用の `qat-gpu-trace.ts` は固定量子化層の前後を追加出力し、通常出力との比較も保存する。
+元の保存 IR に出力一覧だけを加えた検査は GPU 無しで通過した（`qat-gpu-trace-prepare-v2.log`）。
+内部 IR の camelCase 表現をそのまま保存 JSON に戻す最初の試行は reader が拒否し、元ヘッダを保持する形へ修正した。
+実行前の時点では、GPU と CPU の最初の差の帰属はまだ終わっていない。
+
+固定丸めの数は E2B **487**、E4B **596**、scale=0 は両方 **2**。
+恒等な丸めの除去だけに大きな利得を期待せず、`qat-gpu-profile.ts` で GPU 内訳を採る準備をした。
+通常の壁時計と、1 dispatch ごとに pass を分ける timestamp 計測は区別する。
+
+PLE の Python 全体検証は exporter **3,227 passed / 1 skipped**（`ple-product-exporter-pytest.log`）、
+recipes **2,757 passed / 4 skipped**（`ple-product-recipes-pytest.log`）。
+
+PLE 単位の `deno task verify` は **2,864 passed / 743 steps / 0 failed / 5 ignored、27m45s**
+（`ple-product-verify.log`、終了コード 0）。製品コードは走行中に変更せず、結果・作業索引の文書だけを更新した。
+fixture の 10 ファイルは保存した生成器から **全 byte 同一**で再生成できた
+（`ple-fixture-reproduction.json`）。この単位を独立コミットし、準備済みの GPU 中間値比較へ進む。

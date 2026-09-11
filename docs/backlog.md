@@ -24,7 +24,8 @@
   Chrome / Deno の Gemma 比較は自由文まで実施済み。他課題・長文・M2 を次の検収へ残す。
   QAT mobile は [INT2 / SRQ の実形状試作と統合案](research/2026-09-10-codex-mtp-optimization.md#qat-mobile-の-int2-と固定丸め2026-09-11)を記録（K-27）。
   [ADR 0097](decisions/0097-gemma4-qat-integration.md) の統合は承認済み。`gemma4-qat` の E2B / E4B として、
-  公開 IR・固定 SRQ・PLE の INT4 読取を段階実装し、通常生成から検収する。Wan は小さな DiT から段階検証する。
+  公開 INT2 IR・固定 SRQ・固定 writer・PLE の INT2 / INT4 読取は検収済み。
+  次は recipe / family / CLI と通常生成の CPU/GPU 差の帰属へ進む。Wan は小さな DiT から段階検証する。
   実測と未完の正本は [追加調査](research/2026-09-10-codex-mtp-optimization.md#追加-llm-の実行と量子化別比較)。
 
 - **9/11 レビューの継続検証**（調査 2026-09-10・[対応記録](research/2026-09-10-codex-mtp-optimization.md)）:

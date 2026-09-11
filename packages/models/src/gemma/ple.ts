@@ -17,9 +17,12 @@
  * 書き手の正本は `tools/export-recipes/gemma4/export_product.py`:
  *
  * - `ple.json` — 索引（token 総数 / 層数 / 層当たり次元 / embed scale / shard の token 範囲）
- * - `ple-NNNNN-of-NNNNN.safetensors` — **token-major**。`values` `[rows, layers, dim]` i8 と
+ * - `ple-NNNNN-of-NNNNN.safetensors` — **token-major**。`values` `[rows, layers, dim]` と
  *   `scales` `[rows, layers]` f32 で、1 token の PLE が**連続 1 読み**になる（ADR 0085 決定 1）。
  *   vocab の範囲で shard し、上限は書き手の容量（ADR 0090 — 256MiB − ヘッダ余裕 = 1 回の読みの上限）。
+ *
+ * schema 1 は I8、schema 2 は storage で I2 / I4 を明示する（ADR 0097 追記 4）。
+ * packed 値も shape は論理要素数で、読み取りと常駐予算には格納 byte 数を使う。
  *
  * ## MUST: 逆量子化は GPU 側 `embedding` とビット一致する
  *
@@ -81,6 +84,8 @@ export type Gemma4PleShard = {
 
 /** `ple.json` の受理形（書き手の正本は `gemma4/export_product.py`）。 */
 export type Gemma4PleIndex = {
+  /** schema 2 の packed 格納。省略は従来の schema 1 / I8（ADR 0097）。 */
+  readonly storage?: "i2" | "i4";
   /** sidecar が持つ token 行数（= `vocab_size_per_layer_input`）。 */
   readonly tokens: number;
   /** 層数（E2B は 35）。 */
@@ -289,13 +294,22 @@ const readOffset = (raw: Record<string, unknown>, key: string, where: string): n
  */
 export const parseGemma4PleIndex = (raw: unknown, where = "ple.json"): Gemma4PleIndex => {
   const root = readRecord(raw, where);
-  assertAllowedKeys(root, INDEX_KEYS, where);
-  if (root.schema !== SCHEMA) {
-    throw new Error(`${where}.schema ${String(root.schema)} が ${SCHEMA} でない`);
+  assertAllowedKeys(root, root.schema === 2 ? [...INDEX_KEYS, "storage"] : INDEX_KEYS, where);
+  if (root.schema !== SCHEMA && root.schema !== 2) {
+    throw new Error(`${where}.schema ${String(root.schema)} が 1 / 2 でない`);
+  }
+  let storage: "i2" | "i4" | undefined;
+  if (root.schema === 2) {
+    const value = root.storage;
+    if (value !== "i2" && value !== "i4") throw new Error(`${where}.storage は i2 / i4 が必要`);
+    storage = value;
   }
   const tokens = readCount(root, "tokens", where);
   const layers = readCount(root, "layers", where);
   const dim = readCount(root, "dim", where);
+  if (storage !== undefined && dim % 16 !== 0) {
+    throw new Error(`${where}.dim は packed で16の倍数が必要`);
+  }
   const embedScale = root.embedScale;
   if (typeof embedScale !== "number" || !Number.isFinite(embedScale) || embedScale <= 0) {
     throw new Error(`${where}.embedScale ${String(embedScale)} が正の有限数でない`);
@@ -326,7 +340,7 @@ export const parseGemma4PleIndex = (raw: unknown, where = "ple.json"): Gemma4Ple
   if (expected !== tokens) {
     throw new Error(`${where}: shard の合計 ${expected} 行が tokens ${tokens} と違う`);
   }
-  return { tokens, layers, dim, embedScale, shards };
+  return { tokens, layers, dim, embedScale, shards, ...(storage === undefined ? {} : { storage }) };
 };
 
 /** per-row scale 1 個ぶんのバイト数（`scales` は f32 — `readResidentShard` の dtype 門と対）。 */
@@ -342,7 +356,8 @@ const DEFAULT_RESIDENT_SHARDS = 2;
  * 待たずに判定できる。
  */
 export const gemma4PleShardBytes = (index: Gemma4PleIndex, shard: Gemma4PleShard): number =>
-  (shard.stop - shard.start) * index.layers * (index.dim + SCALE_BYTES);
+  (shard.stop - shard.start) * index.layers *
+  (index.dim / (index.storage === "i2" ? 4 : index.storage === "i4" ? 2 : 1) + SCALE_BYTES);
 
 /** 索引中で最も大きい shard 1 本ぶん（予算の下限 = これを割ると 1 本も載せられない）。 */
 const largestShardBytes = (index: Gemma4PleIndex): number =>
@@ -359,10 +374,10 @@ const largestShardBytes = (index: Gemma4PleIndex): number =>
 export const defaultGemma4PleResidentBytes = (index: Gemma4PleIndex): number =>
   DEFAULT_RESIDENT_SHARDS * largestShardBytes(index);
 
-/** 読み込み済みの shard 1 本（i8 値と per-row scale の**生の並び**）。 */
+/** 読み込み済みの shard 1 本（整数値と層別 scale の**生の並び**）。 */
 type ResidentShard = {
   readonly start: number;
-  readonly values: Int8Array<ArrayBuffer>;
+  readonly values: Int8Array<ArrayBuffer> | Uint8Array<ArrayBuffer>;
   readonly scales: Float32Array<ArrayBuffer>;
 };
 
@@ -411,7 +426,7 @@ const assertShardMetadata = (
   const declared = readRecord(JSON.parse(raw), `${shard.file} の ${METADATA_KEY}`);
   const mismatches = (
     [
-      ["schema", SCHEMA],
+      ["schema", index.storage === undefined ? SCHEMA : 2],
       ["tokens", index.tokens],
       ["layers", index.layers],
       ["dim", index.dim],
@@ -420,6 +435,9 @@ const assertShardMetadata = (
       ["stop", shard.stop],
     ] as const
   ).filter(([key, want]) => (Object.hasOwn(declared, key) ? declared[key] : undefined) !== want);
+  if (index.storage !== undefined && declared.storage !== index.storage) {
+    throw new Error(`${shard.file}: karume_ple.storage が索引と違う`);
+  }
   if (mismatches.length > 0) {
     throw new Error(
       `${shard.file}: ${METADATA_KEY} が索引と食い違う（` +
@@ -448,8 +466,11 @@ const assertShardTables = (
   assertShardMetadata(tables, index, shard);
   const rows = shard.stop - shard.start;
   const values = tensorView(tables, VALUES_KEY, shard.file);
-  if (values.dtype !== "I8") {
-    throw new Error(`${shard.file}: '${VALUES_KEY}' の格納 dtype が ${values.dtype}（I8 でない）`);
+  const dtype = index.storage === "i2" ? "I2" : index.storage === "i4" ? "I4" : "I8";
+  if (values.dtype !== dtype) {
+    throw new Error(
+      `${shard.file}: '${VALUES_KEY}' の格納 dtype が ${values.dtype}（${dtype} でない）`,
+    );
   }
   assertShape(values.shape, [rows, index.layers, index.dim], `${shard.file} の '${VALUES_KEY}'`);
   const scales = tensorView(tables, SCALES_KEY, shard.file);
@@ -469,7 +490,9 @@ const readResidentShard = (
   const { values, scales } = assertShardTables(file, index, shard);
   return {
     start: shard.start,
-    values: new Int8Array(file.buffer, values.byteOffset, values.byteLength),
+    values: index.storage === undefined
+      ? new Int8Array(file.buffer, values.byteOffset, values.byteLength)
+      : new Uint8Array(file.buffer, values.byteOffset, values.byteLength),
     scales: new Float32Array(file.buffer, scales.byteOffset, scales.byteLength / SCALE_BYTES),
   };
 };
@@ -670,6 +693,8 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
     );
   }
   const stride = index.layers * index.dim;
+  const factor = index.storage === "i2" ? 4 : index.storage === "i4" ? 2 : 1;
+  const rowValueBytes = stride / factor;
   /** 行 1 本ぶんの `scales`（f32 × 層数）のバイト数。 */
   const scaleStride = index.layers * SCALE_BYTES;
 
@@ -796,7 +821,7 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
   const writeRow = (
     data: Float32Array,
     target: number,
-    values: Int8Array<ArrayBuffer>,
+    values: Int8Array<ArrayBuffer> | Uint8Array<ArrayBuffer>,
     valuesFrom: number,
     scales: Float32Array<ArrayBuffer>,
     scalesFrom: number,
@@ -804,9 +829,21 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
     let cursor = target;
     for (let layer = 0; layer < index.layers; layer += 1) {
       const scale = scales[scalesFrom + layer];
-      const base = valuesFrom + layer * index.dim;
-      for (let column = 0; column < index.dim; column += 1) {
-        data[cursor + column] = Math.fround(values[base + column] * scale) * index.embedScale;
+      const base = valuesFrom + layer * index.dim / factor;
+      if (factor === 1) {
+        for (let column = 0; column < index.dim; column += 1) {
+          data[cursor + column] = Math.fround(values[base + column] * scale) * index.embedScale;
+        }
+      } else {
+        const bits = 8 / factor;
+        const mask = (1 << bits) - 1;
+        const offset = 1 << (bits - 1);
+        for (let column = 0; column < index.dim; column += 1) {
+          const value =
+            ((values[base + Math.floor(column / factor)] >>> (bits * (column % factor))) & mask) -
+            offset;
+          data[cursor + column] = Math.fround(value * scale) * index.embedScale;
+        }
       }
       cursor += index.dim;
     }
@@ -836,7 +873,7 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
     for (const [id, positions] of rows) {
       const row = id - loaded.start;
       const first = positions[0] * stride;
-      writeRow(data, first, loaded.values, row * stride, loaded.scales, row * index.layers);
+      writeRow(data, first, loaded.values, row * rowValueBytes, loaded.scales, row * index.layers);
       copyDuplicates(data, positions, first);
     }
   };
@@ -862,8 +899,8 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
       range,
       source.bytes,
       file,
-      layout.valuesOffset + row * stride,
-      stride,
+      layout.valuesOffset + row * rowValueBytes,
+      rowValueBytes,
       options,
     );
     const scales = await readRange(
@@ -876,7 +913,14 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
     );
     rowReads += 1;
     const first = positions[0] * stride;
-    writeRow(data, first, new Int8Array(values), 0, new Float32Array(scales), 0);
+    writeRow(
+      data,
+      first,
+      index.storage === undefined ? new Int8Array(values) : new Uint8Array(values),
+      0,
+      new Float32Array(scales),
+      0,
+    );
     copyDuplicates(data, positions, first);
   };
 
