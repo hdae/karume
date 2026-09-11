@@ -150,6 +150,7 @@ const subpathSurfaces = async (): Promise<readonly { name: string; surface: stri
   { name: "./birefnet", surface: Object.keys(await import("../birefnet.ts")) },
   { name: "./depth-anything", surface: Object.keys(await import("../depth-anything.ts")) },
   { name: "./gemma", surface: Object.keys(await import("../gemma.ts")) },
+  { name: "./gemma4-qat", surface: Object.keys(await import("../gemma4-qat.ts")) },
   { name: "./irodori", surface: Object.keys(await import("../irodori.ts")) },
   { name: "./sbv2", surface: Object.keys(await import("../sbv2.ts")) },
   { name: "./siglip2", surface: Object.keys(await import("../siglip2.ts")) },
@@ -213,6 +214,7 @@ Deno.test("barrel: KARUME_SOURCES は家族表の和集合ちょうど（畳み�
     import("../birefnet.ts"),
     import("../depth-anything.ts"),
     import("../gemma.ts"),
+    import("../gemma4-qat.ts"),
     import("../irodori.ts"),
     import("../sbv2.ts"),
     import("../siglip2.ts"),
@@ -236,4 +238,15 @@ Deno.test("barrel: KARUME_SOURCES は家族表の和集合ちょうど（畳み�
   );
   // サブパスの数は `deno.json` の exports と揃っていること（面が増えたら走査も増やす）。
   assertEquals(subpaths.length, namespaces.length);
+});
+
+Deno.test("gemma4-qat: 別ファミリの入口を両建てし、内部構築は公開しない", async () => {
+  const qat = await import("../gemma4-qat.ts");
+  for (const name of ["Gemma4QatPipeline", "gemma4QatRopeInputs"]) {
+    assert(Object.hasOwn(qat, name));
+    assert(Object.hasOwn(models, name));
+  }
+  for (const name of ["GemmaPipeline", "admitGemma4Qat", "Gemma4Pipeline", "GEMMA4_SOURCES"]) {
+    assertEquals(Object.hasOwn(qat, name), false);
+  }
 });

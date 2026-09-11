@@ -18,6 +18,9 @@ model code (patch layers, export scripts, reference pipelines). That directory i
 the project's MIT license — each family there carries its own `THIRD_PARTY_NOTICES.md` recording
 what the recipe derives from, and the upstream terms recorded there govern it.
 
+Experimental fixed mobile QAT: [Gemma 4 QAT E2B / E4B](examples/gemma4-qat/README.md),
+with a separate `gemma4-qat` pipeline and local chat CLI.
+
 Experimental local LLM examples: [MiniCPM5-2B](examples/minicpm5/README.md) and
 [Qwen3-0.6B](examples/qwen3/README.md). These CLIs use existing converted assets in `outputs/series/`;
 see their READMEs for commands and the current context limit.

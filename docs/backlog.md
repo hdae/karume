@@ -26,7 +26,8 @@
   [ADR 0097](decisions/0097-gemma4-qat-integration.md) の統合は承認済み。`gemma4-qat` の E2B / E4B として、
   公開 INT2 IR・固定 SRQ・固定 writer・PLE の INT2 / INT4 読取は検収済み。
   公式 recipe / 配布形の全量変換・固定 bytes 一致・Deno/Chrome の短文比較は確認済み。CPU/GPU 差は SRQ 境界をまたぐ縮約差に帰属。
-  次は family / 対話 CLI の統合、複数ターン・中断・解放を検収し、SRQ 融合と prefill を実測する。Wan は小さな DiT から段階検証する。
+  family / 対話 CLI は E2B/E4B・Deno/Chrome・複数ターン・中断・解放と全体検証を完了。
+  SRQ 後処理融合は単体の出力u32一致とdecode upの利得を確認。次はup/gateを中心に全体のA/Bとprefillを実測する。Wan は小さな DiT から段階検証する。
   実測と未完の正本は [追加調査](research/2026-09-10-codex-mtp-optimization.md#追加-llm-の実行と量子化別比較)。
 
 - **9/11 レビューの継続検証**（調査 2026-09-10・[対応記録](research/2026-09-10-codex-mtp-optimization.md)）:

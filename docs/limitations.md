@@ -1449,3 +1449,15 @@ hub 自前の受信バイトの門（`fetch` ラッパ）を撤去した。HF �
 - **content-length の事前突合はしない**（by-design）: Fetch 仕様上 Content-Length は信頼できず、
   Content-Encoding 越しでは宣言と実受信が食い違うのが正常なので、汎用の取得層に入れると誤検知になる。
   size の食い違いは受信で捕まる（超過は途中で・不足は全量受信後に）。
+
+## Gemma 4 QAT: 実験段階の固定 mobile 形式
+
+`gemma4-qat` は通常 `gemma4` とは別ファミリで、公式 mobile Transformers 形式の E2B / E4B の text 生成だけを扱う。
+固定 INT2 / INT4 / INT8、SRQ、packed PLE を保持する。MTP、vision、audio、公開 source pin は未対応。
+ローカルの利用例は [QAT CLI](../examples/gemma4-qat/README.md)、数値契約は [ADR 0097](decisions/0097-gemma4-qat-integration.md)。
+
+CPU / GPU の行列縮約の小さな差が SRQ の丸め境界をまたぎ、トークン列が変わる場合がある。
+既定 chunk32 と比較用 chunk64 でも E4B の短文8件中1件で列が分岐した。chunk 間の数値同値は保証しない。
+RTX の Deno / Chrome は両モデル・両 chunk 条件の全32件で一致したが、広い品質や M2 の同値性の証明ではない。
+初期配布の capacity128、chunk32、trace上限128を超える使い方の品質・性能は未検収。
+実測の出所は [QAT の統合検収](research/2026-09-10-codex-mtp-optimization.md#qat-の共通パイプラインと対話-cli2026-09-11)。

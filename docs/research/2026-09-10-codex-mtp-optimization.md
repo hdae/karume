@@ -1834,3 +1834,109 @@ Python 全体の初回は新 recipe の optional import と据え替え静的検
 正式 recipe の `deno task verify` v2 は **2,864 passed / 743 steps / 0 failed / 5 ignored、24m59s**、
 終了コード0（`recipe-verify-v2.log`）。実行中は製品コードを固定し、追記した文書は再整形・確認した。
 検査済み配布形を新規 `models/karume-gemma4-qat/` に配置済み。次の単位は共通 pipeline と対話 CLI。
+
+## QAT の共通パイプラインと対話 CLI（2026-09-11）
+
+公式 recipe は `022cb09` にコミットした。ADR 0097 追記6に従い、既存 Gemma の本体を非公開の
+共通基底へ移し、`Gemma4QatPipeline` / `@karume/models/gemma4-qat` を追加した。
+通常 Gemma の会話・MTP・解放の本体を共用する。QAT は専用の構造検査と f32 段丸め RoPE を使う。
+QAT の pipeline オプションから MTP を除き、実行時の指定も拒否する。
+
+既存 `demo:gemma4` の対話処理を共通 runner へ移し、`demo:gemma4-qat --model e2b|e4b` を追加した。
+model 省略時は manifest の既定。取得元は既定 `models/karume-gemma4-qat/`、明示 `--source` / `--repo` も可。
+既定の最大生成は QAT 64、通常 Gemma 256。QAT の実験段階の制約を起動時に表示する。
+
+### Deno / Chrome と会話の寿命
+
+OUT の `family-deno.ts` / `family-browser.ts` は同じ `family-candidate/lifecycle.ts` を使う。
+名前に candidate が残るが、実行時の import は正式な公開 `packages/models/gemma4-qat.ts`。
+Deno は `denoDirectory`、Chrome はローカル HTTP の全量・区間読みを `localDirectory` へ接続した。
+Chrome は NVIDIA Ampere、fallback=false。8ケース・最大16 token、容量128、greedy。
+
+| モデル | chunk      | 既存の単一prefill比較との列一致 | Deno / Chrome の列一致 |
+| ------ | ---------- | ------------------------------: | ---------------------: |
+| E2B    | 64         |                             8/8 |                    8/8 |
+| E2B    | 32（既定） |                             8/8 |                    8/8 |
+| E4B    | 64         |                             8/8 |                    8/8 |
+| E4B    | 32（既定） |                             7/8 |                    8/8 |
+
+E4B の相違は35 tokenの会話履歴入力で、生成step13（0始まり）から。32行の2chunkに分ける条件と
+64行の1chunk条件の比較で、Deno と Chrome はそれぞれ同じ列を出した。縮約と SRQ の感度による差と
+**推測**するが、このケースの最初の中間テンソル差は未帰属。chunk 間の全ビット一致は主張しない。
+集計は `family-deno-summary.json` / `family-browser-summary.json`、全記録は `*-family-{deno,browser}-*.json`。
+
+全4条件で次を確認した。Deno / Chrome の会話結果は停止理由も含めて一致した。
+
+- 算術2ターン（45 → 4）が EOS で終了し、同じ sequence を1本だけ使う。全履歴の再描画でも2ターン目は4。
+- decode中の AbortSignal は指定した理由を返し、doneはaborted。その会話から次の生成が成功する。
+- 反復の早期終了はclosedで決着し、次の会話も成功する。reset相当のdispose後も再生成できる。
+- 同容量の会話を順に作り直した各runで、state常駐量は E2B **14,352,392 B**、E4B **46,792,712 B** のまま。
+  これは会話用stateの量であり、モデル重みや全VRAM量ではない。累積する生存バッファは観測されなかった。
+
+最初の検査は `contextCount` を現存数と誤読して失敗した。この項目は作成した累計本数なので、
+定義と実装を確認し、再作成を累計本数・解放を常駐bytesで別々に検査するよう修正した。
+この修正で製品の解放処理や期待する常駐量は変更していない。
+
+`e2e_gemma4_qat_test.ts` は公開入口の2モデル・6stepsで成功（`family-product-gpu.log`）。
+CPUの形式・RoPE・公開面は15件で成功し、追加で独立Torchの角度丸め期待値を固定した。
+CLIはQAT E2B（model省略）/ E4B（明示）/ 通常Gemmaで、2ターン → `/reset` → 1ターン → `/exit` を
+標準入力から自動実行し、すべて終了0（`family-cli-results.json`、`gemma4*-*-cli.log`）。手動操作の報告ではない。
+
+### 取得済み資産と末尾 bucket の対照
+
+`family-extra.ts` / `family-extra.json` で、公開 `fromAssets` も両モデルの算術45/EOSを確認した。
+E4B の35 token会話履歴は `chunkLength: 32, chunkBuckets: []`（末尾も物理32行）にすると、
+chunk64の16 token列と全件一致した。既定bucketでは末尾3 tokenが物理4行となり、
+`stateQkParallelEligible`（M<=8）でQKの縮約経路が変わる。対照により小さい末尾bucketの
+計画切り替えへの依存を確認した。最初の中間テンソル差の特定はしていないため、単一opの責任とは断定しない。
+既定bucketとchunkは変更していない。最初の追加スクリプトはparseManifestへJSON文字列でなくobjectを渡して失敗し、
+APIに合わせたv2で検収した（`family-extra-v2.log`）。
+
+### SRQ 後処理融合のマイクロベンチ
+
+`srq-fusion-benchmark.ts` と `srq-fusion-benchmark-steady.ts` は、正式GEMVの縮約本体を保ち、
+最後のstoreだけを正式SRQのビット境界表による処理へ置き換える。製品runtimeへの融合はまだ追加していない。
+E2Bの実up/down/head重みを使い、I2の同じ整数をI4/I8へ広げた対照も含む。
+up/downはM=1/4/32、headはM=1、計21条件。各条件の通常・広い値域・丸め境界近傍の3入力で、
+融合前後のu32出力は全件一致した（計63比較、初回・反復増加版とも成功）。
+
+初回は1試料10反復、ABBA順で各候補6試料。時間がばらついたため、両候補を各100反復で交互に3回温め、
+1試料100反復・各候補10試料へ増やした。GPU timestampはlinearと後置SRQだけで、前置SRQは両候補に共通で計測外。
+個々の実時間・範囲・中央値の正本は `srq-fusion-benchmark{,-steady}.json` と `srq-fusion-summary.json`。
+
+反復増加版のM=1の中央値:
+
+| 形                 | 格納 | 分離 ms | 融合 ms | 速度比（分離/融合） |
+| ------------------ | ---- | ------: | ------: | ------------------: |
+| up [12288,1536]    | I2   |  0.0425 |  0.0329 |               1.289 |
+| up [12288,1536]    | I4   |  0.0580 |  0.0477 |               1.216 |
+| up [12288,1536]    | I8   |  0.0674 |  0.0581 |               1.160 |
+| down [1536,12288]  | I2   |  0.1154 |  0.1122 |               1.029 |
+| down [1536,12288]  | I4   |  0.1908 |  0.1843 |               1.036 |
+| down [1536,12288]  | I8   |  0.1875 |  0.1828 |               1.026 |
+| head [262144,1536] | I2   |  0.2487 |  0.2430 |               1.024 |
+
+upのM=32はI2で1.003倍、I4で0.988倍、I8で1.061倍。全形状への一律適用の根拠にはしない。
+M=1 upの時間短縮は約14〜22%であり、会話で最初に「16〜29%短縮」と書いたのは速度比との取り違えだったため訂正した。
+モデル全体の利得・バッファ削減・初回compile費用は未測定。次はdecodeのup/gateに絞った全体比較を優先する。
+
+### 共通化後の host RoPE 計測
+
+`rope-host-bench.ts` は共通化前の `022cb09` と変更後の通常 Gemma、および QAT の RoPE を比較した。
+位置1024からの1 / 4 / 32 / 64行を使い、通常 Gemma の変更前後は全u32一致。
+100回のwarmup後、前→後→QAT→QAT→後→前を4巡、各試料は約4096位置分を反復した。
+1呼び出しの中央値は以下。生データは `rope-host-bench.json`、集計は `rope-host-summary.json`。
+
+| 行数 | 通常・変更前 ms | 通常・変更後 ms |  QAT ms |
+| ---: | --------------: | --------------: | ------: |
+|    1 |         0.01613 |         0.01592 | 0.01683 |
+|    4 |         0.04947 |         0.04847 | 0.05013 |
+|   32 |         0.36518 |         0.36015 | 0.36714 |
+|   64 |         0.72855 |         0.72151 | 0.73275 |
+
+通常経路の悪化は観測されなかった。約1〜2%の小差は測定の揺れと区別しておらず、高速化の成果とは数えない。
+このCPUでQAT decodeのRoPEは約0.017 msであり、まずGPUのlinear/SRQ融合を優先する。
+
+共通パイプライン / CLI の `deno task verify` は **2,869 passed / 760 steps / 0 failed / 5 ignored、25m13s**、
+終了コード0（`family-verify.log`）。実行中は実行処理を固定し、追記文書とQAT制約を訂正したCLIコメントを再確認した。
+変更文書の相対ファイルリンクは欠損0件。モデル固有 recipe の変更は前コミットで検収済み。

@@ -23,7 +23,7 @@
  * default（sliding: rotaryDim = headDim）と proportional（full: rotaryDim = partial_rotary_factor
  * ぶん）は**同じ 1 式**に畳まれる。attention_scaling は両 rope_type とも 1 なので掛けない。
  *
- * ## 数値契約
+ * ## 通常 Gemma の数値契約
  *
  * - 計算は **f64**、格納時に 1 度だけ f32 へ丸める。上流は全経路 f32（角度 `position × invFreq`
  *   を f32 で積むため大きい位置ほど角度が粗い — 131,071 で ULP ≈ 0.008 rad）なので、
@@ -35,6 +35,9 @@
  *   全表でも期待 0.4 要素）で、GPU 側の 1 ULP 群（known-issues の Metal 節）と同じ扱いにする。
  * - 回さない次元（`invFreq = 0`）は角度 0 なので cos = 1 / sin = 0 が**厳密**に出る。
  *
+ * QAT 専用入口は周波数のべき乗・逆数・位置積を段ごとに f32 に丸める
+ * （ADR 0097 追記 5）。上流の三角関数・縮約との全ビット一致は保証しない。
+ *
  * MUST: pad 行（`position = 0`）も通常行と同じ式で埋める（cos = 1 / sin = 0）。pad 行の値は
  * 契約上無意味（ADR 0066 追記 6）だが、未初期化のまま渡すと NaN が pad 行の attention に入り
  * 「空行 → 厳密 0」の構造保証（ADR 0067 決定 6）の外側で NaN 分類が動きうる。
@@ -43,7 +46,10 @@
 import type { Tensor } from "@karume/runtime";
 
 /** 層種別の名前（上流 `layer_types` の綴りそのまま — グラフ入力名の一部になる）。 */
-export const GEMMA4_ROPE_LAYER_TYPES = ["sliding_attention", "full_attention"] as const;
+export const GEMMA4_ROPE_LAYER_TYPES = [
+  "sliding_attention",
+  "full_attention",
+] as const;
 
 export type Gemma4RopeLayerType = (typeof GEMMA4_ROPE_LAYER_TYPES)[number];
 
@@ -73,8 +79,10 @@ export type Gemma4RopePart = (typeof GEMMA4_ROPE_PARTS)[number];
  * MUST: ここが唯一の生成箇所（配布側の門 `GEMMA4_GRAPH_INPUTS` と TS の派生入力名は同じ文字列
  * から出す）。
  */
-export const gemma4RopeInputName = (layerType: Gemma4RopeLayerType, part: Gemma4RopePart): string =>
-  `rope_${layerType}_${part}`;
+export const gemma4RopeInputName = (
+  layerType: Gemma4RopeLayerType,
+  part: Gemma4RopePart,
+): string => `rope_${layerType}_${part}`;
 
 /** 4 本のグラフ入力名（層種別 × 部の固定順）。 */
 export const gemma4RopeInputNames = (): string[] =>
@@ -89,7 +97,10 @@ export const gemma4RopeInputNames = (): string[] =>
  * 「前半 = 後半」の並びが崩れ、上流と別の表を黙って作る。`theta` は正の有限値
  * （`theta ** 負` が 0 / Inf に落ちる形を弾く）。
  */
-export const assertGemma4RopeLayerSpec = (where: string, spec: Gemma4RopeLayerSpec): void => {
+export const assertGemma4RopeLayerSpec = (
+  where: string,
+  spec: Gemma4RopeLayerSpec,
+): void => {
   const { theta, headDim, rotaryDim } = spec;
   if (!Number.isFinite(theta) || theta <= 0) {
     throw new Error(`${where}: theta は正の有限値（${theta}）`);
@@ -97,34 +108,49 @@ export const assertGemma4RopeLayerSpec = (where: string, spec: Gemma4RopeLayerSp
   if (!Number.isInteger(headDim) || headDim < 2 || headDim % 2 !== 0) {
     throw new Error(`${where}: headDim は 2 以上の偶数（${headDim}）`);
   }
-  if (!Number.isInteger(rotaryDim) || rotaryDim < 2 || rotaryDim % 2 !== 0 || rotaryDim > headDim) {
+  if (
+    !Number.isInteger(rotaryDim) || rotaryDim < 2 || rotaryDim % 2 !== 0 ||
+    rotaryDim > headDim
+  ) {
     throw new Error(
       `${where}: rotaryDim は 2 以上 headDim 以下の偶数（${rotaryDim} / headDim ${headDim}）`,
     );
   }
 };
 
-export const assertGemma4RopeSpec = (where: string, spec: Gemma4RopeSpec): void => {
+export const assertGemma4RopeSpec = (
+  where: string,
+  spec: Gemma4RopeSpec,
+): void => {
   for (const layerType of GEMMA4_ROPE_LAYER_TYPES) {
     assertGemma4RopeLayerSpec(`${where}.${layerType}`, spec[layerType]);
   }
 };
 
 /**
- * 逆周波数 `invFreq[0 .. headDim/2)`（f64）。回さない次元は 0。
+ * 逆周波数 `invFreq[0 .. headDim/2)`。回さない次元は 0。QAT だけ段ごとに f32 へ丸める。
  *
  * NOTE: `theta ** x` は `Math.pow` の f64。上流は f32 で `1 / base ** t` を計算するので相対 1e-7
  * 級の差があるが、これは意図した差（上の数値契約）。
  */
-export const gemma4RopeInverseFrequencies = (
+const ropeInverseFrequencies = (
   spec: Gemma4RopeLayerSpec,
+  qat: boolean,
 ): Float64Array<ArrayBuffer> => {
   assertGemma4RopeLayerSpec("gemma4 rope", spec);
   const half = spec.headDim / 2;
   const rotated = spec.rotaryDim / 2;
   const invFreq = new Float64Array(half);
   for (let i = 0; i < rotated; i += 1) {
-    invFreq[i] = Math.pow(spec.theta, -(2 * i) / spec.headDim);
+    invFreq[i] = qat
+      ? Math.fround(
+        1 /
+          Math.fround(Math.pow(spec.theta, Math.fround(2 * i / spec.headDim))),
+      )
+      : Math.pow(spec.theta, -(2 * i) / spec.headDim);
+    if (qat && (!Number.isFinite(invFreq[i]) || invFreq[i] <= 0)) {
+      throw new Error("gemma4-qat rope: f32 逆周波数が正の有限数でない");
+    }
   }
   return invFreq;
 };
@@ -140,11 +166,12 @@ export type Gemma4RopeRows = {
  *
  * MUST: 位置は非負整数（u32 の論理位置）。負や非整数は式が定義されないので fail loudly。
  */
-export const gemma4RopeRows = (
+const ropeRows = (
   spec: Gemma4RopeLayerSpec,
   positions: ArrayLike<number>,
+  qat: boolean,
 ): Gemma4RopeRows => {
-  const invFreq = gemma4RopeInverseFrequencies(spec);
+  const invFreq = ropeInverseFrequencies(spec, qat);
   const width = spec.headDim;
   const half = width / 2;
   const rows = positions.length;
@@ -157,8 +184,8 @@ export const gemma4RopeRows = (
     }
     const base = row * width;
     for (let i = 0; i < half; i += 1) {
-      const angle = position * invFreq[i];
-      // f64 → f32 の丸めは代入時の 1 回だけ（前半 j = i と後半 j = i + half は同じ値）
+      const angle = qat ? Math.fround(Math.fround(position) * invFreq[i]) : position * invFreq[i];
+      // 三角関数の結果は代入時に f32 へ丸める（前半と後半は同じ値）。
       const c = Math.cos(angle);
       const s = Math.sin(angle);
       cos[base + i] = c;
@@ -175,17 +202,49 @@ export const gemma4RopeRows = (
  *
  * `positions` は物理行数ぶん（pad 行は 0 — `sequence.ts` が `input_ids` と同じ規約で埋める）。
  */
-export const gemma4RopeInputs = (
+const ropeInputs = (
   spec: Gemma4RopeSpec,
   positions: ArrayLike<number>,
+  qat: boolean,
 ): Record<string, Tensor> => {
   const inputs: Record<string, Tensor> = {};
   for (const layerType of GEMMA4_ROPE_LAYER_TYPES) {
     const layer = spec[layerType];
-    const rows = gemma4RopeRows(layer, positions);
+    const rows = ropeRows(layer, positions, qat);
     const shape = [1, positions.length, layer.headDim];
-    inputs[gemma4RopeInputName(layerType, "cos")] = { dtype: "f32", shape, data: rows.cos };
-    inputs[gemma4RopeInputName(layerType, "sin")] = { dtype: "f32", shape, data: rows.sin };
+    inputs[gemma4RopeInputName(layerType, "cos")] = {
+      dtype: "f32",
+      shape,
+      data: rows.cos,
+    };
+    inputs[gemma4RopeInputName(layerType, "sin")] = {
+      dtype: "f32",
+      shape,
+      data: rows.sin,
+    };
   }
   return inputs;
 };
+
+/** 通常 Gemma の逆周波数（f64）。回さない次元は 0。 */
+export const gemma4RopeInverseFrequencies = (
+  spec: Gemma4RopeLayerSpec,
+): Float64Array<ArrayBuffer> => ropeInverseFrequencies(spec, false);
+/** 通常 Gemma の位置列から cos / sin 行を f64 計算で作り、f32 格納する。 */
+export const gemma4RopeRows = (
+  spec: Gemma4RopeLayerSpec,
+  positions: ArrayLike<number>,
+): Gemma4RopeRows => ropeRows(spec, positions, false);
+/** 通常 Gemma の物理 chunk に対応する RoPE 入力4本。pad の位置は 0。 */
+export const gemma4RopeInputs = (
+  spec: Gemma4RopeSpec,
+  positions: ArrayLike<number>,
+): Record<string, Tensor> => ropeInputs(spec, positions, false);
+/**
+ * 固定 QAT 専用の f32 段丸め。pad を含む物理 chunk の RoPE 入力4本を作る。
+ * DECIDED: [ADR 0097 追記5](../../../../docs/decisions/0097-gemma4-qat-integration.md#追記-5--固定-qat-recipe-と数値比較の扱い2026-09-11)。
+ */
+export const gemma4QatRopeInputs = (
+  spec: Gemma4RopeSpec,
+  positions: ArrayLike<number>,
+): Record<string, Tensor> => ropeInputs(spec, positions, true);

@@ -278,3 +278,11 @@ export type { DecodedWav } from "./src/audio/wav.ts";
  * （ADR 0083 決定 9 — 破壊的変更。消費側の doc は limitations）。parity 検収用の内部ヘルパ
  * として `src/generation/greedy.ts` に残っており、生成の公開面は生成 API 波の sequence が持つ。
  */
+
+// 固定 mobile QAT は別ファミリ。会話・設定の共通型は Gemma の公開面を使う。
+export { Gemma4QatPipeline } from "./src/gemma/pipeline.ts";
+export type {
+  Gemma4QatFromPretrainedOptions,
+  Gemma4QatPipelineOptions,
+} from "./src/gemma/pipeline.ts";
+export { gemma4QatRopeInputs } from "./src/gemma/rope.ts";

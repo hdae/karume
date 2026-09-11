@@ -170,3 +170,24 @@ SRQ 単体の CPU / GPU ビット一致は保たれている。8種類の短い�
 トークン列は全件一致したが、公式 CPU との完全一致は E2B 6件 / E4B 4件。
 この結果を品質全般の合格とは扱わず、family / CLI に実験段階の制約として明示する。
 既存の許容差・期待値は変更しない。詳細と生データは research の該当節を参照する。
+
+## 追記 6 — 共通パイプラインと対話 CLI（2026-09-11）
+
+公開入口 `Gemma4QatPipeline.fromPretrained` / `fromAssets` とサブパス `@karume/models/gemma4-qat`
+を追加する。既存の Gemma 本体は非公開の共通基底へ移し、通常 / QAT の factory だけを薄く分ける。
+会話・sequence・取得・見積り・解放の実装は同じものを使う。通常 Gemma の既定値・数値・MTP は維持する。
+
+- QAT は `gemma4-qat/1`、model `e2b` / `e4b` だけを受理する。token embedding の INT2、
+  共有 head、固定混成格納、量子化 linear の前後の SRQ、モデル別の PLE 格納を構築前に検査する。
+  通常 Gemma の manifest を QAT として読み替えない。QAT の MTP 構築指定は型と実行時で拒否する。
+- 派生入力の RoPE は QAT 専用の f32 段丸めへ切り替える。既存の `gemma4RopeInputs` と
+  既存 golden の値は変えない。新たに `gemma4QatRopeInputs` を公開する。
+- 会話 API と資産・設定の型は共通の Gemma 型を使う。QAT の取得オプションは model を2種類に絞り、
+  speculative を受けない。公開済み通常 Gemma の API を撤去・改名しない。
+- `demo:gemma4-qat` を追加し、既存 Gemma CLI を共通 runner に移す。履歴・KV 継続・reset・中断・
+  進捗・統計は既存の動作を使う。QAT は既定 `models/karume-gemma4-qat/`、model 省略時は manifest の既定、
+  最大生成64 token。通常 Gemma の既定256 tokenは維持する。QAT の実験段階の制約を起動時に表示する。
+
+検収は通常 Gemma の全体回帰、QAT E2B/E4B の Deno/Chrome 生成比較、既定chunk32と比較用64、
+複数ターンの KV 再利用、中断・反復の早期終了後の復帰、会話ごとの状態バッファ解放で行う。
+公式 CPU/GPU の縮約差の評価は追記5のままとし、期待値や既存許容差を緩めない。

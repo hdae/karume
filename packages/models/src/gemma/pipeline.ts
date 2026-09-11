@@ -35,6 +35,7 @@
  * ## MUST: 全モジュール副作用ゼロ（import 時実行・グローバル可変状態の禁止 — CLAUDE.md）
  */
 
+import { admitGemma4Qat, assertGemma4QatModel, assertGemma4QatPle } from "./qat.ts";
 import { closeableGenerator } from "../concurrency/closeable-generator.ts";
 import {
   acquireGpu,
@@ -117,6 +118,7 @@ import {
 import {
   GEMMA4_ROPE_LAYER_TYPES,
   GEMMA4_ROPE_PARTS,
+  gemma4QatRopeInputs,
   gemma4RopeInputName,
   gemma4RopeInputNames,
   gemma4RopeInputs,
@@ -136,6 +138,8 @@ import {
 import { parseGemmaTokenizerAsset } from "./text/asset.ts";
 import { GemmaTokenizer } from "./text/tokenizer.ts";
 import { type Gemma4ChatMessage, gemma4ChatPrompt, gemma4StopTokens } from "./text/chat.ts";
+
+type GemmaFamily = "gemma4" | "gemma4-qat";
 
 /**
  * グラフ入力の名前（正本は `export_product.py` の定数）。
@@ -308,7 +312,10 @@ export type Gemma4PipelineOptions = {
    *
    * コールバックの例外は握らない（fail loudly — そのターンごと落ちる）。
    */
-  readonly onRunDiagnostics?: (diagnostics: SessionDiagnostics, phase: Gemma4RunPhase) => void;
+  readonly onRunDiagnostics?: (
+    diagnostics: SessionDiagnostics,
+    phase: Gemma4RunPhase,
+  ) => void;
   /**
    * states 形 attention ③PV の縮約形（省略時は {@link GEMMA4_STATE_ATTENTION_REDUCE} =
    * `"parallel"`）。
@@ -407,7 +414,14 @@ export const GEMMA4_STATE_ATTENTION_REDUCE: StateAttentionReduce = "parallel";
  * MUST: 凍結する — この配列は module スコープの共有物で、消費者が並べ替えると以後に組む
  * pipeline の物理行数の選び方まで変わる（`chunkBuckets` は昇順前提で先頭一致を採る）。
  */
-export const GEMMA4_CHUNK_BUCKETS: readonly number[] = Object.freeze([4, 8, 32, 64, 128, 256]);
+export const GEMMA4_CHUNK_BUCKETS: readonly number[] = Object.freeze([
+  4,
+  8,
+  32,
+  64,
+  128,
+  256,
+]);
 
 /**
  * 既定のバケット列を、選ばれた `chunkLength` に載る段だけへ切り詰める。
@@ -678,7 +692,10 @@ type Gemma4State = {
    */
   readonly planBackingBudgetBytes?: number;
   /** 実行 1 回ごとの観測席（{@link Gemma4PipelineOptions.onRunDiagnostics}）。 */
-  readonly onRunDiagnostics?: (diagnostics: SessionDiagnostics, phase: Gemma4RunPhase) => void;
+  readonly onRunDiagnostics?: (
+    diagnostics: SessionDiagnostics,
+    phase: Gemma4RunPhase,
+  ) => void;
 };
 
 /**
@@ -723,7 +740,9 @@ type Gemma4SidecarAssets = {
 
 /** `ple.json` のバイト列を索引へ落とす（fatal decode → JSON → 受理形）。 */
 const parsePleIndexAsset = (bytes: Uint8Array<ArrayBuffer>): Gemma4PleIndex =>
-  parseGemma4PleIndex(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)));
+  parseGemma4PleIndex(
+    JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)),
+  );
 
 /**
  * PLE 索引が宣言する shard と、manifest の**遅延資産**が**ちょうど一致**することを見る門。
@@ -860,7 +879,9 @@ const hiddenSizeOf = (graph: GenerationGraph): number => {
 const capacitySymbolOf = (graph: GenerationGraph): string => {
   const fromInputs = new Set<string>();
   for (const input of graph.inputs) {
-    for (const dim of input.shape) if (typeof dim === "string") fromInputs.add(dim);
+    for (const dim of input.shape) {
+      if (typeof dim === "string") fromInputs.add(dim);
+    }
   }
   const free = graph.symbols.filter((symbol) => !fromInputs.has(symbol));
   if (free.length !== 1) {
@@ -1045,9 +1066,14 @@ export const speculativeSetup = (
  * `fromAssets` / `fromPretrained` / `estimateSessionMemory` の 3 つで、どれも妥当値しか渡さない）。
  * `mod.ts` / サブパス面には出さない（ADR 0008）。
  */
-export const assertChunkLength = (chunkLength: number, config: Gemma4PipelineConfig): number => {
+export const assertChunkLength = (
+  chunkLength: number,
+  config: Gemma4PipelineConfig,
+): number => {
   if (!Number.isSafeInteger(chunkLength) || chunkLength < 2) {
-    throw new Error(`Gemma4Pipeline: chunkLength ${chunkLength} が 2 以上の整数でない`);
+    throw new Error(
+      `Gemma4Pipeline: chunkLength ${chunkLength} が 2 以上の整数でない`,
+    );
   }
   if (chunkLength > config.maxChunkLength) {
     throw new Error(
@@ -1099,13 +1125,20 @@ const buildGemma4Program = (
   admitted: Gemma4Admission,
   assets: Gemma4SidecarAssets,
   options: Gemma4PipelineOptions,
+  family: GemmaFamily,
 ): {
   readonly wiring: GenerationWiring;
   readonly tokenizer: GemmaTokenizer;
   readonly ple: Gemma4Ple;
 } => {
   const { config, vocabSize, capacitySymbol, component } = admitted;
-  const tokenizer = new GemmaTokenizer(parseGemmaTokenizerAsset(assets.tokenizer));
+  if (family === "gemma4-qat") {
+    assertGemma4QatPle(component.graph, assets.pleIndex);
+  }
+  const ropeInputs = family === "gemma4-qat" ? gemma4QatRopeInputs : gemma4RopeInputs;
+  const tokenizer = new GemmaTokenizer(
+    parseGemmaTokenizerAsset(assets.tokenizer),
+  );
   // ① tokenizer が生成しうる id と ② 主 embedding の vocab 行数。
   if (tokenizer.maxTokenId >= vocabSize) {
     throw new Error(
@@ -1123,7 +1156,10 @@ const buildGemma4Program = (
       : { maxResidentBytes: options.maxResidentPleBytes }),
   });
 
-  const chunkLength = assertChunkLength(options.chunkLength ?? config.chunkLength, config);
+  const chunkLength = assertChunkLength(
+    options.chunkLength ?? config.chunkLength,
+    config,
+  );
   const wiring = createGenerationProgram({
     graph: component.graph,
     inputIds: INPUT_IDS,
@@ -1150,7 +1186,7 @@ const buildGemma4Program = (
       names: [PER_LAYER_INPUTS, ...gemma4RopeInputNames()],
       derive: async (ids, positions, deriveOptions) => ({
         [PER_LAYER_INPUTS]: await ple.gather(ids, deriveOptions),
-        ...gemma4RopeInputs(config.rope, positions),
+        ...ropeInputs(config.rope, positions),
       }),
     },
   });
@@ -1172,12 +1208,14 @@ const buildGemma4Program = (
 const gemma4ManifestConfig = (
   manifest: Manifest,
   selection: { readonly model?: string; readonly quant?: string },
+  family: GemmaFamily,
 ): {
   readonly config: Gemma4PipelineConfig;
   readonly quantName: string;
   readonly quant: Quant;
 } => {
   const modelName = selection.model ?? manifest.defaultModel;
+  if (family === "gemma4-qat") assertGemma4QatModel(modelName);
   if (!Object.hasOwn(manifest.models, modelName)) {
     throw new Error(
       `Gemma4Pipeline: model '${modelName}' は manifest に無い` +
@@ -1186,16 +1224,16 @@ const gemma4ManifestConfig = (
   }
   const entry: ModelEntry = manifest.models[modelName];
   const { name, major } = entry.pipeline;
-  if (name !== GEMMA4_PIPELINE_NAME) {
+  if (name !== family) {
     throw new Error(
       `Gemma4Pipeline: manifest の pipeline が '${name}/${major}'` +
-        `（'${GEMMA4_PIPELINE_NAME}/${GEMMA4_PIPELINE_MAJOR}' が必要）`,
+        `（'${family}/${GEMMA4_PIPELINE_MAJOR}' が必要）`,
     );
   }
   if (major !== GEMMA4_PIPELINE_MAJOR) {
     throw new Error(
       `Gemma4Pipeline: pipeline '${name}/${major}' の major に未対応` +
-        `（この実装が読めるのは ${GEMMA4_PIPELINE_NAME}/${GEMMA4_PIPELINE_MAJOR}）`,
+        `（この実装が読めるのは ${family}/${GEMMA4_PIPELINE_MAJOR}）`,
     );
   }
   const quantName = selection.quant ?? entry.defaultQuant;
@@ -1336,7 +1374,9 @@ export const runDiagnosticsHook = <D>(
     // draft run は drafter Session でしか起きない（居なければ簿記の破れ — 黙って貸し手の
     // 診断を渡すと、別の run の値が draft の名前で積算される）。
     if (drafter === undefined) {
-      throw new Error("Gemma4Pipeline: drafter が居ないのに draft run の観測が届いた");
+      throw new Error(
+        "Gemma4Pipeline: drafter が居ないのに draft run の観測が届いた",
+      );
     }
     listener(drafter.session.diagnostics(), phase);
   };
@@ -1349,7 +1389,10 @@ export const runDiagnosticsHook = <D>(
  * （この層で数え直さない）。写す欄が増えたときに片方の入口だけ古いまま残るのを防ぐため、
  * 組み立てを 1 本にしてある。
  */
-export const stopStringOf = (stopString: string, inner: GenerationStop): Gemma4ChatStop => ({
+export const stopStringOf = (
+  stopString: string,
+  inner: GenerationStop,
+): Gemma4ChatStop => ({
   reason: "stop-string",
   stopString,
   tokens: inner.tokens,
@@ -1417,7 +1460,12 @@ export const completeChatTurn = async (options: {
     failure ??= { error };
   }
   try {
-    await closeChatTurn(options.where, failure, () => options.cleanup(stop), options.release);
+    await closeChatTurn(
+      options.where,
+      failure,
+      () => options.cleanup(stop),
+      options.release,
+    );
   } catch (error) {
     options.fail(error);
     throw error;
@@ -1443,7 +1491,7 @@ const joinChunks = async (chunks: AsyncIterable<string>): Promise<string> => {
  * {@link Gemma4Pipeline.fromAssets}（取得済みバイト列）の 2 つだけ — コンストラクタを private に
  * してあるのは、資産の突合を迂回した半端な状態を作れないようにするため（ADR 0008）。
  */
-export class Gemma4Pipeline {
+class GemmaPipeline {
   readonly #state: Gemma4State;
   /** chat と dispose の直列化鎖（1 つの Session を 2 本の会話で同時に押さない）。 */
   readonly #chain = createOperationChain();
@@ -1452,31 +1500,32 @@ export class Gemma4Pipeline {
   /** dispose の 1 本。**undefined でないことが「dispose 済み」**（派生状態を別に持たない）。 */
   #disposal: Promise<void> | undefined;
 
-  private constructor(state: Gemma4State) {
+  protected constructor(state: Gemma4State) {
     this.#state = state;
   }
 
-  /**
-   * 配布形から取得して組む（`loadManifest` → `resolveFiles` → **グラフ shard だけ**を
-   * 取って `prepareModel` → 家族 admission → 重み shard と PLE sidecar の prefetch →
-   * tokenizer と索引の取得 → 構築）。重み shard は Session を組むときに 1 本ずつ流れ、PLE
-   * sidecar は**触った 1 本だけ**が永続キャッシュから読み直される（ADR 0070 / 0085 決定 3）。
-   *
-   * **`ref` は必須**（取得元に既定は無い — `src/hub/repo-ref.ts` の MUST）。パッケージ版が検証した
-   * 取得元は {@link GEMMA4_SOURCES}（`./config.ts`）の `"gemma4"` — 再現性を自分で固定するなら
-   * `{ repo, revision }` を呼び手が明示する。文字列の `ref` は `{ repo }` と読む（= `main` 追従）。
-   *
-   * 手元の配布形は**取得元ハンドル**で渡す（`localDirectory` / `@karume/hub/deno` の
-   * `denoDirectory`）。HF の `owner/name` の綴りの門は通らず、network も CacheStorage も
-   * 通らない（{@link Gemma4FromPretrainedOptions} の HTTP 専用ノブは効かない）。
-   */
-  static async fromPretrained(
+  /** 共通 factory の組み立て。family の契約を検査して状態を返す。 */
+  protected static async loadPretrained(
+    family: GemmaFamily,
     ref: string | HubRepoRef | DistributionSource,
     options: Gemma4FromPretrainedOptions = {},
-  ): Promise<Gemma4Pipeline> {
-    const where = "Gemma4Pipeline.fromPretrained";
-    if (options.speculative !== undefined) assertSpeculative(where, options.speculative);
-    const source = toManifestSource(ref, where, 'GEMMA4_SOURCES["gemma4"]（@karume/models/gemma）');
+  ): Promise<Gemma4State> {
+    const where = family === "gemma4"
+      ? "Gemma4Pipeline.fromPretrained"
+      : "Gemma4QatPipeline.fromPretrained";
+    if (family === "gemma4-qat" && options.speculative !== undefined) {
+      throw new Error(`${where}: QAT の MTP は未対応`);
+    }
+    if (options.speculative !== undefined) {
+      assertSpeculative(where, options.speculative);
+    }
+    const source = toManifestSource(
+      ref,
+      where,
+      family === "gemma4"
+        ? 'GEMMA4_SOURCES["gemma4"]（@karume/models/gemma）'
+        : "明示した QAT 配布形の取得元",
+    );
     const hubOptions: StreamAssetsOptions = hubLoadOptions(options);
     const loaded = await loadManifest(source, hubOptions);
     const selection = {
@@ -1486,7 +1535,10 @@ export class Gemma4Pipeline {
     // MUST: 取る weights を役割で絞る（`ResolveOptions.weights`）。投機を使わないロードで
     // drafter の shard が表に残ると、遅延資産の突合（{@link assertPleShardAssets}）が落ちる。
     const componentKeys = options.speculative === undefined ? [MODEL] : [MODEL, DRAFTER];
-    const files = resolveFiles(loaded.manifest, { ...selection, weights: componentKeys });
+    const files = resolveFiles(loaded.manifest, {
+      ...selection,
+      weights: componentKeys,
+    });
     const { admitted, assets, deferred } = await loadShardComponents(
       where,
       loaded,
@@ -1494,12 +1546,22 @@ export class Gemma4Pipeline {
       componentKeys,
       // 家族の門は admission 席で通す（重み shard を取る前 — `src/hub/components.ts`）。
       async (open) => {
-        const { config, quantName, quant } = gemma4ManifestConfig(loaded.manifest, selection);
+        const { config, quantName, quant } = gemma4ManifestConfig(
+          loaded.manifest,
+          selection,
+          family,
+        );
         const admitted = admitGemma4(
           open(MODEL),
           config,
           options.speculative === undefined ? undefined : open(DRAFTER),
         );
+        if (family === "gemma4-qat") {
+          admitGemma4Qat(
+            admitted.component.graph,
+            selection.model ?? loaded.manifest.defaultModel,
+          );
+        }
         // 配布形が宣言した `requiredLimits` は**重み shard を取る前**にここで見る
         // （ADR 0089 決定 5 — 共有 GPU ならその limits、自前で取る経路はアダプタ実測値）。
         // 他 7 家族と違って席が閉包側にあるのは、{@link admitGemma4} が構築オプションを
@@ -1521,7 +1583,9 @@ export class Gemma4Pipeline {
     // 「配布形が宣言した資産を 1 本も読まないまま動く」形で、逆に足りなければ会話の途中で
     // 初めて落ちる（どちらもロードの時点で分かる）。
     // 突合の本体は {@link assertPleShardAssets}（GPU も重み shard も触っていないこの位置で呼ぶ）。
-    const pleIndex = parsePleIndexAsset(assetBytes(where, assets, PLE_INDEX_ASSET));
+    const pleIndex = parsePleIndexAsset(
+      assetBytes(where, assets, PLE_INDEX_ASSET),
+    );
     assertPleShardAssets(where, pleIndex, Object.keys(deferred));
     // MUST: 取得層のオプションから `signal` を落とす（`hub/components.ts` の相 2 と同じ理由 —
     // ロード 1 回の寿命を表す signal を、以後の生成が使う読み口へ持ち越さない）。載せ直すのは
@@ -1561,38 +1625,38 @@ export class Gemma4Pipeline {
         ...(reader === undefined ? {} : {
           range: {
             cost: reader.cost,
-            read: async (offset: number, length: number, options: Gemma4PleReadOptions = {}) =>
+            read: async (
+              offset: number,
+              length: number,
+              options: Gemma4PleReadOptions = {},
+            ) =>
               // hub が tight view を保証しているので、`buffer` がそのまま要求区間ちょうどになる。
               (await reader.read(offset, length, options)).buffer,
           },
         }),
       };
     };
-    return await Gemma4Pipeline.#build(
+    return await GemmaPipeline.#build(
+      family,
       admitted,
-      { tokenizer: assetBytes(where, assets, TOKENIZER_ASSET), pleIndex, openPleShard },
+      {
+        tokenizer: assetBytes(where, assets, TOKENIZER_ASSET),
+        pleIndex,
+        openPleShard,
+      },
       options,
     );
   }
 
-  /**
-   * 取得済み資産から組む。資産の解釈・グラフとの突合・id 空間の相互照合を全てここで済ませ、
-   * **製品グラフの Session を 1 本張って**返す。
-   *
-   * 製品グラフは配布形の時点で常に分割されている（ADR 0081）ので、`model` は**宣言順の
-   * shard 列**（先頭がグラフ shard）を受け、`fromPretrained` と同じ shard 逐次面へ流す
-   * （受け口の実装は `src/hub/components.ts` — 7 家族共有の {@link assetComponentOpener}）。
-   *
-   * MUST: `config` は {@link fromPretrained} と**同じ門**（{@link parseGemma4PipelineConfig}）を
-   * 通す。TS の型は未知キーも値域も見ないので、門が無いと `temperature: -1` のような宣言が
-   * 3.7GiB を読み切った後の初 `chat` で初めて落ちる。宣言を検査するのは**バイト列を 1 本も
-   * 開く前**である。
-   */
-  static async fromAssets(
+  /** 共通 factory の組み立て。family の契約を検査して状態を返す。 */
+  protected static async loadAssets(
+    family: GemmaFamily,
     input: Gemma4Assets,
     options: Gemma4PipelineOptions = {},
-  ): Promise<Gemma4Pipeline> {
-    const where = "Gemma4Pipeline.fromAssets";
+  ): Promise<Gemma4State> {
+    const where = family === "gemma4"
+      ? "Gemma4Pipeline.fromAssets"
+      : "Gemma4QatPipeline.fromAssets";
     // MUST: この面に drafter の席は無い（{@link Gemma4Assets} が持つのは製品グラフ 1 本）。
     // 黙って投機なしで組むと「指定したのに効かない」形になるので fail loudly で断る。
     if (options.speculative !== undefined) {
@@ -1603,20 +1667,30 @@ export class Gemma4Pipeline {
     }
     const config = parseGemma4PipelineConfig(input.config);
     if (input.model.length === 0) {
-      throw new Error(`${where}: 製品グラフの shard 列が空（先頭がグラフ shard）`);
+      throw new Error(
+        `${where}: 製品グラフの shard 列が空（先頭がグラフ shard）`,
+      );
     }
     const shards = Object.fromEntries(
-      input.model.map((bytes, index): readonly [string, Uint8Array<ArrayBuffer>] => [
+      input.model.map((
+        bytes,
+        index,
+      ): readonly [string, Uint8Array<ArrayBuffer>] => [
         `${MODEL}[${index}]`,
         bytes,
       ]),
     );
-    const open = assetComponentOpener(where, shards, (key) => assetBuffer(where, shards, key));
+    const open = assetComponentOpener(
+      where,
+      shards,
+      (key) => assetBuffer(where, shards, key),
+    );
     // NOTE: `requiredLimits` の検査はこの面には無い — {@link Gemma4Assets} は manifest を
     // 持たない（バイト列と `config` だけ）ので、宣言そのものへ到達できない。実寸の検査は
     // Session 構築時の `assertWeightsWithinLimits`（ADR 0089 決定 1）が受け持つ。
     const admitted = admitGemma4(open(MODEL), config);
-    return await Gemma4Pipeline.#build(admitted, {
+    if (family === "gemma4-qat") admitGemma4Qat(admitted.component.graph);
+    return await GemmaPipeline.#build(family, admitted, {
       tokenizer: input.tokenizer,
       pleIndex: parsePleIndexAsset(input.pleIndex),
       openPleShard: input.openPleShard,
@@ -1636,11 +1710,17 @@ export class Gemma4Pipeline {
    * 段 2 の裁定「束ね口は context」）。順序は target が先で、drafter はその埋め込み表を借りる。
    */
   static async #build(
+    family: GemmaFamily,
     admitted: Gemma4Admission,
     assets: Gemma4SidecarAssets,
     options: Gemma4PipelineOptions,
-  ): Promise<Gemma4Pipeline> {
-    const { wiring, tokenizer, ple } = buildGemma4Program(admitted, assets, options);
+  ): Promise<Gemma4State> {
+    const { wiring, tokenizer, ple } = buildGemma4Program(
+      admitted,
+      assets,
+      options,
+      family,
+    );
     // 投機の `k` は 2 つの消費者（生成と見積り）が同じ値を見るように**ここで 1 度**解決する。
     const speculativeK = options.speculative === undefined
       ? undefined
@@ -1662,8 +1742,13 @@ export class Gemma4Pipeline {
     let session: Session | undefined;
     try {
       session = await admitted.component.createSession(gpu, sessionOptions);
-      const drafter = await Gemma4Pipeline.#buildDrafter(admitted, session, gpu, sessionOptions);
-      return new Gemma4Pipeline({
+      const drafter = await GemmaPipeline.#buildDrafter(
+        admitted,
+        session,
+        gpu,
+        sessionOptions,
+      );
+      return {
         gpu,
         ownsGpu,
         session,
@@ -1685,7 +1770,7 @@ export class Gemma4Pipeline {
         ...(options.onRunDiagnostics === undefined
           ? {}
           : { onRunDiagnostics: options.onRunDiagnostics }),
-      });
+      };
     } catch (error) {
       // 構築に失敗したら誰も解放できなくなるので、ここで返す。順序は借り手（drafter は
       // 張れていない = 借用計数は既に戻っている）→ 貸し手 → 内部で取った GPU。
@@ -1720,11 +1805,16 @@ export class Gemma4Pipeline {
     for (const borrower of Object.keys(drafter.admission.sharedWeights)) {
       sharedWeights = {
         ...sharedWeights,
-        [borrower]: target.exportWeight(drafter.admission.sharedWeights[borrower]),
+        [borrower]: target.exportWeight(
+          drafter.admission.sharedWeights[borrower],
+        ),
       };
     }
     return {
-      session: await drafter.component.createSession(gpu, { ...sessionOptions, sharedWeights }),
+      session: await drafter.component.createSession(gpu, {
+        ...sessionOptions,
+        sharedWeights,
+      }),
       // 見積り専用（`estimateSessionMemory` が drafter の常駐重みをこれから引く）。
       graph: drafter.component.graph,
       outputs: drafter.admission.outputs,
@@ -1886,7 +1976,9 @@ export class Gemma4Pipeline {
    * で会話ごとに切れる）。借り手 context はこの sequence の寿命に束ねられ、`dispose()` が
    * 貸し手より先に畳む。自己採算ゲートの状態も sequence の寿命（ターンを跨いで測り続ける）。
    */
-  async sequence(options: Gemma4SequenceOptions = {}): Promise<GenerationSequence> {
+  async sequence(
+    options: Gemma4SequenceOptions = {},
+  ): Promise<GenerationSequence> {
     if (this.#disposal !== undefined) {
       throw new Error("Gemma4Pipeline: dispose 済みでは sequence を作れない");
     }
@@ -2015,12 +2107,19 @@ export class Gemma4Pipeline {
     // 借り手ぶん（常駐重みと context の state）は drafter グラフを**同じ estimator に掛けて**
     // 引く（式をこの層で組み直さない — 借り物スロットと共有 initializer を外すのは runtime の
     // 常駐プランナと `GenerationContext.create` の分岐そのものである）。
-    const borrower = estimateGraphMemory(drafter.graph, planWeightResidency(drafter.graph), {
-      // 借り手 context は `chunkLength` 1 ちょうど・容量記号は貸し手から継承する。
-      generation: { chunkLength: 1, bindings: { [wiring.capacitySymbol]: capacity } },
-      maxStorageBufferBindingSize,
-      ...budget,
-    });
+    const borrower = estimateGraphMemory(
+      drafter.graph,
+      planWeightResidency(drafter.graph),
+      {
+        // 借り手 context は `chunkLength` 1 ちょうど・容量記号は貸し手から継承する。
+        generation: {
+          chunkLength: 1,
+          bindings: { [wiring.capacitySymbol]: capacity },
+        },
+        maxStorageBufferBindingSize,
+        ...budget,
+      },
+    );
     const weights = {
       compressedBytes: target.resident.weights.compressedBytes +
         borrower.resident.weights.compressedBytes,
@@ -2142,5 +2241,91 @@ export class Gemma4Pipeline {
         return held;
       });
     });
+  }
+}
+
+/** 通常 Gemma 4。既存の取得・数値・MTP 契約を保つ入口。 */
+export class Gemma4Pipeline extends GemmaPipeline {
+  private constructor(state: Gemma4State) {
+    super(state);
+  }
+  /**
+   * 配布形から取得して組む（`loadManifest` → `resolveFiles` → **グラフ shard だけ**を
+   * 取って `prepareModel` → 家族 admission → 重み shard と PLE sidecar の prefetch →
+   * tokenizer と索引の取得 → 構築）。重み shard は Session を組むときに 1 本ずつ流れ、PLE
+   * sidecar は**触った 1 本だけ**が永続キャッシュから読み直される（ADR 0070 / 0085 決定 3）。
+   *
+   * **`ref` は必須**（取得元に既定は無い — `src/hub/repo-ref.ts` の MUST）。パッケージ版が検証した
+   * 取得元は {@link GEMMA4_SOURCES}（`./config.ts`）の `"gemma4"` — 再現性を自分で固定するなら
+   * `{ repo, revision }` を呼び手が明示する。文字列の `ref` は `{ repo }` と読む（= `main` 追従）。
+   *
+   * 手元の配布形は**取得元ハンドル**で渡す（`localDirectory` / `@karume/hub/deno` の
+   * `denoDirectory`）。HF の `owner/name` の綴りの門は通らず、network も CacheStorage も
+   * 通らない（{@link Gemma4FromPretrainedOptions} の HTTP 専用ノブは効かない）。
+   */
+  static async fromPretrained(
+    ref: string | HubRepoRef | DistributionSource,
+    options: Gemma4FromPretrainedOptions = {},
+  ): Promise<Gemma4Pipeline> {
+    return new Gemma4Pipeline(
+      await super.loadPretrained(GEMMA4_PIPELINE_NAME, ref, options),
+    );
+  }
+  /**
+   * 取得済み資産から組む。資産の解釈・グラフとの突合・id 空間の相互照合を全てここで済ませ、
+   * **製品グラフの Session を 1 本張って**返す。
+   *
+   * 製品グラフは配布形の時点で常に分割されている（ADR 0081）ので、`model` は**宣言順の
+   * shard 列**（先頭がグラフ shard）を受け、`fromPretrained` と同じ shard 逐次面へ流す
+   * （受け口の実装は `src/hub/components.ts` — 7 家族共有の {@link assetComponentOpener}）。
+   *
+   * MUST: `config` は {@link fromPretrained} と**同じ門**（{@link parseGemma4PipelineConfig}）を
+   * 通す。TS の型は未知キーも値域も見ないので、門が無いと `temperature: -1` のような宣言が
+   * 3.7GiB を読み切った後の初 `chat` で初めて落ちる。宣言を検査するのは**バイト列を 1 本も
+   * 開く前**である。
+   */
+  static async fromAssets(
+    input: Gemma4Assets,
+    options: Gemma4PipelineOptions = {},
+  ): Promise<Gemma4Pipeline> {
+    return new Gemma4Pipeline(
+      await super.loadAssets(GEMMA4_PIPELINE_NAME, input, options),
+    );
+  }
+}
+
+/** 固定 mobile QAT の初期実装では drafter を受けない。 */
+export type Gemma4QatPipelineOptions =
+  & Omit<Gemma4PipelineOptions, "speculative">
+  & { readonly speculative?: never };
+export type Gemma4QatFromPretrainedOptions =
+  & Omit<Gemma4FromPretrainedOptions, "speculative" | "model">
+  & {
+    readonly speculative?: never;
+    readonly model?: "e2b" | "e4b";
+  };
+
+/** 実験段階の固定 QAT E2B/E4B。CPU/GPU の全ビット一致と広い品質は未保証（ADR 0097）。 */
+export class Gemma4QatPipeline extends GemmaPipeline {
+  private constructor(state: Gemma4State) {
+    super(state);
+  }
+  /** 明示した QAT 配布形から E2B/E4B を組む。model 省略時は manifest の既定を使う。 */
+  static async fromPretrained(
+    ref: string | HubRepoRef | DistributionSource,
+    options: Gemma4QatFromPretrainedOptions = {},
+  ): Promise<Gemma4QatPipeline> {
+    return new Gemma4QatPipeline(
+      await super.loadPretrained("gemma4-qat", ref, options),
+    );
+  }
+  /** 取得済み固定 QAT 資産を検査して組む。モデルはグラフと PLE の構成から判別する。 */
+  static async fromAssets(
+    input: Gemma4Assets,
+    options: Gemma4QatPipelineOptions = {},
+  ): Promise<Gemma4QatPipeline> {
+    return new Gemma4QatPipeline(
+      await super.loadAssets("gemma4-qat", input, options),
+    );
   }
 }
