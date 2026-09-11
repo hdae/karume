@@ -1,5 +1,5 @@
 /**
- * linear の **GEMV 族**（重み i4 / i8 格納 — ADR 0082）。`linear` の 2 本目のカーネル族で、
+ * linear の **GEMV 族**（重み i4 / i8 格納、および M=1 の f16 格納 — ADR 0082）。`linear` の 2 本目のカーネル族で、
  * 出力・束縛・uniform は既定経路（src/kernels/gemm.ts の linear）と同じまま、**担当割りだけ**が
  * 「1 スレッド = 1 出力列」へ変わる。M=1（decode）の変種と、小 M（2〜{@link LINEAR_GEMV_MAX_ROWS}・
  * 短い prefill / 投機検証）の**行ブロック変種**の 2 形を持つ（後者は ADR 0082 追記 5 /
@@ -98,13 +98,20 @@ import {
  *
  * 適格判定（src/runtime/recipe-builder.ts の `#buildLinear`）が k と group 長へ課す整除の
  * 単位でもあるので、門とカーネルが格納ごとに同じ 1 個の導出点を読む。
- * MUST: f32 / f16 格納は fail loudly — 本族は圧縮格納 2 種でしか実測していない（ADR 0082
- * 決定 4 の「実測した範囲に留める」）。
+ * f16 は 8 要素 / 語で M=1 のみ。f32 は実測していないため fail loudly（ADR 0082）。
  */
 export const linearGemvUnit = (storage: WeightStorage): number => {
   if (storage === "i4") return 32;
   if (storage === "i8") return 16;
-  throw new CodegenError(`linear_gemv: 重み ${storage} 格納は本族に無い（i4 / i8 のみ）`);
+  if (storage === "f16") return 8;
+  throw new CodegenError(`linear_gemv: 重み ${storage} 格納は本族に無い（f16 / i4 / i8 のみ）`);
+};
+
+/** f16 は M=1 だけで検収する。行ブロック側へ暗黙に広げない。 */
+const assertRowsStorage = (storage: WeightStorage): void => {
+  if (storage === "f16") {
+    throw new CodegenError("linear_gemv: f16 格納の行ブロックは未対応（M=1 変種のみ）");
+  }
 };
 
 /** WebGPU core が保証する 1 workgroup のスレッド数上限（`cols` の上界）。 */
@@ -192,6 +199,7 @@ export const linearGemvRowsForShape = (
   n: number,
   threadTarget: number = ROWS_THREAD_TARGET,
 ): number => {
+  assertRowsStorage(storage);
   if (!Number.isSafeInteger(m) || m < 1 || m > LINEAR_GEMV_MAX_ROWS) {
     throw new CodegenError(`linear_gemv: 行数 ${m} は 1..${LINEAR_GEMV_MAX_ROWS} の外`);
   }
@@ -282,6 +290,9 @@ export const linearGemvParams = (
 ): Uint32Array<ArrayBuffer> => {
   const unit = linearGemvUnit(storage);
   gemvGroupShift(storage, groupSize);
+  if (storage === "f16" && m !== 1) {
+    throw new CodegenError(`linear_gemv params: f16 格納は m=1 のみ（${m}）`);
+  }
   if (!Number.isSafeInteger(m) || m < 1 || m > LINEAR_GEMV_MAX_ROWS) {
     throw new CodegenError(
       `linear_gemv params: m は 1..${LINEAR_GEMV_MAX_ROWS} の整数（${m}）`,
@@ -330,6 +341,7 @@ export const linearGemvRowsKey = (
   variant: LinearGemvRowsVariant,
 ): string => {
   assertRowsVariant(variant);
+  assertRowsStorage(storage);
   gemvGroupShift(storage, groupSize);
   return `linear_gemv:v1:f32:c${variant.cols}u${variant.unroll}r${variant.rows}${
     weightKeyPart(storage)
@@ -344,13 +356,13 @@ export const linearGemvRowsKey = (
  * 出力は `f32`（1 スレッド 1 列のスカラ書き — 既定 v4 経路の `vec4<f32>` と違い n の整除を
  * 要らない）。
  */
-const bindings = (unit: number): string =>
+const bindings = (unit: number, storage: WeightStorage): string =>
   `@group(0) @binding(1) var<storage, read> x: array<vec4<f32>>;
 // 行頭が 16 B 整列なのは k % ${unit} == 0 から（適格判定が保証する）
 @group(0) @binding(2) var<storage, read> w: array<vec4<u32>>;
 @group(0) @binding(3) var<storage, read> bias: array<f32>;
 @group(0) @binding(4) var<storage, read_write> out: array<f32>;
-@group(0) @binding(5) var<storage, read> wscale: array<f32>;`;
+${storage === "f16" ? "" : "@group(0) @binding(5) var<storage, read> wscale: array<f32>;"}`;
 
 /**
  * 語 1 本ぶんの読み（重み語 + x の quad 先頭 + i4 だけ group scale）。
@@ -431,8 +443,24 @@ ${macs}`;
   }).join("\n");
 };
 
+/**
+ * f16 8 要素 / 語。unpack2x16float は既定 GEMM と同じ復元で、scale は持たない。
+ * MUST: 語の x→w、各対の下位→上位の順に積和する。活性の成分添字は静的に展開する。
+ */
+const unitMacsF16 = (slot: string): string => {
+  const lanes = ["x", "y", "z", "w"] as const;
+  return lanes.map((component, pair) => {
+    const weights = `h${slot}_${pair}`;
+    const activation = `x${slot}_${pair}`;
+    return `    let ${weights} = unpack2x16float(pw${slot}.${component});
+    let ${activation} = x[xq${slot} + ${Math.floor(pair / 2)}u];
+    acc = acc + ${activation}.${lanes[(pair * 2) % 4]} * ${weights}.x;
+    acc = acc + ${activation}.${lanes[(pair * 2 + 1) % 4]} * ${weights}.y;`;
+  }).join("\n");
+};
+
 const unitMacs = (storage: WeightStorage, slot: string): string =>
-  storage === "i4" ? unitMacsI4(slot) : unitMacsI8(slot);
+  storage === "f16" ? unitMacsF16(slot) : storage === "i4" ? unitMacsI4(slot) : unitMacsI8(slot);
 
 /**
  * 語 1 本の積和展開（行ブロック変種・`rows` 行）。
@@ -515,7 +543,7 @@ const scaleSetupWgsl = (storage: WeightStorage, shift: number | undefined): stri
     : weightScaleWgsl(storage, "col", "  ");
 
 /**
- * GEMV の WGSL（`out[n] = x[k] · wᵀ[n,k] + bias[n]`・M=1・重み i4 / i8 格納）。
+ * GEMV の WGSL（`out[n] = x[k] · wᵀ[n,k] + bias[n]`・M=1・重み f16 / i4 / i8 格納）。
  *
  * 1 スレッドが 1 出力列の縮約を丸ごと持つので、並列度の上限は `n`。これはビット同一の代償
  * そのもので、k 方向へ割れば並列度は上がるが縮約順が動く（MUST NOT — モジュール doc）。
@@ -541,7 +569,7 @@ struct Dims {
   k: u32,
 }
 @group(0) @binding(0) var<uniform> dims: Dims;
-${bindings(unit)}
+${bindings(unit, storage)}
 
 @compute @workgroup_size(${cols})
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -587,6 +615,7 @@ export const linearGemvRowsWgsl = (
   variant: LinearGemvRowsVariant,
 ): string => {
   assertRowsVariant(variant);
+  assertRowsStorage(storage);
   const unit = linearGemvUnit(storage);
   const shift = gemvGroupShift(storage, groupSize);
   const { cols, unroll, rows } = variant;
@@ -611,7 +640,7 @@ struct Dims {
   k: u32,
 }
 @group(0) @binding(0) var<uniform> dims: Dims;
-${bindings(unit)}
+${bindings(unit, storage)}
 
 @compute @workgroup_size(${cols})
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {

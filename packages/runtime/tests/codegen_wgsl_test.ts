@@ -502,6 +502,7 @@ Deno.test("生成した WGSL がスナップショットとバイト単位で一
     ["linear_gemv_g32.wgsl", linearGemvWgsl("i4", 32)],
     ["linear_gemv_g64.wgsl", linearGemvWgsl("i4", 64)],
     ["linear_gemv_wi8.wgsl", linearGemvWgsl("i8")],
+    ["linear_gemv_wf16.wgsl", linearGemvWgsl("f16")],
     // 同族の **行ブロック変種**（M ≥ 2 — ADR 0082 追記 5 / perf-ledger K-21）。上の M=1 の 3 本と
     // **対で置く**のが条件で、行ブロック化で decode（M=1）の生成物が 1 バイトも動かないことは
     // この対でしか見えない。
@@ -754,6 +755,7 @@ Deno.test("同じ生成入力からは常に同一の WGSL が出る（全 op ×
     );
   }
   assertEquals(linearGemvWgsl("i8"), linearGemvWgsl("i8"), "linear gemv:i8");
+  assertEquals(linearGemvWgsl("f16"), linearGemvWgsl("f16"), "linear gemv:f16");
   // 行ブロック変種は生成入力に `rows` が増えるだけ（rows は (格納, m, n) の純関数から来る値で、
   // 生成側は受け取った数をそのまま焼く）。rows ごとに展開本数が変わるので、状態を持たないことは
   // 高さを跨いで固定する。
@@ -993,6 +995,7 @@ Deno.test("パイプラインキーは生成入力ごとに一意（別カーネ
     // 格納（i4 / i8）もキーに載る — 1 語の要素数が 32 / 16 で違うので、衝突すると縮約が行の
     // 半分だけ / 倍だけ回った沈黙誤値になる（perf-ledger K-16）。
     linearGemvKey("i8"),
+    linearGemvKey("f16"),
     // 変種（列数 / 先読み本数）もキーに載る — 載っていないと最初に組んだ形の
     // パイプラインが別の形の dispatch で走り、workgroup 形の食い違いで沈黙誤値になる。
     linearGemvKey("i4", 32, { cols: 64, unroll: 4 }),

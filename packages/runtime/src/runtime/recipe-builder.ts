@@ -1570,9 +1570,8 @@ export class RecipeBuilder {
     // 門の内訳:
     // - `1 ≤ m ≤ LINEAR_GEMV_MAX_ROWS` — 1 スレッドが 1 出力列（× 行ブロック）の縮約を丸ごと持つ
     //   形で実測した範囲。上限の外は既定の GEMM 骨格のまま。
-    // - `i4` / `i8` 格納 × `f32` 計算 — 実測して採った組み合わせはここだけ。f16 格納にも同じ
-    //   機序は効くはずだが、**実測の無い区間を選択で埋めない**（gemm-geometry
-    //   `gemmGeometryForRows` の MUST と同じ規律）。i8 × f16 計算（w8a16）は上で落ちている。
+    // - `i4` / `i8` 格納 × `f32` 計算。f16 格納は下の M=1 専用の門で受ける。
+    //   i8 × f16 計算（w8a16）は上で落ちている。
     // - `groupSize % <刻み> === 0`（i4 のみ）— 重み 1 語 32 要素が group を跨がない条件
     //   （跨ぐと語あたり 1 個の scale では足りず沈黙誤値になる）。i8 の scale は出力チャネル
     //   ごと 1 本なので、跨ぐ相手がそもそも無い。
@@ -1582,6 +1581,15 @@ export class RecipeBuilder {
     // - `v4` は GEMV の要件では**ない**（出力はスカラ書きなので n の整除は要らない）が、
     //   掃引した実形が全て v4 なので門を実測の範囲に留める。n % 4 != 0 の M=1 は既定の
     //   スカラ変種のまま（値は同じ・速度だけ従来どおり）。
+    // f16 格納も M=1 のみ同じ骨格へ（ADR 0082 追記 6）。計算は f32 のまま、
+    // 重み 1 語 = 8 要素。行ブロックと f16 計算はこの変種の検収範囲に含めない。
+    if (
+      m === 1 && weightStorage === "f16" && compute === "f32" && v4 &&
+      k > 0 && k % linearGemvUnit("f16") === 0
+    ) {
+      await this.#buildLinearGemv(step, binds, outs, builder, "f16", m, n, k);
+      return;
+    }
     const i4Unit = linearGemvUnit("i4");
     const gemvRows = m >= 1 && m <= LINEAR_GEMV_MAX_ROWS;
     if (

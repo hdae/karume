@@ -1016,3 +1016,89 @@ reset を計測外にしていたため比較値に採用せず、計測境界�
 これは短い既定 greedy 会話の一致と操作の検収であり、モデル全般の回答品質を保証しない。
 例えば Qwen は国名を求めた 5 回目にも `Tokyo.` と答える（CPU も同じ）。長文・公開配布・
 M2 / ブラウザでの今回の多ターン操作、f16 GEMV / INT2 の試作は未完のまま別項目として残す。
+
+## f16 格納 M=1 の GEMV（2026-09-11）
+
+利用者の優先指示に従い、Sol 3 名の序盤調査後は主担当だけで試作・検証した。
+コンテキスト容量の拡張は後回し。実測は RTX 3080 Ti / Deno 2.9.6。
+保存先は `outputs/bench/karume/2026-09-11_optimization-next/`。
+この節は f16 の採否を扱い、INT2 / SRQ と Anima の追加候補は別の調査単位とする。
+
+### 適用範囲と採用判断
+
+既存 f16 は M=1 でも共有タイルと barrier を持つ GEMM を使っていた。
+既存 GEMV 族へ f16 の読み出しを追加し、1 スレッドが 1 列を K 昇順に計算する。
+`unpack2x16float`、`acc = acc + x * w`、最後の bias 加算を維持する。
+門は M=1・f32 計算・K>0・K%8=0・N%4=0。公開 API / IR / 資産は無変更。
+判断は [ADR 0082 追記 6](../decisions/0082-linear-gemv-decode.md#追記-62026-09-11-f16-格納の-m1-を-gemv-族へ広げるk-25)。
+
+実 Qwen の f16 linear は 197 本、形状 `(N,K,本数)` は
+`(2048,1024,28)` / `(1024,1024,56)` / `(1024,2048,28)` /
+`(3072,1024,56)` / `(1024,3072,28)` / `(151936,1024,1)`。
+全て適格。Gemma の既存 i4 / i8 資産と MiniCPM5 の現行 f32 / 整数量子化資産はこの変更の対象ではない。
+
+### 単体と実モデルの結果
+
+`f16-micro-focused.jsonl` は正の K を持つ 14 形 × 6 腕で全出力 u32 一致。
+実形状 9 形は heater を挟み各 5 回の最小 GPU 時間を採り、5 形は端の一致だけを検査した。
+順序は GEMM → c32u4 → c32u16 → c32u16 → c32u4 → GEMM。
+Qwen の層数で重み付けし、各腕の最小値を往復 2 腕で平均した合計は
+GEMM **25.650 ms**、c32u4 **5.948 ms（4.31 倍）**、c32u16 **4.802 ms**。
+単体は合成重みを使用し、実生成の壁時計とは区別する。
+
+`f16-model-wall.jsonl` は timestamp と logits hash 計算を使わない別走行。
+同一プロセスの同じ往復順で、3 入力をそれぞれ 64 token 生成した。
+decode 63 回の先頭 7 回を除いた 56 回の中央値を求め、往復 2 腕の中央値を掲載する。
+
+| 入力       | GEMM ms/token | c32u4 ms/token | c32u16 ms/token | 採用 c32u4 の倍率 |
+| ---------- | ------------: | -------------: | --------------: | ----------------: |
+| capital-en |        42.992 |         22.581 |          23.620 |              1.90 |
+| capital-ja |        42.974 |         21.932 |          21.531 |              1.96 |
+| webgpu     |        42.649 |         21.750 |          21.230 |              1.96 |
+
+c32u16 は入力により勝敗が変わり、head 単体も c32u4 の 0.962 ms に対して 1.246 ms。
+安定した上積みの根拠がないため既存の c32u4 を採用する。
+当初の打ち切り線「単体 1.3 倍または decode 全体 10%」を両方満たす。
+
+初期化の観測は単体 JSON の `compileMs` にあるが、この値は Session 作成から初回 run 完了までであり、
+シェーダのコンパイル時間だけではない。最初の形の初回は GEMM 71.4 ms / c32u4 113.4 ms
+（`f16-micro.jsonl`）。全体の prefill は M=16 で今回の変更対象外。
+初回準備と定常 decode を混ぜて倍率を出さない。
+
+### 数値と境界の検証
+
+- `f16-model.jsonl`: 同じ 6 腕 × 3 入力で CPU 参照 logits（既存 atol=1e-3 / rtol=0）と
+  既存 greedy 列を維持。各 decode の全 logits を SHA-256 で比較し、最初の GEMM 腕に対する
+  **945 回の比較が全て一致**。出力 token だけの比較ではない。
+- 採用する製品 WGSL と、モデルで測った c32u4 試作 WGSL はバイト一致。
+- `f16-codegen.log`: 82 tests 成功。既存 snapshot を変更せず f16 snapshot を追加。
+- `f16-gpu-test.log`: 追加 3 tests 成功。8 形の通常 GEMM との u32 一致と CPU 参照、
+  M / K / N / 格納を 1 条件ずつ外した 4 形、f16 計算の指定を検証。
+- `f16-mutation.log`: f16 の対の積和順だけを反転した試作で u32 アサーションが失敗。
+  検査を通すための期待値・許容差の変更はしていない。
+
+初期掃引は最後に加えた K=0 の **GEMM 比較側**で `Binding size 4 … less than minimum 16` により停止した。
+これは既存の limitations・recipe-builder のコメント・gpu_i8a8_test が記録する非対応域で、新規回帰ではない。
+最初に想定外と報告したが、照合後に訂正した。`K0-STOP.md` と元ログを保存し、K=0 自体の修正は混ぜない。
+新しい f16 の門は K>0 に限定し、既存テストは維持した。
+
+### Chrome の追試と全体検証
+
+Chrome 153.0.8010.36（Vulkan / NVIDIA Ampere、fallback adapter=false）でも同じ台本を実行した。
+`browser-f16-parity.json` は GEMM → c32u4 → c32u4 → GEMM、3 入力 × 64 token。
+CPU 参照と既存 greedy 列を維持し、最初の GEMM 腕に対する **567 回の全 logits SHA 比較が一致**。
+`browser-f16-wall.json` は timestamp / hash 計算を外した別走行で、代表値の取り方は Deno と同じ。
+
+| 入力       | GEMM ms/token | c32u4 ms/token | 倍率 |
+| ---------- | ------------: | -------------: | ---: |
+| capital-en |        20.430 |         11.899 | 1.72 |
+| capital-ja |        20.501 |         11.751 | 1.74 |
+| webgpu     |        20.854 |         11.856 | 1.76 |
+
+集計は `browser-f16-summary.json`。wall の console に残る固定 `bitEqual` 表示は根拠にせず、
+JSON の `checkBits=false` と、別の parity 走行を区別する。
+Deno と Chrome の絶対時間の差を、そのまま TypeScript の費用とは帰属しない。
+Apple M2 は未検証。RTX での成績を M2 へ外挿しない。
+
+`deno task verify` は **2,843 passed / 743 steps / 0 failed / 5 ignored、24m38s**。
+`f16-verify.log` と `f16-final-status.json` に保存する。Chrome 追試後の文書更新は fmt と差分を再確認した。

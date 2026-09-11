@@ -14,8 +14,9 @@
   残件は配布 recipe / source 表、長文と広い品質評価。実験資産を公開済みモデルとして扱わない。
   手元の試走は [MiniCPM5 CLI](../examples/minicpm5/README.md) / [Qwen3 CLI](../examples/qwen3/README.md) を使える。
   容量 128 の対話・履歴整理・reset・中断と、公式 CPU 参照への多ターン一致を検収済み。
-  Anima w4a8 / drafter / f16 GEMM の既存形状比較は不採用で完了。次の f16 M=1 GEMV は
-  [範囲と検収案](research/2026-09-10-codex-mtp-optimization.md#次に試作する-f16-gemv-の範囲)を判断してから試作する。
+  Anima w4a8 / drafter / f16 GEMM の既存形状比較は不採用で完了。f16 M=1 GEMV は
+  [単体・Qwen の検収](research/2026-09-10-codex-mtp-optimization.md#f16-格納-m1-の-gemv2026-09-11)に基づき採用（K-25）。
+  f16 は Chrome も検収済みで、M2 追試は残る。利用者の希望により、容量拡張より最適化調査を優先する。
   Chrome / Deno の Gemma 比較は自由文まで実施済み。他課題・長文・M2 を次の検収へ残す。
   QAT mobile は INT2 / SRQ と重み共有を設計し、Wan は小さな DiT から段階検証する。
   実測と未完の正本は [追加調査](research/2026-09-10-codex-mtp-optimization.md#追加-llm-の実行と量子化別比較)。

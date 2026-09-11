@@ -27,6 +27,7 @@ import {
   linearGemvParams,
   linearGemvRowsForShape,
   linearGemvRowsKey,
+  linearGemvRowsWgsl,
 } from "../src/kernels/linear-gemv.ts";
 import type { WeightStorage } from "../src/kernels/weight-storage.ts";
 
@@ -221,5 +222,25 @@ Deno.test("uniform の m は 1..上限（行ブロックの y タイルが受け
     () => linearGemvParams("i8", LINEAR_GEMV_MAX_ROWS + 1, 64, 64),
     CodegenError,
     "m は 1..",
+  );
+});
+
+Deno.test("f16 GEMV は M=1 と 8 要素整列のみを受け、行ブロックの生成を拒否する", () => {
+  assertEquals([...linearGemvParams("f16", 1, 36, 40)], [1, 36, 40, 0]);
+  assertEquals([...linearGemvParams("f16", 1, 4, 0)], [1, 4, 0, 0]);
+  assertThrows(() => linearGemvParams("f16", 2, 36, 40), CodegenError, "m=1 のみ");
+  assertThrows(() => linearGemvParams("f16", 1, 36, 36), CodegenError, "k");
+  assertThrows(() => linearGemvParams("f16", 1, 36, 40, 32), CodegenError);
+  assertThrows(() => linearGemvRowsForShape("f16", 1, 36), CodegenError, "行ブロックは未対応");
+  const variant = { cols: 32, unroll: 4, rows: 1 };
+  assertThrows(
+    () => linearGemvRowsKey("f16", undefined, variant),
+    CodegenError,
+    "行ブロックは未対応",
+  );
+  assertThrows(
+    () => linearGemvRowsWgsl("f16", undefined, variant),
+    CodegenError,
+    "行ブロックは未対応",
   );
 });
