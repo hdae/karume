@@ -7,12 +7,12 @@
 > [docs/perf-ledger.md](../docs/perf-ledger.md)。ここは「今この瞬間の文脈」だけを持つ —
 > 履歴・完了記録は ADR / research / git へ。
 >
-> Last updated: 2026-09-10（MTP ④ = ADR 0096・段 1〜3 + 4-A + 4-B ④⑤③⑧⑨ + ゲート v3.1 済・次は M2 の warm 再計測〈v3.1 + exploreMax 512〉・⑩・⑥ の裁定・4-C docs）
+> Last updated: 2026-09-11（MTP ④ = ADR 0096・段 1〜3 + 4-A + 4-B ④⑤③⑧⑨ + ゲート v3.1 済・次は M2 の warm 再計測〈v3.1 + exploreMax 512〉・⑩・⑥ の裁定・4-C docs）
 
 ## Now
 
 - **9/11 レビュー対応後の再開** — [調査・実測と引き継ぎ](../docs/research/2026-09-10-codex-mtp-optimization.md#分割コミットと再開用の引き継ぎ) を先に読む。
-  現在は `codex/review-and-fix`。次の候補は Anima DiT stage 内の転送・readback の費用計測。
+  現在は `codex/review-and-fix`。固定入力の転送は測定済み。次の候補は Anima w4a8 のタイル形状・drafter 実重みの比較。
   利用者の希望により、今後は作業単位で調査・検証を終えて順次コミットする。残件の正本は backlog。
 
 - **Codex 性能調査（2026-09-06）の消化波（2026-09-07）** — 実測と設計の正本は
@@ -126,8 +126,10 @@
 
 ## Open decisions
 
-- MiniMax-H3（動画生成・オープンウェイト 33.1B/42.5GB 級）は遠期の関心として記録のみ —
-  ブラウザ実行はメモリ規模的に現行スコープ外（レビュー DS-4）。
+- 動画生成は Wan2.1-T2V-1.3B の小さな DiT 単体からの検証が候補。長系列 attention・
+  causal Conv3d VAE が未対応。MiniMax H3 は公開 Transformer だけで BF16 約 66.3 GB、
+  text encoder / VAE が別に必要で、地域・商用条件付きライセンス。現行ブラウザ実装の対象外。
+  構成・容量・段階案の正本は [動画調査](../docs/research/2026-09-10-codex-mtp-optimization.md#動画生成の事前調査-wan-と-minimax-h3)。
 - 差分レビュー見送り分の中優先 2 件（正本 = `.claude/reviews/2026-09-03_7fc4ada/ROADMAP.md`）:
   W-G5-7 = `tools/opbench` / `tools/fusion-hints` の資産解決を `tools/_shared/assets.ts` へ統合
   するか / W-G4-4 = chunk 上限の出所を provenance の `sym_max` 欄へ移すか（再 export に同乗）。

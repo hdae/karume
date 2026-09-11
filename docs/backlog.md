@@ -9,6 +9,13 @@
 
 ## now — 0.12.0 リリース後（2026-09-06）
 
+- **モデル横断の追加調査（2026-09-10〜11）**: Qwen3-0.6B / MiniCPM5-2B の量子化別 GPU 検証と
+  Gemma E4B の decoder 検証は実施済み。配布 manifest・公開 pipeline・長文 / 品質検収は未完。
+  Qwen の独立 CPU 不一致は試験台本の RoPE 丸めへ帰属して解消した。
+  次は既存カーネル設定の Anima w4a8 / drafter 実重み比較。f16 M=1 GEMV の新 kernel は試作の判断待ち。
+  QAT mobile は同じ E2B 構造の別数値モデルで、INT2 / SRQ の契約から設計する。
+  実測と未完の正本は [追加調査](research/2026-09-10-codex-mtp-optimization.md#追加-llm-の実行と量子化別比較)。
+
 - **9/11 レビューの継続検証**（調査 2026-09-10・[対応記録](research/2026-09-10-codex-mtp-optimization.md)）:
   `artifacts.staged_publication` の同一 final への複数 writer を許容するか決め、必要ならロック・中断復旧を設計する。
   GPU 端チャネル保護の M2 / ブラウザ追試とモデル全体の性能計測は残る。
@@ -50,8 +57,9 @@
 - **Anima: DiT stage 内だけの反復常駐**（起票 2026-09-07 — Codex 性能調査 04 §Anima）: Session を stage ごとに作って返す
   現設計（VRAM の不変条件）を保ったまま、DiT stage の中で初期 latent の patchify を 1 度にし、RoPE / cond・uncond embedding /
   timestep 材料を反復間で再利用し、DiT 出力 → CFG → Euler / DPM++2M 更新を同じ token layout で回し、最後だけ unpatchify する。
-  `copyLatents` / onEvent / abort の応答性は公開面の契約なので削らない（数 step ごとに finish する境界も測る）。実測は未着手
-  （Irodori の 1.76 倍を転用しない）。
+  `copyLatents` / onEvent / abort の応答性は公開面の契約なので削らない（数 step ごとに finish する境界も測る）。
+  **固定入力だけの常駐化は測定済み・利得なし**（2026-09-10、1024px / CFG1 / Euler8、全 step / PNG 一致）。
+  latent / scheduler を含む反復常駐と CFG>1 は未検証（[実測](research/2026-09-10-codex-mtp-optimization.md#ホスト待ちと既存融合の追加測定)）。
 - **sampler の top-p 単独指定 ✅ 2026-09-10**（H-11 残件）: f32 の安定 radix sort で順位・確率をビット同一に保ち、
   全語彙の比較ソートを置換した。Gemma 実 logits 24 行の再生で 7.6〜7.8 倍（CPU 抽選だけ）。
   [実測と適用範囲](research/2026-09-10-codex-mtp-optimization.md#共通サンプラーの-top-p-単独指定)。top-k 付きの配布既定は変更しない。
@@ -481,6 +489,10 @@ autoregressive 波の**残項目（波外へ送り）**:
 
 ## later
 
+- **ブラウザ動画生成の基盤**（調査 2026-09-10）: Wan2.1-T2V-1.3B を小さな DiT 単体 → 実 token 長の
+  attention / FFN → causal Conv3d VAE → scheduler と段寿命の順に検収する案。runtime 語彙と数値契約の判断が先。
+  H3 は公開重みの規模・未公開の後段・ライセンス条件から構造調査に留める。
+  [構成と容量試算](research/2026-09-10-codex-mtp-optimization.md#動画生成の事前調査-wan-と-minimax-h3)。
 - **カードの Usage repo 導出の硬化（起票 2026-08-25）**: `karume.dist` はカードの Usage 例の
   repo 名を**出力ディレクトリ名**から導出するため、越境参照のステージング焼き（`--out` が
   別名）で誤った repo 名がカードに載る（実害 = turbo カードに `-release` 付き誤名が公開されて

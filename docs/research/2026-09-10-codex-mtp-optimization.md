@@ -316,3 +316,221 @@ CPU 使用率ではなく、GPU 待ちを含む呼び出しへの時間帰属で
 対象検証は **34 passed / 3 steps / 0 failed**（`argmax-tests.log`）。
 全体 `deno task verify` は **2,818 passed / 743 steps / 0 failed / 5 ignored（24m44s）**
 （`verify-argmax.log`）。
+
+### 追加 LLM の実行と量子化別比較
+
+**実験用の系列を作成し、既存 runtime で検証した**。公開モデルの登録・配布 manifest・製品 pipeline の追加はまだ行っていない。
+対象は Gemma 4 E4B、MiniCPM5-2B、Qwen3-0.6B。公式重みは `inputs/<family>/`、変換結果は
+`outputs/series/*-2026-09-10-probe/` に分離した。取得 revision・ファイル長・モデルカードのライセンスは
+`model-census.json` に保存。既存の配布資産を上書きせず、外部実装の複製やリポジトリの clone は行っていない。
+
+MiniCPM5-2B と Qwen3-0.6B は、既存 MiniCPM recipe の chunk wrapper と state 変換を使う実験台本
+`export-llm-probe.py` / `export-llm-quant-probe.py` で変換した。モデル本体は公式 Transformers の
+`AutoModelForCausalLM` を読み、RoPE の表引きは置換前の全位置照合を維持する。
+Qwen は 28 attention / 56 KV slots、MiniCPM は 42 / 84。RoPE 表 256、context 128、prefill chunk 16 の短文試験である。
+f16 は格納だけを圧縮し演算は f32。i8 は既存 per-channel、i4 は decoder linear を group 32 とし、
+embedding / lm_head は共有関係を保った i8 にする。f16 試作時に未丸めの RoPE 定数表の格納を拒否されたため、
+表を f32 と明示した。失敗した試作のログ・部分出力を別名で保存し、格納検査の条件は変更していない。
+
+`run-llm-probe.ts` は各量子化と同じ重みの CPU 参照に対し、3 入力の prefill 全 logits を
+atol=1e-3 / rtol=0 で検査し、8 token の greedy 継続を厳密照合した。7 形式すべて成功。
+続く `llm-quant-bench.ts` は 1 device / 1 process 内で各形式を往復順にロードし、各 3 入力 × 64 token を生成した。
+先頭の decode 7 回を暖機として除いた 56 回 × 6 ケース = 各形式 336 標本の中央値を示す。
+この性能試験も全 logits と先頭 8 token を照合する。残る 56 token の CPU 一致は主張しない。
+EOS 後も固定長で計算する台本なので、chat 応答時間・品質の評価とは区別する。
+
+| モデル      | 格納         | 変換済み shard の総 byte | 定常 decode ms/token | prefill 最大絶対誤差 |
+| ----------- | ------------ | -----------------------: | -------------------: | -------------------: |
+| Qwen3-0.6B  | f32          |            2,385,411,200 |               42.187 |        0.000240 未満 |
+| Qwen3-0.6B  | f16          |            1,193,441,600 |               42.700 |        0.000246 未満 |
+| Qwen3-0.6B  | i8           |              599,478,792 |               21.782 |        0.000144 未満 |
+| Qwen3-0.6B  | i4 / head i8 |              432,956,648 |               21.096 |        0.000084 未満 |
+| MiniCPM5-2B | f32          |           10,068,270,544 |               87.938 |        0.000202 未満 |
+| MiniCPM5-2B | i8           |            2,522,805,240 |               28.820 |        0.000100 未満 |
+| MiniCPM5-2B | i4 / head i8 |            1,776,451,608 |               26.596 |        0.000294 未満 |
+
+数値の正本は `qwen3-06b-quant-bench.jsonl` / `minicpm5-2b-quant-bench.jsonl` と各 `-summary.json`。
+初回の短い試験値は `llm-quant-summary.json` に別途残した。別プロセスだった初期値を、この表の倍率計算へ混ぜない。
+Qwen の f16 は容量を半減しても速くならない。現行 linear は i8 / i4 の小 M を GEMV へ送り、f16 は
+M=1 でも共有タイルの GEMM を使うので、**f16 M=1 の計算方式が次の候補**となる。
+これは原因候補であり、専用 kernel による改善を測定済みという意味ではない。
+`f16-gemv-plan.md` に影響範囲・逐次 K 順序・u32 一致・単体 1.3 倍または decode 10% の門を記し、試作の判断を求めた。
+
+Qwen はさらに公式 chat template の `enable_thinking=False` で France / Japan / WebGPU の 3 問を確認した。
+`chat-refs.py` / `run-chat-probe.ts`、`chat-fixtures/`、`qwen3-06b-{f16,i8,i4}-chat-gpu.jsonl` が根拠。
+9 条件すべて、prefill 全 logits（最大絶対誤差 0.000181 未満）と EOS または 32 token までの CPU 継続が一致した。
+ただし **一致は品質を保証しない**。f16 / i8 でも日本の首都を大阪と答え、i4 は France を Lyon、日本を京都と答えた。
+これらは export 用ラッパーの CPU 参照にも現れた応答であり、GPU 固有の誤差とは断定しない。
+後述の独立検証で見つかった差は検証台本の RoPE 丸めに帰属し、条件を合わせた公式 CPU でも f16 の 3 問は全 token 一致した。
+単純 i4 を品質検収なしに採用しない。
+公式 Qwen は thinking mode で greedy を推奨していない。本試験の greedy は数値検収用である。
+[Qwen3-0.6B の公式モデルカード](https://huggingface.co/Qwen/Qwen3-0.6B/blob/main/README.md)。
+MiniCPM の公式 chat 用 `chat_template.jinja` はこの時点では未取得で、製品 chat の成立までは検証していない。
+
+E4B は `export-e4b-probe.py` で decoder を main linear i4 / embedding i8 とし、3,159,221,160 byte の系列を作った。
+42 attention / 48 slots、sliding / full attention の共有元は層 22 / 23。CPU 参照用の PLE は必要な 38 行だけを読み、
+全語彙の PLE sidecar・manifest・drafter はまだ作っていない。モデルを meta 上に構築して重みを assign し、
+共有 embedding の同一オブジェクト性を `tie_weights()` で復元した。検証用 export の最大 RSS は約 25.6 GB。
+`run-e4b-probe.ts` は 3 入力 × 8 step の logits / hidden を atol=1e-2 で照合し、argmax id は全件一致。
+最大絶対誤差は logits 0.000191 未満 / hidden 0.000271 未満だった。
+短い decode の中央値は入力別 37.26 / 36.68 / 35.52 ms。これは動作確認の付随値で、形式間の速度比較ではない。
+`export-e4b.log` / `e4b-gpu.jsonl` / `e4b-gpu-summary.json` に保存した。
+
+追加のメモリ試算は `model-memory.ts` / `model-memory.json` に保存した。
+既存 `PreparedModel.estimate`、chunk 64、capacity 4,096、binding 上限 256 MiB、backing 予算 256 MiB の条件で、
+Qwen3 i4 は weight 412.56 MiB / KV 896.00 MiB / 勘定済みピーク 1,564.56 MiB、
+MiniCPM5-2B i4 は 1,693.69 / 336.00 / 2,285.69 MiB、E4B は 3,012.23 / 168.63 / 3,436.85 MiB となる。
+小型 Qwen でも KV head が 8 本あるので、長い context の KV は MiniCPM より大きい。
+これは **構造からの試算**。E4B の host PLE、upload staging、退役待ち、その他 `unaccounted` はピーク値に含まれず、
+ブラウザでの動作可否の保証ではない。今回の Qwen / MiniCPM 資産の RoPE 表は 256 位置なので、
+長文を実行するには位置表の拡張または host RoPE の設計と追加検証が必要である。
+
+### Gemma E2B mobile QAT は同じ構造の別量子化変種
+
+[公式モデルカード](https://huggingface.co/google/gemma-4-E2B-it-qat-mobile-transformers/blob/main/README.md) と
+[config](https://huggingface.co/google/gemma-4-E2B-it-qat-mobile-transformers/blob/main/config.json)、
+[Transformers の gemma_quant](https://github.com/huggingface/transformers/blob/main/src/transformers/integrations/gemma_quant.py)
+を確認した。35 層・hidden 1536・FFN 6144・query / KV head 8 / 1・PLE 256 などの骨格は E2B と同じ。
+一方、量子化を考慮した学習による重みと演算を持ち、現行 E2B の PTQ i4g32 と同一の数値モデルではない。
+
+主 embedding / lm_head は INT2、PLE embedding は INT4、MLP は前半 15 層 INT4 / 後半 INT2、
+attention INT4、per-layer gate / projection は INT8。出力行ごとの scale と整数 packing を使い、group 32 ではない。
+さらに SRQ（静的な再量子化）として活性へ `x / scale → round → clamp[-128,127] → ×scale` を適用する。
+scale=0 の場合の処理も公式実装に従う必要がある。重みを展開して現行 i4 へ再量子化するだけでは、この意味を再現できない。
+現 runtime には INT2 格納と `round` op がなく、`docs/op-vocabulary.md` の round の候補記述を実装済みと誤認しない。
+
+今回取得したのは config・tokenizer・カードなどのメタデータだけで、QAT 重みの export / GPU 実行は未実施。
+追加するなら、まず SRQ と整数 packing の数値契約・tied weight の扱いを決め、CPU 参照と 1 linear / embedding の
+検収から進める。通常 E2B の配布設定へ黙って置き換えない。
+
+### 動画生成の事前調査: Wan と MiniMax H3
+
+以下は公式構成と現行 IR からの調査・試算であり、動画モデルの GPU 実測ではない。
+初期調査 `initial-video-feasibility.md` の結論を主担当が公式カード・実装・公開ファイル一覧で確認した。
+`model-census.json` に取得時の revision とファイル容量を保存した。動画の重みは取得しておらず、外部ソースの複製・clone もしていない。
+
+最初の候補は **Wan2.1-T2V-1.3B の小さな DiT 単体試験**とする。
+[公式実装](https://github.com/Wan-Video/Wan2.1/blob/main/wan/modules/model.py) は
+30 block / hidden 1536 / 12 head / FFN 8960、時間・空間の RoPE を使う。
+[VAE](https://github.com/Wan-Video/Wan2.1/blob/main/wan/modules/vae.py) は時間方向を含む causal Conv3d で、
+時間 4 倍・空間 8 倍圧縮、DiT の patch は時間 1 × 空間 2 × 2。
+公式の 832×480・81 frame は `21×30×52 = 32,760 token` になる。
+
+| Wan2.1 の中間値                       | 単純に実体化した容量の試算 |
+| ------------------------------------- | -------------------------: |
+| hidden `[32760,1536]` f32             |                 191.95 MiB |
+| FFN `[32760,8960]` f32                |                  1.093 GiB |
+| 全 self-attention score・12 head・f32 |                  47.98 GiB |
+| 同 score・f16                         |                  23.99 GiB |
+
+Anima の段ごとに Session を開閉する寿命管理、linear / norm / attention は再利用候補である。
+一方、現 IR は rank 1〜4、VAE は rank 5 と Conv3d が必要で、画像用 patchify / spatial tiling をそのまま適用できない。
+既存 attention の row block は一時容量を下げるが、二乗の計算量は残る。
+動画では長系列の online attention、FFN の分割、時間方向の VAE cache を別々に設計・検収する必要がある。
+self-attention の K/V は denoise ごとに変わるので、LLM の KV cache を流用して step 間に残すことはできない。
+
+順序は、①小さな固定 text 条件で DiT の CPU/GPU 照合、②実 token 長の attention / FFN 容量・時間、
+③causal VAE の短い時間 chunk、④公式 scheduler と各段を結ぶ経路、とする。
+[公式カード](https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B/blob/main/README.md) の VRAM 8.19 GB は
+PyTorch の offload / T5 CPU を伴う条件なので、ブラウザの必要メモリとして転用しない。
+[Wan2.2-TI2V-5B](https://github.com/Wan-Video/Wan2.2) は VAE の空間圧縮が 16 倍となり、
+704×1280・121 frame は 27,280 token になるが、重み・公式実行条件が大きく、動画基盤を作った後の候補とする。
+Wan の公式カードは Apache-2.0。派生配布を作る段階では同梱する text encoder / VAE の条件も確認する。
+
+**MiniMax H3 は公開重みを持つ別の動画・音声生成モデルで、Hailuo-02 / 2.3 の別名ではない。**
+[公式説明](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/README.md) とファイル一覧では、
+33B Transformer の BF16 重みだけで **66,280,430,144 byte**、ほかに Qwen3-VL-32B text encoder 約 66.7 GB と
+visual VAE 約 10.4 GB がある。約 13B の AdaLN branch は事前計算で省略可能とされるが、
+従来の索引の「42.5 GB」を公式配布物のサイズとする根拠にはならない。
+初回公開は full attention の経路で、sparse attention は未公開。公開 Base 768p と、未公開の後段を含む 2K 製品経路も区別する。
+したがって H3 は構造の調査対象に留め、今回のブラウザ実装には着手しない。
+
+[H3 Community License](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE) は Apache-2.0 ではない。
+適用地域から EU・英国・韓国・米国を除き、年間売上 2,000 万 USD 超の商用利用には事前の書面承認を求める。
+商用 UI の表示・再配布・利用制約の条件もある。実装・配布を検討する際は、その時点の想定地域と形態に照らして確認する。
+
+### ホスト待ちと既存融合の追加測定
+
+実行台本は `gemma-phases.ts`、結果は `gemma-phases-extract.jsonl` / `gemma-phases-extract-summary.json` へ保存した。
+extract・prompt 4,845 / capacity 8,192・greedy・64 token の診断走行で、定常 plain は
+run 壁 28.482 ms / encode 3.247 ms / map 24.938 ms、そのうち map の同期区間は 13.855 ms。
+draft は壁 14.663 ms / encode 1.107 ms / map 13.487 ms、map 同期区間 2.403 ms だった。
+error scope の pop は約 0.005 ms に留まり、pop と map の並列化を速度策とする根拠はない。
+
+非同期 map の約 11 ms の床は、実行版と同じ
+[Deno v2.9.6 の `buffer.rs`](https://github.com/denoland/deno/blob/v2.9.6/ext/webgpu/buffer.rs#L239-L261)
+の待ち方と整合する。device poll の後に 10 ms sleep する future と通知受信 future を `try_join!` で待つため、
+通知だけが先に来ても sleep 側の終了を待つ。このソース確認は実測への帰属であり、Deno 自体を変更したものではない。
+純 TypeScript / Web 標準の runtime でこの内部待ちを解除する口は見つかっていない。
+`gemma-host.cpuprofile.json` の native `mapAsync` に約 15.55 秒が載るが、待ちを含む標本なので CPU 演算時間と解釈しない。
+
+既存融合 attention の分割数は `attention-split.ts` で `[1,16,4096,128]` を 1 / 2 / 4 / 8 / 16 / 32 / 64、
+往復順に測った（a8 / score f16）。14 試行すべて u32 一致・timestamp clamp 0。
+1 分割は一時容量 601.01 MiB、GPU 6.46 / 6.98 ms、2 分割は 344.76 MiB、6.77 / 6.80 ms。
+4 分割は 216.63 MiB、6.99 / 9.69 ms、8 分割は 152.57 MiB、8.42 / 10.90 ms となり、
+細分割では dispatch 数が増え、遅くなった。**分割増を高速化としては採用しない**。
+`attention-split.jsonl` が数値の正本。これは attention 単体の容量であり、Anima 全体のピークではない。
+
+Anima の固定入力は `anima-inputs.ts`、1024×1024 / CFG=1 / Euler 8 step / seed 42 で、
+host → RoPE 常駐 → RoPE + text 条件常駐 → 逆順の 6 回を比較した。
+1 forward の upload は 7,413,760 → 3,219,456 → 1,122,304 byte へ減り、全 step / PNG の SHA は一致したが、
+GPU buffer の観測ピークは全試行 2,775,563,888 byte のまま、全体壁は 11.59〜12.06 秒の変動範囲だった。
+転送の host 呼び出しは約 0.5 ms、DiT は約 800 ms/forward なので、この条件で有意な全体利得は示せない。
+**固定入力の常駐化だけでは採用しない**。CFG>1、latent / scheduler の GPU 常駐化は別の未検証範囲。
+数値・ハッシュは `anima-inputs-quick.jsonl` に保存した。
+
+`abort-timer.ts` では既存 `settleAbort` の CPU 費用を測り、signal なし約 0.0003 ms、
+未 abort の signal あり約 2.07 ms/境界だった（Deno、5×256 回）。
+過去の MessageChannel 案は timer 由来の中断を最初の境界で拾う契約を破るので再採用しない。
+中断契約を変えずに短縮できる手段は未確認。ブラウザでの値も未測定である。
+
+### 独立した公式 CPU 検証で停止（22:09 UTC 頃）
+
+`qwen-official-chat.py` は Qwen3-0.6B を公式 `attn_implementation="sdpa"` のまま読み、
+既存参照と同じ f16 丸めを重みに施し、公式 non-thinking chat template の入力 id を厳密照合した。
+RoPE 表への置換・独自 attention 登録・export 用ラッパーは使わない。
+France 質問の prefill 全 logits を既存のラッパー CPU 参照と比較したところ、
+最大絶対差 **0.003142833709716797**、atol=1e-3 / rtol=0 を超える要素は **70,138 / 3,950,336** だった。
+`qwen-official-chat.log` に失敗を保存した。生成継続の比較に到達する前に停止している。
+
+これは GPU 対ラッパー CPU の既存検証とは別の門である。
+attention の演算経路による丸め差なのか、ラッパーの意味差なのか、生成 token に影響するのかは未判定。
+許容差を変更せず、利用者の「想定外の問題は一旦止める」指示に従って追加実験・修正を停止した。
+公式モデルへの忠実度を確認するまで、Qwen の chat 品質に関する帰属と新形式の製品採用を保留する。
+再開時は同じ重み・入力の同一性、RoPE、mask、公式 SDPA と登録 attention の層別差を順に切り分ける。
+
+直前の W1 比較は cold 3 課題 / warm 2 課題 × base/skip の **10 条件**が成功し、全 token 列一致。
+`w1-ab-summary.json` に比率を保存した。初回 plain 観測の除外に安定した速度利得はなく、製品へ未採用。
+台本に含めた warm extract は既存 bench が非対応として拒否したため、成功件数から除外した。
+`w1-extract-warm-skip.log` と `w1-ab-progress.log` がこの台本条件の誤りを記録している。
+
+後続の `radix-width.ts`、`extract-drafter-real-bench.py` / `drafter-real-gemv.ts`、
+`anima-w4-geometry.ts` は `run-next-trials.py` の最初の検証失敗で **未実行**。
+GPTQ の校正比較も台本準備のみ。新しい f16 GEMV kernel は試作の判断待ちで、実装していない。
+Chrome は隔離した一時環境で NVIDIA ANGLE Vulkan を認識したが WebGPU adapter が得られず、
+ブラウザのモデル実行・性能検証には到達していない（`browser-diagnose-*.json` / `browser-info.log`）。
+
+### Qwen の不一致を検証台本の RoPE 丸めへ帰属（2026-09-11）
+
+利用者の継続承認後、`qwen-attention-attribution-fixed-rope.py` で同じモデル実体の
+重みを固定し、公式 / 登録 attention、暗黙 / 明示 mask、通常 / math SDPA、RoPE 表の有無を切り分けた。
+原因は **独立検証の台本だけが `round_weights_to_f16(model)` を RoPE 置換前に呼んでいたこと**。
+この既存関数は仕様どおりパラメータと f32 バッファを丸める。公式 RoPE の
+`inv_freq` / `original_inv_freq` は各 64 要素中 63 要素が変わり、最大変化は 0.00017815828323364258 だった。
+一方、export 用参照では丸め前に RoPE を f32 の位置表へ置換するため、解析的な周波数は丸めない。
+前回の独立検証はこの条件が揃っていなかった。runtime / exporter の数値不具合ではない。
+
+パラメータのアドレス・更新世代が不変であることを確認したまま、周波数バッファだけを元へ戻すと、
+France 質問の全 logits の最大差は **0.003142833709716797 → 0** になった。
+通常 SDPA では mask の明示・登録 attention・RoPE 表のどの組み合わせでも既存参照とビット同一。
+math SDPA を強制した場合だけ最大 0.00008392333984375 の演算経路差が残り、従来の atol=1e-3 / rtol=0 を満たした。
+
+さらに、元の周波数を保った公式 CPU 実装で 3 問を通常 / math SDPA の両方で再検証した。
+通常 SDPA は **prefill 全 logits が 3 問ともビット同一**、math の最大差は 0.000084 未満。
+継続は France 2 / Japan 10 / WebGPU 32 token、計 6 条件すべて既存参照と厳密一致した。
+Japan の「大阪」という応答も再現し、GPU / ラッパー固有の異常ではないことを確認した。
+この短い試験をモデル全般の品質評価へ外挿しない。
+
+数値の正本は `qwen-attention-attribution-fixed-rope.json` / 同 `.log`。
+最初の失敗と、周波数丸めを残した対照群も保存した。検証の atol・rtol・期待 token は変更していない。
+本体コードへの修正は不要で、後続の既存カーネル設定比較へ再開できる状態となった。
