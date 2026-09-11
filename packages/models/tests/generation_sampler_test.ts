@@ -110,6 +110,35 @@ Deno.test("sampler: greedy は範囲内の最初の NaN を最大値より優先
   assertThrows(() => createSampler().next(f32([0, Infinity, -1]), []), Error, "最大値が非有限");
 });
 
+Deno.test("sampler: topK は候補の範囲外でも最初の NaN を拒否する", () => {
+  for (const topK of [1, 2, 4, 8]) {
+    for (const values of [[NaN, 3, 2, 1], [3, NaN, 2, NaN], [Infinity, 3, 2, NaN]]) {
+      const backing = f32([NaN, ...values, NaN]);
+      const logits = backing.subarray(1, backing.length - 1);
+      const first = values.findIndex(Number.isNaN);
+      const error = assertThrows(
+        () => samplerDistribution(logits, { temperature: 1, topK }, []),
+        Error,
+      );
+      assertEquals(
+        error.message,
+        `logits[${first}] が NaN（非有限） — token id へ畳まずここで落とす`,
+      );
+    }
+  }
+  // 加工で生じた NaN も、上位候補から外れる位置にあっても拒否する。
+  assertThrows(
+    () =>
+      samplerDistribution(f32([3, 2, Infinity]), {
+        temperature: 1,
+        topK: 1,
+        logitBias: [[2, -Infinity]],
+      }, []),
+    Error,
+    "logits[2] が NaN",
+  );
+});
+
 Deno.test("sampler: 最大 logit が非有限なら token id へ畳まずに落ちる", () => {
   // 位置表の外の gather は行ごと NaN 汚染する（known-issues）ので、最終行 logits は**丸ごと**
   // 非有限になる。argmax はそれを「もっともらしい token id」（NaN 比較が常に false なので

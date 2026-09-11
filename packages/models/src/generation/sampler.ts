@@ -196,7 +196,7 @@ const processLogits = (
  * 全部弾き、softmax の分母は NaN になって確率が全滅する。範囲外添字の gather は行ごと NaN 汚染
  * するので（[known-issues] / [limitations]）、これは実際に起きる形である。
  *
- * 温度 0 の経路は最大値の探索にこの検査をまとめる。確率を作る経路では順位付けの前に検査する。
+ * 温度 0 は最大値の探索、top-k は候補の走査にこの検査をまとめる。それ以外は順位付けの前に検査する。
  */
 const assertNoNaN = (logits: Float32Array<ArrayBuffer>): void => {
   for (let token = 0; token < logits.length; token += 1) {
@@ -281,9 +281,14 @@ const selectTopKHeap = (logits: Float32Array<ArrayBuffer>, k: number): number[] 
     }
   };
 
+  // token id 順に全件を検査し、先に現れた NaN を候補の大小に関係なく拒否する。
   // 充填相: 先頭 k 件をそのまま積む。
   let token = 0;
   for (; token < k; token += 1) {
+    const value = logits[token];
+    if (value !== value) {
+      throw new Error(`logits[${token}] が NaN（非有限） — token id へ畳まずここで落とす`);
+    }
     heap.push(token);
     let at = heap.length - 1;
     while (at > 0) {
@@ -297,7 +302,11 @@ const selectTopKHeap = (logits: Float32Array<ArrayBuffer>, k: number): number[] 
   }
   // 定常相: 根より良い token だけを差し替える。
   for (; token < logits.length; token += 1) {
-    if (logits[token] <= logits[heap[0]]) continue;
+    const value = logits[token];
+    if (value !== value) {
+      throw new Error(`logits[${token}] が NaN（非有限） — token id へ畳まずここで落とす`);
+    }
+    if (value <= logits[heap[0]]) continue;
     heap[0] = token;
     siftDown(0);
   }
@@ -375,15 +384,16 @@ export const samplerDistribution = (
     };
   }
 
-  assertNoNaN(processed);
-
   // 語彙数を超える topK は語彙数へ丸める（HF の `min(top_k, vocab)`）。
   const topK = spec.topK === undefined ? undefined : Math.min(spec.topK, processed.length);
   const topP = spec.topP;
   let candidates: readonly number[] | Int32Array<ArrayBuffer>;
   if (topK !== undefined) candidates = selectTopKHeap(processed, topK);
-  else if (topP !== undefined && topP < 1) candidates = sortAllDescending(processed);
-  else candidates = Array.from({ length: processed.length }, (_unused, token) => token);
+  else {
+    assertNoNaN(processed);
+    if (topP !== undefined && topP < 1) candidates = sortAllDescending(processed);
+    else candidates = Array.from({ length: processed.length }, (_unused, token) => token);
+  }
 
   // softmax は候補集合の中だけで正規化する（top-k で落とした質量は分母から消える — HF が
   // 落とした席を −inf にして `softmax` へ渡すのと同値）。
