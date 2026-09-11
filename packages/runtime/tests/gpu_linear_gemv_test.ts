@@ -708,6 +708,8 @@ type RowsCase = {
   readonly tiles: number;
   /** 最終 y タイルで実際に書き戻す行数（`< rows` なら部分タイル）。 */
   readonly lastTileRows: number;
+  /** 長いKは短縮約用の許容差でなく、独立CPU参照からの前進誤差上界を検査する。 */
+  readonly longReference?: boolean;
 };
 
 /**
@@ -716,6 +718,18 @@ type RowsCase = {
  * MUST: `n % 4 == 0`（門が v4 を要求する）。
  */
 const ROWS_CASES: readonly RowsCase[] = [
+  // 関数の呼び出しをまたぐ長いKと部分タイルでも、通常GEMMとの丸めを維持する。
+  {
+    name: "長いK・rows2 × 部分タイル（k4096 n4096 m9）",
+    longReference: true,
+    k: 4096,
+    n: 4096,
+    groupSize: 64,
+    m: 9,
+    rows: 2,
+    tiles: 5,
+    lastTileRows: 1,
+  },
   // rows > 1 × y タイル複数（行共有と読み直しが両方走る基準形・units 4 ちょうど）
   {
     name: "rows4 × タイル8（k128 n2048 g32 m32）",
@@ -790,6 +804,17 @@ const ROWS_CASES: readonly RowsCase[] = [
  * MUST: `n % 4 == 0`（門が v4 を要求する）。
  */
 const ROWS_I8_CASES: readonly RowsCase[] = [
+  // 関数の呼び出しをまたぐ長いKと部分タイルでも、通常GEMMとの丸めを維持する。
+  {
+    name: "長いK・rows2 × 部分タイル（k4096 n4096 m9）",
+    longReference: true,
+    k: 4096,
+    n: 4096,
+    m: 9,
+    rows: 2,
+    tiles: 5,
+    lastTileRows: 1,
+  },
   // rows > 1 × y タイル複数・units 5（端数 1 本）
   {
     name: "rows8 × タイル4（k80 n4096 m32）",
@@ -889,19 +914,38 @@ const checkRowsCase = async (
     );
   }
 
-  // ③ CPU 参照
+  // ③ CPU参照。短いKの既存許容差はそのまま使う。
   const reference = applyReferenceOp(
     "linear",
-    [
-      fill([m, k], XS) as RefTensor,
-      refTensor(weightShape, values),
-      bias as RefTensor,
-    ],
+    [fill([m, k], XS) as RefTensor, refTensor(weightShape, values), bias as RefTensor],
     {},
     [m, n],
   );
-  const report = compareTensors(gemv.output, reference, GEMM_TOLERANCE);
-  assertEquals(report.pass, true, `${name}: ${formatAllclose(report)}`);
+  if (rowsCase.longReference) {
+    // K=4096へK=72の経験的な帯を外挿しない。f32の隣接値への丸めを含むu=2^-23、
+    // 乗算K回・加算K回・bias・参照の最終丸めからγ(2K+2)·Σ|項|を上界とする。
+    // この入力は有限かつnormal。FMAの有無を固定しない。最適化の退行は②の全ビット比較で検出する。
+    const input = fill([m, k], XS).data;
+    const errorFactor = (2 * k + 2) * 2 ** -23;
+    const gamma = errorFactor / (1 - errorFactor);
+    for (let row = 0; row < m; row++) {
+      for (let col = 0; col < n; col++) {
+        let magnitude = Math.abs(bias.data[col]);
+        for (let inner = 0; inner < k; inner++) {
+          magnitude += Math.abs(input[row * k + inner] * values[col * k + inner]);
+        }
+        const index = row * n + col;
+        const error = Math.abs(gemv.output.data[index] - reference.data[index]);
+        assert(
+          error <= gamma * magnitude,
+          `${name}: CPU参照 ${index}: ${error} > ${gamma * magnitude}`,
+        );
+      }
+    }
+  } else {
+    const report = compareTensors(gemv.output, reference, GEMM_TOLERANCE);
+    assertEquals(report.pass, true, `${name}: ${formatAllclose(report)}`);
+  }
 
   // ④ 行ブロック変種のキーで走ったこと（②③だけだと既定経路のままでも緑になる）
   if (gemv.keys.length === 0) return;

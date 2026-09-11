@@ -170,15 +170,15 @@ Deno.test("門の外の (m, n) は黙って丸めず落ちる", () => {
 Deno.test("キーに rows が載り、rows=1 の行ブロックは M=1 変種と別キーになる", () => {
   assertEquals(
     linearGemvRowsKey("i4", 32, defaultLinearGemvRowsVariant("i4", 32, 2048)),
-    "linear_gemv:v1:f32:c32u4r4:wi4g32",
+    "linear_gemv:v2:f32:c32u4r4:wi4g32",
   );
   assertEquals(
     linearGemvRowsKey("i4", 64, defaultLinearGemvRowsVariant("i4", 32, 12288)),
-    "linear_gemv:v1:f32:c32u4r8:wi4g64",
+    "linear_gemv:v2:f32:c32u4r8:wi4g64",
   );
   assertEquals(
     linearGemvRowsKey("i8", undefined, defaultLinearGemvRowsVariant("i8", 32, 262144)),
-    "linear_gemv:v1:f32:c32u4r16:wi8",
+    "linear_gemv:v2:f32:c32u4r16:wi8",
   );
   // MUST: `r1` は M=1 変種のキーと別物（テキストも別 — y タイル化された行ブロック）。
   // 同じキーに割り当たると、M=1 の資産が M ≥ 2 の dispatch に配られて 1 行しか書かれない。
@@ -188,7 +188,7 @@ Deno.test("キーに rows が載り、rows=1 の行ブロックは M=1 変種と
   );
   assertEquals(
     linearGemvRowsKey("i4", 32, defaultLinearGemvRowsVariant("i4", 2, 64)),
-    "linear_gemv:v1:f32:c32u4r1:wi4g32",
+    "linear_gemv:v2:f32:c32u4r1:wi4g32",
   );
   // rows も cols / unroll と同じく域を持つ（キーの生成が域外を通すと WGSL 側で初めて落ちる）
   assertThrows(
@@ -275,5 +275,16 @@ Deno.test("INT2 行ブロックは既定の全高さでシェーダーを10 KB�
       linearGemvRowsKey("i2", undefined, variant),
       `linear_gemv:v2:f32:c32u4r${rows}:wi2`,
     );
+  }
+});
+
+Deno.test("INT4・INT8 行ブロックは既定の全高さでシェーダーを12 KB未満に保つ", () => {
+  // 従来の最大高さは約70 KB。行展開へ戻って初回コンパイルが増える回帰を検出する。
+  for (const storage of ["i4", "i8"] as const) {
+    for (const rows of storage === "i4" ? [1, 2, 4, 8] : [1, 2, 4, 8, 16]) {
+      const variant = { cols: 32, unroll: 4, rows };
+      const source = linearGemvRowsWgsl(storage, storage === "i4" ? 32 : undefined, variant);
+      assertEquals(source.length < 12_000, true, `${storage} ${rows} 行: ${source.length} 文字`);
+    }
   }
 });

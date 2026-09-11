@@ -60,8 +60,8 @@
  * i4 は `f32(i32(u) − 8) * scale`・i8 は `f32(q) * scale` の成分ごと f32 乗算
  * （scale を縮約の外へ括り出さない — ADR 0019）。変わるのは ADR 0022 決定 3 が自由と認めた
  * **担当割り**だけ = **既定経路とビット同一**。行ブロックでも 1 出力要素あたりの縮約順・積の
- * 対応・bias の足し順は M=1 と同一で、違いは復元した値 `f32(q) * scale` を `let` に置いて行間で
- * 共有すること（丸め点は同じ 1 個の f32 乗算 — {@link rowsMacsI4} の WHY）。
+ * 対応・bias の足し順は M=1 と同一。行ブロックでは語ごとの関数を行別に呼ぶが、
+ * 復元の丸め点は同じ 1 個の f32 乗算を保つ（ADR 0082 追記 8・9）。
  * MUST: 先読み（`unroll`）は「語をまとめて読む」だけで、**積和の順序は語の昇順のまま**。
  * 語をまたいで積和を混ぜると 1 出力要素あたりの加算順が動き、契約が割れる。
  * NOTE: f32 の縮約に順序非依存の理論保証は無いので、ビット同一は gemm-geometry と同じく
@@ -347,11 +347,9 @@ export const linearGemvRowsKey = (
   assertRowsVariant(variant);
   assertRowsStorage(storage);
   gemvGroupShift(storage, groupSize);
-  return `linear_gemv:${
-    storage === "i2" ? "v2" : "v1"
-  }:f32:c${variant.cols}u${variant.unroll}r${variant.rows}${weightKeyPart(storage)}${
-    i4GroupKeyPart(groupSize)
-  }`;
+  return `linear_gemv:v2:f32:c${variant.cols}u${variant.unroll}r${variant.rows}${
+    weightKeyPart(storage)
+  }${i4GroupKeyPart(groupSize)}`;
 };
 
 /**
@@ -528,81 +526,35 @@ const unitMacs = (storage: WeightStorage, slot: string): string =>
     : unitMacsI8(slot);
 
 /**
- * 語 1 本の積和展開（行ブロック変種・`rows` 行）。
- *
- * 逆量子化した値 `d = f32(q) * scale`（i4 は `f32(i32(u) − 8) * ws`）を要素ごとに 1 度だけ `let` に
- * 置き、行ごとに `acc<r> = acc<r> + x * d` を語内の要素昇順で書く。1 出力要素あたりの縮約順・
- * 積の対応（x の要素 × その要素の逆量子化値）・bias の足し順は M=1 変種と同じで、違うのは
- * 「逆量子化の乗算を行間で共有する」ことだけ — 丸め点は同じ 1 個の f32 乗算で、既定経路との
- * u32 完全一致は実測（門 = tests/gpu_linear_gemv_test.ts・掃引 6,000 組超 — research
- * 2026-09-07-gemv-rows-k21）。
- *
- * WHY 巻き上げ（行ごとに M=1 と同じ字面を書かない）: 生成テキストの量がそのままシェーダの
- * コンパイル費になる（naga の解析・検証がテキスト量に超線形 — i4 8 行で 100 KB / ≈200 ms が
- * 73 KB / ≈55 ms、研究ノート §6）。速度は行ごとに書く形と同等（掃引で差はノイズ帯）。
- * MUST: x は `vec4<f32>` 束縛から**静的成分**で引く（M=1 変種と同じ Metal の規律）。行の添字
- * `xr<r>` は配列添字であって成分添字ではない。
+ * I4/I8も行ごとの積和を小さな関数へまとめる。K昇順とf32の丸め点はM=1と同じ。
+ * 逆量子化の式を行ごとに複製する代わりに関数を呼び、WGSLの解析・コンパイル量を減らす。
+ * DECIDED: docs/decisions/0082-linear-gemv-decode.md#追記-92026-09-11-int4int8-行ブロックにも関数化を適用する
  */
-const rowsMacsI4 = (slot: string, rows: number): string => {
-  const lanes = ["x", "y", "z", "w"] as const;
-  return lanes.map((component, quad) => {
-    const bytes = `b${slot}_${quad}`;
-    // 要素 e = 2·byte + nibble（0..7）。d の添字は要素の並びそのもの。
-    const dequant = lanes.flatMap((byte, lane) => [
-      `    let d${slot}_${quad}_${lane * 2} = f32(i32(${bytes}.${byte} & 0xFu) - 8) * ws${slot};`,
-      `    let d${slot}_${quad}_${
-        lane * 2 + 1
-      } = f32(i32(${bytes}.${byte} >> 4u) - 8) * ws${slot};`,
-    ]).join("\n");
-    const perRow = Array.from({ length: rows }, (_, row) => {
-      const xa = `xa${slot}_${quad}_${row}`;
-      const xb = `xb${slot}_${quad}_${row}`;
-      // 語の成分 `quad` は要素 8·quad..8·quad+7 = x の quad 2 本ぶん（要素 e は quad 2 本の 8 成分に順に対応）。
-      const macs = Array.from(
-        { length: 8 },
-        (_, element) =>
-          `    acc${row} = acc${row} + ${element < 4 ? xa : xb}.${
-            lanes[element % 4]
-          } * d${slot}_${quad}_${element};`,
-      ).join("\n");
-      return `    let ${xa} = x[xr${row} + xq${slot} + ${quad * 2}u];
-    let ${xb} = x[xr${row} + xq${slot} + ${quad * 2 + 1}u];
-${macs}`;
-    }).join("\n");
-    return `    let ${bytes} = unpack4xU8(pw${slot}.${component});
-${dequant}
-${perRow}`;
+const rowsWordCall = (storage: "i4" | "i8", slot: string, rows: number): string =>
+  Array.from({ length: rows }, (_, row) => {
+    const scale = storage === "i4" ? `ws${slot}` : "wscale_v";
+    return `    acc${row} = linear_${storage}_word(pw${slot}, xr${row} + xq${slot}, ${scale}, acc${row});`;
   }).join("\n");
-};
 
-/** i8 版（成分 `quad` の 4 要素 = x の 1 quad・scale は列ごと 1 本 — {@link unitMacsI8} と同じ対応）。 */
-const rowsMacsI8 = (slot: string, rows: number): string => {
-  const lanes = ["x", "y", "z", "w"] as const;
-  return lanes.map((component, quad) => {
-    const bytes = `b${slot}_${quad}`;
-    const dequant = lanes.map((lane) =>
-      `    let d${slot}_${quad}_${lane} = f32(${bytes}.${lane}) * ${WEIGHT_SCALE_VAR};`
-    ).join("\n");
-    const perRow = Array.from({ length: rows }, (_, row) => {
-      const xa = `xa${slot}_${quad}_${row}`;
-      const macs = lanes.map((lane) =>
-        `    acc${row} = acc${row} + ${xa}.${lane} * d${slot}_${quad}_${lane};`
-      ).join("\n");
-      return `    let ${xa} = x[xr${row} + xq${slot} + ${quad}u];
-${macs}`;
-    }).join("\n");
-    return `    let ${bytes} = unpack4xI8(pw${slot}.${component});
-${dequant}
-${perRow}`;
-  }).join("\n");
+const wordHelperWgsl = (storage: WeightStorage): string => {
+  if (storage === "i2") return i2WordWgsl();
+  if (storage === "f16" || storage === "f32") return "";
+  const scale = storage === "i4" ? "wsa" : "wscale_v";
+  return `
+fn linear_${storage}_word(pwa: vec4<u32>, xqa: u32, ${scale}: f32, initial: f32) -> f32 {
+  var acc = initial;
+${storage === "i4" ? unitMacsI4("a") : unitMacsI8("a")}
+  return acc;
+}
+`;
 };
 
 const rowsMacs = (storage: WeightStorage, slot: string, rows: number): string =>
   storage === "i4"
-    ? rowsMacsI4(slot, rows)
+    ? rowsWordCall("i4", slot, rows)
     : storage === "i2"
     ? rowsMacsI2(slot, rows)
-    : rowsMacsI8(slot, rows);
+    : rowsWordCall("i8", slot, rows);
 
 /** i4 は行あたりの scale 本数から group の先頭を導く / i8 は出力チャネル 1 本を巻き上げる。 */
 const scaleSetupWgsl = (storage: WeightStorage, shift: number | undefined): string =>
@@ -709,7 +661,7 @@ struct Dims {
   k: u32,
 }
 @group(0) @binding(0) var<uniform> dims: Dims;
-${bindings(unit, storage)}${storage === "i2" ? i2WordWgsl() : ""}
+${bindings(unit, storage)}${wordHelperWgsl(storage)}
 
 @compute @workgroup_size(${cols})
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {

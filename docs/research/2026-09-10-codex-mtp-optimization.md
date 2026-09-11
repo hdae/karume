@@ -2270,3 +2270,94 @@ Chromeの取得元はローカルHTTP Range、Denoはローカルファイル。
 
 コミット前の `deno task verify` は **2,885 passed / 760 steps / 0 failed / 5 ignored、24分38秒、終了コード0**
 （`ple-product-verify.log`）。GPUベンチや別のGPUテストは並走させずに完了した。
+
+## INT4・INT8 行ブロックとドライバキャッシュの分離（2026-09-11）
+
+この節はRTX 3080 Ti / Deno 2.9.6 / Chrome 153での時点実測。生データのOUTは
+`outputs/bench/karume/2026-09-11_fable-followup/`。通常版E2BとQAT E2Bを別々に比較する。
+INT2だけの関数化を基準とし、INT4・INT8も行ブロック内の語を関数化した。
+最大高さの生成文字数はINT4 r8が72,592→7,835、INT8 r16が70,318→10,212。
+M=1の全格納型とINT2行ブロックは生成WGSL・キーとも不変。
+
+### 最初の比較で生じた逆転
+
+`all-rows-model-summary.json` は3入力×各3生成の基準・候補を2組比較した集計。
+各組9生成のtoken列は一致した。Deno通常版の初回は333→185 / 341→184 msに短縮したが、
+QATは401→799 / 414→263 ms、Chrome通常版は467→620 / 481→338 ms、
+Chrome QATは428→645 / 431→311 msとなった。
+候補の最初の起動だけ遅い傾向から、ドライバの永続キャッシュを切り分けた。
+
+暖機後6生成の速度比中央値はDeno通常版0.999 / 1.004、QAT0.994 / 0.998、
+Chrome通常版0.989 / 1.015、QAT0.991 / 0.995。
+M=1は変更しておらず、この揺れから定常速度の改善を主張しない。
+
+### 空キャッシュと再利用の対照
+
+`run-cold-cache.py` と `run-cold-cache-reverse.py` は、環境・モデル・候補ごとに新しい空の
+専用ディレクトリを作り、子プロセスだけに `__GL_SHADER_DISK_CACHE_PATH` を設定する。
+1回目のプロセス終了後、同じディレクトリを使う2回目のプロセスを起動する。
+既存キャッシュを消さず、設定も永続変更しない。逆順では環境・モデル・候補の順序を反転し、別の空ディレクトリを使った。
+各条件で2ファイルの作成と次プロセスでの同じ容量を記録した（`*-cache-files.json`）。
+[NVIDIAの環境変数の説明](https://http.download.nvidia.com/XFree86/Linux-x86_64/555.58/README/openglenvvariables.html)は
+OpenGLについての文書であり、Vulkanの仕様根拠とはしない。ここでは実際のファイル生成と時間差を観測した。
+
+容量128・chunk32・PLE常駐0・温度0で短い物語を2token生成した際の、最初のtokenまでの時間を測る。
+以下の「再利用」も新しいプロセスの初回応答であり、同一会話の2ターン目ではない。
+基準はINT2行ブロックのみ関数化済み、候補はINT4・INT8も適用済み。
+
+| 環境・モデル  | 順序   | 空キャッシュ 基準→候補 | 再利用 基準→候補 |
+| ------------- | ------ | ---------------------: | ---------------: |
+| Deno 通常版   | 順方向 |         985.9→863.7 ms |   333.2→186.5 ms |
+| Deno 通常版   | 逆方向 |         977.6→857.6 ms |   336.4→182.2 ms |
+| Deno QAT      | 順方向 |       1643.8→1525.5 ms |   405.3→260.3 ms |
+| Deno QAT      | 逆方向 |       1650.6→1526.2 ms |   407.1→269.6 ms |
+| Chrome 通常版 | 順方向 |         797.7→704.3 ms |   402.9→240.0 ms |
+| Chrome 通常版 | 逆方向 |         816.7→706.6 ms |   364.1→343.8 ms |
+| Chrome QAT    | 順方向 |         856.7→788.0 ms |   437.1→303.5 ms |
+| Chrome QAT    | 逆方向 |         837.0→869.9 ms |   471.9→357.7 ms |
+
+全条件で同じ環境・モデルのtoken列が一致した。集計は `cold-cache-summary.json` /
+`cold-cache-reverse-summary.json`、個票は `{deno|chrome}-{normal|qat}-{cache|cache2}-{i2rows|allrows}-{0|1}.json`。
+INT2の関数化前を示す `async` 対照もQATで各2回含む（合計40プロセス）。
+推測: 前の比較は既にコンパイル済みの基準と、候補の初回ドライバコンパイルが混在し、逆転が大きく出ていた。
+ただしChrome QATの空キャッシュ逆順は約4%悪化しており、全条件での短縮とはしない。
+
+Deno通常版のシェーダー生成APIの同期部分は約113→24 ms、QATでは約159→57 msへ短縮した。
+非同期コンパイルのpromise時間には重複とJSの待ちも含むため、各promiseの時間を足してCPU費用と扱わない。
+M2・E4B全体・長文prefillは未計測。
+
+### 統合と検証
+
+最初の候補の既存GPUテストは6件成功。整理した生成器は、M=1のcols16/32×unroll1/4/8で
+旧生成器との全文・キー一致、全既定行高さで測定候補との全文一致を確認した
+（`all-rows-minimal-source-check.ts` / `.log`）。
+INT4・INT8のsnapshot4本だけを更新し、M=1とINT2は更新しない。
+K=4096・M=9・N=4096の長い縮約と部分タイルを両格納型のGPUテストへ追加し、
+通常GEMMの先頭行とのu32一致・独立CPU参照・実際の選択キーで検証する。
+決定は[ADR 0082 追記9](../decisions/0082-linear-gemv-decode.md#追記-92026-09-11-int4int8-行ブロックにも関数化を適用する)。
+
+追加した長いKの最初の検証は **90 passed / 2 failed、8秒**。
+通常GEMMとの全ビット比較は通り、f64で総和する汎用CPU参照との比較だけが失敗した。
+凍結した変更前カーネルでも同じ2件・同じ最大誤差で再現した
+（`all-rows-product-focused.log` / `all-rows-old-long-isolate-v2.log`）。
+INT4はmaxAbs 0.00042724609375、INT8は0.002838134765625。
+既存のGEMM許容差はK=72までのコーパスに由来し、K=4096のこの入力への適用は不適切だった。
+独立CPU参照を乗算・加算ごとにf32へ丸める試作も行ったが、これもGPUと一致しなかった
+（`all-rows-long-scalar-ref.log`）。WGSLは積和の融合と丸めの選択を許すため、
+このCPUの丸め方だけをGPUの契約とする検証は採らない
+（[WGSLの浮動小数点規則](https://www.w3.org/TR/WGSL/#floating-point-evaluation)）。
+最初の配列全体の失敗表示が大きくなった実行はSIGINTで止め、要素ごとの表示で切り分けた
+（`all-rows-product-focused-v2.log`）。
+
+最終的な追加ケースは、通常GEMMとの全ビット一致を維持した上で、CPUのf64参照からの
+前進誤差上界も検査する。乗算・加算・bias・参照の丸め回数から `γ(2K+2) × Σ|項|` を使う。
+`γ(n)=nu/(1−nu)`、normalなf32の隣接値への丸めを含む `u=2^-23` とし、
+この入力にはoverflow/underflowがない。経験的な閾値の調整ではない。
+既存ケースの参照と許容差は変更せず、最適化による退行の検出は厳密なGPU間比較が担う。
+隔離の最初の起動はOUTが既定の検出対象外で終了したため、明示したimport mapと`--no-config`で実行した。
+
+重点検証は **92 passed / 0 failed、12秒**（`all-rows-product-focused-v3.log`）。
+コミット前の `deno task verify` は **2,886 passed / 760 steps / 0 failed / 5 ignored、24分43秒、終了コード0**
+（`all-rows-product-verify.log`）。GPUベンチ・別のGPUテストは並走させていない。
+最終の生成器も測定候補との全文一致を確認した（`all-rows-product-source-check.log`）。
+追加リンクと見出し、性能台帳の対象外の行が不変であることも検査した（`all-rows-doc-links.log`）。
