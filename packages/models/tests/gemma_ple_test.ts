@@ -16,7 +16,7 @@
 //   費用の型（seek / scan）と予算の空きから「行読み / 全量読み」が決まる。値は経路に依らず
 //   ビット同一で、ヘッダは shard ごとに 1 度しか読まない。
 
-import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
+import { assert, assertEquals, assertRejects, assertStrictEquals, assertThrows } from "@std/assert";
 import {
   createGemma4Ple,
   defaultGemma4PleResidentBytes,
@@ -1114,3 +1114,92 @@ Deno.test("Gemma4Ple: 先行読みが dispose 後に完了しても常駐を復�
     });
   }
 });
+
+for (const rows of [1, 8, 9, 16]) {
+  Deno.test(`Gemma4Ple.gather: ${rows} 行の値とscaleの読込を上限内で重ねる`, async () => {
+    const bytes = shardBytesOf(POOL_INDEX, 0);
+    const reader = fakeSources([POOL_FILE], () => bytes.buffer, { cost: "seek" });
+    const ple = createGemma4Ple({
+      index: POOL_INDEX,
+      openShard: reader.openShard,
+      vocabSize: POOL_ROWS,
+      maxResidentBytes: 0,
+    });
+    try {
+      await ple.gather(Array.from({ length: rows }, (_, row) => row));
+      assertEquals(reader.peak.inFlight, rows <= 8 ? rows * 2 : rows);
+      assertEquals(ple.stats().rowReads, rows);
+    } finally {
+      ple.dispose();
+    }
+  });
+}
+
+for (const rejected of ["values", "scales", "both"] as const) {
+  Deno.test(`Gemma4Ple.gather: ${rejected} の拒否でも相手の読込を待って原因を保持する`, async () => {
+    const bytes = SHARD_BYTES[0].buffer;
+    const gate = Promise.withResolvers<void>();
+    const both = Promise.withResolvers<void>();
+    const valuesError = new Error("values failure");
+    const scalesError = new Error("scales failure");
+    let inject = false;
+    let calls = 0;
+    const ple = createGemma4Ple({
+      index: INDEX,
+      vocabSize: TOKENS,
+      maxResidentBytes: 0,
+      openShard: () =>
+        Promise.resolve({
+          bytes: bytes.byteLength,
+          readAll: () => Promise.resolve(bytes),
+          range: {
+            cost: "seek",
+            read: async (offset, length) => {
+              if (inject) {
+                const call = calls++;
+                assert(call < 2);
+                if (calls === 2) both.resolve();
+                if (call === 0 && rejected !== "scales") throw valuesError;
+                if (call === 1 && rejected === "scales") throw scalesError;
+                await gate.promise;
+                if (rejected === "both") throw scalesError;
+              }
+              return bytes.slice(offset, offset + length);
+            },
+          },
+        }),
+    });
+    await ple.gather([0]);
+    inject = true;
+    const running = ple.gather([1]);
+    let settled = false;
+    const checked = running.then(() => {
+      settled = true;
+    }, () => {
+      settled = true;
+    });
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        both.promise,
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(() => reject(Error("row reads were serialized")), 1000);
+        }),
+      ]);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      assertEquals(settled, false, "もう片方の読込が未完了のままgatherを返さない");
+      gate.resolve();
+      const error = await assertRejects(() => running);
+      assertStrictEquals(error, rejected === "scales" ? scalesError : valuesError);
+      assertEquals(ple.stats().rowReads, 1, "失敗した行を完了済みとして数えない");
+      inject = false;
+      await ple.gather([1]);
+      assertEquals(ple.stats().rowReads, 2);
+    } finally {
+      if (timeout !== undefined) clearTimeout(timeout);
+      gate.resolve();
+      await checked;
+      ple.dispose();
+    }
+  });
+}

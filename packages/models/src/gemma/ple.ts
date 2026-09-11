@@ -881,21 +881,22 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
   /**
    * shard から**行 1 本だけ**を引いて書く（全量は読まない）。
    *
-   * 1 行 = `values`（i8・`stride` バイト）と `scales`（f32・`layers × 4` バイト）の 2 区間で、
-   * どちらも**同じスロットで順に**引く（並列に撒くと fd の占有が {@link ROW_READ_CONCURRENCY}
-   * の 2 倍になる）。順序に依存する状態は持たない — 書き込み先は行ごとに素な区間である。
+   * 1 行の値と scale は別の 2 区間にある。全行を同時に引いても
+   * {@link ROW_READ_CONCURRENCY} を超えない小さい gather だけ、2 区間を並行して読む。
+   * 書き込み先は行ごとに重ならず、値の復元順序も変わらない。
    */
   const readRow = async (
     job: RowJob,
     data: Float32Array,
     options: Gemma4PleReadOptions,
+    parallelPair: boolean,
   ): Promise<void> => {
     const { plan, id, positions } = job;
     const { source, range } = plan;
     const { file } = index.shards[plan.position];
     const layout = await layoutOf(plan.position, range, source.bytes, options);
     const row = id - layout.start;
-    const values = await readRange(
+    const valuesRequest = readRange(
       range,
       source.bytes,
       file,
@@ -903,14 +904,21 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
       rowValueBytes,
       options,
     );
-    const scales = await readRange(
-      range,
-      source.bytes,
-      file,
-      layout.scalesOffset + row * scaleStride,
-      scaleStride,
-      options,
-    );
+    const readScales = (): Promise<ArrayBuffer> =>
+      readRange(
+        range,
+        source.bytes,
+        file,
+        layout.scalesOffset + row * scaleStride,
+        scaleStride,
+        options,
+      );
+    const scalesRequest = parallelPair ? readScales() : valuesRequest.then(readScales);
+    // 片方の拒否でも、発行済みのもう片方を待ち切る。値側の原因を先に返す。
+    const [valuesResult, scalesResult] = await Promise.allSettled([valuesRequest, scalesRequest]);
+    if (valuesResult.status === "rejected") throw valuesResult.reason;
+    if (scalesResult.status === "rejected") throw scalesResult.reason;
+    const values = valuesResult.value, scales = scalesResult.value;
     rowReads += 1;
     const first = positions[0] * stride;
     writeRow(
@@ -940,13 +948,14 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
     for (const plan of plans) {
       for (const [id, positions] of plan.rows) jobs.push({ plan, id, positions });
     }
+    const parallelPair = jobs.length * 2 <= ROW_READ_CONCURRENCY;
     let next = 0;
     const worker = async (): Promise<void> => {
       // MUST: 取り出しと `next` の前進の間に await を挟まない（挟むと 2 本が同じ行を引く）。
       while (next < jobs.length) {
         const job = jobs[next];
         next += 1;
-        await readRow(job, data, options);
+        await readRow(job, data, options, parallelPair);
       }
     };
     await Promise.all(
