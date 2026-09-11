@@ -24,6 +24,7 @@ from birefnet.distribution import LUCIDA_PIPELINE
 from birefnet.distribution import PIPELINE as BIREFNET_PIPELINE
 from depth_anything.distribution import PIPELINE as DEPTH_ANYTHING_PIPELINE
 from gemma4.distribution import PIPELINE as GEMMA4_PIPELINE
+from gemma4_qat.distribution import PIPELINE as GEMMA4_QAT_PIPELINE
 from irodori.distribution import PIPELINE as IRODORI_PIPELINE
 from karume.dist import PIPELINES as CORE_PIPELINES
 from karume.dist import DistError
@@ -44,6 +45,7 @@ RECIPE_PIPELINES = {
     "depth-anything": DEPTH_ANYTHING_PIPELINE,
     "vowel-detector": VOWEL_DETECTOR_PIPELINE,
     "gemma4": GEMMA4_PIPELINE,
+    "gemma4-qat": GEMMA4_QAT_PIPELINE,
 }
 
 
@@ -114,6 +116,7 @@ class TestRegistry:
             "anima",
             "anima-extra",
             "gemma4",
+            "gemma4-qat",
             "siglip2",
             "birefnet",
             "lucida",

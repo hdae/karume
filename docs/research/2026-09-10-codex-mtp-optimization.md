@@ -1750,3 +1750,87 @@ PLE 単位の `deno task verify` は **2,864 passed / 743 steps / 0 failed / 5 i
 （`ple-product-verify.log`、終了コード 0）。製品コードは走行中に変更せず、結果・作業索引の文書だけを更新した。
 fixture の 10 ファイルは保存した生成器から **全 byte 同一**で再生成できた
 （`ple-fixture-reproduction.json`）。この単位を独立コミットし、準備済みの GPU 中間値比較へ進む。
+
+## QAT の縮約差の帰属と Chrome 比較（2026-09-11）
+
+以下の生データは `outputs/bench/karume/2026-09-11_qat-integration/`。
+PLE は `fc3fd8f` にコミット済み。GPU 中間値の採取を完走し、英語最初の2 step の
+通常グラフと追加出力グラフの logits は全ビット一致した。
+観測の追加で結果が変わっていないことを確認してから CPU と照合した
+（`e2b-gpu-{plain,trace}-f32.json`、`e2b-gpu-trace-comparison.json`）。
+
+最初に固定丸め後の値が異なるのは、0始まり層0の `self_attn.q_proj` 出力の1要素 `[0,4,1055]`。
+その linear への入力は SRQ 後に CPU / GPU 全ビット一致していた。
+保存した GPU の linear 出力へ CPU の SRQ をかけても、GPU の SRQ 出力と全ビット一致した。
+したがって、この地点の差は SRQ の実装差ではなく、**同じ入力の行列縮約差が固定丸め境界をまたぐこと**に帰属できる。
+
+| 値                   |                 CPU |                 GPU |
+| -------------------- | ------------------: | ------------------: |
+| 丸め前の linear 出力 |  −23.38580894470215 |  −23.38584327697754 |
+| scale で除した f32   |  −7.499994277954102 |   −7.50000524520874 |
+| SRQ 後               | −21.826770782470703 | −24.944881439208984 |
+
+丸め前の絶対差は **0.000034332275390625**、固定 scale は **3.118110179901123**。
+f32 の入力・重みを f64 で内積した対照は **−23.385812002611928**。
+CPU / GPU の誤差はそれぞれ約 **+0.00000306 / −0.00003127** だった。
+根拠は `e2b-linear-boundary.json` と `e2b-linear-boundary.py`。最初の試行では観測テンソルと
+autograd の扱いが衝突し、推論専用に requires_grad を落とした v2 が成功した。
+計算順や許容差を変更して結果を合わせる修正は入れていない。
+
+### 8種類の短い生成比較
+
+公式 CPU f32/eager と Deno / Chrome の実 GPU を、greedy 最大16 token で比較した。
+ケースは算術・抽出・翻訳・コード・物語・日本語・中国語・会話履歴。
+最後のケースは履歴を全量 prefill する比較であり、KV cache を保持する複数ターンの寿命検査ではない。
+GPU は f32 RoPE 候補、parallel attention、容量128、物理 chunk を32行単位で入力長に合わせた。
+
+| モデル | CPU と列全体が一致 | Deno と Chrome が一致 | CPU と分岐したケース（0始まり step） |
+| ------ | -----------------: | --------------------: | ------------------------------------ |
+| E2B    |                6/8 |                   8/8 | 物語13、日本語0                      |
+| E4B    |                4/8 |                   8/8 | 物語10、日本語11、中国語9、会話4     |
+
+全件の JSON から集計した `broad-summary.json` が件数の根拠。
+CPU は `*-cpu-broad-reference.json`、Deno は `*-gpu-broad-f32-parallel.json`、
+Chrome は `*-browser-broad.json`（実 adapter は NVIDIA Ampere、fallback=false）。
+英語・日本語各12 token の Chrome 比較も完走し、Deno と同じトークン列だった（`*-browser-short.json`）。
+全 logits は有限だった。小さな入力集合なので、これを品質全般の合格とは扱わない。
+
+### 演算別時間
+
+`qat-gpu-profile.ts` / `*-gpu-profile-f32-parallel.json` の内訳を `gpu-profile-summary.json` へ集計した。
+2ケースの prefill 各1回、decode 計22回。timestamp 計測は dispatch ごとに pass を分けるため、
+通常実行の壁時計やスループットとは異なる。負の timestamp 補正は両モデルとも0件。
+
+| モデル・相  | GPU 合計平均 ms | linear GEMV ms |  SRQ ms |
+| ----------- | --------------: | -------------: | ------: |
+| E2B prefill |         46.3912 |        32.9663 |  4.6880 |
+| E2B decode  |         25.0560 |        14.0455 |  3.6374 |
+| E4B prefill |        151.2197 |       122.0135 | 10.0642 |
+| E4B decode  |         27.6452 |        17.0304 |  3.1543 |
+
+次の速度候補は linear と SRQ の融合、prefill の GEMV / GEMM 選択。
+単独 SRQ が decode の約11〜15%を占めるが、融合でその全量が消えるとは限らない。
+まず別 family の通常生成・寿命を統合し、この固定数値契約を保つ A/B で判定する。
+
+### 正式 QAT recipe の全量変換
+
+`gemma4_qat.export` と `dist.py --pipeline gemma4-qat` を追加した（ADR 0097 追記5）。
+既存 Gemma の tokenizer・wrapper・PLE 配布検査を使い、固定 payload と scale を保存後に全量照合する。
+元ファイルの fingerprint と trace 上限を `reference.json` へ記録し、途中失敗で既存出力を壊さない据え替えに含めた。
+
+`e2b/e4b-recipe-proof/` の全量変換は成功。固定重み数は E2B **276**（I2 61 / I4 145 / I8 70）、
+E4B **343**（I2 1 / I4 258 / I8 84）。model / PLE shard 数はそれぞれ **5 / 5**、**10 / 3**。
+両モデルで固定重みと PLE の保存後 bytes はすべて元と一致した。ローカル配布形は OUT の
+`karume-gemma4-qat/`、組み立て成功ログは `recipe-dist-v3.log`。
+初回の graph 門は明示 `f32` 格納を未考慮、次は card の keyword 引数の不一致で失敗し、両方を修正した。
+正式 recipe の GPU 8ケースは両モデルとも既存候補とトークン列が全件一致した
+（`*-recipe-gpu-broad-f32-parallel.json`、集計 `recipe-generation-parity.json`）。
+
+Python 全体の初回は新 recipe の optional import と据え替え静的検査の登録漏れで2件失敗した。
+修正後は exporter **3,227 passed / 1 skipped**、recipes **2,797 passed / 4 skipped**
+（`recipe-exporter-pytest-v2.log` / `recipe-recipes-pytest-v2.log`）。
+修正中に動いていた初回 Deno verify は終了143で停止したため合格に数えず、製品コードを固定して v2 を実行した。
+
+正式 recipe の `deno task verify` v2 は **2,864 passed / 743 steps / 0 failed / 5 ignored、24m59s**、
+終了コード0（`recipe-verify-v2.log`）。実行中は製品コードを固定し、追記した文書は再整形・確認した。
+検査済み配布形を新規 `models/karume-gemma4-qat/` に配置済み。次の単位は共通 pipeline と対話 CLI。

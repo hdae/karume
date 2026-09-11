@@ -31,6 +31,7 @@ from anima import distribution as anima_distribution
 from birefnet import distribution as birefnet_distribution
 from depth_anything import distribution as depth_anything_distribution
 from gemma4 import distribution as gemma4_distribution
+from gemma4_qat import distribution as gemma4_qat_distribution
 from irodori import distribution as irodori_distribution
 from karume.dist import PIPELINES as CORE_PIPELINES
 from karume.dist import DistError, Pipeline
@@ -52,6 +53,7 @@ PIPELINES: Mapping[str, Pipeline] = {
     "depth-anything": depth_anything_distribution.PIPELINE,
     "vowel-detector": vowel_detector_distribution.PIPELINE,
     "gemma4": gemma4_distribution.PIPELINE,
+    "gemma4-qat": gemma4_qat_distribution.PIPELINE,
     **CORE_PIPELINES,
 }
 

@@ -147,3 +147,26 @@ schema 1 / I8 の索引・復元・読み方は維持する。旧 reader は sch
 公式 E2B INT4 / E4B INT2 の probe との全ビット一致、およびモデルに依存しない独立 Torch fixture で
 全量・行読取・常駐・重複 token・境界を検査する。既存の未知 schema 拒否テストは未対応版を 2 から 3 へ進め、
 拒否そのものは保つ。正式 recipe はこの sidecar を後続単位で書く。
+
+## 追記 5 — 固定 QAT recipe と数値比較の扱い（2026-09-11）
+
+recipe `gemma4_qat` は公式 mobile Transformers 形式だけを読み、text / PLE / tokenizer を
+`gemma4-qat-<model>-product` 系列へ保存する。実行は `python -m gemma4_qat.export`。
+既存 Gemma の wrapper、attention の登録、states 変換、tokenizer compile を再利用する。
+
+- 元の固定整数・scale は唯一の値の供給元。trace だけに shape-only の重みを使い、変換後は
+  f32/meta 宣言と固定 writer へ渡す。head と embedding の共有は全 bytes 一致を確認してから行う。
+  分割後の全固定 payload と PLE を元 bytes と照合し、出所・config・tokenizer と同じ据え替え単位に置く。
+- 変換先に通常 Gemma の量子化や drafter は足さない。配布の quant は既存文法に沿う `i4` とし、
+  label / description に固定混成 INT2 / INT4 / INT8 と SRQ を明示する。
+- 初期の既定 capacity は 128、chunkLength は 32、trace 上限は 128。上限を provenance に保存し、
+  dist はその値を検査して使う。モデルの位置上限は公式 config から導く。長文の品質・速度は未検収。
+- QAT の RoPE は周波数のべき乗・逆数・位置積を段ごとに f32 へ丸める専用入口を使う。
+  通常 Gemma の f64 計算契約は変えない。三角関数は host の Math.cos / Math.sin 後に f32 格納。
+  上流 Torch の三角関数や各 GPU の縮約との全ビット一致は保証しない。
+
+CPU / GPU の最初の差は、同一入力の行列縮約が SRQ の丸め境界をまたぐことまで実測で帰属した。
+SRQ 単体の CPU / GPU ビット一致は保たれている。8種類の短い生成比較では Deno と Chrome の
+トークン列は全件一致したが、公式 CPU との完全一致は E2B 6件 / E4B 4件。
+この結果を品質全般の合格とは扱わず、family / CLI に実験段階の制約として明示する。
+既存の許容差・期待値は変更しない。詳細と生データは research の該当節を参照する。

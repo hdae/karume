@@ -367,8 +367,10 @@ def _offset(raw: Mapping[str, Any], key: str, where: str) -> int:
     return value
 
 
-def gemma4_ple_index(product: Path) -> Mapping[str, Any]:
+def gemma4_ple_index(product: Path, *, storage: str | None = None) -> Mapping[str, Any]:
     """PLE sidecar の索引を読んで**形まで**落とす（読み手 `ple.ts` の受理集合の鏡像）。
+
+    storage を明示した QAT 呼び手だけ schema 2 / I2・I4 を受ける。省略時は従来の schema 1 / I8。
 
     MUST: 範囲は `[0, tokens)` の**隙間も重なりも無い昇順分割**であること。緩めると「引けない
     id がある索引」や「2 本が同じ id を持つ索引」が通り、後者は**どちらの行を引いたか**で
@@ -380,14 +382,22 @@ def gemma4_ple_index(product: Path) -> Mapping[str, Any]:
     raw = _read_json(path, "PLE sidecar の索引")
     if not isinstance(raw, dict):
         raise DistError(f"{where}: 最上位オブジェクトでない")
-    unknown = sorted(set(raw) - set(GEMMA4_PLE_INDEX_KEYS))
+    if storage not in (None, "i2", "i4"):
+        raise DistError(f"未対応 PLE storage: {storage}")
+    keys = (*GEMMA4_PLE_INDEX_KEYS, "storage") if storage else GEMMA4_PLE_INDEX_KEYS
+    unknown = sorted(set(raw) - set(keys))
     if unknown:
-        raise DistError(f"{where}: 未知キー {unknown}（許可: {list(GEMMA4_PLE_INDEX_KEYS)}）")
-    if raw.get("schema") != GEMMA4_PLE_SCHEMA:
-        raise DistError(f"{where}: schema が {raw.get('schema')!r}（期待 {GEMMA4_PLE_SCHEMA}）")
+        raise DistError(f"{where}: 未知キー {unknown}（許可: {list(keys)}）")
+    schema = 2 if storage else GEMMA4_PLE_SCHEMA
+    if raw.get("schema") != schema:
+        raise DistError(f"{where}: schema が {raw.get('schema')!r}（期待 {schema}）")
+    if storage and raw.get("storage") != storage:
+        raise DistError(f"{where}: storage が期待 {storage} と違う")
     tokens = _positive_int(raw, "tokens", where)
     layers = _positive_int(raw, "layers", where)
     dim = _positive_int(raw, "dim", where)
+    if storage and dim % 16:
+        raise DistError(f"{where}: packed PLE の dim は16の倍数が必要")
     scale = raw.get("embedScale")
     if (
         not isinstance(scale, int | float)
@@ -423,7 +433,14 @@ def gemma4_ple_index(product: Path) -> Mapping[str, Any]:
         expected = stop
     if expected != tokens:
         raise DistError(f"{where}: shard の合計 {expected} 行が tokens {tokens} と違う")
-    return {"tokens": tokens, "layers": layers, "dim": dim, "embedScale": scale, "shards": shards}
+    return {
+        "tokens": tokens,
+        "layers": layers,
+        "dim": dim,
+        "embedScale": scale,
+        "shards": shards,
+        **({"storage": storage} if storage else {}),
+    }
 
 
 def gemma4_ple_role(position: int) -> str:
@@ -796,7 +813,11 @@ def assert_gemma4_ple_shards(placements: Mapping[str, Path], index: Mapping[str,
         header = safetensors_header(path)
         rows = int(shard["stop"]) - int(shard["start"])
         for key, dtype, shape in (
-            (GEMMA4_PLE_VALUES_KEY, "I8", [rows, index["layers"], index["dim"]]),
+            (
+                GEMMA4_PLE_VALUES_KEY,
+                str(index.get("storage", "i8")).upper(),
+                [rows, index["layers"], index["dim"]],
+            ),
             (GEMMA4_PLE_SCALES_KEY, "F32", [rows, index["layers"]]),
         ):
             spec = header.get(key)
@@ -820,7 +841,8 @@ def assert_gemma4_ple_shards(placements: Mapping[str, Path], index: Mapping[str,
         if not isinstance(declared, dict):
             raise DistError(f"{path}: {GEMMA4_PLE_METADATA_KEY} が最上位オブジェクトでない")
         expected = {
-            "schema": GEMMA4_PLE_SCHEMA,
+            "schema": 2 if "storage" in index else GEMMA4_PLE_SCHEMA,
+            **({"storage": index["storage"]} if "storage" in index else {}),
             "tokens": index["tokens"],
             "layers": index["layers"],
             "dim": index["dim"],

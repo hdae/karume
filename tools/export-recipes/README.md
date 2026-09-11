@@ -74,7 +74,7 @@ uv run python dist.py --pipeline sbv2 --card-profile jvnv \
 ```
 
 The accepted set is `anima` / `anima-extra` / `sbv2` / `irodori` / `siglip2` / `birefnet` /
-`lucida` / `depth-anything` / `vowel-detector` / `gemma4`. What the flags mean — `--model` for
+`lucida` / `depth-anything` / `vowel-detector` / `gemma4` / `gemma4-qat`. What the flags mean — `--model` for
 assembling several models into one repository, `--card-profile` for attribution, and the model
 card written after `verify_dist` — is the engine's contract and is documented in
 [`../exporter/README.md`](../exporter/README.md).
@@ -125,3 +125,6 @@ uv run ruff format --check .
 
 The core has its own set (run in `tools/exporter/`) — see
 [`../exporter/README.md`](../exporter/README.md).
+
+The experimental [Gemma 4 QAT recipe](gemma4_qat/README.md) preserves the official mobile
+INT2/INT4/INT8 payloads and fixed activation rounding for E2B and E4B.

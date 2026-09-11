@@ -46,6 +46,9 @@ WRITER_CALLS = frozenset(
         # 表に無いと、その台本を表へ載せても「書いている場所」を 1 つも見ないまま緑になる。
         "write_ple_shards",
         "write_record",
+        # 固定 QAT のコンテナと PLE も同じ作業席の内側へ置く。
+        "publish_model",
+        "write_ple",
     }
 )
 
@@ -59,6 +62,7 @@ EMIT_ENTRIES: tuple[tuple[str, str], ...] = (
     ("gemma4/export.py", "export_series"),
     ("gemma4/export_decode.py", "export_series"),
     ("gemma4/export_product.py", "export_series"),
+    ("gemma4_qat/export.py", "export_qat"),
     ("gemma4/export_drafter.py", "export_series"),
     ("minicpm5/export.py", "export_series"),
     ("minicpm5/export_decode.py", "export_series"),

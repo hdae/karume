@@ -16,9 +16,9 @@
   f16 / f32 M=1 GEMV は RTX の実 LLM で検収して採用（K-25 / K-26）。固定 INT2 / SRQ と writer は実装・検収済み（K-27）。
   QAT の公開形式・固定丸め・PLE 対応は承認済み。別 family `gemma4-qat` の E2B / E4B として統合中（[ADR 0097](../docs/decisions/0097-gemma4-qat-integration.md)）。Anima の RMS128 を適用（K-28）。
   TypeScript の CPU profile / token-only 比較も記録済み（H-18）。Chrome のみ利得があり、製品変更は保留。
-  QAT は格納・固定丸め → recipe / PLE → family / 通常生成の順に、主担当で実装・検収する。
+  QAT の格納・固定丸め・PLE は検収済み。公式 recipe / 配布形を全量検証し、次は family / 対話 CLI の統合を検収する。
   M2 は利用者から Anima / Irodori などの動作・短縮報告あり。形状別の自動数値検収と追加 LLM の配布・長文・品質検収は残る。E4B / Qwen / MiniCPM のローカル実行と
-  Chrome の Gemma 自由文比較は済。QAT の固定重みは保存後も全 byte 一致。CPU/GPU の丸め差が token 選択へ届くケースを帰属中で、生成品質の検収は未完。
+  Chrome の Gemma 自由文比較は済。QAT の固定重みは保存後も全 byte 一致。CPU/GPU 差は行列縮約が SRQ 境界をまたぐことまで帰属済み。8短文で Deno/Chrome は一致、公式CPU一致はE2B 6件/E4B 4件。広い生成品質は未検収。
   ローカル実験 CLI は [MiniCPM5](../examples/minicpm5/README.md) / [Qwen3](../examples/qwen3/README.md)。
   Gemma 準拠の対話・reset・中断に対応。容量 128 の多ターン検収は research に記録。公開 pipeline は未追加。
   利用者の希望により、今後は作業単位で調査・検証を終えて順次コミットする。残件の正本は backlog。
