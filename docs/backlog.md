@@ -19,6 +19,8 @@
   f32 M=1 も [両 LLM の検収](research/2026-09-10-codex-mtp-optimization.md#f32-格納-m1-の-gemv2026-09-11)で採用（K-26）。
   幅128以下の RMS 正規化も [Anima 全体の検収](research/2026-09-10-codex-mtp-optimization.md#anima-の-rms-正規化と並べ替え融合2026-09-11)で採用（K-28）。
   f16 / f32 / RMS128 の M2 追試は残る。利用者の希望により、容量拡張より最適化調査を優先する。
+  TypeScript の [CPU profile / token-only 比較](research/2026-09-10-codex-mtp-optimization.md#typescript-の実行費と-token-only-出力2026-09-11)は記録済み（H-18）。
+  生成用の出力宣言は将来の LLM recipe / pipeline で検討する。現在の CLI の契約は維持する。
   Chrome / Deno の Gemma 比較は自由文まで実施済み。他課題・長文・M2 を次の検収へ残す。
   QAT mobile は [INT2 / SRQ の実形状試作と統合案](research/2026-09-10-codex-mtp-optimization.md#qat-mobile-の-int2-と固定丸め2026-09-11)を記録（K-27）。
   公開 IR・固定 SRQ・PLE の INT4 読取への対応を判断後、通常生成から検収する。Wan は小さな DiT から段階検証する。

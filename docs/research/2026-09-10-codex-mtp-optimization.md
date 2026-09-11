@@ -1373,3 +1373,112 @@ CFG は条件の影響を強める係数で、1 と 4 の両方を検査した�
 （`rms-verify-v2.log`）。最初の実行は追加テストの `finally` 内の throw を lint が拒否し、GPU 実行前に終了した。
 後処理後に GPU エラーを報告して元の例外を上書きしない形へ直し、追加 GPU テスト 2 件の再成功後に全体検証をやり直した。
 元ログ `rms-verify.log` と `rms-cleanup-test.log` も保存した。検証開始時から 7 個のコード・テストファイルの SHA が同じことを確認した。
+
+## TypeScript の実行費と token-only 出力（2026-09-11）
+
+RTX 3080 Ti、Deno 2.9.6、Chrome 153.0.8010.36（Vulkan / NVIDIA Ampere、fallback=false）での時点調査。
+保存先は `outputs/bench/karume/2026-09-11_optimization-next/`。製品の TypeScript 実行経路は変更していない。
+
+### ブラウザの CPU サンプリング
+
+`browser-profile.ts` / `.mjs` で、Qwen3-0.6B の f32 / GPTQ I4、MiniCPM5-2B の f32 を調べた。
+各モデルは英語・日本語・WebGPU の 3 入力で 64 token を生成する。読み込み・prefill・最初の 7 decode を外し、
+decode 8〜63 の各 56 回、計 168 回を Chrome DevTools Protocol の CPU Profiler で記録した。
+サンプリング間隔は 1,000 µs。logits の hash 回収は無効にし、既存 CPU prefill 参照と greedy 列の検査を保った。
+容量 128・prefill 16 行の実験グラフであり、CLI の対話処理や表示費は含めない。
+
+以下は renderer のサンプル時間を decode 回数で割ったもの。
+`(idle)` には GPU・プロセス間通信・イベントループの待ちなどが含まれるため、GPU の計算時間とは呼ばない。
+また、ブラウザ全体や GPU process の CPU 使用率ではない。Profiler 自体の費用もあるので、性能比較は次節の別走行で行う。
+
+| モデル        | JavaScript ms/decode | engine/native ms/decode | idle ms/decode | JavaScript 比率 | idle 比率 |
+| ------------- | -------------------: | ----------------------: | -------------: | --------------: | --------: |
+| Qwen3 GPTQ I4 |                0.497 |                   0.685 |          8.984 |           4.88% |    88.26% |
+| Qwen3 f32     |                0.447 |                   0.698 |         16.573 |           2.52% |    93.54% |
+| MiniCPM5 f32  |                0.447 |                   0.609 |         41.861 |           1.04% |    97.47% |
+
+JavaScript の主な観測箇所は `Session.#collectStaged` の出力コピーだった。
+個々の dispatch / bind / 記号処理はサンプルが少なく、これだけで細かな順位を断定しない。
+`browser-profile-<family>-<0..2>.cpuprofile` が原本、`browser-profile-summary.json` と `host-trials-summary.json` が集計。分類手順は `summarize-profiles.py` に保存した。
+
+ソースも確認し、次の候補は独立した改修に進めなかった。
+
+- `statesOnlySymbols` は入力 shape と記号の集合を調べる。この 3 資産の入力は 2 本で、全中間値の走査ではない。
+  構築時 metadata 化は H-10 の既存低優先度判断を維持する。
+- `arena.ts` の `toSizeClass` は 4 byte 整列と最小 4 byte であり、2 の冪へ丸めて巨大な余白をコピーする実装ではない。
+- `getMappedRange().slice(0)` は unmap 後も利用者へ値を返すために必要な所有コピー。
+  単に view へ置換できない。staging の再利用・複数出力の pack は H-9 と同じ寿命・失敗復帰の設計が要る。
+- 実行ごとの入力検査・GPU エラー検査・実行リースは維持する。今回のサンプルから削除の根拠は得られていない。
+
+### 全 logits の回収を省く対照実験
+
+現在の Qwen / MiniCPM 実験 CLI は、GPU 内で greedy token を計算するが、IR の出力宣言は `[logits, token]` の 2 本である。次 token だけを使う生成では、この logits 回収量が削減候補になる。
+
+`prepare-token-only.py` で実験用の先頭 shard を別名で作り、**変更は graph.outputs を `[token]` にするだけ**に限った。
+その他の graph フィールド、全 tensor payload、残りの shard は同じことを検査した。
+証拠は `token-only-projections.json`。既存の系列資産を上書きせず、実験ファイルは保存先の中だけに置いた。
+計算ノードは減らしておらず、GPU の logits 計算と argmax は残る。
+
+比較順は全出力 → token-only → token-only → 全出力。3 入力 × 64 token を各方式で実行し、
+Profiler と hash 回収は無効にした。各走行の最初の 7 decode を外した 56 回の中央値を取り、往復 2 値の中央値で比べる。
+全出力側は既存 CPU prefill logits の `atol=1e-3, rtol=0` を満たし、全方式で既存 greedy 列と **生成した 64 token 全列の一致**を確認した。token-only 側の全 logits 一致を確認したという意味ではない。
+
+decode 最終 run の staging 確保は Qwen の両格納型で **607,748 → 4 bytes**、
+MiniCPM5 で **522,244 → 4 bytes**、本数は全て **2 → 1**。
+同じ入力間の dispatch 数は同じで、重みと plan backing のバイト数も変わらない。
+追加照合は `host-invariants-summary.json` に保存した。
+
+| 環境   | モデル        | 全出力 ms/decode | token-only ms/decode | 速度比（全出力 / token-only） |
+| ------ | ------------- | ---------------: | -------------------: | ----------------------------: |
+| Chrome | Qwen3 GPTQ I4 |      9.539–9.570 |          8.979–8.988 |                   1.061–1.066 |
+| Chrome | Qwen3 f32     |    17.119–17.170 |        16.551–16.667 |                   1.027–1.035 |
+| Chrome | MiniCPM5 f32  |    42.344–42.434 |        41.819–41.885 |                   1.013–1.014 |
+| Deno   | Qwen3 GPTQ I4 |    19.123–21.214 |        20.872–21.674 |                   0.916–0.979 |
+| Deno   | Qwen3 f32     |    27.380–27.501 |        27.472–27.645 |                   0.990–1.001 |
+| Deno   | MiniCPM5 f32  |    53.488–53.598 |        53.008–53.504 |                   1.002–1.009 |
+
+範囲は 3 入力の最小・最大であり、信頼区間ではない。原本は `browser-readback-<family>.json` / `deno-readback-<family>.json` と同名ログ、
+集計は `summarize-host-trials.py` / `host-trials-summary.json`。
+Chrome では全出力に対して約 **1.2〜6.2% の時間短縮**を得たが、Deno の共通改善は確認できなかった。
+
+Deno の Qwen I4 は比較順に沿った時間変動が大きかったため、各 Session に先行 64 token の生成を加えて再測定した。
+`deno-readback-warm-qwen3-06b-gptq-i4.json` と `deno-readback-warm-summary.json` では、英語 / 日本語 / WebGPU の速度比は **0.974 / 0.976 / 0.988**。暖機後も改善せず、順序による変動は残った。
+この実験は RMS の統合中だったため、import map で両方式を従来 RMS256 に固定した。
+原因を Deno 固有の回帰と断定せず、「この条件で利得が再現しない」と結論付ける。追加の GPU 追試はここで打ち切った。
+
+### 採否と残件
+
+H-18 として **将来の LLM 生成用資産での出力宣言を検討する候補**に留める。
+現在の `examples/shared/llm-generate.ts` は 2 出力の形を検証するので、token-only 資産はそのままでは使えない。
+CLI の検査を外す・loader で IR を黙って書き換える変更は加えていない。
+実装する場合は、診断用 logits 出力と生成用 token 出力の用途を recipe / pipeline の契約に明記し、
+両環境で複数ターン・中断・エラー・数値を検収する。現行のホスト側で sampling を行う経路には logits が必要で、greedy 限定の比較を一般化しない。
+M2・長文・モデル全体の品質は未検証。既存 H-9 / H-10 の単独改修より、この用途の整理を優先候補にする。
+
+## 最適化調査の再開位置（2026-09-11）
+
+序盤の Sol 3 担当による調査は終了し、その後の試作・実測・統合・検収は主担当で行った。
+今回の続きで調査エージェントを追加する必要はない。作業ブランチは `codex/review-and-fix`。
+
+| コミット  | 完了した単位                                              |
+| --------- | --------------------------------------------------------- |
+| `f8bbaf1` | f16 格納 M=1 の GEMV。単体と Deno / Chrome の Qwen を検収 |
+| `eaccc9b` | f32 格納 M=1 の GEMV。Qwen / MiniCPM5 を両環境で検収      |
+| `cbd0b8c` | QAT INT2 / 固定 SRQ の単体実測と製品化の段階案            |
+| `92d219e` | 幅 128 以下の RMS 正規化。Anima 全体と Qwen の数値を検収  |
+
+TypeScript / token-only の記録は、この 4 単位に続く独立した文書コミットとする。
+実測の入口は [保存結果の索引](../../outputs/bench/karume/2026-09-11_optimization-next/RESULTS-INDEX.md)。
+同ディレクトリの `HANDOFF.md` は開始前のメモなので、最新状態は `STATE.md` の末尾と各 `*-final-status.json` を読む。
+再実行する場合は新しい出力先を作り、検証と GPU ベンチを並走させない。
+
+次の推奨は [QAT の製品化段階案](#製品化の段階案判断待ち)の判断と、IR / 固定 SRQ の契約からの段階実装。
+PLE の I4 読取、prefill、通常生成全体の一致・品質・メモリを検収するまで、INT2 の単体利得を全体性能として扱わない。
+MTP drafter の I8 共有重みはその後の別設計にする。
+
+未完は f16 / f32 / RMS128 の M2 追試、QAT の製品統合・全モデル検収、token-only 出力の正式な recipe / pipeline 契約。
+長文容量・広い品質評価・モデル配布・動画対応は従来どおり backlog に残す。今回の CLI と既存モデル資産は変更していない。
+
+この文書コミット前の `deno task verify` は **2,849 passed / 743 steps / 0 failed / 5 ignored、24m26s**
+（`host-verify.log`）。追加文書のリンク・数値・保存データとの対応も確認した。
+全体検証は終了し、実験用 HTTP / Xvfb / Chrome も停止済み。実行中の GPU ジョブはない。
