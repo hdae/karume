@@ -121,7 +121,50 @@ def main() -> None:
                         ),
                     }
                 )
-        fixtures[family] = {"cases": cases, "chats": chats}
+        multiturn = []
+        for system in [None, "Answer briefly. 日本語で答えてください。", ""]:
+            for answer in [
+                "Paris.",
+                "東京",
+                "",
+                "\n\nhello",
+                "<think>\n\n</think>\n\nParis.",
+                "<think>\nreason\n</think>\n\n東京",
+                "<think>unfinished",
+                "orphan</think>\nbody</think>\nlast",
+            ]:
+                turns = [
+                    {"user": "Previous question?", "assistant": answer},
+                    {"user": "次の質問", "assistant": "e\u0301 👩🏽\u200d💻"},
+                ]
+                messages = (
+                    [] if system is None else [{"role": "system", "content": system}]
+                )
+                for turn in turns:
+                    messages.extend(
+                        [
+                            {"role": "user", "content": turn["user"]},
+                            {"role": "assistant", "content": turn["assistant"]},
+                        ]
+                    )
+                prompt = "Continue briefly."
+                messages.append({"role": "user", "content": prompt})
+                ids = tok.apply_chat_template(
+                    messages,
+                    tokenize=True,
+                    return_dict=False,
+                    add_generation_prompt=True,
+                    enable_thinking=False,
+                )
+                multiturn.append(
+                    {
+                        "turns": turns,
+                        "prompt": prompt,
+                        "system": system,
+                        "ids": " ".join(map(str, ids)),
+                    }
+                )
+        fixtures[family] = {"cases": cases, "chats": chats, "multiturn": multiturn}
 
     args.out.mkdir(parents=True, exist_ok=True)
     unicode_path.write_text(json.dumps(unicode_data, ensure_ascii=False) + "\n")

@@ -61,10 +61,12 @@ const byteAlphabet = (): string[] => {
   );
 };
 
+export type LlmTurn = { readonly user: string; readonly assistant: string };
+
 export type LlmTokenizer = {
   readonly stopTokens: readonly number[];
   encode(text: string, completion?: boolean): number[];
-  chat(prompt: string, system?: string): number[];
+  chat(prompt: string, system?: string, turns?: readonly LlmTurn[]): number[];
   decoder(): { push(token: number): string; finish(): string };
 };
 
@@ -233,9 +235,36 @@ export const createLlmTokenizer = (
   return {
     stopTokens: [getId("<|im_end|>"), getId(mini ? "</s>" : "<|endoftext|>")],
     encode,
-    chat(prompt, system): number[] {
+    chat(prompt, system, turns = []): number[] {
+      // tool response は公式テンプレートの last_query 判定を変えるため、この text-only CLI では拒否する。
+      if (prompt.startsWith("<tool_response>") && prompt.endsWith("</tool_response>")) {
+        throw new Error("tool response を入力する会話は未対応です");
+      }
       let text = mini ? "<s>" : "";
       if (system !== undefined) text += `<|im_start|>system\n${system}<|im_end|>\n`;
+      for (const turn of turns) {
+        let content = turn.assistant;
+        let reasoning = "";
+        const closing = content.indexOf("</think>");
+        if (closing >= 0) {
+          const before = content.slice(0, closing).replace(/\n+$/, "");
+          const opening = before.lastIndexOf("<think>");
+          reasoning = (opening < 0 ? before : before.slice(opening + 7)).replace(/^\n+/, "");
+          content = content.slice(content.lastIndexOf("</think>") + 8).replace(/^\n+/, "");
+        }
+        // Qwen は過去の reasoning を外す。MiniCPM は過去の空 thinking block も残す。
+        if (mini) {
+          if (reasoning !== "") {
+            content = `<think>\n${reasoning.replace(/^\n+|\n+$/g, "")}\n</think>\n\n${
+              content.replace(/^\n+/, "")
+            }`;
+          } else if (!content.includes("<think>") && !content.includes("</think>")) {
+            content = `<think>\n\n</think>\n\n${content.replace(/^\n+/, "")}`;
+          }
+        }
+        text += `<|im_start|>user\n${turn.user}<|im_end|>\n` +
+          `<|im_start|>assistant\n${content}<|im_end|>\n`;
+      }
       text +=
         `<|im_start|>user\n${prompt}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n`;
       return encode(text);

@@ -1,8 +1,15 @@
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
-import { createLlmTokenizer, type LlmFamily, record } from "./llm-tokenizer.ts";
+import { createLlmTokenizer, type LlmFamily, type LlmTokenizer, record } from "./llm-tokenizer.ts";
 import { llmProfile, localFileUrl, selectLlmSource } from "./llm-source.ts";
-import { checkLlmRequest, type LlmGraph, streamLlm } from "./llm-generate.ts";
+import {
+  checkLlmRequest,
+  LlmCapacityError,
+  type LlmGraph,
+  LlmSequence,
+  streamLlm,
+} from "./llm-generate.ts";
 import type { GreedySession } from "../../packages/models/src/generation/greedy.ts";
+import { LlmChat, prepareLlmChat, readLlmLines } from "./llm-chat.ts";
 import fixtures from "./fixtures/llm-tokenizer-parity.json" with { type: "json" };
 import unicode from "./llm-unicode.json" with { type: "json" };
 
@@ -98,6 +105,17 @@ for (const family of ["qwen3", "minicpm5"] satisfies LlmFamily[]) {
       for (const test of fixtures[family].chats) {
         assertEquals(tokenizer.chat(test.prompt, test.system ?? undefined), parseIds(test.ids));
       }
+      for (const test of fixtures[family].multiturn) {
+        assertEquals(
+          tokenizer.chat(test.prompt, test.system ?? undefined, test.turns),
+          parseIds(test.ids),
+        );
+      }
+      assertThrows(
+        () => tokenizer.chat("<tool_response>unsupported</tool_response>"),
+        Error,
+        "未対応",
+      );
       // 未対応の正規化を既定扱いすると、日本語など一部入力だけの誤値に化ける。
       assertThrows(
         () =>
@@ -200,4 +218,160 @@ Deno.test("LLM stream: AbortSignal で中断した後は追加の decode を行�
   );
   assertEquals(fake.runs.length, 1);
   assertEquals(fake.disposed(), 1);
+});
+
+const testTokenizer = (): LlmTokenizer => ({
+  stopTokens: [2],
+  encode: (text) => Array.from(text, (char) => char.charCodeAt(0) % 100),
+  chat(prompt, system, turns = []): number[] {
+    return this.encode(
+      (system ?? "") + turns.map((turn) => turn.user + turn.assistant).join("") + prompt,
+    );
+  },
+  decoder: () => ({ push: (token) => String.fromCharCode(token), finish: () => "" }),
+});
+
+Deno.test("LLM 多ターン: 同じ prefix は EOS の未 commit 分を含む差分だけ流す", async () => {
+  const fake = fakeSession([20, 2, 30, 2]);
+  await using sequence = new LlmSequence(fake.session, graph);
+  assertEquals(await Array.fromAsync(sequence.stream([1, 3], 8, [2])), [20, 2]);
+  assertEquals(fake.disposed(), 0);
+  const progress: number[] = [];
+  assertEquals(
+    await Array.fromAsync(
+      sequence.stream(
+        [1, 3, 20, 2, 5],
+        8,
+        [2],
+        undefined,
+        ({ reusedTokens }) => progress.push(reusedTokens),
+      ),
+    ),
+    [30, 2],
+  );
+  assertEquals(progress, [3]);
+  assertEquals(fake.runs[2].ids.slice(0, 2), [2, 5]);
+  assertEquals(fake.runs[2].positions.slice(0, 2), [3, 4]);
+  await sequence.reset();
+  assertEquals(fake.disposed(), 1);
+});
+
+Deno.test("LLM 多ターン: テンプレートが変わった prefix と reset 後は先頭から再計算する", async () => {
+  const fake = fakeSession([20, 2, 2, 2]);
+  await using sequence = new LlmSequence(fake.session, graph);
+  await Array.fromAsync(sequence.stream([1, 3], 8, [2]));
+  await Array.fromAsync(sequence.stream([1, 4, 20, 2, 5], 8, [2]));
+  assertEquals(fake.disposed(), 1);
+  assertEquals(fake.runs[2].positions[0], 0);
+  await sequence.reset();
+  await Array.fromAsync(sequence.stream([1, 4, 20, 2, 5], 8, [2]));
+  assertEquals(fake.runs[3].queryLength, 5);
+  assertEquals(fake.runs[3].positions[0], 0);
+  await sequence.dispose();
+  assertEquals(fake.disposed(), 3);
+  await assertRejects(() => Array.fromAsync(sequence.stream([1], 1, [2])), Error, "dispose 済み");
+});
+
+Deno.test("LLM 多ターン: 中断や並行操作で走行中の context を別の生成へ渡さない", async () => {
+  const fake = fakeSession([20, 2]);
+  await using sequence = new LlmSequence(fake.session, graph);
+  const stream = sequence.stream([1], 8, [2]);
+  await stream.next();
+  await assertRejects(() => Array.fromAsync(sequence.stream([1], 1, [2])), Error, "並行");
+  await assertRejects(() => sequence.reset(), Error, "生成中");
+  await assertRejects(() => sequence.dispose(), Error, "生成中");
+  await stream.return(undefined);
+  assertEquals(fake.disposed(), 1);
+  await Array.fromAsync(sequence.stream([1, 20, 3], 8, [2]));
+  assertEquals(fake.runs[1].positions[0], 0);
+});
+
+Deno.test("LLM 多ターン: 元の失敗と解放時の失敗を両方残す", async () => {
+  const failure = new Error("run failed"), release = new Error("dispose failed");
+  const session: GreedySession<Context> = {
+    createGenerationContext: () =>
+      Promise.resolve({ pastLength: 0, dispose: () => Promise.reject(release) }),
+    run: () => Promise.reject(failure),
+  };
+  await using sequence = new LlmSequence(session, graph);
+  const caught = await assertRejects(
+    () => Array.fromAsync(sequence.stream([1], 8, [2])),
+    SuppressedError,
+  );
+  assertEquals(caught.error, release);
+  assertEquals(caught.suppressed, failure);
+});
+
+Deno.test("LLM 多ターン: 容量超過は古い発話の対だけを落とし、収まらない質問では履歴を変えない", async () => {
+  const tokenizer = testTokenizer();
+  const turns = [{ user: "a".repeat(30), assistant: "b".repeat(30) }, {
+    user: "c",
+    assistant: "d",
+  }];
+  const plan = prepareLlmChat(tokenizer, graph, turns, "next", 64, "system");
+  assertEquals(plan.turns, [turns[1]]);
+  assertEquals(plan.droppedTurns, 1);
+  assertEquals(plan.ids, tokenizer.encode("systemcdnext"));
+  assertEquals(turns.length, 2);
+  assertThrows(
+    () => prepareLlmChat(tokenizer, graph, turns, "x".repeat(129), 1, "system"),
+    LlmCapacityError,
+  );
+  const fake = fakeSession([65, 2]);
+  await using sequence = new LlmSequence(fake.session, graph);
+  const chat = new LlmChat(sequence, tokenizer, graph, 8, "system");
+  await chat.send("a", () => {});
+  const before = chat.turns;
+  await assertRejects(() => chat.send("x".repeat(129), () => {}), LlmCapacityError);
+  assertEquals(chat.turns, before);
+  assertEquals(fake.runs.length, 2);
+});
+
+Deno.test("LLM 多ターン: 部分回答を中断後の履歴に残し、未出力の質問は残さない", async () => {
+  const fake = fakeSession([65, 2, 66]);
+  await using sequence = new LlmSequence(fake.session, graph);
+  const chat = new LlmChat(sequence, testTokenizer(), graph, 8);
+  const abort = new AbortController();
+  const result = await chat.send("a", () => abort.abort(), { signal: abort.signal });
+  assertEquals(result.stop, "aborted");
+  assertEquals(result.text, "A");
+  assertEquals(chat.turns, [{ user: "a", assistant: "A" }]);
+  assertEquals(fake.disposed(), 1);
+  const next = await chat.send("b", () => {});
+  assertEquals(next.promptTokens, testTokenizer().encode("aAb"));
+  assertEquals(next.reusedTokens, 0);
+  const before = chat.turns;
+  const prefillAbort = new AbortController();
+  const empty = await chat.send("c", () => {}, {
+    signal: prefillAbort.signal,
+    onPrefill: () => prefillAbort.abort(),
+  });
+  assertEquals(empty.stop, "aborted");
+  assertEquals(empty.tokens, []);
+  assertEquals(chat.turns, before);
+  await chat.reset();
+  assertEquals(chat.turns, []);
+});
+
+Deno.test("LLM 多ターン: 生成上限で切った回答を次ターンへ渡し、空の EOS も会話として閉じる", async () => {
+  const fake = fakeSession([65, 2]);
+  await using sequence = new LlmSequence(fake.session, graph);
+  const chat = new LlmChat(sequence, testTokenizer(), graph, 1);
+  assertEquals((await chat.send("a", () => {})).stop, "length");
+  assertEquals(fake.disposed(), 1);
+  const result = await chat.send("b", () => {});
+  assertEquals(result.promptTokens, testTokenizer().encode("aAb"));
+  assertEquals(result.stop, "eos");
+  assertEquals(chat.turns, [{ user: "a", assistant: "A" }, { user: "b", assistant: "" }]);
+});
+
+Deno.test("LLM 多ターン: 行読みは CRLF・空行・UTF-8 分割・最後の改行なしを保つ", async () => {
+  const bytes = new TextEncoder().encode("東京\r\n\nnext");
+  const stream = new ReadableStream<Uint8Array<ArrayBuffer>>({
+    start(controller): void {
+      for (const byte of bytes) controller.enqueue(Uint8Array.of(byte));
+      controller.close();
+    },
+  });
+  assertEquals(await Array.fromAsync(readLlmLines(stream)), ["東京", "", "next"]);
 });

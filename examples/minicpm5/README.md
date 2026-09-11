@@ -1,11 +1,12 @@
 # MiniCPM5-2B CLI (experimental)
 
-Generate a single response using a locally converted MiniCPM5-2B model in Deno + WebGPU.
+Chat with a locally converted MiniCPM5-2B model in Deno + WebGPU.
 The tokenizer also runs in TypeScript; Python is not required to run this CLI.
 
 From the repository root:
 
 ```sh
+deno task demo:minicpm5
 deno task demo:minicpm5 --prompt "日本の首都を都市名だけで答えてください。"
 deno task demo:minicpm5 --prompt "WebGPUとは何ですか？日本語で一文で答えてください。"
 deno task demo:minicpm5 --quant i8 --prompt "What is the capital of France?"
@@ -34,10 +35,22 @@ Options and behavior match [the Qwen3 CLI](../qwen3/README.md): `--prompt`, `--s
 `--max-new-tokens` (default 64), `--completion`, `--json`, and `--help`.
 Chat uses the official non-thinking template, including MiniCPM's beginning-of-sequence token.
 Generation is greedy (temperature 0) and stops at either official EOS token.
-Each invocation handles one prompt; history is not retained. Without `--prompt`, stdin is read to EOF.
+Without `--prompt`, interaction follows `demo:gemma4`: enter one message per line, `/reset` clears the
+conversation, and `/exit`, `/quit`, or Ctrl+D exits. Ctrl+C during generation cancels only that turn;
+displayed partial text is kept for the next message. Piped input uses the same line-by-line interaction.
+`--prompt` generates one response and exits. `--completion` without `--prompt` reads stdin until EOF.
+`--json` emits one JSON object per response, with all status on stderr.
+
+Weights stay loaded between turns. After EOS, the CLI reuses the KV cache only when the next official
+template's token prefix exactly matches the committed tokens. MiniCPM keeps the empty thinking block
+in past assistant messages, so ordinary turns can reuse their cache. A changed prefix or an interrupted
+or length-limited answer is rebuilt from the displayed conversation. `/reset` releases the cache.
 
 This example uses a 128-token KV cache and 64 rows per prefill chunk. Input length plus
-`max-new-tokens - 1` must fit within 128; oversized requests fail before allocating GPU weights.
+`max-new-tokens - 1` must fit within 128. Chat removes the oldest complete question/answer pairs with a
+notice, keeping the system message and current question. A question that still does not fit is rejected
+without losing the conversation. Single-response requests are checked before allocating GPU weights.
+Use `--max-new-tokens 32` to leave more space for history.
 This is a short-context experimental example, not the original model's context limit.
 The measured GPTQ i4 weights occupy about 1.78 GB on disk; GPU usage also includes cache and workspace.
 

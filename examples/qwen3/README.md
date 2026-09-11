@@ -1,11 +1,12 @@
 # Qwen3-0.6B CLI (experimental)
 
-Generate a single response using a locally converted Qwen3-0.6B model. Inference and tokenization
+Chat with a locally converted Qwen3-0.6B model. Inference and tokenization
 run in Deno + WebGPU; Python is only needed to regenerate the tokenizer test fixtures.
 
 From the repository root:
 
 ```sh
+deno task demo:qwen3
 deno task demo:qwen3 --prompt "What is the capital of France? Answer with the city name only."
 deno task demo:qwen3 --prompt "日本の首都を都市名だけで答えてください。"
 deno task demo:qwen3 --quant i8 --prompt "Explain WebGPU briefly."
@@ -33,23 +34,37 @@ The default tokenizer is `inputs/qwen3/Qwen3-0.6B/tokenizer.json` from the offic
 Use `--source` to select another series, or `--quant` to select a quantization; the two options are
 mutually exclusive.
 
-| Option                 | Default | Meaning                                                                                 |
-| ---------------------- | ------- | --------------------------------------------------------------------------------------- |
-| `--prompt <text>`      | stdin   | One user message; stdin is read until EOF (Ctrl+D in a terminal).                       |
-| `--system <text>`      | omitted | Optional system message.                                                                |
-| `--max-new-tokens <n>` | `64`    | Maximum generated tokens, including EOS.                                                |
-| `--completion`         | off     | Continue raw text instead of applying the chat template.                                |
-| `--json`               | off     | Print one JSON result with text, input/output token IDs, stop reason, and elapsed time. |
-| `--help`               |         | Show usage without loading assets or requesting a GPU.                                  |
+| Option                 | Default | Meaning                                                                  |
+| ---------------------- | ------- | ------------------------------------------------------------------------ |
+| `--prompt <text>`      | omitted | Generate one response and exit; omit for interactive, line-by-line chat. |
+| `--system <text>`      | omitted | Optional system message.                                                 |
+| `--max-new-tokens <n>` | `64`    | Maximum generated tokens, including EOS.                                 |
+| `--completion`         | off     | Continue raw text once; without `--prompt`, read stdin until EOF.        |
+| `--json`               | off     | Print one JSON result per response, including input/output token IDs.    |
+| `--help`               |         | Show usage without loading assets or requesting a GPU.                   |
 
-Generation is greedy (temperature 0), with thinking disabled in chat mode. Text is streamed to stdout;
-status goes to stderr. Ctrl+C cancels generation and releases resources. Each invocation is independent;
-conversation history is not retained.
+Without `--prompt`, the CLI follows `demo:gemma4`: enter one message per line, use `/reset` to clear
+history, and `/exit`, `/quit`, or Ctrl+D to leave. Ctrl+C during generation cancels the current turn;
+the next message can continue from the displayed partial response. Ctrl+C while idle exits the process.
+Piped input also uses one line per message. For a multiline single message, pass `--prompt`.
+
+Generation is greedy (temperature 0), with thinking disabled. Weights stay loaded between turns.
+The official Qwen template removes the empty thinking block from past assistant messages, so the CLI
+rebuilds the KV cache when the rendered token prefix changes. It only reuses an exactly matching
+committed prefix. `/reset` clears both conversation history and its cache.
+
+Interactive text and turn summaries go to stdout; loading and prefill status go to stderr. With
+`--json`, stdout contains only one JSON object per response, including `reusedTokens` and `droppedTurns`;
+status goes to stderr. `--prompt --json` keeps the single-response JSON format.
 
 This example uses the short-context experimental graphs: 64 rows per prefill chunk and a 128-token
 KV cache. The number of input tokens plus `max-new-tokens - 1` must fit within 128. Oversized requests
-fail before allocating GPU weights; reduce the input or token limit. This limit belongs to the example,
-not to the original model. Generation quality, especially after quantization, is still experimental.
+fail before allocating GPU weights in single-response mode. In chat mode, the CLI removes the oldest
+user/assistant pairs until the next request fits and prints a notice; it keeps the system message and
+current question. If those alone do not fit, the question is rejected and the conversation remains
+available. Reduce the input or token limit. The default generation budget is 64 tokens; use
+`--max-new-tokens 32` to leave more room for history. This limit belongs to the example, not to the
+original model. Generation quality, especially after quantization, is still experimental.
 
 See [the measurement record](../../docs/research/2026-09-10-codex-mtp-optimization.md) and
 [the MiniCPM5 CLI](../minicpm5/README.md). The shared loader and tokenizer currently use repository

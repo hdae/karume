@@ -961,3 +961,58 @@ tools/.venv/bin/python examples/shared/emit-llm-fixtures.py --out /tmp/karume-ll
 RTX 3080 Ti で実施。モデルの内容の正確さを認定する検証ではない。
 例えば Qwen3 の日本語回答は CPU 参照も `日本の首都は、**东京**です。` と出す。
 長文・多ターン・モデル全般の品質評価・M2 での実行は引き続き未検証。
+
+## 追加 LLM CLI の多ターン対応（2026-09-11）
+
+利用者の依頼により、f16 GEMV / QAT mobile INT2 に先立って MiniCPM5 / Qwen3 の対話を実装した。
+既存グラフと実行 API で成立するため、runtime カーネルや公開 pipeline の追加は要らない。
+`demo:gemma4` と同様に行単位の会話、`/reset`、`/exit`・`/quit`・EOF、生成中の SIGINT を扱う。
+`--prompt` は単発実行、`--completion` の標準入力は EOF まで読む従来の文章継続を維持する。
+対話の `--json` は回答ごとに JSON 1 行を出し、操作案内は stderr へ送る。
+
+重みの Session は会話中に保持する。KV キャッシュを継ぐのは EOS で閉じたターンだけで、
+次の公式テンプレートの token 列と commit 済みの列が完全一致することを条件とした。
+最後に配送した token は未 commit なので、次の prompt の差分から入力する。
+Qwen は履歴の assistant から空 thinking block を外すため、通常の次ターンで prefix が変わる。
+MiniCPM は過去の空 block も維持する。一律の差分連結は Qwen の公式入力と一致しないため採らない。
+BPE 再符号化で prefix が変わる場合も同じ検査で再構成する。rewind は使わない。
+
+容量は既存どおり 128 token、prefill は 64 行。生成予算を含めて収まらなければ古い質問と回答の
+対を削り、件数を通知する。system と今回の質問は必ず残す。今回の質問だけでも大きすぎる場合は
+元の履歴を変更せず拒否し、次の入力を受ける。中断・生成上限で切った回答は表示済みの本文を
+履歴に残し、未閉鎖の KV は返却する。未出力で中断した質問は履歴に残さない。
+
+生データ・再現スクリプトの所在は `outputs/bench/karume/2026-09-11_llm-multiturn/`:
+
+| 検証                      | 観測結果                                                                          | 記録                                                                                             |
+| ------------------------- | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| 公式 tokenizer の多ターン | 両モデル各 24 件で厳密一致。既存 73 入力・復号 + 15 単発 chat と Unicode 表は不変 | `fixture-generation.log` / `fixtures/` / `unit.log`                                              |
+| 実 GPU と公式 CPU の会話  | 両モデル各 7 回、計 14 回で入力・生成 ID・本文・停止・履歴削除件数が一致          | `reference.py` / `reference.log` / `gpu-parity-summary.json` / 各 `*-cli.jsonl`                  |
+| SIGINT 後の復帰           | 両 CLI に実際に SIGINT を送り、次の質問・reset・終了まで成功                      | `check-interrupt.py` / `interrupt-summary.json` / 各 `*-interrupt.stdout.txt`                    |
+| 大きすぎる質問の拒否後    | 両 CLI で直前の履歴を保持し、次の回答も CPU と一致                                | `check-overflow.py` / `overflow-summary.json`                                                    |
+| 単発の回帰検証            | 従来のチャット 3 + 継続 1 × 2 モデル、全 8 ケースで CPU と一致                    | `check-single.py` / `cli-smoke-summary.json`                                                     |
+| キャッシュ比較            | 毎回 token 列を CPU 参照と照合。条件・数値は次表                                  | `cache-bench-inclusive.ts` / `cache-bench-inclusive.json` / `cache-bench-inclusive-summary.json` |
+| 全体検証                  | fmt / lint / check / test の実行ログ。完了結果は同ディレクトリの最終状態記録      | `verify.log` / `FINAL-STATUS.json`                                                               |
+
+CPU 参照は保存済み GPTQ i4 パラメータを公式モデルへ復元し、全パラメータを読んだことと
+従来の全 logits golden（atol=1e-3 / rtol=0）への一致を先に検査した。
+RoPE の inv_freq は公式 f32 のまま保持し、各ターンを公式 tokenizer / SDPA で独立再計算した。
+
+RTX 3080 Ti、各方式 1 会話 warmup 後に cache / replay の順を交互に 4 回ずつ計測した中央値。
+前ターンのキャッシュ返却を両方式の計測に含め、重みの読み込みは含めない。
+単位は ms、入力処理は最終 prefill 完了まで、全体は EOS を含む全 token の配送と終了まで。
+
+| モデル・ターン | 毎回再計算: 入力 / 全体 | 条件付き再利用: 入力 / 全体 | 再利用 token |
+| -------------- | ----------------------- | --------------------------- | ------------ |
+| MiniCPM5・2    | 103.67 / 133.35         | 84.19 / 111.29              | 28           |
+| MiniCPM5・3    | 200.52 / 232.39         | 83.92 / 111.33              | 57           |
+| Qwen3・2       | 101.91 / 201.50         | 104.22 / 192.75             | 0            |
+| Qwen3・3       | 187.06 / 212.36         | 186.74 / 210.83             | 0            |
+
+MiniCPM の 3 ターン目は prefill が 2 chunk から 1 chunk へ減り、入力処理が約 58% 短縮した。
+Qwen は両方式とも再計算であり、高速化を主張しない。最初の `cache-bench.*` は replay 側だけ
+reset を計測外にしていたため比較値に採用せず、計測境界を修正した `*-inclusive.*` を正本とした。
+
+これは短い既定 greedy 会話の一致と操作の検収であり、モデル全般の回答品質を保証しない。
+例えば Qwen は国名を求めた 5 回目にも `Tokyo.` と答える（CPU も同じ）。長文・公開配布・
+M2 / ブラウザでの今回の多ターン操作、f16 GEMV / INT2 の試作は未完のまま別項目として残す。
