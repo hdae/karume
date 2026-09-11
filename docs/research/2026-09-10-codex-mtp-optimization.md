@@ -1102,3 +1102,77 @@ Apple M2 は未検証。RTX での成績を M2 へ外挿しない。
 
 `deno task verify` は **2,843 passed / 743 steps / 0 failed / 5 ignored、24m38s**。
 `f16-verify.log` と `f16-final-status.json` に保存する。Chrome 追試後の文書更新は fmt と差分を再確認した。
+
+## f32 格納 M=1 の GEMV（2026-09-11）
+
+f16 のコミット `f8bbaf1` 後、主担当が独立試作して採否を検証した。
+保存先は前節と同じ `outputs/bench/karume/2026-09-11_optimization-next/`。
+RTX 3080 Ti / Deno 2.9.6。候補の打ち切り線は単体 1.3 倍または decode 全体 10%。
+公開 API / IR は追加せず、重みを `vec4<f32>` で読む既存族の変種を追加する。
+M=1・f32 計算・K>0・K%4=0・N%4=0 に限り、K 昇順の積和と最後の bias を維持する。
+
+### 単体と Deno の実モデル
+
+`f32-micro-focused.jsonl` は GEMM → GEMV → GEMV → GEMM の順で 16 形、64 件が u32 一致。
+実形状 11 形は heater を挟んで 5 回の最小 GPU 時間を採り、端の 5 形は一致だけを検査した。
+Qwen は前節と同じ 197 linear。MiniCPM5 は 295 linear で、IR の現物から確認した `(N,K,本数)` は
+`(2048,2048,84)` / `(256,2048,84)` / `(6144,2048,84)` / `(2048,6144,42)` /
+`(130560,2048,1)`。どちらも全 linear が適格。
+
+往復 2 腕の最小時間を平均して層数で加重した合計は、Qwen **27.700 → 11.552 ms**、
+MiniCPM5 **74.416 → 34.229 ms**。単体は合成重みであり、モデル全体の時間とは区別する。
+中間層の改善に比べ、head の単体改善は Qwen 1.05 倍、MiniCPM5 1.18 倍と小さい。
+集計は `f32-micro-summary.json`。`compileMs` は Session 作成から初回 run までの観測であり、
+シェーダのコンパイル単独の値ではない。
+
+実モデルは既存 f32 資産で同じ往復順、3 入力を各 64 token 生成した。
+`f32-{family}-parity.jsonl` では既存 CPU 参照の全 prefill logits（atol=1e-3 / rtol=0）と
+既存 greedy 列を維持。各 decode の全 logits SHA を最初の GEMM 腕と比較し、
+**各モデル 567 回、計 1,134 回が一致**した。これは短い固定入力での数値検収であり、
+モデル全般の品質・長文の検証ではない。
+
+`f32-{family}-wall.jsonl` は timestamp / hash 計算を使わない別走行。
+decode 63 回の最初の 7 回を除き、残り 56 回の中央値を採り、往復 2 腕の中央値を掲載する。
+集計コードは `summarize-f32.py`、結果は `f32-model-summary.json`。
+
+| モデル・入力         | GEMM ms/token | GEMV ms/token | 倍率 |
+| -------------------- | ------------: | ------------: | ---: |
+| Qwen・capital-en     |        42.658 |        27.322 | 1.56 |
+| Qwen・capital-ja     |        42.607 |        27.376 | 1.56 |
+| Qwen・webgpu         |        42.647 |        27.506 | 1.55 |
+| MiniCPM5・capital-en |        88.798 |        53.405 | 1.66 |
+| MiniCPM5・capital-ja |        88.876 |        53.188 | 1.67 |
+| MiniCPM5・webgpu     |        89.282 |        53.094 | 1.68 |
+
+### 適用と検証
+
+- 採用は c32u4。製品コードと実測した試作の WGSL は f32 / f16 / i4 / i8 の全変種で一致する。
+- `f32-targeted-test.log`: codegen と f16 / f32 の GPU 境界テスト、計 89 tests 成功。
+  f32 の 8 形は通常 GEMM の先頭行との u32 一致と CPU 参照を検査し、M / K / N の各門を外した
+  3 形と f16 計算の指定も検査する。既存 snapshot の変更はなく、f32 を追加した。
+- `f32-mutation.py` / `f32-mutation.log`: f32 の隣接成分 2 個の積和順だけを入れ替え、
+  u32 比較で拒否することを確認した。許容差や期待値は緩めていない。
+- Apple M2 は未検証。Deno と Chrome の差を TypeScript の費用だけには帰属しない。
+
+### Chrome の追試
+
+Chrome 153.0.8010.36、Vulkan / NVIDIA Ampere、fallback adapter=false。
+両モデルで同じ往復順と入力を使い、parity と wall を別走行にした。
+各モデル 567 回、合計 1,134 回の全 logits SHA 比較が一致し、既存 CPU 参照と greedy 列も維持した。
+壁時計の集計方法は Deno と同じ。
+
+| モデル・入力         | GEMM ms/token | GEMV ms/token | 倍率 |
+| -------------------- | ------------: | ------------: | ---: |
+| Qwen・capital-en     |        22.551 |        17.081 | 1.32 |
+| Qwen・capital-ja     |        22.476 |        17.091 | 1.32 |
+| Qwen・webgpu         |        22.450 |        17.044 | 1.32 |
+| MiniCPM5・capital-en |        53.961 |        42.435 | 1.27 |
+| MiniCPM5・capital-ja |        54.071 |        42.647 | 1.27 |
+| MiniCPM5・webgpu     |        54.042 |        42.582 | 1.27 |
+
+`browser-f32-{family}-{parity,wall}.json` に保存し、集計は `browser-f32-summary.json`。
+GPU カーネルの利得と、環境により違う待ち時間を混ぜて外挿しない。
+全体検証のログは `f32-verify.log`、完了状態は `f32-final-status.json` に記録する。
+
+`deno task verify` は **2,847 passed / 743 steps / 0 failed / 5 ignored、24m42s**。
+検証開始時に記録したコード SHA は、完了後も全て不変だった。

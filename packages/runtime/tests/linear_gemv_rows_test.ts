@@ -244,3 +244,23 @@ Deno.test("f16 GEMV は M=1 と 8 要素整列のみを受け、行ブロック�
     "行ブロックは未対応",
   );
 });
+
+Deno.test("f32 GEMV は M=1 と 4 要素整列のみを受け、行ブロックの生成を拒否する", () => {
+  assertEquals([...linearGemvParams("f32", 1, 36, 40)], [1, 36, 40, 0]);
+  assertEquals([...linearGemvParams("f32", 1, 4, 0)], [1, 4, 0, 0]);
+  assertThrows(() => linearGemvParams("f32", 2, 36, 40), CodegenError, "m=1 のみ");
+  assertThrows(() => linearGemvParams("f32", 1, 36, 38), CodegenError, "k");
+  assertThrows(() => linearGemvParams("f32", 1, 36, 40, 32), CodegenError);
+  assertThrows(() => linearGemvRowsForShape("f32", 1, 36), CodegenError, "行ブロックは未対応");
+  const variant = { cols: 32, unroll: 4, rows: 1 };
+  assertThrows(
+    () => linearGemvRowsKey("f32", undefined, variant),
+    CodegenError,
+    "行ブロックは未対応",
+  );
+  assertThrows(
+    () => linearGemvRowsWgsl("f32", undefined, variant),
+    CodegenError,
+    "行ブロックは未対応",
+  );
+});

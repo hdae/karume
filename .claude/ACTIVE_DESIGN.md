@@ -13,8 +13,8 @@
 
 - **9/11 レビュー対応後の再開** — [調査・実測と引き継ぎ](../docs/research/2026-09-10-codex-mtp-optimization.md#分割コミットと再開用の引き継ぎ) を先に読む。
   現在は `codex/review-and-fix`。CPU 参照の RoPE 不一致は解消。Anima / drafter の既存形状比較は不採用。
-  f16 M=1 GEMV は RTX / Qwen で検収して採用（K-25）。次は INT2 / SRQ と残る最適化の検討。
-  追加 LLM の配布・長文・品質検収と f16 の M2 追試は残る。E4B / Qwen / MiniCPM のローカル実行と
+  f16 / f32 M=1 GEMV は RTX の実 LLM で検収して採用（K-25 / K-26）。次は INT2 / SRQ と残る最適化の検討。
+  追加 LLM の配布・長文・品質検収と f16 / f32 の M2 追試は残る。E4B / Qwen / MiniCPM のローカル実行と
   Chrome の Gemma 自由文比較は済。QAT mobile の重み共有宣言は通常 E2B と異なり、INT2 / SRQ の設計が必要。
   ローカル実験 CLI は [MiniCPM5](../examples/minicpm5/README.md) / [Qwen3](../examples/qwen3/README.md)。
   Gemma 準拠の対話・reset・中断に対応。容量 128 の多ターン検収は research に記録。公開 pipeline は未追加。

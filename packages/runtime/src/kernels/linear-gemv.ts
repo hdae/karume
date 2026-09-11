@@ -1,5 +1,5 @@
 /**
- * linear の **GEMV 族**（重み i4 / i8 格納、および M=1 の f16 格納 — ADR 0082）。`linear` の 2 本目のカーネル族で、
+ * linear の **GEMV 族**（重み i4 / i8 格納、および M=1 の f16 / f32 格納 — ADR 0082）。`linear` の 2 本目のカーネル族で、
  * 出力・束縛・uniform は既定経路（src/kernels/gemm.ts の linear）と同じまま、**担当割りだけ**が
  * 「1 スレッド = 1 出力列」へ変わる。M=1（decode）の変種と、小 M（2〜{@link LINEAR_GEMV_MAX_ROWS}・
  * 短い prefill / 投機検証）の**行ブロック変種**の 2 形を持つ（後者は ADR 0082 追記 5 /
@@ -94,23 +94,26 @@ import {
 } from "./weight-storage.ts";
 
 /**
- * 重み 1 語（`vec4<u32>` = 16 B）が運ぶ要素数 = **縮約の刻み**（格納ごと）。
+ * 重み 1 語（`vec4<u32>` または `vec4<f32>` = 16 B）が運ぶ要素数 = **縮約の刻み**（格納ごと）。
  *
  * 適格判定（src/runtime/recipe-builder.ts の `#buildLinear`）が k と group 長へ課す整除の
  * 単位でもあるので、門とカーネルが格納ごとに同じ 1 個の導出点を読む。
- * f16 は 8 要素 / 語で M=1 のみ。f32 は実測していないため fail loudly（ADR 0082）。
+ * f16 は 8 要素 / 語、f32 は 4 要素 / 語で、両者とも M=1 のみ（ADR 0082 追記 6・7）。
  */
 export const linearGemvUnit = (storage: WeightStorage): number => {
   if (storage === "i4") return 32;
   if (storage === "i8") return 16;
   if (storage === "f16") return 8;
-  throw new CodegenError(`linear_gemv: 重み ${storage} 格納は本族に無い（f16 / i4 / i8 のみ）`);
+  if (storage === "f32") return 4;
+  throw new CodegenError(
+    `linear_gemv: 重み ${storage} 格納は本族に無い（f32 / f16 / i4 / i8 のみ）`,
+  );
 };
 
-/** f16 は M=1 だけで検収する。行ブロック側へ暗黙に広げない。 */
+/** f16 / f32 は M=1 だけで検収する。行ブロック側へ暗黙に広げない。 */
 const assertRowsStorage = (storage: WeightStorage): void => {
-  if (storage === "f16") {
-    throw new CodegenError("linear_gemv: f16 格納の行ブロックは未対応（M=1 変種のみ）");
+  if (storage === "f16" || storage === "f32") {
+    throw new CodegenError(`linear_gemv: ${storage} 格納の行ブロックは未対応（M=1 変種のみ）`);
   }
 };
 
@@ -290,8 +293,8 @@ export const linearGemvParams = (
 ): Uint32Array<ArrayBuffer> => {
   const unit = linearGemvUnit(storage);
   gemvGroupShift(storage, groupSize);
-  if (storage === "f16" && m !== 1) {
-    throw new CodegenError(`linear_gemv params: f16 格納は m=1 のみ（${m}）`);
+  if ((storage === "f16" || storage === "f32") && m !== 1) {
+    throw new CodegenError(`linear_gemv params: ${storage} 格納は m=1 のみ（${m}）`);
   }
   if (!Number.isSafeInteger(m) || m < 1 || m > LINEAR_GEMV_MAX_ROWS) {
     throw new CodegenError(
@@ -359,10 +362,14 @@ export const linearGemvRowsKey = (
 const bindings = (unit: number, storage: WeightStorage): string =>
   `@group(0) @binding(1) var<storage, read> x: array<vec4<f32>>;
 // 行頭が 16 B 整列なのは k % ${unit} == 0 から（適格判定が保証する）
-@group(0) @binding(2) var<storage, read> w: array<vec4<u32>>;
+@group(0) @binding(2) var<storage, read> w: array<vec4<${storage === "f32" ? "f32" : "u32"}>>;
 @group(0) @binding(3) var<storage, read> bias: array<f32>;
 @group(0) @binding(4) var<storage, read_write> out: array<f32>;
-${storage === "f16" ? "" : "@group(0) @binding(5) var<storage, read> wscale: array<f32>;"}`;
+${
+    storage === "f16" || storage === "f32"
+      ? ""
+      : "@group(0) @binding(5) var<storage, read> wscale: array<f32>;"
+  }`;
 
 /**
  * 語 1 本ぶんの読み（重み語 + x の quad 先頭 + i4 だけ group scale）。
@@ -459,8 +466,23 @@ const unitMacsF16 = (slot: string): string => {
   }).join("\n");
 };
 
+/** f32 4 要素 / 語。通常 GEMM と同じ K 昇順の積和を静的成分で展開する。 */
+const unitMacsF32 = (slot: string): string => {
+  const macs = ["x", "y", "z", "w"].map((lane) =>
+    `    acc = acc + xf${slot}.${lane} * pw${slot}.${lane};`
+  ).join("\n");
+  return `    let xf${slot} = x[xq${slot}];
+${macs}`;
+};
+
 const unitMacs = (storage: WeightStorage, slot: string): string =>
-  storage === "f16" ? unitMacsF16(slot) : storage === "i4" ? unitMacsI4(slot) : unitMacsI8(slot);
+  storage === "f32"
+    ? unitMacsF32(slot)
+    : storage === "f16"
+    ? unitMacsF16(slot)
+    : storage === "i4"
+    ? unitMacsI4(slot)
+    : unitMacsI8(slot);
 
 /**
  * 語 1 本の積和展開（行ブロック変種・`rows` 行）。
