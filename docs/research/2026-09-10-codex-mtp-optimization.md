@@ -1,6 +1,6 @@
 # レビュー指摘の再検証と修正（2026-09-10）
 
-この文書は 2026-09-10 時点の調査・実測スナップショットであり、恒久的な作業状態は [backlog](../backlog.md) を正本とする。
+この文書は 2026-09-10〜11 時点の調査・実測スナップショットであり、恒久的な作業状態は [backlog](../backlog.md) を正本とする。
 
 ## 対象と環境
 
@@ -10,7 +10,8 @@
 
 実測は Linux / Deno 2.9.6 / RTX 3080 Ti（driver 610.57.04）で実施。
 Python は `tools/exporter` / `tools/export-recipes` の `uv run --locked` 環境（Python 3.14.6 / PyTorch 2.13.0+cpu）。
-Apple M2 とブラウザは未実測。外部リポジトリのクローンや外部リポジトリ由来の実装の複製は行っていない。
+レビュー修正時点では Apple M2 とブラウザは未実測。9/11 の Chrome 追試は後段に記録し、M2 はこの環境では未実測のまま。
+外部リポジトリのクローンや外部リポジトリ由来の実装の複製は行っていない。
 
 生データと実行スクリプトは新規の [出力ディレクトリ](../../outputs/bench/karume/2026-09-10_review-and-fix/) に保存した。
 このリンク先と `.claude/reviews/` は git 追跡外。再現用スクリプト・ログは同ディレクトリ内にあり、既存のモデル資産を上書きしていない。
@@ -399,7 +400,8 @@ attention INT4、per-layer gate / projection は INT8。出力行ごとの scale
 scale=0 の場合の処理も公式実装に従う必要がある。重みを展開して現行 i4 へ再量子化するだけでは、この意味を再現できない。
 現 runtime には INT2 格納と `round` op がなく、`docs/op-vocabulary.md` の round の候補記述を実装済みと誤認しない。
 
-今回取得したのは config・tokenizer・カードなどのメタデータだけで、QAT 重みの export / GPU 実行は未実施。
+この節の調査時点で取得したのは config・tokenizer・カードなどのメタデータだけ。
+後段で重みの部分取得と CPU 照合を追加したが、QAT 全体の export / GPU 実行は未実施。
 追加するなら、まず SRQ と整数 packing の数値契約・tied weight の扱いを決め、CPU 参照と 1 linear / embedding の
 検収から進める。通常 E2B の配布設定へ黙って置き換えない。
 
@@ -584,3 +586,340 @@ NaN の検査順、同値の id 順、softmax の加算順は変えない。
 今回は根の読み直しだけを採用し、温度用の追加分岐は入れない。
 数値の正本は `sampler-next.jsonl`、実入力の集計は `sampler-next-summary.json`。
 サンプラー単体の CPU 計測であり、生成全体の倍率ではない。
+
+### 既存カーネルの実行形状を再比較（不採用）
+
+`drafter-real-gemv.ts` は、配布済み Gemma drafter の i8 head の実重みを読み、
+K=256 / N=262,144、同じ入力の独立した出力 128 本、heater 付き 5 round で比較した。
+7 条件すべて出力 u32 一致・timestamp clamp 0。基準 c32u4 は 87.961 / 87.893 / 160.518 µs、
+c32u8 は 89.322 µs、c64u4 は 173.814 µs、c16u4 は 160.938 µs、c64u8 は 120.987 µs。
+**同じ基準のドリフトが大きく、安定した勝者は示せないので変更しない**。
+反復数は 128 に固定しており、最速時の計測パスは約 11 ms で既存の目標 80 ms に届かない。
+この制約と、単体の高速な値だけをモデル全体へ外挿できない点を残す。
+正本は `drafter-real-gemv.jsonl`。抽出元を含む台本は `extract-drafter-real-bench.py`。
+
+`f16-gemm-geometry.ts` は新カーネルを作らず、既存 GEMM の M=1 だけを 7 形状 + 基準再測定で比較した。
+Qwen3 の N/K=2048/1024、3072/1024、1024/3072、計 24 条件は出力 u32 一致・clamp 0。
+基準 → wgX=2 の候補 → 最後の基準は、それぞれ 79.329 → 78.579 → 90.198 µs、
+95.064 → 93.839 → 95.068 µs、281.621 → 257.646 → 264.999 µs。
+行方向のタイルをさらに小さくした候補や register 数を変えた候補は遅く、
+**f16 が i8 より遅い問題を解消するような利得は出なかった**。既定は変更しない。
+正本は `f16-gemm-geometry.jsonl`。新しい f16 GEMV の試作提案とは別の試験である。
+
+Anima w4a8 は M=4096、N/K=2048/2048・8192/2048・2048/8192 を各 11 条件で測った。
+`anima-w4-geometry.jsonl` の 33 条件はすべて出力 u32 一致・clamp 0。
+出現数 168 / 28 / 28 による加重合計は基準 707.129 / 710.973 ms、
+最良の regM=8 / regN=4 / wgX=8 / wgY=16 / tileK=16 が 665.219 ms だった。
+
+この候補を **実モデルの最後の検収で棄却した**。
+既存 `anima-v1.0-i4-dyn` transformer と現行 base の text encoder / VAE / RoPE を使い、
+1024² / Euler 8 step / seed 42、CFG=1 / 4 のそれぞれで基準→候補→候補→基準を実行した。
+8 走行すべて、同じ CFG の全 denoise step と最終 PNG の SHA が一致した。
+しかし全体壁の中央値は CFG=1 が 12.555 → 12.482 秒で中立、CFG=4 が 24.747 → 29.612 秒と悪化した。
+単体の合成入力・加重推定を採用根拠にせず、製品の幾何は維持する。
+正本は `anima-w4-model.jsonl`、集計は `anima-w4-model-summary.json`。
+初回の台本は補助資産 `extras.rope_base` の欠落、次は CFG=1 での negative prompt 指定により拒否された。
+これらは実験台本の設定ミスで、ログを保存して修正した後の 8 走行だけを成績に数えた。
+
+### top-p の基数幅の追加試験（不採用）
+
+`radix-width.ts` は既採用の 8 bit × 4 pass に対し、11 bit × 3 pass、16 bit × 2 pass を比較した。
+Gemma の実 logits 24 行と 7 サイズ × 4 分布、計 52 入力で候補 id / Float64 確率のビット列が一致した。
+温度 0.7 / topP=0.95 / topK 未指定、2 warmup + 7 round、同一入力で順序を反転して測定した。
+Gemma 262,144 語の中央値は 11.574 / 10.208 / 9.687 ms だったが、
+16 bit は 17 語で 0.00279 → 0.09181 ms と遅く、histogram も 4 KiB → 512 KiB に増える。
+
+さらに 65,536 語以上だけを 16 bit にする `radix-adaptive.ts` を試し、境界の 65,535 / 65,536 / 65,537 語も照合した。
+出力は一致したが、共通ループにした実装は小語彙でも約 7〜10% 遅く、大きな Gemma でも
+基準 11.520 / 切替 10.426 / 固定 16 bit 9.671 ms と、固定幅の利得を一部失った。
+追加のコード複製と小語彙の回帰を引き受けるほどの根拠にはせず、**8 bit × 4 pass を維持する**。
+数値の正本は `radix-width.jsonl` / `radix-adaptive.jsonl`。後者の `r11` 欄は切替実装を指す。
+
+### Qwen の GPTQ と短い品質比較
+
+既存の GPTQ 校正・export を Qwen3-0.6B に適用した。16 文 441 token、group=32、
+static_groups / act_order 有効、damping=0.01、28 stage / 196 module、約 179 秒で実験資産を書いた。
+保存容量は通常の RTN-i4 と同じ **432,956,648 byte**。埋め込み / head は i8、decoder linear は i4 である。
+校正文とハッシュ・各層の報告は実験系列の `calibration.json` に保存した。
+
+保存した実バイトを読み戻し、元の周波数を保つ公式 CPU SDPA で 6 文・213 個の次 token 位置を比較した。
+正解の文章を毎回入力する teacher-forced 評価であり、生成文の人間評価や一般ベンチマークではない。
+NLL は正解の次 token に割り当てた負の対数確率、KL は f32 の出力分布との隔たりで、どちらも小さい方がよい。
+
+| 格納    | 平均 NLL | f32 との平均 KL | f32 と同じ最大確率 token の割合 |
+| ------- | -------: | --------------: | ------------------------------: |
+| f32     | 3.402840 |               0 |                          1.0000 |
+| i8      | 3.418895 |        0.022556 |                          0.9202 |
+| RTN-i4  | 3.743736 |        0.434886 |                          0.7136 |
+| GPTQ-i4 | 3.671265 |        0.253722 |                          0.7183 |
+
+GPTQ は RTN-i4 に対し KL が約 42% 小さいが、i8 の差には届かず、最大確率 token の一致率の改善も小さい。
+6 文からモデル全般の品質を断定しない。本文・token 数・ハッシュは `qwen-quant-quality.json`、
+重み復元と既存 golden の atol=1e-3 検査は `qwen-quant-quality-stored.py` に残した。
+最初の汎用 safetensors reader は I4 非対応で失敗したため、既存の verify / unpack / dequantize を使って読み直した。
+
+GPTQ の GPU 検証は completion 3 入力 × 8 token に加え、公式 non-thinking chat の 3 問も成功した。
+chat の prefill 全 logits の最大絶対差は 0.000245 未満、3 / 10 / 21 token が CPU と厳密一致した。
+France は Paris、Japan は「东京」、WebGPU は短い説明だった。通常 i4 の Lyon / 京都から変わるが、小標本である。
+`qwen3-06b-gptq-i4-chat-gpu.jsonl` が正本。
+
+同一プロセスの RTN→GPTQ→GPTQ→RTN、各 3 入力 64 token の定常 336 標本ずつでは、
+decode 中央値は RTN 21.180919 / GPTQ 22.100336 ms。速度改善ではない。
+基準自体も最初の 19.3 ms 前後から最後の 21.5 ms 前後へ変動しているので、差を方式固有の定数としない。
+正本は `qwen3-06b-gptq-bench.jsonl`。各入力の初めの 8 token と全 prefill logits は CPU 検証済みで、
+残りの token は速度測定用の固定長生成である。
+
+### Chrome と Deno の同一台本での比較
+
+この Linux 環境では Chrome 153 の headless 起動は NVIDIA ANGLE Vulkan を認識しても
+WebGPU adapter が null だった。`ForceEnableWebGpuInterop` の追加でも変わらなかったが、
+一時的な Xvfb 上の headed 起動で **NVIDIA Ampere / isFallbackAdapter=false** を取得できた。
+WebGPU 有効化フラグ付きの検証環境であり、すべてのブラウザ / OS の既定動作を保証する試験ではない。
+起動引数と adapter 情報は `browser-diagnose-headed.json` / 各結果 JSON に保存した。
+
+依存バイナリは `/tmp` へ展開した。Xvfb が固定する `/usr/bin/xkbcomp` が存在しなかったため、
+一時的な別バイナリの同長文字列だけを `/tmp/xkb` に置き換えた。元バイナリとシステムは変更していない。
+両方の SHA と変更内容は `browser-xvfb-local.json` に保存した。外部ソースコードの転記ではない。
+
+同じ `roundTrip()` で 5 warmup + 50 標本を測り、コピーした整数 42 の読み戻しも毎回検証した。
+
+| コピー容量 | Chrome 壁中央値 ms | Deno 2.9.6 壁中央値 ms |
+| ---------- | -----------------: | ---------------------: |
+| 4 byte     |           0.090000 |              11.344801 |
+| 4 KiB      |           0.090000 |              11.359680 |
+| 1 MiB      |           2.232500 |              11.620766 |
+
+Deno の小転送にある約 11 ms の床は Chrome にはない。
+正本は `browser-headed-roundtrip-qwen3-06b-i8.json` / `deno-roundtrip-matched.json`。
+
+Chrome の Qwen3-0.6B i8 は 3 入力 × 8 token が CPU と一致し、prefill 全 logits の最大絶対差は
+0.000144 未満だった（`browser-headed-probe-qwen3-06b-i8.json`）。これは短い数値検証で、正式な速度ベンチではない。
+
+Gemma 4 E2B は同じ HTTP 資産、自由文 prompt、128 token、capacity=8192 で比較した。
+各 mode に warmup 1 回 + 測定 2 回、毎回新しい sequence を作る。Deno / Chrome 合計 **18 走行すべての id 列が同一**。
+初回 token が届いた後の generation 時間の中央値は次のとおり。
+
+| mode   | Chrome ms |  Deno ms |
+| ------ | --------: | -------: |
+| plain  |  2747.505 | 3480.547 |
+| always |  2795.847 | 3555.984 |
+| auto   |  2897.857 | 3694.281 |
+
+この自由文では Chrome の通常生成が約 1.27 倍速いが、投機は通常生成を上回らない。
+小さな転送の倍率をモデル全体へ外挿せず、prompt / 受理率が違う課題とも区別する。
+正本は `browser-headed-gemma-freeform.json` / `deno-gemma-matched.json`、
+集計は `browser-deno-gemma-summary.json`、共通台本は `browser-main.ts`。
+
+### MiniCPM5-2B の GPTQ と短い品質比較
+
+既存の GPTQ 校正を MiniCPM5-2B に適用した。16 文 457 token、group=32、
+static_groups / act_order 有効、damping=0.01、42 stage / 294 module を処理した。
+校正は 970.405 秒、export と completion 参照まで 1022.019 秒、chat 参照まで 1063.490 秒。
+保存容量は通常の RTN-i4 と同じ **1,776,451,608 byte**。実験系列は
+`outputs/series/minicpm5-2b-gptq-i4-2026-09-10-probe/`。
+
+保存された量子化重みを復元し、公式 CPU 実装で 6 文・210 個の次 token 位置を評価した。
+RoPE の周波数は元のまま保ち、復元後に既存 golden の全 logits も atol=1e-3 / rtol=0 で確認した。
+埋め込みと head はそれぞれ 2 つの i8 shard を結合して復元する。
+
+| 格納    | 平均 NLL | f32 との平均 KL | f32 と同じ最大確率 token の割合 |
+| ------- | -------: | --------------: | ------------------------------: |
+| f32     | 3.069982 |               0 |                          1.0000 |
+| i8      | 3.069811 |        0.004278 |                          0.9667 |
+| RTN-i4  | 3.292731 |        0.322306 |                          0.7095 |
+| GPTQ-i4 | 3.169761 |        0.129570 |                          0.8571 |
+
+この小標本では GPTQ が RTN に対して KL を約 60% 減らし、最大確率 token の一致率も改善した。
+i8 と同じ忠実度には達していない。NLL の i8 と f32 の僅差は i8 の一般的優位を意味しない。
+正本は `minicpm-quant-quality.json` / `minicpm-quant-quality-summary.json`、
+台本は `minicpm-quant-quality-restored.py`。初回の入力パスの組み立てミスは失敗ログに残し、
+修正後の出力だけを評価した。校正文と評価文を混ぜず、一般的な言語能力の評価へ外挿しない。
+
+GPU は GPTQ の completion 3 入力 × 8 token、chat 3 問の 2 / 2 / 19 token が CPU と厳密一致した。
+prefill 全 logits の最大絶対差は completion 0.000074 未満、chat 0.000212 未満。
+RTN-i4 の chat も 2 / 2 / 20 token が CPU と一致し、最大差 0.000328 未満だった。
+Chrome でも i8 / GPTQ-i4 の各 3 入力 × 8 token が CPU と一致し、最大差は 0.000100 未満。
+正本は `minicpm5-2b-gptq-i4-gpu.jsonl`、`minicpm5-2b-gptq-i4-chat-gpu.jsonl`、
+`minicpm5-2b-i4-chat-gpu.jsonl`、`browser-headed-probe-minicpm5-2b-*.json`。
+
+速度は同一プロセスの RTN→GPTQ→GPTQ→RTN、各 3 入力 64 token、
+初めの decode 7 回を除いた定常 336 標本ずつで **26.580705 / 26.626631 ms** と同等だった。
+GPTQ の利点はここでは容量を変えずに数値の劣化を減らすことにある。
+正本は `minicpm5-2b-gptq-bench.jsonl`、集計は同 `-summary.json`。
+配布 recipe / 公開 manifest への採用、長文と広い品質評価は別の検収として残る。
+
+### Gemma E4B の全 PLE と既存 pipeline での実行
+
+先の decoder 検証を広げ、42 layer × 256 dim × 262,144 token の PLE（層別の埋め込み）を
+すべて用意した。元の checkpoint から 1024 行ずつ読み、既存式の i8 + channel scale で
+token 順に 11 shard へ格納した。PLE は **2,862,616,000 byte**、decoder は **3,159,221,160 byte**。
+境界 35 点と先の CPU 入力 24 件で、読み戻した PLE が元の量子化計算と厳密一致した。
+公式 tokenizer 由来の encode 26 / decode 32 ケースも既存 TS 実装と一致した。
+
+`outputs/series/gemma4-e4b-pipeline-2026-09-11-probe/` に、既存 `karume/4` 形式のローカル manifest を作った。
+既存 `Gemma4Pipeline` をそのまま使い、drafter 無し、chunk=16 / maxChunk=64 / capacity=128 とした。
+必要な maxBufferSize / maxStorageBufferBindingSize は既存の見積り関数でともに **640 MiB**。
+この値は最大の単一バッファに関する要求で、モデル全体の VRAM 容量ではない。
+
+Deno と Chrome の両方で次を確認した。
+
+- completion 3 入力 × 8 token は先の CPU 参照と厳密一致。
+- chat は France「Paris」、Japan「東京」、WebGPU の日本語一文が出力され、Deno / Chrome の
+  全 id 列と停止理由が一致。本文 token 数は 1 / 1 / 27、EOS は別に数える。
+- この走行時点では chat の CPU 参照を未取得だったため、JSON の cpuIdentity は false のまま保存した。
+  後段の CPU 照合で確認を追加している。
+
+正本は `e4b-pipeline-deno.json` / `e4b-pipeline-browser.json`、照合は `e4b-pipeline-summary.json`。
+資産の内訳は系列内 `pipeline-probe.json`。その finishSeconds / finishPeakRssBytes は manifest を
+仕上げた区間だけの値であり、モデル全体の export 時間・最大 RAM ではない。
+初回台本は graph shard 単独を verify_model に渡して失敗したため、代表ファイルを渡す形へ修正した。
+元の decoder / 公開資産は上書きしていない。
+
+この結果は E4B が既存パイプラインで動く実験資産であり、公開モデル追加の完了ではない。
+通常の配布 recipe は E2B と drafter を前提とするため、E4B の正式配布には build の対象分離、
+ファミリの source 表、配布 smoke、品質 / 長文の検収が要る。
+今回このための公開 API やランタイム変更は行っていない。
+
+### ブラウザでの run 内訳と Fusion の再評価
+
+`browser-phase-profile.ts` は自由文 64 token、各 mode に warmup 1 回 + 測定 1 回で
+Session.run / mapAsync / popErrorScope / submit を計測した。Deno と Chrome 合計 12 走行で id 列が一致した。
+測定 run の中央値は次のとおり。map は複数出力の待ちが重なるので、最初の発行から最後の完了までを取り、
+Promise ごとの待ち時間を足し合わせない。
+
+| 実行環境 / kind               | run ms | map 呼出し前 ms | map 全体 ms | map 同期発行の合計 ms |
+| ----------------------------- | -----: | --------------: | ----------: | --------------------: |
+| Chrome plain decode（63 本）  | 17.270 |           4.095 |      12.620 |                 0.005 |
+| Deno plain decode（63 本）    | 26.252 |           3.003 |      23.064 |                11.982 |
+| Chrome always draft（36 本）  |  4.597 |           1.592 |       2.975 |                 0.005 |
+| Deno always draft（36 本）    | 14.055 |           1.059 |      12.939 |                 1.858 |
+| Chrome always verify（36 本） | 20.322 |           5.227 |      13.195 |                 0.010 |
+| Deno always verify（36 本）   | 28.804 |           3.508 |      24.606 |                13.524 |
+
+各列の中央値なので和が run 中央値と一致するとは限らない。
+Chrome の popErrorScope 2 本の発行〜最終完了は plain decode 3.685 / draft 1.435 / verify 4.747 ms、
+Deno は約 0.005 ms だった。Chrome では GPU コマンドを出した後の検証待ちが見えるが、GPU 計算と重なるため、
+この全量を消せる直列費用とみなすのは誤りである。エラースコープは維持し、順序を変える修正は採用しない。
+この台本は abort signal 無しで、低遅延 timer の呼び出しは両環境とも 0 件だった。
+したがってブラウザの timer clamp に関する仮説は、この測定では検証できていない。
+正本は `browser-phase-profile.json` / `deno-phase-profile.json`、集計は `browser-deno-phase-summary.json`。
+
+GPU timestamp を有効にした別走行でも 6 走行の token 列は同一で、全 418 run の timestamp clamp は 0 だった。
+plain decode / always draft / always verify の kernel 時間合計の中央値は **19.703 / 3.361 / 21.083 ms**。
+plain decode の主な平均内訳は i4 linear 10.503 ms（276 dispatch）、rms_norm 2.160 ms（242）、
+strided 1.260 ms（205）、i8 head 1.211 ms（1）。drafter は i8 linear 1.354 ms（68）、
+rms_norm 0.445 ms（63）、strided 0.289 ms（48）だった。
+測定自体が query と読み戻しを加え、非計測 run より遅くなるので、両者の差を CPU 時間とみなさない。
+正本は `browser-gemma-gpu-timed.json`、集計は `browser-gemma-gpu-summary.json`。
+
+Fusion の既存結果 [9/6 の K-15 / K-7 / P-5](2026-09-06-fusion-spikes-k15-k7.md) も再確認した。
+今回も linear が大きく、dispatch 本数だけでは融合の利益を判定できない。
+新しい候補は小さい RMSNorm / 転置の実形状と消費側をまず絞り、timestamp 無しのモデル全体で判定する。
+新 kernel、丸め障壁の削除、検証スコープの省略を、今回の内訳だけで採用しない。
+
+### 次に試作する f16 GEMV の範囲
+
+これは未承認・未実装の提案である。現行の f16 M=1 は共有タイルと barrier を持つ GEMM、
+i8 / i4 の小 M は GEMV を使う。Qwen3 の正式比較で f16 の decode が f32 と同程度だったことと、
+既存 GEMM のタイル変更が解決にならなかったことから、この実行方式の差を次の候補とする。
+
+試作は `linear-gemv.ts` の f16 格納・M=1 だけに限定する。既存の逐次 K 縮約と最後の bias を保ち、
+`unpack2x16float` で読んだ重みを使う。公開 API / manifest / 格納データの変更は含めない。
+実装箇所は codegen と linear の族選択、対応するテスト・設計記録である。
+
+1. 実資産の N/K と端チャネル・bias を検収対象として固定する。
+2. 実験ディレクトリの切替だけで試作し、同じ key の WGSL の決定性と既存 GEMM との u32 一致を確認する。
+3. heater と往復順の単体計測で候補を絞る。
+4. Qwen3-0.6B f16 の CPU 参照・生成 id を保って、同一プロセスのモデル A/B を行う。
+5. 単体 1.3 倍または対象 decode 全体 10% の改善が再現しなければ採用しない。数値門は緩めない。
+
+大きな dispatch 数を減らせてもコンパイル費が増える可能性があるので、初回と定常を分ける。
+RTX での利得を M2 の利得とは扱わない。詳細原稿は `f16-gemv-plan.md` にも保存した。
+
+### QAT mobile の保存重みを部分取得して照合
+
+公式の固定 revision の safetensors からヘッダーだけを範囲取得し、INT2 / INT4 が U8 に詰めて保存され、
+INT8 は I8、scale は F32 であることを確認した。ヘッダーは 375,392 byte。
+テキスト部分の重み・scale・その他 tensor の payload 合計は **2,118,056,254 byte**。
+これは音声・視覚側とヘッダーを除く保存容量で、GPU 常駐容量の実測ではない。
+正本は `qat-safetensors-header.json` / `qat-header-summary.json`。
+
+設定の直接比較では、text_config の差は `tie_word_embeddings: true → false` だった。
+したがって「同じ構造」は layer / head / 次元などの骨格を指し、重み共有の宣言まで同一ではない。
+初期調査の「tied embedding も一致」という記述は訂正する。正本は `qat-config-diff.json`。
+
+ただし、共有が無効なことから重みの値まで異なるとは推論できない。
+最初の 64 語を CPU で照合した後、head / embedding の格納整数 **100,663,296 byte ずつ**と
+scale **1,048,576 byte ずつ**をストリームで全バイト比較し、双方とも完全一致した。
+正本は `qat-tied-bytes-summary.json`。取得した 203,423,744 byte は比較に使い、全量を複製保存していない。
+この revision で両者の整数・scale だけを共有するなら、重複する **97 MiB** が削減候補となる。
+これは未実装の候補で、別 revision や活性の丸めまで同一として共有することはできない。
+
+さらに最後の MLP down projection の 32 出力行と実 scale を読み、インストール済みの
+公式 Transformers `QuantizedLinear` で f32 の合成入力 `[4,12288]` を実行した。
+入力 / 出力 scale は 0.0994094536 / 0.1543705314、SRQ を省いた比較では **128 出力すべて**が変わり、
+最大絶対差は 0.1191568971 だった。前述の 64 語と合わせた tensor の取得量は 148,112 byte。
+これにより、整数を展開するだけで通常 linear へ通す案では公式の演算を再現できないことを具体的に確認した。
+台本・取得範囲・SHA・出力 SHA は `qat-small-cpu-probe.py` / `qat-small-cpu-summary.json` に保存した。
+公式関数を呼び出しており、外部実装コードは転記していない。
+モデル全体の生成・品質・GPU 性能は未検証であり、新しい格納 / SRQ 契約の設計が必要という判断は変わらない。
+
+### 中断境界の timer を CPU 単体で比較
+
+`abort-browser.ts` は既存 `settleAbort` をそのまま呼び、signal 無し / 有り、
+連続呼び出し / 別の MessageChannel task の後という 4 条件を各 3 round × 256 標本で診断した。
+先に timer で予約した中断を次の境界で拾う確認も、Deno / Chrome 各 25 回成功した。
+MessageChannel はこの台本で別 task を挟むためだけに使い、製品の中断待ちを置き換えていない。
+
+Chrome 153 では signal 有りの連続呼び出しが中央値 4.065〜4.090 ms、
+別 task の後は 0.005 ms だった。Deno 2.9.6 はどちらも約 2.06〜2.08 ms。
+signal 無しは Chrome の時計分解能では中央値 0、Deno は約 0.0003 ms だった。
+Chrome は GPU を無効にした headless 起動で、この CPU 診断中には別プロセスの機能検証が進行していた。
+したがって厳密な CPU 性能比較ではなく、待ち方の条件差を確認する診断である。
+
+この結果だけからブラウザの生成に毎 token 4 ms を加算してはいけない。
+GPU の完了通知など別 task を経由する場合の nesting は、tight loop の連続 timer と異なる。
+数値と引数は `browser-abort.json` / `deno-abort-matched.json`、集計は `abort-matched-summary.json`。
+
+### 中断 signal の有無を Gemma の実生成で比較
+
+`browser-abort-model.ts` は同一の自由文 64 token、capacity=8192、新しい sequence ごとの
+plain / always を、signal 無し→有り→有り→無しの順で測った。各条件の warmup を先に 1 回ずつ置き、
+Chrome / Deno 合計 **24 走行すべての id 列が一致**した。表は warmup を除いた各 2 走行の中央値。
+
+| 実行環境 / mode | signal 無しの生成 ms | signal 有り ms | 有り時の timer 中央値 ms |
+| --------------- | -------------------: | -------------: | -----------------------: |
+| Chrome plain    |             1345.695 |       1349.945 |                    0.010 |
+| Chrome always   |             1286.595 |       1286.737 |                    0.015 |
+| Deno plain      |             1728.041 |       1865.491 |                    2.084 |
+| Deno always     |             1619.639 |       1701.253 |                    2.090 |
+
+実生成では Chrome の連続 timer の 4 ms は再現せず、signal の有無は中立だった。
+Deno は plain 約 8% / always 約 5% の追加時間があり、単体で観測した約 2 ms の timer 待ちと整合する。
+1 走行の timer 本数は plain 64 / always 37。投機は複数 token をまとめて確定するため境界の数も少ない。
+中断を受け付けるために必要な境界を間引く修正は入れない。
+
+これは 64 token の出力区間であり、前段の 128 token 比較と受理分布が違う。
+この短い区間では always が plain より速いが、その比率を自由文全体や長い継続へ外挿しない。
+正本は `browser-abort-model.json` / `deno-abort-model.json`、集計は `abort-model-summary.json`。
+
+最初の Chrome 起動は Vulkan の feature 指定が漏れて adapter が null だった。
+成功済みの `--enable-features=Vulkan` を含む引数へ揃えると完走した。失敗ログも保持し、成績から除外した。
+使用した Puppeteer は enable-features を内部で統合するときに入力 args 配列から削除するため、
+起動後の args を保存した JSON だけではこの flag を再現できない。実際の起動コードを
+`browser-drivers/` へ保存した。今後は渡す前の配列または実プロセスの spawnargs を記録する。
+
+### E4B 会話の CPU 照合を追加
+
+`e4b-chat-cpu.py` は同じ公式 checkpoint から量子化済み `ProductChunkWrapper` の CPU 参照を再構築した。
+KV cache を使わず、各 token の全 prefix を f32 で計算する。
+先に保存済み completion 3 ケースの prefill を再計算し、logits / hidden とも最大絶対差 0 を確認した。
+
+その参照で France / Japan / WebGPU の chat を生成すると、**EOS 込み 2 / 2 / 28 token** が
+Deno / Chrome の両方と厳密一致した。WebGPU の最小 top-1 / top-2 margin は 0.0993042 だった。
+CPU の実行時間は 116.482 秒、プロセスの最大 RSS は 27,012,087,808 byte。
+この RSS は CPU 参照の構築・計算であり、ブラウザでの推論に必要な容量ではない。
+
+正本は `e4b-chat-cpu/summary.json` と各問の prefill tensor、実行間の照合は
+`e4b-pipeline-cpu-summary.json`。元の GPU 実行 JSON にある cpuIdentity=false は、その時点の記録として残した。
+E4B の短い会話についても CPU / Deno / Chrome の一致を確認できたが、広い品質評価と長文は引き続き未検証である。

@@ -12,7 +12,9 @@
 ## Now
 
 - **9/11 レビュー対応後の再開** — [調査・実測と引き継ぎ](../docs/research/2026-09-10-codex-mtp-optimization.md#分割コミットと再開用の引き継ぎ) を先に読む。
-  現在は `codex/review-and-fix`。固定入力の転送は測定済み。次の候補は Anima w4a8 のタイル形状・drafter 実重みの比較。
+  現在は `codex/review-and-fix`。CPU 参照の RoPE 不一致は解消。Anima / drafter の既存形状比較は不採用。
+  次は f16 GEMV の試作判断、追加 LLM の配布・長文・品質検収。E4B / Qwen / MiniCPM のローカル実行と
+  Chrome の Gemma 自由文比較は済。QAT mobile の重み共有宣言は通常 E2B と異なり、INT2 / SRQ の設計が必要。
   利用者の希望により、今後は作業単位で調査・検証を終えて順次コミットする。残件の正本は backlog。
 
 - **Codex 性能調査（2026-09-06）の消化波（2026-09-07）** — 実測と設計の正本は

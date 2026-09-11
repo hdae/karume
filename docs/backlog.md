@@ -9,11 +9,13 @@
 
 ## now — 0.12.0 リリース後（2026-09-06）
 
-- **モデル横断の追加調査（2026-09-10〜11）**: Qwen3-0.6B / MiniCPM5-2B の量子化別 GPU 検証と
-  Gemma E4B の decoder 検証は実施済み。配布 manifest・公開 pipeline・長文 / 品質検収は未完。
-  Qwen の独立 CPU 不一致は試験台本の RoPE 丸めへ帰属して解消した。
-  次は既存カーネル設定の Anima w4a8 / drafter 実重み比較。f16 M=1 GEMV の新 kernel は試作の判断待ち。
-  QAT mobile は同じ E2B 構造の別数値モデルで、INT2 / SRQ の契約から設計する。
+- **モデル横断の追加調査（2026-09-10〜11）**: Qwen3-0.6B / MiniCPM5-2B の RTN / GPTQ と
+  E4B の全 PLE を含むローカル pipeline は実機検証済み。E4B chat も CPU / Deno / Chrome で一致。
+  残件は配布 recipe / source 表、長文と広い品質評価。実験資産を公開済みモデルとして扱わない。
+  Anima w4a8 / drafter / f16 GEMM の既存形状比較は不採用で完了。次の f16 M=1 GEMV は
+  [範囲と検収案](research/2026-09-10-codex-mtp-optimization.md#次に試作する-f16-gemv-の範囲)を判断してから試作する。
+  Chrome / Deno の Gemma 比較は自由文まで実施済み。他課題・長文・M2 を次の検収へ残す。
+  QAT mobile は INT2 / SRQ と重み共有を設計し、Wan は小さな DiT から段階検証する。
   実測と未完の正本は [追加調査](research/2026-09-10-codex-mtp-optimization.md#追加-llm-の実行と量子化別比較)。
 
 - **9/11 レビューの継続検証**（調査 2026-09-10・[対応記録](research/2026-09-10-codex-mtp-optimization.md)）:
