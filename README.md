@@ -17,3 +17,7 @@ License: MIT ([LICENSE](LICENSE))
 model code (patch layers, export scripts, reference pipelines). That directory is **not** covered by
 the project's MIT license — each family there carries its own `THIRD_PARTY_NOTICES.md` recording
 what the recipe derives from, and the upstream terms recorded there govern it.
+
+Experimental local LLM examples: [MiniCPM5-2B](examples/minicpm5/README.md) and
+[Qwen3-0.6B](examples/qwen3/README.md). These CLIs use existing converted assets in `outputs/series/`;
+see their READMEs for commands and the current context limit.

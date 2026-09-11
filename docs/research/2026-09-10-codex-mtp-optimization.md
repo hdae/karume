@@ -923,3 +923,41 @@ CPU の実行時間は 116.482 秒、プロセスの最大 RSS は 27,012,087,80
 正本は `e4b-chat-cpu/summary.json` と各問の prefill tensor、実行間の照合は
 `e4b-pipeline-cpu-summary.json`。元の GPU 実行 JSON にある cpuIdentity=false は、その時点の記録として残した。
 E4B の短い会話についても CPU / Deno / Chrome の一致を確認できたが、広い品質評価と長文は引き続き未検証である。
+
+## 追加 LLM のローカル CLI（2026-09-11）
+
+利用者の依頼により、[MiniCPM5-2B](../../examples/minicpm5/README.md) と
+[Qwen3-0.6B](../../examples/qwen3/README.md) を試せる CLI を追加した。
+取得元を省略すると既存のローカル系列を優先し、現在の手元では GPTQ i4 を選ぶ。
+Anima / Irodori の既定もローカル配布形を優先する（`acee48e`）。Gemma 4 は元からローカルが既定。
+
+新 CLI は単発・greedy・非 thinking。入力文と system 指示、文章継続、標準入力、逐次復号、
+EOS 停止、JSON 出力を持つ。KV 容量 128 / prefill 64 行の既存実験グラフを使い、
+`入力 token 数 + max-new-tokens − 1 ≤ 128` を GPU 重み転送前に検査する。
+公開 pipeline / 配布 recipe / source 表の追加や、長文対応はこの変更に含めない。
+
+実行時の追加依存は無い。既存の BPE と Qwen の文字走査を使い、MiniCPM の数字 3 文字分割・
+BOS と、各モデルのチャット形式を examples 内で結線した。Unicode 表は既存の生成器から作成し、
+元の tokenizer と NFC（Unicode 正規化）の 12,232,704 文脈 + 乱択 2,000 件を照合した。
+両モデルで入力・復号 73 ケース、チャット 15 ケースずつが公式 tokenizer と厳密一致する。
+表と参照列は次の手順で別ディレクトリへ再生成できる（実行時に Python は不要）:
+
+```sh
+tools/.venv/bin/python examples/shared/emit-llm-fixtures.py --out /tmp/karume-llm-fixtures
+```
+
+保存結果の所在は `outputs/bench/karume/2026-09-11_cli-local-models/`:
+
+| 検証                                           | 結果                                                               | 生データ                                                           |
+| ---------------------------------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------ |
+| GPTQ i4 の CLI: 2 モデル × チャット 3 + 継続 1 | 全 8 件で CPU 参照の token 列・本文と一致。チャットは EOS まで一致 | `cli-smoke-summary.json` / `check-cli.py` / 各 CLI の JSON・stderr |
+| 標準入力からの MiniCPM5 日本語生成             | 逐次 stdout が `東京` + 改行                                       | `stdin-minicpm5.stdout.txt` / `cli-options.log`                    |
+| Qwen3 の `--quant i8`                          | 選択先と継続 8 token が CPU 参照と一致                             | `quant-i8-qwen3.json`                                              |
+| 容量超過                                       | 重み転送前に終了コード 1 で拒否                                    | `capacity-rejection.stderr.log`                                    |
+| Unicode 表・参照列の再生成                     | 同じデータを再現                                                   | `fixture-regeneration.log` / `regenerated/`                        |
+| ローカル優先の全体検証                         | 2,822 tests / 743 steps、失敗 0、ignore 5                          | `verify-local-first.log`                                           |
+| CLI 追加の全体検証                             | fmt / lint / check / test のログ                                   | `verify-llm-cli.log`                                               |
+
+RTX 3080 Ti で実施。モデルの内容の正確さを認定する検証ではない。
+例えば Qwen3 の日本語回答は CPU 参照も `日本の首都は、**东京**です。` と出す。
+長文・多ターン・モデル全般の品質評価・M2 での実行は引き続き未検証。

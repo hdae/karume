@@ -12,6 +12,7 @@
 - **モデル横断の追加調査（2026-09-10〜11）**: Qwen3-0.6B / MiniCPM5-2B の RTN / GPTQ と
   E4B の全 PLE を含むローカル pipeline は実機検証済み。E4B chat も CPU / Deno / Chrome で一致。
   残件は配布 recipe / source 表、長文と広い品質評価。実験資産を公開済みモデルとして扱わない。
+  手元の試走は [MiniCPM5 CLI](../examples/minicpm5/README.md) / [Qwen3 CLI](../examples/qwen3/README.md) を使える。
   Anima w4a8 / drafter / f16 GEMM の既存形状比較は不採用で完了。次の f16 M=1 GEMV は
   [範囲と検収案](research/2026-09-10-codex-mtp-optimization.md#次に試作する-f16-gemv-の範囲)を判断してから試作する。
   Chrome / Deno の Gemma 比較は自由文まで実施済み。他課題・長文・M2 を次の検収へ残す。

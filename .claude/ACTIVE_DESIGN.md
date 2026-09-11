@@ -15,6 +15,7 @@
   現在は `codex/review-and-fix`。CPU 参照の RoPE 不一致は解消。Anima / drafter の既存形状比較は不採用。
   次は f16 GEMV の試作判断、追加 LLM の配布・長文・品質検収。E4B / Qwen / MiniCPM のローカル実行と
   Chrome の Gemma 自由文比較は済。QAT mobile の重み共有宣言は通常 E2B と異なり、INT2 / SRQ の設計が必要。
+  ローカル実験 CLI は [MiniCPM5](../examples/minicpm5/README.md) / [Qwen3](../examples/qwen3/README.md)。公開 pipeline は未追加。
   利用者の希望により、今後は作業単位で調査・検証を終えて順次コミットする。残件の正本は backlog。
 
 - **Codex 性能調査（2026-09-06）の消化波（2026-09-07）** — 実測と設計の正本は

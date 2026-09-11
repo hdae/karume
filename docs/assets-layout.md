@@ -128,6 +128,11 @@ uv run python dist.py --pipeline vowel-detector      # → models/karume-vowel-d
 Gemma 4 は従来どおりローカルが既定、公開取得は `--repo` で指定する。
 SBV2 と vowel-detector は使う配布形を `--source` で明示する。
 
+追加 LLM の実験 CLI は [MiniCPM5](../examples/minicpm5/README.md) /
+[Qwen3](../examples/qwen3/README.md)。公開配布形は未作成なので、`outputs/series/` の変換済み
+系列と `inputs/` の公式 `tokenizer.json` を直接読む。GPTQ i4 → i8 → RTN i4 → f16 → f32 の順で
+既存系列を探し、同種の実験が複数ある場合は `--source` の指定を求める。新規取得・再変換はしない。
+
 ## 公開（HF へのアップロード）
 
 **MUST: モデルファイルを HF へ上げるときは、`tools/.venv/bin/hf`（huggingface_hub 1.27 /
