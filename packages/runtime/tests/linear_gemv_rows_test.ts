@@ -264,3 +264,16 @@ Deno.test("f32 GEMV は M=1 と 4 要素整列のみを受け、行ブロック�
     "行ブロックは未対応",
   );
 });
+
+Deno.test("INT2 行ブロックは既定の全高さでシェーダーを10 KB未満に保つ", () => {
+  // 初回解析費の回帰を検出する。従来の行別展開は r4 で76 KBだった（ADR 0082 追記8）。
+  for (const rows of [1, 2, 4]) {
+    const variant = { cols: 32, unroll: 4, rows };
+    const source = linearGemvRowsWgsl("i2", undefined, variant);
+    assertEquals(source.length < 10_000, true, `${rows} 行: ${source.length} bytes`);
+    assertEquals(
+      linearGemvRowsKey("i2", undefined, variant),
+      `linear_gemv:v2:f32:c32u4r${rows}:wi2`,
+    );
+  }
+});

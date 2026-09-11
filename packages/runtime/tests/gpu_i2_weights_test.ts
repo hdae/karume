@@ -297,3 +297,49 @@ Deno.test({
     }
   },
 });
+
+Deno.test({
+  name: "INT2 行ブロックは長い縮約と端の行でも M=1 の積和とビット一致する",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    try {
+      // r1 / r2 / r4、語の先読みと残り、長い K を跨ぐ。scale と bias は2冪に限定しない。
+      for (const [m, n, k] of [[3, 68, 320], [3, 8192, 320], [7, 8192, 576], [2, 68, 12288]]) {
+        const w = weight(n, k);
+        const rows = await createSession(
+          gpu,
+          openModel(makeModel(linearGraph(m, n, k, "i2"), n, k, w)),
+        );
+        const single = await createSession(
+          gpu,
+          openModel(makeModel(linearGraph(1, n, k, "i2"), n, k, w)),
+        );
+        try {
+          const data = Float32Array.from(
+            { length: m * k },
+            (_, i) => Math.sin(i * 0.37) * (i % 7 === 0 ? 19.3 : 0.073),
+          );
+          const actual = bits((await rows.run({ x: { dtype: "f32", shape: [m, k], data } })).y);
+          for (let row = 0; row < m; row++) {
+            const expected = bits(
+              (await single.run({
+                x: { dtype: "f32", shape: [1, k], data: data.slice(row * k, (row + 1) * k) },
+              })).y,
+            );
+            assertEquals(
+              actual.subarray(row * n, (row + 1) * n),
+              expected,
+              `${m},${n},${k} row=${row}`,
+            );
+          }
+        } finally {
+          await single.dispose();
+          await rows.dispose();
+        }
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+});

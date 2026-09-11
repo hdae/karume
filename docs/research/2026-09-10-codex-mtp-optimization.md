@@ -2164,3 +2164,65 @@ Denoの定常速度はほぼ横ばい。Chromeの定常値は揺れがあり、�
 修正後の `deno task verify` は **2,876 passed / 760 steps / 0 failed / 5 ignored、26分30秒、終了コード0**。
 ログは `async-product-verify-v2.log`。他のGPUジョブは並走させていない。
 この走行の一部では公式CPU参照の生成も行ったため、検証所要時間を性能比較には用いない。
+
+## INT2 行ブロックの初回準備短縮（2026-09-11）
+
+RTX 3080 Ti / Deno 2.9.6 / Chrome 153での時点実測。OUTと入力・生成条件は直前の非同期コンパイル節と同じ。
+本節の基準は非同期コンパイル反映後。利用者のM2の値とは区別する。
+
+### 候補を絞った理由
+
+INT2は16 B語が64要素を表し、従来は語の先読みと行数ぶん積和を展開していた。
+`helper-i2.ts` は計算順を保ったWGSL関数化、`small-workgroup-i2.ts` はcols4/8/16/32/64、
+`select-i2.ts` は4値の逆量子化を縮約前に計算する候補を比較した。
+実際のdown / up / head重み、3入力、同じcompute pass内の100反復×8試料、試料ごとの順序反転で測定した。
+生データは同名JSON、集計は `exact-micro-summary.json`。全候補で基準とのraw u32は一致した。
+
+cols縮小はdownで最大1.009倍、up/headで大きく遅くなり採らない。
+関数化したM=1はdownで0.907倍、up/headで約0.997倍。逆量子化の4値選択はdownで1.086倍、
+upで0.975倍、headで1.022倍だった。4値選択の全体効果は未検収で、製品には入れていない。
+
+M=1と行ブロックを共通化した全体候補 `helper-import-map.json` は、Denoの初回応答を
+512→388 / 513→397 msに短縮したが、暖機後の中央値は両走行とも基準の約0.993倍。
+Chrome初回は544→743 msへ遅くなった（`qat-helper-0/1.json`、`qat-helper-base-1.json`、
+`chrome-qat-helper-base-0.json` / `chrome-qat-helper-0.json`）。この全域適用は採らない。
+
+### 行ブロックだけを変更した対照
+
+`helper-rows-import-map.json` はM=1のWGSLを従来のまま残し、行ブロックだけ関数化した。
+既定r4のWGSLは **76,161→9,169文字**。r1/r2も7,828 / 8,275文字となる。
+幾何や行数の選択を変えず、生成テキストと初回の解析量を減らす。
+
+| 実行環境      | 基準の初回応答 | 候補の初回応答 | 生データ                                                               |
+| ------------- | -------------: | -------------: | ---------------------------------------------------------------------- |
+| Deno          |       513.0 ms |       405.3 ms | `qat-helper-base-1.json` / `qat-helper-rows-0.json`                    |
+| Chrome・1組目 |       543.5 ms |       463.6 ms | `chrome-qat-helper-base-0.json` / `chrome-qat-helper-rows-0.json`      |
+| Chrome・逆順  |       493.5 ms |       414.7 ms | `chrome-qat-helper-rows-base-1.json` / `chrome-qat-helper-rows-1.json` |
+
+Chromeは候補→基準の順でも初回短縮を再現した。全3組・27生成のtoken列が一致。
+暖機後の全体速度比はDeno **0.996〜1.006**、Chrome **0.996〜1.067**で、短文の揺れを含む。
+M=1のWGSLは全文不変なので、この値を生成カーネルの高速化とは呼ばない。
+集計は `new-model-summary.json`。公開API、数値契約、保存形式を維持し、
+変更する行ブロックだけキーの版を上げる（[ADR 0082](../decisions/0082-linear-gemv-decode.md#追記-82026-09-11-int2-行ブロックのシェーダーを縮小するk-30)）。
+
+### 正しさと適用範囲
+
+`helper-real-bits.ts` / `helper-rows-real-bits.ts` は実重み3形×M=1/2/4/8/16/32×3入力、
+**54条件・52,157,952要素**を基準と比較し、raw u32の差は0。
+製品へ整理した生成器は `check-i2-rows-product.ts` で実測候補とのWGSL全文一致を確認した。
+M=1と他格納型のsnapshotは更新せず、変更対象のINT2 r4のみ更新した。
+
+製品の重点検証は **90 passed / 0 failed、2秒**（`i2-rows-product-focused.log`）。
+K=12,288や先読みの残り、r1/r2/r4、最終タイルの端を、非2冪scale・biasと幅の異なる入力で検査し、
+既存M=1の出力とビット一致した。行ブロックの既定全高さに10 KB未満の生成量の門も加えた。
+M2、E4B全体、長文prefillは未計測。全体検証はこの重点検証とは別に行う。
+
+整形後の製品コードでも、凍結した旧カーネルを対照として同じ54条件・52,157,952要素のu32一致を再確認した
+（`i2-rows-product-real-bits.ts` / `.json` / `.log`）。この対照は現在の製品ファイルを参照せず、
+保存済みの `async-candidate/runtime` のカーネルを直接読む。
+
+コミット前の `deno task verify` は **2,878 passed / 760 steps / 0 failed / 5 ignored、24分38秒、終了コード0**。
+ログは `i2-rows-product-verify-v2.log`。最初の起動はリンク修正後の表整形で停止したため、
+整形を揃えて全体を再実行した（最初のログは `i2-rows-product-verify.log`）。
+この全体検証中、CPU専用と誤認した別の `estimate_test.ts` に実GPUの検証が1件含まれ、約199 ms重なった。
+性能ベンチは並走させていない。以後はテスト名だけでCPU専用と判断しない。

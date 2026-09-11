@@ -347,9 +347,11 @@ export const linearGemvRowsKey = (
   assertRowsVariant(variant);
   assertRowsStorage(storage);
   gemvGroupShift(storage, groupSize);
-  return `linear_gemv:v1:f32:c${variant.cols}u${variant.unroll}r${variant.rows}${
-    weightKeyPart(storage)
-  }${i4GroupKeyPart(groupSize)}`;
+  return `linear_gemv:${
+    storage === "i2" ? "v2" : "v1"
+  }:f32:c${variant.cols}u${variant.unroll}r${variant.rows}${weightKeyPart(storage)}${
+    i4GroupKeyPart(groupSize)
+  }`;
 };
 
 /**
@@ -477,29 +479,42 @@ ${macs}`;
 };
 
 /** INT2 の16 B語を K 昇順に積和する。成分添字を静的にして Metal の動的添字を避ける。 */
-const macsI2 = (slot: string, rows?: number): string => {
+const unitMacsI2 = (slot: string): string => {
   const lanes = ["x", "y", "z", "w"] as const;
   return lanes.flatMap((component, word) =>
     lanes.map((_, byte) => {
       const index = word * 4 + byte;
       const quantized = `q${slot}_${index}`;
       const decoded = `d${slot}_${index}`;
-      const products = Array.from({ length: rows ?? 1 }, (_, row) => {
-        const activation = `x${slot}_${index}_${row}`;
-        const base = rows === undefined ? "" : `xr${row} + `;
-        const acc = rows === undefined ? "acc" : `acc${row}`;
-        return `    let ${activation} = x[${base}xq${slot} + ${index}u];
-${
-          lanes.map((lane) => `    ${acc} = ${acc} + ${activation}.${lane} * ${decoded}.${lane};`)
-            .join("\n")
-        }`;
-      }).join("\n");
+      const activation = `x${slot}_${index}_0`;
+      const products = `    let ${activation} = x[xq${slot} + ${index}u];
+${lanes.map((lane) => `    acc = acc + ${activation}.${lane} * ${decoded}.${lane};`).join("\n")}`;
       return `    let ${quantized} = (pw${slot}.${component} >> ${byte * 8}u) & 255u;
     let ${decoded} = vec4<f32>(vec4<i32>(vec4<u32>(${quantized}, ${quantized} >> 2u, ${quantized} >> 4u, ${quantized} >> 6u) & vec4<u32>(3u)) - vec4<i32>(2)) * ${WEIGHT_SCALE_VAR};
 ${products}`;
     })
   ).join("\n");
 };
+
+/**
+ * INT2 の行ブロックだけを関数にまとめ、語・行ごとの展開による初回の解析費を減らす。
+ * 1 出力の K 昇順、成分の静的添字、復元と積和の丸め点は M=1 と同じ。
+ * DECIDED: docs/decisions/0082-linear-gemv-decode.md#追記-82026-09-11-int2-行ブロックのシェーダーを縮小するk-30
+ */
+const i2WordWgsl = (): string => `
+fn linear_i2_word(pwa: vec4<u32>, xqa: u32, wscale_v: f32, initial: f32) -> f32 {
+  var acc = initial;
+${unitMacsI2("a")}
+  return acc;
+}
+`;
+
+const rowsMacsI2 = (slot: string, rows: number): string =>
+  Array.from(
+    { length: rows },
+    (_, row) =>
+      `    acc${row} = linear_i2_word(pw${slot}, xr${row} + xq${slot}, wscale_v, acc${row});`,
+  ).join("\n");
 
 const unitMacs = (storage: WeightStorage, slot: string): string =>
   storage === "f32"
@@ -509,7 +524,7 @@ const unitMacs = (storage: WeightStorage, slot: string): string =>
     : storage === "i4"
     ? unitMacsI4(slot)
     : storage === "i2"
-    ? macsI2(slot)
+    ? unitMacsI2(slot)
     : unitMacsI8(slot);
 
 /**
@@ -586,7 +601,7 @@ const rowsMacs = (storage: WeightStorage, slot: string, rows: number): string =>
   storage === "i4"
     ? rowsMacsI4(slot, rows)
     : storage === "i2"
-    ? macsI2(slot, rows)
+    ? rowsMacsI2(slot, rows)
     : rowsMacsI8(slot, rows);
 
 /** i4 は行あたりの scale 本数から group の先頭を導く / i8 は出力チャネル 1 本を巻き上げる。 */
@@ -653,7 +668,7 @@ ${unitMacs(storage, "t")}
 };
 
 /**
- * 行ブロック GEMV の WGSL（`out[m,n] = x[m,k] · wᵀ[n,k] + bias[n]`・M ≥ 2・重み i4 / i8 格納）。
+ * 行ブロック GEMV の WGSL（`out[m,n] = x[m,k] · wᵀ[n,k] + bias[n]`・M ≥ 2・重み i2 / i4 / i8 格納）。
  *
  * dispatch は `[ceil(n / cols), ceil(m / rows), 1]`。1 スレッドは列 `gid.x` × 行
  * `gid.y · rows .. +rows` を持ち、重み語と scale は 1 回だけ読んで行ごとの x と積和する。
@@ -694,7 +709,7 @@ struct Dims {
   k: u32,
 }
 @group(0) @binding(0) var<uniform> dims: Dims;
-${bindings(unit, storage)}
+${bindings(unit, storage)}${storage === "i2" ? i2WordWgsl() : ""}
 
 @compute @workgroup_size(${cols})
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
