@@ -492,6 +492,21 @@ const i4Executable = (node: IrNode): boolean =>
   I4_WEIGHT_OPS.has(node.op) &&
   (node.op !== CONV1D_OP || conv1dAttrs(node.attrs, `nodes (${node.op})`).groups === 1);
 
+/** INT2 は linear / embedding の重みだけを packed のまま実行できる（ADR 0097）。 */
+export const i2EligibleInitializers = (graph: IrGraph): ReadonlySet<string> => {
+  const executable = new Set<string>();
+  const other = new Set<string>();
+  for (const node of graph.nodes) {
+    const weightSlot = WEIGHT_SLOTS.get(node.op);
+    if (weightSlot === undefined) continue;
+    const name = node.ins[weightSlot];
+    if (name === undefined || !Object.hasOwn(graph.initializers, name)) continue;
+    (node.op === "linear" || node.op === "embedding" ? executable : other).add(name);
+  }
+  for (const name of other) executable.delete(name);
+  return executable;
+};
+
 /**
  * 重みスロットでの消費が {@link i4Executable} を満たす op **だけ**の initializer（i4 の適格集合の
  * 狭め — ADR 0069 決定 5。エクスポータ側 `karume/emit.py: i4_eligible_initializers` の鏡像）。

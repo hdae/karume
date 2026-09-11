@@ -101,6 +101,7 @@ import {
  * f16 は 8 要素 / 語、f32 は 4 要素 / 語で、両者とも M=1 のみ（ADR 0082 追記 6・7）。
  */
 export const linearGemvUnit = (storage: WeightStorage): number => {
+  if (storage === "i2") return 64;
   if (storage === "i4") return 32;
   if (storage === "i8") return 16;
   if (storage === "f16") return 8;
@@ -475,6 +476,31 @@ const unitMacsF32 = (slot: string): string => {
 ${macs}`;
 };
 
+/** INT2 の16 B語を K 昇順に積和する。成分添字を静的にして Metal の動的添字を避ける。 */
+const macsI2 = (slot: string, rows?: number): string => {
+  const lanes = ["x", "y", "z", "w"] as const;
+  return lanes.flatMap((component, word) =>
+    lanes.map((_, byte) => {
+      const index = word * 4 + byte;
+      const quantized = `q${slot}_${index}`;
+      const decoded = `d${slot}_${index}`;
+      const products = Array.from({ length: rows ?? 1 }, (_, row) => {
+        const activation = `x${slot}_${index}_${row}`;
+        const base = rows === undefined ? "" : `xr${row} + `;
+        const acc = rows === undefined ? "acc" : `acc${row}`;
+        return `    let ${activation} = x[${base}xq${slot} + ${index}u];
+${
+          lanes.map((lane) => `    ${acc} = ${acc} + ${activation}.${lane} * ${decoded}.${lane};`)
+            .join("\n")
+        }`;
+      }).join("\n");
+      return `    let ${quantized} = (pw${slot}.${component} >> ${byte * 8}u) & 255u;
+    let ${decoded} = vec4<f32>(vec4<i32>(vec4<u32>(${quantized}, ${quantized} >> 2u, ${quantized} >> 4u, ${quantized} >> 6u) & vec4<u32>(3u)) - vec4<i32>(2)) * ${WEIGHT_SCALE_VAR};
+${products}`;
+    })
+  ).join("\n");
+};
+
 const unitMacs = (storage: WeightStorage, slot: string): string =>
   storage === "f32"
     ? unitMacsF32(slot)
@@ -482,6 +508,8 @@ const unitMacs = (storage: WeightStorage, slot: string): string =>
     ? unitMacsF16(slot)
     : storage === "i4"
     ? unitMacsI4(slot)
+    : storage === "i2"
+    ? macsI2(slot)
     : unitMacsI8(slot);
 
 /**
@@ -555,7 +583,11 @@ ${perRow}`;
 };
 
 const rowsMacs = (storage: WeightStorage, slot: string, rows: number): string =>
-  storage === "i4" ? rowsMacsI4(slot, rows) : rowsMacsI8(slot, rows);
+  storage === "i4"
+    ? rowsMacsI4(slot, rows)
+    : storage === "i2"
+    ? macsI2(slot, rows)
+    : rowsMacsI8(slot, rows);
 
 /** i4 は行あたりの scale 本数から group の先頭を導く / i8 は出力チャネル 1 本を巻き上げる。 */
 const scaleSetupWgsl = (storage: WeightStorage, shift: number | undefined): string =>

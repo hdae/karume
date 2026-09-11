@@ -374,7 +374,7 @@ because a mistaken pack order is otherwise a silent wrong-value bug.
 **Ordering**: an I4 data section is always a multiple of 8 bytes, so it belongs to the 4-byte-aligned
 group and goes with F32 / I32 (ADR 0069 addendum 2):
 
-    F32 (name ascending) → I32 → **I4** → even-count F16 → odd-count F16 → I8 (last)
+    F32 (name ascending) → I32 → **I4 / I2** (name ascending) → even-count F16 → odd-count F16 → I8 (last)
 
 ### Mixed storage (`weight_dtype_overrides` — ADR 0069 addendum 4)
 
@@ -467,9 +467,12 @@ conformance table is the correct one.
 
 - **The semantic dtypes are f32 / i32 / bool** (ADR 0009). torch's i64 is normalized to i32 at the
   exporter boundary (out of range fails loudly). **The storage dtypes are f32 / f16 / bf16 / i8 /
-  i4 / i32** (i32 is raw int32 — the explicit exception of ADR 0010). An initializer's semantic
-  dtype is f32 or i32, and the semantic/storage pairs are only `f32 × {f32,f16,bf16,i8,i4}` and
+  i4 / i2 / i32** (i32 is raw int32 — the explicit exception of ADR 0010). An initializer's semantic
+  dtype is f32 or i32, and the semantic/storage pairs are only `f32 × {f32,f16,bf16,i8,i4,i2}` and
   `i32 × i32` (the cross products fail loudly).
+  Fixed `i2` uses low-bit-first packing of `q+2` for `q ∈ [-2,1]`, rank-2 weights with
+  a row width divisible by 16, and F32 `[rows,1]` scales (ADR 0097). It is supported by
+  the low-level writer and reader; `write_model` does not add automatic INT2 quantization.
 - The IR vocabulary has **60** ops, of which the exporter can emit **58**: `topk` and `state_append`
   are in the vocabulary but no `torch.export` graph produces them (`topk` waits on the multi-output
   getitem wiring, and `state_append` is the effect op the decode-graph script emits — ADR 0067

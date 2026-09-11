@@ -29,6 +29,7 @@ import {
   type ReadyInitializer,
 } from "../format/container.ts";
 import { alignF16Payload, decodeF16 } from "../format/f16.ts";
+import { decodeI2 } from "../format/i2.ts";
 import { decodeI4 } from "../format/i4.ts";
 import { alignI8Payload, decodeI8 } from "../format/i8.ts";
 import type { IrDtype, IrGraph } from "../format/ir.ts";
@@ -1297,13 +1298,14 @@ export class Session {
                 hostExpandedBytes += payload.byteLength;
               }
             }
-            if (initializer.storage.dtype === "i8") {
-              if (seat.seat === "i8") {
+            if (initializer.storage.dtype === "i8" || initializer.storage.dtype === "i2") {
+              const dtype = initializer.storage.dtype;
+              if (seat.seat === "i8" || seat.seat === "i2") {
                 // scale は分割前の**全体**に掛かる 1 本きりなので、形の突合も確保も転送も
                 // piece 1（丸ごとなら唯一の実体）でだけ行う。突合に渡すのは piece の形では
                 // なく宣言 shape。
                 if (piece === undefined || piece.first) {
-                  const scale = scaleTensor(item, "i8");
+                  const scale = scaleTensor(item, dtype);
                   assertChannelScale(name, declaredShape, scale.shape, seat.channelAxis);
                   // MUST: scale のバッファも「GPU 常駐圧縮」に数える（実際に抱えるバイト数）。
                   residentCompressedBytes += scale.bytes.byteLength;
@@ -1311,15 +1313,19 @@ export class Session {
                   if (scale.bytes.byteLength > 0) {
                     timedWrite(scaleBuffer, scale.bytes, 0);
                   }
-                  residentWeights.set(name, { storage: "i8", scale: scaleBuffer });
+                  residentWeights.set(name, { storage: dtype, scale: scaleBuffer });
                 }
                 // MUST: 要素数が 4 の倍数でない重みは末尾をゼロ詰めして 4 バイト整列させる
                 // （f16 の 2 バイト詰めと同じ理由 — writeBuffer が validation で落ちる）。
                 payload = tailAligned ? alignI8Payload(raw) : raw;
                 residentCompressedBytes += payload.byteLength;
               } else {
-                const scale = expandedScale("i8");
-                payload = timedDecode(() => decodeI8(raw, pieceShape, scale.values, scale.shape));
+                const scale = expandedScale(dtype);
+                payload = timedDecode(() =>
+                  dtype === "i2"
+                    ? decodeI2(raw, pieceShape, scale.values, scale.shape)
+                    : decodeI8(raw, pieceShape, scale.values, scale.shape)
+                );
                 hostExpandedBytes += payload.byteLength;
               }
             }
@@ -1864,7 +1870,7 @@ export class Session {
       buffer,
       resident: residentWeights.get(initializerName),
       seat: seat.seat,
-      channelAxis: seat.seat === "i8" ? seat.channelAxis : undefined,
+      channelAxis: seat.seat === "i8" || seat.seat === "i2" ? seat.channelAxis : undefined,
       storage: graph.initializers[initializerName].storage.dtype,
       shape: graph.values[initializerName].shape.map(Number),
       retain: (): void => {

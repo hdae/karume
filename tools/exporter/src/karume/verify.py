@@ -81,11 +81,11 @@ TOP_LEVEL_KEYS = (
 OPTIONAL_TOP_LEVEL_KEYS = ("states",)
 
 SEMANTIC_DTYPES = ("f32", "i32", "bool")
-STORAGE_DTYPES = ("f32", "f16", "bf16", "i8", "i4", "i32")
+STORAGE_DTYPES = ("f32", "f16", "bf16", "i8", "i4", "i2", "i32")
 
 #: scale / group_size の記述子を持てる格納 dtype（量子化格納）。TS 側
 #: `packages/runtime/src/format/ir.ts` の QUANTIZED_STORAGE_DTYPES の鏡像。
-QUANTIZED_STORAGE_DTYPES = ("i8", "i4")
+QUANTIZED_STORAGE_DTYPES = ("i8", "i4", "i2")
 
 #: state スロットの dtype 語彙。現状 f32 のみ（ADR 0066 決定 2）。
 STATE_DTYPES = ("f32",)
@@ -105,13 +105,14 @@ STORAGE_ENCODING = {
     "bf16": "BF16",
     "i8": "I8",
     "i4": "I4",
+    "i2": "I2",
     "i32": "I32",
 }
 
 #: initializer の意味論 dtype → 許される格納 dtype（docs/ir-v1.md「値と型」）。
 #: MUST: 交差を許さない — `i32` 宣言の initializer が f16 のビット列として読まれる
 #: 沈黙誤値になる。bool の initializer は語彙に無い。
-INITIALIZER_STORAGE = {"f32": ("f32", "f16", "bf16", "i8", "i4"), "i32": ("i32",)}
+INITIALIZER_STORAGE = {"f32": ("f32", "f16", "bf16", "i8", "i4", "i2"), "i32": ("i32",)}
 
 
 # ---- JSON 層 --------------------------------------------------------------
@@ -315,6 +316,8 @@ def _parse_storage(value: Any, where: str, *, shared: bool = False) -> IrStorage
         raise IrError(f"{where}: 格納 dtype '{dtype}' には scale（scale テンソルのキー）が要る")
     # MUST: i4 は group_size を**明示宣言**する（ADR 0069 決定 2）。group 長が決まらない
     # 4bit 格納は scale の引き直し位置が決まらず、展開が黙って別の値を出す。
+    if dtype == "i2" and has_group_size:
+        raise IrError(f"{where}: i2 は行ごとの scale のみ（group_size は付けられない）")
     if dtype == "i4" and not has_group_size and not shared:
         raise IrError(f"{where}: 格納 dtype 'i4' には group_size が要る（ADR 0069 決定 2）")
     scale = _as_nonempty_str(obj["scale"], f"{where}.scale") if has_scale else None
@@ -654,6 +657,10 @@ def _check_declarations(
         # initializer は束縛前に確定していなければ safetensors 側 shape と突合できない。
         if any(not isinstance(dim, int) for dim in values[name].shape):
             raise IrError(f"graph.values['{name}']: initializer の shape に記号次元は使えない")
+        if storage_dtype == "i2":
+            shape = values[name].shape
+            if len(shape) != 2 or any(dim <= 0 for dim in shape) or shape[1] % 16:
+                raise IrError(f"graph.values['{name}']: i2 は正の rank 2・行長は16の倍数が必要")
         if storage_dtype == "i4":
             _check_group_quantized_shape(name, initializers[name], values[name])
     for node in nodes:
@@ -977,6 +984,7 @@ READER_DTYPE_BITS = {
     "BF16": 16,
     "I8": 8,
     "I4": 4,
+    "I2": 2,
     "U8": 8,
     "I32": 32,
     "U32": 32,
@@ -992,6 +1000,7 @@ READER_DTYPE_ALIGN = {
     "BF16": 2,
     "I8": 1,
     "I4": 4,
+    "I2": 4,
     "U8": 1,
     "I32": 4,
     "U32": 4,
@@ -1586,6 +1595,8 @@ def verify_shards(paths: Sequence[str | Path]) -> IrGraph:
                 channel_axes.get(name) if name in eligible else None,
                 initializer.storage.group_size if initializer.storage.dtype == "i4" else None,
             )
+            if initializer.storage.dtype == "i2" and stored[scale].shape != [declared[0], 1]:
+                raise ContainerError(f"{where}: i2 の scale は [{declared[0]},1] が必要")
             if owner[scale] != owner[initializer.tensor]:
                 # MUST: 逐次消費（ADR 0070 決定 3）は weight と scale を同時に要求するので、
                 # 跨いだ配布形は「参照を手放す」契約と両立しない。書く側の割り付け

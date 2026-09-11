@@ -1521,6 +1521,9 @@ export class RecipeBuilder {
     const k = weight[1];
     const m = numel(x.slice(0, -1));
     const weightStorage = this.#weightStorage(step);
+    if (weightStorage === "i2" && this.#state.linearCompute !== "f32") {
+      throw new ExecutionError("linear: i2 常駐は linearCompute 'f32' のみ対応（ADR 0097）");
+    }
     // 整数内積の経路は **opt-in × 整数常駐（i8 / i4）× k > 0 × k % 4 == 0** の 4 条件が
     // 揃ったときだけ（ADR 0025 / w4a8 は perf-ledger Q-8）。既定の "f32" では 1 バイトも
     // 挙動が変わらない。
@@ -1598,6 +1601,14 @@ export class RecipeBuilder {
     }
     const i4Unit = linearGemvUnit("i4");
     const gemvRows = m >= 1 && m <= LINEAR_GEMV_MAX_ROWS;
+    if (
+      gemvRows && weightStorage === "i2" && compute === "f32" && v4 &&
+      k % linearGemvUnit("i2") === 0
+    ) {
+      await this.#buildLinearGemv(step, binds, outs, builder, "i2", m, n, k);
+      return;
+    }
+
     if (
       gemvRows && weightStorage === "i4" && compute === "f32" && v4 &&
       groupSize !== undefined && groupSize % i4Unit === 0 &&

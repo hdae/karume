@@ -47,3 +47,31 @@ SRQ（Static Range Quantization、固定 scale による活性値の丸め）を
 
 この段階案は承認済みであり、含まれる実装に段階ごとの再承認は要らない。
 仕様変更は実装前に説明・記録し、承認範囲を超える変更や前提を覆す想定外の問題が出た場合に再確認する。
+
+## 追記 1 — INT2 格納と実行の契約（2026-09-11）
+
+IR v1 に格納 `i2`、safetensors の方言に `I2` を追加する。manifest は `karume/4` のまま。
+旧 reader は未知の格納型を拒否する。既存の格納形式、生成キー、数値許容差は変更しない。
+
+- 意味論は f32。論理形は正整数の rank 2 `[N,K]`、K は 16 の倍数。
+  1 byte に 4 要素を下位 2bit から詰め、格納値は `u=q+2`、整数の全域 `[-2,1]` を使う。
+  header の shape は論理形、バイト数は `N*K/4`。先頭は 4 byte 整列し、暗黙の末尾詰め物は持たない。
+- `storage.scale` は必須で、F32 の `[N,1]`。group_size は受理しない。
+  scale は重みと同じ shard、行分割時は先頭 piece と同居する。復元は要素ごとの `fround(q*scale)`。
+  固定整数と scale の保存値を再量子化しない。
+- 消費が linear / embedding の重みスロットだけなら packed 常駐。
+  他の消費や graph 出力を持つ場合は CPU で f32 展開し、診断・見積りに展開後のバイト数を載せる。
+  linearCompute は f32 のみ。a8 / f16 指定と、畳み込みの packed I2 生成は明示的に拒否する。
+- GEMV は `1<=M<=64`、`N%4=0`、`K%64=0`。16 byte の重み語が 64 要素を運び、K 昇順に縮約する。
+  行ブロックは既存の 256 要素上限から最大 4 行になる。それ以外は packed GEMM を使う。
+  embedding も packed のまま行を読む。
+- shared initializer は、既存の形・格納・消費席・device・run リース・寿命の検査を維持する。
+  INT2 の scale も同じ行軸で借用する。MTP の I8 借用を INT2 へ変更する意味ではない。
+- exporter の低レベル writer / reader と固定整数 pack / unpack を対応させる。
+  通常の `write_model(weight_dtype=...)` に自動 INT2 量子化は追加しない。
+  固定 packed 重みを直接受ける変換入口は QAT recipe の実装単位で追加する。
+
+E4B の公式 config と重み実体を確認した結果、PLE は **E2B が INT4、E4B が INT2** だった。
+PLE はグラフ外でホストが読む sidecar なので、上記 IR の行ごと scale とは別に、層ごとの block scale を保持する。
+PLE の実装単位はこの 2 格納を扱う。全配列の照合では、両モデルとも head と token embedding の整数列・scale が一致した。
+実体の出所と照合記録は新しい出力先の `e2b/e4b-download.json` と `e2b/e4b-census.json`。

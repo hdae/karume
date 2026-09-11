@@ -432,7 +432,7 @@ class TestStorageDescriptor:
 
     def test_unknown_storage_dtype_is_rejected(self):
         with pytest.raises(IrError, match="語彙外"):
-            parse(initializers={"w": {"tensor": "enc.w", "storage": {"dtype": "i2"}}})
+            parse(initializers={"w": {"tensor": "enc.w", "storage": {"dtype": "i1"}}})
 
 
 class TestGroupQuantizedStorage:

@@ -492,6 +492,14 @@ Deno.test("生成した WGSL がスナップショットとバイト単位で一
     // i4 は linear / embedding 限定（ADR 0069）— group 32（既定）の shift を焼いた変種。
     // embedding 版は **linear と対で置く**（scale の引き方が別実装〈充填で quad ごと /
     // カーネル本体で要素ごと〉なので、片方だけ動いた生成物が普通に組み上がる）。
+    ["linear_wi2.wgsl", linearWgsl("i2", false)],
+    ["linear_wi2_v4.wgsl", linearWgsl("i2", true)],
+    ["linear_gemv_wi2.wgsl", linearGemvWgsl("i2")],
+    [
+      "linear_gemv_r4_wi2.wgsl",
+      linearGemvRowsWgsl("i2", undefined, { cols: 32, unroll: 4, rows: 4 }),
+    ],
+    ["embedding_wi2.wgsl", embeddingWgsl("i2")],
     ["linear_wi4.wgsl", linearWgsl("i4", false, "f32", undefined, 32)],
     ["linear_wi4_v4.wgsl", linearWgsl("i4", true, "f32", undefined, 32)],
     // linear の **GEMV 族**（M=1 × i4 / i8 — ADR 0082）。骨格を共有しない別カーネルなので、この
@@ -4901,4 +4909,17 @@ Deno.test("codegen は契約外の生成入力を fail loudly にする", () => 
   assertThrows(() => axisReduceWgsl({ op: "amax", dtype: "bool" }), CodegenError);
   assertThrows(() => axisReduceParams(1.5, 2, 3), CodegenError);
   assertThrows(() => axisReduceParams(4, 2, -1), CodegenError);
+});
+
+Deno.test("INT2 は対応外の畳み込み・計算精度の生成を拒否する", () => {
+  const cases = [
+    () => conv1dWgsl("i2"),
+    () => conv2dWgsl("i2"),
+    () => convTranspose1dWgsl("i2"),
+    () => conv1dIgemmWgsl("i2", true),
+    () => conv2dIgemmWgsl("i2", true),
+    () => linearWgsl("i2", true, "f16"),
+    () => linearI8a8Wgsl(true, false, undefined, "i2"),
+  ];
+  for (const generate of cases) assertThrows(generate, CodegenError);
 });

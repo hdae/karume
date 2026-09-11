@@ -8,6 +8,7 @@ export type SafetensorsDtype =
   | "BF16"
   | "I8"
   | "I4"
+  | "I2"
   | "U8"
   | "I32"
   | "U32"
@@ -29,6 +30,7 @@ const DTYPE_BITS: Readonly<Record<SafetensorsDtype, number>> = {
   I8: 8,
   // packed 4bit（ADR 0069 決定 2）。shape は論理形のままで、バイト数だけが bit 幅から決まる。
   I4: 4,
+  I2: 2,
   U8: 8,
   I32: 32,
   // U32 は意味論 bool の実表現（u32 の 0/1 — ADR 0009）。golden の io がこの形で書かれる。
@@ -48,6 +50,7 @@ const DTYPE_ALIGN: Readonly<Record<SafetensorsDtype, number>> = {
   BF16: 2,
   I8: 1,
   I4: 4,
+  I2: 4,
   U8: 1,
   I32: 4,
   U32: 4,

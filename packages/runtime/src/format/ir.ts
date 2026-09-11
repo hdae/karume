@@ -1,3 +1,5 @@
+import { isI2Shape } from "./i2.ts";
+
 // IR v1（docs/ir-v1.md）のグラフ JSON 型と構造検証。
 // 検証はここに 1 本化する: safetensors との突合は container.ts、次元文法は dims.ts が持ち、
 // 本ファイルはグラフ単体で決まる規則（宣言・SSA・トポロジカル順・語彙）だけを見る。
@@ -13,7 +15,7 @@ export type IrDtype = "f32" | "i32" | "bool";
  * i32 で（f16 は ADR 0018・i8 は ADR 0019・i4 は ADR 0069 — いずれも適格な重みスロットは
  * 圧縮のまま GPU 常駐・適格外はロード時に CPU で f32 展開）、bf16 は宣言として受理するだけ。
  */
-export type IrStorageDtype = "f32" | "f16" | "bf16" | "i8" | "i4" | "i32";
+export type IrStorageDtype = "f32" | "f16" | "bf16" | "i8" | "i4" | "i2" | "i32";
 
 /** 非負整数、または `coeff·sym+offset` の正準表記（dims.ts）。 */
 export type IrDim = number | string;
@@ -149,7 +151,7 @@ const OPTIONAL_TOP_LEVEL_KEYS = ["states"] as const;
 
 /** 意味論 dtype の全語彙（宣言としての受理集合 — 実行可否は契約表 src/ops.ts が持つ）。 */
 export const SEMANTIC_DTYPES = ["f32", "i32", "bool"] as const;
-const STORAGE_DTYPES = ["f32", "f16", "bf16", "i8", "i4", "i32"] as const;
+const STORAGE_DTYPES = ["f32", "f16", "bf16", "i8", "i4", "i2", "i32"] as const;
 
 /**
  * scale / group_size の記述子を持てる格納 dtype（量子化格納）。
@@ -158,7 +160,7 @@ const STORAGE_DTYPES = ["f32", "f16", "bf16", "i8", "i4", "i32"] as const;
  * 二重化する）。group 量子化そのものの受理は格納 i4 だけ（ADR 0069 決定 2）で、それは
  * capability の層（format/container.ts）が見る。
  */
-const QUANTIZED_STORAGE_DTYPES: readonly IrStorageDtype[] = ["i8", "i4"];
+const QUANTIZED_STORAGE_DTYPES: readonly IrStorageDtype[] = ["i8", "i4", "i2"];
 
 /** i4 の group 長の下限（ORT と同じ制約 — ADR 0069 決定 2）。 */
 const MIN_GROUP_SIZE = 16;
@@ -192,7 +194,7 @@ const MAX_STATE_RANK = 4;
  * safetensors 側の BOOL は 1 バイト格納で 4 バイト前提の転送とも噛み合わない）。
  */
 const INITIALIZER_STORAGE: ReadonlyMap<IrDtype, readonly IrStorageDtype[]> = new Map([
-  ["f32", ["f32", "f16", "bf16", "i8", "i4"]],
+  ["f32", ["f32", "f16", "bf16", "i8", "i4", "i2"]],
   ["i32", ["i32"]],
 ]);
 
@@ -309,6 +311,9 @@ const parseStorage = (value: unknown, where: string, shared = false): IrStorage 
   if (shared) return { dtype };
   const hasScale = Object.hasOwn(obj, "scale");
   const hasGroupSize = Object.hasOwn(obj, "group_size");
+  if (dtype === "i2" && hasGroupSize) {
+    throw new IrError(`${where}: i2 は行ごとの scale のみ（group_size は付けられない）`);
+  }
   // scale / group_size は量子化格納の記述子。非量子化 dtype に付いているのはエクスポータの
   // 取り違えなので受理しない（黙って無視すると格納の意味が二重化する）。
   if (!QUANTIZED_STORAGE_DTYPES.includes(dtype) && (hasScale || hasGroupSize)) {
@@ -751,6 +756,9 @@ const checkDeclarations = (
       );
     }
     const storageDtype = initializers[name].storage.dtype;
+    if (storageDtype === "i2" && !isI2Shape(values[name].shape)) {
+      throw new IrError(`graph.values['${name}']: i2 は正の rank 2・行長は16の倍数が必要`);
+    }
     if (!allowedStorage.includes(storageDtype)) {
       throw new IrError(
         `graph.initializers['${name}']: 意味論 dtype '${

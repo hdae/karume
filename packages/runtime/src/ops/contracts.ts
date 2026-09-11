@@ -774,7 +774,7 @@ export const RUNTIME_SUPPORT: RuntimeSupport = {
   // 常駐・適格外はロード時に CPU で f32 展開）ので、**どの initializer に付いていても実行
   // できる**。i4 の適格だけ狭い（linear の重みスロット限定 — 適格外は CPU 展開の受け皿）。
   // bf16 だけが宣言としては valid で実行できない（capability 不足として列挙で落ちる）。
-  storage: new Set(["f32", "f16", "i8", "i4", "i32"]),
+  storage: new Set(["f32", "f16", "i8", "i4", "i2", "i32"]),
   io: new Set(IO_DTYPES),
 };
 

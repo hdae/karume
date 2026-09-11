@@ -149,7 +149,7 @@ Deno.test("parseIrGraph: dtype 語彙", () => {
     g.inputs[0].dtype = "i64";
   });
   assertRejects("格納 dtype に i2", (g) => {
-    g.initializers["w"].storage = { dtype: "i2" };
+    g.initializers["w"].storage = { dtype: "i1" };
   });
 });
 

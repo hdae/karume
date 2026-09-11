@@ -1501,3 +1501,56 @@ u32 / golden / SHA の自動検収まで完了したという意味にも扱わ�
 
 AGENTS.md の該当箇所は、無説明の仕様変更を防ぐ意図に合わせて改訂した。
 承認された統合範囲は段階ごとに聞き直さず進め、範囲外の変更や前提を覆す問題が出たときに再確認する。
+
+## QAT 統合の INT2 基盤（2026-09-11）
+
+ADR 0097 の承認範囲で、IR の `i2` / safetensors の `I2`、CPU 展開、メモリ見積り、
+packed GEMV / GEMM / embedding、shared weight と行分割読込を実装した。
+固定 SRQ op・QAT recipe・PLE・別 family の通常生成は後続の単位であり、この時点では未完。
+通常 exporter の自動量子化選択は変えず、低レベル writer / reader と固定整数 pack / unpack を追加した。
+
+新しい出力先の `e2b/e4b-download.json` は固定 revision と LFS SHA の照合結果、
+`e2b/e4b-census.json` は公式モジュールの論理 shape と実ファイルの照合結果。
+E2B の text linear は INT2 61 / INT4 145 / INT8 70 本、E4B は INT2 1 / INT4 258 / INT8 84 本。
+PLE は **E2B が INT4、E4B が INT2** なので、後続の host sidecar 読取は両方を扱う。
+両モデルとも head と token embedding の全整数列・scale が一致し、調べた重み scale に 0 / 負値 / 非有限値は無かった。
+
+### 製品カーネルの実形状比較
+
+RTX 3080 Ti、Deno。先行実験の固定 E2B up / down / head 重みを用い、丸め前後それぞれを
+f32 / INT4 / INT8 / INT2 の GPU 経路で u32 全数比較した。**54 比較すべて一致**。
+元の整数・scale を変えず、格納による差だけを見る。
+
+時間は入力 SRQ + linear + 出力 SRQ の合計。ヒータで GPU を起こし、往復順それぞれ 5 標本、
+各標本 20 回の GPU timestamp を取り、合計 10 標本の中央値を示す。
+これは単体計測であり、モデル全体の生成時間の倍率ではない。
+
+| 形状                 | INT4 GEMV (ms) | INT2 GEMV (ms) | INT4 / INT2 |
+| -------------------- | -------------: | -------------: | ----------: |
+| up `[12288,1536]`    |      0.0602624 |      0.0479232 |     1.26 倍 |
+| down `[1536,12288]`  |      0.2062848 |      0.1386496 |     1.49 倍 |
+| head `[262144,1536]` |      0.7132160 |      0.2821888 |     2.53 倍 |
+
+INT2 の M=1 GEMM は同じ順に 0.3359232 / 0.9984768 / 4.7663104 ms。
+GEMV の適格条件を満たす単行では GEMV を選ぶ既存の方針を維持する。
+行ブロック 4 行の INT2 WGSL は 76,161 文字で、既存の 80,000 文字の目安内。
+
+正本は `int2-product-benchmark-v2.json` / `int2-product-summary.json` と対応する `.ts` / `.log`。
+実行には差し替えの無い `product-import-map.json` を使用した。
+初回の `int2-product-benchmark.json` は試作 import map を使ったため、正式な数値は v2 に揃える。
+
+保存済み公式 CPU 参照との差は先行実測と件数が完全に一致した。
+down/sin と up/near-boundary は符号付きゼロ各 1、up/wide は縮約誤差が SRQ 境界を越す 1 要素。
+head/sin と head/wide は各 252,186 要素で、output scale=0 により丸めが無効なため加算順の微小差が残る。
+原因の正本は旧出力先の `qat-full-attribution.json`。INT2 が CPU 縮約とのビット同一を達成したとは扱わず、
+既存の許容差や golden 条件も変更していない。
+
+### 検証
+
+`int2-targeted-v2.log` は 82 passed / 0 failed。新しい形式検査、GPU の scalar / vec4 GEMM、
+GEMV（行ブロック 4 行を含む）、embedding、借用、packed / CPU 展開の行分割、既存 WGSL snapshot を含む。
+Python は `int2-exporter-pytest-v2.log` が **3,156 passed / 1 skipped**、
+`int2-recipes-pytest.log` が **2,757 passed / 4 skipped**。
+未知 dtype の否定テストは `i2` が新しい正規語彙になったため `i1` に変更し、拒否条件を維持した。
+コミット前の `deno task verify` は **2,857 passed / 743 steps / 0 failed / 5 ignored、24m30s**
+（`int2-verify.log`）。コードは検証した状態のまま、完了後に結果と保存形式の文書表記を更新した。

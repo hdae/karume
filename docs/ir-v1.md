@@ -129,16 +129,23 @@ capability 宣言を加えた非互換改訂。確定範囲を定義し、拡張
   グラフ入力の転送は 3 型とも可能。torch 既定の整数 i64 は **エクスポータ境界で i32 へ
   正規化**する（値域外は fail loudly）— IR に i64 は無い。
 - **格納 dtype**（`initializers[].storage.dtype`）:
-  `"f32" | "f16" | "bf16" | "i8" | "i4" | "i32"`。`i32` 以外は**意味論 f32 の符号化**で、
+  `"f32" | "f16" | "bf16" | "i8" | "i4" | "i2" | "i32"`。`i32` 以外は**意味論 f32 の符号化**で、
   `i32` だけが**生の int32**（記号依存定数の焼き込み先 —
   ADR [0010](decisions/0010-symbolic-constant-folding.md)。「格納語彙は f32 の符号化」の
   明示的な例外）。量子化格納は `storage.scale`（scale テンソルの safetensors キー）・
-  `storage.group_size` を持てる。**ランタイムが実行できるのは `f32` / `f16` / `i8` / `i4` /
+  `storage.group_size` を持てる。**ランタイムが実行できるのは `f32` / `f16` / `i8` / `i4` / `i2` /
   `i32`** — bf16 だけが「宣言としては valid、実行は fail loudly（capability 不足の診断付き）」。
-  `i4`（ADR [0069](decisions/0069-packed-w4-storage.md)）の適格だけ狭い —
+  `i4`（ADR [0069](decisions/0069-packed-w4-storage.md)）の適格は狭い —
   **消費が linear / embedding / conv1d（`groups == 1`）の重みスロットのみ**の initializer が
   packed のまま GPU 常駐し（0069 追記 6 の embedding 追補・追記 7 の conv1d 追補）、適格外は
   ロード時に CPU で f32 展開される（正しさは保たれ VRAM 削減はゼロ）。
+- **`i2` の格納形と実行**（ADR [0097](decisions/0097-gemma4-qat-integration.md#追記-1--int2-格納と実行の契約2026-09-11)）:
+  論理形は正整数の rank 2 `[N,K]`、K は 16 の倍数。safetensors は `I2`、バイト数 `N*K/4`、
+  先頭は 4 byte 整列。1 byte に 4 要素を下位 2bit から `u=q+2` で詰め、整数 `[-2,1]` を保持する。
+  `storage.scale` は必須の F32 `[N,1]`、`group_size` はパース時に拒否する。
+  重みと scale は同じ shard（行分割時は先頭 piece）に置く。
+  linear / embedding の重みだけなら packed 常駐し、他の消費では CPU で f32 展開する。
+  復元は要素ごとの `fround(q*scale)`。linear の計算は f32 のみで、a8 / f16 は明示拒否する。
 - **`i4` の格納形**（ADR 0069 決定 2 / 3）: 行方向 group の対称量子化を packed 4bit で持つ。
   テンソル shape は**論理形のまま**で、safetensors 側は `I4`・バイト長は `numel / 2`
   （要素数が奇数の宣言は bit 総量が byte 境界に乗らないので fail loudly）・**テンソル先頭は
@@ -152,7 +159,7 @@ capability 宣言を加えた非互換改訂。確定範囲を定義し、拡張
     `[shape[0], 行長 / group_size]`（rank2 の重みでは従来の「同 rank・最終次元だけ group 数」と
     同値 — 0069 追記 7）— i8 の keepdim broadcast 形とは別分岐
 
-  `group_size` を `i4` 以外の格納 dtype に付けた宣言は `非対応 group 量子化` として
+  `group_size` を `i8` に付けた宣言は `非対応 group 量子化` として
   capability 不足で落ちる（**group 量子化の格納は `i4` のみ**。黙って無視すると group ごとの
   scale を per-channel として読む沈黙誤値になる）。
 - **`f16` の実行**（ADR [0018](decisions/0018-f16-weight-execution.md)）: 意味論はあくまで f32
@@ -217,7 +224,7 @@ capability 宣言を加えた非互換改訂。確定範囲を定義し、拡張
 - initializer の宣言は**数値次元のみ**（記号次元不可）。意味論 dtype は **f32 / i32** で、
   **意味論と格納の組は次の 2 通りだけ**（交差は fail loudly — i32 宣言が f16 のビット列として
   読まれる沈黙誤値を塞ぐ）:
-  - 意味論 `f32` × 格納 `f32` / `f16` / `bf16` / `i8` / `i4`
+  - 意味論 `f32` × 格納 `f32` / `f16` / `bf16` / `i8` / `i4` / `i2`
   - 意味論 `i32` × 格納 `i32`
 
   bool の initializer は語彙に無い（実測に無く、safetensors の `BOOL` は 1 バイト格納で

@@ -95,6 +95,7 @@ const STORAGE_ENCODING: Readonly<Record<IrStorageDtype, SafetensorsDtype>> = {
   i8: "I8",
   // packed 4bit（ADR 0069 決定 2）。shape は論理形のままで、バイト数だけが bit 幅から決まる。
   i4: "I4",
+  i2: "I2",
   i32: "I32",
 };
 
@@ -289,6 +290,12 @@ const resolveScale = (
   // ので、scale の形の分岐は group_size の有無ではなく**格納 dtype**で決める。
   const groupSize = initializer.storage.dtype === "i4" ? initializer.storage.groupSize : undefined;
   assertScaleTensor(name, scaleKey, scale, weightShape, groupSize);
+  if (
+    initializer.storage.dtype === "i2" &&
+    (scale.shape.length !== 2 || scale.shape[0] !== weightShape[0] || scale.shape[1] !== 1)
+  ) {
+    throw new ContainerError(`initializer '${name}': i2 の scale は [${weightShape[0]},1] が必要`);
+  }
   return scale;
 };
 

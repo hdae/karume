@@ -559,6 +559,10 @@ HF の `safe_open` は整列違反を読めてしまうので、そちらを通�
 
 ## 格納 dtype `I4` は safetensors の方言（公式パーサは読めない）
 
+INT2 の `I2` も karume の追加語彙であり、公式 safetensors reader との互換形式ではない
+（[ADR 0097](decisions/0097-gemma4-qat-integration.md)）。IR 上の INT2 は行ごとの scale、
+linear / embedding の packed 実行に対応し、linearCompute は f32 に限る。
+
 packed int4（ADR [0069](decisions/0069-packed-w4-storage.md)）は safetensors ヘッダに
 dtype `I4` を書くが、これは**公式仕様に無い語**で、公式 safetensors ライブラリは該当
 テンソルを含むファイルを拒否する（実測 2026-09-01・safetensors 0.8.0 — 受理 dtype は

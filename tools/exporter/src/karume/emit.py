@@ -145,7 +145,7 @@ _STORAGE_ENCODING: Mapping[str, tuple[str, int]] = {
 #: 寄せる（上の「並び順」節）。F32 → I32 の順と群内の名前昇順は `safetensors.torch.save_file`
 #: が f32 のみのファイルに対して出す並びと一致するので、f16 / i8 / i4 を含まない資産のバイト列
 #: はこの writer に切り替えても変わらない。
-_DTYPE_GROUP = {"F32": 0, "I32": 1, "I4": 2, "F16": 3, "I8": 4}
+_DTYPE_GROUP = {"F32": 0, "I32": 1, "I4": 2, "I2": 2, "F16": 3, "I8": 4}
 
 #: packed nibble の offset（格納値は `u = q + 8`・値域 [1,15] で 0 は未使用 = 15 準位）。
 #: 非対称化する日にはこの定数が「`storage.zero_point` 省略時の既定 = 8」へ読み替わるだけで、
@@ -358,6 +358,33 @@ def i4_eligible_initializers(
 def _scale_key(tensor_key: str) -> str:
     """companion scale の safetensors キー（重みキーから機械的に作る）。"""
     return f"karume.scale.{tensor_key}"
+
+
+def pack_int2(quantized: torch.Tensor) -> torch.Tensor:
+    """固定整数 [-2,1] を下位2bitから詰める。量子化やscaleの変更は行わない（ADR 0097）。"""
+    if quantized.dtype != torch.int8:
+        raise EmitError("INT2 の整数列は int8 の器が必要")
+    flat = quantized.reshape(-1)
+    if flat.numel() % 4:
+        raise EmitError("INT2 の要素数は4の倍数が必要")
+    if bool(((flat < -2) | (flat > 1)).any()):
+        raise EmitError("INT2 の整数は [-2,1] が必要")
+    u = (flat + 2).to(torch.uint8)
+    return u[0::4] | (u[1::4] << 2) | (u[2::4] << 4) | (u[3::4] << 6)
+
+
+def unpack_int2(packed: torch.Tensor, shape: Sequence[int]) -> torch.Tensor:
+    """packed INT2 を固定整数へ戻す。論理形と全バイト数の一致を要求する。"""
+    count = 1
+    for dim in shape:
+        if type(dim) is not int or dim < 0:
+            raise EmitError("INT2 の shape は非負整数が必要")
+        count *= dim
+    if packed.dtype != torch.uint8 or packed.numel() * 4 != count:
+        raise EmitError("INT2 のバイト列と論理 shape が一致しない")
+    flat = packed.reshape(-1)
+    lanes = torch.stack(tuple((flat >> shift) & 3 for shift in (0, 2, 4, 6)), dim=-1)
+    return (lanes.to(torch.int8) - 2).reshape(tuple(shape))
 
 
 def pack_int4(quantized: torch.Tensor) -> torch.Tensor:
@@ -726,7 +753,7 @@ def _convert_for_storage(key: str, tensor: torch.Tensor, conversion: _Conversion
 #: 実行可否は `verify.assert_runtime_support` が単独で持つ）— ここは**バイト数を数えるだけ**の
 #: 層なので、読めるグラフを数えられない状態を作らない。bit 単位なのは packed 4bit
 #: （1 バイトに 2 要素 — ADR 0069 決定 2）が要素バイト数で表せないため。
-_STORAGE_BITS = {"f32": 32, "f16": 16, "bf16": 16, "i8": 8, "i4": 4, "i32": 32}
+_STORAGE_BITS = {"f32": 32, "f16": 16, "bf16": 16, "i8": 8, "i4": 4, "i2": 2, "i32": 32}
 #: 圧縮に数えない格納 dtype（= 素の 4 バイト表現）。圧縮側を列挙すると格納 dtype を足すたびに
 #: 2 箇所直す形になるので、**否定形**で書く。
 _PLAIN_STORAGE_DTYPES = ("f32", "i32")
@@ -756,6 +783,8 @@ def storage_breakdown(graph: IrGraph) -> StorageBreakdown:
             compressed_bytes += nbytes
             if dtype == "i8":
                 scale_bytes += shape[axes[name]] * _SCALE_BYTES
+            elif dtype == "i2":
+                scale_bytes += shape[0] * _SCALE_BYTES
             elif dtype == "i4":
                 # 整除は読めるグラフなら保証済み（verify の `_check_group_quantized_shape`）。
                 # 存在は型の上でだけ optional なので、既定で埋めず言い直す — 1 で埋めると

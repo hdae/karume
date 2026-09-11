@@ -30,12 +30,13 @@
 import { CodegenError } from "../codegen/errors.ts";
 
 /** 重みスロットの格納形。意味論はどれも f32（計算は常に f32 — ADR 0006）。 */
-export type WeightStorage = "f32" | "f16" | "i8" | "i4";
+export type WeightStorage = "f32" | "f16" | "i8" | "i4" | "i2";
 
 /**
  * 融合 5 カーネルが**共有する**変種の全数（スナップショットと縮退ハーネスの網羅を機械的に
  * 回すための列挙）。
  *
+ * INT2 も linear / embedding 専用なのでこの共通列挙には含めない（ADR 0097）。
  * MUST: `i4` は入れない — i4 の実行経路は **linear / embedding / conv1d の implicit GEMM
  * （groups == 1）だけ**（ADR 0069 決定 5 と その embedding / conv1d 追補）で、残りの生成入口
  * （conv1d 直接カーネル / conv2d / conv_transpose1d）に i4 を渡す経路は各生成関数が落とす。
@@ -80,7 +81,15 @@ export const i4GroupKeyPart = (groupSize: number | undefined): string =>
  * 暗黙シェーダキャッシュを取り直すうえ、キー固定のテストが一斉に動く。
  */
 export const weightKeyPart = (storage: WeightStorage): string =>
-  storage === "f32" ? "" : storage === "f16" ? ":wf16" : storage === "i8" ? ":wi8" : ":wi4";
+  storage === "f32"
+    ? ""
+    : storage === "f16"
+    ? ":wf16"
+    : storage === "i8"
+    ? ":wi8"
+    : storage === "i2"
+    ? ":wi2"
+    : ":wi4";
 
 /**
  * 重みバッファの WGSL 要素型（f16 は 2 要素・i8 は 4 要素を 1 語に詰めた格納なので u32）。
@@ -98,6 +107,8 @@ export const weightNote = (storage: WeightStorage): string =>
     ? ", 重み f16 格納"
     : storage === "i8"
     ? ", 重み i8 格納"
+    : storage === "i2"
+    ? ", 重み i2 格納"
     : ", 重み i4 格納";
 
 /**
@@ -146,6 +157,29 @@ fn dequant4(i: u32) -> vec4<f32> {
 fn dequant(i: u32) -> f32 {
   let pair = unpack2x16float(${name}[i >> 1u]);
   return select(pair.x, pair.y, (i & 1u) == 1u);
+}
+`;
+  }
+  if (storage === "i2") {
+    // 下位から4要素ずつ抽出。quad は4整列なので同一byte内に収まり、語境界を跨がない。
+    return quad
+      ? `
+@group(0) @binding(${scaleBinding}) var<storage, read> wscale: array<f32>;
+
+// INT2: 下位2bitから u=q+2。逆量子化の乗算は要素ごと。
+fn dequant4(i: u32, scale: f32) -> vec4<f32> {
+  let byte = (${name}[i >> 4u] >> ((i & 15u) * 2u)) & 255u;
+  let q = vec4<i32>(vec4<u32>(byte, byte >> 2u, byte >> 4u, byte >> 6u) & vec4<u32>(3u)) - vec4<i32>(2);
+  return vec4<f32>(q) * scale;
+}
+`
+      : `
+@group(0) @binding(${scaleBinding}) var<storage, read> wscale: array<f32>;
+
+// INT2: 1語16要素。平坦添字から語と語内位置を求める。
+fn dequant(i: u32, scale: f32) -> f32 {
+  let u = (${name}[i >> 4u] >> ((i & 15u) * 2u)) & 3u;
+  return f32(i32(u) - 2) * scale;
 }
 `;
   }
@@ -262,7 +296,7 @@ export const weightScaleWgsl = (
   indent: string,
   variable: string = WEIGHT_SCALE_VAR,
 ): string =>
-  storage === "i8"
+  storage === "i8" || storage === "i2"
     ? `
 ${indent}// 出力チャネルの scale はループ不変 — 重みの要素ごとに引き直さない（ADR 0019）
 ${indent}let ${variable} = wscale[${channel}];`

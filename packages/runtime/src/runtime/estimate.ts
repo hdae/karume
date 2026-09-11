@@ -459,6 +459,7 @@ const weightEstimate = (
       case "f16":
       case "i8":
       case "i4":
+      case "i2":
         compressed += buffer.byteLength;
         break;
       default: {

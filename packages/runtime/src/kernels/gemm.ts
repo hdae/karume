@@ -1694,6 +1694,9 @@ const linearVariantWgsl = (
   // MUST: i8 重み × f16 計算は組まない（w8a16 — ADR 0028 決定 3）。ALU が 1:1 の機では
   // 速度の案として成立せず、品質の案としては需要が出てから別途裁定する。黙って f32 計算へ
   // 落とすと「i8 資産のときだけ f16 変種が効かない」形の沈黙になるので、生成の入口で落とす。
+  if (compute === "f16" && weight === "i2") {
+    throw new CodegenError("linear: 重み i2 格納 × f16 計算は未対応（ADR 0097）");
+  }
   if (compute === "f16" && weight === "i8") {
     throw new CodegenError(
       "linear: 重み i8 格納 × f16 計算（w8a16）は未実装 — " +
@@ -2253,6 +2256,9 @@ export const gemmWgsl = (spec: GemmSpec): string => {
         spec.weightGroupShift,
       );
     case "conv1d":
+      if (spec.weight === "i2") {
+        throw new CodegenError("conv1d: 重み i2 格納は未対応（ADR 0097）");
+      }
       // MUST: group 長の log2 は i4 と 1 対 1（linear と同文 — 欠けたまま生成すると scale 添字が
       // 壊れた WGSL が出る・i4 以外に付くのは呼び出し側の結線バグ）。
       if ((spec.weight === "i4") !== (spec.weightGroupShift !== undefined)) {
@@ -2262,6 +2268,9 @@ export const gemmWgsl = (spec: GemmSpec): string => {
       }
       return conv1dIgemmWgsl(geometry, spec.weight, spec.v4, spec.weightGroupShift);
     case "conv2d":
+      if (spec.weight === "i2") {
+        throw new CodegenError("conv2d: 重み i2 格納は未対応（ADR 0097）");
+      }
       // MUST: conv2d に i4 の実行経路は無い（ADR 0069 決定 5 の追補は conv1d まで）。A 側の
       // 展開器は 1D / 2D で共有なので**生成が通ってしまう** — 適格判定（plan.ts）が閉じている
       // 前提に乗らず、生成の入口でも落とす（直呼び経路の沈黙誤値を塞ぐ）。

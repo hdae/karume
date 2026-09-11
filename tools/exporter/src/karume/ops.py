@@ -288,7 +288,7 @@ IO_DTYPES = SEMANTIC_DTYPES
 #: GPU 常駐し、適格外はロード時に CPU で f32 展開されるので、どちらの経路でも実行できる
 #: （TS 側 RuntimeSupport.storage の鏡像）。i4 の適格だけ狭い（linear / embedding の重み
 #: スロット限定 — `emit.I4_WEIGHT_OPS`）。
-M0_STORAGE_DTYPES = frozenset({"f32", "f16", "i8", "i4", "i32"})
+M0_STORAGE_DTYPES = frozenset({"f32", "f16", "i8", "i4", "i2", "i32"})
 
 OpKind = Literal[
     "unary",

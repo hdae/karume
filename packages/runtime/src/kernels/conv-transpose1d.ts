@@ -73,6 +73,9 @@ export const CONV_TRANSPOSE1D_SCALE_BINDING = 5;
  * なる — conv1d 直接カーネルと同じ fail loudly の流儀）。
  */
 const assertGatherWeight = (weight: WeightStorage): void => {
+  if (weight === "i2") {
+    throw new CodegenError("畳み込み: 重み i2 格納は未対応（ADR 0097）");
+  }
   if (weight === "i4") {
     throw new CodegenError(
       "conv_transpose1d: 重み i4 格納は未対応 — i4 の実行経路は linear / embedding / conv1d(groups==1) の implicit GEMM だけ（ADR 0069 決定 5）",

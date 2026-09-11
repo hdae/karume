@@ -24,6 +24,7 @@ import { numel } from "../ops.ts";
 import {
   eligibleCompressedInitializers,
   ExecutionError,
+  i2EligibleInitializers,
   i4EligibleInitializers,
   weightChannelAxes,
 } from "./plan.ts";
@@ -40,7 +41,7 @@ import {
  */
 export type ResidentWeight =
   | { readonly storage: "f16" }
-  | { readonly storage: "i8"; readonly scale: GPUBuffer }
+  | { readonly storage: "i8" | "i2"; readonly scale: GPUBuffer }
   | { readonly storage: "i4"; readonly scale: GPUBuffer; readonly groupSize: number };
 
 /**
@@ -58,7 +59,7 @@ export type WeightResidency =
   | { readonly seat: "raw"; readonly payloadBytes: number }
   | { readonly seat: "f16"; readonly payloadBytes: number }
   | {
-    readonly seat: "i8";
+    readonly seat: "i8" | "i2";
     readonly payloadBytes: number;
     readonly scaleBytes: number;
     /** per-channel scale が掛かる軸（消費側 op から決まる — ADR 0019）。 */
@@ -110,6 +111,7 @@ export const planWeightResidency = (graph: IrGraph): ReadonlyMap<string, WeightR
   // i4 の適格はさらに狭く「重みスロットでの消費が linear / embedding / conv1d(groups==1) だけ」
   // （ADR 0069 決定 5 とその追補 — 展開経路を持つカーネルはこの 3 つ）。
   const i4Eligible = i4EligibleInitializers(graph);
+  const i2Eligible = i2EligibleInitializers(graph);
   // i8 の per-channel scale が掛かる軸（消費側 op から決まる — ADR 0019）。
   const channelAxes = weightChannelAxes(graph);
   const plan = new Map<string, WeightResidency>();
@@ -123,17 +125,19 @@ export const planWeightResidency = (graph: IrGraph): ReadonlyMap<string, WeightR
     if (initializer.shared !== undefined) {
       const resident = storage === "i4"
         ? eligible.has(name) && i4Eligible.has(name)
+        : storage === "i2"
+        ? eligible.has(name) && i2Eligible.has(name)
         : eligible.has(name);
       if (storage === "f32" || storage === "i32" || storage === "bf16") {
         plan.set(name, { seat: "shared", expected: "raw" });
       } else if (!resident) {
         plan.set(name, { seat: "shared", expected: "expanded" });
-      } else if (storage === "i8") {
+      } else if (storage === "i8" || storage === "i2") {
         const channelAxis = channelAxes.get(name);
         if (channelAxis === undefined) {
           throw new ExecutionError(`${where}: per-channel scale のチャネル軸が決まらない`);
         }
-        plan.set(name, { seat: "shared", expected: "i8", channelAxis });
+        plan.set(name, { seat: "shared", expected: storage, channelAxis });
       } else {
         plan.set(name, { seat: "shared", expected: storage });
       }
@@ -147,6 +151,8 @@ export const planWeightResidency = (graph: IrGraph): ReadonlyMap<string, WeightR
     }
     const resident = storage === "i4"
       ? eligible.has(name) && i4Eligible.has(name)
+      : storage === "i2"
+      ? eligible.has(name) && i2Eligible.has(name)
       : eligible.has(name);
     if (!resident) {
       plan.set(name, { seat: "expanded", payloadBytes, expandedBytes: count * 4 });
@@ -156,7 +162,7 @@ export const planWeightResidency = (graph: IrGraph): ReadonlyMap<string, WeightR
       plan.set(name, { seat: "f16", payloadBytes });
       continue;
     }
-    if (storage === "i8") {
+    if (storage === "i8" || storage === "i2") {
       const channelAxis = channelAxes.get(name);
       if (channelAxis === undefined) {
         throw new ExecutionError(`${where}: per-channel scale のチャネル軸が決まらない`);
@@ -170,7 +176,7 @@ export const planWeightResidency = (graph: IrGraph): ReadonlyMap<string, WeightR
       // GPU 常駐経路の scale は「チャネル軸だけが伸びた keepdim 形」でなければならない
       // （executor の `assertChannelScale` が実テンソル側の門）ので、要素数はチャネル数に等しい。
       plan.set(name, {
-        seat: "i8",
+        seat: storage,
         payloadBytes,
         scaleBytes: declaredScaleBytes(channels, where),
         channelAxis,
@@ -366,7 +372,9 @@ export const planWeightBuffers = (
       "payload",
       seat.seat === "expanded" ? seat.expandedBytes : seat.payloadBytes,
     );
-    if (seat.seat === "i8" || seat.seat === "i4") add(name, seat.seat, "scale", seat.scaleBytes);
+    if (seat.seat === "i8" || seat.seat === "i4" || seat.seat === "i2") {
+      add(name, seat.seat, "scale", seat.scaleBytes);
+    }
   }
   return buffers;
 };

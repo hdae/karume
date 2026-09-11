@@ -82,6 +82,9 @@ export const CONV1D_SCALE_BINDING = 5;
  * 参照する不成立 WGSL になる — 既存の fail loudly 流儀）。
  */
 const assertDirectWeight = (weight: WeightStorage): void => {
+  if (weight === "i2") {
+    throw new CodegenError("畳み込み: 重み i2 格納は未対応（ADR 0097）");
+  }
   if (weight === "i4") {
     throw new CodegenError(
       "conv1d 直接カーネル: 重み i4 格納は未対応 — i4 の conv1d は groups == 1 の implicit GEMM 限定（ADR 0069 決定 5）",
