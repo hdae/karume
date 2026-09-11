@@ -118,6 +118,16 @@ uv run python dist.py --pipeline vowel-detector      # → models/karume-vowel-d
   再生成できる。core 単体の `karume dist` は受理集合が空で落ちる設計（ADR 0065）— family を
   組むのは常にこのリポ driver の `dist.py`。
 
+## CLI のローカル優先
+
+`demo:anima` と `demo:irodori` は、`--source` を省略すると上記の標準ミラー
+（`models/karume-anima` / `models/karume-irodori-v4.1-small`）を優先する。
+ミラー自体が無い場合だけファミリの `SOURCES` にある検証済み公開 revision を取得する。
+存在するディレクトリに `karume.json` が無ければ、未完成としてエラーにする。
+`--source` の明示指定が最優先で、実際の取得元は起動時に表示される。
+Gemma 4 は従来どおりローカルが既定、公開取得は `--repo` で指定する。
+SBV2 と vowel-detector は使う配布形を `--source` で明示する。
+
 ## 公開（HF へのアップロード）
 
 **MUST: モデルファイルを HF へ上げるときは、`tools/.venv/bin/hf`（huggingface_hub 1.27 /

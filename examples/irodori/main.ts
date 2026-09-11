@@ -5,13 +5,10 @@
  *     deno task demo:irodori --caption "落ち着いた女性の声で、ゆっくりと話している。" --seed 7
  *     deno task demo:irodori --ref inputs/irodori/v4-small/samples/clone_ref1.wav
  *
- * `--source` 未指定ならこの台本が `IRODORI_SOURCES["irodori-v4.1-small"]`（このパッケージ版が
- * 検証した取得元 — ADR 0073 / 0092。旧版 v4 の pin `IRODORI_SOURCES["irodori-v4-small"]` も
- * 同じ表に残っている）を渡す。`fromPretrained` 自体に既定は無いので、取得元を綴るのは常に
- * 呼び出し側。明示したときだけ、`karume.json` を持つディレクトリなら `denoDirectory` で直に
- * 読み、それ以外は HF リポジトリ名として読む（どちらも `fromPretrained` の 1 本 — shard 分割
- * された配布形もそのまま通る）。越境参照を持つ配布形は `--source-map owner/name=<パス>` で
- * 越境先を名指しする（繰り返し可）。`--ref` は参照音声
+ * `--source` 未指定なら `models/karume-irodori-v4.1-small` のローカル配布形を優先する。
+ * 不在の場合だけ `IRODORI_SOURCES["irodori-v4.1-small"]` の検証済み公開 revision を取得する。
+ * 明示した `--source` はローカル配布形または HF リポジトリ名としてそのまま読む。
+ * 越境参照の取得元は `--source-map owner/name=<パス>` で名指しする。`--ref` は参照音声
  * （WAV — 配布形と同じ 48kHz の mono/多ch PCM16 か IEEE float）で、渡すとその声質に寄る
  * （voice cloning）。`--caption` は声質の指示文（Voice Design）。サンプラのノブ（steps / CFG）は
  * manifest の `pipelineConfig` が固定していて、実行時には `--seed` と `--seconds`（発話長の
@@ -25,7 +22,7 @@ import {
   type IrodoriSpeakerInput,
 } from "../../packages/models/mod.ts";
 import { IRODORI_SOURCES } from "../../packages/models/irodori.ts";
-import { distributionSource } from "../shared/local-source.ts";
+import { distributionSource, localOrPinnedSource } from "../shared/local-source.ts";
 import { runMain } from "../shared/run-main.ts";
 
 const USAGE = "--source <パス|HF repo> --source-map <owner/name=パス> --text <文字列>" +
@@ -89,12 +86,10 @@ const ref = args.get("ref");
 const seconds = number("seconds");
 const seed = integer("seed") ?? 0;
 
-// MUST: 効かないノブを黙って捨てない（`local-source.ts` が HF リポ名 + mapping で落とすのと
-// 同じ線）。`--source` 未指定の取得元は焼き込み pin（`{repo, revision}`）で、越境 mapping を
-// 渡す口が無い — 黙って捨てると「mapping を渡したのに既定 pin を取りに行く」が沈黙する。
+// 越境 mapping は明示した取得元にだけ適用する。
 if (source === undefined && sourceMaps.length > 0) {
   throw new Error(
-    `--source-map は --source を明示したときだけ効く（既定の取得元は HF の pin）（使い方: ${USAGE}）`,
+    `--source-map は --source を明示したときだけ効く（使い方: ${USAGE}）`,
   );
 }
 
@@ -111,14 +106,16 @@ const main = async (): Promise<void> => {
     : { audio: decodeWav(await Deno.readFile(ref)) };
 
   /** 取得元（ローカルの配布形なら `denoDirectory`・それ以外は HF リポジトリ名）。 */
-  const from = source === undefined
-    ? IRODORI_SOURCES["irodori-v4.1-small"]
-    : await distributionSource(source, sourceMaps);
+  const resolved = source === undefined
+    ? await localOrPinnedSource(
+      "models/karume-irodori-v4.1-small",
+      IRODORI_SOURCES["irodori-v4.1-small"],
+    )
+    : { from: await distributionSource(source, sourceMaps), label: source };
+  const { from, label } = resolved;
 
   console.log(
-    `[irodori] ${
-      source ?? `${IRODORI_SOURCES["irodori-v4.1-small"].repo}（台本の既定 = 検証済み pin）`
-    }` +
+    `[irodori] ${label}` +
       ` / model ${model ?? "（manifest の既定）"}` +
       ` / quant ${quant ?? "（manifest の既定）"} / seed ${seed}` +
       `${ref === undefined ? "" : ` / 参照 ${ref}`}\n` +

@@ -4,7 +4,7 @@
 // （効かないノブが静かに残ると、取り違えた取得元から焼いた出力が「モデルの揺れ」に見える）。
 
 import { assertEquals, assertRejects } from "@std/assert";
-import { distributionSource } from "./local-source.ts";
+import { distributionSource, localOrPinnedSource } from "./local-source.ts";
 import { MANIFEST_FILE } from "./local-assets.ts";
 
 /** 一時ディレクトリを 1 つ作って渡す（終わったら消す）。 */
@@ -74,6 +74,34 @@ Deno.test("distributionSource: 同じ repo を 2 度名指しすると落ちる"
       () => distributionSource(dir, ["owner/name=/tmp/a", "owner/name=/tmp/b"]),
       Error,
       "repo owner/name が重複",
+    );
+  });
+});
+
+Deno.test("localOrPinnedSource: ローカル配布形があれば公開取得より優先する", async () => {
+  await withDir(async (dir) => {
+    await markAsDist(dir);
+    const resolved = await localOrPinnedSource(dir, { repo: "owner/model", revision: "pin" });
+    assertEquals(resolved.label, dir);
+    assertEquals("repo" in resolved.from, false);
+  });
+});
+
+Deno.test("localOrPinnedSource: ミラー不在なら revision を保った公開取得元を返す", async () => {
+  await withDir(async (dir) => {
+    const pinned = { repo: "owner/model", revision: "pin" };
+    const resolved = await localOrPinnedSource(`${dir}/absent`, pinned);
+    assertEquals(resolved.from, pinned);
+    assertEquals(resolved.label, "owner/model@pin");
+  });
+});
+
+Deno.test("localOrPinnedSource: 存在する未完成ミラーは公開取得で隠さない", async () => {
+  await withDir(async (dir) => {
+    await assertRejects(
+      () => localOrPinnedSource(dir, { repo: "owner/model", revision: "pin" }),
+      Error,
+      "karume.json が無い",
     );
   });
 });

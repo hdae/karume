@@ -65,3 +65,24 @@ export const distributionSource = async (
   // 空の mapping は「宣言が無い」と同義（越境を踏んだ時点で hub が案内付きで落ちる）。
   return denoDirectory(source, { crossRepo: parseCrossRepo(sourceMaps) });
 };
+
+/** 既定のローカルミラーを優先し、不在のときだけ検証済み公開 revision を使う。 */
+export const localOrPinnedSource = async (
+  directory: string,
+  pinned: { readonly repo: string; readonly revision: string },
+): Promise<{
+  readonly from: DistributionSource | { readonly repo: string; readonly revision: string };
+  readonly label: string;
+}> => {
+  try {
+    await Deno.stat(directory);
+  } catch (error) {
+    if (!(error instanceof Deno.errors.NotFound)) throw error;
+    return { from: pinned, label: `${pinned.repo}@${pinned.revision}` };
+  }
+  // 存在するが未完成のミラーは、ネットワーク取得で覆い隠さない。
+  if (!await isLocalDist(directory)) {
+    throw new Error(`${directory} に karume.json が無い（ローカル配布形を確認してください）`);
+  }
+  return { from: denoDirectory(directory), label: directory };
+};

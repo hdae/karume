@@ -7,12 +7,10 @@
  *     deno task demo:anima --source models/karume-anima-extra \
  *         --source-map hdae/karume-anima=models/karume-anima
  *
- * `--source` 未指定ならこの台本が `ANIMA_SOURCES["anima"]`（このパッケージ版が検証した
- * 取得元 — ADR 0073 / 0092・既定モデル = Turbo）を渡す。`fromPretrained` 自体に既定は無いので、
- * 取得元を綴るのは常に呼び出し側。明示したときだけ、`karume.json` を持つディレクトリなら
- * `denoDirectory` で直に読み、それ以外は HF リポジトリ名として読む。どちらも
- * `fromPretrained` の 1 本なので、shard 分割された配布形もそのまま通る。未指定のノブは
- * manifest の `defaults` が埋める。
+ * `--source` 未指定なら `models/karume-anima` のローカル配布形を優先する。
+ * 不在の場合だけ `ANIMA_SOURCES["anima"]` の検証済み公開 revision を取得する。
+ * 明示した `--source` はローカル配布形または HF リポジトリ名としてそのまま読む。
+ * 未指定のノブは manifest の `defaults` が埋める。
  *
  * 追加学習系（karume-anima-extra）のミラーは text stack を公式リポへ**越境参照**するので、
  * その取得元を `--source-map owner/name=<パス>` で名指しする（繰り返し可。未指定で越境を
@@ -21,7 +19,7 @@
 
 import { AnimaPipeline, encodePng } from "../../packages/models/mod.ts";
 import { ANIMA_SOURCES, parseResolution } from "../../packages/models/anima.ts";
-import { distributionSource } from "../shared/local-source.ts";
+import { distributionSource, localOrPinnedSource } from "../shared/local-source.ts";
 import { runMain } from "../shared/run-main.ts";
 
 const USAGE = "--source <パス|HF repo> --source-map <owner/name=パス> --prompt <文字列>" +
@@ -90,12 +88,10 @@ if (rawGuidance !== undefined && !Number.isFinite(Number(rawGuidance))) {
 const guidanceScale = rawGuidance === undefined ? undefined : Number(rawGuidance);
 const negativePrompt = args.get("negative");
 
-// MUST: 効かないノブを黙って捨てない（`local-source.ts` が HF リポ名 + mapping で落とすのと
-// 同じ線）。`--source` 未指定の取得元は焼き込み pin（`{repo, revision}`）で、越境 mapping を
-// 渡す口が無い — 黙って捨てると「mapping を渡したのに既定 pin を取りに行く」が沈黙する。
+// 越境 mapping は明示した取得元にだけ適用する。
 if (source === undefined && sourceMaps.length > 0) {
   throw new Error(
-    `--source-map は --source を明示したときだけ効く（既定の取得元は HF の pin）（使い方: ${USAGE}）`,
+    `--source-map は --source を明示したときだけ効く（使い方: ${USAGE}）`,
   );
 }
 
@@ -107,12 +103,13 @@ if (source === undefined && sourceMaps.length > 0) {
  */
 const main = async (): Promise<void> => {
   /** 取得元（ローカルの配布形なら `denoDirectory`・それ以外は HF リポジトリ名）。 */
-  const from = source === undefined
-    ? ANIMA_SOURCES["anima"]
-    : await distributionSource(source, sourceMaps);
+  const resolved = source === undefined
+    ? await localOrPinnedSource("models/karume-anima", ANIMA_SOURCES["anima"])
+    : { from: await distributionSource(source, sourceMaps), label: source };
+  const { from, label } = resolved;
 
   console.log(
-    `[anima] ${source ?? `${ANIMA_SOURCES["anima"].repo}（台本の既定 = 検証済み pin）`}` +
+    `[anima] ${label}` +
       ` / model ${model ?? "（manifest の既定）"}` +
       ` / quant ${quant ?? "（manifest の既定）"} / seed ${seed}`,
   );
