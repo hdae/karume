@@ -1176,3 +1176,120 @@ GPU カーネルの利得と、環境により違う待ち時間を混ぜて外�
 
 `deno task verify` は **2,847 passed / 743 steps / 0 failed / 5 ignored、24m42s**。
 検証開始時に記録したコード SHA は、完了後も全て不変だった。
+
+## QAT mobile の INT2 と固定丸め（2026-09-11）
+
+f32 のコミット `eaccc9b` 後に主担当が行った独立実験。保存先は
+`outputs/bench/karume/2026-09-11_optimization-next/`。RTX 3080 Ti / Deno 2.9.6。
+この節は単体の実測と製品統合前の提案であり、公開 IR / runtime / exporter の対応を意味しない。
+
+### 公式形式と既存形式の違い
+
+対象は [Google の QAT mobile モデル](https://huggingface.co/google/gemma-4-E2B-it-qat-mobile-transformers)。
+通常 E2B と骨格は同じでも、固定量子化された重みと途中の丸め処理が異なるため、別の量子化 profile として扱う。
+取得 revision、Range、SHA は `qat-full-projections/manifest.json` と旧調査の
+`outputs/bench/karume/2026-09-10_model-optimization/qat-safetensors-header.json` に保存した。
+外部実装の複製はせず、公式 Transformers の CPU 関数を参照計算として呼び出した。
+
+`qat-module-census.json` は公式 config、meta device 上の全 module、保存済み tensor header を照合した結果。
+text linear は INT2 **61 本**、INT4 **145 本**、INT8 **70 本**。
+token embedding は INT2、PLE（層別の埋め込み）は INT4。U8 という物理 dtype だけでは bit 数を決められない。
+INT2 は下位 2 bit から 4 値/byte、格納値 0..3 を整数 -2..1 として復元し、linear は出力行ごとの scale を掛ける。
+SRQ は固定 scale による丸めで、scale=0 は恒等、それ以外は
+`clamp(round_even(f32(x / scale)), -128, 127) * scale`。既存の動的 absmax の w4a8 とは異なる。
+
+INT4 の固定重みは再量子化せず、既存の group 形式へ scale を反復できる。
+`qat-i4-normalize/summary.json` では up の実 8 行と PLE の実 2 行を既存 pack/unpack で往復し、
+公式の f32 復元値と全 u32 一致。q=-8 も含む。全 text の INT4 で scale 反復の追加量は
+**2,420,736 bytes**。製品化では既存 helper の記述と実装の符号域を明示的に整える必要がある。
+ただし `packages/models/src/gemma/ple.ts` の sidecar reader は I8 専用で、
+通常 embedding が I4 を読めることは PLE の対応を意味しない。専用の宣言・行 byte 範囲・全量/区間読取の変更が必要。
+
+### SRQ の境界差を特定した
+
+CPU の丸めを単純に WGSL へ移すと、down の境界入力 49,152 個中 **5,693 個**で SRQ が異なった
+（`qat-division.json`）。CPU の商 -123.5 に対して GPU が -123.49999237060547 となる例があり、
+偶数丸めを選ぶだけでは解消しない。
+[WGSL の精度仕様](https://www.w3.org/TR/2026/CRD-WGSL-20260831/#floating-point-accuracy)は、
+分母の絶対値が 2^-126 以上 2^126 以下の f32 除算に 2.5 ULP の誤差を許す。
+
+独立試作では scale ごとに 128 個の f32 閾値（512 bytes）を CPU で生成し、
+GPU の除算は整数区間の候補にだけ使い、丸めの最終判定は入力と閾値の比較で行った。
+閾値は「f32 除算の丸め後に偶数丸め」という二段階の境界から導出する。
+詳細は `QAT-SRQ-PROOF.md`、実装は `qat-thresholds-v2.py` / `qat-gpu-v2.ts`。
+実 input/output scale と 0.125、1 の 4 scale について、閾値の両隣・正負・±0・乱数を含む
+**803,080 入力が CPU / GPU とも公式参照に u32 一致**した。
+これは試した scale と RTX の検証であり、全 scale・非有限値・subnormal・別 GPU の保証ではない。
+最初の閾値生成試作の失敗は NumPy scalar 比較の暗黙変換が原因で、v2 で修正し元ログも残した。
+
+追加の `qat-srq-scale-sweep-{cpu,gpu}.json` は seed=60911、1,031 scale（0 の恒等を含む）、
+**857,792 入力で CPU / GPU とも全 u32 一致**。非ゼロ scale は約 2.39e-10〜4.27e9 で、
+非ゼロ scale ごとに全 128 閾値と両隣・正負・±0・乱数を検査した。0 は恒等変換を検査した。
+元の 4 scale 試験とは入力の重複がある。
+これは有限値の追加検証で、NaN / Inf / subnormal と M2 は未検証のまま。
+
+### 実形状の packed INT2 と既存カーネルの比較
+
+最後の MLP の down / up と語彙 head の実重みを取得し、同じ整数と scale を
+f32 / I4 / I8 に損失なく展開して比較した。別モデルの重みを比べた数値ではない。
+`qat-existing-storage.py` は可逆変換の照合と SHA を保存する。
+INT2 試作は 32 スレッド、K 昇順の積和、unroll 1/2/4。N/K は既存版と同じ uniform に渡す。
+初版の INT2 だけ N/K を定数化した比較は公平性が不足したため、後続 v2 と最終版で再測した。
+
+`qat-packed-current-baselines.json` の 105 記録は、数値確認 63 件と時間計測 42 件。
+3 形 × 3 入力で、f32 GEMM を基準とした他 6 方式の **54 比較が全出力 u32 一致**した。
+時間は入出力 SRQ を含む 3 pass、20 反復、heater 後の 5 samples の最小値を採り、
+7 方式を正順・逆順で測った 2 値の平均。集計は `summarize-qat-final.py` / `qat-packed-summary-final.json`。
+
+| 形状 (N,K)         | f32 GEMV ms | I4 GEMV ms | I8 GEMV ms | INT2 u4 ms | 対 I4 倍率 |
+| ------------------ | ----------: | ---------: | ---------: | ---------: | ---------: |
+| down (1536,12288)  |       0.515 |      0.181 |      0.264 |      0.140 |       1.29 |
+| up (12288,1536)    |       0.219 |      0.056 |      0.072 |      0.047 |       1.18 |
+| head (262144,1536) |       4.379 |      0.711 |      1.029 |      0.308 |       2.31 |
+
+INT2 u1/u2/u4 は down 0.154/0.136/0.140 ms、up 0.048/0.048/0.047 ms、
+head 0.322/0.316/0.308 ms。u4 は比較用の代表で、全モデルで採用する設定は未決定。
+小さな MLP 重みが GPU cache に収まる条件だけで判断しないため、head の全行も測った。
+head の重み＋scale は INT2 **101,711,872 bytes（97 MiB）**、I4 **204,472,320 bytes**、
+I8 **403,701,760 bytes**、f32 **1,610,612,736 bytes（1.5 GiB）**。
+モデル全体の VRAM ピークや生成速度の実測ではなく、その倍率へ外挿しない。
+`compileMs` は createComputePipelineAsync の時間で、後続形は同一コードの cache が温まっている。
+
+### CPU との差と検収の限界
+
+全行の比較では CPU と GPU の線形縮約順に由来する差が残った。
+`qat-full-attribution.json` では GPU の丸め前の値を公式 CPU SRQ へ渡すと、全 9 入力で GPU 最終値と u32 一致。
+残差を SRQ の実装誤りと混同しない。
+
+- down の sin と up の境界入力は各 1 出力で ±0 のみが異なる。
+- up の wide は 1/12,288 出力で隣の量子化区間へ移る。
+  index 11381 の丸め前は CPU 4.922986507 / GPU 4.922981262、
+  最終値は CPU 4.942914963 / GPU 4.903052330。小さな縮約差が固定丸めで拡大する。
+- head は scale=0 で通常の f32 縮約差が残り、sin/wide の最大絶対差は 4.53e-6 / 1.45e-4。
+  head の near-boundary ケースは scale=0 から作ったゼロ入力であり、境界の根拠には数えない。
+
+期待値・許容差は変更していない。モデル全体の logits、生成列、品質の CPU 一致は未検証。
+
+### 製品化の段階案（判断待ち）
+
+既存形式の改善だけを進める案は公開契約を増やさないが、QAT の容量利得を使えない。
+単体では既存 I4 を上回る利得を確認できたため、**INT2 と固定 SRQ を明示した段階的対応を推薦**する。
+ただし公開形式・新カーネル・PLE reader にまたがる変更なので、次の範囲を判断対象とする。
+
+1. IR の i2 と固定 SRQ の契約を定義。packing、scale=0、丸め、有限値の範囲、旧 reader との版互換を明示する。
+   INT4 は固定値を維持する group 正規化を使い、再量子化で黙って値を変えない。
+2. loader / CPU 参照 / GPU に実装し、単行 GEMV に加え prefill の GEMM と embedding を検証する。
+   packing と SRQ と縮約差を個別に検査し、既存の許容差を緩めて通さない。
+3. Gemma QAT 専用 recipe と PLE の INT4 宣言・読取を対応する。既存 I8 reader は維持する。
+   PLE を I8 に広げる案は重みが倍になるため、容量利得と引き換えであることを明示する。
+   exporter / recipe の両 pytest と deno verify を実行する。
+4. 通常生成から CPU、Deno、Chrome の複数入力で検収し、RAM / VRAM ピークと中断・解放を確認する。
+   M2 は別実機で検証する。SRQ の単体一致だけで全モデルの品質を判断しない。
+5. head と token embedding の共有を検討する。固定 revision の整数・scale 全 byte の一致は
+   旧 `outputs/bench/karume/2026-09-10_model-optimization/qat-tied-bytes-summary.json` と今回の取得 SHA で照合済みだが、97 MiB の節約候補を全体計測で検収する。
+   PLE は別物。MTP の現行 drafter が借用する I8 重みの変更は、通常生成の検収後に別途設計する。
+
+この調査単位では製品コードを変更せず、K-27 を「単体試作済み・統合案の判断待ち」として残す。
+
+この調査コミット前の `deno task verify` は **2,847 passed / 743 steps / 0 failed / 5 ignored、24m44s**。
+ログは `qat-verify.log`。追加 SRQ の GPU 照合は全体検証の終了後に直列実行した。
