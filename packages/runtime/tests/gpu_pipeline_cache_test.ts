@@ -52,11 +52,22 @@ const createFakeGpu = (
     createShaderModule: (descriptor: { readonly code: string }) => {
       calls.push("createShaderModule");
       modules.push(descriptor.code);
-      return {};
+      return {
+        getCompilationInfo: () =>
+          Promise.resolve({
+            messages: [{ lineNum: 3, linePos: 7, message: "shader detail" }],
+          }),
+      };
     },
-    createComputePipeline: () => {
-      calls.push("createComputePipeline");
-      return { id: modules.length, getBindGroupLayout: () => ({ id: modules.length }) };
+    createComputePipelineAsync: () => {
+      calls.push("createComputePipelineAsync");
+      return Promise.resolve({
+        id: modules.length,
+        getBindGroupLayout: () => {
+          calls.push("getBindGroupLayout");
+          return { id: modules.length };
+        },
+      });
     },
   };
   const fake: FakeGpu = {
@@ -97,14 +108,14 @@ Deno.test("PipelineCache は未決着の同一キー要求でも生成を 1 本�
   assertEquals(cache.size, 1);
   assertEquals(gpu.modules, [WGSL_A], "同時要求でもシェーダモジュールは 1 回だけ作る");
   assertEquals(
-    gpu.calls.filter((call) => call === "createComputePipeline").length,
+    gpu.calls.filter((call) => call === "createComputePipelineAsync").length,
     1,
     "同時要求でもパイプライン生成は 1 回だけ",
   );
   assertEquals(
     gpu.calls.filter((call) => call === "push:validation").length,
-    1,
-    "errorScope も重ねない",
+    2,
+    "module と layout を個別に囲み、同キーで重複させない",
   );
 });
 
@@ -153,7 +164,12 @@ Deno.test("PipelineCache はパイプライン生成を internal + validation �
     "push:internal",
     "push:validation",
     "createShaderModule",
-    "createComputePipeline",
+    "createComputePipelineAsync",
+    "pop",
+    "pop",
+    "push:internal",
+    "push:validation",
+    "getBindGroupLayout",
     "pop",
     "pop",
   ]);
@@ -358,4 +374,96 @@ Deno.test("PipelineCache.get は役割を WGSL から採って返す（生成の
     StorageRoleError,
   );
   assertEquals(gpu.modules.length, 1, "矛盾した WGSL はシェーダモジュールを作らない");
+});
+
+Deno.test("async compile の internal / validation 拒否を型で区別し、原因を残す", async () => {
+  for (const reason of ["internal", "validation"] as const) {
+    const gpu = createFakeGpu();
+    const cause = Object.assign(new Error(`compile ${reason}`), { reason });
+    gpu.device.createComputePipelineAsync = () => Promise.reject(cause);
+    const cache = new PipelineCache(gpu.device);
+    const error = await assertRejects<GpuInternalError | GpuValidationError>(
+      () => cache.get("async-error", WGSL_A),
+      reason === "internal" ? GpuInternalError : GpuValidationError,
+    );
+    assertStrictEquals(error.cause, cause);
+    assert(error.message.includes("3:7 shader detail"));
+    assertEquals(cache.size, 0);
+  }
+});
+
+Deno.test("async compile の既知でない例外を validation へ塗り替えない", async () => {
+  const gpu = createFakeGpu();
+  const cause = new RangeError("unexpected rejection");
+  gpu.device.createComputePipelineAsync = () => Promise.reject(cause);
+  const cache = new PipelineCache(gpu.device);
+  const error = await assertRejects(
+    () => cache.get("unexpected", WGSL_A),
+    RangeError,
+  );
+  assertStrictEquals(error, cause);
+  assertEquals(cache.size, 0);
+});
+
+Deno.test("module の検証失敗でも発行済み compile の決着を待ってから拒否する", async () => {
+  const gpu = createFakeGpu({ message: "module validation" } as GPUError);
+  const compiling = Promise.withResolvers<GPUComputePipeline>();
+  gpu.device.createComputePipelineAsync = () => compiling.promise;
+  const cache = new PipelineCache(gpu.device);
+  let settled = false;
+  const checked = assertRejects(
+    () => cache.get("drain", WGSL_A),
+    GpuValidationError,
+    "module validation",
+  ).then(() => {
+    settled = true;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assertEquals(settled, false);
+  assertEquals(cache.size, 1);
+  compiling.reject(
+    Object.assign(new Error("derived pipeline failure"), {
+      reason: "validation",
+    }),
+  );
+  await checked;
+  assertEquals(cache.size, 0);
+});
+
+Deno.test("非同期 compile の完了順が逆でもキーと layout を取り違えない", async () => {
+  const gpu = createFakeGpu();
+  const first = Promise.withResolvers<GPUComputePipeline>();
+  const second = Promise.withResolvers<GPUComputePipeline>();
+  gpu.device.createComputePipelineAsync = (descriptor) =>
+    descriptor.label === "first" ? first.promise : second.promise;
+  const a = {
+    label: "first",
+    getBindGroupLayout: () => ({ label: "first" }),
+  } satisfies GPUComputePipeline;
+  const b = {
+    label: "second",
+    getBindGroupLayout: () => ({ label: "second" }),
+  } satisfies GPUComputePipeline;
+  const cache = new PipelineCache(gpu.device);
+  const pa = cache.get("first", WGSL_A), pb = cache.get("second", WGSL_B);
+  second.resolve(b);
+  assertStrictEquals((await pb).pipeline, b);
+  first.resolve(a);
+  assertStrictEquals((await pa).pipeline, a);
+  assertEquals(cache.size, 2);
+});
+
+Deno.test("コンパイル診断の取得失敗でも元の拒否理由と原因を保持する", async () => {
+  const gpu = createFakeGpu();
+  const cause = Object.assign(new Error("compile internal"), { reason: "internal" });
+  gpu.device.createComputePipelineAsync = () => Promise.reject(cause);
+  gpu.device.createShaderModule = () => ({
+    label: "diagnostics failure",
+    getCompilationInfo: () => Promise.reject(new Error("info unavailable")),
+  });
+  const cache = new PipelineCache(gpu.device);
+  const error = await assertRejects(() => cache.get("diagnostics", WGSL_A), GpuInternalError);
+  assertStrictEquals(error.cause, cause);
+  assert(error.message.includes("info unavailable"));
+  assertEquals(cache.size, 0);
 });

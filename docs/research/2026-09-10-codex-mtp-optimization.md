@@ -2087,3 +2087,80 @@ AGENTS.md、ADR 0097、再開用引き継ぎの記述をこの意図へ揃えた
 **2,869 passed / 760 steps / 0 failed / 5 ignored、24分59秒、終了コード0**。
 ログは `outputs/bench/karume/2026-09-11_fable-followup/policy-verify.log`。
 同時に別のGPUジョブは実行していない。製品コードは変更していない。
+
+## 公開カーネル調査と非同期コンパイル（2026-09-11）
+
+以下はRTX 3080 Ti / Deno 2.9.6 / Chrome 153.0.8010.36の時点実測。
+今回の OUT は `outputs/bench/karume/2026-09-11_fable-followup/`。
+利用者のM2観測はDenoのdemo表示で、通常E2Bが初回6.8 / 2回目16.4 tok/s、
+QAT E2Bが初回4〜5 / 2回目16〜17 tok/s。prompt・生成長を固定した比較ではなく、
+以下のRTX実測とも混ぜない。利用者は初回と定常生成の両方の改善を希望している。
+
+### 公開実装との差
+
+[公開Spaceの固定版](https://huggingface.co/spaces/webml-community/gemma-4-webgpu-kernels/tree/158f16ae0f672943ca304d59c47c8e3a264e399e)を
+`~/workspace/reference/gemma-4-webgpu-kernels` で確認した。
+GoogleのE2B mobile QATを読む独立したbundleで、Transformers.js / ONNX Runtimeを呼び出す形ではない。
+`index.html` はload後にwarmupし、速度を最初のトークン以降で算出する。karumeのCLI表示はターン全体である。
+GPUでの最大値選択、小さい読み戻し、次tokenのGPU保持、先行submit、QKV / MLP / norm等の融合が主な構成差だった。
+縮約順・SRQ・GELUの実装も違うため、公開デモを数値の正解としては使わない。
+root / README / bundleにコードのライセンス指定は見当たらず、製品へそのソースを複製していない。
+
+関連する上流の変更として、[ORT #28501](https://github.com/microsoft/onnxruntime/pull/28501)の共有KV対応、
+[ORT #28280](https://github.com/microsoft/onnxruntime/pull/28280)のQKV / MLP融合、
+[ORT #29557](https://github.com/microsoft/onnxruntime/pull/29557)の非同期コンパイルを確認した。
+公開SpaceのbundleそのものがORT / Transformers.jsへマージされたことは確認していない。
+karumeにも共有KVと導出済み計画はあるが、パイプラインの生成待ちは直列だった。
+
+### 初回と定常生成を分けた計測
+
+`cold-warm.ts` / `cold-browser.ts` を使用。通常E2B i4とQAT E2Bをcapacity128 / chunk32 / PLE常駐0、
+同じ入力token、温度0、最大64 tokenで比較した。英語短文・日本語・コードの3件を各3回、
+同じpipelineの新しいsequenceで生成した。実際の複数ターン会話ではなく、初回とキャッシュ済み実行の比較である。
+各runの壁時計・出力バイト・診断、シェーダー生成の時間と全文、最初のtokenまでの時間をJSONへ保存した。
+計測フックのCPU費用も含む。token数に停止tokenを含む全体速度と、配送した最初のtoken以降の速度は別の欄にした。
+
+Deno基準は `normal-cold-0.json` / `qat-cold-0.json`。初回応答は通常331 ms / QAT507 ms、
+シェーダーモジュール生成は113 / 249 ms、同期pipeline生成は12 / 21 ms、新規キーは32 / 43本だった。
+64 token生成の暖機後は双方約37 tok/s。QATの軽量化だけでは定常速度差が出ない傾向が再現した。
+Chrome QAT基準の暖機後は約49 tok/s。全3件のtoken列はDenoと一致した。
+Denoの内部待ちについては、本記録の「ホスト待ちと既存融合の追加測定」の帰属を参照する。
+
+### 非同期コンパイルの比較と採用範囲
+
+`async-import-map.json` で自分のruntimeの隔離コピーへ差し替えた。
+WGSLとGPUでの計算順序を変えず、非同期コンパイルとレシピの並列準備を組み合わせた。
+初回応答は次のとおり。Chrome QATは基準→候補→基準→候補と再測定した。
+
+| 実行環境 / モデル       |     基準 |     候補 | 生データ                                                   |
+| ----------------------- | -------: | -------: | ---------------------------------------------------------- |
+| Deno / 通常E2B          | 330.9 ms | 328.2 ms | `normal-cold-0.json` / `normal-async-0.json`               |
+| Deno / QAT E2B          | 506.9 ms | 512.3 ms | `qat-cold-0.json` / `qat-async-0.json`                     |
+| Chrome / 通常E2B        | 711.5 ms | 550.1 ms | `chrome-normal-base-0.json` / `chrome-normal-async-0.json` |
+| Chrome / QAT E2B・1回目 | 879.3 ms | 499.5 ms | `chrome-qat-base-0.json` / `chrome-qat-async-0.json`       |
+| Chrome / QAT E2B・2回目 | 803.4 ms | 508.1 ms | `chrome-qat-base-1.json` / `chrome-qat-async-1.json`       |
+
+レシピ並列準備だけの対照は967.5 ms（`chrome-qat-build-0.json`）で改善しなかった。
+基準と候補の全9生成、またChrome QATの追加9生成でtoken列が一致した。
+Denoの定常速度はほぼ横ばい。Chromeの定常値は揺れがあり、通常版の短い日本語生成では1走行で約16%遅かった。
+初回の改善を定常速度の改善とは扱わない。M2の初回差をこの結果だけで解決済みとも呼ばない。
+
+採用する変更は共通runtimeの初回準備だけ。公開API・WGSL・キー・GPUのdispatch順序は維持する。
+失敗したコンパイルを待ち切る、原因を保持する、逆順完了でもレシピ順を維持するテストを追加した。
+シェーダー診断の補完は、既存L-7の調査で必要とされていた条件を維持する。
+詳細の決定は [ADR 0042](../decisions/0042-prepared-execution-plan.md#非同期コンパイル2026-09-11)。
+
+比較5組・合計45生成のtoken列と、キーごとのWGSL全文が一致した（`async-summary.json`）。
+製品へ反映した後のキャッシュ・依存順・error scope・計画キャッシュの重点検証は
+**33 passed / 0 failed、2秒**（`async-product-focused-v2.log`）。
+
+初回の全体検証は **2,875 passed / 1 failed / 5 ignored、24分49秒**。
+失敗は `gpu_resident_batch_test.ts` の故障注入が旧同期APIへ残り、注入回数が0だったため。
+当該ファイル単独でも **24 passed / 1 failed** と再現した。VRAM圧による失敗とは扱わない。
+注入先を非同期APIへ合わせ、参照数・破棄拒否・出力ビット・完了後の解放の期待値は維持した。
+修正後は既存の重点検証に常駐テンソルの検証を加え、**58 passed / 0 failed、7秒**。
+ログは `async-product-verify.log` / `async-resident-isolate.log` / `async-product-focused-v3.log`。
+
+修正後の `deno task verify` は **2,876 passed / 760 steps / 0 failed / 5 ignored、26分30秒、終了コード0**。
+ログは `async-product-verify-v2.log`。他のGPUジョブは並走させていない。
+この走行の一部では公式CPU参照の生成も行ったため、検証所要時間を性能比較には用いない。

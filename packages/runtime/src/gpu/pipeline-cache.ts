@@ -14,7 +14,7 @@
  * パイプラインは使えないので、作り直しの入口は `acquireGpu()` からの GpuContext 再構築だけ。
  */
 
-import { withPipelineScope } from "./error-scope.ts";
+import { GpuInternalError, GpuValidationError, withPipelineScope } from "./error-scope.ts";
 
 /** 同一キーに異なる WGSL が渡された（決定性の破れ）。 */
 export class PipelineKeyConflictError extends Error {
@@ -80,6 +80,10 @@ type CachedPipeline = {
   readonly roles: StorageRoles;
 };
 
+type PipelineCompilation =
+  | { readonly ok: true; readonly pipeline: GPUComputePipeline }
+  | { readonly ok: false; readonly cause: unknown };
+
 type CacheEntry = {
   readonly wgsl: string;
   /**
@@ -130,24 +134,70 @@ export class PipelineCache {
     // 観測するより先に走る = 削除の後に来た get() だけが作り直す。
     // MUST: 役割は生成の前に採る（宣言の矛盾はコンパイルを待たずに落とす）。
     const roles = parseStorageRoles(wgsl);
-    const resolved = withPipelineScope(
-      this.#device,
-      `createComputePipeline(${key})`,
-      () => {
-        const module = this.#device.createShaderModule({ label: key, code: wgsl });
-        const pipeline = this.#device.createComputePipeline({
-          label: key,
-          layout: "auto",
-          compute: { module },
-        });
-        // MUST: `getBindGroupLayout(0)` はスコープの**内側**で呼ぶ。層の取得は本来ただの
-        // 付随処理だが、無効なパイプラインに対して呼ぶと派生の validation エラーが立つため、
-        // 生成の検出網を二重化する役目を兼ねている（例えば internal エラーで無効化された
-        // パイプラインは、ここで立つ派生エラーによっても捕捉され、下の eviction 経路へ落ちる）。
-        // スコープの外へ出すとこの偶然の防御が黙って消える。
-        return { pipeline, layout: pipeline.getBindGroupLayout(0), roles };
-      },
-    ).catch((cause: unknown) => {
+    const resolved = (async (): Promise<CachedPipeline> => {
+      let compiling: Promise<PipelineCompilation> | undefined;
+      const created = await withPipelineScope(
+        this.#device,
+        `createShaderModule(${key})`,
+        () => {
+          const module = this.#device.createShaderModule({
+            label: key,
+            code: wgsl,
+          });
+          // スコープを張った同期区間で発行し、完了は pop の後に待つ。
+          // DECIDED: docs/decisions/0042-prepared-execution-plan.md#非同期コンパイル2026-09-11
+          // 拒否も値にして直ちに受ける。module の検証が先に落ちても未処理の拒否を残さない。
+          const pending = this.#device.createComputePipelineAsync({
+            label: key,
+            layout: "auto",
+            compute: { module },
+          })
+            .then(
+              (pipeline) => ({ ok: true as const, pipeline }),
+              (cause: unknown) => ({ ok: false as const, cause }),
+            );
+          compiling = pending;
+          return { module, pending };
+        },
+      ).catch(async (cause: unknown) => {
+        // モジュールの検証失敗でも、発行済みコンパイルの決着前に再試行や破棄へ進めない。
+        await compiling;
+        throw cause;
+      });
+      const result = await created.pending;
+      if (!result.ok) {
+        const cause = result.cause;
+        if (
+          cause instanceof Error && "reason" in cause &&
+          (cause.reason === "internal" || cause.reason === "validation")
+        ) {
+          // GPUPipelineError.message だけでは診断が空になる実装がある。
+          // 補足の取得自体が落ちても、根因と拒否理由を上書きしない。
+          const details = await created.module.getCompilationInfo().then(
+            (info) =>
+              info.messages.map((message) =>
+                `${message.lineNum}:${message.linePos} ${message.message}`
+              ).join("; "),
+            (diagnosticCause: unknown) => `getCompilationInfo failed: ${String(diagnosticCause)}`,
+          );
+          const message = `createComputePipelineAsync(${key}): ${String(cause)} ${details}`;
+          if (cause.reason === "internal") throw new GpuInternalError(message, { cause });
+          throw new GpuValidationError(message, { cause });
+        }
+        // WebGPU が規定する拒否理由以外は、推測で validation に分類しない。
+        throw cause;
+      }
+      // layout 取得も別の同期スコープで囲む。待機中に他の生成のスコープを吸い込まない。
+      return await withPipelineScope(
+        this.#device,
+        `getBindGroupLayout(${key})`,
+        () => ({
+          pipeline: result.pipeline,
+          layout: result.pipeline.getBindGroupLayout(0),
+          roles,
+        }),
+      );
+    })().catch((cause: unknown) => {
       this.#entries.delete(key);
       throw cause;
     });

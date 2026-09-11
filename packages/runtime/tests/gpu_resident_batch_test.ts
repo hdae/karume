@@ -742,16 +742,16 @@ Deno.test({
     const session = await producerSession(gpu);
     const bound = await gpu.createResident(BYTES, "bound");
     const device = gpu.device;
-    const original = device.createComputePipeline.bind(device);
+    const original = device.createComputePipelineAsync.bind(device);
     let injected = 0;
     try {
       bound.write(input(0).data);
       // ミス run は「env へ実体を束縛 → パイプライン生成を await → エンコード」の順で進む。
       // その await 窓（= パイプライン生成中）で dispose を試すのがこの注入。焼き込み参照は
       // まだ 0 本なので、束縛予約が無ければここは素通りしてしまう。
-      device.createComputePipeline = ((
+      device.createComputePipelineAsync = (
         descriptor: GPUComputePipelineDescriptor,
-      ): GPUComputePipeline => {
+      ): Promise<GPUComputePipeline> => {
         if (injected === 0) {
           injected += 1;
           assertEquals(bound.bakedReferences, 0, "焼き込み参照はまだ立っていない窓");
@@ -759,7 +759,7 @@ Deno.test({
           assertThrows(() => bound.dispose(), ResidentTensorError, "束縛中");
         }
         return original(descriptor);
-      }) as typeof device.createComputePipeline;
+      };
 
       const outputs = await session.run({ x: bound });
       assertEquals(injected, 1, "注入が 1 度も走っていない（窓を踏めていない）");
@@ -776,7 +776,7 @@ Deno.test({
       bound.dispose();
       assertEquals(bound.disposed, true);
     } finally {
-      device.createComputePipeline = original;
+      device.createComputePipelineAsync = original;
       await session.dispose();
       gpu.destroy();
     }

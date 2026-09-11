@@ -493,7 +493,16 @@ export class RecipeBuilder {
       fullCapacities: new Map(),
     };
     const recipes: StepRecipe[] = [];
-    for (const step of steps) recipes.push(await this.#buildStep(step, defined, states));
+    // 名前は元の順に解決し、各ステップのコンパイル待ちだけを重ねる。
+    // DECIDED: docs/decisions/0042-prepared-execution-plan.md#非同期コンパイル2026-09-11
+    const pending = steps.map((step) => this.#buildStep(step, defined, states));
+    // 途中の失敗で先に抜けると、後続の params 書き込みが run の後始末を追い越す。
+    // 全件を待ち、失敗も元のステップ順で返す。GPU コマンドの順序はレシピ列が保つ。
+    const settled = await Promise.allSettled(pending);
+    for (const result of settled) {
+      if (result.status === "rejected") throw result.reason;
+      recipes.push(result.value);
+    }
     return {
       recipes,
       generation: { chunkRows: states.chunkRows, fullCapacities: states.fullCapacities },
@@ -562,13 +571,14 @@ export class RecipeBuilder {
       name: output.name,
     }));
 
+    // 入力参照を検証した後に定義を進め、実行順と同じ名前解決を保つ。
+    for (const output of outputs) defined.add(output.name);
     const builder = new StepRecipeBuilder();
     if (step.kind === "node") {
       await this.#buildNode(step.plan, step.aliasesInput, binds, outs, builder, states);
     } else {
       await this.#buildFused(step, binds, outs, builder);
     }
-    for (const output of outputs) defined.add(output.name);
 
     const recipe: StepRecipe = {
       outputs,
