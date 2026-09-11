@@ -1554,3 +1554,78 @@ Python は `int2-exporter-pytest-v2.log` が **3,156 passed / 1 skipped**、
 未知 dtype の否定テストは `i2` が新しい正規語彙になったため `i1` に変更し、拒否条件を維持した。
 コミット前の `deno task verify` は **2,857 passed / 743 steps / 0 failed / 5 ignored、24m30s**
 （`int2-verify.log`）。コードは検証した状態のまま、完了後に結果と保存形式の文書表記を更新した。
+
+## QAT 統合の固定 SRQ op（2026-09-11）
+
+INT2 基盤は `ffc532b` に分割コミットした。続く単位では `static_quantize` を IR / CPU 参照 /
+GPU / exporter に追加する。具体的な丸め・特殊値・scale の契約は ADR 0097 追記 2。
+製品の GPU 実装は除算や乗算を行わず、f32 の正の値のビット順序を使って、境界表と出力表を引く。
+CPU 参照は表を使わず、f32 除算と最近接偶数丸めを直接評価する。
+
+### 一致の根拠と回帰データ
+
+出力先は `outputs/bench/karume/2026-09-11_qat-integration/`。
+`srq-bit-table-fixture.py` が公式 `transformers.integrations.gemma_quant.apply_srq` の CPU 出力を保存した。
+**1,014 scales / 912,068 inputs**（実モデルの値、0、非正規化数、最大有限値、ランダム scale と
+丸め境界の両隣、符号付きゼロ、±Inf、符号・payload の異なる NaN）を検査した。
+
+- 独立 TypeScript CPU 参照: **相違 0**（`srq-js-reference.json`）。
+- GPU の storage 表試作: **相違 0**（`srq-bit-table-gpu.json` / 実行ログ `-v3.log`）。
+- 製品と同じ uniform 表 + grid-stride: **128 / 256 スレッド両方で相違 0**（`srq-uniform-parity.json`）。
+  全 scale の入力を 1 workgroup だけで実行し、複数巡回も確認した。
+- TypeScript が作る全境界表・出力表も、検証済み Python 表と一致（`srq-params-check.log`）。
+
+この中から特殊 scale 14 種と固定乱数 scale 16 種、計 **24,416 入力**を
+`packages/runtime/tests/fixtures/static-quantize-oracle.safetensors` に保持した。
+生成の出所は metadata、抽出スクリプトと SHA は `srq-regression-fixture.py` / `.json`。
+CPU 参照、Session 経由の GPU、直接 dispatch の grid-stride、汎用 exporter の eager 実装が同じ
+期待ビット列を使う。これとは別に、torch.export から `static_quantize_block` の tiny golden を生成し、
+既存 golden のバイト列や許容差は変更しない。
+
+### 単体速度の採否
+
+RTX 3080 Ti / Deno、scale=0.09940945357084274、符号を跨ぐ有限入力。
+GPU ヒータ後、100 回の dispatch を 1 標本として、往復順各 5 標本を測り、全 10 標本の中央値を比較した。
+正本は `srq-uniform-benchmark.json` と対応 `.ts` / `srq-uniform-benchmark-v2.log`。
+初回は計測器の timestamp 指定が不正だったため無効とし、修正後の走行だけを集計した。
+
+|    要素数 | 表 128 threads (ms) | 表 256 threads (ms) | 先行の除算 + 境界補正 (ms) |
+| --------: | ------------------: | ------------------: | -------------------------: |
+|     1,536 |          0.00871936 |          0.00960000 |                 0.00854016 |
+|    12,288 |          0.01022464 |          0.01020928 |                 0.00862208 |
+|   262,144 |          0.02350592 |          0.02612736 |                 0.01311232 |
+| 1,048,576 |          0.07764480 |          0.07031808 |                 0.03056128 |
+
+既定は **128 threads**。decode の活性長で 256 に明確な利得がなく、262,144 要素でも 128 が速い。
+表方式には速度コストがある。先行の除算 + 境界補正は通常の有限入力の比較対象であり、
+SRQ op が今回受理する特殊 scale / 非正規化数 / 非有限値の全契約を検収した製品経路ではない。
+大きな prefill での寄与と融合・表探索の短縮は、全モデルでの帰属後に判断する。
+
+### Python 検証と次段の停止点
+
+SRQ の Python 全体検証は exporter **3,201 passed / 1 skipped**（`srq-exporter-pytest.log`）、
+recipes **2,757 passed / 4 skipped**（`srq-recipes-pytest.log`）。
+
+全体 GPU 検証を待つ間、次段の試作を出力ディレクトリ内だけで行った。
+固定 writer は INT2 / INT4 / INT8 の重みと scale を、行分割後も全バイト同じまま保持した
+（`fixed-writer-proof.json`、`fixed-writer-proof-v3.log`）。製品 writer へは未適用。
+公式 CPU の通常生成は E2B / E4B とも英語・日本語各 12 token が完了し、token 列と logits を保存した
+（`e2b/e4b-cpu-reference.json` と `*-cpu-en/ja.safetensors`）。
+
+既存 `ProductChunkWrapper` へ QAT text を接続する試作で、同一の英語 prompt について
+公式 CPU `generate` の初回 logits と wrapper の最終行を比較した。
+E2B は先頭 token=818 が一致し、最大絶対差 **6.67572021484375e-6**。
+E4B も先頭 token=818 は一致したが、最大絶対差は **2.6703062057495117** だった
+（`e2b-wrapper-proof-v3.log` / `e4b-wrapper-proof.log`）。
+
+E4B の差は未帰属で、共通 wrapper をそのまま採用する検収条件を満たしたとは扱わない。
+CPU 同士の比較なので、SRQ の GPU カーネルの問題とも断定できない。
+想定外の問題では停止するという利用者の指示に従い、QAT の追加調査・統合を停止した。
+比較条件と wrapper 接続の差を中間値まで切り分けることが再開時の判断点。
+試作は正式 recipe・配布資産へ適用しておらず、停止状態の詳細は出力先 `STATE.md` に残した。
+
+開始済みだった `deno task verify` は **2,862 passed / 743 steps / 0 failed / 5 ignored、25m53s**
+で終了した（`srq-verify.log`、終了コード 0）。製品コードは検証中に変更せず、結果回収後の変更は記録のみ。
+SRQ は未コミットで停止した。E4B の原因調査と正式 QAT 統合は未完で、GPU ジョブは終了済み。
+
+利用者から原因調査の継続承認を受けた。検証済み SRQ を独立コミットし、E4B の CPU 比較差から再開する。

@@ -30,6 +30,7 @@ import {
   STATE_READONLY_ATTRS,
   STATE_WINDOW_ATTRS,
   stateReadonly,
+  STATIC_QUANTIZE_ATTRS,
   SYM_PREFIX_SLICE_ATTRS,
   TOPK_ATTRS,
   UPSAMPLE_BILINEAR2D_ATTRS,
@@ -68,6 +69,7 @@ import {
   SLICE_OP,
   SOFTMAX_OP,
   STATE_APPEND_OP,
+  STATIC_QUANTIZE_OP,
   SYM_PREFIX_SLICE_OP,
   TOPK_OP,
   UNARY_OPS,
@@ -106,6 +108,7 @@ export type OpKind =
   | "linear"
   | "layerNorm"
   | "rmsNorm"
+  | "staticQuantize"
   | "softmax"
   | "safeSoftmax"
   | "attention"
@@ -294,6 +297,11 @@ export type OpContract =
     readonly kind: "rmsNorm";
     readonly name: typeof RMS_NORM_OP;
     readonly arity: 2;
+  })
+  | (ContractBase & {
+    readonly kind: "staticQuantize";
+    readonly name: typeof STATIC_QUANTIZE_OP;
+    readonly arity: 1;
   })
   | (ContractBase & {
     readonly kind: "softmax";
@@ -611,6 +619,12 @@ export const OP_CONTRACTS: ReadonlyMap<string, OpContract> = new Map<string, OpC
     kind: "rmsNorm",
     name: RMS_NORM_OP,
     arity: 2,
+  }],
+  [STATIC_QUANTIZE_OP, {
+    ...contract(STATIC_QUANTIZE_OP, STATIC_QUANTIZE_ATTRS),
+    kind: "staticQuantize",
+    name: STATIC_QUANTIZE_OP,
+    arity: 1,
   }],
   [SOFTMAX_OP, {
     ...contract(SOFTMAX_OP, SOFTMAX_ATTRS),

@@ -830,3 +830,21 @@ export const convTranspose1dAttrs = (
   stride: assertIntegerAttr(attrValue(attrs, "stride"), `${where} の attrs.stride`, 1),
   padding: assertIntegerAttr(attrValue(attrs, "padding"), `${where} の attrs.padding`, 0),
 });
+
+/** 固定 SRQ の scale は保存済み f32 値をそのまま使う（ADR 0097）。 */
+const assertStaticQuantizeScale = (value: unknown, where: string): number => {
+  const scale = assertFiniteAttr(value, where, "static_quantize の scale");
+  if (scale < 0 || Math.fround(scale) !== scale) {
+    throw new OpContractError(`${where}: static_quantize の scale は非負・厳密な f32 値が必要`);
+  }
+  return scale;
+};
+export const STATIC_QUANTIZE_ATTRS: AttrSchema = {
+  scale: (value, where) => {
+    assertStaticQuantizeScale(value, where);
+  },
+};
+export const staticQuantizeScale = (
+  attrs: Readonly<Record<string, unknown>>,
+  where: string,
+): number => assertStaticQuantizeScale(attrValue(attrs, "scale"), `${where} の attrs.scale`);

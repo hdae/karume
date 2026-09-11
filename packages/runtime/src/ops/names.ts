@@ -258,6 +258,7 @@ export const ATTENTION_OP = "attention";
 export const STATE_APPEND_OP = "state_append";
 
 export const RMS_NORM_OP = "rms_norm";
+export const STATIC_QUANTIZE_OP = "static_quantize";
 export const SOFTMAX_OP = "softmax";
 /**
  * `softmax` + 「**行 max が −inf の行は全 0 を書く**」（ADR 0044）。契約・attrs・shape 規則は

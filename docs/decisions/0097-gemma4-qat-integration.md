@@ -75,3 +75,32 @@ E4B の公式 config と重み実体を確認した結果、PLE は **E2B が IN
 PLE はグラフ外でホストが読む sidecar なので、上記 IR の行ごと scale とは別に、層ごとの block scale を保持する。
 PLE の実装単位はこの 2 格納を扱う。全配列の照合では、両モデルとも head と token embedding の整数列・scale が一致した。
 実体の出所と照合記録は新しい出力先の `e2b/e4b-download.json` と `e2b/e4b-census.json`。
+
+## 追記 2 — 固定 SRQ op の契約（2026-09-11）
+
+IR に `static_quantize` を追加する。入力・出力は f32 各 1 本、shape は不変（スカラ・空テンソルも可）。
+属性 `scale` は必須で、非負・有限かつ厳密に f32 で表せる JSON 数値だけを受理する。
+保存済み scale を暗黙に丸め直さず、負値・非有限値・f32 範囲外・丸めを要する値を拒否する。
+既存 op の属性規則は変更しない。旧 runtime は未知 op として拒否する。
+
+- scale > 0 の意味は、f32 除算 `x/scale` → 最近接の偶数への整数丸め → `[-128,127]` への飽和 → f32 乗算。
+  scale=0（-0 を含む）は入力のビット列をそのまま返す。
+- 符号付きゼロを保つ。±Inf は整数上限・下限へ飽和してから scale を掛ける。
+  scale > 0 の NaN は符号・payload を保ち quiet bit を立てる。乗算結果の overflow は ±Inf を返す。
+  非正規化数を含め、GPU の浮動小数点除算の許容誤差や flush-to-zero に依存しない。
+- CPU 参照は f32 除算と偶数丸めを直接計算する。GPU は正の絶対値のビット順序と境界表の二分探索で求める。
+  128 境界と 129 出力値を host で一度作り、count と恒等フラグを含めた 1,040 byte の uniform で運ぶ。
+  最悪 8 比較。値の演算を GPU の f32 除算・乗算へ戻さない。
+- 境界 `j+0.5` の f32 丸め区間を考慮する。j が偶数なら上端を厳密に超す最小 f32、
+  奇数なら下端以上の最小 f32 が次の整数段階の始点になる。host の境界積は f64 で厳密に表せる。
+  scale によって境界が重なる場合も、そのまま単調な表として扱う。
+- 専用の op kind と単独カーネルにする。既存 unary の融合には入れず、codegen キーには scale を入れない。
+  uniform は既存の内容アドレスキャッシュと Session の寿命を使う。パラメータのバイト数は既存の
+  メモリ見積りと同様に除外項目で、実際の確保量は diagnostics の weights に含まれる。
+- exporter は `karume::static_quantize` を原子的に保持し、同名 IR op へ変換する。
+  汎用 core の eager 実装は Torch の演算だけを使い、Transformers への依存は追加しない。
+  QAT recipe が固定 scale を指定する。既存グラフへ SRQ を自動挿入しない。
+
+検収は公式 CPU の境界両隣・ランダム値・特殊値を保存した fixture、独立 CPU 参照、実 GPU の u32 比較、
+共有した TS/Python 契約表、codegen snapshot、torch.export から生成した新しい tiny golden で行う。
+既存の golden と数値許容差は変更しない。

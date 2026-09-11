@@ -55,12 +55,12 @@ const node = (
 // MUST: doc は読まない（書式依存の抽出突合は脆く、恒真化の温床にもなる）。ここは**期待値
 // リテラル**で op 集合を固定するだけで、docs/ir-v1.md の一覧との同期は op 追加時の人手仕事
 // （契約 1 セット — ops.ts / ops.py / shapes.py / fixtures / CPU 参照 / golden / ir-v1.md）。
-Deno.test("契約表の op 集合が期待値リテラル 60 本と一致する", () => {
+Deno.test("契約表の op 集合が期待値リテラル 61 本と一致する", () => {
   assertEquals(UNARY_OPS.length, 19);
   assertEquals(BINARY_OPS.length, 6);
   // argmax は reduce 族に**入らない**（attrs も出力 dtype も rank の扱いも別 — ADR 0068 決定 2）
   assertEquals(REDUCE_OPS.length, 3);
-  assertEquals(OP_CONTRACTS.size, 60);
+  assertEquals(OP_CONTRACTS.size, 61);
   assertEquals([...OP_CONTRACTS.keys()].sort(), [
     "abs",
     "add",
@@ -115,6 +115,7 @@ Deno.test("契約表の op 集合が期待値リテラル 60 本と一致する"
     "softmax",
     "sqrt",
     "state_append",
+    "static_quantize",
     "sub",
     "sum",
     "sym_prefix_slice",
@@ -320,8 +321,8 @@ Deno.test("スロット別契約の出力はスロット 0 と同型で、混合
   assertEquals(resolve("bmm", ["f32", "f32"], "f32"), "f32");
 });
 
-// attrs を持つ op は 30 本。それ以外は attrs 空のままで、非空 attrs は fail loudly。
-Deno.test("attrs を持つ op は契約表が列挙する 30 本だけで、他は attrs 空", () => {
+// attrs を持つ op は 31 本。それ以外は attrs 空のままで、非空 attrs は fail loudly。
+Deno.test("attrs を持つ op は契約表が列挙する 31 本だけで、他は attrs 空", () => {
   const withAttrs = [...OP_CONTRACTS]
     .filter(([, contract]) => attrKeysOf(contract).length > 0)
     .map(([name]) => name)
@@ -353,6 +354,7 @@ Deno.test("attrs を持つ op は契約表が列挙する 30 本だけで、他�
     "safe_softmax",
     "slice",
     "softmax",
+    "static_quantize",
     "sum",
     "sym_prefix_slice",
     "topk",

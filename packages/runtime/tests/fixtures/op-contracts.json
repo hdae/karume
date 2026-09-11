@@ -379,6 +379,19 @@
       "arity": 4,
       "dtypes": { "kind": "uniform", "accept": ["f32"] },
       "attrs": []
+    },
+    {
+      "op": "static_quantize",
+      "arity": 1,
+      "dtypes": {
+        "kind": "uniform",
+        "accept": [
+          "f32"
+        ]
+      },
+      "attrs": [
+        "scale"
+      ]
     }
   ],
   "attr_values": [
@@ -753,6 +766,31 @@
         7,
         null,
         []
+      ]
+    },
+    {
+      "op": "static_quantize",
+      "attr": "scale",
+      "why": "保存済み scale を丸め直さず受け取る非負の f32",
+      "accept": [
+        0,
+        1,
+        0.5,
+        0.09940945357084274,
+        1.401298464324817e-45,
+        3.4028234663852886e+38
+      ],
+      "reject": [
+        -1,
+        0.1,
+        1e-50,
+        1e+39,
+        "1",
+        null,
+        true,
+        [
+          1
+        ]
       ]
     }
   ],
@@ -2637,6 +2675,88 @@
       "ins": [[2, 12], [2, 4], [12, 4], [12]],
       "throws": true,
       "why": "rank 3/2/2/1 以外は受理しない（batch_first / 時間軸を畳んだ形は語彙に無い）"
+    },
+    {
+      "op": "static_quantize",
+      "ins": [
+        []
+      ],
+      "attrs": {
+        "scale": 0.5
+      },
+      "outs": [
+        []
+      ]
+    },
+    {
+      "op": "static_quantize",
+      "ins": [
+        [
+          0,
+          16
+        ]
+      ],
+      "attrs": {
+        "scale": 0.5
+      },
+      "outs": [
+        [
+          0,
+          16
+        ]
+      ]
+    },
+    {
+      "op": "static_quantize",
+      "ins": [
+        [
+          3,
+          17
+        ]
+      ],
+      "attrs": {
+        "scale": 0.5
+      },
+      "outs": [
+        [
+          3,
+          17
+        ]
+      ]
+    },
+    {
+      "op": "static_quantize",
+      "ins": [
+        [
+          1,
+          "T",
+          1536
+        ]
+      ],
+      "attrs": {
+        "scale": 0.5
+      },
+      "outs": [
+        [
+          1,
+          "T",
+          1536
+        ]
+      ],
+      "bindings": {
+        "T": 7
+      }
+    },
+    {
+      "op": "static_quantize",
+      "ins": [
+        [
+          3
+        ]
+      ],
+      "attrs": {},
+      "throws": true,
+      "why": "scale 必須"
     }
   ]
 }

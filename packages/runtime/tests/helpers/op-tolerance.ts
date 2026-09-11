@@ -42,6 +42,7 @@ export const GEMM_TOLERANCE: Tolerance = { atol: 2e-4, rtol: 4e-6 };
 
 const OP_TOLERANCE: Readonly<Record<string, Tolerance>> = {
   // 厳密 — 値を作らない / 正しく丸められる単発演算（f32 出力のもの）
+  static_quantize: EXACT,
   neg: EXACT,
   abs: EXACT,
   relu: EXACT,

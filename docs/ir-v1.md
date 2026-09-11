@@ -639,6 +639,13 @@ state スロットを読み書きするノードの契約（ADR
     **縮小（`Hout < H`）も同じ op**（2 タップしか読まないのは torch と同じ仕様で `area` とは
     別物）。空間軸の長さ 0 は受理しない
 
+- **固定活性量子化**（ADR [0097](decisions/0097-gemma4-qat-integration.md#追記-2--固定-srq-op-の契約2026-09-11)）:
+  - `static_quantize`（f32、アリティ 1、attrs `scale`）— shape は不変。scale は非負・有限で厳密な f32 値。
+    f32 除算 → 最近接の偶数への整数丸め → `[-128,127]` への飽和 → f32 乗算を行う。
+    scale=0 は全ビットを保つ恒等動作。符号付きゼロと NaN の符号・payload を保持し、
+    scale > 0 の NaN は quiet 化する。±Inf は飽和し、出力の overflow は ±Inf。
+    GPU の除算精度や非正規化数の flush に依存せず、境界・出力表を整数で読む。
+
 - **RNN スキャン**（拡張分子層〈旧第 2 層〉の分子 — ADR [0056](decisions/0056-gru-scan.md)）:
   - `gru_scan` / `gru_scan_reverse`（f32、**attrs 空**、**アリティ 4 固定**）—
     `gi[T,N,3H]` / `h0[N,H]` / `W_hh[3H,H]` / `b_hh[3H]` → `y[T,N,H]` の GRU 隠れ側スキャン。

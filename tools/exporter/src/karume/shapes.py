@@ -61,6 +61,7 @@ from karume.ops import (
     slice_attrs,
     softmax_dim,
     state_window,
+    static_quantize_scale,
     sym_prefix_slice_attrs,
     topk_k,
     upsample_bilinear2d_attrs,
@@ -330,6 +331,9 @@ def _compute(
         return _sole(_linear(ins, where))
     if kind == "layer_norm":
         return _sole(_layer_norm(ins, where, attrs))
+    if kind == "static_quantize":
+        static_quantize_scale(attrs, where)
+        return _sole(list(ins[0]))
     if kind == "rms_norm":
         return _sole(_rms_norm(ins, where, attrs))
     # safe_softmax は shape 規則も attrs も softmax と同一（違いは空行の値だけ — ADR 0044）。

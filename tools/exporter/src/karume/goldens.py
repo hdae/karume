@@ -66,6 +66,7 @@ from karume.golden_models import (
     RuntimeMaskedAttention,
     ScalarOperands,
     SplinePieces,
+    StaticQuantizeBlock,
     SymbolicTable,
     UnaryChain,
     _band_mask,
@@ -116,6 +117,34 @@ class GoldenSpec:
 
 
 GOLDEN_SPECS: tuple[GoldenSpec, ...] = (
+    GoldenSpec(
+        name="static_quantize_block",
+        build=lambda g: StaticQuantizeBlock(),
+        example_inputs=lambda g: (
+            torch.tensor(
+                [
+                    [
+                        -1000.0,
+                        -128.5,
+                        -127.5,
+                        -2.5,
+                        -1.5,
+                        -0.5,
+                        -0.0,
+                        0.0,
+                        0.5,
+                        1.5,
+                        2.5,
+                        126.5,
+                        127.5,
+                        128.5,
+                        1000.0,
+                    ]
+                ],
+                dtype=torch.float32,
+            ),
+        ),
+    ),
     GoldenSpec(
         name="unary_chain",
         build=lambda _: UnaryChain(),

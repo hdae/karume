@@ -18,6 +18,7 @@ import {
   softmaxDim,
   stateReadonly,
   stateWindow,
+  staticQuantizeScale,
   symPrefixSliceAttrs,
   topkK,
   upsampleBilinear2dAttrs,
@@ -640,6 +641,9 @@ export const computeOutputShape = (
       }
       return sole([...x]);
     }
+    case "staticQuantize":
+      staticQuantizeScale(context.attrs ?? {}, where);
+      return sole([...inputShapes[0]]);
     case "rmsNorm": {
       const [x, weight] = inputShapes;
       // MUST: eps はここでも引く（attrs スキーマを通らない経路 — CPU 参照の直呼び — でも

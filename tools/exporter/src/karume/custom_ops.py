@@ -86,3 +86,21 @@ def _fake(
 
 gru_scan.register_fake(_fake)
 gru_scan_reverse.register_fake(_fake)
+
+
+@torch.library.custom_op("karume::static_quantize", mutates_args=())
+def static_quantize(x: torch.Tensor, scale: float) -> torch.Tensor:
+    """固定 f32 scale の SRQ。汎用 core は Transformers に依存しない（ADR 0097）。"""
+    from karume.ops import assert_static_quantize_scale
+
+    assert_static_quantize_scale(scale, "static_quantize")
+    if x.dtype != torch.float32:
+        raise ValueError("static_quantize は f32 入力のみ対応")
+    if scale == 0:
+        return x.clone()
+    return torch.clamp(torch.round(x / scale), -128, 127) * scale
+
+
+@static_quantize.register_fake
+def _static_quantize_fake(x: torch.Tensor, scale: float) -> torch.Tensor:
+    return x.new_empty(x.shape)

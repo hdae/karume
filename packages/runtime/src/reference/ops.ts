@@ -44,6 +44,7 @@ import {
   rmsNormEps,
   scalarParamValues,
   sliceAttrs,
+  staticQuantizeScale,
   TOPK_OP,
   topkK,
   type UnaryOpName,
@@ -1663,6 +1664,8 @@ export const applyReferenceOpOutputs = (
       return sole(referenceLayerNorm(inputs[0], inputs[1], inputs[2], attrs));
     case "rmsNorm":
       return sole(referenceRmsNorm(inputs[0], inputs[1], attrs));
+    case "staticQuantize":
+      return sole(referenceStaticQuantize(inputs[0], attrs));
     case "softmax":
       return sole(referenceSoftmax(inputs[0], attrs));
     case "safeSoftmax":
@@ -1723,4 +1726,36 @@ export const applyReferenceOp = (
     );
   }
   return outputs[0];
+};
+
+/** GPU の境界表を使わず、f32 除算と偶数丸めから求める独立参照（ADR 0097）。 */
+export const referenceStaticQuantize = (
+  x: RefTensor,
+  attrs: Readonly<Record<string, unknown>>,
+): RefTensor => {
+  const contract = resolveOpContract("static_quantize");
+  assertDtype(contract, x.dtype, "reference");
+  const shape = computeOutputShape(contract, [x.shape], "reference", { attrs })[0];
+  const scale = staticQuantizeScale(attrs, "reference");
+  const input = new Uint32Array(x.data.buffer, x.data.byteOffset, x.data.length);
+  const output = new Float32Array(input.length);
+  const bits = new Uint32Array(output.buffer);
+  for (let i = 0; i < input.length; i++) {
+    const value = input[i], sign = value & 0x80000000, magnitude = value & 0x7fffffff;
+    if (scale === 0) {
+      bits[i] = value;
+      continue;
+    }
+    // 浮動小数演算へ渡す前に NaN を判別し、符号と payload を保って quiet にする。
+    if (magnitude > 0x7f800000) {
+      bits[i] = value | 0x00400000;
+      continue;
+    }
+    const q = Math.fround(Math.abs(x.data[i]) / scale);
+    const lower = Math.floor(q), fraction = q - lower;
+    const rounded = fraction > 0.5 || (fraction === 0.5 && lower % 2 !== 0) ? lower + 1 : lower;
+    output[i] = Math.fround(Math.min(rounded, sign === 0 ? 127 : 128) * scale);
+    bits[i] |= sign;
+  }
+  return { dtype: "f32", shape, data: output };
 };

@@ -952,3 +952,14 @@ def _zeroed_column(generator: torch.Generator, *shape: int, at: tuple[int, int])
     tensor = _uniform(generator, *shape, low=-1.5, high=1.5)
     tensor[:, :, at[0], at[1]] = 0.0
     return tensor
+
+
+class StaticQuantizeBlock(nn.Module):
+    """保存される SRQ と scale=0 の恒等動作を通す tiny golden（ADR 0097）。"""
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        return (
+            torch.ops.karume.static_quantize(x, 1.0),
+            torch.ops.karume.static_quantize(x, 0.09940945357084274),
+            torch.ops.karume.static_quantize(x, 0.0),
+        )

@@ -184,6 +184,7 @@ Current models and coverage:
 | `spline_pieces`            | `T`          | ge_scalar, le_scalar, gt_scalar, ge, bitwise_and, cumsum, sum(bool→i32), clamp, exp, log1p, where, reshape                                                             |
 | `coupling_split`           | `T`          | slice(split decomposition + slicing after pad), cat, flip(axis length 3), pad, tanh, mul                                                                               |
 | `decoder_tail`             | `T`          | leaky_relu(slope 0.1 and the default 0.01), expand(f32), conv1d, tanh, mul                                                                                             |
+| `static_quantize_block`    | fixed        | static_quantize ×3 (ties-to-even, a non-power-of-two fixed scale, and scale=0 identity)                                                                                |
 | `rms_norm_block`           | `T`          | rms_norm ×3 (hand-written `x·rsqrt(mean(x²)+eps)·w` folded into one node + `nn.RMSNorm` with and without affine), layer_norm(no affine), linear(no bias)               |
 | `conv2d_block`             | none         | conv2d ×3 (Kh≠Kw / asymmetric stride, padding and dilation / groups 3 / one branch with no bias), sum(channel axis), sqrt, clamp_min, div, mul, reshape                |
 | `deform_conv2d_block`      | none         | deform_conv2d (DCNv2 — offsets reaching outside the input plane, modulator in [0,2], k=3×2 with asymmetric padding and a k=1 branch with no bias)                      |
@@ -473,10 +474,10 @@ conformance table is the correct one.
   Fixed `i2` uses low-bit-first packing of `q+2` for `q ∈ [-2,1]`, rank-2 weights with
   a row width divisible by 16, and F32 `[rows,1]` scales (ADR 0097). It is supported by
   the low-level writer and reader; `write_model` does not add automatic INT2 quantization.
-- The IR vocabulary has **60** ops, of which the exporter can emit **58**: `topk` and `state_append`
+- The IR vocabulary has **61** ops, of which the exporter can emit **59**: `topk` and `state_append`
   are in the vocabulary but no `torch.export` graph produces them (`topk` waits on the multi-output
   getitem wiring, and `state_append` is the effect op the decode-graph script emits — ADR 0067
-  decision 5). The list below is those 58 (ADR 0017 added `rms_norm` / `conv2d` / `clamp_min`,
+  decision 5). The list below is those 59 (ADR 0017 added `rms_norm` / `conv2d` / `clamp_min`,
   ADR 0023 added `attention`, `gelu_tanh` was added for EmbeddingGemma, `sin` for the Snake
   activation, `safe_softmax` for runtime attention masks — ADR 0044 — `upsample_bilinear2d` for
   the segmentation / depth family, `deform_conv2d` for the BiRefNet family — ADR 0055 — and
@@ -494,6 +495,7 @@ conformance table is the correct one.
     length 1, so the rank is preserved; f32 → i32, no attrs) / `cumsum` (last dim)
   - layout (ADR 0011 / 0014): `reshape` / `permute` / `expand` (f32 unlocked as well) / `slice` /
     `cat` (**the only variadic-arity op in IR v1**) / `pad` / `flip`
+  - fixed activation rounding (ADR 0097): `static_quantize`, f32 input/output with unchanged shape and a required, nonnegative, exactly representable f32 `scale`; scale=0 is a bit-preserving identity
   - symbolic prefix slice (ADR 0010): `sym_prefix_slice`
   - fused ops (ADR 0012 / 0015 / 0017 / 0023): `linear` / `layer_norm` / **`rms_norm`** /
     `softmax` / **`safe_softmax`** / **`attention`** / `embedding` / `masked_fill` / `conv1d` /

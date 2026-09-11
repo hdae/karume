@@ -30,7 +30,7 @@ from torch.fx import Node
 import karume.custom_ops  # noqa: F401  -- torch.ops.karume の登録が副作用
 from karume.extents import extent_key
 from karume.normalize import SAFE_SOFTMAX_META
-from karume.ops import GRU_SCAN_OP, GRU_SCAN_REVERSE_OP, STRIDED_RANK
+from karume.ops import GRU_SCAN_OP, GRU_SCAN_REVERSE_OP, STRIDED_RANK, static_quantize_scale
 
 aten = torch.ops.aten
 
@@ -1330,7 +1330,16 @@ def _h_conv_transpose1d(node: Node) -> Emitted:
     )
 
 
+def _h_static_quantize(node: Node) -> Emitted:
+    _expect(
+        len(node.args) == 2 and not node.kwargs, node, "static_quantize は入力と固定 scale が必要"
+    )
+    scale = static_quantize_scale({"scale": node.args[1]}, "static_quantize")
+    return Emitted("static_quantize", 1, {"scale": scale})
+
+
 ATEN_HANDLERS = {
+    torch.ops.karume.static_quantize.default: _h_static_quantize,
     aten.neg.default: _simple("neg", 1),
     aten.abs.default: _simple("abs", 1),
     aten.exp.default: _simple("exp", 1),

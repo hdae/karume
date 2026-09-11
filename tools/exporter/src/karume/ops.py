@@ -13,6 +13,7 @@ NOTE: 出力 shape の導出（broadcast/縮約）は本表に持たない — �
 from __future__ import annotations
 
 import math
+import struct
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -135,6 +136,7 @@ LAYER_NORM_OP = "layer_norm"
 #: RMSNorm（ADR 0017）。**アリティ 2**（x, weight — bias が無い）で attrs は eps のみ。
 #: 正規化長の正本は weight の長さ（normalized_shape の欄は作らない — 二重管理にしない）。
 RMS_NORM_OP = "rms_norm"
+STATIC_QUANTIZE_OP = "static_quantize"
 SOFTMAX_OP = "softmax"
 #: `softmax` + 「**行 max が -inf の行は全 0 を書く**」（ADR 0044）。契約・attrs・shape 規則は
 #: softmax と同一で、違いはこの 1 行だけ。SDPA 分解の safe-softmax ガードを実値証明で
@@ -313,6 +315,7 @@ OpKind = Literal[
     "linear",
     "layer_norm",
     "rms_norm",
+    "static_quantize",
     "softmax",
     "safe_softmax",
     "attention",
@@ -567,6 +570,26 @@ LAYER_NORM_ATTRS: AttrSchema = {
     "normalized_shape": lambda value, where: _assert_normalized_shape(value, where),
     "eps": lambda value, where: _assert_eps(value, where, "layer_norm"),
 }
+
+
+def assert_static_quantize_scale(value: Any, where: str) -> float:
+    """SRQ は固定 f32 scale を丸め直さず受け取る（ADR 0097）。"""
+    number = _assert_finite_attr(value, where, "static_quantize の scale")
+    try:
+        rounded = struct.unpack("<f", struct.pack("<f", number))[0]
+    except (OverflowError, struct.error) as error:
+        raise OpContractError(f"{where}: static_quantize の scale は f32 が必要") from error
+    if number < 0 or rounded != number:
+        raise OpContractError(f"{where}: static_quantize の scale は非負・厳密な f32 値が必要")
+    return number
+
+
+STATIC_QUANTIZE_ATTRS: AttrSchema = {"scale": assert_static_quantize_scale}
+
+
+def static_quantize_scale(attrs: Mapping[str, Any], where: str) -> float:
+    return assert_static_quantize_scale(attrs.get("scale"), f"{where} の attrs.scale")
+
 
 #: rms_norm の attrs（ADR 0017）。
 #:
@@ -1193,6 +1216,7 @@ OP_CONTRACTS: dict[str, OpContract] = {
     # bias が無いのでアリティ 2（ADR 0017）。weight 無しの形はハンドラが ones 合成で
     # アリティ 2 へ正規化する — ゼロ bias 合成（ADR 0015）と同じ手筋。
     RMS_NORM_OP: _contract(RMS_NORM_OP, "rms_norm", 2, RMS_NORM_ATTRS),
+    STATIC_QUANTIZE_OP: _contract(STATIC_QUANTIZE_OP, "static_quantize", 1, STATIC_QUANTIZE_ATTRS),
     SOFTMAX_OP: _contract(SOFTMAX_OP, "softmax", 1, SOFTMAX_ATTRS),
     # ADR 0044。attrs スキーマは softmax と**同じ 1 本を共有**する（複製すると片方だけ
     # 絞りが緩む形が作れる）。

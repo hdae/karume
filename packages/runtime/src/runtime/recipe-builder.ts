@@ -15,6 +15,12 @@
  * 状態は {@link RecipeBuilderContext} という構造的な面だけで受け取る。
  */
 
+import {
+  STATIC_QUANTIZE_KEY,
+  STATIC_QUANTIZE_WGSL,
+  STATIC_QUANTIZE_WORKGROUP_SIZE,
+  staticQuantizeParams,
+} from "../kernels/static-quantize.ts";
 import { gridStrideWorkgroups, tiledWorkgroups } from "../codegen/dispatch.ts";
 import {
   ELEMENTWISE_WORKGROUP_SIZE,
@@ -290,6 +296,7 @@ import {
   sliceAttrs,
   stateReadonly,
   stateWindow,
+  staticQuantizeScale,
   topkK,
   type UnaryOpName,
   WEIGHT_SLOTS,
@@ -748,6 +755,9 @@ export class RecipeBuilder {
         break;
       case "layerNorm":
         await this.#buildLayerNorm(step, binds, outs, builder);
+        break;
+      case "staticQuantize":
+        await this.#buildStaticQuantize(step, binds, outs, builder);
         break;
       case "rmsNorm":
         await this.#buildRmsNorm(step, binds, outs, builder);
@@ -1860,6 +1870,39 @@ export class RecipeBuilder {
         { binding: 4, source: outs[0] },
       ],
       workgroups: [groups, 1, 1],
+    });
+  }
+
+  /** 固定 SRQ の表は既存の不変 params キャッシュで保持する（ADR 0097）。 */
+  async #buildStaticQuantize(
+    step: NodePlan,
+    binds: readonly BindingSource[],
+    outs: readonly BindingSource[],
+    builder: StepRecipeBuilder,
+  ): Promise<void> {
+    const count = numel(step.outputs[0].shape);
+    const scale = staticQuantizeScale(step.node.attrs, `nodes (${step.node.op})`);
+    const { pipeline, layout, roles } = await this.#state.cache.get(
+      STATIC_QUANTIZE_KEY,
+      STATIC_QUANTIZE_WGSL,
+    );
+    const params = this.#writeParams(staticQuantizeParams(count, scale), PARAMS_UNIFORM_USAGE);
+    builder.dispatch({
+      key: STATIC_QUANTIZE_KEY,
+      pipeline,
+      layout,
+      roles,
+      params,
+      bindings: [{ binding: 1, source: binds[0] }, { binding: 2, source: outs[0] }],
+      workgroups: [
+        gridStrideWorkgroups(
+          count,
+          STATIC_QUANTIZE_WORKGROUP_SIZE,
+          this.#state.gpu.limits.maxComputeWorkgroupsPerDimension,
+        ),
+        1,
+        1,
+      ],
     });
   }
 

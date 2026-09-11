@@ -1,4 +1,5 @@
 import { assert, assertEquals, assertNotEquals, assertThrows } from "@std/assert";
+import { STATIC_QUANTIZE_WGSL } from "../src/kernels/static-quantize.ts";
 import {
   ELEMENTWISE_WORKGROUP_SIZE,
   elementwiseKey,
@@ -320,6 +321,7 @@ const elementwiseDtypes = (): readonly (readonly [string, IrDtype])[] =>
 
 Deno.test("生成した WGSL がスナップショットとバイト単位で一致する（codegen 決定性の固定）", async () => {
   const cases: readonly (readonly [string, string])[] = [
+    ["static_quantize.wgsl", STATIC_QUANTIZE_WGSL],
     ["elementwise_relu_r1.wgsl", elementwiseWgsl({ op: "relu", rank: 1, dtype: "f32" })],
     ["elementwise_sigmoid_r1.wgsl", elementwiseWgsl({ op: "sigmoid", rank: 1, dtype: "f32" })],
     ["elementwise_gelu_r2.wgsl", elementwiseWgsl({ op: "gelu", rank: 2, dtype: "f32" })],
