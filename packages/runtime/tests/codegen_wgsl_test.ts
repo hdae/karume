@@ -160,6 +160,8 @@ import {
   adalnNormParams,
 } from "../src/kernels/adaln-norm.ts";
 import {
+  RMS_NORM_128_KEY,
+  RMS_NORM_128_WGSL,
   RMS_NORM_KEY,
   RMS_NORM_WGSL,
   RMS_NORM_WORKGROUP_SIZE,
@@ -467,6 +469,7 @@ Deno.test("生成した WGSL がスナップショットとバイト単位で一
     // 行統計と affine の文字列を共有しているぶん、片方だけバイト列が動くのが最大の事故。
     ["adaln_norm.wgsl", ADALN_NORM_WGSL],
     ["rms_norm.wgsl", RMS_NORM_WGSL],
+    ["rms_norm_128.wgsl", RMS_NORM_128_WGSL],
     ["softmax.wgsl", SOFTMAX_WGSL],
     // safe_softmax 変種（ADR 0044）。**素の softmax と対で置く**のが条件で、両者は同じ
     // 生成関数から出る（②③ の縮約順序が 1 語でもずれれば分解経路とのビット同一が壊れる）。
@@ -943,6 +946,7 @@ Deno.test("パイプラインキーは生成入力ごとに一意（別カーネ
     GATHER_KEY,
     LAYER_NORM_KEY,
     RMS_NORM_KEY,
+    RMS_NORM_128_KEY,
     SOFTMAX_KEY,
     SAFE_SOFTMAX_KEY,
     ATTENTION_STATS_KEY,

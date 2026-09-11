@@ -117,7 +117,13 @@ import {
   embeddingWgsl,
 } from "../kernels/embedding.ts";
 import { LAYER_NORM_KEY, LAYER_NORM_WGSL, layerNormParams } from "../kernels/layer-norm.ts";
-import { RMS_NORM_KEY, RMS_NORM_WGSL, rmsNormParams } from "../kernels/rms-norm.ts";
+import {
+  RMS_NORM_128_KEY,
+  RMS_NORM_128_WGSL,
+  RMS_NORM_KEY,
+  RMS_NORM_WGSL,
+  rmsNormParams,
+} from "../kernels/rms-norm.ts";
 import { LINEAR_SCALE_BINDING, linearKey, linearParams, linearWgsl } from "../kernels/linear.ts";
 import {
   defaultLinearGemvRowsVariant,
@@ -1860,7 +1866,10 @@ export class RecipeBuilder {
     const dim = shape[shape.length - 1];
     const rows = numel(shape.slice(0, -1));
     const eps = rmsNormEps(step.node.attrs, `nodes (${step.node.op})`);
-    const { pipeline, layout, roles } = await this.#state.cache.get(RMS_NORM_KEY, RMS_NORM_WGSL);
+    const narrow = dim > 0 && dim <= 128;
+    const key = narrow ? RMS_NORM_128_KEY : RMS_NORM_KEY;
+    const wgsl = narrow ? RMS_NORM_128_WGSL : RMS_NORM_WGSL;
+    const { pipeline, layout, roles } = await this.#state.cache.get(key, wgsl);
     const params = this.#writeParams(rmsNormParams(rows, dim, eps), PARAMS_UNIFORM_USAGE);
     const groups = gridStrideWorkgroups(
       rows,
@@ -1868,7 +1877,7 @@ export class RecipeBuilder {
       this.#state.gpu.limits.maxComputeWorkgroupsPerDimension,
     );
     builder.dispatch({
-      key: RMS_NORM_KEY,
+      key,
       pipeline,
       layout,
       roles,

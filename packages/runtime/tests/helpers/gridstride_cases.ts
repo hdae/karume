@@ -69,7 +69,13 @@ import {
   gatherParams,
 } from "../../src/kernels/gather.ts";
 import { LAYER_NORM_KEY, LAYER_NORM_WGSL, layerNormParams } from "../../src/kernels/layer-norm.ts";
-import { RMS_NORM_KEY, RMS_NORM_WGSL, rmsNormParams } from "../../src/kernels/rms-norm.ts";
+import {
+  RMS_NORM_128_KEY,
+  RMS_NORM_128_WGSL,
+  RMS_NORM_KEY,
+  RMS_NORM_WGSL,
+  rmsNormParams,
+} from "../../src/kernels/rms-norm.ts";
 import {
   MASKED_FILL_KEY,
   MASKED_FILL_WGSL,
@@ -994,7 +1000,7 @@ export const gruScanCase = (): DegenerateCase => {
   };
 };
 
-export const rmsNormCase = (): DegenerateCase => {
+export const rmsNormCase = (narrow = false): DegenerateCase => {
   const rows = 5_000;
   const dim = 4;
   const eps = 1e-6;
@@ -1002,9 +1008,9 @@ export const rmsNormCase = (): DegenerateCase => {
   const input = fill([rows, dim], (i) => ((i * 5) % 17) * 0.5 - 4);
   const weight = fill([dim], POSITIVE);
   return {
-    name: "rms_norm",
-    key: RMS_NORM_KEY,
-    wgsl: RMS_NORM_WGSL,
+    name: narrow ? "rms_norm 128" : "rms_norm",
+    key: narrow ? RMS_NORM_128_KEY : RMS_NORM_KEY,
+    wgsl: narrow ? RMS_NORM_128_WGSL : RMS_NORM_WGSL,
     params: rmsNormParams(rows, dim, eps),
     uniformParams: true,
     inputs: [input, weight],
