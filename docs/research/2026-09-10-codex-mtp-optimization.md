@@ -1940,3 +1940,133 @@ M=1 upの時間短縮は約14〜22%であり、会話で最初に「16〜29%短�
 共通パイプライン / CLI の `deno task verify` は **2,869 passed / 760 steps / 0 failed / 5 ignored、25m13s**、
 終了コード0（`family-verify.log`）。実行中は実行処理を固定し、追記文書とQAT制約を訂正したCLIコメントを再確認した。
 変更文書の相対ファイルリンクは欠損0件。モデル固有 recipe の変更は前コミットで検収済み。
+
+## QAT 統合後の SRQ 融合・探索と INT2 変種（2026-09-11）
+
+共有パイプラインと対話CLIは `7ed64b3` にコミットした。以下は試作で、製品runtimeには追加していない。
+この節のスクリプト・生データ・集計・検証ログは `outputs/bench/karume/2026-09-11_qat-integration/`（OUT）に保存した。
+RTX 3080 Ti、Deno / Chrome 153（NVIDIA Ampere、fallback=false）。GPUジョブはすべて直列。
+実験開始前の採用目安は、出力一致を保ち、全体で約3%以上の安定した利得があり、他モデルで1%以上悪化しないこと。
+
+### SRQ 融合の全モデル比較
+
+`srq-full-candidate/` はdecodeのup/gateだけ、`srq-broad-candidate/` はGEMV適格な全固定量子化linearを対象とする。
+どちらもM=1・f32計算に限定し、privateなlinear出力と後置SRQを1dispatchへまとめる。
+固定weight scaleは既存の常駐バッファを借り、SRQの境界表はGEMVのuniformへ同居させた。
+元のK縮約とbias順を変えず、出力storeに整数境界表によるSRQを適用する。
+
+`srq-full-parity.ts` / `srq-broad-parity.ts` は、正式recipeの8入力・最大16tokenについて
+各stepのlogitsとhiddenをSHA-256で比較した。通常版と各候補で、E2B **196** / E4B **208**、
+計**404出力ハッシュ**がそれぞれ全件一致。decodeの融合数は限定版 **70 / 84**、広い版 **275 / 342**。
+prefillの融合数は0。集計は `srq-full-summary.json` / `srq-broad-parity-summary.json`。
+
+全体ベンチは通常版と候補を同じGPU上で交互に実行する。モデルはそれぞれ別deviceへ読み込み、実行を並走させない。
+まず8ケース×最大16tokenを両候補で比較し、次に物語・日本語・コードを最大64tokenで
+通常→候補→候補→通常の順に3巡する。各候補・各課題6試料。greedy、容量128、既定chunk32、
+PLEは行読み（常駐予算0）。診断のtimestamp計測は有効にせず、通常runのwallとdecode相を記録した。
+以下はwall中央値の速度比（通常/候補）。初回ロードは順番とcacheの影響を分離していないので、速度比較へ使わない。
+
+| 候補         | 環境   | モデル |   物語 | 日本語 | コード |
+| ------------ | ------ | ------ | -----: | -----: | -----: |
+| up/gate融合  | Deno   | E2B    | 1.0092 | 1.0048 | 1.0034 |
+| up/gate融合  | Deno   | E4B    | 1.0106 | 1.0034 | 1.0017 |
+| 全linear融合 | Deno   | E2B    | 1.0179 | 1.0198 | 1.0176 |
+| 全linear融合 | Deno   | E4B    | 1.0155 | 1.0031 | 1.0225 |
+| 全linear融合 | Chrome | E2B    | 1.0266 | 1.0208 | 1.0384 |
+| 全linear融合 | Chrome | E4B    | 1.0001 | 1.0076 | 1.0400 |
+
+Chromeの一部課題は3%を超えたが、同じモデルの他課題で安定した利得にはならない。
+Denoの全体では最大でも約2.2%。新しい融合ルール・常駐weight用operand・uniform構成を製品へ追加する根拠としては不足し、
+今回は両融合を見送る。生成列は全反復で一致。広い融合の最大64token比較はDeno/Chrome間も12条件すべて一致した
+（`srq-broad-cross-backend.json`）。M2での速度・同値性は未検証。
+
+生データ: `*-srq-full-bench.json`、`*-srq-broad-bench.json`、`*-srq-broad-browser.json`。
+集計: `srq-full-summary.json`、`srq-broad-bench-summary.json`、`srq-broad-browser-summary.json`。
+
+### INT2 GEMV の担当列数と先読み
+
+`int2-gemv-sweep.ts` はE2Bの実up/down/headで、現行c32u4と列数16/32/64/128×先読み2/8/16の計13変種を比較した。
+3形×13=39条件で、通常・広い値域・境界付近の3入力を使用。SRQ前の生linear出力はすべてu32一致。
+同じ変種を100回温め、100反復/試料、順番を往復し各6試料。GPU timestampの中央値を比較した。
+
+| 形                 | 現行c32u4 ms | 最良変種 | 最良 ms | 速度比 |
+| ------------------ | -----------: | -------- | ------: | -----: |
+| up [12288,1536]    |      0.03094 | c32u4    | 0.03094 |  1.000 |
+| down [1536,12288]  |      0.11149 | c64u8    | 0.10639 |  1.048 |
+| head [262144,1536] |      0.24333 | c32u8    | 0.24287 |  1.002 |
+
+upは現行が最良、headはほぼ同等。downの小差を全体へ外挿すると寄与は限定的で、形状別の選択を増やす根拠にしない。
+ばらつきもあり、全モデル実装やM2の最適値の主張へは進めない。生データ `int2-gemv-sweep.json`、
+全変種の範囲・初回compile時間を含む集計 `int2-gemv-sweep-summary.json`。既定変種は変更していない。
+
+### SRQ 境界探索の別案
+
+`srq-search-candidate/` は融合を追加せず、SRQ単体だけを変更する。浮動小数の商から探索の開始位置を概算し、
+整数境界表で上下に移動して最終levelを確定する。概算の精度を数値契約にせず、元と同じ順序付き境界の比較で決める。
+非正規scaleは従来の整数二分探索を使う。ゼロscaleの恒等写像、NaN・Inf・符号・飽和・出力値の表は維持する。
+
+既存の独立Torch oracle **24,416入力**を、直接dispatchとSession（反復含む）で全ビット照合し、4テスト成功。
+さらに両モデルの計**404出力ハッシュ**も通常版と全件一致した
+（`srq-search-test.log` / `srq-search-parity-summary.json`）。
+単体はup/down/headの出力要素数・実scaleに、量子化levelの振幅8/130を使う6条件。
+各候補100反復×4試料の速度比は**1.003〜1.081**、通常版の絶対時間は約0.008〜0.010 ms。
+小さい演算なので、単体比率だけで全体の利得とは扱わない（`srq-search-micro{,-summary}.json`）。
+
+全体ベンチは融合と同じ8ケースの対照・3課題のABBAを使った。候補名がログの`fused`に残るが、
+この試作はSRQ単体の探索変更だけで、linear融合はない。wall中央値の速度比:
+
+| 環境   | モデル |   物語 | 日本語 | コード |
+| ------ | ------ | -----: | -----: | -----: |
+| Deno   | E2B    | 1.0075 | 1.0058 | 1.0046 |
+| Deno   | E4B    | 1.0035 | 1.0083 | 1.0054 |
+| Chrome | E2B    | 1.0019 | 0.9999 | 1.0052 |
+| Chrome | E4B    | 1.0119 | 1.0029 | 0.9754 |
+
+Denoは全課題1%未満、ChromeのE4Bコードは約2.5%遅い。採用条件を満たさず、この探索変更も見送る。
+正当性検査の成功だけを高速化の根拠にはしない。生データ `*-srq-search-{bench,browser}.json`、
+全範囲・decode時間の集計 `srq-search-summary.json`。
+
+### compute pass の切り方を揃えた対照
+
+初回と反復増加版の融合マイクロベンチは、各dispatchを別compute passに置いていた。
+通常推論は `SubmitScheduler.#encodePlainChunk` が複数dispatchを同じpassにまとめ、copyが来たときだけ区切る。
+診断のtimestamp計測は別passに分けるため、単体の測定方法による費用を全体利得へ外挿できない。
+
+`srq-fusion-single-pass.ts` は同じ入力・WGSL・反復数を保ち、比較するdispatch列を1つのpassへ置いた。
+21条件×3入力のu32比較はすべて成功。各候補100反復×10試料のM=1の速度比は、
+up I2/I4/I8が **1.084 / 1.061 / 1.041**、downが **0.930 / 1.004 / 1.011**。
+別pass時のup **1.289 / 1.216 / 1.160**から差が縮まり、down I2は順位も逆転した。
+境界の違いが単体の結論に影響することを確認した。唯一の原因とは断定せず、採否は通常モードの全体wallで判断する。
+生データ `srq-fusion-single-pass.json`、全21形・範囲の集計 `srq-fusion-single-pass-summary.json`。
+
+今回の全体A/Bは各52生成×10実行=**520生成**。広い融合と探索変更の最大64token比較は、
+Deno/Chrome間の計24条件すべてで列が一致した（`optimization-final-audit.json`）。
+製品への追加最適化は見送り、既定カーネル・数値契約・APIを変更しない。
+次はM2のQAT検収と、既存H-18の生成用出力・転送削減の設計を優先する。品質・長文・M2は未検収のまま区別する。
+
+### 転送削減の契約確認と CPU 抽選の追加観測
+
+全体検証中にGPUを使わず、H-18の次段をソースで確認した。現行 `Session.run` は読み戻す出力を選ぶ引数を持たず、
+`#stageOutputs` はgraph.outputs全件を読み戻す。`GenerationProgram` はlogitsとhiddenを必須としている。
+通常Gemma/QATの温度0でもrepetition penaltyとlogit biasは有効で、NaNや最大値が非有限の入力は拒否する。
+GPUのargmaxだけへ置き換えるなら、その適用条件と異常値の拒否を明示する必要がある。今回は契約を変更していない。
+
+`sampler-host-bench.ts` は保存済みの公式CPU logits（E2B/E4B、物語の先頭と最終行）を使い、
+`createSampler().next()`を64回温め、128回×5試料で計測した。これはこのLinux CPU上の観測で、M2の値ではない。
+GPUの全体検証と並行したCPU計測なので、絶対時間は処理の規模を知る材料とし、全体の高速化率には使わない。
+既定のtop-k併用とtop-p単独では費用が大きく違う（`sampler-host-bench.json` / `sampler-host-summary.json`）。
+各行の中央値の範囲はgreedy **0.2004〜0.2097 ms**、QAT既定 **0.2695〜0.3464 ms**、
+top-p単独 **14.1157〜14.1544 ms**。後続の分布計測は別API・別条件であり、この絶対値とは直接比較しない。
+
+基数幅の候補もQAT実logits4行と合成1行で再測定した。`samplerDistribution`の候補idと確率のu64列はすべて一致。
+8/10/11/12/16bitの比較で16bitは約1.19〜1.21倍だったが、過去の **H-17** と同じ案であることの確認が後になった。
+小語彙の回帰とhistogram増という既存の不採用理由を覆す測定ではないため、再実装やサイズ切替は進めない。
+この追加は新規の高速化成果に数えず、QATでの再観測として残す
+（`sampler-radix-bench.json` / `sampler-radix-summary.json`、各16反復×6試料・順序反転）。
+
+### この調査単位の最終検証
+
+調査記録のコミット前に `deno task verify` を新規実行し、fmt・lint・型検査と実GPUテストを完走した。
+**2,869 passed / 760 steps / 0 failed / 5 ignored、25分2秒、終了コード0**。
+ログは OUT の `research-verify.log`。この走行中に他のGPUジョブは実行していない。
+製品コードは `7ed64b3` のまま。結果の追記後の整形検査775ファイル、相対ファイルリンク303件、差分検査も成功した。
