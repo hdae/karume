@@ -122,3 +122,20 @@ export const TANH_STABLE_WGSL = `fn tanh_stable(x: f32) -> f32 {
   let t = select(lo, ${f32Literal(TANH_SATURATION)}, x > ${f32Literal(TANH_SATURATION)});
   return ${nanGuard("x", "tanh(t)")};
 }`;
+
+/**
+ * f32 の値ビットを大小順の整数へ写す。NaN を最優先、±0 を同点にする。
+ * 入力時に一度だけ変換し、縮約中は整数キーと最小 index を比較する。
+ * 値を返す場合は、選ばれた index の元の値ビットを読む（NaN・±0 を保つ）。
+ * DECIDED: docs/decisions/0068-decode-exit-multi-output.md 追記 10。
+ */
+export const F32_RANK_WGSL = `fn f32_rank_key(bits: u32) -> u32 {
+  let magnitude = bits & 0x7fffffffu;
+  let zeroed = select(bits, 0u, magnitude == 0u);
+  let ordered = select(zeroed ^ 0x80000000u, ~zeroed, (zeroed & 0x80000000u) != 0u);
+  return select(ordered, 0xffffffffu, magnitude > 0x7f800000u);
+}
+
+fn rank_key_beats(kb: u32, ib: u32, ka: u32, ia: u32) -> bool {
+  return kb > ka || (kb == ka && ib < ia);
+}`;

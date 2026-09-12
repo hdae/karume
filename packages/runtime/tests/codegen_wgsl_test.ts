@@ -1478,29 +1478,35 @@ Deno.test("cumsum は 1 invocation = 1 行の前縁和で、行方向を grid-st
  *    別要素という族内の食い違いになる。
  */
 Deno.test("argmax は最小 index を保存する比較式・−inf identity・ビット列 NaN 判定を持つ", () => {
-  assertEquals(ARGMAX_KEY, `argmax:v1:f32>i32:lastdim:minindex:wg${ARGMAX_WORKGROUP_SIZE}`);
+  assertEquals(ARGMAX_KEY, `argmax:v2:f32>i32:lastdim:minindex:wg${ARGMAX_WORKGROUP_SIZE}`);
   assertEquals(ARGMAX_WORKGROUP_SIZE, 256);
   // ① タイブレーク: 同値なら小さい index が勝つ（辞書式順序の 1 本の述語）
-  assertEquals(ARGMAX_WGSL.includes("return vb > va || (vb == va && ib < ia);"), true);
+  assertEquals(ARGMAX_WGSL.includes("return kb > ka || (kb == ka && ib < ia);"), true);
   // 述語は 1 箇所定義で、走査・木の両方が同じ関数を呼ぶ（向きの取り違えを構造で潰す）
-  assertEquals(ARGMAX_WGSL.includes("fn argmax_beats(vb: f32, ib: u32, va: f32, ia: u32)"), true);
-  assertEquals(ARGMAX_WGSL.includes("if (argmax_beats(v, i, best, best_at)) {"), true);
+  assertEquals(
+    ARGMAX_WGSL.includes("fn rank_key_beats(kb: u32, ib: u32, ka: u32, ia: u32)"),
+    true,
+  );
+  assertEquals(ARGMAX_WGSL.includes("if (rank_key_beats(v, i, best, best_at)) {"), true);
   assertEquals(
     ARGMAX_WGSL.includes(
-      "if (argmax_beats(other, other_at, scratch_value[lid], scratch_index[lid])) {",
+      "if (rank_key_beats(other, other_at, scratch_value[lid], scratch_index[lid])) {",
     ),
     true,
   );
   // ② identity は −inf（params 経由）+ index の番兵は dim（全 −inf 行が index 0 になる根拠）
-  assertEquals(ARGMAX_WGSL.includes("let neg_inf = bitcast<f32>(params.neg_inf);"), true);
+  assertEquals(ARGMAX_WGSL.includes("let neg_inf = f32_rank_key(params.neg_inf);"), true);
   assertEquals(ARGMAX_WGSL.includes("var best = neg_inf;"), true);
   assertEquals(ARGMAX_WGSL.includes("var best_at = dim;"), true);
   // MUST: reduce 族の有限 sentinel が紛れ込んでいない
   assertEquals(ARGMAX_WGSL.includes("3.402823466e38"), false);
-  // ③ NaN はビット列で判定して「最大」として扱う（両方 NaN なら最小 index）
-  assertEquals(ARGMAX_WGSL.includes("fn is_nan_bits(x: f32) -> bool {"), true);
-  assertEquals(ARGMAX_WGSL.includes("  if (na != nb) {\n    return nb;\n  }"), true);
-  assertEquals(ARGMAX_WGSL.includes("  if (na) {\n    return ib < ia;\n  }"), true);
+  // ③ NaN は最大の同一キーにし、±0 は同点にする（同じキーなら最小 index）
+  assertEquals(ARGMAX_WGSL.includes("let magnitude = bits & 0x7fffffffu;"), true);
+  assertEquals(
+    ARGMAX_WGSL.includes("return select(ordered, 0xffffffffu, magnitude > 0x7f800000u);"),
+    true,
+  );
+  assertEquals(ARGMAX_WGSL.includes("let zeroed = select(bits, 0u, magnitude == 0u);"), true);
   // 出力は i32 の添字（f32 で書くと語彙 2^24 超で隣の token に丸まる）
   assertEquals(ARGMAX_WGSL.includes("read_write> out: array<i32>;"), true);
   assertEquals(ARGMAX_WGSL.includes("out[row] = i32(scratch_index[0u]);"), true);
@@ -1531,55 +1537,63 @@ Deno.test("argmax は最小 index を保存する比較式・−inf identity・�
  */
 Deno.test("topk は 2 相（レーン局所 top-k → トーナメント merge）で、最小 index を保存する述語を共有する", () => {
   assertEquals(TOPK_WORKGROUP_SIZE, 32);
-  assertEquals(topkKey(4), `topk:v1:f32+i32:lastdim:desc:minindex:k4:wg${TOPK_WORKGROUP_SIZE}`);
+  assertEquals(
+    topkKey(4),
+    `topk:v2:f32+i32:lastdim:desc:minindex:k4:wg${TOPK_WORKGROUP_SIZE}`,
+  );
   // キーは k を含む（k ごとに別 WGSL）
   assertEquals(topkKey(1) === topkKey(2), false);
   const wgsl = topkWgsl(4);
-  // ① 出力 2 本（値 f32 + 添字 i32）を別の束縛で書く
-  assertEquals(wgsl.includes("@binding(2) var<storage, read_write> values: array<f32>;"), true);
+  // ① 出力 2 本（f32 の値ビット + 添字 i32）を別の束縛で書く
+  assertEquals(wgsl.includes("@binding(2) var<storage, read_write> values: array<u32>;"), true);
   assertEquals(wgsl.includes("@binding(3) var<storage, read_write> indices: array<i32>;"), true);
   // ① 相 1 = レーンごとの候補ブロック（k 語 × W レーン）/ 相 2 = W 者トーナメントの先頭
-  assertEquals(wgsl.includes("var<workgroup> cand_value: array<f32, 128>;"), true);
+  assertEquals(wgsl.includes("var<workgroup> cand_value: array<u32, 128>;"), true);
   assertEquals(wgsl.includes("var<workgroup> cand_index: array<u32, 128>;"), true);
-  assertEquals(wgsl.includes("var<workgroup> head_value: array<f32, 32>;"), true);
+  assertEquals(wgsl.includes("var<workgroup> head_value: array<u32, 32>;"), true);
   assertEquals(wgsl.includes("var<workgroup> head_index: array<u32, 32>;"), true);
   // ① 行の読み出しは 1 回だけ（走査ループは 1 本・k のループは merge 側にしかない）
-  assertEquals((wgsl.match(/let v = x\[base \+ i\];/g) ?? []).length, 1);
+  assertEquals((wgsl.match(/let v = f32_rank_key\(x\[base \+ i\]\);/g) ?? []).length, 1);
   assertEquals(wgsl.includes("let block = lid * 4u;"), true);
   // ② 述語は 1 箇所定義で、走査・木の両方が同じ関数を呼ぶ（向きの取り違えを構造で潰す）
-  assertEquals(wgsl.includes("fn topk_beats(vb: f32, ib: u32, va: f32, ia: u32)"), true);
-  assertEquals(wgsl.includes("return vb > va || (vb == va && ib < ia);"), true);
-  assertEquals(
-    wgsl.includes("if (topk_beats(v, i, cand_value[block + 3u], cand_index[block + 3u])) {"),
-    true,
-  );
+  assertEquals(wgsl.includes("fn rank_key_beats(kb: u32, ib: u32, ka: u32, ia: u32)"), true);
+  assertEquals(wgsl.includes("return kb > ka || (kb == ka && ib < ia);"), true);
   assertEquals(
     wgsl.includes(
-      "while (s > 0u && topk_beats(v, i, cand_value[block + s - 1u], cand_index[block + s - 1u])) {",
+      "if (rank_key_beats(v, i, cand_value[block + 3u], cand_index[block + 3u])) {",
     ),
     true,
   );
   assertEquals(
-    wgsl.includes("if (topk_beats(other, other_at, head_value[lid], head_index[lid])) {"),
+    wgsl.includes(
+      "while (s > 0u && rank_key_beats(v, i, cand_value[block + s - 1u], cand_index[block + s - 1u])) {",
+    ),
+    true,
+  );
+  assertEquals(
+    wgsl.includes("if (rank_key_beats(other, other_at, head_value[lid], head_index[lid])) {"),
     true,
   );
   // ③ identity は −inf（params 経由）+ 番兵 index = dim（全 −inf 行でも答えが定義される根拠）
-  assertEquals(wgsl.includes("let neg_inf = bitcast<f32>(params.neg_inf);"), true);
+  assertEquals(wgsl.includes("let neg_inf = f32_rank_key(params.neg_inf);"), true);
   assertEquals(wgsl.includes("cand_value[block + s] = neg_inf;"), true);
   assertEquals(wgsl.includes("cand_index[block + s] = dim;"), true);
   // MUST: reduce 族の有限 sentinel が紛れ込んでいない
   assertEquals(wgsl.includes("3.402823466e38"), false);
-  // ④ NaN はビット列で判定して「最大」として扱う（argmax と同一本文）
-  assertEquals(wgsl.includes("fn is_nan_bits(x: f32) -> bool {"), true);
-  assertEquals(wgsl.includes("  if (na != nb) {\n    return nb;\n  }"), true);
-  assertEquals(wgsl.includes("  if (na) {\n    return ib < ia;\n  }"), true);
+  // ④ NaN は最大の同一キー、±0 は同点へ写す（argmax と同一本文）
+  assertEquals(wgsl.includes("let magnitude = bits & 0x7fffffffu;"), true);
   assertEquals(
-    ARGMAX_WGSL.includes("return vb > va || (vb == va && ib < ia);"),
+    wgsl.includes("return select(ordered, 0xffffffffu, magnitude > 0x7f800000u);"),
+    true,
+  );
+  assertEquals(wgsl.includes("let zeroed = select(bits, 0u, magnitude == 0u);"), true);
+  assertEquals(
+    ARGMAX_WGSL.includes("return kb > ka || (kb == ka && ib < ia);"),
     true,
     "argmax と同じ述語本文（k=1 が argmax と一致することの前提）",
   );
   // ⑤ 出力は行ごとに k 語・カーソルを進めるのは勝った要素の持ち主だけ
-  assertEquals(wgsl.includes("values[row * 4u + r] = head_value[0u];"), true);
+  assertEquals(wgsl.includes("values[row * 4u + r] = x[base + won];"), true);
   assertEquals(wgsl.includes("indices[row * 4u + r] = i32(won);"), true);
   assertEquals(wgsl.includes("if (won % 32u == lid) {"), true);
   assertEquals(wgsl.includes("cursor = cursor + 1u;"), true);
@@ -1588,7 +1602,9 @@ Deno.test("topk は 2 相（レーン局所 top-k → トーナメント merge�
   assertEquals(wgsl.includes("row = row + nwg.x;"), true);
   // k=1 の縮退形: ブロックの末尾（最弱）と先頭が同じ語になり、挿入ループは 1 度も回らない
   assertEquals(
-    topkWgsl(1).includes("if (topk_beats(v, i, cand_value[block + 0u], cand_index[block + 0u])) {"),
+    topkWgsl(1).includes(
+      "if (rank_key_beats(v, i, cand_value[block + 0u], cand_index[block + 0u])) {",
+    ),
     true,
   );
 

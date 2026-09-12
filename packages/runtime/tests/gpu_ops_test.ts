@@ -1092,7 +1092,7 @@ Deno.test({
  * - **argmax の番兵 `dim` → `0`**: 番兵が答えに効くのは行の最大値が −inf のとき（= 全要素が
  *   −inf）だけで、その行の正解添字は 0 なので**変異版も同じ 0** を返す。原理的に値へ出ない。
  *   代わりに同じ MUST（有限 sentinel 禁止 — src/kernels/argmax.ts）を撃つ**番兵値**の変異
- *   （`neg_inf` → `0.0`）を置いた。こちらは全負値の行で番兵 index `dim` が出力へ漏れる。
+ *   （`neg_inf` → 正のゼロの順位キー）を置いた。こちらは全負値の行で番兵 index `dim` が出力へ漏れる。
  */
 type RankInjection = {
   readonly label: string;
@@ -1154,7 +1154,7 @@ const TOPK_INJECTIONS: readonly TopkInjection[] = [
   {
     label: "tie 分岐を ib > ia へ反転",
     input: TOPK_SPREAD_INPUT,
-    mutate: injectRank("(vb == va && ib < ia)", "(vb == va && ib > ia)"),
+    mutate: injectRank("(kb == ka && ib < ia)", "(kb == ka && ib > ia)"),
   },
   // ③ レーン局所挿入の末尾（最弱）比較を 1 つ手前へずらす（k 本目が入らなくなる）
   {
@@ -1200,24 +1200,14 @@ const ARGMAX_INJECTIONS: readonly RankInjection[] = [
   // ① identity の**値**を有限 sentinel にする（番兵 index が [0, dim) の外へ漏れる）
   {
     label: "行 max の identity を有限 sentinel にする",
-    mutate: injectRank("var best = neg_inf;", "var best = 0.0;"),
+    mutate: injectRank("var best = neg_inf;", "var best = 0x80000000u;"),
   },
-  // ② 述語から NaN 分岐を落とす（NaN は比較で全て false になり黙って負ける）
+  // ② NaN と非 NaN の優先順位を反転（NaN が有限値へ負ける誤りの検出線）。
   {
-    label: "argmax_beats の NaN 分岐を削除",
+    label: "最大値比較の NaN 優先順位を反転",
     mutate: injectRank(
-      [
-        "  let na = is_nan_bits(va);",
-        "  let nb = is_nan_bits(vb);",
-        "  if (na != nb) {",
-        "    return nb;",
-        "  }",
-        "  if (na) {",
-        "    return ib < ia;",
-        "  }",
-        "",
-      ].join("\n"),
-      "",
+      "select(ordered, 0xffffffffu, magnitude > 0x7f800000u)",
+      "select(ordered, 0u, magnitude > 0x7f800000u)",
     ),
   },
 ];

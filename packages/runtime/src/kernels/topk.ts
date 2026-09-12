@@ -16,17 +16,19 @@
  *    最大元を木で畳み、それが残り集合の最大元（各ブロックが降順だから）。勝った要素の
  *    持ち主だけがカーソルを 1 進める。
  *
- * MUST: **全語彙 argsort を経由しない**（ADR 0068 決定 3）。読み出しは行を 1 回だけで、
+ * MUST: **全語彙 argsort を経由しない**（ADR 0068 決定 3）。候補の走査は行を 1 回だけで、
  * 仕事量は `dim/W` の走査 + `k·log2(W)` の畳み込み。k 回の行 reduce（マスク付き argmax の
  * 反復）に均すと行を k 回読むことになり、ADR が避けている高コスト側に落ちる。
+ * 選択値を書き出すときだけ元入力の k 要素を再読し、値のビット列を保つ。
  *
- * MUST: **scratch は workgroup storage に閉じる**（出力バッファへの同居も一時バッファも
+ * MUST: この通常形の **scratch は workgroup storage に閉じる**（出力バッファへの同居も一時バッファも
  * 出さない — ADR 0068 決定 3 の「確保仕様が読めなくなる」を構造で回避）。代わりに k の
  * **実装上限**が workgroup storage の device limit から決まる（{@link topkMaxK}）ので、
  * 超過は縮退させず {@link assertTopkK} が上限値つきで fail loudly にする。
+ * k=1 の長い行は argmax と同じ分割形を使う（ADR 0068 追記 9）。
  *
- * MUST: タイブレークは **最小 index**（ADR 0068 決定 3）。述語 {@link TOPK_BEATS_FN} は
- * argmax（src/kernels/argmax.ts の `argmax_beats`）と**同一本文**で、(値 降順, index 昇順) の
+ * MUST: タイブレークは **最小 index**（ADR 0068 決定 3）。述語 {@link F32_RANK_WGSL} は
+ * argmax と共通で、(値 降順, index 昇順) の
  * 辞書式順序の厳密比較 — ①どちらの子を第 1 引数にしても勝者が変わらない ②勝者は候補集合の
  * 最大元。よってレーン局所の挿入・木の畳み込み・ラウンド間の順序が全て 1 本の述語で閉じ、
  * 結合順に依らず「値降順・同値なら index 昇順」で出る。k=1 は argmax と同じ答えになる
@@ -48,17 +50,16 @@
  * 無い。
  *
  * MUST: NaN は**最大として扱う**（argmax と同じ規律。torch も NaN を先頭へ出す — 実測同上）。
- * 判定は**ビット列**（{@link IS_NAN_BITS_WGSL}）— ドライバの比較は NaN で全て false になるので、
+ * 判定は**ビット列**（{@link F32_RANK_WGSL}）— ドライバの比較は NaN で全て false になるので、
  * 素の `>` に任せると NaN が黙って負ける。
  *
  * MUST: params は uniform で渡す（行ループ内に workgroupBarrier があり、ループ条件が
  * workgroup 内で一様である必要がある）。
- * MUST: −inf のビット列は params で運ぶ（safe_softmax / argmax と同じ理由 — 定数式の
- * `bitcast<f32>(0xff800000u)` を「const-expression が inf」としてシェーダ生成エラーにする
- * 実装がありうる）。
+ * −inf のビット列は既存の params レイアウトで運ぶ。比較・保存とも整数のまま扱い、
+ * 非正規数が途中でゼロ化されないようにする（ADR 0068 追記 10）。
  */
 
-import { IS_NAN_BITS_WGSL } from "../codegen/numerics-wgsl.ts";
+import { F32_RANK_WGSL } from "../codegen/numerics-wgsl.ts";
 import { CodegenError } from "../codegen/errors.ts";
 import { assertU32Params } from "../codegen/params.ts";
 
@@ -124,30 +125,11 @@ export const assertTopkK = (k: number, storageLimitBytes: number, where: string)
 };
 
 /**
- * `(vb, ib)` が `(va, ia)` に勝つか。順序は **NaN > 有限 > −inf**、同値なら **index が
- * 小さい方**（モジュール doc の MUST）。
- *
- * MUST: argmax の `argmax_beats` と**同一の本文**にする（族間で答えが割れないことが k=1 の
- * 突合門の前提）。名前だけ分けるのは、キーが別パイプラインだと分かるようにするため。
- */
-const TOPK_BEATS_FN = `fn topk_beats(vb: f32, ib: u32, va: f32, ia: u32) -> bool {
-  let na = is_nan_bits(va);
-  let nb = is_nan_bits(vb);
-  if (na != nb) {
-    return nb;
-  }
-  if (na) {
-    return ib < ia;
-  }
-  return vb > va || (vb == va && ib < ia);
-}`;
-
-/**
  * パイプラインキー。**k を含む**（WGSL が k で変わるので、含めないと最初の k のパイプラインが
  * 別の k の dispatch に配られ、例外なしに別のバイト列が書かれる）。
  */
 export const topkKey = (k: number): string =>
-  `topk:v1:f32+i32:lastdim:desc:minindex:k${k}:wg${TOPK_WORKGROUP_SIZE}`;
+  `topk:v2:f32+i32:lastdim:desc:minindex:k${k}:wg${TOPK_WORKGROUP_SIZE}`;
 
 /** k を焼いた WGSL（配列長とラウンド数が k で決まる）。 */
 export const topkWgsl = (k: number): string => {
@@ -159,17 +141,15 @@ struct Params {
   neg_inf: u32,
 }
 @group(0) @binding(0) var<uniform> params: Params;
-@group(0) @binding(1) var<storage, read> x: array<f32>;
-@group(0) @binding(2) var<storage, read_write> values: array<f32>;
+@group(0) @binding(1) var<storage, read> x: array<u32>;
+@group(0) @binding(2) var<storage, read_write> values: array<u32>;
 @group(0) @binding(3) var<storage, read_write> indices: array<i32>;
 
-${IS_NAN_BITS_WGSL}
+${F32_RANK_WGSL}
 
-${TOPK_BEATS_FN}
-
-var<workgroup> cand_value: array<f32, ${k * w}>;
+var<workgroup> cand_value: array<u32, ${k * w}>;
 var<workgroup> cand_index: array<u32, ${k * w}>;
-var<workgroup> head_value: array<f32, ${w}>;
+var<workgroup> head_value: array<u32, ${w}>;
 var<workgroup> head_index: array<u32, ${w}>;
 
 @compute @workgroup_size(${w})
@@ -180,7 +160,7 @@ fn main(
 ) {
   let lid = lid3.x;
   let dim = params.dim;
-  let neg_inf = bitcast<f32>(params.neg_inf);
+  let neg_inf = f32_rank_key(params.neg_inf);
   let block = lid * ${k}u;
   var row = wid.x;
   while (row < params.rows) {
@@ -193,11 +173,11 @@ fn main(
     }
     var i = lid;
     while (i < dim) {
-      let v = x[base + i];
+      let v = f32_rank_key(x[base + i]);
       // 末尾（最弱）に勝てない候補はここで捨てる。勝つ候補だけが降順を保つ挿入へ進む
-      if (topk_beats(v, i, cand_value[block + ${k - 1}u], cand_index[block + ${k - 1}u])) {
+      if (rank_key_beats(v, i, cand_value[block + ${k - 1}u], cand_index[block + ${k - 1}u])) {
         var s = ${k - 1}u;
-        while (s > 0u && topk_beats(v, i, cand_value[block + s - 1u], cand_index[block + s - 1u])) {
+        while (s > 0u && rank_key_beats(v, i, cand_value[block + s - 1u], cand_index[block + s - 1u])) {
           cand_value[block + s] = cand_value[block + s - 1u];
           cand_index[block + s] = cand_index[block + s - 1u];
           s = s - 1u;
@@ -220,7 +200,7 @@ fn main(
         if (lid < stride) {
           let other = head_value[lid + stride];
           let other_at = head_index[lid + stride];
-          if (topk_beats(other, other_at, head_value[lid], head_index[lid])) {
+          if (rank_key_beats(other, other_at, head_value[lid], head_index[lid])) {
             head_value[lid] = other;
             head_index[lid] = other_at;
           }
@@ -230,7 +210,7 @@ fn main(
       }
       let won = head_index[0u];
       if (lid == 0u) {
-        values[row * ${k}u + r] = head_value[0u];
+        values[row * ${k}u + r] = x[base + won];
         indices[row * ${k}u + r] = i32(won);
       }
       // 走査は i ≡ lid (mod ${w}) の分担なので、勝った要素の持ち主は won % ${w} で決まる
