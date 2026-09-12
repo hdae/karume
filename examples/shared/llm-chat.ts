@@ -82,6 +82,7 @@ export class LlmChat<C extends LlmContext> {
     options: {
       readonly signal?: AbortSignal;
       readonly onPrefill?: (progress: LlmPrefill) => void;
+      readonly onToken?: (id: number) => void;
       readonly onOverflow?: (droppedTurns: number) => void;
     } = {},
   ): Promise<LlmReply> {
@@ -124,7 +125,10 @@ export class LlmChat<C extends LlmContext> {
         ) {
           tokens.push(token);
           if (this.#tokenizer.stopTokens.includes(token)) stop = "eos";
-          else write(decoder.push(token));
+          else {
+            options.onToken?.(token);
+            write(decoder.push(token));
+          }
         }
       } catch (error) {
         if (!signal?.aborted || error !== signal.reason) throw error;

@@ -56,3 +56,18 @@ The measured GPTQ i4 weights occupy about 1.78 GB on disk; GPU usage also includ
 
 See [the measurement record](../../docs/research/2026-09-10-codex-mtp-optimization.md).
 A public distribution and a published `MiniCPM5Pipeline` API are still pending.
+
+## Timing and warmup
+
+Startup runs a short warmup with separate generation state, then discards that state before
+accepting conversation input. Warmup does not add messages to the conversation. It prepares the
+main prefill/decode paths, not every possible prompt length or speculative execution path.
+Use `--no-warmup` to measure a run without this startup step; driver caches may still be warm.
+
+Each reply reports **TTFT** (time to the first non-stop token), **decode tok/s** (subsequent
+non-stop tokens divided by the time from the first token to completion), and **total** turn time.
+These are wall-clock measurements including host work and output handling, not GPU-only timings.
+The displayed total token count includes EOS; the decode numerator excludes EOS and the first
+token. With no delivered tokens TTFT is unavailable; with fewer than two, decode speed is unavailable.
+Token timing precedes text decoding, so buffered text does not postpone TTFT.
+Warmup and model loading are reported separately and excluded from turn timing.

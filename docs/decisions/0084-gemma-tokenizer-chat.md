@@ -204,3 +204,21 @@ export / runtime attention_mask 配線は本波の射程外で later に残る�
     低層の既定」という**上流のどこにも無い**組み合わせを作らないため。
   - **破壊的変更（未リリース面）**: 上の改名・`config.sampler` の型縮小・`fromAssets` が不正宣言を
     ロード前に拒否するようになったこと。GPU golden は全て不変。
+
+## トークン通知とデモ計測（2026-09-12）
+
+利用者の速度比較依頼により、Gemma4ChatOptions / Gemma4ChatTurnOptions に省略可能な
+`onToken(id)` を追加する。復号前の生成イベントで同期通知し、停止 token は既存イベントと同じく
+含めない。特殊 token と停止文字列に隠れる token は含む。関数は要求発行時に保持し、例外は
+onPrefill と同じく生成の失敗として伝播させる。既存の戻り値・生成列・停止勘定は変更しない。
+
+デモはモデル読込後に独立した生成状態で主要な prefill / decode を暖機し、解放後に会話を開始する。
+既定は暖機ありへ変更し、`--no-warmup` で従来の開始条件を選べる。全形のコンパイルや driver cache
+の消去は保証しない。Gemma は全 chunk 長の prefill と短い decode を別 sequence で通す。
+抽選設定は本番と同じだが、履歴・KV・乱数状態・投機ゲートは会話と共有しない。
+
+Gemma通常/QAT・MiniCPM5・Qwen3のデモは、開始から最初の非停止 token までをTTFT、
+`(非停止token数 - 1) / (完了時刻 - 最初のtoken時刻)`をdecode速度とする。
+本文を再tokenizeせず、復号前の配送を数える。0 tokenのTTFT、0〜1 tokenまたは時間0の速度は未測定。
+従来のターン全体時間と停止込みtoken数は残す。JSON出力はelapsedMsを維持し、
+`generatedTokens`・`ttftMs`・`decodeTokensPerSecond`を追加する（未測定はnull）。

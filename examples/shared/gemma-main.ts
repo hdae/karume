@@ -16,6 +16,12 @@ import { denoDirectory } from "../../packages/hub/deno.ts";
 import type { AssetProgress } from "../../packages/hub/mod.ts";
 import { acquireGpu } from "../../packages/runtime/mod.ts";
 import type { GpuTimingStats, SessionDiagnostics } from "../../packages/runtime/mod.ts";
+import {
+  formatGenerationTiming,
+  generationTimer,
+  type GenerationTiming,
+} from "./generation-timing.ts";
+import { warmupGemma } from "./gemma-warmup.ts";
 
 export const runGemmaCli = async (
   family: "gemma4" | "gemma4-qat",
@@ -24,7 +30,7 @@ export const runGemmaCli = async (
   const USAGE = "--source <配布形のパス> | --repo <owner/name[@revision]>" +
     " --system <文字列> --max-new-tokens <整数> --temperature <数> --top-k <整数>" +
     " --top-p <数> --seed <整数> --max-resident-ple-bytes <整数> --capacity <整数>" +
-    " --chunk-length <整数> --diagnostics" +
+    " --chunk-length <整数> --diagnostics --no-warmup" +
     (family === "gemma4" ? " --speculative" : " --model <e2b|e4b>");
   if (argv.length === 1 && ["--help", "-h"].includes(argv[0])) {
     console.log(`deno task demo:${family} ${USAGE}`);
@@ -46,7 +52,9 @@ export const runGemmaCli = async (
   ]);
   /** 値を取らないスイッチ（`--key value` の対ではなく 1 語で立つ）。 */
   const FLAGS = new Set(
-    family === "gemma4" ? ["speculative", "diagnostics"] : ["diagnostics"],
+    family === "gemma4"
+      ? ["speculative", "diagnostics", "no-warmup"]
+      : ["diagnostics", "no-warmup"],
   );
 
   /** 取得元の既定（`dist.py --pipeline gemma4` が組むローカルミラー — `docs/assets-layout.md`）。 */
@@ -385,7 +393,7 @@ export const runGemmaCli = async (
       estimate.resident.stateBytes;
 
     write(
-      `[${family}] ready（${((performance.now() - started) / 1000).toFixed(1)}s）` +
+      `[${family}] loaded（${((performance.now() - started) / 1000).toFixed(1)}s）` +
         ` / capacity ${capacity}${
           capacity === defaultCapacity ? "" : `（既定 ${defaultCapacity}）`
         }` +
@@ -424,6 +432,18 @@ export const runGemmaCli = async (
         return dropOldestTurns(context);
       },
     };
+    if (!flags.has("no-warmup")) {
+      note(`[${family}] ウォームアップ中（別の生成状態で prefill・decode）\n`);
+      const at = performance.now();
+      const tokens = await warmupGemma(pipeline, capacity, sampler);
+      note(
+        `  warmup ${
+          ((performance.now() - at) / 1000).toFixed(2)
+        }s / ${tokens} token（会話履歴に含めません）\n`,
+      );
+    } else {
+      note(`[${family}] ウォームアップなし\n`);
+    }
     let session = new Gemma4ChatSession(pipeline, sessionOptions);
 
     /**
@@ -477,17 +497,13 @@ export const runGemmaCli = async (
       }
     };
 
-    /**
-     * 1 ターンの締め。tok/s は `stop.tokens`（停止 token も 1 個 = 抽選 1 回 = run 1 回）から書く —
-     * 出力文字列を符号化し直すと、byte_fallback や停止 token のぶんだけ数がずれる。
-     */
-    const report = (stop: Gemma4ChatStop, at: number): void => {
+    /** 総 token 数は停止 token 込み。decode 速度は onToken が受けた停止以外の token で計測する。 */
+    const report = (stop: Gemma4ChatStop, timing: GenerationTiming): void => {
       // 本文が 1 片も出なかったターン（即 EOS）では、ここが prefill の行を畳む唯一の席になる。
       clearPrefill();
-      const elapsed = (performance.now() - at) / 1000;
       write(
-        `\n  [${describeStop(stop)} · ${stop.tokens} tok · ${elapsed.toFixed(1)}s · ` +
-          `${(stop.tokens / elapsed).toFixed(1)} tok/s${describeSpeculation(stop)}` +
+        `\n  [${describeStop(stop)} · ${stop.tokens} tok · ${formatGenerationTiming(timing)}` +
+          describeSpeculation(stop) +
           ` · 会話 ${session.turns.length} 発話]\n`,
       );
       showTiming();
@@ -528,12 +544,13 @@ export const runGemmaCli = async (
 
       const controller = new AbortController();
       turn = controller;
-      const turnStarted = performance.now();
+      const timer = generationTimer();
       turnRuns = 0;
       lastTiming = undefined;
       // 発行した stream は必ず汲み切るか break で閉じる（ターンの締めは列の終端で走る）。
       const stream = session.send(line, {
         onPrefill: showPrefill,
+        onToken: timer.onToken,
         signal: controller.signal,
       });
       try {
@@ -543,7 +560,7 @@ export const runGemmaCli = async (
           clearPrefill();
           write(chunk);
         }
-        report(await stream.done, turnStarted);
+        report(await stream.done, timer.finish());
       } catch (error) {
         clearPrefill();
         if (error instanceof GenerationCapacityError) {
@@ -557,7 +574,7 @@ export const runGemmaCli = async (
         } else if (error === controller.signal.reason) {
           // 中断でも「成功した run のぶんだけ」会話は進んでいる。done は reject ではなく
           // `aborted` で settle するので、生成できた token 数はそのまま読める。
-          report(await stream.done, turnStarted);
+          report(await stream.done, timer.finish());
         } else {
           throw error;
         }

@@ -1029,3 +1029,37 @@ Deno.test("ChatSession: 履歴スナップショットの各発話は外部か�
   assertEquals(session.turns[0].content, "Name a color.");
   await session.dispose();
 });
+
+Deno.test("ChatSession token 通知: 発行時の関数を保持し、本文と停止 token 数を変えない", async () => {
+  const host = fakeHost([{ text: "Blue.", closes: true }], programOf(640));
+  await using session = new Gemma4ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS });
+  const seen: number[] = [];
+  const options = {
+    onToken: (id: number): void => {
+      seen.push(id);
+    },
+  };
+  const stream = session.send("Name a color.", options);
+  options.onToken = () => {
+    throw new Error("発行後の変更");
+  };
+  assertEquals(await stream.text(), "Blue.");
+  assertEquals(seen, tokenizer.encode("Blue."));
+  assertEquals((await stream.done).tokens, seen.length + 1);
+});
+Deno.test("ChatSession token 通知: callback の失敗を伝え、次の会話を妨げない", async () => {
+  const host = fakeHost(
+    [{ text: "Blue.", closes: true }, { text: "Red.", closes: true }],
+    programOf(640),
+  );
+  await using session = new Gemma4ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS });
+  const failure = new Error("token observer failed");
+  const stream = session.send("Name a color.", {
+    onToken: () => {
+      throw failure;
+    },
+  });
+  assertEquals(await assertRejects(() => stream.text()), failure);
+  assertEquals(await assertRejects(() => stream.done), failure);
+  assertEquals(await session.send("Another color.").text(), "Red.");
+});

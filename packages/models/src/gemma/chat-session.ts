@@ -166,6 +166,11 @@ export type Gemma4ChatTurnOptions = {
    * 出す口が要る。
    */
   readonly onPrefill?: (progress: Gemma4PrefillProgress) => void;
+  /**
+   * 停止 token を除く生成 token の通知。復号・停止文字列の保留より前に同期で呼ぶ。
+   * 本文を出さない特殊 token も含む。例外はそのターンへ伝播する。発行時に関数を写す。
+   */
+  readonly onToken?: (id: number) => void;
   /** 中断（`signal.reason` をそのまま throw する — ADR 0083 決定 5）。 */
   readonly signal?: AbortSignal;
 };
@@ -349,6 +354,7 @@ export class Gemma4ChatSession {
     const stopTokens = options.stopTokens === undefined ? undefined : [...options.stopTokens];
     const signal = options.signal;
     const onPrefill = options.onPrefill;
+    const onToken = options.onToken;
     // 停止文字列の状態機械もここで作る（指定の検査と複製がその中で済む = 受理集合が同期に落ちる）。
     const stopStrings = createStopStringFilter(options.stopStrings ?? []);
     const detokenizer = this.#host.tokenizer.createDetokenizer();
@@ -392,7 +398,7 @@ export class Gemma4ChatSession {
           ...(sampler === undefined ? {} : { sampler }),
           ...(signal === undefined ? {} : { signal }),
         });
-        const parts = decodeChatChunks(stream, detokenizer, stopStrings, onPrefill);
+        const parts = decodeChatChunks(stream, detokenizer, stopStrings, onPrefill, onToken);
         try {
           for (;;) {
             const step = await parts.next();

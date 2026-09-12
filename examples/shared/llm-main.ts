@@ -15,12 +15,13 @@ import {
   streamLlm,
 } from "./llm-generate.ts";
 import { LlmChat, readLlmLines } from "./llm-chat.ts";
+import { formatGenerationTiming, generationTimer } from "./generation-timing.ts";
 
 export const runLlmCli = async (family: LlmFamily, argv = Deno.args): Promise<void> => {
   const profile = llmProfile(family);
   const usage = `deno task demo:${family} [--prompt <文字列>] [--system <文字列>]\n` +
     `  [--source <変換済み系列ディレクトリ> | --quant <${LLM_QUANTS.join("|")}>]\n` +
-    `  [--tokenizer <公式 tokenizer.json>] [--max-new-tokens <整数>] [--completion] [--json]\n` +
+    `  [--tokenizer <公式 tokenizer.json>] [--max-new-tokens <整数>] [--completion] [--json] [--no-warmup]\n` +
     "ローカルモデルを優先します。--prompt を省略すると行ごとの対話になります。\n" +
     "/reset で履歴消去、/exit・Ctrl+D で終了、生成中の Ctrl+C でターン中断。\n" +
     "greedy・非 thinking・容量 128 token。古い発話を対で削除し、system は保持します。\n" +
@@ -33,7 +34,7 @@ export const runLlmCli = async (family: LlmFamily, argv = Deno.args): Promise<vo
   const flags = new Set<string>();
   for (let at = 0; at < argv.length; at++) {
     const key = argv[at];
-    if (["--completion", "--json"].includes(key)) {
+    if (["--completion", "--json", "--no-warmup"].includes(key)) {
       if (flags.has(key)) throw new Error(`${key} が重複しています`);
       flags.add(key);
       continue;
@@ -104,6 +105,33 @@ export const runLlmCli = async (family: LlmFamily, argv = Deno.args): Promise<vo
     const session = await prepared.createSession(gpu, streamShards(shards.slice(1)));
     await using _release = { [Symbol.asyncDispose]: () => session.dispose() };
     note(`  loaded ${((performance.now() - loaded) / 1000).toFixed(2)}s\n`);
+    if (!flags.has("--no-warmup")) {
+      note("  ウォームアップ中（別の会話・最大4 token）\n");
+      const started = performance.now();
+      turn = new AbortController();
+      let tokens = 0;
+      try {
+        for await (
+          const token of streamLlm(
+            session,
+            graph,
+            tokenizer.encode("Hello", true),
+            4,
+            tokenizer.stopTokens,
+            turn.signal,
+          )
+        ) if (!tokenizer.stopTokens.includes(token)) tokens += 1;
+      } finally {
+        turn = undefined;
+      }
+      note(
+        `  warmup ${
+          ((performance.now() - started) / 1000).toFixed(2)
+        }s / ${tokens} token（会話履歴に含めません）\n`,
+      );
+    } else {
+      note("  ウォームアップなし\n");
+    }
     if (interactive) {
       await using sequence = new LlmSequence(session, graph);
       const chat = new LlmChat(sequence, tokenizer, graph, maxNewTokens, args.get("--system"));
@@ -134,26 +162,26 @@ export const runLlmCli = async (family: LlmFamily, argv = Deno.args): Promise<vo
           continue;
         }
         turn = new AbortController();
-        const started = performance.now();
+        const timer = generationTimer();
         try {
           const result = await chat.send(line, (chunk) => {
             if (!json) write(chunk);
           }, {
             signal: turn.signal,
+            onToken: timer.onToken,
             onOverflow: (count) => status(`\n  [容量超過: 古い ${count} 組の発話を外して再構成]\n`),
             onPrefill: ({ chunk, chunks }) => {
               if (chunks > 1) note(`  prefill ${chunk}/${chunks}\n`);
             },
           });
-          const elapsedMs = performance.now() - started;
+          const timing = timer.finish();
           if (json) {
-            write(JSON.stringify({ model: profile.name, source, ...result, elapsedMs }) + "\n");
+            write(JSON.stringify({ model: profile.name, source, ...result, ...timing }) + "\n");
           } else {
             status(
               `\n  [${result.stop} · ${result.tokens.length} tok · ${
-                (elapsedMs / 1000).toFixed(2)
-              }s` +
-                ` · ${(result.tokens.length * 1000 / elapsedMs).toFixed(1)} tok/s` +
+                formatGenerationTiming(timing)
+              }` +
                 ` · 会話 ${chat.turns.length * 2} 発話 · KV 再利用 ${result.reusedTokens} token]\n`,
             );
           }
@@ -170,7 +198,7 @@ export const runLlmCli = async (family: LlmFamily, argv = Deno.args): Promise<vo
     }
     if (ids === undefined) throw new Error("単発生成の入力がありません");
     turn = new AbortController();
-    const started = performance.now();
+    const timer = generationTimer();
     const decoder = tokenizer.decoder();
     const tokens: number[] = [];
     let text = "";
@@ -194,10 +222,11 @@ export const runLlmCli = async (family: LlmFamily, argv = Deno.args): Promise<vo
         stop = "eos";
         continue;
       }
+      timer.onToken();
       write(decoder.push(token));
     }
     write(decoder.finish());
-    const elapsedMs = performance.now() - started;
+    const timing = timer.finish();
     if (flags.has("--json")) {
       console.log(
         JSON.stringify({
@@ -207,15 +236,15 @@ export const runLlmCli = async (family: LlmFamily, argv = Deno.args): Promise<vo
           tokens,
           text,
           stop,
-          elapsedMs,
+          ...timing,
         }),
       );
     } else {
       Deno.stdout.writeSync(encoder.encode("\n"));
       note(
         `  ${tokens.length} token（EOS を含む）/ ${
-          (elapsedMs / 1000).toFixed(2)
-        }s / stop=${stop}\n`,
+          formatGenerationTiming(timing)
+        } / stop=${stop}\n`,
       );
     }
   } finally {

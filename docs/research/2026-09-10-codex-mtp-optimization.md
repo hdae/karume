@@ -2821,3 +2821,43 @@ M2での初回/暖機後の追試、温度あり・penalty/bias・投機の転�
 修正後の全体検証は **2,928 passed（760 steps）/ 0 failed / 5 ignored、24分48秒**
 （修正用ディレクトリの`product-verify.log`）。TypeScriptの対象10ファイルは再検証中に変更していない
 （`final-source-hashes.json`）。既存のスキップ5件も、数値修正前後と同じ母音検出の資産依存ケースである。
+
+## デモのTTFT分離と起動時ウォームアップ（2026-09-12）
+
+この節はRTX 3080 Ti / Denoでの時点検証。利用者のM2の2ターン目16.9 tok/sという観測を受け、
+公開デモと比較するため、まず計測条件を揃えた。ここで測るのはデモの振る舞いであり、新しいカーネルの速度ではない。
+
+Gemma通常/QATの会話オプションに復号前の`onToken(id)`を追加した。停止tokenは通知しない。
+TTFTは開始から最初の非停止tokenまで、decode速度は`(配送数 - 1) / (完了時刻 - 最初の配送時刻)`。
+0 tokenのTTFT、0〜1 tokenまたは時間0の速度は未測定と表示する。ターン全体時間と停止込みtoken数も残す。
+MiniCPM5/Qwen3も同じ算出式へ揃え、JSONには既存のelapsedMsに加えてgeneratedTokens・ttftMs・
+decodeTokensPerSecondを出す。未測定はnull。文字列の再符号化や最初の非空文字列では計測しない。
+
+起動時の暖機は既定有効、`--no-warmup`で無効にできる。Gemmaは全chunk長のprefillと最大4tokenの
+短い生成を独立sequenceで行い、解放してから会話を開始する。MiniCPM5/Qwen3も独立した短い生成で暖機する。
+本番のsampler設定を用いるが、履歴・KV・乱数状態・投機ゲートは本番と共有しない。
+全ての入力長・投機経路のコンパイルやdriver cacheの管理を保証するものではない。
+契約変更は[ADR 0084](../decisions/0084-gemma-tokenizer-chat.md#トークン通知とデモ計測2026-09-12)。
+
+重点CPU検証は**78 passed（84 steps）/ 0 failed、1秒**。
+`outputs/bench/karume/2026-09-12_demo-timing-qpj_8tgs/focused.log`に保存した。
+続く型検査はGenerationSequence型にasyncDisposeが無いため失敗し、公開disposeをawaitする
+所有ラッパーへ直した。4デモの型検査で修正を確認した。
+
+実GPU比較の初回は読込時間の表示を比較器が除去しておらず失敗した。本文・停止・会話には差がなく、
+時刻除去を直して新規ディレクトリで再走した。初回ログは`2026-09-12_demo-warmup-check-eedb5xj3/`に残す。
+最終結果は`outputs/bench/karume/2026-09-12_demo-warmup-recheck-n45nwi85/summary.json`。
+Gemma通常、同投機、QAT E2B/E4B、MiniCPM5、Qwen3の**6構成・各3ターン・暖機あり/なし**で、
+回答・停止結果・reset後の再現が一致した。MiniCPM5/Qwen3はJSONのtoken列・prompt・KV再利用数も一致。
+Gemmaの比較は本文と時刻以外の表示を対象にし、token列の完全一致とは主張しない。
+
+温度1・seed42のGemma通常/QAT E2Bでも各3ターンの暖機あり/なしが一致した。
+`outputs/bench/karume/2026-09-12_demo-sampling-check-b93o_pel/summary.json`が正本。
+同じディレクトリにQwen3単発completionのJSONとMiniCPM5単発chatの表示確認も保存した。
+GPUの仕事は全て逐次実行した。Apple GPUでの新表示と暖機の確認は利用者の実機で行う。
+
+全体検証は**2,934 passed（760 steps）/ 0 failed / 5 ignored、24分51秒**。
+ログは`outputs/bench/karume/2026-09-12_demo-timing-verify-cjo4gmo1/verify.log`。
+その間にGPUの別ジョブは実行していない。終了後、通常Gemmaの既定capacity4096 / chunk768でも
+暖機と4tokenの生成を確認した（`2026-09-12_demo-default-warmup-yiy7_l_e/`）。
+暖機0.87秒・TTFT142msはこの単発の動作確認値で、安定した性能改善の根拠には使わない。

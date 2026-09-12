@@ -931,3 +931,21 @@ Deno.test("観測席: drafter が居ないのに draft が届いたら fail loud
     "drafter が居ないのに draft run の観測が届いた",
   );
 });
+
+Deno.test("chat token 通知: 停止文字列の保留より先に全 token が届く", async () => {
+  const seen: string[] = [];
+  const events = (async function* (): AsyncGenerator<GenerationEvent> {
+    yield { kind: "prefill", chunk: 1, chunks: 1 };
+    for (const id of [2, 4]) yield { kind: "token", id, position: id };
+  })();
+  for await (
+    const text of decodeChatChunks(
+      events,
+      new StreamingDetokenizer(sourceOf(SPELLINGS)),
+      createStopStringFilter(["END"]),
+      undefined,
+      (id) => seen.push(`token:${id}`),
+    )
+  ) seen.push(`text:${text}`);
+  assertEquals(seen, ["token:2", "token:4", "text:ENX!"]);
+});

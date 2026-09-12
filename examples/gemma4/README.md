@@ -121,7 +121,7 @@ pass the flag on macOS, and any fatal error is unwrapped in full — `Suppressed
 The banner is shaped like this — the byte figures depend on the asset and the device:
 
 ```
-[gemma4] ready（12.3s） / capacity 4096 / maxPosition 131072 / chunk 768
+[gemma4] loaded（12.3s） / capacity 4096 / maxPosition 131072 / chunk 768
          GPU 見積り resident 3812 MiB / peakAccounted 4205 MiB（上限ではない — 勘定外 5 項目）
          sampler {"temperature":1,"topK":64,"topP":0.95} / max-new-tokens 256 / 投機なし
 ```
@@ -141,7 +141,7 @@ A long prompt spends its first seconds in prefill, where nothing has been decode
 prompt spans more than one chunk, the script overwrites a `prefill n/m` line on stderr until the
 first piece of the reply arrives.
 
-Each turn closes with a bracketed summary: stop reason, tokens generated, elapsed seconds, tok/s,
+Each turn closes with a bracketed summary: stop reason, tokens generated, TTFT, decode tok/s, total seconds,
 then — on a speculating turn — `投機 k=3 · 2.15 tok/cycle（cycles 40）`, and finally the number of
 turns in the conversation. `k` is the drafter's step count, taken from the length of the acceptance
 histogram (the tally is built with one bucket per acceptance count, `0..k`); the tokens committed per
@@ -149,3 +149,18 @@ verify run are `1.00` when nothing was accepted and at most `k + 1`. When a turn
 session drops the oldest user/assistant pair and says so; when there is nothing left to drop, it
 reports the numbers that decide the case (limit, past length, prompt length, and the largest
 `max-new-tokens` that would have fit).
+
+## Timing and warmup
+
+Startup runs a short warmup with separate generation state, then discards that state before
+accepting conversation input. Warmup does not add messages to the conversation. It prepares the
+main prefill/decode paths, not every possible prompt length or speculative execution path.
+Use `--no-warmup` to measure a run without this startup step; driver caches may still be warm.
+
+Each reply reports **TTFT** (time to the first non-stop token), **decode tok/s** (subsequent
+non-stop tokens divided by the time from the first token to completion), and **total** turn time.
+These are wall-clock measurements including host work and output handling, not GPU-only timings.
+The displayed total token count includes EOS; the decode numerator excludes EOS and the first
+token. With no delivered tokens TTFT is unavailable; with fewer than two, decode speed is unavailable.
+Token timing precedes text decoding, so buffered text does not postpone TTFT.
+Warmup and model loading are reported separately and excluded from turn timing.

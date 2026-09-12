@@ -537,6 +537,11 @@ export type Gemma4ChatOptions = {
    * コールバックの例外は握らない（fail loudly — そのターンごと落ちる）。
    */
   readonly onPrefill?: (progress: Gemma4PrefillProgress) => void;
+  /**
+   * 停止 token を除く生成 token の通知。復号・停止文字列の保留より前に同期で呼ぶ。
+   * 本文を出さない特殊 token も含む。例外はそのターンへ伝播する。発行時に関数を写す。
+   */
+  readonly onToken?: (id: number) => void;
   /** 中断（段の境目で検査し `signal.reason` をそのまま throw する — ADR 0083 決定 5）。 */
   readonly signal?: AbortSignal;
   /**
@@ -1273,6 +1278,7 @@ export const decodeChatChunks = async function* (
   detokenizer: StreamingDetokenizer,
   stopStrings: StopStringFilter,
   onPrefill?: (progress: Gemma4PrefillProgress) => void,
+  onToken?: (id: number) => void,
 ): AsyncGenerator<string, string | undefined, undefined> {
   for await (const event of events) {
     if (event.kind === "prefill") {
@@ -1281,6 +1287,7 @@ export const decodeChatChunks = async function* (
       onPrefill?.({ chunk: event.chunk, chunks: event.chunks });
       continue;
     }
+    onToken?.(event.id);
     const chunk = stopStrings.push(detokenizer.push(event.id));
     if (chunk.text !== "") yield chunk.text;
     if (chunk.matched !== undefined) return chunk.matched;
@@ -1885,6 +1892,7 @@ class GemmaPipeline {
     const stopStrings = createStopStringFilter(options.stopStrings ?? []);
     const capacity = options.capacity;
     const onPrefill = options.onPrefill;
+    const onToken = options.onToken;
     // 投機の DI と観測 hook も**発行時に**決める（本体は最初の `next()` まで走らない）。
     const speculative = speculativeSetup(this.#state, options.speculative);
     const onRun = runDiagnosticsHook(this.#state);
@@ -1931,6 +1939,7 @@ class GemmaPipeline {
           state.tokenizer.createDetokenizer(),
           stopStrings,
           onPrefill,
+          onToken,
         );
       } catch (error) {
         failure = { error };
