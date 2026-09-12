@@ -13,6 +13,7 @@
   E4B の全 PLE を含むローカル pipeline は実機検証済み。E4B chat も CPU / Deno / Chrome で一致。
   [初期品質参考値](research/2026-09-12-llm-quality-baseline.md)はQwen/MiniCPMで保存済み。
   [TTFT・tok/s比較](research/2026-09-12-llm-speed-baseline.md)を基準にM2の同条件追試とprefillの費用帰属を優先する。
+  [Chrome比較ページとRTX実測](research/2026-09-12-browser-llm-speed.md)を追加。通常/QAT E2BのローカルONNX・HF直接取得を検収済み。M2は同ページで追試する。
   残件は配布 recipe / source 表、長文と広い品質評価。実験資産を公開済みモデルとして扱わない。
   手元の試走は [MiniCPM5 CLI](../examples/minicpm5/README.md) / [Qwen3 CLI](../examples/qwen3/README.md) を使える。
   容量 128 の対話・履歴整理・reset・中断と、公式 CPU 参照への多ターン一致を検収済み。

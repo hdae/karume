@@ -15,7 +15,7 @@
     ]
   },
   "tasks": {
-    "check": "deno check packages/runtime/mod.ts packages/hub/mod.ts packages/hub/deno.ts packages/models/mod.ts examples/anima/main.ts examples/anima/eval-images.ts examples/gemma4/main.ts examples/sbv2/main.ts examples/sbv2/dump.ts examples/irodori/main.ts examples/irodori/eval-audio.ts examples/vowel-detector/main.ts tools/opbench/main.ts tools/fusion-hints/main.ts tools/published-smoke/main.ts tools/ram-peak/measure.ts tools/mtp-bench/main.ts tools/diag/hold-vram.ts examples/minicpm5/main.ts examples/qwen3/main.ts examples/gemma4-qat/main.ts tools/llm-speed/main.ts",
+    "check": "deno check packages/runtime/mod.ts packages/hub/mod.ts packages/hub/deno.ts packages/models/mod.ts examples/anima/main.ts examples/anima/eval-images.ts examples/gemma4/main.ts examples/sbv2/main.ts examples/sbv2/dump.ts examples/irodori/main.ts examples/irodori/eval-audio.ts examples/vowel-detector/main.ts tools/opbench/main.ts tools/fusion-hints/main.ts tools/published-smoke/main.ts tools/ram-peak/measure.ts tools/mtp-bench/main.ts tools/diag/hold-vram.ts examples/minicpm5/main.ts examples/qwen3/main.ts examples/gemma4-qat/main.ts tools/llm-speed/main.ts tools/llm-speed/browser/server.ts tools/llm-speed/browser/runner.ts",
     "verify": "deno fmt --check && deno lint && deno task check && deno test -A",
     "demo:anima": "deno run -A examples/anima/main.ts",
     "smoke:published": "deno run -A --config tools/published-smoke/deno.json tools/published-smoke/main.ts",
@@ -28,7 +28,8 @@
     "dump:sbv2": "deno run -A examples/sbv2/dump.ts",
     "demo:qwen3": "deno run -A examples/qwen3/main.ts",
     "demo:minicpm5": "deno run -A examples/minicpm5/main.ts",
-    "demo:gemma4-qat": "deno run -A examples/gemma4-qat/main.ts"
+    "demo:gemma4-qat": "deno run -A examples/gemma4-qat/main.ts",
+    "bench:llm-browser": "deno run -A tools/llm-speed/browser/server.ts"
   },
   "fmt": {
     "lineWidth": 100,
@@ -37,6 +38,7 @@
   "imports": {
     "@std/assert": "jsr:@std/assert@1",
     "@hdae/yomi": "jsr:@hdae/yomi@^0.4.2",
-    "@hdae/yomi/loader": "jsr:@hdae/yomi@^0.4.2/loader"
+    "@hdae/yomi/loader": "jsr:@hdae/yomi@^0.4.2/loader",
+    "@std/testing/bdd": "jsr:@std/testing@1/bdd"
   }
 }

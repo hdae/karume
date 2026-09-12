@@ -23,6 +23,7 @@
   Chrome の Gemma 自由文比較は済。QAT の固定重みは保存後も全 byte 一致。CPU/GPU 差は行列縮約が SRQ 境界をまたぐことまで帰属済み。8短文で Deno/Chrome は一致、公式CPU一致はE2B 6件/E4B 4件。広い生成品質は未検収。
   デモの暖機・TTFT分離は検収済み。[Qwen/MiniCPMの初期品質参考値](../docs/research/2026-09-12-llm-quality-baseline.md)も保存。
   [PyTorchとDeno/WebGPUの速度比較](../docs/research/2026-09-12-llm-speed-baseline.md)を基準に、次はM2の同条件追試とprefillの費用帰属。Gemmaの品質本採点は残件。
+  [Gemma E2B / QAT E2BのChrome比較](../docs/research/2026-09-12-browser-llm-speed.md)も追加。`deno task bench:llm-browser`でM2から追試できる。RTXでは両エンジン・2取得経路の80生成が反復一致。量子化条件は異なる。
   ローカル実験 CLI は [MiniCPM5](../examples/minicpm5/README.md) / [Qwen3](../examples/qwen3/README.md)。
   Gemma 準拠の対話・reset・中断に対応。容量 128 の多ターン検収は research に記録。公開 pipeline は未追加。
   利用者の希望により、今後は作業単位で調査・検証を終えて順次コミットする。残件の正本は backlog。

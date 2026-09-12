@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Gemma E2B · Browser benchmark</title>
+    <style>
+    :root {
+      color-scheme: light dark;
+      font-family: system-ui, sans-serif;
+    }
+    body {
+      max-width: 1080px;
+      margin: 40px auto;
+      padding: 0 20px;
+      line-height: 1.6;
+    }
+    h1 {
+      font-size: 1.8rem;
+      margin-bottom: 8px;
+    }
+    .muted {
+      opacity: .75;
+    }
+    .controls {
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+      margin: 24px 0;
+      align-items: end;
+    }
+    label {
+      display: grid;
+      gap: 4px;
+    }
+    select,
+    button {
+      font: inherit;
+      padding: 8px 14px;
+      border-radius: 8px;
+      border: 1px solid #8886;
+    }
+    button {
+      cursor: pointer;
+    }
+    button:disabled {
+      cursor: default;
+      opacity: .5;
+    }
+    #status {
+      padding: 14px;
+      background: #8881;
+      border-radius: 8px;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    .table {
+      overflow-x: auto;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-variant-numeric: tabular-nums;
+    }
+    td,
+    th {
+      text-align: left;
+      padding: 10px;
+      border-bottom: 1px solid #8884;
+      white-space: nowrap;
+    }
+    pre {
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      padding: 16px;
+      background: #8881;
+    }
+    iframe {
+      width: 1px;
+      height: 1px;
+      border: 0;
+      position: absolute;
+    }
+    </style>
+  </head>
+  <body>
+    <h1>Gemma E2B · ブラウザ速度比較</h1>
+    <p class="muted">同じChromeで karume と Transformers.js を順番に計測します。</p>
+    <p>固定の英語・日本語入力から最大64トークンを生成。初回 → 暖機1回 → 本計測3回。TTFTは最初のトークンまでの時間、decodeはそれ以降の生成速度です。モデル取得・読み込み時間は別計測です。</p>
+    <p>通常版ONNXはq4f16、QAT ONNXはq2f16。karumeはf32演算です。配布重み・量子化・KVキャッシュの構成も異なるため、エンジン単独の性能差ではありません。</p>
+    <div class="controls">
+      <label>モデル<select id="model"><option value="normal">Gemma 4 E2B</option><option value="qat">Gemma 4 QAT E2B</option><option value="both">両方</option></select></label>
+      <label>比較対象<select id="engine"><option value="both">両方（順番に実行）</option><option value="karume">karume</option><option value="transformers">Transformers.js</option></select></label>
+      <button id="run">計測開始</button><button id="save" disabled>JSONを保存</button>
+    </div>
+    <p id="environment" class="muted"></p>
+    <p id="status" role="status" aria-live="polite">準備中</p>
+    <p
+      class="muted">計測中はこのタブを前面に置き、他のGPU処理を止めてください。ONNX初回取得は通常版 約3.1 GB、QAT 約2.3 GBです。中止する場合はページを再読み込みしてください。</p>
+    <div class="table">
+      <table>
+        <thead>
+          <tr>
+            <th>モデル / エンジン</th>
+            <th>入力</th>
+            <th>初回TTFT</th>
+            <th>暖機後TTFT</th>
+            <th>暖機後decode</th>
+            <th>生成数</th>
+            <th>読み込み</th>
+          </tr>
+        </thead>
+        <tbody id="results"></tbody>
+      </table>
+    </div>
+    <div id="texts"></div>
+    <script type="module">
+    const $ = (id) => document.getElementById(id);
+    const results = [], failures = [];
+    let activeFrame;
+    const report = () => ({ format: "karume-browser-comparison/1", results, failures });
+    const median = (values) => {
+      const valid = values.filter((v) => v !== null).sort((a, b) => a - b);
+      return valid.length === values.length ? valid[Math.floor(valid.length / 2)] : null;
+    };
+    const number = (value, unit) => value === null ? "—" : `${value.toFixed(2)} ${unit}`;
+    const add = (r) => {
+      results.push(r);
+      $("save").disabled = false;
+      for (const c of r.cases) {
+        const tr = document.createElement("tr");
+        const values = [
+          `${r.model} / ${r.engine}`,
+          c.case,
+          number(c.first.ttftMs, "ms"),
+          number(median(c.measured.map((x) => x.ttftMs)), "ms"),
+          number(median(c.measured.map((x) => x.decodeTokensPerSecond)), "tok/s"),
+          c.measured.map((x) => x.generatedTokens).join(" / "),
+          number(r.loadSeconds, "s"),
+        ];
+        for (const v of values) {
+          const td = document.createElement("td");
+          td.textContent = v;
+          tr.append(td);
+        }
+        $("results").append(tr);
+        const details = document.createElement("details"),
+          summary = document.createElement("summary"),
+          pre = document.createElement("pre");
+        summary.textContent = `${r.model} / ${r.engine} / ${c.case} の出力${
+          c.deterministic ? "" : "（繰り返しで不一致あり）"
+        }`;
+        pre.textContent = c.first.text;
+        details.append(summary, pre);
+        $("texts").append(details);
+      }
+    };
+    const runOne = (model, engine) =>
+      new Promise((resolve, reject) => {
+        const frame = document.createElement("iframe");
+        activeFrame = frame;
+        const listener = (event) => {
+          if (event.origin !== location.origin || event.source !== frame.contentWindow) return;
+          const { type, value } = event.data;
+          if (type === "status") {
+            $("status").textContent = value;
+            return;
+          }
+          if (type !== "result" && type !== "error") return;
+          window.removeEventListener("message", listener);
+          frame.remove();
+          activeFrame = undefined;
+          if (type === "error") {
+            failures.push({ model, engine, error: value });
+            $("save").disabled = false;
+            reject(Error(value));
+          } else {
+            add(value);
+            resolve();
+          }
+        };
+        window.addEventListener("message", listener);
+        frame.src = `/frame.html?model=${model}&engine=${engine}`;
+        frame.title = "Benchmark execution";
+        document.body.append(frame);
+      });
+    const start = async () => {
+      $("run").disabled = true;
+      $("model").disabled = true;
+      $("engine").disabled = true;
+      try {
+        const models = $("model").value === "both" ? ["normal", "qat"] : [$("model").value];
+        const engines = $("engine").value === "both" ? ["karume", "transformers"] : [$("engine").value];
+        for (const model of models) for (const engine of engines) await runOne(model, engine);
+        $("status").textContent =
+          "計測完了。表は本計測3回の中央値です。初回TTFTは各入力の初回で、プロセス全体の初回は英語のみです。";
+      } catch (error) {
+        $("status").textContent = String(error);
+      } finally {
+        activeFrame?.remove();
+        $("run").disabled = false;
+        $("model").disabled = false;
+        $("engine").disabled = false;
+      }
+    };
+    $("run").addEventListener("click", start);
+    $("save").addEventListener("click", () => {
+      const url = URL.createObjectURL(
+        new Blob([JSON.stringify(report(), null, 2)], { type: "application/json" }),
+      );
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `gemma-browser-${new Date().toISOString().replaceAll(":", "-")}.json`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    });
+    // 自動ブラウザも画面と同じ操作・結果を使う。
+    window.benchmarkResults = report;
+    try {
+      const config = await (await fetch("/config.json")).json();
+      const adapter = await navigator.gpu?.requestAdapter({ powerPreference: "high-performance" });
+      if (!adapter || adapter.info.isFallbackAdapter) {
+        throw Error("ハードウェアWebGPUを使えるChromeが必要です。");
+      }
+      $("environment").textContent =
+        `${adapter.info.vendor} / ${adapter.info.architecture} · shader-f16: ${
+          adapter.features.has("shader-f16")
+        } · Transformers.js ${config.versions.transformers} / ORT ${config.versions.onnxruntime} · ONNX: ${
+          config.localOnnx ? "ローカル" : "Hugging Face"
+        }`;
+      $("status").textContent = "準備完了。karumeはローカルの変換済みモデルを使います。";
+    } catch (error) {
+      $("status").textContent = String(error);
+      $("run").disabled = true;
+    }
+    </script>
+  </body>
+</html>

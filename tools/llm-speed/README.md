@@ -126,3 +126,10 @@ deno check tools/llm-speed/main.ts
 See the [recorded speed comparison](../../docs/research/2026-09-12-llm-speed-baseline.md).
 The separate [quality baseline](../llm-baseline/README.md) remains useful for tracking changes in
 model outputs; its CPU scoring duration is not used as a generation-speed result.
+
+## Chrome / M2 comparison
+
+Run `deno task bench:llm-browser` from the repository root and open
+http://localhost:8787 in Chrome. The [browser benchmark](browser/README.md) compares
+local karume Gemma E2B / QAT E2B with pinned Transformers.js ONNX models, separates
+TTFT from warmed decode throughput, and exports JSON results.

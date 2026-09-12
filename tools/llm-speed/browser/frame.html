@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+  <meta charset="utf-8">
+  <title>Benchmark runner</title>
+  <script type="importmap">
+  {
+    "imports": {
+      "onnxruntime-web/webgpu": "/vendor/ort.webgpu.min.mjs?v={{onnxruntime}}",
+      "onnxruntime-common": "/vendor/ort.webgpu.min.mjs?v={{onnxruntime}}"
+    }
+  }
+  </script>
+  <script type="module">
+  import { runBenchmark } from "/runner.js";
+  const params = new URLSearchParams(location.search);
+  const engine = params.get("engine"), model = params.get("model");
+  const send = (type, value) => parent.postMessage({ type, value }, location.origin);
+  try {
+    if (!["karume", "transformers"].includes(engine) || !["normal", "qat"].includes(model)) {
+      throw Error("Invalid benchmark selection");
+    }
+    const config = await (await fetch("/config.json")).json();
+    const result = await runBenchmark(engine, model, config.localOnnx, (s) => send("status", s));
+    send("result", {
+      ...result,
+      checkout: config.revision,
+      checkoutDirty: config.dirty,
+      bundleSha256: config.bundleSha256,
+    });
+  } catch (error) {
+    send("error", String(error?.stack ?? error));
+  }
+  </script>
+</html>

@@ -2887,3 +2887,24 @@ M2の同条件測定、長文脈、Gemmaの広い品質評価は残る。デモ�
 速度基準値の統合後の全体検証は**2,934 passed（760 steps）/ 0 failed / 5 ignored、25分20秒**。
 ログは`outputs/bench/karume/2026-09-12_llm-speed-verify-fNWKU5/verify.log`。
 Pythonの時計・品質復元/採点は22件成功。反復生成160件、資産93ファイルのSHAと記録の参照先も照合した。
+
+## Gemma E2B / QAT E2BのChrome比較（2026-09-12）
+
+[ブラウザ比較の正本](2026-09-12-browser-llm-speed.md)と[集計JSON](2026-09-12-browser-llm-speed-results.json)を追加した。
+`deno task bench:llm-browser`でローカルサーバーを起動し、M2のChromeから初回・暖機後のTTFT / tok/sを確認できる。
+通常 / QAT E2B、karume / Transformers.jsを独立iframeで逐次実行し、モデル読込時間と生成時間を分離する。
+既存karume配布物を読み取り専用で使い、公開ONNXは固定revisionから取得する。ローカルONNXの指定も可能。
+
+RTX 3080 Ti / Chrome153で、ローカルONNX・HF直接取得の計80生成が各5反復でtoken一致した。
+HF直接取得時の英語中央値は通常karume **51.07 tok/s** / Transformers.js **11.71 tok/s**、
+QATは **52.78 / 12.65 tok/s**。karumeの通常/QATの生成列は前回のDenoとも一致した。
+ONNXの量子化・演算精度・KV構成はkarumeと異なり、エンジン間の出力は分岐する。ORTの速度ばらつきも残る。
+WebML Communityの専用カーネルを動かした結果とは扱わない。
+
+headlessでadapterが得られないため、Xvfb上のheaded Chromeを自動操作した。
+Linux / NVIDIA向けf16実験toggleを明示し、M2の通常起動へは持ち込まない。
+M2での新ページの速度と、広い品質評価は利用者の実機追試・後続作業として残る。
+
+比較ページ統合後の全体検証は**2,935 passed（762 steps）/ 0 failed / 5 ignored、25分13秒**。
+ログは`outputs/bench/karume/2026-09-12_browser-verify-9UMwHy/verify.log`。
+JSON保存の画面操作と、最終bundleが計測時と同一であることも確認した。
