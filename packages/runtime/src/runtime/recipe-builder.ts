@@ -66,6 +66,9 @@ import {
   argmaxSplitGroups,
   argmaxSplitParams,
   argmaxSplitPartialBytes,
+  TOPK_ONE_SPLIT_MERGE_KEY,
+  topkOneSplitGroups,
+  topkOneSplitMergeWgsl,
 } from "../kernels/argmax.ts";
 import {
   CONV1D_SCALE_BINDING,
@@ -954,42 +957,14 @@ export class RecipeBuilder {
     const limit = this.#state.gpu.limits.maxComputeWorkgroupsPerDimension;
     const groups = argmaxSplitGroups(dim);
     if (groups > 0) {
-      const partialPipeline = await this.#state.cache.get(
-        ARGMAX_SPLIT_PARTIAL_KEY,
-        ARGMAX_SPLIT_PARTIAL_WGSL,
+      await this.#buildMaxIndexSplit(
+        rows,
+        dim,
+        groups,
+        binds[0],
+        outs[0],
+        builder,
       );
-      const mergePipeline = await this.#state.cache.get(
-        ARGMAX_SPLIT_MERGE_KEY,
-        ARGMAX_SPLIT_MERGE_WGSL,
-      );
-      const params = this.#writeParams(argmaxSplitParams(rows, dim, groups), PARAMS_UNIFORM_USAGE);
-      // 部分結果 [rows, groups, 2]（u32）。partial の直前に確保し merge の直後に返す。
-      const partial = builder.allocTemp(argmaxSplitPartialBytes(rows, groups));
-      builder.dispatch({
-        key: ARGMAX_SPLIT_PARTIAL_KEY,
-        pipeline: partialPipeline.pipeline,
-        layout: partialPipeline.layout,
-        roles: partialPipeline.roles,
-        params,
-        bindings: [{ binding: 1, source: binds[0] }, { binding: 2, source: partial }],
-        // x 軸 = 区間（1 workgroup = 1 区間・欠落は沈黙誤値なので上限超過は fail loudly）、
-        // y 軸 = 行（grid-stride で縮退可）。
-        workgroups: [
-          tiledWorkgroups(groups, 1, limit, "argmax split partial"),
-          gridStrideWorkgroups(rows, 1, limit),
-          1,
-        ],
-      });
-      builder.dispatch({
-        key: ARGMAX_SPLIT_MERGE_KEY,
-        pipeline: mergePipeline.pipeline,
-        layout: mergePipeline.layout,
-        roles: mergePipeline.roles,
-        params,
-        bindings: [{ binding: 1, source: partial }, { binding: 2, source: outs[0] }],
-        workgroups: [gridStrideWorkgroups(rows, 1, limit), 1, 1],
-      });
-      builder.releaseTemp(partial);
       return;
     }
     const { pipeline, layout, roles } = await this.#state.cache.get(ARGMAX_KEY, ARGMAX_WGSL);
@@ -1007,17 +982,79 @@ export class RecipeBuilder {
   }
 
   /**
-   * topk（最終次元・static-k・**出力 2 本** — ADR 0068 決定 3）。**1 dispatch**で、argmax と
-   * 同じ「1 行 = 1 workgroup + 行方向 grid-stride」（レーン局所 top-k → トーナメント merge の
-   * 根拠は src/kernels/topk.ts）。
+   * 部分最大と最小添字の縮約を共有し、topk(k=1)だけ元入力の値ビットも写す。
+   * DECIDED: docs/decisions/0068-decode-exit-multi-output.md#追記-92026-09-11-topk-k1-の長い行も-2-dispatch-へ分割する
+   */
+  async #buildMaxIndexSplit(
+    rows: number,
+    dim: number,
+    groups: number,
+    input: BindingSource,
+    index: BindingSource,
+    builder: StepRecipeBuilder,
+    value?: BindingSource,
+  ): Promise<void> {
+    const limit = this.#state.gpu.limits.maxComputeWorkgroupsPerDimension;
+    const mergeKey = value === undefined ? ARGMAX_SPLIT_MERGE_KEY : TOPK_ONE_SPLIT_MERGE_KEY;
+    const partialPipeline = await this.#state.cache.get(
+      ARGMAX_SPLIT_PARTIAL_KEY,
+      ARGMAX_SPLIT_PARTIAL_WGSL,
+    );
+    const mergePipeline = await this.#state.cache.get(
+      mergeKey,
+      value === undefined ? ARGMAX_SPLIT_MERGE_WGSL : topkOneSplitMergeWgsl(),
+    );
+    const params = this.#writeParams(
+      argmaxSplitParams(rows, dim, groups),
+      PARAMS_UNIFORM_USAGE,
+    );
+    // 部分結果 [rows, groups, 2]（u32）。partial の直前に確保し merge の直後に返す。
+    const partial = builder.allocTemp(argmaxSplitPartialBytes(rows, groups));
+    builder.dispatch({
+      key: ARGMAX_SPLIT_PARTIAL_KEY,
+      pipeline: partialPipeline.pipeline,
+      layout: partialPipeline.layout,
+      roles: partialPipeline.roles,
+      params,
+      bindings: [{ binding: 1, source: input }, { binding: 2, source: partial }],
+      // x 軸 = 区間（1 workgroup = 1 区間・欠落は沈黙誤値なので上限超過は fail loudly）、
+      // y 軸 = 行（grid-stride で縮退可）。
+      workgroups: [
+        tiledWorkgroups(groups, 1, limit, "argmax split partial"),
+        gridStrideWorkgroups(rows, 1, limit),
+        1,
+      ],
+    });
+    builder.dispatch({
+      key: mergeKey,
+      pipeline: mergePipeline.pipeline,
+      layout: mergePipeline.layout,
+      roles: mergePipeline.roles,
+      params,
+      bindings: [
+        { binding: 1, source: partial },
+        { binding: 2, source: index },
+        ...(value === undefined
+          ? []
+          : [{ binding: 3, source: value }, { binding: 4, source: input }]),
+      ],
+      workgroups: [gridStrideWorkgroups(rows, 1, limit), 1, 1],
+    });
+    builder.releaseTemp(partial);
+  }
+
+  /**
+   * topk（最終次元・static-k・**出力 2 本** — ADR 0068 決定 3）。
+   * k=1 の長い行は argmax の部分最大・merge を共用し、それ以外は1 dispatch。
+   * 値は選ばれた元入力のu32を写し、NaNのペイロードと符号付きゼロを維持する。
    *
    * MUST: 出力は**列で受ける**（`outs[0]` = 値 f32・`outs[1]` = 添字 i32）。順序は
    * {@link StepRecipe.outputs} と同じ出力 slot 昇順で、`node.outs` の並びがそのまま bind 面の
-   * 束縛番号 2 / 3 に対応する。取り違えると shape も byteLength も同じ（どちらも `[…, k]` の
+   * 1 dispatch経路の束縛番号 2 / 3 に対応する。取り違えると shape も byteLength も同じ（どちらも `[…, k]` の
    * 4 バイト要素）なので**例外なしに値と添字が入れ替わる**。
-   * MUST: 一時バッファを持たない（scratch は workgroup storage に閉じる — 決定 3 の
-   * 「出力バッファへの同居は採らない」を、そもそも scratch を外に出さない形で満たす）。
-   * 代わりに k の実装上限を device limit から判定する（{@link assertTopkK} — 縮退しない）。
+   * MUST: 分割経路の一時は実行・見積りの双方へ載せる。出力と同居させない。
+   * 1 dispatch 経路の scratch は workgroup storage に閉じ、k の実装上限は
+   * device limit から判定する（{@link assertTopkK} — 縮退しない）。
    */
   async #buildTopk(
     step: NodePlan,
@@ -1033,6 +1070,20 @@ export class RecipeBuilder {
     // **device 依存の実装上限**だけ（workgroup storage — 上限値つきで fail loudly）。
     const k = topkK(step.node.attrs, where);
     assertTopkK(k, this.#state.gpu.limits.maxComputeWorkgroupStorageSize, where);
+    const splitGroups = topkOneSplitGroups(dim);
+    // 外側が空なら従来経路へ残す。分割一時0Bはレシピの寿命契約に入らない。
+    if (k === 1 && rows > 0 && splitGroups > 0) {
+      await this.#buildMaxIndexSplit(
+        rows,
+        dim,
+        splitGroups,
+        binds[0],
+        outs[1],
+        builder,
+        outs[0],
+      );
+      return;
+    }
     const key = topkKey(k);
     const { pipeline, layout, roles } = await this.#state.cache.get(key, topkWgsl(k));
     const params = this.#writeParams(topkParams(rows, dim), PARAMS_UNIFORM_USAGE);

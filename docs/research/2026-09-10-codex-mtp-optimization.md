@@ -2361,3 +2361,183 @@ INT4はmaxAbs 0.00042724609375、INT8は0.002838134765625。
 （`all-rows-product-verify.log`）。GPUベンチ・別のGPUテストは並走させていない。
 最終の生成器も測定候補との全文一致を確認した（`all-rows-product-source-check.log`）。
 追加リンクと見出し、性能台帳の対象外の行が不変であることも検査した（`all-rows-doc-links.log`）。
+
+## topk k=1 の分割と小出力の実験（2026-09-11）
+
+この節はRTX 3080 Ti / Deno 2.9.6 / Chrome 153での時点実測。生データのOUTは
+`outputs/bench/karume/2026-09-11_fable-followup/`。M2の実測ではない。
+
+### カーネルの変更
+
+大語彙のtopk(k=1)を、既存argmaxと同じ部分最大→mergeの2 dispatchへ分割する。
+最大の値と最小indexを選ぶ規則は変えず、値は元入力のu32をそのまま写す。
+mergeで元入力を読むため、部分結果だけでなく元入力の寿命も見積りと実行へ載せる。
+新しい公開APIやIRは追加しない。決定は
+[ADR 0068 追記9](../decisions/0068-decode-exit-multi-output.md#追記-92026-09-11-topk-k1-の長い行も-2-dispatch-へ分割する)。
+
+`top1-kernel-bench.ts` / `.json` は同じcompute pass内の100反復を、heater後に8試料・順序交替で測った。
+基準と候補の値・indexのu32一致を確認してから計測する。中央値は次のとおり。
+
+| 行数 |   行長 | 既存topk k=1 |   分割候補 | 速度比 |
+| ---: | -----: | -----------: | ---------: | -----: |
+|    1 |  16384 |   0.16208 ms | 0.01004 ms |  16.14 |
+|    8 |  16384 |   0.17031 ms | 0.01057 ms |  16.11 |
+|   64 |  16384 |   0.17722 ms | 0.01184 ms |  14.97 |
+|    1 |  16385 |   0.16867 ms | 0.01029 ms |  16.40 |
+|    8 |  16385 |   0.16981 ms | 0.01051 ms |  16.16 |
+|   64 |  16385 |   0.16974 ms | 0.01208 ms |  14.06 |
+|    1 | 262144 |   2.01720 ms | 0.00922 ms | 218.74 |
+|    8 | 262144 |   3.17251 ms | 0.02289 ms | 138.59 |
+|   64 | 262144 |   3.21206 ms | 0.09917 ms |  32.39 |
+
+これはカーネル反復の値であり、生成全体の速度比ではない。
+既存argmaxのWGSLは全文不変で、k>1と短い行のtopkも維持する。
+区間数がWebGPUの既定dispatch上限65,535を超える巨大な行は、既存1 dispatchへ残す。
+
+### 小出力化を含む生成の対照
+
+`small-output.ts` / `small-browser.ts` はQAT E2Bの同じ入力・重みで、実験用グラフの出力だけを
+logits+hiddenからtopkの値+indexへ変える。容量128、chunk32、PLE常駐0、温度0、penalty/bias無し、
+最大64token、3入力×各3生成。毎回新しいGenerationContextを作るため、実際の多ターン会話ではない。
+通常CLIの変更でもない。出力は1tokenあたり **1,054,720 B→8 B**。
+
+既存topkをそのまま使った初期候補はDenoで約5%遅くなった（`small-top1-0-retry.log`、`warm-summary.json`）。
+分割カーネルを使った最小差分を、基準→候補→候補→基準の順で比較した。
+以下は暖機後6生成の「基準の所要時間÷候補の所要時間」。
+
+| 環境   | 比較組 | 最小 / 中央 / 最大    |
+| ------ | ------ | --------------------- |
+| Deno   | 1      | 1.007 / 1.012 / 1.016 |
+| Deno   | 2      | 1.014 / 1.020 / 1.026 |
+| Chrome | 1      | 1.006 / 1.032 / 1.066 |
+| Chrome | 2      | 1.007 / 1.063 / 1.090 |
+
+全4組・各9生成のtoken列が一致した。集計は`top1-minimal-model-summary.json`、個票は
+`{deno|chrome}-small-minimal-{base|top1}-{0|1}.json`。
+出力転送とCPUの語彙走査を減らせば両環境で利益はあるが、Denoの待ち時間の下限は残る。
+通常版、E4B、M2での小出力化は未検収。
+
+### 正しさと残る統合
+
+候補のGPU検証は **3 passed / 0 failed、490 ms**（`top1-minimal-gpu.log`）。
+行長16,383 / 16,384 / 16,385 / 262,144、8行でNaNの符号とpayload・同点・±0・全−inf・末尾を検査した。
+`neg→topk`の中間入力を使うグラフでも、2回の値変更とbacking再利用で値・indexが一致。
+workspaceの見積りは実測のピーク以上。部分結果を見積りから外す故障注入は失敗した
+（`top1-intermediate-estimate-no-temp.log`）。元入力のmerge読みを省く注入は、現行plannerが
+ノードの終わりまで入力を保持するため失敗しなかった。この後者を検出済みとは主張しない。
+
+製品の小出力化には、次の段階が必要。
+
+1. バッチの終端で常駐出力をstagingへコピーし、mapを完了待ちとして使う。
+   現在の`BatchScope.finish()`後に`ResidentTensor.read()`を呼ぶだけでは待ちが2回になる。
+2. `Session.enqueue`へGenerationContextを渡すなら、発行からバッチの最終成功/失敗まで使用リースを保つ。
+   長さのadvance/defer、state書き込み後のpoison、abort・dispose・rewindとの排他を通常runと揃える。
+   enqueue本体のin-flightリースと同じ完了待ちにすると自己待ちになるため、寿命を分ける。
+3. modelsの内部能力として、温度0・penalty/bias無し・非投機の小出力を明示する。
+   最初のNaNと非有限の最大値を現行sampler同様に拒否する。仮の全logitsへ膨らませるadapterは作らない。
+
+公開API・会話状態に触れるため、この段階はカーネル最適化と分けて検収する。
+この時点では未実装で、CLIの出力転送を減らしたとは報告しない。
+
+追加でsignaling NaNを正負1行ずつ含む10行へ拡大し、旧topkと候補の両方で値ビットを確認した。
+旧側は対象1件成功・2件filter、候補は3件成功（`top1-signaling-baseline.log` /
+`top1-signaling-candidate.log`）。製品の重点検証は **149 passed / 5 steps / 0 failed、2秒**
+（`top1-product-focused.log`）。既存argmaxのsnapshotは更新していない。
+
+全体検証中の差分レビューで、外側の次元が0の場合に分割用一時が0Bになる退行を見つけた。
+初回の全体検証は自分のテストプロセスへSIGINTを送って中断した（`top1-product-verify.log`、
+終了コード139。成功した全体検証としては扱わない）。
+旧経路は3形状×2実行の空出力を返し、候補は分割境界で0B一時の検査に失敗した
+（`top1-empty-baseline.log` / `top1-empty-candidate.log`）。
+行数0は既存の1 dispatch経路へ残し、受理範囲を保つGPU回帰テストを追加した。
+修正後の重点検証は **150 passed / 5 steps / 0 failed、2秒**（`top1-product-focused-v2.log`）。
+全体の `deno task verify` は **2,891 passed / 760 steps / 0 failed / 5 ignored、24分37秒**で成功
+（`top1-product-verify-v2.log`）。この全体走行中はGPUベンチ・追加GPUテストを並走させていない。
+
+## 定常速度の追加候補と採否（2026-09-11）
+
+この節はRTX 3080 Tiでの時点実験。OUTは `outputs/bench/karume/2026-09-11_fable-followup/`。
+
+### 重み容量と演算構成
+
+`weight-layout-summary.py` / `.json` で現在のE2B資産を数えた。PLEを除く主グラフのshard合計は
+通常版1,579,589,924 B、QAT828,096,932 B。linearは双方277個だが、通常版はINT4が276・INT8が1、
+QATはINT2が61・INT4が145・INT8が70・f32が1。QATにはさらにstatic_quantizeが487個ある。
+容量は約半分でも演算と同期の費用は残るため、容量比からtok/sの倍率は予測できない。
+ノード数は時間の帰属ではない。利用者のM2ではDenoの通常版が初回6.8、2回目16.4 tok/s、
+QATが初回4〜5、2回目16〜17 tok/sとの観測で、これをRTXの実測と混同しない。
+
+### 数値を変えないINT2候補
+
+`shared-x-i2.ts` / `.json` は入力をworkgroupメモリへ共同で読み、Kタイル256/512/1024/4096を比較した。
+実重みdown/up/head×3入力で、rawと量子化後のu32は基準と一致した。
+速度比の最良はdown0.936、up0.986、head1.034。大きなタイルではheadも0.788へ低下した。
+共通適用には利益がなく採らない。集計は`shared-x-summary.json`。
+
+4値の逆量子化を先に計算して整数コードで選ぶ候補は、単体downで1.086倍だった。
+`select-import-map.json`はM=1・K>=4096・N<=4096だけに限定してモデル全体を比較したが、
+暖機後の中央値はDeno1.001 / 1.009、Chrome0.992 / 1.005で、安定した利益がなかった。
+全4組・各9生成のtoken列は一致した。採用せず、`select-model-summary.json`へ記録した。
+
+列ごとに連続する重みを並べ替え、隣接スレッドの読みをまとめる候補は、raw値が一致し、
+down1.014・up1.006・head1.047倍。headの並べ替えだけでも約96 msを要し、
+保存形式やアップロードの複雑さに見合う全体利益を確認できていないため採らない。
+集計は`exact-micro-summary.json`。小workgroupとM=1関数化の不採用理由はINT2行ブロック節を参照。
+
+### K方向の並列縮約
+
+`parallel-i2.ts` / `.json` は語の加算順を変える別候補。8レーンのf32部分和はdownで2.777倍、
+up0.916・head0.599倍だった。down相当の形だけに限定したQAT E2Bは
+暖機後1.035〜1.046倍で、9生成のtoken列は基準と一致した（`qat-parallel-0.json`）。
+ただしraw u32と一部の量子化後の値は変わる。
+
+`parallel-oracle.ts` / `.json`で独立CPUの投影結果との距離も比較した。
+downのsin / wide / near-boundary入力で、量子化前のmaxAbsは順に
+5.96e-6→2.86e-6、5.064e-4→1.106e-4、6.866e-5→3.338e-5へ改善した。
+一方、sin入力の量子化後にCPUと異なる要素は1/1536→2/1536へ増えた。
+丸め境界を跨ぐため、量子化前の誤差改善が量子化後の一致を保証しない。
+整数16レーンではこの3入力の量子化後差が0だったが、入力scaleを知る新しい実行契約が必要。
+単純な浮動小数点誤差上界で境界を避ける案は93〜100%の出力が判定不能となり、不採用。
+
+既定経路には入れない。別の明示的な数値モードとして扱う場合も、E4B・M2・複数入力と長い生成の
+品質評価が必要。M=1だけの変更は、投機verify行0とdecodeのu32一致を保証しない。
+QATのMTPは未対応であり、将来の統合へそのまま適用できるとはしない。
+
+### 公式CPUの長い生成との比較
+
+`e2b-cpu-long-reference.json` / `long-reference-summary.json` は同じ3入力を最大64tokenまで比較した。
+GPUの変更前・非同期準備後・並列縮約候補は同じprefix一致長で、code46/64、物語13/64、日本語0/18だった。
+日本語のGPU生成長は20token。これらは今回の最適化より前からある差で、
+GPUの基準とのtoken一致を「公式CPUと64token完全一致」とは報告しない。
+
+### 量子化の固定回数探索とlinearとの融合
+
+`srq-search-bench.ts`はstatic_quantizeの値・境界表を変えず、while探索を固定8比較へ展開した候補。
+CPUの802,723点で従来探索と一致し、公式30scale・24,416入力を含む既存GPU検証4件も成功した
+（`srq-search-cpu-check.json`、`srq-branchless-oracle.log`）。
+6サイズ×3分布、100反復×8試料・順序交替の単体測定では、全18条件で1.018〜1.591倍だった
+（`srq-search-bench-summary.json`）。
+しかしQAT全体のABBAでは、暖機後中央値がDeno0.990 / 1.006、Chrome1.001 / 1.009で利益が安定しなかった。
+全4組・各9生成のtoken列は一致。採用しない（`srq-model-summary.json`）。
+
+`linear-srq-census.json`では、277個のlinearのうち276個が直後のstatic_quantizeだけに消費される
+（INT4 145・INT8 70・INT2 61）。量子化scaleが0で恒等になるopは487個中2個に留まる。
+`linear-srq-fusion-bench.ts`はINT2のM=1の末尾へ同じ整数表の量子化を付け、2 dispatchを1つにした。
+down/up/head×3入力×bias有無の18条件で量子化後u32が基準と一致した。
+ただし単体の速度比中央値はdown0.971・up1.050・head1.019で、downは遅くなった。
+サンプル間の揺れもあり、この形での共通適用は見送る。集計は`linear-srq-fusion-bench-summary.json`。
+INT4・INT8への融合やM2の速度は、この実験では評価していない。
+
+### 推定位置を固定回数で補正するSRQ候補
+
+`srq-hint-candidate`は、前回のQAT統合後に試した商からの境界探索と同系列で、新しい原理とは扱わない。
+今回は上下1段の補正後に整数表の区間を検査し、未確定なら従来二分探索で確定する。
+35scaleのうち恒等の0を除く34scale・境界前後・ランダムビットと、推定値の±2段故障注入を含む
+**10,256,541比較**が一致した（`srq-hint-cpu-check.json`）。
+公式30scale・24,416入力を含む既存GPU検証も **4 passed / 0 failed、2秒**（`srq-hint-oracle.log`）。
+
+同じ6サイズ×3分布の単体速度比は0.744〜1.412倍で、混合分布では全6サイズが遅く、
+262,144要素と1,048,576要素では約0.744 / 0.748倍だった。
+`srq-hint-bench.json` / `srq-hint-bench-summary.json`へ保存した。
+範囲による損が大きく、過去の同系列候補でも全体利益が安定していなかったため、
+今回の候補は全モデル比較へ進めず不採用とした。

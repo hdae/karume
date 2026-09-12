@@ -41,7 +41,7 @@ import { assertRuntimeSupport, type KarumeModel } from "../format/container.ts";
 import { parseDim, solveDim } from "../format/dims.ts";
 import type { IrDim, IrGraph } from "../format/ir.ts";
 import { toSizeClass } from "../gpu/arena.ts";
-import { numel, RUNTIME_SUPPORT, stateWindow } from "../ops.ts";
+import { numel, RUNTIME_SUPPORT, stateWindow, topkK } from "../ops.ts";
 import { aliasesInput } from "./fusion.ts";
 import {
   assertChunkBuckets,
@@ -71,7 +71,11 @@ import {
   type TransientTempSpec,
 } from "./transient-plan.ts";
 import { DEFAULT_PLAN_BACKING_BUDGET_BYTES, type GenerationContextSpec } from "./session-types.ts";
-import { argmaxSplitGroups, argmaxSplitPartialBytes } from "../kernels/argmax.ts";
+import {
+  argmaxSplitGroups,
+  argmaxSplitPartialBytes,
+  topkOneSplitGroups,
+} from "../kernels/argmax.ts";
 import { planStateAttention, type StateAttentionBlock } from "./state-attention-plan.ts";
 import {
   planWeightBuffers,
@@ -486,16 +490,19 @@ const isStateAttention = (node: NodePlan): boolean =>
   node.contract.kind === "attention" && Object.keys(node.node.states).length > 0;
 
 /**
- * 2 相形の argmax（長い行 — src/kernels/argmax.ts の「2 相分割」）が持つ部分結果の一時。
- * 経路の選択は実行相（recipe-builder の `#buildArgmax`）と同じ純関数 `argmaxSplitGroups` を通す
+ * 2 相形の argmax / topk(k=1)（長い行 — src/kernels/argmax.ts の「2 相分割」）が持つ部分結果の一時。
+ * 経路の選択は実行相と同じ純関数 `argmaxSplitGroups` / `topkOneSplitGroups` を通す
  * — ここで閾値を書き直すと、片方だけ直された実装に対して estimator が別の数を主張し続ける。
  * 1 dispatch 形（短い行）は 0 を返す。
  */
-const argmaxSplitTempBytes = (node: NodePlan): number => {
-  if (node.node.op !== "argmax") return 0;
+const selectionSplitTempBytes = (node: NodePlan): number => {
+  if (
+    node.node.op !== "argmax" &&
+    !(node.node.op === "topk" && topkK(node.node.attrs, "topk estimate") === 1)
+  ) return 0;
   const input = node.inputShapes[0];
   const dim = input[input.length - 1];
-  const groups = argmaxSplitGroups(dim);
+  const groups = node.node.op === "topk" ? topkOneSplitGroups(dim) : argmaxSplitGroups(dim);
   return groups === 0 ? 0 : argmaxSplitPartialBytes(numel(input.slice(0, -1)), groups);
 };
 
@@ -610,12 +617,19 @@ const transientSlotBytes = (
           writes: outputRefs,
         });
       }
-    } else if (!isAlias && argmaxSplitTempBytes(node) > 0) {
-      // 2 相 argmax: partial が一時へ書き、merge がそれを読んで出力へ書く（実行相と同じ 2 dispatch）。
+    } else if (!isAlias && selectionSplitTempBytes(node) > 0) {
+      // 部分最大から最小添字へ縮約する。topkはmergeで元入力の値ビットも読む。
       const partial: TransientRef = { kind: "temp", id: temps.length };
-      temps.push({ byteLength: argmaxSplitTempBytes(node), allocBefore: 0, releaseAfter: 1 });
+      temps.push({
+        byteLength: selectionSplitTempBytes(node),
+        allocBefore: 0,
+        releaseAfter: 1,
+      });
       dispatches.push({ reads, writes: [partial] });
-      dispatches.push({ reads: [partial], writes: outputRefs });
+      dispatches.push({
+        reads: node.node.op === "topk" ? [partial, ...reads] : [partial],
+        writes: outputRefs,
+      });
     } else if (!isAlias) {
       dispatches.push({ reads, writes: outputRefs });
     }

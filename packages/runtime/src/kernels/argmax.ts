@@ -196,6 +196,16 @@ export const ARGMAX_SPLIT_MERGE_KEY =
 export const argmaxSplitGroups = (dim: number): number =>
   dim >= ARGMAX_SPLIT_MIN_DIM ? Math.ceil(dim / ARGMAX_SPLIT_SPAN) : 0;
 
+/**
+ * topk(k=1)の分割はWebGPUの既定dispatch上限内に限る。
+ * 巨大な行は従来のgrid-stride 1 dispatchへ残し、対応入力を狭めない。
+ * https://gpuweb.github.io/gpuweb/#dom-gpusupportedlimits-maxcomputeworkgroupsperdimension
+ */
+export const topkOneSplitGroups = (dim: number): number => {
+  const groups = argmaxSplitGroups(dim);
+  return groups <= 65_535 ? groups : 0;
+};
+
 /** 部分結果の一時バッファの大きさ（`[rows, groups]` × (値 u32 + index u32)）。 */
 export const argmaxSplitPartialBytes = (rows: number, groups: number): number => rows * groups * 8;
 
@@ -278,62 +288,77 @@ export const ARGMAX_SPLIT_PARTIAL_WGSL: string = [
   "",
 ].join("\n");
 
-export const ARGMAX_SPLIT_MERGE_WGSL: string = [
-  "// karume argmax split merge (partials [rows, groups, 2] -> i32 index per row)",
-  "struct Params {",
-  "  rows: u32,",
-  "  dim: u32,",
-  "  groups: u32,",
-  "  neg_inf: u32,",
-  "}",
-  "@group(0) @binding(0) var<uniform> params: Params;",
-  "@group(0) @binding(1) var<storage, read> partial: array<u32>;",
-  "@group(0) @binding(2) var<storage, read_write> out: array<i32>;",
-  "",
-  IS_NAN_BITS_WGSL,
-  "",
-  ARGMAX_BEATS_FN,
-  "",
-  `var<workgroup> scratch_value: array<f32, ${ARGMAX_WORKGROUP_SIZE}>;`,
-  `var<workgroup> scratch_index: array<u32, ${ARGMAX_WORKGROUP_SIZE}>;`,
-  "",
-  `@compute @workgroup_size(${ARGMAX_WORKGROUP_SIZE})`,
-  "fn main(",
-  "  @builtin(workgroup_id) wid: vec3<u32>,",
-  "  @builtin(local_invocation_id) lid3: vec3<u32>,",
-  "  @builtin(num_workgroups) nwg: vec3<u32>,",
-  ") {",
-  "  let lid = lid3.x;",
-  "  let groups = params.groups;",
-  "  let neg_inf = bitcast<f32>(params.neg_inf);",
-  "  var row = wid.x;",
-  "  while (row < params.rows) {",
-  "    let base = row * groups * 2u;",
-  "    var best = neg_inf;",
-  "    var best_at = params.dim;",
-  "    var g = lid;",
-  "    while (g < groups) {",
-  "      let v = bitcast<f32>(partial[base + g * 2u]);",
-  "      let v_at = partial[base + g * 2u + 1u];",
-  "      if (argmax_beats(v, v_at, best, best_at)) {",
-  "        best = v;",
-  "        best_at = v_at;",
-  "      }",
-  `      g = g + ${ARGMAX_WORKGROUP_SIZE}u;`,
-  "    }",
-  "    scratch_value[lid] = best;",
-  "    scratch_index[lid] = best_at;",
-  "    workgroupBarrier();",
-  ARGMAX_TREE_WGSL,
-  "    if (lid == 0u) {",
-  "      out[row] = i32(scratch_index[0u]);",
-  "    }",
-  "    workgroupBarrier();",
-  "    row = row + nwg.x;",
-  "  }",
-  "}",
-  "",
-].join("\n");
+const splitMergeWgsl = (valueOutput: boolean): string =>
+  [
+    valueOutput
+      ? "// karume topk k=1 split merge (raw input bits and minimum index)"
+      : "// karume argmax split merge (partials [rows, groups, 2] -> i32 index per row)",
+    "struct Params {",
+    "  rows: u32,",
+    "  dim: u32,",
+    "  groups: u32,",
+    "  neg_inf: u32,",
+    "}",
+    "@group(0) @binding(0) var<uniform> params: Params;",
+    "@group(0) @binding(1) var<storage, read> partial: array<u32>;",
+    "@group(0) @binding(2) var<storage, read_write> out: array<i32>;",
+    ...(valueOutput
+      ? [
+        "@group(0) @binding(3) var<storage, read_write> value: array<u32>;",
+        "@group(0) @binding(4) var<storage, read> input: array<u32>;",
+      ]
+      : []),
+    "",
+    IS_NAN_BITS_WGSL,
+    "",
+    ARGMAX_BEATS_FN,
+    "",
+    `var<workgroup> scratch_value: array<f32, ${ARGMAX_WORKGROUP_SIZE}>;`,
+    `var<workgroup> scratch_index: array<u32, ${ARGMAX_WORKGROUP_SIZE}>;`,
+    "",
+    `@compute @workgroup_size(${ARGMAX_WORKGROUP_SIZE})`,
+    "fn main(",
+    "  @builtin(workgroup_id) wid: vec3<u32>,",
+    "  @builtin(local_invocation_id) lid3: vec3<u32>,",
+    "  @builtin(num_workgroups) nwg: vec3<u32>,",
+    ") {",
+    "  let lid = lid3.x;",
+    "  let groups = params.groups;",
+    "  let neg_inf = bitcast<f32>(params.neg_inf);",
+    "  var row = wid.x;",
+    "  while (row < params.rows) {",
+    "    let base = row * groups * 2u;",
+    "    var best = neg_inf;",
+    "    var best_at = params.dim;",
+    "    var g = lid;",
+    "    while (g < groups) {",
+    "      let v = bitcast<f32>(partial[base + g * 2u]);",
+    "      let v_at = partial[base + g * 2u + 1u];",
+    "      if (argmax_beats(v, v_at, best, best_at)) {",
+    "        best = v;",
+    "        best_at = v_at;",
+    "      }",
+    `      g = g + ${ARGMAX_WORKGROUP_SIZE}u;`,
+    "    }",
+    "    scratch_value[lid] = best;",
+    "    scratch_index[lid] = best_at;",
+    "    workgroupBarrier();",
+    ARGMAX_TREE_WGSL,
+    "    if (lid == 0u) {",
+    "      out[row] = i32(scratch_index[0u]);",
+    ...(valueOutput ? ["      value[row] = input[row * params.dim + scratch_index[0u]];"] : []),
+    "    }",
+    "    workgroupBarrier();",
+    "    row = row + nwg.x;",
+    "  }",
+    "}",
+    "",
+  ].join("\n");
+
+export const ARGMAX_SPLIT_MERGE_WGSL: string = splitMergeWgsl(false);
+export const TOPK_ONE_SPLIT_MERGE_KEY =
+  `topk:v1:f32+i32:lastdim:desc:minindex:k1:split-merge:wg${ARGMAX_WORKGROUP_SIZE}`;
+export const topkOneSplitMergeWgsl = (): string => splitMergeWgsl(true);
 
 /**
  * 2 相形の uniform（`{rows, dim, groups, neg_inf}` — partial / merge で同じ 4 語）。

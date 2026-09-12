@@ -15,6 +15,7 @@ import {
   argmaxSplitGroups,
   argmaxSplitParams,
   argmaxSplitPartialBytes,
+  topkOneSplitGroups,
 } from "../src/kernels/argmax.ts";
 
 Deno.test("argmax 2 相分割の経路選択は行長の純関数", async (t) => {
@@ -48,4 +49,13 @@ Deno.test("argmax 2 相分割の params は分割の形と一致しないと落�
     assertThrows(() => argmaxSplitParams(1, 4096, 1), CodegenError, "分割の形に合わない");
     assertThrows(() => argmaxSplitParams(1, 262144, 0), CodegenError, "分割の形に合わない");
   });
+});
+
+Deno.test("topk k=1の分割は閾値とdispatch上限を守り、巨大な行は既存経路へ残す", () => {
+  assertEquals(topkOneSplitGroups(ARGMAX_SPLIT_MIN_DIM - 1), 0);
+  assertEquals(topkOneSplitGroups(ARGMAX_SPLIT_MIN_DIM), 4);
+  assertEquals(topkOneSplitGroups(ARGMAX_SPLIT_MIN_DIM + 1), 5);
+  assertEquals(topkOneSplitGroups(262144), 64);
+  assertEquals(topkOneSplitGroups(65535 * ARGMAX_SPLIT_SPAN), 65535);
+  assertEquals(topkOneSplitGroups(65535 * ARGMAX_SPLIT_SPAN + 1), 0);
 });

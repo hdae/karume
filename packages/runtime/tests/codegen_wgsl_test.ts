@@ -45,6 +45,8 @@ import {
   ARGMAX_WGSL,
   ARGMAX_WORKGROUP_SIZE,
   argmaxParams,
+  TOPK_ONE_SPLIT_MERGE_KEY,
+  topkOneSplitMergeWgsl,
 } from "../src/kernels/argmax.ts";
 import { bmmKey, bmmParams, bmmRowWindowParams, bmmWgsl } from "../src/kernels/bmm.ts";
 import {
@@ -385,6 +387,7 @@ Deno.test("生成した WGSL がスナップショットとバイト単位で一
     // 動いたのに merge は旧形」が同じキーで通り、ビット同一の主張が沈黙で崩れる）。
     ["argmax_split_partial.wgsl", ARGMAX_SPLIT_PARTIAL_WGSL],
     ["argmax_split_merge.wgsl", ARGMAX_SPLIT_MERGE_WGSL],
+    ["topk_one_split_merge.wgsl", topkOneSplitMergeWgsl()],
     // topk（ADR 0068 決定 3）。**k=1 と一般形を対で置く**のが条件 — k=1 ではブロックの末尾
     // （最弱）と先頭が同じ語になり、挿入ループが 1 度も回らない縮退形なので、一般形だけを
     // 固定すると `k-1` の焼き込みが 1 ずれても気づけない（k=1 は argmax と同じ答えを返す
@@ -969,6 +972,7 @@ Deno.test("パイプラインキーは生成入力ごとに一意（別カーネ
     // topk は **k ごとに別パイプライン**（k を WGSL に焼くので配列長とラウンド数が変わる）。
     // k を含めないと最初に組んだ k のパイプラインが別の k の dispatch に配られ、例外なしに
     // 別の本数だけが書かれた出力（残りは前 run の残骸）が読まれる。argmax とも衝突しない。
+    TOPK_ONE_SPLIT_MERGE_KEY,
     topkKey(1),
     topkKey(4),
     PAD_KEY,

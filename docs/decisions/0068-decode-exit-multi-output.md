@@ -240,3 +240,22 @@ R = k+1 行を 1 run で採点し、hidden の受理行を drafter の入力に�
 タイブレーク / NaN / 全 −inf 行の規定（追記 2）は 2 相形の門（`gpu_ops_test.ts`）でも同じ
 リテラルで固定した。GPU 側 argmax の禁止（追記 6・7）は target の出口の話で不変 — 2 相化は
 drafter が既に持つ argmax 出口の速度だけを変える。
+
+## 追記 9（2026-09-11）: topk k=1 の長い行も 2 dispatch へ分割する
+
+- 出力転送を減らす実験で、既存topkのk=1経路が大語彙では費用を増やすと判明した。
+  argmaxの部分最大・mergeを共有し、k=1かつ行数が正で行長16,384以上を2 dispatchへ分割する。
+  [単体とモデル全体の実測](../research/2026-09-10-codex-mtp-optimization.md#topk-k1-の分割と小出力の実験2026-09-11)を根拠に採用する。
+- 比較順序は従来と同じ（NaN優先・値降順・最小index）。値の出力は選ばれた元入力のu32を写し、
+  ±0とNaN payloadを保つ。中間のf32最大値を値出力へ変換する形にはしない。
+  argmaxの生成物はバイト不変。k>1と短い行のtopkも変更しない。
+- 選択関数`topkOneSplitGroups`を実行と見積りの双方で使う。65,535区間を超える行は
+  従来のgrid-stride 1 dispatchへ残し、対応入力を狭めない。
+  partialの一時領域は`rows × groups × 8 B`。mergeまで元入力・partialを保持し、
+  値と添字は独立した出力領域へ書く。実行と見積りの寿命を一致させる。
+- 公開API・IR・保存形式は変更しない。Sessionが既存topkノードを実行する際の内部最適化。
+  Gemmaの製品資産とCLIの出口は引き続きlogits+hiddenであり、これだけで転送量は減らない。
+  小出力化の統合は会話状態のリース・バッチ完了・sampler能力を含む別の設計単位。
+- 境界、NaN payload、同点、全−inf、符号付きゼロ、最終index、先行ノードの中間出力、
+  backing再利用、メモリ見積りを検証する。GPU単体の倍率を生成全体の倍率と混同しない。
+  M2での速度は未検収。
