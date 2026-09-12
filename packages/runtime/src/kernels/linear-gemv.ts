@@ -144,9 +144,17 @@ export type LinearGemvRowsVariant = LinearGemvVariant & {
 /**
  * 既定の変種。**RTX 3080 Ti / gemma4 E2B decode の実 12 形 + 端数 4 形の掃引**で census 加重
  * 最良（`c32 u4`・対既定 ×8.45 — ADR 0082 / docs/research/2026-08-30-gemma4-decode-wallclock.md
- * §7）。MUST: 既定の変更はビット同一門（tests/gpu_linear_gemv_test.ts）の再実測とセット。
+ * §7）。M=1の実測形を渡す場合は追記10の語彙INT8をc16へ選択する。
+ * MUST: 既定の変更はビット同一門（tests/gpu_linear_gemv_test.ts）の再実測とセット。
  */
-export const defaultLinearGemvVariant = (): LinearGemvVariant => ({ cols: 32, unroll: 4 });
+export const defaultLinearGemvVariant = (
+  shape?: { readonly storage: WeightStorage; readonly n: number; readonly k: number },
+): LinearGemvVariant => ({
+  // DECIDED: 大語彙INT8の実測形だけ担当列数を減らす（ADR 0082 追記10）。
+  // docs/decisions/0082-linear-gemv-decode.md
+  cols: shape?.storage === "i8" && shape.n === 262144 && shape.k === 1536 ? 16 : 32,
+  unroll: 4,
+});
 
 /**
  * 行ブロック変種が受ける M の上限 = **門の上限**（`#buildLinear` が本族へ入れる行数の範囲）。

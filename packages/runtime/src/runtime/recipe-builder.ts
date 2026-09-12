@@ -1759,7 +1759,7 @@ export class RecipeBuilder {
     const rowsVariant = m === 1
       ? undefined
       : defaultLinearGemvRowsVariant(storage, m, n, this.#state.linearGemvRowsThreadTarget);
-    const variant = rowsVariant ?? defaultLinearGemvVariant();
+    const variant = rowsVariant ?? defaultLinearGemvVariant({ storage, n, k });
     const rows = rowsVariant?.rows ?? 1;
     const key = rowsVariant === undefined
       ? linearGemvKey(storage, groupSize, variant)

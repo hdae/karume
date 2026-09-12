@@ -2961,3 +2961,14 @@ M2の効果は未測定。既存のBHSD snapshot・丸め障壁・GPUのビッ�
 
 追加の英語・日本語16走行もA/Bで出力一致。統合の全体検証は2,944 passed（771 steps）/ 0 failed / 5 ignored。
 初回の3失敗はtoolsの旧融合カウンタで、単独再現・期待数更新・全体再検証の経緯を上記researchへ保存した。
+
+## Chromeの語彙INT8とK並列の追試（2026-09-12）
+
+[追試記録](2026-09-12-chrome-gemv-followup.md)と[保存JSON](2026-09-12-chrome-gemv-followup-results.json)を追加。
+大語彙INT8のM=1・N262144・K1536だけc16u4へ選択する。実重みの全要素u32一致、
+ABBA/BAAB計32生成の一致を確認し、全体速度の倍率中央値は1.0244 / 1.0187（RTX Chrome）。
+submitの上限2048は通常/QATの全組で低下し不採用。Kの並列加算は長いKで有望だが、大きいNの逆行もあり隔離実験を継続。
+FP64参照との算術誤差を測ったが、モデル品質の検収ではない。M2の効果、K並列の全体比較、重み配置・GPU常駐PLEは未完。
+
+統合の全体検証は2,946 passed（773 steps）/ 0 failed / 5 ignored、25分3秒。
+ログは`outputs/bench/karume/2026-09-12_head16-verify-6iecb046/verify.log`。
