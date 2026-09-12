@@ -373,8 +373,8 @@ Deno.test({
     // lm_head だけが i8 重み（+ f32 bias）。
     assertEquals(byStorage.get("f32+i8"), 1);
     assertEquals(linears.reduce((total, weight) => total + weight.count, 0), 277);
-    // 融合ヒットは既設の実資産の門（assets_fusion_counts_test.ts）と同じ 15（M=1）。
-    assertEquals(summary.by_fusion.hits, { rope: 15 });
+    // 融合ヒットは実資産の門と同じ50（BSHDのq=35 / 所有k=15）。
+    assertEquals(summary.by_fusion.hits, { rope: 50 });
 
     // drafter（4 層 × k=3 段展開）: linear 68 / rms_norm 63 / attention 12（全部 readonly —
     // state_append は 0 本）/ argmax 3。記号は C だけなので既定表の M / R は未使用に数えない。

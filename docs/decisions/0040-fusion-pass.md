@@ -245,3 +245,20 @@ EmbeddingGemma-300m（Gemma3・head 幅 256）で rope が 0 ヒットだった�
 効果: EmbeddingGemma で rope 0 → 48（実 dispatch 1,294 → 958・−26%）、Anima text
 encoder で同型の取りこぼし解消 55 → 56（sin 表の初出が隙間に落ちる 1 箇所 — 上の実測欄の
 503 は当時の matcher の値で、以後は 504）。PNG sha256 門 3 本一致でビット同一を再確認。
+
+## 追記（2026-09-12）: BSHD half-split RoPE
+
+Gemma 4の実グラフは`[1,S,H,D]` / table `[1,S,1,D]`であり、従来のBHSD受理条件では
+M=1かつH=1のKだけが適合していた。両表がこの形に厳密一致する場合に限りBSHDを追加する。
+表のtoken添字は`row / H`。既存BHSDの`row % S`とは別キー`rope:v1:half:bshd:f32:wg256`にする。
+両形が重なる退化形は既存BHSDを選び、従来キーのWGSL本文を保存する。
+
+カーネル生成は軸順を引数に取り、表の添字以外を共有する。module import時に生成処理を走らせない。
+2積のu32 workgroup stagingとbarrier、grid-stride、B=1、偶数D、dim=3の半分割、私有中間、
+結線・dtype・窓内passthroughの検査は維持する。IR・公開API・保存重み・数値契約は変更しない。
+不適合の形は従来のprimitive列で実行する。
+
+通常/QAT E2Bの50鎖とAnima text conditionerの24鎖が適合する。
+受理集合の拡大として資産の融合カウンタ検査を更新し、BSHDのGPUビット一致・反例・snapshotを追加する。
+丸め障壁の成立は従来どおりバックエンド依存であり、M2実機と既存goldenの門を維持する。
+採否の根拠・Chrome実測・未統合候補は[調査記録](../research/2026-09-12-chrome-gemma-optimization.md)に置く。

@@ -2,7 +2,8 @@
  * half-split RoPE を 1 pass で適用する f32 カーネル（融合ルール `rope` の実体 —
  * src/runtime/fusion.ts）。
  *
- * 入力 `x` は `[B,H,S,D]`、cos / sin は `[1,1,S,D]`。最後の次元を半分に分け、
+ * 入力 `x` は `[1,H,S,D]` / table `[1,1,S,D]`、または
+ * `[1,S,H,D]` / table `[1,S,1,D]`。最後の次元を半分に分け、
  * `rotate_half(x) = cat(-x[..., D/2:], x[..., :D/2])` として
  * `x * cos + rotate_half(x) * sin` を出力する。
  *
@@ -27,10 +28,15 @@ export const ROPE_WORKGROUP_SIZE = 256;
 /** MUST: WGSL を変えたらキーも上げる（パイプラインキャッシュは本文を見ない）。 */
 export const ROPE_KEY = `rope:v1:half:f32:wg${ROPE_WORKGROUP_SIZE}`;
 
-export const ROPE_WGSL: string = `// karume RoPE (half split, f32, full-write)
+export const ROPE_BSHD_KEY = `rope:v1:half:bshd:f32:wg${ROPE_WORKGROUP_SIZE}`;
+export type RopeLayout = "bhsd" | "bshd";
+
+/** 軸順で位置表の添字だけを切り替え、積の丸め障壁は共有する。 */
+export const ropeWgsl = (layout: RopeLayout): string =>
+  `// karume RoPE (half split, f32, full-write)
 struct Params {
   n: u32,
-  sequence: u32,
+  ${layout === "bhsd" ? "sequence" : "heads"}: u32,
   head_dim: u32,
   half_dim: u32,
 }
@@ -54,7 +60,7 @@ fn main(
     if (i < params.n) {
       let d = i % params.head_dim;
       let row = i / params.head_dim;
-      let token = row % params.sequence;
+      let token = ${layout === "bhsd" ? "row % params.sequence" : "row / params.heads"};
       let row_base = i - d;
       var rotated_bits: u32;
       if (d < params.half_dim) {
@@ -80,23 +86,25 @@ fn main(
 }
 `;
 
-/** 16-byte uniform params。`n` は `[B,H,S,D]` の全要素数。 */
+/** 16-byte uniform。第2値は BHSD の S、BSHD の H（位置表の添字計算に使う軸）。 */
 export const ropeParams = (
   n: number,
-  sequence: number,
+  tableAxisSize: number,
   headDim: number,
+  layout: RopeLayout = "bhsd",
 ): Uint32Array<ArrayBuffer> => {
-  assertU32Params("rope params", { n, sequence, headDim });
-  if (sequence === 0) throw new CodegenError("rope params: sequence は 1 以上");
+  const axis = layout === "bhsd" ? "sequence" : "heads";
+  assertU32Params("rope params", { n, [axis]: tableAxisSize, headDim });
+  if (tableAxisSize === 0) throw new CodegenError(`rope params: ${axis} は 1 以上`);
   if (headDim === 0 || headDim % 2 !== 0) {
     throw new CodegenError(`rope params: headDim は正の偶数（${headDim}）`);
   }
-  const rowSize = sequence * headDim;
-  assertU32Params("rope params", { "sequence × headDim": rowSize });
+  const rowSize = tableAxisSize * headDim;
+  assertU32Params("rope params", { [`${axis} × headDim`]: rowSize });
   if (n % rowSize !== 0) {
     throw new CodegenError(
-      `rope params: n ${n} が sequence ${sequence} × headDim ${headDim} の整数行でない`,
+      `rope params: n ${n} が ${axis} ${tableAxisSize} × headDim ${headDim} の整数行でない`,
     );
   }
-  return new Uint32Array([n, sequence, headDim, headDim / 2]);
+  return new Uint32Array([n, tableAxisSize, headDim, headDim / 2]);
 };

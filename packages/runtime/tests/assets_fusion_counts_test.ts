@@ -111,7 +111,7 @@ const MIRRORS: ReadonlyMap<string, URL> = new Map();
  * 有無はエクスポータが決める）なので、テスト側に焼かずここから引く — 焼くと分割数が動いた
  * 瞬間に融合ヒット数の門が NotFound で落ちて、退行検出そのものが止まる。
  */
-type AnimaManifest = {
+type AssetManifest = {
   readonly defaultModel: string;
   readonly models: Readonly<
     Record<string, {
@@ -127,7 +127,7 @@ type AnimaManifest = {
 type ShardRef = { readonly path: string; readonly repo?: string };
 
 // 資産が無い環境では 1 バイトも読まない（この定数を触るのは ignore を抜けたテストだけ）。
-const ANIMA_MANIFEST: AnimaManifest | undefined = ASSETS_AVAILABLE
+const ANIMA_MANIFEST: AssetManifest | undefined = ASSETS_AVAILABLE
   ? JSON.parse(await Deno.readTextFile(new URL("karume.json", ANIMA_DIR)))
   : undefined;
 
@@ -136,7 +136,7 @@ const ANIMA_MANIFEST: AnimaManifest | undefined = ASSETS_AVAILABLE
  * 後続の重み shard は metadata を持たないので、融合の計画に要るのはこの 1 本だけ。
  */
 const readAnimaGraph = (component: string, dtype: string): Promise<IrGraph> => {
-  const manifest = ANIMA_MANIFEST as AnimaManifest;
+  const manifest = ANIMA_MANIFEST as AssetManifest;
   const [head] = manifest.models[manifest.defaultModel].weights[component][dtype].shards;
   if (head.repo === undefined) return readIrGraph(new URL(head.path, ANIMA_DIR));
   const mirror = MIRRORS.get(head.repo);
@@ -257,8 +257,8 @@ Deno.test({
         source_hidden_states: [1, 64, 1024],
         target_input_ids: [1, 512],
       }),
-      { ...NONE, identityExpand: 48 },
-      "conditioner",
+      { ...NONE, rope: 24, identityExpand: 48 },
+      "conditioner（BSHD の q/k 各12鎖も融合）",
     );
     const vae = await readAnimaGraph("vae_decoder", "f16");
     assertEquals(
@@ -323,20 +323,12 @@ if (!MINICPM5_DECODE_AVAILABLE) {
 }
 
 /**
- * Gemma 4 E2B decode（states 形・35 層）。**rope はヒット 15 本・prefill 形（M=32）は 0 本**で、
- * これは全 50 鎖（q 側 35 + k 側 15 所有層）が掴めている状態ではない — op 名列は 50 箇所とも
- * matcher の窓（`mul,slice,slice,neg,cat,mul,add`）に並ぶが、計画では大半が外れる。同じ
- * 表引き RoPE の MiniCPM5 が M 非依存で全鎖適合する（下のテスト）ので、gemma4 固有の発行形が
- * 原因と見られる — 機序は未特定（実測の記録 =
- * docs/research/2026-08-30-gemma4-decode-wallclock.md §4。GPU 時間への寄与は 1ms 級なので
- * 追跡は性能実需待ち）。
- *
- * この門が守るのは他と同じ 2 方向: **掴めている 15 本が黙って外れない**こと（exporter の
- * 発行順退行 — dispatch が値の正しいまま +200 本級に増える）と、**数字が動いたら受理集合か
- * 発行形が変わった**と気づけること（増える側は改善 — その時この期待値を更新する）。
+ * Gemma 4 E2B は BSHD / table B S 1 D の50鎖（q=35、所有k=15）。
+ * 旧BHSD matcherではM=1・H=1のkだけが一致し、decode=15 / prefill=0だった。
+ * BSHDの専用添字を追加したため、両方で全50鎖を固定する（ADR 0040追記2026-09-12）。
  */
 Deno.test({
-  name: "実資産の Gemma 4 E2B decode は M=1 で rope 15 を掴む（token-only 形も同一・M=32 は 0）",
+  name: "実資産の Gemma 4 E2B は decode / prefill とも rope 50 を掴む（token-only 形も同一）",
   ignore: !GEMMA4_DECODE_AVAILABLE,
   fn: async () => {
     for (
@@ -346,11 +338,41 @@ Deno.test({
       ] as const
     ) {
       const graph = await readIrGraph(source);
-      assertEquals(decodeFusionCounts(graph, 1), { ...NONE, rope: 15 }, `${name} decode（M=1）`);
-      assertEquals(decodeFusionCounts(graph, 32), NONE, `${name} prefill 形（M=32）`);
+      assertEquals(decodeFusionCounts(graph, 1), { ...NONE, rope: 50 }, `${name} decode（M=1）`);
+      assertEquals(
+        decodeFusionCounts(graph, 32),
+        { ...NONE, rope: 50 },
+        `${name} prefill 形（M=32）`,
+      );
     }
   },
 });
+
+// 配布形も先頭shardをmanifestから引く。旧seriesとQATの両方で発行順を守る。
+for (const family of ["gemma4", "gemma4-qat"]) {
+  const root = new URL(`../../../models/karume-${family}/`, import.meta.url);
+  const manifestUrl = new URL("karume.json", root);
+  const available = await exists(manifestUrl);
+  if (!available) {
+    console.warn(`[karume] ${manifestUrl.pathname} が無いため配布形のRoPE検査をSKIPする`);
+  }
+  Deno.test({
+    name: `実配布 ${family} E2B は M=1/32/64 とも RoPE 50 を掴む`,
+    ignore: !available,
+    fn: async () => {
+      const manifest: AssetManifest = JSON.parse(await Deno.readTextFile(manifestUrl));
+      const [weights] = Object.values(manifest.models.e2b.weights.model);
+      const [head] = weights.shards;
+      if (head.repo !== undefined) {
+        throw new Error("Gemma実資産の融合テストは自己完結配布を要求する");
+      }
+      const graph = await readIrGraph(new URL(head.path, root));
+      for (const rows of [1, 32, 64]) {
+        assertEquals(decodeFusionCounts(graph, rows), { ...NONE, rope: 50 }, `${family} M=${rows}`);
+      }
+    },
+  });
+}
 
 /**
  * MiniCPM5-1B decode（24 層 × q/k = 48 鎖・KV 共有なし）。gemma4 と違い**全鎖が M 非依存で

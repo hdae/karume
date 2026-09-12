@@ -318,10 +318,10 @@ const ASSET_CASES: readonly AssetCase[] = [
     component: "model",
     graph: "gemma4-e2b-decode/model",
     binds: { M: 1, C: 640 },
-    // **既知の穴**: 綴りは 50 箇所とも並ぶのに計画は 15 本しか掴まない（機序は未特定 —
-    // docs/research/2026-08-30-gemma4-decode-wallclock.md §4）。残る 35 本が候補に出る。
+    // BSHDの軸順に対応したため、既知の50鎖を全て融合する（ADR 0040追記2026-09-12）。
+    // 融合済みの鎖を未対応候補へ二重計上しない。
     expected: { [ROPE_DIRECT_FIRST]: 50 },
-    fusedExpected: { [ROPE_DIRECT_FIRST]: 35 },
+    fusedExpected: { [ROPE_DIRECT_FIRST]: 0 },
   },
 ];
 
@@ -454,7 +454,7 @@ Deno.test({
     // （M / R を宣言しないので、既定表の残りは束縛に載らない）。
     assertEquals(decode.graphs[0].symbols, { M: 1, R: 1, C: 4096 });
     assertEquals(decode.graphs[1].symbols, { C: 4096 });
-    // ヒット数は census 側の門と同じ 15（M=1 の rope）。
-    assertEquals(decode.graphs[0].counts.rope, 15);
+    // ヒット数は census 側の門と同じ50（BSHDのq/k全鎖）。
+    assertEquals(decode.graphs[0].counts.rope, 50);
   },
 });

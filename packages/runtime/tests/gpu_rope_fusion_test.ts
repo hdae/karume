@@ -3,15 +3,14 @@
 
 import { assert, assertEquals } from "@std/assert";
 import { openModel } from "../src/format/container.ts";
-import { acquireGpu } from "../src/gpu/device.ts";
-import { ROPE_KEY } from "../src/kernels/rope.ts";
+import { acquireGpu, LIMIT_CAPS } from "../src/gpu/device.ts";
+import { ROPE_BSHD_KEY, ROPE_KEY } from "../src/kernels/rope.ts";
 import { createSession, type Tensor } from "../src/runtime/executor.ts";
 import type { GraphJson } from "./helpers/format.ts";
 import { fill, graphModelBuffer } from "./helpers/graph.ts";
 import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
 
 // H=1, S=3 では n=384 となり、256 スレッド workgroup の末尾端数も通る。
-const TABLE_SHAPE = [1, 1, "S", 128] as const;
 type RopeOrder = "slice-first" | "direct-first";
 
 /**
@@ -21,9 +20,22 @@ type RopeOrder = "slice-first" | "direct-first";
  * `heads` は x の H 軸。カーネルは `row = i / head_dim` を `sequence` で割って token を出す形で
  * head 方向を畳んでいるので、H≥2 を通さないとその添字が 1 度も踏まれない。
  */
-const ropeGraph = (order: RopeOrder, interpose: boolean, heads = 1): GraphJson => {
-  const shape = [1, heads, "S", 128] as const;
-  const halfShape = [1, heads, "S", 64] as const;
+const ropeGraph = (
+  order: RopeOrder,
+  interpose: boolean,
+  heads = 1,
+  headDim = 128,
+  layout: "bhsd" | "bshd" = "bhsd",
+): GraphJson => {
+  const shape = layout === "bshd"
+    ? [1, "S", heads, headDim] as const
+    : [1, heads, "S", headDim] as const;
+  const tableShape = layout === "bshd"
+    ? [1, "S", 1, headDim] as const
+    : [1, 1, "S", headDim] as const;
+  const halfShape = layout === "bshd"
+    ? [1, "S", heads, headDim / 2] as const
+    : [1, heads, "S", headDim / 2] as const;
   const values: GraphJson["values"] = {
     first: { dtype: "f32", shape: [...halfShape] },
     second: { dtype: "f32", shape: [...halfShape] },
@@ -46,13 +58,18 @@ const ropeGraph = (order: RopeOrder, interpose: boolean, heads = 1): GraphJson =
     op: "slice",
     ins: ["x"],
     outs: ["first"],
-    attrs: { dim: 3, start: 0, end: 64 },
+    attrs: { dim: 3, start: 0, end: headDim / 2 },
   });
   if (interpose) {
     nodes.push({ op: "reshape", ins: ["first"], outs: ["first_alias"], attrs: {} });
   }
   nodes.push(
-    { op: "slice", ins: ["x"], outs: ["second"], attrs: { dim: 3, start: 64, end: 128 } },
+    {
+      op: "slice",
+      ins: ["x"],
+      outs: ["second"],
+      attrs: { dim: 3, start: headDim / 2, end: headDim },
+    },
     { op: "neg", ins: ["second"], outs: ["negative"], attrs: {} },
     {
       op: "cat",
@@ -73,8 +90,8 @@ const ropeGraph = (order: RopeOrder, interpose: boolean, heads = 1): GraphJson =
     symbols: ["S"],
     inputs: [
       { name: "x", dtype: "f32", shape: [...shape] },
-      { name: "cos", dtype: "f32", shape: [...TABLE_SHAPE] },
-      { name: "sin", dtype: "f32", shape: [...TABLE_SHAPE] },
+      { name: "cos", dtype: "f32", shape: [...tableShape] },
+      { name: "sin", dtype: "f32", shape: [...tableShape] },
     ],
     outputs: ["y"],
     initializers: {},
@@ -325,6 +342,131 @@ Deno.test({
         }
       } finally {
         await consumerSession.dispose();
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
+  name: "BSHD RoPEはtoken/head軸・端数・幅・特殊値をprimitive列とビット一致で処理する（実GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    try {
+      for (
+        const [heads, sequence, dim] of [[8, 1, 256], [16, 17, 64], [3, 17, 6], [4, 3, 128], [
+          8,
+          9,
+          256,
+        ], [
+          2,
+          5,
+          512,
+        ]]
+      ) {
+        const inputs = {
+          x: fill([1, sequence, heads, dim], (i) => Math.sin(i * 0.37) * 3.1 + i / 997),
+          cos: fill([1, sequence, 1, dim], (i) => Math.cos(i * 0.19 + 0.3)),
+          sin: fill([1, sequence, 1, dim], (i) => Math.sin(i * 0.23 - 0.2)),
+        };
+        new Uint32Array(inputs.x.data.buffer).set([
+          0,
+          0x80000000,
+          1,
+          0x80000001,
+          0x007fffff,
+          0x807fffff,
+          0x7f800000,
+          0xff800000,
+          0x7fc01234,
+          0xff801234,
+        ]);
+        for (const order of ["slice-first", "direct-first"] as const) {
+          const fused = await createSession(
+            gpu,
+            openModel(graphModelBuffer(ropeGraph(order, false, heads, dim, "bshd"))),
+          );
+          const split = await createSession(
+            gpu,
+            openModel(graphModelBuffer(ropeGraph(order, true, heads, dim, "bshd"))),
+          );
+          try {
+            const actual = (await fused.run(inputs)).y;
+            const expected = (await split.run(inputs)).y;
+            assertEquals(actual.shape, [1, sequence, heads, dim]);
+            assertFloatParity(bits(actual), bits(expected));
+            assertEquals(fused.diagnostics().lastRunFusions?.rope, 1);
+            assertEquals(split.diagnostics().lastRunFusions?.rope, 0);
+            assertEquals(fused.diagnostics().submit.dispatchCount, 1);
+          } finally {
+            await fused.dispose();
+            await split.dispose();
+          }
+        }
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
+  name: "BSHD RoPEはgrid-strideの複数巡回でもprimitive列とビット一致する（実GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu({ [LIMIT_CAPS]: { maxComputeWorkgroupsPerDimension: 2 } });
+    const heads = 8, sequence = 17, dim = 128;
+    const inputs = {
+      x: fill([1, sequence, heads, dim], (i) => Math.sin(i * 0.013)),
+      cos: fill([1, sequence, 1, dim], (i) => Math.cos(i * 0.017)),
+      sin: fill([1, sequence, 1, dim], (i) => Math.sin(i * 0.019)),
+    };
+    try {
+      assertEquals(gpu.limits.maxComputeWorkgroupsPerDimension, 2);
+      const fused = await createSession(
+        gpu,
+        openModel(graphModelBuffer(ropeGraph("direct-first", false, heads, dim, "bshd"))),
+      );
+      const split = await createSession(
+        gpu,
+        openModel(graphModelBuffer(ropeGraph("direct-first", true, heads, dim, "bshd"))),
+      );
+      try {
+        assertFloatParity(bits((await fused.run(inputs)).y), bits((await split.run(inputs)).y));
+        assertEquals(fused.diagnostics().lastRunFusions?.rope, 1);
+      } finally {
+        await fused.dispose();
+        await split.dispose();
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
+  name: "BSHD RoPEは専用キーだけで走る（実GPU/timestamp-query）",
+  ignore: !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu({ gpuTiming: true });
+    try {
+      const session = await createSession(
+        gpu,
+        openModel(graphModelBuffer(ropeGraph("direct-first", false, 3, 128, "bshd"))),
+      );
+      try {
+        await session.run({
+          x: fill([1, 5, 3, 128], (i) => Math.sin(i)),
+          cos: fill([1, 5, 1, 128], (i) => Math.cos(i)),
+          sin: fill([1, 5, 1, 128], (i) => Math.sin(i)),
+        });
+        const timing = session.diagnostics().lastRunTiming;
+        assert(timing !== undefined);
+        assertEquals(timing.entries.map((x) => x.key), [ROPE_BSHD_KEY]);
+      } finally {
+        await session.dispose();
       }
     } finally {
       gpu.destroy();

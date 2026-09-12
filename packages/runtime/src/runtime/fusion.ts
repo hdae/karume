@@ -72,7 +72,14 @@ import { bmmKey, bmmParams, bmmRowWindowParams, bmmWgsl } from "../kernels/bmm.t
 import { gemmUsesVec4 } from "../kernels/gemm.ts";
 import { gemmGeometryForRows, gemmTileM, gemmTileN } from "../kernels/gemm-geometry.ts";
 import { SAFE_SOFTMAX_KEY, SAFE_SOFTMAX_WGSL, softmaxParams } from "../kernels/softmax.ts";
-import { ROPE_KEY, ROPE_WGSL, ROPE_WORKGROUP_SIZE, ropeParams } from "../kernels/rope.ts";
+import {
+  ROPE_BSHD_KEY,
+  ROPE_KEY,
+  ROPE_WORKGROUP_SIZE,
+  type RopeLayout,
+  ropeParams,
+  ropeWgsl,
+} from "../kernels/rope.ts";
 import {
   SILU_WORKGROUP_SIZE,
   siluKey,
@@ -621,8 +628,9 @@ type RopeMatch = FusionMatch & {
   readonly sinName: string;
   readonly outputName: string;
   readonly outputShape: readonly number[];
-  readonly sequence: number;
+  readonly tableAxisSize: number;
   readonly headDim: number;
+  readonly layout: RopeLayout;
 };
 
 /**
@@ -632,7 +640,8 @@ type RopeMatch = FusionMatch & {
  * - slice-first: `slice×2, neg, cat, mul(x,cos), mul(cat,sin), add`
  * - direct-first: `mul(x,cos), slice×2, neg, cat, mul(cat,sin), add`
  *
- * MUST: 受理するのは `[1,H,S,D]`（D は正の偶数）/ table `[1,1,S,D]` / dim=3 の
+ * MUST: `[1,H,S,D]` / table `[1,1,S,D]` または `[1,S,H,D]` / table `[1,S,1,D]`
+ * （D は正の偶数）/ dim=3 の
  * `0-D/2` / `D/2-D` だけ。head 幅 D は**実測 2 種（128 と 256）**あるので slice の境界から
  * 導くが、偶奇 RoPE（`x[0::2]` / `x[1::2]` 形）・別 broadcast・別 cat 軸は「式が似ている」で
  * 広げない — 受理集合を広げた瞬間、「掴めなければ既存経路で必ず正しい」という fallback の
@@ -696,8 +705,19 @@ const ROPE_RULE = defineRule<RopeMatch>({
 
     const xShape = first.inputShapes[0];
     if (xShape.length !== 4 || xShape[0] !== 1) return undefined;
-    const [, heads, sequence, headDim] = xShape;
-    if (heads < 1 || sequence < 1 || headDim < 2 || headDim % 2 !== 0) return undefined;
+    const [, axis1, axis2, headDim] = xShape;
+    if (axis1 < 1 || axis2 < 1 || headDim < 2 || headDim % 2 !== 0) return undefined;
+    const tablesMatch = (shape: readonly number[]): boolean =>
+      sameShape(direct.inputShapes[1], shape) && sameShape(cross.inputShapes[1], shape);
+    // 両者が一致する退化形は既存BHSDを優先し、既存のキー・本文を維持する。
+    const layout = tablesMatch([1, 1, axis2, headDim])
+      ? "bhsd"
+      : tablesMatch([1, axis1, 1, headDim])
+      ? "bshd"
+      : undefined;
+    if (layout === undefined) return undefined;
+    // 両レイアウトとも第2軸が表添字の除数（BHSD=S、BSHD=H）。
+    const tableAxisSize = axis2;
     const halfDim = headDim / 2;
 
     const firstSlice = sliceAttrs(first.node.attrs, "RoPE first slice");
@@ -708,8 +728,8 @@ const ROPE_RULE = defineRule<RopeMatch>({
       catDim(cat.node.attrs, "RoPE cat") !== 3
     ) return undefined;
 
-    const halfShape = [1, heads, sequence, halfDim];
-    const fullShape = [1, heads, sequence, headDim];
+    const halfShape = [1, axis1, axis2, halfDim];
+    const fullShape = [1, axis1, axis2, headDim];
     if (
       !sameShape(first.outputs[0].shape, halfShape) ||
       !sameShape(second.outputs[0].shape, halfShape) ||
@@ -719,11 +739,6 @@ const ROPE_RULE = defineRule<RopeMatch>({
       !sameShape(add.outputs[0].shape, fullShape)
     ) return undefined;
 
-    const tableShape = [1, 1, sequence, headDim];
-    if (
-      !sameShape(direct.inputShapes[1], tableShape) ||
-      !sameShape(cross.inputShapes[1], tableShape)
-    ) return undefined;
     if (!internalsArePrivate(chain, context)) return undefined;
 
     return {
@@ -734,8 +749,9 @@ const ROPE_RULE = defineRule<RopeMatch>({
       sinName: cross.node.ins[1],
       outputName: add.outputs[0].name,
       outputShape: add.outputs[0].shape,
-      sequence,
+      tableAxisSize,
       headDim,
+      layout,
     };
   },
   build: (matched) => {
@@ -746,9 +762,9 @@ const ROPE_RULE = defineRule<RopeMatch>({
       outputShape: matched.outputShape,
       temps: [],
       dispatches: [{
-        key: ROPE_KEY,
-        wgsl: () => ROPE_WGSL,
-        params: ropeParams(count, matched.sequence, matched.headDim),
+        key: matched.layout === "bhsd" ? ROPE_KEY : ROPE_BSHD_KEY,
+        wgsl: () => ropeWgsl(matched.layout),
+        params: ropeParams(count, matched.tableAxisSize, matched.headDim, matched.layout),
         workgroups: { kind: "gridStride", items: count, size: ROPE_WORKGROUP_SIZE },
       }],
     };

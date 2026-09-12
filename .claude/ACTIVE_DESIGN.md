@@ -26,7 +26,8 @@
   [Gemma E2B / QAT E2BのChrome比較](../docs/research/2026-09-12-browser-llm-speed.md)も追加。`deno task bench:llm-browser`でM2から追試できる。量子化条件は異なる。
   [M2実測とPLEの量子化行キャッシュ](../docs/research/2026-09-12-ple-row-cache.md)を追加（H-22、既存予算内256行・公開API/数値不変）。
   Chrome E2B/E4Bで効果、Deno E2Bはほぼ中立。改善後M2も利用者追試で速度向上・40生成の一致を確認。次は入力バケットH-23。QATのM2/RTX生成列には導入前から差があり、別途帰属する。
-  [WebMLとのheadless比較](../docs/research/2026-09-12-webml-browser-speed.md)では同一入力・容量・生成数でもRTXで大きな差。長い生成だけが理由ではなく、速度差の帰属・品質比較を残す。
+  [WebMLとのheadless比較](../docs/research/2026-09-12-webml-browser-speed.md)では同一入力・容量・生成数でもRTXで大きな差。長い生成だけが理由ではない。
+  [ChromeのCPU/GPU内訳とRoPE融合](../docs/research/2026-09-12-chrome-gemma-optimization.md)に基づきBSHD融合を採用（K-32）。次はGEMV重み配置・大語彙形状（K-33/K-34）とM2追試・品質比較。
   ローカル実験 CLI は [MiniCPM5](../examples/minicpm5/README.md) / [Qwen3](../examples/qwen3/README.md)。
   Gemma 準拠の対話・reset・中断に対応。容量 128 の多ターン検収は research に記録。公開 pipeline は未追加。
   利用者の希望により、今後は作業単位で調査・検証を終えて順次コミットする。残件の正本は backlog。

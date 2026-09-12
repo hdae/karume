@@ -170,7 +170,13 @@ import {
   RMS_NORM_WORKGROUP_SIZE,
   rmsNormParams,
 } from "../src/kernels/rms-norm.ts";
-import { ROPE_KEY, ROPE_WGSL, ROPE_WORKGROUP_SIZE, ropeParams } from "../src/kernels/rope.ts";
+import {
+  ROPE_BSHD_KEY,
+  ROPE_KEY,
+  ROPE_WORKGROUP_SIZE,
+  ropeParams,
+  ropeWgsl,
+} from "../src/kernels/rope.ts";
 import { linearKey, linearParams, linearWgsl } from "../src/kernels/linear.ts";
 import {
   linearGemvKey,
@@ -462,7 +468,8 @@ Deno.test("生成した WGSL がスナップショットとバイト単位で一
     ["silu_x_sigmoid.wgsl", siluWgsl("x-sigmoid")],
     ["silu_sigmoid_x.wgsl", siluWgsl("sigmoid-x")],
     ["flip.wgsl", FLIP_WGSL],
-    ["rope.wgsl", ROPE_WGSL],
+    ["rope.wgsl", ropeWgsl("bhsd")],
+    ["rope_bshd.wgsl", ropeWgsl("bshd")],
     ["linear.wgsl", LINEAR_WGSL],
     ["linear_v4.wgsl", linearWgsl("f32", true)],
     // skinny-M 幾何（M ≤ 64 → M16N16 — src/kernels/gemm-geometry.ts の掃引確定値）の代表
@@ -1633,6 +1640,7 @@ Deno.test("topk は 2 相（レーン局所 top-k → トーナメント merge�
 });
 
 Deno.test("half-split RoPE は積を workgroup u32 へ丸め、一様 barrier 後に加算する", () => {
+  const ROPE_WGSL = ropeWgsl("bhsd");
   assertEquals(ROPE_KEY, `rope:v1:half:f32:wg${ROPE_WORKGROUP_SIZE}`);
   assertEquals(ROPE_WORKGROUP_SIZE, 256);
   assertEquals(ROPE_WGSL.includes("var<workgroup> products: array<vec2<u32>, 256>;"), true);
@@ -4944,4 +4952,14 @@ Deno.test("INT2 は対応外の畳み込み・計算精度の生成を拒否す�
     () => linearI8a8Wgsl(true, false, undefined, "i2"),
   ];
   for (const generate of cases) assertThrows(generate, CodegenError);
+});
+
+Deno.test("BSHD RoPE は head 数で位置表を引き、異なるキーと uniform を使う", () => {
+  assertEquals(ROPE_BSHD_KEY, `rope:v1:half:bshd:f32:wg${ROPE_WORKGROUP_SIZE}`);
+  assertEquals(ropeWgsl("bshd").includes("let token = row / params.heads;"), true);
+  assertEquals([...ropeParams(3 * 5 * 128, 3, 128, "bshd")], [1920, 3, 128, 64]);
+  assertThrows(() => ropeParams(768, 0, 128, "bshd"), CodegenError, "heads");
+  assertThrows(() => ropeParams(768, 3, 127, "bshd"), CodegenError, "headDim");
+  assertThrows(() => ropeParams(769, 3, 128, "bshd"), CodegenError, "整数行");
+  assertThrows(() => ropeParams(0, 0x80000000, 128, "bshd"), CodegenError, "u32");
 });

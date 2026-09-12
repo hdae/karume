@@ -2946,3 +2946,18 @@ Karumeの最初の台本でGPU Instance消失も観測し、参照保持後に�
 詳細と計測境界は[標準chatの追加測定](2026-09-12-webml-browser-speed.md#karume標準chatでの追加測定)。
 比較記録の検証は`deno task verify` 2,936 passed（771 steps）/ 0 failed / 5 ignored。
 利用者の継続依頼により、次はChromeで既定greedy経路のCPU/GPU内訳を採り、速度改善を進める。
+
+## Chromeの速度差の帰属とBSHD RoPE融合（2026-09-12）
+
+[調査と候補比較](2026-09-12-chrome-gemma-optimization.md)、[保存結果](2026-09-12-chrome-gemma-optimization-results.json)を追加。
+既定greedyのGPU処理が短い生成時間の約77〜79％を占め、通常版は行列積、QATは行列積と再量子化が主要候補だった。
+error scopeとmapの重複は24走行で出力一致しても安定した改善がなく不採用（H-24）。
+GEMVの重み語配置とworkgroup形状は合成入力でビット一致と改善する形を確認したが、全体比較と資源設計を残す（K-33/K-34）。
+
+RoPEの取りこぼしはBHSD / BSHDの軸順不一致に帰属し、数値・公開契約を保つ専用キーを追加（K-32 / ADR 0040）。
+Gemma通常/QAT E2Bのdecode / prefillは50鎖すべて、Anima text conditionerも24鎖を融合する。
+Chromeで短間隔ABBAの4組すべてが改善し、倍率中央値はQAT1.0293 / 通常1.0268。56走行のtoken列・文章・停止理由が一致した。
+M2の効果は未測定。既存のBHSD snapshot・丸め障壁・GPUのビット一致と画像golden検査を維持する。
+
+追加の英語・日本語16走行もA/Bで出力一致。統合の全体検証は2,944 passed（771 steps）/ 0 failed / 5 ignored。
+初回の3失敗はtoolsの旧融合カウンタで、単独再現・期待数更新・全体再検証の経緯を上記researchへ保存した。

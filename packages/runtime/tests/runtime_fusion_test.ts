@@ -11,7 +11,7 @@ import { elementwiseKey } from "../src/codegen/elementwise.ts";
 import { type IrGraph, parseIrGraph } from "../src/format/ir.ts";
 import { ADALN_NORM_KEY, adalnNormParams } from "../src/kernels/adaln-norm.ts";
 import { bmmKey } from "../src/kernels/bmm.ts";
-import { ROPE_KEY } from "../src/kernels/rope.ts";
+import { ROPE_BSHD_KEY, ROPE_KEY } from "../src/kernels/rope.ts";
 import { siluKey } from "../src/kernels/silu.ts";
 import { SAFE_SOFTMAX_KEY } from "../src/kernels/softmax.ts";
 import { UPSAMPLE_2X_KEY } from "../src/kernels/upsample2x.ts";
@@ -300,6 +300,7 @@ Deno.test("upsample x2 の反例（near-shape / 別名 / 内部 output / 別 con
 // ---------------------------------------------------------------- RoPE
 
 type RopeOptions = {
+  readonly layout?: "bhsd" | "bshd";
   readonly order?: "slice-first" | "direct-first";
   readonly heads?: number;
   readonly interpose?: boolean;
@@ -329,10 +330,16 @@ const ropeGraph = (options: RopeOptions = {}): GraphJson => {
   const batch = options.batch2 ? 2 : 1;
   const headDim = options.headDim ?? 128;
   const split = headDim / (options.nearSplit ? 4 : 2);
-  const full = [batch, heads, 5, headDim];
-  const low = [batch, heads, 5, split];
-  const high = [batch, heads, 5, headDim - split];
-  const table = options.nearTable ? full : [1, 1, 5, headDim];
+  const full = options.layout === "bshd" ? [batch, 5, heads, headDim] : [batch, heads, 5, headDim];
+  const low = options.layout === "bshd" ? [batch, 5, heads, split] : [batch, heads, 5, split];
+  const high = options.layout === "bshd"
+    ? [batch, 5, heads, headDim - split]
+    : [batch, heads, 5, headDim - split];
+  const table = options.nearTable
+    ? full
+    : options.layout === "bshd"
+    ? [1, 5, 1, headDim]
+    : [1, 1, 5, headDim];
   const values: GraphJson["values"] = {
     first: { dtype: "f32", shape: low },
     second: { dtype: "f32", shape: high },
@@ -367,13 +374,22 @@ const ropeGraph = (options: RopeOptions = {}): GraphJson => {
   if (options.prefixSlicedSin) {
     // Tmax 形（S=8）の定数を実行時の T=5 へ縮める。宣言 shape が記号を含まないことが
     // sym_prefix_slice の契約なので、表側は静的形で置く。
-    values.sin_table = { dtype: "f32", shape: [1, 1, 8, headDim] };
-    values.sin = { dtype: "f32", shape: [1, 1, "T", headDim] };
+    values.sin_table = {
+      dtype: "f32",
+      shape: options.layout === "bshd" ? [1, 8, 1, headDim] : [1, 1, 8, headDim],
+    };
+    values.sin = {
+      dtype: "f32",
+      shape: options.layout === "bshd" ? [1, "T", 1, headDim] : [1, 1, "T", headDim],
+    };
     nodes.push({
       op: "sym_prefix_slice",
       ins: ["sin_table"],
       outs: ["sin"],
-      attrs: { sym: "T", slices: [{ dim: 2, coeff: 1, offset: 0 }] },
+      attrs: {
+        sym: "T",
+        slices: [{ dim: options.layout === "bshd" ? 1 : 2, coeff: 1, offset: 0 }],
+      },
     });
   }
   if (options.gapReshape) {
@@ -425,8 +441,12 @@ const ropeInputs = (options: RopeOptions = {}): Readonly<Record<string, readonly
   const heads = options.heads ?? 1;
   const batch = options.batch2 ? 2 : 1;
   const headDim = options.headDim ?? 128;
-  const full = [batch, heads, 5, headDim];
-  const table = options.nearTable ? full : [1, 1, 5, headDim];
+  const full = options.layout === "bshd" ? [batch, 5, heads, headDim] : [batch, heads, 5, headDim];
+  const table = options.nearTable
+    ? full
+    : options.layout === "bshd"
+    ? [1, 5, 1, headDim]
+    : [1, 1, 5, headDim];
   return options.prefixSlicedSin
     ? { x: full, cos: table, bind: [5] }
     : { x: full, cos: table, sin: table };
@@ -1119,4 +1139,47 @@ Deno.test("birefnet 形の分解 attention は掴めず、S がノード出力�
     "S / mask 済み S / P がステップ内一時になっていない",
   );
   assertEquals(allocatedOutputs(fused).has("scores3"), false, "S がノード出力として残っている");
+});
+
+Deno.test("BSHD RoPEは両発行順でhead数をuniformへ渡し、私有中間だけを畳む", () => {
+  for (const order of ["slice-first", "direct-first"] as const) {
+    const options: RopeOptions = { layout: "bshd", heads: 4, headDim: 256, order };
+    const plan = fuse(ropeGraph(options), ropeInputs(options));
+    assertEquals(outline(plan.steps), ["fused:rope"]);
+    const step = fusedAt(plan, 0);
+    assertEquals(step.binds, ["x", "cos", "sin"]);
+    assertEquals(step.nodeCount, 7);
+    assertEquals(step.dispatches[0].key, ROPE_BSHD_KEY);
+    assertEquals([...step.dispatches[0].params], [4 * 5 * 256, 4, 256, 128]);
+    for (
+      const negative of [
+        { interpose: true },
+        { internalOutput: true },
+        { extraConsumer: true },
+        { nearSplit: true },
+        { batch2: true },
+        { swappedAdd: true },
+        { nearTable: true },
+        { gapReshape: true },
+      ]
+    ) {
+      const rejected = { ...options, ...negative };
+      assertEquals(
+        fuse(ropeGraph(rejected), ropeInputs(rejected)).counts.rope,
+        0,
+        JSON.stringify(rejected),
+      );
+    }
+  }
+});
+
+Deno.test("BSHD RoPEはcos/sinの軸が別なら掴まず、共通の位置表のsliceは保持する", () => {
+  const options: RopeOptions = { layout: "bshd", heads: 4, headDim: 128, order: "direct-first" };
+  const graph = ropeGraph(options);
+  graph.inputs[1].shape = [1, 1, 4, 128];
+  assertEquals(fuse(graph, { ...ropeInputs(options), cos: [1, 1, 4, 128] }).counts.rope, 0);
+  const sliced = { ...options, prefixSlicedSin: true };
+  const plan = fuse(ropeGraph(sliced), ropeInputs(sliced));
+  assertEquals(outline(plan.steps), ["sym_prefix_slice", "fused:rope"]);
+  assertEquals(fusedAt(plan, 1).dispatches[0].key, ROPE_BSHD_KEY);
 });
