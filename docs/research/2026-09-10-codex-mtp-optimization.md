@@ -2908,3 +2908,21 @@ M2での新ページの速度と、広い品質評価は利用者の実機追試
 比較ページ統合後の全体検証は**2,935 passed（762 steps）/ 0 failed / 5 ignored、25分13秒**。
 ログは`outputs/bench/karume/2026-09-12_browser-verify-9UMwHy/verify.log`。
 JSON保存の画面操作と、最終bundleが計測時と同一であることも確認した。
+
+## M2 のブラウザ実測と PLE 行キャッシュ（2026-09-12）
+
+利用者の通常/QAT E2BのM2実測を確認し、[調査の正本](2026-09-12-ple-row-cache.md)と
+[M2の保存結果](2026-09-12-m2-browser-speed-results.json)、[RTXでの改善前後](2026-09-12-ple-row-cache-results.json)を追加した。
+HTTP RangeのPLE入力準備に固定費が残ることを帰属し、通常/QAT共通loaderで量子化行を最大256行だけ再利用する。
+既存ホスト予算の空きのみを使い、全量shard優先・予算0で無効。値とscaleをそのまま保持し、既存の逆量子化を使う。
+公開引数・保存資産・GPUカーネル・精度は変更しない。内部診断の保持byte数は行の保持も数える（ADR 0085追記）。
+
+未使用の英語/日本語6入力でChrome E2B/E4BのTTFTとdecodeが改善し、Deno E2Bはほぼ中立。
+全20実行・240生成が120組の基準/候補でtoken列と停止結果が一致した。CPU重点検証は34 passed（38 steps）。
+細かい入力バケットも独立実験で効果があったが、既定は変更していない（H-23）。
+M2改善後、CacheStorageのBlob経路、長文、MTPの速度は残件。QATのM2/RTX生成列の差は導入前のbundle同士にあり、
+同じ機器内の反復一致と区別して記録した。今回の変更がその差を解消したとは扱わない。
+
+全体検証はベンチ・サーバー停止後に実施し、**2,936 passed（771 steps）/ 0 failed / 5 ignored、24分53秒**で成功。
+ログは `outputs/bench/karume/2026-09-12_ple-row-cache-verify-b49feca6/verify.log`。
+最終browser bundleと計測対象のbyte一致、実測と生成列のhash、文書リンクも確認した。

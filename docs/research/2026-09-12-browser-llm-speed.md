@@ -1,4 +1,4 @@
-> 2026-09-12時点の実測と調査。RTX 3080 Ti / Linux / Chromeの結果であり、Apple M2の実測ではない。
+> 2026-09-12時点の実測と調査。本文の表はRTX 3080 Ti / Linux / Chrome。利用者のM2実測は末尾のリンク先に区別して保存する。
 
 # Gemma E2B / QAT E2B のブラウザ速度比較
 
@@ -109,7 +109,7 @@ GPUベンチ同士やGPUテストは並走させていない。比較で固定�
 前回のPyTorch基準は復元したdense演算または公式QAT層であり、専用CUDA量子化カーネルの上限ではない。
 また利用者が紹介した[WebML Community Space](https://huggingface.co/spaces/webml-community/gemma-4-webgpu-kernels)は
 専用カーネル実装であり、ここで動かしたTransformers.js / ORTとは別の比較対象である。
-M2の同一ページでの実測と、広い品質評価は残る。
+広い品質評価は残る。利用者によるM2の同一ページでの実測は下記へ追記した。
 
 ## 検収
 
@@ -122,3 +122,11 @@ M2の同一ページでの実測と、広い品質評価は残る。
 上記ディレクトリの`verify.log`が正本。GPUベンチとは並走させていない。
 最終コードのbrowser bundleを再作成し、HF直接取得の4構成に保存したbundle SHAとの一致も確認した。
 記録した生JSON2ファイルのSHA、karume/Denoの8組の生成列、文書の参照先も照合した。
+
+## 利用者の M2 実測と改善の追試
+
+通常版のみと、通常/QATを含む2回の提出を[生成列・全反復の計測値付きで保存](2026-09-12-m2-browser-speed-results.json)した。
+再提出ではkarumeの暖機後decodeは通常/QATとも約19〜20 tok/sだった。Transformers.jsの通常版は2回の提出間で大きく変動しており、
+一方の走行だけを安定した速度差と解釈しない。いずれも量子化・演算精度の条件差が残る。
+[PLE行キャッシュの調査](2026-09-12-ple-row-cache.md)にM2の表と、その後のRTXでの費用分解・改善前後の比較を記録する。
+改善後のM2は同じ `deno task bench:llm-browser` で再計測できる。提出済みのM2結果は改善前のコードによるもの。

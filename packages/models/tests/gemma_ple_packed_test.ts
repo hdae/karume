@@ -29,12 +29,12 @@ for (const dtype of ["i2", "i4"] as const) {
       gemma4PleShardBytes(index, index.shards[0]),
       3 * 3 * (32 / factor + 4),
     );
-    for (const mode of ["full", "seek", "resident"] as const) {
+    for (const mode of ["full", "seek", "resident", "cached"] as const) {
       let all = 0, range = 0;
       const ple = createGemma4Ple({
         index,
         vocabSize: index.tokens,
-        maxResidentBytes: mode === "resident" ? 100000 : 0,
+        maxResidentBytes: mode === "resident" || mode === "cached" ? 100000 : 0,
         openShard: async (name) => {
           const bytes = await Deno.readFile(new URL(name, dir));
           return {
@@ -44,7 +44,7 @@ for (const dtype of ["i2", "i4"] as const) {
               all++;
               return Promise.resolve(bytes.slice().buffer);
             },
-            ...(mode === "seek"
+            ...(mode === "seek" || mode === "cached"
               ? {
                 range: {
                   cost: "seek" as const,
@@ -66,7 +66,7 @@ for (const dtype of ["i2", "i4"] as const) {
       const value = await ple.gather(ids);
       assert(value.dtype === "f32");
       assertEquals(new Uint32Array(value.data.buffer), expected);
-      const loads = all;
+      const loads = all, reads = range;
       const repeat = await ple.gather(ids);
       assert(repeat.dtype === "f32");
       assertEquals(new Uint32Array(repeat.data.buffer), expected);
@@ -81,6 +81,16 @@ for (const dtype of ["i2", "i4"] as const) {
       if (mode === "seek") {
         assertEquals(all, 0);
         assert(range > 0);
+      }
+      if (mode === "cached") {
+        assertEquals(all, 0);
+        assert(reads > 0);
+        assertEquals(range, reads, "反復で行を読み直している");
+        assertEquals(ple.stats().rowReads, new Set(ids).size);
+        assertEquals(
+          ple.stats().residentBytes,
+          new Set(ids).size * index.layers * (index.dim / factor + 4),
+        );
       }
       ple.dispose();
       assertEquals(ple.stats().residentBytes, 0);

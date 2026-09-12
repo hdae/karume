@@ -17,6 +17,7 @@
 //   ビット同一で、ヘッダは shard ごとに 1 度しか読まない。
 
 import { assert, assertEquals, assertRejects, assertStrictEquals, assertThrows } from "@std/assert";
+import { describe, it } from "@std/testing/bdd";
 import {
   createGemma4Ple,
   defaultGemma4PleResidentBytes,
@@ -54,6 +55,8 @@ const INDEX: Gemma4PleIndex = {
 
 /** shard 1 本ぶんのバイト数（この索引は全 shard 同幅）。 */
 const SHARD_BUDGET = gemma4PleShardBytes(INDEX, INDEX.shards[0]);
+/** i8 値と f32 scale を保持する 1 行の byte 数。 */
+const ROW_BYTES = LAYERS * (DIM + 4);
 
 /** i8 の値は `id * 10 + 層 * 2 + 列`、per-row scale は `1 / 2^(層+1)`（2 冪で厳密）。 */
 const quantized = (id: number, layer: number, column: number): number =>
@@ -832,7 +835,7 @@ Deno.test("Gemma4Ple.gather: seek の小さい gather は全量を読まず行�
   const tensor = await ple.gather([3]);
   assertEquals(
     ple.stats(),
-    { loads: 0, rowReads: 1, resident: 0, residentBytes: 0 },
+    { loads: 0, rowReads: 1, resident: 0, residentBytes: ROW_BYTES },
     "1 id の gather で shard 全量（253MiB 級）を読んでいる",
   );
   assertEquals(reader.readAll.length, 0);
@@ -929,7 +932,7 @@ Deno.test("Gemma4Ple.gather: scan は 2 行までが行読み（3 行目から�
       vocabSize: WIDE_INDEX.tokens,
     });
     await ple.gather([0, 1]);
-    assertEquals(ple.stats(), { loads: 0, rowReads: 2, resident: 0, residentBytes: 0 });
+    assertEquals(ple.stats(), { loads: 0, rowReads: 2, resident: 0, residentBytes: 2 * ROW_BYTES });
   });
 
   await t.step("3 行 → 全量読み + LRU", async () => {
@@ -958,7 +961,7 @@ Deno.test("Gemma4Ple.gather: scan は 2 行までが行読み（3 行目から�
     });
     // 位置は 6 つでも一意行は 2 つ（prefill の pad 行と同じ形）。
     await ple.gather([0, 0, 0, 1, 1, 0]);
-    assertEquals(ple.stats(), { loads: 0, rowReads: 2, resident: 0, residentBytes: 0 });
+    assertEquals(ple.stats(), { loads: 0, rowReads: 2, resident: 0, residentBytes: 2 * ROW_BYTES });
   });
 });
 
@@ -979,7 +982,12 @@ Deno.test("Gemma4Ple.gather: seek の境目は 32 行（予算に空きがあっ
 
   // 境目は `ple.ts` の `SEEK_FULL_ROWS`（= 32）。
   await t.step("31 行 → 行読み（載せる価値が出るのは 32 行から）", async () => {
-    assertEquals(await gatherRows(31), { loads: 0, rowReads: 31, resident: 0, residentBytes: 0 });
+    assertEquals(await gatherRows(31), {
+      loads: 0,
+      rowReads: 31,
+      resident: 0,
+      residentBytes: 31 * ROW_BYTES,
+    });
   });
 
   await t.step("32 行 → 全量読み + 常駐（以後の gather の hit のために載せる）", async () => {
@@ -1044,7 +1052,7 @@ Deno.test("Gemma4Ple.gather: shard のヘッダは 1 度しか読まない（行
   assertEquals(headerReads(), 1, "2 度目の gather でヘッダを読み直している");
   assertEquals(reader.ranges.length, 6, "2 度目の gather が行 2 区間だけで済んでいない");
   assertEquals(reader.opens, [SHARD_FILES[0]], "読み口を 2 度開いている");
-  assertEquals(ple.stats(), { loads: 0, rowReads: 2, resident: 0, residentBytes: 0 });
+  assertEquals(ple.stats(), { loads: 0, rowReads: 2, resident: 0, residentBytes: 2 * ROW_BYTES });
 });
 
 Deno.test("Gemma4Ple.gather: 宣言 bytes に収まらない区間は読み口を呼ばずに落ちる", async () => {
@@ -1203,3 +1211,196 @@ for (const rejected of ["values", "scales", "both"] as const) {
     }
   });
 }
+
+describe("Gemma4Ple の量子化行キャッシュ", () => {
+  it("前の gather の hit を先に使い、重複を複写して新しい行だけ読む", async () => {
+    const reader = fakeSources(SHARD_FILES, (i) => SHARD_BYTES[i].buffer, { cost: "seek" });
+    const ple = createGemma4Ple({ index: INDEX, openShard: reader.openShard, vocabSize: TOKENS });
+    const full = createGemma4Ple({
+      index: INDEX,
+      openShard: fakeReader().openShard,
+      vocabSize: TOKENS,
+    });
+    try {
+      await ple.gather([0, 3]);
+      const before = reader.ranges.length;
+      const ids = [3, 1, 0, 3];
+      const actual = await ple.gather(ids), expected = await full.gather(ids);
+      assert(actual.dtype === "f32" && expected.dtype === "f32");
+      assertEquals(words(actual.data), words(expected.data));
+      assertEquals(reader.ranges.length - before, 2);
+      assertEquals(ple.stats(), {
+        loads: 0,
+        rowReads: 3,
+        resident: 0,
+        residentBytes: 3 * ROW_BYTES,
+      });
+    } finally {
+      ple.dispose();
+      full.dispose();
+    }
+  });
+
+  it("256 行を上限に、最後に参照された行を残す", async () => {
+    const index: Gemma4PleIndex = {
+      ...POOL_INDEX,
+      tokens: 300,
+      shards: [{ file: POOL_FILE, start: 0, stop: 300 }],
+    };
+    const bytes = shardBytesOf(index, 0);
+    const reader = fakeSources([POOL_FILE], () => bytes.buffer, { cost: "seek" });
+    const ple = createGemma4Ple({ index, openShard: reader.openShard, vocabSize: index.tokens });
+    try {
+      for (let id = 0; id < 256; id++) await ple.gather([id]);
+      await ple.gather([0]);
+      assertEquals(ple.stats().rowReads, 256);
+      await ple.gather([256]);
+      await ple.gather([0]);
+      assertEquals(ple.stats().rowReads, 257, "最近使った 0 行を追い出している");
+      await ple.gather([1]);
+      assertEquals(ple.stats().rowReads, 258, "最も古い 1 行が追い出されていない");
+      assertEquals(ple.stats().residentBytes, 256 * ROW_BYTES);
+    } finally {
+      ple.dispose();
+    }
+  });
+
+  it("全量 shard を優先し、残った byte 予算ぶんだけ行を保持する", async () => {
+    const reader = wideSources("seek");
+    const budget = WIDE_BUDGET + 2 * ROW_BYTES;
+    const ple = createGemma4Ple({
+      index: WIDE_INDEX,
+      openShard: reader.openShard,
+      vocabSize: WIDE_INDEX.tokens,
+      maxResidentBytes: budget,
+    });
+    try {
+      for (const id of [WIDE_ROWS, WIDE_ROWS + 1, WIDE_ROWS + 2]) await ple.gather([id]);
+      assertEquals(ple.stats().residentBytes, 3 * ROW_BYTES);
+      await ple.gather(wideIds(0));
+      assertEquals(ple.stats(), { loads: 1, rowReads: 3, resident: 1, residentBytes: budget });
+      await ple.gather([WIDE_ROWS + 1]);
+      assertEquals(ple.stats().rowReads, 3);
+      await ple.gather([WIDE_ROWS]);
+      assertEquals(ple.stats().rowReads, 4);
+      assertEquals(ple.stats().residentBytes, budget);
+    } finally {
+      ple.dispose();
+    }
+  });
+
+  it("全量読みの予約中に別の行読みが完了しても予算を超えない", async () => {
+    const reader = wideSources("seek");
+    const entered = Promise.withResolvers<void>(), gate = Promise.withResolvers<void>();
+    const ple = createGemma4Ple({
+      index: WIDE_INDEX,
+      vocabSize: WIDE_INDEX.tokens,
+      maxResidentBytes: WIDE_BUDGET,
+      openShard: async (file) => {
+        const source = await reader.openShard(file);
+        return {
+          ...source,
+          readAll: async (options) => {
+            entered.resolve();
+            await gate.promise;
+            return await source.readAll(options);
+          },
+        };
+      },
+    });
+    try {
+      await ple.gather([WIDE_ROWS]);
+      const pending = ple.gather(wideIds(0));
+      await entered.promise;
+      assertEquals(ple.stats().residentBytes, WIDE_BUDGET, "全量予約時に行を追い出していない");
+      await ple.gather([WIDE_ROWS]);
+      assertEquals(ple.stats().residentBytes, WIDE_BUDGET);
+      gate.resolve();
+      await pending;
+      await ple.gather([WIDE_ROWS]);
+      assertEquals(ple.stats().rowReads, 3, "予算の空きがないのに行を保持している");
+      assertEquals(ple.stats().residentBytes, WIDE_BUDGET);
+    } finally {
+      gate.resolve();
+      ple.dispose();
+    }
+  });
+
+  it("予算 0 では行も保持せず、同じ値を毎回読み直す", async () => {
+    const reader = fakeSources(SHARD_FILES, (i) => SHARD_BYTES[i].buffer, { cost: "seek" });
+    const ple = createGemma4Ple({
+      index: INDEX,
+      openShard: reader.openShard,
+      vocabSize: TOKENS,
+      maxResidentBytes: 0,
+    });
+    try {
+      const first = await ple.gather([0]), second = await ple.gather([0]);
+      assert(first.dtype === "f32" && second.dtype === "f32");
+      assertEquals(words(first.data), words(second.data));
+      assertEquals(ple.stats(), { loads: 0, rowReads: 2, resident: 0, residentBytes: 0 });
+      assertEquals(reader.ranges.length, 6);
+    } finally {
+      ple.dispose();
+    }
+  });
+
+  for (const action of ["dispose", "abort", "values-failure", "scales-failure"] as const) {
+    it(`${action} の途中だった行を保持しない`, async () => {
+      const reader = fakeSources(SHARD_FILES, (i) => SHARD_BYTES[i].buffer, { cost: "seek" });
+      const entered = Promise.withResolvers<void>(), gate = Promise.withResolvers<void>();
+      const failure = Error(action);
+      let calls = 0;
+      const ple = createGemma4Ple({
+        index: INDEX,
+        vocabSize: TOKENS,
+        openShard: async (file) => {
+          const source = await reader.openShard(file);
+          assert(source.range);
+          const range = source.range;
+          return {
+            ...source,
+            range: {
+              ...range,
+              read: async (offset, length, options) => {
+                const call = calls++;
+                if (call === 2 || call === 3) {
+                  entered.resolve();
+                  await gate.promise;
+                  if (
+                    (call === 2 && action === "values-failure") ||
+                    (call === 3 && action === "scales-failure")
+                  ) throw failure;
+                }
+                return await range.read(offset, length, options);
+              },
+            },
+          };
+        },
+      });
+      const abort = new AbortController();
+      try {
+        const pending = ple.gather([0], { signal: abort.signal });
+        const checked = action.endsWith("failure")
+          ? assertRejects(() => pending, Error, action)
+          : pending;
+        await entered.promise;
+        if (action === "dispose") ple.dispose();
+        if (action === "abort") abort.abort();
+        gate.resolve();
+        await checked;
+        assertEquals(ple.stats().residentBytes, 0);
+        if (action === "dispose") await assertRejects(() => ple.gather([0]));
+        else {
+          const before = calls;
+          await ple.gather([0]);
+          assertEquals(calls - before, 2, "中断・失敗した行をキャッシュから返している");
+          assertEquals(ple.stats().residentBytes, ROW_BYTES);
+        }
+      } finally {
+        gate.resolve();
+        ple.dispose();
+      }
+    });
+  }
+});

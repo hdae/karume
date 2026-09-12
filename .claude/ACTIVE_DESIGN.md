@@ -16,14 +16,16 @@
   f16 / f32 M=1 GEMV は RTX の実 LLM で検収して採用（K-25 / K-26）。固定 INT2 / SRQ と writer は実装・検収済み（K-27）。
   QAT の公開形式・固定丸め・PLE 対応は承認済み。別 family `gemma4-qat` の E2B / E4B として統合済み（[ADR 0097](../docs/decisions/0097-gemma4-qat-integration.md)）。Anima の RMS128 を適用（K-28）。
   温度0・非投機decodeの小出力を通常Gemma4 / QATへ統合（H-18・[ADR 0083](../docs/decisions/0083-generation-api-surface.md#gemmaの温度0生成の小出力2026-09-12)）。
-  prefillは従来run、decodeはbatchとGPU内topkで8B読戻し。一般sampling・penalty/bias・投機・診断は従来経路。M2は未検収。
+  prefillは従来run、decodeはbatchとGPU内topkで8B読戻し。一般sampling・penalty/bias・投機・診断は従来経路。M2の通常/QAT E2Bは利用者のChrome計測で動作・反復一致を確認。
   QAT の公式 recipe は検収・コミット済み。共通 pipeline / 対話 CLI の E2B/E4B・Deno/Chrome・複数ターン・中断・解放と全体検証を完了。
   SRQ融合・境界探索短縮は全体比較、INT2変種は単体比較を終え、追加採用を見送り（K-29）。単体計測のpass境界にも注意。
   M2 は利用者から Anima / Irodori などの動作・短縮報告あり。形状別の自動数値検収と追加 LLM の配布・長文・品質検収は残る。E4B / Qwen / MiniCPM のローカル実行と
   Chrome の Gemma 自由文比較は済。QAT の固定重みは保存後も全 byte 一致。CPU/GPU 差は行列縮約が SRQ 境界をまたぐことまで帰属済み。8短文で Deno/Chrome は一致、公式CPU一致はE2B 6件/E4B 4件。広い生成品質は未検収。
   デモの暖機・TTFT分離は検収済み。[Qwen/MiniCPMの初期品質参考値](../docs/research/2026-09-12-llm-quality-baseline.md)も保存。
   [PyTorchとDeno/WebGPUの速度比較](../docs/research/2026-09-12-llm-speed-baseline.md)を基準に、次はM2の同条件追試とprefillの費用帰属。Gemmaの品質本採点は残件。
-  [Gemma E2B / QAT E2BのChrome比較](../docs/research/2026-09-12-browser-llm-speed.md)も追加。`deno task bench:llm-browser`でM2から追試できる。RTXでは両エンジン・2取得経路の80生成が反復一致。量子化条件は異なる。
+  [Gemma E2B / QAT E2BのChrome比較](../docs/research/2026-09-12-browser-llm-speed.md)も追加。`deno task bench:llm-browser`でM2から追試できる。量子化条件は異なる。
+  [M2実測とPLEの量子化行キャッシュ](../docs/research/2026-09-12-ple-row-cache.md)を追加（H-22、既存予算内256行・公開API/数値不変）。
+  Chrome E2B/E4Bで効果、Deno E2Bはほぼ中立。次は改善後M2と入力バケットH-23。QATのM2/RTX生成列には導入前から差があり、別途帰属する。
   ローカル実験 CLI は [MiniCPM5](../examples/minicpm5/README.md) / [Qwen3](../examples/qwen3/README.md)。
   Gemma 準拠の対話・reset・中断に対応。容量 128 の多ターン検収は research に記録。公開 pipeline は未追加。
   利用者の希望により、今後は作業単位で調査・検証を終えて順次コミットする。残件の正本は backlog。

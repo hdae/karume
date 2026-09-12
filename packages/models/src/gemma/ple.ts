@@ -53,6 +53,8 @@
  * 一意行数 `rows` で決める（{@link createGemma4Ple} の方針表）。decode の 1 token は 253MiB の
  * 全量読みではなく 9,100 B の 2 読みになる。
  *
+ * 読み終えた量子化行は最大 256 行まで LRU で再利用する。全量 shard を優先し、既存の
+ * ホスト RAM 予算の空きだけを使う。予算 0 は行も保持しない（ADR 0085 追記 2026-09-12）。
  * 行の位置は shard ごとに**ヘッダを 1 度だけ**解いて持つ（先頭 8 バイト → ヘッダ長 → ヘッダ
  * JSON の 2 段読み）。検査は全量経路と**同じ 1 実装**（{@link assertShardTables}）を通すので、
  * 行読みのときだけ別形式の資産が通ることはない。値は同じバイト列を同じ 2 段丸めに掛けるので、
@@ -180,7 +182,7 @@ export type Gemma4PleOptions = {
    */
   readonly vocabSize: number;
   /**
-   * 常駐させる shard の**ホスト RAM 上限（バイト）**（LRU — ADR 0085 決定 3）。
+   * 常駐させる shard と量子化行の**ホスト RAM 上限（バイト）**（LRU — ADR 0085 決定 3）。
    *
    * 省略時は {@link defaultGemma4PleResidentBytes}（= 最大 shard 2 本ぶん）。`0` は「常駐させ
    * ない」= gather が使い終わった shard を即座に落とす形で、正当な指定である（読み直しが毎回
@@ -207,10 +209,11 @@ export type Gemma4PleStats = {
   /** 現在常駐している shard 数。 */
   readonly resident: number;
   /**
-   * 常駐が占めるホスト RAM（{@link Gemma4PleOptions.maxResidentBytes} と同じ単位）。
+   * shard と行キャッシュが占めるホスト RAM（{@link Gemma4PleOptions.maxResidentBytes} と同じ単位）。
    *
-   * 読み**始めた**時点で計上する（取得の完了を待たない）— 予算は席の予約として使わないと、
-   * 走行中の読みが束になったときに上限を黙って超える。
+   * 全量 shard は読み**始めた**時点で予約し、行は読み終えて保持した byte 数を加える。
+   * shard の予約時に行を追い出すため、両者の合計は既存予算を超えない。
+   * 読取り中の一時バッファや Map 等の管理用オブジェクトは従来同様この量に含まない。
    */
   readonly residentBytes: number;
 };
@@ -625,6 +628,14 @@ const SEEK_FULL_ROWS = 32;
  */
 const ROW_READ_CONCURRENCY = 16;
 
+/** 同じ token の再読取りを省く上限。shard 常駐後の予算の空きだけを使う（ADR 0085）。 */
+const ROW_CACHE_CAPACITY = 256;
+
+type CachedRow = {
+  readonly values: Int8Array<ArrayBuffer> | Uint8Array<ArrayBuffer>;
+  readonly scales: Float32Array<ArrayBuffer>;
+};
+
 /** 行読みへ倒した shard 1 本ぶんの計画（方針表の結果 — `range` は絞り込み済み）。 */
 type RowPlan = {
   readonly position: number;
@@ -697,6 +708,9 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
   const rowValueBytes = stride / factor;
   /** 行 1 本ぶんの `scales`（f32 × 層数）のバイト数。 */
   const scaleStride = index.layers * SCALE_BYTES;
+  const rowBytes = rowValueBytes + scaleStride;
+  /** 行も量子化された byte 列のまま保持し、逆量子化の順序を変えない。挿入順 = LRU。 */
+  const rowCache = new Map<number, CachedRow>();
 
   /** 挿入順 = LRU（触った shard を末尾へ付け替え、予算超過分は先頭から落とす）。 */
   const resident = new Map<number, Promise<ResidentShard>>();
@@ -712,6 +726,17 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
   let loads = 0;
   let rowReads = 0;
   let disposed = false;
+
+  const trimRows = (): void => {
+    const limit = Math.min(
+      ROW_CACHE_CAPACITY,
+      Math.floor(Math.max(0, budget - residentBytes) / rowBytes),
+    );
+    for (const oldest of rowCache.keys()) {
+      if (rowCache.size <= limit) break;
+      rowCache.delete(oldest);
+    }
+  };
 
   const release = (position: number): void => {
     resident.delete(position);
@@ -806,6 +831,8 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
       if (residentBytes <= budget) break;
       release(oldest);
     }
+    // 全量 shard を優先し、行の常駐を既存予算へ上乗せしない。
+    trimRows();
     return pending;
   };
 
@@ -921,15 +948,18 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
     const values = valuesResult.value, scales = scalesResult.value;
     rowReads += 1;
     const first = positions[0] * stride;
-    writeRow(
-      data,
-      first,
-      index.storage === undefined ? new Int8Array(values) : new Uint8Array(values),
-      0,
-      new Float32Array(scales),
-      0,
-    );
+    const cached: CachedRow = {
+      values: index.storage === undefined ? new Int8Array(values) : new Uint8Array(values),
+      scales: new Float32Array(scales),
+    };
+    writeRow(data, first, cached.values, 0, cached.scales, 0);
     copyDuplicates(data, positions, first);
+    // 値と scale の成功後だけ保存し、中断・dispose 後にはキャッシュを復活させない。
+    if (!disposed && !options.signal?.aborted && budget - residentBytes >= rowBytes) {
+      rowCache.delete(id);
+      rowCache.set(id, cached);
+      trimRows();
+    }
   };
 
   /**
@@ -946,7 +976,19 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
   ): Promise<void> => {
     const jobs: RowJob[] = [];
     for (const plan of plans) {
-      for (const [id, positions] of plan.rows) jobs.push({ plan, id, positions });
+      for (const [id, positions] of plan.rows) {
+        const cached = rowCache.get(id);
+        if (cached === undefined) {
+          jobs.push({ plan, id, positions });
+        } else {
+          // hit を先に複写し、後続 miss の LRU 追い出しで読み直すことを避ける。
+          rowCache.delete(id);
+          rowCache.set(id, cached);
+          const first = positions[0] * stride;
+          writeRow(data, first, cached.values, 0, cached.scales, 0);
+          copyDuplicates(data, positions, first);
+        }
+      }
     }
     const parallelPair = jobs.length * 2 <= ROW_READ_CONCURRENCY;
     let next = 0;
@@ -1054,7 +1096,12 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
       return { dtype: "f32", shape: [1, ids.length, index.layers, index.dim], data };
     },
     stats(): Gemma4PleStats {
-      return { loads, rowReads, resident: resident.size, residentBytes };
+      return {
+        loads,
+        rowReads,
+        resident: resident.size,
+        residentBytes: residentBytes + rowCache.size * rowBytes,
+      };
     },
     dispose(): void {
       disposed = true;
@@ -1064,6 +1111,7 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
       // 読み口と行の位置も落とす（gather は以後 fail loudly なので、掴み続ける理由が無い）。
       sources.clear();
       layouts.clear();
+      rowCache.clear();
     },
   };
 };
