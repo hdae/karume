@@ -91,8 +91,10 @@
     <div class="controls">
       <label>モデル<select id="model"><option value="normal">Gemma 4 E2B</option><option value="qat">Gemma 4 QAT E2B</option><option value="both">両方</option></select></label>
       <label>比較対象<select id="engine"><option value="both">両方（順番に実行）</option><option value="karume">karume</option><option value="transformers">Transformers.js</option></select></label>
+      <label>Karumeの行列計算<select id="reduce"><option value="sequential">既定（逐次加算）</option><option value="parallel">並列加算（実験）</option><option value="both">既定と並列を比較</option></select></label>
       <button id="run">計測開始</button><button id="save" disabled>JSONを保存</button>
     </div>
+    <p>並列加算はGemma E2Bの一部の量子化行列を高速化します。重みは同じですが丸め順が変わり、特にQATでは文章も変わる場合があります。M2の効果はこの画面で比較してください。</p>
     <p id="environment" class="muted"></p>
     <p id="status" role="status" aria-live="polite">準備中</p>
     <p
@@ -130,7 +132,7 @@
       for (const c of r.cases) {
         const tr = document.createElement("tr");
         const values = [
-          `${r.model} / ${r.engine}`,
+          `${r.model} / ${r.engine}${r.linearGemvReduce ? ` / ${r.linearGemvReduce}` : ""}`,
           c.case,
           number(c.first.ttftMs, "ms"),
           number(median(c.measured.map((x) => x.ttftMs)), "ms"),
@@ -147,15 +149,15 @@
         const details = document.createElement("details"),
           summary = document.createElement("summary"),
           pre = document.createElement("pre");
-        summary.textContent = `${r.model} / ${r.engine} / ${c.case} の出力${
-          c.deterministic ? "" : "（繰り返しで不一致あり）"
-        }`;
+        summary.textContent = `${r.model} / ${r.engine}${
+          r.linearGemvReduce ? ` / ${r.linearGemvReduce}` : ""
+        } / ${c.case} の出力${c.deterministic ? "" : "（繰り返しで不一致あり）"}`;
         pre.textContent = c.first.text;
         details.append(summary, pre);
         $("texts").append(details);
       }
     };
-    const runOne = (model, engine) =>
+    const runOne = (model, engine, reduce) =>
       new Promise((resolve, reject) => {
         const frame = document.createElement("iframe");
         activeFrame = frame;
@@ -171,7 +173,7 @@
           frame.remove();
           activeFrame = undefined;
           if (type === "error") {
-            failures.push({ model, engine, error: value });
+            failures.push({ model, engine, linearGemvReduce: reduce, error: value });
             $("save").disabled = false;
             reject(Error(value));
           } else {
@@ -180,7 +182,7 @@
           }
         };
         window.addEventListener("message", listener);
-        frame.src = `/frame.html?model=${model}&engine=${engine}`;
+        frame.src = `/frame.html?model=${model}&engine=${engine}&reduce=${reduce}`;
         frame.title = "Benchmark execution";
         document.body.append(frame);
       });
@@ -188,10 +190,20 @@
       $("run").disabled = true;
       $("model").disabled = true;
       $("engine").disabled = true;
+      $("reduce").disabled = true;
       try {
         const models = $("model").value === "both" ? ["normal", "qat"] : [$("model").value];
         const engines = $("engine").value === "both" ? ["karume", "transformers"] : [$("engine").value];
-        for (const model of models) for (const engine of engines) await runOne(model, engine);
+        const reductions = $("reduce").value === "both"
+          ? ["sequential", "parallel"]
+          : [$("reduce").value];
+        for (const model of models) {
+          for (const engine of engines) {
+            for (const reduce of engine === "karume" ? reductions : ["sequential"]) {
+              await runOne(model, engine, reduce);
+            }
+          }
+        }
         $("status").textContent =
           "計測完了。表は本計測3回の中央値です。初回TTFTは各入力の初回で、プロセス全体の初回は英語のみです。";
       } catch (error) {
@@ -201,6 +213,7 @@
         $("run").disabled = false;
         $("model").disabled = false;
         $("engine").disabled = false;
+        $("reduce").disabled = false;
       }
     };
     $("run").addEventListener("click", start);

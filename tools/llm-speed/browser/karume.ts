@@ -1,4 +1,4 @@
-import { acquireGpu } from "../../../packages/runtime/mod.ts";
+import { acquireGpu, type LinearGemvReduce } from "../../../packages/runtime/mod.ts";
 import { localDirectory } from "../../../packages/hub/mod.ts";
 import { gemma4ChatPrompt, Gemma4Pipeline } from "../../../packages/models/gemma.ts";
 import { Gemma4QatPipeline } from "../../../packages/models/gemma4-qat.ts";
@@ -6,7 +6,11 @@ import { generationTimer } from "../../../examples/shared/generation-timing.ts";
 import type { ModelKind } from "./config.ts";
 import type { EngineHandle, Fixture } from "./runner.ts";
 
-export const loadKarume = async (kind: ModelKind, fixture: Fixture): Promise<EngineHandle> => {
+export const loadKarume = async (
+  kind: ModelKind,
+  fixture: Fixture,
+  linearGemvReduce: LinearGemvReduce = "sequential",
+): Promise<EngineHandle> => {
   const gpu = await acquireGpu();
   try {
     const manifestResponse = await fetch(`/models/${kind}/karume.json`);
@@ -34,7 +38,7 @@ export const loadKarume = async (kind: ModelKind, fixture: Fixture): Promise<Eng
         return new Uint8Array(await r.arrayBuffer());
       },
     }, { label: `browser-speed-${kind}` });
-    const common = { gpu, model: "e2b", chunkLength: 64 } as const;
+    const common = { gpu, model: "e2b", chunkLength: 64, linearGemvReduce } as const;
     const pipeline = kind === "normal"
       ? await Gemma4Pipeline.fromPretrained(source, common)
       : await Gemma4QatPipeline.fromPretrained(source, common);
@@ -54,6 +58,7 @@ export const loadKarume = async (kind: ModelKind, fixture: Fixture): Promise<Eng
       metadata: {
         manifestSha256,
         compute: "f32",
+        linearGemvReduce,
         weights: kind === "normal"
           ? "Karume packed i4 / i8"
           : "Karume fixed int2 / int4 / int8 + SRQ",

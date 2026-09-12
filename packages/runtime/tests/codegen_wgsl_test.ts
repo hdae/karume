@@ -180,6 +180,7 @@ import {
 import { linearKey, linearParams, linearWgsl } from "../src/kernels/linear.ts";
 import {
   linearGemvKey,
+  linearGemvParallelWgsl,
   linearGemvRowsKey,
   type LinearGemvRowsVariant,
   linearGemvRowsWgsl,
@@ -507,6 +508,9 @@ Deno.test("生成した WGSL がスナップショットとバイト単位で一
     ["linear_wi2.wgsl", linearWgsl("i2", false)],
     ["linear_wi2_v4.wgsl", linearWgsl("i2", true)],
     ["linear_gemv_wi2.wgsl", linearGemvWgsl("i2")],
+    ["linear_gemv_parallel_wi2_l2.wgsl", linearGemvParallelWgsl("i2", undefined, 2)],
+    ["linear_gemv_parallel_g512_l4.wgsl", linearGemvParallelWgsl("i4", 512, 4)],
+    ["linear_gemv_parallel_wi8_l16.wgsl", linearGemvParallelWgsl("i8", undefined, 16)],
     [
       "linear_gemv_r4_wi2.wgsl",
       linearGemvRowsWgsl("i2", undefined, { cols: 32, unroll: 4, rows: 4 }),

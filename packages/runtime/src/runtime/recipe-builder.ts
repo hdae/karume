@@ -139,6 +139,9 @@ import {
   defaultLinearGemvVariant,
   LINEAR_GEMV_MAX_ROWS,
   linearGemvKey,
+  linearGemvParallelKey,
+  linearGemvParallelLanes,
+  linearGemvParallelWgsl,
   linearGemvParams,
   linearGemvRowsKey,
   linearGemvRowsWgsl,
@@ -322,6 +325,7 @@ import {
 import type {
   ComputePrecision,
   I8a8Dot,
+  LinearGemvReduce,
   ParamsCacheStats,
   StateAttentionReduce,
 } from "./session-types.ts";
@@ -368,6 +372,7 @@ type RecipeBuilderContext = {
   readonly attentionScoreStorage: ScoreStorage;
   /** states 形 attention ③PV の縮約形（executor の {@link SessionState} が既定を決める）。 */
   readonly stateAttentionReduce: StateAttentionReduce;
+  readonly linearGemvReduce: LinearGemvReduce;
   /**
    * 行ブロック gemv の並列度目標（`SessionOptions.linearGemvRowsThreadTarget` — Session 生成時に
    * 固定される静的なノブ。`undefined` はカーネル側の既定）。
@@ -1732,6 +1737,7 @@ export class RecipeBuilder {
    *
    * 束縛・uniform・出力実体は既定経路と同一で、変わるのは「どのスレッドがどの出力を担当するか」
    * だけ（1 スレッド = 1 出力列〈M ≥ 2 は × 行ブロック〉・共有タイルと barrier を持たない）。
+   * 例外は明示指定の linearGemvReduce: parallel（ADR 0098）で、対象形状の K を分担する。
    * 1 出力要素あたりの K 縮約順は k 昇順の逐次のままなので**ビット同一**（src/kernels/linear-gemv.ts
    * の数値契約）。
    * MUST: M=1 は M=1 変種（decode の生成物を動かさない）、M ≥ 2 は行ブロック変種で、行数 `rows` は
@@ -1755,18 +1761,25 @@ export class RecipeBuilder {
     const limit = this.#state.gpu.limits.maxComputeWorkgroupsPerDimension;
     const [x, weight] = step.inputShapes;
     const where = `linear gemv [${x.join(",")}] × [${weight.join(",")}]`;
-    // M=1 は M=1 変種（行ブロック無し）、M ≥ 2 は行ブロック変種（rows は (m, n, 目標) の純関数）。
-    const rowsVariant = m === 1
+    // 数値を変える選択は明示指定時のみ。参照経路の選択・WGSLは従来どおり。
+    const lanes = this.#state.linearGemvReduce === "parallel"
+      ? linearGemvParallelLanes(storage, m, n, k, groupSize)
+      : undefined;
+    const rowsVariant = m === 1 || lanes !== undefined
       ? undefined
       : defaultLinearGemvRowsVariant(storage, m, n, this.#state.linearGemvRowsThreadTarget);
     const variant = rowsVariant ?? defaultLinearGemvVariant({ storage, n, k });
     const rows = rowsVariant?.rows ?? 1;
-    const key = rowsVariant === undefined
+    const key = lanes !== undefined
+      ? linearGemvParallelKey(storage, groupSize, lanes)
+      : rowsVariant === undefined
       ? linearGemvKey(storage, groupSize, variant)
       : linearGemvRowsKey(storage, groupSize, rowsVariant);
     const { pipeline, layout, roles } = await this.#state.cache.get(
       key,
-      rowsVariant === undefined
+      lanes !== undefined
+        ? linearGemvParallelWgsl(storage, groupSize, lanes)
+        : rowsVariant === undefined
         ? linearGemvWgsl(storage, groupSize, variant)
         : linearGemvRowsWgsl(storage, groupSize, rowsVariant),
     );
@@ -1787,7 +1800,7 @@ export class RecipeBuilder {
         ...this.#weightScaleBindings(step, LINEAR_SCALE_BINDING),
       ],
       workgroups: [
-        tiledWorkgroups(n, variant.cols, limit, where),
+        tiledWorkgroups(n, lanes === undefined ? variant.cols : 128 / lanes, limit, where),
         tiledWorkgroups(m, rows, limit, where),
         1,
       ],

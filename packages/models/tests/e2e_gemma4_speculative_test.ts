@@ -779,12 +779,16 @@ Deno.test({
      * 棄却（`commit(0)`）を挟むのは、投機ループが実際に通す順序だからである（受理 0 の cycle で
      * 次の decode が同じ値を出すことがこの門の意味）。
      */
-    const measure = async (reduce: StateAttentionReduce): Promise<RowPair> => {
+    const measure = async (
+      reduce: StateAttentionReduce,
+      linearGemvReduce: "sequential" | "parallel" = "sequential",
+    ): Promise<RowPair> => {
       const parsed = prepareModel(await readShard(shards[0]));
       // 出口 2 本の順序が契約（出力 0 = logits・出力 1 = 最終 norm 後 hidden）。
       const logitsName = parsed.graph.outputs[0];
       const session = await parsed.createSession(gpu, streamShards(shards.slice(1)), {
         stateAttentionReduce: reduce,
+        linearGemvReduce,
       });
       try {
         const context = await session.createGenerationContext({
@@ -874,6 +878,17 @@ Deno.test({
             `${(performance.now() - started).toFixed(0)}ms`,
         );
       });
+
+      for (const attention of ["sequential", "parallel"] as const) {
+        await t.step(
+          `GEMV並列加算 / attention=${attention} でverify行0とdecodeがu32一致する`,
+          async () => {
+            const { mismatches, left, right } = compare(await measure(attention, "parallel"));
+            assertEquals(mismatches, 0);
+            assertEquals(left, right);
+          },
+        );
+      }
 
       await t.step("② 既定席（parallel）の差は実測だけ（門ではない）", async () => {
         const started = performance.now();

@@ -154,6 +154,7 @@ export type {
   GenerationContext,
   GenerationContextSpec,
   GenerationRun,
+  LinearGemvReduce,
   ParamsCacheStats,
   PlanBackingStats,
   PreparedPlanStats,

@@ -1461,3 +1461,10 @@ CPU / GPU の行列縮約の小さな差が SRQ の丸め境界をまたぎ、�
 RTX の Deno / Chrome は両モデル・両 chunk 条件の全32件で一致したが、広い品質や M2 の同値性の証明ではない。
 初期配布の capacity128、chunk32、trace上限128を超える使い方の品質・性能は未検収。
 実測の出所は [QAT の統合検収](research/2026-09-10-codex-mtp-optimization.md#qat-の共通パイプラインと対話-cli2026-09-11)。
+
+## GEMVの並列加算（2026-09-12）
+
+`linearGemvReduce: "parallel"` は[ADR 0098](decisions/0098-linear-gemv-parallel.md)の任意指定。
+対象は実測した量子化行列と物理 M=1..8、f32 演算のみ。既定の逐次加算と bit 同一ではなく、QAT は生成列も変わり得る。
+M>8 と対象外形状は従来経路で、診断キーで適用範囲を確認できる。E4B・他モデルの全面的な高速化を意味しない。
+M2 の速度・広い品質評価は未検収。既定は変更していない。

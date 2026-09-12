@@ -507,6 +507,31 @@ Deno.test({
 });
 
 Deno.test({
+  name: "GEMV並列加算は不正な綴りと未実装の計算精度の組を構築時に拒否する",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    try {
+      for (
+        const options of [
+          jsCallerOptions({ linearGemvReduce: "paralel" }),
+          { linearGemvReduce: "parallel", linearCompute: "f16" } as const,
+          { linearGemvReduce: "parallel", linearCompute: "a8" } as const,
+        ]
+      ) {
+        await assertRejects(
+          () => createSession(gpu, openModel(chainModelBuffer()), options),
+          ExecutionError,
+          "linearGemvReduce",
+        );
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
   name: "planBackingBudgetBytes は非負の安全な整数だけを受ける（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {

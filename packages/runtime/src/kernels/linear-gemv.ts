@@ -68,7 +68,7 @@
  * **実測命題**（門 = tests/gpu_linear_gemv_test.ts の u32 完全一致）。
  *
  * MUST NOT: k を分割して部分和を足し直す（split-K）形は縮約順が変わるため、この族には
- * 入れない。実測でも ADR 0058 の opt-in 席を切る価値が無かった（ADR 0082 §不採用）。
+ * 入れない。別の任意指定カーネル `linearGemvParallelWgsl` は ADR 0098 に従う。
  *
  * ## 幾何との関係（gemm-geometry の「唯一の選択点」MUST の射程）
  *
@@ -391,6 +391,7 @@ const unitLoads = (
   slot: string,
   unitExpr: string,
   shift: number | undefined,
+  inputBase = "",
 ): string => {
   const unit = linearGemvUnit(storage);
   const groupScale = storage === "i4"
@@ -399,7 +400,7 @@ const unitLoads = (
     : "";
   return `    let unit${slot} = ${unitExpr};
     let pw${slot} = w[row_base + unit${slot}];${groupScale}
-    let xq${slot} = unit${slot} * ${unit / 4}u;`;
+    let xq${slot} = ${inputBase}unit${slot} * ${unit / 4}u;`;
 };
 
 /**
@@ -699,6 +700,123 @@ ${unitLoads(storage, "t", "unit", shift)}
 ${rowsMacs(storage, "t", rows)}
   }
 ${stores}
+}
+`;
+};
+
+/** K を分担する lane 数。1 workgroup は常に128 thread（共有部分和512 byte）。 */
+export type LinearGemvParallelLanes = 2 | 4 | 8 | 16 | 32;
+
+type ParallelShape = {
+  readonly storage: WeightStorage;
+  readonly n: number;
+  readonly k: number;
+  readonly group?: number;
+  readonly lanes: LinearGemvParallelLanes;
+};
+
+// DECIDED: 実測した形だけを任意指定の対象にする。GPU名による自動選択ではない。
+// docs/decisions/0098-linear-gemv-parallel.md
+const PARALLEL_SHAPES: readonly ParallelShape[] = [
+  { storage: "i4", n: 8960, k: 1536, group: 32, lanes: 4 },
+  { storage: "i4", n: 2048, k: 1536, group: 32, lanes: 4 },
+  { storage: "i4", n: 256, k: 1536, group: 32, lanes: 32 },
+  { storage: "i4", n: 1536, k: 2048, group: 32, lanes: 32 },
+  { storage: "i4", n: 6144, k: 1536, group: 32, lanes: 4 },
+  { storage: "i4", n: 1536, k: 6144, group: 32, lanes: 32 },
+  { storage: "i4", n: 1536, k: 256, group: 32, lanes: 4 },
+  { storage: "i4", n: 4096, k: 1536, group: 32, lanes: 4 },
+  { storage: "i4", n: 512, k: 1536, group: 32, lanes: 32 },
+  { storage: "i4", n: 1536, k: 4096, group: 32, lanes: 32 },
+  { storage: "i4", n: 12288, k: 1536, group: 32, lanes: 4 },
+  { storage: "i4", n: 1536, k: 12288, group: 32, lanes: 32 },
+  { storage: "i8", n: 262144, k: 1536, lanes: 16 },
+  { storage: "i4", n: 2048, k: 1536, group: 512, lanes: 4 },
+  { storage: "i4", n: 256, k: 1536, group: 512, lanes: 32 },
+  { storage: "i4", n: 1536, k: 2048, group: 2048, lanes: 32 },
+  { storage: "i4", n: 6144, k: 1536, group: 512, lanes: 4 },
+  { storage: "i4", n: 1536, k: 6144, group: 2048, lanes: 32 },
+  { storage: "i8", n: 256, k: 1536, lanes: 32 },
+  { storage: "i8", n: 1536, k: 256, lanes: 4 },
+  { storage: "i4", n: 4096, k: 1536, group: 512, lanes: 4 },
+  { storage: "i4", n: 512, k: 1536, group: 512, lanes: 32 },
+  { storage: "i4", n: 1536, k: 4096, group: 4096, lanes: 32 },
+  { storage: "i2", n: 12288, k: 1536, lanes: 2 },
+  { storage: "i2", n: 1536, k: 12288, lanes: 32 },
+];
+
+/** 同じ形の M=1/4/8 は同じ加算順。M>8 の prefill は既存の行ブロックを維持する。 */
+export const linearGemvParallelLanes = (
+  storage: WeightStorage,
+  m: number,
+  n: number,
+  k: number,
+  group?: number,
+): LinearGemvParallelLanes | undefined => {
+  if (m < 1 || m > 8) return undefined;
+  return PARALLEL_SHAPES.find((shape) =>
+    shape.storage === storage && shape.n === n && shape.k === k && shape.group === group
+  )?.lanes;
+};
+
+export const linearGemvParallelKey = (
+  storage: WeightStorage,
+  group: number | undefined,
+  lanes: LinearGemvParallelLanes,
+): string => `linear_gemv_parallel${weightKeyPart(storage)}${i4GroupKeyPart(group)}:l${lanes}`;
+
+/**
+ * 圧縮語を K の lane に巡回配分する任意指定版。逆量子化と語内の積和は逐次版と共有するが、
+ * 語をまたぐ加算順は異なる。128 thread 内の木縮約だけで完結し、追加 feature を要求しない。
+ * M を shader に焼かず、decode と少数行の投機検証を同一キー・同一算術にする。
+ * DECIDED: docs/decisions/0098-linear-gemv-parallel.md
+ */
+export const linearGemvParallelWgsl = (
+  storage: WeightStorage,
+  group: number | undefined,
+  lanes: LinearGemvParallelLanes,
+): string => {
+  if (![2, 4, 8, 16, 32].includes(lanes)) {
+    throw new CodegenError("linear_gemv_parallel: 不正なlane数");
+  }
+  assertRowsStorage(storage);
+  const unit = linearGemvUnit(storage);
+  const shift = gemvGroupShift(storage, group);
+  return `// karume linear gemv K parallel (${storage}, ${lanes} lanes/output)
+struct Dims {
+  m: u32,
+  n: u32,
+  k: u32,
+}
+@group(0) @binding(0) var<uniform> dims: Dims;
+${bindings(unit, storage)}
+var<workgroup> partial: array<f32, 128>;
+
+@compute @workgroup_size(128)
+fn main(@builtin(local_invocation_index) lid: u32, @builtin(workgroup_id) wg: vec3<u32>) {
+  let lane = lid % ${lanes}u;
+  let col = wg.x * ${128 / lanes}u + lid / ${lanes}u;
+  var acc = 0.0;
+  // 端の列も部分和0を書き、全threadが同じbarrierを通る。
+  if (col < dims.n) {
+    let units = dims.k / ${unit}u;
+    let row_base = col * units;${scaleSetupWgsl(storage, shift)}
+    for (var unit = lane; unit < units; unit += ${lanes}u) {
+${unitLoads(storage, "t", "unit", shift, "wg.y * (dims.k / 4u) + ")}
+${unitMacs(storage, "t")}
+    }
+  }
+  partial[lid] = acc;
+  workgroupBarrier();
+  for (var width = ${lanes / 2}u; width > 0u; width /= 2u) {
+    if (lane < width) {
+      partial[lid] = partial[lid] + partial[lid + width];
+    }
+    workgroupBarrier();
+  }
+  if (col < dims.n && lane == 0u) {
+    out[wg.y * dims.n + col] = partial[lid] + bias[col];
+  }
 }
 `;
 };

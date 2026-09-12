@@ -210,6 +210,9 @@ export type ComputePrecision = "f32" | "f16" | "a8";
 /** states 形 attention ①QK / ③PV の縮約形（{@link SessionOptions.stateAttentionReduce}）。 */
 export type StateAttentionReduce = "sequential" | "parallel";
 
+/** 量子化 GEMV の K 加算順（ADR 0098）。 */
+export type LinearGemvReduce = "sequential" | "parallel";
+
 export type SessionOptions = {
   /** submit の時間予算政策（TDR / watchdog 対策 — ADR 0004）。既定は DEFAULT_SUBMIT_POLICY。 */
   readonly submitPolicy?: SubmitPolicy;
@@ -301,6 +304,13 @@ export type SessionOptions = {
    * MUST: 既定は `"sequential"`（ADR 0058 決定 2 — 数値を変える経路の自動選択禁止）。
    */
   readonly stateAttentionReduce?: StateAttentionReduce;
+  /**
+   * 量子化 GEMV の加算順（既定 sequential）。parallel は実測済みの INT2/4/8 形状と M=1..8 に
+   * 限る任意指定。f32 演算のみで、対象外形状・格納は従来経路（診断キーで区別）。
+   * 加算順が変わるため、QAT の再量子化を含め生成列は既定と一致しない場合がある。
+   * M=1 と M=4/8 は同一の加算順を使う。追加重みコピーは無い。ADR 0098。
+   */
+  readonly linearGemvReduce?: LinearGemvReduce;
   /**
    * 行ブロック gemv（linear の GEMV 族・M ≥ 2）の**並列度の目標**（スレッド数 = 出力列 n ×
    * y タイル数）。既定 16384 = 参照 device（RTX 3080 Ti）の飽和点。

@@ -16,7 +16,7 @@
   [Chrome比較ページとRTX実測](research/2026-09-12-browser-llm-speed.md)を追加。通常/QAT E2BのローカルONNX・HF直接取得を検収済み。
   [利用者のM2実測とPLE行キャッシュ](research/2026-09-12-ple-row-cache.md)を記録。H-22のM2改善後は利用者追試で速度向上と40生成の一致を確認。
   [WebMLとの同条件比較](research/2026-09-12-webml-browser-speed.md)も追加。[Chromeプロファイルと候補比較](research/2026-09-12-chrome-gemma-optimization.md)に基づき、
-  大語彙INT8のc16を限定採用（[K-34追試](research/2026-09-12-chrome-gemv-followup.md)）。次は重み配置・K並列（K-33 / K-35）、RoPE/c16のM2追試、品質比較、
+  大語彙INT8のc16を限定採用（[K-34追試](research/2026-09-12-chrome-gemv-followup.md)）。K並列を明示指定で追加（[K-35](research/2026-09-12-chrome-gemv-parallel.md)）。重みコピーK-33は費用対効果で見送り。次は並列版のM2追試、品質比較、
   H-23の入力バケット検収、QATのM2/RTX生成差とChromeのGPU Instance消失の原因の切り分け。
   残件は配布 recipe / source 表、長文と広い品質評価。実験資産を公開済みモデルとして扱わない。
   手元の試走は [MiniCPM5 CLI](../examples/minicpm5/README.md) / [Qwen3 CLI](../examples/qwen3/README.md) を使える。

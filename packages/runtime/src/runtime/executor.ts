@@ -117,6 +117,7 @@ import {
   type GenerationRun,
   I8A8_DOT,
   type I8a8Dot,
+  type LinearGemvReduce,
   type ParamsCacheStats,
   type PreparedPlanStats,
   ROW_BLOCK_SPLIT,
@@ -136,6 +137,7 @@ export type {
   GenerationContextSpec,
   GenerationRun,
   I8a8Dot,
+  LinearGemvReduce,
   ParamsCacheStats,
   PlanBackingStats,
   PreparedPlanStats,
@@ -159,7 +161,7 @@ export { I8A8_DOT, ROW_BLOCK_SPLIT } from "./session-types.ts";
 export type { SharedWeight } from "./weight-residency.ts";
 
 /**
- * 実行形ノブ（{@link SessionOptions} の 4 ノブ）の受理集合。
+ * {@link SessionOptions} の実行形ノブの受理集合。
  *
  * MUST: 器は `Record<union, true>` — union に値を足してここを直し忘れると、キーの欠落が
  * **型検査で**赤くなる（値の配列で持つと、足した値が黙って受理集合から落ちる）。
@@ -175,6 +177,10 @@ const ATTENTION_COMPUTES: Readonly<Record<ComputePrecision, true>> = {
   a8: true,
 };
 const SCORE_STORAGES: Readonly<Record<ScoreStorage, true>> = { f32: true, f16: true };
+const LINEAR_GEMV_REDUCES: Readonly<Record<LinearGemvReduce, true>> = {
+  sequential: true,
+  parallel: true,
+};
 const STATE_ATTENTION_REDUCES: Readonly<Record<StateAttentionReduce, true>> = {
   sequential: true,
   parallel: true,
@@ -196,12 +202,14 @@ const assertExecutionKnobs = (
   attentionCompute: ComputePrecision,
   attentionScoreStorage: ScoreStorage,
   stateAttentionReduce: StateAttentionReduce,
+  linearGemvReduce: LinearGemvReduce,
 ): void => {
   const knobs: readonly (readonly [string, string, Readonly<Record<string, true>>])[] = [
     ["linearCompute", linearCompute, LINEAR_COMPUTES],
     ["attentionCompute", attentionCompute, ATTENTION_COMPUTES],
     ["attentionScoreStorage", attentionScoreStorage, SCORE_STORAGES],
     ["stateAttentionReduce", stateAttentionReduce, STATE_ATTENTION_REDUCES],
+    ["linearGemvReduce", linearGemvReduce, LINEAR_GEMV_REDUCES],
   ];
   const violations = knobs
     .filter(([, value, accepted]) => !Object.hasOwn(accepted, value))
@@ -939,6 +947,7 @@ type SessionState = {
    * （M ≥ 16 は席に依らず ③ₜ = ③ とビット同一のタイル経路 — 席は 1 つ）。
    */
   readonly stateAttentionReduce: StateAttentionReduce;
+  readonly linearGemvReduce: LinearGemvReduce;
   /**
    * 行ブロック gemv の並列度目標（opt-in — {@link SessionOptions.linearGemvRowsThreadTarget}）。
    * 省略（`undefined`）はカーネル側の既定 = 参照 device の飽和点。
@@ -1055,6 +1064,7 @@ export class Session {
     const attentionCompute = options.attentionCompute ?? "f32";
     const attentionScoreStorage = options.attentionScoreStorage ?? "f32";
     const stateAttentionReduce = options.stateAttentionReduce ?? "sequential";
+    const linearGemvReduce = options.linearGemvReduce ?? "sequential";
     const planBackingBudgetBytes = options.planBackingBudgetBytes ??
       DEFAULT_PLAN_BACKING_BUDGET_BYTES;
     // MUST: 綴りの検査は既定代入の直後・以降の全ゲートより前。ここを通った後は s16×c16 ゲートも
@@ -1064,7 +1074,11 @@ export class Session {
       attentionCompute,
       attentionScoreStorage,
       stateAttentionReduce,
+      linearGemvReduce,
     );
+    if (linearGemvReduce === "parallel" && linearCompute !== "f32") {
+      throw new ExecutionError("linearGemvReduce: parallel は linearCompute: f32 のみ対応");
+    }
     // 値域の検査（union を読まない）は綴りの門の後 — 文言は estimate.ts の同じ門と揃える。
     if (!Number.isSafeInteger(planBackingBudgetBytes) || planBackingBudgetBytes < 0) {
       throw new ExecutionError(
@@ -1506,6 +1520,7 @@ export class Session {
       attentionCompute,
       attentionScoreStorage,
       stateAttentionReduce,
+      linearGemvReduce,
       linearGemvRowsThreadTarget,
       planBackingBudgetBytes,
       // linear の拡張の有無は**速度にしか効かない**（両変種は同じ整数を返す）ので、機能検出では

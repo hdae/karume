@@ -329,6 +329,11 @@ export type Gemma4PipelineOptions = {
    */
   readonly stateAttentionReduce?: StateAttentionReduce;
   /**
+   * 量子化 GEMV の任意指定の並列加算。省略時は sequential。意味・適用形状は
+   * runtime の SessionOptions が正本。target / drafter 両方へ渡す。QAT は文章が変わる場合がある。
+   */
+  readonly linearGemvReduce?: SessionOptions["linearGemvReduce"];
+  /**
    * slot backing（run の形ごとの中間バッファ束）を同時に保持するバイト予算。意味・既定・値域は
    * runtime の `SessionOptions.planBackingBudgetBytes` が正本で、この pipeline はそこへ素通しする
    * （`createSession` と {@link Gemma4Pipeline.estimateSessionMemory} の両方に同じ値が効く）。
@@ -1740,6 +1745,9 @@ class GemmaPipeline {
     // この家族だけ古い値で走る）。drafter Session にも同じノブを渡す。
     const sessionOptions = {
       stateAttentionReduce: options.stateAttentionReduce ?? GEMMA4_STATE_ATTENTION_REDUCE,
+      ...(options.linearGemvReduce === undefined
+        ? {}
+        : { linearGemvReduce: options.linearGemvReduce }),
       ...(options.planBackingBudgetBytes === undefined
         ? {}
         : { planBackingBudgetBytes: options.planBackingBudgetBytes }),

@@ -2972,3 +2972,18 @@ FP64参照との算術誤差を測ったが、モデル品質の検収ではな�
 
 統合の全体検証は2,946 passed（773 steps）/ 0 failed / 5 ignored、25分3秒。
 ログは`outputs/bench/karume/2026-09-12_head16-verify-6iecb046/verify.log`。
+
+## ChromeのK並列GEMV・品質・MTP（2026-09-12）
+
+[調査の正本](2026-09-12-chrome-gemv-parallel.md)と[集計JSON](2026-09-12-chrome-gemv-parallel-results.json)に、26形状の掃引、モデル全体ABBA、固定品質評価、PyTorch部分参照、並列化後のGPUプロファイルを保存する。
+M1だけの変更はMTP行0一致を壊し、全Mの変更はTTFTを遅くしたため、M1..8へ限定した。
+実測25形状を`linearGemvReduce: "parallel"`で明示指定する（ADR 0098）。既定、既存golden、IR、配布重みは変更しない。
+Gemma通常/QATとCLI・Chrome比較画面へ結線。QATの文章と小規模品質スコアは変化し、既定への昇格は行わない。
+SRQ探索短縮と重み転置コピーは今回不採用。次はM2の明示指定A/B、GPU常駐PLE、RMS/SRQ/linearの融合。
+
+K並列の統合検収は **2,950 passed（780 steps）/ 0 failed / 5 ignored、25分0秒**。
+ログは`outputs/bench/karume/2026-09-12_parallel-verify-final-x43w55vk/verify.log`。
+Chrome画面の40生成・JSON保存、Deno通常/QAT/MTPの各3ターンとresetも確認した。
+統合版のABBA倍率中央値は通常1.5449 / QAT1.3867（同じ41入力ID・capacity8192・256生成）。
+QATは既定と文章・小規模品質が変わる。M2で`bench:llm-browser`の「既定と並列を比較」またはCLIの
+`--linear-gemv-reduce parallel`を使って追試する。既定への昇格は行っていない。

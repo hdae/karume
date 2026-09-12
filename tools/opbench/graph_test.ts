@@ -16,6 +16,7 @@ import {
 
 Deno.test("opOfKey: 先頭語を op に写す（変種名は表で・表に無ければ先頭語そのまま）", () => {
   assertEquals(opOfKey("linear_gemv:v1:f32:c32u4:wi4g32"), "linear");
+  assertEquals(opOfKey("linear_gemv_parallel:wi4g512:l4"), "linear");
   assertEquals(opOfKey("linear:v4:i8a8:tile128x64r8x8w8x16k16v4:dp4a"), "linear");
   assertEquals(opOfKey("quantize_rows:v1:f32>i8:pertoken:wg256"), "aux");
   assertEquals(opOfKey("attention_state_qk:v2"), "attention");

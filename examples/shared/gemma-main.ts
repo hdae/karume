@@ -9,6 +9,7 @@ import {
 import type {
   Gemma4ChatSessionOptions,
   Gemma4ChatStop,
+  Gemma4FromPretrainedOptions,
   Gemma4PrefillProgress,
   SamplerSpec,
 } from "../../packages/models/gemma.ts";
@@ -30,7 +31,7 @@ export const runGemmaCli = async (
   const USAGE = "--source <配布形のパス> | --repo <owner/name[@revision]>" +
     " --system <文字列> --max-new-tokens <整数> --temperature <数> --top-k <整数>" +
     " --top-p <数> --seed <整数> --max-resident-ple-bytes <整数> --capacity <整数>" +
-    " --chunk-length <整数> --diagnostics --no-warmup" +
+    " --chunk-length <整数> --linear-gemv-reduce <sequential|parallel> --diagnostics --no-warmup" +
     (family === "gemma4" ? " --speculative" : " --model <e2b|e4b>");
   if (argv.length === 1 && ["--help", "-h"].includes(argv[0])) {
     console.log(`deno task demo:${family} ${USAGE}`);
@@ -48,6 +49,7 @@ export const runGemmaCli = async (
     "max-resident-ple-bytes",
     "capacity",
     "chunk-length",
+    "linear-gemv-reduce",
     ...(family === "gemma4-qat" ? ["model"] : []),
   ]);
   /** 値を取らないスイッチ（`--key value` の対ではなく 1 語で立つ）。 */
@@ -114,6 +116,13 @@ export const runGemmaCli = async (
     return value;
   };
 
+  const linearGemvReduce = args.get("linear-gemv-reduce");
+  if (
+    linearGemvReduce !== undefined && linearGemvReduce !== "sequential" &&
+    linearGemvReduce !== "parallel"
+  ) {
+    throw Error("--linear-gemv-reduce は sequential または parallel が必要です");
+  }
   const temperature = number("temperature");
   const topK = integer("top-k");
   const topP = number("top-p");
@@ -333,6 +342,9 @@ export const runGemmaCli = async (
       ? undefined
       : { [Symbol.dispose]: (): void => gpu.destroy() };
 
+    if (linearGemvReduce === "parallel") {
+      note(`[${family}] GEMV並列加算（実験）: 既定と生成列が変わる場合があります。\n`);
+    }
     const started = performance.now();
     note(`[${family}] ${sourceDir ?? repoRef ?? DEFAULT_SOURCE} を読み込む\n`);
     const source = repoRef === undefined
@@ -341,10 +353,11 @@ export const runGemmaCli = async (
     const loadOptions = {
       ...(maxResidentPleBytes === undefined ? {} : { maxResidentPleBytes }),
       ...(chunkLengthArg === undefined ? {} : { chunkLength: chunkLengthArg }),
+      ...(linearGemvReduce === undefined ? {} : { linearGemvReduce }),
       ...(gpu === undefined ? {} : { gpu }),
       ...(diagnostics ? { onRunDiagnostics: observeRun } : {}),
       onProgress: showProgress,
-    };
+    } satisfies Gemma4FromPretrainedOptions;
     if (family === "gemma4-qat") {
       note(
         `[${family}] 実験段階: CPU/GPU 間で生成列が異なる場合があります。長文・広い品質は未検収です。\n`,

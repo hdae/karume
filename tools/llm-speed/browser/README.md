@@ -40,6 +40,18 @@ unsupported GPU rather than switching to CPU. The Linux/NVIDIA benchmark documen
 in the research note uses an experimental Chrome flag; it is **not** part of the
 Mac launch command and is not necessary for ordinary supported M2 Chrome.
 
+## Experimental parallel GEMV
+
+Select **karume** under 比較対象 and **既定と並列を比較** under Karumeの行列計算.
+This runs the default and `linearGemvReduce: "parallel"` sequentially in fresh iframes.
+The table and saved JSON identify the mode. The same converted model files are used.
+
+The option speeds up selected packed INT2/INT4/INT8 matrices with f32 arithmetic
+and 1–8 input rows. Larger prefill batches and unmeasured shapes retain their usual
+kernels. Summation order changes, so token sequences can differ, particularly for
+QAT. It is opt-in and does not change the default. Apple GPU performance and quality
+must be checked on your device; the RTX result is not an M2 prediction.
+
 ## What is measured
 
 The fixed English and Japanese prompts and token IDs are in [cases.json](cases.json).

@@ -49,3 +49,14 @@ The displayed total token count includes EOS; the decode numerator excludes EOS 
 token. With no delivered tokens TTFT is unavailable; with fewer than two, decode speed is unavailable.
 Token timing precedes text decoding, so buffered text does not postpone TTFT.
 Warmup and model loading are reported separately and excluded from turn timing.
+
+## Experimental parallel GEMV
+
+```sh
+deno task demo:gemma4-qat --linear-gemv-reduce parallel
+```
+
+This opt-in changes the summation order of selected packed INT2/INT4/INT8 matrices
+for 1–8 rows. The default is `sequential`. It uses the same local converted weights
+and can change generated tokens, especially with QAT. The measured shape set targets
+E2B; other shapes keep their existing kernels. Measure on your GPU before choosing it.

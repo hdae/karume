@@ -81,6 +81,7 @@ export const recordRun = (
 const BUCKETS: ReadonlySet<string> = new Set(["aux", "strided", "fused"]);
 const KEY_TO_OP: Readonly<Record<string, string>> = {
   linear_gemv: "linear",
+  linear_gemv_parallel: "linear",
   attention_state_qk: "attention",
   attention_state_pv: "attention",
   attention_state_stats: "attention",

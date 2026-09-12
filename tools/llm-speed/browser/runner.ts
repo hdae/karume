@@ -1,3 +1,4 @@
+import type { LinearGemvReduce } from "../../../packages/runtime/mod.ts";
 import {
   generationTimer,
   type GenerationTiming,
@@ -188,6 +189,7 @@ export const runBenchmark = async (
   kind: ModelKind,
   localOnnx: boolean,
   status: (s: string) => void,
+  linearGemvReduce: LinearGemvReduce = "sequential",
 ): Promise<object> => {
   const response = await fetch("/cases.json");
   if (!response.ok) throw Error(`Fixture HTTP ${response.status}`);
@@ -210,7 +212,7 @@ export const runBenchmark = async (
   status(`${kind} / ${engine}: loading`);
   const started = performance.now();
   const handle = engine === "karume"
-    ? await loadKarume(kind, fixture)
+    ? await loadKarume(kind, fixture, linearGemvReduce)
     : await loadTransformers(kind, fixture, localOnnx, status);
   const loadSeconds = (performance.now() - started) / 1000;
   try {
