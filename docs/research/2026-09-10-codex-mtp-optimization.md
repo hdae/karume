@@ -2926,3 +2926,23 @@ M2改善後、CacheStorageのBlob経路、長文、MTPの速度は残件。QAT�
 全体検証はベンチ・サーバー停止後に実施し、**2,936 passed（771 steps）/ 0 failed / 5 ignored、24分53秒**で成功。
 ログは `outputs/bench/karume/2026-09-12_ple-row-cache-verify-b49feca6/verify.log`。
 最終browser bundleと計測対象のbyte一致、実測と生成列のhash、文書リンクも確認した。
+
+## WebML Space の headless 比較と M2 追試（2026-09-12）
+
+[調査と実測](2026-09-12-webml-browser-speed.md)、[保存JSON](2026-09-12-webml-browser-speed-results.json)を追加。
+M2の改善後は通常27.5〜27.8 / QAT29.4〜29.8 tok/s、40生成で前回の同条件と一致した。環境変動もあるため差分全量を修正へ帰属しない。
+
+RTXでWebML Spaceを実際に自動操作し、Xvfb併用のheadless Chromeでも生成を確認した。
+最大生成数64/256/1,024を各3回、入力ID・容量8,192・文字列復号込みの条件で揃えると、
+WebMLは285.3/280.3/262.6、Karume QATは57.4/58.3/57.7、通常は52.6/52.9/52.6 tok/s。
+長い生成による速度上積みの仮説は、このRTX比較では支持されなかった。
+Spaceの未対応行列機能を公開引数で無効化しており、精度・丸め・生成列の同等性は主張しない。
+各実装内の反復・長さ間の接頭辞一致を検査した。次は速度差の帰属、広い品質比較、M2の同条件比較。
+Karumeの最初の台本でGPU Instance消失も観測し、参照保持後に測定できたが根因は未確定として記録した。
+製品コード・既定カーネルの変更は無い。
+
+標準`pipeline.chat`でも同じ長さを各3回追試し、QATは56.26 / 57.11 / 56.70 tok/s、
+通常版は51.49 / 52.76 / 52.50 tok/sだった。18組で全列復号の比較とID・文章が一致した。
+詳細と計測境界は[標準chatの追加測定](2026-09-12-webml-browser-speed.md#karume標準chatでの追加測定)。
+比較記録の検証は`deno task verify` 2,936 passed（771 steps）/ 0 failed / 5 ignored。
+利用者の継続依頼により、次はChromeで既定greedy経路のCPU/GPU内訳を採り、速度改善を進める。
