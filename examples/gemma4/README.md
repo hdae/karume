@@ -56,6 +56,11 @@ switches. Unknown keys are rejected rather than silently ignored.
 Any sampling flag you pass is layered on top of the recommended values the asset declares; the ones
 you leave out keep their declared value.
 
+With `--temperature 0`, decoding reads back only the selected value and token id when logits need
+no repetition penalty or logit bias, and speculation and diagnostics are disabled. Prefill keeps
+the regular path. This uses the existing model assets and also applies to the mobile QAT family.
+Sampling at other temperatures keeps the regular path.
+
 A flag value may not start with `--`. The parser treats such a value as a swallowed flag and stops,
 so that a mistyped knob never runs silently on its default. The cost is that a system prompt whose
 text begins with `--` (say `--- rules ---`) is rejected; reword it or drop the leading dashes.

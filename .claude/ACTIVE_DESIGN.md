@@ -7,7 +7,7 @@
 > [docs/perf-ledger.md](../docs/perf-ledger.md)。ここは「今この瞬間の文脈」だけを持つ —
 > 履歴・完了記録は ADR / research / git へ。
 >
-> Last updated: 2026-09-11（MTP ④ = ADR 0096・段 1〜3 + 4-A + 4-B ④⑤③⑧⑨ + ゲート v3.1 済・次は M2 の warm 再計測〈v3.1 + exploreMax 512〉・⑩・⑥ の裁定・4-C docs）
+> Last updated: 2026-09-12（MTP ④ = ADR 0096・段 1〜3 + 4-A + 4-B ④⑤③⑧⑨ + ゲート v3.1 済・次は M2 の warm 再計測〈v3.1 + exploreMax 512〉・⑩・⑥ の裁定・4-C docs）
 
 ## Now
 
@@ -15,7 +15,8 @@
   現在は `codex/review-and-fix`。CPU 参照の RoPE 不一致は解消。Anima / drafter の既存形状比較は不採用。
   f16 / f32 M=1 GEMV は RTX の実 LLM で検収して採用（K-25 / K-26）。固定 INT2 / SRQ と writer は実装・検収済み（K-27）。
   QAT の公開形式・固定丸め・PLE 対応は承認済み。別 family `gemma4-qat` の E2B / E4B として統合済み（[ADR 0097](../docs/decisions/0097-gemma4-qat-integration.md)）。Anima の RMS128 を適用（K-28）。
-  TypeScript の CPU profile / token-only 比較も記録済み（H-18）。Chrome のみ利得があり、製品変更は保留。
+  温度0・非投機decodeの小出力を通常Gemma4 / QATへ統合（H-18・[ADR 0083](../docs/decisions/0083-generation-api-surface.md#gemmaの温度0生成の小出力2026-09-12)）。
+  prefillは従来run、decodeはbatchとGPU内topkで8B読戻し。一般sampling・penalty/bias・投機・診断は従来経路。M2は未検収。
   QAT の公式 recipe は検収・コミット済み。共通 pipeline / 対話 CLI の E2B/E4B・Deno/Chrome・複数ターン・中断・解放と全体検証を完了。
   SRQ融合・境界探索短縮は全体比較、INT2変種は単体比較を終え、追加採用を見送り（K-29）。単体計測のpass境界にも注意。
   M2 は利用者から Anima / Irodori などの動作・短縮報告あり。形状別の自動数値検収と追加 LLM の配布・長文・品質検収は残る。E4B / Qwen / MiniCPM のローカル実行と

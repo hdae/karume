@@ -25,6 +25,11 @@ does. Longer contexts are not validated. `--capacity`, `--chunk-length`, samplin
 memory budget flags have the same meaning as in the Gemma CLI. Use `--help` for the option list.
 MTP (`--speculative`), vision, and audio are not supported for this QAT family.
 
+`--temperature 0` uses the Gemma pipeline's small-output decode path when logits need no repetition
+penalty or logit bias and diagnostics are disabled. It reads back the selected value and token id;
+prefill and sampling at other temperatures keep their regular paths. Existing model assets work
+without conversion.
+
 CPU and GPU floating-point reductions can cross an SRQ rounding boundary and select different
 tokens. Deno and Chrome agreed on the tested short RTX cases; this does not establish broad model
 quality or Apple GPU equivalence. The experimental status is also printed at startup.

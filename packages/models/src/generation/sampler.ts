@@ -3,10 +3,10 @@
  * EOS **集合**での停止判定。**パイプライン非依存の共通処理**なので `greedy.ts` と同じ
  * `src/generation/` に置く（ADR 0083 決定 7 — 置き場の裁定そのもの）。
  *
- * 入口は「最終行 logits `[1,1,V]` の生データ」（ADR 0083 決定 6）。GPU 側は argmax も topk も
- * 持たないので、ここは**全語彙を見られる**前提で書ける — top-k に実装上限（ADR 0068 追記 2 の
- * `k ≤ 63`）は無く、repetition penalty も full-vocab nucleus もそのまま表現できる。これが
- * 「topk 製品グラフを採らない」根拠 3 の裏返しである。
+ * 一般samplingの入口は最終行logits `[1,1,V]` の生データ（ADR 0083 決定6）。
+ * 全語彙を扱うため、top-kの実装上限を設けず、repetition penaltyとfull-vocab nucleusも表現する。
+ * 加工不要の温度0だけは、GPUで選んだ最大値・最小添字を検査する内部能力も返す。
+ * 保存済みグラフの出口と一般samplingの契約は変えない（ADR 0083 温度0生成の追記）。
  *
  * ## MUST: HF の token 列 parity は取れない
  *
@@ -90,6 +90,8 @@ export type SamplerDistribution = {
 
 /** 1 本の生成に張り付く抽選器（RNG 状態を持つので step をまたいで使い回す）。 */
 export type Sampler = {
+  /** 加工不要の温度0だけ、GPUが選んだ最初のNaNまたは最大値・最小添字を検査して返す。 */
+  readonly greedy?: (value: number, index: number) => number;
   /**
    * 最終行 logits から次の token を 1 個選ぶ。
    *
@@ -207,6 +209,17 @@ const assertNoNaN = (logits: Float32Array<ArrayBuffer>): void => {
   }
 };
 
+/** CPU/GPUで共通の最大値検査。非有限値をtokenへ畳まず、従来のエラーを返す。 */
+const checkedMaximum = (value: number, index: number): number => {
+  if (value !== value) {
+    throw new Error(`logits[${index}] が NaN（非有限） — token id へ畳まずここで落とす`);
+  }
+  if (!Number.isFinite(value)) {
+    throw new Error(`logits の最大値が非有限（${value}） — token id へ畳まずここで落とす`);
+  }
+  return index;
+};
+
 /**
  * 最大値の添字（同値は**先に出た方** — torch の `argmax` と同じ tie-break）。
  *
@@ -228,10 +241,7 @@ const argmax = (logits: Float32Array<ArrayBuffer>): number => {
       best = token;
     }
   }
-  if (!Number.isFinite(bestValue)) {
-    throw new Error(`logits の最大値が非有限（${bestValue}） — token id へ畳まずここで落とす`);
-  }
-  return best;
+  return checkedMaximum(bestValue, best);
 };
 
 /**
@@ -477,7 +487,10 @@ export const createSampler = (spec: SamplerSpec = {}): Sampler => {
   // seed の受理集合検査もここで済ませる（抽選が走るのは decode の途中なので、生成器を作るのを
   // 遅らせると不正な seed が GB 級のロードの末に落ちる — anima の `assertAcceptableSeed` と同趣旨）。
   const random = new Randu(frozen.seed ?? 0);
+  const rawGreedy = (frozen.temperature ?? 0) === 0 &&
+    (frozen.repetitionPenalty ?? 1) === 1 && (frozen.logitBias?.length ?? 0) === 0;
   return {
+    ...(rawGreedy ? { greedy: checkedMaximum } : {}),
     next(logits: Float32Array<ArrayBuffer>, history: readonly number[]): number {
       const { tokens, probabilities } = samplerDistribution(logits, frozen, history);
       // 候補 1 件（温度 0 / topK 1 / 語彙 1）は抽選が自明なので RNG を回さない。

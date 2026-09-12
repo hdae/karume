@@ -420,3 +420,33 @@ RNG・温度処理・top-k 指定時の有界 heap は変更しない。作業�
 配布既定は top-k 64 付きであり、今回の高速化をその既定生成の改善と扱わない。
 
 [実測・厳密一致の門](../research/2026-09-10-codex-mtp-optimization.md#共通サンプラーの-top-p-単独指定)を参照。
+
+## Gemmaの温度0生成の小出力（2026-09-12）
+
+- 通常Gemma4とGemma4-QATの共通pipelineで、生logitsを加工しない温度0・非投機のdecodeだけを
+  target enqueue→常駐logits→別topk(k=1) Session→finishAndReadへ接続する。
+  prefillは従来runで処理し、最初のtokenまでの経路を維持する。初回prefillからbackingを作る案は、
+  Chrome E4Bの初回が遅くなったため採らない。
+  保存済みグラフのlogits+hidden出口を変更しない。新しいCLI引数やモデル資産は不要。
+  一般sampling、penalty/bias、投機は通常runを使う。
+- 生成ループは小出力を内部能力として受ける。架空の全語彙logitsへ膨らませるadapterは作らない。
+  Samplerが発行時に固定した指定から、最大値だけで決められる能力を返す。
+  温度0ではtopK/topP/seedが選択に効かない既存契約を維持する。全ての不正指定は従来どおり検査する。
+- topkが返す最初のNaNまたは最大値と最小添字を検査する。NaN・最大値±Infinityは従来同様に拒否し、
+  有効tokenへ畳まない。選択の失敗より前に、書き込み済みfrontierをpendingTokenから外す。
+  中間prefillは抽選しないので、その非有限値を最終chunkの選択と混同しない。
+- 診断callback/gpuTimingを指定したpipelineは従来runのままにし、lastRun等の観測を維持する。
+  生の生成イベント、EOS、break、AbortSignal、複数turnは同じ生成ループを通す。
+- helperはpipeline寿命で共有する。通常runとbatch全体を同じ操作鎖へ載せ、混在会話で
+  runがbatchの内側へ先行する循環を防ぐ。contextの構築はSession鎖外の既存契約を維持する。
+  GPU資源は最初のgreedy時に遅延確保し、準備失敗は部分確保を全て返して次の発行で再試行する。
+  解放順はsequence→helperのselectorとresident→drafter→target→GPU→PLE。
+- 追加のresidentとselectorのメモリは`auxiliaryBytes`へ別計上し、`peakAccountedBytes`にも保守的に加える。
+  内訳と合計の契約は[ADR 0070](0070-shard-loading-admission.md#補助資源の見積り内訳2026-09-12)に記録する。
+  selectorは1形のみで複数backing予算0。runtime estimatorが数える入力分は実際にはresidentを
+  借りるため、この加算は小さな過大見積りになる。値を小さく見せるために計測から省かない。
+- 検収はCPUで経路選択/履歴/NaN/中断、GPUでmixed run/部分確保/解放、実pipelineで通常/QATの
+  E2B/E4B・Deno/Chromeのtoken/会話結果一致とABBA速度比較。M2は利用者実機での追試が必要。
+  温度ありのCLI既定設定がこの最適化で速くなったとは報告しない。
+
+[実測と検収](../research/2026-09-10-codex-mtp-optimization.md#gemmaの温度0decodeの小出力化2026-09-12)を参照。

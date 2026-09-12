@@ -573,7 +573,15 @@ export type GenerationSpeculativeOptions<C extends GenerationContextFace> = {
   readonly now?: () => number;
 };
 
+export type GreedyRunResult = { readonly value: number; readonly index: number };
+export type GenerationGreedyRun<C extends GenerationContextFace> = (
+  inputs: RunInputs,
+  generation: { readonly context: C; readonly queryLength: number },
+) => Promise<GreedyRunResult>;
+
 export type GenerationSequenceOptions<C extends GenerationContextFace> = {
+  /** 生logitsの最大値を返す内部能力。温度0・加工無し・非投機・観測無しのdecodeでのみ使う。 */
+  readonly greedy?: GenerationGreedyRun<C>;
   readonly session: GenerationSession<C>;
   /** 検証済みの静的配線（`createGenerationProgram` の返り値）。 */
   readonly program: GenerationWiring;
@@ -995,6 +1003,18 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
     // 抽選器は 1 生成に 1 つ（RNG 状態を step 越しに持つ）。指定の検査と、その指定の
     // スナップショット（`logitBias` の要素まで写す）も `createSampler` の中で済む。
     const sampler = createSampler(request.sampler);
+    const greedy = face === undefined && options.onRun === undefined && sampler.greedy !== undefined
+      ? options.greedy
+      : undefined;
+    const pickGreedy = (result: GreedyRunResult): number => {
+      if (
+        !Number.isSafeInteger(result.index) || result.index < 0 || result.index >= program.vocabSize
+      ) {
+        throw new Error(`greedyの添字 ${result.index} が語彙 0..${program.vocabSize - 1} の外`);
+      }
+      if (sampler.greedy === undefined) throw new Error("greedy選択能力が無い");
+      return sampler.greedy(result.value, result.index);
+    };
     // 投機は drafter が居れば**温度に依らず**張る。受理は行ごとに `sampler.next` を非投機の decode と
     // 同じ logits・同じ history・同じ順で 1 回ずつ呼ぶ（確定 token 1 個につき 1 回）ので、RNG の消費列も
     // token 列も非投機と厳密に一致する — 温度 > 0 では「draft と同じ token を引いたら受理」が
@@ -1302,21 +1322,30 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
           // prefill 側と同じ理由で run の発行直前にもう一度見る（decode で踏むと token が 1 個
           // 余分に消費者へ届く）。
           signal?.throwIfAborted();
-          const outputs = await session.run(
-            {
-              [program.inputIds]: i32Row(1, ids),
-              [program.lastRow]: lastRowInput([0]),
-              ...extra,
-            },
-            undefined,
-            { context, queryLength: 1 },
-          );
+          const inputs: RunInputs = {
+            [program.inputIds]: i32Row(1, ids),
+            [program.lastRow]: lastRowInput([0]),
+            ...extra,
+          };
+          // prefillは従来runを維持し、初回から大きなbackingを確保する費用を避ける。
+          const result = greedy === undefined
+            ? {
+              kind: "logits" as const,
+              outputs: await session.run(inputs, undefined, { context, queryLength: 1 }),
+            }
+            : {
+              kind: "greedy" as const,
+              selected: await greedy(inputs, { context, queryLength: 1 }),
+            };
           // MUST: run が通った時点で frontier は KV に入った（= もう連結してはならない）— prefill
           // 側の `index === 0` と同じ理由で、抽選の**前**に落とす。ここを抽選の後に置くと、logits の
           // NaN などで `sampler.next` が投げたときに旧 frontier が残り、次ターンの prompt 先頭へ
           // 連結されて**同じ token が 2 つの位置に入る**（例外にならない沈黙劣化）。
           pendingToken = undefined;
-          token = sampler.next(readLogits(outputs, program, `decode@${step}`, 1).row(0), history);
+          token = result.kind === "greedy" ? pickGreedy(result.selected) : sampler.next(
+            readLogits(result.outputs, program, `decode@${step}`, 1).row(0),
+            history,
+          );
           onRun?.({ kind: "decode", step: step + 1, wallMs: now() - startedAt });
           generated += 1;
           history.push(token);

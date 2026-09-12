@@ -774,6 +774,19 @@ Deno.test({
       await t.step("② 見積りは target + drafter の常駐を合算する", () => {
         const report = pipeline.estimateSessionMemory();
         assert(report.resident.weights.totalBytes > 0, "常駐重みの見積りが 0 バイト");
+        assert(
+          report.auxiliaryBytes !== undefined && report.auxiliaryBytes > 0,
+          "非投機の会話でも使える補助出力の勘定が落ちている",
+        );
+        assertEquals(
+          report.peakAccountedBytes,
+          report.resident.weights.totalBytes + report.resident.stateBytes +
+            Math.max(
+              report.planBackingBudgetBytes,
+              ...report.scenarios.map((one) => one.ioBytes + one.workspaceBytes),
+            ) + report.auxiliaryBytes,
+          "drafter合算後も追加勘定とピークの内訳が一致する",
+        );
         // 厳密一致の門（2 Session の診断との突合・借り手 state 8 バイト・verify シナリオの
         // ioBytes）は段 3 の実 GPU レッグが足す。
         assertEquals(

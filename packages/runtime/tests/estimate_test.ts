@@ -174,6 +174,7 @@ Deno.test("既定予算の peakAccountedBytes は常駐 + 予算（シナリオ�
   // 最大シナリオ 500（io 220 + workspace 280）は 256 MiB の予算に収まるので、勘定側に立つのは
   // 予算のほう（保持集合はこの量を超えない = 過大側に倒した「勘定に入れた分のピーク」）。
   assertEquals(report.peakAccountedBytes, 116 + DEFAULT_PLAN_BACKING_BUDGET_BYTES);
+  assertEquals(report.auxiliaryBytes, undefined, "単体Sessionは補助資源を報告しない");
 });
 
 Deno.test("予算はシナリオごとの数字を動かさない（効くのはピークだけ）", () => {

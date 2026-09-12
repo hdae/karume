@@ -46,7 +46,11 @@ import {
   type Gemma4RunPhase,
 } from "../gemma.ts";
 // 予算の既定は runtime の**公開面**から取る（写すと家族側だけ古い値を名乗れる）。
-import { DEFAULT_PLAN_BACKING_BUDGET_BYTES, type SessionDiagnostics } from "@karume/runtime";
+import {
+  type AdmissionReport,
+  DEFAULT_PLAN_BACKING_BUDGET_BYTES,
+  type SessionDiagnostics,
+} from "@karume/runtime";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 // PLE shard の読み口（`Deno.open` の位置読み = 費用の型 seek）は helper が正本。
 import { openPleShardAt } from "./helpers/ple-source.ts";
@@ -527,23 +531,48 @@ Deno.test({
   fn: async () => {
     // 既定（256 MiB）とも最大シナリオとも違う値を選ぶ（どちらの既定へ落ちても落ちる形）。
     const budget = 4 * 1024 * 1024 * 1024;
-    const pipeline = await openPipeline({ planBackingBudgetBytes: budget });
-    try {
-      const report = pipeline.estimateSessionMemory();
-      assertEquals(report.planBackingBudgetBytes, budget, "予算が見積りへ降りていない");
-      const scenario = Math.max(
-        ...report.scenarios.map((one) => one.ioBytes + one.workspaceBytes),
-      );
-      // 門が空振らないことの対: この予算はどのシナリオよりも大きい（= max の予算側が立つ）。
-      assert(scenario < budget, `最大シナリオ ${scenario} が予算 ${budget} を下回っていない`);
-      assertEquals(
-        report.peakAccountedBytes,
-        report.resident.weights.totalBytes + report.resident.stateBytes + budget,
-        "ピークが予算を勘定に入れていない（既定へ落ちている）",
-      );
-    } finally {
-      await pipeline.dispose();
+    const reports: AdmissionReport[] = [];
+    for (const diagnostics of [false, true]) {
+      const pipeline = await openPipeline({
+        planBackingBudgetBytes: budget,
+        ...(diagnostics ? { onRunDiagnostics: () => {} } : {}),
+      });
+      try {
+        const report = pipeline.estimateSessionMemory();
+        reports.push(report);
+        assertEquals(report.planBackingBudgetBytes, budget, "予算が見積りへ降りていない");
+        const scenario = Math.max(
+          ...report.scenarios.map((one) => one.ioBytes + one.workspaceBytes),
+        );
+        // 門が空振らないことの対: この予算はどのシナリオよりも大きい（= max の予算側が立つ）。
+        assert(scenario < budget, `最大シナリオ ${scenario} が予算 ${budget} を下回っていない`);
+        if (diagnostics) {
+          assertEquals(report.auxiliaryBytes, undefined, "診断時は補助出力を確保しない");
+        } else {
+          assert(
+            report.auxiliaryBytes !== undefined &&
+              report.auxiliaryBytes >= pipeline.program.vocabSize * 4 + 8,
+            "補助出力の常駐logits・値・添字が追加勘定に入っていない",
+          );
+        }
+        assertEquals(
+          report.peakAccountedBytes,
+          report.resident.weights.totalBytes + report.resident.stateBytes + budget +
+            (report.auxiliaryBytes ?? 0),
+          "ピークが予算と補助資源を勘定に入れていない",
+        );
+      } finally {
+        await pipeline.dispose();
+      }
     }
+    const [greedy, observed] = reports;
+    assertEquals(greedy.resident, observed.resident, "補助資源を重みやKV stateへ混ぜない");
+    assertEquals(greedy.scenarios, observed.scenarios, "targetのシナリオは同じ");
+    assertEquals(
+      greedy.peakAccountedBytes - observed.peakAccountedBytes,
+      greedy.auxiliaryBytes,
+      "経路の差は追加勘定と厳密に一致する",
+    );
   },
 });
 

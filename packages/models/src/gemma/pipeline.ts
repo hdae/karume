@@ -35,6 +35,7 @@
  * ## MUST: 全モジュール副作用ゼロ（import 時実行・グローバル可変状態の禁止 — CLAUDE.md）
  */
 
+import { createGemmaGreedyOutput, type GemmaGreedyOutput } from "./greedy-output.ts";
 import { admitGemma4Qat, assertGemma4QatModel, assertGemma4QatPle } from "./qat.ts";
 import { closeableGenerator } from "../concurrency/closeable-generator.ts";
 import {
@@ -627,6 +628,7 @@ export type Gemma4ChatStream = AsyncIterable<string> & {
 
 /** {@link Gemma4Pipeline} の内部状態（公開面には出さない）。 */
 type Gemma4State = {
+  readonly greedyOutput?: GemmaGreedyOutput;
   readonly gpu: GpuContext;
   readonly ownsGpu: boolean;
   readonly session: Session;
@@ -1742,6 +1744,9 @@ class GemmaPipeline {
     let session: Session | undefined;
     try {
       session = await admitted.component.createSession(gpu, sessionOptions);
+      const greedyOutput = !gpu.gpuTimingEnabled && options.onRunDiagnostics === undefined
+        ? createGemmaGreedyOutput(gpu, session, wiring.logits, wiring.vocabSize)
+        : undefined;
       const drafter = await GemmaPipeline.#buildDrafter(
         admitted,
         session,
@@ -1752,6 +1757,7 @@ class GemmaPipeline {
         gpu,
         ownsGpu,
         session,
+        ...(greedyOutput === undefined ? {} : { greedyOutput }),
         graph: admitted.component.graph,
         wiring,
         program: generationProgramFace(wiring),
@@ -1912,7 +1918,8 @@ class GemmaPipeline {
         }
         release = await acquire();
         sequence = await createGenerationSequence({
-          session: state.session,
+          session: state.greedyOutput?.session ?? state.session,
+          ...(state.greedyOutput === undefined ? {} : { greedy: state.greedyOutput.greedy }),
           program: state.wiring,
           ...(capacity === undefined ? {} : { capacity }),
           ...(speculative === undefined ? {} : { speculative }),
@@ -1986,7 +1993,8 @@ class GemmaPipeline {
     const speculative = speculativeSetup(state, options.speculative);
     const onRun = runDiagnosticsHook(state);
     const inner = await createGenerationSequence({
-      session: state.session,
+      session: state.greedyOutput?.session ?? state.session,
+      ...(state.greedyOutput === undefined ? {} : { greedy: state.greedyOutput.greedy }),
       program: state.wiring,
       ...(options.capacity === undefined ? {} : { capacity: options.capacity }),
       ...(speculative === undefined ? {} : { speculative }),
@@ -2038,6 +2046,9 @@ class GemmaPipeline {
    * **同時に常駐する**ぶんは、{@link Gemma4PipelineOptions.planBackingBudgetBytes} が
    * `peakAccountedBytes` の片側の項として上から押さえる（ADR 0095 決定 4）。
    *
+   * 小出力decodeの補助Session・常駐入出力は `auxiliaryBytes` に別計上し、ピークにも加える。
+   * 診断で小出力を無効にしたpipelineではこの欄を省略する（0）。
+   *
    * NOTE: `AdmissionReport` は runtime の型で、`@karume/models` は再輸出しない（ADR 0008 の薄い面 —
    * 見積りを読む消費者は runtime の型をそのまま使う）。
    *
@@ -2084,7 +2095,7 @@ class GemmaPipeline {
     // `chunkLength: k+1` を名乗ると k < 3 で実 run より小さい形を見積る）。
     const rows = (this.#state.speculativeK ?? GEMMA4_DRAFT_STEPS) + 1;
     const verifyRows = physicalChunkRows(rows, wiring);
-    const target = estimateGraphMemory(graph, planWeightResidency(graph), {
+    const baseTarget = estimateGraphMemory(graph, planWeightResidency(graph), {
       // 行数記号 R は run では `last_row` の要素数が束縛する（入力 shape 由来）。見積りは入力を
       // 持たないので R = 1（通常の prefill / decode の形）を明示する。
       bindings: { [wiring.rowSymbol]: 1 },
@@ -2103,6 +2114,12 @@ class GemmaPipeline {
       maxStorageBufferBindingSize,
       ...budget,
     });
+    const auxiliaryBytes = this.#state.greedyOutput?.extraBytes;
+    const target = {
+      ...baseTarget,
+      ...(auxiliaryBytes === undefined ? {} : { auxiliaryBytes }),
+      peakAccountedBytes: baseTarget.peakAccountedBytes + (auxiliaryBytes ?? 0),
+    };
     if (drafter === undefined) return target;
     // 借り手ぶん（常駐重みと context の state）は drafter グラフを**同じ estimator に掛けて**
     // 引く（式をこの層で組み直さない — 借り物スロットと共有 initializer を外すのは runtime の
@@ -2139,6 +2156,7 @@ class GemmaPipeline {
       // 貸し手の run と同時には走らない（借り手 run は貸し手の run リースを取る）。
       scenarios: target.scenarios,
       planBackingBudgetBytes: target.planBackingBudgetBytes,
+      ...(auxiliaryBytes === undefined ? {} : { auxiliaryBytes }),
       // 常駐は 2 つの Session が同時に抱えるので和。保持集合の上限（予算 vs 最大シナリオ）は
       // 貸し手の側がそのまま効く。
       peakAccountedBytes: target.peakAccountedBytes + residentBytes,
@@ -2206,6 +2224,7 @@ class GemmaPipeline {
         // 貸し手 `dispose()` は runtime が fail loudly で断る（借り手の bind group が貸し手の
         // 重みバッファを掴んでいる）。順序を逆にすると、この 1 本が必ず失敗して残りの段は
         // 通るものの、報告に毎回「貸し出している」が載る。
+        () => this.#state.greedyOutput?.dispose(),
         () => this.#state.drafter?.session.dispose(),
         () => this.#state.session.dispose(),
         () => {

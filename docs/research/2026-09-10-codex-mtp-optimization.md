@@ -2729,3 +2729,95 @@ argmaxの行長262,144・64行では順位キーが0.666倍、対応するtopk�
 （`2026-09-12_rank-key-pgcyshci/product-focused.log`）。
 全体検証は **2,918 passed（760 steps）/ 0 failed / 5 ignored、24分45秒**
 （同ディレクトリの`product-verify.log`）。この検証・コミットにはmodelsの小出力候補を含めない。
+
+## Gemmaの温度0decodeの小出力化（2026-09-12）
+
+この節はRTX 3080 Ti / Deno 2.9.6 / Chrome 153での時点検証。M2の実測ではない。
+主実験は `outputs/bench/karume/2026-09-12_greedy-after-decode-oj136f8y/`（以下OUT）。
+追試は同じ親の `2026-09-12_greedy-repeat-qky5qjyx/`。
+
+通常Gemma4とGemma4-QATの共通pipelineに、温度0・非投機・penalty/bias無し・診断無しの
+**decodeだけ**、target enqueue→常駐logits→小さなtopk Session→8B読戻しを接続した。
+prefillは従来runを維持する。保存済みlogits+hiddenのグラフ・資産・CLI引数は変更しない。
+最大値・NaNの最小添字・非有限値の拒否は従来CPU選択と同じ。一般samplingと投機は従来経路。
+[ADR 0083](../decisions/0083-generation-api-surface.md#gemmaの温度0生成の小出力2026-09-12)に
+適用条件、通常runとbatchの直列化、準備失敗と資源解放を記録した。
+
+### 比較条件と一致
+
+基準は小出力統合前のmodelsコピー、runtimeは両者とも`50675cc`の整数順位キー修正後。
+診断callbackは両方とも無し。Denoはローカル位置読み、ChromeはlocalhostのHTTP Range。
+容量128・chunk32・PLE常駐0・温度0・最大64token、3入力を各3回生成する。
+別途、同じsequenceの温度0→1→0、温度の異なる並行会話、decode後のabort/breakと再開、
+Gemma4ChatSessionの2ターンと作り直し後の再現を比較した。
+旧検証器は最初のtoken直後の中断でprefillしか通らなかったため、2token受信後へ変更した。
+CPU検証では小出力decodeを実際に1回通ったことも検査する。旧準備フォルダは残し、上書きしていない。
+
+Deno/Chrome × 通常/QAT × E2B/E4Bを正順・逆順で比較し、**全16組が生成列・停止結果・会話状態で一致**。
+`pipeline-greedy-decode-summary.json`と`pipeline-greedy-*-decode-{forward|reverse}.json`が正本。
+各候補はdecodeごと8Bのmapを確認した。これは温度ありのCLI既定設定の速度比較ではない。
+Apple GPUや公式CPUとの全生成一致を、この比較から主張しない。
+
+隔離候補のCPU検証は **125 passed（54 steps）/ 0 failed、556ms**（`cpu-tests.log`）。
+GPUの通常runとの混在・部分確保失敗後の再試行・未await生成を待つdisposeは
+**3 passed / 0 failed、682ms**（`gpu-tests.log`）。初回統合の6ファイルは検証候補と同じで、
+`source-manifest.json`に測定対象のハッシュを保存した。後述の見積り内訳のみ、全体検証後に修正した。
+
+### 暖機後の速度とばらつき
+
+各入力の2・3回目、計6生成の壁時間比の中央値。1より大きいと候補が速い。
+モデル読込を除き、prefillから生成完了までを含む。最初のtokenを除いたdecode tok/sとは区別する。
+
+| 環境   | モデル | サイズ |   正順 |   逆順 |
+| ------ | ------ | ------ | -----: | -----: |
+| deno   | 通常   | E2B    | 1.0211 | 1.0174 |
+| deno   | 通常   | E4B    | 0.9928 | 1.0005 |
+| deno   | QAT    | E2B    | 1.0178 | 1.0111 |
+| deno   | QAT    | E4B    | 0.9900 | 1.0221 |
+| chrome | 通常   | E2B    | 1.0706 | 1.0532 |
+| chrome | 通常   | E4B    | 1.0334 | 1.0412 |
+| chrome | QAT    | E2B    | 1.0692 | 0.9976 |
+| chrome | QAT    | E4B    | 1.0156 | 1.0241 |
+
+Chrome QAT E2Bは正順約7%改善に対して逆順が横ばいだったため、同条件で4組を追加した。
+全て一致し、壁時間比は **1.0698 / 1.0876 / 1.0399 / 1.0436**。
+主実験の横ばい結果を除外せず残す。ばらつきの原因は特定していないが、追加4組で利益を再確認した。
+Deno通常E4Bの初回token到着は主実験正順254→503ms、逆順253→248msだった。
+追加2組は250→246ms / 247→245msで、最初の外れ値は再現しなかった。
+追加2組の暖機後比は **0.9966 / 1.0249**。Deno E4Bの安定した利益は主張せず、ほぼ中立と判断する。
+追試の正本は`summary.json`と`{chrome-qat-e2b|deno-normal-e4b}-*-{base|greedy}.json`。
+主実験と追試の計**22組・44実行**で出力が一致した。
+
+初回時間はdriver cacheを管理したcold測定ではない。prefillの実行経路を維持しても揺れがあり、
+初回が必ず速くなるとは扱わない。追加資源の見積りは全4モデルで **2,097,940 B**。
+GPU資源は最初のgreedy decodeまで遅延確保し、見積りは借用入力のぶんを含む保守的な上界。
+
+Chromeを中心とする利益と結果一致に基づき、温度0decodeの候補を採用する。
+M2での初回/暖機後の追試、温度あり・penalty/bias・投機の転送削減は残る。
+`deno task demo:gemma4-qat --model e2b --temperature 0`で既存ローカル資産を使って試せる。
+
+製品版の重点検証は **128 passed（54 steps）/ 0 failed、1秒**
+（OUTの`product-focused.log`）。許容誤差・golden・既存の期待列は変更していない。
+
+### 全体検証で見つかった見積り内訳の修正
+
+初回の全体検証は **2,927 passed（760 steps）/ 1 failed / 5 ignored、25分19秒**
+（OUTの`product-verify.log`）。失敗は`e2e_gemma4_chat_test.ts`の予算透過検証で、
+単独でも **2 passed（12 steps）/ 1 failed、17秒**（`product-chat-isolated.log`）と再現した。
+差額2,097,940Bは追加した小出力資源の量に一致する。これはVRAM圧の失敗ではなく、
+ピークだけに足して内訳へ載せなかった実装が`AdmissionReport`の合計式を崩していた。
+
+修正の作業先は `outputs/bench/karume/2026-09-12_greedy-memory-k95clxph/`。
+公開の省略可能欄`auxiliaryBytes`へ補助資源を別計上し、合計へ加える。runtime単体の既存レポートは欄を省略し、値も変えない。
+通常/診断の両経路で予算・シナリオ・重み・stateを照合し、追加勘定とピーク差を厳密に検査する。
+投機pipelineの合成後にも内訳が残ることを検証する。既存の等値検査を許容誤差へ緩めていない。
+推論・GPU資源の確保量・選択経路は変更せず、実測候補からの差は報告の内訳とその検査だけである。
+
+修正後の会話ファイル全体とruntime見積りは **70 passed（12 steps）/ 0 failed、22秒**
+（修正用ディレクトリの`focused.log`）。
+投機pipelineの見積り・生成は **1 passed（2 steps）/ 0 failed / 8 filtered out、2秒**
+（同ディレクトリの`speculative-report.log`）。これは重点確認で、続く全体検証ではフィルタを使わない。
+
+修正後の全体検証は **2,928 passed（760 steps）/ 0 failed / 5 ignored、24分48秒**
+（修正用ディレクトリの`product-verify.log`）。TypeScriptの対象10ファイルは再検証中に変更していない
+（`final-source-hashes.json`）。既存のスキップ5件も、数値修正前後と同じ母音検出の資産依存ケースである。

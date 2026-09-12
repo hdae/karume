@@ -187,8 +187,14 @@ export type AdmissionReport = {
    */
   readonly planBackingBudgetBytes: number;
   /**
-   * 常駐の総和 + **保持集合の上限**（= `resident.weights.totalBytes + resident.stateBytes +
-   * max(planBackingBudgetBytes, max(ioBytes + workspaceBytes))`）。
+   * 補助Sessionや常駐入出力の追加勘定。resident / scenarios の内訳とは重複させない。
+   * 省略は0。runtimeの単体Session見積りは省略し、modelsが補助資源を持つ場合に加える。
+   * DECIDED: docs/decisions/0070-shard-loading-admission.md#補助資源の見積り内訳2026-09-12
+   */
+  readonly auxiliaryBytes?: number;
+  /**
+   * 常駐の総和 + **保持集合の上限** + 補助資源（= `resident.weights.totalBytes + resident.stateBytes +
+   * max(planBackingBudgetBytes, max(ioBytes + workspaceBytes)) + (auxiliaryBytes ?? 0)`）。
    *
    * **上限保証ではなく「勘定に入れた分のピーク」**を名乗る欄（名前の由来）。シナリオ側を和では
    * なく `max(予算, 最大シナリオ)` で足すのは、Session が抱える slot backing の保持集合が

@@ -286,3 +286,18 @@ GC しても消えない 1 本）で、定数も 1GB 級だった。shard ごと
   閉じた（実測: gemma4 warm 1,408 → 684 MiB・anima f16 warm 2,242 → 743 MiB —
   [research 結果 8](../research/2026-09-02-shard-size-ram-peak.md)）。組み込みの 2 取得元は
   どちらも器を使い、器を使わないのは外部実装の取得元だけになった。
+
+## 補助資源の見積り内訳（2026-09-12）
+
+`AdmissionReport`へ省略可能な`auxiliaryBytes`を追加する。省略は0で、runtimeの単体Sessionの
+返り値と既存の計算結果は変えない。modelsが補助Sessionや常駐入出力を別に持つ場合、その追加勘定を
+この欄に載せる。`resident` / `scenarios`の内訳とは重複させず、重みやKV stateへ混ぜない。
+
+合計式は `weights + state + max(予算, 最大シナリオ) + (auxiliaryBytes ?? 0)`。
+最初の小出力実装は追加量をピークにだけ加えており、内訳から合計を再現できない不整合を既存テストが検出した。
+合計値を小さく戻したり等値検査を緩めたりせず、足した資源を公開内訳にも示す。
+
+Gemmaの温度0decodeは補助selectorと常駐入出力をこの欄へ載せ、診断で小出力を無効にしたpipelineは省略する。
+投機対応pipelineも非投機の会話を開けるので、この補助勘定を合成後まで保持する。
+[ADR 0083](0083-generation-api-surface.md#gemmaの温度0生成の小出力2026-09-12)と
+[検証記録](../research/2026-09-10-codex-mtp-optimization.md#gemmaの温度0decodeの小出力化2026-09-12)を参照。
