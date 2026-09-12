@@ -21,6 +21,8 @@
   SRQ融合・境界探索短縮は全体比較、INT2変種は単体比較を終え、追加採用を見送り（K-29）。単体計測のpass境界にも注意。
   M2 は利用者から Anima / Irodori などの動作・短縮報告あり。形状別の自動数値検収と追加 LLM の配布・長文・品質検収は残る。E4B / Qwen / MiniCPM のローカル実行と
   Chrome の Gemma 自由文比較は済。QAT の固定重みは保存後も全 byte 一致。CPU/GPU 差は行列縮約が SRQ 境界をまたぐことまで帰属済み。8短文で Deno/Chrome は一致、公式CPU一致はE2B 6件/E4B 4件。広い生成品質は未検収。
+  デモの暖機・TTFT分離は検収済み。[Qwen/MiniCPMの初期品質参考値](../docs/research/2026-09-12-llm-quality-baseline.md)も保存。
+  現在の優先はPyTorchとDeno/WebGPUのtok/s比較。Gemmaの品質本採点は残件。
   ローカル実験 CLI は [MiniCPM5](../examples/minicpm5/README.md) / [Qwen3](../examples/qwen3/README.md)。
   Gemma 準拠の対話・reset・中断に対応。容量 128 の多ターン検収は research に記録。公開 pipeline は未追加。
   利用者の希望により、今後は作業単位で調査・検証を終えて順次コミットする。残件の正本は backlog。
