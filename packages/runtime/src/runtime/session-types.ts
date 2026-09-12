@@ -60,10 +60,38 @@ export type RunInput = Tensor | ResidentTensor;
 export type RunInputs = Readonly<Record<string, RunInput>>;
 export type RunOutputs = Readonly<Record<string, Tensor>>;
 
+/**
+ * generation実行1回ぶんの指定（Session.runの第3引数、EnqueueOptions.generation）。
+ *
+ * `queryLength` は今 step の実 token 数（prefill は `1..chunkLength`・decode は 1）で、
+ * **`pastLength` は渡さない** — 論理長の進行はcontextが所有し、runまたはbatchの最終成功でのみ進む
+ * （ADR 0066 決定 6 の二重簿記の禁止）。
+ */
+export type GenerationRun = {
+  readonly context: GenerationContext;
+  readonly queryLength: number;
+  /**
+   * 論理長を進める時点（既定 `"immediate"` = 従来 — run が例外なく返った時点で `queryLength` 行
+   * ぶん進む）。enqueueではbatchが例外なく完了するまで進めない。
+   *
+   * `"deferred"` は進行を保留し、**受理した行数**を後から `GenerationContext.commit(rows)` で
+   * 確定させる（投機デコードの検証形 — draft の何行が受理されるかは、その run の出力を読んで
+   * 初めて決まる）。保留がある間は次の run と `rewind` を拒否するので、論理長を動かす経路は
+   * 依然 1 本のまま（ADR 0066 決定 6 の二重簿記の禁止）。
+   */
+  readonly commit?: "immediate" | "deferred";
+};
+
 /** {@link Session.enqueue} の指定。 */
 export type EnqueueOptions = {
   /** 束ねる区間（{@link GpuContext.beginBatch}）。フェンスはこの区間の決着 1 本だけ。 */
   readonly batch: BatchScope;
+  /**
+   * 会話状態を使う実行。使用予約は発行時からbatchの最終決着まで保つ。
+   * 論理長のadvance/deferはenqueueの戻り時でなく、finish/finishAndReadの成功時に行う。
+   * 同じcontextを未確定のまま重ねて使えない。context/Sessionのdisposeはfinish後に行う。
+   */
+  readonly generation?: GenerationRun;
   /**
    * 記号次元の明示指定。常駐入力は束縛源にならないので、その入力**だけ**が持つシンボルは
    * ここで与える（`run` の第 2 引数と同じ意味）。

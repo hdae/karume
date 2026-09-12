@@ -2606,3 +2606,52 @@ targetのlogitsを常駐出力へコピー→別topk Session→8B読み戻しで
 実グラフを書き換えない経路にも利益はあるが、一般samplingのCLI既定設定の高速化ではない。
 次はgenerationの寿命を製品へ統合し、modelsのgreedy能力と多ターン・中断・resetを検収する。
 通常版/E4B/M2、温度あり・penalty/bias・投機の小出力化は別途必要。
+
+## 会話状態のバッチ統合（2026-09-12）
+
+この節はRTX 3080 Tiでの時点検証。OUTは前節と同じ。M2の検収ではない。
+
+`Session.enqueue`へ`generation`を追加し、既存のcontext・queryLength・commitを受ける。
+入力の写しと使用予約は発行時、論理長のadvance/deferと予約返却はバッチ最終決着時とする。
+後続Sessionや読み戻しの失敗も書き込み済みcontextをpoisonする。IRと保存資産は変えない。
+[ADR 0066](../decisions/0066-generation-context-state-slots.md#バッチ実行の-generationcontext2026-09-12)
+に、借り手への予約伝播・通常runとバッチ中の破棄の違いを記録した。
+
+バッチの使用予約中はcontext/所有Sessionのdisposeを受付終了前に拒否する。
+単にdisposeをSessionの操作鎖へ追加すると、前のenqueue→dispose→後のenqueueの順で、
+disposeがバッチ完了を待ち、バッチが後のenqueueを待つ循環になる。
+従来runの二段破棄は維持し、バッチ完了後の破棄を受け付ける。
+
+11件の追加検証はfull/slidingのu32一致、途中settleと最終確定、発行指定の写し、
+並行run/rewind/dispose拒否、deferred確定、書き込み前後の失敗、複数contextの確定失敗、
+不正指定の部分予約解放、借り手と貸し手の寿命を対象にする。
+製品版は既存の状態/借用/バッチ/フェンス検証と合わせて **96 passed / 0 failed、17秒**
+（`batch-generation-product-focused.log`）。lint・型検査も成功した。
+
+modelsの隔離試作では、既存CPU検証118件（54 steps）と追加7件、GPU追加3件が成功した。
+記録は`model-greedy-existing-cpu.log` / `model-greedy-new-cpu-v3.log` /
+`model-greedy-gpu-test.log`。実pipeline比較のDeno QAT E2B・通常E2B・QAT E4Bでも
+生成token・多ターン・温度切替・並行会話・中断再開・reset後の結果が一致した。
+通常E4Bの初回は比較器のmanifest参照先がE2B専用だったためロード時に失敗した
+（`pipeline-greedy-deno-normal-e4b-base.log`）。既存E4B実験資産へ参照先だけを直し、
+`-v2`の別出力で再試験し、Deno/Chrome・通常/QAT・E2B/E4Bの全8条件で結果が一致した
+（`pipeline-greedy-smoke.log` / `pipeline-greedy-rest.log` / `pipeline-greedy-remaining.log`）。
+初回比較の基準側は経路固定に診断callbackを使ったので、速度の採否には使わない。
+診断なしの旧modelsコピーと候補を改めて正順/逆順で比較する。
+これらはmodelsの製品統合前の検証で、CLI速度の最終判断ではない。
+
+主担当の再レビューで、不正contextの内部参照が常駐出力の使用予約後に例外を出す経路を発見した。
+追加テストは修正前に使用予約1本の残留で失敗した（`batch-generation-invalid-context-before.log`）。
+内部参照を予約前の検査区間へ移し、追加1件を含む **97 passed / 0 failed、17秒**を確認した
+（`batch-generation-product-focused-v2.log`）。初期の11件にこの回帰1件を加え、製品の追加検証は12件。
+
+modelsの診断なし正順/逆順比較も全16組で出力が一致した（`pipeline-greedy-clean-summary.json`）。
+ただし、初回prefillから小出力を使う案ではChrome通常E4Bの最初のtoken到着が
+535→639 ms / 517→663 msと遅くなった。driver cacheを管理していないため原因の帰属は未確定だが、
+初回runのアリーナ経路を初回enqueueのbacking構築へ置き換える差もある。
+この初回経路は採用せず、prefillを既存runで維持し、decodeだけを小出力にする別候補へ進む。
+`model-greedy-decode-candidate`のCPU検証は **125 passed（54 steps）/ 0 failed、552 ms**
+（`model-greedy-decode-cpu.log`）。実モデルと製品統合の検収は後続段階。
+
+会話状態のバッチ拡張の全体検証は **2,916 passed（760 steps）/ 0 failed / 5 ignored、24分44秒**
+（`batch-generation-product-verify.log`）。models側の小出力経路はこの検証・コミットには含めない。

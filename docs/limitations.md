@@ -1283,10 +1283,10 @@ Deno 側の実 GPU テストはもともと tolerance 判定なので影響し�
 - **sliding スロットを 1 本でも含む GenerationContext の `rewind` は全拒否**（ADR
   [0066](decisions/0066-generation-context-state-slots.md) 追記 2 — ring はエビクト後に物理配置と
   論理範囲が一致せず、左詰め compaction を持たない。緩和は compaction 実装と対）。
-- **`enqueue` は generation 面を持たない**（state 参照グラフは導出で fail loudly）。裁定済み
-  （2026-08-18 波 E）: decode ループは前 step の token 読み戻しが次 step の入力になる逐次律速で、
-  フェンスを束ねる利得が原理的に立たない（1 step 内の dispatch 束ねは `run` の submit 区間が
-  既に持つ）。speculative decoding 等の「読み戻し無しで複数 step を積める」実需が出た時に再訪。
+- `enqueue.generation`はcontextの使用予約をbatchの最終決着まで保つ（2026-09-12追加・
+  [ADR 0066](decisions/0066-generation-context-state-slots.md#バッチ実行の-generationcontext2026-09-12)）。
+  同じcontextの未確定実行を複数積むこと、予約中のcontext/所有Sessionのdisposeは拒否する。
+  `finish` / `finishAndRead`後に次の実行・破棄へ進む。通常runの破棄待ち契約は変わらない。
 - state スロットの dtype は f32 のみ（f16 は席予約 — ADR 0066 追記 5）・複数シーケンス /
   batch>1 の生成・paged KV は ADR 0066 決定 8 のスコープ外。
 

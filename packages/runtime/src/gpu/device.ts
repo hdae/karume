@@ -1211,6 +1211,13 @@ export type BatchMember = {
   closeMeasurementWindowAfterFence(): void;
 };
 
+/** バッチの成功判定後に状態を確定し、成否によらず使用予約を返す。 */
+type BatchFinalizer = {
+  complete(): void;
+  fail(cause: unknown): void;
+  release(): void;
+};
+
 /** {@link BatchScope} のランタイム内部面。 */
 type BatchInternals = {
   /** errorScope 区間が実際に開くまでの待ち（{@link GpuContext.beginBatch} が await する）。 */
@@ -1239,6 +1246,7 @@ type BatchInternals = {
    * （errorScope が internal / out-of-memory を優先するのと同じ判断）。
    */
   leave(failure?: { readonly cause: unknown }): void;
+  onSettled(finalizer: BatchFinalizer): void;
 };
 
 /**
@@ -1262,6 +1270,7 @@ export class BatchScope {
   readonly [RUNTIME_INTERNAL]: BatchInternals;
   readonly #gpu: GpuContext;
   readonly #members = new Set<BatchMember>();
+  readonly #finalizers: BatchFinalizer[] = [];
   readonly #completion: Promise<Readonly<Record<string, ArrayBuffer>> | undefined>;
   readonly #release: () => void;
   /** 未返却の in-flight リースが全て返ったことの通知（{@link BatchInternals.enter}）。 */
@@ -1343,6 +1352,12 @@ export class BatchScope {
       entered: entered.promise,
       join: (member) => {
         this.#members.add(member);
+      },
+      onSettled: (finalizer) => {
+        if (this.#finished) {
+          throw new BatchScopeError("batch finalizer must be registered at admission");
+        }
+        this.#finalizers.push(finalizer);
       },
       enter: (owner) => {
         if (owner !== this.#gpu) {
@@ -1571,19 +1586,45 @@ export class BatchScope {
    * {@link BatchScope.settle} とは別物なので、同名を避けてこの名前にしている）。
    */
   async #resolveFinish(): Promise<void> {
+    let failure: { readonly cause: unknown } | undefined;
     try {
       try {
         await this.#completion;
       } catch (cause) {
-        // MUST: errorScope 側を優先し、包み直さずそのまま投げる（型で分岐する呼び手が居る）。
-        // 記録があれば cause に載せて、2 つの事実が 1 度に見えるようにする。
         if (this.#failure !== undefined && cause instanceof Error && cause.cause === undefined) {
           cause.cause = this.#failure.cause;
         }
-        throw cause;
+        failure = { cause };
       }
-      if (this.#failure !== undefined) throw this.#failure.cause;
+      failure ??= this.#failure;
+      if (failure === undefined) {
+        try {
+          for (const finalizer of this.#finalizers) finalizer.complete();
+        } catch (cause) {
+          failure = { cause };
+        }
+      }
+      const notifyFailure = (): void => {
+        if (failure === undefined) return;
+        for (const finalizer of this.#finalizers) {
+          try {
+            finalizer.fail(failure.cause);
+          } catch { /* 元の失敗を保持し、残る使用予約も返す。 */ }
+        }
+      };
+      if (failure !== undefined) notifyFailure();
+      const hadFailure = failure !== undefined;
+      for (const finalizer of this.#finalizers) {
+        try {
+          finalizer.release();
+        } catch (cause) {
+          failure ??= { cause };
+        }
+      }
+      if (!hadFailure && failure !== undefined) notifyFailure();
+      if (failure !== undefined) throw failure.cause;
     } finally {
+      this.#finalizers.length = 0;
       for (const [, resident] of this.#readback ?? []) resident[RUNTIME_INTERNAL].releaseUse();
       this.#readback = undefined;
     }

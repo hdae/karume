@@ -168,7 +168,8 @@ type GenerationContextInternals = {
    * **同一 context に未決着 run が既に 1 本ある**とき — {@link GenerationContext.rewind} の doc と
    * 同じ「論理長が横から動く」形が、2 本目の発行そのもので起きる）。
    */
-  acquireRun(): void;
+  acquireRun(kind?: "batch"): void;
+  assertCanDispose(): void;
   /** 進行中の generation run を返す（成功・失敗の両経路で必ず 1 度）。 */
   releaseRun(): void;
   /**
@@ -468,13 +469,10 @@ export class GenerationContext {
   /** 汚染の理由（追記 3）。立つと `dispose` 以外の全操作を拒否する（読みも含む）。 */
   #poisoned: string | undefined;
   /**
-   * 進行中の generation run の本数（**リース**）。`Session.run` の同期区間で取り、run の決着で
-   * 返す。0 でない間は {@link GenerationContext.rewind} を拒否する。
-   *
-   * MUST: 取れるのは高々 1 本（2 本目の発行は `acquireRun` が拒否する）。本数のまま持つのは
-   * 「返し損ね」を releaseRun が簿記の破れとして落とせるようにするため。
+   * 高々1本の使用予約。runはその完了、batchは区間の最終決着まで保つ。
+   * batch中はSessionの実行本体だけが先に戻るため、通常runと異なりdisposeを拒否する。
    */
-  #runs = 0;
+  #runKind: "run" | "batch" | undefined;
   /**
    * dispose の 1 段目 — **新規受付の終了**（同期に立つ）。以後の run admission と利用者面の
    * 読み書きを拒否するが、受理済み run の内部面（論理長の搬送・進行）は**まだ通す**。
@@ -540,7 +538,7 @@ export class GenerationContext {
       forgetBorrower: (borrower: GenerationContext): void => {
         this.#borrowers.delete(borrower);
       },
-      acquireRun: (): void => {
+      acquireRun: (kind): void => {
         this.#assertUsable("run");
         // MUST: 未 commit の deferred run がある間は次を発行させない。2 本目は「1 本目が
         // 書いた物理行のうちどこまでが確定か」が決まらないまま P を捕捉するので、commit(rows)
@@ -557,7 +555,7 @@ export class GenerationContext {
         // 発行時に組んだ通常のグラフ入力**で、ランタイムは中身を見ない。つまり KV の論理長は
         // 正しいまま位置だけが静かにずれる（例外も警告も出ない沈黙誤値）。1 本ずつ await して
         // 発行すること — 並行させたい生成は context を分ける。
-        if (this.#runs > 0) {
+        if (this.#runKind !== undefined) {
           throw new ExecutionError(
             "run: 進行中の generation run がある GenerationContext へ並行発行された" +
               "（2 本目は 1 本目の進行後の論理長で走る一方、位置入力は発行時の論理長のままなので、" +
@@ -570,16 +568,17 @@ export class GenerationContext {
         // の deferred run・進行中 run がそのまま借り手の拒否理由になる。
         // MUST: 自分の検査を全て通してから取る（取ってから落ちると、返し手の居ないリースが
         // 貸し手に 1 本残って以後の rewind / commit が永久に拒否される）。
-        this.#borrow?.lender[RUNTIME_INTERNAL].acquireRun();
-        this.#runs += 1;
+        this.#borrow?.lender[RUNTIME_INTERNAL].acquireRun(kind);
+        this.#runKind = kind ?? "run";
       },
+      assertCanDispose: (): void => this.#assertCanDispose(),
       releaseRun: (): void => {
-        if (this.#runs < 1) {
+        if (this.#runKind === undefined) {
           throw new ExecutionError(
             "releaseRun: 進行中の generation run が居ないのにリースを返した（簿記の破れ）",
           );
         }
-        this.#runs -= 1;
+        this.#runKind = undefined;
         this.#borrow?.lender[RUNTIME_INTERNAL].releaseRun();
       },
       pastLength: (): number => {
@@ -915,9 +914,9 @@ export class GenerationContext {
     this.#assertUsable("commit");
     // 借り手は論理長を持たない（進めるのも確定させるのも貸し手 — ADR 0096 段 2 §2.1）。
     this.#assertNotBorrowing("commit");
-    if (this.#runs > 0) {
+    if (this.#runKind !== undefined) {
       throw new ExecutionError(
-        `commit: 進行中の generation run が ${this.#runs} 本ある間は確定できない` +
+        `commit: 進行中の generation run が 1 本ある間は確定できない` +
           "（run の決着を await してから呼ぶこと）",
       );
     }
@@ -970,9 +969,9 @@ export class GenerationContext {
   rewind(position: number): void {
     this.#assertUsable("rewind");
     this.#assertNotBorrowing("rewind");
-    if (this.#runs > 0) {
+    if (this.#runKind !== undefined) {
       throw new ExecutionError(
-        `rewind: 進行中の generation run が ${this.#runs} 本ある間は巻き戻せない` +
+        `rewind: 進行中の generation run が 1 本ある間は巻き戻せない` +
           "（run は頭で捕捉した pastLength で uniform と dispatch 数を決めるので、横から動かすと" +
           "GPU が見た論理長と進行の基準が分裂する）。run の決着を await してから呼ぶこと",
       );
@@ -1007,6 +1006,8 @@ export class GenerationContext {
 
   /**
    * state スロットと論理長 uniform を返す（ADR 0066 決定 6 — flush-before-destroy）。
+   * batchの使用予約中は受付を閉じず拒否する。finish後に再試行できる。
+   * 以下の二段破棄は通常runの契約。
    *
    * MUST: **2 段**にする。同期に立つのは 1 段目（新規受付の終了 — 以後の run admission と
    * 利用者面の読み書きを拒否）だけで、内部面（論理長の搬送・進行）の遮断は Session チェーンに
@@ -1022,6 +1023,12 @@ export class GenerationContext {
    * Session の重み・計画キャッシュには手を出さない（順序の依存を作らない）。
    */
   dispose(): Promise<void> {
+    // batchの使用予約中は受付を閉じず拒否する。finish後の再試行は従来の破棄手順へ進む。
+    try {
+      this.#assertCanDispose();
+    } catch (cause) {
+      return Promise.reject(cause);
+    }
     // MUST: 借り手が生きている間は破棄しない（ADR 0096 段 2 §2.1）。借り手の bind group は
     // このスロットバッファを掴んでおり、破棄すると次の draft が破棄済みバッファを読む。
     // `dispose` の「冪等・非 throw」契約からの**意図的な逸脱**で、受付終了フラグを立てる前に
@@ -1058,6 +1065,15 @@ export class GenerationContext {
       }
     });
     return this.#disposal;
+  }
+
+  /** バッチ中の破棄待ちをSession鎖へ積むと、後続enqueueとの自己待ちになるため拒否する。 */
+  #assertCanDispose(): void {
+    if (this.#runKind === "batch") {
+      throw new ExecutionError(
+        "dispose: GenerationContext は batch の最終決着待ち（finish 後に破棄すること）",
+      );
+    }
   }
 
   /**

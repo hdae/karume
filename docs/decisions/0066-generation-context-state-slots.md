@@ -285,3 +285,24 @@ accepted 直後の第 3 巡（Codex 独立レビュー・5 本セット照合）
   配布形の値ではない: 配布 drafter は 3 段・limitations 参照）。余裕 0 の context は
   **`queryLength = 1` の deferred run すら発行できない**（同期区間で fail loudly）。
 - immediate な run（prefill / decode）は全行を確定させるので上限は `chunkLength` のまま不変。
+
+## バッチ実行の GenerationContext（2026-09-12）
+
+- `EnqueueOptions.generation`を追加し、通常runと同じcontext・queryLength・commitを受ける。
+  contextの所属、束縛、許可行、容量、deferredのsliding余裕、借り手の制約は既存runと同じ。
+  IR・保存資産・Session.runの数値/長さ契約は変えない。
+- 使用予約はenqueueの発行時に取り、batchの最終決着まで保つ。enqueueのPromiseは
+  エンコードの完了だけを表し、この時点では長さを進めない。区間成功時にadvance/deferし、
+  `finish` / `finishAndRead`が呼び手へ返る前に確定と予約返却を完了する。
+  `settle()`は途中のフェンスであり、長さの確定には使わない。
+- 同じcontextに複数の未確定実行を積むことは拒否する。別contextは同じbatchへ積める。
+  借り手の予約種別は貸し手へ伝え、読み書きの排他を保つ。借り手自身は論理長を進めない。
+- 後続Sessionや読み戻しの失敗も区間全体の失敗とする。stateを書いてsubmitした実行は
+  既存runと同じsnapshot判定でpoisonし、再利用を拒否する。書込み前の入力/compile失敗は
+  contextをpoisonしない。複数contextの確定途中で内部失敗した場合も、書込み済み全contextをpoisonする。
+- batch予約中のcontext.disposeと、そのcontextを所有するSession.disposeは受付終了前に拒否する。
+  finish後は再試行できる。通常runの二段破棄（新規受付を閉じ、受理済みrunの後で破棄）は維持する。
+  batch待ちをSessionの直列化鎖へ積むだけの案は、後続enqueue→dispose→batch→enqueueの循環を作るため採らない。
+- 外部batchの従来規約は残る。同じSessionの通常runが未決着のままenqueueすることは拒否される。
+  透明なモデル最適化に使う側は、通常runとbatchを開く操作の順序をそろえる必要がある。
+  この追加だけでGemmaの出力転送を変えたとはしない。

@@ -495,8 +495,9 @@ autoregressive 波の**残項目（波外へ送り）**:
 - **MiniCPM5 の token-only 系列**（ADR 0068 追記 4 の同形展開 — models 側 `lastRow` は
   共通化済みで recipe + 門の鏡像だけ。topk の exporter 側〈多出力 aten の getitem 結線〉は
   sampling 実需まで先送りのまま）。
-- L8（fake-device 注入面）は保留継続・`enqueue` の generation 面は設けない裁定で確定
-  （limitations）。
+- L8（fake-device 注入面）は保留継続。`enqueue.generation`は2026-09-12に追加した
+  （[ADR 0066](decisions/0066-generation-context-state-slots.md#バッチ実行の-generationcontext2026-09-12)）。
+  target→選択グラフの間をCPUへ戻さず接続するための拡張で、token間の依存は変えない。
 - 有界論理 extent の席（R2 — IR スキーマ予約のみ・実装は最初の実需モデルまで先送り）・
   bool initializer / storage の設計・pipeline 単位の Session 常駐と device-loss lifecycle
   （perf H-4 と同体）・sampling/RNG はホスト維持（GPU 側は argmax/topk のみ）。

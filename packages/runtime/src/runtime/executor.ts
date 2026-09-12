@@ -114,6 +114,7 @@ import {
   DEFAULT_PLAN_BACKING_BUDGET_BYTES,
   type EnqueueOptions,
   type GenerationContextSpec,
+  type GenerationRun,
   I8A8_DOT,
   type I8a8Dot,
   type ParamsCacheStats,
@@ -133,6 +134,7 @@ export type {
   ComputePrecision,
   EnqueueOptions,
   GenerationContextSpec,
+  GenerationRun,
   I8a8Dot,
   ParamsCacheStats,
   PlanBackingStats,
@@ -617,6 +619,48 @@ const parseShard = (bytes: Uint8Array<ArrayBuffer>, origin: string): Safetensors
   }
 };
 
+const assertGenerationCommit = (capturedGeneration: GenerationRun | undefined): void => {
+  // MUST: `commit` の値域は発行の同期区間で見る。型の外から来た綴り違いを既定へ倒すと、
+  // deferred のつもりで発行した run が黙って論理長を進める（例外も警告も出ない位置ずれ）。
+  if (
+    capturedGeneration?.commit !== undefined && capturedGeneration.commit !== "immediate" &&
+    capturedGeneration.commit !== "deferred"
+  ) {
+    throw new ExecutionError(
+      `run: generation.commit '${capturedGeneration.commit}' は 'immediate' か 'deferred' のみ`,
+    );
+  }
+  // MUST: deferred run が sliding ring へ書ける行数は**余裕まで**（`Q ≤ slidingSlack`）。
+  // 棄却行 j（commit した行数 m に対し j ≥ m）は物理 ring 上で論理列 `P+j−C` を潰すので、
+  // 確定後の読者の窓の下端より下に落ちる条件が要る。読者は 2 種類あり、下端が低いのは
+  // **借り手（readonly 読者 — drafter）**の `P+m−W`（`src/kernels/state-attention.ts` の
+  // readonly 節 `column_base = P − min(P, W)`。states 形の読者は今 step の ins があるぶん
+  // 1 列高い `P+m−(W−1)`）。条件 `P+j−C < P+m−W` ⟺ `j − m < C − W = slidingSlack` を
+  // 全ての `m ≥ 0`（`commit(0)` を含む）・`j ≤ Q−1` で満たすには `Q ≤ slidingSlack`。
+  // MUST: 借り手の有無で分岐しない（借り手は deferred + `commit(0)` の**後**に開くこともでき、
+  // run 発行時点の有無で緩めると「後から借り手を開く順」に穴が残る）。貸し手自身の読者しか
+  // 居ない場合は 1 列ぶん厳しいだけで、壊れる形は生まない。
+  // 超えた run は例外も NaN も出さずに過去 KV を潰すので、発行の同期区間で落とす。immediate な
+  // run（prefill / decode）は全行を確定させるので上限は `chunkLength` のまま。
+  if (capturedGeneration?.commit === "deferred") {
+    // 借り手 context は論理長を持たない（進行も確定も貸し手の側 — ADR 0096 段 2 §2.1）ので、
+    // 確定させる相手が居ない deferred は発行の同期区間で落とす。
+    if (capturedGeneration.context[RUNTIME_INTERNAL].borrowing) {
+      throw new ExecutionError(
+        "run: 借り手 context の run に generation.commit 'deferred' は指定できない" +
+          "（借り手は論理長を進めないので確定させる相手が居ない）",
+      );
+    }
+    const slack = capturedGeneration.context.slidingSlack;
+    if (slack !== undefined && capturedGeneration.queryLength > slack) {
+      throw new ExecutionError(
+        `run: deferred な generation run の queryLength ${capturedGeneration.queryLength} が ` +
+          `sliding ring の余裕 ${slack} を超える（棄却行が live な過去 KV を潰す）`,
+      );
+    }
+  }
+};
+
 /**
  * 導出相まるごとの成果物（Session 常駐 — キーは {@link Session.#preparedKey}）。
  *
@@ -635,28 +679,6 @@ type PreparedPlan = {
    * 持たないグラフでは空で、その run は検査を 1 つも通さない（見る対象が無い）。
    */
   readonly generation: GenerationLimits;
-};
-
-/**
- * generation run 1 回ぶんの指定（{@link Session.run} の第 3 引数）。
- *
- * `queryLength` は今 step の実 token 数（prefill は `1..chunkLength`・decode は 1）で、
- * **`pastLength` は渡さない** — 論理長の進行は context が所有し、run の成功でのみ進む
- * （ADR 0066 決定 6 の二重簿記の禁止）。
- */
-export type GenerationRun = {
-  readonly context: GenerationContext;
-  readonly queryLength: number;
-  /**
-   * 論理長を進める時点（既定 `"immediate"` = 従来 — run が例外なく返った時点で `queryLength` 行
-   * ぶん進む）。
-   *
-   * `"deferred"` は進行を保留し、**受理した行数**を後から `GenerationContext.commit(rows)` で
-   * 確定させる（投機デコードの検証形 — draft の何行が受理されるかは、その run の出力を読んで
-   * 初めて決まる）。保留がある間は次の run と `rewind` を拒否するので、論理長を動かす経路は
-   * 依然 1 本のまま（ADR 0066 決定 6 の二重簿記の禁止）。
-   */
-  readonly commit?: "immediate" | "deferred";
 };
 
 /**
@@ -1558,50 +1580,10 @@ export class Session {
       queryLength: generation.queryLength,
       commit: generation.commit,
     };
-    // MUST: `commit` の値域は発行の同期区間で見る。型の外から来た綴り違いを既定へ倒すと、
-    // deferred のつもりで発行した run が黙って論理長を進める（例外も警告も出ない位置ずれ）。
-    if (
-      capturedGeneration?.commit !== undefined && capturedGeneration.commit !== "immediate" &&
-      capturedGeneration.commit !== "deferred"
-    ) {
-      return Promise.reject(
-        new ExecutionError(
-          `run: generation.commit '${capturedGeneration.commit}' は 'immediate' か 'deferred' のみ`,
-        ),
-      );
-    }
-    // MUST: deferred run が sliding ring へ書ける行数は**余裕まで**（`Q ≤ slidingSlack`）。
-    // 棄却行 j（commit した行数 m に対し j ≥ m）は物理 ring 上で論理列 `P+j−C` を潰すので、
-    // 確定後の読者の窓の下端より下に落ちる条件が要る。読者は 2 種類あり、下端が低いのは
-    // **借り手（readonly 読者 — drafter）**の `P+m−W`（`src/kernels/state-attention.ts` の
-    // readonly 節 `column_base = P − min(P, W)`。states 形の読者は今 step の ins があるぶん
-    // 1 列高い `P+m−(W−1)`）。条件 `P+j−C < P+m−W` ⟺ `j − m < C − W = slidingSlack` を
-    // 全ての `m ≥ 0`（`commit(0)` を含む）・`j ≤ Q−1` で満たすには `Q ≤ slidingSlack`。
-    // MUST: 借り手の有無で分岐しない（借り手は deferred + `commit(0)` の**後**に開くこともでき、
-    // run 発行時点の有無で緩めると「後から借り手を開く順」に穴が残る）。貸し手自身の読者しか
-    // 居ない場合は 1 列ぶん厳しいだけで、壊れる形は生まない。
-    // 超えた run は例外も NaN も出さずに過去 KV を潰すので、発行の同期区間で落とす。immediate な
-    // run（prefill / decode）は全行を確定させるので上限は `chunkLength` のまま。
-    if (capturedGeneration?.commit === "deferred") {
-      // 借り手 context は論理長を持たない（進行も確定も貸し手の側 — ADR 0096 段 2 §2.1）ので、
-      // 確定させる相手が居ない deferred は発行の同期区間で落とす。
-      if (capturedGeneration.context[RUNTIME_INTERNAL].borrowing) {
-        return Promise.reject(
-          new ExecutionError(
-            "run: 借り手 context の run に generation.commit 'deferred' は指定できない" +
-              "（借り手は論理長を進めないので確定させる相手が居ない）",
-          ),
-        );
-      }
-      const slack = capturedGeneration.context.slidingSlack;
-      if (slack !== undefined && capturedGeneration.queryLength > slack) {
-        return Promise.reject(
-          new ExecutionError(
-            `run: deferred な generation run の queryLength ${capturedGeneration.queryLength} が ` +
-              `sliding ring の余裕 ${slack} を超える（棄却行が live な過去 KV を潰す）`,
-          ),
-        );
-      }
+    try {
+      assertGenerationCommit(capturedGeneration);
+    } catch (cause) {
+      return Promise.reject(cause);
     }
     const lease = capturedGeneration?.context[RUNTIME_INTERNAL];
     let captured: CapturedInputs;
@@ -1708,12 +1690,21 @@ export class Session {
     let captured: CapturedInputs;
     let capturedOptions: EnqueueOptions;
     let used: ResidentTensor[];
+    let lease: GenerationContext[typeof RUNTIME_INTERNAL] | undefined;
     try {
       // MUST: 入力の写しはリース取得より**前**（写しが落ちた後に返し手の居ないリースが 1 本
       // 残ると `finish()` が永久に待つ）。`batch` は実体そのものを持つ（写す対象ではない）。
       captured = captureInputs(inputs);
+      const generation = options.generation;
       capturedOptions = {
         batch: options.batch,
+        ...(generation === undefined ? {} : {
+          generation: {
+            context: generation.context,
+            queryLength: generation.queryLength,
+            commit: generation.commit,
+          },
+        }),
         bindings: { ...options.bindings },
         ...(options.copyOutputs === undefined
           ? {}
@@ -1724,6 +1715,9 @@ export class Session {
       // MUST: 使用予約は写し先も含めて**発行の同期区間**で取る（run と同じ理由 —
       // {@link retainUsedResidents}）。写しの相手も受理済みの enqueue が使う実体なので、
       // 入力と同じ寿命の保護が要る。
+      assertGenerationCommit(capturedOptions.generation);
+      // 型の外から来た不正contextの参照も、常駐出力の使用予約より前に済ませる。
+      lease = capturedOptions.generation?.context[RUNTIME_INTERNAL];
       const targets: [where: string, resident: ResidentTensor][] = [];
       for (const [name, resident] of captured.residentInputs) {
         targets.push([`入力 '${name}'`, resident]);
@@ -1735,12 +1729,26 @@ export class Session {
     } catch (cause) {
       return Promise.reject(cause);
     }
+    let acquired = false;
     try {
+      lease?.acquireRun("batch");
+      acquired = lease !== undefined;
       batch.enter(this.#state.gpu);
     } catch (cause) {
+      if (acquired) lease?.releaseRun();
       // 取得済みの使用予約は返してから落ちる（この enqueue は区間に入らない）。
       releaseUsedResidents(used);
       return Promise.reject(cause);
+    }
+    // enqueueのエンコード完了と区間の成功を分ける。長さの確定も予約の返却もfinishの決着前。
+    // DECIDED: docs/decisions/0066-generation-context-state-slots.md#バッチ実行の-generationcontext2026-09-12
+    let finalize: { complete(): void; fail(cause: unknown): void } | undefined;
+    if (lease !== undefined) {
+      batch.onSettled({
+        complete: () => finalize?.complete(),
+        fail: (cause) => finalize?.fail(cause),
+        release: () => lease.releaseRun(),
+      });
     }
     return this.#serialize(async () => {
       // ホスト側の失敗は戻り Promise にしか出ない（errorScope は GPU 側の失敗しか捕らえない）
@@ -1748,7 +1756,7 @@ export class Session {
       // 「undefined が投げられた」を区別するため。
       let failure: { readonly cause: unknown } | undefined;
       try {
-        await this.#enqueueOnce(captured, capturedOptions);
+        finalize = await this.#enqueueOnce(captured, capturedOptions);
       } catch (cause) {
         failure = { cause };
         throw cause;
@@ -1890,8 +1898,14 @@ export class Session {
     });
   }
 
-  /** 重みバッファを解放する。実行中の run の完了を待ってから破棄し、以後の run は fail loudly。 */
+  /** 重みを解放する。通常runは完了を待つ。未決着batchにcontextが予約されていれば受付終了前に拒否する。 */
   dispose(): Promise<void> {
+    try {
+      for (const context of this.#contexts) context[RUNTIME_INTERNAL].assertCanDispose();
+    } catch (cause) {
+      return Promise.reject(cause);
+    }
+
     // MUST: 借り手が生きている間は破棄しない（ADR 0096 段 2 §2.2）。借り手の bind group は
     // この Session の重みバッファを掴んでいる。`GenerationContext.dispose` と同じ逸脱で、
     // 受付終了（`#disposal` の代入）より前に返す。
@@ -2394,13 +2408,31 @@ export class Session {
    * なので、この門を持ち込むと 1 本目が非 backed（= フェンスを伴うアリーナ経路）に落ちる。
    * 黙って落とさないのがこの面の契約なので、初回はここで払う。
    */
-  async #enqueueOnce(captured: CapturedInputs, options: EnqueueOptions): Promise<void> {
+  async #enqueueOnce(
+    captured: CapturedInputs,
+    options: EnqueueOptions,
+  ): Promise<{ complete(): void; fail(cause: unknown): void } | undefined> {
     const { graph, scheduler } = this.#state;
     // 受け口の検査とリース取得は {@link Session.enqueue} の同期区間で済んでいる（本体で
     // やると finish との競走が閉じない）。ここは決着の相手として登録するだけ。
     // MUST: 区間の決着で「未 submit を出し切る」「計測窓を閉じる」の相手として登録する。
     options.batch[RUNTIME_INTERNAL].join(scheduler);
 
+    const generation = options.generation;
+    if (generation !== undefined && !this.#contexts.has(generation.context)) {
+      throw new ExecutionError("enqueue の GenerationContext がこの Session の生存集合に無い");
+    }
+    const stateShapes = generation === undefined ? undefined : new Map(
+      [...generation.context[RUNTIME_INTERNAL].slots].map(([name, slot]) => [name, slot.shape]),
+    );
+    const pastLength = generation === undefined
+      ? 0
+      : generation.context[RUNTIME_INTERNAL].pastLength();
+    const face = generation === undefined ? undefined : {
+      context: generation.context,
+      encoding: generationEncoding(generation.context, pastLength, generation.queryLength),
+    };
+    let stateWriteSubmits: number | undefined;
     const { inputShapes, residentInputs } = captured;
     // MUST: 束縛の解決（= 入力 shape の検証）は run と同じく毎回走らせる。
     const resolved = bindSymbols(
@@ -2409,11 +2441,13 @@ export class Session {
       options.bindings ?? {},
       residentNames(residentInputs),
     );
-    // MUST: `enqueue` は generation 面を持たない（波 D-5）。state 参照グラフは
-    // `stateShapes` 無しの導出で fail loudly になる（黙って state 抜きで走らない）。
-    const preparedKey = this.#preparedKey(resolved, residentInputs, undefined);
+    // context無しのstate参照は従来どおり導出で拒否する。渡されたcontextの束縛はrunと同じ。
+    if (generation !== undefined) {
+      assertGenerationBindings(generation.context[RUNTIME_INTERNAL].bindings, resolved);
+    }
+    const preparedKey = this.#preparedKey(resolved, residentInputs, stateShapes);
     const prepared = this.#takePrepared(preparedKey);
-    const derived = prepared ?? this.#planSteps(resolved, undefined);
+    const derived = prepared ?? this.#planSteps(resolved, stateShapes);
     const shapes = derived.shapes;
     this.#lastRunFusions = derived.fusions;
     this.#lastRunPrepared = undefined;
@@ -2428,11 +2462,14 @@ export class Session {
     let builtBacking: string | undefined;
     try {
       let recipes: readonly StepRecipe[];
+      let limits: GenerationLimits;
       if ("recipes" in derived) {
         recipes = derived.recipes;
+        limits = derived.generation;
       } else {
-        const built = await this.#recipeBuilder.buildRecipes(derived.steps);
+        const built = await this.#recipeBuilder.buildRecipes(derived.steps, stateShapes);
         recipes = built.recipes;
+        limits = built.generation;
         // MUST: 登録は `RecipeBuilder.buildRecipes` が完走して戻った後だけ（run と同じ理由）。
         this.#registerPrepared(preparedKey, {
           shapes,
@@ -2459,7 +2496,29 @@ export class Session {
         hit: prepared !== undefined,
         cachedPlans: this.#state.prepared.size,
       };
-      executeBakedPlan(recipes, activated.backing.groups, scheduler);
+      if (generation !== undefined) {
+        assertGenerationRun(
+          limits,
+          generation.context[RUNTIME_INTERNAL].allowedRows,
+          pastLength,
+          generation.queryLength,
+        );
+        generation.context[RUNTIME_INTERNAL].writeLengths(pastLength, generation.queryLength);
+      }
+      executeBakedPlan(
+        recipes,
+        activated.backing.groups,
+        scheduler,
+        face === undefined ? undefined : {
+          groups: this.#generationGroups(face, activated.backing, recipes),
+          encoding: face.encoding,
+          onStep: (recipe) => {
+            if (recipe.writesState && stateWriteSubmits === undefined) {
+              stateWriteSubmits = scheduler.submitCount;
+            }
+          },
+        },
+      );
       // MUST: 写しは dispatch 列の**後**に積む（同じコマンド列の FIFO が「書き終わった slot を
       // 読む」の根拠）。写し先が同じ enqueue の常駐入力を兼ねる形（ループの状態更新）も、
       // 読む dispatch が全て先に積まれているので正しい。
@@ -2480,6 +2539,7 @@ export class Session {
     } catch (cause) {
       // MUST: 失敗した enqueue の残 pending は submit せずに捨てる（run と同じ規律）。
       scheduler.discard();
+      this.#poisonOnStateWrite(generation, stateWriteSubmits, cause);
       if (builtBacking !== undefined) this.#retireBacking(builtBacking);
       this.#destroyRetired();
       throw cause;
@@ -2487,8 +2547,24 @@ export class Session {
     // MUST: 破棄待ちを返してよいのは submit / discard の**後**だけ（未 submit のエンコードが
     // 破棄済みバッファを参照しないこと）。submit 済みコマンドからの参照は WebGPU 的に安全で、
     // 実解放は完了まで実装が遅延する。
-    this.#destroyRetired();
-    this.#lastRunParams = this.#recipeBuilder.paramsStats;
+    try {
+      this.#destroyRetired();
+      this.#lastRunParams = this.#recipeBuilder.paramsStats;
+    } catch (cause) {
+      this.#poisonOnStateWrite(generation, stateWriteSubmits, cause);
+      throw cause;
+    }
+    if (generation === undefined) return undefined;
+    return {
+      complete: (): void => {
+        const internals = generation.context[RUNTIME_INTERNAL];
+        if (!internals.borrowing) {
+          if (generation.commit === "deferred") internals.defer(pastLength, generation.queryLength);
+          else internals.advance(pastLength, generation.queryLength);
+        }
+      },
+      fail: (cause): void => this.#poisonOnStateWrite(generation, stateWriteSubmits, cause),
+    };
   }
 
   /**
