@@ -108,3 +108,26 @@ Promise を握っていないので、実態は「dispatch を 1 本落とした
 `finish()` から `ExecutionError` 等が出るのは 0.7.0 までに対する**破壊的な挙動変更**で、
 [limitations](../limitations.md) に節を持つ。同じ失敗は enqueue の戻り Promise 側にも従来どおり
 出る（1 つの事実が 2 経路で見えるのは `run` と同じ）。区間の外形・待ちの増減は不変。
+
+## バッチ終端の一括読み戻し（2026-09-12）
+
+- Gemma/QATの出力転送削減に向け、`BatchScope.finishAndRead(outputs)`を追加する。
+  同じdeviceの常駐テンソルを名前で指定し、呼び手が所有する`ArrayBuffer`の対応表を返す。
+  `finish(): Promise<void>`と既存`ResidentTensor.read()`の動作は変えない。
+- 発行時にmember構成を固定し、同期区間で常駐テンソルの使用予約を取る。
+  データは借用で、呼び出しから決着までwriteしない。同一テンソルの別名指定は許す。
+  途中の不正member・破棄済み・別device・合計上限超過は部分予約を返し、バッチを終了させず拒否する。
+- 全enqueueのエンコードが決着した後、未submitを出し切り、1個のstagingへ4byte境界で
+  出力を連結コピーする。copyのsubmit後にエラースコープを検査し、map完了をフェンスにして、ホスト側の失敗と合流した後だけ結果を返す。
+  空集合は従来のqueueフェンスで閉じる。合計が`maxBufferSize`を超える場合は明示拒否する。
+  分割stagingや複数mapへ黙って切り替えない。
+- 読み戻しの指定は未終了・settle中でないバッチへ1回だけ。指定後の`finish` / asyncDisposeは
+  同じ最終決着を待つ。`finish`先行後の指定・読み戻しの重複指定は拒否する。
+  使用予約は`finish`の決着前に必ず返し、stagingも成功・失敗の両方で破棄する。
+- copy/確保のGPUエラーがmap拒否を引き起こした場合はGPUエラーを優先する。
+  copyのGPUエラーはmap前に判定する。enqueue側の失敗もあれば、従来どおりcauseへ保持する。
+  デバイス消失時の未決着mapは既存の消失通知と競わせ、ハングを失敗へ変える。
+  GPU側の失敗とenqueue側の失敗がともに存在する場合の優先規則は従来どおり。
+- この追加だけで会話用の`Session.enqueue`やGemmaの小出力化を有効にしたとはしない。
+  GenerationContextの使用予約・長さの確定・失敗時のpoisonをバッチ最終決着へ接続する段階、
+  modelsのgreedy能力を接続する段階を別々に検収する。IR・保存資産・既存の数値契約は変更しない。

@@ -2541,3 +2541,68 @@ INT4・INT8への融合やM2の速度は、この実験では評価していな�
 `srq-hint-bench.json` / `srq-hint-bench-summary.json`へ保存した。
 範囲による損が大きく、過去の同系列候補でも全体利益が安定していなかったため、
 今回の候補は全モデル比較へ進めず不採用とした。
+
+## バッチ終端の一括読み戻し（2026-09-12）
+
+この節はRTX 3080 Ti / Deno 2.9.6 / Chrome 153での時点実測。OUTは
+`outputs/bench/karume/2026-09-11_fable-followup/`。M2の実測ではない。
+
+### 読み戻しの順序と公開面
+
+`BatchScope.finishAndRead(outputs)`を追加する。全enqueueのエンコード後、指定した常駐出力を
+1個のstagingへコピーし、mapを唯一の完了フェンスにする。既存の`finish(): Promise<void>`と
+`ResidentTensor.read()`は維持する。指定は発行時に固定し、使用予約はバッチの最終決着まで保つ。
+空の集合は既存のqueueフェンス、別device・破棄済み・合計上限超過・重複指定は明示拒否する。
+決定は[ADR 0054](../decisions/0054-resident-loop-and-fence.md#バッチ終端の一括読み戻し2026-09-12)。
+
+`batch-read-bench.ts`は、2個の既存residentを`finish→並行read`で読む経路と、一括読み戻しを比較する。
+4回の準備後、8試料×各10回を順序交替で測定した。計測器で全試料の
+queueフェンス1回/map2回→queueフェンス0回/map1回を確認した。
+これは転送プロトコルの対照であり、既に単一フェンスの`Session.run`に対する倍率ではない。
+
+| 環境   |    出力合計 | finish後にread | 一括読み戻し |
+| ------ | ----------: | -------------: | -----------: |
+| Deno   |         8 B |      22.437 ms |    11.197 ms |
+| Deno   | 1,048,580 B |      23.253 ms |    12.076 ms |
+| Chrome |         8 B |       1.081 ms |     0.527 ms |
+| Chrome | 1,048,580 B |       1.577 ms |     1.383 ms |
+
+数値の正本は`batch-read-bench-early-summary.json`、個票は`batch-read-bench-{deno|chrome}-early.json`。
+初期案はmap後にerrorScopeを検査し、Chromeの大出力が1.587→3.384 msへ悪化した
+（`batch-read-bench-summary.json`）。copyのsubmit直後にerrorScopeを検査し、その後mapする
+既存runと同じ順序へ直すと、上表では退行が解消した。Chrome内部の遅延理由まで帰属したとはしない。
+
+追加した13条件は、非await enqueue、memberの写し、12B境界・重複名・NaNの値ビット、
+破棄/別device/不正型、空集合、finish/settle競合、確保/copy/map/読み出し失敗、device loss、
+GPU失敗とホスト失敗の原因保持を検証する。
+製品版の重点検証は **45 passed / 0 failed、7秒**（`batch-read-product-focused.log`）。
+全体検証は **2,904 passed（760 steps）/ 0 failed / 5 ignored、24分58秒**
+（`batch-read-product-verify.log`）。
+
+### 会話状態を使う次段階の試作
+
+`batch-generation-candidate`は`enqueue.generation`と終端時の長さ確定を加えた隔離コピー。
+使用予約を終端まで保ち、成功時だけadvance/defer、state書き込み後の失敗ではpoisonする。
+バッチ中のdisposeを明示拒否する案で、通常runの破棄待ち契約は維持する。
+既存98件と追加11件を実行し、追加1件の「空のsliding履歴でrewindできる」という誤った前提を訂正した。
+製品の既存テストは変更していない。既存98件・追加10件成功/1件失敗のログは
+`batch-generation-focused.log`、訂正した追加全11件の成功は`batch-generation-focused-v2.log`。
+借り手の予約伝播、full/slidingのprefillとdecodeのu32一致、後続失敗と複数contextの確定失敗も含む。
+この段階は製品未統合。
+
+`batch-model-deno.ts` / `batch-model-browser.ts`は保存済みQAT E2B資産を変更せず、
+targetのlogitsを常駐出力へコピー→別topk Session→8B読み戻しで実行する。
+容量128、chunk32、PLE常駐0、温度0、penalty/bias無し、最大64token、3入力×各3生成。
+毎回新しいcontextを作るため実際の多ターン会話ではなく、CLIの計測でもない。
+基準→候補→候補→基準の比較で、全4組・各9生成のtoken列が一致した。
+1tokenあたりのCPU出力は1,054,720 B→8 B。暖機後6生成の速度比中央値は次のとおり。
+
+| 環境   | 1組目 | 2組目 |
+| ------ | ----: | ----: |
+| Deno   | 1.015 | 1.032 |
+| Chrome | 1.052 | 1.027 |
+
+正本は`batch-model-summary.json`、個票は`{deno|chrome}-batch-model-{base|batch}-{0|1}.json`。
+実グラフを書き換えない経路にも利益はあるが、一般samplingのCLI既定設定の高速化ではない。
+次はgenerationの寿命を製品へ統合し、modelsのgreedy能力と多ターン・中断・resetを検収する。
+通常版/E4B/M2、温度あり・penalty/bias・投機の小出力化は別途必要。

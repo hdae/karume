@@ -1262,11 +1262,12 @@ export class BatchScope {
   readonly [RUNTIME_INTERNAL]: BatchInternals;
   readonly #gpu: GpuContext;
   readonly #members = new Set<BatchMember>();
-  readonly #completion: Promise<void>;
+  readonly #completion: Promise<Readonly<Record<string, ArrayBuffer>> | undefined>;
   readonly #release: () => void;
   /** 未返却の in-flight リースが全て返ったことの通知（{@link BatchInternals.enter}）。 */
   readonly #drained = Promise.withResolvers<void>();
   #leases = 0;
+  #readback: readonly (readonly [string, ResidentTensor])[] | undefined;
   #finished = false;
   /** {@link BatchScope.settle} の途中か（この間の enqueue は拒否する — 窓の帰属を守る）。 */
   #settling = false;
@@ -1298,6 +1299,17 @@ export class BatchScope {
       // 未完了の GPU 実行を残したまま finish が返る（直後の read が古い値を返す）。
       await this.#drained.promise;
       const device = gpu.device;
+      let outputs: Readonly<Record<string, ArrayBuffer>> | undefined;
+      let popped = false;
+      const checkFailureScopes = async (): Promise<void> => {
+        const pending = popFailureScopes(
+          device,
+          this.#readback === undefined ? "batch のエンコード" : "batch のエンコードと読み戻し",
+        );
+        popped = true;
+        const failure = await pending;
+        if (failure !== undefined) throw failure;
+      };
       try {
         // enqueue は末尾で必ず submit するので通常ここは空振りする。それでも出し切るのは、
         // 「batch が閉じた時点で未 submit のエンコードは 1 つも無い」を区間側の責務として
@@ -1305,12 +1317,16 @@ export class BatchScope {
         for (const member of this.#members) member.submitPending();
         // MUST: 消失後の onSubmittedWorkDone が解決しない実装がありうる（実測は
         // raceCanaryDeviceLost の doc）ため競わせる。
-        await gpu[RUNTIME_INTERNAL].raceDeviceLost(
-          device.queue.onSubmittedWorkDone(),
-          "batch の完了",
-        );
+        if (this.#readback !== undefined && this.#readback.length > 0) {
+          outputs = await this.#readOutputs(this.#readback, checkFailureScopes);
+        } else {
+          await gpu[RUNTIME_INTERNAL].raceDeviceLost(
+            device.queue.onSubmittedWorkDone(),
+            "batch の完了",
+          );
+        }
       } catch (cause) {
-        await discardFailureScopes(device);
+        if (!popped) await discardFailureScopes(device);
         throw cause;
       } finally {
         // 計測窓は batch のフェンス 1 回で閉じる。窓に N 本の enqueue が入るぶん推定は粗く
@@ -1318,8 +1334,8 @@ export class BatchScope {
         // （src/gpu/submit.ts の「計測の帰属」）。
         for (const member of this.#members) member.closeMeasurementWindowAfterFence();
       }
-      const failure = await popFailureScopes(device, "batch のエンコード");
-      if (failure !== undefined) throw failure;
+      if (!popped) await checkFailureScopes();
+      return outputs;
     });
     // 決着を finish が受け取るまで未処理拒否にしない（拒否の中身は finish がそのまま返す）。
     void this.#completion.catch(() => undefined);
@@ -1405,6 +1421,7 @@ export class BatchScope {
    * 区間を閉じる。**新規 enqueue を拒否 → in-flight の enqueue が全て決着するのを待つ →
    * 未 submit を出し切る → フェンス 1 本で全 enqueue の完了を待つ → errorScope を pop して
    * 失敗を型付き例外にする**、の順で進む。
+   * `finishAndRead`指定時はcopy後にerrorScopeを検査し、mapを唯一の完了フェンスにする。
    *
    * MUST: 2 度目以降も同じ完了を返す（先に返すと呼び出し側が破棄へ進み、ロックと errorScope が
    * 開いたまま残る）。
@@ -1448,6 +1465,95 @@ export class BatchScope {
   }
 
   /**
+   * 指定した常駐出力をまとめて読み戻し、そのmapをバッチの完了フェンスにする。
+   * 既存finishの後にreadする二重待ちを避ける。空の指定はfinishと同じフェンスで閉じる。
+   *
+   * 構成は同期区間で固定し、全出力を決着まで使用予約する。データは借用であり、
+   * 呼び出しから決着まではwriteしない。返したArrayBufferは呼び手の所有物。
+   * 指定できるのは未終了・settle中でないbatchへ1回だけ。以後のfinishは同じ決着を待つ。
+   * 出力の合計はdeviceのmaxBufferSize以下とし、別device・破棄済みは受け付けない。
+   * DECIDED: docs/decisions/0054-resident-loop-and-fence.md#バッチ終端の一括読み戻し2026-09-12
+   */
+  finishAndRead(
+    outputs: Readonly<Record<string, ResidentTensor>>,
+  ): Promise<Readonly<Record<string, ArrayBuffer>>> {
+    const retained: ResidentTensor[] = [];
+    try {
+      if (this.#finished || this.#settling) {
+        throw new BatchScopeError(
+          "finishAndRead は未終了・settle中でない batch に1回だけ指定できる",
+        );
+      }
+      assertDeviceUsable(this.#gpu, "batch の読み戻し");
+      const entries = Object.entries(outputs);
+      let totalBytes = 0;
+      for (const [name, resident] of entries) {
+        if (
+          !(resident instanceof ResidentTensor) || resident[RUNTIME_INTERNAL].owner !== this.#gpu
+        ) {
+          throw new BatchScopeError(
+            `finishAndRead '${name}': 同じ GpuContext の ResidentTensor が必要`,
+          );
+        }
+        resident[RUNTIME_INTERNAL].retainUse();
+        retained.push(resident);
+        totalBytes += resident.byteLength;
+      }
+      if (!Number.isSafeInteger(totalBytes) || totalBytes > this.#gpu.limits.maxBufferSize) {
+        throw new BatchScopeError(
+          `finishAndRead: 合計 ${totalBytes} bytes が maxBufferSize ${this.#gpu.limits.maxBufferSize} を超える`,
+        );
+      }
+      this.#readback = entries;
+    } catch (cause) {
+      for (const resident of retained) resident[RUNTIME_INTERNAL].releaseUse();
+      return Promise.reject(cause);
+    }
+    return this.finish().then(async () => (await this.#completion) ?? {});
+  }
+
+  async #readOutputs(
+    entries: readonly (readonly [string, ResidentTensor])[],
+    checkFailureScopes: () => Promise<void>,
+  ): Promise<Readonly<Record<string, ArrayBuffer>>> {
+    const device = this.#gpu.device;
+    const staging = device.createBuffer({
+      label: "batch-readback",
+      size: entries.reduce((sum, [, resident]) => sum + resident.byteLength, 0),
+      usage: BUFFER_USAGE.COPY_DST | BUFFER_USAGE.MAP_READ,
+    });
+    try {
+      const encoder = device.createCommandEncoder();
+      let offset = 0;
+      for (const [, resident] of entries) {
+        encoder.copyBufferToBuffer(
+          resident[RUNTIME_INTERNAL].buffer,
+          0,
+          staging,
+          offset,
+          resident.byteLength,
+        );
+        offset += resident.byteLength;
+      }
+      device.queue.submit([encoder.finish()]);
+      await checkFailureScopes();
+      await this.#gpu[RUNTIME_INTERNAL].raceDeviceLost(
+        staging.mapAsync(MAP_MODE.READ),
+        "batch の読み戻し",
+      );
+      const mapped = staging.getMappedRange();
+      offset = 0;
+      return Object.fromEntries(entries.map(([name, resident]) => {
+        const copy = mapped.slice(offset, offset + resident.byteLength);
+        offset += resident.byteLength;
+        return [name, copy];
+      }));
+    } finally {
+      staging.destroy();
+    }
+  }
+
+  /**
    * `await using` 対応（Explicit Resource Management）— {@link BatchScope.finish} の別名。
    *
    * 区間は device 単位の errorScope 区間ロックを握り続けるので、`finish()` を通らずに抜けると
@@ -1466,16 +1572,21 @@ export class BatchScope {
    */
   async #resolveFinish(): Promise<void> {
     try {
-      await this.#completion;
-    } catch (cause) {
-      // MUST: errorScope 側を優先し、包み直さずそのまま投げる（型で分岐する呼び手が居る）。
-      // 記録があれば cause に載せて、2 つの事実が 1 度に見えるようにする。
-      if (this.#failure !== undefined && cause instanceof Error && cause.cause === undefined) {
-        cause.cause = this.#failure.cause;
+      try {
+        await this.#completion;
+      } catch (cause) {
+        // MUST: errorScope 側を優先し、包み直さずそのまま投げる（型で分岐する呼び手が居る）。
+        // 記録があれば cause に載せて、2 つの事実が 1 度に見えるようにする。
+        if (this.#failure !== undefined && cause instanceof Error && cause.cause === undefined) {
+          cause.cause = this.#failure.cause;
+        }
+        throw cause;
       }
-      throw cause;
+      if (this.#failure !== undefined) throw this.#failure.cause;
+    } finally {
+      for (const [, resident] of this.#readback ?? []) resident[RUNTIME_INTERNAL].releaseUse();
+      this.#readback = undefined;
     }
-    if (this.#failure !== undefined) throw this.#failure.cause;
   }
 }
 
