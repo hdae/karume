@@ -1,0 +1,1231 @@
+{
+  "format": "karume-llm-speed-aggregate/1",
+  "artifactRoot": "outputs/bench/karume/2026-09-12_llm-speed-final-WAkJev",
+  "additionalArtifactRoot": "outputs/bench/karume/2026-09-12_qat-text-speed-r37k5w",
+  "baseCommit": "147104a",
+  "device": "NVIDIA GeForce RTX 3080 Ti",
+  "conditions": {
+    "capacity": 128,
+    "maxNewTokens": 64,
+    "warmups": 1,
+    "repeats": 3,
+    "sampler": "greedy",
+    "attentionTorch": "sdpa",
+    "compileTorch": false,
+    "textDecodingTimed": false
+  },
+  "rows": [
+    {
+      "model": "qwen3-06b",
+      "engine": "deno",
+      "status": "complete",
+      "folder": "outputs/bench/karume/2026-09-12_llm-speed-final-WAkJev/qwen3-06b-deno",
+      "loadSeconds": 0.934873311,
+      "cases": [
+        {
+          "case": "english-list",
+          "promptTokens": 34,
+          "generatedTokens": 64,
+          "firstTtftMs": 158.24823100000003,
+          "firstInProcess": true,
+          "ttftMs": {
+            "median": 90.46584699999948,
+            "min": 89.78601499999968,
+            "max": 92.08303899999964
+          },
+          "decodeTokensPerSecond": {
+            "median": 45.427117963518974,
+            "min": 45.22181997174089,
+            "max": 45.98128385266648
+          },
+          "elapsedMs": {
+            "median": 1476.6228389999997,
+            "min": 1462.2057220000002,
+            "max": 1483.5986319999993
+          },
+          "withinEngineTokensIdentical": true
+        },
+        {
+          "case": "japanese-list",
+          "promptTokens": 49,
+          "generatedTokens": 64,
+          "firstTtftMs": 92.48095000000103,
+          "firstInProcess": false,
+          "ttftMs": {
+            "median": 92.13201900000058,
+            "min": 91.91418899999917,
+            "max": 94.7711049999998
+          },
+          "decodeTokensPerSecond": {
+            "median": 44.61458953872993,
+            "min": 44.22002685667537,
+            "max": 44.72697996498595
+          },
+          "elapsedMs": {
+            "median": 1506.8652350000011,
+            "min": 1500.459993999999,
+            "max": 1516.8258619999997
+          },
+          "withinEngineTokensIdentical": true
+        }
+      ],
+      "placement": "packed-weights",
+      "compute": "f32"
+    },
+    {
+      "model": "qwen3-06b",
+      "engine": "torch-float32",
+      "status": "complete",
+      "folder": "outputs/bench/karume/2026-09-12_llm-speed-final-WAkJev/qwen3-06b-torch-float32",
+      "loadSeconds": 1.2990151919948403,
+      "cases": [
+        {
+          "case": "english-list",
+          "promptTokens": 34,
+          "generatedTokens": 64,
+          "firstTtftMs": 400.32329701352865,
+          "firstInProcess": true,
+          "ttftMs": {
+            "median": 22.100330999819562,
+            "min": 22.078270005295053,
+            "max": 22.975932981353253
+          },
+          "decodeTokensPerSecond": {
+            "median": 50.732715865106385,
+            "min": 49.45074756375447,
+            "max": 50.903463392201374
+          },
+          "elapsedMs": {
+            "median": 1264.778168988414,
+            "min": 1259.7371400042903,
+            "max": 1296.0731660132296
+          },
+          "withinEngineTokensIdentical": true
+        },
+        {
+          "case": "japanese-list",
+          "promptTokens": 49,
+          "generatedTokens": 64,
+          "firstTtftMs": 22.438930987846106,
+          "firstInProcess": false,
+          "ttftMs": {
+            "median": 22.301760996924713,
+            "min": 22.278641001321375,
+            "max": 22.325851023197174
+          },
+          "decodeTokensPerSecond": {
+            "median": 51.27240935617532,
+            "min": 50.72094191398648,
+            "max": 51.51492297096396
+          },
+          "elapsedMs": {
+            "median": 1251.0096640035044,
+            "min": 1245.248363004066,
+            "max": 1264.4163490040228
+          },
+          "withinEngineTokensIdentical": true
+        }
+      ],
+      "placement": "dequantized-dense",
+      "plePlacement": null,
+      "dtype": "float32",
+      "parameterBytes": 2384199680,
+      "cudaPeakAllocatedBytes": 2422332928
+    },
+    {
+      "model": "qwen3-06b",
+      "engine": "torch-bfloat16",
+      "status": "complete",
+      "folder": "outputs/bench/karume/2026-09-12_llm-speed-final-WAkJev/qwen3-06b-torch-bfloat16",
+      "loadSeconds": 1.3488067540165503,
+      "cases": [
+        {
+          "case": "english-list",
+          "promptTokens": 34,
+          "generatedTokens": 64,
+          "firstTtftMs": 404.7856050019618,
+          "firstInProcess": true,
+          "ttftMs": {
+            "median": 18.968035001307726,
+            "min": 18.919714988442138,
+            "max": 19.05767500284128
+          },
+          "decodeTokensPerSecond": {
+            "median": 55.062969851578224,
+            "min": 54.81372926191348,
+            "max": 55.551498042389724
+          },
+          "elapsedMs": {
+            "median": 1163.2022819831036,
+            "min": 1153.0508630094118,
+            "max": 1168.2668009889312
+          },
+          "withinEngineTokensIdentical": true
+        },
+        {
+          "case": "japanese-list",
+          "promptTokens": 49,
+          "generatedTokens": 64,
+          "firstTtftMs": 19.403865007916465,
+          "firstInProcess": false,
+          "ttftMs": {
+            "median": 19.37613499467261,
+            "min": 19.04665501206182,
+            "max": 20.363798015750945
+          },
+          "decodeTokensPerSecond": {
+            "median": 53.30220006519537,
+            "min": 51.31206409868681,
+            "max": 55.41916605478263
+          },
+          "elapsedMs": {
+            "median": 1200.9866110165603,
+            "min": 1156.1669690127019,
+            "max": 1248.145239020232
+          },
+          "withinEngineTokensIdentical": true
+        }
+      ],
+      "placement": "dequantized-dense",
+      "plePlacement": null,
+      "dtype": "bfloat16",
+      "parameterBytes": 1192099840,
+      "cudaPeakAllocatedBytes": 1214544896
+    },
+    {
+      "model": "minicpm5-2b",
+      "engine": "deno",
+      "status": "complete",
+      "folder": "outputs/bench/karume/2026-09-12_llm-speed-final-WAkJev/minicpm5-2b-deno",
+      "loadSeconds": 3.174263685,
+      "cases": [
+        {
+          "case": "english-list",
+          "promptTokens": 35,
+          "generatedTokens": 64,
+          "firstTtftMs": 351.297857,
+          "firstInProcess": true,
+          "ttftMs": {
+            "median": 103.93464099999983,
+            "min": 83.19471299999896,
+            "max": 119.36359999999968
+          },
+          "decodeTokensPerSecond": {
+            "median": 36.77332956719959,
+            "min": 36.669415838738225,
+            "max": 36.84637946472339
+          },
+          "elapsedMs": {
+            "median": 1817.1327860000001,
+            "min": 1801.2477159999999,
+            "max": 1829.165239
+          },
+          "withinEngineTokensIdentical": true
+        },
+        {
+          "case": "japanese-list",
+          "promptTokens": 41,
+          "generatedTokens": 64,
+          "firstTtftMs": 82.95535299999938,
+          "firstInProcess": false,
+          "ttftMs": {
+            "median": 88.45414199999868,
+            "min": 87.66921100000036,
+            "max": 103.15120999999999
+          },
+          "decodeTokensPerSecond": {
+            "median": 36.43344066993144,
+            "min": 36.31465140982487,
+            "max": 36.59390528159019
+          },
+          "elapsedMs": {
+            "median": 1822.5061859999987,
+            "min": 1810.052302,
+            "max": 1832.331843
+          },
+          "withinEngineTokensIdentical": true
+        }
+      ],
+      "placement": "packed-weights",
+      "compute": "f32"
+    },
+    {
+      "model": "minicpm5-2b",
+      "engine": "torch-float32",
+      "status": "complete",
+      "folder": "outputs/bench/karume/2026-09-12_llm-speed-final-WAkJev/minicpm5-2b-torch-float32",
+      "loadSeconds": 6.074282334011514,
+      "cases": [
+        {
+          "case": "english-list",
+          "promptTokens": 35,
+          "generatedTokens": 64,
+          "firstTtftMs": 461.4785489975475,
+          "firstInProcess": true,
+          "ttftMs": {
+            "median": 28.25371199287474,
+            "min": 28.246552014024928,
+            "max": 28.318892000243068
+          },
+          "decodeTokensPerSecond": {
+            "median": 40.96401724586548,
+            "min": 40.386627932932804,
+            "max": 41.30922770071442
+          },
+          "elapsedMs": {
+            "median": 1566.1816530046053,
+            "min": 1553.3366899762768,
+            "max": 1588.2411540078465
+          },
+          "withinEngineTokensIdentical": true
+        },
+        {
+          "case": "japanese-list",
+          "promptTokens": 41,
+          "generatedTokens": 64,
+          "firstTtftMs": 28.39960198616609,
+          "firstInProcess": false,
+          "ttftMs": {
+            "median": 28.388022008584812,
+            "min": 28.349081985652447,
+            "max": 28.480583016062155
+          },
+          "decodeTokensPerSecond": {
+            "median": 40.9839184961389,
+            "min": 40.97098420568536,
+            "max": 41.295475538650024
+          },
+          "elapsedMs": {
+            "median": 1565.6688830058556,
+            "min": 1553.9399409899488,
+            "max": 1566.0616029927041
+          },
+          "withinEngineTokensIdentical": true
+        }
+      ],
+      "placement": "dequantized-dense",
+      "plePlacement": null,
+      "dtype": "float32",
+      "parameterBytes": 10067025920,
+      "cudaPeakAllocatedBytes": 10087620096
+    },
+    {
+      "model": "minicpm5-2b",
+      "engine": "torch-bfloat16",
+      "status": "complete",
+      "folder": "outputs/bench/karume/2026-09-12_llm-speed-final-WAkJev/minicpm5-2b-torch-bfloat16",
+      "loadSeconds": 5.853629078017548,
+      "cases": [
+        {
+          "case": "english-list",
+          "promptTokens": 35,
+          "generatedTokens": 64,
+          "firstTtftMs": 399.2029749788344,
+          "firstInProcess": true,
+          "ttftMs": {
+            "median": 21.915601013461128,
+            "min": 21.903660002863035,
+            "max": 21.96779102087021
+          },
+          "decodeTokensPerSecond": {
+            "median": 46.76923332793957,
+            "min": 46.52536657783218,
+            "max": 46.83478004058316
+          },
+          "elapsedMs": {
+            "median": 1368.9550010021776,
+            "min": 1367.1219680109061,
+            "max": 1376.0036840103567
+          },
+          "withinEngineTokensIdentical": true
+        },
+        {
+          "case": "japanese-list",
+          "promptTokens": 41,
+          "generatedTokens": 64,
+          "firstTtftMs": 22.428151016356423,
+          "firstInProcess": false,
+          "ttftMs": {
+            "median": 22.536102012963966,
+            "min": 21.944720996543765,
+            "max": 22.651222010608763
+          },
+          "decodeTokensPerSecond": {
+            "median": 45.91602984637218,
+            "min": 44.93403584008796,
+            "max": 46.6372908051286
+          },
+          "elapsedMs": {
+            "median": 1394.7210680053104,
+            "min": 1373.3864389942028,
+            "max": 1423.9999520068523
+          },
+          "withinEngineTokensIdentical": true
+        }
+      ],
+      "placement": "dequantized-dense",
+      "plePlacement": null,
+      "dtype": "bfloat16",
+      "parameterBytes": 5033512960,
+      "cudaPeakAllocatedBytes": 5047420928
+    },
+    {
+      "model": "gemma4-e2b",
+      "engine": "deno",
+      "status": "complete",
+      "folder": "outputs/bench/karume/2026-09-12_llm-speed-final-WAkJev/gemma4-e2b-deno",
+      "loadSeconds": 1.9271705189999997,
+      "cases": [
+        {
+          "case": "english-list",
+          "promptTokens": 31,
+          "generatedTokens": 64,
+          "firstTtftMs": 183.97989899999993,
+          "firstInProcess": true,
+          "ttftMs": {
+            "median": 50.87367400000039,
+            "min": 50.4848120000006,
+            "max": 50.89303299999938
+          },
+          "decodeTokensPerSecond": {
+            "median": 37.99603041960507,
+            "min": 37.730220507733854,
+            "max": 37.99742256245154
+          },
+          "elapsedMs": {
+            "median": 1708.9416170000004,
+            "min": 1708.9002279999995,
+            "max": 1720.2338660000005
+          },
+          "withinEngineTokensIdentical": true
+        },
+        {
+          "case": "japanese-list",
+          "promptTokens": 37,
+          "generatedTokens": 64,
+          "firstTtftMs": 170.04242299999896,
+          "firstInProcess": false,
+          "ttftMs": {
+            "median": 71.42392200000177,
+            "min": 71.08442099999957,
+            "max": 71.4872919999998
+          },
+          "decodeTokensPerSecond": {
+            "median": 37.92967802654084,
+            "min": 37.858441834365706,
+            "max": 37.978049512048216
+          },
+          "elapsedMs": {
+            "median": 1732.3924110000007,
+            "min": 1729.937385000001,
+            "max": 1735.5811359999989
+          },
+          "withinEngineTokensIdentical": true
+        }
+      ],
+      "placement": "packed-weights",
+      "pleBudget": "default-two-shards",
+      "compute": "f32"
+    },
+    {
+      "model": "gemma4-e2b",
+      "engine": "torch-float32",
+      "status": "complete",
+      "folder": "outputs/bench/karume/2026-09-12_llm-speed-final-WAkJev/gemma4-e2b-torch-float32",
+      "loadSeconds": 5.993028394994326,
+      "cases": [
+        {
+          "case": "english-list",
+          "promptTokens": 31,
+          "generatedTokens": 64,
+          "firstTtftMs": 410.36001601605676,
+          "firstInProcess": true,
+          "ttftMs": {
+            "median": 38.249700010055676,
+            "min": 38.20297002675943,
+            "max": 38.25205098837614
+          },
+          "decodeTokensPerSecond": {
+            "median": 32.19988193453325,
+            "min": 32.16588650660876,
+            "max": 32.2319152568427
+          },
+          "elapsedMs": {
+            "median": 1994.778613006929,
+            "min": 1992.8364899824373,
+            "max": 1996.7996960040182
+          },
+          "withinEngineTokensIdentical": true
+        },
+        {
+          "case": "japanese-list",
+          "promptTokens": 37,
+          "generatedTokens": 64,
+          "firstTtftMs": 43.045469996286556,
+          "firstInProcess": false,
+          "ttftMs": {
+            "median": 41.378105990588665,
+            "min": 41.21431600651704,
+            "max": 43.06534997886047
+          },
+          "decodeTokensPerSecond": {
+            "median": 31.904348114810983,
+            "min": 31.499086163848915,
+            "max": 32.28996839385354
+          },
+          "elapsedMs": {
+            "median": 2017.7178259764332,
+            "min": 1992.2846679983195,
+            "max": 2041.4361290168017
+          },
+          "withinEngineTokensIdentical": true
+        }
+      ],
+      "placement": "dequantized-dense",
+      "plePlacement": "cpu-row-lookup",
+      "dtype": "float32",
+      "parameterBytes": 9119036416,
+      "cudaPeakAllocatedBytes": 9146304512
+    },
+    {
+      "model": "gemma4-e2b",
+      "engine": "torch-bfloat16",
+      "status": "complete",
+      "folder": "outputs/bench/karume/2026-09-12_llm-speed-final-WAkJev/gemma4-e2b-torch-bfloat16",
+      "loadSeconds": 6.497565794008551,
+      "cases": [
+        {
+          "case": "english-list",
+          "promptTokens": 31,
+          "generatedTokens": 64,
+          "firstTtftMs": 470.15826500137337,
+          "firstInProcess": true,
+          "ttftMs": {
+            "median": 37.300227995729074,
+            "min": 37.22774802008644,
+            "max": 40.00188398640603
+          },
+          "decodeTokensPerSecond": {
+            "median": 30.428310022269272,
+            "min": 29.237596561537615,
+            "max": 30.68258164488879
+          },
+          "elapsedMs": {
+            "median": 2110.442205972504,
+            "min": 2090.5824690125883,
+            "max": 2191.987626021728
+          },
+          "withinEngineTokensIdentical": true
+        },
+        {
+          "case": "japanese-list",
+          "promptTokens": 37,
+          "generatedTokens": 64,
+          "firstTtftMs": 58.29264799831435,
+          "firstInProcess": false,
+          "ttftMs": {
+            "median": 38.425601000199094,
+            "min": 38.42034097760916,
+            "max": 38.81393201299943
+          },
+          "decodeTokensPerSecond": {
+            "median": 30.69846480279423,
+            "min": 30.311293709927188,
+            "max": 30.750025302418603
+          },
+          "elapsedMs": {
+            "median": 2090.6402289983816,
+            "min": 2087.2044029820245,
+            "max": 2117.2471590107307
+          },
+          "withinEngineTokensIdentical": true
+        }
+      ],
+      "placement": "dequantized-dense",
+      "plePlacement": "cpu-row-lookup",
+      "dtype": "bfloat16",
+      "parameterBytes": 4559518208,
+      "cudaPeakAllocatedBytes": 4576587776
+    },
+    {
+      "model": "gemma4-e4b",
+      "engine": "deno",
+      "status": "complete",
+      "folder": "outputs/bench/karume/2026-09-12_llm-speed-final-WAkJev/gemma4-e4b-deno",
+      "loadSeconds": 3.0822772259999995,
+      "cases": [
+        {
+          "case": "english-list",
+          "promptTokens": 31,
+          "generatedTokens": 64,
+          "firstTtftMs": 280.4298960000001,
+          "firstInProcess": true,
+          "ttftMs": {
+            "median": 83.50638400000025,
+            "min": 83.3176829999993,
+            "max": 84.14075499999853
+          },
+          "decodeTokensPerSecond": {
+            "median": 27.574240177390152,
+            "min": 27.49482475387877,
+            "max": 27.712039955954676
+          },
+          "elapsedMs": {
+            "median": 2368.2474899999997,
+            "min": 2357.5208489999986,
+            "max": 2374.657982999999
+          },
+          "withinEngineTokensIdentical": true
+        },
+        {
+          "case": "japanese-list",
+          "promptTokens": 37,
+          "generatedTokens": 64,
+          "firstTtftMs": 250.83964200000082,
+          "firstInProcess": false,
+          "ttftMs": {
+            "median": 129.91888899999685,
+            "min": 128.53286700000172,
+            "max": 132.11029300000155
+          },
+          "decodeTokensPerSecond": {
+            "median": 27.330740804623012,
+            "min": 27.249436235873045,
+            "max": 27.574270096147867
+          },
+          "elapsedMs": {
+            "median": 2435.015572999997,
+            "min": 2413.2714940000005,
+            "max": 2444.0847300000023
+          },
+          "withinEngineTokensIdentical": true
+        }
+      ],
+      "placement": "packed-weights",
+      "pleBudget": "default-two-shards",
+      "compute": "f32"
+    },
+    {
+      "model": "gemma4-e4b",
+      "engine": "torch-float32",
+      "status": "does-not-fit",
+      "folder": "outputs/bench/karume/2026-09-12_llm-speed-final-WAkJev/gemma4-e4b-torch-float32",
+      "capacity": {
+        "parameterBytes": 18577764352,
+        "freeBytes": 12216762368,
+        "totalBytes": 12488474624
+      }
+    },
+    {
+      "model": "gemma4-e4b",
+      "engine": "torch-bfloat16",
+      "status": "complete",
+      "folder": "outputs/bench/karume/2026-09-12_llm-speed-final-WAkJev/gemma4-e4b-torch-bfloat16",
+      "loadSeconds": 13.917536186025245,
+      "cases": [
+        {
+          "case": "english-list",
+          "promptTokens": 31,
+          "generatedTokens": 64,
+          "firstTtftMs": 554.6095220197458,
+          "firstInProcess": true,
+          "ttftMs": {
+            "median": 46.199255011742935,
+            "min": 46.14446501364,
+            "max": 46.2348050205037
+          },
+          "decodeTokensPerSecond": {
+            "median": 23.832917114899978,
+            "min": 23.806823696519327,
+            "max": 24.014352349335507
+          },
+          "elapsedMs": {
+            "median": 2689.602061989717,
+            "min": 2669.6659550070763,
+            "max": 2692.4445680051576
+          },
+          "withinEngineTokensIdentical": true
+        },
+        {
+          "case": "japanese-list",
+          "promptTokens": 37,
+          "generatedTokens": 64,
+          "firstTtftMs": 53.769388992805034,
+          "firstInProcess": false,
+          "ttftMs": {
+            "median": 48.74349900637753,
+            "min": 47.08340700017288,
+            "max": 50.854564004112035
+          },
+          "decodeTokensPerSecond": {
+            "median": 23.718380857548183,
+            "min": 23.296750446090268,
+            "max": 23.74138311502551
+          },
+          "elapsedMs": {
+            "median": 2704.4489099935163,
+            "min": 2703.2512279984076,
+            "max": 2752.983309008414
+          },
+          "withinEngineTokensIdentical": true
+        }
+      ],
+      "placement": "dequantized-dense",
+      "plePlacement": "cpu-row-lookup",
+      "dtype": "bfloat16",
+      "parameterBytes": 9288882176,
+      "cudaPeakAllocatedBytes": 9305406976
+    },
+    {
+      "model": "gemma4-qat-e2b",
+      "engine": "deno",
+      "status": "complete",
+      "folder": "outputs/bench/karume/2026-09-12_llm-speed-final-WAkJev/gemma4-qat-e2b-deno",
+      "loadSeconds": 1.49345001,
+      "cases": [
+        {
+          "case": "english-list",
+          "promptTokens": 31,
+          "generatedTokens": 64,
+          "firstTtftMs": 257.27384300000017,
+          "firstInProcess": true,
+          "ttftMs": {
+            "median": 52.93898699999954,
+            "min": 51.41123599999992,
+            "max": 54.39353999999912
+          },
+          "decodeTokensPerSecond": {
+            "median": 37.54760249284422,
+            "min": 37.44837169091484,
+            "max": 37.57560125981043
+          },
+          "elapsedMs": {
+            "median": 1730.8090989999992,
+            "min": 1728.0311139999994,
+            "max": 1736.709676999999
+          },
+          "withinEngineTokensIdentical": true
+        },
+        {
+          "case": "japanese-list",
+          "promptTokens": 37,
+          "generatedTokens": 64,
+          "firstTtftMs": 216.9115899999997,
+          "firstInProcess": false,
+          "ttftMs": {
+            "median": 73.68304599999828,
+            "min": 73.29769600000145,
+            "max": 74.69772799999919
+          },
+          "decodeTokensPerSecond": {
+            "median": 37.255886040285965,
+            "min": 37.05495366263052,
+            "max": 37.265575969981136
+          },
+          "elapsedMs": {
+            "median": 1765.2659899999999,
+            "min": 1764.6910099999986,
+            "max": 1773.4752369999987
+          },
+          "withinEngineTokensIdentical": true
+        }
+      ],
+      "placement": "packed-weights",
+      "pleBudget": "default-two-shards",
+      "compute": "f32"
+    },
+    {
+      "model": "gemma4-qat-e2b",
+      "engine": "torch-float32",
+      "status": "complete",
+      "folder": "outputs/bench/karume/2026-09-12_llm-speed-final-WAkJev/gemma4-qat-e2b-torch-float32",
+      "loadSeconds": 4.686486969003454,
+      "cases": [
+        {
+          "case": "english-list",
+          "promptTokens": 31,
+          "generatedTokens": 64,
+          "firstTtftMs": 706.7205019993708,
+          "firstInProcess": true,
+          "ttftMs": {
+            "median": 146.68569999048486,
+            "min": 145.81926801474765,
+            "max": 151.84735899674706
+          },
+          "decodeTokensPerSecond": {
+            "median": 7.530433112271036,
+            "min": 7.10092898630024,
+            "max": 7.679486713302806
+          },
+          "elapsedMs": {
+            "median": 8512.738363991957,
+            "min": 8349.49255399988,
+            "max": 9023.92594498815
+          },
+          "withinEngineTokensIdentical": true
+        },
+        {
+          "case": "japanese-list",
+          "promptTokens": 37,
+          "generatedTokens": 64,
+          "firstTtftMs": 173.25691899168305,
+          "firstInProcess": false,
+          "ttftMs": {
+            "median": 159.56316399388015,
+            "min": 154.87483501783572,
+            "max": 160.72281601373106
+          },
+          "decodeTokensPerSecond": {
+            "median": 7.540935444689625,
+            "min": 7.444325500758272,
+            "max": 7.635205053710357
+          },
+          "elapsedMs": {
+            "median": 8513.96434698836,
+            "min": 8406.126707996009,
+            "max": 8623.544597998261
+          },
+          "withinEngineTokensIdentical": true
+        }
+      ],
+      "placement": "official-packed-qat",
+      "plePlacement": "device-packed",
+      "dtype": "float32",
+      "parameterBytes": 2509085792,
+      "cudaPeakAllocatedBytes": 7776239616
+    },
+    {
+      "model": "gemma4-qat-e4b",
+      "engine": "deno",
+      "status": "complete",
+      "folder": "outputs/bench/karume/2026-09-12_llm-speed-final-WAkJev/gemma4-qat-e4b-deno",
+      "loadSeconds": 2.4913656869999996,
+      "cases": [
+        {
+          "case": "english-list",
+          "promptTokens": 31,
+          "generatedTokens": 64,
+          "firstTtftMs": 339.7904470000003,
+          "firstInProcess": true,
+          "ttftMs": {
+            "median": 89.81776499999978,
+            "min": 86.3476699999992,
+            "max": 96.67778699999872
+          },
+          "decodeTokensPerSecond": {
+            "median": 27.131453477349833,
+            "min": 27.018863945513047,
+            "max": 27.216311828824345
+          },
+          "elapsedMs": {
+            "median": 2411.8459619999994,
+            "min": 2401.135962999999,
+            "max": 2428.382040999999
+          },
+          "withinEngineTokensIdentical": true
+        },
+        {
+          "case": "japanese-list",
+          "promptTokens": 37,
+          "generatedTokens": 64,
+          "firstTtftMs": 819.1681079999998,
+          "firstInProcess": false,
+          "ttftMs": {
+            "median": 122.97609699999884,
+            "min": 122.77545600000303,
+            "max": 126.00766199999998
+          },
+          "decodeTokensPerSecond": {
+            "median": 27.294584929945046,
+            "min": 27.221400991201964,
+            "max": 27.36765536187886
+          },
+          "elapsedMs": {
+            "median": 2434.157801000001,
+            "min": 2424.762936000003,
+            "max": 2437.3316300000006
+          },
+          "withinEngineTokensIdentical": true
+        }
+      ],
+      "placement": "packed-weights",
+      "pleBudget": "default-two-shards",
+      "compute": "f32"
+    },
+    {
+      "model": "gemma4-qat-e4b",
+      "engine": "torch-float32",
+      "status": "runtime-oom",
+      "folder": "outputs/bench/karume/2026-09-12_llm-speed-final-WAkJev/gemma4-qat-e4b-torch-float32"
+    },
+    {
+      "model": "gemma4-qat-e2b",
+      "engine": "torch-float32-text",
+      "status": "complete",
+      "folder": "outputs/bench/karume/2026-09-12_qat-text-speed-r37k5w/gemma4-qat-e2b",
+      "loadSeconds": 3.5890498719818424,
+      "cases": [
+        {
+          "case": "english-list",
+          "promptTokens": 31,
+          "generatedTokens": 64,
+          "firstTtftMs": 683.6071379948407,
+          "firstInProcess": true,
+          "ttftMs": {
+            "median": 122.36713399761356,
+            "min": 122.06139299087226,
+            "max": 125.08738800534047
+          },
+          "decodeTokensPerSecond": {
+            "median": 8.592553009953225,
+            "min": 8.587043527073629,
+            "max": 8.607239861811891
+          },
+          "elapsedMs": {
+            "median": 7457.017715001712,
+            "min": 7441.480975976447,
+            "max": 7459.001658018678
+          },
+          "withinEngineTokensIdentical": true
+        },
+        {
+          "case": "japanese-list",
+          "promptTokens": 37,
+          "generatedTokens": 64,
+          "firstTtftMs": 129.79410699335858,
+          "firstInProcess": false,
+          "ttftMs": {
+            "median": 132.92994198855013,
+            "min": 130.274688010104,
+            "max": 132.96281298971735
+          },
+          "decodeTokensPerSecond": {
+            "median": 8.284027279628706,
+            "min": 8.226332639059686,
+            "max": 8.305296300883542
+          },
+          "elapsedMs": {
+            "median": 7737.959497986594,
+            "min": 7718.45100200153,
+            "max": 7788.608330010902
+          },
+          "withinEngineTokensIdentical": true
+        }
+      ],
+      "placement": "official-packed-qat",
+      "plePlacement": "device-packed",
+      "dtype": "float32",
+      "modelClass": "Gemma4ForCausalLM",
+      "qatModel": "text",
+      "parameterBytes": 2136666272,
+      "cudaPeakAllocatedBytes": 5790897152
+    },
+    {
+      "model": "gemma4-qat-e4b",
+      "engine": "torch-float32-text",
+      "status": "complete",
+      "folder": "outputs/bench/karume/2026-09-12_qat-text-speed-r37k5w/gemma4-qat-e4b",
+      "loadSeconds": 4.326522939023562,
+      "cases": [
+        {
+          "case": "english-list",
+          "promptTokens": 31,
+          "generatedTokens": 64,
+          "firstTtftMs": 757.9966039920691,
+          "firstInProcess": true,
+          "ttftMs": {
+            "median": 263.53085099253803,
+            "min": 263.44140100991353,
+            "max": 264.8088729765732
+          },
+          "decodeTokensPerSecond": {
+            "median": 4.425649176346533,
+            "min": 4.409539304340784,
+            "max": 4.534182682456666
+          },
+          "elapsedMs": {
+            "median": 14498.641140002292,
+            "min": 14157.986459002132,
+            "max": 14552.015687979292
+          },
+          "withinEngineTokensIdentical": true
+        },
+        {
+          "case": "japanese-list",
+          "promptTokens": 37,
+          "generatedTokens": 64,
+          "firstTtftMs": 273.479839990614,
+          "firstInProcess": false,
+          "ttftMs": {
+            "median": 254.95870600570925,
+            "min": 254.70477499766275,
+            "max": 272.1141859947238
+          },
+          "decodeTokensPerSecond": {
+            "median": 4.961317898618852,
+            "min": 4.766633806316808,
+            "max": 4.9615330992068065
+          },
+          "elapsedMs": {
+            "median": 12953.19761900464,
+            "min": 12952.392917010002,
+            "max": 13488.988516997779
+          },
+          "withinEngineTokensIdentical": true
+        }
+      ],
+      "placement": "official-packed-qat",
+      "plePlacement": "device-packed",
+      "dtype": "float32",
+      "modelClass": "Gemma4ForCausalLM",
+      "qatModel": "text",
+      "parameterBytes": 3204117176,
+      "cudaPeakAllocatedBytes": 9268502016
+    }
+  ],
+  "crossEngineTokens": [
+    {
+      "model": "qwen3-06b",
+      "torchDtype": "float32",
+      "torchConfig": "qwen3-06b-torch-float32",
+      "case": "english-list",
+      "identical": true,
+      "commonPrefixTokens": 64,
+      "tokens": 64,
+      "firstDifferentToken": null
+    },
+    {
+      "model": "qwen3-06b",
+      "torchDtype": "float32",
+      "torchConfig": "qwen3-06b-torch-float32",
+      "case": "japanese-list",
+      "identical": true,
+      "commonPrefixTokens": 64,
+      "tokens": 64,
+      "firstDifferentToken": null
+    },
+    {
+      "model": "qwen3-06b",
+      "torchDtype": "bfloat16",
+      "torchConfig": "qwen3-06b-torch-bfloat16",
+      "case": "english-list",
+      "identical": true,
+      "commonPrefixTokens": 64,
+      "tokens": 64,
+      "firstDifferentToken": null
+    },
+    {
+      "model": "qwen3-06b",
+      "torchDtype": "bfloat16",
+      "torchConfig": "qwen3-06b-torch-bfloat16",
+      "case": "japanese-list",
+      "identical": true,
+      "commonPrefixTokens": 64,
+      "tokens": 64,
+      "firstDifferentToken": null
+    },
+    {
+      "model": "minicpm5-2b",
+      "torchDtype": "float32",
+      "torchConfig": "minicpm5-2b-torch-float32",
+      "case": "english-list",
+      "identical": true,
+      "commonPrefixTokens": 64,
+      "tokens": 64,
+      "firstDifferentToken": null
+    },
+    {
+      "model": "minicpm5-2b",
+      "torchDtype": "float32",
+      "torchConfig": "minicpm5-2b-torch-float32",
+      "case": "japanese-list",
+      "identical": true,
+      "commonPrefixTokens": 64,
+      "tokens": 64,
+      "firstDifferentToken": null
+    },
+    {
+      "model": "minicpm5-2b",
+      "torchDtype": "bfloat16",
+      "torchConfig": "minicpm5-2b-torch-bfloat16",
+      "case": "english-list",
+      "identical": true,
+      "commonPrefixTokens": 64,
+      "tokens": 64,
+      "firstDifferentToken": null
+    },
+    {
+      "model": "minicpm5-2b",
+      "torchDtype": "bfloat16",
+      "torchConfig": "minicpm5-2b-torch-bfloat16",
+      "case": "japanese-list",
+      "identical": false,
+      "commonPrefixTokens": 18,
+      "tokens": 64,
+      "firstDifferentToken": {
+        "deno": 1998,
+        "torch": 2511
+      }
+    },
+    {
+      "model": "gemma4-e2b",
+      "torchDtype": "float32",
+      "torchConfig": "gemma4-e2b-torch-float32",
+      "case": "english-list",
+      "identical": true,
+      "commonPrefixTokens": 64,
+      "tokens": 64,
+      "firstDifferentToken": null
+    },
+    {
+      "model": "gemma4-e2b",
+      "torchDtype": "float32",
+      "torchConfig": "gemma4-e2b-torch-float32",
+      "case": "japanese-list",
+      "identical": true,
+      "commonPrefixTokens": 64,
+      "tokens": 64,
+      "firstDifferentToken": null
+    },
+    {
+      "model": "gemma4-e2b",
+      "torchDtype": "bfloat16",
+      "torchConfig": "gemma4-e2b-torch-bfloat16",
+      "case": "english-list",
+      "identical": true,
+      "commonPrefixTokens": 64,
+      "tokens": 64,
+      "firstDifferentToken": null
+    },
+    {
+      "model": "gemma4-e2b",
+      "torchDtype": "bfloat16",
+      "torchConfig": "gemma4-e2b-torch-bfloat16",
+      "case": "japanese-list",
+      "identical": false,
+      "commonPrefixTokens": 37,
+      "tokens": 64,
+      "firstDifferentToken": {
+        "deno": 18668,
+        "torch": 198172
+      }
+    },
+    {
+      "model": "gemma4-e4b",
+      "torchDtype": "bfloat16",
+      "torchConfig": "gemma4-e4b-torch-bfloat16",
+      "case": "english-list",
+      "identical": true,
+      "commonPrefixTokens": 64,
+      "tokens": 64,
+      "firstDifferentToken": null
+    },
+    {
+      "model": "gemma4-e4b",
+      "torchDtype": "bfloat16",
+      "torchConfig": "gemma4-e4b-torch-bfloat16",
+      "case": "japanese-list",
+      "identical": true,
+      "commonPrefixTokens": 64,
+      "tokens": 64,
+      "firstDifferentToken": null
+    },
+    {
+      "model": "gemma4-qat-e2b",
+      "torchDtype": "float32",
+      "torchConfig": "gemma4-qat-e2b-torch-float32",
+      "case": "english-list",
+      "identical": false,
+      "commonPrefixTokens": 22,
+      "tokens": 64,
+      "firstDifferentToken": {
+        "deno": 107,
+        "torch": 9187
+      }
+    },
+    {
+      "model": "gemma4-qat-e2b",
+      "torchDtype": "float32",
+      "torchConfig": "gemma4-qat-e2b-torch-float32",
+      "case": "japanese-list",
+      "identical": false,
+      "commonPrefixTokens": 56,
+      "tokens": 64,
+      "firstDifferentToken": {
+        "deno": 237051,
+        "torch": 237364
+      }
+    },
+    {
+      "model": "gemma4-qat-e2b",
+      "torchDtype": "float32",
+      "torchConfig": "gemma4-qat-e2b-torch-float32-text",
+      "case": "english-list",
+      "identical": false,
+      "commonPrefixTokens": 22,
+      "tokens": 64,
+      "firstDifferentToken": {
+        "deno": 107,
+        "torch": 9187
+      }
+    },
+    {
+      "model": "gemma4-qat-e2b",
+      "torchDtype": "float32",
+      "torchConfig": "gemma4-qat-e2b-torch-float32-text",
+      "case": "japanese-list",
+      "identical": false,
+      "commonPrefixTokens": 56,
+      "tokens": 64,
+      "firstDifferentToken": {
+        "deno": 237051,
+        "torch": 237364
+      }
+    },
+    {
+      "model": "gemma4-qat-e4b",
+      "torchDtype": "float32",
+      "torchConfig": "gemma4-qat-e4b-torch-float32-text",
+      "case": "english-list",
+      "identical": true,
+      "commonPrefixTokens": 64,
+      "tokens": 64,
+      "firstDifferentToken": null
+    },
+    {
+      "model": "gemma4-qat-e4b",
+      "torchDtype": "float32",
+      "torchConfig": "gemma4-qat-e4b-torch-float32-text",
+      "case": "japanese-list",
+      "identical": false,
+      "commonPrefixTokens": 43,
+      "tokens": 64,
+      "firstDifferentToken": {
+        "deno": 4109,
+        "torch": 236764
+      }
+    }
+  ],
+  "rawAggregate": {
+    "path": "outputs/bench/karume/2026-09-12_llm-speed-final-WAkJev/aggregate-v2.json",
+    "sha256": "d9b78f52c0be504253f5da48c7dc493505bd4b608e9f23b644b0661e2b8e976f"
+  },
+  "rawSummaryHashes": {
+    "outputs/bench/karume/2026-09-12_llm-speed-final-WAkJev/qwen3-06b-deno/summary.json": "21564d18017e11e6823f478b8556035ca788f3433c2d6d1ac44e21475dc4a7f2",
+    "outputs/bench/karume/2026-09-12_llm-speed-final-WAkJev/qwen3-06b-torch-float32/summary.json": "7266c56f2f731c7806abdcf4c89614d1746852ba7104d4294bf1e4e4af4b9d49",
+    "outputs/bench/karume/2026-09-12_llm-speed-final-WAkJev/qwen3-06b-torch-bfloat16/summary.json": "f18bf8b1f49e8852836aceb457604179b6be88bf7a3771978bc3aed7bfd58ef5",
+    "outputs/bench/karume/2026-09-12_llm-speed-final-WAkJev/minicpm5-2b-deno/summary.json": "cb0926087db4b8dbd7de06139925f2bef1bc614f88d8cd3052ef642a6eea4964",
+    "outputs/bench/karume/2026-09-12_llm-speed-final-WAkJev/minicpm5-2b-torch-float32/summary.json": "07dd6b7e72f7768000645f7f2819fc35976ff8281f6e926daf9ca97850bd12be",
+    "outputs/bench/karume/2026-09-12_llm-speed-final-WAkJev/minicpm5-2b-torch-bfloat16/summary.json": "43b0a6c6c74212036bcd137c0306886eae6b53bbc14c2da7c8d3fbcbe565db11",
+    "outputs/bench/karume/2026-09-12_llm-speed-final-WAkJev/gemma4-e2b-deno/summary.json": "536ec9a9c75b1c010881a33dfa74100b2d3b378f22aac4f6e2965036dc903d14",
+    "outputs/bench/karume/2026-09-12_llm-speed-final-WAkJev/gemma4-e2b-torch-float32/summary.json": "4db84441b978186a37ba42ab9a0de602425c3d886cab09eee645803d24a36739",
+    "outputs/bench/karume/2026-09-12_llm-speed-final-WAkJev/gemma4-e2b-torch-bfloat16/summary.json": "69c62735b73dbe4e3ff1ddebbbccd3759da21e6b09d1695b108a798fae9b9c08",
+    "outputs/bench/karume/2026-09-12_llm-speed-final-WAkJev/gemma4-e4b-deno/summary.json": "5a48400dcdffb8b18651ad86867abd19e12cc0c112b511b34dbc9d83209c4b3b",
+    "outputs/bench/karume/2026-09-12_llm-speed-final-WAkJev/gemma4-e4b-torch-bfloat16/summary.json": "901c365dabe080b90c9899afd04fa06f29c363ca3ee4542fddc01f1fce8a1033",
+    "outputs/bench/karume/2026-09-12_llm-speed-final-WAkJev/gemma4-qat-e2b-deno/summary.json": "24755a35073d6a5710ebf9db3414c89d08869a8cd68c107d9640c570f417d055",
+    "outputs/bench/karume/2026-09-12_llm-speed-final-WAkJev/gemma4-qat-e2b-torch-float32/summary.json": "605b9c03115faad43b7ed4b0f74ebcb76a486d40d498972db2591dfd29a2278d",
+    "outputs/bench/karume/2026-09-12_llm-speed-final-WAkJev/gemma4-qat-e4b-deno/summary.json": "920ea61b270c9c9afd7f9be46880fbfc93249721c43760ce97793283275a6c7c",
+    "outputs/bench/karume/2026-09-12_qat-text-speed-r37k5w/gemma4-qat-e2b/summary.json": "7da33bd78725f2c4e5b4b5976f905722f951042cbafed264d4911c7925a0ef07",
+    "outputs/bench/karume/2026-09-12_qat-text-speed-r37k5w/gemma4-qat-e4b/summary.json": "1c091035b8447713f41be9b57583b0747843aef7ad06b6a8e0b404589e256f22"
+  }
+}

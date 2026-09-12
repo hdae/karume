@@ -2870,3 +2870,20 @@ Gemma通常/QATのE2B/E4Bは読み込みと少数採点まで成功した。量�
 利用者の主目的はtok/s比較であり、品質評価だけに作業の軸を移したのは解釈違いだった。
 利用者は品質計測にも意味があるとして保持を希望したため、完了分を記録し、速度比較を優先する。
 CPU品質評価の所要時間をGPUのtok/s比較に流用しない。
+
+## LLM の速度ベースライン（2026-09-12）
+
+[速度比較の正本](2026-09-12-llm-speed-baseline.md)に6モデルのTTFT・暖機後tok/sを記録した。
+入力token・停止・量子化重みを固定し、Deno/WebGPUとPyTorch/TransformersをRTX 3080 Tiで逐次実行した。
+通常モデルのPyTorchは保存整数をdense f32/BF16へ展開するため、格納方式と追加の丸め条件を明記する。
+QATは公式multimodal wrapperの全埋め込み展開を切り分け、同一量子化層を公式CausalLMへ接続する
+text条件を追加した。CPUのprefill/cached decode logits一致と、E2BのCUDA生成列一致を確認した。
+
+暖機後はQwen/MiniCPMにPyTorchとの差があり、通常/QAT Gemmaではこの条件のDenoが速かった。
+とくにMiniCPM/QwenのTTFT差を次の調査候補とする。全行logitsの投影・転送が候補だが、時間の帰属は未完。
+QATと一部BF16の生成列はDenoと分岐したため、速度の同条件比較と出力の一致を区別して記録した。
+M2の同条件測定、長文脈、Gemmaの広い品質評価は残る。デモ・品質・速度を作業単位で分けてコミットする。
+
+速度基準値の統合後の全体検証は**2,934 passed（760 steps）/ 0 failed / 5 ignored、25分20秒**。
+ログは`outputs/bench/karume/2026-09-12_llm-speed-verify-fNWKU5/verify.log`。
+Pythonの時計・品質復元/採点は22件成功。反復生成160件、資産93ファイルのSHAと記録の参照先も照合した。
