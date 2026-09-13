@@ -3002,5 +3002,32 @@ QATは既定と文章・小規模品質が変わる。M2で`bench:llm-browser`�
 従来の `i4` は維持し、呼び手の明示指定を優先する。QAT E4Bの既定は `i4` のまま。
 全体検証は2,953 passed（784 steps）/ 0 failed / 5 ignored。Pythonはexporter3,227 passed / recipes2,800 passed。
 新規配布形、Chrome UIの60生成、CLI9起動も確認済み。生データと条件は上記の記録を正本とする。
-次のH-23台本は `outputs/bench/karume/2026-09-13_prefill-bucket-survey-_s_ei117/` に準備した。
-この変更のコミット後に `tools/.venv/bin/python <専用ディレクトリ>/run.py` を実行し、結果を `summarize.py` で集計する。
+H-23の初回台本 `outputs/bench/karume/2026-09-13_prefill-bucket-survey-_s_ei117/` はGPU取得で終了。
+参照保持後の別ディレクトリで実行を完了し、長いchunkと投機へ範囲を広げた。結果と再開点は次節を参照する。
+
+## 入力バケットの比較とキャッシュ限界（2026-09-13）
+
+[実測と判断](2026-09-13-prefill-buckets.md)にH-23の検収をまとめた。
+chunk64の720生成では出力を維持し、日本語入力の暖機後TTFTが約26〜34%短縮した。
+一方、長いchunkと容量切り替えの1,872生成ではtoken列の不一致はなくても、計画ミスや中間バッファ再構築が増える。
+通常chunk768の細分化と、QATの容量交互使用は全体で悪化するため、全モデルの既定への一括適用は見送る。
+MTPの288生成も通常生成・バケット間で一致した。未検証のlogits一致や品質全般は主張しない。
+
+ブラウザ比較に標準/少数追加/細分化とABC→CBAの往復を追加する。モデル・runtimeの既定値は維持する。
+次はM2で `bench:llm-browser` の「並列加算を指定」「3種類を往復比較」を実行し、chunk64の用途限定採用を判断する。
+decodeの改善候補はGPU常駐PLEと融合。LinuxのChrome Instance参照消失は別件として根因の切り分けを残す。
+実験台本の不正容量、起動時GPU失敗、UI検収台本の暖機配列の誤認は、生データと修正した別ディレクトリを対応付けて保存している。
+
+最終のChrome UIは120生成の一致、JSON保存、不正設定拒否まで検収済み。
+専用ディレクトリは `outputs/bench/karume/2026-09-13_prefill-ui-reopen-vly2j3kl/`。
+GPU取得前の失敗は新規pageの最大2回の初期化として台本に記録し、製品のGPU取得処理は変更しない。
+入力バケットのライブラリ既定値は変更せず、M2比較を次の判断材料にする。
+
+H-23の統合検証は **2,953 passed（784 steps）/ 0 failed / 5 ignored、25分32秒**。
+ログは `outputs/bench/karume/2026-09-13_prefill-verify-j4cfwp2v/verify.log`。
+566ソースの不変と最終UI bundleの一致を確認した。
+
+次のdecode調査に向けたDeno CPU計測では、暖機後のPLE gather 1行が通常E2B約0.021 ms、QAT E2B約0.033 ms、E4B約0.047 msだった。
+実験は `outputs/bench/karume/2026-09-13_cpu-ple-cost-9ajm68w2/`、条件と限界は[H-23の記録](2026-09-13-prefill-buckets.md#次のdecode調査に向けたcpu計測)を参照する。
+この環境のCPU展開だけでは大きなdecode改善を見込めないため、次は正規化周辺とRMS→SRQ融合を優先する。
+GPUへの書き込み費用・Chrome/M2でのCPU費用は未測定。全表常駐やGPU行キャッシュを実装したとは扱わない。

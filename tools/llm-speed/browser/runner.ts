@@ -3,7 +3,13 @@ import {
   generationTimer,
   type GenerationTiming,
 } from "../../../examples/shared/generation-timing.ts";
-import { type Engine, type ModelKind, onnxModels, versions } from "./config.ts";
+import {
+  type Engine,
+  type ModelKind,
+  onnxModels,
+  type PrefillBuckets,
+  versions,
+} from "./config.ts";
 import { loadKarume } from "./karume.ts";
 export type Fixture = {
   cases: { case: string; prompt: string; inputIds: number[] }[];
@@ -190,6 +196,7 @@ export const runBenchmark = async (
   localOnnx: boolean,
   status: (s: string) => void,
   linearGemvReduce?: LinearGemvReduce,
+  prefillBuckets: PrefillBuckets = "default",
 ): Promise<object> => {
   const response = await fetch("/cases.json");
   if (!response.ok) throw Error(`Fixture HTTP ${response.status}`);
@@ -212,7 +219,7 @@ export const runBenchmark = async (
   status(`${kind} / ${engine}: loading`);
   const started = performance.now();
   const handle = engine === "karume"
-    ? await loadKarume(kind, fixture, linearGemvReduce)
+    ? await loadKarume(kind, fixture, linearGemvReduce, prefillBuckets)
     : await loadTransformers(kind, fixture, localOnnx, status);
   const loadSeconds = (performance.now() - started) / 1000;
   try {

@@ -13,3 +13,4 @@ export const onnxModels = {
 } as const;
 export type ModelKind = keyof typeof onnxModels;
 export type Engine = "karume" | "transformers";
+export type PrefillBuckets = "default" | "sparse" | "dense";

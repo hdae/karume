@@ -15,12 +15,14 @@
   const params = new URLSearchParams(location.search);
   const engine = params.get("engine"), model = params.get("model");
   const reduce = params.get("reduce") ?? "quant";
+  const prefill = params.get("prefill") ?? "default";
   const send = (type, value) => parent.postMessage({ type, value }, location.origin);
   try {
     if (!["karume", "transformers"].includes(engine) || !["normal", "qat"].includes(model)) {
       throw Error("Invalid benchmark selection");
     }
     if (!["quant", "sequential", "parallel"].includes(reduce)) throw Error("Invalid GEMV reduction");
+    if (!["default", "sparse", "dense"].includes(prefill)) throw Error("Invalid prefill buckets");
     const config = await (await fetch("/config.json")).json();
     const result = await runBenchmark(
       engine,
@@ -28,6 +30,7 @@
       config.localOnnx,
       (s) => send("status", s),
       reduce === "quant" ? undefined : reduce,
+      prefill,
     );
     send("result", {
       ...result,

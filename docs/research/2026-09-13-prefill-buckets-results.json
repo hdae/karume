@@ -1,0 +1,4047 @@
+{
+  "format": "karume-prefill-buckets/1",
+  "date": "2026-09-13",
+  "coreRevision": "6aae325b66dfa9e4495e14b5c7dfa46f3169e5c0",
+  "initial": {
+    "directory": "outputs/bench/karume/2026-09-13_prefill-bucket-retained-mu2itm1h",
+    "summarySha256": "2887930f5b33875c05e50fe0d6608410332d28df3b7ff63c47ac82c051b06d85",
+    "data": {
+      "sources": {
+        "128-normal-0-A.json": "4a4881563168cd5bae578e18d028f258a9108cc4600841437e6913762967e811",
+        "128-normal-1-B.json": "d4c164445f2efd77e24f7d228f688ed6ff1432a7cc69fa0e700a85a67ae34273",
+        "128-normal-2-C.json": "fe8ecd6d1db1b83fc01df2b371ce5bf8dd5230abe49699574a06b72a723e2acb",
+        "128-normal-3-C.json": "7aef3661c03ed9f4f9e3a1851af9d9fb829e55dbda6dd8dd802b7d7acde306e9",
+        "128-normal-4-B.json": "f1cb4369e5d7ce21a25d79471b3133780d83a94b065bae8306ea36f7002ccae5",
+        "128-normal-5-A.json": "2e3c4a86620afba677b0e79b827160373a7ce57cf9dab59589f26107e51d212e",
+        "128-qat-0-A.json": "25f3d13057affaefa21c9d7cb13b6047c1f4bb32a25b9f2459f3cdbfb978420e",
+        "128-qat-1-B.json": "98326146b36bb3e2017ba939f64da3cd1755b5092e2c30221915d049a6a42908",
+        "128-qat-2-C.json": "9552ed35d2e710f8949c806a6ccc8d64c57489bb2d75c52883473db3b9fe8c3a",
+        "128-qat-3-C.json": "c54925dc68f61346aa173762f58d3ef1ce99427568316434aec6f241b17da544",
+        "128-qat-4-B.json": "81b83478cd291ca63b9355060263bdb6b39b04fe82b5c805fb5e65124ca4a3fb",
+        "128-qat-5-A.json": "168c94ea6dc10fd7dea09ddc14f485fd6055f377fc23466abf926f42b22d3b76",
+        "8192-normal-0-A.json": "f2aac3b231507ec973bb11799a9574c76beabc8d3850c08f6db46d6fd57bada3",
+        "8192-normal-1-B.json": "5061077e99502955ba1d7e1a53d981cbf4c5c2547057dac7a7937c0b6232421e",
+        "8192-normal-2-C.json": "13a92bb36bdda450d71727165a6186e2b15d344f7af8f6bee5cb98226dda4eec",
+        "8192-normal-3-C.json": "9438ddd5259c0db04e03c95e7ba845212f1c8e8cae800baf375dfd85c6896aff",
+        "8192-normal-4-B.json": "c6350de446268453387e8ce0cb948198fd7c3f439c39ca29814320059a420060",
+        "8192-normal-5-A.json": "f2ff6a05d885036a9f0c274c3bc1eb2bdf479e7323c3b9d02bec6d4886cc20cd",
+        "8192-qat-0-A.json": "502588d8e2551cbafb2fe0377b7571087229ee942d24a84477efb21a0344e011",
+        "8192-qat-1-B.json": "2018ead541c9130318755f00cde3e1e82bd26c33db5d4551c2e381093ed8c812",
+        "8192-qat-2-C.json": "c79369683531accf4065c3a1e8effa6349a6b5e70494b835cd76a1f4b9d26bf7",
+        "8192-qat-3-C.json": "e4afc5eb92ce5a0b788c7e6705d8108fb82d5b1b90efca2860fa903881d76f8d",
+        "8192-qat-4-B.json": "249b51f05d1334d7fd522b2ff929580ce5215c1c7666914133124b98e0317a17",
+        "8192-qat-5-A.json": "d6720097c6fa8585bea42f8f25675e8d071a5b26f8977df98ad25c616332519a"
+      },
+      "configurations": 24,
+      "generations": 720,
+      "differences": [],
+      "unstable": [],
+      "rows": [
+        {
+          "capacity": 128,
+          "kind": "normal",
+          "case": "english-list",
+          "modes": [
+            {
+              "mode": "A",
+              "index": 0,
+              "firstTtftMs": 451.19999998807907,
+              "warmTtftMedianMs": 36.349999994039536,
+              "warmMissingFirstToken": 0,
+              "warmBackingBuilds": 0,
+              "warmPlanMisses": 0,
+              "maxBackingBytes": 25691536,
+              "inputTokens": 31
+            },
+            {
+              "mode": "B",
+              "index": 1,
+              "firstTtftMs": 524.1999999880791,
+              "warmTtftMedianMs": 36.39999997615814,
+              "warmMissingFirstToken": 0,
+              "warmBackingBuilds": 0,
+              "warmPlanMisses": 0,
+              "maxBackingBytes": 41453208,
+              "inputTokens": 31
+            },
+            {
+              "mode": "C",
+              "index": 2,
+              "firstTtftMs": 373.30000001192093,
+              "warmTtftMedianMs": 36.94999995827675,
+              "warmMissingFirstToken": 0,
+              "warmBackingBuilds": 0,
+              "warmPlanMisses": 0,
+              "maxBackingBytes": 70822020,
+              "inputTokens": 31
+            },
+            {
+              "mode": "C",
+              "index": 3,
+              "firstTtftMs": 454.80000001192093,
+              "warmTtftMedianMs": 37.54999998211861,
+              "warmMissingFirstToken": 0,
+              "warmBackingBuilds": 0,
+              "warmPlanMisses": 0,
+              "maxBackingBytes": 70822020,
+              "inputTokens": 31
+            },
+            {
+              "mode": "B",
+              "index": 4,
+              "firstTtftMs": 420.0999999642372,
+              "warmTtftMedianMs": 37.39999997615814,
+              "warmMissingFirstToken": 0,
+              "warmBackingBuilds": 0,
+              "warmPlanMisses": 0,
+              "maxBackingBytes": 41453208,
+              "inputTokens": 31
+            },
+            {
+              "mode": "A",
+              "index": 5,
+              "firstTtftMs": 418.0999999642372,
+              "warmTtftMedianMs": 37.349999994039536,
+              "warmMissingFirstToken": 0,
+              "warmBackingBuilds": 0,
+              "warmPlanMisses": 0,
+              "maxBackingBytes": 25691536,
+              "inputTokens": 31
+            }
+          ],
+          "BRatios": [
+            0.998626374116721,
+            0.998663102081538
+          ],
+          "BRatioMedian": 0.9986447380991295,
+          "CRatios": [
+            0.9837618412742971,
+            0.9946737686238533
+          ],
+          "CRatioMedian": 0.9892178049490752
+        },
+        {
+          "capacity": 128,
+          "kind": "normal",
+          "case": "japanese-list",
+          "modes": [
+            {
+              "mode": "A",
+              "index": 0,
+              "firstTtftMs": 149.5,
+              "warmTtftMedianMs": 57.44999998807907,
+              "warmMissingFirstToken": 0,
+              "warmBackingBuilds": 0,
+              "warmPlanMisses": 0,
+              "maxBackingBytes": 25691536,
+              "inputTokens": 37
+            },
+            {
+              "mode": "B",
+              "index": 1,
+              "firstTtftMs": 138.10000002384186,
+              "warmTtftMedianMs": 45.80000001192093,
+              "warmMissingFirstToken": 0,
+              "warmBackingBuilds": 0,
+              "warmPlanMisses": 0,
+              "maxBackingBytes": 41453208,
+              "inputTokens": 37
+            },
+            {
+              "mode": "C",
+              "index": 2,
+              "firstTtftMs": 134.39999997615814,
+              "warmTtftMedianMs": 40.05000001192093,
+              "warmMissingFirstToken": 0,
+              "warmBackingBuilds": 0,
+              "warmPlanMisses": 0,
+              "maxBackingBytes": 70822020,
+              "inputTokens": 37
+            },
+            {
+              "mode": "C",
+              "index": 3,
+              "firstTtftMs": 131.69999998807907,
+              "warmTtftMedianMs": 41.0,
+              "warmMissingFirstToken": 0,
+              "warmBackingBuilds": 0,
+              "warmPlanMisses": 0,
+              "maxBackingBytes": 70822020,
+              "inputTokens": 37
+            },
+            {
+              "mode": "B",
+              "index": 4,
+              "firstTtftMs": 139.79999995231628,
+              "warmTtftMedianMs": 47.44999998807907,
+              "warmMissingFirstToken": 0,
+              "warmBackingBuilds": 0,
+              "warmPlanMisses": 0,
+              "maxBackingBytes": 41453208,
+              "inputTokens": 37
+            },
+            {
+              "mode": "A",
+              "index": 5,
+              "firstTtftMs": 148.69999998807907,
+              "warmTtftMedianMs": 60.19999998807907,
+              "warmMissingFirstToken": 0,
+              "warmBackingBuilds": 0,
+              "warmPlanMisses": 0,
+              "maxBackingBytes": 25691536,
+              "inputTokens": 37
+            }
+          ],
+          "BRatios": [
+            1.2543668116403024,
+            1.268703898908392
+          ],
+          "BRatioMedian": 1.2615353552743471,
+          "CRatios": [
+            1.4344569281143325,
+            1.468292682636075
+          ],
+          "CRatioMedian": 1.4513748053752038
+        },
+        {
+          "capacity": 128,
+          "kind": "qat",
+          "case": "english-list",
+          "modes": [
+            {
+              "mode": "A",
+              "index": 0,
+              "firstTtftMs": 325.10000002384186,
+              "warmTtftMedianMs": 38.849999994039536,
+              "warmMissingFirstToken": 0,
+              "warmBackingBuilds": 0,
+              "warmPlanMisses": 0,
+              "maxBackingBytes": 31006096,
+              "inputTokens": 31
+            },
+            {
+              "mode": "B",
+              "index": 1,
+              "firstTtftMs": 481.39999997615814,
+              "warmTtftMedianMs": 39.70000001788139,
+              "warmMissingFirstToken": 0,
+              "warmBackingBuilds": 0,
+              "warmPlanMisses": 0,
+              "maxBackingBytes": 50224792,
+              "inputTokens": 31
+            },
+            {
+              "mode": "C",
+              "index": 2,
+              "firstTtftMs": 458.2000000476837,
+              "warmTtftMedianMs": 40.650000005960464,
+              "warmMissingFirstToken": 0,
+              "warmBackingBuilds": 0,
+              "warmPlanMisses": 0,
+              "maxBackingBytes": 86229124,
+              "inputTokens": 31
+            },
+            {
+              "mode": "C",
+              "index": 3,
+              "firstTtftMs": 456.5,
+              "warmTtftMedianMs": 39.79999998211861,
+              "warmMissingFirstToken": 0,
+              "warmBackingBuilds": 0,
+              "warmPlanMisses": 0,
+              "maxBackingBytes": 86229124,
+              "inputTokens": 31
+            },
+            {
+              "mode": "B",
+              "index": 4,
+              "firstTtftMs": 469.30000001192093,
+              "warmTtftMedianMs": 40.60000002384186,
+              "warmMissingFirstToken": 0,
+              "warmBackingBuilds": 0,
+              "warmPlanMisses": 0,
+              "maxBackingBytes": 50224792,
+              "inputTokens": 31
+            },
+            {
+              "mode": "A",
+              "index": 5,
+              "firstTtftMs": 413.60000002384186,
+              "warmTtftMedianMs": 42.04999998211861,
+              "warmMissingFirstToken": 0,
+              "warmBackingBuilds": 0,
+              "warmPlanMisses": 0,
+              "maxBackingBytes": 31006096,
+              "inputTokens": 31
+            }
+          ],
+          "BRatios": [
+            0.9785894200640048,
+            1.0357142846656466
+          ],
+          "BRatioMedian": 1.0071518523648257,
+          "CRatios": [
+            0.9557195569088069,
+            1.056532663341982
+          ],
+          "CRatioMedian": 1.0061261101253944
+        },
+        {
+          "capacity": 128,
+          "kind": "qat",
+          "case": "japanese-list",
+          "modes": [
+            {
+              "mode": "A",
+              "index": 0,
+              "firstTtftMs": 194,
+              "warmTtftMedianMs": 62.0,
+              "warmMissingFirstToken": 0,
+              "warmBackingBuilds": 0,
+              "warmPlanMisses": 0,
+              "maxBackingBytes": 31006096,
+              "inputTokens": 37
+            },
+            {
+              "mode": "B",
+              "index": 1,
+              "firstTtftMs": 169,
+              "warmTtftMedianMs": 48.10000002384186,
+              "warmMissingFirstToken": 0,
+              "warmBackingBuilds": 0,
+              "warmPlanMisses": 0,
+              "maxBackingBytes": 50224792,
+              "inputTokens": 37
+            },
+            {
+              "mode": "C",
+              "index": 2,
+              "firstTtftMs": 167.69999998807907,
+              "warmTtftMedianMs": 42.69999998807907,
+              "warmMissingFirstToken": 0,
+              "warmBackingBuilds": 0,
+              "warmPlanMisses": 0,
+              "maxBackingBytes": 86229124,
+              "inputTokens": 37
+            },
+            {
+              "mode": "C",
+              "index": 3,
+              "firstTtftMs": 171.80000001192093,
+              "warmTtftMedianMs": 41.19999998807907,
+              "warmMissingFirstToken": 0,
+              "warmBackingBuilds": 0,
+              "warmPlanMisses": 0,
+              "maxBackingBytes": 86229124,
+              "inputTokens": 37
+            },
+            {
+              "mode": "B",
+              "index": 4,
+              "firstTtftMs": 186.5999999642372,
+              "warmTtftMedianMs": 47.75,
+              "warmMissingFirstToken": 0,
+              "warmBackingBuilds": 0,
+              "warmPlanMisses": 0,
+              "maxBackingBytes": 50224792,
+              "inputTokens": 37
+            },
+            {
+              "mode": "A",
+              "index": 5,
+              "firstTtftMs": 177.9000000357628,
+              "warmTtftMedianMs": 61.95000001788139,
+              "warmMissingFirstToken": 0,
+              "warmBackingBuilds": 0,
+              "warmPlanMisses": 0,
+              "maxBackingBytes": 31006096,
+              "inputTokens": 37
+            }
+          ],
+          "BRatios": [
+            1.2889812883423761,
+            1.297382199327359
+          ],
+          "BRatioMedian": 1.2931817438348676,
+          "CRatios": [
+            1.451990632723866,
+            1.5036407775681113
+          ],
+          "CRatioMedian": 1.4778157051459888
+        },
+        {
+          "capacity": 8192,
+          "kind": "normal",
+          "case": "english-list",
+          "modes": [
+            {
+              "mode": "A",
+              "index": 0,
+              "firstTtftMs": 394.2000000476837,
+              "warmTtftMedianMs": 44.099999994039536,
+              "warmMissingFirstToken": 0,
+              "warmBackingBuilds": 0,
+              "warmPlanMisses": 0,
+              "maxBackingBytes": 46130576,
+              "inputTokens": 31
+            },
+            {
+              "mode": "B",
+              "index": 1,
+              "firstTtftMs": 447,
+              "warmTtftMedianMs": 43.5,
+              "warmMissingFirstToken": 0,
+              "warmBackingBuilds": 0,
+              "warmPlanMisses": 0,
+              "maxBackingBytes": 75523736,
+              "inputTokens": 31
+            },
+            {
+              "mode": "C",
+              "index": 2,
+              "firstTtftMs": 470.30000001192093,
+              "warmTtftMedianMs": 43.05000001192093,
+              "warmMissingFirstToken": 0,
+              "warmBackingBuilds": 0,
+              "warmPlanMisses": 0,
+              "maxBackingBytes": 130451588,
+              "inputTokens": 31
+            },
+            {
+              "mode": "C",
+              "index": 3,
+              "firstTtftMs": 383.80000001192093,
+              "warmTtftMedianMs": 45.69999998807907,
+              "warmMissingFirstToken": 0,
+              "warmBackingBuilds": 0,
+              "warmPlanMisses": 0,
+              "maxBackingBytes": 130451588,
+              "inputTokens": 31
+            },
+            {
+              "mode": "B",
+              "index": 4,
+              "firstTtftMs": 404.7999999523163,
+              "warmTtftMedianMs": 43.849999994039536,
+              "warmMissingFirstToken": 0,
+              "warmBackingBuilds": 0,
+              "warmPlanMisses": 0,
+              "maxBackingBytes": 75523736,
+              "inputTokens": 31
+            },
+            {
+              "mode": "A",
+              "index": 5,
+              "firstTtftMs": 461.39999997615814,
+              "warmTtftMedianMs": 42.5,
+              "warmMissingFirstToken": 0,
+              "warmBackingBuilds": 0,
+              "warmPlanMisses": 0,
+              "maxBackingBytes": 46130576,
+              "inputTokens": 31
+            }
+          ],
+          "BRatios": [
+            1.0137931033112537,
+            0.9692132270416639
+          ],
+          "BRatioMedian": 0.9915031651764588,
+          "CRatios": [
+            1.0243902434803218,
+            0.929978118404512
+          ],
+          "CRatioMedian": 0.9771841809424169
+        },
+        {
+          "capacity": 8192,
+          "kind": "normal",
+          "case": "japanese-list",
+          "modes": [
+            {
+              "mode": "A",
+              "index": 0,
+              "firstTtftMs": 161.5,
+              "warmTtftMedianMs": 67.39999997615814,
+              "warmMissingFirstToken": 0,
+              "warmBackingBuilds": 0,
+              "warmPlanMisses": 0,
+              "maxBackingBytes": 46130576,
+              "inputTokens": 37
+            },
+            {
+              "mode": "B",
+              "index": 1,
+              "firstTtftMs": 146.69999998807907,
+              "warmTtftMedianMs": 54.25,
+              "warmMissingFirstToken": 0,
+              "warmBackingBuilds": 0,
+              "warmPlanMisses": 0,
+              "maxBackingBytes": 75523736,
+              "inputTokens": 37
+            },
+            {
+              "mode": "C",
+              "index": 2,
+              "firstTtftMs": 134.4000000357628,
+              "warmTtftMedianMs": 45.10000002384186,
+              "warmMissingFirstToken": 0,
+              "warmBackingBuilds": 0,
+              "warmPlanMisses": 0,
+              "maxBackingBytes": 130451588,
+              "inputTokens": 37
+            },
+            {
+              "mode": "C",
+              "index": 3,
+              "firstTtftMs": 133.9000000357628,
+              "warmTtftMedianMs": 47.44999998807907,
+              "warmMissingFirstToken": 0,
+              "warmBackingBuilds": 0,
+              "warmPlanMisses": 0,
+              "maxBackingBytes": 130451588,
+              "inputTokens": 37
+            },
+            {
+              "mode": "B",
+              "index": 4,
+              "firstTtftMs": 141.19999998807907,
+              "warmTtftMedianMs": 59.099999994039536,
+              "warmMissingFirstToken": 0,
+              "warmBackingBuilds": 0,
+              "warmPlanMisses": 0,
+              "maxBackingBytes": 75523736,
+              "inputTokens": 37
+            },
+            {
+              "mode": "A",
+              "index": 5,
+              "firstTtftMs": 154.80000001192093,
+              "warmTtftMedianMs": 67.84999999403954,
+              "warmMissingFirstToken": 0,
+              "warmBackingBuilds": 0,
+              "warmPlanMisses": 0,
+              "maxBackingBytes": 46130576,
+              "inputTokens": 37
+            }
+          ],
+          "BRatios": [
+            1.242396312924574,
+            1.1480541455310063
+          ],
+          "BRatioMedian": 1.1952252292277903,
+          "CRatios": [
+            1.4944567614307653,
+            1.429926238379043
+          ],
+          "CRatioMedian": 1.4621914999049042
+        },
+        {
+          "capacity": 8192,
+          "kind": "qat",
+          "case": "english-list",
+          "modes": [
+            {
+              "mode": "A",
+              "index": 0,
+              "firstTtftMs": 461.5,
+              "warmTtftMedianMs": 43.29999998211861,
+              "warmMissingFirstToken": 0,
+              "warmBackingBuilds": 0,
+              "warmPlanMisses": 0,
+              "maxBackingBytes": 46732688,
+              "inputTokens": 31
+            },
+            {
+              "mode": "B",
+              "index": 1,
+              "firstTtftMs": 445.5,
+              "warmTtftMedianMs": 44.20000001788139,
+              "warmMissingFirstToken": 0,
+              "warmBackingBuilds": 0,
+              "warmPlanMisses": 0,
+              "maxBackingBytes": 76469912,
+              "inputTokens": 31
+            },
+            {
+              "mode": "C",
+              "index": 2,
+              "firstTtftMs": 432.39999997615814,
+              "warmTtftMedianMs": 43.849999994039536,
+              "warmMissingFirstToken": 0,
+              "warmBackingBuilds": 0,
+              "warmPlanMisses": 0,
+              "maxBackingBytes": 132135044,
+              "inputTokens": 31
+            },
+            {
+              "mode": "C",
+              "index": 3,
+              "firstTtftMs": 503.5999999642372,
+              "warmTtftMedianMs": 44.150000005960464,
+              "warmMissingFirstToken": 0,
+              "warmBackingBuilds": 0,
+              "warmPlanMisses": 0,
+              "maxBackingBytes": 132135044,
+              "inputTokens": 31
+            },
+            {
+              "mode": "B",
+              "index": 4,
+              "firstTtftMs": 427.5,
+              "warmTtftMedianMs": 43.349999994039536,
+              "warmMissingFirstToken": 0,
+              "warmBackingBuilds": 0,
+              "warmPlanMisses": 0,
+              "maxBackingBytes": 76469912,
+              "inputTokens": 31
+            },
+            {
+              "mode": "A",
+              "index": 5,
+              "firstTtftMs": 491.4000000357628,
+              "warmTtftMedianMs": 43.30000001192093,
+              "warmMissingFirstToken": 0,
+              "warmBackingBuilds": 0,
+              "warmPlanMisses": 0,
+              "maxBackingBytes": 46732688,
+              "inputTokens": 31
+            }
+          ],
+          "BRatios": [
+            0.9796380082488985,
+            0.9988465978748448
+          ],
+          "BRatioMedian": 0.9892423030618716,
+          "CRatios": [
+            0.9874572403193685,
+            0.9807474520062337
+          ],
+          "CRatioMedian": 0.9841023461628011
+        },
+        {
+          "capacity": 8192,
+          "kind": "qat",
+          "case": "japanese-list",
+          "modes": [
+            {
+              "mode": "A",
+              "index": 0,
+              "firstTtftMs": 182.4000000357628,
+              "warmTtftMedianMs": 67.84999999403954,
+              "warmMissingFirstToken": 0,
+              "warmBackingBuilds": 0,
+              "warmPlanMisses": 0,
+              "maxBackingBytes": 46732688,
+              "inputTokens": 37
+            },
+            {
+              "mode": "B",
+              "index": 1,
+              "firstTtftMs": 174.89999997615814,
+              "warmTtftMedianMs": 55.80000001192093,
+              "warmMissingFirstToken": 0,
+              "warmBackingBuilds": 0,
+              "warmPlanMisses": 0,
+              "maxBackingBytes": 76469912,
+              "inputTokens": 37
+            },
+            {
+              "mode": "C",
+              "index": 2,
+              "firstTtftMs": 169.80000001192093,
+              "warmTtftMedianMs": 45.650000005960464,
+              "warmMissingFirstToken": 0,
+              "warmBackingBuilds": 0,
+              "warmPlanMisses": 0,
+              "maxBackingBytes": 132135044,
+              "inputTokens": 37
+            },
+            {
+              "mode": "C",
+              "index": 3,
+              "firstTtftMs": 176,
+              "warmTtftMedianMs": 47.0,
+              "warmMissingFirstToken": 0,
+              "warmBackingBuilds": 0,
+              "warmPlanMisses": 0,
+              "maxBackingBytes": 132135044,
+              "inputTokens": 37
+            },
+            {
+              "mode": "B",
+              "index": 4,
+              "firstTtftMs": 175.19999998807907,
+              "warmTtftMedianMs": 52.44999998807907,
+              "warmMissingFirstToken": 0,
+              "warmBackingBuilds": 0,
+              "warmPlanMisses": 0,
+              "maxBackingBytes": 76469912,
+              "inputTokens": 37
+            },
+            {
+              "mode": "A",
+              "index": 5,
+              "firstTtftMs": 184.5,
+              "warmTtftMedianMs": 63.60000002384186,
+              "warmMissingFirstToken": 0,
+              "warmBackingBuilds": 0,
+              "warmPlanMisses": 0,
+              "maxBackingBytes": 46732688,
+              "inputTokens": 37
+            }
+          ],
+          "BRatios": [
+            1.2159498204219406,
+            1.2125834135042322
+          ],
+          "BRatioMedian": 1.2142666169630862,
+          "CRatios": [
+            1.4863088715264061,
+            1.3531914898689756
+          ],
+          "CRatioMedian": 1.4197501806976909
+        }
+      ]
+    }
+  },
+  "stress": {
+    "directory": "outputs/bench/karume/2026-09-13_prefill-cache-stress-p02h3vvi",
+    "summarySha256": "8472a1c8543ed51ab1392b7fdea690f89a7b7dff6b84507812fe9b4227a91550",
+    "data": {
+      "generations": 1872,
+      "differencesVsStandard": [],
+      "repeatInstability": [],
+      "capacityDifferences": [],
+      "configs": [
+        {
+          "file": "alternating-normal-0-A.json",
+          "options": {
+            "alternating": true,
+            "kind": "normal",
+            "candidate": "A"
+          },
+          "chunkLength": 768,
+          "buckets": [
+            4,
+            8,
+            32,
+            64,
+            128,
+            256
+          ],
+          "loadMs": 5071.699999988079,
+          "runs": 104,
+          "maxPlanBackingMiB": 335.25293350219727,
+          "maxCachedPlans": 12,
+          "cycles": [
+            {
+              "sweep": 2,
+              "sumTtftMs": 3660.100000023842,
+              "backingBuilds": 8,
+              "prefillPlanMisses": 10,
+              "prefillRuns": 28
+            },
+            {
+              "sweep": 3,
+              "sumTtftMs": 3722.199999988079,
+              "backingBuilds": 8,
+              "prefillPlanMisses": 10,
+              "prefillRuns": 28
+            }
+          ],
+          "cases": [
+            {
+              "capacity": 1024,
+              "case": "english-list",
+              "ttftMs": 54.19999998807907,
+              "backingBuilds": 4,
+              "prefillPlanMisses": 0
+            },
+            {
+              "capacity": 8192,
+              "case": "english-list",
+              "ttftMs": 55.19999998807907,
+              "backingBuilds": 2,
+              "prefillPlanMisses": 0
+            },
+            {
+              "capacity": 1024,
+              "case": "japanese-list",
+              "ttftMs": 79.7999999821186,
+              "backingBuilds": 2,
+              "prefillPlanMisses": 0
+            },
+            {
+              "capacity": 8192,
+              "case": "japanese-list",
+              "ttftMs": 86.14999997615814,
+              "backingBuilds": 2,
+              "prefillPlanMisses": 0
+            }
+          ]
+        },
+        {
+          "file": "alternating-normal-1-B.json",
+          "options": {
+            "alternating": true,
+            "kind": "normal",
+            "candidate": "B"
+          },
+          "chunkLength": 768,
+          "buckets": [
+            4,
+            8,
+            16,
+            32,
+            48,
+            64,
+            128,
+            256
+          ],
+          "loadMs": 5174.300000011921,
+          "runs": 104,
+          "maxPlanBackingMiB": 335.25293350219727,
+          "maxCachedPlans": 12,
+          "cycles": [
+            {
+              "sweep": 2,
+              "sumTtftMs": 4010.8000000715256,
+              "backingBuilds": 10,
+              "prefillPlanMisses": 18,
+              "prefillRuns": 28
+            },
+            {
+              "sweep": 3,
+              "sumTtftMs": 3909.8000000715256,
+              "backingBuilds": 10,
+              "prefillPlanMisses": 18,
+              "prefillRuns": 28
+            }
+          ],
+          "cases": [
+            {
+              "capacity": 1024,
+              "case": "english-list",
+              "ttftMs": 69.0499999821186,
+              "backingBuilds": 2,
+              "prefillPlanMisses": 2
+            },
+            {
+              "capacity": 8192,
+              "case": "english-list",
+              "ttftMs": 72.80000001192093,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 2
+            },
+            {
+              "capacity": 1024,
+              "case": "japanese-list",
+              "ttftMs": 81.05000001192093,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 2
+            },
+            {
+              "capacity": 8192,
+              "case": "japanese-list",
+              "ttftMs": 82.5,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 2
+            }
+          ]
+        },
+        {
+          "file": "alternating-normal-2-C.json",
+          "options": {
+            "alternating": true,
+            "kind": "normal",
+            "candidate": "C"
+          },
+          "chunkLength": 768,
+          "buckets": [
+            4,
+            8,
+            16,
+            24,
+            32,
+            40,
+            48,
+            56,
+            64,
+            128,
+            256
+          ],
+          "loadMs": 5059.900000035763,
+          "runs": 104,
+          "maxPlanBackingMiB": 335.25293350219727,
+          "maxCachedPlans": 12,
+          "cycles": [
+            {
+              "sweep": 2,
+              "sumTtftMs": 3817.7999998927116,
+              "backingBuilds": 4,
+              "prefillPlanMisses": 24,
+              "prefillRuns": 28
+            },
+            {
+              "sweep": 3,
+              "sumTtftMs": 3952.800000011921,
+              "backingBuilds": 4,
+              "prefillPlanMisses": 24,
+              "prefillRuns": 28
+            }
+          ],
+          "cases": [
+            {
+              "capacity": 1024,
+              "case": "english-list",
+              "ttftMs": 72.64999997615814,
+              "backingBuilds": 2,
+              "prefillPlanMisses": 2
+            },
+            {
+              "capacity": 8192,
+              "case": "english-list",
+              "ttftMs": 71.99999997019768,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 2
+            },
+            {
+              "capacity": 1024,
+              "case": "japanese-list",
+              "ttftMs": 74.25,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 2
+            },
+            {
+              "capacity": 8192,
+              "case": "japanese-list",
+              "ttftMs": 70.7999999821186,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 2
+            }
+          ]
+        },
+        {
+          "file": "alternating-normal-3-C.json",
+          "options": {
+            "alternating": true,
+            "kind": "normal",
+            "candidate": "C"
+          },
+          "chunkLength": 768,
+          "buckets": [
+            4,
+            8,
+            16,
+            24,
+            32,
+            40,
+            48,
+            56,
+            64,
+            128,
+            256
+          ],
+          "loadMs": 5059.399999976158,
+          "runs": 104,
+          "maxPlanBackingMiB": 335.25293350219727,
+          "maxCachedPlans": 12,
+          "cycles": [
+            {
+              "sweep": 2,
+              "sumTtftMs": 3865.30000013113,
+              "backingBuilds": 4,
+              "prefillPlanMisses": 24,
+              "prefillRuns": 28
+            },
+            {
+              "sweep": 3,
+              "sumTtftMs": 3931.8000000715256,
+              "backingBuilds": 4,
+              "prefillPlanMisses": 24,
+              "prefillRuns": 28
+            }
+          ],
+          "cases": [
+            {
+              "capacity": 1024,
+              "case": "english-list",
+              "ttftMs": 67.25,
+              "backingBuilds": 2,
+              "prefillPlanMisses": 2
+            },
+            {
+              "capacity": 8192,
+              "case": "english-list",
+              "ttftMs": 71.7000000178814,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 2
+            },
+            {
+              "capacity": 1024,
+              "case": "japanese-list",
+              "ttftMs": 70.80000001192093,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 2
+            },
+            {
+              "capacity": 8192,
+              "case": "japanese-list",
+              "ttftMs": 73.99999997019768,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 2
+            }
+          ]
+        },
+        {
+          "file": "alternating-normal-4-B.json",
+          "options": {
+            "alternating": true,
+            "kind": "normal",
+            "candidate": "B"
+          },
+          "chunkLength": 768,
+          "buckets": [
+            4,
+            8,
+            16,
+            32,
+            48,
+            64,
+            128,
+            256
+          ],
+          "loadMs": 4979.800000011921,
+          "runs": 104,
+          "maxPlanBackingMiB": 335.25293350219727,
+          "maxCachedPlans": 12,
+          "cycles": [
+            {
+              "sweep": 2,
+              "sumTtftMs": 3861.7000001072884,
+              "backingBuilds": 10,
+              "prefillPlanMisses": 18,
+              "prefillRuns": 28
+            },
+            {
+              "sweep": 3,
+              "sumTtftMs": 3990.2000000476837,
+              "backingBuilds": 10,
+              "prefillPlanMisses": 18,
+              "prefillRuns": 28
+            }
+          ],
+          "cases": [
+            {
+              "capacity": 1024,
+              "case": "english-list",
+              "ttftMs": 67.25000002980232,
+              "backingBuilds": 2,
+              "prefillPlanMisses": 2
+            },
+            {
+              "capacity": 8192,
+              "case": "english-list",
+              "ttftMs": 69.64999997615814,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 2
+            },
+            {
+              "capacity": 1024,
+              "case": "japanese-list",
+              "ttftMs": 77.19999998807907,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 2
+            },
+            {
+              "capacity": 8192,
+              "case": "japanese-list",
+              "ttftMs": 83.69999998807907,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 2
+            }
+          ]
+        },
+        {
+          "file": "alternating-normal-5-A.json",
+          "options": {
+            "alternating": true,
+            "kind": "normal",
+            "candidate": "A"
+          },
+          "chunkLength": 768,
+          "buckets": [
+            4,
+            8,
+            32,
+            64,
+            128,
+            256
+          ],
+          "loadMs": 5183.300000011921,
+          "runs": 104,
+          "maxPlanBackingMiB": 335.25293350219727,
+          "maxCachedPlans": 12,
+          "cycles": [
+            {
+              "sweep": 2,
+              "sumTtftMs": 3737.599999964237,
+              "backingBuilds": 8,
+              "prefillPlanMisses": 10,
+              "prefillRuns": 28
+            },
+            {
+              "sweep": 3,
+              "sumTtftMs": 3762.399999976158,
+              "backingBuilds": 8,
+              "prefillPlanMisses": 10,
+              "prefillRuns": 28
+            }
+          ],
+          "cases": [
+            {
+              "capacity": 1024,
+              "case": "english-list",
+              "ttftMs": 53.64999997615814,
+              "backingBuilds": 4,
+              "prefillPlanMisses": 0
+            },
+            {
+              "capacity": 8192,
+              "case": "english-list",
+              "ttftMs": 54.5,
+              "backingBuilds": 2,
+              "prefillPlanMisses": 0
+            },
+            {
+              "capacity": 1024,
+              "case": "japanese-list",
+              "ttftMs": 80.94999998807907,
+              "backingBuilds": 2,
+              "prefillPlanMisses": 0
+            },
+            {
+              "capacity": 8192,
+              "case": "japanese-list",
+              "ttftMs": 80.59999999403954,
+              "backingBuilds": 2,
+              "prefillPlanMisses": 0
+            }
+          ]
+        },
+        {
+          "file": "alternating-qat-0-A.json",
+          "options": {
+            "alternating": true,
+            "kind": "qat",
+            "candidate": "A"
+          },
+          "chunkLength": 128,
+          "buckets": [
+            4,
+            8,
+            32,
+            64
+          ],
+          "loadMs": 7825.800000011921,
+          "runs": 104,
+          "maxPlanBackingMiB": 177.8104476928711,
+          "maxCachedPlans": 12,
+          "cycles": [
+            {
+              "sweep": 2,
+              "sumTtftMs": 3551.80000013113,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 0,
+              "prefillRuns": 44
+            },
+            {
+              "sweep": 3,
+              "sumTtftMs": 3700.9999999403954,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 0,
+              "prefillRuns": 44
+            }
+          ],
+          "cases": [
+            {
+              "capacity": 1024,
+              "case": "english-list",
+              "ttftMs": 41.35000002384186,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 0
+            },
+            {
+              "capacity": 8192,
+              "case": "english-list",
+              "ttftMs": 42.5,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 0
+            },
+            {
+              "capacity": 1024,
+              "case": "japanese-list",
+              "ttftMs": 70.5499999821186,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 0
+            },
+            {
+              "capacity": 8192,
+              "case": "japanese-list",
+              "ttftMs": 73.34999999403954,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 0
+            }
+          ]
+        },
+        {
+          "file": "alternating-qat-1-B.json",
+          "options": {
+            "alternating": true,
+            "kind": "qat",
+            "candidate": "B"
+          },
+          "chunkLength": 128,
+          "buckets": [
+            4,
+            8,
+            16,
+            32,
+            48,
+            64
+          ],
+          "loadMs": 5974.100000023842,
+          "runs": 104,
+          "maxPlanBackingMiB": 200.7618865966797,
+          "maxCachedPlans": 12,
+          "cycles": [
+            {
+              "sweep": 2,
+              "sumTtftMs": 4190.400000035763,
+              "backingBuilds": 4,
+              "prefillPlanMisses": 10,
+              "prefillRuns": 44
+            },
+            {
+              "sweep": 3,
+              "sumTtftMs": 4162.400000035763,
+              "backingBuilds": 4,
+              "prefillPlanMisses": 10,
+              "prefillRuns": 44
+            }
+          ],
+          "cases": [
+            {
+              "capacity": 1024,
+              "case": "english-list",
+              "ttftMs": 44.79999998211861,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 0
+            },
+            {
+              "capacity": 8192,
+              "case": "english-list",
+              "ttftMs": 44.44999998807907,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 0
+            },
+            {
+              "capacity": 1024,
+              "case": "japanese-list",
+              "ttftMs": 50.54999998211861,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 0
+            },
+            {
+              "capacity": 8192,
+              "case": "japanese-list",
+              "ttftMs": 55.25,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 0
+            }
+          ]
+        },
+        {
+          "file": "alternating-qat-2-C.json",
+          "options": {
+            "alternating": true,
+            "kind": "qat",
+            "candidate": "C"
+          },
+          "chunkLength": 128,
+          "buckets": [
+            4,
+            8,
+            16,
+            24,
+            32,
+            40,
+            48,
+            56,
+            64
+          ],
+          "loadMs": 7010.800000011921,
+          "runs": 104,
+          "maxPlanBackingMiB": 96.6982650756836,
+          "maxCachedPlans": 12,
+          "cycles": [
+            {
+              "sweep": 2,
+              "sumTtftMs": 4590.299999952316,
+              "backingBuilds": 2,
+              "prefillPlanMisses": 20,
+              "prefillRuns": 44
+            },
+            {
+              "sweep": 3,
+              "sumTtftMs": 4585.3999999165535,
+              "backingBuilds": 2,
+              "prefillPlanMisses": 20,
+              "prefillRuns": 44
+            }
+          ],
+          "cases": [
+            {
+              "capacity": 1024,
+              "case": "english-list",
+              "ttftMs": 94.14999997615814,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 2
+            },
+            {
+              "capacity": 8192,
+              "case": "english-list",
+              "ttftMs": 95.69999995827675,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 2
+            },
+            {
+              "capacity": 1024,
+              "case": "japanese-list",
+              "ttftMs": 96.85000002384186,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 2
+            },
+            {
+              "capacity": 8192,
+              "case": "japanese-list",
+              "ttftMs": 99.09999996423721,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 2
+            }
+          ]
+        },
+        {
+          "file": "alternating-qat-3-C.json",
+          "options": {
+            "alternating": true,
+            "kind": "qat",
+            "candidate": "C"
+          },
+          "chunkLength": 128,
+          "buckets": [
+            4,
+            8,
+            16,
+            24,
+            32,
+            40,
+            48,
+            56,
+            64
+          ],
+          "loadMs": 7069.100000023842,
+          "runs": 104,
+          "maxPlanBackingMiB": 96.6982650756836,
+          "maxCachedPlans": 12,
+          "cycles": [
+            {
+              "sweep": 2,
+              "sumTtftMs": 4505.199999809265,
+              "backingBuilds": 2,
+              "prefillPlanMisses": 20,
+              "prefillRuns": 44
+            },
+            {
+              "sweep": 3,
+              "sumTtftMs": 4439.700000047684,
+              "backingBuilds": 2,
+              "prefillPlanMisses": 20,
+              "prefillRuns": 44
+            }
+          ],
+          "cases": [
+            {
+              "capacity": 1024,
+              "case": "english-list",
+              "ttftMs": 94.64999997615814,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 2
+            },
+            {
+              "capacity": 8192,
+              "case": "english-list",
+              "ttftMs": 96.65000000596046,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 2
+            },
+            {
+              "capacity": 1024,
+              "case": "japanese-list",
+              "ttftMs": 96.65000000596046,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 2
+            },
+            {
+              "capacity": 8192,
+              "case": "japanese-list",
+              "ttftMs": 100.4500000178814,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 2
+            }
+          ]
+        },
+        {
+          "file": "alternating-qat-4-B.json",
+          "options": {
+            "alternating": true,
+            "kind": "qat",
+            "candidate": "B"
+          },
+          "chunkLength": 128,
+          "buckets": [
+            4,
+            8,
+            16,
+            32,
+            48,
+            64
+          ],
+          "loadMs": 7836.899999976158,
+          "runs": 104,
+          "maxPlanBackingMiB": 200.7618865966797,
+          "maxCachedPlans": 12,
+          "cycles": [
+            {
+              "sweep": 2,
+              "sumTtftMs": 4100.699999928474,
+              "backingBuilds": 4,
+              "prefillPlanMisses": 10,
+              "prefillRuns": 44
+            },
+            {
+              "sweep": 3,
+              "sumTtftMs": 4159.30000013113,
+              "backingBuilds": 4,
+              "prefillPlanMisses": 10,
+              "prefillRuns": 44
+            }
+          ],
+          "cases": [
+            {
+              "capacity": 1024,
+              "case": "english-list",
+              "ttftMs": 42.10000002384186,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 0
+            },
+            {
+              "capacity": 8192,
+              "case": "english-list",
+              "ttftMs": 42.849999994039536,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 0
+            },
+            {
+              "capacity": 1024,
+              "case": "japanese-list",
+              "ttftMs": 55.849999994039536,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 0
+            },
+            {
+              "capacity": 8192,
+              "case": "japanese-list",
+              "ttftMs": 54.39999997615814,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 0
+            }
+          ]
+        },
+        {
+          "file": "alternating-qat-5-A.json",
+          "options": {
+            "alternating": true,
+            "kind": "qat",
+            "candidate": "A"
+          },
+          "chunkLength": 128,
+          "buckets": [
+            4,
+            8,
+            32,
+            64
+          ],
+          "loadMs": 6022,
+          "runs": 104,
+          "maxPlanBackingMiB": 177.8104476928711,
+          "maxCachedPlans": 12,
+          "cycles": [
+            {
+              "sweep": 2,
+              "sumTtftMs": 3596.1000000834465,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 0,
+              "prefillRuns": 44
+            },
+            {
+              "sweep": 3,
+              "sumTtftMs": 3661.2999998927116,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 0,
+              "prefillRuns": 44
+            }
+          ],
+          "cases": [
+            {
+              "capacity": 1024,
+              "case": "english-list",
+              "ttftMs": 46.75,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 0
+            },
+            {
+              "capacity": 8192,
+              "case": "english-list",
+              "ttftMs": 44.55000001192093,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 0
+            },
+            {
+              "capacity": 1024,
+              "case": "japanese-list",
+              "ttftMs": 65.90000000596046,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 0
+            },
+            {
+              "capacity": 8192,
+              "case": "japanese-list",
+              "ttftMs": 68.44999998807907,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 0
+            }
+          ]
+        },
+        {
+          "file": "single-normal-0-A.json",
+          "options": {
+            "alternating": false,
+            "kind": "normal",
+            "candidate": "A"
+          },
+          "chunkLength": 768,
+          "buckets": [
+            4,
+            8,
+            32,
+            64,
+            128,
+            256
+          ],
+          "loadMs": 4908.899999976158,
+          "runs": 52,
+          "maxPlanBackingMiB": 335.25293350219727,
+          "maxCachedPlans": 8,
+          "cycles": [
+            {
+              "sweep": 2,
+              "sumTtftMs": 1547.0000000596046,
+              "backingBuilds": 10,
+              "prefillPlanMisses": 0,
+              "prefillRuns": 14
+            },
+            {
+              "sweep": 3,
+              "sumTtftMs": 1513.5,
+              "backingBuilds": 10,
+              "prefillPlanMisses": 0,
+              "prefillRuns": 14
+            }
+          ],
+          "cases": [
+            {
+              "capacity": 8192,
+              "case": "english-list",
+              "ttftMs": 52.650000005960464,
+              "backingBuilds": 2,
+              "prefillPlanMisses": 0
+            },
+            {
+              "capacity": 8192,
+              "case": "japanese-list",
+              "ttftMs": 74.4500000178814,
+              "backingBuilds": 2,
+              "prefillPlanMisses": 0
+            }
+          ]
+        },
+        {
+          "file": "single-normal-1-B.json",
+          "options": {
+            "alternating": false,
+            "kind": "normal",
+            "candidate": "B"
+          },
+          "chunkLength": 768,
+          "buckets": [
+            4,
+            8,
+            16,
+            32,
+            48,
+            64,
+            128,
+            256
+          ],
+          "loadMs": 6281.099999964237,
+          "runs": 52,
+          "maxPlanBackingMiB": 335.25293350219727,
+          "maxCachedPlans": 10,
+          "cycles": [
+            {
+              "sweep": 2,
+              "sumTtftMs": 1506.9999999403954,
+              "backingBuilds": 12,
+              "prefillPlanMisses": 0,
+              "prefillRuns": 14
+            },
+            {
+              "sweep": 3,
+              "sumTtftMs": 1515.999999821186,
+              "backingBuilds": 12,
+              "prefillPlanMisses": 0,
+              "prefillRuns": 14
+            }
+          ],
+          "cases": [
+            {
+              "capacity": 8192,
+              "case": "english-list",
+              "ttftMs": 51.89999997615814,
+              "backingBuilds": 2,
+              "prefillPlanMisses": 0
+            },
+            {
+              "capacity": 8192,
+              "case": "japanese-list",
+              "ttftMs": 62.55000001192093,
+              "backingBuilds": 2,
+              "prefillPlanMisses": 0
+            }
+          ]
+        },
+        {
+          "file": "single-normal-2-C.json",
+          "options": {
+            "alternating": false,
+            "kind": "normal",
+            "candidate": "C"
+          },
+          "chunkLength": 768,
+          "buckets": [
+            4,
+            8,
+            16,
+            24,
+            32,
+            40,
+            48,
+            56,
+            64,
+            128,
+            256
+          ],
+          "loadMs": 4945,
+          "runs": 52,
+          "maxPlanBackingMiB": 335.25293350219727,
+          "maxCachedPlans": 12,
+          "cycles": [
+            {
+              "sweep": 2,
+              "sumTtftMs": 1730.6000000238419,
+              "backingBuilds": 2,
+              "prefillPlanMisses": 12,
+              "prefillRuns": 14
+            },
+            {
+              "sweep": 3,
+              "sumTtftMs": 1687.6000000834465,
+              "backingBuilds": 2,
+              "prefillPlanMisses": 12,
+              "prefillRuns": 14
+            }
+          ],
+          "cases": [
+            {
+              "capacity": 8192,
+              "case": "english-list",
+              "ttftMs": 66.14999997615814,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 2
+            },
+            {
+              "capacity": 8192,
+              "case": "japanese-list",
+              "ttftMs": 70.55000001192093,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 2
+            }
+          ]
+        },
+        {
+          "file": "single-normal-3-C.json",
+          "options": {
+            "alternating": false,
+            "kind": "normal",
+            "candidate": "C"
+          },
+          "chunkLength": 768,
+          "buckets": [
+            4,
+            8,
+            16,
+            24,
+            32,
+            40,
+            48,
+            56,
+            64,
+            128,
+            256
+          ],
+          "loadMs": 4819.800000011921,
+          "runs": 52,
+          "maxPlanBackingMiB": 335.25293350219727,
+          "maxCachedPlans": 12,
+          "cycles": [
+            {
+              "sweep": 2,
+              "sumTtftMs": 1715.6000002622604,
+              "backingBuilds": 2,
+              "prefillPlanMisses": 12,
+              "prefillRuns": 14
+            },
+            {
+              "sweep": 3,
+              "sumTtftMs": 1701.9000000357628,
+              "backingBuilds": 2,
+              "prefillPlanMisses": 12,
+              "prefillRuns": 14
+            }
+          ],
+          "cases": [
+            {
+              "capacity": 8192,
+              "case": "english-list",
+              "ttftMs": 65.84999999403954,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 2
+            },
+            {
+              "capacity": 8192,
+              "case": "japanese-list",
+              "ttftMs": 69.19999998807907,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 2
+            }
+          ]
+        },
+        {
+          "file": "single-normal-4-B.json",
+          "options": {
+            "alternating": false,
+            "kind": "normal",
+            "candidate": "B"
+          },
+          "chunkLength": 768,
+          "buckets": [
+            4,
+            8,
+            16,
+            32,
+            48,
+            64,
+            128,
+            256
+          ],
+          "loadMs": 4993.199999988079,
+          "runs": 52,
+          "maxPlanBackingMiB": 335.25293350219727,
+          "maxCachedPlans": 10,
+          "cycles": [
+            {
+              "sweep": 2,
+              "sumTtftMs": 1565.0999999642372,
+              "backingBuilds": 12,
+              "prefillPlanMisses": 0,
+              "prefillRuns": 14
+            },
+            {
+              "sweep": 3,
+              "sumTtftMs": 1564.5,
+              "backingBuilds": 12,
+              "prefillPlanMisses": 0,
+              "prefillRuns": 14
+            }
+          ],
+          "cases": [
+            {
+              "capacity": 8192,
+              "case": "english-list",
+              "ttftMs": 56.099999994039536,
+              "backingBuilds": 2,
+              "prefillPlanMisses": 0
+            },
+            {
+              "capacity": 8192,
+              "case": "japanese-list",
+              "ttftMs": 64.60000002384186,
+              "backingBuilds": 2,
+              "prefillPlanMisses": 0
+            }
+          ]
+        },
+        {
+          "file": "single-normal-5-A.json",
+          "options": {
+            "alternating": false,
+            "kind": "normal",
+            "candidate": "A"
+          },
+          "chunkLength": 768,
+          "buckets": [
+            4,
+            8,
+            32,
+            64,
+            128,
+            256
+          ],
+          "loadMs": 4928.5,
+          "runs": 52,
+          "maxPlanBackingMiB": 335.25293350219727,
+          "maxCachedPlans": 8,
+          "cycles": [
+            {
+              "sweep": 2,
+              "sumTtftMs": 1608.299999833107,
+              "backingBuilds": 10,
+              "prefillPlanMisses": 0,
+              "prefillRuns": 14
+            },
+            {
+              "sweep": 3,
+              "sumTtftMs": 1588.5000001192093,
+              "backingBuilds": 10,
+              "prefillPlanMisses": 0,
+              "prefillRuns": 14
+            }
+          ],
+          "cases": [
+            {
+              "capacity": 8192,
+              "case": "english-list",
+              "ttftMs": 53.50000002980232,
+              "backingBuilds": 2,
+              "prefillPlanMisses": 0
+            },
+            {
+              "capacity": 8192,
+              "case": "japanese-list",
+              "ttftMs": 75.69999998807907,
+              "backingBuilds": 2,
+              "prefillPlanMisses": 0
+            }
+          ]
+        },
+        {
+          "file": "single-qat-0-A.json",
+          "options": {
+            "alternating": false,
+            "kind": "qat",
+            "candidate": "A"
+          },
+          "chunkLength": 128,
+          "buckets": [
+            4,
+            8,
+            32,
+            64
+          ],
+          "loadMs": 2901.400000035763,
+          "runs": 52,
+          "maxPlanBackingMiB": 107.78705978393555,
+          "maxCachedPlans": 6,
+          "cycles": [
+            {
+              "sweep": 2,
+              "sumTtftMs": 1631.1000000238419,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 0,
+              "prefillRuns": 22
+            },
+            {
+              "sweep": 3,
+              "sumTtftMs": 2122.1999999284744,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 0,
+              "prefillRuns": 22
+            }
+          ],
+          "cases": [
+            {
+              "capacity": 8192,
+              "case": "english-list",
+              "ttftMs": 44.60000002384186,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 0
+            },
+            {
+              "capacity": 8192,
+              "case": "japanese-list",
+              "ttftMs": 63.29999998211861,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 0
+            }
+          ]
+        },
+        {
+          "file": "single-qat-1-B.json",
+          "options": {
+            "alternating": false,
+            "kind": "qat",
+            "candidate": "B"
+          },
+          "chunkLength": 128,
+          "buckets": [
+            4,
+            8,
+            16,
+            32,
+            48,
+            64
+          ],
+          "loadMs": 6993.199999988079,
+          "runs": 52,
+          "maxPlanBackingMiB": 136.14668655395508,
+          "maxCachedPlans": 8,
+          "cycles": [
+            {
+              "sweep": 2,
+              "sumTtftMs": 1576.9000000357628,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 0,
+              "prefillRuns": 22
+            },
+            {
+              "sweep": 3,
+              "sumTtftMs": 1631.3999998569489,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 0,
+              "prefillRuns": 22
+            }
+          ],
+          "cases": [
+            {
+              "capacity": 8192,
+              "case": "english-list",
+              "ttftMs": 45.34999996423721,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 0
+            },
+            {
+              "capacity": 8192,
+              "case": "japanese-list",
+              "ttftMs": 50.349999994039536,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 0
+            }
+          ]
+        },
+        {
+          "file": "single-qat-2-C.json",
+          "options": {
+            "alternating": false,
+            "kind": "qat",
+            "candidate": "C"
+          },
+          "chunkLength": 128,
+          "buckets": [
+            4,
+            8,
+            16,
+            24,
+            32,
+            40,
+            48,
+            56,
+            64
+          ],
+          "loadMs": 7019.600000023842,
+          "runs": 52,
+          "maxPlanBackingMiB": 189.23309326171875,
+          "maxCachedPlans": 11,
+          "cycles": [
+            {
+              "sweep": 2,
+              "sumTtftMs": 1591.3000001311302,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 0,
+              "prefillRuns": 22
+            },
+            {
+              "sweep": 3,
+              "sumTtftMs": 1575.2000001072884,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 0,
+              "prefillRuns": 22
+            }
+          ],
+          "cases": [
+            {
+              "capacity": 8192,
+              "case": "english-list",
+              "ttftMs": 43.60000002384186,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 0
+            },
+            {
+              "capacity": 8192,
+              "case": "japanese-list",
+              "ttftMs": 45.15000003576279,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 0
+            }
+          ]
+        },
+        {
+          "file": "single-qat-3-C.json",
+          "options": {
+            "alternating": false,
+            "kind": "qat",
+            "candidate": "C"
+          },
+          "chunkLength": 128,
+          "buckets": [
+            4,
+            8,
+            16,
+            24,
+            32,
+            40,
+            48,
+            56,
+            64
+          ],
+          "loadMs": 6917.800000011921,
+          "runs": 52,
+          "maxPlanBackingMiB": 189.23309326171875,
+          "maxCachedPlans": 11,
+          "cycles": [
+            {
+              "sweep": 2,
+              "sumTtftMs": 1580.0000000596046,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 0,
+              "prefillRuns": 22
+            },
+            {
+              "sweep": 3,
+              "sumTtftMs": 1610.9999998807907,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 0,
+              "prefillRuns": 22
+            }
+          ],
+          "cases": [
+            {
+              "capacity": 8192,
+              "case": "english-list",
+              "ttftMs": 45.19999995827675,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 0
+            },
+            {
+              "capacity": 8192,
+              "case": "japanese-list",
+              "ttftMs": 45.84999996423721,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 0
+            }
+          ]
+        },
+        {
+          "file": "single-qat-4-B.json",
+          "options": {
+            "alternating": false,
+            "kind": "qat",
+            "candidate": "B"
+          },
+          "chunkLength": 128,
+          "buckets": [
+            4,
+            8,
+            16,
+            32,
+            48,
+            64
+          ],
+          "loadMs": 7124.100000023842,
+          "runs": 52,
+          "maxPlanBackingMiB": 136.14668655395508,
+          "maxCachedPlans": 8,
+          "cycles": [
+            {
+              "sweep": 2,
+              "sumTtftMs": 1615.199999988079,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 0,
+              "prefillRuns": 22
+            },
+            {
+              "sweep": 3,
+              "sumTtftMs": 1650.0999999642372,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 0,
+              "prefillRuns": 22
+            }
+          ],
+          "cases": [
+            {
+              "capacity": 8192,
+              "case": "english-list",
+              "ttftMs": 44.64999997615814,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 0
+            },
+            {
+              "capacity": 8192,
+              "case": "japanese-list",
+              "ttftMs": 51.05000001192093,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 0
+            }
+          ]
+        },
+        {
+          "file": "single-qat-5-A.json",
+          "options": {
+            "alternating": false,
+            "kind": "qat",
+            "candidate": "A"
+          },
+          "chunkLength": 128,
+          "buckets": [
+            4,
+            8,
+            32,
+            64
+          ],
+          "loadMs": 7033.100000023842,
+          "runs": 52,
+          "maxPlanBackingMiB": 107.78705978393555,
+          "maxCachedPlans": 6,
+          "cycles": [
+            {
+              "sweep": 2,
+              "sumTtftMs": 1618.9000000953674,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 0,
+              "prefillRuns": 22
+            },
+            {
+              "sweep": 3,
+              "sumTtftMs": 1666.0000001192093,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 0,
+              "prefillRuns": 22
+            }
+          ],
+          "cases": [
+            {
+              "capacity": 8192,
+              "case": "english-list",
+              "ttftMs": 44.19999998807907,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 0
+            },
+            {
+              "capacity": 8192,
+              "case": "japanese-list",
+              "ttftMs": 65.40000000596046,
+              "backingBuilds": 0,
+              "prefillPlanMisses": 0
+            }
+          ]
+        }
+      ],
+      "sha256": {
+        "alternating-normal-0-A.json": "cd66fef11a7fa8e71bd5ba3f76f3c57306930297b2c65e2b5ef76ea88aa55bf3",
+        "alternating-normal-1-B.json": "4dc7cc79e65be3a12cb71482bd43fb991bf80512c6b1f60b001b7e0a12c4f5db",
+        "alternating-normal-2-C.json": "ee0aaeda64ac62070c3fced7360c83fdfc5d115cd60e41923406a5b4407cd2d1",
+        "alternating-normal-3-C.json": "9017f58203102d8b9aeb6553b884018c6a11315d5dd3c45853439830e5a49868",
+        "alternating-normal-4-B.json": "5546f8db051275ead91d14042ef9830f78be9a09b390f15cbe4e97d1b4ef083e",
+        "alternating-normal-5-A.json": "38637f5aa8d439c1a28dba32e6d6808b0ef0d24d9b07b291eeb0448638241d77",
+        "alternating-qat-0-A.json": "425ae1200aad2926850be142f6cd67f3fd647cfea57db25153c8b1f2f99743d0",
+        "alternating-qat-1-B.json": "9da939303263eb5634952fbca528aca275091e3076362cf12e7dcf0a3b155dca",
+        "alternating-qat-2-C.json": "6e722b2fbf7c87fd435d777fcfc66f4480a4e9e050c032babf25d2ed4926f875",
+        "alternating-qat-3-C.json": "4499926e89db005d9ecb4b4a8f327bcc6ddcd05583e8a336141b40ba0c1b72cb",
+        "alternating-qat-4-B.json": "d0c42f80e840c06a8b4287b76c190c498f89ef6977956fb8da057a98f5bf6a66",
+        "alternating-qat-5-A.json": "334d46680d4fbee6d8684f7aecfa69ef68f75cb2a89e23e069491f42677cc657",
+        "single-normal-0-A.json": "1cf8951c4395911a81190ced97a6e880b336207117c87b8c20331c49c7317c05",
+        "single-normal-1-B.json": "4bdff9fe0bcf34029df9a41db17f014ea07c6bda7db1b83638f20e2bf75902e1",
+        "single-normal-2-C.json": "2c21978c43370e0f3024a7a0416da75e67f0c9fd3d6e71596434894fde65c8f5",
+        "single-normal-3-C.json": "b0901213add9a75e440dc46ff575997ab488796c7f11c169b1f83e47d2001270",
+        "single-normal-4-B.json": "d91aaa2405e71c912d28bf3428d8c6ae7f6a15ca323370dbeabb3e1df9d4090b",
+        "single-normal-5-A.json": "e1c5637cabfa250ea3687caf7f7a236173867555bfa671cd4cc2f45105a3e219",
+        "single-qat-0-A.json": "b07ad89bb11f8cc531a014942a3e705f7b3476e9f604315ce5c9f8cc85ad4b86",
+        "single-qat-1-B.json": "b333d8a50d3dda61d68afd6c3e208106ae65a99494d1068e5bc70179b7cc5b39",
+        "single-qat-2-C.json": "b07b25f3ea223fd7f8a0c91a5f427cda67ac86a5fa2b848d85ff63294e6b86ac",
+        "single-qat-3-C.json": "b2bc30a97f90f0a0aad76879329ab1dc81d1280bf977a8d2ea3bb6d5a05917bc",
+        "single-qat-4-B.json": "878aed17312bf08a8ffc81ee836ba85d739413fec455566ec64f15975f9ed03d",
+        "single-qat-5-A.json": "26811f2ce3a52022ca0d3766d0302fac23e2a822c0514208eb36020f0439a187"
+      },
+      "probeSha256": "6c7aba249d191db2583526f717ee17650137d20860079d4e6a9481fb9da518be",
+      "bundleSha256": "a1237314876b44decb3a412dc14708e6b78afea71323410d98665541bea9e1a2"
+    }
+  },
+  "mtp": {
+    "directory": "outputs/bench/karume/2026-09-13_prefill-mtp-wide-a9c4dk_f",
+    "summarySha256": "d576fd34de05e41ac64b1cae4865697b428da8725dfb55fce54f571c61ef9311",
+    "data": {
+      "generations": 288,
+      "differencesVsPlainStandard": [],
+      "speculativeDifferences": [],
+      "repeatInstability": [],
+      "configs": [
+        {
+          "file": "chunk64-parallel-0-A.json",
+          "options": {
+            "chunkLength": 64,
+            "reduce": "parallel",
+            "candidate": "A"
+          },
+          "buckets": [
+            4,
+            8,
+            32
+          ],
+          "generations": 24,
+          "verifyLogicalRows": {
+            "4": 123,
+            "1": 3,
+            "3": 3,
+            "2": 3
+          }
+        },
+        {
+          "file": "chunk64-parallel-1-B.json",
+          "options": {
+            "chunkLength": 64,
+            "reduce": "parallel",
+            "candidate": "B"
+          },
+          "buckets": [
+            4,
+            8,
+            16,
+            32,
+            48
+          ],
+          "generations": 24,
+          "verifyLogicalRows": {
+            "4": 123,
+            "1": 3,
+            "3": 3,
+            "2": 3
+          }
+        },
+        {
+          "file": "chunk64-parallel-2-C.json",
+          "options": {
+            "chunkLength": 64,
+            "reduce": "parallel",
+            "candidate": "C"
+          },
+          "buckets": [
+            4,
+            8,
+            16,
+            24,
+            32,
+            40,
+            48,
+            56
+          ],
+          "generations": 24,
+          "verifyLogicalRows": {
+            "4": 123,
+            "1": 3,
+            "3": 3,
+            "2": 3
+          }
+        },
+        {
+          "file": "chunk64-sequential-0-A.json",
+          "options": {
+            "chunkLength": 64,
+            "reduce": "sequential",
+            "candidate": "A"
+          },
+          "buckets": [
+            4,
+            8,
+            32
+          ],
+          "generations": 24,
+          "verifyLogicalRows": {
+            "4": 123,
+            "1": 3,
+            "3": 3,
+            "2": 3
+          }
+        },
+        {
+          "file": "chunk64-sequential-1-B.json",
+          "options": {
+            "chunkLength": 64,
+            "reduce": "sequential",
+            "candidate": "B"
+          },
+          "buckets": [
+            4,
+            8,
+            16,
+            32,
+            48
+          ],
+          "generations": 24,
+          "verifyLogicalRows": {
+            "4": 123,
+            "1": 3,
+            "3": 3,
+            "2": 3
+          }
+        },
+        {
+          "file": "chunk64-sequential-2-C.json",
+          "options": {
+            "chunkLength": 64,
+            "reduce": "sequential",
+            "candidate": "C"
+          },
+          "buckets": [
+            4,
+            8,
+            16,
+            24,
+            32,
+            40,
+            48,
+            56
+          ],
+          "generations": 24,
+          "verifyLogicalRows": {
+            "4": 123,
+            "1": 3,
+            "3": 3,
+            "2": 3
+          }
+        },
+        {
+          "file": "chunk768-parallel-0-A.json",
+          "options": {
+            "chunkLength": 768,
+            "reduce": "parallel",
+            "candidate": "A"
+          },
+          "buckets": [
+            4,
+            8,
+            32,
+            64,
+            128,
+            256
+          ],
+          "generations": 24,
+          "verifyLogicalRows": {
+            "4": 123,
+            "1": 3,
+            "3": 3,
+            "2": 3
+          }
+        },
+        {
+          "file": "chunk768-parallel-1-B.json",
+          "options": {
+            "chunkLength": 768,
+            "reduce": "parallel",
+            "candidate": "B"
+          },
+          "buckets": [
+            4,
+            8,
+            16,
+            32,
+            48,
+            64,
+            128,
+            256
+          ],
+          "generations": 24,
+          "verifyLogicalRows": {
+            "4": 123,
+            "1": 3,
+            "3": 3,
+            "2": 3
+          }
+        },
+        {
+          "file": "chunk768-parallel-2-C.json",
+          "options": {
+            "chunkLength": 768,
+            "reduce": "parallel",
+            "candidate": "C"
+          },
+          "buckets": [
+            4,
+            8,
+            16,
+            24,
+            32,
+            40,
+            48,
+            56,
+            64,
+            128,
+            256
+          ],
+          "generations": 24,
+          "verifyLogicalRows": {
+            "4": 123,
+            "1": 3,
+            "3": 3,
+            "2": 3
+          }
+        },
+        {
+          "file": "chunk768-sequential-0-A.json",
+          "options": {
+            "chunkLength": 768,
+            "reduce": "sequential",
+            "candidate": "A"
+          },
+          "buckets": [
+            4,
+            8,
+            32,
+            64,
+            128,
+            256
+          ],
+          "generations": 24,
+          "verifyLogicalRows": {
+            "4": 123,
+            "1": 3,
+            "3": 3,
+            "2": 3
+          }
+        },
+        {
+          "file": "chunk768-sequential-1-B.json",
+          "options": {
+            "chunkLength": 768,
+            "reduce": "sequential",
+            "candidate": "B"
+          },
+          "buckets": [
+            4,
+            8,
+            16,
+            32,
+            48,
+            64,
+            128,
+            256
+          ],
+          "generations": 24,
+          "verifyLogicalRows": {
+            "4": 123,
+            "1": 3,
+            "3": 3,
+            "2": 3
+          }
+        },
+        {
+          "file": "chunk768-sequential-2-C.json",
+          "options": {
+            "chunkLength": 768,
+            "reduce": "sequential",
+            "candidate": "C"
+          },
+          "buckets": [
+            4,
+            8,
+            16,
+            24,
+            32,
+            40,
+            48,
+            56,
+            64,
+            128,
+            256
+          ],
+          "generations": 24,
+          "verifyLogicalRows": {
+            "4": 123,
+            "1": 3,
+            "3": 3,
+            "2": 3
+          }
+        }
+      ],
+      "sha256": {
+        "/home/developer/workspace/karume/outputs/bench/karume/2026-09-13_prefill-mtp-_x2qbgjm/chunk64-parallel-0-A.json": "f294f8103878b1a05975aa04148a47cc167d379b4576642b1935c56f100b2cf0",
+        "/home/developer/workspace/karume/outputs/bench/karume/2026-09-13_prefill-mtp-_x2qbgjm/chunk64-parallel-1-B.json": "8831db78282f6323721a4cb0aaff720c26c046df36f7a520e8ae31d0eae13465",
+        "/home/developer/workspace/karume/outputs/bench/karume/2026-09-13_prefill-mtp-_x2qbgjm/chunk64-parallel-2-C.json": "15aa84eed643beb9f525cd60349afc9e0792ab2210d0c7c582231a854da170e2",
+        "/home/developer/workspace/karume/outputs/bench/karume/2026-09-13_prefill-mtp-_x2qbgjm/chunk64-sequential-0-A.json": "4717a2a2aecd73234697c8d6b22c5688f9c9a541ab17407454b5a148188609b7",
+        "/home/developer/workspace/karume/outputs/bench/karume/2026-09-13_prefill-mtp-_x2qbgjm/chunk64-sequential-1-B.json": "ff8130ef6d1e291f8dd8272f84f75fb95a929587efb0627ede486908704d04c5",
+        "/home/developer/workspace/karume/outputs/bench/karume/2026-09-13_prefill-mtp-_x2qbgjm/chunk64-sequential-2-C.json": "849acececa25add6b332f377f63067a3e4bd776f0fdae4e2a370db7e280a3230",
+        "/home/developer/workspace/karume/outputs/bench/karume/2026-09-13_prefill-mtp-wide-a9c4dk_f/chunk768-parallel-0-A.json": "ddba65bc6c5c7dc93c9291c32bc91d4377ec3873aaff6dfdda7b55875460beaf",
+        "/home/developer/workspace/karume/outputs/bench/karume/2026-09-13_prefill-mtp-wide-a9c4dk_f/chunk768-parallel-1-B.json": "40b7dde668b6c1e4aa4504b4fccd3e219dfc1bc16523c75926ca8ca21b84dbbe",
+        "/home/developer/workspace/karume/outputs/bench/karume/2026-09-13_prefill-mtp-wide-a9c4dk_f/chunk768-parallel-2-C.json": "b6dfb2e3c68e1b094ed367cc931a64d24ad82047f51c17331177fe522fe48a3e",
+        "/home/developer/workspace/karume/outputs/bench/karume/2026-09-13_prefill-mtp-wide-a9c4dk_f/chunk768-sequential-0-A.json": "637fd0698a29c4801eabfc72d729071e4aeaec1163479152b6ceccc561fd5341",
+        "/home/developer/workspace/karume/outputs/bench/karume/2026-09-13_prefill-mtp-wide-a9c4dk_f/chunk768-sequential-1-B.json": "921ecc2dc3391c19a56a4ad11b97080f958cdc150c0c9213ba1a7d60daa413cd",
+        "/home/developer/workspace/karume/outputs/bench/karume/2026-09-13_prefill-mtp-wide-a9c4dk_f/chunk768-sequential-2-C.json": "d83895c1bf352f7aa2f503f9dde6c7bc89322040e8ae51c68e68e5975298c87a"
+      },
+      "sources": {
+        "/home/developer/workspace/karume/outputs/bench/karume/2026-09-13_prefill-mtp-wide-a9c4dk_f/probe-v2.ts": "d2ae384d999f202737eef51b8b97a8088eea6bf0f931ccffdbe01d3d935dd231",
+        "/home/developer/workspace/karume/outputs/bench/karume/2026-09-13_prefill-mtp-_x2qbgjm/probe-v2.ts": "d1a319abcda8f0197d1ac1af5b3d207bde735f2b5eb2094397d4794949bc5e66"
+      },
+      "bundleSha256": "289587a2c39cbb2ede6a624b13536de4ddfd5f1fa05121b772d031cef1294708"
+    }
+  },
+  "ui": {
+    "directory": "outputs/bench/karume/2026-09-13_prefill-ui-reopen-vly2j3kl",
+    "resultsSha256": "7722029f22366c2cb66c6a5e543c651310bba9cc4b20ad27c2de48ad85610a5a",
+    "parity": {
+      "generations": 120,
+      "differences": []
+    },
+    "jobs": [
+      {
+        "model": "normal",
+        "engine": "karume",
+        "quant": "i4-gemvpar",
+        "linearGemvReduce": "parallel",
+        "linearGemvReduceOverride": "parallel",
+        "prefillBuckets": "default",
+        "chunkBuckets": [
+          4,
+          8,
+          32
+        ],
+        "chunkLength": 64,
+        "capacity": 128,
+        "loadSeconds": 6.4464150000214575,
+        "bundleSha256": "ee7359283820dd12b6f8846fd59519a4477a9c68665feb02e6a610fc74a2d59b",
+        "adapter": {
+          "vendor": "nvidia",
+          "architecture": "ampere",
+          "description": "",
+          "device": "",
+          "isFallbackAdapter": false,
+          "features": [
+            "depth32float-stencil8",
+            "chromium-experimental-subgroup-matrix",
+            "rg11b10ufloat-renderable",
+            "texture-formats-tier1",
+            "bgra8unorm-storage",
+            "chromium-experimental-multi-draw-indirect",
+            "texture-compression-bc",
+            "dual-source-blending",
+            "chromium-experimental-sampling-resource-table",
+            "core-features-and-limits",
+            "chromium-experimental-timestamp-query-inside-passes",
+            "float32-filterable",
+            "indirect-first-instance",
+            "float32-blendable",
+            "subgroup-size-control",
+            "texture-compression-unaligned",
+            "depth-clip-control",
+            "texture-compression-bc-sliced-3d",
+            "timestamp-query",
+            "texture-formats-tier2",
+            "shader-f16",
+            "clip-distances",
+            "primitive-index",
+            "texture-component-swizzle",
+            "subgroups"
+          ]
+        },
+        "cases": [
+          {
+            "case": "english-list",
+            "firstTtftMs": 498.55000001192093,
+            "warmTtftMedianMs": 36.7049999833107,
+            "warmDecodeMedianTokensPerSecond": 105.35645601495972,
+            "deterministic": true
+          },
+          {
+            "case": "japanese-list",
+            "firstTtftMs": 156.18000000715256,
+            "warmTtftMedianMs": 57.62999999523163,
+            "warmDecodeMedianTokensPerSecond": 104.92742519382178,
+            "deterministic": true
+          }
+        ]
+      },
+      {
+        "model": "normal",
+        "engine": "karume",
+        "quant": "i4-gemvpar",
+        "linearGemvReduce": "parallel",
+        "linearGemvReduceOverride": "parallel",
+        "prefillBuckets": "sparse",
+        "chunkBuckets": [
+          4,
+          8,
+          16,
+          32,
+          48
+        ],
+        "chunkLength": 64,
+        "capacity": 128,
+        "loadSeconds": 5.815014999985695,
+        "bundleSha256": "ee7359283820dd12b6f8846fd59519a4477a9c68665feb02e6a610fc74a2d59b",
+        "adapter": {
+          "vendor": "nvidia",
+          "architecture": "ampere",
+          "description": "",
+          "device": "",
+          "isFallbackAdapter": false,
+          "features": [
+            "depth32float-stencil8",
+            "chromium-experimental-subgroup-matrix",
+            "rg11b10ufloat-renderable",
+            "bgra8unorm-storage",
+            "texture-formats-tier1",
+            "chromium-experimental-multi-draw-indirect",
+            "texture-compression-bc",
+            "dual-source-blending",
+            "core-features-and-limits",
+            "chromium-experimental-sampling-resource-table",
+            "chromium-experimental-timestamp-query-inside-passes",
+            "float32-filterable",
+            "indirect-first-instance",
+            "float32-blendable",
+            "subgroup-size-control",
+            "texture-compression-unaligned",
+            "depth-clip-control",
+            "texture-compression-bc-sliced-3d",
+            "clip-distances",
+            "texture-formats-tier2",
+            "timestamp-query",
+            "shader-f16",
+            "primitive-index",
+            "texture-component-swizzle",
+            "subgroups"
+          ]
+        },
+        "cases": [
+          {
+            "case": "english-list",
+            "firstTtftMs": 426.1650000214577,
+            "warmTtftMedianMs": 36.689999997615814,
+            "warmDecodeMedianTokensPerSecond": 105.08056177070505,
+            "deterministic": true
+          },
+          {
+            "case": "japanese-list",
+            "firstTtftMs": 133.04000002145767,
+            "warmTtftMedianMs": 46.314999997615814,
+            "warmDecodeMedianTokensPerSecond": 105.342362676606,
+            "deterministic": true
+          }
+        ]
+      },
+      {
+        "model": "normal",
+        "engine": "karume",
+        "quant": "i4-gemvpar",
+        "linearGemvReduce": "parallel",
+        "linearGemvReduceOverride": "parallel",
+        "prefillBuckets": "dense",
+        "chunkBuckets": [
+          4,
+          8,
+          16,
+          24,
+          32,
+          40,
+          48,
+          56
+        ],
+        "chunkLength": 64,
+        "capacity": 128,
+        "loadSeconds": 5.987995000004768,
+        "bundleSha256": "ee7359283820dd12b6f8846fd59519a4477a9c68665feb02e6a610fc74a2d59b",
+        "adapter": {
+          "vendor": "nvidia",
+          "architecture": "ampere",
+          "description": "",
+          "device": "",
+          "isFallbackAdapter": false,
+          "features": [
+            "depth32float-stencil8",
+            "chromium-experimental-subgroup-matrix",
+            "rg11b10ufloat-renderable",
+            "texture-formats-tier1",
+            "bgra8unorm-storage",
+            "chromium-experimental-multi-draw-indirect",
+            "texture-compression-bc",
+            "dual-source-blending",
+            "chromium-experimental-sampling-resource-table",
+            "core-features-and-limits",
+            "chromium-experimental-timestamp-query-inside-passes",
+            "float32-filterable",
+            "indirect-first-instance",
+            "float32-blendable",
+            "subgroup-size-control",
+            "texture-compression-unaligned",
+            "depth-clip-control",
+            "texture-compression-bc-sliced-3d",
+            "clip-distances",
+            "shader-f16",
+            "timestamp-query",
+            "texture-formats-tier2",
+            "primitive-index",
+            "texture-component-swizzle",
+            "subgroups"
+          ]
+        },
+        "cases": [
+          {
+            "case": "english-list",
+            "firstTtftMs": 458.22000002861023,
+            "warmTtftMedianMs": 36.355000019073486,
+            "warmDecodeMedianTokensPerSecond": 101.88239861021933,
+            "deterministic": true
+          },
+          {
+            "case": "japanese-list",
+            "firstTtftMs": 131.22500002384186,
+            "warmTtftMedianMs": 40.05000001192093,
+            "warmDecodeMedianTokensPerSecond": 102.1930962854445,
+            "deterministic": true
+          }
+        ]
+      },
+      {
+        "model": "normal",
+        "engine": "karume",
+        "quant": "i4-gemvpar",
+        "linearGemvReduce": "parallel",
+        "linearGemvReduceOverride": "parallel",
+        "prefillBuckets": "dense",
+        "chunkBuckets": [
+          4,
+          8,
+          16,
+          24,
+          32,
+          40,
+          48,
+          56
+        ],
+        "chunkLength": 64,
+        "capacity": 128,
+        "loadSeconds": 5.948650000035763,
+        "bundleSha256": "ee7359283820dd12b6f8846fd59519a4477a9c68665feb02e6a610fc74a2d59b",
+        "adapter": {
+          "vendor": "nvidia",
+          "architecture": "ampere",
+          "description": "",
+          "device": "",
+          "isFallbackAdapter": false,
+          "features": [
+            "depth32float-stencil8",
+            "chromium-experimental-subgroup-matrix",
+            "rg11b10ufloat-renderable",
+            "bgra8unorm-storage",
+            "texture-formats-tier1",
+            "chromium-experimental-multi-draw-indirect",
+            "texture-compression-bc",
+            "dual-source-blending",
+            "core-features-and-limits",
+            "chromium-experimental-sampling-resource-table",
+            "chromium-experimental-timestamp-query-inside-passes",
+            "float32-filterable",
+            "indirect-first-instance",
+            "float32-blendable",
+            "subgroup-size-control",
+            "texture-compression-unaligned",
+            "depth-clip-control",
+            "texture-compression-bc-sliced-3d",
+            "clip-distances",
+            "shader-f16",
+            "texture-formats-tier2",
+            "timestamp-query",
+            "primitive-index",
+            "texture-component-swizzle",
+            "subgroups"
+          ]
+        },
+        "cases": [
+          {
+            "case": "english-list",
+            "firstTtftMs": 508.4200000166893,
+            "warmTtftMedianMs": 36.41500002145767,
+            "warmDecodeMedianTokensPerSecond": 101.41579672039433,
+            "deterministic": true
+          },
+          {
+            "case": "japanese-list",
+            "firstTtftMs": 126.41000002622604,
+            "warmTtftMedianMs": 39.67500001192093,
+            "warmDecodeMedianTokensPerSecond": 99.88980410612811,
+            "deterministic": true
+          }
+        ]
+      },
+      {
+        "model": "normal",
+        "engine": "karume",
+        "quant": "i4-gemvpar",
+        "linearGemvReduce": "parallel",
+        "linearGemvReduceOverride": "parallel",
+        "prefillBuckets": "sparse",
+        "chunkBuckets": [
+          4,
+          8,
+          16,
+          32,
+          48
+        ],
+        "chunkLength": 64,
+        "capacity": 128,
+        "loadSeconds": 5.982665000021457,
+        "bundleSha256": "ee7359283820dd12b6f8846fd59519a4477a9c68665feb02e6a610fc74a2d59b",
+        "adapter": {
+          "vendor": "nvidia",
+          "architecture": "ampere",
+          "description": "",
+          "device": "",
+          "isFallbackAdapter": false,
+          "features": [
+            "depth32float-stencil8",
+            "chromium-experimental-subgroup-matrix",
+            "rg11b10ufloat-renderable",
+            "bgra8unorm-storage",
+            "texture-formats-tier1",
+            "chromium-experimental-multi-draw-indirect",
+            "texture-compression-bc",
+            "dual-source-blending",
+            "chromium-experimental-sampling-resource-table",
+            "core-features-and-limits",
+            "chromium-experimental-timestamp-query-inside-passes",
+            "float32-filterable",
+            "indirect-first-instance",
+            "float32-blendable",
+            "subgroup-size-control",
+            "texture-compression-unaligned",
+            "depth-clip-control",
+            "texture-compression-bc-sliced-3d",
+            "shader-f16",
+            "timestamp-query",
+            "texture-formats-tier2",
+            "clip-distances",
+            "primitive-index",
+            "texture-component-swizzle",
+            "subgroups"
+          ]
+        },
+        "cases": [
+          {
+            "case": "english-list",
+            "firstTtftMs": 410.0649999976158,
+            "warmTtftMedianMs": 36.72000002861023,
+            "warmDecodeMedianTokensPerSecond": 99.12908021965782,
+            "deterministic": true
+          },
+          {
+            "case": "japanese-list",
+            "firstTtftMs": 138.4099999666214,
+            "warmTtftMedianMs": 46.89999997615814,
+            "warmDecodeMedianTokensPerSecond": 98.2892981716283,
+            "deterministic": true
+          }
+        ]
+      },
+      {
+        "model": "normal",
+        "engine": "karume",
+        "quant": "i4-gemvpar",
+        "linearGemvReduce": "parallel",
+        "linearGemvReduceOverride": "parallel",
+        "prefillBuckets": "default",
+        "chunkBuckets": [
+          4,
+          8,
+          32
+        ],
+        "chunkLength": 64,
+        "capacity": 128,
+        "loadSeconds": 6.074555000007153,
+        "bundleSha256": "ee7359283820dd12b6f8846fd59519a4477a9c68665feb02e6a610fc74a2d59b",
+        "adapter": {
+          "vendor": "nvidia",
+          "architecture": "ampere",
+          "description": "",
+          "device": "",
+          "isFallbackAdapter": false,
+          "features": [
+            "depth32float-stencil8",
+            "chromium-experimental-subgroup-matrix",
+            "rg11b10ufloat-renderable",
+            "texture-formats-tier1",
+            "bgra8unorm-storage",
+            "chromium-experimental-multi-draw-indirect",
+            "texture-compression-bc",
+            "dual-source-blending",
+            "chromium-experimental-sampling-resource-table",
+            "core-features-and-limits",
+            "chromium-experimental-timestamp-query-inside-passes",
+            "float32-filterable",
+            "indirect-first-instance",
+            "float32-blendable",
+            "subgroup-size-control",
+            "texture-compression-unaligned",
+            "depth-clip-control",
+            "texture-compression-bc-sliced-3d",
+            "clip-distances",
+            "texture-formats-tier2",
+            "shader-f16",
+            "timestamp-query",
+            "primitive-index",
+            "texture-component-swizzle",
+            "subgroups"
+          ]
+        },
+        "cases": [
+          {
+            "case": "english-list",
+            "firstTtftMs": 486.0700000524521,
+            "warmTtftMedianMs": 36.74500000476837,
+            "warmDecodeMedianTokensPerSecond": 99.02624195523117,
+            "deterministic": true
+          },
+          {
+            "case": "japanese-list",
+            "firstTtftMs": 146.5600000023842,
+            "warmTtftMedianMs": 59.839999973773956,
+            "warmDecodeMedianTokensPerSecond": 99.38162543907968,
+            "deterministic": true
+          }
+        ]
+      },
+      {
+        "model": "qat",
+        "engine": "karume",
+        "quant": "i4-gemvpar",
+        "linearGemvReduce": "parallel",
+        "linearGemvReduceOverride": "parallel",
+        "prefillBuckets": "default",
+        "chunkBuckets": [
+          4,
+          8,
+          32
+        ],
+        "chunkLength": 64,
+        "capacity": 128,
+        "loadSeconds": 2.9186299999952316,
+        "bundleSha256": "ee7359283820dd12b6f8846fd59519a4477a9c68665feb02e6a610fc74a2d59b",
+        "adapter": {
+          "vendor": "nvidia",
+          "architecture": "ampere",
+          "description": "",
+          "device": "",
+          "isFallbackAdapter": false,
+          "features": [
+            "depth32float-stencil8",
+            "chromium-experimental-subgroup-matrix",
+            "rg11b10ufloat-renderable",
+            "texture-formats-tier1",
+            "bgra8unorm-storage",
+            "chromium-experimental-multi-draw-indirect",
+            "texture-compression-bc",
+            "dual-source-blending",
+            "core-features-and-limits",
+            "chromium-experimental-sampling-resource-table",
+            "chromium-experimental-timestamp-query-inside-passes",
+            "float32-filterable",
+            "indirect-first-instance",
+            "float32-blendable",
+            "subgroup-size-control",
+            "texture-compression-unaligned",
+            "depth-clip-control",
+            "texture-compression-bc-sliced-3d",
+            "timestamp-query",
+            "texture-formats-tier2",
+            "clip-distances",
+            "shader-f16",
+            "primitive-index",
+            "texture-component-swizzle",
+            "subgroups"
+          ]
+        },
+        "cases": [
+          {
+            "case": "english-list",
+            "firstTtftMs": 253.6700000166893,
+            "warmTtftMedianMs": 38.79000002145767,
+            "warmDecodeMedianTokensPerSecond": 90.06240037924613,
+            "deterministic": true
+          },
+          {
+            "case": "japanese-list",
+            "firstTtftMs": 180.25499999523163,
+            "warmTtftMedianMs": 58.94499999284744,
+            "warmDecodeMedianTokensPerSecond": 89.9710807286481,
+            "deterministic": true
+          }
+        ]
+      },
+      {
+        "model": "qat",
+        "engine": "karume",
+        "quant": "i4-gemvpar",
+        "linearGemvReduce": "parallel",
+        "linearGemvReduceOverride": "parallel",
+        "prefillBuckets": "sparse",
+        "chunkBuckets": [
+          4,
+          8,
+          16,
+          32,
+          48
+        ],
+        "chunkLength": 64,
+        "capacity": 128,
+        "loadSeconds": 6.926799999952316,
+        "bundleSha256": "ee7359283820dd12b6f8846fd59519a4477a9c68665feb02e6a610fc74a2d59b",
+        "adapter": {
+          "vendor": "nvidia",
+          "architecture": "ampere",
+          "description": "",
+          "device": "",
+          "isFallbackAdapter": false,
+          "features": [
+            "depth32float-stencil8",
+            "chromium-experimental-subgroup-matrix",
+            "rg11b10ufloat-renderable",
+            "bgra8unorm-storage",
+            "texture-formats-tier1",
+            "chromium-experimental-multi-draw-indirect",
+            "texture-compression-bc",
+            "dual-source-blending",
+            "core-features-and-limits",
+            "chromium-experimental-sampling-resource-table",
+            "chromium-experimental-timestamp-query-inside-passes",
+            "float32-filterable",
+            "indirect-first-instance",
+            "float32-blendable",
+            "subgroup-size-control",
+            "texture-compression-unaligned",
+            "depth-clip-control",
+            "texture-compression-bc-sliced-3d",
+            "timestamp-query",
+            "clip-distances",
+            "shader-f16",
+            "texture-formats-tier2",
+            "primitive-index",
+            "texture-component-swizzle",
+            "subgroups"
+          ]
+        },
+        "cases": [
+          {
+            "case": "english-list",
+            "firstTtftMs": 484.2249999642372,
+            "warmTtftMedianMs": 38.52000004053116,
+            "warmDecodeMedianTokensPerSecond": 90.2132899890727,
+            "deterministic": true
+          },
+          {
+            "case": "japanese-list",
+            "firstTtftMs": 167.33500003814697,
+            "warmTtftMedianMs": 47.17500001192093,
+            "warmDecodeMedianTokensPerSecond": 90.05081438566394,
+            "deterministic": true
+          }
+        ]
+      },
+      {
+        "model": "qat",
+        "engine": "karume",
+        "quant": "i4-gemvpar",
+        "linearGemvReduce": "parallel",
+        "linearGemvReduceOverride": "parallel",
+        "prefillBuckets": "dense",
+        "chunkBuckets": [
+          4,
+          8,
+          16,
+          24,
+          32,
+          40,
+          48,
+          56
+        ],
+        "chunkLength": 64,
+        "capacity": 128,
+        "loadSeconds": 6.925544999957085,
+        "bundleSha256": "ee7359283820dd12b6f8846fd59519a4477a9c68665feb02e6a610fc74a2d59b",
+        "adapter": {
+          "vendor": "nvidia",
+          "architecture": "ampere",
+          "description": "",
+          "device": "",
+          "isFallbackAdapter": false,
+          "features": [
+            "depth32float-stencil8",
+            "chromium-experimental-subgroup-matrix",
+            "rg11b10ufloat-renderable",
+            "bgra8unorm-storage",
+            "texture-formats-tier1",
+            "chromium-experimental-multi-draw-indirect",
+            "texture-compression-bc",
+            "dual-source-blending",
+            "chromium-experimental-sampling-resource-table",
+            "core-features-and-limits",
+            "chromium-experimental-timestamp-query-inside-passes",
+            "float32-filterable",
+            "indirect-first-instance",
+            "float32-blendable",
+            "subgroup-size-control",
+            "texture-compression-unaligned",
+            "depth-clip-control",
+            "texture-compression-bc-sliced-3d",
+            "timestamp-query",
+            "clip-distances",
+            "texture-formats-tier2",
+            "shader-f16",
+            "primitive-index",
+            "texture-component-swizzle",
+            "subgroups"
+          ]
+        },
+        "cases": [
+          {
+            "case": "english-list",
+            "firstTtftMs": 474.5250000357628,
+            "warmTtftMedianMs": 38.714999973773956,
+            "warmDecodeMedianTokensPerSecond": 90.2785738885241,
+            "deterministic": true
+          },
+          {
+            "case": "japanese-list",
+            "firstTtftMs": 165.80000001192093,
+            "warmTtftMedianMs": 41.49500000476837,
+            "warmDecodeMedianTokensPerSecond": 89.7730025531332,
+            "deterministic": true
+          }
+        ]
+      },
+      {
+        "model": "qat",
+        "engine": "karume",
+        "quant": "i4-gemvpar",
+        "linearGemvReduce": "parallel",
+        "linearGemvReduceOverride": "parallel",
+        "prefillBuckets": "dense",
+        "chunkBuckets": [
+          4,
+          8,
+          16,
+          24,
+          32,
+          40,
+          48,
+          56
+        ],
+        "chunkLength": 64,
+        "capacity": 128,
+        "loadSeconds": 6.965180000007153,
+        "bundleSha256": "ee7359283820dd12b6f8846fd59519a4477a9c68665feb02e6a610fc74a2d59b",
+        "adapter": {
+          "vendor": "nvidia",
+          "architecture": "ampere",
+          "description": "",
+          "device": "",
+          "isFallbackAdapter": false,
+          "features": [
+            "depth32float-stencil8",
+            "chromium-experimental-subgroup-matrix",
+            "rg11b10ufloat-renderable",
+            "bgra8unorm-storage",
+            "texture-formats-tier1",
+            "chromium-experimental-multi-draw-indirect",
+            "texture-compression-bc",
+            "dual-source-blending",
+            "chromium-experimental-sampling-resource-table",
+            "core-features-and-limits",
+            "chromium-experimental-timestamp-query-inside-passes",
+            "float32-filterable",
+            "indirect-first-instance",
+            "float32-blendable",
+            "subgroup-size-control",
+            "texture-compression-unaligned",
+            "depth-clip-control",
+            "texture-compression-bc-sliced-3d",
+            "texture-formats-tier2",
+            "timestamp-query",
+            "shader-f16",
+            "clip-distances",
+            "primitive-index",
+            "texture-component-swizzle",
+            "subgroups"
+          ]
+        },
+        "cases": [
+          {
+            "case": "english-list",
+            "firstTtftMs": 509.56999999284744,
+            "warmTtftMedianMs": 39.105000019073486,
+            "warmDecodeMedianTokensPerSecond": 90.05081439333604,
+            "deterministic": true
+          },
+          {
+            "case": "japanese-list",
+            "firstTtftMs": 158.22500002384186,
+            "warmTtftMedianMs": 41.5349999666214,
+            "warmDecodeMedianTokensPerSecond": 89.68099190663231,
+            "deterministic": true
+          }
+        ]
+      },
+      {
+        "model": "qat",
+        "engine": "karume",
+        "quant": "i4-gemvpar",
+        "linearGemvReduce": "parallel",
+        "linearGemvReduceOverride": "parallel",
+        "prefillBuckets": "sparse",
+        "chunkBuckets": [
+          4,
+          8,
+          16,
+          32,
+          48
+        ],
+        "chunkLength": 64,
+        "capacity": 128,
+        "loadSeconds": 6.975894999980927,
+        "bundleSha256": "ee7359283820dd12b6f8846fd59519a4477a9c68665feb02e6a610fc74a2d59b",
+        "adapter": {
+          "vendor": "nvidia",
+          "architecture": "ampere",
+          "description": "",
+          "device": "",
+          "isFallbackAdapter": false,
+          "features": [
+            "depth32float-stencil8",
+            "chromium-experimental-subgroup-matrix",
+            "rg11b10ufloat-renderable",
+            "bgra8unorm-storage",
+            "texture-formats-tier1",
+            "chromium-experimental-multi-draw-indirect",
+            "texture-compression-bc",
+            "dual-source-blending",
+            "chromium-experimental-sampling-resource-table",
+            "core-features-and-limits",
+            "chromium-experimental-timestamp-query-inside-passes",
+            "float32-filterable",
+            "indirect-first-instance",
+            "float32-blendable",
+            "subgroup-size-control",
+            "texture-compression-unaligned",
+            "depth-clip-control",
+            "texture-compression-bc-sliced-3d",
+            "shader-f16",
+            "texture-formats-tier2",
+            "timestamp-query",
+            "clip-distances",
+            "primitive-index",
+            "texture-component-swizzle",
+            "subgroups"
+          ]
+        },
+        "cases": [
+          {
+            "case": "english-list",
+            "firstTtftMs": 503.5199999809265,
+            "warmTtftMedianMs": 38.80000001192093,
+            "warmDecodeMedianTokensPerSecond": 90.16358250490809,
+            "deterministic": true
+          },
+          {
+            "case": "japanese-list",
+            "firstTtftMs": 169.80500000715256,
+            "warmTtftMedianMs": 47.080000042915344,
+            "warmDecodeMedianTokensPerSecond": 89.57133716906867,
+            "deterministic": true
+          }
+        ]
+      },
+      {
+        "model": "qat",
+        "engine": "karume",
+        "quant": "i4-gemvpar",
+        "linearGemvReduce": "parallel",
+        "linearGemvReduceOverride": "parallel",
+        "prefillBuckets": "default",
+        "chunkBuckets": [
+          4,
+          8,
+          32
+        ],
+        "chunkLength": 64,
+        "capacity": 128,
+        "loadSeconds": 6.847785000026226,
+        "bundleSha256": "ee7359283820dd12b6f8846fd59519a4477a9c68665feb02e6a610fc74a2d59b",
+        "adapter": {
+          "vendor": "nvidia",
+          "architecture": "ampere",
+          "description": "",
+          "device": "",
+          "isFallbackAdapter": false,
+          "features": [
+            "depth32float-stencil8",
+            "chromium-experimental-subgroup-matrix",
+            "rg11b10ufloat-renderable",
+            "texture-formats-tier1",
+            "bgra8unorm-storage",
+            "chromium-experimental-multi-draw-indirect",
+            "texture-compression-bc",
+            "dual-source-blending",
+            "core-features-and-limits",
+            "chromium-experimental-sampling-resource-table",
+            "chromium-experimental-timestamp-query-inside-passes",
+            "float32-filterable",
+            "indirect-first-instance",
+            "float32-blendable",
+            "subgroup-size-control",
+            "texture-compression-unaligned",
+            "depth-clip-control",
+            "texture-compression-bc-sliced-3d",
+            "shader-f16",
+            "clip-distances",
+            "texture-formats-tier2",
+            "timestamp-query",
+            "primitive-index",
+            "texture-component-swizzle",
+            "subgroups"
+          ]
+        },
+        "cases": [
+          {
+            "case": "english-list",
+            "firstTtftMs": 396.55500000715256,
+            "warmTtftMedianMs": 39.01500004529953,
+            "warmDecodeMedianTokensPerSecond": 89.9749355545863,
+            "deterministic": true
+          },
+          {
+            "case": "japanese-list",
+            "firstTtftMs": 181.16000002622604,
+            "warmTtftMedianMs": 59.655000030994415,
+            "warmDecodeMedianTokensPerSecond": 90.0501708152817,
+            "deterministic": true
+          }
+        ]
+      }
+    ],
+    "failures": []
+  },
+  "cpuPleCost": {
+    "directory": "outputs/bench/karume/2026-09-13_cpu-ple-cost-9ajm68w2",
+    "resultsSha256": "e1cf83005bbf7667e134680807bf2e802f5eba02647036e78df24a60bc363e40",
+    "provenance": {
+      "revision": "6aae325b66dfa9e4495e14b5c7dfa46f3169e5c0",
+      "sha256": {
+        "outputs/bench/karume/2026-09-13_cpu-ple-cost-9ajm68w2/run.ts": "4f169d09cee8fe4bb68da5dfad422c883e4ec893b8f51773f3bacbb1738cdc2d",
+        "packages/models/src/gemma/ple.ts": "53b39d4c0bc2e24a9a66c0bae1264e33ed91dbe52022887f81d57f0c30e07bf2",
+        "tools/llm-speed/browser/cases.json": "c8179d43c11c647e166c9bb5137a43213903460ce17faf5d5d59636e46a251c0"
+      }
+    },
+    "cpuModel": "AMD Ryzen 5 5600 6-Core Processor",
+    "environment": {
+      "deno": "2.9.6",
+      "v8": "15.0.245.2-rusty",
+      "typescript": "6.0.3"
+    },
+    "scope": "Deno CPU-only warm quantized-row-cache gather; excludes file reads and GPU upload",
+    "samples": 10500,
+    "results": [
+      {
+        "model": "normal-e2b",
+        "scenario": "decode-1",
+        "rows": 1,
+        "samples": 500,
+        "minMs": 0.011240000000000805,
+        "p50Ms": 0.020700000000005048,
+        "p95Ms": 0.03173999999999921,
+        "meanMs": 0.02207105199999981,
+        "before": {
+          "readCalls": 114,
+          "readBytes": 457240,
+          "stats": {
+            "loads": 0,
+            "rowReads": 50,
+            "resident": 0,
+            "residentBytes": 455000
+          }
+        },
+        "after": {
+          "readCalls": 114,
+          "readBytes": 457240,
+          "stats": {
+            "loads": 0,
+            "rowReads": 50,
+            "resident": 0,
+            "residentBytes": 455000
+          }
+        }
+      },
+      {
+        "model": "normal-e2b",
+        "scenario": "verify-4",
+        "rows": 4,
+        "samples": 500,
+        "minMs": 0.03149999999999409,
+        "p50Ms": 0.03461100000001238,
+        "p95Ms": 0.08768000000000598,
+        "meanMs": 0.05720737199999979,
+        "before": {
+          "readCalls": 114,
+          "readBytes": 457240,
+          "stats": {
+            "loads": 0,
+            "rowReads": 50,
+            "resident": 0,
+            "residentBytes": 455000
+          }
+        },
+        "after": {
+          "readCalls": 114,
+          "readBytes": 457240,
+          "stats": {
+            "loads": 0,
+            "rowReads": 50,
+            "resident": 0,
+            "residentBytes": 455000
+          }
+        }
+      },
+      {
+        "model": "normal-e2b",
+        "scenario": "verify-8",
+        "rows": 8,
+        "samples": 500,
+        "minMs": 0.06902999999999793,
+        "p50Ms": 0.07171999999999912,
+        "p95Ms": 0.0760609999999815,
+        "meanMs": 0.07396042399999982,
+        "before": {
+          "readCalls": 114,
+          "readBytes": 457240,
+          "stats": {
+            "loads": 0,
+            "rowReads": 50,
+            "resident": 0,
+            "residentBytes": 455000
+          }
+        },
+        "after": {
+          "readCalls": 114,
+          "readBytes": 457240,
+          "stats": {
+            "loads": 0,
+            "rowReads": 50,
+            "resident": 0,
+            "residentBytes": 455000
+          }
+        }
+      },
+      {
+        "model": "normal-e2b",
+        "scenario": "english-32",
+        "rows": 32,
+        "samples": 500,
+        "minMs": 0.23543000000000802,
+        "p50Ms": 0.27715999999998076,
+        "p95Ms": 0.30363999999997304,
+        "meanMs": 0.29026060799999914,
+        "before": {
+          "readCalls": 116,
+          "readBytes": 466340,
+          "stats": {
+            "loads": 0,
+            "rowReads": 51,
+            "resident": 0,
+            "residentBytes": 464100
+          }
+        },
+        "after": {
+          "readCalls": 116,
+          "readBytes": 466340,
+          "stats": {
+            "loads": 0,
+            "rowReads": 51,
+            "resident": 0,
+            "residentBytes": 464100
+          }
+        }
+      },
+      {
+        "model": "normal-e2b",
+        "scenario": "japanese-40",
+        "rows": 40,
+        "samples": 500,
+        "minMs": 0.3031609999999887,
+        "p50Ms": 0.5492509999999129,
+        "p95Ms": 1.0114909999999782,
+        "meanMs": 0.5506199259999975,
+        "before": {
+          "readCalls": 116,
+          "readBytes": 466340,
+          "stats": {
+            "loads": 0,
+            "rowReads": 51,
+            "resident": 0,
+            "residentBytes": 464100
+          }
+        },
+        "after": {
+          "readCalls": 116,
+          "readBytes": 466340,
+          "stats": {
+            "loads": 0,
+            "rowReads": 51,
+            "resident": 0,
+            "residentBytes": 464100
+          }
+        }
+      },
+      {
+        "model": "normal-e2b",
+        "scenario": "japanese-48",
+        "rows": 48,
+        "samples": 500,
+        "minMs": 0.559671000000094,
+        "p50Ms": 0.5742210000000796,
+        "p95Ms": 1.1617820000000165,
+        "meanMs": 0.6781915019999964,
+        "before": {
+          "readCalls": 116,
+          "readBytes": 466340,
+          "stats": {
+            "loads": 0,
+            "rowReads": 51,
+            "resident": 0,
+            "residentBytes": 464100
+          }
+        },
+        "after": {
+          "readCalls": 116,
+          "readBytes": 466340,
+          "stats": {
+            "loads": 0,
+            "rowReads": 51,
+            "resident": 0,
+            "residentBytes": 464100
+          }
+        }
+      },
+      {
+        "model": "normal-e2b",
+        "scenario": "japanese-64",
+        "rows": 64,
+        "samples": 500,
+        "minMs": 0.6041609999999764,
+        "p50Ms": 0.6201409999998759,
+        "p95Ms": 1.3955819999998766,
+        "meanMs": 0.7841155779999949,
+        "before": {
+          "readCalls": 116,
+          "readBytes": 466340,
+          "stats": {
+            "loads": 0,
+            "rowReads": 51,
+            "resident": 0,
+            "residentBytes": 464100
+          }
+        },
+        "after": {
+          "readCalls": 116,
+          "readBytes": 466340,
+          "stats": {
+            "loads": 0,
+            "rowReads": 51,
+            "resident": 0,
+            "residentBytes": 464100
+          }
+        }
+      },
+      {
+        "model": "qat-e2b",
+        "scenario": "decode-1",
+        "rows": 1,
+        "samples": 500,
+        "minMs": 0.03191999999990003,
+        "p50Ms": 0.03251000000000204,
+        "p95Ms": 0.03353999999990265,
+        "meanMs": 0.03276691599999412,
+        "before": {
+          "readCalls": 108,
+          "readBytes": 232368,
+          "stats": {
+            "loads": 0,
+            "rowReads": 50,
+            "resident": 0,
+            "residentBytes": 231000
+          }
+        },
+        "after": {
+          "readCalls": 108,
+          "readBytes": 232368,
+          "stats": {
+            "loads": 0,
+            "rowReads": 50,
+            "resident": 0,
+            "residentBytes": 231000
+          }
+        }
+      },
+      {
+        "model": "qat-e2b",
+        "scenario": "verify-4",
+        "rows": 4,
+        "samples": 500,
+        "minMs": 0.09138099999995575,
+        "p50Ms": 0.09455000000002656,
+        "p95Ms": 0.1453910000000178,
+        "meanMs": 0.10909370399999853,
+        "before": {
+          "readCalls": 108,
+          "readBytes": 232368,
+          "stats": {
+            "loads": 0,
+            "rowReads": 50,
+            "resident": 0,
+            "residentBytes": 231000
+          }
+        },
+        "after": {
+          "readCalls": 108,
+          "readBytes": 232368,
+          "stats": {
+            "loads": 0,
+            "rowReads": 50,
+            "resident": 0,
+            "residentBytes": 231000
+          }
+        }
+      },
+      {
+        "model": "qat-e2b",
+        "scenario": "verify-8",
+        "rows": 8,
+        "samples": 500,
+        "minMs": 0.20861999999988257,
+        "p50Ms": 0.21306000000004133,
+        "p95Ms": 0.22232999999982894,
+        "meanMs": 0.21677694599998812,
+        "before": {
+          "readCalls": 108,
+          "readBytes": 232368,
+          "stats": {
+            "loads": 0,
+            "rowReads": 50,
+            "resident": 0,
+            "residentBytes": 231000
+          }
+        },
+        "after": {
+          "readCalls": 108,
+          "readBytes": 232368,
+          "stats": {
+            "loads": 0,
+            "rowReads": 50,
+            "resident": 0,
+            "residentBytes": 231000
+          }
+        }
+      },
+      {
+        "model": "qat-e2b",
+        "scenario": "english-32",
+        "rows": 32,
+        "samples": 500,
+        "minMs": 0.7562809999999445,
+        "p50Ms": 0.7938909999998032,
+        "p95Ms": 1.1619920000002821,
+        "meanMs": 0.8201297380000019,
+        "before": {
+          "readCalls": 110,
+          "readBytes": 236988,
+          "stats": {
+            "loads": 0,
+            "rowReads": 51,
+            "resident": 0,
+            "residentBytes": 235620
+          }
+        },
+        "after": {
+          "readCalls": 110,
+          "readBytes": 236988,
+          "stats": {
+            "loads": 0,
+            "rowReads": 51,
+            "resident": 0,
+            "residentBytes": 235620
+          }
+        }
+      },
+      {
+        "model": "qat-e2b",
+        "scenario": "japanese-40",
+        "rows": 40,
+        "samples": 500,
+        "minMs": 0.9200219999997898,
+        "p50Ms": 0.9740520000000288,
+        "p95Ms": 0.9799520000001394,
+        "meanMs": 0.9822339319999955,
+        "before": {
+          "readCalls": 110,
+          "readBytes": 236988,
+          "stats": {
+            "loads": 0,
+            "rowReads": 51,
+            "resident": 0,
+            "residentBytes": 235620
+          }
+        },
+        "after": {
+          "readCalls": 110,
+          "readBytes": 236988,
+          "stats": {
+            "loads": 0,
+            "rowReads": 51,
+            "resident": 0,
+            "residentBytes": 235620
+          }
+        }
+      },
+      {
+        "model": "qat-e2b",
+        "scenario": "japanese-48",
+        "rows": 48,
+        "samples": 500,
+        "minMs": 0.9297309999997196,
+        "p50Ms": 0.9986610000000837,
+        "p95Ms": 1.2429120000001603,
+        "meanMs": 1.060981802000014,
+        "before": {
+          "readCalls": 110,
+          "readBytes": 236988,
+          "stats": {
+            "loads": 0,
+            "rowReads": 51,
+            "resident": 0,
+            "residentBytes": 235620
+          }
+        },
+        "after": {
+          "readCalls": 110,
+          "readBytes": 236988,
+          "stats": {
+            "loads": 0,
+            "rowReads": 51,
+            "resident": 0,
+            "residentBytes": 235620
+          }
+        }
+      },
+      {
+        "model": "qat-e2b",
+        "scenario": "japanese-64",
+        "rows": 64,
+        "samples": 500,
+        "minMs": 1.253172000000177,
+        "p50Ms": 1.2750429999996413,
+        "p95Ms": 1.4346120000000155,
+        "meanMs": 1.2962991019999928,
+        "before": {
+          "readCalls": 110,
+          "readBytes": 236988,
+          "stats": {
+            "loads": 0,
+            "rowReads": 51,
+            "resident": 0,
+            "residentBytes": 235620
+          }
+        },
+        "after": {
+          "readCalls": 110,
+          "readBytes": 236988,
+          "stats": {
+            "loads": 0,
+            "rowReads": 51,
+            "resident": 0,
+            "residentBytes": 235620
+          }
+        }
+      },
+      {
+        "model": "qat-e4b",
+        "scenario": "decode-1",
+        "rows": 1,
+        "samples": 500,
+        "minMs": 0.0448500000002241,
+        "p50Ms": 0.04658999999992375,
+        "p95Ms": 0.04993999999987864,
+        "meanMs": 0.047053299999990486,
+        "before": {
+          "readCalls": 106,
+          "readBytes": 143824,
+          "stats": {
+            "loads": 0,
+            "rowReads": 50,
+            "resident": 0,
+            "residentBytes": 142800
+          }
+        },
+        "after": {
+          "readCalls": 106,
+          "readBytes": 143824,
+          "stats": {
+            "loads": 0,
+            "rowReads": 50,
+            "resident": 0,
+            "residentBytes": 142800
+          }
+        }
+      },
+      {
+        "model": "qat-e4b",
+        "scenario": "verify-4",
+        "rows": 4,
+        "samples": 500,
+        "minMs": 0.1367099999997663,
+        "p50Ms": 0.13871000000017375,
+        "p95Ms": 0.14407000000028347,
+        "meanMs": 0.1408516159999963,
+        "before": {
+          "readCalls": 106,
+          "readBytes": 143824,
+          "stats": {
+            "loads": 0,
+            "rowReads": 50,
+            "resident": 0,
+            "residentBytes": 142800
+          }
+        },
+        "after": {
+          "readCalls": 106,
+          "readBytes": 143824,
+          "stats": {
+            "loads": 0,
+            "rowReads": 50,
+            "resident": 0,
+            "residentBytes": 142800
+          }
+        }
+      },
+      {
+        "model": "qat-e4b",
+        "scenario": "verify-8",
+        "rows": 8,
+        "samples": 500,
+        "minMs": 0.3072699999993347,
+        "p50Ms": 0.3155900000001566,
+        "p95Ms": 0.32105000000046857,
+        "meanMs": 0.3180326320000022,
+        "before": {
+          "readCalls": 106,
+          "readBytes": 143824,
+          "stats": {
+            "loads": 0,
+            "rowReads": 50,
+            "resident": 0,
+            "residentBytes": 142800
+          }
+        },
+        "after": {
+          "readCalls": 106,
+          "readBytes": 143824,
+          "stats": {
+            "loads": 0,
+            "rowReads": 50,
+            "resident": 0,
+            "residentBytes": 142800
+          }
+        }
+      },
+      {
+        "model": "qat-e4b",
+        "scenario": "english-32",
+        "rows": 32,
+        "samples": 500,
+        "minMs": 1.1686319999998886,
+        "p50Ms": 1.1771319999998013,
+        "p95Ms": 1.2130919999999605,
+        "meanMs": 1.187963057999992,
+        "before": {
+          "readCalls": 108,
+          "readBytes": 146680,
+          "stats": {
+            "loads": 0,
+            "rowReads": 51,
+            "resident": 0,
+            "residentBytes": 145656
+          }
+        },
+        "after": {
+          "readCalls": 108,
+          "readBytes": 146680,
+          "stats": {
+            "loads": 0,
+            "rowReads": 51,
+            "resident": 0,
+            "residentBytes": 145656
+          }
+        }
+      },
+      {
+        "model": "qat-e4b",
+        "scenario": "japanese-40",
+        "rows": 40,
+        "samples": 500,
+        "minMs": 1.4220030000005863,
+        "p50Ms": 1.4617630000002464,
+        "p95Ms": 1.5566920000001119,
+        "meanMs": 1.480885510000013,
+        "before": {
+          "readCalls": 108,
+          "readBytes": 146680,
+          "stats": {
+            "loads": 0,
+            "rowReads": 51,
+            "resident": 0,
+            "residentBytes": 145656
+          }
+        },
+        "after": {
+          "readCalls": 108,
+          "readBytes": 146680,
+          "stats": {
+            "loads": 0,
+            "rowReads": 51,
+            "resident": 0,
+            "residentBytes": 145656
+          }
+        }
+      },
+      {
+        "model": "qat-e4b",
+        "scenario": "japanese-48",
+        "rows": 48,
+        "samples": 500,
+        "minMs": 1.4585630000001402,
+        "p50Ms": 1.4837429999997767,
+        "p95Ms": 1.534022000000732,
+        "meanMs": 1.4926521299999786,
+        "before": {
+          "readCalls": 108,
+          "readBytes": 146680,
+          "stats": {
+            "loads": 0,
+            "rowReads": 51,
+            "resident": 0,
+            "residentBytes": 145656
+          }
+        },
+        "after": {
+          "readCalls": 108,
+          "readBytes": 146680,
+          "stats": {
+            "loads": 0,
+            "rowReads": 51,
+            "resident": 0,
+            "residentBytes": 145656
+          }
+        }
+      },
+      {
+        "model": "qat-e4b",
+        "scenario": "japanese-64",
+        "rows": 64,
+        "samples": 500,
+        "minMs": 1.5055730000003678,
+        "p50Ms": 1.5380629999999655,
+        "p95Ms": 2.536483999999291,
+        "meanMs": 1.764425945999983,
+        "before": {
+          "readCalls": 108,
+          "readBytes": 146680,
+          "stats": {
+            "loads": 0,
+            "rowReads": 51,
+            "resident": 0,
+            "residentBytes": 145656
+          }
+        },
+        "after": {
+          "readCalls": 108,
+          "readBytes": 146680,
+          "stats": {
+            "loads": 0,
+            "rowReads": 51,
+            "resident": 0,
+            "residentBytes": 145656
+          }
+        }
+      }
+    ]
+  },
+  "verification": {
+    "directory": "outputs/bench/karume/2026-09-13_prefill-verify-j4cfwp2v",
+    "completion": {
+      "exitCode": 0,
+      "elapsedSeconds": 1534.7628316879272,
+      "branch": "codex/review-and-fix"
+    },
+    "testSummary": "2953 passed (784 steps) | 0 failed | 5 ignored (25m32s)",
+    "verifyLogSha256": "c9a7a6dda851b9c7a1c58c7138e2f087326fe5602402f69c0985bc420d420fe7",
+    "sourceAndBundleAudit": {
+      "sourceFilesChecked": 566,
+      "sourceDifferences": [],
+      "bundleSha256": "ee7359283820dd12b6f8846fd59519a4477a9c68665feb02e6a610fc74a2d59b",
+      "matchesFinalUi": true
+    }
+  }
+}

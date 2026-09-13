@@ -55,6 +55,35 @@ and 1–8 input rows. Larger batches and unmeasured shapes keep their existing k
 Token sequences can differ, especially for QAT. The M2 results and quality limits are
 recorded in [the adoption note](../../../docs/research/2026-09-13-m2-gemv-adoption.md).
 
+## Prefill bucket experiment
+
+Select **karume**, **並列加算を指定**, and **3種類を往復比較** under Karumeの入力バケット
+to compare the prefill candidates on M2. Explicit parallel selection also works with
+older local distributions. Select **両方** under モデル to include QAT E2B. Save the
+JSON after completion; each result includes `prefillBuckets` and `chunkBuckets`.
+
+| Selection           | Physical row buckets below chunk length 64 |
+| ------------------- | ------------------------------------------ |
+| 標準 (`default`)    | 4, 8, 32                                   |
+| 少数追加 (`sparse`) | 4, 8, 16, 32, 48                           |
+| 細分化 (`dense`)    | 4, 8, 16, 24, 32, 40, 48, 56               |
+
+The default stays **標準**. A 37-token Japanese input uses 64 physical rows with
+standard buckets, 48 with sparse buckets, and 40 with dense buckets. The 31-token
+English input uses 32 rows in all three. This primarily targets TTFT, not decode
+throughput. It does not change the stored weights, quant selection, or library defaults.
+
+The combined comparison runs `default → sparse → dense → dense → sparse → default`,
+with a fresh iframe/model for each job, to expose run-order effects. Each job retains
+the initial, warmup, and three measured generations described below. Selecting both
+GEMV modes doubles the six Karume jobs per model. Transformers.js runs only once per
+model regardless of these Karume settings.
+
+This is a **chunk-64 experiment**, not a recommendation to extend all chunk sizes.
+More buckets consume more execution-plan and buffer-cache entries; long inputs and
+alternating context capacities can erase the benefit. RTX cache-stress results and
+remaining M2 validation are recorded in [the prefill note](../../../docs/research/2026-09-13-prefill-buckets.md).
+
 ## What is measured
 
 The fixed English and Japanese prompts and token IDs are in [cases.json](cases.json).

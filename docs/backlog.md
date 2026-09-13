@@ -17,8 +17,9 @@
   [利用者のM2実測とPLE行キャッシュ](research/2026-09-12-ple-row-cache.md)を記録。H-22のM2改善後は利用者追試で速度向上と40生成の一致を確認。
   [WebMLとの同条件比較](research/2026-09-12-webml-browser-speed.md)も追加。[Chromeプロファイルと候補比較](research/2026-09-12-chrome-gemma-optimization.md)に基づき、
   大語彙INT8のc16を限定採用（[K-34追試](research/2026-09-12-chrome-gemv-followup.md)）。K並列を明示指定で追加（[K-35](research/2026-09-12-chrome-gemv-parallel.md)）。[M2の実測と採用判断](research/2026-09-13-m2-gemv-adoption.md)から、通常/QAT E2Bに高速化付きの既定quantを定義。
-  重みコピーK-33は費用対効果で見送り。次はGPU常駐PLE・融合・広い品質比較、
-  H-23の入力バケット検収、QATのM2/RTX生成差とChromeのGPU Instance消失の原因の切り分け。
+  重みコピーK-33は費用対効果で見送り。次は融合・広い品質比較（Denoの暖機後CPU PLE展開は小さく、GPU転送の帰属は未完）、
+  H-23の[入力バケット比較画面](research/2026-09-13-prefill-buckets.md)でM2を検収し、chunk64への適用を判断する。
+  広いchunk/複数容量への一括適用は見送り。QATのM2/RTX生成差とChromeのGPU Instance消失は原因の切り分けを残す。
   残件は配布 recipe / source 表、長文と広い品質評価。実験資産を公開済みモデルとして扱わない。
   手元の試走は [MiniCPM5 CLI](../examples/minicpm5/README.md) / [Qwen3 CLI](../examples/qwen3/README.md) を使える。
   容量 128 の対話・履歴整理・reset・中断と、公式 CPU 参照への多ターン一致を検収済み。
