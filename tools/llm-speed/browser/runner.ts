@@ -6,6 +6,7 @@ import {
 import {
   type Engine,
   type ModelKind,
+  type NormalizationMode,
   onnxModels,
   type PrefillBuckets,
   versions,
@@ -197,6 +198,7 @@ export const runBenchmark = async (
   status: (s: string) => void,
   linearGemvReduce?: LinearGemvReduce,
   prefillBuckets: PrefillBuckets = "default",
+  normalization: NormalizationMode = "reference",
 ): Promise<object> => {
   const response = await fetch("/cases.json");
   if (!response.ok) throw Error(`Fixture HTTP ${response.status}`);
@@ -219,7 +221,7 @@ export const runBenchmark = async (
   status(`${kind} / ${engine}: loading`);
   const started = performance.now();
   const handle = engine === "karume"
-    ? await loadKarume(kind, fixture, linearGemvReduce, prefillBuckets)
+    ? await loadKarume(kind, fixture, linearGemvReduce, prefillBuckets, normalization)
     : await loadTransformers(kind, fixture, localOnnx, status);
   const loadSeconds = (performance.now() - started) / 1000;
   try {

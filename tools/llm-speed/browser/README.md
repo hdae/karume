@@ -8,8 +8,9 @@ deno task bench:llm-browser
 
 Open **http://localhost:8787** in Chrome on your Mac and click **計測開始**. The
 current defaults measure **both Gemma 4 E2B models with karume, parallel GEMV, and
-dense prefill buckets**: two model loads and 20 generations in total. These settings
-provide the baseline for the next optimization comparison. Choose Transformers.js,
+dense prefill buckets**, comparing reference / submit limit 768 / RMS-add fusion
+with limit 768 in forward and reverse order: 12 model loads and 120 generations
+in total. These settings prepare the next M2 validation. Choose Transformers.js,
 reference settings, or a combined comparison explicitly when needed.
 **JSONを保存** downloads all timings, generated token IDs, output text,
 GPU information, model references, dependency versions, and the benchmark bundle hash.
@@ -52,7 +53,8 @@ are rewritten by this benchmark. The table and JSON include the selected quant a
 effective reduction mode; JSON also records whether the mode was explicitly overridden.
 
 Select **karume** under 比較対象 and **逐次と並列を比較** under Karumeの行列計算 to run
-both overrides in fresh iframes, with the same quant and weights. Parallel GEMV changes
+both overrides in fresh iframes, with the same quant and weights. Set
+Karumeの正規化・投入設定 to **従来** to isolate that comparison. Parallel GEMV changes
 the summation order for selected packed INT2/INT4/INT8 matrices with f32 arithmetic
 and 1–8 input rows. Larger batches and unmeasured shapes keep their existing kernels.
 Token sequences can differ, especially for QAT. The M2 results and quality limits are
@@ -62,7 +64,8 @@ recorded in [the adoption note](../../../docs/research/2026-09-13-m2-gemv-adopti
 
 The initial selection uses **両方**, **karume**, **並列加算を指定**, and **細分化**,
 following the [M2 validation](../../../docs/research/2026-09-13-m2-prefill-adoption.md).
-To repeat the bucket comparison, change Karumeの入力バケット to **3種類を往復比較**.
+To repeat only the bucket comparison, change Karumeの入力バケット to
+**3種類を往復比較** and Karumeの正規化・投入設定 to **従来**.
 Explicit parallel selection also works with older local distributions. Save the JSON
 after completion; each result includes `prefillBuckets` and `chunkBuckets`.
 
@@ -88,6 +91,29 @@ This is a **chunk-64 experiment**, not a recommendation to extend all chunk size
 More buckets consume more execution-plan and buffer-cache entries; long inputs and
 alternating context capacities can erase the benefit. RTX cache-stress results and
 the scope of the experiment are recorded in [the prefill note](../../../docs/research/2026-09-13-prefill-buckets.md).
+
+## RMS normalization and GPU submission comparison
+
+The default **3設定を往復比較** runs `reference → submit768 → fused → fused → submit768 → reference`.
+Each model uses fresh iframes, with the same weights, parallel GEMV, and dense buckets.
+This separates the contribution of GPU submission frequency from kernel fusion.
+
+| Setting                             | RMS-add fusion | Maximum dispatches per submission |
+| ----------------------------------- | -------------- | --------------------------------: |
+| 従来 (`reference`)                  | Off            |                              1024 |
+| 投入上限のみ768 (`submit768`)       | Off            |                               768 |
+| RMSと加算を融合 + 上限768 (`fused`) | On             |                               768 |
+
+The fusion is opt-in and keeps the original RMS kernels available. It combines
+adjacent RMS normalization and addition for validated f32 widths; the integer
+rounding barrier matched the reference on the tested RTX backends. M2 validation
+is pending. Library, CLI, and quant defaults stay unchanged. Results include
+`normalization`, `fuseRmsNormAdd`, and `submitMaxChunkSize`.
+
+Both Gemma pipelines also accept `fuseRmsNormAdd` and the runtime `submitPolicy`
+as independent options. The fusion flag alone does not change the submission limit.
+See [ADR 0099](../../../docs/decisions/0099-rms-norm-add-fusion.md) and
+[measurements](../../../docs/research/2026-09-13-rms-norm-add-fusion.md).
 
 ## What is measured
 

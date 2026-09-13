@@ -15,22 +15,22 @@
  *   沈黙誤値になる。
  * - MUST: 融合は演算列を潰すが**値は変えない**。丸め位置の保存はカーネル側の責務で、その
  *   手段（workgroup memory 往復による丸め障壁）が仕様保証でないことは各カーネルの docstring に
- *   書いてある。
+ *   書いてある。任意指定のrmsNormAddはADR 0099の検収範囲に限り、未検証GPUでは参照経路を残す。
  * - MUST: 掴むのは**契約の出力数が 1 本**のノードだけ（{@link windowIsSingleOutput} —
  *   ADR 0068 決定 1）。{@link FusedStep} は単一出力のままで、鎖のノードの出力は常に
  *   `outputs[0]`（多出力 op の融合は語彙に入れていない）。
  *
  * ## 畳む先は 1 dispatch とは限らない
  *
- * 4 ルール（silu / upsample2x / rope / adaln）は「N ノード → private カーネル 1 dispatch」だが、
+ * rmsNormAdd / silu / upsample2x / rope / adaln は「N ノード → private カーネル 1 dispatch」だが、
  * {@link ROW_BLOCK_ATTENTION_RULE} は**演算ではなく中間の実体化幅**を畳むので、ステップ内で
  * 閉じた一時（{@link FusedStep.temps}）を挟んだ dispatch 列になる。どちらも
  * {@link FusedStep} 1 つ = 実行ステップ 1 つで、解放簿記の合流点は変わらない。
  *
  * ## 適用順
  *
- * {@link FUSION_RULES} の**宣言順**（silu → upsample2x → rope → adaln → rowBlockAttention）。
- * 5 ルールの先頭 op は `sigmoid` / `reshape` / `mul|slice` / `layer_norm` / `bmm` で互いに素
+ * {@link FUSION_RULES} の**宣言順**（rmsNormAdd → silu → upsample2x → rope → adaln → rowBlockAttention）。
+ * 6 ルールの先頭 op は `rms_norm` / `sigmoid` / `reshape` / `mul|slice` / `layer_norm` / `bmm` で互いに素
  * なので、この順序は結果に効かない（順序が意味を持つのは先頭 op が重なったときだけ —
  * 重なりが生じていないことは tests/runtime_fusion_test.ts が {@link FusionRule.heads} から
  * 機械的に検査する）。窓の**内側**に他ルールの先頭 op が現れる形（rowBlockAttention の窓は
@@ -54,6 +54,7 @@ import {
   layerNormAttrs,
   numel,
   outputCountOf,
+  rmsNormEps,
   SAFE_SOFTMAX_OP,
   sliceAttrs,
   softmaxDim,
@@ -93,13 +94,19 @@ import {
   UPSAMPLE_2X_WGSL,
   UPSAMPLE_2X_WORKGROUP_SIZE,
 } from "../kernels/upsample2x.ts";
+import {
+  rmsNormAddKey,
+  type RmsNormAddOrder,
+  rmsNormAddWgsl,
+  rmsNormParams,
+} from "../kernels/rms-norm.ts";
 import { ExecutionError, type NodePlan } from "./plan.ts";
 
 /** 融合ルールの識別子（{@link FUSION_RULES} の宣言順と 1 対 1）。 */
-type FusionRuleName = "silu" | "upsample2x" | "rope" | "adaln" | "rowBlockAttention";
+type FusionRuleName = "rmsNormAdd" | "silu" | "upsample2x" | "rope" | "adaln" | "rowBlockAttention";
 
 /**
- * 診断カウンタの見出し。融合 4 ルールに加えて、0 dispatch の別名化のうち**条件付きで外れうる**
+ * 診断カウンタの見出し。融合ルールに加えて、0 dispatch の別名化のうち**条件付きで外れうる**
  * 恒等 expand（{@link ExecStep} の `aliasesInput`）を数える。reshape の別名化は無条件なので
  * 数えない（外れようがない = 観測する意味がない）。
  */
@@ -122,7 +129,7 @@ export type FusedOperand =
 /**
  * dispatch の workgroup 数の決め方。
  *
- * - `gridStride` = 要素 / 行の被覆数を割る形（elementwise・reduce・融合 4 ルール）。上限を
+ * - `gridStride` = 要素 / 行の被覆数を割る形（elementwise・reduce・1 dispatchの融合）。上限を
  *   超えたら縮退し、カーネル側の grid-stride が残りを回す。
  * - `tiled` = **1 workgroup = 1 出力タイル**の GEMM 族。grid-stride で縮退できないので、
  *   上限超過は宣言側（`tiledWorkgroups`）が fail loudly にする。
@@ -149,7 +156,7 @@ type FusedDispatch = {
   readonly paramsStorage?: boolean;
   /**
    * binding 1 以降のオペランド列。**省略できるのは 1 dispatch のルールだけ**で、そのときは
-   * 「{@link FusedStep.binds} を宣言順 → 末尾に出力」（融合 4 ルール共通の形）になる。
+   * 「{@link FusedStep.binds} を宣言順 → 末尾に出力」（1 dispatchの融合に共通の形）になる。
    */
   readonly operands?: readonly FusedOperand[];
   readonly workgroups: FusedWorkgroups;
@@ -242,6 +249,8 @@ type FusionContext = {
    * 最小枚数の代わりにこの枚数で割る。上限に収まらない枚数は fail loudly。
    */
   readonly rowBlockSplit?: number;
+  /** 明示指定時だけRMS→addを融合する（ADR 0099）。 */
+  readonly fuseRmsNormAdd?: boolean;
 };
 
 const sameShape = (a: readonly number[], b: readonly number[]): boolean =>
@@ -1018,7 +1027,7 @@ type RowBlockAttentionMatch = FusionMatch & {
  *
  * ## 適用順と head 衝突
  *
- * 先頭 op は `bmm` で、既存 4 ルールの先頭 op（`sigmoid` / `reshape` / `mul` / `slice` /
+ * 先頭 op は `bmm` で、他ルールの先頭 op（`rms_norm` / `sigmoid` / `reshape` / `mul` / `slice` /
  * `layer_norm`）と互いに素なので宣言順は結果に効かない。窓の内側には `reshape` /
  * `expand` が 5 本あるが、掴んだ時点で走査は窓幅ぶん進むので内側で別ルールが発火する余地は
  * 無い（掴めなかったときだけ内側の `reshape` が upsample2x の先頭として試され、6 ノードの
@@ -1239,8 +1248,67 @@ const ROW_BLOCK_ATTENTION_RULE = defineRule<RowBlockAttentionMatch>({
   },
 });
 
+type RmsNormAddMatch = FusionMatch & {
+  readonly binds: readonly string[];
+  readonly shape: readonly number[];
+  readonly outputName: string;
+  readonly eps: number;
+  readonly order: RmsNormAddOrder;
+};
+
+/** 共有・出力・broadcastは既存経路へ戻す。実測した最終次元に限定する（ADR 0099）。 */
+const RMS_NORM_ADD_RULE = defineRule<RmsNormAddMatch>({
+  name: "rmsNormAdd",
+  heads: ["rms_norm"],
+  match: (nodes, index, context) => {
+    if (context.fuseRmsNormAdd !== true) return undefined;
+    const norm = nodes[index], add = nodes[index + 1];
+    if (norm?.node.op !== "rms_norm" || add?.node.op !== "add") return undefined;
+    const chain = [norm, add], shape = norm.outputs[0].shape;
+    if (!allF32(chain) || !internalsArePrivate(chain, context)) return undefined;
+    if (shape.some((dim) => dim < 1) || ![256, 1536, 2560].includes(shape[shape.length - 1])) {
+      return undefined;
+    }
+    const position = add.node.ins.indexOf(norm.outputs[0].name);
+    if (
+      position < 0 || !sameShape(shape, norm.inputShapes[0]) ||
+      add.inputShapes.some((input) => !sameShape(input, shape)) ||
+      !sameShape(shape, add.outputs[0].shape)
+    ) return undefined;
+    const binds = [...norm.node.ins, add.node.ins[1 - position]];
+    // 重複bindingを要求する形は今回の検収外。外部入力の延べ参照は共通の解放簿記が導く。
+    if (new Set(binds).size !== 3) return undefined;
+    return {
+      window: chain,
+      chain,
+      binds,
+      shape,
+      outputName: add.outputs[0].name,
+      eps: rmsNormEps(norm.node.attrs, "rms_norm fusion"),
+      order: position === 0 ? "norm-residual" : "residual-norm",
+    };
+  },
+  build: (matched) => ({
+    binds: matched.binds,
+    outputName: matched.outputName,
+    outputShape: matched.shape,
+    temps: [],
+    dispatches: [{
+      key: rmsNormAddKey(matched.order),
+      wgsl: () => rmsNormAddWgsl(matched.order),
+      params: rmsNormParams(
+        numel(matched.shape.slice(0, -1)),
+        matched.shape[matched.shape.length - 1],
+        matched.eps,
+      ),
+      workgroups: { kind: "gridStride", items: numel(matched.shape.slice(0, -1)), size: 1 },
+    }],
+  }),
+});
+
 /** MUST: この配列の順が適用順（冒頭「適用順」節）。 */
 export const FUSION_RULES: readonly FusionRule[] = [
+  RMS_NORM_ADD_RULE,
   SILU_RULE,
   UPSAMPLE_2X_RULE,
   ROPE_RULE,
@@ -1270,6 +1338,7 @@ export const planFusions = (
 ): FusionPlan => {
   const steps: ExecStep[] = [];
   const counts: Record<FusionCounterName, number> = {
+    rmsNormAdd: 0,
     silu: 0,
     upsample2x: 0,
     rope: 0,

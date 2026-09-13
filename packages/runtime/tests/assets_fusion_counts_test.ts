@@ -171,9 +171,11 @@ const fusionCounts = (
   graph: IrGraph,
   inputShapes: Readonly<Record<string, readonly number[]>>,
   stateShapes?: ReadonlyMap<string, readonly number[]>,
+  fuseRmsNormAdd = false,
 ): FusionCounts =>
   planFusions(planGraph(graph, bindSymbols(graph, inputShapes), stateShapes).nodes, {
     useCounts: countUses(graph),
+    fuseRmsNormAdd,
     outputNames: new Set(graph.outputs),
     // WebGPU core 既定（128MiB）を判定に使う。行ブロック枚数はヒット数に効かないが、
     // **上限の値を機の実測から取らない**ことでこの門が機に依らない固定であり続ける。
@@ -190,7 +192,7 @@ const fusionCounts = (
  * 値には依存しない（e2e の検収値と同じ 640 を使うのは読み合わせやすさだけ）。入力は全て
  * `[1, M]`（token-only 形の `last_row[1]` は数値次元なのでそのまま）。
  */
-const decodeFusionCounts = (graph: IrGraph, rows: number): FusionCounts => {
+const decodeFusionCounts = (graph: IrGraph, rows: number, fuseRmsNormAdd = false): FusionCounts => {
   const inputShapes = Object.fromEntries(
     graph.inputs.map((spec) => [
       spec.name,
@@ -203,7 +205,7 @@ const decodeFusionCounts = (graph: IrGraph, rows: number): FusionCounts => {
       slot.shape.map((dim) => (typeof dim === "number" ? dim : 640)),
     ]),
   );
-  return fusionCounts(graph, inputShapes, stateShapes);
+  return fusionCounts(graph, inputShapes, stateShapes, fuseRmsNormAdd);
 };
 
 /**
@@ -223,6 +225,7 @@ const NONE: FusionCounts = {
   upsample2x: 0,
   rope: 0,
   adaln: 0,
+  rmsNormAdd: 0,
   rowBlockAttention: 0,
   identityExpand: 0,
 };
@@ -357,7 +360,7 @@ for (const family of ["gemma4", "gemma4-qat"]) {
     console.warn(`[karume] ${manifestUrl.pathname} が無いため配布形のRoPE検査をSKIPする`);
   }
   Deno.test({
-    name: `実配布 ${family} E2B は M=1/32/64 とも RoPE 50 を掴む`,
+    name: `実配布 ${family} E2B は RoPE 50 と任意指定のRMS→add 106を掴む`,
     ignore: !available,
     fn: async () => {
       const manifest: AssetManifest = JSON.parse(await Deno.readTextFile(manifestUrl));
@@ -367,8 +370,13 @@ for (const family of ["gemma4", "gemma4-qat"]) {
         throw new Error("Gemma実資産の融合テストは自己完結配布を要求する");
       }
       const graph = await readIrGraph(new URL(head.path, root));
-      for (const rows of [1, 32, 64]) {
+      for (const rows of [1, 4, 8, 32, 40, 64]) {
         assertEquals(decodeFusionCounts(graph, rows), { ...NONE, rope: 50 }, `${family} M=${rows}`);
+        assertEquals(
+          decodeFusionCounts(graph, rows, true),
+          { ...NONE, rope: 50, rmsNormAdd: 106 },
+          `${family} fused M=${rows}`,
+        );
       }
     },
   });

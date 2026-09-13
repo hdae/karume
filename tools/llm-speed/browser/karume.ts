@@ -1,4 +1,8 @@
-import { acquireGpu, type LinearGemvReduce } from "../../../packages/runtime/mod.ts";
+import {
+  acquireGpu,
+  DEFAULT_SUBMIT_POLICY,
+  type LinearGemvReduce,
+} from "../../../packages/runtime/mod.ts";
 import { localDirectory, parseManifest } from "../../../packages/hub/mod.ts";
 import {
   GEMMA4_CHUNK_BUCKETS,
@@ -7,7 +11,7 @@ import {
 } from "../../../packages/models/gemma.ts";
 import { Gemma4QatPipeline } from "../../../packages/models/gemma4-qat.ts";
 import { generationTimer } from "../../../examples/shared/generation-timing.ts";
-import type { ModelKind, PrefillBuckets } from "./config.ts";
+import type { ModelKind, NormalizationMode, PrefillBuckets } from "./config.ts";
 import type { EngineHandle, Fixture } from "./runner.ts";
 
 export const loadKarume = async (
@@ -15,6 +19,7 @@ export const loadKarume = async (
   fixture: Fixture,
   linearGemvReduce?: LinearGemvReduce,
   prefillBuckets: PrefillBuckets = "default",
+  normalization: NormalizationMode = "reference",
 ): Promise<EngineHandle> => {
   const gpu = await acquireGpu();
   try {
@@ -55,7 +60,13 @@ export const loadKarume = async (
       : prefillBuckets === "sparse"
       ? [4, 8, 16, 32, 48]
       : [4, 8, 16, 24, 32, 40, 48, 56];
+    const submitPolicy = normalization === "reference" ? DEFAULT_SUBMIT_POLICY : {
+      ...DEFAULT_SUBMIT_POLICY,
+      maxChunkSize: 768,
+    };
     const common = {
+      fuseRmsNormAdd: normalization === "fused",
+      submitPolicy,
       gpu,
       model: "e2b",
       quant,
@@ -90,6 +101,9 @@ export const loadKarume = async (
           : "Karume fixed int2 / int4 / int8 + SRQ",
         capacity: fixture.capacity,
         chunkLength: 64,
+        normalization,
+        fuseRmsNormAdd: normalization === "fused",
+        submitMaxChunkSize: submitPolicy.maxChunkSize,
         prefillBuckets,
         chunkBuckets,
         pleBudget: "default-two-shards",

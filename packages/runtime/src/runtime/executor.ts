@@ -968,6 +968,7 @@ type SessionState = {
   readonly attentionI8a8Dot: I8a8Dot;
   /** 行ブロック枚数の強制（テスト専用 — {@link ROW_BLOCK_SPLIT}）。 */
   readonly rowBlockSplit: number | undefined;
+  readonly fuseRmsNormAdd: boolean;
   readonly useCounts: ReadonlyMap<string, number>;
   readonly dtypes: ReadonlyMap<string, IrDtype>;
   readonly outputNames: ReadonlySet<string>;
@@ -1060,6 +1061,9 @@ export class Session {
     shards: AsyncIterable<WeightShard>,
     options: SessionOptions,
   ): Promise<Session> {
+    if (options.fuseRmsNormAdd !== undefined && typeof options.fuseRmsNormAdd !== "boolean") {
+      throw new ExecutionError("options.fuseRmsNormAdd はbooleanでなければならない");
+    }
     const linearCompute = options.linearCompute ?? "f32";
     const attentionCompute = options.attentionCompute ?? "f32";
     const attentionScoreStorage = options.attentionScoreStorage ?? "f32";
@@ -1530,6 +1534,7 @@ export class Session {
       // **実走カナリアの判定**（上の `attentionI8a8Dot`）で決める。
       attentionI8a8Dot,
       rowBlockSplit: options[ROW_BLOCK_SPLIT],
+      fuseRmsNormAdd: options.fuseRmsNormAdd ?? false,
       useCounts: countUses(graph),
       dtypes: declaredDtypes(graph),
       outputNames: new Set(graph.outputs),
@@ -2668,6 +2673,7 @@ export class Session {
       this.#state.gpu.limits;
     const fusion = planFusions(plan.nodes, {
       useCounts: this.#state.useCounts,
+      fuseRmsNormAdd: this.#state.fuseRmsNormAdd,
       outputNames: this.#state.outputNames,
       limits: { maxStorageBufferBindingSize, maxComputeWorkgroupsPerDimension },
       ...(this.#state.rowBlockSplit === undefined

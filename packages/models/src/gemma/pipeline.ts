@@ -335,6 +335,10 @@ export type Gemma4PipelineOptions = {
    * 特にQATでは生成列が変わる場合がある。
    */
   readonly linearGemvReduce?: SessionOptions["linearGemvReduce"];
+  /** RMS→addの任意融合。意味・適用範囲はruntimeの同名設定が正本（ADR 0099）。 */
+  readonly fuseRmsNormAdd?: SessionOptions["fuseRmsNormAdd"];
+  /** GPUへの投入政策。target / drafterへ同じ値を渡し、省略時はruntimeの既定を使う。 */
+  readonly submitPolicy?: SessionOptions["submitPolicy"];
   /**
    * slot backing（run の形ごとの中間バッファ束）を同時に保持するバイト予算。意味・既定・値域は
    * runtime の `SessionOptions.planBackingBudgetBytes` が正本で、この pipeline はそこへ素通しする
@@ -1757,6 +1761,8 @@ class GemmaPipeline {
     // 未指定なら欄ごと渡さない（既定値をここに写すと、runtime 側で既定が動いたときに
     // この家族だけ古い値で走る）。drafter Session にも同じノブを渡す。
     const sessionOptions = {
+      ...(options.fuseRmsNormAdd === undefined ? {} : { fuseRmsNormAdd: options.fuseRmsNormAdd }),
+      ...(options.submitPolicy === undefined ? {} : { submitPolicy: options.submitPolicy }),
       stateAttentionReduce: options.stateAttentionReduce ?? GEMMA4_STATE_ATTENTION_REDUCE,
       ...(options.linearGemvReduce === undefined
         ? {}

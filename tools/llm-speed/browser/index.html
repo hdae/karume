@@ -94,10 +94,12 @@
       <label>比較対象<select id="engine"><option value="both">両方（順番に実行）</option><option value="karume" selected>karume</option><option value="transformers">Transformers.js</option></select></label>
       <label>Karumeの行列計算<select id="reduce"><option value="quant">quant定義に従う</option><option value="sequential">逐次加算を指定</option><option value="parallel" selected>並列加算を指定</option><option value="both">逐次と並列を比較</option></select></label>
       <label>Karumeの入力バケット<select id="prefill"><option value="default">標準</option><option value="sparse">少数追加</option><option value="dense" selected>細分化</option><option value="all">3種類を往復比較</option></select></label>
+      <label>Karumeの正規化・投入設定<select id="normalization"><option value="reference">従来</option><option value="submit768">投入上限のみ768</option><option value="fused">RMSと加算を融合 + 上限768</option><option value="all" selected>3設定を往復比較</option></select></label>
       <button id="run">計測開始</button><button id="save" disabled>JSONを保存</button>
     </div>
     <p>「quant定義に従う」を選ぶと配布形の設定を使います。初期選択の「並列加算を指定」と逐次・並列の比較では、同じquantの加算方式だけを上書きします。重みは同じですが丸め順が変わり、特にQATでは文章も変わる場合があります。</p>
-    <p>入力バケットは最初のトークンまでの待ち時間を比較する実験用設定です。往復比較は「標準 → 少数追加 → 細分化 → 細分化 → 少数追加 → 標準」の順に実行します。行列計算の比較も選ぶと1モデルにつき12回読み込みます。Transformers.jsには適用しません。</p>
+    <p>入力バケットは最初のトークンまでの待ち時間を比較する実験用設定です。往復比較は「標準 → 少数追加 → 細分化 → 細分化 → 少数追加 → 標準」の順に実行します。入力バケットだけを比べる場合は、正規化・投入設定を「従来」にしてください。Transformers.jsには適用しません。</p>
+    <p>正規化の比較は「従来 → 投入上限のみ768 → 融合 + 上限768 → 融合 + 上限768 → 投入上限のみ768 → 従来」。初期選択では両モデルで計12設定を測り、融合とGPUへの投入頻度の効果を分けます。融合は任意指定の試験経路で、M2での速度・出力を確認するための比較です。</p>
     <p id="environment" class="muted"></p>
     <p id="status" role="status" aria-live="polite">準備中</p>
     <p
@@ -137,7 +139,9 @@
         const values = [
           `${r.model} / ${r.engine}${r.quant ? ` / ${r.quant}` : ""}${
             r.linearGemvReduce ? ` / ${r.linearGemvReduce}` : ""
-          }${r.prefillBuckets ? ` / ${r.prefillBuckets} [${r.chunkBuckets.join(",")}]` : ""}`,
+          }${r.prefillBuckets ? ` / ${r.prefillBuckets} [${r.chunkBuckets.join(",")}]` : ""}${
+            r.normalization ? ` / ${r.normalization}` : ""
+          }`,
           c.case,
           number(c.first.ttftMs, "ms"),
           number(median(c.measured.map((x) => x.ttftMs)), "ms"),
@@ -156,15 +160,15 @@
           pre = document.createElement("pre");
         summary.textContent = `${r.model} / ${r.engine}${
           r.linearGemvReduce ? ` / ${r.linearGemvReduce}` : ""
-        }${r.prefillBuckets ? ` / ${r.prefillBuckets}` : ""} / ${c.case} の出力${
-          c.deterministic ? "" : "（繰り返しで不一致あり）"
-        }`;
+        }${r.prefillBuckets ? ` / ${r.prefillBuckets}` : ""}${
+          r.normalization ? ` / ${r.normalization}` : ""
+        } / ${c.case} の出力${c.deterministic ? "" : "（繰り返しで不一致あり）"}`;
         pre.textContent = c.first.text;
         details.append(summary, pre);
         $("texts").append(details);
       }
     };
-    const runOne = (model, engine, reduce, prefill) =>
+    const runOne = (model, engine, reduce, prefill, normalization) =>
       new Promise((resolve, reject) => {
         const frame = document.createElement("iframe");
         activeFrame = frame;
@@ -172,7 +176,9 @@
           if (event.origin !== location.origin || event.source !== frame.contentWindow) return;
           const { type, value } = event.data;
           if (type === "status") {
-            $("status").textContent = engine === "karume" ? `${value} / ${prefill}` : value;
+            $("status").textContent = engine === "karume"
+              ? `${value} / ${prefill} / ${normalization}`
+              : value;
             return;
           }
           if (type !== "result" && type !== "error") return;
@@ -185,6 +191,7 @@
               engine,
               linearGemvReduce: reduce,
               prefillBuckets: prefill,
+              normalization,
               error: value,
             });
             $("save").disabled = false;
@@ -195,7 +202,8 @@
           }
         };
         window.addEventListener("message", listener);
-        frame.src = `/frame.html?model=${model}&engine=${engine}&reduce=${reduce}&prefill=${prefill}`;
+        frame.src =
+          `/frame.html?model=${model}&engine=${engine}&reduce=${reduce}&prefill=${prefill}&normalization=${normalization}`;
         frame.title = "Benchmark execution";
         document.body.append(frame);
       });
@@ -205,6 +213,7 @@
       $("engine").disabled = true;
       $("reduce").disabled = true;
       $("prefill").disabled = true;
+      $("normalization").disabled = true;
       try {
         const models = $("model").value === "both" ? ["normal", "qat"] : [$("model").value];
         const engines = $("engine").value === "both" ? ["karume", "transformers"] : [$("engine").value];
@@ -214,11 +223,16 @@
         const prefills = $("prefill").value === "all"
           ? ["default", "sparse", "dense", "dense", "sparse", "default"]
           : [$("prefill").value];
+        const normalizations = $("normalization").value === "all"
+          ? ["reference", "submit768", "fused", "fused", "submit768", "reference"]
+          : [$("normalization").value];
         for (const model of models) {
           for (const engine of engines) {
             for (const reduce of engine === "karume" ? reductions : ["sequential"]) {
               for (const prefill of engine === "karume" ? prefills : ["default"]) {
-                await runOne(model, engine, reduce, prefill);
+                for (const normalization of engine === "karume" ? normalizations : ["reference"]) {
+                  await runOne(model, engine, reduce, prefill, normalization);
+                }
               }
             }
           }
@@ -234,6 +248,7 @@
         $("engine").disabled = false;
         $("reduce").disabled = false;
         $("prefill").disabled = false;
+        $("normalization").disabled = false;
       }
     };
     $("run").addEventListener("click", start);

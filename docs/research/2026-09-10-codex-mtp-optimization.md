@@ -3045,3 +3045,19 @@ GPUへの書き込み費用・Chrome/M2でのCPU費用は未測定。全表常�
 この初期選択の統合検証は **2,953 passed（784 steps）/ 0 failed / 5 ignored、25分29秒**。
 ログは `outputs/bench/karume/2026-09-13_m2-prefill-verify-vextsks8/verify.log`。
 UIの2設定/全26設定の開始順とJSON保存は、保存済みの生成結果を使った操作検査で確認した。GPU速度の追試とは扱わない。
+
+## M2再計測とRMS→addの任意融合（2026-09-13）
+
+[再計測・融合・投入上限の検収](2026-09-13-rms-norm-add-fusion.md)にK-36を記録した。
+利用者のM2再計測は通常約32.6、QAT約34.4〜34.5 tok/sへ戻り、前回と同じ設定の20生成は一致。
+同一bundleなので恒常的なコード遅化とは判断しない。速度変動の環境側の原因は未確定。
+
+RMS→SRQと共有メモリによる丸め保持は不採用。整数演算を挟むRMS→addは実SessionとChromeで検収した。
+融合だけでは投入境界の変化で通常E2Bが遅くなる組み合わせがあり、投入上限768と交差比較した。
+160生成の不一致0。runtimeの`fuseRmsNormAdd`とGemmaの`submitPolicy`を独立に渡せるようにする（ADR 0099）。
+参照のRMSキー・WGSLと既定quantは維持。M2の候補は未検収で、比較画面を3設定往復・両モデルの初期選択にした。
+起動後に開始するだけで12設定120生成を取れる。RMS自体の128/64 thread配置実験は準備のみで、次の独立した作業へ残す。
+検証ログと再開先は上記のresearchを参照する。
+製品UIの120生成も不一致0。RTX/Chromeで通常103.024→112.536、QAT89.464→93.059 tok/s。
+全体の`deno task verify`は2,955 passed（797 steps）、0 failed、5 ignoredで通過した。
+ログは`outputs/bench/karume/2026-09-13_norm-fusion-verify-zdm3mbac/verify.log`。

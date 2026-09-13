@@ -1,0 +1,1978 @@
+{
+  "snapshot": "2026-09-13",
+  "m2Retest": {
+    "sourceSha256": "81178bb126ced4b9f9180f4bcf1fdb40d53431fad38ffa81c33ed6efb83b94dc",
+    "source": "gemma-browser-2026-09-13T09-49-46.942Z.json",
+    "generations": 20,
+    "differences": [],
+    "rows": [
+      {
+        "model": "normal",
+        "case": "english-list",
+        "ttftMs": 338.46499997377396,
+        "decodeTokensPerSecond": 32.639442953385974,
+        "loadSeconds": 3.2736850000023843
+      },
+      {
+        "model": "normal",
+        "case": "japanese-list",
+        "ttftMs": 409.9850000143051,
+        "decodeTokensPerSecond": 32.5649554563148,
+        "loadSeconds": 3.2736850000023843
+      },
+      {
+        "model": "qat",
+        "case": "english-list",
+        "ttftMs": 387.02499997615814,
+        "decodeTokensPerSecond": 34.51563065006036,
+        "loadSeconds": 1.779185000002384
+      },
+      {
+        "model": "qat",
+        "case": "japanese-list",
+        "ttftMs": 479.16999995708466,
+        "decodeTokensPerSecond": 34.44232141170001,
+        "loadSeconds": 1.779185000002384
+      }
+    ]
+  },
+  "micro": [
+    {
+      "path": "outputs/bench/karume/2026-09-13_norm-post-micro-heater-eh052zdd/results.json",
+      "sha256": "f11cca4f30979d1154001a8eb0a18fd1758f0be2628f4837b3a4f7af8f9b5206",
+      "cases": 48,
+      "checks": [
+        {
+          "post": "add",
+          "variant": "direct",
+          "checks": 216,
+          "elements": 5721600,
+          "different": 991730,
+          "nanDifferent": 0
+        },
+        {
+          "post": "add",
+          "variant": "barrier",
+          "checks": 216,
+          "elements": 5721600,
+          "different": 0,
+          "nanDifferent": 0
+        },
+        {
+          "post": "static_quantize",
+          "variant": "direct",
+          "checks": 72,
+          "elements": 3661824,
+          "different": 0,
+          "nanDifferent": 0
+        },
+        {
+          "post": "static_quantize",
+          "variant": "barrier",
+          "checks": 72,
+          "elements": 3661824,
+          "different": 0,
+          "nanDifferent": 0
+        }
+      ],
+      "timings": [
+        {
+          "model": "normal-e2b",
+          "post": "add",
+          "dim": 256,
+          "rows": 1,
+          "medianMs": [
+            0.00476256,
+            0.00307904,
+            0.00344064
+          ],
+          "speedup": [
+            1,
+            1.5467678237372688,
+            1.3842075892857142
+          ]
+        },
+        {
+          "model": "normal-e2b",
+          "post": "add",
+          "dim": 256,
+          "rows": 4,
+          "medianMs": [
+            0.00483136,
+            0.0031376,
+            0.00342848
+          ],
+          "speedup": [
+            1,
+            1.539826619071902,
+            1.4091842449131977
+          ]
+        },
+        {
+          "model": "normal-e2b",
+          "post": "add",
+          "dim": 256,
+          "rows": 8,
+          "medianMs": [
+            0.00490144,
+            0.0032688,
+            0.00387008
+          ],
+          "speedup": [
+            1,
+            1.4994615761135583,
+            1.2664957830329089
+          ]
+        },
+        {
+          "model": "normal-e2b",
+          "post": "add",
+          "dim": 256,
+          "rows": 32,
+          "medianMs": [
+            0.0052144,
+            0.0036064,
+            0.00364
+          ],
+          "speedup": [
+            1,
+            1.445874001774623,
+            1.4325274725274726
+          ]
+        },
+        {
+          "model": "normal-e2b",
+          "post": "add",
+          "dim": 256,
+          "rows": 40,
+          "medianMs": [
+            0.00523584,
+            0.00342528,
+            0.00371712
+          ],
+          "speedup": [
+            1,
+            1.5285874439461884,
+            1.4085743801652892
+          ]
+        },
+        {
+          "model": "normal-e2b",
+          "post": "add",
+          "dim": 256,
+          "rows": 64,
+          "medianMs": [
+            0.005469119999999999,
+            0.00366752,
+            0.00422464
+          ],
+          "speedup": [
+            1,
+            1.4912311316639035,
+            1.2945765793061657
+          ]
+        },
+        {
+          "model": "normal-e2b",
+          "post": "add",
+          "dim": 1536,
+          "rows": 1,
+          "medianMs": [
+            0.00727936,
+            0.0056672,
+            0.007285120000000001
+          ],
+          "speedup": [
+            1,
+            1.284472049689441,
+            0.999209347272248
+          ]
+        },
+        {
+          "model": "normal-e2b",
+          "post": "add",
+          "dim": 1536,
+          "rows": 4,
+          "medianMs": [
+            0.00727936,
+            0.005918400000000001,
+            0.00713312
+          ],
+          "speedup": [
+            1,
+            1.2299540416328736,
+            1.020501547709838
+          ]
+        },
+        {
+          "model": "normal-e2b",
+          "post": "add",
+          "dim": 1536,
+          "rows": 8,
+          "medianMs": [
+            0.007330560000000001,
+            0.0055968,
+            0.0069856
+          ],
+          "speedup": [
+            1,
+            1.3097770154373929,
+            1.0493815849748054
+          ]
+        },
+        {
+          "model": "normal-e2b",
+          "post": "add",
+          "dim": 1536,
+          "rows": 32,
+          "medianMs": [
+            0.00770016,
+            0.006184960000000001,
+            0.00764064
+          ],
+          "speedup": [
+            1,
+            1.2449813741721854,
+            1.0077899233572056
+          ]
+        },
+        {
+          "model": "normal-e2b",
+          "post": "add",
+          "dim": 1536,
+          "rows": 40,
+          "medianMs": [
+            0.00777536,
+            0.00568864,
+            0.0073494400000000005
+          ],
+          "speedup": [
+            1,
+            1.3668222984755583,
+            1.0579527147646623
+          ]
+        },
+        {
+          "model": "normal-e2b",
+          "post": "add",
+          "dim": 1536,
+          "rows": 64,
+          "medianMs": [
+            0.008842560000000001,
+            0.0066294399999999995,
+            0.00796
+          ],
+          "speedup": [
+            1,
+            1.3338321185499833,
+            1.1108743718592966
+          ]
+        },
+        {
+          "model": "qat-e2b",
+          "post": "add",
+          "dim": 256,
+          "rows": 1,
+          "medianMs": [
+            0.00534784,
+            0.0031187199999999997,
+            0.00340032
+          ],
+          "speedup": [
+            1,
+            1.71475477118818,
+            1.572746094485225
+          ]
+        },
+        {
+          "model": "qat-e2b",
+          "post": "add",
+          "dim": 256,
+          "rows": 4,
+          "medianMs": [
+            0.00487968,
+            0.00316704,
+            0.003984
+          ],
+          "speedup": [
+            1,
+            1.5407699302819036,
+            1.2248192771084339
+          ]
+        },
+        {
+          "model": "qat-e2b",
+          "post": "add",
+          "dim": 256,
+          "rows": 8,
+          "medianMs": [
+            0.0048544,
+            0.0031705600000000002,
+            0.0038256
+          ],
+          "speedup": [
+            1,
+            1.5310859911182881,
+            1.2689251359263907
+          ]
+        },
+        {
+          "model": "qat-e2b",
+          "post": "add",
+          "dim": 256,
+          "rows": 32,
+          "medianMs": [
+            0.00509632,
+            0.0033030399999999997,
+            0.00397248
+          ],
+          "speedup": [
+            1,
+            1.5429180391397017,
+            1.282906396004511
+          ]
+        },
+        {
+          "model": "qat-e2b",
+          "post": "add",
+          "dim": 256,
+          "rows": 40,
+          "medianMs": [
+            0.00518752,
+            0.00344672,
+            0.00375552
+          ],
+          "speedup": [
+            1,
+            1.5050598830192183,
+            1.381305385139741
+          ]
+        },
+        {
+          "model": "qat-e2b",
+          "post": "add",
+          "dim": 256,
+          "rows": 64,
+          "medianMs": [
+            0.00551488,
+            0.00370624,
+            0.00395328
+          ],
+          "speedup": [
+            1,
+            1.4879986185460197,
+            1.395013760725271
+          ]
+        },
+        {
+          "model": "qat-e2b",
+          "post": "add",
+          "dim": 1536,
+          "rows": 1,
+          "medianMs": [
+            0.007446080000000001,
+            0.005545919999999999,
+            0.0069776000000000005
+          ],
+          "speedup": [
+            1,
+            1.3426230454099592,
+            1.067140564090805
+          ]
+        },
+        {
+          "model": "qat-e2b",
+          "post": "add",
+          "dim": 1536,
+          "rows": 4,
+          "medianMs": [
+            0.00727744,
+            0.005587839999999999,
+            0.00705376
+          ],
+          "speedup": [
+            1,
+            1.3023708624441646,
+            1.031710747175974
+          ]
+        },
+        {
+          "model": "qat-e2b",
+          "post": "add",
+          "dim": 1536,
+          "rows": 8,
+          "medianMs": [
+            0.007396160000000001,
+            0.00559712,
+            0.00698624
+          ],
+          "speedup": [
+            1,
+            1.3214224458292838,
+            1.0586753389519972
+          ]
+        },
+        {
+          "model": "qat-e2b",
+          "post": "add",
+          "dim": 1536,
+          "rows": 32,
+          "medianMs": [
+            0.0076425600000000005,
+            0.0056416,
+            0.007088
+          ],
+          "speedup": [
+            1,
+            1.3546795235394216,
+            1.0782392776523704
+          ]
+        },
+        {
+          "model": "qat-e2b",
+          "post": "add",
+          "dim": 1536,
+          "rows": 40,
+          "medianMs": [
+            0.007850240000000001,
+            0.00567488,
+            0.00713408
+          ],
+          "speedup": [
+            1,
+            1.383331453704748,
+            1.1003857540145332
+          ]
+        },
+        {
+          "model": "qat-e2b",
+          "post": "add",
+          "dim": 1536,
+          "rows": 64,
+          "medianMs": [
+            0.008835840000000001,
+            0.0065776,
+            0.00788928
+          ],
+          "speedup": [
+            1,
+            1.3433227925079056,
+            1.1199805305427113
+          ]
+        },
+        {
+          "model": "qat-e2b",
+          "post": "static_quantize",
+          "dim": 1536,
+          "rows": 1,
+          "medianMs": [
+            0.0092464,
+            0.01256384,
+            0.012672319999999999
+          ],
+          "speedup": [
+            1,
+            0.7359533391065153,
+            0.729653291583546
+          ]
+        },
+        {
+          "model": "qat-e2b",
+          "post": "static_quantize",
+          "dim": 1536,
+          "rows": 4,
+          "medianMs": [
+            0.00836832,
+            0.012605120000000001,
+            0.01302368
+          ],
+          "speedup": [
+            1,
+            0.663882612779569,
+            0.6425464999140028
+          ]
+        },
+        {
+          "model": "qat-e2b",
+          "post": "static_quantize",
+          "dim": 1536,
+          "rows": 8,
+          "medianMs": [
+            0.00852992,
+            0.01234528,
+            0.01753056
+          ],
+          "speedup": [
+            1,
+            0.6909458513699163,
+            0.4865743022470474
+          ]
+        },
+        {
+          "model": "qat-e2b",
+          "post": "static_quantize",
+          "dim": 1536,
+          "rows": 32,
+          "medianMs": [
+            0.009632960000000001,
+            0.01354496,
+            0.01607648
+          ],
+          "speedup": [
+            1,
+            0.7111840861840862,
+            0.5991958438663191
+          ]
+        },
+        {
+          "model": "qat-e2b",
+          "post": "static_quantize",
+          "dim": 1536,
+          "rows": 40,
+          "medianMs": [
+            0.01181504,
+            0.01278464,
+            0.0132128
+          ],
+          "speedup": [
+            1,
+            0.9241589907889468,
+            0.8942116735286995
+          ]
+        },
+        {
+          "model": "qat-e2b",
+          "post": "static_quantize",
+          "dim": 1536,
+          "rows": 64,
+          "medianMs": [
+            0.012918400000000002,
+            0.01298592,
+            0.013837440000000001
+          ],
+          "speedup": [
+            1,
+            0.9948005224119664,
+            0.9335830905138524
+          ]
+        },
+        {
+          "model": "qat-e4b",
+          "post": "add",
+          "dim": 256,
+          "rows": 1,
+          "medianMs": [
+            0.00504544,
+            0.00311968,
+            0.0034016000000000003
+          ],
+          "speedup": [
+            1,
+            1.6172940814442507,
+            1.4832549388523046
+          ]
+        },
+        {
+          "model": "qat-e4b",
+          "post": "add",
+          "dim": 256,
+          "rows": 4,
+          "medianMs": [
+            0.00482944,
+            0.00314112,
+            0.00367392
+          ],
+          "speedup": [
+            1,
+            1.5374898125509373,
+            1.3145196411462416
+          ]
+        },
+        {
+          "model": "qat-e4b",
+          "post": "add",
+          "dim": 256,
+          "rows": 8,
+          "medianMs": [
+            0.00486304,
+            0.00316576,
+            0.00383168
+          ],
+          "speedup": [
+            1,
+            1.5361366622864652,
+            1.2691665274761983
+          ]
+        },
+        {
+          "model": "qat-e4b",
+          "post": "add",
+          "dim": 256,
+          "rows": 32,
+          "medianMs": [
+            0.005091200000000001,
+            0.0033017600000000004,
+            0.00400416
+          ],
+          "speedup": [
+            1,
+            1.5419654971893777,
+            1.2714776632302407
+          ]
+        },
+        {
+          "model": "qat-e4b",
+          "post": "add",
+          "dim": 256,
+          "rows": 40,
+          "medianMs": [
+            0.00518912,
+            0.00344256,
+            0.00375936
+          ],
+          "speedup": [
+            1,
+            1.5073433723740473,
+            1.380320054477358
+          ]
+        },
+        {
+          "model": "qat-e4b",
+          "post": "add",
+          "dim": 256,
+          "rows": 64,
+          "medianMs": [
+            0.00562432,
+            0.00374464,
+            0.00395712
+          ],
+          "speedup": [
+            1,
+            1.501965475987011,
+            1.42131651301957
+          ]
+        },
+        {
+          "model": "qat-e4b",
+          "post": "add",
+          "dim": 2560,
+          "rows": 1,
+          "medianMs": [
+            0.00895456,
+            0.0075337600000000005,
+            0.0098512
+          ],
+          "speedup": [
+            1,
+            1.1885910886463067,
+            0.9089816469059608
+          ]
+        },
+        {
+          "model": "qat-e4b",
+          "post": "add",
+          "dim": 2560,
+          "rows": 4,
+          "medianMs": [
+            0.0091568,
+            0.007439360000000001,
+            0.00973824
+          ],
+          "speedup": [
+            1,
+            1.2308585684790088,
+            0.940293112513144
+          ]
+        },
+        {
+          "model": "qat-e4b",
+          "post": "add",
+          "dim": 2560,
+          "rows": 8,
+          "medianMs": [
+            0.009108159999999999,
+            0.00745344,
+            0.01071264
+          ],
+          "speedup": [
+            1,
+            1.2220075562424864,
+            0.8502255279744301
+          ]
+        },
+        {
+          "model": "qat-e4b",
+          "post": "add",
+          "dim": 2560,
+          "rows": 32,
+          "medianMs": [
+            0.009700480000000001,
+            0.00877472,
+            0.00993632
+          ],
+          "speedup": [
+            1,
+            1.1055030815798113,
+            0.976264854594055
+          ]
+        },
+        {
+          "model": "qat-e4b",
+          "post": "add",
+          "dim": 2560,
+          "rows": 40,
+          "medianMs": [
+            0.00985632,
+            0.00769536,
+            0.01052384
+          ],
+          "speedup": [
+            1,
+            1.280813373253493,
+            0.936570681424271
+          ]
+        },
+        {
+          "model": "qat-e4b",
+          "post": "add",
+          "dim": 2560,
+          "rows": 64,
+          "medianMs": [
+            0.01054272,
+            0.0079056,
+            0.01160512
+          ],
+          "speedup": [
+            1,
+            1.3335761991499695,
+            0.9084541995257266
+          ]
+        },
+        {
+          "model": "qat-e4b",
+          "post": "static_quantize",
+          "dim": 2560,
+          "rows": 1,
+          "medianMs": [
+            0.0103728,
+            0.01916736,
+            0.01991968
+          ],
+          "speedup": [
+            1,
+            0.5411699889812681,
+            0.5207312567270157
+          ]
+        },
+        {
+          "model": "qat-e4b",
+          "post": "static_quantize",
+          "dim": 2560,
+          "rows": 4,
+          "medianMs": [
+            0.01058592,
+            0.01947712,
+            0.01916288
+          ],
+          "speedup": [
+            1,
+            0.5435054053165971,
+            0.5524180081490883
+          ]
+        },
+        {
+          "model": "qat-e4b",
+          "post": "static_quantize",
+          "dim": 2560,
+          "rows": 8,
+          "medianMs": [
+            0.012567680000000001,
+            0.01901568,
+            0.01936992
+          ],
+          "speedup": [
+            1,
+            0.6609114162627895,
+            0.6488245692289902
+          ]
+        },
+        {
+          "model": "qat-e4b",
+          "post": "static_quantize",
+          "dim": 2560,
+          "rows": 32,
+          "medianMs": [
+            0.012646079999999999,
+            0.019006719999999998,
+            0.01974656
+          ],
+          "speedup": [
+            1,
+            0.6653478348710351,
+            0.6404193945679652
+          ]
+        },
+        {
+          "model": "qat-e4b",
+          "post": "static_quantize",
+          "dim": 2560,
+          "rows": 40,
+          "medianMs": [
+            0.01347968,
+            0.019299200000000002,
+            0.02013216
+          ],
+          "speedup": [
+            1,
+            0.6984579671696236,
+            0.6695595504903598
+          ]
+        },
+        {
+          "model": "qat-e4b",
+          "post": "static_quantize",
+          "dim": 2560,
+          "rows": 64,
+          "medianMs": [
+            0.01583776,
+            0.019207039999999998,
+            0.02155904
+          ],
+          "speedup": [
+            1,
+            0.8245809869714439,
+            0.7346226919194917
+          ]
+        }
+      ]
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-13_norm-opaque-micro-bkvgpb6y/results.json",
+      "sha256": "c40177b34860d345432d2606aae9bf30c2bd2fc64804c4b04defcb05bc8c8ed6",
+      "cases": 16,
+      "checks": [
+        {
+          "post": "add",
+          "variant": "direct",
+          "checks": 80,
+          "elements": 4464640,
+          "different": 1307662,
+          "nanDifferent": 0
+        },
+        {
+          "post": "add",
+          "variant": "barrier",
+          "checks": 80,
+          "elements": 4464640,
+          "different": 0,
+          "nanDifferent": 0
+        },
+        {
+          "post": "add",
+          "variant": "opaque",
+          "checks": 80,
+          "elements": 4464640,
+          "different": 0,
+          "nanDifferent": 0
+        },
+        {
+          "post": "static_quantize",
+          "variant": "direct",
+          "checks": 80,
+          "elements": 4464640,
+          "different": 0,
+          "nanDifferent": 0
+        },
+        {
+          "post": "static_quantize",
+          "variant": "barrier",
+          "checks": 80,
+          "elements": 4464640,
+          "different": 0,
+          "nanDifferent": 0
+        },
+        {
+          "post": "static_quantize",
+          "variant": "opaque",
+          "checks": 80,
+          "elements": 4464640,
+          "different": 0,
+          "nanDifferent": 0
+        }
+      ],
+      "timings": [
+        {
+          "model": "normal-e2b",
+          "post": "add",
+          "dim": 1536,
+          "rows": 1,
+          "medianMs": [
+            0.0073043199999999996,
+            0.00555008,
+            0.00697184,
+            0.00558144
+          ],
+          "speedup": [
+            1,
+            1.3160747232472325,
+            1.04768898884656,
+            1.3086801972250888
+          ]
+        },
+        {
+          "model": "normal-e2b",
+          "post": "add",
+          "dim": 1536,
+          "rows": 4,
+          "medianMs": [
+            0.00737248,
+            0.0055103999999999995,
+            0.00693024,
+            0.00566688
+          ],
+          "speedup": [
+            1,
+            1.3379210220673636,
+            1.063813085838297,
+            1.3009769043988932
+          ]
+        },
+        {
+          "model": "normal-e2b",
+          "post": "add",
+          "dim": 1536,
+          "rows": 40,
+          "medianMs": [
+            0.00791392,
+            0.0057833599999999995,
+            0.00712192,
+            0.00565728
+          ],
+          "speedup": [
+            1,
+            1.36839484313617,
+            1.1112059669302659,
+            1.398891340007919
+          ]
+        },
+        {
+          "model": "normal-e2b",
+          "post": "add",
+          "dim": 1536,
+          "rows": 64,
+          "medianMs": [
+            0.00835904,
+            0.00746656,
+            0.00787296,
+            0.00620896
+          ],
+          "speedup": [
+            1,
+            1.1195302790039858,
+            1.0617404381579483,
+            1.3462866567025717
+          ]
+        },
+        {
+          "model": "qat-e2b",
+          "post": "static_quantize",
+          "dim": 1536,
+          "rows": 1,
+          "medianMs": [
+            0.00899552,
+            0.013548800000000001,
+            0.012769280000000001,
+            0.01265344
+          ],
+          "speedup": [
+            1,
+            0.6639348134152101,
+            0.7044657177225341,
+            0.710914976480704
+          ]
+        },
+        {
+          "model": "qat-e2b",
+          "post": "static_quantize",
+          "dim": 1536,
+          "rows": 4,
+          "medianMs": [
+            0.0082976,
+            0.01702848,
+            0.01285888,
+            0.012314879999999999
+          ],
+          "speedup": [
+            1,
+            0.48727778404179356,
+            0.6452817041608601,
+            0.6737865086789316
+          ]
+        },
+        {
+          "model": "qat-e2b",
+          "post": "static_quantize",
+          "dim": 1536,
+          "rows": 40,
+          "medianMs": [
+            0.0100448,
+            0.01262464,
+            0.01323168,
+            0.012445759999999998
+          ],
+          "speedup": [
+            1,
+            0.7956504106255703,
+            0.7591477423879659,
+            0.8070861080400072
+          ]
+        },
+        {
+          "model": "qat-e2b",
+          "post": "static_quantize",
+          "dim": 1536,
+          "rows": 64,
+          "medianMs": [
+            0.01167072,
+            0.01267712,
+            0.01348832,
+            0.012684800000000001
+          ],
+          "speedup": [
+            1,
+            0.9206128836833604,
+            0.8652463761239354,
+            0.9200554994954591
+          ]
+        },
+        {
+          "model": "qat-e4b",
+          "post": "add",
+          "dim": 2560,
+          "rows": 1,
+          "medianMs": [
+            0.00903776,
+            0.00811136,
+            0.00972736,
+            0.007369280000000001
+          ],
+          "speedup": [
+            1,
+            1.114210194098154,
+            0.9291071781038226,
+            1.226410178470624
+          ]
+        },
+        {
+          "model": "qat-e4b",
+          "post": "add",
+          "dim": 2560,
+          "rows": 4,
+          "medianMs": [
+            0.00913888,
+            0.00736032,
+            0.00994336,
+            0.00763776
+          ],
+          "speedup": [
+            1,
+            1.241641667753576,
+            0.9190937469829112,
+            1.196539299480476
+          ]
+        },
+        {
+          "model": "qat-e4b",
+          "post": "add",
+          "dim": 2560,
+          "rows": 40,
+          "medianMs": [
+            0.01006432,
+            0.007596159999999999,
+            0.00998432,
+            0.00925888
+          ],
+          "speedup": [
+            1,
+            1.3249220658859213,
+            1.0080125636998813,
+            1.086991083154766
+          ]
+        },
+        {
+          "model": "qat-e4b",
+          "post": "add",
+          "dim": 2560,
+          "rows": 64,
+          "medianMs": [
+            0.010802879999999999,
+            0.00781632,
+            0.010064960000000001,
+            0.00827712
+          ],
+          "speedup": [
+            1,
+            1.382092851879145,
+            1.0733157409468093,
+            1.3051496172581765
+          ]
+        },
+        {
+          "model": "qat-e4b",
+          "post": "static_quantize",
+          "dim": 2560,
+          "rows": 1,
+          "medianMs": [
+            0.01012832,
+            0.01896448,
+            0.020362239999999997,
+            0.021263999999999998
+          ],
+          "speedup": [
+            1,
+            0.5340678995680346,
+            0.497406965049032,
+            0.4763130173062453
+          ]
+        },
+        {
+          "model": "qat-e4b",
+          "post": "static_quantize",
+          "dim": 2560,
+          "rows": 4,
+          "medianMs": [
+            0.01022464,
+            0.02021856,
+            0.01955648,
+            0.01871392
+          ],
+          "speedup": [
+            1,
+            0.5057056486713198,
+            0.5228261936708446,
+            0.5463654862262958
+          ]
+        },
+        {
+          "model": "qat-e4b",
+          "post": "static_quantize",
+          "dim": 2560,
+          "rows": 40,
+          "medianMs": [
+            0.0145072,
+            0.020472,
+            0.0201984,
+            0.01906816
+          ],
+          "speedup": [
+            1,
+            0.7086361860101602,
+            0.7182351077313055,
+            0.7608075451433174
+          ]
+        },
+        {
+          "model": "qat-e4b",
+          "post": "static_quantize",
+          "dim": 2560,
+          "rows": 64,
+          "medianMs": [
+            0.01740096,
+            0.023856000000000002,
+            0.01988256,
+            0.0190176
+          ],
+          "speedup": [
+            1,
+            0.7294164989939638,
+            0.8751870986432331,
+            0.9149924280666331
+          ]
+        }
+      ]
+    }
+  ],
+  "submitComparison": {
+    "path": "outputs/bench/karume/2026-09-13_norm-submit-browser-j2ru2sdz",
+    "generations": 160,
+    "differences": [],
+    "timeline": [
+      {
+        "file": "128-normal-0-baseline.json",
+        "sha256": "48726d5b003ee71b45f2aeae2775dd706d062afd3eb41cbe6fe97bcb21963366",
+        "options": {
+          "capacity": 128,
+          "kind": "normal",
+          "candidate": "baseline"
+        },
+        "loadMs": 5348.899999976158,
+        "cases": [
+          {
+            "case": "english-list",
+            "decodeTokensPerSecond": 105.0350116684693,
+            "ttftMs": 36.59999996423721
+          },
+          {
+            "case": "japanese-list",
+            "decodeTokensPerSecond": 99.22822491172046,
+            "ttftMs": 41.30000001192093
+          }
+        ]
+      },
+      {
+        "file": "128-normal-1-base768.json",
+        "sha256": "850944e26573e2056d0c0da16bdba3e2a98221dd593d3705b2de7f7d61234abf",
+        "options": {
+          "capacity": 128,
+          "kind": "normal",
+          "candidate": "base768"
+        },
+        "loadMs": 5053.399999976158,
+        "cases": [
+          {
+            "case": "english-list",
+            "decodeTokensPerSecond": 103.12653462507568,
+            "ttftMs": 36.89999997615814
+          },
+          {
+            "case": "japanese-list",
+            "decodeTokensPerSecond": 108.84588804198766,
+            "ttftMs": 40.39999997615814
+          }
+        ]
+      },
+      {
+        "file": "128-normal-2-opaque.json",
+        "sha256": "95b953651887f4599ea51b279307d969ca96a93d7ded682617a8b8286482e9a9",
+        "options": {
+          "capacity": 128,
+          "kind": "normal",
+          "candidate": "opaque"
+        },
+        "loadMs": 5101.300000011921,
+        "cases": [
+          {
+            "case": "english-list",
+            "decodeTokensPerSecond": 100.52656772810997,
+            "ttftMs": 37.69999998807907
+          },
+          {
+            "case": "japanese-list",
+            "decodeTokensPerSecond": 100.31847133757962,
+            "ttftMs": 41.10000002384186
+          }
+        ]
+      },
+      {
+        "file": "128-normal-3-fused768.json",
+        "sha256": "cbb8fefbb16b8972192f18183cdb81f05cb26a7ab586025bb7722a7c9d65da4f",
+        "options": {
+          "capacity": 128,
+          "kind": "normal",
+          "candidate": "fused768"
+        },
+        "loadMs": 5179.800000011921,
+        "cases": [
+          {
+            "case": "english-list",
+            "decodeTokensPerSecond": 111.15031758168676,
+            "ttftMs": 36.80000001192093
+          },
+          {
+            "case": "japanese-list",
+            "decodeTokensPerSecond": 111.76157529655985,
+            "ttftMs": 40
+          }
+        ]
+      },
+      {
+        "file": "128-normal-4-fused768.json",
+        "sha256": "8a868733cbf986d1e72ae3ca6e72c38a3e0336a724cb1abad15e5ac8b892aeea",
+        "options": {
+          "capacity": 128,
+          "kind": "normal",
+          "candidate": "fused768"
+        },
+        "loadMs": 5023.900000035763,
+        "cases": [
+          {
+            "case": "english-list",
+            "decodeTokensPerSecond": 111.4649681552172,
+            "ttftMs": 37
+          },
+          {
+            "case": "japanese-list",
+            "decodeTokensPerSecond": 110.93502376480481,
+            "ttftMs": 39.799999952316284
+          }
+        ]
+      },
+      {
+        "file": "128-normal-5-opaque.json",
+        "sha256": "102282149b16bd6c83fbb0c3c2c9a2e1a61f89fc85e8eb10cc6e1c671589d814",
+        "options": {
+          "capacity": 128,
+          "kind": "normal",
+          "candidate": "opaque"
+        },
+        "loadMs": 4952.199999988079,
+        "cases": [
+          {
+            "case": "english-list",
+            "decodeTokensPerSecond": 100.41440866498071,
+            "ttftMs": 37.10000002384186
+          },
+          {
+            "case": "japanese-list",
+            "decodeTokensPerSecond": 100.11123471281373,
+            "ttftMs": 41
+          }
+        ]
+      },
+      {
+        "file": "128-normal-6-base768.json",
+        "sha256": "4f6280124c61ed3a8aa1694fa6a74eb18b6549d13c2a9f15380b92088ae5fd3e",
+        "options": {
+          "capacity": 128,
+          "kind": "normal",
+          "candidate": "base768"
+        },
+        "loadMs": 5116.199999988079,
+        "cases": [
+          {
+            "case": "english-list",
+            "decodeTokensPerSecond": 108.2660250835678,
+            "ttftMs": 37.39999997615814
+          },
+          {
+            "case": "japanese-list",
+            "decodeTokensPerSecond": 108.19165378449297,
+            "ttftMs": 40.10000002384186
+          }
+        ]
+      },
+      {
+        "file": "128-normal-7-baseline.json",
+        "sha256": "28ef7420a80c307fdf7b4c76b58ca2eea2300e20a1bbc9de9f7629c2631ab3ac",
+        "options": {
+          "capacity": 128,
+          "kind": "normal",
+          "candidate": "baseline"
+        },
+        "loadMs": 4961.899999976158,
+        "cases": [
+          {
+            "case": "english-list",
+            "decodeTokensPerSecond": 98.52987174925914,
+            "ttftMs": 38.09999996423721
+          },
+          {
+            "case": "japanese-list",
+            "decodeTokensPerSecond": 98.56070087793326,
+            "ttftMs": 41.89999997615814
+          }
+        ]
+      },
+      {
+        "file": "128-qat-0-baseline.json",
+        "sha256": "84a1492bd51f6f46a9c2f14f54bfddf335212bf4cf556d4edf5586b96ed0633b",
+        "options": {
+          "capacity": 128,
+          "kind": "qat",
+          "candidate": "baseline"
+        },
+        "loadMs": 2962.199999988079,
+        "cases": [
+          {
+            "case": "english-list",
+            "decodeTokensPerSecond": 89.23512747875354,
+            "ttftMs": 39.80000001192093
+          },
+          {
+            "case": "japanese-list",
+            "decodeTokensPerSecond": 88.682432427968,
+            "ttftMs": 43.5
+          }
+        ]
+      },
+      {
+        "file": "128-qat-1-base768.json",
+        "sha256": "eed39f7a515faf5cbad77e7c947c889166ad879fe4d671a8faedd8cbacf43800",
+        "options": {
+          "capacity": 128,
+          "kind": "qat",
+          "candidate": "base768"
+        },
+        "loadMs": 6857.099999964237,
+        "cases": [
+          {
+            "case": "english-list",
+            "decodeTokensPerSecond": 91.15902185394313,
+            "ttftMs": 39.09999996423721
+          },
+          {
+            "case": "japanese-list",
+            "decodeTokensPerSecond": 90.53024860203824,
+            "ttftMs": 42.80000001192093
+          }
+        ]
+      },
+      {
+        "file": "128-qat-2-opaque.json",
+        "sha256": "1838f57878510b3c680c3880423f32a2fd7b2a64f52346bfd897b8c840dd685c",
+        "options": {
+          "capacity": 128,
+          "kind": "qat",
+          "candidate": "opaque"
+        },
+        "loadMs": 7075.599999964237,
+        "cases": [
+          {
+            "case": "english-list",
+            "decodeTokensPerSecond": 90.21910353562151,
+            "ttftMs": 39.19999998807907
+          },
+          {
+            "case": "japanese-list",
+            "decodeTokensPerSecond": 88.47072040147549,
+            "ttftMs": 43.90000003576279
+          }
+        ]
+      },
+      {
+        "file": "128-qat-3-fused768.json",
+        "sha256": "6381f0d69a751b8334a25be93b83121dc945978c09b253846e3838135081ad83",
+        "options": {
+          "capacity": 128,
+          "kind": "qat",
+          "candidate": "fused768"
+        },
+        "loadMs": 7027.300000011921,
+        "cases": [
+          {
+            "case": "english-list",
+            "decodeTokensPerSecond": 92.56538349002409,
+            "ttftMs": 38.60000002384186
+          },
+          {
+            "case": "japanese-list",
+            "decodeTokensPerSecond": 91.95737848969297,
+            "ttftMs": 42.30000001192093
+          }
+        ]
+      },
+      {
+        "file": "128-qat-4-fused768.json",
+        "sha256": "5c75ac8fc1e5a38c92781d0f7e8b97a707290488b2c8184a69e6e806b80c2afc",
+        "options": {
+          "capacity": 128,
+          "kind": "qat",
+          "candidate": "fused768"
+        },
+        "loadMs": 7043.399999976158,
+        "cases": [
+          {
+            "case": "english-list",
+            "decodeTokensPerSecond": 92.85187914517317,
+            "ttftMs": 38.10000002384186
+          },
+          {
+            "case": "japanese-list",
+            "decodeTokensPerSecond": 92.17264081931236,
+            "ttftMs": 42.19999998807907
+          }
+        ]
+      },
+      {
+        "file": "128-qat-5-opaque.json",
+        "sha256": "4e344570e06ad17f8921d4bf9bafe0d791db00053e9497360a24b133d10b0729",
+        "options": {
+          "capacity": 128,
+          "kind": "qat",
+          "candidate": "opaque"
+        },
+        "loadMs": 7044.800000011921,
+        "cases": [
+          {
+            "case": "english-list",
+            "decodeTokensPerSecond": 90.47824213546089,
+            "ttftMs": 38.90000003576279
+          },
+          {
+            "case": "japanese-list",
+            "decodeTokensPerSecond": 90.62140391409709,
+            "ttftMs": 42.700000047683716
+          }
+        ]
+      },
+      {
+        "file": "128-qat-6-base768.json",
+        "sha256": "5e5baf0baab1e068705bbd61622c42f26fa2f20be573eafa77886f8a24748ac6",
+        "options": {
+          "capacity": 128,
+          "kind": "qat",
+          "candidate": "base768"
+        },
+        "loadMs": 7064.199999988079,
+        "cases": [
+          {
+            "case": "english-list",
+            "decodeTokensPerSecond": 91.02730819716137,
+            "ttftMs": 38.19999998807907
+          },
+          {
+            "case": "japanese-list",
+            "decodeTokensPerSecond": 90.55627425769659,
+            "ttftMs": 42
+          }
+        ]
+      },
+      {
+        "file": "128-qat-7-baseline.json",
+        "sha256": "ba9e97d39fc705c7051d43bfa5f06fb317fd27d714f1bd79fa117af85e5da269",
+        "options": {
+          "capacity": 128,
+          "kind": "qat",
+          "candidate": "baseline"
+        },
+        "loadMs": 7131,
+        "cases": [
+          {
+            "case": "english-list",
+            "decodeTokensPerSecond": 88.81996334264934,
+            "ttftMs": 39.39999997615814
+          },
+          {
+            "case": "japanese-list",
+            "decodeTokensPerSecond": 89.14673835538298,
+            "ttftMs": 42
+          }
+        ]
+      }
+    ],
+    "groups": [
+      {
+        "model": "normal",
+        "candidate": "baseline",
+        "medianDecode": 98.89446289482686,
+        "decodeRange": [
+          98.52987174925914,
+          105.0350116684693
+        ],
+        "medianTtft": 39.69999998807907
+      },
+      {
+        "model": "normal",
+        "candidate": "base768",
+        "medianDecode": 108.22883943403039,
+        "decodeRange": [
+          103.12653462507568,
+          108.84588804198766
+        ],
+        "medianTtft": 38.75
+      },
+      {
+        "model": "normal",
+        "candidate": "opaque",
+        "medianDecode": 100.36644000128017,
+        "decodeRange": [
+          100.11123471281373,
+          100.52656772810997
+        ],
+        "medianTtft": 39.349999994039536
+      },
+      {
+        "model": "normal",
+        "candidate": "fused768",
+        "medianDecode": 111.30764286845198,
+        "decodeRange": [
+          110.93502376480481,
+          111.76157529655985
+        ],
+        "medianTtft": 38.39999997615814
+      },
+      {
+        "model": "qat",
+        "candidate": "baseline",
+        "medianDecode": 88.98335084901616,
+        "decodeRange": [
+          88.682432427968,
+          89.23512747875354
+        ],
+        "medianTtft": 40.900000005960464
+      },
+      {
+        "model": "qat",
+        "candidate": "base768",
+        "medianDecode": 90.79179122742897,
+        "decodeRange": [
+          90.53024860203824,
+          91.15902185394313
+        ],
+        "medianTtft": 40.54999998211861
+      },
+      {
+        "model": "qat",
+        "candidate": "opaque",
+        "medianDecode": 90.34867283554121,
+        "decodeRange": [
+          88.47072040147549,
+          90.62140391409709
+        ],
+        "medianTtft": 40.95000001788139
+      },
+      {
+        "model": "qat",
+        "candidate": "fused768",
+        "medianDecode": 92.36901215466823,
+        "decodeRange": [
+          91.95737848969297,
+          92.85187914517317
+        ],
+        "medianTtft": 40.400000005960464
+      }
+    ]
+  },
+  "integratedUi": {
+    "path": "outputs/bench/karume/2026-09-13_norm-ui-reopen-n_0a1epi",
+    "resultSha256": "936280bf6d20b2d185d0f8c512a8586e4c5aa52dc71161060bede83e74ea3957",
+    "parity": {
+      "generations": 120,
+      "differences": []
+    },
+    "groups": [
+      {
+        "model": "normal",
+        "normalization": "reference",
+        "medianDecode": 103.02388296713818,
+        "range": [
+          99.66856247423007,
+          107.70519549216083
+        ]
+      },
+      {
+        "model": "normal",
+        "normalization": "submit768",
+        "medianDecode": 110.17308588557296,
+        "range": [
+          110.11868347868123,
+          110.4788292742123
+        ]
+      },
+      {
+        "model": "normal",
+        "normalization": "fused",
+        "medianDecode": 112.53624667584927,
+        "range": [
+          112.16850202207613,
+          113.33381305414913
+        ]
+      },
+      {
+        "model": "qat",
+        "normalization": "reference",
+        "medianDecode": 89.46449632794388,
+        "range": [
+          88.8976689046737,
+          90.12617664976541
+        ]
+      },
+      {
+        "model": "qat",
+        "normalization": "submit768",
+        "medianDecode": 92.37832922092983,
+        "range": [
+          91.64102899339044,
+          93.07272969216773
+        ]
+      },
+      {
+        "model": "qat",
+        "normalization": "fused",
+        "medianDecode": 93.05923294118134,
+        "range": [
+          92.55314460359439,
+          93.46626313507426
+        ]
+      }
+    ],
+    "timeline": [
+      {
+        "model": "normal",
+        "normalization": "reference",
+        "fuseRmsNormAdd": false,
+        "submitMaxChunkSize": 1024,
+        "bundleSha256": "e8679798de0615130971b3782f66e254c2907864e4bdc49c9f6141c71f6a7139",
+        "manifestSha256": "ae23f43cc141d369edc0669ae097fca3e95a91f27ccaf0089f56be4984834ac8",
+        "quant": "i4-gemvpar",
+        "linearGemvReduce": "parallel",
+        "prefillBuckets": "dense",
+        "cases": [
+          {
+            "case": "english-list",
+            "decodeTokensPerSecond": 107.70519549216083,
+            "ttftMs": 35.7150000333786
+          },
+          {
+            "case": "japanese-list",
+            "decodeTokensPerSecond": 106.2995115245865,
+            "ttftMs": 40.10999995470047
+          }
+        ]
+      },
+      {
+        "model": "normal",
+        "normalization": "submit768",
+        "fuseRmsNormAdd": false,
+        "submitMaxChunkSize": 768,
+        "bundleSha256": "e8679798de0615130971b3782f66e254c2907864e4bdc49c9f6141c71f6a7139",
+        "manifestSha256": "ae23f43cc141d369edc0669ae097fca3e95a91f27ccaf0089f56be4984834ac8",
+        "quant": "i4-gemvpar",
+        "linearGemvReduce": "parallel",
+        "prefillBuckets": "dense",
+        "cases": [
+          {
+            "case": "english-list",
+            "decodeTokensPerSecond": 110.18031094918727,
+            "ttftMs": 35.439999997615814
+          },
+          {
+            "case": "japanese-list",
+            "decodeTokensPerSecond": 110.11868347868123,
+            "ttftMs": 38.94499999284744
+          }
+        ]
+      },
+      {
+        "model": "normal",
+        "normalization": "fused",
+        "fuseRmsNormAdd": true,
+        "submitMaxChunkSize": 768,
+        "bundleSha256": "e8679798de0615130971b3782f66e254c2907864e4bdc49c9f6141c71f6a7139",
+        "manifestSha256": "ae23f43cc141d369edc0669ae097fca3e95a91f27ccaf0089f56be4984834ac8",
+        "quant": "i4-gemvpar",
+        "linearGemvReduce": "parallel",
+        "prefillBuckets": "dense",
+        "cases": [
+          {
+            "case": "english-list",
+            "decodeTokensPerSecond": 112.62771177840212,
+            "ttftMs": 35.19000005722046
+          },
+          {
+            "case": "japanese-list",
+            "decodeTokensPerSecond": 112.44478157329644,
+            "ttftMs": 39.4549999833107
+          }
+        ]
+      },
+      {
+        "model": "normal",
+        "normalization": "fused",
+        "fuseRmsNormAdd": true,
+        "submitMaxChunkSize": 768,
+        "bundleSha256": "e8679798de0615130971b3782f66e254c2907864e4bdc49c9f6141c71f6a7139",
+        "manifestSha256": "ae23f43cc141d369edc0669ae097fca3e95a91f27ccaf0089f56be4984834ac8",
+        "quant": "i4-gemvpar",
+        "linearGemvReduce": "parallel",
+        "prefillBuckets": "dense",
+        "cases": [
+          {
+            "case": "english-list",
+            "decodeTokensPerSecond": 112.16850202207613,
+            "ttftMs": 36.314999997615814
+          },
+          {
+            "case": "japanese-list",
+            "decodeTokensPerSecond": 113.33381305414913,
+            "ttftMs": 39.37999999523163
+          }
+        ]
+      },
+      {
+        "model": "normal",
+        "normalization": "submit768",
+        "fuseRmsNormAdd": false,
+        "submitMaxChunkSize": 768,
+        "bundleSha256": "e8679798de0615130971b3782f66e254c2907864e4bdc49c9f6141c71f6a7139",
+        "manifestSha256": "ae23f43cc141d369edc0669ae097fca3e95a91f27ccaf0089f56be4984834ac8",
+        "quant": "i4-gemvpar",
+        "linearGemvReduce": "parallel",
+        "prefillBuckets": "dense",
+        "cases": [
+          {
+            "case": "english-list",
+            "decodeTokensPerSecond": 110.4788292742123,
+            "ttftMs": 36.12999999523163
+          },
+          {
+            "case": "japanese-list",
+            "decodeTokensPerSecond": 110.16586082195863,
+            "ttftMs": 40.11500000953674
+          }
+        ]
+      },
+      {
+        "model": "normal",
+        "normalization": "reference",
+        "fuseRmsNormAdd": false,
+        "submitMaxChunkSize": 1024,
+        "bundleSha256": "e8679798de0615130971b3782f66e254c2907864e4bdc49c9f6141c71f6a7139",
+        "manifestSha256": "ae23f43cc141d369edc0669ae097fca3e95a91f27ccaf0089f56be4984834ac8",
+        "quant": "i4-gemvpar",
+        "linearGemvReduce": "parallel",
+        "prefillBuckets": "dense",
+        "cases": [
+          {
+            "case": "english-list",
+            "decodeTokensPerSecond": 99.74825440968984,
+            "ttftMs": 36.1700000166893
+          },
+          {
+            "case": "japanese-list",
+            "decodeTokensPerSecond": 99.66856247423007,
+            "ttftMs": 41.10999995470047
+          }
+        ]
+      },
+      {
+        "model": "qat",
+        "normalization": "reference",
+        "fuseRmsNormAdd": false,
+        "submitMaxChunkSize": 1024,
+        "bundleSha256": "e8679798de0615130971b3782f66e254c2907864e4bdc49c9f6141c71f6a7139",
+        "manifestSha256": "118e16431a3ba75988ef811e87a8e731b4766e92ef43d4058c4e300b378a4f0c",
+        "quant": "i4-gemvpar",
+        "linearGemvReduce": "parallel",
+        "prefillBuckets": "dense",
+        "cases": [
+          {
+            "case": "english-list",
+            "decodeTokensPerSecond": 89.48609413990089,
+            "ttftMs": 38.27499997615814
+          },
+          {
+            "case": "japanese-list",
+            "decodeTokensPerSecond": 90.12617664976541,
+            "ttftMs": 41.4200000166893
+          }
+        ]
+      },
+      {
+        "model": "qat",
+        "normalization": "submit768",
+        "fuseRmsNormAdd": false,
+        "submitMaxChunkSize": 768,
+        "bundleSha256": "e8679798de0615130971b3782f66e254c2907864e4bdc49c9f6141c71f6a7139",
+        "manifestSha256": "118e16431a3ba75988ef811e87a8e731b4766e92ef43d4058c4e300b378a4f0c",
+        "quant": "i4-gemvpar",
+        "linearGemvReduce": "parallel",
+        "prefillBuckets": "dense",
+        "cases": [
+          {
+            "case": "english-list",
+            "decodeTokensPerSecond": 92.53139457706379,
+            "ttftMs": 38.30500000715256
+          },
+          {
+            "case": "japanese-list",
+            "decodeTokensPerSecond": 93.07272969216773,
+            "ttftMs": 41.49000000953674
+          }
+        ]
+      },
+      {
+        "model": "qat",
+        "normalization": "fused",
+        "fuseRmsNormAdd": true,
+        "submitMaxChunkSize": 768,
+        "bundleSha256": "e8679798de0615130971b3782f66e254c2907864e4bdc49c9f6141c71f6a7139",
+        "manifestSha256": "118e16431a3ba75988ef811e87a8e731b4766e92ef43d4058c4e300b378a4f0c",
+        "quant": "i4-gemvpar",
+        "linearGemvReduce": "parallel",
+        "prefillBuckets": "dense",
+        "cases": [
+          {
+            "case": "english-list",
+            "decodeTokensPerSecond": 93.46626313507426,
+            "ttftMs": 37.3400000333786
+          },
+          {
+            "case": "japanese-list",
+            "decodeTokensPerSecond": 92.76369552340101,
+            "ttftMs": 40.93000000715256
+          }
+        ]
+      },
+      {
+        "model": "qat",
+        "normalization": "fused",
+        "fuseRmsNormAdd": true,
+        "submitMaxChunkSize": 768,
+        "bundleSha256": "e8679798de0615130971b3782f66e254c2907864e4bdc49c9f6141c71f6a7139",
+        "manifestSha256": "118e16431a3ba75988ef811e87a8e731b4766e92ef43d4058c4e300b378a4f0c",
+        "quant": "i4-gemvpar",
+        "linearGemvReduce": "parallel",
+        "prefillBuckets": "dense",
+        "cases": [
+          {
+            "case": "english-list",
+            "decodeTokensPerSecond": 93.35477035896166,
+            "ttftMs": 37.655000030994415
+          },
+          {
+            "case": "japanese-list",
+            "decodeTokensPerSecond": 92.55314460359439,
+            "ttftMs": 41.394999980926514
+          }
+        ]
+      },
+      {
+        "model": "qat",
+        "normalization": "submit768",
+        "fuseRmsNormAdd": false,
+        "submitMaxChunkSize": 768,
+        "bundleSha256": "e8679798de0615130971b3782f66e254c2907864e4bdc49c9f6141c71f6a7139",
+        "manifestSha256": "118e16431a3ba75988ef811e87a8e731b4766e92ef43d4058c4e300b378a4f0c",
+        "quant": "i4-gemvpar",
+        "linearGemvReduce": "parallel",
+        "prefillBuckets": "dense",
+        "cases": [
+          {
+            "case": "english-list",
+            "decodeTokensPerSecond": 92.22526386479586,
+            "ttftMs": 38.30500000715256
+          },
+          {
+            "case": "japanese-list",
+            "decodeTokensPerSecond": 91.64102899339044,
+            "ttftMs": 41.08499997854233
+          }
+        ]
+      },
+      {
+        "model": "qat",
+        "normalization": "reference",
+        "fuseRmsNormAdd": false,
+        "submitMaxChunkSize": 1024,
+        "bundleSha256": "e8679798de0615130971b3782f66e254c2907864e4bdc49c9f6141c71f6a7139",
+        "manifestSha256": "118e16431a3ba75988ef811e87a8e731b4766e92ef43d4058c4e300b378a4f0c",
+        "quant": "i4-gemvpar",
+        "linearGemvReduce": "parallel",
+        "prefillBuckets": "dense",
+        "cases": [
+          {
+            "case": "english-list",
+            "decodeTokensPerSecond": 88.8976689046737,
+            "ttftMs": 39.15000003576279
+          },
+          {
+            "case": "japanese-list",
+            "decodeTokensPerSecond": 89.44289851598687,
+            "ttftMs": 41.50499999523163
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -35,21 +35,31 @@ export const RMS_NORM_WORKGROUP_SIZE = 256;
 /** MUST: WGSL を変えたらキーも上げる（異なる本文を同じキーへ混ぜない）。 */
 export const RMS_NORM_KEY = `rms_norm:v1:f32:lastdim:wg${RMS_NORM_WORKGROUP_SIZE}`;
 
-const rmsNormWgsl = (workgroupSize: 128 | 256): string =>
+/** 後続addの入力順。加算の左右をコード生成でも維持する。 */
+export type RmsNormAddOrder = "norm-residual" | "residual-norm";
+
+const rmsNormWgsl = (
+  workgroupSize: 128 | 256,
+  addOrder?: RmsNormAddOrder,
+): string =>
   `// karume rms_norm (last dim, weight only, f32, 二乗和 1 パス)
 struct Params {
   rows: u32,
   dim: u32,
-  eps: f32,
+  eps: f32,${addOrder === undefined ? "" : "\n  rounding_mask: u32,"}
 }
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read> x: array<f32>;
 @group(0) @binding(2) var<storage, read> weight: array<f32>;
-@group(0) @binding(3) var<storage, read_write> out: array<f32>;
+@group(0) @binding(${addOrder === undefined ? 3 : 4}) var<storage, read_write> out: array<f32>;
 
 var<workgroup> scratch: array<f32, ${workgroupSize}>;
 
-@compute @workgroup_size(${workgroupSize})
+${
+    addOrder === undefined
+      ? ""
+      : "@group(0) @binding(3) var<storage, read> residual: array<f32>;\n"
+  }@compute @workgroup_size(${workgroupSize})
 fn main(
   @builtin(workgroup_id) wid: vec3<u32>,
   @builtin(local_invocation_id) lid3: vec3<u32>,
@@ -86,7 +96,13 @@ fn main(
 
     var o = lid;
     while (o < dim) {
-      out[base + o] = x[base + o] * inv * weight[o];
+      ${
+    addOrder === undefined
+      ? "out[base + o] = x[base + o] * inv * weight[o];"
+      : addOrder === "norm-residual"
+      ? "out[base + o] = bitcast<f32>(bitcast<u32>(x[base + o] * inv * weight[o]) ^ params.rounding_mask) + residual[base + o];"
+      : "out[base + o] = residual[base + o] + bitcast<f32>(bitcast<u32>(x[base + o] * inv * weight[o]) ^ params.rounding_mask);"
+  }
       o = o + ${workgroupSize}u;
     }
     row = row + nwg.x;
@@ -98,6 +114,29 @@ fn main(
 export const RMS_NORM_WGSL: string = rmsNormWgsl(RMS_NORM_WORKGROUP_SIZE);
 export const RMS_NORM_128_KEY = "rms_norm:v1:f32:lastdim:wg128";
 export const RMS_NORM_128_WGSL: string = rmsNormWgsl(128);
+
+/**
+ * 任意指定のRMS→add融合（DECIDED: docs/decisions/0099-rms-norm-add-fusion.md）。
+ * 直接つなぐと最後の乗算とaddが融合し丸めが変わるため、uniformの0との整数XORを挟む。
+ * この値はrmsNormParamsの第4語（0）。定数式のbitcast往復に簡略化しないこと。
+ * 実測では参照と一致するが、WGSLは全バックエンドのビット同一を保証しない。
+ * workgroup内の縮約とgrid-strideは単体RMSと共有し、公開の既定経路は変更しない。
+ */
+export const rmsNormAddWgsl = (order: RmsNormAddOrder): string => {
+  assertRmsNormAddOrder(order);
+  return rmsNormWgsl(RMS_NORM_WORKGROUP_SIZE, order);
+};
+
+export const rmsNormAddKey = (order: RmsNormAddOrder): string => {
+  assertRmsNormAddOrder(order);
+  return `rms_norm_add:v1:${RMS_NORM_KEY}:${order}:xor-round`;
+};
+
+const assertRmsNormAddOrder = (order: RmsNormAddOrder): void => {
+  if (order !== "norm-residual" && order !== "residual-norm") {
+    throw new CodegenError(`rms_norm_add: 未対応の加算順 '${String(order)}'`);
+  }
+};
 
 /**
  * uniform の Params（rows / dim / eps。WGSL の uniform struct は 16 バイト整列なので

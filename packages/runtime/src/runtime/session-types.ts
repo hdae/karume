@@ -312,6 +312,13 @@ export type SessionOptions = {
    */
   readonly linearGemvReduce?: LinearGemvReduce;
   /**
+   * 隣接するf32のrms_norm→addを融合する（既定false、ADR 0099）。
+   * 最終次元256/1536/2560、同一shape、内部値が専有される形だけに適用する。
+   * 丸め保持を実測しているが、未検証GPUで参照とビット同一とは保証しない。
+   * submitPolicyは独立の設定で、この指定だけでは投入上限を変更しない。
+   */
+  readonly fuseRmsNormAdd?: boolean;
+  /**
    * 行ブロック gemv（linear の GEMV 族・M ≥ 2）の**並列度の目標**（スレッド数 = 出力列 n ×
    * y タイル数）。既定 16384 = 参照 device（RTX 3080 Ti）の飽和点。
    *

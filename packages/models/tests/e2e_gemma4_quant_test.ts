@@ -3,7 +3,7 @@ import { assert, assertEquals, assertRejects } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
 import { parseManifest } from "@karume/hub";
 import { denoDirectory } from "@karume/hub/deno";
-import { acquireGpu, type SessionDiagnostics } from "@karume/runtime";
+import { acquireGpu, DEFAULT_SUBMIT_POLICY, type SessionDiagnostics } from "@karume/runtime";
 import { Gemma4Pipeline } from "../gemma.ts";
 import { type Gemma4QatFromPretrainedOptions, Gemma4QatPipeline } from "../gemma4-qat.ts";
 import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE } from "./helpers/gpu.ts";
@@ -64,6 +64,14 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
             const mode of [
               { name: "default", options: {}, parallel: true },
               {
+                name: "fused",
+                options: {
+                  fuseRmsNormAdd: true,
+                  submitPolicy: { ...DEFAULT_SUBMIT_POLICY, maxChunkSize: 768 },
+                },
+                parallel: true,
+              },
+              {
                 name: "explicit-parallel",
                 options: { linearGemvReduce: "parallel" },
                 parallel: true,
@@ -103,6 +111,10 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
                 runs.set(mode.name, { text, stop });
                 assert([...keys].some((key) => key.startsWith("linear_gemv")));
                 assertEquals(
+                  [...keys].some((key) => key.startsWith("rms_norm_add:")),
+                  mode.name === "fused",
+                );
+                assertEquals(
                   [...keys].some((key) => key.startsWith("linear_gemv_parallel")),
                   mode.parallel,
                   mode.name,
@@ -115,6 +127,7 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
             }
           }
           assertEquals(runs.get("default"), runs.get("explicit-parallel"));
+          assertEquals(runs.get("default"), runs.get("fused"));
           assertEquals(runs.get("reference"), runs.get("override"));
           const loadUnsupported = () =>
             family === "gemma4"

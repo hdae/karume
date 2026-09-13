@@ -62,6 +62,7 @@ const fusedAt = (plan: FusionPlan, index: number) => {
 
 Deno.test("ルール表の先頭 op は互いに素で、適用順が結果に効かない", () => {
   assertEquals(FUSION_RULES.map((rule) => rule.name), [
+    "rmsNormAdd",
     "silu",
     "upsample2x",
     "rope",
@@ -75,7 +76,15 @@ Deno.test("ルール表の先頭 op は互いに素で、適用順が結果に�
       seen.add(head);
     }
   }
-  assertEquals([...seen].sort(), ["bmm", "layer_norm", "mul", "reshape", "sigmoid", "slice"]);
+  assertEquals([...seen].sort(), [
+    "bmm",
+    "layer_norm",
+    "mul",
+    "reshape",
+    "rms_norm",
+    "sigmoid",
+    "slice",
+  ]);
 });
 
 // ---------------------------------------------------------------- SiLU
@@ -793,6 +802,7 @@ Deno.test("カウンタは融合が並んだグラフでルール別に積み上
     upsample2x: 0,
     rope: 1,
     adaln: 0,
+    rmsNormAdd: 0,
     rowBlockAttention: 0,
     identityExpand: 0,
   });
