@@ -189,7 +189,7 @@ export const runBenchmark = async (
   kind: ModelKind,
   localOnnx: boolean,
   status: (s: string) => void,
-  linearGemvReduce: LinearGemvReduce = "sequential",
+  linearGemvReduce?: LinearGemvReduce,
 ): Promise<object> => {
   const response = await fetch("/cases.json");
   if (!response.ok) throw Error(`Fixture HTTP ${response.status}`);

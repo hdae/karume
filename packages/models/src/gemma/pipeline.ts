@@ -329,8 +329,10 @@ export type Gemma4PipelineOptions = {
    */
   readonly stateAttentionReduce?: StateAttentionReduce;
   /**
-   * 量子化 GEMV の任意指定の並列加算。省略時は sequential。意味・適用形状は
-   * runtime の SessionOptions が正本。target / drafter 両方へ渡す。QAT は文章が変わる場合がある。
+   * 量子化 GEMV の加算順。明示値 → 選択quantのsession → sequentialの順で解決する。
+   * fromAssetsにはquantが無いため、未指定ならsequential。モデル構成による自動選択はしない。
+   * 意味・適用形状はruntimeのSessionOptionsが正本。target / drafter両方へ渡す（ADR 0098）。
+   * 特にQATでは生成列が変わる場合がある。
    */
   readonly linearGemvReduce?: SessionOptions["linearGemvReduce"];
   /**
@@ -1564,6 +1566,12 @@ class GemmaPipeline {
           selection,
           family,
         );
+        // 未対応の宣言を無視して走らせない。重みshardの取得より前に拒否する。
+        for (const key of Object.keys(quant.session)) {
+          if (key !== "linearGemvReduce") {
+            throw new Error(`${where}: quant '${quantName}' のsession.${key}は未対応`);
+          }
+        }
         const admitted = admitGemma4(
           open(MODEL),
           config,
@@ -1584,7 +1592,7 @@ class GemmaPipeline {
           options.gpu,
           `Gemma4Pipeline: quant '${quantName}'`,
         );
-        return admitted;
+        return { ...admitted, quantLinearGemvReduce: quant.session.linearGemvReduce };
       },
       {
         ...hubOptions,
@@ -1657,7 +1665,12 @@ class GemmaPipeline {
         pleIndex,
         openPleShard,
       },
-      options,
+      {
+        ...options,
+        ...(options.linearGemvReduce === undefined && admitted.quantLinearGemvReduce !== undefined
+          ? { linearGemvReduce: admitted.quantLinearGemvReduce }
+          : {}),
+      },
     );
   }
 

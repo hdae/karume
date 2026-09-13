@@ -143,3 +143,9 @@ SBV2 席名は 2026-09-05 に追随〉。公開済み 4 リポの manifest は�
 anima の `w4` / `w4-a8-s16` は既存行のまま（素版リポ karume-anima のローカル配布形にも
 同名で組み込まれているが**その 2 席は未公開** — 配布スキップ裁定 2026-08-24・perf-ledger
 Q-5）。公開リポ数は Consequences の 4 のまま変わらない。
+
+## 追記（2026-09-13）— GEMVの並列加算
+
+実行ノブの末尾に `gemvpar` を追加し、`session.linearGemvReduce: "parallel"` を表す。
+今回の `i4-gemvpar` は `i4` と同じ重み写像を持ち、加算方式だけが異なる（[ADR 0098](0098-linear-gemv-parallel.md)）。
+既定は引き続き名前ではなく `defaultQuant` で選ぶ。参照用の既存quant名と意味は維持する。

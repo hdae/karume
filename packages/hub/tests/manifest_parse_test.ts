@@ -818,3 +818,21 @@ Deno.test("parseManifest: ファイル参照の越境席 repo / revision（ADR 0
     );
   });
 });
+
+Deno.test("parseManifest: quantのGEMV加算指定を保持し、未指定と不正値を区別する", async (t) => {
+  for (const linearGemvReduce of ["sequential", "parallel"] as const) {
+    await t.step(linearGemvReduce, () => {
+      const manifest = parseManifest(withModel({
+        quants: { q: { weights: { net: "f16" }, session: { linearGemvReduce } } },
+      }));
+      assertEquals(manifest.models.m.quants.q.session, { linearGemvReduce });
+    });
+  }
+  assertEquals(parseManifest(withModel()).models.m.quants.q.session, {});
+  for (const value of ["auto", "Parallel", 1, true, null]) {
+    assertThrows(() =>
+      parseManifest(withModel({
+        quants: { q: { weights: { net: "f16" }, session: { linearGemvReduce: value } } },
+      })), HubError);
+  }
+});

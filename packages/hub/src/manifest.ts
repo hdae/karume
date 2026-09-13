@@ -148,10 +148,12 @@ const GPU_FEATURE_KEYS: readonly string[] = ["shaderF16"];
 const LINEAR_COMPUTE: readonly LinearCompute[] = ["f32", "a8", "f16"];
 const ATTENTION_COMPUTE: readonly AttentionCompute[] = ["f32", "f16", "a8"];
 const SCORE_STORAGE: readonly ScoreStorage[] = ["f32", "f16"];
+const LINEAR_GEMV_REDUCE = ["sequential", "parallel"] as const;
 const SESSION_KEYS: readonly string[] = [
   "linearCompute",
   "attentionCompute",
   "attentionScoreStorage",
+  "linearGemvReduce",
 ];
 
 export type LinearCompute = "f32" | "a8" | "f16";
@@ -263,11 +265,12 @@ export type WeightFiles = {
  */
 export type WeightEntry = Readonly<Record<string, WeightFiles>>;
 
-/** manifest 所有の実行ノブ語彙（3 キー固定 — ADR 0038 §3）。 */
+/** manifest 所有の実行ノブ語彙（ADR 0038 §3 / 0098）。 */
 export type SessionSpec = {
   readonly linearCompute?: LinearCompute;
   readonly attentionCompute?: AttentionCompute;
   readonly attentionScoreStorage?: ScoreStorage;
+  readonly linearGemvReduce?: "sequential" | "parallel";
 };
 
 /** device 生成前に要る GPU feature（`shaderF16` のみ — ADR 0038 §3）。 */
@@ -636,10 +639,12 @@ const parseSession = (fail: Fail, raw: unknown, where: string): SessionSpec => {
   const linearCompute = readEnum(fail, raw, "linearCompute", LINEAR_COMPUTE, at);
   const attentionCompute = readEnum(fail, raw, "attentionCompute", ATTENTION_COMPUTE, at);
   const attentionScoreStorage = readEnum(fail, raw, "attentionScoreStorage", SCORE_STORAGE, at);
+  const linearGemvReduce = readEnum(fail, raw, "linearGemvReduce", LINEAR_GEMV_REDUCE, at);
   return {
     ...(linearCompute === undefined ? {} : { linearCompute }),
     ...(attentionCompute === undefined ? {} : { attentionCompute }),
     ...(attentionScoreStorage === undefined ? {} : { attentionScoreStorage }),
+    ...(linearGemvReduce === undefined ? {} : { linearGemvReduce }),
   };
 };
 

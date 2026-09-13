@@ -25,8 +25,12 @@ fixed packed payload and scale after sharding and publishes all files together o
 pass. `reference.json` records checkpoint fingerprints and trace bounds. Exporting into an existing
 output replaces that complete series; use a new directory to retain previous measurements.
 
-The distribution family is `gemma4-qat/1`, with models `e2b` and `e4b`. Its single `i4` quant is
-explicitly labeled as fixed mixed INT2/INT4/INT8 with SRQ. Default capacity is 128 tokens and prefill
+The distribution family is `gemma4-qat/1`, with models `e2b` and `e4b`. The `i4` quant is
+fixed mixed INT2/INT4/INT8 with SRQ and reference GEMV summation. E2B defaults to
+`i4-gemvpar`, which references the same weights and adds
+`session: { "linearGemvReduce": "parallel" }`. E4B keeps `i4` as its default.
+Rebuild the distribution to obtain the new declaration; no checkpoint requantization
+is needed. Explicit runtime options override quant settings. Default capacity is 128 tokens and prefill
 chunk length is 32 (trace maximum 128). Larger contexts and broad quality remain unvalidated.
 CPU and GPU floating-point reductions can cross SRQ rounding boundaries and select different
 tokens. Short Deno and Chrome comparisons on an RTX 3080 Ti agreed with each other, but did not

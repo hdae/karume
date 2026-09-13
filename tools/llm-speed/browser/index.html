@@ -91,10 +91,10 @@
     <div class="controls">
       <label>モデル<select id="model"><option value="normal">Gemma 4 E2B</option><option value="qat">Gemma 4 QAT E2B</option><option value="both">両方</option></select></label>
       <label>比較対象<select id="engine"><option value="both">両方（順番に実行）</option><option value="karume">karume</option><option value="transformers">Transformers.js</option></select></label>
-      <label>Karumeの行列計算<select id="reduce"><option value="sequential">既定（逐次加算）</option><option value="parallel">並列加算（実験）</option><option value="both">既定と並列を比較</option></select></label>
+      <label>Karumeの行列計算<select id="reduce"><option value="quant">quant定義に従う</option><option value="sequential">逐次加算を指定</option><option value="parallel">並列加算を指定</option><option value="both">逐次と並列を比較</option></select></label>
       <button id="run">計測開始</button><button id="save" disabled>JSONを保存</button>
     </div>
-    <p>並列加算はGemma E2Bの一部の量子化行列を高速化します。重みは同じですが丸め順が変わり、特にQATでは文章も変わる場合があります。M2の効果はこの画面で比較してください。</p>
+    <p>既定では配布形のquant定義に従います。逐次と並列の比較では同じquantの加算方式だけを上書きします。重みは同じですが丸め順が変わり、特にQATでは文章も変わる場合があります。</p>
     <p id="environment" class="muted"></p>
     <p id="status" role="status" aria-live="polite">準備中</p>
     <p
@@ -132,7 +132,9 @@
       for (const c of r.cases) {
         const tr = document.createElement("tr");
         const values = [
-          `${r.model} / ${r.engine}${r.linearGemvReduce ? ` / ${r.linearGemvReduce}` : ""}`,
+          `${r.model} / ${r.engine}${r.quant ? ` / ${r.quant}` : ""}${
+            r.linearGemvReduce ? ` / ${r.linearGemvReduce}` : ""
+          }`,
           c.case,
           number(c.first.ttftMs, "ms"),
           number(median(c.measured.map((x) => x.ttftMs)), "ms"),

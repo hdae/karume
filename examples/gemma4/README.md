@@ -165,13 +165,20 @@ token. With no delivered tokens TTFT is unavailable; with fewer than two, decode
 Token timing precedes text decoding, so buffered text does not postpone TTFT.
 Warmup and model loading are reported separately and excluded from turn timing.
 
-## Experimental parallel GEMV
+## Quant selection and parallel GEMV
 
 ```sh
-deno task demo:gemma4 --linear-gemv-reduce parallel
+deno task demo:gemma4 --quant i4
+deno task demo:gemma4 --quant i4-gemvpar
 ```
 
-This opt-in changes the summation order of selected packed INT2/INT4/INT8 matrices
-for 1–8 rows. The default is `sequential`. It uses the same local converted weights
-and can change generated tokens, especially with QAT. The measured shape set targets
-E2B; other shapes keep their existing kernels. Measure on your GPU before choosing it.
+Updated E2B distributions default to `i4-gemvpar`, which uses the same packed weights
+as `i4` and declares `session.linearGemvReduce: "parallel"`. `i4` retains the reference
+summation order. Existing distributions retain their declared default until rebuilt;
+QAT E4B still defaults to `i4`.
+
+An explicit `--linear-gemv-reduce sequential` or `parallel` overrides the selected
+quant. With older distributions, `--linear-gemv-reduce parallel` works without a rebuild.
+The kernel applies to measured packed INT2/INT4/INT8 shapes and 1–8 rows; other shapes
+retain their existing kernels. Rounding and generated tokens can differ, particularly
+for QAT. Runtime and `fromAssets` defaults remain sequential.

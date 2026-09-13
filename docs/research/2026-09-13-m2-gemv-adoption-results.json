@@ -1,0 +1,217 @@
+{
+  "source": "outputs/bench/karume/2026-09-13_m2-gemv-adoption-_lcwesvq/gemma-browser-2026-09-13T05-00-09.585Z.json",
+  "sha256": "446117a8a348c70d8374f2722974f1e1aff4be60dea284796ba1512504fee8c3",
+  "deviceReportedByUser": "Apple M2",
+  "checkout": "9e859ec55b5a87422790cf900d0331743f70c0b3",
+  "bundleSha256": "3d384324ef743166aded3da20fbc6acdf5427bb10359849218e673c82596475a",
+  "generatedRuns": 60,
+  "rows": [
+    {
+      "model": "normal",
+      "engine": "karume",
+      "reduce": "sequential",
+      "case": "english-list",
+      "decodeMedian": 26.150030612656586,
+      "decodeRange": [
+        26.07367676134176,
+        26.205723246686354
+      ],
+      "ttftMedianMs": 342.35000002384186,
+      "firstTtftMs": 556.8849999904633,
+      "deterministic": true
+    },
+    {
+      "model": "normal",
+      "engine": "karume",
+      "reduce": "sequential",
+      "case": "japanese-list",
+      "decodeMedian": 25.945465103171106,
+      "decodeRange": [
+        25.92485905904362,
+        26.047857770427413
+      ],
+      "ttftMedianMs": 634.1000000238419,
+      "firstTtftMs": 693.0649999976158,
+      "deterministic": true
+    },
+    {
+      "model": "normal",
+      "engine": "karume",
+      "reduce": "parallel",
+      "case": "english-list",
+      "decodeMedian": 32.597222509555046,
+      "decodeRange": [
+        32.50396625838715,
+        32.75577450529187
+      ],
+      "ttftMedianMs": 340.15499997138977,
+      "firstTtftMs": 471.10000002384186,
+      "deterministic": true
+    },
+    {
+      "model": "normal",
+      "engine": "karume",
+      "reduce": "parallel",
+      "case": "japanese-list",
+      "decodeMedian": 32.659493674086384,
+      "decodeRange": [
+        32.48737246716615,
+        32.664404354499595
+      ],
+      "ttftMedianMs": 634.9800000190735,
+      "firstTtftMs": 699.9250000119209,
+      "deterministic": true
+    },
+    {
+      "model": "normal",
+      "engine": "transformers",
+      "reduce": null,
+      "case": "english-list",
+      "decodeMedian": 19.34856751494112,
+      "decodeRange": [
+        19.048454127130796,
+        19.34936976328567
+      ],
+      "ttftMedianMs": 188.6050000190735,
+      "firstTtftMs": 456.11500000953674,
+      "deterministic": true
+    },
+    {
+      "model": "normal",
+      "engine": "transformers",
+      "reduce": null,
+      "case": "japanese-list",
+      "decodeMedian": 19.04851172147297,
+      "decodeRange": [
+        19.042437432128523,
+        19.280589190519326
+      ],
+      "ttftMedianMs": 240.5700000524521,
+      "firstTtftMs": 244.0600000023842,
+      "deterministic": true
+    },
+    {
+      "model": "qat",
+      "engine": "karume",
+      "reduce": "sequential",
+      "case": "english-list",
+      "decodeMedian": 29.289451845681548,
+      "decodeRange": [
+        26.860517171681426,
+        30.726910921329246
+      ],
+      "ttftMedianMs": 388.81500005722046,
+      "firstTtftMs": 517.589999973774,
+      "deterministic": true
+    },
+    {
+      "model": "qat",
+      "engine": "karume",
+      "reduce": "sequential",
+      "case": "japanese-list",
+      "decodeMedian": 28.287526996688513,
+      "decodeRange": [
+        26.552309102461766,
+        30.6859777257699
+      ],
+      "ttftMedianMs": 763.5600000023842,
+      "firstTtftMs": 907.5299999713898,
+      "deterministic": true
+    },
+    {
+      "model": "qat",
+      "engine": "karume",
+      "reduce": "parallel",
+      "case": "english-list",
+      "decodeMedian": 34.42011664617503,
+      "decodeRange": [
+        30.95762245517579,
+        34.42256153046326
+      ],
+      "ttftMedianMs": 387.7900000214577,
+      "firstTtftMs": 519.9399999976158,
+      "deterministic": true
+    },
+    {
+      "model": "qat",
+      "engine": "karume",
+      "reduce": "parallel",
+      "case": "japanese-list",
+      "decodeMedian": 34.3630428211079,
+      "decodeRange": [
+        32.12622035041016,
+        34.38076423607877
+      ],
+      "ttftMedianMs": 763.2800000309944,
+      "firstTtftMs": 864.0049999952316,
+      "deterministic": true
+    },
+    {
+      "model": "qat",
+      "engine": "transformers",
+      "reduce": null,
+      "case": "english-list",
+      "decodeMedian": 19.94339873503376,
+      "decodeRange": [
+        19.602443771381658,
+        19.979829885974507
+      ],
+      "ttftMedianMs": 694.8149999976158,
+      "firstTtftMs": 844.0550000071526,
+      "deterministic": true
+    },
+    {
+      "model": "qat",
+      "engine": "transformers",
+      "reduce": null,
+      "case": "japanese-list",
+      "decodeMedian": 19.969760077717517,
+      "decodeRange": [
+        19.51062399936391,
+        19.97916458533752
+      ],
+      "ttftMedianMs": 830.9700000286102,
+      "firstTtftMs": 828.714999973774,
+      "deterministic": true
+    }
+  ],
+  "pairs": [
+    {
+      "model": "normal",
+      "case": "english-list",
+      "ratio": 1.2465462466333797,
+      "sameIds": true,
+      "firstDifferingIndex": null,
+      "sameText": true
+    },
+    {
+      "model": "normal",
+      "case": "japanese-list",
+      "ratio": 1.2587746469071652,
+      "sameIds": true,
+      "firstDifferingIndex": null,
+      "sameText": true
+    },
+    {
+      "model": "qat",
+      "case": "english-list",
+      "ratio": 1.1751710761787422,
+      "sameIds": false,
+      "firstDifferingIndex": 18,
+      "sameText": false
+    },
+    {
+      "model": "qat",
+      "case": "japanese-list",
+      "ratio": 1.214777199333495,
+      "sameIds": false,
+      "firstDifferingIndex": 35,
+      "sameText": false
+    }
+  ],
+  "limitations": [
+    "single UI sequence, no ABBA order reversal",
+    "64 generated tokens, capacity 128; not the RTX 8192/256 run",
+    "quality assessment is limited to saved outputs and prior fixed suite"
+  ]
+}

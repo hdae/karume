@@ -40,17 +40,20 @@ unsupported GPU rather than switching to CPU. The Linux/NVIDIA benchmark documen
 in the research note uses an experimental Chrome flag; it is **not** part of the
 Mac launch command and is not necessary for ordinary supported M2 Chrome.
 
-## Experimental parallel GEMV
+## Quant defaults and parallel GEMV
 
-Select **karume** under 比較対象 and **既定と並列を比較** under Karumeの行列計算.
-This runs the default and `linearGemvReduce: "parallel"` sequentially in fresh iframes.
-The table and saved JSON identify the mode. The same converted model files are used.
+The default **quant定義に従う** follows the distribution's E2B `defaultQuant` and its
+`session.linearGemvReduce` setting. Newly assembled E2B distributions default to
+`i4-gemvpar`; older local distributions keep their existing `i4` default. No files
+are rewritten by this benchmark. The table and JSON include the selected quant and
+effective reduction mode; JSON also records whether the mode was explicitly overridden.
 
-The option speeds up selected packed INT2/INT4/INT8 matrices with f32 arithmetic
-and 1–8 input rows. Larger prefill batches and unmeasured shapes retain their usual
-kernels. Summation order changes, so token sequences can differ, particularly for
-QAT. It is opt-in and does not change the default. Apple GPU performance and quality
-must be checked on your device; the RTX result is not an M2 prediction.
+Select **karume** under 比較対象 and **逐次と並列を比較** under Karumeの行列計算 to run
+both overrides in fresh iframes, with the same quant and weights. Parallel GEMV changes
+the summation order for selected packed INT2/INT4/INT8 matrices with f32 arithmetic
+and 1–8 input rows. Larger batches and unmeasured shapes keep their existing kernels.
+Token sequences can differ, especially for QAT. The M2 results and quality limits are
+recorded in [the adoption note](../../../docs/research/2026-09-13-m2-gemv-adoption.md).
 
 ## What is measured
 

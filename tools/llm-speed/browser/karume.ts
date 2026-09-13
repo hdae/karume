@@ -1,5 +1,5 @@
 import { acquireGpu, type LinearGemvReduce } from "../../../packages/runtime/mod.ts";
-import { localDirectory } from "../../../packages/hub/mod.ts";
+import { localDirectory, parseManifest } from "../../../packages/hub/mod.ts";
 import { gemma4ChatPrompt, Gemma4Pipeline } from "../../../packages/models/gemma.ts";
 import { Gemma4QatPipeline } from "../../../packages/models/gemma4-qat.ts";
 import { generationTimer } from "../../../examples/shared/generation-timing.ts";
@@ -9,7 +9,7 @@ import type { EngineHandle, Fixture } from "./runner.ts";
 export const loadKarume = async (
   kind: ModelKind,
   fixture: Fixture,
-  linearGemvReduce: LinearGemvReduce = "sequential",
+  linearGemvReduce?: LinearGemvReduce,
 ): Promise<EngineHandle> => {
   const gpu = await acquireGpu();
   try {
@@ -19,8 +19,15 @@ export const loadKarume = async (
         `Karume distribution HTTP ${manifestResponse.status}. Check the server model directory.`,
       );
     }
+    const manifestBytes = await manifestResponse.arrayBuffer();
+    const manifest = parseManifest(new TextDecoder().decode(manifestBytes));
+    const model = manifest.models.e2b;
+    if (model === undefined) throw Error("The distribution has no E2B model");
+    const quant = model.defaultQuant;
+    const effectiveReduce = linearGemvReduce ?? model.quants[quant].session.linearGemvReduce ??
+      "sequential";
     const manifestSha256 = Array.from(
-      new Uint8Array(await crypto.subtle.digest("SHA-256", await manifestResponse.arrayBuffer())),
+      new Uint8Array(await crypto.subtle.digest("SHA-256", manifestBytes)),
       (v) => v.toString(16).padStart(2, "0"),
     ).join("");
     const source = localDirectory({
@@ -38,7 +45,13 @@ export const loadKarume = async (
         return new Uint8Array(await r.arrayBuffer());
       },
     }, { label: `browser-speed-${kind}` });
-    const common = { gpu, model: "e2b", chunkLength: 64, linearGemvReduce } as const;
+    const common = {
+      gpu,
+      model: "e2b",
+      quant,
+      chunkLength: 64,
+      ...(linearGemvReduce === undefined ? {} : { linearGemvReduce }),
+    } as const;
     const pipeline = kind === "normal"
       ? await Gemma4Pipeline.fromPretrained(source, common)
       : await Gemma4QatPipeline.fromPretrained(source, common);
@@ -58,7 +71,9 @@ export const loadKarume = async (
       metadata: {
         manifestSha256,
         compute: "f32",
-        linearGemvReduce,
+        quant,
+        linearGemvReduce: effectiveReduce,
+        linearGemvReduceOverride: linearGemvReduce ?? null,
         weights: kind === "normal"
           ? "Karume packed i4 / i8"
           : "Karume fixed int2 / int4 / int8 + SRQ",

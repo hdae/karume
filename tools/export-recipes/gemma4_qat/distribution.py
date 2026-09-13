@@ -80,6 +80,29 @@ def assert_qat_graph(graph: Mapping[str, Any]) -> None:
         raise DistError("QAT の共有 head または非量子化 projection の本数が違う")
 
 
+def qat_quants(model: str) -> Mapping[str, Any]:
+    """参照quantを保持し、検収済みE2BにだけGEMV並列の定義を足す（ADR 0098）。"""
+    checkpoint_name(model)
+    quant = {
+        "weights": {"model": "i4"},
+        "session": {},
+        "label": "Fixed mixed int2/int4/int8 with SRQ",
+        "description": "Official mobile QAT integers and scales, preserved without "
+        "requantization; fixed activation rounding (SRQ).",
+    }
+    quants = {"i4": quant}
+    if model == "e2b":
+        quants["i4-gemvpar"] = {
+            **quant,
+            "session": {"linearGemvReduce": "parallel"},
+            "label": "Fixed mixed QAT with parallel GEMV",
+            "description": "The same fixed QAT weights and SRQ as i4, with parallel GEMV "
+            "summation. Rounding and generated tokens can differ. "
+            "Select i4 for the reference summation order.",
+        }
+    return quants
+
+
 def qat_plan(series_dir: Path, model: str) -> ModelPlan:
     """検査した1系列から配布計画を作る。元チェックポイントの再ダウンロードは不要。"""
     source = series_dir / series_name(model)
@@ -123,22 +146,15 @@ def qat_plan(series_dir: Path, model: str) -> ModelPlan:
     max_position = gemma4_max_position(config, where)
     if max_position < MAX_CHUNK_LENGTH:
         raise DistError("QAT の位置上限が初期容量より小さい")
+    quant_modes = qat_quants(model)
     return ModelPlan(
         name=model,
         pipeline="gemma4-qat/1",
         artifacts=artifacts,
         weights={"model": {"i4": WeightFiles("model")}},
         assets=gemma4_assets(index),
-        quants={
-            "i4": {
-                "weights": {"model": "i4"},
-                "session": {},
-                "label": "Fixed mixed int2/int4/int8 with SRQ",
-                "description": "Official mobile QAT integers and scales, preserved without "
-                "requantization; fixed activation rounding (SRQ).",
-            }
-        },
-        default_quant="i4",
+        quants=quant_modes,
+        default_quant="i4-gemvpar" if model == "e2b" else "i4",
         pipeline_config={
             "chunkLength": 32,
             "maxChunkLength": reference["maxChunkLength"],

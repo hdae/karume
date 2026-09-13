@@ -14,20 +14,20 @@
   import { runBenchmark } from "/runner.js";
   const params = new URLSearchParams(location.search);
   const engine = params.get("engine"), model = params.get("model");
-  const reduce = params.get("reduce") ?? "sequential";
+  const reduce = params.get("reduce") ?? "quant";
   const send = (type, value) => parent.postMessage({ type, value }, location.origin);
   try {
     if (!["karume", "transformers"].includes(engine) || !["normal", "qat"].includes(model)) {
       throw Error("Invalid benchmark selection");
     }
-    if (!["sequential", "parallel"].includes(reduce)) throw Error("Invalid GEMV reduction");
+    if (!["quant", "sequential", "parallel"].includes(reduce)) throw Error("Invalid GEMV reduction");
     const config = await (await fetch("/config.json")).json();
     const result = await runBenchmark(
       engine,
       model,
       config.localOnnx,
       (s) => send("status", s),
-      reduce,
+      reduce === "quant" ? undefined : reduce,
     );
     send("result", {
       ...result,

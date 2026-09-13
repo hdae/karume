@@ -2987,3 +2987,20 @@ Chrome画面の40生成・JSON保存、Deno通常/QAT/MTPの各3ターンとrese
 統合版のABBA倍率中央値は通常1.5449 / QAT1.3867（同じ41入力ID・capacity8192・256生成）。
 QATは既定と文章・小規模品質が変わる。M2で`bench:llm-browser`の「既定と並列を比較」またはCLIの
 `--linear-gemv-reduce parallel`を使って追試する。既定への昇格は行っていない。
+
+## M2追試とquantによるGEMV選択（2026-09-13）
+
+[採用判断と計測値](2026-09-13-m2-gemv-adoption.md)を追加。利用者のM2で通常約25％・QAT約18〜21％の利得。
+通常の生成列は一致、QATは変わるが保存された短文と固定小規模評価には採用を見送るほどの大幅劣化を認めなかった。
+利用者の補足に従い、モデル形状からの自動選択を避け、quant.sessionにparallelを明示した `i4-gemvpar` を追加する。
+通常/QAT E2Bの配布recipeだけdefaultQuantを変更し、参照i4・runtime・fromAssetsは従来設定を保持する。
+呼び手の明示指定がquantより優先。AGENTSとADR 0058/0098へ永続化。次はGPU常駐PLE・融合・広い品質検証。
+
+### quant採用の最終検収（2026-09-13）
+
+[quant定義による採用](2026-09-13-m2-gemv-adoption.md)は、通常/QAT E2Bに `i4-gemvpar` を追加する形で完了。
+従来の `i4` は維持し、呼び手の明示指定を優先する。QAT E4Bの既定は `i4` のまま。
+全体検証は2,953 passed（784 steps）/ 0 failed / 5 ignored。Pythonはexporter3,227 passed / recipes2,800 passed。
+新規配布形、Chrome UIの60生成、CLI9起動も確認済み。生データと条件は上記の記録を正本とする。
+次のH-23台本は `outputs/bench/karume/2026-09-13_prefill-bucket-survey-_s_ei117/` に準備した。
+この変更のコミット後に `tools/.venv/bin/python <専用ディレクトリ>/run.py` を実行し、結果を `summarize.py` で集計する。

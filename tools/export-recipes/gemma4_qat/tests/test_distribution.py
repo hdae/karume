@@ -5,7 +5,7 @@ from copy import deepcopy
 import pytest
 
 from gemma4_qat.config import checkpoint_name, series_name
-from gemma4_qat.distribution import assert_qat_graph, repo_name
+from gemma4_qat.distribution import assert_qat_graph, qat_quants, repo_name
 from karume.dist import DistError
 
 
@@ -63,3 +63,21 @@ class TestQatGraph:
     def test_unknown_model_is_rejected(self):
         with pytest.raises(ValueError, match="未対応"):
             series_name("12b")
+
+
+class TestQatQuants:
+    def test_parallel_uses_the_same_weights_and_keeps_the_reference(self):
+        modes = qat_quants("e2b")
+        assert list(modes) == ["i4", "i4-gemvpar"]
+        assert modes["i4"]["session"] == {}
+        assert modes["i4-gemvpar"]["weights"] == modes["i4"]["weights"]
+        assert modes["i4-gemvpar"]["session"] == {"linearGemvReduce": "parallel"}
+
+    def test_unmeasured_e4b_keeps_its_single_reference_mode(self):
+        modes = qat_quants("e4b")
+        assert list(modes) == ["i4"]
+        assert modes["i4"]["session"] == {}
+
+    def test_unknown_model_is_rejected(self):
+        with pytest.raises(ValueError, match="未対応"):
+            qat_quants("12b")

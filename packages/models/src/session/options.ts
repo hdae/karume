@@ -1,5 +1,5 @@
 /**
- * manifest の `session`（3 キー固定の manifest 所有語彙）→ runtime `SessionOptions` の写像
+ * manifest の `session`（manifest 所有語彙）→ runtime `SessionOptions` の写像
  * （**パイプライン非依存の共通処理** — 7 家族の `fromAssets` が同じ形で使う）。
  *
  * MUST: barrel には出さない。これは配布形の宣言を runtime のノブへ翻訳する内部機構で、
@@ -39,6 +39,8 @@ const WRITERS: { readonly [K in keyof Required<SessionSpec>]: SpecWriter } = {
     spec.attentionScoreStorage === undefined
       ? {}
       : { attentionScoreStorage: spec.attentionScoreStorage },
+  linearGemvReduce: (spec) =>
+    spec.linearGemvReduce === undefined ? {} : { linearGemvReduce: spec.linearGemvReduce },
 };
 
 /** 宣言された欄だけを持つ `SessionOptions` を組む（未指定のキーは欄ごと作らない）。 */

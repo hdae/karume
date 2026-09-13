@@ -1,6 +1,6 @@
 # 0098: 量子化 GEMV の K 並列加算を任意指定する
 
-- Status: experimental（2026-09-12、実装・RTX自動検収済み）。利用者の Chrome 最適化依頼の範囲で追加。M2と人による品質判断は残り、既定には昇格しない。
+- Status: accepted（2026-09-13）。runtimeは任意指定を維持し、Gemma通常/QAT E2Bの既定quantに明示する。
 - 関連: [0058](0058-numerics-opt-in-contract.md)、[0082](0082-linear-gemv-decode.md)、[0096](0096-speculative-decoding.md)、[0097](0097-gemma4-qat-integration.md)。
 
 ## 背景
@@ -34,3 +34,28 @@
 - 第4段: M2で利用者が追試する。既定への昇格や他形状・他モデルへの拡張は、この記録だけでは行わない。
 
 数値の正本は[調査・検収記録](../research/2026-09-12-chrome-gemv-parallel.md)とそこから辿る保存 JSON。品質の良否を速度だけで判断しない。
+
+## quant定義での採用（2026-09-13）
+
+利用者のM2/Chrome測定で通常E2Bは約25％、QAT E2Bは約18〜21％改善し、TTFTはほぼ不変。
+保存された英語・日本語の出力を読み、問いへの関連性と文の連続性を確認した。通常のA/Bは64 token全一致。
+QATは語句が変わるが、今回の短い出力に崩壊は見られない。RTXの固定64問は45→44正答、NLLは約0.63％増。
+大幅劣化を示す証拠は無く、利用者が委任した速度/品質判断の範囲で採用する。広い品質を保証する判断ではない。
+
+- 通常/QAT E2Bの配布recipeに `i4-gemvpar` を追加し、`defaultQuant` に指定する。
+  重み写像は従来の `i4` と同じで、`session: { linearGemvReduce: "parallel" }` だけを加える。
+  従来の `i4` の意味と参照goldenは変更しない。E4Bの既定は検証前なので `i4` を維持する。
+- hubの `SessionSpec` に `linearGemvReduce: "sequential" | "parallel"` を追加する。
+  未知値を拒否し、modelsの共通写像も対応する。manifest形式は `karume/4` の省略可能欄の追加で、
+  既存の空sessionは従来どおり。旧readerは新欄を未知キーとして拒否し、黙って無視しない。
+- GemmaのfromPretrainedは選択quantの宣言をtarget/drafterへ渡す。
+  優先順位は呼び手の明示指定 → quant.session → runtimeの参照既定。
+  fromAssetsにはquant選択が無いので明示したオプションのみを使う。モデル名・層数・GPU名で自動選択しない。
+- Gemmaは今回 `linearGemvReduce` だけをquant.sessionから受理する。
+  未実装の他のsession欄を宣言したquantは、重みのダウンロード前に拒否する。値を捨てて続行しない。
+- CLIでquantを選べるようにし、Chrome画面の既定はmanifestの `defaultQuant` に従う。
+  比較時は同じ選択quantに加算方式を明示してA/Bする。結果には選択quantと有効な加算方式を記録する。
+- 既存のローカル配布形・公開pinを自動で書き換えない。recipeから新しい配布形を作ったときに既定が変わる。
+  重み自体の再量子化は不要。参照用 `quant: "i4"` と、実行指定 `linearGemvReduce: "sequential"` を残す。
+
+数値と採否の根拠は[M2の採用判断](../research/2026-09-13-m2-gemv-adoption.md)。

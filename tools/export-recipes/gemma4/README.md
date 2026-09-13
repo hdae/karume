@@ -487,3 +487,12 @@ pinned fetch source for the published repository is `GEMMA4_SOURCES["gemma4"]`
 (`@karume/models/gemma` — ADR [0073](../../../docs/decisions/0073-models-source-pin.md) /
 [0092](../../../docs/decisions/0092-distribution-repos-and-sources.md)); a locally built
 distribution is spelled out by the caller, since `fromPretrained` has no default source.
+
+## GEMV execution variants
+
+E2B distributions provide `i4` (reference summation) and `i4-gemvpar` (parallel GEMV).
+Both reference the same model and drafter weight files. The default is `i4-gemvpar`,
+whose quant definition declares `session.linearGemvReduce: "parallel"`.
+Reassembling the distribution updates this metadata without requantizing the weights.
+Existing distributions and pinned public revisions are not changed automatically.
+See [the adoption record](../../../docs/research/2026-09-13-m2-gemv-adoption.md).

@@ -220,9 +220,8 @@ GEMMA4_WEIGHTS: Mapping[str, Mapping[str, WeightFiles]] = {
     GEMMA4_DRAFTER_ROLE: {GEMMA4_DRAFTER_DTYPE: WeightFiles(GEMMA4_DRAFTER_ROLE)},
 }
 
-#: quant 席（ADR 0074 の文法 `<格納>[+<部品><ビット>]…[-<ノブ>]…`）。1 席だけなのは格納系列が
-#: 1 本しか無いため。`session` は空 — `Gemma4Pipeline` は Session の実行形ノブを結線していない
-#: （宣言だけ足すと「名前だけの席」になる）。
+#: 同じ格納系列に参照加算とGEMV並列加算を用意する（ADR 0098）。
+#: 明示したi4の意味を保持し、既定quantだけを高速化付きへ向ける。
 GEMMA4_QUANTS: Mapping[str, Any] = {
     GEMMA4_DTYPE: {
         "weights": {},
@@ -231,10 +230,18 @@ GEMMA4_QUANTS: Mapping[str, Any] = {
         "description": "The only storage series: the main model's linear weights in packed int4"
         " (group 32) and its embedding tables in int8, which are not int4-eligible. The drafter"
         " head is int8 throughout.",
-    }
+    },
+    "i4-gemvpar": {
+        "weights": {},
+        "session": {"linearGemvReduce": "parallel"},
+        "label": "Packed int4 with parallel GEMV",
+        "description": "The same packed weights as i4, with parallel GEMV summation. "
+        "Faster on tested E2B devices; rounding and generated tokens can differ. "
+        "Select i4 for the reference summation order.",
+    },
 }
 
-GEMMA4_DEFAULT_QUANT = GEMMA4_DTYPE
+GEMMA4_DEFAULT_QUANT = "i4-gemvpar"
 
 #: 固定長 prefill chunk の行数（ADR 0066 決定 4 — context の計画時定数）。**実行時ノブ**なので
 #: 資産からは導出できない。上限は記号 `M` の trace 時の上限（{@link GEMMA4_MAX_CHUNK_LENGTH}）。
@@ -1008,8 +1015,11 @@ def gemma4_plan(sources: Gemma4Sources, model: str = GEMMA4_DEFAULT_MODEL) -> Mo
         assets=gemma4_assets(index),
         # requiredLimits は書かない — core の dist が組み立て時に一括導出して焼く
         # （karume/limits.py。計画側の手書きは二重管理として拒否される）。
-        quants=complete_quant_weights(GEMMA4_WEIGHTS, GEMMA4_QUANTS),
-        default_quant=GEMMA4_DEFAULT_QUANT,
+        quants=complete_quant_weights(
+            GEMMA4_WEIGHTS,
+            GEMMA4_QUANTS if model == "e2b" else {GEMMA4_DTYPE: GEMMA4_QUANTS[GEMMA4_DTYPE]},
+        ),
+        default_quant=GEMMA4_DEFAULT_QUANT if model == "e2b" else GEMMA4_DTYPE,
         pipeline_config=pipeline_config,
     )
 
