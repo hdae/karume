@@ -146,6 +146,8 @@ import {
   linearGemvParams,
   linearGemvRowsKey,
   linearGemvRowsWgsl,
+  linearGemvSubgroupKey,
+  linearGemvSubgroupWgsl,
   linearGemvUnit,
   linearGemvWgsl,
 } from "../kernels/linear-gemv.ts";
@@ -1765,7 +1767,8 @@ export class RecipeBuilder {
     const [x, weight] = step.inputShapes;
     const where = `linear gemv [${x.join(",")}] × [${weight.join(",")}]`;
     // 数値を変える選択は明示指定時のみ。参照経路の選択・WGSLは従来どおり。
-    const lanes = this.#state.linearGemvReduce === "parallel"
+    const subgroup = this.#state.linearGemvReduce === "parallel-subgroup32";
+    const lanes = this.#state.linearGemvReduce !== "sequential"
       ? linearGemvParallelLanes(storage, m, n, k, groupSize)
       : undefined;
     const rowsVariant = m === 1 || lanes !== undefined
@@ -1774,14 +1777,18 @@ export class RecipeBuilder {
     const variant = rowsVariant ?? defaultLinearGemvVariant({ storage, n, k });
     const rows = rowsVariant?.rows ?? 1;
     const key = lanes !== undefined
-      ? linearGemvParallelKey(storage, groupSize, lanes)
+      ? subgroup
+        ? linearGemvSubgroupKey(storage, groupSize, lanes)
+        : linearGemvParallelKey(storage, groupSize, lanes)
       : rowsVariant === undefined
       ? linearGemvKey(storage, groupSize, variant)
       : linearGemvRowsKey(storage, groupSize, rowsVariant);
     const { pipeline, layout, roles } = await this.#state.cache.get(
       key,
       lanes !== undefined
-        ? linearGemvParallelWgsl(storage, groupSize, lanes)
+        ? subgroup
+          ? linearGemvSubgroupWgsl(storage, groupSize, lanes)
+          : linearGemvParallelWgsl(storage, groupSize, lanes)
         : rowsVariant === undefined
         ? linearGemvWgsl(storage, groupSize, variant)
         : linearGemvRowsWgsl(storage, groupSize, rowsVariant),

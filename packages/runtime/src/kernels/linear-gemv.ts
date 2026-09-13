@@ -820,3 +820,64 @@ ${unitMacs(storage, "t")}
 }
 `;
 };
+
+export const linearGemvSubgroupKey = (
+  storage: WeightStorage,
+  group: number | undefined,
+  lanes: LinearGemvParallelLanes,
+): string => `${linearGemvParallelKey(storage, group, lanes)}:subgroup32`;
+
+/**
+ * parallelと同じ入力配分・加算木をsubgroup内の値交換で実行する。
+ * 既存のWGSLとキーは維持する。固定32レーンの機能を明示要求し、共有メモリを使わない。
+ * DECIDED: docs/decisions/0101-linear-gemv-subgroup.md
+ */
+export const linearGemvSubgroupWgsl = (
+  storage: WeightStorage,
+  group: number | undefined,
+  lanes: LinearGemvParallelLanes,
+): string => {
+  if (![2, 4, 8, 16, 32].includes(lanes)) {
+    throw new CodegenError("linear_gemv_parallel: 不正なlane数");
+  }
+  assertRowsStorage(storage);
+  const unit = linearGemvUnit(storage);
+  const shift = gemvGroupShift(storage, group);
+  return `enable subgroups, subgroup_size_control;
+// karume linear gemv K subgroup32 (${storage}, ${lanes} lanes/output)
+struct Dims {
+  m: u32,
+  n: u32,
+  k: u32,
+}
+@group(0) @binding(0) var<uniform> dims: Dims;
+${bindings(unit, storage)}
+
+@compute @workgroup_size(128) @subgroup_size(32)
+fn main(
+  @builtin(subgroup_invocation_id) sub: u32,
+  @builtin(subgroup_id) sg: u32,
+  @builtin(workgroup_id) wg: vec3<u32>,
+) {
+  let lane = sub % ${lanes}u;
+  let col = wg.x * ${128 / lanes}u + sg * ${32 / lanes}u + sub / ${lanes}u;
+  var acc = 0.0;
+  // 端の列も全レーンがshuffleへ参加する。local IDとsubgroup IDの配置を仮定しない。
+  if (col < dims.n) {
+    let units = dims.k / ${unit}u;
+    let row_base = col * units;${scaleSetupWgsl(storage, shift)}
+    for (var unit = lane; unit < units; unit += ${lanes}u) {
+${unitLoads(storage, "t", "unit", shift, "wg.y * (dims.k / 4u) + ")}
+${unitMacs(storage, "t")}
+    }
+  }
+  for (var width = ${lanes / 2}u; width > 0u; width /= 2u) {
+    let other = subgroupShuffleXor(acc, width);
+    if (lane < width) { acc = acc + other; }
+  }
+  if (col < dims.n && lane == 0u) {
+    out[wg.y * dims.n + col] = acc + bias[col];
+  }
+}
+`;
+};

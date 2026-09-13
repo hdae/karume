@@ -1758,7 +1758,10 @@ class GemmaPipeline {
       ? undefined
       : assertSpeculative("Gemma4Pipeline", options.speculative);
     const gpu = options.gpu ??
-      await acquireGpu({ subgroups: options.rmsNormReduce === "subgroup32" });
+      await acquireGpu({
+        subgroups: options.rmsNormReduce === "subgroup32" ||
+          options.linearGemvReduce === "parallel-subgroup32",
+      });
     const ownsGpu = options.gpu === undefined;
     // ③PV の縮約形は家族の既定（K-12 昇格済み）— 呼び手が明示すればそれに従う。予算は
     // 未指定なら欄ごと渡さない（既定値をここに写すと、runtime 側で既定が動いたときに

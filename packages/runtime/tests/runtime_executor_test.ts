@@ -517,6 +517,8 @@ Deno.test({
           jsCallerOptions({ linearGemvReduce: "paralel" }),
           { linearGemvReduce: "parallel", linearCompute: "f16" } as const,
           { linearGemvReduce: "parallel", linearCompute: "a8" } as const,
+          { linearGemvReduce: "parallel-subgroup32", linearCompute: "f16" } as const,
+          { linearGemvReduce: "parallel-subgroup32", linearCompute: "a8" } as const,
         ]
       ) {
         await assertRejects(

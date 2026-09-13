@@ -3080,3 +3080,24 @@ runtimeの`rmsNormReduce: "subgroup32"`、GPU取得の`subgroups: true`とGemma�
 ログは`outputs/bench/karume/2026-09-13_rms-subgroup-verify-retry-_ylusnzs/verify.log`。
 初回の配布形読み込み失敗は単独・全体再走で成功。旧manifestが残る疑似HFの固定revision問題を再現して別件に記録したが、
 当該失敗時のポートは未記録なので因果は未確定。キャッシュ削除・自動再試行・検証条件の緩和はしていない。
+
+## M2のRMS検収と並列GEMVのsubgroup値交換（2026-09-13）
+
+[調査・費用帰属・検収](2026-09-13-gemv-subgroup.md)と[集計JSON](2026-09-13-gemv-subgroup-results.json)に記録した。
+M2のRMSは約0.5%差で既定採用を見送る。RMSをworkgroupへ戻した再プロファイルで行列計算を対象にし、
+parallelと同じ入力配分・加算木をsubgroupShuffleXorで実行する任意指定を追加した（K-38 / ADR 0101）。
+既存parallel・参照WGSL・golden・quant・recipeは維持。Denoは新機能を使えず、Chromeで明示指定する。
+
+私有実験160生成・統合UI80生成はすべて既存parallelと一致。QATはRTXで約4〜5%の利得が再現した。
+通常版は初回約2.8%改善、統合追試は中立で、利得の判断を保留する。M2の結果ではない。
+Chromeの共有検査180件28,080要素と35 Session実行も通過。追加幾何の探索は有効124形状まで行い、全体検収前なので採用しない。
+
+次はM2で`deno task bench:llm-browser`の開始ボタンから、初期選択の通常/QAT各ABBA・8設定80生成を取る。
+未完はM2、E4B・長文・実モデルMTPの新経路検収、広い品質、既定への組み込み、大きいI4行列の幾何の全体比較。
+実験はすべて別ディレクトリへ保存。初回ハーネスの解放メソッド誤りと、探索のGPU投入数上限漏れも上記researchへ記録した。
+
+K-38の最終verifyは**2,959 passed（802 steps）・0 failed・5 ignored（2 steps）**、テスト25分51秒で完了。
+ログは`outputs/bench/karume/2026-09-13_gemv-subgroup-verify-final-8okk9vns/verify.log`。
+追加stepのDeno SKIPは機能未提供による。Chromeは共有数値検査とSession診断を実走した。
+新規テストの期待と実行条件を修正するための2回の中断、SIGINT時のexit 139と単独成功は上記researchへ記録してある。
+最終HTMLの説明修正後も、初期選択と推論bundleのSHAがUI検収版と一致することを確認した。

@@ -211,7 +211,7 @@ export type ComputePrecision = "f32" | "f16" | "a8";
 export type StateAttentionReduce = "sequential" | "parallel";
 
 /** 量子化 GEMV の K 加算順（ADR 0098）。 */
-export type LinearGemvReduce = "sequential" | "parallel";
+export type LinearGemvReduce = "sequential" | "parallel" | "parallel-subgroup32";
 
 /** RMS正規化の縮約方式。subgroup32は参照と加算順が異なる（ADR 0100）。 */
 export type RmsNormReduce = "workgroup" | "subgroup32";
@@ -312,6 +312,8 @@ export type SessionOptions = {
    * 限る任意指定。f32 演算のみで、対象外形状・格納は従来経路（診断キーで区別）。
    * 加算順が変わるため、QAT の再量子化を含め生成列は既定と一致しない場合がある。
    * M=1 と M=4/8 は同一の加算順を使う。追加重みコピーは無い。ADR 0098。
+   * parallel-subgroup32はparallelと同じ配分・加算木を32レーン内の値交換で実行する（ADR 0101）。
+   * acquireGpu({ subgroups: true })が必要。不足時は拒否し、自動でparallelへ戻さない。
    */
   readonly linearGemvReduce?: LinearGemvReduce;
   /**

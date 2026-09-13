@@ -7,12 +7,11 @@ deno task bench:llm-browser
 ```
 
 Open **http://localhost:8787** in Chrome on your Mac and click **計測開始**. The
-current defaults measure **QAT E2B with karume, parallel GEMV, and dense prefill
-buckets**. They compare RMS workgroup reduction and the new 32-lane subgroup
-reduction in ABBA order, with RMS-add fusion and submission limit 768 in both:
-4 model loads and 40 generations. These settings prepare the next M2 validation.
-Choose the normal E2B model, Transformers.js,
-reference settings, or a combined comparison explicitly when needed.
+current defaults measure **normal and QAT E2B with karume and dense prefill
+buckets**. They compare the existing parallel GEMV and its subgroup32 variant
+in ABBA order, with RMS-add fusion and submission limit 768 in both:
+8 model loads and 80 generations. These settings prepare the next M2 validation.
+Transformers.js, reference settings, and earlier comparisons remain available.
 **JSONを保存** downloads all timings, generated token IDs, output text,
 GPU information, model references, dependency versions, and the benchmark bundle hash.
 Keep the tab in the foreground and avoid other GPU workloads during measurement.
@@ -63,10 +62,11 @@ recorded in [the adoption note](../../../docs/research/2026-09-13-m2-gemv-adopti
 
 ## Prefill bucket experiment
 
-The initial selection uses **Gemma 4 QAT E2B**, **karume**, **並列加算を指定**, and **細分化**,
+The initial selection uses both E2B models, **karume**, and **細分化**,
 following the [M2 validation](../../../docs/research/2026-09-13-m2-prefill-adoption.md).
 To repeat only the bucket comparison, change Karumeの入力バケット to
-**3種類を往復比較** and Karumeの正規化・投入設定 to **従来**.
+**3種類を往復比較**, Karumeの行列計算 to **並列加算を指定**, and
+Karumeの正規化・投入設定 to **従来**.
 Explicit parallel selection also works with older local distributions. Save the JSON
 after completion; each result includes `prefillBuckets` and `chunkBuckets`.
 
@@ -93,9 +93,30 @@ More buckets consume more execution-plan and buffer-cache entries; long inputs a
 alternating context capacities can erase the benefit. RTX cache-stress results and
 the scope of the experiment are recorded in [the prefill note](../../../docs/research/2026-09-13-prefill-buckets.md).
 
+## Subgroup GEMV comparison
+
+The initial selection runs both E2B models with **並列GEMVの2経路を往復比較**:
+`parallel → parallel-subgroup32 → parallel-subgroup32 → parallel`, for eight jobs
+and 80 generations. Dense chunk-64 buckets, RMS-add fusion, and submission limit
+768 stay fixed. This compares the matrix reduction only; RMS subgroup reduction
+remains a separate option.
+
+`linearGemvReduce: "parallel-subgroup32"` preserves the existing parallel kernel's
+input partition and addition tree while exchanging partial sums within a fixed
+32-lane subgroup. RTX comparisons preserved all generated tokens. M2 still needs
+validation. Missing `subgroups`, `subgroup-size-control`, or WGSL `subgroup_id`
+support is an error; Deno 2.9.6 does not provide the required features.
+
+Both Gemma pipelines accept this option. With an external GPU context, first call
+`acquireGpu({ subgroups: true })`. Existing `parallel`, `sequential`, quant defaults,
+and model assets retain their meanings. This mode is currently an explicit runtime
+option and is not added to the distribution's quant vocabulary. See
+[ADR 0101](../../../docs/decisions/0101-linear-gemv-subgroup.md) and
+[measurements](../../../docs/research/2026-09-13-gemv-subgroup.md).
+
 ## RMS normalization and GPU submission comparison
 
-The default **RMSの2経路を往復比較** runs `fused → subgroup32 → subgroup32 → fused`
+The optional **RMSの2経路を往復比較** runs `fused → subgroup32 → subgroup32 → fused`
 for QAT E2B. Each job uses a fresh iframe with the same weights, parallel GEMV,
 dense prefill buckets, RMS-add fusion, and submission limit 768. `subgroup32`
 changes the reduction order and can change generated text. It requires Chrome
@@ -116,8 +137,8 @@ submission frequency from fusion.
 The fusion is opt-in and keeps the original RMS kernels available. It combines
 adjacent RMS normalization and addition for validated f32 widths; the integer
 rounding barrier matched the reference on the tested RTX backends and the M2
-fusion comparison preserved all 120 generated sequences. The new subgroup path
-still needs M2 validation. Library, CLI, and quant defaults stay unchanged.
+fusion comparison preserved all 120 generated sequences. The M2 RMS subgroup comparison showed only about 0.5% difference;
+its speed benefit is not established on M2. Library, CLI, and quant defaults stay unchanged.
 Results include `normalization`, `rmsNormReduce`, `fuseRmsNormAdd`,
 `submitMaxChunkSize`, and the enabled GPU and WGSL features.
 

@@ -5,6 +5,8 @@ import {
   linearGemvParallelKey,
   linearGemvParallelLanes,
   linearGemvParallelWgsl,
+  linearGemvSubgroupKey,
+  linearGemvSubgroupWgsl,
 } from "../src/kernels/linear-gemv.ts";
 
 describe("GEMV並列加算の選択とコード生成", () => {
@@ -35,15 +37,25 @@ describe("GEMV並列加算の選択とコード生成", () => {
           assertEquals(keys.has(key), false);
           keys.set(key, shader);
           assertEquals(linearGemvParallelWgsl(storage, group, lanes), shader);
+          const subgroupKey = linearGemvSubgroupKey(storage, group, lanes);
+          const subgroupShader = linearGemvSubgroupWgsl(storage, group, lanes);
+          assertNotEquals(subgroupKey, key);
+          assertEquals(keys.has(subgroupKey), false);
+          keys.set(subgroupKey, subgroupShader);
+          assertEquals(linearGemvSubgroupWgsl(storage, group, lanes), subgroupShader);
         }
       }
     }
-    assertEquals(keys.size, 30);
+    assertEquals(keys.size, 60);
   });
   it("未対応格納と不正なgroupをコード生成前に拒否する", () => {
     assertThrows(() => linearGemvParallelWgsl("f16", undefined, 4));
     assertThrows(() => linearGemvParallelWgsl("f32", undefined, 4));
     assertThrows(() => linearGemvParallelWgsl("i4", 16, 4));
     assertThrows(() => linearGemvParallelWgsl("i8", 32, 4));
+    assertThrows(() => linearGemvSubgroupWgsl("f16", undefined, 4));
+    assertThrows(() => linearGemvSubgroupWgsl("f32", undefined, 4));
+    assertThrows(() => linearGemvSubgroupWgsl("i4", 16, 4));
+    assertThrows(() => linearGemvSubgroupWgsl("i8", 32, 4));
   });
 });

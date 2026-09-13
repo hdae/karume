@@ -182,6 +182,7 @@ const SCORE_STORAGES: Readonly<Record<ScoreStorage, true>> = { f32: true, f16: t
 const LINEAR_GEMV_REDUCES: Readonly<Record<LinearGemvReduce, true>> = {
   sequential: true,
   parallel: true,
+  "parallel-subgroup32": true,
 };
 const STATE_ATTENTION_REDUCES: Readonly<Record<StateAttentionReduce, true>> = {
   sequential: true,
@@ -1096,8 +1097,19 @@ export class Session {
       stateAttentionReduce,
       linearGemvReduce,
     );
-    if (linearGemvReduce === "parallel" && linearCompute !== "f32") {
-      throw new ExecutionError("linearGemvReduce: parallel は linearCompute: f32 のみ対応");
+    if (linearGemvReduce !== "sequential" && linearCompute !== "f32") {
+      throw new ExecutionError(
+        `linearGemvReduce: ${linearGemvReduce} は linearCompute: f32 のみ対応`,
+      );
+    }
+    if (
+      linearGemvReduce === "parallel-subgroup32" &&
+      (!gpu.features.has("subgroups") || !gpu.features.has("subgroup-size-control") ||
+        !gpu.wgslLanguageFeatures.has("subgroup_id"))
+    ) {
+      throw new ExecutionError(
+        "linearGemvReduce: parallel-subgroup32 は acquireGpu({ subgroups: true }) が必要",
+      );
     }
     // 値域の検査（union を読まない）は綴りの門の後 — 文言は estimate.ts の同じ門と揃える。
     if (!Number.isSafeInteger(planBackingBudgetBytes) || planBackingBudgetBytes < 0) {

@@ -24,7 +24,9 @@ export const loadKarume = async (
   const subgroup = normalization === "subgroup32";
   const fuseRmsNormAdd = normalization === "fused" || subgroup;
   const rmsNormReduce = subgroup ? "subgroup32" : "workgroup";
-  const gpu = await acquireGpu({ subgroups: subgroup });
+  const gpu = await acquireGpu({
+    subgroups: subgroup || linearGemvReduce === "parallel-subgroup32",
+  });
   try {
     const manifestResponse = await fetch(`/models/${kind}/karume.json`);
     if (!manifestResponse.ok) {

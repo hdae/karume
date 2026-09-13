@@ -22,7 +22,9 @@
     if (!["karume", "transformers"].includes(engine) || !["normal", "qat"].includes(model)) {
       throw Error("Invalid benchmark selection");
     }
-    if (!["quant", "sequential", "parallel"].includes(reduce)) throw Error("Invalid GEMV reduction");
+    if (!["quant", "sequential", "parallel", "parallel-subgroup32"].includes(reduce)) {
+      throw Error("Invalid GEMV reduction");
+    }
     if (!["default", "sparse", "dense"].includes(prefill)) throw Error("Invalid prefill buckets");
     if (!["reference", "submit768", "fused", "subgroup32"].includes(normalization)) {
       throw Error("Invalid normalization mode");
