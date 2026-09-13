@@ -31,7 +31,7 @@ RMS subgroup32のM2追試は約0.5%の差で、既定採用を裏付ける改善
    内部GPU取得では指定時だけ必要な機能を要求する。外部GPUはSessionの門で検査する。
    quantの保存語彙・recipe・既定quant・配布形式・公開revisionは変更しない。
    Denoの必要な機能は未提供なので、今回はChromeで明示指定する提供範囲とする。
-6. 比較画面は通常/QAT E2B・Karume・細分化chunk64・RMS融合・投入768を初期選択にし、
+6. 導入時の比較画面は通常/QAT E2B・Karume・細分化chunk64・RMS融合・投入768を初期選択にし、
    各モデルでparallel→parallel-subgroup32→parallel-subgroup32→parallelを測る（8設定80生成）。
    RMSのsubgroup32とは独立した選択にする。以前の参照・RMS・Transformers.js比較も残す。
 
@@ -46,3 +46,14 @@ RMS subgroup32のM2追試は約0.5%の差で、既定採用を裏付ける改善
 
 値交換は[WGSLのsubgroupShuffleXor仕様](https://www.w3.org/TR/WGSL/#subgroupshufflexor-builtin)に従う。
 マスクはsubgroup内で一様な16以下の2冪とし、全レーンが参加する。外部実装のソースコードは複製していない。
+
+## M2追試後の採否と画面の初期選択（2026-09-13）
+
+[利用者の80生成](../research/2026-09-13-m2-gemv-subgroup-adoption.md)は既存parallelとtoken/stop/textが一致した。
+通常版は約9.3%遅く、QATにも高速化の根拠はない。QATは走行中の変動が大きいため、固定した低下率とは扱わない。
+M2向けの既定採用を見送る。RTXのQATでは利得が再現しているため、任意指定は維持する。
+共有メモリ同期を減らせば他GPUでも速くなる、という仮定は採用根拠にしない。
+
+画面の初期選択だけを既存parallelへ戻す。両E2B・dense・RMS融合・投入768の2設定20生成となり、
+GEMV/RMSのsubgroup比較は引き続き選択できる。runtime・モデル・quant・CLIの既定と保存形式は変えない。
+既に得られたM2の80生成を同じ設定で取り直す必要はない。

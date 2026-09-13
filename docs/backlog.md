@@ -21,7 +21,7 @@
   H-23は[M2の全26設定](research/2026-09-13-m2-prefill-adoption.md)を検収し、比較画面のchunk64だけ細分化を初期選択に採用。
   K-36は[M2追試](research/2026-09-13-rms-subgroup-reduction.md)まで完了。モデル既定への組み込みは、融合のquant選択とホストの投入方針を分けて具体化する。
   K-37は[M2追試](research/2026-09-13-gemv-subgroup.md)まで完了。約0.5%の差で既定採用を見送る。
-  K-38の並列GEMV subgroup32を任意指定で追加。次は初期選択の両E2B・8設定80生成をM2で追試する。QATのRTX利得は再現、通常版は保留。Denoは必要な機能が未対応。
+  K-38の並列GEMV subgroup32は任意指定を維持。[M2の80生成](research/2026-09-13-m2-gemv-subgroup-adoption.md)は出力一致、速度改善なしで既定採用を見送る。画面は既存parallelの2設定20生成へ戻す。次は大きい行列の配置の全体比較とM2のGPU費用帰属。Denoは必要な機能が未対応。
   広いchunk/複数容量への一括適用は見送り。QATのM2/RTX生成差とChromeのGPU Instance消失は原因の切り分けを残す。
   残件は配布 recipe / source 表、長文と広い品質評価。実験資産を公開済みモデルとして扱わない。
   手元の試走は [MiniCPM5 CLI](../examples/minicpm5/README.md) / [Qwen3 CLI](../examples/qwen3/README.md) を使える。

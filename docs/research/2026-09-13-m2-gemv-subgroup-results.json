@@ -1,0 +1,808 @@
+{
+  "format": "karume-m2-gemv-subgroup-adoption/1",
+  "sourceFile": "gemma-browser-2026-09-13T18-31-55.278Z.json",
+  "sourceSha256": "7f1046aabf08d6eafe0b07d9382ca0f2325b3bf3443d929dc79f22486b2265ed",
+  "artifacts": "outputs/bench/karume/2026-09-13_18-39-42_m2-gemv-subgroup-adoption-retry-sx1l83zy",
+  "aggregation": "median of each three-measured-generation median, across two cases and two model loads; descriptive only",
+  "environment": {
+    "engine": "karume",
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
+    "platform": "MacIntel",
+    "adapter": {
+      "vendor": "apple",
+      "architecture": "metal-3",
+      "description": "",
+      "device": "",
+      "isFallbackAdapter": false,
+      "features": [
+        "depth32float-stencil8",
+        "rg11b10ufloat-renderable",
+        "bgra8unorm-storage",
+        "texture-formats-tier1",
+        "texture-compression-bc",
+        "dual-source-blending",
+        "core-features-and-limits",
+        "float32-filterable",
+        "indirect-first-instance",
+        "texture-compression-astc-sliced-3d",
+        "float32-blendable",
+        "subgroup-size-control",
+        "texture-compression-astc",
+        "texture-compression-etc2",
+        "depth-clip-control",
+        "texture-compression-bc-sliced-3d",
+        "shader-f16",
+        "clip-distances",
+        "texture-formats-tier2",
+        "timestamp-query",
+        "primitive-index",
+        "texture-component-swizzle",
+        "subgroups"
+      ]
+    },
+    "wgslLanguageFeatures": [
+      "packed_4x8_integer_dot_product",
+      "subgroup_uniformity",
+      "immediate_address_space",
+      "linear_indexing",
+      "subgroup_id",
+      "readonly_and_readwrite_storage_textures",
+      "unrestricted_pointer_parameters",
+      "buffer_view",
+      "texture_and_sampler_let",
+      "texture_formats_tier1",
+      "pointer_composite_access",
+      "uniform_buffer_standard_layout"
+    ],
+    "compute": "f32",
+    "quant": "i4",
+    "capacity": 128,
+    "chunkLength": 64,
+    "normalization": "fused",
+    "fuseRmsNormAdd": true,
+    "rmsNormReduce": "workgroup",
+    "submitMaxChunkSize": 768,
+    "prefillBuckets": "dense",
+    "chunkBuckets": [
+      4,
+      8,
+      16,
+      24,
+      32,
+      40,
+      48,
+      56
+    ],
+    "pleBudget": "default-two-shards",
+    "sampler": {
+      "temperature": 0
+    },
+    "maxNewTokens": 64,
+    "textDecodingTimed": false,
+    "fixture": {
+      "cases": [
+        {
+          "case": "english-list",
+          "prompt": "Write a numbered list of twenty practical tips for learning a new language. Give one short sentence for each tip.",
+          "inputIds": [
+            2,
+            105,
+            2364,
+            107,
+            6974,
+            496,
+            49597,
+            1694,
+            529,
+            12571,
+            10231,
+            11221,
+            573,
+            4735,
+            496,
+            861,
+            5192,
+            236761,
+            23097,
+            886,
+            2822,
+            13315,
+            573,
+            1546,
+            6508,
+            236761,
+            106,
+            107,
+            105,
+            4368,
+            107
+          ]
+        },
+        {
+          "case": "japanese-list",
+          "prompt": "プログラミングを学ぶ人に向けたアドバイスを20個、番号付きで挙げてください。それぞれ一文で説明してください。",
+          "inputIds": [
+            2,
+            105,
+            2364,
+            107,
+            18668,
+            29171,
+            70738,
+            237051,
+            230452,
+            98782,
+            65630,
+            237036,
+            77221,
+            99950,
+            237051,
+            236778,
+            236771,
+            237629,
+            236951,
+            67583,
+            28412,
+            237007,
+            178274,
+            95509,
+            236924,
+            59043,
+            237009,
+            237364,
+            237007,
+            34084,
+            49391,
+            236924,
+            106,
+            107,
+            105,
+            4368,
+            107
+          ]
+        }
+      ],
+      "stopTokens": [
+        1,
+        106,
+        50
+      ],
+      "maxNewTokens": 64,
+      "capacity": 128
+    },
+    "checkout": "17578a9288403bafdd4764bca40ca9d79b4c7a34",
+    "checkoutDirty": false,
+    "bundleSha256": "b098c37dc4fa88c097d772a13a689db10533846e858a04a6708145736e8466e0"
+  },
+  "manifests": {
+    "normal": "c445ea39ed8050b5d97757cfeb902c789c9048ad5eec6a962378e08772bb7ca6",
+    "qat": "6c3ae974beeb032942aaa4c943619855b787f34f67441f0f4be63432caca52db"
+  },
+  "summaries": {
+    "normal": {
+      "modes": {
+        "parallel": {
+          "decodeMedian": 32.90374273138835,
+          "caseLoadMedianRange": [
+            32.66914710271739,
+            33.14995619499186
+          ],
+          "byCase": {
+            "english-list": {
+              "decodeMedian": 32.95482412669956,
+              "ttftMedianMs": 339.2224999964237
+            },
+            "japanese-list": {
+              "decodeMedian": 32.8584702535434,
+              "ttftMedianMs": 409.3324999809265
+            }
+          }
+        },
+        "parallel-subgroup32": {
+          "decodeMedian": 29.857687976619303,
+          "caseLoadMedianRange": [
+            29.798152988005377,
+            29.914671959370516
+          ],
+          "byCase": {
+            "english-list": {
+              "decodeMedian": 29.894634889279324,
+              "ttftMedianMs": 339.7800000011921
+            },
+            "japanese-list": {
+              "decodeMedian": 29.819465561027926,
+              "ttftMedianMs": 409.1399999856949
+            }
+          }
+        }
+      },
+      "ratio": 0.9074252804723252,
+      "changePercent": -9.257471952767482
+    },
+    "qat": {
+      "modes": {
+        "parallel": {
+          "decodeMedian": 33.87706981741276,
+          "caseLoadMedianRange": [
+            28.543467623213278,
+            34.96076625157702
+          ],
+          "byCase": {
+            "english-list": {
+              "decodeMedian": 34.171291349679606,
+              "ttftMedianMs": 388.2925000190735
+            },
+            "japanese-list": {
+              "decodeMedian": 31.457895405128305,
+              "ttftMedianMs": 498.580000013113
+            }
+          }
+        },
+        "parallel-subgroup32": {
+          "decodeMedian": 28.706764429550176,
+          "caseLoadMedianRange": [
+            27.038278476741485,
+            33.1204163713638
+          ],
+          "byCase": {
+            "english-list": {
+              "decodeMedian": 28.706764429550176,
+              "ttftMedianMs": 408.95750001072884
+            },
+            "japanese-list": {
+              "decodeMedian": 30.079347424052642,
+              "ttftMedianMs": 497.46000000834465
+            }
+          }
+        }
+      },
+      "ratio": 0.8473803839668254,
+      "changePercent": -15.261961603317465
+    }
+  },
+  "jobs": [
+    {
+      "job": 0,
+      "model": "normal",
+      "reduce": "parallel",
+      "date": "2026-09-13T18:27:33.873Z",
+      "loadSeconds": 3.6774350000023843,
+      "enabledFeatures": [
+        "core-features-and-limits"
+      ],
+      "cases": [
+        {
+          "case": "english-list",
+          "inputTokens": 31,
+          "decodeMedian": 33.14995619499186,
+          "ttftMedianMs": 338.38499999046326,
+          "firstTtftMs": 475.76500004529953,
+          "measured": [
+            {
+              "elapsedMs": 2236.214999973774,
+              "ttftMs": 338.38499999046326,
+              "decodeTokensPerSecond": 33.19580784398709,
+              "generatedTokens": 64
+            },
+            {
+              "elapsedMs": 2248.6099999547005,
+              "ttftMs": 337.4699999690056,
+              "decodeTokensPerSecond": 32.96461797695175,
+              "generatedTokens": 64
+            },
+            {
+              "elapsedMs": 2239.5099999904633,
+              "ttftMs": 339.05500000715256,
+              "decodeTokensPerSecond": 33.14995619499186,
+              "generatedTokens": 64
+            }
+          ]
+        },
+        {
+          "case": "japanese-list",
+          "inputTokens": 37,
+          "decodeMedian": 32.66914710271739,
+          "ttftMedianMs": 409.2399999499321,
+          "firstTtftMs": 463.66999995708466,
+          "measured": [
+            {
+              "elapsedMs": 2336.979999959469,
+              "ttftMs": 408.55500000715256,
+              "decodeTokensPerSecond": 32.66914710271739,
+              "generatedTokens": 64
+            },
+            {
+              "elapsedMs": 2316.429999947548,
+              "ttftMs": 409.2399999499321,
+              "decodeTokensPerSecond": 33.03289132182885,
+              "generatedTokens": 64
+            },
+            {
+              "elapsedMs": 2352.3199999928474,
+              "ttftMs": 409.75,
+              "decodeTokensPerSecond": 32.43126373836308,
+              "generatedTokens": 64
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "job": 1,
+      "model": "normal",
+      "reduce": "parallel-subgroup32",
+      "date": "2026-09-13T18:28:02.408Z",
+      "loadSeconds": 3.056814999997616,
+      "enabledFeatures": [
+        "core-features-and-limits",
+        "subgroup-size-control",
+        "subgroups"
+      ],
+      "cases": [
+        {
+          "case": "english-list",
+          "inputTokens": 31,
+          "decodeMedian": 29.874597819188136,
+          "ttftMedianMs": 340.13499999046326,
+          "firstTtftMs": 505.21499997377396,
+          "measured": [
+            {
+              "elapsedMs": 2448.9449999928474,
+              "ttftMs": 340.1299999952316,
+              "decodeTokensPerSecond": 29.874597819188136,
+              "generatedTokens": 64
+            },
+            {
+              "elapsedMs": 2446.1800000071526,
+              "ttftMs": 341.2950000166893,
+              "decodeTokensPerSecond": 29.930376243968407,
+              "generatedTokens": 64
+            },
+            {
+              "elapsedMs": 2468.0300000309944,
+              "ttftMs": 340.13499999046326,
+              "decodeTokensPerSecond": 29.606724015423694,
+              "generatedTokens": 64
+            }
+          ]
+        },
+        {
+          "case": "japanese-list",
+          "inputTokens": 37,
+          "decodeMedian": 29.84077813405047,
+          "ttftMedianMs": 409.1449999809265,
+          "firstTtftMs": 462.54499995708466,
+          "measured": [
+            {
+              "elapsedMs": 2517.110000014305,
+              "ttftMs": 409.1449999809265,
+              "decodeTokensPerSecond": 29.886644227490695,
+              "generatedTokens": 64
+            },
+            {
+              "elapsedMs": 2521.664999961853,
+              "ttftMs": 410.4599999785423,
+              "decodeTokensPerSecond": 29.84077813405047,
+              "generatedTokens": 64
+            },
+            {
+              "elapsedMs": 2519.964999973774,
+              "ttftMs": 408.44499999284744,
+              "decodeTokensPerSecond": 29.836326438096293,
+              "generatedTokens": 64
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "job": 2,
+      "model": "normal",
+      "reduce": "parallel-subgroup32",
+      "date": "2026-09-13T18:28:31.857Z",
+      "loadSeconds": 3.28425,
+      "enabledFeatures": [
+        "core-features-and-limits",
+        "subgroup-size-control",
+        "subgroups"
+      ],
+      "cases": [
+        {
+          "case": "english-list",
+          "inputTokens": 31,
+          "decodeMedian": 29.914671959370516,
+          "ttftMedianMs": 339.42500001192093,
+          "firstTtftMs": 550.75,
+          "measured": [
+            {
+              "elapsedMs": 2445.4150000214577,
+              "ttftMs": 339.42500001192093,
+              "decodeTokensPerSecond": 29.914671959370516,
+              "generatedTokens": 64
+            },
+            {
+              "elapsedMs": 2444.664999961853,
+              "ttftMs": 339.3499999642372,
+              "decodeTokensPerSecond": 29.924263115054682,
+              "generatedTokens": 64
+            },
+            {
+              "elapsedMs": 2448.6299999952316,
+              "ttftMs": 339.4650000333786,
+              "decodeTokensPerSecond": 29.869640355846716,
+              "generatedTokens": 64
+            }
+          ]
+        },
+        {
+          "case": "japanese-list",
+          "inputTokens": 37,
+          "decodeMedian": 29.798152988005377,
+          "ttftMedianMs": 409.13499999046326,
+          "firstTtftMs": 463.4850000143051,
+          "measured": [
+            {
+              "elapsedMs": 2523.1699999570847,
+              "ttftMs": 408.94499999284744,
+              "decodeTokensPerSecond": 29.798152988005377,
+              "generatedTokens": 64
+            },
+            {
+              "elapsedMs": 2526.985000014305,
+              "ttftMs": 410.19499999284744,
+              "decodeTokensPerSecond": 29.762045360834744,
+              "generatedTokens": 64
+            },
+            {
+              "elapsedMs": 2516.8650000095367,
+              "ttftMs": 409.13499999046326,
+              "decodeTokensPerSecond": 29.88997641985923,
+              "generatedTokens": 64
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "job": 3,
+      "model": "normal",
+      "reduce": "parallel",
+      "date": "2026-09-13T18:28:58.976Z",
+      "loadSeconds": 3.2042999999523163,
+      "enabledFeatures": [
+        "core-features-and-limits"
+      ],
+      "cases": [
+        {
+          "case": "english-list",
+          "inputTokens": 31,
+          "decodeMedian": 32.759692058407275,
+          "ttftMedianMs": 340.0600000023842,
+          "firstTtftMs": 460.5049999952316,
+          "measured": [
+            {
+              "elapsedMs": 2262.1050000190735,
+              "ttftMs": 339.00999999046326,
+              "decodeTokensPerSecond": 32.759692058407275,
+              "generatedTokens": 64
+            },
+            {
+              "elapsedMs": 2243.350000023842,
+              "ttftMs": 340.0600000023842,
+              "decodeTokensPerSecond": 33.10057847164107,
+              "generatedTokens": 64
+            },
+            {
+              "elapsedMs": 2328.014999985695,
+              "ttftMs": 340.38499999046326,
+              "decodeTokensPerSecond": 31.696040007522093,
+              "generatedTokens": 64
+            }
+          ]
+        },
+        {
+          "case": "japanese-list",
+          "inputTokens": 37,
+          "decodeMedian": 33.047793404369415,
+          "ttftMedianMs": 409.42500001192093,
+          "firstTtftMs": 465.5949999690056,
+          "measured": [
+            {
+              "elapsedMs": 2310.564999997616,
+              "ttftMs": 409.42500001192093,
+              "decodeTokensPerSecond": 33.13801192993364,
+              "generatedTokens": 64
+            },
+            {
+              "elapsedMs": 2316.935000002384,
+              "ttftMs": 410.6050000190735,
+              "decodeTokensPerSecond": 33.047793404369415,
+              "generatedTokens": 64
+            },
+            {
+              "elapsedMs": 2321.1549999713898,
+              "ttftMs": 408.8149999976158,
+              "decodeTokensPerSecond": 32.943932564744756,
+              "generatedTokens": 64
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "job": 4,
+      "model": "qat",
+      "reduce": "parallel",
+      "date": "2026-09-13T18:29:26.369Z",
+      "loadSeconds": 1.9377199999690056,
+      "enabledFeatures": [
+        "core-features-and-limits"
+      ],
+      "cases": [
+        {
+          "case": "english-list",
+          "inputTokens": 31,
+          "decodeMedian": 33.38181644778219,
+          "ttftMedianMs": 388.28500002622604,
+          "firstTtftMs": 510.6850000023842,
+          "measured": [
+            {
+              "elapsedMs": 2274.0299999713898,
+              "ttftMs": 386.77499997615814,
+              "decodeTokensPerSecond": 33.38181644778219,
+              "generatedTokens": 64
+            },
+            {
+              "elapsedMs": 2203.9650000333786,
+              "ttftMs": 396.5400000214577,
+              "decodeTokensPerSecond": 34.85621810010622,
+              "generatedTokens": 64
+            },
+            {
+              "elapsedMs": 2407.2300000190735,
+              "ttftMs": 388.28500002622604,
+              "decodeTokensPerSecond": 31.204416167960588,
+              "generatedTokens": 64
+            }
+          ]
+        },
+        {
+          "case": "japanese-list",
+          "inputTokens": 37,
+          "decodeMedian": 28.543467623213278,
+          "ttftMedianMs": 513.4300000071526,
+          "firstTtftMs": 607.75,
+          "measured": [
+            {
+              "elapsedMs": 2822.0699999928474,
+              "ttftMs": 490.58000004291534,
+              "decodeTokensPerSecond": 27.02134686460285,
+              "generatedTokens": 64
+            },
+            {
+              "elapsedMs": 2689.235000014305,
+              "ttftMs": 516.0099999904633,
+              "decodeTokensPerSecond": 28.98917507359286,
+              "generatedTokens": 64
+            },
+            {
+              "elapsedMs": 2720.5900000333786,
+              "ttftMs": 513.4300000071526,
+              "decodeTokensPerSecond": 28.543467623213278,
+              "generatedTokens": 64
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "job": 5,
+      "model": "qat",
+      "reduce": "parallel-subgroup32",
+      "date": "2026-09-13T18:30:06.131Z",
+      "loadSeconds": 8.12907499998808,
+      "enabledFeatures": [
+        "core-features-and-limits",
+        "subgroup-size-control",
+        "subgroups"
+      ],
+      "cases": [
+        {
+          "case": "english-list",
+          "inputTokens": 31,
+          "decodeMedian": 27.224053964180843,
+          "ttftMedianMs": 422.125,
+          "firstTtftMs": 1332.949999988079,
+          "measured": [
+            {
+              "elapsedMs": 2745.895000040531,
+              "ttftMs": 422.125,
+              "decodeTokensPerSecond": 27.111116848440748,
+              "generatedTokens": 64
+            },
+            {
+              "elapsedMs": 2750.4300000071526,
+              "ttftMs": 436.30000001192093,
+              "decodeTokensPerSecond": 27.224053964180843,
+              "generatedTokens": 64
+            },
+            {
+              "elapsedMs": 2629.3400000333786,
+              "ttftMs": 421.4399999976158,
+              "decodeTokensPerSecond": 28.533900991430567,
+              "generatedTokens": 64
+            }
+          ]
+        },
+        {
+          "case": "japanese-list",
+          "inputTokens": 37,
+          "decodeMedian": 27.038278476741485,
+          "ttftMedianMs": 516.3899999856949,
+          "firstTtftMs": 1184.8100000023842,
+          "measured": [
+            {
+              "elapsedMs": 2807.0849999785423,
+              "ttftMs": 507.8700000047684,
+              "decodeTokensPerSecond": 27.40065631127085,
+              "generatedTokens": 64
+            },
+            {
+              "elapsedMs": 2856.389999985695,
+              "ttftMs": 526.3599999547005,
+              "decodeTokensPerSecond": 27.038278476741485,
+              "generatedTokens": 64
+            },
+            {
+              "elapsedMs": 2858.114999949932,
+              "ttftMs": 516.3899999856949,
+              "decodeTokensPerSecond": 26.9032444035752,
+              "generatedTokens": 64
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "job": 6,
+      "model": "qat",
+      "reduce": "parallel-subgroup32",
+      "date": "2026-09-13T18:30:40.785Z",
+      "loadSeconds": 7.692915000021458,
+      "enabledFeatures": [
+        "core-features-and-limits",
+        "subgroup-size-control",
+        "subgroups"
+      ],
+      "cases": [
+        {
+          "case": "english-list",
+          "inputTokens": 31,
+          "decodeMedian": 30.18947489491951,
+          "ttftMedianMs": 395.7900000214577,
+          "firstTtftMs": 1307.785000026226,
+          "measured": [
+            {
+              "elapsedMs": 2651.9800000190735,
+              "ttftMs": 430.2000000476837,
+              "decodeTokensPerSecond": 28.35564277327695,
+              "generatedTokens": 64
+            },
+            {
+              "elapsedMs": 2297.925000011921,
+              "ttftMs": 395.7900000214577,
+              "decodeTokensPerSecond": 33.120677554598316,
+              "generatedTokens": 64
+            },
+            {
+              "elapsedMs": 2475.835000038147,
+              "ttftMs": 389.01500004529953,
+              "decodeTokensPerSecond": 30.18947489491951,
+              "generatedTokens": 64
+            }
+          ]
+        },
+        {
+          "case": "japanese-list",
+          "inputTokens": 37,
+          "decodeMedian": 33.1204163713638,
+          "ttftMedianMs": 478.5300000309944,
+          "firstTtftMs": 615.7649999856949,
+          "measured": [
+            {
+              "elapsedMs": 2433.939999997616,
+              "ttftMs": 478.5300000309944,
+              "decodeTokensPerSecond": 32.21830715863957,
+              "generatedTokens": 64
+            },
+            {
+              "elapsedMs": 2385.464999973774,
+              "ttftMs": 483.3149999976158,
+              "decodeTokensPerSecond": 33.1204163713638,
+              "generatedTokens": 64
+            },
+            {
+              "elapsedMs": 2377.6549999713898,
+              "ttftMs": 477.8149999976158,
+              "decodeTokensPerSecond": 33.1606872162233,
+              "generatedTokens": 64
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "job": 7,
+      "model": "qat",
+      "reduce": "parallel",
+      "date": "2026-09-13T18:31:07.221Z",
+      "loadSeconds": 2.0207349999547004,
+      "enabledFeatures": [
+        "core-features-and-limits"
+      ],
+      "cases": [
+        {
+          "case": "english-list",
+          "inputTokens": 31,
+          "decodeMedian": 34.96076625157702,
+          "ttftMedianMs": 388.30000001192093,
+          "firstTtftMs": 525.5400000214577,
+          "measured": [
+            {
+              "elapsedMs": 2190.4950000047684,
+              "ttftMs": 388.47500002384186,
+              "decodeTokensPerSecond": 34.96076625157702,
+              "generatedTokens": 64
+            },
+            {
+              "elapsedMs": 2183.1549999713898,
+              "ttftMs": 387.3550000190735,
+              "decodeTokensPerSecond": 35.081857668823275,
+              "generatedTokens": 64
+            },
+            {
+              "elapsedMs": 2405.0750000476837,
+              "ttftMs": 388.30000001192093,
+              "decodeTokensPerSecond": 31.237991347018305,
+              "generatedTokens": 64
+            }
+          ]
+        },
+        {
+          "case": "japanese-list",
+          "inputTokens": 37,
+          "decodeMedian": 34.37232318704333,
+          "ttftMedianMs": 483.7300000190735,
+          "firstTtftMs": 605.8249999880791,
+          "measured": [
+            {
+              "elapsedMs": 2316.600000023842,
+              "ttftMs": 483.7300000190735,
+              "decodeTokensPerSecond": 34.37232318704333,
+              "generatedTokens": 64
+            },
+            {
+              "elapsedMs": 2301.9449999928474,
+              "ttftMs": 491.8700000047684,
+              "decodeTokensPerSecond": 34.80518763057603,
+              "generatedTokens": 64
+            },
+            {
+              "elapsedMs": 2471.1050000190735,
+              "ttftMs": 478.7300000190735,
+              "decodeTokensPerSecond": 31.620553359683793,
+              "generatedTokens": 64
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "parity": {
+    "generations": 80,
+    "acrossModeDifferences": 0,
+    "withinModeDifferences": 0,
+    "scope": "tokenIds, stopToken, text; logits and intermediate u32 are not measured"
+  },
+  "failures": []
+}

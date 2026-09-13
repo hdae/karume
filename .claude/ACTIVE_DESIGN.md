@@ -7,7 +7,7 @@
 > [docs/perf-ledger.md](../docs/perf-ledger.md)。ここは「今この瞬間の文脈」だけを持つ —
 > 履歴・完了記録は ADR / research / git へ。
 >
-> Last updated: 2026-09-13（M2のRMS検収と並列GEMV subgroup32の任意指定）
+> Last updated: 2026-09-13（M2の並列GEMV subgroup32検収・既定採用見送り）
 
 ## Now
 
@@ -30,7 +30,7 @@
   [ChromeのCPU/GPU内訳とRoPE融合](../docs/research/2026-09-12-chrome-gemma-optimization.md)に基づきBSHD融合を採用（K-32）。大語彙INT8のc16も[全体追試](../docs/research/2026-09-12-chrome-gemv-followup.md)から限定採用（K-34）。[K並列の任意指定](../docs/research/2026-09-12-chrome-gemv-parallel.md)を追加（K-35 / ADR 0098）。[M2採用判断](../docs/research/2026-09-13-m2-gemv-adoption.md)により通常/QAT E2Bの新しい既定quantを `i4-gemvpar` にする。runtimeと参照i4は維持。K-33のコピーは見送り。次は融合・広い品質評価。H-23記録末尾のCPU計測では暖機後PLE展開が小さく、GPU転送の帰属は未完。
   [RMS→add](../docs/research/2026-09-13-rms-norm-add-fusion.md)のM2追試は完了（K-36 / ADR 0099）。融合＋投入768を次候補の基準にする。モデル既定への組み込みは未完。
   [RMS縮約候補](../docs/research/2026-09-13-rms-subgroup-reduction.md)を比較し、subgroup32を任意指定で追加（K-37 / ADR 0100）。QATの小規模品質に大幅劣化なし。[M2追試](../docs/research/2026-09-13-gemv-subgroup.md)は約0.5%差で既定採用を見送る。Denoは必要な機能が未対応。元の加算木・WGSL・goldenは維持。
-  [並列GEMVのsubgroup値交換](../docs/research/2026-09-13-gemv-subgroup.md)を任意指定で追加（K-38 / ADR 0101）。QATのRTX利得は約4〜5%、通常版は追試で再現せず。次は初期選択の両E2B・8設定80生成をM2で追試する。既存parallelとquantは維持。
+  [並列GEMVのsubgroup値交換](../docs/research/2026-09-13-gemv-subgroup.md)を任意指定で追加（K-38 / ADR 0101）。QATのRTX利得は約4〜5%、通常版は追試で再現せず。[M2の80生成](../docs/research/2026-09-13-m2-gemv-subgroup-adoption.md)は出力一致、速度改善なし。M2既定採用を見送り、画面は既存parallelの2設定20生成へ戻す。次は大きい行列の配置とM2でのGPU費用帰属。quantは維持。
   ローカル実験 CLI は [MiniCPM5](../examples/minicpm5/README.md) / [Qwen3](../examples/qwen3/README.md)。
   Gemma 準拠の対話・reset・中断に対応。容量 128 の多ターン検収は research に記録。公開 pipeline は未追加。
   利用者の希望により、今後は作業単位で調査・検証を終えて順次コミットする。残件の正本は backlog。

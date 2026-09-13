@@ -8,7 +8,8 @@ M2のRMS subgroup32は従来34.899→35.081 tok/s、約0.52%の差だった。�
 既定採用を裏付ける利得とは判断せず、ADR 0100の任意指定を維持する。
 次のGEMV候補はparallelの入力配分・加算木を保ったまま、workgroup内の共有メモリと同期を32レーン内の値交換へ置き換える。
 RTXではQATに全体の利得が再現したため、[ADR 0101](../decisions/0101-linear-gemv-subgroup.md)の任意指定として統合する。
-通常版の利得は追試で再現せず、M2は未検収。既定quant・保存形式は変更しない。
+通常版のRTX利得は追試で再現しなかった。[その後のM2追試](2026-09-13-m2-gemv-subgroup-adoption.md)でも高速化せず、
+M2向けの既定採用を見送った。既定quant・保存形式は変更しない。
 
 数値の集計は[保存JSON](2026-09-13-gemv-subgroup-results.json)。以下の中央値は信頼区間ではない。
 
@@ -103,8 +104,9 @@ UI bundleは`b098c37dc4fa88c097d772a13a689db10533846e858a04a6708145736e8466e0`�
 
 ## 次の追試と残件
 
-M2では`deno task bench:llm-browser`で起動し、初期選択のまま「計測開始」。通常/QATの各ABBA、計8設定80生成を保存する。
-GEMVの比較中はRMSをworkgroupに固定する。前回のRMS subgroup比較やTransformers.jsは選択肢として残す。
+導入時はM2で通常/QATの各ABBA、計8設定80生成を依頼した。[追試は完了](2026-09-13-m2-gemv-subgroup-adoption.md)し、
+現在の画面の初期選択は既存parallelの2設定20生成へ戻す。GEMVの比較中はRMSをworkgroupに固定する。
+前回のRMS subgroup比較やTransformers.jsは選択肢として残す。
 Deno 2.9.6は必要な機能を提供していないため、新経路はChromeで任意指定する。共通の既定quantにはまだ追加しない。
 次の独立候補は大きい行列のlane数、SRQを含む複合処理、長い生成でのCPU/GPU待機の再帰属。
 

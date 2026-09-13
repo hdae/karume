@@ -8,9 +8,9 @@ deno task bench:llm-browser
 
 Open **http://localhost:8787** in Chrome on your Mac and click **計測開始**. The
 current defaults measure **normal and QAT E2B with karume and dense prefill
-buckets**. They compare the existing parallel GEMV and its subgroup32 variant
-in ABBA order, with RMS-add fusion and submission limit 768 in both:
-8 model loads and 80 generations. These settings prepare the next M2 validation.
+buckets**, using existing parallel GEMV, RMS-add fusion, and submission limit 768:
+2 model loads and 20 generations. The subgroup GEMV variant was slower in the
+[M2 comparison](../../../docs/research/2026-09-13-m2-gemv-subgroup-adoption.md), so it is no longer selected initially.
 Transformers.js, reference settings, and earlier comparisons remain available.
 **JSONを保存** downloads all timings, generated token IDs, output text,
 GPU information, model references, dependency versions, and the benchmark bundle hash.
@@ -95,7 +95,7 @@ the scope of the experiment are recorded in [the prefill note](../../../docs/res
 
 ## Subgroup GEMV comparison
 
-The initial selection runs both E2B models with **並列GEMVの2経路を往復比較**:
+To repeat the comparison, select both E2B models and **並列GEMVの2経路を往復比較**:
 `parallel → parallel-subgroup32 → parallel-subgroup32 → parallel`, for eight jobs
 and 80 generations. Dense chunk-64 buckets, RMS-add fusion, and submission limit
 768 stay fixed. This compares the matrix reduction only; RMS subgroup reduction
@@ -103,8 +103,10 @@ remains a separate option.
 
 `linearGemvReduce: "parallel-subgroup32"` preserves the existing parallel kernel's
 input partition and addition tree while exchanging partial sums within a fixed
-32-lane subgroup. RTX comparisons preserved all generated tokens. M2 still needs
-validation. Missing `subgroups`, `subgroup-size-control`, or WGSL `subgroup_id`
+32-lane subgroup. RTX and M2 comparisons preserved all generated tokens. M2 normal
+E2B was about 9.3% slower; QAT also showed no speed benefit, with substantial
+variation during the run. The browser therefore initially selects existing `parallel`.
+Missing `subgroups`, `subgroup-size-control`, or WGSL `subgroup_id`
 support is an error; Deno 2.9.6 does not provide the required features.
 
 Both Gemma pipelines accept this option. With an external GPU context, first call

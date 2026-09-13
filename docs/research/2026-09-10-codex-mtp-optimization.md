@@ -3101,3 +3101,19 @@ K-38の最終verifyは**2,959 passed（802 steps）・0 failed・5 ignored（2 s
 追加stepのDeno SKIPは機能未提供による。Chromeは共有数値検査とSession診断を実走した。
 新規テストの期待と実行条件を修正するための2回の中断、SIGINT時のexit 139と単独成功は上記researchへ記録してある。
 最終HTMLの説明修正後も、初期選択と推論bundleのSHAがUI検収版と一致することを確認した。
+
+## M2の並列GEMV subgroup32の採否（2026-09-13）
+
+[利用者の80生成と採否](2026-09-13-m2-gemv-subgroup-adoption.md)・[集計JSON](2026-09-13-m2-gemv-subgroup-results.json)に記録した。
+通常E2Bは既存32.904→候補29.858 tok/s、約9.3%遅化。QATも高速化せず、走行中の変動が大きいため低下率の断定は避ける。
+全80生成のtoken/stop/textは入力・モデルごとに一致。中間値・logitsのu32検収ではない。
+
+M2向けの既定採用は見送り、RTXのQATで利得のあった任意指定を維持する（K-38 / ADR 0101）。
+比較画面は既存parallel・両E2B・dense・RMS融合・投入768の2設定20生成へ戻す。今回と同じ80生成の再依頼は不要。
+runtime・quant・モデル・CLIの既定は変更しない。次は大きいI4行列の配置の全体比較と、M2でのGPU費用帰属。
+E4B・長文・実モデルMTP・広い品質の新経路検収は引き続き未完。
+
+全体の`deno task verify`は**2,959 passed（802 steps）・0 failed・5 ignored（2 steps）**で完了。
+テスト25分56秒、verify全体1,557.360秒。ログと終了コードは
+`outputs/bench/karume/2026-09-13_18-48-32_m2-gemv-subgroup-verify-18zsdbz2/`。
+検証開始時からソース・HTMLのSHAは不変。検証後の追記はこの結果の記録のみで、別途整形・差分を確認する。
