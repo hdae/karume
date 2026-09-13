@@ -3,6 +3,19 @@
 > 置き場の規約: 未解決のバグ（意図した設計制約は [limitations.md](limitations.md)）。
 > 解決したら該当節を削除し、修正コミットへのポインタを残さない（履歴は git が持つ）。
 
+## 疑似HFサーバーの固定revisionで古いmanifestが再利用される
+
+HTTP疎通テスト用の`examples/shared/local-dist-server.ts`はrepoとrevisionを固定している。
+manifestのキャッシュキーはresolve URLなので、過去に使ったポートへ再び割り当てられた場合、
+現在のディレクトリと異なる世代のmanifestがヒットし得る。旧1出力Gemmaグラフを指すエントリが残存し、
+同じURL・revisionで内容だけを更新する再現実験では旧manifestが返った。
+[調査と再現手順](research/2026-09-13-rms-subgroup-reduction.md#全体検証の切り分け)。
+
+2026-09-13の全体verifyで1出力として拒否され、単独実行は成功した事象の原因候補。
+失敗時のポートを保存していないため、この事象との因果は未確定。GPUのフレークと同一視しない。
+修正候補はテスト用サーバーのrevisionを配布内容に結びつけ、ポート再利用でも世代を区別すること。
+通常のローカルCLI・ブラウザ比較はこの疑似HFサーバーを使用しない。
+
 ## フル走行の `deno task verify` が GPU VRAM 圧で稀にフレークする
 
 12GiB の GPU に GB 級モデルを連続投入するため、**フル走行では稀に `GpuOutOfMemoryError` /

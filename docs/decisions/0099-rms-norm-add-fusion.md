@@ -1,6 +1,6 @@
 # 0099: RMS正規化と後続加算を任意指定で融合する
 
-- Status: accepted（2026-09-13）。runtimeは任意指定。モデル既定への採用はM2の検収後に判断する。
+- Status: accepted（2026-09-13）。runtimeは任意指定。M2検収は完了。モデル既定への組み込みは別段階。
 - 関連: [0017](0017-rms-norm-conv2d-clamp-min.md)、[0058](0058-numerics-opt-in-contract.md)、[0068](0068-decode-exit-multi-output.md)、[0098](0098-linear-gemv-parallel.md)。
 
 ## 背景
@@ -46,3 +46,9 @@ CPUとGPUの仕事の重なりが関係するという推測はあるが、そ�
 - `deno task verify`を通し、M2は利用者が比較画面で追試する。M2未検収の段階で高速化付きquantの既定へ昇格しない。
 
 数値・生データ・不採用候補は[調査記録](../research/2026-09-13-rms-norm-add-fusion.md)を参照する。
+
+## M2追試後の状態（2026-09-13）
+
+[利用者の120生成](../research/2026-09-13-rms-subgroup-reduction.md#利用者のm2結果)で参照との一致と小幅な速度向上を確認した。
+融合＋上限768を次候補の比較基準にする。融合のquant選択と、ADR 0038のホスト政策である投入上限は別の設定であり、
+この検収だけでsubmitPolicyをquantの保存語彙へ追加しない。モデル既定への組み込みは未完。

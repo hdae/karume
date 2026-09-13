@@ -337,6 +337,8 @@ export type Gemma4PipelineOptions = {
   readonly linearGemvReduce?: SessionOptions["linearGemvReduce"];
   /** RMS→addの任意融合。意味・適用範囲はruntimeの同名設定が正本（ADR 0099）。 */
   readonly fuseRmsNormAdd?: SessionOptions["fuseRmsNormAdd"];
+  /** RMSの任意縮約。subgroup32は対応GPU必須で、参照と加算順が変わる（ADR 0100）。 */
+  readonly rmsNormReduce?: SessionOptions["rmsNormReduce"];
   /** GPUへの投入政策。target / drafterへ同じ値を渡し、省略時はruntimeの既定を使う。 */
   readonly submitPolicy?: SessionOptions["submitPolicy"];
   /**
@@ -1755,13 +1757,15 @@ class GemmaPipeline {
     const speculativeK = options.speculative === undefined
       ? undefined
       : assertSpeculative("Gemma4Pipeline", options.speculative);
-    const gpu = options.gpu ?? await acquireGpu();
+    const gpu = options.gpu ??
+      await acquireGpu({ subgroups: options.rmsNormReduce === "subgroup32" });
     const ownsGpu = options.gpu === undefined;
     // ③PV の縮約形は家族の既定（K-12 昇格済み）— 呼び手が明示すればそれに従う。予算は
     // 未指定なら欄ごと渡さない（既定値をここに写すと、runtime 側で既定が動いたときに
     // この家族だけ古い値で走る）。drafter Session にも同じノブを渡す。
     const sessionOptions = {
       ...(options.fuseRmsNormAdd === undefined ? {} : { fuseRmsNormAdd: options.fuseRmsNormAdd }),
+      ...(options.rmsNormReduce === undefined ? {} : { rmsNormReduce: options.rmsNormReduce }),
       ...(options.submitPolicy === undefined ? {} : { submitPolicy: options.submitPolicy }),
       stateAttentionReduce: options.stateAttentionReduce ?? GEMMA4_STATE_ATTENTION_REDUCE,
       ...(options.linearGemvReduce === undefined

@@ -15,6 +15,7 @@
  * 状態は {@link RecipeBuilderContext} という構造的な面だけで受け取る。
  */
 
+import { rmsNormSubgroupKey, rmsNormSubgroupWgsl } from "../kernels/rms-norm-subgroup.ts";
 import {
   STATIC_QUANTIZE_KEY,
   STATIC_QUANTIZE_WGSL,
@@ -327,6 +328,7 @@ import type {
   I8a8Dot,
   LinearGemvReduce,
   ParamsCacheStats,
+  RmsNormReduce,
   StateAttentionReduce,
 } from "./session-types.ts";
 import { planStateAttention } from "./state-attention-plan.ts";
@@ -373,6 +375,7 @@ type RecipeBuilderContext = {
   /** states 形 attention ③PV の縮約形（executor の {@link SessionState} が既定を決める）。 */
   readonly stateAttentionReduce: StateAttentionReduce;
   readonly linearGemvReduce: LinearGemvReduce;
+  readonly rmsNormReduce: RmsNormReduce;
   /**
    * 行ブロック gemv の並列度目標（`SessionOptions.linearGemvRowsThreadTarget` — Session 生成時に
    * 固定される静的なノブ。`undefined` はカーネル側の既定）。
@@ -1995,8 +1998,9 @@ export class RecipeBuilder {
     const rows = numel(shape.slice(0, -1));
     const eps = rmsNormEps(step.node.attrs, `nodes (${step.node.op})`);
     const narrow = dim > 0 && dim <= 128;
-    const key = narrow ? RMS_NORM_128_KEY : RMS_NORM_KEY;
-    const wgsl = narrow ? RMS_NORM_128_WGSL : RMS_NORM_WGSL;
+    const subgroup = !narrow && this.#state.rmsNormReduce === "subgroup32";
+    const key = narrow ? RMS_NORM_128_KEY : subgroup ? rmsNormSubgroupKey() : RMS_NORM_KEY;
+    const wgsl = narrow ? RMS_NORM_128_WGSL : subgroup ? rmsNormSubgroupWgsl() : RMS_NORM_WGSL;
     const { pipeline, layout, roles } = await this.#state.cache.get(key, wgsl);
     const params = this.#writeParams(rmsNormParams(rows, dim, eps), PARAMS_UNIFORM_USAGE);
     const groups = gridStrideWorkgroups(

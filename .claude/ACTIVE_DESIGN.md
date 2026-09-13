@@ -7,7 +7,7 @@
 > [docs/perf-ledger.md](../docs/perf-ledger.md)。ここは「今この瞬間の文脈」だけを持つ —
 > 履歴・完了記録は ADR / research / git へ。
 >
-> Last updated: 2026-09-13（RMS→addの任意融合とM2比較の準備）
+> Last updated: 2026-09-13（M2の融合検収とRMS subgroup32の任意指定）
 
 ## Now
 
@@ -28,7 +28,8 @@
   Chrome E2B/E4Bで効果、Deno E2Bはほぼ中立。改善後M2も利用者追試で速度向上・40生成の一致を確認。H-23は[chunk64の比較画面とキャッシュ負荷検証](../docs/research/2026-09-13-prefill-buckets.md)を追加。[M2追試](../docs/research/2026-09-13-m2-prefill-adoption.md)から比較画面のchunk64だけ細分化を初期選択に採用。全chunkへの細分化は見送り。QATのM2/RTX生成列には導入前から差があり、別途帰属する。
   [WebMLとのheadless比較](../docs/research/2026-09-12-webml-browser-speed.md)では同一入力・容量・生成数でもRTXで大きな差。長い生成だけが理由ではない。
   [ChromeのCPU/GPU内訳とRoPE融合](../docs/research/2026-09-12-chrome-gemma-optimization.md)に基づきBSHD融合を採用（K-32）。大語彙INT8のc16も[全体追試](../docs/research/2026-09-12-chrome-gemv-followup.md)から限定採用（K-34）。[K並列の任意指定](../docs/research/2026-09-12-chrome-gemv-parallel.md)を追加（K-35 / ADR 0098）。[M2採用判断](../docs/research/2026-09-13-m2-gemv-adoption.md)により通常/QAT E2Bの新しい既定quantを `i4-gemvpar` にする。runtimeと参照i4は維持。K-33のコピーは見送り。次は融合・広い品質評価。H-23記録末尾のCPU計測では暖機後PLE展開が小さく、GPU転送の帰属は未完。
-  [RMS→addの任意融合と投入上限比較](../docs/research/2026-09-13-rms-norm-add-fusion.md)を追加（K-36 / ADR 0099）。次はM2で画面初期選択の3設定往復を検収。既定quantへの採用はその後に判断する。RMS自体のworkgroup候補は未計測。
+  [RMS→add](../docs/research/2026-09-13-rms-norm-add-fusion.md)のM2追試は完了（K-36 / ADR 0099）。融合＋投入768を次候補の基準にする。モデル既定への組み込みは未完。
+  [RMS縮約候補](../docs/research/2026-09-13-rms-subgroup-reduction.md)を比較し、subgroup32を任意指定で追加（K-37 / ADR 0100）。QATの小規模品質に大幅劣化なし。次はM2で初期選択のQAT・4設定40生成。Denoは必要な機能が未対応。元の加算木・WGSL・goldenは維持。
   ローカル実験 CLI は [MiniCPM5](../examples/minicpm5/README.md) / [Qwen3](../examples/qwen3/README.md)。
   Gemma 準拠の対話・reset・中断に対応。容量 128 の多ターン検収は research に記録。公開 pipeline は未追加。
   利用者の希望により、今後は作業単位で調査・検証を終えて順次コミットする。残件の正本は backlog。

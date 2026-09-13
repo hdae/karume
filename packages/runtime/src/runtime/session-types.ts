@@ -213,6 +213,9 @@ export type StateAttentionReduce = "sequential" | "parallel";
 /** 量子化 GEMV の K 加算順（ADR 0098）。 */
 export type LinearGemvReduce = "sequential" | "parallel";
 
+/** RMS正規化の縮約方式。subgroup32は参照と加算順が異なる（ADR 0100）。 */
+export type RmsNormReduce = "workgroup" | "subgroup32";
+
 export type SessionOptions = {
   /** submit の時間予算政策（TDR / watchdog 対策 — ADR 0004）。既定は DEFAULT_SUBMIT_POLICY。 */
   readonly submitPolicy?: SubmitPolicy;
@@ -318,6 +321,12 @@ export type SessionOptions = {
    * submitPolicyは独立の設定で、この指定だけでは投入上限を変更しない。
    */
   readonly fuseRmsNormAdd?: boolean;
+  /**
+   * RMSの縮約方式（既定workgroup）。subgroup32は幅128超のRMSと任意のRMS→add融合に適用。
+   * acquireGpu({ subgroups: true })が必要。不足時は拒否し、自動で参照へ戻さない。
+   * 加算順が変わるため生成列は参照と異なりうる。M2・投機生成の採用は別途検収する。
+   */
+  readonly rmsNormReduce?: RmsNormReduce;
   /**
    * 行ブロック gemv（linear の GEMV 族・M ≥ 2）の**並列度の目標**（スレッド数 = 出力列 n ×
    * y タイル数）。既定 16384 = 参照 device（RTX 3080 Ti）の飽和点。

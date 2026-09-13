@@ -21,7 +21,10 @@ export const loadKarume = async (
   prefillBuckets: PrefillBuckets = "default",
   normalization: NormalizationMode = "reference",
 ): Promise<EngineHandle> => {
-  const gpu = await acquireGpu();
+  const subgroup = normalization === "subgroup32";
+  const fuseRmsNormAdd = normalization === "fused" || subgroup;
+  const rmsNormReduce = subgroup ? "subgroup32" : "workgroup";
+  const gpu = await acquireGpu({ subgroups: subgroup });
   try {
     const manifestResponse = await fetch(`/models/${kind}/karume.json`);
     if (!manifestResponse.ok) {
@@ -65,7 +68,8 @@ export const loadKarume = async (
       maxChunkSize: 768,
     };
     const common = {
-      fuseRmsNormAdd: normalization === "fused",
+      fuseRmsNormAdd,
+      rmsNormReduce,
       submitPolicy,
       gpu,
       model: "e2b",
@@ -92,6 +96,8 @@ export const loadKarume = async (
     return {
       metadata: {
         manifestSha256,
+        enabledFeatures: [...gpu.features],
+        wgslLanguageFeatures: [...gpu.wgslLanguageFeatures],
         compute: "f32",
         quant,
         linearGemvReduce: effectiveReduce,
@@ -102,7 +108,8 @@ export const loadKarume = async (
         capacity: fixture.capacity,
         chunkLength: 64,
         normalization,
-        fuseRmsNormAdd: normalization === "fused",
+        fuseRmsNormAdd,
+        rmsNormReduce,
         submitMaxChunkSize: submitPolicy.maxChunkSize,
         prefillBuckets,
         chunkBuckets,

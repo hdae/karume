@@ -24,7 +24,7 @@
     }
     if (!["quant", "sequential", "parallel"].includes(reduce)) throw Error("Invalid GEMV reduction");
     if (!["default", "sparse", "dense"].includes(prefill)) throw Error("Invalid prefill buckets");
-    if (!["reference", "submit768", "fused"].includes(normalization)) {
+    if (!["reference", "submit768", "fused", "subgroup32"].includes(normalization)) {
       throw Error("Invalid normalization mode");
     }
     const config = await (await fetch("/config.json")).json();

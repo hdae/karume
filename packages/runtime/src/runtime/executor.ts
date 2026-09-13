@@ -120,6 +120,7 @@ import {
   type LinearGemvReduce,
   type ParamsCacheStats,
   type PreparedPlanStats,
+  type RmsNormReduce,
   ROW_BLOCK_SPLIT,
   type RunInput,
   type RunInputs,
@@ -141,6 +142,7 @@ export type {
   ParamsCacheStats,
   PlanBackingStats,
   PreparedPlanStats,
+  RmsNormReduce,
   RunInput,
   RunInputs,
   RunOutputs,
@@ -948,6 +950,7 @@ type SessionState = {
    */
   readonly stateAttentionReduce: StateAttentionReduce;
   readonly linearGemvReduce: LinearGemvReduce;
+  readonly rmsNormReduce: RmsNormReduce;
   /**
    * 行ブロック gemv の並列度目標（opt-in — {@link SessionOptions.linearGemvRowsThreadTarget}）。
    * 省略（`undefined`）はカーネル側の既定 = 参照 device の飽和点。
@@ -1063,6 +1066,19 @@ export class Session {
   ): Promise<Session> {
     if (options.fuseRmsNormAdd !== undefined && typeof options.fuseRmsNormAdd !== "boolean") {
       throw new ExecutionError("options.fuseRmsNormAdd はbooleanでなければならない");
+    }
+    const rmsNormReduce = options.rmsNormReduce === undefined ? "workgroup" : options.rmsNormReduce;
+    if (rmsNormReduce !== "workgroup" && rmsNormReduce !== "subgroup32") {
+      throw new ExecutionError(`options.rmsNormReduce: 未対応の値 '${String(rmsNormReduce)}'`);
+    }
+    if (
+      rmsNormReduce === "subgroup32" &&
+      (!gpu.features.has("subgroups") || !gpu.features.has("subgroup-size-control") ||
+        !gpu.wgslLanguageFeatures.has("subgroup_id"))
+    ) {
+      throw new ExecutionError(
+        "rmsNormReduce: subgroup32 は acquireGpu({ subgroups: true }) が必要",
+      );
     }
     const linearCompute = options.linearCompute ?? "f32";
     const attentionCompute = options.attentionCompute ?? "f32";
@@ -1535,6 +1551,7 @@ export class Session {
       attentionI8a8Dot,
       rowBlockSplit: options[ROW_BLOCK_SPLIT],
       fuseRmsNormAdd: options.fuseRmsNormAdd ?? false,
+      rmsNormReduce,
       useCounts: countUses(graph),
       dtypes: declaredDtypes(graph),
       outputNames: new Set(graph.outputs),
@@ -2674,6 +2691,7 @@ export class Session {
     const fusion = planFusions(plan.nodes, {
       useCounts: this.#state.useCounts,
       fuseRmsNormAdd: this.#state.fuseRmsNormAdd,
+      rmsNormReduce: this.#state.rmsNormReduce,
       outputNames: this.#state.outputNames,
       limits: { maxStorageBufferBindingSize, maxComputeWorkgroupsPerDimension },
       ...(this.#state.rowBlockSplit === undefined

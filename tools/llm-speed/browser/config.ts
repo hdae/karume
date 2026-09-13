@@ -15,4 +15,4 @@ export type ModelKind = keyof typeof onnxModels;
 export type Engine = "karume" | "transformers";
 export type PrefillBuckets = "default" | "sparse" | "dense";
 
-export type NormalizationMode = "reference" | "submit768" | "fused";
+export type NormalizationMode = "reference" | "submit768" | "fused" | "subgroup32";

@@ -158,6 +158,7 @@ export type {
   ParamsCacheStats,
   PlanBackingStats,
   PreparedPlanStats,
+  RmsNormReduce,
   RunInput,
   RunInputs,
   RunOutputs,

@@ -188,7 +188,7 @@ export const assertLimitsGranted = (
  * NOTE: 全廃方針は ADR 0021 で「**既定では**何も要求しない」に読み替えた。条件付きで載るのは
  * GPU 側時間計測（{@link TIMESTAMP_QUERY_FEATURE} — {@link AcquireGpuOptions.gpuTiming} の
  * 三値）と f16 **計算**変種（{@link SHADER_F16_FEATURE} —
- * {@link AcquireGpuOptions.shaderF16}）の 2 本だけ。実際に有効化された feature の照会は
+ * {@link AcquireGpuOptions.shaderF16}）と32レーンsubgroup（ADR 0100）。有効なfeatureの照会は
  * {@link GpuContext.features} で行える。
  */
 const REQUIRED_FEATURES: readonly GPUFeatureName[] = [];
@@ -343,12 +343,13 @@ const raceCanaryDeviceLost = <T>(
   device: GPUDevice,
   work: Promise<T>,
   where: string,
+  feature = "shader-f16",
 ): Promise<T> =>
   Promise.race([
     work,
     device.lost.then((info): never => {
       throw new GpuDeviceLostError(
-        `shader-f16 カナリアの${where}中に device が失われた（再構築が必要）${
+        `${feature} カナリアの${where}中に device が失われた（再構築が必要）${
           describeDeviceLoss(info)
         }`,
       );
@@ -443,9 +444,10 @@ export const readAdapterInfo = (adapter: AdapterInfoHost): GPUAdapterInfo =>
 /**
  * MUST: `navigator.gpu.wgslLanguageFeatures` は実装差のある面（型定義に無い実装・未提供の
  * 実装がある）。直接参照はこの関数 1 箇所に閉じ込め、欠落時は空集合に縮退する。
- * 参考情報であり機能検出には使わない（ハードウェア対応と無関係に列挙されるため）。
- * 唯一の実用は**数値が同一な変種の選択**（w8a8 の dot4I8Packed / エミュ — ADR 0025。
+ * 単独ではGPU対応の証明にしない（ハードウェア対応と無関係に列挙されるため）。
+ * 自動選択に使えるのは**数値が同一な変種の選択**（w8a8 の dot4I8Packed / エミュ — ADR 0025。
  * 誤った選択でも結果が 1 ビットも変わらない場合に限り、速度の分岐に使ってよい）。
+ * subgroup_idは明示要求時の必要条件としてのみ検査し、device featureと実走も要求する。
  */
 type WgslLanguageFeatureHost = GPU & { readonly wgslLanguageFeatures?: Iterable<string> };
 
@@ -453,6 +455,93 @@ const readWgslLanguageFeatures = (gpu: GPU): ReadonlySet<string> => {
   const host: WgslLanguageFeatureHost = gpu;
   const features = host.wgslLanguageFeatures;
   return new Set(features ?? []);
+};
+
+/** 実行に必要な3機能を明示要求時だけ検査する。自動有効化・黙った縮退はしない。 */
+export const planSubgroup32Features = (
+  adapterFeatures: GpuFeatureSet,
+  languageFeatures: ReadonlySet<string>,
+  requested: boolean | undefined,
+): readonly string[] => {
+  if (requested !== undefined && typeof requested !== "boolean") {
+    throw new GpuFeatureError("subgroups はbooleanでなければならない");
+  }
+  if (requested !== true) return [];
+  for (const feature of ["subgroups", "subgroup-size-control"]) {
+    if (!adapterFeatures.has(feature)) {
+      throw new GpuFeatureError(`subgroups: true を指定したが、アダプタが '${feature}' を持たない`);
+    }
+  }
+  if (!languageFeatures.has("subgroup_id")) {
+    throw new GpuFeatureError("subgroups: true はWGSL言語機能 'subgroup_id' が必要");
+  }
+  return ["subgroups", "subgroup-size-control"];
+};
+
+/** 256レーン全てで32レーン縮約・8部分和・broadcastの既知解を実走する（ADR 0100）。 */
+export const assertSubgroup32Executes = async (device: GPUDevice): Promise<void> => {
+  const code = `enable subgroups, subgroup_size_control;
+@group(0) @binding(0) var<storage, read_write> out: array<f32>;
+var<workgroup> partial: array<f32, 8>;
+@compute @workgroup_size(256) @subgroup_size(32)
+fn main(@builtin(local_invocation_index) lid: u32,
+  @builtin(subgroup_invocation_id) sub: u32, @builtin(subgroup_id) sg: u32,
+  @builtin(num_subgroups) count: u32, @builtin(subgroup_size) size: u32) {
+  let value = subgroupAdd(f32(lid + 1u));
+  if (subgroupElect()) { partial[sg] = value; }
+  workgroupBarrier();
+  var across = 0.0;
+  if (sub < count) { across = partial[sub]; }
+  let sum = subgroupAdd(across);
+  out[lid] = select(-1.0, sum, size == 32u && count == 8u);
+}`;
+  const out = device.createBuffer({
+    size: 1024,
+    usage: BUFFER_USAGE.STORAGE | BUFFER_USAGE.COPY_SRC,
+  });
+  const staging = device.createBuffer({
+    size: 1024,
+    usage: BUFFER_USAGE.COPY_DST | BUFFER_USAGE.MAP_READ,
+  });
+  try {
+    await raceCanaryDeviceLost(
+      device,
+      withPipelineScope(device, "subgroups カナリア", () => {
+        const pipeline = device.createComputePipeline({
+          layout: "auto",
+          compute: {
+            module: device.createShaderModule({ code }),
+            entryPoint: "main",
+          },
+        });
+        const bindings = device.createBindGroup({
+          layout: pipeline.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: { buffer: out } },
+          ],
+        });
+        const encoder = device.createCommandEncoder(), pass = encoder.beginComputePass();
+        pass.setPipeline(pipeline);
+        pass.setBindGroup(0, bindings);
+        pass.dispatchWorkgroups(1);
+        pass.end();
+        encoder.copyBufferToBuffer(out, 0, staging, 0, 1024);
+        device.queue.submit([encoder.finish()]);
+      }),
+      "実行",
+      "subgroups",
+    );
+    await raceCanaryDeviceLost(device, staging.mapAsync(MAP_MODE.READ), "読み戻し", "subgroups");
+    const observed = new Float32Array(staging.getMappedRange().slice(0));
+    staging.unmap();
+    if (observed.length !== 256 || observed.some((value) => value !== 32896)) {
+      throw new GpuFeatureError("subgroups カナリア: 32レーン縮約の既知解と一致しない");
+    }
+  } finally {
+    // コマンドは読み戻しより先にsubmit済み。失敗時も未投入の参照を残さない。
+    staging.destroy();
+    out.destroy();
+  }
 };
 
 export type DeviceLostHandler = (info: GPUDeviceLostInfo) => void;
@@ -491,6 +580,12 @@ export type AcquireGpuOptions = {
    * である必要がある（Session 構築時に fail loudly）。
    */
   readonly shaderF16?: boolean;
+  /**
+   * 32レーンsubgroupの明示要求（既定false、ADR 0100）。subgroupsとsubgroup-size-control、
+   * WGSLのsubgroup_idが必要。取得時に既知解の実走を検査し、不足・不一致は拒否する。
+   * 能力を取得するだけでは計算経路を変えない。SessionのrmsNormReduceは別途指定する。
+   */
+  readonly subgroups?: boolean;
   /** テスト専用（{@link LIMIT_CAPS}）。requiredLimits を**絞る**方向にだけ効く。 */
   readonly [LIMIT_CAPS]?: LimitCaps;
 };
@@ -1659,11 +1754,19 @@ export const acquireGpu = async (options: AcquireGpuOptions = {}): Promise<GpuCo
   // 条件付き feature の判定はここだけ（不足は例外 — 黙って能力を落とさない）。ADR 0021 / 0028。
   const timestampQuery = planTimestampFeature(adapter.features, options.gpuTiming);
   const shaderF16 = planShaderF16Feature(adapter.features, options.shaderF16);
+  const languageFeatures = readWgslLanguageFeatures(gpu);
+  const subgroupFeatures = planSubgroup32Features(
+    adapter.features,
+    languageFeatures,
+    options.subgroups,
+  );
   const device = await adapter.requestDevice({
     requiredFeatures: [
       ...REQUIRED_FEATURES,
       ...(timestampQuery ? [TIMESTAMP_QUERY_FEATURE] : []),
       ...(shaderF16 ? [SHADER_F16_FEATURE] : []),
+      // Denoの型定義に未収録のWebGPU機能。上で実機の広告を検査した境界に限定する。
+      ...subgroupFeatures as readonly GPUFeatureName[],
     ],
     requiredLimits: limits,
   });
@@ -1671,6 +1774,7 @@ export const acquireGpu = async (options: AcquireGpuOptions = {}): Promise<GpuCo
     assertLimitsGranted(limits, device.limits);
     // MUST: 列挙ではなく実走で確かめる（denoland/deno#23125 の沈黙全 0）。
     if (shaderF16) await assertShaderF16Executes(device);
+    if (subgroupFeatures.length > 0) await assertSubgroup32Executes(device);
   } catch (cause) {
     device.destroy();
     throw cause;
@@ -1679,7 +1783,7 @@ export const acquireGpu = async (options: AcquireGpuOptions = {}): Promise<GpuCo
     device,
     readAdapterInfo(adapter),
     limits,
-    readWgslLanguageFeatures(gpu),
+    languageFeatures,
     options.onDeviceLost,
   );
 };

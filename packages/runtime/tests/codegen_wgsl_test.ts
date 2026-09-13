@@ -1,3 +1,4 @@
+import { rmsNormSubgroupWgsl } from "../src/kernels/rms-norm-subgroup.ts";
 import { assert, assertEquals, assertNotEquals, assertThrows } from "@std/assert";
 import { STATIC_QUANTIZE_WGSL } from "../src/kernels/static-quantize.ts";
 import {
@@ -483,6 +484,9 @@ Deno.test("生成した WGSL がスナップショットとバイト単位で一
     ["adaln_norm.wgsl", ADALN_NORM_WGSL],
     ["rms_norm.wgsl", RMS_NORM_WGSL],
     ["rms_norm_128.wgsl", RMS_NORM_128_WGSL],
+    ["rms_norm_subgroup32.wgsl", rmsNormSubgroupWgsl()],
+    ["rms_norm_add_subgroup32_nr.wgsl", rmsNormSubgroupWgsl("norm-residual")],
+    ["rms_norm_add_subgroup32_rn.wgsl", rmsNormSubgroupWgsl("residual-norm")],
     ["softmax.wgsl", SOFTMAX_WGSL],
     // safe_softmax 変種（ADR 0044）。**素の softmax と対で置く**のが条件で、両者は同じ
     // 生成関数から出る（②③ の縮約順序が 1 語でもずれれば分解経路とのビット同一が壊れる）。

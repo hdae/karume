@@ -7,10 +7,11 @@ deno task bench:llm-browser
 ```
 
 Open **http://localhost:8787** in Chrome on your Mac and click **計測開始**. The
-current defaults measure **both Gemma 4 E2B models with karume, parallel GEMV, and
-dense prefill buckets**, comparing reference / submit limit 768 / RMS-add fusion
-with limit 768 in forward and reverse order: 12 model loads and 120 generations
-in total. These settings prepare the next M2 validation. Choose Transformers.js,
+current defaults measure **QAT E2B with karume, parallel GEMV, and dense prefill
+buckets**. They compare RMS workgroup reduction and the new 32-lane subgroup
+reduction in ABBA order, with RMS-add fusion and submission limit 768 in both:
+4 model loads and 40 generations. These settings prepare the next M2 validation.
+Choose the normal E2B model, Transformers.js,
 reference settings, or a combined comparison explicitly when needed.
 **JSONを保存** downloads all timings, generated token IDs, output text,
 GPU information, model references, dependency versions, and the benchmark bundle hash.
@@ -62,7 +63,7 @@ recorded in [the adoption note](../../../docs/research/2026-09-13-m2-gemv-adopti
 
 ## Prefill bucket experiment
 
-The initial selection uses **両方**, **karume**, **並列加算を指定**, and **細分化**,
+The initial selection uses **Gemma 4 QAT E2B**, **karume**, **並列加算を指定**, and **細分化**,
 following the [M2 validation](../../../docs/research/2026-09-13-m2-prefill-adoption.md).
 To repeat only the bucket comparison, change Karumeの入力バケット to
 **3種類を往復比較** and Karumeの正規化・投入設定 to **従来**.
@@ -94,25 +95,38 @@ the scope of the experiment are recorded in [the prefill note](../../../docs/res
 
 ## RMS normalization and GPU submission comparison
 
-The default **3設定を往復比較** runs `reference → submit768 → fused → fused → submit768 → reference`.
-Each model uses fresh iframes, with the same weights, parallel GEMV, and dense buckets.
-This separates the contribution of GPU submission frequency from kernel fusion.
+The default **RMSの2経路を往復比較** runs `fused → subgroup32 → subgroup32 → fused`
+for QAT E2B. Each job uses a fresh iframe with the same weights, parallel GEMV,
+dense prefill buckets, RMS-add fusion, and submission limit 768. `subgroup32`
+changes the reduction order and can change generated text. It requires Chrome
+with `subgroups`, `subgroup-size-control`, and the WGSL `subgroup_id` language
+feature; missing support is an error. Deno 2.9.6 cannot run this path.
 
-| Setting                             | RMS-add fusion | Maximum dispatches per submission |
-| ----------------------------------- | -------------- | --------------------------------: |
-| 従来 (`reference`)                  | Off            |                              1024 |
-| 投入上限のみ768 (`submit768`)       | Off            |                               768 |
-| RMSと加算を融合 + 上限768 (`fused`) | On             |                               768 |
+The previous **従来の3設定を往復比較** remains available as
+`reference → submit768 → fused → fused → submit768 → reference` to separate
+submission frequency from fusion.
+
+| Setting                                      | RMS-add fusion | Maximum dispatches per submission |
+| -------------------------------------------- | -------------- | --------------------------------: |
+| 従来 (`reference`)                           | Off            |                              1024 |
+| 投入上限のみ768 (`submit768`)                | Off            |                               768 |
+| RMSと加算を融合 + 上限768 (`fused`)          | On             |                               768 |
+| 32レーン縮約 + 融合 + 上限768 (`subgroup32`) | On             |                               768 |
 
 The fusion is opt-in and keeps the original RMS kernels available. It combines
 adjacent RMS normalization and addition for validated f32 widths; the integer
-rounding barrier matched the reference on the tested RTX backends. M2 validation
-is pending. Library, CLI, and quant defaults stay unchanged. Results include
-`normalization`, `fuseRmsNormAdd`, and `submitMaxChunkSize`.
+rounding barrier matched the reference on the tested RTX backends and the M2
+fusion comparison preserved all 120 generated sequences. The new subgroup path
+still needs M2 validation. Library, CLI, and quant defaults stay unchanged.
+Results include `normalization`, `rmsNormReduce`, `fuseRmsNormAdd`,
+`submitMaxChunkSize`, and the enabled GPU and WGSL features.
 
 Both Gemma pipelines also accept `fuseRmsNormAdd` and the runtime `submitPolicy`
-as independent options. The fusion flag alone does not change the submission limit.
-See [ADR 0099](../../../docs/decisions/0099-rms-norm-add-fusion.md) and
+as independent options. They also accept `rmsNormReduce: "subgroup32"`; when you
+supply a GPU context, acquire it with `acquireGpu({ subgroups: true })` first.
+The fusion flag alone does not change the submission limit. See
+[ADR 0100](../../../docs/decisions/0100-rms-subgroup-reduction.md),
+[the subgroup measurements and quality limits](../../../docs/research/2026-09-13-rms-subgroup-reduction.md), [ADR 0099](../../../docs/decisions/0099-rms-norm-add-fusion.md) and
 [measurements](../../../docs/research/2026-09-13-rms-norm-add-fusion.md).
 
 ## What is measured

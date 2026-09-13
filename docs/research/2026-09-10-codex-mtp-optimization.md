@@ -3061,3 +3061,22 @@ RMS→SRQと共有メモリによる丸め保持は不採用。整数演算を�
 製品UIの120生成も不一致0。RTX/Chromeで通常103.024→112.536、QAT89.464→93.059 tok/s。
 全体の`deno task verify`は2,955 passed（797 steps）、0 failed、5 ignoredで通過した。
 ログは`outputs/bench/karume/2026-09-13_norm-fusion-verify-zdm3mbac/verify.log`。
+
+## M2融合追試とRMS subgroup候補（2026-09-13）
+
+[調査記録と次の追試](2026-09-13-rms-subgroup-reduction.md)にK-36のM2検収とK-37をまとめた。
+M2の120生成は全設定で一致、融合＋上限768は通常約3.7%・QAT約2.6%改善。
+RMSのthread配置・vector・元の加算木を保つsubgroupを比較し、QATに効果が出たsubgroupAddを任意指定へ追加した。
+通常生成のRTX利得は約2〜4%、固定入力列の帰属実験では約6%。両者を同じ指標として扱わない。
+固定64問・29窓の品質に大幅劣化は見られなかったが、QATの文章と選択肢は一部変わる。
+
+runtimeの`rmsNormReduce: "subgroup32"`、GPU取得の`subgroups: true`とGemmaの透過指定が入口。
+元のWGSL・golden・既定quantは維持。Denoの必要な機能は未対応なので、Chromeで実走する。
+次はM2で比較画面の開始ボタンを押すだけでQATのABBA・4設定40生成を取れる。
+61ケースのChrome数値検査とUI40生成・保存JSONも検収済み。未完はM2、新経路のE4B・長文・投機生成全体、既定への組み込み。
+完了した実験の出力先・準備失敗・再開手順は上記researchを正本とする。
+
+全体verifyは2,958 passed（800 steps）・0 failed・5 ignored（1 step）、25分50秒で完了。
+ログは`outputs/bench/karume/2026-09-13_rms-subgroup-verify-retry-_ylusnzs/verify.log`。
+初回の配布形読み込み失敗は単独・全体再走で成功。旧manifestが残る疑似HFの固定revision問題を再現して別件に記録したが、
+当該失敗時のポートは未記録なので因果は未確定。キャッシュ削除・自動再試行・検証条件の緩和はしていない。

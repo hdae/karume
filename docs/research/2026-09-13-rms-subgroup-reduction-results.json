@@ -1,0 +1,4679 @@
+{
+  "snapshot": "2026-09-13",
+  "hardware": "RTX 3080 Ti unless explicitly labelled user Apple M2",
+  "m2": {
+    "source": "gemma-browser-2026-09-13T11-58-16.422Z.json",
+    "sourceSha256": "c2daa8d6523a0805a6738df8d850b7bbcc857a6f16376ab678e446e020bdb68f",
+    "generations": 120,
+    "differences": [],
+    "previousDifferences": [],
+    "groups": [
+      {
+        "model": "normal",
+        "mode": "reference",
+        "medianDecode": 28.965908647214732,
+        "range": [
+          28.819366614742034,
+          29.509924468645707
+        ],
+        "speedup": 1.0,
+        "medianTtftMs": 388.7049999833107
+      },
+      {
+        "model": "normal",
+        "mode": "submit768",
+        "medianDecode": 29.30054668163934,
+        "range": [
+          28.978107729469922,
+          29.887636717573038
+        ],
+        "speedup": 1.0115528236486648,
+        "medianTtftMs": 389.892500013113
+      },
+      {
+        "model": "normal",
+        "mode": "fused",
+        "medianDecode": 30.042778558624008,
+        "range": [
+          29.58350649079532,
+          30.50566775941813
+        ],
+        "speedup": 1.0371771493352695,
+        "medianTtftMs": 386.5150000154972
+      },
+      {
+        "model": "qat",
+        "mode": "reference",
+        "medianDecode": 31.245610296401395,
+        "range": [
+          31.095141261370056,
+          31.626902947700625
+        ],
+        "speedup": 1.0,
+        "medianTtftMs": 455.1924999952316
+      },
+      {
+        "model": "qat",
+        "mode": "submit768",
+        "medianDecode": 31.901495785991568,
+        "range": [
+          31.84954879786675,
+          31.99618077407873
+        ],
+        "speedup": 1.0209912843234081,
+        "medianTtftMs": 445.5900000035763
+      },
+      {
+        "model": "qat",
+        "mode": "fused",
+        "medianDecode": 32.04591023098851,
+        "range": [
+          31.801237219447486,
+          32.28277662632375
+        ],
+        "speedup": 1.0256131958055974,
+        "medianTtftMs": 446.77250000834465
+      }
+    ],
+    "timeline": [
+      {
+        "job": 0,
+        "model": "normal",
+        "mode": "reference",
+        "date": "2026-09-13T11:53:00.149Z",
+        "loadSeconds": 3.698295000016689,
+        "cases": [
+          {
+            "case": "english-list",
+            "decodeTokensPerSecond": 28.819366614742034,
+            "ttftMs": 353.8600000143051
+          },
+          {
+            "case": "japanese-list",
+            "decodeTokensPerSecond": 29.00706068704219,
+            "ttftMs": 426.68000000715256
+          }
+        ]
+      },
+      {
+        "job": 1,
+        "model": "normal",
+        "mode": "submit768",
+        "date": "2026-09-13T11:53:29.632Z",
+        "loadSeconds": 3.4585900000333787,
+        "cases": [
+          {
+            "case": "english-list",
+            "decodeTokensPerSecond": 29.887636717573038,
+            "ttftMs": 353.710000038147
+          },
+          {
+            "case": "japanese-list",
+            "decodeTokensPerSecond": 29.27250846815095,
+            "ttftMs": 428.16000002622604
+          }
+        ]
+      },
+      {
+        "job": 2,
+        "model": "normal",
+        "mode": "fused",
+        "date": "2026-09-13T11:53:58.383Z",
+        "loadSeconds": 3.221214999973774,
+        "cases": [
+          {
+            "case": "english-list",
+            "decodeTokensPerSecond": 30.50566775941813,
+            "ttftMs": 349.38499999046326
+          },
+          {
+            "case": "japanese-list",
+            "decodeTokensPerSecond": 30.10047826301747,
+            "ttftMs": 423.10000002384186
+          }
+        ]
+      },
+      {
+        "job": 3,
+        "model": "normal",
+        "mode": "fused",
+        "date": "2026-09-13T11:54:27.641Z",
+        "loadSeconds": 3.3401299999952316,
+        "cases": [
+          {
+            "case": "english-list",
+            "decodeTokensPerSecond": 29.985078854230547,
+            "ttftMs": 349.93000000715256
+          },
+          {
+            "case": "japanese-list",
+            "decodeTokensPerSecond": 29.58350649079532,
+            "ttftMs": 424.7099999785423
+          }
+        ]
+      },
+      {
+        "job": 4,
+        "model": "normal",
+        "mode": "submit768",
+        "date": "2026-09-13T11:54:56.955Z",
+        "loadSeconds": 3.124535000026226,
+        "cases": [
+          {
+            "case": "english-list",
+            "decodeTokensPerSecond": 29.328584895127733,
+            "ttftMs": 350.74000000953674
+          },
+          {
+            "case": "japanese-list",
+            "decodeTokensPerSecond": 28.978107729469922,
+            "ttftMs": 426.07499998807907
+          }
+        ]
+      },
+      {
+        "job": 5,
+        "model": "normal",
+        "mode": "reference",
+        "date": "2026-09-13T11:55:26.366Z",
+        "loadSeconds": 3.2439900000095365,
+        "cases": [
+          {
+            "case": "english-list",
+            "decodeTokensPerSecond": 28.924756607387273,
+            "ttftMs": 355.5199999809265
+          },
+          {
+            "case": "japanese-list",
+            "decodeTokensPerSecond": 29.509924468645707,
+            "ttftMs": 421.8899999856949
+          }
+        ]
+      },
+      {
+        "job": 6,
+        "model": "qat",
+        "mode": "reference",
+        "date": "2026-09-13T11:55:53.721Z",
+        "loadSeconds": 1.978375,
+        "cases": [
+          {
+            "case": "english-list",
+            "decodeTokensPerSecond": 31.36466148576371,
+            "ttftMs": 403.25
+          },
+          {
+            "case": "japanese-list",
+            "decodeTokensPerSecond": 31.626902947700625,
+            "ttftMs": 494.2450000047684
+          }
+        ]
+      },
+      {
+        "job": 7,
+        "model": "qat",
+        "mode": "submit768",
+        "date": "2026-09-13T11:56:20.887Z",
+        "loadSeconds": 2.179164999961853,
+        "cases": [
+          {
+            "case": "english-list",
+            "decodeTokensPerSecond": 31.859212622508682,
+            "ttftMs": 398.4350000023842
+          },
+          {
+            "case": "japanese-list",
+            "decodeTokensPerSecond": 31.99618077407873,
+            "ttftMs": 492.7450000047684
+          }
+        ]
+      },
+      {
+        "job": 8,
+        "model": "qat",
+        "mode": "fused",
+        "date": "2026-09-13T11:56:47.788Z",
+        "loadSeconds": 2.1416449999809264,
+        "cases": [
+          {
+            "case": "english-list",
+            "decodeTokensPerSecond": 32.28277662632375,
+            "ttftMs": 400.3700000047684
+          },
+          {
+            "case": "japanese-list",
+            "decodeTokensPerSecond": 32.029609594531024,
+            "ttftMs": 493.2150000333786
+          }
+        ]
+      },
+      {
+        "job": 9,
+        "model": "qat",
+        "mode": "fused",
+        "date": "2026-09-13T11:57:15.065Z",
+        "loadSeconds": 2.1737549999952317,
+        "cases": [
+          {
+            "case": "english-list",
+            "decodeTokensPerSecond": 31.801237219447486,
+            "ttftMs": 399.6850000023842
+          },
+          {
+            "case": "japanese-list",
+            "decodeTokensPerSecond": 32.062210867446005,
+            "ttftMs": 493.17500001192093
+          }
+        ]
+      },
+      {
+        "job": 10,
+        "model": "qat",
+        "mode": "submit768",
+        "date": "2026-09-13T11:57:42.514Z",
+        "loadSeconds": 2.2857450000047685,
+        "cases": [
+          {
+            "case": "english-list",
+            "decodeTokensPerSecond": 31.943778949474453,
+            "ttftMs": 398.27999997138977
+          },
+          {
+            "case": "japanese-list",
+            "decodeTokensPerSecond": 31.84954879786675,
+            "ttftMs": 494.6050000190735
+          }
+        ]
+      },
+      {
+        "job": 11,
+        "model": "qat",
+        "mode": "reference",
+        "date": "2026-09-13T11:58:10.258Z",
+        "loadSeconds": 2.0892549999952315,
+        "cases": [
+          {
+            "case": "english-list",
+            "decodeTokensPerSecond": 31.126559107039085,
+            "ttftMs": 416.1399999856949
+          },
+          {
+            "case": "japanese-list",
+            "decodeTokensPerSecond": 31.095141261370056,
+            "ttftMs": 499.0349999666214
+          }
+        ]
+      }
+    ],
+    "metadata": [
+      {
+        "model": "normal",
+        "adapter": {
+          "vendor": "apple",
+          "architecture": "metal-3",
+          "description": "",
+          "device": "",
+          "isFallbackAdapter": false,
+          "features": [
+            "depth32float-stencil8",
+            "rg11b10ufloat-renderable",
+            "bgra8unorm-storage",
+            "texture-formats-tier1",
+            "texture-compression-bc",
+            "dual-source-blending",
+            "core-features-and-limits",
+            "float32-filterable",
+            "indirect-first-instance",
+            "texture-compression-astc-sliced-3d",
+            "float32-blendable",
+            "subgroup-size-control",
+            "texture-compression-astc",
+            "texture-compression-etc2",
+            "depth-clip-control",
+            "texture-compression-bc-sliced-3d",
+            "clip-distances",
+            "timestamp-query",
+            "shader-f16",
+            "texture-formats-tier2",
+            "primitive-index",
+            "texture-component-swizzle",
+            "subgroups"
+          ]
+        },
+        "manifestSha256": "c445ea39ed8050b5d97757cfeb902c789c9048ad5eec6a962378e08772bb7ca6",
+        "compute": "f32",
+        "quant": "i4",
+        "capacity": 128,
+        "chunkLength": 64,
+        "fixture": {
+          "cases": [
+            {
+              "case": "english-list",
+              "prompt": "Write a numbered list of twenty practical tips for learning a new language. Give one short sentence for each tip.",
+              "inputIds": [
+                2,
+                105,
+                2364,
+                107,
+                6974,
+                496,
+                49597,
+                1694,
+                529,
+                12571,
+                10231,
+                11221,
+                573,
+                4735,
+                496,
+                861,
+                5192,
+                236761,
+                23097,
+                886,
+                2822,
+                13315,
+                573,
+                1546,
+                6508,
+                236761,
+                106,
+                107,
+                105,
+                4368,
+                107
+              ]
+            },
+            {
+              "case": "japanese-list",
+              "prompt": "プログラミングを学ぶ人に向けたアドバイスを20個、番号付きで挙げてください。それぞれ一文で説明してください。",
+              "inputIds": [
+                2,
+                105,
+                2364,
+                107,
+                18668,
+                29171,
+                70738,
+                237051,
+                230452,
+                98782,
+                65630,
+                237036,
+                77221,
+                99950,
+                237051,
+                236778,
+                236771,
+                237629,
+                236951,
+                67583,
+                28412,
+                237007,
+                178274,
+                95509,
+                236924,
+                59043,
+                237009,
+                237364,
+                237007,
+                34084,
+                49391,
+                236924,
+                106,
+                107,
+                105,
+                4368,
+                107
+              ]
+            }
+          ],
+          "stopTokens": [
+            1,
+            106,
+            50
+          ],
+          "maxNewTokens": 64,
+          "capacity": 128
+        },
+        "sampler": {
+          "temperature": 0
+        },
+        "maxNewTokens": 64,
+        "bundleSha256": "e8679798de0615130971b3782f66e254c2907864e4bdc49c9f6141c71f6a7139"
+      },
+      {
+        "model": "qat",
+        "adapter": {
+          "vendor": "apple",
+          "architecture": "metal-3",
+          "description": "",
+          "device": "",
+          "isFallbackAdapter": false,
+          "features": [
+            "depth32float-stencil8",
+            "rg11b10ufloat-renderable",
+            "texture-formats-tier1",
+            "bgra8unorm-storage",
+            "texture-compression-bc",
+            "dual-source-blending",
+            "core-features-and-limits",
+            "float32-filterable",
+            "indirect-first-instance",
+            "texture-compression-astc-sliced-3d",
+            "float32-blendable",
+            "subgroup-size-control",
+            "texture-compression-astc",
+            "texture-compression-etc2",
+            "depth-clip-control",
+            "texture-compression-bc-sliced-3d",
+            "timestamp-query",
+            "shader-f16",
+            "clip-distances",
+            "texture-formats-tier2",
+            "primitive-index",
+            "texture-component-swizzle",
+            "subgroups"
+          ]
+        },
+        "manifestSha256": "6c3ae974beeb032942aaa4c943619855b787f34f67441f0f4be63432caca52db",
+        "compute": "f32",
+        "quant": "i4",
+        "capacity": 128,
+        "chunkLength": 64,
+        "fixture": {
+          "cases": [
+            {
+              "case": "english-list",
+              "prompt": "Write a numbered list of twenty practical tips for learning a new language. Give one short sentence for each tip.",
+              "inputIds": [
+                2,
+                105,
+                2364,
+                107,
+                6974,
+                496,
+                49597,
+                1694,
+                529,
+                12571,
+                10231,
+                11221,
+                573,
+                4735,
+                496,
+                861,
+                5192,
+                236761,
+                23097,
+                886,
+                2822,
+                13315,
+                573,
+                1546,
+                6508,
+                236761,
+                106,
+                107,
+                105,
+                4368,
+                107
+              ]
+            },
+            {
+              "case": "japanese-list",
+              "prompt": "プログラミングを学ぶ人に向けたアドバイスを20個、番号付きで挙げてください。それぞれ一文で説明してください。",
+              "inputIds": [
+                2,
+                105,
+                2364,
+                107,
+                18668,
+                29171,
+                70738,
+                237051,
+                230452,
+                98782,
+                65630,
+                237036,
+                77221,
+                99950,
+                237051,
+                236778,
+                236771,
+                237629,
+                236951,
+                67583,
+                28412,
+                237007,
+                178274,
+                95509,
+                236924,
+                59043,
+                237009,
+                237364,
+                237007,
+                34084,
+                49391,
+                236924,
+                106,
+                107,
+                105,
+                4368,
+                107
+              ]
+            }
+          ],
+          "stopTokens": [
+            1,
+            106,
+            50
+          ],
+          "maxNewTokens": 64,
+          "capacity": 128
+        },
+        "sampler": {
+          "temperature": 0
+        },
+        "maxNewTokens": 64,
+        "bundleSha256": "e8679798de0615130971b3782f66e254c2907864e4bdc49c9f6141c71f6a7139"
+      }
+    ]
+  },
+  "whole": {
+    "source": "2026-09-13_rms-whole-browser-uw_k66jo",
+    "files": [
+      {
+        "path": "outputs/bench/karume/2026-09-13_rms-whole-browser-uw_k66jo/128-normal-0-baseline.json",
+        "sha256": "f815ebc88985952c27445762d46ac5da036ebc26cdb7ba302d8eeba9bf0a1e99"
+      },
+      {
+        "path": "outputs/bench/karume/2026-09-13_rms-whole-browser-uw_k66jo/128-normal-1-tree.json",
+        "sha256": "456bbdb1b4a049657fcb459882ba185f84ce9629373203706e13f01842da206e"
+      },
+      {
+        "path": "outputs/bench/karume/2026-09-13_rms-whole-browser-uw_k66jo/128-normal-2-fast.json",
+        "sha256": "921cd42ebc84d6bcf29fd407fe22dbe43ab3f699a31bdc3155c71beb86320fe7"
+      },
+      {
+        "path": "outputs/bench/karume/2026-09-13_rms-whole-browser-uw_k66jo/128-normal-3-fast.json",
+        "sha256": "7573a7263ec52891c294a4a074737ac902ea8a8dc4ff940e205a57d1c712d1df"
+      },
+      {
+        "path": "outputs/bench/karume/2026-09-13_rms-whole-browser-uw_k66jo/128-normal-4-tree.json",
+        "sha256": "344bda2f2538a4ac3d67b07ad4265637110d113193d82a4250fb21586b20098b"
+      },
+      {
+        "path": "outputs/bench/karume/2026-09-13_rms-whole-browser-uw_k66jo/128-normal-5-baseline.json",
+        "sha256": "7b819e80e7de97994a1b974ecac1466e75e8722480797af3f6e8014dbd5f3d74"
+      },
+      {
+        "path": "outputs/bench/karume/2026-09-13_rms-whole-browser-uw_k66jo/128-qat-0-baseline.json",
+        "sha256": "7b25c325cf16b76e1aaced6ef20a696e29f9b777e5c2ca9c3a56a1c4a409b7ff"
+      },
+      {
+        "path": "outputs/bench/karume/2026-09-13_rms-whole-browser-uw_k66jo/128-qat-1-tree.json",
+        "sha256": "568d370961a77ef7fb8c90e5cd6ff115fcacf7a26318d9e5acbfcc70fd0e50c1"
+      },
+      {
+        "path": "outputs/bench/karume/2026-09-13_rms-whole-browser-uw_k66jo/128-qat-2-fast.json",
+        "sha256": "0e1712535c32194315336e9c480233be08a160c9d243b90be75c636105c24c6a"
+      },
+      {
+        "path": "outputs/bench/karume/2026-09-13_rms-whole-browser-uw_k66jo/128-qat-3-fast.json",
+        "sha256": "939f2913d5d73da322fff6960ac8d5477bf44cb57ad3d0c15e5c496e0bfbccbe"
+      },
+      {
+        "path": "outputs/bench/karume/2026-09-13_rms-whole-browser-uw_k66jo/128-qat-4-tree.json",
+        "sha256": "646abeb6bf4477605c583af3765e12ed705afa9dba5f550095ec5060c92af627"
+      },
+      {
+        "path": "outputs/bench/karume/2026-09-13_rms-whole-browser-uw_k66jo/128-qat-5-baseline.json",
+        "sha256": "99704332c0afcf9aeccc2468da6661327149f2bcb1cd0b4dd7cc5adba146789d"
+      }
+    ],
+    "models": {
+      "normal": {
+        "baseline": {
+          "decodeTpsMedian": 111.74180863730592,
+          "perCaseLoadDecodeMedians": [
+            111.66253101972903,
+            112.35955055224234,
+            111.40583554376659,
+            111.8210862548828
+          ],
+          "warmTtftMedians": {
+            "english-list": [
+              35.39999997615814,
+              36.5
+            ],
+            "japanese-list": [
+              38.799999952316284,
+              40.39999997615814
+            ]
+          },
+          "generations": 20,
+          "differentGenerations": [],
+          "speedup": 1.0
+        },
+        "fast": {
+          "decodeTpsMedian": 111.82108978361401,
+          "perCaseLoadDecodeMedians": [
+            111.80124223602485,
+            111.78140525904473,
+            112.43976440952991,
+            111.84093733120318
+          ],
+          "warmTtftMedians": {
+            "english-list": [
+              36.30000001192093,
+              36.5
+            ],
+            "japanese-list": [
+              39.700000047683716,
+              40.09999996423721
+            ]
+          },
+          "generations": 20,
+          "differentGenerations": [],
+          "speedup": 1.0007095029807995
+        },
+        "tree": {
+          "decodeTpsMedian": 112.71153668258908,
+          "perCaseLoadDecodeMedians": [
+            112.39964317573595,
+            113.43176088574606,
+            112.86277320198035,
+            112.56030016319782
+          ],
+          "warmTtftMedians": {
+            "english-list": [
+              36.19999998807907,
+              36.5
+            ],
+            "japanese-list": [
+              39.5,
+              39.69999998807907
+            ]
+          },
+          "generations": 20,
+          "differentGenerations": [],
+          "speedup": 1.0086782920118174
+        }
+      },
+      "qat": {
+        "baseline": {
+          "decodeTpsMedian": 92.59966193963633,
+          "perCaseLoadDecodeMedians": [
+            92.44314013206163,
+            92.3618237762761,
+            92.75618374721104,
+            92.86556604099954
+          ],
+          "warmTtftMedians": {
+            "english-list": [
+              38,
+              38.10000002384186
+            ],
+            "japanese-list": [
+              41.39999997615814,
+              41.700000047683716
+            ]
+          },
+          "generations": 20,
+          "differentGenerations": [],
+          "speedup": 1.0
+        },
+        "fast": {
+          "decodeTpsMedian": 96.08839583033537,
+          "perCaseLoadDecodeMedians": [
+            98.88557526846087,
+            94.19856460001755,
+            97.97822706065318,
+            93.47181008902078
+          ],
+          "warmTtftMedians": {
+            "english-list": [
+              38,
+              38.19999998807907
+            ],
+            "japanese-list": [
+              41.19999998807907,
+              41.30000001192093
+            ]
+          },
+          "generations": 20,
+          "differentGenerations": [
+            {
+              "load": 0,
+              "case": "english-list",
+              "sweep": 0
+            },
+            {
+              "load": 0,
+              "case": "english-list",
+              "sweep": 1
+            },
+            {
+              "load": 0,
+              "case": "english-list",
+              "sweep": 2
+            },
+            {
+              "load": 0,
+              "case": "english-list",
+              "sweep": 3
+            },
+            {
+              "load": 0,
+              "case": "english-list",
+              "sweep": 4
+            },
+            {
+              "load": 0,
+              "case": "japanese-list",
+              "sweep": 0
+            },
+            {
+              "load": 0,
+              "case": "japanese-list",
+              "sweep": 1
+            },
+            {
+              "load": 0,
+              "case": "japanese-list",
+              "sweep": 2
+            },
+            {
+              "load": 0,
+              "case": "japanese-list",
+              "sweep": 3
+            },
+            {
+              "load": 0,
+              "case": "japanese-list",
+              "sweep": 4
+            },
+            {
+              "load": 1,
+              "case": "english-list",
+              "sweep": 0
+            },
+            {
+              "load": 1,
+              "case": "english-list",
+              "sweep": 1
+            },
+            {
+              "load": 1,
+              "case": "english-list",
+              "sweep": 2
+            },
+            {
+              "load": 1,
+              "case": "english-list",
+              "sweep": 3
+            },
+            {
+              "load": 1,
+              "case": "english-list",
+              "sweep": 4
+            },
+            {
+              "load": 1,
+              "case": "japanese-list",
+              "sweep": 0
+            },
+            {
+              "load": 1,
+              "case": "japanese-list",
+              "sweep": 1
+            },
+            {
+              "load": 1,
+              "case": "japanese-list",
+              "sweep": 2
+            },
+            {
+              "load": 1,
+              "case": "japanese-list",
+              "sweep": 3
+            },
+            {
+              "load": 1,
+              "case": "japanese-list",
+              "sweep": 4
+            }
+          ],
+          "speedup": 1.0376754495386091
+        },
+        "tree": {
+          "decodeTpsMedian": 93.48119437874593,
+          "perCaseLoadDecodeMedians": [
+            94.00179051196746,
+            92.81084267004356,
+            93.95973154362416,
+            93.00265721386768
+          ],
+          "warmTtftMedians": {
+            "english-list": [
+              38.19999998807907,
+              38
+            ],
+            "japanese-list": [
+              41.200000047683716,
+              42
+            ]
+          },
+          "generations": 20,
+          "differentGenerations": [],
+          "speedup": 1.0095198235138725
+        }
+      }
+    }
+  },
+  "replay": {
+    "source": "2026-09-13_rms-replay-browser-zxjf_ith",
+    "files": [
+      {
+        "path": "outputs/bench/karume/2026-09-13_rms-replay-browser-zxjf_ith/128-normal-0-baseline.json",
+        "sha256": "1c16a320d9b13eba72f78a1e0acfd2bcfb9592d1571851e90024cc3d5da00627"
+      },
+      {
+        "path": "outputs/bench/karume/2026-09-13_rms-replay-browser-zxjf_ith/128-normal-1-fast.json",
+        "sha256": "a3dd7dc6baf4559580fe335c1cf2a8b3c558dd9acf9718e6aa1f52bae1fda9b6"
+      },
+      {
+        "path": "outputs/bench/karume/2026-09-13_rms-replay-browser-zxjf_ith/128-normal-2-fast.json",
+        "sha256": "002ba4d7647a3a30b578d79494861d11a0bed3a997a687d83050fe2855687858"
+      },
+      {
+        "path": "outputs/bench/karume/2026-09-13_rms-replay-browser-zxjf_ith/128-normal-3-baseline.json",
+        "sha256": "10fa6e75e938add455b0cdce83acb326be4d974cffee1e9b25b02f5c45d1c84e"
+      },
+      {
+        "path": "outputs/bench/karume/2026-09-13_rms-replay-browser-zxjf_ith/128-qat-0-baseline.json",
+        "sha256": "3f6926debbc294f017d0a5d0141ff3307c71df81be2def92decca59eeac4fdc4"
+      },
+      {
+        "path": "outputs/bench/karume/2026-09-13_rms-replay-browser-zxjf_ith/128-qat-1-fast.json",
+        "sha256": "a74b77bda8fc69103fb80964a1947b74ccd66223a19bb29c9b154023124e4ad4"
+      },
+      {
+        "path": "outputs/bench/karume/2026-09-13_rms-replay-browser-zxjf_ith/128-qat-2-fast.json",
+        "sha256": "752dc769bf6cd5611a47161323f83c2340435d57e434763c74001883ce41a0bd"
+      },
+      {
+        "path": "outputs/bench/karume/2026-09-13_rms-replay-browser-zxjf_ith/128-qat-3-baseline.json",
+        "sha256": "a70a537852063f1568f19371121459f165fac43d85a3e6b6fc1f2280d28a9fea"
+      }
+    ],
+    "models": {
+      "normal": {
+        "baseline": {
+          "decodeTpsMedian": 111.80265063029825,
+          "perCaseLoadDecodeMedians": [
+            110.75949366856477,
+            113.04503857644428,
+            111.40583554376659,
+            112.19946571682992
+          ],
+          "warmTtftMedians": {
+            "english-list": [
+              35.19999998807907,
+              36.69999998807907
+            ],
+            "japanese-list": [
+              38.80000001192093,
+              39.69999998807907
+            ]
+          },
+          "generations": 20,
+          "differentGenerations": [],
+          "speedup": 1.0
+        },
+        "fast": {
+          "decodeTpsMedian": 112.0400631703778,
+          "perCaseLoadDecodeMedians": [
+            112.60053619302948,
+            111.13071087674308,
+            111.88066062392569,
+            112.19946571682992
+          ],
+          "warmTtftMedians": {
+            "english-list": [
+              35,
+              36.19999998807907
+            ],
+            "japanese-list": [
+              39.799999952316284,
+              39.89999997615814
+            ]
+          },
+          "generations": 20,
+          "differentGenerations": [],
+          "speedup": 1.002123496524824
+        }
+      },
+      "qat": {
+        "baseline": {
+          "decodeTpsMedian": 93.24544338563659,
+          "perCaseLoadDecodeMedians": [
+            93.8757264243142,
+            92.82451746148011,
+            93.66636930979307,
+            92.45670677530597
+          ],
+          "warmTtftMedians": {
+            "english-list": [
+              37.69999998807907,
+              37.69999998807907
+            ],
+            "japanese-list": [
+              41.69999998807907,
+              41.19999998807907
+            ]
+          },
+          "generations": 20,
+          "differentGenerations": [],
+          "speedup": 1.0
+        },
+        "fast": {
+          "decodeTpsMedian": 98.99304783539424,
+          "perCaseLoadDecodeMedians": [
+            99.92069785884219,
+            98.19201994647587,
+            99.7940757243126,
+            96.00731484477978
+          ],
+          "warmTtftMedians": {
+            "english-list": [
+              37.89999997615814,
+              37.69999998807907
+            ],
+            "japanese-list": [
+              41.30000001192093,
+              41.30000001192093
+            ]
+          },
+          "generations": 20,
+          "differentGenerations": [],
+          "speedup": 1.0616395208287785
+        }
+      }
+    }
+  },
+  "quality": {
+    "A": {
+      "arcCount": 64,
+      "arcCorrect": 44,
+      "arcNormalizedCorrect": 43,
+      "tokens": 1870,
+      "meanNll": 6.500792001056308,
+      "perplexity": 665.6686345856683,
+      "arc": [
+        {
+          "id": "Mercury_417466",
+          "answer": 0,
+          "prediction": 0,
+          "normalized": 0,
+          "nll": [
+            25.25482560148559,
+            39.6697996391721,
+            36.69397093719305,
+            31.62336705866919
+          ]
+        },
+        {
+          "id": "Mercury_7081673",
+          "answer": 1,
+          "prediction": 1,
+          "normalized": 1,
+          "nll": [
+            22.687268013974663,
+            16.71246916313983,
+            31.818488607817198,
+            24.14051394844185
+          ]
+        },
+        {
+          "id": "MCAS_2005_5_10",
+          "answer": 1,
+          "prediction": 2,
+          "normalized": 2,
+          "nll": [
+            21.693778792946013,
+            24.140075231646378,
+            20.683346011046975,
+            34.63421312372717
+          ]
+        },
+        {
+          "id": "Mercury_7166145",
+          "answer": 1,
+          "prediction": 2,
+          "normalized": 2,
+          "nll": [
+            45.37582163080219,
+            56.45310696455063,
+            42.27001570225541,
+            53.87651758329505
+          ]
+        },
+        {
+          "id": "MSA_2013_5_6",
+          "answer": 1,
+          "prediction": 1,
+          "normalized": 1,
+          "nll": [
+            32.937891395411356,
+            6.758031757197244,
+            23.17313042434202,
+            20.290099056086405
+          ]
+        },
+        {
+          "id": "Mercury_SC_405199",
+          "answer": 1,
+          "prediction": 3,
+          "normalized": 1,
+          "nll": [
+            22.896396985124433,
+            17.51549054846607,
+            18.414168660827357,
+            15.703598325439174
+          ]
+        },
+        {
+          "id": "NYSEDREGENTS_2015_8_28",
+          "answer": 1,
+          "prediction": 1,
+          "normalized": 1,
+          "nll": [
+            14.553240972612588,
+            5.552361684892862,
+            8.459733205888956,
+            16.866837698076456
+          ]
+        },
+        {
+          "id": "Mercury_SC_401777",
+          "answer": 1,
+          "prediction": 1,
+          "normalized": 1,
+          "nll": [
+            21.64196480096777,
+            13.602110274447995,
+            17.58025587381323,
+            14.593552001132565
+          ]
+        },
+        {
+          "id": "Mercury_7198188",
+          "answer": 1,
+          "prediction": 1,
+          "normalized": 1,
+          "nll": [
+            36.20203334083227,
+            32.04528399904051,
+            44.27970641408721,
+            58.03187724187829
+          ]
+        },
+        {
+          "id": "MCAS_1998_4_11",
+          "answer": 3,
+          "prediction": 3,
+          "normalized": 3,
+          "nll": [
+            34.18275019232315,
+            28.067605229627787,
+            46.98566001883126,
+            9.844399160137211
+          ]
+        },
+        {
+          "id": "Mercury_SC_LBS10784",
+          "answer": 1,
+          "prediction": 1,
+          "normalized": 3,
+          "nll": [
+            17.752059088881317,
+            7.540042983229462,
+            18.839602667297335,
+            18.9637718596076
+          ]
+        },
+        {
+          "id": "Mercury_7033548",
+          "answer": 3,
+          "prediction": 0,
+          "normalized": 3,
+          "nll": [
+            13.409327598373334,
+            18.98954473563415,
+            19.383034268259497,
+            14.363778029838105
+          ]
+        },
+        {
+          "id": "Mercury_7239733",
+          "answer": 3,
+          "prediction": 1,
+          "normalized": 1,
+          "nll": [
+            24.129895994834573,
+            24.02772896206826,
+            28.299353735871197,
+            34.39194944594793
+          ]
+        },
+        {
+          "id": "Mercury_7146195",
+          "answer": 3,
+          "prediction": 3,
+          "normalized": 3,
+          "nll": [
+            14.237905474516683,
+            18.23151948090543,
+            22.376741808957426,
+            11.279933795344018
+          ]
+        },
+        {
+          "id": "NCEOGA_2013_8_36",
+          "answer": 3,
+          "prediction": 3,
+          "normalized": 3,
+          "nll": [
+            26.551356795148436,
+            20.105687024907652,
+            21.322373750524108,
+            12.366603734807555
+          ]
+        },
+        {
+          "id": "Mercury_SC_415412",
+          "answer": 3,
+          "prediction": 0,
+          "normalized": 1,
+          "nll": [
+            31.70494392691509,
+            46.50715196618129,
+            50.25270170616051,
+            36.60419992362648
+          ]
+        },
+        {
+          "id": "Mercury_7126840",
+          "answer": 2,
+          "prediction": 0,
+          "normalized": 2,
+          "nll": [
+            12.707108554980483,
+            18.35822505114861,
+            12.802499359979247,
+            13.749143442587407
+          ]
+        },
+        {
+          "id": "Mercury_SC_408362",
+          "answer": 1,
+          "prediction": 1,
+          "normalized": 1,
+          "nll": [
+            21.038892017681484,
+            6.428333507854823,
+            36.029819052154096,
+            12.897584487095571
+          ]
+        },
+        {
+          "id": "MDSA_2008_8_35",
+          "answer": 2,
+          "prediction": 0,
+          "normalized": 0,
+          "nll": [
+            43.04440731269852,
+            50.929784671172506,
+            48.71709258309407,
+            69.94395955898824
+          ]
+        },
+        {
+          "id": "NYSEDREGENTS_2015_8_21",
+          "answer": 1,
+          "prediction": 3,
+          "normalized": 3,
+          "nll": [
+            23.95476008087031,
+            21.80994081729051,
+            31.63226103672383,
+            18.478009245820953
+          ]
+        },
+        {
+          "id": "VASoL_2008_5_12",
+          "answer": 1,
+          "prediction": 1,
+          "normalized": 1,
+          "nll": [
+            15.897944669672299,
+            4.627122144647885,
+            17.611126165338803,
+            20.834781866022396
+          ]
+        },
+        {
+          "id": "Mercury_SC_LBS10680",
+          "answer": 0,
+          "prediction": 0,
+          "normalized": 0,
+          "nll": [
+            33.85715731568024,
+            49.7232361316621,
+            37.35154202532935,
+            56.264727874130756
+          ]
+        },
+        {
+          "id": "MCAS_2003_5_3",
+          "answer": 1,
+          "prediction": 1,
+          "normalized": 2,
+          "nll": [
+            29.12127262098067,
+            19.78653663141005,
+            27.791860945399726,
+            27.324818787400652
+          ]
+        },
+        {
+          "id": "NYSEDREGENTS_2015_4_8",
+          "answer": 3,
+          "prediction": 3,
+          "normalized": 3,
+          "nll": [
+            23.130634318419553,
+            22.8737487898551,
+            16.935089598723508,
+            9.222035895415402
+          ]
+        },
+        {
+          "id": "VASoL_2010_5_18",
+          "answer": 0,
+          "prediction": 2,
+          "normalized": 2,
+          "nll": [
+            26.26123955732595,
+            16.56994569481672,
+            15.258985398612111,
+            28.795001264437808
+          ]
+        },
+        {
+          "id": "Mercury_7074900",
+          "answer": 2,
+          "prediction": 2,
+          "normalized": 2,
+          "nll": [
+            24.572148387007104,
+            19.315123196280666,
+            12.933154025017245,
+            24.023932823430084
+          ]
+        },
+        {
+          "id": "Mercury_SC_408762",
+          "answer": 0,
+          "prediction": 0,
+          "normalized": 0,
+          "nll": [
+            4.677744138753031,
+            20.335449081681737,
+            16.246983867906103,
+            10.644133907578954
+          ]
+        },
+        {
+          "id": "ACTAAP_2015_5_8",
+          "answer": 0,
+          "prediction": 0,
+          "normalized": 3,
+          "nll": [
+            42.82187043231178,
+            51.68588568129414,
+            63.941416231477795,
+            52.49851271844198
+          ]
+        },
+        {
+          "id": "Mercury_7263008",
+          "answer": 2,
+          "prediction": 3,
+          "normalized": 2,
+          "nll": [
+            37.65924026293151,
+            40.0732384117476,
+            23.52186155866808,
+            23.520730108621017
+          ]
+        },
+        {
+          "id": "MCAS_2000_4_29",
+          "answer": 0,
+          "prediction": 0,
+          "normalized": 0,
+          "nll": [
+            12.273787417730627,
+            15.826322785305571,
+            19.100509902360542,
+            12.477576684336483
+          ]
+        },
+        {
+          "id": "CSZ_2008_5_CSZ10233",
+          "answer": 3,
+          "prediction": 3,
+          "normalized": 3,
+          "nll": [
+            35.95317556128457,
+            37.79181053619486,
+            37.020574263628625,
+            9.939292186072358
+          ]
+        },
+        {
+          "id": "Mercury_7128660",
+          "answer": 2,
+          "prediction": 2,
+          "normalized": 2,
+          "nll": [
+            33.23864228470994,
+            51.83463988453597,
+            25.162771561136616,
+            34.12169227714299
+          ]
+        },
+        {
+          "id": "Mercury_7100520",
+          "answer": 2,
+          "prediction": 2,
+          "normalized": 3,
+          "nll": [
+            44.45441526922206,
+            43.7244742891277,
+            41.405467593808346,
+            41.76105189671285
+          ]
+        },
+        {
+          "id": "Mercury_7017728",
+          "answer": 1,
+          "prediction": 1,
+          "normalized": 1,
+          "nll": [
+            28.888044146713582,
+            23.662979802891442,
+            28.11038249602029,
+            40.14976000889759
+          ]
+        },
+        {
+          "id": "Mercury_7037258",
+          "answer": 1,
+          "prediction": 0,
+          "normalized": 3,
+          "nll": [
+            46.906598112380976,
+            51.21663679432207,
+            47.82068665026144,
+            54.372804996362234
+          ]
+        },
+        {
+          "id": "Mercury_7032865",
+          "answer": 0,
+          "prediction": 0,
+          "normalized": 0,
+          "nll": [
+            0.4781716007898993,
+            14.980323804463392,
+            9.225103803549503,
+            9.494368817954022
+          ]
+        },
+        {
+          "id": "Mercury_405057",
+          "answer": 1,
+          "prediction": 1,
+          "normalized": 1,
+          "nll": [
+            22.848992505340316,
+            14.106465020446517,
+            24.729796090392806,
+            23.311833062438705
+          ]
+        },
+        {
+          "id": "Mercury_7057593",
+          "answer": 0,
+          "prediction": 0,
+          "normalized": 0,
+          "nll": [
+            6.616614462865222,
+            16.129613997472156,
+            14.503953101170886,
+            14.744403006566394
+          ]
+        },
+        {
+          "id": "Mercury_SC_405231",
+          "answer": 2,
+          "prediction": 1,
+          "normalized": 1,
+          "nll": [
+            30.888590507512284,
+            20.43858776180663,
+            22.377504113675933,
+            41.947009388793106
+          ]
+        },
+        {
+          "id": "VASoL_2007_5_38",
+          "answer": 0,
+          "prediction": 1,
+          "normalized": 0,
+          "nll": [
+            37.32195039201351,
+            22.199432576339884,
+            37.84129242701077,
+            44.29486817835914
+          ]
+        },
+        {
+          "id": "Mercury_SC_410895",
+          "answer": 3,
+          "prediction": 3,
+          "normalized": 3,
+          "nll": [
+            40.864281580159286,
+            34.39110353344567,
+            57.67962195992318,
+            26.72559958232992
+          ]
+        },
+        {
+          "id": "Mercury_7015978",
+          "answer": 3,
+          "prediction": 3,
+          "normalized": 3,
+          "nll": [
+            18.713239914293514,
+            26.91624792020633,
+            15.614821106958853,
+            14.724687657262646
+          ]
+        },
+        {
+          "id": "ACTAAP_2010_5_5",
+          "answer": 2,
+          "prediction": 2,
+          "normalized": 3,
+          "nll": [
+            30.872197559411788,
+            48.58172831124271,
+            24.326426161953872,
+            39.5325684978595
+          ]
+        },
+        {
+          "id": "Mercury_7080955",
+          "answer": 3,
+          "prediction": 3,
+          "normalized": 3,
+          "nll": [
+            22.79196613950235,
+            27.76652214344207,
+            23.780042688782533,
+            18.316514023670994
+          ]
+        },
+        {
+          "id": "ACTAAP_2009_5_4",
+          "answer": 3,
+          "prediction": 0,
+          "normalized": 3,
+          "nll": [
+            10.518590065753767,
+            12.3634406059149,
+            14.011358151635406,
+            15.970188378564277
+          ]
+        },
+        {
+          "id": "CSZ20679",
+          "answer": 2,
+          "prediction": 2,
+          "normalized": 2,
+          "nll": [
+            12.925103475918373,
+            11.163690591153355,
+            6.630036658226754,
+            10.31430855543444
+          ]
+        },
+        {
+          "id": "Mercury_7017010",
+          "answer": 0,
+          "prediction": 1,
+          "normalized": 2,
+          "nll": [
+            40.88398903318149,
+            24.907962493520007,
+            31.92559129235149,
+            36.27097736921536
+          ]
+        },
+        {
+          "id": "Mercury_7146108",
+          "answer": 1,
+          "prediction": 0,
+          "normalized": 3,
+          "nll": [
+            25.558935287622464,
+            34.66532644602829,
+            50.907695392616944,
+            41.09878645196984
+          ]
+        },
+        {
+          "id": "NYSEDREGENTS_2012_4_12",
+          "answer": 2,
+          "prediction": 2,
+          "normalized": 2,
+          "nll": [
+            26.695998391302112,
+            16.569453975351337,
+            8.388572475107196,
+            30.552767535837177
+          ]
+        },
+        {
+          "id": "VASoL_2009_5_3",
+          "answer": 0,
+          "prediction": 0,
+          "normalized": 0,
+          "nll": [
+            17.335338184313322,
+            29.533211370188546,
+            17.64640840300594,
+            26.11164760889448
+          ]
+        },
+        {
+          "id": "Mercury_SC_401253",
+          "answer": 2,
+          "prediction": 2,
+          "normalized": 2,
+          "nll": [
+            22.33707831589285,
+            20.2865265046491,
+            6.887482952400454,
+            18.871417314108694
+          ]
+        },
+        {
+          "id": "Mercury_7235953",
+          "answer": 1,
+          "prediction": 1,
+          "normalized": 1,
+          "nll": [
+            23.737144670291627,
+            17.060688874781974,
+            31.523825669071062,
+            36.866794607614516
+          ]
+        },
+        {
+          "id": "Mercury_403974",
+          "answer": 3,
+          "prediction": 3,
+          "normalized": 3,
+          "nll": [
+            15.679654832836771,
+            18.100792093008817,
+            17.025321458424486,
+            10.713653747285417
+          ]
+        },
+        {
+          "id": "Mercury_7241063",
+          "answer": 2,
+          "prediction": 2,
+          "normalized": 1,
+          "nll": [
+            36.3738321729824,
+            29.23534197614893,
+            22.355089561445553,
+            36.04808283566535
+          ]
+        },
+        {
+          "id": "MCAS_2010_8_12015",
+          "answer": 1,
+          "prediction": 2,
+          "normalized": 2,
+          "nll": [
+            6.810558422832827,
+            6.557643994121889,
+            6.364328488140444,
+            8.87098513486896
+          ]
+        },
+        {
+          "id": "Mercury_7168350",
+          "answer": 0,
+          "prediction": 0,
+          "normalized": 0,
+          "nll": [
+            9.413335593539315,
+            18.99271290669608,
+            18.76244524319752,
+            18.48025778134449
+          ]
+        },
+        {
+          "id": "Mercury_182158",
+          "answer": 0,
+          "prediction": 0,
+          "normalized": 1,
+          "nll": [
+            13.799166139580173,
+            19.822960188727606,
+            29.291302467582994,
+            46.17501563762397
+          ]
+        },
+        {
+          "id": "Mercury_SC_402980",
+          "answer": 1,
+          "prediction": 0,
+          "normalized": 2,
+          "nll": [
+            33.54769534470452,
+            57.287642440519946,
+            45.5041888378765,
+            46.22367327519561
+          ]
+        },
+        {
+          "id": "Mercury_417126",
+          "answer": 3,
+          "prediction": 1,
+          "normalized": 1,
+          "nll": [
+            7.687383901184933,
+            7.670025121277707,
+            11.093958150452512,
+            8.404299031800168
+          ]
+        },
+        {
+          "id": "NYSEDREGENTS_2010_8_2",
+          "answer": 3,
+          "prediction": 3,
+          "normalized": 3,
+          "nll": [
+            11.100955751534144,
+            9.87655515923916,
+            11.626757338194238,
+            8.716474321480433
+          ]
+        },
+        {
+          "id": "NYSEDREGENTS_2010_8_13",
+          "answer": 1,
+          "prediction": 1,
+          "normalized": 1,
+          "nll": [
+            26.899399977228825,
+            5.814219635031407,
+            21.582264583609287,
+            23.89109412958402
+          ]
+        },
+        {
+          "id": "Mercury_7216668",
+          "answer": 2,
+          "prediction": 2,
+          "normalized": 2,
+          "nll": [
+            14.19639032479148,
+            14.682616406639625,
+            4.3763629734120855,
+            9.928187543114234
+          ]
+        },
+        {
+          "id": "MCAS_2001_5_19",
+          "answer": 2,
+          "prediction": 2,
+          "normalized": 2,
+          "nll": [
+            19.6961353829392,
+            18.574826962501408,
+            7.5732482549983935,
+            16.14534473941479
+          ]
+        },
+        {
+          "id": "Mercury_SC_413631",
+          "answer": 0,
+          "prediction": 0,
+          "normalized": 0,
+          "nll": [
+            28.97810244854036,
+            31.72841069649077,
+            50.59599022073489,
+            38.60516228223825
+          ]
+        }
+      ]
+    },
+    "B": {
+      "arcCount": 64,
+      "arcCorrect": 45,
+      "arcNormalizedCorrect": 44,
+      "tokens": 1870,
+      "meanNll": 6.493217929410332,
+      "perplexity": 660.6458581009115,
+      "arc": [
+        {
+          "id": "Mercury_417466",
+          "answer": 0,
+          "prediction": 0,
+          "normalized": 0,
+          "nll": [
+            27.13343063406639,
+            42.02011572361876,
+            37.31396319733651,
+            32.193936650940145
+          ]
+        },
+        {
+          "id": "Mercury_7081673",
+          "answer": 1,
+          "prediction": 1,
+          "normalized": 1,
+          "nll": [
+            23.44573300017491,
+            16.777912578866285,
+            32.097292928666434,
+            23.48611676392631
+          ]
+        },
+        {
+          "id": "MCAS_2005_5_10",
+          "answer": 1,
+          "prediction": 2,
+          "normalized": 2,
+          "nll": [
+            21.761816058797983,
+            23.290356826440746,
+            20.628062046850385,
+            33.14838735371879
+          ]
+        },
+        {
+          "id": "Mercury_7166145",
+          "answer": 1,
+          "prediction": 2,
+          "normalized": 2,
+          "nll": [
+            45.18866430650574,
+            56.845078088277205,
+            42.54486615899823,
+            53.41480385921746
+          ]
+        },
+        {
+          "id": "MSA_2013_5_6",
+          "answer": 1,
+          "prediction": 1,
+          "normalized": 1,
+          "nll": [
+            33.352189053268646,
+            7.095856655807712,
+            20.97227381584189,
+            20.008478153915622
+          ]
+        },
+        {
+          "id": "Mercury_SC_405199",
+          "answer": 1,
+          "prediction": 1,
+          "normalized": 1,
+          "nll": [
+            22.896661278535383,
+            16.851574324416113,
+            19.93833840798741,
+            17.373671659940534
+          ]
+        },
+        {
+          "id": "NYSEDREGENTS_2015_8_28",
+          "answer": 1,
+          "prediction": 1,
+          "normalized": 1,
+          "nll": [
+            15.439909823058123,
+            5.912070162413592,
+            8.6129692865591,
+            17.507053740141863
+          ]
+        },
+        {
+          "id": "Mercury_SC_401777",
+          "answer": 1,
+          "prediction": 1,
+          "normalized": 1,
+          "nll": [
+            21.007259199829743,
+            11.37687570831363,
+            15.9982002474982,
+            13.370311567993806
+          ]
+        },
+        {
+          "id": "Mercury_7198188",
+          "answer": 1,
+          "prediction": 1,
+          "normalized": 1,
+          "nll": [
+            36.787497938803206,
+            33.25313446078628,
+            45.063030235005,
+            56.208333679778306
+          ]
+        },
+        {
+          "id": "MCAS_1998_4_11",
+          "answer": 3,
+          "prediction": 3,
+          "normalized": 3,
+          "nll": [
+            33.26051820936914,
+            25.914767403862758,
+            46.8023818808551,
+            9.473717106395473
+          ]
+        },
+        {
+          "id": "Mercury_SC_LBS10784",
+          "answer": 1,
+          "prediction": 1,
+          "normalized": 3,
+          "nll": [
+            19.382548069402116,
+            8.390475963994401,
+            19.288043170345688,
+            19.390061665568812
+          ]
+        },
+        {
+          "id": "Mercury_7033548",
+          "answer": 3,
+          "prediction": 0,
+          "normalized": 3,
+          "nll": [
+            14.397166572927954,
+            18.81334160269154,
+            19.56890310538776,
+            15.688283400604728
+          ]
+        },
+        {
+          "id": "Mercury_7239733",
+          "answer": 3,
+          "prediction": 1,
+          "normalized": 1,
+          "nll": [
+            23.666805374419727,
+            23.3595540164252,
+            28.456087677479314,
+            34.45522662222686
+          ]
+        },
+        {
+          "id": "Mercury_7146195",
+          "answer": 3,
+          "prediction": 3,
+          "normalized": 3,
+          "nll": [
+            14.153555053455172,
+            19.62169472449924,
+            23.323215659861642,
+            11.377974615888231
+          ]
+        },
+        {
+          "id": "NCEOGA_2013_8_36",
+          "answer": 3,
+          "prediction": 3,
+          "normalized": 3,
+          "nll": [
+            28.103103697663123,
+            22.0513076487835,
+            22.8429016772564,
+            12.845811337595755
+          ]
+        },
+        {
+          "id": "Mercury_SC_415412",
+          "answer": 3,
+          "prediction": 0,
+          "normalized": 0,
+          "nll": [
+            30.82007168317541,
+            48.09701650801635,
+            50.96734452608291,
+            37.892879160545824
+          ]
+        },
+        {
+          "id": "Mercury_7126840",
+          "answer": 2,
+          "prediction": 0,
+          "normalized": 2,
+          "nll": [
+            11.453756202795361,
+            17.875634180050405,
+            11.661714972128085,
+            13.421195461890484
+          ]
+        },
+        {
+          "id": "Mercury_SC_408362",
+          "answer": 1,
+          "prediction": 1,
+          "normalized": 1,
+          "nll": [
+            20.405233333718076,
+            5.769291828285947,
+            37.21574833336527,
+            12.569065045875181
+          ]
+        },
+        {
+          "id": "MDSA_2008_8_35",
+          "answer": 2,
+          "prediction": 0,
+          "normalized": 0,
+          "nll": [
+            42.77386604225832,
+            53.64126946962065,
+            47.26897175507711,
+            67.21452550418137
+          ]
+        },
+        {
+          "id": "NYSEDREGENTS_2015_8_21",
+          "answer": 1,
+          "prediction": 3,
+          "normalized": 3,
+          "nll": [
+            24.50523316747305,
+            21.02366331301469,
+            32.3021009455666,
+            17.31261591523864
+          ]
+        },
+        {
+          "id": "VASoL_2008_5_12",
+          "answer": 1,
+          "prediction": 1,
+          "normalized": 1,
+          "nll": [
+            12.75398611289771,
+            4.60811208946021,
+            15.051555387800054,
+            18.51259206992896
+          ]
+        },
+        {
+          "id": "Mercury_SC_LBS10680",
+          "answer": 0,
+          "prediction": 0,
+          "normalized": 0,
+          "nll": [
+            36.45714354310468,
+            47.1038747034045,
+            37.502525184136346,
+            56.27003043433589
+          ]
+        },
+        {
+          "id": "MCAS_2003_5_3",
+          "answer": 1,
+          "prediction": 1,
+          "normalized": 2,
+          "nll": [
+            29.12127332907165,
+            19.78653394203628,
+            27.79185848581205,
+            27.324817766956933
+          ]
+        },
+        {
+          "id": "NYSEDREGENTS_2015_4_8",
+          "answer": 3,
+          "prediction": 3,
+          "normalized": 3,
+          "nll": [
+            22.14953155842297,
+            21.417055800824095,
+            15.423387721447874,
+            8.951879695324827
+          ]
+        },
+        {
+          "id": "VASoL_2010_5_18",
+          "answer": 0,
+          "prediction": 2,
+          "normalized": 2,
+          "nll": [
+            26.757482849105973,
+            17.062316781543586,
+            16.80265123577252,
+            29.41971897403606
+          ]
+        },
+        {
+          "id": "Mercury_7074900",
+          "answer": 2,
+          "prediction": 2,
+          "normalized": 2,
+          "nll": [
+            25.107275979635798,
+            19.615431763882363,
+            12.709929943049872,
+            22.472614938478436
+          ]
+        },
+        {
+          "id": "Mercury_SC_408762",
+          "answer": 0,
+          "prediction": 0,
+          "normalized": 0,
+          "nll": [
+            4.748983404150096,
+            19.574610547201917,
+            16.393163518088148,
+            12.568595723288343
+          ]
+        },
+        {
+          "id": "ACTAAP_2015_5_8",
+          "answer": 0,
+          "prediction": 0,
+          "normalized": 3,
+          "nll": [
+            44.135664570166966,
+            50.76159215950865,
+            63.41984280291028,
+            50.80678149623634
+          ]
+        },
+        {
+          "id": "Mercury_7263008",
+          "answer": 2,
+          "prediction": 2,
+          "normalized": 2,
+          "nll": [
+            41.29900978696186,
+            39.65392545407012,
+            21.947284589597437,
+            23.041692158875602
+          ]
+        },
+        {
+          "id": "MCAS_2000_4_29",
+          "answer": 0,
+          "prediction": 3,
+          "normalized": 3,
+          "nll": [
+            11.786992248514398,
+            15.694037046814124,
+            18.596753843199263,
+            11.482664975189323
+          ]
+        },
+        {
+          "id": "CSZ_2008_5_CSZ10233",
+          "answer": 3,
+          "prediction": 3,
+          "normalized": 3,
+          "nll": [
+            37.12614980810733,
+            37.59414571438309,
+            37.890988303230706,
+            8.838141967580967
+          ]
+        },
+        {
+          "id": "Mercury_7128660",
+          "answer": 2,
+          "prediction": 2,
+          "normalized": 2,
+          "nll": [
+            34.37887370848938,
+            53.2581011412629,
+            25.641634847751394,
+            34.88974339632463
+          ]
+        },
+        {
+          "id": "Mercury_7100520",
+          "answer": 2,
+          "prediction": 2,
+          "normalized": 3,
+          "nll": [
+            43.651246212097234,
+            42.17371502317001,
+            40.03492771567073,
+            42.18144847501508
+          ]
+        },
+        {
+          "id": "Mercury_7017728",
+          "answer": 1,
+          "prediction": 1,
+          "normalized": 1,
+          "nll": [
+            29.337821526909547,
+            22.39442306549992,
+            28.49080351738208,
+            41.0485042458923
+          ]
+        },
+        {
+          "id": "Mercury_7037258",
+          "answer": 1,
+          "prediction": 0,
+          "normalized": 3,
+          "nll": [
+            48.119099472146836,
+            51.44637510244326,
+            49.82795371164798,
+            50.17385653848278
+          ]
+        },
+        {
+          "id": "Mercury_7032865",
+          "answer": 0,
+          "prediction": 0,
+          "normalized": 0,
+          "nll": [
+            0.5543813646989726,
+            12.899371538909907,
+            8.370998561382589,
+            9.942668194753605
+          ]
+        },
+        {
+          "id": "Mercury_405057",
+          "answer": 1,
+          "prediction": 1,
+          "normalized": 1,
+          "nll": [
+            22.744463923135843,
+            14.707019808450784,
+            25.227951767603006,
+            23.685904982248392
+          ]
+        },
+        {
+          "id": "Mercury_7057593",
+          "answer": 0,
+          "prediction": 0,
+          "normalized": 0,
+          "nll": [
+            5.859619645927971,
+            16.832091836784905,
+            14.628084688042229,
+            13.19658425316674
+          ]
+        },
+        {
+          "id": "Mercury_SC_405231",
+          "answer": 2,
+          "prediction": 1,
+          "normalized": 1,
+          "nll": [
+            28.61746626276021,
+            19.28895699461683,
+            20.36473199570699,
+            41.091199138838036
+          ]
+        },
+        {
+          "id": "VASoL_2007_5_38",
+          "answer": 0,
+          "prediction": 1,
+          "normalized": 0,
+          "nll": [
+            39.17134704826981,
+            22.91686100467366,
+            38.224684465357896,
+            46.43280555127222
+          ]
+        },
+        {
+          "id": "Mercury_SC_410895",
+          "answer": 3,
+          "prediction": 3,
+          "normalized": 3,
+          "nll": [
+            37.859316590546115,
+            32.73977282025223,
+            53.209072536147104,
+            25.015288046050795
+          ]
+        },
+        {
+          "id": "Mercury_7015978",
+          "answer": 3,
+          "prediction": 3,
+          "normalized": 3,
+          "nll": [
+            18.79012828307938,
+            26.144707414048064,
+            15.423801247747317,
+            14.625318655992032
+          ]
+        },
+        {
+          "id": "ACTAAP_2010_5_5",
+          "answer": 2,
+          "prediction": 2,
+          "normalized": 2,
+          "nll": [
+            31.51402356119473,
+            48.97307428870475,
+            23.445606203005024,
+            41.695126550808084
+          ]
+        },
+        {
+          "id": "Mercury_7080955",
+          "answer": 3,
+          "prediction": 3,
+          "normalized": 3,
+          "nll": [
+            21.950915510337786,
+            25.718078818491755,
+            23.88454088613788,
+            18.0567408248423
+          ]
+        },
+        {
+          "id": "ACTAAP_2009_5_4",
+          "answer": 3,
+          "prediction": 0,
+          "normalized": 3,
+          "nll": [
+            8.840698900527318,
+            11.417437258071264,
+            14.130839960129048,
+            15.379806037239742
+          ]
+        },
+        {
+          "id": "CSZ20679",
+          "answer": 2,
+          "prediction": 2,
+          "normalized": 2,
+          "nll": [
+            13.050614350701178,
+            10.408399032099162,
+            9.21306627102662,
+            9.83390714139215
+          ]
+        },
+        {
+          "id": "Mercury_7017010",
+          "answer": 0,
+          "prediction": 1,
+          "normalized": 0,
+          "nll": [
+            37.044294720415515,
+            24.537722411082257,
+            31.347014730117987,
+            32.993202025990854
+          ]
+        },
+        {
+          "id": "Mercury_7146108",
+          "answer": 1,
+          "prediction": 0,
+          "normalized": 3,
+          "nll": [
+            26.5800009197013,
+            33.268536157300225,
+            49.94532297070255,
+            41.30445060808451
+          ]
+        },
+        {
+          "id": "NYSEDREGENTS_2012_4_12",
+          "answer": 2,
+          "prediction": 2,
+          "normalized": 2,
+          "nll": [
+            26.500462804163444,
+            15.95627217384671,
+            8.17269234749173,
+            29.252300072635162
+          ]
+        },
+        {
+          "id": "VASoL_2009_5_3",
+          "answer": 0,
+          "prediction": 0,
+          "normalized": 0,
+          "nll": [
+            17.459908990844962,
+            28.185447905383906,
+            17.962798264686523,
+            25.553629317693282
+          ]
+        },
+        {
+          "id": "Mercury_SC_401253",
+          "answer": 2,
+          "prediction": 2,
+          "normalized": 2,
+          "nll": [
+            22.430357257373092,
+            19.70688336909513,
+            7.1146917847502245,
+            17.604983487560606
+          ]
+        },
+        {
+          "id": "Mercury_7235953",
+          "answer": 1,
+          "prediction": 1,
+          "normalized": 1,
+          "nll": [
+            24.876888413574555,
+            17.92849682690691,
+            29.96174872770836,
+            38.56305295820469
+          ]
+        },
+        {
+          "id": "Mercury_403974",
+          "answer": 3,
+          "prediction": 3,
+          "normalized": 3,
+          "nll": [
+            18.20315185227997,
+            19.170647825814065,
+            18.058753408492432,
+            10.596484551478852
+          ]
+        },
+        {
+          "id": "Mercury_7241063",
+          "answer": 2,
+          "prediction": 2,
+          "normalized": 1,
+          "nll": [
+            37.3454830049067,
+            29.19792214319139,
+            21.99106803278141,
+            36.51614642926258
+          ]
+        },
+        {
+          "id": "MCAS_2010_8_12015",
+          "answer": 1,
+          "prediction": 2,
+          "normalized": 2,
+          "nll": [
+            7.467568142613654,
+            7.4177405669300605,
+            6.878805859288459,
+            9.660929424962287
+          ]
+        },
+        {
+          "id": "Mercury_7168350",
+          "answer": 0,
+          "prediction": 0,
+          "normalized": 0,
+          "nll": [
+            9.073822932063848,
+            20.78350623559982,
+            16.929605440913946,
+            17.864196734248907
+          ]
+        },
+        {
+          "id": "Mercury_182158",
+          "answer": 0,
+          "prediction": 0,
+          "normalized": 1,
+          "nll": [
+            13.9783920315338,
+            19.477923634406306,
+            29.242466793204567,
+            46.5411340184037
+          ]
+        },
+        {
+          "id": "Mercury_SC_402980",
+          "answer": 1,
+          "prediction": 0,
+          "normalized": 2,
+          "nll": [
+            32.05468825001554,
+            56.56866457687326,
+            41.10289317541183,
+            41.529254755884395
+          ]
+        },
+        {
+          "id": "Mercury_417126",
+          "answer": 3,
+          "prediction": 1,
+          "normalized": 1,
+          "nll": [
+            8.281505208006404,
+            7.011727910032771,
+            10.953281025877498,
+            7.412501912107967
+          ]
+        },
+        {
+          "id": "NYSEDREGENTS_2010_8_2",
+          "answer": 3,
+          "prediction": 3,
+          "normalized": 3,
+          "nll": [
+            11.71041139776662,
+            9.749669447147216,
+            12.586369886600341,
+            8.97949442083791
+          ]
+        },
+        {
+          "id": "NYSEDREGENTS_2010_8_13",
+          "answer": 1,
+          "prediction": 1,
+          "normalized": 1,
+          "nll": [
+            27.640581151967442,
+            6.486110782747662,
+            21.694338894014752,
+            23.662417030458844
+          ]
+        },
+        {
+          "id": "Mercury_7216668",
+          "answer": 2,
+          "prediction": 2,
+          "normalized": 2,
+          "nll": [
+            14.427390457876871,
+            14.48390138316984,
+            4.323069931753825,
+            10.938529373892496
+          ]
+        },
+        {
+          "id": "MCAS_2001_5_19",
+          "answer": 2,
+          "prediction": 2,
+          "normalized": 2,
+          "nll": [
+            19.696136497762623,
+            18.574828131822372,
+            7.455032912961574,
+            16.14534107331759
+          ]
+        },
+        {
+          "id": "Mercury_SC_413631",
+          "answer": 0,
+          "prediction": 0,
+          "normalized": 0,
+          "nll": [
+            27.488163495357313,
+            32.904945385607526,
+            48.386527778209626,
+            38.684462522650804
+          ]
+        }
+      ]
+    },
+    "changedPredictions": 3,
+    "source": "outputs/bench/karume/2026-09-13_rms-subgroup-quality-9lvtm0cg",
+    "suiteSha256": "ec403b3a5f993f68cd361fb5f3c94ac9c2109cd4c1671c233f4bd5d64c84de44"
+  },
+  "micro": {
+    "geometry": {
+      "source": "outputs/bench/karume/2026-09-13_rms-geometry-micro-s09nizj5/results.json",
+      "sha256": "93d6df83e2b2180be6ca498501ea09ee6b3aa407ca44cb84378842efe1556ef9",
+      "environment": {
+        "deno": "2.9.6",
+        "v8": "15.0.245.2-rusty",
+        "typescript": "6.0.3"
+      },
+      "checks": {
+        "wg128": {
+          "checks": 90,
+          "elements": 3786240,
+          "different": 0,
+          "nanDifferent": 0,
+          "maxAbs": 0,
+          "maxRel": 0
+        },
+        "wg64": {
+          "checks": 90,
+          "elements": 3786240,
+          "different": 0,
+          "nanDifferent": 0,
+          "maxAbs": 0,
+          "maxRel": 0
+        },
+        "const256": {
+          "checks": 90,
+          "elements": 3786240,
+          "different": 0,
+          "nanDifferent": 0,
+          "maxAbs": 0,
+          "maxRel": 0
+        },
+        "const128": {
+          "checks": 90,
+          "elements": 3786240,
+          "different": 0,
+          "nanDifferent": 0,
+          "maxAbs": 0,
+          "maxRel": 0
+        }
+      },
+      "timings": [
+        {
+          "model": "normal-e2b",
+          "dim": 256,
+          "rows": 1,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.00310048,
+              "speedup": 1
+            },
+            "wg128": {
+              "medianMs": 0.0033030399999999997,
+              "speedup": 0.9386746754504942
+            },
+            "wg64": {
+              "medianMs": 0.00415968,
+              "speedup": 0.7453650280790831
+            },
+            "const256": {
+              "medianMs": 0.0030214400000000002,
+              "speedup": 1.0261597119254395
+            },
+            "const128": {
+              "medianMs": 0.0040377600000000005,
+              "speedup": 0.7678712949754318
+            }
+          }
+        },
+        {
+          "model": "normal-e2b",
+          "dim": 256,
+          "rows": 8,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.00311968,
+              "speedup": 1
+            },
+            "wg128": {
+              "medianMs": 0.00343808,
+              "speedup": 0.9073901712583768
+            },
+            "wg64": {
+              "medianMs": 0.00428352,
+              "speedup": 0.7282982220230092
+            },
+            "const256": {
+              "medianMs": 0.00481024,
+              "speedup": 0.6485497605109101
+            },
+            "const128": {
+              "medianMs": 0.0033718399999999996,
+              "speedup": 0.9252159058555567
+            }
+          }
+        },
+        {
+          "model": "normal-e2b",
+          "dim": 256,
+          "rows": 32,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.0033046399999999997,
+              "speedup": 1
+            },
+            "wg128": {
+              "medianMs": 0.00524864,
+              "speedup": 0.6296183392269236
+            },
+            "wg64": {
+              "medianMs": 0.004272000000000001,
+              "speedup": 0.7735580524344567
+            },
+            "const256": {
+              "medianMs": 0.00329696,
+              "speedup": 1.002329418615937
+            },
+            "const128": {
+              "medianMs": 0.0034483200000000004,
+              "speedup": 0.9583333333333331
+            }
+          }
+        },
+        {
+          "model": "normal-e2b",
+          "dim": 256,
+          "rows": 40,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.00341024,
+              "speedup": 1
+            },
+            "wg128": {
+              "medianMs": 0.0052793599999999994,
+              "speedup": 0.6459570857073585
+            },
+            "wg64": {
+              "medianMs": 0.00427424,
+              "speedup": 0.7978588006288837
+            },
+            "const256": {
+              "medianMs": 0.00336896,
+              "speedup": 1.012253039513678
+            },
+            "const128": {
+              "medianMs": 0.00349088,
+              "speedup": 0.9768998074983959
+            }
+          }
+        },
+        {
+          "model": "normal-e2b",
+          "dim": 256,
+          "rows": 64,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.00368704,
+              "speedup": 1
+            },
+            "wg128": {
+              "medianMs": 0.0036646400000000003,
+              "speedup": 1.0061124694376526
+            },
+            "wg64": {
+              "medianMs": 0.0051008,
+              "speedup": 0.7228356336260978
+            },
+            "const256": {
+              "medianMs": 0.00357184,
+              "speedup": 1.0322522845368214
+            },
+            "const128": {
+              "medianMs": 0.00364352,
+              "speedup": 1.011944493237309
+            }
+          }
+        },
+        {
+          "model": "normal-e2b",
+          "dim": 1536,
+          "rows": 1,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.0055152000000000005,
+              "speedup": 1
+            },
+            "wg128": {
+              "medianMs": 0.0080736,
+              "speedup": 0.683115338882283
+            },
+            "wg64": {
+              "medianMs": 0.013755839999999998,
+              "speedup": 0.4009351664456697
+            },
+            "const256": {
+              "medianMs": 0.005522559999999999,
+              "speedup": 0.9986672847375132
+            },
+            "const128": {
+              "medianMs": 0.00807232,
+              "speedup": 0.6832236581305005
+            }
+          }
+        },
+        {
+          "model": "normal-e2b",
+          "dim": 1536,
+          "rows": 8,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.00537888,
+              "speedup": 1
+            },
+            "wg128": {
+              "medianMs": 0.009309119999999999,
+              "speedup": 0.5778075693513458
+            },
+            "wg64": {
+              "medianMs": 0.014296640000000001,
+              "speedup": 0.37623385634666606
+            },
+            "const256": {
+              "medianMs": 0.0056704,
+              "speedup": 0.948589164785553
+            },
+            "const128": {
+              "medianMs": 0.00803264,
+              "speedup": 0.6696279180941757
+            }
+          }
+        },
+        {
+          "model": "normal-e2b",
+          "dim": 1536,
+          "rows": 32,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.0055033600000000005,
+              "speedup": 1
+            },
+            "wg128": {
+              "medianMs": 0.01128032,
+              "speedup": 0.48787268446285215
+            },
+            "wg64": {
+              "medianMs": 0.01352832,
+              "speedup": 0.40680291418298803
+            },
+            "const256": {
+              "medianMs": 0.0060048,
+              "speedup": 0.9164934718891554
+            },
+            "const128": {
+              "medianMs": 0.00797408,
+              "speedup": 0.6901561057827361
+            }
+          }
+        },
+        {
+          "model": "normal-e2b",
+          "dim": 1536,
+          "rows": 40,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.00563104,
+              "speedup": 1
+            },
+            "wg128": {
+              "medianMs": 0.00799744,
+              "speedup": 0.7041053137003842
+            },
+            "wg64": {
+              "medianMs": 0.01381696,
+              "speedup": 0.407545509287137
+            },
+            "const256": {
+              "medianMs": 0.00561344,
+              "speedup": 1.0031353323452288
+            },
+            "const128": {
+              "medianMs": 0.00808992,
+              "speedup": 0.6960563268858035
+            }
+          }
+        },
+        {
+          "model": "normal-e2b",
+          "dim": 1536,
+          "rows": 64,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.00627104,
+              "speedup": 1
+            },
+            "wg128": {
+              "medianMs": 0.00849152,
+              "speedup": 0.7385061802833885
+            },
+            "wg64": {
+              "medianMs": 0.013706240000000001,
+              "speedup": 0.45753175196115053
+            },
+            "const256": {
+              "medianMs": 0.006898560000000001,
+              "speedup": 0.9090360886909732
+            },
+            "const128": {
+              "medianMs": 0.00833792,
+              "speedup": 0.7521108381946576
+            }
+          }
+        },
+        {
+          "model": "qat-e4b",
+          "dim": 2560,
+          "rows": 1,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.00725408,
+              "speedup": 1
+            },
+            "wg128": {
+              "medianMs": 0.0162912,
+              "speedup": 0.44527597721469264
+            },
+            "wg64": {
+              "medianMs": 0.0207904,
+              "speedup": 0.3489148837925196
+            },
+            "const256": {
+              "medianMs": 0.01060736,
+              "speedup": 0.6838723301556655
+            },
+            "const128": {
+              "medianMs": 0.011422719999999999,
+              "speedup": 0.6350571492604214
+            }
+          }
+        },
+        {
+          "model": "qat-e4b",
+          "dim": 2560,
+          "rows": 8,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.00735424,
+              "speedup": 1
+            },
+            "wg128": {
+              "medianMs": 0.011673919999999999,
+              "speedup": 0.6299717661248321
+            },
+            "wg64": {
+              "medianMs": 0.02076576,
+              "speedup": 0.3541522198079916
+            },
+            "const256": {
+              "medianMs": 0.00743296,
+              "speedup": 0.9894093335629413
+            },
+            "const128": {
+              "medianMs": 0.011800960000000001,
+              "speedup": 0.6231899777645208
+            }
+          }
+        },
+        {
+          "model": "qat-e4b",
+          "dim": 2560,
+          "rows": 32,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.0074016,
+              "speedup": 1
+            },
+            "wg128": {
+              "medianMs": 0.011712,
+              "speedup": 0.6319672131147541
+            },
+            "wg64": {
+              "medianMs": 0.020745279999999998,
+              "speedup": 0.3567847722469883
+            },
+            "const256": {
+              "medianMs": 0.00772768,
+              "speedup": 0.9578036357613152
+            },
+            "const128": {
+              "medianMs": 0.011828479999999999,
+              "speedup": 0.6257439671031274
+            }
+          }
+        },
+        {
+          "model": "qat-e4b",
+          "dim": 2560,
+          "rows": 40,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.0075152,
+              "speedup": 1
+            },
+            "wg128": {
+              "medianMs": 0.011690560000000001,
+              "speedup": 0.6428434566008813
+            },
+            "wg64": {
+              "medianMs": 0.023820800000000003,
+              "speedup": 0.3154889844169801
+            },
+            "const256": {
+              "medianMs": 0.0081792,
+              "speedup": 0.9188184663536777
+            },
+            "const128": {
+              "medianMs": 0.01169568,
+              "speedup": 0.6425620400010944
+            }
+          }
+        },
+        {
+          "model": "qat-e4b",
+          "dim": 2560,
+          "rows": 64,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.00868512,
+              "speedup": 1
+            },
+            "wg128": {
+              "medianMs": 0.01186944,
+              "speedup": 0.7317211258492397
+            },
+            "wg64": {
+              "medianMs": 0.02092992,
+              "speedup": 0.4149619300981561
+            },
+            "const256": {
+              "medianMs": 0.00760544,
+              "speedup": 1.141961543316363
+            },
+            "const128": {
+              "medianMs": 0.011863680000000001,
+              "speedup": 0.7320763877650104
+            }
+          }
+        }
+      ],
+      "sampleStatistic": "upper middle of six sorted measurements, as recorded by the micro harness"
+    },
+    "vector": {
+      "source": "outputs/bench/karume/2026-09-13_rms-vector-micro-tfexh8z3/results.json",
+      "sha256": "e7997ea5e333bdb8d3549d69a8bc43e43d61fa67b6b9067f90df173306dffa87",
+      "environment": {
+        "deno": "2.9.6",
+        "v8": "15.0.245.2-rusty",
+        "typescript": "6.0.3"
+      },
+      "checks": {
+        "vec2": {
+          "checks": 90,
+          "elements": 3786240,
+          "different": 0,
+          "nanDifferent": 0,
+          "maxAbs": 0,
+          "maxRel": 0
+        },
+        "vec4": {
+          "checks": 90,
+          "elements": 3786240,
+          "different": 0,
+          "nanDifferent": 0,
+          "maxAbs": 0,
+          "maxRel": 0
+        },
+        "constVec2": {
+          "checks": 90,
+          "elements": 3786240,
+          "different": 0,
+          "nanDifferent": 0,
+          "maxAbs": 0,
+          "maxRel": 0
+        },
+        "constVec4": {
+          "checks": 90,
+          "elements": 3786240,
+          "different": 0,
+          "nanDifferent": 0,
+          "maxAbs": 0,
+          "maxRel": 0
+        }
+      },
+      "timings": [
+        {
+          "model": "normal-e2b",
+          "dim": 256,
+          "rows": 1,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.00309856,
+              "speedup": 1
+            },
+            "vec2": {
+              "medianMs": 0.0029024,
+              "speedup": 1.0675854465270123
+            },
+            "vec4": {
+              "medianMs": 0.0034492800000000003,
+              "speedup": 0.8983208089804249
+            },
+            "constVec2": {
+              "medianMs": 0.00289664,
+              "speedup": 1.0697083517454709
+            },
+            "constVec4": {
+              "medianMs": 0.00292544,
+              "speedup": 1.0591774228833954
+            }
+          }
+        },
+        {
+          "model": "normal-e2b",
+          "dim": 256,
+          "rows": 8,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.0031584,
+              "speedup": 1
+            },
+            "vec2": {
+              "medianMs": 0.00296608,
+              "speedup": 1.0648397885424534
+            },
+            "vec4": {
+              "medianMs": 0.00297568,
+              "speedup": 1.0614044520916228
+            },
+            "constVec2": {
+              "medianMs": 0.0029628799999999998,
+              "speedup": 1.0659898477157361
+            },
+            "constVec4": {
+              "medianMs": 0.0033798400000000003,
+              "speedup": 0.9344821056618065
+            }
+          }
+        },
+        {
+          "model": "normal-e2b",
+          "dim": 256,
+          "rows": 32,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.00340736,
+              "speedup": 1
+            },
+            "vec2": {
+              "medianMs": 0.00314176,
+              "speedup": 1.084538602566714
+            },
+            "vec4": {
+              "medianMs": 0.00339264,
+              "speedup": 1.0043388039992454
+            },
+            "constVec2": {
+              "medianMs": 0.00314176,
+              "speedup": 1.084538602566714
+            },
+            "constVec4": {
+              "medianMs": 0.00308992,
+              "speedup": 1.1027340513670256
+            }
+          }
+        },
+        {
+          "model": "normal-e2b",
+          "dim": 256,
+          "rows": 40,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.00338432,
+              "speedup": 1
+            },
+            "vec2": {
+              "medianMs": 0.00317568,
+              "speedup": 1.0656993147924223
+            },
+            "vec4": {
+              "medianMs": 0.0049356800000000004,
+              "speedup": 0.6856846473029046
+            },
+            "constVec2": {
+              "medianMs": 0.0031708799999999996,
+              "speedup": 1.0673125441517815
+            },
+            "constVec4": {
+              "medianMs": 0.00316512,
+              "speedup": 1.0692548781720757
+            }
+          }
+        },
+        {
+          "model": "normal-e2b",
+          "dim": 256,
+          "rows": 64,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.00364416,
+              "speedup": 1
+            },
+            "vec2": {
+              "medianMs": 0.00337856,
+              "speedup": 1.0786133737450274
+            },
+            "vec4": {
+              "medianMs": 0.0051168,
+              "speedup": 0.7121951219512195
+            },
+            "constVec2": {
+              "medianMs": 0.00338144,
+              "speedup": 1.0776947099460585
+            },
+            "constVec4": {
+              "medianMs": 0.0034262399999999997,
+              "speedup": 1.063603250210143
+            }
+          }
+        },
+        {
+          "model": "normal-e2b",
+          "dim": 1536,
+          "rows": 1,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.0055184,
+              "speedup": 1
+            },
+            "vec2": {
+              "medianMs": 0.00532992,
+              "speedup": 1.035362632084534
+            },
+            "vec4": {
+              "medianMs": 0.0056128,
+              "speedup": 0.9831812998859748
+            },
+            "constVec2": {
+              "medianMs": 0.0053747199999999995,
+              "speedup": 1.0267325553703264
+            },
+            "constVec4": {
+              "medianMs": 0.0055820800000000005,
+              "speedup": 0.9885920660398989
+            }
+          }
+        },
+        {
+          "model": "normal-e2b",
+          "dim": 1536,
+          "rows": 8,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.005499840000000001,
+              "speedup": 1
+            },
+            "vec2": {
+              "medianMs": 0.00536512,
+              "speedup": 1.0251103423595374
+            },
+            "vec4": {
+              "medianMs": 0.00684768,
+              "speedup": 0.8031683723538484
+            },
+            "constVec2": {
+              "medianMs": 0.005422400000000001,
+              "speedup": 1.0142814989672468
+            },
+            "constVec4": {
+              "medianMs": 0.00552064,
+              "speedup": 0.9962323208903316
+            }
+          }
+        },
+        {
+          "model": "normal-e2b",
+          "dim": 1536,
+          "rows": 32,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.00568448,
+              "speedup": 1
+            },
+            "vec2": {
+              "medianMs": 0.00601088,
+              "speedup": 0.9456984667802385
+            },
+            "vec4": {
+              "medianMs": 0.0064288,
+              "speedup": 0.8842210054753608
+            },
+            "constVec2": {
+              "medianMs": 0.00554848,
+              "speedup": 1.024511217486591
+            },
+            "constVec4": {
+              "medianMs": 0.00569568,
+              "speedup": 0.9980335973931119
+            }
+          }
+        },
+        {
+          "model": "normal-e2b",
+          "dim": 1536,
+          "rows": 40,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.00566176,
+              "speedup": 1
+            },
+            "vec2": {
+              "medianMs": 0.00553408,
+              "speedup": 1.02307158552099
+            },
+            "vec4": {
+              "medianMs": 0.0058035199999999995,
+              "speedup": 0.9755734450816057
+            },
+            "constVec2": {
+              "medianMs": 0.0055264,
+              "speedup": 1.0244933410538506
+            },
+            "constVec4": {
+              "medianMs": 0.00672608,
+              "speedup": 0.8417622151386841
+            }
+          }
+        },
+        {
+          "model": "normal-e2b",
+          "dim": 1536,
+          "rows": 64,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.0072873600000000005,
+              "speedup": 1
+            },
+            "vec2": {
+              "medianMs": 0.00626144,
+              "speedup": 1.1638472939132214
+            },
+            "vec4": {
+              "medianMs": 0.0063459200000000006,
+              "speedup": 1.148353587817054
+            },
+            "constVec2": {
+              "medianMs": 0.00632128,
+              "speedup": 1.1528298066214437
+            },
+            "constVec4": {
+              "medianMs": 0.0063158400000000005,
+              "speedup": 1.1538227694178447
+            }
+          }
+        },
+        {
+          "model": "qat-e4b",
+          "dim": 2560,
+          "rows": 1,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.00740672,
+              "speedup": 1
+            },
+            "vec2": {
+              "medianMs": 0.00735552,
+              "speedup": 1.0069607587227007
+            },
+            "vec4": {
+              "medianMs": 0.007725760000000001,
+              "speedup": 0.9587043863645777
+            },
+            "constVec2": {
+              "medianMs": 0.007417280000000001,
+              "speedup": 0.9985762975106777
+            },
+            "constVec4": {
+              "medianMs": 0.00786528,
+              "speedup": 0.941698197648399
+            }
+          }
+        },
+        {
+          "model": "qat-e4b",
+          "dim": 2560,
+          "rows": 8,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.00734688,
+              "speedup": 1
+            },
+            "vec2": {
+              "medianMs": 0.007369919999999999,
+              "speedup": 0.9968737788198516
+            },
+            "vec4": {
+              "medianMs": 0.00773216,
+              "speedup": 0.9501717501965815
+            },
+            "constVec2": {
+              "medianMs": 0.007440639999999999,
+              "speedup": 0.9873989334250818
+            },
+            "constVec4": {
+              "medianMs": 0.007695039999999999,
+              "speedup": 0.9547552709277666
+            }
+          }
+        },
+        {
+          "model": "qat-e4b",
+          "dim": 2560,
+          "rows": 32,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.00754976,
+              "speedup": 1
+            },
+            "vec2": {
+              "medianMs": 0.00749888,
+              "speedup": 1.006785013228642
+            },
+            "vec4": {
+              "medianMs": 0.007834879999999999,
+              "speedup": 0.9636088874366935
+            },
+            "constVec2": {
+              "medianMs": 0.007400640000000001,
+              "speedup": 1.0201496086824922
+            },
+            "constVec4": {
+              "medianMs": 0.007546880000000001,
+              "speedup": 1.0003816146540025
+            }
+          }
+        },
+        {
+          "model": "qat-e4b",
+          "dim": 2560,
+          "rows": 40,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.0076608,
+              "speedup": 1
+            },
+            "vec2": {
+              "medianMs": 0.0074464,
+              "speedup": 1.0287924366136656
+            },
+            "vec4": {
+              "medianMs": 0.008104,
+              "speedup": 0.9453109575518263
+            },
+            "constVec2": {
+              "medianMs": 0.0085376,
+              "speedup": 0.8973013493253373
+            },
+            "constVec4": {
+              "medianMs": 0.0077046400000000004,
+              "speedup": 0.9943099223325165
+            }
+          }
+        },
+        {
+          "model": "qat-e4b",
+          "dim": 2560,
+          "rows": 64,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.007696,
+              "speedup": 1
+            },
+            "vec2": {
+              "medianMs": 0.0076527999999999995,
+              "speedup": 1.005644992682417
+            },
+            "vec4": {
+              "medianMs": 0.00790656,
+              "speedup": 0.9733689493281528
+            },
+            "constVec2": {
+              "medianMs": 0.00779424,
+              "speedup": 0.9873958205033461
+            },
+            "constVec4": {
+              "medianMs": 0.00803456,
+              "speedup": 0.9578620360044607
+            }
+          }
+        }
+      ],
+      "sampleStatistic": "upper middle of six sorted measurements, as recorded by the micro harness"
+    },
+    "tree": {
+      "source": "outputs/bench/karume/2026-09-13_rms-subgroup-browser-vp1vkjzz/results.json",
+      "sha256": "a9b2e0b90354bc01a6c4e7c8aec37dd4560536e0778210ca8a01aaf0d2be6055",
+      "environment": {
+        "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/153.0.0.0 Safari/537.36",
+        "adapter": {},
+        "features": [
+          "core-features-and-limits",
+          "timestamp-query",
+          "subgroups"
+        ],
+        "subgroupSizes": [
+          32
+        ]
+      },
+      "checks": {
+        "vec2": {
+          "checks": 90,
+          "elements": 3786240,
+          "different": 0,
+          "nanDifferent": 0,
+          "maxAbs": 0,
+          "maxRel": 0
+        },
+        "vec4": {
+          "checks": 90,
+          "elements": 3786240,
+          "different": 0,
+          "nanDifferent": 0,
+          "maxAbs": 0,
+          "maxRel": 0
+        },
+        "subgroup1": {
+          "checks": 90,
+          "elements": 3786240,
+          "different": 0,
+          "nanDifferent": 0,
+          "maxAbs": 0,
+          "maxRel": 0
+        },
+        "subgroup2": {
+          "checks": 90,
+          "elements": 3786240,
+          "different": 0,
+          "nanDifferent": 0,
+          "maxAbs": 0,
+          "maxRel": 0
+        },
+        "subgroup4": {
+          "checks": 90,
+          "elements": 3786240,
+          "different": 0,
+          "nanDifferent": 0,
+          "maxAbs": 0,
+          "maxRel": 0
+        }
+      },
+      "timings": [
+        {
+          "model": "normal-e2b",
+          "dim": 256,
+          "rows": 1,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.00347136,
+              "speedup": 1
+            },
+            "vec2": {
+              "medianMs": 0.0032563199999999996,
+              "speedup": 1.0660377358490567
+            },
+            "vec4": {
+              "medianMs": 0.00329728,
+              "speedup": 1.0527950310559007
+            },
+            "subgroup1": {
+              "medianMs": 0.0031641599999999996,
+              "speedup": 1.0970873786407769
+            },
+            "subgroup2": {
+              "medianMs": 0.00305152,
+              "speedup": 1.1375838926174497
+            },
+            "subgroup4": {
+              "medianMs": 0.0029696,
+              "speedup": 1.1689655172413793
+            }
+          }
+        },
+        {
+          "model": "normal-e2b",
+          "dim": 256,
+          "rows": 8,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.0035020800000000003,
+              "speedup": 1
+            },
+            "vec2": {
+              "medianMs": 0.00329728,
+              "speedup": 1.0621118012422361
+            },
+            "vec4": {
+              "medianMs": 0.003328,
+              "speedup": 1.0523076923076924
+            },
+            "subgroup1": {
+              "medianMs": 0.0032256000000000003,
+              "speedup": 1.0857142857142856
+            },
+            "subgroup2": {
+              "medianMs": 0.00311296,
+              "speedup": 1.125
+            },
+            "subgroup4": {
+              "medianMs": 0.0030719999999999996,
+              "speedup": 1.1400000000000001
+            }
+          }
+        },
+        {
+          "model": "normal-e2b",
+          "dim": 256,
+          "rows": 32,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.0037785600000000003,
+              "speedup": 1
+            },
+            "vec2": {
+              "medianMs": 0.0035737600000000005,
+              "speedup": 1.0573065902578795
+            },
+            "vec4": {
+              "medianMs": 0.0036352,
+              "speedup": 1.03943661971831
+            },
+            "subgroup1": {
+              "medianMs": 0.0035328,
+              "speedup": 1.0695652173913044
+            },
+            "subgroup2": {
+              "medianMs": 0.00338944,
+              "speedup": 1.1148036253776437
+            },
+            "subgroup4": {
+              "medianMs": 0.00330752,
+              "speedup": 1.1424148606811146
+            }
+          }
+        },
+        {
+          "model": "normal-e2b",
+          "dim": 256,
+          "rows": 40,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.0038912,
+              "speedup": 1
+            },
+            "vec2": {
+              "medianMs": 0.0036864000000000003,
+              "speedup": 1.0555555555555556
+            },
+            "vec4": {
+              "medianMs": 0.00371712,
+              "speedup": 1.046831955922865
+            },
+            "subgroup1": {
+              "medianMs": 0.0036352,
+              "speedup": 1.0704225352112677
+            },
+            "subgroup2": {
+              "medianMs": 0.0035123199999999998,
+              "speedup": 1.1078717201166182
+            },
+            "subgroup4": {
+              "medianMs": 0.00346112,
+              "speedup": 1.1242603550295858
+            }
+          }
+        },
+        {
+          "model": "normal-e2b",
+          "dim": 256,
+          "rows": 64,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.004280320000000001,
+              "speedup": 1
+            },
+            "vec2": {
+              "medianMs": 0.00401408,
+              "speedup": 1.0663265306122451
+            },
+            "vec4": {
+              "medianMs": 0.0040448,
+              "speedup": 1.058227848101266
+            },
+            "subgroup1": {
+              "medianMs": 0.00395264,
+              "speedup": 1.0829015544041452
+            },
+            "subgroup2": {
+              "medianMs": 0.00384,
+              "speedup": 1.114666666666667
+            },
+            "subgroup4": {
+              "medianMs": 0.0037580799999999996,
+              "speedup": 1.1389645776566761
+            }
+          }
+        },
+        {
+          "model": "normal-e2b",
+          "dim": 1536,
+          "rows": 1,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.00596992,
+              "speedup": 1
+            },
+            "vec2": {
+              "medianMs": 0.00586752,
+              "speedup": 1.0174520069808028
+            },
+            "vec4": {
+              "medianMs": 0.00603136,
+              "speedup": 0.9898132427843802
+            },
+            "subgroup1": {
+              "medianMs": 0.00574464,
+              "speedup": 1.0392156862745099
+            },
+            "subgroup2": {
+              "medianMs": 0.00574464,
+              "speedup": 1.0392156862745099
+            },
+            "subgroup4": {
+              "medianMs": 0.00574464,
+              "speedup": 1.0392156862745099
+            }
+          }
+        },
+        {
+          "model": "normal-e2b",
+          "dim": 1536,
+          "rows": 8,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.00603136,
+              "speedup": 1
+            },
+            "vec2": {
+              "medianMs": 0.0059392,
+              "speedup": 1.0155172413793103
+            },
+            "vec4": {
+              "medianMs": 0.00608256,
+              "speedup": 0.9915824915824917
+            },
+            "subgroup1": {
+              "medianMs": 0.00580608,
+              "speedup": 1.0388007054673722
+            },
+            "subgroup2": {
+              "medianMs": 0.00580608,
+              "speedup": 1.0388007054673722
+            },
+            "subgroup4": {
+              "medianMs": 0.00585728,
+              "speedup": 1.0297202797202798
+            }
+          }
+        },
+        {
+          "model": "normal-e2b",
+          "dim": 1536,
+          "rows": 32,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.00620544,
+              "speedup": 1
+            },
+            "vec2": {
+              "medianMs": 0.006092800000000001,
+              "speedup": 1.018487394957983
+            },
+            "vec4": {
+              "medianMs": 0.00625664,
+              "speedup": 0.9918166939443535
+            },
+            "subgroup1": {
+              "medianMs": 0.00598016,
+              "speedup": 1.0376712328767124
+            },
+            "subgroup2": {
+              "medianMs": 0.00591872,
+              "speedup": 1.0484429065743945
+            },
+            "subgroup4": {
+              "medianMs": 0.00595968,
+              "speedup": 1.0412371134020617
+            }
+          }
+        },
+        {
+          "model": "normal-e2b",
+          "dim": 1536,
+          "rows": 40,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.00631808,
+              "speedup": 1
+            },
+            "vec2": {
+              "medianMs": 0.00621568,
+              "speedup": 1.016474464579901
+            },
+            "vec4": {
+              "medianMs": 0.00635904,
+              "speedup": 0.9935587761674719
+            },
+            "subgroup1": {
+              "medianMs": 0.00608256,
+              "speedup": 1.0387205387205387
+            },
+            "subgroup2": {
+              "medianMs": 0.00603136,
+              "speedup": 1.0475382003395586
+            },
+            "subgroup4": {
+              "medianMs": 0.00607232,
+              "speedup": 1.0404721753794266
+            }
+          }
+        },
+        {
+          "model": "normal-e2b",
+          "dim": 1536,
+          "rows": 64,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.00667648,
+              "speedup": 1
+            },
+            "vec2": {
+              "medianMs": 0.0065740799999999995,
+              "speedup": 1.015576323987539
+            },
+            "vec4": {
+              "medianMs": 0.00671744,
+              "speedup": 0.9939024390243903
+            },
+            "subgroup1": {
+              "medianMs": 0.00644096,
+              "speedup": 1.0365659777424483
+            },
+            "subgroup2": {
+              "medianMs": 0.0063897599999999995,
+              "speedup": 1.044871794871795
+            },
+            "subgroup4": {
+              "medianMs": 0.00644096,
+              "speedup": 1.0365659777424483
+            }
+          }
+        },
+        {
+          "model": "qat-e4b",
+          "dim": 2560,
+          "rows": 1,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.00796672,
+              "speedup": 1
+            },
+            "vec2": {
+              "medianMs": 0.00795648,
+              "speedup": 1.0012870012870012
+            },
+            "vec4": {
+              "medianMs": 0.00822272,
+              "speedup": 0.9688667496886676
+            },
+            "subgroup1": {
+              "medianMs": 0.0077824,
+              "speedup": 1.0236842105263158
+            },
+            "subgroup2": {
+              "medianMs": 0.00776192,
+              "speedup": 1.0263852242744063
+            },
+            "subgroup4": {
+              "medianMs": 0.00784384,
+              "speedup": 1.0156657963446476
+            }
+          }
+        },
+        {
+          "model": "qat-e4b",
+          "dim": 2560,
+          "rows": 8,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.00917504,
+              "speedup": 1
+            },
+            "vec2": {
+              "medianMs": 0.00799744,
+              "speedup": 1.147247119078105
+            },
+            "vec4": {
+              "medianMs": 0.00815104,
+              "speedup": 1.1256281407035176
+            },
+            "subgroup1": {
+              "medianMs": 0.0077516799999999995,
+              "speedup": 1.1836195508586527
+            },
+            "subgroup2": {
+              "medianMs": 0.00584704,
+              "speedup": 1.5691768826619965
+            },
+            "subgroup4": {
+              "medianMs": 0.00598016,
+              "speedup": 1.534246575342466
+            }
+          }
+        },
+        {
+          "model": "qat-e4b",
+          "dim": 2560,
+          "rows": 32,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.00827392,
+              "speedup": 1
+            },
+            "vec2": {
+              "medianMs": 0.00816128,
+              "speedup": 1.0138017565872022
+            },
+            "vec4": {
+              "medianMs": 0.00838656,
+              "speedup": 0.9865689865689867
+            },
+            "subgroup1": {
+              "medianMs": 0.0079872,
+              "speedup": 1.035897435897436
+            },
+            "subgroup2": {
+              "medianMs": 0.007895039999999999,
+              "speedup": 1.0479896238651105
+            },
+            "subgroup4": {
+              "medianMs": 0.00802816,
+              "speedup": 1.0306122448979593
+            }
+          }
+        },
+        {
+          "model": "qat-e4b",
+          "dim": 2560,
+          "rows": 40,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.008437759999999999,
+              "speedup": 1
+            },
+            "vec2": {
+              "medianMs": 0.0083968,
+              "speedup": 1.0048780487804878
+            },
+            "vec4": {
+              "medianMs": 0.008417280000000001,
+              "speedup": 1.0024330900243306
+            },
+            "subgroup1": {
+              "medianMs": 0.0080384,
+              "speedup": 1.0496815286624204
+            },
+            "subgroup2": {
+              "medianMs": 0.00801792,
+              "speedup": 1.0523627075351212
+            },
+            "subgroup4": {
+              "medianMs": 0.0081408,
+              "speedup": 1.0364779874213834
+            }
+          }
+        },
+        {
+          "model": "qat-e4b",
+          "dim": 2560,
+          "rows": 64,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.008785920000000001,
+              "speedup": 1
+            },
+            "vec2": {
+              "medianMs": 0.008775680000000001,
+              "speedup": 1.0011668611435238
+            },
+            "vec4": {
+              "medianMs": 0.00899072,
+              "speedup": 0.9772209567198178
+            },
+            "subgroup1": {
+              "medianMs": 0.008601600000000001,
+              "speedup": 1.0214285714285714
+            },
+            "subgroup2": {
+              "medianMs": 0.00858112,
+              "speedup": 1.0238663484486876
+            },
+            "subgroup4": {
+              "medianMs": 0.00871424,
+              "speedup": 1.008225616921269
+            }
+          }
+        }
+      ],
+      "sampleStatistic": "upper middle of six sorted measurements, as recorded by the micro harness"
+    },
+    "fast": {
+      "source": "outputs/bench/karume/2026-09-13_rms-subgroup-fast-mgaiywfu/results.json",
+      "sha256": "5de6c078098573bd909d9452ccd7242be970362f52bc3b6173e14b2d496a1b01",
+      "environment": {
+        "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/153.0.0.0 Safari/537.36",
+        "adapter": {},
+        "features": [
+          "core-features-and-limits",
+          "subgroup-size-control",
+          "timestamp-query",
+          "subgroups"
+        ],
+        "languageFeatures": [
+          "packed_4x8_integer_dot_product",
+          "subgroup_uniformity",
+          "immediate_address_space",
+          "subgroup_id",
+          "linear_indexing",
+          "readonly_and_readwrite_storage_textures",
+          "swizzle_assignment",
+          "unrestricted_pointer_parameters",
+          "buffer_view",
+          "pointer_composite_access",
+          "texture_formats_tier1",
+          "texture_and_sampler_let",
+          "uniform_buffer_standard_layout"
+        ],
+        "subgroupSizes": [
+          32
+        ]
+      },
+      "checks": {
+        "tree1": {
+          "checks": 90,
+          "elements": 3786240,
+          "different": 0,
+          "nanDifferent": 0,
+          "maxAbs": 0,
+          "maxRel": 0
+        },
+        "tree4": {
+          "checks": 90,
+          "elements": 3786240,
+          "different": 0,
+          "nanDifferent": 0,
+          "maxAbs": 0,
+          "maxRel": 0
+        },
+        "fast1": {
+          "checks": 90,
+          "elements": 3786240,
+          "different": 392032,
+          "nanDifferent": 0,
+          "maxAbs": 1.52587890625e-05,
+          "maxRel": 2.3761466244045228e-07
+        },
+        "fast2": {
+          "checks": 90,
+          "elements": 3786240,
+          "different": 263530,
+          "nanDifferent": 0,
+          "maxAbs": 1.52587890625e-05,
+          "maxRel": 2.3738582187066436e-07
+        },
+        "fast4": {
+          "checks": 90,
+          "elements": 3786240,
+          "different": 321394,
+          "nanDifferent": 0,
+          "maxAbs": 1.52587890625e-05,
+          "maxRel": 2.3816107262031244e-07
+        },
+        "single4": {
+          "checks": 90,
+          "elements": 3786240,
+          "different": 259172,
+          "nanDifferent": 0,
+          "maxAbs": 1.52587890625e-05,
+          "maxRel": 2.3810039693717173e-07
+        }
+      },
+      "timings": [
+        {
+          "model": "normal-e2b",
+          "dim": 256,
+          "rows": 1,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.00349184,
+              "speedup": 1
+            },
+            "tree1": {
+              "medianMs": 0.0031641599999999996,
+              "speedup": 1.103559870550162
+            },
+            "tree4": {
+              "medianMs": 0.00297984,
+              "speedup": 1.1718213058419245
+            },
+            "fast1": {
+              "medianMs": 0.0026828800000000003,
+              "speedup": 1.3015267175572518
+            },
+            "fast2": {
+              "medianMs": 0.0027545599999999996,
+              "speedup": 1.267657992565056
+            },
+            "fast4": {
+              "medianMs": 0.0027545599999999996,
+              "speedup": 1.267657992565056
+            },
+            "single4": {
+              "medianMs": 0.00301056,
+              "speedup": 1.1598639455782314
+            }
+          }
+        },
+        {
+          "model": "normal-e2b",
+          "dim": 256,
+          "rows": 8,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.0035020800000000003,
+              "speedup": 1
+            },
+            "tree1": {
+              "medianMs": 0.0032256000000000003,
+              "speedup": 1.0857142857142856
+            },
+            "tree4": {
+              "medianMs": 0.00304128,
+              "speedup": 1.1515151515151516
+            },
+            "fast1": {
+              "medianMs": 0.00274432,
+              "speedup": 1.2761194029850746
+            },
+            "fast2": {
+              "medianMs": 0.0028160000000000004,
+              "speedup": 1.2436363636363637
+            },
+            "fast4": {
+              "medianMs": 0.00282624,
+              "speedup": 1.2391304347826089
+            },
+            "single4": {
+              "medianMs": 0.00303104,
+              "speedup": 1.1554054054054055
+            }
+          }
+        },
+        {
+          "model": "normal-e2b",
+          "dim": 256,
+          "rows": 32,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.0037785600000000003,
+              "speedup": 1
+            },
+            "tree1": {
+              "medianMs": 0.00349184,
+              "speedup": 1.0821114369501468
+            },
+            "tree4": {
+              "medianMs": 0.00330752,
+              "speedup": 1.1424148606811146
+            },
+            "fast1": {
+              "medianMs": 0.0030208,
+              "speedup": 1.2508474576271187
+            },
+            "fast2": {
+              "medianMs": 0.00308224,
+              "speedup": 1.2259136212624586
+            },
+            "fast4": {
+              "medianMs": 0.00310272,
+              "speedup": 1.217821782178218
+            },
+            "single4": {
+              "medianMs": 0.0031232,
+              "speedup": 1.2098360655737705
+            }
+          }
+        },
+        {
+          "model": "normal-e2b",
+          "dim": 256,
+          "rows": 40,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.00390144,
+              "speedup": 1
+            },
+            "tree1": {
+              "medianMs": 0.00364544,
+              "speedup": 1.0702247191011236
+            },
+            "tree4": {
+              "medianMs": 0.00344064,
+              "speedup": 1.1339285714285714
+            },
+            "fast1": {
+              "medianMs": 0.00315392,
+              "speedup": 1.237012987012987
+            },
+            "fast2": {
+              "medianMs": 0.00324608,
+              "speedup": 1.2018927444794951
+            },
+            "fast4": {
+              "medianMs": 0.0032256000000000003,
+              "speedup": 1.2095238095238094
+            },
+            "single4": {
+              "medianMs": 0.0031641599999999996,
+              "speedup": 1.2330097087378642
+            }
+          }
+        },
+        {
+          "model": "normal-e2b",
+          "dim": 256,
+          "rows": 64,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.00423936,
+              "speedup": 1
+            },
+            "tree1": {
+              "medianMs": 0.0039936,
+              "speedup": 1.0615384615384615
+            },
+            "tree4": {
+              "medianMs": 0.00379904,
+              "speedup": 1.1159029649595689
+            },
+            "fast1": {
+              "medianMs": 0.0035020800000000003,
+              "speedup": 1.2105263157894737
+            },
+            "fast2": {
+              "medianMs": 0.0035328,
+              "speedup": 1.2
+            },
+            "fast4": {
+              "medianMs": 0.00354304,
+              "speedup": 1.1965317919075145
+            },
+            "single4": {
+              "medianMs": 0.0034816,
+              "speedup": 1.2176470588235295
+            }
+          }
+        },
+        {
+          "model": "normal-e2b",
+          "dim": 1536,
+          "rows": 1,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.00595968,
+              "speedup": 1
+            },
+            "tree1": {
+              "medianMs": 0.0057344,
+              "speedup": 1.0392857142857144
+            },
+            "tree4": {
+              "medianMs": 0.0057344,
+              "speedup": 1.0392857142857144
+            },
+            "fast1": {
+              "medianMs": 0.00521216,
+              "speedup": 1.143418467583497
+            },
+            "fast2": {
+              "medianMs": 0.00538624,
+              "speedup": 1.1064638783269962
+            },
+            "fast4": {
+              "medianMs": 0.005509119999999999,
+              "speedup": 1.0817843866171006
+            },
+            "single4": {
+              "medianMs": 0.008417280000000001,
+              "speedup": 0.7080291970802919
+            }
+          }
+        },
+        {
+          "model": "normal-e2b",
+          "dim": 1536,
+          "rows": 8,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.00602112,
+              "speedup": 1
+            },
+            "tree1": {
+              "medianMs": 0.005785599999999999,
+              "speedup": 1.04070796460177
+            },
+            "tree4": {
+              "medianMs": 0.005785599999999999,
+              "speedup": 1.04070796460177
+            },
+            "fast1": {
+              "medianMs": 0.005273600000000001,
+              "speedup": 1.1417475728155337
+            },
+            "fast2": {
+              "medianMs": 0.005457920000000001,
+              "speedup": 1.1031894934333957
+            },
+            "fast4": {
+              "medianMs": 0.00556032,
+              "speedup": 1.0828729281767955
+            },
+            "single4": {
+              "medianMs": 0.00846848,
+              "speedup": 0.7110036275695283
+            }
+          }
+        },
+        {
+          "model": "normal-e2b",
+          "dim": 1536,
+          "rows": 32,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.0061952,
+              "speedup": 1
+            },
+            "tree1": {
+              "medianMs": 0.00596992,
+              "speedup": 1.0377358490566038
+            },
+            "tree4": {
+              "medianMs": 0.00594944,
+              "speedup": 1.0413080895008604
+            },
+            "fast1": {
+              "medianMs": 0.00544768,
+              "speedup": 1.137218045112782
+            },
+            "fast2": {
+              "medianMs": 0.00561152,
+              "speedup": 1.104014598540146
+            },
+            "fast4": {
+              "medianMs": 0.00580608,
+              "speedup": 1.0670194003527336
+            },
+            "single4": {
+              "medianMs": 0.008427519999999999,
+              "speedup": 0.7351154313487243
+            }
+          }
+        },
+        {
+          "model": "normal-e2b",
+          "dim": 1536,
+          "rows": 40,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.00631808,
+              "speedup": 1
+            },
+            "tree1": {
+              "medianMs": 0.00607232,
+              "speedup": 1.0404721753794266
+            },
+            "tree4": {
+              "medianMs": 0.00607232,
+              "speedup": 1.0404721753794266
+            },
+            "fast1": {
+              "medianMs": 0.00555008,
+              "speedup": 1.1383763837638377
+            },
+            "fast2": {
+              "medianMs": 0.0057344,
+              "speedup": 1.1017857142857144
+            },
+            "fast4": {
+              "medianMs": 0.00584704,
+              "speedup": 1.0805604203152364
+            },
+            "single4": {
+              "medianMs": 0.00912384,
+              "speedup": 0.6924803591470259
+            }
+          }
+        },
+        {
+          "model": "normal-e2b",
+          "dim": 1536,
+          "rows": 64,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.00666624,
+              "speedup": 1
+            },
+            "tree1": {
+              "medianMs": 0.00643072,
+              "speedup": 1.0366242038216562
+            },
+            "tree4": {
+              "medianMs": 0.00643072,
+              "speedup": 1.0366242038216562
+            },
+            "fast1": {
+              "medianMs": 0.00584704,
+              "speedup": 1.1401050788091067
+            },
+            "fast2": {
+              "medianMs": 0.00601088,
+              "speedup": 1.1090289608177173
+            },
+            "fast4": {
+              "medianMs": 0.00613376,
+              "speedup": 1.0868113522537564
+            },
+            "single4": {
+              "medianMs": 0.00884736,
+              "speedup": 0.7534722222222222
+            }
+          }
+        },
+        {
+          "model": "qat-e4b",
+          "dim": 2560,
+          "rows": 1,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.00796672,
+              "speedup": 1
+            },
+            "tree1": {
+              "medianMs": 0.007874560000000001,
+              "speedup": 1.011703511053316
+            },
+            "tree4": {
+              "medianMs": 0.007925759999999999,
+              "speedup": 1.005167958656331
+            },
+            "fast1": {
+              "medianMs": 0.00722944,
+              "speedup": 1.1019830028328612
+            },
+            "fast2": {
+              "medianMs": 0.0074649600000000005,
+              "speedup": 1.0672153635116597
+            },
+            "fast4": {
+              "medianMs": 0.007700479999999999,
+              "speedup": 1.0345744680851066
+            },
+            "single4": {
+              "medianMs": 0.01261568,
+              "speedup": 0.6314935064935064
+            }
+          }
+        },
+        {
+          "model": "qat-e4b",
+          "dim": 2560,
+          "rows": 8,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.00802816,
+              "speedup": 1
+            },
+            "tree1": {
+              "medianMs": 0.00784384,
+              "speedup": 1.0234986945169713
+            },
+            "tree4": {
+              "medianMs": 0.00795648,
+              "speedup": 1.009009009009009
+            },
+            "fast1": {
+              "medianMs": 0.0072089599999999995,
+              "speedup": 1.1136363636363635
+            },
+            "fast2": {
+              "medianMs": 0.007454720000000001,
+              "speedup": 1.0769230769230769
+            },
+            "fast4": {
+              "medianMs": 0.0076492800000000005,
+              "speedup": 1.0495314591700133
+            },
+            "single4": {
+              "medianMs": 0.01263616,
+              "speedup": 0.6353322528363047
+            }
+          }
+        },
+        {
+          "model": "qat-e4b",
+          "dim": 2560,
+          "rows": 32,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.00828416,
+              "speedup": 1
+            },
+            "tree1": {
+              "medianMs": 0.00807936,
+              "speedup": 1.0253485424588087
+            },
+            "tree4": {
+              "medianMs": 0.00822272,
+              "speedup": 1.0074719800747198
+            },
+            "fast1": {
+              "medianMs": 0.00743424,
+              "speedup": 1.1143250688705235
+            },
+            "fast2": {
+              "medianMs": 0.00759808,
+              "speedup": 1.0902964959568733
+            },
+            "fast4": {
+              "medianMs": 0.00781312,
+              "speedup": 1.0602883355176933
+            },
+            "single4": {
+              "medianMs": 0.0126464,
+              "speedup": 0.6550607287449393
+            }
+          }
+        },
+        {
+          "model": "qat-e4b",
+          "dim": 2560,
+          "rows": 40,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.00832512,
+              "speedup": 1
+            },
+            "tree1": {
+              "medianMs": 0.00812032,
+              "speedup": 1.025220680958386
+            },
+            "tree4": {
+              "medianMs": 0.0081408,
+              "speedup": 1.0226415094339623
+            },
+            "fast1": {
+              "medianMs": 0.00749568,
+              "speedup": 1.110655737704918
+            },
+            "fast2": {
+              "medianMs": 0.007731200000000001,
+              "speedup": 1.07682119205298
+            },
+            "fast4": {
+              "medianMs": 0.00790528,
+              "speedup": 1.0531088082901554
+            },
+            "single4": {
+              "medianMs": 0.012656639999999999,
+              "speedup": 0.6577669902912622
+            }
+          }
+        },
+        {
+          "model": "qat-e4b",
+          "dim": 2560,
+          "rows": 64,
+          "variants": {
+            "ref256": {
+              "medianMs": 0.00887808,
+              "speedup": 1
+            },
+            "tree1": {
+              "medianMs": 0.00869376,
+              "speedup": 1.0212014134275618
+            },
+            "tree4": {
+              "medianMs": 0.008806399999999999,
+              "speedup": 1.008139534883721
+            },
+            "fast1": {
+              "medianMs": 0.008048640000000001,
+              "speedup": 1.1030534351145036
+            },
+            "fast2": {
+              "medianMs": 0.00830464,
+              "speedup": 1.0690505548705302
+            },
+            "fast4": {
+              "medianMs": 0.00847872,
+              "speedup": 1.0471014492753623
+            },
+            "single4": {
+              "medianMs": 0.013056000000000002,
+              "speedup": 0.6799999999999999
+            }
+          }
+        }
+      ],
+      "sampleStatistic": "upper middle of six sorted measurements, as recorded by the micro harness"
+    }
+  },
+  "integratedUi": {
+    "source": "outputs/bench/karume/2026-09-13_rms-subgroup-ui-lf0xylkp/results.json",
+    "sha256": "34910f8c524a25a093c1f180c9f7a1330cbc802fd07864aec359808bf6441b7c",
+    "bundleSha256": "e8ef44d661dd69774ca08d16287376a17692fb9c4c05ec57ed9e423c65e5c70a",
+    "generations": 40,
+    "versusPrivateCandidateTokenDifferences": 0,
+    "qat": {
+      "fused": {
+        "decodeTpsMedian": 99.59361710751391,
+        "perCaseLoadMedians": [
+          100.59799921833708,
+          100.92433878229983,
+          98.58923499669073,
+          95.04054308881766
+        ],
+        "warmTtftMedians": {
+          "english-list": [
+            36.72499996423721,
+            36.68000000715256
+          ],
+          "japanese-list": [
+            40.980000019073486,
+            41.39500004053116
+          ]
+        }
+      },
+      "subgroup32": {
+        "decodeTpsMedian": 101.64505886734324,
+        "perCaseLoadMedians": [
+          101.79679420967781,
+          101.78281485480218,
+          101.5073028798843,
+          101.18043845244091
+        ],
+        "warmTtftMedians": {
+          "english-list": [
+            36.55000001192093,
+            36.47999995946884
+          ],
+          "japanese-list": [
+            39.94499999284744,
+            40.07000005245209
+          ]
+        }
+      }
+    },
+    "speedup": 1.0205981248538725,
+    "kernelChecks": {
+      "cases": 61,
+      "elements": 688307,
+      "features": [
+        "core-features-and-limits",
+        "subgroup-size-control",
+        "subgroups"
+      ],
+      "language": [
+        "packed_4x8_integer_dot_product",
+        "subgroup_uniformity",
+        "immediate_address_space",
+        "linear_indexing",
+        "subgroup_id",
+        "readonly_and_readwrite_storage_textures",
+        "swizzle_assignment",
+        "unrestricted_pointer_parameters",
+        "buffer_view",
+        "texture_formats_tier1",
+        "pointer_composite_access",
+        "texture_and_sampler_let",
+        "uniform_buffer_standard_layout"
+      ]
+    }
+  }
+}

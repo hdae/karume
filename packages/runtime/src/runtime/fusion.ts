@@ -48,6 +48,7 @@
  * {@link passthroughIsIndependent} が機械的に見る。
  */
 
+import { rmsNormSubgroupKey, rmsNormSubgroupWgsl } from "../kernels/rms-norm-subgroup.ts";
 import {
   catDim,
   LAYER_NORM_OP,
@@ -251,6 +252,7 @@ type FusionContext = {
   readonly rowBlockSplit?: number;
   /** 明示指定時だけRMS→addを融合する（ADR 0099）。 */
   readonly fuseRmsNormAdd?: boolean;
+  readonly rmsNormReduce?: "workgroup" | "subgroup32";
 };
 
 const sameShape = (a: readonly number[], b: readonly number[]): boolean =>
@@ -1254,6 +1256,7 @@ type RmsNormAddMatch = FusionMatch & {
   readonly outputName: string;
   readonly eps: number;
   readonly order: RmsNormAddOrder;
+  readonly subgroup: boolean;
 };
 
 /** 共有・出力・broadcastは既存経路へ戻す。実測した最終次元に限定する（ADR 0099）。 */
@@ -1286,6 +1289,7 @@ const RMS_NORM_ADD_RULE = defineRule<RmsNormAddMatch>({
       outputName: add.outputs[0].name,
       eps: rmsNormEps(norm.node.attrs, "rms_norm fusion"),
       order: position === 0 ? "norm-residual" : "residual-norm",
+      subgroup: context.rmsNormReduce === "subgroup32",
     };
   },
   build: (matched) => ({
@@ -1294,8 +1298,9 @@ const RMS_NORM_ADD_RULE = defineRule<RmsNormAddMatch>({
     outputShape: matched.shape,
     temps: [],
     dispatches: [{
-      key: rmsNormAddKey(matched.order),
-      wgsl: () => rmsNormAddWgsl(matched.order),
+      key: matched.subgroup ? rmsNormSubgroupKey(matched.order) : rmsNormAddKey(matched.order),
+      wgsl: () =>
+        matched.subgroup ? rmsNormSubgroupWgsl(matched.order) : rmsNormAddWgsl(matched.order),
       params: rmsNormParams(
         numel(matched.shape.slice(0, -1)),
         matched.shape[matched.shape.length - 1],

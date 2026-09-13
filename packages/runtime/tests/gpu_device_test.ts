@@ -11,11 +11,13 @@ import {
   acquireGpu,
   assertLimitsGranted,
   assertShaderF16Executes,
+  assertSubgroup32Executes,
   GpuDeviceLostError,
   GpuFeatureError,
   GpuLimitError,
   planRequiredLimits,
   planShaderF16Feature,
+  planSubgroup32Features,
   readAdapterInfo,
   readAdapterLimits,
   REQUIRED_LIMIT_KEYS,
@@ -570,4 +572,43 @@ Deno.test({
     assertEquals(gpu.lost?.reason, "destroyed");
     assertEquals(notified, 0, "意図的な破棄は消失通知の対象外");
   },
+});
+
+Deno.test("subgroup32は明示要求と必要な全機能を要求し、既定では要求しない", () => {
+  const present = new Set(["subgroups", "subgroup-size-control"]),
+    language = new Set(["subgroup_id"]);
+  assertEquals(planSubgroup32Features(present, language, undefined), []);
+  assertEquals(planSubgroup32Features(new Set(), new Set(), false), []);
+  assertEquals(planSubgroup32Features(present, language, true), [
+    "subgroups",
+    "subgroup-size-control",
+  ]);
+  for (
+    const absent of [new Set<string>(), new Set(["subgroups"]), new Set(["subgroup-size-control"])]
+  ) {
+    assertThrows(() => planSubgroup32Features(absent, language, true), GpuFeatureError);
+  }
+  assertThrows(
+    () => planSubgroup32Features(present, new Set(), true),
+    GpuFeatureError,
+    "subgroup_id",
+  );
+});
+
+Deno.test("subgroup32カナリアは全レーンの既知解だけを受理し、消失で待ち続けない", async () => {
+  await assertSubgroup32Executes(canaryDevice({ mapped: Array<number>(256).fill(32896) }));
+  for (const mapped of [[], Array<number>(256).fill(0), [...Array<number>(255).fill(32896), 0]]) {
+    await assertRejects(() => assertSubgroup32Executes(canaryDevice({ mapped })), GpuFeatureError);
+  }
+  await assertRejects(
+    () => assertSubgroup32Executes(canaryDevice({ lost: lossAfterMacrotask() })),
+    GpuDeviceLostError,
+    "subgroups",
+  );
+  await assertRejects(
+    () =>
+      assertSubgroup32Executes(canaryDevice({ hangValidation: true, lost: lossAfterMacrotask() })),
+    GpuDeviceLostError,
+    "subgroups",
+  );
 });
