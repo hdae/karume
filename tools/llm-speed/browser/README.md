@@ -6,9 +6,12 @@ Run from the repository root (tested with Deno 2.9.6):
 deno task bench:llm-browser
 ```
 
-Open **http://localhost:8787** in Chrome on your Mac. Select Gemma 4 E2B, QAT E2B,
-or both, then click **計測開始**. The default compares karume and Transformers.js
-sequentially. **JSONを保存** downloads all timings, generated token IDs, output text,
+Open **http://localhost:8787** in Chrome on your Mac and click **計測開始**. The
+current defaults measure **both Gemma 4 E2B models with karume, parallel GEMV, and
+dense prefill buckets**: two model loads and 20 generations in total. These settings
+provide the baseline for the next optimization comparison. Choose Transformers.js,
+reference settings, or a combined comparison explicitly when needed.
+**JSONを保存** downloads all timings, generated token IDs, output text,
 GPU information, model references, dependency versions, and the benchmark bundle hash.
 Keep the tab in the foreground and avoid other GPU workloads during measurement.
 Reload the page to stop a run; stop the server with Ctrl+C.
@@ -42,7 +45,7 @@ Mac launch command and is not necessary for ordinary supported M2 Chrome.
 
 ## Quant defaults and parallel GEMV
 
-The default **quant定義に従う** follows the distribution's E2B `defaultQuant` and its
+Selecting **quant定義に従う** follows the distribution's E2B `defaultQuant` and its
 `session.linearGemvReduce` setting. Newly assembled E2B distributions default to
 `i4-gemvpar`; older local distributions keep their existing `i4` default. No files
 are rewritten by this benchmark. The table and JSON include the selected quant and
@@ -57,10 +60,11 @@ recorded in [the adoption note](../../../docs/research/2026-09-13-m2-gemv-adopti
 
 ## Prefill bucket experiment
 
-Select **karume**, **並列加算を指定**, and **3種類を往復比較** under Karumeの入力バケット
-to compare the prefill candidates on M2. Explicit parallel selection also works with
-older local distributions. Select **両方** under モデル to include QAT E2B. Save the
-JSON after completion; each result includes `prefillBuckets` and `chunkBuckets`.
+The initial selection uses **両方**, **karume**, **並列加算を指定**, and **細分化**,
+following the [M2 validation](../../../docs/research/2026-09-13-m2-prefill-adoption.md).
+To repeat the bucket comparison, change Karumeの入力バケット to **3種類を往復比較**.
+Explicit parallel selection also works with older local distributions. Save the JSON
+after completion; each result includes `prefillBuckets` and `chunkBuckets`.
 
 | Selection           | Physical row buckets below chunk length 64 |
 | ------------------- | ------------------------------------------ |
@@ -68,7 +72,8 @@ JSON after completion; each result includes `prefillBuckets` and `chunkBuckets`.
 | 少数追加 (`sparse`) | 4, 8, 16, 32, 48                           |
 | 細分化 (`dense`)    | 4, 8, 16, 24, 32, 40, 48, 56               |
 
-The default stays **標準**. A 37-token Japanese input uses 64 physical rows with
+The browser initially selects **細分化**; **標準** remains available. Library defaults
+are unchanged. A 37-token Japanese input uses 64 physical rows with
 standard buckets, 48 with sparse buckets, and 40 with dense buckets. The 31-token
 English input uses 32 rows in all three. This primarily targets TTFT, not decode
 throughput. It does not change the stored weights, quant selection, or library defaults.
@@ -82,7 +87,7 @@ model regardless of these Karume settings.
 This is a **chunk-64 experiment**, not a recommendation to extend all chunk sizes.
 More buckets consume more execution-plan and buffer-cache entries; long inputs and
 alternating context capacities can erase the benefit. RTX cache-stress results and
-remaining M2 validation are recorded in [the prefill note](../../../docs/research/2026-09-13-prefill-buckets.md).
+the scope of the experiment are recorded in [the prefill note](../../../docs/research/2026-09-13-prefill-buckets.md).
 
 ## What is measured
 

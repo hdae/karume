@@ -1,0 +1,2031 @@
+{
+  "format": "karume-m2-prefill-adoption/1",
+  "sourceAttachment": "/home/developer/.codex/attachments/dff4f5b1-39a6-40bd-bf4f-1635b47b6f4b/gemma-browser-2026-09-13T08-53-09.649Z.json",
+  "sourceSha256": "105d97d3c12cdfc420f1be474a1dabbc4160abaafd8870273daa1ebeb0d8e498",
+  "directory": "outputs/bench/karume/2026-09-13_m2-prefill-summary-9d7fz0gn",
+  "userReportedHardware": "Apple M2",
+  "reportedUserAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
+  "adapter": {
+    "vendor": "apple",
+    "architecture": "metal-3",
+    "description": "",
+    "device": "",
+    "isFallbackAdapter": false,
+    "features": [
+      "depth32float-stencil8",
+      "rg11b10ufloat-renderable",
+      "bgra8unorm-storage",
+      "texture-formats-tier1",
+      "texture-compression-bc",
+      "dual-source-blending",
+      "core-features-and-limits",
+      "float32-filterable",
+      "indirect-first-instance",
+      "texture-compression-astc-sliced-3d",
+      "float32-blendable",
+      "subgroup-size-control",
+      "texture-compression-astc",
+      "texture-compression-etc2",
+      "depth-clip-control",
+      "texture-compression-bc-sliced-3d",
+      "clip-distances",
+      "timestamp-query",
+      "shader-f16",
+      "texture-formats-tier2",
+      "primitive-index",
+      "texture-component-swizzle",
+      "subgroups"
+    ]
+  },
+  "checkout": "e03114dec9811dbab048cbf5df096e9752e6b3b0",
+  "bundleSha256": "ee7359283820dd12b6f8846fd59519a4477a9c68665feb02e6a610fc74a2d59b",
+  "fixture": {
+    "cases": [
+      {
+        "case": "english-list",
+        "prompt": "Write a numbered list of twenty practical tips for learning a new language. Give one short sentence for each tip.",
+        "inputIds": [
+          2,
+          105,
+          2364,
+          107,
+          6974,
+          496,
+          49597,
+          1694,
+          529,
+          12571,
+          10231,
+          11221,
+          573,
+          4735,
+          496,
+          861,
+          5192,
+          236761,
+          23097,
+          886,
+          2822,
+          13315,
+          573,
+          1546,
+          6508,
+          236761,
+          106,
+          107,
+          105,
+          4368,
+          107
+        ]
+      },
+      {
+        "case": "japanese-list",
+        "prompt": "プログラミングを学ぶ人に向けたアドバイスを20個、番号付きで挙げてください。それぞれ一文で説明してください。",
+        "inputIds": [
+          2,
+          105,
+          2364,
+          107,
+          18668,
+          29171,
+          70738,
+          237051,
+          230452,
+          98782,
+          65630,
+          237036,
+          77221,
+          99950,
+          237051,
+          236778,
+          236771,
+          237629,
+          236951,
+          67583,
+          28412,
+          237007,
+          178274,
+          95509,
+          236924,
+          59043,
+          237009,
+          237364,
+          237007,
+          34084,
+          49391,
+          236924,
+          106,
+          107,
+          105,
+          4368,
+          107
+        ]
+      }
+    ],
+    "stopTokens": [
+      1,
+      106,
+      50
+    ],
+    "maxNewTokens": 64,
+    "capacity": 128
+  },
+  "jobs": 26,
+  "generations": 260,
+  "karumeGenerations": 240,
+  "transformersGenerations": 20,
+  "withinJobDifferences": [],
+  "bucketDifferencesAtSameReduction": [],
+  "sequentialVsParallel": [
+    {
+      "model": "normal",
+      "case": "english-list",
+      "same": true,
+      "firstDifferentToken": null
+    },
+    {
+      "model": "normal",
+      "case": "japanese-list",
+      "same": true,
+      "firstDifferentToken": null
+    },
+    {
+      "model": "qat",
+      "case": "english-list",
+      "same": false,
+      "firstDifferentToken": 18
+    },
+    {
+      "model": "qat",
+      "case": "japanese-list",
+      "same": false,
+      "firstDifferentToken": 35
+    }
+  ],
+  "groups": [
+    {
+      "model": "normal",
+      "reduce": "sequential",
+      "case": "english-list",
+      "buckets": {
+        "default": {
+          "ttftMs": [
+            341.68499994277954,
+            370.34500002861023
+          ],
+          "decodeTokensPerSecond": [
+            26.08387829979316,
+            21.208586447679213
+          ],
+          "pairedTtftReductionPercent": [
+            0.0,
+            0.0
+          ]
+        },
+        "sparse": {
+          "ttftMs": [
+            341.2849999666214,
+            380.8100000023842
+          ],
+          "decodeTokensPerSecond": [
+            26.068228415456016,
+            21.399129428946523
+          ],
+          "pairedTtftReductionPercent": [
+            0.11706688213563021,
+            -2.8257435561342747
+          ]
+        },
+        "dense": {
+          "ttftMs": [
+            371.460000038147,
+            376.3299999833107
+          ],
+          "decodeTokensPerSecond": [
+            21.977523621495553,
+            21.04092459819299
+          ],
+          "pairedTtftReductionPercent": [
+            -8.714166586286698,
+            -1.6160606878014017
+          ]
+        }
+      }
+    },
+    {
+      "model": "normal",
+      "reduce": "sequential",
+      "case": "japanese-list",
+      "buckets": {
+        "default": {
+          "ttftMs": [
+            635.2450000047684,
+            671.6349999904633
+          ],
+          "decodeTokensPerSecond": [
+            26.07475591136418,
+            23.627628573636567
+          ],
+          "pairedTtftReductionPercent": [
+            0.0,
+            0.0
+          ]
+        },
+        "sparse": {
+          "ttftMs": [
+            474.3550000190735,
+            507
+          ],
+          "decodeTokensPerSecond": [
+            26.02977723874215,
+            21.400328817785386
+          ],
+          "pairedTtftReductionPercent": [
+            25.32723594589288,
+            24.512570070469963
+          ]
+        },
+        "dense": {
+          "ttftMs": [
+            438.40499997138977,
+            444.6899999976158
+          ],
+          "decodeTokensPerSecond": [
+            23.282155705863033,
+            20.952124396038123
+          ],
+          "pairedTtftReductionPercent": [
+            30.98646979226929,
+            33.78993054204589
+          ]
+        }
+      }
+    },
+    {
+      "model": "normal",
+      "reduce": "parallel",
+      "case": "english-list",
+      "buckets": {
+        "default": {
+          "ttftMs": [
+            373.40499997138977,
+            370.82499998807907
+          ],
+          "decodeTokensPerSecond": [
+            25.83666715216066,
+            26.590356564340542
+          ],
+          "pairedTtftReductionPercent": [
+            0.0,
+            0.0
+          ]
+        },
+        "sparse": {
+          "ttftMs": [
+            370.74000000953674,
+            375.1299999952316
+          ],
+          "decodeTokensPerSecond": [
+            25.504369141111113,
+            25.615535212287007
+          ],
+          "pairedTtftReductionPercent": [
+            0.7137022702045304,
+            -1.1609249665720967
+          ]
+        },
+        "dense": {
+          "ttftMs": [
+            376.3700000047684,
+            376.89000004529953
+          ],
+          "decodeTokensPerSecond": [
+            25.140166404078172,
+            25.531087138178336
+          ],
+          "pairedTtftReductionPercent": [
+            -0.7940440094818646,
+            -1.6355423872218555
+          ]
+        }
+      }
+    },
+    {
+      "model": "normal",
+      "reduce": "parallel",
+      "case": "japanese-list",
+      "buckets": {
+        "default": {
+          "ttftMs": [
+            671.8249999880791,
+            672.2300000190735
+          ],
+          "decodeTokensPerSecond": [
+            25.710560306367693,
+            25.601430429624827
+          ],
+          "pairedTtftReductionPercent": [
+            0.0,
+            0.0
+          ]
+        },
+        "sparse": {
+          "ttftMs": [
+            508.6899999976158,
+            509.10000002384186
+          ],
+          "decodeTokensPerSecond": [
+            25.517643627929132,
+            25.711557140974918
+          ],
+          "pairedTtftReductionPercent": [
+            24.282365198281987,
+            24.26699195076135
+          ]
+        },
+        "dense": {
+          "ttftMs": [
+            446.30000001192093,
+            446.164999961853
+          ],
+          "decodeTokensPerSecond": [
+            25.548584892418347,
+            25.709038971638442
+          ],
+          "pairedTtftReductionPercent": [
+            33.569009783821656,
+            33.62911504259052
+          ]
+        }
+      }
+    },
+    {
+      "model": "qat",
+      "reduce": "sequential",
+      "case": "english-list",
+      "buckets": {
+        "default": {
+          "ttftMs": [
+            421.55000001192093,
+            424.2450000047684
+          ],
+          "decodeTokensPerSecond": [
+            24.809010002013373,
+            24.326860328889886
+          ],
+          "pairedTtftReductionPercent": [
+            0.0,
+            0.0
+          ]
+        },
+        "sparse": {
+          "ttftMs": [
+            425.0949999690056,
+            419.6599999666214
+          ],
+          "decodeTokensPerSecond": [
+            24.55125757051855,
+            24.52645450661989
+          ],
+          "pairedTtftReductionPercent": [
+            -0.84094412453668,
+            1.080743447322996
+          ]
+        },
+        "dense": {
+          "ttftMs": [
+            424.1650000214577,
+            419.0149999856949
+          ],
+          "decodeTokensPerSecond": [
+            24.118294492032348,
+            24.481278622390633
+          ],
+          "pairedTtftReductionPercent": [
+            -0.620329737744707,
+            1.232778234042764
+          ]
+        }
+      }
+    },
+    {
+      "model": "qat",
+      "reduce": "sequential",
+      "case": "japanese-list",
+      "buckets": {
+        "default": {
+          "ttftMs": [
+            803.7049999833107,
+            802.3199999928474
+          ],
+          "decodeTokensPerSecond": [
+            24.448359631353764,
+            24.361948955916475
+          ],
+          "pairedTtftReductionPercent": [
+            0.0,
+            0.0
+          ]
+        },
+        "sparse": {
+          "ttftMs": [
+            613.3950000405312,
+            613.2849999666214
+          ],
+          "decodeTokensPerSecond": [
+            24.50832602291128,
+            24.27740987016047
+          ],
+          "pairedTtftReductionPercent": [
+            23.679086225260694,
+            23.561047964392166
+          ]
+        },
+        "dense": {
+          "ttftMs": [
+            526.1400000452995,
+            517.6399999856949
+          ],
+          "decodeTokensPerSecond": [
+            24.38415494406743,
+            24.543701423696294
+          ],
+          "pairedTtftReductionPercent": [
+            34.535681617480904,
+            35.482101905684814
+          ]
+        }
+      }
+    },
+    {
+      "model": "qat",
+      "reduce": "parallel",
+      "case": "english-list",
+      "buckets": {
+        "default": {
+          "ttftMs": [
+            424.1650000214577,
+            427.3149999976158
+          ],
+          "decodeTokensPerSecond": [
+            26.53592458758944,
+            26.708156162354108
+          ],
+          "pairedTtftReductionPercent": [
+            0.0,
+            0.0
+          ]
+        },
+        "sparse": {
+          "ttftMs": [
+            424.82499998807907,
+            425.44999998807907
+          ],
+          "decodeTokensPerSecond": [
+            26.739953947451195,
+            26.829974617937783
+          ],
+          "pairedTtftReductionPercent": [
+            -0.15559981766246622,
+            0.43644618362265186
+          ]
+        },
+        "dense": {
+          "ttftMs": [
+            414.0149999856949,
+            416.96499997377396
+          ],
+          "decodeTokensPerSecond": [
+            26.879311889588283,
+            26.674344361632464
+          ],
+          "pairedTtftReductionPercent": [
+            2.3929367192600304,
+            2.4221007977486386
+          ]
+        }
+      }
+    },
+    {
+      "model": "qat",
+      "reduce": "parallel",
+      "case": "japanese-list",
+      "buckets": {
+        "default": {
+          "ttftMs": [
+            804.6549999713898,
+            805.5649999976158
+          ],
+          "decodeTokensPerSecond": [
+            26.687282239055296,
+            26.639435243731118
+          ],
+          "pairedTtftReductionPercent": [
+            0.0,
+            0.0
+          ]
+        },
+        "sparse": {
+          "ttftMs": [
+            615.2650000452995,
+            607.464999973774
+          ],
+          "decodeTokensPerSecond": [
+            26.522742199025693,
+            26.60562856901491
+          ],
+          "pairedTtftReductionPercent": [
+            23.536795264159693,
+            24.591435827577936
+          ]
+        },
+        "dense": {
+          "ttftMs": [
+            532.285000026226,
+            524.6650000214577
+          ],
+          "decodeTokensPerSecond": [
+            26.88900602403471,
+            26.728835959248052
+          ],
+          "pairedTtftReductionPercent": [
+            33.84928944141875,
+            34.86993600479037
+          ]
+        }
+      }
+    }
+  ],
+  "rows": [
+    {
+      "job": 0,
+      "model": "normal",
+      "engine": "karume",
+      "reduce": "sequential",
+      "bucket": "default",
+      "case": "english-list",
+      "firstTtftMs": 480.80000001192093,
+      "ttftMedianMs": 341.68499994277954,
+      "decodeMedianTokensPerSecond": 26.08387829979316,
+      "measuredTtftMs": [
+        340.86500000953674,
+        342.5750000476837,
+        341.68499994277954
+      ],
+      "measuredDecodeTokensPerSecond": [
+        26.081016745539976,
+        26.104034938436023,
+        26.08387829979316
+      ]
+    },
+    {
+      "job": 0,
+      "model": "normal",
+      "engine": "karume",
+      "reduce": "sequential",
+      "bucket": "default",
+      "case": "japanese-list",
+      "firstTtftMs": 694.1850000023842,
+      "ttftMedianMs": 635.2450000047684,
+      "decodeMedianTokensPerSecond": 26.07475591136418,
+      "measuredTtftMs": [
+        634.3899999856949,
+        641.25,
+        635.2450000047684
+      ],
+      "measuredDecodeTokensPerSecond": [
+        26.07475591136418,
+        26.100141686148298,
+        25.924805718067955
+      ]
+    },
+    {
+      "job": 1,
+      "model": "normal",
+      "engine": "karume",
+      "reduce": "sequential",
+      "bucket": "sparse",
+      "case": "english-list",
+      "firstTtftMs": 451.83999997377396,
+      "ttftMedianMs": 341.2849999666214,
+      "decodeMedianTokensPerSecond": 26.068228415456016,
+      "measuredTtftMs": [
+        340.2300000190735,
+        342.41000002622604,
+        341.2849999666214
+      ],
+      "measuredDecodeTokensPerSecond": [
+        26.044681097811303,
+        26.091007920484547,
+        26.068228415456016
+      ]
+    },
+    {
+      "job": 1,
+      "model": "normal",
+      "engine": "karume",
+      "reduce": "sequential",
+      "bucket": "sparse",
+      "case": "japanese-list",
+      "firstTtftMs": 540.5649999976158,
+      "ttftMedianMs": 474.3550000190735,
+      "decodeMedianTokensPerSecond": 26.02977723874215,
+      "measuredTtftMs": [
+        473.89500004053116,
+        476.9949999451637,
+        474.3550000190735
+      ],
+      "measuredDecodeTokensPerSecond": [
+        26.02977723874215,
+        26.039298674709404,
+        25.97948857510845
+      ]
+    },
+    {
+      "job": 2,
+      "model": "normal",
+      "engine": "karume",
+      "reduce": "sequential",
+      "bucket": "dense",
+      "case": "english-list",
+      "firstTtftMs": 488.73499995470047,
+      "ttftMedianMs": 371.460000038147,
+      "decodeMedianTokensPerSecond": 21.977523621495553,
+      "measuredTtftMs": [
+        391.1050000190735,
+        371.460000038147,
+        369.789999961853
+      ],
+      "measuredDecodeTokensPerSecond": [
+        20.94703890345559,
+        21.977523621495553,
+        23.257445151171382
+      ]
+    },
+    {
+      "job": 2,
+      "model": "normal",
+      "engine": "karume",
+      "reduce": "sequential",
+      "bucket": "dense",
+      "case": "japanese-list",
+      "firstTtftMs": 1089.3450000286102,
+      "ttftMedianMs": 438.40499997138977,
+      "decodeMedianTokensPerSecond": 23.282155705863033,
+      "measuredTtftMs": [
+        448.1799999475479,
+        434.24000000953674,
+        438.40499997138977
+      ],
+      "measuredDecodeTokensPerSecond": [
+        23.282155705863033,
+        21.717210889540787,
+        23.59970406741374
+      ]
+    },
+    {
+      "job": 3,
+      "model": "normal",
+      "engine": "karume",
+      "reduce": "sequential",
+      "bucket": "dense",
+      "case": "english-list",
+      "firstTtftMs": 1129.1899999976158,
+      "ttftMedianMs": 376.3299999833107,
+      "decodeMedianTokensPerSecond": 21.04092459819299,
+      "measuredTtftMs": [
+        379.9549999833107,
+        367.21499997377396,
+        376.3299999833107
+      ],
+      "measuredDecodeTokensPerSecond": [
+        21.04092459819299,
+        21.037973542394496,
+        21.193888758945892
+      ]
+    },
+    {
+      "job": 3,
+      "model": "normal",
+      "engine": "karume",
+      "reduce": "sequential",
+      "bucket": "dense",
+      "case": "japanese-list",
+      "firstTtftMs": 1073.864999949932,
+      "ttftMedianMs": 444.6899999976158,
+      "decodeMedianTokensPerSecond": 20.952124396038123,
+      "measuredTtftMs": [
+        459.47000002861023,
+        443.81999999284744,
+        444.6899999976158
+      ],
+      "measuredDecodeTokensPerSecond": [
+        20.952124396038123,
+        21.07520335050514,
+        20.92682586549048
+      ]
+    },
+    {
+      "job": 4,
+      "model": "normal",
+      "engine": "karume",
+      "reduce": "sequential",
+      "bucket": "sparse",
+      "case": "english-list",
+      "firstTtftMs": 1119.539999961853,
+      "ttftMedianMs": 380.8100000023842,
+      "decodeMedianTokensPerSecond": 21.399129428946523,
+      "measuredTtftMs": [
+        380.8100000023842,
+        365.8499999642372,
+        464.0349999666214
+      ],
+      "measuredDecodeTokensPerSecond": [
+        21.399129428946523,
+        21.23131517889089,
+        21.98680442722826
+      ]
+    },
+    {
+      "job": 4,
+      "model": "normal",
+      "engine": "karume",
+      "reduce": "sequential",
+      "bucket": "sparse",
+      "case": "japanese-list",
+      "firstTtftMs": 1120.160000026226,
+      "ttftMedianMs": 507,
+      "decodeMedianTokensPerSecond": 21.400328817785386,
+      "measuredTtftMs": [
+        519.660000026226,
+        506.7450000047684,
+        507
+      ],
+      "measuredDecodeTokensPerSecond": [
+        21.205124235390162,
+        21.400328817785386,
+        21.505192821099296
+      ]
+    },
+    {
+      "job": 5,
+      "model": "normal",
+      "engine": "karume",
+      "reduce": "sequential",
+      "bucket": "default",
+      "case": "english-list",
+      "firstTtftMs": 1040.5400000214577,
+      "ttftMedianMs": 370.34500002861023,
+      "decodeMedianTokensPerSecond": 21.208586447679213,
+      "measuredTtftMs": [
+        376.27000004053116,
+        363.7950000166893,
+        370.34500002861023
+      ],
+      "measuredDecodeTokensPerSecond": [
+        21.186120064904888,
+        21.42569280671769,
+        21.208586447679213
+      ]
+    },
+    {
+      "job": 5,
+      "model": "normal",
+      "engine": "karume",
+      "reduce": "sequential",
+      "bucket": "default",
+      "case": "japanese-list",
+      "firstTtftMs": 1248.489999949932,
+      "ttftMedianMs": 671.6349999904633,
+      "decodeMedianTokensPerSecond": 23.627628573636567,
+      "measuredTtftMs": [
+        671.6349999904633,
+        651.9299999475479,
+        672.9750000238419
+      ],
+      "measuredDecodeTokensPerSecond": [
+        23.627628573636567,
+        24.65560425752361,
+        21.309592868234922
+      ]
+    },
+    {
+      "job": 6,
+      "model": "normal",
+      "engine": "karume",
+      "reduce": "parallel",
+      "bucket": "default",
+      "case": "english-list",
+      "firstTtftMs": 1032.949999988079,
+      "ttftMedianMs": 373.40499997138977,
+      "decodeMedianTokensPerSecond": 25.83666715216066,
+      "measuredTtftMs": [
+        372.8299999833107,
+        373.40499997138977,
+        373.4800000190735
+      ],
+      "measuredDecodeTokensPerSecond": [
+        24.294167664150137,
+        25.83666715216066,
+        25.944984278855223
+      ]
+    },
+    {
+      "job": 6,
+      "model": "normal",
+      "engine": "karume",
+      "reduce": "parallel",
+      "bucket": "default",
+      "case": "japanese-list",
+      "firstTtftMs": 1307.1449999809265,
+      "ttftMedianMs": 671.8249999880791,
+      "decodeMedianTokensPerSecond": 25.710560306367693,
+      "measuredTtftMs": [
+        671.8249999880791,
+        671.1150000095367,
+        678.3999999761581
+      ],
+      "measuredDecodeTokensPerSecond": [
+        25.710560306367693,
+        25.7793654593582,
+        25.52622515738972
+      ]
+    },
+    {
+      "job": 7,
+      "model": "normal",
+      "engine": "karume",
+      "reduce": "parallel",
+      "bucket": "sparse",
+      "case": "english-list",
+      "firstTtftMs": 1024.7050000429153,
+      "ttftMedianMs": 370.74000000953674,
+      "decodeMedianTokensPerSecond": 25.504369141111113,
+      "measuredTtftMs": [
+        386.7450000047684,
+        369.60999995470047,
+        370.74000000953674
+      ],
+      "measuredDecodeTokensPerSecond": [
+        25.135853302420166,
+        25.504369141111113,
+        25.537658926397896
+      ]
+    },
+    {
+      "job": 7,
+      "model": "normal",
+      "engine": "karume",
+      "reduce": "parallel",
+      "bucket": "sparse",
+      "case": "japanese-list",
+      "firstTtftMs": 1116.5299999713898,
+      "ttftMedianMs": 508.6899999976158,
+      "decodeMedianTokensPerSecond": 25.517643627929132,
+      "measuredTtftMs": [
+        521.2800000309944,
+        502.0250000357628,
+        508.6899999976158
+      ],
+      "measuredDecodeTokensPerSecond": [
+        25.517643627929132,
+        25.36436106015358,
+        25.521158255265206
+      ]
+    },
+    {
+      "job": 8,
+      "model": "normal",
+      "engine": "karume",
+      "reduce": "parallel",
+      "bucket": "dense",
+      "case": "english-list",
+      "firstTtftMs": 1099.3849999904633,
+      "ttftMedianMs": 376.3700000047684,
+      "decodeMedianTokensPerSecond": 25.140166404078172,
+      "measuredTtftMs": [
+        392.72000002861023,
+        376.3700000047684,
+        374.55500000715256
+      ],
+      "measuredDecodeTokensPerSecond": [
+        25.140166404078172,
+        25.03541716751687,
+        25.723945318417247
+      ]
+    },
+    {
+      "job": 8,
+      "model": "normal",
+      "engine": "karume",
+      "reduce": "parallel",
+      "bucket": "dense",
+      "case": "japanese-list",
+      "firstTtftMs": 986.7749999761581,
+      "ttftMedianMs": 446.30000001192093,
+      "decodeMedianTokensPerSecond": 25.548584892418347,
+      "measuredTtftMs": [
+        443.5199999809265,
+        446.30000001192093,
+        452.5949999690056
+      ],
+      "measuredDecodeTokensPerSecond": [
+        25.886882541123995,
+        25.548584892418347,
+        24.48056515106048
+      ]
+    },
+    {
+      "job": 9,
+      "model": "normal",
+      "engine": "karume",
+      "reduce": "parallel",
+      "bucket": "dense",
+      "case": "english-list",
+      "firstTtftMs": 1111.2900000214577,
+      "ttftMedianMs": 376.89000004529953,
+      "decodeMedianTokensPerSecond": 25.531087138178336,
+      "measuredTtftMs": [
+        393.74000000953674,
+        375.8600000143051,
+        376.89000004529953
+      ],
+      "measuredDecodeTokensPerSecond": [
+        25.33946843416498,
+        25.531087138178336,
+        26.03607028945786
+      ]
+    },
+    {
+      "job": 9,
+      "model": "normal",
+      "engine": "karume",
+      "reduce": "parallel",
+      "bucket": "dense",
+      "case": "japanese-list",
+      "firstTtftMs": 1054.3050000071526,
+      "ttftMedianMs": 446.164999961853,
+      "decodeMedianTokensPerSecond": 25.709038971638442,
+      "measuredTtftMs": [
+        458.6700000166893,
+        446.164999961853,
+        440.5799999833107
+      ],
+      "measuredDecodeTokensPerSecond": [
+        25.709038971638442,
+        24.49531867227254,
+        25.973115763417567
+      ]
+    },
+    {
+      "job": 10,
+      "model": "normal",
+      "engine": "karume",
+      "reduce": "parallel",
+      "bucket": "sparse",
+      "case": "english-list",
+      "firstTtftMs": 1100.6850000023842,
+      "ttftMedianMs": 375.1299999952316,
+      "decodeMedianTokensPerSecond": 25.615535212287007,
+      "measuredTtftMs": [
+        391.6399999856949,
+        375.1299999952316,
+        371.8949999809265
+      ],
+      "measuredDecodeTokensPerSecond": [
+        25.474049828467653,
+        25.615535212287007,
+        25.942366767645613
+      ]
+    },
+    {
+      "job": 10,
+      "model": "normal",
+      "engine": "karume",
+      "reduce": "parallel",
+      "bucket": "sparse",
+      "case": "japanese-list",
+      "firstTtftMs": 1138.2300000190735,
+      "ttftMedianMs": 509.10000002384186,
+      "decodeMedianTokensPerSecond": 25.711557140974918,
+      "measuredTtftMs": [
+        515.9150000214577,
+        492.94999998807907,
+        509.10000002384186
+      ],
+      "measuredDecodeTokensPerSecond": [
+        25.711557140974918,
+        25.811315188707816,
+        24.5211563089534
+      ]
+    },
+    {
+      "job": 11,
+      "model": "normal",
+      "engine": "karume",
+      "reduce": "parallel",
+      "bucket": "default",
+      "case": "english-list",
+      "firstTtftMs": 931.375,
+      "ttftMedianMs": 370.82499998807907,
+      "decodeMedianTokensPerSecond": 26.590356564340542,
+      "measuredTtftMs": [
+        396.2950000166893,
+        370.82499998807907,
+        364.1899999976158
+      ],
+      "measuredDecodeTokensPerSecond": [
+        25.24306466817947,
+        26.590356564340542,
+        28.384323743913672
+      ]
+    },
+    {
+      "job": 11,
+      "model": "normal",
+      "engine": "karume",
+      "reduce": "parallel",
+      "bucket": "default",
+      "case": "japanese-list",
+      "firstTtftMs": 1276.8899999856949,
+      "ttftMedianMs": 672.2300000190735,
+      "decodeMedianTokensPerSecond": 25.601430429624827,
+      "measuredTtftMs": [
+        672.2300000190735,
+        677.2249999642372,
+        667.4150000214577
+      ],
+      "measuredDecodeTokensPerSecond": [
+        25.899866184100873,
+        25.584171925239005,
+        25.601430429624827
+      ]
+    },
+    {
+      "job": 12,
+      "model": "normal",
+      "engine": "transformers",
+      "reduce": null,
+      "bucket": null,
+      "case": "english-list",
+      "firstTtftMs": 778.9449999928474,
+      "ttftMedianMs": 311.6100000143051,
+      "decodeMedianTokensPerSecond": 9.276704207891651,
+      "measuredTtftMs": [
+        464.4599999785423,
+        287.68000000715256,
+        311.6100000143051
+      ],
+      "measuredDecodeTokensPerSecond": [
+        9.276704207891651,
+        9.29317305811756,
+        9.26160732993312
+      ]
+    },
+    {
+      "job": 12,
+      "model": "normal",
+      "engine": "transformers",
+      "reduce": null,
+      "bucket": null,
+      "case": "japanese-list",
+      "firstTtftMs": 332.0400000214577,
+      "ttftMedianMs": 365.2900000214577,
+      "decodeMedianTokensPerSecond": 8.93514995804537,
+      "measuredTtftMs": [
+        372.4350000023842,
+        365.2900000214577,
+        357.86500000953674
+      ],
+      "measuredDecodeTokensPerSecond": [
+        9.011392975435351,
+        8.93514995804537,
+        8.884676893899034
+      ]
+    },
+    {
+      "job": 13,
+      "model": "qat",
+      "engine": "karume",
+      "reduce": "sequential",
+      "bucket": "default",
+      "case": "english-list",
+      "firstTtftMs": 1315.0999999642372,
+      "ttftMedianMs": 421.55000001192093,
+      "decodeMedianTokensPerSecond": 24.809010002013373,
+      "measuredTtftMs": [
+        421.69499999284744,
+        418.69499999284744,
+        421.55000001192093
+      ],
+      "measuredDecodeTokensPerSecond": [
+        24.809010002013373,
+        23.74388265247685,
+        25.95401607496024
+      ]
+    },
+    {
+      "job": 13,
+      "model": "qat",
+      "engine": "karume",
+      "reduce": "sequential",
+      "bucket": "default",
+      "case": "japanese-list",
+      "firstTtftMs": 1666,
+      "ttftMedianMs": 803.7049999833107,
+      "decodeMedianTokensPerSecond": 24.448359631353764,
+      "measuredTtftMs": [
+        798.3949999809265,
+        803.7049999833107,
+        818.9550000429153
+      ],
+      "measuredDecodeTokensPerSecond": [
+        24.448359631353764,
+        23.33216672456444,
+        24.702685534974794
+      ]
+    },
+    {
+      "job": 14,
+      "model": "qat",
+      "engine": "karume",
+      "reduce": "sequential",
+      "bucket": "sparse",
+      "case": "english-list",
+      "firstTtftMs": 1350.2249999642372,
+      "ttftMedianMs": 425.0949999690056,
+      "decodeMedianTokensPerSecond": 24.55125757051855,
+      "measuredTtftMs": [
+        420.0900000333786,
+        432.9500000476837,
+        425.0949999690056
+      ],
+      "measuredDecodeTokensPerSecond": [
+        24.69464870914575,
+        24.55125757051855,
+        24.379767115042025
+      ]
+    },
+    {
+      "job": 14,
+      "model": "qat",
+      "engine": "karume",
+      "reduce": "sequential",
+      "bucket": "sparse",
+      "case": "japanese-list",
+      "firstTtftMs": 1457.324999988079,
+      "ttftMedianMs": 613.3950000405312,
+      "decodeMedianTokensPerSecond": 24.50832602291128,
+      "measuredTtftMs": [
+        614.5950000286102,
+        613.3950000405312,
+        606.125
+      ],
+      "measuredDecodeTokensPerSecond": [
+        24.226995410596864,
+        24.871840930619094,
+        24.50832602291128
+      ]
+    },
+    {
+      "job": 15,
+      "model": "qat",
+      "engine": "karume",
+      "reduce": "sequential",
+      "bucket": "dense",
+      "case": "english-list",
+      "firstTtftMs": 1449.7549999952316,
+      "ttftMedianMs": 424.1650000214577,
+      "decodeMedianTokensPerSecond": 24.118294492032348,
+      "measuredTtftMs": [
+        400.80500000715256,
+        424.1650000214577,
+        426.0600000023842
+      ],
+      "measuredDecodeTokensPerSecond": [
+        24.118294492032348,
+        24.185560836150128,
+        24.044470821446374
+      ]
+    },
+    {
+      "job": 15,
+      "model": "qat",
+      "engine": "karume",
+      "reduce": "sequential",
+      "bucket": "dense",
+      "case": "japanese-list",
+      "firstTtftMs": 1304.324999988079,
+      "ttftMedianMs": 526.1400000452995,
+      "decodeMedianTokensPerSecond": 24.38415494406743,
+      "measuredTtftMs": [
+        526.1400000452995,
+        531.7849999666214,
+        511.9950000047684
+      ],
+      "measuredDecodeTokensPerSecond": [
+        24.687681238975863,
+        24.38415494406743,
+        24.263431542461007
+      ]
+    },
+    {
+      "job": 16,
+      "model": "qat",
+      "engine": "karume",
+      "reduce": "sequential",
+      "bucket": "dense",
+      "case": "english-list",
+      "firstTtftMs": 1281.6000000238419,
+      "ttftMedianMs": 419.0149999856949,
+      "decodeMedianTokensPerSecond": 24.481278622390633,
+      "measuredTtftMs": [
+        419.0149999856949,
+        433.5649999976158,
+        416.6199999451637
+      ],
+      "measuredDecodeTokensPerSecond": [
+        24.613557381843666,
+        24.481278622390633,
+        24.23510358558912
+      ]
+    },
+    {
+      "job": 16,
+      "model": "qat",
+      "engine": "karume",
+      "reduce": "sequential",
+      "bucket": "dense",
+      "case": "japanese-list",
+      "firstTtftMs": 1350.2599999904633,
+      "ttftMedianMs": 517.6399999856949,
+      "decodeMedianTokensPerSecond": 24.543701423696294,
+      "measuredTtftMs": [
+        525.464999973774,
+        517.6399999856949,
+        517.2849999666214
+      ],
+      "measuredDecodeTokensPerSecond": [
+        24.617452601382634,
+        24.36510530152869,
+        24.543701423696294
+      ]
+    },
+    {
+      "job": 17,
+      "model": "qat",
+      "engine": "karume",
+      "reduce": "sequential",
+      "bucket": "sparse",
+      "case": "english-list",
+      "firstTtftMs": 1404.839999973774,
+      "ttftMedianMs": 419.6599999666214,
+      "decodeMedianTokensPerSecond": 24.52645450661989,
+      "measuredTtftMs": [
+        417.58000004291534,
+        433.05500000715256,
+        419.6599999666214
+      ],
+      "measuredDecodeTokensPerSecond": [
+        24.723916268475705,
+        24.52645450661989,
+        24.287283871640508
+      ]
+    },
+    {
+      "job": 17,
+      "model": "qat",
+      "engine": "karume",
+      "reduce": "sequential",
+      "bucket": "sparse",
+      "case": "japanese-list",
+      "firstTtftMs": 1353.875,
+      "ttftMedianMs": 613.2849999666214,
+      "decodeMedianTokensPerSecond": 24.27740987016047,
+      "measuredTtftMs": [
+        607.6449999809265,
+        613.2849999666214,
+        614.6899999976158
+      ],
+      "measuredDecodeTokensPerSecond": [
+        24.27740987016047,
+        24.47994684329453,
+        24.177578558229346
+      ]
+    },
+    {
+      "job": 18,
+      "model": "qat",
+      "engine": "karume",
+      "reduce": "sequential",
+      "bucket": "default",
+      "case": "english-list",
+      "firstTtftMs": 1368.2750000357628,
+      "ttftMedianMs": 424.2450000047684,
+      "decodeMedianTokensPerSecond": 24.326860328889886,
+      "measuredTtftMs": [
+        419.48499995470047,
+        424.2450000047684,
+        424.60000002384186
+      ],
+      "measuredDecodeTokensPerSecond": [
+        24.504512914052707,
+        24.326860328889886,
+        23.789564311400618
+      ]
+    },
+    {
+      "job": 18,
+      "model": "qat",
+      "engine": "karume",
+      "reduce": "sequential",
+      "bucket": "default",
+      "case": "japanese-list",
+      "firstTtftMs": 1644.6850000023842,
+      "ttftMedianMs": 802.3199999928474,
+      "decodeMedianTokensPerSecond": 24.361948955916475,
+      "measuredTtftMs": [
+        801.6749999523163,
+        802.3199999928474,
+        819.960000038147
+      ],
+      "measuredDecodeTokensPerSecond": [
+        24.361948955916475,
+        24.115478692186016,
+        24.38967735938842
+      ]
+    },
+    {
+      "job": 19,
+      "model": "qat",
+      "engine": "karume",
+      "reduce": "parallel",
+      "bucket": "default",
+      "case": "english-list",
+      "firstTtftMs": 1238.6850000023842,
+      "ttftMedianMs": 424.1650000214577,
+      "decodeMedianTokensPerSecond": 26.53592458758944,
+      "measuredTtftMs": [
+        413.19499999284744,
+        431.0049999952316,
+        424.1650000214577
+      ],
+      "measuredDecodeTokensPerSecond": [
+        26.881720430517735,
+        26.524473037036092,
+        26.53592458758944
+      ]
+    },
+    {
+      "job": 19,
+      "model": "qat",
+      "engine": "karume",
+      "reduce": "parallel",
+      "bucket": "default",
+      "case": "japanese-list",
+      "firstTtftMs": 1627.9199999570847,
+      "ttftMedianMs": 804.6549999713898,
+      "decodeMedianTokensPerSecond": 26.687282239055296,
+      "measuredTtftMs": [
+        799.6650000214577,
+        804.6549999713898,
+        833.7749999761581
+      ],
+      "measuredDecodeTokensPerSecond": [
+        26.687282239055296,
+        26.696329254727473,
+        26.449251024198368
+      ]
+    },
+    {
+      "job": 20,
+      "model": "qat",
+      "engine": "karume",
+      "reduce": "parallel",
+      "bucket": "sparse",
+      "case": "english-list",
+      "firstTtftMs": 1229.800000011921,
+      "ttftMedianMs": 424.82499998807907,
+      "decodeMedianTokensPerSecond": 26.739953947451195,
+      "measuredTtftMs": [
+        424.2649999856949,
+        425.64000004529953,
+        424.82499998807907
+      ],
+      "measuredDecodeTokensPerSecond": [
+        27.248133178747615,
+        26.434268882881163,
+        26.739953947451195
+      ]
+    },
+    {
+      "job": 20,
+      "model": "qat",
+      "engine": "karume",
+      "reduce": "parallel",
+      "bucket": "sparse",
+      "case": "japanese-list",
+      "firstTtftMs": 1272.835000038147,
+      "ttftMedianMs": 615.2650000452995,
+      "decodeMedianTokensPerSecond": 26.522742199025693,
+      "measuredTtftMs": [
+        614.3349999785423,
+        615.2650000452995,
+        623.0199999809265
+      ],
+      "measuredDecodeTokensPerSecond": [
+        26.803606148580595,
+        26.18932805664276,
+        26.522742199025693
+      ]
+    },
+    {
+      "job": 21,
+      "model": "qat",
+      "engine": "karume",
+      "reduce": "parallel",
+      "bucket": "dense",
+      "case": "english-list",
+      "firstTtftMs": 1262.1699999570847,
+      "ttftMedianMs": 414.0149999856949,
+      "decodeMedianTokensPerSecond": 26.879311889588283,
+      "measuredTtftMs": [
+        414.0149999856949,
+        436.1899999976158,
+        410.85000002384186
+      ],
+      "measuredDecodeTokensPerSecond": [
+        27.012425715939738,
+        26.605853287321466,
+        26.879311889588283
+      ]
+    },
+    {
+      "job": 21,
+      "model": "qat",
+      "engine": "karume",
+      "reduce": "parallel",
+      "bucket": "dense",
+      "case": "japanese-list",
+      "firstTtftMs": 1292.574999988079,
+      "ttftMedianMs": 532.285000026226,
+      "decodeMedianTokensPerSecond": 26.88900602403471,
+      "measuredTtftMs": [
+        532.285000026226,
+        541.1750000119209,
+        511.90499997138977
+      ],
+      "measuredDecodeTokensPerSecond": [
+        27.07028606445109,
+        26.496138082917014,
+        26.88900602403471
+      ]
+    },
+    {
+      "job": 22,
+      "model": "qat",
+      "engine": "karume",
+      "reduce": "parallel",
+      "bucket": "dense",
+      "case": "english-list",
+      "firstTtftMs": 1379.5450000166893,
+      "ttftMedianMs": 416.96499997377396,
+      "decodeMedianTokensPerSecond": 26.674344361632464,
+      "measuredTtftMs": [
+        416.1850000023842,
+        416.96499997377396,
+        426.25999999046326
+      ],
+      "measuredDecodeTokensPerSecond": [
+        27.175319633856777,
+        26.674344361632464,
+        26.580764386945678
+      ]
+    },
+    {
+      "job": 22,
+      "model": "qat",
+      "engine": "karume",
+      "reduce": "parallel",
+      "bucket": "dense",
+      "case": "japanese-list",
+      "firstTtftMs": 1230.5799999833107,
+      "ttftMedianMs": 524.6650000214577,
+      "decodeMedianTokensPerSecond": 26.728835959248052,
+      "measuredTtftMs": [
+        524.6650000214577,
+        563.6000000238419,
+        508.29499995708466
+      ],
+      "measuredDecodeTokensPerSecond": [
+        26.728835959248052,
+        26.962483630113237,
+        26.620468181934132
+      ]
+    },
+    {
+      "job": 23,
+      "model": "qat",
+      "engine": "karume",
+      "reduce": "parallel",
+      "bucket": "sparse",
+      "case": "english-list",
+      "firstTtftMs": 1253.4350000023842,
+      "ttftMedianMs": 425.44999998807907,
+      "decodeMedianTokensPerSecond": 26.829974617937783,
+      "measuredTtftMs": [
+        420.35000002384186,
+        435.38499999046326,
+        425.44999998807907
+      ],
+      "measuredDecodeTokensPerSecond": [
+        27.003684074207104,
+        26.829974617937783,
+        25.447451013681306
+      ]
+    },
+    {
+      "job": 23,
+      "model": "qat",
+      "engine": "karume",
+      "reduce": "parallel",
+      "bucket": "sparse",
+      "case": "japanese-list",
+      "firstTtftMs": 1299.2150000333786,
+      "ttftMedianMs": 607.464999973774,
+      "decodeMedianTokensPerSecond": 26.60562856901491,
+      "measuredTtftMs": [
+        604.1049999594688,
+        611.460000038147,
+        607.464999973774
+      ],
+      "measuredDecodeTokensPerSecond": [
+        26.96588815118566,
+        26.60562856901491,
+        25.563824347949357
+      ]
+    },
+    {
+      "job": 24,
+      "model": "qat",
+      "engine": "karume",
+      "reduce": "parallel",
+      "bucket": "default",
+      "case": "english-list",
+      "firstTtftMs": 1359.6949999928474,
+      "ttftMedianMs": 427.3149999976158,
+      "decodeMedianTokensPerSecond": 26.708156162354108,
+      "measuredTtftMs": [
+        417.9899999499321,
+        432.97999995946884,
+        427.3149999976158
+      ],
+      "measuredDecodeTokensPerSecond": [
+        27.085590465427938,
+        26.6289071578355,
+        26.708156162354108
+      ]
+    },
+    {
+      "job": 24,
+      "model": "qat",
+      "engine": "karume",
+      "reduce": "parallel",
+      "bucket": "default",
+      "case": "japanese-list",
+      "firstTtftMs": 1675.7799999713898,
+      "ttftMedianMs": 805.5649999976158,
+      "decodeMedianTokensPerSecond": 26.639435243731118,
+      "measuredTtftMs": [
+        806.0400000214577,
+        800.6599999666214,
+        805.5649999976158
+      ],
+      "measuredDecodeTokensPerSecond": [
+        25.310658197712815,
+        26.706344664345888,
+        26.639435243731118
+      ]
+    },
+    {
+      "job": 25,
+      "model": "qat",
+      "engine": "transformers",
+      "reduce": null,
+      "bucket": null,
+      "case": "english-list",
+      "firstTtftMs": 1061.9800000190735,
+      "ttftMedianMs": 770.7549999952316,
+      "decodeMedianTokensPerSecond": 10.173063181910504,
+      "measuredTtftMs": [
+        770.7549999952316,
+        757.4900000095367,
+        778.7099999785423
+      ],
+      "measuredDecodeTokensPerSecond": [
+        9.854212402007617,
+        10.697139364177739,
+        10.173063181910504
+      ]
+    },
+    {
+      "job": 25,
+      "model": "qat",
+      "engine": "transformers",
+      "reduce": null,
+      "bucket": null,
+      "case": "japanese-list",
+      "firstTtftMs": 962.4049999713898,
+      "ttftMedianMs": 937.660000026226,
+      "decodeMedianTokensPerSecond": 10.160675765578695,
+      "measuredTtftMs": [
+        910.7249999642372,
+        955.1999999880791,
+        937.660000026226
+      ],
+      "measuredDecodeTokensPerSecond": [
+        10.160675765578695,
+        10.373153619810836,
+        9.862666285782922
+      ]
+    }
+  ],
+  "externalEngines": [
+    {
+      "format": "karume-browser-speed/1",
+      "engine": "transformers",
+      "model": "normal",
+      "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
+      "platform": "MacIntel",
+      "date": "2026-09-13T08:18:24.681Z",
+      "loadSeconds": 121.00925499999524,
+      "transformers": "4.2.0",
+      "onnxruntime": "1.29.0",
+      "repo": "onnx-community/gemma-4-E2B-it-ONNX",
+      "revision": "9f4bef82ea6e296bc69f8a2f5939f73af81b07a6",
+      "dtype": "q4f16",
+      "local": false,
+      "compute": "f16",
+      "sessions": [
+        "embed_tokens",
+        "decoder_model_merged"
+      ],
+      "wasmThreads": 1,
+      "cache": "dynamic KV",
+      "textOnly": true,
+      "sampler": {
+        "temperature": 0
+      },
+      "maxNewTokens": 64,
+      "textDecodingTimed": false,
+      "checkout": "e03114dec9811dbab048cbf5df096e9752e6b3b0",
+      "checkoutDirty": false,
+      "bundleSha256": "ee7359283820dd12b6f8846fd59519a4477a9c68665feb02e6a610fc74a2d59b"
+    },
+    {
+      "format": "karume-browser-speed/1",
+      "engine": "transformers",
+      "model": "qat",
+      "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
+      "platform": "MacIntel",
+      "date": "2026-09-13T08:29:33.893Z",
+      "loadSeconds": 95.84608000004292,
+      "transformers": "4.2.0",
+      "onnxruntime": "1.29.0",
+      "repo": "onnx-community/gemma-4-E2B-it-qat-mobile-ONNX",
+      "revision": "5cd5514efd375abf2801c856a3936b259cc00133",
+      "dtype": "q2f16",
+      "local": false,
+      "compute": "f16",
+      "sessions": [
+        "embed_tokens",
+        "decoder_model_merged"
+      ],
+      "wasmThreads": 1,
+      "cache": "dynamic KV",
+      "textOnly": true,
+      "sampler": {
+        "temperature": 0
+      },
+      "maxNewTokens": 64,
+      "textDecodingTimed": false,
+      "checkout": "e03114dec9811dbab048cbf5df096e9752e6b3b0",
+      "checkoutDirty": false,
+      "bundleSha256": "ee7359283820dd12b6f8846fd59519a4477a9c68665feb02e6a610fc74a2d59b"
+    }
+  ],
+  "timeline": [
+    {
+      "job": 0,
+      "model": "normal",
+      "engine": "karume",
+      "reduce": "sequential",
+      "bucket": "default",
+      "resultCreatedAt": "2026-09-13T08:07:27.602Z",
+      "loadSeconds": 3.928360000014305,
+      "allGenerationsSeconds": 29.605540000021456,
+      "secondsSincePreviousResult": null,
+      "unattributedSecondsSincePrevious": null
+    },
+    {
+      "job": 1,
+      "model": "normal",
+      "engine": "karume",
+      "reduce": "sequential",
+      "bucket": "sparse",
+      "resultCreatedAt": "2026-09-13T08:07:59.319Z",
+      "loadSeconds": 2.841514999985695,
+      "allGenerationsSeconds": 28.823590000033377,
+      "secondsSincePreviousResult": 31.717,
+      "unattributedSecondsSincePrevious": 0.05189499998092728
+    },
+    {
+      "job": 2,
+      "model": "normal",
+      "engine": "karume",
+      "reduce": "sequential",
+      "bucket": "dense",
+      "resultCreatedAt": "2026-09-13T08:08:35.701Z",
+      "loadSeconds": 3.189504999995232,
+      "allGenerationsSeconds": 33.13097499984503,
+      "secondsSincePreviousResult": 36.382,
+      "unattributedSecondsSincePrevious": 0.061520000159738686
+    },
+    {
+      "job": 3,
+      "model": "normal",
+      "engine": "karume",
+      "reduce": "sequential",
+      "bucket": "dense",
+      "resultCreatedAt": "2026-09-13T08:09:22.671Z",
+      "loadSeconds": 10.058134999990463,
+      "allGenerationsSeconds": 36.755044999957086,
+      "secondsSincePreviousResult": 46.97,
+      "unattributedSecondsSincePrevious": 0.15682000005244845
+    },
+    {
+      "job": 4,
+      "model": "normal",
+      "engine": "karume",
+      "reduce": "sequential",
+      "bucket": "sparse",
+      "resultCreatedAt": "2026-09-13T08:10:09.909Z",
+      "loadSeconds": 10.154800000011921,
+      "allGenerationsSeconds": 36.91535000002384,
+      "secondsSincePreviousResult": 47.238,
+      "unattributedSecondsSincePrevious": 0.16784999996423977
+    },
+    {
+      "job": 5,
+      "model": "normal",
+      "engine": "karume",
+      "reduce": "sequential",
+      "bucket": "default",
+      "resultCreatedAt": "2026-09-13T08:10:56.190Z",
+      "loadSeconds": 9.339115000009537,
+      "allGenerationsSeconds": 36.79220500004291,
+      "secondsSincePreviousResult": 46.281,
+      "unattributedSecondsSincePrevious": 0.14967999994755132
+    },
+    {
+      "job": 6,
+      "model": "normal",
+      "engine": "karume",
+      "reduce": "parallel",
+      "bucket": "default",
+      "resultCreatedAt": "2026-09-13T08:11:38.845Z",
+      "loadSeconds": 9.619894999980927,
+      "allGenerationsSeconds": 32.871594999969005,
+      "secondsSincePreviousResult": 42.655,
+      "unattributedSecondsSincePrevious": 0.1635100000500671
+    },
+    {
+      "job": 7,
+      "model": "normal",
+      "engine": "karume",
+      "reduce": "parallel",
+      "bucket": "sparse",
+      "resultCreatedAt": "2026-09-13T08:12:20.859Z",
+      "loadSeconds": 9.889539999961853,
+      "allGenerationsSeconds": 31.951734999954702,
+      "secondsSincePreviousResult": 42.014,
+      "unattributedSecondsSincePrevious": 0.17272500008344593
+    },
+    {
+      "job": 8,
+      "model": "normal",
+      "engine": "karume",
+      "reduce": "parallel",
+      "bucket": "dense",
+      "resultCreatedAt": "2026-09-13T08:13:02.598Z",
+      "loadSeconds": 9.901730000019073,
+      "allGenerationsSeconds": 31.66851000005007,
+      "secondsSincePreviousResult": 41.739,
+      "unattributedSecondsSincePrevious": 0.168759999930856
+    },
+    {
+      "job": 9,
+      "model": "normal",
+      "engine": "karume",
+      "reduce": "parallel",
+      "bucket": "dense",
+      "resultCreatedAt": "2026-09-13T08:13:45.188Z",
+      "loadSeconds": 9.944444999992847,
+      "allGenerationsSeconds": 32.46533000010252,
+      "secondsSincePreviousResult": 42.59,
+      "unattributedSecondsSincePrevious": 0.18022499990463814
+    },
+    {
+      "job": 10,
+      "model": "normal",
+      "engine": "karume",
+      "reduce": "parallel",
+      "bucket": "sparse",
+      "resultCreatedAt": "2026-09-13T08:14:26.060Z",
+      "loadSeconds": 8.598009999990463,
+      "allGenerationsSeconds": 32.11155500000715,
+      "secondsSincePreviousResult": 40.872,
+      "unattributedSecondsSincePrevious": 0.16243500000238242
+    },
+    {
+      "job": 11,
+      "model": "normal",
+      "engine": "karume",
+      "reduce": "parallel",
+      "bucket": "default",
+      "resultCreatedAt": "2026-09-13T08:15:08.448Z",
+      "loadSeconds": 9.919689999997615,
+      "allGenerationsSeconds": 32.32386999994517,
+      "secondsSincePreviousResult": 42.388,
+      "unattributedSecondsSincePrevious": 0.1444400000572159
+    },
+    {
+      "job": 12,
+      "model": "normal",
+      "engine": "transformers",
+      "reduce": null,
+      "bucket": null,
+      "resultCreatedAt": "2026-09-13T08:18:24.681Z",
+      "loadSeconds": 121.00925499999524,
+      "allGenerationsSeconds": 75.04659999996424,
+      "secondsSincePreviousResult": 196.233,
+      "unattributedSecondsSincePrevious": 0.17714500004052525
+    },
+    {
+      "job": 13,
+      "model": "qat",
+      "engine": "karume",
+      "reduce": "sequential",
+      "bucket": "default",
+      "resultCreatedAt": "2026-09-13T08:19:09.601Z",
+      "loadSeconds": 8.06657499998808,
+      "allGenerationsSeconds": 36.53346500009298,
+      "secondsSincePreviousResult": 44.92,
+      "unattributedSecondsSincePrevious": 0.3199599999189431
+    },
+    {
+      "job": 14,
+      "model": "qat",
+      "engine": "karume",
+      "reduce": "sequential",
+      "bucket": "sparse",
+      "resultCreatedAt": "2026-09-13T08:19:52.906Z",
+      "loadSeconds": 8.050664999961853,
+      "allGenerationsSeconds": 35.10550500011444,
+      "secondsSincePreviousResult": 43.305,
+      "unattributedSecondsSincePrevious": 0.1488299999237057
+    },
+    {
+      "job": 15,
+      "model": "qat",
+      "engine": "karume",
+      "reduce": "sequential",
+      "bucket": "dense",
+      "resultCreatedAt": "2026-09-13T08:20:35.776Z",
+      "loadSeconds": 7.926444999992848,
+      "allGenerationsSeconds": 34.77286500000954,
+      "secondsSincePreviousResult": 42.87,
+      "unattributedSecondsSincePrevious": 0.17068999999761303
+    },
+    {
+      "job": 16,
+      "model": "qat",
+      "engine": "karume",
+      "reduce": "sequential",
+      "bucket": "dense",
+      "resultCreatedAt": "2026-09-13T08:21:17.942Z",
+      "loadSeconds": 7.6916099999547,
+      "allGenerationsSeconds": 34.32089499992132,
+      "secondsSincePreviousResult": 42.166,
+      "unattributedSecondsSincePrevious": 0.153495000123975
+    },
+    {
+      "job": 17,
+      "model": "qat",
+      "engine": "karume",
+      "reduce": "sequential",
+      "bucket": "sparse",
+      "resultCreatedAt": "2026-09-13T08:22:00.219Z",
+      "loadSeconds": 7.3373149999976155,
+      "allGenerationsSeconds": 34.77287499988079,
+      "secondsSincePreviousResult": 42.277,
+      "unattributedSecondsSincePrevious": 0.1668100001215933
+    },
+    {
+      "job": 18,
+      "model": "qat",
+      "engine": "karume",
+      "reduce": "sequential",
+      "bucket": "default",
+      "resultCreatedAt": "2026-09-13T08:22:44.469Z",
+      "loadSeconds": 7.991060000002384,
+      "allGenerationsSeconds": 36.21432500010729,
+      "secondsSincePreviousResult": 44.25,
+      "unattributedSecondsSincePrevious": 0.04461499989032802
+    },
+    {
+      "job": 19,
+      "model": "qat",
+      "engine": "karume",
+      "reduce": "parallel",
+      "bucket": "default",
+      "resultCreatedAt": "2026-09-13T08:23:24.634Z",
+      "loadSeconds": 6.521670000016689,
+      "allGenerationsSeconds": 33.498554999947544,
+      "secondsSincePreviousResult": 40.165,
+      "unattributedSecondsSincePrevious": 0.14477500003576438
+    },
+    {
+      "job": 20,
+      "model": "qat",
+      "engine": "karume",
+      "reduce": "parallel",
+      "bucket": "sparse",
+      "resultCreatedAt": "2026-09-13T08:24:04.835Z",
+      "loadSeconds": 7.593899999976158,
+      "allGenerationsSeconds": 32.46898000001907,
+      "secondsSincePreviousResult": 40.201,
+      "unattributedSecondsSincePrevious": 0.13812000000476843
+    },
+    {
+      "job": 21,
+      "model": "qat",
+      "engine": "karume",
+      "reduce": "parallel",
+      "bucket": "dense",
+      "resultCreatedAt": "2026-09-13T08:24:44.305Z",
+      "loadSeconds": 7.257524999976158,
+      "allGenerationsSeconds": 32.05572000002861,
+      "secondsSincePreviousResult": 39.47,
+      "unattributedSecondsSincePrevious": 0.15675499999523623
+    },
+    {
+      "job": 22,
+      "model": "qat",
+      "engine": "karume",
+      "reduce": "parallel",
+      "bucket": "dense",
+      "resultCreatedAt": "2026-09-13T08:25:23.461Z",
+      "loadSeconds": 6.818865000009537,
+      "allGenerationsSeconds": 32.1758749999404,
+      "secondsSincePreviousResult": 39.156,
+      "unattributedSecondsSincePrevious": 0.16126000005006347
+    },
+    {
+      "job": 23,
+      "model": "qat",
+      "engine": "karume",
+      "reduce": "parallel",
+      "bucket": "sparse",
+      "resultCreatedAt": "2026-09-13T08:26:03.743Z",
+      "loadSeconds": 7.621139999985695,
+      "allGenerationsSeconds": 32.51450499999523,
+      "secondsSincePreviousResult": 40.282,
+      "unattributedSecondsSincePrevious": 0.14635500001907076
+    },
+    {
+      "job": 24,
+      "model": "qat",
+      "engine": "karume",
+      "reduce": "parallel",
+      "bucket": "default",
+      "resultCreatedAt": "2026-09-13T08:26:45.858Z",
+      "loadSeconds": 8.07682999998331,
+      "allGenerationsSeconds": 33.87027499991655,
+      "secondsSincePreviousResult": 42.115,
+      "unattributedSecondsSincePrevious": 0.16789500010013825
+    },
+    {
+      "job": 25,
+      "model": "qat",
+      "engine": "transformers",
+      "reduce": null,
+      "bucket": null,
+      "resultCreatedAt": "2026-09-13T08:29:33.893Z",
+      "loadSeconds": 95.84608000004292,
+      "allGenerationsSeconds": 72.04053499996662,
+      "secondsSincePreviousResult": 168.035,
+      "unattributedSecondsSincePrevious": 0.14838499999045496
+    }
+  ]
+}

@@ -85,17 +85,18 @@
   </head>
   <body>
     <h1>Gemma E2B · ブラウザ速度比較</h1>
-    <p class="muted">同じChromeで karume と Transformers.js を順番に計測します。</p>
+    <p
+      class="muted">初期選択は通常版・QATのKarumeを並列加算・入力バケット細分化で計測します。設定を変更してTransformers.jsや参照経路とも比較できます。</p>
     <p>固定の英語・日本語入力から最大64トークンを生成。初回 → 暖機1回 → 本計測3回。TTFTは最初のトークンまでの時間、decodeはそれ以降の生成速度です。モデル取得・読み込み時間は別計測です。</p>
     <p>通常版ONNXはq4f16、QAT ONNXはq2f16。karumeはf32演算です。配布重み・量子化・KVキャッシュの構成も異なるため、エンジン単独の性能差ではありません。</p>
     <div class="controls">
-      <label>モデル<select id="model"><option value="normal">Gemma 4 E2B</option><option value="qat">Gemma 4 QAT E2B</option><option value="both">両方</option></select></label>
-      <label>比較対象<select id="engine"><option value="both">両方（順番に実行）</option><option value="karume">karume</option><option value="transformers">Transformers.js</option></select></label>
-      <label>Karumeの行列計算<select id="reduce"><option value="quant">quant定義に従う</option><option value="sequential">逐次加算を指定</option><option value="parallel">並列加算を指定</option><option value="both">逐次と並列を比較</option></select></label>
-      <label>Karumeの入力バケット<select id="prefill"><option value="default">標準</option><option value="sparse">少数追加</option><option value="dense">細分化</option><option value="all">3種類を往復比較</option></select></label>
+      <label>モデル<select id="model"><option value="normal">Gemma 4 E2B</option><option value="qat">Gemma 4 QAT E2B</option><option value="both" selected>両方</option></select></label>
+      <label>比較対象<select id="engine"><option value="both">両方（順番に実行）</option><option value="karume" selected>karume</option><option value="transformers">Transformers.js</option></select></label>
+      <label>Karumeの行列計算<select id="reduce"><option value="quant">quant定義に従う</option><option value="sequential">逐次加算を指定</option><option value="parallel" selected>並列加算を指定</option><option value="both">逐次と並列を比較</option></select></label>
+      <label>Karumeの入力バケット<select id="prefill"><option value="default">標準</option><option value="sparse">少数追加</option><option value="dense" selected>細分化</option><option value="all">3種類を往復比較</option></select></label>
       <button id="run">計測開始</button><button id="save" disabled>JSONを保存</button>
     </div>
-    <p>既定では配布形のquant定義に従います。逐次と並列の比較では同じquantの加算方式だけを上書きします。重みは同じですが丸め順が変わり、特にQATでは文章も変わる場合があります。</p>
+    <p>「quant定義に従う」を選ぶと配布形の設定を使います。初期選択の「並列加算を指定」と逐次・並列の比較では、同じquantの加算方式だけを上書きします。重みは同じですが丸め順が変わり、特にQATでは文章も変わる場合があります。</p>
     <p>入力バケットは最初のトークンまでの待ち時間を比較する実験用設定です。往復比較は「標準 → 少数追加 → 細分化 → 細分化 → 少数追加 → 標準」の順に実行します。行列計算の比較も選ぶと1モデルにつき12回読み込みます。Transformers.jsには適用しません。</p>
     <p id="environment" class="muted"></p>
     <p id="status" role="status" aria-live="polite">準備中</p>
