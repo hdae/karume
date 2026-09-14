@@ -1,0 +1,3177 @@
+{
+  "snapshotDate": "2026-09-14",
+  "branch": "codex/review-and-fix",
+  "base": "4dca96af3bee228065c9ece1b0826f23f7822f7f",
+  "localMain": "4dca96af3bee228065c9ece1b0826f23f7822f7f",
+  "head": "c014231cd4b1875870674f3bf20247a4cf7cbc41",
+  "mainAncestor": true,
+  "leftRight": [
+    "0",
+    "62"
+  ],
+  "commitCount": 62,
+  "fileCount": 356,
+  "groups": {
+    "configuration": {
+      "files": 2,
+      "added": 35,
+      "deleted": 9
+    },
+    "documentation": {
+      "files": 47,
+      "added": 6546,
+      "deleted": 47
+    },
+    "examples": {
+      "files": 21,
+      "added": 3115,
+      "deleted": 618
+    },
+    "exporter": {
+      "files": 13,
+      "added": 319,
+      "deleted": 26
+    },
+    "fixtures": {
+      "files": 78,
+      "added": 5107,
+      "deleted": 3442
+    },
+    "hub": {
+      "files": 2,
+      "added": 10,
+      "deleted": 6
+    },
+    "models": {
+      "files": 15,
+      "added": 1191,
+      "deleted": 261
+    },
+    "recipes": {
+      "files": 14,
+      "added": 875,
+      "deleted": 16
+    },
+    "research-data": {
+      "files": 17,
+      "added": 69322,
+      "deleted": 0
+    },
+    "runtime": {
+      "files": 36,
+      "added": 1987,
+      "deleted": 530
+    },
+    "tests": {
+      "files": 92,
+      "added": 7989,
+      "deleted": 229
+    },
+    "tools": {
+      "files": 19,
+      "added": 3108,
+      "deleted": 0
+    }
+  },
+  "files": [
+    {
+      "path": ".claude/ACTIVE_DESIGN.md",
+      "status": "M",
+      "group": "documentation",
+      "added": 29,
+      "deleted": 3,
+      "binary": false
+    },
+    {
+      "path": "AGENTS.md",
+      "status": "A",
+      "group": "documentation",
+      "added": 167,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "README.md",
+      "status": "M",
+      "group": "documentation",
+      "added": 7,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "deno.json",
+      "status": "M",
+      "group": "configuration",
+      "added": 21,
+      "deleted": 6,
+      "binary": false
+    },
+    {
+      "path": "deno.lock",
+      "status": "M",
+      "group": "configuration",
+      "added": 14,
+      "deleted": 3,
+      "binary": false
+    },
+    {
+      "path": "docs/assets-layout.md",
+      "status": "M",
+      "group": "documentation",
+      "added": 15,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/backlog.md",
+      "status": "M",
+      "group": "documentation",
+      "added": 53,
+      "deleted": 6,
+      "binary": false
+    },
+    {
+      "path": "docs/decisions/0010-symbolic-constant-folding.md",
+      "status": "M",
+      "group": "documentation",
+      "added": 5,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/decisions/0017-rms-norm-conv2d-clamp-min.md",
+      "status": "M",
+      "group": "documentation",
+      "added": 19,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/decisions/0040-fusion-pass.md",
+      "status": "M",
+      "group": "documentation",
+      "added": 17,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/decisions/0042-prepared-execution-plan.md",
+      "status": "M",
+      "group": "documentation",
+      "added": 25,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/decisions/0044-runtime-attention-mask.md",
+      "status": "M",
+      "group": "documentation",
+      "added": 7,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/decisions/0054-resident-loop-and-fence.md",
+      "status": "M",
+      "group": "documentation",
+      "added": 23,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/decisions/0058-numerics-opt-in-contract.md",
+      "status": "M",
+      "group": "documentation",
+      "added": 20,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/decisions/0066-generation-context-state-slots.md",
+      "status": "M",
+      "group": "documentation",
+      "added": 30,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/decisions/0068-decode-exit-multi-output.md",
+      "status": "M",
+      "group": "documentation",
+      "added": 39,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/decisions/0070-shard-loading-admission.md",
+      "status": "M",
+      "group": "documentation",
+      "added": 15,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/decisions/0074-quant-seat-naming.md",
+      "status": "M",
+      "group": "documentation",
+      "added": 6,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/decisions/0082-linear-gemv-decode.md",
+      "status": "M",
+      "group": "documentation",
+      "added": 72,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/decisions/0083-generation-api-surface.md",
+      "status": "M",
+      "group": "documentation",
+      "added": 44,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/decisions/0084-gemma-tokenizer-chat.md",
+      "status": "M",
+      "group": "documentation",
+      "added": 18,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/decisions/0085-ple-host-gather.md",
+      "status": "M",
+      "group": "documentation",
+      "added": 41,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/decisions/0097-gemma4-qat-integration.md",
+      "status": "A",
+      "group": "documentation",
+      "added": 195,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/decisions/0098-linear-gemv-parallel.md",
+      "status": "A",
+      "group": "documentation",
+      "added": 61,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/decisions/0099-rms-norm-add-fusion.md",
+      "status": "A",
+      "group": "documentation",
+      "added": 54,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/decisions/0100-rms-subgroup-reduction.md",
+      "status": "A",
+      "group": "documentation",
+      "added": 60,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/decisions/0101-linear-gemv-subgroup.md",
+      "status": "A",
+      "group": "documentation",
+      "added": 59,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/ir-v1.md",
+      "status": "M",
+      "group": "documentation",
+      "added": 19,
+      "deleted": 5,
+      "binary": false
+    },
+    {
+      "path": "docs/known-issues.md",
+      "status": "M",
+      "group": "documentation",
+      "added": 13,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/limitations.md",
+      "status": "M",
+      "group": "documentation",
+      "added": 29,
+      "deleted": 4,
+      "binary": false
+    },
+    {
+      "path": "docs/op-vocabulary.md",
+      "status": "M",
+      "group": "documentation",
+      "added": 5,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/perf-ledger.md",
+      "status": "M",
+      "group": "documentation",
+      "added": 68,
+      "deleted": 29,
+      "binary": false
+    },
+    {
+      "path": "docs/research/2026-09-10-codex-mtp-optimization.md",
+      "status": "A",
+      "group": "documentation",
+      "added": 3133,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/research/2026-09-12-browser-llm-speed-results.json",
+      "status": "A",
+      "group": "research-data",
+      "added": 2651,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/research/2026-09-12-browser-llm-speed.md",
+      "status": "A",
+      "group": "documentation",
+      "added": 140,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/research/2026-09-12-chrome-gemma-optimization-results.json",
+      "status": "A",
+      "group": "research-data",
+      "added": 8349,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/research/2026-09-12-chrome-gemma-optimization.md",
+      "status": "A",
+      "group": "documentation",
+      "added": 168,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/research/2026-09-12-chrome-gemv-followup-results.json",
+      "status": "A",
+      "group": "research-data",
+      "added": 9884,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/research/2026-09-12-chrome-gemv-followup.md",
+      "status": "A",
+      "group": "documentation",
+      "added": 101,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/research/2026-09-12-chrome-gemv-parallel-results.json",
+      "status": "A",
+      "group": "research-data",
+      "added": 10103,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/research/2026-09-12-chrome-gemv-parallel.md",
+      "status": "A",
+      "group": "documentation",
+      "added": 175,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/research/2026-09-12-llm-quality-baseline.md",
+      "status": "A",
+      "group": "documentation",
+      "added": 95,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/research/2026-09-12-llm-quality-results.json",
+      "status": "A",
+      "group": "research-data",
+      "added": 209,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/research/2026-09-12-llm-speed-baseline.md",
+      "status": "A",
+      "group": "documentation",
+      "added": 153,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/research/2026-09-12-llm-speed-results.json",
+      "status": "A",
+      "group": "research-data",
+      "added": 1231,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/research/2026-09-12-m2-browser-speed-results.json",
+      "status": "A",
+      "group": "research-data",
+      "added": 2270,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/research/2026-09-12-ple-row-cache-results.json",
+      "status": "A",
+      "group": "research-data",
+      "added": 6330,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/research/2026-09-12-ple-row-cache.md",
+      "status": "A",
+      "group": "documentation",
+      "added": 128,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/research/2026-09-12-webml-browser-speed-results.json",
+      "status": "A",
+      "group": "research-data",
+      "added": 10466,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/research/2026-09-12-webml-browser-speed.md",
+      "status": "A",
+      "group": "documentation",
+      "added": 146,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/research/2026-09-13-gemv-subgroup-results.json",
+      "status": "A",
+      "group": "research-data",
+      "added": 2506,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/research/2026-09-13-gemv-subgroup.md",
+      "status": "A",
+      "group": "documentation",
+      "added": 160,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/research/2026-09-13-m2-gemv-adoption-results.json",
+      "status": "A",
+      "group": "research-data",
+      "added": 217,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/research/2026-09-13-m2-gemv-adoption.md",
+      "status": "A",
+      "group": "documentation",
+      "added": 105,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/research/2026-09-13-m2-gemv-subgroup-adoption.md",
+      "status": "A",
+      "group": "documentation",
+      "added": 96,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/research/2026-09-13-m2-gemv-subgroup-results.json",
+      "status": "A",
+      "group": "research-data",
+      "added": 808,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/research/2026-09-13-m2-prefill-adoption-results.json",
+      "status": "A",
+      "group": "research-data",
+      "added": 2031,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/research/2026-09-13-m2-prefill-adoption.md",
+      "status": "A",
+      "group": "documentation",
+      "added": 90,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/research/2026-09-13-prefill-buckets-results.json",
+      "status": "A",
+      "group": "research-data",
+      "added": 4047,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/research/2026-09-13-prefill-buckets.md",
+      "status": "A",
+      "group": "documentation",
+      "added": 233,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/research/2026-09-13-rms-norm-add-fusion-results.json",
+      "status": "A",
+      "group": "research-data",
+      "added": 1978,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/research/2026-09-13-rms-norm-add-fusion.md",
+      "status": "A",
+      "group": "documentation",
+      "added": 140,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/research/2026-09-13-rms-subgroup-reduction-results.json",
+      "status": "A",
+      "group": "research-data",
+      "added": 4679,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/research/2026-09-13-rms-subgroup-reduction.md",
+      "status": "A",
+      "group": "documentation",
+      "added": 170,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/research/2026-09-14-i4-lane-comparison.md",
+      "status": "A",
+      "group": "documentation",
+      "added": 98,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "docs/research/2026-09-14-i4-lane-results.json",
+      "status": "A",
+      "group": "research-data",
+      "added": 1563,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "examples/anima/main.ts",
+      "status": "M",
+      "group": "examples",
+      "added": 12,
+      "deleted": 15,
+      "binary": false
+    },
+    {
+      "path": "examples/gemma4-qat/README.md",
+      "status": "A",
+      "group": "examples",
+      "added": 69,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "examples/gemma4-qat/main.ts",
+      "status": "A",
+      "group": "examples",
+      "added": 5,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "examples/gemma4/README.md",
+      "status": "M",
+      "group": "examples",
+      "added": 40,
+      "deleted": 2,
+      "binary": false
+    },
+    {
+      "path": "examples/gemma4/main.ts",
+      "status": "M",
+      "group": "examples",
+      "added": 3,
+      "deleted": 583,
+      "binary": false
+    },
+    {
+      "path": "examples/irodori/main.ts",
+      "status": "M",
+      "group": "examples",
+      "added": 15,
+      "deleted": 18,
+      "binary": false
+    },
+    {
+      "path": "examples/minicpm5/README.md",
+      "status": "A",
+      "group": "examples",
+      "added": 73,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "examples/minicpm5/main.ts",
+      "status": "A",
+      "group": "examples",
+      "added": 5,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "examples/qwen3/README.md",
+      "status": "A",
+      "group": "examples",
+      "added": 86,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "examples/qwen3/main.ts",
+      "status": "A",
+      "group": "examples",
+      "added": 5,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "examples/shared/emit-llm-fixtures.py",
+      "status": "A",
+      "group": "examples",
+      "added": 176,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "examples/shared/fixtures/llm-tokenizer-parity.json",
+      "status": "A",
+      "group": "fixtures",
+      "added": 1306,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "examples/shared/gemma-main.ts",
+      "status": "A",
+      "group": "examples",
+      "added": 611,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "examples/shared/gemma-warmup.ts",
+      "status": "A",
+      "group": "examples",
+      "added": 25,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "examples/shared/generation-timing.ts",
+      "status": "A",
+      "group": "examples",
+      "added": 41,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "examples/shared/generation_timing_test.ts",
+      "status": "A",
+      "group": "tests",
+      "added": 45,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "examples/shared/llm-chat.ts",
+      "status": "A",
+      "group": "examples",
+      "added": 173,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "examples/shared/llm-generate.ts",
+      "status": "A",
+      "group": "examples",
+      "added": 232,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "examples/shared/llm-main.ts",
+      "status": "A",
+      "group": "examples",
+      "added": 253,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "examples/shared/llm-source.ts",
+      "status": "A",
+      "group": "examples",
+      "added": 79,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "examples/shared/llm-tokenizer.ts",
+      "status": "A",
+      "group": "examples",
+      "added": 293,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "examples/shared/llm-unicode.json",
+      "status": "A",
+      "group": "examples",
+      "added": 898,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "examples/shared/llm_cli_test.ts",
+      "status": "A",
+      "group": "tests",
+      "added": 377,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "examples/shared/local-source.ts",
+      "status": "M",
+      "group": "examples",
+      "added": 21,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "examples/shared/local_source_test.ts",
+      "status": "M",
+      "group": "tests",
+      "added": 29,
+      "deleted": 1,
+      "binary": false
+    },
+    {
+      "path": "packages/hub/src/fetch.ts",
+      "status": "M",
+      "group": "hub",
+      "added": 4,
+      "deleted": 5,
+      "binary": false
+    },
+    {
+      "path": "packages/hub/src/manifest.ts",
+      "status": "M",
+      "group": "hub",
+      "added": 6,
+      "deleted": 1,
+      "binary": false
+    },
+    {
+      "path": "packages/hub/tests/fetch_test.ts",
+      "status": "M",
+      "group": "tests",
+      "added": 25,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/hub/tests/manifest_parse_test.ts",
+      "status": "M",
+      "group": "tests",
+      "added": 18,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/models/deno.json",
+      "status": "M",
+      "group": "models",
+      "added": 2,
+      "deleted": 1,
+      "binary": false
+    },
+    {
+      "path": "packages/models/gemma4-qat.ts",
+      "status": "A",
+      "group": "models",
+      "added": 48,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/models/mod.ts",
+      "status": "M",
+      "group": "models",
+      "added": 8,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/models/src/concurrency/closeable-generator.ts",
+      "status": "A",
+      "group": "models",
+      "added": 46,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/models/src/gemma/chat-session.ts",
+      "status": "M",
+      "group": "models",
+      "added": 30,
+      "deleted": 36,
+      "binary": false
+    },
+    {
+      "path": "packages/models/src/gemma/greedy-output.ts",
+      "status": "A",
+      "group": "models",
+      "added": 155,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/models/src/gemma/pipeline.ts",
+      "status": "M",
+      "group": "models",
+      "added": 397,
+      "deleted": 119,
+      "binary": false
+    },
+    {
+      "path": "packages/models/src/gemma/ple.ts",
+      "status": "M",
+      "group": "models",
+      "added": 144,
+      "deleted": 41,
+      "binary": false
+    },
+    {
+      "path": "packages/models/src/gemma/qat.ts",
+      "status": "A",
+      "group": "models",
+      "added": 106,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/models/src/gemma/rope.ts",
+      "status": "M",
+      "group": "models",
+      "added": 77,
+      "deleted": 18,
+      "binary": false
+    },
+    {
+      "path": "packages/models/src/generation/sampler.ts",
+      "status": "M",
+      "group": "models",
+      "added": 96,
+      "deleted": 27,
+      "binary": false
+    },
+    {
+      "path": "packages/models/src/generation/sequence.ts",
+      "status": "M",
+      "group": "models",
+      "added": 54,
+      "deleted": 15,
+      "binary": false
+    },
+    {
+      "path": "packages/models/src/generation/speculation.ts",
+      "status": "M",
+      "group": "models",
+      "added": 2,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/models/src/irodori/pipeline.ts",
+      "status": "M",
+      "group": "models",
+      "added": 23,
+      "deleted": 3,
+      "binary": false
+    },
+    {
+      "path": "packages/models/src/session/options.ts",
+      "status": "M",
+      "group": "models",
+      "added": 3,
+      "deleted": 1,
+      "binary": false
+    },
+    {
+      "path": "packages/models/tests/closeable_generator_test.ts",
+      "status": "A",
+      "group": "tests",
+      "added": 77,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/models/tests/e2e_gemma4_chat_test.ts",
+      "status": "M",
+      "group": "tests",
+      "added": 46,
+      "deleted": 17,
+      "binary": false
+    },
+    {
+      "path": "packages/models/tests/e2e_gemma4_drafter_test.ts",
+      "status": "M",
+      "group": "tests",
+      "added": 13,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/models/tests/e2e_gemma4_qat_test.ts",
+      "status": "A",
+      "group": "tests",
+      "added": 130,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/models/tests/e2e_gemma4_quant_test.ts",
+      "status": "A",
+      "group": "tests",
+      "added": 143,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/models/tests/e2e_gemma4_speculative_test.ts",
+      "status": "M",
+      "group": "tests",
+      "added": 27,
+      "deleted": 1,
+      "binary": false
+    },
+    {
+      "path": "packages/models/tests/e2e_irodori_cleanup_test.ts",
+      "status": "A",
+      "group": "tests",
+      "added": 107,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/models/tests/fixtures/gemma4-ple-packed/i2/oracle.safetensors",
+      "status": "A",
+      "group": "fixtures",
+      "added": null,
+      "deleted": null,
+      "binary": true
+    },
+    {
+      "path": "packages/models/tests/fixtures/gemma4-ple-packed/i2/ple-00001-of-00003.safetensors",
+      "status": "A",
+      "group": "fixtures",
+      "added": null,
+      "deleted": null,
+      "binary": true
+    },
+    {
+      "path": "packages/models/tests/fixtures/gemma4-ple-packed/i2/ple-00002-of-00003.safetensors",
+      "status": "A",
+      "group": "fixtures",
+      "added": null,
+      "deleted": null,
+      "binary": true
+    },
+    {
+      "path": "packages/models/tests/fixtures/gemma4-ple-packed/i2/ple-00003-of-00003.safetensors",
+      "status": "A",
+      "group": "fixtures",
+      "added": null,
+      "deleted": null,
+      "binary": true
+    },
+    {
+      "path": "packages/models/tests/fixtures/gemma4-ple-packed/i2/ple.json",
+      "status": "A",
+      "group": "fixtures",
+      "added": 25,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/models/tests/fixtures/gemma4-ple-packed/i4/oracle.safetensors",
+      "status": "A",
+      "group": "fixtures",
+      "added": null,
+      "deleted": null,
+      "binary": true
+    },
+    {
+      "path": "packages/models/tests/fixtures/gemma4-ple-packed/i4/ple-00001-of-00003.safetensors",
+      "status": "A",
+      "group": "fixtures",
+      "added": null,
+      "deleted": null,
+      "binary": true
+    },
+    {
+      "path": "packages/models/tests/fixtures/gemma4-ple-packed/i4/ple-00002-of-00003.safetensors",
+      "status": "A",
+      "group": "fixtures",
+      "added": null,
+      "deleted": null,
+      "binary": true
+    },
+    {
+      "path": "packages/models/tests/fixtures/gemma4-ple-packed/i4/ple-00003-of-00003.safetensors",
+      "status": "A",
+      "group": "fixtures",
+      "added": null,
+      "deleted": null,
+      "binary": true
+    },
+    {
+      "path": "packages/models/tests/fixtures/gemma4-ple-packed/i4/ple.json",
+      "status": "A",
+      "group": "fixtures",
+      "added": 25,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/models/tests/gemma_chat_session_test.ts",
+      "status": "M",
+      "group": "tests",
+      "added": 125,
+      "deleted": 4,
+      "binary": false
+    },
+    {
+      "path": "packages/models/tests/gemma_chat_test.ts",
+      "status": "M",
+      "group": "tests",
+      "added": 18,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/models/tests/gemma_greedy_output_test.ts",
+      "status": "A",
+      "group": "tests",
+      "added": 119,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/models/tests/gemma_ple_packed_test.ts",
+      "status": "A",
+      "group": "tests",
+      "added": 124,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/models/tests/gemma_ple_test.ts",
+      "status": "M",
+      "group": "tests",
+      "added": 347,
+      "deleted": 8,
+      "binary": false
+    },
+    {
+      "path": "packages/models/tests/gemma_qat_test.ts",
+      "status": "A",
+      "group": "tests",
+      "added": 171,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/models/tests/generation_nucleus_test.ts",
+      "status": "A",
+      "group": "tests",
+      "added": 95,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/models/tests/generation_sampler_test.ts",
+      "status": "M",
+      "group": "tests",
+      "added": 45,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/models/tests/generation_sequence_test.ts",
+      "status": "M",
+      "group": "tests",
+      "added": 14,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/models/tests/generation_small_output_test.ts",
+      "status": "A",
+      "group": "tests",
+      "added": 210,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/models/tests/generation_speculation_test.ts",
+      "status": "M",
+      "group": "tests",
+      "added": 91,
+      "deleted": 29,
+      "binary": false
+    },
+    {
+      "path": "packages/models/tests/models_barrel_surface_test.ts",
+      "status": "M",
+      "group": "tests",
+      "added": 13,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/models/tests/session_options_test.ts",
+      "status": "M",
+      "group": "tests",
+      "added": 9,
+      "deleted": 2,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/mod.ts",
+      "status": "M",
+      "group": "runtime",
+      "added": 2,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/src/codegen/numerics-wgsl.ts",
+      "status": "M",
+      "group": "runtime",
+      "added": 17,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/src/format/container.ts",
+      "status": "M",
+      "group": "runtime",
+      "added": 7,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/src/format/i2.ts",
+      "status": "A",
+      "group": "runtime",
+      "added": 45,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/src/format/ir.ts",
+      "status": "M",
+      "group": "runtime",
+      "added": 12,
+      "deleted": 4,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/src/format/safetensors.ts",
+      "status": "M",
+      "group": "runtime",
+      "added": 3,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/src/gpu/device.ts",
+      "status": "M",
+      "group": "runtime",
+      "added": 277,
+      "deleted": 21,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/src/gpu/pipeline-cache.ts",
+      "status": "M",
+      "group": "runtime",
+      "added": 69,
+      "deleted": 19,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/src/kernels/argmax.ts",
+      "status": "M",
+      "group": "runtime",
+      "added": 105,
+      "deleted": 108,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/src/kernels/conv-transpose1d.ts",
+      "status": "M",
+      "group": "runtime",
+      "added": 3,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/src/kernels/conv1d.ts",
+      "status": "M",
+      "group": "runtime",
+      "added": 5,
+      "deleted": 2,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/src/kernels/conv2d.ts",
+      "status": "M",
+      "group": "runtime",
+      "added": 5,
+      "deleted": 2,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/src/kernels/gemm.ts",
+      "status": "M",
+      "group": "runtime",
+      "added": 45,
+      "deleted": 12,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/src/kernels/linear-gemv.ts",
+      "status": "M",
+      "group": "runtime",
+      "added": 320,
+      "deleted": 83,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/src/kernels/linear-i8a8.ts",
+      "status": "M",
+      "group": "runtime",
+      "added": 7,
+      "deleted": 3,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/src/kernels/linear.ts",
+      "status": "M",
+      "group": "runtime",
+      "added": 2,
+      "deleted": 1,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/src/kernels/rms-norm-subgroup.ts",
+      "status": "A",
+      "group": "runtime",
+      "added": 83,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/src/kernels/rms-norm.ts",
+      "status": "M",
+      "group": "runtime",
+      "added": 62,
+      "deleted": 14,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/src/kernels/rope.ts",
+      "status": "M",
+      "group": "runtime",
+      "added": 20,
+      "deleted": 12,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/src/kernels/static-quantize.ts",
+      "status": "A",
+      "group": "runtime",
+      "added": 66,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/src/kernels/topk.ts",
+      "status": "M",
+      "group": "runtime",
+      "added": 22,
+      "deleted": 42,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/src/kernels/weight-storage.ts",
+      "status": "M",
+      "group": "runtime",
+      "added": 37,
+      "deleted": 3,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/src/ops.ts",
+      "status": "M",
+      "group": "runtime",
+      "added": 2,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/src/ops/attrs.ts",
+      "status": "M",
+      "group": "runtime",
+      "added": 18,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/src/ops/contracts.ts",
+      "status": "M",
+      "group": "runtime",
+      "added": 15,
+      "deleted": 1,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/src/ops/names.ts",
+      "status": "M",
+      "group": "runtime",
+      "added": 1,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/src/ops/shapes.ts",
+      "status": "M",
+      "group": "runtime",
+      "added": 4,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/src/reference/ops.ts",
+      "status": "M",
+      "group": "runtime",
+      "added": 35,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/src/runtime/estimate.ts",
+      "status": "M",
+      "group": "runtime",
+      "added": 34,
+      "deleted": 13,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/src/runtime/executor.ts",
+      "status": "M",
+      "group": "runtime",
+      "added": 218,
+      "deleted": 85,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/src/runtime/fusion.ts",
+      "status": "M",
+      "group": "runtime",
+      "added": 115,
+      "deleted": 25,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/src/runtime/generation-context.ts",
+      "status": "M",
+      "group": "runtime",
+      "added": 33,
+      "deleted": 17,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/src/runtime/plan.ts",
+      "status": "M",
+      "group": "runtime",
+      "added": 15,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/src/runtime/recipe-builder.ts",
+      "status": "M",
+      "group": "runtime",
+      "added": 212,
+      "deleted": 56,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/src/runtime/session-types.ts",
+      "status": "M",
+      "group": "runtime",
+      "added": 56,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/src/runtime/weight-residency.ts",
+      "status": "M",
+      "group": "runtime",
+      "added": 15,
+      "deleted": 7,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/assets_fusion_counts_test.ts",
+      "status": "M",
+      "group": "tests",
+      "added": 51,
+      "deleted": 21,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/codegen_wgsl_test.ts",
+      "status": "M",
+      "group": "tests",
+      "added": 174,
+      "deleted": 58,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/e2e_public_api_test.ts",
+      "status": "M",
+      "group": "tests",
+      "added": 2,
+      "deleted": 1,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/estimate_test.ts",
+      "status": "M",
+      "group": "tests",
+      "added": 1,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/golden/static_quantize_block/io.safetensors",
+      "status": "A",
+      "group": "fixtures",
+      "added": null,
+      "deleted": null,
+      "binary": true
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/golden/static_quantize_block/model.safetensors",
+      "status": "A",
+      "group": "fixtures",
+      "added": null,
+      "deleted": null,
+      "binary": true
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/op-contracts.json",
+      "status": "M",
+      "group": "fixtures",
+      "added": 120,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/static-quantize-oracle.safetensors",
+      "status": "A",
+      "group": "fixtures",
+      "added": null,
+      "deleted": null,
+      "binary": true
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/argmax.wgsl",
+      "status": "M",
+      "group": "fixtures",
+      "added": 13,
+      "deleted": 18,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/argmax_split_merge.wgsl",
+      "status": "M",
+      "group": "fixtures",
+      "added": 12,
+      "deleted": 17,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/argmax_split_partial.wgsl",
+      "status": "M",
+      "group": "fixtures",
+      "added": 14,
+      "deleted": 19,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/conv1d_igemm.wgsl",
+      "status": "M",
+      "group": "fixtures",
+      "added": 16,
+      "deleted": 16,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/conv1d_igemm_m32.wgsl",
+      "status": "M",
+      "group": "fixtures",
+      "added": 16,
+      "deleted": 16,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/conv1d_igemm_m32_v4.wgsl",
+      "status": "M",
+      "group": "fixtures",
+      "added": 16,
+      "deleted": 16,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/conv1d_igemm_m32_wf16.wgsl",
+      "status": "M",
+      "group": "fixtures",
+      "added": 16,
+      "deleted": 16,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/conv1d_igemm_m32_wf16_v4.wgsl",
+      "status": "M",
+      "group": "fixtures",
+      "added": 16,
+      "deleted": 16,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/conv1d_igemm_m32_wi4.wgsl",
+      "status": "M",
+      "group": "fixtures",
+      "added": 16,
+      "deleted": 16,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/conv1d_igemm_m32_wi4_v4.wgsl",
+      "status": "M",
+      "group": "fixtures",
+      "added": 16,
+      "deleted": 16,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/conv1d_igemm_m32_wi8.wgsl",
+      "status": "M",
+      "group": "fixtures",
+      "added": 18,
+      "deleted": 18,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/conv1d_igemm_m32_wi8_v4.wgsl",
+      "status": "M",
+      "group": "fixtures",
+      "added": 18,
+      "deleted": 18,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/conv1d_igemm_v4.wgsl",
+      "status": "M",
+      "group": "fixtures",
+      "added": 51,
+      "deleted": 16,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/conv1d_igemm_wf16.wgsl",
+      "status": "M",
+      "group": "fixtures",
+      "added": 16,
+      "deleted": 16,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/conv1d_igemm_wf16_v4.wgsl",
+      "status": "M",
+      "group": "fixtures",
+      "added": 16,
+      "deleted": 16,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/conv1d_igemm_wi4.wgsl",
+      "status": "M",
+      "group": "fixtures",
+      "added": 16,
+      "deleted": 16,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/conv1d_igemm_wi4_v4.wgsl",
+      "status": "M",
+      "group": "fixtures",
+      "added": 16,
+      "deleted": 16,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/conv1d_igemm_wi8.wgsl",
+      "status": "M",
+      "group": "fixtures",
+      "added": 18,
+      "deleted": 18,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/conv1d_igemm_wi8_v4.wgsl",
+      "status": "M",
+      "group": "fixtures",
+      "added": 18,
+      "deleted": 18,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/conv2d_igemm.wgsl",
+      "status": "M",
+      "group": "fixtures",
+      "added": 16,
+      "deleted": 16,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/conv2d_igemm_m32.wgsl",
+      "status": "M",
+      "group": "fixtures",
+      "added": 16,
+      "deleted": 16,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/conv2d_igemm_m32_v4.wgsl",
+      "status": "M",
+      "group": "fixtures",
+      "added": 16,
+      "deleted": 16,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/conv2d_igemm_m32_wf16.wgsl",
+      "status": "M",
+      "group": "fixtures",
+      "added": 16,
+      "deleted": 16,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/conv2d_igemm_m32_wf16_v4.wgsl",
+      "status": "M",
+      "group": "fixtures",
+      "added": 16,
+      "deleted": 16,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/conv2d_igemm_m32_wi8.wgsl",
+      "status": "M",
+      "group": "fixtures",
+      "added": 18,
+      "deleted": 18,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/conv2d_igemm_m32_wi8_v4.wgsl",
+      "status": "M",
+      "group": "fixtures",
+      "added": 18,
+      "deleted": 18,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/conv2d_igemm_v4.wgsl",
+      "status": "M",
+      "group": "fixtures",
+      "added": 16,
+      "deleted": 16,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/conv2d_igemm_wf16.wgsl",
+      "status": "M",
+      "group": "fixtures",
+      "added": 16,
+      "deleted": 16,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/conv2d_igemm_wf16_v4.wgsl",
+      "status": "M",
+      "group": "fixtures",
+      "added": 16,
+      "deleted": 16,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/conv2d_igemm_wi8.wgsl",
+      "status": "M",
+      "group": "fixtures",
+      "added": 18,
+      "deleted": 18,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/conv2d_igemm_wi8_v4.wgsl",
+      "status": "M",
+      "group": "fixtures",
+      "added": 18,
+      "deleted": 18,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/embedding_wi2.wgsl",
+      "status": "A",
+      "group": "fixtures",
+      "added": 42,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/linear_gemv_f32.wgsl",
+      "status": "A",
+      "group": "fixtures",
+      "added": 74,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/linear_gemv_parallel_g512_l4.wgsl",
+      "status": "A",
+      "group": "fixtures",
+      "added": 88,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/linear_gemv_parallel_wi2_l2.wgsl",
+      "status": "A",
+      "group": "fixtures",
+      "added": 156,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/linear_gemv_parallel_wi8_l16.wgsl",
+      "status": "A",
+      "group": "fixtures",
+      "added": 68,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/linear_gemv_r1_g32.wgsl",
+      "status": "M",
+      "group": "fixtures",
+      "added": 54,
+      "deleted": 380,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/linear_gemv_r4_g32.wgsl",
+      "status": "M",
+      "group": "fixtures",
+      "added": 69,
+      "deleted": 980,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/linear_gemv_r4_g64.wgsl",
+      "status": "M",
+      "group": "fixtures",
+      "added": 69,
+      "deleted": 980,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/linear_gemv_r4_wi2.wgsl",
+      "status": "A",
+      "group": "fixtures",
+      "added": 210,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/linear_gemv_r4_wi8.wgsl",
+      "status": "M",
+      "group": "fixtures",
+      "added": 49,
+      "deleted": 500,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/linear_gemv_subgroup_g512_l4.wgsl",
+      "status": "A",
+      "group": "fixtures",
+      "added": 88,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/linear_gemv_subgroup_wi2_l2.wgsl",
+      "status": "A",
+      "group": "fixtures",
+      "added": 156,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/linear_gemv_subgroup_wi8_l16.wgsl",
+      "status": "A",
+      "group": "fixtures",
+      "added": 68,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/linear_gemv_wf16.wgsl",
+      "status": "A",
+      "group": "fixtures",
+      "added": 129,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/linear_gemv_wi2.wgsl",
+      "status": "A",
+      "group": "fixtures",
+      "added": 611,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/linear_w4a8_g32.wgsl",
+      "status": "M",
+      "group": "fixtures",
+      "added": 10,
+      "deleted": 9,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/linear_w4a8_g32_emu.wgsl",
+      "status": "M",
+      "group": "fixtures",
+      "added": 10,
+      "deleted": 9,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/linear_w4a8_g32_emu_v4.wgsl",
+      "status": "M",
+      "group": "fixtures",
+      "added": 10,
+      "deleted": 9,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/linear_w4a8_g32_v4.wgsl",
+      "status": "M",
+      "group": "fixtures",
+      "added": 10,
+      "deleted": 9,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/linear_wi2.wgsl",
+      "status": "A",
+      "group": "fixtures",
+      "added": 456,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/linear_wi2_v4.wgsl",
+      "status": "A",
+      "group": "fixtures",
+      "added": 256,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/linear_wi8.wgsl",
+      "status": "M",
+      "group": "fixtures",
+      "added": 2,
+      "deleted": 2,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/linear_wi8_v4.wgsl",
+      "status": "M",
+      "group": "fixtures",
+      "added": 2,
+      "deleted": 2,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/rms_norm_128.wgsl",
+      "status": "A",
+      "group": "fixtures",
+      "added": 56,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/rms_norm_add_subgroup32_nr.wgsl",
+      "status": "A",
+      "group": "fixtures",
+      "added": 54,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/rms_norm_add_subgroup32_rn.wgsl",
+      "status": "A",
+      "group": "fixtures",
+      "added": 54,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/rms_norm_subgroup32.wgsl",
+      "status": "A",
+      "group": "fixtures",
+      "added": 53,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/rope_bshd.wgsl",
+      "status": "A",
+      "group": "fixtures",
+      "added": 51,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/static_quantize.wgsl",
+      "status": "A",
+      "group": "fixtures",
+      "added": 29,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/topk_k1.wgsl",
+      "status": "M",
+      "group": "fixtures",
+      "added": 17,
+      "deleted": 22,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/topk_k4.wgsl",
+      "status": "M",
+      "group": "fixtures",
+      "added": 17,
+      "deleted": 22,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/fixtures/wgsl/topk_one_split_merge.wgsl",
+      "status": "A",
+      "group": "fixtures",
+      "added": 75,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/format_i2_test.ts",
+      "status": "A",
+      "group": "tests",
+      "added": 106,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/format_ir_test.ts",
+      "status": "M",
+      "group": "tests",
+      "added": 1,
+      "deleted": 1,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/gpu_batch_generation_test.ts",
+      "status": "A",
+      "group": "tests",
+      "added": 437,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/gpu_batch_readback_test.ts",
+      "status": "A",
+      "group": "tests",
+      "added": 332,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/gpu_conv1d_parity_test.ts",
+      "status": "M",
+      "group": "tests",
+      "added": 1,
+      "deleted": 1,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/gpu_conv2d_parity_test.ts",
+      "status": "M",
+      "group": "tests",
+      "added": 1,
+      "deleted": 1,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/gpu_device_test.ts",
+      "status": "M",
+      "group": "tests",
+      "added": 41,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/gpu_gridstride_test.ts",
+      "status": "M",
+      "group": "tests",
+      "added": 1,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/gpu_i2_weights_test.ts",
+      "status": "A",
+      "group": "tests",
+      "added": 345,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/gpu_linear_gemv_f16_test.ts",
+      "status": "A",
+      "group": "tests",
+      "added": 169,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/gpu_linear_gemv_f32_test.ts",
+      "status": "A",
+      "group": "tests",
+      "added": 164,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/gpu_linear_gemv_parallel_census_test.ts",
+      "status": "A",
+      "group": "tests",
+      "added": 117,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/gpu_linear_gemv_parallel_test.ts",
+      "status": "A",
+      "group": "tests",
+      "added": 185,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/gpu_linear_gemv_subgroup_test.ts",
+      "status": "A",
+      "group": "tests",
+      "added": 54,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/gpu_linear_gemv_test.ts",
+      "status": "M",
+      "group": "tests",
+      "added": 52,
+      "deleted": 8,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/gpu_linear_gemv_variant_test.ts",
+      "status": "A",
+      "group": "tests",
+      "added": 110,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/gpu_ops_test.ts",
+      "status": "M",
+      "group": "tests",
+      "added": 7,
+      "deleted": 17,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/gpu_pipeline_cache_test.ts",
+      "status": "M",
+      "group": "tests",
+      "added": 116,
+      "deleted": 8,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/gpu_rank_subnormal_test.ts",
+      "status": "A",
+      "group": "tests",
+      "added": 148,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/gpu_recipe_parallel_test.ts",
+      "status": "A",
+      "group": "tests",
+      "added": 90,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/gpu_resident_batch_test.ts",
+      "status": "M",
+      "group": "tests",
+      "added": 5,
+      "deleted": 5,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/gpu_rms_norm_add_fusion_test.ts",
+      "status": "A",
+      "group": "tests",
+      "added": 185,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/gpu_rms_norm_geometry_test.ts",
+      "status": "A",
+      "group": "tests",
+      "added": 177,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/gpu_rms_norm_subgroup_test.ts",
+      "status": "A",
+      "group": "tests",
+      "added": 51,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/gpu_rope_fusion_test.ts",
+      "status": "M",
+      "group": "tests",
+      "added": 152,
+      "deleted": 10,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/gpu_topk_split_test.ts",
+      "status": "A",
+      "group": "tests",
+      "added": 173,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/helpers/gemv-subgroup-census.ts",
+      "status": "A",
+      "group": "tests",
+      "added": 106,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/helpers/gemv-subgroup-check.ts",
+      "status": "A",
+      "group": "tests",
+      "added": 156,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/helpers/gridstride_cases.ts",
+      "status": "M",
+      "group": "tests",
+      "added": 11,
+      "deleted": 5,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/helpers/op-tolerance.ts",
+      "status": "M",
+      "group": "tests",
+      "added": 1,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/helpers/rms-norm-add-graph.ts",
+      "status": "A",
+      "group": "tests",
+      "added": 63,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/helpers/rms-subgroup-check.ts",
+      "status": "A",
+      "group": "tests",
+      "added": 144,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/kernel_argmax_split_test.ts",
+      "status": "M",
+      "group": "tests",
+      "added": 10,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/linear_gemv_parallel_test.ts",
+      "status": "A",
+      "group": "tests",
+      "added": 61,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/linear_gemv_rows_test.ts",
+      "status": "M",
+      "group": "tests",
+      "added": 69,
+      "deleted": 4,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/linear_gemv_variant_test.ts",
+      "status": "A",
+      "group": "tests",
+      "added": 40,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/ops_contract_test.ts",
+      "status": "M",
+      "group": "tests",
+      "added": 8,
+      "deleted": 6,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/runtime_executor_test.ts",
+      "status": "M",
+      "group": "tests",
+      "added": 27,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/runtime_fusion_test.ts",
+      "status": "M",
+      "group": "tests",
+      "added": 84,
+      "deleted": 11,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/runtime_rms_norm_add_fusion_test.ts",
+      "status": "A",
+      "group": "tests",
+      "added": 75,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "packages/runtime/tests/static_quantize_test.ts",
+      "status": "A",
+      "group": "tests",
+      "added": 190,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/export-recipes/README.md",
+      "status": "M",
+      "group": "recipes",
+      "added": 4,
+      "deleted": 1,
+      "binary": false
+    },
+    {
+      "path": "tools/export-recipes/dist.py",
+      "status": "M",
+      "group": "recipes",
+      "added": 2,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/export-recipes/gemma4/README.md",
+      "status": "M",
+      "group": "recipes",
+      "added": 9,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/export-recipes/gemma4/distribution.py",
+      "status": "M",
+      "group": "recipes",
+      "added": 47,
+      "deleted": 15,
+      "binary": false
+    },
+    {
+      "path": "tools/export-recipes/gemma4/tests/ple_fixture.py",
+      "status": "A",
+      "group": "tests",
+      "added": 91,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/export-recipes/gemma4/tests/test_distribution.py",
+      "status": "M",
+      "group": "tests",
+      "added": 4,
+      "deleted": 2,
+      "binary": false
+    },
+    {
+      "path": "tools/export-recipes/gemma4_qat/README.md",
+      "status": "A",
+      "group": "recipes",
+      "added": 38,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/export-recipes/gemma4_qat/THIRD_PARTY_NOTICES.md",
+      "status": "A",
+      "group": "recipes",
+      "added": 19,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/export-recipes/gemma4_qat/__init__.py",
+      "status": "A",
+      "group": "recipes",
+      "added": 1,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/export-recipes/gemma4_qat/audit.py",
+      "status": "A",
+      "group": "recipes",
+      "added": 41,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/export-recipes/gemma4_qat/checkpoint.py",
+      "status": "A",
+      "group": "recipes",
+      "added": 163,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/export-recipes/gemma4_qat/config.py",
+      "status": "A",
+      "group": "recipes",
+      "added": 21,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/export-recipes/gemma4_qat/distribution.py",
+      "status": "A",
+      "group": "recipes",
+      "added": 231,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/export-recipes/gemma4_qat/export.py",
+      "status": "A",
+      "group": "recipes",
+      "added": 88,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/export-recipes/gemma4_qat/ple.py",
+      "status": "A",
+      "group": "recipes",
+      "added": 128,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/export-recipes/gemma4_qat/tests/__init__.py",
+      "status": "A",
+      "group": "tests",
+      "added": 1,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/export-recipes/gemma4_qat/tests/test_audit.py",
+      "status": "A",
+      "group": "tests",
+      "added": 61,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/export-recipes/gemma4_qat/tests/test_distribution.py",
+      "status": "A",
+      "group": "tests",
+      "added": 83,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/export-recipes/gemma4_qat/tests/test_fixed.py",
+      "status": "A",
+      "group": "tests",
+      "added": 167,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/export-recipes/gemma4_qat/trace.py",
+      "status": "A",
+      "group": "recipes",
+      "added": 83,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/export-recipes/tests/test_dist_driver.py",
+      "status": "M",
+      "group": "tests",
+      "added": 3,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/export-recipes/tests/test_staged_publication.py",
+      "status": "M",
+      "group": "tests",
+      "added": 4,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/exporter/README.md",
+      "status": "M",
+      "group": "exporter",
+      "added": 16,
+      "deleted": 5,
+      "binary": false
+    },
+    {
+      "path": "tools/exporter/src/karume/__init__.py",
+      "status": "M",
+      "group": "exporter",
+      "added": 6,
+      "deleted": 4,
+      "binary": false
+    },
+    {
+      "path": "tools/exporter/src/karume/aten_handlers.py",
+      "status": "M",
+      "group": "exporter",
+      "added": 10,
+      "deleted": 1,
+      "binary": false
+    },
+    {
+      "path": "tools/exporter/src/karume/convert.py",
+      "status": "M",
+      "group": "exporter",
+      "added": 16,
+      "deleted": 4,
+      "binary": false
+    },
+    {
+      "path": "tools/exporter/src/karume/custom_ops.py",
+      "status": "M",
+      "group": "exporter",
+      "added": 18,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/exporter/src/karume/emit.py",
+      "status": "M",
+      "group": "exporter",
+      "added": 148,
+      "deleted": 4,
+      "binary": false
+    },
+    {
+      "path": "tools/exporter/src/karume/golden_models.py",
+      "status": "M",
+      "group": "exporter",
+      "added": 11,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/exporter/src/karume/goldens.py",
+      "status": "M",
+      "group": "exporter",
+      "added": 29,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/exporter/src/karume/normalize.py",
+      "status": "M",
+      "group": "exporter",
+      "added": 19,
+      "deleted": 3,
+      "binary": false
+    },
+    {
+      "path": "tools/exporter/src/karume/ops.py",
+      "status": "M",
+      "group": "exporter",
+      "added": 25,
+      "deleted": 1,
+      "binary": false
+    },
+    {
+      "path": "tools/exporter/src/karume/pipeline.py",
+      "status": "M",
+      "group": "exporter",
+      "added": 3,
+      "deleted": 1,
+      "binary": false
+    },
+    {
+      "path": "tools/exporter/src/karume/shapes.py",
+      "status": "M",
+      "group": "exporter",
+      "added": 4,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/exporter/src/karume/verify.py",
+      "status": "M",
+      "group": "exporter",
+      "added": 14,
+      "deleted": 3,
+      "binary": false
+    },
+    {
+      "path": "tools/exporter/tests/test_convert.py",
+      "status": "M",
+      "group": "tests",
+      "added": 27,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/exporter/tests/test_fixed_weights.py",
+      "status": "A",
+      "group": "tests",
+      "added": 230,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/exporter/tests/test_i2_storage.py",
+      "status": "A",
+      "group": "tests",
+      "added": 82,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/exporter/tests/test_normalize.py",
+      "status": "M",
+      "group": "tests",
+      "added": 21,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/exporter/tests/test_static_quantize.py",
+      "status": "A",
+      "group": "tests",
+      "added": 68,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/exporter/tests/test_verify.py",
+      "status": "M",
+      "group": "tests",
+      "added": 1,
+      "deleted": 1,
+      "binary": false
+    },
+    {
+      "path": "tools/fusion-hints/enumerate_test.ts",
+      "status": "M",
+      "group": "tests",
+      "added": 5,
+      "deleted": 5,
+      "binary": false
+    },
+    {
+      "path": "tools/llm-baseline/README.md",
+      "status": "A",
+      "group": "tools",
+      "added": 88,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/llm-baseline/data.py",
+      "status": "A",
+      "group": "tools",
+      "added": 146,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/llm-baseline/fetch_data.py",
+      "status": "A",
+      "group": "tools",
+      "added": 73,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/llm-baseline/run.py",
+      "status": "A",
+      "group": "tools",
+      "added": 227,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/llm-baseline/scoring.py",
+      "status": "A",
+      "group": "tools",
+      "added": 52,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/llm-baseline/test_scoring.py",
+      "status": "A",
+      "group": "tests",
+      "added": 36,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/llm-baseline/test_storage.py",
+      "status": "A",
+      "group": "tests",
+      "added": 34,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/llm-baseline/test_weights.py",
+      "status": "A",
+      "group": "tests",
+      "added": 48,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/llm-baseline/weights.py",
+      "status": "A",
+      "group": "tools",
+      "added": 356,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/llm-speed/README.md",
+      "status": "A",
+      "group": "tools",
+      "added": 135,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/llm-speed/browser/README.md",
+      "status": "A",
+      "group": "tools",
+      "added": 217,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/llm-speed/browser/cases.json",
+      "status": "A",
+      "group": "tools",
+      "added": 91,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/llm-speed/browser/config.ts",
+      "status": "A",
+      "group": "tools",
+      "added": 18,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/llm-speed/browser/frame.html",
+      "status": "A",
+      "group": "tools",
+      "added": 52,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/llm-speed/browser/index.html",
+      "status": "A",
+      "group": "tools",
+      "added": 290,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/llm-speed/browser/karume.ts",
+      "status": "A",
+      "group": "tools",
+      "added": 159,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/llm-speed/browser/runner.ts",
+      "status": "A",
+      "group": "tools",
+      "added": 274,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/llm-speed/browser/server.ts",
+      "status": "A",
+      "group": "tools",
+      "added": 268,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/llm-speed/browser/server_test.ts",
+      "status": "A",
+      "group": "tests",
+      "added": 86,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/llm-speed/main.ts",
+      "status": "A",
+      "group": "tools",
+      "added": 281,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/llm-speed/prepare.py",
+      "status": "A",
+      "group": "tools",
+      "added": 82,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/llm-speed/test_timing.py",
+      "status": "A",
+      "group": "tests",
+      "added": 23,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/llm-speed/torch_bench.py",
+      "status": "A",
+      "group": "tools",
+      "added": 298,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/opbench/census_test.ts",
+      "status": "M",
+      "group": "tests",
+      "added": 2,
+      "deleted": 2,
+      "binary": false
+    },
+    {
+      "path": "tools/opbench/graph.ts",
+      "status": "M",
+      "group": "tools",
+      "added": 1,
+      "deleted": 0,
+      "binary": false
+    },
+    {
+      "path": "tools/opbench/graph_test.ts",
+      "status": "M",
+      "group": "tests",
+      "added": 1,
+      "deleted": 0,
+      "binary": false
+    }
+  ],
+  "commits": [
+    {
+      "sha": "d4b351c3a035f2489014f5d04daac68f1df19d90",
+      "title": "fix(exporter): 動的 view の定数化を単位軸の変更に制限する"
+    },
+    {
+      "sha": "555f358d6ff3290cff8305a82629189a911bba5f",
+      "title": "fix(exporter): 記号依存マスクの safe_softmax を維持する"
+    },
+    {
+      "sha": "03e96c16979184d484acd31bcaba7838094b749b",
+      "title": "fix(models): 生成ストリームの終了通知と解放を整合させる"
+    },
+    {
+      "sha": "edf76f4b091d0ee508919c31059c317641c43ad1",
+      "title": "fix(models): 会話履歴のメッセージ所有権を分離する"
+    },
+    {
+      "sha": "3bdaea6a563e00a412937ab530b37864b50bfb48",
+      "title": "fix(models): PLE 破棄後のキャッシュ再登録を防ぐ"
+    },
+    {
+      "sha": "2086d7583a2b2f8844dc302bbffaf6d2ad368fbd",
+      "title": "fix(models): Irodori の多重障害でも全資源を解放する"
+    },
+    {
+      "sha": "2f85b2ad84aeb8f25aa7e877a41ba44c01c8a045",
+      "title": "fix(models): 投機の採算計測から診断 callback の費用を除く"
+    },
+    {
+      "sha": "0d9284e6a3481a5bcf40015ed71f939ffba3106a",
+      "title": "perf(models): 空 draft の抽選で履歴コピーを省く"
+    },
+    {
+      "sha": "b054dad8f41c0cd2711151c844901c6895ccc3fb",
+      "title": "perf(hub): 資産辞書の構築で二乗コピーをなくす"
+    },
+    {
+      "sha": "732734f21603ba69c5b5c06033b4a23913730451",
+      "title": "fix(runtime): GEMM の端チャネル読みを範囲内に収める"
+    },
+    {
+      "sha": "d7f752584744ae27463c8def36b1a72102c20bb2",
+      "title": "docs: レビューの実測と次の調査への引き継ぎを記録する"
+    },
+    {
+      "sha": "dad907808540765c7de71c82826c331c552e38b2",
+      "title": "docs: AGENTS の作業指示を追跡し現行方針へ更新する"
+    },
+    {
+      "sha": "5266b6e5c46493d394eaf89adb6305d82552a161",
+      "title": "perf(models): top-p の全語彙整列を線形時間へ変える"
+    },
+    {
+      "sha": "3f617bc868be8da2a70a3142dd3c8ed44bc03a47",
+      "title": "perf(models): greedy の検査と最大値検索を一度に行う"
+    },
+    {
+      "sha": "53abc03cd051e5746f75d696362ed60ff35a019f",
+      "title": "docs(research): モデル横断の実測と CPU 参照の不一致原因を記録する"
+    },
+    {
+      "sha": "1a1a62dc1c8affb7d0198ae88e3409906540764a",
+      "title": "perf(models): top-k の候補走査に NaN 検査をまとめる"
+    },
+    {
+      "sha": "fbc8cf2a34a68a2c73eedd26784a087369056fbc",
+      "title": "perf(models): top-k の根の値を候補の交換時だけ読み直す"
+    },
+    {
+      "sha": "408bb17f855415fc448e99c63559cfd0fba1c7e8",
+      "title": "docs(research): 追加モデルとブラウザの実測結果を記録する"
+    },
+    {
+      "sha": "acee48eae3f35880da36c1851cdc5d188475824d",
+      "title": "fix(examples): Anima と Irodori のローカルモデルを優先する"
+    },
+    {
+      "sha": "8bdd7d4e59ad9da86a98d0748c3dec7bfe56d1bd",
+      "title": "feat(examples): MiniCPM5 と Qwen3 のローカル CLI を追加する"
+    },
+    {
+      "sha": "3291798a1f8ceeb2f41af29a2e23e84a401140f7",
+      "title": "feat(examples): MiniCPM5 と Qwen3 の対話を多ターン化する"
+    },
+    {
+      "sha": "f8bbaf1293f210c2bf2ad37d192f5e90d1991a88",
+      "title": "perf(runtime): f16 格納の単行 linear を GEMV 化する"
+    },
+    {
+      "sha": "eaccc9be20513f44b115c64aaef316c3ed30e49a",
+      "title": "perf(runtime): f32 格納の単行 linear を GEMV 化する"
+    },
+    {
+      "sha": "cbd0b8ce5b01509cb2178c553f9f1c781f34e972",
+      "title": "docs(perf): QAT の INT2 実測と固定丸めの統合案を記録する"
+    },
+    {
+      "sha": "92d219e1aced54c3228f2d4375120760d3db6115",
+      "title": "perf(runtime): 幅128以下のRMS正規化の空スレッドを削減する"
+    },
+    {
+      "sha": "2ad1063b1f5f4432959c37aec0d8bb6857a86d43",
+      "title": "docs(perf): TypeScriptの実行費と出力転送の比較を記録する"
+    },
+    {
+      "sha": "563bbbc5ca279afb42d991a1799bc54bc199c06c",
+      "title": "docs(qat): 統合の承認範囲と別ファミリ方針を記録する"
+    },
+    {
+      "sha": "ffc532ba1bc8b36a3599f4e713d0e6b5397d0a81",
+      "title": "feat(runtime): 固定INT2格納とpacked実行を追加する"
+    },
+    {
+      "sha": "f4752c6024327f203c90b7a094985b922743a7d8",
+      "title": "feat(runtime): 固定SRQの丸めをCPUとGPUで保存する"
+    },
+    {
+      "sha": "449e7e1b9337a5260ca5f70cf3a6949224073f24",
+      "title": "feat(exporter): 固定量子化重みを再変換せず分割保存する"
+    },
+    {
+      "sha": "fc3fd8f741dbba5e0203efe09ffad5a69c0f2b51",
+      "title": "feat(models): PLEの固定INT2とINT4を全量・行単位で読み込む"
+    },
+    {
+      "sha": "022cb091ed7b6f4e7cca766d879094c6e3179fca",
+      "title": "feat(exporter): Gemma 4 QATの固定重みを別ファミリへ変換する"
+    },
+    {
+      "sha": "7ed64b32ecd197b72163e3e54ef88184db4c49e1",
+      "title": "feat(models): Gemma 4 QATの共有パイプラインと対話CLIを追加する"
+    },
+    {
+      "sha": "f88b5904d15ef17730a7488b21680a3b2c35a5d2",
+      "title": "docs(perf): QATのSRQ融合とINT2変種の実測と採否を記録する"
+    },
+    {
+      "sha": "fce05ac580de6cce260025cb6ba245171ad29123",
+      "title": "docs(workflow): 停止条件をインシデントに限定する"
+    },
+    {
+      "sha": "623b8b7fec9abbe1154a57f7e113dba4bd7059b6",
+      "title": "perf(runtime): 初回のパイプライン生成を非同期化する"
+    },
+    {
+      "sha": "2e4da6696d9663f4556b7cca5241d96261050cd5",
+      "title": "perf(runtime): INT2行ブロックの初回コンパイルを軽くする"
+    },
+    {
+      "sha": "5c132c7c28c0534fe498b5f4eedc8c80a5056ce7",
+      "title": "perf(models): PLEの値とscaleを上限内で並行して読む"
+    },
+    {
+      "sha": "ffaf4b49913e47a209c2630a60ac831abcfc2d5e",
+      "title": "perf(runtime): INT4とINT8の行ブロックも初回準備を軽くする"
+    },
+    {
+      "sha": "8ec3df0e3642b87a429a3867e267744c9e83fdd9",
+      "title": "perf(runtime): 大語彙のtopk最大値を二段階で縮約する"
+    },
+    {
+      "sha": "f3d05bdd672e3c36b4b87f6d3a9bb885e6fb1d35",
+      "title": "perf(runtime): バッチ出力を単一フェンスで一括読み戻しする"
+    },
+    {
+      "sha": "d10cb4372c58c22c5f9c2cf893c8da08635beebe",
+      "title": "feat(runtime): 会話状態をバッチの最終決着まで保護する"
+    },
+    {
+      "sha": "053c87ea9d5b74b12126cd354dbb7112ab222f67",
+      "title": "docs(workflow): 実験ごとの新規ディレクトリ作成を必須にする"
+    },
+    {
+      "sha": "50675cc8b1d6f3c7d76dacff6d587516e770f017",
+      "title": "fix(runtime): 最大値選択で非正規数の順位と値ビットを保つ"
+    },
+    {
+      "sha": "2ea0ad5c5fadb241f848174db69f76665f900ea3",
+      "title": "perf(models): Gemmaの温度0decodeの出力転送を8バイトにする"
+    },
+    {
+      "sha": "d27bc99ed7398d3a04a0498377732341d66138ab",
+      "title": "feat(examples): LLMデモを暖機しTTFTと生成速度を分ける"
+    },
+    {
+      "sha": "147104aa713792b9905b77ae73f6f99776b24121",
+      "title": "feat(tools): LLMの量子化済み重みを使う品質評価を追加"
+    },
+    {
+      "sha": "cac257411a0c37fae4ec2b40de3da6e0ad8a42fb",
+      "title": "feat(tools): LLMのTTFTと生成速度の比較基準を追加"
+    },
+    {
+      "sha": "0adfa5aa3e83b52888a2731ae96e5dda1a2403b6",
+      "title": "feat(tools): Gemma E2BをChromeで比較する計測ページを追加"
+    },
+    {
+      "sha": "a0d6d13adbc4f2d30481a887b1052045082ab9be",
+      "title": "perf(models): Gemmaの埋め込み行を既存予算内で再利用する"
+    },
+    {
+      "sha": "a295ede625ce964f9b605797513bd4febb9e3b0b",
+      "title": "docs(perf): WebMLとKarumeのheadless比較を記録する"
+    },
+    {
+      "sha": "ecc3801badc6a16056d9e4922c045d014edaf0e4",
+      "title": "perf(runtime): GemmaのBSHD RoPEを融合する"
+    },
+    {
+      "sha": "fbb91e80325bb4f2556e2f8ecdafe4fba92649be",
+      "title": "perf(runtime): 大語彙INT8のGEMVを16列で実行する"
+    },
+    {
+      "sha": "9e859ec55b5a87422790cf900d0331743f70c0b3",
+      "title": "perf(runtime): 量子化GEMVの並列加算を任意指定で追加する"
+    },
+    {
+      "sha": "6aae325b66dfa9e4495e14b5c7dfa46f3169e5c0",
+      "title": "feat(models): GEMV並列加算を既定quantから選択する"
+    },
+    {
+      "sha": "e03114dec9811dbab048cbf5df096e9752e6b3b0",
+      "title": "feat(bench): Gemmaの入力バケット比較を追加する"
+    },
+    {
+      "sha": "0ee9e488fd41ddb5fee015bd7940d8e3d64ccb9e",
+      "title": "feat(bench): M2の採用設定を初期選択に反映する"
+    },
+    {
+      "sha": "7114d0cd2bfec2f9f0a74d1ab3333e0217705c03",
+      "title": "perf(runtime): RMSと残差加算を任意指定で融合する"
+    },
+    {
+      "sha": "744cdbe263eaab551c0bcd9abf87e90e1d8f2867",
+      "title": "perf(runtime): RMSの32レーンsubgroup縮約を任意指定で追加する"
+    },
+    {
+      "sha": "17578a9288403bafdd4764bca40ca9d79b4c7a34",
+      "title": "perf(runtime): 並列GEMVのsubgroup縮約を任意指定で追加する"
+    },
+    {
+      "sha": "f2e39855f6af51a2ad1fa63054566fb803521d6d",
+      "title": "chore(bench): M2追試に基づき並列GEMVの初期選択を戻す"
+    },
+    {
+      "sha": "c014231cd4b1875870674f3bf20247a4cf7cbc41",
+      "title": "docs(perf): 大きいI4のレーン数変更を実測で見送る"
+    }
+  ],
+  "scopeNote": "c014231までの実装・調査を固定した索引。後続のマージ準備文書コミット自身は含まない。分類はパス優先で、各領域のREADMEもその領域に含む。"
+}

@@ -1470,3 +1470,15 @@ M>8 と対象外形状は従来経路で、診断キーで適用範囲を確認�
 [M2での速度改善と短文出力](research/2026-09-13-m2-gemv-adoption.md)は確認済み。広い品質評価は残る。
 通常/QAT E2Bの新しい配布recipeは、parallelを明示した `i4-gemvpar` を既定quantに選ぶ。
 従来の `i4`・runtime・fromAssetsの逐次既定は維持する。既存の配布形や公開pinは自動で変更しない。
+
+## RMS融合とsubgroup最適化の提供範囲（2026-09-14整理）
+
+`fuseRmsNormAdd`は既定falseで、投入上限とは独立した指定（[ADR 0099](decisions/0099-rms-norm-add-fusion.md)）。
+比較画面の融合＋投入768が、モデル・CLI・quantの既定になったことは意味しない。
+
+`rmsNormReduce: "subgroup32"`と`linearGemvReduce: "parallel-subgroup32"`は任意指定。
+外部GPUを渡す場合は`acquireGpu({ subgroups: true })`で必要機能を要求する。
+WebGPUのsubgroups / subgroup-size-control、WGSLのsubgroup_id、32レーンの既知解検査が必要で、不足時は拒否する。
+Deno 2.9.6では必要機能が未提供。Chromeでの実走とM2の追試は済みだが、M2の既定採用は見送っている。
+これらはquant.sessionの保存語彙には含めない。既存のworkgroup / parallelを選び直せる。
+数値・対象形状・未検収範囲は[ADR 0100](decisions/0100-rms-subgroup-reduction.md)と[0101](decisions/0101-linear-gemv-subgroup.md)を参照する。

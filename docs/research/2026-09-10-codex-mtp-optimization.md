@@ -3131,3 +3131,17 @@ M2のGPU費用帰属とRMS融合＋投入768のモデル既定化は未完とし
 
 この記録のコミット前に`deno task verify`を完走（`ok | 2959 passed (802 steps) | 0 failed | 5 ignored (2 steps) (25m42s)`、exit 0）。
 ログは`outputs/bench/karume/2026-09-14_18-33-25_i4-lane-verify-tixp3atg/verify.log`。検証後の追記は検証結果の記録だけ。
+
+## マージ前の差分整理とレビュー資料（2026-09-14）
+
+[レビュー資料](2026-09-14-merge-review.md)と[356ファイル・62コミットの固定索引](2026-09-14-merge-review-index.json)を追加。
+比較範囲はローカルmainの`4dca96a`から`c014231`。mainは祖先なので履歴の並べ替え・衝突解消は不要だった。
+追加行の約7割を占める実測JSONは根拠として維持し、実装の担当範囲・依存・公開契約・既定設定・未検証範囲へ読む入口を設けた。
+ACTIVE_DESIGNは古い作業順の履歴を取り除いて現況の索引へ整理し、limitationsには既存のRMS融合/subgroupの提供範囲を補足した。
+数値契約・実装・モデル資産・他ブランチは変更していない。レビューエージェントの実行・マージ・push・公開も未実施。
+
+Python再検証はexporter 3,227 passed / 1 skipped、recipe 2,800 passed / 4 skipped、計測ツール22 passed。
+ログ・warning件数・実行条件はレビュー資料に記載。次はその資料を使う独立レビューと、確認できた指摘への作業単位の対応。
+
+文書整理後も`deno task verify`を完走（`ok | 2959 passed (802 steps) | 0 failed | 5 ignored (2 steps) (25m46s)`、exit 0）。
+ログは`outputs/bench/karume/2026-09-14_19-10-32_merge-docs-verify-gixbe167/verify.log`。推論コード・テスト・資産は変更せず、検証後の追記は結果の記録だけ。
