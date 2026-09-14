@@ -3145,3 +3145,17 @@ Python再検証はexporter 3,227 passed / 1 skipped、recipe 2,800 passed / 4 sk
 
 文書整理後も`deno task verify`を完走（`ok | 2959 passed (802 steps) | 0 failed | 5 ignored (2 steps) (25m46s)`、exit 0）。
 ログは`outputs/bench/karume/2026-09-14_19-10-32_merge-docs-verify-gixbe167/verify.log`。推論コード・テスト・資産は変更せず、検証後の追記は結果の記録だけ。
+
+## 独立レビューとM2再計測（2026-09-14）
+
+[結果と検証範囲](2026-09-14-merge-review-results.md)に、Sol 3担当と主担当のマージ前レビューを記録した。
+比較は`4dca96a..315732a`。今回の範囲で修正が必要な再現可能な新規不具合は見つからず、実装・既定・資産は変更しない。
+利用者のM2再計測20生成は前回の同条件40生成とtoken/stop/text一致。通常30.568 / QAT31.524 tok/sで前回より約7%低いが、
+同じ推論bundle・資産・設定であり、直近のコード変更の遅化とは判断しない。環境変動の原因とGPU内訳は未確定。
+
+ACTIVE_DESIGNとbacklogはレビュー済みへ更新する。M2のGPU帰属・RMS融合のモデル既定化・広い品質などは残件のまま。
+マージ・push・公開は行わず、マージ時に対象headと検証headを再照合できる状態とする。検証の出所と残る不確実性は上記結果を参照する。
+
+このレビュー記録のコミット前も`deno task verify`を完走（**2,959 passed（802 steps）/ 0 failed / 5 ignored（2 steps）**、26分3秒）。
+ログは`outputs/bench/karume/2026-09-14_20-07-17_merge-reviewed-verify-3sdefjle/verify.log`、exit 0。計測ツールのCPU検証も22件成功。
+検証後はこの事実の追記のみで、推論コード・テスト・資産は変更していない。

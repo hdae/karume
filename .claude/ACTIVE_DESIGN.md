@@ -1,7 +1,7 @@
 # ACTIVE_DESIGN — Karume
 
 > 現在の設計とレビューの入口。履歴はADR / research / gitに置き、作業順は[backlog](../docs/backlog.md)、性能の採否は[perf-ledger](../docs/perf-ledger.md)を正本とする。
-> Last updated: 2026-09-14（最適化実験を区切り、マージ前のレビュー資料を準備）
+> Last updated: 2026-09-14（独立レビューと利用者M2再計測を照合）
 
 ## 現在の焦点
 
@@ -27,7 +27,7 @@
 
 ## 次と未完
 
-- 次は[レビュー資料](../docs/research/2026-09-14-merge-review.md)に従う独立レビューと、その指摘の作業単位ごとの対応。
+- [独立レビューとM2再計測](../docs/research/2026-09-14-merge-review-results.md)を完了。Sol 3担当と主担当の確認では、修正が必要な新規不具合は見つかっていない。マージ時は対象headと検証headを再照合する。
   マージ・push・公開はまだ行っていない。公開済み0.12.0との互換性と、新しい配布形が要求するreaderを区別する。
 - M2のGPU時間の帰属、RMS融合のモデル既定化、E4B・他LLM・長文・広い品質評価は[backlog](../docs/backlog.md)に残す。
   Wan / MiniMax H3は[事前調査](../docs/research/2026-09-10-codex-mtp-optimization.md#動画生成の事前調査-wan-と-minimax-h3)までで、ブラウザ実装は未着手。

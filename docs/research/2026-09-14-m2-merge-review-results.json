@@ -1,0 +1,918 @@
+{
+  "format": "karume-m2-merge-review/1",
+  "sourceSha256": {
+    "input.json": "b55056f813c24dfb0df6268af8653f8bef527fb9f8d4ea32c7c83782df6c3e96",
+    "previous.json": "7f1046aabf08d6eafe0b07d9382ca0f2325b3bf3443d929dc79f22486b2265ed"
+  },
+  "artifacts": "outputs/bench/karume/2026-09-14_19-59-16_m2-merge-review-ndy3fu60",
+  "aggregation": "median of each case/load three-measured-run median; current 1 load, previous 2 baseline loads; separate-day descriptive comparison only",
+  "settings": {
+    "normal": {
+      "engine": "karume",
+      "model": "normal",
+      "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
+      "platform": "MacIntel",
+      "compute": "f32",
+      "quant": "i4",
+      "linearGemvReduce": "parallel",
+      "linearGemvReduceOverride": "parallel",
+      "manifestSha256": "c445ea39ed8050b5d97757cfeb902c789c9048ad5eec6a962378e08772bb7ca6",
+      "bundleSha256": "b098c37dc4fa88c097d772a13a689db10533846e858a04a6708145736e8466e0",
+      "weights": "Karume packed i4 / i8",
+      "capacity": 128,
+      "chunkLength": 64,
+      "normalization": "fused",
+      "fuseRmsNormAdd": true,
+      "rmsNormReduce": "workgroup",
+      "submitMaxChunkSize": 768,
+      "prefillBuckets": "dense",
+      "chunkBuckets": [
+        4,
+        8,
+        16,
+        24,
+        32,
+        40,
+        48,
+        56
+      ],
+      "pleBudget": "default-two-shards",
+      "sampler": {
+        "temperature": 0
+      },
+      "maxNewTokens": 64,
+      "textDecodingTimed": false,
+      "fixture": {
+        "cases": [
+          {
+            "case": "english-list",
+            "prompt": "Write a numbered list of twenty practical tips for learning a new language. Give one short sentence for each tip.",
+            "inputIds": [
+              2,
+              105,
+              2364,
+              107,
+              6974,
+              496,
+              49597,
+              1694,
+              529,
+              12571,
+              10231,
+              11221,
+              573,
+              4735,
+              496,
+              861,
+              5192,
+              236761,
+              23097,
+              886,
+              2822,
+              13315,
+              573,
+              1546,
+              6508,
+              236761,
+              106,
+              107,
+              105,
+              4368,
+              107
+            ]
+          },
+          {
+            "case": "japanese-list",
+            "prompt": "プログラミングを学ぶ人に向けたアドバイスを20個、番号付きで挙げてください。それぞれ一文で説明してください。",
+            "inputIds": [
+              2,
+              105,
+              2364,
+              107,
+              18668,
+              29171,
+              70738,
+              237051,
+              230452,
+              98782,
+              65630,
+              237036,
+              77221,
+              99950,
+              237051,
+              236778,
+              236771,
+              237629,
+              236951,
+              67583,
+              28412,
+              237007,
+              178274,
+              95509,
+              236924,
+              59043,
+              237009,
+              237364,
+              237007,
+              34084,
+              49391,
+              236924,
+              106,
+              107,
+              105,
+              4368,
+              107
+            ]
+          }
+        ],
+        "stopTokens": [
+          1,
+          106,
+          50
+        ],
+        "maxNewTokens": 64,
+        "capacity": 128
+      }
+    },
+    "qat": {
+      "engine": "karume",
+      "model": "qat",
+      "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
+      "platform": "MacIntel",
+      "compute": "f32",
+      "quant": "i4",
+      "linearGemvReduce": "parallel",
+      "linearGemvReduceOverride": "parallel",
+      "manifestSha256": "6c3ae974beeb032942aaa4c943619855b787f34f67441f0f4be63432caca52db",
+      "bundleSha256": "b098c37dc4fa88c097d772a13a689db10533846e858a04a6708145736e8466e0",
+      "weights": "Karume fixed int2 / int4 / int8 + SRQ",
+      "capacity": 128,
+      "chunkLength": 64,
+      "normalization": "fused",
+      "fuseRmsNormAdd": true,
+      "rmsNormReduce": "workgroup",
+      "submitMaxChunkSize": 768,
+      "prefillBuckets": "dense",
+      "chunkBuckets": [
+        4,
+        8,
+        16,
+        24,
+        32,
+        40,
+        48,
+        56
+      ],
+      "pleBudget": "default-two-shards",
+      "sampler": {
+        "temperature": 0
+      },
+      "maxNewTokens": 64,
+      "textDecodingTimed": false,
+      "fixture": {
+        "cases": [
+          {
+            "case": "english-list",
+            "prompt": "Write a numbered list of twenty practical tips for learning a new language. Give one short sentence for each tip.",
+            "inputIds": [
+              2,
+              105,
+              2364,
+              107,
+              6974,
+              496,
+              49597,
+              1694,
+              529,
+              12571,
+              10231,
+              11221,
+              573,
+              4735,
+              496,
+              861,
+              5192,
+              236761,
+              23097,
+              886,
+              2822,
+              13315,
+              573,
+              1546,
+              6508,
+              236761,
+              106,
+              107,
+              105,
+              4368,
+              107
+            ]
+          },
+          {
+            "case": "japanese-list",
+            "prompt": "プログラミングを学ぶ人に向けたアドバイスを20個、番号付きで挙げてください。それぞれ一文で説明してください。",
+            "inputIds": [
+              2,
+              105,
+              2364,
+              107,
+              18668,
+              29171,
+              70738,
+              237051,
+              230452,
+              98782,
+              65630,
+              237036,
+              77221,
+              99950,
+              237051,
+              236778,
+              236771,
+              237629,
+              236951,
+              67583,
+              28412,
+              237007,
+              178274,
+              95509,
+              236924,
+              59043,
+              237009,
+              237364,
+              237007,
+              34084,
+              49391,
+              236924,
+              106,
+              107,
+              105,
+              4368,
+              107
+            ]
+          }
+        ],
+        "stopTokens": [
+          1,
+          106,
+          50
+        ],
+        "maxNewTokens": 64,
+        "capacity": 128
+      }
+    }
+  },
+  "adapter": {
+    "vendor": "apple",
+    "architecture": "metal-3",
+    "description": "",
+    "device": "",
+    "isFallbackAdapter": false,
+    "features": [
+      "depth32float-stencil8",
+      "rg11b10ufloat-renderable",
+      "bgra8unorm-storage",
+      "texture-formats-tier1",
+      "texture-compression-bc",
+      "dual-source-blending",
+      "core-features-and-limits",
+      "float32-filterable",
+      "indirect-first-instance",
+      "texture-compression-astc-sliced-3d",
+      "float32-blendable",
+      "subgroup-size-control",
+      "texture-compression-astc",
+      "texture-compression-etc2",
+      "depth-clip-control",
+      "texture-compression-bc-sliced-3d",
+      "clip-distances",
+      "timestamp-query",
+      "shader-f16",
+      "texture-formats-tier2",
+      "primitive-index",
+      "texture-component-swizzle",
+      "subgroups"
+    ]
+  },
+  "models": {
+    "normal": {
+      "previous": {
+        "decodeMedian": 32.90374273138835,
+        "byCase": {
+          "english-list": {
+            "decodeMedian": 32.95482412669956,
+            "ttftMedianMs": 339.2224999964237
+          },
+          "japanese-list": {
+            "decodeMedian": 32.8584702535434,
+            "ttftMedianMs": 409.3324999809265
+          }
+        }
+      },
+      "current": {
+        "decodeMedian": 30.567977242739026,
+        "byCase": {
+          "english-list": {
+            "decodeMedian": 30.772386911155575,
+            "ttftMedianMs": 344.22500002384186
+          },
+          "japanese-list": {
+            "decodeMedian": 30.363567574322477,
+            "ttftMedianMs": 419.6899999976158
+          }
+        }
+      },
+      "descriptiveChangePercent": -7.098783587379353
+    },
+    "qat": {
+      "previous": {
+        "decodeMedian": 33.87706981741276,
+        "byCase": {
+          "english-list": {
+            "decodeMedian": 34.171291349679606,
+            "ttftMedianMs": 388.2925000190735
+          },
+          "japanese-list": {
+            "decodeMedian": 31.457895405128305,
+            "ttftMedianMs": 498.580000013113
+          }
+        }
+      },
+      "current": {
+        "decodeMedian": 31.524292576824415,
+        "byCase": {
+          "english-list": {
+            "decodeMedian": 31.08187112908067,
+            "ttftMedianMs": 398.3149999976158
+          },
+          "japanese-list": {
+            "decodeMedian": 31.96671402456816,
+            "ttftMedianMs": 487.414999961853
+          }
+        }
+      },
+      "descriptiveChangePercent": -6.945043515478488
+    }
+  },
+  "jobs": [
+    {
+      "source": "previous",
+      "job": 0,
+      "model": "normal",
+      "date": "2026-09-13T18:27:33.873Z",
+      "checkout": "17578a9288403bafdd4764bca40ca9d79b4c7a34",
+      "loadSeconds": 3.6774350000023843,
+      "cases": [
+        {
+          "case": "english-list",
+          "inputTokens": 31,
+          "decodeMedian": 33.14995619499186,
+          "ttftMedianMs": 338.38499999046326,
+          "first": {
+            "elapsedMs": 2829.814999997616,
+            "generatedTokens": 64,
+            "ttftMs": 475.76500004529953,
+            "decodeTokensPerSecond": 26.762388225091282
+          },
+          "warmups": [
+            {
+              "elapsedMs": 2269.4449999928474,
+              "generatedTokens": 64,
+              "ttftMs": 373.85000002384186,
+              "decodeTokensPerSecond": 33.23494733897805
+            }
+          ],
+          "measured": [
+            {
+              "elapsedMs": 2236.214999973774,
+              "generatedTokens": 64,
+              "ttftMs": 338.38499999046326,
+              "decodeTokensPerSecond": 33.19580784398709
+            },
+            {
+              "elapsedMs": 2248.6099999547005,
+              "generatedTokens": 64,
+              "ttftMs": 337.4699999690056,
+              "decodeTokensPerSecond": 32.96461797695175
+            },
+            {
+              "elapsedMs": 2239.5099999904633,
+              "generatedTokens": 64,
+              "ttftMs": 339.05500000715256,
+              "decodeTokensPerSecond": 33.14995619499186
+            }
+          ]
+        },
+        {
+          "case": "japanese-list",
+          "inputTokens": 37,
+          "decodeMedian": 32.66914710271739,
+          "ttftMedianMs": 409.2399999499321,
+          "first": {
+            "elapsedMs": 2495.349999964237,
+            "generatedTokens": 64,
+            "ttftMs": 463.66999995708466,
+            "decodeTokensPerSecond": 31.00882028655015
+          },
+          "warmups": [
+            {
+              "elapsedMs": 2333.6650000214577,
+              "generatedTokens": 64,
+              "ttftMs": 427.6050000190735,
+              "decodeTokensPerSecond": 33.052474738424394
+            }
+          ],
+          "measured": [
+            {
+              "elapsedMs": 2336.979999959469,
+              "generatedTokens": 64,
+              "ttftMs": 408.55500000715256,
+              "decodeTokensPerSecond": 32.66914710271739
+            },
+            {
+              "elapsedMs": 2316.429999947548,
+              "generatedTokens": 64,
+              "ttftMs": 409.2399999499321,
+              "decodeTokensPerSecond": 33.03289132182885
+            },
+            {
+              "elapsedMs": 2352.3199999928474,
+              "generatedTokens": 64,
+              "ttftMs": 409.75,
+              "decodeTokensPerSecond": 32.43126373836308
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "source": "previous",
+      "job": 3,
+      "model": "normal",
+      "date": "2026-09-13T18:28:58.976Z",
+      "checkout": "17578a9288403bafdd4764bca40ca9d79b4c7a34",
+      "loadSeconds": 3.2042999999523163,
+      "cases": [
+        {
+          "case": "english-list",
+          "inputTokens": 31,
+          "decodeMedian": 32.759692058407275,
+          "ttftMedianMs": 340.0600000023842,
+          "first": {
+            "elapsedMs": 2841.725000023842,
+            "generatedTokens": 64,
+            "ttftMs": 460.5049999952316,
+            "decodeTokensPerSecond": 26.45702622993384
+          },
+          "warmups": [
+            {
+              "elapsedMs": 2280.0849999785423,
+              "generatedTokens": 64,
+              "ttftMs": 374.3149999976158,
+              "decodeTokensPerSecond": 33.05750431617169
+            }
+          ],
+          "measured": [
+            {
+              "elapsedMs": 2262.1050000190735,
+              "generatedTokens": 64,
+              "ttftMs": 339.00999999046326,
+              "decodeTokensPerSecond": 32.759692058407275
+            },
+            {
+              "elapsedMs": 2243.350000023842,
+              "generatedTokens": 64,
+              "ttftMs": 340.0600000023842,
+              "decodeTokensPerSecond": 33.10057847164107
+            },
+            {
+              "elapsedMs": 2328.014999985695,
+              "generatedTokens": 64,
+              "ttftMs": 340.38499999046326,
+              "decodeTokensPerSecond": 31.696040007522093
+            }
+          ]
+        },
+        {
+          "case": "japanese-list",
+          "inputTokens": 37,
+          "decodeMedian": 33.047793404369415,
+          "ttftMedianMs": 409.42500001192093,
+          "first": {
+            "elapsedMs": 2600.839999973774,
+            "generatedTokens": 64,
+            "ttftMs": 465.5949999690056,
+            "decodeTokensPerSecond": 29.504810923270778
+          },
+          "warmups": [
+            {
+              "elapsedMs": 2357.8800000548363,
+              "generatedTokens": 64,
+              "ttftMs": 428.4050000309944,
+              "decodeTokensPerSecond": 32.6513688952806
+            }
+          ],
+          "measured": [
+            {
+              "elapsedMs": 2310.564999997616,
+              "generatedTokens": 64,
+              "ttftMs": 409.42500001192093,
+              "decodeTokensPerSecond": 33.13801192993364
+            },
+            {
+              "elapsedMs": 2316.935000002384,
+              "generatedTokens": 64,
+              "ttftMs": 410.6050000190735,
+              "decodeTokensPerSecond": 33.047793404369415
+            },
+            {
+              "elapsedMs": 2321.1549999713898,
+              "generatedTokens": 64,
+              "ttftMs": 408.8149999976158,
+              "decodeTokensPerSecond": 32.943932564744756
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "source": "previous",
+      "job": 4,
+      "model": "qat",
+      "date": "2026-09-13T18:29:26.369Z",
+      "checkout": "17578a9288403bafdd4764bca40ca9d79b4c7a34",
+      "loadSeconds": 1.9377199999690056,
+      "cases": [
+        {
+          "case": "english-list",
+          "inputTokens": 31,
+          "decodeMedian": 33.38181644778219,
+          "ttftMedianMs": 388.28500002622604,
+          "first": {
+            "elapsedMs": 2885.050000011921,
+            "generatedTokens": 64,
+            "ttftMs": 510.6850000023842,
+            "decodeTokensPerSecond": 26.53340998530005
+          },
+          "warmups": [
+            {
+              "elapsedMs": 2254.775000035763,
+              "generatedTokens": 64,
+              "ttftMs": 444.9950000047684,
+              "decodeTokensPerSecond": 34.81086098803228
+            }
+          ],
+          "measured": [
+            {
+              "elapsedMs": 2274.0299999713898,
+              "generatedTokens": 64,
+              "ttftMs": 386.77499997615814,
+              "decodeTokensPerSecond": 33.38181644778219
+            },
+            {
+              "elapsedMs": 2203.9650000333786,
+              "generatedTokens": 64,
+              "ttftMs": 396.5400000214577,
+              "decodeTokensPerSecond": 34.85621810010622
+            },
+            {
+              "elapsedMs": 2407.2300000190735,
+              "generatedTokens": 64,
+              "ttftMs": 388.28500002622604,
+              "decodeTokensPerSecond": 31.204416167960588
+            }
+          ]
+        },
+        {
+          "case": "japanese-list",
+          "inputTokens": 37,
+          "decodeMedian": 28.543467623213278,
+          "ttftMedianMs": 513.4300000071526,
+          "first": {
+            "elapsedMs": 2624.2199999690056,
+            "generatedTokens": 64,
+            "ttftMs": 607.75,
+            "decodeTokensPerSecond": 31.242716232311093
+          },
+          "warmups": [
+            {
+              "elapsedMs": 2516.7400000095367,
+              "generatedTokens": 64,
+              "ttftMs": 540.2800000309944,
+              "decodeTokensPerSecond": 31.875170760189413
+            }
+          ],
+          "measured": [
+            {
+              "elapsedMs": 2822.0699999928474,
+              "generatedTokens": 64,
+              "ttftMs": 490.58000004291534,
+              "decodeTokensPerSecond": 27.02134686460285
+            },
+            {
+              "elapsedMs": 2689.235000014305,
+              "generatedTokens": 64,
+              "ttftMs": 516.0099999904633,
+              "decodeTokensPerSecond": 28.98917507359286
+            },
+            {
+              "elapsedMs": 2720.5900000333786,
+              "generatedTokens": 64,
+              "ttftMs": 513.4300000071526,
+              "decodeTokensPerSecond": 28.543467623213278
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "source": "previous",
+      "job": 7,
+      "model": "qat",
+      "date": "2026-09-13T18:31:07.221Z",
+      "checkout": "17578a9288403bafdd4764bca40ca9d79b4c7a34",
+      "loadSeconds": 2.0207349999547004,
+      "cases": [
+        {
+          "case": "english-list",
+          "inputTokens": 31,
+          "decodeMedian": 34.96076625157702,
+          "ttftMedianMs": 388.30000001192093,
+          "first": {
+            "elapsedMs": 2926.935000002384,
+            "generatedTokens": 64,
+            "ttftMs": 525.5400000214577,
+            "decodeTokensPerSecond": 26.234751051160007
+          },
+          "warmups": [
+            {
+              "elapsedMs": 2258.214999973774,
+              "generatedTokens": 64,
+              "ttftMs": 449.72999995946884,
+              "decodeTokensPerSecond": 34.83578796589503
+            }
+          ],
+          "measured": [
+            {
+              "elapsedMs": 2190.4950000047684,
+              "generatedTokens": 64,
+              "ttftMs": 388.47500002384186,
+              "decodeTokensPerSecond": 34.96076625157702
+            },
+            {
+              "elapsedMs": 2183.1549999713898,
+              "generatedTokens": 64,
+              "ttftMs": 387.3550000190735,
+              "decodeTokensPerSecond": 35.081857668823275
+            },
+            {
+              "elapsedMs": 2405.0750000476837,
+              "generatedTokens": 64,
+              "ttftMs": 388.30000001192093,
+              "decodeTokensPerSecond": 31.237991347018305
+            }
+          ]
+        },
+        {
+          "case": "japanese-list",
+          "inputTokens": 37,
+          "decodeMedian": 34.37232318704333,
+          "ttftMedianMs": 483.7300000190735,
+          "first": {
+            "elapsedMs": 2692.4049999713898,
+            "generatedTokens": 64,
+            "ttftMs": 605.8249999880791,
+            "decodeTokensPerSecond": 30.19294731115217
+          },
+          "warmups": [
+            {
+              "elapsedMs": 2615.6599999666214,
+              "generatedTokens": 64,
+              "ttftMs": 531.4549999833107,
+              "decodeTokensPerSecond": 30.227352875798914
+            }
+          ],
+          "measured": [
+            {
+              "elapsedMs": 2316.600000023842,
+              "generatedTokens": 64,
+              "ttftMs": 483.7300000190735,
+              "decodeTokensPerSecond": 34.37232318704333
+            },
+            {
+              "elapsedMs": 2301.9449999928474,
+              "generatedTokens": 64,
+              "ttftMs": 491.8700000047684,
+              "decodeTokensPerSecond": 34.80518763057603
+            },
+            {
+              "elapsedMs": 2471.1050000190735,
+              "generatedTokens": 64,
+              "ttftMs": 478.7300000190735,
+              "decodeTokensPerSecond": 31.620553359683793
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "source": "current",
+      "job": 0,
+      "model": "normal",
+      "date": "2026-09-14T19:39:20.827Z",
+      "checkout": "315732a667b00fbdc747f560a69ed11476420aa2",
+      "loadSeconds": 4.542079999983311,
+      "cases": [
+        {
+          "case": "english-list",
+          "inputTokens": 31,
+          "decodeMedian": 30.772386911155575,
+          "ttftMedianMs": 344.22500002384186,
+          "first": {
+            "elapsedMs": 3106.75,
+            "generatedTokens": 64,
+            "ttftMs": 601.6650000214577,
+            "decodeTokensPerSecond": 25.148847244919686
+          },
+          "warmups": [
+            {
+              "elapsedMs": 2580.639999985695,
+              "generatedTokens": 64,
+              "ttftMs": 388.31999999284744,
+              "decodeTokensPerSecond": 28.73668077662273
+            }
+          ],
+          "measured": [
+            {
+              "elapsedMs": 2407.1800000071526,
+              "generatedTokens": 64,
+              "ttftMs": 359.8899999856949,
+              "decodeTokensPerSecond": 30.772386911155575
+            },
+            {
+              "elapsedMs": 2379.9549999833107,
+              "generatedTokens": 64,
+              "ttftMs": 343.3949999809265,
+              "decodeTokensPerSecond": 30.934517028678872
+            },
+            {
+              "elapsedMs": 2396.4599999785423,
+              "generatedTokens": 64,
+              "ttftMs": 344.22500002384186,
+              "decodeTokensPerSecond": 30.698238750138565
+            }
+          ]
+        },
+        {
+          "case": "japanese-list",
+          "inputTokens": 37,
+          "decodeMedian": 30.363567574322477,
+          "ttftMedianMs": 419.6899999976158,
+          "first": {
+            "elapsedMs": 2758.6299999952316,
+            "generatedTokens": 64,
+            "ttftMs": 479.6850000023842,
+            "decodeTokensPerSecond": 27.64437053118778
+          },
+          "warmups": [
+            {
+              "elapsedMs": 2585.7199999690056,
+              "generatedTokens": 64,
+              "ttftMs": 442.1200000047684,
+              "decodeTokensPerSecond": 29.389811532492566
+            }
+          ],
+          "measured": [
+            {
+              "elapsedMs": 2642.1700000166893,
+              "generatedTokens": 64,
+              "ttftMs": 416.1050000190735,
+              "decodeTokensPerSecond": 28.301060391348624
+            },
+            {
+              "elapsedMs": 2459.875,
+              "generatedTokens": 64,
+              "ttftMs": 419.6899999976158,
+              "decodeTokensPerSecond": 30.879552589557505
+            },
+            {
+              "elapsedMs": 2501.439999997616,
+              "generatedTokens": 64,
+              "ttftMs": 426.5849999785423,
+              "decodeTokensPerSecond": 30.363567574322477
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "source": "current",
+      "job": 1,
+      "model": "qat",
+      "date": "2026-09-14T19:39:47.667Z",
+      "checkout": "315732a667b00fbdc747f560a69ed11476420aa2",
+      "loadSeconds": 1.8252400000095368,
+      "cases": [
+        {
+          "case": "english-list",
+          "inputTokens": 31,
+          "decodeMedian": 31.08187112908067,
+          "ttftMedianMs": 398.3149999976158,
+          "first": {
+            "elapsedMs": 2699.3299999833107,
+            "generatedTokens": 64,
+            "ttftMs": 522.2250000238419,
+            "decodeTokensPerSecond": 28.937511053060312
+          },
+          "warmups": [
+            {
+              "elapsedMs": 2430.014999985695,
+              "generatedTokens": 64,
+              "ttftMs": 436.45500004291534,
+              "decodeTokensPerSecond": 31.601757660571174
+            }
+          ],
+          "measured": [
+            {
+              "elapsedMs": 2463.099999964237,
+              "generatedTokens": 64,
+              "ttftMs": 398.3149999976158,
+              "decodeTokensPerSecond": 30.511651334651518
+            },
+            {
+              "elapsedMs": 2345.0799999833107,
+              "generatedTokens": 64,
+              "ttftMs": 397.0349999666214,
+              "decodeTokensPerSecond": 32.34011534613434
+            },
+            {
+              "elapsedMs": 2426.2450000047684,
+              "generatedTokens": 64,
+              "ttftMs": 399.3400000333786,
+              "decodeTokensPerSecond": 31.08187112908067
+            }
+          ]
+        },
+        {
+          "case": "japanese-list",
+          "inputTokens": 37,
+          "decodeMedian": 31.96671402456816,
+          "ttftMedianMs": 487.414999961853,
+          "first": {
+            "elapsedMs": 2724.6700000166893,
+            "generatedTokens": 64,
+            "ttftMs": 592.3300000429153,
+            "decodeTokensPerSecond": 29.54500689419832
+          },
+          "warmups": [
+            {
+              "elapsedMs": 2450.885000050068,
+              "generatedTokens": 64,
+              "ttftMs": 535.4200000166893,
+              "decodeTokensPerSecond": 32.890185933390676
+            }
+          ],
+          "measured": [
+            {
+              "elapsedMs": 2444.849999964237,
+              "generatedTokens": 64,
+              "ttftMs": 487.414999961853,
+              "decodeTokensPerSecond": 32.18497676802717
+            },
+            {
+              "elapsedMs": 2466.9300000071526,
+              "generatedTokens": 64,
+              "ttftMs": 486.335000038147,
+              "decodeTokensPerSecond": 31.808623166768516
+            },
+            {
+              "elapsedMs": 2474.060000002384,
+              "generatedTokens": 64,
+              "ttftMs": 503.25999999046326,
+              "decodeTokensPerSecond": 31.96671402456816
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "comparability": [
+    {
+      "model": "normal",
+      "previousBaselineLoads": 2,
+      "settingsAndAssetsEqual": true
+    },
+    {
+      "model": "qat",
+      "previousBaselineLoads": 2,
+      "settingsAndAssetsEqual": true
+    }
+  ],
+  "parity": {
+    "currentGenerations": 20,
+    "previousBaselineGenerations": 40,
+    "differences": 0,
+    "scope": "tokenIds, stopToken, text; logits and intermediate u32 not measured"
+  },
+  "failures": []
+}
