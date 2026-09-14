@@ -3159,3 +3159,29 @@ ACTIVE_DESIGNとbacklogはレビュー済みへ更新する。M2のGPU帰属・R
 このレビュー記録のコミット前も`deno task verify`を完走（**2,959 passed（802 steps）/ 0 failed / 5 ignored（2 steps）**、26分3秒）。
 ログは`outputs/bench/karume/2026-09-14_20-07-17_merge-reviewed-verify-3sdefjle/verify.log`、exit 0。計測ツールのCPU検証も22件成功。
 検証後はこの事実の追記のみで、推論コード・テスト・資産は変更していない。
+
+## 添付参照資料の再検証とpermuteコピー削減（2026-09-14）
+
+[調査と採否](2026-09-14-reference-rope-optimization.md)、[数値の正本](2026-09-14-reference-rope-optimization-results.json)を追加。
+古い同梱Karumeとの14ファイルの差を確認し、現行`c265a60`を基準に比較した。外部ソースは複製・実行していない。
+K-40のRMS→RoPE融合は単体で速いが、80生成の全体利得が1%未満で保留。
+K-41の要素順を変えないpermuteの別名化を、既存の実行・メモリ見積りの共通判定へ統合した（ADR 0011追記）。
+
+統合初版の160生成は通常112.350→114.691 tok/s、QAT92.798→94.135 tok/s。
+別走行のQATは−1.339%で、安定した改善率の保証とはしない。decodeの100 dispatch削減はGPU診断でも確認した。
+全比較400生成と診断28生成はモデル・入力ごとのtoken/stop/text一致。関連100テストも成功。
+全体verifyの結果は新しい調査記録の末尾を参照する。
+
+次はM2で既存初期選択の20生成による動作・速度確認、続いてstate attentionとgate/up共有の費用調査。
+現在のブラウザ画面は必要な両E2B・parallel・dense・融合・投入768が選ばれており変更不要。
+今回のruntime変更は以前のSolレビューの後なので、マージ資料へ追加差分として記録した。main・資産・公開設定は変更しない。
+
+自己レビューで入力を別名化した場合のcopyOutputsの受理範囲への影響を見つけ、内部の実体だけを新しい別名化の対象にした。
+Gemma両E2Bの12プランは保護前後で同一。入力・重みのコピー維持と書戻しを含む関連125テストが成功した。
+最終実装の再計測・全体検証結果は上記の新しい調査記録を参照する。
+
+所有権保護後の最終160生成は通常112.360→115.100 tok/s（+2.439%）、QAT93.175→94.044 tok/s（+0.933%）。
+全比較560生成＋診断28生成の計588生成がモデル・入力ごとにtoken/stop/text一致。旧規則/保護なし/最終実装の書戻し3対照も保存した。
+
+最終実装の`deno task verify`も成功（**ok | 2961 passed (811 steps) | 0 failed | 5 ignored (2 steps) (26m11s)**）。
+ログは`outputs/bench/karume/2026-09-14_23-22-03_singleton-permute-final-verify-8e4okmux/verify.log`。

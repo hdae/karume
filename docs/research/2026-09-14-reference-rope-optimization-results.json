@@ -1,0 +1,2984 @@
+{
+  "baselineHead": "c265a600f5d5af51ceca4fe86aa85266ebed1947",
+  "runs": {
+    "rmsRope": {
+      "rawDirectory": "outputs/bench/karume/2026-09-14_22-27-38_rms-rope-whole-validated-iksmh8_y",
+      "bundles": {
+        "baseline": "e9ce2aab7332dcf94fbba56ba28fa15ee64533e677d78b3280a81956d103bd98",
+        "candidate": "b2473ee94df417fd020e4b0255a84cdf6256f8246aaa704414f3192107db8e8d"
+      },
+      "loads": [
+        {
+          "rawFile": "normal-0-baseline.json",
+          "sha256": "d53ba88c75f8372adfdd395c3da6a033600a8286f73512873d7cbf33756468ae",
+          "model": "normal",
+          "ordinal": 0,
+          "variant": "baseline",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 112.78195488729325,
+              "ttftMedianMs": 35.40000000037253,
+              "decodeSamplesTokS": [
+                111.38613861356794,
+                112.78195488729325,
+                113.28897680280922
+              ],
+              "ttftSamplesMs": [
+                35.69999999925494,
+                35.40000000037253,
+                35.20000000111759
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 111.6427432219117,
+              "ttftMedianMs": 38.90000000037253,
+              "decodeSamplesTokS": [
+                112.43976441177267,
+                111.6427432219117,
+                109.35601458087265
+              ],
+              "ttftSamplesMs": [
+                39.59999999962747,
+                38.90000000037253,
+                38.70000000111759
+              ]
+            }
+          ]
+        },
+        {
+          "rawFile": "normal-1-rms-rope.json",
+          "sha256": "3419a789abcbd735f364da66ca05eaf8ff535571575c21eafea9ed30d855aaa3",
+          "model": "normal",
+          "ordinal": 1,
+          "variant": "rms-rope",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 112.2194513714966,
+              "ttftMedianMs": 36.20000000111759,
+              "decodeSamplesTokS": [
+                112.2194513714966,
+                113.12623451240412,
+                111.20917917034421
+              ],
+              "ttftSamplesMs": [
+                36.59999999962747,
+                35.69999999925494,
+                36.20000000111759
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 113.26860841439121,
+              "ttftMedianMs": 39.69999999925494,
+              "decodeSamplesTokS": [
+                112.05976520788823,
+                114.50381679366055,
+                113.26860841439121
+              ],
+              "ttftSamplesMs": [
+                40.29999999888241,
+                39.69999999925494,
+                38.5
+              ]
+            }
+          ]
+        },
+        {
+          "rawFile": "normal-2-rms-rope.json",
+          "sha256": "36bafaa9ffa1a7054ad56e13e6cd30693789764f79e698545f532df5dd40ddf1",
+          "model": "normal",
+          "ordinal": 2,
+          "variant": "rms-rope",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 113.86228086013946,
+              "ttftMedianMs": 36,
+              "decodeSamplesTokS": [
+                113.86228086013946,
+                114.10976272422117,
+                113.41134113411341
+              ],
+              "ttftSamplesMs": [
+                36.59999999962747,
+                36,
+                36
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 112.90322580645162,
+              "ttftMedianMs": 39.40000000037253,
+              "decodeSamplesTokS": [
+                114.50381679366055,
+                112.90322580645162,
+                112.86277319972069
+              ],
+              "ttftSamplesMs": [
+                39,
+                40.5,
+                39.40000000037253
+              ]
+            }
+          ]
+        },
+        {
+          "rawFile": "normal-3-baseline.json",
+          "sha256": "4aa6e524f48a48bbcbeb2c1e38a7aaaa7af73f886a6791db590a0edaabeeec92",
+          "model": "normal",
+          "ordinal": 3,
+          "variant": "baseline",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 111.70212765957447,
+              "ttftMedianMs": 36,
+              "decodeSamplesTokS": [
+                111.66253101751718,
+                111.86079545469343,
+                111.70212765957447
+              ],
+              "ttftSamplesMs": [
+                36.70000000111759,
+                35.90000000037253,
+                36
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 112.5,
+              "ttftMedianMs": 39.90000000037253,
+              "decodeSamplesTokS": [
+                106.04275374522724,
+                112.5,
+                112.72141706916803
+              ],
+              "ttftSamplesMs": [
+                40.90000000037253,
+                39.59999999962747,
+                39.90000000037253
+              ]
+            }
+          ]
+        },
+        {
+          "rawFile": "qat-0-baseline.json",
+          "sha256": "4705e132190db318b01776f24730f0379eb11b28c5f922a01499c02f0b2b84bb",
+          "model": "qat",
+          "ordinal": 0,
+          "variant": "baseline",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 94.80812641083521,
+              "ttftMedianMs": 37.90000000037253,
+              "decodeSamplesTokS": [
+                94.35375168499371,
+                94.9653301175228,
+                94.80812641083521
+              ],
+              "ttftSamplesMs": [
+                38.19999999925494,
+                37.69999999925494,
+                37.90000000037253
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 93.31950822105578,
+              "ttftMedianMs": 41,
+              "decodeSamplesTokS": [
+                92.89295193143053,
+                93.31950822105578,
+                94.36788496110718
+              ],
+              "ttftSamplesMs": [
+                41.90000000037253,
+                41,
+                41
+              ]
+            }
+          ]
+        },
+        {
+          "rawFile": "qat-1-rms-rope.json",
+          "sha256": "8f7e35c295f02eb0b4e9c7d1ab908da597b6cfd50572364380cae31aaa2d5487",
+          "model": "qat",
+          "ordinal": 1,
+          "variant": "rms-rope",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 93.65244536925128,
+              "ttftMedianMs": 37.79999999888241,
+              "decodeSamplesTokS": [
+                93.41637010670996,
+                93.65244536925128,
+                93.81980640357409
+              ],
+              "ttftSamplesMs": [
+                38.09999999962747,
+                37.79999999888241,
+                37.79999999888241
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 93.43022393583033,
+              "ttftMedianMs": 41.100000001490116,
+              "decodeSamplesTokS": [
+                93.43022393583033,
+                92.98892988929889,
+                93.86174016696951
+              ],
+              "ttftSamplesMs": [
+                42,
+                40.79999999888241,
+                41.100000001490116
+              ]
+            }
+          ]
+        },
+        {
+          "rawFile": "qat-2-rms-rope.json",
+          "sha256": "5e29a125f42b4fecde897a9b7120fbd64ee6df888d74a9cdb23a78baa68a218a",
+          "model": "qat",
+          "ordinal": 2,
+          "variant": "rms-rope",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 93.43022393583033,
+              "ttftMedianMs": 38,
+              "decodeSamplesTokS": [
+                93.43022393583033,
+                94.01581853459935,
+                93.1539257724835
+              ],
+              "ttftSamplesMs": [
+                38,
+                37.69999999925494,
+                38
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 93.47181008902078,
+              "ttftMedianMs": 41.09999999962747,
+              "decodeSamplesTokS": [
+                93.59679096721864,
+                93.38867477028579,
+                93.47181008902078
+              ],
+              "ttftSamplesMs": [
+                42.100000001490116,
+                41.09999999962747,
+                40.90000000037253
+              ]
+            }
+          ]
+        },
+        {
+          "rawFile": "qat-3-baseline.json",
+          "sha256": "aa91033d59e99b661c85d41009320c6f533a6f47528d7bed41bf0ed78b2a8ac9",
+          "model": "qat",
+          "ordinal": 3,
+          "variant": "baseline",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 92.70158917015087,
+              "ttftMedianMs": 38.20000000111759,
+              "decodeSamplesTokS": [
+                92.85187914517317,
+                92.70158917015087,
+                92.2266139657947
+              ],
+              "ttftSamplesMs": [
+                38.40000000037253,
+                37.59999999962747,
+                38.20000000111759
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 92.6470588235294,
+              "ttftMedianMs": 41.59999999962747,
+              "decodeSamplesTokS": [
+                92.48385202568502,
+                94.31137724550898,
+                92.6470588235294
+              ],
+              "ttftSamplesMs": [
+                41.90000000037253,
+                41.59999999962747,
+                41.09999999962747
+              ]
+            }
+          ]
+        }
+      ],
+      "models": {
+        "normal": {
+          "metadata": {
+            "manifestSha256": "ae23f43cc141d369edc0669ae097fca3e95a91f27ccaf0089f56be4984834ac8",
+            "enabledFeatures": [
+              "core-features-and-limits"
+            ],
+            "wgslLanguageFeatures": [
+              "buffer_view",
+              "immediate_address_space",
+              "linear_indexing",
+              "packed_4x8_integer_dot_product",
+              "pointer_composite_access",
+              "readonly_and_readwrite_storage_textures",
+              "subgroup_id",
+              "subgroup_uniformity",
+              "swizzle_assignment",
+              "texture_and_sampler_let",
+              "texture_formats_tier1",
+              "uniform_buffer_standard_layout",
+              "unrestricted_pointer_parameters"
+            ],
+            "compute": "f32",
+            "quant": "i4-gemvpar",
+            "linearGemvReduce": "parallel",
+            "linearGemvReduceOverride": "parallel",
+            "weights": "Karume packed i4 / i8",
+            "capacity": 128,
+            "chunkLength": 64,
+            "normalization": "fused",
+            "fuseRmsNormAdd": true,
+            "rmsNormReduce": "workgroup",
+            "submitMaxChunkSize": 768,
+            "prefillBuckets": "dense",
+            "chunkBuckets": [
+              4,
+              8,
+              16,
+              24,
+              32,
+              40,
+              48,
+              56
+            ],
+            "pleBudget": "default-two-shards"
+          },
+          "baseline": {
+            "caseLoadMedianTokS": 112.10106382978724,
+            "caseLoadMedianTtftMs": 37.450000000186265
+          },
+          "rms-rope": {
+            "caseLoadMedianTokS": 113.0859171104214,
+            "caseLoadMedianTtftMs": 37.80000000074506
+          },
+          "decodeChangePercent": 0.8785405302928817
+        },
+        "qat": {
+          "metadata": {
+            "manifestSha256": "118e16431a3ba75988ef811e87a8e731b4766e92ef43d4058c4e300b378a4f0c",
+            "enabledFeatures": [
+              "core-features-and-limits"
+            ],
+            "wgslLanguageFeatures": [
+              "buffer_view",
+              "immediate_address_space",
+              "linear_indexing",
+              "packed_4x8_integer_dot_product",
+              "pointer_composite_access",
+              "readonly_and_readwrite_storage_textures",
+              "subgroup_id",
+              "subgroup_uniformity",
+              "swizzle_assignment",
+              "texture_and_sampler_let",
+              "texture_formats_tier1",
+              "uniform_buffer_standard_layout",
+              "unrestricted_pointer_parameters"
+            ],
+            "compute": "f32",
+            "quant": "i4-gemvpar",
+            "linearGemvReduce": "parallel",
+            "linearGemvReduceOverride": "parallel",
+            "weights": "Karume fixed int2 / int4 / int8 + SRQ",
+            "capacity": 128,
+            "chunkLength": 64,
+            "normalization": "fused",
+            "fuseRmsNormAdd": true,
+            "rmsNormReduce": "workgroup",
+            "submitMaxChunkSize": 768,
+            "prefillBuckets": "dense",
+            "chunkBuckets": [
+              4,
+              8,
+              16,
+              24,
+              32,
+              40,
+              48,
+              56
+            ],
+            "pleBudget": "default-two-shards"
+          },
+          "baseline": {
+            "caseLoadMedianTokS": 93.01054869560332,
+            "caseLoadMedianTtftMs": 39.60000000055879
+          },
+          "rms-rope": {
+            "caseLoadMedianTokS": 93.45101701242555,
+            "caseLoadMedianTtftMs": 39.549999999813735
+          },
+          "decodeChangePercent": 0.47356813071144366
+        }
+      }
+    },
+    "permuteAbba": {
+      "rawDirectory": "outputs/bench/karume/2026-09-14_22-32-50_singleton-permute-whole-035paoby",
+      "bundles": {
+        "baseline": "d24d6f974cca4701aa815fc06dfac75c5e8e98b6b60b50d6c31cb248867b8e83",
+        "candidate": "ce1a3e8c4577164026ff46c9b85cabd6d9a2180d502b957b56d17c9309ed4396"
+      },
+      "loads": [
+        {
+          "rawFile": "normal-0-baseline.json",
+          "sha256": "9b90278dcda3916da438e83ff5bca1b62023183fcb5cc2cfa734972e351f50a0",
+          "model": "normal",
+          "ordinal": 0,
+          "variant": "baseline",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 111.40583554376659,
+              "ttftMedianMs": 35.600000001490116,
+              "decodeSamplesTokS": [
+                109.22330097108541,
+                112.52009287365259,
+                111.40583554376659
+              ],
+              "ttftSamplesMs": [
+                35.600000001490116,
+                36.5,
+                35.399999998509884
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 112.19946571682992,
+              "ttftMedianMs": 38.70000000111759,
+              "decodeSamplesTokS": [
+                111.20917917034421,
+                112.19946571682992,
+                112.64080100110151
+              ],
+              "ttftSamplesMs": [
+                39.29999999888241,
+                38.70000000111759,
+                38.69999999925494
+              ]
+            }
+          ]
+        },
+        {
+          "rawFile": "normal-1-singleton.json",
+          "sha256": "99ef61847a0659692ce94238cd2459eaadb6691ee8e126b6ecfb5429648d81b8",
+          "model": "normal",
+          "ordinal": 1,
+          "variant": "singleton",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 114.54545454545455,
+              "ttftMedianMs": 35.40000000037253,
+              "decodeSamplesTokS": [
+                114.54545454545455,
+                115.59633027522936,
+                114.17180137754185
+              ],
+              "ttftSamplesMs": [
+                36.19999999925494,
+                35.09999999962747,
+                35.40000000037253
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 114.67054969088255,
+              "ttftMedianMs": 38.69999999925494,
+              "decodeSamplesTokS": [
+                114.35832274452241,
+                115.30014641280572,
+                114.67054969088255
+              ],
+              "ttftSamplesMs": [
+                39.19999999925494,
+                38.69999999925494,
+                38.30000000074506
+              ]
+            }
+          ]
+        },
+        {
+          "rawFile": "normal-2-singleton.json",
+          "sha256": "c3d40e77be951c31c9ad8151862d0b00fadc606dd6d8acfe8c5df1f6c38fd577",
+          "model": "normal",
+          "ordinal": 2,
+          "variant": "singleton",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 113.73894204722446,
+              "ttftMedianMs": 36.29999999888241,
+              "decodeSamplesTokS": [
+                115.23687580002051,
+                110.31343022244982,
+                113.73894204722446
+              ],
+              "ttftSamplesMs": [
+                36.899999998509884,
+                36.29999999888241,
+                35.79999999888241
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 114.1304347826087,
+              "ttftMedianMs": 39.59999999962747,
+              "decodeSamplesTokS": [
+                113.04503857871124,
+                114.1304347826087,
+                115.3212520591508
+              ],
+              "ttftSamplesMs": [
+                39.59999999962747,
+                38.5,
+                39.69999999925494
+              ]
+            }
+          ]
+        },
+        {
+          "rawFile": "normal-3-baseline.json",
+          "sha256": "203dd70f3a7c7dc7e7df908b54498fe6d67ab31f9f28b62afe01edf3bc960ca8",
+          "model": "normal",
+          "ordinal": 3,
+          "variant": "baseline",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 111.68232582882752,
+              "ttftMedianMs": 36.30000000074506,
+              "decodeSamplesTokS": [
+                112.19946571682992,
+                111.42553944103022,
+                111.68232582882752
+              ],
+              "ttftSamplesMs": [
+                36.5,
+                36.29999999888241,
+                36.30000000074506
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 112.52009287365259,
+              "ttftMedianMs": 40.09999999962747,
+              "decodeSamplesTokS": [
+                109.87094523885432,
+                112.64080100110151,
+                112.52009287365259
+              ],
+              "ttftSamplesMs": [
+                40.899999998509884,
+                40.09999999962747,
+                39.69999999925494
+              ]
+            }
+          ]
+        },
+        {
+          "rawFile": "qat-0-baseline.json",
+          "sha256": "ad2e96eeda8fcd19969f4ca7ca32b1706531a8719fd5b7d3fd69da75e097f90e",
+          "model": "qat",
+          "ordinal": 0,
+          "variant": "baseline",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 95.39672925494315,
+              "ttftMedianMs": 38.09999999962747,
+              "decodeSamplesTokS": [
+                95.97806215716673,
+                95.39672925494315,
+                94.69412295194566
+              ],
+              "ttftSamplesMs": [
+                38.09999999962747,
+                37.5,
+                38.19999999925494
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 92.97520661162136,
+              "ttftMedianMs": 41.40000000037253,
+              "decodeSamplesTokS": [
+                92.5653834849575,
+                93.59679096721864,
+                92.97520661162136
+              ],
+              "ttftSamplesMs": [
+                42,
+                41.40000000037253,
+                41
+              ]
+            }
+          ]
+        },
+        {
+          "rawFile": "qat-1-singleton.json",
+          "sha256": "85f16c92e27feea249b04e5dfe80373b142d8579885ae79f7774a448e7088f44",
+          "model": "qat",
+          "ordinal": 1,
+          "variant": "singleton",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 94.69412295221078,
+              "ttftMedianMs": 37.90000000037253,
+              "decodeSamplesTokS": [
+                94.7225981056011,
+                94.69412295221078,
+                93.68029739776952
+              ],
+              "ttftSamplesMs": [
+                38.69999999925494,
+                37.80000000074506,
+                37.90000000037253
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 95.10869565238787,
+              "ttftMedianMs": 41.30000000074506,
+              "decodeSamplesTokS": [
+                95.10869565238787,
+                94.07197252511585,
+                95.13742071892311
+              ],
+              "ttftSamplesMs": [
+                41.80000000074506,
+                41.09999999962747,
+                41.30000000074506
+              ]
+            }
+          ]
+        },
+        {
+          "rawFile": "qat-2-singleton.json",
+          "sha256": "8aff7c48fa93f0ec392780ba5014d7f6b81ea41cb3d3f6279f12e996503153b7",
+          "model": "qat",
+          "ordinal": 2,
+          "variant": "singleton",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 94.31137724550898,
+              "ttftMedianMs": 37.70000000111759,
+              "decodeSamplesTokS": [
+                94.07197252511585,
+                94.31137724550898,
+                94.87951807228916
+              ],
+              "ttftSamplesMs": [
+                38.40000000037253,
+                37.69999999925494,
+                37.70000000111759
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 94.86523113994178,
+              "ttftMedianMs": 41.19999999925494,
+              "decodeSamplesTokS": [
+                94.86523113994178,
+                94.9653301175228,
+                94.33962264166732
+              ],
+              "ttftSamplesMs": [
+                41.600000001490116,
+                41.19999999925494,
+                41
+              ]
+            }
+          ]
+        },
+        {
+          "rawFile": "qat-3-baseline.json",
+          "sha256": "804cb63d1162232de4981e3c926a749a5cd250f6f143d2518326a27469fa271d",
+          "model": "qat",
+          "ordinal": 3,
+          "variant": "baseline",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 92.68795056652796,
+              "ttftMedianMs": 38,
+              "decodeSamplesTokS": [
+                92.68795056652796,
+                92.53819036417605,
+                94.92240470075926
+              ],
+              "ttftSamplesMs": [
+                38.69999999925494,
+                37.90000000037253,
+                38
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 92.60620314556961,
+              "ttftMedianMs": 41.20000000111759,
+              "decodeSamplesTokS": [
+                91.98423127483876,
+                92.60620314556961,
+                93.48568036795544
+              ],
+              "ttftSamplesMs": [
+                41.90000000037253,
+                41.19999999925494,
+                41.20000000111759
+              ]
+            }
+          ]
+        }
+      ],
+      "models": {
+        "normal": {
+          "metadata": {
+            "manifestSha256": "ae23f43cc141d369edc0669ae097fca3e95a91f27ccaf0089f56be4984834ac8",
+            "enabledFeatures": [
+              "core-features-and-limits"
+            ],
+            "wgslLanguageFeatures": [
+              "buffer_view",
+              "immediate_address_space",
+              "linear_indexing",
+              "packed_4x8_integer_dot_product",
+              "pointer_composite_access",
+              "readonly_and_readwrite_storage_textures",
+              "subgroup_id",
+              "subgroup_uniformity",
+              "swizzle_assignment",
+              "texture_and_sampler_let",
+              "texture_formats_tier1",
+              "uniform_buffer_standard_layout",
+              "unrestricted_pointer_parameters"
+            ],
+            "compute": "f32",
+            "quant": "i4-gemvpar",
+            "linearGemvReduce": "parallel",
+            "linearGemvReduceOverride": "parallel",
+            "weights": "Karume packed i4 / i8",
+            "capacity": 128,
+            "chunkLength": 64,
+            "normalization": "fused",
+            "fuseRmsNormAdd": true,
+            "rmsNormReduce": "workgroup",
+            "submitMaxChunkSize": 768,
+            "prefillBuckets": "dense",
+            "chunkBuckets": [
+              4,
+              8,
+              16,
+              24,
+              32,
+              40,
+              48,
+              56
+            ],
+            "pleBudget": "default-two-shards"
+          },
+          "singleton": {
+            "caseLoadMedianTokS": 114.33794466403162,
+            "caseLoadMedianTtftMs": 37.49999999906868
+          },
+          "baseline": {
+            "caseLoadMedianTokS": 111.94089577282872,
+            "caseLoadMedianTtftMs": 37.50000000093132
+          },
+          "decodeChangePercent": 2.1413522508051397
+        },
+        "qat": {
+          "metadata": {
+            "manifestSha256": "118e16431a3ba75988ef811e87a8e731b4766e92ef43d4058c4e300b378a4f0c",
+            "enabledFeatures": [
+              "core-features-and-limits"
+            ],
+            "wgslLanguageFeatures": [
+              "buffer_view",
+              "immediate_address_space",
+              "linear_indexing",
+              "packed_4x8_integer_dot_product",
+              "pointer_composite_access",
+              "readonly_and_readwrite_storage_textures",
+              "subgroup_id",
+              "subgroup_uniformity",
+              "swizzle_assignment",
+              "texture_and_sampler_let",
+              "texture_formats_tier1",
+              "uniform_buffer_standard_layout",
+              "unrestricted_pointer_parameters"
+            ],
+            "compute": "f32",
+            "quant": "i4-gemvpar",
+            "linearGemvReduce": "parallel",
+            "linearGemvReduceOverride": "parallel",
+            "weights": "Karume fixed int2 / int4 / int8 + SRQ",
+            "capacity": 128,
+            "chunkLength": 64,
+            "normalization": "fused",
+            "fuseRmsNormAdd": true,
+            "rmsNormReduce": "workgroup",
+            "submitMaxChunkSize": 768,
+            "prefillBuckets": "dense",
+            "chunkBuckets": [
+              4,
+              8,
+              16,
+              24,
+              32,
+              40,
+              48,
+              56
+            ],
+            "pleBudget": "default-two-shards"
+          },
+          "singleton": {
+            "caseLoadMedianTokS": 94.77967704607627,
+            "caseLoadMedianTtftMs": 39.549999999813735
+          },
+          "baseline": {
+            "caseLoadMedianTokS": 92.83157858907467,
+            "caseLoadMedianTtftMs": 39.65000000037253
+          },
+          "decodeChangePercent": 2.098529925495507
+        }
+      }
+    },
+    "permuteBaab": {
+      "rawDirectory": "outputs/bench/karume/2026-09-14_22-37-59_singleton-permute-baab-etjftlpn",
+      "bundles": {
+        "baseline": "4c73e9a7de2978f5508f965467fe7ce37755501e64ff77107be1dbdd4355b1cc",
+        "candidate": "d72a42c604ad7eb7bd09cd6a5f59ed8e9211ac5d9e48ed9a4e7aacb58a06830f"
+      },
+      "loads": [
+        {
+          "rawFile": "normal-0-singleton.json",
+          "sha256": "b0f64c1ace245cde581f492b6e6c1fe5698162f2cc980ab460403028d443c440",
+          "model": "normal",
+          "ordinal": 0,
+          "variant": "singleton",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 113.90345326350105,
+              "ttftMedianMs": 36.5,
+              "decodeSamplesTokS": [
+                113.22789360202862,
+                113.90345326350105,
+                115.76626240368661
+              ],
+              "ttftSamplesMs": [
+                36.5,
+                35.80000000074506,
+                39.70000000111759
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 113.04503857908907,
+              "ttftMedianMs": 39.90000000037253,
+              "decodeSamplesTokS": [
+                110.83743842357268,
+                113.04503857908907,
+                113.06532663331701
+              ],
+              "ttftSamplesMs": [
+                39.90000000037253,
+                41.70000000111759,
+                39.69999999925494
+              ]
+            }
+          ]
+        },
+        {
+          "rawFile": "normal-1-baseline.json",
+          "sha256": "0879f19ac97f56d3687da8f13e5982e1c05450b3514246f626612c00e11902de",
+          "model": "normal",
+          "ordinal": 1,
+          "variant": "baseline",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 112.54019292589523,
+              "ttftMedianMs": 36.19999999925494,
+              "decodeSamplesTokS": [
+                111.22881355924888,
+                112.92346298612284,
+                112.54019292589523
+              ],
+              "ttftSamplesMs": [
+                37.69999999925494,
+                36.19999999925494,
+                36.09999999962747
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 110.54570977357224,
+              "ttftMedianMs": 40.100000001490116,
+              "decodeSamplesTokS": [
+                109.64148973205856,
+                110.54570977357224,
+                112.45983577271389
+              ],
+              "ttftSamplesMs": [
+                40.100000001490116,
+                39.79999999888241,
+                40.90000000037253
+              ]
+            }
+          ]
+        },
+        {
+          "rawFile": "normal-2-baseline.json",
+          "sha256": "45876af470209316fd5b8acb1d116944ebc5c5c6a693f5a64999f961be6da9ca",
+          "model": "normal",
+          "ordinal": 2,
+          "variant": "baseline",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 109.96683539877645,
+              "ttftMedianMs": 36.59999999962747,
+              "decodeSamplesTokS": [
+                112.0199146514194,
+                108.09883321915032,
+                109.96683539877645
+              ],
+              "ttftSamplesMs": [
+                36.59999999962747,
+                36.5,
+                36.59999999962747
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 110.603932584342,
+              "ttftMedianMs": 39.79999999888241,
+              "decodeSamplesTokS": [
+                110.33274956217163,
+                110.603932584342,
+                111.46496815301317
+              ],
+              "ttftSamplesMs": [
+                41.20000000111759,
+                39.79999999888241,
+                39.59999999962747
+              ]
+            }
+          ]
+        },
+        {
+          "rawFile": "normal-3-singleton.json",
+          "sha256": "55d342fa4910daaa54d83895cff779b9aa59bb250deb1032c8d171f11d4d72d7",
+          "model": "normal",
+          "ordinal": 3,
+          "variant": "singleton",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 110.13986013986013,
+              "ttftMedianMs": 36.30000000074506,
+              "decodeSamplesTokS": [
+                110.13986013986013,
+                112.37959329297514,
+                109.60334029213351
+              ],
+              "ttftSamplesMs": [
+                36.70000000111759,
+                35.90000000037253,
+                36.30000000074506
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 105.01750291708764,
+              "ttftMedianMs": 40.30000000074506,
+              "decodeSamplesTokS": [
+                111.07193229915859,
+                104.30463576158941,
+                105.01750291708764
+              ],
+              "ttftSamplesMs": [
+                40.20000000111759,
+                40.30000000074506,
+                40.79999999888241
+              ]
+            }
+          ]
+        },
+        {
+          "rawFile": "qat-0-singleton.json",
+          "sha256": "ab4a5716c1e81e40f970753bc99b23a94b17f3622095c828e216a669f93e234d",
+          "model": "qat",
+          "ordinal": 0,
+          "variant": "singleton",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 101.1723141157651,
+              "ttftMedianMs": 36.90000000037253,
+              "decodeSamplesTokS": [
+                101.23734533171232,
+                101.1723141157651,
+                91.90371991247265
+              ],
+              "ttftSamplesMs": [
+                36.90000000037253,
+                36.19999999925494,
+                37
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 97.25223834505641,
+              "ttftMedianMs": 40.5,
+              "decodeSamplesTokS": [
+                99.04103128444724,
+                95.35341304687611,
+                97.25223834505641
+              ],
+              "ttftSamplesMs": [
+                40.79999999888241,
+                40,
+                40.5
+              ]
+            }
+          ]
+        },
+        {
+          "rawFile": "qat-1-baseline.json",
+          "sha256": "241eab7667a204d04af6d574c6471cab80ab858aa3d14f8fca3a26771d4a0d96",
+          "model": "qat",
+          "ordinal": 1,
+          "variant": "baseline",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 100.22271714927989,
+              "ttftMedianMs": 37.5,
+              "decodeSamplesTokS": [
+                100.22271714927989,
+                100.23866348448688,
+                98.93216080419373
+              ],
+              "ttftSamplesMs": [
+                37.90000000037253,
+                37.30000000074506,
+                37.5
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 98.97879025923017,
+              "ttftMedianMs": 41,
+              "decodeSamplesTokS": [
+                98.97879025923017,
+                99.66777408643748,
+                93.63852556495935
+              ],
+              "ttftSamplesMs": [
+                41,
+                41.5,
+                39.90000000037253
+              ]
+            }
+          ]
+        },
+        {
+          "rawFile": "qat-2-baseline.json",
+          "sha256": "b7a94a3e78fe45a0df4460b039a698e647ca9a38989a246bbaa15c1b6c157b16",
+          "model": "qat",
+          "ordinal": 2,
+          "variant": "baseline",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 95.99268627168563,
+              "ttftMedianMs": 38.100000001490116,
+              "decodeSamplesTokS": [
+                99.80988593138221,
+                93.49955476418002,
+                95.99268627168563
+              ],
+              "ttftSamplesMs": [
+                38.59999999962747,
+                37.70000000111759,
+                38.100000001490116
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 94.48110377913858,
+              "ttftMedianMs": 41.40000000037253,
+              "decodeSamplesTokS": [
+                94.48110377913858,
+                94.60880012034987,
+                93.91771019667566
+              ],
+              "ttftSamplesMs": [
+                41.59999999962747,
+                41.40000000037253,
+                41.29999999888241
+              ]
+            }
+          ]
+        },
+        {
+          "rawFile": "qat-3-singleton.json",
+          "sha256": "7c9ad5a9fb93d22dfb0ccb334d3b529e9cd959536ebdfd47b977a41f96cc0afc",
+          "model": "qat",
+          "ordinal": 3,
+          "variant": "singleton",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 94.93670886081279,
+              "ttftMedianMs": 37.80000000074506,
+              "decodeSamplesTokS": [
+                95.39672925494315,
+                94.93670886081279,
+                94.70835838856068
+              ],
+              "ttftSamplesMs": [
+                38.19999999925494,
+                37.40000000037253,
+                37.80000000074506
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 95.10869565212043,
+              "ttftMedianMs": 41.30000000074506,
+              "decodeSamplesTokS": [
+                94.75109038947917,
+                95.10869565212043,
+                96.96783130686816
+              ],
+              "ttftSamplesMs": [
+                42,
+                41.19999999925494,
+                41.30000000074506
+              ]
+            }
+          ]
+        }
+      ],
+      "models": {
+        "normal": {
+          "metadata": {
+            "manifestSha256": "ae23f43cc141d369edc0669ae097fca3e95a91f27ccaf0089f56be4984834ac8",
+            "enabledFeatures": [
+              "core-features-and-limits"
+            ],
+            "wgslLanguageFeatures": [
+              "buffer_view",
+              "immediate_address_space",
+              "linear_indexing",
+              "packed_4x8_integer_dot_product",
+              "pointer_composite_access",
+              "readonly_and_readwrite_storage_textures",
+              "subgroup_id",
+              "subgroup_uniformity",
+              "swizzle_assignment",
+              "texture_and_sampler_let",
+              "texture_formats_tier1",
+              "uniform_buffer_standard_layout",
+              "unrestricted_pointer_parameters"
+            ],
+            "compute": "f32",
+            "quant": "i4-gemvpar",
+            "linearGemvReduce": "parallel",
+            "linearGemvReduceOverride": "parallel",
+            "weights": "Karume packed i4 / i8",
+            "capacity": 128,
+            "chunkLength": 64,
+            "normalization": "fused",
+            "fuseRmsNormAdd": true,
+            "rmsNormReduce": "workgroup",
+            "submitMaxChunkSize": 768,
+            "prefillBuckets": "dense",
+            "chunkBuckets": [
+              4,
+              8,
+              16,
+              24,
+              32,
+              40,
+              48,
+              56
+            ],
+            "pleBudget": "default-two-shards"
+          },
+          "singleton": {
+            "caseLoadMedianTokS": 111.5924493594746,
+            "caseLoadMedianTtftMs": 38.200000000186265
+          },
+          "baseline": {
+            "caseLoadMedianTokS": 110.57482117895712,
+            "caseLoadMedianTtftMs": 38.19999999925494
+          },
+          "decodeChangePercent": 0.9203073264486772
+        },
+        "qat": {
+          "metadata": {
+            "manifestSha256": "118e16431a3ba75988ef811e87a8e731b4766e92ef43d4058c4e300b378a4f0c",
+            "enabledFeatures": [
+              "core-features-and-limits"
+            ],
+            "wgslLanguageFeatures": [
+              "buffer_view",
+              "immediate_address_space",
+              "linear_indexing",
+              "packed_4x8_integer_dot_product",
+              "pointer_composite_access",
+              "readonly_and_readwrite_storage_textures",
+              "subgroup_id",
+              "subgroup_uniformity",
+              "swizzle_assignment",
+              "texture_and_sampler_let",
+              "texture_formats_tier1",
+              "uniform_buffer_standard_layout",
+              "unrestricted_pointer_parameters"
+            ],
+            "compute": "f32",
+            "quant": "i4-gemvpar",
+            "linearGemvReduce": "parallel",
+            "linearGemvReduceOverride": "parallel",
+            "weights": "Karume fixed int2 / int4 / int8 + SRQ",
+            "capacity": 128,
+            "chunkLength": 64,
+            "normalization": "fused",
+            "fuseRmsNormAdd": true,
+            "rmsNormReduce": "workgroup",
+            "submitMaxChunkSize": 768,
+            "prefillBuckets": "dense",
+            "chunkBuckets": [
+              4,
+              8,
+              16,
+              24,
+              32,
+              40,
+              48,
+              56
+            ],
+            "pleBudget": "default-two-shards"
+          },
+          "singleton": {
+            "caseLoadMedianTokS": 96.18046699858843,
+            "caseLoadMedianTtftMs": 39.15000000037253
+          },
+          "baseline": {
+            "caseLoadMedianTokS": 97.4857382654579,
+            "caseLoadMedianTtftMs": 39.55000000074506
+          },
+          "decodeChangePercent": -1.338935612627934
+        }
+      }
+    },
+    "product": {
+      "rawDirectory": "outputs/bench/karume/2026-09-14_22-46-48_singleton-permute-product-7307b_o4",
+      "bundles": {
+        "baseline": "4c73e9a7de2978f5508f965467fe7ce37755501e64ff77107be1dbdd4355b1cc",
+        "candidate": "1ef13c3ab1619a5748b1349e70d74a3712b0392e352d2f1073f5d02ae6dab40e"
+      },
+      "loads": [
+        {
+          "rawFile": "normal-0-baseline.json",
+          "sha256": "93746c935b4d263bb3a68461a46d39c840860a88fb9b8266b662528c68582dc0",
+          "model": "normal",
+          "ordinal": 0,
+          "variant": "baseline",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 111.13071088331559,
+              "ttftMedianMs": 35.70000000298023,
+              "decodeSamplesTokS": [
+                109.66057441253264,
+                111.13071088331559,
+                112.29946524064171
+              ],
+              "ttftSamplesMs": [
+                35.70000000298023,
+                36,
+                35.399999998509884
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 113.18720804856511,
+              "ttftMedianMs": 39,
+              "decodeSamplesTokS": [
+                112.3194865397885,
+                113.53397008424263,
+                113.18720804856511
+              ],
+              "ttftSamplesMs": [
+                39.19999999925494,
+                38.69999999925494,
+                39
+              ]
+            }
+          ]
+        },
+        {
+          "rawFile": "normal-1-singleton.json",
+          "sha256": "993852ea2ed9639d8c26efeafdc76b8f44a6e495e4f917e62da35bef20e05959",
+          "model": "normal",
+          "ordinal": 1,
+          "variant": "singleton",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 115.7875390550036,
+              "ttftMedianMs": 35.19999999925494,
+              "decodeSamplesTokS": [
+                116.12903225806451,
+                115.7875390550036,
+                115.00547645110316
+              ],
+              "ttftSamplesMs": [
+                35.80000000074506,
+                34.80000000074506,
+                35.19999999925494
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 115.91536338546459,
+              "ttftMedianMs": 38.600000001490116,
+              "decodeSamplesTokS": [
+                115.30014641319877,
+                115.91536338546459,
+                116.36497968262542
+              ],
+              "ttftSamplesMs": [
+                39.100000001490116,
+                38.600000001490116,
+                38.399999998509884
+              ]
+            }
+          ]
+        },
+        {
+          "rawFile": "normal-2-singleton.json",
+          "sha256": "0b1f014a3ea0bf03e27dbe67ca10975bc9697e1b408156cc63af2f0fd34ffb03",
+          "model": "normal",
+          "ordinal": 2,
+          "variant": "singleton",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 111.72193651386146,
+              "ttftMedianMs": 35.900000002235174,
+              "decodeSamplesTokS": [
+                114.37908496716554,
+                111.72193651386146,
+                111.30742049469964
+              ],
+              "ttftSamplesMs": [
+                35.600000001490116,
+                35.900000002235174,
+                36.600000001490116
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 114.71230881297427,
+              "ttftMedianMs": 39.099999997764826,
+              "decodeSamplesTokS": [
+                114.71230881297427,
+                114.75409836065573,
+                114.71230881297427
+              ],
+              "ttftSamplesMs": [
+                39.099999997764826,
+                39.5,
+                39
+              ]
+            }
+          ]
+        },
+        {
+          "rawFile": "normal-3-baseline.json",
+          "sha256": "dd027773843cfd0b4ff716233a321efb50c1a48a2cfa4d2b2875ed6a6ca15b7d",
+          "model": "normal",
+          "ordinal": 3,
+          "variant": "baseline",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 112.84255776449207,
+              "ttftMedianMs": 35.79999999701977,
+              "decodeSamplesTokS": [
+                112.17948717993366,
+                113.0653266325611,
+                112.84255776449207
+              ],
+              "ttftSamplesMs": [
+                35.5,
+                36,
+                35.79999999701977
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 112.3194865397885,
+              "ttftMedianMs": 39,
+              "decodeSamplesTokS": [
+                111.88066062910686,
+                113.06532663331701,
+                112.3194865397885
+              ],
+              "ttftSamplesMs": [
+                39.19999999925494,
+                39,
+                38.69999999925494
+              ]
+            }
+          ]
+        },
+        {
+          "rawFile": "normal-4-singleton.json",
+          "sha256": "051b9350f524bc2c2cbf45a255267995dbfc879871a6aa7e490fe0f0f2ddc8d0",
+          "model": "normal",
+          "ordinal": 4,
+          "variant": "singleton",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 114.81683980332704,
+              "ttftMedianMs": 36.099999997764826,
+              "decodeSamplesTokS": [
+                114.81683980332704,
+                113.96526772777693,
+                116.02209944751381
+              ],
+              "ttftSamplesMs": [
+                36.600000001490116,
+                35.80000000074506,
+                36.099999997764826
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 114.670549690105,
+              "ttftMedianMs": 39.80000000074506,
+              "decodeSamplesTokS": [
+                115.55392516523494,
+                114.670549690105,
+                114.25462459225653
+              ],
+              "ttftSamplesMs": [
+                40.19999999925494,
+                39.80000000074506,
+                39.5
+              ]
+            }
+          ]
+        },
+        {
+          "rawFile": "normal-5-baseline.json",
+          "sha256": "daddcb8d67629edd96e0f21266672007c7f0185fe00ad6c19ac27ead0881ecc4",
+          "model": "normal",
+          "ordinal": 5,
+          "variant": "baseline",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 112.43976441252025,
+              "ttftMedianMs": 36.099999997764826,
+              "decodeSamplesTokS": [
+                111.4255394413973,
+                112.43976441252025,
+                112.58041458154439
+              ],
+              "ttftSamplesMs": [
+                36.600000001490116,
+                35.70000000298023,
+                36.099999997764826
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 111.03278110709455,
+              "ttftMedianMs": 39.899999998509884,
+              "decodeSamplesTokS": [
+                112.37959329260175,
+                111.03278110709455,
+                109.29909784899873
+              ],
+              "ttftSamplesMs": [
+                40.599999997764826,
+                39.5,
+                39.899999998509884
+              ]
+            }
+          ]
+        },
+        {
+          "rawFile": "normal-6-baseline.json",
+          "sha256": "e3d3c06eb844f6a8d8160f86c1b1f0ad37e5308da6df9f1d3ab3bdab78151851",
+          "model": "normal",
+          "ordinal": 6,
+          "variant": "baseline",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 112.37959329260175,
+              "ttftMedianMs": 35.899999998509884,
+              "decodeSamplesTokS": [
+                113.20754716981132,
+                111.58342189131018,
+                112.37959329260175
+              ],
+              "ttftSamplesMs": [
+                36.69999999925494,
+                35.69999999925494,
+                35.899999998509884
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 110.52631578947368,
+              "ttftMedianMs": 39.900000002235174,
+              "decodeSamplesTokS": [
+                111.60318866253321,
+                108.41507485774987,
+                110.52631578947368
+              ],
+              "ttftSamplesMs": [
+                40.599999997764826,
+                39.69999999925494,
+                39.900000002235174
+              ]
+            }
+          ]
+        },
+        {
+          "rawFile": "normal-7-singleton.json",
+          "sha256": "0293640ce391c7840b9b27fda8076ab691dfa0cc9cc5d2827c17b3397346c6c2",
+          "model": "normal",
+          "ordinal": 7,
+          "variant": "singleton",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 112.339514979199,
+              "ttftMedianMs": 36.29999999701977,
+              "decodeSamplesTokS": [
+                112.339514979199,
+                112.23944414736572,
+                112.96395911720161
+              ],
+              "ttftSamplesMs": [
+                36.5,
+                36,
+                36.29999999701977
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 109.90928122833546,
+              "ttftMedianMs": 39.70000000298023,
+              "decodeSamplesTokS": [
+                110.79845233951399,
+                109.90928122833546,
+                109.73697961999038
+              ],
+              "ttftSamplesMs": [
+                40.100000001490116,
+                39.70000000298023,
+                39.399999998509884
+              ]
+            }
+          ]
+        },
+        {
+          "rawFile": "qat-0-baseline.json",
+          "sha256": "6c00c818b806564b3c86fff9fc8efbc8391d3293d28fbc62b5ab17d59a61a17b",
+          "model": "qat",
+          "ordinal": 0,
+          "variant": "baseline",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 93.2366434809375,
+              "ttftMedianMs": 37.70000000298023,
+              "decodeSamplesTokS": [
+                93.2366434809375,
+                92.9340610711587,
+                93.26424870466322
+              ],
+              "ttftSamplesMs": [
+                37.80000000074506,
+                37.600000001490116,
+                37.70000000298023
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 92.38891333009751,
+              "ttftMedianMs": 41.5,
+              "decodeSamplesTokS": [
+                92.52459979459226,
+                92.17264081931236,
+                92.38891333009751
+              ],
+              "ttftSamplesMs": [
+                42.30000000074506,
+                41.5,
+                41.099999997764826
+              ]
+            }
+          ]
+        },
+        {
+          "rawFile": "qat-1-singleton.json",
+          "sha256": "6cd8b3bfb56f0280d45102eab74cc0ba70a0fd7151fc9358e393d3d65d5f209a",
+          "model": "qat",
+          "ordinal": 1,
+          "variant": "singleton",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 95.45454545454545,
+              "ttftMedianMs": 37.899999998509884,
+              "decodeSamplesTokS": [
+                95.45454545454545,
+                95.49795361538753,
+                94.26904084981261
+              ],
+              "ttftSamplesMs": [
+                37.899999998509884,
+                37.5,
+                37.899999998509884
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 94.01581853486068,
+              "ttftMedianMs": 41.600000001490116,
+              "decodeSamplesTokS": [
+                94.29726088887814,
+                94.01581853486068,
+                93.72210651602177
+              ],
+              "ttftSamplesMs": [
+                41.899999998509884,
+                41.600000001490116,
+                41.30000000074506
+              ]
+            }
+          ]
+        },
+        {
+          "rawFile": "qat-2-singleton.json",
+          "sha256": "5a7bee6fbb057d85d07366b9d3cf2e556f2569bfa0ec8c6ea7719ccce4677e81",
+          "model": "qat",
+          "ordinal": 2,
+          "variant": "singleton",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 94.17040358744394,
+              "ttftMedianMs": 37.80000000074506,
+              "decodeSamplesTokS": [
+                93.86174016696951,
+                94.17040358744394,
+                94.5945945945946
+              ],
+              "ttftSamplesMs": [
+                39.20000000298023,
+                37.400000002235174,
+                37.80000000074506
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 94.10007468259896,
+              "ttftMedianMs": 42,
+              "decodeSamplesTokS": [
+                94.18448198503435,
+                93.83378016106616,
+                94.10007468259896
+              ],
+              "ttftSamplesMs": [
+                42,
+                41.399999998509884,
+                42.599999997764826
+              ]
+            }
+          ]
+        },
+        {
+          "rawFile": "qat-3-baseline.json",
+          "sha256": "421fe0678ce4971c3abe004391d28424d55105a178d8d2a4c8a20b20ff67ebb7",
+          "model": "qat",
+          "ordinal": 3,
+          "variant": "baseline",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 93.01638860221055,
+              "ttftMedianMs": 37.899999998509884,
+              "decodeSamplesTokS": [
+                94.29726088887814,
+                93.01638860221055,
+                92.98892988929889
+              ],
+              "ttftSamplesMs": [
+                38.19999999925494,
+                37.70000000298023,
+                37.899999998509884
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 92.5789860396767,
+              "ttftMedianMs": 41.30000000074506,
+              "decodeSamplesTokS": [
+                92.06488382328565,
+                93.52731591479966,
+                92.5789860396767
+              ],
+              "ttftSamplesMs": [
+                41.900000002235174,
+                41.30000000074506,
+                41.099999997764826
+              ]
+            }
+          ]
+        },
+        {
+          "rawFile": "qat-4-singleton.json",
+          "sha256": "0a140312f130c57ee3c909a895c3e63bb37dedc928506ed16d2d9179eacc511e",
+          "model": "qat",
+          "ordinal": 4,
+          "variant": "singleton",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 94.32549782870065,
+              "ttftMedianMs": 38.5,
+              "decodeSamplesTokS": [
+                93.91771019667566,
+                94.60880012034987,
+                94.32549782870065
+              ],
+              "ttftSamplesMs": [
+                37.900000002235174,
+                38.80000000074506,
+                38.5
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 93.55509355530057,
+              "ttftMedianMs": 41.30000000074506,
+              "decodeSamplesTokS": [
+                93.69422962491163,
+                93.04386353597395,
+                93.55509355530057
+              ],
+              "ttftSamplesMs": [
+                41.599999997764826,
+                41.30000000074506,
+                41.30000000074506
+              ]
+            }
+          ]
+        },
+        {
+          "rawFile": "qat-5-baseline.json",
+          "sha256": "14988b69bef8ff4396add102777c99703587d8ca7eb974f4e361de65a648576a",
+          "model": "qat",
+          "ordinal": 5,
+          "variant": "baseline",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 93.30568720389442,
+              "ttftMedianMs": 38.400000002235174,
+              "decodeSamplesTokS": [
+                92.85187914517317,
+                94.00179051039994,
+                93.30568720389442
+              ],
+              "ttftSamplesMs": [
+                38.900000002235174,
+                37.30000000074506,
+                38.400000002235174
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 92.40246406560745,
+              "ttftMedianMs": 41.30000000074506,
+              "decodeSamplesTokS": [
+                92.40246406560745,
+                91.98423127483876,
+                92.40246406560745
+              ],
+              "ttftSamplesMs": [
+                41.80000000074506,
+                41.30000000074506,
+                41.30000000074506
+              ]
+            }
+          ]
+        },
+        {
+          "rawFile": "qat-6-baseline.json",
+          "sha256": "7eee5767e2f5ab6ed513e0ce54c1c9b17f6b92a3e95db0ffadebc89c3a3e7b60",
+          "model": "qat",
+          "ordinal": 6,
+          "variant": "baseline",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 93.30568720389442,
+              "ttftMedianMs": 37.69999999925494,
+              "decodeSamplesTokS": [
+                92.79717189540814,
+                93.30568720389442,
+                93.68029739776952
+              ],
+              "ttftSamplesMs": [
+                38,
+                37.599999997764826,
+                37.69999999925494
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 92.52459979459226,
+              "ttftMedianMs": 41.69999999925494,
+              "decodeSamplesTokS": [
+                94.00179051039994,
+                92.52459979459226,
+                92.06488382278447
+              ],
+              "ttftSamplesMs": [
+                41.69999999925494,
+                41.20000000298023,
+                42.30000000074506
+              ]
+            }
+          ]
+        },
+        {
+          "rawFile": "qat-7-singleton.json",
+          "sha256": "e31affa6aff3f8fe69b748f6777becf62d23635a91e1592161d33a1c517e8779",
+          "model": "qat",
+          "ordinal": 7,
+          "variant": "singleton",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 94.19856459372119,
+              "ttftMedianMs": 38.30000000074506,
+              "decodeSamplesTokS": [
+                94.19856459372119,
+                94.18448198555889,
+                95.35341304687611
+              ],
+              "ttftSamplesMs": [
+                38.5,
+                37.80000000074506,
+                38.30000000074506
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 93.68029739776952,
+              "ttftMedianMs": 41.599999997764826,
+              "decodeSamplesTokS": [
+                93.68029739776952,
+                93.41637010696797,
+                93.86174016644856
+              ],
+              "ttftSamplesMs": [
+                41.79999999701977,
+                41,
+                41.599999997764826
+              ]
+            }
+          ]
+        }
+      ],
+      "models": {
+        "normal": {
+          "metadata": {
+            "manifestSha256": "ae23f43cc141d369edc0669ae097fca3e95a91f27ccaf0089f56be4984834ac8",
+            "enabledFeatures": [
+              "core-features-and-limits"
+            ],
+            "wgslLanguageFeatures": [
+              "buffer_view",
+              "immediate_address_space",
+              "linear_indexing",
+              "packed_4x8_integer_dot_product",
+              "pointer_composite_access",
+              "readonly_and_readwrite_storage_textures",
+              "subgroup_id",
+              "subgroup_uniformity",
+              "swizzle_assignment",
+              "texture_and_sampler_let",
+              "texture_formats_tier1",
+              "uniform_buffer_standard_layout",
+              "unrestricted_pointer_parameters"
+            ],
+            "compute": "f32",
+            "quant": "i4-gemvpar",
+            "linearGemvReduce": "parallel",
+            "linearGemvReduceOverride": "parallel",
+            "weights": "Karume packed i4 / i8",
+            "capacity": 128,
+            "chunkLength": 64,
+            "normalization": "fused",
+            "fuseRmsNormAdd": true,
+            "rmsNormReduce": "workgroup",
+            "submitMaxChunkSize": 768,
+            "prefillBuckets": "dense",
+            "chunkBuckets": [
+              4,
+              8,
+              16,
+              24,
+              32,
+              40,
+              48,
+              56
+            ],
+            "pleBudget": "default-two-shards"
+          },
+          "singleton": {
+            "caseLoadMedianTokS": 114.69142925153963,
+            "caseLoadMedianTtftMs": 37.44999999925494
+          },
+          "baseline": {
+            "caseLoadMedianTokS": 112.34953991619513,
+            "caseLoadMedianTtftMs": 37.54999999888241
+          },
+          "decodeChangePercent": 2.0844672235341477
+        },
+        "qat": {
+          "metadata": {
+            "manifestSha256": "118e16431a3ba75988ef811e87a8e731b4766e92ef43d4058c4e300b378a4f0c",
+            "enabledFeatures": [
+              "core-features-and-limits"
+            ],
+            "wgslLanguageFeatures": [
+              "buffer_view",
+              "immediate_address_space",
+              "linear_indexing",
+              "packed_4x8_integer_dot_product",
+              "pointer_composite_access",
+              "readonly_and_readwrite_storage_textures",
+              "subgroup_id",
+              "subgroup_uniformity",
+              "swizzle_assignment",
+              "texture_and_sampler_let",
+              "texture_formats_tier1",
+              "uniform_buffer_standard_layout",
+              "unrestricted_pointer_parameters"
+            ],
+            "compute": "f32",
+            "quant": "i4-gemvpar",
+            "linearGemvReduce": "parallel",
+            "linearGemvReduceOverride": "parallel",
+            "weights": "Karume fixed int2 / int4 / int8 + SRQ",
+            "capacity": 128,
+            "chunkLength": 64,
+            "normalization": "fused",
+            "fuseRmsNormAdd": true,
+            "rmsNormReduce": "workgroup",
+            "submitMaxChunkSize": 768,
+            "prefillBuckets": "dense",
+            "chunkBuckets": [
+              4,
+              8,
+              16,
+              24,
+              32,
+              40,
+              48,
+              56
+            ],
+            "pleBudget": "default-two-shards"
+          },
+          "singleton": {
+            "caseLoadMedianTokS": 94.13523913502145,
+            "caseLoadMedianTtftMs": 39.90000000037253
+          },
+          "baseline": {
+            "caseLoadMedianTokS": 92.79768732094362,
+            "caseLoadMedianTtftMs": 39.850000001490116
+          },
+          "decodeChangePercent": 1.4413633062339892
+        }
+      }
+    },
+    "productGuarded": {
+      "rawDirectory": "outputs/bench/karume/2026-09-14_23-15-40_singleton-permute-owned-product-lqxrj4eq",
+      "bundles": {
+        "baseline": "4c73e9a7de2978f5508f965467fe7ce37755501e64ff77107be1dbdd4355b1cc",
+        "candidate": "744848a6738f165ba50e1c25fcd0b113d6b21793f335bdbd61d9fb4b24af788a"
+      },
+      "loads": [
+        {
+          "rawFile": "normal-0-baseline.json",
+          "sha256": "9c1a78468730180ccc9a9e857e2c86f9399ed1fcb9b964fc0f77e83a04563924",
+          "model": "normal",
+          "ordinal": 0,
+          "variant": "baseline",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 112.66094420615869,
+              "ttftMedianMs": 35.29999999701977,
+              "decodeSamplesTokS": [
+                113.00448430493273,
+                112.66094420615869,
+                98.57612267227837
+              ],
+              "ttftSamplesMs": [
+                35.899999998509884,
+                34.80000000074506,
+                35.29999999701977
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 112.0199146510484,
+              "ttftMedianMs": 38.80000000074506,
+              "decodeSamplesTokS": [
+                112.0199146510484,
+                112.2594440486166,
+                109.89010988996708
+              ],
+              "ttftSamplesMs": [
+                39.19999999925494,
+                38.80000000074506,
+                38.79999999701977
+              ]
+            }
+          ]
+        },
+        {
+          "rawFile": "normal-1-singleton.json",
+          "sha256": "f50067258b5caa631944641c33991da651f03c7c285ffb9f1ec8f10570a533a0",
+          "model": "normal",
+          "ordinal": 1,
+          "variant": "singleton",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 115.4903758020165,
+              "ttftMedianMs": 35.19999999925494,
+              "decodeSamplesTokS": [
+                115.68123393284543,
+                115.4903758020165,
+                115.23687580041313
+              ],
+              "ttftSamplesMs": [
+                35.5,
+                34.899999998509884,
+                35.19999999925494
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 116.12903225806451,
+              "ttftMedianMs": 38.600000001490116,
+              "decodeSamplesTokS": [
+                116.23616236162361,
+                114.69142545119571,
+                116.12903225806451
+              ],
+              "ttftSamplesMs": [
+                39.100000001490116,
+                38.600000001490116,
+                38.5
+              ]
+            }
+          ]
+        },
+        {
+          "rawFile": "normal-2-singleton.json",
+          "sha256": "627c652308892ed501b7200ff57d74c7c8081f6afb608766a2c385ed61cadb61",
+          "model": "normal",
+          "ordinal": 2,
+          "variant": "singleton",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 115.25795828728184,
+              "ttftMedianMs": 35.30000000074506,
+              "decodeSamplesTokS": [
+                115.25795828728184,
+                115.11054266461366,
+                115.93669488438123
+              ],
+              "ttftSamplesMs": [
+                35.600000001490116,
+                35.100000001490116,
+                35.30000000074506
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 116.36497968262542,
+              "ttftMedianMs": 39.5,
+              "decodeSamplesTokS": [
+                114.54545454545455,
+                116.36497968262542,
+                117.27475800463026
+              ],
+              "ttftSamplesMs": [
+                39.100000001490116,
+                39.80000000074506,
+                39.5
+              ]
+            }
+          ]
+        },
+        {
+          "rawFile": "normal-3-baseline.json",
+          "sha256": "ec29d207088a8e930ef2823f46d74760be96197a75fd54082a2e08c66b006a53",
+          "model": "normal",
+          "ordinal": 3,
+          "variant": "baseline",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 113.63636363666907,
+              "ttftMedianMs": 35.80000000074506,
+              "decodeSamplesTokS": [
+                113.90345326388464,
+                112.27945107868645,
+                113.63636363666907
+              ],
+              "ttftSamplesMs": [
+                35.5,
+                35.80000000074506,
+                36
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 112.4598357730878,
+              "ttftMedianMs": 39.70000000298023,
+              "decodeSamplesTokS": [
+                112.78195488691719,
+                112.4598357730878,
+                111.13071088404585
+              ],
+              "ttftSamplesMs": [
+                40.29999999701977,
+                39.600000001490116,
+                39.70000000298023
+              ]
+            }
+          ]
+        },
+        {
+          "rawFile": "normal-4-singleton.json",
+          "sha256": "10a7ab0dc77b3886fcfefdc74759763afcc577a570f3ff7166505a3dcf9f2a53",
+          "model": "normal",
+          "ordinal": 4,
+          "variant": "singleton",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 114.75409836065573,
+              "ttftMedianMs": 36.600000001490116,
+              "decodeSamplesTokS": [
+                114.52463188557714,
+                114.75409836065573,
+                115.38461538461539
+              ],
+              "ttftSamplesMs": [
+                36.80000000074506,
+                35.70000000298023,
+                36.600000001490116
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 114.94252873610093,
+              "ttftMedianMs": 39.600000001490116,
+              "decodeSamplesTokS": [
+                114.92156147328987,
+                114.94252873610093,
+                115.4903758020165
+              ],
+              "ttftSamplesMs": [
+                40.099999997764826,
+                39.600000001490116,
+                39.400000002235174
+              ]
+            }
+          ]
+        },
+        {
+          "rawFile": "normal-5-baseline.json",
+          "sha256": "8a6a5b1f9d412e05f2eb9f0764df173482e97fcc63f8846290479c359bafaca2",
+          "model": "normal",
+          "ordinal": 5,
+          "variant": "baseline",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 112.72141706954369,
+              "ttftMedianMs": 36.20000000298023,
+              "decodeSamplesTokS": [
+                112.72141706954369,
+                112.86277319972069,
+                112.47991430146655
+              ],
+              "ttftSamplesMs": [
+                36.5,
+                36,
+                36.20000000298023
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 112.21945137186893,
+              "ttftMedianMs": 39.80000000074506,
+              "decodeSamplesTokS": [
+                112.21945137186893,
+                111.16993118066495,
+                112.37959329334853
+              ],
+              "ttftSamplesMs": [
+                40.399999998509884,
+                39.399999998509884,
+                39.80000000074506
+              ]
+            }
+          ]
+        },
+        {
+          "rawFile": "normal-6-baseline.json",
+          "sha256": "459ba6c3f21c78f54ae72cf24a1b51abdbf6c49e7e1e2a96c2b984938ce1f650",
+          "model": "normal",
+          "ordinal": 6,
+          "variant": "baseline",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 112.2594440486166,
+              "ttftMedianMs": 36,
+              "decodeSamplesTokS": [
+                111.15031757218982,
+                112.52009287327826,
+                112.2594440486166
+              ],
+              "ttftSamplesMs": [
+                36.79999999701977,
+                36,
+                36
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 112.07970112049989,
+              "ttftMedianMs": 39.79999999701977,
+              "decodeSamplesTokS": [
+                111.72193651386146,
+                112.07970112049989,
+                112.76176839105784
+              ],
+              "ttftSamplesMs": [
+                40.600000001490116,
+                39.79999999701977,
+                39.600000001490116
+              ]
+            }
+          ]
+        },
+        {
+          "rawFile": "normal-7-singleton.json",
+          "sha256": "ab301e7643fd512675ef513dc43f527d56981259a72421ed766c1516864185a0",
+          "model": "normal",
+          "ordinal": 7,
+          "variant": "singleton",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 114.7750045540963,
+              "ttftMedianMs": 36.29999999701977,
+              "decodeSamplesTokS": [
+                114.44141689373296,
+                114.7750045540963,
+                115.30014641241267
+              ],
+              "ttftSamplesMs": [
+                36.69999999925494,
+                36.29999999701977,
+                36.099999997764826
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 114.19249592185079,
+              "ttftMedianMs": 39.80000000074506,
+              "decodeSamplesTokS": [
+                115.4903758020165,
+                114.02714932126698,
+                114.19249592185079
+              ],
+              "ttftSamplesMs": [
+                40.19999999925494,
+                39.80000000074506,
+                39.70000000298023
+              ]
+            }
+          ]
+        },
+        {
+          "rawFile": "qat-0-baseline.json",
+          "sha256": "694393bc2c856b747088d665f7bfbcc5ea5802d5496db9596cd5d3d0f6a2698c",
+          "model": "qat",
+          "ordinal": 0,
+          "variant": "baseline",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 93.19526627218934,
+              "ttftMedianMs": 37.900000002235174,
+              "decodeSamplesTokS": [
+                93.12638580931264,
+                93.55509355530057,
+                93.19526627218934
+              ],
+              "ttftSamplesMs": [
+                38,
+                37.70000000298023,
+                37.900000002235174
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 93.1539257724835,
+              "ttftMedianMs": 41.69999999925494,
+              "decodeSamplesTokS": [
+                92.3618237793027,
+                96.10983981693364,
+                93.1539257724835
+              ],
+              "ttftSamplesMs": [
+                41.899999998509884,
+                41.100000001490116,
+                41.69999999925494
+              ]
+            }
+          ]
+        },
+        {
+          "rawFile": "qat-1-singleton.json",
+          "sha256": "7bdd3e0a890d6862f501fe468370244adf6982bef4f22e0b8142fe0eb5084a1e",
+          "model": "qat",
+          "ordinal": 1,
+          "variant": "singleton",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 94.08602150569041,
+              "ttftMedianMs": 38,
+              "decodeSamplesTokS": [
+                95.02262443438914,
+                93.44408187491786,
+                94.08602150569041
+              ],
+              "ttftSamplesMs": [
+                38,
+                37.399999998509884,
+                38
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 94.39616421904256,
+              "ttftMedianMs": 41.099999997764826,
+              "decodeSamplesTokS": [
+                94.53781512626182,
+                94.01581853433802,
+                94.39616421904256
+              ],
+              "ttftSamplesMs": [
+                42.19999999925494,
+                41,
+                41.099999997764826
+              ]
+            }
+          ]
+        },
+        {
+          "rawFile": "qat-2-singleton.json",
+          "sha256": "8230b691869d589a3a36d2ddf9ce65502338b8130a427d464e15794003c64711",
+          "model": "qat",
+          "ordinal": 2,
+          "variant": "singleton",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 94.18448198503435,
+              "ttftMedianMs": 37.80000000074506,
+              "decodeSamplesTokS": [
+                94.17040358744394,
+                94.18448198503435,
+                94.56619633754197
+              ],
+              "ttftSamplesMs": [
+                37.80000000074506,
+                37.399999998509884,
+                37.80000000074506
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 93.6385255647001,
+              "ttftMedianMs": 41.599999997764826,
+              "decodeSamplesTokS": [
+                93.6385255647001,
+                93.87572641910313,
+                93.33333333333333
+              ],
+              "ttftSamplesMs": [
+                41.599999997764826,
+                41.5,
+                42.099999997764826
+              ]
+            }
+          ]
+        },
+        {
+          "rawFile": "qat-3-baseline.json",
+          "sha256": "ce379dd55986c4f7d8238ef721c6353ef7cc3eaa4ed22716d9265933bdefa7c4",
+          "model": "qat",
+          "ordinal": 3,
+          "variant": "baseline",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 93.59679096695963,
+              "ttftMedianMs": 37.70000000298023,
+              "decodeSamplesTokS": [
+                93.59679096695963,
+                95.03695881753147,
+                92.97520661187694
+              ],
+              "ttftSamplesMs": [
+                38,
+                37.69999999925494,
+                37.70000000298023
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 92.5653834849575,
+              "ttftMedianMs": 41.5,
+              "decodeSamplesTokS": [
+                92.1996194935333,
+                92.5653834849575,
+                93.22284699604994
+              ],
+              "ttftSamplesMs": [
+                41.900000002235174,
+                41.5,
+                40.79999999701977
+              ]
+            }
+          ]
+        },
+        {
+          "rawFile": "qat-4-singleton.json",
+          "sha256": "b22b3477ec42eb124e7aa3f51d259691ff39984db6f2752d944cb8d94385e8bd",
+          "model": "qat",
+          "ordinal": 4,
+          "variant": "singleton",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 93.73605118317143,
+              "ttftMedianMs": 37.80000000074506,
+              "decodeSamplesTokS": [
+                94.00179050987742,
+                93.63852556521859,
+                93.73605118317143
+              ],
+              "ttftSamplesMs": [
+                38.29999999701977,
+                37.5,
+                37.80000000074506
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 93.75,
+              "ttftMedianMs": 41.599999997764826,
+              "decodeSamplesTokS": [
+                93.7639529693998,
+                93.09886212460846,
+                93.75
+              ],
+              "ttftSamplesMs": [
+                42.899999998509884,
+                41.599999997764826,
+                41.099999997764826
+              ]
+            }
+          ]
+        },
+        {
+          "rawFile": "qat-5-baseline.json",
+          "sha256": "33a44dc58ca33f3b03d2a4100b161fc54cfeca4679656748c655421e0daa7d10",
+          "model": "qat",
+          "ordinal": 5,
+          "variant": "baseline",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 93.09886212512097,
+              "ttftMedianMs": 37.80000000074506,
+              "decodeSamplesTokS": [
+                93.20905459356659,
+                92.4838520259379,
+                93.09886212512097
+              ],
+              "ttftSamplesMs": [
+                38.099999997764826,
+                37.70000000298023,
+                37.80000000074506
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 92.3347501098215,
+              "ttftMedianMs": 42.099999997764826,
+              "decodeSamplesTokS": [
+                92.3347501098215,
+                92.42957746458666,
+                92.1591574022908
+              ],
+              "ttftSamplesMs": [
+                42.29999999701977,
+                42.099999997764826,
+                41.30000000074506
+              ]
+            }
+          ]
+        },
+        {
+          "rawFile": "qat-6-baseline.json",
+          "sha256": "eb9db6eeb7d29724c41fd583944633e45a33f8045a5110e7434a2b2ea258584f",
+          "model": "qat",
+          "ordinal": 6,
+          "variant": "baseline",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 93.41637010696797,
+              "ttftMedianMs": 37.69999999925494,
+              "decodeSamplesTokS": [
+                93.58288770063834,
+                93.41637010696797,
+                93.26424870466322
+              ],
+              "ttftSamplesMs": [
+                39,
+                37.400000002235174,
+                37.69999999925494
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 93.40252038547072,
+              "ttftMedianMs": 41.599999997764826,
+              "decodeSamplesTokS": [
+                93.40252038547072,
+                94.25493716306003,
+                93.03012404026774
+              ],
+              "ttftSamplesMs": [
+                41.899999998509884,
+                41.599999997764826,
+                41.19999999925494
+              ]
+            }
+          ]
+        },
+        {
+          "rawFile": "qat-7-singleton.json",
+          "sha256": "46d8b6b0e8fa2de673dd4e8b2098fe871063e3c5bf335a16baf1fcf8e94f7d11",
+          "model": "qat",
+          "ordinal": 7,
+          "variant": "singleton",
+          "cases": [
+            {
+              "case": 0,
+              "decodeMedianTokS": 94.00179051039994,
+              "ttftMedianMs": 38.100000001490116,
+              "decodeSamplesTokS": [
+                93.31950822079831,
+                96.75933036377793,
+                94.00179051039994
+              ],
+              "ttftSamplesMs": [
+                38.100000001490116,
+                37.599999997764826,
+                38.19999999925494
+              ]
+            },
+            {
+              "case": 1,
+              "decodeMedianTokS": 94.21265141329474,
+              "ttftMedianMs": 42,
+              "decodeSamplesTokS": [
+                94.21265141329474,
+                94.3678849608439,
+                94.10007468259896
+              ],
+              "ttftSamplesMs": [
+                41.600000001490116,
+                42,
+                42.5
+              ]
+            }
+          ]
+        }
+      ],
+      "models": {
+        "normal": {
+          "metadata": {
+            "manifestSha256": "ae23f43cc141d369edc0669ae097fca3e95a91f27ccaf0089f56be4984834ac8",
+            "enabledFeatures": [
+              "core-features-and-limits"
+            ],
+            "wgslLanguageFeatures": [
+              "buffer_view",
+              "immediate_address_space",
+              "linear_indexing",
+              "packed_4x8_integer_dot_product",
+              "pointer_composite_access",
+              "readonly_and_readwrite_storage_textures",
+              "subgroup_id",
+              "subgroup_uniformity",
+              "swizzle_assignment",
+              "texture_and_sampler_let",
+              "texture_formats_tier1",
+              "uniform_buffer_standard_layout",
+              "unrestricted_pointer_parameters"
+            ],
+            "compute": "f32",
+            "quant": "i4-gemvpar",
+            "linearGemvReduce": "parallel",
+            "linearGemvReduceOverride": "parallel",
+            "weights": "Karume packed i4 / i8",
+            "capacity": 128,
+            "chunkLength": 64,
+            "normalization": "fused",
+            "fuseRmsNormAdd": true,
+            "rmsNormReduce": "workgroup",
+            "submitMaxChunkSize": 768,
+            "prefillBuckets": "dense",
+            "chunkBuckets": [
+              4,
+              8,
+              16,
+              24,
+              32,
+              40,
+              48,
+              56
+            ],
+            "pleBudget": "default-two-shards"
+          },
+          "singleton": {
+            "caseLoadMedianTokS": 115.10024351169139,
+            "caseLoadMedianTtftMs": 37.600000001490116
+          },
+          "baseline": {
+            "caseLoadMedianTokS": 112.3596399108522,
+            "caseLoadMedianTtftMs": 37.500000001862645
+          },
+          "decodeChangePercent": 2.4391352651304654
+        },
+        "qat": {
+          "metadata": {
+            "manifestSha256": "118e16431a3ba75988ef811e87a8e731b4766e92ef43d4058c4e300b378a4f0c",
+            "enabledFeatures": [
+              "core-features-and-limits"
+            ],
+            "wgslLanguageFeatures": [
+              "buffer_view",
+              "immediate_address_space",
+              "linear_indexing",
+              "packed_4x8_integer_dot_product",
+              "pointer_composite_access",
+              "readonly_and_readwrite_storage_textures",
+              "subgroup_id",
+              "subgroup_uniformity",
+              "swizzle_assignment",
+              "texture_and_sampler_let",
+              "texture_formats_tier1",
+              "uniform_buffer_standard_layout",
+              "unrestricted_pointer_parameters"
+            ],
+            "compute": "f32",
+            "quant": "i4-gemvpar",
+            "linearGemvReduce": "parallel",
+            "linearGemvReduceOverride": "parallel",
+            "weights": "Karume fixed int2 / int4 / int8 + SRQ",
+            "capacity": 128,
+            "chunkLength": 64,
+            "normalization": "fused",
+            "fuseRmsNormAdd": true,
+            "rmsNormReduce": "workgroup",
+            "submitMaxChunkSize": 768,
+            "prefillBuckets": "dense",
+            "chunkBuckets": [
+              4,
+              8,
+              16,
+              24,
+              32,
+              40,
+              48,
+              56
+            ],
+            "pleBudget": "default-two-shards"
+          },
+          "singleton": {
+            "caseLoadMedianTokS": 94.04390600804518,
+            "caseLoadMedianTtftMs": 39.59999999962747
+          },
+          "baseline": {
+            "caseLoadMedianTokS": 93.17459602233643,
+            "caseLoadMedianTtftMs": 39.70000000111759
+          },
+          "decodeChangePercent": 0.9329903458882294
+        }
+      }
+    }
+  },
+  "profiles": [
+    {
+      "rawFile": "outputs/bench/karume/2026-09-14_22-35-47_singleton-permute-profile-x1khfwbm/normal-0-baseline-1-pass.json",
+      "sha256": "43e772a15b12466cd65f8ed9eaa472064e939a10c51e5d2b03dc3349f8232740",
+      "model": "normal",
+      "variant": "baseline",
+      "mode": "pass",
+      "decodeDispatchPerToken": 1024,
+      "prefillDispatch": 1022,
+      "totalDispatch": 65534,
+      "decodeGpuMedianMs": 6.411264,
+      "decodeWallTokS": 111.8806606283667
+    },
+    {
+      "rawFile": "outputs/bench/karume/2026-09-14_22-35-47_singleton-permute-profile-x1khfwbm/normal-0-baseline-2-dispatch.json",
+      "sha256": "c1f1f8d720274257197b99565534c73f941e80a431ab35e6fbef2e314bdc9ce8",
+      "model": "normal",
+      "variant": "baseline",
+      "mode": "dispatch",
+      "stridedPerDecodeToken": 135,
+      "perturbedMedianMsByFamily": {
+        "argmax": 0.009216,
+        "attention_state_pv": 0.30310399999999993,
+        "attention_state_qk": 0.6082559999999998,
+        "attention_state_stats": 0.280576,
+        "embedding": 0.012288,
+        "ew": 1.1233280000000008,
+        "linear_gemv_parallel": 5.219328000000002,
+        "rms_norm": 1.1141119999999989,
+        "rms_norm_add": 0.9922560000000005,
+        "rope": 0.311296,
+        "state_append": 0.18227200000000005,
+        "strided": 0.8140800000000015,
+        "topk": 0.006144
+      }
+    },
+    {
+      "rawFile": "outputs/bench/karume/2026-09-14_22-35-47_singleton-permute-profile-x1khfwbm/normal-1-singleton-1-pass.json",
+      "sha256": "a8fcf4621acaac95a326e07939cafa811861cea4176912f8a82a28f284142047",
+      "model": "normal",
+      "variant": "singleton",
+      "mode": "pass",
+      "decodeDispatchPerToken": 924,
+      "prefillDispatch": 992,
+      "totalDispatch": 59204,
+      "decodeGpuMedianMs": 6.281216,
+      "decodeWallTokS": 114.52463188480158
+    },
+    {
+      "rawFile": "outputs/bench/karume/2026-09-14_22-35-47_singleton-permute-profile-x1khfwbm/normal-1-singleton-2-dispatch.json",
+      "sha256": "c2db5c56476cda0e933dd7bf1491f6a98fdb504a9c93385580e849c944b80374",
+      "model": "normal",
+      "variant": "singleton",
+      "mode": "dispatch",
+      "stridedPerDecodeToken": 35,
+      "perturbedMedianMsByFamily": {
+        "argmax": 0.01024,
+        "attention_state_pv": 0.3072,
+        "attention_state_qk": 0.5980159999999999,
+        "attention_state_stats": 0.283648,
+        "embedding": 0.012288,
+        "ew": 1.139712000000001,
+        "linear_gemv_parallel": 5.249024000000001,
+        "rms_norm": 1.1233279999999988,
+        "rms_norm_add": 0.9994240000000005,
+        "rope": 0.31436800000000004,
+        "state_append": 0.18124800000000008,
+        "strided": 0.21606400000000012,
+        "topk": 0.006144
+      }
+    },
+    {
+      "rawFile": "outputs/bench/karume/2026-09-14_22-35-47_singleton-permute-profile-x1khfwbm/qat-0-singleton-1-pass.json",
+      "sha256": "24ebb478e8096a60cbbd91d490b42afa445e1cb25bf881fb321a3d3e7699e094",
+      "model": "qat",
+      "variant": "singleton",
+      "mode": "pass",
+      "decodeDispatchPerToken": 1411,
+      "prefillDispatch": 1479,
+      "totalDispatch": 90372,
+      "decodeGpuMedianMs": 7.458816,
+      "decodeWallTokS": 94.29726088914104
+    },
+    {
+      "rawFile": "outputs/bench/karume/2026-09-14_22-35-47_singleton-permute-profile-x1khfwbm/qat-0-singleton-2-dispatch.json",
+      "sha256": "89f6929bc63f731723126c017b44fe4853068d8803434f892533ca717bd878d5",
+      "model": "qat",
+      "variant": "singleton",
+      "mode": "dispatch",
+      "stridedPerDecodeToken": 35,
+      "perturbedMedianMsByFamily": {
+        "argmax": 0.009216,
+        "attention_state_pv": 0.3051519999999999,
+        "attention_state_qk": 0.6031359999999998,
+        "attention_state_stats": 0.283648,
+        "embedding": 0.012288,
+        "ew": 1.1253760000000013,
+        "linear_gemv": 0.36863999999999997,
+        "linear_gemv_parallel": 4.538368000000008,
+        "rms_norm": 1.1233279999999988,
+        "rms_norm_add": 0.9973760000000005,
+        "rope": 0.315392,
+        "state_append": 0.18329600000000007,
+        "static_quantize": 3.635200000000024,
+        "strided": 0.21606400000000012,
+        "topk": 0.007168
+      }
+    },
+    {
+      "rawFile": "outputs/bench/karume/2026-09-14_22-35-47_singleton-permute-profile-x1khfwbm/qat-1-baseline-1-pass.json",
+      "sha256": "67f2a2e464b272a919e10f35c8b6c3c13c3900e03ec9e8eceace097f48a9e566",
+      "model": "qat",
+      "variant": "baseline",
+      "mode": "pass",
+      "decodeDispatchPerToken": 1511,
+      "prefillDispatch": 1509,
+      "totalDispatch": 96702,
+      "decodeGpuMedianMs": 7.636992,
+      "decodeWallTokS": 92.87925696584225
+    },
+    {
+      "rawFile": "outputs/bench/karume/2026-09-14_22-35-47_singleton-permute-profile-x1khfwbm/qat-1-baseline-2-dispatch.json",
+      "sha256": "8b873297ab535f0dbfa000ffbb65fc268de9618397b272e5cec14b112386fea8",
+      "model": "qat",
+      "variant": "baseline",
+      "mode": "dispatch",
+      "stridedPerDecodeToken": 135,
+      "perturbedMedianMsByFamily": {
+        "argmax": 0.01024,
+        "attention_state_pv": 0.304128,
+        "attention_state_qk": 0.6082559999999997,
+        "attention_state_stats": 0.28262400000000004,
+        "embedding": 0.012288,
+        "ew": 1.1274240000000009,
+        "linear_gemv": 0.369664,
+        "linear_gemv_parallel": 4.560896000000005,
+        "rms_norm": 1.1274239999999986,
+        "rms_norm_add": 1.0035200000000006,
+        "rope": 0.3143680000000001,
+        "state_append": 0.18329600000000004,
+        "static_quantize": 3.6433920000000257,
+        "strided": 0.8202240000000014,
+        "topk": 0.007168
+      }
+    }
+  ],
+  "comparisonGenerations": 560,
+  "outputSignatures": {
+    "normal/0": "5967f5896ce05e09a9ac9144e3c32ad9c36909bc58491a305ca74cd57634d7d3",
+    "normal/1": "cedb8b84ea5dabbc9c62dfadb60ca0c869ece1ef164b8f99d81940bbe7a792d0",
+    "qat/0": "3ee4c6d1e4390745ff8ce5d45206e8848a54e0da92dfb869c73d73a1638a387e",
+    "qat/1": "6e4c44d63cb04fc50a2ba1f302d582d2af7e8c5971077b2bc5fa0529bc42e95e"
+  },
+  "profileGenerations": 28,
+  "rmsRopeMicro": {
+    "rawFile": "outputs/bench/karume/2026-09-14_22-24-17_rms-rope-micro-retry-onbxj8hk/results.json",
+    "sha256": "5e17f31ee909f770a56cd85c31f78b5dc3b10d87613cd30f0936c09514071992",
+    "shapes": 24,
+    "checks": 240,
+    "elements": 10045440,
+    "speedupRange": [
+      1.1769138128030139,
+      1.4112397701549715
+    ],
+    "finiteWordDifferences": 0,
+    "nanClassDifferences": 0
+  },
+  "unchangedProductSourceFiles": 785,
+  "copyOutputsControls": {
+    "rawDirectory": "outputs/bench/karume/2026-09-14_23-19-51_permute-copyoutputs-controls-tzwr7eb1",
+    "variants": {
+      "legacy": {
+        "variant": "legacy",
+        "status": "accepted",
+        "dispatch": 1
+      },
+      "unrestricted": {
+        "variant": "unrestricted",
+        "status": "rejected",
+        "callError": "copyOutputs 'after': 写し元と写し先が同じバッファ（常駐テンソル 'control input'）— グラフ出力がその常駐入力の別名（reshape / 恒等 expand）になっているため、写しは自己コピーになる（計算内容がゼロの構成）",
+        "finishError": "copyOutputs 'after': 写し元と写し先が同じバッファ（常駐テンソル 'control input'）— グラフ出力がその常駐入力の別名（reshape / 恒等 expand）になっているため、写しは自己コピーになる（計算内容がゼロの構成）",
+        "dispatch": 0
+      },
+      "guarded": {
+        "variant": "guarded",
+        "status": "accepted",
+        "dispatch": 1
+      }
+    }
+  }
+}

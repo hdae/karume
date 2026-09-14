@@ -145,3 +145,20 @@ M2のGEMV subgroupの80生成は完了して採用見送り。RMS subgroupも既
 ログは`outputs/bench/karume/2026-09-14_19-10-32_merge-docs-verify-gixbe167/verify.log`。検証開始時からTS/WGSL/HTML 782ファイルのSHAは不変。
 348ローカルリンク、全変更パスと索引、数値、mainとの祖先関係、既存tiny goldenと公開source表の非変更を照合した。
 終了後の変更はこの検証記録の追記とfmtだけで、推論コードやテストを変更していない。
+
+## 独立レビュー後の追加差分（2026-09-14、基準c265a60）
+
+添付資料を現行コードで再検証し、[要素順を保つpermuteのコピー削減](2026-09-14-reference-rope-optimization.md)を追加した。
+この差分は以前のSolレビュー（315732aまで）の範囲に含まれない。固定索引は当時の範囲のまま保持する。
+
+追加で読む実装は`packages/runtime/src/runtime/fusion.ts`の`planAliases`と
+`packages/runtime/src/runtime/recipe-builder.ts`のpermute分岐、`estimate.ts`と融合候補ツールの共有判定への接続。
+非単位軸の順序判定、入力・重みからのコピーを残してcopyOutputsの既存受理条件を保つこと、
+別名時にコピーを発行しないこと、既存retain/release・出力pinとの整合、
+実行とメモリ見積りが同じ述語を使うことを確認する。
+回帰テストは`runtime_permute_alias_test.ts`、`gpu_permute_alias_test.ts`、独立添字oracleの`helpers/permute.ts`。
+IR・公開設定・dtype対応・数値演算・goldenは変更しない。理由と境界は[ADR 0011](../decisions/0011-layout-strategy.md#要素順を保つpermute2026-09-14)。
+
+RTXの最終実装160生成は通常約2.44%、QAT約0.93%速いが、別走行のQATは逆転しており、固定改善率の保証ではない。
+M2は未検収。588生成の出力比較・関連125テスト・全体verifyの出所は上記調査記録に集約する。
+外部カーネルは読解のみで複製していない。RMS→RoPEの追加融合は試作に留め、製品へ入れていない。

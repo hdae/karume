@@ -23,6 +23,7 @@
   K-37は[M2追試](research/2026-09-13-gemv-subgroup.md)まで完了。約0.5%の差で既定採用を見送る。
   K-38の並列GEMV subgroup32は任意指定を維持。[M2の80生成](research/2026-09-13-m2-gemv-subgroup-adoption.md)は出力一致、速度改善なしで既定採用を見送る。画面は既存parallelの2設定20生成へ戻す。[I4 N12288/K1536のL8比較](research/2026-09-14-i4-lane-comparison.md)は通常E2Bの80生成で約10.7%遅く不採用。M2のGPU費用帰属は残る。Denoは必要な機能が未対応。
   利用者の2026-09-14依頼により、[マージ前レビュー資料と全差分索引](research/2026-09-14-merge-review.md)を準備し、ACTIVE_DESIGNを現況の索引へ整理した。[独立レビューとM2再計測](research/2026-09-14-merge-review-results.md)も完了し、今回の範囲で修正が必要な新規指摘はなし。マージ時は対象headと検証headを再照合する。マージ・push・公開は未実施。未完の最適化を資料準備と同時に完了扱いにしない。
+  [添付参照資料の現行再検証](research/2026-09-14-reference-rope-optimization.md)からK-41のpermuteコピー削減を実装。残る検収はM2の既存初期選択20生成と、前回レビュー後の追加差分確認。K-40のRMS→RoPE融合は保留。次の候補はstate attentionとgate/up入力共有の費用調査（数値順を変える実装は任意指定の方針を維持）。
   広いchunk/複数容量への一括適用は見送り。QATのM2/RTX生成差とChromeのGPU Instance消失は原因の切り分けを残す。
   残件は配布 recipe / source 表、長文と広い品質評価。実験資産を公開済みモデルとして扱わない。
   手元の試走は [MiniCPM5 CLI](../examples/minicpm5/README.md) / [Qwen3 CLI](../examples/qwen3/README.md) を使える。

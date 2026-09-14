@@ -559,11 +559,11 @@ export class RecipeBuilder {
     const bindNames = step.kind === "node" ? step.plan.node.ins : step.binds;
     const consumedNames = step.kind === "node" ? step.plan.node.ins : step.ins;
     const binds = bindNames.map((name) => this.#bindingSource(name, defined));
-    // reshape と恒等 expand は要素順を変えないので**入力バッファをそのまま出力の実体にする**
+    // 要素順を変えない別名では**入力バッファをそのまま出力の実体にする**
     // （別名 — ADR 0011）。dispatch も確保も出さない。要素数一致は planGraph が済ませているので、
     // 別名先の実バッファは宣言 shape ぶんの大きさを必ず満たす。
     // MUST: 別名元は bind 面の先頭（temp にはなりえない）。
-    // MUST: 別名化しうる 2 op（reshape / 恒等 expand）は**単一出力**なので、別名の出力列は
+    // MUST: 別名化しうるop（reshape / expand / permute）は**単一出力**なので、別名の出力列は
     // 常に 1 本きり。多出力 op を別名化する形はここでは表せない（増やすときは alias の
     // 「どの入力を」まで slot ごとに宣言することになる）。
     const aliasesInput = step.kind === "node" && step.aliasesInput;
@@ -754,6 +754,11 @@ export class RecipeBuilder {
         await this.#buildTopk(step, binds, outs, builder);
         break;
       case "permute":
+        // 要素順が変わらない場合は既存aliasの簿記だけで完結する（ADR 0011）。
+        if (!aliasesInput) {
+          await this.#buildStridedCopy(step, "permute", binds, outs, builder);
+        }
+        break;
       case "slice":
       case "symPrefixSlice":
         await this.#buildStridedCopy(step, step.contract.kind, binds, outs, builder);

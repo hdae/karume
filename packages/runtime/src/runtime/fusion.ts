@@ -55,6 +55,7 @@ import {
   layerNormAttrs,
   numel,
   outputCountOf,
+  permuteDims,
   rmsNormEps,
   SAFE_SOFTMAX_OP,
   sliceAttrs,
@@ -212,7 +213,8 @@ type NodeStep = {
   readonly kind: "node";
   readonly plan: NodePlan;
   /**
-   * 出力を入力バッファの別名にする（0 dispatch — ADR 0011）。reshape は常に真、expand は
+   * 出力を入力バッファの別名にする（0 dispatch — ADR 0011）。reshapeは常に真、permuteは
+   * 要素順が変わらず、実体が内部で確保されている場合だけ。expand は
    * 束縛後の入出力 shape が rank を含め完全一致するとき（= 複製軸を持たない恒等写像）だけ真。
    */
   readonly aliasesInput: boolean;
@@ -1322,19 +1324,48 @@ export const FUSION_RULES: readonly FusionRule[] = [
 ];
 
 /**
- * 出力を入力バッファの別名にするか（0 dispatch — ADR 0011 とその 2026-08-08 追記）。reshape は
- * 要素順を変えないので無条件、`expand` は束縛後の入出力 shape が rank を含め完全一致するとき
- * （= 複製軸を持たない恒等写像）だけ。1 軸でも複製があれば strided 実体化コピーへ戻す。
- *
- * MUST: **別名規則の唯一の判定点**。判定は束縛済み shape と契約だけで決まる（device 非依存 =
- * 実行相と見積り相で必ず同じ答えになる）ので、実行計画（{@link planFusions} →
- * recipe-builder の `#buildStep`）と必要量 estimator（src/runtime/estimate.ts の
- * `transientSlotBytes`）はこの 1 本を共有する。書き写すと、片方だけ直された実装に対して
- * estimator が例外も警告も無く別の中間ピークを主張し続ける（レビュー R6V-2 の実際の姿）。
+ * 長さ1の軸は座標が常に0なので、移動しても平坦な要素順へ影響しない。
+ * それ以外の軸は元の順を保つ必要がある。同じ長さの軸同士の交換も許さない。
+ * 空テンソルは従来経路に残す。DECIDED: docs/decisions/0011-layout-strategy.md#要素順を保つpermute2026-09-14
  */
-export const aliasesInput = (plan: NodePlan): boolean =>
+const permuteKeepsElementOrder = (plan: NodePlan): boolean => {
+  const shape = plan.inputShapes[0];
+  if (shape.some((dim) => dim === 0)) return false;
+  let previous = -1;
+  for (const axis of permuteDims(plan.node.attrs, "permute alias")) {
+    if (shape[axis] === 1) continue;
+    if (axis <= previous) return false;
+    previous = axis;
+  }
+  return true;
+};
+
+/**
+ * 別名規則の唯一の判定点。新しく省くpermuteのコピーは内部で確保した実体に限る。
+ * 入力や重みにまで別名を伸ばすと、従来のcopyOutputsが自己コピーとして拒否される。
+ */
+const aliasesInput = (plan: NodePlan, internal: ReadonlySet<string>): boolean =>
   plan.contract.kind === "reshape" ||
+  (plan.contract.kind === "permute" && internal.has(plan.node.ins[0]) &&
+    permuteKeepsElementOrder(plan)) ||
   (plan.contract.kind === "expand" && sameShape(plan.inputShapes[0], plan.outputs[0].shape));
+
+/**
+ * 宣言順に別名と実体の由来を導出する。入力・重みは集合の外、確保した値とその別名だけが内部値。
+ * 実行相と見積り相が共有し、形状と所有権の判定を別々に書き写さない（ADR 0011）。
+ */
+export const planAliases = (nodes: readonly NodePlan[]): ReadonlySet<NodePlan> => {
+  const internal = new Set<string>();
+  const aliases = new Set<NodePlan>();
+  for (const plan of nodes) {
+    const alias = aliasesInput(plan, internal);
+    if (alias) aliases.add(plan);
+    if (!alias || internal.has(plan.node.ins[0])) {
+      for (const output of plan.outputs) internal.add(output.name);
+    }
+  }
+  return aliases;
+};
 
 /** ノード列を走査して融合ステップへ畳む。掴めなかったノードは素のまま並ぶ。 */
 export const planFusions = (
@@ -1342,6 +1373,7 @@ export const planFusions = (
   context: FusionContext,
 ): FusionPlan => {
   const steps: ExecStep[] = [];
+  const aliases = planAliases(nodes);
   const counts: Record<FusionCounterName, number> = {
     rmsNormAdd: 0,
     silu: 0,
@@ -1352,7 +1384,7 @@ export const planFusions = (
     identityExpand: 0,
   };
   const pushNode = (plan: NodePlan): void => {
-    const alias = aliasesInput(plan);
+    const alias = aliases.has(plan);
     if (alias && plan.contract.kind === "expand") counts.identityExpand += 1;
     steps.push({ kind: "node", plan, aliasesInput: alias });
   };

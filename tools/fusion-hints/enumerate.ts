@@ -8,11 +8,11 @@
 
 import type { IrGraph } from "../../packages/runtime/src/format/ir.ts";
 import {
-  aliasesInput,
   enumerateUnfusedWindows,
   type ExecStep,
   type FusionCounts,
   type FusionLimits,
+  planAliases,
   planFusions,
   type UnfusedWindow,
 } from "../../packages/runtime/src/runtime/fusion.ts";
@@ -54,10 +54,11 @@ export const enumerateGraph = (
   };
   const plan = planFusions(nodes, context);
   // 融合を切った計画は「全ノードが素のステップ」— planFusions の別名化判定
-  // （`aliasesInput`）だけは共有する（ステップの形を 2 通りに割らない）。
-  const steps: readonly ExecStep[] = options.fused === false
-    ? nodes.map((node) => ({ kind: "node", plan: node, aliasesInput: aliasesInput(node) }))
-    : plan.steps;
+  // （`planAliases`）だけは共有する（ステップの形を 2 通りに割らない）。
+  const aliases = options.fused === false ? planAliases(nodes) : undefined;
+  const steps: readonly ExecStep[] = aliases === undefined
+    ? plan.steps
+    : nodes.map((node) => ({ kind: "node", plan: node, aliasesInput: aliases.has(node) }));
   return {
     node_count: nodes.length,
     counts: plan.counts,

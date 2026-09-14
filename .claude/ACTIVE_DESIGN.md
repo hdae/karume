@@ -1,7 +1,7 @@
 # ACTIVE_DESIGN — Karume
 
 > 現在の設計とレビューの入口。履歴はADR / research / gitに置き、作業順は[backlog](../docs/backlog.md)、性能の採否は[perf-ledger](../docs/perf-ledger.md)を正本とする。
-> Last updated: 2026-09-14（独立レビューと利用者M2再計測を照合）
+> Last updated: 2026-09-14（添付参照資料の再検証とpermuteコピー削減）
 
 ## 現在の焦点
 
@@ -22,12 +22,14 @@
 - 大きいI4のL4→L8候補は[全体比較で不採用](../docs/research/2026-09-14-i4-lane-comparison.md)。製品はL4を維持する。
   [最新M2追試](../docs/research/2026-09-13-m2-gemv-subgroup-adoption.md)も完了済み。同じ80生成を再依頼しない。
   比較画面は両E2B・parallel・dense chunk64・RMS融合・投入768の2設定20生成。CLIやモデルの既定とは区別する。
+- [添付参照資料を現行コードで再検証](../docs/research/2026-09-14-reference-rope-optimization.md)。要素順を保つpermuteのコピーを省く（[ADR 0011](../docs/decisions/0011-layout-strategy.md#要素順を保つpermute2026-09-14)）。
+  Gemma両E2Bのdecodeで100 dispatchを削減。数値設定・WGSLは不変、M2の追試は未完。RMS→RoPE融合の試作は全体利得が小さく保留。
 - [MiniCPM5](../examples/minicpm5/README.md) / [Qwen3](../examples/qwen3/README.md)はローカル変換資産を使う短文脈の対話CLI。
   マルチターン・reset・中断は検収済み。公開pipeline、長文脈・広い品質検収は未完。
 
 ## 次と未完
 
-- [独立レビューとM2再計測](../docs/research/2026-09-14-merge-review-results.md)を完了。Sol 3担当と主担当の確認では、修正が必要な新規不具合は見つかっていない。マージ時は対象headと検証headを再照合する。
+- [独立レビューとM2再計測](../docs/research/2026-09-14-merge-review-results.md)を完了。Sol 3担当と主担当の確認では、修正が必要な新規不具合は見つかっていない。レビュー範囲は315732aまでで、後続のpermute最適化を含まない。追加差分は上の資料に記録し、マージ時に対象headと検証headを再照合する。
   マージ・push・公開はまだ行っていない。公開済み0.12.0との互換性と、新しい配布形が要求するreaderを区別する。
 - M2のGPU時間の帰属、RMS融合のモデル既定化、E4B・他LLM・長文・広い品質評価は[backlog](../docs/backlog.md)に残す。
   Wan / MiniMax H3は[事前調査](../docs/research/2026-09-10-codex-mtp-optimization.md#動画生成の事前調査-wan-と-minimax-h3)までで、ブラウザ実装は未着手。

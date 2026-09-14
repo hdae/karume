@@ -12,9 +12,9 @@
 import { assertEquals, assertThrows } from "@std/assert";
 import { type IrGraph, parseIrGraph } from "../src/format/ir.ts";
 import {
-  aliasesInput,
   enumerateUnfusedWindows,
   type ExecStep,
+  planAliases,
   planFusions,
   type UnfusedWindow,
 } from "../src/runtime/fusion.ts";
@@ -48,8 +48,10 @@ const plan = (graph: GraphJson, inputShapes: Readonly<Record<string, readonly nu
 };
 
 /** 融合を切った計画（全ノードが素のステップ）。 */
-const unfused = (nodes: ReturnType<typeof plan>["nodes"]): readonly ExecStep[] =>
-  nodes.map((node) => ({ kind: "node", plan: node, aliasesInput: aliasesInput(node) }));
+const unfused = (nodes: ReturnType<typeof plan>["nodes"]): readonly ExecStep[] => {
+  const aliases = planAliases(nodes);
+  return nodes.map((node) => ({ kind: "node", plan: node, aliasesInput: aliases.has(node) }));
+};
 
 /** 窓の要約（op 名列 / 窓幅 / 先頭ノード位置 / 鎖の出力名）。 */
 const outline = (windows: readonly UnfusedWindow[]): readonly string[] =>

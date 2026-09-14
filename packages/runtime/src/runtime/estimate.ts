@@ -42,7 +42,7 @@ import { parseDim, solveDim } from "../format/dims.ts";
 import type { IrDim, IrGraph } from "../format/ir.ts";
 import { toSizeClass } from "../gpu/arena.ts";
 import { numel, RUNTIME_SUPPORT, stateWindow, topkK } from "../ops.ts";
-import { aliasesInput } from "./fusion.ts";
+import { planAliases } from "./fusion.ts";
 import {
   assertChunkBuckets,
   assertChunkLength,
@@ -131,7 +131,7 @@ export type AdmissionScenario = {
    * 中間（transient）slot 表の必要バイト = prepared backing の必要側と同義（**近似**）。
    *
    * 融合前のノード列を宣言順に歩き、実行相と同じ確保規則（exact-size LIFO 再利用・
-   * 消費回数は `countUses`・グラフ出力は pinned で解放しない・reshape / 恒等 expand の出力は
+   * 消費回数は `countUses`・グラフ出力は pinned で解放しない・別名化できる出力は
    * 確保せず入力の実体を別名で使う）で slot 表を再生した総バイト。**states 形 attention の
    * ノード内一時（スコア S と行統計）はここに入る** — 融合の成立に依存せず必ず出て、capacity
    * 律速のグラフでは中間の主役になるため（算式は {@link stateAttentionTemps}）。それ以外の
@@ -268,7 +268,7 @@ export type EstimateOptions = {
  * ように読まれる（ADR 0070 決定 5 が unaccounted 欄を要求した理由そのもの）。
  */
 const UNACCOUNTED: readonly string[] = Object.freeze([
-  "融合が畳んで消す中間と、融合ルールが宣言するノード内一時（どちらも device limit と融合の成立に依存する。reshape / 恒等 expand の別名は勘定に入っている）",
+  "融合が畳んで消す中間と、融合ルールが宣言するノード内一時（どちらも device limit と融合の成立に依存する。別名化した値は勘定に入っている）",
   "states 形でない attention のノード内一時（スコアの行ブロックと i8a8 の量子化中間）と、linear i8a8 の量子化中間 — どれも数値変種と device limit に依存する。states 形 attention のスコア S と行統計は勘定に入っている（融合の成立に依存せず必ず出るため）",
   "params バッファ（カーネル定数 — Session 常駐・内容アドレスキャッシュ）",
   "queue.writeBuffer の実装 staging（submit の完了まで解放されない）",
@@ -576,7 +576,7 @@ const stateAttentionTemps = (
  * fail loudly になる。上限は `limit`（`EstimateOptions.maxStorageBufferBindingSize` — 無指定なら
  * WebGPU core 既定）で、領域の上限はそれと core 既定の大きいほう（束縛上限 ≤ `maxBufferSize` は
  * 仕様の不変条件）。
- * MUST: 簿記の単位は**値名ではなく slot**（別名 = reshape / 恒等 expand は根の生存を延ばす）。
+ * MUST: 簿記の単位は**値名ではなく slot**（別名は根の生存を延ばす）。
  */
 const transientSlotBytes = (
   graph: IrGraph,
@@ -586,8 +586,9 @@ const transientSlotBytes = (
 ): number => {
   const uses = countUses(graph);
   const outputNames = new Set(graph.outputs);
+  const aliases = planAliases(nodes);
   const program: TransientStepSpec[] = nodes.map((node) => {
-    const isAlias = aliasesInput(node);
+    const isAlias = aliases.has(node);
     const outputs: TransientOutputSpec[] = node.outputs.map((out) => ({
       name: out.name,
       kind: isAlias ? "alias" : "alloc",
