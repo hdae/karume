@@ -1,6 +1,6 @@
 # 0103: 並列GEMVと固定再量子化の任意融合
 
-- Status: accepted（2026-09-15・利用者の最適化継続依頼の範囲）。M2での採用判断は未完。
+- Status: accepted（2026-09-15・利用者の最適化継続依頼の範囲）。M2の短文生成も検収済み。quant宣言への適用は別作業。
 - 関連: [0097](0097-gemma4-qat-integration.md)、[0098](0098-linear-gemv-parallel.md)、[0096](0096-speculative-decoding.md)、[0040](0040-fusion-pass.md)
 - 根拠: [保留候補の再検証](../research/2026-09-15-held-combinations.md)、[製品実装の検収](../research/2026-09-15-linear-static-quantize-fusion.md)
 
@@ -57,3 +57,10 @@ QATのMTPそのものを新たに実装・保証する変更ではない。
 Chrome画面の初期選択はQAT E2Bだけで非融合→融合→融合→非融合、計40生成。
 M2で利得を確認できなかったattention融合は選択肢へ残し、比較基準は従来のparallelにする。
 M2検収前に高速化付きquantのモデル既定へ昇格しない。
+
+## M2検収後の判断（2026-09-15）
+
+[40生成の追試](../research/2026-09-15-m2-linear-srq-adoption.md)は出力一致、小幅な速度改善方向。
+任意高速化として採用を維持し、QAT E2Bの高速quant構成候補に含める。
+速度の標本は重なり、全環境で一定の改善率を保証しない。追加の同一追試は不要。
+既定化はquant.sessionの許可表と明示指定優先を整理して適用し、今回の文書更新では変更しない。

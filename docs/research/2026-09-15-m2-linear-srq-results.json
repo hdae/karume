@@ -1,0 +1,399 @@
+{
+  "snapshot": "2026-09-15",
+  "source": "gemma-browser-2026-09-15T05-26-00.089Z.json",
+  "sourceSha256": "4aafa6dceb84144dc32d347e6e85f4af8806a909ad90e07962faa2c179dd4eca",
+  "generations": 40,
+  "outputsMatch": true,
+  "outputsMatchPreviousM2": true,
+  "failures": [],
+  "metadata": {
+    "format": "karume-browser-speed/1",
+    "engine": "karume",
+    "model": "qat",
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
+    "platform": "MacIntel",
+    "adapter": {
+      "vendor": "apple",
+      "architecture": "metal-3",
+      "description": "",
+      "device": "",
+      "isFallbackAdapter": false,
+      "features": [
+        "bgra8unorm-storage",
+        "clip-distances",
+        "core-features-and-limits",
+        "depth-clip-control",
+        "depth32float-stencil8",
+        "dual-source-blending",
+        "float32-blendable",
+        "float32-filterable",
+        "indirect-first-instance",
+        "primitive-index",
+        "rg11b10ufloat-renderable",
+        "shader-f16",
+        "subgroup-size-control",
+        "subgroups",
+        "texture-component-swizzle",
+        "texture-compression-astc",
+        "texture-compression-astc-sliced-3d",
+        "texture-compression-bc",
+        "texture-compression-bc-sliced-3d",
+        "texture-compression-etc2",
+        "texture-formats-tier1",
+        "texture-formats-tier2",
+        "timestamp-query"
+      ]
+    },
+    "manifestSha256": "6c3ae974beeb032942aaa4c943619855b787f34f67441f0f4be63432caca52db",
+    "enabledFeatures": [
+      "core-features-and-limits"
+    ],
+    "wgslLanguageFeatures": [
+      "buffer_view",
+      "immediate_address_space",
+      "linear_indexing",
+      "packed_4x8_integer_dot_product",
+      "pointer_composite_access",
+      "readonly_and_readwrite_storage_textures",
+      "subgroup_id",
+      "subgroup_uniformity",
+      "texture_and_sampler_let",
+      "texture_formats_tier1",
+      "uniform_buffer_standard_layout",
+      "unrestricted_pointer_parameters"
+    ],
+    "compute": "f32",
+    "quant": "i4",
+    "linearGemvReduce": "parallel",
+    "linearGemvReduceOverride": "parallel",
+    "weights": "Karume fixed int2 / int4 / int8 + SRQ",
+    "capacity": 128,
+    "chunkLength": 64,
+    "normalization": "fused",
+    "stateAttentionReduce": "parallel",
+    "fuseRmsNormAdd": true,
+    "rmsNormReduce": "workgroup",
+    "submitMaxChunkSize": 768,
+    "prefillBuckets": "dense",
+    "chunkBuckets": [
+      4,
+      8,
+      16,
+      24,
+      32,
+      40,
+      48,
+      56
+    ],
+    "pleBudget": "default-two-shards",
+    "sampler": {
+      "temperature": 0
+    },
+    "maxNewTokens": 64,
+    "textDecodingTimed": false,
+    "fixture": {
+      "cases": [
+        {
+          "case": "english-list",
+          "prompt": "Write a numbered list of twenty practical tips for learning a new language. Give one short sentence for each tip.",
+          "inputIds": [
+            2,
+            105,
+            2364,
+            107,
+            6974,
+            496,
+            49597,
+            1694,
+            529,
+            12571,
+            10231,
+            11221,
+            573,
+            4735,
+            496,
+            861,
+            5192,
+            236761,
+            23097,
+            886,
+            2822,
+            13315,
+            573,
+            1546,
+            6508,
+            236761,
+            106,
+            107,
+            105,
+            4368,
+            107
+          ]
+        },
+        {
+          "case": "japanese-list",
+          "prompt": "プログラミングを学ぶ人に向けたアドバイスを20個、番号付きで挙げてください。それぞれ一文で説明してください。",
+          "inputIds": [
+            2,
+            105,
+            2364,
+            107,
+            18668,
+            29171,
+            70738,
+            237051,
+            230452,
+            98782,
+            65630,
+            237036,
+            77221,
+            99950,
+            237051,
+            236778,
+            236771,
+            237629,
+            236951,
+            67583,
+            28412,
+            237007,
+            178274,
+            95509,
+            236924,
+            59043,
+            237009,
+            237364,
+            237007,
+            34084,
+            49391,
+            236924,
+            106,
+            107,
+            105,
+            4368,
+            107
+          ]
+        }
+      ],
+      "stopTokens": [
+        1,
+        106,
+        50
+      ],
+      "maxNewTokens": 64,
+      "capacity": 128
+    },
+    "checkout": "92f2bb606472c4bfb1063dea457cd39d2720a0c4",
+    "checkoutDirty": false,
+    "bundleSha256": "3f29f59194087e6e94e0dfa35445bf4e32f566fd308960d9a22ac0d03aa04605"
+  },
+  "loads": [
+    {
+      "index": 0,
+      "fused": false,
+      "loadSeconds": 2.2510450000166893,
+      "cases": [
+        {
+          "case": "english-list",
+          "tokS": 33.99213324907488,
+          "ttftMs": 387.7800000309944,
+          "measuredTokS": [
+            33.99213324907488,
+            35.42460323014898,
+            31.48929364004977
+          ],
+          "firstTokS": 27.559055118110237,
+          "firstTtftMs": 526.7150000333786
+        },
+        {
+          "case": "japanese-list",
+          "tokS": 32.581038869937565,
+          "ttftMs": 477.6650000214577,
+          "measuredTokS": [
+            32.581038869937565,
+            35.24367082397348,
+            32.21023569653258
+          ],
+          "firstTokS": 33.38668136353496,
+          "firstTtftMs": 593.914999961853
+        }
+      ]
+    },
+    {
+      "index": 1,
+      "fused": true,
+      "loadSeconds": 2.0213800000548363,
+      "cases": [
+        {
+          "case": "english-list",
+          "tokS": 34.43639106662016,
+          "ttftMs": 386.64999997615814,
+          "measuredTokS": [
+            34.43639106662016,
+            35.32984334313,
+            33.13992940614975
+          ],
+          "firstTokS": 25.097601784837536,
+          "firstTtftMs": 523.7549999952316
+        },
+        {
+          "case": "japanese-list",
+          "tokS": 35.06360147684462,
+          "ttftMs": 478.9399999976158,
+          "measuredTokS": [
+            35.190124421522675,
+            35.06360147684462,
+            30.246073412094972
+          ],
+          "firstTokS": 33.47280334728033,
+          "firstTtftMs": 593.125
+        }
+      ]
+    },
+    {
+      "index": 2,
+      "fused": true,
+      "loadSeconds": 2.0431150000095366,
+      "cases": [
+        {
+          "case": "english-list",
+          "tokS": 35.16586566658035,
+          "ttftMs": 387.44999998807907,
+          "measuredTokS": [
+            34.44269801134422,
+            35.219830441955104,
+            35.16586566658035
+          ],
+          "firstTokS": 31.560280134944875,
+          "firstTtftMs": 511.5649999976158
+        },
+        {
+          "case": "japanese-list",
+          "tokS": 35.175093799828716,
+          "ttftMs": 476.65499997138977,
+          "measuredTokS": [
+            35.211562806482306,
+            35.11646962364709,
+            35.175093799828716
+          ],
+          "firstTokS": 33.12494413476797,
+          "firstTtftMs": 561.4800000190735
+        }
+      ]
+    },
+    {
+      "index": 3,
+      "fused": false,
+      "loadSeconds": 1.9561650000214577,
+      "cases": [
+        {
+          "case": "english-list",
+          "tokS": 34.19322973998042,
+          "ttftMs": 386.7000000476837,
+          "measuredTokS": [
+            34.19322973998042,
+            35.141836355901624,
+            31.627061720878356
+          ],
+          "firstTokS": 28.19082053210742,
+          "firstTtftMs": 507.6399999856949
+        },
+        {
+          "case": "japanese-list",
+          "tokS": 35.11549094833344,
+          "ttftMs": 479.30500000715256,
+          "measuredTokS": [
+            34.83347663055882,
+            35.11549094833344,
+            35.293623339080106
+          ],
+          "firstTokS": 32.98507032814094,
+          "firstTtftMs": 605.0699999928474
+        }
+      ]
+    }
+  ],
+  "groups": {
+    "off": {
+      "tokS": 34.09268149452765,
+      "ttftMs": 432.72250002622604,
+      "allMeasuredMedianTokS": 34.51335318526962,
+      "allMeasuredMeanTokS": 33.92880785370417,
+      "minTokS": 31.48929364004977,
+      "maxTokS": 35.42460323014898,
+      "caseLoadRange": [
+        32.581038869937565,
+        35.11549094833344
+      ],
+      "firstTtftMs": 560.3149999976158,
+      "firstTokS": 30.58794543012418
+    },
+    "on": {
+      "tokS": 35.114733571712485,
+      "ttftMs": 432.0524999797344,
+      "allMeasuredMedianTokS": 35.141167645113725,
+      "allMeasuredMeanTokS": 34.478123623016664,
+      "minTokS": 30.246073412094972,
+      "maxTokS": 35.32984334313,
+      "caseLoadRange": [
+        34.43639106662016,
+        35.175093799828716
+      ],
+      "firstTtftMs": 542.6175000071526,
+      "firstTokS": 32.342612134856424
+    }
+  },
+  "decodeDeltaPercent": 2.997863565964698,
+  "ttftDeltaMs": -0.6700000464916229,
+  "allMeasuredMedianDeltaPercent": 1.819047997086698,
+  "rawFiles": [
+    {
+      "path": "outputs/bench/karume/2026-09-15_05-29-08_m2-linear-srq-validation-thwy7do_/input.json",
+      "sha256": "4aafa6dceb84144dc32d347e6e85f4af8806a909ad90e07962faa2c179dd4eca"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_05-29-08_m2-linear-srq-validation-thwy7do_/analyze.py",
+      "sha256": "0d72cd2e35aaf58c37aef8f0f38a41167a0811fa8d80dbd6139242344e33c64f"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_05-29-08_m2-linear-srq-validation-thwy7do_/summary.json",
+      "sha256": "b45a302200ee88c0c8d7fd4e4aa68f9ab808200e05e5c9b4e2de2be5f9d3794a"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_05-31-50_m2-srq-adoption-verify-31ttpek6/run.py",
+      "sha256": "cca0f9d68d64a9ff54bfcf474d6342c33e88c939f6e90f7dc5978348c5fe13b8"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_05-31-50_m2-srq-adoption-verify-31ttpek6/before.json",
+      "sha256": "0dd6b27fb298799cc0c0c37674695ed222cbd3388e46b42d911d7fc602355e70"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_05-31-50_m2-srq-adoption-verify-31ttpek6/verify.log",
+      "sha256": "50efee625e14065c0334dcfda2a6be1b9665fadced6c7f40478ba98ae72fce94"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_05-31-50_m2-srq-adoption-verify-31ttpek6/completion.json",
+      "sha256": "f7e6bd62439d0c37efd6d6d19ce203d370e8cb7935c5a81f8dd1e5a743da8e93"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_05-31-50_m2-srq-adoption-verify-31ttpek6/final-verification.json",
+      "sha256": "094b8f2b00f87a9b9035628770230424d571b6297cdf9b05f27576f9334d6dfa"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_05-31-50_m2-srq-adoption-verify-31ttpek6/finalize.py",
+      "sha256": "23437ab5fdcf876fc2067fdb39ecec96dbe14535a72e67a77936a0f59fb12790"
+    }
+  ],
+  "verification": {
+    "command": [
+      "deno",
+      "task",
+      "verify"
+    ],
+    "exitCode": 0,
+    "elapsedSeconds": 1624.7528727054596,
+    "sourceFiles": 798,
+    "changed": [],
+    "summary": "ok | 2970 passed (823 steps) | 0 failed | 5 ignored (2 steps) (27m4s)",
+    "directory": "outputs/bench/karume/2026-09-15_05-31-50_m2-srq-adoption-verify-31ttpek6"
+  }
+}

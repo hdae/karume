@@ -1,7 +1,7 @@
 # ACTIVE_DESIGN — Karume
 
 > 現在の設計とレビューの入口。履歴はADR / research / gitに置き、作業順は[backlog](../docs/backlog.md)、性能の採否は[perf-ledger](../docs/perf-ledger.md)を正本とする。
-> Last updated: 2026-09-15（M2 attention検収・linear→SRQ融合）
+> Last updated: 2026-09-15（M2 linear→SRQ検収）
 
 ## 現在の焦点
 
@@ -27,7 +27,7 @@
 - [attentionの行統計・PV融合](../docs/research/2026-09-15-attention-fusion.md)を任意指定`parallel-fused`で追加（[ADR 0102](../docs/decisions/0102-state-attention-stats-pv-fusion.md)）。
   M≤8・列上限≤1024のstates形だけ。[M2の80生成](../docs/research/2026-09-15-linear-static-quantize-fusion.md#利用者のm2-attention結果)は出力一致したが速度の利得は無く、任意指定に残す。モデル既定は不変。
 - [保留候補の併用再検証](../docs/research/2026-09-15-held-combinations.md)は920生成とGPU帰属まで完了。
-  最大併用を既定には採用しない。単独の[linear→SRQ融合](../docs/research/2026-09-15-linear-static-quantize-fusion.md)を任意指定`fuseLinearStaticQuantize`で統合（[ADR 0103](../docs/decisions/0103-linear-static-quantize-fusion.md)）。M2は初期選択40生成で検収待ち。広い併用は試作のまま。
+  最大併用を既定には採用しない。単独の[linear→SRQ融合](../docs/research/2026-09-15-linear-static-quantize-fusion.md)を任意指定`fuseLinearStaticQuantize`で統合（[ADR 0103](../docs/decisions/0103-linear-static-quantize-fusion.md)）。[M2の40生成](../docs/research/2026-09-15-m2-linear-srq-adoption.md)も出力一致し、小幅な改善方向。任意採用を維持し、同じ追試は再依頼しない。RMS融合と合わせたquant宣言の整理・既定化は次の作業。広い併用は試作のまま。
 - [MiniCPM5](../examples/minicpm5/README.md) / [Qwen3](../examples/qwen3/README.md)はローカル変換資産を使う短文脈の対話CLI。
   マルチターン・reset・中断は検収済み。公開pipeline、長文脈・広い品質検収は未完。
 
