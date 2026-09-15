@@ -882,7 +882,7 @@ Deno.test({
         );
       });
 
-      for (const attention of ["sequential", "parallel"] as const) {
+      for (const attention of ["sequential", "parallel", "parallel-fused"] as const) {
         await t.step(
           `GEMV並列加算 / attention=${attention} でverify行0とdecodeがu32一致する`,
           async () => {

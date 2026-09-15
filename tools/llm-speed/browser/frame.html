@@ -17,6 +17,7 @@
   const reduce = params.get("reduce") ?? "quant";
   const prefill = params.get("prefill") ?? "default";
   const normalization = params.get("normalization") ?? "reference";
+  const attention = params.get("attention") ?? "parallel";
   const send = (type, value) => parent.postMessage({ type, value }, location.origin);
   try {
     if (!["karume", "transformers"].includes(engine) || !["normal", "qat"].includes(model)) {
@@ -30,6 +31,9 @@
       throw Error("Invalid normalization mode");
     }
     const config = await (await fetch("/config.json")).json();
+    if (!["sequential", "parallel", "parallel-fused"].includes(attention)) {
+      throw Error("Invalid state attention mode");
+    }
     const result = await runBenchmark(
       engine,
       model,
@@ -38,6 +42,7 @@
       reduce === "quant" ? undefined : reduce,
       prefill,
       normalization,
+      attention,
     );
     send("result", {
       ...result,

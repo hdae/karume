@@ -1,3 +1,4 @@
+import { stateStatsPvWgsl } from "../src/kernels/state-attention-stats-pv.ts";
 import { rmsNormSubgroupWgsl } from "../src/kernels/rms-norm-subgroup.ts";
 import { assert, assertEquals, assertNotEquals, assertThrows } from "@std/assert";
 import { STATIC_QUANTIZE_WGSL } from "../src/kernels/static-quantize.ts";
@@ -702,6 +703,10 @@ Deno.test("生成した WGSL がスナップショットとバイト単位で一
     ["attention_state_qk_tiled_sliding_gqa.wgsl", stateQkTiledWgsl(true, true, 16)],
     ["attention_state_qk_tiled_m768.wgsl", stateQkTiledWgsl(false, false, 768)],
     ["attention_state_qk_tiled_m768_sliding_gqa.wgsl", stateQkTiledWgsl(true, true, 768)],
+    ["attention_state_stats_pv.wgsl", stateStatsPvWgsl(false, false)],
+    ["attention_state_stats_pv_gqa.wgsl", stateStatsPvWgsl(false, true)],
+    ["attention_state_stats_pv_sliding.wgsl", stateStatsPvWgsl(true, false)],
+    ["attention_state_stats_pv_sliding_gqa.wgsl", stateStatsPvWgsl(true, true)],
     ["attention_state_stats.wgsl", stateStatsWgsl(false)],
     ["attention_state_stats_sliding.wgsl", stateStatsWgsl(true)],
     ["attention_state_pv.wgsl", statePvWgsl(false, false)],

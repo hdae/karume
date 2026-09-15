@@ -88,3 +88,21 @@ Deno.test("収まらない枚数の明示は fail loudly（上限の検査を fo
     "2 枚では 1 枚 1024B が上限に収まらない",
   );
 });
+
+Deno.test("行統計/PV融合は中間statsだけを省き、列と行ブロックは維持する", () => {
+  const extent = { batchHeads: 8, chunkRows: 4, capacity: 16 };
+  const plain = planStateAttention(extent, 1536);
+  const fused = planStateAttention({ ...extent, fuseStatsPv: true }, 1536);
+  assertEquals(plain.fusedStatsPv, false);
+  assertEquals(fused.fusedStatsPv, true);
+  assertEquals(fused.colCap, plain.colCap);
+  assertEquals(fused.blocks, [
+    { offset: 0, rows: 2, scoreBytes: 1024, statsBytes: 0 },
+    { offset: 2, rows: 2, scoreBytes: 1024, statsBytes: 0 },
+  ]);
+  const outside = { ...extent, capacity: 1025 };
+  assertEquals(
+    planStateAttention({ ...outside, fuseStatsPv: true }, WIDE_LIMIT),
+    planStateAttention(outside, WIDE_LIMIT),
+  );
+});

@@ -2,6 +2,7 @@ import {
   acquireGpu,
   DEFAULT_SUBMIT_POLICY,
   type LinearGemvReduce,
+  type StateAttentionReduce,
 } from "../../../packages/runtime/mod.ts";
 import { localDirectory, parseManifest } from "../../../packages/hub/mod.ts";
 import {
@@ -20,6 +21,7 @@ export const loadKarume = async (
   linearGemvReduce?: LinearGemvReduce,
   prefillBuckets: PrefillBuckets = "default",
   normalization: NormalizationMode = "reference",
+  stateAttentionReduce: StateAttentionReduce = "parallel",
 ): Promise<EngineHandle> => {
   const subgroup = normalization === "subgroup32";
   const fuseRmsNormAdd = normalization === "fused" || subgroup;
@@ -70,6 +72,7 @@ export const loadKarume = async (
       maxChunkSize: 768,
     };
     const common = {
+      stateAttentionReduce,
       fuseRmsNormAdd,
       rmsNormReduce,
       submitPolicy,
@@ -110,6 +113,7 @@ export const loadKarume = async (
         capacity: fixture.capacity,
         chunkLength: 64,
         normalization,
+        stateAttentionReduce,
         fuseRmsNormAdd,
         rmsNormReduce,
         submitMaxChunkSize: submitPolicy.maxChunkSize,

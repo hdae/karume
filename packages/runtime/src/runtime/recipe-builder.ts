@@ -15,6 +15,7 @@
  * 状態は {@link RecipeBuilderContext} という構造的な面だけで受け取る。
  */
 
+import { stateStatsPvKey, stateStatsPvWgsl } from "../kernels/state-attention-stats-pv.ts";
 import { rmsNormSubgroupKey, rmsNormSubgroupWgsl } from "../kernels/rms-norm-subgroup.ts";
 import {
   STATIC_QUANTIZE_KEY,
@@ -2505,8 +2506,14 @@ export class RecipeBuilder {
     const batchHeads = batch * heads;
     // 行ブロックの枚数を明示する `rowBlockSplit`（テスト専用 `ROW_BLOCK_SPLIT`）を渡すのは
     // 実行計画側だけ — 見積りには受け口が無く、既定の等分だけを名乗る。
-    const { colCap, blocks } = planStateAttention(
-      { batchHeads, chunkRows, capacity, window },
+    const { colCap, fusedStatsPv, blocks } = planStateAttention(
+      {
+        batchHeads,
+        chunkRows,
+        capacity,
+        window,
+        fuseStatsPv: this.#state.stateAttentionReduce === "parallel-fused",
+      },
       this.#state.gpu.limits.maxStorageBufferBindingSize,
       this.#state.rowBlockSplit,
     );
@@ -2514,7 +2521,7 @@ export class RecipeBuilder {
     // ①QK / ③PV の縮約形は**同じ** opt-in 席（ADR 0058・2026-09-06 裁定でノブは 1 つのまま）。
     // ①' / ③' はどちらも束縛・params が参照経路と同一で、キー・WGSL・workgroup 算出の 3 点
     // だけが替わる（キーの `:par` が census 門の目印）。
-    const parallel = this.#state.stateAttentionReduce === "parallel";
+    const parallel = this.#state.stateAttentionReduce !== "sequential";
     // ①' だけは席に**適用条件**が掛かる: この計画の `M`（= chunkRows）が 8 以下のときだけ選ぶ
     // （decode の M=1 と投機の verify M ≤ 8）。
     // WHY: ①' が縮めるのは 1 invocation の D 逐次の遅延で、それが律速なのは有効 invocation が
@@ -2549,7 +2556,9 @@ export class RecipeBuilder {
       ? stateQkTiledKey(sliding, gqa, chunkRows)
       : stateQkKey(sliding, gqa);
     const statsKey = stateStatsKey(sliding);
-    const pvKey = pvTiled
+    const pvKey = fusedStatsPv
+      ? stateStatsPvKey(sliding, gqa)
+      : pvTiled
       ? statePvTiledKey(sliding, gqa, chunkRows)
       : pvParallel
       ? statePvParallelKey(sliding, gqa)
@@ -2562,10 +2571,14 @@ export class RecipeBuilder {
         ? stateQkTiledWgsl(sliding, gqa, chunkRows)
         : stateQkWgsl(sliding, gqa),
     );
-    const stats = await this.#state.cache.get(statsKey, stateStatsWgsl(sliding));
+    const stats = fusedStatsPv
+      ? undefined
+      : await this.#state.cache.get(statsKey, stateStatsWgsl(sliding));
     const pv = await this.#state.cache.get(
       pvKey,
-      pvTiled
+      fusedStatsPv
+        ? stateStatsPvWgsl(sliding, gqa)
+        : pvTiled
         ? statePvTiledWgsl(sliding, gqa, chunkRows)
         : pvParallel
         ? statePvParallelWgsl(sliding, gqa)
@@ -2608,7 +2621,7 @@ export class RecipeBuilder {
         window,
       };
       const scores = builder.allocTemp(block.scoreBytes);
-      const rowStats = builder.allocTemp(block.statsBytes);
+      const rowStats = fusedStatsPv ? undefined : builder.allocTemp(block.statsBytes);
 
       // ①QK — **workgroup 数だけが論理長から算出**される（仕事量 ∝ Q × (有効 past + Q) の機構
       // そのもの — ADR 0066 決定 3 の合格条件）。
@@ -2640,26 +2653,27 @@ export class RecipeBuilder {
             : stateQkWorkgroups(dispatchGeometry, past, query, limit, `${where} ①QK`),
       });
 
-      // ② 行統計 — 1 行 = 1 workgroup の行方向 grid-stride（live の走査は行ループの内側）。
-      // 覆うのは有効行だけなので、workgroup 数も ① と同じく論理長から算出する。
-      builder.dispatch({
-        key: statsKey,
-        pipeline: stats.pipeline,
-        layout: stats.layout,
-        roles: stats.roles,
-        params: this.#writeParams(
-          stateStatsParams(batchHeads, block.rows, block.offset, colCap, window),
-          PARAMS_UNIFORM_USAGE,
-        ),
-        bindings: [
-          { binding: 1, source: scores },
-          { binding: 2, source: rowStats },
-          { binding: 3, source: { kind: "lengths" } },
-        ],
-        workgroups: (_past, query) =>
-          stateStatsWorkgroups(dispatchGeometry, query, limit, `${where} ②stats`),
-      });
-
+      if (stats !== undefined && rowStats !== undefined) {
+        // ② 行統計 — 1 行 = 1 workgroup の行方向 grid-stride（live の走査は行ループの内側）。
+        // 覆うのは有効行だけなので、workgroup 数も ① と同じく論理長から算出する。
+        builder.dispatch({
+          key: statsKey,
+          pipeline: stats.pipeline,
+          layout: stats.layout,
+          roles: stats.roles,
+          params: this.#writeParams(
+            stateStatsParams(batchHeads, block.rows, block.offset, colCap, window),
+            PARAMS_UNIFORM_USAGE,
+          ),
+          bindings: [
+            { binding: 1, source: scores },
+            { binding: 2, source: rowStats },
+            { binding: 3, source: { kind: "lengths" } },
+          ],
+          workgroups: (_past, query) =>
+            stateStatsWorkgroups(dispatchGeometry, query, limit, `${where} ②stats`),
+        });
+      }
       // ③PV — 出力は `rowOffset` からの `rowsBlock` 行**全て**（pad 行も full-write）。
       builder.dispatch({
         key: pvKey,
@@ -2669,7 +2683,7 @@ export class RecipeBuilder {
         params: pvParams,
         bindings: [
           { binding: 1, source: scores },
-          { binding: 2, source: rowStats },
+          ...(rowStats === undefined ? [] : [{ binding: 2, source: rowStats }]),
           { binding: 3, source: binds[2] },
           { binding: 4, source: { kind: "state", name: vSlot.name } },
           { binding: 5, source: outs[0] },
@@ -2683,7 +2697,7 @@ export class RecipeBuilder {
       });
 
       // MUST: 確保の逆順で返す（計画の再生と同じ順）。
-      builder.releaseTemp(rowStats);
+      if (rowStats !== undefined) builder.releaseTemp(rowStats);
       builder.releaseTemp(scores);
     }
   }

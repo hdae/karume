@@ -1941,3 +1941,28 @@ Deno.test({
     }
   },
 });
+
+Deno.test("parallel-fused の一時見積りは行統計の割当だけを取り除く", () => {
+  const model = openGraph(stateAttentionGraph());
+  const options = {
+    generation: { chunkLength: 4, bindings: { C: 16 } },
+    maxStorageBufferBindingSize: WIDE_LIMIT,
+  };
+  const plain = estimateSessionMemory(model, options);
+  const fused = estimateSessionMemory(model, {
+    ...options,
+    stateAttentionReduce: "parallel-fused",
+  });
+  const { prefill, decode } = bothScenarios(fused);
+  assertEquals(prefill.workspaceBytes, 512 + 1024);
+  assertEquals(decode.workspaceBytes, 128 + 256);
+  assertEquals(fused.resident, plain.resident);
+  assertEquals(prefill.ioBytes, plain.scenarios[0].ioBytes);
+  const outside = { ...options, generation: { chunkLength: 16, bindings: { C: 1025 } } };
+  assertEquals(
+    estimateSessionMemory(model, { ...outside, stateAttentionReduce: "parallel-fused" }),
+    estimateSessionMemory(model, outside),
+  );
+  Object.defineProperty(options, "stateAttentionReduce", { value: "unsupported" });
+  assertThrows(() => estimateSessionMemory(model, options), ExecutionError, "stateAttentionReduce");
+});

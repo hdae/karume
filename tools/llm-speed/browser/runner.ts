@@ -1,4 +1,4 @@
-import type { LinearGemvReduce } from "../../../packages/runtime/mod.ts";
+import type { LinearGemvReduce, StateAttentionReduce } from "../../../packages/runtime/mod.ts";
 import {
   generationTimer,
   type GenerationTiming,
@@ -199,6 +199,7 @@ export const runBenchmark = async (
   linearGemvReduce?: LinearGemvReduce,
   prefillBuckets: PrefillBuckets = "default",
   normalization: NormalizationMode = "reference",
+  stateAttentionReduce: StateAttentionReduce = "parallel",
 ): Promise<object> => {
   const response = await fetch("/cases.json");
   if (!response.ok) throw Error(`Fixture HTTP ${response.status}`);
@@ -221,7 +222,14 @@ export const runBenchmark = async (
   status(`${kind} / ${engine}: loading`);
   const started = performance.now();
   const handle = engine === "karume"
-    ? await loadKarume(kind, fixture, linearGemvReduce, prefillBuckets, normalization)
+    ? await loadKarume(
+      kind,
+      fixture,
+      linearGemvReduce,
+      prefillBuckets,
+      normalization,
+      stateAttentionReduce,
+    )
     : await loadTransformers(kind, fixture, localOnnx, status);
   const loadSeconds = (performance.now() - started) / 1000;
   try {

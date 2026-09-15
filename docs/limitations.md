@@ -1482,3 +1482,9 @@ WebGPUのsubgroups / subgroup-size-control、WGSLのsubgroup_id、32レーンの
 Deno 2.9.6では必要機能が未提供。Chromeでの実走とM2の追試は済みだが、M2の既定採用は見送っている。
 これらはquant.sessionの保存語彙には含めない。既存のworkgroup / parallelを選び直せる。
 数値・対象形状・未検収範囲は[ADR 0100](decisions/0100-rms-subgroup-reduction.md)と[0101](decisions/0101-linear-gemv-subgroup.md)を参照する。
+
+## states attention の行統計/PV融合（2026-09-15）
+
+`stateAttentionReduce: "parallel-fused"` は[ADR 0102](decisions/0102-state-attention-stats-pv-fusion.md)の任意指定。
+M<=8・静的列上限<=1024のstates形だけを融合し、対象外とreadonlyは従来parallel経路を維持する。
+RTX/Chromeとカーネル数値の検収を行い、M2の性能検収は残る。モデルの既定・quant宣言は変更していない。

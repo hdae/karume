@@ -7,10 +7,11 @@ deno task bench:llm-browser
 ```
 
 Open **http://localhost:8787** in Chrome on your Mac and click **計測開始**. The
-current defaults measure **normal and QAT E2B with karume and dense prefill
-buckets**, using existing parallel GEMV, RMS-add fusion, and submission limit 768:
-2 model loads and 20 generations. The subgroup GEMV variant was slower in the
-[M2 comparison](../../../docs/research/2026-09-13-m2-gemv-subgroup-adoption.md), so it is no longer selected initially.
+current defaults compare **normal and QAT E2B with parallel and fused state
+attention**, in parallel → fused → fused → parallel order for each model:
+8 model loads and 80 generations. Parallel GEMV, dense prefill buckets, RMS-add
+fusion, and submission limit 768 stay fixed. The fusion is an explicit benchmark
+override; model defaults remain unchanged.
 Transformers.js, reference settings, and earlier comparisons remain available.
 **JSONを保存** downloads all timings, generated token IDs, output text,
 GPU information, model references, dependency versions, and the benchmark bundle hash.
@@ -43,6 +44,18 @@ The ONNX variants require `shader-f16`. The page reports support and rejects an
 unsupported GPU rather than switching to CPU. The Linux/NVIDIA benchmark documented
 in the research note uses an experimental Chrome flag; it is **not** part of the
 Mac launch command and is not necessary for ordinary supported M2 Chrome.
+
+## State attention fusion
+
+The **Karumeのattention** selector compares `stateAttentionReduce: "parallel"`
+with `"parallel-fused"`. The fused path combines normalization and value
+aggregation for state attention with at most 8 physical rows and 1024 score
+columns. Other shapes and readonly attention retain their existing parallel path.
+The JSON records `stateAttentionReduce` for each run. See
+[the decision record](../../../docs/decisions/0102-state-attention-stats-pv-fusion.md).
+
+When testing only an earlier optimization below, select **従来の並列経路** for
+attention to avoid adding another comparison axis.
 
 ## Quant defaults and parallel GEMV
 

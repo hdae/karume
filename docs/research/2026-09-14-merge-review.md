@@ -162,3 +162,16 @@ IR・公開設定・dtype対応・数値演算・goldenは変更しない。理�
 RTXの最終実装160生成は通常約2.44%、QAT約0.93%速いが、別走行のQATは逆転しており、固定改善率の保証ではない。
 M2は未検収。588生成の出力比較・関連125テスト・全体verifyの出所は上記調査記録に集約する。
 外部カーネルは読解のみで複製していない。RMS→RoPEの追加融合は試作に留め、製品へ入れていない。
+
+## attention融合の追加差分（2026-09-15、基準ff6da66）
+
+[調査と検証](2026-09-15-attention-fusion.md)と[ADR 0102](../decisions/0102-state-attention-stats-pv-fusion.md)を追加。
+runtimeの任意指定`parallel-fused`、新しい行統計/PV融合カーネル、実行・メモリ見積りの共通適用判定を読む。
+共有メモリの最大値→分母→PV部分和の再利用のbarrier、NaN・空行・pad、ring、
+M≤8/列上限≤1024の適用範囲、readonly非適用、statsの確保/解放削除と見積りの一致が確認点。
+GemmaはSession構築時の同じ設定を見積りへ渡す。参照WGSL/goldenとquant/defaultQuantは維持する。
+
+回帰は`gpu_state_attention_fused_test.ts`、`gpu_state_execution_test.ts`、plan/estimate/snapshot、
+実モデルMTPのverify行0/decode比較。Chromeの比較画面は8設定80生成を初期選択にした。
+この差分も315732aまでの独立レビューには含まれない。M2のattention採否と保留候補の組合せは未完。
+前節のpermuteについては最新M220生成で出力一致を確認済み。

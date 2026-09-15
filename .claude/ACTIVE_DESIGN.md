@@ -1,7 +1,7 @@
 # ACTIVE_DESIGN — Karume
 
 > 現在の設計とレビューの入口。履歴はADR / research / gitに置き、作業順は[backlog](../docs/backlog.md)、性能の採否は[perf-ledger](../docs/perf-ledger.md)を正本とする。
-> Last updated: 2026-09-14（添付参照資料の再検証とpermuteコピー削減）
+> Last updated: 2026-09-15（attentionの行統計・PV融合とM2結果）
 
 ## 現在の焦点
 
@@ -21,9 +21,11 @@
   [ADR 0099](../docs/decisions/0099-rms-norm-add-fusion.md)、[0100](../docs/decisions/0100-rms-subgroup-reduction.md)、[0101](../docs/decisions/0101-linear-gemv-subgroup.md)を参照。
 - 大きいI4のL4→L8候補は[全体比較で不採用](../docs/research/2026-09-14-i4-lane-comparison.md)。製品はL4を維持する。
   [最新M2追試](../docs/research/2026-09-13-m2-gemv-subgroup-adoption.md)も完了済み。同じ80生成を再依頼しない。
-  比較画面は両E2B・parallel・dense chunk64・RMS融合・投入768の2設定20生成。CLIやモデルの既定とは区別する。
+  比較画面は両E2B・parallel・dense chunk64・RMS融合・投入768でattentionを往復比較する8設定80生成。CLIやモデルの既定とは区別する。
 - [添付参照資料を現行コードで再検証](../docs/research/2026-09-14-reference-rope-optimization.md)。要素順を保つpermuteのコピーを省く（[ADR 0011](../docs/decisions/0011-layout-strategy.md#要素順を保つpermute2026-09-14)）。
-  Gemma両E2Bのdecodeで100 dispatchを削減。数値設定・WGSLは不変、M2の追試は未完。RMS→RoPE融合の試作は全体利得が小さく保留。
+  Gemma両E2Bのdecodeで100 dispatchを削減。数値設定・WGSLは不変。M2の20生成は出力一致、速度上昇は別時刻の比較なので全てを変更効果へ帰属しない。RMS→RoPE融合の試作は全体利得が小さく保留。
+- [attentionの行統計・PV融合](../docs/research/2026-09-15-attention-fusion.md)を任意指定`parallel-fused`で追加（[ADR 0102](../docs/decisions/0102-state-attention-stats-pv-fusion.md)）。
+  M≤8・列上限≤1024のstates形だけ。モデル既定は不変、M2は未検収。次は過去の保留候補の組合せも測る。
 - [MiniCPM5](../examples/minicpm5/README.md) / [Qwen3](../examples/qwen3/README.md)はローカル変換資産を使う短文脈の対話CLI。
   マルチターン・reset・中断は検収済み。公開pipeline、長文脈・広い品質検収は未完。
 

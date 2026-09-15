@@ -128,6 +128,7 @@ import {
   type SessionBuildStats,
   type SessionDiagnostics,
   type SessionOptions,
+  STATE_ATTENTION_REDUCES,
   type StateAttentionReduce,
   type StorageDiagnostics,
   type Tensor,
@@ -183,10 +184,6 @@ const LINEAR_GEMV_REDUCES: Readonly<Record<LinearGemvReduce, true>> = {
   sequential: true,
   parallel: true,
   "parallel-subgroup32": true,
-};
-const STATE_ATTENTION_REDUCES: Readonly<Record<StateAttentionReduce, true>> = {
-  sequential: true,
-  parallel: true,
 };
 
 /**

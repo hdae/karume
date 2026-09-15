@@ -326,6 +326,8 @@ export type Gemma4PipelineOptions = {
    * 両者で同一 — 既定への昇格はユーザーの品質裁定（2026-09-03）と golden の再走を同一コミットで
    * 行った（ADR 0058 決定 6・ADR 0067 追記 2026-09-03）。`"sequential"` は parity の突合や
    * 「順序依存の差を疑う」ときに戻す口。
+   * `"parallel-fused"` は少数行・短い列上限で行統計と PV を融合する任意指定（ADR 0102）。
+   * 加算順は parallel と同じで、対象外の形は parallel の経路を使う。
    */
   readonly stateAttentionReduce?: StateAttentionReduce;
   /**
@@ -649,6 +651,8 @@ type Gemma4State = {
   readonly gpu: GpuContext;
   readonly ownsGpu: boolean;
   readonly session: Session;
+  /** Session 構築に使った不変の設定。中間メモリ見積りにも同じ値を渡す。 */
+  readonly stateAttentionReduce: StateAttentionReduce;
   /**
    * 製品グラフの宣言（`estimateSessionMemory` の材料 — ADR 0070 決定 5 の estimator は
    * `graph + 常駐計画` から純関数で出る）。
@@ -1797,6 +1801,7 @@ class GemmaPipeline {
         gpu,
         ownsGpu,
         session,
+        stateAttentionReduce: sessionOptions.stateAttentionReduce,
         ...(greedyOutput === undefined ? {} : { greedyOutput }),
         graph: admitted.component.graph,
         wiring,
@@ -2154,6 +2159,7 @@ class GemmaPipeline {
         }),
       },
       maxStorageBufferBindingSize,
+      stateAttentionReduce: this.#state.stateAttentionReduce,
       ...budget,
     });
     const auxiliaryBytes = this.#state.greedyOutput?.extraBytes;

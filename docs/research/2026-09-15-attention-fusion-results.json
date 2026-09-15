@@ -1,0 +1,2755 @@
+{
+  "baselineHead": "ff6da661429a3575ac17381a4989ef132c304dde",
+  "metric": "Median of warmed case medians across loads; 3 warmed runs per case, 2 cases per load, 64 generated tokens",
+  "m2": {
+    "runs": [
+      {
+        "source": "/home/developer/.codex/attachments/7ac1c42c-0c1b-4d7d-84f1-02e17b39b46e/gemma-browser-2026-09-14T19-51-43.751Z.json",
+        "sha256": "b55056f813c24dfb0df6268af8653f8bef527fb9f8d4ea32c7c83782df6c3e96",
+        "failures": [],
+        "models": [
+          {
+            "format": "karume-browser-speed/1",
+            "engine": "karume",
+            "model": "normal",
+            "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
+            "platform": "MacIntel",
+            "date": "2026-09-14T19:39:20.827Z",
+            "loadSeconds": 4.542079999983311,
+            "manifestSha256": "c445ea39ed8050b5d97757cfeb902c789c9048ad5eec6a962378e08772bb7ca6",
+            "enabledFeatures": [
+              "core-features-and-limits"
+            ],
+            "compute": "f32",
+            "quant": "i4",
+            "linearGemvReduce": "parallel",
+            "linearGemvReduceOverride": "parallel",
+            "weights": "Karume packed i4 / i8",
+            "capacity": 128,
+            "chunkLength": 64,
+            "normalization": "fused",
+            "fuseRmsNormAdd": true,
+            "rmsNormReduce": "workgroup",
+            "submitMaxChunkSize": 768,
+            "prefillBuckets": "dense",
+            "chunkBuckets": [
+              4,
+              8,
+              16,
+              24,
+              32,
+              40,
+              48,
+              56
+            ],
+            "pleBudget": "default-two-shards",
+            "sampler": {
+              "temperature": 0
+            },
+            "maxNewTokens": 64,
+            "textDecodingTimed": false,
+            "checkout": "315732a667b00fbdc747f560a69ed11476420aa2",
+            "checkoutDirty": false,
+            "bundleSha256": "b098c37dc4fa88c097d772a13a689db10533846e858a04a6708145736e8466e0",
+            "cases": [
+              {
+                "case": "english-list",
+                "speed": [
+                  30.772386911155575,
+                  30.934517028678872,
+                  30.698238750138565
+                ],
+                "median": 30.772386911155575,
+                "medianTtftMs": 344.22500002384186,
+                "signature": [
+                  "5967f5896ce05e09a9ac9144e3c32ad9c36909bc58491a305ca74cd57634d7d3"
+                ]
+              },
+              {
+                "case": "japanese-list",
+                "speed": [
+                  28.301060391348624,
+                  30.879552589557505,
+                  30.363567574322477
+                ],
+                "median": 30.363567574322477,
+                "medianTtftMs": 419.6899999976158,
+                "signature": [
+                  "cedb8b84ea5dabbc9c62dfadb60ca0c869ece1ef164b8f99d81940bbe7a792d0"
+                ]
+              }
+            ],
+            "median": 30.567977242739026
+          },
+          {
+            "format": "karume-browser-speed/1",
+            "engine": "karume",
+            "model": "qat",
+            "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
+            "platform": "MacIntel",
+            "date": "2026-09-14T19:39:47.667Z",
+            "loadSeconds": 1.8252400000095368,
+            "manifestSha256": "6c3ae974beeb032942aaa4c943619855b787f34f67441f0f4be63432caca52db",
+            "enabledFeatures": [
+              "core-features-and-limits"
+            ],
+            "compute": "f32",
+            "quant": "i4",
+            "linearGemvReduce": "parallel",
+            "linearGemvReduceOverride": "parallel",
+            "weights": "Karume fixed int2 / int4 / int8 + SRQ",
+            "capacity": 128,
+            "chunkLength": 64,
+            "normalization": "fused",
+            "fuseRmsNormAdd": true,
+            "rmsNormReduce": "workgroup",
+            "submitMaxChunkSize": 768,
+            "prefillBuckets": "dense",
+            "chunkBuckets": [
+              4,
+              8,
+              16,
+              24,
+              32,
+              40,
+              48,
+              56
+            ],
+            "pleBudget": "default-two-shards",
+            "sampler": {
+              "temperature": 0
+            },
+            "maxNewTokens": 64,
+            "textDecodingTimed": false,
+            "checkout": "315732a667b00fbdc747f560a69ed11476420aa2",
+            "checkoutDirty": false,
+            "bundleSha256": "b098c37dc4fa88c097d772a13a689db10533846e858a04a6708145736e8466e0",
+            "cases": [
+              {
+                "case": "english-list",
+                "speed": [
+                  30.511651334651518,
+                  32.34011534613434,
+                  31.08187112908067
+                ],
+                "median": 31.08187112908067,
+                "medianTtftMs": 398.3149999976158,
+                "signature": [
+                  "ee9e7c9b98817e74f10100d71e9a7bf7e3161e585dc9e64f95fc2f26bdc7c261"
+                ]
+              },
+              {
+                "case": "japanese-list",
+                "speed": [
+                  32.18497676802717,
+                  31.808623166768516,
+                  31.96671402456816
+                ],
+                "median": 31.96671402456816,
+                "medianTtftMs": 487.414999961853,
+                "signature": [
+                  "0b4dcd482ce0834788bc709e27ff0f7425c4b9241f76f29aef36fdda3ec8a6c6"
+                ]
+              }
+            ],
+            "median": 31.524292576824415
+          }
+        ]
+      },
+      {
+        "source": "/home/developer/.codex/attachments/d591f880-b7bb-4ebe-8b01-8e9abdb0a5a1/gemma-browser-2026-09-15T00-33-19.166Z.json",
+        "sha256": "f8ef13cf5afe1b4f5b9ed53741b72ef1cbd4f4c003e0e54086fcae13df46b6d8",
+        "failures": [],
+        "models": [
+          {
+            "format": "karume-browser-speed/1",
+            "engine": "karume",
+            "model": "normal",
+            "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
+            "platform": "MacIntel",
+            "date": "2026-09-15T00:32:46.704Z",
+            "loadSeconds": 3.752210000038147,
+            "manifestSha256": "c445ea39ed8050b5d97757cfeb902c789c9048ad5eec6a962378e08772bb7ca6",
+            "enabledFeatures": [
+              "core-features-and-limits"
+            ],
+            "compute": "f32",
+            "quant": "i4",
+            "linearGemvReduce": "parallel",
+            "linearGemvReduceOverride": "parallel",
+            "weights": "Karume packed i4 / i8",
+            "capacity": 128,
+            "chunkLength": 64,
+            "normalization": "fused",
+            "fuseRmsNormAdd": true,
+            "rmsNormReduce": "workgroup",
+            "submitMaxChunkSize": 768,
+            "prefillBuckets": "dense",
+            "chunkBuckets": [
+              4,
+              8,
+              16,
+              24,
+              32,
+              40,
+              48,
+              56
+            ],
+            "pleBudget": "default-two-shards",
+            "sampler": {
+              "temperature": 0
+            },
+            "maxNewTokens": 64,
+            "textDecodingTimed": false,
+            "checkout": "ff6da661429a3575ac17381a4989ef132c304dde",
+            "checkoutDirty": false,
+            "bundleSha256": "daa9a72676a50ad6d79fd1b42408cdd73f29c16ab24bd1a59c9f3055c4fd4066",
+            "cases": [
+              {
+                "case": "english-list",
+                "speed": [
+                  33.29149877799062,
+                  32.7865439853195,
+                  33.023108312225176
+                ],
+                "median": 33.023108312225176,
+                "medianTtftMs": 340.1449999809265,
+                "signature": [
+                  "5967f5896ce05e09a9ac9144e3c32ad9c36909bc58491a305ca74cd57634d7d3"
+                ]
+              },
+              {
+                "case": "japanese-list",
+                "speed": [
+                  30.024090758571322,
+                  33.269083516380114,
+                  33.2497690988257
+                ],
+                "median": 33.2497690988257,
+                "medianTtftMs": 409.35499995946884,
+                "signature": [
+                  "cedb8b84ea5dabbc9c62dfadb60ca0c869ece1ef164b8f99d81940bbe7a792d0"
+                ]
+              }
+            ],
+            "median": 33.136438705525435
+          },
+          {
+            "format": "karume-browser-speed/1",
+            "engine": "karume",
+            "model": "qat",
+            "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
+            "platform": "MacIntel",
+            "date": "2026-09-15T00:33:12.843Z",
+            "loadSeconds": 1.8367049999833107,
+            "manifestSha256": "6c3ae974beeb032942aaa4c943619855b787f34f67441f0f4be63432caca52db",
+            "enabledFeatures": [
+              "core-features-and-limits"
+            ],
+            "compute": "f32",
+            "quant": "i4",
+            "linearGemvReduce": "parallel",
+            "linearGemvReduceOverride": "parallel",
+            "weights": "Karume fixed int2 / int4 / int8 + SRQ",
+            "capacity": 128,
+            "chunkLength": 64,
+            "normalization": "fused",
+            "fuseRmsNormAdd": true,
+            "rmsNormReduce": "workgroup",
+            "submitMaxChunkSize": 768,
+            "prefillBuckets": "dense",
+            "chunkBuckets": [
+              4,
+              8,
+              16,
+              24,
+              32,
+              40,
+              48,
+              56
+            ],
+            "pleBudget": "default-two-shards",
+            "sampler": {
+              "temperature": 0
+            },
+            "maxNewTokens": 64,
+            "textDecodingTimed": false,
+            "checkout": "ff6da661429a3575ac17381a4989ef132c304dde",
+            "checkoutDirty": false,
+            "bundleSha256": "daa9a72676a50ad6d79fd1b42408cdd73f29c16ab24bd1a59c9f3055c4fd4066",
+            "cases": [
+              {
+                "case": "english-list",
+                "speed": [
+                  33.77472792558697,
+                  34.95601368305996,
+                  31.89889569045706
+                ],
+                "median": 33.77472792558697,
+                "medianTtftMs": 389.4399999976158,
+                "signature": [
+                  "ee9e7c9b98817e74f10100d71e9a7bf7e3161e585dc9e64f95fc2f26bdc7c261"
+                ]
+              },
+              {
+                "case": "japanese-list",
+                "speed": [
+                  34.536349507450765,
+                  34.50655624550644,
+                  32.01064989291277
+                ],
+                "median": 34.50655624550644,
+                "medianTtftMs": 484.8899999856949,
+                "signature": [
+                  "0b4dcd482ce0834788bc709e27ff0f7425c4b9241f76f29aef36fdda3ec8a6c6"
+                ]
+              }
+            ],
+            "median": 34.1406420855467
+          }
+        ]
+      }
+    ],
+    "sameOutputAcrossRuns": true
+  },
+  "runs": {
+    "basic": {
+      "rawDirectory": "outputs/bench/karume/2026-09-15_00-46-39_attention-stats-pv-whole-ys5b92m_",
+      "speedSummary": {
+        "directory": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_00-46-39_attention-stats-pv-whole-ys5b92m_",
+        "models": [
+          {
+            "model": "normal",
+            "variants": [
+              {
+                "variant": "baseline",
+                "median": 113.16157673915816,
+                "files": [
+                  {
+                    "path": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_00-46-39_attention-stats-pv-whole-ys5b92m_/normal-0-baseline.json",
+                    "sha256": "e745d030613da43ec03734ac15e6c3250cc1adec17b394adff3b993cb529b5fe",
+                    "caseMedians": [
+                      113.90345326388464,
+                      115.5327342745533
+                    ]
+                  },
+                  {
+                    "path": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_00-46-39_attention-stats-pv-whole-ys5b92m_/normal-3-baseline.json",
+                    "sha256": "49a793ba495076c2f557d515fe694845f98acb5c3e76b1f45f0f718f6212f028",
+                    "caseMedians": [
+                      114.96350364963503,
+                      114.46220930263547
+                    ]
+                  },
+                  {
+                    "path": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_00-46-39_attention-stats-pv-whole-ys5b92m_/normal-5-baseline.json",
+                    "sha256": "e71cae94606d69731cbc2c1b0c3b4913b27b2172f672b4dc5ddbe75b3df6a7d8",
+                    "caseMedians": [
+                      112.41970021443169,
+                      112.27945107794099
+                    ]
+                  },
+                  {
+                    "path": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_00-46-39_attention-stats-pv-whole-ys5b92m_/normal-6-baseline.json",
+                    "sha256": "20f3471f4fe55a12f22c53bd645115d70421528e4a2a03d333158851c00198d3",
+                    "caseMedians": [
+                      111.64274322154318,
+                      110.44880785442598
+                    ]
+                  }
+                ]
+              },
+              {
+                "variant": "candidate",
+                "median": 116.41876271960783,
+                "files": [
+                  {
+                    "path": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_00-46-39_attention-stats-pv-whole-ys5b92m_/normal-1-candidate.json",
+                    "sha256": "aa2d3a492802e8339bc9c90f13236a4aebd01a4dc3d4854b115fa3751ced5b91",
+                    "caseMedians": [
+                      116.81809753448572,
+                      116.66666666666667
+                    ]
+                  },
+                  {
+                    "path": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_00-46-39_attention-stats-pv-whole-ys5b92m_/normal-2-candidate.json",
+                    "sha256": "31d3ca709b7a06a82e9834824983fa53e584c94a4f29606f31bba4d04bb38916",
+                    "caseMedians": [
+                      116.47254575659025,
+                      116.36497968262542
+                    ]
+                  },
+                  {
+                    "path": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_00-46-39_attention-stats-pv-whole-ys5b92m_/normal-4-candidate.json",
+                    "sha256": "6a2191db9fcff514e8c77439a375cdc538fa1bf5bff778014057e24583e5fe00",
+                    "caseMedians": [
+                      116.55874190564292,
+                      116.30053535183063
+                    ]
+                  },
+                  {
+                    "path": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_00-46-39_attention-stats-pv-whole-ys5b92m_/normal-7-candidate.json",
+                    "sha256": "562c2032ce691dc3025dcfedcb7fa0a22e06584817324e9d1a196359a50257db",
+                    "caseMedians": [
+                      114.98448621964408,
+                      114.71230881297427
+                    ]
+                  }
+                ]
+              }
+            ],
+            "speedup": 1.028783497670394
+          },
+          {
+            "model": "qat",
+            "variants": [
+              {
+                "variant": "baseline",
+                "median": 93.83378848693201,
+                "files": [
+                  {
+                    "path": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_00-46-39_attention-stats-pv-whole-ys5b92m_/qat-0-baseline.json",
+                    "sha256": "b2dd2e07a558078c97c5d067c0541258271cc6bad85ddbcc8887cc12e9dd4800",
+                    "caseMedians": [
+                      93.30568720389442,
+                      93.08510638287625
+                    ]
+                  },
+                  {
+                    "path": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_00-46-39_attention-stats-pv-whole-ys5b92m_/qat-3-baseline.json",
+                    "sha256": "42dae5eb90103784fb634a9f0dbe63a3b9dec84f4f18575e6adc993204d95103",
+                    "caseMedians": [
+                      94.29726088940394,
+                      93.88971684053651
+                    ]
+                  },
+                  {
+                    "path": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_00-46-39_attention-stats-pv-whole-ys5b92m_/qat-5-baseline.json",
+                    "sha256": "cb6dd3a0737502af1124d4b721e222a595af4d1b909e73453a830146a39d2c38",
+                    "caseMedians": [
+                      93.75,
+                      93.80583680741546
+                    ]
+                  },
+                  {
+                    "path": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_00-46-39_attention-stats-pv-whole-ys5b92m_/qat-6-baseline.json",
+                    "sha256": "53996d8778b4572fb0283d790ba79290980b298e0250fc944e3ecc9fdfbc121b",
+                    "caseMedians": [
+                      93.86174016644856,
+                      94.17040358744394
+                    ]
+                  }
+                ]
+              },
+              {
+                "variant": "candidate",
+                "median": 94.46693869616598,
+                "files": [
+                  {
+                    "path": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_00-46-39_attention-stats-pv-whole-ys5b92m_/qat-1-candidate.json",
+                    "sha256": "801804e44f0eaf60b1ba0ddad030bed670207af987bff934d5cbf7a77fc482bc",
+                    "caseMedians": [
+                      94.55200360187536,
+                      94.4527736131934
+                    ]
+                  },
+                  {
+                    "path": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_00-46-39_attention-stats-pv-whole-ys5b92m_/qat-2-candidate.json",
+                    "sha256": "9ec58e3944804a920a2d1df1f884f419f28bf06f91f8d638ac54b7e853711d50",
+                    "caseMedians": [
+                      94.48110377966643,
+                      94.65144230748041
+                    ]
+                  },
+                  {
+                    "path": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_00-46-39_attention-stats-pv-whole-ys5b92m_/qat-4-candidate.json",
+                    "sha256": "f74894c81ecedad28c9c10f5f10e35d60bfa7f7a6772a4503934492eb57e58ec",
+                    "caseMedians": [
+                      94.1563293974887,
+                      94.04388714754461
+                    ]
+                  },
+                  {
+                    "path": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_00-46-39_attention-stats-pv-whole-ys5b92m_/qat-7-candidate.json",
+                    "sha256": "4a6d1a4d82fd798892c70b8d9538a75f68136496243eb28deeeee2c9bc41f59a",
+                    "caseMedians": [
+                      94.48110377913858,
+                      94.24083769633508
+                    ]
+                  }
+                ]
+              }
+            ],
+            "speedup": 1.0067475716311098
+          }
+        ],
+        "sameOutputs": true
+      },
+      "loads": [
+        {
+          "file": "normal-0-baseline.json",
+          "sha256": "e745d030613da43ec03734ac15e6c3250cc1adec17b394adff3b993cb529b5fe",
+          "cases": [
+            {
+              "case": 0,
+              "decodeSamplesTokS": [
+                114.98448622042588,
+                113.90345326388464,
+                113.78002528460317
+              ],
+              "ttftSamplesMs": [
+                35.5,
+                35,
+                34.900000002235174
+              ]
+            },
+            {
+              "case": 1,
+              "decodeSamplesTokS": [
+                114.60796798269126,
+                115.93669488438123,
+                115.5327342745533
+              ],
+              "ttftSamplesMs": [
+                39.899999998509884,
+                38.80000000074506,
+                39.69999999925494
+              ]
+            }
+          ]
+        },
+        {
+          "file": "normal-1-candidate.json",
+          "sha256": "aa2d3a492802e8339bc9c90f13236a4aebd01a4dc3d4854b115fa3751ced5b91",
+          "cases": [
+            {
+              "case": 0,
+              "decodeSamplesTokS": [
+                117.36214605050775,
+                115.57512383096373,
+                116.81809753448572
+              ],
+              "ttftSamplesMs": [
+                36.30000000074506,
+                35.400000002235174,
+                37.100000001490116
+              ]
+            },
+            {
+              "case": 1,
+              "decodeSamplesTokS": [
+                116.66666666666667,
+                117.27475800463026,
+                115.53273427534259
+              ],
+              "ttftSamplesMs": [
+                39.20000000298023,
+                38.69999999925494,
+                38.600000001490116
+              ]
+            }
+          ]
+        },
+        {
+          "file": "normal-2-candidate.json",
+          "sha256": "31d3ca709b7a06a82e9834824983fa53e584c94a4f29606f31bba4d04bb38916",
+          "cases": [
+            {
+              "case": 0,
+              "decodeSamplesTokS": [
+                116.49408284007619,
+                115.76626240368661,
+                116.47254575659025
+              ],
+              "ttftSamplesMs": [
+                36.899999998509884,
+                36.30000000074506,
+                36
+              ]
+            },
+            {
+              "case": 1,
+              "decodeSamplesTokS": [
+                115.4903758020165,
+                116.991643454039,
+                116.36497968262542
+              ],
+              "ttftSamplesMs": [
+                40.29999999701977,
+                38.900000002235174,
+                39.80000000074506
+              ]
+            }
+          ]
+        },
+        {
+          "file": "normal-3-baseline.json",
+          "sha256": "49a793ba495076c2f557d515fe694845f98acb5c3e76b1f45f0f718f6212f028",
+          "cases": [
+            {
+              "case": 0,
+              "decodeSamplesTokS": [
+                116.27906976728195,
+                114.44141689373296,
+                114.96350364963503
+              ],
+              "ttftSamplesMs": [
+                36.899999998509884,
+                36.400000002235174,
+                36.29999999701977
+              ]
+            },
+            {
+              "case": 1,
+              "decodeSamplesTokS": [
+                114.50381679404819,
+                114.46220930263547,
+                113.53397008500482
+              ],
+              "ttftSamplesMs": [
+                40.5,
+                39.80000000074506,
+                39.70000000298023
+              ]
+            }
+          ]
+        },
+        {
+          "file": "normal-4-candidate.json",
+          "sha256": "6a2191db9fcff514e8c77439a375cdc538fa1bf5bff778014057e24583e5fe00",
+          "cases": [
+            {
+              "case": 0,
+              "decodeSamplesTokS": [
+                116.55874190564292,
+                114.56628477936118,
+                116.77479147358666
+              ],
+              "ttftSamplesMs": [
+                36.600000001490116,
+                36.100000001490116,
+                36
+              ]
+            },
+            {
+              "case": 1,
+              "decodeSamplesTokS": [
+                116.30053535183063,
+                116.66666666666667,
+                114.17180137715646
+              ],
+              "ttftSamplesMs": [
+                40.5,
+                39.5,
+                39.79999999701977
+              ]
+            }
+          ]
+        },
+        {
+          "file": "normal-5-baseline.json",
+          "sha256": "e71cae94606d69731cbc2c1b0c3b4913b27b2172f672b4dc5ddbe75b3df6a7d8",
+          "cases": [
+            {
+              "case": 0,
+              "decodeSamplesTokS": [
+                110.85694175596939,
+                113.57490535439808,
+                112.41970021443169
+              ],
+              "ttftSamplesMs": [
+                36.599999997764826,
+                35.900000002235174,
+                38
+              ]
+            },
+            {
+              "case": 1,
+              "decodeSamplesTokS": [
+                111.07193229915859,
+                112.27945107794099,
+                112.70125223613596
+              ],
+              "ttftSamplesMs": [
+                40.19999999925494,
+                40.80000000074506,
+                39.79999999701977
+              ]
+            }
+          ]
+        },
+        {
+          "file": "normal-6-baseline.json",
+          "sha256": "20f3471f4fe55a12f22c53bd645115d70421528e4a2a03d333158851c00198d3",
+          "cases": [
+            {
+              "case": 0,
+              "decodeSamplesTokS": [
+                114.60796798191457,
+                109.87094523849741,
+                111.64274322154318
+              ],
+              "ttftSamplesMs": [
+                37,
+                37.69999999925494,
+                36.099999997764826
+              ]
+            },
+            {
+              "case": 1,
+              "decodeSamplesTokS": [
+                110.44880785442598,
+                111.4846929751357,
+                108.7144089732528
+              ],
+              "ttftSamplesMs": [
+                40.20000000298023,
+                39.900000002235174,
+                39.69999999925494
+              ]
+            }
+          ]
+        },
+        {
+          "file": "normal-7-candidate.json",
+          "sha256": "562c2032ce691dc3025dcfedcb7fa0a22e06584817324e9d1a196359a50257db",
+          "cases": [
+            {
+              "case": 0,
+              "decodeSamplesTokS": [
+                116.10762992964797,
+                114.98448621964408,
+                113.78002528460317
+              ],
+              "ttftSamplesMs": [
+                36.399999998509884,
+                36,
+                35.899999998509884
+              ]
+            },
+            {
+              "case": 1,
+              "decodeSamplesTokS": [
+                114.71230881297427,
+                114.31682090333815,
+                114.79591836719109
+              ],
+              "ttftSamplesMs": [
+                40.400000002235174,
+                39.69999999925494,
+                39.5
+              ]
+            }
+          ]
+        },
+        {
+          "file": "qat-0-baseline.json",
+          "sha256": "b2dd2e07a558078c97c5d067c0541258271cc6bad85ddbcc8887cc12e9dd4800",
+          "cases": [
+            {
+              "case": 0,
+              "decodeSamplesTokS": [
+                93.112621933503,
+                93.30568720389442,
+                93.31950822079831
+              ],
+              "ttftSamplesMs": [
+                38.70000000298023,
+                40.19999999925494,
+                38.099999997764826
+              ]
+            },
+            {
+              "case": 1,
+              "decodeSamplesTokS": [
+                57.840616966422715,
+                93.08510638287625,
+                93.9877666715351
+              ],
+              "ttftSamplesMs": [
+                42.5,
+                41.399999998509884,
+                41.19999999925494
+              ]
+            }
+          ]
+        },
+        {
+          "file": "qat-1-candidate.json",
+          "sha256": "801804e44f0eaf60b1ba0ddad030bed670207af987bff934d5cbf7a77fc482bc",
+          "cases": [
+            {
+              "case": 0,
+              "decodeSamplesTokS": [
+                94.22674244669398,
+                94.9796472183465,
+                94.55200360187536
+              ],
+              "ttftSamplesMs": [
+                38,
+                38.599999997764826,
+                38.600000001490116
+              ]
+            },
+            {
+              "case": 1,
+              "decodeSamplesTokS": [
+                94.4527736131934,
+                94.93670886054632,
+                94.12819363556032
+              ],
+              "ttftSamplesMs": [
+                41.80000000074506,
+                41.19999999925494,
+                41.5
+              ]
+            }
+          ]
+        },
+        {
+          "file": "qat-2-candidate.json",
+          "sha256": "9ec58e3944804a920a2d1df1f884f419f28bf06f91f8d638ac54b7e853711d50",
+          "cases": [
+            {
+              "case": 0,
+              "decodeSamplesTokS": [
+                94.05792773951914,
+                94.48110377966643,
+                94.85094850959149
+              ],
+              "ttftSamplesMs": [
+                39.099999997764826,
+                37.400000002235174,
+                37.70000000298023
+              ]
+            },
+            {
+              "case": 1,
+              "decodeSamplesTokS": [
+                95.00829437469224,
+                94.35375168499371,
+                94.65144230748041
+              ],
+              "ttftSamplesMs": [
+                41.69999999925494,
+                41.100000001490116,
+                41.19999999925494
+              ]
+            }
+          ]
+        },
+        {
+          "file": "qat-3-baseline.json",
+          "sha256": "42dae5eb90103784fb634a9f0dbe63a3b9dec84f4f18575e6adc993204d95103",
+          "cases": [
+            {
+              "case": 0,
+              "decodeSamplesTokS": [
+                95.74468085106383,
+                94.08602150516697,
+                94.29726088940394
+              ],
+              "ttftSamplesMs": [
+                38,
+                37.899999998509884,
+                38.400000002235174
+              ]
+            },
+            {
+              "case": 1,
+              "decodeSamplesTokS": [
+                93.88971684053651,
+                93.98776667205745,
+                93.59679096695963
+              ],
+              "ttftSamplesMs": [
+                42.19999999925494,
+                41.100000001490116,
+                42
+              ]
+            }
+          ]
+        },
+        {
+          "file": "qat-4-candidate.json",
+          "sha256": "f74894c81ecedad28c9c10f5f10e35d60bfa7f7a6772a4503934492eb57e58ec",
+          "cases": [
+            {
+              "case": 0,
+              "decodeSamplesTokS": [
+                94.6230099133103,
+                94.11413205876941,
+                94.1563293974887
+              ],
+              "ttftSamplesMs": [
+                39,
+                37.80000000074506,
+                39.899999998509884
+              ]
+            },
+            {
+              "case": 1,
+              "decodeSamplesTokS": [
+                94.31137724550898,
+                92.85187914517317,
+                94.04388714754461
+              ],
+              "ttftSamplesMs": [
+                41.69999999925494,
+                44,
+                42.20000000298023
+              ]
+            }
+          ]
+        },
+        {
+          "file": "qat-5-baseline.json",
+          "sha256": "cb6dd3a0737502af1124d4b721e222a595af4d1b909e73453a830146a39d2c38",
+          "cases": [
+            {
+              "case": 0,
+              "decodeSamplesTokS": [
+                93.44408187491786,
+                93.75,
+                94.21265141329474
+              ],
+              "ttftSamplesMs": [
+                38.900000002235174,
+                37.5,
+                38.20000000298023
+              ]
+            },
+            {
+              "case": 1,
+              "decodeSamplesTokS": [
+                93.6385255647001,
+                93.81980640357409,
+                93.80583680741546
+              ],
+              "ttftSamplesMs": [
+                42,
+                40.80000000074506,
+                41.099999997764826
+              ]
+            }
+          ]
+        },
+        {
+          "file": "qat-6-baseline.json",
+          "sha256": "53996d8778b4572fb0283d790ba79290980b298e0250fc944e3ecc9fdfbc121b",
+          "cases": [
+            {
+              "case": 0,
+              "decodeSamplesTokS": [
+                93.86174016644856,
+                94.33962264140418,
+                93.54120267260579
+              ],
+              "ttftSamplesMs": [
+                37.899999998509884,
+                37.69999999925494,
+                38.5
+              ]
+            },
+            {
+              "case": 1,
+              "decodeSamplesTokS": [
+                92.76984243831801,
+                94.72259810533582,
+                94.17040358744394
+              ],
+              "ttftSamplesMs": [
+                42.099999997764826,
+                43.599999997764826,
+                42.5
+              ]
+            }
+          ]
+        },
+        {
+          "file": "qat-7-candidate.json",
+          "sha256": "4a6d1a4d82fd798892c70b8d9538a75f68136496243eb28deeeee2c9bc41f59a",
+          "cases": [
+            {
+              "case": 0,
+              "decodeSamplesTokS": [
+                94.01581853433802,
+                94.48110377913858,
+                95.19492293733616
+              ],
+              "ttftSamplesMs": [
+                38.19999999925494,
+                38.69999999925494,
+                37.600000001490116
+              ]
+            },
+            {
+              "case": 1,
+              "decodeSamplesTokS": [
+                94.24083769633508,
+                93.29187027977268,
+                94.33962264140418
+              ],
+              "ttftSamplesMs": [
+                42,
+                41.100000001490116,
+                41.399999998509884
+              ]
+            }
+          ]
+        }
+      ],
+      "bundles": {
+        "baseline": "d60ec6d435cf39f63f92481c267f1cc40690fc563b5eb6e3b71018deaaf3d0a9",
+        "candidate": "0b6025f67fc2147abd9044b05ecb56dcaabaee74801349357367f35d548f0b0f"
+      }
+    },
+    "sharedProbability": {
+      "rawDirectory": "outputs/bench/karume/2026-09-15_00-54-29_attention-probability-share-whole-nhsxyo_v",
+      "speedSummary": {
+        "directory": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_00-54-29_attention-probability-share-whole-nhsxyo_v",
+        "models": [
+          {
+            "model": "normal",
+            "variants": [
+              {
+                "variant": "baseline",
+                "median": 112.9281651156211,
+                "files": [
+                  {
+                    "path": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_00-54-29_attention-probability-share-whole-nhsxyo_v/normal-0-baseline.json",
+                    "sha256": "3a43f587a2659d1a5e6426834e4a4b7bd0e43600a8812a3c2cc20d91d4e6383e",
+                    "caseMedians": [
+                      116.02209944751381,
+                      114.71230881297427
+                    ]
+                  },
+                  {
+                    "path": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_00-54-29_attention-probability-share-whole-nhsxyo_v/normal-3-baseline.json",
+                    "sha256": "83c04f6640fa3b9cc6f71a53273aad0b57bd1e13f28267171a4012b357127f9b",
+                    "caseMedians": [
+                      114.69142545119571,
+                      113.65686451441228
+                    ]
+                  },
+                  {
+                    "path": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_00-54-29_attention-probability-share-whole-nhsxyo_v/normal-5-baseline.json",
+                    "sha256": "46af3dd4db66c15c0392ebd2553b4b82c12002aeba52117b1c6f7bb8984fa1e9",
+                    "caseMedians": [
+                      111.62296243828195,
+                      110.50692860872712
+                    ]
+                  },
+                  {
+                    "path": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_00-54-29_attention-probability-share-whole-nhsxyo_v/normal-6-baseline.json",
+                    "sha256": "06641c3d43b98934ea97a9f9cf9d0dc953bf2f217f7f62e6a378c770305a8640",
+                    "caseMedians": [
+                      112.19946571682992,
+                      106.87022900763358
+                    ]
+                  }
+                ]
+              },
+              {
+                "variant": "candidate",
+                "median": 115.72429482753739,
+                "files": [
+                  {
+                    "path": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_00-54-29_attention-probability-share-whole-nhsxyo_v/normal-1-candidate.json",
+                    "sha256": "eae980f1f3a018bdfdd141789d0b177e06a1fdac3b8be21d47b49df1127bef6e",
+                    "caseMedians": [
+                      116.77479147358666,
+                      115.97938144345805
+                    ]
+                  },
+                  {
+                    "path": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_00-54-29_attention-probability-share-whole-nhsxyo_v/normal-2-candidate.json",
+                    "sha256": "e4bb5ebf0477c126ca88620fd8d3b7e718afc175149f8c2eb2e48197ea09ff5f",
+                    "caseMedians": [
+                      116.1504424781952,
+                      116.53718091058172
+                    ]
+                  },
+                  {
+                    "path": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_00-54-29_attention-probability-share-whole-nhsxyo_v/normal-4-candidate.json",
+                    "sha256": "eb846fc107f9022d451e65ad53c41a0df5787bdf661770ce6cdb086c1db2b1c5",
+                    "caseMedians": [
+                      114.25462459225653,
+                      115.46920821161675
+                    ]
+                  },
+                  {
+                    "path": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_00-54-29_attention-probability-share-whole-nhsxyo_v/normal-7-candidate.json",
+                    "sha256": "a4a7af491ed916b102556aa541d394431fe8359f955def7a2864077611369be2",
+                    "caseMedians": [
+                      114.90060186091999,
+                      113.84170581888262
+                    ]
+                  }
+                ]
+              }
+            ],
+            "speedup": 1.024760250988347
+          },
+          {
+            "model": "qat",
+            "variants": [
+              {
+                "variant": "baseline",
+                "median": 93.3680006863357,
+                "files": [
+                  {
+                    "path": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_00-54-29_attention-probability-share-whole-nhsxyo_v/qat-0-baseline.json",
+                    "sha256": "5f76f27dc20679d2411de88de88a461f4a3695fd7d2b3a165859c7cc585bed46",
+                    "caseMedians": [
+                      93.14015375486667,
+                      93.2366434809375
+                    ]
+                  },
+                  {
+                    "path": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_00-54-29_attention-probability-share-whole-nhsxyo_v/qat-3-baseline.json",
+                    "sha256": "36c0d5278d7a41a4f1c213e0744386c2668af1d2782e7336c1db34a9a9aa368b",
+                    "caseMedians": [
+                      93.97374701691533,
+                      93.45794392502705
+                    ]
+                  },
+                  {
+                    "path": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_00-54-29_attention-probability-share-whole-nhsxyo_v/qat-5-baseline.json",
+                    "sha256": "17724a8b0f35c1513b066f041dc120d772350337f517bf2c0c8500bd62e2bbca",
+                    "caseMedians": [
+                      94.08602150516697,
+                      93.27805744764436
+                    ]
+                  },
+                  {
+                    "path": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_00-54-29_attention-probability-share-whole-nhsxyo_v/qat-6-baseline.json",
+                    "sha256": "82a6d6a4c947da77d2eaf83b1ef0251e6c7ff731858d98760cf5e524a3f83497",
+                    "caseMedians": [
+                      93.45794392502705,
+                      92.51101321585904
+                    ]
+                  }
+                ]
+              },
+              {
+                "variant": "candidate",
+                "median": 94.27609480415006,
+                "files": [
+                  {
+                    "path": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_00-54-29_attention-probability-share-whole-nhsxyo_v/qat-1-candidate.json",
+                    "sha256": "ceaa95f72ab5993cfcdb885d284d74fb38ef17666b37378dc09071435f3251fc",
+                    "caseMedians": [
+                      94.5945945945946,
+                      93.97374701691533
+                    ]
+                  },
+                  {
+                    "path": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_00-54-29_attention-probability-share-whole-nhsxyo_v/qat-2-candidate.json",
+                    "sha256": "0143a9e0fbae4f9bbca00db5adec38f8df462cc28c13d179bb1d7091cdb9bebb",
+                    "caseMedians": [
+                      94.28314875796205,
+                      93.87572641962424
+                    ]
+                  },
+                  {
+                    "path": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_00-54-29_attention-probability-share-whole-nhsxyo_v/qat-4-candidate.json",
+                    "sha256": "b1b4de0c76fa5ad66a9c7f3782c1273495b41a3e5238791faf576f9a4a5d83c8",
+                    "caseMedians": [
+                      94.33962264140418,
+                      94.1985645931965
+                    ]
+                  },
+                  {
+                    "path": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_00-54-29_attention-probability-share-whole-nhsxyo_v/qat-7-candidate.json",
+                    "sha256": "9805e530c0634b4d8a420c0b06adfb8a56aef381f2638858376a21c02d9436b0",
+                    "caseMedians": [
+                      94.28314875796205,
+                      94.26904085033809
+                    ]
+                  }
+                ]
+              }
+            ],
+            "speedup": 1.0097259672600793
+          }
+        ],
+        "sameOutputs": true
+      },
+      "loads": [
+        {
+          "file": "normal-0-baseline.json",
+          "sha256": "3a43f587a2659d1a5e6426834e4a4b7bd0e43600a8812a3c2cc20d91d4e6383e",
+          "cases": [
+            {
+              "case": 0,
+              "decodeSamplesTokS": [
+                116.27906976728195,
+                113.75947995727525,
+                116.02209944751381
+              ],
+              "ttftSamplesMs": [
+                35.80000000074506,
+                35,
+                36.19999999925494
+              ]
+            },
+            {
+              "case": 1,
+              "decodeSamplesTokS": [
+                114.71230881297427,
+                115.59633027522936,
+                113.73894204684198
+              ],
+              "ttftSamplesMs": [
+                39.69999999925494,
+                39,
+                38.30000000074506
+              ]
+            }
+          ]
+        },
+        {
+          "file": "normal-1-candidate.json",
+          "sha256": "eae980f1f3a018bdfdd141789d0b177e06a1fdac3b8be21d47b49df1127bef6e",
+          "cases": [
+            {
+              "case": 0,
+              "decodeSamplesTokS": [
+                116.92650334059554,
+                116.49408284007619,
+                116.77479147358666
+              ],
+              "ttftSamplesMs": [
+                37.29999999701977,
+                36.29999999701977,
+                36.30000000074506
+              ]
+            },
+            {
+              "case": 1,
+              "decodeSamplesTokS": [
+                113.84170581811627,
+                116.04347025187073,
+                115.97938144345805
+              ],
+              "ttftSamplesMs": [
+                40.69999999925494,
+                40.19999999925494,
+                39.599999997764826
+              ]
+            }
+          ]
+        },
+        {
+          "file": "normal-2-candidate.json",
+          "sha256": "e4bb5ebf0477c126ca88620fd8d3b7e718afc175149f8c2eb2e48197ea09ff5f",
+          "cases": [
+            {
+              "case": 0,
+              "decodeSamplesTokS": [
+                116.40798226099977,
+                115.76626240368661,
+                116.1504424781952
+              ],
+              "ttftSamplesMs": [
+                36.5,
+                36.19999999925494,
+                37.600000001490116
+              ]
+            },
+            {
+              "case": 1,
+              "decodeSamplesTokS": [
+                115.91536338546459,
+                116.73151750988877,
+                116.53718091058172
+              ],
+              "ttftSamplesMs": [
+                40.80000000074506,
+                39.69999999925494,
+                39.70000000298023
+              ]
+            }
+          ]
+        },
+        {
+          "file": "normal-3-baseline.json",
+          "sha256": "83c04f6640fa3b9cc6f71a53273aad0b57bd1e13f28267171a4012b357127f9b",
+          "cases": [
+            {
+              "case": 0,
+              "decodeSamplesTokS": [
+                114.85870556061987,
+                114.69142545119571,
+                114.6914254504179
+              ],
+              "ttftSamplesMs": [
+                36.400000002235174,
+                35.70000000298023,
+                36.69999999925494
+              ]
+            },
+            {
+              "case": 1,
+              "decodeSamplesTokS": [
+                113.65686451441228,
+                113.41134113411341,
+                115.00547645188526
+              ],
+              "ttftSamplesMs": [
+                40,
+                39.70000000298023,
+                39.600000001490116
+              ]
+            }
+          ]
+        },
+        {
+          "file": "normal-4-candidate.json",
+          "sha256": "eb846fc107f9022d451e65ad53c41a0df5787bdf661770ce6cdb086c1db2b1c5",
+          "cases": [
+            {
+              "case": 0,
+              "decodeSamplesTokS": [
+                115.89403973478164,
+                114.25462459225653,
+                113.61587015329125
+              ],
+              "ttftSamplesMs": [
+                36.899999998509884,
+                36,
+                37.30000000074506
+              ]
+            },
+            {
+              "case": 1,
+              "decodeSamplesTokS": [
+                115.00547645188526,
+                115.46920821161675,
+                115.5327342745533
+              ],
+              "ttftSamplesMs": [
+                40,
+                39.80000000074506,
+                39.69999999925494
+              ]
+            }
+          ]
+        },
+        {
+          "file": "normal-5-baseline.json",
+          "sha256": "46af3dd4db66c15c0392ebd2553b4b82c12002aeba52117b1c6f7bb8984fa1e9",
+          "cases": [
+            {
+              "case": 0,
+              "decodeSamplesTokS": [
+                112.9437074218642,
+                111.62296243828195,
+                109.81349137193972
+              ],
+              "ttftSamplesMs": [
+                36.399999998509884,
+                35.80000000074506,
+                36.100000001490116
+              ]
+            },
+            {
+              "case": 1,
+              "decodeSamplesTokS": [
+                109.16652226692776,
+                110.50692860872712,
+                110.60393258398031
+              ],
+              "ttftSamplesMs": [
+                40.5,
+                39.899999998509884,
+                40.599999997764826
+              ]
+            }
+          ]
+        },
+        {
+          "file": "normal-6-baseline.json",
+          "sha256": "06641c3d43b98934ea97a9f9cf9d0dc953bf2f217f7f62e6a378c770305a8640",
+          "cases": [
+            {
+              "case": 0,
+              "decodeSamplesTokS": [
+                112.19946571682992,
+                113.75947995651,
+                111.24845488242471
+              ],
+              "ttftSamplesMs": [
+                36.80000000074506,
+                36.5,
+                36.5
+              ]
+            },
+            {
+              "case": 1,
+              "decodeSamplesTokS": [
+                107.41687979539643,
+                106.87022900763358,
+                106.14995787700084
+              ],
+              "ttftSamplesMs": [
+                40.80000000074506,
+                40.30000000074506,
+                39.899999998509884
+              ]
+            }
+          ]
+        },
+        {
+          "file": "normal-7-candidate.json",
+          "sha256": "a4a7af491ed916b102556aa541d394431fe8359f955def7a2864077611369be2",
+          "cases": [
+            {
+              "case": 0,
+              "decodeSamplesTokS": [
+                115.00547645110316,
+                113.22789360202862,
+                114.90060186091999
+              ],
+              "ttftSamplesMs": [
+                36.600000001490116,
+                36,
+                38.100000001490116
+              ]
+            },
+            {
+              "case": 1,
+              "decodeSamplesTokS": [
+                114.17180137715646,
+                110.83743842320946,
+                113.84170581888262
+              ],
+              "ttftSamplesMs": [
+                41,
+                39.599999997764826,
+                40.400000002235174
+              ]
+            }
+          ]
+        },
+        {
+          "file": "qat-0-baseline.json",
+          "sha256": "5f76f27dc20679d2411de88de88a461f4a3695fd7d2b3a165859c7cc585bed46",
+          "cases": [
+            {
+              "case": 0,
+              "decodeSamplesTokS": [
+                93.12638580931264,
+                93.14015375486667,
+                93.61069836552748
+              ],
+              "ttftSamplesMs": [
+                39.099999997764826,
+                38.899999998509884,
+                38.900000002235174
+              ]
+            },
+            {
+              "case": 1,
+              "decodeSamplesTokS": [
+                93.55509355478303,
+                93.2366434809375,
+                93.18148202959367
+              ],
+              "ttftSamplesMs": [
+                41.899999998509884,
+                41.19999999925494,
+                42.100000001490116
+              ]
+            }
+          ]
+        },
+        {
+          "file": "qat-1-candidate.json",
+          "sha256": "ceaa95f72ab5993cfcdb885d284d74fb38ef17666b37378dc09071435f3251fc",
+          "cases": [
+            {
+              "case": 0,
+              "decodeSamplesTokS": [
+                94.3678849608439,
+                94.97964721887993,
+                94.5945945945946
+              ],
+              "ttftSamplesMs": [
+                38.19999999925494,
+                38.600000001490116,
+                38.70000000298023
+              ]
+            },
+            {
+              "case": 1,
+              "decodeSamplesTokS": [
+                94.18448198555889,
+                93.97374701691533,
+                93.19526627218934
+              ],
+              "ttftSamplesMs": [
+                42.30000000074506,
+                41.100000001490116,
+                42.29999999701977
+              ]
+            }
+          ]
+        },
+        {
+          "file": "qat-2-candidate.json",
+          "sha256": "0143a9e0fbae4f9bbca00db5adec38f8df462cc28c13d179bb1d7091cdb9bebb",
+          "cases": [
+            {
+              "case": 0,
+              "decodeSamplesTokS": [
+                94.28314875796205,
+                94.4103102057266,
+                94.26904084981261
+              ],
+              "ttftSamplesMs": [
+                38.30000000074506,
+                38.30000000074506,
+                38.899999998509884
+              ]
+            },
+            {
+              "case": 1,
+              "decodeSamplesTokS": [
+                93.91771019667566,
+                93.6385255647001,
+                93.87572641962424
+              ],
+              "ttftSamplesMs": [
+                41.900000002235174,
+                42.19999999925494,
+                42.30000000074506
+              ]
+            }
+          ]
+        },
+        {
+          "file": "qat-3-baseline.json",
+          "sha256": "36c0d5278d7a41a4f1c213e0744386c2668af1d2782e7336c1db34a9a9aa368b",
+          "cases": [
+            {
+              "case": 0,
+              "decodeSamplesTokS": [
+                93.97374701691533,
+                94.04388714754461,
+                93.55509355530057
+              ],
+              "ttftSamplesMs": [
+                39.100000001490116,
+                37.30000000074506,
+                39.19999999925494
+              ]
+            },
+            {
+              "case": 1,
+              "decodeSamplesTokS": [
+                93.45794392502705,
+                93.66636931290577,
+                93.07135470547892
+              ],
+              "ttftSamplesMs": [
+                43.69999999925494,
+                42.29999999701977,
+                43
+              ]
+            }
+          ]
+        },
+        {
+          "file": "qat-4-candidate.json",
+          "sha256": "b1b4de0c76fa5ad66a9c7f3782c1273495b41a3e5238791faf576f9a4a5d83c8",
+          "cases": [
+            {
+              "case": 0,
+              "decodeSamplesTokS": [
+                94.33962264140418,
+                94.32549782922676,
+                94.89380930831133
+              ],
+              "ttftSamplesMs": [
+                39.099999997764826,
+                38.20000000298023,
+                37.599999997764826
+              ]
+            },
+            {
+              "case": 1,
+              "decodeSamplesTokS": [
+                94.35375168446728,
+                94.00179051039994,
+                94.1985645931965
+              ],
+              "ttftSamplesMs": [
+                41.599999997764826,
+                42.69999999925494,
+                42.19999999925494
+              ]
+            }
+          ]
+        },
+        {
+          "file": "qat-5-baseline.json",
+          "sha256": "17724a8b0f35c1513b066f041dc120d772350337f517bf2c0c8500bd62e2bbca",
+          "cases": [
+            {
+              "case": 0,
+              "decodeSamplesTokS": [
+                93.34716254280501,
+                94.08602150516697,
+                95.68651275787686
+              ],
+              "ttftSamplesMs": [
+                39.100000001490116,
+                38.600000001490116,
+                37.79999999701977
+              ]
+            },
+            {
+              "case": 1,
+              "decodeSamplesTokS": [
+                93.27805744764436,
+                93.19526627218934,
+                93.65244536951059
+              ],
+              "ttftSamplesMs": [
+                41.80000000074506,
+                41.30000000074506,
+                42.599999997764826
+              ]
+            }
+          ]
+        },
+        {
+          "file": "qat-6-baseline.json",
+          "sha256": "82a6d6a4c947da77d2eaf83b1ef0251e6c7ff731858d98760cf5e524a3f83497",
+          "cases": [
+            {
+              "case": 0,
+              "decodeSamplesTokS": [
+                94.17040358744394,
+                93.26424870466322,
+                93.45794392502705
+              ],
+              "ttftSamplesMs": [
+                38.19999999925494,
+                38.600000001490116,
+                38.80000000074506
+              ]
+            },
+            {
+              "case": 1,
+              "decodeSamplesTokS": [
+                92.61981770077772,
+                92.51101321585904,
+                92.45670677985521
+              ],
+              "ttftSamplesMs": [
+                42.19999999925494,
+                42.600000001490116,
+                42.79999999701977
+              ]
+            }
+          ]
+        },
+        {
+          "file": "qat-7-candidate.json",
+          "sha256": "9805e530c0634b4d8a420c0b06adfb8a56aef381f2638858376a21c02d9436b0",
+          "cases": [
+            {
+              "case": 0,
+              "decodeSamplesTokS": [
+                94.26904084981261,
+                94.4669365724108,
+                94.28314875796205
+              ],
+              "ttftSamplesMs": [
+                38.100000001490116,
+                38.100000001490116,
+                38.399999998509884
+              ]
+            },
+            {
+              "case": 1,
+              "decodeSamplesTokS": [
+                94.14225941433075,
+                94.26904085033809,
+                94.48110377913858
+              ],
+              "ttftSamplesMs": [
+                43,
+                41,
+                41.900000002235174
+              ]
+            }
+          ]
+        }
+      ],
+      "bundles": {
+        "baseline": "592cbf82cd28d404a056054ec5c844872e0467cdaa2cf09f8fc36bdbb0b9dd68",
+        "candidate": "a41e356f6a0fa36bb65d01dc7b331c3c1167bd5812bef1537639cd4c87242d32"
+      }
+    },
+    "product": {
+      "rawDirectory": "outputs/bench/karume/2026-09-15_01-15-38_attention-product-whole-_phgaqv4",
+      "speedSummary": {
+        "directory": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_01-15-38_attention-product-whole-_phgaqv4",
+        "models": [
+          {
+            "model": "normal",
+            "variants": [
+              {
+                "variant": "baseline",
+                "median": 114.63927402014767,
+                "files": [
+                  {
+                    "path": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_01-15-38_attention-product-whole-_phgaqv4/normal-0-baseline.json",
+                    "sha256": "9817de4e29f129484fcacb966e9096d1e91912d92b044521da3c6c736b5d3ec4",
+                    "caseMedians": [
+                      115.85141596159191,
+                      116.45101663585952
+                    ]
+                  },
+                  {
+                    "path": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_01-15-38_attention-product-whole-_phgaqv4/normal-3-baseline.json",
+                    "sha256": "97ef6aa4ff99dff4a16aa31d371414b36141b26003363c818dfdc8ccb6e0c791",
+                    "caseMedians": [
+                      111.05235325210164,
+                      115.34236543406433
+                    ]
+                  },
+                  {
+                    "path": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_01-15-38_attention-product-whole-_phgaqv4/normal-5-baseline.json",
+                    "sha256": "e81c1d2e00c142e37541fe7017927ee68bc84dd971930ecf0aa5a6c21aa86f40",
+                    "caseMedians": [
+                      114.58712258987745,
+                      114.54545454545455
+                    ]
+                  },
+                  {
+                    "path": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_01-15-38_attention-product-whole-_phgaqv4/normal-6-baseline.json",
+                    "sha256": "58ab189986955d2fcddfeb77676af53c3e404ed399cea489481b0d8098bb04ae",
+                    "caseMedians": [
+                      114.6914254504179,
+                      114.48300926751718
+                    ]
+                  }
+                ]
+              },
+              {
+                "variant": "candidate",
+                "median": 116.25762794098934,
+                "files": [
+                  {
+                    "path": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_01-15-38_attention-product-whole-_phgaqv4/normal-1-candidate.json",
+                    "sha256": "cbdf5ced603df5ce861687094271192acf44709cda2b3ddd1ec49711c4dee046",
+                    "caseMedians": [
+                      116.30053535103083,
+                      116.19328661026664
+                    ]
+                  },
+                  {
+                    "path": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_01-15-38_attention-product-whole-_phgaqv4/normal-2-candidate.json",
+                    "sha256": "c93947c88919b503fd64dbebec79bd0b7a2cd9636e40da11bd1ce0cb0558dea6",
+                    "caseMedians": [
+                      115.65999632841229,
+                      117.1003717472119
+                    ]
+                  },
+                  {
+                    "path": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_01-15-38_attention-product-whole-_phgaqv4/normal-4-candidate.json",
+                    "sha256": "18baff460e26be6f107616ad93064fb95e35a7668eabf283fe6999ca0a19546e",
+                    "caseMedians": [
+                      116.66666666666667,
+                      116.42949547186565
+                    ]
+                  },
+                  {
+                    "path": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_01-15-38_attention-product-whole-_phgaqv4/normal-7-candidate.json",
+                    "sha256": "5b74475df278d0c5cdb60a145f69bd3238fc4d8cb8f2592ad22fd2cf3c1ad674",
+                    "caseMedians": [
+                      116.21472053094784,
+                      115.27904849039341
+                    ]
+                  }
+                ]
+              }
+            ],
+            "speedup": 1.0141169240181793
+          },
+          {
+            "model": "qat",
+            "variants": [
+              {
+                "variant": "baseline",
+                "median": 94.0159525338246,
+                "files": [
+                  {
+                    "path": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_01-15-38_attention-product-whole-_phgaqv4/qat-0-baseline.json",
+                    "sha256": "0b8975892d701d46e8b4ce898c763e2e43da0c126386857f14304b8e8c2ed67a",
+                    "caseMedians": [
+                      94.1985645931965,
+                      94.15632939801294
+                    ]
+                  },
+                  {
+                    "path": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_01-15-38_attention-product-whole-_phgaqv4/qat-3-baseline.json",
+                    "sha256": "943a91fc42a8bb4b72a53fe200576243614e56b04659f13a3c7c0b23a8270bab",
+                    "caseMedians": [
+                      93.86174016644856,
+                      93.70816599721877
+                    ]
+                  },
+                  {
+                    "path": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_01-15-38_attention-product-whole-_phgaqv4/qat-5-baseline.json",
+                    "sha256": "566e63f60037acc0e516afa6797ccd694027b94177c04cae874a17819416b68b",
+                    "caseMedians": [
+                      94.12819363503641,
+                      93.65244536951059
+                    ]
+                  },
+                  {
+                    "path": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_01-15-38_attention-product-whole-_phgaqv4/qat-6-baseline.json",
+                    "sha256": "585f79c0354cef071368f49397ca2873288333ac72e7a04bcfefb73ab6312e97",
+                    "caseMedians": [
+                      93.9037114326128,
+                      94.15632939801294
+                    ]
+                  }
+                ]
+              },
+              {
+                "variant": "candidate",
+                "median": 94.50236734369668,
+                "files": [
+                  {
+                    "path": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_01-15-38_attention-product-whole-_phgaqv4/qat-1-candidate.json",
+                    "sha256": "c213e094e2a3facff11483952084db28f162a709ab55a1a27dd08e2c6b951425",
+                    "caseMedians": [
+                      94.67989179409133,
+                      94.52363090772693
+                    ]
+                  },
+                  {
+                    "path": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_01-15-38_attention-product-whole-_phgaqv4/qat-2-candidate.json",
+                    "sha256": "93c41f1bb4a84ae0e9ef6ed6a36cf0bf6f75dc5253550be45523b824883d23a0",
+                    "caseMedians": [
+                      97.6592776311494,
+                      93.61069836552748
+                    ]
+                  },
+                  {
+                    "path": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_01-15-38_attention-product-whole-_phgaqv4/qat-4-candidate.json",
+                    "sha256": "0061545a94a5e4c01e55a9b4f0076336675eebe62450c1afd1f45dec329dc5ec",
+                    "caseMedians": [
+                      94.33962264140418,
+                      94.48110377966643
+                    ]
+                  },
+                  {
+                    "path": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_01-15-38_attention-product-whole-_phgaqv4/qat-7-candidate.json",
+                    "sha256": "e166f1a471a0ffd52433b629748024b675ae124f5c8eb6e8b07be1967d24cf1f",
+                    "caseMedians": [
+                      95.15178976017623,
+                      93.97374701639313
+                    ]
+                  }
+                ]
+              }
+            ],
+            "speedup": 1.0051737476115776
+          }
+        ],
+        "sameOutputs": true
+      },
+      "loads": [
+        {
+          "file": "normal-0-baseline.json",
+          "sha256": "9817de4e29f129484fcacb966e9096d1e91912d92b044521da3c6c736b5d3ec4",
+          "cases": [
+            {
+              "case": 0,
+              "decodeSamplesTokS": [
+                115.7875390550036,
+                115.85141596159191,
+                115.97938144345805
+              ],
+              "ttftSamplesMs": [
+                36.099999997764826,
+                34.899999998509884,
+                35
+              ]
+            },
+            {
+              "case": 1,
+              "decodeSamplesTokS": [
+                114.33756805807623,
+                116.45101663585952,
+                116.53718091058172
+              ],
+              "ttftSamplesMs": [
+                39.100000001490116,
+                38.69999999925494,
+                38.400000002235174
+              ]
+            }
+          ]
+        },
+        {
+          "file": "normal-1-candidate.json",
+          "sha256": "cbdf5ced603df5ce861687094271192acf44709cda2b3ddd1ec49711c4dee046",
+          "cases": [
+            {
+              "case": 0,
+              "decodeSamplesTokS": [
+                116.30053535103083,
+                97.5987606506584,
+                116.42949547186565
+              ],
+              "ttftSamplesMs": [
+                35.599999997764826,
+                34.80000000074506,
+                39.099999997764826
+              ]
+            },
+            {
+              "case": 1,
+              "decodeSamplesTokS": [
+                116.45101663585952,
+                116.19328661026664,
+                115.40575196954015
+              ],
+              "ttftSamplesMs": [
+                78.69999999925494,
+                38.5,
+                38.30000000074506
+              ]
+            }
+          ]
+        },
+        {
+          "file": "normal-2-candidate.json",
+          "sha256": "c93947c88919b503fd64dbebec79bd0b7a2cd9636e40da11bd1ce0cb0558dea6",
+          "cases": [
+            {
+              "case": 0,
+              "decodeSamplesTokS": [
+                115.44804837838743,
+                115.65999632841229,
+                116.68827560691587
+              ],
+              "ttftSamplesMs": [
+                36.100000001490116,
+                37.5,
+                35.400000002235174
+              ]
+            },
+            {
+              "case": 1,
+              "decodeSamplesTokS": [
+                116.1504424781952,
+                117.60313608379246,
+                117.1003717472119
+              ],
+              "ttftSamplesMs": [
+                39.5,
+                38.69999999925494,
+                39.100000001490116
+              ]
+            }
+          ]
+        },
+        {
+          "file": "normal-3-baseline.json",
+          "sha256": "97ef6aa4ff99dff4a16aa31d371414b36141b26003363c818dfdc8ccb6e0c791",
+          "cases": [
+            {
+              "case": 0,
+              "decodeSamplesTokS": [
+                113.08562197061836,
+                97.4628712873534,
+                111.05235325210164
+              ],
+              "ttftSamplesMs": [
+                35.80000000074506,
+                34.900000002235174,
+                36.80000000074506
+              ]
+            },
+            {
+              "case": 1,
+              "decodeSamplesTokS": [
+                115.34236543406433,
+                114.64968152866243,
+                115.34236543406433
+              ],
+              "ttftSamplesMs": [
+                39,
+                40,
+                38.600000001490116
+              ]
+            }
+          ]
+        },
+        {
+          "file": "normal-4-candidate.json",
+          "sha256": "18baff460e26be6f107616ad93064fb95e35a7668eabf283fe6999ca0a19546e",
+          "cases": [
+            {
+              "case": 0,
+              "decodeSamplesTokS": [
+                116.81809753448572,
+                116.66666666666667,
+                116.66666666666667
+              ],
+              "ttftSamplesMs": [
+                36.70000000298023,
+                36.099999997764826,
+                36.399999998509884
+              ]
+            },
+            {
+              "case": 1,
+              "decodeSamplesTokS": [
+                116.42949547186565,
+                116.51562788993307,
+                115.15262292132587
+              ],
+              "ttftSamplesMs": [
+                40.399999998509884,
+                39.69999999925494,
+                39.30000000074506
+              ]
+            }
+          ]
+        },
+        {
+          "file": "normal-5-baseline.json",
+          "sha256": "e81c1d2e00c142e37541fe7017927ee68bc84dd971930ecf0aa5a6c21aa86f40",
+          "cases": [
+            {
+              "case": 0,
+              "decodeSamplesTokS": [
+                114.58712258987745,
+                115.59633027522936,
+                110.58451816760117
+              ],
+              "ttftSamplesMs": [
+                36.599999997764826,
+                35.899999998509884,
+                38.400000002235174
+              ]
+            },
+            {
+              "case": 1,
+              "decodeSamplesTokS": [
+                114.17180137715646,
+                114.54545454545455,
+                114.85870556061987
+              ],
+              "ttftSamplesMs": [
+                40.5,
+                39.79999999701977,
+                39.30000000074506
+              ]
+            }
+          ]
+        },
+        {
+          "file": "normal-6-baseline.json",
+          "sha256": "58ab189986955d2fcddfeb77676af53c3e404ed399cea489481b0d8098bb04ae",
+          "cases": [
+            {
+              "case": 0,
+              "decodeSamplesTokS": [
+                115.06849315068493,
+                114.6914254504179,
+                114.6914254504179
+              ],
+              "ttftSamplesMs": [
+                36.69999999925494,
+                36,
+                36.19999999925494
+              ]
+            },
+            {
+              "case": 1,
+              "decodeSamplesTokS": [
+                113.18720804932266,
+                114.48300926751718,
+                114.50381679404819
+              ],
+              "ttftSamplesMs": [
+                40.100000001490116,
+                40.399999998509884,
+                39.600000001490116
+              ]
+            }
+          ]
+        },
+        {
+          "file": "normal-7-candidate.json",
+          "sha256": "5b74475df278d0c5cdb60a145f69bd3238fc4d8cb8f2592ad22fd2cf3c1ad674",
+          "cases": [
+            {
+              "case": 0,
+              "decodeSamplesTokS": [
+                116.21472053094784,
+                116.00073651229451,
+                116.21472053094784
+              ],
+              "ttftSamplesMs": [
+                36.5,
+                35.80000000074506,
+                36.599999997764826
+              ]
+            },
+            {
+              "case": 1,
+              "decodeSamplesTokS": [
+                115.27904849039341,
+                115.34236543327765,
+                115.25795828728184
+              ],
+              "ttftSamplesMs": [
+                40.5,
+                40,
+                39.599999997764826
+              ]
+            }
+          ]
+        },
+        {
+          "file": "qat-0-baseline.json",
+          "sha256": "0b8975892d701d46e8b4ce898c763e2e43da0c126386857f14304b8e8c2ed67a",
+          "cases": [
+            {
+              "case": 0,
+              "decodeSamplesTokS": [
+                93.66636931290577,
+                94.22674244669398,
+                94.1985645931965
+              ],
+              "ttftSamplesMs": [
+                37.899999998509884,
+                37.599999997764826,
+                37.80000000074506
+              ]
+            },
+            {
+              "case": 1,
+              "decodeSamplesTokS": [
+                92.29416935227435,
+                94.15632939801294,
+                94.70835838856068
+              ],
+              "ttftSamplesMs": [
+                42.69999999925494,
+                43.19999999925494,
+                41.5
+              ]
+            }
+          ]
+        },
+        {
+          "file": "qat-1-candidate.json",
+          "sha256": "c213e094e2a3facff11483952084db28f162a709ab55a1a27dd08e2c6b951425",
+          "cases": [
+            {
+              "case": 0,
+              "decodeSamplesTokS": [
+                94.67989179409133,
+                96.28610729012419,
+                94.39616421956947
+              ],
+              "ttftSamplesMs": [
+                37.79999999701977,
+                37.19999999925494,
+                38.100000001490116
+              ]
+            },
+            {
+              "case": 1,
+              "decodeSamplesTokS": [
+                94.52363090772693,
+                95.78835335270088,
+                94.18448198555889
+              ],
+              "ttftSamplesMs": [
+                41.80000000074506,
+                41.100000001490116,
+                41.30000000074506
+              ]
+            }
+          ]
+        },
+        {
+          "file": "qat-2-candidate.json",
+          "sha256": "93c41f1bb4a84ae0e9ef6ed6a36cf0bf6f75dc5253550be45523b824883d23a0",
+          "cases": [
+            {
+              "case": 0,
+              "decodeSamplesTokS": [
+                87.42714404689899,
+                97.84127970147742,
+                97.6592776311494
+              ],
+              "ttftSamplesMs": [
+                37.900000002235174,
+                38.5,
+                38
+              ]
+            },
+            {
+              "case": 1,
+              "decodeSamplesTokS": [
+                94.28314875796205,
+                93.61069836552748,
+                92.37536656891496
+              ],
+              "ttftSamplesMs": [
+                41.80000000074506,
+                41.20000000298023,
+                41.29999999701977
+              ]
+            }
+          ]
+        },
+        {
+          "file": "qat-3-baseline.json",
+          "sha256": "943a91fc42a8bb4b72a53fe200576243614e56b04659f13a3c7c0b23a8270bab",
+          "cases": [
+            {
+              "case": 0,
+              "decodeSamplesTokS": [
+                93.7639529693998,
+                93.86174016644856,
+                94.35375168499371
+              ],
+              "ttftSamplesMs": [
+                37.69999999925494,
+                37.5,
+                37.69999999925494
+              ]
+            },
+            {
+              "case": 1,
+              "decodeSamplesTokS": [
+                93.70816599721877,
+                92.94777220408785,
+                94.00179051039994
+              ],
+              "ttftSamplesMs": [
+                41.600000001490116,
+                41,
+                41.100000001490116
+              ]
+            }
+          ]
+        },
+        {
+          "file": "qat-4-candidate.json",
+          "sha256": "0061545a94a5e4c01e55a9b4f0076336675eebe62450c1afd1f45dec329dc5ec",
+          "cases": [
+            {
+              "case": 0,
+              "decodeSamplesTokS": [
+                94.33962264140418,
+                94.11413205876941,
+                94.6230099133103
+              ],
+              "ttftSamplesMs": [
+                39.599999997764826,
+                37.5,
+                37.70000000298023
+              ]
+            },
+            {
+              "case": 1,
+              "decodeSamplesTokS": [
+                95.20930935479966,
+                94.48110377966643,
+                93.91771019667566
+              ],
+              "ttftSamplesMs": [
+                41.80000000074506,
+                41.20000000298023,
+                41.19999999925494
+              ]
+            }
+          ]
+        },
+        {
+          "file": "qat-5-baseline.json",
+          "sha256": "566e63f60037acc0e516afa6797ccd694027b94177c04cae874a17819416b68b",
+          "cases": [
+            {
+              "case": 0,
+              "decodeSamplesTokS": [
+                93.83378016106616,
+                94.12819363503641,
+                94.22674244669398
+              ],
+              "ttftSamplesMs": [
+                38.400000002235174,
+                37.29999999701977,
+                37.69999999925494
+              ]
+            },
+            {
+              "case": 1,
+              "decodeSamplesTokS": [
+                93.65244536951059,
+                93.27805744712985,
+                94.18448198503435
+              ],
+              "ttftSamplesMs": [
+                41.600000001490116,
+                41.399999998509884,
+                41.399999998509884
+              ]
+            }
+          ]
+        },
+        {
+          "file": "qat-6-baseline.json",
+          "sha256": "585f79c0354cef071368f49397ca2873288333ac72e7a04bcfefb73ab6312e97",
+          "cases": [
+            {
+              "case": 0,
+              "decodeSamplesTokS": [
+                93.9037114326128,
+                93.91771019667566,
+                93.68029739776952
+              ],
+              "ttftSamplesMs": [
+                38.20000000298023,
+                37.19999999925494,
+                38.19999999925494
+              ]
+            },
+            {
+              "case": 1,
+              "decodeSamplesTokS": [
+                93.48568036821383,
+                94.15632939801294,
+                94.24083769633508
+              ],
+              "ttftSamplesMs": [
+                42.19999999925494,
+                41.30000000074506,
+                41.20000000298023
+              ]
+            }
+          ]
+        },
+        {
+          "file": "qat-7-candidate.json",
+          "sha256": "e166f1a471a0ffd52433b629748024b675ae124f5c8eb6e8b07be1967d24cf1f",
+          "cases": [
+            {
+              "case": 0,
+              "decodeSamplesTokS": [
+                94.9796472183465,
+                95.44008483595414,
+                95.15178976017623
+              ],
+              "ttftSamplesMs": [
+                38.29999999701977,
+                37.600000001490116,
+                38.900000002235174
+              ]
+            },
+            {
+              "case": 1,
+              "decodeSamplesTokS": [
+                94.1563293974887,
+                93.97374701639313,
+                93.30568720389442
+              ],
+              "ttftSamplesMs": [
+                42.099999997764826,
+                41.399999998509884,
+                41.19999999925494
+              ]
+            }
+          ]
+        }
+      ],
+      "bundles": {
+        "baseline": "d60ec6d435cf39f63f92481c267f1cc40690fc563b5eb6e3b71018deaaf3d0a9",
+        "candidate": "2d79cff8e30789185c588438b255684cf893e983e1dde37996933549e92d2b99"
+      }
+    }
+  },
+  "outputs": {
+    "counts": {
+      "basic": 160,
+      "sharedProbability": 160,
+      "product": 160,
+      "profile": 28,
+      "ui": 80
+    },
+    "total": 588,
+    "signatures": {
+      "normal-0": "5967f5896ce05e09a9ac9144e3c32ad9c36909bc58491a305ca74cd57634d7d3",
+      "normal-1": "cedb8b84ea5dabbc9c62dfadb60ca0c869ece1ef164b8f99d81940bbe7a792d0",
+      "qat-0": "3ee4c6d1e4390745ff8ce5d45206e8848a54e0da92dfb869c73d73a1638a387e",
+      "qat-1": "6e4c44d63cb04fc50a2ba1f302d582d2af7e8c5971077b2bc5fa0529bc42e95e"
+    }
+  },
+  "profile": {
+    "rawDirectory": "outputs/bench/karume/2026-09-15_01-16-44_attention-native-profile-t5wvv_j7",
+    "nativePass": [
+      {
+        "path": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_01-16-44_attention-native-profile-t5wvv_j7/normal-0-baseline-1-pass.json",
+        "sha256": "702a9264f12169746ce2a9ac30cf666d9c511eccffd682fcbccd5eb76cbc8005",
+        "model": "normal",
+        "variant": "baseline",
+        "dispatchCounts": [
+          924
+        ],
+        "gpuMsPerTokenMedian": 6.335488,
+        "gpuSamples": [
+          6.478848,
+          6.337536,
+          6.467584,
+          6.386688,
+          6.395904,
+          6.356992,
+          6.358016,
+          6.317056,
+          6.317056,
+          6.31808,
+          6.316032,
+          6.315008,
+          6.319104,
+          6.31808,
+          6.325248,
+          6.320128,
+          6.320128,
+          6.182912,
+          6.299648,
+          6.30784,
+          6.3232,
+          6.322176,
+          6.334464,
+          6.331392,
+          6.32832,
+          6.325248,
+          6.32832,
+          6.330368,
+          6.340608,
+          6.33344,
+          6.341632,
+          6.335488,
+          6.330368,
+          6.199296,
+          6.315008,
+          6.325248,
+          6.33344,
+          6.32832,
+          6.337536,
+          6.33344,
+          6.335488,
+          6.34368,
+          6.346752,
+          6.3488,
+          6.3488,
+          6.346752,
+          6.351872,
+          6.354944,
+          6.35392,
+          6.21568,
+          6.340608,
+          6.34368,
+          6.350848,
+          6.354944,
+          6.365184,
+          6.356992,
+          6.358016,
+          6.36416,
+          6.36928,
+          6.370304,
+          6.3744,
+          6.373376,
+          6.370304
+        ],
+        "families": {
+          "attention_state_qk": 35,
+          "attention_state_stats": 35,
+          "attention_state_pv": 35,
+          "attention_state_stats_pv": 0
+        }
+      },
+      {
+        "path": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_01-16-44_attention-native-profile-t5wvv_j7/normal-1-candidate-1-pass.json",
+        "sha256": "00433ecad7876f693f84ed1ed55dc01e366fa89a65d5ef17f4cf2b033fd9692d",
+        "model": "normal",
+        "variant": "candidate",
+        "dispatchCounts": [
+          889
+        ],
+        "gpuMsPerTokenMedian": 6.283264,
+        "gpuSamples": [
+          6.295552,
+          6.329344,
+          6.457344,
+          6.322176,
+          6.340608,
+          6.304768,
+          6.30784,
+          6.28736,
+          6.272,
+          6.268928,
+          6.268928,
+          6.264832,
+          6.270976,
+          6.267904,
+          6.272,
+          6.272,
+          6.268928,
+          6.137856,
+          6.257664,
+          6.25664,
+          6.264832,
+          6.26688,
+          6.278144,
+          6.274048,
+          6.280192,
+          6.276096,
+          6.279168,
+          6.280192,
+          6.285312,
+          6.276096,
+          6.285312,
+          6.285312,
+          6.280192,
+          6.151168,
+          6.26176,
+          6.26688,
+          6.268928,
+          6.268928,
+          6.286336,
+          6.28736,
+          6.285312,
+          6.286336,
+          6.28224,
+          6.283264,
+          6.294528,
+          6.283264,
+          6.296576,
+          6.29248,
+          6.28736,
+          6.168576,
+          6.272,
+          6.284288,
+          6.298624,
+          6.296576,
+          6.305792,
+          6.309888,
+          6.306816,
+          6.304768,
+          6.306816,
+          6.31296,
+          6.319104,
+          6.311936,
+          6.31808
+        ],
+        "families": {
+          "attention_state_qk": 35,
+          "attention_state_stats": 0,
+          "attention_state_pv": 0,
+          "attention_state_stats_pv": 35
+        }
+      },
+      {
+        "path": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_01-16-44_attention-native-profile-t5wvv_j7/qat-0-candidate-1-pass.json",
+        "sha256": "7b701f593e44850b678281b7e4bbf9cea068d36ca74ae5edad51efd3ddf91b1d",
+        "model": "qat",
+        "variant": "candidate",
+        "dispatchCounts": [
+          1376
+        ],
+        "gpuMsPerTokenMedian": 7.472128,
+        "gpuSamples": [
+          7.657472,
+          7.518208,
+          7.635968,
+          7.552,
+          7.532544,
+          7.508992,
+          7.481344,
+          7.452672,
+          7.447552,
+          7.45472,
+          7.45472,
+          7.45472,
+          7.46496,
+          7.460864,
+          7.46496,
+          7.463936,
+          7.456768,
+          7.324672,
+          7.455744,
+          7.452672,
+          7.455744,
+          7.461888,
+          7.45984,
+          7.467008,
+          7.467008,
+          7.471104,
+          7.469056,
+          7.46496,
+          7.473152,
+          7.47008,
+          7.48032,
+          7.472128,
+          7.479296,
+          7.333888,
+          7.44448,
+          7.452672,
+          7.45472,
+          7.456768,
+          7.467008,
+          7.468032,
+          7.477248,
+          7.474176,
+          7.478272,
+          7.47008,
+          7.483392,
+          7.481344,
+          7.484416,
+          7.488512,
+          7.483392,
+          7.34208,
+          7.478272,
+          7.472128,
+          7.477248,
+          7.476224,
+          7.486464,
+          7.478272,
+          7.502848,
+          7.504896,
+          7.501824,
+          7.498752,
+          7.504896,
+          7.508992,
+          7.507968
+        ],
+        "families": {
+          "attention_state_qk": 35,
+          "attention_state_stats": 0,
+          "attention_state_pv": 0,
+          "attention_state_stats_pv": 35
+        }
+      },
+      {
+        "path": "/home/developer/workspace/karume/outputs/bench/karume/2026-09-15_01-16-44_attention-native-profile-t5wvv_j7/qat-1-baseline-1-pass.json",
+        "sha256": "88990367d52879c1431035a3e6b9cabe15f760f02b04a694e77f1b9e7989c3ee",
+        "model": "qat",
+        "variant": "baseline",
+        "dispatchCounts": [
+          1411
+        ],
+        "gpuMsPerTokenMedian": 7.524352,
+        "gpuSamples": [
+          7.611392,
+          7.642112,
+          7.657472,
+          7.612416,
+          7.563264,
+          7.559168,
+          7.520256,
+          7.513088,
+          7.504896,
+          7.502848,
+          7.512064,
+          7.50592,
+          7.512064,
+          7.503872,
+          7.515136,
+          7.508992,
+          7.510016,
+          7.379968,
+          7.508992,
+          7.507968,
+          7.51104,
+          7.513088,
+          7.519232,
+          7.514112,
+          7.522304,
+          7.524352,
+          7.52128,
+          7.514112,
+          7.53152,
+          7.52128,
+          7.53664,
+          7.528448,
+          7.528448,
+          7.390208,
+          7.5008,
+          7.504896,
+          7.512064,
+          7.512064,
+          7.524352,
+          7.52128,
+          7.524352,
+          7.53152,
+          7.538688,
+          7.527424,
+          7.54176,
+          7.538688,
+          7.547904,
+          7.535616,
+          7.53664,
+          7.40864,
+          7.53152,
+          7.530496,
+          7.533568,
+          7.532544,
+          7.544832,
+          7.535616,
+          7.555072,
+          7.556096,
+          7.560192,
+          7.548928,
+          7.558144,
+          7.568384,
+          7.575552
+        ],
+        "families": {
+          "attention_state_qk": 35,
+          "attention_state_stats": 35,
+          "attention_state_pv": 35,
+          "attention_state_stats_pv": 0
+        }
+      }
+    ]
+  },
+  "ui": {
+    "directory": "outputs/bench/karume/2026-09-15_01-18-55_attention-browser-ui-d8rx5op1",
+    "sha256": "c424feecf27562afa407f051cc2ecd9f9f4b89a758a690b73e3238b4248cc410",
+    "parity": {
+      "generations": 80,
+      "differences": []
+    },
+    "completion": {
+      "exitCode": 0,
+      "elapsedSeconds": 116.10399556159973
+    }
+  },
+  "correctness": {
+    "rawFile": "outputs/bench/karume/2026-09-15_00-50-54_attention-fusion-correctness-p5q8x4cz/results.json",
+    "sha256": "4d0d903b9e92c7f9f5358a5730959b509e0c37ebe760dc26787655466e3c6c0f",
+    "shapes": 180,
+    "comparisons": 720,
+    "maximumReferenceAbs": 1.7881393432617188e-07,
+    "differentBits": 0
+  }
+}

@@ -15,6 +15,7 @@
  */
 
 import { STATE_STATS_STRIDE, stateSliding } from "../kernels/state-attention.ts";
+import { stateStatsPvEligible } from "../kernels/state-attention-stats-pv.ts";
 import { planRowBlocks } from "./fusion.ts";
 
 /**
@@ -31,6 +32,8 @@ export type StateAttentionExtent = {
   readonly capacity: number;
   /** sliding の窓幅 `W`。full 変種は 0 か省略（判定は {@link stateSliding} の 1 本）。 */
   readonly window?: number;
+  /** parallel-fused の states 形からだけ指定する。readonly は渡さない。 */
+  readonly fuseStatsPv?: boolean;
 };
 
 /** 行ブロック 1 枚ぶんの一時（確保順 — 解放は逆順）。 */
@@ -41,7 +44,7 @@ export type StateAttentionBlock = {
   readonly rows: number;
   /** スコア S = `B·H × 行数 × colCap × 4` バイト。 */
   readonly scoreBytes: number;
-  /** 行統計 = `B·H × 行数 × STATE_STATS_STRIDE × 4` バイト。 */
+  /** 行統計 = `B·H × 行数 × STATE_STATS_STRIDE × 4` バイト。融合時は 0。 */
   readonly statsBytes: number;
 };
 
@@ -52,6 +55,8 @@ export type StateAttentionPlan = {
    * （下限式の正本は `src/kernels/state-attention.ts` の `assertStateGeometry`）。
    */
   readonly colCap: number;
+  /** 行統計の中間を持たない 2 dispatch の計画か。 */
+  readonly fusedStatsPv: boolean;
   /** 行ブロック（{@link planRowBlocks} の等分 — 1 枚ぶんだけが同時生存する）。 */
   readonly blocks: readonly StateAttentionBlock[];
 };
@@ -75,11 +80,12 @@ export const planStateAttention = (
   const { batchHeads, chunkRows, capacity } = extent;
   const window = extent.window ?? 0;
   const colCap = stateSliding(window) ? window - 1 + chunkRows : capacity;
+  const fusedStatsPv = extent.fuseStatsPv === true && stateStatsPvEligible(chunkRows, colCap);
   const blocks = planRowBlocks(chunkRows, batchHeads * colCap * 4, limit, forced).map((block) => ({
     offset: block.offset,
     rows: block.rows,
     scoreBytes: batchHeads * block.rows * colCap * 4,
-    statsBytes: batchHeads * block.rows * STATE_STATS_STRIDE * 4,
+    statsBytes: fusedStatsPv ? 0 : batchHeads * block.rows * STATE_STATS_STRIDE * 4,
   }));
-  return { colCap, blocks };
+  return { colCap, fusedStatsPv, blocks };
 };

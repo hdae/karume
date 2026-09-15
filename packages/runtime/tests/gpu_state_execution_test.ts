@@ -2081,3 +2081,73 @@ Deno.test({
     }
   },
 });
+
+Deno.test({
+  name: "parallel-fused は適用形だけstats/PVをまとめ、state更新後もparallelとu32一致する",
+  ignore: !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    try {
+      for (
+        const [chunkRows, capacity, window, expectedFusion] of [
+          [1, 64, undefined, true],
+          [8, 39, 31, true],
+          [9, 64, undefined, false],
+          [1, 1025, undefined, false],
+          [8, 1024, undefined, true],
+        ] as const
+      ) {
+        const model: StateModel = { heads: 4, kvHeads: 1, depth: 17, capacity, window };
+        const sessions = [
+          await stateSession(gpu, model, { stateAttentionReduce: "parallel" }),
+          await stateSession(gpu, model, { stateAttentionReduce: "parallel-fused" }),
+        ];
+        const contexts = await Promise.all(
+          sessions.map((s) => s.createGenerationContext({ chunkLength: chunkRows })),
+        );
+        try {
+          for (let step = 0; step < (window ? 8 : 4); step++) {
+            const input = stepInputs(model, chunkRows, step * 13);
+            const before = await runStep(
+              sessions[0],
+              contexts[0],
+              model,
+              input,
+              chunkRows,
+              chunkRows,
+            );
+            const after = await runStep(
+              sessions[1],
+              contexts[1],
+              model,
+              input,
+              chunkRows,
+              chunkRows,
+            );
+            assertEquals(new Uint32Array(after.buffer), new Uint32Array(before.buffer));
+          }
+          const entries = sessions[1].diagnostics().lastRunTiming?.entries ?? [];
+          assert(entries.length > 0);
+          assertEquals(
+            entries.some((e) => e.key.startsWith("attention_state_stats_pv:")),
+            expectedFusion,
+          );
+          assertEquals(
+            entries.some((e) => e.key.startsWith("attention_state_stats:")),
+            !expectedFusion,
+          );
+          assertEquals(
+            entries.some((e) => e.key.startsWith("attention_state_pv:")),
+            !expectedFusion,
+          );
+          assertEquals(contexts[1].pastLength, contexts[0].pastLength);
+        } finally {
+          for (const c of contexts) await c.dispose();
+          for (const s of sessions) await s.dispose();
+        }
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+});

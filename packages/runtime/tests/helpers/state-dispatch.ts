@@ -1,3 +1,4 @@
+import { stateStatsPvWgsl } from "../../src/kernels/state-attention-stats-pv.ts";
 // gpu_state_attention_test.ts の**直接 dispatch ハーネス**（states 形 attention 3 段 +
 // `state_append`）。executor / recipe-builder への結線は波 D-3 の担当なので、本波の実 GPU 検証は
 // `createComputePipeline` + 手組みバッファでカーネルを直接撃つ。依存は helpers → src の一方向。
@@ -226,6 +227,8 @@ export const runStateAttention = async (
     readonly mutate?: StateMutation;
     readonly cache?: StatePipelineCache;
     /** ③ の縮約形（既定 sequential = 参照経路・parallel = ③' の KV 並列縮約変種）。 */
+    /** ② / ③′ を融合して直接検証する。 */
+    readonly statsPvFusion?: boolean;
     readonly pvReduce?: "sequential" | "parallel";
     /**
      * ① の縮約形（既定 sequential = 参照経路・parallel = ①' の D 並列縮約変種）。
@@ -312,11 +315,20 @@ export const runStateAttention = async (
         cache,
         wgsl("qk", qkParallel ? stateQkParallelWgsl(sliding, gqa) : stateQkWgsl(sliding, gqa)),
       );
-      const st = pipelineOf(device, cache, wgsl("stats", stateStatsWgsl(sliding)));
+      const st = options.statsPvFusion
+        ? undefined
+        : pipelineOf(device, cache, wgsl("stats", stateStatsWgsl(sliding)));
       const pv = pipelineOf(
         device,
         cache,
-        wgsl("pv", parallel ? statePvParallelWgsl(sliding, gqa) : statePvWgsl(sliding, gqa)),
+        wgsl(
+          "pv",
+          options.statsPvFusion
+            ? stateStatsPvWgsl(sliding, gqa)
+            : parallel
+            ? statePvParallelWgsl(sliding, gqa)
+            : statePvWgsl(sliding, gqa),
+        ),
       );
       const encoder = device.createCommandEncoder();
       const pass = encoder.beginComputePass();
@@ -326,12 +338,24 @@ export const runStateAttention = async (
         ? stateQkParallelWorkgroups(dispatchGeometry, spec.past, spec.query, limit, spec.name)
         : stateQkWorkgroups(dispatchGeometry, spec.past, spec.query, limit, spec.name);
       pass.dispatchWorkgroups(qkGroups[0], qkGroups[1], qkGroups[2]);
-      pass.setPipeline(st);
-      pass.setBindGroup(0, bind(device, st, [statsParams, scores, stats, lengths]));
-      const statsGroups = stateStatsWorkgroups(dispatchGeometry, spec.query, limit, spec.name);
-      pass.dispatchWorkgroups(statsGroups[0], statsGroups[1], statsGroups[2]);
+      if (st !== undefined) {
+        pass.setPipeline(st);
+        pass.setBindGroup(0, bind(device, st, [statsParams, scores, stats, lengths]));
+        const statsGroups = stateStatsWorkgroups(dispatchGeometry, spec.query, limit, spec.name);
+        pass.dispatchWorkgroups(statsGroups[0], statsGroups[1], statsGroups[2]);
+      }
       pass.setPipeline(pv);
-      pass.setBindGroup(0, bind(device, pv, [params, scores, stats, insV, slotV, out, lengths]));
+      pass.setBindGroup(
+        0,
+        options.statsPvFusion
+          ? device.createBindGroup({
+            layout: pv.getBindGroupLayout(0),
+            entries: [params, scores, stats, insV, slotV, out, lengths]
+              .map((buffer, binding) => ({ binding, resource: { buffer } }))
+              .filter((entry) => entry.binding !== 2),
+          })
+          : bind(device, pv, [params, scores, stats, insV, slotV, out, lengths]),
+      );
       const pvGroups = parallel
         ? statePvParallelWorkgroups(dispatchGeometry, limit, spec.name)
         : statePvWorkgroups(dispatchGeometry, limit, spec.name);

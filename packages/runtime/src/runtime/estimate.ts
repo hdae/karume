@@ -70,7 +70,12 @@ import {
   type TransientStepSpec,
   type TransientTempSpec,
 } from "./transient-plan.ts";
-import { DEFAULT_PLAN_BACKING_BUDGET_BYTES, type GenerationContextSpec } from "./session-types.ts";
+import {
+  DEFAULT_PLAN_BACKING_BUDGET_BYTES,
+  type GenerationContextSpec,
+  STATE_ATTENTION_REDUCES,
+  type StateAttentionReduce,
+} from "./session-types.ts";
 import {
   argmaxSplitGroups,
   argmaxSplitPartialBytes,
@@ -218,6 +223,8 @@ export type AdmissionReport = {
 };
 
 export type EstimateOptions = {
+  /** Session と同じ states attention 設定。省略時は参照経路の一時を見積る。 */
+  readonly stateAttentionReduce?: StateAttentionReduce;
   /**
    * 記号次元の値（グラフ入力側 — run に渡すのと同じ束縛）。states 専用記号（容量）と
    * 物理 chunk 行 `M` の記号は、どちらも {@link EstimateOptions.generation} の側から決まるので
@@ -269,7 +276,7 @@ export type EstimateOptions = {
  */
 const UNACCOUNTED: readonly string[] = Object.freeze([
   "融合が畳んで消す中間と、融合ルールが宣言するノード内一時（どちらも device limit と融合の成立に依存する。別名化した値は勘定に入っている）",
-  "states 形でない attention のノード内一時（スコアの行ブロックと i8a8 の量子化中間）と、linear i8a8 の量子化中間 — どれも数値変種と device limit に依存する。states 形 attention のスコア S と行統計は勘定に入っている（融合の成立に依存せず必ず出るため）",
+  "states 形でない attention のノード内一時（スコアの行ブロックと i8a8 の量子化中間）と、linear i8a8 の量子化中間 — どれも数値変種と device limit に依存する。states 形 attention のスコア S と、stateAttentionReduce に応じて必要な行統計は勘定に入っている",
   "params バッファ（カーネル定数 — Session 常駐・内容アドレスキャッシュ）",
   "queue.writeBuffer の実装 staging（submit の完了まで解放されない）",
   "退役の窓（予算超過 / 計画の LRU 追い出しで退役した slot backing は、次の計画の確保より前に destroy されず flush 後の後始末まで生きるので、その run では退役分 + 新規が同時に載る）",
@@ -531,6 +538,7 @@ const stateAttentionTemps = (
   node: NodePlan,
   stateShapes: ReadonlyMap<string, readonly number[]> | undefined,
   limit: number | undefined,
+  stateAttentionReduce: StateAttentionReduce,
 ): readonly StateAttentionBlock[] => {
   const q = node.inputShapes[0];
   const where = `attention (states) [${q.join(",")}]`;
@@ -558,6 +566,7 @@ const stateAttentionTemps = (
     chunkRows,
     capacity: slotShape[2],
     window: stateWindow(node.node.attrs, where) ?? 0,
+    fuseStatsPv: node.node.ins.length === 3 && stateAttentionReduce === "parallel-fused",
   }, limit).blocks;
 };
 
@@ -583,6 +592,7 @@ const transientSlotBytes = (
   nodes: readonly NodePlan[],
   stateShapes: ReadonlyMap<string, readonly number[]> | undefined,
   limit: number | undefined,
+  stateAttentionReduce: StateAttentionReduce,
 ): number => {
   const uses = countUses(graph);
   const outputNames = new Set(graph.outputs);
@@ -605,24 +615,30 @@ const transientSlotBytes = (
     const temps: TransientTempSpec[] = [];
     const dispatches: TransientDispatchSpec[] = [];
     if (isStateAttention(node)) {
-      // 行ブロックごとに実行相（recipe-builder の states 形 attention）と同じ 3 dispatch を写す。
-      // scores は ① の直前に確保・stats は ② の直前に確保し、どちらも ③ の直後に解放する。
+      // 行ブロックごとに実行相の 2 / 3 dispatch と一時の寿命を写す。
+      // scores は QK の直前、非融合時の stats は行統計の直前に確保し、PV の直後に解放する。
       // readonly 変種（借り手の cross-attention — ADR 0096・ins は q だけ）は K/V を external
       // スロットから読み、今 step の k / v 入力を持たない。読みの参照は**在る入力だけ**にする
       // （無い名前を参照に載せると transient 計画が未定義の参照で落ちる）。
       const [q, k, v] = reads;
-      for (const temp of stateAttentionTemps(node, stateShapes, limit)) {
+      for (const temp of stateAttentionTemps(node, stateShapes, limit, stateAttentionReduce)) {
         const base = dispatches.length;
+        const fused = temp.statsBytes === 0;
+        const last = base + (fused ? 1 : 2);
         const scores: TransientRef = { kind: "temp", id: temps.length };
-        temps.push({ byteLength: temp.scoreBytes, allocBefore: base, releaseAfter: base + 2 });
-        const stats: TransientRef = { kind: "temp", id: temps.length };
-        temps.push({ byteLength: temp.statsBytes, allocBefore: base + 1, releaseAfter: base + 2 });
+        temps.push({ byteLength: temp.scoreBytes, allocBefore: base, releaseAfter: last });
         dispatches.push({ reads: k === undefined ? [q] : [q, k], writes: [scores] });
-        dispatches.push({ reads: [scores], writes: [stats] });
-        dispatches.push({
-          reads: v === undefined ? [scores, stats] : [scores, stats, v],
-          writes: outputRefs,
-        });
+        if (fused) {
+          dispatches.push({ reads: v === undefined ? [scores] : [scores, v], writes: outputRefs });
+        } else {
+          const stats: TransientRef = { kind: "temp", id: temps.length };
+          temps.push({ byteLength: temp.statsBytes, allocBefore: base + 1, releaseAfter: last });
+          dispatches.push({ reads: [scores], writes: [stats] });
+          dispatches.push({
+            reads: v === undefined ? [scores, stats] : [scores, stats, v],
+            writes: outputRefs,
+          });
+        }
       }
     } else if (!isAlias && selectionSplitTempBytes(node) > 0) {
       // 部分最大から最小添字へ縮約する。topkはmergeで元入力の値ビットも読む。
@@ -716,9 +732,14 @@ export const estimateGraphMemory = (
   // 静的軸・cat の連結軸・入力の意味論 dtype）も同じ位置で通す。`PreparedModel.estimate` は
   // 構築時と二重に通ることになるが、どちらも純関数・冪等でグラフ 1 走査ぶんの費用しかない。
   validateGraphContracts(graph);
-  // MUST: `maxStorageBufferBindingSize` の値域はグラフの形に依らず**ここで**見る。読み手
-  // （`stateAttentionTemps`）の内側だけに置くと、states 形 attention を持たないグラフでは
-  // -1 / 1.5 / NaN が黙って受理され、値域門の位置が呼び手から見えない。
+  const stateAttentionReduce = options.stateAttentionReduce ?? "sequential";
+  if (!Object.hasOwn(STATE_ATTENTION_REDUCES, stateAttentionReduce)) {
+    throw new ExecutionError(
+      "options.stateAttentionReduce '" + stateAttentionReduce + "' は未対応",
+    );
+  }
+  // MUST: 値域はグラフの形に依らずここで見る。stateAttentionTemps の内側だけで検査すると、
+  // states 形 attention を持たないグラフで -1 / 1.5 / NaN が黙って受理される。
   const bindingSizeLimit = options.maxStorageBufferBindingSize;
   if (
     bindingSizeLimit !== undefined &&
@@ -823,6 +844,7 @@ export const estimateGraphMemory = (
         plan.nodes,
         state.shapes,
         options.maxStorageBufferBindingSize,
+        stateAttentionReduce,
       ),
     };
   });

@@ -208,7 +208,14 @@ export const ROW_BLOCK_SPLIT: unique symbol = Symbol("karume.rowBlockSplit");
 export type ComputePrecision = "f32" | "f16" | "a8";
 
 /** states 形 attention ①QK / ③PV の縮約形（{@link SessionOptions.stateAttentionReduce}）。 */
-export type StateAttentionReduce = "sequential" | "parallel";
+export type StateAttentionReduce = "sequential" | "parallel" | "parallel-fused";
+
+/** 実行とメモリ見積りで共有する値域。 */
+export const STATE_ATTENTION_REDUCES: Readonly<Record<StateAttentionReduce, true>> = {
+  sequential: true,
+  parallel: true,
+  "parallel-fused": true,
+};
 
 /** 量子化 GEMV の K 加算順（ADR 0098）。 */
 export type LinearGemvReduce = "sequential" | "parallel" | "parallel-subgroup32";
@@ -305,6 +312,9 @@ export type SessionOptions = {
    * どちらも縮約順が変わるので **参照経路とビット同一ではない**（決定性は保つ）。融合
    * attention（`attentionCompute`）とは別族なので直交する。
    * MUST: 既定は `"sequential"`（ADR 0058 決定 2 — 数値を変える経路の自動選択禁止）。
+   *
+   * parallel-fused は parallel の加算順を保ち、M<=8・列上限<=1024 の states 形だけ
+   * 行統計と PV を融合する。readonly / その他の形は parallel の経路。ADR 0102。
    */
   readonly stateAttentionReduce?: StateAttentionReduce;
   /**

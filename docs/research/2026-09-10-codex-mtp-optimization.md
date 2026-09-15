@@ -3185,3 +3185,14 @@ Gemma両E2Bの12プランは保護前後で同一。入力・重みのコピー�
 
 最終実装の`deno task verify`も成功（**ok | 2961 passed (811 steps) | 0 failed | 5 ignored (2 steps) (26m11s)**）。
 ログは`outputs/bench/karume/2026-09-14_23-22-03_singleton-permute-final-verify-8e4okmux/verify.log`。
+
+## M2のpermute検収とattention融合（2026-09-15）
+
+[調査・実測](2026-09-15-attention-fusion.md)と[数値の正本](2026-09-15-attention-fusion-results.json)を追加。
+M2の20生成は前回と一致し、通常33.136/QAT34.141 tok/s。時刻の違いを含み、改善の全てをコードへ帰属しない。
+K-42は行統計とPVを融合する任意指定で、製品版の通常114.639→116.258、QAT94.016→94.502 tok/s。
+35 dispatch/tokenを削減、588生成がモデル・入力ごとに一致。既存参照・モデル既定は維持する（ADR 0102）。
+
+次はM2でattentionの80生成を比較。画面は必要設定を初期選択済み。
+主担当は過去の保留候補の組合せ実験を続ける。MTP行0/decode一致は関連テスト7 stepsで検証済み。
+全体verifyの結果は新しい調査記録の末尾を参照する。main・push・公開は変更しない。

@@ -389,7 +389,7 @@ export const statePvTiledEligible = (chunkRows: number): boolean => chunkRows >=
  * 更新した dispatch が例外なしに別のバッファ領域を読む。③ が読まない 2 語（`neg_inf` /
  * `scale`）ぶんの無駄より、語順が 1 箇所しかない性質が優先する。
  */
-const STATE_PARAMS_STRUCT = `struct Params {
+export const STATE_PARAMS_STRUCT = `struct Params {
   rows_block: u32,
   row_offset: u32,
   chunk_rows: u32,
@@ -452,7 +452,7 @@ export const stateSlotRowWgsl = (sliding: boolean, uniform = STATE_UNIFORM): str
  * `column_base` = full: `0` / sliding: `P − min(P, W−1)`（append 前なので row 0 の窓まで
  * 全行 resident — ADR 0067 決定 4）。`live_columns` = `(P − column_base) + Q`。
  */
-const stateLiveWgsl = (sliding: boolean, uniform = STATE_UNIFORM): string =>
+export const stateLiveWgsl = (sliding: boolean, uniform = STATE_UNIFORM): string =>
   `fn column_base(past: u32) -> u32 {
   return ${sliding ? `past - min(past, ${uniform}.window - 1u)` : "0u"};
 }
@@ -488,7 +488,7 @@ const stateWindowFn = (sliding: boolean, uniform = STATE_UNIFORM): string =>
  * 1 文字列をそのまま共有できる。①ₜ だけは行数が骨格の `dims.m` に居る（Dims の先頭 3 語は
  * `m` / `n` / `k` 固定）ので、欄名も引数で受ける。
  */
-const stateEffectiveRowsWgsl = (uniform = STATE_UNIFORM, rows = "rows_block"): string =>
+export const stateEffectiveRowsWgsl = (uniform = STATE_UNIFORM, rows = "rows_block"): string =>
   `fn effective_rows(query: u32) -> u32 {
   if (query <= ${uniform}.row_offset) {
     return 0u;
@@ -525,7 +525,7 @@ const stateScoreFn = (name: string, array: string, lanes?: number): string =>
  * 値域門（{@link assertStateGeometry}）が `r ≥ 1` を保証するので、GQA 変種のゼロ除算は
  * 起こらない。
  */
-const kvPlaneWgsl = (gqa: boolean, uniform = STATE_UNIFORM): string =>
+export const kvPlaneWgsl = (gqa: boolean, uniform = STATE_UNIFORM): string =>
   gqa ? `z / ${uniform}.kv_repeat` : "z";
 
 /**
