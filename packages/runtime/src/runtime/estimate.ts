@@ -733,6 +733,9 @@ export const estimateGraphMemory = (
   // 構築時と二重に通ることになるが、どちらも純関数・冪等でグラフ 1 走査ぶんの費用しかない。
   validateGraphContracts(graph);
   const stateAttentionReduce = options.stateAttentionReduce ?? "sequential";
+  if (typeof stateAttentionReduce !== "string") {
+    throw new ExecutionError("options.stateAttentionReduce は文字列でなければならない");
+  }
   if (!Object.hasOwn(STATE_ATTENTION_REDUCES, stateAttentionReduce)) {
     throw new ExecutionError(
       "options.stateAttentionReduce '" + stateAttentionReduce + "' は未対応",

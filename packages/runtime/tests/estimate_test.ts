@@ -1966,3 +1966,24 @@ Deno.test("parallel-fused の一時見積りは行統計の割当だけを取り
   Object.defineProperty(options, "stateAttentionReduce", { value: "unsupported" });
   assertThrows(() => estimateSessionMemory(model, options), ExecutionError, "stateAttentionReduce");
 });
+
+Deno.test("attentionの見積り設定は文字列への変換前に型を拒否する", () => {
+  const model = plainModel();
+  let conversions = 0;
+  const object = {
+    [Symbol.toPrimitive](): string {
+      conversions++;
+      return "parallel-fused";
+    },
+  };
+  for (const value of [["parallel-fused"], object, false, 0, 1n, Symbol("parallel-fused")]) {
+    const options = { bindings: { T: 2 } };
+    Object.defineProperty(options, "stateAttentionReduce", { value });
+    assertThrows(
+      () => estimateSessionMemory(model, options),
+      ExecutionError,
+      "stateAttentionReduce",
+    );
+  }
+  assertEquals(conversions, 0);
+});

@@ -959,3 +959,50 @@ Deno.test({
     assertThrows(() => openModel(chainModelBuffer(unbindable)), IrError, "束縛が取れない");
   },
 });
+
+Deno.test({
+  name: "実行形設定の配列・変換可能なオブジェクトを文字列として受理しない",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    try {
+      const model = openModel(chainModelBuffer());
+      const knobs = [
+        ["linearCompute", "f32"],
+        ["attentionCompute", "f32"],
+        ["attentionScoreStorage", "f32"],
+        ["stateAttentionReduce", "parallel-fused"],
+        ["linearGemvReduce", "parallel"],
+      ] as const;
+      for (const [name, valid] of knobs) {
+        let conversions = 0;
+        const object = {
+          [Symbol.toPrimitive](): string {
+            conversions++;
+            return valid;
+          },
+          toJSON(): string {
+            conversions++;
+            throw new Error("診断で利用者の変換を呼ばない");
+          },
+        };
+        for (const value of [[valid], object, false, 0, 1n, Symbol(valid)]) {
+          const options: SessionOptions = {};
+          Object.defineProperty(options, name, { value });
+          await assertRejects(
+            async () => {
+              const session = await createSession(gpu, model, options);
+              // 回帰時にも、誤って構築したSessionをテスト側で解放してから失敗させる。
+              await session.dispose();
+            },
+            ExecutionError,
+            name,
+          );
+        }
+        assertEquals(conversions, 0);
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+});

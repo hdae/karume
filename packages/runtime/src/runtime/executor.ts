@@ -211,12 +211,13 @@ const assertExecutionKnobs = (
     ["stateAttentionReduce", stateAttentionReduce, STATE_ATTENTION_REDUCES],
     ["linearGemvReduce", linearGemvReduce, LINEAR_GEMV_REDUCES],
   ];
+  // Object.hasOwn のキー変換で配列などを受理しない。診断でも利用者の変換を呼ばない。
   const violations = knobs
-    .filter(([, value, accepted]) => !Object.hasOwn(accepted, value))
+    .filter(([, value, accepted]) => typeof value !== "string" || !Object.hasOwn(accepted, value))
     .map(([name, value, accepted]) =>
-      `  - ${name}: ${JSON.stringify(value)}（受理するのは ${
-        Object.keys(accepted).map((accept) => `'${accept}'`).join(" / ")
-      }）`
+      `  - ${name}: ${
+        typeof value === "string" ? JSON.stringify(value) : typeof value
+      }（受理するのは ${Object.keys(accepted).map((accept) => `'${accept}'`).join(" / ")}）`
     );
   if (violations.length === 0) return;
   throw new ExecutionError(
