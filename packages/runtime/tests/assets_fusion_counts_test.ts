@@ -28,8 +28,9 @@
 
 import { assertEquals } from "@std/assert";
 import { type IrGraph, parseIrGraph } from "../src/format/ir.ts";
-import { type FusionCounts, planFusions } from "../src/runtime/fusion.ts";
+import { type FusionCounts, type FusionWeightLayout, planFusions } from "../src/runtime/fusion.ts";
 import { bindSymbols, countUses, planGraph } from "../src/runtime/plan.ts";
+import { planWeightResidency } from "../src/runtime/weight-residency.ts";
 import { resolveShards } from "./helpers/shard-files.ts";
 
 const ANIMA_DIR = new URL("../../../models/karume-anima/", import.meta.url);
@@ -172,10 +173,26 @@ const fusionCounts = (
   inputShapes: Readonly<Record<string, readonly number[]>>,
   stateShapes?: ReadonlyMap<string, readonly number[]>,
   fuseRmsNormAdd = false,
+  fuseLinearStaticQuantize = false,
 ): FusionCounts =>
   planFusions(planGraph(graph, bindSymbols(graph, inputShapes), stateShapes).nodes, {
     useCounts: countUses(graph),
     fuseRmsNormAdd,
+    fuseLinearStaticQuantize,
+    linearGemvReduce: "parallel",
+    linearCompute: "f32",
+    weightLayouts: new Map(
+      [...planWeightResidency(graph)].flatMap(([name, weight]): [string, FusionWeightLayout][] => {
+        if (weight.seat === "i4") {
+          const groupSize = graph.initializers[name].storage.groupSize;
+          if (groupSize === undefined) throw Error("i4のgroup_sizeが無い");
+          return [[name, { storage: "i4", groupSize }]];
+        }
+        return weight.seat === "i2" || weight.seat === "i8" || weight.seat === "f16"
+          ? [[name, { storage: weight.seat }]]
+          : [];
+      }),
+    ),
     outputNames: new Set(graph.outputs),
     // WebGPU core 既定（128MiB）を判定に使う。行ブロック枚数はヒット数に効かないが、
     // **上限の値を機の実測から取らない**ことでこの門が機に依らない固定であり続ける。
@@ -192,7 +209,12 @@ const fusionCounts = (
  * 値には依存しない（e2e の検収値と同じ 640 を使うのは読み合わせやすさだけ）。入力は全て
  * `[1, M]`（token-only 形の `last_row[1]` は数値次元なのでそのまま）。
  */
-const decodeFusionCounts = (graph: IrGraph, rows: number, fuseRmsNormAdd = false): FusionCounts => {
+const decodeFusionCounts = (
+  graph: IrGraph,
+  rows: number,
+  fuseRmsNormAdd = false,
+  fuseLinearStaticQuantize = false,
+): FusionCounts => {
   const inputShapes = Object.fromEntries(
     graph.inputs.map((spec) => [
       spec.name,
@@ -205,7 +227,7 @@ const decodeFusionCounts = (graph: IrGraph, rows: number, fuseRmsNormAdd = false
       slot.shape.map((dim) => (typeof dim === "number" ? dim : 640)),
     ]),
   );
-  return fusionCounts(graph, inputShapes, stateShapes, fuseRmsNormAdd);
+  return fusionCounts(graph, inputShapes, stateShapes, fuseRmsNormAdd, fuseLinearStaticQuantize);
 };
 
 /**
@@ -226,6 +248,7 @@ const NONE: FusionCounts = {
   rope: 0,
   adaln: 0,
   rmsNormAdd: 0,
+  linearStaticQuantize: 0,
   rowBlockAttention: 0,
   identityExpand: 0,
 };
@@ -377,6 +400,12 @@ for (const family of ["gemma4", "gemma4-qat"]) {
           { ...NONE, rope: 50, rmsNormAdd: 106 },
           `${family} fused M=${rows}`,
         );
+        assertEquals(decodeFusionCounts(graph, rows, true, true), {
+          ...NONE,
+          rope: 50,
+          rmsNormAdd: 106,
+          linearStaticQuantize: family === "gemma4-qat" && rows <= 8 ? 275 : 0,
+        }, `${family} linear SRQ M=${rows}`);
       }
     },
   });

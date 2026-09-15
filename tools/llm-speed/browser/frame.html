@@ -18,6 +18,7 @@
   const prefill = params.get("prefill") ?? "default";
   const normalization = params.get("normalization") ?? "reference";
   const attention = params.get("attention") ?? "parallel";
+  const linearSrq = params.get("linearSrq") ?? "off";
   const send = (type, value) => parent.postMessage({ type, value }, location.origin);
   try {
     if (!["karume", "transformers"].includes(engine) || !["normal", "qat"].includes(model)) {
@@ -30,6 +31,7 @@
     if (!["reference", "submit768", "fused", "subgroup32"].includes(normalization)) {
       throw Error("Invalid normalization mode");
     }
+    if (!["off", "on"].includes(linearSrq)) throw Error("Invalid linear SRQ mode");
     const config = await (await fetch("/config.json")).json();
     if (!["sequential", "parallel", "parallel-fused"].includes(attention)) {
       throw Error("Invalid state attention mode");
@@ -43,6 +45,7 @@
       prefill,
       normalization,
       attention,
+      linearSrq === "on",
     );
     send("result", {
       ...result,

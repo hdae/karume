@@ -83,6 +83,7 @@
 
 import { CodegenError } from "../codegen/errors.ts";
 import { gemmParams } from "./gemm.ts";
+import { staticQuantizeParams } from "./static-quantize.ts";
 import {
   i4GroupKeyPart,
   i4GroupShift,
@@ -368,12 +369,12 @@ export const linearGemvRowsKey = (
  * 出力は `f32`（1 スレッド 1 列のスカラ書き — 既定 v4 経路の `vec4<f32>` と違い n の整除を
  * 要らない）。
  */
-const bindings = (unit: number, storage: WeightStorage): string =>
+const bindings = (unit: number, storage: WeightStorage, quantize = false): string =>
   `@group(0) @binding(1) var<storage, read> x: array<vec4<f32>>;
 // 行頭が 16 B 整列なのは k % ${unit} == 0 から（適格判定が保証する）
 @group(0) @binding(2) var<storage, read> w: array<vec4<${storage === "f32" ? "f32" : "u32"}>>;
 @group(0) @binding(3) var<storage, read> bias: array<f32>;
-@group(0) @binding(4) var<storage, read_write> out: array<f32>;
+@group(0) @binding(4) var<storage, read_write> out: array<${quantize ? "u32" : "f32"}>;
 ${
     storage === "f16" || storage === "f32"
       ? ""
@@ -775,6 +776,63 @@ export const linearGemvParallelWgsl = (
   storage: WeightStorage,
   group: number | undefined,
   lanes: LinearGemvParallelLanes,
+): string => parallelWgsl(storage, group, lanes, false);
+
+/** 固定SRQまで融合する別キー。参照のparallel本文はバイト単位で維持する（ADR 0103）。 */
+export const linearGemvStaticQuantizeKey = (
+  storage: WeightStorage,
+  group: number | undefined,
+  lanes: LinearGemvParallelLanes,
+): string => `${linearGemvParallelKey(storage, group, lanes)}:static-quantize:v1`;
+
+export const linearGemvStaticQuantizeParams = (
+  storage: WeightStorage,
+  m: number,
+  n: number,
+  k: number,
+  scale: number,
+  group?: number,
+): Uint32Array<ArrayBuffer> => {
+  if (m < 1 || m > 8) throw new CodegenError("linear static_quantize: mは1..8のみ対応");
+  assertRowsStorage(storage);
+  const params = new Uint32Array(264);
+  params.set(linearGemvParams(storage, m, n, k, group));
+  // 第4語は実行時の丸め障壁。0とのXORを定数式へ置き換えない。
+  params.set(staticQuantizeParams(m * n, scale), 4);
+  return params;
+};
+
+export const linearGemvStaticQuantizeWgsl = (
+  storage: WeightStorage,
+  group: number | undefined,
+  lanes: LinearGemvParallelLanes,
+): string => parallelWgsl(storage, group, lanes, true);
+
+/** SRQの整数表を共用し、128境界の上限探索だけを固定回数へ展開する。 */
+const staticQuantizeEpilogue = (): string => `
+fn srqWord(index: u32) -> u32 { return dims.srq[index >> 2u][index & 3u]; }
+fn quantize(bits: u32) -> u32 {
+  if (srqWord(258u) != 0u) { return bits; }
+  let magnitude = bits & 0x7fffffffu;
+  if (magnitude > 0x7f800000u) { return bits | 0x00400000u; }
+  var lo = 0u;
+${
+  [64, 32, 16, 8, 4, 2, 1].map((step) =>
+    `  lo += select(0u, ${step}u, magnitude >= srqWord(lo + ${step}u));`
+  ).join("\n")
+}
+  lo += select(0u, 1u, magnitude >= srqWord(128u));
+  let sign = bits & 0x80000000u;
+  let level = min(lo, select(127u, 128u, sign != 0u));
+  return srqWord(129u + level) | sign;
+}
+`;
+
+const parallelWgsl = (
+  storage: WeightStorage,
+  group: number | undefined,
+  lanes: LinearGemvParallelLanes,
+  quantize: boolean,
 ): string => {
   if (![2, 4, 8, 16, 32].includes(lanes)) {
     throw new CodegenError("linear_gemv_parallel: 不正なlane数");
@@ -786,10 +844,10 @@ export const linearGemvParallelWgsl = (
 struct Dims {
   m: u32,
   n: u32,
-  k: u32,
+  k: u32,${quantize ? "\n  rounding_mask: u32,\n  srq: array<vec4<u32>, 65>," : ""}
 }
 @group(0) @binding(0) var<uniform> dims: Dims;
-${bindings(unit, storage)}
+${bindings(unit, storage, quantize)}${quantize ? staticQuantizeEpilogue() : ""}
 var<workgroup> partial: array<f32, 128>;
 
 @compute @workgroup_size(128)
@@ -815,7 +873,11 @@ ${unitMacs(storage, "t")}
     workgroupBarrier();
   }
   if (col < dims.n && lane == 0u) {
-    out[wg.y * dims.n + col] = partial[lid] + bias[col];
+    out[wg.y * dims.n + col] = ${
+    quantize
+      ? "quantize(bitcast<u32>(partial[lid] + bias[col]) ^ dims.rounding_mask)"
+      : "partial[lid] + bias[col]"
+  };
   }
 }
 `;

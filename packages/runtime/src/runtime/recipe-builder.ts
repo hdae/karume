@@ -641,6 +641,17 @@ export class RecipeBuilder {
         }
         return source;
       }
+      if (operand.kind === "weightScale") {
+        const name = step.binds[operand.index];
+        const resident = this.#state.residentWeights.get(name);
+        if (resident === undefined || resident.storage === "f16") {
+          throw new ExecutionError(
+            `融合ルール '${step.rule}': bind ${operand.index} の常駐scaleが無い`,
+          );
+        }
+        // 既存の重みscaleを借りる。所有者・sharedWeightsのリースはSessionのまま。
+        return { kind: "resident", buffer: resident.scale };
+      }
       const temp = temps[operand.id];
       // 未確保の一時を束ねるのは寿命宣言の破れ（確保より前の dispatch から読んでいる）。
       if (temp === undefined) {

@@ -334,6 +334,13 @@ export type SessionOptions = {
    */
   readonly fuseRmsNormAdd?: boolean;
   /**
+   * 隣接するlinear→static_quantizeを融合する（既定false、ADR 0103）。
+   * linearGemvReduce: parallel / linearCompute: f32との組合せのみ対応する。
+   * 検収済みINT2/4/8の形状、M=1..8、内部値が専有される形だけ。既存scaleを借用する。
+   * 未検証GPUのビット一致は保証せず、falseで非融合の参照へ戻せる。
+   */
+  readonly fuseLinearStaticQuantize?: boolean;
+  /**
    * RMSの縮約方式（既定workgroup）。subgroup32は幅128超のRMSと任意のRMS→add融合に適用。
    * acquireGpu({ subgroups: true })が必要。不足時は拒否し、自動で参照へ戻さない。
    * 加算順が変わるため生成列は参照と異なりうる。M2・投機生成の採用は別途検収する。

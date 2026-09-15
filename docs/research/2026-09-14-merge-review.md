@@ -190,3 +190,15 @@ GemmaはSession構築時の同じ設定を見積りへ渡す。参照WGSL/golden
 新しいattention見積り設定と、既存Sessionの実行設定の型を、Object.hasOwnのキー変換より前に検査する。
 確認点は配列などの拒否、診断で利用者の変換を呼ばないこと、文字列の既存エラーと有効な実行設定を保つこと。
 カーネルと既定は変更しない。この修正も以前のSolレビューの範囲には含まれない。
+
+## linear→SRQ融合の追加差分（2026-09-15、基準f6ccf44）
+
+[実装の検収](2026-09-15-linear-static-quantize-fusion.md)と[ADR 0103](../decisions/0103-linear-static-quantize-fusion.md)を参照する。
+旧レビューの範囲には含まれない。主な確認点は、常駐格納の純粋な記述とscaleの借用の分離、
+元のparallel/SRQとの算術・丸め障壁、M1..8とprivate/隣接/同形状の適格条件、sharedWeightsの解放順。
+新しい診断カウンタと任意のboolean設定を加え、モデル・quantの既定は変更していない。
+M2のattention追試は利得が無く、画面の次比較は従来attentionを使うQATのlinear→SRQ40生成とした。
+
+linear→SRQ製品化の全体verifyとソース不変の照合も完了。
+最終件数と生ログは[検収記録](2026-09-15-linear-static-quantize-fusion.md#全体検証)に集約した。
+M2の新しい融合の検収は未完で、モデル既定の変更は次の判断に残す。

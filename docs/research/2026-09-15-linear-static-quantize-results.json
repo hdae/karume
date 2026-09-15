@@ -1,0 +1,1519 @@
+{
+  "snapshot": "2026-09-15",
+  "baseline": "f6ccf446ceb28d6895cf020ffdbe48eafafbe305",
+  "m2": {
+    "source": "/home/developer/.codex/attachments/8ff5b435-17df-4faa-9cf7-717aba3ad40e/gemma-browser-2026-09-15T04-06-55.199Z.json",
+    "sha256": "94085f63694e3fee81be0259f0fcf8c8e482eaeff9a56d6b0db7a58f29da27ce",
+    "generations": 80,
+    "outputsMatch": true,
+    "loads": [
+      {
+        "model": "normal",
+        "attention": "parallel",
+        "date": "2026-09-15T03:50:15.488Z",
+        "checkout": "f6ccf446ceb28d6895cf020ffdbe48eafafbe305",
+        "dirty": false,
+        "bundleSha256": "e396350bd47e71f8563ee43cff8f16635ca0ed39a43b304af5e176b563d2d370",
+        "manifestSha256": "c445ea39ed8050b5d97757cfeb902c789c9048ad5eec6a962378e08772bb7ca6"
+      },
+      {
+        "model": "normal",
+        "attention": "parallel-fused",
+        "date": "2026-09-15T03:50:41.981Z",
+        "checkout": "f6ccf446ceb28d6895cf020ffdbe48eafafbe305",
+        "dirty": false,
+        "bundleSha256": "e396350bd47e71f8563ee43cff8f16635ca0ed39a43b304af5e176b563d2d370",
+        "manifestSha256": "c445ea39ed8050b5d97757cfeb902c789c9048ad5eec6a962378e08772bb7ca6"
+      },
+      {
+        "model": "normal",
+        "attention": "parallel-fused",
+        "date": "2026-09-15T03:51:08.378Z",
+        "checkout": "f6ccf446ceb28d6895cf020ffdbe48eafafbe305",
+        "dirty": false,
+        "bundleSha256": "e396350bd47e71f8563ee43cff8f16635ca0ed39a43b304af5e176b563d2d370",
+        "manifestSha256": "c445ea39ed8050b5d97757cfeb902c789c9048ad5eec6a962378e08772bb7ca6"
+      },
+      {
+        "model": "normal",
+        "attention": "parallel",
+        "date": "2026-09-15T03:51:34.994Z",
+        "checkout": "f6ccf446ceb28d6895cf020ffdbe48eafafbe305",
+        "dirty": false,
+        "bundleSha256": "e396350bd47e71f8563ee43cff8f16635ca0ed39a43b304af5e176b563d2d370",
+        "manifestSha256": "c445ea39ed8050b5d97757cfeb902c789c9048ad5eec6a962378e08772bb7ca6"
+      },
+      {
+        "model": "qat",
+        "attention": "parallel",
+        "date": "2026-09-15T03:52:00.643Z",
+        "checkout": "f6ccf446ceb28d6895cf020ffdbe48eafafbe305",
+        "dirty": false,
+        "bundleSha256": "e396350bd47e71f8563ee43cff8f16635ca0ed39a43b304af5e176b563d2d370",
+        "manifestSha256": "6c3ae974beeb032942aaa4c943619855b787f34f67441f0f4be63432caca52db"
+      },
+      {
+        "model": "qat",
+        "attention": "parallel-fused",
+        "date": "2026-09-15T03:52:26.508Z",
+        "checkout": "f6ccf446ceb28d6895cf020ffdbe48eafafbe305",
+        "dirty": false,
+        "bundleSha256": "e396350bd47e71f8563ee43cff8f16635ca0ed39a43b304af5e176b563d2d370",
+        "manifestSha256": "6c3ae974beeb032942aaa4c943619855b787f34f67441f0f4be63432caca52db"
+      },
+      {
+        "model": "qat",
+        "attention": "parallel-fused",
+        "date": "2026-09-15T03:52:52.593Z",
+        "checkout": "f6ccf446ceb28d6895cf020ffdbe48eafafbe305",
+        "dirty": false,
+        "bundleSha256": "e396350bd47e71f8563ee43cff8f16635ca0ed39a43b304af5e176b563d2d370",
+        "manifestSha256": "6c3ae974beeb032942aaa4c943619855b787f34f67441f0f4be63432caca52db"
+      },
+      {
+        "model": "qat",
+        "attention": "parallel",
+        "date": "2026-09-15T03:53:18.325Z",
+        "checkout": "f6ccf446ceb28d6895cf020ffdbe48eafafbe305",
+        "dirty": false,
+        "bundleSha256": "e396350bd47e71f8563ee43cff8f16635ca0ed39a43b304af5e176b563d2d370",
+        "manifestSha256": "6c3ae974beeb032942aaa4c943619855b787f34f67441f0f4be63432caca52db"
+      }
+    ],
+    "groups": {
+      "('normal', 'parallel')": {
+        "speed": [
+          33.371914091200445,
+          33.28138619635846,
+          33.3832315495924,
+          33.39703508577843
+        ],
+        "ttft": [
+          340.5199999809265,
+          407.69499999284744,
+          339.9350000023842,
+          409.97500002384186
+        ],
+        "firstTTFT": [
+          474.66000002622604,
+          462.875,
+          446.5949999690056,
+          460.55999994277954
+        ],
+        "medianTokS": 33.37757282039642,
+        "medianTTFTms": 374.107499986887
+      },
+      "('normal', 'parallel-fused')": {
+        "speed": [
+          33.141324075012534,
+          33.07442533157007,
+          32.88452052513509,
+          33.0917982237834
+        ],
+        "ttft": [
+          339.9549999833107,
+          408.8600000143051,
+          338.5949999690056,
+          407.90499997138977
+        ],
+        "firstTTFT": [
+          458.83999997377396,
+          460.9749999642372,
+          444.4800000190735,
+          459.7049999833107
+        ],
+        "medianTokS": 33.083111777676734,
+        "medianTTFTms": 373.92999997735023
+      },
+      "('qat', 'parallel')": {
+        "speed": [
+          34.79932389894162,
+          35.0256855025627,
+          34.01571742157077,
+          34.84089325358816
+        ],
+        "ttft": [
+          387.3499999642372,
+          477.9800000190735,
+          387.29499995708466,
+          478.32499998807907
+        ],
+        "firstTTFT": [
+          509.39999997615814,
+          608.7300000190735,
+          514.210000038147,
+          607.6650000214577
+        ],
+        "medianTokS": 34.82010857626489,
+        "medianTTFTms": 432.66499999165535
+      },
+      "('qat', 'parallel-fused')": {
+        "speed": [
+          34.71332578552015,
+          34.65422781620256,
+          34.813169325266635,
+          34.847542003733665
+        ],
+        "ttft": [
+          387.08000004291534,
+          478.7549999952316,
+          387.2099999785423,
+          479.77000004053116
+        ],
+        "firstTTFT": [
+          516.6500000357628,
+          596.8149999976158,
+          512.7050000429153,
+          609.3199999928474
+        ],
+        "medianTokS": 34.76324755539339,
+        "medianTTFTms": 432.982499986887
+      }
+    }
+  },
+  "whole": {
+    "generations": 120,
+    "outputsMatch": true,
+    "groups": {
+      "normal/base": {
+        "speeds": [
+          114.6288209603879,
+          115.00547645188526,
+          114.44141689373296,
+          115.08951406680946
+        ],
+        "ttfts": [
+          34.899999998509884,
+          38.79999999701977,
+          36.20000000298023,
+          39.70000000298023
+        ],
+        "files": [
+          "normal-0-base.json",
+          "normal-3-base.json"
+        ],
+        "tokS": 114.81714870613658,
+        "ttftMs": 37.5
+      },
+      "normal/fused": {
+        "speeds": [
+          116.70989255344169,
+          115.7875390550036,
+          114.73319978114921,
+          115.19473395533306
+        ],
+        "ttfts": [
+          35.100000001490116,
+          38.70000000298023,
+          35.69999999552965,
+          40
+        ],
+        "files": [
+          "normal-1-fused.json",
+          "normal-2-fused.json"
+        ],
+        "tokS": 115.49113650516833,
+        "ttftMs": 37.19999999925494
+      },
+      "qat/base": {
+        "speeds": [
+          95.97806215743908,
+          94.39616421851566,
+          94.4669365724108,
+          93.75,
+          93.88971684053651,
+          93.68029739776952,
+          93.98776667205745,
+          94.2126514138196
+        ],
+        "ttfts": [
+          38.100000001490116,
+          41.19999999552965,
+          37.79999999701977,
+          41,
+          37.79999999701977,
+          41.19999999552965,
+          38,
+          41.600000001490116
+        ],
+        "files": [
+          "qat-0-base.json",
+          "qat-3-base.json",
+          "qat-5-base.json",
+          "qat-6-base.json"
+        ],
+        "tokS": 94.10020904293853,
+        "ttftMs": 39.55000000074506
+      },
+      "qat/fused": {
+        "speeds": [
+          100.22271714898291,
+          99.49463044804719,
+          99.84152139461173,
+          100.17490857075731,
+          99.63624861545878,
+          99.1501416421294,
+          100.12714558121678,
+          99.55752212436268
+        ],
+        "ttfts": [
+          37.70000000298023,
+          41.399999998509884,
+          37.79999999701977,
+          41.20000000298023,
+          37.69999999552965,
+          40.899999998509884,
+          37.599999994039536,
+          41.100000001490116
+        ],
+        "files": [
+          "qat-1-fused.json",
+          "qat-2-fused.json",
+          "qat-4-fused.json",
+          "qat-7-fused.json"
+        ],
+        "tokS": 99.73888500503526,
+        "ttftMs": 39.349999997764826
+      }
+    }
+  },
+  "thermal": {
+    "normal": {
+      "samples": 28,
+      "temperatureC": [
+        51,
+        70
+      ],
+      "softwareThermalSlowdown": 1,
+      "hardwareThermalSlowdown": 0
+    },
+    "qat": {
+      "samples": 68,
+      "temperatureC": [
+        71,
+        82
+      ],
+      "softwareThermalSlowdown": 0,
+      "hardwareThermalSlowdown": 0
+    }
+  },
+  "profile": {
+    "generations": 24,
+    "outputsMatchWhole": true,
+    "profiles": [
+      {
+        "file": "qat-0-base-1-pass.json",
+        "variant": "base",
+        "dispatches": 1411,
+        "gpuMs": 7.351296,
+        "samples": [
+          7.4496,
+          7.455744,
+          7.456768,
+          7.41888,
+          7.376896,
+          7.360512,
+          7.337984,
+          7.319552,
+          7.312384,
+          7.333888,
+          7.33184,
+          7.327744,
+          7.333888,
+          7.330816,
+          7.34208,
+          7.333888,
+          7.328768,
+          7.209984,
+          7.325696,
+          7.32672,
+          7.32672,
+          7.329792,
+          7.33184,
+          7.334912,
+          7.339008,
+          7.344128,
+          7.341056,
+          7.343104,
+          7.346176,
+          7.349248,
+          7.35744,
+          7.348224,
+          7.35232,
+          7.223296,
+          7.345152,
+          7.340032,
+          7.348224,
+          7.3472,
+          7.358464,
+          7.365632,
+          7.35744,
+          7.354368,
+          7.368704,
+          7.351296,
+          7.374848,
+          7.364608,
+          7.369728,
+          7.369728,
+          7.36768,
+          7.237632,
+          7.36768,
+          7.361536,
+          7.371776,
+          7.374848,
+          7.376896,
+          7.37792,
+          7.384064,
+          7.389184,
+          7.390208,
+          7.386112,
+          7.390208,
+          7.394304,
+          7.395328
+        ],
+        "decodePassCounts": [
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          4,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3
+        ],
+        "prefillPasses": 3,
+        "fusionKeysPerToken": 0
+      },
+      {
+        "file": "qat-1-fused-1-pass.json",
+        "variant": "fused",
+        "dispatches": 1136,
+        "gpuMs": 6.774784,
+        "samples": [
+          6.880256,
+          6.700032,
+          6.829056,
+          6.790144,
+          6.782976,
+          6.76352,
+          6.750208,
+          6.74816,
+          6.747136,
+          6.757376,
+          6.752256,
+          6.75328,
+          6.7584,
+          6.757376,
+          6.761472,
+          6.760448,
+          6.759424,
+          6.626304,
+          6.760448,
+          6.759424,
+          6.760448,
+          6.762496,
+          6.760448,
+          6.760448,
+          6.770688,
+          6.770688,
+          6.762496,
+          6.767616,
+          6.77888,
+          6.770688,
+          6.780928,
+          6.77376,
+          6.77888,
+          6.644736,
+          6.754304,
+          6.762496,
+          6.76864,
+          6.774784,
+          6.775808,
+          6.77888,
+          6.776832,
+          6.777856,
+          6.785024,
+          6.776832,
+          6.791168,
+          6.782976,
+          6.791168,
+          6.78912,
+          6.785024,
+          6.65088,
+          6.780928,
+          6.782976,
+          6.79936,
+          6.797312,
+          6.800384,
+          6.80448,
+          6.803456,
+          6.810624,
+          6.801408,
+          6.80448,
+          6.812672,
+          6.811648,
+          6.811648
+        ],
+        "decodePassCounts": [
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3
+        ],
+        "prefillPasses": 3,
+        "fusionKeysPerToken": 275
+      },
+      {
+        "file": "qat-2-fused-1-pass.json",
+        "variant": "fused",
+        "dispatches": 1136,
+        "gpuMs": 6.813696,
+        "samples": [
+          7.11168,
+          6.938624,
+          6.936576,
+          6.912,
+          6.856704,
+          6.844416,
+          6.818816,
+          6.812672,
+          6.785024,
+          6.793216,
+          6.793216,
+          6.791168,
+          6.797312,
+          6.79424,
+          6.800384,
+          6.802432,
+          6.795264,
+          6.659072,
+          6.784,
+          6.791168,
+          6.79424,
+          6.795264,
+          6.797312,
+          6.798336,
+          6.798336,
+          6.808576,
+          6.808576,
+          6.80448,
+          6.812672,
+          6.80448,
+          6.8096,
+          6.817792,
+          6.81472,
+          6.678528,
+          6.79936,
+          6.802432,
+          6.800384,
+          6.805504,
+          6.8096,
+          6.818816,
+          6.813696,
+          6.816768,
+          6.82496,
+          6.822912,
+          6.829056,
+          6.822912,
+          6.829056,
+          6.828032,
+          6.827008,
+          6.689792,
+          6.831104,
+          6.829056,
+          6.834176,
+          6.83008,
+          6.842368,
+          6.838272,
+          6.844416,
+          6.846464,
+          6.841344,
+          6.844416,
+          6.848512,
+          6.852608,
+          6.856704
+        ],
+        "decodePassCounts": [
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3
+        ],
+        "prefillPasses": 3,
+        "fusionKeysPerToken": 275
+      },
+      {
+        "file": "qat-3-base-1-pass.json",
+        "variant": "base",
+        "dispatches": 1411,
+        "gpuMs": 7.394304,
+        "samples": [
+          7.717888,
+          7.553024,
+          7.502848,
+          7.465984,
+          7.40864,
+          7.387136,
+          7.36256,
+          7.361536,
+          7.364608,
+          7.373824,
+          7.379968,
+          7.369728,
+          7.378944,
+          7.371776,
+          7.380992,
+          7.375872,
+          7.375872,
+          7.247872,
+          7.36768,
+          7.366656,
+          7.369728,
+          7.374848,
+          7.376896,
+          7.371776,
+          7.384064,
+          7.395328,
+          7.394304,
+          7.379968,
+          7.39328,
+          7.39328,
+          7.396352,
+          7.391232,
+          7.402496,
+          7.267328,
+          7.390208,
+          7.38816,
+          7.392256,
+          7.38816,
+          7.394304,
+          7.400448,
+          7.399424,
+          7.402496,
+          7.40864,
+          7.402496,
+          7.406592,
+          7.401472,
+          7.404544,
+          7.409664,
+          7.405568,
+          7.276544,
+          7.412736,
+          7.405568,
+          7.41376,
+          7.410688,
+          7.420928,
+          7.415808,
+          7.432192,
+          7.427072,
+          7.430144,
+          7.421952,
+          7.430144,
+          7.437312,
+          7.441408
+        ],
+        "decodePassCounts": [
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3
+        ],
+        "prefillPasses": 3,
+        "fusionKeysPerToken": 0
+      }
+    ]
+  },
+  "ui": {
+    "completion": {
+      "exitCode": 0,
+      "elapsedSeconds": 58.41881585121155
+    },
+    "defaults": {
+      "model": "qat",
+      "engine": "karume",
+      "reduce": "parallel",
+      "prefill": "dense",
+      "normalization": "fused",
+      "attention": "parallel",
+      "linearSrq": "compare"
+    },
+    "parity": {
+      "generations": 40,
+      "differences": []
+    }
+  },
+  "rawFiles": [
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-08-31_m2-attention-validation-d2cyaal8/input.json",
+      "sha256": "94085f63694e3fee81be0259f0fcf8c8e482eaeff9a56d6b0db7a58f29da27ce"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-08-31_m2-attention-validation-d2cyaal8/settings-audit.json",
+      "sha256": "fc8bbd4e747c37fdb93d0fdd742519a78c32c8bcf34868118fcb4b7261ff7184"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-08-31_m2-attention-validation-d2cyaal8/summary.json",
+      "sha256": "af14060b3c2e9472ef5329807b97cacff47b86f825e137a003511aba8488a957"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/bundle-hashes.json",
+      "sha256": "eb3776651cee1a2901bc455260335ed8f971d5d09d5c46b3c9812d3c0b610041"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/completion.json",
+      "sha256": "44c7730a32a672f3311d495d1833db430545d3553319d3d2328f3f8bfaa0b7af"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/cooling-normal-0-base.json",
+      "sha256": "d51aefc460281978df25a15b28f28c1198be8e0af3da87ee9440fd9643bc0ef8"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/cooling-normal-1-fused.json",
+      "sha256": "52b02f489f8f854a7bf7234519f6b8d8f9c1aa3429d15e4b4408fead752343e6"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/cooling-normal-2-fused.json",
+      "sha256": "bcdd1567b35c2fc144532639193fc4325eaa867a6f0d8314ed5067a847d21537"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/cooling-normal-3-base.json",
+      "sha256": "5d875882c4aa7470f40e05f72e5275056843e6083c509f10324f5de01864dc76"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/cooling-qat-0-base.json",
+      "sha256": "594e75acd6db3e854e3086f1f7bb9874ad42acb1fd206d26d2e840436f41c65f"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/cooling-qat-1-fused.json",
+      "sha256": "3485b8eee4350fd0a2ab69613eaa60e8a24a3f478dfcbba5c2b18fe43caee23b"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/cooling-qat-2-fused.json",
+      "sha256": "2966fcb7a4a7551ad9c06c61625f16b2d1625ac4afb23bc046f4df5bf3364069"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/cooling-qat-3-base.json",
+      "sha256": "2b418952f8c48adfc9114022fa35a38c1d93238828a103fc3da3a635fc7e9018"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/cooling-qat-4-fused.json",
+      "sha256": "4cf322170f7c4328f120758cbc9c4d320c1c7d7b185749ee9898c89c8f32f868"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/cooling-qat-5-base.json",
+      "sha256": "c5e8baff2e79fd029eeb8d2c7d13eb4d9eea8c815883d83aff745a5ffd29142d"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/cooling-qat-6-base.json",
+      "sha256": "e02680df829eb57ac5836e9ce8ea336213d4803a01ccbb378d4a6d023673ce2f"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/cooling-qat-7-fused.json",
+      "sha256": "fc3f81212f5a4e94e956ac88569e8d16dfd68b2a90e58fa1316cb3b4d05e5ce9"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/copies-normal-0-base.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/copies-normal-1-fused.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/copies-normal-2-fused.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/copies-normal-3-base.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/copies-qat-0-base.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/copies-qat-1-fused.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/copies-qat-2-fused.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/copies-qat-3-base.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/copies-qat-4-fused.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/copies-qat-5-base.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/copies-qat-6-base.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/copies-qat-7-fused.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/events.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/layout-copies.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/normal-0-base.json",
+      "sha256": "b3d58123994d9c9bcc7f27054e7e0f27d47bf4b04d8ad8cb1ac0cb96a963582b"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/normal-1-fused.json",
+      "sha256": "65f4c0904c4d04aa0e3baea40f7c190d6b9335069e8e48dc79ae7178fa79ecc2"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/normal-2-fused.json",
+      "sha256": "828fe4318cbe15394514a716395c08d04c495a7bda050054aab8c662fdb895b2"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/normal-3-base.json",
+      "sha256": "3e9c2c62108defb194cd545e897f06925bc38857c419919ce5b33ab252c3ad44"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/preflight.json",
+      "sha256": "8e67d6696ab444d197e88aad8621dd7d185d79bc6d5c67cc140f65452ef746ec"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/processes.json",
+      "sha256": "d78e024cdfb62f2790a014b1b718b428f323490a97c562d31c8dd1553f5de3b9"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/qat-0-base.json",
+      "sha256": "2411bc8dcb08c61dbb7b3f421ce6a40e2b9d082905aafe7cdc215b7380b42b12"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/qat-1-fused.json",
+      "sha256": "e53e896c921fba1612eb4e13719d606867734fd1d9816a683324a5a358a23002"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/qat-2-fused.json",
+      "sha256": "c07c7cf64a808ee8edee87fd5791e48f19db10719db931eb073d08183e1d3f17"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/qat-3-base.json",
+      "sha256": "aa06034818c56ec544d00381bfeb88347037dde3084dfff81875b9cc35c33db1"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/qat-4-fused.json",
+      "sha256": "86b27366aa04cb447c89cf283517c789be6e46d2cfa98ad6b4d0ff1eeb100769"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/qat-5-base.json",
+      "sha256": "6e5c8da6ae5a78e94591258cae72ecd012503e96f468c78506f61fc2ca0343fb"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/qat-6-base.json",
+      "sha256": "77a844e37ac508d7b536e02740a1bb739fedd3e725871637721ccdfd1dd1f2c8"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/qat-7-fused.json",
+      "sha256": "4ce49ec3a505ba2e7c1a36dad0fcc28bcf8489bba258535597781e99f513b481"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/specs.json",
+      "sha256": "bf86205af8bd5841d4a70a6ad0b4d809864bf348743f5f58c04b807c23971d70"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/summary.json",
+      "sha256": "5115a5571770b915309c182d0be3a17327f19b7b5dd32d3e3ab71a8e2c08dccb"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/system-info.json",
+      "sha256": "bc6dcf3490b8883c74944ea8c0b85eb3e2f193bd536d95cbe7879174bd38816c"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/thermal-by-model.json",
+      "sha256": "2dd9cdfe5397d02265bd610d5b2997eba34842a77e2b25eebe30adffb87a6d7d"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/thermal-summary.json",
+      "sha256": "008067dd9d2a60768ecce7ff2f90116a5e6b7b96acabfc3e0c4903db8076dae1"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/telemetry.csv",
+      "sha256": "97fe2e5a263e6ab2b92e3696eeeecb5d0c892a2649ecaf1f52fa6e2e3f83b29b"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/browser.log",
+      "sha256": "3895ead7eb1eb22fec41f23b8cce16e4e83a93edb34f27bc8d9d613838c8373b"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/bundle.log",
+      "sha256": "d16aa7dc54f180f923c84ca296cb62cefb600206fbb22d5fc4ea021732998f3c"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/server.log",
+      "sha256": "120dac5012633abb449b73f6fde274e8843a3c50e8e37b5336524b349abe849b"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/xvfb.log",
+      "sha256": "87e9572cf030493a1f7ba83d385129046b224374ca1414911674b30fc44276d7"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/probe.ts",
+      "sha256": "f221ca6c58255a8187c9adaac6e30e28ee86b998f8065f375ed967dbfa1aa4b4"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/server.ts",
+      "sha256": "17f1e4cd4808dcb91492e63a31e319180b9f3d60739cbf0fa6c13199dcb9b1e6"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/run.py",
+      "sha256": "1f71658efed710cb52dd128e7b3b6eda125fca78ad09651e6264f5df557853ba"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-22-46_linear-srq-product-whole-92vof_4r/run.mjs",
+      "sha256": "54c0b27be0a29894fb9cf48bfa14f655721ef3d2191b4a2e8171096666788c08"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-39-41_linear-srq-product-profile-xltwfot8/bundle-hashes.json",
+      "sha256": "02d026ba23c95dd1838cb6e0f9d59fbe3060814a62152af27771120fc6c51e00"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-39-41_linear-srq-product-profile-xltwfot8/completion.json",
+      "sha256": "86e5dcfc0666d6d6cbd8665845a4fdae8fde806a395b5ed33ce925e1823043de"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-39-41_linear-srq-product-profile-xltwfot8/events.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-39-41_linear-srq-product-profile-xltwfot8/preflight.json",
+      "sha256": "8e67d6696ab444d197e88aad8621dd7d185d79bc6d5c67cc140f65452ef746ec"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-39-41_linear-srq-product-profile-xltwfot8/processes.json",
+      "sha256": "b8dc3a9bcd840e491295f8d0419c6862a42f0afba92614582a43b77b4afd72fb"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-39-41_linear-srq-product-profile-xltwfot8/qat-0-base-0-none.json",
+      "sha256": "6f3ec33abaae30e1caf2984b4777ebceccedb603fe639a36a8e4b160e7f10b95"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-39-41_linear-srq-product-profile-xltwfot8/qat-0-base-1-pass.json",
+      "sha256": "188cdcf16056de7327347cc84a9823080128582df3efce501187d9a14ba803e6"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-39-41_linear-srq-product-profile-xltwfot8/qat-0-base-2-none.json",
+      "sha256": "9ac2f80438b2f31429901ff965d610c80e8e9e3ce0922d4e74f0a4a4141b91c4"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-39-41_linear-srq-product-profile-xltwfot8/qat-0-base-metadata.json",
+      "sha256": "d61c4968f9debf7f2f68e19b0f7d05c5405caee70a0982693637c768d67d2bfb"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-39-41_linear-srq-product-profile-xltwfot8/qat-0-base-warm-0.json",
+      "sha256": "56c61ff6823e95790df89cc43ea09b6b8146cde9cbf8335353ed771c478979f4"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-39-41_linear-srq-product-profile-xltwfot8/qat-0-base-warm-1.json",
+      "sha256": "c788998973a7218e95f16e3543ba094eadf8c3662a9eee7502f50e38574093ba"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-39-41_linear-srq-product-profile-xltwfot8/qat-0-base-warm-2.json",
+      "sha256": "6f6ec9c7e5f79ef3aa13bdc6d94abb10189b3195a14f9b430facae11f8264e19"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-39-41_linear-srq-product-profile-xltwfot8/qat-1-fused-0-none.json",
+      "sha256": "ca2f319e3268c5a890a8571d28a334c0c2f846bf64730b8d66762d8d49ef9fe3"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-39-41_linear-srq-product-profile-xltwfot8/qat-1-fused-1-pass.json",
+      "sha256": "1762ea808edfa151a2134be12b11fba0a1c2d2c9eda3179fb0ed163697507cf1"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-39-41_linear-srq-product-profile-xltwfot8/qat-1-fused-2-none.json",
+      "sha256": "b3991a5742ac87bd9acda728674fdf53ef239a0d9b095d4ffa04e4895591db95"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-39-41_linear-srq-product-profile-xltwfot8/qat-1-fused-metadata.json",
+      "sha256": "423cc81662ebe997c38671cdae515a25bf74ac8ce8e28d31a396e04ac6149acb"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-39-41_linear-srq-product-profile-xltwfot8/qat-1-fused-warm-0.json",
+      "sha256": "81e0d57c58098d1e016fb06ead19eccec75a907324157db069dc5bffc582be22"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-39-41_linear-srq-product-profile-xltwfot8/qat-1-fused-warm-1.json",
+      "sha256": "8d8dda873925c683b485172be7a1896523c8d569658bcbf90979e3dce4ba5a61"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-39-41_linear-srq-product-profile-xltwfot8/qat-1-fused-warm-2.json",
+      "sha256": "a6e81eb5bbc5dc755c699711a5ea6fe14829430a9d15861978ab0a11f496f5ec"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-39-41_linear-srq-product-profile-xltwfot8/qat-2-fused-0-none.json",
+      "sha256": "156c89ee74f2e03eb38a92763e171a1319c7f44c28738d095b93753344559514"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-39-41_linear-srq-product-profile-xltwfot8/qat-2-fused-1-pass.json",
+      "sha256": "bc808a0eab726408bc7b8a40f6b2c8a4aa2d0d39fba7a259e504b2ab2552124d"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-39-41_linear-srq-product-profile-xltwfot8/qat-2-fused-2-none.json",
+      "sha256": "56e18eac3eb316e8a48b4f601fbed644ad222abca5d57e50c894f1d041983b7f"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-39-41_linear-srq-product-profile-xltwfot8/qat-2-fused-metadata.json",
+      "sha256": "1132c7878bce2da62d2d6c95f0c3b759ddb7655e920a9306f98755e38f66440d"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-39-41_linear-srq-product-profile-xltwfot8/qat-2-fused-warm-0.json",
+      "sha256": "59aa98c1515fa9441d0b58a1e5785a2fb53790283a900a3711e44f4a4bbcbf1c"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-39-41_linear-srq-product-profile-xltwfot8/qat-2-fused-warm-1.json",
+      "sha256": "d6ca29bc48c3f06adb71b4758c6a2bb6ca36fccc7611ea1f03895835268e9cad"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-39-41_linear-srq-product-profile-xltwfot8/qat-2-fused-warm-2.json",
+      "sha256": "82fe4df4688a72469c727a7a99342fbcbae177aed168fb55529e6eeb56769c74"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-39-41_linear-srq-product-profile-xltwfot8/qat-3-base-0-none.json",
+      "sha256": "e746a43d6ff3262dcbe22bb1b0d313aa569e5ceb0818a64154c89f39c3931b8a"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-39-41_linear-srq-product-profile-xltwfot8/qat-3-base-1-pass.json",
+      "sha256": "665f7fa0bd1786f97ed909662990913c4f6becadfbe66cd6b795d453090237a4"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-39-41_linear-srq-product-profile-xltwfot8/qat-3-base-2-none.json",
+      "sha256": "c7e9c638f325e1826df47ac4b2516d14446ac9ac0fcc2f9ec678feceba61e5b3"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-39-41_linear-srq-product-profile-xltwfot8/qat-3-base-metadata.json",
+      "sha256": "06ee78976a720a7a8a6ad8454b5f9092e6c2790cb5390a0dfc0c4e7355df96b3"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-39-41_linear-srq-product-profile-xltwfot8/qat-3-base-warm-0.json",
+      "sha256": "0a268e2b0f72b8b586e8d5a07d7990f138799766ba48699aac7c48bade7032b6"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-39-41_linear-srq-product-profile-xltwfot8/qat-3-base-warm-1.json",
+      "sha256": "c3ecb3c03a21e52e778c9d41a8cbf6792b345cb41b2d681abfa43d857e8d5348"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-39-41_linear-srq-product-profile-xltwfot8/qat-3-base-warm-2.json",
+      "sha256": "b79a24da1955c6dfb38370e86eeec18e250616106679ea2cd048a761ad06b79b"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-39-41_linear-srq-product-profile-xltwfot8/specs.json",
+      "sha256": "ae2710eb80d4b11ce24dc6d10e2209ba5ab1abb720a382bb7cfa8ff187803e5d"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-39-41_linear-srq-product-profile-xltwfot8/summary.json",
+      "sha256": "b52afa7692e9b8d4107235fe04e04f8dbfdf6a042910187cf1efe595af3563fa"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-39-41_linear-srq-product-profile-xltwfot8/system-info.json",
+      "sha256": "a00a224be8b3f70550e35835810801c2dc1301dd4ef9a6c6f6ef55deab426a8b"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-39-41_linear-srq-product-profile-xltwfot8/telemetry.csv",
+      "sha256": "05a2b24360cc79021939c482c99d9f06c7d0e623e0241b917a41d0f4641f8aa2"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-39-41_linear-srq-product-profile-xltwfot8/browser.log",
+      "sha256": "bacd668615e902a027eb9ec6fba450d78834d7fca74552a53aea65d171d3633d"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-39-41_linear-srq-product-profile-xltwfot8/bundle.log",
+      "sha256": "fd957678888e3af10f272b19e2f93225da3e0c32823d3dd68980ca716322a4fd"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-39-41_linear-srq-product-profile-xltwfot8/server.log",
+      "sha256": "24d9f31b35f14f479e3db3d3b62b3317397ad7564922e5ca04c48f6aeba7d661"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-39-41_linear-srq-product-profile-xltwfot8/xvfb.log",
+      "sha256": "87e9572cf030493a1f7ba83d385129046b224374ca1414911674b30fc44276d7"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-39-41_linear-srq-product-profile-xltwfot8/probe.ts",
+      "sha256": "243eb71317a74cff643aba6feb97fb0d3092df05beddff605f6a571ac45f753a"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-39-41_linear-srq-product-profile-xltwfot8/server.ts",
+      "sha256": "df96afde6fbbf5f511b85af500056c6fda6a38c32b9ffa82cacdcdf73a96bcbb"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-39-41_linear-srq-product-profile-xltwfot8/run.py",
+      "sha256": "f4b32f275708a963ef8dbc3306adadd47f17a4f9c1ff907f834aefcefa23ea6e"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-39-41_linear-srq-product-profile-xltwfot8/summarize.py",
+      "sha256": "8a54809ccb95526056a972f8210764ad81189ccabf843aeb659f10e480bd8d14"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-39-41_linear-srq-product-profile-xltwfot8/run.mjs",
+      "sha256": "fef8a5415ed7ad33f3e03e200d60548081a2b13ef28bfc1e5d8305f2ca996d05"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-39-41_linear-srq-product-profile-xltwfot8/gpu-instrument.js",
+      "sha256": "1c185be5671fe5eb3491d605bdc7d7429de8bd460e35b044998e94b7a1e4d8fc"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-38-45_linear-srq-browser-ui-eudk359t/completion.json",
+      "sha256": "5381cee874470411af1c11996be8bb9d96e908562ad1c48a70f0a5079e80b26a"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-38-45_linear-srq-browser-ui-eudk359t/defaults.json",
+      "sha256": "a492cda14024ae134138c2185095147263861ac6d464a97f5642ddba972ccdf0"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-38-45_linear-srq-browser-ui-eudk359t/events.json",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-38-45_linear-srq-browser-ui-eudk359t/gemma-browser-2026-09-15T04-40-00.699Z.json",
+      "sha256": "99d8475169f4b6df2153c1f86300fb5e1b6d62142ab8cdea3d74c8a26dfb2b77"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-38-45_linear-srq-browser-ui-eudk359t/initial-status.json",
+      "sha256": "43fd7480e74d94be1a23c6644fe354982b62fa13fbe8207ce5dbcbd84efc7fd9"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-38-45_linear-srq-browser-ui-eudk359t/invalid.json",
+      "sha256": "b838d7627888a6f5ab0801ab57f03063f351282b9858a58576bc1e8da387e7da"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-38-45_linear-srq-browser-ui-eudk359t/parity.json",
+      "sha256": "e2dd127f9ef6b68b2716ce34d860667295e16faa911a10b14119ca3e8e93c43d"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-38-45_linear-srq-browser-ui-eudk359t/preflight.json",
+      "sha256": "8e67d6696ab444d197e88aad8621dd7d185d79bc6d5c67cc140f65452ef746ec"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-38-45_linear-srq-browser-ui-eudk359t/processes.json",
+      "sha256": "4a110d62045d975b152c187b2e1e98fad8c5efce6052ae6f15c170d32c85131f"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-38-45_linear-srq-browser-ui-eudk359t/results.json",
+      "sha256": "99d8475169f4b6df2153c1f86300fb5e1b6d62142ab8cdea3d74c8a26dfb2b77"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-38-45_linear-srq-browser-ui-eudk359t/status.json",
+      "sha256": "d35f19fd4d311a33611f69840aa4446f70105fa38352fd7180ee58f3fc4a0645"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-38-45_linear-srq-browser-ui-eudk359t/system-info.json",
+      "sha256": "dc3910b5de174a7db23b86500eb969c06377a79cb9a02c029bce2713fbab983d"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-38-45_linear-srq-browser-ui-eudk359t/table.json",
+      "sha256": "9655eb2230cbba9795726f860be224b9969322ca30f92fdb9d551e81ff8ec804"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-38-45_linear-srq-browser-ui-eudk359t/browser.log",
+      "sha256": "1bbac0c19f6c55943c89261197edc435d100d574dd854ed3d67b81457c6702c9"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-38-45_linear-srq-browser-ui-eudk359t/server.log",
+      "sha256": "3f8a97ac93ab1284a661e97cf9c275f199cb75e28f4977d0b863bcfa735b9027"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-38-45_linear-srq-browser-ui-eudk359t/xvfb.log",
+      "sha256": "87e9572cf030493a1f7ba83d385129046b224374ca1414911674b30fc44276d7"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-38-45_linear-srq-browser-ui-eudk359t/run.py",
+      "sha256": "571f7bb5b5dcaf73a6cde3848cd2ac3d56b8134ef7b8c19e282f15b6cbaf729d"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-38-45_linear-srq-browser-ui-eudk359t/run.mjs",
+      "sha256": "477628f89424b95f752a4a00f56f9ec6884c1b03e08d75cd940ecc727366e711"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-10-40_linear-srq-integration-36_zacop/initial-tests.log",
+      "sha256": "86cc4bbab15b232845fa2a1b9889963d82cc9fa81e71a935709145c3a582526b"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-10-40_linear-srq-integration-36_zacop/kernel-tests.log",
+      "sha256": "90cf3325e64bb2f1a07dfde10771d8b761f08ba9666c1b025641487e446187ef"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-10-40_linear-srq-integration-36_zacop/session-tests-fixed.log",
+      "sha256": "2ee49364258c85ce7d60d633c3861e203f063e6417461975a52526fc801feb0c"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-10-40_linear-srq-integration-36_zacop/session-tests.log",
+      "sha256": "fe6f118fef5b1f4b5e268c4ea1ed4c247e048857893bc6e2e199f9cc6869e6a2"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-10-40_linear-srq-integration-36_zacop/source-changes.json",
+      "sha256": "ccf0f2306f3b05a642da440f4b61f20c4937916cab3c2ee080c141ba7f4de5b1"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-10-40_linear-srq-integration-36_zacop/reference-codegen.json",
+      "sha256": "1d274087a668a204c4005726d53f04d9c82f6ab6752833ecd4d50e4ea9a9b788"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-10-40_linear-srq-integration-36_zacop/add-tests.py",
+      "sha256": "72ee46d87b71e3d6c4c29043f651f78d664b6ab2eb43cda325d7bc1544560852"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-10-40_linear-srq-integration-36_zacop/browser.py",
+      "sha256": "e2feab8d2cb893f780f42529af11bb08d36274e5e15745f5970f67a869628f25"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-10-40_linear-srq-integration-36_zacop/implement.py",
+      "sha256": "779e99cf822e25b3e59db21cfe871a8860144cd691457e753363044f8e4fe740"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-10-40_linear-srq-integration-36_zacop/prepare-profile.py",
+      "sha256": "f4df2b11cb39438f132bc36716650460192048ad992934da319d2b44481cfb39"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-10-40_linear-srq-integration-36_zacop/prepare-ui.py",
+      "sha256": "b92b364b2b06a20c76a962380ed59387fe4d67abec3ff4920e00f0cb7aeda780"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-10-40_linear-srq-integration-36_zacop/prepare-whole.py",
+      "sha256": "4746cc967befef3fe33bc228fbfd6a45788d3b018f5785f817162a0dca476c60"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-10-40_linear-srq-integration-36_zacop/update-records.py",
+      "sha256": "1b059a07bf75d7b2405ff98989dcf6bcea7a0c3a4c18e4c3d990536b4f678849"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-43-08_linear-srq-model-tests-5zwsr8ql/run.py",
+      "sha256": "582a7a8dcecf8e04dcbebe6a5cdedabacf6c55b23c202ac1a291a79f385b5487"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-43-08_linear-srq-model-tests-5zwsr8ql/quant.log",
+      "sha256": "8b77d8dbe4c6b17461f358ace5d795177a1bcaf5dd1c6dbab7ab4889e502f7ed"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-43-08_linear-srq-model-tests-5zwsr8ql/mtp.log",
+      "sha256": "5bb313607ed5ce19e72300a5344b66752056b8919772b5902b8258fd97456002"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-43-08_linear-srq-model-tests-5zwsr8ql/completion.json",
+      "sha256": "bfdaf22a1cd0c4513583c1b93b278272a688197c1cb42b6caaf0fac4efb213c7"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-50-17_linear-srq-full-verify-hroiuby3/run.py",
+      "sha256": "cca0f9d68d64a9ff54bfcf474d6342c33e88c939f6e90f7dc5978348c5fe13b8"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-50-17_linear-srq-full-verify-hroiuby3/before.json",
+      "sha256": "3ac42c61654864cae259354be9797c6b0f05cb43253effd4a03d5f2eb202b221"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-50-17_linear-srq-full-verify-hroiuby3/verify.log",
+      "sha256": "f45aeea14ca64824fa3622b3287159da178ba08272967bcde02633579799b0bf"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-50-17_linear-srq-full-verify-hroiuby3/completion.json",
+      "sha256": "34ef9ce73020750ca69f98e53776222cb080894d0d4a92a681a63aca44cd8260"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-50-17_linear-srq-full-verify-hroiuby3/final-verification.json",
+      "sha256": "62ed541253b7065a02294b5175fee85ea6e19d15bd83fe82c47ec2bbd8017d21"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-50-17_linear-srq-full-verify-hroiuby3/audit.json",
+      "sha256": "b4bfa61fe15c09e58fda2a3269ea3560d872d762001d33f8910fa143e86e75d1"
+    },
+    {
+      "path": "outputs/bench/karume/2026-09-15_04-50-17_linear-srq-full-verify-hroiuby3/finalize.py",
+      "sha256": "a9db9f7b4add72b63854698be10e525cd80818ef34cba8289735e13e85891b94"
+    }
+  ],
+  "modelTests": [
+    {
+      "name": "quant",
+      "cmd": [
+        "deno",
+        "test",
+        "-A",
+        "packages/models/tests/e2e_gemma4_quant_test.ts"
+      ],
+      "exitCode": 0,
+      "elapsedSeconds": 49.06062889099121
+    },
+    {
+      "name": "mtp",
+      "cmd": [
+        "deno",
+        "test",
+        "-A",
+        "--filter",
+        "gemma4 投機⑤",
+        "packages/models/tests/e2e_gemma4_speculative_test.ts"
+      ],
+      "exitCode": 0,
+      "elapsedSeconds": 26.193833589553833
+    }
+  ],
+  "fullVerify": {
+    "command": [
+      "deno",
+      "task",
+      "verify"
+    ],
+    "exitCode": 0,
+    "elapsedSeconds": 1630.731274843216,
+    "sourceFiles": 798,
+    "changed": [],
+    "summary": "ok | 2970 passed (823 steps) | 0 failed | 5 ignored (2 steps) (27m4s)",
+    "directory": "outputs/bench/karume/2026-09-15_04-50-17_linear-srq-full-verify-hroiuby3",
+    "skippedReasons": {
+      "tests": {
+        "missingVowelWav": 4,
+        "missingVowelDistribution": 1
+      },
+      "steps": {
+        "denoSubgroupUnavailable": 2
+      }
+    }
+  }
+}

@@ -76,6 +76,7 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
                 options: { linearGemvReduce: "parallel" },
                 parallel: true,
               },
+              { name: "linear-srq", options: { fuseLinearStaticQuantize: true }, parallel: true },
               { name: "reference", options: { quant: "i4" }, parallel: false },
               { name: "override", options: { linearGemvReduce: "sequential" }, parallel: false },
             ] as const
@@ -111,6 +112,10 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
                 runs.set(mode.name, { text, stop });
                 assert([...keys].some((key) => key.startsWith("linear_gemv")));
                 assertEquals(
+                  [...keys].some((key) => key.endsWith(":static-quantize:v1")),
+                  mode.name === "linear-srq" && family === "gemma4-qat",
+                );
+                assertEquals(
                   [...keys].some((key) => key.startsWith("rms_norm_add:")),
                   mode.name === "fused",
                 );
@@ -128,6 +133,7 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
           }
           assertEquals(runs.get("default"), runs.get("explicit-parallel"));
           assertEquals(runs.get("default"), runs.get("fused"));
+          assertEquals(runs.get("default"), runs.get("linear-srq"));
           assertEquals(runs.get("reference"), runs.get("override"));
           const loadUnsupported = () =>
             family === "gemma4"

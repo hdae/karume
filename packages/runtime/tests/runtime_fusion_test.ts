@@ -62,6 +62,7 @@ const fusedAt = (plan: FusionPlan, index: number) => {
 
 Deno.test("ルール表の先頭 op は互いに素で、適用順が結果に効かない", () => {
   assertEquals(FUSION_RULES.map((rule) => rule.name), [
+    "linearStaticQuantize",
     "rmsNormAdd",
     "silu",
     "upsample2x",
@@ -79,6 +80,7 @@ Deno.test("ルール表の先頭 op は互いに素で、適用順が結果に�
   assertEquals([...seen].sort(), [
     "bmm",
     "layer_norm",
+    "linear",
     "mul",
     "reshape",
     "rms_norm",
@@ -803,6 +805,7 @@ Deno.test("カウンタは融合が並んだグラフでルール別に積み上
     rope: 1,
     adaln: 0,
     rmsNormAdd: 0,
+    linearStaticQuantize: 0,
     rowBlockAttention: 0,
     identityExpand: 0,
   });

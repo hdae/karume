@@ -86,22 +86,24 @@
   <body>
     <h1>Gemma E2B · ブラウザ速度比較</h1>
     <p
-      class="muted">初期選択は通常版とQATでattentionの従来経路と融合経路を往復比較します。行列の並列加算・入力バケット細分化・RMSと加算の融合・投入上限768を揃えた計8設定、80生成です。開始ボタンだけで比較できます。</p>
+      class="muted">初期選択はQAT E2Bで行列計算と再量子化の融合を往復比較します。行列の並列加算・入力バケット細分化・RMSと加算の融合・投入上限768・従来のattentionを揃えた計4設定、40生成です。開始ボタンだけで比較できます。</p>
     <p>固定の英語・日本語入力から最大64トークンを生成。初回 → 暖機1回 → 本計測3回。TTFTは最初のトークンまでの時間、decodeはそれ以降の生成速度です。モデル取得・読み込み時間は別計測です。</p>
     <p>通常版ONNXはq4f16、QAT ONNXはq2f16。karumeはf32演算です。配布重み・量子化・KVキャッシュの構成も異なるため、エンジン単独の性能差ではありません。</p>
     <div class="controls">
-      <label>モデル<select id="model"><option value="normal">Gemma 4 E2B</option><option value="qat">Gemma 4 QAT E2B</option><option value="both" selected>両方</option></select></label>
+      <label>モデル<select id="model"><option value="normal">Gemma 4 E2B</option><option value="qat" selected>Gemma 4 QAT E2B</option><option value="both">両方</option></select></label>
       <label>比較対象<select id="engine"><option value="both">両方（順番に実行）</option><option value="karume" selected>karume</option><option value="transformers">Transformers.js</option></select></label>
       <label>Karumeの行列計算<select id="reduce"><option value="quant">quant定義に従う</option><option value="sequential">逐次加算を指定</option><option value="parallel" selected>並列加算を指定</option><option value="parallel-subgroup32">並列加算を32レーン内で実行</option><option value="compare-subgroup">並列GEMVの2経路を往復比較</option><option value="both">逐次と並列を比較</option></select></label>
       <label>Karumeの入力バケット<select id="prefill"><option value="default">標準</option><option value="sparse">少数追加</option><option value="dense" selected>細分化</option><option value="all">3種類を往復比較</option></select></label>
       <label>Karumeの正規化・投入設定<select id="normalization"><option value="reference">従来</option><option value="submit768">投入上限のみ768</option><option value="fused" selected>RMSと加算を融合 + 上限768</option><option value="subgroup32">32レーン縮約 + 融合 + 上限768</option><option value="compare-subgroup">RMSの2経路を往復比較</option><option value="all">従来の3設定を往復比較</option></select></label>
-      <label>Karumeのattention<select id="attention"><option value="parallel">従来の並列経路</option><option value="parallel-fused">行統計と集約を融合</option><option value="compare" selected>従来と融合を往復比較</option><option value="sequential">参照用の逐次経路</option></select></label>
+      <label>Karumeのattention<select id="attention"><option value="parallel" selected>従来の並列経路</option><option value="parallel-fused">行統計と集約を融合</option><option value="compare">従来と融合を往復比較</option><option value="sequential">参照用の逐次経路</option></select></label>
+      <label>Karumeの行列出力<select id="linearSrq"><option value="off">従来</option><option value="on">再量子化まで融合</option><option value="compare" selected>従来と融合を往復比較</option></select></label>
       <button id="run">計測開始</button><button id="save" disabled>JSONを保存</button>
     </div>
     <p>「quant定義に従う」を選ぶと配布形の設定を使います。並列GEMVの往復比較と逐次・並列の比較では、同じquantの加算方式だけを上書きします。重みは同じですが丸め順が変わり、特にQATでは文章も変わる場合があります。</p>
     <p>入力バケットは最初のトークンまでの待ち時間を比較する実験用設定です。往復比較は「標準 → 少数追加 → 細分化 → 細分化 → 少数追加 → 標準」の順に実行します。入力バケットだけを比べる場合は、行列計算を「並列加算を指定」、正規化・投入設定を「従来」にしてください。Transformers.jsには適用しません。</p>
     <p>並列GEMVの往復比較を選ぶと、モデルごとに「並列 → 並列subgroup32 → 並列subgroup32 → 並列」を実行します。subgroup32はM2の追試で高速化しなかったため初期選択には含めません。この候補にはsubgroupsとsubgroup-size-controlに対応したChromeが必要です。未対応ならエラーを表示します。RMSの32レーン縮約は別の任意設定で、加算順と文章が変わる場合があります。</p>
     <p>attentionの往復比較は「従来 → 融合 → 融合 → 従来」です。融合は少数行・短い列上限の行統計と集約をまとめます。重み・加算順・モデルの既定設定は変えません。</p>
+    <p>行列出力の往復比較は「従来 → 融合 → 融合 → 従来」です。QATの行列計算と直後の固定scaleへの丸めをまとめます。並列加算の指定が必要です。通常版には適用箇所がありません。他の候補だけを比べるときは行列出力を「従来」にしてください。attention融合はM2で利得が確認できなかったため初期選択には含めません。</p>
     <p id="environment" class="muted"></p>
     <p id="status" role="status" aria-live="polite">準備中</p>
     <p
@@ -143,7 +145,11 @@
             r.linearGemvReduce ? ` / ${r.linearGemvReduce}` : ""
           }${r.prefillBuckets ? ` / ${r.prefillBuckets} [${r.chunkBuckets.join(",")}]` : ""}${
             r.normalization ? ` / ${r.normalization}` : ""
-          }${r.stateAttentionReduce ? ` / ${r.stateAttentionReduce}` : ""}`,
+          }${r.stateAttentionReduce ? ` / ${r.stateAttentionReduce}` : ""}${
+            r.fuseLinearStaticQuantize === undefined
+              ? ""
+              : ` / linearSRQ=${r.fuseLinearStaticQuantize ? "on" : "off"}`
+          }`,
           c.case,
           number(c.first.ttftMs, "ms"),
           number(median(c.measured.map((x) => x.ttftMs)), "ms"),
@@ -164,15 +170,17 @@
           r.linearGemvReduce ? ` / ${r.linearGemvReduce}` : ""
         }${r.prefillBuckets ? ` / ${r.prefillBuckets}` : ""}${
           r.normalization ? ` / ${r.normalization}` : ""
-        }${r.stateAttentionReduce ? ` / ${r.stateAttentionReduce}` : ""} / ${c.case} の出力${
-          c.deterministic ? "" : "（繰り返しで不一致あり）"
-        }`;
+        }${r.stateAttentionReduce ? ` / ${r.stateAttentionReduce}` : ""}${
+          r.fuseLinearStaticQuantize === undefined
+            ? ""
+            : ` / linearSRQ=${r.fuseLinearStaticQuantize ? "on" : "off"}`
+        } / ${c.case} の出力${c.deterministic ? "" : "（繰り返しで不一致あり）"}`;
         pre.textContent = c.first.text;
         details.append(summary, pre);
         $("texts").append(details);
       }
     };
-    const runOne = (model, engine, reduce, prefill, normalization, attention) =>
+    const runOne = (model, engine, reduce, prefill, normalization, attention, linearSrq) =>
       new Promise((resolve, reject) => {
         const frame = document.createElement("iframe");
         activeFrame = frame;
@@ -181,7 +189,7 @@
           const { type, value } = event.data;
           if (type === "status") {
             $("status").textContent = engine === "karume"
-              ? `${value} / ${prefill} / ${normalization} / ${attention}`
+              ? `${value} / ${prefill} / ${normalization} / ${attention} / linearSRQ=${linearSrq}`
               : value;
             return;
           }
@@ -197,6 +205,7 @@
               prefillBuckets: prefill,
               normalization,
               stateAttentionReduce: attention,
+              fuseLinearStaticQuantize: linearSrq === "on",
               error: value,
             });
             $("save").disabled = false;
@@ -208,7 +217,7 @@
         };
         window.addEventListener("message", listener);
         frame.src =
-          `/frame.html?model=${model}&engine=${engine}&reduce=${reduce}&prefill=${prefill}&normalization=${normalization}&attention=${attention}`;
+          `/frame.html?model=${model}&engine=${engine}&reduce=${reduce}&prefill=${prefill}&normalization=${normalization}&attention=${attention}&linearSrq=${linearSrq}`;
         frame.title = "Benchmark execution";
         document.body.append(frame);
       });
@@ -220,6 +229,7 @@
       $("prefill").disabled = true;
       $("normalization").disabled = true;
       $("attention").disabled = true;
+      $("linearSrq").disabled = true;
       try {
         const models = $("model").value === "both" ? ["normal", "qat"] : [$("model").value];
         const engines = $("engine").value === "both" ? ["karume", "transformers"] : [$("engine").value];
@@ -236,6 +246,9 @@
           : $("normalization").value === "compare-subgroup"
           ? ["fused", "subgroup32", "subgroup32", "fused"]
           : [$("normalization").value];
+        const linearSrqs = $("linearSrq").value === "compare"
+          ? ["off", "on", "on", "off"]
+          : [$("linearSrq").value];
         const attentions = $("attention").value === "compare"
           ? ["parallel", "parallel-fused", "parallel-fused", "parallel"]
           : [$("attention").value];
@@ -245,7 +258,9 @@
               for (const prefill of engine === "karume" ? prefills : ["default"]) {
                 for (const normalization of engine === "karume" ? normalizations : ["reference"]) {
                   for (const attention of engine === "karume" ? attentions : ["parallel"]) {
-                    await runOne(model, engine, reduce, prefill, normalization, attention);
+                    for (const linearSrq of engine === "karume" ? linearSrqs : ["off"]) {
+                      await runOne(model, engine, reduce, prefill, normalization, attention, linearSrq);
+                    }
                   }
                 }
               }
@@ -265,6 +280,7 @@
         $("prefill").disabled = false;
         $("normalization").disabled = false;
         $("attention").disabled = false;
+        $("linearSrq").disabled = false;
       }
     };
     $("run").addEventListener("click", start);

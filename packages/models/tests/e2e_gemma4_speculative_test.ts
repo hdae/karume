@@ -783,6 +783,7 @@ Deno.test({
       reduce: StateAttentionReduce,
       linearGemvReduce: "sequential" | "parallel" = "sequential",
       fuseRmsNormAdd = false,
+      fuseLinearStaticQuantize = false,
     ): Promise<RowPair> => {
       const parsed = prepareModel(await readShard(shards[0]));
       // 出口 2 本の順序が契約（出力 0 = logits・出力 1 = 最終 norm 後 hidden）。
@@ -791,6 +792,7 @@ Deno.test({
         stateAttentionReduce: reduce,
         linearGemvReduce,
         fuseRmsNormAdd,
+        fuseLinearStaticQuantize,
       });
       try {
         const context = await session.createGenerationContext({
@@ -900,6 +902,14 @@ Deno.test({
           assertEquals(left, right);
         });
       }
+
+      await t.step("linear→SRQ指定は通常版のMTP verify行0/decode一致を保つ", async () => {
+        const { mismatches, left, right } = compare(
+          await measure("parallel", "parallel", true, true),
+        );
+        assertEquals(mismatches, 0);
+        assertEquals(left, right);
+      });
 
       await t.step("② 既定席（parallel）の差は実測だけ（門ではない）", async () => {
         const started = performance.now();

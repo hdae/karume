@@ -29,8 +29,8 @@
  *
  * ## 適用順
  *
- * {@link FUSION_RULES} の**宣言順**（rmsNormAdd → silu → upsample2x → rope → adaln → rowBlockAttention）。
- * 6 ルールの先頭 op は `rms_norm` / `sigmoid` / `reshape` / `mul|slice` / `layer_norm` / `bmm` で互いに素
+ * {@link FUSION_RULES} の**宣言順**（linearStaticQuantize → rmsNormAdd → silu → upsample2x → rope → adaln → rowBlockAttention）。
+ * 7 ルールの先頭 op は `linear` / `rms_norm` / `sigmoid` / `reshape` / `mul|slice` / `layer_norm` / `bmm` で互いに素
  * なので、この順序は結果に効かない（順序が意味を持つのは先頭 op が重なったときだけ —
  * 重なりが生じていないことは tests/runtime_fusion_test.ts が {@link FusionRule.heads} から
  * 機械的に検査する）。窓の**内側**に他ルールの先頭 op が現れる形（rowBlockAttention の窓は
@@ -48,6 +48,15 @@
  * {@link passthroughIsIndependent} が機械的に見る。
  */
 
+import {
+  type LinearGemvParallelLanes,
+  linearGemvParallelLanes,
+  linearGemvStaticQuantizeKey,
+  linearGemvStaticQuantizeParams,
+  linearGemvStaticQuantizeWgsl,
+} from "../kernels/linear-gemv.ts";
+import type { LinearGemvReduce } from "./session-types.ts";
+import type { WeightStorage } from "../kernels/weight-storage.ts";
 import { rmsNormSubgroupKey, rmsNormSubgroupWgsl } from "../kernels/rms-norm-subgroup.ts";
 import {
   catDim,
@@ -60,6 +69,7 @@ import {
   SAFE_SOFTMAX_OP,
   sliceAttrs,
   softmaxDim,
+  staticQuantizeScale,
   SYM_PREFIX_SLICE_OP,
 } from "../ops.ts";
 import { tiledWorkgroups } from "../codegen/dispatch.ts";
@@ -105,7 +115,14 @@ import {
 import { ExecutionError, type NodePlan } from "./plan.ts";
 
 /** 融合ルールの識別子（{@link FUSION_RULES} の宣言順と 1 対 1）。 */
-type FusionRuleName = "rmsNormAdd" | "silu" | "upsample2x" | "rope" | "adaln" | "rowBlockAttention";
+type FusionRuleName =
+  | "linearStaticQuantize"
+  | "rmsNormAdd"
+  | "silu"
+  | "upsample2x"
+  | "rope"
+  | "adaln"
+  | "rowBlockAttention";
 
 /**
  * 診断カウンタの見出し。融合ルールに加えて、0 dispatch の別名化のうち**条件付きで外れうる**
@@ -126,6 +143,7 @@ export type FusionCounts = Readonly<Record<FusionCounterName, number>>;
 export type FusedOperand =
   | { readonly kind: "bind"; readonly index: number }
   | { readonly kind: "temp"; readonly id: number }
+  | { readonly kind: "weightScale"; readonly index: number }
   | { readonly kind: "output" };
 
 /**
@@ -241,6 +259,11 @@ export type FusionLimits = {
   readonly maxComputeWorkgroupsPerDimension: number;
 };
 
+/** GPU実体を持たない常駐格納情報。scaleの寿命と所有権はSession側に残す。 */
+export type FusionWeightLayout =
+  | { readonly storage: "f16" | "i2" | "i8" }
+  | { readonly storage: "i4"; readonly groupSize: number };
+
 /** 判定に要るグラフ全体の事実（executor の Session 状態から渡す）。 */
 type FusionContext = {
   /** 値名 → グラフ内の消費回数（plan.ts の countUses）。 */
@@ -254,6 +277,10 @@ type FusionContext = {
   readonly rowBlockSplit?: number;
   /** 明示指定時だけRMS→addを融合する（ADR 0099）。 */
   readonly fuseRmsNormAdd?: boolean;
+  readonly fuseLinearStaticQuantize?: boolean;
+  readonly linearGemvReduce?: LinearGemvReduce;
+  readonly linearCompute?: "f32" | "f16" | "a8";
+  readonly weightLayouts?: ReadonlyMap<string, FusionWeightLayout>;
   readonly rmsNormReduce?: "workgroup" | "subgroup32";
 };
 
@@ -1313,8 +1340,101 @@ const RMS_NORM_ADD_RULE = defineRule<RmsNormAddMatch>({
   }),
 });
 
+type LinearStaticQuantizeMatch = FusionMatch & {
+  readonly binds: readonly string[];
+  readonly shape: readonly number[];
+  readonly outputName: string;
+  readonly storage: WeightStorage;
+  readonly group: number | undefined;
+  readonly lanes: LinearGemvParallelLanes;
+  readonly m: number;
+  readonly n: number;
+  readonly k: number;
+  readonly scale: number;
+  readonly workgroups: readonly [number, number, number];
+};
+
+// DECIDED: docs/decisions/0103-linear-static-quantize-fusion.md
+const LINEAR_STATIC_QUANTIZE_RULE = defineRule<LinearStaticQuantizeMatch>({
+  name: "linearStaticQuantize",
+  heads: ["linear"],
+  match: (nodes, index, context) => {
+    if (
+      context.fuseLinearStaticQuantize !== true || context.linearGemvReduce !== "parallel" ||
+      context.linearCompute !== "f32"
+    ) return undefined;
+    const linear = nodes[index], srq = nodes[index + 1];
+    if (linear?.node.op !== "linear" || srq?.node.op !== "static_quantize") return undefined;
+    const chain = [linear, srq];
+    if (!allF32(chain) || !internalsArePrivate(chain, context)) return undefined;
+    if (
+      linear.node.ins.length !== 3 || new Set(linear.node.ins).size !== 3 ||
+      srq.node.ins[0] !== linear.outputs[0].name ||
+      !sameShape(linear.outputs[0].shape, srq.outputs[0].shape)
+    ) return undefined;
+    const weight = context.weightLayouts?.get(linear.node.ins[1]);
+    if (weight === undefined || weight.storage === "f16") return undefined;
+    const m = numel(linear.inputShapes[0].slice(0, -1));
+    const [n, k] = linear.inputShapes[1];
+    const group = weight.storage === "i4" ? weight.groupSize : undefined;
+    const lanes = linearGemvParallelLanes(weight.storage, m, n, k, group);
+    if (lanes === undefined) return undefined;
+    // tile型はgrid-strideへ縮退しない。通常のlinearと同じdevice上限で拒否する。
+    const workgroups: readonly [number, number, number] = [
+      tiledWorkgroups(
+        n,
+        128 / lanes,
+        context.limits.maxComputeWorkgroupsPerDimension,
+        "linear static_quantize N",
+      ),
+      tiledWorkgroups(
+        m,
+        1,
+        context.limits.maxComputeWorkgroupsPerDimension,
+        "linear static_quantize M",
+      ),
+      1,
+    ];
+    return {
+      window: chain,
+      chain,
+      binds: linear.node.ins,
+      shape: srq.outputs[0].shape,
+      outputName: srq.outputs[0].name,
+      storage: weight.storage,
+      group,
+      lanes,
+      m,
+      n,
+      k,
+      scale: staticQuantizeScale(srq.node.attrs, "linear static_quantize fusion"),
+      workgroups,
+    };
+  },
+  build: (m) => ({
+    binds: m.binds,
+    outputName: m.outputName,
+    outputShape: m.shape,
+    temps: [],
+    dispatches: [{
+      key: linearGemvStaticQuantizeKey(m.storage, m.group, m.lanes),
+      wgsl: () => linearGemvStaticQuantizeWgsl(m.storage, m.group, m.lanes),
+      params: linearGemvStaticQuantizeParams(m.storage, m.m, m.n, m.k, m.scale, m.group),
+      operands: [
+        { kind: "bind", index: 0 },
+        { kind: "bind", index: 1 },
+        { kind: "bind", index: 2 },
+        { kind: "output" },
+        { kind: "weightScale", index: 1 },
+      ],
+      workgroups: { kind: "tiled", counts: m.workgroups },
+    }],
+  }),
+});
+
 /** MUST: この配列の順が適用順（冒頭「適用順」節）。 */
 export const FUSION_RULES: readonly FusionRule[] = [
+  LINEAR_STATIC_QUANTIZE_RULE,
   RMS_NORM_ADD_RULE,
   SILU_RULE,
   UPSAMPLE_2X_RULE,
@@ -1375,6 +1495,7 @@ export const planFusions = (
   const steps: ExecStep[] = [];
   const aliases = planAliases(nodes);
   const counts: Record<FusionCounterName, number> = {
+    linearStaticQuantize: 0,
     rmsNormAdd: 0,
     silu: 0,
     upsample2x: 0,

@@ -57,7 +57,12 @@ import type { ScoreStorage } from "../kernels/score-storage.ts";
 export type { ScoreStorage } from "../kernels/score-storage.ts";
 import { numel, RUNTIME_SUPPORT } from "../ops.ts";
 import { type AdmissionReport, estimateGraphMemory, type EstimateOptions } from "./estimate.ts";
-import { type ExecStep, type FusionCounts, planFusions } from "./fusion.ts";
+import {
+  type ExecStep,
+  type FusionCounts,
+  type FusionWeightLayout,
+  planFusions,
+} from "./fusion.ts";
 import { GenerationContext, type GenerationContextHost } from "./generation-context.ts";
 /**
  * 1 生成ぶんの可変 state の所有者（ADR 0066 決定 1）。**型としてのみ**公開する — 入口は
@@ -971,6 +976,7 @@ type SessionState = {
   /** 行ブロック枚数の強制（テスト専用 — {@link ROW_BLOCK_SPLIT}）。 */
   readonly rowBlockSplit: number | undefined;
   readonly fuseRmsNormAdd: boolean;
+  readonly fuseLinearStaticQuantize: boolean;
   readonly useCounts: ReadonlyMap<string, number>;
   readonly dtypes: ReadonlyMap<string, IrDtype>;
   readonly outputNames: ReadonlySet<string>;
@@ -1063,6 +1069,12 @@ export class Session {
     shards: AsyncIterable<WeightShard>,
     options: SessionOptions,
   ): Promise<Session> {
+    if (
+      options.fuseLinearStaticQuantize !== undefined &&
+      typeof options.fuseLinearStaticQuantize !== "boolean"
+    ) {
+      throw new ExecutionError("options.fuseLinearStaticQuantize はbooleanでなければならない");
+    }
     if (options.fuseRmsNormAdd !== undefined && typeof options.fuseRmsNormAdd !== "boolean") {
       throw new ExecutionError("options.fuseRmsNormAdd はbooleanでなければならない");
     }
@@ -1095,6 +1107,14 @@ export class Session {
       stateAttentionReduce,
       linearGemvReduce,
     );
+    if (
+      options.fuseLinearStaticQuantize === true &&
+      (linearGemvReduce !== "parallel" || linearCompute !== "f32")
+    ) {
+      throw new ExecutionError(
+        "fuseLinearStaticQuantize は linearGemvReduce: parallel / linearCompute: f32 のみ対応",
+      );
+    }
     if (linearGemvReduce !== "sequential" && linearCompute !== "f32") {
       throw new ExecutionError(
         `linearGemvReduce: ${linearGemvReduce} は linearCompute: f32 のみ対応`,
@@ -1561,6 +1581,7 @@ export class Session {
       attentionI8a8Dot,
       rowBlockSplit: options[ROW_BLOCK_SPLIT],
       fuseRmsNormAdd: options.fuseRmsNormAdd ?? false,
+      fuseLinearStaticQuantize: options.fuseLinearStaticQuantize ?? false,
       rmsNormReduce,
       useCounts: countUses(graph),
       dtypes: declaredDtypes(graph),
@@ -2698,9 +2719,24 @@ export class Session {
     const plan = planGraph(this.#state.graph, bindings, stateShapes);
     const { maxStorageBufferBindingSize, maxComputeWorkgroupsPerDimension } =
       this.#state.gpu.limits;
+    // 実体を融合の純関数へ渡さず、プラン導出時だけ格納記述へ射影する。
+    const weightLayouts = this.#state.fuseLinearStaticQuantize
+      ? new Map(
+        [...this.#state.residentWeights].map(([name, weight]): [string, FusionWeightLayout] => [
+          name,
+          weight.storage === "i4"
+            ? { storage: weight.storage, groupSize: weight.groupSize }
+            : { storage: weight.storage },
+        ]),
+      )
+      : undefined;
     const fusion = planFusions(plan.nodes, {
       useCounts: this.#state.useCounts,
       fuseRmsNormAdd: this.#state.fuseRmsNormAdd,
+      fuseLinearStaticQuantize: this.#state.fuseLinearStaticQuantize,
+      linearGemvReduce: this.#state.linearGemvReduce,
+      linearCompute: this.#state.linearCompute,
+      ...(weightLayouts === undefined ? {} : { weightLayouts }),
       rmsNormReduce: this.#state.rmsNormReduce,
       outputNames: this.#state.outputNames,
       limits: { maxStorageBufferBindingSize, maxComputeWorkgroupsPerDimension },

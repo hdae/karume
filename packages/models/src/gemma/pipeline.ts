@@ -339,6 +339,7 @@ export type Gemma4PipelineOptions = {
   readonly linearGemvReduce?: SessionOptions["linearGemvReduce"];
   /** RMS→addの任意融合。意味・適用範囲はruntimeの同名設定が正本（ADR 0099）。 */
   readonly fuseRmsNormAdd?: SessionOptions["fuseRmsNormAdd"];
+  readonly fuseLinearStaticQuantize?: SessionOptions["fuseLinearStaticQuantize"];
   /** RMSの任意縮約。subgroup32は対応GPU必須で、参照と加算順が変わる（ADR 0100）。 */
   readonly rmsNormReduce?: SessionOptions["rmsNormReduce"];
   /** GPUへの投入政策。target / drafterへ同じ値を渡し、省略時はruntimeの既定を使う。 */
@@ -1772,6 +1773,9 @@ class GemmaPipeline {
     // この家族だけ古い値で走る）。drafter Session にも同じノブを渡す。
     const sessionOptions = {
       ...(options.fuseRmsNormAdd === undefined ? {} : { fuseRmsNormAdd: options.fuseRmsNormAdd }),
+      ...(options.fuseLinearStaticQuantize === undefined
+        ? {}
+        : { fuseLinearStaticQuantize: options.fuseLinearStaticQuantize }),
       ...(options.rmsNormReduce === undefined ? {} : { rmsNormReduce: options.rmsNormReduce }),
       ...(options.submitPolicy === undefined ? {} : { submitPolicy: options.submitPolicy }),
       stateAttentionReduce: options.stateAttentionReduce ?? GEMMA4_STATE_ATTENTION_REDUCE,

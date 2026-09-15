@@ -3216,3 +3216,15 @@ attentionは`b9d41ef`にコミット済み。その後、過去の候補を現�
 [修正記録](2026-09-15-execution-option-validation.md)を参照。
 attentionの追加確認で、配列などが有効な設定名へ変換されて受理される問題を再現し、見積りとSession入口を修正した。
 性能候補の採否・WGSL・正しい実行設定の意味は変えない。次の性能作業は引き続きlinear→SRQの独立した任意指定への整理。
+
+## M2 attention追試とlinear→SRQの統合（2026-09-15）
+
+[実装・検収](2026-09-15-linear-static-quantize-fusion.md)と[数値・raw hash](2026-09-15-linear-static-quantize-results.json)を追加した。
+M2のattention80生成は出力一致、速度は通常−0.88%・QAT−0.16%で、任意指定に残す。
+`fuseLinearStaticQuantize`を独立した任意指定へ統合し、RTX ChromeのQATは94.100→99.739 tok/s（約6%）となった。
+275 dispatch/tokenを削減し、scaleは既存常駐バッファを借用。広い融合・重み転置は統合していない。
+次はM2でQATの40生成を検収する。比較画面は開始ボタンだけでその比較を実行できる。通常版のMTP、参照golden、モデル既定は維持する。
+
+linear→SRQ製品化の全体verifyとソース不変の照合も完了。
+最終件数と生ログは[検収記録](2026-09-15-linear-static-quantize-fusion.md#全体検証)に集約した。
+M2の新しい融合の検収は未完で、モデル既定の変更は次の判断に残す。

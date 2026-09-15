@@ -7,11 +7,12 @@ deno task bench:llm-browser
 ```
 
 Open **http://localhost:8787** in Chrome on your Mac and click **計測開始**. The
-current defaults compare **normal and QAT E2B with parallel and fused state
-attention**, in parallel → fused → fused → parallel order for each model:
-8 model loads and 80 generations. Parallel GEMV, dense prefill buckets, RMS-add
-fusion, and submission limit 768 stay fixed. The fusion is an explicit benchmark
-override; model defaults remain unchanged.
+current defaults compare **QAT E2B with linear-to-SRQ fusion disabled and enabled**,
+in off → on → on → off order: 4 model loads and 40 generations. Parallel GEMV,
+dense prefill buckets, RMS-add fusion, submission limit 768, and unfused parallel
+attention stay fixed. The fusion is an explicit benchmark override; model defaults
+remain unchanged. The M2 attention comparison showed no speed benefit, so attention
+fusion remains optional.
 Transformers.js, reference settings, and earlier comparisons remain available.
 **JSONを保存** downloads all timings, generated token IDs, output text,
 GPU information, model references, dependency versions, and the benchmark bundle hash.
@@ -45,6 +46,19 @@ unsupported GPU rather than switching to CPU. The Linux/NVIDIA benchmark documen
 in the research note uses an experimental Chrome flag; it is **not** part of the
 Mac launch command and is not necessary for ordinary supported M2 Chrome.
 
+## Linear output fusion
+
+The **Karumeの行列出力** selector compares `fuseLinearStaticQuantize: false` with
+`true`. This combines packed parallel GEMV and the following fixed-scale
+requantization (SRQ), using the existing weight-scale buffer. It requires
+`linearGemvReduce: "parallel"` and f32 compute; unsupported combinations are rejected.
+Only validated INT2/4/8 shapes with 1–8 physical rows are fused. The normal E2B graph
+has no applicable SRQ nodes. JSON and table labels record the selected flag.
+See [the decision record](../../../docs/decisions/0103-linear-static-quantize-fusion.md).
+
+When comparing any earlier optimization, set **Karumeの行列出力** to **従来** to
+avoid adding another comparison axis.
+
 ## State attention fusion
 
 The **Karumeのattention** selector compares `stateAttentionReduce: "parallel"`
@@ -75,7 +89,7 @@ recorded in [the adoption note](../../../docs/research/2026-09-13-m2-gemv-adopti
 
 ## Prefill bucket experiment
 
-The initial selection uses both E2B models, **karume**, and **細分化**,
+The initial selection uses QAT E2B, **karume**, and **細分化**,
 following the [M2 validation](../../../docs/research/2026-09-13-m2-prefill-adoption.md).
 To repeat only the bucket comparison, change Karumeの入力バケット to
 **3種類を往復比較**, Karumeの行列計算 to **並列加算を指定**, and
