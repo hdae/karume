@@ -308,6 +308,18 @@ flush 頻度をどう変えても天井は動かない**（判定に入るのは
 - 出所の file:line・既知の上流報告（denoland/deno#35195 等）・逆算の根拠は
   [research/2026-08-03-wgpu-memory-ceiling.md](research/2026-08-03-wgpu-memory-ceiling.md)。
 
+## Deno CLI の decode は 1 token あたり 10 ms の待ちを含む（外部制約・deno_webgpu の poll ループ）
+
+Deno 2.9.6 の `ext/webgpu/buffer.rs`（`mapAsync`）と `queue.rs`（`onSubmittedWorkDone`）は
+`while !done { device_poll(wait_indefinitely); sleep(10 ms) }` の形で完了を待ち、GPU が終わった後にも
+必ず 1 回 10 ms 寝る。decode は 1 token = フェンス 1 本なので Deno の壁には 10 ms/token の定数が乗る
+（RTX 3080 Ti で 23.8 ms/token のうち 10 ms）。同じ資産を Chrome で回すと壁 10〜11 ms/token。
+
+- **Karume 側では回避不能**（`pop_error_scope` にはこの待ちが無いが、読み戻しには `mapAsync` が要る）。
+  選択肢は Deno のパッチビルドか、1 フェンスあたりの token 数を増やす先行投入（perf-ledger H-27）。
+- **Deno CLI の tok/s は製品の性能指標に使わない** — 採否判定は Chrome の壁と GPU 時間で行う。
+  根因と実測は [decode 速度調査](research/2026-09-19-qat-speed-recon.md) §3.2。
+
 ## bf16 格納は宣言のみ受理・実行は fail loudly
 
 IR v1 の格納スキーマとしては受理するが、実行経路が無く `createSession` が capability 不足と

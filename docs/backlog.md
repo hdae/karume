@@ -9,6 +9,14 @@
 
 ## now — 0.12.0 リリース後（2026-09-06）
 
+- **decode 速度調査の波（2026-09-19・着手順の裁定待ち）**: 帰属と反証は [decode 速度の帰属と次に試すこと](research/2026-09-19-qat-speed-recon.md)、
+  候補の採否は [perf-ledger](perf-ledger.md) H-26〜H-29 / K-48〜K-53（K-45 / K-46 / K-47 は追記）。確定した事実: Deno の 23.8 ms/token のうち
+  10 ms は deno_webgpu の poll ループの sleep（karume 無関係・採否判定は Chrome で）・律速は帯域でも演算でもなく命令数 × 占有率と dispatch 本数・
+  「i8 計算」は方向として正（利得 0.9 ms・段 0 の kill 判定が先）・「i8 KV」は速度 0（メモリ項目へ）・WebML 285 tok/s の要因は実行構造（先行投入・presrq・1 pass）。
+  順序（research §10）: ⓪ 物差しを Chrome へ + GPU 1 セッションで確定する事実（GEMV 総時間・未帰属 49 dispatch・`per_layer_model_projection` の費用）→
+  ① K-45 段 0 → ② H-28（PLE の GPU 常駐・depth 1・ビット一致門）→ ③ H-27（先行投入）→ ④ K-45 段 1 / 2 → ⑤ 小物（K-48 段 1 / K-49 / K-50 段 1 / K-51）→
+  ⑥ K-46 の再起票（メモリ項目）。併用後の見込みは Deno 約 7.5 ms（約 130 tok/s）/ Chrome 約 6.5 ms（約 150 tok/s）。
+
 - **QAT レビュー対応の波（2026-09-19）**: 裁定は [ADR 0097 追記 7](decisions/0097-gemma4-qat-integration.md)、
   実測は [QAT レビューの実測記録](research/2026-09-19-qat-review.md)。中身は ①配布既定を通常 Gemma と
   揃える（capacity 4096 / chunkLength 768 / trace 上限 768・対話 CLI の既定 256 token。既定 capacity と
@@ -535,6 +543,10 @@ autoregressive 波の**残項目（波外へ送り）**:
 
 ## later
 
+- **層内の大融合を塞ぐ 3 契約の裁定（起票 2026-09-19）**: WebML との dispatch 差（1,132 → 約 316 本）のうち約 480 本は
+  `windowTouchesState` MUST（ADR 0067）・FusedStep 単一出力 MUST（ADR 0068 決定 1）・atomic last-arriver merge の可搬性判定が同時に塞ぐ。
+  個別候補（attention→SRQ・残差 add→SRQ・attention 1 dispatch・Q/K/V 3 出力）は全て反証で閉じたので、契約を緩めるかの設計裁定が先
+  （[research](research/2026-09-19-qat-speed-recon.md) §9.1）。裁定前に速度候補として起票しない。
 - **ブラウザ動画生成の基盤**（調査 2026-09-10）: Wan2.1-T2V-1.3B を小さな DiT 単体 → 実 token 長の
   attention / FFN → causal Conv3d VAE → scheduler と段寿命の順に検収する案。runtime 語彙と数値契約の判断が先。
   H3 は公開重みの規模・未公開の後段・ライセンス条件から構造調査に留める。
