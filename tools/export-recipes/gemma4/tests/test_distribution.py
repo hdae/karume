@@ -666,6 +666,11 @@ class TestGemma4Card:
         # 数は manifest から導出する（推奨サンプラも位置上限も本文に出る）。
         assert str(fixture.MAX_POSITION) in card
         assert str(fixture.GENERATION_CONFIG["top_k"]) in card
+        # session の boolean は manifest と同じ JSON 表記で綴る — Python の `True` が出ると
+        # 読み手がそのまま貼った TypeScript と綴りが食い違う。
+        fast = next(line for line in card.splitlines() if line.startswith("| `i4-fast`"))
+        assert "`fuseRmsNormAdd` = `true`" in fast
+        assert "True" not in fast
 
     def test_it_refuses_to_describe_another_pipeline(self, gemma4_assembled) -> None:
         _, manifest = gemma4_assembled

@@ -49,6 +49,7 @@ manifest に並んだ順のまま出す（並べ替えを挟むと「manifest �
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -241,9 +242,20 @@ def models(manifest: Mapping[str, Any]) -> list[str]:
 
 
 def _session(quant: Mapping[str, Any]) -> str:
+    """quant が宣言する実行設定を 1 セルに綴る。
+
+    MUST: 値は **JSON 表記**で出す。`render_card` が受け取るのは JSON へ書く前のメモリ上の
+    dict なので、素で埋めると boolean が Python の `True` / `False` で出て、manifest
+    （`true`）とも利用者がそのまま貼る TypeScript とも綴りが食い違う（`false` を書いたつもりの
+    セルが真値に読める形）。文字列だけは `json.dumps` の二重引用符を付けずに出す — 席の値は
+    `parallel` のような enum で、表の他の綴り（`` `i4` `` など）と揃える。
+    """
     session = quant["session"]
     features = quant.get("gpuFeatures", {})
-    parts = [f"`{key}` = `{value}`" for key, value in session.items()]
+    parts = [
+        f"`{key}` = `{value if isinstance(value, str) else json.dumps(value)}`"
+        for key, value in session.items()
+    ]
     parts += [f"requires `{key}`" for key, value in features.items() if value]
     return " / ".join(parts) if parts else "—"
 
