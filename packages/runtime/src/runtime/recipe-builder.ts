@@ -19,8 +19,11 @@ import { stateStatsPvKey, stateStatsPvWgsl } from "../kernels/state-attention-st
 import { rmsNormSubgroupKey, rmsNormSubgroupWgsl } from "../kernels/rms-norm-subgroup.ts";
 import {
   STATIC_QUANTIZE_KEY,
+  STATIC_QUANTIZE_PACKED_KEY,
+  STATIC_QUANTIZE_PACKED_WGSL,
   STATIC_QUANTIZE_WGSL,
   STATIC_QUANTIZE_WORKGROUP_SIZE,
+  staticQuantizePackedParams,
   staticQuantizeParams,
 } from "../kernels/static-quantize.ts";
 import { gridStrideWorkgroups, tiledWorkgroups } from "../codegen/dispatch.ts";
@@ -141,8 +144,12 @@ import {
   defaultLinearGemvVariant,
   LINEAR_GEMV_MAX_ROWS,
   linearGemvKey,
+  linearGemvParallelEligible,
   linearGemvParallelKey,
   linearGemvParallelLanes,
+  linearGemvParallelPackedKey,
+  linearGemvParallelPackedParams,
+  linearGemvParallelPackedWgsl,
   linearGemvParallelWgsl,
   linearGemvParams,
   linearGemvRowsKey,
@@ -312,7 +319,13 @@ import {
   WEIGHT_SLOTS,
   WHERE_OP,
 } from "../ops.ts";
-import { type ExecStep, type FusedOperand, type FusedStep, planRowBlocks } from "./fusion.ts";
+import {
+  type ExecStep,
+  type FusedOperand,
+  type FusedStep,
+  type PackedActivations,
+  planRowBlocks,
+} from "./fusion.ts";
 import type { StorageRoles } from "../gpu/pipeline-cache.ts";
 import { ExecutionError, type NodePlan } from "./plan.ts";
 import {
@@ -589,7 +602,15 @@ export class RecipeBuilder {
     for (const output of outputs) defined.add(output.name);
     const builder = new StepRecipeBuilder();
     if (step.kind === "node") {
-      await this.#buildNode(step.plan, step.aliasesInput, binds, outs, builder, states);
+      await this.#buildNode(
+        step.plan,
+        step.aliasesInput,
+        binds,
+        outs,
+        builder,
+        states,
+        step.packedActivations,
+      );
     } else {
       await this.#buildFused(step, binds, outs, builder);
     }
@@ -713,6 +734,8 @@ export class RecipeBuilder {
     outs: readonly BindingSource[],
     builder: StepRecipeBuilder,
     states: StateBuildContext,
+    /** packed int8 活性の役割（ADR 0105 — 受理は fusion.ts の 1 箇所で済んでいる）。 */
+    packed: PackedActivations | undefined,
   ): Promise<void> {
     switch (step.contract.kind) {
       case "unary":
@@ -791,13 +814,13 @@ export class RecipeBuilder {
         await this.#buildFlip(step, binds, outs, builder);
         break;
       case "linear":
-        await this.#buildLinear(step, binds, outs, builder);
+        await this.#buildLinear(step, binds, outs, builder, packed);
         break;
       case "layerNorm":
         await this.#buildLayerNorm(step, binds, outs, builder);
         break;
       case "staticQuantize":
-        await this.#buildStaticQuantize(step, binds, outs, builder);
+        await this.#buildStaticQuantize(step, binds, outs, builder, packed);
         break;
       case "rmsNorm":
         await this.#buildRmsNorm(step, binds, outs, builder);
@@ -1613,6 +1636,7 @@ export class RecipeBuilder {
     binds: readonly BindingSource[],
     outs: readonly BindingSource[],
     builder: StepRecipeBuilder,
+    packed: PackedActivations | undefined,
   ): Promise<void> {
     const [x, weight] = step.inputShapes;
     const n = weight[0];
@@ -1621,6 +1645,26 @@ export class RecipeBuilder {
     const weightStorage = this.#weightStorage(step);
     if (weightStorage === "i2" && this.#state.linearCompute !== "f32") {
       throw new ExecutionError("linear: i2 常駐は linearCompute 'f32' のみ対応（ADR 0097）");
+    }
+    // packed 活性（ADR 0105）を受け取ると宣言された linear が並列 GEMV へ落ちなければ、
+    // `vec4<u32>` の束縛に f32 の語が流れる = 例外なしの沈黙誤値になる。対付けの受理は
+    // fusion.ts の 1 箇所だが、**同じ述語で**ここでも確かめる（fail loudly）。
+    if (packed !== undefined) {
+      const eligible = packed.role === "read" &&
+        this.#state.linearGemvReduce === "parallel" && this.#state.linearCompute === "f32" &&
+        linearGemvParallelEligible(
+            weightStorage,
+            m,
+            n,
+            k,
+            weightStorage === "i4" ? this.#weightGroupSize(step) : undefined,
+          ) !== undefined;
+      if (!eligible) {
+        throw new ExecutionError(
+          `linear [${x.join(",")}] × [${weight.join(",")}]: ` +
+            "packed 活性（ADR 0105）と宣言されたが並列 GEMV へ落ちない",
+        );
+      }
     }
     // 整数内積の経路は **opt-in × 整数常駐（i8 / i4）× k > 0 × k % 4 == 0** の 4 条件が
     // 揃ったときだけ（ADR 0025 / w4a8 は perf-ledger Q-8）。既定の "f32" では 1 バイトも
@@ -1694,7 +1738,18 @@ export class RecipeBuilder {
       m === 1 && (weightStorage === "f16" || weightStorage === "f32") &&
       compute === "f32" && v4 && k > 0 && k % linearGemvUnit(weightStorage) === 0
     ) {
-      await this.#buildLinearGemv(step, binds, outs, builder, weightStorage, m, n, k);
+      await this.#buildLinearGemv(
+        step,
+        binds,
+        outs,
+        builder,
+        weightStorage,
+        m,
+        n,
+        k,
+        undefined,
+        undefined,
+      );
       return;
     }
     const i4Unit = linearGemvUnit("i4");
@@ -1703,7 +1758,7 @@ export class RecipeBuilder {
       gemvRows && weightStorage === "i2" && compute === "f32" && v4 &&
       k % linearGemvUnit("i2") === 0
     ) {
-      await this.#buildLinearGemv(step, binds, outs, builder, "i2", m, n, k);
+      await this.#buildLinearGemv(step, binds, outs, builder, "i2", m, n, k, undefined, packed);
       return;
     }
 
@@ -1712,7 +1767,7 @@ export class RecipeBuilder {
       groupSize !== undefined && groupSize % i4Unit === 0 &&
       k % i4Unit === 0
     ) {
-      await this.#buildLinearGemv(step, binds, outs, builder, "i4", m, n, k, groupSize);
+      await this.#buildLinearGemv(step, binds, outs, builder, "i4", m, n, k, groupSize, packed);
       return;
     }
     // i8 格納（lm_head — perf-ledger K-16）。i4 と同じ族・同じ変種で、違うのは 1 語が運ぶ
@@ -1721,7 +1776,7 @@ export class RecipeBuilder {
       gemvRows && weightStorage === "i8" && compute === "f32" && v4 &&
       k % linearGemvUnit("i8") === 0
     ) {
-      await this.#buildLinearGemv(step, binds, outs, builder, "i8", m, n, k);
+      await this.#buildLinearGemv(step, binds, outs, builder, "i8", m, n, k, undefined, packed);
       return;
     }
     // MUST: タイル幾何は平坦化後の行数 m のバケット（src/kernels/gemm-geometry.ts）。
@@ -1778,7 +1833,9 @@ export class RecipeBuilder {
     m: number,
     n: number,
     k: number,
-    groupSize?: number,
+    groupSize: number | undefined,
+    /** packed int8 活性の対（ADR 0105）。並列変種のときだけ立ちうる。 */
+    packed: PackedActivations | undefined,
   ): Promise<void> {
     const limit = this.#state.gpu.limits.maxComputeWorkgroupsPerDimension;
     const [x, weight] = step.inputShapes;
@@ -1793,10 +1850,15 @@ export class RecipeBuilder {
       : defaultLinearGemvRowsVariant(storage, m, n, this.#state.linearGemvRowsThreadTarget);
     const variant = rowsVariant ?? defaultLinearGemvVariant({ storage, n, k });
     const rows = rowsVariant?.rows ?? 1;
+    // packed 活性の変種は並列（非 subgroup）だけが持つ。`#buildLinear` の門を通っていれば
+    // ここは必ず `lanes !== undefined && !subgroup` になる。
+    const packedScale = packed === undefined ? undefined : packed.scale;
     const key = lanes !== undefined
       ? subgroup
         ? linearGemvSubgroupKey(storage, groupSize, lanes)
-        : linearGemvParallelKey(storage, groupSize, lanes)
+        : packedScale === undefined
+        ? linearGemvParallelKey(storage, groupSize, lanes)
+        : linearGemvParallelPackedKey(storage, groupSize, lanes)
       : rowsVariant === undefined
       ? linearGemvKey(storage, groupSize, variant)
       : linearGemvRowsKey(storage, groupSize, rowsVariant);
@@ -1805,14 +1867,19 @@ export class RecipeBuilder {
       lanes !== undefined
         ? subgroup
           ? linearGemvSubgroupWgsl(storage, groupSize, lanes)
-          : linearGemvParallelWgsl(storage, groupSize, lanes)
+          : packedScale === undefined
+          ? linearGemvParallelWgsl(storage, groupSize, lanes)
+          : linearGemvParallelPackedWgsl(storage, groupSize, lanes)
         : rowsVariant === undefined
         ? linearGemvWgsl(storage, groupSize, variant)
         : linearGemvRowsWgsl(storage, groupSize, rowsVariant),
     );
     // uniform は既定経路と同じ 3 語（束縛レイアウトを分けない）。整除の検査は族側の 1 箇所。
+    // packed 変種だけが Dims の末尾へ活性 scale を 1 語足す。
     const params = this.#writeParams(
-      linearGemvParams(storage, m, n, k, groupSize),
+      packedScale === undefined
+        ? linearGemvParams(storage, m, n, k, groupSize)
+        : linearGemvParallelPackedParams(storage, m, n, k, packedScale, groupSize),
       PARAMS_UNIFORM_USAGE,
     );
     builder.dispatch({
@@ -1974,22 +2041,39 @@ export class RecipeBuilder {
     });
   }
 
-  /** 固定 SRQ の表は既存の不変 params キャッシュで保持する（ADR 0097）。 */
+  /**
+   * 固定 SRQ の表は既存の不変 params キャッシュで保持する（ADR 0097）。
+   *
+   * `packed` が `"write"` のときは出力を packed int8（u32 1 語 = 4 要素）で書く別キーへ落とす
+   * （ADR 0105）。出力バッファの確保は宣言 shape のまま（= 実際に書くのはその 1/4）で、
+   * アリーナのバケットを動かさない。
+   */
   async #buildStaticQuantize(
     step: NodePlan,
     binds: readonly BindingSource[],
     outs: readonly BindingSource[],
     builder: StepRecipeBuilder,
+    packed: PackedActivations | undefined,
   ): Promise<void> {
     const count = numel(step.outputs[0].shape);
     const scale = staticQuantizeScale(step.node.attrs, `nodes (${step.node.op})`);
+    if (packed !== undefined && packed.role !== "write") {
+      throw new ExecutionError(
+        `static_quantize: packed 活性の役割 '${packed.role}' はこの op には来ない`,
+      );
+    }
+    const writesPacked = packed !== undefined;
+    const key = writesPacked ? STATIC_QUANTIZE_PACKED_KEY : STATIC_QUANTIZE_KEY;
     const { pipeline, layout, roles } = await this.#state.cache.get(
-      STATIC_QUANTIZE_KEY,
-      STATIC_QUANTIZE_WGSL,
+      key,
+      writesPacked ? STATIC_QUANTIZE_PACKED_WGSL : STATIC_QUANTIZE_WGSL,
     );
-    const params = this.#writeParams(staticQuantizeParams(count, scale), PARAMS_UNIFORM_USAGE);
+    const params = this.#writeParams(
+      writesPacked ? staticQuantizePackedParams(count, scale) : staticQuantizeParams(count, scale),
+      PARAMS_UNIFORM_USAGE,
+    );
     builder.dispatch({
-      key: STATIC_QUANTIZE_KEY,
+      key,
       pipeline,
       layout,
       roles,
@@ -1997,7 +2081,7 @@ export class RecipeBuilder {
       bindings: [{ binding: 1, source: binds[0] }, { binding: 2, source: outs[0] }],
       workgroups: [
         gridStrideWorkgroups(
-          count,
+          writesPacked ? count / 4 : count,
           STATIC_QUANTIZE_WORKGROUP_SIZE,
           this.#state.gpu.limits.maxComputeWorkgroupsPerDimension,
         ),

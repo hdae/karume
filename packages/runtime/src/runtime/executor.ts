@@ -985,6 +985,8 @@ type SessionState = {
   readonly rowBlockSplit: number | undefined;
   readonly fuseRmsNormAdd: boolean;
   readonly fuseLinearStaticQuantize: boolean;
+  /** 固定 SRQ の活性を packed int8 で並列 GEMV へ渡す（ADR 0105）。 */
+  readonly packedStaticQuantize: boolean;
   readonly useCounts: ReadonlyMap<string, number>;
   readonly dtypes: ReadonlyMap<string, IrDtype>;
   readonly outputNames: ReadonlySet<string>;
@@ -1086,6 +1088,12 @@ export class Session {
     if (options.fuseRmsNormAdd !== undefined && typeof options.fuseRmsNormAdd !== "boolean") {
       throw new ExecutionError("options.fuseRmsNormAdd はbooleanでなければならない");
     }
+    if (
+      options.packedStaticQuantize !== undefined &&
+      typeof options.packedStaticQuantize !== "boolean"
+    ) {
+      throw new ExecutionError("options.packedStaticQuantize はbooleanでなければならない");
+    }
     const rmsNormReduce = options.rmsNormReduce === undefined ? "workgroup" : options.rmsNormReduce;
     if (rmsNormReduce !== "workgroup" && rmsNormReduce !== "subgroup32") {
       // 診断で利用者の変換を呼ばない（`String(x)` は `Symbol.toPrimitive` / `toString` を走らせ、
@@ -1127,6 +1135,16 @@ export class Session {
     ) {
       throw new ExecutionError(
         "fuseLinearStaticQuantize は linearGemvReduce: parallel / linearCompute: f32 のみ対応",
+      );
+    }
+    // packed 活性の変種を持つのは並列 GEMV 族だけ（ADR 0105）。黙って f32 経路へ落とすと
+    // 「指定したのに効かない」席になるので、融合と同じ流儀で拒否する。
+    if (
+      options.packedStaticQuantize === true &&
+      (linearGemvReduce !== "parallel" || linearCompute !== "f32")
+    ) {
+      throw new ExecutionError(
+        "packedStaticQuantize は linearGemvReduce: parallel / linearCompute: f32 のみ対応",
       );
     }
     if (linearGemvReduce !== "sequential" && linearCompute !== "f32") {
@@ -1596,6 +1614,7 @@ export class Session {
       rowBlockSplit: options[ROW_BLOCK_SPLIT],
       fuseRmsNormAdd: options.fuseRmsNormAdd ?? false,
       fuseLinearStaticQuantize: options.fuseLinearStaticQuantize ?? false,
+      packedStaticQuantize: options.packedStaticQuantize ?? false,
       rmsNormReduce,
       useCounts: countUses(graph),
       dtypes: declaredDtypes(graph),
@@ -2734,7 +2753,10 @@ export class Session {
     const { maxStorageBufferBindingSize, maxComputeWorkgroupsPerDimension } =
       this.#state.gpu.limits;
     // 実体を融合の純関数へ渡さず、プラン導出時だけ格納記述へ射影する。
-    const weightLayouts = this.#state.fuseLinearStaticQuantize
+    // packed 活性の対付け（ADR 0105）も消費先 linear の格納形を見るので、どちらかの席が
+    // 立っていれば射影する。
+    const weightLayouts = this.#state.fuseLinearStaticQuantize ||
+        this.#state.packedStaticQuantize
       ? new Map(
         [...this.#state.residentWeights].map(([name, weight]): [string, FusionWeightLayout] => [
           name,
@@ -2748,6 +2770,7 @@ export class Session {
       useCounts: this.#state.useCounts,
       fuseRmsNormAdd: this.#state.fuseRmsNormAdd,
       fuseLinearStaticQuantize: this.#state.fuseLinearStaticQuantize,
+      packedStaticQuantize: this.#state.packedStaticQuantize,
       linearGemvReduce: this.#state.linearGemvReduce,
       linearCompute: this.#state.linearCompute,
       ...(weightLayouts === undefined ? {} : { weightLayouts }),

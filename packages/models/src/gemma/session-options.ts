@@ -4,7 +4,7 @@ import type { SessionOptions } from "@karume/runtime";
 
 type GemmaSessionOptions = Pick<
   SessionOptions,
-  "linearGemvReduce" | "fuseRmsNormAdd" | "fuseLinearStaticQuantize"
+  "linearGemvReduce" | "fuseRmsNormAdd" | "fuseLinearStaticQuantize" | "packedStaticQuantize"
 >;
 
 // DECIDED: docs/decisions/0104-gemma-fast-quant.md
@@ -29,6 +29,9 @@ export const resolveGemmaSessionOptions = (
   const fuseLinearStaticQuantize = overrides.fuseLinearStaticQuantize === undefined
     ? quant.fuseLinearStaticQuantize
     : overrides.fuseLinearStaticQuantize;
+  // packedStaticQuantize（ADR 0105）は**呼び手の明示指定だけ**で入る。manifest 所有の
+  // 語彙（hub の SessionSpec）にはまだ席が無く、採用が決まってから足す。
+  const packedStaticQuantize = overrides.packedStaticQuantize;
   if (
     linearGemvReduce !== undefined && linearGemvReduce !== "sequential" &&
     linearGemvReduce !== "parallel" && linearGemvReduce !== "parallel-subgroup32"
@@ -39,14 +42,23 @@ export const resolveGemmaSessionOptions = (
   if (fuseLinearStaticQuantize !== undefined && typeof fuseLinearStaticQuantize !== "boolean") {
     throw new Error(`${where}: fuseLinearStaticQuantizeはbooleanでなければならない`);
   }
+  if (packedStaticQuantize !== undefined && typeof packedStaticQuantize !== "boolean") {
+    throw new Error(`${where}: packedStaticQuantizeはbooleanでなければならない`);
+  }
   if (fuseLinearStaticQuantize === true && linearGemvReduce !== "parallel") {
     throw new Error(
       `${where}: fuseLinearStaticQuantizeはlinearGemvReduce: parallelが必要`,
+    );
+  }
+  if (packedStaticQuantize === true && linearGemvReduce !== "parallel") {
+    throw new Error(
+      `${where}: packedStaticQuantizeはlinearGemvReduce: parallelが必要`,
     );
   }
   return {
     ...(linearGemvReduce === undefined ? {} : { linearGemvReduce }),
     ...(fuseRmsNormAdd === undefined ? {} : { fuseRmsNormAdd }),
     ...(fuseLinearStaticQuantize === undefined ? {} : { fuseLinearStaticQuantize }),
+    ...(packedStaticQuantize === undefined ? {} : { packedStaticQuantize }),
   };
 };

@@ -82,7 +82,7 @@
  */
 
 import { CodegenError } from "../codegen/errors.ts";
-import { gemmParams } from "./gemm.ts";
+import { gemmParams, gemmUsesVec4 } from "./gemm.ts";
 import { staticQuantizeParams } from "./static-quantize.ts";
 import {
   i4GroupKeyPart,
@@ -369,8 +369,13 @@ export const linearGemvRowsKey = (
  * 出力は `f32`（1 スレッド 1 列のスカラ書き — 既定 v4 経路の `vec4<f32>` と違い n の整除を
  * 要らない）。
  */
-const bindings = (unit: number, storage: WeightStorage, quantize = false): string =>
-  `@group(0) @binding(1) var<storage, read> x: array<vec4<f32>>;
+const bindings = (
+  unit: number,
+  storage: WeightStorage,
+  quantize = false,
+  packed = false,
+): string =>
+  `@group(0) @binding(1) var<storage, read> x: array<vec4<${packed ? "u32" : "f32"}>>;
 // 行頭が 16 B 整列なのは k % ${unit} == 0 から（適格判定が保証する）
 @group(0) @binding(2) var<storage, read> w: array<vec4<${storage === "f32" ? "f32" : "u32"}>>;
 @group(0) @binding(3) var<storage, read> bias: array<f32>;
@@ -393,15 +398,43 @@ const unitLoads = (
   unitExpr: string,
   shift: number | undefined,
   inputBase = "",
+  packed = false,
 ): string => {
   const unit = linearGemvUnit(storage);
   const groupScale = storage === "i4"
     ? `
     let ws${slot} = wscale[scale_base + ((unit${slot} * ${unit}u) >> ${shift}u)];`
     : "";
+  // packed 活性は 1 束縛要素（`vec4<u32>`）が 16 要素を運ぶ（f32 の quad は 4 要素）。
   return `    let unit${slot} = ${unitExpr};
     let pw${slot} = w[row_base + unit${slot}];${groupScale}
-    let xq${slot} = ${inputBase}unit${slot} * ${unit / 4}u;`;
+    let xq${slot} = ${inputBase}unit${slot} * ${unit / (packed ? 16 : 4)}u;`;
+};
+
+/** 語内の成分名（`vec4` の静的添字 — Metal の動的添字を避ける規律）。 */
+const LANES = ["x", "y", "z", "w"] as const;
+
+/**
+ * 活性 1 quad（4 要素）を読む 1 行。既定は `vec4<f32>` の quad をそのまま引く。
+ *
+ * packed 活性（ADR 0105）では束縛が `array<vec4<u32>>` になり、**16 要素 = 1 本**で読める。
+ * 語は 4 quad に 1 度だけ読み、quad ごとに `unpack4xI8` で int8 コードへ戻してから
+ * `f32(code) * x_scale` で f32 値を作る。これで 1 重み語あたりの活性ロードが
+ * i2 は 16 → 4 本・i4 は 8 → 2 本・i8 は 4 → 1 本になる（research 2026-09-19 §14 の律速）。
+ *
+ * MUST: 復元の字面は `vec4<f32>(unpack4xI8(…)) * dims.x_scale` = **要素ごとの f32 1 乗算**。
+ * 生産側 SRQ の出力値表（static-quantize.ts の `params[129 + level]` = `Math.fround(level*scale)`）
+ * と要素ごとに u32 一致する — level ≤ 128 と f32 scale の積は f64 で厳密なので、表側も
+ * この乗算も「厳密な積を正しく丸めた f32」に一致する（ADR 0105 の決定 3）。
+ * MUST: 語の成分は静的添字（`.x` / `.y` / `.z` / `.w`）で引く（既定経路と同じ Metal の規律）。
+ */
+const activationQuad = (packed: boolean, slot: string, name: string, quad: number): string => {
+  if (!packed) return `    let ${name} = x[xq${slot} + ${quad}u];`;
+  const word = quad >> 2;
+  const load = quad % 4 === 0 ? `    let xp${slot}_${word} = x[xq${slot} + ${word}u];\n` : "";
+  return `${load}    let ${name} = vec4<f32>(unpack4xI8(xp${slot}_${word}.${
+    LANES[quad & 3]
+  })) * dims.x_scale;`;
 };
 
 /**
@@ -416,7 +449,7 @@ const unitLoads = (
  * MUST: このテキストは行ブロック化の前と 1 バイトも変えない（decode の生成物 —
  * tests/fixtures/wgsl/linear_gemv_*.wgsl が検出器）。
  */
-const unitMacsI4 = (slot: string): string => {
+const unitMacsI4 = (slot: string, packed = false): string => {
   const lanes = ["x", "y", "z", "w"] as const;
   return lanes.map((component, quad) => {
     const bytes = `b${slot}_${quad}`;
@@ -433,8 +466,8 @@ const unitMacsI4 = (slot: string): string => {
       ];
     }).join("\n");
     return `    let ${bytes} = unpack4xU8(pw${slot}.${component});
-    let ${xa} = x[xq${slot} + ${quad * 2}u];
-    let ${xb} = x[xq${slot} + ${quad * 2 + 1}u];
+${activationQuad(packed, slot, xa, quad * 2)}
+${activationQuad(packed, slot, xb, quad * 2 + 1)}
 ${macs}`;
   }).join("\n");
 };
@@ -447,7 +480,7 @@ ${macs}`;
  * MUST: 展開順は語内の要素昇順（成分 x→w × レーン x→w）・字面は `f32(q) * ws` の要素ごと乗算。
  * MUST: x は `vec4<f32>` 束縛から**静的成分**で引く（i4 版と同じ Metal の規律）。
  */
-const unitMacsI8 = (slot: string): string => {
+const unitMacsI8 = (slot: string, packed = false): string => {
   const lanes = ["x", "y", "z", "w"] as const;
   return lanes.map((component, quad) => {
     const bytes = `b${slot}_${quad}`;
@@ -456,7 +489,7 @@ const unitMacsI8 = (slot: string): string => {
       `    acc = acc + ${xa}.${lane} * (f32(${bytes}.${lane}) * ${WEIGHT_SCALE_VAR});`
     ).join("\n");
     return `    let ${bytes} = unpack4xI8(pw${slot}.${component});
-    let ${xa} = x[xq${slot} + ${quad}u];
+${activationQuad(packed, slot, xa, quad)}
 ${macs}`;
   }).join("\n");
 };
@@ -487,7 +520,7 @@ ${macs}`;
 };
 
 /** INT2 の16 B語を K 昇順に積和する。成分添字を静的にして Metal の動的添字を避ける。 */
-const unitMacsI2 = (slot: string): string => {
+const unitMacsI2 = (slot: string, packed = false): string => {
   const lanes = ["x", "y", "z", "w"] as const;
   return lanes.flatMap((component, word) =>
     lanes.map((_, byte) => {
@@ -495,7 +528,7 @@ const unitMacsI2 = (slot: string): string => {
       const quantized = `q${slot}_${index}`;
       const decoded = `d${slot}_${index}`;
       const activation = `x${slot}_${index}_0`;
-      const products = `    let ${activation} = x[xq${slot} + ${index}u];
+      const products = `${activationQuad(packed, slot, activation, index)}
 ${lanes.map((lane) => `    acc = acc + ${activation}.${lane} * ${decoded}.${lane};`).join("\n")}`;
       return `    let ${quantized} = (pw${slot}.${component} >> ${byte * 8}u) & 255u;
     let ${decoded} = vec4<f32>(vec4<i32>(vec4<u32>(${quantized}, ${quantized} >> 2u, ${quantized} >> 4u, ${quantized} >> 6u) & vec4<u32>(3u)) - vec4<i32>(2)) * ${WEIGHT_SCALE_VAR};
@@ -524,16 +557,16 @@ const rowsMacsI2 = (slot: string, rows: number): string =>
       `    acc${row} = linear_i2_word(pw${slot}, xr${row} + xq${slot}, wscale_v, acc${row});`,
   ).join("\n");
 
-const unitMacs = (storage: WeightStorage, slot: string): string =>
+const unitMacs = (storage: WeightStorage, slot: string, packed = false): string =>
   storage === "f32"
     ? unitMacsF32(slot)
     : storage === "f16"
     ? unitMacsF16(slot)
     : storage === "i4"
-    ? unitMacsI4(slot)
+    ? unitMacsI4(slot, packed)
     : storage === "i2"
-    ? unitMacsI2(slot)
-    : unitMacsI8(slot);
+    ? unitMacsI2(slot, packed)
+    : unitMacsI8(slot, packed);
 
 /**
  * I4/I8も行ごとの積和を小さな関数へまとめる。K昇順とf32の丸め点はM=1と同じ。
@@ -760,6 +793,33 @@ export const linearGemvParallelLanes = (
   )?.lanes;
 };
 
+/**
+ * 「この形が並列 GEMV（{@link linearGemvParallelWgsl} 族）へ落ちるか」を返す**唯一の純関数**。
+ *
+ * {@link linearGemvParallelLanes}（実測形の表引き）に、recipe-builder の `#buildLinear` が
+ * GEMV 族へ入れる条件（格納・`k % 刻み`・i4 の group 長・出力 vec4 の実測範囲）を重ねたもの。
+ * packed 活性の対付け（ADR 0105）はプラン時にこの述語で消費先を判定し、recipe-builder は
+ * 同じ述語で「packed と宣言された linear が本当に並列 GEMV へ落ちる」ことを検査する。
+ *
+ * MUST: 2 箇所が同じ 1 本を読む。別に持つと、片方だけ広いときに `vec4<u32>` 束縛へ f32 の語を
+ * 流す形（例外なしの沈黙誤値）が出る。
+ */
+export const linearGemvParallelEligible = (
+  storage: WeightStorage,
+  m: number,
+  n: number,
+  k: number,
+  group?: number,
+): LinearGemvParallelLanes | undefined => {
+  if (storage !== "i2" && storage !== "i4" && storage !== "i8") return undefined;
+  if (!gemmUsesVec4(k, n)) return undefined;
+  if (k <= 0 || k % linearGemvUnit(storage) !== 0) return undefined;
+  if (storage === "i4") {
+    if (group === undefined || group % linearGemvUnit("i4") !== 0) return undefined;
+  } else if (group !== undefined) return undefined;
+  return linearGemvParallelLanes(storage, m, n, k, group);
+};
+
 export const linearGemvParallelKey = (
   storage: WeightStorage,
   group: number | undefined,
@@ -808,6 +868,93 @@ export const linearGemvStaticQuantizeWgsl = (
   lanes: LinearGemvParallelLanes,
 ): string => parallelWgsl(storage, group, lanes, true);
 
+/**
+ * packed int8 活性の変種（ADR 0105）を表すキー断片。**既存キーの末尾に足す**ので、診断・census が
+ * 読んでいる格納判別子（`:wi4g512` / `:l4` / `:static-quantize:v1`）の位置は 1 つも動かない。
+ */
+const PACKED_ACTIVATION_KEY_PART = ":packed-x-i8";
+
+export const linearGemvParallelPackedKey = (
+  storage: WeightStorage,
+  group: number | undefined,
+  lanes: LinearGemvParallelLanes,
+): string => `${linearGemvParallelKey(storage, group, lanes)}${PACKED_ACTIVATION_KEY_PART}`;
+
+/**
+ * 並列 GEMV の packed 活性変種。幾何・lane 表・縮約木・bias の足し順は
+ * {@link linearGemvParallelWgsl} と 1 バイトも変えず、**活性の読みと復元だけ**が違う。
+ */
+export const linearGemvParallelPackedWgsl = (
+  storage: WeightStorage,
+  group: number | undefined,
+  lanes: LinearGemvParallelLanes,
+): string => parallelWgsl(storage, group, lanes, false, true);
+
+export const linearGemvStaticQuantizePackedKey = (
+  storage: WeightStorage,
+  group: number | undefined,
+  lanes: LinearGemvParallelLanes,
+): string => `${linearGemvStaticQuantizeKey(storage, group, lanes)}${PACKED_ACTIVATION_KEY_PART}`;
+
+/** SRQ 融合エピローグ付き並列 GEMV の packed 活性変種（出力側 SRQ は f32 のまま）。 */
+export const linearGemvStaticQuantizePackedWgsl = (
+  storage: WeightStorage,
+  group: number | undefined,
+  lanes: LinearGemvParallelLanes,
+): string => parallelWgsl(storage, group, lanes, true, true);
+
+/**
+ * packed 活性の復元 scale（= 生産側 SRQ の f32 scale）を u32 の bit 列にする。
+ *
+ * MUST: 正・有限・厳密に f32 表現できる値（生産側 {@link staticQuantizeParams} と同じ門）。
+ * 0 は恒等 SRQ で packed int8 に落とせないので、ここでも拒否する（fail loudly）。
+ */
+const activationScaleBits = (scale: number): number => {
+  if (!Number.isFinite(scale) || scale <= 0 || Math.fround(scale) !== scale) {
+    throw new CodegenError(
+      `linear_gemv packed: 活性 scale ${scale} は正・有限で厳密に f32 表現できる値が必要`,
+    );
+  }
+  const scratch = new Float32Array(1);
+  scratch[0] = scale;
+  return new Uint32Array(scratch.buffer)[0];
+};
+
+/** packed 活性変種の params（Dims の最終メンバ `x_scale` に 1 語足すだけ）。 */
+export const linearGemvParallelPackedParams = (
+  storage: WeightStorage,
+  m: number,
+  n: number,
+  k: number,
+  xScale: number,
+  group?: number,
+): Uint32Array<ArrayBuffer> => {
+  assertRowsStorage(storage);
+  const params = linearGemvParams(storage, m, n, k, group);
+  params[3] = activationScaleBits(xScale);
+  return params;
+};
+
+/**
+ * SRQ 融合エピローグ付き packed 活性変種の params。既存の並び（`m/n/k/rounding_mask` +
+ * 出力側 SRQ の表 260 語）をそのまま保ち、**末尾**へ `x_scale` を 1 語足す
+ * （`array<vec4<u32>>` の 16 B 整列で語 264 に落ちる — WGSL の Dims と同じ導出）。
+ */
+export const linearGemvStaticQuantizePackedParams = (
+  storage: WeightStorage,
+  m: number,
+  n: number,
+  k: number,
+  xScale: number,
+  scale: number,
+  group?: number,
+): Uint32Array<ArrayBuffer> => {
+  const params = new Uint32Array(268);
+  params.set(linearGemvStaticQuantizeParams(storage, m, n, k, scale, group));
+  params[264] = activationScaleBits(xScale);
+  return params;
+};
+
 /** SRQの整数表を共用し、128境界の上限探索だけを固定回数へ展開する。 */
 const staticQuantizeEpilogue = (): string => `
 fn srqWord(index: u32) -> u32 { return dims.srq[index >> 2u][index & 3u]; }
@@ -833,6 +980,7 @@ const parallelWgsl = (
   group: number | undefined,
   lanes: LinearGemvParallelLanes,
   quantize: boolean,
+  packed = false,
 ): string => {
   if (![2, 4, 8, 16, 32].includes(lanes)) {
     throw new CodegenError("linear_gemv_parallel: 不正なlane数");
@@ -840,14 +988,19 @@ const parallelWgsl = (
   assertRowsStorage(storage);
   const unit = linearGemvUnit(storage);
   const shift = gemvGroupShift(storage, group);
-  return `// karume linear gemv K parallel (${storage}, ${lanes} lanes/output)
+  // MUST: `x_scale` は Dims の**最終メンバ**（packed 変種の params はこの位置へ 1 語足す）。
+  return `// karume linear gemv K parallel (${storage}, ${lanes} lanes/output${
+    packed ? ", packed int8 活性" : ""
+  })
 struct Dims {
   m: u32,
   n: u32,
-  k: u32,${quantize ? "\n  rounding_mask: u32,\n  srq: array<vec4<u32>, 65>," : ""}
+  k: u32,${quantize ? "\n  rounding_mask: u32,\n  srq: array<vec4<u32>, 65>," : ""}${
+    packed ? "\n  x_scale: f32," : ""
+  }
 }
 @group(0) @binding(0) var<uniform> dims: Dims;
-${bindings(unit, storage, quantize)}${quantize ? staticQuantizeEpilogue() : ""}
+${bindings(unit, storage, quantize, packed)}${quantize ? staticQuantizeEpilogue() : ""}
 var<workgroup> partial: array<f32, 128>;
 
 @compute @workgroup_size(128)
@@ -860,8 +1013,8 @@ fn main(@builtin(local_invocation_index) lid: u32, @builtin(workgroup_id) wg: ve
     let units = dims.k / ${unit}u;
     let row_base = col * units;${scaleSetupWgsl(storage, shift)}
     for (var unit = lane; unit < units; unit += ${lanes}u) {
-${unitLoads(storage, "t", "unit", shift, "wg.y * (dims.k / 4u) + ")}
-${unitMacs(storage, "t")}
+${unitLoads(storage, "t", "unit", shift, `wg.y * (dims.k / ${packed ? 16 : 4}u) + `, packed)}
+${unitMacs(storage, "t", packed)}
     }
   }
   partial[lid] = acc;

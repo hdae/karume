@@ -51,9 +51,12 @@
  */
 
 import {
+  linearGemvParallelEligible,
   type LinearGemvParallelLanes,
-  linearGemvParallelLanes,
   linearGemvStaticQuantizeKey,
+  linearGemvStaticQuantizePackedKey,
+  linearGemvStaticQuantizePackedParams,
+  linearGemvStaticQuantizePackedWgsl,
   linearGemvStaticQuantizeParams,
   linearGemvStaticQuantizeWgsl,
 } from "../kernels/linear-gemv.ts";
@@ -71,6 +74,7 @@ import {
   SAFE_SOFTMAX_OP,
   sliceAttrs,
   softmaxDim,
+  STATIC_QUANTIZE_OP,
   staticQuantizeScale,
   SYM_PREFIX_SLICE_OP,
 } from "../ops.ts";
@@ -128,10 +132,11 @@ type FusionRuleName =
 
 /**
  * 診断カウンタの見出し。融合ルールに加えて、0 dispatch の別名化のうち**条件付きで外れうる**
- * 恒等 expand（{@link ExecStep} の `aliasesInput`）を数える。reshape の別名化は無条件なので
- * 数えない（外れようがない = 観測する意味がない）。
+ * 恒等 expand（{@link ExecStep} の `aliasesInput`）と、packed int8 活性で受け渡す
+ * 固定 SRQ の本数（ADR 0105）を数える。reshape の別名化は無条件なので数えない
+ * （外れようがない = 観測する意味がない）。
  */
-type FusionCounterName = FusionRuleName | "identityExpand";
+type FusionCounterName = FusionRuleName | "identityExpand" | "packedStaticQuantize";
 
 /** ルール別の適用回数。「融合が黙って外れて性能だけ落ちる」事故の唯一の観測点。 */
 export type FusionCounts = Readonly<Record<FusionCounterName, number>>;
@@ -229,6 +234,19 @@ export type FusedStep = {
   readonly dispatches: readonly FusedDispatch[];
 };
 
+/**
+ * packed int8 活性の受け渡し（ADR 0105）— 固定 SRQ の出力を u32 1 語 = int8 コード 4 個で
+ * 渡す対の宣言。`role` は**このノードがどちら側か**で、`scale` はどちらの側でも
+ * **生産側 SRQ の f32 scale**（消費側が `f32(code) * scale` で復元するのに要る）。
+ *
+ * MUST: 対の受理は {@link planFusions} の 1 箇所で決まる。生産側だけ / 消費側だけを立てると、
+ * `vec4<u32>` 束縛に f32 の語が流れる形（例外なしの沈黙誤値）になる。
+ */
+export type PackedActivations = {
+  readonly role: "write" | "read";
+  readonly scale: number;
+};
+
 type NodeStep = {
   readonly kind: "node";
   readonly plan: NodePlan;
@@ -238,6 +256,8 @@ type NodeStep = {
    * 束縛後の入出力 shape が rank を含め完全一致するとき（= 複製軸を持たない恒等写像）だけ真。
    */
   readonly aliasesInput: boolean;
+  /** packed int8 活性の対（ADR 0105）。`undefined` = 従来どおり f32 で受け渡す。 */
+  readonly packedActivations?: PackedActivations;
 };
 
 export type ExecStep = NodeStep | FusedStep;
@@ -280,10 +300,23 @@ type FusionContext = {
   /** 明示指定時だけRMS→addを融合する（ADR 0099）。 */
   readonly fuseRmsNormAdd?: boolean;
   readonly fuseLinearStaticQuantize?: boolean;
+  /** 固定 SRQ の活性を packed int8 で並列 GEMV へ渡す（ADR 0105）。 */
+  readonly packedStaticQuantize?: boolean;
   readonly linearGemvReduce?: LinearGemvReduce;
   readonly linearCompute?: "f32" | "f16" | "a8";
   readonly weightLayouts?: ReadonlyMap<string, FusionWeightLayout>;
   readonly rmsNormReduce?: "workgroup" | "subgroup32";
+};
+
+/**
+ * ルールが見る文脈 = 呼び手の {@link FusionContext} + **走査の内側で決まる** packed 活性の対
+ * （値名 → 生産側 SRQ の scale）。
+ *
+ * MUST: `packedValues` は呼び手が宣言するものではない（{@link planFusions} が 1 度目の走査の
+ * 結果から導く — 素のノードとして残った SRQ だけが対象なので、走査の前には決まらない）。
+ */
+type FusionScanContext = FusionContext & {
+  readonly packedValues: ReadonlyMap<string, number>;
 };
 
 const sameShape = (a: readonly number[], b: readonly number[]): boolean =>
@@ -391,7 +424,7 @@ type FusionRule = {
   readonly apply: (
     nodes: readonly NodePlan[],
     index: number,
-    context: FusionContext,
+    context: FusionScanContext,
   ) => FusionHit | undefined;
 };
 
@@ -448,7 +481,7 @@ const defineRule = <Matched extends FusionMatch>(rule: {
   readonly match: (
     nodes: readonly NodePlan[],
     index: number,
-    context: FusionContext,
+    context: FusionScanContext,
   ) => Matched | undefined;
   readonly build: (
     matched: Matched,
@@ -1353,6 +1386,8 @@ type LinearStaticQuantizeMatch = FusionMatch & {
   readonly n: number;
   readonly k: number;
   readonly scale: number;
+  /** packed int8 活性で受け取るときの生産側 SRQ の scale（f32 のままなら `undefined`）。 */
+  readonly packedX: number | undefined;
   readonly workgroups: readonly [number, number, number];
 };
 
@@ -1379,7 +1414,7 @@ const LINEAR_STATIC_QUANTIZE_RULE = defineRule<LinearStaticQuantizeMatch>({
     const m = numel(linear.inputShapes[0].slice(0, -1));
     const [n, k] = linear.inputShapes[1];
     const group = weight.storage === "i4" ? weight.groupSize : undefined;
-    const lanes = linearGemvParallelLanes(weight.storage, m, n, k, group);
+    const lanes = linearGemvParallelEligible(weight.storage, m, n, k, group);
     if (lanes === undefined) return undefined;
     // tile型はgrid-strideへ縮退しない。通常のlinearと同じdevice上限で拒否する。
     const workgroups: readonly [number, number, number] = [
@@ -1410,6 +1445,9 @@ const LINEAR_STATIC_QUANTIZE_RULE = defineRule<LinearStaticQuantizeMatch>({
       n,
       k,
       scale: staticQuantizeScale(srq.node.attrs, "linear static_quantize fusion"),
+      // 活性側が packed int8 で渡ってくる形（ADR 0105）。受理は planFusions の 1 箇所で済んで
+      // おり、ここは「渡ってくるか」を読むだけ（出力側 SRQ は f32 のまま）。
+      packedX: context.packedValues.get(linear.node.ins[0]),
       workgroups,
     };
   },
@@ -1419,9 +1457,24 @@ const LINEAR_STATIC_QUANTIZE_RULE = defineRule<LinearStaticQuantizeMatch>({
     outputShape: m.shape,
     temps: [],
     dispatches: [{
-      key: linearGemvStaticQuantizeKey(m.storage, m.group, m.lanes),
-      wgsl: () => linearGemvStaticQuantizeWgsl(m.storage, m.group, m.lanes),
-      params: linearGemvStaticQuantizeParams(m.storage, m.m, m.n, m.k, m.scale, m.group),
+      key: m.packedX === undefined
+        ? linearGemvStaticQuantizeKey(m.storage, m.group, m.lanes)
+        : linearGemvStaticQuantizePackedKey(m.storage, m.group, m.lanes),
+      wgsl: () =>
+        m.packedX === undefined
+          ? linearGemvStaticQuantizeWgsl(m.storage, m.group, m.lanes)
+          : linearGemvStaticQuantizePackedWgsl(m.storage, m.group, m.lanes),
+      params: m.packedX === undefined
+        ? linearGemvStaticQuantizeParams(m.storage, m.m, m.n, m.k, m.scale, m.group)
+        : linearGemvStaticQuantizePackedParams(
+          m.storage,
+          m.m,
+          m.n,
+          m.k,
+          m.packedX,
+          m.scale,
+          m.group,
+        ),
       operands: [
         { kind: "bind", index: 0 },
         { kind: "bind", index: 1 },
@@ -1489,13 +1542,35 @@ export const planAliases = (nodes: readonly NodePlan[]): ReadonlySet<NodePlan> =
   return aliases;
 };
 
-/** ノード列を走査して融合ステップへ畳む。掴めなかったノードは素のまま並ぶ。 */
-export const planFusions = (
+const NO_PACKED: ReadonlyMap<string, number> = new Map();
+
+/**
+ * 素のノード 1 本に packed 活性の役割（ADR 0105）を付ける。生産側は固定 SRQ、消費側は
+ * その値を**活性スロット**に取る linear で、どちらも `packedValues` の 1 つの決定から従う。
+ */
+const packedRole = (
+  plan: NodePlan,
+  packed: ReadonlyMap<string, number>,
+): { readonly packedActivations: PackedActivations } | Record<never, never> => {
+  if (packed.size === 0) return {};
+  if (plan.node.op === STATIC_QUANTIZE_OP) {
+    const scale = packed.get(plan.outputs[0].name);
+    return scale === undefined ? {} : { packedActivations: { role: "write", scale } };
+  }
+  if (plan.node.op !== "linear") return {};
+  const scale = packed.get(plan.node.ins[0]);
+  return scale === undefined ? {} : { packedActivations: { role: "read", scale } };
+};
+
+/** ノード列を 1 度走査して融合ステップへ畳む。掴めなかったノードは素のまま並ぶ。 */
+const scanFusions = (
   nodes: readonly NodePlan[],
   context: FusionContext,
+  packed: ReadonlyMap<string, number>,
 ): FusionPlan => {
   const steps: ExecStep[] = [];
   const aliases = planAliases(nodes);
+  const scanContext: FusionScanContext = { ...context, packedValues: packed };
   const counts: Record<FusionCounterName, number> = {
     linearStaticQuantize: 0,
     rmsNormAdd: 0,
@@ -1505,15 +1580,16 @@ export const planFusions = (
     adaln: 0,
     rowBlockAttention: 0,
     identityExpand: 0,
+    packedStaticQuantize: packed.size,
   };
   const pushNode = (plan: NodePlan): void => {
     const alias = aliases.has(plan);
     if (alias && plan.contract.kind === "expand") counts.identityExpand += 1;
-    steps.push({ kind: "node", plan, aliasesInput: alias });
+    steps.push({ kind: "node", plan, aliasesInput: alias, ...packedRole(plan, packed) });
   };
   for (let index = 0; index < nodes.length;) {
     const hit = FUSION_RULES.reduce<FusionHit | undefined>(
-      (found, rule) => found ?? rule.apply(nodes, index, context),
+      (found, rule) => found ?? rule.apply(nodes, index, scanContext),
       undefined,
     );
     if (hit !== undefined) {
@@ -1528,6 +1604,122 @@ export const planFusions = (
     index += 1;
   }
   return { steps, counts };
+};
+
+/**
+ * 値名 → その値を消費するノード（延べ — 同じノードが 2 度取れば 2 回入る）。
+ */
+const consumersByValue = (
+  nodes: readonly NodePlan[],
+): ReadonlyMap<string, readonly NodePlan[]> => {
+  const consumers = new Map<string, NodePlan[]>();
+  for (const plan of nodes) {
+    for (const name of plan.node.ins) {
+      const found = consumers.get(name);
+      if (found === undefined) consumers.set(name, [plan]);
+      else found.push(plan);
+    }
+  }
+  return consumers;
+};
+
+/**
+ * この消費先が「packed 活性を受け取れる linear」か（ADR 0105 の対付けの消費側条件）。
+ *
+ * MUST: 活性スロット（`ins[0]`）でだけ取ること。重み / bias に同じ値が来る形は f32 の語を
+ * 期待する束縛なので、packed へ切り替えると黙って誤値になる。
+ * MUST: 並列 GEMV へ落ちる判定は {@link linearGemvParallelEligible} 1 本（recipe-builder の
+ * 門と同じ述語）。
+ */
+const readsPackedActivation = (
+  plan: NodePlan,
+  name: string,
+  context: FusionContext,
+): boolean => {
+  if (plan.node.op !== "linear" || plan.node.ins.length !== 3) return false;
+  if (plan.node.ins[0] !== name || plan.node.ins[1] === name || plan.node.ins[2] === name) {
+    return false;
+  }
+  if (!allF32([plan])) return false;
+  const weight = context.weightLayouts?.get(plan.node.ins[1]);
+  if (weight === undefined || weight.storage === "f16") return false;
+  const m = numel(plan.inputShapes[0].slice(0, -1));
+  const [n, k] = plan.inputShapes[1];
+  const group = weight.storage === "i4" ? weight.groupSize : undefined;
+  return linearGemvParallelEligible(weight.storage, m, n, k, group) !== undefined;
+};
+
+/**
+ * packed int8 活性で受け渡す固定 SRQ（ADR 0105）— 値名 → その SRQ の f32 scale。
+ *
+ * 受理は 4 条件:
+ *
+ * 1. 席（`packedStaticQuantize`）が立っており、`linearGemvReduce: parallel` /
+ *    `linearCompute: f32`（packed 変種を持つのは並列 GEMV 族だけ）。
+ * 2. **素のノードとして残った** `static_quantize`。linear→SRQ 融合（ADR 0103）に飲まれた
+ *    SRQ は出力側エピローグで、packed 出力は本段の範囲外なので対象にしない — だから
+ *    この判定は 1 度目の走査結果（`steps`）を入力に取る。
+ * 3. 出力が graph output でなく、最終次元 k が 16 の倍数（束縛は `vec4<u32>` = 16 要素単位で
+ *    読む）、scale が正・有限（scale 0 は恒等 SRQ で int8 コードに落とせない）。
+ * 4. 消費先が 1 本以上あり、**その全てが**並列 GEMV へ落ちる linear の活性スロット
+ *    （{@link readsPackedActivation}）。1 本でも GEMM / 逐次 GEMV / 他 op が混ざれば f32 のまま。
+ * 5. その値を消費する融合ステップが {@link LINEAR_STATIC_QUANTIZE_RULE} 以外に無いこと。
+ *
+ * MUST: 5 は**将来のルール**向けの不変条件。packed で読む綴りを持つのは
+ * linearStaticQuantize の融合だけなので、別のルールが linear を窓へ入れた瞬間、その
+ * 融合カーネルは packed の語を f32 として読む（例外なしの沈黙誤値）。現行 7 ルールの窓に
+ * `linear` は 1 本も無いので今は発火しないが、受理側に置かないと追加したルールだけが
+ * 黙って壊れる。
+ */
+const packedStaticQuantizeValues = (
+  nodes: readonly NodePlan[],
+  steps: readonly ExecStep[],
+  context: FusionContext,
+): ReadonlyMap<string, number> => {
+  if (
+    context.packedStaticQuantize !== true || context.linearGemvReduce !== "parallel" ||
+    context.linearCompute !== "f32"
+  ) return NO_PACKED;
+  const consumers = consumersByValue(nodes);
+  const foldedElsewhere = new Set<string>();
+  for (const step of steps) {
+    if (step.kind !== "fused" || step.rule === "linearStaticQuantize") continue;
+    for (const name of step.ins) foldedElsewhere.add(name);
+  }
+  const packed = new Map<string, number>();
+  for (const step of steps) {
+    if (step.kind !== "node" || step.plan.node.op !== STATIC_QUANTIZE_OP) continue;
+    const [output] = step.plan.outputs;
+    if (context.outputNames.has(output.name) || foldedElsewhere.has(output.name)) continue;
+    if (!allF32([step.plan])) continue;
+    const k = output.shape[output.shape.length - 1];
+    if (k === undefined || k <= 0 || k % 16 !== 0) continue;
+    const scale = staticQuantizeScale(step.plan.node.attrs, "packed static_quantize");
+    if (!Number.isFinite(scale) || scale <= 0) continue;
+    const uses = consumers.get(output.name) ?? [];
+    if (uses.length === 0) continue;
+    if (!uses.every((use) => readsPackedActivation(use, output.name, context))) continue;
+    packed.set(output.name, scale);
+  }
+  return packed;
+};
+
+/**
+ * ノード列を走査して融合ステップへ畳む。掴めなかったノードは素のまま並ぶ。
+ *
+ * packed 活性の席（ADR 0105）が立っているときだけ**走査を 2 度**回す。1 度目は対付けの入力
+ * （どの SRQ が素のノードとして残るか）を得るためで、2 度目が結果。
+ * MUST: packed の有無はどのルールの `match` 条件にも入らない（変わるのは掴んだ
+ * linear→SRQ 融合が組む dispatch のキー・WGSL・params だけ）ので、2 度の走査は**同じ窓を
+ * 同じルールが掴む** — 対付けの入力が 2 度目で動くことはない。
+ */
+export const planFusions = (
+  nodes: readonly NodePlan[],
+  context: FusionContext,
+): FusionPlan => {
+  const first = scanFusions(nodes, context, NO_PACKED);
+  const packed = packedStaticQuantizeValues(nodes, first.steps, context);
+  return packed.size === 0 ? first : scanFusions(nodes, context, packed);
 };
 
 /**

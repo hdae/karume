@@ -174,11 +174,13 @@ const fusionCounts = (
   stateShapes?: ReadonlyMap<string, readonly number[]>,
   fuseRmsNormAdd = false,
   fuseLinearStaticQuantize = false,
+  packedStaticQuantize = false,
 ): FusionCounts =>
   planFusions(planGraph(graph, bindSymbols(graph, inputShapes), stateShapes).nodes, {
     useCounts: countUses(graph),
     fuseRmsNormAdd,
     fuseLinearStaticQuantize,
+    packedStaticQuantize,
     linearGemvReduce: "parallel",
     linearCompute: "f32",
     weightLayouts: new Map(
@@ -214,6 +216,7 @@ const decodeFusionCounts = (
   rows: number,
   fuseRmsNormAdd = false,
   fuseLinearStaticQuantize = false,
+  packedStaticQuantize = false,
 ): FusionCounts => {
   const inputShapes = Object.fromEntries(
     graph.inputs.map((spec) => [
@@ -227,7 +230,14 @@ const decodeFusionCounts = (
       slot.shape.map((dim) => (typeof dim === "number" ? dim : 640)),
     ]),
   );
-  return fusionCounts(graph, inputShapes, stateShapes, fuseRmsNormAdd, fuseLinearStaticQuantize);
+  return fusionCounts(
+    graph,
+    inputShapes,
+    stateShapes,
+    fuseRmsNormAdd,
+    fuseLinearStaticQuantize,
+    packedStaticQuantize,
+  );
 };
 
 /**
@@ -251,6 +261,7 @@ const NONE: FusionCounts = {
   linearStaticQuantize: 0,
   rowBlockAttention: 0,
   identityExpand: 0,
+  packedStaticQuantize: 0,
 };
 
 Deno.test({
@@ -406,6 +417,19 @@ for (const family of ["gemma4", "gemma4-qat"]) {
           rmsNormAdd: 106,
           linearStaticQuantize: family === "gemma4-qat" && rows <= 8 ? 275 : 0,
         }, `${family} linear SRQ M=${rows}`);
+        // packed 活性（ADR 0105）は**素のまま残った SRQ** だけを掴む。QAT decode 計画
+        // （M ≤ 8）の 210 本がそれで、linear→SRQ 融合が掴む 275 本とは重ならない
+        // （あちらの出力側の消費先には linear 以外が混ざる）。prefill 計画（M ≥ 32）は
+        // 並列 GEMV に落ちないので 0 になる。融合の有無でこの数は動かない。
+        for (const fuseSrq of [false, true]) {
+          assertEquals(decodeFusionCounts(graph, rows, true, fuseSrq, true), {
+            ...NONE,
+            rope: 50,
+            rmsNormAdd: 106,
+            linearStaticQuantize: fuseSrq && family === "gemma4-qat" && rows <= 8 ? 275 : 0,
+            packedStaticQuantize: family === "gemma4-qat" && rows <= 8 ? 210 : 0,
+          }, `${family} packed SRQ M=${rows} fuse=${fuseSrq}`);
+        }
       }
     },
   });

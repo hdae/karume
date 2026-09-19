@@ -115,6 +115,7 @@ Deno.test({
         linearStaticQuantize: 0,
         rowBlockAttention: 0,
         identityExpand: 0,
+        packedStaticQuantize: 0,
       });
       assertEquals(diagnostics.pipelineCount, 3);
       // 重みアリーナは initializer 2 本に加えて params キャッシュ（Session 常駐）の実体も

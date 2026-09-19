@@ -740,6 +740,7 @@ Deno.test("adaLN の窓内 passthrough は他ルールの受理位置を潰さ�
     useCounts: countUses(ir),
     outputNames: new Set(ir.outputs),
     limits: TEST_LIMITS,
+    packedValues: new Map<string, number>(),
   };
   // 窓（layer_norm + reshape×3 + add + mul + add）の**全ての開始位置**で adaln 以外が
   // 1 つも掴まないことを見る。`reshape` は upsample2x の先頭 op でもあるので、窓ごと
@@ -808,6 +809,7 @@ Deno.test("カウンタは融合が並んだグラフでルール別に積み上
     linearStaticQuantize: 0,
     rowBlockAttention: 0,
     identityExpand: 0,
+    packedStaticQuantize: 0,
   });
 });
 

@@ -341,6 +341,16 @@ export type SessionOptions = {
    */
   readonly fuseLinearStaticQuantize?: boolean;
   /**
+   * 固定SRQの活性をpacked int8（u32 1語にint8コード4個）で並列GEMVへ渡す（既定false、ADR 0105）。
+   * linearGemvReduce: parallel / linearCompute: f32との組合せのみ対応する。
+   * 対象は「素のstatic_quantizeノードで、消費先が全て並列GEMVへ落ちるlinearの活性」だけで、
+   * 1本でも別の消費先が混ざる形・k が16の倍数でない形・scale 0（恒等）は従来のf32のまま。
+   * 重み1語あたりの活性ロードがi2 16→4本・i4 8→2本・i8 4→1本に減る（research 2026-09-19 §14）。
+   * 復元は`f32(code) * scale`で、現行SRQ出力と要素ごとにu32一致する（ADR 0105）。
+   * 例外は int8 に席が無い2値 — -0.0は+0.0へ落ち（積和の結果は動かない）、NaNは飽和する。
+   */
+  readonly packedStaticQuantize?: boolean;
+  /**
    * RMSの縮約方式（既定workgroup）。subgroup32は幅128超のRMSと任意のRMS→add融合に適用。
    * acquireGpu({ subgroups: true })が必要。不足時は拒否し、自動で参照へ戻さない。
    * 加算順が変わるため生成列は参照と異なりうる。M2・投機生成の採用は別途検収する。

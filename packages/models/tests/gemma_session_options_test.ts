@@ -62,6 +62,33 @@ describe("Gemmaのquant実行設定", () => {
       { linearGemvReduce: "parallel", fuseLinearStaticQuantize: true },
     );
   });
+  it("packedStaticQuantizeは明示指定だけで入り、parallel以外を拒否する（ADR 0105）", () => {
+    // manifestの語彙（SessionSpec）には席が無いので、quant宣言からは決して入らない。
+    assertEquals(resolve(fast, {}, "test"), fast);
+    assertEquals(resolve(fast, { packedStaticQuantize: true }, "test"), {
+      ...fast,
+      packedStaticQuantize: true,
+    });
+    assertEquals(resolve(fast, { packedStaticQuantize: false }, "test"), {
+      ...fast,
+      packedStaticQuantize: false,
+    });
+    assertThrows(
+      () => resolve({}, { packedStaticQuantize: true }, "test"),
+      Error,
+      "packedStaticQuantizeはlinearGemvReduce: parallelが必要",
+    );
+    assertThrows(
+      () =>
+        resolve(fast, {
+          linearGemvReduce: "sequential",
+          fuseLinearStaticQuantize: false,
+          packedStaticQuantize: true,
+        }, "test"),
+      Error,
+      "packedStaticQuantizeはlinearGemvReduce: parallelが必要",
+    );
+  });
   it("SessionSpecの全キーが許可表か拒否パスのどちらかに現れる", () => {
     // hubのSESSION_KEYSとmodelsのWRITERSは`Required<SessionSpec>`の網羅表なので、ノブが
     // 増えれば型検査が落ちる。Gemmaだけは手書きの文字列比較3本（ADR 0104の「3欄だけ」）
@@ -102,6 +129,7 @@ describe("Gemmaのquant実行設定", () => {
       ["linearGemvReduce", "linearGemvReduceが不正"],
       ["fuseRmsNormAdd", "fuseRmsNormAddはbooleanでなければならない"],
       ["fuseLinearStaticQuantize", "fuseLinearStaticQuantizeはbooleanでなければならない"],
+      ["packedStaticQuantize", "packedStaticQuantizeはbooleanでなければならない"],
     ] as const;
     for (const [key, message] of invalid) {
       for (const value of [null, 0, 1, [], object]) {

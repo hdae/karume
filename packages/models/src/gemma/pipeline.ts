@@ -399,6 +399,12 @@ export type Gemma4PipelineOptions = {
    * （ADR 0104）。fromAssetsにはquantが無いため、未指定ならruntime既定。
    */
   readonly fuseLinearStaticQuantize?: SessionOptions["fuseLinearStaticQuantize"];
+  /**
+   * 固定SRQの活性をpacked int8で並列GEMVへ渡す。意味・適用範囲はruntimeの同名設定が正本
+   * （ADR 0105）。実効の`linearGemvReduce`が`"parallel"`でなければ拒否する。
+   * manifestの語彙には席が無いので**呼び手の明示指定だけ**で入り、target / drafter両方へ渡す。
+   */
+  readonly packedStaticQuantize?: SessionOptions["packedStaticQuantize"];
   /** RMSの任意縮約。subgroup32は対応GPU必須で、参照と加算順が変わる（ADR 0100）。 */
   readonly rmsNormReduce?: SessionOptions["rmsNormReduce"];
   /** GPUへの投入政策。target / drafterへ同じ値を渡し、省略時はruntimeの既定を使う。 */
@@ -1914,6 +1920,9 @@ class GemmaPipeline {
       ...(options.fuseLinearStaticQuantize === undefined
         ? {}
         : { fuseLinearStaticQuantize: options.fuseLinearStaticQuantize }),
+      ...(options.packedStaticQuantize === undefined
+        ? {}
+        : { packedStaticQuantize: options.packedStaticQuantize }),
       ...(options.rmsNormReduce === undefined ? {} : { rmsNormReduce: options.rmsNormReduce }),
       ...(options.submitPolicy === undefined ? {} : { submitPolicy: options.submitPolicy }),
       stateAttentionReduce: options.stateAttentionReduce ?? GEMMA4_STATE_ATTENTION_REDUCE,

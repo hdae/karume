@@ -1,7 +1,10 @@
 import { stateStatsPvWgsl } from "../src/kernels/state-attention-stats-pv.ts";
 import { rmsNormSubgroupWgsl } from "../src/kernels/rms-norm-subgroup.ts";
 import { assert, assertEquals, assertNotEquals, assertThrows } from "@std/assert";
-import { STATIC_QUANTIZE_WGSL } from "../src/kernels/static-quantize.ts";
+import {
+  STATIC_QUANTIZE_PACKED_WGSL,
+  STATIC_QUANTIZE_WGSL,
+} from "../src/kernels/static-quantize.ts";
 import {
   ELEMENTWISE_WORKGROUP_SIZE,
   elementwiseKey,
@@ -182,10 +185,12 @@ import {
 import { linearKey, linearParams, linearWgsl } from "../src/kernels/linear.ts";
 import {
   linearGemvKey,
+  linearGemvParallelPackedWgsl,
   linearGemvParallelWgsl,
   linearGemvRowsKey,
   type LinearGemvRowsVariant,
   linearGemvRowsWgsl,
+  linearGemvStaticQuantizePackedWgsl,
   linearGemvStaticQuantizeWgsl,
   linearGemvSubgroupWgsl,
   linearGemvWgsl,
@@ -335,6 +340,7 @@ const elementwiseDtypes = (): readonly (readonly [string, IrDtype])[] =>
 Deno.test("生成した WGSL がスナップショットとバイト単位で一致する（codegen 決定性の固定）", async () => {
   const cases: readonly (readonly [string, string])[] = [
     ["static_quantize.wgsl", STATIC_QUANTIZE_WGSL],
+    ["static_quantize_packed.wgsl", STATIC_QUANTIZE_PACKED_WGSL],
     ["elementwise_relu_r1.wgsl", elementwiseWgsl({ op: "relu", rank: 1, dtype: "f32" })],
     ["elementwise_sigmoid_r1.wgsl", elementwiseWgsl({ op: "sigmoid", rank: 1, dtype: "f32" })],
     ["elementwise_gelu_r2.wgsl", elementwiseWgsl({ op: "gelu", rank: 2, dtype: "f32" })],
@@ -519,6 +525,28 @@ Deno.test("生成した WGSL がスナップショットとバイト単位で一
     ["linear_gemv_static_quantize_wi2_l2.wgsl", linearGemvStaticQuantizeWgsl("i2", undefined, 2)],
     ["linear_gemv_static_quantize_g512_l4.wgsl", linearGemvStaticQuantizeWgsl("i4", 512, 4)],
     ["linear_gemv_static_quantize_wi8_l32.wgsl", linearGemvStaticQuantizeWgsl("i8", undefined, 32)],
+    // packed int8 活性の変種（ADR 0105）— 活性の束縛と復元だけが違う 6 本。
+    [
+      "linear_gemv_parallel_packed_wi2_l2.wgsl",
+      linearGemvParallelPackedWgsl("i2", undefined, 2),
+    ],
+    ["linear_gemv_parallel_packed_g512_l4.wgsl", linearGemvParallelPackedWgsl("i4", 512, 4)],
+    [
+      "linear_gemv_parallel_packed_wi8_l16.wgsl",
+      linearGemvParallelPackedWgsl("i8", undefined, 16),
+    ],
+    [
+      "linear_gemv_static_quantize_packed_wi2_l2.wgsl",
+      linearGemvStaticQuantizePackedWgsl("i2", undefined, 2),
+    ],
+    [
+      "linear_gemv_static_quantize_packed_g512_l4.wgsl",
+      linearGemvStaticQuantizePackedWgsl("i4", 512, 4),
+    ],
+    [
+      "linear_gemv_static_quantize_packed_wi8_l32.wgsl",
+      linearGemvStaticQuantizePackedWgsl("i8", undefined, 32),
+    ],
     ["linear_gemv_parallel_g512_l4.wgsl", linearGemvParallelWgsl("i4", 512, 4)],
     ["linear_gemv_parallel_wi8_l16.wgsl", linearGemvParallelWgsl("i8", undefined, 16)],
     ["linear_gemv_subgroup_wi2_l2.wgsl", linearGemvSubgroupWgsl("i2", undefined, 2)],
