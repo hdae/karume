@@ -415,3 +415,21 @@ census との突合で **unmapped_keys は空**（1,137 dispatch/run = 1,132 + �
 linear 57% / rms_norm 14% / attention 10% / static_quantize 9.5% / mul 3% / gelu 2% / RoPE 融合 1.5% / slice 1.2% / state_append 0.8%。
 census の素ノード数と dispatch 数の食い違い（attention 35 → 105・static_quantize 485 → 210・add 106 → 0・slice 35 → 0）は、
 census が session ノブの融合（rms_norm→add・linear→SRQ）と attention の 3 段展開・slice の実体化を数えないため。
+
+### 13.6 M2（利用者実機・Chrome 153・apple / metal-3・ブラウザ計測ページの既定往復）
+
+条件はページ既定（QAT E2B・`i4-fast` の並列 GEMV・rms→add 融合・**capacity 128 / chunk 64**・投入上限 768・linear→SRQ 融合を
+off → on → on → off の 4 ロード・2 prompt × 各 5 生成 = 40 生成・checkout `debb4a1` clean）。要約は
+[M2 結果 JSON](2026-09-19-m2-browser-speed-results.json)（元ファイルの SHA256 つき）。
+
+| ロード | linear→SRQ 融合 | 英語 decode tok/s（中央値 [範囲]） | 日本語 decode tok/s | TTFT 英 / 日 |
+| ------ | --------------- | ---------------------------------: | ------------------: | -----------: |
+| 1      | off             |                   33.5 [32.2–35.3] |    32.1 [30.8–35.1] | 386 / 487 ms |
+| 2      | on              |                   34.8 [33.2–35.2] |    35.1 [31.6–35.2] |    386 / 486 |
+| 3      | on              |                   35.2 [29.9–35.4] |    35.1 [30.7–35.2] |    386 / 477 |
+| 4      | off             |                   34.4 [32.1–35.3] |    34.5 [30.2–35.2] |    386 / 484 |
+
+中央値の中央値: 融合 off 33.9 / on **35.1 tok/s**（+3.5%）— 09-15 の M2 実測（34.1 / 35.1・
+[m2-linear-srq-adoption](2026-09-15-m2-linear-srq-adoption.md)）と同じ値で、現行 main に M2 の退行は無い。
+token 列は 8 系列とも計測内で決定的。M2 の壁 28.5 ms/token は RTX Chrome の 10.7 ms の 2.7 倍で、
+RTX で決めた採否を M2 へ持ち込むときは同ページの往復比較で追試する（従来どおり）。
