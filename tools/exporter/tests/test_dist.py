@@ -29,7 +29,7 @@ import pytest
 from ir_fixtures import ir_container, ir_shards
 from safetensors.numpy import load, save
 
-from karume import dist, limits
+from karume import dist, limits, verify
 from karume.artifacts import SUPERSEDED_SUFFIX
 from karume.dist import (
     MANIFEST_FILENAME,
@@ -39,6 +39,7 @@ from karume.dist import (
     MAX_SHARDS,
     PIPELINES,
     SHARED_DIRNAME,
+    STORAGE_DTYPE_LABELS,
     Artifact,
     DistError,
     ExternalComponents,
@@ -367,6 +368,22 @@ class TestDtypeLabelVocabulary:
         out_dir = self._distribution(tmp_path, "i4")
 
         assert verify_dist(out_dir) == _shard_sizes("A", self._REL_PATH, self._MARK)
+
+    def test_it_accepts_the_packed_int2_label(self, tmp_path: Path) -> None:
+        """`i2`（ADR 0097 の INT2 格納）も語彙の内側 — INT2 を名乗る配布形が組めること。"""
+        out_dir = self._distribution(tmp_path, "i2")
+
+        assert verify_dist(out_dir) == _shard_sizes("A", self._REL_PATH, self._MARK)
+
+    def test_the_label_vocabulary_covers_every_storage_dtype_of_the_ir_gate(self) -> None:
+        """ラベル語彙は IR 検証側の格納 dtype 語彙を包含する（写しの追随漏れの機械化）。
+
+        `STORAGE_DTYPE_LABELS` は `packages/runtime/src/format/ir.ts` の人手の写しで、同じ
+        パッケージに 2 本目の写し（`karume.verify.STORAGE_DTYPES`）がある。IR としては通る
+        格納 dtype がラベル語彙に無いと、**その dtype を名乗る配布形を組んだ瞬間**に
+        `verify_dist` が落ちる（ADR 0097 の `i2` で実際に起きていた食い違い）。
+        """
+        assert set(verify.STORAGE_DTYPES) <= STORAGE_DTYPE_LABELS
 
 
 class TestPlanGates:

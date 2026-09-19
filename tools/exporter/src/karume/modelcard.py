@@ -69,6 +69,22 @@ _SHA_DIGITS = 16
 
 _UNITS = (("GiB", 1 << 30), ("MiB", 1 << 20), ("KiB", 1 << 10))
 
+#: 公式 safetensors 仕様に無い **packed 整数の格納ラベル** → 注記に綴る整数の幅。
+#: 注記の順序は固定（描画は決定的 — 本モジュールの MUST）。
+#:
+#: 実測 2026-09-19（`safetensors` 0.8.0 の `safe_open`・I2 / I4 の 1 テンソルだけの最小
+#: コンテナ）: どちらもヘッダの解析で `unknown variant` として拒否される（受理語彙は BOOL /
+#: F4 / F6_* / U8 / I8 / F8_* / I16 / U16 / F16 / BF16 / I32 / U32 / F32 / C64 / F64 / I64 /
+#: U64）。同じ書き方の I8 / F32 は開ける。
+#:
+#: NOTE: 条件を**ラベルの綴り**で立てるのは、カードが manifest だけから導出するため（この
+#: モジュールの MUST）— コンテナのヘッダ実 dtype は組み立て時に {@link karume.dist.storage_dtypes}
+#: が読むが、その結果は manifest にも `ModelPlan` にも載らないのでカードからは到達できない。
+#: 限界: 混成コンテナを 1 語のラベルで名乗る配布形（QAT は I2 + I4 + I8 を `i4` と綴る —
+#: ADR 0097 追記 5）では、名乗らなかったほうの方言に注記が掛からない。掛かる側の注記は出るので
+#: 「公式パーサで開けない」事実自体は読み手に届く。
+_PACKED_DIALECT_LABELS: Mapping[str, str] = {"i4": "int4", "i2": "int2"}
+
 
 @dataclass(frozen=True)
 class CardMetadata:
@@ -342,19 +358,22 @@ def quants(
     lines += [
         "Per-file `size` and `sha256` live in `karume.json` — verify against that at the fetch"
         " layer.",
-        "Dtype labels use the runtime's **storage dtype vocabulary** (`f16` / `i8` / `i4`), not"
-        " the `fp16` spelling common elsewhere in the ecosystem.",
+        "Dtype labels use the runtime's **storage dtype vocabulary** (`f16` / `i8` / `i4` /"
+        " `i2`), not the `fp16` spelling common elsewhere in the ecosystem.",
     ]
-    # `I4` は safetensors の方言（ADR 0069・docs/limitations.md「格納 dtype `I4` は
-    # safetensors の方言」）— 公式パーサで開けない事実は、その配布形を選んだ読み手にだけ
-    # 関わるので i4 の席があるときだけ綴る（全カードに載せると事実でない主張になる）。
-    if any("i4" in entry for entry in model["weights"].values()):
-        lines.append(
-            "A component stored as `i4` uses a packed int4 dtype (`I4`) that is **not part of the"
-            " official safetensors specification** — the official `safetensors` library rejects a"
-            " file that contains it (checked with 0.8.0). Karume's runtime and exporter read it;"
-            " files without `i4` stay fully compatible."
-        )
+    # `I4` / `I2` は safetensors の方言（ADR 0069・ADR 0097 追記 1・docs/limitations.md）—
+    # 公式パーサで開けない事実は、その配布形を選んだ読み手にだけ関わるので、その綴りの席が
+    # あるときだけ綴る（全カードに載せると事実でない主張になる）。条件の立て方と限界は
+    # {@link _PACKED_DIALECT_LABELS}。
+    for label, width in _PACKED_DIALECT_LABELS.items():
+        if any(label in entry for entry in model["weights"].values()):
+            lines.append(
+                f"A component stored as `{label}` uses a packed {width} dtype"
+                f" (`{label.upper()}`) that is **not part of the official safetensors"
+                " specification** — the official `safetensors` library rejects a file that"
+                " contains it (checked with 0.8.0). Karume's runtime and exporter read it; files"
+                f" without `{label}` stay fully compatible."
+            )
     if any(ref["path"].startswith("shared/") for ref in refs):
         lines.append(
             "A path under `shared/` is one this model shares byte for byte with another model in"

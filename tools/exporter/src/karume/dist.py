@@ -138,13 +138,15 @@ MAX_MANIFEST_BYTES = 1024 * 1024
 #:
 #: NOTE: 正本は `packages/runtime/src/format/ir.ts` の `STORAGE_DTYPES` だが、あちらは export
 #: されていないモジュール私有定数で、op 契約表のような機械突合の正本ファイルも無い — ここは
-#: **人手の写し**（食い違えば片方だけが古びる）。
+#: **人手の写し**。ただし同じパッケージ内に IR 検証側の写し（{@link karume.verify.STORAGE_DTYPES}）
+#: があるので、そちらを包含することをテストで突き合わせる（`tests/test_dist.py` の
+#: `TestDtypeLabelVocabulary`）— 片方だけが古びる失敗様式は、その 1 本で機械化してある。
 #:
 #: 縛るのは、モデルカードの「`I4` は safetensors の方言」注記（{@link karume.modelcard.quants}）
 #: が**ラベルの綴り**で条件を立てるため。ラベルを `w4` のような席名で綴った家族では、i4 を含む
 #: 配布形なのに注記が黙って消える — カード自身が「ラベルは格納 dtype 語彙」と主張している以上、
 #: その主張を保証する門が要る。
-STORAGE_DTYPE_LABELS = frozenset({"f32", "f16", "bf16", "i8", "i4", "i32"})
+STORAGE_DTYPE_LABELS = frozenset({"f32", "f16", "bf16", "i8", "i4", "i2", "i32"})
 
 #: quant の表示欄（ADR 0075 決定 1）の文字数上限。`label` は選択肢に出す短い表示名、
 #: `description` は 1 行の説明で、どちらも optional。hub は同じ値で境界検査するので

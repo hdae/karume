@@ -270,6 +270,14 @@ class TestQuantsNotes:
             " layer." in lines
         )
 
+    def test_the_dtype_vocabulary_note_spells_the_packed_labels(self) -> None:
+        """語彙文が packed の綴りを落とすと、方言の注記（`i4` / `i2`）と繋がらなくなる。"""
+        assert any(
+            line.startswith("Dtype labels use the runtime's **storage dtype vocabulary**")
+            and "`i4` / `i2`" in line
+            for line in quants(_manifest()["models"]["zeta"])
+        )
+
     def test_a_shared_path_is_explained(self) -> None:
         """`(N shared)` の意味は本文の 1 文と対（注記が無いと何と共有なのか読めない）。"""
         assert any(
@@ -328,6 +336,56 @@ class TestQuantsNotes:
         """f16 / i8 だけの配布形は公式互換のまま — 掛からない注意書きを載せない。"""
         assert not any(
             line.startswith("A component stored as `i4`")
+            for line in quants(_manifest()["models"]["zeta"])
+        )
+
+    def test_the_i4_note_keeps_the_wording_already_published(self) -> None:
+        """i2 を条件へ足しても、既に配った i4 系列のカードのバイト列は動かさない。"""
+        manifest = _manifest()
+        manifest["models"]["zeta"]["weights"]["front"]["i4"] = {
+            "shards": [_ref("zeta/front-i4.safetensors", 1024, "1" * 64)]
+        }
+
+        assert (
+            "A component stored as `i4` uses a packed int4 dtype (`I4`) that is **not part of the"
+            " official safetensors specification** — the official `safetensors` library rejects a"
+            " file that contains it (checked with 0.8.0). Karume's runtime and exporter read it;"
+            " files without `i4` stay fully compatible."
+        ) in quants(manifest["models"]["zeta"])
+
+    def test_an_i2_component_flags_the_safetensors_dialect(self) -> None:
+        """`I2`（ADR 0097 の INT2 格納）も公式 0.8.0 では開けない（2026-09-19 実測）。"""
+        manifest = _manifest()
+        manifest["models"]["zeta"]["weights"]["front"]["i2"] = {
+            "shards": [_ref("zeta/front-i2.safetensors", 512, "2" * 64)]
+        }
+
+        assert any(
+            line.startswith("A component stored as `i2` uses a packed int2 dtype (`I2`)")
+            for line in quants(manifest["models"]["zeta"])
+        )
+
+    def test_a_model_with_both_packed_dialects_flags_each_one(self) -> None:
+        """2 つの席を持つ配布形には注記も 2 本 — 順序は固定（描画は決定的）。"""
+        manifest = _manifest()
+        manifest["models"]["zeta"]["weights"]["front"]["i4"] = {
+            "shards": [_ref("zeta/front-i4.safetensors", 1024, "1" * 64)]
+        }
+        manifest["models"]["zeta"]["weights"]["tables"]["i2"] = {
+            "shards": [_ref("zeta/tables-i2.safetensors", 64, "2" * 64)]
+        }
+
+        flagged = [
+            line.split(" uses")[0]
+            for line in quants(manifest["models"]["zeta"])
+            if line.startswith("A component stored as")
+        ]
+        assert flagged == ["A component stored as `i4`", "A component stored as `i2`"]
+
+    def test_a_model_without_a_packed_dialect_flags_nothing(self) -> None:
+        """f16 / i8 だけの配布形では方言の注記が 1 本も出ない（i2 側も含めて）。"""
+        assert not any(
+            line.startswith("A component stored as")
             for line in quants(_manifest()["models"]["zeta"])
         )
 
