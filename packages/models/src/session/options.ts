@@ -41,6 +41,12 @@ const WRITERS: { readonly [K in keyof Required<SessionSpec>]: SpecWriter } = {
       : { attentionScoreStorage: spec.attentionScoreStorage },
   linearGemvReduce: (spec) =>
     spec.linearGemvReduce === undefined ? {} : { linearGemvReduce: spec.linearGemvReduce },
+  fuseRmsNormAdd: (spec) =>
+    spec.fuseRmsNormAdd === undefined ? {} : { fuseRmsNormAdd: spec.fuseRmsNormAdd },
+  fuseLinearStaticQuantize: (spec) =>
+    spec.fuseLinearStaticQuantize === undefined
+      ? {}
+      : { fuseLinearStaticQuantize: spec.fuseLinearStaticQuantize },
 };
 
 /** 宣言された欄だけを持つ `SessionOptions` を組む（未指定のキーは欄ごと作らない）。 */

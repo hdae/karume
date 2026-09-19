@@ -154,6 +154,8 @@ const SESSION_KEYS: readonly string[] = [
   "attentionCompute",
   "attentionScoreStorage",
   "linearGemvReduce",
+  "fuseRmsNormAdd",
+  "fuseLinearStaticQuantize",
 ];
 
 export type LinearCompute = "f32" | "a8" | "f16";
@@ -265,12 +267,14 @@ export type WeightFiles = {
  */
 export type WeightEntry = Readonly<Record<string, WeightFiles>>;
 
-/** manifest 所有の実行ノブ語彙（ADR 0038 §3 / 0098）。 */
+/** manifest 所有の実行ノブ語彙（ADR 0038 §3 / 0098 / 0104）。 */
 export type SessionSpec = {
   readonly linearCompute?: LinearCompute;
   readonly attentionCompute?: AttentionCompute;
   readonly attentionScoreStorage?: ScoreStorage;
   readonly linearGemvReduce?: "sequential" | "parallel";
+  readonly fuseRmsNormAdd?: boolean;
+  readonly fuseLinearStaticQuantize?: boolean;
 };
 
 /** device 生成前に要る GPU feature（`shaderF16` のみ — ADR 0038 §3）。 */
@@ -631,6 +635,19 @@ const readEnum = <T extends string>(
   return found;
 };
 
+/** 明示falseを保ち、nullや数値を未指定扱いしない。 */
+const readBoolean = (
+  fail: Fail,
+  raw: Record<string, unknown>,
+  key: string,
+  where: string,
+): boolean | undefined => {
+  if (!Object.hasOwn(raw, key)) return undefined;
+  const value = raw[key];
+  if (typeof value !== "boolean") throw fail.format(`${where}.${key}: 真偽値でない`);
+  return value;
+};
+
 const parseSession = (fail: Fail, raw: unknown, where: string): SessionSpec => {
   if (raw === undefined) return {};
   if (!isRecord(raw)) throw fail.format(`${where}.session: オブジェクトでない`);
@@ -640,11 +657,15 @@ const parseSession = (fail: Fail, raw: unknown, where: string): SessionSpec => {
   const attentionCompute = readEnum(fail, raw, "attentionCompute", ATTENTION_COMPUTE, at);
   const attentionScoreStorage = readEnum(fail, raw, "attentionScoreStorage", SCORE_STORAGE, at);
   const linearGemvReduce = readEnum(fail, raw, "linearGemvReduce", LINEAR_GEMV_REDUCE, at);
+  const fuseRmsNormAdd = readBoolean(fail, raw, "fuseRmsNormAdd", at);
+  const fuseLinearStaticQuantize = readBoolean(fail, raw, "fuseLinearStaticQuantize", at);
   return {
     ...(linearCompute === undefined ? {} : { linearCompute }),
     ...(attentionCompute === undefined ? {} : { attentionCompute }),
     ...(attentionScoreStorage === undefined ? {} : { attentionScoreStorage }),
     ...(linearGemvReduce === undefined ? {} : { linearGemvReduce }),
+    ...(fuseRmsNormAdd === undefined ? {} : { fuseRmsNormAdd }),
+    ...(fuseLinearStaticQuantize === undefined ? {} : { fuseLinearStaticQuantize }),
   };
 };
 

@@ -836,3 +836,22 @@ Deno.test("parseManifest: quantのGEMV加算指定を保持し、未指定と不
       })), HubError);
   }
 });
+
+Deno.test("parseManifest: 融合の真偽値を保持し、未指定・不正値と区別する", () => {
+  for (const key of ["fuseRmsNormAdd", "fuseLinearStaticQuantize"]) {
+    for (const value of [false, true]) {
+      const session = { [key]: value };
+      const manifest = parseManifest(withModel({
+        quants: { q: { weights: { net: "f16" }, session } },
+      }));
+      assertEquals(manifest.models.m.quants.q.session, session);
+    }
+    for (const value of [null, 0, 1, "true", "false", [], {}]) {
+      assertThrows(() =>
+        parseManifest(withModel({
+          quants: { q: { weights: { net: "f16" }, session: { [key]: value } } },
+        })), HubError);
+    }
+  }
+  assertEquals(parseManifest(withModel()).models.m.quants.q.session, {});
+});
