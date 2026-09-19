@@ -226,7 +226,7 @@ full 層 = 4 / 9 / 14 / 19 / 24 / 29 / 34、自前 KV は層 0〜14（full 3 + s
 | E        | 入力側 SRQ の融合（rms_norm→SRQ 70・mul→SRQ 70・gelu→mul→SRQ 35）                   | holds                        | 0.19（B 併用 0.08） |    0.19（0.08） | 既存 rms_norm エピローグ規則の拡張（段 1・不変条件無改訂）+ 新規則（段 2・「heads 互いに素」の緩和が要る）。attention 後 35・残差 add 後 35 は契約（windowTouchesState MUST・単一出力）で不可                                                                                             |
 | F        | その他 dispatch 削減（slice のオフセット別名化 35・parallel-fused 28・rms→RoPE 50） | holds / uncertain            |        0.17（0.06） |    0.14（0.06） | slice 別名化はビット同一・再 export 不要（ADR 0093 の offset 束縛を alias に通すだけ）。parallel-fused は capacity 4096 で 28/35 層適格・Deno に指定口が無く未実測。既定変更は ADR 0102 が M2 実測で却下済み                                                                              |
 | G        | 重みの連結 GEMV（k+v 15 層・gate/up 35 層）                                         | holds（gate/up は段 0 待ち） |                0.16 |            0.13 | k+v は同形・同 lanes・出力 SRQ scale 15/15 層一致 → ビット同一で −15 dispatch（実測差 2.85 µs/層）。q/k/v 3 本連結は lanes と scale が違い不可                                                                                                                                            |
-| I        | `per_layer_model_projection`（f32 55 MB）を並列 GEMV の対象表へ                     | holds                        |                0.14 |            0.14 | 同形 i4 の逐次→lanes 4 が 1.63 倍（実測）。再 export 不要。i4 化（段 2）は再 export が別の理由で起きる時だけ相乗り                                                                                                                                                                        |
+| I        | `per_layer_model_projection`（f32 55 MB）を並列 GEMV の対象表へ                     | holds → **§13 で kill**      |                0.14 |            0.14 | 同形 i4 の逐次→lanes 4 が 1.63 倍（実測）。再 export 不要。i4 化（段 2）は再 export が別の理由で起きる時だけ相乗り                                                                                                                                                                        |
 | J        | submit / pass 構造                                                                  | 反転                         |       0（B 採用時） |   0（B 採用時） | 「submit 4→1」は refuted（同方向の H-25 が Chrome で −7.3%）。生きるのは逆向きの **first-chunk ramp**（先頭チャンクを小さくして GPU を早く走らせる — Deno 0.45 / Chrome 1.0）で、B が Deno 専用と判明した時だけ復活                                                                       |
 | H1       | INT2 カーネルの lane / LUT / 語粒度                                                 | refuted（lane）/ C に吸収    |                   0 |               0 | 同形の lane 全掃引が l2 → l32 で単調悪化（実測）。残るのは bitcast 復元の命令ダイエット 0.2（C を落とした時だけ独立に採る）                                                                                                                                                               |
 | H2       | GEMV 再構成（subgroup K 分担・per-row scale K-47・f16 活性・subgroup matrix）       | refuted / C に吸収           |                   0 |               0 | subgroup matrix は WebML でも prefill（M ≥ 64）限定。K-47 は i4 語 = 32 要素で scale 読みは 48 回/列に過ぎず速度案として refuted。ZP と scale をエピローグへ畳む変種は C と同一作業                                                                                                       |
@@ -259,30 +259,30 @@ GPU 系を B の前に Deno で測ると過小に見える — **GPU 系の採�
 
 ## 10. 次に試すこと（順位・期待利得・測り方）
 
-| 順 | 作業                                                                                                                                                                                                                                              | 種別                             | 期待利得                                                | 前提・費用                                                                                                                                                                | 採否の門                                                                                                                           |
-| -- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| 0  | **物差しを直す**: 採否判定は Chrome の壁と GPU 時間（`deno task bench:llm-browser`）。Deno CLI の tok/s は 10 ms の定数込みなので比較にだけ使う。Deno の上流へ poll ループの修正を報告するかは別途                                                | 計測衛生                         | Deno 10 ms（パッチ時）                                  | コード変更ゼロ                                                                                                                                                            | —                                                                                                                                  |
-| 0' | **1 セッションで確定する事実**（GPU 1 回・実装なし）: opbench graph の per-key GPU 時間で GEMV 総時間（4.0〜4.9 の見積り）・未帰属 49 dispatch（C-9）・`per_layer_model_projection` の現状費用（0.2〜0.57 の幅）・lm_head 1 dispatch の値を採る   | 計測                             | —                                                       | `tools/opbench` 既存                                                                                                                                                      | —                                                                                                                                  |
-| 1  | **C 段 0 — K-45 の kill 判定**: 現行 GEMV の積和展開だけを「数値は壊れるが構造は同一」な最小命令形に差し替えた比較用シェーダを opbench single（heater 付き・ABBA×4）で 2 形（i2 262144×1536・i2 12288×1536 l2）A/B                                | スパイク（半日・新カーネル不要） | C の 0.9 ms 全額が懸かる                                | 無し                                                                                                                                                                      | ① が 25% 以上速くならなければ **C は refuted**。① だけ速く ② が 5% 以内なら対象形を絞る                                            |
-| 2  | **B 段 ① — PLE の GPU 常駐（depth 1 のまま）**: 既存 embedding カーネルで sidecar を gather、input_ids を selector の常駐 index に                                                                                                                | 実装（前提工事）                 | 0.25 ms + B の前提                                      | manifest requiredLimits 引き上げ（256 MiB → 1.13 GiB・M2 の VRAM 可否は利用者実機）・ADR 0085 決定 3 の shard 遅延ロード放棄・段階席（full 予算が取れる機だけ常駐）       | **速度を見ない**: `ple.probe` のビット一致 + 64 / 256 token の id 列完全一致。割れたら進まない                                     |
-| 3  | **B 段 ② — 先行投入 depth 2 → 4**: ADR 0066 に「K 本の decode run を同一 context へ先行発行してよい（位置は発行側が先に宣言・論理長は成功で K 進む）」の opt-in 例外・EOS 超過は既存 rewind・greedy 限定席                                        | 実装（契約改訂）                 | Deno ×1.5〜1.7・Chrome 最大 −2.2 ms                     | ADR 0066 / 0054 決定 2（gpuTiming と非両立 → 診断経路は非先行投入）                                                                                                       | depth 1/2/4/8 の ABBA（Deno と Chrome）。**Chrome の壁−GPU 差が 3.2 → 1 ms 未満へ落ちなければ Deno 専用と判定**し J の ramp を復活 |
-| 4  | **C 段 1 / 段 2 — 整数内積 GEMV 族**（段 0 が通った形だけ）: Route A = 重み語を `unpack4xU8 → −z → pack4xI8 → dot4I8Packed`（行和不要・再 export 不要）→ Route B = 符号なし内積 + 活性の偏り `a^0x80` + 補正 2 項をエピローグへ                   | 実装（新カーネル族）             | 0.9 ms（GPU）                                           | ADR 0058 の数値 opt-in 席 + manifest の 4 つ目の宣言可能ノブ・`src/reference` の整数経路（i32 厳密参照・atol=0）・PARALLEL_SHAPES の穴埋め・ADR 0097 追記 8 / 0098 の改訂 | 単体 A/B → lane 2〜32 で u32 完全一致（縮約一意性の検出器）→ Chrome ABBA                                                           |
-| 5  | **小物の波**（ビット同一・再 export 不要・各 ≤0.2 ms）: E 段 1（rms_norm→SRQ 70）、F の slice オフセット別名化、G の k+v 連結、I 段 1（f32 8960×1536 を対象表へ・lane 掃引）、F の `--state-attention-reduce` CLI フラグ追加と capacity 4096 実測 | 実装（小）                       | 合計 0.5〜0.6 ms（Chrome）                              | 融合カウンタ（ADR 0040）・SessionSpec の席                                                                                                                                | 各 dispatch 数の減少を `--diagnostics` で確認 → Chrome ABBA。E 段 2（mul→SRQ・gelu 連鎖）は「heads 互いに素」の緩和裁定後          |
-| 6  | **K-46 の再起票**（速度の波から外す）: メモリ・容量天井の項目として full + sliding 両方。長文脈の品質検収（512 超・未検収）が立ってから                                                                                                           | 台帳整理                         | 速度 0・KV 60 → 15 MiB（4096）・1,548 → 387 MiB（131k） | ADR 0066 決定 2 / STATE_DTYPES・ADR 0058 席                                                                                                                               | M-K2: attention_state_qk の D_LANES 掃引で「遅延律速か発行律速か」を判定 → 発行律速なら 4 要素/語のロードを長文脈の波へ            |
-| —  | **契約の裁定（値段の付いていない 480 dispatch）**: windowTouchesState MUST / 単一出力 MUST / last-arriver の可搬性を緩めるか                                                                                                                      | 設計裁定                         | 最大 0.5 ms + WebML 級融合の前提                        | ADR 0067 / 0068 の改訂                                                                                                                                                    | 裁定前に候補化しない                                                                                                               |
+| 順           | 作業                                                                                                                                                                                                                                              | 種別                             | 期待利得                                                | 前提・費用                                                                                                                                                                | 採否の門                                                                                                                           |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| 0（済 §13）  | **物差しを直す**: 採否判定は Chrome の壁と GPU 時間（`deno task bench:llm-browser`）。Deno CLI の tok/s は 10 ms の定数込みなので比較にだけ使う。Deno の上流へ poll ループの修正を報告するかは別途                                                | 計測衛生                         | Deno 10 ms（パッチ時）                                  | コード変更ゼロ                                                                                                                                                            | —                                                                                                                                  |
+| 0'（済 §13） | **1 セッションで確定する事実**（GPU 1 回・実装なし）: opbench graph の per-key GPU 時間で GEMV 総時間（4.0〜4.9 の見積り）・未帰属 49 dispatch（C-9）・`per_layer_model_projection` の現状費用（0.2〜0.57 の幅）・lm_head 1 dispatch の値を採る   | 計測                             | —                                                       | `tools/opbench` 既存                                                                                                                                                      | —                                                                                                                                  |
+| 1            | **C 段 0 — K-45 の kill 判定**: 現行 GEMV の積和展開だけを「数値は壊れるが構造は同一」な最小命令形に差し替えた比較用シェーダを opbench single（heater 付き・ABBA×4）で 2 形（i2 262144×1536・i2 12288×1536 l2）A/B                                | スパイク（半日・新カーネル不要） | C の 0.9 ms 全額が懸かる                                | 無し                                                                                                                                                                      | ① が 25% 以上速くならなければ **C は refuted**。① だけ速く ② が 5% 以内なら対象形を絞る                                            |
+| 2            | **B 段 ① — PLE の GPU 常駐（depth 1 のまま）**: 既存 embedding カーネルで sidecar を gather、input_ids を selector の常駐 index に                                                                                                                | 実装（前提工事）                 | 0.25 ms + B の前提                                      | manifest requiredLimits 引き上げ（256 MiB → 1.13 GiB・M2 の VRAM 可否は利用者実機）・ADR 0085 決定 3 の shard 遅延ロード放棄・段階席（full 予算が取れる機だけ常駐）       | **速度を見ない**: `ple.probe` のビット一致 + 64 / 256 token の id 列完全一致。割れたら進まない                                     |
+| 3            | **B 段 ② — 先行投入 depth 2 → 4**: ADR 0066 に「K 本の decode run を同一 context へ先行発行してよい（位置は発行側が先に宣言・論理長は成功で K 進む）」の opt-in 例外・EOS 超過は既存 rewind・greedy 限定席                                        | 実装（契約改訂）                 | Deno ×1.5〜1.7・Chrome 最大 −2.2 ms                     | ADR 0066 / 0054 決定 2（gpuTiming と非両立 → 診断経路は非先行投入）                                                                                                       | depth 1/2/4/8 の ABBA（Deno と Chrome）。**Chrome の壁−GPU 差が 3.2 → 1 ms 未満へ落ちなければ Deno 専用と判定**し J の ramp を復活 |
+| 4            | **C 段 1 / 段 2 — 整数内積 GEMV 族**（段 0 が通った形だけ）: Route A = 重み語を `unpack4xU8 → −z → pack4xI8 → dot4I8Packed`（行和不要・再 export 不要）→ Route B = 符号なし内積 + 活性の偏り `a^0x80` + 補正 2 項をエピローグへ                   | 実装（新カーネル族）             | 0.9 ms（GPU）                                           | ADR 0058 の数値 opt-in 席 + manifest の 4 つ目の宣言可能ノブ・`src/reference` の整数経路（i32 厳密参照・atol=0）・PARALLEL_SHAPES の穴埋め・ADR 0097 追記 8 / 0098 の改訂 | 単体 A/B → lane 2〜32 で u32 完全一致（縮約一意性の検出器）→ Chrome ABBA                                                           |
+| 5            | **小物の波**（ビット同一・再 export 不要・各 ≤0.2 ms）: E 段 1（rms_norm→SRQ 70）、F の slice オフセット別名化、G の k+v 連結、I 段 1（f32 8960×1536 を対象表へ・lane 掃引）、F の `--state-attention-reduce` CLI フラグ追加と capacity 4096 実測 | 実装（小）                       | 合計 0.5〜0.6 ms（Chrome）                              | 融合カウンタ（ADR 0040）・SessionSpec の席                                                                                                                                | 各 dispatch 数の減少を `--diagnostics` で確認 → Chrome ABBA。E 段 2（mul→SRQ・gelu 連鎖）は「heads 互いに素」の緩和裁定後          |
+| 6            | **K-46 の再起票**（速度の波から外す）: メモリ・容量天井の項目として full + sliding 両方。長文脈の品質検収（512 超・未検収）が立ってから                                                                                                           | 台帳整理                         | 速度 0・KV 60 → 15 MiB（4096）・1,548 → 387 MiB（131k） | ADR 0066 決定 2 / STATE_DTYPES・ADR 0058 席                                                                                                                               | M-K2: attention_state_qk の D_LANES 掃引で「遅延律速か発行律速か」を判定 → 発行律速なら 4 要素/語のロードを長文脈の波へ            |
+| —            | **契約の裁定（値段の付いていない 480 dispatch）**: windowTouchesState MUST / 単一出力 MUST / last-arriver の可搬性を緩めるか                                                                                                                      | 設計裁定                         | 最大 0.5 ms + WebML 級融合の前提                        | ADR 0067 / 0068 の改訂                                                                                                                                                    | 裁定前に候補化しない                                                                                                               |
 
 kill として台帳に残すもの: lm_head の並列化 / block-major / argmax エピローグ（D）、INT2 の lane 変更（H1）、q/k/v 3 本連結、
 submit 4→1（S6-1）、K-47 の速度案、f16 活性、decode の subgroup matrix、QAT の投機（drafter 無し）、複数会話束ね。
 
 ## 11. 実測でしか確定しない主張（外れたときに崩れる金額の大きい順）
 
-1. GEMV の GPU 総時間 4.0〜4.9 ms/token — GPU 区分の全判定の母数だが直接測られたことが無い（0' で確定）。
+1. GEMV の GPU 総時間 4.0〜4.9 ms/token — GPU 区分の全判定の母数だが直接測られたことが無い（0' で確定）。**→ §13: 約 4.0 ms で確定**。
 2. C 段 0: 占有率 20% 以下の形で命令削減が時間になるか — 反証材料あり（同一命令数で n 依存の 2 倍差）。
 3. dispatch 単価 1.1 µs/本（GPU 0.48 + ホスト 0.62）— E / F / G / J の全額がこの係数に線形。温度管理下では上下 2 倍ぶれうる。
-4. Chrome の壁−GPU 差 3.2 ms のうち driver 固有の割合 — B と J の存否。J の陽性対照（H-25 の 2048 アーム再走で −7% が再現するか）が最短。
+4. Chrome の壁−GPU 差 3.2 ms のうち driver 固有の割合 — B と J の存否。J の陽性対照（H-25 の 2048 アーム再走で −7% が再現するか）が最短。**→ §13: 差は 3.3〜4.1 ms（割合は未分解）**。
 5. B: depth d の d 本の mapAsync が 1 回の 10 ms sleep 窓でまとめて解決するか（推測: `done` を receiver 側で立てる形なので解決するはず）。
 6. parallel-fused を capacity 4096・Deno で測った値（指定口が無く一度も測られていない）。
-7. `per_layer_model_projection` の現状費用（上界 0.2〜0.57 の幅）。0.3 ms 未満なら I はクラスタごと消える。
+7. `per_layer_model_projection` の現状費用（上界 0.2〜0.57 の幅）。0.3 ms 未満なら I はクラスタごと消える。**→ §13: 0.13 ms・kill**。
 8. G: i2 n=24576 l2 の単体時間（n 方向の実測点が 1 つ）。
 9. Deno で 0.1 ms 級の GPU 短縮が poll の 10 ms 刻みに吸われて壁が動かない可能性 — GPU 系は Chrome で先に測る根拠。
 10. M2 の Metal で `dot4I8Packed` が native 命令に落ちるか（落ちなければ C は M2 で無効）。
@@ -343,3 +343,75 @@ submit 4→1（S6-1）、K-47 の速度案、f16 活性、decode の subgroup ma
   static_quantize:v1:f32:wg128 5.710 ms（12.5%） · 485 dispatch
   rms_norm:v1:f32:lastdim:wg256 3.751 ms（8.2%） · 242 dispatch
 ```
+
+## 13. 計測セッション（2026-09-19 夜・RTX 3080 Ti・main `debb4a1`・§10 の ⓪ と 0'）
+
+条件: capacity 4096 / chunk 768・prompt は `tools/llm-speed/browser/cases.json` の 2 本（英 31 token / 日 37 token）・64 token・
+warmup あり・各ロード前 75℃ 以下かつ thermal slowdown 無効。生データは [結果 JSON](2026-09-19-qat-speed-recon-results.json) と
+bundle `outputs/bench/karume/2026-09-19_18-11-40_speed-baseline-k9/`（git 追跡外）。Chrome は Xvfb 上の Chrome 153（NVIDIA f16 実験フラグ付き・
+[browser-llm-speed](2026-09-12-browser-llm-speed.md) と同じ起動条件）、ロードごとに fresh page・2 暖機 + 3 本計測。
+
+### 13.1 壁時計（decode）
+
+| 環境                                             |                        QAT `i4-fast` |                 通常 `i4-fast` |
+| ------------------------------------------------ | -----------------------------------: | -----------------------------: |
+| Deno CLI・64 token（3 回の中央値・範囲 ±0.1）    |                42.1 tok/s = 23.75 ms |          43.6 tok/s = 22.94 ms |
+| Deno CLI・256 token                              |                 38.6 tok/s = 25.9 ms |           39.7 tok/s = 25.2 ms |
+| Chrome・64 token（2 ロード × 2 prompt の中央値） | 92.7〜93.9 tok/s = **10.6〜10.8 ms** | 99.4〜99.8 tok/s = **10.0 ms** |
+| Deno − Chrome                                    |                              13.0 ms |                        12.9 ms |
+
+Deno − Chrome の 13 ms は §3 の「Deno 固有のフェンス待ち 12.6〜13.5」の内側（sleep 10 ms + Deno 側ホストの残り約 3 ms）。
+token 列は 4 ロード × 2 prompt とも 3 本の計測内で完全一致（結果 JSON に保存）。
+
+### 13.2 GPU 時間（Chrome・pass 境界の外部 timestamp = 製品の pass 構成のまま）
+
+| ロード | GPU ms/token 中央値 [min–max] | 同ロードの壁 | 非 GPU（壁 − GPU） | dispatch / pass per token |
+| ------ | ----------------------------: | -----------: | -----------------: | ------------------------- |
+| QAT 1  |              6.98 [6.79–7.13] |   10.6〜11.1 |           3.3〜4.1 | 1,134 / 3                 |
+| QAT 2  |              7.49 [6.92–8.40] |         10.8 |                3.3 | 1,134 / 3                 |
+| 通常   |              6.21 [6.05–6.49] |         9.95 |                3.7 | 924 / 2                   |
+
+先行投入（H-27）の kill 基準「Chrome の壁 − GPU が 1 ms 未満へ落ちるか」の基線は **3.3〜4.1 ms**。
+
+### 13.3 per-key の GPU 配分（dispatch 分割 timestamp を pass 総時間へ補正）
+
+dispatch ごとに pass を割ると総 GPU 時間が QAT 11.61 ms / 通常 10.29 ms に膨らむ（pass 総時間 6.98 / 6.21 の 1.66 倍）。
+膨張を **dispatch あたり一定（QAT 4.1 µs・通常 4.4 µs）と仮定**して各キーから引いた値が「補正」。仮定は粗いが、
+dispatch 本数の多い小カーネル（SRQ・rms_norm・elementwise）ほど生値が過大になる向きは正しい。
+
+| 群（QAT）                                   |   本数/token |            生値 ms |            補正 ms |  通常 Gemma 補正 ms |
+| ------------------------------------------- | -----------: | -----------------: | -----------------: | ------------------: |
+| GEMV（並列 275 + 逐次 2）                   |          277 |               5.09 |    **3.95（57%）** | 4.06（65%・277 本） |
+| static_quantize                             |          210 |               1.52 |           **0.66** |                   0 |
+| rms_norm + rms_norm_add                     |          242 |               2.04 |               1.05 |                0.95 |
+| attention_state_*（qk / stats / pv）        |          105 |               1.17 |               0.74 |                0.73 |
+| elementwise（mul 108・gelu 70・…）          |          181 |               1.08 |               0.34 |                0.26 |
+| RoPE 融合 / slice（strided） / state_append | 50 / 35 / 30 | 0.29 / 0.22 / 0.18 | 0.09 / 0.08 / 0.05 |  0.10 / 0.07 / 0.04 |
+| 出口（argmax / topk）・embedding            |            4 |               0.03 |               0.01 |                0.01 |
+
+QAT の GEMV 形別（補正 ms）: wi4g512:l4 65 本 0.88 / **wi2:l2（gate・up）40 本 0.80**（191 MB → 239 GB/s） /
+**wi2:l32（down）20 本 0.73**（94 MB → 129 GB/s） / wi4g2048:l32 43 本 0.57 / wi8 70 本 0.35 / wi4g512:l32 30 本 0.15 /
+lm_head（逐次 wi2）1 本 **0.24** / `per_layer_model_projection`（逐次 f32）1 本 **0.13**。
+
+### 13.4 確定したこと（§11 の未確定事項への回答）
+
+1. **GEMV の GPU 総時間 = 約 4.0 ms/token**（§11 の 1・見積り 4.0〜4.9 の下端）。QAT は通常の半分のバイトしか読まないのに
+   GEMV 時間は同じ（3.95 vs 4.06）— 帯域律速でないことの直接の証拠。**QAT が通常より遅い 0.77 ms は SRQ 0.66 + f32 射影 0.13 でほぼ全部**。
+2. **未帰属 dispatch は無い**（§11 の 4・C-9）: 1,134 本すべてが既知キーで、内訳は §5 の表と一致（1,132 + greedy 出口の argmax / topk 2 本）。
+   §5 の census 由来モデルの +49 は slice の実体化 35 本と RoPE の k 側 15 本を census が数えていなかった帳簿差で、未知のカーネルではない。
+3. **K-51（`per_layer_model_projection` の並列化）は kill**（§11 の 7）: 現状費用 0.13 ms/token は kill 線 0.3 ms 未満。0 にしても GPU の 1.9%。
+4. **K-52（lm_head）の kill を実モデルでも確認**: 0.24 ms/token（単体実測と同じ値）。
+5. static_quantize 210 本の実時間は 0.66 ms（補正）。クラスタ E の見積り 0.19 ms は「dispatch 固定費」だけを数えた値で、
+   融合で消える時間はその間（0.19〜0.66）。E の kill 線を再設定する材料。
+6. Chrome の非 GPU は 3.3〜4.1 ms（旧基準 3.2〜3.3 とほぼ同じ）。
+
+M2（利用者実機・Chrome・ブラウザ計測ページの既定往復）は利用者が実行中で、JSON 受領後に本節へ追記する。
+
+### 13.5 Deno 側の per-op 配分（opbench graph・QAT 対応を追加して実走）
+
+`tools/opbench` の `graph` を QAT 家族でも駆動できるようにし（`--family` 省略時は manifest から推定・census の既定シナリオも共有）、
+同じ prompt・64 token・capacity 4096 で 1 回実走した（timing モード = dispatch ごとの pass 分割なので絶対値は膨らむ。1 run 25.9 ms）。
+census との突合で **unmapped_keys は空**（1,137 dispatch/run = 1,132 + 出口・prefill 込み）。op 別の配分は Chrome の補正値と同じ順位:
+linear 57% / rms_norm 14% / attention 10% / static_quantize 9.5% / mul 3% / gelu 2% / RoPE 融合 1.5% / slice 1.2% / state_append 0.8%。
+census の素ノード数と dispatch 数の食い違い（attention 35 → 105・static_quantize 485 → 210・add 106 → 0・slice 35 → 0）は、
+census が session ノブの融合（rms_norm→add・linear→SRQ）と attention の 3 段展開・slice の実体化を数えないため。

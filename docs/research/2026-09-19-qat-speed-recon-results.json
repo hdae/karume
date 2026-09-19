@@ -1,0 +1,1296 @@
+{
+  "note": "2026-09-19 計測セッション（RTX 3080 Ti・main debb4a1・capacity 4096 / chunk 768・64 token・prompt = tools/llm-speed/browser/cases.json）。数値の正本は本ファイルと bundle（git 追跡外）。",
+  "bundle": "outputs/bench/karume/2026-09-19_18-11-40_speed-baseline-k9",
+  "checkout": "debb4a1fbcf7254ab534b0d6eb97c7854f9b35cc",
+  "deno": {
+    "conditions": "Deno 2.9.6 CLI（deno task demo:gemma4[-qat]）・warmup あり・各ロード前 75℃以下・3 回",
+    "runs": [
+      {
+        "kind": "qat",
+        "tokens": 64,
+        "rep": 1,
+        "decodeTokPerS": 42,
+        "ttftMs": 156
+      },
+      {
+        "kind": "normal",
+        "tokens": 64,
+        "rep": 1,
+        "decodeTokPerS": 43.4,
+        "ttftMs": 119
+      },
+      {
+        "kind": "qat",
+        "tokens": 64,
+        "rep": 2,
+        "decodeTokPerS": 42.1,
+        "ttftMs": 157
+      },
+      {
+        "kind": "normal",
+        "tokens": 64,
+        "rep": 2,
+        "decodeTokPerS": 43.6,
+        "ttftMs": 129
+      },
+      {
+        "kind": "qat",
+        "tokens": 64,
+        "rep": 3,
+        "decodeTokPerS": 42.2,
+        "ttftMs": 159
+      },
+      {
+        "kind": "normal",
+        "tokens": 64,
+        "rep": 3,
+        "decodeTokPerS": 43.7,
+        "ttftMs": 141
+      },
+      {
+        "kind": "qat",
+        "tokens": 256,
+        "rep": 1,
+        "decodeTokPerS": 38.4,
+        "ttftMs": 157
+      },
+      {
+        "kind": "normal",
+        "tokens": 256,
+        "rep": 1,
+        "decodeTokPerS": 39.6,
+        "ttftMs": 124
+      },
+      {
+        "kind": "qat",
+        "tokens": 256,
+        "rep": 2,
+        "decodeTokPerS": 38.7,
+        "ttftMs": 162
+      },
+      {
+        "kind": "normal",
+        "tokens": 256,
+        "rep": 2,
+        "decodeTokPerS": 40,
+        "ttftMs": 126
+      },
+      {
+        "kind": "qat",
+        "tokens": 256,
+        "rep": 3,
+        "decodeTokPerS": 38.6,
+        "ttftMs": 155
+      },
+      {
+        "kind": "normal",
+        "tokens": 256,
+        "rep": 3,
+        "decodeTokPerS": 39.7,
+        "ttftMs": 119
+      }
+    ],
+    "medianTokPerS": {
+      "qat-64": 42.1,
+      "normal-64": 43.6,
+      "qat-256": 38.6,
+      "normal-256": 39.7
+    }
+  },
+  "chrome": {
+    "conditions": "Chrome 153（Xvfb・--enable-dawn-features=vulkan_enable_f16_on_nvidia）・fresh page per load・2 warmup + 3 measured per prompt・cooling ≤75℃",
+    "wall": {
+      "qat-wall-0": {
+        "english-list": {
+          "decodeTokPerS_median": 92.68795056805197,
+          "decodeTokPerS_range": [
+            91.89031505330763,
+            93.4856803692474
+          ],
+          "ttftMs_median": 39.20000000298023,
+          "tokenIdsIdentical": true,
+          "tokenIds": [
+            8291,
+            659,
+            12571,
+            10231,
+            11221,
+            573,
+            4735,
+            496,
+            861,
+            5192,
+            236787,
+            108,
+            236770,
+            236761,
+            5213,
+            3974,
+            21179,
+            236764,
+            1944,
+            6376,
+            7675,
+            99382,
+            107,
+            236778,
+            236761,
+            5213,
+            1514,
+            1042,
+            561,
+            5869,
+            528,
+            506,
+            5192,
+            1343,
+            4009,
+            99382,
+            107,
+            236800,
+            236761,
+            5213,
+            82804,
+            12259,
+            699,
+            1719,
+            886,
+            236764,
+            1581,
+            768,
+            625,
+            236789,
+            236751,
+            59314,
+            99382,
+            107,
+            236812,
+            236761,
+            5213,
+            10896,
+            13053,
+            6307,
+            13283,
+            573,
+            38038,
+            3540
+          ]
+        },
+        "japanese-list": {
+          "decodeTokPerS_median": 93.31950822182822,
+          "decodeTokPerS_range": [
+            92.48385202543214,
+            95.1374207183879
+          ],
+          "ttftMs_median": 59.599999994039536,
+          "tokenIdsIdentical": true,
+          "tokenIds": [
+            18668,
+            29171,
+            70738,
+            237051,
+            230452,
+            237086,
+            28915,
+            77221,
+            99950,
+            237051,
+            236778,
+            236771,
+            237629,
+            236951,
+            59043,
+            237009,
+            237364,
+            237007,
+            34084,
+            11914,
+            236924,
+            108,
+            236770,
+            236761,
+            5213,
+            117256,
+            103336,
+            5077,
+            163557,
+            53121,
+            184056,
+            237048,
+            204982,
+            13785,
+            5077,
+            87130,
+            236951,
+            22384,
+            86167,
+            237051,
+            196856,
+            129242,
+            55507,
+            140119,
+            185141,
+            95920,
+            237000,
+            241867,
+            237053,
+            13764,
+            236924,
+            107,
+            236778,
+            236761,
+            5213,
+            237374,
+            100511,
+            237377,
+            237051,
+            127609,
+            237295,
+            238199,
+            4042,
+            53121
+          ]
+        },
+        "metadata": {
+          "manifestSha256": "23cf61b6edb55d25a1eb3c0ff9c8265386107568c87558620d04575f648a8103",
+          "enabledFeatures": [
+            "core-features-and-limits"
+          ],
+          "wgslLanguageFeatures": [
+            "packed_4x8_integer_dot_product",
+            "subgroup_uniformity",
+            "immediate_address_space",
+            "linear_indexing",
+            "subgroup_id",
+            "readonly_and_readwrite_storage_textures",
+            "swizzle_assignment",
+            "unrestricted_pointer_parameters",
+            "buffer_view",
+            "texture_and_sampler_let",
+            "texture_formats_tier1",
+            "pointer_composite_access",
+            "uniform_buffer_standard_layout"
+          ],
+          "compute": "f32",
+          "quant": "i4-fast",
+          "linearGemvReduce": "parallel",
+          "linearGemvReduceOverride": null,
+          "weights": "Karume fixed int2 / int4 / int8 + SRQ",
+          "capacity": 4096,
+          "chunkLength": 768,
+          "normalization": "product-default",
+          "stateAttentionReduce": "parallel",
+          "fuseLinearStaticQuantize": true,
+          "fuseRmsNormAdd": true,
+          "rmsNormReduce": "workgroup",
+          "submitMaxChunkSize": 1024,
+          "prefillBuckets": "default",
+          "chunkBuckets": [],
+          "pleBudget": "default"
+        }
+      },
+      "normal-wall-0": {
+        "english-list": {
+          "decodeTokPerS_median": 99.40044178020864,
+          "decodeTokPerS_range": [
+            99.32208734084188,
+            99.84152139461173
+          ],
+          "ttftMs_median": 39.29999999701977,
+          "tokenIdsIdentical": true,
+          "tokenIds": [
+            8291,
+            659,
+            12571,
+            10231,
+            11221,
+            573,
+            4735,
+            496,
+            861,
+            5192,
+            236787,
+            108,
+            236770,
+            236761,
+            5213,
+            3974,
+            84947,
+            6376,
+            7675,
+            99382,
+            9187,
+            607,
+            1944,
+            236764,
+            78407,
+            9395,
+            1546,
+            1719,
+            236761,
+            107,
+            236778,
+            236761,
+            5213,
+            6924,
+            496,
+            9958,
+            2748,
+            10368,
+            99382,
+            9996,
+            4735,
+            496,
+            4841,
+            912,
+            529,
+            822,
+            15668,
+            236761,
+            107,
+            236800,
+            236761,
+            5213,
+            15354,
+            580,
+            1494,
+            236772,
+            27521,
+            38038,
+            1171,
+            99382,
+            20099,
+            506,
+            1346,
+            3364
+          ]
+        },
+        "japanese-list": {
+          "decodeTokPerS_median": 99.79407571489048,
+          "decodeTokPerS_range": [
+            99.63624861663283,
+            99.82570115529629
+          ],
+          "ttftMs_median": 60.099999994039536,
+          "tokenIdsIdentical": true,
+          "tokenIds": [
+            1408,
+            67666,
+            29171,
+            70738,
+            237051,
+            230452,
+            237086,
+            28915,
+            77221,
+            99950,
+            236778,
+            236771,
+            238295,
+            108,
+            236770,
+            236761,
+            5213,
+            76389,
+            237051,
+            239145,
+            26085,
+            30117,
+            237383,
+            118823,
+            237000,
+            49391,
+            236924,
+            1018,
+            236743,
+            166792,
+            237050,
+            36236,
+            237000,
+            134904,
+            114184,
+            41415,
+            236951,
+            18668,
+            29171,
+            70738,
+            236945,
+            198172,
+            49225,
+            237512,
+            237364,
+            237380,
+            237051,
+            167573,
+            29666,
+            40051,
+            16918,
+            3652,
+            236924,
+            107,
+            236778,
+            236761,
+            5213,
+            151113,
+            237760,
+            120269,
+            30117,
+            239774,
+            49262,
+            237007
+          ]
+        },
+        "metadata": {
+          "manifestSha256": "f4a7136b5f26f622c6e717adbe4a4d689a8af42e260c9052e646dfe89d82fc52",
+          "enabledFeatures": [
+            "core-features-and-limits"
+          ],
+          "wgslLanguageFeatures": [
+            "packed_4x8_integer_dot_product",
+            "subgroup_uniformity",
+            "immediate_address_space",
+            "linear_indexing",
+            "subgroup_id",
+            "readonly_and_readwrite_storage_textures",
+            "swizzle_assignment",
+            "unrestricted_pointer_parameters",
+            "buffer_view",
+            "texture_formats_tier1",
+            "pointer_composite_access",
+            "texture_and_sampler_let",
+            "uniform_buffer_standard_layout"
+          ],
+          "compute": "f32",
+          "quant": "i4-fast",
+          "linearGemvReduce": "parallel",
+          "linearGemvReduceOverride": null,
+          "weights": "Karume packed i4 / i8",
+          "capacity": 4096,
+          "chunkLength": 768,
+          "normalization": "product-default",
+          "stateAttentionReduce": "parallel",
+          "fuseLinearStaticQuantize": false,
+          "fuseRmsNormAdd": true,
+          "rmsNormReduce": "workgroup",
+          "submitMaxChunkSize": 1024,
+          "prefillBuckets": "default",
+          "chunkBuckets": [],
+          "pleBudget": "default"
+        }
+      },
+      "qat-wall-1": {
+        "english-list": {
+          "decodeTokPerS_median": 92.67431597366172,
+          "decodeTokPerS_range": [
+            92.61981770027046,
+            94.8509485090595
+          ],
+          "ttftMs_median": 38.8999999910593,
+          "tokenIdsIdentical": true,
+          "tokenIds": [
+            8291,
+            659,
+            12571,
+            10231,
+            11221,
+            573,
+            4735,
+            496,
+            861,
+            5192,
+            236787,
+            108,
+            236770,
+            236761,
+            5213,
+            3974,
+            21179,
+            236764,
+            1944,
+            6376,
+            7675,
+            99382,
+            107,
+            236778,
+            236761,
+            5213,
+            1514,
+            1042,
+            561,
+            5869,
+            528,
+            506,
+            5192,
+            1343,
+            4009,
+            99382,
+            107,
+            236800,
+            236761,
+            5213,
+            82804,
+            12259,
+            699,
+            1719,
+            886,
+            236764,
+            1581,
+            768,
+            625,
+            236789,
+            236751,
+            59314,
+            99382,
+            107,
+            236812,
+            236761,
+            5213,
+            10896,
+            13053,
+            6307,
+            13283,
+            573,
+            38038,
+            3540
+          ]
+        },
+        "japanese-list": {
+          "decodeTokPerS_median": 93.87572641806092,
+          "decodeTokPerS_range": [
+            93.65244536899196,
+            94.60880011929132
+          ],
+          "ttftMs_median": 59.69999998807907,
+          "tokenIdsIdentical": true,
+          "tokenIds": [
+            18668,
+            29171,
+            70738,
+            237051,
+            230452,
+            237086,
+            28915,
+            77221,
+            99950,
+            237051,
+            236778,
+            236771,
+            237629,
+            236951,
+            59043,
+            237009,
+            237364,
+            237007,
+            34084,
+            11914,
+            236924,
+            108,
+            236770,
+            236761,
+            5213,
+            117256,
+            103336,
+            5077,
+            163557,
+            53121,
+            184056,
+            237048,
+            204982,
+            13785,
+            5077,
+            87130,
+            236951,
+            22384,
+            86167,
+            237051,
+            196856,
+            129242,
+            55507,
+            140119,
+            185141,
+            95920,
+            237000,
+            241867,
+            237053,
+            13764,
+            236924,
+            107,
+            236778,
+            236761,
+            5213,
+            237374,
+            100511,
+            237377,
+            237051,
+            127609,
+            237295,
+            238199,
+            4042,
+            53121
+          ]
+        },
+        "metadata": {
+          "manifestSha256": "23cf61b6edb55d25a1eb3c0ff9c8265386107568c87558620d04575f648a8103",
+          "enabledFeatures": [
+            "core-features-and-limits"
+          ],
+          "wgslLanguageFeatures": [
+            "packed_4x8_integer_dot_product",
+            "subgroup_uniformity",
+            "immediate_address_space",
+            "linear_indexing",
+            "subgroup_id",
+            "readonly_and_readwrite_storage_textures",
+            "swizzle_assignment",
+            "unrestricted_pointer_parameters",
+            "buffer_view",
+            "texture_and_sampler_let",
+            "texture_formats_tier1",
+            "pointer_composite_access",
+            "uniform_buffer_standard_layout"
+          ],
+          "compute": "f32",
+          "quant": "i4-fast",
+          "linearGemvReduce": "parallel",
+          "linearGemvReduceOverride": null,
+          "weights": "Karume fixed int2 / int4 / int8 + SRQ",
+          "capacity": 4096,
+          "chunkLength": 768,
+          "normalization": "product-default",
+          "stateAttentionReduce": "parallel",
+          "fuseLinearStaticQuantize": true,
+          "fuseRmsNormAdd": true,
+          "rmsNormReduce": "workgroup",
+          "submitMaxChunkSize": 1024,
+          "prefillBuckets": "default",
+          "chunkBuckets": [],
+          "pleBudget": "default"
+        }
+      },
+      "normal-wall-1": {
+        "english-list": {
+          "decodeTokPerS_median": 99.73088491325436,
+          "decodeTokPerS_range": [
+            99.62049335769484,
+            99.82570115765331
+          ],
+          "ttftMs_median": 39.3999999910593,
+          "tokenIdsIdentical": true,
+          "tokenIds": [
+            8291,
+            659,
+            12571,
+            10231,
+            11221,
+            573,
+            4735,
+            496,
+            861,
+            5192,
+            236787,
+            108,
+            236770,
+            236761,
+            5213,
+            3974,
+            84947,
+            6376,
+            7675,
+            99382,
+            9187,
+            607,
+            1944,
+            236764,
+            78407,
+            9395,
+            1546,
+            1719,
+            236761,
+            107,
+            236778,
+            236761,
+            5213,
+            6924,
+            496,
+            9958,
+            2748,
+            10368,
+            99382,
+            9996,
+            4735,
+            496,
+            4841,
+            912,
+            529,
+            822,
+            15668,
+            236761,
+            107,
+            236800,
+            236761,
+            5213,
+            15354,
+            580,
+            1494,
+            236772,
+            27521,
+            38038,
+            1171,
+            99382,
+            20099,
+            506,
+            1346,
+            3364
+          ]
+        },
+        "japanese-list": {
+          "decodeTokPerS_median": 99.68354430379746,
+          "decodeTokPerS_range": [
+            99.22822491637825,
+            100.5426109170113
+          ],
+          "ttftMs_median": 62.8999999910593,
+          "tokenIdsIdentical": true,
+          "tokenIds": [
+            1408,
+            67666,
+            29171,
+            70738,
+            237051,
+            230452,
+            237086,
+            28915,
+            77221,
+            99950,
+            236778,
+            236771,
+            238295,
+            108,
+            236770,
+            236761,
+            5213,
+            76389,
+            237051,
+            239145,
+            26085,
+            30117,
+            237383,
+            118823,
+            237000,
+            49391,
+            236924,
+            1018,
+            236743,
+            166792,
+            237050,
+            36236,
+            237000,
+            134904,
+            114184,
+            41415,
+            236951,
+            18668,
+            29171,
+            70738,
+            236945,
+            198172,
+            49225,
+            237512,
+            237364,
+            237380,
+            237051,
+            167573,
+            29666,
+            40051,
+            16918,
+            3652,
+            236924,
+            107,
+            236778,
+            236761,
+            5213,
+            151113,
+            237760,
+            120269,
+            30117,
+            239774,
+            49262,
+            237007
+          ]
+        },
+        "metadata": {
+          "manifestSha256": "f4a7136b5f26f622c6e717adbe4a4d689a8af42e260c9052e646dfe89d82fc52",
+          "enabledFeatures": [
+            "core-features-and-limits"
+          ],
+          "wgslLanguageFeatures": [
+            "packed_4x8_integer_dot_product",
+            "subgroup_uniformity",
+            "immediate_address_space",
+            "linear_indexing",
+            "subgroup_id",
+            "readonly_and_readwrite_storage_textures",
+            "swizzle_assignment",
+            "unrestricted_pointer_parameters",
+            "buffer_view",
+            "texture_formats_tier1",
+            "pointer_composite_access",
+            "texture_and_sampler_let",
+            "uniform_buffer_standard_layout"
+          ],
+          "compute": "f32",
+          "quant": "i4-fast",
+          "linearGemvReduce": "parallel",
+          "linearGemvReduceOverride": null,
+          "weights": "Karume packed i4 / i8",
+          "capacity": 4096,
+          "chunkLength": 768,
+          "normalization": "product-default",
+          "stateAttentionReduce": "parallel",
+          "fuseLinearStaticQuantize": false,
+          "fuseRmsNormAdd": true,
+          "rmsNormReduce": "workgroup",
+          "submitMaxChunkSize": 1024,
+          "prefillBuckets": "default",
+          "chunkBuckets": [],
+          "pleBudget": "default"
+        }
+      }
+    },
+    "gpuPassTimestamps": {
+      "qat-profile-0": {
+        "wallMsPerToken_none": [
+          10.56507936522128,
+          11.106349206396512
+        ],
+        "gpuMsPerToken": {
+          "median": 6.976512,
+          "min": 6.792192,
+          "max": 7.130112
+        },
+        "nonGpuMsPerToken": 4.1298372063965125,
+        "dispatchPerToken": [
+          1134
+        ],
+        "passesPerToken": [
+          3
+        ],
+        "prefillGpuMs": 30.220288
+      },
+      "qat-profile-1": {
+        "wallMsPerToken_none": [
+          10.812698412745718,
+          10.812698412745718
+        ],
+        "gpuMsPerToken": {
+          "median": 7.487488,
+          "min": 6.923264,
+          "max": 8.403968
+        },
+        "nonGpuMsPerToken": 3.325210412745718,
+        "dispatchPerToken": [
+          1134
+        ],
+        "passesPerToken": [
+          3
+        ],
+        "prefillGpuMs": 32.943104
+      },
+      "normal-profile-0": {
+        "wallMsPerToken_none": [
+          9.94920634939557,
+          9.946031745937136
+        ],
+        "gpuMsPerToken": {
+          "median": 6.207488,
+          "min": 6.048768,
+          "max": 6.490112
+        },
+        "nonGpuMsPerToken": 3.741718349395571,
+        "dispatchPerToken": [
+          924
+        ],
+        "passesPerToken": [
+          2
+        ],
+        "prefillGpuMs": 29.09184
+      }
+    },
+    "perKeyDispatchSplit": {
+      "qat-profile-0": {
+        "passTotalMs": 6.976512,
+        "dispatchModeTotalMs": 11.613497806451614,
+        "inflationMsPerDispatch": 0.004089052739375321,
+        "rows": [
+          {
+            "key": "linear_gemv_parallel:wi4g512:l4:static-quantize:v1",
+            "dispatchPerToken": 65,
+            "rawMs": 1.1491,
+            "correctedMs": 0.8834
+          },
+          {
+            "key": "linear_gemv_parallel:wi2:l2:static-quantize:v1",
+            "dispatchPerToken": 40,
+            "rawMs": 0.964,
+            "correctedMs": 0.8004
+          },
+          {
+            "key": "linear_gemv_parallel:wi2:l32:static-quantize:v1",
+            "dispatchPerToken": 20,
+            "rawMs": 0.8112,
+            "correctedMs": 0.7294
+          },
+          {
+            "key": "static_quantize:v1:f32:wg128",
+            "dispatchPerToken": 210,
+            "rawMs": 1.5224,
+            "correctedMs": 0.6637
+          },
+          {
+            "key": "linear_gemv_parallel:wi4g2048:l32:static-quantize:v1",
+            "dispatchPerToken": 43,
+            "rawMs": 0.7486,
+            "correctedMs": 0.5727
+          },
+          {
+            "key": "rms_norm_add:v1:rms_norm:v1:f32:lastdim:wg256:residual-norm:xor-round",
+            "dispatchPerToken": 105,
+            "rawMs": 0.9617,
+            "correctedMs": 0.5323
+          },
+          {
+            "key": "rms_norm:v1:f32:lastdim:wg256",
+            "dispatchPerToken": 136,
+            "rawMs": 1.0744,
+            "correctedMs": 0.5182
+          },
+          {
+            "key": "attention_state_qk:v1:f32:wg16x16:par:sliding:gqa",
+            "dispatchPerToken": 28,
+            "rawMs": 0.4265,
+            "correctedMs": 0.312
+          },
+          {
+            "key": "linear_gemv:v1:f32:c32u4:wi2",
+            "dispatchPerToken": 1,
+            "rawMs": 0.2401,
+            "correctedMs": 0.236
+          },
+          {
+            "key": "ew:v3:mul:f32>f32:r3:wg256",
+            "dispatchPerToken": 108,
+            "rawMs": 0.6332,
+            "correctedMs": 0.1915
+          },
+          {
+            "key": "linear_gemv_parallel:wi8:l4:static-quantize:v1",
+            "dispatchPerToken": 35,
+            "rawMs": 0.3174,
+            "correctedMs": 0.1743
+          },
+          {
+            "key": "linear_gemv_parallel:wi8:l32:static-quantize:v1",
+            "dispatchPerToken": 35,
+            "rawMs": 0.3149,
+            "correctedMs": 0.1718
+          },
+          {
+            "key": "linear_gemv_parallel:wi4g512:l32:static-quantize:v1",
+            "dispatchPerToken": 30,
+            "rawMs": 0.2707,
+            "correctedMs": 0.148
+          },
+          {
+            "key": "ew:v3:gelu_tanh:f32>f32:r3:wg256",
+            "dispatchPerToken": 70,
+            "rawMs": 0.4241,
+            "correctedMs": 0.1379
+          },
+          {
+            "key": "linear_gemv:v1:f32:c32u4",
+            "dispatchPerToken": 1,
+            "rawMs": 0.1359,
+            "correctedMs": 0.1318
+          },
+          {
+            "key": "attention_state_qk:v1:f32:wg16x16:par:gqa",
+            "dispatchPerToken": 7,
+            "rawMs": 0.1603,
+            "correctedMs": 0.1317
+          },
+          {
+            "key": "attention_state_pv:v1:f32:wg16x16:par:sliding:gqa",
+            "dispatchPerToken": 28,
+            "rawMs": 0.2432,
+            "correctedMs": 0.1287
+          },
+          {
+            "key": "attention_state_stats:v2:f32:wg256:sliding",
+            "dispatchPerToken": 28,
+            "rawMs": 0.2251,
+            "correctedMs": 0.1106
+          },
+          {
+            "key": "linear_gemv_parallel:wi4g4096:l32:static-quantize:v1",
+            "dispatchPerToken": 7,
+            "rawMs": 0.134,
+            "correctedMs": 0.1054
+          },
+          {
+            "key": "strided:v1:f32:r4:wg256",
+            "dispatchPerToken": 35,
+            "rawMs": 0.2197,
+            "correctedMs": 0.0766
+          },
+          {
+            "key": "rope:v1:half:bshd:f32:wg256",
+            "dispatchPerToken": 35,
+            "rawMs": 0.2088,
+            "correctedMs": 0.0657
+          },
+          {
+            "key": "state_append:v1:f32:wg256:sliding",
+            "dispatchPerToken": 24,
+            "rawMs": 0.14,
+            "correctedMs": 0.0419
+          },
+          {
+            "key": "attention_state_pv:v1:f32:wg16x16:par:gqa",
+            "dispatchPerToken": 7,
+            "rawMs": 0.0573,
+            "correctedMs": 0.0286
+          },
+          {
+            "key": "attention_state_stats:v2:f32:wg256",
+            "dispatchPerToken": 7,
+            "rawMs": 0.0561,
+            "correctedMs": 0.0275
+          },
+          {
+            "key": "rope:v1:half:f32:wg256",
+            "dispatchPerToken": 15,
+            "rawMs": 0.0834,
+            "correctedMs": 0.0221
+          },
+          {
+            "key": "state_append:v1:f32:wg256",
+            "dispatchPerToken": 6,
+            "rawMs": 0.035,
+            "correctedMs": 0.0105
+          },
+          {
+            "key": "argmax:v2:f32>i32:lastdim:minindex:split-partial:wg256e16",
+            "dispatchPerToken": 1,
+            "rawMs": 0.0096,
+            "correctedMs": 0.0055
+          },
+          {
+            "key": "ew:v3:div:f32>f32:r3:wg256",
+            "dispatchPerToken": 1,
+            "rawMs": 0.0085,
+            "correctedMs": 0.0044
+          },
+          {
+            "key": "ew:v3:tanh:f32>f32:r3:wg256",
+            "dispatchPerToken": 1,
+            "rawMs": 0.008,
+            "correctedMs": 0.004
+          },
+          {
+            "key": "rms_norm_add:v1:rms_norm:v1:f32:lastdim:wg256:norm-residual:xor-round",
+            "dispatchPerToken": 1,
+            "rawMs": 0.0078,
+            "correctedMs": 0.0037
+          },
+          {
+            "key": "embedding:v1:f32:i32:wg256:wi2",
+            "dispatchPerToken": 1,
+            "rawMs": 0.0064,
+            "correctedMs": 0.0023
+          },
+          {
+            "key": "topk:v2:f32+i32:lastdim:desc:minindex:k1:split-merge:wg256",
+            "dispatchPerToken": 1,
+            "rawMs": 0.0058,
+            "correctedMs": 0.0017
+          },
+          {
+            "key": "ew:v3:mul:f32>f32:r4:wg256",
+            "dispatchPerToken": 1,
+            "rawMs": 0.0053,
+            "correctedMs": 0.0012
+          },
+          {
+            "key": "embedding:v1:f32:i32:wg256",
+            "dispatchPerToken": 1,
+            "rawMs": 0.005,
+            "correctedMs": 0.0009
+          }
+        ]
+      },
+      "normal-profile-0": {
+        "passTotalMs": 6.207488,
+        "dispatchModeTotalMs": 10.288094967741936,
+        "inflationMsPerDispatch": 0.004416241307080017,
+        "rows": [
+          {
+            "key": "linear_gemv_parallel:wi4g32:l4",
+            "dispatchPerToken": 141,
+            "rawMs": 2.5389,
+            "correctedMs": 1.9162
+          },
+          {
+            "key": "linear_gemv_parallel:wi4g32:l32",
+            "dispatchPerToken": 135,
+            "rawMs": 2.2736,
+            "correctedMs": 1.6774
+          },
+          {
+            "key": "rms_norm_add:v1:rms_norm:v1:f32:lastdim:wg256:residual-norm:xor-round",
+            "dispatchPerToken": 105,
+            "rawMs": 0.963,
+            "correctedMs": 0.4993
+          },
+          {
+            "key": "linear_gemv_parallel:wi8:l16",
+            "dispatchPerToken": 1,
+            "rawMs": 0.4681,
+            "correctedMs": 0.4636
+          },
+          {
+            "key": "rms_norm:v1:f32:lastdim:wg256",
+            "dispatchPerToken": 136,
+            "rawMs": 1.0431,
+            "correctedMs": 0.4425
+          },
+          {
+            "key": "attention_state_qk:v1:f32:wg16x16:par:sliding:gqa",
+            "dispatchPerToken": 28,
+            "rawMs": 0.4364,
+            "correctedMs": 0.3128
+          },
+          {
+            "key": "ew:v3:mul:f32>f32:r3:wg256",
+            "dispatchPerToken": 108,
+            "rawMs": 0.6394,
+            "correctedMs": 0.1625
+          },
+          {
+            "key": "attention_state_qk:v1:f32:wg16x16:par:gqa",
+            "dispatchPerToken": 7,
+            "rawMs": 0.1685,
+            "correctedMs": 0.1376
+          },
+          {
+            "key": "attention_state_pv:v1:f32:wg16x16:par:sliding:gqa",
+            "dispatchPerToken": 28,
+            "rawMs": 0.2538,
+            "correctedMs": 0.1302
+          },
+          {
+            "key": "attention_state_stats:v2:f32:wg256:sliding",
+            "dispatchPerToken": 28,
+            "rawMs": 0.22,
+            "correctedMs": 0.0963
+          },
+          {
+            "key": "ew:v3:gelu_tanh:f32>f32:r3:wg256",
+            "dispatchPerToken": 70,
+            "rawMs": 0.4022,
+            "correctedMs": 0.0931
+          },
+          {
+            "key": "rope:v1:half:bshd:f32:wg256",
+            "dispatchPerToken": 35,
+            "rawMs": 0.2201,
+            "correctedMs": 0.0655
+          },
+          {
+            "key": "strided:v1:f32:r4:wg256",
+            "dispatchPerToken": 35,
+            "rawMs": 0.2193,
+            "correctedMs": 0.0647
+          },
+          {
+            "key": "state_append:v1:f32:wg256:sliding",
+            "dispatchPerToken": 24,
+            "rawMs": 0.1408,
+            "correctedMs": 0.0349
+          },
+          {
+            "key": "rope:v1:half:f32:wg256",
+            "dispatchPerToken": 15,
+            "rawMs": 0.0963,
+            "correctedMs": 0.03
+          },
+          {
+            "key": "attention_state_pv:v1:f32:wg16x16:par:gqa",
+            "dispatchPerToken": 7,
+            "rawMs": 0.0596,
+            "correctedMs": 0.0287
+          },
+          {
+            "key": "attention_state_stats:v2:f32:wg256",
+            "dispatchPerToken": 7,
+            "rawMs": 0.0536,
+            "correctedMs": 0.0227
+          },
+          {
+            "key": "state_append:v1:f32:wg256",
+            "dispatchPerToken": 6,
+            "rawMs": 0.0345,
+            "correctedMs": 0.008
+          },
+          {
+            "key": "argmax:v2:f32>i32:lastdim:minindex:split-partial:wg256e16",
+            "dispatchPerToken": 1,
+            "rawMs": 0.0098,
+            "correctedMs": 0.0053
+          },
+          {
+            "key": "ew:v3:tanh:f32>f32:r3:wg256",
+            "dispatchPerToken": 1,
+            "rawMs": 0.0082,
+            "correctedMs": 0.0038
+          },
+          {
+            "key": "ew:v3:div:f32>f32:r3:wg256",
+            "dispatchPerToken": 1,
+            "rawMs": 0.0079,
+            "correctedMs": 0.0035
+          },
+          {
+            "key": "embedding:v1:f32:i32:wg256:wi8",
+            "dispatchPerToken": 1,
+            "rawMs": 0.0078,
+            "correctedMs": 0.0034
+          },
+          {
+            "key": "rms_norm_add:v1:rms_norm:v1:f32:lastdim:wg256:norm-residual:xor-round",
+            "dispatchPerToken": 1,
+            "rawMs": 0.0072,
+            "correctedMs": 0.0028
+          },
+          {
+            "key": "topk:v2:f32+i32:lastdim:desc:minindex:k1:split-merge:wg256",
+            "dispatchPerToken": 1,
+            "rawMs": 0.0056,
+            "correctedMs": 0.0012
+          },
+          {
+            "key": "ew:v3:mul:f32>f32:r4:wg256",
+            "dispatchPerToken": 1,
+            "rawMs": 0.0055,
+            "correctedMs": 0.0011
+          },
+          {
+            "key": "embedding:v1:f32:i32:wg256",
+            "dispatchPerToken": 1,
+            "rawMs": 0.005,
+            "correctedMs": 0.0006
+          }
+        ]
+      }
+    }
+  }
+}
