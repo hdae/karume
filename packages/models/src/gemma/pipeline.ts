@@ -338,8 +338,18 @@ export type Gemma4PipelineOptions = {
    * 特にQATでは生成列が変わる場合がある。
    */
   readonly linearGemvReduce?: SessionOptions["linearGemvReduce"];
-  /** RMS→addの任意融合。意味・適用範囲はruntimeの同名設定が正本（ADR 0099）。 */
+  /**
+   * RMS→addの任意融合。意味・適用範囲はruntimeの同名設定が正本（ADR 0099）。
+   * 明示値 → 選択quantのsession → runtime既定の順で解決し、target / drafter両方へ渡す
+   * （ADR 0104）。fromAssetsにはquantが無いため、未指定ならruntime既定。
+   */
   readonly fuseRmsNormAdd?: SessionOptions["fuseRmsNormAdd"];
+  /**
+   * linear→固定SRQの任意融合。意味・適用範囲はruntimeの同名設定が正本（ADR 0103）。
+   * 実効の`linearGemvReduce`が`"parallel"`でなければ拒否する。
+   * 明示値 → 選択quantのsession → runtime既定の順で解決し、target / drafter両方へ渡す
+   * （ADR 0104）。fromAssetsにはquantが無いため、未指定ならruntime既定。
+   */
   readonly fuseLinearStaticQuantize?: SessionOptions["fuseLinearStaticQuantize"];
   /** RMSの任意縮約。subgroup32は対応GPU必須で、参照と加算順が変わる（ADR 0100）。 */
   readonly rmsNormReduce?: SessionOptions["rmsNormReduce"];

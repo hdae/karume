@@ -75,7 +75,9 @@ attention to avoid adding another comparison axis.
 
 Selecting **quant定義に従う** follows the distribution's E2B `defaultQuant` and its
 `session.linearGemvReduce` setting. Newly assembled E2B distributions default to
-`i4-gemvpar`; older local distributions keep their existing `i4` default. No files
+`i4-fast`, which also declares fusion flags; this page applies its own normalization
+and linear SRQ selections instead, so only `linearGemvReduce` is taken from the quant.
+Older local distributions keep their existing `i4` or `i4-gemvpar` default. No files
 are rewritten by this benchmark. The table and JSON include the selected quant and
 effective reduction mode; JSON also records whether the mode was explicitly overridden.
 

@@ -208,3 +208,15 @@ M2の新しい融合の検収は未完で、モデル既定の変更は次の判
 [利用者の40生成](2026-09-15-m2-linear-srq-adoption.md)は全出力一致、小幅な速度改善方向だった。
 任意採用を維持し、QAT E2Bの高速quant構成候補に含める。同じM2追試は再依頼しない。
 次はRMS融合等と合わせたquant宣言・明示上書きの整理。今回の追加差分は文書と計測記録だけ。
+
+## 高速quant宣言の追加差分（2026-09-15、基準985cff0）
+
+[統合の検収](2026-09-15-gemma-fast-quant.md)と[ADR 0104](../decisions/0104-gemma-fast-quant.md)を参照する。
+上の「互換性と既定設定」表は2026-09-14時点の凍結で、以下の4点はその後の変更なので表には反映していない。
+①`quant.session`の保存語彙へ`fuseRmsNormAdd`と`fuseLinearStaticQuantize`のboolean 2欄が増えた。
+②通常/QAT E2Bの新規配布の`defaultQuant`が`i4-gemvpar`から`i4-fast`へ移った。
+③通常版は並列GEMV＋RMS→add融合、QATはさらにlinear→SRQ融合を宣言する。
+④参照へ戻す確実な手段は`quant: "i4"`。`linearGemvReduce: "sequential"`単独はQATでは拒否される。
+該当コミットは`e7cc2f8`（hubの保存語彙）、`214fb31`（modelsの明示指定による上書き）、
+`fcd5448`（E2B配布の既定切り替え）、`a287d17`（ADR 0104と検収記録）。
+旧レビューの範囲には含まれない。

@@ -55,11 +55,14 @@ Warmup and model loading are reported separately and excluded from turn timing.
 ```sh
 deno task demo:gemma4-qat --quant i4
 deno task demo:gemma4-qat --quant i4-gemvpar
+deno task demo:gemma4-qat --quant i4-fast
 ```
 
-Updated E2B distributions default to `i4-gemvpar`, which uses the same packed weights
-as `i4` and declares `session.linearGemvReduce: "parallel"`. `i4` retains the reference
-summation order. Existing distributions retain their declared default until rebuilt;
+Updated E2B distributions default to `i4-fast`, which uses the same packed weights
+as `i4` and declares `session.linearGemvReduce: "parallel"` together with
+`session.fuseRmsNormAdd: true` and `session.fuseLinearStaticQuantize: true`.
+`i4-gemvpar` declares parallel GEMV alone, and `i4` retains the reference summation
+order. Existing distributions retain their declared default until rebuilt;
 QAT E4B still defaults to `i4`.
 
 An explicit `--linear-gemv-reduce sequential` or `parallel` overrides the selected

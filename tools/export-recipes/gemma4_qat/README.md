@@ -29,14 +29,15 @@ The distribution family is `gemma4-qat/1`, with models `e2b` and `e4b`. The `i4`
 fixed mixed INT2/INT4/INT8 with SRQ and reference GEMV summation. E2B defaults to
 `i4-fast`, which uses the same weights and declares parallel GEMV, RMS-add fusion,
 and linear-to-SRQ fusion. `i4-gemvpar` retains parallel GEMV without either fusion.
-E4B keeps `i4` as its default. Fusion declarations require a reader with
-fusion-option support; published 0.12.0 readers reject those fields.
-Explicit `false` overrides a quant's fusion flag. To use sequential GEMV with
+E4B keeps `i4` as its default. Every quant other than `i4` declares a `session` field
+that the published 0.12.0 readers reject, so both `i4-gemvpar` and `i4-fast` need a
+reader newer than 0.12.0. Explicit runtime options override quant settings, including
+setting a fusion flag back to `false`. To use sequential GEMV with
 `i4-fast`, also set `fuseLinearStaticQuantize: false`, or select `i4`.
-Submission policy and prefill buckets remain separate host options.
-See [the decision record](../../../docs/decisions/0104-gemma-fast-quant.md).
 Rebuild the distribution to obtain the new declaration; no checkpoint requantization
-is needed. Explicit runtime options override quant settings. Default capacity is 128 tokens and prefill
+is needed. Submission policy and prefill buckets remain separate host options.
+See [the decision record](../../../docs/decisions/0104-gemma-fast-quant.md).
+Default capacity is 128 tokens and prefill
 chunk length is 32 (trace maximum 128). Larger contexts and broad quality remain unvalidated.
 CPU and GPU floating-point reductions can cross SRQ rounding boundaries and select different
 tokens. Short Deno and Chrome comparisons on an RTX 3080 Ti agreed with each other, but did not

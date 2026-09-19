@@ -136,3 +136,5 @@ known-issues の Metal 節）。
   複数の高速化の組合せが変わる場合も、同じ実行設定内のMTP一致などの不変条件は維持する。
 
 今回の適用はGemma通常/QAT E2BのGEMV並列加算（[ADR 0098](0098-linear-gemv-parallel.md)）。
+2026-09-15の適用はRMS→addとlinear→SRQ融合の宣言（[ADR 0104](0104-gemma-fast-quant.md)）で、
+上の3条件（変種が実際に適用される・明示指定と対応する・品質と速度を別に検証する）がその検収項目にあたる。

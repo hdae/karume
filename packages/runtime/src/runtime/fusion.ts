@@ -22,7 +22,9 @@
  *
  * ## 畳む先は 1 dispatch とは限らない
  *
- * rmsNormAdd / silu / upsample2x / rope / adaln は「N ノード → private カーネル 1 dispatch」だが、
+ * linearStaticQuantize / rmsNormAdd / silu / upsample2x / rope / adaln は「N ノード → private
+ * カーネル 1 dispatch」（{@link LINEAR_STATIC_QUANTIZE_RULE} は並列 GEMV と固定再量子化を
+ * 1 dispatch へ畳む）だが、
  * {@link ROW_BLOCK_ATTENTION_RULE} は**演算ではなく中間の実体化幅**を畳むので、ステップ内で
  * 閉じた一時（{@link FusedStep.temps}）を挟んだ dispatch 列になる。どちらも
  * {@link FusedStep} 1 つ = 実行ステップ 1 つで、解放簿記の合流点は変わらない。

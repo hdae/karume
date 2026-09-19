@@ -488,17 +488,17 @@ pinned fetch source for the published repository is `GEMMA4_SOURCES["gemma4"]`
 [0092](../../../docs/decisions/0092-distribution-repos-and-sources.md)); a locally built
 distribution is spelled out by the caller, since `fromPretrained` has no default source.
 
-## GEMV execution variants
+## Quant execution variants
 
 E2B distributions provide `i4` (reference summation), `i4-gemvpar` (parallel
 GEMV), and `i4-fast` (parallel GEMV plus RMS-add fusion). The default is
 `i4-fast`; all three reference the same model and drafter weight files.
-E4B keeps its reference `i4` definition.
 
 Explicit runtime options override each quant setting, including
 `fuseRmsNormAdd: false`. Reassembling into a new output directory updates the
 metadata without requantizing weights. Existing distributions and pinned public
-revisions remain unchanged. Fusion declarations require a hub/models reader with
-fusion-option support; published 0.12.0 readers reject those fields.
+revisions remain unchanged. Every quant other than `i4` declares a `session`
+field that the published 0.12.0 readers reject, so both `i4-gemvpar` and
+`i4-fast` need a hub/models reader newer than 0.12.0.
 Submission policy and prefill buckets are separate host options.
 See [the decision record](../../../docs/decisions/0104-gemma-fast-quant.md).

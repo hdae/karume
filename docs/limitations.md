@@ -1468,7 +1468,7 @@ RTX の Deno / Chrome は両モデル・両 chunk 条件の全32件で一致し�
 対象は実測した量子化行列と物理 M=1..8、f32 演算のみ。既定の逐次加算と bit 同一ではなく、QAT は生成列も変わり得る。
 M>8 と対象外形状は従来経路で、診断キーで適用範囲を確認できる。E4B・他モデルの全面的な高速化を意味しない。
 [M2での速度改善と短文出力](research/2026-09-13-m2-gemv-adoption.md)は確認済み。広い品質評価は残る。
-通常/QAT E2Bの新しい配布recipeは、parallelを明示した `i4-gemvpar` を既定quantに選ぶ。
+通常/QAT E2Bの新しい配布recipeは、parallelとRMS→add融合（QATはさらにlinear→SRQ融合）を宣言した `i4-fast` を既定quantに選ぶ（[ADR 0104](decisions/0104-gemma-fast-quant.md)）。parallelだけの `i4-gemvpar` も保持する。
 従来の `i4`・runtime・fromAssetsの逐次既定は維持する。既存の配布形や公開pinは自動で変更しない。
 
 ## RMS融合とsubgroup最適化の提供範囲（2026-09-14整理）

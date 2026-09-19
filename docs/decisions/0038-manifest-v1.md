@@ -145,12 +145,18 @@ manifest はリポジトリ直下の固定名 **`karume.json`**。
   「VAE は i8 化しない」判断にも実在する需要で、後から map 化すると配布済み manifest が
   割れる）。
 - **`session` は manifest 所有の語彙**であり runtime 型の素通しではない。v1 のキーは
-  `linearCompute` / `attentionCompute` / `attentionScoreStorage` の 3 つに固定し、hub が
+  `linearCompute` / `attentionCompute` / `attentionScoreStorage` の 3 つに始まり、hub が
   **キーも値も allowlist で検査**する（未知キー・未知値は fail loudly。runtime の
   `SessionOptions` への写像は hub/models が明示的に行う）。理由: ①runtime は未知オプション
   キーを黙って無視するため、綴り違いは「s16 が名前だけになる」沈黙劣化になる ②素通しは配布済み
   manifest を runtime 内部の綴りに釘付けする ③`SessionOptions` には `submitPolicy`（TDR
   予算 = ホスト政策）が含まれ、配布者に書かせてはならない。
+  **改訂（2026-09-13・ADR [0098](0098-linear-gemv-parallel.md) / 2026-09-15・ADR
+  [0104](0104-gemma-fast-quant.md)）**: キーは 3 つ固定のままではなく、0098 が
+  `linearGemvReduce` を、0104 が `fuseRmsNormAdd` / `fuseLinearStaticQuantize` を足して
+  現在は 6 キー（後者 2 欄の詳細は末尾の追記 2026-09-15）。現行のキー一覧の正本は
+  `packages/hub/src/manifest.ts` の `SESSION_KEYS` で、allowlist 検査と ①〜③ の理由は
+  そのまま掛かる。
 - `gpuFeatures` は `AcquireGpuOptions` の部分集合。hub は**キーの allowlist 検査のみ**行う
   （v1 は `shaderF16` のみ・未知キーは拒否）。解釈と device 生成は models 側の責務
   （Session より前の `acquireGpu` 層に効くため）。
