@@ -34,6 +34,7 @@ export const runGemmaCli = async (
     " --ple-residency <host|gpu> --capacity <整数>" +
     " --chunk-length <整数> --quant <名前> --linear-gemv-reduce <sequential|parallel>" +
     " --fuse-rms-norm-add <true|false> --fuse-linear-static-quantize <true|false>" +
+    " --packed-static-quantize <true|false>" +
     " --diagnostics --no-warmup" +
     (family === "gemma4" ? " --speculative" : " --model <e2b|e4b>");
   if (argv.length === 1 && ["--help", "-h"].includes(argv[0])) {
@@ -56,6 +57,7 @@ export const runGemmaCli = async (
     "linear-gemv-reduce",
     "fuse-rms-norm-add",
     "fuse-linear-static-quantize",
+    "packed-static-quantize",
     "quant",
     ...(family === "gemma4-qat" ? ["model"] : []),
   ]);
@@ -169,6 +171,11 @@ export const runGemmaCli = async (
   };
   const fuseRmsNormAdd = boolean("fuse-rms-norm-add");
   const fuseLinearStaticQuantize = boolean("fuse-linear-static-quantize");
+  /**
+   * 固定 SRQ の活性を packed int8 で並列 GEMV へ渡す（ADR 0105・既定は runtime の false）。
+   * quant の宣言語彙には席が無いので、ここで明示したときだけ立つ。
+   */
+  const packedStaticQuantize = boolean("packed-static-quantize");
   const temperature = number("temperature");
   const topK = integer("top-k");
   const topP = number("top-p");
@@ -393,7 +400,7 @@ export const runGemmaCli = async (
         linearGemvReduce ?? "quantの指定"
       } / RMS→add融合: ${fuseRmsNormAdd ?? "quantの指定"} / linear→SRQ融合: ${
         fuseLinearStaticQuantize ?? "quantの指定"
-      }\n`,
+      } / 活性packed: ${packedStaticQuantize ?? "false（既定）"}\n`,
     );
     const started = performance.now();
     note(`[${family}] ${sourceDir ?? repoRef ?? DEFAULT_SOURCE} を読み込む\n`);
@@ -408,6 +415,7 @@ export const runGemmaCli = async (
       ...(linearGemvReduce === undefined ? {} : { linearGemvReduce }),
       ...(fuseRmsNormAdd === undefined ? {} : { fuseRmsNormAdd }),
       ...(fuseLinearStaticQuantize === undefined ? {} : { fuseLinearStaticQuantize }),
+      ...(packedStaticQuantize === undefined ? {} : { packedStaticQuantize }),
       ...(gpu === undefined ? {} : { gpu }),
       ...(diagnostics ? { onRunDiagnostics: observeRun } : {}),
       onProgress: showProgress,
