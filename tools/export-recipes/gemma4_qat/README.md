@@ -27,8 +27,14 @@ output replaces that complete series; use a new directory to retain previous mea
 
 The distribution family is `gemma4-qat/1`, with models `e2b` and `e4b`. The `i4` quant is
 fixed mixed INT2/INT4/INT8 with SRQ and reference GEMV summation. E2B defaults to
-`i4-gemvpar`, which references the same weights and adds
-`session: { "linearGemvReduce": "parallel" }`. E4B keeps `i4` as its default.
+`i4-fast`, which uses the same weights and declares parallel GEMV, RMS-add fusion,
+and linear-to-SRQ fusion. `i4-gemvpar` retains parallel GEMV without either fusion.
+E4B keeps `i4` as its default. Fusion declarations require a reader with
+fusion-option support; published 0.12.0 readers reject those fields.
+Explicit `false` overrides a quant's fusion flag. To use sequential GEMV with
+`i4-fast`, also set `fuseLinearStaticQuantize: false`, or select `i4`.
+Submission policy and prefill buckets remain separate host options.
+See [the decision record](../../../docs/decisions/0104-gemma-fast-quant.md).
 Rebuild the distribution to obtain the new declaration; no checkpoint requantization
 is needed. Explicit runtime options override quant settings. Default capacity is 128 tokens and prefill
 chunk length is 32 (trace maximum 128). Larger contexts and broad quality remain unvalidated.

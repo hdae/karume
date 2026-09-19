@@ -6,7 +6,7 @@ import pytest
 
 from gemma4_qat.config import checkpoint_name, series_name
 from gemma4_qat.distribution import assert_qat_graph, qat_quants, repo_name
-from karume.dist import DistError
+from karume.dist import DistError, assert_quant_presentation
 
 
 def graph_fixture():
@@ -66,12 +66,23 @@ class TestQatGraph:
 
 
 class TestQatQuants:
+    @pytest.mark.parametrize("model", ["e2b", "e4b"])
+    def test_every_quant_fits_the_manifest_presentation_contract(self, model):
+        for name, quant in qat_quants(model).items():
+            assert_quant_presentation(f"{model}.{name}", quant)
+
     def test_parallel_uses_the_same_weights_and_keeps_the_reference(self):
         modes = qat_quants("e2b")
-        assert list(modes) == ["i4", "i4-gemvpar"]
+        assert list(modes) == ["i4", "i4-gemvpar", "i4-fast"]
         assert modes["i4"]["session"] == {}
         assert modes["i4-gemvpar"]["weights"] == modes["i4"]["weights"]
         assert modes["i4-gemvpar"]["session"] == {"linearGemvReduce": "parallel"}
+        assert modes["i4-fast"]["weights"] == modes["i4"]["weights"]
+        assert modes["i4-fast"]["session"] == {
+            "linearGemvReduce": "parallel",
+            "fuseRmsNormAdd": True,
+            "fuseLinearStaticQuantize": True,
+        }
 
     def test_unmeasured_e4b_keeps_its_single_reference_mode(self):
         modes = qat_quants("e4b")

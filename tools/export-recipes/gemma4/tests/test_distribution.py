@@ -155,10 +155,15 @@ class TestGemma4Layout:
         model = _model(manifest)
         assert model["pipeline"] == "gemma4/1"
         assert list(model["weights"]) == [GEMMA4_ROLE, GEMMA4_DRAFTER_ROLE]
-        assert list(model["quants"]) == ["i4", "i4-gemvpar"]
-        assert model["defaultQuant"] == "i4-gemvpar"
+        assert list(model["quants"]) == ["i4", "i4-gemvpar", "i4-fast"]
+        assert model["defaultQuant"] == "i4-fast"
         assert model["quants"]["i4-gemvpar"]["weights"] == model["quants"]["i4"]["weights"]
         assert model["quants"]["i4-gemvpar"]["session"] == {"linearGemvReduce": "parallel"}
+        assert model["quants"]["i4-fast"]["weights"] == model["quants"]["i4"]["weights"]
+        assert model["quants"]["i4-fast"]["session"] == {
+            "linearGemvReduce": "parallel",
+            "fuseRmsNormAdd": True,
+        }
         # 役割ごとに基底格納が違う（drafter は linear まで i8）ので、自動補完が 2 席とも
         # それぞれの唯一の dtype ラベルで埋める。
         assert model["quants"]["i4"]["weights"] == {GEMMA4_ROLE: "i4", GEMMA4_DRAFTER_ROLE: "i8"}

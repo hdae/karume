@@ -81,7 +81,7 @@ def assert_qat_graph(graph: Mapping[str, Any]) -> None:
 
 
 def qat_quants(model: str) -> Mapping[str, Any]:
-    """参照quantを保持し、検収済みE2BにだけGEMV並列の定義を足す（ADR 0098）。"""
+    """参照quantを保持し、検収済みE2Bに並列・融合の定義を足す（ADR 0104）。"""
     checkpoint_name(model)
     quant = {
         "weights": {"model": "i4"},
@@ -99,6 +99,18 @@ def qat_quants(model: str) -> Mapping[str, Any]:
             "description": "The same fixed QAT weights and SRQ as i4, with parallel GEMV "
             "summation. Rounding and generated tokens can differ. "
             "Select i4 for the reference summation order.",
+        }
+        quants["i4-fast"] = {
+            **quant,
+            "session": {
+                "linearGemvReduce": "parallel",
+                "fuseRmsNormAdd": True,
+                "fuseLinearStaticQuantize": True,
+            },
+            "label": "Fixed mixed QAT with parallel GEMV and fusion",
+            "description": "Same fixed QAT weights; parallel GEMV, RMS-add and linear-SRQ "
+            "fusion for E2B. Use i4 for reference summation or i4-gemvpar without fusion. "
+            "Requires fusion-option support.",
         }
     return quants
 
@@ -154,7 +166,7 @@ def qat_plan(series_dir: Path, model: str) -> ModelPlan:
         weights={"model": {"i4": WeightFiles("model")}},
         assets=gemma4_assets(index),
         quants=quant_modes,
-        default_quant="i4-gemvpar" if model == "e2b" else "i4",
+        default_quant="i4-fast" if model == "e2b" else "i4",
         pipeline_config={
             "chunkLength": 32,
             "maxChunkLength": reference["maxChunkLength"],

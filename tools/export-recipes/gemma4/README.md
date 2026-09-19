@@ -490,9 +490,15 @@ distribution is spelled out by the caller, since `fromPretrained` has no default
 
 ## GEMV execution variants
 
-E2B distributions provide `i4` (reference summation) and `i4-gemvpar` (parallel GEMV).
-Both reference the same model and drafter weight files. The default is `i4-gemvpar`,
-whose quant definition declares `session.linearGemvReduce: "parallel"`.
-Reassembling the distribution updates this metadata without requantizing the weights.
-Existing distributions and pinned public revisions are not changed automatically.
-See [the adoption record](../../../docs/research/2026-09-13-m2-gemv-adoption.md).
+E2B distributions provide `i4` (reference summation), `i4-gemvpar` (parallel
+GEMV), and `i4-fast` (parallel GEMV plus RMS-add fusion). The default is
+`i4-fast`; all three reference the same model and drafter weight files.
+E4B keeps its reference `i4` definition.
+
+Explicit runtime options override each quant setting, including
+`fuseRmsNormAdd: false`. Reassembling into a new output directory updates the
+metadata without requantizing weights. Existing distributions and pinned public
+revisions remain unchanged. Fusion declarations require a hub/models reader with
+fusion-option support; published 0.12.0 readers reject those fields.
+Submission policy and prefill buckets are separate host options.
+See [the decision record](../../../docs/decisions/0104-gemma-fast-quant.md).

@@ -239,9 +239,17 @@ GEMMA4_QUANTS: Mapping[str, Any] = {
         "Faster on tested E2B devices; rounding and generated tokens can differ. "
         "Select i4 for the reference summation order.",
     },
+    "i4-fast": {
+        "weights": {},
+        "session": {"linearGemvReduce": "parallel", "fuseRmsNormAdd": True},
+        "label": "Packed int4 with parallel GEMV and RMS fusion",
+        "description": "Same weights as i4; parallel GEMV and RMS-add fusion for E2B. "
+        "Use i4 for reference summation or i4-gemvpar without fusion. "
+        "Requires fusion-option support.",
+    },
 }
 
-GEMMA4_DEFAULT_QUANT = "i4-gemvpar"
+GEMMA4_DEFAULT_QUANT = "i4-fast"
 
 #: 固定長 prefill chunk の行数（ADR 0066 決定 4 — context の計画時定数）。**実行時ノブ**なので
 #: 資産からは導出できない。上限は記号 `M` の trace 時の上限（{@link GEMMA4_MAX_CHUNK_LENGTH}）。
