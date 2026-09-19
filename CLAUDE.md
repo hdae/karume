@@ -39,6 +39,8 @@ torch.export → IR v1・uv 管理）。設計の正本は [docs/decisions/](doc
 - `deno task verify`（= fmt --check + lint + check + test）。GPU テストは実 GPU で実行、
   アダプタ無し環境は明示 SKIP（リリース判定は緑必須 — ADR 0005）
 - exporter: `uv run pytest`（**tools/exporter と tools/export-recipes の両方で** — ADR 0065）
+- `models/` の配布形ミラーが無い機では `KARUME_ALLOW_NO_DISTRIBUTION=1` で門番を外せる
+  （QAT / quant の実資産 e2e は走らない）
 - git worktree は**リポ外**（例 `~/workspace/karume-wt-<名前>`）に作る — リポ内に置くと
   fmt / lint / test が worktree 側のファイルを誤拾いする（deno.json に exclude は設けない —
   2026-08-16 裁定）
