@@ -201,8 +201,17 @@ const LINEAR_GEMV_REDUCES: Readonly<Record<LinearGemvReduce, true>> = {
  * `"i8a8"` → `"a8"`・ADR 0074 決定 3・互換シムは置かない）は網の外にある。
  * MUST: 違反は**全件列挙して 1 回で落とす**（`assertWeightsWithinLimits` と同じ流儀 — 1 本ずつ
  * 落とすと、直すたびに次の 1 本が現れて何本直せば通るのかが最後まで分からない）。
+ * MUST: 受理集合を引く**前に** `typeof` で型（文字列）を見る。`Object.hasOwn` は値をプロパティ
+ * キーへ変換するので、この門が無いと `["a8"]` が `'a8'` として受理され、下流の厳密比較では
+ * 外れて既定へ黙って縮退する。
+ * MUST: 診断でも利用者の変換（`toString` / `Symbol.toPrimitive` / `toJSON`）を呼ばない。非文字列は
+ * `typeof` の型名だけを出す — 入力境界の診断で利用者のコードを走らせると、`ExecutionError` の
+ * 代わりに利用者側の例外が `createSession` から抜ける。
+ *
+ * パッケージ内向けに export しているのはテスト用（GPU に触れない純関数なので、アダプタ無し
+ * 環境でも回帰を撃てる）。`mod.ts` の公開面には出さない（ADR 0008）。
  */
-const assertExecutionKnobs = (
+export const assertExecutionKnobs = (
   linearCompute: NonNullable<SessionOptions["linearCompute"]>,
   attentionCompute: ComputePrecision,
   attentionScoreStorage: ScoreStorage,
@@ -216,7 +225,6 @@ const assertExecutionKnobs = (
     ["stateAttentionReduce", stateAttentionReduce, STATE_ATTENTION_REDUCES],
     ["linearGemvReduce", linearGemvReduce, LINEAR_GEMV_REDUCES],
   ];
-  // Object.hasOwn のキー変換で配列などを受理しない。診断でも利用者の変換を呼ばない。
   const violations = knobs
     .filter(([, value, accepted]) => typeof value !== "string" || !Object.hasOwn(accepted, value))
     .map(([name, value, accepted]) =>
@@ -1080,7 +1088,13 @@ export class Session {
     }
     const rmsNormReduce = options.rmsNormReduce === undefined ? "workgroup" : options.rmsNormReduce;
     if (rmsNormReduce !== "workgroup" && rmsNormReduce !== "subgroup32") {
-      throw new ExecutionError(`options.rmsNormReduce: 未対応の値 '${String(rmsNormReduce)}'`);
+      // 診断で利用者の変換を呼ばない（`String(x)` は `Symbol.toPrimitive` / `toString` を走らせ、
+      // 例外を投げるオブジェクトでは `ExecutionError` の代わりにそれが抜ける）。
+      throw new ExecutionError(
+        `options.rmsNormReduce: 未対応の値 ${
+          typeof rmsNormReduce === "string" ? JSON.stringify(rmsNormReduce) : typeof rmsNormReduce
+        }`,
+      );
     }
     if (
       rmsNormReduce === "subgroup32" &&

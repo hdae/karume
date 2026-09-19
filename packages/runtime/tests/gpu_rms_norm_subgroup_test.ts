@@ -1,8 +1,9 @@
-import { assertRejects } from "@std/assert";
+import { assertEquals, assertRejects } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { openModel } from "../src/format/container.ts";
 import { createSession, type SessionOptions } from "../src/runtime/executor.ts";
+import { ExecutionError } from "../src/runtime/plan.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { graphModelBuffer } from "./helpers/graph.ts";
 import { rmsNormAddGraph } from "./helpers/rms-norm-add-graph.ts";
@@ -23,6 +24,31 @@ describe({
             Error,
             "rmsNormReduce",
           );
+        }
+        // 診断で利用者の変換を呼ばないこと: 変換が走れば `ExecutionError` ではなく "boom" が抜ける。
+        for (
+          const value of [
+            {
+              toString(): string {
+                throw new Error("boom");
+              },
+            },
+            {
+              [Symbol.toPrimitive](): string {
+                throw new Error("boom");
+              },
+            },
+          ]
+        ) {
+          const options: SessionOptions = {};
+          Reflect.set(options, "rmsNormReduce", value);
+          const error = await assertRejects(
+            () => createSession(gpu, openModel(graphModelBuffer(rmsNormAddGraph())), options),
+            ExecutionError,
+            "rmsNormReduce",
+          );
+          // 値そのものではなく型名だけを出す。
+          assertEquals(error.message.includes("object"), true, error.message);
         }
       } finally {
         gpu.destroy();

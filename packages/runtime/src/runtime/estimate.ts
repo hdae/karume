@@ -734,7 +734,9 @@ export const estimateGraphMemory = (
   validateGraphContracts(graph);
   const stateAttentionReduce = options.stateAttentionReduce ?? "sequential";
   if (typeof stateAttentionReduce !== "string") {
-    throw new ExecutionError("options.stateAttentionReduce は文字列でなければならない");
+    throw new ExecutionError(
+      `options.stateAttentionReduce は文字列でなければならない（${typeof stateAttentionReduce}）`,
+    );
   }
   if (!Object.hasOwn(STATE_ATTENTION_REDUCES, stateAttentionReduce)) {
     throw new ExecutionError(
