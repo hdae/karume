@@ -180,7 +180,9 @@ retains the reference summation order. Existing distributions retain their decla
 default until rebuilt; QAT E4B still defaults to `i4`.
 
 An explicit `--linear-gemv-reduce sequential` or `parallel` overrides the selected
-quant. With older distributions, `--linear-gemv-reduce parallel` works without a rebuild.
+quant, and `--fuse-rms-norm-add <true|false>` does the same for the RMS-norm/add fusion
+(`--fuse-linear-static-quantize` exists as well, but ordinary Gemma quants never declare it).
+With older distributions, `--linear-gemv-reduce parallel` works without a rebuild.
 The kernel applies to measured packed INT2/INT4/INT8 shapes and 1–8 rows; other shapes
 retain their existing kernels. Rounding and generated tokens can differ, particularly
 for QAT. Runtime and `fromAssets` defaults remain sequential.

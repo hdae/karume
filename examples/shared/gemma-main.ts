@@ -31,7 +31,9 @@ export const runGemmaCli = async (
   const USAGE = "--source <配布形のパス> | --repo <owner/name[@revision]>" +
     " --system <文字列> --max-new-tokens <整数> --temperature <数> --top-k <整数>" +
     " --top-p <数> --seed <整数> --max-resident-ple-bytes <整数> --capacity <整数>" +
-    " --chunk-length <整数> --quant <名前> --linear-gemv-reduce <sequential|parallel> --diagnostics --no-warmup" +
+    " --chunk-length <整数> --quant <名前> --linear-gemv-reduce <sequential|parallel>" +
+    " --fuse-rms-norm-add <true|false> --fuse-linear-static-quantize <true|false>" +
+    " --diagnostics --no-warmup" +
     (family === "gemma4" ? " --speculative" : " --model <e2b|e4b>");
   if (argv.length === 1 && ["--help", "-h"].includes(argv[0])) {
     console.log(`deno task demo:${family} ${USAGE}`);
@@ -50,6 +52,8 @@ export const runGemmaCli = async (
     "capacity",
     "chunk-length",
     "linear-gemv-reduce",
+    "fuse-rms-norm-add",
+    "fuse-linear-static-quantize",
     "quant",
     ...(family === "gemma4-qat" ? ["model"] : []),
   ]);
@@ -63,8 +67,14 @@ export const runGemmaCli = async (
   /** 取得元の既定（`dist.py --pipeline gemma4` が組むローカルミラー — `docs/assets-layout.md`）。 */
   const DEFAULT_SOURCE = `models/karume-${family}`;
 
-  /** 1 ターンで生成する token 数の上限（停止 token は含まれない）。 */
-  const DEFAULT_MAX_NEW_TOKENS = family === "gemma4" ? 256 : 64;
+  /**
+   * 1 ターンで生成する token 数の上限（停止 token は含まれない）。
+   *
+   * QAT も通常 Gemma と同じ 256（ADR 0097 追記 7 の 1 — 旧既定 64 は追記 6 の当時の値で、
+   * モデルの制限ではなく台本の既定だった）。実際に伸ばせる長さは
+   * `used + prompt + maxNewTokens − 1 ≤ capacity` の 1 式が決める。
+   */
+  const DEFAULT_MAX_NEW_TOKENS = 256;
 
   /**
    * `--key value` の対と、値を取らない {@link FLAGS} だけを受ける。
@@ -124,6 +134,26 @@ export const runGemmaCli = async (
   ) {
     throw Error("--linear-gemv-reduce は sequential または parallel が必要です");
   }
+
+  /**
+   * 融合の明示指定（省略すると quant の宣言がそのまま効く — ADR 0104 の「呼び手の明示指定 →
+   * quant.session → runtime 既定」の順序）。
+   *
+   * MUST: `true` / `false` 以外は fail loudly。QAT の `i4-fast` は
+   * `fuseLinearStaticQuantize: true` を宣言しており、`--linear-gemv-reduce sequential` だけを
+   * 重ねるとロード時に拒否される（融合は `parallel` を要求する — ADR 0103）。逃げ道として
+   * `--fuse-linear-static-quantize false` を同時に渡せる形が要る。
+   */
+  const boolean = (key: string): boolean | undefined => {
+    const raw = args.get(key);
+    if (raw === undefined) return undefined;
+    if (raw !== "true" && raw !== "false") {
+      throw new Error(`--${key} ${raw} は true または false が必要です`);
+    }
+    return raw === "true";
+  };
+  const fuseRmsNormAdd = boolean("fuse-rms-norm-add");
+  const fuseLinearStaticQuantize = boolean("fuse-linear-static-quantize");
   const temperature = number("temperature");
   const topK = integer("top-k");
   const topP = number("top-p");
@@ -346,6 +376,8 @@ export const runGemmaCli = async (
     note(
       `[${family}] quant: ${args.get("quant") ?? "配布形の既定"} / GEMV加算: ${
         linearGemvReduce ?? "quantの指定"
+      } / RMS→add融合: ${fuseRmsNormAdd ?? "quantの指定"} / linear→SRQ融合: ${
+        fuseLinearStaticQuantize ?? "quantの指定"
       }\n`,
     );
     const started = performance.now();
@@ -358,6 +390,8 @@ export const runGemmaCli = async (
       ...(maxResidentPleBytes === undefined ? {} : { maxResidentPleBytes }),
       ...(chunkLengthArg === undefined ? {} : { chunkLength: chunkLengthArg }),
       ...(linearGemvReduce === undefined ? {} : { linearGemvReduce }),
+      ...(fuseRmsNormAdd === undefined ? {} : { fuseRmsNormAdd }),
+      ...(fuseLinearStaticQuantize === undefined ? {} : { fuseLinearStaticQuantize }),
       ...(gpu === undefined ? {} : { gpu }),
       ...(diagnostics ? { onRunDiagnostics: observeRun } : {}),
       onProgress: showProgress,

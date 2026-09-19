@@ -19,11 +19,13 @@ It must use pipeline `gemma4-qat/1`; ordinary Gemma distributions are rejected. 
 represents the original fixed mixture of INT2, INT4, and INT8 with static activation rounding (SRQ).
 The CLI does not requantize or select a replacement model.
 
-The initial distribution defaults are capacity 128 and prefill chunk length 32. This CLI defaults
-to at most 64 new tokens per turn. It drops old conversation pairs when needed, as the Gemma CLI
-does. Longer contexts are not validated. `--capacity`, `--chunk-length`, sampling flags, and PLE
-memory budget flags have the same meaning as in the Gemma CLI. Use `--help` for the option list.
-MTP (`--speculative`), vision, and audio are not supported for this QAT family.
+The distribution defaults are capacity 4096 and prefill chunk length 768, the same values the
+ordinary Gemma 4 distribution declares. This CLI defaults to at most 256 new tokens per turn.
+It drops old conversation pairs when needed, as the Gemma CLI does. Output quality beyond a
+512-token context has not been reviewed; the defaults make longer conversations reachable, not
+validated. `--capacity`, `--chunk-length`, sampling flags, and PLE memory budget flags have the
+same meaning as in the Gemma CLI. Use `--help` for the option list. MTP (`--speculative`), vision,
+and audio are not supported for this QAT family.
 
 `--temperature 0` uses the Gemma pipeline's small-output decode path when logits need no repetition
 penalty or logit bias and diagnostics are disabled. It reads back the selected value and token id;
@@ -58,15 +60,26 @@ deno task demo:gemma4-qat --quant i4-gemvpar
 deno task demo:gemma4-qat --quant i4-fast
 ```
 
-Updated E2B distributions default to `i4-fast`, which uses the same packed weights
-as `i4` and declares `session.linearGemvReduce: "parallel"` together with
-`session.fuseRmsNormAdd: true` and `session.fuseLinearStaticQuantize: true`.
-`i4-gemvpar` declares parallel GEMV alone, and `i4` retains the reference summation
-order. Existing distributions retain their declared default until rebuilt;
-QAT E4B still defaults to `i4`.
+All three quant labels require a distribution built with the current recipe; rebuild the local
+distribution if `--quant i4-fast` reports an unknown quant. E2B then defaults to `i4-fast`, which
+uses the same packed weights as `i4` and declares `session.linearGemvReduce: "parallel"` together
+with `session.fuseRmsNormAdd: true` and `session.fuseLinearStaticQuantize: true`. `i4-gemvpar`
+declares parallel GEMV alone, and `i4` retains the reference summation order. QAT E4B still
+defaults to `i4`.
 
-An explicit `--linear-gemv-reduce sequential` or `parallel` overrides the selected
-quant. With older distributions, `--linear-gemv-reduce parallel` works without a rebuild.
-The kernel applies to measured packed INT2/INT4/INT8 shapes and 1–8 rows; other shapes
-retain their existing kernels. Rounding and generated tokens can differ, particularly
-for QAT. Runtime and `fromAssets` defaults remain sequential.
+Individual knobs override what the selected quant declares:
+
+```sh
+deno task demo:gemma4-qat --linear-gemv-reduce sequential --fuse-linear-static-quantize false
+deno task demo:gemma4-qat --fuse-rms-norm-add false
+```
+
+`--fuse-linear-static-quantize` fuses the static activation rounding (SRQ) that follows a linear
+into that linear, and it requires parallel GEMV. Passing `--linear-gemv-reduce sequential` alone on
+an `i4-fast` distribution is therefore rejected at load time: either select `--quant i4` (or
+`i4-gemvpar`) or turn the fusion off explicitly, as in the first line above. The startup line prints
+the effective value of all three knobs, and marks the ones the quant declaration still decides.
+
+The parallel GEMV kernel applies to measured packed INT2/INT4/INT8 shapes and 1–8 rows; other
+shapes retain their existing kernels. Rounding and generated tokens can differ, particularly for
+QAT. Runtime and `fromAssets` defaults remain sequential.
