@@ -337,9 +337,11 @@ Deno.test({
     "実資産 census: gemma4 は linear 277 / rms_norm 242 / attention 35 / state_append 30・drafter は linear 68 / attention 12 / argmax 3",
   ignore: !GEMMA4_AVAILABLE,
   fn: async () => {
-    const asset = await resolveAsset(GEMMA4_DIR, undefined, undefined, undefined);
+    // 参照席 `i4` を名指しする（配布の既定は `i4-fast` = parallel + RMS 融合の宣言 —
+    // ADR 0104）。この census が数えるのは静的なグラフと参照の実行変種で、既定席の宣言は対象外。
+    const asset = await resolveAsset(GEMMA4_DIR, undefined, "i4", undefined);
     assertEquals(asset.family, "gemma4");
-    // 既定 quant `i4` はノブを 1 つも宣言していない（実行変種は呼び手の既定のまま）。
+    // 参照席 `i4` はノブを 1 つも宣言していない（実行変種は呼び手の既定のまま）。
     assertEquals(asset.session, {});
     // 第 2 role `drafter`（ADR 0096 段 2）も静的 census の対象 — 借り手グラフでも IR は単独で
     // 読める（実行に貸し手が要るのは opbench run の話で、数える側には効かない）。
