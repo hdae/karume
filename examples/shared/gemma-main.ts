@@ -30,7 +30,8 @@ export const runGemmaCli = async (
 ): Promise<void> => {
   const USAGE = "--source <配布形のパス> | --repo <owner/name[@revision]>" +
     " --system <文字列> --max-new-tokens <整数> --temperature <数> --top-k <整数>" +
-    " --top-p <数> --seed <整数> --max-resident-ple-bytes <整数> --capacity <整数>" +
+    " --top-p <数> --seed <整数> --max-resident-ple-bytes <整数>" +
+    " --ple-residency <host|gpu> --capacity <整数>" +
     " --chunk-length <整数> --quant <名前> --linear-gemv-reduce <sequential|parallel>" +
     " --fuse-rms-norm-add <true|false> --fuse-linear-static-quantize <true|false>" +
     " --diagnostics --no-warmup" +
@@ -49,6 +50,7 @@ export const runGemmaCli = async (
     "top-p",
     "seed",
     "max-resident-ple-bytes",
+    "ple-residency",
     "capacity",
     "chunk-length",
     "linear-gemv-reduce",
@@ -133,6 +135,19 @@ export const runGemmaCli = async (
     linearGemvReduce !== "parallel"
   ) {
     throw Error("--linear-gemv-reduce は sequential または parallel が必要です");
+  }
+
+  /**
+   * PLE sidecar の置き場（省略時はライブラリの既定 = `host`）。
+   *
+   * `gpu` は量子化バイト列をロード時に 1 度だけ GPU へ上げ、run ごとの per-layer 入力を GPU 内の
+   * gather で作る（ホストの逆量子化と writeBuffer が消える）。単一束縛なので、載らない device
+   * ではロードが fail loudly で止まる — 黙って host へ退避しない。`--max-resident-ple-bytes` は
+   * GPU 常駐では効かないので、同時に渡すとライブラリが断る。
+   */
+  const pleResidency = args.get("ple-residency");
+  if (pleResidency !== undefined && pleResidency !== "host" && pleResidency !== "gpu") {
+    throw Error("--ple-residency は host または gpu が必要です");
   }
 
   /**
@@ -388,6 +403,7 @@ export const runGemmaCli = async (
     const loadOptions = {
       ...(args.has("quant") ? { quant: args.get("quant") } : {}),
       ...(maxResidentPleBytes === undefined ? {} : { maxResidentPleBytes }),
+      ...(pleResidency === undefined ? {} : { pleResidency }),
       ...(chunkLengthArg === undefined ? {} : { chunkLength: chunkLengthArg }),
       ...(linearGemvReduce === undefined ? {} : { linearGemvReduce }),
       ...(fuseRmsNormAdd === undefined ? {} : { fuseRmsNormAdd }),
