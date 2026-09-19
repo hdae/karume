@@ -188,26 +188,30 @@ which is the number the K-11 acceptance line (gemma4 decode `linear/f32+i4g32`) 
 ## `graph` — one real run, per-key GPU time, compared with the census
 
 ```
-deno run -A tools/opbench/main.ts graph --source <mirror> --family <gemma4|anima|siglip2|irodori> \
-    --out <dir> [--census <census dir> --scenario <name>] [--single <single dir>] [--mode timing|wall]
+deno run -A tools/opbench/main.ts graph --source <mirror> --out <dir> \
+    [--family <gemma4|gemma4-qat|anima|siglip2|irodori>] \
+    [--census <census dir> --scenario <name>] [--single <single dir>] [--mode timing|wall]
 ```
 
 Drives one real inference through the family's pipeline with `acquireGpu({ gpuTiming: true })`
 injected, and records every `onRunDiagnostics` callback as one row of `graph.jsonl`: the run's label
 (`prefill-n` / `decode-n`, or `<component>-n`), its dispatch count, total GPU time and the
-per-pipeline-key breakdown. For gemma4 the label comes from the phase the pipeline hands to the
+per-pipeline-key breakdown. Without `--family` the family is inferred from the mirror's manifest
+pipeline id, the same way `census` infers it, so the two commands never disagree about the name a
+given asset goes by. For gemma4 the label comes from the phase the pipeline hands to the
 callback, so a prompt split across several prefill chunks records `prefill-1`, `prefill-2`, … rather
 than mislabelling the later chunks as decode runs. Production code is untouched; the observation
 point is the same one P-1 was measured through.
 
 What "one run" means per family:
 
-| Family    | One run                                                                          | Input flags                                                             |
-| --------- | -------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| `gemma4`  | one short chat turn (`prefill` runs, one per chunk, + N `decode` runs)           | `--prompt`, `--new-tokens` (default 8), `--capacity`, `--chunk-buckets` |
-| `anima`   | one image (`text_encoder` / `text_conditioner` / `transformer` step / VAE tiles) | `--prompt`, `--steps` (default 2), `--size` (1024)                      |
-| `siglip2` | one image embedded (`vision`, a single run)                                      | none — the image is synthetic (see below)                               |
-| `irodori` | one utterance (each conditioner once, `dit` per step, then the codec)            | `--text`, `--seconds` (fractional, optional)                            |
+| Family       | One run                                                                          | Input flags                                                             |
+| ------------ | -------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| `gemma4`     | one short chat turn (`prefill` runs, one per chunk, + N `decode` runs)           | `--prompt`, `--new-tokens` (default 8), `--capacity`, `--chunk-buckets` |
+| `gemma4-qat` | the same turn through `Gemma4QatPipeline` (`--model` is `e2b` or `e4b`)          | same as `gemma4`                                                        |
+| `anima`      | one image (`text_encoder` / `text_conditioner` / `transformer` step / VAE tiles) | `--prompt`, `--steps` (default 2), `--size` (1024)                      |
+| `siglip2`    | one image embedded (`vision`, a single run)                                      | none — the image is synthetic (see below)                               |
+| `irodori`    | one utterance (each conditioner once, `dit` per step, then the codec)            | `--text`, `--seconds` (fractional, optional)                            |
 
 `--chunk-buckets 32,64,128` (or `none` to disable) overrides the prefill buckets the gemma4 pipeline
 declares, so the pad cost of a short prompt can be measured as a two-run A/B against `none`.
@@ -223,19 +227,28 @@ timing windows), so the wall clock is close to twice the untimed one. The GPU ti
 still the ones to read; take the wall from a `--mode wall` process.
 
 With `--census` and `--scenario`, the runs whose label starts with `--runs` (default `decode` for
-gemma4, `transformer` for anima, `vision` for siglip2, `dit` for irodori) are averaged and compared
-per op with the census's plain node
+gemma4 and gemma4-qat, `transformer` for anima, `vision` for siglip2, `dit` for irodori) are averaged
+and compared per op with the census's plain node
 count (rows that are neither fused nor aliased). Pipeline keys are mapped to ops by their leading
 word; variant names that differ from the op (`linear_gemv` → `linear`, `attention_state_*` →
 `attention`) go through a small table, `quantize_rows` is counted as `aux` (the a8 path's activation
 quantisation has no census node), and any key that maps to nothing the census knows is listed under
-`unmapped_keys` rather than dropped. With `--single`, the census-weighted totals of a `single` run
+`unmapped_keys` rather than dropped. A fused kernel is charged to the census op that dominates the
+window it folded — `linear_gemv_parallel:…:static-quantize` to `linear` (its leading word already
+says so) and `rms_norm_add` to `rms_norm` — while rules whose window has no census op of that name
+(`rope`, `silu`, `adaln_norm`) go to the `fused` bucket. Charging them to a real op rather than to
+`fused` is what keeps `unmapped_keys` a usable signal: what is left there is an unattributed
+dispatch, not a kernel the table forgot. Expect `census_nodes` and `measured_dispatches` to differ
+for a fused op, in either direction: the census applies only the fusion rules that need no session
+knob, so the ones a quant turns on (`fuseRmsNormAdd`, `fuseLinearStaticQuantize` on the QAT
+`i4-fast` quant) fold nodes in the real run that the census still counts as plain. With `--single`,
+the census-weighted totals of a `single` run
 are joined per op and reported as `single_over_graph` — the ratio that says how far the single-op
 model is from the in-graph time (K-11 measured 0.75–0.85).
 
 Component names in `graph.jsonl` are always the census spelling, because the comparison joins them
 by name: irodori's callback spells its stages with hyphens (`text-proj`, `codec-encoder`) and the
-tool writes the census's underscores (`text_proj`, `codec_encoder`). A family outside the four above
+tool writes the census's underscores (`text_proj`, `codec_encoder`). A family outside the five above
 fails loudly.
 
 ## `torch` — the PyTorch reference (column B)

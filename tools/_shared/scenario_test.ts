@@ -4,10 +4,10 @@
 // 押さえている。ここが見るのはその非対称の残り — どのコンポーネントも宣言しない綴りは、
 // 値が効かないだけでなく `unused_bindings` にも出ないので、誤綴りの記録がどこにも残らない。
 
-import { assertThrows } from "@std/assert";
+import { assertEquals, assertThrows } from "@std/assert";
 import { parseIrGraph } from "../../packages/runtime/src/format/ir.ts";
 import type { IrGraph } from "../../packages/runtime/src/format/ir.ts";
-import { assertPlainBindingKeys, parseScenario } from "./scenario.ts";
+import { assertPlainBindingKeys, defaultScenarios, parseScenario } from "./scenario.ts";
 
 /**
  * 記号を名乗る最小グラフ（ノードは要らない — 見るのは `symbols` の和集合）。
@@ -53,4 +53,9 @@ Deno.test("assertPlainBindingKeys: 1 つのコンポーネントだけが宣言�
 
 Deno.test("assertPlainBindingKeys: 修飾キーはここでは見ない（component 側の門が持つ）", () => {
   assertPlainBindingKeys(parseScenario("rep=codec_encoder.T:750"), [graphWith(["S"])]);
+});
+
+Deno.test("defaultScenarios: gemma4-qat は gemma4 と同じ既定シナリオを共有する", () => {
+  assertEquals(defaultScenarios("gemma4-qat"), defaultScenarios("gemma4"));
+  assertEquals(defaultScenarios("gemma4").map((s) => s.name), ["decode", "prefill"]);
 });

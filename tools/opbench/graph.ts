@@ -9,10 +9,10 @@
  * 要るので `acquireGpu({ gpuTiming: true })` を注入する（1 dispatch = 1 pass に開くため壁時計は
  * 変わる — 壁は timing 無効の別プロセスで採る = `single` と同じ二本立て）。
  *
- * 家族ごとの「1 回」: gemma4 = 短い chat 1 ターン（prefill 1 run + decode N run）、anima = 1 枚
- * （text_encoder / text_conditioner / transformer step / vae_decoder タイル）、siglip2 = 画像
- * 1 枚の embed（vision 1 run）、irodori = 発話 1 本（条件エンコーダ各 1 run + dit の step 群 +
- * codec）。他家族は未対応で fail loudly。
+ * 家族ごとの「1 回」: gemma4 / gemma4-qat = 短い chat 1 ターン（prefill 1 run + decode N run）、
+ * anima = 1 枚（text_encoder / text_conditioner / transformer step / vae_decoder タイル）、
+ * siglip2 = 画像 1 枚の embed（vision 1 run）、irodori = 発話 1 本（条件エンコーダ各 1 run +
+ * dit の step 群 + codec）。他家族は未対応で fail loudly。
  */
 
 import type { GpuContext, SessionDiagnostics } from "../../packages/runtime/mod.ts";
@@ -21,6 +21,7 @@ import type { IrodoriRunComponent, Rgb8Image } from "../../packages/models/mod.t
 import { AnimaPipeline, IrodoriPipeline, Siglip2Pipeline } from "../../packages/models/mod.ts";
 import type { Gemma4RunPhase } from "../../packages/models/gemma.ts";
 import { Gemma4Pipeline } from "../../packages/models/gemma.ts";
+import { Gemma4QatPipeline } from "../../packages/models/gemma4-qat.ts";
 import type { CensusSummary } from "./census.ts";
 import type { SingleSummary } from "./single.ts";
 
@@ -75,7 +76,11 @@ export const recordRun = (
  * - `strided` / `strided_write` は permute / slice / cat / expand の**実体化**で、どの op から出た
  *   dispatch かはキーに残らない → `strided` の 1 バケツ（census 側は op 別なので 1:1 には
  *   ならない — P-5 の kind 別内訳は census 側が持つ）。
- * - 融合ルールのキー（`rope` など）は census では fused_by に畳まれたノードなので `fused`。
+ * - 融合ルールのキーは、畳んだ窓に census の op と同名の主役が居るならその op へ寄せる
+ *   （`linear_gemv_parallel:…:static-quantize` → linear・`rms_norm_add` → rms_norm）。主役が
+ *   census の op 名を持たないルール（`rope` / `silu` / `adaln_norm`）だけ `fused` に落とす。
+ *   MUST: 既知の op のキーを `unmapped` に残さない — 残りは「未帰属 dispatch の特定」に使う信号
+ *   なので、既知のカーネルで薄めない。
  */
 /** census の op と 1:1 にならない集計バケツ（unmapped には入れない）。 */
 const BUCKETS: ReadonlySet<string> = new Set(["aux", "strided", "fused"]);
@@ -90,6 +95,11 @@ const KEY_TO_OP: Readonly<Record<string, string>> = {
   attention_pv: "attention",
   attention_stats: "attention",
   attention_fused: "attention",
+  // rms_norm_add は融合ルール rmsNormAdd（rms_norm + add）の 1 カーネル。時間の帰属先は
+  // rms_norm にする（`fused` バケツへ逃がすと、QAT decode で最大の norm 群が op 別の表から
+  // 消える）。census は session ノブ（`fuseRmsNormAdd`）を掛けずに数えるので census_nodes と
+  // dispatch 数は一致しない — 突合表はこの 2 列を対で読む。
+  rms_norm_add: "rms_norm",
   // adaln_norm は融合ルール adaln が畳んだ modulation 群の 1 カーネル（census では fused_by）。
   adaln_norm: "fused",
   quantize_rows: "aux",
@@ -243,19 +253,20 @@ const syntheticImage = (): Rgb8Image => {
 };
 
 /** 実走できる家族（CLI の `--family` の値でもある）。 */
-export const DRIVE_FAMILIES = ["gemma4", "anima", "siglip2", "irodori"] as const;
+export const DRIVE_FAMILIES = ["gemma4", "gemma4-qat", "anima", "siglip2", "irodori"] as const;
 export type DriveFamily = typeof DRIVE_FAMILIES[number];
 
 export const isDriveFamily = (name: string | undefined): name is DriveFamily =>
   DRIVE_FAMILIES.some((known) => known === name);
 
 /**
- * 突合に使う run の label 接頭辞の既定 — 家族ごとに「その 1 回の主役」が違う。gemma4 は
- * decode（prefill は形が違うので別勘定）、anima は transformer の step、siglip2 は run が
- * vision の 1 本だけ、irodori は step 数だけ回る dit。
+ * 突合に使う run の label 接頭辞の既定 — 家族ごとに「その 1 回の主役」が違う。gemma4 /
+ * gemma4-qat は decode（prefill は形が違うので別勘定）、anima は transformer の step、siglip2 は
+ * run が vision の 1 本だけ、irodori は step 数だけ回る dit。
  */
 const DEFAULT_RUNS_PREFIX: Readonly<Record<DriveFamily, string>> = {
   gemma4: "decode",
+  "gemma4-qat": "decode",
   anima: "transformer",
   siglip2: SIGLIP2_COMPONENT,
   irodori: "dit",
@@ -323,6 +334,17 @@ export type DriveOptions = {
   readonly durationSeconds?: number;
 };
 
+/**
+ * `--model` を QAT 配布形の model 名へ絞る（`Gemma4QatFromPretrainedOptions` は e2b / e4b しか
+ * 受けない）。MUST: `as` で素通しせず、資産を 1 バイトも取る前に綴り違いを落とす。
+ */
+export const gemma4QatModel = (model: string): "e2b" | "e4b" => {
+  if (model !== "e2b" && model !== "e4b") {
+    throw new Error(`gemma4-qat の model は e2b か e4b（'${model}'）`);
+  }
+  return model;
+};
+
 export type DriveResult = {
   readonly records: readonly RunRecord[];
   readonly wall_ms: number;
@@ -337,17 +359,29 @@ export const driveOnce = async (options: DriveOptions): Promise<DriveResult> => 
     ...(options.quant === undefined ? {} : { quant: options.quant }),
   };
   const loadStarted = performance.now();
-  if (options.family === "gemma4") {
+  if (options.family === "gemma4" || options.family === "gemma4-qat") {
     let runs = 0;
-    const pipeline = await Gemma4Pipeline.fromPretrained(denoDirectory(options.source), {
-      ...selection,
+    // 2 家族で違うのは pipeline の生成だけ（QAT は生成・会話の API が通常 Gemma と同じ別配布形 —
+    // ADR 0097）。観測席も入力も同じにしておかないと、decode の内訳が家族間で比べられない。
+    const common = {
+      ...(options.quant === undefined ? {} : { quant: options.quant }),
       gpu: options.gpu,
       ...(options.chunkBuckets === undefined ? {} : { chunkBuckets: options.chunkBuckets }),
-      onRunDiagnostics: (diagnostics, phase) => {
+      onRunDiagnostics: (diagnostics: SessionDiagnostics, phase: Gemma4RunPhase): void => {
         records.push(recordRun(runs, "model", gemma4RunLabel(phase), diagnostics));
         runs += 1;
       },
-    });
+    };
+    const ref = denoDirectory(options.source);
+    const pipeline = options.family === "gemma4-qat"
+      ? await Gemma4QatPipeline.fromPretrained(ref, {
+        ...common,
+        ...(options.model === undefined ? {} : { model: gemma4QatModel(options.model) }),
+      })
+      : await Gemma4Pipeline.fromPretrained(ref, {
+        ...common,
+        ...(options.model === undefined ? {} : { model: options.model }),
+      });
     const loadMs = performance.now() - loadStarted;
     try {
       const started = performance.now();

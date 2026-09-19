@@ -254,19 +254,19 @@ const USAGE = `使い方: deno run -A tools/opbench/main.ts <census|single> …
     --limit <n>          加重（count × 出力要素）の降順で先頭 n 件だけ
     --session <knob>=<value>   実行変種の上書き（linearCompute / attentionCompute / attentionScoreStorage・繰り返し可）
     --rounds <n>         代表値（min）を採る反復回数（既定 ${ROUNDS}）
-  graph --source <dir> --family <gemma4|anima|siglip2|irodori> --out <dir> [--census <dir> --scenario <name>]
+  graph --source <dir> --out <dir> [--family <gemma4|gemma4-qat|anima|siglip2|irodori>] [--census <dir> --scenario <name>]
     --source <dir>       配布形（karume.json あり）— pipeline の fromPretrained で読む
-    --family <name>      gemma4（chat 1 ターン）/ anima（1 枚）/ siglip2（合成画像 1 枚の embed）/ irodori（発話 1 本）
+    --family <name>      gemma4 / gemma4-qat（chat 1 ターン）/ anima（1 枚）/ siglip2（合成画像 1 枚の embed）/ irodori（発話 1 本）— 既定 = manifest の pipeline id から推定
     --out <dir>          graph.jsonl（run ごと）/ summary.json の書き出し先
     --mode timing|wall   timing = op 別 GPU 時間（既定・timestamp-query が要る）/ wall = 計測無効で壁だけ
     --census <dir>       突合する census の出力（--scenario と組で・省略時は突合しない）
-    --scenario <name>    census のシナリオ（gemma4 = decode / prefill・anima = 1024px・siglip2 = native・irodori = representative）
-    --runs <prefix>      突合に使う run の label 接頭辞（既定 gemma4 = decode / anima = transformer / siglip2 = vision / irodori = dit）— gemma4 の label は prefill-<chunk> / decode-<step> なので、prefill と書けば chunk が何本でも prefill 群が全部入る
+    --scenario <name>    census のシナリオ（gemma4 / gemma4-qat = decode / prefill・anima = 1024px・siglip2 = native・irodori = representative）
+    --runs <prefix>      突合に使う run の label 接頭辞（既定 gemma4 / gemma4-qat = decode / anima = transformer / siglip2 = vision / irodori = dit）— gemma4 の label は prefill-<chunk> / decode-<step> なので、prefill と書けば chunk が何本でも prefill 群が全部入る
     --single <dir>       single の出力（op 別の single / graph 比を出す）
     --model / --quant    配布形の選択（既定 = manifest）
-    --new-tokens <n>     gemma4 の生成 token 数（既定 8）/ --capacity <n> gemma4 の KV 容量（既定 = 配布形）/ --steps <n> --size <px> anima の step と辺（既定 2 / 1024・step は 2 以上）
-    --chunk-buckets <n,n,...>  gemma4 の prefill バケット（既定 = パイプラインの GEMMA4_CHUNK_BUCKETS・none で無効 = 全 prefill が chunkLength 行）
-    --prompt <text>      gemma4 / anima の入力文（既定あり）
+    --new-tokens <n>     gemma4 / gemma4-qat の生成 token 数（既定 8）/ --capacity <n> KV 容量（既定 = 配布形）/ --steps <n> --size <px> anima の step と辺（既定 2 / 1024・step は 2 以上）
+    --chunk-buckets <n,n,...>  gemma4 / gemma4-qat の prefill バケット（既定 = パイプラインの GEMMA4_CHUNK_BUCKETS・none で無効 = 全 prefill が chunkLength 行）
+    --prompt <text>      gemma4 / gemma4-qat / anima の入力文（既定あり）
     --text <text>        irodori の発話文（既定あり）
     --seconds <n>        irodori の発話長（秒・小数可・省略時は duration グラフが決める）
   torch --single <dir> --out <dir> [--venv <dir>] [--compile true] [--rounds <n>] [--limit <n>] [--op <name>]
@@ -421,7 +421,15 @@ const readSingleSummary = async (dir: URL): Promise<SingleSummary> => {
 const runGraph = async (args: ReadonlyMap<string, readonly string[]>): Promise<void> => {
   const source = single(args, "source");
   if (source === undefined) throw new Error("--source <配布形ディレクトリ> は必須");
-  const family = single(args, "family");
+  // `--family` 省略時は census と同じ解決（manifest の pipeline id）で推す — 同じ資産に対して
+  // census と graph が別の家族名を名乗ると、突合の相手を人手で読み替えることになる。
+  const family = single(args, "family") ??
+    (await resolveAsset(
+      directoryUrl(source),
+      single(args, "model"),
+      single(args, "quant"),
+      undefined,
+    )).family;
   if (!isDriveFamily(family)) {
     throw new Error(`--family は ${DRIVE_FAMILIES.join(" / ")}（'${family}'）— 他家族は未対応`);
   }

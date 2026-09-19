@@ -36,24 +36,30 @@ export type Scenario = {
  * MUST: 値の出どころを `provenance` に書く。代表値は「その家族を実際に走らせたときの形」で
  * あって普遍の定数ではないので、出どころの無い数字は次の読み手が更新できない。
  */
+/**
+ * gemma4 と gemma4-qat は同じ形（QAT は同じ層構成・同じ記号 M / R / C — ADR 0097）なので既定
+ * シナリオを共有する。片方だけ更新して食い違う事故を避けるため配列は 1 つ。
+ */
+const GEMMA4_SCENARIOS: readonly Scenario[] = [
+  {
+    name: "decode",
+    bindings: { M: 1, R: 1, C: 4096 },
+    source: "default",
+    provenance: "decode 1 トークン（M=1・選ぶ行 R=1）。C は full attention スロットの容量記号で、" +
+      "sliding 側は配布形が window 512 + 余裕 8 = 520 で焼き込み済み（ADR 0066 / 0096）",
+  },
+  {
+    name: "prefill",
+    bindings: { M: 768, R: 1, C: 4096 },
+    source: "default",
+    provenance: "prefill の物理 chunk 行数 M=768（可変 capacity 波の掃引で使った刻み）・" +
+      "選ぶ行は最終行 1 本（R=1）",
+  },
+];
+
 const DEFAULT_SCENARIOS: Readonly<Record<string, readonly Scenario[]>> = {
-  gemma4: [
-    {
-      name: "decode",
-      bindings: { M: 1, R: 1, C: 4096 },
-      source: "default",
-      provenance:
-        "decode 1 トークン（M=1・選ぶ行 R=1）。C は full attention スロットの容量記号で、" +
-        "sliding 側は配布形が window 512 + 余裕 8 = 520 で焼き込み済み（ADR 0066 / 0096）",
-    },
-    {
-      name: "prefill",
-      bindings: { M: 768, R: 1, C: 4096 },
-      source: "default",
-      provenance: "prefill の物理 chunk 行数 M=768（可変 capacity 波の掃引で使った刻み）・" +
-        "選ぶ行は最終行 1 本（R=1）",
-    },
-  ],
+  gemma4: GEMMA4_SCENARIOS,
+  "gemma4-qat": GEMMA4_SCENARIOS,
   anima: [
     {
       name: "1024px",
