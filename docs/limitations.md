@@ -1539,7 +1539,7 @@ token 列は 1 つも変わらない。
 1 度も引かれない予算、投機デコード（`speculative`）は drafter の per-layer 入力がこの席の範囲外、
 `acquireGpu({ gpuTiming: true })` は計測中に batch を開けないためである。
 
-速度の採否はまだ付いていない。Deno CLI の decode は deno_webgpu の 10 ms/token 床を含むので
-判定に使えず（参照機の 32 token greedy で host 730〜740 ms / gpu 741〜751 ms と差が床に埋もれる）、
-Chrome・M2 での計測は未検収である。GPU 常駐は先行投入（perf-ledger H-27）の前提としても置いた席で、
-単独の効き幅はこの席の採否とは別に測る。
+単独では速くならない（[research §15](research/2026-09-19-qat-speed-recon.md)）: Chrome の greedy decode で壁 0〜−7%・
+GPU +0.08 ms/token、日本語 prompt の TTFT が +25〜30 ms、Deno は温度 0 で中立。**greedy 以外の run（サンプリング・
+prefill・診断付き）は gather 用の batch を 1 本先行させるのでフェンスが 1 本増え、Deno では +13 ms/token**（CLI の
+既定サンプラーで 42 → 27 tok/s）。席は先行投入（perf-ledger H-27）の前提として置いたもので、既定にはしない。

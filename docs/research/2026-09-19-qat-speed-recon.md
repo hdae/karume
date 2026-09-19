@@ -477,3 +477,25 @@ bundle は `outputs/bench/karume/2026-09-19_18-31-28_k45-stage0-dceb0046/`（git
    （M2 の Metal で native に落ちるか・§11 の 10）に賭けずに利得の大半が取れる可能性がある。
 2. ③（lm_head・逐次）だけは算術が 36% で、ここは整数内積が効く。形ごとに効くレバーが違う。
 3. 床は 527〜719 GB/s（ピーク 912 の 58〜79%）で、活性ロードを潰した後の GEMV は重み転送の床に近づく。③ の残り代は 2.1 倍が上限。
+
+## 15. H-28 段 ① — PLE の GPU 常駐（opt-in 席・depth 1）の A/B（2026-09-19・RTX・main `118b2c3`）
+
+実装は `d1c848e`（`pleResidency: "gpu"`・ADR 0085 追記）。GPU 内 gather は golden ともホスト gather とも u32 一致、
+生成文は全対で同一。条件は §13 と同じ（QAT E2B `i4-fast`・capacity 4096 / chunk 768・64 token）。
+生値は [結果 JSON](2026-09-19-h28-ple-gpu-results.json)。
+
+| 経路                                          |                    host |                                              gpu |                                         差 |
+| --------------------------------------------- | ----------------------: | -----------------------------------------------: | -----------------------------------------: |
+| Chrome 壁（greedy・2 ロード × 2 prompt）      |        94.2〜95.4 tok/s |                                 87.6〜95.3 tok/s | 0〜−7%（英語 prompt で悪化・日本語は同等） |
+| Chrome GPU（pass 境界）                       |           6.94 ms/token | 7.02 ms/token（+ gather 2 dispatch・pass 3 → 4） |                                   +0.08 ms |
+| Chrome TTFT 英 / 日                           |          40 / 61〜65 ms |                               42〜43 / 89〜96 ms |            日本語 prompt で **+25〜30 ms** |
+| Deno 壁・温度 0（greedy・64 / 256 token）     | 43.0〜43.6 / 39.5〜39.8 |                          43.1〜43.3 / 39.5〜39.6 |                                       中立 |
+| Deno 壁・CLI 既定サンプラー（64 / 256 token） | 42.0〜42.3 / 38.5〜38.6 |                      **26.8〜27.1 / 24.5〜25.0** |         **+13 ms/token**（フェンス +1 本） |
+
+判定: **単独では効かない**（クラスタ B の見積り 0.25 ms は出ない）。ホストの gather + writeBuffer はもともと GPU の陰に
+隠れていて臨界路に無く、代わりに token ごとの gather pass + copy が GPU 側に 1 段増える。greedy 以外の run
+（サンプリング・prefill・診断）は gather 用 batch を 1 本先行させるのでフェンスが 1 本増え、Deno では 10 ms 床がそのまま乗る。
+席は opt-in・既定 host のまま据え置き、**価値は先行投入（H-27 段 ②）の前提**としてだけ残す。H-27 に進む前の残件:
+①非 greedy 経路でも gather を target と同じ batch に積む（フェンス +1 を消す）②日本語 prompt の TTFT +25〜30 ms の帰属
+（gather Session の行数別 plan / 常駐の初回コンパイルか）③通常 Gemma 4 E2B の i8 sidecar（2.19 GiB）は参照機の束縛上限に
+載らない（QAT 専用のまま）。
