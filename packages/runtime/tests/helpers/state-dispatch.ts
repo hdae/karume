@@ -226,9 +226,9 @@ export const runStateAttention = async (
   options: {
     readonly mutate?: StateMutation;
     readonly cache?: StatePipelineCache;
-    /** ③ の縮約形（既定 sequential = 参照経路・parallel = ③' の KV 並列縮約変種）。 */
-    /** ② / ③′ を融合して直接検証する。 */
+    /** ② / ③' を融合して直接検証する。 */
     readonly statsPvFusion?: boolean;
+    /** ③ の縮約形（既定 sequential = 参照経路・parallel = ③' の KV 並列縮約変種）。 */
     readonly pvReduce?: "sequential" | "parallel";
     /**
      * ① の縮約形（既定 sequential = 参照経路・parallel = ①' の D 並列縮約変種）。

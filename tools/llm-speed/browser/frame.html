@@ -32,10 +32,10 @@
       throw Error("Invalid normalization mode");
     }
     if (!["off", "on"].includes(linearSrq)) throw Error("Invalid linear SRQ mode");
-    const config = await (await fetch("/config.json")).json();
     if (!["sequential", "parallel", "parallel-fused"].includes(attention)) {
       throw Error("Invalid state attention mode");
     }
+    const config = await (await fetch("/config.json")).json();
     const result = await runBenchmark(
       engine,
       model,

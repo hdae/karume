@@ -45,6 +45,7 @@ import {
   stateStatsWgsl,
   stateStatsWorkgroups,
 } from "../src/kernels/state-attention.ts";
+import { stateStatsPvKey } from "../src/kernels/state-attention-stats-pv.ts";
 import { statePvTiledWgsl, stateQkTiledWgsl } from "../src/kernels/gemm.ts";
 import {
   STATE_APPEND_WORKGROUP_SIZE,
@@ -75,6 +76,12 @@ Deno.test("states 形のキーは :sliding / :gqa の 2 ビットだけで分か
   assertEquals(statePvKey(true, true), "attention_state_pv:v1:f32:wg16x4:sliding:gqa");
   assertEquals(stateStatsKey(false), "attention_state_stats:v2:f32:wg256");
   assertEquals(stateStatsKey(true), "attention_state_stats:v2:f32:wg256:sliding");
+  // 融合 ②+③'（ADR 0102）も同じ 2 ビットで分かれる。キャッシュの identity なので、
+  // 綴りが動けば「同じ形なのに別パイプライン」になる面を他の変種と同じ水準で固定する。
+  assertEquals(stateStatsPvKey(false, false), "attention_state_stats_pv:v1:f32:wg16x16");
+  assertEquals(stateStatsPvKey(true, false), "attention_state_stats_pv:v1:f32:wg16x16:sliding");
+  assertEquals(stateStatsPvKey(false, true), "attention_state_stats_pv:v1:f32:wg16x16:gqa");
+  assertEquals(stateStatsPvKey(true, true), "attention_state_stats_pv:v1:f32:wg16x16:sliding:gqa");
   assertEquals(stateAppendKey(false), "state_append:v1:f32:wg256");
   assertEquals(stateAppendKey(true), "state_append:v1:f32:wg256:sliding");
   // 幾何の定数がキーに出ている（workgroup を動かせばキーが動く = 別パイプライン）
@@ -82,10 +89,11 @@ Deno.test("states 形のキーは :sliding / :gqa の 2 ビットだけで分か
   assertEquals(STATE_ATTENTION_TILE_M, 4);
   assertEquals(STATE_STATS_WORKGROUP_SIZE, 256);
   assertEquals(STATE_APPEND_WORKGROUP_SIZE, 256);
-  // 4 族 × 変種が全て別キー（同一構成が 2 通りのキーを持たない / 別構成が同じキーを持たない）
+  // 5 族 × 変種が全て別キー（同一構成が 2 通りのキーを持たない / 別構成が同じキーを持たない）
   const keys = [
     ...VARIANTS.map(([sliding, gqa]) => stateQkKey(sliding, gqa)),
     ...VARIANTS.map(([sliding, gqa]) => statePvKey(sliding, gqa)),
+    ...VARIANTS.map(([sliding, gqa]) => stateStatsPvKey(sliding, gqa)),
     stateStatsKey(false),
     stateStatsKey(true),
     stateAppendKey(false),

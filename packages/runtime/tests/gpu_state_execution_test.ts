@@ -2082,21 +2082,31 @@ Deno.test({
   },
 });
 
+/** 融合の適用・非適用が分かれる形（`chunkRows <= 8` かつ `colCap <= 1024` が適用条件）。 */
+const FUSION_CASES = [
+  [1, 64, undefined, true],
+  [8, 39, 31, true],
+  [9, 64, undefined, false],
+  [1, 1025, undefined, false],
+  [8, 1024, undefined, true],
+] as const;
+
+/**
+ * 席 `"parallel-fused"`（② と ③' の融合）を `Session.run` 経由で見る門の 1 本目 = 値。
+ *
+ * MUST: 数値一致とキー確認は**別テストに割る**（キー確認は下）。`TIMING_ACQUIRE_OPTIONS` は
+ * timestamp-query 不在で `gpuTiming: false` に落ち、`lastRunTiming` が undefined になるので
+ * キー確認は timestamp 付き device に閉じるしかない。一方 u32 一致は timestamp を要らないので、
+ * 1 本にまとめると Session を通した唯一の数値一致まで timestamp 不在の device で丸ごと
+ * skip され、結線の誤りを自動検証が 1 件も捕まえなくなる。
+ */
 Deno.test({
-  name: "parallel-fused は適用形だけstats/PVをまとめ、state更新後もparallelとu32一致する",
-  ignore: !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
+  name: "parallel-fused は state 更新後も parallel と u32 一致する（実 GPU）",
+  ignore: !GPU_AVAILABLE,
   fn: async () => {
-    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    const gpu = await acquireGpu();
     try {
-      for (
-        const [chunkRows, capacity, window, expectedFusion] of [
-          [1, 64, undefined, true],
-          [8, 39, 31, true],
-          [9, 64, undefined, false],
-          [1, 1025, undefined, false],
-          [8, 1024, undefined, true],
-        ] as const
-      ) {
+      for (const [chunkRows, capacity, window] of FUSION_CASES) {
         const model: StateModel = { heads: 4, kvHeads: 1, depth: 17, capacity, window };
         const sessions = [
           await stateSession(gpu, model, { stateAttentionReduce: "parallel" }),
@@ -2126,7 +2136,46 @@ Deno.test({
             );
             assertEquals(new Uint32Array(after.buffer), new Uint32Array(before.buffer));
           }
-          const entries = sessions[1].diagnostics().lastRunTiming?.entries ?? [];
+          assertEquals(contexts[1].pastLength, contexts[0].pastLength);
+        } finally {
+          for (const c of contexts) await c.dispose();
+          for (const s of sessions) await s.dispose();
+        }
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+/**
+ * 2 本目 = キー。適用形では融合キーが 1 本だけ立ち、非適用形では従来の ② / ③' が立つ。
+ *
+ * NOTE: 融合の採否はレシピ構築時に `chunkRows` と `colCap` だけで決まるので、1 step 走らせれば
+ * 立つキーは出揃う（値の進行は上のテストが見る）。
+ */
+Deno.test({
+  name: "parallel-fused は適用形だけstats/PVをまとめる（実 GPU / timestamp-query）",
+  ignore: !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    try {
+      for (const [chunkRows, capacity, window, expectedFusion] of FUSION_CASES) {
+        const model: StateModel = { heads: 4, kvHeads: 1, depth: 17, capacity, window };
+        const session = await stateSession(gpu, model, {
+          stateAttentionReduce: "parallel-fused",
+        });
+        const context = await session.createGenerationContext({ chunkLength: chunkRows });
+        try {
+          await runStep(
+            session,
+            context,
+            model,
+            stepInputs(model, chunkRows, 13),
+            chunkRows,
+            chunkRows,
+          );
+          const entries = session.diagnostics().lastRunTiming?.entries ?? [];
           assert(entries.length > 0);
           assertEquals(
             entries.some((e) => e.key.startsWith("attention_state_stats_pv:")),
@@ -2140,10 +2189,9 @@ Deno.test({
             entries.some((e) => e.key.startsWith("attention_state_pv:")),
             !expectedFusion,
           );
-          assertEquals(contexts[1].pastLength, contexts[0].pastLength);
         } finally {
-          for (const c of contexts) await c.dispose();
-          for (const s of sessions) await s.dispose();
+          await context.dispose();
+          await session.dispose();
         }
       }
     } finally {

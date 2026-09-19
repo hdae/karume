@@ -85,6 +85,7 @@ const KEY_TO_OP: Readonly<Record<string, string>> = {
   attention_state_qk: "attention",
   attention_state_pv: "attention",
   attention_state_stats: "attention",
+  attention_state_stats_pv: "attention",
   attention_qk: "attention",
   attention_pv: "attention",
   attention_stats: "attention",
