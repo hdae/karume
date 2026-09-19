@@ -1454,13 +1454,35 @@ hub 自前の受信バイトの門（`fetch` ラッパ）を撤去した。HF �
 
 `gemma4-qat` は通常 `gemma4` とは別ファミリで、公式 mobile Transformers 形式の E2B / E4B の text 生成だけを扱う。
 固定 INT2 / INT4 / INT8、SRQ、packed PLE を保持する。MTP、vision、audio、公開 source pin は未対応。
-ローカルの利用例は [QAT CLI](../examples/gemma4-qat/README.md)、数値契約は [ADR 0097](decisions/0097-gemma4-qat-integration.md)。
+ローカルの利用例は [QAT CLI](../examples/gemma4-qat/README.md)、数値契約は [ADR 0097](decisions/0097-gemma4-qat-integration.md)、
+用語は [glossary](glossary.md)、実測の出所は [QAT レビューの実測記録](research/2026-09-19-qat-review.md)。
 
-CPU / GPU の行列縮約の小さな差が SRQ の丸め境界をまたぎ、トークン列が変わる場合がある。
-既定 chunk32 と比較用 chunk64 でも E4B の短文8件中1件で列が分岐した。chunk 間の数値同値は保証しない。
-RTX の Deno / Chrome は両モデル・両 chunk 条件の全32件で一致したが、広い品質や M2 の同値性の証明ではない。
-初期配布の capacity128、chunk32、trace上限128を超える使い方の品質・性能は未検収。
-実測の出所は [QAT の統合検収](research/2026-09-10-codex-mtp-optimization.md#qat-の共通パイプラインと対話-cli2026-09-11)。
+**活性は「丸めるだけ」で公式 mobile の整数内積ではない**。
+公式 mobile ランタイムは SRQ で丸めた int8 をそのまま整数内積（int32 累算）に渡すが、karume は上流
+transformers と同じく f32 へ復元して float で縮約する（[ADR 0097](decisions/0097-gemma4-qat-integration.md) 追記 1・8）。
+これが CPU / GPU で token 列が分岐する根本で、縮約順の小さな差が SRQ の丸め境界をまたぐと列が割れる。
+同じ理由で chunk 長を変えても列は変わりうる（E4B の短文比較に実例がある）。「変わる = バグ」ではない。
+整数内積の実装は今回の範囲に含めず [perf-ledger](perf-ledger.md) K-45 に起票した。
+
+**KV cache は f32 で、公式の量子化 scale を使わない**。
+公式 checkpoint は層ごとに `k_cache_scale` / `v_cache_scale`（text 計 70 本）を持つが、
+karume は上流 transformers と同じくこれを読まない。
+1 位置あたりの full 層 KV は E2B 12,288 B / E4B 32,768 B で、sliding 層は窓 512 の固定バッファなので
+capacity に依らない。int8 化は [perf-ledger](perf-ledger.md) K-46 に起票した。
+
+**既定は capacity 4096・chunkLength 768・trace 上限 768・対話 CLI の `--max-new-tokens` 256**（通常 Gemma と同じ）。
+prefill バケットも通常 Gemma と同じ梯子を使う（QAT 専用に測り直した列ではない）。
+**512 超の文脈での出力品質は未検収**で、これが容量を使い込むときの唯一の実質的な前提条件。
+動くこと自体は確認済みで、capacity 8192 の実行は
+[prefill バケット調査](research/2026-09-13-prefill-buckets.md)（ただし最長入力は 65 token）、
+1,024 長の生成は [WebML 比較の速度ベンチ](research/2026-09-12-webml-browser-speed.md)にある。
+どちらも品質は見ていない。RTX の Deno / Chrome が一致した短文比較も、広い品質や M2 の同値性の証明ではない。
+
+**thinking モードは非対応**。公式 `chat_template.jinja` の `enable_thinking` 相当の経路が無く、
+会話の `reasoning` 欄は fail loudly で拒否する（[ADR 0084](decisions/0084-gemma-tokenizer-chat.md) 決定 5 の射程どおり）。
+
+**checkpoint の 1,179 テンソルを丸ごと使っていない**（vision_tower 546・audio_tower 631・
+embed_vision 1・embed_audio 1）。vision / audio に着手する波の規模はこの本数が目安になる。
 
 ## GEMVの並列加算（2026-09-12）
 

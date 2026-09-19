@@ -1,6 +1,7 @@
 # 0099: RMS正規化と後続加算を任意指定で融合する
 
-- Status: accepted（2026-09-13）。runtimeは任意指定。M2検収は完了。モデル既定への組み込みは別段階。
+- Status: accepted（2026-09-13）。runtimeは任意指定。M2検収は完了。モデル既定への組み込みは別段階
+  → [ADR 0104](0104-gemma-fast-quant.md) で E2B の既定 quant へ宣言（2026-09-15）。
 - 関連: [0017](0017-rms-norm-conv2d-clamp-min.md)、[0058](0058-numerics-opt-in-contract.md)、[0068](0068-decode-exit-multi-output.md)、[0098](0098-linear-gemv-parallel.md)。
 
 ## 背景

@@ -193,3 +193,77 @@ SRQ 単体の CPU / GPU ビット一致は保たれている。8種類の短い�
 検収は通常 Gemma の全体回帰、QAT E2B/E4B の Deno/Chrome 生成比較、既定chunk32と比較用64、
 複数ターンの KV 再利用、中断・反復の早期終了後の復帰、会話ごとの状態バッファ解放で行う。
 公式 CPU/GPU の縮約差の評価は追記5のままとし、期待値や既存許容差を緩めない。
+
+## 追記 7 — 2026-09-19 レビュー後の裁定
+
+実測の記録は [QAT レビューの実測記録](../research/2026-09-19-qat-review.md)。
+用語は [glossary](../glossary.md)、量子化方式の索引は [quantization](../quantization.md)。
+
+### 1. 既定値を通常 Gemma と同じにする
+
+配布 recipe の既定を **capacity 4096・chunkLength 768・trace 上限（`maxChunkLength`）768** とし、
+対話 CLI の既定 `--max-new-tokens` を **256** とする。E2B / E4B とも同じ既定にする。
+これは追記 5 の「初期の既定 capacity は 128、chunkLength は 32、trace 上限は 128」と
+追記 6 の「最大生成64 token」を**上書きする**（旧記述は当時の決定として残す）。
+`maxChunkLength` を上げるので配布形の再 export が要る。
+既定 capacity と trace 上限は別の定数に分け、焼く前に 3 式
+（`chunkLength ≤ maxChunkLength`・`chunkLength ≤ capacity`・`capacity ≤ maxPosition`）を検査する。
+512 超の文脈での出力品質は依然として未検収で、その扱いは [limitations](../limitations.md) の QAT 節が持つ。
+
+### 2. scale=0 の SRQ は recipe が挟まない
+
+上流で SRQ scale が 0（未較正 = 恒等）なのは **lm_head の入出力だけ**なので、
+recipe は scale=0 の `static_quantize` を IR に挟まない。
+構造門（TS の `admitGemma4Qat` と Python の `assert_qat_graph`）の「量子化 linear の前後に SRQ 必須」は
+**共有 head（token embedding と同じ initializer を使う linear）だけ前後の SRQ を省略してよい**に緩める。
+他の量子化 linear は前後とも必須のまま。門と recipe は同じ変更単位で揃える。
+
+混成格納の網羅条件からは恒真の `i2` 条件を外す。残る実効条件は
+**`i4` と `i8` が同時に存在すること**で、これは現行 2 モデルの実体に基づく仮定である。
+この仮定を外れる checkpoint（例えば `i4` を持たない構成）は門が拒否する。
+
+### 3. `reference.json` は schema 2
+
+常に `True` のリテラルだった `fixedBytesExact` / `pleBytesExact` を落とす。
+代わりに `qat_plan` が `fixedWeights` / `storageCounts` / `pleShards` を配布コンテナの実体と**突合**する。
+上流 checkpoint のうち変換に反映しなかったテンソル（`upstreamUnused`）を本数つきで記録し、
+「読んでいない」のか「見落とした」のかが後から判別できるようにする。
+
+### 4. KV cache は f32 のまま
+
+公式 checkpoint が持つ層ごとの `k_cache_scale` / `v_cache_scale`（text 計 70 本）は**保持しない**。
+KV は f32 で持つ（上流 transformers も同じくこの scale を無視する）。
+1 位置あたりの full 層 KV は **E2B 12,288 B / E4B 32,768 B**（sliding 層は窓 512 の固定バッファで
+capacity に依らない）。この本数は決定 3 の `upstreamUnused` に記録する。
+
+### 5. QAT RoPE の 1 ULP 差の出どころ
+
+追記 5 は全ビット一致の非保証を「上流 Torch の三角関数や各 GPU の縮約」に限定列挙していたが、
+**逆周波数の段そのもの**が層種別ごとに 1 本だけ公式と 1 ULP ずれる。
+差は位置に比例し、位置 131,071 の full sin で最大絶対差 1.909e-3。
+出どころは torch のべき乗がベクトル化経路で 1 ULP ずれることで、べき乗段は karume 側が正しい丸めを得る。
+一方で逆周波数は二段丸め（べき乗を f32 へ丸めてから逆数）のぶん厳密値から 1 ULP 外れるので、
+**どちらか一方が数学的に正しいとは言えない**。
+単段化すると新たに多数の要素が公式と食い違うため、追記 5 の段ごと f32 丸めを維持する。
+ビット一致を取りに行くなら `pipelineConfig.rope` へ逆周波数表を焼くしかなく、今回は採らない。
+
+### 6. 「公式 CPU 参照」の性格
+
+追記 5 が言う公式参照は **transformers（f32・`attn_implementation='eager'`）** であって、
+公式が想定する mobile ランタイム（LiteRT-LM）ではない。mobile ランタイムとの一致は測定していない。
+参照 fixture は 2 種あり性格が違う — 中間値 fixture は karume 側の候補 RoPE を注入したもの
+（CPU / GPU の縮約差の帰属に使う）、8 ケース生成の参照は公式 RoPE のまま（決定 5 の差を含む）。
+docs でこの指標に触れるときは、どちらの参照かを必ず書く。
+
+### 7. f32 ロードの根拠
+
+recipe の `dtype=torch.float32` は、公式モデルカードが推奨する `dtype="auto"` が本 checkpoint で
+解決する dtype と**同じ**である（root config に `dtype` 欄が無く f32 に解決する）。
+karume の都合で公式と違う条件を取っているのではない。
+
+### 8. 活性の整数内積と int8 KV は今回実装しない
+
+公式 mobile の整数内積（[perf-ledger](../perf-ledger.md) K-45）と int8 KV cache（同 K-46）は
+**今回の範囲に含めない**。起票だけを行い、次のタスクとして台帳が持つ。
+したがって追記 1 の「活性は丸めるだけ・計算は f32」という決定はそのまま有効で、
+CPU / GPU で token 列が分岐しうる性質も残る。

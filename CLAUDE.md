@@ -65,6 +65,10 @@ torch.export → IR v1・uv 管理）。設計の正本は [docs/decisions/](doc
 - `docs/decisions/` — ADR（MADR-lite）。インライン `DECIDED:` の指し先
 - `docs/backlog.md` — **波順・作業項目・状態の正本**（now / next / later / release / parked）
 - `docs/ir-v1.md` — IR フォーマット仕様 / `docs/op-vocabulary.md` — op 語彙台帳
+- `docs/glossary.md` — 用語 → 意味の要約 → 使う日本語 → 正本へのポインタ（**意味の正本は
+  参照先** — ここは索引。docs に新しい用語を入れたら 1 行足す）
+- `docs/quantization.md` — 量子化方式の索引（格納型 / 実行ノブ / quant 席 / exporter 側の方式と
+  その状態。数値と意味論は複製せず正本を指す）
 - `docs/assets-layout.md` — ローカル資産 3 根（models / outputs / inputs — 全て git 追跡外）の規約
 - `docs/release-runbook.md` — リリース・HF 公開の恒久手順（pin 焼き込み・断片化対策・publish 順序）
 - `docs/research/` — 調査・実測記録（**時点スナップショット** — 冒頭に性格を示す注記 1 行）

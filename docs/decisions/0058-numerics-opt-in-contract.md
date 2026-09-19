@@ -5,7 +5,8 @@
 - 対象: runtime の `SessionOptions` 実行変種面。既存 3 軸（`linearCompute` /
   `attentionCompute` / `attentionScoreStorage`）の流儀を契約へ昇格し、以後の「数値契約を
   割る最適化」（直近 = perf-ledger K-5 / K-2）が従う席の作り方を 1 本に固定する。
-  配布資産側の量子化系列（quant 席 — [ADR 0050](0050-irodori-quant-series.md)）は
+  配布資産側の quant 席（用語は [glossary](../glossary.md)・命名規則は
+  [ADR 0074](0074-quant-seat-naming.md)・先例は [ADR 0050](0050-irodori-quant-series.md)）は
   **格納形の軸**で本 ADR の対象外（交差の規約のみ決定 7）。
 - 背景方針: ビット同一門は「実装が正しいことの指標であって目的ではない」
   （ユーザー方針 2026-08-13 — 正本は [perf-ledger](../perf-ledger.md) ヘッダ）。

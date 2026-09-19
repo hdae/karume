@@ -9,6 +9,17 @@
 
 ## now — 0.12.0 リリース後（2026-09-06）
 
+- **QAT レビュー対応の波（2026-09-19）**: 裁定は [ADR 0097 追記 7](decisions/0097-gemma4-qat-integration.md)、
+  実測は [QAT レビューの実測記録](research/2026-09-19-qat-review.md)。中身は ①配布既定を通常 Gemma と
+  揃える（capacity 4096 / chunkLength 768 / trace 上限 768・対話 CLI の既定 256 token。既定 capacity と
+  trace 上限の定数を分け、焼く前に 3 式を検査する）②scale=0 の恒等 SRQ を recipe が挟まないようにし、
+  構造門を「共有 head だけ SRQ 省略可」へ緩める ③構造門・配布計画（`qat_plan`）・公開入口の失敗経路と
+  QAT RoPE の golden を埋める ④[glossary](glossary.md) と [quantization](quantization.md) を新設し、
+  散在していた用語と方式の索引をそこへ寄せる ⑤`reference.json` を schema 2 にする
+  （byte 一致フラグの廃止・本数の突合・未反映テンソルの記録）。
+  ローカル配布 `models/karume-gemma4-qat` / `models/karume-gemma4` は ADR 0104 の recipe で再ビルドする
+  （E2B の既定 quant が `i4-fast` になる）。512 超の文脈での品質検収はこの波に含めない。
+
 - **モデル横断の追加調査（2026-09-10〜11）**: Qwen3-0.6B / MiniCPM5-2B の RTN / GPTQ と
   E4B の全 PLE を含むローカル pipeline は実機検証済み。E4B chat も CPU / Deno / Chrome で一致。
   [初期品質参考値](research/2026-09-12-llm-quality-baseline.md)はQwen/MiniCPMで保存済み。
@@ -42,7 +53,7 @@
   公開 INT2 IR・固定 SRQ・固定 writer・PLE の INT2 / INT4 読取は検収済み。
   公式 recipe / 配布形の全量変換・固定 bytes 一致・Deno/Chrome の短文比較は確認済み。CPU/GPU 差は SRQ 境界をまたぐ縮約差に帰属。
   family / 対話 CLI は E2B/E4B・Deno/Chrome・複数ターン・中断・解放と全体検証を完了。
-  SRQ融合・境界探索短縮・INT2変種は検証し、全体の安定利得が不足するため見送り（K-29）。次はM2のQAT・小出力生成の検収と、一般samplingの転送削減。Wan は小さな DiT から段階検証する。
+  SRQ融合・境界探索短縮・INT2変種は当時の逐次実装で検証し、全体の安定利得が不足するため見送った（K-29）。その後、並列GEMVの下で単独のlinear→SRQ融合が改善したためK-44として統合済み（上の2026-09-15の行が正本）。残るのは一般samplingの転送削減と、上の「QAT レビュー対応の波」。Wan は小さな DiT から段階検証する。
   実測と未完の正本は [追加調査](research/2026-09-10-codex-mtp-optimization.md#追加-llm-の実行と量子化別比較)。
 
 - **9/11 レビューの継続検証**（調査 2026-09-10・[対応記録](research/2026-09-10-codex-mtp-optimization.md)）:
@@ -173,6 +184,11 @@
   可否は uncertain**（miss コストは転送でなく再実行フェンス 1 本が支配し、expert を小さくしても
   安くならない。ブラウザ〈Dawn〉のフェンス床と実 hit 率は未測定・1 層のみ）。着手条件は
   parked「IR への値依存実行選択」に従属。
+
+**次タスク（QAT レビュー対応の波の直後）**: [perf-ledger](perf-ledger.md) K-45（活性の整数内積）と
+K-46（int8 KV cache）を**同じ束で**進める。どちらも公式 mobile の計算形へ寄せる変更で、
+片方だけ入れても「CPU / GPU で token 列が分岐する」性質もメモリ 4 倍も残る。
+スパイク実測（速度・公式 mobile との列一致率・int8 KV の品質）で採否を決める。
 
 **ユーザー実機（Claude からは実行できない）**:
 

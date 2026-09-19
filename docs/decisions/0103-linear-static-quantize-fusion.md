@@ -1,6 +1,7 @@
 # 0103: 並列GEMVと固定再量子化の任意融合
 
-- Status: accepted（2026-09-15・利用者の最適化継続依頼の範囲）。M2の短文生成も検収済み。quant宣言への適用は別作業。
+- Status: accepted（2026-09-15・利用者の最適化継続依頼の範囲）。M2の短文生成も検収済み。quant宣言への適用は別作業
+  → [ADR 0104](0104-gemma-fast-quant.md) で E2B の既定 quant へ宣言（2026-09-15）。
 - 関連: [0097](0097-gemma4-qat-integration.md)、[0098](0098-linear-gemv-parallel.md)、[0096](0096-speculative-decoding.md)、[0040](0040-fusion-pass.md)
 - 根拠: [保留候補の再検証](../research/2026-09-15-held-combinations.md)、[製品実装の検収](../research/2026-09-15-linear-static-quantize-fusion.md)
 
