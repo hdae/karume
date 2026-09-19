@@ -40,7 +40,7 @@ silent rather than red — the recipe tests guard every upstream package with `p
 the environment has been rebuilt, re-run the `--all-groups` command above from this directory.
 
 The family dependency groups (`anima` / `sbv2` / `siglip2` / `siglip2-preprocess` / `birefnet` /
-`depth-anything` / `depth-anything-preprocess`) are declared in this directory's
+`depth-anything` / `depth-anything-preprocess` / `gemma4-qat`) are declared in this directory's
 [`pyproject.toml`](pyproject.toml) and are deliberately **not** part of a bare `uv sync` — the base
 dependencies alone must keep the core tests and the tiny goldens running. Upstream packages that
 would otherwise pin the whole environment are taken temporarily with `uv run --with …` instead of a

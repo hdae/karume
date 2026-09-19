@@ -17,7 +17,7 @@ from gemma4.export_product import ProductChunkWrapper
 from karume.custom_ops import static_quantize
 from karume.emit import FixedQuantizedWeight
 
-from .config import CHECKPOINTS
+from .config import CHECKPOINTS, PLE_BITS
 
 if TYPE_CHECKING:
     from transformers.integrations.gemma_quant import QuantizedEmbedding, QuantizedLinear
@@ -57,7 +57,7 @@ def load_qat(model_dir: Path, model_name: str) -> LoadedQat:
     ).eval()
     text = original.model.language_model
     ple = text.embed_tokens_per_layer
-    if not isinstance(ple, QuantizedEmbedding) or ple.num_bits != (4 if model_name == "e2b" else 2):
+    if not isinstance(ple, QuantizedEmbedding) or ple.num_bits != PLE_BITS[model_name]:
         raise ValueError("QAT の PLE 格納がモデル名と合わない")
     shim = nn.Module()
     shim.model, shim.lm_head, shim.config = text, original.lm_head, original.config.text_config
@@ -94,10 +94,16 @@ class TraceLinear(nn.Module):
         self.output_scale = _activation_scale(source.output_activation_scale)
 
     def forward(self, value: torch.Tensor) -> torch.Tensor:
-        return static_quantize(
-            functional.linear(static_quantize(value, self.input_scale), self.weight, self.bias),
-            self.output_scale,
-        )
+        # scale=0 は契約上の恒等（ADR 0097 追記 2）なので SRQ を挟まない。挟むと IR に恒等の
+        # `static_quantize` が残り、runtime は scale=0 でも dispatch を積む — 上流で 0 なのは
+        # lm_head の入出力だけで、その出力は語彙全体なので decode 1 step ごとに語彙全体の
+        # 恒等コピーが走る。入力側・出力側は独立に判定する（片側だけ 0 の形もそのまま通す）。
+        if self.input_scale != 0.0:
+            value = static_quantize(value, self.input_scale)
+        result = functional.linear(value, self.weight, self.bias)
+        if self.output_scale != 0.0:
+            result = static_quantize(result, self.output_scale)
+        return result
 
 
 class TraceEmbedding(nn.Module):

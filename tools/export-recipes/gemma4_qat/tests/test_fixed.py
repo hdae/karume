@@ -16,24 +16,8 @@ from transformers.integrations.gemma_quant import QuantizedEmbedding, QuantizedL
 from gemma4.distribution import assert_gemma4_ple_shards, gemma4_ple_index, gemma4_ple_role
 from gemma4_qat.checkpoint import TraceLinear, fixed_trace_weights, load_qat
 from gemma4_qat.ple import write_ple
+from gemma4_qat.tests.series_fixture import packed_embedding
 from karume.dist import DistError
-
-
-def packed_embedding(bits: int) -> QuantizedEmbedding:
-    rows, layers, dim = 9, 3, 32
-    factor = 8 // bits
-    module = QuantizedEmbedding(rows, layers * dim, torch.float32, embed_scale=3.5, num_bits=bits)
-    module.embedding_quantized = nn.Parameter(
-        (torch.arange(rows * layers * dim // factor) * 37 % 256)
-        .to(torch.uint8)
-        .reshape(rows, layers * dim // factor),
-        requires_grad=False,
-    )
-    module.embedding_scale = nn.Parameter(
-        torch.arange(1, rows * layers + 1, dtype=torch.float32).reshape(rows, layers) / 19,
-        requires_grad=False,
-    )
-    return module
 
 
 class TestPackedPle:
@@ -113,6 +97,29 @@ class TestTraceLinear:
         traced.weight = nn.Parameter(source._dequantize_weights().clone(), requires_grad=False)
         value = torch.arange(3 * 64, dtype=torch.float32).reshape(1, 3, 64) / 17 - 4
         assert torch.equal(traced(value).view(torch.int32), source(value).view(torch.int32))
+
+    @pytest.mark.parametrize(
+        ("input_scale", "output_scale", "rounds"),
+        [(0.0, 0.0, 0), (0.125, 0.0, 1), (0.0, 0.125, 1), (0.125, 0.25, 2)],
+    )
+    def test_it_traces_only_the_srq_that_actually_rounds(
+        self, input_scale: float, output_scale: float, rounds: int
+    ):
+        """scale=0 は恒等（ADR 0097 追記 2）なので IR に残さない。
+
+        残すと runtime が decode のたびに恒等コピーを dispatch する（上流で 0 なのは lm_head の
+        入出力だけなので、その 1 本は語彙全体の読み書きになる）。入力側・出力側は独立に判定する。
+        """
+        source = QuantizedLinear(64, 8, num_bits=4).requires_grad_(False)
+        source.input_activation_scale.fill_(input_scale)
+        source.output_activation_scale.fill_(output_scale)
+        exported = torch.export.export(TraceLinear(source), (torch.zeros(1, 3, 64),))
+        traced = [
+            node
+            for node in exported.graph.nodes
+            if node.target is torch.ops.karume.static_quantize.default
+        ]
+        assert len(traced) == rounds
 
     @pytest.mark.parametrize("scale", [-1.0, float("nan"), float("inf")])
     def test_invalid_srq_scale_is_rejected(self, scale: float):

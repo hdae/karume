@@ -10,9 +10,17 @@ from karume.dist import DistError, assert_quant_presentation
 
 
 def graph_fixture():
+    """正当な最小の QAT グラフ。
+
+    量子化 linear は 2 本 — 共有 head（token embedding と同じ initializer）と、ごく普通の
+    量子化 linear 1 本。前者は前後の SRQ を持たない（上流 lm_head の SRQ scale が 0 = 恒等
+    なので recipe が挟まない）、後者は前後とも持つ。この非対称が契約そのものなので、
+    故障注入は**普通の linear 側**へ掛ける。
+    """
     return {
         "initializers": {
             "weight": {"tensor": "head", "storage": {"dtype": "i2"}},
+            "mlp": {"tensor": "mlp", "storage": {"dtype": "i4"}},
             "projection": {
                 "tensor": "model.model.per_layer_model_projection.weight",
                 "storage": {"dtype": "f32"},
@@ -22,10 +30,27 @@ def graph_fixture():
             {"op": "embedding", "ins": ["weight", "input_ids"], "outs": ["embedded"]},
             {"op": "linear", "ins": ["embedded", "projection"], "outs": ["projected"]},
             {"op": "static_quantize", "ins": ["projected"], "outs": ["rounded"]},
-            {"op": "linear", "ins": ["rounded", "weight"], "outs": ["head"]},
-            {"op": "static_quantize", "ins": ["head"], "outs": ["logits"]},
+            {"op": "linear", "ins": ["rounded", "mlp"], "outs": ["mlp_out"]},
+            {"op": "static_quantize", "ins": ["mlp_out"], "outs": ["hidden"]},
+            {"op": "linear", "ins": ["hidden", "weight"], "outs": ["logits"]},
         ],
     }
+
+
+#: {@link graph_fixture} の head linear（最後のノード）の位置。
+HEAD_NODE = 5
+
+
+def wrap_head_with_srq(graph):
+    """head linear の前後へ SRQ を足す（scale>0 で焼かれた形 — 省略しない側の系列）。"""
+    head = graph["nodes"][HEAD_NODE]
+    graph["nodes"].insert(
+        HEAD_NODE, {"op": "static_quantize", "ins": [head["ins"][0]], "outs": ["head_in"]}
+    )
+    head["ins"][0] = "head_in"
+    head["outs"] = ["head_out"]
+    graph["nodes"].append({"op": "static_quantize", "ins": ["head_out"], "outs": ["logits"]})
+    return graph
 
 
 class TestQatGraph:
@@ -34,6 +59,10 @@ class TestQatGraph:
         before = deepcopy(graph)
         assert_qat_graph(graph)
         assert graph == before
+
+    def test_accepts_a_shared_head_that_still_carries_its_srq(self):
+        """head の SRQ は「省略してよい」であって禁止ではない（scale>0 で焼かれた形も通す）。"""
+        assert_qat_graph(wrap_head_with_srq(graph_fixture()))
 
     @pytest.mark.parametrize(
         "fault", ["embedding", "before", "after", "extra_consumer", "unquantized", "untied"]
@@ -45,13 +74,23 @@ class TestQatGraph:
         elif fault in ("before", "after"):
             graph["nodes"][2 if fault == "before" else 4]["op"] = "reshape"
         elif fault == "extra_consumer":
-            graph["nodes"].append({"op": "reshape", "ins": ["head"], "outs": ["unrounded"]})
+            graph["nodes"].append({"op": "reshape", "ins": ["mlp_out"], "outs": ["unrounded"]})
         elif fault == "unquantized":
             graph["initializers"]["projection"]["tensor"] = "another.linear.weight"
         else:
+            # 共有でなくなった head は普通の量子化 linear になるので SRQ を補う — 残る違反を
+            # 「共有 head が 1 本でない」1 つに絞り、SRQ 欠落の経路と取り違えないため。
             graph["initializers"]["separate"] = deepcopy(graph["initializers"]["weight"])
-            graph["nodes"][3]["ins"][1] = "separate"
+            wrap_head_with_srq(graph)["nodes"][HEAD_NODE + 1]["ins"][1] = "separate"
         with pytest.raises(DistError):
+            assert_qat_graph(graph)
+
+    def test_only_the_shared_head_may_omit_its_srq(self):
+        """省略を許すのは共有 head だけ — 同じ省略を普通の量子化 linear がすると落ちる。"""
+        assert_qat_graph(graph_fixture())
+        graph = graph_fixture()
+        graph["nodes"][2]["op"] = "reshape"
+        with pytest.raises(DistError, match="固定 SRQ"):
             assert_qat_graph(graph)
 
     @pytest.mark.parametrize("model", ["e2b", "e4b"])

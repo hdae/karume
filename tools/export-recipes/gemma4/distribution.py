@@ -936,15 +936,25 @@ def gemma4_sampler(model_dir: Path) -> dict[str, Any]:
 
 
 def gemma4_pipeline_config(
-    max_position: int, rope: Mapping[str, Any], sampler: Mapping[str, Any]
+    max_position: int,
+    rope: Mapping[str, Any],
+    sampler: Mapping[str, Any],
+    *,
+    chunk_length: int,
+    max_chunk_length: int,
+    capacity: int,
 ) -> dict[str, Any]:
     """`pipelineConfig`（TS 側スキーマの 6 欄）を組む。
 
+    実行時ノブの 3 つ（`chunk_length` / `max_chunk_length` / `capacity`）は**呼び手が渡す** —
+    通常 Gemma は {@link GEMMA4_CHUNK_LENGTH} / {@link GEMMA4_MAX_CHUNK_LENGTH} /
+    {@link GEMMA4_CAPACITY} を、固定 QAT は `gemma4_qat.config` の同種の定数を渡す。関係式の
+    実装が 1 本しかないので、family が増えても「3 式のうち 1 式しか見ていない配布形」を作れない。
+
     MUST: 実行時ノブが**両側の上限の内側**に収まることをここで落とす。chunk の行数は記号 `M`
-    の trace 時の上限（{@link GEMMA4_MAX_CHUNK_LENGTH}）を超えられず、`capacity` は会話が
-    使える最大の論理長なので位置は最大 `capacity - 1` まで進む — モデルの宣言
-    （`maxPosition`）を超える容量は「宣言の内側なのに上流が想定していない位置を回す」形で、
-    長い会話でだけ表面化する。
+    の trace 時の上限（`max_chunk_length`）を超えられず、`capacity` は会話が使える最大の
+    論理長なので位置は最大 `capacity - 1` まで進む — モデルの宣言（`maxPosition`）を超える
+    容量は「宣言の内側なのに上流が想定していない位置を回す」形で、長い会話でだけ表面化する。
 
     MUST: その chunk の上限を `maxChunkLength` として**宣言にも載せる**。ここの検査が見るのは
     配布形が焼く既定値だけで、`chunkLength` は読み手の実行時ノブでもある — 宣言が無いと
@@ -956,26 +966,26 @@ def gemma4_pipeline_config(
     どこにも記録されていない（資産からも読めない）。小さい `--sym-max` で trace した容器に対して
     `chunkLength: 768` を名乗る配布形は、この検査も同値テストも素通りする。
     """
-    if not 2 <= GEMMA4_CHUNK_LENGTH <= GEMMA4_MAX_CHUNK_LENGTH:
+    if not 2 <= chunk_length <= max_chunk_length:
         raise DistError(
-            f"chunkLength {GEMMA4_CHUNK_LENGTH} が [2, {GEMMA4_MAX_CHUNK_LENGTH}] の外"
+            f"chunkLength {chunk_length} が [2, {max_chunk_length}] の外"
             "（下限は記号 M の下限・上限は trace 時の `Dim` の上限）"
         )
-    if GEMMA4_CAPACITY < GEMMA4_CHUNK_LENGTH:
+    if capacity < chunk_length:
         raise DistError(
-            f"capacity {GEMMA4_CAPACITY} が chunkLength {GEMMA4_CHUNK_LENGTH} より小さい"
+            f"capacity {capacity} が chunkLength {chunk_length} より小さい"
             " — 1 chunk すら入らない容量は宣言できない"
         )
-    if max_position < GEMMA4_CAPACITY:
+    if max_position < capacity:
         raise DistError(
-            f"capacity {GEMMA4_CAPACITY} がモデルの位置上限 {max_position} を超えた"
+            f"capacity {capacity} がモデルの位置上限 {max_position} を超えた"
             " — 容量いっぱいの会話が宣言の外の位置を回す"
         )
     return {
-        "chunkLength": GEMMA4_CHUNK_LENGTH,
-        "maxChunkLength": GEMMA4_MAX_CHUNK_LENGTH,
+        "chunkLength": chunk_length,
+        "maxChunkLength": max_chunk_length,
         "maxPosition": max_position,
-        "capacity": GEMMA4_CAPACITY,
+        "capacity": capacity,
         "rope": {layer_type: dict(spec) for layer_type, spec in rope.items()},
         "sampler": dict(sampler),
     }
@@ -1010,7 +1020,12 @@ def gemma4_plan(sources: Gemma4Sources, model: str = GEMMA4_DEFAULT_MODEL) -> Mo
     assert_gemma4_ple_shards(placements, index)
     assert_gemma4_tokenizer(placements[GEMMA4_TOKENIZER_ROLE], vocab_size)
     pipeline_config = gemma4_pipeline_config(
-        gemma4_max_position(text_config, where), rope, gemma4_sampler(sources.model)
+        gemma4_max_position(text_config, where),
+        rope,
+        gemma4_sampler(sources.model),
+        chunk_length=GEMMA4_CHUNK_LENGTH,
+        max_chunk_length=GEMMA4_MAX_CHUNK_LENGTH,
+        capacity=GEMMA4_CAPACITY,
     )
     output_paths = gemma4_output_paths(index)
     return ModelPlan(

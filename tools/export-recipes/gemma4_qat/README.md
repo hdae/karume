@@ -8,11 +8,14 @@ It does not requantize the checkpoint. The text decoder, tokenizer, and packed p
 
 The upstream weights are Apache 2.0. Distribution assembly includes the license text and a
 modification notice. This recipe imports the installed Transformers implementation and does not
-copy its source. Use the repository's pinned Transformers dependency (`5.14.1`).
+copy its source. Use the repository's pinned Transformers dependency (`5.14.1`), declared as the
+`gemma4-qat` dependency group; without that group the export cannot run and the tests that build
+upstream modules are skipped.
 
 From `tools/export-recipes`:
 
 ```sh
+uv sync --group gemma4-qat
 uv run python -m gemma4_qat.export --model e2b
 uv run python -m gemma4_qat.export --model e4b
 uv run python dist.py --pipeline gemma4-qat --model e2b --model e4b \
@@ -22,8 +25,11 @@ uv run python dist.py --pipeline gemma4-qat --model e2b --model e4b \
 Place original checkpoints in `inputs/gemma4-qat/<checkpoint-name>/`, or pass `--input`.
 Exports go to `outputs/series/gemma4-qat-<model>-product/`, or `--out`. The export verifies every
 fixed packed payload and scale after sharding and publishes all files together only after checks
-pass. `reference.json` records checkpoint fingerprints and trace bounds. Exporting into an existing
-output replaces that complete series; use a new directory to retain previous measurements.
+pass. `reference.json` records checkpoint fingerprints, trace bounds, how many fixed weights and
+PLE shards were verified, and how many upstream tensors this text-only conversion never read
+(KV cache scales, vision, audio). Distribution assembly reconciles those counts against the series
+itself. Exporting into an existing output replaces that complete series; use a new directory to
+retain previous measurements.
 
 The distribution family is `gemma4-qat/1`, with models `e2b` and `e4b`. The `i4` quant is
 fixed mixed INT2/INT4/INT8 with SRQ and reference GEMV summation. E2B defaults to
@@ -37,8 +43,9 @@ setting a fusion flag back to `false`. To use sequential GEMV with
 Rebuild the distribution to obtain the new declaration; no checkpoint requantization
 is needed. Submission policy and prefill buckets remain separate host options.
 See [the decision record](../../../docs/decisions/0104-gemma-fast-quant.md).
-Default capacity is 128 tokens and prefill
-chunk length is 32 (trace maximum 128). Larger contexts and broad quality remain unvalidated.
+Default capacity is 4096 tokens and prefill chunk length is 768 (trace maximum 768) — the same
+defaults as ordinary Gemma. Both are runtime knobs a caller can override. Output quality beyond
+512-token contexts has not been accepted yet.
 CPU and GPU floating-point reductions can cross SRQ rounding boundaries and select different
 tokens. Short Deno and Chrome comparisons on an RTX 3080 Ti agreed with each other, but did not
 always match the official CPU output. This is not a claim of CPU/GPU bit identity or complete model

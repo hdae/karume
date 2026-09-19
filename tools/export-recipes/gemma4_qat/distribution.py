@@ -15,6 +15,7 @@ from gemma4.distribution import (
     gemma4_assets,
     gemma4_hidden_size,
     gemma4_max_position,
+    gemma4_pipeline_config,
     gemma4_ple_index,
     gemma4_ple_role,
     gemma4_rope,
@@ -34,7 +35,17 @@ from karume.dist import (
 )
 from karume.modelcard import CardMetadata, frontmatter, models, quants, render, require_pipeline
 
-from .config import CHECKPOINTS, MAX_CHUNK_LENGTH, MAX_SELECTED_ROWS, checkpoint_name, series_name
+from .config import (
+    CHECKPOINTS,
+    DEFAULT_CAPACITY,
+    DEFAULT_CHUNK_LENGTH,
+    MAX_CHUNK_LENGTH,
+    MAX_SELECTED_ROWS,
+    PLE_BITS,
+    REFERENCE_SCHEMA,
+    checkpoint_name,
+    series_name,
+)
 
 
 def assert_qat_graph(graph: Mapping[str, Any]) -> None:
@@ -67,6 +78,13 @@ def assert_qat_graph(graph: Mapping[str, Any]) -> None:
             continue
         if dtype not in ("i2", "i4", "i8"):
             raise DistError(f"QAT linear の固定格納に未対応: {dtype}")
+        # 共有 head だけ前後の SRQ を省略してよい — 上流 lm_head の SRQ scale は入出力とも 0
+        # （未較正 = 恒等）で、recipe は scale=0 の SRQ を IR に挟まない（`checkpoint.py` の
+        # `TraceLinear`）。他の量子化 linear の scale は全て正なので、前後とも必須のまま。
+        shared_head = node["ins"][1] == token_weight
+        head_count += shared_head
+        if shared_head:
+            continue
         before = producers.get(node["ins"][0], {})
         after = consumers.get(node["outs"][0], [])
         if (
@@ -75,9 +93,22 @@ def assert_qat_graph(graph: Mapping[str, Any]) -> None:
             or after[0]["op"] != "static_quantize"
         ):
             raise DistError("QAT linear の前後に固定 SRQ が必要")
-        head_count += node["ins"][1] == token_weight
     if head_count != 1 or ordinary_count != 1:
         raise DistError("QAT の共有 head または非量子化 projection の本数が違う")
+
+
+#: 固定格納の dtype（`reference.json` の `storageCounts` の鍵でもある）。
+FIXED_STORAGE_DTYPES: tuple[str, ...] = ("i2", "i4", "i8")
+
+
+def fixed_storage_counts(graph: Mapping[str, Any]) -> dict[str, int]:
+    """IR の initializer を固定格納の dtype 別に数える（`reference.json` の突合相手）。"""
+    counts = dict.fromkeys(FIXED_STORAGE_DTYPES, 0)
+    for entry in graph["initializers"].values():
+        dtype = entry.get("storage", {}).get("dtype")
+        if dtype in counts:
+            counts[dtype] += 1
+    return counts
 
 
 #: 系列ごとの既定 quant。実測で検収した席だけを既定にするので導出できず、宣言が要る
@@ -126,22 +157,28 @@ def qat_plan(series_dir: Path, model: str) -> ModelPlan:
     source = series_dir / series_name(model)
     reference = json.loads((source / "reference.json").read_text())
     if (
-        reference.get("schema") != 1
+        reference.get("schema") != REFERENCE_SCHEMA
         or reference.get("family") != "gemma4-qat"
         or reference.get("model") != model
         or reference.get("maxChunkLength") != MAX_CHUNK_LENGTH
         or reference.get("maxSelectedRows") != MAX_SELECTED_ROWS
-        or reference.get("fixedBytesExact") is not True
-        or reference.get("pleBytesExact") is not True
     ):
-        raise DistError("QAT reference の family/model/trace範囲/固定bytes 検証が合わない")
-    index = gemma4_ple_index(source, storage="i4" if model == "e2b" else "i2")
+        raise DistError("QAT reference の schema/family/model/trace範囲が合わない")
+    index = gemma4_ple_index(source, storage=f"i{PLE_BITS[model]}")
     container = source / "model.safetensors"
     for dtype in ("I2", "I4", "I8"):
         assert_storage("model", container, {"model": dtype})
     assert_storage_absent("model", container, {"model": ("F16",)})
     graph = ir_graph(container)
     assert_qat_graph(graph)
+    # 変換時の検証結果は「何本を照合したか」で突き合わせる（常に True のフラグは門にならない）。
+    counts = fixed_storage_counts(graph)
+    if (
+        reference.get("fixedWeights") != sum(counts.values())
+        or reference.get("storageCounts") != counts
+        or reference.get("pleShards") != len(index["shards"])
+    ):
+        raise DistError("QAT reference の固定重み本数・格納内訳・PLE shard 本数が現物と違う")
     config = gemma4_text_config(source)
     where = str(source / "config.json")
     rope = gemma4_rope(config, where)
@@ -161,9 +198,6 @@ def qat_plan(series_dir: Path, model: str) -> ModelPlan:
     }
     for role, path in placements.items():
         artifacts[role] = Artifact(f"ple/{path.name}", source=path)
-    max_position = gemma4_max_position(config, where)
-    if max_position < MAX_CHUNK_LENGTH:
-        raise DistError("QAT の位置上限が初期容量より小さい")
     quant_modes = qat_quants(model)
     return ModelPlan(
         name=model,
@@ -173,14 +207,16 @@ def qat_plan(series_dir: Path, model: str) -> ModelPlan:
         assets=gemma4_assets(index),
         quants=quant_modes,
         default_quant=QAT_DEFAULT_QUANT[model],
-        pipeline_config={
-            "chunkLength": 32,
-            "maxChunkLength": reference["maxChunkLength"],
-            "capacity": MAX_CHUNK_LENGTH,
-            "maxPosition": max_position,
-            "rope": rope,
-            "sampler": gemma4_sampler(source),
-        },
+        # 3 式（chunkLength ≤ maxChunkLength / chunkLength ≤ capacity / capacity ≤ maxPosition）
+        # の検査は通常 Gemma と同じ 1 実装を通す。trace 上限は provenance に記録した値を使う。
+        pipeline_config=gemma4_pipeline_config(
+            gemma4_max_position(config, where),
+            rope,
+            gemma4_sampler(source),
+            chunk_length=DEFAULT_CHUNK_LENGTH,
+            max_chunk_length=reference["maxChunkLength"],
+            capacity=DEFAULT_CAPACITY,
+        ),
     )
 
 

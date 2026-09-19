@@ -30,7 +30,7 @@ class TracedQat:
 def trace_qat(loaded: LoadedQat, ids: torch.Tensor) -> TracedQat:
     """固定 payload を退避してから shape-only trace。通常推論と混ぜない単方向の処理。"""
     if ids.ndim != 2 or ids.shape[0] != 1 or not 2 <= ids.shape[1] <= MAX_CHUNK_LENGTH:
-        raise ValueError("QAT trace の例示入力は [1,M]、2<=M<=128 が必要")
+        raise ValueError(f"QAT trace の例示入力は [1,M]、2<=M<={MAX_CHUNK_LENGTH} が必要")
     with torch.inference_mode():
         ple = loaded.ple(ids).reshape(
             1,

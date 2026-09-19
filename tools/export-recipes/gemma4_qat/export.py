@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -15,13 +15,47 @@ from _shared.paths import INPUTS_ROOT, SERIES_ROOT
 from gemma4.provenance import checkpoint_fingerprint
 from karume import publish_model
 from karume.artifacts import staged_publication
+from karume.dist import safetensors_header
 from karume.shards import resolve_shards
 
 from .audit import assert_fixed_bytes
 from .checkpoint import load_qat
-from .config import CHECKPOINTS, MAX_CHUNK_LENGTH, MAX_SELECTED_ROWS, series_name
+from .config import (
+    CHECKPOINTS,
+    MAX_CHUNK_LENGTH,
+    MAX_SELECTED_ROWS,
+    REFERENCE_SCHEMA,
+    series_name,
+)
 from .ple import write_ple
 from .trace import trace_qat
+
+#: 上流 checkpoint のうち text 変換が**読まない**テンソル群（ヘッダの綴りで数える）。
+#: KV cache の SRQ scale は f32 の KV を使うので読まず（上流 transformers も同じ）、
+#: vision / audio は text 専用の変換対象外（ADR 0097 決定 1）。未対応が暗黙にならないよう、
+#: 「使わなかった量」を系列の記録に残す。
+UNUSED_UPSTREAM_MARKERS: Mapping[str, tuple[str, ...]] = {
+    "kvCacheScales": ("k_cache_scale", "v_cache_scale"),
+    "vision": ("vision_tower", "embed_vision"),
+    "audio": ("audio_tower", "embed_audio"),
+}
+
+
+def upstream_unused(model_dir: Path) -> dict[str, int]:
+    """上流 safetensors の**ヘッダだけ**を読み、変換が使わないテンソルを群ごとに数える。"""
+    containers = sorted(model_dir.glob("*.safetensors"))
+    if not containers:
+        raise ValueError(f"{model_dir}: safetensors が 1 本も無い")
+    names = [
+        name
+        for container in containers
+        for name in safetensors_header(container)
+        if name != "__metadata__"
+    ]
+    return {
+        group: sum(any(marker in name for marker in markers) for name in names)
+        for group, markers in UNUSED_UPSTREAM_MARKERS.items()
+    }
 
 
 def export_qat(model_dir: Path, destination: Path, model: str) -> dict[str, Any]:
@@ -52,7 +86,7 @@ def export_qat(model_dir: Path, destination: Path, model: str) -> dict[str, Any]
             (model_dir / "generation_config.json").read_bytes()
         )
         record = {
-            "schema": 1,
+            "schema": REFERENCE_SCHEMA,
             "family": "gemma4-qat",
             "model": model,
             "checkpoint": checkpoint,
@@ -65,8 +99,7 @@ def export_qat(model_dir: Path, destination: Path, model: str) -> dict[str, Any]
             },
             "weightFiles": len(resolve_shards(target)),
             "pleShards": len(index["shards"]),
-            "fixedBytesExact": True,
-            "pleBytesExact": True,
+            "upstreamUnused": upstream_unused(model_dir),
         }
         (staged / "reference.json").write_text(json.dumps(record, indent=2) + "\n")
     return record

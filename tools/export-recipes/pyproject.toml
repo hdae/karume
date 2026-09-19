@@ -107,6 +107,13 @@ depth-anything = ["transformers==5.14.1"]
 # 足すのは PNG を開く pillow だけ — 前処理の正本 `DPTImageProcessor`（fast 側）が要求する
 # torchvision は既に core の基本依存にある（`deform_conv2d` の op 登録用）。
 depth-anything-preprocess = ["pillow>=11", "transformers==5.14.1"]
+# Gemma 4 mobile QAT の実重み export 用（`uv sync --group gemma4-qat`）。既定の sync には
+# 入れない。要るのは transformers だけ（固定整数の入れ物 `gemma_quant` は本体に入っている）。
+# MUST: transformers は `==` でピンする（anima / siglip2 / birefnet グループと同型の理由）—
+# recipe は `transformers.integrations.gemma_quant` の `QuantizedLinear` / `QuantizedEmbedding`
+# の属性名（`weight_scale` / `input_activation_scale` / `embedding_quantized`）と forward に
+# 直接依存していて、マイナー更新で綴りや丸めの形が変わると固定値の写しが黙って別物になる。
+gemma4-qat = ["transformers==5.14.1"]
 # NOTE: EmbeddingGemma / MiniCPM5 / 母音検出 recipe は依存グループを持たない — 前 2 者は
 # `uv run --with 'transformers==5.14.1' python -m <family>.export` の一時足し
 # （各台本の docstring）、母音検出は core の基本依存（torch / numpy / safetensors）だけで回る。
