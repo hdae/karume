@@ -26,13 +26,13 @@ if (!available) {
 }
 
 /** QAT E2B decode 計画で packed になる SRQ の本数（assets_fusion_counts_test.ts と同じ値）。 */
-const DECODE_PACKED = 210;
+const DECODE_PACKED = 70;
 
 describe({
   name: "gemma4-qat: packed int8 活性（ADR 0105・実GPU）",
   ignore: !available || !GPU_AVAILABLE,
   fn: () => {
-    it("席 on / off の 64 token greedy id 列が完全一致し、decode 計画だけが 210 本を掴む", async () => {
+    it("席 on / off の 64 token greedy id 列が完全一致し、decode 計画だけが 70 本を掴む", async () => {
       const outputs: number[][] = [];
       const packedByPhase: Record<string, number[]> = {};
       for (const packedStaticQuantize of [false, true]) {

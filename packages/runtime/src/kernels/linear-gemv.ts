@@ -747,37 +747,59 @@ type ParallelShape = {
   readonly k: number;
   readonly group?: number;
   readonly lanes: LinearGemvParallelLanes;
+  /**
+   * packed int8 活性（ADR 0105）で受け取る形か。**実測で速くなった行だけ true**。
+   *
+   * 効くのは「K が長く lanes 32」= 1 スレッドが 1 重み語あたりに読む活性が多い形だけで、
+   * K=1536 の lanes 2 / 4 と i8 は追加の unpack / 変換 / 乗算が利得を食い潰す
+   * （ADR 0105 追記 1 の per-key 実測）。
+   */
+  readonly packedActivations: boolean;
 };
 
 // DECIDED: 実測した形だけを任意指定の対象にする。GPU名による自動選択ではない。
 // docs/decisions/0098-linear-gemv-parallel.md
 const PARALLEL_SHAPES: readonly ParallelShape[] = [
-  { storage: "i4", n: 8960, k: 1536, group: 32, lanes: 4 },
-  { storage: "i4", n: 2048, k: 1536, group: 32, lanes: 4 },
-  { storage: "i4", n: 256, k: 1536, group: 32, lanes: 32 },
-  { storage: "i4", n: 1536, k: 2048, group: 32, lanes: 32 },
-  { storage: "i4", n: 6144, k: 1536, group: 32, lanes: 4 },
-  { storage: "i4", n: 1536, k: 6144, group: 32, lanes: 32 },
-  { storage: "i4", n: 1536, k: 256, group: 32, lanes: 4 },
-  { storage: "i4", n: 4096, k: 1536, group: 32, lanes: 4 },
-  { storage: "i4", n: 512, k: 1536, group: 32, lanes: 32 },
-  { storage: "i4", n: 1536, k: 4096, group: 32, lanes: 32 },
-  { storage: "i4", n: 12288, k: 1536, group: 32, lanes: 4 },
-  { storage: "i4", n: 1536, k: 12288, group: 32, lanes: 32 },
-  { storage: "i8", n: 262144, k: 1536, lanes: 16 },
-  { storage: "i4", n: 2048, k: 1536, group: 512, lanes: 4 },
-  { storage: "i4", n: 256, k: 1536, group: 512, lanes: 32 },
-  { storage: "i4", n: 1536, k: 2048, group: 2048, lanes: 32 },
-  { storage: "i4", n: 6144, k: 1536, group: 512, lanes: 4 },
-  { storage: "i4", n: 1536, k: 6144, group: 2048, lanes: 32 },
-  { storage: "i8", n: 256, k: 1536, lanes: 32 },
-  { storage: "i8", n: 1536, k: 256, lanes: 4 },
-  { storage: "i4", n: 4096, k: 1536, group: 512, lanes: 4 },
-  { storage: "i4", n: 512, k: 1536, group: 512, lanes: 32 },
-  { storage: "i4", n: 1536, k: 4096, group: 4096, lanes: 32 },
-  { storage: "i2", n: 12288, k: 1536, lanes: 2 },
-  { storage: "i2", n: 1536, k: 12288, lanes: 32 },
+  { storage: "i4", n: 8960, k: 1536, group: 32, lanes: 4, packedActivations: false },
+  { storage: "i4", n: 2048, k: 1536, group: 32, lanes: 4, packedActivations: false },
+  { storage: "i4", n: 256, k: 1536, group: 32, lanes: 32, packedActivations: false },
+  { storage: "i4", n: 1536, k: 2048, group: 32, lanes: 32, packedActivations: false },
+  { storage: "i4", n: 6144, k: 1536, group: 32, lanes: 4, packedActivations: false },
+  { storage: "i4", n: 1536, k: 6144, group: 32, lanes: 32, packedActivations: false },
+  { storage: "i4", n: 1536, k: 256, group: 32, lanes: 4, packedActivations: false },
+  { storage: "i4", n: 4096, k: 1536, group: 32, lanes: 4, packedActivations: false },
+  { storage: "i4", n: 512, k: 1536, group: 32, lanes: 32, packedActivations: false },
+  { storage: "i4", n: 1536, k: 4096, group: 32, lanes: 32, packedActivations: false },
+  { storage: "i4", n: 12288, k: 1536, group: 32, lanes: 4, packedActivations: false },
+  { storage: "i4", n: 1536, k: 12288, group: 32, lanes: 32, packedActivations: false },
+  { storage: "i8", n: 262144, k: 1536, lanes: 16, packedActivations: false },
+  { storage: "i4", n: 2048, k: 1536, group: 512, lanes: 4, packedActivations: false },
+  { storage: "i4", n: 256, k: 1536, group: 512, lanes: 32, packedActivations: false },
+  { storage: "i4", n: 1536, k: 2048, group: 2048, lanes: 32, packedActivations: true },
+  { storage: "i4", n: 6144, k: 1536, group: 512, lanes: 4, packedActivations: false },
+  { storage: "i4", n: 1536, k: 6144, group: 2048, lanes: 32, packedActivations: true },
+  { storage: "i8", n: 256, k: 1536, lanes: 32, packedActivations: false },
+  { storage: "i8", n: 1536, k: 256, lanes: 4, packedActivations: false },
+  { storage: "i4", n: 4096, k: 1536, group: 512, lanes: 4, packedActivations: false },
+  { storage: "i4", n: 512, k: 1536, group: 512, lanes: 32, packedActivations: false },
+  { storage: "i4", n: 1536, k: 4096, group: 4096, lanes: 32, packedActivations: true },
+  { storage: "i2", n: 12288, k: 1536, lanes: 2, packedActivations: false },
+  { storage: "i2", n: 1536, k: 12288, lanes: 32, packedActivations: true },
 ];
+
+/** 実測表の行引き（M の範囲も含めて 1 箇所）。 */
+const parallelShapeFor = (
+  storage: WeightStorage,
+  m: number,
+  n: number,
+  k: number,
+  group?: number,
+): ParallelShape | undefined => {
+  if (m < 1 || m > 8) return undefined;
+  return PARALLEL_SHAPES.find((shape) =>
+    shape.storage === storage && shape.n === n && shape.k === k && shape.group === group
+  );
+};
 
 /** 同じ形の M=1/4/8 は同じ加算順。M>8 の prefill は既存の行ブロックを維持する。 */
 export const linearGemvParallelLanes = (
@@ -786,23 +808,15 @@ export const linearGemvParallelLanes = (
   n: number,
   k: number,
   group?: number,
-): LinearGemvParallelLanes | undefined => {
-  if (m < 1 || m > 8) return undefined;
-  return PARALLEL_SHAPES.find((shape) =>
-    shape.storage === storage && shape.n === n && shape.k === k && shape.group === group
-  )?.lanes;
-};
+): LinearGemvParallelLanes | undefined => parallelShapeFor(storage, m, n, k, group)?.lanes;
 
 /**
  * 「この形が並列 GEMV（{@link linearGemvParallelWgsl} 族）へ落ちるか」を返す**唯一の純関数**。
  *
  * {@link linearGemvParallelLanes}（実測形の表引き）に、recipe-builder の `#buildLinear` が
  * GEMV 族へ入れる条件（格納・`k % 刻み`・i4 の group 長・出力 vec4 の実測範囲）を重ねたもの。
- * packed 活性の対付け（ADR 0105）はプラン時にこの述語で消費先を判定し、recipe-builder は
- * 同じ述語で「packed と宣言された linear が本当に並列 GEMV へ落ちる」ことを検査する。
- *
- * MUST: 2 箇所が同じ 1 本を読む。別に持つと、片方だけ広いときに `vec4<u32>` 束縛へ f32 の語を
- * 流す形（例外なしの沈黙誤値）が出る。
+ * packed 活性の対付け（ADR 0105）はこれをさらに行ごとの採否で絞った
+ * {@link linearGemvPackedEligible} を読む。
  */
 export const linearGemvParallelEligible = (
   storage: WeightStorage,
@@ -818,6 +832,29 @@ export const linearGemvParallelEligible = (
     if (group === undefined || group % linearGemvUnit("i4") !== 0) return undefined;
   } else if (group !== undefined) return undefined;
   return linearGemvParallelLanes(storage, m, n, k, group);
+};
+
+/**
+ * 「この形を **packed int8 活性**（ADR 0105）で受け取るか」を返す**唯一の純関数**。
+ *
+ * {@link linearGemvParallelEligible}（並列 GEMV へ落ちるか）に、実測表の行の
+ * `packedActivations` を重ねたもの。packed 変種の WGSL・params は全形ぶん生成できる
+ * （テストとスナップショットは全形を維持する）が、**製品の plan が選ぶのはこの述語が
+ * lane を返す形だけ**。
+ *
+ * MUST: 対付け（fusion.ts）と recipe-builder の門が同じ 1 本を読む。別に持つと、片方だけ
+ * 広いときに `vec4<u32>` 束縛へ f32 の語を流す形（例外なしの沈黙誤値）が出る。
+ */
+export const linearGemvPackedEligible = (
+  storage: WeightStorage,
+  m: number,
+  n: number,
+  k: number,
+  group?: number,
+): LinearGemvParallelLanes | undefined => {
+  const lanes = linearGemvParallelEligible(storage, m, n, k, group);
+  if (lanes === undefined) return undefined;
+  return parallelShapeFor(storage, m, n, k, group)?.packedActivations === true ? lanes : undefined;
 };
 
 export const linearGemvParallelKey = (

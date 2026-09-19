@@ -130,7 +130,8 @@ describe({
               pass.dispatchWorkgroups(gx);
             };
             dispatch(STATIC_QUANTIZE_WGSL, [sp, input, reference], Math.ceil(count / 128));
-            dispatch(STATIC_QUANTIZE_PACKED_WGSL, [pp, input, codes], Math.ceil(count / 4 / 128));
+            // packed も f32 経路と同じ「1 スレッド 1 要素」（ADR 0105 追記 1）= dispatch 数も同じ
+            dispatch(STATIC_QUANTIZE_PACKED_WGSL, [pp, input, codes], Math.ceil(count / 128));
             dispatch(RESTORE_WGSL, [rp, codes, restored], Math.ceil(count / 4 / 64));
             pass.end();
             encoder.copyBufferToBuffer(reference, 0, stage, 0, count * 4);
@@ -159,6 +160,130 @@ describe({
           assertEquals(validationError, null);
         }
         assertEquals(checks, SCALES.length);
+      } finally {
+        gpu.destroy();
+      }
+    });
+
+    /**
+     * grid-stride の端の長さ。`128` の倍数でない `132` と `12288`（= 132 × 93 + …）を含めて、
+     * 共有メモリ経由の詰め（ADR 0105 追記 1）が端のタイルで壊れないことを見る。
+     * 要素数が 4 の倍数なのは params の門（1 語 4 要素）。
+     */
+    const TAIL_COUNTS = [4, 16, 128, 132, 1536, 12288] as const;
+    /** 範囲外の語を 1 語でも書いたら落ちる番兵。 */
+    const SENTINEL = 0xdeadbeef;
+
+    it("新カーネルは端の長さでも f32 経路と同じコード列を出す（コード巡回 × count 6 種）", async () => {
+      const gpu = await acquireGpu(), d = gpu.device;
+      try {
+        const cache = new Map<string, GPUComputePipeline>();
+        const compile = (code: string): GPUComputePipeline => {
+          const found = cache.get(code);
+          if (found !== undefined) return found;
+          const made = d.createComputePipeline({
+            layout: "auto",
+            compute: { module: d.createShaderModule({ code }), entryPoint: "main" },
+          });
+          cache.set(code, made);
+          return made;
+        };
+        let checks = 0;
+        for (const count of TAIL_COUNTS) {
+          for (const scale of [SCALES[0], SCALES[2]]) {
+            // 全 256 コードを巡回させ、4 要素ごとに 1 語の境界を跨がせる。
+            const x = Float32Array.from(
+              { length: count },
+              (_, i) => ((i % 256) - 128 + (i % 3) * 0.37) * scale,
+            );
+            const words = count / 4;
+            const owned: GPUBuffer[] = [];
+            d.pushErrorScope("validation");
+            let validationError: GPUError | null = null;
+            try {
+              const make = (
+                v: number | ArrayBufferView<ArrayBuffer>,
+                usage = U.STORAGE | U.COPY_DST | U.COPY_SRC,
+              ): GPUBuffer => {
+                const b = d.createBuffer({
+                  size: typeof v === "number" ? v : v.byteLength,
+                  usage,
+                });
+                owned.push(b);
+                if (typeof v !== "number") d.queue.writeBuffer(b, 0, v);
+                return b;
+              };
+              const input = make(x);
+              const reference = make(count * 4);
+              // 末尾 8 語を番兵で埋めておき、端のタイルの書きすぎを検出する。
+              const codes = make(new Uint32Array(words + 8).fill(SENTINEL));
+              const restored = make(count * 4);
+              const stage = make((count * 2 + words + 8) * 4, U.MAP_READ | U.COPY_DST);
+              const sp = make(staticQuantizeParams(count, scale), U.UNIFORM | U.COPY_DST);
+              const pp = make(staticQuantizePackedParams(count, scale), U.UNIFORM | U.COPY_DST);
+              const rp = make(Uint32Array.of(words, f32Bits(scale), 0, 0), U.UNIFORM | U.COPY_DST);
+              const encoder = d.createCommandEncoder(), pass = encoder.beginComputePass();
+              const dispatch = (code: string, buffers: GPUBuffer[], gx: number): void => {
+                const pipeline = compile(code);
+                pass.setPipeline(pipeline);
+                pass.setBindGroup(
+                  0,
+                  d.createBindGroup({
+                    layout: pipeline.getBindGroupLayout(0),
+                    entries: buffers.map((buffer, binding) => ({
+                      binding,
+                      resource: { buffer },
+                    })),
+                  }),
+                );
+                pass.dispatchWorkgroups(gx);
+              };
+              const groups = Math.ceil(count / 128);
+              dispatch(STATIC_QUANTIZE_WGSL, [sp, input, reference], groups);
+              dispatch(STATIC_QUANTIZE_PACKED_WGSL, [pp, input, codes], groups);
+              dispatch(RESTORE_WGSL, [rp, codes, restored], Math.ceil(words / 64));
+              pass.end();
+              encoder.copyBufferToBuffer(reference, 0, stage, 0, count * 4);
+              encoder.copyBufferToBuffer(restored, 0, stage, count * 4, count * 4);
+              encoder.copyBufferToBuffer(codes, 0, stage, count * 8, (words + 8) * 4);
+              d.queue.submit([encoder.finish()]);
+              await stage.mapAsync(MAP_MODE.READ);
+              const read = new Uint32Array(stage.getMappedRange().slice(0));
+              stage.unmap();
+              // 契約は「f32 経路の語と一致・ただし `-0.0` だけ `+0.0` へ落ちる」（ADR 0105）。
+              let different = 0, negativeZero = 0;
+              for (let i = 0; i < count; i += 1) {
+                const reference = read[i], restoredWord = read[i + count];
+                if (reference === 0x80000000) {
+                  negativeZero += 1;
+                  if (restoredWord !== 0) different += 1;
+                } else if (reference !== restoredWord) different += 1;
+              }
+              assertEquals(different, 0, `count=${count} scale=${scale}: 一致しない要素`);
+              // `-0.0` になるのは「負で level 0 へ落ちる」= 商が (-0.5, 0) の要素だけ。上の入力で
+              // それを満たすのは `i%256 == 127 かつ i%3 == 2`（商 -0.26）の 1 点 = `i ≡ 383 (mod 768)`。
+              assertEquals(
+                negativeZero,
+                Math.floor((count + 384) / 768),
+                `count=${count} scale=${scale}: -0.0 の落ちる本数`,
+              );
+              const tail = [...read.subarray(count * 2 + words, count * 2 + words + 8)];
+              assertEquals(
+                tail,
+                Array.from({ length: 8 }, () => SENTINEL),
+                `count=${count} scale=${scale}: 範囲外の語を書いた`,
+              );
+              checks += 1;
+            } finally {
+              d.queue.submit([]);
+              await d.queue.onSubmittedWorkDone();
+              validationError = await d.popErrorScope();
+              for (const b of owned) b.destroy();
+            }
+            assertEquals(validationError, null);
+          }
+        }
+        assertEquals(checks, TAIL_COUNTS.length * 2);
       } finally {
         gpu.destroy();
       }
@@ -284,7 +409,7 @@ describe({
                       dispatch(
                         STATIC_QUANTIZE_PACKED_WGSL,
                         [pp, input, xPacked],
-                        Math.ceil(m * k / 4 / 128),
+                        Math.ceil(m * k / 128),
                       );
                       const tiles = Math.ceil(n / (128 / lanes));
                       dispatch(

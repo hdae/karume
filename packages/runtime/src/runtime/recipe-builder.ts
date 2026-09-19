@@ -144,7 +144,7 @@ import {
   defaultLinearGemvVariant,
   LINEAR_GEMV_MAX_ROWS,
   linearGemvKey,
-  linearGemvParallelEligible,
+  linearGemvPackedEligible,
   linearGemvParallelKey,
   linearGemvParallelLanes,
   linearGemvParallelPackedKey,
@@ -1652,7 +1652,7 @@ export class RecipeBuilder {
     if (packed !== undefined) {
       const eligible = packed.role === "read" &&
         this.#state.linearGemvReduce === "parallel" && this.#state.linearCompute === "f32" &&
-        linearGemvParallelEligible(
+        linearGemvPackedEligible(
             weightStorage,
             m,
             n,
@@ -2080,8 +2080,10 @@ export class RecipeBuilder {
       params,
       bindings: [{ binding: 1, source: binds[0] }, { binding: 2, source: outs[0] }],
       workgroups: [
+        // packed も f32 経路と同じ「1 スレッド 1 要素」の幾何（ADR 0105 追記 1）なので、
+        // dispatch 数は要素数から引く（詰めるのは workgroup 内の共有メモリ経由）。
         gridStrideWorkgroups(
-          writesPacked ? count / 4 : count,
+          count,
           STATIC_QUANTIZE_WORKGROUP_SIZE,
           this.#state.gpu.limits.maxComputeWorkgroupsPerDimension,
         ),

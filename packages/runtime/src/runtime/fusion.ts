@@ -51,6 +51,7 @@
  */
 
 import {
+  linearGemvPackedEligible,
   linearGemvParallelEligible,
   type LinearGemvParallelLanes,
   linearGemvStaticQuantizeKey,
@@ -1628,8 +1629,9 @@ const consumersByValue = (
  *
  * MUST: 活性スロット（`ins[0]`）でだけ取ること。重み / bias に同じ値が来る形は f32 の語を
  * 期待する束縛なので、packed へ切り替えると黙って誤値になる。
- * MUST: 並列 GEMV へ落ちる判定は {@link linearGemvParallelEligible} 1 本（recipe-builder の
- * 門と同じ述語）。
+ * MUST: 判定は {@link linearGemvPackedEligible} 1 本（recipe-builder の門と同じ述語）。
+ * 並列 GEMV へ落ちるだけでは足りず、**実測で packed が効いた行**（ADR 0105 追記 1）に
+ * 限る — 効かない形まで packed にすると、生産側 SRQ ごと丸損になる。
  */
 const readsPackedActivation = (
   plan: NodePlan,
@@ -1646,7 +1648,7 @@ const readsPackedActivation = (
   const m = numel(plan.inputShapes[0].slice(0, -1));
   const [n, k] = plan.inputShapes[1];
   const group = weight.storage === "i4" ? weight.groupSize : undefined;
-  return linearGemvParallelEligible(weight.storage, m, n, k, group) !== undefined;
+  return linearGemvPackedEligible(weight.storage, m, n, k, group) !== undefined;
 };
 
 /**
@@ -1661,8 +1663,9 @@ const readsPackedActivation = (
  *    この判定は 1 度目の走査結果（`steps`）を入力に取る。
  * 3. 出力が graph output でなく、最終次元 k が 16 の倍数（束縛は `vec4<u32>` = 16 要素単位で
  *    読む）、scale が正・有限（scale 0 は恒等 SRQ で int8 コードに落とせない）。
- * 4. 消費先が 1 本以上あり、**その全てが**並列 GEMV へ落ちる linear の活性スロット
- *    （{@link readsPackedActivation}）。1 本でも GEMM / 逐次 GEMV / 他 op が混ざれば f32 のまま。
+ * 4. 消費先が 1 本以上あり、**その全てが**packed が効くと実測された形の並列 GEMV linear の
+ *    活性スロット（{@link readsPackedActivation}）。1 本でも GEMM / 逐次 GEMV / 他 op /
+ *    実測で効かなかった形が混ざれば f32 のまま。
  * 5. その値を消費する融合ステップが {@link LINEAR_STATIC_QUANTIZE_RULE} 以外に無いこと。
  *
  * MUST: 5 は**将来のルール**向けの不変条件。packed で読む綴りを持つのは

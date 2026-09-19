@@ -417,8 +417,12 @@ for (const family of ["gemma4", "gemma4-qat"]) {
           rmsNormAdd: 106,
           linearStaticQuantize: family === "gemma4-qat" && rows <= 8 ? 275 : 0,
         }, `${family} linear SRQ M=${rows}`);
-        // packed 活性（ADR 0105）は**素のまま残った SRQ** だけを掴む。QAT decode 計画
-        // （M ≤ 8）の 210 本がそれで、linear→SRQ 融合が掴む 275 本とは重ならない
+        // packed 活性（ADR 0105）は**素のまま残った SRQ** のうち、消費先が全て
+        // `packedActivations: true` の実測形（ADR 0105 追記 1）に落ちるものだけを掴む。
+        // QAT decode 計画（M ≤ 8）では 70 本 — 内訳は per-key 実測の本数そのもので、
+        // i2 1536×12288 が 20 / i4 g2048 1536×{2048,6144} が 43 / i4 g4096 1536×4096 が 7。
+        // 追記 1 の前は 210 本で、差の 140 本は実測で効かなかった形（i4 g512 の l4 / l32・
+        // i8・i2 12288×1536 の l2）へ落ちる SRQ。linear→SRQ 融合が掴む 275 本とは重ならない
         // （あちらの出力側の消費先には linear 以外が混ざる）。prefill 計画（M ≥ 32）は
         // 並列 GEMV に落ちないので 0 になる。融合の有無でこの数は動かない。
         for (const fuseSrq of [false, true]) {
@@ -427,7 +431,7 @@ for (const family of ["gemma4", "gemma4-qat"]) {
             rope: 50,
             rmsNormAdd: 106,
             linearStaticQuantize: fuseSrq && family === "gemma4-qat" && rows <= 8 ? 275 : 0,
-            packedStaticQuantize: family === "gemma4-qat" && rows <= 8 ? 210 : 0,
+            packedStaticQuantize: family === "gemma4-qat" && rows <= 8 ? 70 : 0,
           }, `${family} packed SRQ M=${rows} fuse=${fuseSrq}`);
         }
       }

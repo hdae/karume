@@ -100,6 +100,20 @@ export const STATIC_QUANTIZE_PACKED_KEY = "static_quantize:v1:packed-i8:wg128";
  * NOTE: int8 に席が無い 2 値だけは f32 経路と違う。**-0.0 はコード 0 = +0.0 へ落ち**
  * （GEMV の積和では `acc` が +0.0 始まりなので出力は動かない — ADR 0105）、**NaN は境界表の
  * 外側として ±127 / -128 へ飽和する**（f32 経路は NaN をそのまま流す）。
+ *
+ * ## 幾何（f32 経路と同じ「1 スレッド 1 要素」— ADR 0105 追記 1）
+ *
+ * 1 語 4 要素を 1 スレッドが直列に量子化する形は、スレッド数が要素数の 1/4 に落ちて
+ * 占有率が足りない（k=1536 なら 384 スレッド = workgroup 3 個）。実測でも f32 経路より
+ * 19% 遅かったので、**担当割りだけ**を f32 経路に揃える:
+ *
+ * - 1 スレッドが自分の 1 要素のコードを求め、workgroup 共有メモリへ置く（128 要素 = 1 タイル）。
+ * - `workgroupBarrier()` の後、下位 32 スレッドが 4 コードずつ 1 語へ詰めて書く。
+ * - タイルの選択は `workgroup_id` だけで決まる grid-stride なので、dispatch 数は f32 経路と同じ
+ *   `ceil(count / 128)` で、barrier は端のタイルでも workgroup 全体で一様。
+ *
+ * MUST: barrier を跨ぐ分岐は `workgroup_id` 由来だけにする（`local_invocation_index` で
+ * ループを回すと端のタイルで barrier が非一様になり、WGSL の一様性解析で落ちる）。
  */
 export const STATIC_QUANTIZE_PACKED_WGSL: string =
   `// karume static_quantize packed: 固定 f32 scale の SRQ を int8 コード 4 個 / u32 語で書く（ADR 0105）
@@ -121,16 +135,33 @@ fn quantizeCode(bits: u32) -> u32 {
   // 負は 2 の補数の低位 8 bit（level 0 の符号は席が無く +0 へ落ちる）
   return select(level, (0u - level) & 255u, sign != 0u);
 }
+// 1 タイル（${STATIC_QUANTIZE_WORKGROUP_SIZE} 要素）ぶんのコード置き場
+var<workgroup> codes: array<u32, ${STATIC_QUANTIZE_WORKGROUP_SIZE}>;
 @compute @workgroup_size(${STATIC_QUANTIZE_WORKGROUP_SIZE})
-fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) groups: vec3<u32>) {
-  let stride = groups.x * ${STATIC_QUANTIZE_WORKGROUP_SIZE}u;
-  let words = word(0u) >> 2u;
-  var i = gid.x;
-  while (i < words) {
-    let base = i << 2u;
-    output[i] = quantizeCode(input[base]) | (quantizeCode(input[base + 1u]) << 8u) |
-      (quantizeCode(input[base + 2u]) << 16u) | (quantizeCode(input[base + 3u]) << 24u);
-    i += stride;
+fn main(
+  @builtin(local_invocation_index) lid: u32,
+  @builtin(workgroup_id) wg: vec3<u32>,
+  @builtin(num_workgroups) groups: vec3<u32>,
+) {
+  let count = word(0u);
+  let tiles = (count + ${STATIC_QUANTIZE_WORKGROUP_SIZE - 1}u) / ${STATIC_QUANTIZE_WORKGROUP_SIZE}u;
+  // タイルの選択は workgroup_id だけで決まる = 下の barrier は端でも workgroup 一様
+  for (var tile = wg.x; tile < tiles; tile += groups.x) {
+    let index = tile * ${STATIC_QUANTIZE_WORKGROUP_SIZE}u + lid;
+    var code = 0u;
+    if (index < count) { code = quantizeCode(input[index]); }
+    codes[lid] = code;
+    workgroupBarrier();
+    // 要素数は 4 の倍数（params の門）なので、1 語は全要素が範囲内か全要素が範囲外のどちらか
+    if (lid < ${STATIC_QUANTIZE_WORKGROUP_SIZE / 4}u) {
+      let base = lid * 4u;
+      if (tile * ${STATIC_QUANTIZE_WORKGROUP_SIZE}u + base < count) {
+        output[tile * ${STATIC_QUANTIZE_WORKGROUP_SIZE / 4}u + lid] = codes[base] |
+          (codes[base + 1u] << 8u) | (codes[base + 2u] << 16u) | (codes[base + 3u] << 24u);
+      }
+    }
+    // 次のタイルが codes を上書きする前に、上の読みを全スレッドが終える（WAR）
+    workgroupBarrier();
   }
 }
 `;

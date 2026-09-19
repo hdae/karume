@@ -133,3 +133,81 @@ bias の加算順・出力側エピローグは 1 バイトも変えない**。�
   活性 3 種（素直 / int8 全域 / `±Inf`・`-0.0`）で出力が **u32 完全一致**（540 件）。
   QAT E2B の 64 token greedy id 列が席 on / off で完全一致。
 - 全GPUでの浮動小数点丸めの仕様保証とはしない（ADR 0103 と同じ立場 — 実機での一致は検収結果）。
+
+## 追記 1（2026-09-19）: 形ごとの採否と SRQ カーネルの再設計
+
+決定 1〜4 の席をそのまま実測に掛けたら、QAT E2B decode（Chrome・pass 境界 timestamp）の
+GPU 時間は **+0.25 ms/token（悪化）**だった。dispatch 分割の per-key 実測
+（`outputs/bench/karume/2026-09-19_21-25-39_k45-1a-packed-aa2db539/per-key-on-off.json`）が
+悪化の出どころを 2 つに割った。
+
+| キー（packed 変種 vs 現行）                                 | 本数/token | on/off の生値比 | 補正 Δ ms/token |
+| ----------------------------------------------------------- | ---------: | --------------: | --------------: |
+| `linear_gemv_parallel:wi2:l32:static-quantize:v1`           |         20 |            0.62 |           −0.31 |
+| `linear_gemv_parallel:wi4g2048:l32:static-quantize:v1`      |         43 |            0.81 |           −0.13 |
+| `linear_gemv_parallel:wi4g4096:l32:static-quantize:v1`      |          7 |            0.77 |           −0.03 |
+| `linear_gemv_parallel:wi4g512:l4:static-quantize:v1`        |         65 |            0.98 |           +0.01 |
+| `linear_gemv_parallel:wi4g512:l32:static-quantize:v1`       |         30 |            1.01 |           +0.02 |
+| `linear_gemv_parallel:wi8:l4:static-quantize:v1`            |         35 |            1.05 |           +0.03 |
+| `linear_gemv_parallel:wi8:l32:static-quantize:v1`           |         35 |            1.05 |           +0.03 |
+| `linear_gemv_parallel:wi2:l2:static-quantize:v1`            |         40 |            1.23 |           +0.25 |
+| 素の SRQ（席 on = `:packed-i8:wg128` / off = `:f32:wg128`） |        210 |            1.19 |           +0.39 |
+
+読み:
+
+1. 効くのは **K が長く lanes 32 の形**（1 スレッドが 1 重み語あたりに読む活性が多い形）だけ。
+   K=1536 の lanes 2 / 4 と i8 では、減らしたロード本数より追加の unpack / 変換 / 乗算が勝つ。
+2. **packed SRQ カーネル自体が f32 版より 19% 遅い**。1 スレッドが 4 要素を直列に量子化する
+   幾何ではスレッド数が要素数の 1/4 に落ち、k=1536 なら 384 スレッド = workgroup 3 個で
+   占有率が足りない。
+
+### 追記決定 1: packed SRQ カーネルの幾何を f32 経路に揃える
+
+`STATIC_QUANTIZE_PACKED_WGSL` を**1 スレッド 1 要素**へ戻す。各スレッドが自分の要素のコードを
+求めて workgroup 共有メモリ（`array<u32, 128>`）へ置き、`workgroupBarrier()` の後に下位
+32 スレッドが 4 コードずつ 1 語へ詰めて書く。dispatch 数は f32 版と同じ `ceil(count / 128)`。
+atomic OR は使わない（書き込みが 1 語 1 スレッドに閉じるので要らない）。
+
+- **grid-stride の端**: タイル（128 要素）の選択を `workgroup_id` だけで回す。`count` が 128 の
+  倍数でなくても barrier は workgroup 全体で一様に通る（`local_invocation_index` でループを
+  回すと端のタイルで barrier が非一様になり、WGSL の一様性解析で落ちる）。範囲外の要素は
+  コード 0 を共有メモリへ置くだけで、**語は書かない** — `count` は 4 の倍数（params の門）なので
+  1 語は「全要素が範囲内」か「全要素が範囲外」のどちらかにしかならない。
+- **コードの確定**（境界表・二分探索・level / sign）は 1 バイトも動かさない。変わったのは
+  担当割りと書き出しの経路だけで、決定 3 のビット同一の根拠はそのまま。
+- タイルごとに barrier を 2 回通る（2 本目は次のタイルが共有メモリを上書きする前の WAR 障壁）。
+
+### 追記決定 2: 形ごとの採否を実測表に載せる
+
+`PARALLEL_SHAPES`（ADR 0098 / 0022 の「実測した形だけ」の流儀）の各行に
+`packedActivations: boolean` を足し、上の実測で効いた 4 行だけ true にする。
+
+| 行                             | lanes | per-key        | 採否  |
+| ------------------------------ | ----: | -------------- | ----- |
+| i2 n=1536 k=12288              |    32 | `wi2:l32`      | true  |
+| i4 g2048 n=1536 k=2048         |    32 | `wi4g2048:l32` | true  |
+| i4 g2048 n=1536 k=6144         |    32 | `wi4g2048:l32` | true  |
+| i4 g4096 n=1536 k=4096         |    32 | `wi4g4096:l32` | true  |
+| 他 21 行（g32 の 12 行を含む） |     — | —              | false |
+
+対付け（決定 2）の消費側条件はこの採否まで含む: **消費先の全てが true の行へ落ちる**
+`static_quantize` だけを packed にする。判定は `linearGemvPackedEligible`
+（`linearGemvParallelEligible` に行の採否を重ねた述語）1 本で、fusion.ts の対付けと
+recipe-builder の門が同じ述語を読む MUST は決定 2 のまま。
+
+false の行にも packed 変種の WGSL・params は生成できる（テストとスナップショットは全形を
+維持する）が、**製品の plan では選ばれない**。
+
+融合カウンタ `packedStaticQuantize` は QAT E2B decode 計画で **210 → 70**
+（内訳 = per-key の本数そのもの: 20 + 43 + 7）。prefill 計画は 0 のまま。
+
+### 検収（追記ぶん）
+
+- 新カーネルが f32 経路と同じコード列を出すこと（コード巡回 × `count` = 4 / 16 / 128 / 132 /
+  1536 / 12288 で u32 一致 + 範囲外の語を書かない番兵）。既存の 540 件 u32 完全一致と
+  256 コード × 代表 scale 6 本はそのまま緑。
+- 採否の gating（true の行だけ対付けが成立・false の行が 1 本でも混ざる SRQ は f32 のまま）。
+  同じ (格納, n, k) でも group 長が違えば別の行 = 別の採否になることを i4 1536×2048 の
+  g2048 / g32 の対で固定する。
+- 実配布 QAT E2B の decode 70 / prefill 0。
+- 故障注入（共有メモリの詰め順を 1 バイトずらす）で 3 つの GPU 門が赤になることを確認して復元。
