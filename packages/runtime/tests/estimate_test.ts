@@ -1292,9 +1292,10 @@ const stateAttentionReport = (options: {
   readonly capacity: number;
   readonly chunkLength: number;
   readonly window?: number;
+  readonly heads?: number;
   readonly limit?: number;
 }): AdmissionReport =>
-  estimateSessionMemory(openGraph(stateAttentionGraph(options.window)), {
+  estimateSessionMemory(openGraph(stateAttentionGraph(options.window, options.heads)), {
     generation: { chunkLength: options.chunkLength, bindings: { C: options.capacity } },
     maxStorageBufferBindingSize: options.limit ?? WIDE_LIMIT,
   });
@@ -1398,33 +1399,37 @@ Deno.test("sliding 変種の列容量は W−1+M（capacity を上げても S �
 });
 
 Deno.test("行ブロックの枚数は maxStorageBufferBindingSize で変わる（1 枚ぶんだけが同時生存）", () => {
+  // MUST: 絞りは**スロットが束縛できる**範囲に留める（H=64 で S の 1 行だけを上限の外へ出す —
+  // 実 GPU 側の複数枚テストと同じ形）。上限をスロット（1024B）より下げた形は
+  // `GenerationContext.create` が拒否する device なので、見積りも同じ門で落とす（ADR 0066 追記 5）。
   const at = (limit: number): number =>
-    bothScenarios(stateAttentionReport({ capacity: 16, chunkLength: 4, limit })).prefill
+    bothScenarios(stateAttentionReport({ capacity: 16, chunkLength: 4, heads: 64, limit })).prefill
       .workspaceBytes;
-  // 1 行 = 4×16×4 = 256B。上限に余裕があれば 1 枚（4 行）: S 1024 + 行統計 128
-  assertEquals(at(WIDE_LIMIT), 512 + 1024 + 128);
-  // 512B → 1 枚 2 行の 2 枚。2 枚目は 1 枚目が生存を終えた区間を掴むので総バイトは 1 枚ぶん。
-  assertEquals(at(512), 512 + 512 + 64);
-  // 256B → 1 枚 1 行の 4 枚に割れるが、出力 o（512B）自体が束縛上限に入らないので計画の
+  // 1 行 = 64×16×4 = 4096B・出力 o [1,64,4,8] = 2048 要素 → 8192B。
+  // 上限に余裕があれば 1 枚（4 行）: S 16384 + 行統計 64×4×2×4 = 2048
+  assertEquals(at(WIDE_LIMIT), 8192 + 16384 + 2048);
+  // 8192B → 1 枚 2 行の 2 枚。2 枚目は 1 枚目が生存を終えた区間を掴むので総バイトは 1 枚ぶん。
+  assertEquals(at(8192), 8192 + 8192 + 1024);
+  // 4096B → 1 枚 1 行の 4 枚に割れるが、出力 o（8192B）自体が束縛上限に入らないので計画の
   // preflight（ADR 0093 決定 5）が数を返さず落とす。
-  assertThrows(() => at(256), ExecutionError, "'o' 512B");
+  assertThrows(() => at(4096), ExecutionError, "'o' 8192B");
 });
 
 Deno.test("端数で 1 行狭いブロックが混ざっても広い枚の区間を配り直すので総和は広い枚 1 枚ぶん", () => {
-  // M=3・上限 512B → 1 枚 2 行で 2 枚（等分は 2 行 + 1 行）。2 枚目の狭い S / 行統計は
-  // 1 枚目が生存を終えた区間を掴む（配り直しはサイズに依らない — ADR 0093 決定 8）ので、
-  // 領域は広い枚の S 512 + 行統計 64 + 出力 o [1,4,3,8]=96 要素 → 384 の 3 本。
+  // M=3・H=64・上限 8192B（1 行 4096B）→ 1 枚 2 行で 2 枚（等分は 2 行 + 1 行）。2 枚目の狭い
+  // S / 行統計は 1 枚目が生存を終えた区間を掴む（配り直しはサイズに依らない — ADR 0093 決定 8）
+  // ので、領域は広い枚の S 8192 + 行統計 1024 + 出力 o [1,64,3,8]=1536 要素 → 6144 の 3 本。
   const { prefill } = bothScenarios(
-    stateAttentionReport({ capacity: 16, chunkLength: 3, limit: 512 }),
+    stateAttentionReport({ capacity: 16, chunkLength: 3, heads: 64, limit: 8192 }),
   );
-  const wide = 4 * 2 * 16 * 4 + 4 * 2 * 2 * 4; // 512 + 64
-  assertEquals(prefill.workspaceBytes, 384 + wide);
+  const wide = 64 * 2 * 16 * 4 + 64 * 2 * 2 * 4; // 8192 + 1024
+  assertEquals(prefill.workspaceBytes, 6144 + wide);
 });
 
 Deno.test("上限が動かすのは中間だけ（io・state・重みの欄は 1 バイトも動かない）", () => {
-  const wide = stateAttentionReport({ capacity: 16, chunkLength: 4 });
-  // 512B = 出力 o（512B）が束縛上限に収まる最小の絞り（S は 2 枚に割れる）
-  const narrow = stateAttentionReport({ capacity: 16, chunkLength: 4, limit: 512 });
+  const wide = stateAttentionReport({ capacity: 16, chunkLength: 4, heads: 64 });
+  // 8192B = 出力 o（8192B）が束縛上限に収まる最小の絞り（S は 2 枚に割れる）
+  const narrow = stateAttentionReport({ capacity: 16, chunkLength: 4, heads: 64, limit: 8192 });
   assertEquals(wide.resident, narrow.resident);
   assertEquals(
     wide.scenarios.map((scenario) => scenario.ioBytes),
@@ -1638,8 +1643,9 @@ Deno.test({
 
 Deno.test("1 行でも上限に入らない形は fail loudly（行ブロックでは割り切れない）", () => {
   assertThrows(
-    // 1 行 = 4×16×4 = 256B > 128B
-    () => stateAttentionReport({ capacity: 16, chunkLength: 4, limit: 128 }),
+    // 1 行 = 64×16×4 = 4096B > 2048B（state スロットの 1024B は収まるので、落ちるのは行ブロック
+    // の側だけ — スロットが上限を割る形は 1 段手前の門が先に落とす）
+    () => stateAttentionReport({ capacity: 16, chunkLength: 4, heads: 64, limit: 2048 }),
     ExecutionError,
     "既にストレージ束縛の上限を超える",
   );

@@ -46,9 +46,11 @@ import { planAliases } from "./fusion.ts";
 import {
   assertChunkBuckets,
   assertChunkLength,
+  assertSlotWithinLimits,
   LENGTHS_BYTES,
   resolveBindings,
   resolveSlotShape,
+  type SlotLimits,
   STATE_ELEMENT_BYTES,
 } from "./generation-context.ts";
 import {
@@ -256,6 +258,17 @@ export type EstimateOptions = {
    */
   readonly maxStorageBufferBindingSize?: number;
   /**
+   * `maxBufferSize` の granted 値（`GPUDevice.limits` / `readAdapterLimits`）。
+   *
+   * 使うのは state スロット単体の上限検査だけで、どのカテゴリのバイト数も動かさない
+   * （`maxStorageBufferBindingSize` と**対**— 実構築は 2 本とも見る: ADR 0066 追記 5）。
+   *
+   * 任意欄にしてあるのは、device を持たない呼び手（グラフだけを握った見積り）を壊さないため。
+   * 渡した欄だけが検査に効き、未指定の側は既定値で埋めない（どの device でも実際には出ない
+   * 境界を estimator だけが主張しないため）。値域（正の安全整数）はグラフの形に依らず入口で見る。
+   */
+  readonly maxBufferSize?: number;
+  /**
    * slot backing の保持予算（`SessionOptions.planBackingBudgetBytes` と同じ値・既定
    * `DEFAULT_PLAN_BACKING_BUDGET_BYTES` = 256 MiB）。
    *
@@ -403,10 +416,23 @@ const bindChunkRows = (
   return bindings;
 };
 
+/**
+ * device 上限欄の値域検査（省略可・与えるなら正の安全整数）。
+ *
+ * MUST: 読み手（`stateAttentionTemps` / `assertSlotWithinLimits`）の内側でなく入口に置く —
+ * 読まない形のグラフでだけ不正値が黙って通ると、値域門の位置が呼び手から見えない。
+ */
+const assertLimitOption = (name: string, limit: number | undefined): void => {
+  if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1)) {
+    throw new ExecutionError(`options.${name} ${limit} は正の安全整数でなければならない`);
+  }
+};
+
 /** state スロットの見積り（{@link GenerationContext} の確保と同じ式 — 値の複製はしない）。 */
 const stateEstimate = (
   graph: IrGraph,
   spec: GenerationContextSpec | undefined,
+  limits: SlotLimits,
 ): {
   readonly bytes: number;
   readonly shapes: ReadonlyMap<string, readonly number[]> | undefined;
@@ -422,7 +448,8 @@ const stateEstimate = (
     );
   }
   // MUST: 実構築（GenerationContext.create）が拒否する spec に見積りを返さない — 値域は
-  // 同じ門（assertChunkLength / assertChunkBuckets）を通す。
+  // 同じ門（assertChunkLength / assertChunkBuckets）を、スロット単体の寸法は同じ
+  // `assertSlotWithinLimits` を通す（下の走査内）。
   assertChunkLength(spec.chunkLength);
   assertChunkBuckets(spec.chunkBuckets, spec.chunkLength);
   const bindings = resolveBindings(graph, spec.bindings);
@@ -435,7 +462,12 @@ const stateEstimate = (
     // 一時（S / 行統計）の勘定に要るので解決するが、バイト数は 1 つも数えない
     // （`GenerationContext.create` の確保と同じ分岐 = 見積りと実構築が同じ数を主張する）。
     if (graph.states[name].external) continue;
-    bytes += numel(shape) * STATE_ELEMENT_BYTES;
+    const byteLength = numel(shape) * STATE_ELEMENT_BYTES;
+    // MUST: 実構築（`GenerationContext.create`）と同じ位置・同じ門でスロット単体の上限を見る
+    // （ADR 0066 追記 5）。ここを抜くと、CLI が `--capacity` の値検査を見積りに兼ねさせている
+    // 経路（examples/shared/gemma-main.ts）で「起動時には数字が出て、最初のターンで落ちる」。
+    assertSlotWithinLimits(name, shape, byteLength, limits);
+    bytes += byteLength;
   }
   // 論理長 uniform は context 1 本につき 1 枚（スロット数に依らない）。
   return { bytes: bytes + LENGTHS_BYTES, shapes, bindings };
@@ -745,15 +777,8 @@ export const estimateGraphMemory = (
   }
   // MUST: 値域はグラフの形に依らずここで見る。stateAttentionTemps の内側だけで検査すると、
   // states 形 attention を持たないグラフで -1 / 1.5 / NaN が黙って受理される。
-  const bindingSizeLimit = options.maxStorageBufferBindingSize;
-  if (
-    bindingSizeLimit !== undefined &&
-    (!Number.isSafeInteger(bindingSizeLimit) || bindingSizeLimit < 1)
-  ) {
-    throw new ExecutionError(
-      `options.maxStorageBufferBindingSize ${bindingSizeLimit} は正の安全整数でなければならない`,
-    );
-  }
+  assertLimitOption("maxStorageBufferBindingSize", options.maxStorageBufferBindingSize);
+  assertLimitOption("maxBufferSize", options.maxBufferSize);
   // MUST: 予算の値域も**ここで**見る（`createSession` と同じ検査 — ADR 0095 決定 1）。読む位置
   // （下のピーク）だけに置くと、Session が作れない予算で見積りだけが数を返す。
   const budgetBytes = options.planBackingBudgetBytes ?? DEFAULT_PLAN_BACKING_BUDGET_BYTES;
@@ -765,7 +790,7 @@ export const estimateGraphMemory = (
   const chunkDims = chunkRowDims(graph);
   const chunkSymbols = new Set(chunkDims.map((dim) => parseDim(dim).sym));
   const bindings = planBindings(graph, options.bindings, chunkSymbols);
-  const state = stateEstimate(graph, options.generation);
+  const state = stateEstimate(graph, options.generation, options);
   const weights = weightEstimate(residency);
 
   const chunkLength = options.generation?.chunkLength;

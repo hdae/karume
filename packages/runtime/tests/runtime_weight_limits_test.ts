@@ -19,6 +19,7 @@ import { assertEquals, assertRejects, assertStringIncludes, assertThrows } from 
 import { openModel } from "../src/format/container.ts";
 import { type IrGraph, parseIrGraph } from "../src/format/ir.ts";
 import { GpuContext, readAdapterInfo, type RequiredLimits } from "../src/gpu/device.ts";
+import { estimateGraphMemory } from "../src/runtime/estimate.ts";
 import { createSession } from "../src/runtime/executor.ts";
 import {
   assertChunkLength,
@@ -362,4 +363,114 @@ Deno.test("state スロットが両上限に収まれば確保へ進む（門は
   );
   assertStringIncludes(error.message, "注入: createBuffer が呼ばれた");
   assertEquals(spy.createBuffer, 1);
+});
+
+// ---------------------------------------------------------------------------
+// 見積り側（estimateGraphMemory）— 実構築と**同じ境界**であること（ADR 0066 追記 5 / Q4-3）
+//
+// 見積りだけが受理する寸法があると、CLI のように `--capacity` の値検査を見積りに兼ねさせて
+// いる呼び手で「起動時には数字が出て、最初のターンで落ちる」形になる。
+// ---------------------------------------------------------------------------
+
+/**
+ * 見積りと実構築の**両方**を通せる最小グラフ。上の `stateGraph` は `state_append` の入力が
+ * rank-4 契約を満たさない（実構築は graph を計画しないので通るが、見積りは planGraph を通る）
+ * ので、対で見るテストはこちらを使う。スロット `kv` は [1,2,1,4] = 8 要素 × 4 = **32 バイト**
+ * （`stateGraph([8])` と同じ大きさなので境界の数字も同じ）。
+ */
+const pairedStateGraph = (): IrGraph => {
+  const graph = baseGraph();
+  graph.inputs.push({ name: "chunk", dtype: "f32", shape: [1, 2, 1, 4] });
+  graph.states = { kv: { dtype: "f32", shape: [1, 2, 1, 4] } };
+  graph.requires.ops.push("state_append");
+  graph.nodes.push({
+    op: "state_append",
+    ins: ["chunk"],
+    outs: [],
+    attrs: {},
+    states: { slot: "kv" },
+  });
+  return parseIrGraph(JSON.stringify(graph));
+};
+
+/** 同じグラフ・同じ上限で見積りを引く（state スロットは `kv` 1 本 = 8 要素 × 4 = 32 バイト）。 */
+const stateEstimateAt = (
+  graph: IrGraph,
+  maxStorageBufferBindingSize: number,
+  maxBufferSize: number,
+): number =>
+  estimateGraphMemory(graph, planWeightResidency(graph), {
+    bindings: { T: 1 },
+    generation: { chunkLength: 1 },
+    maxStorageBufferBindingSize,
+    maxBufferSize,
+  }).resident.stateBytes;
+
+/** 実構築を同じ上限で走らせ、拒否されたなら文言を返す（確保へ進んだなら undefined）。 */
+const createRejectionAt = async (
+  graph: IrGraph,
+  maxStorageBufferBindingSize: number,
+  maxBufferSize: number,
+): Promise<string | undefined> => {
+  const spy: AllocSpy = { createBuffer: 0 };
+  const gpu = spyGpu(spy, limits(maxStorageBufferBindingSize, maxBufferSize));
+  const error = await assertRejects(
+    () => GenerationContext.create(stateHost(gpu, graph), { chunkLength: 1 }),
+    Error,
+  );
+  if (spy.createBuffer > 0) return undefined;
+  return error.message;
+};
+
+Deno.test("束縛上限の境界は見積りと実構築で同じ（1 バイト下回ると両方が同じ文言で落ちる）", async () => {
+  const graph = pairedStateGraph();
+  // 上限ぴったり（32 バイト）は両方とも通る — 実構築は確保へ進み、見積りは数字を返す。
+  assertEquals(stateEstimateAt(graph, 32, 1024), 32 + 8, "スロット 32 + 論理長 uniform 8");
+  assertEquals(await createRejectionAt(graph, 32, 1024), undefined, "境界ちょうどは確保へ進む");
+  // 1 バイト下回ると、見積りも実構築も落ちる。文言は 1 本の門を共有しているので同一。
+  const rejection = await createRejectionAt(graph, 31, 1024);
+  const estimateError = assertThrows(
+    () => stateEstimateAt(graph, 31, 1024),
+    ExecutionError,
+  );
+  assertEquals(estimateError.message, rejection);
+  assertStringIncludes(
+    estimateError.message,
+    "state 'kv': 容量 [1,2,1,4] の 32 バイトが maxStorageBufferBindingSize 31 バイトを超える",
+  );
+});
+
+Deno.test("バッファ上限の境界も見積りと実構築で同じ（束縛上限に収まる形で片側だけを割る）", async () => {
+  const graph = pairedStateGraph();
+  assertEquals(stateEstimateAt(graph, 1024, 32), 32 + 8);
+  assertEquals(await createRejectionAt(graph, 1024, 32), undefined);
+  const rejection = await createRejectionAt(graph, 1024, 31);
+  const estimateError = assertThrows(() => stateEstimateAt(graph, 1024, 31), ExecutionError);
+  assertEquals(estimateError.message, rejection);
+  assertStringIncludes(
+    estimateError.message,
+    "state 'kv': 容量 [1,2,1,4] の 32 バイトが maxBufferSize 31 バイトを超える",
+  );
+});
+
+Deno.test("上限を渡さない見積りは既定値を捏造しない（device を持たない呼び手は従来どおり）", () => {
+  const graph = pairedStateGraph();
+  // 片側だけを渡す形も含めて、渡した欄だけが検査に効く（未指定の側は見ない）。
+  assertEquals(
+    estimateGraphMemory(graph, planWeightResidency(graph), {
+      bindings: { T: 1 },
+      generation: { chunkLength: 1 },
+    }).resident.stateBytes,
+    32 + 8,
+  );
+  assertThrows(
+    () =>
+      estimateGraphMemory(graph, planWeightResidency(graph), {
+        bindings: { T: 1 },
+        generation: { chunkLength: 1 },
+        maxBufferSize: 31,
+      }),
+    ExecutionError,
+    "maxBufferSize 31 バイトを超える",
+  );
 });

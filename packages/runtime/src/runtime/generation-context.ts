@@ -388,6 +388,51 @@ export const resolveSlotShape = (
   });
 
 /**
+ * スロット単体の検査に使う device の絶対上限（ADR 0089 — 物理空き VRAM は推測しない）。
+ *
+ * `GenerationContext.create` は `GpuContext.limits`（2 欄とも granted 値）を、estimator は
+ * `EstimateOptions` の同名欄（どちらも任意）をそのまま渡す。
+ */
+export type SlotLimits = {
+  readonly maxStorageBufferBindingSize?: number;
+  readonly maxBufferSize?: number;
+};
+
+/**
+ * スロット 1 本のバイト数を device の絶対上限と突き合わせる（ADR 0066 追記 5）。
+ *
+ * MUST: 上限は 2 本とも見る。`maxStorageBufferBindingSize ≤ maxBufferSize` は device を計画
+ * する側（gpu/device.ts の `planRequiredLimits`）が保っている関係であって、外から渡された
+ * GpuContext にまで効く保証ではない — 束縛上限だけを見る形にすると、関係が崩れた device で
+ * 「確保そのものが通らない大きさ」を素通しして無効バッファを掴む。
+ * MUST: 見積り（estimate.ts）も**この 1 本**を通す。写しを置くと、実構築が拒否する容量へ
+ * 見積りだけが数字を返す形（起動時には数字が出て最初のターンで落ちる）が復活する。
+ *
+ * 上限が未指定の欄は検査しない — 見積りの呼び手は device を持たないことがあり、そこで既定値を
+ * 捏造すると「どの device でも実際には出ない境界」を estimator だけが主張する。
+ */
+export const assertSlotWithinLimits = (
+  name: string,
+  shape: readonly number[],
+  byteLength: number,
+  limits: SlotLimits,
+): void => {
+  for (const limitName of ["maxStorageBufferBindingSize", "maxBufferSize"] as const) {
+    const limit = limits[limitName];
+    // MUST: スロット単体のバイト数が上限を超える容量指定は fail loudly（追記 5）。
+    // 分割して束ねる形は持たない（KV は連続容量 — 決定 8 の明示選択）ので、超過は容量設計の
+    // 誤りとして呼び出し点で落とす以外に手が無い。
+    if (limit !== undefined && byteLength > limit) {
+      throw new ExecutionError(
+        `state '${name}': 容量 [${shape.join(",")}] の ${byteLength} バイトが ` +
+          `${limitName} ${limit} バイトを超える（ADR 0066 追記 5）。` +
+          "容量を下げるか、スロットを分けてグラフを組み直すこと",
+      );
+    }
+  }
+};
+
+/**
  * 借り手 context が抱える借用の状態（ADR 0096 段 2 §2.1）。**貸し手の実体そのもの**を持つ
  * （写しではない — 写すと「どちらが本物か」が生まれる）。
  */
@@ -666,29 +711,10 @@ export class GenerationContext {
       return await GenerationContext.#createBorrowed(host, spec, spec.borrow, names);
     }
     const bindings = resolveBindings(graph, spec.bindings);
-    // MUST: 上限は 2 本とも見る。`maxStorageBufferBindingSize ≤ maxBufferSize` は device を計画
-    // する側（gpu/device.ts の `planRequiredLimits`）が保っている関係であって、外から渡された
-    // GpuContext にまで効く保証ではない — 束縛上限だけを見る形にすると、関係が崩れた device で
-    // 「確保そのものが通らない大きさ」を素通しして無効バッファを掴む。
-    const limits = [
-      ["maxStorageBufferBindingSize", gpu.limits.maxStorageBufferBindingSize],
-      ["maxBufferSize", gpu.limits.maxBufferSize],
-    ] as const;
     const planned = names.map((name) => {
       const shape = resolveSlotShape(name, graph.states[name].shape, bindings);
       const byteLength = numel(shape) * STATE_ELEMENT_BYTES;
-      // MUST: スロット単体のバイト数が上限を超える容量指定は fail loudly（追記 5）。
-      // 分割して束ねる形は持たない（KV は連続容量 — 決定 8 の明示選択）ので、超過は容量設計の
-      // 誤りとして呼び出し点で落とす以外に手が無い。
-      for (const [limitName, limit] of limits) {
-        if (byteLength > limit) {
-          throw new ExecutionError(
-            `state '${name}': 容量 [${shape.join(",")}] の ${byteLength} バイトが ` +
-              `${limitName} ${limit} バイトを超える（ADR 0066 追記 5）。` +
-              "容量を下げるか、スロットを分けてグラフを組み直すこと",
-          );
-        }
-      }
+      assertSlotWithinLimits(name, shape, byteLength, gpu.limits);
       return { name, shape, byteLength };
     });
 
