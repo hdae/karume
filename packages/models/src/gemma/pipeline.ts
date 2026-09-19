@@ -35,6 +35,7 @@
  * ## MUST: 全モジュール副作用ゼロ（import 時実行・グローバル可変状態の禁止 — CLAUDE.md）
  */
 
+import { resolveGemmaSessionOptions } from "./session-options.ts";
 import { createGemmaGreedyOutput, type GemmaGreedyOutput } from "./greedy-output.ts";
 import { admitGemma4Qat, assertGemma4QatModel, assertGemma4QatPle } from "./qat.ts";
 import { closeableGenerator } from "../concurrency/closeable-generator.ts";
@@ -1578,11 +1579,11 @@ class GemmaPipeline {
           family,
         );
         // 未対応の宣言を無視して走らせない。重みshardの取得より前に拒否する。
-        for (const key of Object.keys(quant.session)) {
-          if (key !== "linearGemvReduce") {
-            throw new Error(`${where}: quant '${quantName}' のsession.${key}は未対応`);
-          }
-        }
+        const quantSession = resolveGemmaSessionOptions(
+          quant.session,
+          options,
+          `${where}: quant '${quantName}'`,
+        );
         const admitted = admitGemma4(
           open(MODEL),
           config,
@@ -1603,7 +1604,7 @@ class GemmaPipeline {
           options.gpu,
           `Gemma4Pipeline: quant '${quantName}'`,
         );
-        return { ...admitted, quantLinearGemvReduce: quant.session.linearGemvReduce };
+        return { ...admitted, quantSession };
       },
       {
         ...hubOptions,
@@ -1678,9 +1679,7 @@ class GemmaPipeline {
       },
       {
         ...options,
-        ...(options.linearGemvReduce === undefined && admitted.quantLinearGemvReduce !== undefined
-          ? { linearGemvReduce: admitted.quantLinearGemvReduce }
-          : {}),
+        ...admitted.quantSession,
       },
     );
   }

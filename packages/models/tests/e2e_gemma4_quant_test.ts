@@ -1,10 +1,10 @@
-/** 同じ配布重みのquant選択と明示指定が、実際のGEMV加算方式へ届くことを検証する。 */
+/** 同じ配布重みのquant選択と明示指定が、実際のGEMV・融合設定へ届くことを検証する。 */
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
-import { parseManifest } from "@karume/hub";
+import { localDirectory, parseManifest } from "@karume/hub";
 import { denoDirectory } from "@karume/hub/deno";
-import { acquireGpu, DEFAULT_SUBMIT_POLICY, type SessionDiagnostics } from "@karume/runtime";
-import { Gemma4Pipeline } from "../gemma.ts";
+import { acquireGpu, type SessionDiagnostics } from "@karume/runtime";
+import { gemma4ChatPrompt, Gemma4Pipeline } from "../gemma.ts";
 import { type Gemma4QatFromPretrainedOptions, Gemma4QatPipeline } from "../gemma4-qat.ts";
 import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE } from "./helpers/gpu.ts";
 
@@ -33,16 +33,22 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
         assert(isRecord(entry) && isRecord(entry.quants));
         const reference = parsed.models.e2b.quants.i4;
         assertEquals(reference.session, {}, "参照i4の定義が変わっている");
+        const fastSession = {
+          linearGemvReduce: "parallel",
+          fuseRmsNormAdd: true,
+          ...(family === "gemma4-qat" ? { fuseLinearStaticQuantize: true } : {}),
+        } as const;
         const manifest = {
           ...raw,
           models: {
             ...raw.models,
             e2b: {
               ...entry,
-              defaultQuant: "i4-gemvpar",
+              defaultQuant: "i4-fast",
               quants: {
                 ...entry.quants,
                 "i4-gemvpar": { ...reference, session: { linearGemvReduce: "parallel" } },
+                "i4-fast": { ...reference, session: fastSession },
                 unsupported: { ...reference, session: { linearCompute: "f16" } },
               },
             },
@@ -62,23 +68,66 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
           const runs = new Map<string, { text: string; stop: unknown }>();
           for (
             const mode of [
-              { name: "default", options: {}, parallel: true },
               {
-                name: "fused",
+                name: "default",
+                options: {},
+                parallel: true,
+                rms: true,
+                srq: family === "gemma4-qat",
+              },
+              {
+                name: "parallel-reference",
+                options: { quant: "i4-gemvpar" },
+                parallel: true,
+                rms: false,
+                srq: false,
+              },
+              {
+                name: "explicit-fast",
+                options: { quant: "i4", ...fastSession },
+                parallel: true,
+                rms: true,
+                srq: family === "gemma4-qat",
+              },
+              {
+                name: "disable-rms",
+                options: { fuseRmsNormAdd: false },
+                parallel: true,
+                rms: false,
+                srq: family === "gemma4-qat",
+              },
+              {
+                name: "disable-srq",
+                options: { fuseLinearStaticQuantize: false },
+                parallel: true,
+                rms: true,
+                srq: false,
+              },
+              {
+                name: "disable-both",
+                options: { fuseRmsNormAdd: false, fuseLinearStaticQuantize: false },
+                parallel: true,
+                rms: false,
+                srq: false,
+              },
+              {
+                name: "reference",
+                options: { quant: "i4" },
+                parallel: false,
+                rms: false,
+                srq: false,
+              },
+              {
+                name: "override",
                 options: {
-                  fuseRmsNormAdd: true,
-                  submitPolicy: { ...DEFAULT_SUBMIT_POLICY, maxChunkSize: 768 },
+                  linearGemvReduce: "sequential",
+                  fuseRmsNormAdd: false,
+                  fuseLinearStaticQuantize: false,
                 },
-                parallel: true,
+                parallel: false,
+                rms: false,
+                srq: false,
               },
-              {
-                name: "explicit-parallel",
-                options: { linearGemvReduce: "parallel" },
-                parallel: true,
-              },
-              { name: "linear-srq", options: { fuseLinearStaticQuantize: true }, parallel: true },
-              { name: "reference", options: { quant: "i4" }, parallel: false },
-              { name: "override", options: { linearGemvReduce: "sequential" }, parallel: false },
             ] as const
           ) {
             const gpu = await acquireGpu({ gpuTiming: true });
@@ -113,11 +162,11 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
                 assert([...keys].some((key) => key.startsWith("linear_gemv")));
                 assertEquals(
                   [...keys].some((key) => key.endsWith(":static-quantize:v1")),
-                  mode.name === "linear-srq" && family === "gemma4-qat",
+                  mode.srq,
                 );
                 assertEquals(
                   [...keys].some((key) => key.startsWith("rms_norm_add:")),
-                  mode.name === "fused",
+                  mode.rms,
                 );
                 assertEquals(
                   [...keys].some((key) => key.startsWith("linear_gemv_parallel")),
@@ -131,15 +180,108 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
               gpu.destroy();
             }
           }
-          assertEquals(runs.get("default"), runs.get("explicit-parallel"));
-          assertEquals(runs.get("default"), runs.get("fused"));
-          assertEquals(runs.get("default"), runs.get("linear-srq"));
+          for (
+            const name of [
+              "parallel-reference",
+              "explicit-fast",
+              "disable-rms",
+              "disable-srq",
+              "disable-both",
+            ]
+          ) {
+            assertEquals(runs.get("default"), runs.get(name), name);
+          }
           assertEquals(runs.get("reference"), runs.get("override"));
+          if (family === "gemma4") {
+            const gpu = await acquireGpu({ gpuTiming: true });
+            const phaseKeys = new Map<string, Set<string>>();
+            try {
+              const pipeline = await Gemma4Pipeline.fromPretrained(denoDirectory(temp), {
+                gpu,
+                model: "e2b",
+                chunkLength: 32,
+                maxResidentPleBytes: 0,
+                speculative: { k: 3 },
+                onRunDiagnostics: (d, phase) => {
+                  const keys = phaseKeys.get(phase.kind) ?? new Set<string>();
+                  for (const row of d.lastRunTiming?.entries ?? []) keys.add(row.key);
+                  phaseKeys.set(phase.kind, keys);
+                },
+              });
+              try {
+                const prompt = gemma4ChatPrompt(pipeline.tokenizer, [{
+                  role: "user",
+                  content: "Write a numbered list of twenty tips for learning a new language.",
+                }]);
+                const outputs: number[][] = [];
+                for (const speculative of [false, "always"] as const) {
+                  const sequence = await pipeline.sequence({ capacity: 128, speculative });
+                  try {
+                    const stream = sequence.generate({
+                      prompt,
+                      maxNewTokens: 32,
+                      sampler: { temperature: 0 },
+                    });
+                    const ids: number[] = [];
+                    for await (const event of stream) {
+                      if (event.kind === "token") ids.push(event.id);
+                    }
+                    const stop = await stream.done;
+                    assertEquals(ids.length, 32);
+                    if (speculative === "always") assert((stop.speculation?.cycles ?? 0) > 0);
+                    outputs.push(ids);
+                  } finally {
+                    await sequence.dispose();
+                  }
+                }
+                assertEquals(outputs[1], outputs[0], "高速quantの投機/非投機");
+                for (const phase of ["decode", "draft", "verify"]) {
+                  const keys = phaseKeys.get(phase);
+                  assert(keys !== undefined, phase);
+                  assert([...keys].some((k) => k.startsWith("linear_gemv_parallel")), phase);
+                  // RMS融合の適用はtarget側のdecode/verifyで見る。
+                  if (phase !== "draft") {
+                    assert([...keys].some((k) => k.startsWith("rms_norm_add:")), phase);
+                  }
+                }
+              } finally {
+                await pipeline.dispose();
+              }
+            } finally {
+              gpu.destroy();
+            }
+          }
+          const heavyPaths = new Set(
+            Object.values(parsed.models.e2b.weights).flatMap((entry) =>
+              Object.values(entry).flatMap((files) => files.shards.slice(1).map((ref) => ref.path))
+            ),
+          );
+          assert(heavyPaths.size > 0);
+          const requested: string[] = [];
+          const noWeightsSource = localDirectory({
+            readFile: async (path) => {
+              requested.push(path);
+              assert(!heavyPaths.has(path), "不正な実行設定で重みshardを取得している");
+              return await Deno.readFile(`${temp}/${path}`);
+            },
+          }, { label: "invalid-gemma-quant" });
           const loadUnsupported = () =>
             family === "gemma4"
-              ? Gemma4Pipeline.fromPretrained(denoDirectory(temp), { quant: "unsupported" })
-              : Gemma4QatPipeline.fromPretrained(denoDirectory(temp), { quant: "unsupported" });
+              ? Gemma4Pipeline.fromPretrained(noWeightsSource, { quant: "unsupported" })
+              : Gemma4QatPipeline.fromPretrained(noWeightsSource, { quant: "unsupported" });
           await assertRejects(loadUnsupported, Error, "session.linearComputeは未対応");
+          if (family === "gemma4-qat") {
+            await assertRejects(
+              () =>
+                Gemma4QatPipeline.fromPretrained(noWeightsSource, {
+                  linearGemvReduce: "sequential",
+                }),
+              Error,
+              "parallelが必要",
+            );
+          }
+          assert(requested.includes("karume.json"));
+          assert(!requested.some((path) => heavyPaths.has(path)));
         } finally {
           await Deno.remove(temp, { recursive: true });
         }
