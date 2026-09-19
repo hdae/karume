@@ -1,0 +1,889 @@
+{
+  "note": "2026-09-19 K-45 段 1a（packed int8 活性・opt-in 席 packedStaticQuantize）の A/B。RTX 3080 Ti・QAT E2B i4-fast・capacity 4096 / chunk 768・64 token・greedy。round1 = 57416eb（全 210 SRQ を packed・SRQ カーネルは count/4 スレッド）、round2 = 追補（形フラグで 70 本・SRQ カーネル再設計）。bundle は git 追跡外。",
+  "round1": {
+    "bundle": "outputs/bench/karume/2026-09-19_21-25-39_k45-1a-packed-aa2db539",
+    "chrome": {
+      "wall": {
+        "qat-packed-off-wall-0": {
+          "english-list": {
+            "decodeTokPerS_median": 94.5,
+            "decodeTokPerS_range": [
+              94.04,
+              94.77
+            ],
+            "ttftMs_median": 39.9
+          },
+          "japanese-list": {
+            "decodeTokPerS_median": 94.4,
+            "decodeTokPerS_range": [
+              93.81,
+              95.63
+            ],
+            "ttftMs_median": 65.8
+          }
+        },
+        "qat-packed-on-wall-0": {
+          "english-list": {
+            "decodeTokPerS_median": 93.37,
+            "decodeTokPerS_range": [
+              93.25,
+              93.54
+            ],
+            "ttftMs_median": 40.2
+          },
+          "japanese-list": {
+            "decodeTokPerS_median": 93.14,
+            "decodeTokPerS_range": [
+              92.08,
+              93.88
+            ],
+            "ttftMs_median": 60.6
+          }
+        },
+        "qat-packed-on-wall-1": {
+          "english-list": {
+            "decodeTokPerS_median": 94.07,
+            "decodeTokPerS_range": [
+              93.57,
+              94.37
+            ],
+            "ttftMs_median": 40.1
+          },
+          "japanese-list": {
+            "decodeTokPerS_median": 95.88,
+            "decodeTokPerS_range": [
+              94.94,
+              96.01
+            ],
+            "ttftMs_median": 66.9
+          }
+        },
+        "qat-packed-off-wall-1": {
+          "english-list": {
+            "decodeTokPerS_median": 94.02,
+            "decodeTokPerS_range": [
+              88.91,
+              94.03
+            ],
+            "ttftMs_median": 41.5
+          },
+          "japanese-list": {
+            "decodeTokPerS_median": 95.18,
+            "decodeTokPerS_range": [
+              95.08,
+              95.35
+            ],
+            "ttftMs_median": 85.9
+          }
+        },
+        "qat-packed-off-wall-2": {
+          "english-list": {
+            "decodeTokPerS_median": 93.67,
+            "decodeTokPerS_range": [
+              93.2,
+              93.83
+            ],
+            "ttftMs_median": 40.7
+          },
+          "japanese-list": {
+            "decodeTokPerS_median": 94.75,
+            "decodeTokPerS_range": [
+              93.53,
+              95.6
+            ],
+            "ttftMs_median": 72.3
+          }
+        },
+        "qat-packed-on-wall-2": {
+          "english-list": {
+            "decodeTokPerS_median": 93.06,
+            "decodeTokPerS_range": [
+              86.29,
+              94.48
+            ],
+            "ttftMs_median": 40.8
+          },
+          "japanese-list": {
+            "decodeTokPerS_median": 94.59,
+            "decodeTokPerS_range": [
+              94.33,
+              95.37
+            ],
+            "ttftMs_median": 64.2
+          }
+        }
+      },
+      "idsIdentical": {
+        "english-list": true,
+        "japanese-list": true
+      },
+      "medianOfMedians": {
+        "off": 94.5,
+        "on": 94.07
+      },
+      "gpuPassTimestamps": {
+        "qat-packed-on-profile-0": {
+          "gpuMsPerToken": {
+            "median": 7.227,
+            "min": 6.899,
+            "max": 7.406
+          },
+          "dispatchPerToken": [
+            1134
+          ],
+          "passesPerToken": [
+            3
+          ]
+        },
+        "qat-packed-off-profile-0": {
+          "gpuMsPerToken": {
+            "median": 6.973,
+            "min": 6.806,
+            "max": 7.344
+          },
+          "dispatchPerToken": [
+            1134
+          ],
+          "passesPerToken": [
+            3
+          ]
+        }
+      },
+      "perKeyCorrected": {
+        "inflationOn": 0.004188965124879105,
+        "inflationOff": 0.004616986288900267,
+        "passGpuOn": 7.227392,
+        "passGpuOff": 6.97344,
+        "rows": [
+          {
+            "key": "linear_gemv_parallel:wi2:l32:static-quantize:v1",
+            "n": 20,
+            "offCorr": 0.742,
+            "onCorr": 0.433,
+            "offRaw": 0.834,
+            "onRaw": 0.517,
+            "deltaCorr": -0.309,
+            "ratioRaw": 0.619
+          },
+          {
+            "key": "linear_gemv_parallel:wi4g2048:l32:static-quantize:v1",
+            "n": 43,
+            "offCorr": 0.572,
+            "onCorr": 0.44,
+            "offRaw": 0.77,
+            "onRaw": 0.62,
+            "deltaCorr": -0.132,
+            "ratioRaw": 0.805
+          },
+          {
+            "key": "linear_gemv_parallel:wi4g4096:l32:static-quantize:v1",
+            "n": 7,
+            "offCorr": 0.104,
+            "onCorr": 0.076,
+            "offRaw": 0.137,
+            "onRaw": 0.105,
+            "deltaCorr": -0.028,
+            "ratioRaw": 0.77
+          },
+          {
+            "key": "linear_gemv_parallel:wi4g512:l4:static-quantize:v1",
+            "n": 65,
+            "offCorr": 0.879,
+            "onCorr": 0.885,
+            "offRaw": 1.179,
+            "onRaw": 1.158,
+            "deltaCorr": 0.006,
+            "ratioRaw": 0.982
+          },
+          {
+            "key": "linear_gemv_parallel:wi4g512:l32:static-quantize:v1",
+            "n": 30,
+            "offCorr": 0.143,
+            "onCorr": 0.159,
+            "offRaw": 0.282,
+            "onRaw": 0.285,
+            "deltaCorr": 0.016,
+            "ratioRaw": 1.011
+          },
+          {
+            "key": "linear_gemv_parallel:wi8:l4:static-quantize:v1",
+            "n": 35,
+            "offCorr": 0.163,
+            "onCorr": 0.194,
+            "offRaw": 0.325,
+            "onRaw": 0.341,
+            "deltaCorr": 0.031,
+            "ratioRaw": 1.048
+          },
+          {
+            "key": "linear_gemv_parallel:wi8:l32:static-quantize:v1",
+            "n": 35,
+            "offCorr": 0.161,
+            "onCorr": 0.193,
+            "offRaw": 0.323,
+            "onRaw": 0.339,
+            "deltaCorr": 0.032,
+            "ratioRaw": 1.051
+          },
+          {
+            "key": "linear_gemv_parallel:wi2:l2:static-quantize:v1",
+            "n": 40,
+            "offCorr": 0.808,
+            "onCorr": 1.053,
+            "offRaw": 0.993,
+            "onRaw": 1.22,
+            "deltaCorr": 0.245,
+            "ratioRaw": 1.229
+          },
+          {
+            "key": "static_quantize:v1:f32:wg128",
+            "n": 210,
+            "offCorr": 0.591,
+            "onCorr": 0.983,
+            "offRaw": 1.561,
+            "onRaw": 1.863,
+            "deltaCorr": 0.392,
+            "ratioRaw": 1.194
+          }
+        ]
+      }
+    },
+    "deno_temperature0": [
+      {
+        "packed": false,
+        "tokens": 64,
+        "rep": 1,
+        "decodeTokPerS": 43.1,
+        "ttftMs": 174
+      },
+      {
+        "packed": true,
+        "tokens": 64,
+        "rep": 1,
+        "decodeTokPerS": 43.4,
+        "ttftMs": 174
+      },
+      {
+        "packed": false,
+        "tokens": 64,
+        "rep": 2,
+        "decodeTokPerS": 42.9,
+        "ttftMs": 176
+      },
+      {
+        "packed": true,
+        "tokens": 64,
+        "rep": 2,
+        "decodeTokPerS": 43.3,
+        "ttftMs": 179
+      },
+      {
+        "packed": false,
+        "tokens": 64,
+        "rep": 3,
+        "decodeTokPerS": 43.4,
+        "ttftMs": 170
+      },
+      {
+        "packed": true,
+        "tokens": 64,
+        "rep": 3,
+        "decodeTokPerS": 43.5,
+        "ttftMs": 170
+      },
+      {
+        "packed": false,
+        "tokens": 256,
+        "rep": 1,
+        "decodeTokPerS": 39.5,
+        "ttftMs": 169
+      },
+      {
+        "packed": true,
+        "tokens": 256,
+        "rep": 1,
+        "decodeTokPerS": 40,
+        "ttftMs": 168
+      },
+      {
+        "packed": false,
+        "tokens": 256,
+        "rep": 2,
+        "decodeTokPerS": 39.9,
+        "ttftMs": 175
+      },
+      {
+        "packed": true,
+        "tokens": 256,
+        "rep": 2,
+        "decodeTokPerS": 39.6,
+        "ttftMs": 167
+      },
+      {
+        "packed": false,
+        "tokens": 256,
+        "rep": 3,
+        "decodeTokPerS": 39,
+        "ttftMs": 178
+      },
+      {
+        "packed": true,
+        "tokens": 256,
+        "rep": 3,
+        "decodeTokPerS": 39.7,
+        "ttftMs": 178
+      }
+    ]
+  },
+  "round2": {
+    "bundle": "outputs/bench/karume/2026-09-19_22-15-33_k45-1a-packed-r2-bdefe843",
+    "chrome": {
+      "wall": {
+        "qat-packed-off-wall-0": {
+          "english-list": {
+            "decodeTokPerS_median": 95.67,
+            "decodeTokPerS_range": [
+              94.81,
+              95.88
+            ],
+            "ttftMs_median": 39.2
+          },
+          "japanese-list": {
+            "decodeTokPerS_median": 94.68,
+            "decodeTokPerS_range": [
+              91.3,
+              94.71
+            ],
+            "ttftMs_median": 60.3
+          }
+        },
+        "qat-packed-on-wall-0": {
+          "english-list": {
+            "decodeTokPerS_median": 103.26,
+            "decodeTokPerS_range": [
+              100.48,
+              103.74
+            ],
+            "ttftMs_median": 41
+          },
+          "japanese-list": {
+            "decodeTokPerS_median": 104.55,
+            "decodeTokPerS_range": [
+              102.32,
+              105.51
+            ],
+            "ttftMs_median": 68.1
+          }
+        },
+        "qat-packed-on-wall-1": {
+          "english-list": {
+            "decodeTokPerS_median": 103.65,
+            "decodeTokPerS_range": [
+              101.89,
+              103.82
+            ],
+            "ttftMs_median": 41.1
+          },
+          "japanese-list": {
+            "decodeTokPerS_median": 102.86,
+            "decodeTokPerS_range": [
+              100.41,
+              105.53
+            ],
+            "ttftMs_median": 62.7
+          }
+        },
+        "qat-packed-off-wall-1": {
+          "english-list": {
+            "decodeTokPerS_median": 94,
+            "decodeTokPerS_range": [
+              90.53,
+              94.51
+            ],
+            "ttftMs_median": 41.2
+          },
+          "japanese-list": {
+            "decodeTokPerS_median": 95.86,
+            "decodeTokPerS_range": [
+              95.27,
+              96.23
+            ],
+            "ttftMs_median": 85
+          }
+        },
+        "qat-packed-off-wall-2": {
+          "english-list": {
+            "decodeTokPerS_median": 94.48,
+            "decodeTokPerS_range": [
+              94.47,
+              94.89
+            ],
+            "ttftMs_median": 40.8
+          },
+          "japanese-list": {
+            "decodeTokPerS_median": 95.32,
+            "decodeTokPerS_range": [
+              95.14,
+              95.56
+            ],
+            "ttftMs_median": 66.1
+          }
+        },
+        "qat-packed-on-wall-2": {
+          "english-list": {
+            "decodeTokPerS_median": 102.82,
+            "decodeTokPerS_range": [
+              101.2,
+              103.31
+            ],
+            "ttftMs_median": 40.7
+          },
+          "japanese-list": {
+            "decodeTokPerS_median": 102.02,
+            "decodeTokPerS_range": [
+              97.77,
+              102.31
+            ],
+            "ttftMs_median": 61.2
+          }
+        }
+      },
+      "idsIdentical": {
+        "english-list": true,
+        "japanese-list": true
+      },
+      "medianOfMedians": {
+        "off": 95.32,
+        "on": 103.26
+      },
+      "gpuPassTimestamps": {
+        "qat-packed-on-profile-0": {
+          "gpuMsPerToken": {
+            "median": 6.633,
+            "min": 6.392,
+            "max": 6.735
+          },
+          "dispatchPerToken": [
+            1134
+          ],
+          "passesPerToken": [
+            3
+          ]
+        },
+        "qat-packed-off-profile-0": {
+          "gpuMsPerToken": {
+            "median": 7.199,
+            "min": 6.915,
+            "max": 7.257
+          },
+          "dispatchPerToken": [
+            1134
+          ],
+          "passesPerToken": [
+            3
+          ]
+        }
+      },
+      "perKeyCorrected": {
+        "inflationOn": 0.0041384991750583145,
+        "inflationOff": 0.0041056416908459925,
+        "passGpuOn": 6.633472,
+        "passGpuOff": 7.19872,
+        "rows": [
+          {
+            "key": "static_quantize:v1:f32:wg128",
+            "n": 210,
+            "offCorr": 0.689,
+            "onCorr": 0.197,
+            "deltaCorr": -0.491,
+            "ratioRaw": 0.314,
+            "packed": true
+          },
+          {
+            "key": "linear_gemv_parallel:wi2:l32:static-quantize:v1",
+            "n": 20,
+            "offCorr": 0.752,
+            "onCorr": 0.431,
+            "deltaCorr": -0.32,
+            "ratioRaw": 0.616,
+            "packed": true
+          },
+          {
+            "key": "linear_gemv_parallel:wi4g2048:l32:static-quantize:v1",
+            "n": 43,
+            "offCorr": 0.59,
+            "onCorr": 0.431,
+            "deltaCorr": -0.159,
+            "ratioRaw": 0.794,
+            "packed": true
+          },
+          {
+            "key": "linear_gemv_parallel:wi4g4096:l32:static-quantize:v1",
+            "n": 7,
+            "offCorr": 0.108,
+            "onCorr": 0.076,
+            "deltaCorr": -0.032,
+            "ratioRaw": 0.767,
+            "packed": true
+          },
+          {
+            "key": "linear_gemv_parallel:wi4g512:l4:static-quantize:v1",
+            "n": 65,
+            "offCorr": 0.91,
+            "onCorr": 0.904,
+            "deltaCorr": -0.006,
+            "ratioRaw": 0.997,
+            "packed": false
+          },
+          {
+            "key": "rms_norm:v1:f32:lastdim:wg256",
+            "n": 136,
+            "offCorr": 0.539,
+            "onCorr": 0.534,
+            "deltaCorr": -0.005,
+            "ratioRaw": 1,
+            "packed": false
+          },
+          {
+            "key": "rope:v1:half:bshd:f32:wg256",
+            "n": 35,
+            "offCorr": 0.072,
+            "onCorr": 0.068,
+            "deltaCorr": -0.005,
+            "ratioRaw": 0.982,
+            "packed": false
+          },
+          {
+            "key": "attention_state_qk:v1:f32:wg16x16:par:gqa",
+            "n": 7,
+            "offCorr": 0.14,
+            "onCorr": 0.135,
+            "deltaCorr": -0.005,
+            "ratioRaw": 0.974,
+            "packed": false
+          },
+          {
+            "key": "ew:v3:mul:f32>f32:r3:wg256",
+            "n": 108,
+            "offCorr": 0.203,
+            "onCorr": 0.199,
+            "deltaCorr": -0.004,
+            "ratioRaw": 1,
+            "packed": false
+          },
+          {
+            "key": "ew:v3:gelu_tanh:f32>f32:r3:wg256",
+            "n": 70,
+            "offCorr": 0.144,
+            "onCorr": 0.141,
+            "deltaCorr": -0.003,
+            "ratioRaw": 0.998,
+            "packed": false
+          },
+          {
+            "key": "linear_gemv:v1:f32:c32u4:wi2",
+            "n": 1,
+            "offCorr": 0.24,
+            "onCorr": 0.237,
+            "deltaCorr": -0.003,
+            "ratioRaw": 0.987,
+            "packed": false
+          },
+          {
+            "key": "linear_gemv_parallel:wi8:l32:static-quantize:v1",
+            "n": 35,
+            "offCorr": 0.177,
+            "onCorr": 0.176,
+            "deltaCorr": -0.001,
+            "ratioRaw": 1.002,
+            "packed": false
+          },
+          {
+            "key": "attention_state_pv:v1:f32:wg16x16:par:sliding:gqa",
+            "n": 28,
+            "offCorr": 0.131,
+            "onCorr": 0.13,
+            "deltaCorr": -0.001,
+            "ratioRaw": 1,
+            "packed": false
+          },
+          {
+            "key": "strided:v1:f32:r4:wg256",
+            "n": 35,
+            "offCorr": 0.08,
+            "onCorr": 0.079,
+            "deltaCorr": -0.001,
+            "ratioRaw": 1.002,
+            "packed": false
+          },
+          {
+            "key": "state_append:v1:f32:wg256:sliding",
+            "n": 24,
+            "offCorr": 0.044,
+            "onCorr": 0.043,
+            "deltaCorr": -0.001,
+            "ratioRaw": 0.998,
+            "packed": false
+          },
+          {
+            "key": "rms_norm_add:v1:rms_norm:v1:f32:lastdim:wg256:residual-norm:xor-round",
+            "n": 105,
+            "offCorr": 0.546,
+            "onCorr": 0.546,
+            "deltaCorr": 0,
+            "ratioRaw": 1.003,
+            "packed": false
+          },
+          {
+            "key": "linear_gemv_parallel:wi8:l4:static-quantize:v1",
+            "n": 35,
+            "offCorr": 0.18,
+            "onCorr": 0.18,
+            "deltaCorr": 0,
+            "ratioRaw": 1.004,
+            "packed": false
+          },
+          {
+            "key": "linear_gemv_parallel:wi4g512:l32:static-quantize:v1",
+            "n": 30,
+            "offCorr": 0.156,
+            "onCorr": 0.156,
+            "deltaCorr": 0,
+            "ratioRaw": 1.002,
+            "packed": false
+          },
+          {
+            "key": "attention_state_stats:v2:f32:wg256:sliding",
+            "n": 28,
+            "offCorr": 0.114,
+            "onCorr": 0.114,
+            "deltaCorr": 0,
+            "ratioRaw": 1.006,
+            "packed": false
+          },
+          {
+            "key": "rope:v1:half:f32:wg256",
+            "n": 15,
+            "offCorr": 0.024,
+            "onCorr": 0.024,
+            "deltaCorr": 0,
+            "ratioRaw": 1.006,
+            "packed": false
+          },
+          {
+            "key": "attention_state_pv:v1:f32:wg16x16:par:gqa",
+            "n": 7,
+            "offCorr": 0.03,
+            "onCorr": 0.03,
+            "deltaCorr": 0,
+            "ratioRaw": 1.002,
+            "packed": false
+          },
+          {
+            "key": "attention_state_stats:v2:f32:wg256",
+            "n": 7,
+            "offCorr": 0.028,
+            "onCorr": 0.028,
+            "deltaCorr": 0,
+            "ratioRaw": 1.005,
+            "packed": false
+          },
+          {
+            "key": "state_append:v1:f32:wg256",
+            "n": 6,
+            "offCorr": 0.011,
+            "onCorr": 0.011,
+            "deltaCorr": 0,
+            "ratioRaw": 1.007,
+            "packed": false
+          },
+          {
+            "key": "argmax:v2:f32>i32:lastdim:minindex:split-partial:wg256e16",
+            "n": 1,
+            "offCorr": 0.006,
+            "onCorr": 0.006,
+            "deltaCorr": 0,
+            "ratioRaw": 1.018,
+            "packed": false
+          },
+          {
+            "key": "ew:v3:div:f32>f32:r3:wg256",
+            "n": 1,
+            "offCorr": 0.004,
+            "onCorr": 0.004,
+            "deltaCorr": 0,
+            "ratioRaw": 0.994,
+            "packed": false
+          },
+          {
+            "key": "ew:v3:tanh:f32>f32:r3:wg256",
+            "n": 1,
+            "offCorr": 0.004,
+            "onCorr": 0.004,
+            "deltaCorr": 0,
+            "ratioRaw": 0.998,
+            "packed": false
+          },
+          {
+            "key": "rms_norm_add:v1:rms_norm:v1:f32:lastdim:wg256:norm-residual:xor-round",
+            "n": 1,
+            "offCorr": 0.004,
+            "onCorr": 0.004,
+            "deltaCorr": 0,
+            "ratioRaw": 0.987,
+            "packed": false
+          },
+          {
+            "key": "embedding:v1:f32:i32:wg256:wi2",
+            "n": 1,
+            "offCorr": 0.002,
+            "onCorr": 0.002,
+            "deltaCorr": 0,
+            "ratioRaw": 1.034,
+            "packed": false
+          },
+          {
+            "key": "topk:v2:f32+i32:lastdim:desc:minindex:k1:split-merge:wg256",
+            "n": 1,
+            "offCorr": 0.002,
+            "onCorr": 0.002,
+            "deltaCorr": 0,
+            "ratioRaw": 1.006,
+            "packed": false
+          },
+          {
+            "key": "ew:v3:mul:f32>f32:r4:wg256",
+            "n": 1,
+            "offCorr": 0.001,
+            "onCorr": 0.001,
+            "deltaCorr": 0,
+            "ratioRaw": 0.991,
+            "packed": false
+          },
+          {
+            "key": "embedding:v1:f32:i32:wg256",
+            "n": 1,
+            "offCorr": 0.001,
+            "onCorr": 0.001,
+            "deltaCorr": 0,
+            "ratioRaw": 1,
+            "packed": false
+          },
+          {
+            "key": "linear_gemv_parallel:wi2:l2:static-quantize:v1",
+            "n": 40,
+            "offCorr": 0.821,
+            "onCorr": 0.822,
+            "deltaCorr": 0.001,
+            "ratioRaw": 1.002,
+            "packed": false
+          },
+          {
+            "key": "attention_state_qk:v1:f32:wg16x16:par:sliding:gqa",
+            "n": 28,
+            "offCorr": 0.316,
+            "onCorr": 0.317,
+            "deltaCorr": 0.001,
+            "ratioRaw": 1.004,
+            "packed": false
+          },
+          {
+            "key": "linear_gemv:v1:f32:c32u4",
+            "n": 1,
+            "offCorr": 0.131,
+            "onCorr": 0.131,
+            "deltaCorr": 0.001,
+            "ratioRaw": 1.005,
+            "packed": false
+          }
+        ]
+      }
+    },
+    "deno_temperature0": [
+      {
+        "packed": false,
+        "tokens": 64,
+        "rep": 1,
+        "decodeTokPerS": 43.7,
+        "ttftMs": 165
+      },
+      {
+        "packed": true,
+        "tokens": 64,
+        "rep": 1,
+        "decodeTokPerS": 44.7,
+        "ttftMs": 180
+      },
+      {
+        "packed": false,
+        "tokens": 64,
+        "rep": 2,
+        "decodeTokPerS": 43.5,
+        "ttftMs": 172
+      },
+      {
+        "packed": true,
+        "tokens": 64,
+        "rep": 2,
+        "decodeTokPerS": 45,
+        "ttftMs": 173
+      },
+      {
+        "packed": false,
+        "tokens": 64,
+        "rep": 3,
+        "decodeTokPerS": 43.4,
+        "ttftMs": 173
+      },
+      {
+        "packed": true,
+        "tokens": 64,
+        "rep": 3,
+        "decodeTokPerS": 44.6,
+        "ttftMs": 174
+      },
+      {
+        "packed": false,
+        "tokens": 256,
+        "rep": 1,
+        "decodeTokPerS": 39.9,
+        "ttftMs": 177
+      },
+      {
+        "packed": true,
+        "tokens": 256,
+        "rep": 1,
+        "decodeTokPerS": 40.4,
+        "ttftMs": 175
+      },
+      {
+        "packed": false,
+        "tokens": 256,
+        "rep": 2,
+        "decodeTokPerS": 39.7,
+        "ttftMs": 172
+      },
+      {
+        "packed": true,
+        "tokens": 256,
+        "rep": 2,
+        "decodeTokPerS": 40.2,
+        "ttftMs": 171
+      },
+      {
+        "packed": false,
+        "tokens": 256,
+        "rep": 3,
+        "decodeTokPerS": 39.3,
+        "ttftMs": 181
+      },
+      {
+        "packed": true,
+        "tokens": 256,
+        "rep": 3,
+        "decodeTokPerS": 40.4,
+        "ttftMs": 174
+      }
+    ]
+  }
+}

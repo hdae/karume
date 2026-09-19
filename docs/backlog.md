@@ -14,7 +14,7 @@
   10 ms は deno_webgpu の poll ループの sleep（karume 無関係・採否判定は Chrome で）・律速は帯域でも演算でもなく命令数 × 占有率と dispatch 本数・
   「i8 計算」は方向として正（利得 0.9 ms・段 0 の kill 判定が先）・「i8 KV」は速度 0（メモリ項目へ）・WebML 285 tok/s の要因は実行構造（先行投入・presrq・1 pass）。
   順序（research §10）: ⓪ 物差しを Chrome へ + GPU 1 セッションで確定する事実（GEMV 総時間・未帰属 49 dispatch・`per_layer_model_projection` の費用）— **済 2026-09-19（research §13: Chrome 壁 QAT 10.6〜10.8 / 通常 10.0 ms・GPU 7.0〜7.5 / 6.2 ms・非 GPU 3.3〜4.1・GEMV 4.0 ms・未帰属なし・K-51 は kill）** →
-  ① K-45 段 0 — **済 2026-09-19（research §14: 門通過・ただし律速は活性ロード本数で段 1 の形は裁定待ち）** → ② H-28 — **済 2026-09-19（`d1c848e`・opt-in・単独では効かず既定 host のまま・research §15）** → ③ H-27（先行投入）→ ④ K-45 段 1 / 2 → ⑤ 小物（K-48 段 1 / K-49 / K-50 段 1 / K-51）→
+  ① K-45 段 0 — **済 2026-09-19（research §14: 門通過・ただし律速は活性ロード本数で段 1 の形は裁定待ち）** → ② H-28 — **済 2026-09-19（`d1c848e`・opt-in・単独では効かず既定 host のまま・research §15）** → ③ H-27（先行投入）→ ④ K-45 段 1a — **済 2026-09-19（`57416eb` + 追補・opt-in・Chrome +8.3%・research §16）**・次 = i4-fast への宣言 + M2 追試・段 1b（整数内積）は lm_head 形 → ⑤ 小物（K-48 段 1 / K-49 / K-50 段 1 / K-51）→
   ⑥ K-46 の再起票（メモリ項目）。併用後の見込みは Deno 約 7.5 ms（約 130 tok/s）/ Chrome 約 6.5 ms（約 150 tok/s）。
 
 - **QAT レビュー対応の波（2026-09-19）**: 裁定は [ADR 0097 追記 7](decisions/0097-gemma4-qat-integration.md)、
