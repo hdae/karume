@@ -549,3 +549,9 @@ manifest はリポジトリ直下の固定名 **`karume.json`**。
   アプリ配達）は共通層の契約として §5 のまま全取得元に掛かる。§7 の越境参照（`repo` /
   `revision`）は取得元契約の 1 つ（`originFor`）になり、ローカル取得元では明示 mapping と明示
   fallback だけが解決手段になる（ADR 0086 決定 3）。
+
+## Gemma高速quantの融合語彙（2026-09-15）
+
+[ADR 0104](0104-gemma-fast-quant.md)により、sessionへ省略可能な`fuseRmsNormAdd`と`fuseLinearStaticQuantize`のbooleanを追加した。
+falseを維持し、不正な型と未知欄を拒否する。旧manifestの意味は保持するが、新しい欄を持つ配布は対応するreaderを必要とする。
+ホストの投入政策とprefillバケットはsessionの保存語彙に含めない。

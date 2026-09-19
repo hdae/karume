@@ -19,11 +19,11 @@
   大語彙INT8のc16を限定採用（[K-34追試](research/2026-09-12-chrome-gemv-followup.md)）。K並列を明示指定で追加（[K-35](research/2026-09-12-chrome-gemv-parallel.md)）。[M2の実測と採用判断](research/2026-09-13-m2-gemv-adoption.md)から、通常/QAT E2Bに高速化付きの既定quantを定義。
   重みコピーK-33は費用対効果で見送り。次は融合・広い品質比較（Denoの暖機後CPU PLE展開は小さく、GPU転送の帰属は未完）、
   H-23は[M2の全26設定](research/2026-09-13-m2-prefill-adoption.md)を検収し、比較画面のchunk64だけ細分化を初期選択に採用。
-  K-36は[M2追試](research/2026-09-13-rms-subgroup-reduction.md)まで完了。モデル既定への組み込みは、融合のquant選択とホストの投入方針を分けて具体化する。
+  K-36は[M2追試](research/2026-09-13-rms-subgroup-reduction.md)まで完了。融合のquant選択は[ADR 0104](decisions/0104-gemma-fast-quant.md)で統合。ホストの投入方針とprefillバケットのモデル既定への適用判断は残す。
   K-37は[M2追試](research/2026-09-13-gemv-subgroup.md)まで完了。約0.5%の差で既定採用を見送る。
   K-38の並列GEMV subgroup32は任意指定を維持。[M2の80生成](research/2026-09-13-m2-gemv-subgroup-adoption.md)は出力一致、速度改善なしで既定採用を見送る。（当時の画面は既存parallelの2設定20生成。現在の比較は下記attention）。[I4 N12288/K1536のL8比較](research/2026-09-14-i4-lane-comparison.md)は通常E2Bの80生成で約10.7%遅く不採用。M2のGPU費用帰属は残る。Denoは必要な機能が未対応。
   利用者の2026-09-14依頼により、[マージ前レビュー資料と全差分索引](research/2026-09-14-merge-review.md)を準備し、ACTIVE_DESIGNを現況の索引へ整理した。[独立レビューとM2再計測](research/2026-09-14-merge-review-results.md)も完了し、今回の範囲で修正が必要な新規指摘はなし。マージ時は対象headと検証headを再照合する。マージ・push・公開は未実施。未完の最適化を資料準備と同時に完了扱いにしない。
-  [添付参照資料の現行再検証](research/2026-09-14-reference-rope-optimization.md)からK-41のpermuteコピー削減を実装しM2検収済み。[K-42のattention融合](research/2026-09-15-attention-fusion.md)もM2の80生成で出力一致を確認したが利得は無く、任意指定に残す。[K-43の保留候補併用](research/2026-09-15-held-combinations.md)から単独の[linear→SRQ融合](research/2026-09-15-linear-static-quantize-fusion.md)をK-44として統合した。常駐scaleの借用・丸め障壁・元のSRQとの数値比較を検収。[M2のQAT40生成](research/2026-09-15-m2-linear-srq-adoption.md)も検収済み。次はRMS融合等と合わせた高速quant宣言の整理、許可表・明示指定優先の検証、E2Bへの既定適用。同じM2追試は再依頼しない。広い併用は未統合で、gate/up入力共有の費用調査も残る。前回レビュー後の追加差分確認も残る。
+  [添付参照資料の現行再検証](research/2026-09-14-reference-rope-optimization.md)からK-41のpermuteコピー削減を実装しM2検収済み。[K-42のattention融合](research/2026-09-15-attention-fusion.md)もM2の80生成で出力一致を確認したが利得は無く、任意指定に残す。[K-43の保留候補併用](research/2026-09-15-held-combinations.md)から単独の[linear→SRQ融合](research/2026-09-15-linear-static-quantize-fusion.md)をK-44として統合した。常駐scaleの借用・丸め障壁・元のSRQとの数値比較を検収。[M2のQAT40生成](research/2026-09-15-m2-linear-srq-adoption.md)も検収済み。[高速quant宣言と明示上書き](research/2026-09-15-gemma-fast-quant.md)を統合。次は投入政策・prefillバケットの適用判断と、前回レビュー後の追加差分確認。同じM2追試は再依頼しない。広い併用は未統合で、gate/up入力共有の費用調査も残る。前回レビュー後の追加差分確認も残る。
   広いchunk/複数容量への一括適用は見送り。QATのM2/RTX生成差とChromeのGPU Instance消失は原因の切り分けを残す。
   残件は配布 recipe / source 表、長文と広い品質評価。実験資産を公開済みモデルとして扱わない。
   手元の試走は [MiniCPM5 CLI](../examples/minicpm5/README.md) / [Qwen3 CLI](../examples/qwen3/README.md) を使える。
