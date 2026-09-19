@@ -69,11 +69,19 @@ describe("Gemmaのquant実行設定", () => {
         return "parallel";
       },
     };
-    for (const key of ["linearGemvReduce", "fuseRmsNormAdd", "fuseLinearStaticQuantize"]) {
+    // 期待メッセージまで縛るのは、型検査ではなく組合せ検査で落ちる「理由のすり替わり」を
+    // 通さないため（resolveは4種類の異なる理由でthrowする）。
+    const invalid = [
+      ["linearGemvReduce", "linearGemvReduceが不正"],
+      ["fuseRmsNormAdd", "fuseRmsNormAddはbooleanでなければならない"],
+      ["fuseLinearStaticQuantize", "fuseLinearStaticQuantizeはbooleanでなければならない"],
+    ] as const;
+    for (const [key, message] of invalid) {
       for (const value of [null, 0, 1, [], object]) {
         const overrides = {};
-        Object.defineProperty(overrides, key, { value });
-        assertThrows(() => resolve(fast, overrides, "test"), Error);
+        // 実呼び出しが渡すoptionsは列挙可能なプロパティしか持たないので、同じ形で検査する。
+        Object.defineProperty(overrides, key, { value, enumerable: true });
+        assertThrows(() => resolve(fast, overrides, "test"), Error, message);
       }
     }
     assertEquals(conversions, 0);

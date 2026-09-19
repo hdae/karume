@@ -202,6 +202,10 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
                 chunkLength: 32,
                 maxResidentPleBytes: 0,
                 speculative: { k: 3 },
+                // 投機/非投機の厳密一致はsequential席でだけ保証される（docs/limitations.md
+                // 「投機デコード」節）。既定のparallelはdecodeとverifyでQKの縮約順が違い、
+                // 近い値のtokenでargmaxが割れうるので、一致を門にする席へ倒す。
+                stateAttentionReduce: "sequential",
                 onRunDiagnostics: (d, phase) => {
                   const keys = phaseKeys.get(phase.kind) ?? new Set<string>();
                   for (const row of d.lastRunTiming?.entries ?? []) keys.add(row.key);
@@ -227,6 +231,9 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
                       if (event.kind === "token") ids.push(event.id);
                     }
                     const stop = await stream.done;
+                    // 先に停止理由を見る。EOSなどで早く止まると一致比較とは無関係に長さが
+                    // 割れるので、赤の原因が「早期停止」だと読めるようにしておく。
+                    assertEquals(stop.reason, "max-tokens");
                     assertEquals(ids.length, 32);
                     if (speculative === "always") assert((stop.speculation?.cycles ?? 0) > 0);
                     outputs.push(ids);
@@ -251,17 +258,25 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
               gpu.destroy();
             }
           }
-          const heavyPaths = new Set(
-            Object.values(parsed.models.e2b.weights).flatMap((entry) =>
+          // slice(1)なのは、先頭shard = グラフshardがadmissionの入力そのもので、門より前に
+          // 取る契約だから（packages/models/src/hub/components.ts の streamAssets 相 1）。
+          // 門の後にしか触れてはいけないのは2本目以降のshardとassets（tokenizer・PLE sidecar）で、
+          // そちらをまとめてこの集合に入れる。
+          const heavyPaths = new Set([
+            ...Object.values(parsed.models.e2b.weights).flatMap((entry) =>
               Object.values(entry).flatMap((files) => files.shards.slice(1).map((ref) => ref.path))
             ),
-          );
+            ...Object.values(parsed.models.e2b.assets).map((ref) => ref.path),
+          ]);
           assert(heavyPaths.size > 0);
           const requested: string[] = [];
           const noWeightsSource = localDirectory({
             readFile: async (path) => {
               requested.push(path);
-              assert(!heavyPaths.has(path), "不正な実行設定で重みshardを取得している");
+              assert(
+                !heavyPaths.has(path),
+                `不正な実行設定で重みshard・資産を取得している: ${path}`,
+              );
               return await Deno.readFile(`${temp}/${path}`);
             },
           }, { label: "invalid-gemma-quant" });
