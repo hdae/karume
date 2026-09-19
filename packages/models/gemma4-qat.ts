@@ -35,6 +35,7 @@ export type {
   Gemma4EstimateOptions,
   Gemma4PipelineConfig,
   Gemma4PleReadOptions,
+  Gemma4PleResidency,
   Gemma4PleShardSource,
   Gemma4PrefillProgress,
   Gemma4RopeLayerSpec,

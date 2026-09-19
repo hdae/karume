@@ -572,6 +572,41 @@ const readHeaderPrefix = async (
   return prefix;
 };
 
+/**
+ * shard の表（metadata + `values` / `scales`）を検査して view を返す**共有の門**。
+ *
+ * MUST: GPU 常駐席（`./ple-gpu.ts`）もこの 1 実装を通す。資産世代の突合（{@link
+ * assertShardMetadata}）と dtype / shape の突合を席ごとに書くと、GPU 常駐で読むときだけ
+ * 別形式・別世代の sidecar が通り、形も dtype も合ったまま別 token の行を引く（ADR 0085
+ * 決定 5 の沈黙誤値）。
+ *
+ * NOTE: `export` はこの共有のためで、`mod.ts` / サブパス面には出さない（ADR 0008）。
+ */
+export const gemma4PleShardViews = (
+  tables: {
+    readonly metadata: ReadonlyMap<string, string>;
+    readonly tensors: ReadonlyMap<string, TensorView>;
+  },
+  index: Gemma4PleIndex,
+  shard: Gemma4PleShard,
+): { readonly values: TensorView; readonly scales: TensorView } =>
+  assertShardTables(tables, index, shard);
+
+/**
+ * 区間読みできる読み口から safetensors のヘッダ区間だけを 2 段で読む**共有の門**
+ * （{@link readHeaderPrefix} の公開名）。
+ *
+ * MUST: GPU 常駐席もこの 1 実装を通す — 壊れたヘッダ長の clamp（{@link readHeaderPrefix} の
+ * MUST）を 2 実装持つと、片方だけが 1TiB の読みを出して `SafetensorsError` の文言に到達
+ * できなくなる。
+ */
+export const readGemma4PleHeaderPrefix = (
+  range: NonNullable<Gemma4PleShardSource["range"]>,
+  bytes: number,
+  file: string,
+  options: Gemma4PleReadOptions = {},
+): Promise<Uint8Array<ArrayBuffer>> => readHeaderPrefix(range, bytes, file, options);
+
 /** shard のヘッダだけを解いて行の位置を得る（**shard ごとに 1 度**）。 */
 const readShardLayout = async (
   range: ShardRange,

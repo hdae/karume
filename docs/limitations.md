@@ -1522,3 +1522,24 @@ Deno 2.9.6では必要機能が未提供。Chromeでの実走とM2の追試は�
 `stateAttentionReduce: "parallel-fused"` は[ADR 0102](decisions/0102-state-attention-stats-pv-fusion.md)の任意指定。
 M<=8・静的列上限<=1024のstates形だけを融合し、対象外とreadonlyは従来parallel経路を維持する。
 RTX/Chromeとカーネル数値の検収を行い、M2の性能検収は残る。モデルの既定・quant宣言は変更していない。
+
+## gemma4: PLE の GPU 常駐席が要るもの（2026-09-19・opt-in）
+
+`pleResidency: "gpu"` は PLE sidecar の量子化バイト列を**単一の storage 束縛**として GPU に置く
+（[ADR 0085 追記](decisions/0085-ple-host-gather.md)）。既定は `"host"` で、従来の挙動・数値・
+token 列は 1 つも変わらない。
+
+必要な束縛上限は配布形で決まる。E2B は QAT（i4）1,174,405,120 B・通常 Gemma 4（i8）
+2,348,810,240 B、E4B QAT（i2）は 704,643,072 B で、`maxStorageBufferBindingSize` と
+`maxBufferSize` の**どちらか**が足りない device ではロードが不足バイト数を添えて失敗する。
+黙ってホスト経路へ退避しない。参照機（RTX 3080 Ti / Vulkan）の上限は 2,147,483,644 B なので、
+**通常 Gemma 4 E2B はこの機ではこの席を使えない**（QAT E2B / E4B は載る）。
+
+併用できないノブが 3 つある（どれもロード時に拒否する）。`maxResidentPleBytes` は GPU 常駐では
+1 度も引かれない予算、投機デコード（`speculative`）は drafter の per-layer 入力がこの席の範囲外、
+`acquireGpu({ gpuTiming: true })` は計測中に batch を開けないためである。
+
+速度の採否はまだ付いていない。Deno CLI の decode は deno_webgpu の 10 ms/token 床を含むので
+判定に使えず（参照機の 32 token greedy で host 730〜740 ms / gpu 741〜751 ms と差が床に埋もれる）、
+Chrome・M2 での計測は未検収である。GPU 常駐は先行投入（perf-ledger H-27）の前提としても置いた席で、
+単独の効き幅はこの席の採否とは別に測る。

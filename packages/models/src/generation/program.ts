@@ -179,6 +179,18 @@ export type GenerationProgramSpec = {
   readonly capacitySymbol: string;
   /** ホスト由来の per-chunk 入力（無い配布形は省略）。 */
   readonly derivedInputs?: DerivedRunInputs;
+  /**
+   * **Session 側が常駐入力として差す**グラフ入力の名前（gemma4 の PLE GPU 常駐席 — ADR 0085
+   * 追記〈GPU 常駐席〉）。
+   *
+   * 宣言するのは名前だけで、値は作らない（作り手は run を発行する側 = `Session` の包み）。
+   * それでも席が要るのは「グラフ入力の完全被覆」を setup で見るためで、ここに書かないと
+   * **ホストが作らない入力**が「結線されていない」として落ちる。
+   *
+   * MUST: {@link DerivedRunInputs.names} と重ねない（同じ入力を 2 つの作り手が名乗る形）。
+   * 重複は {@link assertInputCoverage} が落とす。
+   */
+  readonly residentInputs?: readonly string[];
 };
 
 /**
@@ -503,6 +515,7 @@ export const createGenerationProgram = (spec: GenerationProgramSpec): Generation
     spec.inputIds,
     spec.lastRow,
     ...(spec.derivedInputs?.names ?? []),
+    ...(spec.residentInputs ?? []),
   ]);
   assertSymbols(graph, spec.capacitySymbol);
 
@@ -523,5 +536,6 @@ export const createGenerationProgram = (spec: GenerationProgramSpec): Generation
     stopTokens: [...spec.stopTokens],
     capacitySymbol: spec.capacitySymbol,
     ...(spec.derivedInputs === undefined ? {} : { derivedInputs: spec.derivedInputs }),
+    ...(spec.residentInputs === undefined ? {} : { residentInputs: [...spec.residentInputs] }),
   };
 };

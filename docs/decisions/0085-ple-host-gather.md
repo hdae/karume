@@ -224,3 +224,47 @@ HTTP Rangeを使うChromeのQAT生成が約2〜5%速くなった。Denoローカ
 公開の関数引数・グラフ・保存資産・数値契約は変わらない。既定で既存予算の未使用部分を少量使うことと、
 内部診断が行の常駐 byte を含むことが変更点である。CPU で予算・LRU・重複・並行読取り・中断・破棄と
 I2/I4 の固定参照との bit 一致を検査し、実 GPU では通常/QAT・E2B/E4B の生成列と全体検証を確認する。
+
+## 追記（2026-09-19 — GPU 常駐席: opt-in で sidecar を GPU に置き、gather も GPU 内で行う）
+
+perf-ledger H-28。決定 3（遅延ロード + LRU）と決定 6（PLE は通常のグラフ入力）に対する
+**opt-in の例外**を 1 つ置く。既定は従来どおり `"host"` で、宣言した呼び手だけが GPU 常駐になる
+（利用者裁定 2026-09-19 = 案 A「単一束縛 + 束縛上限の引き上げ + opt-in 席」）。
+
+- **席**: `Gemma4PipelineOptions.pleResidency: "host" | "gpu"`（既定 `"host"`）。通常 Gemma と
+  QAT の共通 pipeline が受ける。不正値・併用できないノブは資産を読む前に fail loudly。
+- **何を消すか**: run ごとのホスト逆量子化と `per_layer_inputs` の writeBuffer（decode
+  35,840 B/token = 約 0.25 ms、prefill 768 行で 27.5 MB）。先行投入（H-27 段 ②）の硬い前提でもある。
+- **機構**: `embedding` → `mul embed_scale` の 2 ノードだけの小さな IR を別 Session で持ち、
+  target の run と**同じ batch へ先に enqueue** して出力を常駐テンソルへ書き、target はそれを
+  `per_layer_inputs` の常駐入力として受ける（writeBuffer を出さない）。temperature 0 の decode は
+  greedy 出力の batch に相乗りするのでフェンスは増えない。prefill と診断付き decode（通常 run）は
+  gather 用の batch を 1 本余分に払う。prefill も decode も GPU gather を通る（片方だけの席にしない）。
+- **重みの形**: 重みは `[tokens × layers, dim]`・添字は `id × layers + layer`。1 行 = 1 層ぶんに
+  なるので、sidecar の `scales[rows, layers]` がそのまま行 scale の並びになり、**i8 / i2 の行
+  scale も i4 の `group_size = dim` の group scale も同じ平坦添字**で引ける。逆量子化は
+  `embedding` の `f32(q) × scale` 1 回、`embed_scale` はその後の別ノード — 決定 4 の 2 段丸めと
+  同じ順序・同じ丸め点である（`ple.probe.safetensors` との u32 一致で門を張る）。
+- **ロード**: 決定 2（ホストで 1 本の巨大 ArrayBuffer に連結しない）を保つため、sidecar の shard を
+  1 本ずつ読んで**ランタイムの shard 逐次面**（ADR 0070 決定 3 / 0090 の piece）へ流す。ランタイムが
+  piece を親 1 本ぶんの GPU バッファへ行オフセット位置に `queue.writeBuffer` する。合成 shard の器は
+  1 本を使い回すので、ホスト RAM のピークは「sidecar の最大 shard 1 本 + 器 1 本」に収まる。
+  companion scale は piece 1 と同じ shard に置く契約（ADR 0090 決定 1）なので、**scale だけは先に
+  全量（E2B で 35 MiB）を集める** — 区間読みできる読み口なら shard あたり数 MB の小読みで済み、
+  持たない読み口では sidecar を 1 度余分に読む。piece 1 は先頭 1 行に切って graph shard へ同居させる。
+- **常駐量と束縛上限**: `values` は分割しない 1 本のバッファで、QAT E2B（i4）1,174,405,120 B・
+  QAT E4B（i2）704,643,072 B・通常 Gemma 4 E2B（i8）2,348,810,240 B。`scales` は f32 で
+  E2B 36,700,160 B。`acquireGpu` はアダプタ実測値をそのまま `requiredLimits` に要求する
+  （`planRequiredLimits`）ので、device 取得側に足すものは無く、**ロード時に
+  `maxStorageBufferBindingSize` / `maxBufferSize` と突き合わせて足りなければ fail loudly** する。
+  黙ってホスト経路へ退避しない。参照機（RTX 3080 Ti / Vulkan）の上限は 2,147,483,644 B で、
+  通常 Gemma 4 E2B の i8 sidecar はこの席を使えない（QAT の i4 / i2 は載る）。
+- **見積り**: 常駐 PLE と gather Session のぶんは `estimateSessionMemory()` の `auxiliaryBytes`
+  （小出力 decode の補助 Session と同じ欄）に載り、`peakAccountedBytes` にも加わる。
+- **未対応の組み合わせ**（どれも fail loudly）: `maxResidentPleBytes`（GPU 常駐では引かれない）/
+  投機デコード（drafter の per-layer 入力は範囲外）/ `gpuTiming`（計測中は batch を開けない）。
+- **検収**: `packages/models/tests/e2e_gemma4_ple_gpu_test.ts` が ①golden（torch の 35 表経路）と
+  u32 一致 ②ホスト `ple.gather` と u32 一致 ③QAT E2B の 16 token greedy 生成 id 列が `"host"` と
+  一致、を見る。CPU 側は `gemma_ple_gpu_test.ts`（席の受理・gather IR の形・合成コンテナの突合）。
+  **速度の採否はまだ付いていない** — Deno CLI の decode は deno_webgpu の 10 ms/token 床を含むので
+  判定に使えず、M2 / Chrome の計測は未検収である。

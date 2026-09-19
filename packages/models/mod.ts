@@ -176,6 +176,11 @@ export type { Gemma4PleShardSource } from "./src/gemma/ple.ts";
  */
 export type { Gemma4PleReadOptions } from "./src/gemma/ple.ts";
 /**
+ * PLE sidecar の置き場（`Gemma4PipelineOptions.pleResidency` の値域 — 既定 `"host"`。
+ * `"gpu"` は量子化バイト列を GPU に常駐させ gather も GPU 内で行う opt-in の席。`./gemma` を参照）。
+ */
+export type { Gemma4PleResidency } from "./src/gemma/ple-gpu.ts";
+/**
  * 多ターンの会話を持ち回る中間層（`chat` と `sequence` の間 — 会話の履歴を持ち、KV を継ぎ、
  * 容量が足りないターンは送る前に切り詰める。既定の切り詰めは `dropOldestTurns` =
  * 最古の user / assistant の対を落とす。`./gemma` を参照）。

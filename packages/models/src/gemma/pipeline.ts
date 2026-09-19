@@ -123,6 +123,12 @@ import {
   parseGemma4PleIndex,
 } from "./ple.ts";
 import {
+  assertGemma4PleResidency,
+  createGemma4PleResident,
+  type Gemma4PleResidency,
+  type Gemma4PleResident,
+} from "./ple-gpu.ts";
+import {
   GEMMA4_ROPE_LAYER_TYPES,
   GEMMA4_ROPE_PARTS,
   gemma4QatRopeInputs,
@@ -269,6 +275,24 @@ export type Gemma4PipelineOptions = {
    * 保存では shard を追い出さない。予算を絞ると行の再利用が減る場合がある（ADR 0085）。
    */
   readonly maxResidentPleBytes?: number;
+  /**
+   * PLE sidecar をどこに置くか（既定 `"host"` = 現行そのまま・ADR 0085 追記〈GPU 常駐席〉）。
+   *
+   * `"gpu"` は sidecar の量子化バイト列を**ロード時に 1 度だけ** GPU へ上げ、run ごとの
+   * `per_layer_inputs` を GPU 内 gather で作る（ホストの逆量子化と writeBuffer が消える —
+   * decode で約 0.25 ms/token）。prefill も decode も同じ経路を通る。
+   *
+   * MUST: 単一束縛なので、values のバイト数が `maxStorageBufferBindingSize` /
+   * `maxBufferSize` に収まらない device では **fail loudly**（黙ってホスト経路へ退避しない）。
+   * 量は配布形で決まる — QAT E2B（i4）は 1.09GiB・QAT E4B（i2）は 672MiB・通常 Gemma 4 E2B
+   * （i8）は 2.19GiB である。
+   *
+   * MUST: ホスト側の行キャッシュ（{@link Gemma4PipelineOptions.maxResidentPleBytes}）とは
+   * **併用できない**（GPU 常駐では 1 度も引かれない予算になる）。投機デコード
+   * （{@link Gemma4PipelineOptions.speculative}）と GPU 時間診断（`acquireGpu({ gpuTiming: true })`）
+   * との併用も未対応で、どれも fail loudly で断る。
+   */
+  readonly pleResidency?: Gemma4PleResidency;
   /**
    * 固定長 prefill chunk の行数（省略時は配布形の宣言 {@link Gemma4PipelineConfig.chunkLength}）。
    *
@@ -719,8 +743,18 @@ type Gemma4State = {
    * どちらも {@link buildGemma4Program} の 1 回の返り値なので「片方だけ差し替えた」形は書けず、
    * 解放口を持たないと常駐ぶん（{@link Gemma4PipelineOptions.maxResidentPleBytes}）が
    * プロセス寿命まで残る。
+   *
+   * GPU 常駐席（{@link Gemma4PipelineOptions.pleResidency} = `"gpu"`）では**組まない** —
+   * ホスト側の行キャッシュを 1 度も引かないので、席だけ作ると「使われない LRU」が残る。
    */
-  readonly ple: Gemma4Ple;
+  readonly ple?: Gemma4Ple;
+  /**
+   * PLE の GPU 常駐（{@link Gemma4PipelineOptions.pleResidency} = `"gpu"` のときだけ）。
+   *
+   * MUST: dispose は **target Session より後**（target の bind group がこの常駐テンソルを
+   * 掴んでいる — 焼き込み参照が残っている間の解放は runtime が fail loudly で断る）。
+   */
+  readonly pleGpu?: Gemma4PleResident;
   readonly tokenizer: GemmaTokenizer;
   readonly config: Gemma4PipelineConfig;
   /**
@@ -1069,6 +1103,37 @@ const assertSpeculative = (
 };
 
 /**
+ * PLE の置き場を確定する（**資産を 1 バイトも読む前**に同期で落とす — ADR 0085 追記）。
+ *
+ * MUST: 併用できないノブはここで断る。どれも「指定は黙って無視される値ではない」形の誤りで、
+ * 通すと「GPU 常駐にしたのに速くならない」「予算を渡したのに効かない」が例外も警告も無いまま
+ * 残る（{@link speculativeSetup} の drafter 不在と同じ流儀）。
+ *
+ * NOTE: `export` は門を直接叩くテストのため（`mod.ts` / サブパス面には出さない — ADR 0008）。
+ */
+export const resolveGemma4PleResidency = (
+  where: string,
+  options: Gemma4PipelineOptions,
+): Gemma4PleResidency => {
+  if (options.pleResidency === undefined) return "host";
+  const residency = assertGemma4PleResidency(where, options.pleResidency);
+  if (residency === "host") return residency;
+  if (options.maxResidentPleBytes !== undefined) {
+    throw new Error(
+      `${where}: pleResidency: "gpu" では maxResidentPleBytes が効かない` +
+        `（GPU 常駐ではホスト側の行キャッシュを 1 度も引かない）`,
+    );
+  }
+  if (options.speculative !== undefined) {
+    throw new Error(
+      `${where}: pleResidency: "gpu" と speculative は併用できない` +
+        `（drafter の per-layer 入力は GPU 常駐席の範囲外 — ADR 0085 追記〈GPU 常駐席〉）`,
+    );
+  }
+  return residency;
+};
+
+/**
  * この会話で投機を張るなら、生成面へ渡す DI 一式を組む（{@link Gemma4SequenceOptions.speculative} /
  * {@link Gemma4ChatOptions.speculative} の解決 — chat と sequence が共有する 1 本）。
  *
@@ -1196,10 +1261,11 @@ const buildGemma4Program = (
   assets: Gemma4SidecarAssets,
   options: Gemma4PipelineOptions,
   admission: GemmaFamilyAdmission,
+  residency: Gemma4PleResidency,
 ): {
   readonly wiring: GenerationWiring;
   readonly tokenizer: GemmaTokenizer;
-  readonly ple: Gemma4Ple;
+  readonly ple?: Gemma4Ple;
 } => {
   const { config, vocabSize, capacitySymbol, component } = admitted;
   const entry = gemmaEntryName(admission.family);
@@ -1219,14 +1285,17 @@ const buildGemma4Program = (
     );
   }
   // ③ PLE sidecar の行数（この突合は `createGemma4Ple` が持つ — 同じ検査を 2 実装持たない）。
-  const ple = createGemma4Ple({
-    index: assets.pleIndex,
-    openShard: assets.openPleShard,
-    vocabSize,
-    ...(options.maxResidentPleBytes === undefined
-      ? {}
-      : { maxResidentBytes: options.maxResidentPleBytes }),
-  });
+  // GPU 常駐席ではホスト gather を組まず、同じ突合を `createGemma4PleResident` が通す。
+  const ple = residency === "host"
+    ? createGemma4Ple({
+      index: assets.pleIndex,
+      openShard: assets.openPleShard,
+      vocabSize,
+      ...(options.maxResidentPleBytes === undefined
+        ? {}
+        : { maxResidentBytes: options.maxResidentPleBytes }),
+    })
+    : undefined;
 
   const chunkLength = assertChunkLength(
     options.chunkLength ?? config.chunkLength,
@@ -1256,15 +1325,23 @@ const buildGemma4Program = (
     // ホスト由来の per-chunk 入力の席に PLE gather と RoPE の cos / sin を差す（ADR 0085 / 本波）。
     // `options` は PLE へそのまま降ろす — shard 1 本 250MiB 級の読みが中断の届かない区間に
     // なるのを避ける（rope は同期の計算なので中断の窓を作らない）。
-    derivedInputs: {
-      names: [PER_LAYER_INPUTS, ...gemma4RopeInputNames()],
-      derive: async (ids, positions, deriveOptions) => ({
-        [PER_LAYER_INPUTS]: await ple.gather(ids, deriveOptions),
-        ...ropeInputs(config.rope, positions),
-      }),
-    },
+    // GPU 常駐席では `per_layer_inputs` の作り手が Session 側（常駐入力）へ移るので、
+    // ホスト由来の席からは外して被覆だけを `residentInputs` で宣言する。
+    derivedInputs: ple === undefined
+      ? {
+        names: gemma4RopeInputNames(),
+        derive: (_ids, positions) => Promise.resolve(ropeInputs(config.rope, positions)),
+      }
+      : {
+        names: [PER_LAYER_INPUTS, ...gemma4RopeInputNames()],
+        derive: async (ids, positions, deriveOptions) => ({
+          [PER_LAYER_INPUTS]: await ple.gather(ids, deriveOptions),
+          ...ropeInputs(config.rope, positions),
+        }),
+      },
+    ...(ple === undefined ? { residentInputs: [PER_LAYER_INPUTS] } : {}),
   });
-  return { wiring, tokenizer, ple };
+  return { wiring, tokenizer, ...(ple === undefined ? {} : { ple }) };
 };
 
 /**
@@ -1595,6 +1672,9 @@ class GemmaPipeline {
     if (options.speculative !== undefined) {
       assertSpeculative(where, options.speculative);
     }
+    // MUST: 席の指定は**資産を 1 バイトも読む前**に見る（`#build` でも同じ関数を通るが、
+    // そちらは 3.7GiB のロードの後である）。
+    resolveGemma4PleResidency(where, options);
     const source = toManifestSource(
       ref,
       where,
@@ -1752,6 +1832,8 @@ class GemmaPipeline {
           `（Gemma4Assets に drafter の shard 列が無い — 投機は fromPretrained から組む）`,
       );
     }
+    // 席の指定は資産を 1 バイトも開く前に見る（`loadPretrained` と同じ位置づけ）。
+    resolveGemma4PleResidency(where, options);
     const config = parseGemma4PipelineConfig(input.config);
     if (input.model.length === 0) {
       throw new Error(
@@ -1805,11 +1887,14 @@ class GemmaPipeline {
     assets: Gemma4SidecarAssets,
     options: Gemma4PipelineOptions,
   ): Promise<Gemma4State> {
+    const entry = gemmaEntryName(admission.family);
+    const residency = resolveGemma4PleResidency(entry, options);
     const { wiring, tokenizer, ple } = buildGemma4Program(
       admitted,
       assets,
       options,
       admission,
+      residency,
     );
     // 投機の `k` は 2 つの消費者（生成と見積り）が同じ値を見るように**ここで 1 度**解決する。
     const speculativeK = options.speculative === undefined
@@ -1842,12 +1927,37 @@ class GemmaPipeline {
         ? {}
         : { linearGemvRowsThreadTarget: options.linearGemvRowsThreadTarget }),
     };
+    // MUST: GPU 時間診断とは併用できない（`beginBatch` は計測が有効な device では開けない —
+    // gather を target と同じ batch へ積む機構そのものが成り立たない）。
+    if (residency === "gpu" && gpu.gpuTimingEnabled) {
+      throw new Error(
+        `${entry}: pleResidency: "gpu" は gpuTiming が有効な device では使えない` +
+          `（GPU 内 gather は batch へ積むが、計測中は batch を開けない — ADR 0021）`,
+      );
+    }
     let session: Session | undefined;
+    let pleGpu: Gemma4PleResident | undefined;
     try {
+      // 束縛上限の不足は**重み 1.5GiB のアップロードより前**に落とす（graph-first と同じ並び）。
+      pleGpu = residency === "host" ? undefined : await createGemma4PleResident({
+        gpu,
+        index: assets.pleIndex,
+        openShard: (file) => assets.openPleShard(file),
+        vocabSize: admitted.vocabSize,
+        inputName: PER_LAYER_INPUTS,
+        idsName: INPUT_IDS,
+        // 流しうる物理行数（decode 1 + prefill バケット + chunk 長）— 出力常駐の上界。
+        rows: [1, ...wiring.chunkBuckets, wiring.chunkLength],
+        entry,
+      });
       session = await admitted.component.createSession(gpu, sessionOptions);
-      const greedyOutput = !gpu.gpuTimingEnabled && options.onRunDiagnostics === undefined
-        ? createGemmaGreedyOutput(gpu, session, wiring.logits, wiring.vocabSize)
-        : undefined;
+      // GPU 常駐席では greedy を使わない run（prefill・診断付き decode）も包みを通す —
+      // `per_layer_inputs` を差す場所がここしかない。greedy そのものを使うかは生成面が
+      // `onRun` の有無で決めるので、包みの有無とは独立である。
+      const greedyOutput =
+        pleGpu !== undefined || (!gpu.gpuTimingEnabled && options.onRunDiagnostics === undefined)
+          ? createGemmaGreedyOutput(gpu, session, wiring.logits, wiring.vocabSize, pleGpu)
+          : undefined;
       const drafter = await GemmaPipeline.#buildDrafter(
         admitted,
         session,
@@ -1855,7 +1965,7 @@ class GemmaPipeline {
         sessionOptions,
       );
       return {
-        entry: gemmaEntryName(admission.family),
+        entry,
         gpu,
         ownsGpu,
         session,
@@ -1864,7 +1974,8 @@ class GemmaPipeline {
         graph: admitted.component.graph,
         wiring,
         program: generationProgramFace(wiring),
-        ple,
+        ...(ple === undefined ? {} : { ple }),
+        ...(pleGpu === undefined ? {} : { pleGpu }),
         tokenizer,
         config: admitted.config,
         ...(drafter === undefined ? {} : { drafter }),
@@ -1882,11 +1993,12 @@ class GemmaPipeline {
       };
     } catch (error) {
       // 構築に失敗したら誰も解放できなくなるので、ここで返す。順序は借り手（drafter は
-      // 張れていない = 借用計数は既に戻っている）→ 貸し手 → 内部で取った GPU。
+      // 張れていない = 借用計数は既に戻っている）→ 貸し手 → PLE の GPU 常駐 → 内部で取った GPU。
       await disposeSteps([
         () => {
           if (session !== undefined) return session.dispose();
         },
+        () => pleGpu?.dispose(),
         () => {
           if (ownsGpu) gpu.destroy();
         },
@@ -2225,7 +2337,11 @@ class GemmaPipeline {
       stateAttentionReduce: this.#state.stateAttentionReduce,
       ...budget,
     });
-    const auxiliaryBytes = this.#state.greedyOutput?.extraBytes;
+    // 小出力 decode の補助 Session と、PLE を GPU 常駐にした席のぶん（ADR 0085 追記）。
+    // どちらも持たない pipeline では欄ごと省く（0 を名乗らない）。
+    const auxiliary = (this.#state.greedyOutput?.extraBytes ?? 0) +
+      (this.#state.pleGpu?.extraBytes ?? 0);
+    const auxiliaryBytes = auxiliary === 0 ? undefined : auxiliary;
     const target = {
       ...baseTarget,
       ...(auxiliaryBytes === undefined ? {} : { auxiliaryBytes }),
@@ -2339,11 +2455,13 @@ class GemmaPipeline {
         () => this.#state.greedyOutput?.dispose(),
         () => this.#state.drafter?.session.dispose(),
         () => this.#state.session.dispose(),
+        // MUST: target Session の後（常駐入力の焼き込み参照が返ってから解放する）。
+        () => this.#state.pleGpu?.dispose(),
         () => {
           if (this.#state.ownsGpu) this.#state.gpu.destroy();
         },
         // 順序は GPU の後（走行中の生成は既に畳んであるので、ここで引き手はもう居ない）。
-        () => this.#state.ple.dispose(),
+        () => this.#state.ple?.dispose(),
       ]);
     });
     return this.#disposal;

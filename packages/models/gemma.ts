@@ -52,6 +52,13 @@ export type { Gemma4PleShardSource } from "./src/gemma/ple.ts";
 /** {@link Gemma4PleShardSource} の読み 1 回へ透過するノブ（`signal` 1 本・best-effort）。 */
 export type { Gemma4PleReadOptions } from "./src/gemma/ple.ts";
 /**
+ * PLE sidecar の置き場（{@link Gemma4PipelineOptions.pleResidency} の値域 — 既定 `"host"`）。
+ *
+ * `"gpu"` は量子化バイト列をロード時に 1 度だけ GPU へ上げ、run ごとの `per_layer_inputs` を
+ * GPU 内 gather で作る opt-in の席である（ADR 0085 追記〈GPU 常駐席〉）。
+ */
+export type { Gemma4PleResidency } from "./src/gemma/ple-gpu.ts";
+/**
  * 多ターンの会話を持ち回る中間層（`chat` と `sequence` の間 — ADR 0083 追記 2026-09-02）。
  *
  * `chat` は 1 ターン = 1 sequence で過去 turn を毎回描き直し（会話が伸びるほど prefill が

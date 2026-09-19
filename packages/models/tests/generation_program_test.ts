@@ -346,6 +346,27 @@ Deno.test("createGenerationProgram: グラフ入力の被覆を両方向で見�
   );
 });
 
+Deno.test("createGenerationProgram: 常駐入力の席も被覆に数える（作り手が Session 側の入力）", () => {
+  // 値を作るのは Session の包みなので derivedInputs には載らない（PLE の GPU 常駐席）。
+  const wiring = createGenerationProgram(
+    specOf({ derivedInputs: undefined, residentInputs: [DERIVED] }),
+  );
+  assertEquals(wiring.residentInputs, [DERIVED]);
+  assertEquals(wiring.derivedInputs, undefined);
+  // 同じ入力を 2 つの作り手が名乗る形は重複として落とす。
+  assertThrows(
+    () =>
+      createGenerationProgram(
+        specOf({
+          residentInputs: [DERIVED],
+          derivedInputs: { names: [DERIVED], derive: () => Promise.resolve({}) },
+        }),
+      ),
+    Error,
+    "結線した入力名に重複がある",
+  );
+});
+
 Deno.test("createGenerationProgram: 記号は入力 shape か容量記号のどちらかで決まること", () => {
   // C（state スロットの容量記号）は入力 shape に現れない = 容量記号が唯一の源。
   assertThrows(
