@@ -51,3 +51,7 @@ exporterとrecipeのpytestは両方を実行した。`tools/export-recipes`が28
 
 新しい配布を使うChrome・CLIの実走と、公開済み0.12.0のreaderが新欄を拒否することの実機確認は**未実施**。
 この節の結果は自動検証だけを表し、上の「自動検証」節が挙げた実機確認を済ませたという意味ではない。
+
+レビュー指摘の修正後（`870c4a8`）に同じ RTX 3080 Ti で再走し、`deno task verify`は
+`ok | 2977 passed (846 steps) | 0 failed | 5 ignored (2 steps) (30m39s)`、pytestは`tools/export-recipes`が
+2807 passed / 4 skipped、`tools/exporter`が3227 passed / 1 skipped。件数の増分は追加したテストの分。
