@@ -220,7 +220,7 @@ GEMMA4_WEIGHTS: Mapping[str, Mapping[str, WeightFiles]] = {
     GEMMA4_DRAFTER_ROLE: {GEMMA4_DRAFTER_DTYPE: WeightFiles(GEMMA4_DRAFTER_ROLE)},
 }
 
-#: 同じ格納系列に参照加算とGEMV並列加算を用意する（ADR 0098）。
+#: 同じ格納系列に参照加算・GEMV並列加算・RMS融合を用意する（ADR 0098 / 0104）。
 #: 明示したi4の意味を保持し、既定quantだけを高速化付きへ向ける。
 GEMMA4_QUANTS: Mapping[str, Any] = {
     GEMMA4_DTYPE: {

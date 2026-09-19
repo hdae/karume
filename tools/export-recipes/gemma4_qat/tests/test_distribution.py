@@ -4,8 +4,8 @@ from copy import deepcopy
 
 import pytest
 
-from gemma4_qat.config import checkpoint_name, series_name
-from gemma4_qat.distribution import assert_qat_graph, qat_quants, repo_name
+from gemma4_qat.config import CHECKPOINTS, checkpoint_name, series_name
+from gemma4_qat.distribution import QAT_DEFAULT_QUANT, assert_qat_graph, qat_quants, repo_name
 from karume.dist import DistError, assert_quant_presentation
 
 
@@ -92,3 +92,16 @@ class TestQatQuants:
     def test_unknown_model_is_rejected(self):
         with pytest.raises(ValueError, match="未対応"):
             qat_quants("12b")
+
+
+class TestQatDefaultQuant:
+    @pytest.mark.parametrize(("model", "expected"), [("e2b", "i4-fast"), ("e4b", "i4")])
+    def test_measured_series_takes_the_fused_default(self, model, expected):
+        assert QAT_DEFAULT_QUANT[model] == expected
+
+    @pytest.mark.parametrize("model", ["e2b", "e4b"])
+    def test_default_names_a_quant_the_model_offers(self, model):
+        assert QAT_DEFAULT_QUANT[model] in qat_quants(model)
+
+    def test_every_checkpoint_declares_a_default(self):
+        assert set(QAT_DEFAULT_QUANT) == set(CHECKPOINTS)

@@ -80,6 +80,12 @@ def assert_qat_graph(graph: Mapping[str, Any]) -> None:
         raise DistError("QAT の共有 head または非量子化 projection の本数が違う")
 
 
+#: 系列ごとの既定 quant。実測で検収した席だけを既定にするので導出できず、宣言が要る
+#: （ADR 0104）。`qat_plan` の中の分岐に書くと `qat_quants` のキーと二重管理になり、
+#: 片方だけ書き換えると既定が存在しない quant を指すため、純データとして 1 箇所に置く。
+QAT_DEFAULT_QUANT: Mapping[str, str] = {"e2b": "i4-fast", "e4b": "i4"}
+
+
 def qat_quants(model: str) -> Mapping[str, Any]:
     """参照quantを保持し、検収済みE2Bに並列・融合の定義を足す（ADR 0104）。"""
     checkpoint_name(model)
@@ -166,7 +172,7 @@ def qat_plan(series_dir: Path, model: str) -> ModelPlan:
         weights={"model": {"i4": WeightFiles("model")}},
         assets=gemma4_assets(index),
         quants=quant_modes,
-        default_quant="i4-fast" if model == "e2b" else "i4",
+        default_quant=QAT_DEFAULT_QUANT[model],
         pipeline_config={
             "chunkLength": 32,
             "maxChunkLength": reference["maxChunkLength"],
