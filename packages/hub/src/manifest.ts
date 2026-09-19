@@ -149,14 +149,22 @@ const LINEAR_COMPUTE: readonly LinearCompute[] = ["f32", "a8", "f16"];
 const ATTENTION_COMPUTE: readonly AttentionCompute[] = ["f32", "f16", "a8"];
 const SCORE_STORAGE: readonly ScoreStorage[] = ["f32", "f16"];
 const LINEAR_GEMV_REDUCE = ["sequential", "parallel"] as const;
-const SESSION_KEYS: readonly string[] = [
-  "linearCompute",
-  "attentionCompute",
-  "attentionScoreStorage",
-  "linearGemvReduce",
-  "fuseRmsNormAdd",
-  "fuseLinearStaticQuantize",
-];
+/**
+ * `session` のキー allowlist — `Required<SessionSpec>` の**網羅表**として持つ。
+ *
+ * MUST: 網羅で縛るのは、allowlist と型と `parseSession` の 3 点がずれると配布形が宣言した
+ * ノブが黙って捨てられるため（`@karume/models` の `WRITERS` と同じ門）。`SessionSpec` に
+ * 席の無いキーを足すと余分な欄として、`SessionSpec` にだけノブを足すと欄の不足として、
+ * どちらもこの宣言が型検査で落ちる。
+ */
+const SESSION_KEYS: Readonly<Record<keyof Required<SessionSpec>, true>> = {
+  linearCompute: true,
+  attentionCompute: true,
+  attentionScoreStorage: true,
+  linearGemvReduce: true,
+  fuseRmsNormAdd: true,
+  fuseLinearStaticQuantize: true,
+};
 
 export type LinearCompute = "f32" | "a8" | "f16";
 export type AttentionCompute = "f32" | "f16" | "a8";
@@ -651,7 +659,7 @@ const readBoolean = (
 const parseSession = (fail: Fail, raw: unknown, where: string): SessionSpec => {
   if (raw === undefined) return {};
   if (!isRecord(raw)) throw fail.format(`${where}.session: オブジェクトでない`);
-  assertAllowedKeys(fail, raw, SESSION_KEYS, `${where}.session`);
+  assertAllowedKeys(fail, raw, Object.keys(SESSION_KEYS), `${where}.session`);
   const at = `${where}.session`;
   const linearCompute = readEnum(fail, raw, "linearCompute", LINEAR_COMPUTE, at);
   const attentionCompute = readEnum(fail, raw, "attentionCompute", ATTENTION_COMPUTE, at);

@@ -837,21 +837,43 @@ Deno.test("parseManifest: quantのGEMV加算指定を保持し、未指定と不
   }
 });
 
-Deno.test("parseManifest: 融合の真偽値を保持し、未指定・不正値と区別する", () => {
+Deno.test("parseManifest: 融合の真偽値を保持し、未指定・不正値と区別する", async (t) => {
   for (const key of ["fuseRmsNormAdd", "fuseLinearStaticQuantize"]) {
     for (const value of [false, true]) {
-      const session = { [key]: value };
-      const manifest = parseManifest(withModel({
-        quants: { q: { weights: { net: "f16" }, session } },
-      }));
-      assertEquals(manifest.models.m.quants.q.session, session);
+      await t.step(`${key}=${value}`, () => {
+        const session = { [key]: value };
+        const manifest = parseManifest(withModel({
+          quants: { q: { weights: { net: "f16" }, session } },
+        }));
+        assertEquals(manifest.models.m.quants.q.session, session);
+      });
     }
     for (const value of [null, 0, 1, "true", "false", [], {}]) {
-      assertThrows(() =>
-        parseManifest(withModel({
-          quants: { q: { weights: { net: "f16" }, session: { [key]: value } } },
-        })), HubError);
+      // 段名に値を綴るのは、assertThrowsの既定メッセージが対象キー・値を出さないため。
+      await t.step(`${key}=${JSON.stringify(value)}は拒否`, () => {
+        assertThrows(
+          () =>
+            parseManifest(withModel({
+              quants: { q: { weights: { net: "f16" }, session: { [key]: value } } },
+            })),
+          HubError,
+        );
+      });
     }
   }
-  assertEquals(parseManifest(withModel()).models.m.quants.q.session, {});
+  // 実配布のi4-fastと同じ形（GEMV指定と融合2欄の同時宣言）を1件固定する。
+  await t.step("linearGemvReduceと同時に宣言できる", () => {
+    const session = {
+      linearGemvReduce: "parallel",
+      fuseRmsNormAdd: true,
+      fuseLinearStaticQuantize: true,
+    } as const;
+    const manifest = parseManifest(withModel({
+      quants: { q: { weights: { net: "f16" }, session } },
+    }));
+    assertEquals(manifest.models.m.quants.q.session, session);
+  });
+  await t.step("未宣言なら欄ごと無い", () => {
+    assertEquals(parseManifest(withModel()).models.m.quants.q.session, {});
+  });
 });
