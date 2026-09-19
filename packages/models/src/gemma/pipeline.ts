@@ -37,7 +37,12 @@
 
 import { resolveGemmaSessionOptions } from "./session-options.ts";
 import { createGemmaGreedyOutput, type GemmaGreedyOutput } from "./greedy-output.ts";
-import { admitGemma4Qat, assertGemma4QatModel, assertGemma4QatPle } from "./qat.ts";
+import {
+  admitGemma4Qat,
+  assertGemma4QatModel,
+  assertGemma4QatPle,
+  type Gemma4QatModel,
+} from "./qat.ts";
 import { closeableGenerator } from "../concurrency/closeable-generator.ts";
 import {
   acquireGpu,
@@ -142,6 +147,25 @@ import { GemmaTokenizer } from "./text/tokenizer.ts";
 import { type Gemma4ChatMessage, gemma4ChatPrompt, gemma4StopTokens } from "./text/chat.ts";
 
 type GemmaFamily = "gemma4" | "gemma4-qat";
+
+/**
+ * family ごとの入口の名前（例外の接頭辞と `where` の前半を**ここ 1 箇所**から出す）。
+ *
+ * MUST: 共通基底が投げる文言も family の名前を名乗る — `Gemma4QatPipeline.fromPretrained` を
+ * 叩いた利用者が `Gemma4Pipeline: ...` を受け取ると、どの入口の話か辿れない。
+ */
+const gemmaEntryName = (family: GemmaFamily): string =>
+  family === "gemma4" ? "Gemma4Pipeline" : "Gemma4QatPipeline";
+
+/**
+ * family と、QAT だけが持つ model 名（{@link admitGemma4Qat} が**グラフから確定**させた値）。
+ *
+ * MUST: model 名を後段で再導出しない（判別規則が 2 実装に割れると、モデルが増えたときに
+ * 片方だけが古い写像を使い続ける）。`Gemma4QatModel` に欄が増えれば型検査が欠落を教える。
+ */
+type GemmaFamilyAdmission =
+  | { readonly family: "gemma4" }
+  | { readonly family: "gemma4-qat"; readonly model: Gemma4QatModel };
 
 /**
  * グラフ入力の名前（正本は `export_product.py` の定数）。
@@ -659,6 +683,12 @@ export type Gemma4ChatStream = AsyncIterable<string> & {
 
 /** {@link Gemma4Pipeline} の内部状態（公開面には出さない）。 */
 type Gemma4State = {
+  /**
+   * 構築に使った入口の名前（{@link gemmaEntryName}）。構築後に投げる文言の接頭辞がここから出る。
+   *
+   * MUST: family そのものではなく**名前**を持つ（この層から先で family 分岐を増やさない）。
+   */
+  readonly entry: string;
   readonly greedyOutput?: GemmaGreedyOutput;
   readonly gpu: GpuContext;
   readonly ownsGpu: boolean;
@@ -1104,21 +1134,24 @@ export const speculativeSetup = (
 export const assertChunkLength = (
   chunkLength: number,
   config: Gemma4PipelineConfig,
+  // NOTE: 既定が通常 Gemma の名前なのは、この門を**直接叩く検査**が入口を持たないため。
+  // 実経路（`buildGemma4Program` / `estimateSessionMemory`）は必ず family の名前を渡す。
+  entry: string = gemmaEntryName("gemma4"),
 ): number => {
   if (!Number.isSafeInteger(chunkLength) || chunkLength < 2) {
     throw new Error(
-      `Gemma4Pipeline: chunkLength ${chunkLength} が 2 以上の整数でない`,
+      `${entry}: chunkLength ${chunkLength} が 2 以上の整数でない`,
     );
   }
   if (chunkLength > config.maxChunkLength) {
     throw new Error(
-      `Gemma4Pipeline: chunkLength ${chunkLength} が配布形の宣言 maxChunkLength` +
+      `${entry}: chunkLength ${chunkLength} が配布形の宣言 maxChunkLength` +
         ` ${config.maxChunkLength} を超えた（記号 M を焼いた trace 範囲の外）`,
     );
   }
   if (chunkLength > config.maxPosition) {
     throw new Error(
-      `Gemma4Pipeline: chunkLength ${chunkLength} が maxPosition ${config.maxPosition} を超えた`,
+      `${entry}: chunkLength ${chunkLength} が maxPosition ${config.maxPosition} を超えた`,
     );
   }
   return chunkLength;
@@ -1138,12 +1171,14 @@ export const assertChunkLength = (
 export const assertGemma4ChunkBuckets = (
   chunkBuckets: readonly number[],
   chunkLength: number,
+  // NOTE: 既定の理由は {@link assertChunkLength} と同じ（門を直接叩く検査のため）。
+  entry: string = gemmaEntryName("gemma4"),
 ): readonly number[] => {
   try {
     assertChunkBuckets(chunkBuckets, chunkLength);
   } catch (cause) {
     throw new Error(
-      `Gemma4Pipeline: ${cause instanceof Error ? cause.message : String(cause)}`,
+      `${entry}: ${cause instanceof Error ? cause.message : String(cause)}`,
       { cause },
     );
   }
@@ -1160,24 +1195,26 @@ const buildGemma4Program = (
   admitted: Gemma4Admission,
   assets: Gemma4SidecarAssets,
   options: Gemma4PipelineOptions,
-  family: GemmaFamily,
+  admission: GemmaFamilyAdmission,
 ): {
   readonly wiring: GenerationWiring;
   readonly tokenizer: GemmaTokenizer;
   readonly ple: Gemma4Ple;
 } => {
   const { config, vocabSize, capacitySymbol, component } = admitted;
-  if (family === "gemma4-qat") {
-    assertGemma4QatPle(component.graph, assets.pleIndex);
+  const entry = gemmaEntryName(admission.family);
+  if (admission.family === "gemma4-qat") {
+    // model 名は admission が確定させた値をそのまま使う（層数から引き直さない）。
+    assertGemma4QatPle(admission.model, component.graph, assets.pleIndex);
   }
-  const ropeInputs = family === "gemma4-qat" ? gemma4QatRopeInputs : gemma4RopeInputs;
+  const ropeInputs = admission.family === "gemma4-qat" ? gemma4QatRopeInputs : gemma4RopeInputs;
   const tokenizer = new GemmaTokenizer(
     parseGemmaTokenizerAsset(assets.tokenizer),
   );
   // ① tokenizer が生成しうる id と ② 主 embedding の vocab 行数。
   if (tokenizer.maxTokenId >= vocabSize) {
     throw new Error(
-      `Gemma4Pipeline: tokenizer の最大 token id ${tokenizer.maxTokenId} が` +
+      `${entry}: tokenizer の最大 token id ${tokenizer.maxTokenId} が` +
         ` 主 embedding の vocab 行数 ${vocabSize} の外（別の語彙で焼かれた組み合わせ）`,
     );
   }
@@ -1194,6 +1231,7 @@ const buildGemma4Program = (
   const chunkLength = assertChunkLength(
     options.chunkLength ?? config.chunkLength,
     config,
+    entry,
   );
   const wiring = createGenerationProgram({
     graph: component.graph,
@@ -1206,6 +1244,7 @@ const buildGemma4Program = (
     chunkBuckets: assertGemma4ChunkBuckets(
       options.chunkBuckets ?? defaultChunkBuckets(chunkLength),
       chunkLength,
+      entry,
     ),
     maxPosition: config.maxPosition,
     capacity: config.capacity,
@@ -1249,11 +1288,12 @@ const gemma4ManifestConfig = (
   readonly quantName: string;
   readonly quant: Quant;
 } => {
+  const where = gemmaEntryName(family);
   const modelName = selection.model ?? manifest.defaultModel;
   if (family === "gemma4-qat") assertGemma4QatModel(modelName);
   if (!Object.hasOwn(manifest.models, modelName)) {
     throw new Error(
-      `Gemma4Pipeline: model '${modelName}' は manifest に無い` +
+      `${where}: model '${modelName}' は manifest に無い` +
         `（利用可能: ${manifest.available.models.join(" / ")}）`,
     );
   }
@@ -1261,20 +1301,20 @@ const gemma4ManifestConfig = (
   const { name, major } = entry.pipeline;
   if (name !== family) {
     throw new Error(
-      `Gemma4Pipeline: manifest の pipeline が '${name}/${major}'` +
+      `${where}: manifest の pipeline が '${name}/${major}'` +
         `（'${family}/${GEMMA4_PIPELINE_MAJOR}' が必要）`,
     );
   }
   if (major !== GEMMA4_PIPELINE_MAJOR) {
     throw new Error(
-      `Gemma4Pipeline: pipeline '${name}/${major}' の major に未対応` +
+      `${where}: pipeline '${name}/${major}' の major に未対応` +
         `（この実装が読めるのは ${family}/${GEMMA4_PIPELINE_MAJOR}）`,
     );
   }
   const quantName = selection.quant ?? entry.defaultQuant;
   if (!Object.hasOwn(entry.quants, quantName)) {
     throw new Error(
-      `Gemma4Pipeline: quant '${quantName}' は manifest に無い` +
+      `${where}: quant '${quantName}' は manifest に無い` +
         `（利用可能: ${entry.available.quants.join(" / ")}）`,
     );
   }
@@ -1547,9 +1587,8 @@ class GemmaPipeline {
     ref: string | HubRepoRef | DistributionSource,
     options: Gemma4FromPretrainedOptions = {},
   ): Promise<Gemma4State> {
-    const where = family === "gemma4"
-      ? "Gemma4Pipeline.fromPretrained"
-      : "Gemma4QatPipeline.fromPretrained";
+    const entry = gemmaEntryName(family);
+    const where = `${entry}.fromPretrained`;
     if (family === "gemma4-qat" && options.speculative !== undefined) {
       throw new Error(`${where}: QAT の MTP は未対応`);
     }
@@ -1599,12 +1638,16 @@ class GemmaPipeline {
           config,
           options.speculative === undefined ? undefined : open(DRAFTER),
         );
-        if (family === "gemma4-qat") {
-          admitGemma4Qat(
-            admitted.component.graph,
-            selection.model ?? loaded.manifest.defaultModel,
-          );
-        }
+        // MUST: グラフから確定した model 名を**捨てずに運ぶ**（PLE 門が層数から引き直さない）。
+        const admission: GemmaFamilyAdmission = family === "gemma4-qat"
+          ? {
+            family,
+            model: admitGemma4Qat(
+              admitted.component.graph,
+              selection.model ?? loaded.manifest.defaultModel,
+            ),
+          }
+          : { family };
         // 配布形が宣言した `requiredLimits` は**重み shard を取る前**にここで見る
         // （ADR 0089 決定 5 — 共有 GPU ならその limits、自前で取る経路はアダプタ実測値）。
         // 他 7 家族と違って席が閉包側にあるのは、{@link admitGemma4} が構築オプションを
@@ -1612,9 +1655,9 @@ class GemmaPipeline {
         await assertRequiredLimitsBeforeDownload(
           quant.requiredLimits,
           options.gpu,
-          `Gemma4Pipeline: quant '${quantName}'`,
+          `${entry}: quant '${quantName}'`,
         );
-        return { ...admitted, quantSession };
+        return { ...admitted, quantSession, admission };
       },
       {
         ...hubOptions,
@@ -1680,7 +1723,7 @@ class GemmaPipeline {
       };
     };
     return await GemmaPipeline.#build(
-      family,
+      admitted.admission,
       admitted,
       {
         tokenizer: assetBytes(where, assets, TOKENIZER_ASSET),
@@ -1700,9 +1743,7 @@ class GemmaPipeline {
     input: Gemma4Assets,
     options: Gemma4PipelineOptions = {},
   ): Promise<Gemma4State> {
-    const where = family === "gemma4"
-      ? "Gemma4Pipeline.fromAssets"
-      : "Gemma4QatPipeline.fromAssets";
+    const where = `${gemmaEntryName(family)}.fromAssets`;
     // MUST: この面に drafter の席は無い（{@link Gemma4Assets} が持つのは製品グラフ 1 本）。
     // 黙って投機なしで組むと「指定したのに効かない」形になるので fail loudly で断る。
     if (options.speculative !== undefined) {
@@ -1735,8 +1776,11 @@ class GemmaPipeline {
     // 持たない（バイト列と `config` だけ）ので、宣言そのものへ到達できない。実寸の検査は
     // Session 構築時の `assertWeightsWithinLimits`（ADR 0089 決定 1）が受け持つ。
     const admitted = admitGemma4(open(MODEL), config);
-    if (family === "gemma4-qat") admitGemma4Qat(admitted.component.graph);
-    return await GemmaPipeline.#build(family, admitted, {
+    // model 名はグラフと PLE の構成から判別する（この面は manifest を持たない）。
+    const admission: GemmaFamilyAdmission = family === "gemma4-qat"
+      ? { family, model: admitGemma4Qat(admitted.component.graph) }
+      : { family };
+    return await GemmaPipeline.#build(admission, admitted, {
       tokenizer: input.tokenizer,
       pleIndex: parsePleIndexAsset(input.pleIndex),
       openPleShard: input.openPleShard,
@@ -1756,7 +1800,7 @@ class GemmaPipeline {
    * 段 2 の裁定「束ね口は context」）。順序は target が先で、drafter はその埋め込み表を借りる。
    */
   static async #build(
-    family: GemmaFamily,
+    admission: GemmaFamilyAdmission,
     admitted: Gemma4Admission,
     assets: Gemma4SidecarAssets,
     options: Gemma4PipelineOptions,
@@ -1765,7 +1809,7 @@ class GemmaPipeline {
       admitted,
       assets,
       options,
-      family,
+      admission,
     );
     // 投機の `k` は 2 つの消費者（生成と見積り）が同じ値を見るように**ここで 1 度**解決する。
     const speculativeK = options.speculative === undefined
@@ -1811,6 +1855,7 @@ class GemmaPipeline {
         sessionOptions,
       );
       return {
+        entry: gemmaEntryName(admission.family),
         gpu,
         ownsGpu,
         session,
@@ -1914,7 +1959,7 @@ class GemmaPipeline {
     options: Gemma4ChatOptions,
   ): Gemma4ChatStream {
     if (this.#disposal !== undefined) {
-      throw new Error("Gemma4Pipeline: dispose 済みでは生成できない");
+      throw new Error(`${this.#state.entry}: dispose 済みでは生成できない`);
     }
     // 受理集合は同期に落とす（GPU にも順番待ちにも入る前）。
     const prompt = gemma4ChatPrompt(this.#state.tokenizer, messages);
@@ -1973,7 +2018,7 @@ class GemmaPipeline {
         // ランタイムが受け付けはしない（dispose 済み Session）が、真因から遠い**runtime の
         // 文言**で落ちるため、ここで**発行時と同じ pipeline の文言**へ揃える。
         if (disposed()) {
-          throw new Error("Gemma4Pipeline: dispose 済みでは生成できない");
+          throw new Error(`${state.entry}: dispose 済みでは生成できない`);
         }
         release = await acquire();
         sequence = await createGenerationSequence({
@@ -2047,7 +2092,7 @@ class GemmaPipeline {
     options: Gemma4SequenceOptions = {},
   ): Promise<GenerationSequence> {
     if (this.#disposal !== undefined) {
-      throw new Error("Gemma4Pipeline: dispose 済みでは sequence を作れない");
+      throw new Error(`${this.#state.entry}: dispose 済みでは sequence を作れない`);
     }
     const state = this.#state;
     const speculative = speculativeSetup(state, options.speculative);
@@ -2065,7 +2110,7 @@ class GemmaPipeline {
     // 塞げる窓 — runtime 側 `executor.ts` の `#createGenerationContext` と同型）。
     if (this.#disposal !== undefined) {
       await inner.dispose();
-      throw new Error("Gemma4Pipeline: dispose 済みでは sequence を作れない");
+      throw new Error(`${state.entry}: dispose 済みでは sequence を作れない`);
     }
     // 正しく返された sequence は追跡から外す（外さないと、多ターン UI が会話ごとに作って
     // 畳んでも Set が単調増加し、`dispose` が破棄済みの実体を全数もう一度 await する）。
@@ -2127,20 +2172,21 @@ class GemmaPipeline {
    * 同時には走らないうえ、この形の必要量は `k` にも `capacity` にも依らない小さな定数である。
    */
   estimateSessionMemory(options: Gemma4EstimateOptions = {}): AdmissionReport {
-    const { wiring, graph, gpu, drafter } = this.#state;
+    const { wiring, graph, gpu, drafter, entry } = this.#state;
     const capacity = options.capacity ?? wiring.capacity;
     const chunkLength = assertChunkLength(
       options.chunkLength ?? wiring.chunkLength,
       this.#state.config,
+      entry,
     );
     if (!Number.isSafeInteger(capacity) || capacity < chunkLength) {
       throw new Error(
-        `Gemma4Pipeline: capacity ${capacity} が chunkLength ${chunkLength} 未満`,
+        `${entry}: capacity ${capacity} が chunkLength ${chunkLength} 未満`,
       );
     }
     if (capacity > wiring.maxPosition) {
       throw new Error(
-        `Gemma4Pipeline: capacity ${capacity} が maxPosition ${wiring.maxPosition} を超えた`,
+        `${entry}: capacity ${capacity} が maxPosition ${wiring.maxPosition} を超えた`,
       );
     }
     // MUST: Session に渡したのと同じ予算を渡す（片方だけ既定に落ちると、報告のピークが実際の
@@ -2151,6 +2197,9 @@ class GemmaPipeline {
     // MUST: 渡す（states 形 attention のノード内一時は行ブロック枚数がこの上限だけで決まるので、
     // 省くと estimator が fail loudly する — 既定値で埋めない）。
     const maxStorageBufferBindingSize = gpu.limits.maxStorageBufferBindingSize;
+    // state スロット単体の上限は 2 本とも見る（実構築 `GenerationContext.create` と同じ門 —
+    // 片方だけ渡すと「起動時には数字が出て最初のターンで落ちる」容量が見積りを通る）。
+    const maxBufferSize = gpu.limits.maxBufferSize;
     // verify の R は k+1・物理行数 M は sequence が流す形と同じ（バケットへ丸めた行数 —
     // `chunkLength: k+1` を名乗ると k < 3 で実 run より小さい形を見積る）。
     const rows = (this.#state.speculativeK ?? GEMMA4_DRAFT_STEPS) + 1;
@@ -2172,6 +2221,7 @@ class GemmaPipeline {
         }),
       },
       maxStorageBufferBindingSize,
+      maxBufferSize,
       stateAttentionReduce: this.#state.stateAttentionReduce,
       ...budget,
     });
@@ -2195,6 +2245,7 @@ class GemmaPipeline {
           bindings: { [wiring.capacitySymbol]: capacity },
         },
         maxStorageBufferBindingSize,
+        maxBufferSize,
         ...budget,
       },
     );

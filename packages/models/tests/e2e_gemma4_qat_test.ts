@@ -1,7 +1,13 @@
 /** 固定 QAT の公開入口と共通会話層の結線を検収する。品質全般の検査ではない（ADR 0097）。 */
-import { assert, assertEquals, assertRejects } from "@std/assert";
+import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
+import { parseManifest, resolveFiles } from "@karume/hub";
 import { denoDirectory } from "@karume/hub/deno";
-import { Gemma4ChatSession, Gemma4QatPipeline } from "../gemma4-qat.ts";
+import {
+  type Gemma4Assets,
+  Gemma4ChatSession,
+  Gemma4QatPipeline,
+  parseGemma4PipelineConfig,
+} from "../gemma4-qat.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
 const root = new URL("../../../models/karume-gemma4-qat/", import.meta.url);
@@ -114,6 +120,48 @@ for (const model of ["e2b", "e4b"] as const) {
             "4",
           );
         });
+        await t.step("capacityの上書きが見積りへ降り、宣言の外は拒否する", () => {
+          // 数はリテラルで持たない（配布形を焼き直すと chunkLength / capacity が動く）。
+          const { chunkLength, capacity, maxPosition } = pipeline.program;
+          const smaller = Math.floor(capacity / 2);
+          assert(smaller >= chunkLength, `capacity ${capacity} が半分に割れない`);
+          const implicit = pipeline.estimateSessionMemory();
+          assertEquals(
+            implicit,
+            pipeline.estimateSessionMemory({ chunkLength, capacity }),
+            "既定引数が配布形の宣言を使っていない",
+          );
+          // 恒真でないことの対: 容量を減らせば state のバイト数は減る。
+          assert(
+            pipeline.estimateSessionMemory({ capacity: smaller }).resident.stateBytes <
+              implicit.resident.stateBytes,
+            "容量を減らしても state のバイト数が動かない",
+          );
+          assertThrows(
+            () => pipeline.estimateSessionMemory({ capacity: chunkLength - 1 }),
+            Error,
+            `capacity ${chunkLength - 1} が chunkLength ${chunkLength} 未満`,
+          );
+          assertThrows(
+            () => pipeline.estimateSessionMemory({ capacity: maxPosition + 1 }),
+            Error,
+            `capacity ${maxPosition + 1} が maxPosition ${maxPosition} を超えた`,
+          );
+        });
+        await t.step("chatのcapacityはsequenceへ降りる（既定へ黙って縮退しない）", async () => {
+          // 降ろし忘れは既定でも動くので**例外にならない** — 受理集合の外を渡して落ちることで
+          // 降りていることを見る。落ちるのは発行時ではなく最初の `next()`。
+          const { chunkLength } = pipeline.program;
+          const stream = pipeline.chat([{ role: "user", content: "hi" }], {
+            maxNewTokens: 4,
+            capacity: chunkLength - 1,
+          });
+          await assertRejects(
+            () => stream.text(),
+            Error,
+            `capacity ${chunkLength - 1} が chunkLength ${chunkLength} を下回る`,
+          );
+        });
         await t.step("同じ容量の会話を作り直してもstateが累積しない", () => {
           assert(states.length > 0);
           // contextCount は現存数でなく累計。解放は同容量の residentBytes で検査する。
@@ -122,6 +170,72 @@ for (const model of ["e2b", "e4b"] as const) {
         });
         await pipeline.dispose();
         await assertRejects(() => pipeline.sequence(), Error, "dispose");
+      } finally {
+        await pipeline.dispose();
+      }
+    },
+  });
+}
+
+/**
+ * 取得済みバイト列から組む面（ADR 0097 追記 6 の公開入口のもう一方）。
+ *
+ * `fromPretrained` の Session と同時に張ると重みが 2 重に常駐するので、別テストにして
+ * 順に走らせる（Deno のテストは既定で直列）。
+ */
+const qatAssets = async (model: "e2b" | "e4b"): Promise<Gemma4Assets> => {
+  // `parseManifest` は**生のテキスト**を受ける（上限バイト数を自分で見るため）。
+  const manifest = parseManifest(await Deno.readTextFile(new URL("karume.json", root)));
+  const files = resolveFiles(manifest, { model, weights: ["model"] });
+  const readRef = async (key: string): Promise<Uint8Array<ArrayBuffer>> => {
+    const ref = files[key];
+    if (ref === undefined) {
+      throw new Error(
+        `test: 資産 '${key}' が配布形の表に無い（${Object.keys(files).join(" / ")}）`,
+      );
+    }
+    return await Deno.readFile(new URL(ref.path, root));
+  };
+  return {
+    config: parseGemma4PipelineConfig(manifest.models[model].pipelineConfig),
+    // 並びは manifest の宣言順（先頭がグラフ shard）。
+    model: await Promise.all(
+      Object.keys(files).filter((key) => key.startsWith("model[")).map(readRef),
+    ),
+    tokenizer: await readRef("tokenizer"),
+    pleIndex: await readRef("ple_index"),
+    openPleShard: (file) => {
+      const ref = files[file];
+      if (ref === undefined) {
+        throw new Error(`test: PLE shard '${file}' が配布形の表に無い`);
+      }
+      return Promise.resolve({
+        bytes: ref.size,
+        // NOTE: `Deno.readFile` が返す配列は tight（offset 0・buffer 長 = ファイル長）。
+        readAll: async () => (await Deno.readFile(new URL(ref.path, root))).buffer,
+      });
+    },
+  };
+};
+
+for (const model of ["e2b", "e4b"] as const) {
+  Deno.test({
+    name: `gemma4-qat ${model}: fromAssets も同じ構築と応答を通る（実GPU）`,
+    ignore: !available || !GPU_AVAILABLE,
+    fn: async () => {
+      const pipeline = await Gemma4QatPipeline.fromAssets(await qatAssets(model), {
+        maxResidentPleBytes: 0,
+      });
+      try {
+        // model 名は manifest ではなくグラフと PLE の構成から判別される面なので、
+        // 同じ短文で fromPretrained と同じ応答になることを見る。
+        assertEquals(
+          await pipeline.chat([{
+            role: "user",
+            content: "What is 17 + 28? Reply with only the number.",
+          }], { maxNewTokens: 8, sampler: { temperature: 0 } }).text(),
+          "45",
+        );
       } finally {
         await pipeline.dispose();
       }

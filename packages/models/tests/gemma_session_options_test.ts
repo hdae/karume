@@ -1,5 +1,6 @@
 import { assertEquals, assertThrows } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
+import type { SessionSpec } from "@karume/hub";
 import { resolveGemmaSessionOptions as resolve } from "../src/gemma/session-options.ts";
 
 describe("Gemmaのquant実行設定", () => {
@@ -60,6 +61,32 @@ describe("Gemmaのquant実行設定", () => {
       }, "test"),
       { linearGemvReduce: "parallel", fuseLinearStaticQuantize: true },
     );
+  });
+  it("SessionSpecの全キーが許可表か拒否パスのどちらかに現れる", () => {
+    // hubのSESSION_KEYSとmodelsのWRITERSは`Required<SessionSpec>`の網羅表なので、ノブが
+    // 増えれば型検査が落ちる。Gemmaだけは手書きの文字列比較3本（ADR 0104の「3欄だけ」）
+    // なので型検査が落ちず、追随漏れは実行時の拒否でしか見えない。ここは全キーを埋めた
+    // spec（キーが増えればこの宣言が型検査で落ちる）から、1キーずつ通る／落ちるを確かめる。
+    const full: Required<SessionSpec> = {
+      linearCompute: "f16",
+      attentionCompute: "f16",
+      attentionScoreStorage: "f16",
+      linearGemvReduce: "sequential",
+      fuseRmsNormAdd: false,
+      fuseLinearStaticQuantize: false,
+    };
+    const accepted = ["linearGemvReduce", "fuseRmsNormAdd", "fuseLinearStaticQuantize"];
+    const rejected: string[] = [];
+    for (const key of Object.keys(full) as (keyof typeof full)[]) {
+      const spec = { [key]: full[key] } satisfies SessionSpec;
+      if (accepted.includes(key)) {
+        assertEquals(resolve(spec, {}, "test"), spec);
+        continue;
+      }
+      assertThrows(() => resolve(spec, {}, "test"), Error, `session.${key}は未対応`);
+      rejected.push(key);
+    }
+    assertEquals([...accepted, ...rejected].sort(), Object.keys(full).sort());
   });
   it("不正な明示値をquantの値で置き換えず、値の文字列変換も呼ばない", () => {
     let conversions = 0;

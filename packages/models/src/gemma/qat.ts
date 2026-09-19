@@ -5,6 +5,19 @@ import type { Gemma4PleIndex } from "./ple.ts";
 type Graph = ModelComponent["graph"];
 export type Gemma4QatModel = "e2b" | "e4b";
 
+/**
+ * モデル → PLE sidecar の格納型（TS 側の正本）。
+ *
+ * MUST: 層数など別の鍵から導き直さない — 判別規則が 2 実装に割れると、3 つ目のモデルが
+ * 増えたとき片方だけが古い写像を使い続ける。`Gemma4QatModel` に欄を足せば型検査が欠落を
+ * 教える。一次情報は上流 `QuantizedEmbedding.num_bits`（recipe の `ple.py` が `i{bits}` を
+ * 作る）で、ここはその期待値の綴り 1 箇所である。
+ */
+const PLE_STORAGE: Record<Gemma4QatModel, "i2" | "i4"> = { e2b: "i4", e4b: "i2" };
+
+/** PLE の 1 層あたりの次元（`per_layer_inputs` の shape[3]）。 */
+const PLE_DIM = 256;
+
 export const assertGemma4QatModel = (model: string): Gemma4QatModel => {
   if (model !== "e2b" && model !== "e4b") {
     throw new Error(`Gemma4QatPipeline: 未対応 model '${model}'`);
@@ -18,14 +31,25 @@ export const admitGemma4Qat = (
 ): Gemma4QatModel => {
   const shape = graph.inputs.find((input) => input.name === "per_layer_inputs")
     ?.shape;
-  const model = shape?.[2] === 35 ? "e2b" : shape?.[2] === 42 ? "e4b" : undefined;
-  const hidden = graph.values[graph.outputs[1]]?.shape[2];
-  if (
-    model === undefined || shape?.[3] !== 256 ||
-    hidden !== (model === "e2b" ? 1536 : 2560)
-  ) {
+  if (shape === undefined) {
+    throw new Error("Gemma4QatPipeline: グラフ入力 per_layer_inputs が無い");
+  }
+  const model = shape[2] === 35 ? "e2b" : shape[2] === 42 ? "e4b" : undefined;
+  if (model === undefined) {
     throw new Error(
-      "Gemma4QatPipeline: E2B/E4B の層数・PLE次元・hidden幅が必要",
+      `Gemma4QatPipeline: per_layer_inputs の層数 ${shape[2]} が E2B 35 / E4B 42 でない`,
+    );
+  }
+  if (shape[3] !== PLE_DIM) {
+    throw new Error(
+      `Gemma4QatPipeline: per_layer_inputs の PLE 次元 ${shape[3]} が ${PLE_DIM} でない`,
+    );
+  }
+  const hidden = graph.values[graph.outputs[1]]?.shape[2];
+  const expectedHidden = model === "e2b" ? 1536 : 2560;
+  if (hidden !== expectedHidden) {
+    throw new Error(
+      `Gemma4QatPipeline: hidden 幅 ${hidden} が ${model} の ${expectedHidden} でない`,
     );
   }
   if (selected !== undefined && assertGemma4QatModel(selected) !== model) {
@@ -64,13 +88,27 @@ export const admitGemma4Qat = (
       ordinary++;
       continue;
     }
-    if (
-      weight === undefined || weight.shared !== undefined ||
-      !["i2", "i4", "i8"].includes(weight.storage.dtype)
-    ) {
+    if (weight === undefined) {
+      throw new Error(
+        `Gemma4QatPipeline: linear の重み '${node.ins[1]}' が initializer でない`,
+      );
+    }
+    if (weight.shared !== undefined) {
+      throw new Error(
+        `Gemma4QatPipeline: linear の重み '${node.ins[1]}' は共有 initializer（QAT は受けない）`,
+      );
+    }
+    if (!["i2", "i4", "i8"].includes(weight.storage.dtype)) {
       throw new Error("Gemma4QatPipeline: linear は固定 INT2/INT4/INT8 が必要");
     }
     storages.add(weight.storage.dtype);
+    if (node.ins[1] === tokenWeight) {
+      // 共有 head だけ前後の SRQ を要求しない。公式 checkpoint の lm_head は SRQ の scale が
+      // 入出力とも 0（未較正 = 恒等）で、recipe は恒等 SRQ を IR に挟まない（ADR 0097）。
+      // SRQ を挟んだ形も受ける（恒等なので数値は同じ）。
+      heads++;
+      continue;
+    }
     const before = producers.get(node.ins[0]);
     const after = consumers.get(node.outs[0]);
     if (
@@ -79,28 +117,54 @@ export const admitGemma4Qat = (
     ) {
       throw new Error("Gemma4QatPipeline: linear の前後に固定 SRQ が必要");
     }
-    if (node.ins[1] === tokenWeight) heads++;
   }
-  if (
-    heads !== 1 || ordinary !== 1 ||
-    !["i2", "i4", "i8"].every((dtype) => storages.has(dtype))
-  ) {
+  if (heads !== 1) {
     throw new Error(
-      "Gemma4QatPipeline: 固定混成格納・共有 head・projection の構成が違う",
+      `Gemma4QatPipeline: token embedding を共有する head が ${heads} 本（1本が必要）`,
+    );
+  }
+  if (ordinary !== 1) {
+    throw new Error(
+      `Gemma4QatPipeline: per_layer_model_projection の f32 linear が ${ordinary} 本（1本が必要）`,
+    );
+  }
+  // i2 は共有 head が必ず満たす（head は token embedding と同じ i2 initializer を使い、
+  // `heads !== 1` が既に 1 本を要求している）ので網羅条件から外す。i4 と i8 の同時存在は
+  // 公式 E2B / E4B の実測構成に基づく仮定（ADR 0097 追記 7）。
+  if (!["i4", "i8"].every((dtype) => storages.has(dtype))) {
+    throw new Error(
+      `Gemma4QatPipeline: 量子化 linear の格納が固定 INT4 と INT8 を揃えていない` +
+        `（${[...storages].sort().join(" / ")}）`,
     );
   }
   return model;
 };
 
 export const assertGemma4QatPle = (
+  model: Gemma4QatModel,
   graph: Graph,
   index: Gemma4PleIndex,
 ): void => {
-  const layers = graph.inputs.find((input) => input.name === "per_layer_inputs")
-    ?.shape[2];
-  if (index.storage !== (layers === 35 ? "i4" : "i2")) {
+  if (index.storage !== PLE_STORAGE[model]) {
     throw new Error(
-      "Gemma4QatPipeline: PLE は E2B が INT4、E4B が INT2 であること",
+      `Gemma4QatPipeline: PLE の格納 '${index.storage}' が ${model} の` +
+        ` '${PLE_STORAGE[model]}' と違う`,
+    );
+  }
+  // 層数と次元の正本はグラフの `per_layer_inputs`（tokens の突合は `createGemma4Ple` が持つ —
+  // 同じ検査を 2 実装持たない）。
+  const shape = graph.inputs.find((input) => input.name === "per_layer_inputs")
+    ?.shape;
+  if (index.layers !== shape?.[2]) {
+    throw new Error(
+      `Gemma4QatPipeline: PLE の層数 ${index.layers} がグラフの per_layer_inputs` +
+        ` ${shape?.[2]} と違う`,
+    );
+  }
+  if (index.dim !== shape[3]) {
+    throw new Error(
+      `Gemma4QatPipeline: PLE の次元 ${index.dim} がグラフの per_layer_inputs` +
+        ` ${shape[3]} と違う`,
     );
   }
 };
