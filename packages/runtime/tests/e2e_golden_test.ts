@@ -14,10 +14,13 @@ import { parseSafetensors } from "../src/format/safetensors.ts";
 import { compareTensors, formatAllclose, type Tolerance } from "../src/reference/allclose.ts";
 import { ioTensor } from "./helpers/golden-io.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { openResults } from "./helpers/results.ts";
 import { readShard, resolveShards, streamShards } from "./helpers/shard-files.ts";
 
 /**
- * torch CPU 期待値との突合に使う許容誤差。
+ * torch CPU 期待値との突合に使う許容誤差 = **判定の 1 段目**（Karume 独自基準・全出力共通）。
+ * ここを超えただけでは赤にせず、2 段目の {@link OUTPUT_TOLERANCE}（WGSL 仕様帯）で受け止めて
+ * warning として記録する。
  *
  * 実測（**全 31 モデル 73 出力**のうち f32 が 64 本。i32 / bool の 9 本は差 0 の厳密一致で、
  * この値の対象外 — ADR 0009。`argmax_pick` の 2 出力は添字なのでこちら側）の最悪値は
@@ -44,20 +47,35 @@ import { readShard, resolveShards, streamShards } from "./helpers/shard-files.ts
 const GOLDEN_TOLERANCE: Tolerance = { atol: 1e-6, rtol: 1e-5 };
 
 /**
- * 出力ごとの許容誤差の上書き（キーは `<model>/<出力名>`）。無い出力は {@link GOLDEN_TOLERANCE}。
+ * 出力ごとの **WGSL 仕様帯**（キーは `<model>/<出力名>`）= 判定の 2 段目。ここに行がある出力だけ、
+ * {@link GOLDEN_TOLERANCE} を超えても赤にならずに済む。
  *
- * MUST: 緩めるのは **op 単位・WGSL 仕様の精度保証の範囲内・実害が無い場合**に限る（裁定
- * 2026-09-20）。全体を一度に緩めない — もし広く緩めるなら「Karume 独自基準 + WGSL 仕様帯」の
- * 2 段の門にして、従来基準に引っかかったことが分かる形にする（独自基準は容易に撤廃してよい）。
+ * 2 段の判定（裁定 2026-09-20）:
+ *
+ * 1. Karume 独自基準（{@link GOLDEN_TOLERANCE}・全出力共通）で通れば **pass**。
+ * 2. 落ちた出力に `spec` があればそれで測り直し、通れば **pass + warning** — 結果 JSON
+ *    （`outputs/verify/<環境キー>/<日付>_golden/results.json`）の `note` に
+ *    「どの出力が独自基準を超え、どの仕様帯で受理したか」が残る。
+ * 3. `spec` が無い / `spec` でも落ちるなら **fail**（メッセージは従来どおり）。
+ *
+ * 独自基準は「従来この値で通っていた」を見失わないための目安であって仕様上の根拠は無く、
+ * **容易に撤廃してよい**（実装バグを掴む網は仕様帯の側にある — op 取り違え・添字ずれの誤差は
+ * O(1) で、仕様帯からも 4 桁上に出る）。
+ *
+ * MUST: ここへ行を足すのは **op 単位・WGSL 仕様の精度保証の範囲内・実害が無い場合**に限り、
+ * 根拠（仕様の該当節と実測値）を行ごとに書く。全体を一度に緩めない。
  *
  * - `activations/sin`: WGSL 仕様の `sin(x)` は |x| ≤ π で**絶対誤差 2⁻¹¹ まで**を許す（§ Accuracy
  *   of Concrete Floating Point Expressions）。golden の入力は [−1.28, 1.89] でこの区間の内側。
  *   NVIDIA（RTX 3080 Ti）はほぼ正しく丸めるので 1e-6 で通っていたが、Intel Arc B570（Mesa ANV）は
  *   x = 1.5908 で 2.68e-5（2026-09-20 実測 — 仕様の内・実装バグの O(1) からは 4 桁下）。
  */
-const OUTPUT_TOLERANCE: Readonly<Record<string, Tolerance>> = {
-  "activations/sin": { atol: 2 ** -11, rtol: 0 },
+const OUTPUT_TOLERANCE: Readonly<Record<string, { readonly spec: Tolerance }>> = {
+  "activations/sin": { spec: { atol: 2 ** -11, rtol: 0 } },
 };
+
+/** 決着と warning の置き場（`outputs/verify/<環境キー>/<日付>_golden/` — 消して安全）。 */
+const results = openResults("golden");
 
 const GOLDEN_ROOT = new URL("./fixtures/golden/", import.meta.url);
 
@@ -125,6 +143,7 @@ for (const model of MODELS) {
     name: `golden 突合: ${model}（実 GPU / torch CPU 期待値）`,
     ignore: !GPU_AVAILABLE,
     fn: async () => {
+      const startedAt = performance.now();
       const shards = modelShards(model);
       const [graphShard, ioBytes] = await Promise.all([
         readShard(shards[0]),
@@ -151,6 +170,10 @@ for (const model of MODELS) {
 
       const gpu = await acquireGpu();
       const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
+      /** Karume 独自基準を超えたが仕様帯で受理した出力（結果 JSON の note になる）。 */
+      const accepted: string[] = [];
+      /** 仕様帯でも受からなかった出力のメッセージ（1 本目でテストを落とす）。 */
+      const failures: string[] = [];
       try {
         const outputs = await session.run(inputs);
         assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());
@@ -162,18 +185,38 @@ for (const model of MODELS) {
           const declared = parsed.graph.values[name].dtype;
           assertEquals(outputs[name].shape, view.shape, `${where}: shape`);
           assertEquals(outputs[name].dtype, declared, `${where}: dtype`);
+          const expected = ioTensor(io, view, declared);
           // f32 は allclose、i32 / bool は厳密一致（整数演算に近似の余地は無い）
-          const report = compareTensors(
-            outputs[name],
-            ioTensor(io, view, declared),
-            OUTPUT_TOLERANCE[`${model}/${name}`] ?? GOLDEN_TOLERANCE,
+          const karume = compareTensors(outputs[name], expected, GOLDEN_TOLERANCE);
+          if (karume.pass) return;
+          // 1 段目を落ちた出力だけが 2 段目（WGSL 仕様帯）へ来る。受かれば pass + warning。
+          const spec = OUTPUT_TOLERANCE[`${model}/${name}`]?.spec;
+          if (spec === undefined) {
+            failures.push(`${where}: ${formatAllclose(karume)}`);
+            return;
+          }
+          const report = compareTensors(outputs[name], expected, spec);
+          if (!report.pass) {
+            failures.push(`${where}: ${formatAllclose(report)}`);
+            return;
+          }
+          accepted.push(
+            `${name}: maxAbs=${karume.maxAbsError} maxRel=${karume.maxRelError} ` +
+              `（仕様帯 atol=${spec.atol} で受理）`,
           );
-          assert(report.pass, `${where}: ${formatAllclose(report)}`);
         });
       } finally {
         await session.dispose();
         gpu.destroy();
       }
+      // 決着は投げる前に残す（赤で終わった回の note も手元に要る）。
+      await results.record({
+        id: model,
+        status: failures.length === 0 ? "pass" : "fail",
+        elapsedMs: Math.round(performance.now() - startedAt),
+        ...(accepted.length === 0 ? {} : { note: accepted.join("; ") }),
+      });
+      assert(failures.length === 0, failures[0]);
     },
   });
 }
