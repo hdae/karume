@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "kind": "sha256",
+  "cases": {
+    "no-ref": {
+      "deno-intel-graphics-bmg-g21": "35a643d355ec13c200bfd51a69a6061c12583bcfc252f2bf9f806dbe8abbe367",
+      "deno-nvidia-geforce-rtx-3080-ti": "5cc43d7fe9ae0a8733e0b06088948e33f947cdabe0934fea3988622530da3e8d"
+    },
+    "voice-clone": {
+      "deno-intel-graphics-bmg-g21": "2d84375dcd5d921c5366be68d64112bb2415978d2f57bbbd2480ae2b756a6965",
+      "deno-nvidia-geforce-rtx-3080-ti": "05f82a9cd8bbb8055fee47b4599840097f62d3d07252c50e1a7ef7fe21631e5e"
+    }
+  }
+}

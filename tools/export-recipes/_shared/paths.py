@@ -36,6 +36,11 @@ SERIES_ROOT = OUTPUTS_ROOT / "series"
 #: ここに残るものは全て台本の再実行で作り直せる。
 BENCH_ROOT = OUTPUTS_ROOT / "bench"
 
+#: 検証の結果と実物の親（`<VERIFY_ROOT>/<環境キー>/<日付>_<系列>/`）。環境キーは
+#: `packages/runtime/tests/helpers/environment.ts` が作る（GPU ごとに席を分ける）。**消して
+#: 安全**な席で、ここに残るものは全てテストの再実行で作り直せる。
+VERIFY_ROOT = OUTPUTS_ROOT / "verify"
+
 #: ホスト資産の親（`<MISC_ROOT>/<名前>/`）。消すと再取得・再エミットが要るので `BENCH_ROOT`
 #: とは分ける（デモ資産・辞書・実コーパスの凍結コピー）。
 MISC_ROOT = OUTPUTS_ROOT / "misc"

@@ -17,20 +17,26 @@
  *
  * ## MUST: 割れたら tolerance 化せず、原因を特定してから digest を更新する
  *
- * 数値が 1 bit でも動いたら鎖のどこかが変わっている。**tolerance 化も参照値の差し替えも禁止**
- * で、赤のまま止めて差分（WAV バイト長 / サンプル数 / S / forward 数 / 実効ノブ / 先頭差分位置 /
- * 実物の WAV）を出す。digest を書き換えてよいのは「何が変わったか」を先に言えたときだけ。
+ * 数値が 1 bit でも動いたら鎖のどこかが変わっている。**tolerance 化は禁止**で、赤のまま
+ * 止めて差分（WAV バイト長 / サンプル数 / S / forward 数 / 実効ノブ / 先頭差分位置 / 実物の
+ * WAV）を出す。
  *
- * 更新の手順（原因を特定した後で）: ①この門を赤のまま走らせ、ログの `sha256 <hex>` を
- * {@link CASES} の該当ケースへ書き戻す ②**別プロセスで 2 回**走らせて一致を確認する
- * ③何が変わって焼き直したのかをコミットメッセージに書く。
+ * ## 参照 digest は環境ごとの行で持つ（クロスデバイスのビット同一は保証しない）
  *
- * ## 参照 digest はこの参照環境専用（クロスデバイスのビット同一は保証しない）
+ * 参照値は `fixtures/references/irodori.json` に**環境キーごとの行**で入っている
+ * （`helpers/reference.ts`）。この門が主張できるのは「その機で数値が動いていない」ことだけで、
+ * 他バックエンド（Metal 等）で一致しないのは仕様 — その機序と別バックエンドでの健全性検証の
+ * 作法（自己 A/B）は [limitations](../../../docs/limitations.md) の「sha256 参照門は参照環境
+ * 専用」節にある。RTX 3080 Ti の行は 2026-08-12 に実測し、**別プロセスで 2 回**焼いて一致を
+ * 確認したもの。
  *
- * 参照値は 2026-08-12 に RTX 3080 Ti / Linux / Vulkan (wgpu) で実測し、**別プロセスで 2 回**
- * 焼いて一致を確認したもの。他バックエンド（Metal 等）では一致しないのが仕様で、その機序と
- * 別バックエンドでの健全性検証の作法（自己 A/B）は [limitations](../../../docs/limitations.md)
- * の「sha256 参照門は参照環境専用」節にある。
+ * - **他の機の行を足す**のは `KARUME_REFERENCE=write`（既存の行には触らない）。
+ * - **自分の機の行を焼き直す**のは `KARUME_REFERENCE=rewrite` だけで、「何が変わったのか」を
+ *   先に言えたときに限る（旧→新はログに出る）。他環境の行は巻き込まない。
+ * - 参照値を持たない機ではそのケースを**明示 SKIP** し、参照門（このファイルの末尾）が
+ *   「参照が無いので全 SKIP」を赤で知らせる。
+ * - 焼き直した後は**別プロセスで 2 回**走らせて一致を確認し、何が変わったのかをコミット
+ *   メッセージに書く。
  *
  * ## ケース 2 本
  *
@@ -73,6 +79,13 @@ import {
 import { type IrodoriPipelineConfig, parseIrodoriPipelineConfig } from "../src/irodori/config.ts";
 import { tSchedule } from "../src/irodori/host/sampler.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import {
+  announceCheck,
+  expectedOf,
+  openReferences,
+  registerReferenceGate,
+} from "../../runtime/tests/helpers/reference.ts";
+import { openResults } from "../../runtime/tests/helpers/results.ts";
 
 /** 配布形の置き場（`karume dist --pipeline irodori` の既定の出力先）。 */
 const ASSETS_DIR = new URL("../../../models/karume-irodori-v4-small/", import.meta.url);
@@ -81,13 +94,12 @@ const REFERENCE_AUDIO = new URL(
   "../../../inputs/irodori/v4-small/samples/clone_ref1.wav",
   import.meta.url,
 );
-/** 実行日（モジュールロード時に 1 回だけ確定 — ダンプ先の日付ディレクトリに使う）。 */
-const TODAY = new Date().toISOString().slice(0, 10);
-/** ミスマッチ時の実物ダンプ先（`rm -rf outputs/bench` で常に安全に消せる — docs/assets-layout.md）。 */
-const OUTPUTS_DIR = new URL(
-  `../../../outputs/bench/karume-irodori-v4-small/${TODAY}_e2e-mismatch/`,
-  import.meta.url,
+/** 参照 digest の席（環境キーごとの行 — 追跡対象）。 */
+const references = openReferences(
+  new URL("fixtures/references/irodori.json", import.meta.url),
 );
+/** 実物と決着の置き場（`outputs/verify/<環境キー>/<日付>_irodori/` — 消して安全）。 */
+const results = openResults("irodori");
 
 /** SKIP 時にそのまま貼れる生成コマンド。 */
 const DIST_COMMAND = "cd tools/exporter && uv run karume dist --pipeline irodori";
@@ -108,14 +120,15 @@ type WavCase = {
   /** 参照音声を `{ audio }` で渡すか（wav 経路 = LUFS 正規化 + `codec_encoder` を含めるか）。 */
   readonly withReference: boolean;
   readonly seed: number;
-  /** 参照 digest（**変更禁止** — 上の MUST）。 */
-  readonly sha256: string;
 };
 
 /**
  * ケース 2 本。テキストと caption は full-loop golden の `meta.json` から借りている（同じ文で
  * 比べられるほうが、割れたときに latent 門の実測と突き合わせやすい）。ただし**この門は golden
  * を読まない** — 参照 digest は波形まで通した実測で、golden の生成条件とは独立に閉じる。
+ *
+ * `name` はそのまま参照値のケース ID（`fixtures/references/irodori.json` の鍵）であり、実物の
+ * ファイル名でもある。
  */
 const CASES: readonly WavCase[] = [
   {
@@ -126,7 +139,6 @@ const CASES: readonly WavCase[] = [
       "若く元気な女性の声。カフェの店員のように、明るくハキハキとした少し高めのトーンで話している。",
     withReference: true,
     seed: 1234,
-    sha256: "05f82a9cd8bbb8055fee47b4599840097f62d3d07252c50e1a7ef7fe21631e5e",
   },
   {
     name: "no-ref",
@@ -134,7 +146,6 @@ const CASES: readonly WavCase[] = [
     text: "本日はお越しいただき、誠にありがとうございます。",
     withReference: false,
     seed: 1235,
-    sha256: "5cc43d7fe9ae0a8733e0b06088948e33f947cdabe0934fea3988622530da3e8d",
   },
 ];
 
@@ -174,6 +185,9 @@ if (!ASSETS_AVAILABLE) {
 }
 
 const RUNNABLE = GPU_AVAILABLE && ASSETS_AVAILABLE;
+
+// この環境の参照値が無いケースは明示 SKIP する（作り方は警告が言う）。
+if (RUNNABLE) references.warnMissing(CASES.map((item) => item.name));
 
 const sha256Hex = async (bytes: Uint8Array<ArrayBuffer>): Promise<string> =>
   Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)))
@@ -251,11 +265,11 @@ const describeKnobs = (item: WavCase, config: IrodoriPipelineConfig): string =>
   `${config.sampleRate}Hz / hop ${config.hopLength} / halo ${config.codecHaloFrames}`;
 
 /**
- * 参照 WAV の**実体**があれば置かれている場所（任意 — 参照環境で焼いた実物を人がここへ置く）。
- * 門は sha256 だけで閉じており、ここは**先頭差分位置を出すためだけ**の材料。
+ * 参照 WAV の**実体**があれば置かれている場所（任意）。実物は走行のたびに結果の席へ残るので、
+ * 突き合わせたい走行の WAV を `<ケース>-reference.wav` という名前で同じ席へ置けば、次の走行が
+ * 先頭差分位置まで出す。門は sha256 だけで閉じており、ここは**その材料**でしかない。
  */
-const referenceWavPath = (item: WavCase): URL =>
-  new URL(`e2e-irodori-${item.name}-reference.wav`, OUTPUTS_DIR);
+const referenceWavPath = (item: WavCase): URL => results.artifact(`${item.name}-reference.wav`);
 
 /**
  * 参照 WAV の実体が手元にあれば**先頭差分位置と近傍値**まで出す。
@@ -265,6 +279,7 @@ const referenceWavPath = (item: WavCase): URL =>
  */
 const describeFirstDifference = async (
   item: WavCase,
+  expected: string,
   actual: Uint8Array<ArrayBuffer>,
 ): Promise<string> => {
   const path = referenceWavPath(item);
@@ -273,7 +288,7 @@ const describeFirstDifference = async (
     return `参照 WAV の実体が無い（${path.pathname}）— 先頭差分位置は出せない`;
   }
   const sha = await sha256Hex(reference);
-  if (sha !== item.sha256) {
+  if (sha !== expected) {
     return `${path.pathname} は参照 WAV ではない（sha256 ${sha}）— 先頭差分位置は出せない`;
   }
   const shared = Math.min(reference.length, actual.length);
@@ -302,35 +317,33 @@ const describeFirstDifference = async (
 /**
  * 参照 sha と食い違ったときの報告。
  *
- * MUST: ここで tolerance に逃げない。実物を {@link OUTPUTS_DIR} へ落として、人が聴き比べ・
- * 突き合わせできる形にする。
+ * MUST: ここで tolerance に逃げない。実物は結果の席（`outputs/verify/...`）に残っているので、
+ * 人が聴き比べ・突き合わせできる形になっている。
  */
 const mismatchReport = async (
   item: WavCase,
   config: IrodoriPipelineConfig,
   audio: IrodoriGeneratedAudio,
   wav: Uint8Array<ArrayBuffer>,
+  expected: string,
   actual: string,
-): Promise<string> => {
-  await Deno.mkdir(OUTPUTS_DIR, { recursive: true });
-  const dumped = new URL(`e2e-irodori-${item.name}-mismatch.wav`, OUTPUTS_DIR);
-  await Deno.writeFile(dumped, wav);
-  return `${item.name}: 出力 WAV の sha256 が参照と一致しない\n` +
-    `  期待 ${item.sha256}\n  実際 ${actual}\n` +
-    `  WAV ${wav.length} バイト / サンプル ${audio.data.length} / ${audio.sampleRate}Hz / ` +
-    `${(audio.data.length / audio.sampleRate).toFixed(3)}s / S ${audio.frames} / ` +
-    `forwards ${audio.forwards}\n` +
-    `  実効ノブ ${describeKnobs(item, config)}\n` +
-    `  ${await describeFirstDifference(item, wav)}\n` +
-    `  実物 ${dumped.pathname}`;
-};
+  dumped: URL,
+): Promise<string> =>
+  `${item.name}: 出力 WAV の sha256 が参照と一致しない\n` +
+  `  期待 ${expected}\n  実際 ${actual}\n` +
+  `  WAV ${wav.length} バイト / サンプル ${audio.data.length} / ${audio.sampleRate}Hz / ` +
+  `${(audio.data.length / audio.sampleRate).toFixed(3)}s / S ${audio.frames} / ` +
+  `forwards ${audio.forwards}\n` +
+  `  実効ノブ ${describeKnobs(item, config)}\n` +
+  `  ${await describeFirstDifference(item, expected, wav)}\n` +
+  `  実物 ${dumped.pathname}`;
 
 /**
  * 1 ケースを生成して digest を突き合わせる。
  *
- * `onEvent` を渡した呼びも**同じ参照値**で突き合わせる — 観測席が数値に 1 ビットも触って
- * いないこと、そして常駐経路 / ホスト経路の出力が同一であることの直接証拠になる
- * （下の onEvent 門）。
+ * `onEvent` を渡した呼びも**同じ参照値**（= 同じケース ID の行）で突き合わせる — 観測席が
+ * 数値に 1 ビットも触っていないこと、そして常駐経路 / ホスト経路の出力が同一であることの
+ * 直接証拠になる（下の onEvent 門）。結果 JSON では別のケースとして残す。
  */
 const runCase = async (
   pipeline: IrodoriPipeline,
@@ -351,16 +364,33 @@ const runCase = async (
   const audio = await pipeline.generate(request);
   const wav = encodeWav(audio.data, audio.sampleRate);
   const actual = await sha256Hex(wav);
-  const elapsed = ((performance.now() - started) / 1000).toFixed(1);
+  const elapsedMs = performance.now() - started;
+  const resultId = onEvent === undefined ? item.name : `${item.name}-onEvent`;
+  // 実物は成功・失敗を問わず毎回残す（次に割れたときの A/B の材料は、割れる前に要る）。
+  const dumped = results.artifact(`${resultId}.wav`);
+  await Deno.writeFile(dumped, wav);
   console.log(
-    `[e2e] irodori ${MODEL}/${QUANT} ${item.name}${
-      onEvent === undefined ? "" : "(onEvent)"
-    }: ${elapsed}s / S ${audio.frames} / ` +
+    `[e2e] irodori ${MODEL}/${QUANT} ${item.name}${onEvent === undefined ? "" : "(onEvent)"}: ${
+      (elapsedMs / 1000).toFixed(1)
+    }s / S ${audio.frames} / ` +
       `forwards ${audio.forwards} / WAV ${wav.length}B / ` +
       `${(audio.data.length / audio.sampleRate).toFixed(2)}s / sha256 ${actual}`,
   );
-  if (actual !== item.sha256) {
-    throw new Error(await mismatchReport(item, config, audio, wav, actual));
+  const check = references.check(item.name, actual);
+  announceCheck(item.name, check, actual);
+  const expected = expectedOf(check);
+  await results.record({
+    id: resultId,
+    status: check.status,
+    ...(expected === undefined ? {} : { expected }),
+    actual,
+    artifact: `${resultId}.wav`,
+    elapsedMs,
+  });
+  if (check.status === "fail") {
+    throw new Error(
+      await mismatchReport(item, config, audio, wav, check.expected, actual, dumped),
+    );
   }
   return audio;
 };
@@ -388,8 +418,14 @@ Deno.test({
         runs.push({ component, hasArena: diagnostics.lastRun !== undefined }),
     });
     for (const item of CASES) {
-      await t.step(`${item.name}: ${item.why}`, async () => {
-        await runCase(pipeline, config, item, reference);
+      await t.step({
+        name: `${item.name}: ${item.why}`,
+        // この環境の参照値が無く、作るモードでもないケースは明示 SKIP する
+        // （理由と作り方は登録時の警告に出ている）。
+        ignore: references.lacksReference(item.name),
+        fn: async () => {
+          await runCase(pipeline, config, item, reference);
+        },
       });
     }
 
@@ -404,9 +440,11 @@ Deno.test({
     //  ③ `denoise-step` は **step 単位**で `config.steps` 回（CFG の内側の forward 数ではない）。
     //  ④ コールバックの throw が生成ごと落とす（step 粒度の中断手段）。
     const withEvents = CASES[0];
-    await t.step(
-      `onEvent: ホスト経路でも WAV sha が同一（step ${REFERENCE_KNOBS.steps} 回の発火）`,
-      async () => {
+    await t.step({
+      name: `onEvent: ホスト経路でも WAV sha が同一（step ${REFERENCE_KNOBS.steps} 回の発火）`,
+      // sha の同一性がこの段の主張の半分なので、参照値が無い環境では丸ごと SKIP する。
+      ignore: references.lacksReference(withEvents.name),
+      fn: async () => {
         const log: string[] = [];
         const shapes = new Set<string>();
         const lengths = new Set<number>();
@@ -484,7 +522,7 @@ Deno.test({
           "生成後に呼んだ copyLatents が step 1 の値を返さない",
         );
       },
-    );
+    });
 
     await t.step("onEvent: コールバックの throw は生成ごと落とす（step 粒度の中断）", async () => {
       const seen: string[] = [];
@@ -550,3 +588,6 @@ Deno.test({
     });
   },
 });
+
+// 「この環境の参照値がまだ無い」を無音の緑にしないための門番（ADR 0005 と同じ流儀）。
+registerReferenceGate(references, { runnable: RUNNABLE });

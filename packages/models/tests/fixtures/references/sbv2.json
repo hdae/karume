@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "kind": "sha256",
+  "cases": {
+    "F1-i4": {
+      "deno-intel-graphics-bmg-g21": "95a552c60a7152391b47a230f1014b4e2003c95b1062d2e78f04f7509c83b5aa",
+      "deno-nvidia-geforce-rtx-3080-ti": "bee0d6e89b1a97146ac480df7a8d29b9db0b6915297c23f73076fc6e7c7dae1e"
+    },
+    "F1-i8": {
+      "deno-intel-graphics-bmg-g21": "900ec60cac9359901efcfcf8b93976f206e22ac4576c61f0fdc4d1dbcaffea44",
+      "deno-nvidia-geforce-rtx-3080-ti": "fc97b13f7ea73d61a4c5e83035dc1c531afaf28298ed41c70d44fee91df214ca"
+    },
+    "F1-i8+bert4": {
+      "deno-intel-graphics-bmg-g21": "ab60f3f00972a8ccc40d1b341c1fe2e867a65a09d06ada166b34c60eb17234c4",
+      "deno-nvidia-geforce-rtx-3080-ti": "a1d07efebcf4ba1559853bcd736d39a40fa839006e8857c45d9bb6c40b5f2d2d"
+    },
+    "F2-i8": {
+      "deno-intel-graphics-bmg-g21": "71a88686ed5c3d05d89dd1bc7d38725ba7e946e58a737afd52c35a70108b891a",
+      "deno-nvidia-geforce-rtx-3080-ti": "df9221aa42341757e7a9660607793162629ce6508797909f5441c6351bc48166"
+    },
+    "M1-i8": {
+      "deno-intel-graphics-bmg-g21": "1d72939edb1a2a460505cb27a1d22cc05786ad2d7f81b712d420e13bdbde334e",
+      "deno-nvidia-geforce-rtx-3080-ti": "aad4881e44eb3ec443413177dcb49a68ada2096803780236d61fdf3690754ad1"
+    },
+    "M2-i8": {
+      "deno-intel-graphics-bmg-g21": "4ef73e76d6942ba398b51657540eaa495ab4c5660e959d79668ef98b6aabab3d",
+      "deno-nvidia-geforce-rtx-3080-ti": "1e7262cbdba33971ffc1fa522eea08582be0529e7f231825f26b31e0ff9c7fbb"
+    }
+  }
+}

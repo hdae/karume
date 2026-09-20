@@ -8,15 +8,15 @@
  * [0039](../../../docs/decisions/0039-sbv2-distribution.md) の Consequences 節の実測）。
  * この門が留めるのは**その後の回帰**である。
  *
- * **数値が 1 bit でも動いたら移植のどこかが変わっている — tolerance 化も参照値の差し替えも
- * 禁止**で、赤のまま止めて差分の内容（WAV バイト長 / サンプル数 / 実効ノブ / 実物の WAV）を
- * 出す。ここを緩めると「移植できた」の意味が消える。
+ * **数値が 1 bit でも動いたら移植のどこかが変わっている — tolerance 化は禁止**で、赤のまま
+ * 止めて差分の内容（WAV バイト長 / サンプル数 / 実効ノブ / 実物の WAV）を出す。ここを緩めると
+ * 「移植できた」の意味が消える。
  *
- * ## 参照値の生成条件（2026-08-30 凍結）
+ * ## 参照値の生成条件（RTX 3080 Ti の行は 2026-08-30 凍結）
  *
  * - **資産は `models/karume-sbv2-jvnv/`** — ライセンス・帰属記述が正の公開ミラー。2026-08-30
  *   裁定で、非公開 FN ミラーを正本にしていた旧門から付け替えた（FN4 時代の参照値と採り直しの
- *   履歴は git 履歴にある）。参照値はこの参照環境で採取して凍結し、凍結時に人が聴いて健全性を
+ *   履歴は git 履歴にある）。参照値はその参照環境で採取して凍結し、凍結時に人が聴いて健全性を
  *   確認した（手順は完了報告の手動確認 — sha だけでは「正しい音」を保証しないため）。
  * - **テキストは `examples/sbv2/main.ts` の `DEFAULT_TEXT`・seed 0**（FN4 時代から不変）。
  * - **style / speaker / styleWeight / 4 ノブは manifest の `pipelineConfig.defaults`**。門は
@@ -41,12 +41,19 @@
  * 効いていない」ことの証拠で、net_g の適格 linear は 6 本しかない（front 2 / voice 4）ぶん
  * **資産サイズの差でも気づけない**。
  *
- * ## 参照 digest はこの参照環境専用（クロスデバイスのビット同一は保証しない）
+ * ## 参照 digest は環境ごとの行で持つ（クロスデバイスのビット同一は保証しない）
  *
- * 参照値は参照環境（RTX 3080 Ti / Linux / Vulkan (wgpu)）で焼いたもので、他バックエンド
- * （Metal 等）では一致しないのが仕様。その機序と、別バックエンドでの健全性検証の作法
- * （自己 A/B）は [limitations](../../../docs/limitations.md) の「sha256 参照門は参照環境専用」
+ * 参照値は `fixtures/references/sbv2.json` に**環境キーごとの行**で入っている
+ * （`helpers/reference.ts`）。RTX 3080 Ti の行は参照環境（Linux / Vulkan (wgpu)）で焼いたもので、
+ * 他バックエンド（Metal 等）では一致しないのが仕様。その機序と、別バックエンドでの健全性検証の
+ * 作法（自己 A/B）は [limitations](../../../docs/limitations.md) の「sha256 参照門は参照環境専用」
  * 節にある。
+ *
+ * - **他の機の行を足す**のは `KARUME_REFERENCE=write`（既存の行には触らない）。
+ * - **自分の機の行を焼き直す**のは `KARUME_REFERENCE=rewrite` だけで、「何が変わったのか」を
+ *   先に言えたときに限る（旧→新はログに出る）。他環境の行は巻き込まない。
+ * - 参照値を持たない機ではそのケースを**明示 SKIP** し、参照門（このファイルの末尾）が
+ *   「参照が無いので全 SKIP」を赤で知らせる。
  *
  * MUST: 資産は `models/karume-sbv2-jvnv/`（untracked・実 GPU 機のローカル資産 — 生成は
  * `dist.py`、docs/assets-layout.md）。無い環境と GPU 無し環境は理由を出して**明示 SKIP** する
@@ -76,20 +83,24 @@ import {
 import { parseSbv2PipelineConfig, type Sbv2Defaults } from "../src/sbv2/config.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { buildSafetensors, f32Bytes } from "./helpers/safetensors.ts";
+import {
+  announceCheck,
+  expectedOf,
+  openReferences,
+  registerReferenceGate,
+} from "../../runtime/tests/helpers/reference.ts";
+import { openResults } from "../../runtime/tests/helpers/results.ts";
 
 /** 資産の置き場（リポ直下 `models/karume-sbv2-jvnv/`）。 */
 const ASSETS_DIR = new URL("../../../models/karume-sbv2-jvnv/", import.meta.url);
-/** 実行日（モジュールロード時に 1 回だけ確定 — ダンプ先の日付ディレクトリに使う）。 */
-const TODAY = new Date().toISOString().slice(0, 10);
-/** ミスマッチ時の実物ダンプ先（`outputs/bench/` は消して安全な席 — docs/assets-layout.md）。 */
-const OUTPUTS_DIR = new URL(
-  `../../../outputs/bench/karume-sbv2-jvnv/${TODAY}_e2e-mismatch/`,
-  import.meta.url,
-);
+/** 参照 digest の席（環境キーごとの行 — 追跡対象）。 */
+const references = openReferences(new URL("fixtures/references/sbv2.json", import.meta.url));
+/** 実物と決着の置き場（`outputs/verify/<環境キー>/<日付>_sbv2/` — 消して安全）。 */
+const results = openResults("sbv2");
 /**
  * 参照 WAV の**実体**があれば置かれている場所（凍結時に採った実物 — ホスト資産）。
  * 門は sha256 だけで閉じており、ここは**差分位置を出すためだけ**の任意の材料 —
- * 無くても、sha256 が {@link REFERENCE_SHA256} でなくても、門の判定は変わらない。
+ * 無くても、sha256 が現環境の参照値でなくても、門の判定は変わらない。
  */
 const REFERENCE_WAV = new URL("../../../outputs/misc/sbv2-demo/freeze/F1-i8.wav", import.meta.url);
 
@@ -105,54 +116,38 @@ const SEED = 0;
  */
 const BERT4_QUANT = "i8+bert4";
 
-/** 参照値（2026-08-30 に参照環境で採取して凍結 — **変更禁止**）。 */
-const REFERENCE_SHA256 = "fc97b13f7ea73d61a4c5e83035dc1c531afaf28298ed41c70d44fee91df214ca";
-
-/**
- * `i8+bert4` の参照値（2026-08-30 に参照環境で採取して凍結 — **変更禁止**）。
- *
- * `i8` と**別の値になるのが正**（BERT の linear が i4 に落ちれば特徴量が動き、波形も動く）。
- * 一致してしまったら i4 席が効いていない（i8 資産が i4 席に入った / quant 解決が既定へ落ちた）
- * ことを意味するので、そこも門に含める。
- */
-const BERT4_REFERENCE_SHA256 = "a1d07efebcf4ba1559853bcd736d39a40fa839006e8857c45d9bb6c40b5f2d2d";
-
 /**
  * `i8+bert4` から**さらに `front` / `voice` も i4 混成**へ替えた quant（3 席とも i4）。session
  * ノブは `i8` と同じで、動かす軸は格納形だけ（`sbv2/distribution.py` の `SBV2_QUANTS`）。
+ *
+ * 参照値は `i8` とも `i8+bert4` とも**別の値になるのが正**。`i8+bert4` と一致したら net_g 側の
+ * i4 席が効いていない（i4 席に i8 資産が入った / quant 解決が既定へ落ちた）ことを意味し、net_g
+ * の適格 linear は 6 本だけで配布バイトもほぼ変わらないため、**この門以外に検出手段が無い**。
  */
 const W4_QUANT = "i4";
 
 /**
- * `i4` の参照値（2026-08-30 に参照環境で採取して凍結 — **変更禁止**）。
- *
- * `i8` とも `i8+bert4` とも**別の値になるのが正**。`i8+bert4` と一致したら net_g 側の i4 席が
- * 効いていない（i4 席に i8 資産が入った / quant 解決が既定へ落ちた）ことを意味し、net_g の適格
- * linear は 6 本だけで配布バイトもほぼ変わらないため、**この門以外に検出手段が無い**。
+ * 参照値のケース ID（`fixtures/references/sbv2.json` の鍵であり、実物のファイル名でもある）。
  */
-const W4_REFERENCE_SHA256 = "bee0d6e89b1a97146ac480df7a8d29b9db0b6915297c23f73076fc6e7c7dae1e";
+const caseIdOf = (model: string, quant: string): string => `${model}-${quant}`;
 
 /**
- * モデル軸の門（`i8` 固定・モデルだけ替える）。参照値は 2026-08-30 に quant 3 本と同時に
- * 採取して凍結 — **変更禁止**。net_g の実重みがモデルごとに違うので、F1 の参照値と一致したら
- * 「資産解決が別モデルへ倒れた」ことの証拠（shape は同じまま別人の声が出る沈黙誤値クラス）。
+ * モデル軸の門（`i8` 固定・モデルだけ替える）。net_g の実重みがモデルごとに違うので、F1 の
+ * 参照値と一致したら「資産解決が別モデルへ倒れた」ことの証拠（shape は同じまま別人の声が出る
+ * 沈黙誤値クラス）。
  */
-const SPEAKER_GATES: readonly { model: string; speaker: string; sha256: string }[] = [
-  {
-    model: "F2",
-    speaker: "jvnv-F2-jp",
-    sha256: "df9221aa42341757e7a9660607793162629ce6508797909f5441c6351bc48166",
-  },
-  {
-    model: "M1",
-    speaker: "jvnv-M1-jp",
-    sha256: "aad4881e44eb3ec443413177dcb49a68ada2096803780236d61fdf3690754ad1",
-  },
-  {
-    model: "M2",
-    speaker: "jvnv-M2-jp",
-    sha256: "1e7262cbdba33971ffc1fa522eea08582be0529e7f231825f26b31e0ff9c7fbb",
-  },
+const SPEAKER_GATES: readonly { model: string; speaker: string }[] = [
+  { model: "F2", speaker: "jvnv-F2-jp" },
+  { model: "M1", speaker: "jvnv-M1-jp" },
+  { model: "M2", speaker: "jvnv-M2-jp" },
+];
+
+/** この門が持つケース ID 全部（登録時の警告と参照門が見る）。 */
+const CASE_IDS: readonly string[] = [
+  caseIdOf(MODEL, QUANT),
+  caseIdOf(MODEL, BERT4_QUANT),
+  caseIdOf(MODEL, W4_QUANT),
+  ...SPEAKER_GATES.map((gate) => caseIdOf(gate.model, QUANT)),
 ];
 
 /** 参照 WAV を焼いた時点の実効ノブ（配布形の `pipelineConfig.defaults` と一致するはず）。 */
@@ -187,6 +182,9 @@ if (!ASSETS_AVAILABLE) {
 }
 
 const RUNNABLE = GPU_AVAILABLE && ASSETS_AVAILABLE;
+
+// この環境の参照値が無いケースは明示 SKIP する（作り方は警告が言う）。
+if (RUNNABLE) references.warnMissing(CASE_IDS);
 
 /**
  * 参照 WAV と同じテキストを発話へ落とす（呼び手側の解析 — 全ての門が同じ 1 本を使う）。
@@ -282,13 +280,16 @@ const describeKnobs = (
  * MUST: 実体の sha256 を確かめてから使う — 別の条件で焼かれた WAV を参照として差分を出すと、
  * 診断そのものが嘘になる。
  */
-const describeFirstDifference = async (actual: Uint8Array<ArrayBuffer>): Promise<string> => {
+const describeFirstDifference = async (
+  expected: string,
+  actual: Uint8Array<ArrayBuffer>,
+): Promise<string> => {
   const reference = await Deno.readFile(REFERENCE_WAV).catch(() => undefined);
   if (reference === undefined) {
     return `参照 WAV の実体が無い（${REFERENCE_WAV.pathname}）— 先頭差分位置は出せない`;
   }
   const sha = await sha256Hex(reference);
-  if (sha !== REFERENCE_SHA256) {
+  if (sha !== expected) {
     return `${REFERENCE_WAV.pathname} は参照 WAV ではない（sha256 ${sha}）— 先頭差分位置は出せない`;
   }
   const shared = Math.min(reference.length, actual.length);
@@ -313,9 +314,8 @@ const describeFirstDifference = async (actual: Uint8Array<ArrayBuffer>): Promise
 /**
  * 参照 sha と食い違ったときの報告（全門共通）。
  *
- * MUST: ここで tolerance に逃げない。実物を {@link OUTPUTS_DIR} へ落として、人が聴き比べ・
- * 突き合わせできる形にする（`outputs/bench/` は「消して安全」な置き場 —
- * docs/assets-layout.md）。
+ * MUST: ここで tolerance に逃げない。実物は結果の席（`outputs/verify/...`）に残っているので、
+ * 人が聴き比べ・突き合わせできる形になっている。
  */
 const mismatchReport = async (
   audio: GeneratedAudio,
@@ -323,15 +323,13 @@ const mismatchReport = async (
   actual: string,
   expected: string,
   defaults: Sbv2Defaults,
-  quant: string = QUANT,
-  model: string = MODEL,
+  quant: string,
+  model: string,
+  dumped: URL,
 ): Promise<string> => {
-  await Deno.mkdir(OUTPUTS_DIR, { recursive: true });
-  const dumped = new URL(`e2e-sbv2-${model}-${quant}-mismatch.wav`, OUTPUTS_DIR);
-  await Deno.writeFile(dumped, wav);
-  // 先頭差分位置の材料（参照 WAV の実体）は F1 / i8 の分しか無い。
-  const difference = expected === REFERENCE_SHA256
-    ? `\n  ${await describeFirstDifference(wav)}`
+  // 先頭差分位置の材料（凍結した参照 WAV の実体）は F1 / i8 の分しか無い。
+  const difference = model === MODEL && quant === QUANT
+    ? `\n  ${await describeFirstDifference(expected, wav)}`
     : "";
   return `出力 WAV の sha256 が参照と一致しない\n` +
     `  期待 ${expected}\n  実際 ${actual}\n` +
@@ -341,10 +339,66 @@ const mismatchReport = async (
     `  実物 ${dumped.pathname}`;
 };
 
+/**
+ * 実物を残し、参照値と突き合わせ、決着を結果 JSON へ積む（全門共通の末端）。
+ *
+ * 実物は**成功・失敗を問わず毎回**書く — 次に割れたときの A/B の材料は、割れる前に要る。
+ */
+const settleCase = async (
+  audio: GeneratedAudio,
+  wav: Uint8Array<ArrayBuffer>,
+  actual: string,
+  defaults: Sbv2Defaults,
+  elapsedMs: number,
+  quant: string = QUANT,
+  model: string = MODEL,
+): Promise<void> => {
+  const caseId = caseIdOf(model, quant);
+  const artifact = `${caseId}.wav`;
+  const dumped = results.artifact(artifact);
+  await Deno.writeFile(dumped, wav);
+  const check = references.check(caseId, actual);
+  announceCheck(caseId, check, actual);
+  const expected = expectedOf(check);
+  await results.record({
+    id: caseId,
+    status: check.status,
+    ...(expected === undefined ? {} : { expected }),
+    actual,
+    artifact,
+    elapsedMs,
+  });
+  if (check.status === "fail") {
+    throw new Error(
+      await mismatchReport(audio, wav, actual, check.expected, defaults, quant, model, dumped),
+    );
+  }
+};
+
+/**
+ * 「別の席の参照値と衝突していないか」を見る（席の不発の検出）。
+ *
+ * NOTE: 突き合わせ相手の行がこの環境にまだ無ければ検査は成立しない（`write` で全ケースを
+ * 通して作れば、登録順に先行する席の行は必ず存在する）。
+ */
+const assertNoCollision = (
+  actual: string,
+  label: string,
+  others: readonly { readonly caseId: string; readonly why: string }[],
+): void => {
+  for (const other of others) {
+    if (references.lookup(other.caseId) === actual) {
+      throw new Error(
+        `${label} の WAV が ${other.caseId} と sha256 完全一致した（${actual}）— ${other.why}`,
+      );
+    }
+  }
+};
+
 Deno.test({
   name:
     `e2e(実GPU): 配布形 ${MODEL} / quant ${QUANT} / seed ${SEED} の WAV が参照 sha256 と一致する`,
-  ignore: !RUNNABLE,
+  ignore: !RUNNABLE || references.lacksReference(caseIdOf(MODEL, QUANT)),
   fn: async () => {
     const manifest = readManifest();
     const defaults = assertReferenceKnobs(modelEntry(manifest));
@@ -359,22 +413,20 @@ Deno.test({
     const audio = await pipeline.generate(await utteranceOnce(), { seed: SEED });
     const wav = encodeWav(audio.data, audio.sampleRate);
     const actual = await sha256Hex(wav);
-    const elapsed = ((performance.now() - started) / 1000).toFixed(1);
+    const elapsedMs = performance.now() - started;
     console.log(
-      `[e2e] sbv2 ${MODEL}/${QUANT}: ${elapsed}s / WAV ${wav.length}B / ` +
+      `[e2e] sbv2 ${MODEL}/${QUANT}: ${(elapsedMs / 1000).toFixed(1)}s / WAV ${wav.length}B / ` +
         `${(audio.data.length / audio.sampleRate).toFixed(2)}s / yomi ${YOMI_VERSION} / ` +
         `sha256 ${actual}`,
     );
-    if (actual !== REFERENCE_SHA256) {
-      throw new Error(await mismatchReport(audio, wav, actual, REFERENCE_SHA256, defaults));
-    }
+    await settleCase(audio, wav, actual, defaults, elapsedMs);
   },
 });
 
 Deno.test({
   name:
     `e2e(実GPU): 配布形 ${MODEL} / quant ${BERT4_QUANT} / seed ${SEED} の WAV が参照 sha256 と一致する`,
-  ignore: !RUNNABLE,
+  ignore: !RUNNABLE || references.lacksReference(caseIdOf(MODEL, BERT4_QUANT)),
   fn: async () => {
     const manifest = readManifest();
     const defaults = assertReferenceKnobs(modelEntry(manifest));
@@ -388,30 +440,25 @@ Deno.test({
     const audio = await pipeline.generate(await utteranceOnce(), { seed: SEED });
     const wav = encodeWav(audio.data, audio.sampleRate);
     const actual = await sha256Hex(wav);
-    const elapsed = ((performance.now() - started) / 1000).toFixed(1);
+    const elapsedMs = performance.now() - started;
     console.log(
-      `[e2e] sbv2 ${MODEL}/${BERT4_QUANT}: ${elapsed}s / WAV ${wav.length}B / ` +
+      `[e2e] sbv2 ${MODEL}/${BERT4_QUANT}: ${(elapsedMs / 1000).toFixed(1)}s / ` +
+        `WAV ${wav.length}B / ` +
         `${(audio.data.length / audio.sampleRate).toFixed(2)}s / yomi ${YOMI_VERSION} / ` +
         `sha256 ${actual}`,
     );
-    if (actual === REFERENCE_SHA256) {
-      throw new Error(
-        `${BERT4_QUANT} の WAV が ${QUANT} と sha256 完全一致した（${actual}）— ` +
-          "i4 席が効いていない（i4 quant の解決が既定へ落ちた / i4 席に i8 資産が入っている）",
-      );
-    }
-    if (actual !== BERT4_REFERENCE_SHA256) {
-      throw new Error(
-        await mismatchReport(audio, wav, actual, BERT4_REFERENCE_SHA256, defaults, BERT4_QUANT),
-      );
-    }
+    assertNoCollision(actual, BERT4_QUANT, [{
+      caseId: caseIdOf(MODEL, QUANT),
+      why: "i4 席が効いていない（i4 quant の解決が既定へ落ちた / i4 席に i8 資産が入っている）",
+    }]);
+    await settleCase(audio, wav, actual, defaults, elapsedMs, BERT4_QUANT);
   },
 });
 
 Deno.test({
   name:
     `e2e(実GPU): 配布形 ${MODEL} / quant ${W4_QUANT} / seed ${SEED} の WAV が参照 sha256 と一致する`,
-  ignore: !RUNNABLE,
+  ignore: !RUNNABLE || references.lacksReference(caseIdOf(MODEL, W4_QUANT)),
   fn: async () => {
     const manifest = readManifest();
     const defaults = assertReferenceKnobs(modelEntry(manifest));
@@ -425,27 +472,25 @@ Deno.test({
     const audio = await pipeline.generate(await utteranceOnce(), { seed: SEED });
     const wav = encodeWav(audio.data, audio.sampleRate);
     const actual = await sha256Hex(wav);
-    const elapsed = ((performance.now() - started) / 1000).toFixed(1);
+    const elapsedMs = performance.now() - started;
     console.log(
-      `[e2e] sbv2 ${MODEL}/${W4_QUANT}: ${elapsed}s / WAV ${wav.length}B / ` +
+      `[e2e] sbv2 ${MODEL}/${W4_QUANT}: ${(elapsedMs / 1000).toFixed(1)}s / WAV ${wav.length}B / ` +
         `${(audio.data.length / audio.sampleRate).toFixed(2)}s / yomi ${YOMI_VERSION} / ` +
         `sha256 ${actual}`,
     );
     // 席の不発は 2 通りある（3 席とも既定へ落ちた / net_g の 2 席だけ i8 のまま）ので、
-    // 「先行する 2 つの quant のどちらかと一致したら落とす」を 1 本の判定で持つ。
-    const collided = [[QUANT, REFERENCE_SHA256], [BERT4_QUANT, BERT4_REFERENCE_SHA256]]
-      .find(([, digest]) => digest === actual);
-    if (collided !== undefined) {
-      throw new Error(
-        `${W4_QUANT} の WAV が ${collided[0]} と sha256 完全一致した（${actual}）— ` +
-          "i4 席が効いていない（i4 quant の解決が既定へ落ちた / i4 席に i8 資産が入っている）",
-      );
-    }
-    if (actual !== W4_REFERENCE_SHA256) {
-      throw new Error(
-        await mismatchReport(audio, wav, actual, W4_REFERENCE_SHA256, defaults, W4_QUANT),
-      );
-    }
+    // 先行する 2 つの quant のどちらとも一致しないことを見る。
+    assertNoCollision(actual, W4_QUANT, [
+      {
+        caseId: caseIdOf(MODEL, QUANT),
+        why: "i4 席が効いていない（i4 quant の解決が既定へ落ちた / i4 席に i8 資産が入っている）",
+      },
+      {
+        caseId: caseIdOf(MODEL, BERT4_QUANT),
+        why: "net_g 側の i4 席が効いていない（front / voice に i8 資産が入っている）",
+      },
+    ]);
+    await settleCase(audio, wav, actual, defaults, elapsedMs, W4_QUANT);
   },
 });
 
@@ -453,7 +498,7 @@ for (const gate of SPEAKER_GATES) {
   Deno.test({
     name:
       `e2e(実GPU): 配布形 ${gate.model} / quant ${QUANT} / seed ${SEED} の WAV が参照 sha256 と一致する`,
-    ignore: !RUNNABLE,
+    ignore: !RUNNABLE || references.lacksReference(caseIdOf(gate.model, QUANT)),
     fn: async () => {
       const manifest = readManifest();
       const defaults = assertReferenceKnobs(modelEntry(manifest, gate.model), gate.speaker);
@@ -466,25 +511,20 @@ for (const gate of SPEAKER_GATES) {
       const audio = await pipeline.generate(await utteranceOnce(), { seed: SEED });
       const wav = encodeWav(audio.data, audio.sampleRate);
       const actual = await sha256Hex(wav);
-      const elapsed = ((performance.now() - started) / 1000).toFixed(1);
+      const elapsedMs = performance.now() - started;
       console.log(
-        `[e2e] sbv2 ${gate.model}/${QUANT}: ${elapsed}s / WAV ${wav.length}B / ` +
+        `[e2e] sbv2 ${gate.model}/${QUANT}: ${(elapsedMs / 1000).toFixed(1)}s / ` +
+          `WAV ${wav.length}B / ` +
           `${(audio.data.length / audio.sampleRate).toFixed(2)}s / yomi ${YOMI_VERSION} / ` +
           `sha256 ${actual}`,
       );
       // モデルごとに net_g の実重みが違う — F1 と一致したら資産解決が別モデルへ倒れている
       // （shape は同じまま別人の声が出る沈黙誤値クラス）。
-      if (actual === REFERENCE_SHA256) {
-        throw new Error(
-          `${gate.model} の WAV が ${MODEL} と sha256 完全一致した（${actual}）— ` +
-            "資産解決が別モデルへ倒れている（model 選択が効いていない）",
-        );
-      }
-      if (actual !== gate.sha256) {
-        throw new Error(
-          await mismatchReport(audio, wav, actual, gate.sha256, defaults, QUANT, gate.model),
-        );
-      }
+      assertNoCollision(actual, gate.model, [{
+        caseId: caseIdOf(MODEL, QUANT),
+        why: "資産解決が別モデルへ倒れている（model 選択が効いていない）",
+      }]);
+      await settleCase(audio, wav, actual, defaults, elapsedMs, QUANT, gate.model);
     },
   });
 }
@@ -740,3 +780,6 @@ Deno.test({
     );
   },
 });
+
+// 「この環境の参照値がまだ無い」を無音の緑にしないための門番（ADR 0005 と同じ流儀）。
+registerReferenceGate(references, { runnable: RUNNABLE });

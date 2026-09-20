@@ -2,12 +2,26 @@
  * Anima の**移植の門**（実 GPU）。manifest → 資産 → `AnimaPipeline` → `generate` →
  * `encodePng` まで通し、出力 PNG の sha256 が参照値と**ビット一致**するかだけを見る。
  *
- * turbo の参照値は **anima-turbo-v1.1（公式 checkpoint — ADR 0087）の初回実測で凍結**した
- * もの（2026-09-01 の再構造で旧 fused turbo の参照値は退役 — モデル自体が置き換わったため。
- * 素の base〈anima-v1.0〉の参照値は 2026-08-22 実測のまま = 再構造で v1.0 のバイトが 1 bit も
- * 動いていないことの証明を兼ねる）。数値が 1 bit でも動いたら移植のどこかが変わっている —
- * **tolerance 化も参照値の差し替えも禁止**で、赤のまま止めて差分の内容（PNG バイト長 /
- * 画素の統計 / 実物の PNG）を出す。ここを緩めると「移植できた」の意味が消える。
+ * 参照値は `fixtures/references/anima.json` に**環境キーごとの行**で入っている
+ * （`helpers/reference.ts`）。この門が主張できるのは「その機で数値が動いていない」ことだけで、
+ * クロスデバイスのビット同一は仕様として保証しない（docs/limitations.md）。RTX 3080 Ti の行は
+ * turbo が **anima-turbo-v1.1（公式 checkpoint — ADR 0087）の初回実測で凍結**したもの
+ * （2026-09-01 の再構造で旧 fused turbo の参照値は退役 — モデル自体が置き換わったため。素の
+ * base〈anima-v1.0〉の行は 2026-08-22 実測のまま = 再構造で v1.0 のバイトが 1 bit も動いて
+ * いないことの証明を兼ねる）。
+ *
+ * 数値が 1 bit でも動いたら移植のどこかが変わっている — **tolerance 化は禁止**で、赤のまま
+ * 止めて差分の内容（PNG バイト長 / 画素の統計 / 実物の PNG）を出す。ここを緩めると「移植
+ * できた」の意味が消える。
+ *
+ * - **他の機の行を足す**のは `KARUME_REFERENCE=write`（既存の行には触らない）。
+ * - **自分の機の行を焼き直す**のは `KARUME_REFERENCE=rewrite` だけで、「何が変わったのか」を
+ *   先に言えたときに限る（旧→新はログに出る）。他環境の行は巻き込まない。
+ * - 参照値を持たない機ではそのケースを**明示 SKIP** し、参照門（このファイルの末尾）が
+ *   「参照が無いので全 SKIP」を赤で知らせる。
+ * - 同じバイトを別経路から産む門（`fromPretrained-512` / `onEvent-1024` /
+ *   `base-cfg-fromAssets-shards`）は**自分のケース ID の行**を持ちつつ、双子のケースの行とも
+ *   一致することを検査する（経路間のビット同一が行の分割で緩まないように）。
  *
  * MUST: 資産は `models/karume-anima/`（untracked・実 GPU 機のローカル資産 — 公式 5 変種同居・
  * 既定 = anima-turbo-v1.1）。turbo（8 step / CFG 無し）の門は既定モデルで、**CFG≠1 の門**
@@ -45,18 +59,22 @@ import { sigmaSchedule } from "../src/anima/sampler.ts";
 import { ANIMA_SPATIAL_COMPRESSION } from "../src/anima/dit-tokens.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { MemoryCacheStorage } from "./helpers/memory-cache.ts";
+import {
+  announceCheck,
+  expectedOf,
+  openReferences,
+  registerReferenceGate,
+} from "../../runtime/tests/helpers/reference.ts";
+import { openResults } from "../../runtime/tests/helpers/results.ts";
 
 /** 資産の置き場（リポ直下 `models/karume-anima/` — 公式 5 変種同居・既定 = turbo-v1.1）。 */
 const ASSETS_DIR = new URL("../../../models/karume-anima/", import.meta.url);
 /** CFG の門が選ぶモデル（素の base — 既定の turbo は CFG=1 で uncond 側を通らない）。 */
 const BASE_MODEL = "anima-v1.0";
-/** 実行日（モジュールロード時に 1 回だけ確定 — ダンプ先の日付ディレクトリに使う）。 */
-const TODAY = new Date().toISOString().slice(0, 10);
-/** ミスマッチ時の実物ダンプ先（`outputs/bench/` は消して安全な席 — docs/assets-layout.md）。 */
-const OUTPUTS_DIR = new URL(
-  `../../../outputs/bench/karume-anima/${TODAY}_e2e-mismatch/`,
-  import.meta.url,
-);
+/** 参照 digest の席（環境キーごとの行 — 追跡対象）。 */
+const references = openReferences(new URL("fixtures/references/anima.json", import.meta.url));
+/** 実物と決着の置き場（`outputs/verify/<環境キー>/<日付>_anima/` — 消して安全）。 */
+const results = openResults("anima");
 
 /**
  * 移行元デモの既定プロンプト（参照 PNG を焼いた時の文字列そのもの）。
@@ -68,27 +86,21 @@ const STEPS = 8;
 const SEED = 42;
 
 /**
- * 参照値（anima-turbo-v1.1 の初回実測 2026-09-01 で凍結 — 以後変更禁止）。
- * 凍結時の内部整合: fromPretrained-512 と 512 / onEvent-1024 と 1024 がそれぞれ
- * ビット同一（別経路 + NaN 汚染した観測込みで同じバイト列）を確認済み。
+ * 既定モデル（turbo）の門 3 本の条件。ケース ID は `<quant>-<解像度>`（ログのラベル・
+ * `fixtures/references/anima.json` の鍵・実物のファイル名を兼ねる）。
+ *
+ * 内部整合: fromPretrained-512 と 512 / onEvent-1024 と 1024 がそれぞれビット同一
+ * （別経路 + NaN 汚染した観測込みで同じバイト列）— 双子の検査として門に入っている。
  */
 const REFERENCE = [
-  {
-    quant: "f16+dit8-a8-attn8-s16",
-    resolution: { width: 1024, height: 1024 },
-    sha256: "7d21fb73928e396e3e6f002d2823d247518e9d8571de75bc6ed018241e3706ee",
-  },
-  {
-    quant: "f16+dit8-a8-attn8-s16",
-    resolution: { width: 512, height: 512 },
-    sha256: "6bf02e1b51cd6e6032b94bece931605c5b97ba4e5e804fcb90a23a9b9bde9155",
-  },
-  {
-    quant: "f16",
-    resolution: { width: 1024, height: 1024 },
-    sha256: "79a3db1bf44d878968f7bf503b413c367b358eea4f6db3c666be4d846901df59",
-  },
-] as const satisfies readonly { quant: string; resolution: ImageSize; sha256: string }[];
+  { quant: "f16+dit8-a8-attn8-s16", resolution: { width: 1024, height: 1024 } },
+  { quant: "f16+dit8-a8-attn8-s16", resolution: { width: 512, height: 512 } },
+  { quant: "f16", resolution: { width: 1024, height: 1024 } },
+] as const satisfies readonly { quant: string; resolution: ImageSize }[];
+
+/** ケース ID（ログのラベル / 参照値の鍵 / 実物のファイル名）。 */
+const caseIdOf = (quant: string, resolution: ImageSize): string =>
+  `${quant}-${formatResolution(resolution)}`;
 
 const manifestText = await Deno.readTextFile(new URL("karume.json", ASSETS_DIR)).catch(
   () => undefined,
@@ -219,41 +231,82 @@ const describePixels = (image: GeneratedImage): string => {
  * 参照 sha と食い違ったときの報告。
  *
  * MUST: ここで tolerance に逃げない。参照は sha256 しか無い（参照 PNG のバイト列は持って
- * いない）ので**先頭差分位置は原理的に出せない** — 代わりに実物を {@link OUTPUTS_DIR} へ
- * 落として、バイト長・画素統計と併せて人が突き合わせられる形にする。
+ * いない）ので**先頭差分位置は原理的に出せない** — 代わりに実物（結果の席に毎回残る）と
+ * バイト長・画素統計を併せて人が突き合わせられる形にする。
  */
-const mismatchReport = async (
+const mismatchReport = (
   label: string,
   image: GeneratedImage,
   png: Uint8Array<ArrayBuffer>,
   expected: string,
   actual: string,
-): Promise<string> => {
-  await Deno.mkdir(OUTPUTS_DIR, { recursive: true });
-  const dumped = new URL(`e2e-mismatch-${label}.png`, OUTPUTS_DIR);
+  dumped: URL,
+): string =>
+  `${label}: 出力 PNG の sha256 が参照と一致しない\n` +
+  `  期待 ${expected}\n  実際 ${actual}\n` +
+  `  PNG ${png.length} バイト / 画像 ${image.width}×${image.height}\n` +
+  `  画素 ${describePixels(image)}\n` +
+  `  実物 ${dumped.pathname}（参照はバイト列ではなく sha256 のみなので先頭差分位置は出せない）`;
+
+/**
+ * 実物を残し、参照値と突き合わせ、決着を結果 JSON へ積む（全門共通の末端）。
+ *
+ * `twin` は「別経路で同じバイトが出るはず」の相手のケース ID。参照値が環境ごとの行になって
+ * からは、経路間のビット同一を「同じ定数を渡す」形では持てないので、**双子の行と実測**を
+ * 直接突き合わせる（相手の行がこの環境にまだ無いときだけ検査は成立しない）。
+ */
+const settlePng = async (
+  label: string,
+  image: GeneratedImage,
+  png: Uint8Array<ArrayBuffer>,
+  actual: string,
+  elapsedMs: number,
+  twin?: string,
+): Promise<void> => {
+  const artifact = `${label}.png`;
+  // 実物は成功・失敗を問わず毎回残す（次に割れたときの A/B の材料は、割れる前に要る）。
+  const dumped = results.artifact(artifact);
   await Deno.writeFile(dumped, png);
-  return `${label}: 出力 PNG の sha256 が参照と一致しない\n` +
-    `  期待 ${expected}\n  実際 ${actual}\n` +
-    `  PNG ${png.length} バイト / 画像 ${image.width}×${image.height}\n` +
-    `  画素 ${describePixels(image)}\n` +
-    `  実物 ${dumped.pathname}（参照はバイト列ではなく sha256 のみなので先頭差分位置は出せない）`;
+  if (twin !== undefined) {
+    const twinSha = references.lookup(twin);
+    if (twinSha !== undefined && twinSha !== actual) {
+      throw new Error(
+        `${label} の PNG が ${twin} とビット同一でない（${twin} ${twinSha} / 実測 ${actual}）— ` +
+          "別経路が同じバイトを産んでいない",
+      );
+    }
+  }
+  const check = references.check(label, actual);
+  announceCheck(label, check, actual);
+  const expected = expectedOf(check);
+  await results.record({
+    id: label,
+    status: check.status,
+    ...(expected === undefined ? {} : { expected }),
+    actual,
+    artifact,
+    elapsedMs,
+  });
+  if (check.status === "fail") {
+    throw new Error(mismatchReport(label, image, png, check.expected, actual, dumped));
+  }
 };
 
 /**
  * 生成 → PNG → sha 突合。一致しない場合は緩めず、診断を付けて落とす。
  *
- * `onEvent` を渡した呼びも**同じ参照値**で突き合わせる — 観測席が数値に 1 ビットも触って
- * いないことの直接証拠になる（下の onEvent 門）。`sampler` は request 側の上書き席
- * （省略時は manifest の `scheduler.type`）。
+ * `onEvent` を渡した呼びも**同じバイト列**を要求する — 観測席が数値に 1 ビットも触って
+ * いないことの直接証拠になる（下の onEvent 門。`twin` で観測なしのケースと突き合わせる）。
+ * `sampler` は request 側の上書き席（省略時は manifest の `scheduler.type`）。
  */
 const assertReferencePng = async (
   label: string,
   pipeline: AnimaPipeline,
   resolution: ImageSize,
-  expected: string,
   options: {
     readonly sampler?: AnimaSamplerType;
     readonly onEvent?: (event: AnimaGenerateEvent) => void;
+    readonly twin?: string;
   } = {},
 ): Promise<void> => {
   const { sampler, onEvent } = options;
@@ -268,11 +321,11 @@ const assertReferencePng = async (
   });
   const png = await encodePng(image.data, image.width, image.height);
   const actual = await sha256Hex(png);
-  const elapsed = ((performance.now() - started) / 1000).toFixed(1);
-  console.log(`[e2e] ${label}: ${elapsed}s / PNG ${png.length}B / sha256 ${actual}`);
-  if (actual !== expected) {
-    throw new Error(await mismatchReport(label, image, png, expected, actual));
-  }
+  const elapsedMs = performance.now() - started;
+  console.log(
+    `[e2e] ${label}: ${(elapsedMs / 1000).toFixed(1)}s / PNG ${png.length}B / sha256 ${actual}`,
+  );
+  await settlePng(label, image, png, actual, elapsedMs, options.twin);
 };
 
 /**
@@ -312,8 +365,8 @@ const withTurbo = async (
   }
 };
 
-for (const { quant, resolution, sha256 } of REFERENCE) {
-  const label = `${quant}-${formatResolution(resolution)}`;
+for (const { quant, resolution } of REFERENCE) {
+  const label = caseIdOf(quant, resolution);
   // request 側 `sampler:"euler"` の明示が manifest 既定（= 公式配布の宣言）とビット同一である
   // ことは、**生成を 1 本も増やさず**最短の 512 ケースだけを明示に振り替えて見る。既定経路の
   // 門は残り 2 ケースと fromPretrained（同じ quant/512 を既定で回して同じ sha を要求する）が
@@ -323,13 +376,13 @@ for (const { quant, resolution, sha256 } of REFERENCE) {
     name: `e2e(実GPU): quant ${quant} / ${formatResolution(resolution)} / ${STEPS}step / ` +
       `seed ${SEED} の PNG が参照 sha256 と一致する` +
       (sampler === undefined ? "" : `（sampler:"${sampler}" 明示）`),
-    ignore: !RUNNABLE,
+    ignore: !RUNNABLE || references.lacksReference(label),
     fn: async () => {
       await withTurbo(
         quant,
         {},
         (pipeline) =>
-          assertReferencePng(label, pipeline, resolution, sha256, {
+          assertReferencePng(label, pipeline, resolution, {
             ...(sampler === undefined ? {} : { sampler }),
           }),
       );
@@ -348,25 +401,22 @@ for (const { quant, resolution, sha256 } of REFERENCE) {
 // MUST: 1024² の上書きは足さない（GPU 時間の上限 — 更新則はホスト側の式で解像度に依らない）。
 
 /**
- * turbo 512²（`REFERENCE[1]` と同じ quant / 解像度 / steps / seed）を DPM++ 2M で回した実測
- * （anima-turbo-v1.1・2026-09-01 凍結）。変更禁止。
+ * turbo 512²（`REFERENCE[1]` と同じ quant / 解像度 / steps / seed）を DPM++ 2M で回したケース。
  */
-const TURBO_DPMPP_SHA256 = "c2ee6787cce4a169f557a21736c1afb8fad17cbb4706cb8cbd871a6c05fa2c93";
+const TURBO_DPMPP_CASE = `${caseIdOf(REFERENCE[1].quant, REFERENCE[1].resolution)}-dpmpp`;
 
 Deno.test({
   name: `e2e(実GPU): turbo ${formatResolution(REFERENCE[1].resolution)} を request の ` +
     `sampler:"dpmpp-2m" で回すと DPM++ 2M の参照 sha256 と一致する`,
-  ignore: !RUNNABLE,
+  ignore: !RUNNABLE || references.lacksReference(TURBO_DPMPP_CASE),
   fn: async () => {
     const { quant, resolution } = REFERENCE[1];
-    await withTurbo(quant, {}, (pipeline) =>
-      assertReferencePng(
-        `${quant}-${formatResolution(resolution)}-dpmpp`,
-        pipeline,
-        resolution,
-        TURBO_DPMPP_SHA256,
-        { sampler: "dpmpp-2m" },
-      ));
+    await withTurbo(
+      quant,
+      {},
+      (pipeline) =>
+        assertReferencePng(TURBO_DPMPP_CASE, pipeline, resolution, { sampler: "dpmpp-2m" }),
+    );
   },
 });
 
@@ -378,22 +428,20 @@ Deno.test({
 // いなかった**（波 L で気付いた穴）。素の base 配布形は既定が CFG なので、そこを 1 ケース
 // だけ固定する（解像度 512 は所要時間の都合 — CFG は 1 step が forward 2 本）。
 
-/** 参照値（2026-08-22 実測 — 変更禁止）。 */
+/** CFG の門の条件（RTX 3080 Ti の行は 2026-08-22 実測）。 */
 const BASE_REFERENCE = {
   quant: "f16+dit8-a8-attn8-s16",
   resolution: { width: 512, height: 512 },
   steps: 20,
   guidanceScale: 4,
   negativePrompt: "low quality, worst quality, blurry, bad anatomy, jpeg artifacts",
-  sha256: "071929c40e90628006eab593842080246140e771a82f8a35762507f4a12e9560",
 } as const;
 
 /** 組み上がった base の pipeline を {@link BASE_REFERENCE} のノブで 1 枚焼き、sha を突き合わせる。 */
 const assertBasePng = async (
   label: string,
   pipeline: AnimaPipeline,
-  expected: string,
-  options: { readonly sampler?: AnimaSamplerType } = {},
+  options: { readonly sampler?: AnimaSamplerType; readonly twin?: string } = {},
 ): Promise<void> => {
   const { resolution, steps, guidanceScale, negativePrompt } = BASE_REFERENCE;
   const started = performance.now();
@@ -408,11 +456,11 @@ const assertBasePng = async (
   });
   const png = await encodePng(image.data, image.width, image.height);
   const actual = await sha256Hex(png);
-  const elapsed = ((performance.now() - started) / 1000).toFixed(1);
-  console.log(`[e2e] ${label}: ${elapsed}s / PNG ${png.length}B / sha256 ${actual}`);
-  if (actual !== expected) {
-    throw new Error(await mismatchReport(label, image, png, expected, actual));
-  }
+  const elapsedMs = performance.now() - started;
+  console.log(
+    `[e2e] ${label}: ${(elapsedMs / 1000).toFixed(1)}s / PNG ${png.length}B / sha256 ${actual}`,
+  );
+  await settlePng(label, image, png, actual, elapsedMs, options.twin);
 };
 
 /**
@@ -426,7 +474,6 @@ const assertBasePng = async (
  */
 const assertBaseReferencePng = async (
   label: string,
-  expected: string,
   options: { readonly sampler?: AnimaSamplerType } = {},
 ): Promise<void> => {
   const manifest = readManifest();
@@ -438,7 +485,7 @@ const assertBaseReferencePng = async (
       { repo: REPO, hubUrl: `http://127.0.0.1:${server.addr.port}` },
       { model: BASE_MODEL, quant, caches: new MemoryCacheStorage() },
     );
-    await assertBasePng(label, pipeline, expected, options);
+    await assertBasePng(label, pipeline, options);
   } finally {
     await server.shutdown();
   }
@@ -447,8 +494,8 @@ const assertBaseReferencePng = async (
 Deno.test({
   name: `e2e(実GPU): 素の base / CFG ${BASE_REFERENCE.guidanceScale} / ` +
     `${BASE_REFERENCE.steps}step の PNG が参照 sha256 と一致する`,
-  ignore: !RUNNABLE,
-  fn: () => assertBaseReferencePng("base-cfg", BASE_REFERENCE.sha256),
+  ignore: !RUNNABLE || references.lacksReference("base-cfg"),
+  fn: () => assertBaseReferencePng("base-cfg"),
 });
 
 // --- 全量面（fromAssets）で分割配布形を読む -----------------------------------
@@ -484,7 +531,7 @@ const readLocalAssets = async (
 Deno.test({
   name:
     "e2e(実GPU): 分割配布形を fromAssets（全量面）で組んでも 素の base の参照 sha256 と一致する",
-  ignore: !RUNNABLE,
+  ignore: !RUNNABLE || references.lacksReference("base-cfg-fromAssets-shards"),
   fn: async () => {
     const { quant } = BASE_REFERENCE;
     const input = await readLocalAssets(ASSETS_DIR, readManifest(), quant);
@@ -497,24 +544,22 @@ Deno.test({
       );
     }
     await using pipeline = await AnimaPipeline.fromAssets(input, { model: BASE_MODEL, quant });
-    await assertBasePng("base-cfg-fromAssets-shards", pipeline, BASE_REFERENCE.sha256);
+    await assertBasePng("base-cfg-fromAssets-shards", pipeline, { twin: "base-cfg" });
   },
 });
 
 /**
  * 素の base を {@link BASE_REFERENCE} と同じノブ（CFG 4 / 20step / seed 42 / 同じネガティブ）で
- * DPM++ 2M へ振ったときの実測（d2e0484 の golden — daf86af で退役）。変更禁止。
+ * DPM++ 2M へ振ったケース（RTX 3080 Ti の行は d2e0484 の golden — daf86af で退役）。
  *
  * CFG≠1 の経路にも上書き席の門を置く — DPM++ 2M の 2 次項は cond/uncond の**合成後**の値を
  * 履歴に持つので、turbo（CFG 無し）の一致だけでは合成と履歴の噛み合わせが裸のまま残る。
  */
-const BASE_DPMPP_SHA256 = "97dad23f6d3bede37b259cbf323b28de6bea60433a431ff859ab3815a08d571c";
-
 Deno.test({
   name: `e2e(実GPU): 素の base を request の sampler:"dpmpp-2m" で回すと ` +
     `DPM++ 2M の参照 sha256 と一致する`,
-  ignore: !RUNNABLE,
-  fn: () => assertBaseReferencePng("base-cfg-dpmpp", BASE_DPMPP_SHA256, { sampler: "dpmpp-2m" }),
+  ignore: !RUNNABLE || references.lacksReference("base-cfg-dpmpp"),
+  fn: () => assertBaseReferencePng("base-cfg-dpmpp", { sampler: "dpmpp-2m" }),
 });
 
 // --- fromPretrained（取得層込み）--------------------------------------------
@@ -525,11 +570,11 @@ Deno.test({
 // 現物と合っていることの門を兼ねる。
 //
 // 解像度が 512 なのは RAM の都合（取得層のメモリキャッシュが資産の写しを持つ）。ビット一致の
-// 門としては 1024 と同格 — 参照 sha は上の 512 ケースと同じ値を使う。
+// 門としては 1024 と同格 — 上の 512 ケースと**同じバイト**が出ることを双子の検査で要求する。
 
 Deno.test({
   name: "e2e(実GPU): fromPretrained（取得層 + integrity 検証）の PNG が参照 sha256 と一致する",
-  ignore: !RUNNABLE,
+  ignore: !RUNNABLE || references.lacksReference("fromPretrained-512"),
   fn: async () => {
     const quant = "f16+dit8-a8-attn8-s16";
     const resolution: ImageSize = { width: 512, height: 512 };
@@ -542,7 +587,9 @@ Deno.test({
       quant,
       { caches, onRunDiagnostics: (component) => observed.push(component) },
       (pipeline) =>
-        assertReferencePng("fromPretrained-512", pipeline, resolution, REFERENCE[1].sha256),
+        assertReferencePng("fromPretrained-512", pipeline, resolution, {
+          twin: caseIdOf(REFERENCE[1].quant, REFERENCE[1].resolution),
+        }),
     );
     const counts = new Map<string, number>();
     for (const component of observed) counts.set(component, (counts.get(component) ?? 0) + 1);
@@ -587,7 +634,7 @@ Deno.test({
 
 Deno.test({
   name: "e2e(実GPU): onEvent の観測は数値に触らない（イベント列 / 途中 latent / 中断）",
-  ignore: !RUNNABLE,
+  ignore: !RUNNABLE || references.lacksReference("onEvent-1024"),
   fn: async (t) => {
     const quant = "f16+dit8-a8-attn8-s16";
     const resolution: ImageSize = { width: 1024, height: 1024 };
@@ -607,7 +654,8 @@ Deno.test({
         const lengths: number[] = [];
         let firstStep: (() => { data: Float32Array<ArrayBuffer> }) | undefined;
         let firstStepData: Float32Array | undefined;
-        await assertReferencePng("onEvent-1024", pipeline, resolution, REFERENCE[0].sha256, {
+        await assertReferencePng("onEvent-1024", pipeline, resolution, {
+          twin: caseIdOf(REFERENCE[0].quant, REFERENCE[0].resolution),
           onEvent: (event) => {
             if (event.kind === "stage") {
               log.push(`stage:${event.component}:${event.at}`);
@@ -800,3 +848,18 @@ Deno.test({
     }
   },
 });
+
+/** この門が持つケース ID 全部（参照値が無いものを登録時に 1 度だけ知らせる）。 */
+const CASE_IDS: readonly string[] = [
+  ...REFERENCE.map(({ quant, resolution }) => caseIdOf(quant, resolution)),
+  TURBO_DPMPP_CASE,
+  "base-cfg",
+  "base-cfg-fromAssets-shards",
+  "base-cfg-dpmpp",
+  "fromPretrained-512",
+  "onEvent-1024",
+];
+if (RUNNABLE) references.warnMissing(CASE_IDS);
+
+// 「この環境の参照値がまだ無い」を無音の緑にしないための門番（ADR 0005 と同じ流儀）。
+registerReferenceGate(references, { runnable: RUNNABLE });
