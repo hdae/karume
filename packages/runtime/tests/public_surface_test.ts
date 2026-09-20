@@ -8,7 +8,7 @@
 //
 // 面を変えたときの更新手順は失敗メッセージが持つ（`KARUME_SURFACE=write`）。
 
-import { assertPublicSurface } from "./public-surface.ts";
+import { assertPublicSurface } from "./helpers/public-surface.ts";
 
 Deno.test("公開面: runtime の exports がスナップショットと一致する", async () => {
   await assertPublicSurface(new URL("../", import.meta.url));

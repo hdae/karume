@@ -1,5 +1,5 @@
-// 公開面のスナップショット門の実体（ADR [0008](../../../docs/decisions/0008-public-api.md) 追記
-// 2026-09-20）。3 パッケージの `tests/public_surface_test.ts` が共通で使う。
+// 公開面のスナップショット門の実体（ADR [0008](../../../../docs/decisions/0008-public-api.md)
+// 追記 2026-09-20）。3 パッケージの `tests/public_surface_test.ts` が共通で使う。
 //
 // 名指しの門（`packages/models/tests/models_barrel_surface_test.ts`）との役割分担:
 //

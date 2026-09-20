@@ -13,7 +13,7 @@
 //
 // 門の実体は runtime 側に 1 本だけ置く（`shard-files.ts` 等と同じパッケージ跨ぎ相対 import）。
 
-import { assertPublicSurface } from "../../runtime/tests/public-surface.ts";
+import { assertPublicSurface } from "../../runtime/tests/helpers/public-surface.ts";
 
 Deno.test("公開面: models の exports（barrel + 9 サブパス）がスナップショットと一致する", async () => {
   await assertPublicSurface(new URL("../", import.meta.url));

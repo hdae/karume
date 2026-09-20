@@ -63,4 +63,4 @@
   実資産も要らず 3 本で合計 0.9 秒、レーン分割の core レーンに入る。更新手順は失敗メッセージが持つ ——
   `KARUME_SURFACE=write` で同じテストを回して fixture を書き直し、差分を CHANGELOG に明示する（この決定の本文
   「公開面の変更はエクスポート差分をレビューで明示」を、レビュー前に機械が差分を出す形にしたもの）。門の実体は
-  `packages/runtime/tests/public-surface.ts` 1 本。
+  `packages/runtime/tests/helpers/public-surface.ts` 1 本。
