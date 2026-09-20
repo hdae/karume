@@ -121,6 +121,7 @@ class TestQatQuants:
             "linearGemvReduce": "parallel",
             "fuseRmsNormAdd": True,
             "fuseLinearStaticQuantize": True,
+            "packedStaticQuantize": True,
         }
 
     def test_unmeasured_e4b_keeps_its_single_reference_mode(self):

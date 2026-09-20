@@ -143,11 +143,12 @@ def qat_quants(model: str) -> Mapping[str, Any]:
                 "linearGemvReduce": "parallel",
                 "fuseRmsNormAdd": True,
                 "fuseLinearStaticQuantize": True,
+                "packedStaticQuantize": True,
             },
             "label": "Fixed mixed QAT with parallel GEMV and fusion",
             "description": "Same fixed QAT weights; parallel GEMV, RMS-add and linear-SRQ "
-            "fusion for E2B. Use i4 for reference summation or i4-gemvpar without fusion. "
-            "Requires fusion-option support.",
+            "fusion, and packed int8 activations for E2B. Use i4 for reference summation "
+            "or i4-gemvpar without fusion. Requires fusion-option support.",
         }
     return quants
 
