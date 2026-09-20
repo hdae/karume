@@ -195,10 +195,19 @@ curl -sS -H "Authorization: Bearer <accessToken>" "<casUrl>/v1/reconstructions/<
 `deno publish` が 3 パッケージ（hub / runtime → models）を依存順に一括 publish する
 （既公開 version は冪等スキップ・OIDC トークンレス）。
 
+NOTE: パッケージ README / LICENSE は公開物に含まれる（`packages/*/README.md` と
+`packages/*/LICENSE` — `deno publish --dry-run --allow-dirty` の出力に 3 パッケージとも載ることを
+2026-09-20 に確認。各 `deno.json` の `publish` は `exclude: ["tests/"]` だけで、`include` の明示は
+要らない）。
+
 - [ ] lockstep bump コミット: 3 JSR パッケージ + exporter の `version`、models → hub 等の
       `^` 依存、`deno.lock` の specifier、**`tools/uv.lock` の再生成（`uv lock` — MUST。CI は
       `uv run --locked` で鮮度検査するため、漏れると exporter / recipes 両ジョブが赤になる。
       実例: 0.4.3 の `e15e271`）**を揃えて 1 コミット（実績: `d65535c` / `7d97dd4`）
+- [ ] `CHANGELOG.md` の `[Unreleased]` をその版の節へ移し、見出しに日付（`git log -1 --format=%cs`
+      と同じ `YYYY-MM-DD`）と版へのリンク定義を入れる。**bump コミットに含める**（ADR
+      [0008](decisions/0008-public-api.md) の「breaking は CHANGELOG で明示する」の実体 —
+      bump 後に足すと公開タグの中身と食い違う）
 - [ ] push（ユーザー）→ CI 緑を確認（`ci.yml` は `deno publish --dry-run` で公開グラフも検証）
 - [ ] CI 緑の main コミットから GitHub Release を作成 → published（発火）
 - [ ] JSR 側で 3 パッケージの新 version を確認

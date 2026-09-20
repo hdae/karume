@@ -21,6 +21,10 @@
   limitations「BiRefNet 系」「sha256 参照門」節。スコープと段取りは着手時に設計する。
   **段 0 済（2026-09-20）**: ④ の verify 分割（`test:core` / `test:models:<系列>` + 被覆の門
   `verify_lanes_test.ts` + 系列名に合わせたテスト改名）— 決定は [ADR 0005 追記](decisions/0005-verification.md)。
+  **段 2c 済（2026-09-20）**: パッケージ README / LICENSE 同梱（`packages/*/README.md` を英語で新設 + リポ直下 LICENSE をバイト同一で複製・公開物入りは `deno publish --dry-run` で確認 — [release-runbook §4](release-runbook.md)）。
+  **段 2b 済（2026-09-20）**: CHANGELOG 新設（リポ直下 `CHANGELOG.md` — Keep a Changelog 形式・
+  tag のある 18 版 + `[Unreleased]`。ADR 0008「breaking は CHANGELOG で明示する」の実体で、
+  [release-runbook](release-runbook.md) §4 に bump 時の移し替えを 1 項追加）。
 
 - **decode 速度調査の波（2026-09-19〜20・2026-09-20 に区切り — 残りは later へ）**: 帰属と反証は [decode 速度の帰属と次に試すこと](research/2026-09-19-qat-speed-recon.md)、
   候補の採否は [perf-ledger](perf-ledger.md) H-26〜H-29 / K-48〜K-53（K-45 / K-46 / K-47 は追記）。確定した事実: Deno の 23.8 ms/token のうち
