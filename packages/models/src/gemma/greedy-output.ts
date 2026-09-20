@@ -94,7 +94,7 @@ export type GemmaGreedyOutput = {
 
 /**
  * PLEをGPU常駐にした席では、target実行の直前にGPU内gatherを積んで常駐入力を差す（ADR 0085）。
- * batchが開いている間に積めばフェンスは増えず、通常runだけがgather用のbatchを1本余分に払う。
+ * batchが開いている間に積めばフェンスは増えず、prefillの通常runだけがgather用のbatchを1本余分に払う。
  */
 const withPleInput = async (
   ple: Gemma4PleResident | undefined,
@@ -139,17 +139,32 @@ export const createGemmaGreedyOutput = (
         assertAlive();
         return chain(async () => {
           if (ple === undefined) return await target.run(inputs, bindings, generation);
-          // 通常runはコマンド列を自分で閉じるので、gatherは先行する1本のbatchで済ませる。
-          // フェンスが1本増えるのはprefillと診断付きdecodeだけで、temperature0のdecodeは
-          // greedy側の同一batchへ積む（ADR 0085 の GPU 常駐席）。
+          const rows = gemma4PleGatherIds("greedy出力", inputs, ple.idsName).length;
           const batch = await gpu.beginBatch();
-          let extra: RunInputs;
           try {
-            extra = await withPleInput(ple, batch, inputs);
+            const extra = await withPleInput(ple, batch, inputs);
+            if (rows > 1) {
+              // prefill（M > 1）は gather 用の batch を先に閉じてから通常 run に渡す（フェンスが
+              // chunk ごとに 1 本増える）。enqueue 系は初回から slot backing を作る契約なので、
+              // chunk 形の backing を 1 本目から払わせない（生成面の prefill が run に留まる理由と
+              // 同じ — generation/sequence.ts）。
+              await batch.finish();
+              return await target.run(extra, bindings, generation);
+            }
+            // decode（M = 1）は gather と target を同じ batch に積み、グラフ出力を batch の終端
+            // フェンスで読み戻す（フェンス 1 本 — greedy と同じ形・ADR 0054 追記）。
+            const read = target.enqueueRead(extra, {
+              batch,
+              generation,
+              ...(bindings === undefined ? {} : { bindings }),
+            });
+            await read.admitted;
+            await batch.finish();
+            return await read.outputs;
           } finally {
+            // finish は何度呼んでも同じ決着を返す（成功経路では上で済んでいる）。
             await batch.finish();
           }
-          return await target.run(extra, bindings, generation);
         });
       },
     },

@@ -34,6 +34,7 @@ import { createGemma4Ple, parseGemma4PleIndex } from "../src/gemma/ple.ts";
 import { createGemma4PleResident, gemma4PleGpuBytes } from "../src/gemma/ple-gpu.ts";
 import { openPleShardAt } from "./helpers/ple-source.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { countFences } from "../../runtime/tests/helpers/fences.ts";
 
 const PRODUCT_ROOT = new URL("../../../outputs/series/gemma4-qat-e2b-product/", import.meta.url);
 const QAT_ROOT = new URL("../../../models/karume-gemma4-qat/", import.meta.url);
@@ -233,5 +234,53 @@ Deno.test({
       Gemma4Pipeline.fromPretrained(source, { pleResidency: "gpu" })
     );
     assertEquals(actual, expected, "GPU 常駐席の生成 id 列");
+  },
+});
+
+// 温度 > 0 の decode は greedy 経路を通らず通常 run（= `enqueueRead`）で走る。gather と target を
+// 同じ batch に積むので、GPU 常駐席が余分に払うフェンスは prefill の chunk ぶんだけになる
+// （ADR 0054 追記〈グラフ出力の一括読み戻し〉— 席の残件 ①）。
+Deno.test({
+  name:
+    "PLE GPU 常駐: 既定サンプラー経路の decode も host と同じ id 列で、余分なフェンスは prefill ぶんだけ（実GPU）",
+  ignore: !QAT_PRESENT || !GPU_AVAILABLE,
+  fn: async () => {
+    const source = denoDirectory(QAT_ROOT);
+    const generate = async (
+      pleResidency: "host" | "gpu",
+    ): Promise<{ ids: number[]; fences: number }> => {
+      const gpu = await acquireGpu();
+      try {
+        const pipeline = await Gemma4QatPipeline.fromPretrained(source, {
+          model: "e2b",
+          pleResidency,
+          gpu,
+        });
+        const fences = countFences(gpu);
+        try {
+          const ids: number[] = [];
+          const stream = pipeline.chat([{ role: "user", content: PROMPT }], {
+            maxNewTokens: GREEDY_STEPS,
+            sampler: { temperature: 0.8, topK: 40, seed: 7 },
+            onToken: (id) => ids.push(id),
+          });
+          await stream.text();
+          return { ids, fences: fences.count() };
+        } finally {
+          fences.restore();
+          await pipeline.dispose();
+        }
+      } finally {
+        gpu.destroy();
+      }
+    };
+    const host = await generate("host");
+    assertEquals(host.ids.length, GREEDY_STEPS, "host 経路が刻みぶん生成していない");
+    const resident = await generate("gpu");
+    assertEquals(resident.ids, host.ids, "GPU 常駐席の生成 id 列（サンプラー経路）");
+    // GPU 常駐席が host 経路より余分に払う queue 待ちは prefill chunk 1 本ぶんの gather batch
+    // だけで、decode の 16 token は 1 本も払わない（同じ batch の終端 map で読み戻す）。
+    // 席の残件 ① の前は decode ごとに 1 本増えていた（= 16 + 1）。
+    assertEquals(resident.fences - host.fences, 1, `host ${host.fences} / gpu ${resident.fences}`);
   },
 });
