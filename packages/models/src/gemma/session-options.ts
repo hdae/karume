@@ -16,7 +16,7 @@ export const resolveGemmaSessionOptions = (
   for (const key of Object.keys(quant)) {
     if (
       key !== "linearGemvReduce" && key !== "fuseRmsNormAdd" &&
-      key !== "fuseLinearStaticQuantize"
+      key !== "fuseLinearStaticQuantize" && key !== "packedStaticQuantize"
     ) throw new Error(`${where}: session.${key}は未対応`);
   }
   // ??はnullをquant定義へ戻すので使わない。不正な明示値は重み取得前に拒否する。
@@ -29,9 +29,11 @@ export const resolveGemmaSessionOptions = (
   const fuseLinearStaticQuantize = overrides.fuseLinearStaticQuantize === undefined
     ? quant.fuseLinearStaticQuantize
     : overrides.fuseLinearStaticQuantize;
-  // packedStaticQuantize（ADR 0105）は**呼び手の明示指定だけ**で入る。manifest 所有の
-  // 語彙（hub の SessionSpec）にはまだ席が無く、採用が決まってから足す。
-  const packedStaticQuantize = overrides.packedStaticQuantize;
+  // packedStaticQuantize（ADR 0105 追記 2〈語彙への昇格〉）は他の3欄と同じ順序で入る —
+  // manifest 所有の語彙（hub の SessionSpec）に席があり、QAT の i4-fast が宣言する。
+  const packedStaticQuantize = overrides.packedStaticQuantize === undefined
+    ? quant.packedStaticQuantize
+    : overrides.packedStaticQuantize;
   if (
     linearGemvReduce !== undefined && linearGemvReduce !== "sequential" &&
     linearGemvReduce !== "parallel" && linearGemvReduce !== "parallel-subgroup32"

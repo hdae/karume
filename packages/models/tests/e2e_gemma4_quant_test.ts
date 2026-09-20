@@ -36,7 +36,9 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
         const fastSession = {
           linearGemvReduce: "parallel",
           fuseRmsNormAdd: true,
-          ...(family === "gemma4-qat" ? { fuseLinearStaticQuantize: true } : {}),
+          ...(family === "gemma4-qat"
+            ? { fuseLinearStaticQuantize: true, packedStaticQuantize: true }
+            : {}),
         } as const;
         const manifest = {
           ...raw,
@@ -74,13 +76,16 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
                 parallel: true,
                 rms: true,
                 srq: family === "gemma4-qat",
+                packed: family === "gemma4-qat",
               },
               {
+                // i4-gemvpar は parallel だけを宣言する quant なので packed も立たない。
                 name: "parallel-reference",
                 options: { quant: "i4-gemvpar" },
                 parallel: true,
                 rms: false,
                 srq: false,
+                packed: false,
               },
               {
                 name: "explicit-fast",
@@ -88,6 +93,7 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
                 parallel: true,
                 rms: true,
                 srq: family === "gemma4-qat",
+                packed: family === "gemma4-qat",
               },
               {
                 name: "disable-rms",
@@ -95,13 +101,16 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
                 parallel: true,
                 rms: false,
                 srq: family === "gemma4-qat",
+                packed: family === "gemma4-qat",
               },
               {
+                // packed が掴むのは素のまま残った SRQ なので、linear→SRQ 融合とは独立に立つ。
                 name: "disable-srq",
                 options: { fuseLinearStaticQuantize: false },
                 parallel: true,
                 rms: true,
                 srq: false,
+                packed: family === "gemma4-qat",
               },
               {
                 name: "disable-both",
@@ -109,6 +118,7 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
                 parallel: true,
                 rms: false,
                 srq: false,
+                packed: family === "gemma4-qat",
               },
               {
                 name: "reference",
@@ -116,17 +126,22 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
                 parallel: false,
                 rms: false,
                 srq: false,
+                packed: false,
               },
               {
+                // sequential へ倒すので packed も明示 false で降ろす（quant 由来の true でも
+                // parallel 必須の拒否は効く）。
                 name: "override",
                 options: {
                   linearGemvReduce: "sequential",
                   fuseRmsNormAdd: false,
                   fuseLinearStaticQuantize: false,
+                  packedStaticQuantize: false,
                 },
                 parallel: false,
                 rms: false,
                 srq: false,
+                packed: false,
               },
             ] as const
           ) {
@@ -171,6 +186,12 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
                 assertEquals(
                   [...keys].some((key) => key.startsWith("linear_gemv_parallel")),
                   mode.parallel,
+                  mode.name,
+                );
+                // packed 変種のキーは既存キーの末尾に断片が付く（ADR 0105 決定 4）。
+                assertEquals(
+                  [...keys].some((key) => key.endsWith(":packed-x-i8")),
+                  mode.packed,
                   mode.name,
                 );
               } finally {

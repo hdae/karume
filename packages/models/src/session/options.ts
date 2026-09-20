@@ -47,6 +47,10 @@ const WRITERS: { readonly [K in keyof Required<SessionSpec>]: SpecWriter } = {
     spec.fuseLinearStaticQuantize === undefined
       ? {}
       : { fuseLinearStaticQuantize: spec.fuseLinearStaticQuantize },
+  packedStaticQuantize: (spec) =>
+    spec.packedStaticQuantize === undefined
+      ? {}
+      : { packedStaticQuantize: spec.packedStaticQuantize },
 };
 
 /** 宣言された欄だけを持つ `SessionOptions` を組む（未指定のキーは欄ごと作らない）。 */

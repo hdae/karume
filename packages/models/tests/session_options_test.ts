@@ -56,6 +56,7 @@ Deno.test("toSessionOptions: SessionSpec の全キーを写す（キー追加の
     linearGemvReduce: "sequential",
     fuseRmsNormAdd: false,
     fuseLinearStaticQuantize: false,
+    packedStaticQuantize: false,
   };
   const mapped = toSessionOptions(full) as Record<string, unknown>;
   assertEquals(Object.keys(mapped).sort(), Object.keys(full).sort());
@@ -63,7 +64,11 @@ Deno.test("toSessionOptions: SessionSpec の全キーを写す（キー追加の
 
 Deno.test("toSessionOptions: 融合の明示falseとtrueを保持する", () => {
   for (const value of [false, true]) {
-    const spec = { fuseRmsNormAdd: value, fuseLinearStaticQuantize: value };
+    const spec = {
+      fuseRmsNormAdd: value,
+      fuseLinearStaticQuantize: value,
+      packedStaticQuantize: value,
+    };
     assertEquals(toSessionOptions(spec), spec);
   }
 });

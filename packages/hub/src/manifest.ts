@@ -164,6 +164,7 @@ const SESSION_KEYS: Readonly<Record<keyof Required<SessionSpec>, true>> = {
   linearGemvReduce: true,
   fuseRmsNormAdd: true,
   fuseLinearStaticQuantize: true,
+  packedStaticQuantize: true,
 };
 
 export type LinearCompute = "f32" | "a8" | "f16";
@@ -283,6 +284,11 @@ export type SessionSpec = {
   readonly linearGemvReduce?: "sequential" | "parallel";
   readonly fuseRmsNormAdd?: boolean;
   readonly fuseLinearStaticQuantize?: boolean;
+  /**
+   * 固定 SRQ の int8 活性を u32 へ詰めて並列 GEMV へ渡す（ADR 0105 追記 2〈語彙への昇格〉）。
+   * `linearGemvReduce: "parallel"` を伴わない宣言は消費側が拒否する。
+   */
+  readonly packedStaticQuantize?: boolean;
 };
 
 /** device 生成前に要る GPU feature（`shaderF16` のみ — ADR 0038 §3）。 */
@@ -667,6 +673,7 @@ const parseSession = (fail: Fail, raw: unknown, where: string): SessionSpec => {
   const linearGemvReduce = readEnum(fail, raw, "linearGemvReduce", LINEAR_GEMV_REDUCE, at);
   const fuseRmsNormAdd = readBoolean(fail, raw, "fuseRmsNormAdd", at);
   const fuseLinearStaticQuantize = readBoolean(fail, raw, "fuseLinearStaticQuantize", at);
+  const packedStaticQuantize = readBoolean(fail, raw, "packedStaticQuantize", at);
   return {
     ...(linearCompute === undefined ? {} : { linearCompute }),
     ...(attentionCompute === undefined ? {} : { attentionCompute }),
@@ -674,6 +681,7 @@ const parseSession = (fail: Fail, raw: unknown, where: string): SessionSpec => {
     ...(linearGemvReduce === undefined ? {} : { linearGemvReduce }),
     ...(fuseRmsNormAdd === undefined ? {} : { fuseRmsNormAdd }),
     ...(fuseLinearStaticQuantize === undefined ? {} : { fuseLinearStaticQuantize }),
+    ...(packedStaticQuantize === undefined ? {} : { packedStaticQuantize }),
   };
 };
 

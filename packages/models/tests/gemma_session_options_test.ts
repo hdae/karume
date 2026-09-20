@@ -62,17 +62,21 @@ describe("Gemmaのquant実行設定", () => {
       { linearGemvReduce: "parallel", fuseLinearStaticQuantize: true },
     );
   });
-  it("packedStaticQuantizeは明示指定だけで入り、parallel以外を拒否する（ADR 0105）", () => {
-    // manifestの語彙（SessionSpec）には席が無いので、quant宣言からは決して入らない。
-    assertEquals(resolve(fast, {}, "test"), fast);
-    assertEquals(resolve(fast, { packedStaticQuantize: true }, "test"), {
-      ...fast,
-      packedStaticQuantize: true,
-    });
-    assertEquals(resolve(fast, { packedStaticQuantize: false }, "test"), {
-      ...fast,
+  it("packedStaticQuantizeはquant宣言から入り、明示falseが勝ち、parallel以外を拒否する", () => {
+    // ADR 0105 追記 2（語彙への昇格）— 実配布のi4-fastと同じ4欄が宣言から素通りする。
+    const packedFast = { ...fast, packedStaticQuantize: true } as const;
+    assertEquals(resolve(packedFast, {}, "test"), packedFast);
+    assertEquals(resolve(packedFast, { packedStaticQuantize: false }, "test"), {
+      ...packedFast,
       packedStaticQuantize: false,
     });
+    assertEquals(resolve(fast, { packedStaticQuantize: true }, "test"), packedFast);
+    // parallelを伴わない宣言はquant由来でも拒否する（i4-fastはparallelを宣言する）。
+    assertThrows(
+      () => resolve({ packedStaticQuantize: true }, {}, "test"),
+      Error,
+      "packedStaticQuantizeはlinearGemvReduce: parallelが必要",
+    );
     assertThrows(
       () => resolve({}, { packedStaticQuantize: true }, "test"),
       Error,
@@ -91,8 +95,9 @@ describe("Gemmaのquant実行設定", () => {
   });
   it("SessionSpecの全キーが許可表か拒否パスのどちらかに現れる", () => {
     // hubのSESSION_KEYSとmodelsのWRITERSは`Required<SessionSpec>`の網羅表なので、ノブが
-    // 増えれば型検査が落ちる。Gemmaだけは手書きの文字列比較3本（ADR 0104の「3欄だけ」）
-    // なので型検査が落ちず、追随漏れは実行時の拒否でしか見えない。ここは全キーを埋めた
+    // 増えれば型検査が落ちる。Gemmaだけは手書きの文字列比較4本（ADR 0104の3欄 +
+    // ADR 0105追記2のpacked）なので型検査が落ちず、追随漏れは実行時の拒否でしか
+    // 見えない。ここは全キーを埋めた
     // spec（キーが増えればこの宣言が型検査で落ちる）から、1キーずつ通る／落ちるを確かめる。
     const full: Required<SessionSpec> = {
       linearCompute: "f16",
@@ -101,8 +106,14 @@ describe("Gemmaのquant実行設定", () => {
       linearGemvReduce: "sequential",
       fuseRmsNormAdd: false,
       fuseLinearStaticQuantize: false,
+      packedStaticQuantize: false,
     };
-    const accepted = ["linearGemvReduce", "fuseRmsNormAdd", "fuseLinearStaticQuantize"];
+    const accepted = [
+      "linearGemvReduce",
+      "fuseRmsNormAdd",
+      "fuseLinearStaticQuantize",
+      "packedStaticQuantize",
+    ];
     const rejected: string[] = [];
     for (const key of Object.keys(full) as (keyof typeof full)[]) {
       const spec = { [key]: full[key] } satisfies SessionSpec;

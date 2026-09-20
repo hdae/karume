@@ -172,8 +172,8 @@ export const runGemmaCli = async (
   const fuseRmsNormAdd = boolean("fuse-rms-norm-add");
   const fuseLinearStaticQuantize = boolean("fuse-linear-static-quantize");
   /**
-   * 固定 SRQ の活性を packed int8 で並列 GEMV へ渡す（ADR 0105・既定は runtime の false）。
-   * quant の宣言語彙には席が無いので、ここで明示したときだけ立つ。
+   * 固定 SRQ の活性を packed int8 で並列 GEMV へ渡す（ADR 0105 追記 2〈語彙への昇格〉）。
+   * 他の 3 席と同じく、省略すると quant の宣言（QAT の `i4-fast` は `true`）が効く。
    */
   const packedStaticQuantize = boolean("packed-static-quantize");
   const temperature = number("temperature");
@@ -400,7 +400,7 @@ export const runGemmaCli = async (
         linearGemvReduce ?? "quantの指定"
       } / RMS→add融合: ${fuseRmsNormAdd ?? "quantの指定"} / linear→SRQ融合: ${
         fuseLinearStaticQuantize ?? "quantの指定"
-      } / 活性packed: ${packedStaticQuantize ?? "false（既定）"}\n`,
+      } / 活性packed: ${packedStaticQuantize ?? "quantの指定"}\n`,
     );
     const started = performance.now();
     note(`[${family}] ${sourceDir ?? repoRef ?? DEFAULT_SOURCE} を読み込む\n`);
