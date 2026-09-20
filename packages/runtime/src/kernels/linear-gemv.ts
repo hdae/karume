@@ -427,14 +427,19 @@ const LANES = ["x", "y", "z", "w"] as const;
  * と要素ごとに u32 一致する — level ≤ 128 と f32 scale の積は f64 で厳密なので、表側も
  * この乗算も「厳密な積を正しく丸めた f32」に一致する（ADR 0105 の決定 3）。
  * MUST: 語の成分は静的添字（`.x` / `.y` / `.z` / `.w`）で引く（既定経路と同じ Metal の規律）。
+ * MUST: 復元した quad は `bitcast` 往復 + 実行時 0（`dims.rounding_mask`）との XOR で**丸め障壁**を
+ * 通す（ADR 0099 の rms→add 融合と同じ書き方・ADR 0105 追記 3）。f32 経路の活性はロード値なので
+ * 積和 `acc + x * d` に入る前に丸めが確定しているが、packed 経路では `(c × s) × d + acc` と積が
+ * 式のまま見え、Metal（M2）ではここで再結合・縮約が入って f32 経路と u32 が割れた（RTX / Vulkan
+ * では割れない）。XOR 0 は恒等なので RTX の数値は動かない。定数式へ簡略化しない（障壁が消える）。
  */
 const activationQuad = (packed: boolean, slot: string, name: string, quad: number): string => {
   if (!packed) return `    let ${name} = x[xq${slot} + ${quad}u];`;
   const word = quad >> 2;
   const load = quad % 4 === 0 ? `    let xp${slot}_${word} = x[xq${slot} + ${word}u];\n` : "";
-  return `${load}    let ${name} = vec4<f32>(unpack4xI8(xp${slot}_${word}.${
+  return `${load}    let ${name} = bitcast<vec4<f32>>(bitcast<vec4<u32>>(vec4<f32>(unpack4xI8(xp${slot}_${word}.${
     LANES[quad & 3]
-  })) * dims.x_scale;`;
+  })) * dims.x_scale) ^ vec4<u32>(dims.rounding_mask));`;
 };
 
 /**
@@ -957,7 +962,11 @@ const activationScaleBits = (scale: number): number => {
   return new Uint32Array(scratch.buffer)[0];
 };
 
-/** packed 活性変種の params（Dims の最終メンバ `x_scale` に 1 語足すだけ）。 */
+/**
+ * packed 活性変種の params。Dims は `m / n / k` の後ろに `x_scale`（語 3）と丸め障壁の
+ * `rounding_mask`（語 4・実行時 0）を持つ。8 語なのは uniform の 16 B 整列（5 語 → 32 B）。
+ * MUST: 語 4 の 0 を定数式へ置き換えない（`activationQuad` の XOR 障壁がここを読む）。
+ */
 export const linearGemvParallelPackedParams = (
   storage: WeightStorage,
   m: number,
@@ -967,7 +976,8 @@ export const linearGemvParallelPackedParams = (
   group?: number,
 ): Uint32Array<ArrayBuffer> => {
   assertRowsStorage(storage);
-  const params = linearGemvParams(storage, m, n, k, group);
+  const params = new Uint32Array(8);
+  params.set(linearGemvParams(storage, m, n, k, group));
   params[3] = activationScaleBits(xScale);
   return params;
 };
@@ -1025,7 +1035,8 @@ const parallelWgsl = (
   assertRowsStorage(storage);
   const unit = linearGemvUnit(storage);
   const shift = gemvGroupShift(storage, group);
-  // MUST: `x_scale` は Dims の**最終メンバ**（packed 変種の params はこの位置へ 1 語足す）。
+  // MUST: `x_scale` は SRQ 融合ありでは Dims の**最終メンバ**（params はこの位置へ 1 語足す）。
+  // 融合なし packed は `x_scale`（語 3）の後ろに丸め障壁の `rounding_mask`（語 4）を持つ。
   return `// karume linear gemv K parallel (${storage}, ${lanes} lanes/output${
     packed ? ", packed int8 活性" : ""
   })
@@ -1034,7 +1045,7 @@ struct Dims {
   n: u32,
   k: u32,${quantize ? "\n  rounding_mask: u32,\n  srq: array<vec4<u32>, 65>," : ""}${
     packed ? "\n  x_scale: f32," : ""
-  }
+  }${packed && !quantize ? "\n  rounding_mask: u32," : ""}
 }
 @group(0) @binding(0) var<uniform> dims: Dims;
 ${bindings(unit, storage, quantize, packed)}${quantize ? staticQuantizeEpilogue() : ""}

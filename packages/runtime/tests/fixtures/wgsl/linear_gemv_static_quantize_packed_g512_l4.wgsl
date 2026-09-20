@@ -52,8 +52,8 @@ fn main(@builtin(local_invocation_index) lid: u32, @builtin(workgroup_id) wg: ve
     let xqt = wg.y * (dims.k / 16u) + unitt * 2u;
     let bt_0 = unpack4xU8(pwt.x);
     let xpt_0 = x[xqt + 0u];
-    let xat_0 = vec4<f32>(unpack4xI8(xpt_0.x)) * dims.x_scale;
-    let xbt_0 = vec4<f32>(unpack4xI8(xpt_0.y)) * dims.x_scale;
+    let xat_0 = bitcast<vec4<f32>>(bitcast<vec4<u32>>(vec4<f32>(unpack4xI8(xpt_0.x)) * dims.x_scale) ^ vec4<u32>(dims.rounding_mask));
+    let xbt_0 = bitcast<vec4<f32>>(bitcast<vec4<u32>>(vec4<f32>(unpack4xI8(xpt_0.y)) * dims.x_scale) ^ vec4<u32>(dims.rounding_mask));
     acc = acc + xat_0.x * (f32(i32(bt_0.x & 0xFu) - 8) * wst);
     acc = acc + xat_0.y * (f32(i32(bt_0.x >> 4u) - 8) * wst);
     acc = acc + xat_0.z * (f32(i32(bt_0.y & 0xFu) - 8) * wst);
@@ -63,8 +63,8 @@ fn main(@builtin(local_invocation_index) lid: u32, @builtin(workgroup_id) wg: ve
     acc = acc + xbt_0.z * (f32(i32(bt_0.w & 0xFu) - 8) * wst);
     acc = acc + xbt_0.w * (f32(i32(bt_0.w >> 4u) - 8) * wst);
     let bt_1 = unpack4xU8(pwt.y);
-    let xat_1 = vec4<f32>(unpack4xI8(xpt_0.z)) * dims.x_scale;
-    let xbt_1 = vec4<f32>(unpack4xI8(xpt_0.w)) * dims.x_scale;
+    let xat_1 = bitcast<vec4<f32>>(bitcast<vec4<u32>>(vec4<f32>(unpack4xI8(xpt_0.z)) * dims.x_scale) ^ vec4<u32>(dims.rounding_mask));
+    let xbt_1 = bitcast<vec4<f32>>(bitcast<vec4<u32>>(vec4<f32>(unpack4xI8(xpt_0.w)) * dims.x_scale) ^ vec4<u32>(dims.rounding_mask));
     acc = acc + xat_1.x * (f32(i32(bt_1.x & 0xFu) - 8) * wst);
     acc = acc + xat_1.y * (f32(i32(bt_1.x >> 4u) - 8) * wst);
     acc = acc + xat_1.z * (f32(i32(bt_1.y & 0xFu) - 8) * wst);
@@ -75,8 +75,8 @@ fn main(@builtin(local_invocation_index) lid: u32, @builtin(workgroup_id) wg: ve
     acc = acc + xbt_1.w * (f32(i32(bt_1.w >> 4u) - 8) * wst);
     let bt_2 = unpack4xU8(pwt.z);
     let xpt_1 = x[xqt + 1u];
-    let xat_2 = vec4<f32>(unpack4xI8(xpt_1.x)) * dims.x_scale;
-    let xbt_2 = vec4<f32>(unpack4xI8(xpt_1.y)) * dims.x_scale;
+    let xat_2 = bitcast<vec4<f32>>(bitcast<vec4<u32>>(vec4<f32>(unpack4xI8(xpt_1.x)) * dims.x_scale) ^ vec4<u32>(dims.rounding_mask));
+    let xbt_2 = bitcast<vec4<f32>>(bitcast<vec4<u32>>(vec4<f32>(unpack4xI8(xpt_1.y)) * dims.x_scale) ^ vec4<u32>(dims.rounding_mask));
     acc = acc + xat_2.x * (f32(i32(bt_2.x & 0xFu) - 8) * wst);
     acc = acc + xat_2.y * (f32(i32(bt_2.x >> 4u) - 8) * wst);
     acc = acc + xat_2.z * (f32(i32(bt_2.y & 0xFu) - 8) * wst);
@@ -86,8 +86,8 @@ fn main(@builtin(local_invocation_index) lid: u32, @builtin(workgroup_id) wg: ve
     acc = acc + xbt_2.z * (f32(i32(bt_2.w & 0xFu) - 8) * wst);
     acc = acc + xbt_2.w * (f32(i32(bt_2.w >> 4u) - 8) * wst);
     let bt_3 = unpack4xU8(pwt.w);
-    let xat_3 = vec4<f32>(unpack4xI8(xpt_1.z)) * dims.x_scale;
-    let xbt_3 = vec4<f32>(unpack4xI8(xpt_1.w)) * dims.x_scale;
+    let xat_3 = bitcast<vec4<f32>>(bitcast<vec4<u32>>(vec4<f32>(unpack4xI8(xpt_1.z)) * dims.x_scale) ^ vec4<u32>(dims.rounding_mask));
+    let xbt_3 = bitcast<vec4<f32>>(bitcast<vec4<u32>>(vec4<f32>(unpack4xI8(xpt_1.w)) * dims.x_scale) ^ vec4<u32>(dims.rounding_mask));
     acc = acc + xat_3.x * (f32(i32(bt_3.x & 0xFu) - 8) * wst);
     acc = acc + xat_3.y * (f32(i32(bt_3.x >> 4u) - 8) * wst);
     acc = acc + xat_3.z * (f32(i32(bt_3.y & 0xFu) - 8) * wst);

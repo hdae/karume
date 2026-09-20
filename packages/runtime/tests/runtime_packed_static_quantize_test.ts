@@ -409,9 +409,11 @@ describe("packed 活性の生成物（ADR 0105）", () => {
     const scale = Math.fround(0.00071);
     const bits = new Uint32Array(Float32Array.of(scale).buffer)[0];
     const plain = linearGemvParallelPackedParams("i2", 1, 12288, 1536, scale);
-    assertEquals(plain.length, 4);
+    // 語 3 = x_scale・語 4 = 丸め障壁の実行時 0（ADR 0105 追記 3）・8 語は uniform の 16 B 整列。
+    assertEquals(plain.length, 8);
     assertEquals([...plain.subarray(0, 3)], [1, 12288, 1536]);
     assertEquals(plain[3], bits);
+    assertEquals([...plain.subarray(4)], [0, 0, 0, 0]);
     const fused = linearGemvStaticQuantizePackedParams("i2", 1, 12288, 1536, scale, scale);
     assertEquals(fused.length, 268);
     assertEquals(fused[264], bits);
