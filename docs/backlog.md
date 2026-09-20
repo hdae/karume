@@ -9,13 +9,16 @@
 
 ## now — 0.12.0 リリース後（2026-09-06）
 
-- **decode 速度調査の波（2026-09-19・着手順の裁定待ち）**: 帰属と反証は [decode 速度の帰属と次に試すこと](research/2026-09-19-qat-speed-recon.md)、
+- **decode 速度調査の波（2026-09-19〜20・2026-09-20 に区切り — 残りは later へ）**: 帰属と反証は [decode 速度の帰属と次に試すこと](research/2026-09-19-qat-speed-recon.md)、
   候補の採否は [perf-ledger](perf-ledger.md) H-26〜H-29 / K-48〜K-53（K-45 / K-46 / K-47 は追記）。確定した事実: Deno の 23.8 ms/token のうち
   10 ms は deno_webgpu の poll ループの sleep（karume 無関係・採否判定は Chrome で）・律速は帯域でも演算でもなく命令数 × 占有率と dispatch 本数・
   「i8 計算」は方向として正（利得 0.9 ms・段 0 の kill 判定が先）・「i8 KV」は速度 0（メモリ項目へ）・WebML 285 tok/s の要因は実行構造（先行投入・presrq・1 pass）。
   順序（research §10）: ⓪ 物差しを Chrome へ + GPU 1 セッションで確定する事実（GEMV 総時間・未帰属 49 dispatch・`per_layer_model_projection` の費用）— **済 2026-09-19（research §13: Chrome 壁 QAT 10.6〜10.8 / 通常 10.0 ms・GPU 7.0〜7.5 / 6.2 ms・非 GPU 3.3〜4.1・GEMV 4.0 ms・未帰属なし・K-51 は kill）** →
   ① K-45 段 0 — **済 2026-09-19（research §14: 門通過・ただし律速は活性ロード本数で段 1 の形は裁定待ち）** → ② H-28 — **済 2026-09-19（`d1c848e`・opt-in・単独では効かず既定 host のまま・research §15）** → ③ H-27（先行投入）→ ④ K-45 段 1a — **済 2026-09-19（`57416eb` + 追補・opt-in・Chrome +8.3%・research §16）**・**`i4-fast` へ宣言済み 2026-09-20（ADR 0105 追記 2・M2 追試済み: 速度中立・id 列一致〈並列族の明示 fma 化 — 追記 4〉）・段 1b（整数内積）は棄却（lm_head に int8 活性が無い）** → ⑤ 小物（K-48 段 1 / K-49 / K-50 段 1 / K-51）→
   ⑥ K-46 の再起票（メモリ項目）。併用後の見込みは Deno 約 7.5 ms（約 130 tok/s）/ Chrome 約 6.5 ms（約 150 tok/s）。
+  **区切り（2026-09-20）**: K-45 は `i4-fast` に宣言（M2 追試 = 速度中立・id 列一致・並列族の明示 fma 化 — ADR 0105 追記 2 / 4）・段 1b は棄却・
+  H-28 は残件 ①（通常 decode を同一 batch へ — `Session.enqueueRead`・ADR 0054 追記）と残件 ②（TTFT の帰属 — research §15.2: Chrome の VRAM 占有下で
+  prefill run が世代を追って遅くなる現象・席の欠陥ではない）を閉じた。**H-27 段 ②・小物（K-48 / K-49 / K-50）・K-46 は later へ**（復活条件つき）。
 
 - **QAT レビュー対応の波（2026-09-19）**: 裁定は [ADR 0097 追記 7](decisions/0097-gemma4-qat-integration.md)、
   実測は [QAT レビューの実測記録](research/2026-09-19-qat-review.md)。中身は ①配布既定を通常 Gemma と
@@ -542,6 +545,11 @@ autoregressive 波の**残項目（波外へ送り）**:
   （perf H-4 と同体）・sampling/RNG はホスト維持（GPU 側は argmax/topk のみ）。
 
 ## later
+
+- **decode 速度の残り（2026-09-20 に now から移動）**: H-27 段 ②（先行投入・ADR 0066 の opt-in 例外・greedy 限定・期待 Deno −5 / Chrome −2.2 ms）、
+  小物 K-48 段 1（rms_norm→SRQ 融合 70 本・0.19 ms）/ K-49（slice 別名化）/ K-50（k+v 連結 GEMV）、K-46（int8 KV — メモリ項目）。
+  復活条件: decode 速度を再び主題にするとき（H-27 の前提 = H-28 の GPU 常駐席は済・prefill のアリーナ経路のプール化を先に）。
+  候補の採否と kill 基準は [perf-ledger](perf-ledger.md)、帰属は [research 2026-09-19](research/2026-09-19-qat-speed-recon.md)。
 
 - **層内の大融合を塞ぐ 3 契約の裁定（起票 2026-09-19）**: WebML との dispatch 差（1,132 → 約 316 本）のうち約 480 本は
   `windowTouchesState` MUST（ADR 0067）・FusedStep 単一出力 MUST（ADR 0068 決定 1）・atomic last-arriver merge の可搬性判定が同時に塞ぐ。

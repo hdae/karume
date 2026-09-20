@@ -1,0 +1,345 @@
+{
+  "snapshot": "2026-09-20",
+  "note": "H-28 残件 ②（TTFT）の帰属。Chrome headless / Vulkan / RTX 3080 Ti・checkout 7f4dff9・QAT E2B i4-fast・capacity 4096 / chunk 768・64 token。bundle は outputs/bench/karume/2026-09-20_h28-ttft-ja-7f4dff9/（git 追跡外）。",
+  "wallJobs": {
+    "qat-host-wall-0": {
+      "case0": [
+        314.7,
+        74.5,
+        40.3,
+        40.2,
+        40.2
+      ],
+      "case1": [
+        206.1,
+        89.9,
+        62.3,
+        59.9,
+        60
+      ]
+    },
+    "qat-host-wall-1": {
+      "case0": [
+        440.3,
+        75.5,
+        40.9,
+        40.6,
+        39.6
+      ],
+      "case1": [
+        176,
+        85.8,
+        60.7,
+        61.8,
+        73.8
+      ]
+    },
+    "qat-gpu-wall-0": {
+      "case0": [
+        456.2,
+        73.7,
+        41.5,
+        40.8,
+        40.4
+      ],
+      "case1": [
+        115.1,
+        87.3,
+        61.7,
+        65.5,
+        85.5
+      ]
+    },
+    "qat-gpu-wall-1": {
+      "case0": [
+        498.1,
+        76.6,
+        40.9,
+        42.1,
+        41.2
+      ],
+      "case1": [
+        120.5,
+        94.8,
+        71.6,
+        92.4,
+        153.8
+      ]
+    }
+  },
+  "profileJobs": {
+    "qat-host-profile-1": [
+      611.1,
+      95.5,
+      61,
+      59.7,
+      60.9,
+      63.9,
+      61
+    ],
+    "qat-gpu-profile-1": [
+      554.9,
+      94.2,
+      61.4,
+      62.5,
+      61,
+      58.6,
+      62.7
+    ],
+    "qat-gpu-profile-0": [
+      502.5,
+      73.9,
+      43,
+      42.1,
+      41.8,
+      40.9,
+      43.3
+    ]
+  },
+  "prefillGpuMs": [
+    {
+      "residency": "host",
+      "caseIndex": 0,
+      "run": 1,
+      "ttftMs": 40.8,
+      "prefillGpuMs": 36.32,
+      "gatherPassesMs": 0
+    },
+    {
+      "residency": "host",
+      "caseIndex": 0,
+      "run": 3,
+      "ttftMs": 40.4,
+      "prefillGpuMs": 37.16,
+      "gatherPassesMs": 0
+    },
+    {
+      "residency": "host",
+      "caseIndex": 1,
+      "run": 1,
+      "ttftMs": 60.9,
+      "prefillGpuMs": 56.98,
+      "gatherPassesMs": 0
+    },
+    {
+      "residency": "host",
+      "caseIndex": 1,
+      "run": 3,
+      "ttftMs": 61,
+      "prefillGpuMs": 57.47,
+      "gatherPassesMs": 0
+    },
+    {
+      "residency": "gpu",
+      "caseIndex": 0,
+      "run": 1,
+      "ttftMs": 41.8,
+      "prefillGpuMs": 37.64,
+      "gatherPassesMs": 0.018
+    },
+    {
+      "residency": "gpu",
+      "caseIndex": 0,
+      "run": 3,
+      "ttftMs": 43.3,
+      "prefillGpuMs": 39.46,
+      "gatherPassesMs": 0.018
+    },
+    {
+      "residency": "gpu",
+      "caseIndex": 1,
+      "run": 1,
+      "ttftMs": 61,
+      "prefillGpuMs": 56.51,
+      "gatherPassesMs": 0.022
+    },
+    {
+      "residency": "gpu",
+      "caseIndex": 1,
+      "run": 3,
+      "ttftMs": 62.7,
+      "prefillGpuMs": 60.23,
+      "gatherPassesMs": 0.02
+    }
+  ],
+  "seqJobs": {
+    "gpu_ja10": [
+      584.6,
+      100,
+      59.5,
+      61.2,
+      63,
+      60.6,
+      60.8,
+      68.1,
+      89.4,
+      143.1
+    ],
+    "gpu_ja5_en5": [
+      533.7,
+      90.1,
+      60.4,
+      62.5,
+      61.8,
+      112.8,
+      72.9,
+      42.3,
+      46.7,
+      54.9
+    ],
+    "gpu_en5_ja5": [
+      371.6,
+      76.6,
+      40.4,
+      41.2,
+      42.4,
+      127,
+      95,
+      61.8,
+      64.6,
+      74.2
+    ],
+    "host_ja5_en5": [
+      496.8,
+      92.7,
+      59.3,
+      61.2,
+      60.1,
+      149.3,
+      72.4,
+      42.6,
+      42.5,
+      44.5
+    ],
+    "host_en5_ja5": [
+      491.4,
+      73.8,
+      41.7,
+      39.9,
+      39.9,
+      187.2,
+      93.1,
+      61.1,
+      59.9,
+      62.3
+    ]
+  },
+  "instrumented_gpu_ja12": {
+    "ttft": [
+      421.3,
+      101.2,
+      61.5,
+      63,
+      62.1,
+      62.4,
+      64.2,
+      75.2,
+      109.3,
+      183.6,
+      183.9,
+      183.8
+    ],
+    "prefillTiming": [
+      "rows=64 begin=0.2 gather=15.3 finish=3.3 run=394.1",
+      "rows=64 begin=0.0 gather=0.1 finish=3.7 run=92.4",
+      "rows=64 begin=0.0 gather=0.1 finish=3.6 run=54.3",
+      "rows=64 begin=0.0 gather=0.1 finish=1.5 run=58.2",
+      "rows=64 begin=0.0 gather=0.1 finish=3.6 run=55.1",
+      "rows=64 begin=0.0 gather=0.1 finish=3.5 run=56.0",
+      "rows=64 begin=0.1 gather=0.0 finish=0.6 run=58.4",
+      "rows=64 begin=0.0 gather=0.0 finish=3.6 run=68.4",
+      "rows=64 begin=0.0 gather=0.1 finish=3.5 run=102.5",
+      "rows=64 begin=0.0 gather=0.0 finish=3.6 run=176.5",
+      "rows=64 begin=0.0 gather=0.0 finish=3.7 run=176.9",
+      "rows=64 begin=0.0 gather=0.0 finish=3.6 run=177.2"
+    ]
+  },
+  "budget1GiB_ja12": {
+    "gpu": [
+      494.7,
+      100.8,
+      61.4,
+      60.9,
+      62,
+      61.7,
+      61.1,
+      64.2,
+      63.5,
+      76.7,
+      109.6,
+      109.9
+    ],
+    "host": [
+      532.5,
+      94.4,
+      59.5,
+      61.5,
+      61.3,
+      61.7,
+      62.1,
+      66.1,
+      74.4,
+      107.3,
+      179.9,
+      181.4
+    ]
+  },
+  "deno12": {
+    "gpu_en": [
+      243.1,
+      109.7,
+      63.6,
+      62.7,
+      64,
+      62.7,
+      62.3,
+      62.4,
+      61,
+      62.2,
+      62.3,
+      62.5
+    ],
+    "gpu_ja": [
+      174.7,
+      117.4,
+      81.3,
+      77.6,
+      77.8,
+      77.8,
+      78.9,
+      76.6,
+      78.7,
+      78.4,
+      78.8,
+      79.4
+    ],
+    "host_en": [
+      210.2,
+      98.1,
+      53.3,
+      52.6,
+      50.9,
+      51.9,
+      51.4,
+      50.8,
+      52.3,
+      51,
+      51.3,
+      50.9
+    ],
+    "host_ja": [
+      159,
+      107,
+      66.5,
+      66.3,
+      66.9,
+      67.9,
+      66.3,
+      66.8,
+      65.8,
+      68,
+      66.8,
+      66.7
+    ]
+  }
+}

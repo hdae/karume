@@ -517,8 +517,41 @@ host / gpu で 3 回ずつ往復。生値は `outputs/bench/karume/2026-09-20_h2
 
 生成文は 3 回とも host / gpu で同一。e2e（`e2e_gemma4_ple_gpu_test.ts`）は「サンプラー経路の id 列が host と一致し、
 `onSubmittedWorkDone` の回数差が prefill 1 本ぶんだけ」を門にする（改訂前は decode 16 token ぶん + 1）。
-残件 ②（日本語 prompt の TTFT +25〜30 ms・Chrome）は別計測（Chrome のフェンスは 0.005 ms 級なので、フェンスでなく gather pass の
-追加か行数別 plan の初回コンパイルが候補）。
+残件 ②（日本語 prompt の TTFT +25〜30 ms・Chrome）の帰属は §15.2。
+
+### 15.2 残件 ② の帰属 — 「日本語 prompt の TTFT +25〜30 ms」は prompt でも gather でもなく、Chrome の VRAM 占有下で prefill run が回を追って遅くなる現象（2026-09-20・RTX）
+
+bundle は `outputs/bench/karume/2026-09-20_h28-ttft-ja-7f4dff9/`（git 追跡外・run.mjs / run2.mjs / instr / budget）。条件は §15 と同じ
+（QAT E2B `i4-fast`・capacity 4096 / chunk 768・64 token・Chrome headless・Vulkan）。要約は [結果 JSON](2026-09-20-h28-ttft-results.json)。
+
+| 見たこと                                                        | host                                   | gpu                                                |
+| --------------------------------------------------------------- | -------------------------------------- | -------------------------------------------------- |
+| 壁ジョブ（英 ×5 → 日 ×5）の日本語 TTFT（暖機後 3 本・2 ジョブ） | 62.3 / 59.9 / 60.0・60.7 / 61.8 / 73.8 | 61.7 / 65.5 / 85.5・71.6 / 92.4 / 153.8            |
+| profile ジョブ（日本語だけ 7 本連続）の TTFT                    | 59.7〜63.9                             | 58.6〜62.7（host と同じ）                          |
+| prefill の GPU 時間（pass 境界 timestamp・日本語）              | 57.0 / 57.5 ms                         | 56.5 / 60.2 ms（gather pass は 0.02 ms）           |
+| seq ジョブ（日本語 ×10 連続）                                   | —                                      | 59.5 61.2 63.0 60.6 60.8 **68.1 89.4 143.1**       |
+| seq ジョブ（日 ×5 → 英 ×5 / 英 ×5 → 日 ×5）                     | 8〜10 本目も平坦                       | 8〜10 本目が伸びる（英でも 42 → 55・日で 62 → 74） |
+| Deno（同条件・12 世代連続）                                     | 66〜68 ms 平坦                         | 77〜79 ms 平坦（差 = フェンス 1 本の 10 ms 床）    |
+
+計時パッチ（prefill の 4 段を `performance.now` で分ける・gpu 日本語 ×12）:
+
+| 世代       | batch 開始 | gather enqueue | batch.finish |      **target.run** |
+| ---------- | ---------: | -------------: | -----------: | ------------------: |
+| 3〜7       |        0.0 |            0.1 |     1.5〜3.7 |           54〜58 ms |
+| 8 / 9 / 10 |        0.0 |            0.0 |          3.6 |  **68 / 102 / 176** |
+| 11 / 12    |        0.0 |            0.0 |          3.7 | 177 / 177（頭打ち） |
+
+読み: 伸びるのは **prefill の `run` 本体のホスト側時間**で、gather の batch（3.7 ms・一定）でも GPU 時間（一定）でもない。
+プロンプトの言語にも依らず、**同じページで 8 世代目以降**に現れて +120 ms で頭打ちになる。Deno では出ない。
+対照（`planBackingBudgetBytes` を 1 GiB にして VRAM 占有を増やす）では **host 経路でも同じ形**が出た
+（日本語 ×12: 59.5 61.5 61.3 61.7 62.1 66.1 74.4 107.3 **179.9 181.4**・gpu は 110 で頭打ち）。
+つまり条件は「Chrome（Dawn）で VRAM の占有が大きい」ことで、GPU 常駐席は PLE 1.2 GB ぶんその条件に入る。
+prefill（M = 64・chunk 形）は run ごとに一時バッファをアリーナで確保・破棄する経路なので、Dawn 側の確保が空き VRAM の減少で
+遅い経路へ落ちると読む（推測 — Dawn 内部は未確認。decode は backing 常駐で確保を伴わず影響を受けない）。
+
+判定: H-28 残件 ② は「席の欠陥」でなく **Chrome の VRAM 占有と prefill のアリーナ経路の相互作用**。席の採否には影響しない
+（既定は host のまま）。対策候補は prefill の一時バッファを run 間で使い回す（アリーナのプール化 / 予算内の backing）で、
+先行投入（H-27）や GPU 常駐を既定にする段で改めて扱う。
 
 ## 16. K-45 段 1a — packed int8 活性（opt-in 席 `packedStaticQuantize`）の A/B（2026-09-19・RTX）
 
