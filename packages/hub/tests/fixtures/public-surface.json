@@ -1,0 +1,233 @@
+{
+  "schema": 1,
+  "entries": {
+    ".": [
+      {
+        "name": "AssetPhase",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "AssetProgress",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "AssetRangeReader",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "AttentionCompute",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "AvailableLabels",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "CacheDiagnostic",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "CacheInventoryOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "CachedAssets",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "DirectoryAdapter",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "DistributionSource",
+        "kind": "class"
+      },
+      {
+        "name": "EvictedAssets",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "FetchAssetsOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "FileRef",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GpuFeaturesSpec",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "HubError",
+        "kind": "class"
+      },
+      {
+        "name": "HubFetchError",
+        "kind": "class"
+      },
+      {
+        "name": "HubRepoRef",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "IntegrityError",
+        "kind": "class"
+      },
+      {
+        "name": "IntegritySource",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "KeptAsset",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "LinearCompute",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "LoadManifestOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "LoadedManifest",
+        "kind": "class"
+      },
+      {
+        "name": "LocalDirectoryOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "MANIFEST_FILENAME",
+        "kind": "variable"
+      },
+      {
+        "name": "Manifest",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "ManifestFormatError",
+        "kind": "class"
+      },
+      {
+        "name": "ManifestPathError",
+        "kind": "class"
+      },
+      {
+        "name": "ManifestReferenceError",
+        "kind": "class"
+      },
+      {
+        "name": "ModelEntry",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "PipelineId",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Quant",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "RequiredLimitName",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "RequiredLimitsSpec",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "ResolveOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "ResolvedFiles",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "RetryDiagnostic",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "ScoreStorage",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "SessionSpec",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "StreamAssetsOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "StreamedAsset",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "WeightEntry",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "WeightFiles",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "clearHubCache",
+        "kind": "function"
+      },
+      {
+        "name": "evictCachedAssets",
+        "kind": "function"
+      },
+      {
+        "name": "fetchAssets",
+        "kind": "function"
+      },
+      {
+        "name": "isDistributionSource",
+        "kind": "function"
+      },
+      {
+        "name": "listCachedAssets",
+        "kind": "function"
+      },
+      {
+        "name": "loadManifest",
+        "kind": "function"
+      },
+      {
+        "name": "localDirectory",
+        "kind": "function"
+      },
+      {
+        "name": "openAsset",
+        "kind": "function"
+      },
+      {
+        "name": "parseManifest",
+        "kind": "function"
+      },
+      {
+        "name": "prefetchAssets",
+        "kind": "function"
+      },
+      {
+        "name": "resolveFiles",
+        "kind": "function"
+      },
+      {
+        "name": "streamAssets",
+        "kind": "function"
+      }
+    ],
+    "./deno": [
+      {
+        "name": "denoDirectory",
+        "kind": "function"
+      }
+    ]
+  }
+}

@@ -52,3 +52,15 @@
   同じ検査で同じ表を組む）で、models の PLE 行読み（ADR 0085 追記 2026-09-07）が「ヘッダを 1 度小読みして行の
   位置を持つ」ために要る。検査の実装は 1 本（`parseSafetensors` がこれを呼ぶ）。hub 側は `openAsset` と型
   `AssetRangeReader`（ADR 0086 追記 ⑧）、`DirectoryAdapter.readFileRange?` を追加した。
+- 2026-09-20: **公開面のスナップショット門を 3 パッケージに常設する**（`packages/<pkg>/tests/public_surface_test.ts`
+  と追跡 fixture `tests/fixtures/public-surface.json`）。それまでの門は
+  `packages/models/tests/models_barrel_surface_test.ts` の名指しリストだけで、リストに無い綴りの増減は素通りし、
+  hub / runtime には門が無かった。2 つの門は役割が違う —— **名指し = 意図の宣言**（「この綴りは出す / 出さない」
+  を人が書く。この決定の「薄い面」を守る側）、**スナップショット = 増減の検出**（何が正しいかは言わず、前回との
+  差だけを見る）。名指し門はそのまま残す。面の真実源は各 `deno.json` の `exports`（runtime 1 面 / hub 2 面 /
+  models 10 面）で、entry ごとに `deno doc --json` を回して `{ name, kind }` の集合を採る。**型 export も採る**
+  ので、`Object.keys` では観測できない `export type` の再輸出もここで縛れる（名指し門が取りこぼす面）。GPU も
+  実資産も要らず 3 本で合計 0.9 秒、レーン分割の core レーンに入る。更新手順は失敗メッセージが持つ ——
+  `KARUME_SURFACE=write` で同じテストを回して fixture を書き直し、差分を CHANGELOG に明示する（この決定の本文
+  「公開面の変更はエクスポート差分をレビューで明示」を、レビュー前に機械が差分を出す形にしたもの）。門の実体は
+  `packages/runtime/tests/public-surface.ts` 1 本。

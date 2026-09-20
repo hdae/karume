@@ -1,0 +1,355 @@
+{
+  "schema": 1,
+  "entries": {
+    ".": [
+      {
+        "name": "AcquireGpuOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "AdmissionReport",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "AdmissionScenario",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "AdmissionScenarioName",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "AdmissionScenarioSpec",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "ArenaStats",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "BatchScope",
+        "kind": "class"
+      },
+      {
+        "name": "BatchScopeError",
+        "kind": "class"
+      },
+      {
+        "name": "ChunkBudgetStats",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "ComputePrecision",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "ContainerError",
+        "kind": "class"
+      },
+      {
+        "name": "DEFAULT_PLAN_BACKING_BUDGET_BYTES",
+        "kind": "variable"
+      },
+      {
+        "name": "DEFAULT_SUBMIT_POLICY",
+        "kind": "variable"
+      },
+      {
+        "name": "DeviceLostHandler",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "DimError",
+        "kind": "class"
+      },
+      {
+        "name": "DispatchLimitError",
+        "kind": "class"
+      },
+      {
+        "name": "EnqueueOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "EnqueueRead",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "EstimateOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "ExecutionError",
+        "kind": "class"
+      },
+      {
+        "name": "FusionCounts",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GenerationContext",
+        "kind": "class"
+      },
+      {
+        "name": "GenerationContextSpec",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GenerationRun",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GpuContext",
+        "kind": "class"
+      },
+      {
+        "name": "GpuDeviceLostError",
+        "kind": "class"
+      },
+      {
+        "name": "GpuFeatureError",
+        "kind": "class"
+      },
+      {
+        "name": "GpuInternalError",
+        "kind": "class"
+      },
+      {
+        "name": "GpuLimitError",
+        "kind": "class"
+      },
+      {
+        "name": "GpuOutOfMemoryError",
+        "kind": "class"
+      },
+      {
+        "name": "GpuTimingEntry",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GpuTimingStats",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GpuUnavailableError",
+        "kind": "class"
+      },
+      {
+        "name": "GpuValidationError",
+        "kind": "class"
+      },
+      {
+        "name": "IrError",
+        "kind": "class"
+      },
+      {
+        "name": "KarumeModel",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "LinearGemvReduce",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "ModelShard",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "OpContractError",
+        "kind": "class"
+      },
+      {
+        "name": "ParamsCacheStats",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "PlanBackingStats",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "PreparedModel",
+        "kind": "class"
+      },
+      {
+        "name": "PreparedPlanStats",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "RequiredLimits",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "ResidentData",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "ResidentTensor",
+        "kind": "class"
+      },
+      {
+        "name": "ResidentTensorError",
+        "kind": "class"
+      },
+      {
+        "name": "RmsNormReduce",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "RunInput",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "RunInputs",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "RunOutputs",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "RuntimeCapabilities",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "SafetensorsDtype",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "SafetensorsError",
+        "kind": "class"
+      },
+      {
+        "name": "SafetensorsFile",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "SafetensorsHeader",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "ScoreStorage",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Session",
+        "kind": "class"
+      },
+      {
+        "name": "SessionBuildStats",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "SessionDiagnostics",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "SessionOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "SharedWeight",
+        "kind": "class"
+      },
+      {
+        "name": "StateAttentionReduce",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "StateBackingStats",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "StorageDiagnostics",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "SubmitPolicy",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "SubmitPolicyError",
+        "kind": "class"
+      },
+      {
+        "name": "SubmitStats",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "SymbolBindings",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Tensor",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "TensorView",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "WeightResidency",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "acquireGpu",
+        "kind": "function"
+      },
+      {
+        "name": "assertChunkBuckets",
+        "kind": "function"
+      },
+      {
+        "name": "capabilities",
+        "kind": "function"
+      },
+      {
+        "name": "createSession",
+        "kind": "function"
+      },
+      {
+        "name": "createSessionFromShards",
+        "kind": "function"
+      },
+      {
+        "name": "estimateGraphMemory",
+        "kind": "function"
+      },
+      {
+        "name": "estimateSessionMemory",
+        "kind": "function"
+      },
+      {
+        "name": "openModel",
+        "kind": "function"
+      },
+      {
+        "name": "parseSafetensors",
+        "kind": "function"
+      },
+      {
+        "name": "parseSafetensorsHeader",
+        "kind": "function"
+      },
+      {
+        "name": "planWeightResidency",
+        "kind": "function"
+      },
+      {
+        "name": "prepareModel",
+        "kind": "function"
+      },
+      {
+        "name": "readAdapterLimits",
+        "kind": "function"
+      },
+      {
+        "name": "safetensorsHeaderLength",
+        "kind": "function"
+      },
+      {
+        "name": "tensorBytes",
+        "kind": "function"
+      }
+    ]
+  }
+}

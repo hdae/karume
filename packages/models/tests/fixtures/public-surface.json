@@ -1,0 +1,1169 @@
+{
+  "schema": 1,
+  "entries": {
+    ".": [
+      {
+        "name": "ANIMA_SOURCES",
+        "kind": "variable"
+      },
+      {
+        "name": "AlphaMatte",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "AnimaAssets",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "AnimaFromPretrainedOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "AnimaGenerateEvent",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "AnimaGenerateRequest",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "AnimaLatentSnapshot",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "AnimaPipeline",
+        "kind": "class"
+      },
+      {
+        "name": "AnimaPipelineOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "AnimaRunComponent",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "AnimaSamplerType",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "BIREFNET_SOURCES",
+        "kind": "variable"
+      },
+      {
+        "name": "BirefnetAssets",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "BirefnetFromPretrainedOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "BirefnetPipeline",
+        "kind": "class"
+      },
+      {
+        "name": "BirefnetPipelineOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "DEPTH_ANYTHING_SOURCES",
+        "kind": "variable"
+      },
+      {
+        "name": "DecodedWav",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "DepthAnythingAssets",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "DepthAnythingFromPretrainedOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "DepthAnythingPipeline",
+        "kind": "class"
+      },
+      {
+        "name": "DepthAnythingPipelineOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "DepthMap",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "FromPretrainedHubOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GEMMA4_CHUNK_BUCKETS",
+        "kind": "variable"
+      },
+      {
+        "name": "GEMMA4_SOURCES",
+        "kind": "variable"
+      },
+      {
+        "name": "Gemma4Assets",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4ChatMessage",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4ChatOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4ChatOverflow",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4ChatOverflowPolicy",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4ChatRole",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4ChatSession",
+        "kind": "class"
+      },
+      {
+        "name": "Gemma4ChatSessionHost",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4ChatSessionOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4ChatStop",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4ChatStream",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4ChatTurnOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4DefaultSampler",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4EstimateOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4FromPretrainedOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4Pipeline",
+        "kind": "class"
+      },
+      {
+        "name": "Gemma4PipelineConfig",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4PipelineOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4PleReadOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4PleResidency",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4PleShardSource",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4PrefillProgress",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4QatFromPretrainedOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4QatPipeline",
+        "kind": "class"
+      },
+      {
+        "name": "Gemma4QatPipelineOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4RopeLayerSpec",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4RopeLayerType",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4RopeSpec",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4RunPhase",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4SequenceOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GemmaDecodeOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GemmaTokenizer",
+        "kind": "class"
+      },
+      {
+        "name": "GeneratedAudio",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GeneratedImage",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GeneratedLatent",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GenerationCapacityConstraint",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GenerationCapacityDetail",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GenerationCapacityError",
+        "kind": "class"
+      },
+      {
+        "name": "GenerationEvent",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GenerationGateTrace",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GenerationProgram",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GenerationRequest",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GenerationRunPhase",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GenerationSequence",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GenerationSpeculation",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GenerationStop",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GenerationStream",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "IRODORI_SOURCES",
+        "kind": "variable"
+      },
+      {
+        "name": "ImageSize",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "IrodoriAssets",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "IrodoriFromPretrainedOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "IrodoriGenerateEvent",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "IrodoriGenerateRequest",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "IrodoriGeneratedAudio",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "IrodoriLatentSnapshot",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "IrodoriPipeline",
+        "kind": "class"
+      },
+      {
+        "name": "IrodoriPipelineOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "IrodoriRunComponent",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "IrodoriSpeakerInput",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "KARUME_SOURCES",
+        "kind": "variable"
+      },
+      {
+        "name": "LabSegment",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Rgb8Image",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "SBV2_SOURCES",
+        "kind": "variable"
+      },
+      {
+        "name": "SIGLIP2_SOURCES",
+        "kind": "variable"
+      },
+      {
+        "name": "SamplerSpec",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Sbv2Assets",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Sbv2FromPretrainedOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Sbv2GenerateOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Sbv2InputError",
+        "kind": "class"
+      },
+      {
+        "name": "Sbv2Mora",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Sbv2Phrases",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Sbv2Pipeline",
+        "kind": "class"
+      },
+      {
+        "name": "Sbv2PipelineOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Sbv2RunComponent",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Sbv2Utterance",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Sbv2Word",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Siglip2Assets",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Siglip2FromPretrainedOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Siglip2Pipeline",
+        "kind": "class"
+      },
+      {
+        "name": "Siglip2PipelineOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "SpeculationGateOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "StreamingDetokenizer",
+        "kind": "class"
+      },
+      {
+        "name": "VowelDetectorAssets",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "VowelDetectorFromPretrainedOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "VowelDetectorPipeline",
+        "kind": "class"
+      },
+      {
+        "name": "VowelDetectorPipelineOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "VowelDetectorResult",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "animaLatents",
+        "kind": "function"
+      },
+      {
+        "name": "approximatePreview",
+        "kind": "function"
+      },
+      {
+        "name": "decodeWav",
+        "kind": "function"
+      },
+      {
+        "name": "denormalizeLatents",
+        "kind": "function"
+      },
+      {
+        "name": "dropOldestTurns",
+        "kind": "function"
+      },
+      {
+        "name": "encodePng",
+        "kind": "function"
+      },
+      {
+        "name": "encodeWav",
+        "kind": "function"
+      },
+      {
+        "name": "formatResolution",
+        "kind": "function"
+      },
+      {
+        "name": "gemma4ChatPrompt",
+        "kind": "function"
+      },
+      {
+        "name": "gemma4ChatTurn",
+        "kind": "function"
+      },
+      {
+        "name": "gemma4QatRopeInputs",
+        "kind": "function"
+      },
+      {
+        "name": "gemma4RopeInputs",
+        "kind": "function"
+      },
+      {
+        "name": "normalizeToNchw",
+        "kind": "function"
+      },
+      {
+        "name": "parseGemma4PipelineConfig",
+        "kind": "function"
+      },
+      {
+        "name": "parseResolution",
+        "kind": "function"
+      },
+      {
+        "name": "resizeRgb8",
+        "kind": "function"
+      },
+      {
+        "name": "toSbv2Utterance",
+        "kind": "function"
+      }
+    ],
+    "./anima": [
+      {
+        "name": "ANIMA_SOURCES",
+        "kind": "variable"
+      },
+      {
+        "name": "AnimaAssets",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "AnimaFromPretrainedOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "AnimaGenerateEvent",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "AnimaGenerateRequest",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "AnimaLatentSnapshot",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "AnimaPipeline",
+        "kind": "class"
+      },
+      {
+        "name": "AnimaPipelineOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "AnimaRunComponent",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "AnimaSamplerType",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GeneratedImage",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "ImageSize",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "animaLatents",
+        "kind": "function"
+      },
+      {
+        "name": "approximatePreview",
+        "kind": "function"
+      },
+      {
+        "name": "denormalizeLatents",
+        "kind": "function"
+      },
+      {
+        "name": "formatResolution",
+        "kind": "function"
+      },
+      {
+        "name": "parseResolution",
+        "kind": "function"
+      }
+    ],
+    "./birefnet": [
+      {
+        "name": "AlphaMatte",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "BIREFNET_SOURCES",
+        "kind": "variable"
+      },
+      {
+        "name": "BirefnetAssets",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "BirefnetFromPretrainedOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "BirefnetPipeline",
+        "kind": "class"
+      },
+      {
+        "name": "BirefnetPipelineOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Rgb8Image",
+        "kind": "typeAlias"
+      }
+    ],
+    "./depth-anything": [
+      {
+        "name": "DEPTH_ANYTHING_SOURCES",
+        "kind": "variable"
+      },
+      {
+        "name": "DepthAnythingAssets",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "DepthAnythingFromPretrainedOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "DepthAnythingPipeline",
+        "kind": "class"
+      },
+      {
+        "name": "DepthAnythingPipelineOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "DepthMap",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Rgb8Image",
+        "kind": "typeAlias"
+      }
+    ],
+    "./gemma": [
+      {
+        "name": "GEMMA4_CHUNK_BUCKETS",
+        "kind": "variable"
+      },
+      {
+        "name": "GEMMA4_SOURCES",
+        "kind": "variable"
+      },
+      {
+        "name": "Gemma4Assets",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4ChatMessage",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4ChatOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4ChatOverflow",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4ChatOverflowPolicy",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4ChatRole",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4ChatSession",
+        "kind": "class"
+      },
+      {
+        "name": "Gemma4ChatSessionHost",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4ChatSessionOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4ChatStop",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4ChatStream",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4ChatTurnOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4DefaultSampler",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4EstimateOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4FromPretrainedOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4Pipeline",
+        "kind": "class"
+      },
+      {
+        "name": "Gemma4PipelineConfig",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4PipelineOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4PleReadOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4PleResidency",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4PleShardSource",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4PrefillProgress",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4RopeLayerSpec",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4RopeLayerType",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4RopeSpec",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4RunPhase",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4SequenceOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GemmaDecodeOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GemmaTokenizer",
+        "kind": "class"
+      },
+      {
+        "name": "GenerationCapacityConstraint",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GenerationCapacityDetail",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GenerationCapacityError",
+        "kind": "class"
+      },
+      {
+        "name": "GenerationEvent",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GenerationGateTrace",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GenerationProgram",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GenerationRequest",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GenerationRunPhase",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GenerationSequence",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GenerationSpeculation",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GenerationStop",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GenerationStream",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "SamplerSpec",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "SpeculationGateOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "StreamingDetokenizer",
+        "kind": "class"
+      },
+      {
+        "name": "dropOldestTurns",
+        "kind": "function"
+      },
+      {
+        "name": "gemma4ChatPrompt",
+        "kind": "function"
+      },
+      {
+        "name": "gemma4ChatTurn",
+        "kind": "function"
+      },
+      {
+        "name": "gemma4RopeInputs",
+        "kind": "function"
+      },
+      {
+        "name": "parseGemma4PipelineConfig",
+        "kind": "function"
+      }
+    ],
+    "./gemma4-qat": [
+      {
+        "name": "GEMMA4_CHUNK_BUCKETS",
+        "kind": "variable"
+      },
+      {
+        "name": "Gemma4Assets",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4ChatMessage",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4ChatOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4ChatOverflow",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4ChatOverflowPolicy",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4ChatSession",
+        "kind": "class"
+      },
+      {
+        "name": "Gemma4ChatSessionHost",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4ChatSessionOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4ChatStop",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4ChatStream",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4ChatTurnOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4DefaultSampler",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4EstimateOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4PipelineConfig",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4PleReadOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4PleResidency",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4PleShardSource",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4PrefillProgress",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4QatFromPretrainedOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4QatPipeline",
+        "kind": "class"
+      },
+      {
+        "name": "Gemma4QatPipelineOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4RopeLayerSpec",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4RopeLayerType",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4RopeSpec",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4RunPhase",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Gemma4SequenceOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GenerationCapacityError",
+        "kind": "class"
+      },
+      {
+        "name": "GenerationEvent",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GenerationStop",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "SamplerSpec",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "dropOldestTurns",
+        "kind": "function"
+      },
+      {
+        "name": "gemma4ChatPrompt",
+        "kind": "function"
+      },
+      {
+        "name": "gemma4ChatTurn",
+        "kind": "function"
+      },
+      {
+        "name": "gemma4QatRopeInputs",
+        "kind": "function"
+      },
+      {
+        "name": "parseGemma4PipelineConfig",
+        "kind": "function"
+      }
+    ],
+    "./irodori": [
+      {
+        "name": "GeneratedLatent",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "IRODORI_SOURCES",
+        "kind": "variable"
+      },
+      {
+        "name": "IrodoriAssets",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "IrodoriFromPretrainedOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "IrodoriGenerateEvent",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "IrodoriGenerateRequest",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "IrodoriGeneratedAudio",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "IrodoriLatentSnapshot",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "IrodoriPipeline",
+        "kind": "class"
+      },
+      {
+        "name": "IrodoriPipelineOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "IrodoriRunComponent",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "IrodoriSpeakerInput",
+        "kind": "typeAlias"
+      }
+    ],
+    "./sbv2": [
+      {
+        "name": "GeneratedAudio",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "SBV2_SOURCES",
+        "kind": "variable"
+      },
+      {
+        "name": "Sbv2Assets",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Sbv2FromPretrainedOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Sbv2GenerateOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Sbv2InputError",
+        "kind": "class"
+      },
+      {
+        "name": "Sbv2Mora",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Sbv2Phrases",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Sbv2Pipeline",
+        "kind": "class"
+      },
+      {
+        "name": "Sbv2PipelineOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Sbv2RunComponent",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Sbv2Utterance",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Sbv2Word",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "toSbv2Utterance",
+        "kind": "function"
+      }
+    ],
+    "./siglip2": [
+      {
+        "name": "Rgb8Image",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "SIGLIP2_SOURCES",
+        "kind": "variable"
+      },
+      {
+        "name": "Siglip2Assets",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Siglip2FromPretrainedOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Siglip2Pipeline",
+        "kind": "class"
+      },
+      {
+        "name": "Siglip2PipelineOptions",
+        "kind": "typeAlias"
+      }
+    ],
+    "./vowel-detector": [
+      {
+        "name": "LabSegment",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "VowelDetectorAssets",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "VowelDetectorFromPretrainedOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "VowelDetectorPipeline",
+        "kind": "class"
+      },
+      {
+        "name": "VowelDetectorPipelineOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "VowelDetectorResult",
+        "kind": "typeAlias"
+      }
+    ]
+  }
+}
