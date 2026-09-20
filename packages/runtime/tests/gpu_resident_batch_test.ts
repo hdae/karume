@@ -942,9 +942,11 @@ Deno.test({
   fn: async () => {
     const gpu = await acquireGpu();
     try {
-      // MUST: 4 の倍数を保つ（崩れると同期の引数検査が先に出て、別の門を検査してしまう）。
-      const tooBig = gpu.limits.maxBufferSize + 4;
-      assertEquals(tooBig % 4, 0, "上限が 4 の倍数でないので要求が同期検査で落ちる");
+      // MUST: 上限超過かつ 4 の倍数を保つ（崩れると同期の引数検査が先に出て、別の門を検査して
+      // しまう）。`maxBufferSize` 自体は 4 の倍数とは限らない（Intel Arc B570 / Deno wgpu は
+      // 2³¹−1 — 2026-09-20 実測）ので、上限の次の 4 の倍数へ切り上げる。
+      const tooBig = Math.ceil((gpu.limits.maxBufferSize + 1) / 4) * 4;
+      assert(tooBig > gpu.limits.maxBufferSize && tooBig % 4 === 0, `tooBig ${tooBig}`);
       // 仕様上 size > maxBufferSize は**確保を伴わない** validation エラー（実メモリを食わない）。
       const error = await assertRejects(
         () => gpu.createResident(tooBig, "too-big"),

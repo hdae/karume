@@ -43,6 +43,22 @@ import { readShard, resolveShards, streamShards } from "./helpers/shard-files.ts
  */
 const GOLDEN_TOLERANCE: Tolerance = { atol: 1e-6, rtol: 1e-5 };
 
+/**
+ * 出力ごとの許容誤差の上書き（キーは `<model>/<出力名>`）。無い出力は {@link GOLDEN_TOLERANCE}。
+ *
+ * MUST: 緩めるのは **op 単位・WGSL 仕様の精度保証の範囲内・実害が無い場合**に限る（裁定
+ * 2026-09-20）。全体を一度に緩めない — もし広く緩めるなら「Karume 独自基準 + WGSL 仕様帯」の
+ * 2 段の門にして、従来基準に引っかかったことが分かる形にする（独自基準は容易に撤廃してよい）。
+ *
+ * - `activations/sin`: WGSL 仕様の `sin(x)` は |x| ≤ π で**絶対誤差 2⁻¹¹ まで**を許す（§ Accuracy
+ *   of Concrete Floating Point Expressions）。golden の入力は [−1.28, 1.89] でこの区間の内側。
+ *   NVIDIA（RTX 3080 Ti）はほぼ正しく丸めるので 1e-6 で通っていたが、Intel Arc B570（Mesa ANV）は
+ *   x = 1.5908 で 2.68e-5（2026-09-20 実測 — 仕様の内・実装バグの O(1) からは 4 桁下）。
+ */
+const OUTPUT_TOLERANCE: Readonly<Record<string, Tolerance>> = {
+  "activations/sin": { atol: 2 ** -11, rtol: 0 },
+};
+
 const GOLDEN_ROOT = new URL("./fixtures/golden/", import.meta.url);
 
 /** 登録時点で必要なので同期列挙する（Deno.test の ignore 判定と同じ理由）。 */
@@ -150,7 +166,7 @@ for (const model of MODELS) {
           const report = compareTensors(
             outputs[name],
             ioTensor(io, view, declared),
-            GOLDEN_TOLERANCE,
+            OUTPUT_TOLERANCE[`${model}/${name}`] ?? GOLDEN_TOLERANCE,
           );
           assert(report.pass, `${where}: ${formatAllclose(report)}`);
         });
