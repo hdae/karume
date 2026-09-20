@@ -59,3 +59,12 @@ QATは語句が変わるが、今回の短い出力に崩壊は見られない�
   重み自体の再量子化は不要。参照用 `quant: "i4"` と、実行指定 `linearGemvReduce: "sequential"` を残す。
 
 数値と採否の根拠は[M2の採用判断](../research/2026-09-13-m2-gemv-adoption.md)。
+
+## 追記（2026-09-20）— 並列族の積和は明示 `fma()` で綴る
+
+M2（Metal）で同じ数式の 2 カーネル（f32 と packed 活性）が u32 で割れた件の帰結。Metal のコンパイラは
+式形ごとに fma 縮約の入れ方を変えるため、`acc + x * d` の綴りでは変種同士が揃わない。並列族
+（f32 / packed × linear→SRQ 融合なし / あり）の積和を `acc = fma(x, d, acc)` に固定した。RTX / Vulkan では
+数値不変（掃引 540 組で不一致 0・QAT E2B の生成文が同一）、Metal では並列経路の出力が変更前から変わる
+（変種同士は揃う）。逐次 GEMV・行ブロック・subgroup 変種は従来の綴りのまま。経緯と実測は
+[0105 追記 4](0105-packed-static-quantize-activations.md#追記-42026-09-20-追記-3-の撤回と並列-gemv-族の積和を明示-fma-で綴る決定)。
