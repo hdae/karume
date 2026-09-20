@@ -38,3 +38,30 @@
   `packages/runtime/tests/gpu_gate_test.ts` が全 SKIP を FAIL にする）。実資産不在も同形で
   `assets_gate_test.ts` が FAIL にし、opt-out は `KARUME_ALLOW_NO_ASSETS=1`。これらを設定した
   環境の緑はリリース判定に使わない（[release-runbook](../release-runbook.md) §1）。
+
+## 追記（2026-09-20）— テストレーン（実行単位の分割）
+
+フル `deno test -A` は 30 分を超え、その大半は**モデル系列ごとの e2e**（`e2e_*_test.ts` 39 本 —
+実重み・実 GPU）に集中する。1 系列に閉じる変更のたびに他系列の e2e まで払うのは、時間の 9 割を
+関係の無い検査に使うことなので、`deno.json` の task を実行単位に分けた。**分けたのは実行単位
+だけで、検証戦略（上の 4 段と規律）は変えていない** — フル verify は横断変更とリリース前の
+最終確認として今のまま残る。
+
+- **粒度**: `test:core`（runtime / hub / 共通層 + tools + examples）と `test:models:<系列>`
+  （anima / sbv2 / irodori / gemma4 / gemma4-qat / birefnet / depth-anything / siglip2 /
+  vowel-detector / minicpm5 / embeddinggemma / deberta / dacvae）。系列名は配布形の綴りに揃える
+  （テストファイル名もそれに追随させた — `gemma_*_test.ts` → `gemma4_*_test.ts` 他）。
+- **門番は core だけ**: `gpu_gate` / `assets_gate` / `distribution_gate` は全 SKIP を FAIL に
+  する門で、系列とは無関係に配布形を要求する（`distribution_gate` は gemma4 の配布形を見る）。
+  系列レーンに同梱すると、その系列と関係の無い資産の不在でレーンが赤くなる。
+- **被覆の門**: レーン分割の唯一の危険は「テストを足したのにどのレーンにも入らない」形で、
+  これは無音で通る（レーン実行では一度も走らず、フル verify でしか現れない）。
+  `packages/runtime/tests/verify_lanes_test.ts` が `deno.json` の task 文字列を真実源として
+  ①core ∪ 全レーン = リポの全 `*_test.ts` ②core と系列レーンは互いに素 ③各レーンは 1 本以上、
+  を見る。task 文字列が想定の形（`deno test -A <対象…> [--ignore=<glob,…>]`）から外れたら
+  推測せず throw する。
+- **系列レーンどうしの重複は許す**: 通常配布形と QAT 配布形の両方を読むファイル
+  （`e2e_gemma4_ple_gpu_test.ts`）は gemma4 と gemma4-qat の両レーンに入れる。被覆漏れは
+  許さないが、重複は 2 度払うだけで結論を変えない。
+- **リリース判定は従来どおりフル verify の緑**（レーンの緑の寄せ集めでは代えない — レーンは
+  互いに素だが、同一プロセスでの相互作用と実行順はフルでしか見ていない）。
