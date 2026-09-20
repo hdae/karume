@@ -42,6 +42,10 @@ torch.export → IR v1・uv 管理）。設計の正本は [docs/decisions/](doc
   コア（runtime / hub / 共通層）の大きめ変更・横断変更・リリース前はフル `deno task verify`。
   コアだけなら `deno task test:core`（門番 3 本を含む）。レーンの一覧は deno.json の
   `test:core` / `test:models:*`、被覆漏れは `verify_lanes_test.ts` が落とす（ADR 0005 追記）
+- **sha256 参照値は環境ごとの行**（ADR 0106）: 行が無い機はそのケースが明示 SKIP + 参照門が赤。
+  `KARUME_REFERENCE=write` で同じレーンを回して自分の機の行を作る（既存の行は触らない・焼き直しは
+  `rewrite`）。結果と実物は `outputs/verify/<環境キー>/<日付>_<系列>/`（消して安全）。
+  **sha 門の tolerance 化は禁止**（緩めた時点で移植の門の意味が消える）
 - exporter: `uv run pytest`（**tools/exporter と tools/export-recipes の両方で** — ADR 0065）
 - `models/` の配布形ミラーが無い機では `KARUME_ALLOW_NO_DISTRIBUTION=1` で門番を外せる
   （QAT / quant の実資産 e2e は走らない）

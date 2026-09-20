@@ -197,7 +197,10 @@ M2 で赤のまま残ることを受容する**（Linux / Vulkan は緑・parall
 開発機の GPU を RTX 3080 Ti から **Intel Arc B570**（BMG G21・VRAM 9.93 GiB・Mesa 25.0.7・Linux xe
 ドライバ・Deno 2.9.6）へ載せ替えてフル verify を回した結果のうち、未解決のまま**記録だけ**に
 とどめたもの（裁定 2026-09-20）。sha256 参照門 16 本の不一致は limitations「sha256 参照門は
-参照環境専用」の by-design、BiRefNet 2048² の device lost は limitations「BiRefNet 系」節、
+参照環境専用」の by-design で、**参照値を環境キーごとの行に替えて消化した**（ADR
+[0106](decisions/0106-device-keyed-references.md) — B570 の行 `deno-intel-graphics-bmg-g21` は
+作成済みなので、この機の門は再び「この機での退行」だけを指す）。BiRefNet 2048² の device lost は
+limitations「BiRefNet 系」節、
 golden `activations` の `sin` は許容差を WGSL 仕様帯へ寄せて消化（`e2e_golden_test.ts` の
 `OUTPUT_TOLERANCE`）、`createResident` 上限門はテスト前提（`maxBufferSize` が 4 の倍数）の穴で
 修正済み。

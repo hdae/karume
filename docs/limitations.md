@@ -1265,13 +1265,20 @@ by-design の理由は取得物と資産の違いで、**手元の配布形は�
 
 ## sha256 参照門は参照環境専用 — クロスデバイスのビット同一は保証しない
 
-e2e の PNG / WAV 参照 sha256（`e2e_anima_test` / `e2e_sbv2_wav_test` /
-`e2e_irodori_wav_test`）は**参照環境（RTX 3080 Ti / Linux / Vulkan (wgpu)）で焼いた値**で、
-他バックエンド（Metal 等）では一致しない — これは仕様であり、門は参照環境での移植・退行
-検出器として機能する。**同じ Linux / Vulkan でもベンダが違えば一致しない**（2026-09-20・Intel Arc
-B570 / Mesa ANV でフル verify: 16 本すべて不一致・出力の PNG は目視で正常 = 数値の微小差）。
-デバイスごとに参照値を持てる形と、結果を JSON で環境間に受け渡す仕組みはテスト整理の波の候補
-（[backlog](backlog.md)）。
+> **2026-09-20 以降、「参照環境」= その機の行を参照値 fixture に持っている環境**（ADR
+> [0106](decisions/0106-device-keyed-references.md)）。参照値は単一の機で焼いた定数ではなく、
+> **環境キーごとの行**になった。節の題は既存のポインタ（コード側のコメントが名前で指す）を
+> 保つために据え置いている。
+
+e2e の PNG / WAV 参照 sha256（`e2e_anima_test` / `e2e_sbv2_wav_test` / `e2e_irodori_wav_test`）は
+**その環境で焼いた値**で、`packages/models/tests/fixtures/references/<系列>.json` に環境キー
+（`<ランタイム>-<アダプタ名 slug>`・例 `deno-intel-graphics-bmg-g21`）ごとの行として入っている。
+**行を持たない環境では一致しない**（Metal 等）— これは仕様であり、門は「**その機**での移植・退行
+検出器」として機能する。**同じ Linux / Vulkan でもベンダが違えば一致しない**（2026-09-20・Intel Arc
+B570 / Mesa ANV でフル verify: 当時の定数 1 本に対して 16 本すべて不一致・出力の PNG は目視で正常 =
+数値の微小差）。この実測が環境別の行へ移した直接の動機で、B570 の行
+（`deno-intel-graphics-bmg-g21`）は作成済み。行の作り方・参照門（`KARUME_ALLOW_NO_REFERENCE` で opt-out）・結果の席
+（`outputs/verify/`）は ADR [0106](decisions/0106-device-keyed-references.md) が正本。
 
 機序: IEEE 754 の加減乗除はデバイス間でも完全同一だが、①超越関数（`exp` 等）の実装が
 ドライバ / コンパイラ依存 ②シェーダコンパイラの fma 融合判断（積和を 1 命令に融合すると

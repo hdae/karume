@@ -1,21 +1,23 @@
 # 資産の置き場（models / outputs / inputs）
 
 ローカル資産 3 根の規約（outputs の 4 分割は 2026-08-30 裁定・`outputs/release/` は公開作業で
-後から生えた 5 つ目の席）。綴りの正本は `tools/export-recipes/_shared/paths.py`（`DIST_ROOT` /
-`SERIES_ROOT` / `EXAMPLES_ROOT` / `BENCH_ROOT` / `MISC_ROOT` / `INPUTS_ROOT` / `OUTPUTS_ROOT`）。
+後から生えた 5 つ目の席・`outputs/verify/` は検証結果の席として 2026-09-20 に生えた 6 つ目）。
+綴りの正本は `tools/export-recipes/_shared/paths.py`（`DIST_ROOT` / `SERIES_ROOT` /
+`EXAMPLES_ROOT` / `BENCH_ROOT` / `VERIFY_ROOT` / `MISC_ROOT` / `INPUTS_ROOT` / `OUTPUTS_ROOT`）。
 **3 根とも git 追跡しない**（全て再生成可能な生成物か手置きの実重みで、リポジトリが持つのは
 作り方だけ）。
 
-| 根                                     | 中身                                                               | 例                                                        |
-| -------------------------------------- | ------------------------------------------------------------------ | --------------------------------------------------------- |
-| `models/`                              | **配布形だけ**（1 ディレクトリ = 1 HF リポ・そのまま上げられる）   | `models/karume-anima-turbo/` / `models/karume-sbv2-jvnv/` |
-| `outputs/series/`                      | exporter の系列出力（コンテナ + golden フィクスチャ `io.*`）       | `outputs/series/sbv2-F1-f16/`                             |
-| `outputs/examples/<model>/`            | examples 台本の既定出力先（`<model>` = `--source` の basename）    | `outputs/examples/karume-sbv2-jvnv/*.wav`                 |
-| `outputs/bench/<model>/<日付>_<目的>/` | e2e ダンプ・ベンチ・視認評価（**消して安全** — 旧 `demo/` の後継） | `outputs/bench/karume-anima/2026-08-30_e2e-mismatch/`     |
-| `outputs/misc/<名前>/`                 | ホスト資産（**消すと再取得・再エミットが要る**）                   | `outputs/misc/sbv2-demo/` / `outputs/misc/corpus/`        |
-| `outputs/release/`                     | 公開作業の作業机（**中身で 2 性格** — 下の bullet）                | `outputs/release/upload-karume-siglip2.log`               |
-| `inputs/<family>/<name>/`              | 手置きの実重み（ckpt・config — 生成物ではない）                    | `inputs/sbv2/F1/`                                         |
-| `inputs/anima/civitai-<versionId>/`    | Civitai 取り込み（重み + `civitai.json` — ADR 0088）               | `inputs/anima/civitai-2983680/`                           |
+| 根                                         | 中身                                                               | 例                                                             |
+| ------------------------------------------ | ------------------------------------------------------------------ | -------------------------------------------------------------- |
+| `models/`                                  | **配布形だけ**（1 ディレクトリ = 1 HF リポ・そのまま上げられる）   | `models/karume-anima-turbo/` / `models/karume-sbv2-jvnv/`      |
+| `outputs/series/`                          | exporter の系列出力（コンテナ + golden フィクスチャ `io.*`）       | `outputs/series/sbv2-F1-f16/`                                  |
+| `outputs/examples/<model>/`                | examples 台本の既定出力先（`<model>` = `--source` の basename）    | `outputs/examples/karume-sbv2-jvnv/*.wav`                      |
+| `outputs/bench/<model>/<日付>_<目的>/`     | e2e ダンプ・ベンチ・視認評価（**消して安全** — 旧 `demo/` の後継） | `outputs/bench/karume-anima/2026-08-30_e2e-mismatch/`          |
+| `outputs/verify/<環境キー>/<日付>_<系列>/` | 検証の結果と実物（**消して安全** — `results.json` + PNG / WAV）    | `outputs/verify/deno-intel-graphics-bmg-g21/2026-09-20_anima/` |
+| `outputs/misc/<名前>/`                     | ホスト資産（**消すと再取得・再エミットが要る**）                   | `outputs/misc/sbv2-demo/` / `outputs/misc/corpus/`             |
+| `outputs/release/`                         | 公開作業の作業机（**中身で 2 性格** — 下の bullet）                | `outputs/release/upload-karume-siglip2.log`                    |
+| `inputs/<family>/<name>/`                  | 手置きの実重み（ckpt・config — 生成物ではない）                    | `inputs/sbv2/F1/`                                              |
+| `inputs/anima/civitai-<versionId>/`        | Civitai 取り込み（重み + `civitai.json` — ADR 0088）               | `inputs/anima/civitai-2983680/`                                |
 
 - 系列出力にはコンテナ以外の**ホスト側資産**も入る（グラフを持たない compile 生成物）—
   トークナイザは `<系列名>-tokenizer/tokenizer.json`（例
@@ -30,6 +32,14 @@
 - `bench/` の `<日付>_<目的>` は実行日 YYYY-MM-DD + 短い識別スラグ（`e2e-mismatch` /
   `eval-images` / `quant-sim` 等）。ファイル取り違え防止のための規約で、機械（テスト・台本）も
   この形で書く。
+- `verify/` の第 1 段は**環境キー**（`<ランタイム>-<アダプタ名 slug>` — 例
+  `deno-intel-graphics-bmg-g21`。`packages/runtime/tests/helpers/environment.ts` が
+  `GPUAdapterInfo` から作る）で、第 2 段が `<日付>_<系列>`（`bench/` と同じ実行日 YYYY-MM-DD）。
+  中身は `results.json`（ケースごとの決着 + 環境の素性 + チェックアウト）と実物（PNG / WAV・
+  一致した回も残す）。書き手は e2e テストで、綴りは exporter 側の `VERIFY_ROOT` と対になる
+  （現状 Python 側の書き手はいないが、結果を読む台本を足すときの正本はそちら）。
+  同じ日・同じ系列を 2 度回すと最後の走行が残る。正本は ADR
+  [0106](decisions/0106-device-keyed-references.md)。
 - `outputs/misc/corpus/` は**テスト入力の凍結コピー**（実画像 4 枚 = depth-anything / birefnet /
   siglip2 の実画像門・golden 生成の入力。実音声 `vowel-*.wav` も同様）。正本の生成は
   `examples/anima/eval-images.ts` / `examples/irodori/eval-audio.ts`（bench へ出る）で、採用分を

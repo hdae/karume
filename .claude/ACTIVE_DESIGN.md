@@ -1,10 +1,14 @@
 # ACTIVE_DESIGN — Karume
 
 > 現在の設計とレビューの入口。履歴はADR / research / gitに置き、作業順は[backlog](../docs/backlog.md)、性能の採否は[perf-ledger](../docs/perf-ledger.md)を正本とする。
-> Last updated: 2026-09-20（速度波の区切り — K-45宣言・段1b棄却・enqueueRead・並列族の明示fma・TTFTの帰属）
+> Last updated: 2026-09-20（テスト整理の波 — レーン分割・環境別の参照値と結果の席・公開面スナップショット門・CHANGELOG / README）
 
 ## 現在の焦点
 
+- テスト整理の波（2026-09-20〜・進行中）。済んだ段: 段0=verifyのレーン分割（`test:core` / `test:models:<系列>`と被覆の門`verify_lanes_test.ts`・[ADR 0005追記](../docs/decisions/0005-verification.md)）、
+  段1=sha256参照値を環境キーごとの行へ（`KARUME_REFERENCE`の3モード・参照門`KARUME_ALLOW_NO_REFERENCE`・結果と実物は`outputs/verify/<環境キー>/<日付>_<系列>/`・[ADR 0106](../docs/decisions/0106-device-keyed-references.md)）、
+  段2a=公開面スナップショット門（各パッケージの`public_surface_test.ts`と`fixtures/public-surface.json`・焼き直しは`KARUME_SURFACE=write`）、段2b=リポ直下`CHANGELOG.md`新設、段2c=パッケージREADME / LICENSEの公開物同梱。
+  以降の段と残件（golden側の環境別化、環境間で`results.json`を突き合わせる道具）の正本は[backlog](../docs/backlog.md)のnow先頭項。
 - `codex/review-and-fix`の[マージ前レビュー資料](../docs/research/2026-09-14-merge-review.md)を入口にする。
   9/11レビューの修正と、その後のQAT・LLM・性能改善を含む。旧レビューの対応表は[調査記録](../docs/research/2026-09-10-codex-mtp-optimization.md#9-月-11-日レビューの対応)。
   比較基点より前のMTP実装や公開API移行を、このブランチで初めて入った変更と混同しない。
@@ -50,6 +54,9 @@
 
 ## 現役の落とし穴
 
+- sha256参照値は**環境ごとの行**で、定数ではない（[ADR 0106](../docs/decisions/0106-device-keyed-references.md)）。行を持たない機では明示SKIP + 参照門が赤になるので、`KARUME_REFERENCE=write`で行を作る。他環境の行を焼き直さない。tolerance化は禁止。
+- レーンを単独で回すと門番3本（`gpu_gate` / `assets_gate` / `distribution_gate`）は走らない（coreにしか無い）。レーンの緑をフルverifyの緑と同じ意味に扱わない。参照門だけは系列のe2eに同梱される。
+- Denoはtimestamp-queryの値をnsへ換算しない（wgpuのraw tickのまま）。B570は`timestampPeriod` 52.0833 nsなので`lastRunTiming` / `--diagnostics`の内訳は×52過小になる（RTXはperiod 1 nsで表面化しなかった・Chromeは換算する — [known-issues](../docs/known-issues.md)）。
 - 全体verifyの失敗はログと失敗ファイルの単独実行で切り分ける。VRAM圧と断定しない。
   偽HF URLの固定repo/revisionとポート再利用で古いmanifestを拾う再現は[known-issues](../docs/known-issues.md)を参照。無断でcacheを消して合格扱いにしない。
 - Metalの診断付き実行によるdevice消失、GPUごとの下位bit差は[known-issues](../docs/known-issues.md)と[limitations](../docs/limitations.md)に記録。

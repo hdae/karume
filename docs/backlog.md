@@ -9,7 +9,7 @@
 
 ## now — 0.12.0 リリース後（2026-09-06）
 
-- **テスト整理・リファクタリングの波（候補・2026-09-20 利用者提案・段 0 のみ着手・次の波）**: 開発機が
+- **テスト整理・リファクタリングの波（2026-09-20 利用者提案・着手中 — 済んだ段は下の「段 N 済」の行）**: 開発機が
   Intel Arc B570 に替わり（NVIDIA の検証は別機の RTX 5070 Ti で行う）、karume はブラウザ優先
   （Deno も積極的に支える）という前提で、① sha256 / golden の**参照値をデバイスごとに持てる形**
   （参照環境の宣言と機ごとの値の並置）② verify の結果を **JSON に集約して環境間で受け渡し**、
@@ -21,10 +21,24 @@
   limitations「BiRefNet 系」「sha256 参照門」節。スコープと段取りは着手時に設計する。
   **段 0 済（2026-09-20）**: ④ の verify 分割（`test:core` / `test:models:<系列>` + 被覆の門
   `verify_lanes_test.ts` + 系列名に合わせたテスト改名）— 決定は [ADR 0005 追記](decisions/0005-verification.md)。
+  **段 1 済（2026-09-20）**: ① の sha256 側（参照値を環境キーごとの行へ + `KARUME_REFERENCE` の 3 モード +
+  参照門）と ② の結果 JSON（`outputs/verify/<環境キー>/<日付>_<系列>/` に `results.json` + 実物を毎回）—
+  決定は [ADR 0106](decisions/0106-device-keyed-references.md)。残りは ① の golden 側（torch 由来の
+  期待出力は tolerance 判定のままで手を付けていない）と ② の**環境間の突き合わせ道具**（集めた
+  `results.json` を並べて差異を出す形）。
   **段 2c 済（2026-09-20）**: パッケージ README / LICENSE 同梱（`packages/*/README.md` を英語で新設 + リポ直下 LICENSE をバイト同一で複製・公開物入りは `deno publish --dry-run` で確認 — [release-runbook §4](release-runbook.md)）。
   **段 2b 済（2026-09-20）**: CHANGELOG 新設（リポ直下 `CHANGELOG.md` — Keep a Changelog 形式・
   tag のある 18 版 + `[Unreleased]`。ADR 0008「breaking は CHANGELOG で明示する」の実体で、
   [release-runbook](release-runbook.md) §4 に bump 時の移し替えを 1 項追加）。
+  **段 2d 済（2026-09-20）**: テストの置き場と名前の是正（公開面の門の実体を
+  `packages/runtime/tests/helpers/public-surface.ts` へ移動 + 全テストが実 GPU を要る
+  `runtime_input_lifetime_test.ts` を `gpu_` 接頭辞へ改名。unit と GPU が同居する
+  `estimate_test.ts` / `runtime_executor_test.ts` / `static_quantize_test.ts` は混在のため据え置き）。
+  **段 2a 済（2026-09-20）**: 公開面のスナップショット門（各パッケージの `tests/public_surface_test.ts` と追跡 fixture
+  `tests/fixtures/public-surface.json` — `deno doc --json` で採る値・型の export 集合。焼き直しは `KARUME_SURFACE=write` —
+  [ADR 0008 追記](decisions/0008-public-api.md)）。
+  **段 3 済（2026-09-20）**: ③ の許容差 2 段化（`e2e_golden_test.ts` — Karume 独自基準を超え WGSL 仕様帯で受理した出力は
+  `outputs/verify/<環境キー>/<日付>_golden/results.json` の `note` に残す・赤にしない）。
 
 - **decode 速度調査の波（2026-09-19〜20・2026-09-20 に区切り — 残りは later へ）**: 帰属と反証は [decode 速度の帰属と次に試すこと](research/2026-09-19-qat-speed-recon.md)、
   候補の採否は [perf-ledger](perf-ledger.md) H-26〜H-29 / K-48〜K-53（K-45 / K-46 / K-47 は追記）。確定した事実: Deno の 23.8 ms/token のうち
