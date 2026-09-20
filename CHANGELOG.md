@@ -32,6 +32,17 @@ measurements in `docs/research/`.
   TTFT and generation speed for Gemma 4 E2B.
 - `glossary.md` and `quantization.md` under `docs/` as indexes for terminology and quantization
   methods.
+- Test lanes: `deno task test:core` and `deno task test:models:<family>` split the full verify
+  into a core lane and per-family lanes; `verify_lanes_test.ts` checks that every test file
+  belongs to a lane. Full `deno task verify` is unchanged and remains the release gate.
+- Device-keyed sha256 references: the PNG / WAV reference values live as per-environment rows
+  in tracked JSON fixtures instead of constants. `KARUME_REFERENCE=write` creates the rows for
+  a new machine (`rewrite` refreshes them), a machine without rows skips those cases explicitly
+  and fails a reference gate (`KARUME_ALLOW_NO_REFERENCE=1` to opt out), and every run writes
+  `results.json` plus the produced images / audio under `outputs/verify/<environment>/`.
+- A public-surface snapshot gate for the three packages (`deno doc --json` symbols against a
+  tracked fixture; `KARUME_SURFACE=write` refreshes it).
+- Each package now ships its README and LICENSE; this CHANGELOG.
 
 ### Changed
 
@@ -45,6 +56,9 @@ measurements in `docs/research/`.
   shape no longer rebuilds it on every run.
 - Gemma 4 prefill picks the smallest declared chunk bucket that covers the query length; the
   default bucket set is `[32, 64, 128, 256]`.
+- Golden tolerances are two-tier: outputs are checked against Karume's own bound first and,
+  where a WGSL accuracy bound is declared for that output, against the specification bound;
+  exceeding only the first is recorded in `results.json` rather than failed.
 
 ### Fixed
 
@@ -55,6 +69,9 @@ measurements in `docs/research/`.
 - Lifecycle defects in models: the generation stream's end notification and release are
   consistent, conversation history no longer shares message ownership, the PLE cache is not
   re-registered after dispose, and Irodori releases every resource on multiple failures.
+- `sin` golden on Intel Arc (Mesa ANV): the output is within the WGSL accuracy bound
+  (absolute 2^-11) and is now accepted under it; the resident over-limit test no longer assumes
+  `maxBufferSize` is a multiple of 4.
 
 ### Breaking
 
@@ -66,21 +83,6 @@ measurements in `docs/research/`.
   its goldens re-baked.
 - **Breaking:** speculation stops enumerating acceptances at a stop token, and reports what was
   handed to the caller as `GenerationSpeculation.delivered`.
-
-### In progress
-
-Work landing in this release that is still being implemented; each line states the intent, not a
-finished surface.
-
-- `deno task verify` is being split into a core lane and per-family model lanes, with a gate that
-  checks every test file is covered by exactly one lane.
-- sha256 / golden reference values are gaining a per-device form (a declared reference environment
-  beside per-machine values), a mode that creates missing references, and per-environment storage
-  of verify results so two machines can be compared.
-- A snapshot gate over the public surface of the three JSR packages, so surface drift shows up as
-  a failing test rather than in review.
-- Each published package gets its own README and LICENSE bundled into what JSR ships.
-- This CHANGELOG.
 
 ## [0.12.0] - 2026-09-06
 
