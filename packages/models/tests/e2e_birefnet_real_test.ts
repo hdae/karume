@@ -27,8 +27,8 @@
 // ## 資産が無い環境
 //
 // golden（`outputs/series/`）も入力の実画像（`outputs/misc/corpus/`）もマット PNG の書き出し先
-// （`outputs/bench/`）もリポジトリ管理外。ただし性格は割れていて、**読み**の corpus はホスト
-// 資産（消すと台本での焼き直しと凍結コピーが要る）、**書き**の bench は `rm -rf` で常に安全に
+// （`outputs/verify/`）もリポジトリ管理外。ただし性格は割れていて、**読み**の corpus はホスト
+// 資産（消すと台本での焼き直しと凍結コピーが要る）、**書き**の verify は `rm -rf` で常に安全に
 // 消せる席である。**1 件も無ければ明示 SKIP**、**golden が中途半端に欠けていれば FAIL**
 // （欠けの FAIL は runtime 側の「資産の完全性」テストが名指しで出す —— 系列ディレクトリの
 // 列挙はあちらが持つ）。
@@ -45,6 +45,7 @@ import { encodePng } from "../src/image/png.ts";
 // （packages/*/deno.json の `publish.exclude`）ので、配布物には影響しない。
 import { decodePng } from "../../runtime/tests/helpers/png-decode.ts";
 import { readShard, resolveShards, streamShards } from "../../runtime/tests/helpers/shard-files.ts";
+import { openResults } from "../../runtime/tests/helpers/results.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
 /**
@@ -92,17 +93,11 @@ const SERIES: readonly Series[] = [
   },
 ];
 
-/** 実行日（モジュールロード時に 1 回だけ確定 — 書き出し先の日付ディレクトリに使う）。 */
-const TODAY = new Date().toISOString().slice(0, 10);
-
 const SERIES_PARENT = new URL("../../../outputs/series/", import.meta.url);
 /** 入力の実画像コーパス（凍結コピー — ホスト資産なので消すと焼き直しが要る）。 */
 const CORPUS_DIR = new URL("../../../outputs/misc/corpus/", import.meta.url);
-/** マット PNG の書き出し先の根（`outputs/bench/` は消して安全な席）。 */
-const BENCH_DIR = new URL(
-  `../../../outputs/bench/birefnet/${TODAY}_e2e-mismatch/`,
-  import.meta.url,
-);
+/** マット PNG と決着の置き場（`outputs/verify/<環境キー>/<日付>_birefnet/` — 消して安全）。 */
+const results = openResults("birefnet");
 const MODEL_FILE = "model.safetensors";
 const IO_PREFIX = "io.";
 const IO_SUFFIX = ".safetensors";
@@ -110,10 +105,11 @@ const IO_SUFFIX = ".safetensors";
 const seriesRoot = (series: Series): URL => new URL(`${series.name}/`, SERIES_PARENT);
 
 /**
- * マット PNG（目視確認用の成果物）の置き場。`outputs/` 配下なので git 追跡外。**系列ごとに
- * 分ける** — 同じ席へ書くと、後に走った系列のマットが先の系列のものを黙って置き換える。
+ * マット PNG（目視確認用の成果物）の名前。**系列名を前に付ける** — 同じ名前へ書くと、後に
+ * 走った系列のマットが先の系列のものを黙って置き換える。
  */
-const artifactDir = (series: Series): URL => new URL(`${series.name}/`, BENCH_DIR);
+const artifactName = (series: Series, caseName: string, kind: string): string =>
+  `${series.name}-${caseName}-${kind}.png`;
 
 /**
  * 実画像そのものを焼き直すコマンド（プロンプト / seed の正本は台本側）。台本は
@@ -353,8 +349,7 @@ for (const series of SERIES) {
       const width = staticDim(parsed, 3);
       const height = staticDim(parsed, 2);
       const inputName = parsed.graph.inputs[0].name;
-      const artifacts = artifactDir(series);
-      await Deno.mkdir(artifacts, { recursive: true });
+      const started = performance.now();
 
       const gpu = await acquireGpu();
       const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
@@ -377,11 +372,11 @@ for (const series of SERIES) {
 
           const alpha = alphaFromLogits(output.data);
           await Deno.writeFile(
-            new URL(`${real.name}-matte.png`, artifacts),
+            results.artifact(artifactName(series, real.name, "matte")),
             await matteToPng(alpha, width, height),
           );
           await Deno.writeFile(
-            new URL(`${real.name}-cutout.png`, artifacts),
+            results.artifact(artifactName(series, real.name, "cutout")),
             await cutoutToPng(image, alpha),
           );
         }
@@ -395,18 +390,28 @@ for (const series of SERIES) {
         assert(ratio !== undefined, `${name} の前景比が無い`);
         return ratio;
       };
-      for (const personCase of REAL_PERSON_CASES) {
-        for (const sceneCase of REAL_SCENE_CASES) {
-          assert(
-            ratioOf(personCase) > ratioOf(sceneCase),
-            `前景比の順序が逆: ${personCase}=${ratioOf(personCase)} <=` +
-              ` ${sceneCase}=${ratioOf(sceneCase)}`,
-          );
+      const note = REAL_CASES.map((real) => `${real.name} ${ratioOf(real.name).toFixed(4)}`)
+        .join(" / ");
+      const elapsedMs = performance.now() - started;
+      try {
+        for (const personCase of REAL_PERSON_CASES) {
+          for (const sceneCase of REAL_SCENE_CASES) {
+            assert(
+              ratioOf(personCase) > ratioOf(sceneCase),
+              `前景比の順序が逆: ${personCase}=${ratioOf(personCase)} <=` +
+                ` ${sceneCase}=${ratioOf(sceneCase)}`,
+            );
+          }
         }
+      } catch (cause) {
+        // 決着を残してから落とす（実物と前景比が手元に無いと、赤の読み解きが始められない）。
+        await results.record({ id: series.name, status: "fail", elapsedMs, note });
+        throw cause;
       }
+      await results.record({ id: series.name, status: "pass", elapsedMs, note });
       console.log(
-        `[karume] BiRefNet のマット PNG を ${artifacts.pathname} へ書いた` +
-          `（<ケース>-matte.png / <ケース>-cutout.png）`,
+        `[karume] BiRefNet のマット PNG を ${results.dir.pathname} へ書いた` +
+          `（${series.name}-<ケース>-matte.png / -cutout.png）`,
       );
     },
   });

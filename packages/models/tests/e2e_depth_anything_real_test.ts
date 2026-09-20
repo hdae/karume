@@ -50,6 +50,7 @@ import { encodePng } from "../src/image/png.ts";
 // （packages/*/deno.json の `publish.exclude`）ので、配布物には影響しない。
 import { decodePng } from "../../runtime/tests/helpers/png-decode.ts";
 import { readShard, resolveShards, streamShards } from "../../runtime/tests/helpers/shard-files.ts";
+import { openResults } from "../../runtime/tests/helpers/results.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
 /**
@@ -107,9 +108,6 @@ const GENERATE = "cd tools/export-recipes && uv run --group depth-anything-prepr
  */
 const IMAGE_COMMAND = "deno task demo:eval-images --source <Anima 配布形のパス>";
 
-/** 実行日（モジュールロード時に 1 回だけ確定 — 書き出し先の日付ディレクトリに使う）。 */
-const TODAY = new Date().toISOString().slice(0, 10);
-
 const SERIES_ROOT = new URL(`../../../outputs/series/${SERIES_NAME}/`, import.meta.url);
 /** 入力の実画像コーパス（凍結コピー — ホスト資産なので消すと焼き直しが要る）。 */
 const CORPUS_DIR = new URL("../../../outputs/misc/corpus/", import.meta.url);
@@ -117,11 +115,8 @@ const MODEL_FILE = "model.safetensors";
 const IO_PREFIX = "io.";
 const IO_SUFFIX = ".safetensors";
 
-/** 深度 PNG（目視確認用の成果物）の置き場。`outputs/bench/` は消して安全な席。 */
-const ARTIFACT_DIR = new URL(
-  `../../../outputs/bench/depth-anything/${TODAY}_e2e-mismatch/`,
-  import.meta.url,
-);
+/** 深度 PNG と決着の置き場（`outputs/verify/<環境キー>/<日付>_depth-anything/` — 消して安全）。 */
+const results = openResults("depth-anything");
 
 /**
  * **実画像**ケース（`--real-images` を付けた emit だけが持つ）。ケース名とファイル名の正本は
@@ -435,7 +430,7 @@ Deno.test({
     // 相対矩形も PNG も一辺だけで索く（正方でなければ黙って別の場所を測ってしまう）。
     assertEquals(width, height, "領域の判別は正方形の地図を前提にする");
     const inputName = parsed.graph.inputs[0].name;
-    await Deno.mkdir(ARTIFACT_DIR, { recursive: true });
+    const started = performance.now();
 
     const gpu = await acquireGpu();
     const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
@@ -461,7 +456,7 @@ Deno.test({
           far: regionMean(output.data, width, far),
         });
         await Deno.writeFile(
-          new URL(`${real.name}-depth.png`, ARTIFACT_DIR),
+          results.artifact(`${real.name}-depth.png`),
           await depthToPng(output.data, width),
         );
       }
@@ -470,18 +465,30 @@ Deno.test({
       gpu.destroy();
     }
 
-    for (const real of REAL_CASES) {
+    const elapsedMs = performance.now() - started;
+    const note = REAL_CASES.map((real) => {
       const measured = means.get(real.name);
-      assert(measured !== undefined, `${real.name} の領域平均が無い`);
-      const [near, far] = REAL_REGIONS[real.name];
-      assert(
-        measured.near > measured.far,
-        `${real.name} の近側 ${near.label} の深度平均 ${measured.near} が` +
-          ` 遠側 ${far.label} の ${measured.far} 以下 — 構図の遠近を当てられていない`,
-      );
+      return `${real.name} ${measured?.near.toFixed(4)}/${measured?.far.toFixed(4)}`;
+    }).join(" / ");
+    try {
+      for (const real of REAL_CASES) {
+        const measured = means.get(real.name);
+        assert(measured !== undefined, `${real.name} の領域平均が無い`);
+        const [near, far] = REAL_REGIONS[real.name];
+        assert(
+          measured.near > measured.far,
+          `${real.name} の近側 ${near.label} の深度平均 ${measured.near} が` +
+            ` 遠側 ${far.label} の ${measured.far} 以下 — 構図の遠近を当てられていない`,
+        );
+      }
+    } catch (cause) {
+      // 決着を残してから落とす（実物と領域平均が手元に無いと、赤の読み解きが始められない）。
+      await results.record({ id: SERIES_NAME, status: "fail", elapsedMs, note });
+      throw cause;
     }
+    await results.record({ id: SERIES_NAME, status: "pass", elapsedMs, note });
     console.log(
-      `[karume] Depth Anything の深度 PNG を ${ARTIFACT_DIR.pathname} へ書いた` +
+      `[karume] Depth Anything の深度 PNG を ${results.dir.pathname} へ書いた` +
         "（<ケース>-depth.png）",
     );
   },
