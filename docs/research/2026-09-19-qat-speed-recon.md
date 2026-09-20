@@ -502,6 +502,24 @@ bundle は `outputs/bench/karume/2026-09-19_18-31-28_k45-stage0-dceb0046/`（git
 （gather Session の行数別 plan / 常駐の初回コンパイルか）③通常 Gemma 4 E2B の i8 sidecar（2.19 GiB）は参照機の束縛上限に
 載らない（QAT 専用のまま）。
 
+### 15.1 残件 ① の解消（2026-09-20・RTX・Deno・`Session.enqueueRead`）
+
+温度 > 0 と診断付きの decode（通常 run）を gather と同じ batch に積み、グラフ出力を batch の終端フェンスで読み戻す面
+（`Session.enqueueRead` — ADR 0054 追記〈グラフ出力の一括読み戻し〉）を足した。prefill（M > 1）は従来どおり gather 用の
+batch を chunk ごとに 1 本先に閉じる（enqueue 系は初回から chunk 形の slot backing を払うため）。
+条件は §15 と同じ（QAT E2B `i4-fast`・capacity 4096 / chunk 768・64 token）で、CLI の**既定サンプラー**（温度 1・seed 7）を
+host / gpu で 3 回ずつ往復。生値は `outputs/bench/karume/2026-09-20_h28-sampler-fence/`（git 追跡外）。
+
+| 経路                                    |             host |              gpu |                                          差 |
+| --------------------------------------- | ---------------: | ---------------: | ------------------------------------------: |
+| Deno 壁・CLI 既定サンプラー（64 token） | 42.7〜43.1 tok/s | 42.2〜43.2 tok/s |                 中立（§15 は −13 ms/token） |
+| Deno TTFT                               |      159〜166 ms |      165〜168 ms | +2〜7 ms（prefill 1 chunk のフェンス 1 本） |
+
+生成文は 3 回とも host / gpu で同一。e2e（`e2e_gemma4_ple_gpu_test.ts`）は「サンプラー経路の id 列が host と一致し、
+`onSubmittedWorkDone` の回数差が prefill 1 本ぶんだけ」を門にする（改訂前は decode 16 token ぶん + 1）。
+残件 ②（日本語 prompt の TTFT +25〜30 ms・Chrome）は別計測（Chrome のフェンスは 0.005 ms 級なので、フェンスでなく gather pass の
+追加か行数別 plan の初回コンパイルが候補）。
+
 ## 16. K-45 段 1a — packed int8 活性（opt-in 席 `packedStaticQuantize`）の A/B（2026-09-19・RTX）
 
 実装は `57416eb`（ADR 0105・全形の u32 一致 540 件・64 token id 列一致）と追補（SRQ カーネルの再設計 + 形ごとの採否フラグ・ADR 0105 追記 1）。
@@ -527,3 +545,23 @@ M2 追試（同ページの往復比較）②段 1b（整数内積）は算術�
 
 追記（2026-09-20）: ①は実施（hub `SessionSpec` に席・QAT E2B `i4-fast` が宣言・配布形再ビルド・計測ページに off/on 軸 — ADR 0105 追記 2）。M2 追試は利用者の往復比較待ち。
 ②は棄却（§14.2 の訂正のとおり lm_head に int8 活性が無い）。
+
+### 16.1 M2 追試（2026-09-20・利用者実機・Chrome・apple / metal-3・計測ページの既定往復）
+
+条件はページの新しい既定（QAT E2B `i4-fast`・並列 GEMV・rms→add 融合・linear→SRQ 融合 on・**capacity 128 / chunk 64**・
+投入上限 768・packed 活性を off → on → on → off の 4 ロード・2 prompt × 各 5 生成 = 40 生成・checkout `f14c860` clean）。
+要約は [M2 結果 JSON](2026-09-20-m2-packed-activations-results.json)（元ファイルの SHA256 つき）。
+
+| ロード | packed 活性 | 英語 decode tok/s（中央値 [範囲]） | 日本語 decode tok/s | TTFT 英 / 日 |
+| ------ | ----------- | ---------------------------------: | ------------------: | -----------: |
+| 1      | off         |                   35.0 [30.7–35.4] |    31.1 [31.0–35.4] | 386 / 476 ms |
+| 2      | on          |                   34.8 [34.3–35.1] |    31.2 [30.2–35.1] |    392 / 485 |
+| 3      | on          |                   32.6 [31.3–35.2] |    35.2 [35.1–35.2] |    388 / 478 |
+| 4      | off         |                   35.2 [34.6–35.3] |    35.3 [31.3–35.3] |    385 / 477 |
+
+中央値の中央値: off 35.3 / on **35.2 tok/s**（−0.3%・各ロードの範囲 30〜35 の中に収まる = **速度は中立**）。TTFT も同等。
+**id 列**: 日本語 prompt は 4 ロードとも同一。英語 prompt は off 同士・on 同士は同一だが、**off と on が 64 token 中の位置 56 から
+分岐**する（各ロード内では決定的）。RTX（Vulkan）では 540 件の u32 完全一致と 64 token の id 列一致を門にしていた席なので、
+Metal では packed 変種の f32 積和が f32 経路とビット同一でない（ADR 0105 決定 3 の「乗算 1 個は正しく丸めた積」が成り立たない —
+FMA 縮約の違いが第一候補・未検証）。M2 では速度利得が無く出力だけが変わるので、宣言の維持は要判断（本文の完了報告）。
+切り分けは M2 で `deno test -A packages/runtime/tests/gpu_packed_static_quantize_test.ts`（u32 一致門・カーネル単体）を回すのが最短。

@@ -238,8 +238,12 @@ perf-ledger H-28。決定 3（遅延ロード + LRU）と決定 6（PLE は通�
 - **機構**: `embedding` → `mul embed_scale` の 2 ノードだけの小さな IR を別 Session で持ち、
   target の run と**同じ batch へ先に enqueue** して出力を常駐テンソルへ書き、target はそれを
   `per_layer_inputs` の常駐入力として受ける（writeBuffer を出さない）。temperature 0 の decode は
-  greedy 出力の batch に相乗りするのでフェンスは増えない。prefill と診断付き decode（通常 run）は
-  gather 用の batch を 1 本余分に払う。prefill も decode も GPU gather を通る（片方だけの席にしない）。
+  greedy 出力の batch に相乗りするのでフェンスは増えない。温度 > 0 や診断付きの decode（通常 run）も
+  同じ batch に積み、グラフ出力は batch の終端フェンスで読み戻す（`Session.enqueueRead` —
+  [0054 追記](0054-resident-loop-and-fence.md#グラフ出力の一括読み戻し2026-09-20)・2026-09-20 に残件 ① として
+  改訂。それまでは gather 用の batch を 1 本先に閉じていた）。prefill（M > 1）だけは gather 用の batch を
+  1 本余分に払う — enqueue 系は初回から slot backing を作る契約で、chunk 形の backing を 1 本目から
+  払わせないため。prefill も decode も GPU gather を通る（片方だけの席にしない）。
 - **重みの形**: 重みは `[tokens × layers, dim]`・添字は `id × layers + layer`。1 行 = 1 層ぶんに
   なるので、sidecar の `scales[rows, layers]` がそのまま行 scale の並びになり、**i8 / i2 の行
   scale も i4 の `group_size = dim` の group scale も同じ平坦添字**で引ける。逆量子化は

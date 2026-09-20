@@ -131,3 +131,27 @@ Promise を握っていないので、実態は「dispatch を 1 本落とした
 - この追加だけで会話用の`Session.enqueue`やGemmaの小出力化を有効にしたとはしない。
   GenerationContextの使用予約・長さの確定・失敗時のpoisonをバッチ最終決着へ接続する段階、
   modelsのgreedy能力を接続する段階を別々に検収する。IR・保存資産・既存の数値契約は変更しない。
+
+## グラフ出力の一括読み戻し（2026-09-20）
+
+- GPU 常駐の側入力（PLE の GPU gather — [0085 追記](0085-ple-host-gather.md#追記2026-09-19--gpu-常駐席-opt-in-で-sidecar-を-gpu-に置きgather-も-gpu-内で行う)）を
+  同じ区間に積む**通常 run**（温度 > 0 の decode・診断付き decode）がフェンスを 1 本余分に払っていた。
+  `run` は device 単位の errorScope 区間ロックを取りに行き、開いている batch がそれを finish まで握るので
+  同じ区間に相乗りできない（自己デッドロック）。根は「batch の中でグラフ出力をホストへ受け取る面が無い」ことなので、
+  上の常駐テンソルの一括読み戻しを**グラフ出力**まで広げる。
+- `Session.enqueueRead(inputs, options): { admitted, outputs }` を追加する。積むコマンド列は `enqueue` と同一で、
+  グラフ出力の写し元（slot backing）を区間へ登録し、決着時に `finishAndRead` の常駐と**同じ 1 本の staging** へ
+  連結コピーして 1 回の map で読み戻す。1 staging / 1 map・`maxBufferSize` の合計検査・GPU 失敗とホスト側失敗の
+  優先規則・使用予約の返却は常駐の読み戻しと同じ規則をそのまま使う。`admitted` は `enqueue` の戻りと同じ意味、
+  `outputs` は区間が例外なく決着した後にだけ解決し、失敗では同じ理由で拒否する（成功データを持ったまま finish が
+  失敗する形は作らない）。
+- 写しは積んだ時点でなく決着時に読む。したがって **enqueueRead を積んだ batch には、その決着まで同じ Session の
+  後続 enqueue を拒否する**（後続が同じ出力 slot を上書きすると読む値が変わる沈黙誤値になる）。解除は決着の
+  finalizer（成否によらず）。区間中の Session / context の dispose が禁止なのは従来どおり。
+- 論理長の advance / defer は `enqueue` と同じく決着時。`lastRun`（アリーナ実績）は enqueue と同じく undefined。
+  gpuTiming 有効な device では batch が開けないので、この面も同じ門の内側にある（ADR 0021 は改訂しない）。
+- 適用は decode 形（M = 1）だけ。prefill を enqueue 系に移すと初回から chunk 形の slot backing を払う
+  （生成面の prefill が run に留まる理由と同じ）ので、prefill は従来の「gather 用 batch を先に閉じる」経路に残す。
+  検収: `gpu_batch_enqueue_read_test.ts`（run と同値・決着前に解決しない・staging 1 本・後続 enqueue の拒否・受理失敗と
+  GPU 失敗の伝播）・`gpu_batch_generation_test.ts`（決着でだけ論理長が進む・u32 一致）・`e2e_gemma4_ple_gpu_test.ts`
+  （サンプラー経路の id 列が host と一致し、余分なフェンスは prefill ぶんだけ）。

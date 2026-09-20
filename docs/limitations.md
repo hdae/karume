@@ -1540,6 +1540,7 @@ token 列は 1 つも変わらない。
 `acquireGpu({ gpuTiming: true })` は計測中に batch を開けないためである。
 
 単独では速くならない（[research §15](research/2026-09-19-qat-speed-recon.md)）: Chrome の greedy decode で壁 0〜−7%・
-GPU +0.08 ms/token、日本語 prompt の TTFT が +25〜30 ms、Deno は温度 0 で中立。**greedy 以外の run（サンプリング・
-prefill・診断付き）は gather 用の batch を 1 本先行させるのでフェンスが 1 本増え、Deno では +13 ms/token**（CLI の
-既定サンプラーで 42 → 27 tok/s）。席は先行投入（perf-ledger H-27）の前提として置いたもので、既定にはしない。
+GPU +0.08 ms/token、日本語 prompt の TTFT が +25〜30 ms、Deno は温度 0 で中立。温度 > 0 や診断付きの decode（通常 run）は
+2026-09-20 から gather と同じ batch に積んで終端フェンスで読み戻す（`Session.enqueueRead`・[ADR 0054 追記](decisions/0054-resident-loop-and-fence.md#グラフ出力の一括読み戻し2026-09-20)）
+ので、フェンスは greedy と同じ 1 本。**prefill だけは gather 用の batch を chunk ごとに 1 本先行させる**（Deno では
+chunk あたり +10 ms の TTFT）。席は先行投入（perf-ledger H-27）の前提として置いたもので、既定にはしない。

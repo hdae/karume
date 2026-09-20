@@ -1,0 +1,223 @@
+{
+  "snapshot": "2026-09-20",
+  "note": "利用者の M2 実機（Chrome・apple / metal-3）でブラウザ計測ページの既定往復（QAT E2B・i4-fast・linear→SRQ 融合 on・packed 活性 off→on→on→off・capacity 128 / chunk 64・64 token）を実行した結果の要約。元 JSON は outputs/bench-browser/（git 追跡外）。",
+  "source": "outputs/bench-browser/gemma-browser-2026-09-20T09-50-09.994Z.json",
+  "sourceSha256": "23f667e801fc3feee06571624e890c859326e7b33a3eeed3185b6c3be15fa07b",
+  "checkout": "f14c860c2cdcf0703d1248fafc6417ab350d843c",
+  "checkoutDirty": false,
+  "bundleSha256": "8201682da5d0ac181663b384b5ead18d3f60335677e9c76e03615748dd3f2a74",
+  "manifestSha256": "23cf61b6edb55d25a1eb3c0ff9c8265386107568c87558620d04575f648a8103",
+  "adapter": {
+    "vendor": "apple",
+    "architecture": "metal-3"
+  },
+  "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
+  "date": "2026-09-20T09:48:39.153Z",
+  "loads": [
+    {
+      "load": 1,
+      "packedStaticQuantize": false,
+      "fuseLinearStaticQuantize": true,
+      "linearGemvReduce": "parallel",
+      "normalization": "fused",
+      "stateAttentionReduce": "parallel",
+      "loadSeconds": 2.3707050000429155,
+      "cases": [
+        {
+          "case": "english-list",
+          "ttftFirstMs": 537.3199999332428,
+          "ttftMedianMs": 386.2999999523163,
+          "decodeTokensPerSecond": [
+            35.39942349396492,
+            30.6586499975874,
+            34.96998409781646
+          ],
+          "decodeMedian": 34.96998409781646,
+          "generatedTokens": [
+            64,
+            64,
+            64
+          ],
+          "deterministic": true,
+          "firstTokenIdsSha": "fedcb9f1ddfadd94"
+        },
+        {
+          "case": "japanese-list",
+          "ttftFirstMs": 564.1200000047684,
+          "ttftMedianMs": 476.06500005722046,
+          "decodeTokensPerSecond": [
+            35.43685770809463,
+            30.978781993331495,
+            31.075278628748862
+          ],
+          "decodeMedian": 31.075278628748862,
+          "generatedTokens": [
+            64,
+            64,
+            64
+          ],
+          "deterministic": true,
+          "firstTokenIdsSha": "1998d67361fa38ed"
+        }
+      ]
+    },
+    {
+      "load": 2,
+      "packedStaticQuantize": true,
+      "fuseLinearStaticQuantize": true,
+      "linearGemvReduce": "parallel",
+      "normalization": "fused",
+      "stateAttentionReduce": "parallel",
+      "loadSeconds": 1.9187400000095367,
+      "cases": [
+        {
+          "case": "english-list",
+          "ttftFirstMs": 514.2250000238419,
+          "ttftMedianMs": 391.9449999332428,
+          "decodeTokensPerSecond": [
+            34.80999544063107,
+            34.336541709027316,
+            35.11187032043889
+          ],
+          "decodeMedian": 34.80999544063107,
+          "generatedTokens": [
+            64,
+            64,
+            64
+          ],
+          "deterministic": true,
+          "firstTokenIdsSha": "c36df06705a122c8"
+        },
+        {
+          "case": "japanese-list",
+          "ttftFirstMs": 562.6449999809265,
+          "ttftMedianMs": 484.88499999046326,
+          "decodeTokensPerSecond": [
+            30.243024302430243,
+            31.22065320573939,
+            35.05472432084142
+          ],
+          "decodeMedian": 31.22065320573939,
+          "generatedTokens": [
+            64,
+            64,
+            64
+          ],
+          "deterministic": true,
+          "firstTokenIdsSha": "1998d67361fa38ed"
+        }
+      ]
+    },
+    {
+      "load": 3,
+      "packedStaticQuantize": true,
+      "fuseLinearStaticQuantize": true,
+      "linearGemvReduce": "parallel",
+      "normalization": "fused",
+      "stateAttentionReduce": "parallel",
+      "loadSeconds": 1.8862450000047684,
+      "cases": [
+        {
+          "case": "english-list",
+          "ttftFirstMs": 505.18999993801117,
+          "ttftMedianMs": 387.6050000190735,
+          "decodeTokensPerSecond": [
+            32.62887759339315,
+            35.21589298774685,
+            31.34320561399074
+          ],
+          "decodeMedian": 32.62887759339315,
+          "generatedTokens": [
+            64,
+            64,
+            64
+          ],
+          "deterministic": true,
+          "firstTokenIdsSha": "c36df06705a122c8"
+        },
+        {
+          "case": "japanese-list",
+          "ttftFirstMs": 604.6150000095367,
+          "ttftMedianMs": 478.25,
+          "decodeTokensPerSecond": [
+            35.2018237884147,
+            35.12547600492738,
+            35.207332064738104
+          ],
+          "decodeMedian": 35.2018237884147,
+          "generatedTokens": [
+            64,
+            64,
+            64
+          ],
+          "deterministic": true,
+          "firstTokenIdsSha": "1998d67361fa38ed"
+        }
+      ]
+    },
+    {
+      "load": 4,
+      "packedStaticQuantize": false,
+      "fuseLinearStaticQuantize": true,
+      "linearGemvReduce": "parallel",
+      "normalization": "fused",
+      "stateAttentionReduce": "parallel",
+      "loadSeconds": 1.8972550001144408,
+      "cases": [
+        {
+          "case": "english-list",
+          "ttftFirstMs": 511.06000006198883,
+          "ttftMedianMs": 385.375,
+          "decodeTokensPerSecond": [
+            34.6085389700416,
+            35.32003879484606,
+            35.24288219590662
+          ],
+          "decodeMedian": 35.24288219590662,
+          "generatedTokens": [
+            64,
+            64,
+            64
+          ],
+          "deterministic": true,
+          "firstTokenIdsSha": "fedcb9f1ddfadd94"
+        },
+        {
+          "case": "japanese-list",
+          "ttftFirstMs": 565.3600000143051,
+          "ttftMedianMs": 477.22000002861023,
+          "decodeTokensPerSecond": [
+            35.3353917608792,
+            31.344063284412744,
+            35.349468777551934
+          ],
+          "decodeMedian": 35.3353917608792,
+          "generatedTokens": [
+            64,
+            64,
+            64
+          ],
+          "deterministic": true,
+          "firstTokenIdsSha": "1998d67361fa38ed"
+        }
+      ]
+    }
+  ],
+  "medianOfMedians": {
+    "off": 35.32003879484606,
+    "on": 35.2018237884147
+  },
+  "tokenIds": {
+    "english-list": {
+      "offEqualsOff": true,
+      "onEqualsOn": true,
+      "offEqualsOn": false,
+      "firstDivergingPosition": 56,
+      "length": 64
+    },
+    "japanese-list": {
+      "offEqualsOn": true,
+      "length": 64
+    }
+  }
+}
