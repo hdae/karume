@@ -427,20 +427,29 @@ const LANES = ["x", "y", "z", "w"] as const;
  * と要素ごとに u32 一致する — level ≤ 128 と f32 scale の積は f64 で厳密なので、表側も
  * この乗算も「厳密な積を正しく丸めた f32」に一致する（ADR 0105 の決定 3）。
  * MUST: 語の成分は静的添字（`.x` / `.y` / `.z` / `.w`）で引く（既定経路と同じ Metal の規律）。
- * MUST: 復元した quad は `bitcast` 往復 + 実行時 0（`dims.rounding_mask`）との XOR で**丸め障壁**を
- * 通す（ADR 0099 の rms→add 融合と同じ書き方・ADR 0105 追記 3）。f32 経路の活性はロード値なので
- * 積和 `acc + x * d` に入る前に丸めが確定しているが、packed 経路では `(c × s) × d + acc` と積が
- * 式のまま見え、Metal（M2）ではここで再結合・縮約が入って f32 経路と u32 が割れた（RTX / Vulkan
- * では割れない）。XOR 0 は恒等なので RTX の数値は動かない。定数式へ簡略化しない（障壁が消える）。
+ * NOTE: 復元値に丸め障壁は置かない。Metal で f32 経路と割れた原因は積和の fma 縮約の入れ方で、
+ * 並列族の積和を明示 `fma()` で綴ることで両経路が揃う（{@link mac} — ADR 0105 追記 4）。
  */
 const activationQuad = (packed: boolean, slot: string, name: string, quad: number): string => {
   if (!packed) return `    let ${name} = x[xq${slot} + ${quad}u];`;
   const word = quad >> 2;
   const load = quad % 4 === 0 ? `    let xp${slot}_${word} = x[xq${slot} + ${word}u];\n` : "";
-  return `${load}    let ${name} = bitcast<vec4<f32>>(bitcast<vec4<u32>>(vec4<f32>(unpack4xI8(xp${slot}_${word}.${
+  return `${load}    let ${name} = vec4<f32>(unpack4xI8(xp${slot}_${word}.${
     LANES[quad & 3]
-  })) * dims.x_scale) ^ vec4<u32>(dims.rounding_mask));`;
+  })) * dims.x_scale;`;
 };
+
+/**
+ * 積和 1 行。並列族（`parallelWgsl` の f32 / packed × 融合なし / あり）は明示 `fma()` で綴る。
+ *
+ * MUST: 並列族は `fma`。`acc + x * d` の綴りは fma への縮約をコンパイラに委ねる形で、RTX / Vulkan
+ * では常に縮約される（明示 fma と u32 同一 — 540 組の掃引）が、Metal（M2）は式形ごとに縮約の入れ方を
+ * 変え、同じ数式のカーネル 2 本（f32 と packed）が u32 で割れた。明示 fma は縮約の自由度そのものを
+ * 消すので、両経路が同じ丸めになる（ADR 0105 追記 4）。逐次 GEMV・行ブロック・subgroup 変種は
+ * 参照経路の数値を動かさないため従来の綴りのまま。
+ */
+const mac = (fma: boolean, x: string, d: string): string =>
+  fma ? `    acc = fma(${x}, ${d}, acc);` : `    acc = acc + ${x} * ${d};`;
 
 /**
  * 語 1 本（i4 32 要素）の積和展開（M=1 変種）。
@@ -454,7 +463,7 @@ const activationQuad = (packed: boolean, slot: string, name: string, quad: numbe
  * MUST: このテキストは行ブロック化の前と 1 バイトも変えない（decode の生成物 —
  * tests/fixtures/wgsl/linear_gemv_*.wgsl が検出器）。
  */
-const unitMacsI4 = (slot: string, packed = false): string => {
+const unitMacsI4 = (slot: string, packed = false, fma = false): string => {
   const lanes = ["x", "y", "z", "w"] as const;
   return lanes.map((component, quad) => {
     const bytes = `b${slot}_${quad}`;
@@ -466,8 +475,8 @@ const unitMacsI4 = (slot: string, packed = false): string => {
       const low = lanes[(lane * 2) % 4];
       const high = lanes[(lane * 2 + 1) % 4];
       return [
-        `    acc = acc + ${source}.${low} * (f32(i32(${bytes}.${byte} & 0xFu) - 8) * ws${slot});`,
-        `    acc = acc + ${source}.${high} * (f32(i32(${bytes}.${byte} >> 4u) - 8) * ws${slot});`,
+        mac(fma, `${source}.${low}`, `(f32(i32(${bytes}.${byte} & 0xFu) - 8) * ws${slot})`),
+        mac(fma, `${source}.${high}`, `(f32(i32(${bytes}.${byte} >> 4u) - 8) * ws${slot})`),
       ];
     }).join("\n");
     return `    let ${bytes} = unpack4xU8(pw${slot}.${component});
@@ -485,13 +494,13 @@ ${macs}`;
  * MUST: 展開順は語内の要素昇順（成分 x→w × レーン x→w）・字面は `f32(q) * ws` の要素ごと乗算。
  * MUST: x は `vec4<f32>` 束縛から**静的成分**で引く（i4 版と同じ Metal の規律）。
  */
-const unitMacsI8 = (slot: string, packed = false): string => {
+const unitMacsI8 = (slot: string, packed = false, fma = false): string => {
   const lanes = ["x", "y", "z", "w"] as const;
   return lanes.map((component, quad) => {
     const bytes = `b${slot}_${quad}`;
     const xa = `xa${slot}_${quad}`;
     const macs = lanes.map((lane) =>
-      `    acc = acc + ${xa}.${lane} * (f32(${bytes}.${lane}) * ${WEIGHT_SCALE_VAR});`
+      mac(fma, `${xa}.${lane}`, `(f32(${bytes}.${lane}) * ${WEIGHT_SCALE_VAR})`)
     ).join("\n");
     return `    let ${bytes} = unpack4xI8(pw${slot}.${component});
 ${activationQuad(packed, slot, xa, quad)}
@@ -525,7 +534,7 @@ ${macs}`;
 };
 
 /** INT2 の16 B語を K 昇順に積和する。成分添字を静的にして Metal の動的添字を避ける。 */
-const unitMacsI2 = (slot: string, packed = false): string => {
+const unitMacsI2 = (slot: string, packed = false, fma = false): string => {
   const lanes = ["x", "y", "z", "w"] as const;
   return lanes.flatMap((component, word) =>
     lanes.map((_, byte) => {
@@ -534,7 +543,7 @@ const unitMacsI2 = (slot: string, packed = false): string => {
       const decoded = `d${slot}_${index}`;
       const activation = `x${slot}_${index}_0`;
       const products = `${activationQuad(packed, slot, activation, index)}
-${lanes.map((lane) => `    acc = acc + ${activation}.${lane} * ${decoded}.${lane};`).join("\n")}`;
+${lanes.map((lane) => mac(fma, `${activation}.${lane}`, `${decoded}.${lane}`)).join("\n")}`;
       return `    let ${quantized} = (pw${slot}.${component} >> ${byte * 8}u) & 255u;
     let ${decoded} = vec4<f32>(vec4<i32>(vec4<u32>(${quantized}, ${quantized} >> 2u, ${quantized} >> 4u, ${quantized} >> 6u) & vec4<u32>(3u)) - vec4<i32>(2)) * ${WEIGHT_SCALE_VAR};
 ${products}`;
@@ -562,16 +571,16 @@ const rowsMacsI2 = (slot: string, rows: number): string =>
       `    acc${row} = linear_i2_word(pw${slot}, xr${row} + xq${slot}, wscale_v, acc${row});`,
   ).join("\n");
 
-const unitMacs = (storage: WeightStorage, slot: string, packed = false): string =>
+const unitMacs = (storage: WeightStorage, slot: string, packed = false, fma = false): string =>
   storage === "f32"
     ? unitMacsF32(slot)
     : storage === "f16"
     ? unitMacsF16(slot)
     : storage === "i4"
-    ? unitMacsI4(slot, packed)
+    ? unitMacsI4(slot, packed, fma)
     : storage === "i2"
-    ? unitMacsI2(slot, packed)
-    : unitMacsI8(slot, packed);
+    ? unitMacsI2(slot, packed, fma)
+    : unitMacsI8(slot, packed, fma);
 
 /**
  * I4/I8も行ごとの積和を小さな関数へまとめる。K昇順とf32の丸め点はM=1と同じ。
@@ -962,11 +971,7 @@ const activationScaleBits = (scale: number): number => {
   return new Uint32Array(scratch.buffer)[0];
 };
 
-/**
- * packed 活性変種の params。Dims は `m / n / k` の後ろに `x_scale`（語 3）と丸め障壁の
- * `rounding_mask`（語 4・実行時 0）を持つ。8 語なのは uniform の 16 B 整列（5 語 → 32 B）。
- * MUST: 語 4 の 0 を定数式へ置き換えない（`activationQuad` の XOR 障壁がここを読む）。
- */
+/** packed 活性変種の params（Dims の最終メンバ `x_scale` に 1 語足すだけ）。 */
 export const linearGemvParallelPackedParams = (
   storage: WeightStorage,
   m: number,
@@ -976,8 +981,7 @@ export const linearGemvParallelPackedParams = (
   group?: number,
 ): Uint32Array<ArrayBuffer> => {
   assertRowsStorage(storage);
-  const params = new Uint32Array(8);
-  params.set(linearGemvParams(storage, m, n, k, group));
+  const params = linearGemvParams(storage, m, n, k, group);
   params[3] = activationScaleBits(xScale);
   return params;
 };
@@ -1035,8 +1039,7 @@ const parallelWgsl = (
   assertRowsStorage(storage);
   const unit = linearGemvUnit(storage);
   const shift = gemvGroupShift(storage, group);
-  // MUST: `x_scale` は SRQ 融合ありでは Dims の**最終メンバ**（params はこの位置へ 1 語足す）。
-  // 融合なし packed は `x_scale`（語 3）の後ろに丸め障壁の `rounding_mask`（語 4）を持つ。
+  // MUST: `x_scale` は Dims の**最終メンバ**（packed 変種の params はこの位置へ 1 語足す）。
   return `// karume linear gemv K parallel (${storage}, ${lanes} lanes/output${
     packed ? ", packed int8 活性" : ""
   })
@@ -1045,7 +1048,7 @@ struct Dims {
   n: u32,
   k: u32,${quantize ? "\n  rounding_mask: u32,\n  srq: array<vec4<u32>, 65>," : ""}${
     packed ? "\n  x_scale: f32," : ""
-  }${packed && !quantize ? "\n  rounding_mask: u32," : ""}
+  }
 }
 @group(0) @binding(0) var<uniform> dims: Dims;
 ${bindings(unit, storage, quantize, packed)}${quantize ? staticQuantizeEpilogue() : ""}
@@ -1062,7 +1065,7 @@ fn main(@builtin(local_invocation_index) lid: u32, @builtin(workgroup_id) wg: ve
     let row_base = col * units;${scaleSetupWgsl(storage, shift)}
     for (var unit = lane; unit < units; unit += ${lanes}u) {
 ${unitLoads(storage, "t", "unit", shift, `wg.y * (dims.k / ${packed ? 16 : 4}u) + `, packed)}
-${unitMacs(storage, "t", packed)}
+${unitMacs(storage, "t", packed, true)}
     }
   }
   partial[lid] = acc;
