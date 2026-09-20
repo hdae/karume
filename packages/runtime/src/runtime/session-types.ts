@@ -108,6 +108,19 @@ export type EnqueueOptions = {
 };
 
 /**
+ * {@link Session.enqueueRead} の戻り — 受理とグラフ出力の 2 本の決着。
+ *
+ * `admitted` は {@link Session.enqueue} の戻りと同じ意味（エンコードの受理・失敗はここにも出る）。
+ * `outputs` は batch の**決着後**にだけ解決する（区間の失敗では同じ理由で拒否する）。
+ * MUST NOT: `finish` / `finishAndRead` を呼ぶ前に `outputs` を await する（区間が閉じるまで
+ * 解決しないので、その await は永久に返らない）。
+ */
+export type EnqueueRead = {
+  readonly admitted: Promise<void>;
+  readonly outputs: Promise<RunOutputs>;
+};
+
+/**
  * {@link Session.createGenerationContext} の指定（ADR 0066 決定 6）。
  *
  * スロット容量（`graph.states` の記号次元）と `chunkLength` を確定して物理確保する。context は

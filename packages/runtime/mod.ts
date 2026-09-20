@@ -150,6 +150,7 @@ export type { WeightResidency } from "./src/runtime/weight-residency.ts";
 export type {
   ComputePrecision,
   EnqueueOptions,
+  EnqueueRead,
   FusionCounts,
   GenerationContext,
   GenerationContextSpec,

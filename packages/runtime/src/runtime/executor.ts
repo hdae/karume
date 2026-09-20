@@ -41,6 +41,7 @@ import {
   formatAttentionI8a8Decision,
 } from "../gpu/attention-dp4a-canary.ts";
 import {
+  type BatchReadSource,
   BatchScopeError,
   type GpuContext,
   ResidentTensor,
@@ -118,6 +119,7 @@ import {
   type ComputePrecision,
   DEFAULT_PLAN_BACKING_BUDGET_BYTES,
   type EnqueueOptions,
+  type EnqueueRead,
   type GenerationContextSpec,
   type GenerationRun,
   I8A8_DOT,
@@ -141,6 +143,7 @@ import {
 export type {
   ComputePrecision,
   EnqueueOptions,
+  EnqueueRead,
   GenerationContextSpec,
   GenerationRun,
   I8a8Dot,
@@ -837,6 +840,14 @@ type ResolvedCopy = {
   readonly size: number;
 };
 
+/** 決着時に読み戻すグラフ出力 1 本（{@link Session.#planReadback} — 写し元は slot backing）。 */
+type PlannedRead = {
+  readonly name: string;
+  readonly shape: readonly number[];
+  readonly count: number;
+  readonly source: BatchReadSource;
+};
+
 /**
  * 融合 attention の整数内積変種を決める（{@link SessionState.attentionI8a8Dot} の入口）。
  *
@@ -1046,6 +1057,11 @@ export class Session {
    * 閉路に参加できない（それらを混ぜると、決着する列まで拒否する過剰な門になる）。
    */
   #pendingRuns = 0;
+  /**
+   * `enqueueRead` を積んだ batch（その決着まで同じ Session の後続 enqueue を拒む —
+   * 決着時に読む出力 slot を後続が上書きすると沈黙誤値になる）。
+   */
+  #readBatch: EnqueueOptions["batch"] | undefined;
   /**
    * 他 Session へ貸し出している重みの本数（{@link Session.exportWeight} の借用計数 —
    * ADR 0096 段 2 §2.2）。0 でない間は {@link Session.dispose} を拒否する。
@@ -1742,7 +1758,8 @@ export class Session {
    * MUST: 通る経路は「導出済み計画 + slot backing」だけ。初回は導出と backing 構築をここで
    * 済ませる（run と違って**初回から** backing を作る — 作らなければ次も非 backed になり、
    * enqueue が成立しない）。アリーナ経路・readback 経路へ**黙って退避しない**のがこの面の
-   * 前提で、退避が要る形（出力をホストで受けたい等）は `run` を使うこと。
+   * 前提で、退避が要る形は `run` を、出力をホストで受けたいだけなら
+   * {@link Session.enqueueRead} を使うこと。
    * MUST: 末尾で必ず eager submit する（{@link SubmitScheduler.submitPending}）。これが
    * 「次の enqueue / `writeBuffer` が先行 dispatch を追い越さない」の根拠。
    * MUST: 同一 Session の run / enqueue / dispose は呼び出し順に直列化される（`run` と同じ
@@ -1768,8 +1785,49 @@ export class Session {
    * 前提の面なので、踏みやすさは run より高い。
    */
   enqueue(inputs: RunInputs, options: EnqueueOptions): Promise<void> {
+    return this.#admit(inputs, options, undefined);
+  }
+
+  /**
+   * {@link Session.enqueue} と同じコマンド列を積み、**グラフ出力を batch の終端フェンスでホストへ
+   * 読み戻す**（ADR 0054 追記〈グラフ出力の一括読み戻し〉— GPU 常駐の側入力を同じ区間に積む
+   * 通常 run がフェンスを 1 本余分に払わないための面）。
+   *
+   * 出力の写し元は slot backing で、コピーは区間の決着時に 1 本の staging へ連結して積む
+   * （{@link BatchScope.finishAndRead} と同じ staging・同じ map = フェンス 1 本）。積んだ時点の
+   * 値を写すのではなく決着時に読むので、**その batch の決着まで同じ Session の後続 enqueue は
+   * 拒否する**（後続が同じ slot を上書きすると読む値が変わる沈黙誤値になる）。
+   *
+   * MUST: `outputs` を await するのは `finish` / `finishAndRead` を呼んだ後（区間が閉じるまで
+   * 解決しない）。受理の失敗は `admitted` と `outputs` の両方に同じ理由で出る。
+   * NOTE: `lastRun`（アリーナの実績）は enqueue と同じく undefined のまま（アリーナを作らない）。
+   */
+  enqueueRead(inputs: RunInputs, options: EnqueueOptions): EnqueueRead {
+    const read = Promise.withResolvers<RunOutputs>();
+    // 決着を呼び手が受け取るまで未処理拒否にしない（同じ失敗は admitted 側にも出る）。
+    void read.promise.catch(() => undefined);
+    const admitted = this.#admit(inputs, options, read);
+    // 受理で落ちた enqueue は読み戻しの相手を 1 つも積んでいない — outputs も同じ理由で落とす。
+    admitted.catch((cause) => read.reject(cause));
+    return { admitted, outputs: read.promise };
+  }
+
+  /** `enqueue` / `enqueueRead` の共通本体（受け口の検査・写し・リース・区間への登録）。 */
+  #admit(
+    inputs: RunInputs,
+    options: EnqueueOptions,
+    read: PromiseWithResolvers<RunOutputs> | undefined,
+  ): Promise<void> {
     if (this.#disposal !== undefined) {
       return Promise.reject(new ExecutionError("dispose 済みの Session では実行できない"));
+    }
+    if (this.#readBatch === options.batch) {
+      return Promise.reject(
+        new BatchScopeError(
+          "enqueueRead を積んだ batch には、その決着まで同じ Session から enqueue できない" +
+            "（決着時に読む出力 slot を後続の enqueue が上書きすると沈黙誤値になる）",
+        ),
+      );
     }
     // MUST: リースを取る**前**に見る（取ってから落とすと、返し手の居ないリースが 1 本残って
     // `finish()` が今度こそ永久に待つ）。
@@ -1851,13 +1909,25 @@ export class Session {
         release: () => lease.releaseRun(),
       });
     }
+    if (read !== undefined) {
+      // MUST: 決着まで同じ Session の後続 enqueue を拒む（読む slot の上書きを塞ぐ）。解除は
+      // 区間の決着（成否によらず release）— リースの finalizer と同じ時点。
+      this.#readBatch = options.batch;
+      batch.onSettled({
+        complete: () => undefined,
+        fail: () => undefined,
+        release: () => {
+          this.#readBatch = undefined;
+        },
+      });
+    }
     return this.#serialize(async () => {
       // ホスト側の失敗は戻り Promise にしか出ない（errorScope は GPU 側の失敗しか捕らえない）
       // ので、区間にも渡して `finish()` の帰属先にする。器で包むのは「失敗が無い」と
       // 「undefined が投げられた」を区別するため。
       let failure: { readonly cause: unknown } | undefined;
       try {
-        finalize = await this.#enqueueOnce(captured, capturedOptions);
+        finalize = await this.#enqueueOnce(captured, capturedOptions, read);
       } catch (cause) {
         failure = { cause };
         throw cause;
@@ -2512,6 +2582,7 @@ export class Session {
   async #enqueueOnce(
     captured: CapturedInputs,
     options: EnqueueOptions,
+    read: PromiseWithResolvers<RunOutputs> | undefined,
   ): Promise<{ complete(): void; fail(cause: unknown): void } | undefined> {
     const { graph, scheduler } = this.#state;
     // 受け口の検査とリース取得は {@link Session.enqueue} の同期区間で済んでいる（本体で
@@ -2561,6 +2632,7 @@ export class Session {
     this.#recipeBuilder.resetParamsStats();
 
     let builtBacking: string | undefined;
+    let reads: readonly PlannedRead[] | undefined;
     try {
       let recipes: readonly StepRecipe[];
       let limits: GenerationLimits;
@@ -2589,6 +2661,8 @@ export class Session {
       builtBacking = activated.built ? activated.backing.key : undefined;
       // MUST: 写し元の解決（実体に依存する検査）は dispatch を 1 本も積む前に済ませる。
       const writes = this.#resolveCopyOutputs(copies, activated.backing);
+      // MUST: 読み戻す出力の解決（実体に依存する検査）も dispatch を 1 本も積む前に済ませる。
+      reads = read === undefined ? undefined : this.#planReadback(activated.backing, shapes);
       graph.inputs.forEach((spec, index) => {
         const values = data[index];
         if (values !== undefined) this.#writeInput(activated.backing, spec.name, values);
@@ -2651,6 +2725,21 @@ export class Session {
     try {
       this.#destroyRetired();
       this.#lastRunParams = this.#recipeBuilder.paramsStats;
+      if (read !== undefined && reads !== undefined) {
+        // 決着の staging へ載せる相手として登録する（in-flight リースの中 — finish は全リースの
+        // 返却を待つので取りこぼさない）。解決は区間の成否が決まった後（BatchScope 側）。
+        const planned = reads;
+        options.batch[RUNTIME_INTERNAL].readAtFinish(planned.map((item) => item.source)).then(
+          (buffers) => {
+            try {
+              read.resolve(this.#collectRead(planned, buffers));
+            } catch (cause) {
+              read.reject(cause);
+            }
+          },
+          (cause) => read.reject(cause),
+        );
+      }
     } catch (cause) {
       this.#poisonOnStateWrite(generation, stateWriteSubmits, cause);
       throw cause;
@@ -3230,6 +3319,50 @@ export class Session {
     const values = backing?.outputs ?? missValues;
     if (values === undefined) throw new ExecutionError("run の束縛先が組まれていない");
     return values;
+  }
+
+  /**
+   * 決着時に読み戻すグラフ出力の写し元を slot backing から解決する（{@link Session.enqueueRead}）。
+   * 適格の判定と initializer の扱いは {@link Session.#stageOutputs} と同じ 1 本の規則
+   * （pin された slot だけ・initializer は重みバッファそのもの）。
+   */
+  #planReadback(
+    backing: ActiveBacking,
+    shapes: ReadonlyMap<string, readonly number[]>,
+  ): readonly PlannedRead[] {
+    return this.#state.graph.outputs.map((name) => {
+      const weight = this.#state.weightBuffers.get(name);
+      const binding = backing.outputs.get(name) ??
+        (weight === undefined ? undefined : { buffer: weight, readable: true });
+      if (binding === undefined) throw new ExecutionError(`グラフ出力 '${name}' のバッファが無い`);
+      if (!binding.readable) {
+        throw new ExecutionError(`グラフ出力 '${name}' がピン留めされておらず読み戻せない`);
+      }
+      const shape = resolvedShape(shapes, name);
+      const count = numel(shape);
+      // MUST: 出力 slot の大きさと同じ算式（`#stageOutputs` / `#planCopyOutputs` と揃える）。
+      const size = Math.max(4, count * 4);
+      return {
+        name,
+        shape,
+        count,
+        source: { buffer: binding.buffer, offset: binding.offset ?? 0, size },
+      };
+    });
+  }
+
+  /** 決着で返った ArrayBuffer 列をホストの {@link Tensor} へ組み直す（{@link Session.#collectStaged} と同じ規則）。 */
+  #collectRead(reads: readonly PlannedRead[], buffers: readonly ArrayBuffer[]): RunOutputs {
+    const outputs: Record<string, Tensor> = Object.create(null);
+    reads.forEach((item, index) => {
+      outputs[item.name] = hostTensor(
+        this.#declaredDtype(item.name),
+        item.shape,
+        buffers[index],
+        item.count,
+      );
+    });
+    return outputs;
   }
 
   /**

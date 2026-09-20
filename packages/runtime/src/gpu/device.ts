@@ -1313,6 +1313,22 @@ type BatchFinalizer = {
   release(): void;
 };
 
+/** 区間の決着時に 1 本の staging へ連結コピーして読み戻す写し元（{@link BatchInternals.readAtFinish}）。 */
+export type BatchReadSource = {
+  readonly buffer: GPUBuffer;
+  readonly offset: number;
+  readonly size: number;
+};
+
+/** {@link BatchInternals.readAtFinish} で登録したグラフ出力の読み戻し 1 件（決着まで保持）。 */
+type GraphRead = {
+  readonly sources: readonly BatchReadSource[];
+  readonly resolve: (buffers: readonly ArrayBuffer[]) => void;
+  readonly reject: (cause: unknown) => void;
+  /** 決着の読み戻しで埋まる（区間の成否が決まるまで呼び手へは返さない）。 */
+  result?: readonly ArrayBuffer[];
+};
+
 /** {@link BatchScope} のランタイム内部面。 */
 type BatchInternals = {
   /** errorScope 区間が実際に開くまでの待ち（{@link GpuContext.beginBatch} が await する）。 */
@@ -1342,6 +1358,17 @@ type BatchInternals = {
    */
   leave(failure?: { readonly cause: unknown }): void;
   onSettled(finalizer: BatchFinalizer): void;
+  /**
+   * グラフ出力の slot を区間の決着時に読み戻す相手として登録する（`Session.enqueueRead`）。
+   * 常駐テンソルの読み戻し（{@link BatchScope.finishAndRead}）と同じ 1 本の staging に連結し、
+   * その map が唯一のフェンスになる。戻りは区間が例外なく決着した後にだけ解決し、失敗
+   * （GPU 側・ホスト側とも）では拒否する。
+   *
+   * MUST: 呼ぶのは enqueue 本体（in-flight リースを持つ間）。`finish` は全リースの返却を待って
+   * から読み戻しへ進むので、リースの中で登録した相手は取りこぼさない。読み戻しが始まった後の
+   * 登録は fail loudly（解決しない Promise を返さない）。
+   */
+  readAtFinish(sources: readonly BatchReadSource[]): Promise<readonly ArrayBuffer[]>;
 };
 
 /**
@@ -1372,6 +1399,10 @@ export class BatchScope {
   readonly #drained = Promise.withResolvers<void>();
   #leases = 0;
   #readback: readonly (readonly [string, ResidentTensor])[] | undefined;
+  /** 決着時に読み戻すグラフ出力（{@link BatchInternals.readAtFinish}）。 */
+  readonly #graphReads: GraphRead[] = [];
+  /** 決着の読み戻しへ進んだか（以後の登録は fail loudly）。 */
+  #readbackStarted = false;
   #finished = false;
   /** {@link BatchScope.settle} の途中か（この間の enqueue は拒否する — 窓の帰属を守る）。 */
   #settling = false;
@@ -1408,7 +1439,7 @@ export class BatchScope {
       const checkFailureScopes = async (): Promise<void> => {
         const pending = popFailureScopes(
           device,
-          this.#readback === undefined ? "batch のエンコード" : "batch のエンコードと読み戻し",
+          this.#readbackBytes() === 0 ? "batch のエンコード" : "batch のエンコードと読み戻し",
         );
         popped = true;
         const failure = await pending;
@@ -1421,9 +1452,18 @@ export class BatchScope {
         for (const member of this.#members) member.submitPending();
         // MUST: 消失後の onSubmittedWorkDone が解決しない実装がありうる（実測は
         // raceCanaryDeviceLost の doc）ため競わせる。
-        if (this.#readback !== undefined && this.#readback.length > 0) {
-          outputs = await this.#readOutputs(this.#readback, checkFailureScopes);
+        // MUST: ここから先の登録は受けない（全リースが返った後なので来ないはずだが、来たら
+        // 解決しない Promise を返すよりは fail loudly）。
+        this.#readbackStarted = true;
+        if (this.#readbackBytes() > 0) {
+          outputs = await this.#readOutputs(
+            this.#readback ?? [],
+            this.#graphReads,
+            checkFailureScopes,
+          );
         } else {
+          // 写し元が 1 本も無い登録（グラフ出力 0 本）は従来の完了フェンスで閉じる。
+          for (const read of this.#graphReads) read.result = [];
           await gpu[RUNTIME_INTERNAL].raceDeviceLost(
             device.queue.onSubmittedWorkDone(),
             "batch の完了",
@@ -1453,6 +1493,18 @@ export class BatchScope {
           throw new BatchScopeError("batch finalizer must be registered at admission");
         }
         this.#finalizers.push(finalizer);
+      },
+      readAtFinish: (sources) => {
+        if (this.#readbackStarted) {
+          throw new BatchScopeError("決着の読み戻しが始まった batch にはグラフ出力を登録できない");
+        }
+        const total = sources.reduce((sum, source) => sum + source.size, 0);
+        this.#assertReadbackBytes(this.#readbackBytes() + total, "グラフ出力の読み戻し");
+        const { promise, resolve, reject } = Promise.withResolvers<readonly ArrayBuffer[]>();
+        // 決着を呼び手が受け取るまで未処理拒否にしない（拒否の中身は finish がそのまま返す）。
+        void promise.catch(() => undefined);
+        this.#graphReads.push({ sources, resolve, reject });
+        return promise;
       },
       enter: (owner) => {
         if (owner !== this.#gpu) {
@@ -1609,11 +1661,7 @@ export class BatchScope {
         retained.push(resident);
         totalBytes += resident.byteLength;
       }
-      if (!Number.isSafeInteger(totalBytes) || totalBytes > this.#gpu.limits.maxBufferSize) {
-        throw new BatchScopeError(
-          `finishAndRead: 合計 ${totalBytes} bytes が maxBufferSize ${this.#gpu.limits.maxBufferSize} を超える`,
-        );
-      }
+      this.#assertReadbackBytes(totalBytes + this.#readbackBytes(), "finishAndRead");
       this.#readback = entries;
     } catch (cause) {
       for (const resident of retained) resident[RUNTIME_INTERNAL].releaseUse();
@@ -1622,28 +1670,57 @@ export class BatchScope {
     return this.finish().then(async () => (await this.#completion) ?? {});
   }
 
+  /** 決着時の staging に載る合計バイト数（常駐の指定 + 登録済みグラフ出力）。 */
+  #readbackBytes(): number {
+    const residents = (this.#readback ?? []).reduce(
+      (sum, [, resident]) => sum + resident.byteLength,
+      0,
+    );
+    return this.#graphReads.reduce(
+      (sum, read) => read.sources.reduce((inner, source) => inner + source.size, sum),
+      residents,
+    );
+  }
+
+  /** 1 本の staging に収まるか（分割 staging や複数 map へ黙って切り替えない — ADR 0054）。 */
+  #assertReadbackBytes(total: number, where: string): void {
+    if (!Number.isSafeInteger(total) || total > this.#gpu.limits.maxBufferSize) {
+      throw new BatchScopeError(
+        `${where}: 合計 ${total} bytes が maxBufferSize ${this.#gpu.limits.maxBufferSize} を超える`,
+      );
+    }
+  }
+
+  /**
+   * 常駐テンソルの指定とグラフ出力の登録を 1 本の staging へ連結コピーして読み戻す。
+   * 常駐の対応表を返し、グラフ出力は登録側の `result` に置く（呼び手へ返すのは区間の成否が
+   * 決まった後 — {@link BatchScope.#resolveFinish}）。
+   */
   async #readOutputs(
-    entries: readonly (readonly [string, ResidentTensor])[],
+    residents: readonly (readonly [string, ResidentTensor])[],
+    graphReads: readonly GraphRead[],
     checkFailureScopes: () => Promise<void>,
   ): Promise<Readonly<Record<string, ArrayBuffer>>> {
     const device = this.#gpu.device;
+    const sources: readonly BatchReadSource[] = [
+      ...residents.map(([, resident]) => ({
+        buffer: resident[RUNTIME_INTERNAL].buffer,
+        offset: 0,
+        size: resident.byteLength,
+      })),
+      ...graphReads.flatMap((read) => read.sources),
+    ];
     const staging = device.createBuffer({
       label: "batch-readback",
-      size: entries.reduce((sum, [, resident]) => sum + resident.byteLength, 0),
+      size: sources.reduce((sum, source) => sum + source.size, 0),
       usage: BUFFER_USAGE.COPY_DST | BUFFER_USAGE.MAP_READ,
     });
     try {
       const encoder = device.createCommandEncoder();
       let offset = 0;
-      for (const [, resident] of entries) {
-        encoder.copyBufferToBuffer(
-          resident[RUNTIME_INTERNAL].buffer,
-          0,
-          staging,
-          offset,
-          resident.byteLength,
-        );
-        offset += resident.byteLength;
+      for (const source of sources) {
+        encoder.copyBufferToBuffer(source.buffer, source.offset, staging, offset, source.size);
+        offset += source.size;
       }
       device.queue.submit([encoder.finish()]);
       await checkFailureScopes();
@@ -1653,11 +1730,16 @@ export class BatchScope {
       );
       const mapped = staging.getMappedRange();
       offset = 0;
-      return Object.fromEntries(entries.map(([name, resident]) => {
-        const copy = mapped.slice(offset, offset + resident.byteLength);
-        offset += resident.byteLength;
-        return [name, copy];
-      }));
+      const take = (size: number): ArrayBuffer => {
+        const copy = mapped.slice(offset, offset + size);
+        offset += size;
+        return copy;
+      };
+      const outputs = Object.fromEntries(
+        residents.map(([name, resident]) => [name, take(resident.byteLength)]),
+      );
+      for (const read of graphReads) read.result = read.sources.map((source) => take(source.size));
+      return outputs;
     } finally {
       staging.destroy();
     }
@@ -1722,6 +1804,17 @@ export class BatchScope {
       this.#finalizers.length = 0;
       for (const [, resident] of this.#readback ?? []) resident[RUNTIME_INTERNAL].releaseUse();
       this.#readback = undefined;
+      // グラフ出力の読み戻しは区間の成否が決まった後にだけ返す（finishAndRead と同じ「合流の後」
+      // — 成功データを持ったまま finish が失敗する形を作らない）。
+      for (const read of this.#graphReads) {
+        if (failure === undefined && read.result !== undefined) read.resolve(read.result);
+        else {
+          read.reject(
+            failure?.cause ?? new BatchScopeError("batch がグラフ出力を読み戻さずに決着した"),
+          );
+        }
+      }
+      this.#graphReads.length = 0;
     }
   }
 }

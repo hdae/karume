@@ -435,3 +435,41 @@ test("batch generation: 不正contextを拒否して常駐出力の使用予約�
     }
   }
 });
+
+test("batch generation: enqueueRead は決着でだけ論理長を進め、出力を run と u32 一致で返す", async () => {
+  const { gpu, session } = await open(),
+    a = await session.createGenerationContext({ chunkLength: 4 }),
+    b = await session.createGenerationContext({ chunkLength: 4 });
+  const u32 = (data: Float32Array): number[] =>
+    Array.from(new Uint32Array(data.buffer, data.byteOffset, data.length));
+  try {
+    // prefill は通常 run で揃え、decode を enqueueRead（b）と run（a）で突き合わせる。
+    await session.run(inputs(4, 0), {}, { context: a, queryLength: 3 });
+    await session.run(inputs(4, 0), {}, { context: b, queryLength: 3 });
+    let past = 3;
+    for (let step = 1; step < 4; step++) {
+      const x = inputs(1, step);
+      const ref = await session.run(x, {}, { context: a, queryLength: 1 });
+      const batch = await gpu.beginBatch(), fences = countFences(gpu);
+      try {
+        const read = session.enqueueRead(x, { batch, generation: { context: b, queryLength: 1 } });
+        await read.admitted;
+        assertEquals(b.pastLength, past, "決着前に論理長が進んだ");
+        await batch.finish();
+        past += 1;
+        assertEquals(b.pastLength, past);
+        const out = await read.outputs;
+        assertEquals(u32(out.o.data as Float32Array), u32(ref.o.data as Float32Array));
+        assertEquals(fences.count(), 0);
+      } finally {
+        fences.restore();
+        await batch.finish();
+      }
+    }
+  } finally {
+    await a.dispose();
+    await b.dispose();
+    await session.dispose();
+    gpu.destroy();
+  }
+});
