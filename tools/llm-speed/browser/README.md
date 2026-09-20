@@ -7,11 +7,11 @@ deno task bench:llm-browser
 ```
 
 Open **http://localhost:8787** in Chrome on your Mac and click **計測開始**. The
-current defaults compare **QAT E2B with linear-to-SRQ fusion disabled and enabled**,
+current defaults compare **QAT E2B with packed int8 activations disabled and enabled**,
 in off → on → on → off order: 4 model loads and 40 generations. Parallel GEMV,
-dense prefill buckets, RMS-add fusion, submission limit 768, and unfused parallel
-attention stay fixed. The fusion is an explicit benchmark override; model defaults
-remain unchanged. The M2 attention comparison showed no speed benefit, so attention
+dense prefill buckets, RMS-add fusion, linear-to-SRQ fusion, submission limit 768, and
+unfused parallel attention stay fixed. The fusion and packed flags are explicit
+benchmark overrides; model defaults remain unchanged. The M2 attention comparison showed no speed benefit, so attention
 fusion remains optional.
 Transformers.js, reference settings, and earlier comparisons remain available.
 **JSONを保存** downloads all timings, generated token IDs, output text,
@@ -59,6 +59,21 @@ See [the decision record](../../../docs/decisions/0103-linear-static-quantize-fu
 When comparing any earlier optimization, set **Karumeの行列出力** to **従来** to
 avoid adding another comparison axis.
 
+## Packed activations
+
+The **Karumeの活性の受け渡し** selector compares `packedStaticQuantize: false` with
+`true`. This hands the int8 output of a fixed-scale requantization (SRQ) to parallel
+GEMV packed four codes per `u32`, instead of one f32 per element. It is a transport
+change only: outputs are bit-identical to the f32 path, with two input values excepted
+(`-0.0` collapses into `+0.0`, and `NaN` saturates instead of propagating). It requires
+`linearGemvReduce: "parallel"` and f32 compute; unsupported combinations are rejected.
+The normal E2B graph has no applicable SRQ nodes. JSON and table labels record the
+selected flag.
+See [the decision record](../../../docs/decisions/0105-packed-static-quantize-activations.md).
+
+When comparing any earlier optimization, set **Karumeの活性の受け渡し** to
+**従来（f32）** to avoid adding another comparison axis.
+
 ## State attention fusion
 
 The **Karumeのattention** selector compares `stateAttentionReduce: "parallel"`
@@ -75,8 +90,9 @@ attention to avoid adding another comparison axis.
 
 Selecting **quant定義に従う** follows the distribution's E2B `defaultQuant` and its
 `session.linearGemvReduce` setting. Newly assembled E2B distributions default to
-`i4-fast`, which also declares fusion flags; this page applies its own normalization
-and linear SRQ selections instead, so only `linearGemvReduce` is taken from the quant.
+`i4-fast`, which also declares fusion flags; this page applies its own normalization,
+linear SRQ, and packed activation selections instead, so only `linearGemvReduce` is
+taken from the quant.
 Older local distributions keep their existing `i4` or `i4-gemvpar` default. No files
 are rewritten by this benchmark. The table and JSON include the selected quant and
 effective reduction mode; JSON also records whether the mode was explicitly overridden.

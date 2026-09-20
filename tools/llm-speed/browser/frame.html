@@ -19,6 +19,7 @@
   const normalization = params.get("normalization") ?? "reference";
   const attention = params.get("attention") ?? "parallel";
   const linearSrq = params.get("linearSrq") ?? "off";
+  const packedSrq = params.get("packedSrq") ?? "off";
   const send = (type, value) => parent.postMessage({ type, value }, location.origin);
   try {
     if (!["karume", "transformers"].includes(engine) || !["normal", "qat"].includes(model)) {
@@ -32,6 +33,7 @@
       throw Error("Invalid normalization mode");
     }
     if (!["off", "on"].includes(linearSrq)) throw Error("Invalid linear SRQ mode");
+    if (!["off", "on"].includes(packedSrq)) throw Error("Invalid packed SRQ mode");
     if (!["sequential", "parallel", "parallel-fused"].includes(attention)) {
       throw Error("Invalid state attention mode");
     }
@@ -46,6 +48,7 @@
       normalization,
       attention,
       linearSrq === "on",
+      packedSrq === "on",
     );
     send("result", {
       ...result,

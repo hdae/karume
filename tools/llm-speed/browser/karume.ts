@@ -23,6 +23,7 @@ export const loadKarume = async (
   normalization: NormalizationMode = "reference",
   stateAttentionReduce: StateAttentionReduce = "parallel",
   fuseLinearStaticQuantize = false,
+  packedStaticQuantize = false,
 ): Promise<EngineHandle> => {
   const subgroup = normalization === "subgroup32";
   const fuseRmsNormAdd = normalization === "fused" || subgroup;
@@ -75,6 +76,7 @@ export const loadKarume = async (
     const common = {
       stateAttentionReduce,
       fuseLinearStaticQuantize,
+      packedStaticQuantize,
       fuseRmsNormAdd,
       rmsNormReduce,
       submitPolicy,
@@ -117,6 +119,7 @@ export const loadKarume = async (
         normalization,
         stateAttentionReduce,
         fuseLinearStaticQuantize,
+        packedStaticQuantize,
         fuseRmsNormAdd,
         rmsNormReduce,
         submitMaxChunkSize: submitPolicy.maxChunkSize,

@@ -201,6 +201,7 @@ export const runBenchmark = async (
   normalization: NormalizationMode = "reference",
   stateAttentionReduce: StateAttentionReduce = "parallel",
   fuseLinearStaticQuantize = false,
+  packedStaticQuantize = false,
 ): Promise<object> => {
   const response = await fetch("/cases.json");
   if (!response.ok) throw Error(`Fixture HTTP ${response.status}`);
@@ -231,6 +232,7 @@ export const runBenchmark = async (
       normalization,
       stateAttentionReduce,
       fuseLinearStaticQuantize,
+      packedStaticQuantize,
     )
     : await loadTransformers(kind, fixture, localOnnx, status);
   const loadSeconds = (performance.now() - started) / 1000;
