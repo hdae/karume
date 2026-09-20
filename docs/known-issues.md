@@ -192,6 +192,35 @@ buffer プールと同じ発想）。同一 queue の実行順序保証がある
 M2 で赤のまま残ることを受容する**（Linux / Vulkan は緑・parallel と sequential の等価性は計測を
 要求しない `packages/models/tests/e2e_gemma4_reduce_parity_test.ts` が担保する）。
 
+## Intel Arc B570（Linux / Vulkan ANV / xe）で OOM 門が赤 + Deno の timestamp 単位と device lost の panic（2026-09-20 実測・記録のみ）
+
+開発機の GPU を RTX 3080 Ti から **Intel Arc B570**（BMG G21・VRAM 9.93 GiB・Mesa 25.0.7・Linux xe
+ドライバ・Deno 2.9.6）へ載せ替えてフル verify を回した結果のうち、未解決のまま**記録だけ**に
+とどめたもの（裁定 2026-09-20）。sha256 参照門 16 本の不一致は limitations「sha256 参照門は
+参照環境専用」の by-design、BiRefNet 2048² の device lost は limitations「BiRefNet 系」節、
+golden `activations` の `sin` は許容差を WGSL 仕様帯へ寄せて消化（`e2e_golden_test.ts` の
+`OUTPUT_TOLERANCE`）、`createResident` 上限門はテスト前提（`maxBufferSize` が 4 の倍数）の穴で
+修正済み。
+
+- **OOM 門（`gpu_generation_context_test.ts`「state 確保の失敗は out-of-memory errorScope で fail
+  loudly」）が赤**: 64 GiB の state 確保は期待どおり `GpuOutOfMemoryError` で落ちるが、その直後の
+  survivor（1 GiB）も `not enough memory left` で落ちる。**karume 側の漏れではない** — 素の WebGPU
+  だけの probe で再現した（1 GiB × 9 本で OOM → 全 `destroy()` 直後の 1 GiB は OOM →
+  `onSubmittedWorkDone` + 200 ms 後の 1 GiB は成功）。Intel / wgpu では `destroy()` の解放が次の
+  device poll まで遅延する。テストは変えない（survivor を poll 後に取る形は「解放を返し損ねた
+  実体を検出する」門の意味を弱める）。Metal の「errorScope 沈黙」とは別種（こちらは落ちる側）。
+- **Deno は timestamp-query の値を ns へ換算しない**（ext/webgpu は wgpu の raw tick をそのまま
+  返す。WebGPU 仕様は ns）。B570 の Vulkan `timestampPeriod` は 52.0833 ns なので、Deno での
+  `lastRunTiming` / `--diagnostics` の内訳は **×52 過小**（BiRefNet 1024² の GPU 総和 raw 64.8 ms
+  × 52.08 ≒ 3,375 ms、壁時計の計測窓 3,452 ms と一致）。RTX は period 1 ns で表面化しなかった。
+  Chrome（Dawn）は換算する。karume 側で補正できない（WebGPU API は period を露出しない）ので、
+  Deno で GPU 内訳を読むときは period ≠ 1 の GPU に注意する。Deno への issue 起票は未。
+- **Deno 2.9.6 は device lost を例外にせず panic する**（ext/webgpu の `device_poll(...).unwrap()`
+  — buffer.rs:247〈mapAsync〉/ queue.rs:109〈onSubmittedWorkDone〉が `Err(Device(Lost))` で落ちる）。
+  karume の `GpuDeviceLostError` 経路に到達する前にプロセスごと消えるので、verify のフル走行中に
+  device lost が起きるとそこで走行が止まる（上の「フル走行が稀にフレークする」節の症状が
+  「テスト 1 本の赤」ではなく「プロセス消滅」になる環境）。
+
 ## EmbeddingGemma の batch>1 export が変換段で通らない
 
 `python -m embeddinggemma.export --batch N`（N>1・tools/export-recipes 側 — 起動形は

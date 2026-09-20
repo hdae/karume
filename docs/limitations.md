@@ -264,6 +264,18 @@ device では走らない** — 欄が名乗るのは常駐分（重み・state�
 本家（同梱 `handler.py` の General-HR）の推論解像度は 2048² なので、**上流と同じ設定では
 ない**点は配布形の制約として明示しておく。回避策は入れていない（実測して判断する側の話）。
 
+**2048² は Intel Arc B570（Linux xe ドライバ）では走らない — 1 dispatch がジョブ制限 5 秒を超える**
+（2026-09-20 実測・裁定 = 現状維持）。xe ドライバは compute ジョブ（= `queue.submit` 1 回）に
+`job_timeout_ms` = 5,000 の上限を持ち（root 以外は変更不可・上限でも 10,000）、超えたジョブを殺して
+device lost にする。BiRefNet 2048² では decoder 末尾の `deform_conv2d`（dispatch #2276・出力
+`[1,256,1024,1024]`）1 本がこれを踏む — 二分探索で dispatch 単位に確定し、1 dispatch = 1 submit に
+しても再現（submit の時間予算分割〈ADR 0004〉は「単独で予算を超える dispatch は分割できない」ので
+効かない）。同じ dispatch は 1024²（出力 `[1,256,512,512]`）で 1.66 s なので、要素数 4 倍の 2048² は
+≈ 6.6 s の見込み。1024² の 2 系列（birefnet-hr / lucida）は B570 でも全緑。Deno はこの device lost を
+例外にせず panic するので、verify のフル走行はここでプロセスごと止まる（known-issues「Intel Arc
+B570」節）。解消するなら kernel 側で `deform_conv2d` を複数 dispatch に分割するか高速化する — 速度の
+波を再開するときの候補で、今は入れない。
+
 ## conv1d（groups==1）も同じ dispatch 上限で fail loudly になる（Lout ≈ 8.39M）
 
 conv1d の implicit GEMM（[decisions/0053](decisions/0053-conv1d-implicit-gemm.md)）も
@@ -1256,7 +1268,10 @@ by-design の理由は取得物と資産の違いで、**手元の配布形は�
 e2e の PNG / WAV 参照 sha256（`e2e_anima_test` / `e2e_sbv2_wav_test` /
 `e2e_irodori_wav_test`）は**参照環境（RTX 3080 Ti / Linux / Vulkan (wgpu)）で焼いた値**で、
 他バックエンド（Metal 等）では一致しない — これは仕様であり、門は参照環境での移植・退行
-検出器として機能する。
+検出器として機能する。**同じ Linux / Vulkan でもベンダが違えば一致しない**（2026-09-20・Intel Arc
+B570 / Mesa ANV でフル verify: 16 本すべて不一致・出力の PNG は目視で正常 = 数値の微小差）。
+デバイスごとに参照値を持てる形と、結果を JSON で環境間に受け渡す仕組みはテスト整理の波の候補
+（[backlog](backlog.md)）。
 
 機序: IEEE 754 の加減乗除はデバイス間でも完全同一だが、①超越関数（`exp` 等）の実装が
 ドライバ / コンパイラ依存 ②シェーダコンパイラの fma 融合判断（積和を 1 命令に融合すると
