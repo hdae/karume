@@ -251,3 +251,34 @@ false の行にも packed 変種の WGSL・params は生成できる（テスト
 - 上限は lm_head 1 dispatch の 0.24 ms/token（research §13.4）の算術 36% ≈ 0.09 ms/token
   （GPU 6.63 ms の 1.3%）。K-45 の目的「公式 mobile と同じ計算形」に合わず利得も小さいので、
   perf-ledger K-52 と同じ判定で棄却する。
+
+## 追記 3（2026-09-20）: Metal での分岐と活性復元の丸め障壁
+
+追記 2 の宣言後、利用者の M2（Chrome・apple / metal-3）で計測ページの往復を回すと、速度は
+中立（off 35.3 / on 35.2 tok/s）で、**英語 prompt の id 列が off / on で 64 token 中の位置 56 から
+分岐**した（[research §16.1](../research/2026-09-19-qat-speed-recon.md)）。M2 で単体の u32 一致門
+（`gpu_packed_static_quantize_test.ts`）を回すと、SRQ の符号列と復元 `f32(code) × scale` は一致し、
+**並列 GEMV の packed 変種だけ**が最初の組（i2・lanes 2・非融合・M=1）から不一致だった。
+
+WGSL の差は 1 点で、f32 経路の活性はロード値（丸めが確定した値）として積和 `acc + x × d` に入るのに
+対し、packed 経路は `vec4<f32>(unpack4xI8(w)) × x_scale` という**積の式**のまま積和に入る。RTX / Vulkan
+では両者が u32 同一だが、Metal のコンパイラは `(c × s) × d + acc` に再結合・縮約の自由度を持ち、
+そこで丸めが変わったと読む（WGSL は fusion を許し再結合を禁じるが、実装の実測事実は別 —
+[0099](0099-rms-norm-add-fusion.md) の丸め障壁と同じ立場）。
+
+### 追記決定 5: 復元した quad に丸め障壁を通す
+
+`activationQuad` の packed 分岐を
+`bitcast<vec4<f32>>(bitcast<vec4<u32>>(vec4<f32>(unpack4xI8(…)) × dims.x_scale) ^ vec4<u32>(dims.rounding_mask))`
+にする（[0099](0099-rms-norm-add-fusion.md) の rms→add 融合と同じ書き方・実行時 0 との XOR）。
+
+- SRQ 融合ありの変種は Dims に `rounding_mask`（語 3）が既にあるのでそれを読む。融合なし packed 変種は
+  Dims を `m / n / k / x_scale / rounding_mask` にし、params を 8 語（uniform の 16 B 整列）へ広げる。
+- XOR 0 は恒等なので RTX の数値は動かない（u32 一致門 540 件・QAT E2B の id 列一致は緑のまま）。
+  変わるのは packed 変種 6 本の WGSL スナップショットと params の語 4。
+- 決定 3 の「乗算 1 個は正しく丸めた積」は乗算単体の性質で、積和に inline したときの
+  コンパイラの変換までは縛れない。障壁はその変換を式の外へ出さないための実装事実で、仕様保証ではない
+  （M2 の再走で緑になることを検収条件にする）。
+
+検収（M2・利用者実走）: 同じ u32 一致門 1 コマンドが緑 → 計測ページの往復で英語 prompt の id 列が
+off / on で一致。赤なら次の仮説（重み側 `f32(q) × wscale` との組合せ）へ進む。
