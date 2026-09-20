@@ -29,7 +29,7 @@
  *   を f32 で積むため大きい位置ほど角度が粗い — 131,071 で ULP ≈ 0.008 rad）なので、
  *   **上流の表とはビット同一にならない**（ADR 0034 知見 2 と同じ壁 — torch の f32 三角関数は
  *   SLEEF の 1 ULP 誤差も持つ）。数学的に正確な側がこちらで、突合は位置比例の許容差で行う
- *   （`tests/gemma_rope_test.ts` — 上流モジュールの実出力 fixture との比較 + 故障注入）。
+ *   （`tests/gemma4_rope_test.ts` — 上流モジュールの実出力 fixture との比較 + 故障注入）。
  * - 決定性: f64 の加減乗除は IEEE 754 で engine 非依存。`Math.cos` / `Math.sin` だけは engine 間で
  *   f64 の 1 ULP 差がありうるが、f32 へ丸めた後に残る確率は要素あたり約 2⁻²⁹（128K × 1,536 要素の
  *   全表でも期待 0.4 要素）で、GPU 側の 1 ULP 群（known-issues の Metal 節）と同じ扱いにする。

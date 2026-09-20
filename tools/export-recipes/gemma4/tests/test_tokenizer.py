@@ -9,7 +9,7 @@
 - 名前が共有電池（{@link _shared.gemma_tokenizer.SHARED_ENCODE_CASES}）と合わせて一意で
   あること。`emit` は 2 つの列を連結するだけで一意性を見ないので、名前が衝突するとパリティ
   フィクスチャに同名 2 件が並ぶ。TS 側は名前で 1 件を引く場所があり
-  （`packages/models/tests/gemma_tokenizer_test.ts` の `fixture.encode.find(…)`）、`find` は
+  （`packages/models/tests/gemma4_tokenizer_test.ts` の `fixture.encode.find(…)`）、`find` は
   黙って先頭を返す — **別のケースを測って緑になる**（落ちて読めなくなるのではない）
 - 出力先の綴りが配布 recipe の系列名と一致すること（書き手と読み手が同じ 1 語から組む —
   `gemma4/distribution.py` の宣言）
@@ -57,5 +57,5 @@ class TestOutputPaths:
         assert tokenizer.ASSET_PATH.name == GEMMA4_TOKENIZER_FILE
 
     def test_the_parity_fixture_is_a_tracked_file(self) -> None:
-        """フィクスチャは git 管理（TS 側 `gemma_tokenizer_test.ts` が読む現物）。"""
+        """フィクスチャは git 管理（TS 側 `gemma4_tokenizer_test.ts` が読む現物）。"""
         assert tokenizer.FIXTURE_PATH.is_file()

@@ -82,7 +82,7 @@ SOURCE_FILES = (
     "generation_config.json",
 )
 
-#: パリティ用フィクスチャ（git 管理 — Deno 側 `gemma_chat_test.ts` が読む）。
+#: パリティ用フィクスチャ（git 管理 — Deno 側 `gemma4_chat_test.ts` が読む）。
 FIXTURE_PATH = (
     REPO_ROOT / "packages" / "models" / "tests" / "fixtures" / "gemma-text" / "gemma4-chat.json"
 )

@@ -1008,7 +1008,7 @@ const capacitySymbolOf = (graph: GenerationGraph): string => {
  * 「要素数が shape と合わない」になる。焼く側の鏡像は `export_decode.py` の `assert_rope_inputs`。
  *
  * NOTE: 内部の口だが export してあるのは、この単位なら宣言の突合を実 GPU も実資産も無しで
- * 縛れるため（`tests/gemma_config_test.ts` — siglip2 の `assertStaticDim` と同じ流儀）。
+ * 縛れるため（`tests/gemma4_config_test.ts` — siglip2 の `assertStaticDim` と同じ流儀）。
  */
 export const assertRopeInputShapes = (
   graph: GenerationGraph,
@@ -1422,7 +1422,7 @@ const gemma4ManifestConfig = (
  *
  * NOTE: barrel（`mod.ts` / `./gemma`）には出さない**内部の口**である（公開の入口は
  * {@link Gemma4Pipeline.chat} だけ）。export してあるのは、この単位なら停止文字列の契約を
- * 実 GPU 無しで縛れるため（`tests/gemma_chat_test.ts`）。
+ * 実 GPU 無しで縛れるため（`tests/gemma4_chat_test.ts`）。
  */
 export const decodeChatChunks = async function* (
   events: AsyncIterable<GenerationEvent>,
@@ -1512,7 +1512,7 @@ export const chatStreamOf = (
  * 診断として「その前の verify run」の値が届く（例外にならない取り違え）。
  *
  * NOTE: 診断の型を型引数にしてあるのは、この関数が診断の**中身を 1 つも読まない**（席へ素通し
- * するだけ）ことを型で示すためで、同時に呼び出し規則の門（`gemma_chat_test.ts`）が実 Session
+ * するだけ）ことを型で示すためで、同時に呼び出し規則の門（`gemma4_chat_test.ts`）が実 Session
  * 無しで書ける。{@link Gemma4State} は `SessionDiagnostics` でそのまま満たす。
  * NOTE: `export` は門を直接叩くテストのため（`mod.ts` / サブパス面には出さない — ADR 0008）。
  */

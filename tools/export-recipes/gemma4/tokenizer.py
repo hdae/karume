@@ -28,7 +28,7 @@ TOKENIZER_JSON = INPUTS_ROOT / "gemma4" / "gemma-4-E2B-it" / "tokenizer.json"
 #: 実行時資産（系列出力）。
 ASSET_PATH = SERIES_ROOT / "gemma4-e2b-tokenizer" / "tokenizer.json"
 
-#: パリティ用フィクスチャ（git 管理 — Deno 側 `gemma_tokenizer_test.ts` が読む）。
+#: パリティ用フィクスチャ（git 管理 — Deno 側 `gemma4_tokenizer_test.ts` が読む）。
 FIXTURE_PATH = (
     REPO_ROOT / "packages" / "models" / "tests" / "fixtures" / "gemma-text" / "gemma4-parity.json"
 )

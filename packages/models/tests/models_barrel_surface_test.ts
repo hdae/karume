@@ -97,7 +97,7 @@ const INTERNAL_VALUES = [
   "renderGemma4ChatTurn",
   "gemma4StopTokens",
   "GemmaTokenizer",
-  // chat 層の内部実装（`gemma_chat_test.ts` が `src/` から直に掴んでいる面）。公開面は
+  // chat 層の内部実装（`gemma4_chat_test.ts` が `src/` から直に掴んでいる面）。公開面は
   // `Gemma4Pipeline.chat` / `Gemma4ChatSession` だけで、逐次復号の部品は出さない
   // — 出すと「停止文字列フィルタと detokenizer を自分で繋ぐ」形が消費者の正道になってしまう。
   // `StreamingDetokenizer` は `export type` の再輸出なので**値としては**出ていない（型だけを

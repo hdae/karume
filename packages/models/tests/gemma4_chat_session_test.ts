@@ -4,7 +4,7 @@
 // `GenerationSequence` に、描画・復号・停止文字列は `chat()` と同じ実装に乗る。だから門も
 // 「どんな prompt を、どの sequence へ流したか」で書ける — 台本どおりに答える偽 sequence を
 // 差し（`Gemma4ChatSessionHost` = セッションがパイプラインから読む面）、tokenizer は
-// `gemma_chat_test.ts` と同じフィクスチャ資産で**本物**を組む（差分描画の等式は本物の綴りでしか
+// `gemma4_chat_test.ts` と同じフィクスチャ資産で**本物**を組む（差分描画の等式は本物の綴りでしか
 // 見られない）。
 //
 // 門は 10 本:
@@ -74,7 +74,7 @@ const fixture = JSON.parse(
   await Deno.readTextFile(new URL("fixtures/gemma-text/gemma4-chat.json", import.meta.url)),
 ) as Fixture;
 
-/** フィクスチャの部分集合から資産表を組む（`gemma_chat_test.ts` と同じ形）。 */
+/** フィクスチャの部分集合から資産表を組む（`gemma4_chat_test.ts` と同じ形）。 */
 const assets: GemmaTokenizerAssets = {
   spec: { postProcessor: "none" },
   model: createBpeModel({

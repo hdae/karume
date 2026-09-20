@@ -274,7 +274,7 @@ Deno.test("gemma4 fromAssets: config は fromPretrained と同じ門を、バイ
       model: [junk],
       tokenizer: junk,
       pleIndex: junk,
-      openPleShard: () => Promise.reject(new Error("gemma_config_test: PLE を読みに行った")),
+      openPleShard: () => Promise.reject(new Error("gemma4_config_test: PLE を読みに行った")),
     });
 
   await t.step("未知キー", async () => {

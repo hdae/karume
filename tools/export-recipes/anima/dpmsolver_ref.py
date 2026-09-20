@@ -3,7 +3,7 @@
 TS 側の family 非依存モジュール（`packages/models/src/generation/dpm-solver-multistep.ts`）は
 diffusers 0.39.0 の `DPMSolverMultistepScheduler` の 1:1 写しなので、その**実クラスを駆動して**
 係数と各 step の状態更新を印字する。突き合わせ先は
-`packages/models/tests/dpm_solver_multistep_test.ts`（inline 期待値の由来がここ）。
+`packages/models/tests/anima_dpm_solver_multistep_test.ts`（inline 期待値の由来がここ）。
 
 実重みは 1 バイトも要らない — 食わせるのは**合成 model 出力**（シード固定・小テンソル・f32）
 なので、`uv run --no-sync python -m anima.dpmsolver_ref` が数秒で回る。

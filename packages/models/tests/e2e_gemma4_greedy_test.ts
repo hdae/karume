@@ -333,7 +333,7 @@ const loadGreedy = async (caseName: string): Promise<GreedyGolden> => {
  *
  * RoPE 派生入力 4 本も記録されているが、こちらは**読まない** — Deno 側は同じ位置列から
  * `gemma4RopeInputs` で組み直す（台本が組んだ表をそのまま食わせると、TS 実装の式が壊れても
- * ③が緑になる）。表そのものの突合は `gemma_rope_test.ts`（上流モジュールの実出力との parity）
+ * ③が緑になる）。表そのものの突合は `gemma4_rope_test.ts`（上流モジュールの実出力との parity）
  * が受け持つ。
  */
 type IoGolden = {

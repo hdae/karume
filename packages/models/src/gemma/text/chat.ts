@@ -218,7 +218,7 @@ export const gemma4ChatPrompt = (
  *   = gemma4ChatPrompt(先頭 turn まで) ⧺ 生成された本文 ⧺ [<turn|>] ⧺ gemma4ChatTurn(次の発話) ⧺ …
  * ```
  *
- * この等式は `gemma_chat_test.ts` の門が任意の分割で見る（template の turn-local 性が壊れたら
+ * この等式は `gemma4_chat_test.ts` の門が任意の分割で見る（template の turn-local 性が壊れたら
  * そこで割れる — 消費者に「先頭の `<bos>` を剥がす」当て推量を書かせないための正本）。
  *
  * MUST: 使えるのは**生成が `<turn|>` で閉じた直後**だけである。max-tokens や `break` で打ち切った

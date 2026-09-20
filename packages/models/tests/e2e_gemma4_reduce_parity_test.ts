@@ -39,7 +39,7 @@ const ASSEMBLE_COMMAND = "cd tools/export-recipes && uv run python dist.py --pip
 const REDUCERS = ["parallel", "sequential"] as const;
 
 /**
- * 検収ケース。prompt は chat フィクスチャの token 列（描画の正本は `gemma_chat_test.ts`）を
+ * 検収ケース。prompt は chat フィクスチャの token 列（描画の正本は `gemma4_chat_test.ts`）を
  * そのまま使う — この門は描画でも復号でもなく**縮約順**だけを問うので、tokenizer を挟まずに
  * token 列 in → token 列 out で回す。日本語ケースを混ぜるのは decode step を伸ばすため。
  */

@@ -2,7 +2,7 @@
 //
 // 実資産には依存しない — 合成した小語彙で「rank と位置の優先順」「古くなった対の無効化」
 // 「byte_fallback の展開」「byte run の畳み方」を直接見る。実資産との突合（id 列が上流の
-// `tokenizers` と一致するか）はファミリ側（gemma_tokenizer_test.ts）の担当で、ここは
+// `tokenizers` と一致するか）はファミリ側（gemma4_tokenizer_test.ts）の担当で、ここは
 // **規則そのもの**と**計算量**を落とせる形に置く。
 
 import { assertEquals, assertThrows } from "@std/assert";

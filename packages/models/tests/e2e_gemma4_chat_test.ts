@@ -7,7 +7,7 @@
 //    固定した greedy golden と文字単位で一致する。golden は**この経路自身で採った**もので、
 //    モデルの正しさは証明しない — 証明するのは「結線を変えても出力が動かない」ことである
 //    （数値の正は `e2e_gemma4_product_test.ts` の交差 parity が持つ）
-// ② **chat の id 列**が HF `apply_chat_template` のフィクスチャと一致する。`gemma_chat_test.ts`
+// ② **chat の id 列**が HF `apply_chat_template` のフィクスチャと一致する。`gemma4_chat_test.ts`
 //    は部分集合と実資産で同じことを見るが、こちらは**パイプラインが握っている資産**で見る
 //    （別の tokenizer を掴んでいれば描画は合ったまま id 列だけが違う）
 // ③ **逐次と一括の一致**: streaming の片を連結したものが、同じ会話を低レベル面（`sequence()`）
@@ -16,11 +16,11 @@
 // ④ **停止集合**が上流の `generation_config.json` の宣言（`[1, 106, 50]`）と一致する
 // ⑤ **射程外は GPU に触る前に落ちる**（tools / 未知 role — `chat` は同期に throw する）
 // ⑥ **増分描画の多ターン**（`gemma4ChatTurn` + `sequence()`）が、同じ会話を毎ターン全体描画で
-//    回した `chat()` と**逐語一致**する。turn-local 契約（`gemma_chat_test.ts` の門）が id 列の
+//    回した `chat()` と**逐語一致**する。turn-local 契約（`gemma4_chat_test.ts` の門）が id 列の
 //    等式で、こちらは同じ等式を**実重みの出力**で見る門である
 // ⑦ **`Gemma4ChatSession` の 2 ターン**が⑥と同じ文字列になる。⑥は「差分描画を手で回せば一致
 //    する」を、⑦は「中間層に任せても同じ会話になる」を見る（KV の継続条件と履歴の積み方は
-//    セッションの中にあるので、実重みで見る門はここにしかない — `gemma_chat_session_test.ts`
+//    セッションの中にあるので、実重みで見る門はここにしかない — `gemma4_chat_session_test.ts`
 //    は偽 sequence で組み立てだけを見る）
 //
 // MUST: 入口は公開面（`../gemma.ts`）から import する — `src/...` を直に掴むと、面が痩せていても
@@ -499,7 +499,7 @@ Deno.test({
     });
 
     await t.step("公開の program 面は凍結された数だけで、dispose 後も読める", () => {
-      // NOTE: PLE sidecar のホストキャッシュが dispose で返ることは `gemma_ple_test.ts` の
+      // NOTE: PLE sidecar のホストキャッシュが dispose で返ることは `gemma4_ple_test.ts` の
       // 単体門が持つ（公開面から `derivedInputs.derive` は引けない = 面を絞った意図どおり）。
       // ここで見るのは絞った後の面の性質 — 配布形が宣言した数がそのまま読め、消費者側の
       // 書き込みが生成ループの停止集合へ届かないこと。

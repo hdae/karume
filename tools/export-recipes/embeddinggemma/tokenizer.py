@@ -29,7 +29,7 @@ TOKENIZER_JSON = INPUTS_ROOT / "embeddinggemma" / "google-300m" / "tokenizer.jso
 #: 実行時資産（系列出力）。
 ASSET_PATH = SERIES_ROOT / "embeddinggemma-300m-tokenizer" / "tokenizer.json"
 
-#: パリティ用フィクスチャ（git 管理 — Deno 側 `gemma_tokenizer_test.ts` が読む）。
+#: パリティ用フィクスチャ（git 管理 — Deno 側 `gemma4_tokenizer_test.ts` が読む）。
 FIXTURE_PATH = (
     REPO_ROOT
     / "packages"

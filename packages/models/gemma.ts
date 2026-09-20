@@ -127,7 +127,7 @@ export { gemma4ChatPrompt } from "./src/gemma/text/chat.ts";
  * 2 ターン目以降の入口 — 過去 turn は context の KV にあるので描き直さない）。
  *
  * MUST: 前 turn を閉じる `<turn|>` は含めない（`GenerationSequence` の `pendingToken` が前置する
- * — turn-local 契約の正本は `renderGemma4ChatTurn` の doc、成立は `gemma_chat_test.ts` の門）。
+ * — turn-local 契約の正本は `renderGemma4ChatTurn` の doc、成立は `gemma4_chat_test.ts` の門）。
  */
 export { gemma4ChatTurn } from "./src/gemma/text/chat.ts";
 export type { Gemma4ChatMessage, Gemma4ChatRole } from "./src/gemma/text/chat.ts";

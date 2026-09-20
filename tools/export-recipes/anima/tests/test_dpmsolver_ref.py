@@ -1,6 +1,6 @@
 """DPM++ 2M の golden リグが**本当に karume の梯子の上で実クラスを回している**ことの門。
 
-このリグの出力は `packages/models/tests/dpm_solver_multistep_test.ts` に inline されている
+このリグの出力は `packages/models/tests/anima_dpm_solver_multistep_test.ts` に inline されている
 ので、リグが黙って別の梯子・別の構成へ滑ると **TS 側だけが赤くなり原因が読めない**。差し替えが
 効いていること（と、差し替えが必要であること = 内蔵 flow 梯子とは別物であること）をここで固定
 する。数値の正本は TS 側ではなくこのリグ。
