@@ -1,0 +1,164 @@
+{
+  "snapshot": "2026-09-20",
+  "note": "並列 GEMV 族の積和を明示 fma() に固定した後（ADR 0105 追記 4・checkout 04c55dd）の M2 再検収。計測ページの既定往復（QAT E2B・i4-fast・linear→SRQ 融合 on・packed 活性 off→on→on→off・capacity 128 / chunk 64・64 token）。元 JSON は outputs/bench-browser/（git 追跡外）。",
+  "source": "outputs/bench-browser/gemma-browser-2026-09-20T12-06-55.292Z.json",
+  "sourceSha256": "f55a6ccf9f9017c0b583a3abb1d7bd395490047165b7ae51179d8b7ee3f87df7",
+  "checkout": "04c55dd5606082c1214069ca6be14853c7ac88f0",
+  "checkoutDirty": false,
+  "bundleSha256": "5b712673b149d16d67995f1873ee775320acfec5de7f7b62543fbf4eb2640f73",
+  "manifestSha256": "23cf61b6edb55d25a1eb3c0ff9c8265386107568c87558620d04575f648a8103",
+  "adapter": {
+    "vendor": "apple",
+    "architecture": "metal-3"
+  },
+  "date": "2026-09-20T12:04:56.778Z",
+  "loads": [
+    {
+      "load": 1,
+      "packedStaticQuantize": false,
+      "fuseLinearStaticQuantize": true,
+      "linearGemvReduce": "parallel",
+      "loadSeconds": 2.365419999957085,
+      "cases": [
+        {
+          "case": "english-list",
+          "ttftMedianMs": 385.7549999952316,
+          "decodeTokensPerSecond": [
+            35.86177845949697,
+            32.23396743794724,
+            35.82283051594821
+          ],
+          "decodeMedian": 35.82283051594821,
+          "deterministic": true,
+          "firstTokenIdsSha": "cb032545685aea6d"
+        },
+        {
+          "case": "japanese-list",
+          "ttftMedianMs": 478.0549999475479,
+          "decodeTokensPerSecond": [
+            35.81142725522729,
+            31.7696448592278,
+            35.65940177040991
+          ],
+          "decodeMedian": 35.65940177040991,
+          "deterministic": true,
+          "firstTokenIdsSha": "1108ec156457c784"
+        }
+      ]
+    },
+    {
+      "load": 2,
+      "packedStaticQuantize": true,
+      "fuseLinearStaticQuantize": true,
+      "linearGemvReduce": "parallel",
+      "loadSeconds": 2.0937799999713897,
+      "cases": [
+        {
+          "case": "english-list",
+          "ttftMedianMs": 393.80999994277954,
+          "decodeTokensPerSecond": [
+            35.886700557712125,
+            35.317464765585946,
+            35.90142494328619
+          ],
+          "decodeMedian": 35.886700557712125,
+          "deterministic": true,
+          "firstTokenIdsSha": "cb032545685aea6d"
+        },
+        {
+          "case": "japanese-list",
+          "ttftMedianMs": 477.85000002384186,
+          "decodeTokensPerSecond": [
+            35.88792713217312,
+            30.79871329877435,
+            35.653044937986266
+          ],
+          "decodeMedian": 35.653044937986266,
+          "deterministic": true,
+          "firstTokenIdsSha": "1108ec156457c784"
+        }
+      ]
+    },
+    {
+      "load": 3,
+      "packedStaticQuantize": true,
+      "fuseLinearStaticQuantize": true,
+      "linearGemvReduce": "parallel",
+      "loadSeconds": 1.878235000014305,
+      "cases": [
+        {
+          "case": "english-list",
+          "ttftMedianMs": 389.16999995708466,
+          "decodeTokensPerSecond": [
+            35.81183438909365,
+            35.37616657329105,
+            35.885371868603826
+          ],
+          "decodeMedian": 35.81183438909365,
+          "deterministic": true,
+          "firstTokenIdsSha": "cb032545685aea6d"
+        },
+        {
+          "case": "japanese-list",
+          "ttftMedianMs": 479.47500002384186,
+          "decodeTokensPerSecond": [
+            33.31218274027684,
+            33.701914591094805,
+            30.089911520988956
+          ],
+          "decodeMedian": 33.31218274027684,
+          "deterministic": true,
+          "firstTokenIdsSha": "1108ec156457c784"
+        }
+      ]
+    },
+    {
+      "load": 4,
+      "packedStaticQuantize": false,
+      "fuseLinearStaticQuantize": true,
+      "linearGemvReduce": "parallel",
+      "loadSeconds": 2.0010299999713896,
+      "cases": [
+        {
+          "case": "english-list",
+          "ttftMedianMs": 391.5550000667572,
+          "decodeTokensPerSecond": [
+            34.67072442497947,
+            30.837683648771797,
+            33.311742388772245
+          ],
+          "decodeMedian": 33.311742388772245,
+          "deterministic": true,
+          "firstTokenIdsSha": "cb032545685aea6d"
+        },
+        {
+          "case": "japanese-list",
+          "ttftMedianMs": 509.4650000333786,
+          "decodeTokensPerSecond": [
+            35.04663148986098,
+            31.232261437265308,
+            30.8136264710911
+          ],
+          "decodeMedian": 31.232261437265308,
+          "deterministic": true,
+          "firstTokenIdsSha": "1108ec156457c784"
+        }
+      ]
+    }
+  ],
+  "medianOfMedians": {
+    "off": 35.81142725522729,
+    "on": 35.886700557712125
+  },
+  "tokenIds": {
+    "english-list": {
+      "allLoadsEqual": true,
+      "length": 64
+    },
+    "japanese-list": {
+      "allLoadsEqual": true,
+      "length": 64
+    },
+    "noteVsPrevious": "fma 化前（2026-09-20-m2-packed-activations-results.json）の off / on どちらとも一致しない = Metal の並列経路の出力が変更前から変わった（ADR 0105 追記 4 のとおり）"
+  }
+}
