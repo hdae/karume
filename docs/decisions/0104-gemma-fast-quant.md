@@ -11,29 +11,29 @@
 参照用`i4`と並列GEMVだけの`i4-gemvpar`は同じ意味で保持する。
 3種類とも重み写像は同じで、再量子化・重みコピーは要らない。
 
-| E2B  | i4-fastのsession宣言                             |
-| ---- | ------------------------------------------------ |
-| 通常 | linearGemvReduce: parallel、fuseRmsNormAdd: true |
-| QAT  | 上記＋fuseLinearStaticQuantize: true             |
+| E2B  | i4-fastのsession宣言                                                                                                                                                                                 |
+| ---- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 通常 | linearGemvReduce: parallel、fuseRmsNormAdd: true                                                                                                                                                     |
+| QAT  | 上記＋fuseLinearStaticQuantize: true＋packedStaticQuantize: true（[0105 追記 2](0105-packed-static-quantize-activations.md#追記-22026-09-20-語彙への昇格と-i4-fast-の宣言段-1b-の棄却)・2026-09-20） |
 
 検収範囲外のE4Bはi4だけを維持する。runtimeの既定、参照WGSL/golden、公開pinを変更しない。
 新しい配布をrecipeから組み立てたときに既定が変わり、既存のローカル配布や公開済みmanifestを自動で書き換えない。
 
 ## 保存語彙と互換性
 
-hubのSessionSpecへ省略可能な2つのbooleanを追加する。true/falseだけを許し、null・数値・文字列を拒否する。
+hubのSessionSpecへ省略可能な2つのbooleanを追加する（3つ目の`packedStaticQuantize`は[0105 追記 2](0105-packed-static-quantize-activations.md#追記-22026-09-20-語彙への昇格と-i4-fast-の宣言段-1b-の棄却)が同じ流儀で加えた）。true/falseだけを許し、null・数値・文字列を拒否する。
 falseを省略や欠如へ変換せず、modelsの共通写像も同じ欄へ明示して転送する。
 manifestはkarume/4のまま。新readerは旧manifestを同じ意味で読み、旧readerは新しい融合欄を未知キーとして拒否する。
 新しい配布には対応するhub/modelsが必要で、公開済み0.12.0で読めるとは扱わない。
 
-Gemmaがquant.sessionから受理するのはlinearGemvReduceと2つの融合欄だけ。
+Gemmaがquant.sessionから受理するのはlinearGemvReduceと融合欄（`fuseRmsNormAdd` / `fuseLinearStaticQuantize` / `packedStaticQuantize`）だけ。
 重みshard取得前のadmissionで、受理する欄と実効設定を検査する。
 利用者の明示指定 → quant宣言 → runtime参照既定の順で各キーを選び、target/drafterの両方へ渡す。
 未対応の宣言を上書きで隠さず、null等の不正な明示値をquantの値へ戻さない。
 
 SRQ融合が有効なまま実効のlinearGemvReduceがparallelでないときは拒否する。
 sequentialやparallel-subgroup32の明示に限らず、どこにも宣言が無い場合（i4を選んで融合だけをtrueにする場合）も拒否する。
-その比較ではfuseLinearStaticQuantize: falseも指定するか、i4/i4-gemvparを選ぶ。
+その比較ではfuseLinearStaticQuantize: falseとpackedStaticQuantize: falseも指定するか、i4/i4-gemvparを選ぶ（packedも同じparallel必須の拒否を持つ）。
 型の正しいfalseは常にquantのtrueより優先する。fromAssetsはquant選択が無いので従来どおり明示したオプションだけを使う。
 
 ## ホスト側の方針を分ける

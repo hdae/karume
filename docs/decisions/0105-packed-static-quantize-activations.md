@@ -211,3 +211,43 @@ false の行にも packed 変種の WGSL・params は生成できる（テスト
   g2048 / g32 の対で固定する。
 - 実配布 QAT E2B の decode 70 / prefill 0。
 - 故障注入（共有メモリの詰め順を 1 バイトずらす）で 3 つの GPU 門が赤になることを確認して復元。
+
+## 追記 2（2026-09-20）: 語彙への昇格と `i4-fast` の宣言・段 1b の棄却
+
+決定 1 の「manifest 所有の語彙には席を作らない」を解く。research §16 の A/B
+（Chrome +8.3% / GPU −0.57 ms/token・Deno +1.5〜2.9%・64 token greedy の id 列一致）で
+採用が決まったので、席を配布形が宣言できる語彙へ昇格する。
+
+### 追記決定 3: hub の `SessionSpec` に `packedStaticQuantize?: boolean` を足す
+
+- true / false だけを受理し、null・数値・文字列は拒否する。false を省略へ畳まず、`@karume/models` の
+  共通写像（`WRITERS`）も同じ欄へ明示して転送する（[0104](0104-gemma-fast-quant.md) の融合 2 欄と
+  同じ流儀）。manifest は `karume/4` のまま。旧 reader は未知キーとして拒否するので、
+  宣言した配布形には対応する hub / models が要る。
+- Gemma が quant.session から受理する欄に加える。優先順位は**明示指定 → quant 宣言 → 未指定
+  （runtime 既定 false）**で、型の正しい明示 false は quant の true に勝つ。決定 1 の
+  「`linearGemvReduce: "parallel"` 必須」の拒否は quant 由来でも同じ。
+
+### 追記決定 4: QAT E2B の `i4-fast` が宣言する
+
+- recipe（`gemma4_qat/distribution.py` の `qat_quants`）の E2B `i4-fast` に
+  `packedStaticQuantize: true` を足す。E4B は `i4` のまま。
+- 通常 Gemma 4 は `static_quantize` ノードを持たず対付けが 0 本なので宣言しない
+  （宣言しても no-op だが、意味の無い欄を配布形に載せない）。
+- 既定の数値: 決定 3 の「`-0.0` はコード 0・NaN は飽和」が QAT E2B の既定経路の挙動になる
+  （ADR 0058 の数値 opt-in の範囲）。参照 golden・reference 経路・`i4` / `i4-gemvpar` は不変。
+- ブラウザ計測ページ（`tools/llm-speed/browser/`）に明示 off / on の軸を足し、M2 の追試は
+  そこでの往復比較で行う（linear→SRQ 融合と同じ器）。
+
+### 段 1b（整数内積）の棄却
+
+「検討した代替」で lm_head 形（③・算術 36%）に絞って別段とした整数内積は実装しない。
+
+- research §14 の「③は算術が効く」は単体ハーネスの読みで、実モデルの lm_head には **int8 活性が
+  存在しない**。公式 checkpoint の lm_head は SRQ の scale が入出力とも 0（未較正 = 恒等）で、
+  recipe は恒等 SRQ を IR に挟まない（`packages/models/src/gemma/qat.ts` の共有 head の門・
+  ADR 0097）。整数内積に要る int8 活性を作るには公式にも無い動的量子化を新設することになり、
+  公式 mobile とも現行ともビット同一でない数値契約が増える。
+- 上限は lm_head 1 dispatch の 0.24 ms/token（research §13.4）の算術 36% ≈ 0.09 ms/token
+  （GPU 6.63 ms の 1.3%）。K-45 の目的「公式 mobile と同じ計算形」に合わず利得も小さいので、
+  perf-ledger K-52 と同じ判定で棄却する。

@@ -1,7 +1,7 @@
 # ACTIVE_DESIGN — Karume
 
 > 現在の設計とレビューの入口。履歴はADR / research / gitに置き、作業順は[backlog](../docs/backlog.md)、性能の採否は[perf-ledger](../docs/perf-ledger.md)を正本とする。
-> Last updated: 2026-09-19（decode速度調査・K-45段1a・H-28段①）
+> Last updated: 2026-09-20（K-45席のi4-fast宣言・段1b棄却）
 
 ## 現在の焦点
 
@@ -14,7 +14,7 @@
   2026-09-19の[レビュー](../docs/research/2026-09-19-qat-review.md)後の裁定は[ADR 0097追記7](../docs/decisions/0097-gemma4-qat-integration.md)。
   配布既定を通常Gemmaと同じcapacity 4096・chunkLength 768・trace上限768にし、対話CLIの既定を256 tokenにする。
   scale=0の恒等SRQはrecipeが挟まず、構造門は共有headだけSRQ省略を許す。512超の文脈の品質検収はこの波に含めない。
-  活性は公式mobileの整数内積ではなくfloat縮約のままで、KVもf32のまま。[decode速度調査](../docs/research/2026-09-19-qat-speed-recon.md)の結果: 律速は活性のロード本数（§14）。K-45 段1a = packed int8活性（opt-in `packedStaticQuantize`・ADR 0105・実測で効く4形だけ・Chrome +8.3%・§16）とH-28 = PLEのGPU常駐（opt-in `pleResidency`・単独では効かず先行投入H-27の前提・§15）を実装済み。次はK-45席のi4-fast宣言とM2追試、段1b（lm_head形の整数内積）、H-27。
+  活性は公式mobileの整数内積ではなくfloat縮約のままで、KVもf32のまま。[decode速度調査](../docs/research/2026-09-19-qat-speed-recon.md)の結果: 律速は活性のロード本数（§14）。K-45 段1a = packed int8活性（opt-in `packedStaticQuantize`・ADR 0105・実測で効く4形だけ・Chrome +8.3%・§16）とH-28 = PLEのGPU常駐（opt-in `pleResidency`・単独では効かず先行投入H-27の前提・§15）を実装済み。K-45席はQAT E2Bの`i4-fast`が宣言済み（ADR 0105追記2・明示falseで外せる・M2追試は計測ページの往復比較待ち）。段1b（lm_head形の整数内積）は棄却: lm_headにint8活性が無く上限0.09 ms/token。次はH-27の前提残件（非greedy経路のgatherフェンス+1・日本語promptのTTFT）から。
   K-46は速度でなくメモリ項目（[perf-ledger](../docs/perf-ledger.md)）。Deno CLIのdecodeはdeno_webgpuの10 ms/token床を含むので採否判定に使わない。
   用語は[glossary](../docs/glossary.md)、量子化方式の全数は[quantization](../docs/quantization.md)が索引を持つ。
 - Gemmaの温度0・非投機decodeはGPU内topkと8B読戻しを使う。prefill、一般sampling、penalty/bias、投機、診断は従来経路。
@@ -28,7 +28,7 @@
   [ADR 0099](../docs/decisions/0099-rms-norm-add-fusion.md)、[0100](../docs/decisions/0100-rms-subgroup-reduction.md)、[0101](../docs/decisions/0101-linear-gemv-subgroup.md)を参照。
 - 大きいI4のL4→L8候補は[全体比較で不採用](../docs/research/2026-09-14-i4-lane-comparison.md)。製品はL4を維持する。
   [最新M2追試](../docs/research/2026-09-13-m2-gemv-subgroup-adoption.md)も完了済み。同じ80生成を再依頼しない。
-  比較画面はQAT E2B・parallel・dense chunk64・RMS融合・投入768・従来attentionでlinear→SRQを往復比較する4設定40生成。CLIやモデルの既定とは区別する。
+  比較画面はQAT E2B・parallel・dense chunk64・RMS融合・linear→SRQ融合・投入768・従来attentionでpacked活性を往復比較する4設定40生成（2026-09-20にlinear→SRQの往復から切替）。CLIやモデルの既定とは区別する。
 - [添付参照資料を現行コードで再検証](../docs/research/2026-09-14-reference-rope-optimization.md)。要素順を保つpermuteのコピーを省く（[ADR 0011](../docs/decisions/0011-layout-strategy.md#要素順を保つpermute2026-09-14)）。
   Gemma両E2Bのdecodeで100 dispatchを削減。数値設定・WGSLは不変。M2の20生成は出力一致、速度上昇は別時刻の比較なので全てを変更効果へ帰属しない。RMS→RoPE融合の試作は全体利得が小さく保留。
 - [attentionの行統計・PV融合](../docs/research/2026-09-15-attention-fusion.md)を任意指定`parallel-fused`で追加（[ADR 0102](../docs/decisions/0102-state-attention-stats-pv-fusion.md)）。
