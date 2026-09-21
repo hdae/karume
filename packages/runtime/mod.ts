@@ -105,7 +105,7 @@ export type { PreparedModel } from "./src/runtime/executor.ts";
  * **構造互換**の型で、runtime は hub に依存しないため独立に持つ — 失敗とフェンスは連番では
  * なくこの `id`（配布形のファイル名）を名乗る。
  */
-export type { ModelShard } from "./src/runtime/executor.ts";
+export type { ModelShard } from "./src/runtime/session-build.ts";
 /**
  * メモリ必要量 estimator（ADR 0070 決定 5）。GPU 非依存の純関数で「必要側」のカテゴリ別
  * バイト数だけを出す — 空き側との比較・可否判定はしない（最終門は out-of-memory errorScope）。

@@ -9,12 +9,8 @@
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { ContainerError } from "../src/format/container.ts";
 import { acquireGpu } from "../src/gpu/device.ts";
-import {
-  createSessionFromShards,
-  type ModelShard,
-  prepareModel,
-  type Tensor,
-} from "../src/runtime/executor.ts";
+import { createSessionFromShards, prepareModel, type Tensor } from "../src/runtime/executor.ts";
+import type { ModelShard } from "../src/runtime/session-build.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { buildFixture, shardStream } from "./helpers/shard-fixture.ts";

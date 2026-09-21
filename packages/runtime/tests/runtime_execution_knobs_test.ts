@@ -3,7 +3,7 @@
 // 拒否される」1 本だけを残し、値の総当たりはここが正本。
 
 import { assertEquals, assertThrows } from "@std/assert";
-import { assertExecutionKnobs } from "../src/runtime/executor.ts";
+import { assertExecutionKnobs } from "../src/runtime/session-build.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
 
 /**
