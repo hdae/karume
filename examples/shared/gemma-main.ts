@@ -293,8 +293,9 @@ export const runGemmaCli = async (
   /**
    * 投機の取り分を締めの行へ 1 語で足す（勘定が載っていないターン = 非投機では何も足さない）。
    *
-   * 1 cycle は棄却でも frontier を 1 個は進めるので、1 cycle あたりの確定 token 数は
-   * `(accepted + cycles) / cycles` — 受理ゼロなら 1.00（投機の取り分なし）で、上限は `k+1`。
+   * 1 cycle あたりの確定 token 数は `delivered / cycles`（ADR 0096 決定 7 の補足が正本）。
+   * 棄却でも frontier は 1 個進むので受理ゼロなら 1.00（投機の取り分なし）で、上限は `k+1`。
+   * 受理した draft が停止 token だった cycle だけは列挙をそこで打ち切るため 1 + a に満たない。
    * これが「1 verify run で何 token 進んだか」であり、投機の効きはこの 1 数がそのまま示す
    * （壁時計の得はこれと run 1 本の重さの積で決まるので、tok/s と並べて読む）。
    *
@@ -307,9 +308,9 @@ export const runGemmaCli = async (
    */
   const describeSpeculation = ({ speculation }: Gemma4ChatStop): string => {
     if (speculation === undefined || speculation.cycles === 0) return "";
-    const { cycles, accepted, acceptedHistogram } = speculation;
+    const { cycles, delivered, acceptedHistogram } = speculation;
     return ` · 投機 k=${acceptedHistogram.length - 1}` +
-      ` · ${((accepted + cycles) / cycles).toFixed(2)} tok/cycle（cycles ${cycles}）`;
+      ` · ${(delivered / cycles).toFixed(2)} tok/cycle（cycles ${cycles}）`;
   };
 
   /** 上書きで描く 1 行の幅（短い行が前の行の尻を残さないよう、ここまで空白で埋める）。 */

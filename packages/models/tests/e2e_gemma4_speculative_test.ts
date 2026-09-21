@@ -81,7 +81,7 @@ const SUFFIX = ".safetensors";
 const MAX_NEW_TOKENS = 200;
 
 /**
- * 受理率（token/cycle = `(accepted + cycles) / cycles`）の床。
+ * 受理率（token/cycle = `delivered / cycles` — ADR 0096 決定 7 の補足が正本）の床。
  *
  * MUST: **実測に合わせない**。値は段 3 の着地時点の end-to-end 実測（README の 2 ケースで
  * 2.010 / 2.140 token/cycle・2026-09-08・RTX 3080 Ti）の**下**に置いた回帰検出線で、drafter の質か
@@ -263,11 +263,20 @@ const commonPrefix = (left: readonly number[], right: readonly number[]): number
  */
 const GOLDEN_PREFIX_FLOOR = 16;
 
-/** 投機の勘定を「1 cycle が確定させた token 数」に直す（= `(accepted + cycles) / cycles`）。 */
+/**
+ * 投機の勘定を「1 cycle が確定させた token 数」に直す（= `delivered / cycles` — ADR 0096
+ * 決定 7 の補足が正本）。
+ *
+ * 旧式の `(accepted + cycles) / cycles` は「1 cycle は必ず 1 + a 個を確定させる」を前提に
+ * するが、受理した draft が停止 token だった cycle はそこで列挙を打ち切るので a 個しか
+ * 確定しない — その 1 本につき分子が 1 だけ過大になる。
+ */
 const tokensPerCycle = (stop: GenerationStop): number => {
   const speculation = stop.speculation;
   assert(speculation !== undefined, `投機が張られていないターン: ${JSON.stringify(stop)}`);
-  return (speculation.accepted + speculation.cycles) / speculation.cycles;
+  // cycle が 1 本も回らなかったターンは割れない（0 除算を NaN で素通しさせない）。
+  assert(speculation.cycles > 0, `cycle が 1 本も回っていないターン: ${JSON.stringify(stop)}`);
+  return speculation.delivered / speculation.cycles;
 };
 
 // ---------------------------------------------------------------------------
