@@ -215,6 +215,14 @@ export const assertPublicSurface = async (packageRoot: URL): Promise<void> => {
   const expected = parseSnapshot(await Deno.readTextFile(snapshotFile), snapshotFile).entries;
   const specs = [...new Set([...Object.keys(expected), ...actual.keys()])].sort(compare);
   const diff: string[] = [];
+  // 面（entry）そのものの増減は symbol 差分と**独立に**出す。両側の不在は下の `?? []` で
+  // 空配列へ畳まれるので、シンボルを 1 つも出さない面（`export {}` だけのモジュール）の
+  // 追加も削除も symbol 差分には一度も現れない。
+  for (const spec of specs) {
+    const present = actual.has(spec);
+    if (present === Object.hasOwn(expected, spec)) continue;
+    diff.push(`  ${present ? "+" : "-"} 公開面 ${spec}`);
+  }
   for (const spec of specs) {
     const before = index(expected[spec] ?? []);
     const after = index(actual.get(spec) ?? []);
