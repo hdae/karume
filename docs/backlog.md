@@ -61,6 +61,14 @@
   `text/code-ranges.ts` へ・`OpKind` を `OpContract["kind"]` から導出・混在テスト 5 本を `gpu_*` へ分割・opbench の rig と
   single_file.py の来歴欠落を修正。残る重複（報告のみ）: `isRecord` / `readRecord`（anima / sbv2 / irodori / gemma）と
   `isPositiveInteger`（birefnet / depth-anything / siglip2 / irodori）は別レイヤなので段 2 で個別判断。
+  **段 2 済（2026-09-21）**: gemma/pipeline.ts → `gemma/admission.ts`（受理集合の判定）+ `gemma/chat-turn.ts`（chat 1 ターンの変換と
+  後始末・公開型 4 本は barrel の import 元を付け替え）で 2,589 → 1,920 行・gemma/ple.ts → `ple-index.ts`（索引 codec と定数）+
+  `ple-shard.ts`（shard の読み口と検査）で ple.ts は所有者 + facade の 724 行・ple-gpu.ts の重複定数 3 本を import へ・
+  hub 共通層 `hub/asset-readers.ts`（資産バイト列 / JSON の読み口）+ `hub/graph-gates.ts`（graph 入力の静的次元）で 8 family の
+  複製を解消・sbv2 の tokenizer 資産門を `sbv2/text/asset.ts` へ・config の残り重複（isPositiveInteger / isRecord / readRecord）を
+  readers.ts へ。**残置（設計判断が要る）**: `Gemma4PipelineOptions` を引数に取る 4 本（assertSpeculative /
+  resolveGemma4PleResidency / buildGemma4Program / speculativeSetup）は admission.ts へ移すと pipeline.ts と循環するので
+  pipeline.ts に残した（寄せるなら gemma4 の公開型置き場を別に立てる）。sbv2 の staticInputDim は方針が逆向きで対象外。
 
 - **decode 速度調査の波（2026-09-19〜20・2026-09-20 に区切り — 残りは later へ）**: 帰属と反証は [decode 速度の帰属と次に試すこと](research/2026-09-19-qat-speed-recon.md)、
   候補の採否は [perf-ledger](perf-ledger.md) H-26〜H-29 / K-48〜K-53（K-45 / K-46 / K-47 は追記）。確定した事実: Deno の 23.8 ms/token のうち
