@@ -33,7 +33,8 @@
   **段 2d 済（2026-09-20）**: テストの置き場と名前の是正（公開面の門の実体を
   `packages/runtime/tests/helpers/public-surface.ts` へ移動 + 全テストが実 GPU を要る
   `runtime_input_lifetime_test.ts` を `gpu_` 接頭辞へ改名。unit と GPU が同居する
-  `estimate_test.ts` / `runtime_executor_test.ts` / `static_quantize_test.ts` は混在のため据え置き）。
+  `estimate_test.ts` / `runtime_executor_test.ts` / `static_quantize_test.ts` は混在のため据え置き
+  → コード品質管理の波 段 1 で GPU 側を `gpu_*` へ分割済み）。
   **段 2a 済（2026-09-20）**: 公開面のスナップショット門（各パッケージの `tests/public_surface_test.ts` と追跡 fixture
   `tests/fixtures/public-surface.json` — `deno doc --json` で採る値・型の export 集合。焼き直しは `KARUME_SURFACE=write` —
   [ADR 0008 追記](decisions/0008-public-api.md)）。
@@ -46,6 +47,20 @@
   ディレクトリ `--ignore` と綴りの門・公開面の entry 差分と値非公開の門・adapter 同一性）、Civitai の本体選択と basename の門
   （[ADR 0088 追記](decisions/0088-civitai-air-intake.md)）、docs の同期 11 件。**構造の 16 件（triage.md §6 の着手順 3 段）は
   コード品質管理の波の入力**（later の同名項に V2-01 を起票済み）。
+
+- **コード品質管理の波（2026-09-21 着手・承認済みの計画）**: 入力は `.claude/reviews/2026-09-21_chatgpt-reviews/triage.md` §6
+  （分割候補 15 本の着手順 3 段・重複実装・未使用 export）。段 1 = 1 ファイルに閉じるか純関数の移動だけの項目、
+  段 2 = family 内の責務分離と小さな共通層（sbv2 の資産門・gemma の admission / chat・ple の索引 codec / shard・hub 共通層）、
+  段 3 = コア実行層の大移動（device.ts の acquire / probe・fusion のルール分割〈ADR 0040 追記〉・irodori・executor の構築相・
+  recipe-builder の族別導出 — 1 ファイルずつ・executor / recipe-builder は最後）。分割しない 5 本（gemm / sequence /
+  generation-context / linear-gemv / state-attention 全体）は同 §3。未使用 export 11 件は段 3 の後に剥がす。
+  `deno.json` に `noUnusedLocals` / `noUnusedParameters` を有効化済み（赤は簡単に直せるものは直す方針）。
+  **段 1 済（2026-09-21）**: state-attention の行統計 WGSL を 1 本の生成器へ（スナップショット不変）・executor の出力解決 3 重と
+  発行準備を 1 本ずつに（await 列不変）・pipelineConfig の基本 reader を `models/src/config/readers.ts` へ（22 箇所）・
+  `withSession` を `session/with-session.ts` へ・tokenizer 資産の門を `text/asset-gates.ts` へ・Unicode 区間探索を
+  `text/code-ranges.ts` へ・`OpKind` を `OpContract["kind"]` から導出・混在テスト 5 本を `gpu_*` へ分割・opbench の rig と
+  single_file.py の来歴欠落を修正。残る重複（報告のみ）: `isRecord` / `readRecord`（anima / sbv2 / irodori / gemma）と
+  `isPositiveInteger`（birefnet / depth-anything / siglip2 / irodori）は別レイヤなので段 2 で個別判断。
 
 - **decode 速度調査の波（2026-09-19〜20・2026-09-20 に区切り — 残りは later へ）**: 帰属と反証は [decode 速度の帰属と次に試すこと](research/2026-09-19-qat-speed-recon.md)、
   候補の採否は [perf-ledger](perf-ledger.md) H-26〜H-29 / K-48〜K-53（K-45 / K-46 / K-47 は追記）。確定した事実: Deno の 23.8 ms/token のうち
@@ -584,7 +599,7 @@ autoregressive 波の**残項目（波外へ送り）**:
 
 ## later
 
-- **コード品質管理の波（起票 2026-09-21）**:
+- **コード品質管理の波の設計項目（起票 2026-09-21 — 波本体は now）**:
   - **Anima / 生成の入力起因エラーを判別可能な型へ揃える**: `parseResolution` と
     `AnimaPipeline.generate` の値域検査、生成側の `maxNewTokens` / `stopTokens` の検査が素の
     `Error` を投げるため、同じ関数内の内部配線異常（hub のバグ側）と区別が付かず、複数モデルを
