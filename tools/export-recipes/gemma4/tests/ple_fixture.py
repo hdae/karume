@@ -10,9 +10,9 @@ import json
 from pathlib import Path
 
 import torch
-from _shared.paths import REPO_ROOT
 from safetensors.torch import save_file
 
+from _shared.paths import REPO_ROOT
 from karume.emit import ContainerEntry, container_order, write_container
 from karume.verify import assert_reader_layout
 
