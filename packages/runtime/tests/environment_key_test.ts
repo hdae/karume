@@ -5,7 +5,13 @@
 // ならないまま門の意味が消えるので、綴りの規則そのものをここで縛る。
 
 import { assert, assertEquals, assertThrows } from "@std/assert";
-import { describeEnvironment, ENVIRONMENT, environmentKey } from "./helpers/environment.ts";
+import {
+  assertAdapterMatchesEnvironment,
+  describeEnvironment,
+  ENVIRONMENT,
+  type Environment,
+  environmentKey,
+} from "./helpers/environment.ts";
 
 /** `GPUAdapterInfo` の実体（読むのは 4 欄だけだが、型は全欄を要求する）。 */
 const adapterInfo = (fields: Partial<GPUAdapterInfo>): GPUAdapterInfo => ({
@@ -52,6 +58,30 @@ Deno.test("環境キー: 名前が 1 つも採れなければ throw する（空
     () => environmentKey("deno", adapterInfo({ device: "57868" })),
     Error,
     "環境キーを作れない",
+  );
+});
+
+Deno.test("環境キー: 走行が取ったアダプタが環境キーと違えば throw する", () => {
+  const environment: Environment = {
+    key: "deno-intel-graphics-bmg-g21",
+    runtime: { name: "deno", version: "2.9.6", v8: "15.0.245.2", typescript: "6.0.3" },
+    adapter: {
+      vendor: "32902",
+      architecture: "",
+      device: "57868",
+      description: "Intel(R) Graphics (BMG G21)",
+    },
+    os: { platform: "linux", arch: "x86_64" },
+  };
+  const context = (description: string): { readonly adapterInfo: GPUAdapterInfo } => ({
+    adapterInfo: adapterInfo({ description }),
+  });
+  // 対照: 同じアダプタなら何も起きない。
+  assertAdapterMatchesEnvironment(context("Intel(R) Graphics (BMG G21)"), environment);
+  assertThrows(
+    () => assertAdapterMatchesEnvironment(context("NVIDIA GeForce RTX 3080 Ti"), environment),
+    Error,
+    "この走行が実際に取ったアダプタのキー",
   );
 });
 

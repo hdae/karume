@@ -83,6 +83,7 @@ import {
 import { parseSbv2PipelineConfig, type Sbv2Defaults } from "../src/sbv2/config.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { buildSafetensors, f32Bytes } from "./helpers/safetensors.ts";
+import { assertRunningAdapter } from "../../runtime/tests/helpers/environment.ts";
 import {
   announceCheck,
   expectedOf,
@@ -353,6 +354,8 @@ const settleCase = async (
   quant: string = QUANT,
   model: string = MODEL,
 ): Promise<void> => {
+  // 参照値を書きうる経路なので、キーを採ったアダプタと実行アダプタの同一性を先に見る。
+  await assertRunningAdapter();
   const caseId = caseIdOf(model, quant);
   const artifact = `${caseId}.wav`;
   const dumped = results.artifact(artifact);
@@ -782,4 +785,5 @@ Deno.test({
 });
 
 // 「この環境の参照値がまだ無い」を無音の緑にしないための門番（ADR 0005 と同じ流儀）。
-registerReferenceGate(references, { runnable: RUNNABLE });
+// 数えるのは上の現役ケースだけ（廃止済みケースの行が残っていても緑にはしない）。
+registerReferenceGate(references, { runnable: RUNNABLE, caseIds: CASE_IDS });

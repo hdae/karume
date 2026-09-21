@@ -73,6 +73,30 @@ Deno.test("結果の書き出し: record のたびに全件で書き直され、
   }
 });
 
+Deno.test("結果の書き出し: 席を作った時点で走行中（cases 空）の results.json が置かれる", async () => {
+  const temporary = Deno.makeTempDirSync({ prefix: "karume-verify-" });
+  try {
+    const root = new URL(`file://${temporary}/`);
+    const results = openResults("golden", { root, environment: ENVIRONMENT });
+    // 前回の走行が同じ席（同じ日・同じ系列）に残した決着。
+    Deno.mkdirSync(results.dir, { recursive: true });
+    Deno.writeTextFileSync(
+      new URL("results.json", results.dir),
+      `${JSON.stringify({ schema: 1, cases: [{ id: "activations", status: "pass" }] })}\n`,
+    );
+    // 実物だけ置いて record には到達しない = 記録の前に例外で抜けた回。
+    await Deno.writeFile(results.artifact("activations.png"), new Uint8Array([1, 2, 3]));
+    const document = JSON.parse(
+      await Deno.readTextFile(new URL("results.json", results.dir)),
+    ) as ResultsDocument;
+    assertEquals(document.cases, [], "前回の走行の決着が今回の実物と同じ席に残っている");
+    assertEquals(document.family, "golden");
+    assert(document.startedAt.endsWith("Z"), "走行中マーカーが今回の startedAt を名乗っていない");
+  } finally {
+    Deno.removeSync(temporary, { recursive: true });
+  }
+});
+
 Deno.test("結果の書き出し: ディレクトリ区切りを含む実物の名前は throw する", () => {
   const temporary = Deno.makeTempDirSync({ prefix: "karume-verify-" });
   try {

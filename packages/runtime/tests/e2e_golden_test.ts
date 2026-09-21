@@ -144,70 +144,83 @@ for (const model of MODELS) {
     ignore: !GPU_AVAILABLE,
     fn: async () => {
       const startedAt = performance.now();
-      const shards = modelShards(model);
-      const [graphShard, ioBytes] = await Promise.all([
-        readShard(shards[0]),
-        readBuffer(model, "io.safetensors"),
-      ]);
-      const parsed = prepareModel(graphShard);
-      const io = parseSafetensors(ioBytes);
-
-      // io の全テンソルがグラフの入出力とちょうど対応する（余りも欠けも無い）。
-      // 命名規約は tools/exporter/README.md「golden レイアウト」が正本。
-      const expectedKeys = [
-        ...parsed.graph.inputs.map((spec) => `input.${spec.name}`),
-        ...parsed.graph.outputs.map((_, index) => `output.${index}`),
-      ].sort();
-      assertEquals([...io.tensors.keys()].sort(), expectedKeys, "io.safetensors のテンソルキー");
-
-      // 記号次元 T は golden の入力 shape の実長から束縛される（明示 bindings を渡さない）。
-      const inputs: Record<string, Tensor> = {};
-      for (const spec of parsed.graph.inputs) {
-        const view = io.tensors.get(`input.${spec.name}`);
-        assert(view !== undefined, `input.${spec.name} が io.safetensors に無い`);
-        inputs[spec.name] = ioTensor(io, view, spec.dtype);
-      }
-
-      const gpu = await acquireGpu();
-      const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
       /** Karume 独自基準を超えたが仕様帯で受理した出力（結果 JSON の note になる）。 */
       const accepted: string[] = [];
       /** 仕様帯でも受からなかった出力のメッセージ（1 本目でテストを落とす）。 */
       const failures: string[] = [];
       try {
-        const outputs = await session.run(inputs);
-        assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());
+        const shards = modelShards(model);
+        const [graphShard, ioBytes] = await Promise.all([
+          readShard(shards[0]),
+          readBuffer(model, "io.safetensors"),
+        ]);
+        const parsed = prepareModel(graphShard);
+        const io = parseSafetensors(ioBytes);
 
-        parsed.graph.outputs.forEach((name, index) => {
-          const view = io.tensors.get(`output.${index}`);
-          assert(view !== undefined, `output.${index} が io.safetensors に無い`);
-          const where = `${model} output.${index} ('${name}')`;
-          const declared = parsed.graph.values[name].dtype;
-          assertEquals(outputs[name].shape, view.shape, `${where}: shape`);
-          assertEquals(outputs[name].dtype, declared, `${where}: dtype`);
-          const expected = ioTensor(io, view, declared);
-          // f32 は allclose、i32 / bool は厳密一致（整数演算に近似の余地は無い）
-          const karume = compareTensors(outputs[name], expected, GOLDEN_TOLERANCE);
-          if (karume.pass) return;
-          // 1 段目を落ちた出力だけが 2 段目（WGSL 仕様帯）へ来る。受かれば pass + warning。
-          const spec = OUTPUT_TOLERANCE[`${model}/${name}`]?.spec;
-          if (spec === undefined) {
-            failures.push(`${where}: ${formatAllclose(karume)}`);
-            return;
-          }
-          const report = compareTensors(outputs[name], expected, spec);
-          if (!report.pass) {
-            failures.push(`${where}: ${formatAllclose(report)}`);
-            return;
-          }
-          accepted.push(
-            `${name}: maxAbs=${karume.maxAbsError} maxRel=${karume.maxRelError} ` +
-              `（仕様帯 atol=${spec.atol} で受理）`,
-          );
+        // io の全テンソルがグラフの入出力とちょうど対応する（余りも欠けも無い）。
+        // 命名規約は tools/exporter/README.md「golden レイアウト」が正本。
+        const expectedKeys = [
+          ...parsed.graph.inputs.map((spec) => `input.${spec.name}`),
+          ...parsed.graph.outputs.map((_, index) => `output.${index}`),
+        ].sort();
+        assertEquals([...io.tensors.keys()].sort(), expectedKeys, "io.safetensors のテンソルキー");
+
+        // 記号次元 T は golden の入力 shape の実長から束縛される（明示 bindings を渡さない）。
+        const inputs: Record<string, Tensor> = {};
+        for (const spec of parsed.graph.inputs) {
+          const view = io.tensors.get(`input.${spec.name}`);
+          assert(view !== undefined, `input.${spec.name} が io.safetensors に無い`);
+          inputs[spec.name] = ioTensor(io, view, spec.dtype);
+        }
+
+        const gpu = await acquireGpu();
+        const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
+        try {
+          const outputs = await session.run(inputs);
+          assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());
+
+          parsed.graph.outputs.forEach((name, index) => {
+            const view = io.tensors.get(`output.${index}`);
+            assert(view !== undefined, `output.${index} が io.safetensors に無い`);
+            const where = `${model} output.${index} ('${name}')`;
+            const declared = parsed.graph.values[name].dtype;
+            assertEquals(outputs[name].shape, view.shape, `${where}: shape`);
+            assertEquals(outputs[name].dtype, declared, `${where}: dtype`);
+            const expected = ioTensor(io, view, declared);
+            // f32 は allclose、i32 / bool は厳密一致（整数演算に近似の余地は無い）
+            const karume = compareTensors(outputs[name], expected, GOLDEN_TOLERANCE);
+            if (karume.pass) return;
+            // 1 段目を落ちた出力だけが 2 段目（WGSL 仕様帯）へ来る。受かれば pass + warning。
+            const spec = OUTPUT_TOLERANCE[`${model}/${name}`]?.spec;
+            if (spec === undefined) {
+              failures.push(`${where}: ${formatAllclose(karume)}`);
+              return;
+            }
+            const report = compareTensors(outputs[name], expected, spec);
+            if (!report.pass) {
+              failures.push(`${where}: ${formatAllclose(report)}`);
+              return;
+            }
+            accepted.push(
+              `${name}: maxAbs=${karume.maxAbsError} maxRel=${karume.maxRelError} ` +
+                `（仕様帯 atol=${spec.atol} で受理）`,
+            );
+          });
+        } finally {
+          await session.dispose();
+          gpu.destroy();
+        }
+      } catch (cause) {
+        // 許容差以外の失敗（資産の読み・createSession・出力キー・shape / dtype・run の例外）も
+        // 席に残す。決着の無いまま抜けると、この席には前回の走行の results.json が居座る。
+        await results.record({
+          id: model,
+          status: "fail",
+          elapsedMs: Math.round(performance.now() - startedAt),
+          note: [...accepted, `例外: ${cause instanceof Error ? cause.message : String(cause)}`]
+            .join("; "),
         });
-      } finally {
-        await session.dispose();
-        gpu.destroy();
+        throw cause;
       }
       // 決着は投げる前に残す（赤で終わった回の note も手元に要る）。
       await results.record({

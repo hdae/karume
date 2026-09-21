@@ -59,6 +59,7 @@ import { sigmaSchedule } from "../src/anima/sampler.ts";
 import { ANIMA_SPATIAL_COMPRESSION } from "../src/anima/dit-tokens.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { MemoryCacheStorage } from "./helpers/memory-cache.ts";
+import { assertRunningAdapter } from "../../runtime/tests/helpers/environment.ts";
 import {
   announceCheck,
   expectedOf,
@@ -263,30 +264,32 @@ const settlePng = async (
   elapsedMs: number,
   twin?: string,
 ): Promise<void> => {
+  // 参照値を書きうる経路なので、キーを採ったアダプタと実行アダプタの同一性を先に見る。
+  await assertRunningAdapter();
   const artifact = `${label}.png`;
   // 実物は成功・失敗を問わず毎回残す（次に割れたときの A/B の材料は、割れる前に要る）。
   const dumped = results.artifact(artifact);
   await Deno.writeFile(dumped, png);
-  if (twin !== undefined) {
-    const twinSha = references.lookup(twin);
-    if (twinSha !== undefined && twinSha !== actual) {
-      throw new Error(
-        `${label} の PNG が ${twin} とビット同一でない（${twin} ${twinSha} / 実測 ${actual}）— ` +
-          "別経路が同じバイトを産んでいない",
-      );
-    }
-  }
+  // 双子の行との突合は**判定だけ**先に済ませる。ここで投げると自分の決着が記録されないまま
+  // 実物だけが席に残り、同じ日の前回の決着と組で読まれる（双子が同値なら自分の不一致でもある）。
+  const twinSha = twin === undefined ? undefined : references.lookup(twin);
+  const twinMismatch = twinSha === undefined || twinSha === actual
+    ? undefined
+    : `${twin} とビット同一でない（${twin} ${twinSha} / 実測 ${actual}）— ` +
+      "別経路が同じバイトを産んでいない";
   const check = references.check(label, actual);
   announceCheck(label, check, actual);
   const expected = expectedOf(check);
   await results.record({
     id: label,
-    status: check.status,
+    status: twinMismatch === undefined ? check.status : "fail",
     ...(expected === undefined ? {} : { expected }),
     actual,
     artifact,
     elapsedMs,
+    ...(twinMismatch === undefined ? {} : { note: twinMismatch }),
   });
+  if (twinMismatch !== undefined) throw new Error(`${label} の PNG が ${twinMismatch}`);
   if (check.status === "fail") {
     throw new Error(mismatchReport(label, image, png, check.expected, actual, dumped));
   }
@@ -862,4 +865,5 @@ const CASE_IDS: readonly string[] = [
 if (RUNNABLE) references.warnMissing(CASE_IDS);
 
 // 「この環境の参照値がまだ無い」を無音の緑にしないための門番（ADR 0005 と同じ流儀）。
-registerReferenceGate(references, { runnable: RUNNABLE });
+// 数えるのは上の現役ケースだけ（廃止済みケースの行が残っていても緑にはしない）。
+registerReferenceGate(references, { runnable: RUNNABLE, caseIds: CASE_IDS });

@@ -20,7 +20,8 @@
  * だけの操作で、**他環境の行には決して触らない**（別の機の参照値を巻き添えにしない）。
  *
  * MUST: 「参照が無いので全 SKIP」を無音の緑にしない。{@link registerReferenceGate} が
- * ADR 0005 の門番と同じ形（opt-out つき）で 1 本落とす。
+ * ADR 0005 の門番と同じ形（opt-out つき）で 1 本落とす。門が数えるのは**呼び手が登録した
+ * ケース**だけである（{@link referenceGatePasses}）。
  */
 
 import { assert } from "@std/assert";
@@ -90,8 +91,6 @@ export type References = {
   readonly mode: ReferenceMode | undefined;
   /** 現環境の行（無ければ `undefined`）。 */
   lookup(caseId: string): string | undefined;
-  /** 現環境の行が 1 つでもあるか（参照門が見る）。 */
-  hasCurrent(): boolean;
   /** 参照値が無く、作るモードでもない（= そのケースは明示 SKIP する）。 */
   lacksReference(caseId: string): boolean;
   /** 現環境の行を書き戻す（モードに依らず呼んだぶんだけ書く — 判定は {@link check}）。 */
@@ -173,17 +172,32 @@ const serialize = (cases: Record<string, Record<string, string>>): string => {
   return `${JSON.stringify({ schema: SCHEMA, kind: KIND, cases: sorted }, undefined, 2)}\n`;
 };
 
+/** {@link openReferences} の注入席（単体テスト用 — 実行時の呼びは何も渡さない）。 */
+export type OpenReferencesOptions = {
+  /** 参照値を索く環境（省略時はこの実行環境）。 */
+  readonly environment?: Environment;
+  /**
+   * この走行の参照モード。
+   *
+   * MUST: **欄ごと省いたときだけ**環境変数 `KARUME_REFERENCE` を読む。既定引数で受けると
+   * 「比較専用のつもりで明示的に渡した `undefined`」が環境変数の write / rewrite に化け、
+   * `KARUME_REFERENCE=write` を付けた走行で単体テストが書き込みモードで回る。
+   */
+  readonly mode?: ReferenceMode | undefined;
+};
+
 /**
  * 参照値 fixture を開く。
  *
- * `environment` / `mode` を引数で受けるのは単体テストのため（実 GPU も環境変数も要らずに
- * モードの分岐を検査できる）。実行時の呼びは既定のまま使う。
+ * `environment` / `mode` を注入できるのは単体テストのため（実 GPU も環境変数も要らずに
+ * モードの分岐を検査できる）。実行時の呼びは第 2 引数ごと省く。
  */
 export const openReferences = (
   fixtureUrl: URL,
-  environment: Environment = ENVIRONMENT,
-  mode: ReferenceMode | undefined = REFERENCE_MODE,
+  options: OpenReferencesOptions = {},
 ): References => {
+  const environment = options.environment ?? ENVIRONMENT;
+  const mode = Object.hasOwn(options, "mode") ? options.mode : REFERENCE_MODE;
   const { cases } = readDocument(fixtureUrl);
   const { key } = environment;
   const requireKey = (): string => {
@@ -199,19 +213,19 @@ export const openReferences = (
     key === undefined ? undefined : cases[caseId]?.[key];
   const record = (caseId: string, sha256: string): "written" | "rewritten" => {
     const current = requireKey();
-    const rows = cases[caseId] ?? {};
-    const previous = rows[current];
-    // 他環境の行はここで写し取られるだけ（触らない）。
-    cases[caseId] = { ...rows, [current]: sha256 };
-    Deno.writeTextFileSync(fixtureUrl, serialize(cases));
+    const previous = cases[caseId]?.[current];
+    // MUST: 書く直前に読み直す。開いた時点の写しをそのまま書き戻すと、その間に別のハンドルが
+    // 足した**他環境の行**が消える（「他環境の行には決して触らない」はこの読み直しで成り立つ）。
+    const onDisk = readDocument(fixtureUrl).cases;
+    onDisk[caseId] = { ...onDisk[caseId], [current]: sha256 };
+    Deno.writeTextFileSync(fixtureUrl, serialize(onDisk));
+    cases[caseId] = { ...cases[caseId], [current]: sha256 };
     return previous === undefined ? "written" : "rewritten";
   };
   return {
     mode,
     fixtureUrl,
     lookup,
-    hasCurrent: (): boolean =>
-      key !== undefined && Object.keys(cases).some((caseId) => cases[caseId][key] !== undefined),
     lacksReference: (caseId: string): boolean => mode === undefined && lookup(caseId) === undefined,
     record,
     check: (caseId: string, sha256: string): ReferenceCheck => {
@@ -246,12 +260,31 @@ export const openReferences = (
 };
 
 /**
+ * 参照門の緑条件（純関数 — 回帰テストはここを直に突く）。
+ *
+ * 数えるのは**この走行が登録したケース**だけである。fixture 全体を横断して 1 行でもあれば
+ * 緑にすると、ケースの改名・削除で残った孤児行（もう誰も突き合わせない行）が、現役ケース
+ * 全 SKIP を緑で隠す。
+ *
+ * MUST: 現役ケースの**一部**にだけ行がある状態は緑のまま（ADR 0106 の設計 — この門が言うのは
+ * 「この環境の参照値が 1 件も無いのではない」ことだけで、全ケース検証済みとは言わない）。
+ */
+export const referenceGatePasses = (
+  references: Pick<References, "mode" | "lookup">,
+  caseIds: readonly string[],
+): boolean =>
+  references.mode !== undefined ||
+  caseIds.some((caseId) => references.lookup(caseId) !== undefined);
+
+/**
  * 参照門（各 sha ファイルに 1 本）。「この環境の参照値がまだ無い」状態を**無音の緑にしない**
  * ための門番で、ADR 0005 の GPU 門番と同じく opt-out つき。
+ *
+ * `caseIds` はそのファイルが登録したケース ID 全部（`warnMissing` へ渡すものと同じ集合）。
  */
 export const registerReferenceGate = (
   references: References,
-  options: { readonly runnable: boolean },
+  options: { readonly runnable: boolean; readonly caseIds: readonly string[] },
 ): void => {
   Deno.test({
     name: `参照門: この環境（${ENVIRONMENT.key ?? "GPU なし"}）の参照値がある`,
@@ -259,9 +292,10 @@ export const registerReferenceGate = (
     ignore: ALLOW_NO_REFERENCE || !options.runnable,
     fn: () => {
       assert(
-        references.hasCurrent() || references.mode !== undefined,
-        `この環境（${ENVIRONMENT.key ?? "GPU なし"}）の参照値が 1 件も無いため sha 門が全て ` +
-          "SKIP された。ADR 0005 と同じ理由でこれは FAIL として扱う（検証していないものを " +
+        referenceGatePasses(references, options.caseIds),
+        `この環境（${ENVIRONMENT.key ?? "GPU なし"}）の参照値が、このファイルが登録した ` +
+          `${options.caseIds.length} ケースのどれにも無いため sha 門が全て SKIP された。` +
+          "ADR 0005 と同じ理由でこれは FAIL として扱う（検証していないものを " +
           "検証済みと誤読させる）。この機の参照値を作るには KARUME_REFERENCE=write を付けて " +
           `同じレーンを回すこと（行の置き場: ${references.fixtureUrl.pathname}）。` +
           "参照値を持たないまま意図的に通すには KARUME_ALLOW_NO_REFERENCE=1 を設定すること。",

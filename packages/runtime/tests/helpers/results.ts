@@ -8,7 +8,9 @@
  * 置くのは 2 種類だけ:
  *
  * - `results.json` — ケースごとの決着（一致 / 不一致 / 参照値を作った）と、それを採った環境・
- *   チェックアウト。`record` のたびに丸ごと書き直すので、途中で落ちても直前までが残る。
+ *   チェックアウト。席を作った時点で `cases` 空の「走行中」として先に書き、`record` のたびに
+ *   丸ごと書き直す。記録に届く前に落ちた回でも、前回の走行の決着が居座ることはない
+ *   （実物だけ今回のバイトに入れ替わった席に、前回の PASS が残るのが最悪の形）。
  * - 実物（PNG / WAV） — **成功・失敗を問わず毎回**。不一致のときだけ残す形だと、一致した
  *   ときの実物が手元に無く、次に割れたときの A/B が採れない。
  *
@@ -109,11 +111,29 @@ export const openResults = (
     }
     return new URL(`${key}/${TODAY}_${family}/`, root);
   };
+  const documentText = (): string =>
+    `${
+      JSON.stringify(
+        {
+          schema: 1,
+          family,
+          environment,
+          checkout: CHECKOUT ?? null,
+          startedAt: STARTED_AT,
+          cases,
+        },
+        undefined,
+        2,
+      )
+    }\n`;
   // 置き場は**使うときに**作る（資産が無くて全 SKIP の機に空ディレクトリを残さない）。
   const ensureDir = (): URL => {
     const dir = directory();
     if (!created) {
       Deno.mkdirSync(dir, { recursive: true });
+      // 「走行中」を先に置く（`cases` 空・この走行の startedAt）。記録の前に例外で抜けても、
+      // 同じ席に居る前回の決着が今回の実物と組で読まれることが無くなる。
+      Deno.writeTextFileSync(new URL("results.json", dir), documentText());
       created = true;
     }
     return dir;
@@ -131,23 +151,7 @@ export const openResults = (
     record: async (entry: ResultEntry): Promise<void> => {
       const dir = ensureDir();
       cases.push(entry);
-      await Deno.writeTextFile(
-        new URL("results.json", dir),
-        `${
-          JSON.stringify(
-            {
-              schema: 1,
-              family,
-              environment,
-              checkout: CHECKOUT ?? null,
-              startedAt: STARTED_AT,
-              cases,
-            },
-            undefined,
-            2,
-          )
-        }\n`,
-      );
+      await Deno.writeTextFile(new URL("results.json", dir), documentText());
     },
   };
 };

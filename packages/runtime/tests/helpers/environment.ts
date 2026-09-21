@@ -17,7 +17,7 @@
  * 埋まっている側を基底にする。
  */
 
-import { readAdapterInfo } from "../../src/gpu/device.ts";
+import { acquireGpu, readAdapterInfo } from "../../src/gpu/device.ts";
 
 /** 参照値を分ける実行系（同じ GPU でもランタイムが違えば数値は動きうる）。 */
 export type EnvironmentRuntime = "deno" | "chrome";
@@ -102,3 +102,45 @@ export const describeEnvironment = async (): Promise<Environment> => {
 
 /** この実行環境（モジュール評価時に 1 回だけ確定）。 */
 export const ENVIRONMENT: Environment = await describeEnvironment();
+
+/**
+ * 走行が実際に使うアダプタが、環境キーを採ったアダプタと同じであることを確かめる。
+ *
+ * {@link ENVIRONMENT} のキーはモジュール評価時の独立した `requestAdapter()` から作られ、実行側の
+ * `acquireGpu` は改めてアダプタを取る。**2 回の要求が同じ物理アダプタを返す保証は WebGPU 仕様に
+ * 無い**（`readAdapterLimits` の注記と同じ前提）。複数 GPU の機で取り違えると、`KARUME_REFERENCE`
+ * の書き込みが追跡下の fixture へ**別のアダプタの数値を静かに入れる** —— 赤にならず、戻すには
+ * 人が行を消すしかない不可逆側の壊れ方なので、進める前に throw する。
+ */
+export const assertAdapterMatchesEnvironment = (
+  context: { readonly adapterInfo: GPUAdapterInfo },
+  environment: Environment = ENVIRONMENT,
+): void => {
+  const running = environmentKey(environment.runtime.name, context.adapterInfo);
+  if (running === environment.key) return;
+  throw new Error(
+    `参照値を索くキー（${environment.key ?? "GPU なし"}）と、` +
+      `この走行が実際に取ったアダプタのキー（${running}）が違う。` +
+      "同じ機の複数の GPU から requestAdapter が別のアダプタを選んでいる。" +
+      "数値をどちらの行として扱うか決められないのでここで止める（参照値の書き込みは戻せない）",
+  );
+};
+
+/**
+ * {@link assertAdapterMatchesEnvironment} を走行に 1 度だけ実行する（参照値を書く経路の入口で呼ぶ）。
+ *
+ * アダプタの選択はプロセス内で変わらないので、検査用の `GpuContext` は 1 度取って捨てる。
+ * 1 度きりにするのは、パイプラインが資産を抱えている最中に device を作り直さないため。
+ */
+let runningAdapterCheck: Promise<void> | undefined;
+export const assertRunningAdapter = (): Promise<void> => {
+  runningAdapterCheck ??= (async (): Promise<void> => {
+    const gpu = await acquireGpu();
+    try {
+      assertAdapterMatchesEnvironment(gpu);
+    } finally {
+      gpu.destroy();
+    }
+  })();
+  return runningAdapterCheck;
+};

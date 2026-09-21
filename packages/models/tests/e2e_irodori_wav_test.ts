@@ -62,7 +62,7 @@
  * のみ（横断不変条件）で、`fromAssets` はバイト列を受け取るだけの面。
  */
 
-import { assertEquals, assertFalse, assertRejects, assertStrictEquals } from "@std/assert";
+import { assert, assertEquals, assertFalse, assertRejects, assertStrictEquals } from "@std/assert";
 import { parseManifest, resolveFiles } from "@karume/hub";
 import type { Manifest, ModelEntry } from "@karume/hub";
 import type { SessionDiagnostics } from "@karume/runtime";
@@ -79,6 +79,7 @@ import {
 import { type IrodoriPipelineConfig, parseIrodoriPipelineConfig } from "../src/irodori/config.ts";
 import { tSchedule } from "../src/irodori/host/sampler.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { assertRunningAdapter } from "../../runtime/tests/helpers/environment.ts";
 import {
   announceCheck,
   expectedOf,
@@ -186,8 +187,11 @@ if (!ASSETS_AVAILABLE) {
 
 const RUNNABLE = GPU_AVAILABLE && ASSETS_AVAILABLE;
 
+/** この門が持つケース ID 全部（登録時の警告と参照門が見る）。 */
+const CASE_IDS: readonly string[] = CASES.map((item) => item.name);
+
 // この環境の参照値が無いケースは明示 SKIP する（作り方は警告が言う）。
-if (RUNNABLE) references.warnMissing(CASES.map((item) => item.name));
+if (RUNNABLE) references.warnMissing(CASE_IDS);
 
 const sha256Hex = async (bytes: Uint8Array<ArrayBuffer>): Promise<string> =>
   Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)))
@@ -344,14 +348,23 @@ const mismatchReport = async (
  * `onEvent` を渡した呼びも**同じ参照値**（= 同じケース ID の行）で突き合わせる — 観測席が
  * 数値に 1 ビットも触っていないこと、そして常駐経路 / ホスト経路の出力が同一であることの
  * 直接証拠になる（下の onEvent 門）。結果 JSON では別のケースとして残す。
+ *
+ * MUST: 経路間のビット同一は**実測どうし**で突き合わせる（ADR 0106 決定 6 と同じ形）。
+ * 共有する参照行だけに頼ると、`KARUME_REFERENCE=rewrite` の走行では通常経路の実測で行を
+ * 焼き直してから `onEvent` 経路の実測で同じ行を上書きするだけになり、A≠B でも緑で終わる。
  */
 const runCase = async (
   pipeline: IrodoriPipeline,
   config: IrodoriPipelineConfig,
   item: WavCase,
   reference: DecodedWav,
-  onEvent?: (event: IrodoriGenerateEvent) => void,
-): Promise<IrodoriGeneratedAudio> => {
+  /** 観測席（`onEvent`）の呼びだけが持つ席。`twinSha` は通常経路の**実測** sha。 */
+  observed?: {
+    readonly onEvent: (event: IrodoriGenerateEvent) => void;
+    readonly twinSha: string;
+  },
+): Promise<{ readonly audio: IrodoriGeneratedAudio; readonly sha: string }> => {
+  const onEvent = observed?.onEvent;
   // `initialNoise` もノブも渡さない — 内部 `Randn` と `pipelineConfig` の既定ごと縛る。
   const request: IrodoriGenerateRequest = {
     text: item.text,
@@ -376,29 +389,38 @@ const runCase = async (
       `forwards ${audio.forwards} / WAV ${wav.length}B / ` +
       `${(audio.data.length / audio.sampleRate).toFixed(2)}s / sha256 ${actual}`,
   );
+  // 経路間ビット同一（MUST）の判定は参照行を経由せず、通常経路の実測と直に比べる。
+  const twinMismatch = observed !== undefined && observed.twinSha !== actual
+    ? `通常経路の WAV とビット同一でない（通常 ${observed.twinSha} / onEvent ${actual}）— ` +
+      "観測席が数値に触っているか、ホスト経路と常駐経路の出力が割れている"
+    : undefined;
   const check = references.check(item.name, actual);
   announceCheck(item.name, check, actual);
   const expected = expectedOf(check);
   await results.record({
     id: resultId,
-    status: check.status,
+    status: twinMismatch === undefined ? check.status : "fail",
     ...(expected === undefined ? {} : { expected }),
     actual,
     artifact: `${resultId}.wav`,
     elapsedMs,
+    ...(twinMismatch === undefined ? {} : { note: twinMismatch }),
   });
+  if (twinMismatch !== undefined) throw new Error(`${item.name}: ${twinMismatch}`);
   if (check.status === "fail") {
     throw new Error(
       await mismatchReport(item, config, audio, wav, check.expected, actual, dumped),
     );
   }
-  return audio;
+  return { audio, sha: actual };
 };
 
 Deno.test({
   name: `e2e(実GPU): 配布形 ${MODEL} / quant ${QUANT} の WAV が参照 sha256 と一致する`,
   ignore: !RUNNABLE,
   fn: async (t) => {
+    // 参照値を書きうる走行なので、キーを採ったアダプタと実行アダプタの同一性を先に見る。
+    await assertRunningAdapter();
     const manifest = readManifest();
     // 門の前提を先に見る（実効ノブが動いていたら、生成する前に「条件が違う」と言う）。
     const config = assertReferenceKnobs(modelEntry(manifest));
@@ -417,6 +439,8 @@ Deno.test({
       onRunDiagnostics: (component: IrodoriRunComponent, diagnostics: SessionDiagnostics) =>
         runs.push({ component, hasArena: diagnostics.lastRun !== undefined }),
     });
+    /** 通常経路の実測 sha（onEvent 経路との経路間ビット同一を、参照行を経由せずに見る相手）。 */
+    const plainSha = new Map<string, string>();
     for (const item of CASES) {
       await t.step({
         name: `${item.name}: ${item.why}`,
@@ -424,7 +448,7 @@ Deno.test({
         // （理由と作り方は登録時の警告に出ている）。
         ignore: references.lacksReference(item.name),
         fn: async () => {
-          await runCase(pipeline, config, item, reference);
+          plainSha.set(item.name, (await runCase(pipeline, config, item, reference)).sha);
         },
       });
     }
@@ -451,22 +475,30 @@ Deno.test({
         let firstStep: (() => { data: Float32Array<ArrayBuffer> }) | undefined;
         let firstStepHead: number[] = [];
         const before = runs.length;
-        const audio = await runCase(pipeline, config, withEvents, reference, (event) => {
-          if (event.kind === "stage") {
-            log.push(`stage:${event.component}:${event.at}`);
-            return;
-          }
-          log.push(`step:${event.step}/${event.steps}@${event.t}`);
-          const snapshot = event.copyLatents();
-          shapes.add(snapshot.shape.join("x"));
-          lengths.add(snapshot.data.length);
-          // 写しを壊す。内部配列を渡していたら以後の step が NaN 汚染され、WAV sha が割れる
-          // （波形の非有限検査が先に落とす）。
-          snapshot.data.fill(Number.NaN);
-          if (event.step === 1) {
-            firstStep = event.copyLatents;
-            firstStepHead = Array.from(event.copyLatents().data.slice(0, 8));
-          }
+        const twinSha = plainSha.get(withEvents.name);
+        assert(
+          twinSha !== undefined,
+          `通常経路の実測 sha が無い（${withEvents.name} の step が走っていない）`,
+        );
+        const { audio } = await runCase(pipeline, config, withEvents, reference, {
+          twinSha,
+          onEvent: (event) => {
+            if (event.kind === "stage") {
+              log.push(`stage:${event.component}:${event.at}`);
+              return;
+            }
+            log.push(`step:${event.step}/${event.steps}@${event.t}`);
+            const snapshot = event.copyLatents();
+            shapes.add(snapshot.shape.join("x"));
+            lengths.add(snapshot.data.length);
+            // 写しを壊す。内部配列を渡していたら以後の step が NaN 汚染され、WAV sha が割れる
+            // （波形の非有限検査が先に落とす）。
+            snapshot.data.fill(Number.NaN);
+            if (event.step === 1) {
+              firstStep = event.copyLatents;
+              firstStepHead = Array.from(event.copyLatents().data.slice(0, 8));
+            }
+          },
         });
 
         // ① ホスト経路の証拠（dit の run が全てアリーナを通っている = `enqueue` ではない）。
@@ -590,4 +622,5 @@ Deno.test({
 });
 
 // 「この環境の参照値がまだ無い」を無音の緑にしないための門番（ADR 0005 と同じ流儀）。
-registerReferenceGate(references, { runnable: RUNNABLE });
+// 数えるのは上の現役ケースだけ（廃止済みケースの行が残っていても緑にはしない）。
+registerReferenceGate(references, { runnable: RUNNABLE, caseIds: CASE_IDS });
