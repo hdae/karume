@@ -97,7 +97,7 @@
  * 書く**（② が残骸を食わないため）。述語外の列の積和は回してよい（読む K 行は範囲内なので安全で、
  * 値は書き出しの `select` で捨てる）。
  * MUST: 適用条件は {@link stateQkTiledEligible}（`M ≥ 16`）。優先順は M=1 かつ席が `"parallel"` →
- * ①' / `M ≥ 16` → ①ₜ / それ以外 → ①（判定は runtime 側 `#buildStateAttention` の 1 箇所）。
+ * ①' / `M ≥ 16` → ①ₜ / それ以外 → ①（判定は runtime 側 `buildStateAttention` の 1 箇所）。
  *
  * ## ③ₜ V 行タイル共有変種（**席に依らない既定経路** — perf-ledger K-13 段 2）
  *
@@ -124,7 +124,7 @@
  * workgroup 一様なので、内側の `workgroupBarrier` の一様性要件を壊さない。
  * MUST: 適用条件は {@link statePvTiledEligible}（`M ≥ 16`）。優先順は `M ≥ 16` → ③ₜ（席に
  * 依らない）/ `M < 16` かつ席が `"parallel"` → ③' / それ以外 → ③（判定は runtime 側
- * `#buildStateAttention` の 1 箇所）。
+ * `buildStateAttention` の 1 箇所）。
  *
  * ## 記号（正本 = ADR 0067 決定 4）
  *
@@ -260,7 +260,7 @@ export const stateQkParallelKey = (sliding: boolean, gqa: boolean): string =>
 /**
  * ①' の**適用条件** — `M`（物理 chunk 行数）が 8 以下の計画だけ。席（`stateAttentionReduce`）が
  * `"parallel"` でも、この条件を満たさない計画は ① のまま走る（席の判定は runtime 側
- * `#buildStateAttention` が持ち、ここは計画の形だけを見る純関数）。
+ * `buildStateAttention` が持ち、ここは計画の形だけを見る純関数）。
  *
  * WHY: ①' が縮めるのは「1 invocation が `D` 本の積和を逐次で回す遅延」で、それが律速なのは
  * 有効 invocation が `live 列 × 1 行` しか無い decode（M=1）だけ。prefill（M=768）では ① が
@@ -307,7 +307,7 @@ export const stateQkTiledKey = (sliding: boolean, gqa: boolean, chunkRows: numbe
  * 数値契約が骨格側の不変条件）。だから席（`stateAttentionReduce`）に依らない**既定経路**で、
  * 縮約順が変わる ①' とは性格が違う。
  * MUST: `M = 1` の計画では ①' の適用条件（{@link stateQkParallelEligible}）と重ならない
- * （1 < 16）。優先順は runtime 側 `#buildStateAttention` が 1 箇所で持つ。
+ * （1 < 16）。優先順は runtime 側 `buildStateAttention` が 1 箇所で持つ。
  */
 export const stateQkTiledEligible = (chunkRows: number): boolean => chunkRows >= 16;
 
@@ -1827,7 +1827,7 @@ export const stateColumnBaseReadonly = (window: number, past: number): number =>
   stateSliding(window) ? past - Math.min(past, window) : 0;
 
 /** readonly の live 列数 `min(P, W)`（full は `P`）— WGSL と同じ式 MUST。 */
-export const stateLiveColumnsReadonly = (window: number, past: number): number =>
+const stateLiveColumnsReadonly = (window: number, past: number): number =>
   stateSliding(window) ? Math.min(past, window) : past;
 
 /**

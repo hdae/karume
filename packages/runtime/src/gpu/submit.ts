@@ -99,7 +99,7 @@ export const DEFAULT_SUBMIT_POLICY: SubmitPolicy = {
  * **平均コスト**で見積もるため、チャンク内に重い dispatch が偏ったぶんの余裕をここで持つ
  * （2 倍の偏りまで予算内に収まる）。
  */
-export const CHUNK_TIME_SAFETY = 0.5;
+const CHUNK_TIME_SAFETY = 0.5;
 
 /**
  * 構築時の政策検査。

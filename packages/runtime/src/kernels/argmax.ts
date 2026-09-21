@@ -155,7 +155,7 @@ export const argmaxParams = (rows: number, dim: number): Uint32Array<ArrayBuffer
 // 経路・同じキーになる（実行時オートチューン禁止・ADR 0022）。
 
 /** partial 1 workgroup が受け持つ要素数（256 スレッド × 16 要素）。 */
-export const ARGMAX_SPLIT_ELEMENTS = 16;
+const ARGMAX_SPLIT_ELEMENTS = 16;
 export const ARGMAX_SPLIT_SPAN = ARGMAX_WORKGROUP_SIZE * ARGMAX_SPLIT_ELEMENTS;
 /**
  * 2 相に割る最小の行長（= 区間 4 本以上）。これより短い行は 1 dispatch 形のまま（キー・WGSL

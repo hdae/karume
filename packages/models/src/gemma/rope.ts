@@ -97,7 +97,7 @@ export const gemma4RopeInputNames = (): string[] =>
  * 「前半 = 後半」の並びが崩れ、上流と別の表を黙って作る。`theta` は正の有限値
  * （`theta ** 負` が 0 / Inf に落ちる形を弾く）。
  */
-export const assertGemma4RopeLayerSpec = (
+const assertGemma4RopeLayerSpec = (
   where: string,
   spec: Gemma4RopeLayerSpec,
 ): void => {

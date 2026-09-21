@@ -38,7 +38,7 @@
  *
  * NOTE: 上の「唯一の選択点」の射程は**この骨格の内側**（どの幾何でタイルを切るか）。linear は
  * M=1 × i4 でこの骨格自体を使わない別族（{@link "./linear-gemv.ts"} の GEMV — ADR 0082）を
- * 持ち、族の選択は `src/runtime/recipe-builder.ts` の `#buildLinear` 1 箇所にある。段が 2 つに
+ * 持ち、族の選択は `src/runtime/recipe-builders/linear.ts` の `buildLinear` 1 箇所にある。段が 2 つに
  * なっても純関数であることとキーに載ることは両段とも変わらない（ADR 0082 決定 2）。
  */
 
@@ -181,7 +181,7 @@ export const assertGemmGeometry = (geometry: GemmGeometry, where: string): void 
  * implicit GEMM は自前のキー（`igemm{tileM}x{tileN}…:wg{x}x{y}`）が workgroup 形を
  * 載せているので、そちらはこの断片を使わずに同じ判別力を持つ。
  */
-export const gemmGeometryKeyPart = (geometry: GemmGeometry): string =>
+const gemmGeometryKeyPart = (geometry: GemmGeometry): string =>
   `r${geometry.regM}x${geometry.regN}w${geometry.wgX}`;
 
 /**

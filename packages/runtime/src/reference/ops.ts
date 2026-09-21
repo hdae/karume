@@ -545,7 +545,7 @@ export const referenceRowReduce = (
  * （NaN 判定も `Number.isNaN` で、ビット列判定を写さない）。同じ式を書くと木の結合順の
  * 誤りや NaN 判定の抜けが両側で相殺する。
  */
-export const referenceArgmax = (x: RefTensor): RefTensor => {
+const referenceArgmax = (x: RefTensor): RefTensor => {
   const contract = resolveOpContract(ARGMAX_OP);
   assertDtype(contract, x.dtype, "reference");
   const shape = computeOutputShape(contract, [x.shape], "reference")[0];
@@ -587,7 +587,7 @@ export const referenceArgmax = (x: RefTensor): RefTensor => {
  * トーナメント」なので、こちらは**添字を辞書式順序で並べ替えて先頭 k 本を取る素朴形**で書く
  * （NaN 判定も `Number.isNaN`）。同じ形を書くとマージ境界の誤りや NaN の抜けが両側で相殺する。
  */
-export const referenceTopk = (
+const referenceTopk = (
   x: RefTensor,
   attrs: Readonly<Record<string, unknown>>,
 ): readonly RefTensor[] => {

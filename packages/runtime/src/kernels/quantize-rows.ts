@@ -58,16 +58,16 @@ import { assertU32Params } from "../codegen/params.ts";
 export const QUANTIZE_ROWS_WORKGROUP_SIZE = 256;
 
 /** 量子化の格子の端（**−128 は使わない** — 上の MUST）。 */
-export const QUANTIZE_ROWS_ABS_MAX = 127;
+const QUANTIZE_ROWS_ABS_MAX = 127;
 
 /** f32 の最小 normal（`torch.finfo(float32).tiny`）。全ゼロ行の scale の床。 */
-export const F32_TINY = 1.1754943508222875e-38;
+const F32_TINY = 1.1754943508222875e-38;
 
 /**
  * 1/127 の**倍精度リテラル**（WGSL 側は f32 へ正しく丸めて読む）。scale を除算ではなく
  * この定数との乗算で作るための正本（上の MUST）。
  */
-export const INV_ABS_MAX = 1 / QUANTIZE_ROWS_ABS_MAX;
+const INV_ABS_MAX = 1 / QUANTIZE_ROWS_ABS_MAX;
 
 export const QUANTIZE_ROWS_KEY =
   `quantize_rows:v1:f32>i8:pertoken:wg${QUANTIZE_ROWS_WORKGROUP_SIZE}`;
