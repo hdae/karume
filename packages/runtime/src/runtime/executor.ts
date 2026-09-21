@@ -449,6 +449,16 @@ const resolvedShape = (
 };
 
 /**
+ * グラフ出力 1 本ぶんのバイト数。**出力 slot の大きさの算式はこの 1 本だけ**で、読み戻しの
+ * staging（{@link Session.#stageOutputs}）・決着時の写し元（{@link Session.#planReadback}）・
+ * `copyOutputs` の写し先検査（{@link Session.#planCopyOutputs}）が揃ってここを読む。
+ *
+ * MUST: 0 要素でもアリーナの最小サイズクラス（4 バイト）に合わせる。copy サイズは両バッファの
+ * 実サイズ以下でなければならず、出力側も同じ下限で確保されている。
+ */
+const outputByteSize = (count: number): number => Math.max(4, count * 4);
+
+/**
  * i8 / i4 格納の companion scale テンソル（ADR 0019 / 0069）。実在・F32・形・co-shard は
  * shard 進行検証（format/container.ts）が済ませているので、ここは view を組むだけ。
  *
@@ -718,6 +728,32 @@ type PlannedSteps = {
 };
 
 /**
+ * run / enqueue の発行準備の成果（{@link Session.#prepareInvocation}）— 「この 1 本が何を
+ * 実行するか」が全部ここに載り、以後の分岐（backed / アリーナ・単一フェンス / 二段待ち）は
+ * 本体側の関心になる。
+ */
+type PreparedInvocation = {
+  /** 束縛解決済みのスロット容量（generation を伴わない実行は undefined）。 */
+  readonly stateShapes: ReadonlyMap<string, readonly number[]> | undefined;
+  /** この実行の頭で 1 度だけ読んだ論理長（generation を伴わない実行は 0）。 */
+  readonly pastLength: number;
+  /**
+   * generation run の context 側の面。**context と encoding を 1 つの変数に束ねる**のは、
+   * 焼き込み経路（{@link Session.#generationGroups}）が両方を同時に要るため — 別々に持つと
+   * 「片方だけ undefined」という起こり得ない組を型で排除できず、握り潰しの分岐が生える。
+   */
+  readonly face:
+    | { readonly context: GenerationContext; readonly encoding: GenerationEncoding }
+    | undefined;
+  readonly preparedKey: string;
+  /** 導出済み計画のヒット（undefined = ミス。診断の `hit` はこれで決まる）。 */
+  readonly prepared: PreparedPlan | undefined;
+  /** ヒットならその計画、ミスなら導出相前半の成果（`recipes` の有無で判別 — `in`）。 */
+  readonly derived: PreparedPlan | PlannedSteps;
+  readonly shapes: ReadonlyMap<string, readonly number[]>;
+};
+
+/**
  * 導出済み計画の常駐本数の上限（LRU）。
  *
  * 定数で固定するのは、これが「連続する run が同じ bindings を使い回す」局所性だけを拾う
@@ -837,6 +873,19 @@ type PlannedCopy = {
 type ResolvedCopy = {
   readonly source: ValueBinding;
   readonly target: GPUBuffer;
+  readonly size: number;
+};
+
+/**
+ * グラフ出力 1 本を「読み戻せる実体 + 大きさ」まで解決した形（{@link Session.#resolveOutput}）。
+ * 読み戻しの 2 経路（staging へ写す / 決着時に写す）が同じ 1 本の規則から受け取る。
+ */
+type ResolvedOutput = {
+  readonly shape: readonly number[];
+  readonly count: number;
+  readonly buffer: GPUBuffer;
+  /** 束縛先が部分範囲（slot）のときの先頭バイト。束縛が持たない形は 0 に倒す。 */
+  readonly offset: number;
   readonly size: number;
 };
 
@@ -2180,6 +2229,77 @@ export class Session {
   }
 
   /**
+   * run / enqueue の発行準備（束縛解決 → 計画鍵 → 導出 → 診断席のクリアまで）。**両方の頭が
+   * 共有する唯一の列**で、片側だけ直す編集が作れないようにここに 1 本で置く。
+   *
+   * MUST: **同期のまま**保つ（await を 1 つも挟まない）。発行の同期区間で写す・予約するという
+   * 規律（ADR 0054 / 0066）がここで割れると、1 マイクロタスクぶん遅れて読んだ論理長・束縛が
+   * 本体へ入る。
+   * MUST: 文の順序を動かさない。論理長の読み（汚染・破棄・device 消失はこの読みが落とす）→
+   * 束縛解決 → 計画鍵 → 導出、の順で失敗が起きることに下流の poison 判定が依っている。
+   */
+  #prepareInvocation(
+    generation: GenerationRun | undefined,
+    captured: CapturedInputs,
+    bindings: SymbolBindings,
+  ): PreparedInvocation {
+    // 束縛解決済みのスロット容量。レシピと計画鍵に載るのは**この容量だけ**で、context の
+    // 識別子は 1 バイトも載らない（ADR 0066 決定 5 — {@link Session.#preparedKey}）。
+    const stateShapes = generation === undefined ? undefined : new Map(
+      [...generation.context[RUNTIME_INTERNAL].slots].map(([name, slot]) => [name, slot.shape]),
+    );
+    // MUST: 論理長は実行の頭で 1 度だけ読む（汚染・破棄・device 消失はこの読みが落とす）。
+    // uniform へ書く値・dispatch 数の算出・容量の検査・進行が同じ 1 つの値から出ることが、
+    // 「GPU が走査する範囲」と「ホストが撃った workgroup 数」の一致の根拠になる（下流の
+    // `writeLengths` / `advance` はこの捕捉値を受け取り、context の現在値と照合する）。
+    // MUST: 読むのは**内部面**（利用者面の `pastLength` ではない）。dispose は 2 段で、
+    // 受理済みのこの実行は 1 段目（受付終了）の後にも完走する契約のため。
+    const pastLength = generation === undefined
+      ? 0
+      : generation.context[RUNTIME_INTERNAL].pastLength();
+    const face = generation === undefined ? undefined : {
+      context: generation.context,
+      encoding: generationEncoding(generation.context, pastLength, generation.queryLength),
+    };
+    const { inputShapes, residentInputs } = captured;
+    // MUST: 束縛の解決（= 入力 shape の検証）はヒット・ミスに関わらず**毎回走らせる**。
+    // ここが飛ぶと、キャッシュに当たった実行だけ入力 shape の宣言不一致を素通りする。
+    const resolved = bindSymbols(
+      this.#state.graph,
+      inputShapes,
+      bindings,
+      residentNames(residentInputs),
+    );
+    // context 無しの state 参照は導出が拒否する。渡された context の束縛はここで照合する。
+    if (generation !== undefined) {
+      assertGenerationBindings(generation.context[RUNTIME_INTERNAL].bindings, resolved);
+    }
+    const preparedKey = this.#preparedKey(resolved, residentInputs, stateShapes);
+    const prepared = this.#takePrepared(preparedKey);
+    // 計画（planGraph）と融合判定（planFusions）はどちらも GPU に触れない純関数で、ヒット時は
+    // 丸ごと飛ばす（根拠は {@link Session.#preparedKey}）。融合は掴めなかったノードを素のまま
+    // ステップ列に並べるので、この段は「速くなるか」だけを決め、正しさには関与しない。
+    const derived = prepared ?? this.#planSteps(resolved, stateShapes);
+    const shapes = derived.shapes;
+    // MUST: ヒットした実行も融合回数を報告する（ADR 0040 §3 の常設契約 — キャッシュの有無で
+    // 観測点が消えると、融合が外れた状態がヒット run の裏に隠れる）。
+    this.#lastRunFusions = derived.fusions;
+    this.#lastRunPrepared = undefined;
+    // MUST: 「直近 run」の席は導出の入口で**まとめて**倒す。成功経路でしか代入しない席
+    // （#lastRun / #lastRunParams）を残すと、失敗した実行の直後の診断が「落ちた実行の
+    // 融合回数」と「1 本前の成功 run のアリーナ / params 実績」を混ぜて 1 つの run として
+    // 語る（診断は融合外れ・params キャッシュ外れの唯一の観測点なので、混ざると読み手が
+    // 別の run を根拠にする）。
+    // NOTE: `#lastRun` は enqueue がアリーナを 1 度も作らないので、enqueue では**成功しても
+    // undefined のまま**が正しい（前の run のものを残すと、enqueue の後に読んだ診断が別の
+    // 実行の話になる）。
+    this.#lastRun = undefined;
+    this.#lastRunParams = undefined;
+    this.#recipeBuilder.resetParamsStats();
+    return { stateShapes, pastLength, face, preparedKey, prepared, derived, shapes };
+  }
+
+  /**
    * run 1 本の本体。**入力は発行時の写し**（{@link CapturedInputs}）で受け取る — ここは
    * 1 マイクロタスク以降に走るので、利用者の Record を引き直すと発行後の書き換えを読む。
    * `generation` も同じ理由で**発行時の写し**（`Session.run` が組んだ 2 欄）で受け取る。
@@ -2200,62 +2320,22 @@ export class Session {
           "（別の Session が作った context か、dispose 済み）",
       );
     }
-    // 束縛解決済みのスロット容量。レシピと計画鍵に載るのは**この容量だけ**で、context の
-    // 識別子は 1 バイトも載らない（ADR 0066 決定 5 — {@link Session.#preparedKey}）。
-    const stateShapes = generation === undefined ? undefined : new Map(
-      [...generation.context[RUNTIME_INTERNAL].slots].map(([name, slot]) => [name, slot.shape]),
-    );
-    // MUST: 論理長は run の頭で 1 度だけ読む（汚染・破棄・device 消失はこの読みが落とす）。
-    // uniform へ書く値・dispatch 数の算出・容量の検査・進行が同じ 1 つの値から出ることが、
-    // 「GPU が走査する範囲」と「ホストが撃った workgroup 数」の一致の根拠になる（下流の
-    // `writeLengths` / `advance` はこの捕捉値を受け取り、context の現在値と照合する）。
-    // MUST: 読むのは**内部面**（利用者面の `pastLength` ではない）。dispose は 2 段で、
-    // 受理済みのこの run は 1 段目（受付終了）の後にも完走する契約のため。
-    const pastLength = generation === undefined
-      ? 0
-      : generation.context[RUNTIME_INTERNAL].pastLength();
-    /**
-     * generation run の context 側の面。**context と encoding を 1 つの変数に束ねる**のは、
-     * 焼き込み経路（{@link Session.#generationGroups}）が両方を同時に要るため — 別々に持つと
-     * 「片方だけ undefined」という起こり得ない組を型で排除できず、握り潰しの分岐が生える。
-     */
-    const generationFace = generation === undefined ? undefined : {
-      context: generation.context,
-      encoding: generationEncoding(generation.context, pastLength, generation.queryLength),
-    };
+    const {
+      stateShapes,
+      pastLength,
+      face: generationFace,
+      preparedKey,
+      prepared,
+      derived,
+      shapes,
+    } = this.#prepareInvocation(generation, captured, bindings);
     const encoding = generationFace?.encoding;
     /**
      * 最初の state 書き dispatch を積んだ時点の submit カウンタ（undefined = まだ積んでいない）。
      * 失敗時の poison 判定（ADR 0066 追記 3）はこの値との比較 1 本で決まる。
      */
     let stateWriteSubmits: number | undefined;
-
-    const { inputShapes, residentInputs } = captured;
-    // MUST: 束縛の解決（= 入力 shape の検証）はヒット・ミスに関わらず**毎 run 走らせる**。
-    // ここが飛ぶと、キャッシュに当たった run だけ入力 shape の宣言不一致を素通りする。
-    const resolved = bindSymbols(graph, inputShapes, bindings, residentNames(residentInputs));
-    if (generation !== undefined) {
-      assertGenerationBindings(generation.context[RUNTIME_INTERNAL].bindings, resolved);
-    }
-    const preparedKey = this.#preparedKey(resolved, residentInputs, stateShapes);
-    const prepared = this.#takePrepared(preparedKey);
-    // 計画（planGraph）と融合判定（planFusions）はどちらも GPU に触れない純関数で、ヒット時は
-    // 丸ごと飛ばす（根拠は {@link Session.#preparedKey}）。融合は掴めなかったノードを素のまま
-    // ステップ列に並べるので、この段は「速くなるか」だけを決め、正しさには関与しない。
-    const derived = prepared ?? this.#planSteps(resolved, stateShapes);
-    const shapes = derived.shapes;
-    // MUST: ヒット run も融合回数を報告する（ADR 0040 §3 の常設契約 — キャッシュの有無で
-    // 観測点が消えると、融合が外れた状態がヒット run の裏に隠れる）。
-    this.#lastRunFusions = derived.fusions;
-    this.#lastRunPrepared = undefined;
-    // MUST: 「直近 run」の席は導出の入口で**まとめて**倒す。成功経路でしか代入しない席
-    // （#lastRun / #lastRunParams）を残すと、失敗した run の直後の診断が「落ちた run の
-    // 融合回数」と「1 本前の成功 run のアリーナ / params 実績」を混ぜて 1 つの run として
-    // 語る（診断は融合外れ・params キャッシュ外れの唯一の観測点なので、混ざると読み手が
-    // 別の run を根拠にする）。
-    this.#lastRun = undefined;
-    this.#lastRunParams = undefined;
-    this.#recipeBuilder.resetParamsStats();
+    const { residentInputs } = captured;
 
     const device = gpu.device;
     /**
@@ -2450,8 +2530,8 @@ export class Session {
                 this.#runValues(backing, missValues),
                 shapes,
                 arena,
-                (source, size, staging) =>
-                  scheduler.copyBuffer(source.buffer, source.offset ?? 0, staging, 0, size),
+                (source, offset, size, staging) =>
+                  scheduler.copyBuffer(source, offset, staging, 0, size),
               );
               // フェンスを張らずに出し切る。待ちは下の mapAsync 1 本に集約される。
               scheduler.submitPending();
@@ -2618,42 +2698,10 @@ export class Session {
     if (generation !== undefined && !this.#contexts.has(generation.context)) {
       throw new ExecutionError("enqueue の GenerationContext がこの Session の生存集合に無い");
     }
-    const stateShapes = generation === undefined ? undefined : new Map(
-      [...generation.context[RUNTIME_INTERNAL].slots].map(([name, slot]) => [name, slot.shape]),
-    );
-    const pastLength = generation === undefined
-      ? 0
-      : generation.context[RUNTIME_INTERNAL].pastLength();
-    const face = generation === undefined ? undefined : {
-      context: generation.context,
-      encoding: generationEncoding(generation.context, pastLength, generation.queryLength),
-    };
+    const { stateShapes, pastLength, face, preparedKey, prepared, derived, shapes } = this
+      .#prepareInvocation(generation, captured, options.bindings ?? {});
     let stateWriteSubmits: number | undefined;
-    const { inputShapes, residentInputs } = captured;
-    // MUST: 束縛の解決（= 入力 shape の検証）は run と同じく毎回走らせる。
-    const resolved = bindSymbols(
-      graph,
-      inputShapes,
-      options.bindings ?? {},
-      residentNames(residentInputs),
-    );
-    // context無しのstate参照は従来どおり導出で拒否する。渡されたcontextの束縛はrunと同じ。
-    if (generation !== undefined) {
-      assertGenerationBindings(generation.context[RUNTIME_INTERNAL].bindings, resolved);
-    }
-    const preparedKey = this.#preparedKey(resolved, residentInputs, stateShapes);
-    const prepared = this.#takePrepared(preparedKey);
-    const derived = prepared ?? this.#planSteps(resolved, stateShapes);
-    const shapes = derived.shapes;
-    this.#lastRunFusions = derived.fusions;
-    this.#lastRunPrepared = undefined;
-    // MUST: run と同じく導出の入口でまとめて倒す（失敗した enqueue の直後の診断が 1 本前の
-    // 実行の実績を混ぜないこと）。`#lastRun` は enqueue がアリーナを 1 度も作らないので
-    // **成功しても undefined のまま**が正しい（前の run のものを残すと、enqueue の後に読んだ
-    // 診断が別の実行の話になる）。
-    this.#lastRun = undefined;
-    this.#lastRunParams = undefined;
-    this.#recipeBuilder.resetParamsStats();
+    const { residentInputs } = captured;
 
     let builtBacking: string | undefined;
     let reads: readonly PlannedRead[] | undefined;
@@ -2800,8 +2848,7 @@ export class Session {
       }
       assertResidentUsable(target, this.#state.gpu, `copyOutputs '${name}'`);
       const shape = resolvedShape(shapes, name);
-      // MUST: 出力 slot の大きさと同じ算式（`#readOutputs` の staging と揃える）。
-      const size = Math.max(4, numel(shape) * 4);
+      const size = outputByteSize(numel(shape));
       if (target.byteLength !== size) {
         throw new ExecutionError(
           `copyOutputs '${name}': 常駐テンソル '${target.label}' の ${target.byteLength} バイトが shape [${
@@ -3346,8 +3393,41 @@ export class Session {
   }
 
   /**
+   * グラフ出力 1 本を写し元の実体と大きさまで解決する（**読み戻しの唯一の規則** — 決着時の
+   * 写し元も staging への copy もここを通る）。
+   *
+   * MUST: initializer も引く。IR は graph.outputs に initializer 名を書くことを許しており
+   * （format/ir.ts の定義済み検査）、その値は run 寿命の束縛先には載らない。
+   * MUST: 読み戻してよいかは {@link ValueBinding.readable}（pin された slot と slot でない値
+   * だけ）だけで決める。経路ごとに適格の判定を持つと、片方だけ緩めた編集が「pin していない
+   * slot を読み戻す」= 配り直しで入れ替わった内容を返す形を通す。
+   */
+  #resolveOutput(
+    values: ReadonlyMap<string, ValueBinding>,
+    shapes: ReadonlyMap<string, readonly number[]>,
+    name: string,
+  ): ResolvedOutput {
+    const weight = this.#state.weightBuffers.get(name);
+    const binding = values.get(name) ??
+      (weight === undefined ? undefined : { buffer: weight, readable: true });
+    if (binding === undefined) throw new ExecutionError(`グラフ出力 '${name}' のバッファが無い`);
+    if (!binding.readable) {
+      throw new ExecutionError(`グラフ出力 '${name}' がピン留めされておらず読み戻せない`);
+    }
+    const shape = resolvedShape(shapes, name);
+    const count = numel(shape);
+    return {
+      shape,
+      count,
+      buffer: binding.buffer,
+      offset: binding.offset ?? 0,
+      size: outputByteSize(count),
+    };
+  }
+
+  /**
    * 決着時に読み戻すグラフ出力の写し元を slot backing から解決する（{@link Session.enqueueRead}）。
-   * 適格の判定と initializer の扱いは {@link Session.#stageOutputs} と同じ 1 本の規則
+   * 適格の判定と initializer の扱いは {@link Session.#resolveOutput} の 1 本きり
    * （pin された slot だけ・initializer は重みバッファそのもの）。
    */
   #planReadback(
@@ -3355,23 +3435,12 @@ export class Session {
     shapes: ReadonlyMap<string, readonly number[]>,
   ): readonly PlannedRead[] {
     return this.#state.graph.outputs.map((name) => {
-      const weight = this.#state.weightBuffers.get(name);
-      const binding = backing.outputs.get(name) ??
-        (weight === undefined ? undefined : { buffer: weight, readable: true });
-      if (binding === undefined) throw new ExecutionError(`グラフ出力 '${name}' のバッファが無い`);
-      if (!binding.readable) {
-        throw new ExecutionError(`グラフ出力 '${name}' がピン留めされておらず読み戻せない`);
-      }
-      const shape = resolvedShape(shapes, name);
-      const count = numel(shape);
-      // MUST: 出力 slot の大きさと同じ算式（`#stageOutputs` / `#planCopyOutputs` と揃える）。
-      const size = Math.max(4, count * 4);
-      return {
+      const { shape, count, buffer, offset, size } = this.#resolveOutput(
+        backing.outputs,
+        shapes,
         name,
-        shape,
-        count,
-        source: { buffer: binding.buffer, offset: binding.offset ?? 0, size },
-      };
+      );
+      return { name, shape, count, source: { buffer, offset, size } };
     });
   }
 
@@ -3395,33 +3464,21 @@ export class Session {
    * MUST: 読み戻すのはグラフ出力のみ。中間値は配り直しで内容が入れ替わっている。
    * NOTE: 積み先を引数に取るのは、単一フェンス経路（run 本体のコマンド列 —
    * {@link SubmitScheduler.copyBuffer}）と二段待ち経路（readback 専用 encoder）で**積む先だけ**
-   * が違うため。staging の作り方と読み戻し適格の判定を経路ごとに 2 本持たない。
+   * が違うため。staging の作り方と読み戻し適格の判定を経路ごとに 2 本持たない
+   * （適格・大きさ・写し元は {@link Session.#resolveOutput}）。
    */
   #stageOutputs(
     env: ReadonlyMap<string, ValueBinding>,
     shapes: ReadonlyMap<string, readonly number[]>,
     arena: RunArena,
-    copy: (source: ValueBinding, size: number, staging: GPUBuffer) => void,
+    copy: (source: GPUBuffer, offset: number, size: number, staging: GPUBuffer) => void,
   ): readonly StagedOutput[] {
     const staged: StagedOutput[] = [];
     for (const name of this.#state.graph.outputs) {
-      // MUST: initializer も引く。IR は graph.outputs に initializer 名を書くことを許して
-      // おり（format/ir.ts の定義済み検査）、その値は env（run 寿命）には載らない。
-      const weight = this.#state.weightBuffers.get(name);
-      const buffer = env.get(name) ??
-        (weight === undefined ? undefined : { buffer: weight, readable: true });
-      if (buffer === undefined) throw new ExecutionError(`グラフ出力 '${name}' のバッファが無い`);
-      if (!buffer.readable) {
-        throw new ExecutionError(`グラフ出力 '${name}' がピン留めされておらず読み戻せない`);
-      }
-      const shape = resolvedShape(shapes, name);
-      const count = numel(shape);
-      // MUST: 0 要素でもアリーナの最小サイズクラス（4 バイト）に合わせる。copy サイズは
-      // 両バッファの実サイズ以下でなければならず、出力側も同じ下限で確保されている。
-      const size = Math.max(4, count * 4);
+      const { shape, count, buffer, offset, size } = this.#resolveOutput(env, shapes, name);
       const staging = arena.allocHostRead(size);
       staged.push({ name, shape, count, staging });
-      copy(buffer, size, staging);
+      copy(buffer, offset, size, staging);
     }
     return staged;
   }
@@ -3499,8 +3556,8 @@ export class Session {
         env,
         shapes,
         arena,
-        (source, size, staging) =>
-          encoder.copyBufferToBuffer(source.buffer, source.offset ?? 0, staging, 0, size),
+        (source, offset, size, staging) =>
+          encoder.copyBufferToBuffer(source, offset, staging, 0, size),
       );
       device.queue.submit([encoder.finish()]);
 
