@@ -31,6 +31,7 @@
  */
 
 import type { HubRepoRef } from "@karume/hub";
+import { assertAllowedKeys, readNumber } from "../config/readers.ts";
 
 /** `pipeline` の契約名と、この実装が受け付ける major（ADR 0038 §1）。 */
 export const SBV2_PIPELINE_NAME = "sbv2";
@@ -101,36 +102,9 @@ export type Sbv2PipelineConfig = {
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
-const assertAllowedKeys = (
-  value: Record<string, unknown>,
-  allowed: readonly string[],
-  where: string,
-): void => {
-  for (const key of Object.keys(value)) {
-    if (!allowed.includes(key)) {
-      throw new Error(`${where}: 未知キー '${key}'（許可: ${allowed.join(" / ")}）`);
-    }
-  }
-};
-
 const readRecord = (raw: unknown, where: string): Record<string, unknown> => {
   if (!isRecord(raw)) throw new Error(`${where}: 無い / オブジェクトでない`);
   return raw;
-};
-
-const readNumber = (
-  raw: Record<string, unknown>,
-  key: string,
-  where: string,
-  check: (value: number) => boolean,
-  requirement: string,
-): number => {
-  if (!Object.hasOwn(raw, key)) throw new Error(`${where}.${key}: 無い`);
-  const value = raw[key];
-  if (typeof value !== "number" || !check(value)) {
-    throw new Error(`${where}.${key}: ${requirement}（${String(value)}）`);
-  }
-  return value;
 };
 
 /** 確保サイズの比較に使う数なので、整数であるだけでなく**安全整数**であることまで見る。 */

@@ -28,6 +28,7 @@
  */
 
 import type { HubRepoRef } from "@karume/hub";
+import { assertAllowedKeys, readNumber, readOnly } from "../config/readers.ts";
 import { maxSequenceLength } from "./host/round.ts";
 
 /** `pipeline` の契約名と、この実装が受け付ける major（ADR 0038 §1）。 */
@@ -163,36 +164,9 @@ export type IrodoriPipelineConfig = {
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
-const assertAllowedKeys = (
-  value: Record<string, unknown>,
-  allowed: readonly string[],
-  where: string,
-): void => {
-  for (const key of Object.keys(value)) {
-    if (!allowed.includes(key)) {
-      throw new Error(`${where}: 未知キー '${key}'（許可: ${allowed.join(" / ")}）`);
-    }
-  }
-};
-
 const readRecord = (raw: unknown, where: string): Record<string, unknown> => {
   if (!isRecord(raw)) throw new Error(`${where}: 無い / オブジェクトでない`);
   return raw;
-};
-
-const readNumber = (
-  raw: Record<string, unknown>,
-  key: string,
-  where: string,
-  check: (value: number) => boolean,
-  requirement: string,
-): number => {
-  if (!Object.hasOwn(raw, key)) throw new Error(`${where}.${key}: 無い`);
-  const value = raw[key];
-  if (typeof value !== "number" || !check(value)) {
-    throw new Error(`${where}.${key}: ${requirement}（${String(value)}）`);
-  }
-  return value;
 };
 
 const isPositiveInteger = (value: number): boolean => Number.isInteger(value) && value > 0;
@@ -210,24 +184,6 @@ const isNonNegativeFinite = (value: number): boolean => Number.isFinite(value) &
  */
 const isNonNegativeF32 = (value: number): boolean =>
   isNonNegativeFinite(value) && value === Math.fround(value);
-
-/** 受理集合が 1 値しかない欄（ADR 0047 決定 1）。綴り違いも対応外も同じ文言で落とす。 */
-const readOnly = <T extends string>(
-  raw: Record<string, unknown>,
-  key: string,
-  where: string,
-  accepted: T,
-  why: string,
-): T => {
-  if (!Object.hasOwn(raw, key)) throw new Error(`${where}.${key}: 無い`);
-  const value = raw[key];
-  if (value !== accepted) {
-    throw new Error(
-      `${where}.${key}: この実装が対応するのは '${accepted}' だけ（${String(value)}）— ${why}`,
-    );
-  }
-  return accepted;
-};
 
 const parseCfgScales = (raw: unknown): IrodoriCfgScales => {
   const where = "pipelineConfig.cfgScales";

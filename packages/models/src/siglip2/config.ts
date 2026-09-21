@@ -36,6 +36,7 @@
  */
 
 import type { HubRepoRef } from "@karume/hub";
+import { assertAllowedKeys, readChannels, readNumber, readOnly } from "../config/readers.ts";
 
 /** `pipeline` の契約名と、この実装が受け付ける major（ADR 0038 §1）。 */
 export const SIGLIP2_PIPELINE_NAME = "siglip2";
@@ -87,9 +88,6 @@ const ROOT_KEYS: readonly string[] = [
 /** この実装が受理する唯一の補間（モジュール doc の MUST）。 */
 const INTERPOLATION = "bilinear";
 
-/** mean / std の要素数（RGB — アルファは入口で受け取らない）。 */
-const CHANNELS = 3;
-
 /** 正規化の定数（`[0, 1]` 尺度 — `preprocessor_config.json` の綴りのまま）。 */
 type Siglip2Channels = readonly [number, number, number];
 
@@ -106,78 +104,7 @@ export type Siglip2PipelineConfig = {
   readonly interpolation: typeof INTERPOLATION;
 };
 
-const assertAllowedKeys = (
-  value: Record<string, unknown>,
-  allowed: readonly string[],
-  where: string,
-): void => {
-  for (const key of Object.keys(value)) {
-    if (!allowed.includes(key)) {
-      throw new Error(`${where}: 未知キー '${key}'（許可: ${allowed.join(" / ")}）`);
-    }
-  }
-};
-
-const readNumber = (
-  raw: Record<string, unknown>,
-  key: string,
-  where: string,
-  check: (value: number) => boolean,
-  requirement: string,
-): number => {
-  if (!Object.hasOwn(raw, key)) throw new Error(`${where}.${key}: 無い`);
-  const value = raw[key];
-  if (typeof value !== "number" || !check(value)) {
-    throw new Error(`${where}.${key}: ${requirement}（${String(value)}）`);
-  }
-  return value;
-};
-
 const isPositiveInteger = (value: number): boolean => Number.isInteger(value) && value > 0;
-
-/**
- * チャネルごとの定数 3 本を読む。
- *
- * MUST: `std` は 0 を弾く（{@link parseSiglip2PipelineConfig}）— 0 除算は例外を出さず
- * `±Infinity` の `pixel_values` を作り、グラフは NaN を吐きながら shape だけ合う。
- */
-const readChannels = (
-  raw: Record<string, unknown>,
-  key: string,
-  where: string,
-  check: (value: number) => boolean,
-  requirement: string,
-): Siglip2Channels => {
-  if (!Object.hasOwn(raw, key)) throw new Error(`${where}.${key}: 無い`);
-  const value = raw[key];
-  if (!Array.isArray(value) || value.length !== CHANNELS) {
-    throw new Error(`${where}.${key}: 長さ ${CHANNELS} の配列でない（${JSON.stringify(value)}）`);
-  }
-  for (const entry of value) {
-    if (typeof entry !== "number" || !check(entry)) {
-      throw new Error(`${where}.${key}: ${requirement}（${JSON.stringify(value)}）`);
-    }
-  }
-  return [value[0], value[1], value[2]];
-};
-
-/** 受理集合が 1 値しかない欄。綴り違いも対応外も同じ文言で落とす。 */
-const readOnly = <T extends string>(
-  raw: Record<string, unknown>,
-  key: string,
-  where: string,
-  accepted: T,
-  why: string,
-): T => {
-  if (!Object.hasOwn(raw, key)) throw new Error(`${where}.${key}: 無い`);
-  const value = raw[key];
-  if (value !== accepted) {
-    throw new Error(
-      `${where}.${key}: この実装が対応するのは '${accepted}' だけ（${String(value)}）— ${why}`,
-    );
-  }
-  return accepted;
-};
 
 /** manifest の `pipelineConfig`（hub が素通しした生の値）を検査して読む。 */
 export const parseSiglip2PipelineConfig = (

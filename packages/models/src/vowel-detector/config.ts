@@ -38,6 +38,7 @@
  * 突き合わせる。
  */
 
+import { assertAllowedKeys } from "../config/readers.ts";
 import { FEATURE_DIM, SAMPLE_RATE } from "./features.ts";
 import { LIPSYNC_CLASSES } from "./postprocess.ts";
 
@@ -77,18 +78,6 @@ export type VowelDetectorPipelineConfig = {
    * 消費者 = `pipeline.ts` の `assertFrameLimit`）。
    */
   readonly maxFrames: number;
-};
-
-const assertAllowedKeys = (
-  value: Record<string, unknown>,
-  allowed: readonly string[],
-  where: string,
-): void => {
-  for (const key of Object.keys(value)) {
-    if (!allowed.includes(key)) {
-      throw new Error(`${where}: 未知キー '${key}'（許可: ${allowed.join(" / ")}）`);
-    }
-  }
 };
 
 /** 受理集合が 1 値しかない数の欄。綴り違いも対応外も同じ文言で落とす。 */

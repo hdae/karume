@@ -75,6 +75,7 @@ import {
   type Tensor,
   type TensorView,
 } from "@karume/runtime";
+import { assertAllowedKeys } from "../config/readers.ts";
 
 /** sidecar shard 1 本の受け持つ token 範囲（`[start, stop)`）。 */
 export type Gemma4PleShard = {
@@ -254,18 +255,6 @@ const SHARD_KEYS: readonly string[] = ["file", "start", "stop"];
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
-
-const assertAllowedKeys = (
-  value: Record<string, unknown>,
-  allowed: readonly string[],
-  where: string,
-): void => {
-  for (const key of Object.keys(value)) {
-    if (!allowed.includes(key)) {
-      throw new Error(`${where}: 未知キー '${key}'（許可: ${allowed.join(" / ")}）`);
-    }
-  }
-};
 
 const readRecord = (raw: unknown, where: string): Record<string, unknown> => {
   if (!isRecord(raw)) throw new Error(`${where}: 無い / オブジェクトでない`);
