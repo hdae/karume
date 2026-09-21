@@ -48,7 +48,7 @@
  *
  * グラフが 1 本になったので SigLIP2 / BiRefNet と同じ常駐も採れるが、この波では**張っては
  * 畳む**を保つ（VRAM を検出の間だけに閉じる形 — Irodori が巨大グラフを 1 本ずつ張っては畳む
- * のと同じ。`src/irodori/pipeline.ts` の `withSession`）。重みは 2.66MB で再アップロードの
+ * のと同じ。`src/session/with-session.ts` の `withSession`）。重みは 2.66MB で再アップロードの
  * 実測は 30〜144ms なので、常駐化は**性能の判断**であって正しさの判断ではない。
  *
  * MUST: それでも直列化鎖には載せる — `detect` の同時実行は `dispose` が in-flight の完了を

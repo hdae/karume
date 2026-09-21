@@ -1,6 +1,6 @@
 // テンソルを 1 本も持たない IR コンテナをバイト列で組む（テスト用の器）。
 //
-// 家族 admission のグラフ突合（`src/irodori/pipeline.ts` の `assertStaticDim` 群）は
+// 家族 admission のグラフ突合（`src/irodori/admission.ts` の `assertStaticDim` 群）は
 // **失敗経路しか無い門**で、破れると「shape は合ったまま別の位置の条件を読む」沈黙誤値になる。
 // その門を踏むには実 IR コンテナが要るが、配布形の重みは GB 級なのでテストからは使えない。
 // `src/irodori/host/sampler-graph.ts` の `packGraph` が**まさにその器**（重みを持たない小さな

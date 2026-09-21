@@ -30,8 +30,8 @@
  * （`openModel` = ヘッダ解析のみ）までで、GPU 常駐は {@link IrodoriPipeline.generate} の
  * 中で段ごとに張っては畳む。`backbone` だけで 1.26GB あるので、条件エンコーダと DiT を
  * 同時に生かさない。codec も同じ理由で DiT を畳んでから張る。DiT の段だけは `dit` に加えて
- * ホストで組んだ小グラフ 2 本（{@link runDitLoopResident}）を同時に張るが、重みを持たない
- * ノード 5 個ぶんなので VRAM の話には効かない。
+ * ホストで組んだ小グラフ 2 本（{@link "./dit-loop.ts"} の `runDitLoopResident`）を同時に張るが、
+ * 重みを持たないノード 5 個ぶんなので VRAM の話には効かない。
  *
  * MUST: この段取りは**公開 API 側でも**守る — `generate` / `generateLatent` は直列化鎖に載せ
  * （並行呼び出しは待たされて順に走る）、`dispose` はその完了を待ってから GPU を破棄する。
@@ -63,13 +63,9 @@
  * 担保する。
  */
 
-import { disposeSteps } from "../session/dispose-steps.ts";
 import {
   acquireGpu,
   type GpuContext,
-  openModel,
-  type ResidentTensor,
-  type Session,
   type SessionDiagnostics,
   type SessionOptions,
   type Tensor,
@@ -79,17 +75,43 @@ import {
   type HubRepoRef,
   loadManifest,
   type Manifest,
-  type ModelEntry,
-  type Quant,
   resolveFiles,
 } from "@karume/hub";
 
 import {
-  IRODORI_PIPELINE_MAJOR,
-  IRODORI_PIPELINE_NAME,
-  type IrodoriPipelineConfig,
-  parseIrodoriPipelineConfig,
-} from "./config.ts";
+  admitIrodori,
+  assetJson,
+  assetOpener,
+  BACKBONE,
+  CAPTION_PROJ,
+  CODEC_DECODER,
+  CODEC_ENCODER,
+  DIT,
+  DURATION,
+  type IrodoriAdmission,
+  SPEAKER,
+  TEXT_PROJ,
+  TOKENIZER,
+} from "./admission.ts";
+import { type ConditionState, emptyCondition, encodeSpeaker, rightPad } from "./conditioning.ts";
+import {
+  type DitLoop,
+  type LatentStage,
+  runDitLoopOnHost,
+  runDitLoopResident,
+  type UncondVariant,
+} from "./dit-loop.ts";
+import {
+  asF32,
+  bool,
+  type EmitEvent,
+  emitter,
+  f32,
+  i32,
+  outputAt,
+  withStageSession,
+} from "./stage.ts";
+import type { IrodoriPipelineConfig } from "./config.ts";
 import { IrodoriTokenizer, parseIrodoriTokenizerAsset } from "./text/tokenizer.ts";
 import {
   assertCodecTileFrames,
@@ -105,60 +127,27 @@ import {
   SEGMENT_ORDER,
   type SegmentLengths,
 } from "./host/mask.ts";
-import { patchReferenceLatent } from "./host/patch.ts";
-import { prependMeanToken, rowMean } from "./host/pooling.ts";
+import { rowMean } from "./host/pooling.ts";
 import { assertAcceptableSeed, Randn } from "./host/random.ts";
-import { normalizeReference, reflectPadToHop } from "./host/reference.ts";
 import {
   type SampleBounds,
   sequenceLengthFromLogFrames,
   sequenceLengthFromSeconds,
   type SequencePlan,
 } from "./host/round.ts";
-import { type CfgVariant, combineCfg, eulerStep, tSchedule } from "./host/sampler.ts";
-import {
-  COMBINE_INPUTS,
-  COMBINE_OUTPUT,
-  combineGraph,
-  EULER_INPUTS,
-  EULER_OUTPUT,
-  eulerGraph,
-} from "./host/sampler-graph.ts";
-import { timestepEmbedding, timestepFrequencies } from "./host/t-embed.ts";
+import { tSchedule } from "./host/sampler.ts";
+import { timestepFrequencies } from "./host/t-embed.ts";
 import { findFlatteningPoint, trimmedSampleCount } from "./host/trim.ts";
 import { settleAbort } from "../concurrency/abort.ts";
 import { createOperationChain } from "../concurrency/serial.ts";
 import {
   assertGpuFeaturesGranted,
   assertRequiredLimitsBeforeDownload,
-  assertRequiredLimitsSatisfied,
   toAcquireGpuOptions,
 } from "../session/gpu-features.ts";
-import { toSessionOptions } from "../session/options.ts";
-import { withSession } from "../session/with-session.ts";
 import { toManifestSource } from "../hub/repo-ref.ts";
 import { type FromPretrainedHubOptions, hubLoadOptions } from "../hub/load-options.ts";
-import {
-  assetComponentOpener,
-  type ComponentOpener,
-  type GraphOwner,
-  loadShardComponents,
-  type ModelComponent,
-  wholeComponent,
-} from "../hub/components.ts";
-import { readAssetBuffer, readAssetJson } from "../hub/asset-readers.ts";
-import { assertGraphInputDim } from "../hub/graph-gates.ts";
-
-/** manifest の weights / assets 表に現れる取得キー（ADR 0041 §3 の規約名）。 */
-const BACKBONE = "backbone";
-const TEXT_PROJ = "text_proj";
-const CAPTION_PROJ = "caption_proj";
-const SPEAKER = "speaker";
-const DURATION = "duration";
-const DIT = "dit";
-const CODEC_DECODER = "codec_decoder";
-const CODEC_ENCODER = "codec_encoder";
-const TOKENIZER = "tokenizer";
+import { loadShardComponents, type ModelComponent } from "../hub/components.ts";
 
 /** 生成結果。`data` は patch 済み latent `[frames × latentDim]`（行優先）。 */
 export type GeneratedLatent = {
@@ -298,47 +287,9 @@ export type IrodoriGenerateEvent =
     readonly steps: number;
     /** その step で消費した時刻 `t`（flow matching のスケジュール — anima の sigma に当たる）。 */
     readonly t: number;
-    /** 呼んだときだけ途中潜在を写して返す（{@link latentSnapshot}）。 */
+    /** 呼んだときだけ途中潜在を写して返す（{@link "./dit-loop.ts"} の `latentSnapshot`）。 */
     readonly copyLatents: () => IrodoriLatentSnapshot;
   };
-
-/** 生成イベントの発火口（未購読なら何もしない 1 本に畳んで、発火点に分岐を置かない）。 */
-type EmitEvent = (event: IrodoriGenerateEvent) => Promise<void>;
-
-/** 未購読のときの発火口。 */
-const NO_EVENTS: EmitEvent = () => Promise.resolve();
-
-/** 要求の `onEvent` を発火口に畳む（await して例外は握らない — {@link IrodoriGenerateRequest.onEvent}）。 */
-const emitter = (
-  onEvent: ((event: IrodoriGenerateEvent) => void | Promise<void>) | undefined,
-): EmitEvent =>
-  onEvent === undefined ? NO_EVENTS : async (event: IrodoriGenerateEvent) => {
-    await onEvent(event);
-  };
-
-/**
- * 途中潜在を返す口を作る（**lazy copy** — 呼ばれたときだけ写す）。
- *
- * 進捗だけを購読する消費側にコピー費用が一切かからず、内部の配列を渡さないので「次 step の
- * 入力を購読側に握られる」事故も構造的に起きない。
- *
- * MUST: 呼ばれた時点ではなく**作った時点**の配列を写す（引数で束縛する）。DiT ループの `x` は
- * step ごとに**新しい配列へ差し替わる**ので、この束縛がそのまま「その step の潜在」になる。
- * ループ変数を閉じ込めると、後から呼んだ購読側に別 step の潜在が返る。
- *
- * MUST: `data` だけでなく `shape` も写す。参照のまま返すと同じ step で 2 回呼んだ写しが同一の
- * 配列を共有し、購読側が 1 回目の `shape` を書き換えると 2 回目の写しが黙って別の形を名乗る。
- * 公開イベント面の契約（`IrodoriGenerateEvent.copyLatents` / `AnimaGenerateEvent.copyLatents`）
- * を家族間で 1 本にするための揃え（anima 側 `src/anima/pipeline.ts` の同名関数と同じ形）。
- *
- * NOTE: `export` は GPU 無しで独立性を縛るテストのため（`mod.ts` / サブパス面には出さない —
- * ADR 0008）。
- */
-export const latentSnapshot = (
-  latent: Float32Array<ArrayBuffer>,
-  shape: readonly number[],
-): () => IrodoriLatentSnapshot =>
-(): IrodoriLatentSnapshot => ({ data: new Float32Array(latent), shape: [...shape] });
 
 /** 構築オプション（{@link IrodoriPipeline.fromAssets} / {@link IrodoriPipeline.fromPretrained} 共通）。 */
 export type IrodoriPipelineOptions = {
@@ -397,188 +348,8 @@ export type IrodoriAssets = {
   readonly assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>;
 };
 
-/**
- * 取得済みバイト列を `openModel` へ渡せる ArrayBuffer にする（門の本体は
- * {@link readAssetBuffer}）。
- */
-const assetBuffer = (
-  assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>,
-  key: string,
-): ArrayBuffer => readAssetBuffer("irodori", "weights / assets", assets, key);
-
-/**
- * 全量面（`fromAssets`）のコンポーネント供給口（受け口の実装は 7 家族共有 —
- * {@link assetComponentOpener}）。素の 1 本は `openModel` で開いて全量面で組み、shard 分割形
- * （`dit[0]` / `dit[1]` / …）は `fromPretrained` と同じ shard 逐次面へ流す。
- */
-const assetOpener = (assets: IrodoriAssets["assets"]): ComponentOpener =>
-  assetComponentOpener("irodori", assets, (key) => assetBuffer(assets, key));
-
-/**
- * 資産 JSON を読む（decode / parse の門は {@link readAssetJson}）。
- *
- * NOTE: `export` は門を直接叩くテストのため（`fromAssets` 経由で此処へ届くには実 IR
- * コンテナ 8 本が要る）。`mod.ts` / サブパス面には出さない（ADR 0008）。
- */
-export const assetJson = (
-  assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>,
-  key: string,
-): unknown => readAssetJson("irodori", "weights / assets", assets, key);
-
-/**
- * グラフ入力の 1 軸ぶんの**静的**次元が `pipelineConfig` の宣言と一致することを見る。
- *
- * MUST: 落とさない。条件 state の宣言長や幅がホストの値とずれても、右 pad と行数計算は
- * そのまま通り（shape は合う）、**別の位置の条件を読んだ**結果が沈黙で出る。
- */
-const assertStaticDim = (
-  model: GraphOwner,
-  inputName: string,
-  axis: number,
-  expected: number,
-  where: string,
-): void => assertGraphInputDim("irodori", model, inputName, axis, expected, where);
-
-/**
- * グラフ**出力**の 1 軸が「記号 × 係数」の派生次元で、その係数が宣言と一致することを見る。
- *
- * MUST: 落とさない。decoder の出力倍率（1 latent フレーム → `hopLength` サンプル）がずれても
- * 出力は「それらしい長さの波形」になり、秒指定の切り出しと末尾トリムだけが別の位置を指す。
- */
-const assertOutputScale = (
-  model: GraphOwner,
-  axis: number,
-  expected: number,
-  where: string,
-): void => {
-  const name = model.graph.outputs[0];
-  const value = model.graph.values[name];
-  if (value === undefined) {
-    throw new Error(`irodori: グラフ出力 '${name}' の宣言が無い（${where}）`);
-  }
-  const symbol = model.graph.symbols[0];
-  // 正準表記は `coeff·sym` で、**係数 1 は省略**する（`format/dims.ts` の `formatDim`）。
-  // 綴りを合わせないと、倍率 1 の正しいグラフをここが誤って拒否する。
-  const canonical = `${expected === 1 ? "" : expected}${symbol}`;
-  const dim = value.shape[axis];
-  if (symbol === undefined || dim !== canonical) {
-    throw new Error(
-      `irodori: ${where} — グラフ出力 '${name}' の軸 ${axis} が ${String(dim)}、` +
-        `pipelineConfig からの期待は '${canonical}'`,
-    );
-  }
-};
-
-/**
- * グラフ**出力**の 1 軸が宣言どおりの**静的**次元であることを見る。
- *
- * MUST: 落とさない。encoder の latent 幅が `pipelineConfig` の `latentDim` とずれても、後段の
- * patch は「幅 × patchSize」で割り切れる限り通ってしまい、**別のチャネルを話者特徴として
- * 読んだ**結果が沈黙で出る。
- */
-const assertOutputDim = (
-  model: GraphOwner,
-  axis: number,
-  expected: number,
-  where: string,
-): void => {
-  const name = model.graph.outputs[0];
-  const value = model.graph.values[name];
-  if (value === undefined) {
-    throw new Error(`irodori: グラフ出力 '${name}' の宣言が無い（${where}）`);
-  }
-  const dim = value.shape[axis];
-  if (dim !== expected) {
-    throw new Error(
-      `irodori: ${where} — グラフ出力 '${name}' の軸 ${axis} が ${String(dim)}、` +
-        `pipelineConfig は ${expected}`,
-    );
-  }
-};
-
-const asF32 = (tensor: Tensor, where: string): Float32Array<ArrayBuffer> => {
-  if (tensor.dtype !== "f32") throw new Error(`${where}: f32 でない（${tensor.dtype}）`);
-  return tensor.data;
-};
-
-const f32 = (data: Float32Array<ArrayBuffer>, shape: readonly number[]): Tensor => ({
-  dtype: "f32",
-  shape: [...shape],
-  data,
-});
-
-const i32 = (data: Int32Array<ArrayBuffer>, shape: readonly number[]): Tensor => ({
-  dtype: "i32",
-  shape: [...shape],
-  data,
-});
-
-/** bool の実表現は u32 の 0 / 1（ADR 0009）。 */
-const bool = (value: boolean): Tensor => ({
-  dtype: "bool",
-  shape: [1, 1],
-  data: Uint32Array.of(value ? 1 : 0),
-});
-
-/** グラフ出力**名**を位置で引く（IR v1 の出力名は `output.<i>` — 名前を決め打ちしない）。 */
-const outputNameAt = (model: GraphOwner, index: number): string => {
-  const name = model.graph.outputs[index];
-  if (name === undefined) {
-    throw new Error(`グラフ出力 ${index} が無い（${model.graph.outputs.length} 本しかない）`);
-  }
-  return name;
-};
-
-/** グラフ出力を**位置**で引く。 */
-const outputAt = (
-  model: GraphOwner,
-  outputs: Readonly<Record<string, Tensor>>,
-  index: number,
-): Tensor => {
-  const name = outputNameAt(model, index);
-  const tensor = outputs[name];
-  if (tensor === undefined) throw new Error(`グラフ出力 ${index}（'${name}'）が実行結果に無い`);
-  return tensor;
-};
-
-/** 観測席（{@link IrodoriPipelineOptions.onRunDiagnostics}）へコンポーネント名を焼いて渡す。 */
-const observer = (
-  state: IrodoriState,
-  component: IrodoriRunComponent,
-): ((diagnostics: SessionDiagnostics) => void) | undefined => {
-  const listener = state.onRunDiagnostics;
-  return listener === undefined ? undefined : (diagnostics) => listener(component, diagnostics);
-};
-
-/**
- * 段 1 本を回す（`stage` イベントを Session 構築の前と解放の後に挟む）。
- * 途中で落ちたら `end` は出ない（生成ごと reject する — `onEvent` の doc）。
- */
-const withStageSession = async <T>(
-  state: IrodoriState,
-  emit: EmitEvent,
-  component: IrodoriRunComponent,
-  model: ModelComponent,
-  sessionOptions: SessionOptions,
-  body: (
-    run: (inputs: Record<string, Tensor>) => Promise<Record<string, Tensor>>,
-    session: Session,
-  ) => Promise<T>,
-): Promise<T> => {
-  await emit({ kind: "stage", component, at: "start" });
-  const result = await withSession(
-    state.gpu,
-    model,
-    sessionOptions,
-    observer(state, component),
-    body,
-  );
-  await emit({ kind: "stage", component, at: "end" });
-  return result;
-};
-
 /** {@link IrodoriPipeline} の内部状態（公開面には出さない）。 */
-type IrodoriState = {
+export type IrodoriState = {
   readonly gpu: GpuContext;
   readonly ownsGpu: boolean;
   readonly config: IrodoriPipelineConfig;
@@ -591,7 +362,7 @@ type IrodoriState = {
   readonly dit: ModelComponent;
   readonly codecEncoder: ModelComponent;
   readonly codecDecoder: ModelComponent;
-  /** `dit` の記号次元 S の名前（導出は {@link admitIrodori} の 1 度だけ）。 */
+  /** `dit` の記号次元 S の名前（導出は {@link "./admission.ts"} の `admitIrodori` の 1 度だけ）。 */
   readonly ditSymbol: string;
   /** 低精度ノブ。**`dit` の Session にだけ**渡す（モジュール doc の MUST）。 */
   readonly ditSessionOptions: SessionOptions;
@@ -599,213 +370,6 @@ type IrodoriState = {
     component: IrodoriRunComponent,
     diagnostics: SessionDiagnostics,
   ) => void;
-};
-
-/** 条件 1 本ぶんの中間状態（行数を値と一緒に持ち歩く — 幅は config が正本）。 */
-type ConditionState = {
-  readonly data: Float32Array<ArrayBuffer>;
-  readonly rows: number;
-};
-
-/** 条件を載せない（参照なし / caption 空）ときのゼロ供給。右 pad で全 0 行になる。 */
-const emptyCondition = (): ConditionState => ({ data: new Float32Array(0), rows: 0 });
-
-/** 条件 state を宣言長へ右詰め 0 pad する（ADR 0047 のホスト残置）。 */
-const rightPad = (
-  state: ConditionState,
-  rows: number,
-  width: number,
-  where: string,
-): Float32Array<ArrayBuffer> => {
-  if (state.rows > rows) {
-    throw new Error(
-      `IrodoriPipeline: ${where} の長さ ${state.rows} が宣言長 ${rows} を超えている`,
-    );
-  }
-  if (state.data.length !== state.rows * width) {
-    throw new Error(
-      `IrodoriPipeline: ${where} の要素数 ${state.data.length} が ${state.rows}×${width} と違う`,
-    );
-  }
-  const padded = new Float32Array(rows * width);
-  padded.set(state.data);
-  return padded;
-};
-
-/** 家族 admission（{@link admitIrodori}）が確定させる材料。 */
-type IrodoriAdmission = {
-  readonly config: IrodoriPipelineConfig;
-  readonly quantName: string;
-  readonly quant: Quant;
-  /**
-   * `dit` の記号次元 S の名前（admission が唯一の導出点）。
-   *
-   * MUST: 実行時に `graph.symbols` から引き直さない — 「記号は 1 本」を確かめた席と使う席が
-   * 離れると、経路によって検査が走ったり走らなかったりする（CLAUDE.md の「導出値は source of
-   * truth から 1 度だけ導く」）。
-   */
-  readonly ditSymbol: string;
-  readonly ditSessionOptions: SessionOptions;
-  readonly backbone: ModelComponent;
-  readonly textProj: ModelComponent;
-  readonly captionProj: ModelComponent;
-  readonly speaker: ModelComponent;
-  readonly duration: ModelComponent;
-  readonly dit: ModelComponent;
-  readonly codecDecoder: ModelComponent;
-  readonly codecEncoder: ModelComponent;
-};
-
-/**
- * この manifest とこのグラフを irodori として実行できるかを見る（`hub/components.ts` の
- * 家族 admission 席 — shard 面では**重み shard を 1 バイトも取る前**に呼ばれる）。
- *
- * MUST: 家族の門はこの 1 本に集める。後段へ散らすと、shard 面では GB 級の重みを落とした
- * **後**にしか落ちない（ADR 0070 決定 5 の文面より実装が狭くなる）。
- * MUST: manifest の契約違反と**グラフとの突合**は **GPU を取りに行く前**に落とす。順序が
- * ずれると、GPU の無い環境では別の例外に化けて「何が悪かったのか」が読み手に伝わらない。
- *
- * NOTE: 各段は不可分（`openModel` を途中で畳む口は無い）なので、
- * {@link IrodoriPipelineOptions.signal} の検査は**段の境目**にだけ置き、そこでイベントループへ
- * 1 度譲ってから検査する（{@link settleAbort}）— 同期解析の最中に届いた中断は次の境目で効く
- * （`options.gpu` 供給時も同様）。グラフとの突合（`assertStaticDim` 群）は開いたコンテナの
- * ヘッダを読むだけで、`openModel` 1 本より桁で軽いので境目を割らない。
- * NOTE: 資産（tokenizer）の解析はこの席へ置けない — admission の時点では extras をまだ
- * 取っていない（取ってからでは重み prefetch より前という位置が保てない）ので
- * {@link buildIrodoriState} に残る。
- */
-const admitIrodori = async (
-  manifest: Manifest,
-  open: ComponentOpener,
-  options: IrodoriPipelineOptions,
-): Promise<IrodoriAdmission> => {
-  // 中断の検査は**段の境目**に置く。入口が最初の 1 本: 中断済みで呼ばれたら manifest にも
-  // 資産にも触らずに返す。
-  options.signal?.throwIfAborted();
-  const modelName = options.model ?? manifest.defaultModel;
-  if (!Object.hasOwn(manifest.models, modelName)) {
-    throw new Error(
-      `IrodoriPipeline: model '${modelName}' は manifest に無い` +
-        `（利用可能: ${manifest.available.models.join(" / ")}）`,
-    );
-  }
-  const entry: ModelEntry = manifest.models[modelName];
-  const { name, major } = entry.pipeline;
-  if (name !== IRODORI_PIPELINE_NAME) {
-    throw new Error(
-      `IrodoriPipeline: manifest の pipeline が '${name}/${major}'` +
-        `（'${IRODORI_PIPELINE_NAME}/${IRODORI_PIPELINE_MAJOR}' が必要）`,
-    );
-  }
-  if (major !== IRODORI_PIPELINE_MAJOR) {
-    // 「古い実装 × 新しいリポ」の沈黙劣化を止める唯一の門（ADR 0038 §6）。
-    throw new Error(
-      `IrodoriPipeline: pipeline '${name}/${major}' の major に未対応` +
-        `（この実装が読めるのは ${IRODORI_PIPELINE_NAME}/${IRODORI_PIPELINE_MAJOR}）`,
-    );
-  }
-  const config = parseIrodoriPipelineConfig(entry.pipelineConfig);
-
-  const quantName = options.quant ?? entry.defaultQuant;
-  if (!Object.hasOwn(entry.quants, quantName)) {
-    throw new Error(
-      `IrodoriPipeline: quant '${quantName}' は manifest に無い` +
-        `（利用可能: ${entry.available.quants.join(" / ")}）`,
-    );
-  }
-  const quant = entry.quants[quantName];
-
-  // 資産の解析は GPU より前（docstring の順序 MUST）。8 本の `openModel` はそれぞれ不可分なので、
-  // 中断の検査はその境目に置く。
-  await settleAbort(options.signal);
-  const backbone = open(BACKBONE);
-  await settleAbort(options.signal);
-  const textProj = open(TEXT_PROJ);
-  await settleAbort(options.signal);
-  const captionProj = open(CAPTION_PROJ);
-  await settleAbort(options.signal);
-  const speaker = open(SPEAKER);
-  await settleAbort(options.signal);
-  const duration = open(DURATION);
-  await settleAbort(options.signal);
-  const dit = open(DIT);
-  await settleAbort(options.signal);
-  const codecDecoder = open(CODEC_DECODER);
-  await settleAbort(options.signal);
-  const codecEncoder = open(CODEC_ENCODER);
-
-  // グラフの宣言と pipelineConfig の突合（ホストの式が読む数は全て config 由来）。
-  assertStaticDim(dit, "x_t", 2, config.latentDim, "latentDim");
-  assertStaticDim(dit, "t_embed", 1, config.timestepEmbedDim, "timestepEmbedDim");
-  assertStaticDim(dit, "text_state", 1, config.maxTextLen, "maxTextLen");
-  assertStaticDim(dit, "text_state", 2, config.textDim, "textDim");
-  assertStaticDim(dit, "speaker_state", 1, config.speakerRows, "speakerRows");
-  assertStaticDim(dit, "speaker_state", 2, config.speakerDim, "speakerDim");
-  assertStaticDim(dit, "caption_state", 1, config.maxCaptionLen, "maxCaptionLen");
-  assertStaticDim(dit, "caption_state", 2, config.captionDim, "captionDim");
-  assertStaticDim(duration, "text_state", 2, config.textDim, "textDim");
-  assertStaticDim(duration, "speaker_vec", 1, config.speakerDim, "speakerDim");
-  assertStaticDim(duration, "caption_vec", 1, config.captionDim, "captionDim");
-  // 参照 latent の patch 幅（latentDim × speakerPatchSize）が speaker の入力幅と一致する。
-  assertStaticDim(
-    speaker,
-    "latent",
-    2,
-    config.latentDim * config.speakerPatchSize,
-    "latentDim × speakerPatchSize",
-  );
-  // codec decoder は latent を 1 フレーム = hopLength サンプルへ展開する。入力幅と**出力の
-  // 派生次元の係数**の両方を見る（係数だけがずれた資産は shape が合ったまま通り、切り出しと
-  // 末尾トリムのサンプル位置だけが静かに別の場所を指す）。
-  assertStaticDim(codecDecoder, "latent", 2, config.latentDim, "latentDim");
-  assertOutputScale(codecDecoder, 2, config.hopLength, "hopLength");
-  // encoder は逆向き（`[1,T,hopLength]` の波形 → `[1,T,latentDim]`）。入力のフレーム幅が
-  // `hopLength` でないと、ホストが並べた波形が**1 フレームずつずれて**読まれる。
-  assertStaticDim(codecEncoder, "wav", 2, config.hopLength, "hopLength");
-  assertOutputDim(codecEncoder, 2, config.latentDim, "latentDim");
-  // `dit` の記号次元は S の 1 本だけ（常駐経路は毎 enqueue この名前で束縛を渡す）。家族の門は
-  // この 1 本に集める MUST の一部で、実行時に置くと ①GB 級の重みを落とした後にしか落ちない
-  // ②ホスト経路（`gpuTiming` 有効 device / `onEvent` 購読）では走らず、同じ配布形が観測経路
-  // ごとに違う文言で落ちる、の 2 つが起きる。
-  const ditSymbols = dit.graph.symbols;
-  if (ditSymbols.length !== 1) {
-    throw new Error(`irodori: dit の記号次元が 1 本でない（[${ditSymbols.join(", ")}]）`);
-  }
-  const ditSymbol = ditSymbols[0];
-
-  const ditSessionOptions = toSessionOptions(quant.session);
-
-  // MUST: 共有 GPU の能力不足（feature / device limit）はこの席で落とす — 自前で取る場合と
-  // 違って `acquireGpu` を待つ理由が無く、重みを落とす前に判る唯一の家族門（要求と検査の
-  // 写像は `session/gpu-features.ts` の 1 本で、後段の検査も同じ関数を呼ぶ）。
-  if (options.gpu !== undefined) {
-    assertGpuFeaturesGranted(
-      quant.gpuFeatures,
-      options.gpu,
-      `IrodoriPipeline: quant '${quantName}'`,
-    );
-    assertRequiredLimitsSatisfied(
-      quant.requiredLimits,
-      options.gpu.limits,
-      `IrodoriPipeline: quant '${quantName}'`,
-    );
-  }
-
-  return {
-    config,
-    quantName,
-    quant,
-    ditSymbol,
-    ditSessionOptions,
-    backbone,
-    textProj,
-    captionProj,
-    speaker,
-    duration,
-    dit,
-    codecDecoder,
-    codecEncoder,
-  };
 };
 
 /**
@@ -846,7 +410,8 @@ const buildIrodoriState = async (
 
   // MUST: 宣言された feature は device 作成時にしか要求できない（ADR 0028）。共有 GPU を
   // 渡された場合は要求できないので、能力が足りないことを名指しして落とす（共有 GPU は
-  // {@link admitIrodori} が既に同じ 1 本で見ているが、自前で取った device はここが唯一の門）。
+  // {@link "./admission.ts"} の `admitIrodori` が既に同じ 1 本で見ているが、自前で取った
+  // device はここが唯一の門）。
   const gpu = options.gpu ?? await acquireGpu(toAcquireGpuOptions(quant.gpuFeatures));
   const ownsGpu = options.gpu === undefined;
   try {
@@ -879,348 +444,6 @@ const buildIrodoriState = async (
     // 内部で取った GPU は、構築に失敗したら誰も解放できなくなるのでここで返す。
     if (ownsGpu) gpu.destroy();
     throw error;
-  }
-};
-
-/**
- * 参照音声 → DACVAE latent（ホスト前処理 + `codec_encoder`）。
- *
- * 切り詰めの上限は `speakerRows` から導く — speaker 条件は「平均トークン 1 本 + patch した
- * 参照」なので、載る参照は `(speakerRows − 1) × speakerPatchSize` フレーム（実重み v4-small で
- * 3,000 フレーム = 120 秒）。**TS 側に秒数を定数で置かない**（config.ts の MUST — 重みを
- * 差し替えたときにホストだけ古い上限を持つ形を作らない）。
- *
- * MUST: 切り詰めは正規化より**前**。後ろに回すと、捨てる区間の音量が LUFS に混ざる
- * （上流も `wav[:, :int(max_ref_seconds·sr)]` を先に取る）。
- */
-const encodeReferenceAudio = async (
-  state: IrodoriState,
-  emit: EmitEvent,
-  audio: { readonly data: Float32Array<ArrayBuffer>; readonly sampleRate: number },
-): Promise<Float32Array<ArrayBuffer>> => {
-  const { config } = state;
-  if (audio.sampleRate !== config.sampleRate) {
-    // リサンプルは持たない（ADR 0048 の流儀 — 黙って近似せず、変換は呼び出し側の責務にする）。
-    throw new Error(
-      `IrodoriPipeline: 参照音声が ${audio.sampleRate}Hz（配布形は ${config.sampleRate}Hz）` +
-        " — リサンプルは持たないので、あらかじめ変換して渡す",
-    );
-  }
-  const maxSamples = (config.speakerRows - 1) * config.speakerPatchSize * config.hopLength;
-  const limited = audio.data.length > maxSamples
-    ? (audio.data.slice(0, maxSamples) as Float32Array<ArrayBuffer>)
-    : audio.data;
-  const padded = reflectPadToHop(
-    normalizeReference(limited, config.sampleRate).data,
-    config.hopLength,
-  );
-  const frames = padded.length / config.hopLength;
-  return await withStageSession(
-    state,
-    emit,
-    "codec-encoder",
-    state.codecEncoder,
-    {},
-    async (run) => {
-      const outputs = await run({ wav: f32(padded, [1, frames, config.hopLength]) });
-      return asF32(outputAt(state.codecEncoder, outputs, 0), "codec encoder の出力");
-    },
-  );
-};
-
-/** speaker 条件を組む（参照音声 / 参照 latent / 埋め込み直接指定 / 参照なしのゼロ短絡）。 */
-const encodeSpeaker = async (
-  state: IrodoriState,
-  emit: EmitEvent,
-  input: IrodoriSpeakerInput | undefined,
-): Promise<ConditionState> => {
-  const { config } = state;
-  if (input === undefined) {
-    // 参照なしはグラフを回さずゼロを置く（上流の `no_ref` と厳密に一致することは exporter の
-    // `_no_reference_evidence` が実測済み）。区間マスクも全 0 になるので寄与は厳密に 0。
-    return emptyCondition();
-  }
-  if ("stateOverride" in input) {
-    const { stateOverride } = input;
-    if (stateOverride.length === 0 || stateOverride.length % config.speakerDim !== 0) {
-      throw new Error(
-        `IrodoriPipeline: speaker.stateOverride の長さ ${stateOverride.length} が` +
-          ` speakerDim ${config.speakerDim} の正の倍数でない`,
-      );
-    }
-    // MUST: `speaker` グラフも `speaker_norm` も平均トークン前置も通さない（上流
-    // `encode_conditions` の `speaker_state_override` 経路）。加工すると、配られた埋め込みが
-    // 二重に正規化された別のベクトルとして条件に入る。
-    return { data: stateOverride, rows: stateOverride.length / config.speakerDim };
-  }
-  const latent = "audio" in input
-    ? await encodeReferenceAudio(state, emit, input.audio)
-    : input.latent;
-  const patched = patchReferenceLatent(latent, config.latentDim, config.speakerPatchSize);
-  const encoded = await withStageSession(
-    state,
-    emit,
-    "speaker",
-    state.speaker,
-    {},
-    async (run) => {
-      const outputs = await run({
-        latent: f32(patched.data, [1, patched.tokens, patched.width]),
-      });
-      return asF32(outputAt(state.speaker, outputs, 0), "speaker の出力");
-    },
-  );
-  // 平均トークンの前置はグラフの外（ADR 0047 決定 4）。
-  return {
-    data: prependMeanToken(encoded, patched.tokens, config.speakerDim),
-    rows: patched.tokens + 1,
-  };
-};
-
-/**
- * latent 段の結果。`plan.targetSamples` は波形の切り出しに要るので**決めた場所から持ち回る**
- * （`GeneratedLatent` は公開の面なので混ぜない）。
- */
-type LatentStage = {
-  readonly latent: GeneratedLatent;
-  readonly plan: SequencePlan;
-};
-
-/** CFG の 1 変種（落とす区間・強さ・その区間だけ False にしたマスク）。 */
-type UncondVariant = {
-  readonly segment: IrodoriSegment;
-  readonly scale: number;
-  readonly mask: Tensor;
-};
-
-/**
- * DiT ループ 1 本ぶんの材料（2 つの経路が**同じもの**を読む — ホストの計算はどちらでも同一）。
- *
- * 条件 3 本を値と Tensor の両方で持つのは、常駐経路が {@link ResidentTensor.write} に生の
- * 配列を要り、ホスト経路が `run` に Tensor を要るため。**同じ配列の別の見方**であって、
- * 独立に更新される複製ではない。
- */
-type DitLoop = {
-  readonly frames: number;
-  /** 初期ノイズ `[frames × latentDim]`。 */
-  readonly initial: Float32Array<ArrayBuffer>;
-  readonly schedule: Float32Array<ArrayBuffer>;
-  readonly frequencies: Float32Array<ArrayBuffer>;
-  /** 右 pad 済みの条件 3 本（グラフ入力名 → 値）。 */
-  readonly conditionValues: Readonly<Record<string, Float32Array<ArrayBuffer>>>;
-  readonly conditions: Readonly<Record<string, Tensor>>;
-  readonly condMask: Tensor;
-  readonly uncondVariants: readonly UncondVariant[];
-};
-
-/** ループの結果（最終潜在と `dit` を回した回数）。 */
-type DitLoopResult = {
-  readonly x: Float32Array<ArrayBuffer>;
-  readonly forwards: number;
-};
-
-/**
- * forward ごとにホストへ降りるループ（`run` → readback → `combineCfg` + `eulerStep` →
- * 再アップロード）。
- *
- * **数値の正本**であり、計測が有効な device（`gpuTiming` — 常駐経路が使う batch を開けない）
- * と生成イベントの購読（`onEvent` — 1 batch の途中は観測できない）での唯一の経路でもある。
- */
-const runDitLoopOnHost = async (
-  state: IrodoriState,
-  emit: EmitEvent,
-  loop: DitLoop,
-): Promise<DitLoopResult> => {
-  const { config } = state;
-  let x = loop.initial;
-  let forwards = 0;
-  await withStageSession(
-    state,
-    emit,
-    "dit",
-    state.dit,
-    state.ditSessionOptions,
-    async (run) => {
-      for (let step = 0; step < config.steps; step += 1) {
-        const t = loop.schedule[step];
-        const tNext = loop.schedule[step + 1];
-        const tEmbed = f32(timestepEmbedding(t, loop.frequencies), [1, config.timestepEmbedDim]);
-        const xTensor = f32(x, [1, loop.frames, config.latentDim]);
-        const cond = asF32(
-          outputAt(
-            state.dit,
-            await run({ x_t: xTensor, t_embed: tEmbed, mask: loop.condMask, ...loop.conditions }),
-            0,
-          ),
-          "dit の速度場",
-        );
-        forwards += 1;
-        const variants: CfgVariant[] = [];
-        if (t >= config.cfgMinT && t <= config.cfgMaxT) {
-          // MUST: 合成順は SEGMENT_ORDER（text → speaker → caption）— `combineCfg` の doc。
-          for (const variant of loop.uncondVariants) {
-            const outputs = await run({
-              x_t: xTensor,
-              t_embed: tEmbed,
-              mask: variant.mask,
-              ...loop.conditions,
-            });
-            forwards += 1;
-            variants.push({
-              scale: variant.scale,
-              velocity: asF32(
-                outputAt(state.dit, outputs, 0),
-                `dit の速度場（uncond ${variant.segment}）`,
-              ),
-            });
-          }
-        }
-        x = eulerStep(x, combineCfg(cond, variants), Math.fround(tNext - t));
-        await emit({
-          kind: "denoise-step",
-          step: step + 1,
-          steps: config.steps,
-          t,
-          copyLatents: latentSnapshot(x, [loop.frames, config.latentDim]),
-        });
-      }
-    },
-  );
-  return { x, forwards };
-};
-
-/**
- * ループ全体を **1 batch** に束ねる GPU 常駐経路（H-5）。
- *
- * 潜在・速度場・CFG の途中結果・条件 3 本を全て {@link ResidentTensor} に置き、`dit` と
- * ホストで組んだ小グラフ 2 本（{@link combineGraph} / {@link eulerGraph}）を `enqueue` で
- * 積むだけにする。ホストへ降りるのは最後の 1 回（`x_t.read()`）だけで、フェンスは
- * `batch.finish()` の 1 本に集約される。
- *
- * MUST: 区間の中で `Session.run` を待たない（自己デッドロック — `beginBatch` の doc）。
- * MUST: 演算の積み方は {@link runDitLoopOnHost} と 1 演算ずつ同型（変種順・差の基準・
- * 引数順）。ずれると最終桁が動き、WAV sha256 門が割れる。強さ `scale` はこちらが GPU へ
- * 渡す前に f32 へ丸めるのに対しホスト経路は JS の f64 で乗算するが、`parseCfgScales` が
- * f32 厳密な値しか受理しないので、2 経路の出力一致は**配布形に依らず無条件で**成立する。
- * MUST: 常駐テンソルを返すのは Session を全て畳んだ**後**（焼き込み参照が残っていると
- * `dispose` が fail loudly になる）。
- */
-const runDitLoopResident = async (state: IrodoriState, loop: DitLoop): Promise<DitLoopResult> => {
-  const { config, gpu } = state;
-  const { frames } = loop;
-  const observe = observer(state, "dit");
-  const latentBytes = frames * config.latentDim * 4;
-  // 記号次元は常駐入力から束縛できない（常駐テンソルは shape を持たない）ので毎 enqueue 明示する。
-  // 名前は admission が確定させたもの（「記号は 1 本」の検査もそこにある — `admitIrodori`）。
-  const bindings = { [state.ditSymbol]: frames };
-  const velocity = outputNameAt(state.dit, 0);
-  const residents: ResidentTensor[] = [];
-  const sessions: Session[] = [];
-  let failure: { readonly error: unknown } | undefined;
-  try {
-    const createResident = async (bytes: number, label: string): Promise<ResidentTensor> => {
-      const tensor = await gpu.createResident(bytes, label);
-      residents.push(tensor);
-      return tensor;
-    };
-    const xT = await createResident(latentBytes, "irodori.x_t");
-    const vCond = await createResident(latentBytes, "irodori.v_cond");
-    const vVariant = await createResident(latentBytes, "irodori.v_variant");
-    const accumulator = await createResident(latentBytes, "irodori.cfg_acc");
-    xT.write(loop.initial);
-    const conditions: Record<string, ResidentTensor> = {};
-    for (const [name, values] of Object.entries(loop.conditionValues)) {
-      const tensor = await createResident(values.byteLength, `irodori.${name}`);
-      // ループの前に 1 度だけ投入する（毎 forward の 3.8MB writeBuffer が丸ごと消える）。
-      tensor.write(values);
-      conditions[name] = tensor;
-    }
-    const open = async (model: ModelComponent, options: SessionOptions): Promise<Session> => {
-      const session = await model.createSession(gpu, options);
-      sessions.push(session);
-      return session;
-    };
-    const dit = await open(state.dit, state.ditSessionOptions);
-    // ホストが組んだ小グラフ 2 本は取得層を通らない（バイト列がその場にある）ので全量面のまま。
-    const combine = await open(
-      wholeComponent(openModel(combineGraph(frames, config.latentDim))),
-      {},
-    );
-    const euler = await open(wholeComponent(openModel(eulerGraph(frames, config.latentDim))), {});
-    // 強さは step に依らないので 1 度だけ作る。
-    const scales = loop.uncondVariants.map((variant) => f32(Float32Array.of(variant.scale), [1]));
-
-    let forwards = 0;
-    const batch = await gpu.beginBatch();
-    let batchFailure: { readonly error: unknown } | undefined;
-    try {
-      for (let step = 0; step < config.steps; step += 1) {
-        const t = loop.schedule[step];
-        const tEmbed = f32(timestepEmbedding(t, loop.frequencies), [1, config.timestepEmbedDim]);
-        const forward = async (mask: Tensor, target: ResidentTensor): Promise<void> => {
-          await dit.enqueue(
-            { x_t: xT, t_embed: tEmbed, mask, ...conditions },
-            { batch, bindings, copyOutputs: { [velocity]: target } },
-          );
-          forwards += 1;
-          if (observe !== undefined) observe(dit.diagnostics());
-        };
-        await forward(loop.condMask, vCond);
-        // 区間の最初の 1 forward だけフェンスを張って推定を裏付ける（P-2）。これが無いと区間の
-        // 間ずっと実測 0 = チャンクは初期値 16 のままで、約 96,000 dispatch が 6,000 回の submit に
-        // 割れる。代償はフェンス 1 本（≈11 ms）。
-        if (step === 0) await batch.settle();
-        const guided = t >= config.cfgMinT && t <= config.cfgMaxT &&
-          loop.uncondVariants.length > 0;
-        if (guided) {
-          // MUST: 合成順は SEGMENT_ORDER（text → speaker → caption）— `combineCfg` の doc。
-          for (let index = 0; index < loop.uncondVariants.length; index += 1) {
-            await forward(loop.uncondVariants[index].mask, vVariant);
-            // k = 0 の被加数は cond そのもの（正本 `combineCfg` の `let value = base`）。同じ
-            // バッファを acc_in と cond の 2 口で読むだけなので WebGPU 上も合法。
-            await combine.enqueue({
-              [COMBINE_INPUTS.accumulator]: index === 0 ? vCond : accumulator,
-              [COMBINE_INPUTS.cond]: vCond,
-              [COMBINE_INPUTS.variant]: vVariant,
-              [COMBINE_INPUTS.scale]: scales[index],
-            }, { batch, copyOutputs: { [COMBINE_OUTPUT]: accumulator } });
-          }
-        }
-        await euler.enqueue({
-          [EULER_INPUTS.x]: xT,
-          [EULER_INPUTS.velocity]: guided ? accumulator : vCond,
-          [EULER_INPUTS.deltaT]: f32(
-            Float32Array.of(Math.fround(loop.schedule[step + 1] - t)),
-            [1],
-          ),
-        }, { batch, copyOutputs: { [EULER_OUTPUT]: xT } });
-      }
-    } catch (error) {
-      batchFailure = { error };
-      throw error;
-    } finally {
-      // MUST: 区間は必ず閉じる（開いたままだと device 単位のロックが返らず、以後の run が
-      // 永久に待つ）。
-      await disposeSteps([
-        () => {
-          if (batchFailure !== undefined) throw batchFailure.error;
-        },
-        () => batch.finish(),
-      ]);
-    }
-    return { x: new Float32Array(await xT.read()), forwards };
-  } catch (error) {
-    failure = { error };
-    throw error;
-  } finally {
-    // Session の焼き込み参照を先に外す。失敗しても全資源の解放を試み、元の故障も残す。
-    await disposeSteps([
-      () => {
-        if (failure !== undefined) throw failure.error;
-      },
-      ...sessions.map((session) => () => session.dispose()),
-      ...residents.map((tensor) => () => tensor.dispose()),
-    ]);
   }
 };
 

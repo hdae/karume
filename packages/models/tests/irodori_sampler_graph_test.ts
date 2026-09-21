@@ -125,7 +125,7 @@ const hostLoop = (
 };
 
 /**
- * 常駐グラフでループを回す（`pipeline.ts` の `runDitLoopResident` と**同じ積み方**）。
+ * 常駐グラフでループを回す（`dit-loop.ts` の `runDitLoopResident` と**同じ積み方**）。
  * `dit` の forward だけがホスト配列の `write` に置き換わっている。
  */
 const residentLoop = async (

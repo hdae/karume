@@ -3,7 +3,7 @@
 //
 // ここで押さえるのは 2 点:
 //  ① `fromAssets` は **manifest の契約違反を、資産を開く前・GPU を取りに行く前**に落とす
-//     （`src/irodori/pipeline.ts` の `admitIrodori` が掲げる MUST）。順序がずれると、GPU の
+//     （`src/irodori/admission.ts` の `admitIrodori` が掲げる MUST）。順序がずれると、GPU の
 //     無い環境では別の例外に化けて「何が悪かったのか」が読み手に伝わらない。
 //  ② 構築の `signal` が**入口でも実行開始後でも**効く（DL 完了後の組み立てが中断不能だと、
 //     UI の中止ボタンが無反応になる窓ができる）。後者は「最初の段境界」までを空資産で見る —
@@ -29,12 +29,9 @@ import {
 } from "@std/assert";
 import { parseManifest } from "@karume/hub";
 import { parseIrodoriPipelineConfig } from "../src/irodori/config.ts";
-import {
-  assertIrodoriRequest,
-  assetJson,
-  IrodoriPipeline,
-  latentSnapshot,
-} from "../src/irodori/pipeline.ts";
+import { assetJson } from "../src/irodori/admission.ts";
+import { latentSnapshot } from "../src/irodori/dit-loop.ts";
+import { assertIrodoriRequest, IrodoriPipeline } from "../src/irodori/pipeline.ts";
 
 const FILE = {
   path: "dit/model.f32.safetensors",
