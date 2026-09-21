@@ -175,6 +175,21 @@ def derive_model_name(model_name: str, version_name: str) -> str:
     return _assert_name(f"{FAMILY_TOKEN}-{model}-{version}")
 
 
+def _assert_basename(name: str) -> str:
+    """API が返したファイル名を取り込み先の 1 段下に閉じ込める（結合の直前で通す）。
+
+    MUST: 区切りを含む名前・`..`・絶対パスを受けない — `Path` の結合は `..` で親へ上がり、
+    絶対パスでは前段を丸ごと捨てるので、上流メタの異常がそのまま `civitai-<versionId>/` の
+    外への書き込みになる（来歴記録だけが取り込み先に残り、重みが外へ出る）。
+    """
+    if not name or name in {".", ".."} or "/" in name or "\\" in name:
+        raise SystemExit(
+            f"上流のファイル名が basename でない: {name!r}"
+            "（取り込み先の外を指しうる — 上流のメタを確かめる）"
+        )
+    return name
+
+
 def _masked(url: str) -> str:
     """表示用（トークンは残さない — 端末とログに撒かない）。"""
     return re.sub(r"([?&]token=)[^&]*", r"\1***", url)
@@ -213,14 +228,17 @@ def fetch_model(model_id: int) -> dict[str, Any]:
 
 
 def select_file(files: list[dict[str, Any]]) -> dict[str, Any]:
-    """本体 1 本を選ぶ。同梱の Text Encoder / VAE は取らない（base 側を共有するため）。"""
-    primary = [entry for entry in files if entry.get("primary")]
+    """本体 1 本を選ぶ。同梱の Text Encoder / VAE は取らない（base 側を共有するため）。
+
+    候補は `type == "Model"` に限る（ADR 0088 追記）— primary 真偽だけで採ると、上流が
+    VAE や Text Encoder を primary に立てた版でそちらを本体にしてしまう。
+    """
+    models = [entry for entry in files if entry.get("type") == "Model"]
+    primary = [entry for entry in models if entry.get("primary")]
     if len(primary) == 1:
         return primary[0]
-    if not primary:
-        models = [entry for entry in files if entry.get("type") == "Model"]
-        if len(models) == 1:
-            return models[0]
+    if not primary and len(models) == 1:
+        return models[0]
     listing = [(entry.get("name"), entry.get("type")) for entry in files]
     raise SystemExit(f"本体のファイルを特定できない: {listing}")
 
@@ -389,7 +407,7 @@ def fetch_checkpoint(
 
     destination = out / f"civitai-{version['id']}"
     destination.mkdir(parents=True, exist_ok=True)
-    checkpoint = destination / file["name"]
+    checkpoint = destination / _assert_basename(file["name"])
     download(file["downloadUrl"], checkpoint, hashes["SHA256"])
 
     record = build_record(model, version, file, derived_name, _resolve_air(version, requested_air))

@@ -277,6 +277,31 @@ class TestDeriveModelName:
             civitai.derive_model_name("WAI-ANIMA", "v1.0")
 
 
+class TestAssertBasename:
+    """API が返したファイル名は取り込み先の 1 段下に閉じ込める（結合規則で外へ出さない）。"""
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "../x.safetensors",
+            "/abs/x.safetensors",
+            "a/b.safetensors",
+            "a\\b.safetensors",
+            "",
+            ".",
+            "..",
+        ],
+    )
+    def test_it_refuses_a_name_that_is_not_a_basename(self, name: str) -> None:
+        with pytest.raises(SystemExit, match="basename でない"):
+            civitai._assert_basename(name)
+
+    def test_it_passes_an_ordinary_upstream_name_through(self) -> None:
+        assert civitai._assert_basename("waiANIMA_v10Base10.safetensors") == (
+            "waiANIMA_v10Base10.safetensors"
+        )
+
+
 class TestSelectFile:
     """同梱の Text Encoder / VAE は取らない（base 側を共有する）。"""
 
@@ -289,6 +314,21 @@ class TestSelectFile:
         files = [{"name": "a.safetensors", "type": "Model"}, {"name": "b.png", "type": "Archive"}]
 
         assert civitai.select_file(files)["name"] == "a.safetensors"
+
+    def test_it_ignores_a_primary_that_is_not_a_model_file(self) -> None:
+        """primary = Model 型という同一視は上流が保証しない（ADR 0088 追記）。"""
+        files = [
+            {"name": "vae.safetensors", "type": "VAE", "primary": True},
+            {"name": "body.safetensors", "type": "Model", "primary": False},
+        ]
+
+        assert civitai.select_file(files)["name"] == "body.safetensors"
+
+    def test_it_stops_when_no_model_file_is_present(self) -> None:
+        files = [{"name": "vae.safetensors", "type": "VAE", "primary": True}]
+
+        with pytest.raises(SystemExit, match="本体のファイルを特定できない"):
+            civitai.select_file(files)
 
     def test_it_stops_when_the_body_cannot_be_told_apart(self) -> None:
         files = [
@@ -458,6 +498,27 @@ class TestFetchCheckpoint:
         printed = capsys.readouterr().out
         assert "python -m anima.single_file" in printed
         assert "anima-diffusers/anima-wai-v1.0" in printed
+
+    def test_it_refuses_a_file_name_that_escapes_the_version_directory(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, token: None
+    ) -> None:
+        """逸脱名は結合の前に落ちる — 重みだけが取り込み先の外へ出る形を作らない。"""
+        escaping = json.loads(json.dumps(VERSION_RESPONSE))
+        for entry in escaping["files"]:
+            if entry["primary"]:
+                entry["name"] = "../escaped.safetensors"
+        fake = _FakeNetwork(
+            {
+                f"{civitai.API_ROOT}/model-versions/2983680": json.dumps(escaping).encode(),
+                f"{civitai.API_ROOT}/models/2544636": json.dumps(MODEL_RESPONSE).encode(),
+            }
+        )
+        monkeypatch.setattr(urllib.request, "urlopen", fake)
+
+        with pytest.raises(SystemExit, match="basename でない"):
+            civitai.fetch_checkpoint(2544636, 2983680, out=tmp_path)
+
+        assert sorted(path.name for path in tmp_path.rglob("*")) == ["civitai-2983680"]
 
     def test_it_overrides_the_derived_name_when_asked(
         self, tmp_path: Path, network: _FakeNetwork, token: None

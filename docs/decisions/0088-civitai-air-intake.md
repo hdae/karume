@@ -66,3 +66,11 @@ distribution / card への登録は従来の手順のまま（コマンドは登
   留める — checkpoint が持たない部分は base 共有で足りる（`single_file` の前提と同じ）。
 - Civitai 以外のソース（HF 直・手置き）は従来どおり — `civitai.json` が無いだけで
   `single_file` は従来形の provenance を書く。
+
+## 追記（2026-09-21）— 本体ファイルの選び方（Consequences の「primary（Model 型）」を決定に上げる）
+
+- **対象は `type == "Model"` のファイルに限る**。primary 真偽だけで選ぶと、上流が VAE や
+  Text Encoder を primary に立てた版でそちらを本体に採ってしまう（primary = Model 型という
+  同一視は上流が保証していない）。
+- **primary が無いときは Model 型が 1 本だけなら採る**。primary を立てない版が実在するため
+  で、Model 型が複数ある場合は fail loudly — どれが本体かは機械では決められない。
