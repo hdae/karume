@@ -220,7 +220,7 @@ export class StepRecipeBuilder {
  * 「どの dispatch がどの一時を読み損ねたか」が診断から消える。
  * MUST: 呼び口は**レシピの宣言の受け口 1 箇所**（recipe-builder の `#buildStep` の戻り）。
  * 素のノードと融合再演の両方がそこを通るので、経路ごとに手書きの検査を置かずに済む
- * （融合ルールの宣言自体は src/runtime/fusion.ts の `assertTempLifetimes` が受け口で落とし、
+ * （融合ルールの宣言自体は src/runtime/fusion-rule.ts の `assertTempLifetimes` が受け口で落とし、
  * ここは**再演した結果**を同じ強度で見る）。
  */
 export const validateStepRecipe = (recipe: StepRecipe): void => {

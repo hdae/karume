@@ -262,3 +262,28 @@ M=1かつH=1のKだけが適合していた。両表がこの形に厳密一致�
 受理集合の拡大として資産の融合カウンタ検査を更新し、BSHDのGPUビット一致・反例・snapshotを追加する。
 丸め障壁の成立は従来どおりバックエンド依存であり、M2実機と既存goldenの門を維持する。
 採否の根拠・Chrome実測・未統合候補は[調査記録](../research/2026-09-12-chrome-gemma-optimization.md)に置く。
+
+## 追記（2026-09-21）: 融合パスのファイル分割（入口は `fusion.ts` のまま）
+
+決定 1 の「`src/runtime/fusion.ts` の純関数パス」は**パスの入口の名指し**として維持し、実体を
+3 つに分ける。
+
+- **ルール 1 本 = 1 ファイル**: `src/runtime/fusion-rules/<rule>.ts`（silu / upsample2x / rope /
+  adaln / row-block-attention / rms-norm-add / linear-static-quantize）。行ブロック分割の純関数
+  `planRowBlocks` は `rowBlockAttention` と同じファイルに置く。
+- **共通型と全ルール共通の適格条件**（`FusedStep` 等の実行ステップの型・`windowIsSingleOutput` /
+  `windowTouchesState` / `allF32` / `internalsArePrivate` / `externalIns` /
+  `passthroughIsIndependent`）と `defineRule` は `src/runtime/fusion-rule.ts`。
+- **パスの入口**（`planFusions` / `scanFusions` / 宣言表 `FUSION_RULES` / 別名化 `planAliases` /
+  候補列挙 `enumerateUnfusedWindows` / 診断カウンタ）は `src/runtime/fusion.ts` のまま。公開型と
+  `planRowBlocks` はここが再 export し、**消費側は `fusion.ts` の綴りで import する**。
+
+実体の依存は fusion-rule → fusion-rules → fusion の**一方向**で、ルール側から `fusion.ts` を
+import しない（宣言表がルールを import するため循環になる）。
+
+MUST: `FUSION_RULES` は**手書きの 1 本**に保つ。ルール側の import 時自動登録へ置き換えると、
+全モジュール副作用ゼロの規約（import 時実行の禁止）に反するうえ、先頭 op の互いに素性を
+`tests/runtime_fusion_test.ts` が**この配列**から機械検査している根拠も消える。順序そのものは
+結果に効かない（先頭 op が互いに素）という決定 1 の性質は変わらない。
+
+判定・生成物・公開面は 1 バイトも変えない（行の移動のみ）。

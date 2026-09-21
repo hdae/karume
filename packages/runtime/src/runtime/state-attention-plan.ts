@@ -10,7 +10,7 @@
  * 迂回すると、片方だけ直された実装に対して estimator が例外も警告も無く別の数を主張し続ける
  * （見積りは実行を止めないので、ずれても赤くならない）。
  *
- * 置き場が `runtime/` なのは {@link planRowBlocks} が `runtime/fusion.ts` に居るため
+ * 置き場が `runtime/` なのは {@link planRowBlocks} が `runtime/fusion-rules/`（入口は `fusion.ts`）に居るため
  * （`kernels/` へ置くと kernels → runtime の逆向き import になる）。
  */
 
