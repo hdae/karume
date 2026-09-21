@@ -146,6 +146,8 @@ import {
   type ModelComponent,
   wholeComponent,
 } from "../hub/components.ts";
+import { readAssetBuffer, readAssetJson } from "../hub/asset-readers.ts";
+import { assertGraphInputDim } from "../hub/graph-gates.ts";
 
 /** manifest の weights / assets 表に現れる取得キー（ADR 0041 §3 の規約名）。 */
 const BACKBONE = "backbone";
@@ -396,31 +398,13 @@ export type IrodoriAssets = {
 };
 
 /**
- * 取得済みバイト列を `openModel` へ渡せる ArrayBuffer にする。
- *
- * MUST: `slice` で写さない — hub は buffer 全体を占める view を返す契約なので、崩れていたら
- * **取得層の不変条件破れ**として落とす。
+ * 取得済みバイト列を `openModel` へ渡せる ArrayBuffer にする（門の本体は
+ * {@link readAssetBuffer}）。
  */
 const assetBuffer = (
   assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>,
   key: string,
-): ArrayBuffer => {
-  if (!Object.hasOwn(assets, key)) {
-    throw new Error(
-      `irodori: 資産 '${key}' が無い（manifest の weights / assets に ${key} が要る）` +
-        `（揃っているキー: ${Object.keys(assets).join(" / ")}）`,
-    );
-  }
-  const bytes = assets[key];
-  if (bytes.byteOffset !== 0 || bytes.byteLength !== bytes.buffer.byteLength) {
-    throw new Error(
-      `irodori: 資産 '${key}' の bytes が buffer 全体を占めていない` +
-        `（byteOffset ${bytes.byteOffset} / byteLength ${bytes.byteLength} /` +
-        ` buffer ${bytes.buffer.byteLength}）`,
-    );
-  }
-  return bytes.buffer;
-};
+): ArrayBuffer => readAssetBuffer("irodori", "weights / assets", assets, key);
 
 /**
  * 全量面（`fromAssets`）のコンポーネント供給口（受け口の実装は 7 家族共有 —
@@ -431,9 +415,7 @@ const assetOpener = (assets: IrodoriAssets["assets"]): ComponentOpener =>
   assetComponentOpener("irodori", assets, (key) => assetBuffer(assets, key));
 
 /**
- * MUST: `fatal: true` で decode する。既定の TextDecoder は不正 UTF-8 を U+FFFD へ黙って
- * 置換するので、壊れたバイト列が「内容の違う valid JSON」として通ってしまう（hub の
- * manifest・anima tokenizer・safetensors ヘッダと同じ流儀で fail loudly）。
+ * 資産 JSON を読む（decode / parse の門は {@link readAssetJson}）。
  *
  * NOTE: `export` は門を直接叩くテストのため（`fromAssets` 経由で此処へ届くには実 IR
  * コンテナ 8 本が要る）。`mod.ts` / サブパス面には出さない（ADR 0008）。
@@ -441,20 +423,7 @@ const assetOpener = (assets: IrodoriAssets["assets"]): ComponentOpener =>
 export const assetJson = (
   assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>,
   key: string,
-): unknown => {
-  const buffer = assetBuffer(assets, key);
-  let text: string;
-  try {
-    text = new TextDecoder("utf-8", { fatal: true }).decode(buffer);
-  } catch (cause) {
-    throw new Error(`irodori: 資産 '${key}' が UTF-8 として読めない`, { cause });
-  }
-  try {
-    return JSON.parse(text);
-  } catch (cause) {
-    throw new Error(`irodori: 資産 '${key}' が JSON として読めない`, { cause });
-  }
-};
+): unknown => readAssetJson("irodori", "weights / assets", assets, key);
 
 /**
  * グラフ入力の 1 軸ぶんの**静的**次元が `pipelineConfig` の宣言と一致することを見る。
@@ -468,17 +437,7 @@ const assertStaticDim = (
   axis: number,
   expected: number,
   where: string,
-): void => {
-  const spec = model.graph.inputs.find((input) => input.name === inputName);
-  if (spec === undefined) throw new Error(`irodori: グラフ入力 '${inputName}' が無い（${where}）`);
-  const dim = spec.shape[axis];
-  if (dim !== expected) {
-    throw new Error(
-      `irodori: ${where} — グラフ入力 '${inputName}' の軸 ${axis} が ${String(dim)}、` +
-        `pipelineConfig は ${expected}`,
-    );
-  }
-};
+): void => assertGraphInputDim("irodori", model, inputName, axis, expected, where);
 
 /**
  * グラフ**出力**の 1 軸が「記号 × 係数」の派生次元で、その係数が宣言と一致することを見る。

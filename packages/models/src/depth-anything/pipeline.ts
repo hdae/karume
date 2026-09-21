@@ -131,6 +131,8 @@ import {
   loadShardComponents,
   type ModelComponent,
 } from "../hub/components.ts";
+import { readAssetBuffer } from "../hub/asset-readers.ts";
+import { assertGraphInputDim } from "../hub/graph-gates.ts";
 
 /** manifest の weights 表に現れる取得キー（ADR 0041 §3 の規約名）。 */
 const DEPTH = "depth";
@@ -196,31 +198,15 @@ export type DepthAnythingAssets = {
 };
 
 /**
- * 取得済みバイト列を `openModel` へ渡せる ArrayBuffer にする。
+ * 取得済みバイト列を `openModel` へ渡せる ArrayBuffer にする（門の本体は
+ * {@link readAssetBuffer}）。
  *
- * MUST: `slice` で写さない — 配布形は 1 本 99MB あり、ホスト RAM のピークが倍になる。hub は
- * buffer 全体を占める view を返す契約なので、崩れていたら**取得層の不変条件破れ**として落とす。
+ * MUST: `slice` で写さない — 配布形は 1 本 99MB あり、ホスト RAM のピークが倍になる。
  */
 const assetBuffer = (
   assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>,
   key: string,
-): ArrayBuffer => {
-  if (!Object.hasOwn(assets, key)) {
-    throw new Error(
-      `depth-anything: 資産 '${key}' が無い（manifest の weights に ${key} が要る）` +
-        `（揃っているキー: ${Object.keys(assets).join(" / ")}）`,
-    );
-  }
-  const bytes = assets[key];
-  if (bytes.byteOffset !== 0 || bytes.byteLength !== bytes.buffer.byteLength) {
-    throw new Error(
-      `depth-anything: 資産 '${key}' の bytes が buffer 全体を占めていない` +
-        `（byteOffset ${bytes.byteOffset} / byteLength ${bytes.byteLength} /` +
-        ` buffer ${bytes.buffer.byteLength}）`,
-    );
-  }
-  return bytes.buffer;
-};
+): ArrayBuffer => readAssetBuffer("depth-anything", "weights", assets, key);
 
 /**
  * 全量面（`fromAssets`）のコンポーネント供給口（受け口の実装は 7 家族共有 —
@@ -248,19 +234,7 @@ export const assertStaticDim = (
   axis: number,
   expected: number,
   where: string,
-): void => {
-  const spec = model.graph.inputs.find((input) => input.name === inputName);
-  if (spec === undefined) {
-    throw new Error(`depth-anything: グラフ入力 '${inputName}' が無い（${where}）`);
-  }
-  const dim = spec.shape[axis];
-  if (dim !== expected) {
-    throw new Error(
-      `depth-anything: ${where} — グラフ入力 '${inputName}' の軸 ${axis} が ${String(dim)}、` +
-        `pipelineConfig は ${expected}`,
-    );
-  }
-};
+): void => assertGraphInputDim("depth-anything", model, inputName, axis, expected, where);
 
 /**
  * グラフ**出力**の形が `[1, imageHeight, imageWidth]` であることを見る。

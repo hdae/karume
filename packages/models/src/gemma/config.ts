@@ -16,7 +16,7 @@
 
 import type { HubRepoRef } from "@karume/hub";
 
-import { assertAllowedKeys } from "../config/readers.ts";
+import { assertAllowedKeys, isRecord } from "../config/readers.ts";
 import {
   assertGemma4RopeSpec,
   GEMMA4_ROPE_LAYER_TYPES,
@@ -146,9 +146,6 @@ const SAMPLER_KEYS: readonly string[] = ["temperature", "topK", "topP"];
 
 /** 受理する rope 層種別の欄（型の正本は `./rope.ts` の {@link Gemma4RopeLayerSpec}）。 */
 const ROPE_LAYER_KEYS: readonly string[] = ["theta", "headDim", "rotaryDim"];
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
 
 /** 欄が実在して数であることだけを見る（値域は呼び手が足す）。 */
 const readRawNumber = (raw: Record<string, unknown>, key: string, where: string): number => {

@@ -15,6 +15,22 @@
 /** mean / std の要素数（RGB — アルファは入口で受け取らない）。 */
 const CHANNELS = 3;
 
+/**
+ * 素のオブジェクトか（配列は**含めない** — 欄の集まりとして読む先で `["a"]` が黙って
+ * `{ "0": "a" }` として通ると、未知キー検査も既定値も別の意味で動く）。
+ */
+export const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+/** 欄の集まりとして読む（欠落とオブジェクトでないのは同じ直し方なので 1 文言）。 */
+export const readRecord = (raw: unknown, where: string): Record<string, unknown> => {
+  if (!isRecord(raw)) throw new Error(`${where}: 無い / オブジェクトでない`);
+  return raw;
+};
+
+/** 寸法・件数の欄の受理条件（{@link readNumber} の `check` に渡す）。 */
+export const isPositiveInteger = (value: number): boolean => Number.isInteger(value) && value > 0;
+
 /** 許可集合の外にあるキーを 1 つでも見つけたら落とす。 */
 export const assertAllowedKeys = (
   value: Record<string, unknown>,

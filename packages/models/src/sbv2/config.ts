@@ -31,7 +31,7 @@
  */
 
 import type { HubRepoRef } from "@karume/hub";
-import { assertAllowedKeys, readNumber } from "../config/readers.ts";
+import { assertAllowedKeys, readNumber, readRecord } from "../config/readers.ts";
 
 /** `pipeline` の契約名と、この実装が受け付ける major（ADR 0038 §1）。 */
 export const SBV2_PIPELINE_NAME = "sbv2";
@@ -97,14 +97,6 @@ export type Sbv2PipelineConfig = {
   /** flow / voice へ渡せる総フレーム数の上限（同上）。 */
   readonly maxFrames: number;
   readonly defaults: Sbv2Defaults;
-};
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
-
-const readRecord = (raw: unknown, where: string): Record<string, unknown> => {
-  if (!isRecord(raw)) throw new Error(`${where}: 無い / オブジェクトでない`);
-  return raw;
 };
 
 /** 確保サイズの比較に使う数なので、整数であるだけでなく**安全整数**であることまで見る。 */

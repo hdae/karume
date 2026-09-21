@@ -23,9 +23,9 @@ import {
   assertTiledBert,
   assertTokenLimit,
   assetJson,
-  parseTokenizerAsset,
   Sbv2Pipeline,
 } from "../src/sbv2/pipeline.ts";
+import { parseTokenizerAsset } from "../src/sbv2/text/asset.ts";
 import { stubModel } from "./helpers/stub-model.ts";
 import { Sbv2InputError } from "../src/sbv2/errors.ts";
 import { Randn } from "../src/sbv2/host/random.ts";

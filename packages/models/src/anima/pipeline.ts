@@ -108,6 +108,7 @@ import {
   loadShardComponents,
   type ModelComponent,
 } from "../hub/components.ts";
+import { readAssetBuffer } from "../hub/asset-readers.ts";
 
 /** manifest の weights / assets 表に現れる取得キー（ADR 0041 §3 の規約名）。 */
 const TEXT_ENCODER = "text_encoder";
@@ -276,31 +277,15 @@ export type AnimaAssets = {
 };
 
 /**
- * 取得済みバイト列を `openModel` へ渡せる ArrayBuffer にする。
+ * 取得済みバイト列を `openModel` へ渡せる ArrayBuffer にする（門の本体は
+ * {@link readAssetBuffer}）。
  *
- * MUST: `slice` で写さない — DiT は 1 本 3.7GiB あり、ホスト RAM のピークが倍になる。hub は
- * buffer 全体を占める view を返す契約なので、崩れていたら**取得層の不変条件破れ**として落とす。
+ * MUST: `slice` で写さない — DiT は 1 本 3.7GiB あり、ホスト RAM のピークが倍になる。
  */
 const assetBuffer = (
   assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>,
   key: string,
-): ArrayBuffer => {
-  if (!Object.hasOwn(assets, key)) {
-    throw new Error(
-      `anima: 資産 '${key}' が無い（manifest の weights / assets に ${key} が要る）` +
-        `（揃っているキー: ${Object.keys(assets).join(" / ")}）`,
-    );
-  }
-  const bytes = assets[key];
-  if (bytes.byteOffset !== 0 || bytes.byteLength !== bytes.buffer.byteLength) {
-    throw new Error(
-      `anima: 資産 '${key}' の bytes が buffer 全体を占めていない` +
-        `（byteOffset ${bytes.byteOffset} / byteLength ${bytes.byteLength} /` +
-        ` buffer ${bytes.buffer.byteLength}）`,
-    );
-  }
-  return bytes.buffer;
-};
+): ArrayBuffer => readAssetBuffer("anima", "weights / assets", assets, key);
 
 /**
  * 全量面（`fromAssets`）のコンポーネント供給口（受け口の実装は 7 家族共有 —

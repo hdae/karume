@@ -106,6 +106,7 @@ import {
   loadShardComponents,
   type ModelComponent,
 } from "../hub/components.ts";
+import { readAssetBuffer } from "../hub/asset-readers.ts";
 
 /**
  * manifest の assets 表に現れる取得キーと、その safetensors のテンソル名
@@ -181,31 +182,13 @@ export type VowelDetectorAssets = {
 };
 
 /**
- * 取得済みバイト列を `openModel` / `parseSafetensors` へ渡せる ArrayBuffer にする。
- *
- * MUST: `slice` で写さない（hub は buffer 全体を占める view を返す契約なので、崩れていたら
- * **取得層の不変条件破れ**として落とす — 他ファミリと同じ形）。
+ * 取得済みバイト列を `openModel` / `parseSafetensors` へ渡せる ArrayBuffer にする
+ * （門の本体は {@link readAssetBuffer}）。
  */
 const assetBuffer = (
   assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>,
   key: string,
-): ArrayBuffer => {
-  if (!Object.hasOwn(assets, key)) {
-    throw new Error(
-      `vowel-detector: 資産 '${key}' が無い（manifest の weights / assets に ${key} が要る）` +
-        `（揃っているキー: ${Object.keys(assets).join(" / ")}）`,
-    );
-  }
-  const bytes = assets[key];
-  if (bytes.byteOffset !== 0 || bytes.byteLength !== bytes.buffer.byteLength) {
-    throw new Error(
-      `vowel-detector: 資産 '${key}' の bytes が buffer 全体を占めていない` +
-        `（byteOffset ${bytes.byteOffset} / byteLength ${bytes.byteLength} /` +
-        ` buffer ${bytes.buffer.byteLength}）`,
-    );
-  }
-  return bytes.buffer;
-};
+): ArrayBuffer => readAssetBuffer("vowel-detector", "weights / assets", assets, key);
 
 /**
  * 全量面（`fromAssets`）のコンポーネント供給口（受け口の実装は 7 家族共有 —

@@ -28,7 +28,13 @@
  */
 
 import type { HubRepoRef } from "@karume/hub";
-import { assertAllowedKeys, readNumber, readOnly } from "../config/readers.ts";
+import {
+  assertAllowedKeys,
+  isPositiveInteger,
+  readNumber,
+  readOnly,
+  readRecord,
+} from "../config/readers.ts";
 import { maxSequenceLength } from "./host/round.ts";
 
 /** `pipeline` の契約名と、この実装が受け付ける major（ADR 0038 §1）。 */
@@ -161,15 +167,6 @@ export type IrodoriPipelineConfig = {
   readonly cfgGuidanceMode: typeof CFG_GUIDANCE_MODE;
 };
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
-
-const readRecord = (raw: unknown, where: string): Record<string, unknown> => {
-  if (!isRecord(raw)) throw new Error(`${where}: 無い / オブジェクトでない`);
-  return raw;
-};
-
-const isPositiveInteger = (value: number): boolean => Number.isInteger(value) && value > 0;
 const isPositiveFinite = (value: number): boolean => Number.isFinite(value) && value > 0;
 const isNonNegativeFinite = (value: number): boolean => Number.isFinite(value) && value >= 0;
 /**

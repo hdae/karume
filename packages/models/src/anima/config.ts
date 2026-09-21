@@ -14,7 +14,7 @@
 
 import type { HubRepoRef } from "@karume/hub";
 
-import { assertAllowedKeys, readNumber } from "../config/readers.ts";
+import { assertAllowedKeys, readNumber, readRecord } from "../config/readers.ts";
 import { assertAcceptableResolution, type ImageSize } from "./resolution.ts";
 
 /** `pipeline` の契約名と、この実装が受け付ける major（ADR 0038 §1）。 */
@@ -122,14 +122,6 @@ type AnimaDefaults = {
 export type AnimaPipelineConfig = {
   readonly scheduler: AnimaScheduler;
   readonly defaults: AnimaDefaults;
-};
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
-
-const readRecord = (raw: unknown, where: string): Record<string, unknown> => {
-  if (!isRecord(raw)) throw new Error(`${where}: 無い / オブジェクトでない`);
-  return raw;
 };
 
 const parseResolutionEntry = (raw: unknown, where: string): ImageSize => {

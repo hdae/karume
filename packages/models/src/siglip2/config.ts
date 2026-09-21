@@ -36,7 +36,13 @@
  */
 
 import type { HubRepoRef } from "@karume/hub";
-import { assertAllowedKeys, readChannels, readNumber, readOnly } from "../config/readers.ts";
+import {
+  assertAllowedKeys,
+  isPositiveInteger,
+  readChannels,
+  readNumber,
+  readOnly,
+} from "../config/readers.ts";
 
 /** `pipeline` の契約名と、この実装が受け付ける major（ADR 0038 §1）。 */
 export const SIGLIP2_PIPELINE_NAME = "siglip2";
@@ -103,8 +109,6 @@ export type Siglip2PipelineConfig = {
   /** ADR 0038 §1 の流儀で**宣言**として持つ（分岐用ではない — モジュール doc の MUST）。 */
   readonly interpolation: typeof INTERPOLATION;
 };
-
-const isPositiveInteger = (value: number): boolean => Number.isInteger(value) && value > 0;
 
 /** manifest の `pipelineConfig`（hub が素通しした生の値）を検査して読む。 */
 export const parseSiglip2PipelineConfig = (

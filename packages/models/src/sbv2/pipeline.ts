@@ -78,8 +78,8 @@ import type { Sbv2Utterance } from "./text/utterance.ts";
 import { bertHiddenOutput, tileBertToPhoneLevel, type TiledBert } from "./text/bert-tile.ts";
 import { buildRelPosTables } from "./text/rel-pos-tables.ts";
 import { type JpExtraRules, parseJpExtraRules, type Sbv2Knobs } from "./text/symbols.ts";
-import { type CleanRanges, DebertaTokenizer } from "./text/tokenizer.ts";
-import { MAX_CODE_POINT } from "../text/asset-gates.ts";
+import type { DebertaTokenizer } from "./text/tokenizer.ts";
+import { parseTokenizerAsset } from "./text/asset.ts";
 import { durationsToFrames } from "./host/duration.ts";
 import { buildZp } from "./host/latent.ts";
 import { Randn } from "./host/random.ts";
@@ -102,6 +102,7 @@ import {
   loadShardComponents,
   type ModelComponent,
 } from "../hub/components.ts";
+import { readAssetBuffer, readAssetJson } from "../hub/asset-readers.ts";
 
 /**
  * manifest の weights / assets 表に現れる取得キー（ADR 0041 §3 の規約名）。
@@ -190,32 +191,11 @@ export type Sbv2Assets = {
   readonly assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>;
 };
 
-/**
- * 取得済みバイト列を `openModel` へ渡せる ArrayBuffer にする。
- *
- * MUST: `slice` で写さない — hub は buffer 全体を占める view を返す契約なので、崩れていたら
- * **取得層の不変条件破れ**として落とす。
- */
+/** 取得済みバイト列を `openModel` へ渡せる ArrayBuffer にする（門の本体は {@link readAssetBuffer}）。 */
 const assetBuffer = (
   assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>,
   key: string,
-): ArrayBuffer => {
-  if (!Object.hasOwn(assets, key)) {
-    throw new Error(
-      `sbv2: 資産 '${key}' が無い（manifest の weights / assets に ${key} が要る）` +
-        `（揃っているキー: ${Object.keys(assets).join(" / ")}）`,
-    );
-  }
-  const bytes = assets[key];
-  if (bytes.byteOffset !== 0 || bytes.byteLength !== bytes.buffer.byteLength) {
-    throw new Error(
-      `sbv2: 資産 '${key}' の bytes が buffer 全体を占めていない` +
-        `（byteOffset ${bytes.byteOffset} / byteLength ${bytes.byteLength} /` +
-        ` buffer ${bytes.buffer.byteLength}）`,
-    );
-  }
-  return bytes.buffer;
-};
+): ArrayBuffer => readAssetBuffer("sbv2", "weights / assets", assets, key);
 
 /**
  * 全量面（`fromAssets`）のコンポーネント供給口（受け口の実装は 7 家族共有 —
@@ -229,9 +209,7 @@ export const assetOpener = (assets: Sbv2Assets["assets"]): ComponentOpener =>
   assetComponentOpener("sbv2", assets, (key) => assetBuffer(assets, key));
 
 /**
- * MUST: `fatal: true` で decode する。既定の TextDecoder は不正 UTF-8 を U+FFFD へ黙って
- * 置換するので、壊れたバイト列が「内容の違う valid JSON」として通ってしまう（hub の
- * manifest・anima tokenizer・safetensors ヘッダと同じ流儀で fail loudly）。
+ * 資産 JSON を読む（decode / parse の門は {@link readAssetJson}）。
  *
  * NOTE: `export` は門を直接叩くテストのため（`fromAssets` 経由で此処へ届くには実 IR
  * コンテナ 3 本が要る）。`mod.ts` / サブパス面には出さない（ADR 0008）。
@@ -239,20 +217,7 @@ export const assetOpener = (assets: Sbv2Assets["assets"]): ComponentOpener =>
 export const assetJson = (
   assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>,
   key: string,
-): unknown => {
-  const buffer = assetBuffer(assets, key);
-  let text: string;
-  try {
-    text = new TextDecoder("utf-8", { fatal: true }).decode(buffer);
-  } catch (cause) {
-    throw new Error(`sbv2: 資産 '${key}' が UTF-8 として読めない`, { cause });
-  }
-  try {
-    return JSON.parse(text);
-  } catch (cause) {
-    throw new Error(`sbv2: 資産 '${key}' が JSON として読めない`, { cause });
-  }
-};
+): unknown => readAssetJson("sbv2", "weights / assets", assets, key);
 
 /**
  * グラフ入力の 1 軸ぶんの**静的**次元を引く。
@@ -320,91 +285,6 @@ const observer = (
 ): ((diagnostics: SessionDiagnostics) => void) | undefined => {
   const listener = state.onRunDiagnostics;
   return listener === undefined ? undefined : (diagnostics) => listener(component, diagnostics);
-};
-
-/**
- * `cleanRanges` の区間表を検査して読む。
- *
- * MUST: 整数・コードポイント範囲・`start <= end`・**昇順かつ非重複**まで見る。`inRanges`
- * （`text/tokenizer.ts`）は二分探索なので、この前提が破れても例外は出ず**黙って外す** —
- * 除去 / 空白化の規則だけが変わった `bertText` から `inputIds` と `baseWord2ph` が同じ
- * 壊れ方で作られるため、`text/model-input.ts` の長さ突合門も通り、別の BERT 埋め込みで合成した
- * 音がそのまま出る。並べ替えて救わない（資産の不正として構築時に落とす）。
- */
-const parseRanges = (raw: unknown, where: string): (readonly [number, number])[] => {
-  if (!Array.isArray(raw)) throw new Error(`${where}: 区間表が配列でない`);
-  let previousEnd = -1;
-  return raw.map((entry, index) => {
-    if (
-      !Array.isArray(entry) || entry.length !== 2 ||
-      typeof entry[0] !== "number" || typeof entry[1] !== "number"
-    ) {
-      throw new Error(`${where}[${index}]: 区間が [start, end] の数値対でない`);
-    }
-    const [start, end]: [number, number] = [entry[0], entry[1]];
-    if (
-      !Number.isInteger(start) || !Number.isInteger(end) ||
-      start < 0 || end > MAX_CODE_POINT
-    ) {
-      throw new Error(
-        `${where}[${index}]: 区間 [${start}, ${end}] が 0..${MAX_CODE_POINT} の整数対でない`,
-      );
-    }
-    if (start > end) {
-      throw new Error(`${where}[${index}]: 区間 [${start}, ${end}] の start が end より大きい`);
-    }
-    if (start <= previousEnd) {
-      throw new Error(
-        `${where}[${index}]: 区間 [${start}, ${end}] が直前の終端 ${previousEnd} 以下から始まる` +
-          "（昇順・非重複でない — 二分探索が黙って外す）",
-      );
-    }
-    previousEnd = end;
-    return [start, end] as const;
-  });
-};
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
-
-/** i32 の上限（トークン id は最終的に `Int32Array` へ書かれる）。 */
-const MAX_TOKEN_ID = 2147483647;
-
-/**
- * 実行時資産のトークナイザ JSON（`karume dist` が配る形）を検査して読む。
- *
- * MUST: 構造を検査してから使う。壊れた語彙表は「読めない」ではなく**全トークンが `[UNK]`**
- * という形で沈黙し、BERT 特徴だけが静かに無意味になる（`text/tokenizer.ts` の doc）。
- *
- * NOTE: `export` は門を直接叩くテストのため（{@link assetJson} と同じ理由）。
- */
-export const parseTokenizerAsset = (raw: unknown, where: string): DebertaTokenizer => {
-  if (!isRecord(raw)) throw new Error(`${where}: オブジェクトでない`);
-  const special = raw["special"];
-  if (!isRecord(special)) throw new Error(`${where}.special: オブジェクトでない`);
-  const [clsId, sepId, unkId] = [special["clsId"], special["sepId"], special["unkId"]];
-  if (typeof clsId !== "number" || typeof sepId !== "number" || typeof unkId !== "number") {
-    throw new Error(`${where}.special: clsId / sepId / unkId が数値でない`);
-  }
-  // MUST: 整数かつ i32 の範囲。id は `Int32Array` へ書かれるので、非整数は**黙って切り捨て
-  // られ**、範囲外は wrap する — どちらも「別のトークンを指す」沈黙誤値になる（語彙の行数に
-  // 収まることは `fromVocabText` が語彙表を持つ側で見る）。
-  for (const [name, id] of [["clsId", clsId], ["sepId", sepId], ["unkId", unkId]] as const) {
-    if (!Number.isInteger(id) || id < 0 || id > MAX_TOKEN_ID) {
-      throw new Error(`${where}.special.${name}: 0..${MAX_TOKEN_ID} の整数でない（${id}）`);
-    }
-  }
-  const vocabText = raw["vocabText"];
-  if (typeof vocabText !== "string" || vocabText.length === 0) {
-    throw new Error(`${where}.vocabText: 空`);
-  }
-  const clean = raw["cleanRanges"];
-  if (!isRecord(clean)) throw new Error(`${where}.cleanRanges: オブジェクトでない`);
-  const ranges: CleanRanges = {
-    removed: parseRanges(clean["removed"], `${where}.cleanRanges.removed`),
-    spaced: parseRanges(clean["spaced"], `${where}.cleanRanges.spaced`),
-  };
-  return DebertaTokenizer.fromVocabText(vocabText, ranges, { clsId, sepId, unkId });
 };
 
 /**
