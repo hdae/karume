@@ -85,42 +85,11 @@ import {
  */
 export const READONLY_ATTENTION_ARITY = 1;
 
-export type OpKind =
-  | "unary"
-  | "binary"
-  | "where"
-  | "cumsum"
-  | "matmul"
-  | "bmm"
-  | "gather"
-  | "rowReduce"
-  | "argmax"
-  | "topk"
-  | "cast"
-  | "reshape"
-  | "permute"
-  | "expand"
-  | "slice"
-  | "cat"
-  | "pad"
-  | "flip"
-  | "symPrefixSlice"
-  | "linear"
-  | "layerNorm"
-  | "rmsNorm"
-  | "staticQuantize"
-  | "softmax"
-  | "safeSoftmax"
-  | "attention"
-  | "stateAppend"
-  | "embedding"
-  | "maskedFill"
-  | "conv1d"
-  | "conv2d"
-  | "convTranspose1d"
-  | "deformConv2d"
-  | "upsampleBilinear2d"
-  | "gruScan";
+/**
+ * op の種別。{@link OpContract} の `kind` から**導出する**（列挙を二重に持つと、op 語彙を
+ * 足したときに片方だけが古いまま型検査が緑で通る）。
+ */
+export type OpKind = OpContract["kind"];
 
 /**
  * 入力スロットの dtype 契約（ADR 0012 の拡張）。
