@@ -46,7 +46,7 @@ const outputs = await session.run({
 console.log(outputs.logits.shape, outputs.logits.data.length);
 
 await session.dispose();
-gpu.device.destroy();
+gpu.destroy();
 ```
 
 Input tensors are borrowed, not copied: do not write to `data` until the promise returned by `run`

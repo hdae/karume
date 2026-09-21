@@ -1713,6 +1713,14 @@ export class Session {
       // 束縛も発行時に固定する（本体で読むと、発行直後の書き換えが「シンボルの束縛が衝突」
       // という無関係な失敗に化ける）。
       capturedBindings = { ...bindings };
+      // MUST: 写しの後にもう一度受け口を検査する。`captureInputs` と spread は利用者の getter を
+      // 同期で走らせるので、その中で同じ Session の `dispose()` が発行できる。呼び出し時点の判定
+      // をすり抜けると破棄完了後に本体が走って slot backing を再確保し、回収経路の無い GPU
+      // バッファが残る（{@link Session.#createGenerationContext} の「確保の後にもう一度」と同じ
+      // 規律 — 最終検査は資源予約と直列化鎖への追加の直前に置く）。
+      if (this.#disposal !== undefined) {
+        throw new ExecutionError("dispose 済みの Session では実行できない");
+      }
       // MUST: 常駐入力の使用予約も**発行の同期区間**で取る（本体の束縛予約だけでは、受理済みの
       // run が居るのに同じ tick の `dispose()` が通る — {@link retainUsedResidents}）。
       const targets: [where: string, resident: ResidentTensor][] = [];
@@ -1812,34 +1820,47 @@ export class Session {
     return { admitted, outputs: read.promise };
   }
 
+  /**
+   * `enqueue` / `enqueueRead` の受け口の検査（{@link Session.#admit} が写しの前後で 2 度呼ぶ）。
+   *
+   * MUST: 2 度目は `captureInputs` と options の写しの**後**。どちらも利用者の getter を同期で
+   * 走らせるので、その中で同じ Session の `dispose()` / `enqueueRead` / `run` が発行できる。
+   * 呼び出し時点の判定だけだと ①破棄済み Session の本体が走る ②`enqueueRead` を積んだ batch へ
+   * 後続 enqueue が通り、決着時に読む slot を上書きする（沈黙誤値）③未 await の run と区間ロック
+   * の閉路が {@link BatchScopeError} へ変換されず無診断のハングになる。
+   * MUST: リースを取る**前**に見る（取ってから落とすと、返し手の居ないリースが 1 本残って
+   * `finish()` が今度こそ永久に待つ）。
+   */
+  #assertEnqueueAdmissible(batch: EnqueueOptions["batch"]): void {
+    if (this.#disposal !== undefined) {
+      throw new ExecutionError("dispose 済みの Session では実行できない");
+    }
+    if (this.#readBatch === batch) {
+      throw new BatchScopeError(
+        "enqueueRead を積んだ batch には、その決着まで同じ Session から enqueue できない" +
+          "（決着時に読む出力 slot を後続の enqueue が上書きすると沈黙誤値になる）",
+      );
+    }
+    if (this.#pendingRuns > 0) {
+      throw new BatchScopeError(
+        `未決着の run が ${this.#pendingRuns} 本ある Session には enqueue できない` +
+          "（batch 区間は errorScope 区間ロックを握ったまま enqueue の決着を待ち、その " +
+          "enqueue は先行 run を待ち、run はそのロックを待つ = 自己デッドロック）。" +
+          "run を await してから batch を開くか、区間中は enqueue だけを使うこと",
+      );
+    }
+  }
+
   /** `enqueue` / `enqueueRead` の共通本体（受け口の検査・写し・リース・区間への登録）。 */
   #admit(
     inputs: RunInputs,
     options: EnqueueOptions,
     read: PromiseWithResolvers<RunOutputs> | undefined,
   ): Promise<void> {
-    if (this.#disposal !== undefined) {
-      return Promise.reject(new ExecutionError("dispose 済みの Session では実行できない"));
-    }
-    if (this.#readBatch === options.batch) {
-      return Promise.reject(
-        new BatchScopeError(
-          "enqueueRead を積んだ batch には、その決着まで同じ Session から enqueue できない" +
-            "（決着時に読む出力 slot を後続の enqueue が上書きすると沈黙誤値になる）",
-        ),
-      );
-    }
-    // MUST: リースを取る**前**に見る（取ってから落とすと、返し手の居ないリースが 1 本残って
-    // `finish()` が今度こそ永久に待つ）。
-    if (this.#pendingRuns > 0) {
-      return Promise.reject(
-        new BatchScopeError(
-          `未決着の run が ${this.#pendingRuns} 本ある Session には enqueue できない` +
-            "（batch 区間は errorScope 区間ロックを握ったまま enqueue の決着を待ち、その " +
-            "enqueue は先行 run を待ち、run はそのロックを待つ = 自己デッドロック）。" +
-            "run を await してから batch を開くか、区間中は enqueue だけを使うこと",
-        ),
-      );
+    try {
+      this.#assertEnqueueAdmissible(options.batch);
+    } catch (cause) {
+      return Promise.reject(cause);
     }
     const batch = options.batch[RUNTIME_INTERNAL];
     // MUST: 受け口の検査とリース取得は `#serialize` に積む**前**に済ませる。本体はマイクロ
@@ -1871,6 +1892,9 @@ export class Session {
           // 「書けたのに別の常駐テンソルへ」の沈黙誤値になる）。実体は借りたまま。
           : { copyOutputs: { ...options.copyOutputs } }),
       };
+      // MUST: 写しの後にもう一度（{@link Session.#assertEnqueueAdmissible}）— 最終検査は資源予約と
+      // 直列化鎖への追加の直前に置く。
+      this.#assertEnqueueAdmissible(capturedOptions.batch);
       // MUST: 使用予約は写し先も含めて**発行の同期区間**で取る（run と同じ理由 —
       // {@link retainUsedResidents}）。写しの相手も受理済みの enqueue が使う実体なので、
       // 入力と同じ寿命の保護が要る。

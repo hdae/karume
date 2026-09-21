@@ -477,6 +477,21 @@ export class SubmitScheduler {
   }
 
   /**
+   * 開いている計測窓を記録せずに捨てる（フェンスに到達しなかった経路 — batch の決着が
+   * `mapAsync` より前の errorScope 検査で落ちた場合）。
+   *
+   * MUST: フェンス前に閉じる代わりに呼ぶ。GPU 実行の途中で閉じると実測が過小に出て
+   * `msPerWorkgroup` に入り、チャンク上限が `maxChunkSize` へ恒久的に切り替わる（TDR 域へ向かう
+   * 危険側 — {@link SubmitScheduler.closeMeasurementWindowAfterFence} の MUST の裏面）。捨てた窓は
+   * 情報が無いだけなので既存の推定値には触らない（実測 0 の窓と同じ扱い — 不変条件 1）。
+   */
+  discardMeasurementWindow(): void {
+    this.#windowStartedAt = undefined;
+    this.#windowWork = 0;
+    this.#windowChunks = 0;
+  }
+
+  /**
    * 未 submit のエンコードを submit せずに捨てる。
    *
    * MUST: 失敗した run の後始末はこの経路を通す。残骸を実行する理由が無いうえ、失敗経路の

@@ -72,6 +72,14 @@ measurements in `docs/research/`.
 - `sin` golden on Intel Arc (Mesa ANV): the output is within the WGSL accuracy bound
   (absolute 2^-11) and is now accepted under it; the resident over-limit test no longer assumes
   `maxBufferSize` is a multiple of 4.
+- Batch lifecycle in runtime: a batch whose read-back fails before its fence no longer feeds
+  the partial elapsed time into the submit chunk estimate; `enqueue` / `run` /
+  `finishAndRead` re-check their admission after copying the caller's inputs, so a getter that
+  re-enters the same Session or batch is rejected instead of reading another call's values,
+  running after `dispose`, or deadlocking; `finish` rejects when the device is lost while its
+  error scopes are still settling.
+- The runtime README's minimal example tears the device down through `gpu.destroy()` (calling
+  `device.destroy()` directly fires `onDeviceLost` as an unexpected loss).
 
 ### Breaking
 

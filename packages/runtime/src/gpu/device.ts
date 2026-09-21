@@ -728,6 +728,12 @@ const assertDeviceUsable = (gpu: GpuContext, where: string): void => {
 export class GpuContext {
   /** ランタイム内部面（利用者が触る面ではない）。 */
   readonly [RUNTIME_INTERNAL]: GpuContextInternals;
+  /**
+   * 生の device（ランタイムの管理外で触る面）。ここから `destroy()` を呼ぶと
+   * {@link AcquireGpuOptions.onDeviceLost} の抑止が効かず予期しない消失として通知され、
+   * `pushErrorScope` / `popErrorScope` を張ると errorScope 区間ロック（LIFO の排他）に参加しない。
+   * 後始末は {@link GpuContext.destroy} を使うこと。
+   */
   readonly device: GPUDevice;
   readonly adapterInfo: GPUAdapterInfo;
   /** device が実際に有効化した feature（アダプタが持つだけの feature は含まない）。 */
@@ -1304,6 +1310,8 @@ export type BatchMember = {
   submitPending(): void;
   /** batch のフェンス完了後に計測窓を閉じる。 */
   closeMeasurementWindowAfterFence(): void;
+  /** フェンスに到達しなかった batch の計測窓を記録せずに捨てる。 */
+  discardMeasurementWindow(): void;
 };
 
 /** バッチの成功判定後に状態を確定し、成否によらず使用予約を返す。 */
@@ -1436,6 +1444,8 @@ export class BatchScope {
       const device = gpu.device;
       let outputs: Readonly<Record<string, ArrayBuffer>> | undefined;
       let popped = false;
+      /** 完了フェンス（読み戻しの `mapAsync` か `onSubmittedWorkDone`）に到達したか。 */
+      let fenced = false;
       const checkFailureScopes = async (): Promise<void> => {
         const pending = popFailureScopes(
           device,
@@ -1460,6 +1470,9 @@ export class BatchScope {
             this.#readback ?? [],
             this.#graphReads,
             checkFailureScopes,
+            () => {
+              fenced = true;
+            },
           );
         } else {
           // 写し元が 1 本も無い登録（グラフ出力 0 本）は従来の完了フェンスで閉じる。
@@ -1468,6 +1481,7 @@ export class BatchScope {
             device.queue.onSubmittedWorkDone(),
             "batch の完了",
           );
+          fenced = true;
         }
       } catch (cause) {
         if (!popped) await discardFailureScopes(device);
@@ -1476,9 +1490,22 @@ export class BatchScope {
         // 計測窓は batch のフェンス 1 回で閉じる。窓に N 本の enqueue が入るぶん推定は粗く
         // （過大に）出るが、過大 = チャンクが小さくなる向き = TDR に対して安全側
         // （src/gpu/submit.ts の「計測の帰属」）。
-        for (const member of this.#members) member.closeMeasurementWindowAfterFence();
+        // MUST: 閉じるのはフェンスに到達した経路だけ。読み戻しが `mapAsync` より前の errorScope
+        // 検査で落ちた窓は GPU 実行の途中にあり、閉じると過小な実測が推定に入ってチャンク上限が
+        // 恒久的に開く（危険側）。その窓は捨てて既存の推定を据え置く。
+        for (const member of this.#members) {
+          if (fenced) member.closeMeasurementWindowAfterFence();
+          else member.discardMeasurementWindow();
+        }
       }
-      if (!popped) await checkFailureScopes();
+      if (!popped) {
+        await checkFailureScopes();
+        // MUST: pop 待ちの間の消失はフェンスの競合に掛からない（`raceDeviceLost` は待ちを抜けた
+        // 時点で購読を外す）。消失後の pop は null で決着する（docs/research の
+        // 2026-08-16-device-lost-wait-settlement）ので、ここで見ないと消失を跨いだ finish が
+        // 成功で返り「区間は無事に閉じた」と誤読される。
+        assertDeviceUsable(gpu, "batch の完了");
+      }
       return outputs;
     });
     // 決着を finish が受け取るまで未処理拒否にしない（拒否の中身は finish がそのまま返す）。
@@ -1641,13 +1668,14 @@ export class BatchScope {
   ): Promise<Readonly<Record<string, ArrayBuffer>>> {
     const retained: ResidentTensor[] = [];
     try {
-      if (this.#finished || this.#settling) {
-        throw new BatchScopeError(
-          "finishAndRead は未終了・settle中でない batch に1回だけ指定できる",
-        );
-      }
+      this.#assertReadbackAcceptable();
       assertDeviceUsable(this.#gpu, "batch の読み戻し");
       const entries = Object.entries(outputs);
+      // MUST: 写しの後にもう一度検査する。`Object.entries` は利用者の getter を同期で走らせるので、
+      // その中で同じ batch の `finishAndRead` / `finish` が先に決着させられる。ここで弾かないと
+      // 外側が `#readback` を上書きし、内側が予約した常駐の使用予約が永久に返らない（以後
+      // dispose できない）。
+      this.#assertReadbackAcceptable();
       let totalBytes = 0;
       for (const [name, resident] of entries) {
         if (
@@ -1668,6 +1696,15 @@ export class BatchScope {
       return Promise.reject(cause);
     }
     return this.finish().then(async () => (await this.#completion) ?? {});
+  }
+
+  /** `finishAndRead` の受け口（未終了・settle 中でない batch へ 1 回だけ）。 */
+  #assertReadbackAcceptable(): void {
+    if (this.#finished || this.#settling) {
+      throw new BatchScopeError(
+        "finishAndRead は未終了・settle中でない batch に1回だけ指定できる",
+      );
+    }
   }
 
   /** 決着時の staging に載る合計バイト数（常駐の指定 + 登録済みグラフ出力）。 */
@@ -1700,6 +1737,7 @@ export class BatchScope {
     residents: readonly (readonly [string, ResidentTensor])[],
     graphReads: readonly GraphRead[],
     checkFailureScopes: () => Promise<void>,
+    markFenced: () => void,
   ): Promise<Readonly<Record<string, ArrayBuffer>>> {
     const device = this.#gpu.device;
     const sources: readonly BatchReadSource[] = [
@@ -1728,6 +1766,7 @@ export class BatchScope {
         staging.mapAsync(MAP_MODE.READ),
         "batch の読み戻し",
       );
+      markFenced();
       const mapped = staging.getMappedRange();
       offset = 0;
       const take = (size: number): ArrayBuffer => {

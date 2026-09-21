@@ -612,3 +612,26 @@ Deno.test("subgroup32カナリアは全レーンの既知解だけを受理し�
     "subgroups",
   );
 });
+
+Deno.test("batch finish: errorScope の pop 待ちの間に消失した区間は成功で返さない", async () => {
+  // 読み戻しの無い finish は `onSubmittedWorkDone` だけを消失と競わせ、その後の pop 待ちは競わせない
+  // （消失後の pop は null で決着する — docs/research/2026-08-16-device-lost-wait-settlement.md）。
+  // 消失を跨いだ finish が成功で返ると「区間は無事に閉じた」と誤読されるので、pop の後に消失を見る。
+  const pops: PromiseWithResolvers<GPUError | null>[] = [];
+  const { gpu, lose } = losableGpuContext(undefined, {
+    popErrorScope: () => {
+      const pop = Promise.withResolvers<GPUError | null>();
+      pops.push(pop);
+      return pop.promise;
+    },
+  });
+  const batch = await gpu.beginBatch();
+  const finished = batch.finish();
+  // pop が発行される（= フェンスを抜けた）まで待つ。
+  while (pops.length < 2) await Promise.resolve();
+  lose();
+  // 消失の記録（`device.lost` の then）が pop の決着より先に走る形を作る。
+  for (let i = 0; i < 4; i += 1) await Promise.resolve();
+  for (const pop of pops) pop.resolve(null);
+  await assertRejects(() => finished, GpuDeviceLostError, "batch の完了");
+});

@@ -31,6 +31,10 @@ export type FakeDeviceParts = {
   /** 未指定なら「消失しない device」（永久に未解決の promise）。 */
   readonly lost?: Promise<GPUDeviceLostInfo>;
   readonly features?: Iterable<string>;
+  /** errorScope の pop（batch の決着を通す検証で要る）。未指定なら null で即決着。 */
+  readonly popErrorScope?: () => Promise<GPUError | null>;
+  /** `queue.onSubmittedWorkDone`（batch の完了フェンス）。未指定なら即決着。 */
+  readonly onSubmittedWorkDone?: () => Promise<void>;
 };
 
 /** DOM 型全体は再現しないため cast で渡す（テスト専用の境界）。 */
@@ -38,6 +42,11 @@ export const fakeDevice = (parts: FakeDeviceParts = {}): GPUDevice =>
   ({
     lost: parts.lost ?? new Promise<GPUDeviceLostInfo>(() => {}),
     features: new Set(parts.features ?? []),
+    pushErrorScope: (): void => undefined,
+    popErrorScope: parts.popErrorScope ?? ((): Promise<GPUError | null> => Promise.resolve(null)),
+    queue: {
+      onSubmittedWorkDone: parts.onSubmittedWorkDone ?? ((): Promise<void> => Promise.resolve()),
+    },
   }) as unknown as GPUDevice;
 
 export const fakeGpuContext = (
@@ -57,7 +66,10 @@ const DEFAULT_LOSS: GPUDeviceLostInfo = { reason: "destroyed", message: "テス�
  * `onDeviceLost` を渡せるのは、公開通知が**挿入順の先頭**に来る形（コンストラクタでの登録）
  * を再現するため。内部購読より先に呼ばれることが、例外隔離を要求する条件そのものになる。
  */
-export const losableGpuContext = (onDeviceLost?: DeviceLostHandler): {
+export const losableGpuContext = (
+  onDeviceLost?: DeviceLostHandler,
+  parts: Omit<FakeDeviceParts, "lost"> = {},
+): {
   readonly gpu: GpuContext;
   readonly lose: (info?: GPUDeviceLostInfo) => void;
 } => {
@@ -66,7 +78,7 @@ export const losableGpuContext = (onDeviceLost?: DeviceLostHandler): {
     resolve = settle;
   });
   return {
-    gpu: fakeGpuContext(fakeDevice({ lost }), onDeviceLost),
+    gpu: fakeGpuContext(fakeDevice({ ...parts, lost }), onDeviceLost),
     lose: (info: GPUDeviceLostInfo = DEFAULT_LOSS): void => resolve(info),
   };
 };
