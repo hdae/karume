@@ -36,12 +36,11 @@ import {
   closeChatTurn,
   decodeChatChunks,
   type Gemma4ChatStop,
-  Gemma4Pipeline,
   type Gemma4RunPhase,
   runDiagnosticsHook,
-  speculativeSetup,
   stopStringOf,
-} from "../src/gemma/pipeline.ts";
+} from "../src/gemma/chat-turn.ts";
+import { Gemma4Pipeline, speculativeSetup } from "../src/gemma/pipeline.ts";
 import type { Gemma4Drafter } from "../src/gemma/speculative.ts";
 import {
   createGenerationSequence,

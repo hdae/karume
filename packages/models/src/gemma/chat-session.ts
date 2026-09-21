@@ -55,8 +55,8 @@ import {
   type Gemma4ChatStop,
   type Gemma4ChatStream,
   type Gemma4PrefillProgress,
-  type Gemma4SequenceOptions,
-} from "./pipeline.ts";
+} from "./chat-turn.ts";
+import type { Gemma4SequenceOptions } from "./pipeline.ts";
 import { type Gemma4ChatMessage, gemma4ChatPrompt, gemma4ChatTurn } from "./text/chat.ts";
 import type { GemmaTokenizer } from "./text/tokenizer.ts";
 

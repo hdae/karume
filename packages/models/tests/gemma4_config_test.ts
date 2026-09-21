@@ -25,8 +25,10 @@ import { type Gemma4PipelineConfig, parseGemma4PipelineConfig } from "../src/gem
 import {
   assertChunkLength,
   assertGemma4ChunkBuckets,
-  assertPleShardAssets,
   assertRopeInputShapes,
+} from "../src/gemma/admission.ts";
+import {
+  assertPleShardAssets,
   GEMMA4_CHUNK_BUCKETS,
   Gemma4Pipeline,
 } from "../src/gemma/pipeline.ts";

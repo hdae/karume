@@ -37,17 +37,11 @@
 
 import { resolveGemmaSessionOptions } from "./session-options.ts";
 import { createGemmaGreedyOutput, type GemmaGreedyOutput } from "./greedy-output.ts";
-import {
-  admitGemma4Qat,
-  assertGemma4QatModel,
-  assertGemma4QatPle,
-  type Gemma4QatModel,
-} from "./qat.ts";
+import { admitGemma4Qat, assertGemma4QatPle } from "./qat.ts";
 import { closeableGenerator } from "../concurrency/closeable-generator.ts";
 import {
   acquireGpu,
   type AdmissionReport,
-  assertChunkBuckets,
   estimateGraphMemory,
   type GenerationContext,
   type GpuContext,
@@ -62,10 +56,7 @@ import {
   type DistributionSource,
   type HubRepoRef,
   loadManifest,
-  type Manifest,
-  type ModelEntry,
   openAsset,
-  type Quant,
   resolveFiles,
   type StreamAssetsOptions,
 } from "@karume/hub";
@@ -78,11 +69,11 @@ import {
   readCachedAsset,
 } from "../hub/components.ts";
 import { type FromPretrainedHubOptions, hubLoadOptions } from "../hub/load-options.ts";
+import { readAssetBuffer } from "../hub/asset-readers.ts";
 import { toManifestSource } from "../hub/repo-ref.ts";
 import { disposeSteps } from "../session/dispose-steps.ts";
 import { assertRequiredLimitsBeforeDownload } from "../session/gpu-features.ts";
 import {
-  GEMMA4_PIPELINE_MAJOR,
   GEMMA4_PIPELINE_NAME,
   type Gemma4DefaultSampler,
   type Gemma4PipelineConfig,
@@ -90,7 +81,6 @@ import {
 } from "./config.ts";
 import {
   createGenerationProgram,
-  type GenerationGraph,
   type GenerationProgram,
   generationProgramFace,
   type GenerationWiring,
@@ -98,13 +88,9 @@ import {
 import {
   assertGenerationRequestValues,
   createGenerationSequence,
-  type GenerationEvent,
   type GenerationRequest,
-  type GenerationRunPhase,
   type GenerationSequence,
-  type GenerationSpeculation,
   type GenerationSpeculativeOptions,
-  type GenerationStop,
   type GenerationStream,
   physicalChunkRows,
 } from "../generation/sequence.ts";
@@ -128,50 +114,32 @@ import {
   type Gemma4PleResidency,
   type Gemma4PleResident,
 } from "./ple-gpu.ts";
-import {
-  GEMMA4_ROPE_LAYER_TYPES,
-  GEMMA4_ROPE_PARTS,
-  gemma4QatRopeInputs,
-  gemma4RopeInputName,
-  gemma4RopeInputNames,
-  gemma4RopeInputs,
-} from "./rope.ts";
-import {
-  admitGemma4Drafter,
-  GEMMA4_DRAFT_STEPS,
-  type Gemma4Drafter,
-  type Gemma4DrafterAdmission,
-  openGemma4DraftFace,
-} from "./speculative.ts";
-import {
-  createStopStringFilter,
-  type StopStringFilter,
-  type StreamingDetokenizer,
-} from "../text/detokenizer.ts";
+import { gemma4QatRopeInputs, gemma4RopeInputNames, gemma4RopeInputs } from "./rope.ts";
+import { GEMMA4_DRAFT_STEPS, type Gemma4Drafter, openGemma4DraftFace } from "./speculative.ts";
+import { createStopStringFilter } from "../text/detokenizer.ts";
 import { parseGemmaTokenizerAsset } from "./text/asset.ts";
 import { GemmaTokenizer } from "./text/tokenizer.ts";
 import { type Gemma4ChatMessage, gemma4ChatPrompt, gemma4StopTokens } from "./text/chat.ts";
-
-type GemmaFamily = "gemma4" | "gemma4-qat";
-
-/**
- * family ごとの入口の名前（例外の接頭辞と `where` の前半を**ここ 1 箇所**から出す）。
- *
- * MUST: 共通基底が投げる文言も family の名前を名乗る — `Gemma4QatPipeline.fromPretrained` を
- * 叩いた利用者が `Gemma4Pipeline: ...` を受け取ると、どの入口の話か辿れない。
- */
-const gemmaEntryName = (family: GemmaFamily): string =>
-  family === "gemma4" ? "Gemma4Pipeline" : "Gemma4QatPipeline";
-
-/**
- * family と、QAT だけが持つ model 名（{@link admitGemma4Qat} が**グラフから確定**させた値）。
- *
- * MUST: model 名を後段で再導出しない（判別規則が 2 実装に割れると、モデルが増えたときに
- * 片方だけが古い写像を使い続ける）。`Gemma4QatModel` に欄が増えれば型検査が欠落を教える。
- */
-type GemmaFamilyAdmission =
-  | { readonly family: "gemma4" }
-  | { readonly family: "gemma4-qat"; readonly model: Gemma4QatModel };
+import {
+  admitGemma4,
+  assertChunkLength,
+  assertGemma4ChunkBuckets,
+  type Gemma4Admission,
+  gemma4ManifestConfig,
+  gemmaEntryName,
+  type GemmaFamily,
+  type GemmaFamilyAdmission,
+} from "./admission.ts";
+import {
+  chatStreamOf,
+  completeChatTurn,
+  decodeChatChunks,
+  type Gemma4ChatStop,
+  type Gemma4ChatStream,
+  type Gemma4PrefillProgress,
+  type Gemma4RunPhase,
+  runDiagnosticsHook,
+} from "./chat-turn.ts";
 
 /**
  * グラフ入力の名前（正本は `export_product.py` の定数）。
@@ -182,15 +150,6 @@ type GemmaFamilyAdmission =
 const INPUT_IDS = "input_ids";
 const PER_LAYER_INPUTS = "per_layer_inputs";
 const LAST_ROW = "last_row";
-
-/**
- * 製品グラフの出口の本数（**順序が契約** — 出力 0 = 選んだ行の logits `[1,R,V]`・
- * 出力 1 = 同じ行の最終 norm 後 hidden `[1,R,H]`）。
- *
- * 名前ではなく順序で引く（`vocabSizeOf` / {@link buildGemma4Program}）— 出口の綴りは
- * 焼き手の内部名で、配布形ごとに動きうるためである。
- */
-const GRAPH_OUTPUTS = 2;
 
 /**
  * 配布形（manifest）の取得キー — weights 1 本と、全量で受け取る assets 2 本。
@@ -634,83 +593,6 @@ export type Gemma4ChatOptions = {
   readonly speculative?: boolean | "always";
 };
 
-/**
- * prefill の進捗 1 通ぶん（`chunk / chunks` がそのまま進捗）。
- *
- * `chunk` は**commit 済み**の chunk 数（1 始まり）で、`GenerationEvent` の `prefill` と同じ意味・
- * 同じ数である（この層は文字列の面なのでイベント型そのものを出さない）。
- */
-export type Gemma4PrefillProgress = {
-  readonly chunk: number;
-  readonly chunks: number;
-};
-
-/**
- * 観測席（{@link Gemma4PipelineOptions.onRunDiagnostics}）が受ける「その 1 通がどの run か」。
- *
- * 席が受けるのは **run 1 本につき 1 通**で、この値はその run が何だったかを言う（順番の勘定
- * ではない）。番号はすべて 1 始まり — `prefill` の `chunk` / `chunks` は `GenerationEvent` の
- * `prefill` と同じ数（commit 済み chunk 数）、`decode` の `step` は**そのターンの** decode run の
- * 番号、`draft` / `verify` の `cycle` は投機の cycle 番号（同じ cycle の 2 本は同じ番号を名乗る）。
- *
- * MUST: 受け手は通知の回数ではなくこの値で分岐する — 複数 chunk に割れた prompt では
- * 「1 通目だけが prefill」が成り立たない。
- * MUST: 生成面の `GenerationRunPhase` **そのもの**である（写した型を持たない — 枝が片方だけ
- * 増えたときに型検査が通り続ける）。この層が足すのは「どちらの Session の診断を引くか」だけ。
- */
-export type Gemma4RunPhase = GenerationRunPhase;
-
-/**
- * chat 1 ターンの停止理由。
- *
- * sequence 層の理由（`eos` / `stop-token` / `max-tokens` / `aborted` / `closed`）に、この層でしか
- * 判定できない 1 つ（{@link Gemma4ChatOptions.stopStrings} の一致）を足したもの。`tokens` の
- * 意味は sequence 層と同じ（そのターンが生成した token 数 — 停止 token も 1 個）で、
- * `stop-string` では**停止文字列を含む片を出した token まで**が数に入る。
- */
-export type Gemma4ChatStop =
-  | GenerationStop
-  | {
-    readonly reason: "stop-string";
-    /** 一致した停止文字列（出力には含まれない）。 */
-    readonly stopString: string;
-    readonly tokens: number;
-    /**
-     * 投機の勘定（`GenerationStop.speculation` をそのまま写したもの — 投機 sequence の
-     * ターンだけ載る）。
-     *
-     * MUST: 写す。この枝は理由を差し替えるために object を組み直すので、写さないと
-     * 「停止文字列で閉じたターンだけ勘定が消える」形になる（例外にならない欠落）。
-     */
-    readonly speculation?: GenerationSpeculation;
-  };
-
-/**
- * 文字列片の列（`for await` で汲む）+ 停止理由 + 一括で受け取る口。
- *
- * 片は逐次復号器が**確定させたぶん**だけで（ADR 0084 決定 4）、byte_fallback の途中は次の
- * token まで持ち越される。連結すると `decode(全 token id)` と一致する（停止文字列で切った
- * ターンだけは、その手前までになる）。
- *
- * MUST: **1 つのストリームは 1 通りにしか消費できない** — 反復（`for await`）と
- * {@link Gemma4ChatStream.text} の併用も、2 度の反復も、同期に throw する。生成は 1 度しか
- * 走らないので、2 通り目には「残り」しか流れない（先に汲んだ側だけが本文を持つ）— 例外に
- * ならない取り違えなので、口の側で塞ぐ。
- *
- * MUST: `done` は**二次的な**通知路である（`GenerationStream.done` と同じ規律）— 失敗は
- * iterable 側が throw するのが一次で、`done` は同じ例外で reject するだけ。
- */
-export type Gemma4ChatStream = AsyncIterable<string> & {
-  readonly done: Promise<Gemma4ChatStop>;
-  /**
-   * 汲み切って連結した 1 本の文字列（逐次表示が要らない呼び手の口）。
-   *
-   * 反復と同じ列を同じ順で汲むだけなので、`text()` の結果は「片を全部連結したもの」と一致する。
-   * 停止理由が要るなら {@link Gemma4ChatStream.done} を併せて読む（`text()` の後でよい）。
-   */
-  text(): Promise<string>;
-};
-
 /** {@link Gemma4Pipeline} の内部状態（公開面には出さない）。 */
 type Gemma4State = {
   /**
@@ -804,26 +686,6 @@ type Gemma4State = {
 };
 
 /**
- * 家族 admission（GPU を取りに行く前・shard 面では重み prefetch の前に通す門）が確定させる材料。
- *
- * NOTE: PLE loader はここに載せない — `wiring.derivedInputs.derive` の閉包が持つのが唯一の
- * 参照で、席を 2 つ作ると「片方だけ差し替えた」形が書ける。
- */
-type Gemma4Admission = {
-  readonly component: ModelComponent;
-  readonly config: Gemma4PipelineConfig;
-  /** 最終行 logits 出口の語彙数（id 空間の相互照合の基準 — ADR 0085 決定 5）。 */
-  readonly vocabSize: number;
-  /** full スロットの容量記号（`createGenerationContext` の束縛点）。 */
-  readonly capacitySymbol: string;
-  /** 投機を指定したときだけ確定する drafter の材料（コンポーネント + 突合の結果）。 */
-  readonly drafter?: {
-    readonly component: ModelComponent;
-    readonly admission: Gemma4DrafterAdmission;
-  };
-};
-
-/**
  * 製品グラフ以外の資産（2 面が別の経路で用意し、解釈は 1 本に集める）。
  *
  * MUST: PLE sidecar だけ「バイト列」ではなく**読み口**を受ける（{@link Gemma4Assets} の同 MUST）。
@@ -882,33 +744,14 @@ export const assertPleShardAssets = (
 };
 
 /**
- * 取得済みバイト列を `openModel` へ渡せる ArrayBuffer にする（7 家族と同じ門・同じ文言）。
- *
- * MUST: `slice` で写さない — 製品グラフの weight shard は 1 本 756MiB 級で、ホスト RAM の
- * ピークが倍になる。hub は buffer 全体を占める view を返す契約なので、崩れていたら
- * **取得層の不変条件破れ**として落とす。
+ * 取得済みバイト列を `openModel` へ渡せる ArrayBuffer にする（門の本体は 7 家族共有の
+ * {@link readAssetBuffer} — 製品グラフの weight shard は 1 本 756MiB 級なので写さない）。
  */
 const assetBuffer = (
   where: string,
   assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>,
   key: string,
-): ArrayBuffer => {
-  if (!Object.hasOwn(assets, key)) {
-    throw new Error(
-      `${where}: 資産 '${key}' が無い（manifest の weights / assets に ${key} が要る）` +
-        `（揃っているキー: ${Object.keys(assets).join(" / ")}）`,
-    );
-  }
-  const bytes = assets[key];
-  if (bytes.byteOffset !== 0 || bytes.byteLength !== bytes.buffer.byteLength) {
-    throw new Error(
-      `${where}: 資産 '${key}' の bytes が buffer 全体を占めていない` +
-        `（byteOffset ${bytes.byteOffset} / byteLength ${bytes.byteLength} /` +
-        ` buffer ${bytes.buffer.byteLength}）`,
-    );
-  }
-  return bytes.buffer;
-};
+): ArrayBuffer => readAssetBuffer(where, "weights / assets", assets, key);
 
 const assetBytes = (
   where: string,
@@ -917,168 +760,6 @@ const assetBytes = (
 ): Uint8Array<ArrayBuffer> => {
   assetBuffer(where, assets, key);
   return assets[key];
-};
-
-/**
- * 選んだ行の logits 出口の語彙数をグラフから引く（`[1, R, V]` — ADR 0083 決定 6）。
- *
- * MUST: 呼び手に宣言させない。V は主 embedding の行数そのもので、宣言と食い違えば PLE
- * sidecar との相互照合（ADR 0085 決定 5）が**間違った基準**で通ってしまう。形の検査は
- * `createGenerationProgram` が同じ値でもう一度行う。
- *
- * MUST: 出口は**2 本ちょうど**（出力 0 = logits・出力 1 = 最終 norm 後 hidden）。順序は IR の
- * 契約で、名前で引かないのは配布形の綴りに依存しないためである（`capacitySymbolOf` と同じ
- * 流儀）。出口 1 本の旧配布形は**ここで**落とす — 互換分岐を書くと「hidden の無い資産で
- * 投機が黙って組めない」形が残る。
- */
-const vocabSizeOf = (graph: GenerationGraph): number => {
-  if (graph.outputs.length !== GRAPH_OUTPUTS) {
-    throw new Error(
-      `Gemma4Pipeline: グラフ出力が ${graph.outputs.length} 本` +
-        `（製品グラフの出口は logits + hidden の ${GRAPH_OUTPUTS} 本 — ADR 0083 決定 6）`,
-    );
-  }
-  const name = graph.outputs[0];
-  if (!Object.hasOwn(graph.values, name)) {
-    throw new Error(`Gemma4Pipeline: グラフ出力 '${name}' の値情報が無い`);
-  }
-  const shape = graph.values[name].shape;
-  const vocab = shape[2];
-  if (shape.length !== 3 || typeof vocab !== "number") {
-    throw new Error(
-      `Gemma4Pipeline: グラフ出力 '${name}' の shape [${shape.join(",")}] が [1,R,V] でない`,
-    );
-  }
-  return vocab;
-};
-
-/**
- * 最終 norm 後 hidden 出口の幅をグラフから引く（`[1, R, H]` — 出力 1・ADR 0083 決定 6）。
- *
- * 呼ぶのは投機のときだけ（drafter の入力 `hidden` の幅がこれと一致する MUST）。本数と順序は
- * {@link vocabSizeOf} が既に見ている。
- */
-const hiddenSizeOf = (graph: GenerationGraph): number => {
-  const name = graph.outputs[1];
-  if (!Object.hasOwn(graph.values, name)) {
-    throw new Error(`Gemma4Pipeline: グラフ出力 '${name}' の値情報が無い`);
-  }
-  const shape = graph.values[name].shape;
-  const hidden = shape[2];
-  if (shape.length !== 3 || typeof hidden !== "number") {
-    throw new Error(
-      `Gemma4Pipeline: グラフ出力 '${name}' の shape [${shape.join(",")}] が [1,R,H] でない`,
-    );
-  }
-  return hidden;
-};
-
-/**
- * full スロットの容量記号をグラフから引く。
- *
- * 記号は「入力 shape から決まらないもの」がちょうど 1 本のはずで（chunk 長の記号は
- * `input_ids` の 2 次元目から決まる・容量記号は states にしか現れない）、それを
- * `createGenerationContext` の束縛点へ渡す（ADR 0066 追記 7）。綴りを定数で持たないのは、
- * 資産側の綴りが変わったときに**黙って束縛されない記号**が残るのを避けるため。
- */
-const capacitySymbolOf = (graph: GenerationGraph): string => {
-  const fromInputs = new Set<string>();
-  for (const input of graph.inputs) {
-    for (const dim of input.shape) {
-      if (typeof dim === "string") fromInputs.add(dim);
-    }
-  }
-  const free = graph.symbols.filter((symbol) => !fromInputs.has(symbol));
-  if (free.length !== 1) {
-    throw new Error(
-      `Gemma4Pipeline: 入力 shape から決まらない記号が ${free.length} 本` +
-        `（[${free.join(", ")}] — full スロットの容量記号 1 本であること）`,
-    );
-  }
-  return free[0];
-};
-
-/**
- * RoPE 派生入力 4 本の宣言形（`[1, M, headDim]`）と `pipelineConfig.rope.<層種>.headDim` の突合。
- *
- * MUST: setup で見られる配線は setup で見る。`createGenerationProgram` が見るのは派生入力の
- * **名前の被覆**だけなので、幅の食い違い（層種別の取り違え = sliding 256 と full 512 の引き違い。
- * exporter 側 `rope.py` が `head_dim` / `global_head_dim` の分岐で自認している間違い方）は、
- * ホストが渡す表を初 `run` が受けるまで落ちない — 3.7GiB のロードの**後**で、しかも文言は
- * 「要素数が shape と合わない」になる。焼く側の鏡像は `export_decode.py` の `assert_rope_inputs`。
- *
- * NOTE: 内部の口だが export してあるのは、この単位なら宣言の突合を実 GPU も実資産も無しで
- * 縛れるため（`tests/gemma4_config_test.ts` — siglip2 の `assertStaticDim` と同じ流儀）。
- */
-export const assertRopeInputShapes = (
-  graph: GenerationGraph,
-  config: Gemma4PipelineConfig,
-): void => {
-  for (const layerType of GEMMA4_ROPE_LAYER_TYPES) {
-    const { headDim } = config.rope[layerType];
-    for (const part of GEMMA4_ROPE_PARTS) {
-      const name = gemma4RopeInputName(layerType, part);
-      const input = graph.inputs.find((entry) => entry.name === name);
-      if (input === undefined) {
-        throw new Error(
-          `Gemma4Pipeline: グラフ入力 '${name}' が無い（RoPE がホスト供給の資産でない）`,
-        );
-      }
-      if (input.shape.length !== 3 || input.shape[2] !== headDim) {
-        throw new Error(
-          `Gemma4Pipeline: グラフ入力 '${name}' の shape [${input.shape.join(",")}] が` +
-            ` pipelineConfig.rope.${layerType}.headDim ${headDim} と食い違う` +
-            `（[1, M, ${headDim}] が要る）`,
-        );
-      }
-    }
-  }
-};
-
-/**
- * この製品グラフを gemma4 として実行できるかを見る（**重み shard を 1 バイトも取る前**）。
- *
- * MUST: 家族の門はこの 1 本に集める（他ファミリの `admit*` と同じ規律 — `hub/components.ts` の
- * {@link FamilyAdmission} 席で呼ばれる）。後段へ散らすと、shard 面では GB 級の重みを落とした
- * **後**にしか落ちない。
- *
- * NOTE: tokenizer / PLE sidecar の解析はここに置けない — admission の時点では assets を
- * まだ取っていない（取ってからでは重み prefetch より前という位置が保てない）ので、
- * {@link buildGemma4Program} に残る（anima の `#admit` と同じ分け方）。
- *
- * NOTE: `config` **単体**の検査はここには無い — 2 つの入口が**どちらも**
- * {@link parseGemma4PipelineConfig} を通してから呼ぶ（値域・関係・未知キーの門はそこが正本で、
- * 同じ検査を 2 実装持たない）。ここが見るのは宣言**とグラフの突合**だけで、
- * {@link assertRopeInputShapes} がその 1 本である（グラフはこの席で初めて手に入る）。
- */
-const admitGemma4 = (
-  component: ModelComponent,
-  config: Gemma4PipelineConfig,
-  drafter?: ModelComponent,
-): Gemma4Admission => {
-  const { graph } = component;
-  assertRopeInputShapes(graph, config);
-  const vocabSize = vocabSizeOf(graph);
-  const capacitySymbol = capacitySymbolOf(graph);
-  return {
-    component,
-    config,
-    vocabSize,
-    capacitySymbol,
-    // drafter の門は `./speculative.ts` が持つ（借り物スロット・共有 initializer の綴りは
-    // 投機の知識で、target の門とは別の 1 本）。target の材料は**確定したもの**を渡す。
-    ...(drafter === undefined ? {} : {
-      drafter: {
-        component: drafter,
-        admission: admitGemma4Drafter("Gemma4Pipeline", drafter.graph, {
-          graph,
-          rope: config.rope,
-          hiddenSize: hiddenSizeOf(graph),
-          capacitySymbol,
-        }),
-      },
-    }),
-  };
 };
 
 /**
@@ -1183,80 +864,6 @@ export const speculativeSetup = (
 };
 
 /**
- * 実行時ノブの `chunkLength` を検査して返す（{@link Gemma4PipelineOptions.chunkLength} の門）。
- *
- * MUST: 2 以上（グラフの chunk 記号は prefill 形の最小 2 で焼かれており、1 行の chunk は decode 形
- * として流れる）・配布形が宣言する `maxChunkLength` 以下・`maxPosition` 以下。宣言
- * （`parseGemma4PipelineConfig`）が同じ関係を既定値に対して見るので、ここが見るのは**呼び手が
- * 上書きした値**である。
- *
- * MUST: `maxChunkLength` の門は落とせない — 記号 `M` の trace 範囲は資産に残らない（IR の
- * `symbols` は名前の列だけ）ので、宣言だけが「この資産が受けられる chunk 行数」の出どころで
- * ある。門が無かった頃、上限 768 の資産に `chunkLength: 1024` を渡すと例外なしで走っていた
- * （2026-09-03 実測）— 保証の外で動く形は fail loudly にする（横断不変条件）。
- *
- * NOTE: 容量との関係（`chunkLength ≤ capacity`）はここでは見ない — 容量は sequence ごとに選ぶので、
- * 両者が揃う唯一の場所が `createGenerationSequence` である（同じ式を 2 箇所に持たない）。
- *
- * NOTE: `export` は門を直接叩くテストのため（{@link assertRopeInputShapes} と同じ扱い — 実経路は
- * `fromAssets` / `fromPretrained` / `estimateSessionMemory` の 3 つで、どれも妥当値しか渡さない）。
- * `mod.ts` / サブパス面には出さない（ADR 0008）。
- */
-export const assertChunkLength = (
-  chunkLength: number,
-  config: Gemma4PipelineConfig,
-  // NOTE: 既定が通常 Gemma の名前なのは、この門を**直接叩く検査**が入口を持たないため。
-  // 実経路（`buildGemma4Program` / `estimateSessionMemory`）は必ず family の名前を渡す。
-  entry: string = gemmaEntryName("gemma4"),
-): number => {
-  if (!Number.isSafeInteger(chunkLength) || chunkLength < 2) {
-    throw new Error(
-      `${entry}: chunkLength ${chunkLength} が 2 以上の整数でない`,
-    );
-  }
-  if (chunkLength > config.maxChunkLength) {
-    throw new Error(
-      `${entry}: chunkLength ${chunkLength} が配布形の宣言 maxChunkLength` +
-        ` ${config.maxChunkLength} を超えた（記号 M を焼いた trace 範囲の外）`,
-    );
-  }
-  if (chunkLength > config.maxPosition) {
-    throw new Error(
-      `${entry}: chunkLength ${chunkLength} が maxPosition ${config.maxPosition} を超えた`,
-    );
-  }
-  return chunkLength;
-};
-
-/**
- * 実行時ノブの `chunkBuckets` を検査して返す（{@link Gemma4PipelineOptions.chunkBuckets} の門）。
- *
- * MUST: 受理集合の規則（2 以上 `chunkLength` 未満・狭義昇順）は**写さない** — 正本は runtime の
- * `assertChunkBuckets` 1 本で、そこが拒否する指定を context 生成まで通さないためにここで先に
- * 通す。この層が足すのは入口の名前だけで、`Gemma4PipelineOptions` に渡した呼び手が
- * 「自分のどの指定が落ちたか」を読めるようにする（`assertChunkLength` と同じ流儀）。
- *
- * NOTE: `maxChunkLength` の門は要らない（バケットは `chunkLength` 未満で、その `chunkLength`
- * 自体が {@link assertChunkLength} の門を通っている）。
- */
-export const assertGemma4ChunkBuckets = (
-  chunkBuckets: readonly number[],
-  chunkLength: number,
-  // NOTE: 既定の理由は {@link assertChunkLength} と同じ（門を直接叩く検査のため）。
-  entry: string = gemmaEntryName("gemma4"),
-): readonly number[] => {
-  try {
-    assertChunkBuckets(chunkBuckets, chunkLength);
-  } catch (cause) {
-    throw new Error(
-      `${entry}: ${cause instanceof Error ? cause.message : String(cause)}`,
-      { cause },
-    );
-  }
-  return chunkBuckets;
-};
-
-/**
  * admission を通った材料 + 資産から静的配線を組む（`fromAssets` と `fromPretrained` が共有）。
  *
  * ここが id 空間の相互照合（ADR 0085 決定 5）を全部通す — ①tokenizer が生成しうる id
@@ -1348,300 +955,6 @@ const buildGemma4Program = (
     ...(ple === undefined ? { residentInputs: [PER_LAYER_INPUTS] } : {}),
   });
   return { wiring, tokenizer, ...(ple === undefined ? {} : { ple }) };
-};
-
-/**
- * この manifest を gemma4 として実行できるかを見る（**GPU も重み shard も触る前**）。
- *
- * MUST: 未知 major は fail loudly（ADR 0038 §1 — 「古い実装 × 新しいリポ」の沈黙劣化を止める
- * 唯一の門）。`quant` の実在検査は取得の前に済ませる（`resolveFiles` も同じことを見るが、
- * こちらは利用可能な一覧を添えて落とす）。
- *
- * MUST: 選ばれた `Quant` を**捨てずに返す** — `requiredLimits` の DL 前検査
- * （ADR 0089 決定 5）は呼び手（{@link Gemma4Pipeline.fromPretrained} の admission 閉包）が
- * 通す。ここで名前の実在だけ見て中身を落とすと、宣言された GPU 前提を誰も読まないまま
- * 3.7GiB を落とす形へ戻る。
- */
-const gemma4ManifestConfig = (
-  manifest: Manifest,
-  selection: { readonly model?: string; readonly quant?: string },
-  family: GemmaFamily,
-): {
-  readonly config: Gemma4PipelineConfig;
-  readonly quantName: string;
-  readonly quant: Quant;
-} => {
-  const where = gemmaEntryName(family);
-  const modelName = selection.model ?? manifest.defaultModel;
-  if (family === "gemma4-qat") assertGemma4QatModel(modelName);
-  if (!Object.hasOwn(manifest.models, modelName)) {
-    throw new Error(
-      `${where}: model '${modelName}' は manifest に無い` +
-        `（利用可能: ${manifest.available.models.join(" / ")}）`,
-    );
-  }
-  const entry: ModelEntry = manifest.models[modelName];
-  const { name, major } = entry.pipeline;
-  if (name !== family) {
-    throw new Error(
-      `${where}: manifest の pipeline が '${name}/${major}'` +
-        `（'${family}/${GEMMA4_PIPELINE_MAJOR}' が必要）`,
-    );
-  }
-  if (major !== GEMMA4_PIPELINE_MAJOR) {
-    throw new Error(
-      `${where}: pipeline '${name}/${major}' の major に未対応` +
-        `（この実装が読めるのは ${family}/${GEMMA4_PIPELINE_MAJOR}）`,
-    );
-  }
-  const quantName = selection.quant ?? entry.defaultQuant;
-  if (!Object.hasOwn(entry.quants, quantName)) {
-    throw new Error(
-      `${where}: quant '${quantName}' は manifest に無い` +
-        `（利用可能: ${entry.available.quants.join(" / ")}）`,
-    );
-  }
-  return {
-    config: parseGemma4PipelineConfig(entry.pipelineConfig),
-    quantName,
-    quant: entry.quants[quantName],
-  };
-};
-
-/**
- * 生成イベント → **確定した文字列片**（復号 → 停止文字列の判定）。返り値は一致した停止文字列
- * （`undefined` = 止まらずに列が終わった）。
- *
- * MUST: 停止文字列で止めるときは `return` で抜ける — `for await` の脱出はイベント列の
- * `return()` を呼ぶので、sequence は**中断（`break`）と同じ後始末**で畳まれる。畳み方を自前で
- * 書くと、KV の committed 整合（未 commit frontier 1 token）が 2 実装に分かれる。
- *
- * NOTE: 停止 token（sequence 層）と違い、停止文字列は復号の**後**でしか判定できない — 1 つの
- * 停止文字列が複数 token に割れることも、1 つの token が停止文字列の末尾と次の本文をまたぐ
- * こともあるため。だから席が 2 層に分かれる（ADR 0083 追記 2026-09-02）。
- *
- * NOTE: barrel（`mod.ts` / `./gemma`）には出さない**内部の口**である（公開の入口は
- * {@link Gemma4Pipeline.chat} だけ）。export してあるのは、この単位なら停止文字列の契約を
- * 実 GPU 無しで縛れるため（`tests/gemma4_chat_test.ts`）。
- */
-export const decodeChatChunks = async function* (
-  events: AsyncIterable<GenerationEvent>,
-  detokenizer: StreamingDetokenizer,
-  stopStrings: StopStringFilter,
-  onPrefill?: (progress: Gemma4PrefillProgress) => void,
-  onToken?: (id: number) => void,
-): AsyncGenerator<string, string | undefined, undefined> {
-  for await (const event of events) {
-    if (event.kind === "prefill") {
-      // 文字列の面には prefill の片が無い（本文はまだ 1 文字も出ていない）ので、進捗だけを
-      // 観測席へ渡す。例外は握らない（fail loudly — 呼び手のコールバックの誤りを飲まない）。
-      onPrefill?.({ chunk: event.chunk, chunks: event.chunks });
-      continue;
-    }
-    onToken?.(event.id);
-    const chunk = stopStrings.push(detokenizer.push(event.id));
-    if (chunk.text !== "") yield chunk.text;
-    if (chunk.matched !== undefined) return chunk.matched;
-  }
-  // 復号器の持ち越し（byte_fallback の run）を確定させたぶんも判定へ通す — 停止文字列の最後の
-  // 1 文字がその run の中に居ることがある。
-  const tail = stopStrings.push(detokenizer.finish());
-  if (tail.text !== "") yield tail.text;
-  if (tail.matched !== undefined) return tail.matched;
-  // 止まらずに終わったターンは、接頭辞として保留していたぶんを最後に流す（1 文字も落とさない —
-  // 保留は判定のための遅延であって、出力の切り詰めではない）。
-  const held = stopStrings.finish();
-  if (held !== "") yield held;
-  return undefined;
-};
-
-/**
- * 片の generator + 停止理由 → 公開の {@link Gemma4ChatStream}（**1 通りにしか消費できない**口）。
- *
- * MUST: 反復と {@link Gemma4ChatStream.text} は**同じ generator**を汲む（別経路を作らない）—
- * 生成は 1 度しか走らないので、一括の口が独自のループを持つと「どちらで読んだかで結果が違う」
- * 形が書けてしまう。2 通り目は静かに空を返すだけで例外にならないので、口の側で塞ぐ。
- *
- * NOTE: {@link decodeChatChunks} と同じく barrel には出さない内部の口である。
- */
-export const chatStreamOf = (
-  chunks: AsyncGenerator<string, void, undefined>,
-  done: Promise<Gemma4ChatStop>,
-): Gemma4ChatStream => {
-  let claimed: "反復" | "text()" | undefined;
-  const claim = (how: "反復" | "text()"): void => {
-    if (claimed !== undefined) {
-      throw new Error(
-        `Gemma4ChatStream: 1 つのストリームは 1 通りにしか消費できない` +
-          `（${claimed} で消費済み — ${how} は同じ生成をもう一度読もうとしている）`,
-      );
-    }
-    claimed = how;
-  };
-  return {
-    [Symbol.asyncIterator]: (): AsyncGenerator<string, void, undefined> => {
-      claim("反復");
-      return chunks;
-    },
-    done,
-    // async にしない — 併用の検査は**同期に**落とす（返り値を await するまで気づけない形に
-    // しない。`generate` の寿命検査と同じ規律）。
-    text: (): Promise<string> => {
-      claim("text()");
-      return joinChunks(chunks);
-    },
-  };
-};
-
-/**
- * 観測席（{@link Gemma4PipelineOptions.onRunDiagnostics}）を生成面の `onRun` hook に仕立てる。
- *
- * 席が pipeline 層にあるのは、`GenerationSequence` が**パイプライン非依存**だからである
- * （Session も診断も知らない — ADR 0083）。生成面は run 1 本につき 1 回、その run の出力を
- * 読み終えた**同期区間**でこの hook を呼ぶので、この層がするのは「どちらの Session の診断を
- * 引くか」を `phase.kind` で決めることだけである。
- *
- * かつてはイベント列（`GenerationEvent`）を包んで run 数を**導出**していた（`withRunDiagnostics`）。
- * 導出は 2 つの例外を抱えていた — prefill 直後の最初の token は run を伴わない・停止 token を
- * 引いた最後の decode run は列に出ない（`done` から補っていた）— うえ、投機では 1 verify run が
- * 複数 token を出すので導出そのものが成り立たない。run の発行元が直接名乗る形（ADR 0083 追記
- * 〈hook〉）にすると、どちらの例外も消える。
- *
- * MUST: 観測席が無ければ `undefined` を返す（hook を渡さない = 生成面が 1 回も呼ばない）。
- * MUST: `draft` は**借り手**（drafter Session）の診断を引く。貸し手のものを渡すと、draft run の
- * 診断として「その前の verify run」の値が届く（例外にならない取り違え）。
- *
- * NOTE: 診断の型を型引数にしてあるのは、この関数が診断の**中身を 1 つも読まない**（席へ素通し
- * するだけ）ことを型で示すためで、同時に呼び出し規則の門（`gemma4_chat_test.ts`）が実 Session
- * 無しで書ける。{@link Gemma4State} は `SessionDiagnostics` でそのまま満たす。
- * NOTE: `export` は門を直接叩くテストのため（`mod.ts` / サブパス面には出さない — ADR 0008）。
- */
-export const runDiagnosticsHook = <D>(
-  state: {
-    readonly session: { diagnostics: () => D };
-    readonly drafter?: { readonly session: { diagnostics: () => D } };
-    readonly onRunDiagnostics?: (diagnostics: D, phase: Gemma4RunPhase) => void;
-  },
-): ((phase: Gemma4RunPhase) => void) | undefined => {
-  const listener = state.onRunDiagnostics;
-  if (listener === undefined) return undefined;
-  return (phase: Gemma4RunPhase): void => {
-    if (phase.kind !== "draft") {
-      listener(state.session.diagnostics(), phase);
-      return;
-    }
-    const drafter = state.drafter;
-    // draft run は drafter Session でしか起きない（居なければ簿記の破れ — 黙って貸し手の
-    // 診断を渡すと、別の run の値が draft の名前で積算される）。
-    if (drafter === undefined) {
-      throw new Error(
-        "Gemma4Pipeline: drafter が居ないのに draft run の観測が届いた",
-      );
-    }
-    listener(drafter.session.diagnostics(), phase);
-  };
-};
-
-/**
- * 停止文字列で閉じたターンの停止理由（`chat` と `Gemma4ChatSession.send` が共有する 1 本）。
- *
- * 理由と綴りはこの層の判定だが、`tokens` と `speculation` は**内側の値をそのまま写す**
- * （この層で数え直さない）。写す欄が増えたときに片方の入口だけ古いまま残るのを防ぐため、
- * 組み立てを 1 本にしてある。
- */
-export const stopStringOf = (
-  stopString: string,
-  inner: GenerationStop,
-): Gemma4ChatStop => ({
-  reason: "stop-string",
-  stopString,
-  tokens: inner.tokens,
-  ...(inner.speculation === undefined ? {} : { speculation: inner.speculation }),
-});
-
-/**
- * ターンの後始末 1 本（`chat` と `Gemma4ChatSession.send` が共有する）。
- *
- * MUST: `release` は**無条件に**呼ぶ。`cleanup`（sequence の返却・セッションの締め）が投げたら
- * 席を返さない形にすると、直列化鎖は前段の決着を得られないまま以後の `chat` / `dispose` を
- * 永久に待つ — 例外 1 つで二度と動かないパイプラインになる（device 消失時に `context.dispose`
- * が `flush` の失敗を伝播させる経路が実在する）。順序は flush-before-destroy のまま
- * 「`cleanup` → `release`」である。
- *
- * MUST: 本体（`failure`）も失敗しているときは**両方**運ぶ。呼び手の `finally` から呼ぶので、
- * ここで投げる例外は本体の例外を置き換える — 包まずに `AggregateError` へ 2 本とも載せる
- * （`errors[0]` が本体・`errors[1]` が後始末。中断の識別 `error === signal.reason` は
- * `errors[0]` に残る）。
- *
- * NOTE: 関数に切り出してあるのは、呼び手の `finally` に制御フロー文を置かないため
- * （`no-unsafe-finally` が禁ずるのは「元の例外を黙って捨てる」形で、ここは捨てずに畳んでいる）。
- */
-export const closeChatTurn = async (
-  where: string,
-  failure: { readonly error: unknown } | undefined,
-  cleanup: () => Promise<void>,
-  release?: () => void,
-): Promise<void> => {
-  try {
-    await cleanup();
-  } catch (error) {
-    if (failure === undefined) throw error;
-    throw new AggregateError(
-      [failure.error, error],
-      `${where}: ターン本体と後始末の両方が失敗した`,
-    );
-  } finally {
-    release?.();
-  }
-};
-
-/** 後始末とリース返却が終わってから、iterable と同じ成否を done へ通知する。 */
-export const completeChatTurn = async (options: {
-  readonly where: string;
-  readonly stream?: GenerationStream;
-  readonly matched?: string;
-  readonly failure?: { readonly error: unknown };
-  readonly cleanup: (stop: Gemma4ChatStop | undefined) => Promise<void>;
-  readonly release?: () => void;
-  readonly settle: (stop: Gemma4ChatStop) => void;
-  readonly fail: (error: unknown) => void;
-}): Promise<void> => {
-  let failure = options.failure;
-  let stop: Gemma4ChatStop | undefined;
-  try {
-    const inner = options.stream === undefined
-      ? { reason: "closed", tokens: 0 } satisfies Gemma4ChatStop
-      : await options.stream.done;
-    // 中断は iterable が reason を投げ、done は aborted を返す既存契約を維持する。
-    if (failure === undefined || inner.reason === "aborted") {
-      stop = options.matched === undefined ? inner : stopStringOf(options.matched, inner);
-    }
-  } catch (error) {
-    failure ??= { error };
-  }
-  try {
-    await closeChatTurn(
-      options.where,
-      failure,
-      () => options.cleanup(stop),
-      options.release,
-    );
-  } catch (error) {
-    options.fail(error);
-    throw error;
-  }
-  if (stop === undefined && failure !== undefined) {
-    options.fail(failure.error);
-    throw failure.error;
-  }
-  options.settle(stop ?? { reason: "closed", tokens: 0 });
-};
-
-/** 片を汲み切って連結する（{@link Gemma4ChatStream.text} の本体）。 */
-const joinChunks = async (chunks: AsyncIterable<string>): Promise<string> => {
-  let text = "";
-  for await (const chunk of chunks) text += chunk;
-  return text;
 };
 
 /**

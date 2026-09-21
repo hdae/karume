@@ -20,20 +20,22 @@ export { GEMMA4_CHUNK_BUCKETS } from "./src/gemma/pipeline.ts";
 export type {
   Gemma4Assets,
   Gemma4ChatOptions,
-  /** `chat` の停止理由（sequence 層の理由 + この層でしか判定できない `stop-string`）。 */
-  Gemma4ChatStop,
-  Gemma4ChatStream,
   /** `estimateSessionMemory` が見積る生成の形（容量 / chunk 長 — どちらも実行時ノブ）。 */
   Gemma4EstimateOptions,
   Gemma4FromPretrainedOptions,
   Gemma4PipelineOptions,
+  /** `sequence()` の指定（この会話が確保する容量）。 */
+  Gemma4SequenceOptions,
+} from "./src/gemma/pipeline.ts";
+export type {
+  /** `chat` の停止理由（sequence 層の理由 + この層でしか判定できない `stop-string`）。 */
+  Gemma4ChatStop,
+  Gemma4ChatStream,
   /** prefill の進捗 1 通（`chunk / chunks` — `onPrefill` が受ける）。 */
   Gemma4PrefillProgress,
   /** 観測席の 1 通がどの run か（prefill の chunk / decode の step — `onRunDiagnostics` が受ける）。 */
   Gemma4RunPhase,
-  /** `sequence()` の指定（この会話が確保する容量）。 */
-  Gemma4SequenceOptions,
-} from "./src/gemma/pipeline.ts";
+} from "./src/gemma/chat-turn.ts";
 /**
  * 自己採算ゲートのノブ（{@link Gemma4PipelineOptions.speculative} の `gate` — **計測・検収用の
  * 静的ノブ**で、既定で十分である）。公開面に在るのは、ノブの A/B（既定 vs 別の閾値）を同じ台本で
