@@ -196,6 +196,8 @@ lm_head + argmax（centroid 疎 softmax の topk は exporter に無い — 受�
 - **同一性の門**: gemma4 の既定席（`stateAttentionReduce: "parallel"`）では decode（M=1）が ①′・verify（M=4）が
   ① で縮約順が違い、ビット同一ではない（設計どおり）。厳密一致の門は `"sequential"` 席（M=1 も M=4 も ① + ③）で
   採り、既定席は同じケースで相違数を報告する（limitations）。①′ の位置不変化（既定席でも u32 門）は段 4 の候補。
+  この「M=4 は ①」は段 4-B の裁定（下の追記）で ①′ を M ≤ 8 へ広げるまでの状態で、現在は verify 形も ①′
+  （現行の記述は決定 6 の括弧書きと limitations の投機節）。
 - **見積り**: `estimateSessionMemory` は target の prefill / decode に verify 形 `{ M: k+1, R: k+1 }` を足し
   （runtime の `generation.scenarios`）、drafter の常駐重み（共有 initializer は除外）と借り手 context の
   lengths 8 バイトを合算する。
@@ -234,7 +236,8 @@ lm_head + argmax（centroid 疎 softmax の topk は exporter に無い — 受�
   `commit(0)` で frontier が二重投入されない。守れるのは大きい負け（M2 自由文 −24% 級・32 cycle で抜ける）
   だけで、3〜4% の差はブロック集計でも判別しない（対話級で誤って抜けるのはターンあたり ≈ 1.5%）。`"always"` は常時投機（A/B・検収・
   計測の席）。**既定席（parallel）ではゲートの切替が壁時計に依るので、同一 seed でも稀に出力が
-  変わりうる**（M=1 と M=4 の ①QK の縮約順が違うため）— 厳密な再現性は `"always"` か
+  変わりうる**（M=1 と M=4 で形が変わる経路が残るため — ①QK の縮約順はこの追記の「段 4-B の裁定」で
+  適用条件を M ≤ 8 へ広げたので M=1 と M=4 で揃う）— 厳密な再現性は `"always"` か
   `stateAttentionReduce: "sequential"`（limitations）。純関数モジュール `speculation-gate.ts`。
 - **決定 7 の補足（受理の列挙）**: 確定した token が停止 token なら列挙を**そこで止める**（非投機が
   触れない先の logits に触れない・RNG の消費数が並ぶ）。`accepted` は配送した受理数、token/cycle

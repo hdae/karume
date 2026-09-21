@@ -64,10 +64,16 @@ NOTE（次リリース限り）: 旧 `hdae/karume-anima-turbo` は ADR 0087 で�
       ADR 0005）。**リリース判定機の条件**: アダプタが `shader-f16` と `timestamp-query` を
       **列挙する**実 HW であること（ソフトウェアアダプタ〈lavapipe 等〉は f16 を f32 で計算する
       ので実 HW レーンと区別する）と、実重み系列（`outputs/series/`）が置いてあること。
-      列挙・資産が欠けた機で verify を通すには意図表明の env
+      列挙・資産・参照値・配布形ミラーが欠けた機で verify を通すには意図表明の env
       （`KARUME_ALLOW_NO_SHADER_F16` / `KARUME_ALLOW_NO_TIMESTAMP_QUERY` /
-      `KARUME_ALLOW_NO_ASSETS`）が要るが、**それらを設定した環境の緑はリリース判定に使わない**
-      （既定では `gpu_gate_test.ts` / `assets_gate_test.ts` が FAIL にする）
+      `KARUME_ALLOW_NO_ASSETS` / `KARUME_ALLOW_NO_REFERENCE` / `KARUME_ALLOW_NO_DISTRIBUTION`）が
+      要るが、**それらを設定した環境の緑はリリース判定に使わない**（既定では `gpu_gate_test.ts` /
+      `assets_gate_test.ts` / 系列ごとの参照門 / `distribution_gate_test.ts` が FAIL にする）
+- [ ] **期待値を作るモードが 1 つも立っていないこと**: `KARUME_REFERENCE`（`write` / `rewrite`）と
+      `KARUME_SURFACE=write` は期待値を実測で書き替える口で、検証ではない。とくに参照門の緑条件は
+      「作るモードなら行が 0 件でも緑」（`packages/runtime/tests/helpers/reference.ts`）なので、
+      リリース判定機に `KARUME_REFERENCE` を残すと **sha 門が 1 本も突き合わせないまま全て
+      `written` で緑になる**。両方とも未設定で回した緑だけをリリース判定に使う
 - [ ] exporter: `uv run --no-sync pytest` + `uv run --no-sync ruff check` +
       `uv run --no-sync ruff format --check` を
       **tools/exporter と tools/export-recipes の両方**で緑（CI は lint と format を

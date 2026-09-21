@@ -206,7 +206,13 @@ export type RequiredLimitName = (typeof REQUIRED_LIMIT_NAMES)[number];
  */
 export type RequiredLimitsSpec = Readonly<Partial<Record<RequiredLimitName, number>>>;
 
-/** ファイル参照の 3 点セット（ADR 0038 §2）。3 点全ての存在と形式が parse 時の必須検査。 */
+/**
+ * ファイル参照の 3 点セット（ADR 0038 §2）。3 点全ての存在と形式が parse 時の必須検査。
+ *
+ * 検査が掛かるのは **manifest データを parse する経路だけ**で、この型は公開型なので呼び手が手で
+ * 組める（{@link crossRefOf} の doc と同旨）。`openAsset`（`fetch.ts`）は渡された ref が読み込み
+ * 済み manifest に属するかを検査しないので、手組みの ref は 3 点セットの整合ごと無検査で通る。
+ */
 export type FileRef = {
   readonly path: string;
   /** Hub 上の保存形 raw のバイト数。 */

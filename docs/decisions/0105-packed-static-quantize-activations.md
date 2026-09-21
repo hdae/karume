@@ -4,7 +4,7 @@
   quant宣言・manifest語彙への昇格はそこから先。
 - 関連: [0097](0097-gemma4-qat-integration.md)、[0098](0098-linear-gemv-parallel.md)、
   [0103](0103-linear-static-quantize-fusion.md)、[0104](0104-gemma-fast-quant.md)、
-  [0040](0040-fusion-pass.md)、[0058](0058-numeric-opt-in.md)、[0022](0022-no-runtime-autotune.md)
+  [0040](0040-fusion-pass.md)、[0058](0058-numerics-opt-in-contract.md)、[0022](0022-no-runtime-autotune.md)
 - 根拠: [QAT decode 速度の帰属](../research/2026-09-19-qat-speed-recon.md) §14（段 0 の切り分け）
 
 ## 問題

@@ -104,7 +104,7 @@ MUST: Session が backing を退役させるとき、生存中の全 context の
   大きい家族（DiT 級）は 1 本だけ持つ側で従来と同じだが、数十 MiB 級の形を複数回す家族（siglip2 の
   base・depth-anything の小解像度）は複数保持側に入る（最大 +256 MiB・見積りに載る）。共通の
   options へ載せる件は backlog。
-- **予算より大きい形は保持されない**: gemma4 の chunk 768 形は capacity 16K で ≈ 528 MiB（capacity 2K で
+- **予算に収まらない形は 1 本だけ保持する**: gemma4 の chunk 768 形は capacity 16K で ≈ 528 MiB（capacity 2K で
   192 MiB）なので、既定 256 MiB では 768 token 以上のプロンプトを含むターンで 768 形 ↔ バケット形 ↔
   decode 形の作り直しが従来どおり起きる（短いターンの往復だけが消える）。長い prompt を毎ターン
   流す用途は予算を上げる（[limitations](../limitations.md)）。

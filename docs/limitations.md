@@ -52,7 +52,8 @@ RoPE の cos / sin 派生入力 — ホストが位置から組む）は**呼び
 
 代替は生成 API 波の `GenerationSequence`（ADR 0083 決定 1〜5 — `AsyncIterable<GenerationEvent>` /
 `AbortSignal` / 多ターン）で、ホスト側 sampling は `src/generation/sampler.ts`（同 決定 7〜8）。
-sequence が出るまでの間、この面に相当するものは公開されていない。
+`GenerationSequence` は `@karume/models` の barrel が型として出しており、実装は
+`Gemma4Pipeline.sequence()` が返す。
 
 ## pin 定数 `*_CURRENT` は公開面から消えた（家族ごとの取得元対応表へ置き換え・0.9.0）
 
@@ -370,9 +371,15 @@ broadcast できない形・実テンソルとの名前衝突・チャネル軸�
 
 `scenarios[].workspaceBytes` は融合**前**のノード列に対する生存区間シミュレーションで、実構築が
 畳む / 割る形は勘定に入らない。非勘定は `unaccounted` 欄が逐語で列挙する — ①融合が畳んで消す
-中間と行ブロック分割の一時 ②states 形 attention のノード内一時（スコア S と行統計 — 融合の
-成立に依存せず必ず出る）③params バッファ ④`queue.writeBuffer` の実装 staging ⑤退役の窓（予算超過 /
-計画の LRU 追い出しで退役した slot backing は flush 後の後始末まで生きる）。
+中間と融合ルールが宣言するノード内一時 ②states 形**でない** attention のノード内一時（スコアの
+行ブロックと i8a8 の量子化中間）と linear i8a8 の量子化中間 ③params バッファ
+④`queue.writeBuffer` の実装 staging ⑤退役の窓（予算超過 / 計画の LRU 追い出しで退役した slot
+backing は flush 後の後始末まで生きる）。**states 形 attention のスコア S と行統計は勘定に
+入っている**（行統計は `stateAttentionReduce` が要求する計画だけで、stats/PV 融合が成立する
+計画では 0 バイト）。
+`unaccounted` に載らない差がもう 1 つある: **領域境界の padding** で、見積りの配置は実構築の
+パッカーと数百バイト単位でずれる（`EstimateOptions.maxBufferSize` は state スロット単体の上限
+検査にしか使わず、どのカテゴリのバイト数も動かさない — `estimate.ts` の JSDoc）。
 可否の最終門はこれまでどおり out-of-memory errorScope で、`peakAccountedBytes` も名前どおり
 「勘定に入れた分のピーク」= 上限保証ではない。
 
@@ -381,7 +388,7 @@ broadcast できない形・実テンソルとの名前衝突・チャネル軸�
 モデルでは、実際に保持する量が数 MiB でも 256 MiB が勘定に載る（過大側）。報告の `planBackingBudgetBytes`
 で引き算できる・`planBackingBudgetBytes: 0` なら従来の `max(シナリオ)` に戻る。
 
-## slot backing の予算つき保持: 予算より大きい形は保持されない・常駐入力の破棄は保持中は拒否される
+## slot backing の予算つき保持: 予算に収まらない形は 1 本だけ保持する・常駐入力の破棄は保持中は拒否される
 
 slot backing は予算（既定 256 MiB・`SessionOptions.planBackingBudgetBytes` / `Gemma4Pipeline` の options）の
 内側で複数保持する（ADR [0095](decisions/0095-plan-backing-budget.md)）。by-design の制約 3 点:
@@ -409,8 +416,9 @@ gemma4 の prefill は chunk ごとに「`queryLength` 以上の最小バケッ�
   追い出し）から destroy まで」と「ミス run の arena 一時（最大でバケット形 1 本ぶん）」。見積りのシナリオ自体は
   prefill / decode の 2 本のまま。2 ターン目以降はバケット形も decode 形も保持されるので作り直しは起きない（予算内なら）。
 - **16 未満のバケットは K-13 の tiled 経路に乗らない**: states 形 attention の ①ₜ / ③ₜ は M ≥ 16 の計画にしか
-  選ばれず、それ未満は参照経路 ① / ③（`stateAttentionReduce: "parallel"` なら ③′）に落ちる。値は正しいが遅く、
-  `parallel` × M ∈ [2, 16) の組は実測していない。gemma4 の既定は全て 16 以上で、この域は明示指定でしか入らない。
+  選ばれず、それ未満は参照経路 ① / ③ に落ちる（`stateAttentionReduce: "parallel"` なら ③′・M ≤ 8 なら ①′ も —
+  K-14）。値は正しいが遅く、`parallel` × M ∈ [2, 16) で実測があるのは投機の verify 形（M = 4 / 8）だけ。
+  gemma4 の既定バケット（`GEMMA4_CHUNK_BUCKETS` = 4 / 8 / 32 / 64 / 128 / 256）のうち 4 と 8 がこの域に入る。
 
 ## linear の GEMV 族（1 ≤ M ≤ 64）: 行ブロックの高さは参照 device の定数で選ぶ・初回ターンにシェーダ解析費が乗る
 
@@ -448,8 +456,9 @@ i4 / i8 格納 × f32 計算の linear は 1 ≤ M ≤ 64 で GEMV 族（ADR [00
 - PreparedPlan の LRU は 12 本。gemma4 の既定バケット 6 本（4 / 8 / 32 / 64 / 128 / 256）+ prefill 形
   - decode 形 = **1 容量あたり 8 形**。容量の違う sequence を交互に回すと 16 形で溢れ、decode が
     静かに再導出へ落ちる（例外は出ない — 観測点は `SessionDiagnostics.lastRunPrepared.hit`）。
-- verify 形（M = 4 / 8）の attention は ① + ③′（①′ は M=1・①ₜ / ③ₜ は M ≥ 16 のまま）。
-  T(4) = 27.6 / T(8) = 37.2 ms（P ≈ 14.7K・GPU 実時間）はこの帯の値で、詰めるのは段 4。
+- verify 形（M = 4 / 8）の attention は ①′ + ③′（①′ は M ≤ 8 の計画 = decode と verify・
+  ①ₜ / ③ₜ は M ≥ 16 のまま）。T(4) = 27.6 / T(8) = 37.2 ms（P ≈ 14.7K・GPU 実時間）がこの帯の
+  値で、詰めるのは段 4。
 - R の torch 側 trace 上限は 9（draft 8 + bonus 1）。IR は記号の範囲を持たないので runtime の
   束縛を縛らない — runtime 側の上限は上の `slidingSlack`。
 
@@ -493,17 +502,20 @@ i4 / i8 格納 × f32 計算の linear は 1 ≤ M ≤ 64 で GEMV 族（ADR [00
   logits・history・順序で 1 回ずつ呼ぶので RNG の消費列まで一致する）。受理率は温度で変わる — 配布形の
   推奨 sampler（温度 1.0）での値は未計測（段 4）。
 - **「投機あり = 非投機」の厳密一致は `stateAttentionReduce: "sequential"` でだけ保証する**。gemma4 の既定席
-  `"parallel"` では decode（M=1）が ①′・verify（M=4）が ① で ①QK の縮約順が違い、ビット同一ではない —
-  近い値の token では argmax が割れうる（chunk 分割の prefill と decode の間に元からある数値差と同じ種類）。
-  既定席での相違数は e2e の実測に載る（`e2e_gemma4_speculative_test.ts` — 2026-09-08・RTX 3080 Ti: 3 ケース × 200 token で相違 0、u32 では
-  262,144 語のうち 94% が違い最大絶対差 1.1e-4）。
+  `"parallel"` でも**attention の縮約順自体は M=1 と M=4 で揃う**（①′ の適用条件が M ≤ 8・③′ は M < 16 なので、
+  decode も verify も ①′ + ③′）。それでも厳密一致を宣言しないのは、**M で形が変わる他経路（GEMV 族の行ブロック
+  など）を帯の全域で実測していない**ためで、近い値の token では argmax が割れうる（chunk 分割の prefill と
+  decode の間に元からある数値差と同じ種類）。既定席の相違は e2e が毎走行で報告する
+  （`e2e_gemma4_speculative_test.ts` の投機② = 生成 token 列・投機⑤ = verify 行 0 と decode の logits。
+  どちらも門ではなく実測の報告）。`linearGemvReduce: "parallel"` を併せた組の verify 行 0 / decode の
+  u32 一致だけは同テストが門として固定している。
 - **自己採算ゲートは既定 on で、切るのは壁時計である**（段 4-B ④・`speculative: true` の既定）。ゲートは cycle の壁と
   decode 1 step の壁を実行時に測り、投機が負けている間は M=1 の decode 形へ落ちる（判定は 16 cycle のブロック集計を
   2 本連続で見てから・戻るのは 8 cycle のバースト集計で〈強い負けのバーストは 4 cycle 目以降で打ち切る〉—
   1 サンプルでは受理数のばらつきに負ける。取り分は課題と host で決まり、
   採算閾値も RTX 1.72〜1.88 / M2 2.17〜2.6 と動くので固定値に焼けない — research 2026-09-09）。壁時計は走行ごとに
   揺れるので、**既定席（`parallel`）では同じ seed でも稀に出力が変わりうる**（落ちた step は M=1・投機の cycle は
-  M=4 で ①QK の縮約順が違い、近い値の token では argmax が割れる — 上の項と同じ種類の差）。厳密な再現性が要るなら
+  M=4 で、上の項の M 依存の経路差がそのまま出る — 近い値の token では argmax が割れる）。厳密な再現性が要るなら
   `speculative: "always"`（ゲート無し）か `stateAttentionReduce: "sequential"`（M=1 と M=4 が u32 一致）を選ぶ。
   落ちた step 数は `GenerationStop.speculation.plainSteps`・切替回数は `switches`（どちらも `"always"` では欄ごと無い）。
 - **`stateAttentionReduce` は drafter の readonly attention（①′ ③′）には効かない — parallel 固定**
@@ -690,8 +702,11 @@ fail loudly（実行上限そのものは緩めない）。
   `[Cout, Cin/groups, K]` と転置）で、`output_padding` / `groups` / `dilation` は attrs に欄が
   無く既定以外は fail loudly。
 - bias 無しの conv は**落とさず**、エクスポータが**ゼロ bias を合成**してアリティ 3 へ
-  正規化する（カーネルと契約に arity 分岐を持ち込まないため）。bias 無しを落とすのは
-  `linear` だけ（実測が全て bias 付き）。
+  正規化する（カーネルと契約に arity 分岐を持ち込まないため）。`linear` も同じ手筋で、
+  **IR の `linear` は 3 入力を要求する**一方、**export 入口は bias 無しを受理してゼロ bias を
+  合成する**（`aten_handlers.py` の `_h_linear`・合成は `+0` の厳密恒等）。bias 無しが少数の
+  例外という前提ではない — ADR [0016](decisions/0016-anima-chain-export.md) の実測は linear
+  711 本中 698 本が bias 無しである。
 
 ## upsample_bilinear2d（align_corners=True）の端点は「厳密一致」を保証しない
 
@@ -907,7 +922,9 @@ EmbeddingGemma と同じ静的方式（B=1・呼び出し側が列を詰める�
   モデル計算（重みを使う演算）は残らない。GPU 側へ移すかは別途の設計判断。
 - **duration の `speaker_vec` / `caption_vec` はホスト供給**。前者は上の平均トークンの
   切り出し、後者は **caption 系列に `caption_norm`（RMSNorm 512）を掛けた masked mean** で、
-  後者だけはホストにモデル計算が 1 本残る。caption 系列をグラフ入力にすると記号次元が
+  `caption_norm` は `caption-proj` グラフの**第 2 出力**として出る（ADR
+  [0048](decisions/0048-irodori-host-port.md) 決定 1）ので、**ホストに残るのは行平均だけ**
+  — 重みを使う演算は 1 本も残らない。caption 系列をグラフ入力にすると記号次元が
   2 本（T と caption 長）になるため採らなかった（多記号グラフは未実測 — recon の U3）。
   **0/0 の危険は無い**（実装が `denom = clamp_min(sum, 1.0)` で割るため — recon が挙げた
   「caption 全 0 の masked_mean」は上流で既に閉じている）。
@@ -1167,6 +1184,16 @@ opt-out）は Metal では発火しない** — 発火先はソフトウェア�
 wgpu-hal metal の `check_if_oom()` は `Ok(())` を返す no-op（[wgpu#7460](https://github.com/gfx-rs/wgpu/issues/7460)
 の TODO 付き）。Metal では予算超過が例外にならず、遅くなるだけで進む。
 
+## 未保護の `popErrorScope` 待ちは device 消失と競わせない（by-design — 未検証範囲あり）
+
+`pushErrorScope` / `popErrorScope` の待ちは device 消失の購読（`raceDeviceLost`）へ接続していない
+箇所がある。Deno + wgpu / NVIDIA の実測では in-flight の `popErrorScope` は消失後も `null` で決着し、
+ハングは 1 件も観測されなかった（[research 2026-08-16](research/2026-08-16-device-lost-wait-settlement.md)
+— WebGPU 仕様の「lost な device の `popErrorScope` は null で resolve」とも一致）。
+**未検証で残るのは実 TDR / ドライバリセットによる消失と、ブラウザ（Dawn）**。決着しない実装に当たると
+finish・使用予約・staging・区間ロックが取り残されるので、そこで永久 pending を観測したら消失と
+競わせる包み込みを入れる。
+
 ## DL 前の GPU 適合チェックは quant が宣言した feature と limits まで（合計・空きは見ない）
 
 quant が宣言する GPU 前提のうち、重み shard を取る前（家族 admission）に突き合わせるのは
@@ -1273,8 +1300,10 @@ by-design の理由は取得物と資産の違いで、**手元の配布形は�
 e2e の PNG / WAV 参照 sha256（`e2e_anima_test` / `e2e_sbv2_wav_test` / `e2e_irodori_wav_test`）は
 **その環境で焼いた値**で、`packages/models/tests/fixtures/references/<系列>.json` に環境キー
 （`<ランタイム>-<アダプタ名 slug>`・例 `deno-intel-graphics-bmg-g21`）ごとの行として入っている。
-**行を持たない環境では一致しない**（Metal 等）— これは仕様であり、門は「**その機**での移植・退行
-検出器」として機能する。**同じ Linux / Vulkan でもベンダが違えば一致しない**（2026-09-20・Intel Arc
+**行を持たない環境では突き合わせずに明示 SKIP する**（Metal 等）— これは仕様であり、門は
+「**その機**での移植・退行検出器」として機能する。SKIP が無音の緑にならないよう、その環境の行が
+1 件も無ければ**系列ごとの参照門が赤**になる（`KARUME_ALLOW_NO_REFERENCE` で opt-out）。
+**同じ Linux / Vulkan でもベンダが違えば一致しない**（2026-09-20・Intel Arc
 B570 / Mesa ANV でフル verify: 当時の定数 1 本に対して 16 本すべて不一致・出力の PNG は目視で正常 =
 数値の微小差）。この実測が環境別の行へ移した直接の動機で、B570 の行
 （`deno-intel-graphics-bmg-g21`）は作成済み。行の作り方・参照門（`KARUME_ALLOW_NO_REFERENCE` で opt-out）・結果の席
@@ -1283,8 +1312,9 @@ B570 / Mesa ANV でフル verify: 当時の定数 1 本に対して 16 本すべ
 機序: IEEE 754 の加減乗除はデバイス間でも完全同一だが、①超越関数（`exp` 等）の実装が
 ドライバ / コンパイラ依存 ②シェーダコンパイラの fma 融合判断（積和を 1 命令に融合すると
 丸めが 1 回減る）③コンパイル経路の違い（ブラウザ Tint / Deno naga）により、カーネル側で
-縮約順序を固定してもクロスデバイスの同一は成立しない。なお w8a8 経路には整数演算なのに
-値が違う未解明の Metal 差も別途ある（[known-issues.md](known-issues.md) の Metal 節）。
+縮約順序を固定してもクロスデバイスの同一は成立しない。なお attention の i8a8 経路には、Metal で
+**TS 参照とちょうど 1 ULP ずれる**差が別途ある（整数段は厳密一致で、ずれるのは dp4a / エミュの
+両変種が共有する f32 エピローグ側 — [known-issues.md](known-issues.md) の Metal 節）。
 
 保証するのは次の 2 つ（いずれも実測データ点は Vulkan と Metal — Apple M2 の実測は
 [research/2026-08-10-f32-geometry-probe.md](research/2026-08-10-f32-geometry-probe.md)
@@ -1457,9 +1487,15 @@ known-issues「Metal で out-of-memory errorScope が沈黙する」）。つま
 - **`weights` で役割を絞った選択は、同じ (model, quant) の残りと勘定を共有しない**（ADR
   [0096](decisions/0096-speculative-decoding.md) 段 2 で入った `ResolveOptions.weights`）。守る側の
   候補は「label（`<model>/<quant>`）が対象と違う選択」なので、同じ label の別の部分集合は守らないし
-  `alsoEvicted` にも載らない。これは意図で、「本体は残して drafter だけ消す」がそのまま書ける
-  （逆に、同じ label の残りが部分在庫に落ちたかどうかは `listCachedAssets` をもう一度引いて見る —
-  label に部分集合を名乗る欄は無い）。`protect` に同じ label の部分集合を複数並べれば全部が守る。
+  `alsoEvicted` にも載らない。帰結は 3 点:
+  - **「本体は残して drafter だけ消す」はそのまま書けない**。`resolveFiles` は weights を絞っても
+    assets を全数展開するので、絞った選択の参照集合に tokenizer / PLE などの共通 assets が入り、
+    **残るのは本体 weights だけ**になる（その (model, quant) は部分在庫に落ちる — 詳細と回避は
+    [known-issues](known-issues.md) の該当節）。
+  - **対象と同じ label の `protect` は無視される**（守る側の候補が「label が違う選択」だけなので）。
+    `inventory_test.ts` が「`protect` に対象自身を混ぜても無視される」を固定している。
+  - **`protect` に部分集合を複数並べて守れるのは、対象と label が違う選択**だけ。同じ label の残りが
+    部分在庫に落ちたかどうかは `listCachedAssets` をもう一度引いて見る（label に部分集合を名乗る欄は無い）。
 - **ローカル取得元は「全て在庫あり」と答え、削除は `HubError` で断る**。実体の欠損は読む時に
   落ちる（照会のたびにディレクトリを舐める I/O は払わない）。ディレクトリの中身は取得物ではなく
   利用者の資産なので、hub が消してよいものが無い。
@@ -1524,8 +1560,18 @@ embed_vision 1・embed_audio 1）。vision / audio に着手する波の規模�
 対象は実測した量子化行列と物理 M=1..8、f32 演算のみ。既定の逐次加算と bit 同一ではなく、QAT は生成列も変わり得る。
 M>8 と対象外形状は従来経路で、診断キーで適用範囲を確認できる。E4B・他モデルの全面的な高速化を意味しない。
 [M2での速度改善と短文出力](research/2026-09-13-m2-gemv-adoption.md)は確認済み。広い品質評価は残る。
-通常/QAT E2Bの新しい配布recipeは、parallelとRMS→add融合（QATはさらにlinear→SRQ融合）を宣言した `i4-fast` を既定quantに選ぶ（[ADR 0104](decisions/0104-gemma-fast-quant.md)）。parallelだけの `i4-gemvpar` も保持する。
+通常/QAT E2Bの新しい配布recipeは、parallelとRMS→add融合（QATはさらにlinear→SRQ融合とpacked int8活性）を宣言した `i4-fast` を既定quantに選ぶ（[ADR 0104](decisions/0104-gemma-fast-quant.md)）。parallelだけの `i4-gemvpar` も保持する。
 従来の `i4`・runtime・fromAssetsの逐次既定は維持する。既存の配布形や公開pinは自動で変更しない。
+
+## packed int8 活性（`packedStaticQuantize`・2026-09-19）
+
+`packedStaticQuantize` は[ADR 0105](decisions/0105-packed-static-quantize-activations.md)の任意指定で、固定SRQが出すint8コード4個をu32 1語に詰めて並列GEMVへ渡す。
+QAT E2Bの `i4-fast` は既定でこれを宣言する（通常Gemma 4は `static_quantize` を持たないので宣言しない）。by-designの制約4点:
+
+- **packedになるのは実測で効いた4形状だけ**（`PARALLEL_SHAPES` の `packedActivations` が true の行 = K が長くlanes 32の形）。消費先が1本でもtrueでない行へ落ちるSRQはf32のまま残り、他21行（g32の12行を含む）は対象外。
+- **非有限値の扱いがf32経路と違う**。`NaN` は境界表の外側として ±127 / -128 へ飽和し（f32経路はNaNをそのまま流す）、`-0.0` はコード0 = `+0.0` へ落ちる。`±Inf` はf32経路も同じ表で飽和するので一致する。数値opt-inの射程（[ADR 0058](decisions/0058-numerics-opt-in-contract.md)）として受け入れる。
+- **確保量は1/4にならない**。出力テンソルの実体は宣言shapeのまま確保し、実際に書くのはその1/4。アリーナのバケットを動かさないための選択で、VRAMの節約ではない。
+- **`linearGemvReduce: "parallel"` かつ `linearCompute: "f32"` の組だけを受理する**。他の組合せとboolean以外の値はSession構築時に拒否し、黙ってf32経路へ落とさない。
 
 ## RMS融合とsubgroup最適化の提供範囲（2026-09-14整理）
 

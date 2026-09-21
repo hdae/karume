@@ -39,6 +39,13 @@
   [ADR 0008 追記](decisions/0008-public-api.md)）。
   **段 3 済（2026-09-20）**: ③ の許容差 2 段化（`e2e_golden_test.ts` — Karume 独自基準を超え WGSL 仕様帯で受理した出力は
   `outputs/verify/<環境キー>/<日付>_golden/results.json` の `note` に残す・赤にしない）。
+  **レビュー取り込み 済（2026-09-21）**: 外部レビュー（5 観点 × 2 試行）の指摘 87 件を実コードで反証した結果
+  （正本 = `.claude/reviews/2026-09-21_chatgpt-reviews/triage.md` — 成立 78 / 反証 8 / 未決 1・high 0 / medium 9）のうち、
+  構造の分割候補 16 件を除く「直す価値あり」を取り込んだ — runtime の batch 受け口（写しの後の再検査・フェンス前失敗の計測窓・
+  pop 待ち中の消失）、テスト基盤（参照門を登録ケースで数える・fixture の読み直し書き・`results.json` の走行中マーカー・レーン門の
+  ディレクトリ `--ignore` と綴りの門・公開面の entry 差分と値非公開の門・adapter 同一性）、Civitai の本体選択と basename の門
+  （[ADR 0088 追記](decisions/0088-civitai-air-intake.md)）、docs の同期 11 件。**構造の 16 件（triage.md §6 の着手順 3 段）は
+  コード品質管理の波の入力**（later の同名項に V2-01 を起票済み）。
 
 - **decode 速度調査の波（2026-09-19〜20・2026-09-20 に区切り — 残りは later へ）**: 帰属と反証は [decode 速度の帰属と次に試すこと](research/2026-09-19-qat-speed-recon.md)、
   候補の採否は [perf-ledger](perf-ledger.md) H-26〜H-29 / K-48〜K-53（K-45 / K-46 / K-47 は追記）。確定した事実: Deno の 23.8 ms/token のうち
@@ -576,6 +583,17 @@ autoregressive 波の**残項目（波外へ送り）**:
   （perf H-4 と同体）・sampling/RNG はホスト維持（GPU 側は argmax/topk のみ）。
 
 ## later
+
+- **コード品質管理の波（起票 2026-09-21）**:
+  - **Anima / 生成の入力起因エラーを判別可能な型へ揃える**: `parseResolution` と
+    `AnimaPipeline.generate` の値域検査、生成側の `maxNewTokens` / `stopTokens` の検査が素の
+    `Error` を投げるため、同じ関数内の内部配線異常（hub のバグ側）と区別が付かず、複数モデルを
+    1 ハンドラで受けるホストはメッセージ文字列を解釈するしかない。同じ検査群でも seed
+    （`anima/random.ts`）と sampler 指定（`generation/sampler.ts`）は既に `RangeError` で判別
+    できるので、揃える先は `RangeError` か公開エラー型のどちらか。**公開面の追加を伴うので
+    設計項目**（ADR [0072](decisions/0072-sbv2-text-injection.md) の 400/500 分離は SBV2 に
+    閉じた決定で、そのまま持ち込まない）。対象は `models/src/anima/resolution.ts` と
+    `models/src/generation/sequence.ts`。
 
 - **decode 速度の残り（2026-09-20 に now から移動）**: H-27 段 ②（先行投入・ADR 0066 の opt-in 例外・greedy 限定・期待 Deno −5 / Chrome −2.2 ms）、
   小物 K-48 段 1（rms_norm→SRQ 融合 70 本・0.19 ms）/ K-49（slice 別名化）/ K-50（k+v 連結 GEMV）、K-46（int8 KV — メモリ項目）。

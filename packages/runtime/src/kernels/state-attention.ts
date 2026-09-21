@@ -63,12 +63,12 @@
  *
  * MUST: 縮約順が ① と違うので**ビット同一ではない**（決定性は保つ）。**席は ③' と同じ 1 つ**
  * （`"parallel"` を指定すると ①' と ③' が一緒に選ばれる — 2026-09-06 裁定。新しいノブは作らない）。
- * MUST: **①' が選ばれるのは `M = 1` の計画だけ**（適用条件は
- * {@link stateQkParallelEligible}）。prefill 計画（M > 1）は席が `"parallel"` でも ① のまま走る
- * — prefill では ① が既に行 × 列で埋まっており、①' は行タイル幅を落として barrier を積む
- * ぶんだけ遅くなると実測した（2026-09-06 — 詳細は同関数の WHY）。③' の側は `M < 16` の計画
- * だけが取る（`M ≥ 16` は席に依らず ③ₜ）ので、**席 1 つで 2 段の適用範囲が違う**形になる
- * （M=1 の decode では ①' と ③' が揃って選ばれる）。
+ * MUST: **①' が選ばれるのは `M ≤ 8` の計画だけ**（適用条件は
+ * {@link stateQkParallelEligible} — decode の M=1 と投機の verify M ≤ 8）。`M ≥ 9` の計画は席が
+ * `"parallel"` でも ① のまま走る — prefill では ① が既に行 × 列で埋まっており、①' は行タイル幅を
+ * 落として barrier を積むぶんだけ遅くなると実測した（2026-09-06 — 詳細は同関数の WHY）。③' の側は
+ * `M < 16` の計画だけが取る（`M ≥ 16` は席に依らず ③ₜ）ので、**席 1 つで 2 段の適用範囲が違う**
+ * 形になる（`M ≤ 8` の decode / verify では ①' と ③' が揃って選ばれる）。
  * MUST: ① の契約は 1 つも動かさない — 述語（causal + sliding 下限）外は live 範囲内なら
  * **必ず −inf を書く**（② が残骸を食わないため）・`cl ≥ live` の列と pad 行は書かない・
  * scale の掛け方（半スケールを q 側と k 側の両方へ）と −inf のビット（`params.neg_inf`）は ① と同一。
@@ -258,7 +258,7 @@ export const stateQkParallelKey = (sliding: boolean, gqa: boolean): string =>
   }`;
 
 /**
- * ①' の**適用条件** — `M`（物理 chunk 行数）が 1 の計画だけ。席（`stateAttentionReduce`）が
+ * ①' の**適用条件** — `M`（物理 chunk 行数）が 8 以下の計画だけ。席（`stateAttentionReduce`）が
  * `"parallel"` でも、この条件を満たさない計画は ① のまま走る（席の判定は runtime 側
  * `#buildStateAttention` が持ち、ここは計画の形だけを見る純関数）。
  *

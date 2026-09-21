@@ -102,11 +102,15 @@ macOS 26 で再実測 = 同じ 12 本が同一署名で再現。フル verify �
   `0x414b3248`）は M2 で採り直すと変わりうる。Linux / Vulkan は M=1 の 12 形 + 行ブロック 11 形とも緑。
   **動作は M2 で確認済み（2026-09-07 ユーザー実走 — K-21 の行ブロック変種 + H-15 の予算つき backing を含む
   最新 main）**。u32 完全一致門の赤 / 緑は未報告（上の 1 ULP 帯の見込みのまま）。
-- **sha256 参照門（anima PNG 9 本 / sbv2 WAV 6 本）は Metal で赤（2026-09-02 — 資産を Mac へ
-  同期して初めて走った）**: limitations「sha256 参照門は参照環境専用」節の仕様どおりで、本節の
-  対象には数えない。別経路同士の実測 sha は一致（base CFG の fromPretrained と fromAssets
-  分割形・512 euler と fromPretrained-512・1024 と onEvent-1024）= Metal 上で決定的で、ロード
-  経路は出力バイトを変えていない。出力はユーザーが目視 / 聴感で健全を確認済み。
+- **sha256 の突合（anima PNG 9 本 / sbv2 WAV 6 本）は Metal で明示 SKIP + 参照門 2 本が赤**:
+  参照値 fixture に Metal の環境キーの行が無いので 15 件は突き合わせずに SKIP され、系列ごとの
+  参照門（anima / sbv2）が「この環境の行が 1 件も無い」で赤くなる（ADR
+  [0106](decisions/0106-device-keyed-references.md)・limitations「sha256 参照門は参照環境専用」節の
+  仕様どおり）。本節の対象には数えない。行は `KARUME_REFERENCE=write` で同じレーンを回せば作れるが、
+  その回の実測を正とする操作なので健全性を別途確かめてから作る。別経路同士の実測 sha は一致
+  （base CFG の fromPretrained と fromAssets 分割形・512 euler と fromPretrained-512・1024 と
+  onEvent-1024）= Metal 上で決定的で、ロード経路は出力バイトを変えていない。出力はユーザーが
+  目視 / 聴感で健全を確認済み。
 
 Deno 2.9.5 / 2.9.6 に Metal / naga / wgpu の更新は無い（denoland/deno#36257 = mapped range の
 み）。根治候補 = TS 参照の FMA 許容化 or WGSL 側で丸めを固定する手段の調査（未着手）。記録 =
@@ -212,6 +216,10 @@ golden `activations` の `sin` は許容差を WGSL 仕様帯へ寄せて消化�
   `onSubmittedWorkDone` + 200 ms 後の 1 GiB は成功）。Intel / wgpu では `destroy()` の解放が次の
   device poll まで遅延する。テストは変えない（survivor を poll 後に取る形は「解放を返し損ねた
   実体を検出する」門の意味を弱める）。Metal の「errorScope 沈黙」とは別種（こちらは落ちる側）。
+  同じ遅延解放は**レーンを間隔なしに連続実行したときのフレーク**としても出る（2026-09-21: anima レーン
+  〈9 分〉の直後に sbv2 レーンを回すと、runtime の golden `i8 / flow / p512` から後の 12 本が OOM —
+  後続は `requestDevice` 自体が `Not enough memory left`。20 秒空けて単独で回すと 198 本すべて緑）。
+  レーンを続けて回すときは間を置くか、赤を見たら単独で再走する。
 - **Deno は timestamp-query の値を ns へ換算しない**（ext/webgpu は wgpu の raw tick をそのまま
   返す。WebGPU 仕様は ns）。B570 の Vulkan `timestampPeriod` は 52.0833 ns なので、Deno での
   `lastRunTiming` / `--diagnostics` の内訳は **×52 過小**（BiRefNet 1024² の GPU 総和 raw 64.8 ms

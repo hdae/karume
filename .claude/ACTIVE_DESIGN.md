@@ -1,11 +1,11 @@
 # ACTIVE_DESIGN — Karume
 
 > 現在の設計とレビューの入口。履歴はADR / research / gitに置き、作業順は[backlog](../docs/backlog.md)、性能の採否は[perf-ledger](../docs/perf-ledger.md)を正本とする。
-> Last updated: 2026-09-20（テスト整理の波 — レーン分割・環境別の参照値と結果の席・公開面スナップショット門・CHANGELOG / README）
+> Last updated: 2026-09-21（テスト整理の波の完了と外部レビューの取り込み — 次はコード品質管理の波）
 
 ## 現在の焦点
 
-- テスト整理の波（2026-09-20〜・進行中）。済んだ段: 段0=verifyのレーン分割（`test:core` / `test:models:<系列>`と被覆の門`verify_lanes_test.ts`・[ADR 0005追記](../docs/decisions/0005-verification.md)）、
+- テスト整理の波（2026-09-20・段0〜3 済）と外部レビューの取り込み（2026-09-21・正本は`.claude/reviews/2026-09-21_chatgpt-reviews/triage.md`・構造の分割候補16件は§6の着手順3段で**次のコード品質管理の波の入力**）。済んだ段: 段0=verifyのレーン分割（`test:core` / `test:models:<系列>`と被覆の門`verify_lanes_test.ts`・[ADR 0005追記](../docs/decisions/0005-verification.md)）、
   段1=sha256参照値を環境キーごとの行へ（`KARUME_REFERENCE`の3モード・参照門`KARUME_ALLOW_NO_REFERENCE`・結果と実物は`outputs/verify/<環境キー>/<日付>_<系列>/`・[ADR 0106](../docs/decisions/0106-device-keyed-references.md)）、
   段2a=公開面スナップショット門（各パッケージの`public_surface_test.ts`と`fixtures/public-surface.json`・焼き直しは`KARUME_SURFACE=write`）、段2b=リポ直下`CHANGELOG.md`新設、段2c=パッケージREADME / LICENSEの公開物同梱。
   以降の段と残件（golden側の環境別化、環境間で`results.json`を突き合わせる道具）の正本は[backlog](../docs/backlog.md)のnow先頭項。
