@@ -172,3 +172,37 @@ class TestSourceProvenance:
 
         with pytest.raises(SystemExit, match=r"欄が足りない: \['air', 'file.sha256'\]"):
             _source_provenance(checkpoint, "org/base")
+
+
+class TestCivitaiIntakeLayout:
+    """記録の欠落は置き場で意味が変わる — 取り込みの配置なら壊れた取り込み、他所なら手置き。"""
+
+    def test_it_stops_when_the_intake_directory_lost_its_record(self, tmp_path: Path) -> None:
+        """`civitai-<versionId>/` は取り込みが掘る形なので、記録が無いのは連鎖が切れた跡。"""
+        intake = tmp_path / "civitai-123"
+        intake.mkdir()
+
+        with pytest.raises(SystemExit, match="取り込みの配置なのに"):
+            _source_provenance(intake / "waiANIMA_v10Base10.safetensors", "org/base")
+
+    def test_it_keeps_the_old_shape_for_a_hand_placed_checkpoint(self, tmp_path: Path) -> None:
+        """Civitai 以外のソースは `civitai.json` が無いだけ（ADR 0088）— 落としてはいけない。"""
+        placed = tmp_path / "anima-hand-placed"
+        placed.mkdir()
+
+        provenance = _source_provenance(placed / "waiANIMA_v10Base10.safetensors", "org/base")
+
+        assert provenance == {"file": "waiANIMA_v10Base10.safetensors", "base_repo": "org/base"}
+
+    def test_it_reads_the_record_inside_the_intake_directory(self, tmp_path: Path) -> None:
+        intake = tmp_path / "civitai-123"
+        intake.mkdir()
+        (intake / "civitai.json").write_text(
+            json.dumps(CIVITAI_RECORD, ensure_ascii=False), encoding="utf-8"
+        )
+
+        provenance = _source_provenance(intake / "waiANIMA_v10Base10.safetensors", "org/base")
+
+        civitai = provenance["civitai"]
+        assert isinstance(civitai, dict)
+        assert civitai["sha256"] == "9d5a1e13"

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 from collections.abc import Mapping
 from pathlib import Path
@@ -61,6 +62,10 @@ SOURCE_PROVENANCE_FILE = "source_provenance.json"
 
 #: 取り込み記録（`anima.civitai` が checkpoint の隣へ書く機械専有ファイル）。
 CIVITAI_PROVENANCE_FILE = "civitai.json"
+
+#: 取り込みが掘る配置（`anima.civitai` の `fetch_checkpoint` が作る `civitai-<versionId>/`）。
+#: ここに居る checkpoint は取り込み経由と分かるので、記録の欠落を手置きと区別できる。
+CIVITAI_INTAKE_DIR = re.compile(r"civitai-[0-9]+")
 
 #: 上の記録から運ぶ欄（説明本文の HTML は運ばない — 変換の出所を辿るのに要らない）。
 #: `sha256` だけは `file` の下にあるので別扱い。
@@ -121,12 +126,21 @@ def _link(target: Path, link: Path) -> None:
 def _civitai_provenance(checkpoint: Path) -> dict[str, object] | None:
     """checkpoint の隣の `civitai.json`（`anima.civitai` の記録）を、運ぶ欄だけに絞る。
 
-    手で置いた checkpoint には無いので、無ければ `None`（従来どおりの記録になる）。**在って
-    読めない・欄が欠けている場合は落とす** — 黙って節を落とすと、出所の分からない重みが
-    「provenance 付き」の体裁で出てくる。
+    手で置いた checkpoint には無いので、無ければ `None`（ADR 0088 の帰結 — Civitai 以外の
+    ソースは `civitai.json` が無いだけで従来形の provenance になる）。**ただし親が取り込みの
+    配置（`civitai-<versionId>/`）なら、記録が無いこと自体が壊れた取り込みなので落とす** —
+    手置きと違ってここでの欠落は来歴の連鎖が切れた跡で、黙って手置き扱いに倒すと出所の
+    分からない重みが素通りする。**在って読めない・欄が欠けている場合も落とす** — 黙って節を
+    落とすと、出所の分からない重みが「provenance 付き」の体裁で出てくる。
     """
     record_path = checkpoint.parent / CIVITAI_PROVENANCE_FILE
     if not record_path.exists():
+        if CIVITAI_INTAKE_DIR.fullmatch(checkpoint.parent.name):
+            raise SystemExit(
+                f"{checkpoint.parent} は取り込みの配置なのに {CIVITAI_PROVENANCE_FILE} が無い"
+                "（取り込みが途中で壊れたか、来歴を消した）— "
+                "`python -m anima.civitai` で取り込み直す"
+            )
         return None
     try:
         record = json.loads(record_path.read_text(encoding="utf-8"))
