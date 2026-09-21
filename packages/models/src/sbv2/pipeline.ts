@@ -45,7 +45,6 @@
 import {
   acquireGpu,
   type GpuContext,
-  type Session,
   type SessionDiagnostics,
   type SessionOptions,
   type Tensor,
@@ -80,6 +79,7 @@ import { bertHiddenOutput, tileBertToPhoneLevel, type TiledBert } from "./text/b
 import { buildRelPosTables } from "./text/rel-pos-tables.ts";
 import { type JpExtraRules, parseJpExtraRules, type Sbv2Knobs } from "./text/symbols.ts";
 import { type CleanRanges, DebertaTokenizer } from "./text/tokenizer.ts";
+import { MAX_CODE_POINT } from "../text/asset-gates.ts";
 import { durationsToFrames } from "./host/duration.ts";
 import { buildZp } from "./host/latent.ts";
 import { Randn } from "./host/random.ts";
@@ -92,6 +92,7 @@ import {
   toAcquireGpuOptions,
 } from "../session/gpu-features.ts";
 import { toSessionOptions } from "../session/options.ts";
+import { withSession } from "../session/with-session.ts";
 import { toManifestSource } from "../hub/repo-ref.ts";
 import { type FromPretrainedHubOptions, hubLoadOptions } from "../hub/load-options.ts";
 import {
@@ -312,39 +313,6 @@ const outputAt = (
   return tensor;
 };
 
-/**
- * 1 グラフぶんの Session を張り、使い終わったら必ず解放する。
- * MUST: `finally` で dispose する — 途中で落ちたときに VRAM が残ると、後続の段が確保に
- * 失敗して「最初の失敗とは別の場所」で落ちる。
- *
- * NOTE: `anima/pipeline.ts` にも同名の helper がある（**意図的な重複**）。あちらの `run` は
- * `graph.outputs[0]` を 1 本だけ返す形で、SBV2 の `front` は 4 出力（logw_sdp / logw_dp /
- * m_p / logs_p）なので載らない。Anima 側を多出力へ広げると全呼び出し側の分解が変わり、
- * 実 GPU でしか露見しない回帰リスクを負う — 共通化は両ファミリが揃ってからのリファクタに回す。
- */
-const withSession = async <T>(
-  gpu: GpuContext,
-  model: ModelComponent,
-  sessionOptions: SessionOptions,
-  observe: ((diagnostics: SessionDiagnostics) => void) | undefined,
-  body: (
-    run: (inputs: Record<string, Tensor>) => Promise<Record<string, Tensor>>,
-    session: Session,
-  ) => Promise<T>,
-): Promise<T> => {
-  const session = await model.createSession(gpu, sessionOptions);
-  try {
-    const run = async (inputs: Record<string, Tensor>): Promise<Record<string, Tensor>> => {
-      const outputs = await session.run(inputs);
-      if (observe !== undefined) observe(session.diagnostics());
-      return outputs;
-    };
-    return await body(run, session);
-  } finally {
-    await session.dispose();
-  }
-};
-
 /** 観測席（{@link Sbv2PipelineOptions.onRunDiagnostics}）へコンポーネント名を焼いて渡す。 */
 const observer = (
   state: Sbv2State,
@@ -353,9 +321,6 @@ const observer = (
   const listener = state.onRunDiagnostics;
   return listener === undefined ? undefined : (diagnostics) => listener(component, diagnostics);
 };
-
-/** Unicode コードポイントの上限（区間表はコードポイントの閉区間）。 */
-const MAX_CODE_POINT = 0x10FFFF;
 
 /**
  * `cleanRanges` の区間表を検査して読む。

@@ -11,7 +11,7 @@
  *
  * **正規表現の `\p{L}` / `\p{N}` / `\s` は使わない** — 判定の正本は Rust 側の Unicode 表で、
  * JS エンジンの ICU とずれた瞬間に pre-token の切れ目が変わり、id 列が静かに別物になる。
- * 分類はエクスポータが正本に 1 文字ずつ聞いて畳んだ閉区間表を引く（`code-ranges.ts`）。
+ * 分類はエクスポータが正本に 1 文字ずつ聞いて畳んだ閉区間表を引く（`text/code-ranges.ts`）。
  *
  * MUST: **NFC も同じ規律**。`String.prototype.normalize("NFC")` は正本ではない — 正本
  * （Rust の `unicode-normalization`）は Unicode 表が古く、実測で 123 コードポイントについて
@@ -23,7 +23,7 @@
 
 import { splitAddedTokens } from "../../text/added-tokens.ts";
 import { toCodePoints } from "../../text/code-points.ts";
-import { type CodeRanges, inCodeRanges } from "./code-ranges.ts";
+import { type CodeRanges, inCodeRanges } from "../../text/code-ranges.ts";
 
 /** pre_tokenizer 正規表現が使う文字クラス（閉区間表）。 */
 export type Qwen2CharClasses = {

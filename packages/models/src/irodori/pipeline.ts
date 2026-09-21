@@ -135,6 +135,7 @@ import {
   toAcquireGpuOptions,
 } from "../session/gpu-features.ts";
 import { toSessionOptions } from "../session/options.ts";
+import { withSession } from "../session/with-session.ts";
 import { toManifestSource } from "../hub/repo-ref.ts";
 import { type FromPretrainedHubOptions, hubLoadOptions } from "../hub/load-options.ts";
 import {
@@ -579,38 +580,6 @@ const outputAt = (
   const tensor = outputs[name];
   if (tensor === undefined) throw new Error(`グラフ出力 ${index}（'${name}'）が実行結果に無い`);
   return tensor;
-};
-
-/**
- * 1 グラフぶんの Session を張り、使い終わったら必ず解放する。
- * MUST: `finally` で dispose する — 途中で落ちたときに VRAM が残ると、後続の段が確保に
- * 失敗して「最初の失敗とは別の場所」で落ちる。
- *
- * NOTE: `sbv2/pipeline.ts` / `anima/pipeline.ts` にも同名の helper がある（**意図的な重複**）。
- * 3 ファミリで `run` の返し方が違い（1 出力 / 多出力 / ここは同一セッションでの複数 run）、
- * 共通化すると全呼び出し側の分解が変わって実 GPU でしか露見しない回帰リスクを負う。
- */
-const withSession = async <T>(
-  gpu: GpuContext,
-  model: ModelComponent,
-  sessionOptions: SessionOptions,
-  observe: ((diagnostics: SessionDiagnostics) => void) | undefined,
-  body: (
-    run: (inputs: Record<string, Tensor>) => Promise<Record<string, Tensor>>,
-    session: Session,
-  ) => Promise<T>,
-): Promise<T> => {
-  const session = await model.createSession(gpu, sessionOptions);
-  try {
-    const run = async (inputs: Record<string, Tensor>): Promise<Record<string, Tensor>> => {
-      const outputs = await session.run(inputs);
-      if (observe !== undefined) observe(session.diagnostics());
-      return outputs;
-    };
-    return await body(run, session);
-  } finally {
-    await session.dispose();
-  }
 };
 
 /** 観測席（{@link IrodoriPipelineOptions.onRunDiagnostics}）へコンポーネント名を焼いて渡す。 */

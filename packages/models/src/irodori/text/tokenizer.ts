@@ -16,7 +16,15 @@
  */
 
 import { splitAddedTokens } from "../../text/added-tokens.ts";
-import { asFiniteNumber, assertUniqueLines, setUnique } from "../../text/asset-gates.ts";
+import {
+  asFiniteNumber,
+  asId,
+  asRecord,
+  assertUniqueLines,
+  asString,
+  asVocabId,
+  parseAddedTokens,
+} from "../../text/asset-gates.ts";
 import { toCodePoints } from "../../text/code-points.ts";
 import { type UnigramModel, unigramTokenize, type UnigramVocabEntry } from "../../text/unigram.ts";
 
@@ -100,48 +108,6 @@ export class IrodoriTokenizer {
   }
 }
 
-const asRecord = (value: unknown, label: string): Record<string, unknown> => {
-  if (typeof value !== "object" || value === null) throw new Error(`${label}: オブジェクトでない`);
-  return value as Record<string, unknown>;
-};
-
-const asString = (value: unknown, label: string): string => {
-  if (typeof value !== "string") throw new Error(`${label}: 文字列でない`);
-  return value;
-};
-
-const asNumber = (value: unknown, label: string): number => {
-  if (typeof value !== "number") throw new Error(`${label}: 数値でない`);
-  return value;
-};
-
-/** i32 の上限（id は最終的に `Int32Array` へ書かれる）。 */
-const MAX_ID = 2147483647;
-
-/**
- * トークン id として受ける数値。
- *
- * MUST: `typeof number` だけで通さない。id は `encodePadded` が `Int32Array` へ書くので、
- * 非整数は**黙って切り捨てられ**、i32 の範囲外は wrap する — どちらも「別のトークンを指す」
- * 沈黙誤値になり、グラフ側の embedding gather まで表面化しない。
- */
-const asId = (value: unknown, label: string): number => {
-  const id = asNumber(value, label);
-  if (!Number.isInteger(id) || id < 0 || id > MAX_ID) {
-    throw new Error(`${label}: トークン id が 0..${MAX_ID} の整数でない（${id}）`);
-  }
-  return id;
-};
-
-/** 語彙表の行を指す id（{@link asId} に加えて語彙の行数未満であること）。 */
-const asVocabId = (value: unknown, label: string, vocabSize: number): number => {
-  const id = asId(value, label);
-  if (id >= vocabSize) {
-    throw new Error(`${label}: トークン id ${id} が語彙の行数 ${vocabSize} 以上`);
-  }
-  return id;
-};
-
 /**
  * byte fallback の先頭 id（{@link asId} に加えて 256 本連番全体が語彙内であること）。
  *
@@ -159,20 +125,6 @@ const asByteBaseId = (value: unknown, label: string, vocabSize: number): number 
     );
   }
   return id;
-};
-
-const parseAddedTokens = (raw: unknown, label: string): Map<string, number> => {
-  if (!Array.isArray(raw)) throw new Error(`${label}: 配列でない`);
-  const out = new Map<string, number>();
-  for (const entry of raw) {
-    if (!Array.isArray(entry) || entry.length !== 2) {
-      throw new Error(`${label}: [文字列, id] でない`);
-    }
-    // NOTE: 語彙の行数では縛らない — 追加トークンは語彙表の外へ採番される形もある
-    // （anima の Qwen2 が実際にそれ）。ここで見るのは i32 として健全なことだけ。
-    setUnique(out, asString(entry[0], label), asId(entry[1], label), label);
-  }
-  return out;
 };
 
 /**

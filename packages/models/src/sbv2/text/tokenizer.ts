@@ -26,6 +26,7 @@
  */
 
 import { assertUniqueLines } from "../../text/asset-gates.ts";
+import { inCodeRanges } from "../../text/code-ranges.ts";
 
 /** `clean_text` の除去・スペース化コードポイント範囲（両端含む閉区間の昇順リスト）。 */
 export type CleanRanges = {
@@ -40,20 +41,6 @@ type SpecialTokens = {
   readonly clsId: number;
   readonly sepId: number;
   readonly unkId: number;
-};
-
-/** 昇順の閉区間リストに対する二分探索で cp が含まれるか判定する。 */
-const inRanges = (ranges: readonly (readonly [number, number])[], cp: number): boolean => {
-  let low = 0;
-  let high = ranges.length - 1;
-  while (low <= high) {
-    const mid = (low + high) >> 1;
-    const [start, end] = ranges[mid];
-    if (cp < start) high = mid - 1;
-    else if (cp > end) low = mid + 1;
-    else return true;
-  }
-  return false;
 };
 
 export class DebertaTokenizer {
@@ -104,8 +91,8 @@ export class DebertaTokenizer {
     for (const ch of text) {
       const cp = ch.codePointAt(0);
       if (cp === undefined) continue;
-      if (inRanges(this.#clean.removed, cp)) continue;
-      cleaned += inRanges(this.#clean.spaced, cp) ? " " : ch;
+      if (inCodeRanges(this.#clean.removed, cp)) continue;
+      cleaned += inCodeRanges(this.#clean.spaced, cp) ? " " : ch;
     }
     // NFC は参照実装の BasicTokenizer 側、NFKC は CharacterTokenizer 側。間に空白分割が
     // 入るため 1 回にまとめられない（NFKC がスペースを生む文字で分割結果が変わる）。
