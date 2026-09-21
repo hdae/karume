@@ -212,7 +212,7 @@ export const gemmComputeKeyPart = (compute: GemmCompute): string => compute === 
 
 /**
  * 行窓変種。クエリ行のブロック実行（分解 attention は src/runtime/fusion.ts の
- * `rowBlockAttention`・融合 attention は src/runtime/recipe-builder.ts の `#buildAttention`）で、
+ * `rowBlockAttention`・融合 attention は src/runtime/recipe-builders/attention.ts の `buildAttention`）で、
  * `[B,M,K] × [B,K,N]` の M を行ブロック 1 枚ぶんに縮めたまま、**片側だけ**を元の全 M
  * （`rows_full`）のストライドで数えて行オフセット（`row_offset`）から読み書きするための 1 ビット。
  *

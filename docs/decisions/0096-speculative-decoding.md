@@ -207,7 +207,7 @@ lm_head + argmax（centroid 疎 softmax の topk は exporter に無い — 受�
 ## 追記（2026-09-09・readonly attention の縮約順は席に依らない — 決定 7 の補足）
 
 - **drafter の readonly attention（①′ ③′）は `stateAttentionReduce` に依らず parallel 固定**:
-  `recipe-builder.ts` の `#buildReadonlyStateAttention` は
+  `recipe-builders/attention.ts` の `buildReadonlyStateAttention` は
   `stateQkParallelReadonlyWgsl` / `statePvParallelReadonlyWgsl` を無条件に選ぶ。Session の
   `stateAttentionReduce` 席が効くのは **target の states 形 attention**（今 step の k/v も読む形）の
   縮約順だけで、借り手の読み専用経路には枝が無い。

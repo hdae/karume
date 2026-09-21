@@ -74,7 +74,7 @@
  *
  * gemm-geometry は「担当割りの選択点は `gemmGeometryForRows` 1 箇所」と書くが、その射程は
  * **GEMM 骨格の中**にとどまる（ADR 0082 決定 2）。本族は骨格を共有しない別カーネルで、選択は
- * 2 段 — **族の選択**（GEMV 族に入るか）は `#buildLinear` の 1 箇所、**変種の選択**（M=1 変種か
+ * 2 段 — **族の選択**（GEMV 族に入るか）は `buildLinear` の 1 箇所、**変種の選択**（M=1 変種か
  * 行ブロックか・行ブロックの `rows`）は {@link defaultLinearGemvRowsVariant} の 1 箇所 — で、
  * どちらも**プラン時 shape の純関数**。判別子はパイプラインキーの族名 `linear_gemv`（行ブロックは
  * 変種の `r<rows>`）に載る — 実行時オートチューン禁止と「同一キー → バイト同一 WGSL」は
@@ -97,7 +97,7 @@ import {
 /**
  * 重み 1 語（`vec4<u32>` または `vec4<f32>` = 16 B）が運ぶ要素数 = **縮約の刻み**（格納ごと）。
  *
- * 適格判定（src/runtime/recipe-builder.ts の `#buildLinear`）が k と group 長へ課す整除の
+ * 適格判定（src/runtime/recipe-builders/linear.ts の `buildLinear`）が k と group 長へ課す整除の
  * 単位でもあるので、門とカーネルが格納ごとに同じ 1 個の導出点を読む。
  * f16 は 8 要素 / 語、f32 は 4 要素 / 語で、両者とも M=1 のみ（ADR 0082 追記 6・7）。
  */
@@ -158,7 +158,7 @@ export const defaultLinearGemvVariant = (
 });
 
 /**
- * 行ブロック変種が受ける M の上限 = **門の上限**（`#buildLinear` が本族へ入れる行数の範囲）。
+ * 行ブロック変種が受ける M の上限 = **門の上限**（`buildLinear` が本族へ入れる行数の範囲）。
  * 掃引した範囲（M ≤ 64 — 既定 GEMM 骨格の M16N16 バケットと同じ幅）そのもので、その外は既定の
  * GEMM 骨格のまま（ADR 0082 決定 4 の「実測した範囲に留める」）。
  */
@@ -363,7 +363,7 @@ export const linearGemvRowsKey = (
 
 /**
  * 束縛。**既定経路の linear と同じ番号・同じ意味**（0 dims / 1 x / 2 w / 3 bias / 4 out /
- * 5 wscale）で、`#buildLinear` が組む束縛列をそのまま受ける。
+ * 5 wscale）で、`buildLinear` が組む束縛列をそのまま受ける。
  *
  * 変わるのは要素型 2 つだけ: 重みは `vec4<u32>`（16 B = i4 32 要素 / i8 16 要素を 1 度に読む）、
  * 出力は `f32`（1 スレッド 1 列のスカラ書き — 既定 v4 経路の `vec4<f32>` と違い n の整除を
@@ -827,7 +827,7 @@ export const linearGemvParallelLanes = (
 /**
  * 「この形が並列 GEMV（{@link linearGemvParallelWgsl} 族）へ落ちるか」を返す**唯一の純関数**。
  *
- * {@link linearGemvParallelLanes}（実測形の表引き）に、recipe-builder の `#buildLinear` が
+ * {@link linearGemvParallelLanes}（実測形の表引き）に、recipe-builders/linear.ts の `buildLinear` が
  * GEMV 族へ入れる条件（格納・`k % 刻み`・i4 の group 長・出力 vec4 の実測範囲）を重ねたもの。
  * packed 活性の対付け（ADR 0105）はこれをさらに行ごとの採否で絞った
  * {@link linearGemvPackedEligible} を読む。

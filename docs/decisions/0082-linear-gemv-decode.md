@@ -3,7 +3,7 @@
 - Status: accepted（2026-08-31・perf-ledger K-11 の実施。スパイクで機序・利得・ビット同一を
   先に実測してから本実装 — ADR 0060 と同じ進め方）
 - 対象: runtime（`src/kernels/linear-gemv.ts` 新規 / `src/runtime/recipe-builder.ts` の
-  `#buildLinear`）。IR 仕様・エクスポータ・配布資産・公開 API は無変更（再 export 不要）。
+  `buildLinear`）。IR 仕様・エクスポータ・配布資産・公開 API は無変更（再 export 不要）。
 - 関連: ADR [0022](0022-gemm-register-blocking.md)（決定 3 = 縮約順の数値契約。本 ADR は
   その射程を**カーネル族が増えた形へ延長**する — 撤回はしない）/
   [0069](0069-packed-w4-storage.md)（i4 格納・group scale・nibble 順）/
@@ -48,13 +48,13 @@ GEMV を置く。束縛番号・uniform（`{m,n,k}` 3 語）・出力実体は�
 は純関数」と書いているが、その射程は **GEMM 骨格の内側**（どの幾何でタイルを切るか）である。
 本 ADR で linear の選択は次の 2 段になる:
 
-1. **族の選択** — `#buildLinear` の 1 箇所。プラン時 shape と Session ノブだけの述語。
+1. **族の選択** — `buildLinear` の 1 箇所。プラン時 shape と Session ノブだけの述語。
 2. **骨格内の幾何選択** — `gemmGeometryForRows`（族 1 = 既定経路に入った後だけ）。
 
 MUST: どちらの段も**プラン時 shape の純関数**で、選択結果は必ずパイプラインキーへ載る
 （族名 `linear_gemv` / 変種 `c32u4` / group `g32`）。ADR 0022 の「実行時オートチューン禁止」と
 「同一キー → バイト同一 WGSL」はこの 2 段構成でも 1 文字も緩まない。
-MUST: 族を増やすたびに段が増える形にはしない — 族の選択は `#buildLinear` の 1 箇所に閉じる。
+MUST: 族を増やすたびに段が増える形にはしない — 族の選択は `buildLinear` の 1 箇所に閉じる。
 
 ### 3. 数値の席 = 既定経路（ADR 0058 の opt-in 席は使わない）
 
@@ -77,7 +77,7 @@ NOTE: f32 縮約に順序非依存の理論保証は無いので、ビット同�
 
 ### 4. 門（適格判定）は実測した範囲に留める
 
-`#buildLinear` が族 2 を選ぶ条件は `m === 1` × 重み `i4` × 計算 `f32` × `v4` ×
+`buildLinear` が族 2 を選ぶ条件は `m === 1` × 重み `i4` × 計算 `f32` × `v4` ×
 `groupSize % 32 === 0` × `k % 32 === 0`。前 4 つは掃引した組み合わせそのもの、後ろ 2 つは
 カーネルの構造要件（重み 1 語 = 32 要素が group を跨がない / 重み束縛 `vec4<u32>` の 16 B 整列。
 `k % 32` は ADR 0069 決定 2 の「行長は group_size の倍数」から従うが、束縛の要件として言い直す）。
@@ -217,7 +217,7 @@ NaN バグ（`tanh_stable` で解消済み）の後に M2 で実測した。
   行方向は `ceil(m / rows)` 枚の y タイル）を足す。M=1 は従来の変種のまま（decode の生成物は
   1 バイトも動かない — fixture が検出器）。
 - 選択は 2 段で、どちらも**プラン時 shape の純関数**（決定 2 の MUST はそのまま）: 族の選択 =
-  `#buildLinear` の 1 箇所（門は 1 ≤ m ≤ `LINEAR_GEMV_MAX_ROWS` = 64・他の条件は決定 4 / 追記 4 と同じ）、
+  `buildLinear` の 1 箇所（門は 1 ≤ m ≤ `LINEAR_GEMV_MAX_ROWS` = 64・他の条件は決定 4 / 追記 4 と同じ）、
   変種の選択 = `defaultLinearGemvRowsVariant(storage, m, n)`（キーに `r<rows>` が載る）。`rows` の規則 =
   「m 以下の最大 2 冪（天井 256 要素/語 = i4 8 行 / i8 16 行）から始め、スレッド数 `n · ceil(m / rows)` が
   16384 に届くまで半分にする」。並列度の目標 16384 は参照 device（RTX 3080 Ti）の飽和点で可搬な最適値では

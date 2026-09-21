@@ -1,6 +1,6 @@
 // states 形 attention のノード内一時の算式（`planStateAttention`）の門。
 //
-// この関数は実行計画（recipe-builder の `#buildStateAttention`）と見積り（estimate.ts）が
+// この関数は実行計画（recipe-builders/attention.ts の `buildStateAttention`）と見積り（estimate.ts）が
 // 分け合う唯一の導出元なので、ここが守るのは「両者が同じ数を得る」ための性質そのもの:
 // 列容量 `colCap` の 2 分岐・行ブロックの覆い（行を漏らさず重ねない）・1 枚が上限に収まること・
 // 枚数の明示（テスト専用 `ROW_BLOCK_SPLIT` の受け口）が効くこと。

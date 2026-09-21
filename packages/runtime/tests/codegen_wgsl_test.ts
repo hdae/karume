@@ -443,7 +443,7 @@ Deno.test("生成した WGSL がスナップショットとバイト単位で一
     ["attention_qk_gqa_v4.wgsl", attentionQkWgsl(true, "f32", "f32", false, true)],
     ["attention_pv_gqa.wgsl", attentionPvWgsl(false, "f32", "f32", true)],
     ["attention_pv_gqa_v4.wgsl", attentionPvWgsl(true, "f32", "f32", true)],
-    // **行窓変種**（クエリ行のブロック実行 — src/runtime/recipe-builder.ts の `#buildAttention`）。
+    // **行窓変種**（クエリ行のブロック実行 — src/runtime/recipe-builders/attention.ts の `buildAttention`）。
     // ①QK は A 側（q）・③PV は C 側（O）が全 M ストライド + 行オフセットになる。**mask 付きを
     // 対で置く**のが条件で、行窓で唯一 base 算術の外へ出るのが mask の**行**添字だから
     // （S はブロック相対・mask は全 M ぶんの実体）。この 6 本を足すことより **上の
@@ -2570,7 +2570,7 @@ Deno.test("attention の GQA 変種は K / V の base 1 行と uniform 1 語だ�
 });
 
 /**
- * **行窓変種**（クエリ行のブロック実行 — src/runtime/recipe-builder.ts の `#buildAttention`）の
+ * **行窓変種**（クエリ行のブロック実行 — src/runtime/recipe-builders/attention.ts の `buildAttention`）の
  * 構造。スナップショットが凍結するのは 8 本の代表だけなので、「どの base が動き、どれが動いて
  * はいけないか」はここで全変種（v4 × 段 × i8a8）に対して機械確認する。
  *

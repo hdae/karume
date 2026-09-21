@@ -244,7 +244,7 @@ const slidingSlotWindows = (graph: IrGraph): ReadonlyMap<string, number> => {
  * この数を超える行数を投機的に書いてはいけない — 超えると棄却行が live な過去 KV を潰す。
  *
  * MUST: 容量軸は**スロット shape の軸 2**（`[B,Hkv,C,D]` — states 形 op の契約。実行計画側
- * `recipe-builder.ts` の `#buildStateAttention` / `#buildStateAppend` も同じ軸を読む）。
+ * `recipe-builders/attention.ts` の `buildStateAttention` / `buildStateAppend` も同じ軸を読む）。
  * ここで別の軸を読むと、公開する余裕が実際の物理行数と無関係な数になる。
  */
 const slidingSlackRows = (

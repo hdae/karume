@@ -1,7 +1,7 @@
 /**
  * states 形 attention（ADR 0067 決定 4）のノード内一時の**算式 1 本**。
  *
- * 実行計画（recipe-builder の `#buildStateAttention`）と見積り（estimate.ts の
+ * 実行計画（recipe-builders/attention.ts の `buildStateAttention`）と見積り（estimate.ts の
  * `stateAttentionTemps`）は同じ数を出さなければならないので、両者が分け合う 3 つの式
  * — 列容量 `colCap` の 2 分岐・行ブロックの割り方（{@link planRowBlocks}）・S / 行統計の
  * バイト式 — をこのモジュールにだけ置く。

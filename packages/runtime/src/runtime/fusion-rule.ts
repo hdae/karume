@@ -69,7 +69,7 @@ export type FusedDispatch = {
   readonly params: Uint32Array<ArrayBuffer>;
   /**
    * params を **storage** で束ねる（可変長 params を持つ elementwise 族だけ — 素のノードの
-   * `#buildElementwise` と同じ）。省略時は uniform。
+   * `buildElementwise` と同じ）。省略時は uniform。
    */
   readonly paramsStorage?: boolean;
   /**

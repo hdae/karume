@@ -319,7 +319,7 @@ const CHUNK_ROW_AXIS = 2;
  * 物理 chunk 行 `M` を決めている**次元宣言**（記号を含むものだけ・重複排除済み）。
  *
  * 判別は「states 欄が非空なノードの入力」= states 形の判別そのもの（ADR 0067 決定 4 —
- * recipe-builder の `#buildStateAttention` / `#buildStateAppend` が `states.chunkRows` へ
+ * recipe-builders/attention.ts の `buildStateAttention` / `buildStateAppend` が `states.chunkRows` へ
  * 積むのと同じノード集合）。数値次元は記号で動かない形なので拾わない — その形の decode step は
  * 物理 chunk 行を prefill と同じまま `queryLength = 1` で回る（`assertGenerationRun` は
  * `rows === chunkLength` を decode でも許す）ので、2 シナリオが同じ数字になるのが正しい。
@@ -557,7 +557,7 @@ const selectionSplitTempBytes = (node: NodePlan): number => {
  * 融合の成立に依存せず必ず出て、大きさは列容量（full = スロット容量 `C` / sliding = 窓の
  * resident 幅 `W−1+M`）に比例するため、可変 capacity のグラフでは中間の主役になる。
  *
- * MUST: 算式は {@link planStateAttention}（実行計画 `#buildStateAttention` と共有する 1 本）
+ * MUST: 算式は {@link planStateAttention}（実行計画 `buildStateAttention` と共有する 1 本）
  * だけから引く。ここで式を書き直すと、片方だけ直された実装に対して estimator が例外も警告も
  * 無く別の数を主張し続ける（モジュール doc の MUST）。ここが持つのは、見積り固有の材料
  * （記号解決済みのスロット shape）を幾何へ翻訳する部分だけ。

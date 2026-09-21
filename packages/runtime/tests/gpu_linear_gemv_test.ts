@@ -131,7 +131,7 @@ type GemvCase = {
 /**
  * 形の選定。`units = k / 32`（重み語の本数）と `n % 32`（最終 workgroup の埋まり方）が
  * 独立の軸で、group 長は scale 添字の shift を動かす軸。
- * MUST: `n % 4 == 0`（門が v4 を要求する — recipe-builder の `#buildLinear`）。
+ * MUST: `n % 4 == 0`（門が v4 を要求する — recipe-builders/linear.ts の `buildLinear`）。
  */
 const CASES: readonly GemvCase[] = [
   // 端がどこにも無い基準形（units = 4 ちょうど・n は workgroup 2 枚ちょうど）
@@ -272,7 +272,7 @@ Deno.test({
   },
 });
 
-/** 門（`#buildLinear` の分岐）1 件ぶんの期待キー。 */
+/** 門（`buildLinear` の分岐）1 件ぶんの期待キー。 */
 type DoorCase = {
   readonly name: string;
   readonly shape: GemvCase;
@@ -447,7 +447,7 @@ const weightAtI8 = (k: number) => (index: number): number => {
 /**
  * 形の選定。`units = k / 16`（重み語の本数）と `n % 32`（最終 workgroup の埋まり方）が
  * 独立の軸で、本番形（n 262,144 × k 1,536 = units 96・n % 32 == 0）はどの端も踏まない。
- * MUST: `n % 4 == 0`（門が v4 を要求する — recipe-builder の `#buildLinear`）。
+ * MUST: `n % 4 == 0`（門が v4 を要求する — recipe-builders/linear.ts の `buildLinear`）。
  */
 const I8_CASES: readonly GemvI8Case[] = [
   // 端がどこにも無い基準形（units = 4 ちょうど・n は workgroup 2 枚ちょうど）
