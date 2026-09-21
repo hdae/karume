@@ -1,11 +1,11 @@
 # ACTIVE_DESIGN — Karume
 
 > 現在の設計とレビューの入口。履歴はADR / research / gitに置き、作業順は[backlog](../docs/backlog.md)、性能の採否は[perf-ledger](../docs/perf-ledger.md)を正本とする。
-> Last updated: 2026-09-21（コード品質管理の波 段 1 / 2 済 — 段 3 は backlog now の同名項）
+> Last updated: 2026-09-21（コード品質管理の波 完了 — 段 1〜3 の置き場は backlog now の同名項）
 
 ## 現在の焦点
 
-- コード品質管理の波（2026-09-21〜・段1 / 2 済）: 入力は外部レビューの分割候補（triage.md §6・3段）。共通層が増えた — `models/src/config/readers.ts`（pipelineConfigの基本reader）・`models/src/session/with-session.ts`・`models/src/text/{asset-gates,code-ranges}.ts`（家族横断の門と区間探索）・`models/src/hub/{asset-readers,graph-gates}.ts`（資産の読み口とgraph寸法の門）。gemmaは`admission.ts`（受理）/ `chat-turn.ts`（chat 1ターンの変換）/ `ple-index.ts` / `ple-shard.ts`に割れ、`ple.ts`は所有者+facade。分割の規律: 数式・await・受理集合・文言を移動と同じ変更に混ぜない、WGSL生成器はスナップショットのバイト同一で確認、公開面fixtureは自動更新しない。
+- コード品質管理の波（2026-09-21・段1〜3 済）: 入力は外部レビューの分割候補（triage.md §6・3段）。共通層 — `models/src/config/readers.ts`・`session/with-session.ts`・`text/{asset-gates,code-ranges}.ts`・`hub/{asset-readers,graph-gates}.ts`。gemmaは`admission.ts` / `chat-turn.ts` / `ple-index.ts` / `ple-shard.ts`（`ple.ts`は所有者+facade）、irodoriは`admission` / `conditioning` / `dit-loop` / `stage`。runtimeは**層の入口を1ファイルに保つfacade**が3つ — `gpu/device.ts`（実体は`context.ts` + `acquire.ts`）・`runtime/fusion.ts`（`fusion-rule.ts` + `fusion-rules/`）・`runtime/recipe-builder.ts`（`RecipeBuildFace`で`recipe-builders/`へ注入）— と、`session-build.ts`（Session.buildの本体）。消費側はfacadeの綴りでimportする。分割の規律: 数式・await・受理集合・文言を移動と同じ変更に混ぜない、WGSL生成器はスナップショットのバイト同一で確認、公開面fixtureは自動更新しない。分割の規律: 数式・await・受理集合・文言を移動と同じ変更に混ぜない、WGSL生成器はスナップショットのバイト同一で確認、公開面fixtureは自動更新しない。
 - テスト整理の波（2026-09-20・段0〜3 済）と外部レビューの取り込み（2026-09-21・正本は`.claude/reviews/2026-09-21_chatgpt-reviews/triage.md`・構造の分割候補16件は§6の着手順3段で**次のコード品質管理の波の入力**）。済んだ段: 段0=verifyのレーン分割（`test:core` / `test:models:<系列>`と被覆の門`verify_lanes_test.ts`・[ADR 0005追記](../docs/decisions/0005-verification.md)）、
   段1=sha256参照値を環境キーごとの行へ（`KARUME_REFERENCE`の3モード・参照門`KARUME_ALLOW_NO_REFERENCE`・結果と実物は`outputs/verify/<環境キー>/<日付>_<系列>/`・[ADR 0106](../docs/decisions/0106-device-keyed-references.md)）、
   段2a=公開面スナップショット門（各パッケージの`public_surface_test.ts`と`fixtures/public-surface.json`・焼き直しは`KARUME_SURFACE=write`）、段2b=リポ直下`CHANGELOG.md`新設、段2c=パッケージREADME / LICENSEの公開物同梱。

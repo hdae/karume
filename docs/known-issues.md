@@ -218,7 +218,7 @@ golden `activations` の `sin` は許容差を WGSL 仕様帯へ寄せて消化�
   実体を検出する」門の意味を弱める）。Metal の「errorScope 沈黙」とは別種（こちらは落ちる側）。
   同じ遅延解放は**レーンを間隔なしに連続実行したときのフレーク**としても出る（2026-09-21: anima レーン
   〈9 分〉の直後に sbv2 レーンを回すと、runtime の golden `i8 / flow / p512` から後の 12 本が OOM —
-  後続は `requestDevice` 自体が `Not enough memory left`。20 秒空けて単独で回すと 198 本すべて緑）。
+  後続は `requestDevice` 自体が `Not enough memory left`。20 秒では足りないことがあり、数分空けて単独で回すと 198 本すべて緑）。
   レーンを続けて回すときは間を置くか、赤を見たら単独で再走する。
 - **Deno は timestamp-query の値を ns へ換算しない**（ext/webgpu は wgpu の raw tick をそのまま
   返す。WebGPU 仕様は ns）。B570 の Vulkan `timestampPeriod` は 52.0833 ns なので、Deno での

@@ -68,7 +68,18 @@
   複製を解消・sbv2 の tokenizer 資産門を `sbv2/text/asset.ts` へ・config の残り重複（isPositiveInteger / isRecord / readRecord）を
   readers.ts へ。**残置（設計判断が要る）**: `Gemma4PipelineOptions` を引数に取る 4 本（assertSpeculative /
   resolveGemma4PleResidency / buildGemma4Program / speculativeSetup）は admission.ts へ移すと pipeline.ts と循環するので
-  pipeline.ts に残した（寄せるなら gemma4 の公開型置き場を別に立てる）。sbv2 の staticInputDim は方針が逆向きで対象外。
+  pipeline.ts に残した（寄せるなら gemma4 の公開型置き場を別に立てる — 2026-09-21 裁定: 新設するにしても後回し）。sbv2 の
+  staticInputDim は方針が逆向きで対象外。
+  **段 3 済（2026-09-21）**: 1 ファイルずつ、いずれも行の移動だけで本体はバイト同一（機械突合）。gpu/device.ts → `context.ts`（3 クラス）+
+  `acquire.ts`（取得・limits・カナリア）で device.ts は層の入口 54 行 / runtime/fusion.ts → `fusion-rule.ts` + `fusion-rules/<rule>.ts` × 7 で
+  fusion.ts は入口 481 行（[ADR 0040 追記](decisions/0040-fusion-pass.md)）/ irodori/pipeline.ts → `admission` / `conditioning` / `dit-loop` /
+  `stage` で 928 行（10 段の説明は pipeline.ts 冒頭に温存）/ executor.ts → `session-build.ts`（構築相・Session.build はファサード）で
+  2,745 行 / recipe-builder.ts → `RecipeBuildFace` の注入面 + `recipe-builders/{elementwise,layout,linear,norm,attention,conv}.ts` で
+  706 行。未使用の export 修飾子 18 本（レビューの 11 件のうち import の無い 10 件 + 族内 8 件）を外した。**波の結論**: 1,000 行超の
+  src は 18 本 → 16 本で、行数の削減より「規則・責務の所有者を 1 つにする」ことが成果（executor 2,745 / gemma pipeline 1,902 /
+  context 1,332 / session-build 1,081 / recipe-builders/attention 1,208 は分割後も 1,000 行超・分割しないと判定した gemm /
+  sequence / generation-context / linear-gemv / state-attention・info の reference/ops / shapes・未着手の anima pipeline /
+  ops/contracts / sbv2 pipeline / hub manifest）。
 
 - **decode 速度調査の波（2026-09-19〜20・2026-09-20 に区切り — 残りは later へ）**: 帰属と反証は [decode 速度の帰属と次に試すこと](research/2026-09-19-qat-speed-recon.md)、
   候補の採否は [perf-ledger](perf-ledger.md) H-26〜H-29 / K-48〜K-53（K-45 / K-46 / K-47 は追記）。確定した事実: Deno の 23.8 ms/token のうち
