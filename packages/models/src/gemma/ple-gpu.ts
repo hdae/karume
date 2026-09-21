@@ -65,10 +65,15 @@ import { disposeSteps } from "../session/dispose-steps.ts";
 import {
   type Gemma4PleIndex,
   type Gemma4PleShard,
+  HEADER_LENGTH_BYTES,
+  packFactor,
+  SCALE_BYTES,
+} from "./ple-index.ts";
+import {
   type Gemma4PleShardSource,
   gemma4PleShardViews,
   readGemma4PleHeaderPrefix,
-} from "./ple.ts";
+} from "./ple-shard.ts";
 
 /** PLE をどこに置くか（{@link Gemma4PipelineOptions.pleResidency} の値域）。 */
 export type Gemma4PleResidency = "host" | "gpu";
@@ -103,9 +108,6 @@ const EMBED_SCALE_TENSOR = "embed_scale";
 /** 物理行数（token 行）の記号 — 束縛源は {@link INDEX_INPUT} の shape だけ。 */
 const ROW_SYMBOL = "M";
 
-/** scale 1 個ぶんのバイト数（sidecar の `scales` は f32 — `./ple.ts` の `SCALE_BYTES` と対）。 */
-const SCALE_BYTES = 4;
-
 /**
  * 合成 shard のヘッダ領域（空白で詰めて固定長にする）。
  *
@@ -114,13 +116,6 @@ const SCALE_BYTES = 4;
  * 100 バイト前後で、512 は桁 1 つぶんの余裕である（超えたら fail loudly）。
  */
 const HEADER_BYTES = 512;
-
-/** safetensors 先頭のヘッダ長欄（u64 LE）。 */
-const HEADER_LENGTH_BYTES = 8;
-
-/** 格納 dtype → 1 バイトに詰まる要素数（`./ple.ts` の `factor` と同じ規約）。 */
-const packFactor = (index: Gemma4PleIndex): number =>
-  index.storage === "i2" ? 4 : index.storage === "i4" ? 2 : 1;
 
 /** 格納 dtype → safetensors の綴り（合成コンテナが書く側）。 */
 const storageDtype = (index: Gemma4PleIndex): "I8" | "I4" | "I2" =>

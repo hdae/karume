@@ -1,6 +1,12 @@
 /**
  * Gemma 4 の PLE（per-layer embeddings）を**ホスト側で gather** する実装（ADR 0085）。
  *
+ * 索引（`ple.json`）の codec と定数は `./ple-index.ts`・shard の読み口と検査は `./ple-shard.ts`
+ * にあり、このファイルが持つのは**所有者**だけである — shard / 行 / 読み口 / 位置の 4 本の
+ * キャッシュと `residentBytes` が 1 つの予算を共有する関係は割れないので、同じ関数の中に置く。
+ * 公開 barrel とテストは従来どおりこのファイルの綴りで名前を取るので、移した名前は末尾で
+ * そのまま re-export する。
+ *
  * ## なぜホストが引くのか
  *
  * PLE は `input_ids` **だけ**を引数に取る純粋な行 lookup で、E2B では i8 35 表 = 2,240MiB。
@@ -56,9 +62,9 @@
  * 読み終えた量子化行は最大 256 行まで LRU で再利用する。全量 shard を優先し、既存の
  * ホスト RAM 予算の空きだけを使う。予算 0 は行も保持しない（ADR 0085 追記 2026-09-12）。
  * 行の位置は shard ごとに**ヘッダを 1 度だけ**解いて持つ（先頭 8 バイト → ヘッダ長 → ヘッダ
- * JSON の 2 段読み）。検査は全量経路と**同じ 1 実装**（{@link assertShardTables}）を通すので、
- * 行読みのときだけ別形式の資産が通ることはない。値は同じバイト列を同じ 2 段丸めに掛けるので、
- * 決定 4 のビット一致は経路に依らない。
+ * JSON の 2 段読み）。検査は全量経路と**同じ 1 実装**（`./ple-shard.ts` の
+ * `gemma4PleShardViews`）を通すので、行読みのときだけ別形式の資産が通ることはない。
+ * 値は同じバイト列を同じ 2 段丸めに掛けるので、決定 4 のビット一致は経路に依らない。
  *
  * ## MUST: id 空間を相互照合する（ADR 0085 決定 5）
  *
@@ -67,95 +73,46 @@
  * 門を置く場所はここしかない。
  */
 
+import type { Tensor } from "@karume/runtime";
 import {
-  parseSafetensors,
-  parseSafetensorsHeader,
-  type SafetensorsFile,
-  safetensorsHeaderLength,
-  type Tensor,
-  type TensorView,
-} from "@karume/runtime";
-import { assertAllowedKeys } from "../config/readers.ts";
-
-/** sidecar shard 1 本の受け持つ token 範囲（`[start, stop)`）。 */
-export type Gemma4PleShard = {
-  /** 配布形の相対ファイル名（読み手が {@link Gemma4PleOptions.openShard} へ渡す綴り）。 */
-  readonly file: string;
-  readonly start: number;
-  readonly stop: number;
-};
-
-/** `ple.json` の受理形（書き手の正本は `gemma4/export_product.py`）。 */
-export type Gemma4PleIndex = {
-  /** schema 2 の packed 格納。省略は従来の schema 1 / I8（ADR 0097）。 */
-  readonly storage?: "i2" | "i4";
-  /** sidecar が持つ token 行数（= `vocab_size_per_layer_input`）。 */
-  readonly tokens: number;
-  /** 層数（E2B は 35）。 */
-  readonly layers: number;
-  /** 層当たりの次元（E2B は 256）。 */
-  readonly dim: number;
-  /** lookup 後に掛かる embed scale（`hidden_size_per_layer_input ** 0.5`）。 */
-  readonly embedScale: number;
-  /** token 範囲の昇順・隙間なしの分割（先頭は 0・末尾は `tokens`）。 */
-  readonly shards: readonly Gemma4PleShard[];
-};
+  defaultGemma4PleResidentBytes,
+  type Gemma4PleIndex,
+  gemma4PleShardBytes,
+  largestShardBytes,
+  packFactor,
+  SCALE_BYTES,
+} from "./ple-index.ts";
+import {
+  type Gemma4PleReadOptions,
+  type Gemma4PleShardSource,
+  readRange,
+  readResidentShard,
+  readShardLayout,
+  type ResidentShard,
+  type ShardLayout,
+  type ShardRange,
+} from "./ple-shard.ts";
 
 /**
- * shard 読みへ透過するノブ（{@link Gemma4PleOptions.openShard} と {@link Gemma4Ple.gather}）。
+ * 互換 re-export（公開 barrel・テスト・他 family が従来どおり `./ple.ts` の綴りで取る面）。
  *
- * MUST: **best-effort** の契約である — 読み口が無視しても壊れない（無視した実装では中断が
- * 「この shard を読み終わってから」効くだけで、値も寿命も変わらない）。生成側は run の発行前に
- * 自分で `signal` を見る（`generation/sequence.ts`）ので、中断の正しさをここへ委ねていない。
+ * NOTE: 分割前の名前の出どころをここへ残すのは、`mod.ts` / サブパス面の綴り（ADR 0008）を
+ * 分割の都合で動かさないためである。新しい呼び手は移動先（`./ple-index.ts` / `./ple-shard.ts`）
+ * から直接取る。
  */
-export type Gemma4PleReadOptions = {
-  /** この読みの中断（生成 1 回ぶんの `signal` がそのまま降りてくる）。 */
-  readonly signal?: AbortSignal;
-};
-
-/**
- * PLE shard 1 本の読み口（{@link Gemma4PleOptions.openShard} が返す handle — ADR 0085 追記
- * 2026-09-07）。
- *
- * 全量（{@link Gemma4PleShardSource.readAll}）は必須で、区間読み（{@link Gemma4PleShardSource.range}）
- * は**任意能力**である（hub の `openAsset` がそのまま満たす）。range を持たない読み口では
- * 従来どおり「触った shard を全量読み → LRU 常駐」だけが起きる。
- *
- * 閉じる面は持たない — 支える読み口（hub の `AssetRangeReader`）が fd も handle も保持しない
- * 契約なので、呼び手に解放の責務が生えない。
- */
-export type Gemma4PleShardSource = {
-  /**
-   * ファイル全長（配布形の宣言 size）。
-   *
-   * 行の位置検査と、ヘッダ 2 段読みの clamp に使う。MUST: 実体長ではなく**宣言**長であること —
-   * 実体は宣言より長いことがあり（別世代の取り違え・書きかけのコピー）、実体長で検査すると
-   * 配布形の外側のバイト列が黙って読める。
-   */
-  readonly bytes: number;
-  /** 全量を読む（返す `ArrayBuffer` は view が buffer 全体を占める — 従来の読み口と同じ契約）。 */
-  readonly readAll: (options?: Gemma4PleReadOptions) => Promise<ArrayBuffer>;
-  /**
-   * `[offset, offset + length)` だけを読む（**任意能力**）。
-   *
-   * `cost` は**費用の型**（hub の `AssetRangeReader` と同じ語彙）: `"seek"` = offset に依らず
-   * 小さい（位置読み / 遅延 Blob の slice）・`"scan"` = offset に比例する（本文ストリームの
-   * 読み飛ばし）。行読みへ倒す行数の境目がこれで変わる（{@link createGemma4Ple} の方針表）。
-   *
-   * MUST: `length` ちょうどを返す（短い戻りは 0 埋めの行として配られる）。
-   */
-  readonly range?: {
-    readonly cost: "seek" | "scan";
-    readonly read: (
-      offset: number,
-      length: number,
-      options?: Gemma4PleReadOptions,
-    ) => Promise<ArrayBuffer>;
-  };
-};
-
-/** {@link Gemma4PleShardSource.range} の実体（任意能力なので、絞った後の型を名前で持つ）。 */
-type ShardRange = NonNullable<Gemma4PleShardSource["range"]>;
+export {
+  defaultGemma4PleResidentBytes,
+  type Gemma4PleIndex,
+  type Gemma4PleShard,
+  gemma4PleShardBytes,
+  parseGemma4PleIndex,
+} from "./ple-index.ts";
+export {
+  type Gemma4PleReadOptions,
+  type Gemma4PleShardSource,
+  gemma4PleShardViews,
+  readGemma4PleHeaderPrefix,
+} from "./ple-shard.ts";
 
 export type Gemma4PleOptions = {
   readonly index: Gemma4PleIndex;
@@ -240,380 +197,6 @@ export type Gemma4Ple = {
    * 「dispose したのに RAM が戻らない」形が復活する。冪等。
    */
   dispose(): void;
-};
-
-/** sidecar のテンソルキーと索引のメタデータキー（綴りの正本は `gemma4/export_product.py`）。 */
-const VALUES_KEY = "values";
-const SCALES_KEY = "scales";
-const METADATA_KEY = "karume_ple";
-
-/** 索引と shard メタデータの版（知らない版を黙って読まない）。 */
-const SCHEMA = 1;
-
-const INDEX_KEYS: readonly string[] = ["schema", "tokens", "layers", "dim", "embedScale", "shards"];
-const SHARD_KEYS: readonly string[] = ["file", "start", "stop"];
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
-
-const readRecord = (raw: unknown, where: string): Record<string, unknown> => {
-  if (!isRecord(raw)) throw new Error(`${where}: 無い / オブジェクトでない`);
-  return raw;
-};
-
-const readCount = (raw: Record<string, unknown>, key: string, where: string): number => {
-  const value = Object.hasOwn(raw, key) ? raw[key] : undefined;
-  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) {
-    throw new Error(`${where}.${key} ${String(value)} が 1 以上の整数でない`);
-  }
-  return value;
-};
-
-const readOffset = (raw: Record<string, unknown>, key: string, where: string): number => {
-  const value = Object.hasOwn(raw, key) ? raw[key] : undefined;
-  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
-    throw new Error(`${where}.${key} ${String(value)} が 0 以上の整数でない`);
-  }
-  return value;
-};
-
-/**
- * `ple.json` を受理形へ落とす（未知キー・欠け・不連続な範囲は fail loudly）。
- *
- * MUST: shard の範囲は `[0, tokens)` の**隙間も重なりも無い昇順分割**であること。緩めると
- * 「引けない id がある索引」や「2 本が同じ id を持つ索引」が通り、後者は**どちらの行を
- * 引いたか**で結果が変わる（沈黙誤値）。
- */
-export const parseGemma4PleIndex = (raw: unknown, where = "ple.json"): Gemma4PleIndex => {
-  const root = readRecord(raw, where);
-  assertAllowedKeys(root, root.schema === 2 ? [...INDEX_KEYS, "storage"] : INDEX_KEYS, where);
-  if (root.schema !== SCHEMA && root.schema !== 2) {
-    throw new Error(`${where}.schema ${String(root.schema)} が 1 / 2 でない`);
-  }
-  let storage: "i2" | "i4" | undefined;
-  if (root.schema === 2) {
-    const value = root.storage;
-    if (value !== "i2" && value !== "i4") throw new Error(`${where}.storage は i2 / i4 が必要`);
-    storage = value;
-  }
-  const tokens = readCount(root, "tokens", where);
-  const layers = readCount(root, "layers", where);
-  const dim = readCount(root, "dim", where);
-  if (storage !== undefined && dim % 16 !== 0) {
-    throw new Error(`${where}.dim は packed で16の倍数が必要`);
-  }
-  const embedScale = root.embedScale;
-  if (typeof embedScale !== "number" || !Number.isFinite(embedScale) || embedScale <= 0) {
-    throw new Error(`${where}.embedScale ${String(embedScale)} が正の有限数でない`);
-  }
-  if (!Array.isArray(root.shards) || root.shards.length === 0) {
-    throw new Error(`${where}.shards が非空の配列でない`);
-  }
-  const shards: Gemma4PleShard[] = [];
-  const files = new Set<string>();
-  let expected = 0;
-  root.shards.forEach((entry, position) => {
-    const at = `${where}.shards[${position}]`;
-    const shard = readRecord(entry, at);
-    assertAllowedKeys(shard, SHARD_KEYS, at);
-    const file = shard.file;
-    if (typeof file !== "string" || file === "") throw new Error(`${at}.file が非空の文字列でない`);
-    if (files.has(file)) throw new Error(`${at}.file '${file}' が重複している`);
-    files.add(file);
-    const start = readOffset(shard, "start", at);
-    const stop = readOffset(shard, "stop", at);
-    if (start !== expected) {
-      throw new Error(`${at}.start ${start} が直前の shard の末尾 ${expected} と連続しない`);
-    }
-    if (stop <= start) throw new Error(`${at}: 範囲 [${start}, ${stop}) が空`);
-    expected = stop;
-    shards.push({ file, start, stop });
-  });
-  if (expected !== tokens) {
-    throw new Error(`${where}: shard の合計 ${expected} 行が tokens ${tokens} と違う`);
-  }
-  return { tokens, layers, dim, embedScale, shards, ...(storage === undefined ? {} : { storage }) };
-};
-
-/** per-row scale 1 個ぶんのバイト数（`scales` は f32 — `readResidentShard` の dtype 門と対）。 */
-const SCALE_BYTES = 4;
-
-/** 既定の常駐予算を導く shard 本数（{@link defaultGemma4PleResidentBytes} の意味づけ）。 */
-const DEFAULT_RESIDENT_SHARDS = 2;
-
-/**
- * shard 1 本を常駐させたときのホスト RAM（i8 `values` + f32 `scales`）。
- *
- * 索引だけで決まる（バイト列を読む前に分かる）ので、予算の検査も LRU の追い出しも取得の完了を
- * 待たずに判定できる。
- */
-export const gemma4PleShardBytes = (index: Gemma4PleIndex, shard: Gemma4PleShard): number =>
-  (shard.stop - shard.start) * index.layers *
-  (index.dim / (index.storage === "i2" ? 4 : index.storage === "i4" ? 2 : 1) + SCALE_BYTES);
-
-/** 索引中で最も大きい shard 1 本ぶん（予算の下限 = これを割ると 1 本も載せられない）。 */
-const largestShardBytes = (index: Gemma4PleIndex): number =>
-  index.shards.reduce((largest, shard) => Math.max(largest, gemma4PleShardBytes(index, shard)), 0);
-
-/**
- * 常駐予算の既定 = **最も大きい shard 2 本ぶん**（{@link Gemma4PleOptions.maxResidentBytes}）。
- *
- * 「2 本」を本数のまま既定にすると、資産世代で shard 幅が変わった瞬間に同じ数字が別の RAM を
- * 意味する（実例: shard 上限 1GiB 世代の 3 本 = 1 本 758MiB → 256MiB 世代の 9 本 = 1 本 253MiB）。
- * **最大** shard を基準に取るのは、どの 2 本を掴んでも予算に収まる = 「2 本常駐」の意味が幅に
- * 依らず保たれる唯一の取り方だからである（ADR 0085 追記 2026-09-02）。
- */
-export const defaultGemma4PleResidentBytes = (index: Gemma4PleIndex): number =>
-  DEFAULT_RESIDENT_SHARDS * largestShardBytes(index);
-
-/** 読み込み済みの shard 1 本（整数値と層別 scale の**生の並び**）。 */
-type ResidentShard = {
-  readonly start: number;
-  readonly values: Int8Array<ArrayBuffer> | Uint8Array<ArrayBuffer>;
-  readonly scales: Float32Array<ArrayBuffer>;
-};
-
-/**
- * 全量経路と行読み経路が共有する検査対象（`SafetensorsFile` と `SafetensorsHeader` の共通形）。
- *
- * 全量経路は buffer 付きの `SafetensorsFile`・行読み経路は buffer を持たない
- * `SafetensorsHeader` を渡すが、資産の受理可否を決めるのはこの 2 つの表だけである。
- */
-type ShardTables = {
-  readonly metadata: ReadonlyMap<string, string>;
-  readonly tensors: ReadonlyMap<string, TensorView>;
-};
-
-const tensorView = (tables: ShardTables, name: string, where: string): TensorView => {
-  const view = tables.tensors.get(name);
-  if (view === undefined) throw new Error(`${where}: テンソル '${name}' が無い`);
-  return view;
-};
-
-const assertShape = (
-  actual: readonly number[],
-  expected: readonly number[],
-  where: string,
-): void => {
-  if (actual.length !== expected.length || actual.some((dim, axis) => dim !== expected[axis])) {
-    throw new Error(`${where}: shape [${actual.join(",")}] が [${expected.join(",")}] でない`);
-  }
-};
-
-/**
- * shard のメタデータが索引と同じ資産世代を名乗っていることを見る。
- *
- * MUST: 範囲まで突き合わせる — 索引だけ差し替えた組み合わせは**形も dtype も合う**まま
- * 別 token の行を引く（ADR 0085 決定 5 の沈黙誤値そのもの）。
- */
-const assertShardMetadata = (
-  tables: ShardTables,
-  index: Gemma4PleIndex,
-  shard: Gemma4PleShard,
-): void => {
-  const raw = tables.metadata.get(METADATA_KEY);
-  if (raw === undefined) {
-    throw new Error(`${shard.file}: __metadata__.${METADATA_KEY} が無い（別形式の資産）`);
-  }
-  const declared = readRecord(JSON.parse(raw), `${shard.file} の ${METADATA_KEY}`);
-  const mismatches = (
-    [
-      ["schema", index.storage === undefined ? SCHEMA : 2],
-      ["tokens", index.tokens],
-      ["layers", index.layers],
-      ["dim", index.dim],
-      ["embedScale", index.embedScale],
-      ["start", shard.start],
-      ["stop", shard.stop],
-    ] as const
-  ).filter(([key, want]) => (Object.hasOwn(declared, key) ? declared[key] : undefined) !== want);
-  if (index.storage !== undefined && declared.storage !== index.storage) {
-    throw new Error(`${shard.file}: karume_ple.storage が索引と違う`);
-  }
-  if (mismatches.length > 0) {
-    throw new Error(
-      `${shard.file}: ${METADATA_KEY} が索引と食い違う（` +
-        mismatches
-          .map(([key, want]) =>
-            `${key} ${String(Object.hasOwn(declared, key) ? declared[key] : undefined)} ≠ ${want}`
-          )
-          .join(" / ") +
-        `）— 片方だけ作り直した組み合わせ`,
-    );
-  }
-};
-
-/**
- * shard の表（metadata + テンソル 2 本）を検査し、`values` / `scales` の view を返す。
- *
- * MUST: 全量経路（{@link readResidentShard}）と行読み経路（{@link readShardLayout}）が通るのは
- * **この 1 実装**であること。片方だけ検査を持つと、行読みのときにだけ別形式・別世代の資産が
- * 通り、形も dtype も合ったまま別 token の行を引く（ADR 0085 決定 5 の沈黙誤値）。
- */
-const assertShardTables = (
-  tables: ShardTables,
-  index: Gemma4PleIndex,
-  shard: Gemma4PleShard,
-): { readonly values: TensorView; readonly scales: TensorView } => {
-  assertShardMetadata(tables, index, shard);
-  const rows = shard.stop - shard.start;
-  const values = tensorView(tables, VALUES_KEY, shard.file);
-  const dtype = index.storage === "i2" ? "I2" : index.storage === "i4" ? "I4" : "I8";
-  if (values.dtype !== dtype) {
-    throw new Error(
-      `${shard.file}: '${VALUES_KEY}' の格納 dtype が ${values.dtype}（${dtype} でない）`,
-    );
-  }
-  assertShape(values.shape, [rows, index.layers, index.dim], `${shard.file} の '${VALUES_KEY}'`);
-  const scales = tensorView(tables, SCALES_KEY, shard.file);
-  if (scales.dtype !== "F32") {
-    throw new Error(`${shard.file}: '${SCALES_KEY}' の格納 dtype が ${scales.dtype}（F32 でない）`);
-  }
-  assertShape(scales.shape, [rows, index.layers], `${shard.file} の '${SCALES_KEY}'`);
-  return { values, scales };
-};
-
-const readResidentShard = (
-  bytes: ArrayBuffer,
-  index: Gemma4PleIndex,
-  shard: Gemma4PleShard,
-): ResidentShard => {
-  const file: SafetensorsFile = parseSafetensors(bytes);
-  const { values, scales } = assertShardTables(file, index, shard);
-  return {
-    start: shard.start,
-    values: index.storage === undefined
-      ? new Int8Array(file.buffer, values.byteOffset, values.byteLength)
-      : new Uint8Array(file.buffer, values.byteOffset, values.byteLength),
-    scales: new Float32Array(file.buffer, scales.byteOffset, scales.byteLength / SCALE_BYTES),
-  };
-};
-
-/** safetensors 先頭のヘッダ長欄（u64 LE）— ヘッダ 2 段読みの 1 段目の長さ。 */
-const HEADER_LENGTH_BYTES = 8;
-
-/** 行読みが使う shard 内の位置（ヘッダを 1 度だけ解いた結果 — 行数に依らず小さい）。 */
-type ShardLayout = {
-  /** この shard の先頭 token id（`row = id - start`）。 */
-  readonly start: number;
-  /** `values` のファイル先頭からの絶対 offset（1 行 = `layers × dim` バイト連続）。 */
-  readonly valuesOffset: number;
-  /** `scales` の同上（1 行 = `layers × 4` バイト連続）。 */
-  readonly scalesOffset: number;
-};
-
-/**
- * 区間読み 1 回（範囲の検査は読み口へ渡す**前**・長さ違いは fail loudly）。
- *
- * MUST: 宣言 `bytes` の外を要求しない。読み口が短く返す実装だと消費側は 0 埋めの行を正常な値
- * として読むので、要求と戻りの長さが違えば必ず落とす。
- */
-const readRange = async (
-  range: ShardRange,
-  bytes: number,
-  file: string,
-  offset: number,
-  length: number,
-  options: Gemma4PleReadOptions,
-): Promise<ArrayBuffer> => {
-  if (offset < 0 || length < 0 || offset + length > bytes) {
-    throw new Error(
-      `${file}: 区間 [${offset}, ${offset + length}) が宣言 ${bytes} バイトの外`,
-    );
-  }
-  const read = await range.read(offset, length, options);
-  if (read.byteLength !== length) {
-    throw new Error(
-      `${file}: 区間 [${offset}, ${offset + length}) の読みが ${read.byteLength} バイトを` +
-        `返した（${length} バイト要求 — 短い戻りは 0 埋めの行として配られる）`,
-    );
-  }
-  return read;
-};
-
-/**
- * ヘッダ区間（先頭 `8 + ヘッダ長` バイト）を 2 段で読む。
- *
- * MUST: 2 段目の読み長は宣言 `bytes` で clamp する（runtime の `safetensorsHeaderLength` の
- * doc）。壊れたヘッダ長（例 1TiB）をそのまま読み長にすると確保か読みが先に落ち、
- * `SafetensorsError` の文言に到達できない。宣言長に収まらないと分かった時点で 2 段目は
- * **読まずに**戻り、8 バイトのまま `parseSafetensorsHeader` の文言で落とす（clamp した長さで
- * 読むと 253MiB 級を無駄に読むことになる）。
- */
-const readHeaderPrefix = async (
-  range: ShardRange,
-  bytes: number,
-  file: string,
-  options: Gemma4PleReadOptions,
-): Promise<Uint8Array<ArrayBuffer>> => {
-  // 宣言長が 8 バイトに満たない shard はここで落ちる（{@link readRange} の範囲検査 — 読み口は
-  // 1 度も呼ばれない）。safetensors としては「ヘッダ長すら無い」形である。
-  const head = new Uint8Array(await readRange(range, bytes, file, 0, HEADER_LENGTH_BYTES, options));
-  const headerLength = safetensorsHeaderLength(head);
-  const dataStart = HEADER_LENGTH_BYTES + headerLength;
-  if (dataStart > bytes) return head;
-  const body = new Uint8Array(
-    await readRange(range, bytes, file, HEADER_LENGTH_BYTES, headerLength, options),
-  );
-  const prefix = new Uint8Array(new ArrayBuffer(dataStart));
-  prefix.set(head);
-  prefix.set(body, HEADER_LENGTH_BYTES);
-  return prefix;
-};
-
-/**
- * shard の表（metadata + `values` / `scales`）を検査して view を返す**共有の門**。
- *
- * MUST: GPU 常駐席（`./ple-gpu.ts`）もこの 1 実装を通す。資産世代の突合（{@link
- * assertShardMetadata}）と dtype / shape の突合を席ごとに書くと、GPU 常駐で読むときだけ
- * 別形式・別世代の sidecar が通り、形も dtype も合ったまま別 token の行を引く（ADR 0085
- * 決定 5 の沈黙誤値）。
- *
- * NOTE: `export` はこの共有のためで、`mod.ts` / サブパス面には出さない（ADR 0008）。
- */
-export const gemma4PleShardViews = (
-  tables: {
-    readonly metadata: ReadonlyMap<string, string>;
-    readonly tensors: ReadonlyMap<string, TensorView>;
-  },
-  index: Gemma4PleIndex,
-  shard: Gemma4PleShard,
-): { readonly values: TensorView; readonly scales: TensorView } =>
-  assertShardTables(tables, index, shard);
-
-/**
- * 区間読みできる読み口から safetensors のヘッダ区間だけを 2 段で読む**共有の門**
- * （{@link readHeaderPrefix} の公開名）。
- *
- * MUST: GPU 常駐席もこの 1 実装を通す — 壊れたヘッダ長の clamp（{@link readHeaderPrefix} の
- * MUST）を 2 実装持つと、片方だけが 1TiB の読みを出して `SafetensorsError` の文言に到達
- * できなくなる。
- */
-export const readGemma4PleHeaderPrefix = (
-  range: NonNullable<Gemma4PleShardSource["range"]>,
-  bytes: number,
-  file: string,
-  options: Gemma4PleReadOptions = {},
-): Promise<Uint8Array<ArrayBuffer>> => readHeaderPrefix(range, bytes, file, options);
-
-/** shard のヘッダだけを解いて行の位置を得る（**shard ごとに 1 度**）。 */
-const readShardLayout = async (
-  range: ShardRange,
-  bytes: number,
-  index: Gemma4PleIndex,
-  shard: Gemma4PleShard,
-  options: Gemma4PleReadOptions,
-): Promise<ShardLayout> => {
-  const header = parseSafetensorsHeader(
-    await readHeaderPrefix(range, bytes, shard.file, options),
-    bytes,
-  );
-  const { values, scales } = assertShardTables(header, index, shard);
-  return {
-    start: shard.start,
-    valuesOffset: values.byteOffset,
-    scalesOffset: scales.byteOffset,
-  };
 };
 
 /**
@@ -728,7 +311,7 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
     );
   }
   const stride = index.layers * index.dim;
-  const factor = index.storage === "i2" ? 4 : index.storage === "i4" ? 2 : 1;
+  const factor = packFactor(index);
   const rowValueBytes = stride / factor;
   /** 行 1 本ぶんの `scales`（f32 × 層数）のバイト数。 */
   const scaleStride = index.layers * SCALE_BYTES;
