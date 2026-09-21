@@ -54,5 +54,9 @@
     "@hdae/yomi": "jsr:@hdae/yomi@^0.4.2",
     "@hdae/yomi/loader": "jsr:@hdae/yomi@^0.4.2/loader",
     "@std/testing/bdd": "jsr:@std/testing@1/bdd"
+  },
+  "compilerOptions": {
+    "noUnusedLocals": true,
+    "noUnusedParameters": true
   }
 }

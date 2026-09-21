@@ -24,12 +24,16 @@ import type {
 // どちらも `fromAssets` の呼び手が**実装する**面）。値ではないので `Object.keys` には出ず、
 // 実行時のアサートでは縛れない。落とせるのは **`deno test`（`verify` の test 段）の型検査**
 // だけ（`deno task check` はテストを対象に含めない）なので、両面から取った型を突き合わせる
-// 束縛をここに置く（片方の 1 行が消えれば test 段が赤）。
-const _bothSurfacesExportPleSource: BarrelPleSource = {
-  bytes: 0,
-  readAll: () => Promise.resolve(new ArrayBuffer(0)),
-} satisfies SubpathPleSource;
-const _bothSurfacesExportPleReadOptions: BarrelPleReadOptions = {} satisfies SubpathPleReadOptions;
+// 束縛をここに置く（片方の 1 行が消えれば test 段が赤）。値の assert は `noUnusedLocals` に
+// 束縛を「読まれない局所」と見なさせないためで、門の実体は型注釈と `satisfies` の側。
+Deno.test("barrel: PLE の型面（source / read options）は barrel とサブパスで同じ型", () => {
+  const source: BarrelPleSource = {
+    bytes: 0,
+    readAll: () => Promise.resolve(new ArrayBuffer(0)),
+  } satisfies SubpathPleSource;
+  const options: BarrelPleReadOptions = {} satisfies SubpathPleReadOptions;
+  assertEquals([source.bytes, Object.keys(options)], [0, []]);
+});
 
 Deno.test("barrel: 生成ループは公開面に無い（ADR 0083 決定 9 の格下げ）", () => {
   const surface = Object.keys(models);
