@@ -781,6 +781,32 @@ fn main(
 `;
 
 /**
+ * ② 行統計の 2 入口（states 形 {@link stateStatsWgsl} / readonly {@link stateStatsReadonlyWgsl}）が
+ * 差し替える断片。束縛・params・縮約順・barrier の位置は 2 入口で 1 バイトも違わず、差は
+ * **header の注記・live 列の前置き・WGSL コメント**だけなので、それだけを引数にする。
+ *
+ * MUST: 生成される WGSL は**コメントまで含めてスナップショットで凍結**されている
+ * （`codegen_wgsl_test.ts` の `attention_state_stats*.wgsl`）。注記は行頭のインデントと末尾改行を
+ * 込みで渡す（空文字列なら行ごと消える）。
+ */
+type StateStatsShape = {
+  /** header 行の `f32` の直後に足す注記（readonly は `, readonly = past のみ`）。 */
+  readonly headerNote: string;
+  /** `column_base` / `live_columns` の定義（states 形は past+query・readonly は past のみ）。 */
+  readonly live: string;
+  /** `let rows` の直前 — 有効行が前詰めであることと 0 除算にならない根拠。 */
+  readonly rowsNote: string;
+  /** 行 max を読んだ後の `workgroupBarrier()` の直前 — scratch 再利用の同期理由。 */
+  readonly amaxBarrierNote: string;
+  /** Σ exp の段の見出し — 空行を 1 度も回さない理由。 */
+  readonly sumNote: string;
+  /** `stats` へ書く直前 — 空行が (0.0, 0.0) になる理由。 */
+  readonly emptyStatsNote: string;
+  /** 行ループ末尾の `workgroupBarrier()` の直前 — 次の行が scratch を上書きする前の同期理由。 */
+  readonly tailBarrierNote: string;
+};
+
+/**
  * ② 行統計。1 行 = 1 workgroup(256) + 行方向 grid-stride（既存 attention_stats と同じ骨格で、
  * 違うのは **dim が実行時値**（live 列数）・**identity が −inf**・**空行ガード**の 3 点）。
  *
@@ -801,8 +827,8 @@ fn main(
  * NaN を落とし、全 NaN 行が空行（stats (0,0)）へ化ける。nan_max なら m = NaN が ③ へ渡り
  * 出力の NaN 分類が保存される。非 NaN 入力ではビット不変（v2）。
  */
-export const stateStatsWgsl = (sliding: boolean): string =>
-  `// karume attention_state_stats (states 形の行統計 m = amax(S) と inv = 1/Σexp(S - m), f32${
+const stateStatsBodyWgsl = (sliding: boolean, shape: StateStatsShape): string =>
+  `// karume attention_state_stats (states 形の行統計 m = amax(S) と inv = 1/Σexp(S - m), f32${shape.headerNote}${
     sliding ? ", sliding window" : ""
   })
 struct Params {
@@ -819,7 +845,7 @@ ${STATE_LENGTHS_STRUCT}
 @group(0) @binding(2) var<storage, read_write> stats: array<f32>;
 @group(0) @binding(3) var<uniform> lengths: Lengths;
 
-${stateLiveWgsl(sliding)}
+${shape.live}
 
 ${stateEffectiveRowsWgsl()}
 
@@ -838,9 +864,7 @@ fn main(
   let lid = lid3.x;
   let neg_inf = bitcast<f32>(params.neg_inf);
   let live = live_columns(lengths.past, lengths.query);
-  // 有効行は各 z 平面の**前詰め** rows 本。total = 0 ならループへ入らないので rows での
-  // 除算・剰余は 0 除算にならない（ホストも 0 なら dispatch を積まない）
-  let rows = effective_rows(lengths.query);
+${shape.rowsNote}  let rows = effective_rows(lengths.query);
   let total = params.batch_heads * rows;
   var index = wid.x;
   while (index < total) {
@@ -865,12 +889,9 @@ fn main(
       stride = stride / 2u;
     }
     let amax = scratch[0u];
-    // scratch の読み終わりを揃えてから ② で上書きする
-    workgroupBarrier();
+${shape.amaxBarrierNote}    workgroupBarrier();
 
-    // ② Σ exp(S - amax)。**空行（amax == -inf）は 1 度も回さない** —
-    // exp(-inf - (-inf)) = exp(NaN) = NaN が分母へ入る
-    let empty = amax == neg_inf;
+${shape.sumNote}    let empty = amax == neg_inf;
     var acc = 0.0;
     if (!empty) {
       var j = lid;
@@ -890,8 +911,7 @@ fn main(
       stride2 = stride2 / 2u;
     }
     if (lid == 0u) {
-      // 空行は (0.0, 0.0)。③ の exp(-inf - 0) * 0 = 0 で出力が**厳密 0** になる
-      var m = 0.0;
+${shape.emptyStatsNote}      var m = 0.0;
       var inv = 0.0;
       if (!empty) {
         m = amax;
@@ -900,12 +920,32 @@ fn main(
       stats[row * ${STATE_STATS_STRIDE}u] = m;
       stats[row * ${STATE_STATS_STRIDE}u + 1u] = inv;
     }
-    // 次の行が scratch[lid] を上書きする前に scratch[0] の読み終わりを揃える
-    workgroupBarrier();
+${shape.tailBarrierNote}    workgroupBarrier();
     index = index + nwg.x;
   }
 }
 `;
+
+/** ② 行統計（states 形 — live は past+query）。骨格と契約は {@link stateStatsBodyWgsl}。 */
+export const stateStatsWgsl = (sliding: boolean): string =>
+  stateStatsBodyWgsl(sliding, {
+    headerNote: "",
+    live: stateLiveWgsl(sliding),
+    rowsNote:
+      `  // 有効行は各 z 平面の**前詰め** rows 本。total = 0 ならループへ入らないので rows での
+  // 除算・剰余は 0 除算にならない（ホストも 0 なら dispatch を積まない）
+`,
+    amaxBarrierNote: `    // scratch の読み終わりを揃えてから ② で上書きする
+`,
+    sumNote: `    // ② Σ exp(S - amax)。**空行（amax == -inf）は 1 度も回さない** —
+    // exp(-inf - (-inf)) = exp(NaN) = NaN が分母へ入る
+`,
+    emptyStatsNote:
+      `      // 空行は (0.0, 0.0)。③ の exp(-inf - 0) * 0 = 0 で出力が**厳密 0** になる
+`,
+    tailBarrierNote: `    // 次の行が scratch[lid] を上書きする前に scratch[0] の読み終わりを揃える
+`,
+  });
 
 /**
  * ③PV。1 invocation = O の 1 要素（`(局所行, D)`）で、縮約は **live 列の昇順逐次**（決定性）。
@@ -1684,104 +1724,17 @@ fn main(
  * ② readonly。② と同じ骨格・束縛・params で、live の式だけ readonly（{@link stateReadonlyLiveWgsl}）。
  */
 export const stateStatsReadonlyWgsl = (sliding: boolean): string =>
-  `// karume attention_state_stats (states 形の行統計 m = amax(S) と inv = 1/Σexp(S - m), f32, readonly = past のみ${
-    sliding ? ", sliding window" : ""
-  })
-struct Params {
-  batch_heads: u32,
-  rows_block: u32,
-  row_offset: u32,
-  col_cap: u32,
-  window: u32,
-  neg_inf: u32,
-}
-${STATE_LENGTHS_STRUCT}
-@group(0) @binding(0) var<uniform> params: Params;
-@group(0) @binding(1) var<storage, read> s: array<f32>;
-@group(0) @binding(2) var<storage, read_write> stats: array<f32>;
-@group(0) @binding(3) var<uniform> lengths: Lengths;
-
-${stateReadonlyLiveWgsl(sliding)}
-
-${stateEffectiveRowsWgsl()}
-
-${IS_NAN_BITS_WGSL}
-
-${NAN_MAX_WGSL}
-
-var<workgroup> scratch: array<f32, ${STATE_STATS_WORKGROUP_SIZE}>;
-
-@compute @workgroup_size(${STATE_STATS_WORKGROUP_SIZE})
-fn main(
-  @builtin(workgroup_id) wid: vec3<u32>,
-  @builtin(local_invocation_id) lid3: vec3<u32>,
-  @builtin(num_workgroups) nwg: vec3<u32>,
-) {
-  let lid = lid3.x;
-  let neg_inf = bitcast<f32>(params.neg_inf);
-  let live = live_columns(lengths.past, lengths.query);
-  let rows = effective_rows(lengths.query);
-  let total = params.batch_heads * rows;
-  var index = wid.x;
-  while (index < total) {
-    let row = (index / rows) * params.rows_block + index % rows;
-    let base = row * params.col_cap;
-
-    // ① 行の最大値。identity は **-inf**（有限 sentinel は MUST NOT — ADR 0067 決定 6）
-    var hi = neg_inf;
-    var i = lid;
-    while (i < live) {
-      hi = nan_max(hi, s[base + i]);
-      i = i + ${STATE_STATS_WORKGROUP_SIZE}u;
-    }
-    scratch[lid] = hi;
-    workgroupBarrier();
-    var stride = ${STATE_STATS_WORKGROUP_SIZE / 2}u;
-    while (stride > 0u) {
-      if (lid < stride) {
-        scratch[lid] = nan_max(scratch[lid], scratch[lid + stride]);
-      }
-      workgroupBarrier();
-      stride = stride / 2u;
-    }
-    let amax = scratch[0u];
-    workgroupBarrier();
-
-    // ② Σ exp(S - amax)。**空行（amax == -inf・P = 0 の列 0 本を含む）は 1 度も回さない**
-    let empty = amax == neg_inf;
-    var acc = 0.0;
-    if (!empty) {
-      var j = lid;
-      while (j < live) {
-        acc = acc + exp(s[base + j] - amax);
-        j = j + ${STATE_STATS_WORKGROUP_SIZE}u;
-      }
-    }
-    scratch[lid] = acc;
-    workgroupBarrier();
-    var stride2 = ${STATE_STATS_WORKGROUP_SIZE / 2}u;
-    while (stride2 > 0u) {
-      if (lid < stride2) {
-        scratch[lid] = scratch[lid] + scratch[lid + stride2];
-      }
-      workgroupBarrier();
-      stride2 = stride2 / 2u;
-    }
-    if (lid == 0u) {
-      var m = 0.0;
-      var inv = 0.0;
-      if (!empty) {
-        m = amax;
-        inv = 1.0 / scratch[0u];
-      }
-      stats[row * ${STATE_STATS_STRIDE}u] = m;
-      stats[row * ${STATE_STATS_STRIDE}u + 1u] = inv;
-    }
-    workgroupBarrier();
-    index = index + nwg.x;
-  }
-}
-`;
+  stateStatsBodyWgsl(sliding, {
+    headerNote: ", readonly = past のみ",
+    live: stateReadonlyLiveWgsl(sliding),
+    rowsNote: "",
+    amaxBarrierNote: "",
+    sumNote:
+      `    // ② Σ exp(S - amax)。**空行（amax == -inf・P = 0 の列 0 本を含む）は 1 度も回さない**
+`,
+    emptyStatsNote: "",
+    tailBarrierNote: "",
+  });
 
 /**
  * ③' readonly。束縛（**ins が無いので 1 本詰まる**）:
