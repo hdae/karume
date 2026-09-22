@@ -42,3 +42,11 @@
   **本 ADR の改訂として**先に決める — 1 要素 = 1 payload 要素の前提を破る格納形は、shape と
   バイト数の対応も含めて別 ADR 級（backlog next の packed weight storage）。
 - `docs/limitations.md` の該当節は本 ADR を指す要約になる。
+
+## 追記（2026-09-22）— 物理配置と書き出し順の契約は ADR 0108（proposed）が上書きする
+
+本 ADR の safetensors 物理配置の契約（隙間なし・要素整列・固定書き出し順
+`F32 → I32 → I4 → 偶数要素 F16 → 奇数要素 F16 → I8`）は、ADR [0108](0108-container-format.md) の
+コンテナが上書きする。0108 では block 先頭 64 B 整列と block 長 4 の倍数を**書き手が焼く**ので、
+書き出し順で整列を作る必要が無くなる（0108 決定 7・Consequences の「退役するもの」）。0108 は
+**proposed** で実装は未着手なので、**実装が入るまでは現行のまま**であり、本文は書き換えていない。

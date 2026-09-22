@@ -1,17 +1,18 @@
 # ACTIVE_DESIGN — Karume
 
 > 現在の設計とレビューの入口。履歴はADR / research / gitに置き、作業順は[backlog](../docs/backlog.md)、性能の採否は[perf-ledger](../docs/perf-ledger.md)を正本とする。
-> Last updated: 2026-09-22（テスト整理の波 完了 — 段 4 = golden の環境別化 + 結果の突き合わせ〈ADR 0106 追記〉、入力起因エラーは `ModelInputError` で完了〈ADR 0107〉。置き場は backlog の消化済み〈0.12.0 リリース後〉節、残置は later）
+> Last updated: 2026-09-22（コンテナ形式の波 段0完了 — ADR 0108 / container-v1 はproposedで実装は未着手。backlogの消化済み12節は[退避スナップショット](../docs/research/2026-09-22-backlog-archive-0.5.0-to-0.12.0.md)へ移し、backlogは運用契約どおり未消化項目だけになった）
 
 ## 現在の焦点
 
-- コード品質管理の波（2026-09-21・段1〜3で完了）: 入力は外部レビューの分割候補（triage.md §6・3段）。共通層 — `models/src/config/readers.ts`・`session/with-session.ts`・`text/{asset-gates,code-ranges}.ts`・`hub/{asset-readers,graph-gates}.ts`。gemmaは`admission.ts` / `chat-turn.ts` / `ple-index.ts` / `ple-shard.ts`（`ple.ts`は所有者+facade）、irodoriは`admission` / `conditioning` / `dit-loop` / `stage`。runtimeは**層の入口を1ファイルに保つfacade**が3つ — `gpu/device.ts`（実体は`context.ts` + `acquire.ts`）・`runtime/fusion.ts`（`fusion-rule.ts` + `fusion-rules/`）・`runtime/recipe-builder.ts`（`RecipeBuildFace`で`recipe-builders/`へ注入）— と、`session-build.ts`（Session.buildの本体）。消費側はfacadeの綴りでimportする。分割の規律: 数式・await・受理集合・文言を移動と同じ変更に混ぜない、WGSL生成器はスナップショットのバイト同一で確認、公開面fixtureは自動更新しない。記録は[backlog](../docs/backlog.md)の消化済み〈0.12.0リリース後〉節、残置はlaterの「コード品質管理の波の残置」。設計項目として残していた入力起因エラーの型は`ModelInputError`1本+派生2本（`Sbv2InputError` / `GenerationCapacityError`）で完了し、家族側73箇所の置き換えと受理集合の所有者一本化3本（seed / animaの`steps` / sbv2の`styleWeight`）まで入っている（[ADR 0107](../docs/decisions/0107-model-input-error.md)）。
+- コンテナ形式の波（2026-09-22・段0完了）: 配布形をsafetensors方言から専用コンテナへ移す。正本は[ADR 0108](../docs/decisions/0108-container-format.md)と[container-v1](../docs/container-v1.md)で、どちらも**proposed**（実装は1行も入っていない）。`krm`=モデル（グラフ+重み+scale+資産）/ `krg`=グラフ（**重みblockを持たない**もの）で、種別を持つのはmagic 4バイトだけ。descriptorは**グラフ記述とモデル記述の2文書**に割り、`krg`はヘッダだけ書き換えたバイトコピーで抜ける（同一性は名前でも「同アーキ」でもなく内容ハッシュで判定する）。物理はblock（取得・検証・解放の単位・**32 MiB以下**・末尾paddingは書き手が焼く）とpart（配信粒度・`{256, 512, 768, 1024} MiB`から書き手が選ぶ・既定256 MiB）の2層で、part 0=ヘッダ+descriptor・part 1=const領域・part 2以降が重み/資産。格納の宣言は**codec台帳**（初版4種 = `int8-sym` / `int4-sym-g` / `int2-off` / `ternary`）へ寄せ、bit数は`packing`からの派生値にする。**旧safetensors形式との互換は全部切る**（両読みは実装せず、旧形式を読むのは移行CLIだけ。旧pinを持つ旧版パッケージは動き続ける）。この形にする動機は無改変の上流重みの読み込み・**部品単位の差し替え**（`fromPretrained`の`components`席・検査はadmissionに置き「重みを1バイトも取る前」を保つ）・**LoRAの実行時A/B**（段5）の3つ。段0の残りの宿題は`pushErrorScope('validation')`の同期区間をblock単位へ割る費用で、**計測中**（結果はADR 0108へ追記する）。段1〜6の作るものと検収はADR 0108の段階分解の表、作業順は[backlog](../docs/backlog.md)のnow先頭が正本。用語は[glossary](../docs/glossary.md)の「配布コンテナ」節。
+- コード品質管理の波（2026-09-21・段1〜3で完了）: 入力は外部レビューの分割候補（triage.md §6・3段）。共通層 — `models/src/config/readers.ts`・`session/with-session.ts`・`text/{asset-gates,code-ranges}.ts`・`hub/{asset-readers,graph-gates}.ts`。gemmaは`admission.ts` / `chat-turn.ts` / `ple-index.ts` / `ple-shard.ts`（`ple.ts`は所有者+facade）、irodoriは`admission` / `conditioning` / `dit-loop` / `stage`。runtimeは**層の入口を1ファイルに保つfacade**が3つ — `gpu/device.ts`（実体は`context.ts` + `acquire.ts`）・`runtime/fusion.ts`（`fusion-rule.ts` + `fusion-rules/`）・`runtime/recipe-builder.ts`（`RecipeBuildFace`で`recipe-builders/`へ注入）— と、`session-build.ts`（Session.buildの本体）。消費側はfacadeの綴りでimportする。分割の規律: 数式・await・受理集合・文言を移動と同じ変更に混ぜない、WGSL生成器はスナップショットのバイト同一で確認、公開面fixtureは自動更新しない。記録は[退避した消化済み節](../docs/research/2026-09-22-backlog-archive-0.5.0-to-0.12.0.md)の〈0.12.0リリース後〉、残置は[backlog](../docs/backlog.md)のlaterの「コード品質管理の波の残置」。設計項目として残していた入力起因エラーの型は`ModelInputError`1本+派生2本（`Sbv2InputError` / `GenerationCapacityError`）で完了し、家族側73箇所の置き換えと受理集合の所有者一本化3本（seed / animaの`steps` / sbv2の`styleWeight`）まで入っている（[ADR 0107](../docs/decisions/0107-model-input-error.md)）。
 - テスト整理の波（2026-09-20・段0〜4で完了）と外部レビューの取り込み（2026-09-21・正本は`.claude/reviews/2026-09-21_chatgpt-reviews/triage.md`・構造の分割候補16件は§6の着手順3段で**コード品質管理の波の入力になり消化済み**）。済んだ段: 段0=verifyのレーン分割（`test:core` / `test:models:<系列>`と被覆の門`verify_lanes_test.ts`・[ADR 0005追記](../docs/decisions/0005-verification.md)）、
   段1=sha256参照値を環境キーごとの行へ（`KARUME_REFERENCE`の3モード・参照門`KARUME_ALLOW_NO_REFERENCE`・結果と実物は`outputs/verify/<環境キー>/<日付>_<系列>/`・[ADR 0106](../docs/decisions/0106-device-keyed-references.md)）、
   段2a=公開面スナップショット門（各パッケージの`public_surface_test.ts`と`fixtures/public-surface.json`・焼き直しは`KARUME_SURFACE=write`）、段2b=リポ直下`CHANGELOG.md`新設、段2c=パッケージREADME / LICENSEの公開物同梱、
   段3=goldenの許容差を「Karume独自基準+WGSL仕様帯」の2段へ（仕様帯で受理した出力は`results.json`の`note`に残す）、
   段4=その2段目を環境キー別の行へ+`results.json`の実測欄`measurements`+実重みgolden11本の結果の席`<系列>-golden`+環境間の突き合わせ道具`tools/verify-diff`（[ADR 0106追記](../docs/decisions/0106-device-keyed-references.md)）。
-  波全体の正本は[backlog](../docs/backlog.md)の消化済み〈0.12.0リリース後〉節。
+  波全体の正本は[退避した消化済み節](../docs/research/2026-09-22-backlog-archive-0.5.0-to-0.12.0.md)の〈0.12.0リリース後〉。
 - `codex/review-and-fix`の[マージ前レビュー資料](../docs/research/2026-09-14-merge-review.md)を入口にする。
   9/11レビューの修正と、その後のQAT・LLM・性能改善を含む。旧レビューの対応表は[調査記録](../docs/research/2026-09-10-codex-mtp-optimization.md#9-月-11-日レビューの対応)。
   比較基点より前のMTP実装や公開API移行を、このブランチで初めて入った変更と混同しない。
@@ -48,7 +49,8 @@
 ## 次と未完
 
 - [独立レビューとM2再計測](../docs/research/2026-09-14-merge-review-results.md)を完了。Sol 3担当と主担当の確認では、修正が必要な新規不具合は見つかっていない。レビュー範囲は315732aまでで、後続のpermute最適化を含まない。追加差分は上の資料に記録し、マージ時に対象headと検証headを再照合する。
-  マージ・push・公開はまだ行っていない。公開済み0.12.0との互換性と、新しい配布形が要求するreaderを区別する。
+  このレビュー分（対象head 315732aまで）はマージ・push済み。未実施はJSR / HF公開のみ。
+  その後の未pushコミット（2026-09-22時点で37本）は、このレビューの統合状態とは別に数える。公開済み0.12.0との互換性と、新しい配布形が要求するreaderを区別する。
 - M2のGPU時間の帰属、投入政策・prefillバケットの適用判断、E4B・他LLM・長文・広い品質評価は[backlog](../docs/backlog.md)に残す。
   Wan / MiniMax H3は[事前調査](../docs/research/2026-09-10-codex-mtp-optimization.md#動画生成の事前調査-wan-と-minimax-h3)までで、ブラウザ実装は未着手。
 - 既存MTPの作業を再開する場合は[ADR 0096](../docs/decisions/0096-speculative-decoding.md)と[実測・ゲートの履歴](../docs/research/2026-09-09-mtp-stage4.md)を読む。
@@ -57,6 +59,8 @@
 
 ## 現役の落とし穴
 
+- 低bit化は**速度の理由にしない**。decodeは本機で帯域律速になっていない（帯域利用率11.5 / 25.5%の実測）ので、低bit codecで削るのは律速でない側になる。効くのは**メモリ**で、実行の前提はpacked int8活性（[ADR 0105](../docs/decisions/0105-packed-static-quantize-activations.md)）。速度を主張したいならそちらの実測が先（[ADR 0108](../docs/decisions/0108-container-format.md)決定15）。
+- 実資産のi2は**三値ではない**。gemma4-qat E2BのI2テンソルで`q = −2`が5.8〜7.4%出ているので、i2資産を三値として読み替えると全要素の6%前後が別の値になる。三値は詰め方も復元式もi2と同一でruntimeの追加は0行だが、**別名のcodecとして宣言する**（資産を識別できるようにするため — [ADR 0108](../docs/decisions/0108-container-format.md)決定13）。
 - sha256参照値は**環境ごとの行**で、定数ではない（[ADR 0106](../docs/decisions/0106-device-keyed-references.md)）。行を持たない機では明示SKIP + 参照門が赤になるので、`KARUME_REFERENCE=write`で行を作る。他環境の行を焼き直さない。tolerance化は禁止。
 - goldenの判定2段目（WGSL仕様帯・`e2e_golden_test.ts`の`OUTPUT_TOLERANCE`）も**環境キー別の行**で、行が無い機では2段目そのものが無く1段目のKarume独自基準だけで赤になる（[ADR 0106追記](../docs/decisions/0106-device-keyed-references.md)）。行を足すのは実測した機のキーの下だけで、全機共通へ広げない。
 - `results.json`の`measurements`は**判定に使わない記録**で、帯に対する比などの派生値を持たない（導くのは`tools/verify-diff`の側）。この欄を読んで帯を動かすときも、緩める根拠は仕様の該当節と実測値で書く。
