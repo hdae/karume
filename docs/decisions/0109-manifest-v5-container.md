@@ -71,7 +71,7 @@ ADR 0038 決定 1 の規則どおり major を繰り上げ、旧 major は unsup
     "model": { "length": 40961, "sha256": "…" }
   },
   "parts": [
-    { "path": "v4.1-small/dit/model.i8-00001-of-00003.krm", "size": 224448, "sha256": "…" },
+    { "path": "v4.1-small/dit/model.i8-00001-of-00003.krm", "size": 224407, "sha256": "…" },
     { "path": "v4.1-small/dit/model.i8-00002-of-00003.krm", "size": 0, "sha256": "e3b0c442…" },
     { "path": "v4.1-small/dit/model.i8-00003-of-00003.krm", "size": 268435456, "sha256": "…" }
   ]
@@ -99,10 +99,15 @@ ADR 0038 決定 1 の規則どおり major を繰り上げ、旧 major は unsup
 - **model 単位の `assets`（quant 非依存・FileRef）は残す** — tokenizer / symbols / style_vectors /
   speaker_embeddings は複数コンテナで共有され、越境参照（anima-extra）も実在する。コンテナに畳むと
   リポ間・席間で複製される。
-- **PLE sidecar は `assets` から消え、モデルコンテナの `assets`（役割 `ple-table` の block 列 +
-  役割 `ple-index` の索引）へ移る**。区間読みを要するので**専用 part に単独で置く**
-  （container-v1 §4.2）。1 shard 250 MiB 級は block 上限 32 MiB を超えるので 1 shard = 複数 block
-  になり、書き手は block 境界を**行の倍数**で切る（読み手は行 → block の翻訳だけをする）。
+- **PLE sidecar は `assets` から消え、モデルコンテナの `assets` へ移る**: `values` と `scales` を別々の
+  行列として block 上限 32 MiB 以下・**行の倍数**で切り直し（旧 shard の境界は消える）、役割
+  `ple-values` / `ple-scales` の block 列（資産名 `ple.values.<k>` / `ple.scales.<k>`）と、役割 `ple-index`
+  の索引（schema 3 — 行バイト数と block ごとの token 区間）にする。区間読みを要する block は
+  **1 block = 1 part**（container-v1 §4.2 の「専用 part に単独」）。索引や `rope_base` のような全量読みの
+  資産は資産どうしで 1 part を共有してよい（重み block とは同居しない）。読み手は token → (block, 行 offset)
+  の翻訳だけをする。
+- 資産は shape を持たないので **`assets[].length`（payload のバイト数）を宣言する**（block 長 = 4 の倍数への
+  切り上げ）。消費側が末尾の 0x00 を推測で剥がない。
 - **`extras` は退役**し、実物 1 種（`rope_base`）はコンテナの `assets`（役割 `rope-base`）へ移る。
   複製は 66 KB × 2 本（f16 / i8）で済む。
 
@@ -114,8 +119,9 @@ descriptor の `graph` 文書の sha256 が同一性を与えるので、共有 
 
 ### 6. hub の検査は「宣言だけで閉じるもの」に絞る
 
-件数・天井・`size: 0` の規則・64 の倍数（part 0 の長さは対象外）・越境の一様性・descriptor 長
-（≤ 32 MiB）は parse で見る。**descriptor と parts の整合・block 目次・codec 台帳の突合は
+件数・天井・`size: 0` の規則・part 0 の長さ（= 24 + 2 文書の長さ）・越境の一様性・descriptor 長
+（≤ 32 MiB）は parse で見る（part の長さに 64 の倍数の規則は無い — 64 B 整列は block の offset の規則で、
+part 長は 4 の倍数にしかならない）。**descriptor と parts の整合・block 目次・codec 台帳の突合は
 `openContainer` が持つ**（`open.ts:222-278`）ので hub には置かない — 検査点を 2 つにしない。
 
 `resolveFiles` の戻りは **選択結果の構造型**（部品 → コンテナ参照・資産名 → FileRef）にし、

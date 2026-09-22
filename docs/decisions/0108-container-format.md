@@ -627,8 +627,9 @@ descriptor を取るのが 2 周目になる）。
    sha256 を照合しない取得元）は block ごとに digest する。warm は従来どおり 0 回。block の sha256 は
    段 6 の Range 取得で「届いた分だけ検証する」ための契約として残る（container-v1 §7 を訂正）。
 4. **追記 1 の 12 の訂正 — assets の受け口は段 2 に入れる**（段階分解表が正本）。小段の最後に置き、
-   PLE は専用 part の asset（役割 `ple-table` の block 列 + `ple-index`）、`extras` の `rope_base` は
-   asset（役割 `rope-base`・66 KB × 2 本の複製）へ移る。
+   PLE は asset（役割 `ple-values` / `ple-scales` の block 列 — 区間読みの block は 1 block = 1 part — と
+   役割 `ple-index` の索引 schema 3）、`extras` の `rope_base` は asset（役割 `rope-base`・66 KB × 2 本の
+   複製）へ移る。資産は `assets[].length`（payload 長）を宣言する（ADR 0109 決定 4）。
 5. **段 2 で `karume/5` を書くのは移行 CLI のリポ丸ごとモード**（`karume migrate --manifest`）。
    旧 manifest から shard 列を引くので、追記 1 の 14 / 15 で未対応だったディレクトリを跨ぐ shard 列と
    128 鎖全本の逐語突合はここで閉じる。dist.py / recipe が `krm` を直接書くのは段 3

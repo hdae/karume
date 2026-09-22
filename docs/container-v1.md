@@ -27,7 +27,9 @@ ADR [0108](decisions/0108-container-format.md) の具体化。`krm`（モデル�
   検証済みの有無で分ける（HF 経由は取得層の 1 回のみ・block の digest は未検証の取得元だけ）②§8 に
   manifest 側の形（`container.descriptor` = 2 文書の期待値・`container.parts` = part 0 を含む全 part・
   長さ 0 の part は 0 バイトのファイル・共有 `krg` の席は置かない）③§11 に段 2 の取得単位（part・
-  seek / scan の分岐）④§12 に移行 CLI のリポ丸ごとモード（`karume/5` を書く）。
+  seek / scan の分岐）④§12 に移行 CLI のリポ丸ごとモード（`karume/5` を書く）⑤§2.2 の `assets` に
+  `length`（payload の論理長・block 長はその 4 の倍数への切り上げ MUST）を足し、PLE の役割名を実装の
+  `ple-values` / `ple-scales` / `ple-index` に揃える。
 
 ## 0. 記法と共通規則
 
@@ -167,7 +169,8 @@ CPU 試作 ① の綴りは `constRegion.constants[]` / `constRegion.length` だ
     }
   },
   "assets": {
-    "ple-table": { "block": "a.ple", "role": "ple-table" }
+    "ple.values.0": { "block": "a.0", "role": "ple-values", "length": 33546240 },
+    "ple_index": { "block": "a.1", "role": "ple-index", "length": 165 }
   },
   "provenance": {
     "license": "gemma",
@@ -217,10 +220,11 @@ CPU 試作 ① の綴りは `constRegion.constants[]` / `constRegion.length` だ
 
 `assets` の値:
 
-| 欄      | 型     | 必須 | 規則                                                                                                                                                               |
-| ------- | ------ | ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `block` | string | 必須 | `blocks[].id` を指す。その block の `role` は `"asset"` MUST                                                                                                       |
-| `role`  | string | 必須 | **models 側の解釈者名**（`ple-table` / `style-vectors` / `rope-base` / `tokenizer` …）。**runtime は解釈しない** — descriptor が持つのは「名前 → block」までである |
+| 欄       | 型     | 必須 | 規則                                                                                                                                                                                                       |
+| -------- | ------ | ---- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `block`  | string | 必須 | `blocks[].id` を指す。その block の `role` は `"asset"` MUST                                                                                                                                               |
+| `role`   | string | 必須 | **models 側の解釈者名**（`ple-values` / `ple-scales` / `ple-index` / `rope-base` / `style-vectors` …）。**runtime は解釈しない** — descriptor が持つのは「名前 → block」までである                         |
+| `length` | u64    | 必須 | payload のバイト数（論理長）。資産は shape を持たないので自分で宣言する。その block の `length` は**これを 4 の倍数へ切り上げた値 MUST**（詰め物の量まで宣言で閉じ、消費側が末尾の 0x00 を推測で剥がない） |
 
 ### 2.3 `provenance`
 
