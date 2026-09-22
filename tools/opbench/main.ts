@@ -28,6 +28,7 @@ import {
   type CaseFailure,
   createHeater,
   measureCase,
+  rigOf,
   type RunSingleOptions,
   selectCases,
   sessionOptionsOf,
@@ -495,15 +496,7 @@ const runGraph = async (args: ReadonlyMap<string, readonly string[]>): Promise<v
     source,
     family,
     mode,
-    // GPUAdapterInfo の 4 欄は prototype 上の getter なので spread では写らない（空の rig に
-    // なる）。`single.ts` の rig と同じ 4 欄を明示的に読む。
-    rig: {
-      vendor: gpu.adapterInfo.vendor,
-      architecture: gpu.adapterInfo.architecture,
-      device: gpu.adapterInfo.device,
-      description: gpu.adapterInfo.description,
-      deno: Deno.version.deno,
-    },
+    rig: rigOf(gpu),
     runs: result.records.length,
     compared_runs: compared.length,
     runs_prefix: runsPrefix,

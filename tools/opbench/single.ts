@@ -494,6 +494,32 @@ export const measureCase = async (
   }
 };
 
+/** rig 欄が読む面だけ（`GPUAdapterInfo` はこれを満たす）。 */
+export type AdapterInfoFields = {
+  readonly vendor: string;
+  readonly architecture: string;
+  readonly device: string;
+  readonly description: string;
+};
+
+/** summary.json が「どの機で測ったか」を残す欄。 */
+export type Rig = AdapterInfoFields & { readonly deno: string };
+
+/**
+ * GPU の名乗りを rig 欄へ写す。
+ *
+ * MUST: 4 欄は 1 つずつ明示的に読む — `GPUAdapterInfo` の欄は prototype 上の getter なので
+ * spread（`{ ...gpu.adapterInfo }`）では 1 つも写らず、rig が空のまま残る。single と graph の
+ * 2 つの summary が同じ表を持つので、読みはこの 1 本に寄せる（片方だけ spread へ戻る形を作らない）。
+ */
+export const rigOf = (gpu: { readonly adapterInfo: AdapterInfoFields }): Rig => ({
+  vendor: gpu.adapterInfo.vendor,
+  architecture: gpu.adapterInfo.architecture,
+  device: gpu.adapterInfo.device,
+  description: gpu.adapterInfo.description,
+  deno: Deno.version.deno,
+});
+
 export type SingleSummary = {
   readonly generated_at: string;
   readonly census: string;
@@ -502,12 +528,7 @@ export type SingleSummary = {
   readonly quant: string;
   readonly session: SessionOptions;
   readonly mode: "timing" | "wall";
-  readonly rig: {
-    readonly vendor: string;
-    readonly architecture: string;
-    readonly device: string;
-    readonly description: string;
-    readonly deno: string;
+  readonly rig: Rig & {
     readonly target_pass_ms: number;
     readonly rounds: number;
   };
@@ -521,8 +542,8 @@ export type SingleSummary = {
 export const buildSingleSummary = (
   census: string,
   summary: CensusSummary,
-  gpu: GpuContext,
-  options: RunSingleOptions,
+  gpu: { readonly adapterInfo: AdapterInfoFields },
+  options: Pick<RunSingleOptions, "session" | "mode" | "rounds">,
   records: readonly SingleRecord[],
   excluded: Readonly<Record<string, number>>,
   failed: readonly CaseFailure[],
@@ -533,7 +554,6 @@ export const buildSingleSummary = (
     const key = `${record.op}/${record.storage_signature}`;
     byOpStorage.set(key, (byOpStorage.get(key) ?? 0) + record.weighted_ms);
   }
-  const info = gpu.adapterInfo;
   return {
     generated_at: new Date().toISOString(),
     census,
@@ -543,11 +563,7 @@ export const buildSingleSummary = (
     session: options.session,
     mode: options.mode,
     rig: {
-      vendor: info.vendor,
-      architecture: info.architecture,
-      device: info.device,
-      description: info.description,
-      deno: Deno.version.deno,
+      ...rigOf(gpu),
       target_pass_ms: TARGET_PASS_MS,
       rounds: options.rounds ?? ROUNDS,
     },
