@@ -31,6 +31,11 @@ import { type IrGraph, parseIrGraph } from "../src/format/ir.ts";
 import { type FusionCounts, type FusionWeightLayout, planFusions } from "../src/runtime/fusion.ts";
 import { bindSymbols, countUses, planGraph } from "../src/runtime/plan.ts";
 import { planWeightResidency } from "../src/runtime/weight-residency.ts";
+import {
+  type ContainerManifest,
+  containerPart0,
+  readContainerGraph,
+} from "./helpers/container-graph.ts";
 import { resolveShards } from "./helpers/shard-files.ts";
 
 const ANIMA_DIR = new URL("../../../models/karume-anima/", import.meta.url);
@@ -41,10 +46,7 @@ const ANIMA_DIR = new URL("../../../models/karume-anima/", import.meta.url);
 const GEMMA_MODEL = resolveShards(
   new URL("../../../outputs/series/embeddinggemma-300m/model.safetensors", import.meta.url),
 )[0];
-const IRODORI_DIR = new URL(
-  "../../../models/karume-irodori-v4-small/v4-small/",
-  import.meta.url,
-);
+const IRODORI_DIR = new URL("../../../models/karume-irodori-v4-small/", import.meta.url);
 
 /** safetensors のヘッダ JSON だけを読む（実体は読まない）。 */
 const readIrGraph = async (source: URL): Promise<IrGraph> => {
@@ -73,8 +75,13 @@ const readIrGraph = async (source: URL): Promise<IrGraph> => {
  * 変えない）ので、系列が増えても f32 の 1 本を見れば足りる — 見ているのはエクスポータの
  * ノード発行順で、それは系列を跨いで同じ 1 回の変換から出る。
  */
-const readIrodoriGraph = (name: string): Promise<IrGraph> =>
-  readIrGraph(resolveShards(new URL(`${name}/model.f32.safetensors`, IRODORI_DIR))[0]);
+const readIrodoriGraph = async (name: string): Promise<IrGraph> => {
+  const manifest: ContainerManifest = JSON.parse(
+    await Deno.readTextFile(new URL("karume.json", IRODORI_DIR)),
+  );
+  const head = containerPart0(manifest, "v4-small", name, "f32");
+  return await readContainerGraph(new URL(head.path, IRODORI_DIR), name);
+};
 
 /**
  * 資産の有無。
@@ -107,39 +114,24 @@ if (!ASSETS_AVAILABLE) {
  */
 const MIRRORS: ReadonlyMap<string, URL> = new Map();
 
-/**
- * manifest のうちこのファイルが引く欄だけ。**綴りを持つのは配布形**（shard 本数・path・越境の
- * 有無はエクスポータが決める）なので、テスト側に焼かずここから引く — 焼くと分割数が動いた
- * 瞬間に融合ヒット数の門が NotFound で落ちて、退行検出そのものが止まる。
- */
-type AssetManifest = {
-  readonly defaultModel: string;
-  readonly models: Readonly<
-    Record<string, {
-      readonly weights: Readonly<
-        Record<
-          string,
-          Readonly<Record<string, { readonly shards: readonly ShardRef[] }>>
-        >
-      >;
-    }>
-  >;
-};
-type ShardRef = { readonly path: string; readonly repo?: string };
-
 // 資産が無い環境では 1 バイトも読まない（この定数を触るのは ignore を抜けたテストだけ）。
-const ANIMA_MANIFEST: AssetManifest | undefined = ASSETS_AVAILABLE
+// **綴りを持つのは配布形**（part 本数・path・越境の有無はエクスポータが決める）なので、テスト側に
+// 焼かず manifest から引く — 焼くと分割数が動いた瞬間に融合ヒット数の門が NotFound で落ちて、
+// 退行検出そのものが止まる。
+const ANIMA_MANIFEST: ContainerManifest | undefined = ASSETS_AVAILABLE
   ? JSON.parse(await Deno.readTextFile(new URL("karume.json", ANIMA_DIR)))
   : undefined;
 
 /**
- * コンポーネントの**グラフ shard**（`karume_ir` を持つ先頭 shard — ADR 0070 決定 3）を読む。
- * 後続の重み shard は metadata を持たないので、融合の計画に要るのはこの 1 本だけ。
+ * 部品の容器の **part 0**（ヘッダ + 2 文書 — ADR 0109 決定 3）からグラフを読む。重みの block は
+ * 読まない（融合の計画に要るのはグラフ宣言だけ）。
  */
 const readAnimaGraph = (component: string, dtype: string): Promise<IrGraph> => {
-  const manifest = ANIMA_MANIFEST as AssetManifest;
-  const [head] = manifest.models[manifest.defaultModel].weights[component][dtype].shards;
-  if (head.repo === undefined) return readIrGraph(new URL(head.path, ANIMA_DIR));
+  const manifest = ANIMA_MANIFEST as ContainerManifest;
+  const head = containerPart0(manifest, manifest.defaultModel, component, dtype);
+  if (head.repo === undefined) {
+    return readContainerGraph(new URL(head.path, ANIMA_DIR), component);
+  }
   const mirror = MIRRORS.get(head.repo);
   if (mirror === undefined) {
     throw new Error(
@@ -147,7 +139,7 @@ const readAnimaGraph = (component: string, dtype: string): Promise<IrGraph> => {
         `（既知: ${[...MIRRORS.keys()].join(" / ")}）`,
     );
   }
-  return readIrGraph(new URL(head.path, mirror));
+  return readContainerGraph(new URL(head.path, mirror), component);
 };
 
 const GEMMA_AVAILABLE = await exists(GEMMA_MODEL);
@@ -159,9 +151,7 @@ if (!GEMMA_AVAILABLE) {
 
 // 見るのは**ファイル**（ディレクトリではない）— 配布形の綴りが動いたときに、空でない
 // ディレクトリだけを見て「資産あり」と判断すると、読めない path で FAIL する形になる。
-const IRODORI_AVAILABLE = await exists(
-  resolveShards(new URL("dit/model.f32.safetensors", IRODORI_DIR))[0],
-);
+const IRODORI_AVAILABLE = await exists(new URL("karume.json", IRODORI_DIR));
 if (!IRODORI_AVAILABLE) {
   console.warn(
     `[karume] ${IRODORI_DIR.pathname} が無いため Irodori の融合ヒット数を SKIP する`,
@@ -394,13 +384,13 @@ for (const family of ["gemma4", "gemma4-qat"]) {
     name: `実配布 ${family} E2B は RoPE 50 と任意指定のRMS→add 106を掴む`,
     ignore: !available,
     fn: async () => {
-      const manifest: AssetManifest = JSON.parse(await Deno.readTextFile(manifestUrl));
+      const manifest: ContainerManifest = JSON.parse(await Deno.readTextFile(manifestUrl));
       const [weights] = Object.values(manifest.models.e2b.weights.model);
-      const [head] = weights.shards;
+      const head = weights.container.parts[0];
       if (head.repo !== undefined) {
         throw new Error("Gemma実資産の融合テストは自己完結配布を要求する");
       }
-      const graph = await readIrGraph(new URL(head.path, root));
+      const graph = await readContainerGraph(new URL(head.path, root), "model");
       for (const rows of [1, 4, 8, 32, 40, 64]) {
         assertEquals(decodeFusionCounts(graph, rows), { ...NONE, rope: 50 }, `${family} M=${rows}`);
         assertEquals(
