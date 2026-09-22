@@ -15,6 +15,14 @@ ADR [0108](decisions/0108-container-format.md) の具体化。`krm`（モデル�
 改訂履歴（未リリースにつきシムも移行も作らない — ADR 0003 の改訂手順を継承）:
 
 - v1（2026-09-22）: 初版。ADR 0108 の決定 1〜20 を具体化。
+- v1 訂正（2026-09-22・段 1 の実装で判明）: ①`capabilities.codecs` を**モデル記述の `codecs`** へ移す
+  （グラフ記述は `krm` / `krg` でバイト同一 MUST なので、束縛表に依存する欄を持てない）②束縛表から
+  借用形 `{ "shared": true }` を外す（shared 宣言は IR 側だけが持ち、束縛表のキー集合は
+  「shared でも const 供給でもない initializer」と完全一致）③`rowAxis` / `groupSize` / `scale` は
+  量子化 codec でのみ書く（非量子化で書くと fail loudly）④`int8-sym` の packing を 1 要素 / 1 バイト /
+  整列 4 に訂正（4 / 4 / 1 だと `numel % 4 == 0` という v1 に無い制約が入る）⑤descriptor の配列順を
+  書き手の決定性のために固定（`const.blocks` は offset 昇順 MUST・`blocks` は (part, offset) 昇順・
+  `constants` は (graph, initializer) の code point 順・数値と map の綴りは ir-v2.md の正準直列化と同じ）。
 
 ## 0. 記法と共通規則
 
@@ -60,7 +68,6 @@ descriptor を**グラフ記述**と**モデル記述**の 2 文書に割る理�
   "version": 1,
   "capabilities": {
     "ops": ["matmul", "linear", "..."],
-    "codecs": ["int4-sym-g", "int8-sym"],
     "features": []
   },
   "graphs": {
@@ -83,17 +90,16 @@ descriptor を**グラフ記述**と**モデル記述**の 2 文書に割る理�
 }
 ```
 
-| 欄                      | 型       | 必須 | 上限・規則                                                                                                     |
-| ----------------------- | -------- | ---- | -------------------------------------------------------------------------------------------------------------- |
-| `format`                | string   | 必須 | 固定 `"karume-container"`。不一致は fail loudly                                                                |
-| `version`               | integer  | 必須 | 固定 `1`                                                                                                       |
-| `capabilities.ops`      | string[] | 必須 | 全 `graphs` の `requires.ops` の和集合と**完全一致**。読み手は自分の対応表と突合し非対応 op を列挙して拒否     |
-| `capabilities.codecs`   | string[] | 必須 | 束縛表が使う codec 登録名の集合と**完全一致**（`krg` では空配列）。**重みを 1 バイトも取る前**に台帳と突合する |
-| `capabilities.features` | string[] | 必須 | 将来の拡張点。初版は空配列のみ受理（非空は fail loudly）                                                       |
-| `graphs`                | object   | 必須 | 1 個以上・**64 個以下**。キーはグラフ名（1〜64 文字・`[A-Za-z0-9._-]+`）。値は IR v2 グラフ                    |
-| `const.length`          | u64      | 必須 | const 領域のバイト長（§3）。const が無いときは `0`                                                             |
-| `const.blocks`          | 配列     | 必須 | const block の目次（§3）。const が無いときは空配列                                                             |
-| `const.constants`       | 配列     | 必須 | const block を initializer へ結ぶ**束縛表**（§3）。const が無いときは空配列                                    |
+| 欄                      | 型       | 必須 | 上限・規則                                                                                                 |
+| ----------------------- | -------- | ---- | ---------------------------------------------------------------------------------------------------------- |
+| `format`                | string   | 必須 | 固定 `"karume-container"`。不一致は fail loudly                                                            |
+| `version`               | integer  | 必須 | 固定 `1`                                                                                                   |
+| `capabilities.ops`      | string[] | 必須 | 全 `graphs` の `requires.ops` の和集合と**完全一致**。読み手は自分の対応表と突合し非対応 op を列挙して拒否 |
+| `capabilities.features` | string[] | 必須 | 将来の拡張点。初版は空配列のみ受理（非空は fail loudly）                                                   |
+| `graphs`                | object   | 必須 | 1 個以上・**64 個以下**。キーはグラフ名（1〜64 文字・`[A-Za-z0-9._-]+`）。値は IR v2 グラフ                |
+| `const.length`          | u64      | 必須 | const 領域のバイト長（§3）。const が無いときは `0`                                                         |
+| `const.blocks`          | 配列     | 必須 | const block の目次（§3）。const が無いときは空配列                                                         |
+| `const.constants`       | 配列     | 必須 | const block を initializer へ結ぶ**束縛表**（§3）。const が無いときは空配列                                |
 
 `const.blocks[]` の要素:
 
@@ -129,6 +135,7 @@ CPU 試作 ① の綴りは `constRegion.constants[]` / `constRegion.length` だ
 {
   "format": "karume-model",
   "version": 1,
+  "codecs": ["int4-sym-g"],
   "parts": [
     { "index": 1, "length": 30801920, "sha256": "…" },
     { "index": 2, "length": 268435456, "sha256": "…" }
@@ -162,15 +169,16 @@ CPU 試作 ① の綴りは `constRegion.constants[]` / `constRegion.length` だ
 }
 ```
 
-| 欄           | 型      | 必須 | 上限・規則                                                               |
-| ------------ | ------- | ---- | ------------------------------------------------------------------------ |
-| `format`     | string  | 必須 | 固定 `"karume-model"`                                                    |
-| `version`    | integer | 必須 | 固定 `1`                                                                 |
-| `parts`      | 配列    | 必須 | **添字 1 以上だけ**・1 個以上・**1024 個以下**（§10）。§4.2              |
-| `blocks`     | 配列    | 必須 | 0 個以上・**65,536 個以下**（§10）。§4.1                                 |
-| `binding`    | object  | 必須 | グラフ名 → initializer 名 → 供給（§5）。キーは `graphs` のキーの部分集合 |
-| `assets`     | object  | 必須 | 資産名 → `{ block, role }`。無ければ空オブジェクト                       |
-| `provenance` | object  | 必須 | §2.3                                                                     |
+| 欄           | 型       | 必須 | 上限・規則                                                                                                                                 |
+| ------------ | -------- | ---- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `format`     | string   | 必須 | 固定 `"karume-model"`                                                                                                                      |
+| `version`    | integer  | 必須 | 固定 `1`                                                                                                                                   |
+| `codecs`     | string[] | 必須 | 束縛表が使う codec 登録名の集合と**完全一致**。**重みを 1 バイトも取る前**に台帳と突合する（読み手は各 `encoding.codec` も台帳と照合する） |
+| `parts`      | 配列     | 必須 | **添字 1 以上だけ**・1 個以上・**1024 個以下**（§10）。§4.2                                                                                |
+| `blocks`     | 配列     | 必須 | 0 個以上・**65,536 個以下**（§10）。§4.1                                                                                                   |
+| `binding`    | object   | 必須 | グラフ名 → initializer 名 → 供給（§5）。キーは `graphs` のキーの部分集合                                                                   |
+| `assets`     | object   | 必須 | 資産名 → `{ block, role }`。無ければ空オブジェクト                                                                                         |
+| `provenance` | object   | 必須 | §2.3                                                                                                                                       |
 
 `parts[]` の要素:
 
@@ -365,14 +373,10 @@ block 上限を 32 MiB **以下**とする根拠は 3 点である（CPU 試作 
 
 `pieces[]` の要素は `{ block, rows: [begin, end) }`。`rows` は**先頭次元**の半開区間。
 
-**借用形**
-
-```jsonc
-{ "shared": true }
-```
-
-別 Session からの借用（現行 `sharedWeights` — `packages/runtime/src/runtime/session-types.ts:404-415`）。
-**突合集合の外**にあり、`encoding` も `block` も `pieces` も持たない。
+**借用（shared）は束縛表に載せない。** 別 Session からの借用（現行 `sharedWeights` —
+`packages/runtime/src/runtime/session-types.ts:404-415`）は IR 側の `{ "shared": true }` 宣言だけが
+持ち（[ir-v2.md](ir-v2.md)「共有 initializer」— 借り手の名前 = 貸し手の initializer 名）、束縛表の
+**突合集合の外**にある。束縛表に書くと余剰として fail loudly。
 
 ### 規則
 
@@ -417,17 +421,17 @@ block 上限を 32 MiB **以下**とする根拠は 3 点である（CPU 試作 
 }
 ```
 
-| 欄                      | 型     | 必須   | 規則・上限                                                                           |
-| ----------------------- | ------ | ------ | ------------------------------------------------------------------------------------ |
-| `codec`                 | string | 必須   | 台帳の登録名（§6.3）。**台帳に無い名前は重み取得前に拒否**                           |
-| `packing.blockElements` | u32    | 必須   | 1 以上。1 packing block が運ぶ**要素数**                                             |
-| `packing.blockBytes`    | u32    | 必須   | 1 以上。1 packing block の**バイト数**                                               |
-| `packing.alignBytes`    | u32    | 必須   | `1 / 2 / 4 / 8 / 16 / 64` のいずれか。payload 先頭の整列要求                         |
-| `rowAxis`               | u32    | 必須   | `0` または `1`。**行の軸**                                                           |
-| `groupSize`             | u32    | 必須   | 1 以上・行長を割り切る MUST。行長に等しいとき = per-channel                          |
-| `scale.block`           | string | 必須   | scale の block id。`role` は `"scale"` MUST                                          |
-| `scale.dtype`           | string | 必須   | 台帳の `scale.dtype` 受理集合の 1 つ（初版は `"f32"` のみ）                          |
-| `zeroPoint.block`       | string | 省略可 | 台帳の `zeroPoint.allowed` が真の codec でのみ書ける（初版は 4 種とも偽 ⇒ 常に省略） |
+| 欄                      | 型     | 必須   | 規則・上限                                                                                                 |
+| ----------------------- | ------ | ------ | ---------------------------------------------------------------------------------------------------------- |
+| `codec`                 | string | 必須   | 台帳の登録名（§6.3）。**台帳に無い名前は重み取得前に拒否**                                                 |
+| `packing.blockElements` | u32    | 必須   | 1 以上。1 packing block が運ぶ**要素数**                                                                   |
+| `packing.blockBytes`    | u32    | 必須   | 1 以上。1 packing block の**バイト数**                                                                     |
+| `packing.alignBytes`    | u32    | 必須   | `1 / 2 / 4 / 8 / 16 / 64` のいずれか。payload 先頭の整列要求                                               |
+| `rowAxis`               | u32    | 量子化 | `0` または `1`。**行の軸**。台帳の `scale` が required の codec でのみ書く（非量子化で書くと fail loudly） |
+| `groupSize`             | u32    | 量子化 | 1 以上・行長を割り切る MUST。per-channel の codec では行長に**等しい** MUST                                |
+| `scale.block`           | string | 量子化 | scale の block id。`role` は `"scale"` MUST                                                                |
+| `scale.dtype`           | string | 量子化 | 台帳の `scale.dtype` 受理集合の 1 つ（初版は `"f32"` のみ）                                                |
+| `zeroPoint.block`       | string | 省略可 | 台帳の `zeroPoint.allowed` が真の codec でのみ書ける（初版は 4 種とも偽 ⇒ 常に省略）                       |
 
 **bit 数は宣言に置かない**。`packing.blockElements` / `packing.blockBytes` からの派生値である
 （`bits = blockBytes · 8 / blockElements`）。`bits` を宣言に置くと非整数 bpw が表せず、payload
@@ -516,9 +520,9 @@ rowLength  = numel / shape[rowAxis]
 | 格納コード `u`          | `u = q`（符号付き 8bit）                                | `u = q + 8`（`[1,15]`・0 未使用）                                                 | `u = q + 2`（`[0,3]`）                                        | `u = q + 2`（`[1,3]`・**0 未使用**） |
 | `levels.kind`           | `int-sym`                                               | `int-sym`                                                                         | `int-offset`                                                  | `int-sym`                            |
 | `levels.offset`         | 0                                                       | 8                                                                                 | 2                                                             | 2                                    |
-| `packing.blockElements` | 4                                                       | 8                                                                                 | 16                                                            | 16                                   |
-| `packing.blockBytes`    | 4                                                       | 4                                                                                 | 4                                                             | 4                                    |
-| `packing.alignBytes`    | 1                                                       | 4                                                                                 | 4                                                             | 4                                    |
+| `packing.blockElements` | 1                                                       | 8                                                                                 | 16                                                            | 16                                   |
+| `packing.blockBytes`    | 1                                                       | 4                                                                                 | 4                                                             | 4                                    |
+| `packing.alignBytes`    | 4                                                       | 4                                                                                 | 4                                                             | 4                                    |
 | 派生 bit / 要素         | 8                                                       | 4                                                                                 | 2                                                             | 2                                    |
 | 詰め順（1 u32 語）      | 4 要素・`unpack4xI8(w[i>>2])[i&3]`                      | 8 要素・バイト内で要素 `2i` = **下位** nibble / `2i+1` = **上位**                 | 16 要素・**下位 2bit から**順に `(w[i>>4] >> ((i&15)*2)) & 3` | **`int2-off` と完全に同一**          |
 | `scale.dtype`           | `f32`                                                   | `f32`                                                                             | `f32`                                                         | `f32`                                |
