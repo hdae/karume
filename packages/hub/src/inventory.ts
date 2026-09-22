@@ -181,7 +181,7 @@ const protectorsOf = (
     const selection = namedSelection(manifest, entry);
     if (selection.model === target.model && selection.quant === target.quant) continue;
     // 参照の並びは `resolveFiles` の宣言順なので、同じ部分集合は同じ鍵になる。
-    byKey.set(`${labelOf(selection)} ${refs.map(fileRefKey).join(" ")}`, {
+    byKey.set(`${labelOf(selection)}\0${refs.map(fileRefKey).join("\0")}`, {
       selection,
       refs,
     });
