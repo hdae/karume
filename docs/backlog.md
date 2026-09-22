@@ -9,45 +9,6 @@
 
 ## now — 0.12.0 リリース後（2026-09-06）
 
-- **テスト整理・リファクタリングの波（2026-09-20 利用者提案・着手中 — 済んだ段は下の「段 N 済」の行）**: 開発機が
-  Intel Arc B570 に替わり（NVIDIA の検証は別機の RTX 5070 Ti で行う）、karume はブラウザ優先
-  （Deno も積極的に支える）という前提で、① sha256 / golden の**参照値をデバイスごとに持てる形**
-  （参照環境の宣言と機ごとの値の並置）② verify の結果を **JSON に集約して環境間で受け渡し**、
-  複数デバイスの差異を突き合わせられるようにする ③ 許容差は「Karume 独自基準 + WGSL 仕様帯」の
-  2 段（独自基準は容易に撤廃可・従来基準に引っかかったことが分かる形。緩めるのは op 単位・仕様の
-  範囲内・実害なしに限る — `e2e_golden_test.ts` の `OUTPUT_TOLERANCE`）④ 変更に関連するテストの
-  個別実行を主にし、フル verify は横断変更とリリース前だけ（現状 30 分超）⑤ 速度の物差しは
-  ヘッドレス Chrome 計測（`tools/llm-speed/browser` の計測ページ — 成立済み）。B570 で判明した
-  記録は known-issues「Intel Arc B570」節・limitations「BiRefNet 系」「sha256 参照門」節。
-  **段 0 済（2026-09-20）**: ④ の verify 分割（`test:core` / `test:models:<系列>` + 被覆の門
-  `verify_lanes_test.ts` + 系列名に合わせたテスト改名）— 決定は [ADR 0005 追記](decisions/0005-verification.md)。
-  **段 1 済（2026-09-20）**: ① の sha256 側（参照値を環境キーごとの行へ + `KARUME_REFERENCE` の 3 モード +
-  参照門）と ② の結果 JSON（`outputs/verify/<環境キー>/<日付>_<系列>/` に `results.json` + 実物を毎回）—
-  決定は [ADR 0106](decisions/0106-device-keyed-references.md)。残りは ① の golden 側（torch 由来の
-  期待出力は tolerance 判定のままで手を付けていない）と ② の**環境間の突き合わせ道具**（集めた
-  `results.json` を並べて差異を出す形）。
-  **段 2c 済（2026-09-20）**: パッケージ README / LICENSE 同梱（`packages/*/README.md` を英語で新設 + リポ直下 LICENSE をバイト同一で複製・公開物入りは `deno publish --dry-run` で確認 — [release-runbook §4](release-runbook.md)）。
-  **段 2b 済（2026-09-20）**: CHANGELOG 新設（リポ直下 `CHANGELOG.md` — Keep a Changelog 形式・
-  tag のある 18 版 + `[Unreleased]`。ADR 0008「breaking は CHANGELOG で明示する」の実体で、
-  [release-runbook](release-runbook.md) §4 に bump 時の移し替えを 1 項追加）。
-  **段 2d 済（2026-09-20）**: テストの置き場と名前の是正（公開面の門の実体を
-  `packages/runtime/tests/helpers/public-surface.ts` へ移動 + 全テストが実 GPU を要る
-  `runtime_input_lifetime_test.ts` を `gpu_` 接頭辞へ改名。unit と GPU が同居する
-  `estimate_test.ts` / `runtime_executor_test.ts` / `static_quantize_test.ts` は混在のため据え置き
-  → コード品質管理の波 段 1 で GPU 側を `gpu_*` へ分割済み）。
-  **段 2a 済（2026-09-20）**: 公開面のスナップショット門（各パッケージの `tests/public_surface_test.ts` と追跡 fixture
-  `tests/fixtures/public-surface.json` — `deno doc --json` で採る値・型の export 集合。焼き直しは `KARUME_SURFACE=write` —
-  [ADR 0008 追記](decisions/0008-public-api.md)）。
-  **段 3 済（2026-09-20）**: ③ の許容差 2 段化（`e2e_golden_test.ts` — Karume 独自基準を超え WGSL 仕様帯で受理した出力は
-  `outputs/verify/<環境キー>/<日付>_golden/results.json` の `note` に残す・赤にしない）。
-  **レビュー取り込み 済（2026-09-21）**: 外部レビュー（5 観点 × 2 試行）の指摘 87 件を実コードで反証した結果
-  （正本 = `.claude/reviews/2026-09-21_chatgpt-reviews/triage.md` — 成立 78 / 反証 8 / 未決 1・high 0 / medium 9）のうち、
-  構造の分割候補 16 件を除く「直す価値あり」を取り込んだ — runtime の batch 受け口（写しの後の再検査・フェンス前失敗の計測窓・
-  pop 待ち中の消失）、テスト基盤（参照門を登録ケースで数える・fixture の読み直し書き・`results.json` の走行中マーカー・レーン門の
-  ディレクトリ `--ignore` と綴りの門・公開面の entry 差分と値非公開の門・adapter 同一性）、Civitai の本体選択と basename の門
-  （[ADR 0088 追記](decisions/0088-civitai-air-intake.md)）、docs の同期 11 件。**構造の 16 件（triage.md §6 の着手順 3 段）は
-  コード品質管理の波の入力**（later の同名項に V2-01 を起票済み）。
-
 - **モデル横断の追加調査（2026-09-10〜11）**: Qwen3-0.6B / MiniCPM5-2B の RTN / GPTQ と
   E4B の全 PLE を含むローカル pipeline は実機検証済み。E4B chat も CPU / Deno / Chrome で一致。
   [初期品質参考値](research/2026-09-12-llm-quality-baseline.md)はQwen/MiniCPMで保存済み。
@@ -217,7 +178,61 @@
   （**起票のみ** — 収集する項目・置き場・オプトインの形は未設計）。
 - Pixel（8GB 級 Android Chrome）の `err.cause` 再判定 — [known-issues](known-issues.md)。
 
-## 消化済み（0.12.0 リリース後 — 2026-09-07〜21）
+## 消化済み（0.12.0 リリース後 — 2026-09-07〜22）
+
+- **テスト整理・リファクタリングの波（2026-09-20 利用者提案・2026-09-22 完了 — 段は下の「段 N 済」の行）**: 開発機が
+  Intel Arc B570 に替わり（NVIDIA の検証は別機の RTX 5070 Ti で行う）、karume はブラウザ優先
+  （Deno も積極的に支える）という前提で、① sha256 / golden の**参照値をデバイスごとに持てる形**
+  （参照環境の宣言と機ごとの値の並置）② verify の結果を **JSON に集約して環境間で受け渡し**、
+  複数デバイスの差異を突き合わせられるようにする ③ 許容差は「Karume 独自基準 + WGSL 仕様帯」の
+  2 段（独自基準は容易に撤廃可・従来基準に引っかかったことが分かる形。緩めるのは op 単位・仕様の
+  範囲内・実害なしに限る — `e2e_golden_test.ts` の `OUTPUT_TOLERANCE`）④ 変更に関連するテストの
+  個別実行を主にし、フル verify は横断変更とリリース前だけ（現状 30 分超）⑤ 速度の物差しは
+  ヘッドレス Chrome 計測（`tools/llm-speed/browser` の計測ページ — 成立済み）。B570 で判明した
+  記録は known-issues「Intel Arc B570」節・limitations「BiRefNet 系」「sha256 参照門」節。
+  **段 0 済（2026-09-20）**: ④ の verify 分割（`test:core` / `test:models:<系列>` + 被覆の門
+  `verify_lanes_test.ts` + 系列名に合わせたテスト改名）— 決定は [ADR 0005 追記](decisions/0005-verification.md)。
+  **段 1 済（2026-09-20）**: ① の sha256 側（参照値を環境キーごとの行へ + `KARUME_REFERENCE` の 3 モード +
+  参照門）と ② の結果 JSON（`outputs/verify/<環境キー>/<日付>_<系列>/` に `results.json` + 実物を毎回）—
+  決定は [ADR 0106](decisions/0106-device-keyed-references.md)。残りは ① の golden 側（torch 由来の
+  期待出力は tolerance 判定のままで手を付けていない）と ② の**環境間の突き合わせ道具**（集めた
+  `results.json` を並べて差異を出す形）。
+  **段 2c 済（2026-09-20）**: パッケージ README / LICENSE 同梱（`packages/*/README.md` を英語で新設 + リポ直下 LICENSE をバイト同一で複製・公開物入りは `deno publish --dry-run` で確認 — [release-runbook §4](release-runbook.md)）。
+  **段 2b 済（2026-09-20）**: CHANGELOG 新設（リポ直下 `CHANGELOG.md` — Keep a Changelog 形式・
+  tag のある 18 版 + `[Unreleased]`。ADR 0008「breaking は CHANGELOG で明示する」の実体で、
+  [release-runbook](release-runbook.md) §4 に bump 時の移し替えを 1 項追加）。
+  **段 2d 済（2026-09-20）**: テストの置き場と名前の是正（公開面の門の実体を
+  `packages/runtime/tests/helpers/public-surface.ts` へ移動 + 全テストが実 GPU を要る
+  `runtime_input_lifetime_test.ts` を `gpu_` 接頭辞へ改名。unit と GPU が同居する
+  `estimate_test.ts` / `runtime_executor_test.ts` / `static_quantize_test.ts` は混在のため据え置き
+  → コード品質管理の波 段 1 で GPU 側を `gpu_*` へ分割済み）。
+  **段 2a 済（2026-09-20）**: 公開面のスナップショット門（各パッケージの `tests/public_surface_test.ts` と追跡 fixture
+  `tests/fixtures/public-surface.json` — `deno doc --json` で採る値・型の export 集合。焼き直しは `KARUME_SURFACE=write` —
+  [ADR 0008 追記](decisions/0008-public-api.md)）。
+  **段 3 済（2026-09-20）**: ③ の許容差 2 段化（`e2e_golden_test.ts` — Karume 独自基準を超え WGSL 仕様帯で受理した出力は
+  `outputs/verify/<環境キー>/<日付>_golden/results.json` の `note` に残す・赤にしない）。
+  **レビュー取り込み 済（2026-09-21）**: 外部レビュー（5 観点 × 2 試行）の指摘 87 件を実コードで反証した結果
+  （正本 = `.claude/reviews/2026-09-21_chatgpt-reviews/triage.md` — 成立 78 / 反証 8 / 未決 1・high 0 / medium 9）のうち、
+  構造の分割候補 16 件を除く「直す価値あり」を取り込んだ — runtime の batch 受け口（写しの後の再検査・フェンス前失敗の計測窓・
+  pop 待ち中の消失）、テスト基盤（参照門を登録ケースで数える・fixture の読み直し書き・`results.json` の走行中マーカー・レーン門の
+  ディレクトリ `--ignore` と綴りの門・公開面の entry 差分と値非公開の門・adapter 同一性）、Civitai の本体選択と basename の門
+  （[ADR 0088 追記](decisions/0088-civitai-air-intake.md)）、docs の同期 11 件。**構造の 16 件（triage.md §6 の着手順 3 段）は
+  コード品質管理の波の入力**（later の同名項に V2-01 を起票済み）。
+  **段 4 済（2026-09-22）**: ① の golden 側（判定 2 段目の WGSL 仕様帯の行を環境キー別へ — [ADR 0106 追記](decisions/0106-device-keyed-references.md)）と
+  ② の突き合わせ道具（`tools/verify-diff` — 門にせず差異があっても終了コード 0・2 台目の結果は手でコピー）+ 結果 JSON の実測欄 `measurements`
+  （合格した回の maxAbs / maxRel も毎回残す・派生値は持たない）+ 実重み golden 11 本の結果の席（`<系列>-golden`）。
+
+- **コード品質管理の波の設計項目（起票 2026-09-21 — 波本体は消化済み〈0.12.0 リリース後〉節）**:
+  - **Anima / 生成の入力起因エラーを判別可能な型へ揃える**: `parseResolution` と
+    `AnimaPipeline.generate` の値域検査、生成側の `maxNewTokens` / `stopTokens` の検査が素の
+    `Error` を投げるため、同じ関数内の内部配線異常（hub のバグ側）と区別が付かず、複数モデルを
+    1 ハンドラで受けるホストはメッセージ文字列を解釈するしかない。同じ検査群でも seed
+    （`anima/random.ts`）と sampler 指定（`generation/sampler.ts`）は既に `RangeError` で判別
+    できるので、揃える先は `RangeError` か公開エラー型のどちらか。**公開面の追加を伴うので
+    設計項目**（ADR [0072](decisions/0072-sbv2-text-injection.md) の 400/500 分離は SBV2 に
+    閉じた決定で、そのまま持ち込まない）。対象は `models/src/anima/resolution.ts` と
+    `models/src/generation/sequence.ts`。
+    **済（2026-09-22）**: `ModelInputError` 1 本 + 派生 2 本・73 箇所置き換え — [ADR 0107](decisions/0107-model-input-error.md)。
 
 - **コード品質管理の波（2026-09-21 着手・承認済みの計画）**: 入力は `.claude/reviews/2026-09-21_chatgpt-reviews/triage.md` §6
   （分割候補 15 本の着手順 3 段・重複実装・未使用 export）。段 1 = 1 ファイルに閉じるか純関数の移動だけの項目、
@@ -629,16 +644,8 @@ autoregressive 波の**残項目（波外へ送り）**:
 
 ## later
 
-- **コード品質管理の波の設計項目（起票 2026-09-21 — 波本体は消化済み〈0.12.0 リリース後〉節）**:
-  - **Anima / 生成の入力起因エラーを判別可能な型へ揃える**: `parseResolution` と
-    `AnimaPipeline.generate` の値域検査、生成側の `maxNewTokens` / `stopTokens` の検査が素の
-    `Error` を投げるため、同じ関数内の内部配線異常（hub のバグ側）と区別が付かず、複数モデルを
-    1 ハンドラで受けるホストはメッセージ文字列を解釈するしかない。同じ検査群でも seed
-    （`anima/random.ts`）と sampler 指定（`generation/sampler.ts`）は既に `RangeError` で判別
-    できるので、揃える先は `RangeError` か公開エラー型のどちらか。**公開面の追加を伴うので
-    設計項目**（ADR [0072](decisions/0072-sbv2-text-injection.md) の 400/500 分離は SBV2 に
-    閉じた決定で、そのまま持ち込まない）。対象は `models/src/anima/resolution.ts` と
-    `models/src/generation/sequence.ts`。
+- **実重み golden 11 本の結果記録の包み（起票 2026-09-22）**: 各 e2e に同型の try / catch / record が
+  並ぶので、helpers 側に「ケース 1 件を記録付きで回す」薄い包みを置いて重複を消す（size S）。
 
 - **コード品質管理の波の残置（起票 2026-09-22 — 出典は消化済み〈0.12.0 リリース後〉節の同波）**:
   - `Gemma4PipelineOptions` を引数に取る 4 本（`assertSpeculative` / `resolveGemma4PleResidency` /

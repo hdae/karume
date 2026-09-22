@@ -8,7 +8,10 @@
   `results_writer_test.ts`・追跡 fixture `packages/models/tests/fixtures/references/{anima,sbv2,irodori}.json`・
   消費側の e2e 5 本（`e2e_anima_test.ts` / `e2e_sbv2_wav_test.ts` / `e2e_irodori_wav_test.ts` は
   参照値 + 結果、`e2e_birefnet_real_test.ts` / `e2e_depth_anything_real_test.ts` は結果のみ）。
-  **ランタイム・配布形・exporter は無改変**（テストの持ち物だけ）
+  2026-09-22 追記の対象は `packages/runtime/tests/e2e_golden_test.ts`（golden 判定の 2 段目 =
+  WGSL 仕様帯を環境キー別に + 実測の記録）・実重み golden 11 本の e2e（`<系列>-golden` の席）・
+  `tools/verify-diff/`（複数環境の `results.json` を並べる読み口）。
+  **ランタイム・配布形・exporter は無改変**（テストと検証道具の持ち物だけ）
 - 関連: ADR [0005](0005-verification.md)（検証戦略 — 「全ケース SKIP は明示 FAIL」の規律と
   2026-09-20 追記のレーン分割）/ [limitations](../limitations.md) の「sha256 参照門」節
   （クロスデバイスのビット同一を保証しない機序）/ [known-issues](../known-issues.md) の
@@ -147,6 +150,12 @@ opt-out も同型の環境変数 `KARUME_ALLOW_NO_REFERENCE=1`。GPU も資産�
 3. **不一致を tolerance で吸収する**（sha を画素差の閾値に替える）— 却下。ADR 0005 の規律どおりで、
    緩めた時点で「移植できた」の意味が消える。デバイスが違うときの健全性検証は参照 sha との一致では
    なく**自己 A/B**（同一入力・幾何 2 種または新旧 2 版の出力 sha の一致）で行う（limitations）。
+4. **golden の許容差も追跡 fixture へ出し、実測から行を起こす**（決定 1 と同じ形を 2 段目に当てる）—
+   却下。帯が走行のたびに実測へ追随する形になり、ADR 0005 の tolerance 化禁止と衝突する。帯は
+   「この GPU の実装はここまで外れてよい」という**仕様由来の宣言**で、実測から起こす値ではない。
+5. **結果を追跡下の台帳に集め、環境間の差異を門にする**（`tools/verify-diff` を赤で落とす）— 却下。
+   クロスデバイスのビット同一は非保証なので、差異そのものを赤にできない。追跡外の結果を追跡下へ
+   持ち込むことにもなり、参照値と結果の席の分割（決定 5）が崩れる。
 
 ## Consequences
 
@@ -158,4 +167,54 @@ opt-out も同型の環境変数 `KARUME_ALLOW_NO_REFERENCE=1`。GPU も資産�
 - fixture に複数環境の行が同居するので、レビューでは「どの環境の行が動いたか」を見る（辞書順固定 +
   `rewrite` が現環境の行しか触らないことで、それが差分から読める）。
 - 系列が増えるたびに fixture 1 本と参照門 1 本が増える。`results.json` は環境の素性とチェックアウトを
-  持つので、複数デバイスの結果を後から突き合わせる材料になる（突き合わせ自体はまだ道具化していない）。
+  持つので、複数デバイスの結果を後から突き合わせる材料になる（突き合わせる道具は追記決定 3）。
+
+## 追記（2026-09-22）— golden 側の環境別化と結果の突き合わせ
+
+### 追記決定 1: golden の 2 段目（WGSL 仕様帯）も環境キーごとの行で持つ
+
+`packages/runtime/tests/e2e_golden_test.ts` の `OUTPUT_TOLERANCE` は `<model>/<出力名>` →
+**環境キー** → `{ spec }` の 2 段の表にする。2 段目が発火するのは**走らせている機の行がある出力
+だけ**で、行が無い機では 2 段目そのものが無い（1 段目の Karume 独自基準だけで測り、超えれば赤）。
+1 段目・fail の文言・`note` の記録は不変。
+
+行を分けるのは、**緩めを足した機の外へ緩めを広げない**ため。`activations/sin` の atol 2⁻¹¹ は
+Intel Arc B570（Mesa ANV）の実測で足した行で、キーが `<model>/<出力名>` だけだと、同じ op を
+ほぼ正しく丸める機（RTX 3080 Ti は 1e-6 で通る）の退行検出の網まで同じだけ緩む。
+
+決定 1 と並べる意味は違う。golden の期待値は **torch CPU 由来で device 非依存**なので、期待値を
+機ごとに持つ必要はない。機ごとに並ぶのは**許容差**の側である（sha256 の参照値は期待値そのものを
+機ごとに持つ — 決定 1）。
+
+### 追記決定 2: 合格した回の差も `results.json` に残す（任意欄 `measurements`）
+
+`cases[]` の 1 件に任意欄 `measurements` を足す。1 本は `output`（グラフの出力名）/ `maxAbs` /
+`maxRel` / `tolerance`（受理に使った帯）/ `stage`（`karume` \| `spec` — fail のときは最後に測った段）。
+許容差の判定は落ちたときにしか数値を見せないので、合格した回の差はどこにも残らない。毎回残せば、
+帯を緩めるかどうかの判断材料が割れる前から手元に揃う。
+
+- **派生値は持たない**（帯に対する比などは読む側 = `tools/verify-diff` が導く）。同じ数の別表現が
+  2 か所に乗ると、片方だけ直った形が作れてしまう。
+- `schema` は **1 のまま**（任意欄の追加で、既存の読み手は無影響）。非有限（NaN / ±Inf）は
+  `JSON.stringify` が `null` にするので、読む側は `null` を受ける。
+- 判定・帯・assert・`ignore` はこの欄と無関係（記録であって判定材料ではない）。
+
+実重み golden 11 本（sbv2 / irodori / birefnet / siglip2 / deberta / depth-anything / dacvae /
+embeddinggemma / minicpm5 / gemma4 / vowel-detector）にも結果の席を配線し、置き場は
+`<系列>-golden` にする。models 側の e2e が素の系列名で同じ根へ書くので、席を分けないと同じ日の
+同じ席を 2 つのファイルが奪い合う。
+
+### 追記決定 3: 環境間の突き合わせは門ではなく読み取り専用の道具（`tools/verify-diff`）
+
+読むのは `outputs/verify/<環境キー>/<日付>_<系列>/results.json`（決定 5 の席）だけで、何も書かない。
+環境ごとに最新の日付の席 1 本を採り（`--date` でその日付に固定）、系列ごとの「ケース × 環境キー」の
+行列と、`status` / 実物の sha / 片方にしか無いケースの差異、`checkout` の不一致・dirty の警告を
+Markdown（`--json` 可）で出す。
+
+**門にしない**。クロスデバイスのビット同一はそもそも非保証（limitations）なので、環境間の差異
+そのものを赤にできない。終了コードは差異があっても 0 で、1 で落ちるのは読めない・`schema` が違う
+ときだけ（黙って「差異なし」は出さない）。
+
+2 台目の結果は**手で** `outputs/verify/<環境キー>/` へコピーする前提で、同期機構は置かない
+（追跡外の結果を追跡下へ持ち込まないための席の分割 = 決定 5 と整合させるため）。別の置き場に
+まとめてあるなら `--root` で指す。

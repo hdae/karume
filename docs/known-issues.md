@@ -227,6 +227,12 @@ golden `activations` の `sin` は許容差を WGSL 仕様帯へ寄せて消化�
   同じ遅延解放は**レーンを間隔なしに連続実行したときのフレーク**としても出る（2026-09-21: anima レーン
   〈9 分〉の直後に sbv2 レーンを回すと、runtime の golden `i8 / flow / p512` から後の 12 本が OOM —
   後続は `requestDevice` 自体が `Not enough memory left`。20 秒では足りないことがあり、数分空けて単独で回すと 198 本すべて緑）。
+  **レーンをまたがなくても同じ形が出る**（2026-09-22 実測）: 1 プロセス内で device の取得と破棄を
+  30 回超繰り返す tiny golden（`e2e_golden_test.ts` の 32 モデル）でも、末尾のケースが
+  `requestDevice` の `Not enough memory left` か重みアップロードの `GpuOutOfMemoryError` で赤になる
+  ことがあり、同じファイルを続けて回すと赤の本数が増える（1 回目 2 本・直後の 2 回目 7 本）。
+  単独実行（`--filter`）は緑で、数分置くと戻る。赤の本数はその走行までに積んだ解放の遅れの量で、
+  退行の大きさではない。
   運用の回避は上の「フル走行が稀にフレークする」節が正本。
 - **Deno は timestamp-query の値を ns へ換算しない**（ext/webgpu は wgpu の raw tick をそのまま
   返す。WebGPU 仕様は ns）。B570 の Vulkan `timestampPeriod` は 52.0833 ns なので、Deno での

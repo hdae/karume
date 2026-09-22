@@ -1,15 +1,17 @@
 # ACTIVE_DESIGN — Karume
 
 > 現在の設計とレビューの入口。履歴はADR / research / gitに置き、作業順は[backlog](../docs/backlog.md)、性能の採否は[perf-ledger](../docs/perf-ledger.md)を正本とする。
-> Last updated: 2026-09-22（コード品質管理の波 完了 — 段 1〜3 の置き場は backlog の消化済み〈0.12.0 リリース後〉節、残置は later の同名項）
+> Last updated: 2026-09-22（テスト整理の波 完了 — 段 4 = golden の環境別化 + 結果の突き合わせ〈ADR 0106 追記〉、入力起因エラーは `ModelInputError` で完了〈ADR 0107〉。置き場は backlog の消化済み〈0.12.0 リリース後〉節、残置は later）
 
 ## 現在の焦点
 
-- コード品質管理の波（2026-09-21・段1〜3 済）: 入力は外部レビューの分割候補（triage.md §6・3段）。共通層 — `models/src/config/readers.ts`・`session/with-session.ts`・`text/{asset-gates,code-ranges}.ts`・`hub/{asset-readers,graph-gates}.ts`。gemmaは`admission.ts` / `chat-turn.ts` / `ple-index.ts` / `ple-shard.ts`（`ple.ts`は所有者+facade）、irodoriは`admission` / `conditioning` / `dit-loop` / `stage`。runtimeは**層の入口を1ファイルに保つfacade**が3つ — `gpu/device.ts`（実体は`context.ts` + `acquire.ts`）・`runtime/fusion.ts`（`fusion-rule.ts` + `fusion-rules/`）・`runtime/recipe-builder.ts`（`RecipeBuildFace`で`recipe-builders/`へ注入）— と、`session-build.ts`（Session.buildの本体）。消費側はfacadeの綴りでimportする。分割の規律: 数式・await・受理集合・文言を移動と同じ変更に混ぜない、WGSL生成器はスナップショットのバイト同一で確認、公開面fixtureは自動更新しない。記録は[backlog](../docs/backlog.md)の消化済み〈0.12.0リリース後〉節、残置はlaterの「コード品質管理の波の残置」。
-- テスト整理の波（2026-09-20・段0〜3 済）と外部レビューの取り込み（2026-09-21・正本は`.claude/reviews/2026-09-21_chatgpt-reviews/triage.md`・構造の分割候補16件は§6の着手順3段で**次のコード品質管理の波の入力**）。済んだ段: 段0=verifyのレーン分割（`test:core` / `test:models:<系列>`と被覆の門`verify_lanes_test.ts`・[ADR 0005追記](../docs/decisions/0005-verification.md)）、
+- コード品質管理の波（2026-09-21・段1〜3で完了）: 入力は外部レビューの分割候補（triage.md §6・3段）。共通層 — `models/src/config/readers.ts`・`session/with-session.ts`・`text/{asset-gates,code-ranges}.ts`・`hub/{asset-readers,graph-gates}.ts`。gemmaは`admission.ts` / `chat-turn.ts` / `ple-index.ts` / `ple-shard.ts`（`ple.ts`は所有者+facade）、irodoriは`admission` / `conditioning` / `dit-loop` / `stage`。runtimeは**層の入口を1ファイルに保つfacade**が3つ — `gpu/device.ts`（実体は`context.ts` + `acquire.ts`）・`runtime/fusion.ts`（`fusion-rule.ts` + `fusion-rules/`）・`runtime/recipe-builder.ts`（`RecipeBuildFace`で`recipe-builders/`へ注入）— と、`session-build.ts`（Session.buildの本体）。消費側はfacadeの綴りでimportする。分割の規律: 数式・await・受理集合・文言を移動と同じ変更に混ぜない、WGSL生成器はスナップショットのバイト同一で確認、公開面fixtureは自動更新しない。記録は[backlog](../docs/backlog.md)の消化済み〈0.12.0リリース後〉節、残置はlaterの「コード品質管理の波の残置」。設計項目として残していた入力起因エラーの型は`ModelInputError`1本+派生2本（`Sbv2InputError` / `GenerationCapacityError`）で完了し、家族側73箇所の置き換えと受理集合の所有者一本化3本（seed / animaの`steps` / sbv2の`styleWeight`）まで入っている（[ADR 0107](../docs/decisions/0107-model-input-error.md)）。
+- テスト整理の波（2026-09-20・段0〜4で完了）と外部レビューの取り込み（2026-09-21・正本は`.claude/reviews/2026-09-21_chatgpt-reviews/triage.md`・構造の分割候補16件は§6の着手順3段で**コード品質管理の波の入力になり消化済み**）。済んだ段: 段0=verifyのレーン分割（`test:core` / `test:models:<系列>`と被覆の門`verify_lanes_test.ts`・[ADR 0005追記](../docs/decisions/0005-verification.md)）、
   段1=sha256参照値を環境キーごとの行へ（`KARUME_REFERENCE`の3モード・参照門`KARUME_ALLOW_NO_REFERENCE`・結果と実物は`outputs/verify/<環境キー>/<日付>_<系列>/`・[ADR 0106](../docs/decisions/0106-device-keyed-references.md)）、
-  段2a=公開面スナップショット門（各パッケージの`public_surface_test.ts`と`fixtures/public-surface.json`・焼き直しは`KARUME_SURFACE=write`）、段2b=リポ直下`CHANGELOG.md`新設、段2c=パッケージREADME / LICENSEの公開物同梱。
-  以降の段と残件（golden側の環境別化、環境間で`results.json`を突き合わせる道具）の正本は[backlog](../docs/backlog.md)のnow先頭項。
+  段2a=公開面スナップショット門（各パッケージの`public_surface_test.ts`と`fixtures/public-surface.json`・焼き直しは`KARUME_SURFACE=write`）、段2b=リポ直下`CHANGELOG.md`新設、段2c=パッケージREADME / LICENSEの公開物同梱、
+  段3=goldenの許容差を「Karume独自基準+WGSL仕様帯」の2段へ（仕様帯で受理した出力は`results.json`の`note`に残す）、
+  段4=その2段目を環境キー別の行へ+`results.json`の実測欄`measurements`+実重みgolden11本の結果の席`<系列>-golden`+環境間の突き合わせ道具`tools/verify-diff`（[ADR 0106追記](../docs/decisions/0106-device-keyed-references.md)）。
+  波全体の正本は[backlog](../docs/backlog.md)の消化済み〈0.12.0リリース後〉節。
 - `codex/review-and-fix`の[マージ前レビュー資料](../docs/research/2026-09-14-merge-review.md)を入口にする。
   9/11レビューの修正と、その後のQAT・LLM・性能改善を含む。旧レビューの対応表は[調査記録](../docs/research/2026-09-10-codex-mtp-optimization.md#9-月-11-日レビューの対応)。
   比較基点より前のMTP実装や公開API移行を、このブランチで初めて入った変更と混同しない。
@@ -56,6 +58,9 @@
 ## 現役の落とし穴
 
 - sha256参照値は**環境ごとの行**で、定数ではない（[ADR 0106](../docs/decisions/0106-device-keyed-references.md)）。行を持たない機では明示SKIP + 参照門が赤になるので、`KARUME_REFERENCE=write`で行を作る。他環境の行を焼き直さない。tolerance化は禁止。
+- goldenの判定2段目（WGSL仕様帯・`e2e_golden_test.ts`の`OUTPUT_TOLERANCE`）も**環境キー別の行**で、行が無い機では2段目そのものが無く1段目のKarume独自基準だけで赤になる（[ADR 0106追記](../docs/decisions/0106-device-keyed-references.md)）。行を足すのは実測した機のキーの下だけで、全機共通へ広げない。
+- `results.json`の`measurements`は**判定に使わない記録**で、帯に対する比などの派生値を持たない（導くのは`tools/verify-diff`の側）。この欄を読んで帯を動かすときも、緩める根拠は仕様の該当節と実測値で書く。
+- 入力起因の失敗（渡した要求そのものが受理できない）は`ModelInputError`で投げる。綴り違い（model / quant / sampler名）・呼び出し手順の違反（dispose済み・二重生成）・資産の齟齬・内部の前提の破れは**素の`Error`のまま**で、この型に混ぜない（[ADR 0107](../docs/decisions/0107-model-input-error.md)決定2 / 3）。
 - レーンを単独で回すと門番3本（`gpu_gate` / `assets_gate` / `distribution_gate`）は走らない（coreにしか無い）。レーンの緑をフルverifyの緑と同じ意味に扱わない。参照門だけは系列のe2eに同梱される。
 - Denoはtimestamp-queryの値をnsへ換算しない（wgpuのraw tickのまま）。B570は`timestampPeriod` 52.0833 nsなので`lastRunTiming` / `--diagnostics`の内訳は×52過小になる（RTXはperiod 1 nsで表面化しなかった・Chromeは換算する — [known-issues](../docs/known-issues.md)）。
 - 全体verifyの失敗はログと失敗ファイルの単独実行で切り分ける。VRAM圧と断定しない。

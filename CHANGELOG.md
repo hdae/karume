@@ -40,6 +40,14 @@ measurements in `docs/research/`.
   a new machine (`rewrite` refreshes them), a machine without rows skips those cases explicitly
   and fails a reference gate (`KARUME_ALLOW_NO_REFERENCE=1` to opt out), and every run writes
   `results.json` plus the produced images / audio under `outputs/verify/<environment>/`.
+- Per-environment golden tolerances and recorded measurements: the second tolerance band of the
+  golden comparison (the WGSL spec band) is keyed by environment too, so a band widened for one GPU
+  no longer loosens the regression net on machines that have no such row. Every golden comparison
+  now records its `measurements` (largest absolute and relative difference, the band that accepted
+  the output, and which stage accepted it) in `results.json` even when it passes, the eleven
+  real-weight golden tests write their own `<family>-golden` results, and `tools/verify-diff` lays
+  the `results.json` files collected from several machines side by side and prints what differs —
+  a read-only tool, not a gate.
 - A public-surface snapshot gate for the three packages (`deno doc --json` symbols against a
   tracked fixture; `KARUME_SURFACE=write` refreshes it).
 - Each package now ships its README and LICENSE; this CHANGELOG.

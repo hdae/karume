@@ -1,6 +1,6 @@
 # 0107: 入力起因の失敗を家族横断の `ModelInputError` 1 本で表す
 
-- Status: accepted（2026-09-22 — 段 D0 で型・所有者・公開面まで入れ、家族側の置き換えは後続）
+- Status: accepted（2026-09-22 — 型・所有者・公開面に続き、家族側の置き換えまで同日に完了）
 - Date: 2026-09-22
 - 対象: `packages/models/src/errors.ts`（新設 — 型）/ `packages/models/src/request-gates.ts`
   （新設 — 家族横断の受理集合の所有者）/ `packages/models/src/sbv2/errors.ts`（派生へ付け替え）/
@@ -20,7 +20,7 @@
 ## Context
 
 `@karume/models` は 8 家族のパイプラインを 1 パッケージで出しており、生成要求の検査は家族ごとに
-書かれている。棚卸しの時点で、**入力起因**（呼び手が渡した要求そのものが受理できない = 入力を
+書かれている。置き換え前の時点で、**入力起因**（呼び手が渡した要求そのものが受理できない = 入力を
 直せば通る）の throw は 127 件あり、その型は 3 通りに割れていた:
 
 | 型               | 件数 | どこ                                            |
@@ -120,5 +120,11 @@ Breaking に載せる（`instanceof RangeError` で分岐していたコード�
   破壊変更**なので、迷ったら入れないのが安い側である。
 - `GenerationCapacityError` は親が増えただけで、`name` も欄も引数の形も変わらない。
   `instanceof GenerationCapacityError` で分岐していたコードは無影響。
-- 家族側の throw の置き換えは段を分ける。この ADR は型・所有者・公開面までで、127 件の
-  分類・置き換えは家族ごとに行う（メッセージは変えない — 型の分岐とメッセージの質は別物）。
+- **家族側の置き換えは完了している** — 生成要求の値域・型・組合せの検査 73 箇所（anima /
+  generation / gemma / sbv2 / irodori / image / audio）が `ModelInputError` を投げる。
+  メッセージは変えず型だけ差し替えた（型の分岐とメッセージの質は別物）。
+- 同じ受理集合を 2 か所に書いていた 3 本は**所有者を 1 本**にした: seed（4 本の写し →
+  `request-gates.ts`）・anima の `steps`（入口と `sigmaSchedule`）・sbv2 の `styleWeight`
+  （入口と表引き）。入口はいずれも所有者を呼ぶ形で、条件そのものは持たない。sbv2 の入口の
+  seed 門だけは `Sbv2InputError` で包み直す（SBV2 だけを載せるホストの `instanceof` を
+  壊さないため — 決定 4 の派生なので横断の分岐にも乗る）。
