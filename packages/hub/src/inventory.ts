@@ -181,7 +181,10 @@ const protectorsOf = (
     const selection = namedSelection(manifest, entry);
     if (selection.model === target.model && selection.quant === target.quant) continue;
     // 参照の並びは `resolveFiles` の宣言順なので、同じ部分集合は同じ鍵になる。
-    byKey.set(`${labelOf(selection)}\0${refs.map(fileRefKey).join("\0")}`, {
+    // MUST: 要素境界の曖昧でない綴り（`JSON.stringify` の配列）で組む — 区切り文字を挟むだけだと
+    // label に同じ文字が入った選択が別の選択と同じ鍵になり、後勝ちで片方が黙って消える
+    // （model / quant 名は manifest 側で制御文字を拒んでいないので、NUL 入りの名前が実際に届く）。
+    byKey.set(JSON.stringify([labelOf(selection), refs.map(fileRefKey)]), {
       selection,
       refs,
     });

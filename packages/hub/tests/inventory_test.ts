@@ -426,6 +426,102 @@ Deno.test("evictCachedAssets: protect は同じ label の部分集合を 2 つ�
   assertEquals(result.alsoEvicted, [W8A8_LABEL, F16_C16_LABEL]);
 });
 
+// ---- 守る側の一意化キーは **label + 参照集合**（同じ label の別の部分集合を両方守るため）。
+// 区切り文字を挟むだけの綴りだと、要素の境界が曖昧になり「label に区切り文字を含む選択」が
+// 別の選択と同じキーになる = 後勝ちで片方の指定が黙って消える。manifest の parse は
+// model / quant 名の制御文字を拒まないので、NUL 入りの名前はここまで実際に届く。
+
+const COLLIDE_A = "collide/a.safetensors";
+const COLLIDE_B = "collide/b.safetensors";
+
+/** `m/q`（参照 = a, b）と同じ鍵に畳まれることを狙った quant 名（label が `m/q\0<a の鍵>`）。 */
+const COLLIDING_QUANT = `q\0${COLLIDE_A}`;
+
+/** 2 weights だけの manifest（消す対象の `target` と、守る側の候補を並べた `m`）。 */
+const collisionManifest = async (): Promise<string> => {
+  const shardOf = async (path: string) => ({
+    path,
+    size: payloadFor(path).byteLength,
+    sha256: await sha256Hex(payloadFor(path)),
+  });
+  const weights = {
+    wa: { f16: { shards: [await shardOf(COLLIDE_A)] } },
+    wb: { f16: { shards: [await shardOf(COLLIDE_B)] } },
+  };
+  const quant = { weights: { wa: "f16", wb: "f16" }, session: {} };
+  const model = (quants: Record<string, unknown>, defaultQuant: string) => ({
+    pipeline: "anima/1",
+    weights,
+    assets: {},
+    quants,
+    defaultQuant,
+    pipelineConfig: {},
+  });
+  return JSON.stringify({
+    format: "karume/4",
+    generator: "karume/0.1.0",
+    defaultModel: "target",
+    models: {
+      target: model({ only: quant }, "only"),
+      m: model({ q: quant, q2: quant, [COLLIDING_QUANT]: quant }, "q"),
+    },
+  });
+};
+
+const COLLISION_TARGET: ResolveOptions = { model: "target", quant: "only" };
+
+/** 対象の参照（a, b）を温めた状態の manifest を開く。 */
+const loadCollision = async (caches: MemoryCacheStorage): Promise<LoadedManifest> => {
+  const files = new Map<string, Uint8Array<ArrayBuffer>>([
+    [MANIFEST_PATH, new TextEncoder().encode(await collisionManifest())],
+    [COLLIDE_A, payloadFor(COLLIDE_A)],
+    [COLLIDE_B, payloadFor(COLLIDE_B)],
+  ]);
+  const { loaded, mock } = await load(caches, { files });
+  await prefetchAssets(loaded, refsOf(loaded, COLLISION_TARGET), { fetch: mock.fetch, caches });
+  return loaded;
+};
+
+Deno.test("evictCachedAssets: protect の label に NUL が入っても守る側が畳まれない", async () => {
+  const caches = new MemoryCacheStorage();
+  const loaded = await loadCollision(caches);
+
+  const result = await evictCachedAssets(loaded, COLLISION_TARGET, {
+    caches,
+    protect: [
+      { model: "m", quant: "q" },
+      { model: "m", quant: COLLIDING_QUANT, weights: ["wb"] },
+    ],
+  });
+
+  // 2 つは別の選択なので両方が守る（a を守るのは m/q だけ — 畳まれると a が消える）。
+  assertEquals(paths(result.evicted), []);
+  assertEquals(paths(result.kept.map((entry) => entry.ref)), [COLLIDE_A, COLLIDE_B]);
+  assertEquals(result.kept[0].sharedWith, ["m/q"]);
+  assertEquals(result.kept[1].sharedWith, ["m/q", `m/${COLLIDING_QUANT}`]);
+  assertEquals(result.alsoEvicted, []);
+  assert(hasEntry(hubCache(caches), payloadFor(COLLIDE_A)), "守ったはずの a が消えている");
+});
+
+Deno.test("evictCachedAssets: 良性の label では同じ形がそのまま守られる（対照）", async () => {
+  const caches = new MemoryCacheStorage();
+  const loaded = await loadCollision(caches);
+
+  const result = await evictCachedAssets(loaded, COLLISION_TARGET, {
+    caches,
+    protect: [
+      { model: "m", quant: "q" },
+      { model: "m", quant: "q2", weights: ["wb"] },
+    ],
+  });
+
+  assertEquals(paths(result.evicted), []);
+  assertEquals(paths(result.kept.map((entry) => entry.ref)), [COLLIDE_A, COLLIDE_B]);
+  assertEquals(result.kept[0].sharedWith, ["m/q"]);
+  assertEquals(result.kept[1].sharedWith, ["m/q", "m/q2"]);
+  assertEquals(result.alsoEvicted, []);
+});
+
 // ---- `evicted` は**取得元が「消えた」と名乗ったもの**だけ（消せる候補をそのまま返さない）。
 // 組み込みの HF 取得元は候補と実際に消えたものが常に一致するので、差が出る取得元を被せないと
 // この契約は観測できない（実装が `evicted: 候補` に退化しても既存テストは全て緑のまま）。
