@@ -601,3 +601,46 @@ descriptor を取るのが 2 周目になる）。
     （initializer 18,515 本・量子化 4,533 本・不一致 0）。③縮図（追記 11）は緑。④参照行は 1 行も書いて
     いない。⑤Python が書いた fixture を TS が開いて `parse → serialize` がバイト同一、writer の決定性は
     pytest で固定（同じグラフを 2 度書いてバイト同一）。
+
+## 追記 2 — 段 2 の裁定（2026-09-22）
+
+段 2（manifest `karume/5`・hub の取得面・PLE の asset 化・部品差し替え席・1 系列の再アップロード）の
+計画で決めた点。manifest の形は ADR [0109](0109-manifest-v5-container.md) が正本で、ここは本 ADR の
+決定に対する訂正と補足だけを持つ。
+
+1. **決定 20 の訂正 — コンテナの粒度は quant 席ではなく部品 × dtype**。`quants[].container` は
+   `weights.<部品>.<dtype>.container` に置き換わり、quant 席は `karume/4` と同じ写像のまま。根拠は
+   実ミラー 11 本の集計 — 席ごとに物理ファイルを作ると 65.9 GiB が 197 GiB（×2.99）になる
+   （quant 席は重みの単位ではない: gemma4 の 3 席は重みが同一で実行ノブだけ違う）。「1 コンテナに
+   複数グラフ」は形式の能力として残り、`karume/5` では使わない。model 単位の `assets`（tokenizer
+   等・越境あり）は manifest に残す。共有 `krg` の `graph: FileRef` 席は `karume/5` に置かない
+   （要る段 = 段 5 で足す）。
+2. **段 2 の取得単位は part**（決定 6 の記述どおり）。hub はコンテナ 1 本につき `BlockSource` を
+   返す面を 1 本持ち、cold は取得層の相 1（ファイル全量を流しながら sha256 検証 + 記録ハッシュ）で
+   part を温めてから区間読み口を開く。区間読みの費用型で分岐する — seek（ブラウザの Blob・ローカルの
+   区間読み）は block ごと、scan（Deno の既定）は part を 1 度に読んで切る。取得層
+   （`@hdae/fetch-cache`）は段 2 では変更しない。**HTTP Range は段 6 のまま**で、前倒しの条件は
+   「2f の RAM ピーク harness で cold のピークが『part 長 + 重ね合わせ』を超える」こと。
+3. **決定 8 の補足 — block の sha256 は未検証の取得元にだけ掛ける**。取得層がファイル全体を検証した
+   バイト列（HF 経由）は `BlockSource` が検証済みと名乗り、`readBlock` は digest を掛けない
+   （cold の 2 重 digest を避ける）。`fromContainer(bytes)` とローカルディレクトリ（ADR 0086 決定 2 —
+   sha256 を照合しない取得元）は block ごとに digest する。warm は従来どおり 0 回。block の sha256 は
+   段 6 の Range 取得で「届いた分だけ検証する」ための契約として残る（container-v1 §7 を訂正）。
+4. **追記 1 の 12 の訂正 — assets の受け口は段 2 に入れる**（段階分解表が正本）。小段の最後に置き、
+   PLE は専用 part の asset（役割 `ple-table` の block 列 + `ple-index`）、`extras` の `rope_base` は
+   asset（役割 `rope-base`・66 KB × 2 本の複製）へ移る。
+5. **段 2 で `karume/5` を書くのは移行 CLI のリポ丸ごとモード**（`karume migrate --manifest`）。
+   旧 manifest から shard 列を引くので、追記 1 の 14 / 15 で未対応だったディレクトリを跨ぐ shard 列と
+   128 鎖全本の逐語突合はここで閉じる。dist.py / recipe が `krm` を直接書くのは段 3
+   （container-v1 §12 の記述どおり）。`hf-upload.zsh` の `*.krm` 追随だけは再アップロードに要るので
+   段 2 へ前倒し。
+6. **共存期間**: 2b 以降 hub は `karume/5` だけを読む。ローカルミラー 11 本は 2d で全部移行して
+   差し替え、レーンは移行済みミラーで回す。HF の pin は段 2 で irodori-v4.1-small だけ更新し、残りは
+   段 3 まで旧版パッケージからだけ動く。
+7. **再アップロードする 1 系列 = irodori-v4.1-small**（5.8 GiB・部品 8 × dtype 4・quant 5 席・
+   extras / PLE / 越境なし — 部品と席の写像を一番広く踏み、移行 CLI の制約に当たらない）。
+8. **RAM ピーク harness（検収②）は Deno（`--expose-gc` + `Deno.memoryUsage().external`）で自動化**し、
+   Chrome は手動確認手順として渡す。取得（part 0 / const / block）を別々に数える。
+9. **小段の順**: 2a 仕様 → 2b hub → 2c runtime → 2d exporter（リポ丸ごとモード + 全ミラー移行 +
+   128 鎖突合）→ 2e models（8 系列の container 経路・部品差し替え席・PLE / extras の asset 化）→
+   2f 検収（harness・再アップロード・docs 同期）。

@@ -7,7 +7,7 @@ ADR [0108](decisions/0108-container-format.md) の具体化。`krm`（モデル�
 
 - **IR v2 のグラフ表現そのもの** → [ir-v2.md](ir-v2.md) が正本（v1 からの差分は §13・正準直列化の
   規則も ir-v2.md の「正準直列化」節）
-- **manifest `karume/5`** → ADR [0038](decisions/0038-manifest-v1.md) 系の改訂が正本
+- **manifest `karume/5`** → ADR [0109](decisions/0109-manifest-v5-container.md) が正本
 - **op の契約** → 実装の契約テーブル（`packages/runtime/src/ops/contracts.ts`）が正本
 - **実行既定**（`session` / `gpuFeatures` / `requiredLimits` / `label` / `description`）→
   manifest の所有（ADR 0038 §3）。descriptor は持たない
@@ -23,6 +23,11 @@ ADR [0108](decisions/0108-container-format.md) の具体化。`krm`（モデル�
   整列 4 に訂正（4 / 4 / 1 だと `numel % 4 == 0` という v1 に無い制約が入る）⑤descriptor の配列順を
   書き手の決定性のために固定（`const.blocks` は offset 昇順 MUST・`blocks` は (part, offset) 昇順・
   `constants` は (graph, initializer) の code point 順・数値と map の綴りは ir-v2.md の正準直列化と同じ）。
+- v1 訂正 2（2026-09-22・段 2 の裁定 — ADR 0109 / ADR 0108 追記 2）: ①§7 の digest 表を取得元の
+  検証済みの有無で分ける（HF 経由は取得層の 1 回のみ・block の digest は未検証の取得元だけ）②§8 に
+  manifest 側の形（`container.descriptor` = 2 文書の期待値・`container.parts` = part 0 を含む全 part・
+  長さ 0 の part は 0 バイトのファイル・共有 `krg` の席は置かない）③§11 に段 2 の取得単位（part・
+  seek / scan の分岐）④§12 に移行 CLI のリポ丸ごとモード（`karume/5` を書く）。
 
 ## 0. 記法と共通規則
 
@@ -342,7 +347,9 @@ block 上限を 32 MiB **以下**とする根拠は 3 点である（CPU 試作 
 - manifest と descriptor の**両方**が各 part の長さを宣言する。読み手は 1 バイトも取る前に
   宿主 RAM を見積れる（ADR 0089 の流儀）。
 - **exporter の既定を 256 から動かすのは段 3 の検収後**（段 1 / 2 は取得単位がまだ part なので、
-  1024 MiB を選ぶとピークが +768 MiB 乗る）。
+  1024 MiB を選ぶとピークが +768 MiB 乗る）。段 2 の取得面は ADR 0109 決定 7 — 区間読みが seek 型の
+  取得元（ブラウザの Blob・ローカルの区間読み）は block ごとに読み、scan 型（Deno の既定）は part を
+  1 度に読んで block に切る。
 - part 件数 ≤ 1024（現行 `MAX_SHARDS` を継承 — `packages/hub/src/manifest.ts:57` /
   `tools/exporter/src/karume/shards.py:108`）。
 
@@ -605,21 +612,26 @@ rowLength  = numel / shape[rowAxis]
 
 **descriptor は自分の正しさを証明できない。** したがって**外側の期待 hash + 長さで先に検証する**:
 
-1. 読み手は外側（manifest の FileRef、または `fromContainer` の呼び手が渡す pin）から
-   **descriptor の期待 sha256 と期待バイト長**を受け取る。
+1. 読み手は外側（manifest `karume/5` の `container.descriptor`、または `fromContainer` の呼び手が渡す
+   pin）から **2 文書それぞれの期待 sha256 と期待バイト長**を受け取る（ADR 0109 決定 3 — part 0
+   ファイルの sha256 とは別の事実）。
 2. part 0（または単一形の先頭）を取得し、ヘッダを読んで 2 文書の長さを得る。
 3. **2 文書のバイト列を期待値と突合してから JSON を parse する**。突合前に parse しない。
 4. parse 後に §2 / §5 の宣言検査を全部通す（**重みを 1 バイトも取る前**）。
 
-実行時の完全性は **descriptor と block の sha256** で張る:
+実行時の完全性は **descriptor と block の sha256** で張る。ただし **block の digest を掛けるのは未検証の
+取得元だけ**である（ADR 0108 追記 2 の 3 / ADR 0109 決定 7）:
 
-| 経路                     | digest の回数                                                          |
-| ------------------------ | ---------------------------------------------------------------------- |
-| cold（初回取得）         | **block ごとに一括 digest**（32 MiB 以下なので §4.1 の速い側に収まる） |
-| warm（キャッシュヒット） | **0 回** — 記録ハッシュの文字列比較だけ                                |
+| 経路                                                           | digest の回数                                                                          |
+| -------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| cold（HF 経由の初回取得）                                      | 取得層が part 全量を流しながら **1 回**（記録ハッシュを焼く）。block の digest は 0 回 |
+| warm（キャッシュヒット）                                       | **0 回** — 記録ハッシュの文字列比較だけ                                                |
+| 未検証の取得元（`fromContainer(bytes)`・ローカルディレクトリ） | **block ごとに一括 digest**（32 MiB 以下なので §4.1 の速い側に収まる）                 |
 
+`BlockSource` が「検証済み」を名乗り、`readBlock` は名乗らない取得元にだけ digest を掛ける。
 warm で digest を走らせないのは現行の規律の継承である（`packages/hub/src/fetch.ts:66-73` —
-キャッシュヒットで GB 級の digest を起こさない）。
+キャッシュヒットで GB 級の digest を起こさない）。block の sha256 は段 6 の Range 取得で「届いた分だけ
+検証する」ための契約として残る。
 
 **ファイル全体の sha256**（`parts[].sha256`）は**公開・再梱包の突合用**として分離する。
 実行時には使わない。
@@ -648,8 +660,10 @@ warm で digest を走らせないのは現行の規律の継承である（`pac
 | 取得の FileRef   | 1 本                                           | descriptor 1 本 + parts N 本（manifest が持つ） |
 
 - **`parts` は添字 1 以上だけ**を載せる（part 0 の sha256 を自分に書くと自己参照 — §2.2）。
-  part 0 の完全性は**外側の期待 hash + 長さ**が張る（§7）。manifest `karume/5` の FileRef は
-  **part 0 を含む全 part** の `size` / `sha256` を持つ。
+  part 0 の完全性は**外側の期待 hash + 長さ**が張る（§7）。manifest `karume/5` の `container.parts` は
+  **part 0 を含む全 part** の FileRef（`size` / `sha256`）を添字順に持つ（ADR 0109 決定 3）。
+- 分割形では長さ 0 の part（const が空の part 1）も **0 バイトのファイルとして書く**。manifest は
+  その FileRef を `size: 0` で持ち、hub は取得しない（ADR 0109 決定 3）。
 - **長さ 0 の part の前に詰め物を挿まない** MUST。part 絶対 offset は「宣言された part 長 +
   64 B 整列規則」から導くので、長さ 0 の part に詰め物を与えると const が空の `krm` からの
   抽出結果と直接書いた `krg` がずれる（§9）。
@@ -662,7 +676,8 @@ warm で digest を走らせないのは現行の規律の継承である（`pac
 - 単一形 `krm` は `krg` を**内包する**（§9 でそのまま抜ける）。
 - 分割形の `krm` は、グラフを内包してもよいし、descriptor に **`graph` の内容参照**
   （`{ sha256, size }`）だけを持って外部の共有 `krg` を指してもよい。参照の取得先は
-  **manifest が FileRef で与える**（descriptor は repo の概念を持たない）。
+  **manifest が FileRef で与える**（descriptor は repo の概念を持たない）。`karume/5` にはこの席を
+  置かない — 要る段（段 5）で足す（ADR 0109 決定 5）。
 
 ## 9. `krg` のバイトコピー抽出
 
@@ -729,6 +744,9 @@ fail loudly** で止まる。
 - **展開（decode）は別の処理単位にする**。1 bit → f32 は 32 倍・i2 → f32 は 16 倍に膨らむので、
   取得の重ね合わせと展開の重ね合わせを同じ予算で数えない。
 - 準備時に取るのは **part 0 だけ**。const（part 1）は要るときに取る。
+- **段 2 の取得単位は part**（ADR 0109 決定 7）: cold は取得層が part 全量を流して検証しキャッシュへ
+  落とし（ヒープに part は載らない）、区間読みは seek 型で block ごと・scan 型で part 1 度。ホスト RAM の
+  ピークは seek 型で block の重ね合わせ、scan 型で part 長 + 重ね合わせ。HTTP Range は段 6。
 - 見積りは**宣言だけで閉じる**: `parts[].length` と `blocks[].length` から、1 バイトも取る前に
   「最大同時ホスト RAM」を計算できる（ADR 0089 の流儀）。
 
@@ -760,16 +778,19 @@ fail loudly** で止まる。
 - 実装は Python（exporter 側 — `repack.py` の「生バイトと IR を変えず詰め方だけ動かす」層を
   流用する）。
 - **段 1 の CLI 面**（`karume migrate <代表 path | 旧単一形> --out <dir> --license <識別子>
-  [--graph] [--single]`）: コンポーネント（グラフ 1 本）単位で、manifest は読まないし書かない
-  （`karume/5` の生成は段 3 の dist 側）。グラフ名の既定は親ディレクトリ名（= `karume.json` の
-  weights のキー）。`--license` は必須（既定値で出所を偽らない）。`provenance.writer` の既定は生成器
-  タグ（`karume/<版>`）なので、不変条件 4「決定的」は**同じ版のもとで**の主張である。
+  [--graph] [--single]`）: コンポーネント（グラフ 1 本）単位で、manifest は読まないし書かない。
+  グラフ名の既定は親ディレクトリ名（= `karume.json` の weights のキー）。`--license` は必須（既定値で
+  出所を偽らない）。`provenance.writer` の既定は生成器タグ（`karume/<版>`）なので、不変条件 4
+  「決定的」は**同じ版のもとで**の主張である。
+- **段 2 のリポ丸ごとモード**（`karume migrate --manifest <karume.json> --out <dir> --license …`）: 旧
+  `karume/4` を読み、全 (モデル, 部品, dtype) を `krm` へ変換し、`assets` を写して `karume/5` の
+  `karume.json` を書く（ADR 0109 決定 8）。dist.py / recipe が `krm` を直接書くのは段 3。
 - 自己検査（不変条件 5）は **payload 部**で突き合わせる（block 全体の sha256 は詰め物を含むので
   新旧で一致しない）。出力は `.partial` へ書き、検査を通ってから据え替える（落ちた回は何も残さない）。
 - 旧 scale の**形**（keepdim / group 形）が `rowAxis` / `groupSize` から決まる形と一致することを焼く前に
   見る（正方の重みでは per-column の `[1,N]` と per-channel の `[N,1]` がバイト数で区別できない）。
 - 未対応: ディレクトリを跨ぐ shard 列（sbv2 の `shared/front` / `shared/voice` は shard 2 が話者
-  ディレクトリに居る）は代表 path からは組み立てられない — 旧 manifest から列を引く経路（段 3）で扱う。
+  ディレクトリに居る）は代表 path からは組み立てられない — リポ丸ごとモードが旧 manifest から列を引く。
 
 不変条件:
 
