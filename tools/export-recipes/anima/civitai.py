@@ -181,8 +181,11 @@ def _assert_basename(name: str) -> str:
     MUST: 区切りを含む名前・`..`・絶対パスを受けない — `Path` の結合は `..` で親へ上がり、
     絶対パスでは前段を丸ごと捨てるので、上流メタの異常がそのまま `civitai-<versionId>/` の
     外への書き込みになる（来歴記録だけが取り込み先に残り、重みが外へ出る）。
+
+    `:` も落とす — Windows では `D:x.safetensors` がドライブ相対名で、区切りを 1 つも含まない
+    まま結合の前段を捨てる（`PureWindowsPath("C:/intake") / "D:x"` → `D:x`）。
     """
-    if not name or name in {".", ".."} or "/" in name or "\\" in name:
+    if not name or name in {".", ".."} or "/" in name or "\\" in name or ":" in name:
         raise SystemExit(
             f"上流のファイル名が basename でない: {name!r}"
             "（取り込み先の外を指しうる — 上流のメタを確かめる）"
@@ -405,7 +408,10 @@ def fetch_checkpoint(
     if "SHA256" not in hashes:
         raise SystemExit(f"API が sha256 を持たない: {file.get('name')}（突合できない）")
 
-    destination = out / f"civitai-{version['id']}"
+    # 取り込み先の 1 段目も上流の値 — 整数化しないと、逸脱した id がそのまま `out` の外を指す
+    # path 要素になる（`mkdir(parents=True)` は親も作るので重みごと外へ出る）。上の modelId と
+    # 同じく非整数は fail loudly。
+    destination = out / f"civitai-{int(version['id'])}"
     destination.mkdir(parents=True, exist_ok=True)
     checkpoint = destination / _assert_basename(file["name"])
     download(file["downloadUrl"], checkpoint, hashes["SHA256"])

@@ -296,6 +296,16 @@ class TestAssertBasename:
         with pytest.raises(SystemExit, match="basename でない"):
             civitai._assert_basename(name)
 
+    @pytest.mark.parametrize("name", ["D:x.safetensors", "C:weights.safetensors"])
+    def test_it_refuses_a_windows_drive_relative_name(self, name: str) -> None:
+        """`D:x` は区切りを 1 つも含まないのに Windows ではドライブ相対名。
+
+        `PureWindowsPath("C:/intake/civitai-123") / "D:x"` は `D:x` になり、結合の前段が
+        丸ごと捨てられる（別ドライブの作業ディレクトリ直下へ 4GB が落ちる）。
+        """
+        with pytest.raises(SystemExit, match="basename でない"):
+            civitai._assert_basename(name)
+
     def test_it_passes_an_ordinary_upstream_name_through(self) -> None:
         assert civitai._assert_basename("waiANIMA_v10Base10.safetensors") == (
             "waiANIMA_v10Base10.safetensors"
@@ -519,6 +529,30 @@ class TestFetchCheckpoint:
             civitai.fetch_checkpoint(2544636, 2983680, out=tmp_path)
 
         assert sorted(path.name for path in tmp_path.rglob("*")) == ["civitai-2983680"]
+
+    def test_it_refuses_a_version_id_that_is_not_an_integer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, token: None
+    ) -> None:
+        """取り込み先の 1 段目も上流の値 — 逸脱した id では `out` の外に何も作らない。
+
+        `mkdir(parents=True)` は途中の `..` ごと親を作るので、素通しだと重みと `civitai.json`
+        の両方が `out` の外（ここでは `tmp_path` 直下）へ落ちる。
+        """
+        escaping = json.loads(json.dumps(VERSION_RESPONSE))
+        escaping["id"] = "/../../escape"
+        fake = _FakeNetwork(
+            {
+                f"{civitai.API_ROOT}/model-versions/2983680": json.dumps(escaping).encode(),
+                f"{civitai.API_ROOT}/models/2544636": json.dumps(MODEL_RESPONSE).encode(),
+            }
+        )
+        monkeypatch.setattr(urllib.request, "urlopen", fake)
+        out = tmp_path / "intake"
+
+        with pytest.raises(ValueError, match="invalid literal for int"):
+            civitai.fetch_checkpoint(2544636, 2983680, out=out)
+
+        assert list(tmp_path.iterdir()) == []
 
     def test_it_overrides_the_derived_name_when_asked(
         self, tmp_path: Path, network: _FakeNetwork, token: None
