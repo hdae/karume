@@ -17,8 +17,8 @@
   2 段（独自基準は容易に撤廃可・従来基準に引っかかったことが分かる形。緩めるのは op 単位・仕様の
   範囲内・実害なしに限る — `e2e_golden_test.ts` の `OUTPUT_TOLERANCE`）④ 変更に関連するテストの
   個別実行を主にし、フル verify は横断変更とリリース前だけ（現状 30 分超）⑤ 速度の物差しは
-  ヘッドレス Chrome 計測を主にする。B570 で判明した記録は known-issues「Intel Arc B570」節・
-  limitations「BiRefNet 系」「sha256 参照門」節。スコープと段取りは着手時に設計する。
+  ヘッドレス Chrome 計測（`tools/llm-speed/browser` の計測ページ — 成立済み）。B570 で判明した
+  記録は known-issues「Intel Arc B570」節・limitations「BiRefNet 系」「sha256 参照門」節。
   **段 0 済（2026-09-20）**: ④ の verify 分割（`test:core` / `test:models:<系列>` + 被覆の門
   `verify_lanes_test.ts` + 系列名に合わせたテスト改名）— 決定は [ADR 0005 追記](decisions/0005-verification.md)。
   **段 1 済（2026-09-20）**: ① の sha256 側（参照値を環境キーごとの行へ + `KARUME_REFERENCE` の 3 モード +
@@ -61,9 +61,9 @@
   K-36は[M2追試](research/2026-09-13-rms-subgroup-reduction.md)まで完了。融合のquant選択は[ADR 0104](decisions/0104-gemma-fast-quant.md)で統合。ホストの投入方針とprefillバケットのモデル既定への適用判断は残す。
   K-37は[M2追試](research/2026-09-13-gemv-subgroup.md)まで完了。約0.5%の差で既定採用を見送る。
   K-38の並列GEMV subgroup32は任意指定を維持。[M2の80生成](research/2026-09-13-m2-gemv-subgroup-adoption.md)は出力一致、速度改善なしで既定採用を見送る。（当時の画面は既存parallelの2設定20生成。現在の比較は下記attention）。[I4 N12288/K1536のL8比較](research/2026-09-14-i4-lane-comparison.md)は通常E2Bの80生成で約10.7%遅く不採用。M2のGPU費用帰属は残る。Denoは必要な機能が未対応。
-  利用者の2026-09-14依頼により、[マージ前レビュー資料と全差分索引](research/2026-09-14-merge-review.md)を準備し、ACTIVE_DESIGNを現況の索引へ整理した。[独立レビューとM2再計測](research/2026-09-14-merge-review-results.md)も完了し、今回の範囲で修正が必要な新規指摘はなし。マージ時は対象headと検証headを再照合する。マージ・push・公開は未実施。未完の最適化を資料準備と同時に完了扱いにしない。
-  [添付参照資料の現行再検証](research/2026-09-14-reference-rope-optimization.md)からK-41のpermuteコピー削減を実装しM2検収済み。[K-42のattention融合](research/2026-09-15-attention-fusion.md)もM2の80生成で出力一致を確認したが利得は無く、任意指定に残す。[K-43の保留候補併用](research/2026-09-15-held-combinations.md)から単独の[linear→SRQ融合](research/2026-09-15-linear-static-quantize-fusion.md)をK-44として統合した。常駐scaleの借用・丸め障壁・元のSRQとの数値比較を検収。[M2のQAT40生成](research/2026-09-15-m2-linear-srq-adoption.md)も検収済み。[高速quant宣言と明示上書き](research/2026-09-15-gemma-fast-quant.md)を統合。次は投入政策・prefillバケットの適用判断と、前回レビュー後の追加差分確認。同じM2追試は再依頼しない。広い併用は未統合で、gate/up入力共有の費用調査も残る。
-  広いchunk/複数容量への一括適用は見送り。QATのM2/RTX生成差とChromeのGPU Instance消失は原因の切り分けを残す。
+  利用者の2026-09-14依頼により、[マージ前レビュー資料と全差分索引](research/2026-09-14-merge-review.md)を準備し、ACTIVE_DESIGNを現況の索引へ整理した。[独立レビューとM2再計測](research/2026-09-14-merge-review-results.md)も完了し、今回の範囲で修正が必要な新規指摘はなし。マージとpushは実施済みで、公開（JSR / HF）は未実施。未完の最適化を資料準備と同時に完了扱いにしない。
+  [添付参照資料の現行再検証](research/2026-09-14-reference-rope-optimization.md)からK-41のpermuteコピー削減を実装しM2検収済み。[K-42のattention融合](research/2026-09-15-attention-fusion.md)もM2の80生成で出力一致を確認したが利得は無く、任意指定に残す。[K-43の保留候補併用](research/2026-09-15-held-combinations.md)から単独の[linear→SRQ融合](research/2026-09-15-linear-static-quantize-fusion.md)をK-44として統合した。常駐scaleの借用・丸め障壁・元のSRQとの数値比較を検収。[M2のQAT40生成](research/2026-09-15-m2-linear-srq-adoption.md)も検収済み。[高速quant宣言と明示上書き](research/2026-09-15-gemma-fast-quant.md)を統合。次は投入政策・prefillバケットの適用判断。同じM2追試は再依頼しない。広い併用は未統合で、gate/up入力共有の費用調査も残る。
+  広いchunk/複数容量への一括適用は見送り。ChromeのGPU Instance消失は原因の切り分けを残す。
   残件は配布 recipe / source 表、長文と広い品質評価。実験資産を公開済みモデルとして扱わない。
   手元の試走は [MiniCPM5 CLI](../examples/minicpm5/README.md) / [Qwen3 CLI](../examples/qwen3/README.md) を使える。
   容量 128 の対話・履歴整理・reset・中断と、公式 CPU 参照への多ターン一致を検収済み。
@@ -81,21 +81,21 @@
   公開 INT2 IR・固定 SRQ・固定 writer・PLE の INT2 / INT4 読取は検収済み。
   公式 recipe / 配布形の全量変換・固定 bytes 一致・Deno/Chrome の短文比較は確認済み。CPU/GPU 差は SRQ 境界をまたぐ縮約差に帰属。
   family / 対話 CLI は E2B/E4B・Deno/Chrome・複数ターン・中断・解放と全体検証を完了。
-  SRQ融合・境界探索短縮・INT2変種は当時の逐次実装で検証し、全体の安定利得が不足するため見送った（K-29）。その後、並列GEMVの下で単独のlinear→SRQ融合が改善したためK-44として統合済み（上の2026-09-15の行が正本）。残るのは一般samplingの転送削減と、上の「QAT レビュー対応の波」。Wan は小さな DiT から段階検証する。
+  SRQ融合・境界探索短縮・INT2変種は当時の逐次実装で検証し、全体の安定利得が不足するため見送った（K-29）。その後、並列GEMVの下で単独のlinear→SRQ融合が改善したためK-44として統合済み（上の2026-09-15の行が正本）。残るのは一般samplingの転送削減。
   実測と未完の正本は [追加調査](research/2026-09-10-codex-mtp-optimization.md#追加-llm-の実行と量子化別比較)。
 
 - **9/11 レビューの継続検証**（調査 2026-09-10・[対応記録](research/2026-09-10-codex-mtp-optimization.md)）:
   `artifacts.staged_publication` の同一 final への複数 writer を許容するか決め、必要ならロック・中断復旧を設計する。
   GPU 端チャネル保護の M2 / ブラウザ追試とモデル全体の性能計測は残る。
-  Anima 常駐化・MTP の性能帰属は下記の既存項目へ統合し、レビュー提案を未検証のまま新規カーネルへしない。
+  レビュー提案を未検証のまま新規カーネルへしない。
 
 0.12.0 は**公開完了**（2026-09-06 — lockstep bump `a24d656` → GitHub Release v0.12.0 → JSR 0.12.0 →
 `deno task smoke:published` 緑・`KARUME_SOURCES` 10 本の疎通を確認。中身は下の消化済み節）。
-2026-09-04 裁定の作業波 a〜d のうち残るのは
-**c だけ**（a / b は消化・d はクローズ）。**OP / Fusion の波（2026-09-06）**: 在庫の融合候補 3 件（P-5 / K-15 / K-7）は実測で閉じた（採否と数値は
+**OP / Fusion の波（2026-09-06）**: 在庫の融合候補 3 件（P-5 / K-15 / K-7）は実測で閉じた（採否と数値は
 [perf-ledger](perf-ledger.md)・記録は [research 2026-09-06](research/2026-09-06-fusion-spikes-k15-k7.md)）。続きは
 大所 = **gemma4 decode の GEMV 並列度**（2026-09-06 ユーザー裁定の a 案）: K-16 / K-14 / K-13 は済（perf-ledger ✅・
-0.12.0 で公開）。次の候補は着手時に起票（ACTIVE_DESIGN の候補欄）。波と独立に消化してよい残件はその下。
+0.12.0 で公開）。その続きは消化済み節の「decode 速度調査の波」と later の「decode 速度の残り」。
+波と独立に消化してよい残件はその下。
 
 **残件**:
 
@@ -114,14 +114,15 @@
   1800 / 1800）。**段 3（投機ループ）は済**（runtime `4c4e2a5`・exporter `b63421d`〈drafter 呼び出し規約の訂正 + golden〉・
   generation core `c31af36`・models / tools `757d734` — 投機ループは `sequence.ts` の内側に DI・verify は deferred で
   「配送した frontier まで」commit・onRun hook・`GenerationStop.speculation`・温度に依らず張る〈token 列は非投機と厳密一致〉。門 =
-  sequential 席で投機 / 非投機の 200 token × 3 ケース厳密一致・受理 1.51 / 2.01 / 2.14 token/cycle）。**段 4-A ✅ 2026-09-09**（`tools/mtp-bench` `5b73fc4`・demo `--speculative` `118689a`・[research 2026-09-09](research/2026-09-09-mtp-stage4.md): 抽出 **1.81×** / 要約 1.41× / 対話 1.18× / 自由文 0.96×〈decode 相・k=3〉・採算 A / A\* で A\* = 1.72〜1.88・温度 1.0 でも受理率は greedy と同じ・token 列一致・長文脈の verify 超過 +5.7 ms は attention ①・draft 壁 15 ms の ≈9.5 ms は Deno の round trip・抽出は k=3 飽和。**M2**〈ユーザー実走〉: 抽出 1.27× / 要約 1.03× / 対話 0.93× / 自由文 0.76×・A\* = 2.17〜2.6・verify が decode の 1.75〜2.2 倍〈短文脈で既に +39 ms = M=4 linear 側〉・prefill 4.8K 54 s〈別項〉）。**4-B ④ ✅ 2026-09-09**（`f845f55` ゲート v2〈16 cycle ブロック × 2 連続で抜ける・8 cycle バーストで戻る〉・`63c6db3` 受理列挙の停止・`cca5a36`/`7f02818` mtp-bench 3 値・ADR 0096 決定 8・[research §6.1](research/2026-09-09-mtp-stage4.md): RTX で auto ≈ always〈勝つ 3 条件 +1〜4%・自由文 0.965× vs always 0.948×〉・M2 の検収はユーザー実走待ち）。**残り = 4-B（承認 2026-09-09・反証後の順序: ④ 自己採算ゲート〈壁と受理の EWMA・非対称ヒステリシス 0.97 / 1.01・plain 側は幾何バックオフ 8→256・W1 は cycle 2 で先に採る・既定 on = 既定席では同一 seed でも稀に出力が変わりうると limitations に明記・`speculative: boolean | "always"`・前段として受理列挙を停止 token で止める仕様変更を別コミット〉→ ⑧ M2 の小 M linear〈**測定済み・否定** 2026-09-09: 静的ノブ `linearGemvRowsThreadTarget`（`87e702b`）で r1 / r2 / r4 を M2 で比べると既定 r1 が最良（verify 90.7 → 103.6 ms）・「重み 4 回読み」仮説は外れ・backend 別既定は不要・K-22 は機序の宿題として残す〉→ ⑤ は縮小〈③′ は既に M=4 で効いており M=1 限定は ①QK だけ・①′ の WGSL は既に M 一般なので適用条件 1 行 + テスト 3 本 + kernel doc の MUST・効き代は M2 で最大 −4 ms/cycle・非負なら残す〉→ ③ argmax → ⑥ k=7 + 3 値ゲート・⑦ 不採用）**。**⑤ ✅ / ③ ✅ 2026-09-09**（`06f82df` ①′ を M ≤ 8 へ〈RTX 中立・既定席で verify 行 0 が u32 一致〉/ `e370562` 2 相 argmax〈drafter の argmax 2.03 → 0.08 ms/run・ビット同一〉— [research §6.2 / §6.3](research/2026-09-09-mtp-stage4.md)）。**M2 検収 ✅ 2026-09-09**（抽出 auto 1.379× / 対話 0.966× / 自由文 0.874× — ゲートは負けを半分に・0.99× には届かず → 残件 = ゲート v3〈強い信号の早抜け・バースト初期間隔 16・bench の sequence 使い回し〉）。**残り = ⑥（裁定待ち: parked か 2 drafter + 3 値ゲート）・ゲート v3・⑩・4-C docs**。**⑨ ✅ 2026-09-09**（`0c8bacd` per-cycle トレース = `onRun` の壁・確定数・ゲート状態 + mtp-bench の局面別バケット・[research §6.4](research/2026-09-09-mtp-stage4.md): RTX では勝つ側は抜けず W1 プローブ 1〜3% のみ・cold は 1%・**ゲートが落とす plain step は長文脈で真の decode より +17〜30% 高い〈verify 形・物理行は 1 で原因は未帰属〉→ 新規 ⑩ = 原因の帰属〈gpu-timing をモード別に割る〉と対策**・M2 の trace〈[research §6.4.1](research/2026-09-09-mtp-stage4.md)〉: 自由文の損の 62% は探索バースト・36% は抜けるまで・対話は 6% 負けを 63 cycle 続ける費用・v3 = 早抜け + 間隔 16 で ≈ 0.94×・warm start で ≈ 0.97×）。**ゲート v3 ✅ 2026-09-10**（`29e74b0` / `15b8111`・[research §6.5](research/2026-09-09-mtp-stage4.md)・ADR 0096 追記: RTX cold は勝つ側で誤退出 0・W1 半減・M2 の v3（[research §6.5.1](research/2026-09-09-mtp-stage4.md)）: cold 自由文 0.934× / 対話 0.959× / 抽出 1.361×・**warm 自由文 0.978× / 対話 0.972×**（残りは 1 ターン 1 回のバースト → exploreMax 512 級で 0.99× 圏）。warm の口は `746ad77` でターンごとに違う発話に直し写しは消えた（research §6.5 表 11′）。**新知見: warm の対話（勝つ課題）で 3 / 7 ターンが抜けて auto / always 0.96 → A/B 済み（`063c874`・research §6.5 表 11″）: 帰属は v3 の 1 ブロック早抜け → **v3.1 ✅ 2026-09-10**（`a28e56f`・`earlyLeave` 既定 off / `burstAbort` 0.15・RTX warm 対話 auto = always・[research §6.5.2](research/2026-09-09-mtp-stage4.md)）。exploreMax 256 → 512（`e365d9a`・M2 warm の再計測で検収）。M2 warm v3.1 = 自由文 0.990× / 対話 0.981×。⑩ は host / readback 側と判明・帰属は run 内の相の壁が要る）。旧記述（⑤ の −6 ms / u32 同一は反証で撤回）= ③ argmax の 2 相化（drafter −1.5 ms/cycle・ビット同一が構造保証）④ 投機の on / off ゲート（k′ ∈ {0, k} を受理の移動平均で・`accepted` の切り詰め前加算の誤りも修正）⑤ ①′ / ③′ の行タイル化（verify M ≤ 8 を decode と同じレーン割り → attention −6 ms + 既定席で u32 同一・着手条件 = 4-A で attention ≥ 5 ms/cycle）⑥ k=7 drafter の再 export + 動的 k（chat 形式の E[a] で予測倍率が k=3 の 1.2× 以上のとき）⑦ GPU argmax / topk 出口（readback + ホスト受理が cycle の 10% 以上のとき）→ 4-C docs（採算表・ADR 0096 帰結〈fence 1 本化は不成立〉の訂正）。裁定: ブラウザ実測はリリース後・M2 のミラーはユーザーが scp。事前プローブ（RTX・P≈4.8K・k=3・greedy）: decode 29.0 ms/run〈GPU 25.2〉・verify 37.0〈GPU 35.4 = decode + attention ①/③′ +6.0 + linear +2.2 + lm_head +0.8〉・draft 15.7〈GPU 6.5・argmax 1.8〉→ cycle 52.7 ms / 2.15 token = 24.5 ms/token = **1.18×**（decode 相・ブラウザ相当 ≈1.3×）。旧記述: 実測 Deno / Metal・温度 1.0 での受理率・投機を張る文脈長の閾値・動的 k・GPU argmax・
+  sequential 席で投機 / 非投機の 200 token × 3 ケース厳密一致・受理 1.51 / 2.01 / 2.14 token/cycle）。**段 4-A ✅ 2026-09-09**（`tools/mtp-bench` `5b73fc4`・demo `--speculative` `118689a`・[research 2026-09-09](research/2026-09-09-mtp-stage4.md): 抽出 **1.81×** / 要約 1.41× / 対話 1.18× / 自由文 0.96×〈decode 相・k=3〉・採算 A / A\* で A\* = 1.72〜1.88・温度 1.0 でも受理率は greedy と同じ・token 列一致・長文脈の verify 超過 +5.7 ms は attention ①・draft 壁 15 ms の ≈9.5 ms は Deno の round trip・抽出は k=3 飽和。**M2**〈ユーザー実走〉: 抽出 1.27× / 要約 1.03× / 対話 0.93× / 自由文 0.76×・A\* = 2.17〜2.6・verify が decode の 1.75〜2.2 倍〈短文脈で既に +39 ms = M=4 linear 側〉・prefill 4.8K 54 s〈別項〉）。**4-B ④ ✅ 2026-09-09**（`f845f55` ゲート v2〈16 cycle ブロック × 2 連続で抜ける・8 cycle バーストで戻る〉・`63c6db3` 受理列挙の停止・`cca5a36`/`7f02818` mtp-bench 3 値・ADR 0096 決定 8・[research §6.1](research/2026-09-09-mtp-stage4.md): RTX で auto ≈ always〈勝つ 3 条件 +1〜4%・自由文 0.965× vs always 0.948×〉・M2 の検収はユーザー実走待ち）。**残り = 4-B（承認 2026-09-09・反証後の順序: ④ 自己採算ゲート〈壁と受理の EWMA・非対称ヒステリシス 0.97 / 1.01・plain 側は幾何バックオフ 8→256・W1 は cycle 2 で先に採る・既定 on = 既定席では同一 seed でも稀に出力が変わりうると limitations に明記・`speculative: boolean | "always"`・前段として受理列挙を停止 token で止める仕様変更を別コミット〉→ ⑧ M2 の小 M linear〈**測定済み・否定** 2026-09-09: 静的ノブ `linearGemvRowsThreadTarget`（`87e702b`）で r1 / r2 / r4 を M2 で比べると既定 r1 が最良（verify 90.7 → 103.6 ms）・「重み 4 回読み」仮説は外れ・backend 別既定は不要・K-22 は機序の宿題として残す〉→ ⑤ は縮小〈③′ は既に M=4 で効いており M=1 限定は ①QK だけ・①′ の WGSL は既に M 一般なので適用条件 1 行 + テスト 3 本 + kernel doc の MUST・効き代は M2 で最大 −4 ms/cycle・非負なら残す〉→ ③ argmax → ⑥ k=7 + 3 値ゲート・⑦ 不採用）**。**⑤ ✅ / ③ ✅ 2026-09-09**（`06f82df` ①′ を M ≤ 8 へ〈RTX 中立・既定席で verify 行 0 が u32 一致〉/ `e370562` 2 相 argmax〈drafter の argmax 2.03 → 0.08 ms/run・ビット同一〉— [research §6.2 / §6.3](research/2026-09-09-mtp-stage4.md)）。**M2 検収 ✅ 2026-09-09**（抽出 auto 1.379× / 対話 0.966× / 自由文 0.874× — ゲートは負けを半分に・0.99× には届かず → 残件 = ゲート v3〈強い信号の早抜け・バースト初期間隔 16・bench の sequence 使い回し〉）。**残り = ⑥（裁定待ち: parked か 2 drafter + 3 値ゲート）・ゲート v3・⑩・4-C docs**。**⑨ ✅ 2026-09-09**（`0c8bacd` per-cycle トレース = `onRun` の壁・確定数・ゲート状態 + mtp-bench の局面別バケット・[research §6.4](research/2026-09-09-mtp-stage4.md): RTX では勝つ側は抜けず W1 プローブ 1〜3% のみ・cold は 1%・**ゲートが落とす plain step は長文脈で真の decode より +17〜30% 高い〈verify 形・物理行は 1 で原因は未帰属〉→ 新規 ⑩ = 原因の帰属〈gpu-timing をモード別に割る〉と対策**・M2 の trace〈[research §6.4.1](research/2026-09-09-mtp-stage4.md)〉: 自由文の損の 62% は探索バースト・36% は抜けるまで・対話は 6% 負けを 63 cycle 続ける費用・v3 = 早抜け + 間隔 16 で ≈ 0.94×・warm start で ≈ 0.97×）。**ゲート v3 ✅ 2026-09-10**（`29e74b0` / `15b8111`・[research §6.5](research/2026-09-09-mtp-stage4.md)・ADR 0096 追記: RTX cold は勝つ側で誤退出 0・W1 半減・M2 の v3（[research §6.5.1](research/2026-09-09-mtp-stage4.md)）: cold 自由文 0.934× / 対話 0.959× / 抽出 1.361×・**warm 自由文 0.978× / 対話 0.972×**（残りは 1 ターン 1 回のバースト → exploreMax 512 級で 0.99× 圏）。warm の口は `746ad77` でターンごとに違う発話に直し写しは消えた（research §6.5 表 11′）。**新知見: warm の対話（勝つ課題）で 3 / 7 ターンが抜けて auto / always 0.96 → A/B 済み（`063c874`・research §6.5 表 11″）: 帰属は v3 の 1 ブロック早抜け → **v3.1 ✅ 2026-09-10**（`a28e56f`・`earlyLeave` 既定 off / `burstAbort` 0.15・RTX warm 対話 auto = always・[research §6.5.2](research/2026-09-09-mtp-stage4.md)）。exploreMax 256 → 512（`e365d9a`）。M2 warm v3.1（exploreMax 256 ビルド）= 自由文 0.990× / 対話 0.981× で、512 の検収は M2 warm の再計測待ち。⑩ は host / readback 側と判明・帰属は run 内の相の壁が要る）。旧記述（⑤ の −6 ms / u32 同一は反証で撤回）= ③ argmax の 2 相化（drafter −1.5 ms/cycle・ビット同一が構造保証）④ 投機の on / off ゲート（k′ ∈ {0, k} を受理の移動平均で・`accepted` の切り詰め前加算の誤りも修正）⑤ ①′ / ③′ の行タイル化（verify M ≤ 8 を decode と同じレーン割り → attention −6 ms + 既定席で u32 同一・着手条件 = 4-A で attention ≥ 5 ms/cycle）⑥ k=7 drafter の再 export + 動的 k（chat 形式の E[a] で予測倍率が k=3 の 1.2× 以上のとき）⑦ GPU argmax / topk 出口（readback + ホスト受理が cycle の 10% 以上のとき）→ 4-C docs（ADR 0096 の段表 段 4 行を現状へ消し込む — 採算表と「fence 1 本化は不成立」は ADR 追記と research §5 に記録済み）。裁定: ブラウザ実測はリリース後・M2 のミラーはユーザーが scp。事前プローブ（RTX・P≈4.8K・k=3・greedy）: decode 29.0 ms/run〈GPU 25.2〉・verify 37.0〈GPU 35.4 = decode + attention ①/③′ +6.0 + linear +2.2 + lm_head +0.8〉・draft 15.7〈GPU 6.5・argmax 1.8〉→ cycle 52.7 ms / 2.15 token = 24.5 ms/token = **1.18×**（decode 相・ブラウザ相当 ≈1.3×）。旧記述: 実測 Deno / Metal・温度 1.0 での受理率・投機を張る文脈長の閾値・動的 k・GPU argmax・
   fence 削減・①′ の位置不変化）。
 - **`planBackingBudgetBytes` を共通の options へ**（起票 2026-09-07 — ADR 0095 帰結）: gemma4 以外は manifest の `session` から
   Session options を組むため予算を変える口が無い（既定 256 MiB が効く）。`onRetry` を `FromPretrainedHubOptions` へ 1 本化した形に
-  倣って載せる。併せて executor / estimate に二重にある予算の値域検査を 1 関数へ寄せる。
+  倣って載せる。併せて estimate / session-build に二重にある予算の値域検査を 1 関数へ寄せる。
 - **GEMV 行ブロックの残件（起票 2026-09-07・K-21 の帰結）**: ①並列度の目標 16384 は RTX 3080 Ti の飽和点（limitations）—
-  M2 / 内蔵 GPU での再掃引は定数の差し替えで済む形 ②ブラウザ（Chrome / Tint）のシェーダ解析費は未測（Deno / naga で初回ターン
-  +85 ms）③Metal の u32 門は行ブロック 11 形も未実測（known-issues）。
+  M2 の再掃引は済（既定 16384 が最良）で、残るのは内蔵 GPU の掃引。差し替え口は静的な Session オプション
+  `linearGemvRowsThreadTarget` ②ブラウザ（Chrome / Tint）のシェーダ解析費は未測（Deno / naga で初回ターン
+  +85 ms）③Metal の u32 門は行ブロック 13 形も未実測（known-issues）。
 - **Anima: DiT stage 内だけの反復常駐**（起票 2026-09-07 — Codex 性能調査 04 §Anima）: Session を stage ごとに作って返す
   現設計（VRAM の不変条件）を保ったまま、DiT stage の中で初期 latent の patchify を 1 度にし、RoPE / cond・uncond embedding /
   timestep 材料を反復間で再利用し、DiT 出力 → CFG → Euler / DPM++2M 更新を同じ token layout で回し、最後だけ unpatchify する。
@@ -129,8 +130,9 @@
   **固定入力だけの常駐化は測定済み・利得なし**（2026-09-10、1024px / CFG1 / Euler8、全 step / PNG 一致）。
   latent / scheduler を含む反復常駐と CFG>1 は未検証（[実測](research/2026-09-10-codex-mtp-optimization.md#ホスト待ちと既存融合の追加測定)）。
 - **slot backing をバケット run の前に退役させるか**（起票 2026-09-07・limitations「prefill バケット」）: 末尾 chunk の
-  バケット run は chunkLength 形の backing が載ったまま arena に一時を確保し、非勘定側の窓が「最大バケット形 + prefill 形」に
-  なる（既定で ≈1.67 倍）。generation のミス run で活性 backing を先に退役させれば窓は消えるが、次の 768 chunk で作り直しが
+  バケット run（ミス run）は chunkLength 形の backing が載ったまま arena に一時を確保し、非勘定側の窓に
+  「ミス run の arena 一時（最大でバケット形 1 本ぶん）」が乗る（既定の梯子なら 768 形 + 256 形 ≈ 1.33 倍）。
+  generation のミス run で活性 backing を先に退役させれば窓は消えるが、次の 768 chunk で作り直しが
   1 回増える。4 GB 級端末で効くかを見てから裁定。
 - **既公開 2 リポの `LICENSE.md` / `NOTICE.md` 同梱是正**（起票 2026-09-04 — ADR
   [0092](decisions/0092-distribution-repos-and-sources.md) 決定 7）: `karume-irodori-v4-small` /
@@ -140,9 +142,9 @@
   未公開の vowel-detector は同梱済み（2026-09-05 — `PIPELINE.root_files` に MIT 全文 +
   著作権行）なので、初回公開時に漏れることはない。
   同じ上げ直し波に**カード / NOTICE の常時分割の文面是正**も乗せる（ADR
-  [0071](decisions/0071-manifest-v3-shards.md) 末尾の未履行記録）: `card.py` の overview 6 本
-  （sbv2 / irodori / siglip2 / depth_anything / birefnet / vowel_detector）と `distribution.py` の
-  NOTICE 改変列挙 4 本（siglip2 / depth_anything / birefnet / gemma4）が単一ファイルの綴りのまま、
+  [0071](decisions/0071-manifest-v3-shards.md) 末尾の未履行記録）: `card.py` の overview 3 本
+  （sbv2 / irodori / vowel_detector）と `distribution.py` の
+  NOTICE 改変列挙 3 本（siglip2 / depth_anything / gemma4）が単一ファイルの綴りのまま、
   anima の `CONTAINER_MODIFICATION` は「収まらないときだけ分割」の条件つき文面のまま。
 - **公開済み `karume-depth-anything-v2` のカード / NOTICE.md 再発行**（起票 2026-09-05）:
   depth-anything の `CONVT_MAXDIFF` は実重み `--verify` の再実測で 1.4e-06 → 6.1e-06 へ確定した
@@ -191,27 +193,19 @@
   ホスト供給へ揃えるかは別裁定。
 - **メモリ管理波の隣接起票**（正本 = ADR [0089](decisions/0089-memory-limits-preflight.md)
   Consequences / ADR [0090](decisions/0090-shard-spec-v3-tensor-pieces.md)）:
-  `GpuContext.createResident` と run 時 transient の確保は errorScope 頼みのまま / gemma4 PLE
-  sidecar は `extras` 席で shard 門の外 / `estimateSessionMemory` のロード面結線（Phase B
-  持ち越し）/ `fromAssets` の位置づけ / large asset の reference-first 一般則 / cache-less
-  streaming mode（26B A4B 級の前提 — CacheStorage quota が先に壁）。
+  `GpuContext.createResident` の確保は errorScope 頼みのまま（run 時 transient は計画時の
+  preflight で確保前に落ちる）/ gemma4 PLE sidecar は `assets` 席で shard 上限の対象外
+  （by-design・現物は 9 本とも上限以下）/ `fromAssets` の位置づけ / large asset の
+  reference-first 一般則。
 - **exporter core の `karume/__init__` が torch を eager import する**: `karume.dist` / `karume.modelcard`
   だけを使う配布・カード層（recipes の dist ドライバ）でも `import dist` で torch が丸ごと読まれる
   （2026-09-04 実測 — recipes 側は torch 非依存の `measurements.py` へ寄せ済み）。`__init__` の
   re-export を遅延化するか、`karume.dist` / `karume.modelcard` を本体から独立に import できる形にする
   （PyPI `karume` の公開面の設計判断 — ADR 0065 の境界）。
-- **examples/ の README 整備**: 現状は gemma4 のみ。残るファミリのデモにも README を置く
+- **examples/ の README 整備**: 残るのは anima / irodori / sbv2 / vowel-detector の 4 ファミリ
   （リポ直下 / models / exporter と同じく英語 — CLAUDE.md）。
-- **MoE page-fault**: リポ外 spike で PoC 済み（2026-09-01）— 機構は成立する（miss の readback
-  は decode が既に払う往復へ相乗りでき追加同期ゼロ・出力は直接束縛とビット同一）が、**実用
-  可否は uncertain**（miss コストは転送でなく再実行フェンス 1 本が支配し、expert を小さくしても
-  安くならない。ブラウザ〈Dawn〉のフェンス床と実 hit 率は未測定・1 層のみ）。着手条件は
-  parked「IR への値依存実行選択」に従属。
 
-**次タスク（QAT レビュー対応の波の直後）**: [perf-ledger](perf-ledger.md) K-45（活性の整数内積）と
-K-46（int8 KV cache）を**同じ束で**進める。どちらも公式 mobile の計算形へ寄せる変更で、
-片方だけ入れても「CPU / GPU で token 列が分岐する」性質もメモリ 4 倍も残る。
-スパイク実測（速度・公式 mobile との列一致率・int8 KV の品質）で採否を決める。
+**decode 速度の残り**（H-27 段 ② / 小物 K-48・K-49・K-50 / K-46）は later の同名項が正本。
 
 **ユーザー実機（Claude からは実行できない）**:
 
@@ -239,7 +233,7 @@ K-46（int8 KV cache）を**同じ束で**進める。どちらも公式 mobile 
   single_file.py の来歴欠落を修正。残る重複（報告のみ）: `isRecord` / `readRecord`（anima / sbv2 / irodori / gemma）と
   `isPositiveInteger`（birefnet / depth-anything / siglip2 / irodori）は別レイヤなので段 2 で個別判断。
   **段 2 済（2026-09-21）**: gemma/pipeline.ts → `gemma/admission.ts`（受理集合の判定）+ `gemma/chat-turn.ts`（chat 1 ターンの変換と
-  後始末・公開型 4 本は barrel の import 元を付け替え）で 2,589 → 1,920 行・gemma/ple.ts → `ple-index.ts`（索引 codec と定数）+
+  後始末・公開型 4 本は barrel の import 元を付け替え）で 2,589 → 1,902 行・gemma/ple.ts → `ple-index.ts`（索引 codec と定数）+
   `ple-shard.ts`（shard の読み口と検査）で ple.ts は所有者 + facade の 724 行・ple-gpu.ts の重複定数 3 本を import へ・
   hub 共通層 `hub/asset-readers.ts`（資産バイト列 / JSON の読み口）+ `hub/graph-gates.ts`（graph 入力の静的次元）で 8 family の
   複製を解消・sbv2 の tokenizer 資産門を `sbv2/text/asset.ts` へ・config の残り重複（isPositiveInteger / isRecord / readRecord）を
@@ -249,7 +243,7 @@ K-46（int8 KV cache）を**同じ束で**進める。どちらも公式 mobile 
   staticInputDim は方針が逆向きで対象外。
   **段 3 済（2026-09-21）**: 1 ファイルずつ、いずれも行の移動だけで本体はバイト同一（機械突合）。gpu/device.ts → `context.ts`（3 クラス）+
   `acquire.ts`（取得・limits・カナリア）で device.ts は層の入口 54 行 / runtime/fusion.ts → `fusion-rule.ts` + `fusion-rules/<rule>.ts` × 7 で
-  fusion.ts は入口 481 行（[ADR 0040 追記](decisions/0040-fusion-pass.md)）/ irodori/pipeline.ts → `admission` / `conditioning` / `dit-loop` /
+  fusion.ts は入口 482 行（[ADR 0040 追記](decisions/0040-fusion-pass.md)）/ irodori/pipeline.ts → `admission` / `conditioning` / `dit-loop` /
   `stage` で 928 行（10 段の説明は pipeline.ts 冒頭に温存）/ executor.ts → `session-build.ts`（構築相・Session.build はファサード）で
   2,745 行 / recipe-builder.ts → `RecipeBuildFace` の注入面 + `recipe-builders/{elementwise,layout,linear,norm,attention,conv}.ts` で
   706 行。未使用の export 修飾子 18 本（レビューの 11 件のうち import の無い 10 件 + 族内 8 件）を外した。**波の結論**: 1,000 行超の
@@ -635,7 +629,7 @@ autoregressive 波の**残項目（波外へ送り）**:
 
 ## later
 
-- **コード品質管理の波の設計項目（起票 2026-09-21 — 波本体は now）**:
+- **コード品質管理の波の設計項目（起票 2026-09-21 — 波本体は消化済み〈0.12.0 リリース後〉節）**:
   - **Anima / 生成の入力起因エラーを判別可能な型へ揃える**: `parseResolution` と
     `AnimaPipeline.generate` の値域検査、生成側の `maxNewTokens` / `stopTokens` の検査が素の
     `Error` を投げるため、同じ関数内の内部配線異常（hub のバグ側）と区別が付かず、複数モデルを
@@ -645,6 +639,14 @@ autoregressive 波の**残項目（波外へ送り）**:
     設計項目**（ADR [0072](decisions/0072-sbv2-text-injection.md) の 400/500 分離は SBV2 に
     閉じた決定で、そのまま持ち込まない）。対象は `models/src/anima/resolution.ts` と
     `models/src/generation/sequence.ts`。
+
+- **コード品質管理の波の残置（起票 2026-09-22 — 出典は消化済み〈0.12.0 リリース後〉節の同波）**:
+  - `Gemma4PipelineOptions` を引数に取る 4 本（`assertSpeculative` / `resolveGemma4PleResidency` /
+    `buildGemma4Program` / `speculativeSetup`）の置き場（`pipeline-options.ts` の新設は 2026-09-21 裁定で後回し）。
+  - sbv2 の `staticInputDim` は方針が逆向きで共通層の対象外のまま。
+  - Unicode 区間表の検査は文言が違い各 family に残っている（二分探索だけ `text/code-ranges.ts` へ寄せた）。
+  - `models/src/session/with-session.ts` の単体テストが無い。
+  - `reference/ops.ts` と `ops/shapes.ts` の分割（info — 可変状態も循環も無く実害ゼロ）。
 
 - **decode 速度の残り（2026-09-20 に now から移動）**: H-27 段 ②（先行投入・ADR 0066 の opt-in 例外・greedy 限定・期待 Deno −5 / Chrome −2.2 ms）、
   小物 K-48 段 1（rms_norm→SRQ 融合 70 本・0.19 ms）/ K-49（slice 別名化）/ K-50（k+v 連結 GEMV）、K-46（int8 KV — メモリ項目）。
@@ -667,14 +669,16 @@ autoregressive 波の**残項目（波外へ送り）**:
   しない形。
 - **examples/anima に `--sampler` ノブ（起票 2026-08-25）**: request 側 `sampler` 席
   （ADR 0078）を CLI デモから振れるようにする小改修。
-- **anima 素版 i4 の品質改善（起票 2026-08-24 — 配布スキップ裁定の復活レバー）**: adaLN の
-  i8 化（irodori の帰属で効いた知見の移植 — anima では**未実測の仮説**）と量子化感度の高い
-  場所の特定。校正済み系列は `outputs/series/` の `*-i4-dyn` に温存（旧 series-archive の
-  退避分と視認物は 2026-08-30 の掃除裁定で削除 — i4 は結局再調整が要るため。実測記録の正本 =
-  [research/2026-08-24-gptq-expansion-quality.md](research/2026-08-24-gptq-expansion-quality.md) §5）。
+- **anima 素版 i4 の品質改善（起票 2026-08-24 — 配布スキップ裁定の復活レバー）**: 残るのは
   turbo 側の i4 席で**未検証のまま残した可能性の一覧**（専用幾何・g16・校正量・もう 1 つの
-  劣化機序 — いずれも「試してダメ」ではなく「試していない」）は
+  劣化機序 — いずれも「試してダメ」ではなく「試していない」）だけで、正本は
   [research/2026-08-21-anima-i4-seat-speed.md](research/2026-08-21-anima-i4-seat-speed.md) §8。
+  g16 は parked「anima の g16 評価」が復活レバーの 1 本として残る。adaLN の i8 化は視認
+  スイープで不採用が裁定済み（perf-ledger Q-9）、量子化感度の高い場所の特定は消化済み
+  （既知問題 3 件 + anima 素版 i4 感度）節の ④ が正本で、同じ裁定が「anima DiT i4 系は
+  しばらく保留」を付けている。校正済み系列は `outputs/series/` の `*-i4-dyn` に温存
+  （実測記録の正本 =
+  [research/2026-08-24-gptq-expansion-quality.md](research/2026-08-24-gptq-expansion-quality.md) §5）。
 - **irodori adaLN i8 の出荷リグ A/B（起票 2026-08-24）**: sim で効いた adaLN i8（+13.1 MiB）が
   出荷リグでも読み上げ方を改善するかは未検証（sim → 出荷の転移限界 — 同 research §2）。
   復活 = `i8+dit4` 席（旧 `w4`）の品質不満、またはサイズ最適化の実需。
@@ -689,15 +693,15 @@ autoregressive 波の**残項目（波外へ送り）**:
   `project_distribution` が「linear の重みスロットだけ・conv / embedding の i4 は格納形も
   実行経路も無い」という pre-J-5b 前提のまま（実際は出荷済み — ADR 0069 追記 6/7）。相対
   比較には無害だが試算が過小で docstring も陳腐化。対象集合と説明の追随を 1 件で。
-- **モデル拡充の続き**: Kokoro-82M（LSTM = multi-output 待ち）・MobileSAM / SAM 2
-  （conv_transpose2d）・BiRefNet_HR 2048² preset・DA-V2 可変解像度（upsample_bicubic2d）。
+- **モデル拡充の続き**: Kokoro-82M（exporter の多出力 `getitem` 結線 + `lstm_scan` 新設裁定
+  〈ADR 0056 決定 8〉待ち — ノードレベル多出力自体は ADR 0068 で解禁済み）・MobileSAM / SAM 2
+  （conv_transpose2d）・DA-V2 可変解像度（upsample_bicubic2d）。後 2 者は必要 op が語彙外。
   候補調査の時点記録は [recon-2](research/2026-08-14-model-expansion-recon-2.md)。
-- **性能候補**: perf-ledger の 🚧（K-2 VAE conv2d / K-4b conv1d i8a8 / K-6 encoder tile /
-  K-9 relattn / L-1 cold-load 分解 / L-2 EG 低精度）— 採否・順序は perf-ledger。
+- **性能候補**: 起票・採否・順序は [perf-ledger](perf-ledger.md) の 🚧 行が正本。
 - EmbeddingGemma の完成（models pipeline / 配布形・batch>1 export・runtime attention_mask 配線）。
   **tokenizer〈Gemma SPM BPE + byte_fallback〉の実装と EG 資産 compile は生成 API 波の段 1a に
-  同乗**（2026-08-31 裁定 9 — ADR [0084](decisions/0084-gemma-tokenizer-chat.md) 決定 6。実装は
-  共用・資産は別 compile）。
+  同乗済み**（2026-08-31 裁定 9 — ADR [0084](decisions/0084-gemma-tokenizer-chat.md) 決定 6。実装は
+  共用・資産は別 compile）。batch>1 export の変換段の壁は [known-issues](known-issues.md)。
 - **w8a8 鏡像門の設置**: `e2e_deberta_w8a8_test.ts`（ADR
   [0026](decisions/0026-w8a8-deberta-deployment.md) 決定 3 — `e2e_deberta_test.ts` は移植済み・
   鏡像側だけ未設置。2026-08-16 裁定で起票）。
@@ -706,7 +710,10 @@ autoregressive 波の**残項目（波外へ送り）**:
   `outputs/series/anima-pipeline*` を読む常設テストは Deno / pytest のどちらにも存在しない
   （2026-08-16 判明 — fixture 4 変種は再エミット済みで前提は解消済み）。
 - **ORT Web 対比ベンチ慣行**（2026-08-16 ユーザー裁定）: 両対応モデルで定期測定し、
-  遅すぎないか・ボトルネックはどこかを調査する。対象 = EmbeddingGemma（models 側の完成が
+  遅すぎないか・ボトルネックはどこかを調査する。**gemma4 では慣行が先に立ち上がっている**
+  （器は `tools/llm-speed/browser` = `deno task bench:llm-browser`・記録は
+  [research 2026-09-12](research/2026-09-12-webml-browser-speed.md)）。残る対象 =
+  EmbeddingGemma（models 側の完成が
   前提）と **KokoroTTS**（2026-08-16 訂正 — 当初の Irodori は打ち間違い。Kokoro は
   Transformers 系で動くため比較しやすい・karume 側は Kokoro-82M 対応が前提 = 上のモデル拡充
   候補・LSTM multi-output 待ち）。将来はブラウザ ONNX + PyTorch ネイティブ込みの比較
@@ -714,11 +721,13 @@ autoregressive 波の**残項目（波外へ送り）**:
   freeDimensionOverrides / IO binding / EP 分断確認・native EP か JSEP かの記録）は
   [runtime-landscape §4](research/2026-08-16-runtime-landscape.md) が正本。
 - **生成イベントの横展開（需要待ち）**: sbv2 / birefnet / depth / siglip2 / vowel への stage
-  イベント（step ループが無く提供できるのは段遷移のみ）と、**生成ループ**の AbortSignal 中断席
-  （現状は onEvent の throw が step 粒度の中断手段 — 席は温存）。**構築経路の AbortSignal は
-  anima で実装済み**（`AnimaPipelineOptions.signal` — 段境界での検査・取得層への透過・
-  `signal.reason` 素通し）なので、流儀の先例はそこ。**生成ループの席は LLM 面で先に開く**
-  （ADR [0083](decisions/0083-generation-api-surface.md) 決定 5 — 他 4 家族への横展開は需要待ちのまま）。
+  イベント（step ループが無く提供できるのは段遷移のみ）と、anima / irodori の**生成ループ**の
+  AbortSignal 中断席（現状は onEvent の throw が step 粒度の中断手段 — 席は温存）。
+  **構築経路の AbortSignal は anima / irodori で実装済み**（`AnimaPipelineOptions.signal` —
+  段境界での検査・取得層への透過・`signal.reason` 素通し）なので、流儀の先例はそこ
+  （他 6 家族の `signal` は取得層へ透過するだけで段境界の検査は持たない）。**生成ループの席は
+  LLM 面では実装済み**（ADR [0083](decisions/0083-generation-api-surface.md) 決定 5 —
+  他家族への横展開は需要待ちのまま）。
 - **`AssetProgress.path` が越境参照を識別できない（起票 2026-08-25・優先度低）**: 進捗イベントの
   `path` は文字列 1 本で、越境コンポーネント参照（ADR
   [0038](decisions/0038-manifest-v1.md) §7 追記）が入った以上**別リポの同名 path と区別が
@@ -726,12 +735,24 @@ autoregressive 波の**残項目（波外へ送り）**:
   消費側がファイル別の進捗を path でキーにすると 2 本が混ざる。埋め方は `repo` / `revision` を
   イベントへ足すか `fileRefKey` を出すか — 公開面の追加なので breaking 波に乗せる。
 - **anima 大解像度の省 RAM タイル逐次組み立て（起票 2026-08-24 裁定）**: VAE decode のタイルを
-  貯めずに順次合成できれば、E-2 の入口拒否で受理集合から外した 8 解像度
-  （1456/1488/1584/1648/1680/1776/1840/1936px）を受理へ戻せる。
+  貯めずに順次合成できれば、ピーク RAM が下がる（`decodeTiled` は今も全枚数を配列に溜めてから
+  合成する）。動機だった 8 解像度の受理復帰は ADR
+  [0033](decisions/0033-vae-fixed-tile-decode.md) 追記の等間隔スナップ配置で別途達成済み。
 - **hub の sha256 同一ファイルのリポ跨ぎ重複 DL 解消（外部フィードバック提案⑥・優先度低）**:
-  content addressing でキャッシュを引けば、同じバイト列を別リポから取り直さずに済む。
-  ADR [0038](decisions/0038-manifest-v1.md) のキャッシュ設計（キーは URL）へ踏み込む変更。
+  取得層のキャッシュキーは既に内容キー（`['hf', kind, repo, path, sha256]` — ADR
+  [0080](decisions/0080-hub-fetch-cache-050.md)）で revision 跨ぎの重複は消えているが、`repo` が
+  キー要素に残るのでリポ跨ぎは取り直しになる。`repo` を落とす（または sha256 だけの別名を張る）案。
+- **cache-less streaming mode**（26B A4B 級の前提 — CacheStorage quota が先に壁）: 相 1
+  （streaming prefetch）は CacheStorage が無いと素 fetch へ縮退できず fail loud のまま
+  （[limitations](limitations.md)）。復活 = 26B A4B 級の実需。最初の 1 単位は「CacheStorage を
+  持たない取得元で相 2 だけの逐次読みが成立するか」の設計メモ 1 枚。
 - Metal 数値差の原因確定（known-issues）・resident 経路の診断/計測制約の解消。
+- **MoE page-fault**: リポ外 spike で PoC 済み（2026-09-01）— 機構は成立する（miss の readback
+  は decode が既に払う往復へ相乗りでき追加同期ゼロ・出力は直接束縛とビット同一）が、**実用
+  可否は uncertain**（miss コストは転送でなく再実行フェンス 1 本が支配し、expert を小さくしても
+  安くならない。ブラウザ〈Dawn〉のフェンス床と実 hit 率は未測定・1 層のみ）。着手条件は
+  parked「IR への値依存実行選択」に従属。最初の 1 単位は spike の実測を
+  [research](research/) へ時点スナップショットとして転記するところまで。
 - MoE の seam（fixed-k routing は静的形で表現可 — dense API に expert 非存在を焼かない）。
 
 ## release — リリース準備波（しばらく先）
@@ -745,8 +766,8 @@ autoregressive 波の**残項目（波外へ送り）**:
   gemma4 生成 API・GEMV 族・tokenizer の追加で失効している）
 - ライセンス interview（export-recipes の family 別 provenance を upstream revision 単位で
   人間確認 — 再編の release gate。**公開 4 リポぶんは波 K-4 の人間ゲートで先行実施**）。
-  **公開済み 6 家族（anima / irodori / sbv2 / siglip2 / gemma4 / depth_anything）の重み行
-  （Revision used / Weights license）は未記録**（公開時点の人間確認は K-4 の 4 リポぶんだけ）。
+  **公開済みは 7 家族 10 エントリで、重み行（Revision used / Weights license）が未記録なのは
+  irodori / sbv2 / siglip2 の 3 家族**（anima / depth_anything / gemma4 / birefnet・lucida は記入済み）。
   コード依存ブロック（transformers / PyTorch 等）の Code license / Attribution は上流 LICENSE の
   現物で 2026-09-05 に記入済み。重み行が埋まらない構造要因 = **上流 revision を機械可読に残す席が
   リポに無い**（`<FAMILY>_SOURCES` は karume 配布リポの pin であって上流ではない）ので、
@@ -757,12 +778,8 @@ autoregressive 波の**残項目（波外へ送り）**:
 
 ## parked（復活条件つき）
 
-- **Gemma 4 MTP（公式 drafter による投機的デコード）— 目標は実用レベルまで到達させる（ユーザー方針 2026-09-07）**。実装前の採算実測
-  （[research 2026-09-07](research/2026-09-07-codex-perf-review-followup.md) §7）で予測倍率 0.35〜0.57× と出たので順序を後ろにした
-  （kill ではない）。復活条件と順序 = perf-ledger K-20（①K-21 ②H-15 ③i4 target の E[a] 再実測〈長文脈の抽出的要約で ≥ 2〉④設計:
-  部分 commit と sliding ring の巻き戻し / Session 跨ぎの埋め込み表と KV スロットの読み共有 / 最終 hidden の出口 / drafter の配布形 /
-  exporter の topk）。重みは `google/gemma-4-E2B-it-assistant`（Apache-2.0・非 gated・158 MB・4 層 hidden 256・target の KV へ
-  cross-attention・自前 KV 無し・verify は k+1 行）。
+- **Gemma 4 MTP（公式 drafter による投機的デコード）**: 現況と残件の正本は now 節の
+  「性能波 K-21 → H-15 は済」項と [perf-ledger](perf-ledger.md) の K-20 行。
 
 - **IR への値依存実行選択（MoE エキスパート動的常駐の前提）**（2026-08-31 裁定 — 入れない）。
   エキスパート単位のロード/退避は ①`ShardValidator` 全件門 ②重み常駐の不変 Map ③IR v1 の
@@ -773,7 +790,7 @@ autoregressive 波の**残項目（波外へ送り）**:
   出荷実需。その際の最初の宿題 = 予測型 offloading（SiDA arXiv:2310.18859 / HOBBIT
   arXiv:2411.01433）の一次精読（読み戻しは消せてもホスト側プール常駐の壁は残る、が現時点の読み）。
   page-fault 機構は**リポ外 spike で PoC 済み・実用可否は uncertain**（復活時は spike の実測を
-  research へ転記してから設計スパイクに入る — now 節「MoE page-fault」）。
+  research へ転記してから設計スパイクに入る — later 節「MoE page-fault」）。
 
 - **karume-sbv2-fn の HF 公開**（2026-08-20 保留裁定 — 波 K で一時「出典表記つき公開」へ
   振れたが撤回）。upstream の書面条件 = Booth 頒布ページの「商用可・クレジット不要・マージ
@@ -791,7 +808,6 @@ autoregressive 波の**残項目（波外へ送り）**:
   復活 = 素版 i4 の視認で品質不満が出た場合。主作業と衝突しない裏実行での前倒しは可
   〈同日ユーザー裁定・anima 校正リグを触る J-4 ②の着地後に流すのが安全〉）
 - hub Range 並列 + prefetch — 復活 = 断片化リポの再来（perf L-3）
-- params / bind group キャッシュ（ADR 0032 案 2）・GPU timestamp 推定源化・全面 f16（案γ）・
-  Vᵀ+列量子化融合・SBV2 NFC チップ・f32 anima 系列再生成
+- GPU timestamp 推定源化・全面 f16（案γ）・SBV2 NFC チップ・f32 anima 系列再生成
 - by-design 制約群（rank≤4 / OOB NaN / 非有限入力 / 0 要素次元 / cancellation 粒度ほか）は
   limitations.md が正本 — 実需が出た項目だけここへ昇格させる

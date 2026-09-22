@@ -18,12 +18,15 @@ manifestのキャッシュキーはresolve URLなので、過去に使ったポ�
 
 ## フル走行の `deno task verify` が GPU VRAM 圧で稀にフレークする
 
-12GiB の GPU に GB 級モデルを連続投入するため、**フル走行では稀に `GpuOutOfMemoryError` /
-`GpuDeviceLostError` でどれか 1 本が落ちる**。落ちるテストは毎回違い（特定の 1 本に固有の
-欠陥ではない）、**失敗したファイルを単独で再走すると常に緑**になる。2026-08-25 に
-verify を並行させた走りで 2 回観測（単独走行でも過去に観測あり）。
+VRAM に対してモデルが大きい機では GB 級モデルの連続投入で **`GpuOutOfMemoryError` /
+`GpuDeviceLostError` が稀に出る**。落ちるテストは毎回違い（特定の 1 本に固有の欠陥ではない）、
+**失敗したファイルを単独で再走すると緑**になる。フル走行だけでなく、**レーンを間隔なしに
+連続実行したとき**にも同じ形で出る（解放が次の device poll まで遅れる機がある —
+下の「Intel Arc B570」節）。
 
-運用の回避 = **失敗したファイルを単独で再走して確認する**（緑ならフレーク）。
+運用の回避 = **レーンの間に数分の間隔を置く**か、**失敗したファイルを単独で再走して確認する**
+（緑ならフレーク）。ただし device lost を例外にせず panic する環境（Deno 2.9.6 — 同節）では
+プロセスごと消えるので、単独再走の前にそこで走行自体が止まる。
 
 ## Metal（Apple GPU）で attention i8a8 の GPU 出力が TS 参照と 1 ULP ずれる（+ conv1d/conv2d parity 4 本 + gru_scan parity 2 本 + linear GEMV u32 門 1 本）
 
@@ -57,9 +60,9 @@ macOS 26 で再実測 = 同じ 12 本が同一署名で再現。フル verify �
   エピローグに**丸めが 1 度も起きない**。よって①QK は健全な device でも M2 でも既知解と厳密
   一致する見込みで、**この 1 ULP 差が今後観測されるのは③PV 側だけ**になる（③PV は
   `qP = round(127·exp(S−m))` を GPU が作るため丸めが残る）。**M2 実機で再確認済み
-  （2026-09-01）**: カナリア 16 本すべて緑 — 素の判定が dp4a を選び分岐と厳密一致フラグが
-  整合・故障注入系も想定どおり。軸 reduce パリティ（`gpu_reduce_axis_parity_test.ts` 2 本）も
-  M2 緑。
+  （2026-09-01）**: 当時のカナリア 16 本すべて緑 — 素の判定が dp4a を選び分岐と厳密一致
+  フラグが整合・故障注入系も想定どおり（現行の本数は 17 本で、後から足した 1 本は M2 未実測）。
+  軸 reduce パリティ（`gpu_reduce_axis_parity_test.ts` 2 本）も M2 緑。
 - **conv1d / conv2d parity 4 本**（implicit GEMM ↔ 直接カーネルのビット一致・golden の
   tolerance 判定は緑）は従来どおり原因未特定 — 同種のエピローグ丸め差の可能性が高いが未検証。
 - **gru_scan / gru_scan_reverse の分解 parity 2 本が M2 で赤（2026-08-31 実測）**:
@@ -99,12 +102,13 @@ macOS 26 で再実測 = 同じ 12 本が同一署名で再現。フル verify �
   **行ブロック変種（K-21・2026-09-07・`5701262`・1 ≤ M ≤ 64）も M2 未実測** — 同じ 1 式インライン
   （逆量子化を `let` に置いて行間で共有）なので同帯（1 ULP）の見込み。同時に u32 門の比較相手が
   M=2（幾何 M16N16）から M=65（幾何 M64N32・門の外）へ移ったので、上の署名（`0x414b3249` vs
-  `0x414b3248`）は M2 で採り直すと変わりうる。Linux / Vulkan は M=1 の 12 形 + 行ブロック 11 形とも緑。
+  `0x414b3248`）は M2 で採り直すと変わりうる。Linux / Vulkan は M=1 の 12 形 + 行ブロック 13 形とも緑。
   **動作は M2 で確認済み（2026-09-07 ユーザー実走 — K-21 の行ブロック変種 + H-15 の予算つき backing を含む
   最新 main）**。u32 完全一致門の赤 / 緑は未報告（上の 1 ULP 帯の見込みのまま）。
-- **sha256 の突合（anima PNG 9 本 / sbv2 WAV 6 本）は Metal で明示 SKIP + 参照門 2 本が赤**:
-  参照値 fixture に Metal の環境キーの行が無いので 15 件は突き合わせずに SKIP され、系列ごとの
-  参照門（anima / sbv2）が「この環境の行が 1 件も無い」で赤くなる（ADR
+- **sha256 の突合（anima PNG 9 本 / sbv2 WAV 6 本 / irodori WAV 2 本〈no-ref / voice-clone〉）は
+  Metal で明示 SKIP + 参照門 3 本が赤**:
+  参照値 fixture に Metal の環境キーの行が無いので 17 件は突き合わせずに SKIP され、系列ごとの
+  参照門（anima / sbv2 / irodori）が「この環境の行が 1 件も無い」で赤くなる（ADR
   [0106](decisions/0106-device-keyed-references.md)・limitations「sha256 参照門は参照環境専用」節の
   仕様どおり）。本節の対象には数えない。行は `KARUME_REFERENCE=write` で同じレーンを回せば作れるが、
   その回の実測を正とする操作なので健全性を別途確かめてから作る。別経路同士の実測 sha は一致
@@ -113,7 +117,10 @@ macOS 26 で再実測 = 同じ 12 本が同一署名で再現。フル verify �
   目視 / 聴感で健全を確認済み。
 
 Deno 2.9.5 / 2.9.6 に Metal / naga / wgpu の更新は無い（denoland/deno#36257 = mapped range の
-み）。根治候補 = TS 参照の FMA 許容化 or WGSL 側で丸めを固定する手段の調査（未着手）。記録 =
+み）。根治候補 = WGSL 側で丸めを固定する手段は明示 `fma()` が有効と判明（ADR
+[0105](decisions/0105-packed-static-quantize-activations.md) 追記 4 — bitcast 往復 + XOR 0 の
+丸め障壁は M2 で無効と実測し撤回）。適用済みは並列 GEMV 族だけで、逐次 GEMV・行ブロック・
+subgroup 変種・conv・gru・attention エピローグは未適用。TS 参照の FMA 許容化は未着手。記録 =
 [research/2026-08-06-metal-silent-miscompute.md](research/2026-08-06-metal-silent-miscompute.md)
 （時点）と
 [research/2026-08-29-chatgpt-review-verification.md](research/2026-08-29-chatgpt-review-verification.md)
@@ -142,7 +149,7 @@ Metal では errorScope 沈黙のまま — by-design 制約として limitation
 （宣言 311,164,928B）の配布形ミラーが M2 のアダプタ値（maxBufferSize 14,302,248,960 /
 maxStorageBufferBindingSize 4,294,967,292）で誤拒否なく通過し、生成まで完走。
 
-## Metal で `--diagnostics`（`gpuTiming: true`）が device ごと落ちる — 実験と改修はリリース後（裁定 2026-09-03）
+## Metal で `--diagnostics`（`gpuTiming: true`）が device ごと落ちる — 切り分け実験は未着手（M2 実機が要る）
 
 実機 **Apple M2 / macOS 26 / Deno 2.9.x** で `examples/gemma4` を `--diagnostics` 付きで走らせると、
 最初のターンで device が消失して落ちる。機序と確定事実は
@@ -156,7 +163,7 @@ GC まで滞留する量、のどちらが支配的か切り分けられてい�
 候補を入れても、この機体で op 別内訳が読めるようになるとは限らない。
 
 **フル verify でも同じ形で 1 本赤になる（2026-09-03・M2 / macOS 26 実測）**: `--diagnostics` を
-渡さない `deno task verify` でも、`packages/models/tests/e2e_gemma4_pretrained_test.ts:202` の
+渡さない `deno task verify` でも、`packages/models/tests/e2e_gemma4_pretrained_test.ts:208` の
 census 門（「gemma4 配布形: パイプラインの既定は ③' 並列縮約で走り…」）が `acquireGpu({ gpuTiming:
 true })` で実重み gemma4 の prefill を走らせるため、parallel / sequential の 2 step とも赤になる
 （フル verify 1856 passed / 13 failed / 139 ignored の **13 本目** — 上の 1 ULP 節が数える 12 本
@@ -169,8 +176,8 @@ true })` で実重み gemma4 の prefill を走らせるため、parallel / sequ
 GpuDeviceLostError: flush 中に device が失われた（再構築が必要） — reason: unknown / device was lost
 ```
 
-（スタックは `SubmitScheduler.flush`〈`submit.ts:508`〉→ `RunArena.destroy`〈`arena.ts:272`〉→
-`GpuContext.onLost`）。**`reason` に載ったのは Metal 側の汎用文言「device was lost」だけで、
+（スタックは `SubmitScheduler.flush`〈`submit.ts:532`〉→ `RunArena.destroy`〈`arena.ts:189`〉→
+`GpuContext.onLost`〈`context.ts:351`〉）。**`reason` に載ったのは Metal 側の汎用文言「device was lost」だけで、
 `createQuerySet` の真因文字列は届かなかった** — limitations の「バックエンドが入れた真因文字列が
 初めて呼び手まで届く」は本経路では成立しない。したがって「query set 約 100 本の同時生存が原因」は
 **見立てのまま**（逐語の裏付けはまだ無い）。傍証として、単一 query set の
@@ -190,9 +197,10 @@ buffer プールと同じ発想）。同一 queue の実行順序保証がある
 落とす必要は無い見込み（`resolveBuffer` / `readBuffer` はチャンクごとに要るが、こちらは Deno でも
 `destroy()` が効く）。逆方向（刻みを小さくする）は総サンプル数が変わらず本数だけ増えるので採らない。
 
-**裁定（2026-09-03・ユーザー）**: 切り分け実験（①②）も上の修正候補も**リリース後**に回す。理由 =
-実機が macOS 26 と確定し、query set を使い回して確保に成功しても wgpu#9414 で timestamp が全ゼロに
-なる可能性があるため、改修より先に実験で見極める。リリース判定では **verify の census 門 1 本が
+**現状**: 切り分け実験（①②）も上の修正候補も**未着手**（実験には M2 実機が要る — backlog の
+now 節「Metal `--diagnostics` の切り分け実験」）。実機が macOS 26 と確定し、query set を使い回して
+確保に成功しても wgpu#9414 で timestamp が全ゼロになる可能性があるため、改修より先に実験で
+見極める（2026-09-03 裁定）。リリース判定では **verify の census 門 1 本が
 M2 で赤のまま残ることを受容する**（Linux / Vulkan は緑・parallel と sequential の等価性は計測を
 要求しない `packages/models/tests/e2e_gemma4_reduce_parity_test.ts` が担保する）。
 
@@ -219,7 +227,7 @@ golden `activations` の `sin` は許容差を WGSL 仕様帯へ寄せて消化�
   同じ遅延解放は**レーンを間隔なしに連続実行したときのフレーク**としても出る（2026-09-21: anima レーン
   〈9 分〉の直後に sbv2 レーンを回すと、runtime の golden `i8 / flow / p512` から後の 12 本が OOM —
   後続は `requestDevice` 自体が `Not enough memory left`。20 秒では足りないことがあり、数分空けて単独で回すと 198 本すべて緑）。
-  レーンを続けて回すときは間を置くか、赤を見たら単独で再走する。
+  運用の回避は上の「フル走行が稀にフレークする」節が正本。
 - **Deno は timestamp-query の値を ns へ換算しない**（ext/webgpu は wgpu の raw tick をそのまま
   返す。WebGPU 仕様は ns）。B570 の Vulkan `timestampPeriod` は 52.0833 ns なので、Deno での
   `lastRunTiming` / `--diagnostics` の内訳は **×52 過小**（BiRefNet 1024² の GPU 総和 raw 64.8 ms
