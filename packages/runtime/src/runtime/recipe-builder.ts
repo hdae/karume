@@ -170,7 +170,29 @@ export type StateBuildContext = {
  * 実績の数え上げが族ごとに散る）。
  */
 export type RecipeBuildFace = {
-  readonly state: RecipeBuilderContext;
+  /**
+   * 導出相の状態のうち、族別導出が**実際に読む欄だけ**。
+   *
+   * MUST: 可変の `paramsCache` / `weights`（{@link RecipeBuilderContext}）をここに載せない —
+   * `readonly` はプロパティ参照に掛かるだけで Map もアリーナも中身は書ける。全体をそのまま
+   * 渡すと、上の「params キャッシュの所有者を 1 つに保つ」が doc の宣言だけになる。
+   * 欄を増やすのは読む側が実際に現れたときだけ。
+   */
+  readonly state: Pick<
+    RecipeBuilderContext,
+    | "gpu"
+    | "cache"
+    | "linearCompute"
+    | "attentionCompute"
+    | "attentionScoreStorage"
+    | "stateAttentionReduce"
+    | "linearGemvReduce"
+    | "rmsNormReduce"
+    | "linearGemvRowsThreadTarget"
+    | "linearI8a8Dot"
+    | "attentionI8a8Dot"
+    | "rowBlockSplit"
+  >;
   readonly writeParams: (params: Uint32Array<ArrayBuffer>, usage: number) => GPUBuffer;
   readonly weightStorage: (step: NodePlan) => WeightStorage;
   readonly weightScaleBindings: (step: NodePlan, binding: number) => readonly BindingRecipe[];
