@@ -43,3 +43,11 @@ export type {
  * `{ repo, revision }` を書く（`fromPretrained` に既定は無い）。
  */
 export { IRODORI_SOURCES } from "./src/irodori/config.ts";
+
+/**
+ * 入力起因の失敗（渡した要求そのものが受理できない = 入力を直せば通る — `seed` の値域・
+ * 話者の指定・長さの指定）。**家族横断で 1 本**なので、複数の家族を同じホストに載せる側は
+ * これだけで 400 と 500 を分けられる。内部不変条件の破れ・資産の齟齬・GPU 容量は素の `Error` の
+ * まま飛ぶ。
+ */
+export { ModelInputError } from "./src/errors.ts";

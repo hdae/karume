@@ -1,3 +1,5 @@
+import { ModelInputError } from "../errors.ts";
+
 /**
  * SBV2 の入力起因エラー。
  *
@@ -9,10 +11,13 @@
  * MUST: 型を分けるだけで**メッセージの質は落とさない**（期待と実際の両方を書く）。型は分岐の
  * ため、メッセージは人のためで、どちらも要る。
  *
- * NOTE: サブクラスは作らない。hub が 5 種に割っているのは利用者の分岐先が実際に違う（形式 /
- * 参照 / path / 完全性 / 取得）からで、こちらは「入力を直せ」の 1 つしかない。
+ * NOTE: {@link ModelInputError} の派生であり、**これ以上の派生は作らない**。家族横断の
+ * 「入力を直せ」は親が受け持つので、この型が残っているのは ADR 0072 決定 6 の線引き（SBV2 の
+ * どの検査が入力起因で、どれが内部不変条件か）を名前で持つためである。hub が 5 種に割って
+ * いるのは利用者の分岐先が実際に違う（形式 / 参照 / path / 完全性 / 取得）からで、こちらは
+ * 「入力を直せ」の 1 つしかない。
  */
-export class Sbv2InputError extends Error {
+export class Sbv2InputError extends ModelInputError {
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
     this.name = "Sbv2InputError";

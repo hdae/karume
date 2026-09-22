@@ -18,6 +18,7 @@ export {
   Gemma4ChatSession,
   gemma4ChatTurn,
   GenerationCapacityError,
+  ModelInputError,
   parseGemma4PipelineConfig,
 } from "./gemma.ts";
 export type {

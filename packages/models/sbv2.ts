@@ -58,3 +58,9 @@ export { Sbv2InputError } from "./src/sbv2/errors.ts";
  * `{ repo, revision }` を書く（`fromPretrained` に既定は無い）。
  */
 export { SBV2_SOURCES } from "./src/sbv2/config.ts";
+
+/**
+ * 入力起因の失敗の**家族横断の親**（{@link Sbv2InputError} はこれの派生）。複数の家族を同じ
+ * ホストに載せる側は、家族ごとの型を知らずにこれ 1 つで 400 と 500 を分けられる。
+ */
+export { ModelInputError } from "./src/errors.ts";

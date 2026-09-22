@@ -176,3 +176,11 @@ export type {
 } from "./src/generation/sequence.ts";
 export type { GenerationProgram } from "./src/generation/program.ts";
 export type { SamplerSpec } from "./src/generation/sampler.ts";
+
+/**
+ * 入力起因の失敗（渡した要求そのものが受理できない = 入力を直せば通る — sampler の値域・
+ * `maxNewTokens`・会話が容量に入らない場合の {@link GenerationCapacityError} はこれの派生）。
+ * **家族横断で 1 本**なので、複数の家族を同じホストに載せる側はこれだけで 400 と 500 を
+ * 分けられる。内部不変条件の破れ・資産の齟齬・GPU 容量は素の `Error` のまま飛ぶ。
+ */
+export { ModelInputError } from "./src/errors.ts";

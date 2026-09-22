@@ -89,6 +89,7 @@
  */
 
 import { closeableGenerator } from "../concurrency/closeable-generator.ts";
+import { ModelInputError } from "../errors.ts";
 import type {
   GenerationContext,
   GenerationContextSpec,
@@ -166,7 +167,7 @@ export type GenerationCapacityDetail = {
  * 打つ手（古い turn を落とす / 新しい context を作る）も同じである。どちらを踏んだかと、
  * そこから切り詰めを計算するのに要る実値は {@link GenerationCapacityDetail} の欄が運ぶ。
  */
-export class GenerationCapacityError extends Error {
+export class GenerationCapacityError extends ModelInputError {
   readonly constraint: GenerationCapacityConstraint;
   readonly pastLength: number;
   readonly promptLength: number;

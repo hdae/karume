@@ -23,6 +23,13 @@
  */
 export type { FromPretrainedHubOptions } from "./src/hub/load-options.ts";
 
+/**
+ * 入力起因の失敗（渡した要求そのものが受理できない = 入力を直せば通る）。**家族横断で 1 本**
+ * なので、8 家族を同じホストに載せる側はこれ 1 つで 400 と 500 を分けられる。内部不変条件の
+ * 破れ・資産の齟齬・GPU 容量は素の `Error` のまま飛ぶ（各サブパスを参照）。
+ */
+export { ModelInputError } from "./src/errors.ts";
+
 export { BirefnetPipeline } from "./src/birefnet/pipeline.ts";
 export { BIREFNET_SOURCES } from "./src/birefnet/config.ts";
 export type {
@@ -119,7 +126,10 @@ export type {
 export { toSbv2Utterance } from "./src/sbv2/text/utterance.ts";
 /** 発話（モーラ列 + 語アライメント）の語彙 — SBV2 が読む欄だけを持つ（`./sbv2` を参照）。 */
 export type { Sbv2Mora, Sbv2Phrases, Sbv2Utterance, Sbv2Word } from "./src/sbv2/text/utterance.ts";
-/** 入力起因の失敗（内部不変条件の破れは素の `Error` のまま — `./sbv2` を参照）。 */
+/**
+ * SBV2 の入力起因の失敗（{@link ModelInputError} の派生 — SBV2 だけを載せる側は
+ * こちらで分岐できる。内部不変条件の破れは素の `Error` のまま — `./sbv2` を参照）。
+ */
 export { Sbv2InputError } from "./src/sbv2/errors.ts";
 /** このパッケージ版が検証した取得元の対応表（`./sbv2` を参照 — 追従したい場合のオプトイン）。 */
 export { SBV2_SOURCES } from "./src/sbv2/config.ts";

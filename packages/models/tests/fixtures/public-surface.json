@@ -351,6 +351,10 @@
         "kind": "typeAlias"
       },
       {
+        "name": "ModelInputError",
+        "kind": "class"
+      },
+      {
         "name": "Rgb8Image",
         "kind": "typeAlias"
       },
@@ -573,6 +577,10 @@
         "kind": "typeAlias"
       },
       {
+        "name": "ModelInputError",
+        "kind": "class"
+      },
+      {
         "name": "animaLatents",
         "kind": "function"
       },
@@ -619,6 +627,10 @@
         "kind": "typeAlias"
       },
       {
+        "name": "ModelInputError",
+        "kind": "class"
+      },
+      {
         "name": "Rgb8Image",
         "kind": "typeAlias"
       }
@@ -647,6 +659,10 @@
       {
         "name": "DepthMap",
         "kind": "typeAlias"
+      },
+      {
+        "name": "ModelInputError",
+        "kind": "class"
       },
       {
         "name": "Rgb8Image",
@@ -827,6 +843,10 @@
         "kind": "typeAlias"
       },
       {
+        "name": "ModelInputError",
+        "kind": "class"
+      },
+      {
         "name": "SamplerSpec",
         "kind": "typeAlias"
       },
@@ -981,6 +1001,10 @@
         "kind": "typeAlias"
       },
       {
+        "name": "ModelInputError",
+        "kind": "class"
+      },
+      {
         "name": "SamplerSpec",
         "kind": "typeAlias"
       },
@@ -1053,12 +1077,20 @@
       {
         "name": "IrodoriSpeakerInput",
         "kind": "typeAlias"
+      },
+      {
+        "name": "ModelInputError",
+        "kind": "class"
       }
     ],
     "./sbv2": [
       {
         "name": "GeneratedAudio",
         "kind": "typeAlias"
+      },
+      {
+        "name": "ModelInputError",
+        "kind": "class"
       },
       {
         "name": "SBV2_SOURCES",
@@ -1115,6 +1147,10 @@
     ],
     "./siglip2": [
       {
+        "name": "ModelInputError",
+        "kind": "class"
+      },
+      {
         "name": "Rgb8Image",
         "kind": "typeAlias"
       },
@@ -1143,6 +1179,10 @@
       {
         "name": "LabSegment",
         "kind": "typeAlias"
+      },
+      {
+        "name": "ModelInputError",
+        "kind": "class"
       },
       {
         "name": "VowelDetectorAssets",
