@@ -21,7 +21,7 @@ import {
   HEADER_BYTES,
   MAX_DESCRIPTOR_BYTES,
 } from "../src/format/container/limits.ts";
-import { openContainer } from "../src/format/container/open.ts";
+import { type BlockSource, openContainer } from "../src/format/container/open.ts";
 import { type IrDeclaration, parseIrDeclaration } from "../src/format/ir.ts";
 import {
   type ModelInput,
@@ -442,6 +442,35 @@ describe("container round trip", () => {
     parts[1][0] ^= 0x01;
     const again = await openContainer({ kind: "parts", parts });
     await assertRejects(() => again.extractGraph(), ContainerFormatError, "const 領域の sha256");
+  });
+
+  it("検証済みを名乗る取得元では block の sha256 を掛けず、名乗らない取得元では掛ける", async () => {
+    // 取得層がファイル全体を検証した経路（hub の HF 取得元）は cold の 2 重 digest と warm の digest を
+    // 避けるために verified を名乗る（ADR 0109 決定 7）。観測は「改ざんが素通りするか」で行う —
+    // digest の回数そのものは外から数えられない。
+    const written = await writeModelContainer(syntheticModel(), OPTIONS);
+    const parts = written.parts.map((part) => part.slice());
+    const weight = written.model.blocks.find((block) => block.role === "weight");
+    if (weight === undefined) throw new Error("weight block が無い");
+    parts[weight.part][weight.offset + 3] ^= 0x80;
+    const sourceOf = (verified: boolean): BlockSource => ({
+      partCount: parts.length,
+      verified,
+      partLength: (index) => parts[index].byteLength,
+      read: (part, offset, length) =>
+        Promise.resolve(parts[part].subarray(offset, offset + length)),
+    });
+    const trusted = await openContainer({ kind: "source", source: sourceOf(true) });
+    assertEquals(
+      await trusted.readBlock(weight.id),
+      parts[weight.part].subarray(weight.offset, weight.offset + weight.length),
+    );
+    const untrusted = await openContainer({ kind: "source", source: sourceOf(false) });
+    await assertRejects(
+      () => untrusted.readBlock(weight.id),
+      ContainerFormatError,
+      "sha256 が宣言と違う",
+    );
   });
 
   it("分割形の part 本数と長さは宣言と一致しなければならない", async () => {

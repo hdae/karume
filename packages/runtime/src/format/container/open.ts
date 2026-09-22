@@ -43,6 +43,14 @@ import { HEADER_BYTES, MAX_SINGLE_CONTAINER_BYTES } from "./limits.ts";
  */
 export type BlockSource = {
   readonly partCount: number;
+  /**
+   * 取得元が part のバイト列を**検証済み**か（ADR 0109 決定 7 / container-v1 §7）。true なら
+   * {@link OpenedContainer.readBlock} は block の sha256 を掛けない（取得層がファイル全体を検証して
+   * 記録ハッシュと突き合わせた経路 — cold の 2 重 digest と warm の digest を避ける）。全量バイト /
+   * part 列 / ローカルディレクトリのように誰も検証していない取得元は false MUST — 黙って true を
+   * 名乗ると改ざんが素通りする。
+   */
+  readonly verified: boolean;
   partLength(index: number): number;
   read(part: number, offset: number, length: number): Promise<Uint8Array<ArrayBuffer>>;
 };
@@ -73,7 +81,10 @@ export type OpenedContainer = {
   locate(
     id: string,
   ): { readonly part: number; readonly record: ConstBlockRecord | DataBlockRecord };
-  /** block を 1 本取り、sha256 を検証して返す（§7 の cold 経路 — 取得した block ごとに一括 digest）。 */
+  /**
+   * block を 1 本取って返す。取得元が検証済みでなければ（{@link BlockSource.verified} が false）
+   * sha256 を検証する（§7 — 未検証の取得元だけが block ごとに一括 digest）。
+   */
   readBlock(id: string): Promise<Uint8Array<ArrayBuffer>>;
   /** `[ヘッダ'][グラフ記述][詰め物][const 領域]` を組み立てて返す（`krg` のバイトコピー抽出 — §9）。 */
   extractGraph(): Promise<Uint8Array<ArrayBuffer>>;
@@ -113,6 +124,7 @@ export const bytesSource = (
   };
   return {
     partCount: lengths.length,
+    verified: false,
     partLength,
     read: (part, offset, length) => {
       if (offset + length > partLength(part)) {
@@ -136,6 +148,7 @@ export const partsSource = (parts: readonly Uint8Array<ArrayBuffer>[]): BlockSou
   };
   return {
     partCount: parts.length,
+    verified: false,
     partLength: (index) => partOf(index).byteLength,
     read: (part, offset, length) =>
       Promise.resolve(sliceExact(partOf(part), offset, length, `part ${part}`)),
@@ -171,6 +184,7 @@ const initialSource = (input: ContainerInput): BlockSource => {
   // 単一形は part 長が descriptor を読むまで分からない。先頭だけ読める暫定の面を作る。
   return {
     partCount: 1,
+    verified: false,
     partLength: () => input.bytes.byteLength,
     read: (_part, offset, length) =>
       Promise.resolve(sliceExact(input.bytes, offset, length, "part 0")),
@@ -268,6 +282,7 @@ export const openContainer = async (
         `block '${id}': 取得長 ${bytes.byteLength} が宣言 ${found.record.length} と違う`,
       );
     }
+    if (source.verified) return bytes;
     const actual = await sha256Hex(bytes);
     if (actual !== found.record.sha256) {
       throw new ContainerFormatError(
