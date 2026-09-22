@@ -10,8 +10,8 @@
 ## now — 0.12.0 リリース後（2026-09-06）
 
 - **Karume 専用コンテナ形式の波（起票 2026-09-22）**: 配布形を safetensors 方言から専用コンテナ
-  （`krm` = モデル / `krg` = グラフ）へ移す。正本は [ADR 0108](decisions/0108-container-format.md)（proposed）と
-  [container-v1](container-v1.md)（proposed）。**段 0 は済（2026-09-22）** = ADR + 仕様 + CPU 試作
+  （`krm` = モデル / `krg` = グラフ）へ移す。正本は [ADR 0108](decisions/0108-container-format.md)（accepted）と
+  [container-v1](container-v1.md)（accepted・2026-09-22 に段 1 着手を裁定）。**段 0 は済（2026-09-22）** = ADR + 仕様 + CPU 試作
   （container の読み書き 18 テスト緑・anima transformer の上流重みが 567/567 バイト一致・
   LoRA のグラフ書き換え 454 本が `parseIrGraph` 通過）。試作の置き場は
   `.claude/reviews/2026-09-22_codex-format-design/spikes/`（git 追跡外）。

@@ -36,8 +36,8 @@
 
 ## 配布コンテナ（`krm` / `krg`）
 
-> [ADR 0108](decisions/0108-container-format.md) と [container-v1](container-v1.md) は **proposed**
-> （2026-09-22 時点で実装は未着手）。ここに並ぶのは新しい配布形の**仕様語彙**であって、現行コードの綴りではない。
+> [ADR 0108](decisions/0108-container-format.md) と [container-v1](container-v1.md) は **accepted**
+> （2026-09-22 に段 1 着手を裁定・実装中）。ここに並ぶのは新しい配布形の**仕様語彙**で、現行配布形のコードの綴りではない。
 > 現行配布形（safetensors + shard）側の語は上の表と [assets-layout](assets-layout.md) が持つ。
 
 | 用語                                  | 意味（要約）                                                                                                                                                                                                           | 使う日本語                                                 | 正本                                                                                                                                                                       |

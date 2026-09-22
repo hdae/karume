@@ -1,7 +1,7 @@
 # 0108: Karume 専用コンテナ形式 — `krm` / `krg`・block / part・codec 台帳
 
-- Status: proposed（2026-09-22 — 段 0 の最初の成果物。実装は未着手で、本 ADR と
-  [container-v1](../container-v1.md) が段 0 の納品物そのもの）
+- Status: accepted（2026-09-22 — 段 0 の成果物として proposed で起票し、同日の段 1 着手の裁定で
+  accepted。codec 登録名 4 種（決定 13）も同時に確定。本 ADR と [container-v1](../container-v1.md) が正本）
 - Date: 2026-09-22
 - 対象（段ごとに触る面の宣言 — 現時点では 1 行も実装していない）:
   - 仕様: [docs/container-v1.md](../container-v1.md)（新設 — 物理形式の正本）/
