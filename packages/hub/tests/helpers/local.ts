@@ -11,11 +11,35 @@ import { MANIFEST_FILENAME } from "../../src/manifest.ts";
 import type { DirectoryAdapter } from "../../src/sources/local.ts";
 import { payloadFor } from "./mock.ts";
 
-export const SHARD_PATHS = [
-  "net/model.shard0.safetensors",
-  "net/model.shard1.safetensors",
+/**
+ * 容器 1 本ぶんの part（container-v1 §8 の綴り）。添字 1 は**長さ 0 の part**（const が空の
+ * コンテナ — ADR 0109 決定 3）で、0 バイトのファイルとして配布形に置かれるが取得も読みも
+ * 起きない。
+ */
+export const PART_PATHS = [
+  "net/model-00001-of-00003.krm",
+  "net/model-00002-of-00003.krm",
+  "net/model-00003-of-00003.krm",
 ] as const;
+/** 長さ 0 の part の添字（{@link PART_PATHS} の中の 1 本）。 */
+export const EMPTY_PART_INDEX = 1;
+/** 選択の列に載る part（長さ 0 を除いた 2 本 — 取得も進捗もこの本数で数える）。 */
+export const FETCHED_PART_PATHS: readonly string[] = PART_PATHS.filter(
+  (_path, index) => index !== EMPTY_PART_INDEX,
+);
+/**
+ * 選択の表（`helpers/selection.ts` の `selectionFiles`）で part を指すキー。添字は**宣言上の
+ * part の id** なので、長さ 0 の part を飛ばしても後続の添字は詰まらない。
+ */
+export const PART_KEYS: readonly string[] = PART_PATHS
+  .map((_path, index) => `net[${index}]`)
+  .filter((_key, index) => index !== EMPTY_PART_INDEX);
 export const TOKENIZER_PATH = "tokenizer/tokenizer.json";
+
+/** コンテナのヘッダ長（container-v1 §1）。part 0 は「ヘッダ + 2 文書ちょうど」。 */
+const HEADER_BYTES = 24;
+/** モデル記述のバイト長（ダミー — hub は descriptor を parse しない）。 */
+const MODEL_DOC_BYTES = 5;
 
 /** 越境参照（ADR 0038 §7）— 別リポの資産を 1 本だけ持つ形。 */
 export const CROSS_REPO = "someone/shared";
@@ -54,16 +78,22 @@ export type LocalDist = {
 };
 
 /**
- * 1 モデル・2 shard + tokenizer の最小配布形。`cross` を真にすると、その上に越境参照の資産
- * （別リポの `text_encoder`）が 1 本乗る。
+ * 1 モデル・容器 1 本（part 3 本・うち 1 本は長さ 0）+ tokenizer の最小配布形。`cross` を真に
+ * すると、その上に越境参照の資産（別リポの `text_encoder`）が 1 本乗る。
+ *
+ * 長さ 0 の part も**0 バイトのファイルとして置く**（container-v1 §8）— 取得は起きないが、
+ * 配布形としては実在する。
  */
 export const buildLocalDist = async (
   options: { readonly cross?: boolean } = {},
 ): Promise<LocalDist> => {
-  const shards = SHARD_PATHS.map((path) => ({ path, bytes: payloadFor(path) }));
+  const parts = PART_PATHS.map((path, index) => ({
+    path,
+    bytes: index === EMPTY_PART_INDEX ? new Uint8Array(new ArrayBuffer(0)) : payloadFor(path),
+  }));
   const tokenizer = payloadFor(TOKENIZER_PATH);
   const files = new Map<string, Uint8Array<ArrayBuffer>>(
-    shards.map(({ path, bytes }) => [path, bytes]),
+    parts.map(({ path, bytes }) => [path, bytes]),
   );
   files.set(TOKENIZER_PATH, tokenizer);
   const crossFiles = new Map<string, Uint8Array<ArrayBuffer>>();
@@ -82,9 +112,10 @@ export const buildLocalDist = async (
       }
       : {}),
   };
+  const partRefs = await Promise.all(parts.map(({ path, bytes }) => fileRefJson(path, bytes)));
   const manifest = {
-    format: "karume/4",
-    generator: "karume/0.8.0",
+    format: "karume/5",
+    generator: "karume/0.13.0",
     defaultModel: "m",
     models: {
       m: {
@@ -92,9 +123,20 @@ export const buildLocalDist = async (
         weights: {
           net: {
             f16: {
-              shards: await Promise.all(
-                shards.map(({ path, bytes }) => fileRefJson(path, bytes)),
-              ),
+              container: {
+                // part 0 は「ヘッダ + グラフ記述 + モデル記述」ちょうど（container-v1 §8）。
+                descriptor: {
+                  graph: {
+                    length: partRefs[0].size - HEADER_BYTES - MODEL_DOC_BYTES,
+                    sha256: await sha256Hex(new TextEncoder().encode("graph:net/model")),
+                  },
+                  model: {
+                    length: MODEL_DOC_BYTES,
+                    sha256: await sha256Hex(new TextEncoder().encode("model:net/model")),
+                  },
+                },
+                parts: partRefs,
+              },
             },
           },
         },

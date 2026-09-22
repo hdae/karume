@@ -1,247 +1,195 @@
-// `resolveFiles` の 2 軸（model / quant）。取得層は通さず、manifest から取得キー表を作るところ
-// だけを見る。
+// `resolveSelection` の 2 軸（model / quant）と、そこから平坦な取得列を導く `selectionRefs`。
+// 取得層は通さず、manifest から選択結果を作るところだけを見る。
 //
-// ここで押さえるのは 5 つ:
-//  ① 省略時は `defaultModel` / `defaultQuant` に落ちる（v2 で model 軸が増えた）。
-//  ② weights は選んだ dtype、assets は quant に依らず常に同じ実体が入る。
-//  ③ 未知の model / quant は**利用可能な一覧**を添えて落ちる（ADR 0041 §8）。
-//  ④ 複数 shard は宣言順のまま `<weights>[i]` へ展開される（v3 の shards 欄）。
-//  ⑤ `weights` の部分集合を渡すとその役割だけが表に出る（並びは宣言順・未知名と重複は拒否）。
+// ここで押さえるのは 6 つ:
+//  ① 省略時は `defaultModel` / `defaultQuant` に落ち、実名が返る。
+//  ② 選択は**構造型**（部品名 → 容器 / 資産名 → FileRef）で、取得キーの綴り規約を持たない。
+//  ③ 並びは宣言順（`weights` の順・容器の中は part の添字順・最後に assets）。
+//  ④ `selectionRefs` は**長さ 0 の part を落とし**、同一実体を `fileRefKey` で一意化する。
+//  ⑤ `weights` の部分集合を渡すとその役割だけが選択に出る（assets は常に全数）。
+//  ⑥ 未知の model / quant / weights は**利用可能な一覧**を添えて落ちる（ADR 0041 §8）。
 
-import { assertEquals, assertThrows } from "@std/assert";
-import { ManifestReferenceError, parseManifest, resolveFiles } from "../mod.ts";
+import { assertEquals, assertNotStrictEquals, assertThrows } from "@std/assert";
+import {
+  type FileRef,
+  ManifestReferenceError,
+  parseManifest,
+  resolveSelection,
+  selectionRefs,
+} from "../mod.ts";
+import {
+  fetchManifest as manifest,
+  STYLE_VECTORS,
+  TEXT_CONDITIONER_PARTS,
+  TEXT_ENCODER_PARTS,
+  TOKENIZER,
+  TRANSFORMER_F16_PARTS,
+  TRANSFORMER_I8_EMPTY,
+  TRANSFORMER_I8_FETCHED,
+  TRANSFORMER_I8_PARTS,
+  VAE_DECODER_PARTS,
+} from "./helpers/fixture.ts";
 
-const manifest = parseManifest(
-  await Deno.readTextFile(new URL("./fixtures/manifest-fetch.json", import.meta.url)),
-);
+const paths = (refs: readonly FileRef[]): string[] => refs.map((ref) => ref.path);
 
-Deno.test("resolveFiles: 省略時は defaultModel / defaultQuant の組を返す", () => {
-  const files = resolveFiles(manifest);
-  // weights（宣言順）→ assets（宣言順）の順に並ぶ。
-  assertEquals(Object.keys(files), [
+Deno.test("resolveSelection: 省略時は defaultModel / defaultQuant の組を実名で返す", () => {
+  const selection = resolveSelection(manifest);
+  assertEquals(selection.model, "anima-turbo");
+  assertEquals(selection.quant, "w8a8-s16");
+  // 部品は weights の宣言順（取得キーの綴り規約は持たない — 席は部品名そのもの）。
+  assertEquals(Object.keys(selection.containers), [
     "text_encoder",
     "text_conditioner",
     "transformer",
-    "transformer.rope_base",
     "vae_decoder",
-    "tokenizer",
-    "rope_alias",
   ]);
-  // defaultQuant = w8a8-s16（transformer は i8）。
-  assertEquals(files["transformer"].path, "transformer/model.i8.safetensors");
+  assertEquals(Object.keys(selection.assets), ["tokenizer", "style_vectors", "style_alias"]);
+  // defaultQuant = w8a8-s16（transformer は i8 の容器）。
+  assertEquals(paths(selection.containers["transformer"].parts), [...TRANSFORMER_I8_PARTS]);
 });
 
-Deno.test("resolveFiles: quant 指定で dtype の選択が切り替わる", () => {
-  const files = resolveFiles(manifest, { quant: "f16" });
-  assertEquals(files["transformer"].path, "transformer/model.f16.safetensors");
-  // extras は dtype 側にぶら下がるが、この manifest では f16 / i8 で同じ実体を指す。
-  assertEquals(files["transformer.rope_base"].path, "transformer/rope_base.safetensors");
+Deno.test("resolveSelection: quant 指定で dtype の選択が切り替わる", () => {
+  const selection = resolveSelection(manifest, { quant: "f16" });
+  assertEquals(selection.quant, "f16");
+  assertEquals(paths(selection.containers["transformer"].parts), [...TRANSFORMER_F16_PARTS]);
+  // 切り替わるのは容器だけで、descriptor も一緒に付いてくる（2 文書の期待値は容器の持ち物）。
+  // 期待値は fixture の実値で綴る — 同じ manifest から引き直すと、descriptor を落とす実装でも
+  // 両辺が同時に動いて緑のままになる（i8 の graph は 22 なので dtype の取り違えも落ちる）。
+  assertEquals(selection.containers["transformer"].descriptor.graph.length, 23);
+  assertEquals(selection.containers["transformer"].descriptor.model.length, 5);
 });
 
-Deno.test("resolveFiles: assets は quant を切り替えても動かない", () => {
-  const defaults = resolveFiles(manifest);
-  const f16 = resolveFiles(manifest, { quant: "f16" });
-  assertEquals(f16["tokenizer"], defaults["tokenizer"]);
-  assertEquals(f16["rope_alias"], defaults["rope_alias"]);
+Deno.test("resolveSelection: assets は quant を切り替えても動かない", () => {
+  const defaults = resolveSelection(manifest);
+  const f16 = resolveSelection(manifest, { quant: "f16" });
+  assertEquals(f16.assets, defaults.assets);
+  // 中身は同じでも**表そのものは毎回組み直す** — parse 済み manifest の表を露出すると、返り値の
+  // assets への代入が以後の全選択・在庫勘定・evict を汚染する（containers と寿命の扱いを揃える）。
+  assertNotStrictEquals(defaults.assets, manifest.models["anima-turbo"].assets);
+  assertNotStrictEquals(f16.assets, defaults.assets);
 });
 
-Deno.test("resolveFiles: model 指定でそのモデルの表に切り替わる", () => {
-  const files = resolveFiles(manifest, { model: "anima-lite" });
-  assertEquals(Object.keys(files), [
-    "text_encoder",
-    "transformer",
-    "transformer.rope_base",
-    "tokenizer",
-  ]);
+Deno.test("resolveSelection: model 指定でそのモデルの選択に切り替わる", () => {
+  const selection = resolveSelection(manifest, { model: "anima-lite" });
+  assertEquals(selection.model, "anima-lite");
+  assertEquals(selection.quant, "w8");
+  assertEquals(Object.keys(selection.containers), ["text_encoder", "transformer"]);
+  assertEquals(Object.keys(selection.assets), ["tokenizer", "style_vectors"]);
   // 共有 path はモデルを跨いでも同じ 3 点セット（ADR 0041 §5 の「path の一致で共有」）。
-  assertEquals(files["text_encoder"], resolveFiles(manifest)["text_encoder"]);
-});
-
-Deno.test("resolveFiles: 同一 path を指すキーは落とさず、同じ 3 点セットを返す", () => {
-  const files = resolveFiles(manifest);
-  assertEquals(files["rope_alias"], files["transformer.rope_base"]);
-  const paths = Object.values(files).map((ref) => ref.path);
-  assertEquals(new Set(paths).size, 6, "7 キー / 6 パス（取得と進捗は path で一意化される）");
-});
-
-Deno.test("resolveFiles: 複数 shard は宣言順のまま別々の取得キーへ展開する", () => {
-  const shard = (name: string, size: number, mark: string) => ({
-    path: `net/${name}`,
-    size,
-    sha256: mark.repeat(32),
-  });
-  const graph = shard("graph.safetensors", 6, "a1");
-  const first = shard("weights-0.safetensors", 8, "b2");
-  const second = shard("weights-1.safetensors", 4, "c3");
-  const sharded = parseManifest(JSON.stringify({
-    format: "karume/4",
-    generator: "karume/0.1.0",
-    defaultModel: "m",
-    models: {
-      m: {
-        pipeline: "anima/1",
-        weights: {
-          net: {
-            f16: {
-              shards: [graph, first, second],
-              extras: { rope_base: shard("rope_base.safetensors", 6, "d4") },
-            },
-          },
-        },
-        assets: {},
-        quants: { q: { weights: { net: "f16" }, session: {} } },
-        defaultQuant: "q",
-        pipelineConfig: {},
-      },
-    },
-  }));
-  const files = resolveFiles(sharded);
-  // shard は `[i]`、extras は `.` — 名前空間が交わらないので取り違えが起きない。
-  assertEquals(Object.keys(files), ["net[0]", "net[1]", "net[2]", "net.rope_base"]);
-  assertEquals([files["net[0]"], files["net[1]"], files["net[2]"]], [graph, first, second]);
-});
-
-// ---- 取得キーの衝突。parse は weights / extras / assets を**別の名前空間**として読むので、
-// 3 つを 1 枚の表へ畳むこの関数だけが衝突の門になる（素通りすると、片方のキーがもう片方の
-// FileRef で上書きされ、呼び出し側は宣言と違うバイト列を受け取る）。
-
-const fileRefJson = (path: string, size: number, mark: string) => ({
-  path,
-  size,
-  sha256: mark.repeat(32),
-});
-
-/** weights `tokenizer`（1 shard = キーは名前そのもの）と assets の名前が衝突する最小 manifest。 */
-const withAssets = (
-  weights: Record<string, unknown>,
-  assets: Record<string, unknown>,
-  mapping: Record<string, string>,
-) =>
-  parseManifest(JSON.stringify({
-    format: "karume/4",
-    generator: "karume/0.1.0",
-    defaultModel: "m",
-    models: {
-      m: {
-        pipeline: "anima/1",
-        weights,
-        assets,
-        quants: { q: { weights: mapping, session: {} } },
-        defaultQuant: "q",
-        pipelineConfig: {},
-      },
-    },
-  }));
-
-/** 2 shard + extras `0` の weights `net`。shard は `net[i]`・extras は `net.0` へ展開される。 */
-const shardedNet = (assets: Record<string, unknown>) =>
-  withAssets(
-    {
-      net: {
-        f16: {
-          shards: [
-            fileRefJson("net/model.shard0.safetensors", 6, "a1"),
-            fileRefJson("net/model.shard1.safetensors", 8, "b2"),
-          ],
-          extras: { 0: fileRefJson("net/rope_base.safetensors", 4, "c3") },
-        },
-      },
-    },
-    assets,
-    { net: "f16" },
-  );
-
-Deno.test("resolveFiles: weights 名と assets 名の衝突は取得キーの門で落ちる", () => {
-  const colliding = withAssets(
-    { tokenizer: { f16: { shards: [fileRefJson("tokenizer/model.safetensors", 6, "a1")] } } },
-    { tokenizer: fileRefJson("tokenizer/tokenizer.json", 4, "b2") },
-    { tokenizer: "f16" },
-  );
-  // parse は通る（別の名前空間として読むだけ）— 落ちるのは表を畳むここ。
-  assertThrows(
-    () => resolveFiles(colliding),
-    ManifestReferenceError,
-    "取得キー 'tokenizer' が衝突した",
+  assertEquals(
+    selection.containers["text_encoder"].parts[0],
+    resolveSelection(manifest).containers["text_encoder"].parts[0],
   );
 });
 
-Deno.test("resolveFiles: shard 展開のキーと extras のキーは名前空間が交わらない", () => {
-  // `[i]` と `.` を分けている理由（`resolveFiles` の MUST）の対照 — extras 名 `0` は `net.0` に
-  // なるので、shard の `net[0]` とは衝突しない。
-  assertEquals(Object.keys(resolveFiles(shardedNet({}))), ["net[0]", "net[1]", "net.0"]);
+Deno.test("selectionRefs: 全容器の全 part + assets を宣言順で並べる", () => {
+  const refs = selectionRefs(resolveSelection(manifest));
+  assertEquals(paths(refs), [
+    ...TEXT_ENCODER_PARTS,
+    ...TEXT_CONDITIONER_PARTS,
+    ...TRANSFORMER_I8_FETCHED,
+    ...VAE_DECODER_PARTS,
+    TOKENIZER,
+    STYLE_VECTORS,
+  ]);
 });
 
-Deno.test("resolveFiles: assets が shard 展開のキーを主張したら取得キーの門で落ちる", () => {
-  assertThrows(
-    () => resolveFiles(shardedNet({ "net[0]": fileRefJson("shared/net0.safetensors", 4, "d4") })),
-    ManifestReferenceError,
-    "取得キー 'net[0]' が衝突した",
+Deno.test("selectionRefs: 長さ 0 の part は列に載らない（取りに行く中身が無い）", () => {
+  const refs = selectionRefs(resolveSelection(manifest));
+  assertEquals(
+    refs.filter((ref) => ref.path === TRANSFORMER_I8_EMPTY),
+    [],
+    "長さ 0 の part が取得列に残っている",
   );
+  // 宣言そのものには残る（添字が part の id なので、落とすと後続の添字がずれる）。
+  assertEquals(resolveSelection(manifest).containers["transformer"].parts.length, 3);
+  assertEquals(refs.filter((ref) => ref.size === 0), []);
+});
+
+Deno.test("selectionRefs: 同じ実体を指す 2 つの資産名は 1 本に畳まれる", () => {
+  const selection = resolveSelection(manifest);
+  // 表の席は 3 つ（tokenizer / style_vectors / style_alias）だが、実体は 2 本。
+  assertEquals(Object.keys(selection.assets).length, 3);
+  const refs = selectionRefs(selection);
+  assertEquals(refs.filter((ref) => ref.path === STYLE_VECTORS).length, 1);
+  assertEquals(new Set(paths(refs)).size, refs.length, "列に重複が残っている");
+});
+
+Deno.test("selectionRefs: 容器を跨いで同じ part を共有しても 1 本に畳まれる", () => {
+  // anima-lite の 2 容器は anima-turbo と同じ実体を指すので、列は turbo 既定の部分集合になる。
+  const lite = new Set(paths(selectionRefs(resolveSelection(manifest, { model: "anima-lite" }))));
+  const turbo = new Set(paths(selectionRefs(resolveSelection(manifest))));
+  for (const path of lite) {
+    assertEquals(turbo.has(path), true, `${path} が既定選択の部分集合になっていない`);
+  }
+  assertEquals(lite.size, TEXT_ENCODER_PARTS.length + TRANSFORMER_I8_FETCHED.length + 2);
 });
 
 // ---- ⑤ weights の部分集合（`ResolveOptions.weights`）。1 つのモデルが「本体だけでも動き、
 // 追加の役割を足すこともできる」形（gemma4 の model + drafter）を、配布形を割らずに扱う軸。
 
-Deno.test("resolveFiles: weights を絞ると指定した役割だけが表に出る（assets は全数）", () => {
-  const files = resolveFiles(manifest, { weights: ["transformer"] });
-  // transformer の shard + その extras + assets 2 本。他の 3 役割は 1 本も出ない。
-  assertEquals(Object.keys(files), [
-    "transformer",
-    "transformer.rope_base",
-    "tokenizer",
-    "rope_alias",
-  ]);
+Deno.test("resolveSelection: weights を絞ると指定した役割だけが選択に出る（assets は全数）", () => {
+  const selection = resolveSelection(manifest, { weights: ["transformer"] });
+  assertEquals(Object.keys(selection.containers), ["transformer"]);
+  assertEquals(Object.keys(selection.assets), ["tokenizer", "style_vectors", "style_alias"]);
   // 絞っても dtype の選び方は変わらない（既定 quant の i8）。
-  assertEquals(files["transformer"].path, "transformer/model.i8.safetensors");
+  assertEquals(paths(selection.containers["transformer"].parts), [...TRANSFORMER_I8_PARTS]);
+  assertEquals(paths(selectionRefs(selection)), [
+    ...TRANSFORMER_I8_FETCHED,
+    TOKENIZER,
+    STYLE_VECTORS,
+  ]);
 });
 
-Deno.test("resolveFiles: weights の並びは宣言順（指定した順ではない）", () => {
-  const files = resolveFiles(manifest, { weights: ["vae_decoder", "text_encoder"] });
-  // 呼び手が逆順に並べても、表は manifest の宣言順のまま（位置で引き当てる層のため）。
-  assertEquals(Object.keys(files), ["text_encoder", "vae_decoder", "tokenizer", "rope_alias"]);
+Deno.test("resolveSelection: weights の並びは宣言順（指定した順ではない）", () => {
+  const selection = resolveSelection(manifest, { weights: ["vae_decoder", "text_encoder"] });
+  // 呼び手が逆順に並べても、選択は manifest の宣言順のまま（取得の送出順を呼び手が動かさない）。
+  assertEquals(Object.keys(selection.containers), ["text_encoder", "vae_decoder"]);
 });
 
-Deno.test("resolveFiles: weights の空配列は 1 本も取らない（assets だけ）", () => {
-  assertEquals(Object.keys(resolveFiles(manifest, { weights: [] })), ["tokenizer", "rope_alias"]);
+Deno.test("resolveSelection: weights の空配列は 1 本も取らない（assets だけ）", () => {
+  const selection = resolveSelection(manifest, { weights: [] });
+  assertEquals(Object.keys(selection.containers), []);
+  assertEquals(paths(selectionRefs(selection)), [TOKENIZER, STYLE_VECTORS]);
 });
 
-Deno.test("resolveFiles: 実在しない weights 名は利用可能一覧つきで拒否する", () => {
+Deno.test("resolveSelection: 実在しない weights 名は利用可能一覧つきで拒否する", () => {
   const error = assertThrows(
-    () => resolveFiles(manifest, { weights: ["transformer", "drafter"] }),
+    () => resolveSelection(manifest, { weights: ["transformer", "drafter"] }),
     ManifestReferenceError,
     "weights 'drafter' は manifest に無い",
   );
   assertEquals(error.available.models, ["anima-turbo", "anima-lite"]);
 });
 
-Deno.test("resolveFiles: weights の重複は拒否する", () => {
+Deno.test("resolveSelection: weights の重複は拒否する", () => {
   assertThrows(
-    () => resolveFiles(manifest, { weights: ["transformer", "transformer"] }),
+    () => resolveSelection(manifest, { weights: ["transformer", "transformer"] }),
     ManifestReferenceError,
     "weights 'transformer' が 2 度指定された",
   );
 });
 
-Deno.test("resolveFiles: weights の実在はモデルごとに見る", () => {
+Deno.test("resolveSelection: weights の実在はモデルごとに見る", () => {
   // anima-lite に text_conditioner は無い（anima-turbo にはある）。
   assertThrows(
-    () => resolveFiles(manifest, { model: "anima-lite", weights: ["text_conditioner"] }),
+    () => resolveSelection(manifest, { model: "anima-lite", weights: ["text_conditioner"] }),
     ManifestReferenceError,
     "利用可能: text_encoder / transformer",
   );
 });
 
-Deno.test("resolveFiles: 実在しない model は利用可能一覧つきで拒否する", () => {
+Deno.test("resolveSelection: 実在しない model は利用可能一覧つきで拒否する", () => {
   const error = assertThrows(
-    () => resolveFiles(manifest, { model: "anima-xl" }),
+    () => resolveSelection(manifest, { model: "anima-xl" }),
     ManifestReferenceError,
   );
   assertEquals(error.available.models, ["anima-turbo", "anima-lite"]);
 });
 
-Deno.test("resolveFiles: 実在しない quant は利用可能一覧つきで拒否する", () => {
+Deno.test("resolveSelection: 実在しない quant は利用可能一覧つきで拒否する", () => {
   const error = assertThrows(
-    () => resolveFiles(manifest, { quant: "q4" }),
+    () => resolveSelection(manifest, { quant: "q4" }),
     ManifestReferenceError,
   );
   assertEquals(error.available.quants, ["f16", "w8a8-s16", "f16-c16"]);
@@ -253,11 +201,57 @@ Deno.test("resolveFiles: 実在しない quant は利用可能一覧つきで拒
   });
 });
 
-Deno.test("resolveFiles: quant の一覧は指定したモデルのものになる", () => {
+Deno.test("resolveSelection: quant の一覧は指定したモデルのものになる", () => {
   const error = assertThrows(
-    () => resolveFiles(manifest, { model: "anima-lite", quant: "w8a8-s16" }),
+    () => resolveSelection(manifest, { model: "anima-lite", quant: "w8a8-s16" }),
     ManifestReferenceError,
   );
   // 別モデル（anima-turbo）にしか無い quant を勧めない。
   assertEquals(error.available.quants, ["w8"]);
+});
+
+// ---- 部品名と資産名は**別の欄**に入るので、`karume/4` にあった「取得キーの衝突」という
+// 失敗形はもう存在しない（3 つの名前空間を 1 枚の表へ畳んでいたのがその門の理由だった）。
+
+Deno.test("resolveSelection: 部品名と資産名が同名でも衝突しない（欄が別）", () => {
+  const collide = parseManifest(JSON.stringify({
+    format: "karume/5",
+    generator: "karume/0.1.0",
+    defaultModel: "m",
+    models: {
+      m: {
+        pipeline: "anima/1",
+        weights: {
+          tokenizer: {
+            f16: {
+              container: {
+                descriptor: {
+                  graph: { length: 11, sha256: "f2".repeat(32) },
+                  model: { length: 5, sha256: "a3".repeat(32) },
+                },
+                parts: [
+                  { path: "tokenizer/model-00001-of-00002.krm", size: 40, sha256: "b2".repeat(32) },
+                  { path: "tokenizer/model-00002-of-00002.krm", size: 64, sha256: "c3".repeat(32) },
+                ],
+              },
+            },
+          },
+        },
+        assets: {
+          tokenizer: { path: "tokenizer/tokenizer.json", size: 12, sha256: "a1".repeat(32) },
+        },
+        quants: { q: { weights: { tokenizer: "f16" }, session: {} } },
+        defaultQuant: "q",
+        pipelineConfig: {},
+      },
+    },
+  }));
+  const selection = resolveSelection(collide);
+  assertEquals(Object.keys(selection.containers), ["tokenizer"]);
+  assertEquals(Object.keys(selection.assets), ["tokenizer"]);
+  assertEquals(paths(selectionRefs(selection)), [
+    "tokenizer/model-00001-of-00002.krm",
+    "tokenizer/model-00002-of-00002.krm",
+    "tokenizer/tokenizer.json",
+  ]);
 });

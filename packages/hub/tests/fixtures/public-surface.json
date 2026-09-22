@@ -35,12 +35,24 @@
         "kind": "typeAlias"
       },
       {
+        "name": "ContainerBlockSource",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "ContainerRef",
+        "kind": "typeAlias"
+      },
+      {
         "name": "DirectoryAdapter",
         "kind": "typeAlias"
       },
       {
         "name": "DistributionSource",
         "kind": "class"
+      },
+      {
+        "name": "DocumentExpectation",
+        "kind": "typeAlias"
       },
       {
         "name": "EvictedAssets",
@@ -143,7 +155,7 @@
         "kind": "typeAlias"
       },
       {
-        "name": "ResolvedFiles",
+        "name": "ResolvedSelection",
         "kind": "typeAlias"
       },
       {
@@ -167,11 +179,11 @@
         "kind": "typeAlias"
       },
       {
-        "name": "WeightEntry",
+        "name": "WeightContainer",
         "kind": "typeAlias"
       },
       {
-        "name": "WeightFiles",
+        "name": "WeightEntry",
         "kind": "typeAlias"
       },
       {
@@ -207,6 +219,10 @@
         "kind": "function"
       },
       {
+        "name": "openContainerSource",
+        "kind": "function"
+      },
+      {
         "name": "parseManifest",
         "kind": "function"
       },
@@ -215,7 +231,11 @@
         "kind": "function"
       },
       {
-        "name": "resolveFiles",
+        "name": "resolveSelection",
+        "kind": "function"
+      },
+      {
+        "name": "selectionRefs",
         "kind": "function"
       },
       {

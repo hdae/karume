@@ -14,9 +14,20 @@ import {
   ManifestFormatError,
   openAsset,
   prefetchAssets,
-  resolveFiles,
   type RetryDiagnostic,
 } from "../mod.ts";
+import {
+  FETCH_MANIFEST_BYTES,
+  fetchManifest,
+  STYLE_VECTORS,
+  TEXT_CONDITIONER_PARTS,
+  TEXT_ENCODER_PARTS,
+  TOKENIZER,
+  TRANSFORMER_F16_PARTS,
+  TRANSFORMER_I8_FETCHED,
+  VAE_DECODER_PARTS,
+} from "./helpers/fixture.ts";
+import { declaredRefs, selectionFiles } from "./helpers/selection.ts";
 import {
   createMockFetch,
   hasEntry,
@@ -35,19 +46,10 @@ import {
 
 const MANIFEST_PATH = "karume.json";
 
-const ASSET_PATHS = [
-  "text_encoder/model.safetensors",
-  "text_conditioner/model.safetensors",
-  "transformer/model.f16.safetensors",
-  "transformer/model.i8.safetensors",
-  "transformer/rope_base.safetensors",
-  "vae_decoder/model.safetensors",
-  "tokenizer/qwen2-tokenizer.json",
-];
+/** fixture が宣言する全ファイル（長さ 0 の part は中身が無いので配信しない）。 */
+const ASSET_PATHS = declaredRefs(fetchManifest).map((ref) => ref.path);
 
-const manifestBytes = new TextEncoder().encode(
-  await Deno.readTextFile(new URL("./fixtures/manifest-fetch.json", import.meta.url)),
-);
+const manifestBytes = FETCH_MANIFEST_BYTES;
 
 const serveAll = (
   overrides: ReadonlyMap<string, Uint8Array<ArrayBuffer>> = new Map(),
@@ -125,7 +127,7 @@ Deno.test("loadManifest: 可変 ref は 1 回だけ解決し、以降は同一 S
   assertEquals(mock.calls[0], revisionUrl("main"));
   assertEquals(mock.calls[1], resolveUrl(MANIFEST_PATH));
 
-  await fetchAssets(loaded, resolveFiles(loaded.manifest), { fetch: mock.fetch, caches });
+  await fetchAssets(loaded, selectionFiles(loaded.manifest), { fetch: mock.fetch, caches });
   assertEquals(countCalls(mock.calls, revisionUrl("main")), 1, "解決はセッション 1 回だけ");
   for (const call of mock.calls.slice(1)) {
     assert(call.includes(`/resolve/${SHA}/`), `${call} が解決済み SHA に固定されていない`);
@@ -310,7 +312,7 @@ Deno.test("loadManifest: 破損した cached karume.json は self-heal で 1 往
   overwriteEntry(
     hubCache(caches),
     manifestBytes,
-    new TextEncoder().encode('{"format": "karume/4"'),
+    new TextEncoder().encode('{"format": "karume/5"'),
     { keepRecord: true },
   );
   const healedParse = createMockFetch({ files: serveAll() });
@@ -325,7 +327,7 @@ Deno.test("loadManifest: 破損した cached karume.json は self-heal で 1 往
 
 Deno.test("loadManifest: 真実源の karume.json が壊れていれば ManifestFormatError（キャッシュにも残さない）", async () => {
   const caches = new MemoryCacheStorage();
-  const broken = new TextEncoder().encode('{"format": "karume/4"');
+  const broken = new TextEncoder().encode('{"format": "karume/5"');
   const mock = createMockFetch({ files: serveAll(new Map([[MANIFEST_PATH, broken]])) });
   await assertRejects(
     () =>
@@ -398,25 +400,24 @@ const load = async (routes: MockRoutes, caches: MemoryCacheStorage) => {
 Deno.test("fetchAssets: 全キーを返し、同一 path は 1 回しか取りに行かない", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: serveAll() }, caches);
-  const files = resolveFiles(loaded.manifest);
+  const files = selectionFiles(loaded.manifest);
   const assets = await fetchAssets(loaded, files, { fetch: mock.fetch, caches });
 
   assertEquals(Object.keys(assets), Object.keys(files));
   assertEquals(
-    countCalls(mock.calls, resolveUrl("transformer/rope_base.safetensors")),
+    countCalls(mock.calls, resolveUrl(STYLE_VECTORS)),
     1,
     "重複 path は 1 回だけ取得する",
   );
   assert(
-    assets["rope_alias"] === assets["transformer.rope_base"],
+    assets["style_alias"] === assets["style_vectors"],
     "同一 path のキーは同じバイト列を共有する",
   );
-  assertEquals(
-    assets["transformer"],
-    payloadFor("transformer/model.i8.safetensors"),
-  );
-  // 選ばれなかった variant は取りに行かない。
-  assertEquals(countCalls(mock.calls, resolveUrl("transformer/model.f16.safetensors")), 0);
+  assertEquals(assets["transformer[0]"], payloadFor(TRANSFORMER_I8_FETCHED[0]));
+  // 選ばれなかった dtype の容器は 1 part も取りに行かない。
+  for (const path of TRANSFORMER_F16_PARTS) {
+    assertEquals(countCalls(mock.calls, resolveUrl(path)), 0, `${path} を取りに行っている`);
+  }
   for (const bytes of Object.values(assets)) {
     assertEquals(bytes.byteOffset, 0);
     assertEquals(bytes.byteLength, bytes.buffer.byteLength);
@@ -426,7 +427,7 @@ Deno.test("fetchAssets: 全キーを返し、同一 path は 1 回しか取り�
 Deno.test("fetchAssets: 進捗総量は manifest の size 合計（path 一意化）", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: serveAll() }, caches);
-  const files = resolveFiles(loaded.manifest);
+  const files = selectionFiles(loaded.manifest);
   const events: AssetProgress[] = [];
   await fetchAssets(loaded, files, {
     fetch: mock.fetch,
@@ -466,7 +467,7 @@ Deno.test("fetchAssets: 進捗総量は manifest の size 合計（path 一意�
 Deno.test("fetchAssets: ファイル別の進捗は全体合計とは別に 1 ファイルぶんを表す", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: serveAll() }, caches);
-  const files = resolveFiles(loaded.manifest);
+  const files = selectionFiles(loaded.manifest);
   const events: AssetProgress[] = [];
   await fetchAssets(loaded, files, {
     fetch: mock.fetch,
@@ -519,7 +520,7 @@ const assertMonotonic = (phases: readonly AssetPhase[], path: string): void => {
 Deno.test("fetchAssets: network 取得の phase は downloading → complete と単調に進む", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: serveAll() }, caches);
-  const files = resolveFiles(loaded.manifest);
+  const files = selectionFiles(loaded.manifest);
   const events: AssetProgress[] = [];
   await fetchAssets(loaded, files, {
     fetch: mock.fetch,
@@ -542,7 +543,7 @@ Deno.test("fetchAssets: network 取得の phase は downloading → complete と
 Deno.test("fetchAssets: キャッシュヒットの phase 列は complete の 1 点だけ", async () => {
   const caches = new MemoryCacheStorage();
   const first = await load({ files: serveAll() }, caches);
-  const files = resolveFiles(first.loaded.manifest);
+  const files = selectionFiles(first.loaded.manifest);
   await fetchAssets(first.loaded, files, { fetch: first.mock.fetch, caches });
 
   const second = createMockFetch({ files: serveAll() });
@@ -579,11 +580,11 @@ Deno.test("fetchAssets: キャッシュヒットの phase 列は complete の 1 
 
 // 律速は「本数」ではなく「in-flight の size 合計」（バイト予算）。予算そのものの境界挙動は
 // tests/concurrency_test.ts が単体で凍結し、ここは面としての観測 — 予算に収まる限り本数では
-// 絞らないこと・送出順が resolveFiles の順に決まることを見る。
+// 絞らないこと・送出順が選択の宣言順に決まることを見る。
 Deno.test("fetchAssets: 予算に収まる限り本数では絞らない（律速はバイト予算）", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: serveAll(), delayMs: 5 }, caches);
-  const files = resolveFiles(loaded.manifest);
+  const files = selectionFiles(loaded.manifest);
   // fixture の全ファイルを足しても予算（1.5GiB）に遠く及ばないので、全本が同時に走る。
   const uniquePaths = new Set(Object.values(files).map((ref) => ref.path));
   await fetchAssets(loaded, files, { fetch: mock.fetch, caches });
@@ -594,10 +595,10 @@ Deno.test("fetchAssets: 予算に収まる限り本数では絞らない（律�
   );
 });
 
-Deno.test("fetchAssets: 送出順は resolveFiles の順（予算待ちを後続に追い越させない）", async () => {
+Deno.test("fetchAssets: 送出順は選択の宣言順（予算待ちを後続に追い越させない）", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: serveAll(), delayMs: 5 }, caches);
-  const files = resolveFiles(loaded.manifest);
+  const files = selectionFiles(loaded.manifest);
   // path 一意化の後、宣言順に 1 回ずつ。
   const expected: string[] = [];
   for (const ref of Object.values(files)) {
@@ -609,7 +610,7 @@ Deno.test("fetchAssets: 送出順は resolveFiles の順（予算待ちを後続
   assertEquals(mock.calls.slice(1), expected);
 });
 
-/** 取得対象の path を送出順（= resolveFiles 順の path 一意化）に並べる。 */
+/** 取得対象の path を送出順（= 表の順の path 一意化）に並べる。 */
 const dispatchOrder = (files: Readonly<Record<string, { path: string }>>): string[] => {
   const order: string[] = [];
   for (const ref of Object.values(files)) {
@@ -622,7 +623,7 @@ Deno.test("fetchAssets: 巻き添えではなく真の第一失敗が表面化�
   const caches = new MemoryCacheStorage();
   const served = serveAll();
   const { mock, loaded } = await load({ files: served, delayMs: 5 }, caches);
-  const files = resolveFiles(loaded.manifest);
+  const files = selectionFiles(loaded.manifest);
   const order = dispatchOrder(files);
   // **先頭以外**の 1 本だけを 404 にする。1 本の失敗は残り全部を abort するので、巻き添え側は
   // 生の AbortError（Chrome ではさらに固定文言へ差し替えられる）として決着する — 決着順や
@@ -644,7 +645,7 @@ Deno.test("fetchAssets: 巻き添えではなく真の第一失敗が表面化�
 Deno.test("fetchAssets: 2 回目はキャッシュから返り network に出ない", async () => {
   const caches = new MemoryCacheStorage();
   const first = await load({ files: serveAll() }, caches);
-  const files = resolveFiles(first.loaded.manifest);
+  const files = selectionFiles(first.loaded.manifest);
   await fetchAssets(first.loaded, files, { fetch: first.mock.fetch, caches });
 
   const second = createMockFetch({ files: serveAll() });
@@ -655,7 +656,7 @@ Deno.test("fetchAssets: 2 回目はキャッシュから返り network に出な
     onProgress: (progress) => events.push(progress),
   });
   assertEquals(second.calls, [], "キャッシュヒットは network に出ない");
-  assertEquals(assets["tokenizer"], payloadFor("tokenizer/qwen2-tokenizer.json"));
+  assertEquals(assets["tokenizer"], payloadFor(TOKENIZER));
   assertEquals(
     events.filter((event) => event.phase === "complete").length,
     new Set(Object.values(files).map((ref) => ref.path)).size,
@@ -666,32 +667,32 @@ Deno.test("fetchAssets: 2 回目はキャッシュから返り network に出な
 Deno.test("fetchAssets: 記録ハッシュが一致するヒットは中身を読み直さずに信じる", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: serveAll() }, caches);
-  const files = resolveFiles(loaded.manifest);
+  const files = selectionFiles(loaded.manifest);
   await fetchAssets(loaded, files, { fetch: mock.fetch, caches });
 
   // 記録（取得時に焼かれたヘッダ）はそのままに、中身だけ差し替える。取得層の既定は
   // 「記録が期待と一致すれば信じる」（ローカル格納の信頼 — knob なしの裁定）なので、全量
   // ハッシュは走らず、この壊れたバイト列がそのまま返る。**トラストの範囲を明示する門**で、
   // ここが赤くなったなら再ハッシュが復活した（＝毎起動の全量ハッシュが戻った）ということ。
-  const path = "vae_decoder/model.safetensors";
+  const path = VAE_DECODER_PARTS[1];
   const tampered = tamper(payloadFor(path));
   overwriteEntry(hubCache(caches), payloadFor(path), tampered, { keepRecord: true });
 
   const second = createMockFetch({ files: serveAll() });
   const assets = await fetchAssets(loaded, files, { fetch: second.fetch, caches });
-  assertEquals(assets["vae_decoder"], tampered, "記録一致のヒットで全量ハッシュが走っている");
+  assertEquals(assets["vae_decoder[1]"], tampered, "記録一致のヒットで全量ハッシュが走っている");
   assertEquals(second.calls, [], "記録が一致しているのに取り直している");
 });
 
 Deno.test("fetchAssets: 記録の無い破損エントリは実ハッシュが捕まえ、1 往復で治る", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: serveAll() }, caches);
-  const files = resolveFiles(loaded.manifest);
+  const files = selectionFiles(loaded.manifest);
   await fetchAssets(loaded, files, { fetch: mock.fetch, caches });
 
   // 記録ごと落とす = 旧版 / 無検証 prefetch 由来のエントリと同じ形。読出し側は実ハッシュで
   // 突合するので、壊れていれば evict → 取り直し（self-heal）になる。
-  const path = "vae_decoder/model.safetensors";
+  const path = VAE_DECODER_PARTS[1];
   overwriteEntry(hubCache(caches), payloadFor(path), tamper(payloadFor(path)), {
     keepRecord: false,
   });
@@ -699,7 +700,7 @@ Deno.test("fetchAssets: 記録の無い破損エントリは実ハッシュが�
   const second = createMockFetch({ files: serveAll() });
   const assets = await fetchAssets(loaded, files, { fetch: second.fetch, caches });
 
-  assertEquals(assets["vae_decoder"], payloadFor(path), "破損キャッシュが素通りしている");
+  assertEquals(assets["vae_decoder[1]"], payloadFor(path), "破損キャッシュが素通りしている");
   assertEquals(countCalls(second.calls, resolveUrl(path)), 1, "self-heal は 1 往復だけ");
   assertEquals(second.calls.length, 1, "壊れていないファイルまで取り直している");
 });
@@ -707,24 +708,24 @@ Deno.test("fetchAssets: 記録の無い破損エントリは実ハッシュが�
 Deno.test("fetchAssets: 記録が一致してもバイト数が manifest と違えば取り直す", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: serveAll() }, caches);
-  const files = resolveFiles(loaded.manifest);
+  const files = selectionFiles(loaded.manifest);
   await fetchAssets(loaded, files, { fetch: mock.fetch, caches });
 
   // 記録は一致 = 全量ハッシュは走らない状態で、長さだけが manifest と食い違うエントリ。
   // `expectedBytes` の門（取得層 HF 層の検証）だけがこれを捕まえられる。
-  const path = "text_encoder/model.safetensors";
+  const path = TEXT_ENCODER_PARTS[1];
   const truncated = payloadFor(path).slice(0, payloadFor(path).byteLength - 1);
   overwriteEntry(hubCache(caches), payloadFor(path), truncated, { keepRecord: true });
 
   const second = createMockFetch({ files: serveAll() });
   const assets = await fetchAssets(loaded, files, { fetch: second.fetch, caches });
-  assertEquals(assets["text_encoder"], payloadFor(path), "長さの違うエントリが素通りしている");
+  assertEquals(assets["text_encoder[1]"], payloadFor(path), "長さの違うエントリが素通りしている");
   assertEquals(countCalls(second.calls, resolveUrl(path)), 1, "self-heal は 1 往復だけ");
 });
 
 Deno.test("fetchAssets: content-length は正しいのに body が足りない取得は fail loudly", async () => {
   const caches = new MemoryCacheStorage();
-  const path = "text_conditioner/model.safetensors";
+  const path = TEXT_CONDITIONER_PARTS[1];
   const full = payloadFor(path);
   const short = full.slice(0, full.byteLength - 2);
   // content-length は manifest の size を主張しつつ、body だけ短く流す（取得層の上限は
@@ -734,7 +735,7 @@ Deno.test("fetchAssets: content-length は正しいのに body が足りない�
     contentLength: (target) => target === path ? full.byteLength : undefined,
   }, caches);
   const error = await assertRejects(
-    () => fetchAssets(loaded, resolveFiles(loaded.manifest), { fetch: mock.fetch, caches }),
+    () => fetchAssets(loaded, selectionFiles(loaded.manifest), { fetch: mock.fetch, caches }),
     HubFetchError,
   );
   assertEquals(error.path, path);
@@ -744,11 +745,11 @@ Deno.test("fetchAssets: content-length は正しいのに body が足りない�
 
 Deno.test("fetchAssets: 資産の 429 は onRetry で届き、取り直したバイト列が返る", async () => {
   const caches = new MemoryCacheStorage();
-  const path = "vae_decoder/model.safetensors";
+  const path = VAE_DECODER_PARTS[1];
   const target = resolveUrl(path);
   const { mock, loaded } = await load({ files: serveAll() }, caches);
   const retries: RetryDiagnostic[] = [];
-  const assets = await fetchAssets(loaded, resolveFiles(loaded.manifest), {
+  const assets = await fetchAssets(loaded, selectionFiles(loaded.manifest), {
     fetch: rateLimitOnce(mock.fetch, (url) => url === target),
     caches,
     onRetry: (diagnostic) => retries.push(diagnostic),
@@ -756,14 +757,14 @@ Deno.test("fetchAssets: 資産の 429 は onRetry で届き、取り直したバ
   assertEquals(retries.length, 1, "再試行の通知が 1 回だけ届いていない");
   assertEquals(retries[0].url, target, "通知が別の資産の URL を名乗っている");
   assertEquals(retries[0].status, 429);
-  assertEquals(assets["vae_decoder"], payloadFor(path), "取り直したバイト列が返っていない");
+  assertEquals(assets["vae_decoder[1]"], payloadFor(path), "取り直したバイト列が返っていない");
   assertEquals(countCalls(mock.calls, target), 2, "429 の後に取り直していない");
 });
 
 Deno.test("fetchAssets: 完全キャッシュ済みでも中断済み signal なら資産を返さない", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: serveAll() }, caches);
-  const files = resolveFiles(loaded.manifest);
+  const files = selectionFiles(loaded.manifest);
   await fetchAssets(loaded, files, { fetch: mock.fetch, caches });
   const cached = hubCache(caches).entries.size;
 
@@ -786,7 +787,7 @@ Deno.test("fetchAssets: 完全キャッシュ済みでも中断済み signal な
 Deno.test("fetchAssets: キャッシュ読出し中の中断でも資産を返さずに素通しする", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: serveAll() }, caches);
-  const files = resolveFiles(loaded.manifest);
+  const files = selectionFiles(loaded.manifest);
   await fetchAssets(loaded, files, { fetch: mock.fetch, caches });
   const uniquePaths = new Set(Object.values(files).map((ref) => ref.path)).size;
 
@@ -823,7 +824,7 @@ Deno.test("fetchAssets: 認証の有無でキャッシュを分けない（ヘ�
     caches,
     headers: { authorization: "Bearer hf_token" },
   });
-  const files = resolveFiles(loaded.manifest);
+  const files = selectionFiles(loaded.manifest);
   await fetchAssets(loaded, files, {
     fetch: authed.fetch,
     caches,
@@ -845,13 +846,16 @@ Deno.test("fetchAssets: 認証の有無でキャッシュを分けない（ヘ�
 
 Deno.test("fetchAssets: sha256 の食い違いは fail loudly（真実源が壊れていれば残さない）", async () => {
   const caches = new MemoryCacheStorage();
-  const corrupt = new TextEncoder().encode("karume-test:tampered-payload-XXXXXXXXXXXX");
-  const path = "vae_decoder/model.safetensors";
+  const path = VAE_DECODER_PARTS[1];
+  // 長さは宣言どおり・中身だけ別物（size の門ではなく sha256 の門を踏ませる）。
+  const corrupt = new TextEncoder().encode(
+    "karume-test:tampered-".padEnd(payloadFor(path).byteLength, "X"),
+  );
   assertEquals(corrupt.byteLength, payloadFor(path).byteLength, "長さは合わせ sha256 だけ外す");
   const { mock, loaded } = await load({ files: serveAll(new Map([[path, corrupt]])) }, caches);
   // 照合は取得層（受信中のハッシュ）が行うので、hub からは取得の失敗として上がる。
   const error = await assertRejects(
-    () => fetchAssets(loaded, resolveFiles(loaded.manifest), { fetch: mock.fetch, caches }),
+    () => fetchAssets(loaded, selectionFiles(loaded.manifest), { fetch: mock.fetch, caches }),
     HubFetchError,
   );
   assertEquals(error.repo, REPO);
@@ -864,7 +868,7 @@ Deno.test("fetchAssets: sha256 の食い違いは fail loudly（真実源が壊�
 
 Deno.test("fetchAssets: 受信バイトが size を超えれば取得層の上限で fail loudly（キャッシュに残さない）", async () => {
   const caches = new MemoryCacheStorage();
-  const path = "text_encoder/model.safetensors";
+  const path = TEXT_ENCODER_PARTS[1];
   const declared = payloadFor(path).byteLength;
   const bloated = new TextEncoder().encode(`karume-test:${path}${"!".repeat(64)}`);
   const { mock, loaded } = await load({
@@ -873,7 +877,7 @@ Deno.test("fetchAssets: 受信バイトが size を超えれば取得層の上�
     contentLength: (target) => target === path ? declared : undefined,
   }, caches);
   const error = await assertRejects(
-    () => fetchAssets(loaded, resolveFiles(loaded.manifest), { fetch: mock.fetch, caches }),
+    () => fetchAssets(loaded, selectionFiles(loaded.manifest), { fetch: mock.fetch, caches }),
     HubFetchError,
   );
   assertEquals(error.path, path);
@@ -892,7 +896,7 @@ Deno.test("fetchAssets: AbortSignal は全取得へ透過する", async () => {
   const { mock, loaded } = await load({ files: serveAll(), delayMs: 5 }, caches);
   const controller = new AbortController();
   const error = await assertRejects(() =>
-    fetchAssets(loaded, resolveFiles(loaded.manifest), {
+    fetchAssets(loaded, selectionFiles(loaded.manifest), {
       fetch: mock.fetch,
       caches,
       signal: controller.signal,
@@ -908,7 +912,7 @@ Deno.test("fetchAssets: abort(reason) の custom Error はそのまま伝播す�
   const controller = new AbortController();
   const reason = new Error("app: ユーザーがロードを取り消した");
   const error = await assertRejects(() =>
-    fetchAssets(loaded, resolveFiles(loaded.manifest), {
+    fetchAssets(loaded, selectionFiles(loaded.manifest), {
       fetch: mock.fetch,
       caches,
       signal: controller.signal,
@@ -923,7 +927,7 @@ Deno.test("fetchAssets: abort(reason) が primitive でもそのまま伝播す�
   const { mock, loaded } = await load({ files: serveAll(), delayMs: 5 }, caches);
   const controller = new AbortController();
   const error = await assertRejects(() =>
-    fetchAssets(loaded, resolveFiles(loaded.manifest), {
+    fetchAssets(loaded, selectionFiles(loaded.manifest), {
       fetch: mock.fetch,
       caches,
       signal: controller.signal,
@@ -942,12 +946,16 @@ Deno.test("fetchAssets: cache I/O の失敗はアプリへ届く診断になる�
     { repo: REPO, hubUrl: HUB_URL, revision: SHA },
     { fetch: mock.fetch, caches, onCacheError: (entry) => diagnostics.push(entry) },
   );
-  const assets = await fetchAssets(loaded, resolveFiles(loaded.manifest), {
+  const assets = await fetchAssets(loaded, selectionFiles(loaded.manifest), {
     fetch: mock.fetch,
     caches,
     onCacheError: (entry) => diagnostics.push(entry),
   });
-  assertEquals(Object.keys(assets).length, 7, "cache が死んでも取得は成立する");
+  assertEquals(
+    Object.keys(assets).length,
+    Object.keys(selectionFiles(loaded.manifest)).length,
+    "cache が死んでも取得は成立する",
+  );
   assert(diagnostics.length > 0, "quota 失敗が黙って握り潰されている");
   assertEquals(new Set(diagnostics.map((entry) => entry.op)), new Set(["put"]));
 });
@@ -980,7 +988,9 @@ const populated = async (...names: readonly string[]): Promise<MemoryCacheStorag
 
 const FOREIGN_REPO = "someone/text-stack";
 const FOREIGN_SHA = "89abcdef0123456789abcdef0123456789abcdef";
-const CROSS_PATH = "text_encoder/model.safetensors";
+const CROSS_PATH = "text_encoder/model-00001-of-00002.krm";
+const OWN_PART1 = "own/model-00002-of-00002.krm";
+const BORROWED_PART1 = "borrowed/model-00002-of-00002.krm";
 
 const digestOf = async (bytes: Uint8Array<ArrayBuffer>): Promise<string> =>
   Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)))
@@ -990,9 +1000,25 @@ const digestOf = async (bytes: Uint8Array<ArrayBuffer>): Promise<string> =>
 const localBytes = new TextEncoder().encode("karume-test:local-text-encoder");
 const foreignBytes = new TextEncoder().encode("karume-test:foreign-text-encoder-payload");
 
-/** 自リポと越境先が**同じ path**を主張する manifest（取り違えの検出器）。 */
+/** part 0 の宣言（`24 + graph + model` ちょうど — container-v1 §8）。 */
+const descriptorFor = (part0Bytes: number) => ({
+  graph: { length: part0Bytes - 24 - 5, sha256: "f2".repeat(32) },
+  model: { length: 5, sha256: "a3".repeat(32) },
+});
+
+const crossPart1 = async (path: string, mark: string) => ({
+  path,
+  size: payloadFor(path).byteLength,
+  sha256: await digestOf(payloadFor(path)),
+  ...(mark === "" ? {} : { repo: FOREIGN_REPO, revision: FOREIGN_SHA }),
+});
+
+/**
+ * 自リポと越境先が**同じ path**を part 0 に主張する manifest（取り違えの検出器）。越境は
+ * **容器単位**（ADR 0109 決定 3）なので、借りる側は全 part が越境先の座標を名乗る。
+ */
 const crossRepoManifest = JSON.stringify({
-  format: "karume/4",
+  format: "karume/5",
   generator: "karume/0.1.0",
   defaultModel: "m",
   models: {
@@ -1001,22 +1027,34 @@ const crossRepoManifest = JSON.stringify({
       weights: {
         own: {
           i8: {
-            shards: [{
-              path: CROSS_PATH,
-              size: localBytes.byteLength,
-              sha256: await digestOf(localBytes),
-            }],
+            container: {
+              descriptor: descriptorFor(localBytes.byteLength),
+              parts: [
+                {
+                  path: CROSS_PATH,
+                  size: localBytes.byteLength,
+                  sha256: await digestOf(localBytes),
+                },
+                await crossPart1(OWN_PART1, ""),
+              ],
+            },
           },
         },
         borrowed: {
           i8: {
-            shards: [{
-              path: CROSS_PATH,
-              size: foreignBytes.byteLength,
-              sha256: await digestOf(foreignBytes),
-              repo: FOREIGN_REPO,
-              revision: FOREIGN_SHA,
-            }],
+            container: {
+              descriptor: descriptorFor(foreignBytes.byteLength),
+              parts: [
+                {
+                  path: CROSS_PATH,
+                  size: foreignBytes.byteLength,
+                  sha256: await digestOf(foreignBytes),
+                  repo: FOREIGN_REPO,
+                  revision: FOREIGN_SHA,
+                },
+                await crossPart1(BORROWED_PART1, "cross"),
+              ],
+            },
           },
         },
       },
@@ -1034,7 +1072,9 @@ const crossRepoFiles = (
   new Map([
     [MANIFEST_PATH, new TextEncoder().encode(crossRepoManifest)],
     [CROSS_PATH, localBytes],
+    [OWN_PART1, payloadFor(OWN_PART1)],
     [`${FOREIGN_REPO}@${FOREIGN_SHA}/${CROSS_PATH}`, foreignBytes],
+    [`${FOREIGN_REPO}@${FOREIGN_SHA}/${BORROWED_PART1}`, payloadFor(BORROWED_PART1)],
     ...overrides,
   ]);
 
@@ -1043,11 +1083,11 @@ const foreignUrl = `${HUB_URL}/${FOREIGN_REPO}/resolve/${FOREIGN_SHA}/${CROSS_PA
 Deno.test("fetchAssets: 越境参照は宣言された (repo, revision) から取る", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: crossRepoFiles() }, caches);
-  const files = resolveFiles(loaded.manifest);
+  const files = selectionFiles(loaded.manifest);
   const assets = await fetchAssets(loaded, files, { fetch: mock.fetch, caches });
 
-  assertEquals(assets["own"], localBytes, "自リポぶんが越境先のバイト列に化けている");
-  assertEquals(assets["borrowed"], foreignBytes, "越境ぶんが自リポのバイト列に化けている");
+  assertEquals(assets["own[0]"], localBytes, "自リポぶんが越境先のバイト列に化けている");
+  assertEquals(assets["borrowed[0]"], foreignBytes, "越境ぶんが自リポのバイト列に化けている");
   assertEquals(countCalls(mock.calls, foreignUrl), 1, "越境先の URL を叩いていない");
   assertEquals(countCalls(mock.calls, resolveUrl(CROSS_PATH)), 1, "自リポの URL を叩いていない");
   // 内容キーなので取得元 URL では引けない。別リポの同名 path が別エントリで共存すること
@@ -1063,7 +1103,7 @@ Deno.test("fetchAssets: 越境参照の検証失敗は越境先の repo / SHA �
     files: crossRepoFiles(new Map([[`${FOREIGN_REPO}@${FOREIGN_SHA}/${CROSS_PATH}`, corrupt]])),
   }, caches);
   const error = await assertRejects(
-    () => fetchAssets(loaded, resolveFiles(loaded.manifest), { fetch: mock.fetch, caches }),
+    () => fetchAssets(loaded, selectionFiles(loaded.manifest), { fetch: mock.fetch, caches }),
     HubFetchError,
   );
   // セッションの repo を名乗ると「そのリポには無い path」を指す診断になる。
@@ -1076,52 +1116,58 @@ Deno.test("fetchAssets: 越境先の 429 も onRetry で届く（越境先の UR
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: crossRepoFiles() }, caches);
   const retries: RetryDiagnostic[] = [];
-  const assets = await fetchAssets(loaded, resolveFiles(loaded.manifest), {
+  const assets = await fetchAssets(loaded, selectionFiles(loaded.manifest), {
     fetch: rateLimitOnce(mock.fetch, (url) => url === foreignUrl),
     caches,
     onRetry: (diagnostic) => retries.push(diagnostic),
   });
   assertEquals(retries.map((diagnostic) => diagnostic.url), [foreignUrl]);
-  assertEquals(assets["borrowed"], foreignBytes, "取り直した越境ぶんが返っていない");
+  assertEquals(assets["borrowed[0]"], foreignBytes, "取り直した越境ぶんが返っていない");
   assertEquals(countCalls(mock.calls, foreignUrl), 2, "429 の後に取り直していない");
 });
 
 Deno.test("fetchAssets: 同じ path の自リポ / 越境は進捗でも別の 1 本として数える", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: crossRepoFiles() }, caches);
-  const files = resolveFiles(loaded.manifest);
+  const files = selectionFiles(loaded.manifest);
   const events: AssetProgress[] = [];
   await fetchAssets(loaded, files, {
     fetch: mock.fetch,
     caches,
     onProgress: (progress) => events.push(progress),
   });
-  const expectedTotal = localBytes.byteLength + foreignBytes.byteLength;
+  let expectedTotal = 0;
+  for (const ref of Object.values(files)) expectedTotal += ref.size;
   for (const event of events) assertEquals(event.total, expectedTotal, "総量が畳まれている");
   assertEquals(events[events.length - 1].loaded, expectedTotal, "最後は総量に到達する");
   assertEquals(
     events.filter((event) => event.phase === "complete").length,
-    2,
+    Object.keys(files).length,
     "同じ path の 2 本が 1 本に畳まれている",
+  );
+  assertEquals(
+    events.filter((event) => event.phase === "complete" && event.path === CROSS_PATH).length,
+    2,
+    "同じ path の自リポ / 越境が 1 本に畳まれている",
   );
 });
 
-// ---- 分割されたコンポーネントへの越境参照（ADR 0038 §7 / ADR 0071 決定 2 —「shards の各要素は
-// 従来の FileRef 検査をそのまま通す」）。exporter は 1GiB 超の共有コンポーネントを
-// **shard 1 本 = 参照 1 つ**の形で焼くので、受け側は列の全要素を参照先の URL から取れなければ
-// ならない（先頭だけ越境する / 列を畳むと、残りの shard がセッションの repo に無くて落ちる）。
+// ---- 越境した容器（ADR 0038 §7 / ADR 0109 決定 3 —「越境参照は容器単位」）。exporter は
+// 共有コンポーネントを **part 1 本 = 参照 1 つ**の形で焼くので、受け側は容器の全 part を参照先の
+// URL から取れなければならない（先頭だけ越境する / 列を畳むと、残りの part がセッションの repo に
+// 無くて落ちる）。
 
 const SPLIT_PATHS = [
-  "text_encoder/model-00001-of-00002.safetensors",
-  "text_encoder/model-00002-of-00002.safetensors",
+  "text_encoder/model-00001-of-00002.krm",
+  "text_encoder/model-00002-of-00002.krm",
 ];
 
 const splitBytes = SPLIT_PATHS.map((path) =>
-  new TextEncoder().encode(`karume-test:foreign-shard:${path}`)
+  new TextEncoder().encode(`karume-test:foreign-part:${path}`)
 );
 
 const splitShardManifest = JSON.stringify({
-  format: "karume/4",
+  format: "karume/5",
   generator: "karume/0.1.0",
   defaultModel: "m",
   models: {
@@ -1130,13 +1176,16 @@ const splitShardManifest = JSON.stringify({
       weights: {
         borrowed: {
           f16: {
-            shards: await Promise.all(SPLIT_PATHS.map(async (path, index) => ({
-              path,
-              size: splitBytes[index].byteLength,
-              sha256: await digestOf(splitBytes[index]),
-              repo: FOREIGN_REPO,
-              revision: FOREIGN_SHA,
-            }))),
+            container: {
+              descriptor: descriptorFor(splitBytes[0].byteLength),
+              parts: await Promise.all(SPLIT_PATHS.map(async (path, index) => ({
+                path,
+                size: splitBytes[index].byteLength,
+                sha256: await digestOf(splitBytes[index]),
+                repo: FOREIGN_REPO,
+                revision: FOREIGN_SHA,
+              }))),
+            },
           },
         },
       },
@@ -1156,17 +1205,16 @@ const splitShardFiles = (): Map<string, Uint8Array<ArrayBuffer>> =>
     ),
   ]);
 
-Deno.test("fetchAssets: 分割コンポーネントは shard ごとに越境先の URL から取る", async () => {
+Deno.test("fetchAssets: 越境した容器は part ごとに越境先の URL から取る", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: splitShardFiles() }, caches);
-  const files = resolveFiles(loaded.manifest);
+  const files = selectionFiles(loaded.manifest);
 
-  // 取得キーは shard の位置つき（列の位置が shard の id — ADR 0071 決定 2）。
   assertEquals(Object.keys(files), ["borrowed[0]", "borrowed[1]"]);
   const assets = await fetchAssets(loaded, files, { fetch: mock.fetch, caches });
 
-  assertEquals(assets["borrowed[0]"], splitBytes[0], "先頭 shard のバイト列が違う");
-  assertEquals(assets["borrowed[1]"], splitBytes[1], "後続 shard のバイト列が違う");
+  assertEquals(assets["borrowed[0]"], splitBytes[0], "part 0 のバイト列が違う");
+  assertEquals(assets["borrowed[1]"], splitBytes[1], "part 1 のバイト列が違う");
   for (const path of SPLIT_PATHS) {
     assertEquals(
       countCalls(mock.calls, `${HUB_URL}/${FOREIGN_REPO}/resolve/${FOREIGN_SHA}/${path}`),
@@ -1184,7 +1232,7 @@ Deno.test("fetchAssets: 分割コンポーネントは shard ごとに越境先�
 Deno.test("clearHubCache: 温めた資産を消す（次の取得は network に出る）", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: serveAll() }, caches);
-  const files = resolveFiles(loaded.manifest);
+  const files = selectionFiles(loaded.manifest);
   await fetchAssets(loaded, files, { fetch: mock.fetch, caches });
   const cached = hubCache(caches).entries.size;
   assert(cached > 1, "manifest 以外に資産が溜まっていない");
@@ -1251,7 +1299,7 @@ const openable = async (): Promise<{
     fetch: mock.fetch,
     caches,
   });
-  return { mock, caches, loaded, ref: resolveFiles(loaded.manifest)["tokenizer"] };
+  return { mock, caches, loaded, ref: selectionFiles(loaded.manifest)["tokenizer"] };
 };
 
 Deno.test("openAsset: 温め済みの参照は取得を起こさずに区間だけを返す", async () => {
@@ -1315,7 +1363,7 @@ Deno.test("openAsset: 記録ハッシュを持たないエントリは読まず�
 Deno.test("openAsset: 記録ハッシュが宣言と食い違うエントリも読まずに取り直す", async () => {
   const { mock, caches, loaded, ref } = await openable();
   const access = { fetch: mock.fetch, caches };
-  const other = resolveFiles(loaded.manifest)["vae_decoder"];
+  const other = selectionFiles(loaded.manifest)["vae_decoder[0]"];
   await prefetchAssets(loaded, [ref, other], access);
   const payload = payloadFor(ref.path);
   // 2 件の記録を入れ替える = どちらも「記録ハッシュ ≠ manifest の宣言」になる。開く側はこれを
@@ -1336,7 +1384,7 @@ Deno.test("openAsset: 越境参照は宣言された (repo, revision) の口で�
   const access = { fetch: mock.fetch, caches };
   // 自リポと越境先が**同じ path** を主張する manifest なので、path で畳んでいれば自リポの
   // バイト列が読めてしまう（区間読みの口も `originFor` 経由で越境先から生えることの検出器）。
-  const ref = resolveFiles(loaded.manifest)["borrowed"];
+  const ref = selectionFiles(loaded.manifest)["borrowed[0]"];
   const calls = mock.calls.length;
 
   const reader = await openAsset(loaded, ref, access);
@@ -1352,7 +1400,7 @@ Deno.test("openAsset: abort 済み signal は口の有無に依らず reason を
     fetch: mock.fetch,
     caches: new MemoryCacheStorage(),
   });
-  const files = resolveFiles(remote.manifest);
+  const files = selectionFiles(remote.manifest);
   const ref = files[Object.keys(files)[0]];
 
   // 口を持たない取得元（位置読みを持たないアダプター）を同じ manifest で 1 本作る。
@@ -1394,7 +1442,7 @@ Deno.test("fetchAssets: 特殊キーも own property で返し、同じ参照の
       return Promise.resolve(bytes);
     },
   }, { label: "synthetic" }));
-  const ref = Object.values(resolveFiles(loaded.manifest))[0];
+  const ref = Object.values(selectionFiles(loaded.manifest))[0];
   const files = Object.fromEntries(
     ["__proto__", "constructor", "2", "toString"].map((key) => [key, ref]),
   );

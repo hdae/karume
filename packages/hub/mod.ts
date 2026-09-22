@@ -1,15 +1,18 @@
 /**
- * `@karume/hub` — 配布 manifest v4（`karume.json` / `karume/4`）の解決と、HF またはローカル
+ * `@karume/hub` — 配布 manifest v5（`karume.json` / `karume/5`）の解決と、HF またはローカル
  * ディレクトリからの取得。
  *
  * ADR 0008: ここは**明示的に設計した薄い面**であり、内部モジュールの素通し再輸出はしない。
  * 面は利用者ストーリーに対応する — manifest を読む（{@link parseManifest} /
  * {@link loadManifest}）/ 手元の配布形を取得元にする（{@link localDirectory} — ランタイム別の
- * 読み口は `@karume/hub/deno` 等のサブパス）/ モデルと実行構成を選ぶ（{@link resolveFiles}）/
- * 資産を取る
- * （{@link fetchAssets}）/ shard を 2 相で逐次受け取る（{@link streamAssets} — RAM ピーク
- * O(最大 shard)。`docs/decisions/0070-shard-loading-admission.md` 決定 2）/ 資産を先に永続
- * キャッシュへ落とす（{@link prefetchAssets} — 逐次面の相 1 単体）/ 資産 1 本の区間だけを読む
+ * 読み口は `@karume/hub/deno` 等のサブパス）/ モデルと実行構成を選ぶ
+ * （{@link resolveSelection} — 平坦な FileRef 列は {@link selectionRefs}）/ コンテナ 1 本を
+ * 区間読みで読む（{@link openContainerSource} — 温めは {@link prefetchAssets} が先。
+ * `@karume/runtime` の `openContainer` にそのまま渡せる）/ 資産を取る（{@link fetchAssets}）/
+ * ファイルを 2 相で
+ * 逐次受け取る（{@link streamAssets} — RAM ピーク O(最大ファイル)。
+ * `docs/decisions/0070-shard-loading-admission.md` 決定 2）/ 資産を先に永続キャッシュへ落とす
+ * （{@link prefetchAssets} — 逐次面の相 1 単体）/ 資産 1 本の区間だけを読む
  * （{@link openAsset} — 取得元が持たなければ `undefined`）/ 失敗を型で捌く
  * （{@link HubError} 以下）/ キャッシュの診断を受け取る（{@link CacheDiagnostic}）/
  * 取得層の再試行（429 / 503 の `Retry-After` 追従）の通知を受け取る（{@link RetryDiagnostic}）/
@@ -17,22 +20,25 @@
  * （{@link listCachedAssets} — 取りには行かない）/ 選択 1 つぶんの在庫を消す
  * （{@link evictCachedAssets} — 他の選択が使うファイルと越境参照は残す）。
  *
- * 仕様の正本は `docs/decisions/0041-manifest-v2.md`（取得層は `0038-manifest-v1.md` §5）。
+ * 仕様の正本は `docs/decisions/0109-manifest-v5-container.md`（コンテナの物理形式は
+ * `docs/container-v1.md`・取得層は `0038-manifest-v1.md` §5）。
  *
  * ## 版と manifest の対応
  *
- * **旧版の manifest は読まない**（major が違えば unsupported format で落ちる — ADR 0041 §1）。
- * JSR 3 本と PyPI `karume`（manifest を書く側）は lockstep で上がるので、下の対応は
- * `@karume/runtime` / `@karume/models` / exporter にもそのまま当てはまる。配布形（HF リポの
- * `karume.json`）を作り直す段取りを事前に読むための表:
+ * **旧版の manifest は読まない**（major が違えば unsupported format で落ちる —
+ * ADR 0109 決定 1）。JSR 3 本と PyPI `karume`（manifest を書く側）は lockstep で上がるので、
+ * 下の対応は `@karume/runtime` / `@karume/models` / exporter にもそのまま当てはまる。配布形
+ * （HF リポの `karume.json`）を作り直す段取りを事前に読むための表:
  *
  * | パッケージ版 | `format` | 主な変更 |
  * | --- | --- | --- |
  * | 0.1.x | `karume/1` | 初版 |
  * | 0.2.x 〜 0.3.x | `karume/2` | model / quant の 2 軸（ADR 0041） |
  * | 0.4.x | `karume/3` | dtype エントリの shard 欄（ADR 0071） |
- * | 0.5.x | `karume/4` | quant の表示欄 + `requiredLimits`（ADR 0075 / 0038 §7）・ファイル参照の
- * 越境席（`repo` / `revision`）・`session` の計算ノブ値 `i8a8` → `a8`（ADR 0074） |
+ * | 0.5.x 〜 0.12.x | `karume/4` | quant の表示欄 + `requiredLimits`（ADR 0075 / 0038 §7）・
+ * ファイル参照の越境席（`repo` / `revision`）・`session` の計算ノブ値 `i8a8` → `a8`（ADR 0074） |
+ * | 次のリリース | `karume/5` | 配布形がコンテナ（`krm`）へ — dtype エントリが `{ container }`
+ * （descriptor の期待値 + part の FileRef 列）になり、`shards` / `extras` は退役（ADR 0109） |
  *
  * 配布形を上げ直す手順は `docs/release-runbook.md`。
  */
@@ -40,6 +46,8 @@
 export { MANIFEST_FILENAME, parseManifest } from "./src/manifest.ts";
 export type {
   AttentionCompute,
+  ContainerRef,
+  DocumentExpectation,
   FileRef,
   GpuFeaturesSpec,
   LinearCompute,
@@ -51,12 +59,24 @@ export type {
   RequiredLimitsSpec,
   ScoreStorage,
   SessionSpec,
+  WeightContainer,
   WeightEntry,
-  WeightFiles,
 } from "./src/manifest.ts";
 
-export { resolveFiles } from "./src/resolve.ts";
-export type { ResolvedFiles, ResolveOptions } from "./src/resolve.ts";
+export { resolveSelection, selectionRefs } from "./src/resolve.ts";
+export type { ResolvedSelection, ResolveOptions } from "./src/resolve.ts";
+
+/**
+ * コンテナ 1 本の取得面（ADR 0109 決定 7）。`openContainerSource` が返す
+ * {@link ContainerBlockSource} は `@karume/runtime` の `BlockSource` と構造互換なので、
+ * `openContainer({ kind: "source", source })` へそのまま渡せる。
+ *
+ * この面は**温めない**（開くだけでは 1 バイトも取りに行かない）— 進捗・中断つきの温めは
+ * {@link prefetchAssets} で先に通す（descriptor で admission を通してから重みを落とす順序を
+ * 呼び手が保てるようにするため — ADR 0108 決定 19）。
+ */
+export { openContainerSource } from "./src/container.ts";
+export type { ContainerBlockSource } from "./src/container.ts";
 
 /**
  * 取得元。`loadManifest` / `fromPretrained` は HF のリポ参照（{@link HubRepoRef}）か、ここで

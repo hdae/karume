@@ -1,5 +1,5 @@
 {
-  "format": "karume/4",
+  "format": "karume/5",
   "generator": "karume/0.1.0",
   "defaultModel": "anima-turbo",
   "models": {
@@ -8,69 +8,165 @@
       "weights": {
         "text_encoder": {
           "f16": {
-            "shards": [
-              {
-                "path": "text_encoder/model.safetensors",
-                "size": 42,
-                "sha256": "14a36a9dbd47cb0288f910d3c713008bef9a97ed11f4816082fe40d592c991b9"
-              }
-            ]
+            "container": {
+              "descriptor": {
+                "graph": {
+                  "length": 20,
+                  "sha256": "ac0ad1380193432080ffd1684b2a343d096d7a5fcef84ebf72335b035c1b8a2b"
+                },
+                "model": {
+                  "length": 5,
+                  "sha256": "09081e0bb71bddd19a13e97fde3257ffdf5e45aee0b5715efc0bf7eb560f1a9d"
+                }
+              },
+              "parts": [
+                {
+                  "path": "text_encoder/model-00001-of-00003.krm",
+                  "size": 49,
+                  "sha256": "8c5a2d9281924b5e64bae274bd19c6e961caf977466dfc39dc19576282fc823a"
+                },
+                {
+                  "path": "text_encoder/model-00002-of-00003.krm",
+                  "size": 49,
+                  "sha256": "8e9cddcac18db532aa55c5c2981c2be87e469bf75a9362a07a1f6c1ca9fe9a88"
+                },
+                {
+                  "path": "text_encoder/model-00003-of-00003.krm",
+                  "size": 49,
+                  "sha256": "a5f697d1ad997125f839da40e5fbffd5d6e711784e60fa11a6625d9ddaf572e7"
+                }
+              ]
+            }
           }
         },
         "text_conditioner": {
           "f16": {
-            "shards": [
-              {
-                "path": "text_conditioner/model.safetensors",
-                "size": 46,
-                "sha256": "6c2c839f36130ea9889e282b706f93939337823efe553b27dc1c2bbf4d94be7e"
-              }
-            ]
+            "container": {
+              "descriptor": {
+                "graph": {
+                  "length": 24,
+                  "sha256": "f859bbbfafd30220cae2a6c4d542e555498659bcb9c6e2046342ac9884c846cd"
+                },
+                "model": {
+                  "length": 5,
+                  "sha256": "54e8efa016e8f538643d7656ca56acf3cb2d5ca19e0d5051497fac5f0c1333fe"
+                }
+              },
+              "parts": [
+                {
+                  "path": "text_conditioner/model-00001-of-00003.krm",
+                  "size": 53,
+                  "sha256": "3b674e55bfdf0cd550840edb5b565f312012254e4e9aad9408480b60459dc917"
+                },
+                {
+                  "path": "text_conditioner/model-00002-of-00003.krm",
+                  "size": 53,
+                  "sha256": "e028fdeeea01fe817fccf90f00deca87690aaf8feea47886e9fa5997c021e366"
+                },
+                {
+                  "path": "text_conditioner/model-00003-of-00003.krm",
+                  "size": 53,
+                  "sha256": "4872036008752162a740272ce36d304aded14db25e7d50f24ee09656a191b074"
+                }
+              ]
+            }
           }
         },
         "transformer": {
           "f16": {
-            "shards": [
-              {
-                "path": "transformer/model.f16.safetensors",
-                "size": 45,
-                "sha256": "34e402b013ecd081136a12177f61d0c8bc861849e27b97e4a8af10f8e98e7e1e"
-              }
-            ],
-            "extras": {
-              "rope_base": {
-                "path": "transformer/rope_base.safetensors",
-                "size": 45,
-                "sha256": "9b7060f4da16b75050e943f51334ae676699efaf73c86db253b248f5f7c8202e"
-              }
+            "container": {
+              "descriptor": {
+                "graph": {
+                  "length": 23,
+                  "sha256": "f3f020bd7e8173494d6cc5d13d04d7b0a060e85cf2bb6feb3fdb4152cf40170b"
+                },
+                "model": {
+                  "length": 5,
+                  "sha256": "d10a2787161ef7da0b6dd9e31771826ebcea026da06fb5f97f7e18eb104c58cc"
+                }
+              },
+              "parts": [
+                {
+                  "path": "transformer/model.f16-00001-of-00003.krm",
+                  "size": 52,
+                  "sha256": "52e3d72a486165a6e102eb60a2c0f2374446a342330fea65add6d6effb8d65d0"
+                },
+                {
+                  "path": "transformer/model.f16-00002-of-00003.krm",
+                  "size": 52,
+                  "sha256": "0dce93a79d8d54f22a11a5d768f31be99ad6df605991fe3445b72b9f82c45d7a"
+                },
+                {
+                  "path": "transformer/model.f16-00003-of-00003.krm",
+                  "size": 52,
+                  "sha256": "5a6be675f97e43b8419470677dc9f4df049b7971a66359f0dec1a68b2aa7267c"
+                }
+              ]
             }
           },
           "i8": {
-            "shards": [
-              {
-                "path": "transformer/model.i8.safetensors",
-                "size": 44,
-                "sha256": "9ee4f749d4f6e27b29c760a4ebab8cac2cc64c7e8fb9282ac314056e6dc39e32"
-              }
-            ],
-            "extras": {
-              "rope_base": {
-                "path": "transformer/rope_base.safetensors",
-                "size": 45,
-                "sha256": "9b7060f4da16b75050e943f51334ae676699efaf73c86db253b248f5f7c8202e"
-              }
+            "container": {
+              "descriptor": {
+                "graph": {
+                  "length": 22,
+                  "sha256": "60251915f29bc4e5d22d2e98f65fe2e01c0db67055355924915bae01c9e45114"
+                },
+                "model": {
+                  "length": 5,
+                  "sha256": "298a496c8ca7a2895a37535f0197a4abfd48d9223a8194f8b0607b7bbc013c56"
+                }
+              },
+              "parts": [
+                {
+                  "path": "transformer/model.i8-00001-of-00003.krm",
+                  "size": 51,
+                  "sha256": "0749e5bc84b5ba1ac973a195ca9772f05fca487a3f6ff883ca12b8a500e3ede8"
+                },
+                {
+                  "path": "transformer/model.i8-00002-of-00003.krm",
+                  "size": 0,
+                  "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                },
+                {
+                  "path": "transformer/model.i8-00003-of-00003.krm",
+                  "size": 51,
+                  "sha256": "6dbbecca9bc4fc8251e98331b1dbde30976cd4f78223ce14293b0080c4dd5822"
+                }
+              ]
             }
           }
         },
         "vae_decoder": {
           "f16": {
-            "shards": [
-              {
-                "path": "vae_decoder/model.safetensors",
-                "size": 41,
-                "sha256": "422c2a6d4a1839415af25db2feb032c5df824df03f023da868cb4fabd6a6aec4"
-              }
-            ]
+            "container": {
+              "descriptor": {
+                "graph": {
+                  "length": 19,
+                  "sha256": "95c73738bfffe404473cfca393adb1b525f42410ac395d33ed9e2d10a622d168"
+                },
+                "model": {
+                  "length": 5,
+                  "sha256": "ab5244ea488f97661e873d1485de2308bfc94257523346230ca57525c75062f7"
+                }
+              },
+              "parts": [
+                {
+                  "path": "vae_decoder/model-00001-of-00003.krm",
+                  "size": 48,
+                  "sha256": "dc14f1e598f8e6f18b0455790b553416c5082f899a9d868391accb10f41dda8f"
+                },
+                {
+                  "path": "vae_decoder/model-00002-of-00003.krm",
+                  "size": 48,
+                  "sha256": "82033c5f6720db2de758a18f646ce34e6582930568e023af83a17befd7ec3760"
+                },
+                {
+                  "path": "vae_decoder/model-00003-of-00003.krm",
+                  "size": 48,
+                  "sha256": "f8ce4f98dbd6577fe40281cd0d7bce46c08c7142a64b43333dac2b30fd8b20aa"
+                }
+              ]
+            }
           }
         }
       },
@@ -80,10 +176,15 @@
           "size": 42,
           "sha256": "38793e49c2a2a1a2376b8677e804e42b9def9104e9b3b53d5b8fbc1a3d096449"
         },
-        "rope_alias": {
-          "path": "transformer/rope_base.safetensors",
-          "size": 45,
-          "sha256": "9b7060f4da16b75050e943f51334ae676699efaf73c86db253b248f5f7c8202e"
+        "style_vectors": {
+          "path": "style/style_vectors.safetensors",
+          "size": 43,
+          "sha256": "3ade30c41ee3ba0ed2abe907d9e62e2e6de93e131cac1bcf0f8b608561a15d2f"
+        },
+        "style_alias": {
+          "path": "style/style_vectors.safetensors",
+          "size": 43,
+          "sha256": "3ade30c41ee3ba0ed2abe907d9e62e2e6de93e131cac1bcf0f8b608561a15d2f"
         }
       },
       "quants": {
@@ -138,30 +239,67 @@
       "weights": {
         "text_encoder": {
           "f16": {
-            "shards": [
-              {
-                "path": "text_encoder/model.safetensors",
-                "size": 42,
-                "sha256": "14a36a9dbd47cb0288f910d3c713008bef9a97ed11f4816082fe40d592c991b9"
-              }
-            ]
+            "container": {
+              "descriptor": {
+                "graph": {
+                  "length": 20,
+                  "sha256": "ac0ad1380193432080ffd1684b2a343d096d7a5fcef84ebf72335b035c1b8a2b"
+                },
+                "model": {
+                  "length": 5,
+                  "sha256": "09081e0bb71bddd19a13e97fde3257ffdf5e45aee0b5715efc0bf7eb560f1a9d"
+                }
+              },
+              "parts": [
+                {
+                  "path": "text_encoder/model-00001-of-00003.krm",
+                  "size": 49,
+                  "sha256": "8c5a2d9281924b5e64bae274bd19c6e961caf977466dfc39dc19576282fc823a"
+                },
+                {
+                  "path": "text_encoder/model-00002-of-00003.krm",
+                  "size": 49,
+                  "sha256": "8e9cddcac18db532aa55c5c2981c2be87e469bf75a9362a07a1f6c1ca9fe9a88"
+                },
+                {
+                  "path": "text_encoder/model-00003-of-00003.krm",
+                  "size": 49,
+                  "sha256": "a5f697d1ad997125f839da40e5fbffd5d6e711784e60fa11a6625d9ddaf572e7"
+                }
+              ]
+            }
           }
         },
         "transformer": {
           "i8": {
-            "shards": [
-              {
-                "path": "transformer/model.i8.safetensors",
-                "size": 44,
-                "sha256": "9ee4f749d4f6e27b29c760a4ebab8cac2cc64c7e8fb9282ac314056e6dc39e32"
-              }
-            ],
-            "extras": {
-              "rope_base": {
-                "path": "transformer/rope_base.safetensors",
-                "size": 45,
-                "sha256": "9b7060f4da16b75050e943f51334ae676699efaf73c86db253b248f5f7c8202e"
-              }
+            "container": {
+              "descriptor": {
+                "graph": {
+                  "length": 22,
+                  "sha256": "60251915f29bc4e5d22d2e98f65fe2e01c0db67055355924915bae01c9e45114"
+                },
+                "model": {
+                  "length": 5,
+                  "sha256": "298a496c8ca7a2895a37535f0197a4abfd48d9223a8194f8b0607b7bbc013c56"
+                }
+              },
+              "parts": [
+                {
+                  "path": "transformer/model.i8-00001-of-00003.krm",
+                  "size": 51,
+                  "sha256": "0749e5bc84b5ba1ac973a195ca9772f05fca487a3f6ff883ca12b8a500e3ede8"
+                },
+                {
+                  "path": "transformer/model.i8-00002-of-00003.krm",
+                  "size": 0,
+                  "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                },
+                {
+                  "path": "transformer/model.i8-00003-of-00003.krm",
+                  "size": 51,
+                  "sha256": "6dbbecca9bc4fc8251e98331b1dbde30976cd4f78223ce14293b0080c4dd5822"
+                }
+              ]
             }
           }
         }
@@ -171,6 +309,11 @@
           "path": "tokenizer/qwen2-tokenizer.json",
           "size": 42,
           "sha256": "38793e49c2a2a1a2376b8677e804e42b9def9104e9b3b53d5b8fbc1a3d096449"
+        },
+        "style_vectors": {
+          "path": "style/style_vectors.safetensors",
+          "size": 43,
+          "sha256": "3ade30c41ee3ba0ed2abe907d9e62e2e6de93e131cac1bcf0f8b608561a15d2f"
         }
       },
       "quants": {

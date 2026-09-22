@@ -8,8 +8,9 @@ import {
   loadManifest,
   ManifestReferenceError,
   prefetchAssets,
-  resolveFiles,
+  resolveSelection,
   type RetryDiagnostic,
+  selectionRefs,
   streamAssets,
   type StreamedAsset,
 } from "../mod.ts";
@@ -19,6 +20,13 @@ import {
   type SourceDriver,
   type SourceOrigin,
 } from "../src/source.ts";
+import {
+  FETCH_MANIFEST_BYTES,
+  fetchManifest,
+  TOKENIZER,
+  VAE_DECODER_PARTS,
+} from "./helpers/fixture.ts";
+import { declaredRefs } from "./helpers/selection.ts";
 import {
   abortWhileAwaitingResponse,
   createMockFetch,
@@ -35,19 +43,10 @@ import {
 
 const MANIFEST_PATH = "karume.json";
 
-const ASSET_PATHS = [
-  "text_encoder/model.safetensors",
-  "text_conditioner/model.safetensors",
-  "transformer/model.f16.safetensors",
-  "transformer/model.i8.safetensors",
-  "transformer/rope_base.safetensors",
-  "vae_decoder/model.safetensors",
-  "tokenizer/qwen2-tokenizer.json",
-];
+/** fixture が宣言する全ファイル（長さ 0 の part は中身が無いので配信しない）。 */
+const ASSET_PATHS = declaredRefs(fetchManifest).map((ref) => ref.path);
 
-const manifestBytes = new TextEncoder().encode(
-  await Deno.readTextFile(new URL("./fixtures/manifest-fetch.json", import.meta.url)),
-);
+const manifestBytes = FETCH_MANIFEST_BYTES;
 
 const serveAll = (
   overrides: ReadonlyMap<string, Uint8Array<ArrayBuffer>> = new Map(),
@@ -71,18 +70,12 @@ const tamper = (bytes: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer> => {
 };
 
 /**
- * shard 列（= 逐次面の入力）。全量面と違い path の一意化は呼び出し側の責務なので、
- * ここで manifest 由来の重複（`rope_alias`）を畳んでから渡す。
+ * ファイル列（= 逐次面の入力）。`selectionRefs` は長さ 0 の part を落とし、同一実体
+ * （`style_alias` のような別名）を畳んだ列を宣言順で返すので、そのまま渡せる。
  */
-const shardRefs = (loaded: LoadedManifest): FileRef[] => {
-  const files = resolveFiles(loaded.manifest);
-  const byPath = new Map<string, FileRef>();
-  for (const key of Object.keys(files)) {
-    const ref = files[key];
-    if (!byPath.has(ref.path)) byPath.set(ref.path, ref);
-  }
-  return [...byPath.values()];
-};
+const shardRefs = (loaded: LoadedManifest): FileRef[] => [
+  ...selectionRefs(resolveSelection(loaded.manifest)),
+];
 
 /** manifest は別 mock で読み、逐次面の観測用に呼び出し記録が空の mock を渡す。 */
 const prepare = async (
@@ -213,7 +206,7 @@ Deno.test("streamAssets: キャッシュも真実源も壊れていれば fail l
 
   // 記録を落として中身を壊す = 相 1 が「陳腐化」と見て温め直しに行く形。その取り直し先
   // （真実源）も壊れているので、通過中の照合で落ちてエントリは成立しない。
-  const path = "vae_decoder/model.safetensors";
+  const path = VAE_DECODER_PARTS[1];
   const corrupt = tamper(payloadFor(path));
   overwriteEntry(hubCache(caches), payloadFor(path), corrupt, { keepRecord: false });
 
@@ -249,7 +242,7 @@ Deno.test("streamAssets: 相 1 の 429 は onRetry で届き、温め直した s
 
 Deno.test("streamAssets: 相 1 の sha256 不一致は fail loud で、キャッシュにエントリを残さない", async () => {
   const caches = new MemoryCacheStorage();
-  const path = "tokenizer/qwen2-tokenizer.json";
+  const path = TOKENIZER;
   const { loaded, refs, mock } = await prepare(
     { files: serveAll(new Map([[path, tamper(payloadFor(path))]])) },
     caches,

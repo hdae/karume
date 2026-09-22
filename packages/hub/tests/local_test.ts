@@ -18,7 +18,6 @@ import {
   ManifestReferenceError,
   openAsset,
   prefetchAssets,
-  resolveFiles,
   streamAssets,
 } from "../mod.ts";
 import type { AssetProgress, DirectoryAdapter } from "../mod.ts";
@@ -34,10 +33,12 @@ import {
   CROSS_PATH,
   CROSS_REPO,
   CROSS_REVISION,
+  FETCHED_PART_PATHS,
   memoryDirectory,
-  SHARD_PATHS,
+  PART_KEYS,
   TOKENIZER_PATH,
 } from "./helpers/local.ts";
+import { selectionFiles } from "./helpers/selection.ts";
 import { MemoryCacheStorage, payloadFor } from "./helpers/mock.ts";
 
 const LABEL = "./models/karume-test";
@@ -80,7 +81,7 @@ const recordProgress = (): { events: AssetProgress[]; onProgress: (p: AssetProgr
   return { events, onProgress: (progress) => events.push(progress) };
 };
 
-Deno.test("localDirectory: manifest → resolveFiles → fetchAssets が実体のバイト列で完走する", async () => {
+Deno.test("localDirectory: manifest → resolveSelection → fetchAssets が実体のバイト列で完走する", async () => {
   const dist = await buildLocalDist();
   const { directory, loaded } = await openLocal(dist.files);
 
@@ -89,21 +90,24 @@ Deno.test("localDirectory: manifest → resolveFiles → fetchAssets が実体�
   assertEquals(loaded.revisionSha, undefined);
   assertEquals(loaded.manifest.available.models, ["m"]);
 
-  const files = resolveFiles(loaded.manifest);
+  const files = selectionFiles(loaded.manifest);
   const assets = await fetchAssets(loaded, files);
-  assertEquals(Object.keys(assets).sort(), ["net[0]", "net[1]", "tokenizer"]);
-  SHARD_PATHS.forEach((path, index) => {
-    assertEquals(assets[`net[${index}]`], payloadFor(path), `${path} の実体が配られていない`);
+  assertEquals(Object.keys(assets).sort(), [...PART_KEYS, "tokenizer"].sort());
+  PART_KEYS.forEach((key, index) => {
+    const part = FETCHED_PART_PATHS[index];
+    assertEquals(assets[key], payloadFor(part), `${part} の実体が配られていない`);
   });
   assertEquals(assets["tokenizer"], payloadFor(TOKENIZER_PATH));
-  // 読んだのは manifest 1 本 + 資産 3 本だけ（同じ path を 2 度読まない）。
-  assertEquals(directory.reads, [MANIFEST_FILENAME, ...SHARD_PATHS, TOKENIZER_PATH]);
+  // 読んだのは manifest 1 本 + 資産 3 本だけ（長さ 0 の part は読まない・同じ path も 2 度読まない）。
+  assertEquals(directory.reads, [MANIFEST_FILENAME, ...FETCHED_PART_PATHS, TOKENIZER_PATH]);
 });
 
 Deno.test("localDirectory: 中断は資産の読みへ透過する", async () => {
   const dist = await buildLocalDist();
   const { directory, loaded } = await openLocal(dist.files);
-  await fetchAssets(loaded, resolveFiles(loaded.manifest), { signal: AbortSignal.timeout(60_000) });
+  await fetchAssets(loaded, selectionFiles(loaded.manifest), {
+    signal: AbortSignal.timeout(60_000),
+  });
   // manifest は loadManifest の signal 無し呼び出し、資産は面の signal つき。
   assertEquals(directory.signals, [false, true, true, true]);
 });
@@ -115,8 +119,8 @@ Deno.test("localDirectory: streamAssets は相 2 だけで完走し、CacheStora
   const loaded = await loadManifest(localDirectory(directory.adapter, { label: LABEL }), {
     caches,
   });
-  const files = resolveFiles(loaded.manifest);
-  const refs = SHARD_PATHS.map((_path, index): FileRef => files[`net[${index}]`]);
+  const files = selectionFiles(loaded.manifest);
+  const refs = PART_KEYS.map((key): FileRef => files[key]);
   const progress = recordProgress();
 
   const received: string[] = [];
@@ -125,9 +129,9 @@ Deno.test("localDirectory: streamAssets は相 2 だけで完走し、CacheStora
     assertEquals(asset.bytes, payloadFor(asset.id));
   }
 
-  assertEquals(received, [...SHARD_PATHS], "宣言順に届いていない");
+  assertEquals(received, [...FETCHED_PART_PATHS], "宣言順に届いていない");
   // 相 1 が丸ごと省かれるので、1 本につき読みは 1 回だけ（温めてから読み直す形にならない）。
-  assertEquals(directory.reads, [MANIFEST_FILENAME, ...SHARD_PATHS]);
+  assertEquals(directory.reads, [MANIFEST_FILENAME, ...FETCHED_PART_PATHS]);
   // 受信の途中という状態が無いので、進捗はファイルごとの complete 1 点だけ。
   assertEquals(progress.events.map((event) => event.phase), ["complete", "complete"]);
   assertEquals(
@@ -140,8 +144,8 @@ Deno.test("localDirectory: streamAssets は相 2 だけで完走し、CacheStora
 Deno.test("prefetchAssets: 相 1 を持たない取得元では何もしない（入力検査だけは効く）", async (t) => {
   const dist = await buildLocalDist();
   const { directory, loaded } = await openLocal(dist.files);
-  const files = resolveFiles(loaded.manifest);
-  const refs = SHARD_PATHS.map((_path, index): FileRef => files[`net[${index}]`]);
+  const files = selectionFiles(loaded.manifest);
+  const refs = PART_KEYS.map((key): FileRef => files[key]);
 
   await t.step("温めるべきキャッシュが無いのは失敗ではない（no-op で返る）", async () => {
     const progress = recordProgress();
@@ -156,6 +160,32 @@ Deno.test("prefetchAssets: 相 1 を持たない取得元では何もしない�
   });
 });
 
+Deno.test("prefetchAssets: 相 1 の有無は ref ごと — 越境先が持つなら越境ぶんだけ温める", async () => {
+  // セッションの取得元だけで判定すると、ローカル配布形 + 越境先がリモートという正当な構成で
+  // 越境ぶんの温めが丸ごと飛ぶ（進捗も signal も届かないまま、実際の取得は後の読みの中で走る）。
+  const dist = await buildLocalDist({ cross: true });
+  const calls: [string, string][] = [];
+  const warmed: string[] = [];
+  const { directory, loaded } = await openLocal(dist.files, {
+    crossRepo: { [CROSS_REPO]: fakeRemote(dist.crossFiles, calls, { warmed }) },
+  });
+  const files = selectionFiles(loaded.manifest);
+  const refs = [...PART_KEYS.map((key): FileRef => files[key]), files["text_encoder"]];
+  directory.reads.length = 0;
+  const progress = recordProgress();
+
+  await prefetchAssets(loaded, refs, { onProgress: progress.onProgress });
+
+  assertEquals(warmed, [CROSS_PATH], "越境 ref が温められていない");
+  // 進捗も温めた ref のぶんだけ出る（相 1 を持たないローカルの ref は 1 つも出さない）。
+  assertEquals(
+    progress.events.map((event) => [event.phase, event.path]),
+    [["complete", CROSS_PATH]],
+    "越境ぶんの進捗が出ていない",
+  );
+  assertEquals(directory.reads, [], "相 1 を持たない取得元の ref を読みに行っている");
+});
+
 Deno.test("localDirectory: size 不一致は fail loudly（path とディレクトリを名乗る）", async () => {
   const dist = await buildLocalDist();
   // 実体だけを差し替える（manifest の size / sha256 は元のまま = 途中で切れたコピーの形）。
@@ -164,7 +194,7 @@ Deno.test("localDirectory: size 不一致は fail loudly（path とディレク�
   const { loaded } = await openLocal(tampered);
 
   const error = await assertRejects(
-    () => fetchAssets(loaded, resolveFiles(loaded.manifest)),
+    () => fetchAssets(loaded, selectionFiles(loaded.manifest)),
     IntegrityError,
   );
   assertEquals(error.path, TOKENIZER_PATH);
@@ -185,7 +215,7 @@ Deno.test("localDirectory: sha256 は照合しない（size が合えば読み�
   tampered.set(TOKENIZER_PATH, swapped);
   const { loaded } = await openLocal(tampered);
 
-  const assets = await fetchAssets(loaded, resolveFiles(loaded.manifest));
+  const assets = await fetchAssets(loaded, selectionFiles(loaded.manifest));
   assertEquals(
     assets["tokenizer"],
     swapped,
@@ -196,19 +226,19 @@ Deno.test("localDirectory: sha256 は照合しない（size が合えば読み�
 Deno.test("localDirectory: 実体が無いファイルは実パスを cause に残して HubFetchError", async () => {
   const dist = await buildLocalDist();
   const missing = new Map(dist.files);
-  missing.delete(SHARD_PATHS[1]);
+  missing.delete(FETCHED_PART_PATHS[1]);
   const { loaded } = await openLocal(missing);
 
   const error = await assertRejects(
-    () => fetchAssets(loaded, resolveFiles(loaded.manifest)),
+    () => fetchAssets(loaded, selectionFiles(loaded.manifest)),
     HubFetchError,
   );
-  assertEquals(error.path, SHARD_PATHS[1]);
+  assertEquals(error.path, FETCHED_PART_PATHS[1]);
   assertEquals(error.repo, undefined);
   assert(error.message.includes(LABEL), `${error.message} がディレクトリを名乗っていない`);
   assert(error.cause instanceof Error, "アダプターのエラーを cause に残していない");
   assert(
-    error.cause.message.includes(SHARD_PATHS[1]),
+    error.cause.message.includes(FETCHED_PART_PATHS[1]),
     `${error.cause.message} が読めなかった実体を名乗っていない`,
   );
 });
@@ -229,7 +259,7 @@ Deno.test("localDirectory: 上限を超えた karume.json は ManifestFormatErro
 Deno.test("localDirectory: 壊れた karume.json は毎回同じ ManifestFormatError で落ちる", async () => {
   const broken = new Map<string, Uint8Array<ArrayBuffer>>([[
     MANIFEST_FILENAME,
-    new TextEncoder().encode('{"format": "karume/4"'),
+    new TextEncoder().encode('{"format": "karume/5"'),
   ]]);
   const directory = memoryDirectory(broken);
   const source = localDirectory(directory.adapter, { label: LABEL });
@@ -245,11 +275,12 @@ Deno.test("localDirectory: 壊れた karume.json は毎回同じ ManifestFormatE
 /**
  * 越境先だけを提供する fake の取得元（段③の公開 factory の代役）。`shortBy` を渡すと、宣言
  * `size` より短いバイト数を名乗る**リモート**取得元になる（越境先の完全性検証の失敗を踏む形）。
+ * `warmed` を渡すと**相 1 を持つ**取得元になり、温めた path をそこへ記録する。
  */
 const fakeRemote = (
   files: ReadonlyMap<string, Uint8Array<ArrayBuffer>>,
   calls: [string, string][],
-  options: { readonly shortBy?: number } = {},
+  options: { readonly shortBy?: number; readonly warmed?: string[] } = {},
 ): DistributionSource => {
   const pinnedFor = (repo: string, revision: string): PinnedSource => {
     const origin: SourceOrigin = {
@@ -272,6 +303,13 @@ const fakeRemote = (
         }
         return Promise.resolve(new Uint8Array(bytes));
       },
+      // 相 1 は取得元ごとの optional 能力（`source.ts` ④）。持つ取得元だけがこの席を生やす。
+      ...(options.warmed === undefined ? {} : {
+        prefetchFile: (ref: FileRef): Promise<void> => {
+          options.warmed?.push(ref.path);
+          return Promise.resolve();
+        },
+      }),
       originFor: (crossRepo, crossRevision) => {
         calls.push([crossRepo, crossRevision]);
         return pinnedFor(crossRepo, crossRevision);
@@ -291,7 +329,7 @@ const crossAssets = async (
 ): Promise<Record<string, Uint8Array<ArrayBuffer>>> => {
   const dist = await buildLocalDist({ cross: true });
   const { loaded } = await openLocal(dist.files, options);
-  return await fetchAssets(loaded, resolveFiles(loaded.manifest));
+  return await fetchAssets(loaded, selectionFiles(loaded.manifest));
 };
 
 Deno.test("localDirectory: 越境参照は明示 mapping の取得元から取る", async () => {
@@ -426,7 +464,7 @@ const openRangeLocal = async (
 Deno.test("openAsset: 位置読みを持たないアダプターでは undefined（全量読みへ倒す）", async () => {
   const dist = await buildLocalDist();
   const { directory, loaded } = await openLocal(dist.files);
-  const ref = resolveFiles(loaded.manifest)["tokenizer"];
+  const ref = selectionFiles(loaded.manifest)["tokenizer"];
   directory.reads.length = 0;
 
   // 能力の差であって失敗ではない（口が無いことを fail loudly にすると、取得元を差し替えられる
@@ -438,7 +476,7 @@ Deno.test("openAsset: 位置読みを持たないアダプターでは undefined
 Deno.test("openAsset: 位置読みを持つアダプターでは seek の口が開き、要求区間だけが降りる", async () => {
   const dist = await buildLocalDist();
   const { directory, loaded } = await openRangeLocal(dist.files);
-  const ref = resolveFiles(loaded.manifest)["tokenizer"];
+  const ref = selectionFiles(loaded.manifest)["tokenizer"];
   directory.reads.length = 0;
 
   const reader = await openAsset(loaded, ref);
@@ -456,7 +494,7 @@ Deno.test("openAsset: 位置読みを持つアダプターでは seek の口が�
 Deno.test("openAsset: 宣言 size の外はアダプターを 1 度も呼ばずに落ちる", async () => {
   const dist = await buildLocalDist();
   const { directory, loaded } = await openRangeLocal(dist.files);
-  const ref = resolveFiles(loaded.manifest)["tokenizer"];
+  const ref = selectionFiles(loaded.manifest)["tokenizer"];
   const reader = await openAsset(loaded, ref);
   assert(reader !== undefined, "口が開かない");
 
@@ -470,7 +508,7 @@ Deno.test("openAsset: 宣言 size の外はアダプターを 1 度も呼ばず�
 Deno.test("openAsset: 短い戻りは throw（0 埋めの行を正常な値として配らない）", async () => {
   const dist = await buildLocalDist();
   const { loaded } = await openRangeLocal(dist.files, {}, { short: true });
-  const ref = resolveFiles(loaded.manifest)["tokenizer"];
+  const ref = selectionFiles(loaded.manifest)["tokenizer"];
   const reader = await openAsset(loaded, ref);
   assert(reader !== undefined, "口が開かない");
 
@@ -482,7 +520,7 @@ Deno.test("openAsset: 短い戻りは throw（0 埋めの行を正常な値と�
 Deno.test("openAsset: 非 tight view を返すアダプターは fail loudly（余白つきの view を配らない）", async () => {
   const dist = await buildLocalDist();
   const { loaded } = await openRangeLocal(dist.files, {}, { loose: true });
-  const ref = resolveFiles(loaded.manifest)["tokenizer"];
+  const ref = selectionFiles(loaded.manifest)["tokenizer"];
   const reader = await openAsset(loaded, ref);
   assert(reader !== undefined, "口が開かない");
 
@@ -503,7 +541,7 @@ Deno.test("openAsset: 越境参照は参照先の取得元の口で解決する"
   const { loaded } = await openLocal(dist.files, {
     crossRepo: { [CROSS_REPO]: localDirectory(cross.adapter, { label: "./models/共有" }) },
   });
-  const files = resolveFiles(loaded.manifest);
+  const files = selectionFiles(loaded.manifest);
 
   assertEquals(await openAsset(loaded, files["tokenizer"]), undefined, "自リポの口が生えている");
   const reader = await openAsset(loaded, files["text_encoder"]);

@@ -25,7 +25,7 @@
  * ## weights の絞り込み（{@link ResolveOptions.weights}）が勘定に効く形
  *
  * 選択は {@link ResolveOptions} なので、対象にも `protect` にも「weights の部分集合」を渡せる。
- * 効き方は 1 つ — **参照の集合が絞ったぶんだけ小さくなる**（`resolveFiles` の結果がそのまま
+ * 効き方は 1 つ — **参照の集合が絞ったぶんだけ小さくなる**（`resolveSelection` の結果がそのまま
  * 勘定の材料）:
  *
  * - 照会（{@link listCachedAssets}）… `cached` / `missing` は絞った参照だけを数える。ある役割
@@ -45,7 +45,7 @@
 
 import { HubError } from "./errors.ts";
 import { crossRefOf, type FileRef, fileRefKey, type Manifest } from "./manifest.ts";
-import { resolveFiles, type ResolveOptions } from "./resolve.ts";
+import { type ResolveOptions, resolveSelection, selectionRefs } from "./resolve.ts";
 import { type LoadedManifest, pinnedSourceOf } from "./session.ts";
 import { type PinnedSource, sourceForRef } from "./source.ts";
 
@@ -69,9 +69,9 @@ export type CacheInventoryOptions = {
 
 /** {@link listCachedAssets} の結果。合わせると選択の全参照（`fileRefKey` で一意化済み）になる。 */
 export type CachedAssets = {
-  /** 在庫にある参照（`resolveFiles` の順）。 */
+  /** 在庫にある参照（`selectionRefs` の順）。 */
   readonly cached: readonly FileRef[];
-  /** 在庫に無い参照（`resolveFiles` の順）。 */
+  /** 在庫に無い参照（`selectionRefs` の順）。 */
   readonly missing: readonly FileRef[];
 };
 
@@ -92,9 +92,9 @@ export type KeptAsset = {
 
 /** {@link evictCachedAssets} の結果。もともと在庫に無い参照はどちらにも載らない。 */
 export type EvictedAssets = {
-  /** 実際に在庫から消えた参照（`resolveFiles` の順）。 */
+  /** 実際に在庫から消えた参照（`selectionRefs` の順）。 */
   readonly evicted: readonly FileRef[];
-  /** 消さなかった参照と理由（`resolveFiles` の順）。 */
+  /** 消さなかった参照と理由（`selectionRefs` の順）。 */
   readonly kept: readonly KeptAsset[];
   /**
    * この削除で**巻き添えに部分在庫へ落ちた選択**のラベル `"<model>/<quant>"`（manifest の
@@ -126,9 +126,12 @@ const uniqueRefs = (refs: Iterable<FileRef>): readonly FileRef[] => {
   return [...unique.values()];
 };
 
-/** 選択 1 つぶんの参照列。存在しない model / quant はここで `ManifestReferenceError`。 */
+/**
+ * 選択 1 つぶんの参照列（長さ 0 の part は落とし、{@link fileRefKey} で一意化済み —
+ * `selectionRefs` の契約）。存在しない model / quant はここで `ManifestReferenceError`。
+ */
 const refsOf = (manifest: Manifest, selection: ResolveOptions): readonly FileRef[] =>
-  uniqueRefs(Object.values(resolveFiles(manifest, selection)));
+  selectionRefs(resolveSelection(manifest, selection));
 
 /** manifest の全 (model, quant) の組。 */
 const allSelections = (manifest: Manifest): readonly Selection[] =>
@@ -137,13 +140,13 @@ const allSelections = (manifest: Manifest): readonly Selection[] =>
   );
 
 /**
- * 選択を実名へ正規化する。実在検査は {@link resolveFiles} が持つので、**resolveFiles を通した
- * 後にだけ**呼ぶ（診断の正本を 2 か所に増やさない）。
+ * 選択を実名へ正規化する。実在検査は {@link resolveSelection} が持つので、**それを通した後に
+ * だけ**呼ぶ（診断の正本を 2 か所に増やさない）。
  */
 const namedSelection = (manifest: Manifest, selection: ResolveOptions): Selection => {
   const model = selection.model ?? manifest.defaultModel;
   if (!Object.hasOwn(manifest.models, model)) {
-    throw new Error(`hub: model '${model}' が resolveFiles 通過後に引けない（不変条件破れ）`);
+    throw new Error(`hub: model '${model}' が resolveSelection 通過後に引けない（不変条件破れ）`);
   }
   return { model, quant: selection.quant ?? manifest.models[model].defaultQuant };
 };
@@ -162,7 +165,7 @@ const sameRefSet = (left: readonly FileRef[], right: readonly FileRef[]): boolea
 };
 
 /**
- * `protect` の一覧を守る側の候補へ正規化する。`resolveFiles` を通してから実名化するので、
+ * `protect` の一覧を守る側の候補へ正規化する。`resolveSelection` を通してから実名化するので、
  * 存在しない model / quant / weights はここで `ManifestReferenceError`。重複は落とし、対象自身も
  * 落とす（対象を自分から守ることはできない）。
  *
@@ -180,7 +183,7 @@ const protectorsOf = (
     const refs = refsOf(manifest, entry);
     const selection = namedSelection(manifest, entry);
     if (selection.model === target.model && selection.quant === target.quant) continue;
-    // 参照の並びは `resolveFiles` の宣言順なので、同じ部分集合は同じ鍵になる。
+    // 参照の並びは `selectionRefs` の宣言順なので、同じ部分集合は同じ鍵になる。
     // MUST: 要素境界の曖昧でない綴り（`JSON.stringify` の配列）で組む — 区切り文字を挟むだけだと
     // label に同じ文字が入った選択が別の選択と同じ鍵になり、後勝ちで片方が黙って消える
     // （model / quant 名は manifest 側で制御文字を拒んでいないので、NUL 入りの名前が実際に届く）。

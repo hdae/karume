@@ -8,7 +8,7 @@ import {
 } from "../mod.ts";
 
 // 悪意 / 破損 manifest の受理集合は tests/fixtures/manifest-invalid.json が正本。ここは表を
-// 全件回すだけで、TS 側に第 2 の定義を作らない（規模上限だけは手書きが非現実的なので組み立てる）。
+// 全件回すだけで、TS 側に第 2 の定義を作らない（境界値だけは手書きが非現実的なので組み立てる）。
 
 type InvalidCase = {
   readonly name: string;
@@ -58,10 +58,45 @@ const validManifestText = await Deno.readTextFile(
   new URL("./fixtures/manifest-fetch.json", import.meta.url),
 );
 
-const FILE = { path: "net/model.f16.safetensors", size: 4, sha256: "a1".repeat(32) };
+/** 資産 1 本（コンテナの外側にある quant 非依存のファイル）。 */
+const FILE = { path: "tokenizer/tokenizer.json", size: 12, sha256: "a1".repeat(32) };
+
+/** コンテナのヘッダ長（container-v1 §1）。part 0 は「ヘッダ + 2 文書ちょうど」。 */
+const HEADER_BYTES = 24;
+const GRAPH_LENGTH = 11;
+const MODEL_LENGTH = 5;
+/** `24 + 11 + 5` — part 0 の size はこの値ちょうどでなければならない。 */
+const PART0_SIZE = HEADER_BYTES + GRAPH_LENGTH + MODEL_LENGTH;
+
+const DESCRIPTOR = {
+  graph: { length: GRAPH_LENGTH, sha256: "f2".repeat(32) },
+  model: { length: MODEL_LENGTH, sha256: "a3".repeat(32) },
+};
 
 /**
- * 検査に要る欄だけを持つ最小の v4 manifest。`patch` は `models.m` の中身を、`envelope` は
+ * part 1 本の宣言。`index` は**添字**（0 始まり）で、ファイル名の連番は書き手の綴り
+ * （1 始まり — `tools/exporter/src/karume/container.py` の `container_paths`）に合わせる。
+ * hub はファイル名を検査しないが、実ミラーと突き合わせる人の材料になる。
+ */
+const part = (index: number, total: number, size: number, mark: string) => ({
+  path: `net/model-${String(index + 1).padStart(5, "0")}-of-${String(total).padStart(5, "0")}.krm`,
+  size,
+  sha256: mark.repeat(32),
+});
+
+const PART0 = part(0, 2, PART0_SIZE, "b2");
+const PART1 = part(1, 2, 64, "c3");
+
+/** 最小の合法なコンテナ（part 0 + part 1）。 */
+const CONTAINER = { descriptor: DESCRIPTOR, parts: [PART0, PART1] };
+
+/** `container` を部分的に差し替えた weights エントリ。 */
+const withContainer = (patch: Record<string, unknown>): Record<string, unknown> => ({
+  net: { f16: { container: { ...CONTAINER, ...patch } } },
+});
+
+/**
+ * 検査に要る欄だけを持つ最小の v5 manifest。`patch` は `models.m` の中身を、`envelope` は
  * トップレベルを上書きする。
  */
 const withModel = (
@@ -69,13 +104,13 @@ const withModel = (
   envelope: Record<string, unknown> = {},
 ): string =>
   JSON.stringify({
-    format: "karume/4",
+    format: "karume/5",
     generator: "karume/0.1.0",
     defaultModel: "m",
     models: {
       m: {
         pipeline: "anima/1",
-        weights: { net: { f16: { shards: [FILE] } } },
+        weights: { net: { f16: { container: CONTAINER } } },
         assets: {},
         quants: { q: { weights: { net: "f16" }, session: {} } },
         defaultQuant: "q",
@@ -85,6 +120,10 @@ const withModel = (
     },
     ...envelope,
   });
+
+/** `models.m.weights.net.f16.container` を読む近道。 */
+const containerOf = (text: string) =>
+  parseManifest(text).models["m"].weights["net"]["f16"].container;
 
 Deno.test("parseManifest: fixture の全違反ケースが宣言どおりのエラー型で赤くなる", async (t) => {
   for (const testCase of invalidCases) {
@@ -104,14 +143,14 @@ Deno.test("parseManifest: fixture の全違反ケースが宣言どおりのエ�
 
 Deno.test("parseManifest: JSON として壊れていれば ManifestFormatError に包んで再送出する", () => {
   const error = assertThrows(
-    () => parseManifest('{"format": "karume/4",}'),
+    () => parseManifest('{"format": "karume/5",}'),
     ManifestFormatError,
   );
   assert(error.cause instanceof SyntaxError, "元の SyntaxError を cause に残す");
 });
 
 Deno.test("parseManifest: v1（karume/1）は読まずに未対応 major として落とす", () => {
-  // ADR 0041 §1: hub は現行版だけを読む（2 形パースを持たない）。旧クライアントの裏返しで、
+  // ADR 0109 決定 1: hub は現行版だけを読む（2 形パースを持たない）。旧クライアントの裏返しで、
   // 新クライアントが旧 manifest を**旧解釈で黙って実行する**経路も作らない。
   const error = assertThrows(
     () =>
@@ -127,26 +166,27 @@ Deno.test("parseManifest: v1（karume/1）は読まずに未対応 major とし�
     ManifestFormatError,
   );
   assert(
-    error.message.includes("karume/4"),
-    `${error.message} が「読めるのは karume/4」を名指ししていない`,
+    error.message.includes("karume/5"),
+    `${error.message} が「読めるのは karume/5」を名指ししていない`,
   );
 });
 
-Deno.test("parseManifest: 直前版（karume/3）も読まず、現行が karume/4 であることを名指しする", () => {
-  // v3 と v4 の差は optional な新席（label / description / requiredLimits / 越境参照）だけで、
-  // v3 の manifest は**構造としては v4 のパーサを素通りしてしまう**。だから断絶は format 文字列
-  // だけが宣言する（ADR 0075 決定 4）。診断が「拒否した版」と「この版が読む版」の両方を
-  // 名指しすることまでを観測値として固定する。
+Deno.test("parseManifest: 直前版（karume/4）も読まず、現行が karume/5 であることを名指しする", () => {
+  // v4 と v5 の差は dtype エントリの中身（`shards` + `extras` → `container`）だけで、他の席は
+  // そのまま。構造から入ると「未知キー 'shards'」という枝葉の診断になり、本当の理由
+  // （この版は karume/5 のみ読む）が隠れる。断絶は format 文字列だけが宣言する（ADR 0109 決定 1）。
   const error = assertThrows(
     () =>
       parseManifest(JSON.stringify({
-        format: "karume/3",
+        format: "karume/4",
         generator: "karume/0.1.0",
         defaultModel: "m",
         models: {
           m: {
             pipeline: "anima/1",
-            weights: { net: { f16: { shards: [FILE] } } },
+            weights: {
+              net: { f16: { shards: [{ ...PART1, path: "net/model.f16.safetensors" }] } },
+            },
             assets: {},
             quants: { q: { weights: { net: "f16" }, session: {} } },
             defaultQuant: "q",
@@ -156,23 +196,20 @@ Deno.test("parseManifest: 直前版（karume/3）も読まず、現行が karume
       })),
     ManifestFormatError,
   );
+  assert(error.message.includes("karume/4"), `${error.message} が拒否した版を名指ししていない`);
   assert(
-    error.message.includes("karume/3"),
-    `${error.message} が拒否した版を名指ししていない`,
-  );
-  assert(
-    error.message.includes("karume/4"),
-    `${error.message} が「読めるのは karume/4」を名指ししていない`,
+    error.message.includes("karume/5"),
+    `${error.message} が「読めるのは karume/5」を名指ししていない`,
   );
   assert(
     error.message.includes("旧版"),
-    `${error.message} が「旧版のパーサを持たない」ことを伝えていない`,
+    `${error.message} が「旧版のパーサを持たない」を伝えていない`,
   );
+  assert(!error.message.includes("'shards'"), `${error.message} が枝葉の未知キーを主因にしている`);
 });
 
 Deno.test("parseManifest: karume/2 の綴り（dtype エントリが {file}）も版で落とす", () => {
-  // 構造から入ると「未知キー 'file'」という枝葉の診断になり、本当の理由（この版は karume/4 のみ
-  // 読む）が隠れる — format を未知キー検査より先に見ていることの観測点。
+  // format を未知キー検査より先に見ていることの観測点（上の v4 と同じ理由を旧い綴りで踏む）。
   const error = assertThrows(
     () =>
       parseManifest(JSON.stringify({
@@ -199,7 +236,7 @@ Deno.test("parseManifest: karume/2 の綴り（dtype エントリが {file}）�
 Deno.test("parseManifest: 規模上限を数値で弾く", async (t) => {
   const modelEntry = (quantName: string) => ({
     pipeline: "anima/1",
-    weights: { net: { f16: { shards: [FILE] } } },
+    weights: { net: { f16: { container: CONTAINER } } },
     assets: {},
     quants: { [quantName]: { weights: { net: "f16" }, session: {} } },
     defaultQuant: quantName,
@@ -212,7 +249,7 @@ Deno.test("parseManifest: 規模上限を数値で弾く", async (t) => {
       models = { ...models, [`m${index}`]: modelEntry("q") };
     }
     const text = JSON.stringify({
-      format: "karume/4",
+      format: "karume/5",
       generator: "karume/0.1.0",
       defaultModel: "m0",
       models,
@@ -224,7 +261,7 @@ Deno.test("parseManifest: 規模上限を数値で弾く", async (t) => {
     let weights: Record<string, unknown> = {};
     let mapping: Record<string, string> = {};
     for (let index = 0; index < 33; index += 1) {
-      weights = { ...weights, [`w${index}`]: { f16: { shards: [FILE] } } };
+      weights = { ...weights, [`w${index}`]: { f16: { container: CONTAINER } } };
       mapping = { ...mapping, [`w${index}`]: "f16" };
     }
     assertThrows(
@@ -237,27 +274,25 @@ Deno.test("parseManifest: 規模上限を数値で弾く", async (t) => {
     );
   });
 
-  await t.step("shards 1025 件（1024 件は通る）", () => {
-    const shards = (count: number): unknown[] =>
-      Array.from({ length: count }, (_, index) => ({
-        path: `net/model.f16.shard${index}.safetensors`,
-        size: 8,
-        sha256: "b2".repeat(32),
-      }));
+  await t.step("parts 1025 件（1024 件は通る）", () => {
+    const parts = (count: number): unknown[] => [
+      part(0, count, PART0_SIZE, "b2"),
+      ...Array.from({ length: count - 1 }, (_unused, index) => part(index + 1, count, 8, "c3")),
+    ];
     // 上限ちょうどが通ることまで見る（片側だけだと「常に落ちる」実装でも緑になる）。
-    const accepted = parseManifest(
-      withModel({ weights: { net: { f16: { shards: shards(1024) } } } }),
-    );
-    assertEquals(accepted.models["m"].weights["net"]["f16"].shards.length, 1024);
+    const accepted = parseManifest(withModel({ weights: withContainer({ parts: parts(1024) }) }));
+    assertEquals(accepted.models["m"].weights["net"]["f16"].container.parts.length, 1024);
     assertThrows(
-      () => parseManifest(withModel({ weights: { net: { f16: { shards: shards(1025) } } } })),
+      () => parseManifest(withModel({ weights: withContainer({ parts: parts(1025) }) })),
       ManifestFormatError,
     );
   });
 
   await t.step("assets 33 件", () => {
     let assets: Record<string, unknown> = {};
-    for (let index = 0; index < 33; index += 1) assets = { ...assets, [`a${index}`]: FILE };
+    for (let index = 0; index < 33; index += 1) {
+      assets = { ...assets, [`a${index}`]: { ...FILE, path: `assets/a${index}.json` } };
+    }
     assertThrows(() => parseManifest(withModel({ assets })), ManifestFormatError);
   });
 
@@ -313,22 +348,24 @@ Deno.test("parseManifest: 1MiB 未満でも深すぎる入れ子は型付きエ�
 });
 
 Deno.test("parseManifest: エラーに利用可能な model / quant / dtype ラベルが載る", () => {
+  const container = (mark: string) => ({
+    descriptor: DESCRIPTOR,
+    parts: [
+      { ...PART0, path: `net/${mark}-00001-of-00002.krm` },
+      { ...PART1, path: `net/${mark}-00002-of-00002.krm`, sha256: mark.repeat(32) },
+    ],
+  });
   const error = assertThrows(
     () =>
       parseManifest(JSON.stringify({
-        format: "karume/4",
+        format: "karume/5",
         generator: "karume/0.1.0",
         defaultModel: "fast",
         models: {
           fast: {
             pipeline: "anima/1",
             weights: {
-              net: {
-                f16: {
-                  shards: [{ path: "net/f16.safetensors", size: 8, sha256: "b2".repeat(32) }],
-                },
-                i8: { shards: [{ path: "net/i8.safetensors", size: 4, sha256: "c3".repeat(32) }] },
-              },
+              net: { f16: { container: container("b2") }, i8: { container: container("c3") } },
             },
             assets: {},
             quants: { w8: { weights: { net: "q4" }, session: {} } },
@@ -337,9 +374,7 @@ Deno.test("parseManifest: エラーに利用可能な model / quant / dtype ラ�
           },
           slim: {
             pipeline: "anima/1",
-            weights: {
-              net: { i8: { shards: [{ path: "slim/i8.st", size: 2, sha256: "d4".repeat(32) }] } },
-            },
+            weights: { net: { i8: { container: container("d4") } } },
             assets: {},
             quants: { w8: { weights: { net: "i8" }, session: {} } },
             defaultQuant: "w8",
@@ -368,7 +403,7 @@ Deno.test("parseManifest: トップレベルの違反にはモデル一覧だけ
 
 Deno.test("parseManifest: 正常な manifest を宣言どおりに読む", () => {
   const manifest = parseManifest(validManifestText);
-  assertEquals(manifest.format, "karume/4");
+  assertEquals(manifest.format, "karume/5");
   assertEquals(manifest.generator, "karume/0.1.0");
   assertEquals(manifest.defaultModel, "anima-turbo");
   assertEquals(Object.keys(manifest.models), ["anima-turbo", "anima-lite"]);
@@ -380,20 +415,24 @@ Deno.test("parseManifest: 正常な manifest を宣言どおりに読む", () =>
   assertEquals(turbo.available.quants, ["f16", "w8a8-s16", "f16-c16"]);
   assertEquals(turbo.pipelineConfig, { defaults: { steps: 8, guidanceScale: 1 } });
 
-  // weights は dtype キー必須の統一形（v1 の {file} / {variants} 2 形は無い）。
+  // weights は dtype キー必須の統一形で、中身はコンテナ 1 本（ADR 0109 決定 3）。
   assertEquals(Object.keys(turbo.weights["transformer"]), ["f16", "i8"]);
   assertEquals(Object.keys(turbo.weights["vae_decoder"]), ["f16"]);
+  const i8 = turbo.weights["transformer"]["i8"].container;
+  assertEquals(i8.parts.length, 3, "part 0 + part 1 + part 2 の 3 本");
+  assertEquals(i8.parts[0].size, 24 + i8.descriptor.graph.length + i8.descriptor.model.length);
+  // 長さ 0 の part（const が空のコンテナ）は宣言に残り、sha256 は空列の値を名乗る。
+  assertEquals(i8.parts[1].size, 0);
   assertEquals(
-    turbo.weights["transformer"]["i8"].shards.map((shard) => shard.path),
-    ["transformer/model.i8.safetensors"],
+    i8.parts[1].sha256,
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   );
-  // extras は dtype エントリの内側（ADR 0041 §3 は席を動かしていない）。
-  assertEquals(Object.keys(turbo.weights["transformer"]["i8"].extras), ["rope_base"]);
-  assertEquals(turbo.weights["vae_decoder"]["f16"].extras, {});
 
   // assets は quant 選択に依存しない無条件ファイル（dtype の階層を持たない）。
-  assertEquals(Object.keys(turbo.assets), ["tokenizer", "rope_alias"]);
+  assertEquals(Object.keys(turbo.assets), ["tokenizer", "style_vectors", "style_alias"]);
   assertEquals(turbo.assets["tokenizer"].path, "tokenizer/qwen2-tokenizer.json");
+  // 同じ実体を 2 つの名前が指す形（表の席は落とさない — 一意化は選択の列を作るときだけ）。
+  assert(turbo.assets["style_alias"] === turbo.assets["style_vectors"]);
 
   assertEquals(turbo.quants["w8a8-s16"].session, {
     linearCompute: "a8",
@@ -412,141 +451,274 @@ Deno.test("parseManifest: 正常な manifest を宣言どおりに読む", () =>
 
 Deno.test("parseManifest: モデル間で同一 path を指す共有は成立する（ADR 0041 §5）", () => {
   const manifest = parseManifest(validManifestText);
-  const shared = manifest.models["anima-turbo"].weights["text_encoder"]["f16"].shards[0];
-  const same = manifest.models["anima-lite"].weights["text_encoder"]["f16"].shards[0];
+  const shared = manifest.models["anima-turbo"].weights["text_encoder"]["f16"].container.parts[0];
+  const same = manifest.models["anima-lite"].weights["text_encoder"]["f16"].container.parts[0];
   assertEquals(same.path, shared.path);
   assertEquals(same.sha256, shared.sha256);
   // 表は 1 本なので、同じ path は同じ FileRef インスタンスに畳まれる（取得も 1 回になる）。
   assert(same === shared, "同一 path の参照が畳まれていない");
 });
 
-Deno.test("parseManifest: weights の shards 欄（ADR 0070 決定 1）", async (t) => {
-  const shard = (name: string, size: number, mark: string) => ({
-    path: `net/${name}`,
-    size,
-    sha256: mark.repeat(32),
+Deno.test("parseManifest: weights の container 欄（ADR 0109 決定 3）", async (t) => {
+  await t.step("descriptor は 2 文書それぞれの長さと sha256 を持つ", () => {
+    const container = containerOf(withModel());
+    assertEquals(container.descriptor.graph, DESCRIPTOR.graph);
+    assertEquals(container.descriptor.model, DESCRIPTOR.model);
   });
 
-  await t.step("1 要素の shards は単一ファイル配布として読める", () => {
-    const manifest = parseManifest(withModel());
-    assertEquals(manifest.models["m"].weights["net"]["f16"].shards, [FILE]);
-  });
-
-  await t.step("複数要素は宣言順のまま保たれる（配列位置が shard id）", () => {
-    const graph = shard("graph.safetensors", 6, "a1");
-    const first = shard("weights-0.safetensors", 8, "b2");
-    const second = shard("weights-1.safetensors", 4, "c3");
-    const manifest = parseManifest(
-      withModel({ weights: { net: { f16: { shards: [graph, first, second] } } } }),
-    );
-    // 並べ替えも重複畳み込みもしない — 順序は先頭 = グラフ shard という意味を持つ（検査は runtime）。
+  await t.step("parts は宣言順のまま保たれる（添字が part の id）", () => {
+    const parts = [PART0, part(1, 3, 8, "c3"), part(2, 3, 16, "d4")];
+    const container = containerOf(withModel({ weights: withContainer({ parts }) }));
     assertEquals(
-      manifest.models["m"].weights["net"]["f16"].shards.map((entry) => entry.path),
-      ["net/graph.safetensors", "net/weights-0.safetensors", "net/weights-1.safetensors"],
+      container.parts.map((entry) => entry.path),
+      parts.map((entry) => entry.path),
     );
   });
 
-  await t.step("shards の中でも同一 path の 3 点セット不一致は拒否する", () => {
+  await t.step("2 件ちょうどは通り、1 件で落ちる（part 0 + part 1 が最小）", () => {
+    assertEquals(containerOf(withModel()).parts.length, 2);
+    assertThrows(
+      () => parseManifest(withModel({ weights: withContainer({ parts: [PART0] }) })),
+      ManifestFormatError,
+      "2 件以上",
+    );
+  });
+
+  await t.step("parts の中でも同一 path の 3 点セット不一致は拒否する", () => {
     const error = assertThrows(
       () =>
         parseManifest(withModel({
-          weights: {
-            net: {
-              f16: {
-                shards: [
-                  shard("weights-0.safetensors", 8, "b2"),
-                  shard(
-                    "weights-0.safetensors",
-                    8,
-                    "c3",
-                  ),
-                ],
-              },
-            },
-          },
+          weights: withContainer({ parts: [PART0, PART1, { ...PART1, sha256: "d4".repeat(32) }] }),
         })),
       ManifestReferenceError,
     );
     assert(
-      error.message.includes("weights-0.safetensors"),
+      error.message.includes(PART1.path),
       `${error.message} が食い違った path を名指ししていない`,
     );
   });
 
-  await t.step("extras は shards と独立の席のまま", () => {
-    const manifest = parseManifest(withModel({
-      weights: {
-        net: {
-          f16: {
-            shards: [shard("weights-0.safetensors", 8, "b2")],
-            extras: { rope_base: shard("rope_base.safetensors", 6, "d4") },
-          },
-        },
+  await t.step("退役した shards / extras のキーは未知キーとして落ちる", () => {
+    for (const retired of ["shards", "extras"]) {
+      const error = assertThrows(
+        () =>
+          parseManifest(withModel({
+            weights: { net: { f16: { container: CONTAINER, [retired]: {} } } },
+          })),
+        ManifestReferenceError,
+        undefined,
+        `dtype エントリの '${retired}' が通ってしまった`,
+      );
+      assert(
+        error.message.includes(retired) && error.message.includes("container"),
+        `${error.message} が未知キーと許可キーを出していない`,
+      );
+    }
+  });
+
+  await t.step("container / descriptor / 文書の未知キーも落ちる", () => {
+    const patches: Record<string, unknown>[] = [
+      { weights: { net: { f16: { container: { ...CONTAINER, graph: FILE } } } } },
+      {
+        weights: withContainer({
+          descriptor: { ...DESCRIPTOR, codecs: [] },
+        }),
       },
-    }));
-    const files = manifest.models["m"].weights["net"]["f16"];
-    assertEquals(files.shards.length, 1);
-    assertEquals(Object.keys(files.extras), ["rope_base"]);
+      {
+        weights: withContainer({
+          descriptor: { ...DESCRIPTOR, graph: { ...DESCRIPTOR.graph, offset: 0 } },
+        }),
+      },
+    ];
+    for (const patch of patches) {
+      assertThrows(
+        () => parseManifest(withModel(patch)),
+        ManifestReferenceError,
+        undefined,
+        `${JSON.stringify(patch)} が通ってしまった`,
+      );
+    }
+  });
+
+  await t.step("descriptor の model は省略できない（krm は必ずモデル記述を持つ）", () => {
+    assertThrows(
+      () =>
+        parseManifest(withModel({
+          weights: withContainer({ descriptor: { graph: DESCRIPTOR.graph } }),
+        })),
+      ManifestFormatError,
+      "descriptor.model: 無い",
+    );
   });
 });
 
-Deno.test("parseManifest: shard のバイト上限 256MiB（ADR 0090 の読み手契約 — ファイル長で測る）", async (t) => {
-  // 読み手は RAM ピーク O(最大 shard)（ADR 0070 決定 2）を前提に組まれているので、上限違反の
-  // shard を parse が黙って通すとブラウザで初めて破綻する。上限の綴りは exporter の
-  // `SHARD_BYTE_LIMIT`（tools/exporter/src/karume/shards.py）と同値。
-  const LIMIT = 2 ** 28;
+Deno.test("parseManifest: part 0 の size は「ヘッダ + 2 文書」ちょうど（container-v1 §8）", async (t) => {
+  // 宣言どうしの整合なので、1 バイトも取らずに見られる。ここが緩いと「取得してから長さ違いに
+  // 気づく」形に戻る。
+  await t.step("ちょうどは通る", () => {
+    assertEquals(containerOf(withModel()).parts[0].size, PART0_SIZE);
+  });
+
+  await t.step("1 バイトでもずれれば両側とも落ちる", () => {
+    for (const delta of [-1, 1]) {
+      const error = assertThrows(
+        () =>
+          parseManifest(withModel({
+            weights: withContainer({ parts: [{ ...PART0, size: PART0_SIZE + delta }, PART1] }),
+          })),
+        ManifestFormatError,
+        undefined,
+        `part 0 の size ${PART0_SIZE + delta} が通ってしまった`,
+      );
+      assert(
+        error.message.includes(String(PART0_SIZE)),
+        `${error.message} が期待した part 0 の長さを出していない`,
+      );
+    }
+  });
+
+  await t.step("descriptor の長さを動かせば part 0 の要求もその分動く", () => {
+    const graph = { ...DESCRIPTOR.graph, length: GRAPH_LENGTH + 100 };
+    const container = containerOf(withModel({
+      weights: withContainer({
+        descriptor: { ...DESCRIPTOR, graph },
+        parts: [{ ...PART0, size: PART0_SIZE + 100 }, PART1],
+      }),
+    }));
+    assertEquals(container.parts[0].size, PART0_SIZE + 100);
+  });
+});
+
+Deno.test("parseManifest: descriptor の 1 文書は 32MiB まで（container-v1 §10）", async (t) => {
+  // 綴りは Python 正本 `tools/exporter/src/karume/container.py` の `MAX_DESCRIPTOR_BYTES` と同値。
+  const LIMIT = 32 * 2 ** 20;
+  const sized = (length: number) => ({
+    descriptor: { ...DESCRIPTOR, graph: { ...DESCRIPTOR.graph, length } },
+    parts: [{ ...PART0, size: HEADER_BYTES + length + MODEL_LENGTH }, PART1],
+  });
+
+  await t.step("ちょうど 32MiB は通る（書き手と同じ閉区間）", () => {
+    const container = containerOf(withModel({ weights: withContainer(sized(LIMIT)) }));
+    assertEquals(container.descriptor.graph.length, LIMIT);
+  });
+
+  await t.step("1 バイト超は落ちる", () => {
+    const error = assertThrows(
+      () => parseManifest(withModel({ weights: withContainer(sized(LIMIT + 1)) })),
+      ManifestFormatError,
+    );
+    assert(error.message.includes(String(LIMIT)), `${error.message} が上限を名乗っていない`);
+  });
+
+  await t.step("長さ 0 の文書は拒否する（krm は必ず 2 文書を持つ）", () => {
+    assertThrows(
+      () => parseManifest(withModel({ weights: withContainer(sized(0)) })),
+      ManifestFormatError,
+    );
+  });
+
+  await t.step("sha256 は小文字 hex 64 桁", () => {
+    for (const sha256 of ["F2".repeat(32), "f2".repeat(31), 12]) {
+      assertThrows(
+        () =>
+          parseManifest(withModel({
+            weights: withContainer({
+              descriptor: { ...DESCRIPTOR, model: { length: MODEL_LENGTH, sha256 } },
+            }),
+          })),
+        ManifestFormatError,
+        undefined,
+        `descriptor の sha256 '${sha256}' が通ってしまった`,
+      );
+    }
+  });
+});
+
+Deno.test("parseManifest: part のバイト上限 1024MiB（container-v1 §10 — ファイル長で測る）", async (t) => {
+  // 読み手は「器の寸法を宣言から見積る」（ADR 0089）前提で組まれているので、上限違反の part を
+  // parse が黙って通すとブラウザで初めて破綻する。上限の綴りは Python 正本
+  // `tools/exporter/src/karume/container.py` の `PART_MAX_BYTES` と同値。
+  const LIMIT = 1024 * 2 ** 20;
   const big = (size: number, mark: string) => ({
-    path: `net/model.f16-of-2.safetensors`,
+    path: "net/model-00002-of-00002.krm",
     size,
     sha256: mark.repeat(32),
   });
 
-  await t.step("上限超過は落ち、エラーが shard の path・寸法・上限を名指しする", () => {
+  await t.step("上限超過は落ち、エラーが part の path・寸法・上限を名指しする", () => {
     const error = assertThrows(
       () =>
         parseManifest(withModel({
-          weights: { net: { f16: { shards: [FILE, big(LIMIT + 1, "b2")] } } },
+          weights: withContainer({ parts: [PART0, big(LIMIT + 1, "c3")] }),
         })),
       ManifestFormatError,
     );
-    for (const expected of ["net/model.f16-of-2.safetensors", String(LIMIT + 1), String(LIMIT)]) {
+    for (const expected of ["net/model-00002-of-00002.krm", String(LIMIT + 1), String(LIMIT)]) {
       assert(error.message.includes(expected), `${error.message} に '${expected}' が無い`);
     }
   });
 
-  await t.step("席に依らない — 先頭（グラフ shard）でも落ちる", () => {
+  await t.step("ちょうど 1024MiB は通る（書き手と同じ閉区間）", () => {
+    // 片側だけだと「常に落ちる」実装でも緑になる。
+    const container = containerOf(
+      withModel({ weights: withContainer({ parts: [PART0, big(LIMIT, "c3")] }) }),
+    );
+    assertEquals(container.parts[1].size, LIMIT);
+  });
+
+  await t.step("非 part の FileRef は対象外 — assets は上限超でも通る", () => {
+    // MUST: 上限は**part 分割の契約**であって全 FileRef の天井ではない（それは 16GiB の
+    // `MAX_FILE_BYTES`）。ここを取り違えると上限超の実在資産（例: PLE sidecar）が読めなくなる。
+    const manifest = parseManifest(withModel({
+      assets: { style_vectors: { ...FILE, path: "style/vectors.safetensors", size: LIMIT + 1 } },
+    }));
+    assertEquals(manifest.models["m"].assets["style_vectors"].size, LIMIT + 1);
+  });
+});
+
+Deno.test("parseManifest: 長さ 0 の part は添字 1 以上だけ（ADR 0109 決定 3）", async (t) => {
+  const EMPTY_SHA = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+  const emptyPart = { path: "net/model-00002-of-00003.krm", size: 0, sha256: EMPTY_SHA };
+
+  await t.step("添字 1 の長さ 0 は通り、宣言にそのまま残る", () => {
+    const container = containerOf(withModel({
+      weights: withContainer({ parts: [PART0, emptyPart, part(2, 3, 16, "d4")] }),
+    }));
+    assertEquals(container.parts[1].size, 0);
+    assertEquals(container.parts[1].sha256, EMPTY_SHA);
+  });
+
+  await t.step("part 0 の長さ 0 は落ちる（ヘッダ + 2 文書を必ず持つ）", () => {
     assertThrows(
       () =>
         parseManifest(withModel({
-          weights: { net: { f16: { shards: [big(LIMIT + 1, "b2"), FILE] } } },
+          weights: withContainer({ parts: [{ ...PART0, size: 0, sha256: EMPTY_SHA }, PART1] }),
         })),
       ManifestFormatError,
     );
   });
 
-  await t.step("ちょうど 256MiB は通る（書き手と同じ閉区間）", () => {
-    // 片側だけだと「常に落ちる」実装でも緑になる。境界の向きは shards.py / verify.py の
-    // `size > SHARD_BYTE_LIMIT` と揃える（ちょうどは合法）。
-    const manifest = parseManifest(withModel({
-      weights: { net: { f16: { shards: [big(LIMIT, "b2")] } } },
-    }));
-    assertEquals(manifest.models["m"].weights["net"]["f16"].shards[0].size, LIMIT);
+  await t.step("長さ 0 なのに sha256 が空列の値でなければ落ちる", () => {
+    const error = assertThrows(
+      () =>
+        parseManifest(withModel({
+          weights: withContainer({
+            parts: [PART0, { ...emptyPart, sha256: "c3".repeat(32) }, part(2, 3, 16, "d4")],
+          }),
+        })),
+      ManifestFormatError,
+    );
+    assert(error.message.includes(EMPTY_SHA), `${error.message} が空列の sha256 を出していない`);
   });
 
-  await t.step("非 shard の FileRef は対象外 — assets / extras は上限超でも通る", () => {
-    // MUST: 上限は**shard 分割の契約**であって全 FileRef の天井ではない（それは 16GiB の
-    // `MAX_FILE_BYTES`）。ここを取り違えると上限超の実在資産（例: PLE sidecar）が読めなくなる。
-    const huge = (mark: string) => ({
-      path: `net/sidecar.${mark}.safetensors`,
-      size: LIMIT + 1,
-      sha256: mark.repeat(32),
-    });
-    const manifest = parseManifest(withModel({
-      weights: { net: { f16: { shards: [FILE], extras: { ple: huge("e5") } } } },
-      assets: { style_vectors: huge("f6") },
-    }));
-    assertEquals(manifest.models["m"].weights["net"]["f16"].extras["ple"].size, LIMIT + 1);
-    assertEquals(manifest.models["m"].assets["style_vectors"].size, LIMIT + 1);
+  await t.step("assets の長さ 0 は従来どおり拒否する（空を許すのは parts だけ）", () => {
+    assertThrows(
+      () =>
+        parseManifest(withModel({
+          assets: { tokenizer: { ...FILE, size: 0, sha256: EMPTY_SHA } },
+        })),
+      ManifestFormatError,
+    );
   });
 });
 
@@ -695,35 +867,52 @@ Deno.test("parseManifest: quant の requiredLimits（ADR 0038 §7 の据え置�
 const COMMIT = "0123456789abcdef0123456789abcdef01234567";
 
 Deno.test("parseManifest: ファイル参照の越境席 repo / revision（ADR 0038 §7）", async (t) => {
-  const foreign = (patch: Record<string, unknown> = {}) => ({
-    path: "text_encoder/model.safetensors",
-    size: 12,
-    sha256: "e5".repeat(32),
-    repo: "other/stack",
-    revision: COMMIT,
-    ...patch,
+  const cross = { repo: "other/stack", revision: COMMIT };
+  /** 容器まるごとを越境させた形（ADR 0109 決定 3 — 越境は容器単位）。 */
+  const foreignContainer = (patch: Record<string, unknown> = {}) => ({
+    descriptor: DESCRIPTOR,
+    parts: [{ ...PART0, ...cross, ...patch }, { ...PART1, ...cross, ...patch }],
   });
 
-  await t.step("shard 列の要素に載る（席は 3 点セットと同じ位置）", () => {
-    const manifest = parseManifest(
-      withModel({ weights: { net: { f16: { shards: [FILE, foreign()] } } } }),
+  await t.step("容器の全 part に同じ座標が載る", () => {
+    const container = containerOf(
+      withModel({ weights: { net: { f16: { container: foreignContainer() } } } }),
     );
-    const shards = manifest.models["m"].weights["net"]["f16"].shards;
-    assertEquals(shards[0].repo, undefined, "自リポ参照は席を持たない");
-    assertEquals(shards[1].repo, "other/stack");
-    assertEquals(shards[1].revision, COMMIT);
+    for (const ref of container.parts) {
+      assertEquals(ref.repo, "other/stack");
+      assertEquals(ref.revision, COMMIT);
+    }
   });
 
-  await t.step("extras / assets の参照にも同じ席が載る", () => {
+  await t.step("assets の参照にも同じ席が載る", () => {
     const manifest = parseManifest(withModel({
-      weights: { net: { f16: { shards: [FILE], extras: { rope_base: foreign() } } } },
-      assets: { tokenizer: foreign({ path: "tokenizer/tokenizer.json", size: 9 }) },
+      assets: { tokenizer: { ...FILE, ...cross } },
     }));
-    assertEquals(
-      manifest.models["m"].weights["net"]["f16"].extras["rope_base"].repo,
-      "other/stack",
-    );
+    assertEquals(manifest.models["m"].assets["tokenizer"].repo, "other/stack");
     assertEquals(manifest.models["m"].assets["tokenizer"].revision, COMMIT);
+  });
+
+  await t.step("越境は容器単位 — 混在も片方だけも落ちる", () => {
+    const mixed: unknown[][] = [
+      [PART0, { ...PART1, ...cross }],
+      [{ ...PART0, ...cross }, PART1],
+      [
+        { ...PART0, ...cross },
+        { ...PART1, repo: "another/stack", revision: COMMIT },
+      ],
+    ];
+    for (const parts of mixed) {
+      const error = assertThrows(
+        () => parseManifest(withModel({ weights: withContainer({ parts }) })),
+        ManifestFormatError,
+        undefined,
+        `${JSON.stringify(parts)} が通ってしまった`,
+      );
+      assert(
+        error.message.includes("容器単位 — ADR 0109 決定 3"),
+        `${error.message} が容器単位の規則を名乗っていない`,
+      );
+    }
   });
 
   await t.step("片方だけの宣言は両方向とも落ちる", () => {
@@ -731,7 +920,7 @@ Deno.test("parseManifest: ファイル参照の越境席 repo / revision（ADR 0
       const error = assertThrows(
         () =>
           parseManifest(withModel({
-            weights: { net: { f16: { shards: [{ ...FILE, ...half }] } } },
+            weights: withContainer({ parts: [{ ...PART0, ...half }, { ...PART1, ...half }] }),
           })),
         ManifestFormatError,
         undefined,
@@ -749,7 +938,7 @@ Deno.test("parseManifest: ファイル参照の越境席 repo / revision（ADR 0
       assertThrows(
         () =>
           parseManifest(withModel({
-            weights: { net: { f16: { shards: [foreign({ revision })] } } },
+            weights: { net: { f16: { container: foreignContainer({ revision }) } } },
           })),
         ManifestFormatError,
         undefined,
@@ -762,7 +951,9 @@ Deno.test("parseManifest: ファイル参照の越境席 repo / revision（ADR 0
     for (const repo of ["stack", "other/stack/extra", "other/..", "other/.hidden", "other/re po"]) {
       assertThrows(
         () =>
-          parseManifest(withModel({ weights: { net: { f16: { shards: [foreign({ repo })] } } } })),
+          parseManifest(withModel({
+            weights: { net: { f16: { container: foreignContainer({ repo }) } } },
+          })),
         ManifestFormatError,
         undefined,
         `repo '${repo}' が通ってしまった`,
@@ -775,44 +966,56 @@ Deno.test("parseManifest: ファイル参照の越境席 repo / revision（ADR 0
     // 片方のバイト列がもう片方に配られる。同一性は (repo, revision, path) の 3 つ。
     const manifest = parseManifest(withModel({
       weights: {
-        net: {
-          f16: { shards: [{ path: "shared/model.safetensors", size: 4, sha256: "a1".repeat(32) }] },
-        },
+        net: { f16: { container: CONTAINER } },
         text: {
           f16: {
-            shards: [
-              {
-                path: "shared/model.safetensors",
-                size: 12,
-                sha256: "b2".repeat(32),
-                repo: "other/stack",
-                revision: COMMIT,
-              },
-            ],
+            container: {
+              descriptor: DESCRIPTOR,
+              parts: [
+                { ...PART0, ...cross, size: PART0_SIZE },
+                { ...PART1, ...cross, size: 128, sha256: "e5".repeat(32) },
+              ],
+            },
           },
         },
       },
       quants: { q: { weights: { net: "f16", text: "f16" }, session: {} } },
     }));
-    assertEquals(manifest.models["m"].weights["net"]["f16"].shards[0].size, 4);
-    assertEquals(manifest.models["m"].weights["text"]["f16"].shards[0].size, 12);
+    assertEquals(manifest.models["m"].weights["net"]["f16"].container.parts[1].size, 64);
+    assertEquals(manifest.models["m"].weights["text"]["f16"].container.parts[1].size, 128);
   });
 
   await t.step("同一の (repo, revision, path) は 1 本に畳まれる", () => {
     const manifest = parseManifest(withModel({
       weights: {
-        net: { f16: { shards: [foreign()], extras: { alias: foreign() } } },
+        net: { f16: { container: foreignContainer() } },
+        text: { f16: { container: foreignContainer() } },
       },
+      quants: { q: { weights: { net: "f16", text: "f16" }, session: {} } },
     }));
-    const entry = manifest.models["m"].weights["net"]["f16"];
-    assert(entry.shards[0] === entry.extras["alias"], "同一参照が畳まれていない");
+    const net = manifest.models["m"].weights["net"]["f16"].container;
+    const text = manifest.models["m"].weights["text"]["f16"].container;
+    assert(net.parts[1] === text.parts[1], "同一参照が畳まれていない");
   });
 
   await t.step("同一の (repo, revision, path) で 3 点セットが食い違えば拒否する", () => {
     assertThrows(
       () =>
         parseManifest(withModel({
-          weights: { net: { f16: { shards: [foreign(), foreign({ size: 99 })] } } },
+          weights: {
+            net: {
+              f16: {
+                container: {
+                  descriptor: DESCRIPTOR,
+                  parts: [
+                    { ...PART0, ...cross },
+                    { ...PART1, ...cross },
+                    { ...PART1, ...cross, size: 99 },
+                  ],
+                },
+              },
+            },
+          },
         })),
       ManifestReferenceError,
     );

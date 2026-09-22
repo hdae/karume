@@ -1,21 +1,21 @@
 /**
- * `karume.json`（配布 manifest v4 = `karume/4`）の parse と全構造検査 — ADR 0041 の正本実装。
+ * `karume.json`（配布 manifest v5 = `karume/5`）の parse と全構造検査 — ADR 0109 の正本実装
+ * （quant 席の語彙は ADR 0041 から継承）。
  *
- * MUST: **旧版は読まない**。`format` が `karume/4` 以外なら unsupported format で落とす
- * （2 形パースを持たない — ADR 0041 §1）。v4 は quant エントリへ表示欄（`label` /
- * `description` — ADR 0075）と `requiredLimits`、ファイル参照へ越境参照（`repo` /
- * `revision` — ADR 0038 §7）の席を足した版で、`session` の計算ノブの値は `i8a8` → `a8`
- * へ改名した（ADR 0074 決定 3）。どれも optional だが、**未知キーを fail loudly で拒否する
- * パーサの性質上、席を足した manifest は旧クライアントから読めない**ので major を繰り上げる
- * （ADR 0075 決定 4）。
+ * MUST: **旧版は読まない**。`format` が `karume/5` 以外なら unsupported format で落とす
+ * （2 形パースを持たない — ADR 0109 決定 1）。v5 は配布形が safetensors 方言の shard 列から
+ * コンテナ（`krm` — ADR 0108 / container-v1）へ移った版で、`weights.<部品>.<dtype>` の中身が
+ * `{ shards, extras }` から `{ container }`（descriptor の期待値 + part の FileRef 列）に
+ * 置き換わった。`quants` / `session` / `gpuFeatures` / `requiredLimits` / `label` /
+ * `description` / `assets` / 越境参照の席は v4 のまま（ADR 0109 決定 2 / 4）。
  * MUST: 手書き parse・Web 標準 API のみ・未対応と想定外は fail loudly（黙って正規化しない）。
  * MUST: manifest 由来のマップは `Object.hasOwn` 経由でのみ引き、合成はスプレッドのみ
  * （`Object.assign` 禁止 — CLAUDE.md 横断不変条件 / ADR 0038 §1）。
  *
- * v1 からの語彙の対応（ADR 0041 §3）: `presets` → `quants` / `defaultPreset` → `defaultQuant` /
- * variant → `dtype` / `components` → `weights`（dtype キー必須のテンソル容器）+ `assets`
- * （quant 選択に依存しない無条件ファイル）。v3 で dtype エントリが `{file}` → `{shards}` に
- * なった（ADR 0071）。
+ * **検査の境界**（ADR 0109 決定 6）: ここで見るのは**宣言だけで閉じるもの**だけ —— 件数・天井・
+ * `size: 0` の規則・part 0 の長さ・越境の一様性・descriptor の長さ。descriptor と parts の整合・
+ * block 目次・codec 台帳の突合は**コンテナを開く側**（`@karume/runtime` の `openContainer`）が
+ * 持つ。検査点を 2 つにすると、同じ規則が 2 か所で別々にずれる。
  */
 
 import {
@@ -40,50 +40,61 @@ const MAX_QUANTS = 32;
 const MAX_PIPELINE_CONFIG_BYTES = 256 * 1024;
 /**
  * manifest 全域走査の深さ上限。実在の manifest は envelope → models → weights → dtype →
- * shards → 要素の 6 段前後（`pipelineConfig` の入れ子を足しても十数段）で足りる。一方
+ * container → parts → 要素の 7 段前後（`pipelineConfig` の入れ子を足しても十数段）で足りる。一方
  * 深さ検査が無いと、1MiB に収まる深いネストが `assertNoForbiddenKeys` の再帰でスタックを
  * 食い潰し、素の `RangeError` として `HubError` 契約の外へ抜ける（Deno 実測: 素の walk は
  * 配列 2,410 段で `RangeError`）。実用の要求より十分上・実測の破綻点よりはるか下に置き、
  * 深すぎる manifest は `ManifestFormatError` として fail loudly させる。
  */
 const MAX_MANIFEST_DEPTH = 64;
-/** 1 ファイルの上限バイト数（ADR 0038 §2 から据え置き）。 */
+/** 1 ファイルの上限バイト数（ADR 0038 §2 から据え置き）。part はこの内側にある。 */
 const MAX_FILE_BYTES = 16 * 2 ** 30;
 /**
- * 1 dtype エントリの shard 数の上限。実在の配布は数十本で足りる（16GiB / shard の上限と
- * 併せれば 1024 本は現実の配布規模のはるか上）一方、上限が無いと 1MiB の manifest に
- * 数千の shard 参照を詰めた入力がそのまま取得計画になる。
+ * 1 コンテナの part 件数の上限（container-v1 §10）。実在の配布は数十本で足りる一方、上限が
+ * 無いと 1MiB の manifest に数千の part 参照を詰めた入力がそのまま取得計画になる。
+ * 綴りは Python 正本 `tools/exporter/src/karume/container.py` の `MAX_PARTS` と同値。
  */
-const MAX_SHARDS = 1024;
+const MAX_PARTS = 1024;
 /**
- * shard 1 本の上限バイト数（256MiB — ADR 0090 の読み手契約。席による例外は無い）。
+ * part 1 本の上限バイト数（1024MiB — container-v1 §10 の「part 長の天井」。part 0 / 1 を含む
+ * 全 part に同じ値を掛ける）。
  *
- * 測るのは manifest の `size` = ヘッダ込みの**ファイル長**で、exporter の読み返し（`karume verify`）
- * が実ファイル長で見る量と同じ。読み手が RAM に載せるのはファイル全体なので、上限の根拠
- * （ロード時ホスト RAM ピーク = 定数 + 最大 shard 1 本〈ADR 0070 追記 2026-09-02〉・Chromium の
- * 単一 `ArrayBuffer` 天井・取得層のバイト予算）に対して正しい数え方はこちら。書き手はデータ節を
- * 「上限 − ヘッダ余裕 1MiB」まで詰める（`SHARD_DATA_CAPACITY`）ので、ここは書き手より緩い側に
- * ならない。
+ * 測るのは manifest の `size` = **ファイル長**で、exporter の読み返し（`karume verify`）が実
+ * ファイル長で見る量と同じ。読み手は「器の寸法を宣言から見積る」（ADR 0089）前提で組まれて
+ * いるので、超過 part を黙って受けるとその前提が崩れ、取得層のバイト予算や Chromium の単一
+ * `ArrayBuffer` 上限に**ブラウザで初めて**ぶつかる。parse 時が正位置 —— 読み手契約はフォーマット
+ * 契約であり、「DL 開始後に初めて分かる」を許さないのが manifest 検査の目的そのもの。
  *
- * MUST: 読み手側にも張る。上限の門は書き手（exporter の `pack_shards`）と読み返し
- * （`karume verify`）にしか無く、規則を守っていない shard 列（手で組んだ / 別実装が書いた /
- * 外部ツールの出力）は焼く側が全て緑で通す。読み手は **RAM ピーク O(最大 shard)**
- * （ADR 0070 決定 2）を前提に組まれているので、超過 shard を黙って受けるとその前提が崩れ、
- * Chromium の単一 `ArrayBuffer` 上限や取得層のバイト予算に**ブラウザで初めて**ぶつかる。
- * parse 時が正位置 — 読み手契約はフォーマット契約であり、「DL 開始後に初めて分かる」を
- * 許さないのが manifest 検査の目的そのもの（{@link parseManifest}）。
+ * MUST: 掛けるのは `container.parts` **だけ**。上限は part 分割の契約であって、`assets`
+ * （単一ファイルで配る付帯資産）はこの規則の外にある — 混同すると上限超の実在資産が読めなく
+ * なる。全 FileRef 共通の天井は {@link MAX_FILE_BYTES}。
  *
- * MUST: 掛けるのは `shards` **だけ**。上限は shard 分割の契約であって、`assets` / `extras`
- * （単一ファイルで配る付帯資産）はこの規則の外にある — 混同すると上限超の実在資産
- * （例: PLE sidecar）が読めなくなる。全 FileRef 共通の天井は {@link MAX_FILE_BYTES}。
- *
- * MUST: 綴りは Python 正本 `tools/exporter/src/karume/shards.py` の `SHARD_BYTE_LIMIT` と
+ * MUST: 綴りは Python 正本 `tools/exporter/src/karume/container.py` の `PART_MAX_BYTES` と
  * 同値に保つ（hub は exporter に依存しないので写しになる）。判定も向こうと同じ**閉区間**
  * （ちょうど上限は合法・超過だけを落とす）。
  */
-const MAX_SHARD_BYTES = 2 ** 28;
-/** hub が理解する `format` の major。未知 major は fail loudly（ADR 0041 §1）。 */
-const FORMAT_MAJOR = 4;
+const MAX_PART_BYTES = 1024 * 2 ** 20;
+/**
+ * descriptor の 1 文書（グラフ記述 / モデル記述）の上限バイト数（32MiB — container-v1 §10）。
+ * part 0 を取る費用を block 上限と同じ桁に収めるための天井で、実測の IR は重複除去 47 本で
+ * 9.0MiB（ADR 0109 Context）。綴りは Python 正本
+ * `tools/exporter/src/karume/container.py` の `MAX_DESCRIPTOR_BYTES` と同値。
+ */
+const MAX_DESCRIPTOR_BYTES = 32 * 2 ** 20;
+/**
+ * コンテナのヘッダ長（container-v1 §1 — 固定 24 バイト）。分割形の part 0 は「ヘッダ + 2 文書
+ * ちょうど」なので、宣言どうしの整合（`parts[0].size === 24 + graph.length + model.length`）が
+ * **1 バイトも取らずに**見られる（container-v1 §8）。
+ */
+const CONTAINER_HEADER_BYTES = 24;
+/**
+ * 空のバイト列の sha256。長さ 0 の part（const が空の part 1 — ADR 0109 決定 3）はこの値を
+ * 名乗らなければならない。別の値は「0 バイトのファイルなのに中身がある」という読み取れない
+ * 宣言なので fail loudly。
+ */
+const EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+/** hub が理解する `format` の major。未知 major は fail loudly（ADR 0109 決定 1）。 */
+const FORMAT_MAJOR = 5;
 /** 表示欄の長さ上限（ADR 0075 決定 1）。 */
 const MAX_LABEL_CHARS = 64;
 const MAX_DESCRIPTION_CHARS = 200;
@@ -126,7 +137,10 @@ const MODEL_KEYS: readonly string[] = [
   "defaultQuant",
   "pipelineConfig",
 ];
-const WEIGHT_DTYPE_KEYS: readonly string[] = ["shards", "extras"];
+const WEIGHT_DTYPE_KEYS: readonly string[] = ["container"];
+const CONTAINER_KEYS: readonly string[] = ["descriptor", "parts"];
+const DESCRIPTOR_KEYS: readonly string[] = ["graph", "model"];
+const DOCUMENT_KEYS: readonly string[] = ["length", "sha256"];
 const FILE_REF_KEYS: readonly string[] = ["path", "size", "sha256", "repo", "revision"];
 const QUANT_KEYS: readonly string[] = [
   "weights",
@@ -256,31 +270,54 @@ export const fileRefKey = (ref: FileRef): string => {
 };
 
 /**
- * weights の 1 dtype ぶんのファイル群（`{shards, extras?}`）。
+ * コンテナが内包する 1 文書（グラフ記述 / モデル記述）の**期待値**（container-v1 §7 の①）。
  *
- * MUST: `shards` は**順序付き**（1 要素以上・{@link MAX_SHARDS} 以下で、1 本ずつが
- * {@link MAX_SHARD_BYTES} 以下）。宣言順は保存され、
- * 先頭 = グラフ shard（`karume_ir` を持つ）・後続 = 重み shard という**意味**を持つ
- * （ADR 0070 決定 3）。hub はその意味を検査しない — safetensors を開かないのが hub の境界で、
- * 順序の意味は shard を消費する runtime 側の契約。hub が保証するのは「宣言順のまま渡す」ことだけ。
- *
- * shard の識別子は**配列位置 = id・`size` = その shard のバイト数**として導出する。manifest に
- * id 欄は設けない（位置から導ける値を独立に更新される欄へ写すと正本が 2 つになる）。
- *
- * NOTE: `extras`（rope_base 等）は v1 と同じ席 = dtype エントリの内側に置く（ADR 0041 §3 は
- * components を weights / assets へ割るだけで、extras の位置は動かしていない）。dtype ごとに
- * 別の付帯資産を持てることに意味がある（同一実体なら同じ path を書けば取得は 1 回に畳まれる）。
+ * descriptor は自分の正しさを証明できないので、外側（この manifest）が 2 文書それぞれの
+ * バイト長と sha256 を持つ。part 0 ファイルの sha256（`parts[0].sha256`）とは**別の事実**で、
+ * `graph` 文書の sha256 はそのまま `krg` の同一性（内容ハッシュ）になる（ADR 0109 決定 3）。
  */
-export type WeightFiles = {
-  readonly shards: readonly FileRef[];
-  readonly extras: Readonly<Record<string, FileRef>>;
+export type DocumentExpectation = {
+  /** バイト長（0 < length <= {@link MAX_DESCRIPTOR_BYTES}）。 */
+  readonly length: number;
+  /** 小文字 hex 64 桁。 */
+  readonly sha256: string;
 };
 
 /**
- * weights の 1 エントリ = **dtype ラベル → ファイル群**。v1 の `{file}` / `{variants}` の
- * 2 形は消え、i8 単体のコンポーネントも `{ "i8": … }` と書く（ADR 0041 §3）。
+ * コンテナ 1 本の入口（ADR 0109 決定 3）。読み手（`openContainer`）が要求するのは
+ * 「2 文書の期待値」と「part ごとのバイト列」の 2 つだけなので、manifest が持つのもこの 2 欄。
+ *
+ * MUST: {@link parts} は**添字順の全 part**（先頭が part 0 = descriptor のファイル）。並べ替えも
+ * 重複畳み込みもしない — 添字が part の id なので、列を触った瞬間に識別子が壊れる。
+ * MUST: 越境参照（`repo` / `revision`）は**容器単位**でそろっている（全部が自リポ、または全部が
+ * 同じ (repo, revision)）。混在は parse が落とす（ADR 0109 決定 3）。
+ *
+ * NOTE: ファイル名の規約（`<stem>-NNNNN-of-NNNNN.krm` — container-v1 §8）は書き手の規約で、
+ * hub は検査しない。
  */
-export type WeightEntry = Readonly<Record<string, WeightFiles>>;
+export type ContainerRef = {
+  readonly descriptor: {
+    readonly graph: DocumentExpectation;
+    readonly model: DocumentExpectation;
+  };
+  /** part 0（descriptor のファイル）を先頭に、添字順の全 part。 */
+  readonly parts: readonly FileRef[];
+};
+
+/**
+ * weights の 1 dtype ぶん = コンテナ 1 本（`{ container }`）。v4 の `{ shards, extras }` の
+ * 後継で、`shards` / `extras` は退役した（ADR 0109 決定 3 / 4 — extras の実物はコンテナの
+ * 内側の資産へ移った）。
+ */
+export type WeightContainer = {
+  readonly container: ContainerRef;
+};
+
+/**
+ * weights の 1 エントリ = **dtype ラベル → コンテナ**。dtype ラベルは選択・表示の語彙で、
+ * 格納の正本は descriptor の `encoding.codec`（ADR 0109 決定 2）— hub は写像の完全性だけを見る。
+ */
+export type WeightEntry = Readonly<Record<string, WeightContainer>>;
 
 /** manifest 所有の実行ノブ語彙（ADR 0038 §3 / 0098 / 0104）。 */
 export type SessionSpec = {
@@ -320,7 +357,7 @@ export type Quant = {
    * この席が要求する device limit の最小値（ADR 0038 §7）。
    *
    * NOTE: hub は受理・検査・型面への露出までを持ち、読み手は `@karume/models` の家族
-   * admission（重み shard を 1 バイトも取る前に GPU 側の limits と突き合わせる — ADR 0089
+   * admission（重みを 1 バイトも取る前に GPU 側の limits と突き合わせる — ADR 0089
    * 決定 5）。突き合わせ相手は、共有 GPU を渡された経路なら `GpuContext.limits`、自前で
    * device を取る経路なら `readAdapterLimits()` のアダプタ実測値。
    */
@@ -532,6 +569,7 @@ const parseFileRef = (
   raw: unknown,
   where: string,
   seen: Map<string, FileRef>,
+  { allowEmpty = false }: { readonly allowEmpty?: boolean } = {},
 ): FileRef => {
   if (!isRecord(raw)) throw fail.format(`${where}: ファイル参照がオブジェクトでない`);
   assertAllowedKeys(fail, raw, FILE_REF_KEYS, where);
@@ -544,9 +582,20 @@ const parseFileRef = (
   if (!SHA256_RE.test(sha256)) {
     throw fail.format(`${where}: 'sha256' は小文字 hex 64 桁でなければならない: '${sha256}'`);
   }
-  if (!Number.isSafeInteger(size) || size <= 0 || size > MAX_FILE_BYTES) {
+  // 空を許すのは `container.parts` の添字 1 以上だけ（長さ 0 の part — ADR 0109 決定 3）。
+  // 他の席で `size: 0` は「取りに行っても 1 バイトも来ない参照」なので従来どおり拒否する。
+  const floor = allowEmpty ? 0 : 1;
+  if (!Number.isSafeInteger(size) || size < floor || size > MAX_FILE_BYTES) {
     throw fail.format(
-      `${where}: 'size' は 0 < size <= ${MAX_FILE_BYTES} の安全整数でなければならない: ${size}`,
+      `${where}: 'size' は ${floor} <= size <= ${MAX_FILE_BYTES} の安全整数でなければならない` +
+        `: ${size}`,
+    );
+  }
+  // 長さ 0 の実体は 1 通りしかないので、名乗る sha256 も 1 つに決まる（ADR 0109 決定 3）。
+  if (size === 0 && sha256 !== EMPTY_SHA256) {
+    throw fail.format(
+      `${where}: 'size' が 0 の参照の 'sha256' は空列の値 ${EMPTY_SHA256} でなければならない` +
+        `: '${sha256}'`,
     );
   }
   assertPath(fail, path, where);
@@ -567,59 +616,126 @@ const parseFileRef = (
   return ref;
 };
 
+/** descriptor の 1 文書の期待値（長さ + sha256）。長さの天井は文書ごとに独立に掛ける。 */
+const parseDocument = (fail: Fail, raw: unknown, where: string): DocumentExpectation => {
+  if (!isRecord(raw)) throw fail.format(`${where}: 無い / オブジェクトでない`);
+  assertAllowedKeys(fail, raw, DOCUMENT_KEYS, where);
+  const length = raw["length"];
+  const sha256 = raw["sha256"];
+  if (typeof length !== "number") throw fail.format(`${where}: 'length' が無い / 数値でない`);
+  if (!Number.isSafeInteger(length) || length <= 0 || length > MAX_DESCRIPTOR_BYTES) {
+    throw fail.format(
+      `${where}: 'length' は 0 < length <= ${MAX_DESCRIPTOR_BYTES} の安全整数でなければならない` +
+        `: ${length}`,
+    );
+  }
+  if (typeof sha256 !== "string") throw fail.format(`${where}: 'sha256' が無い / 文字列でない`);
+  if (!SHA256_RE.test(sha256)) {
+    throw fail.format(`${where}: 'sha256' は小文字 hex 64 桁でなければならない: '${sha256}'`);
+  }
+  return { length, sha256 };
+};
+
 /**
- * shard 列を宣言順のまま読む。並べ替えも重複畳み込みもしない — 位置が shard の id なので、
- * 列を触った瞬間に識別子が壊れる（同一 path の 3 点セット一致だけは {@link parseFileRef} の
- * 表が全域で見る）。
+ * part 列を宣言順のまま読む。並べ替えも重複畳み込みもしない — 添字が part の id なので、列を
+ * 触った瞬間に識別子が壊れる（同一 path の 3 点セット一致だけは {@link parseFileRef} の表が
+ * 全域で見る）。
  *
- * バイト上限（{@link MAX_SHARD_BYTES}）を掛けるのはここ — 1 本ずつ独立に見る検査で、席
+ * バイト上限（{@link MAX_PART_BYTES}）を掛けるのはここ — 1 本ずつ独立に見る検査で、席
  * （先頭 / 末尾）による例外は無い。{@link parseFileRef} 側へ下ろさないのは、あの関数を
- * `assets` / `extras` と共有しているため（上限は shard 分割の契約に限る）。
+ * `assets` と共有しているため（上限は part 分割の契約に限る）。
  */
-const parseShards = (
+const parseParts = (
   fail: Fail,
   raw: unknown,
   where: string,
   seen: Map<string, FileRef>,
 ): readonly FileRef[] => {
   if (!Array.isArray(raw)) throw fail.format(`${where}: 無い / 配列でない`);
-  if (raw.length === 0) throw fail.format(`${where}: 空（shard が 1 つ以上要る）`);
-  if (raw.length > MAX_SHARDS) {
-    throw fail.format(`${where}: ${raw.length} 件が上限 ${MAX_SHARDS} を超えた`);
+  if (raw.length < 2) {
+    throw fail.format(
+      `${where}: ${raw.length} 件（part 0〈descriptor〉+ part 1〈const〉の 2 件以上が要る` +
+        ` — container-v1 §8）`,
+    );
+  }
+  if (raw.length > MAX_PARTS) {
+    throw fail.format(`${where}: ${raw.length} 件が上限 ${MAX_PARTS} を超えた`);
   }
   return raw.map((entry, index) => {
-    const ref = parseFileRef(fail, entry, `${where}[${index}]`, seen);
-    if (ref.size > MAX_SHARD_BYTES) {
+    // 長さ 0 は「const が空の part 1」の形だけ（part 0 はヘッダ + 2 文書を必ず持つ）。
+    const ref = parseFileRef(fail, entry, `${where}[${index}]`, seen, { allowEmpty: index > 0 });
+    if (ref.size > MAX_PART_BYTES) {
       throw fail.format(
-        `${where}[${index}]: shard '${ref.path}' が ${ref.size} バイトで` +
-          `上限 ${MAX_SHARD_BYTES} を超えた（分割規則 — ADR 0090）`,
+        `${where}[${index}]: part '${ref.path}' が ${ref.size} バイトで` +
+          `上限 ${MAX_PART_BYTES} を超えた（part 長の天井 — container-v1 §10）`,
       );
     }
     return ref;
   });
 };
 
-const parseWeightFiles = (
+/**
+ * コンテナ 1 本の入口を読む。ここで見るのは**宣言だけで閉じるもの**だけ（ADR 0109 決定 6）—
+ * descriptor の長さ / part の件数と天井 / part 0 の長さ / 越境の一様性。
+ */
+const parseContainer = (
   fail: Fail,
   raw: unknown,
   where: string,
   seen: Map<string, FileRef>,
-): WeightFiles => {
-  if (!isRecord(raw)) throw fail.format(`${where}: dtype エントリがオブジェクトでない`);
-  assertAllowedKeys(fail, raw, WEIGHT_DTYPE_KEYS, where);
-  const shards = parseShards(fail, raw["shards"], `${where}.shards`, seen);
-  const extrasRaw = raw["extras"];
-  if (extrasRaw === undefined) return { shards, extras: {} };
-  if (!isRecord(extrasRaw)) throw fail.format(`${where}.extras: オブジェクトでない`);
-  let extras: Readonly<Record<string, FileRef>> = {};
-  for (const name of Object.keys(extrasRaw)) {
-    const ref = parseFileRef(fail, extrasRaw[name], `${where}.extras.${name}`, seen);
-    extras = { ...extras, [name]: ref };
+): ContainerRef => {
+  if (!isRecord(raw)) throw fail.format(`${where}: 無い / オブジェクトでない`);
+  assertAllowedKeys(fail, raw, CONTAINER_KEYS, where);
+  const descriptorRaw = raw["descriptor"];
+  if (!isRecord(descriptorRaw)) throw fail.format(`${where}.descriptor: 無い / オブジェクトでない`);
+  assertAllowedKeys(fail, descriptorRaw, DESCRIPTOR_KEYS, `${where}.descriptor`);
+  const graph = parseDocument(fail, descriptorRaw["graph"], `${where}.descriptor.graph`);
+  // krm は必ずモデル記述を持つ（グラフだけの `krg` を配る席は karume/5 に無い — ADR 0109 決定 5）。
+  const model = parseDocument(fail, descriptorRaw["model"], `${where}.descriptor.model`);
+  const parts = parseParts(fail, raw["parts"], `${where}.parts`, seen);
+
+  // part 0 は「ヘッダ + 2 文書ちょうど」（container-v1 §8）。宣言どうしの整合なので、1 バイトも
+  // 取らずにここで見られる — 取得してから長さ違いに気づく形を作らない。
+  const part0 = CONTAINER_HEADER_BYTES + graph.length + model.length;
+  if (parts[0].size !== part0) {
+    throw fail.format(
+      `${where}.parts[0]: part 0 の size ${parts[0].size} が` +
+        ` ヘッダ ${CONTAINER_HEADER_BYTES} + グラフ記述 ${graph.length} +` +
+        ` モデル記述 ${model.length} = ${part0} と違う（container-v1 §8）`,
+    );
   }
-  return { shards, extras };
+
+  // 越境参照は**容器単位**（ADR 0109 決定 3）。片方だけ・混在は、残りの part をセッションの
+  // repo へ取りに行く形になり、そこには無いので取得の途中で初めて落ちる。
+  const head = crossRefOf(parts[0]);
+  for (const [index, ref] of parts.entries()) {
+    const cross = crossRefOf(ref);
+    const agrees = head === undefined
+      ? cross === undefined
+      : cross !== undefined && cross.repo === head.repo && cross.revision === head.revision;
+    if (!agrees) {
+      throw fail.format(
+        `${where}.parts[${index}]: 越境参照は容器単位 — ADR 0109 決定 3` +
+          `（part 0 は ${head === undefined ? "自リポ" : `${head.repo}@${head.revision}`} /` +
+          ` この part は ${cross === undefined ? "自リポ" : `${cross.repo}@${cross.revision}`}）`,
+      );
+    }
+  }
+  return { descriptor: { graph, model }, parts };
 };
 
-/** weights の 1 エントリ（dtype ラベル → ファイル群）。**dtype キーは 1 つ以上必須**。 */
+const parseWeightContainer = (
+  fail: Fail,
+  raw: unknown,
+  where: string,
+  seen: Map<string, FileRef>,
+): WeightContainer => {
+  if (!isRecord(raw)) throw fail.format(`${where}: dtype エントリがオブジェクトでない`);
+  assertAllowedKeys(fail, raw, WEIGHT_DTYPE_KEYS, where);
+  return { container: parseContainer(fail, raw["container"], `${where}.container`, seen) };
+};
+
+/** weights の 1 エントリ（dtype ラベル → コンテナ）。**dtype キーは 1 つ以上必須**。 */
 const parseWeightEntry = (
   fail: Fail,
   raw: unknown,
@@ -633,7 +749,10 @@ const parseWeightEntry = (
   }
   let entry: WeightEntry = {};
   for (const label of labels) {
-    entry = { ...entry, [label]: parseWeightFiles(fail, raw[label], `${where}.${label}`, seen) };
+    entry = {
+      ...entry,
+      [label]: parseWeightContainer(fail, raw[label], `${where}.${label}`, seen),
+    };
   }
   return entry;
 };
@@ -986,7 +1105,8 @@ export const parseManifest = (text: string): Manifest => {
   const fail = createFail(available);
   // MUST: `format` を未知キー検査より**先**に見る。v1 manifest はトップレベルの綴りが丸ごと
   // 違うので、順が逆だと「未知キー 'components'」という的外れな診断が出て、本当の理由
-  // （この版は karume/4 のみ読む）が隠れる（ADR 0041 §1）。
+  // （この版は karume/5 のみ読む）が隠れる（ADR 0109 決定 1）。v4 との差は dtype エントリの
+  // 中身だけなので、そちらは「未知キー 'shards'」という枝葉の診断になる。
   const format = parseFormat(fail, root["format"]);
   assertAllowedKeys(fail, root, ENVELOPE_KEYS, "manifest");
   const generator = root["generator"];

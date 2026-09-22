@@ -8,11 +8,11 @@ import {
   IntegrityError,
   loadManifest,
   localDirectory,
-  resolveFiles,
   streamAssets,
 } from "../mod.ts";
-import { buildLocalDist, memoryDirectory, SHARD_PATHS } from "./helpers/local.ts";
+import { buildLocalDist, FETCHED_PART_PATHS, memoryDirectory, PART_KEYS } from "./helpers/local.ts";
 import { MemoryCacheStorage, payloadFor } from "./helpers/mock.ts";
+import { selectionFiles } from "./helpers/selection.ts";
 
 const LABEL = "./models/karume-test";
 
@@ -21,8 +21,8 @@ const shardRefs = async (files: ReadonlyMap<string, Uint8Array<ArrayBuffer>>, ve
   const loaded = await loadManifest(localDirectory(directory.adapter, { label: LABEL }), {
     caches: new MemoryCacheStorage(),
   });
-  const resolved = resolveFiles(loaded.manifest);
-  const refs = SHARD_PATHS.map((_path, index): FileRef => resolved[`net[${index}]`]);
+  const resolved = selectionFiles(loaded.manifest);
+  const refs = PART_KEYS.map((key): FileRef => resolved[key]);
   return { directory, loaded, refs };
 };
 
@@ -57,7 +57,7 @@ Deno.test("streamAssets: 器経由でも size 不一致は IntegrityError（ア�
   const dist = await buildLocalDist();
   const tampered = new Map(dist.files);
   // 途中で切れたコピー（短い）と、器に収まらない長いコピーの両方を見る。
-  const [first, second] = SHARD_PATHS;
+  const [first, second] = FETCHED_PART_PATHS;
   tampered.set(first, payloadFor(`${first}:truncated`).subarray(0, 8) as Uint8Array<ArrayBuffer>);
   const { loaded, refs } = await shardRefs(tampered, true);
   const short = await assertRejects(

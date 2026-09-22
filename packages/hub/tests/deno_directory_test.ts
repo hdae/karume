@@ -16,13 +16,13 @@ import {
   type LoadedManifest,
   loadManifest,
   openAsset,
-  resolveFiles,
   streamAssets,
   type StreamedAsset,
 } from "../mod.ts";
 import { denoDirectory } from "../deno.ts";
-import { buildLocalDist, SHARD_PATHS, TOKENIZER_PATH } from "./helpers/local.ts";
+import { buildLocalDist, FETCHED_PART_PATHS, PART_KEYS, TOKENIZER_PATH } from "./helpers/local.ts";
 import { payloadFor } from "./helpers/mock.ts";
+import { selectionFiles } from "./helpers/selection.ts";
 
 /** 合成した配布形を実ディレクトリへ書き出す（呼び手が消す）。 */
 const materialize = async (
@@ -51,9 +51,9 @@ const withDistribution = async (
   }
 };
 
-/** 逐次面の入力（この配布形は path が全て別なので resolveFiles の出力をそのまま渡せる）。 */
+/** 逐次面の入力（この配布形は path が全て別なので選択の表をそのまま渡せる）。 */
 const streamRefs = (loaded: LoadedManifest): FileRef[] => {
-  const files = resolveFiles(loaded.manifest);
+  const files = selectionFiles(loaded.manifest);
   return Object.keys(files).map((key) => files[key]);
 };
 
@@ -71,9 +71,9 @@ Deno.test("denoDirectory: 実ディレクトリの配布形が末尾 / の有無
     for (const spelling of [root, `${root}/`]) {
       await t.step(`root = ${spelling === root ? "末尾なし" : "末尾あり"}`, async () => {
         const loaded = await loadManifest(denoDirectory(spelling));
-        const assets = await fetchAssets(loaded, resolveFiles(loaded.manifest));
-        SHARD_PATHS.forEach((path, index) => {
-          assertEquals(assets[`net[${index}]`], payloadFor(path));
+        const assets = await fetchAssets(loaded, selectionFiles(loaded.manifest));
+        PART_KEYS.forEach((key, index) => {
+          assertEquals(assets[key], payloadFor(FETCHED_PART_PATHS[index]));
         });
         assertEquals(assets["tokenizer"], payloadFor(TOKENIZER_PATH));
       });
@@ -84,7 +84,7 @@ Deno.test("denoDirectory: 実ディレクトリの配布形が末尾 / の有無
 Deno.test("denoDirectory: file: URL の root でも同じ配布形を指す", async () => {
   await withDistribution(async (root) => {
     const loaded = await loadManifest(denoDirectory(new URL(`file://${root}`)));
-    const assets = await fetchAssets(loaded, resolveFiles(loaded.manifest));
+    const assets = await fetchAssets(loaded, selectionFiles(loaded.manifest));
     assertEquals(assets["tokenizer"], payloadFor(TOKENIZER_PATH));
   });
 });
@@ -108,17 +108,17 @@ Deno.test("denoDirectory: 欠損は実体のパスを名乗って fail loudly", 
   await withDistribution(async (root) => {
     const loaded = await loadManifest(denoDirectory(root));
     // manifest を読んだ**後**に消える形（配布形の一部が欠けたディレクトリ）。
-    await Deno.remove(`${root}/${SHARD_PATHS[1]}`);
+    await Deno.remove(`${root}/${FETCHED_PART_PATHS[1]}`);
 
     const error = await assertRejects(
-      () => fetchAssets(loaded, resolveFiles(loaded.manifest)),
+      () => fetchAssets(loaded, selectionFiles(loaded.manifest)),
       HubFetchError,
     );
-    assertEquals(error.path, SHARD_PATHS[1]);
+    assertEquals(error.path, FETCHED_PART_PATHS[1]);
     assert(error.message.includes(root), `${error.message} がディレクトリを名乗っていない`);
     assert(error.cause instanceof Error, "Deno のエラーを cause に残していない");
     assert(
-      error.cause.message.includes(`${root}/${SHARD_PATHS[1]}`),
+      error.cause.message.includes(`${root}/${FETCHED_PART_PATHS[1]}`),
       `${error.cause.message} が読めなかった実体の絶対パスを名乗っていない`,
     );
   });
@@ -144,7 +144,7 @@ Deno.test("denoDirectory: 実体の size が manifest と食い違えば Integri
     await Deno.writeFile(`${root}/${TOKENIZER_PATH}`, truncated);
 
     const error = await assertRejects(
-      () => fetchAssets(loaded, resolveFiles(loaded.manifest)),
+      () => fetchAssets(loaded, selectionFiles(loaded.manifest)),
       IntegrityError,
     );
     assertEquals(error.path, TOKENIZER_PATH);
@@ -238,7 +238,7 @@ Deno.test("denoDirectory: 逐次面の中断は reason を素通しし、以降�
 Deno.test("denoDirectory: 区間読みは実体の同区間と一致する（先頭 / 中央 / 末尾ちょうど）", async () => {
   await withDistribution(async (root) => {
     const loaded = await loadManifest(denoDirectory(root));
-    const ref = resolveFiles(loaded.manifest)["tokenizer"];
+    const ref = selectionFiles(loaded.manifest)["tokenizer"];
     const whole = await Deno.readFile(`${root}/${ref.path}`);
     const reader = await openAsset(loaded, ref);
     assert(reader !== undefined, "位置読みを持つアダプターなのに読み口が開かない");
@@ -263,7 +263,7 @@ Deno.test("denoDirectory: 区間読みは実体の同区間と一致する（先
 Deno.test("denoDirectory: 長さ 0 の区間は空のバイト列（呼び手の誤りにしない）", async () => {
   await withDistribution(async (root) => {
     const loaded = await loadManifest(denoDirectory(root));
-    const ref = resolveFiles(loaded.manifest)["tokenizer"];
+    const ref = selectionFiles(loaded.manifest)["tokenizer"];
     const reader = await openAsset(loaded, ref);
     assert(reader !== undefined, "読み口が開かない");
     // 0 バイト要求は「読むものが無い」であって誤りではない（末尾ちょうどの位置も含めて許す）。
@@ -276,7 +276,7 @@ Deno.test("denoDirectory: 長さ 0 の区間は空のバイト列（呼び手の
 Deno.test("denoDirectory: 宣言 size の外はアダプターへ降ろす前に落ちる", async () => {
   await withDistribution(async (root) => {
     const loaded = await loadManifest(denoDirectory(root));
-    const ref = resolveFiles(loaded.manifest)["tokenizer"];
+    const ref = selectionFiles(loaded.manifest)["tokenizer"];
     const reader = await openAsset(loaded, ref);
     assert(reader !== undefined, "読み口が開かない");
 
@@ -294,7 +294,7 @@ Deno.test("denoDirectory: 宣言 size の外はアダプターへ降ろす前に
 Deno.test("denoDirectory: 実体が宣言より短ければ埋まらない区間で落ちる（0 埋めを返さない）", async () => {
   await withDistribution(async (root) => {
     const loaded = await loadManifest(denoDirectory(root));
-    const ref = resolveFiles(loaded.manifest)["tokenizer"];
+    const ref = selectionFiles(loaded.manifest)["tokenizer"];
     const reader = await openAsset(loaded, ref);
     assert(reader !== undefined, "読み口が開かない");
     // 途中で切れたコピー（manifest の size はそのまま = 全量読みの size 門と同じ形）。
@@ -311,7 +311,7 @@ Deno.test("denoDirectory: 実体が宣言より短ければ埋まらない区間
 Deno.test("denoDirectory: 区間読みは abort 済み signal で 1 バイトも返さない", async () => {
   await withDistribution(async (root) => {
     const loaded = await loadManifest(denoDirectory(root));
-    const ref = resolveFiles(loaded.manifest)["tokenizer"];
+    const ref = selectionFiles(loaded.manifest)["tokenizer"];
     const reader = await openAsset(loaded, ref);
     assert(reader !== undefined, "読み口が開かない");
     const controller = new AbortController();

@@ -32,7 +32,6 @@ import {
   parseManifest,
 } from "./manifest.ts";
 import { createProgressEmitter, type ProgressEmitter } from "./progress.ts";
-import type { ResolvedFiles } from "./resolve.ts";
 import {
   type FetchAssetsOptions,
   type HubRepoRef,
@@ -100,7 +99,7 @@ const isTightView = (bytes: Uint8Array): bytes is Uint8Array<ArrayBuffer> =>
   bytes.buffer instanceof ArrayBuffer && bytes.byteOffset === 0 &&
   bytes.byteLength === bytes.buffer.byteLength;
 
-const assertTightView = (bytes: Uint8Array, path: string): Uint8Array<ArrayBuffer> => {
+export const assertTightView = (bytes: Uint8Array, path: string): Uint8Array<ArrayBuffer> => {
   if (!isTightView(bytes)) {
     throw new Error(
       `hub: ${path} の bytes が buffer 全体を占めていない` +
@@ -182,8 +181,9 @@ export const loadManifest = async (
 };
 
 /**
- * 解決済みファイル表を取得する。取得と進捗総量は **path で一意化**され、同じ path を指す
- * 複数のキーには同一のバイト列が入る。
+ * 「キー → ファイル参照」の表を取得する。取得と進捗総量は **{@link fileRefKey} で一意化**され、
+ * 同じ実体を指す複数のキーには同一のバイト列が入る。キーの綴りは**呼び手が決める** — hub は
+ * 表を受け取って同じキーで返すだけで、意味を解釈しない。
  *
  * 検証（size / sha256）は取得元へ委ねる — manifest の `sha256` / `size` を期待値として渡すので、
  * network 取得は受信中に照合され、通ったエントリには記録ハッシュが焼かれる。以後のヒットは記録
@@ -192,7 +192,7 @@ export const loadManifest = async (
  */
 export const fetchAssets = async (
   loaded: LoadedManifest,
-  files: ResolvedFiles,
+  files: Readonly<Record<string, FileRef>>,
   options: FetchAssetsOptions = {},
 ): Promise<Record<string, Uint8Array<ArrayBuffer>>> => {
   const source = pinnedSourceOf(loaded, options);
@@ -240,7 +240,7 @@ export const fetchAssets = async (
   };
 
   // 送出は「本数」ではなく「in-flight の `ref.size` 合計」で律速する（{@link BYTE_BUDGET}）。
-  // 待つのはこのループ 1 本だけなので、`targets`（= resolveFiles の順）の head-of-line
+  // 待つのはこのループ 1 本だけなので、`targets`（= 渡された表の順）の head-of-line
   // blocking がそのまま送出順になる — 後続の小さいファイルに追い越させないので、同じ
   // manifest なら同じ順に出る。
   const admission = createByteAdmission(BYTE_BUDGET);
@@ -353,6 +353,11 @@ const preparePhase = (
  * 終端なので `false`（両方が出すと `downloading`* → `complete` を 1 ファイル 1 回とする
  * `AssetPhase` の契約が破れる）、相 2 を持たない {@link prefetchAssets} では終端がここしか
  * ないので `true`。
+ *
+ * MUST: 相 1 の能力は**ref ごとに**見る（`source.ts` ④は取得元ごとの optional 能力で、越境参照は
+ * セッションと違う取得元から来る）。セッションの取得元だけで決めると、ローカルセッション +
+ * 越境先が HF という正当な構成で越境ぶんの温めが丸ごと飛び、進捗も `signal` も届かないまま
+ * 実際の取得が後の読みの中（`openFile` の温め直し）で無音のまま走る。
  */
 const runPrefetchPhase = async (
   source: PinnedSource,
@@ -362,10 +367,6 @@ const runPrefetchPhase = async (
   progress: ProgressEmitter,
   { emitComplete }: { readonly emitComplete: boolean },
 ): Promise<void> => {
-  // 相 1 は取得元の **optional 能力**（`source.ts` ④）。持たない取得元は相 2 の逐次読みだけで
-  // 同じ RAM 目標を満たすので、ここは何もせずに抜ける。
-  if (source.prefetchFile === undefined) return;
-
   const failure = new AbortController();
   const prefetchSignal = options.signal === undefined
     ? failure.signal
@@ -377,14 +378,27 @@ const runPrefetchPhase = async (
     // ファイルに対してだけ効かず、残り全 ref を舐め切ってから決着する）。全量面 fetchOne・
     // 相 2 と同じ綴り。
     prefetchSignal.throwIfAborted();
-    const origin = sourceForRef(source, ref);
+    let origin: PinnedSource;
+    try {
+      origin = sourceForRef(source, ref);
+    } catch (error) {
+      // 未 mapping の越境（`sources/local.ts` の素の Error）は呼び手の設定不足なので、全量面と
+      // 同じ文脈付きの失敗にする（面ごとに見え方を変えない）。
+      if (error instanceof HubError) throw error;
+      throw context.fetchFailure(ref, "事前取得", error);
+    }
     const prefetchFile = origin.prefetchFile;
     if (prefetchFile === undefined) {
-      // 越境先だけが相 1 を持たない形は取得元契約の破れ（`originFor` は同じ取得元の別座標を
-      // 返すものであって、能力を落とす口ではない）。
-      throw new Error(
-        `hub: 越境先の取得元が相 1 を持たない（${fileRefKey(ref)} — 取得元契約の不変条件破れ）`,
-      );
+      // セッションが相 1 を持つのに越境先だけが持たない形は取得元契約の破れ（`originFor` は
+      // 同じ取得元の別座標を返すものであって、能力を落とす口ではない）。
+      if (source.prefetchFile !== undefined) {
+        throw new Error(
+          `hub: 越境先の取得元が相 1 を持たない（${fileRefKey(ref)} — 取得元契約の不変条件破れ）`,
+        );
+      }
+      // 相 1 を持たない取得元（ローカルディレクトリ）の ref は温めずに飛ばす — 進捗も出さない
+      // （`prefetchAssets` の「何もしない」はこの 1 本ぶんの no-op が並んだ形）。
+      return;
     }
     try {
       await prefetchFile(ref, {
@@ -440,8 +454,10 @@ const runPrefetchPhase = async (
  * 進捗は `downloading`* に続けて**ファイルごとに `complete` を 1 回**出す（相 2 を伴わない
  * この面が終端 — `AssetPhase` の契約。キャッシュ済みのファイルは `complete` 1 点だけ）。
  *
- * **相 1 を持たない取得元（ローカルディレクトリ）では、入力検査だけを行って何もしない** —
- * 進捗も 1 つも出ない。fail loudly にはしない: この面の約束は「後続の読みが安く済む状態にする」
+ * **相 1 を持たない取得元（ローカルディレクトリ）の ref は、入力検査だけを行って何もしない** —
+ * その ref の進捗は 1 つも出ない（全 ref がそうなら面ごと no-op）。判定は**ref ごと**なので、
+ * ローカルセッション + 越境先が HF という構成では越境ぶんだけが温まる。
+ * fail loudly にはしない: この面の約束は「後続の読みが安く済む状態にする」
  * ことで、直接読める取得元では**最初から満たされている**（温めるべきキャッシュが無いのは失敗
  * ではない）。落とすと、取得元を差し替えられるはずのアプリが取得元ごとに分岐する羽目になる。
  *
@@ -471,7 +487,7 @@ export const prefetchAssets = async (
  *   （HF では streaming で永続キャッシュへ落とす — RAM に全量を載せない・同時 4 本）。`sha256` は
  *   通過中に照合され、不一致はエントリ不成立で fail loud（帯域を捨てた後に全量を握って落ちない）。
  *   通ったエントリには記録ハッシュが焼かれ、既に記録が一致するエントリは network に出ずそのまま
- *   温存される。**相 1 を持たない取得元では丸ごと省かれる**（相 2 だけで同じ RAM 目標を満たす）。
+ *   温存される。**相 1 を持たない取得元の ref は省かれる**（相 2 だけで同じ RAM 目標を満たす）。
  * - **相 2（逐次引き渡し）**: `refs` の順に 1 本ずつ「取得元から読む → 呼び手へ渡す →
  *   参照を手放す」。相 1 が焼いた記録と期待 sha256 の突合は取得元が行い（全量ハッシュ 0 回）、
  *   記録が食い違う・バイト数が合わないエントリは self-heal で 1 往復だけ取り直す。
