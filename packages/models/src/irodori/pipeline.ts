@@ -128,7 +128,7 @@ import {
   type SegmentLengths,
 } from "./host/mask.ts";
 import { rowMean } from "./host/pooling.ts";
-import { assertAcceptableSeed, Randn } from "./host/random.ts";
+import { Randn } from "./host/random.ts";
 import {
   type SampleBounds,
   sequenceLengthFromLogFrames,
@@ -148,6 +148,8 @@ import {
 import { toManifestSource } from "../hub/repo-ref.ts";
 import { type FromPretrainedHubOptions, hubLoadOptions } from "../hub/load-options.ts";
 import { loadShardComponents, type ModelComponent } from "../hub/components.ts";
+import { ModelInputError } from "../errors.ts";
+import { assertAcceptableSeed } from "../request-gates.ts";
 
 /** 生成結果。`data` は patch 済み latent `[frames × latentDim]`（行優先）。 */
 export type GeneratedLatent = {
@@ -671,7 +673,9 @@ const generateLatent = async (
     initial = new Randn(seed).normals(noiseLength);
   } else {
     if (request.initialNoise.length !== noiseLength) {
-      throw new Error(
+      // 呼び手が渡した配列の長さなので 400 側（ADR 0107）。S は要求から一意に決まらない
+      // （duration グラフ経路がある）ので、入口では検査できず段 ⑦ が所有者のままになる。
+      throw new ModelInputError(
         `IrodoriPipeline: initialNoise の長さ ${request.initialNoise.length} が` +
           ` ${frames}×${config.latentDim} と違う（決まった latent 長は ${frames}）`,
       );

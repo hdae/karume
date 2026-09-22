@@ -28,6 +28,7 @@
  * 順序を入れ替えると同じノブでも別の分布になるので、ここが契約である。
  */
 
+import { ModelInputError } from "../errors.ts";
 import { Randu } from "./random.ts";
 
 /** sampling の指定（省略時は greedy = 温度 0 の縮退形）。 */
@@ -103,7 +104,7 @@ export type Sampler = {
 
 const assertFiniteAtLeast = (value: number, minimum: number, where: string): void => {
   if (!Number.isFinite(value) || value < minimum) {
-    throw new RangeError(`${where} ${value} が ${minimum} 以上の有限数でない`);
+    throw new ModelInputError(`${where} ${value} が ${minimum} 以上の有限数でない`);
   }
 };
 
@@ -116,31 +117,31 @@ const assertFiniteAtLeast = (value: number, minimum: number, where: string): voi
 const assertSpec = (spec: SamplerSpec): void => {
   if (spec.temperature !== undefined) assertFiniteAtLeast(spec.temperature, 0, "temperature");
   if (spec.topK !== undefined && (!Number.isSafeInteger(spec.topK) || spec.topK < 1)) {
-    throw new RangeError(`topK ${spec.topK} が 1 以上の整数でない`);
+    throw new ModelInputError(`topK ${spec.topK} が 1 以上の整数でない`);
   }
   if (spec.topP !== undefined) {
     if (!Number.isFinite(spec.topP) || spec.topP <= 0 || spec.topP > 1) {
-      throw new RangeError(`topP ${spec.topP} が 0 < topP ≤ 1 の範囲にない`);
+      throw new ModelInputError(`topP ${spec.topP} が 0 < topP ≤ 1 の範囲にない`);
     }
   }
   if (spec.repetitionPenalty !== undefined) {
     if (!Number.isFinite(spec.repetitionPenalty) || spec.repetitionPenalty <= 0) {
-      throw new RangeError(`repetitionPenalty ${spec.repetitionPenalty} が正の有限数でない`);
+      throw new ModelInputError(`repetitionPenalty ${spec.repetitionPenalty} が正の有限数でない`);
     }
   }
   const biased = new Set<number>();
   for (const [token, bias] of spec.logitBias ?? []) {
     if (!Number.isSafeInteger(token) || token < 0) {
-      throw new RangeError(`logitBias の token ${token} が 0 以上の整数でない`);
+      throw new ModelInputError(`logitBias の token ${token} が 0 以上の整数でない`);
     }
     if (biased.has(token)) {
-      throw new RangeError(`logitBias に token ${token} が 2 度出る（後勝ちで畳まない）`);
+      throw new ModelInputError(`logitBias に token ${token} が 2 度出る（後勝ちで畳まない）`);
     }
     biased.add(token);
     // `-Infinity` は「その token を禁止する」慣用（HF の `SequenceBias` と同じ）。`+Infinity` と
     // `NaN` は softmax を NaN にするだけなので受けない。
     if (Number.isNaN(bias) || bias === Number.POSITIVE_INFINITY) {
-      throw new RangeError(`logitBias[${token}] ${bias} が有限数でも -Infinity でもない`);
+      throw new ModelInputError(`logitBias[${token}] ${bias} が有限数でも -Infinity でもない`);
     }
   }
 };
@@ -168,6 +169,10 @@ const processLogits = (
     // MUST: 同じ token が履歴に何度出ても 1 回だけ（HF は `gather` した**元の値**を書き戻すので
     // 重複は冪等）。素直に履歴を舐めると重複ぶん累乗され、別のノブになる。
     for (const token of new Set(history)) {
+      // NOTE: `history` は呼び手の要求ではない（`createSampler` は公開面に出ておらず、唯一の
+      // 呼び元 `GenerationSequence.generate` が渡すのは検査済み prompt + 自分が選んだ token）。
+      // ここが落ちるのは配線の破れ（logits 幅と `program.vocabSize` の食い違い）なので、
+      // 下の `logitBias`（呼び手が渡す値）と違い `ModelInputError` にしない — ADR 0107 決定 2。
       if (!Number.isSafeInteger(token) || token < 0 || token >= processed.length) {
         throw new RangeError(`履歴の token id ${token} が語彙 0..${processed.length - 1} の外`);
       }
@@ -179,7 +184,11 @@ const processLogits = (
   if (bias !== undefined) {
     for (const [token, amount] of bias) {
       if (token >= processed.length) {
-        throw new RangeError(`logitBias の token ${token} が語彙 0..${processed.length - 1} の外`);
+        // 語彙の上限は指定の検査（`assertSpec`）の時点では未知なので、検査がここまで遅れる。
+        // 値そのものは呼び手が書いた `logitBias` なので入力起因（ADR 0107 決定 3）。
+        throw new ModelInputError(
+          `logitBias の token ${token} が語彙 0..${processed.length - 1} の外`,
+        );
       }
       processed[token] += amount;
     }
@@ -485,7 +494,8 @@ export const createSampler = (spec: SamplerSpec = {}): Sampler => {
   // 検査を通った指定を**写して**持つ（{@link snapshotSpec} — 検査した値と抽選が読む値を同じに保つ）。
   const frozen = snapshotSpec(spec);
   // seed の受理集合検査もここで済ませる（抽選が走るのは decode の途中なので、生成器を作るのを
-  // 遅らせると不正な seed が GB 級のロードの末に落ちる — anima の `assertAcceptableSeed` と同趣旨）。
+  // 遅らせると不正な seed が GB 級のロードの末に落ちる — `request-gates.ts` の
+  // `assertAcceptableSeed` がその受理集合の所有者）。
   const random = new Randu(frozen.seed ?? 0);
   const rawGreedy = (frozen.temperature ?? 0) === 0 &&
     (frozen.repetitionPenalty ?? 1) === 1 && (frozen.logitBias?.length ?? 0) === 0;

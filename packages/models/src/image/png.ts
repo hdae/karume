@@ -16,6 +16,8 @@
  * CRC32 は Web 標準に無いので自前で持つ（表 256 エントリ・PNG 仕様 Annex D の多項式）。
  */
 
+import { ModelInputError } from "../errors.ts";
+
 /** PNG シグネチャ（8 バイト）。 */
 const SIGNATURE = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
@@ -98,11 +100,14 @@ export const encodePng = async (
   width: number,
   height: number,
 ): Promise<Uint8Array<ArrayBuffer>> => {
+  // NOTE: 3 引数とも呼び手のもの（この関数は barrel から出るだけで、パイプラインの内側からは
+  // 呼ばれない）。打つ手は「渡す寸法 / バイト列を直す」の 1 つなので {@link ModelInputError}
+  // （ADR 0107 決定 2）。
   if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) {
-    throw new RangeError(`画像サイズ ${width}×${height} が正の整数でない`);
+    throw new ModelInputError(`画像サイズ ${width}×${height} が正の整数でない`);
   }
   if (rgba.length !== width * height * 4) {
-    throw new Error(`RGBA の長さ ${rgba.length} が 4×${width}×${height} と違う`);
+    throw new ModelInputError(`RGBA の長さ ${rgba.length} が 4×${width}×${height} と違う`);
   }
 
   const stride = 1 + width * 3;

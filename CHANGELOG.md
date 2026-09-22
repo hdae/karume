@@ -43,6 +43,10 @@ measurements in `docs/research/`.
 - A public-surface snapshot gate for the three packages (`deno doc --json` symbols against a
   tracked fixture; `KARUME_SURFACE=write` refreshes it).
 - Each package now ships its README and LICENSE; this CHANGELOG.
+- `ModelInputError` in `@karume/models`: one cross-family error for requests that cannot be
+  accepted as given, exported from the barrel and from every pipeline subpath, so a host that
+  loads several families tells a 400 from a 500 with a single `instanceof` instead of reading
+  message strings. `Sbv2InputError` and `GenerationCapacityError` are now subclasses of it.
 
 ### Changed
 
@@ -91,6 +95,10 @@ measurements in `docs/research/`.
   its goldens re-baked.
 - **Breaking:** speculation stops enumerating acceptances at a stop token, and reports what was
   handed to the caller as `GenerationSpeculation.delivered`.
+- **Breaking:** input-caused failures that used to throw `RangeError` now throw
+  `ModelInputError` — the seed range, sampler settings, and image / audio sizes. Code branching
+  on `instanceof RangeError` for these has to switch to `ModelInputError`; plain `catch` is
+  unaffected, since `ModelInputError` extends `Error`.
 
 ## [0.12.0] - 2026-09-06
 

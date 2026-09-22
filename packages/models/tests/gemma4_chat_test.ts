@@ -25,6 +25,8 @@
 // を併せて見る（部分集合と full の食い違いを塞ぐ門）。無い環境では SKIP する。
 
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
+import { describe, it } from "@std/testing/bdd";
+import { ModelInputError } from "../src/errors.ts";
 import { createBpeModel } from "../src/text/bpe.ts";
 import {
   createStopStringFilter,
@@ -160,7 +162,7 @@ Deno.test("gemma4 chat 射程: 素の会話の外は fail loudly（黙って無�
     t.step(label, () => {
       assertThrows(
         () => renderGemma4Chat(messages as readonly Gemma4ChatMessage[]),
-        Error,
+        ModelInputError,
         expected,
       );
     });
@@ -366,7 +368,7 @@ Deno.test("gemma4 chat 増分 射程: 素の発話の外は fail loudly", async 
     t.step(label, () => {
       assertThrows(
         () => renderGemma4ChatTurn(message as Gemma4ChatMessage),
-        Error,
+        ModelInputError,
         expected,
       );
     });
@@ -399,6 +401,41 @@ Deno.test("gemma4 chat 停止 token: 綴りが欠けた資産は fail loudly", (
     Error,
     "<|tool_response>",
   );
+});
+
+// ---- 入力起因の失敗の型（ADR 0107）-----------------------------------------
+//
+// 複数の家族を 1 つのホスト（HTTP サーバー・CLI・UI）へ載せた側が 400 と 500 を分ける手段は
+// `instanceof` 1 本しかない。メッセージの文字列を読む形にすると、文言を直した瞬間に黙って
+// 壊れる。ここで縛るのは**線の両側**で、片側だけだと「全部 ModelInputError にする」実装も
+// 「1 つも ModelInputError にしない」実装も通ってしまう。
+
+describe("gemma4 chat の失敗の型（呼び手の分岐先で分ける）", () => {
+  it("要求そのものが受理できない拒否は ModelInputError で捕まる", () => {
+    assertThrows(() => renderGemma4Chat([]), ModelInputError, "会話が空");
+    assertThrows(
+      () => renderGemma4ChatTurn({ role: "assistant", content: "…" }),
+      ModelInputError,
+      "'assistant' は差分にできない",
+    );
+  });
+
+  it("資産の齟齬は ModelInputError でない（入力を直しても直らない）", () => {
+    // 停止 token の綴りが資産に無いのは配布形の欠落で、呼び手が要求を書き換えても通らない。
+    // これを 400 に混ぜると、利用者は自分の入力を疑い続けることになる。
+    const assets = assetsOf(fixture);
+    const thinned = new Map(assets.addedTokens);
+    thinned.delete("<|tool_response>");
+    const error = assertThrows(
+      () => gemma4StopTokens(new GemmaTokenizer({ ...assets, addedTokens: thinned })),
+      Error,
+      "<|tool_response>",
+    );
+    assert(
+      !(error instanceof ModelInputError),
+      `資産の齟齬が入力起因に混ざっている: ${error.message}`,
+    );
+  });
 });
 
 // ---- 停止文字列と一括受け取り（chat 層 — ADR 0083 追記 2026-09-02）----------

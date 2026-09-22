@@ -28,6 +28,8 @@
  * （ADR 0042）がタイル間で効き続ける — 形が 1 枚だけ違うと、そのぶんだけ導出をやり直す。
  */
 
+import { ModelInputError } from "../errors.ts";
+
 /**
  * `tileFrames` の既定（= 1 回の decode に流す latent フレーム数の上限）。
  *
@@ -70,7 +72,10 @@ export const assertCodecTileFrames = (tileFrames: number, haloFrames: number): v
     throw new Error(`planCodecTiles: haloFrames ${haloFrames} が非負整数でない`);
   }
   if (!Number.isInteger(tileFrames) || tileFrames <= 2 * haloFrames) {
-    throw new Error(
+    // `tileFrames` は呼び手の要求ノブ（`IrodoriGenerateRequest.codecTileFrames`）なので、
+    // 入力を直せば通る = ADR 0107 の分類で 400 側。直上の `haloFrames` は配布形が宣言する数で、
+    // 呼び手が直せないため素の `Error` のまま残す。
+    throw new ModelInputError(
       `planCodecTiles: tileFrames ${tileFrames} が halo 2 枚ぶん（${2 * haloFrames}）` +
         "より大きい整数でない（採用できるフレームが 1 枚も残らない）",
     );

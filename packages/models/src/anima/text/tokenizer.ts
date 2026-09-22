@@ -11,6 +11,7 @@
  * バイト列を受けるだけで I/O を持たない（ブラウザでも Deno でも同じ経路）。
  */
 
+import { ModelInputError } from "../../errors.ts";
 import {
   asFiniteNumber,
   asNumber,
@@ -62,14 +63,16 @@ export const assertPromptTokenLengths = (
 ): void => {
   for (const [which, length] of [["Qwen2", qwenLength], ["T5", t5Length]] as const) {
     if (length < PROMPT_MIN_TOKENS) {
-      throw new Error(
+      throw new ModelInputError(
         `${label}の ${which} id 列が ${length} トークン（最低 ${PROMPT_MIN_TOKENS}）— ` +
           `空文字や空白だけのプロンプトは受理集合 Dim(min=${PROMPT_MIN_TOKENS}) の外。` +
           "1 語以上入れる。",
       );
     }
     if (length > maxLength) {
-      throw new Error(`${label}の ${which} id 列が ${length} トークン（上限 ${maxLength}）`);
+      throw new ModelInputError(
+        `${label}の ${which} id 列が ${length} トークン（上限 ${maxLength}）`,
+      );
     }
   }
 };

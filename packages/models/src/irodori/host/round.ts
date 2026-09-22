@@ -9,6 +9,8 @@
  * 境界ケースで丸め先が変わりうる。
  */
 
+import { ModelInputError } from "../../errors.ts";
+
 const f32 = Math.fround;
 
 /** S の clamp 範囲と秒 ↔ フレーム換算（`clampRange` だけが使う内側の面）。 */
@@ -101,7 +103,12 @@ export const sequenceLengthFromSeconds = (
   seconds: number,
   bounds: SampleBounds,
 ): SequencePlan => {
-  if (!Number.isFinite(seconds)) throw new Error(`durationSeconds ${seconds} が有限の数でない`);
+  // `seconds` は呼び手の要求ノブ（`IrodoriGenerateRequest.durationSeconds`）なので 400 側
+  // （ADR 0107）。`maxSequenceLength` 経由で配布形の `maxSeconds` が入る経路もあるが、そちらは
+  // `config.ts` が parse 時に有限性を確かめた後なのでここへは届かない。
+  if (!Number.isFinite(seconds)) {
+    throw new ModelInputError(`durationSeconds ${seconds} が有限の数でない`);
+  }
   // 上流はフレーム側の clamp を掛け直さない（秒を先に clamp してあるので範囲は自動で収まる）。
   const clamped = Math.min(bounds.maxSeconds, Math.max(bounds.minSeconds, seconds));
   const targetSamples = Math.max(1, Math.trunc(clamped * bounds.sampleRate));

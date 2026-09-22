@@ -111,7 +111,8 @@ barrel（`@karume/models`）はさらに全家族を畳んだ `KARUME_SOURCES` �
 - **`SamplerSpec.logitBias` が `Map` からタプルの配列へ**（`readonly [token, bias][]` —
   2026-09-02）。`new Map([[id, bias]])` を書いていたコードは `[[id, bias]]` へ書き換える。`Map` は
   `JSON.stringify` が `{}` へ潰すので、設定として保存・復元した指定が**黙って空の bias** になって
-  いた。あわせて**同じ token を 2 度書いたら `RangeError`**（`Map` の後勝ちの畳み込みは無くなった）。
+  いた。あわせて**同じ token を 2 度書いたら `ModelInputError`**（`Map` の後勝ちの畳み込みは
+  無くなった）。
 - **`Gemma4Pipeline.sampler` → `defaultSampler` へ改名**し、`Gemma4PipelineConfig.sampler` の型が
   `SamplerSpec` から `Gemma4DefaultSampler`（`temperature` / `topK` / `topP` の 3 欄必須）へ縮小
   された。あわせて `fromAssets` も `fromPretrained` と同じ門（未知キー・値域・

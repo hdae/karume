@@ -26,6 +26,7 @@
 import { assertAlmostEquals, assertEquals, assertThrows } from "@std/assert";
 import { parseSafetensors } from "@karume/runtime";
 import { integratedLoudness, kWeightingFilters } from "../src/irodori/host/loudness.ts";
+import { ModelInputError } from "../src/errors.ts";
 import { normalizeReference, reflectPadToHop } from "../src/irodori/host/reference.ts";
 
 /** 実重み v4-small の運用値（`pipelineConfig` が運ぶ数と同じ）。 */
@@ -232,7 +233,7 @@ Deno.test("reflectPadToHop: 既に倍数なら写しも作らず入力をその�
 Deno.test("reflectPadToHop: hop 未満の入力は落とす（鏡像が自分の先頭を飛び越える）", () => {
   assertThrows(
     () => reflectPadToHop(new Float32Array(3) as Float32Array<ArrayBuffer>, 1920),
-    RangeError,
+    ModelInputError,
     "hopLength 1920 が要る",
   );
 });

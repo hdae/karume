@@ -6,6 +6,8 @@
 // 中身を保証する）。
 
 import { assert, assertEquals, assertRejects } from "@std/assert";
+import { describe, it } from "@std/testing/bdd";
+import { ModelInputError } from "../src/errors.ts";
 import { crc32, encodePng } from "../src/image/png.ts";
 
 Deno.test("crc32: 既知ベクタ（CRC-32/ISO-HDLC の check 値と IEND チャンク）", () => {
@@ -114,20 +116,20 @@ Deno.test("encodePng: サイズが正の整数でなければ落とす（長さ�
   for (const bad of [0, -1, 1.5]) {
     await assertRejects(
       () => encodePng(new Uint8ClampedArray(4), bad, 1),
-      RangeError,
+      ModelInputError,
       "正の整数でない",
     );
     await assertRejects(
       () => encodePng(new Uint8ClampedArray(4), 1, bad),
-      RangeError,
+      ModelInputError,
       "正の整数でない",
     );
   }
   // 門の順序: `width × height × 4` が偶然 RGBA 長と一致する組でも、長さ検査より先に
-  // RangeError で落ちる（後段だと「長さは合っているのに壊れた PNG」を作る経路になる）。
+  // 寸法の検査で落ちる（後段だと「長さは合っているのに壊れた PNG」を作る経路になる）。
   await assertRejects(
     () => encodePng(new Uint8ClampedArray(4), 2, 0.5),
-    RangeError,
+    ModelInputError,
     "正の整数でない",
   );
 });
@@ -135,7 +137,23 @@ Deno.test("encodePng: サイズが正の整数でなければ落とす（長さ�
 Deno.test("encodePng: 不透明でない画素は落とす（黙って不透明化しない）", async () => {
   const rgba = new Uint8ClampedArray([1, 2, 3, 254]);
   await assertRejects(() => encodePng(rgba, 1, 1), Error, "アルファ");
-  await assertRejects(() => encodePng(new Uint8ClampedArray(3), 1, 1), Error, "RGBA の長さ");
+  await assertRejects(
+    () => encodePng(new Uint8ClampedArray(3), 1, 1),
+    ModelInputError,
+    "RGBA の長さ",
+  );
+});
+
+// ---- 入力起因かどうかの分類（ADR 0107）------------------------------------
+
+describe("encodePng の失敗をホストが 400 / 500 に振り分けるとき", () => {
+  it("呼び手が渡した寸法の違反は ModelInputError で捕まる", async () => {
+    await assertRejects(() => encodePng(new Uint8ClampedArray(4), 0, 1), ModelInputError);
+  });
+
+  it("呼び手が渡した RGBA の長さ違反も ModelInputError で捕まる", async () => {
+    await assertRejects(() => encodePng(new Uint8ClampedArray(3), 1, 1), ModelInputError);
+  });
 });
 
 Deno.test("encodePng: deflate が効いている（一様画像が生バイト列より十分小さい）", async () => {

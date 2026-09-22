@@ -62,6 +62,7 @@ import {
 } from "@karume/hub";
 
 import { createOperationChain } from "../concurrency/serial.ts";
+import { ModelInputError } from "../errors.ts";
 import {
   assetComponentOpener,
   loadShardComponents,
@@ -1614,12 +1615,12 @@ class GemmaPipeline {
       entry,
     );
     if (!Number.isSafeInteger(capacity) || capacity < chunkLength) {
-      throw new Error(
+      throw new ModelInputError(
         `${entry}: capacity ${capacity} が chunkLength ${chunkLength} 未満`,
       );
     }
     if (capacity > wiring.maxPosition) {
-      throw new Error(
+      throw new ModelInputError(
         `${entry}: capacity ${capacity} が maxPosition ${wiring.maxPosition} を超えた`,
       );
     }

@@ -1,6 +1,7 @@
 import { assertEquals, assertThrows } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
 import type { SessionSpec } from "@karume/hub";
+import { ModelInputError } from "../src/errors.ts";
 import { resolveGemmaSessionOptions as resolve } from "../src/gemma/session-options.ts";
 
 describe("Gemmaのquant実行設定", () => {
@@ -37,11 +38,15 @@ describe("Gemmaのquant実行設定", () => {
   it("未対応の宣言を上書きで隠さず、実効設定の不正な組合せを拒否する", () => {
     assertThrows(
       () => resolve({ linearCompute: "f32" }, {}, "test"),
-      Error,
+      ModelInputError,
       "session.linearCompute",
     );
     for (const linearGemvReduce of ["sequential", "parallel-subgroup32"] as const) {
-      assertThrows(() => resolve(fast, { linearGemvReduce }, "test"), Error, "parallelが必要");
+      assertThrows(
+        () => resolve(fast, { linearGemvReduce }, "test"),
+        ModelInputError,
+        "parallelが必要",
+      );
       assertEquals(
         resolve(fast, {
           linearGemvReduce,
@@ -52,7 +57,7 @@ describe("Gemmaのquant実行設定", () => {
     }
     assertThrows(
       () => resolve({}, { fuseLinearStaticQuantize: true }, "test"),
-      Error,
+      ModelInputError,
       "parallelが必要",
     );
     assertEquals(
@@ -74,12 +79,12 @@ describe("Gemmaのquant実行設定", () => {
     // parallelを伴わない宣言はquant由来でも拒否する（i4-fastはparallelを宣言する）。
     assertThrows(
       () => resolve({ packedStaticQuantize: true }, {}, "test"),
-      Error,
+      ModelInputError,
       "packedStaticQuantizeはlinearGemvReduce: parallelが必要",
     );
     assertThrows(
       () => resolve({}, { packedStaticQuantize: true }, "test"),
-      Error,
+      ModelInputError,
       "packedStaticQuantizeはlinearGemvReduce: parallelが必要",
     );
     assertThrows(
@@ -89,7 +94,7 @@ describe("Gemmaのquant実行設定", () => {
           fuseLinearStaticQuantize: false,
           packedStaticQuantize: true,
         }, "test"),
-      Error,
+      ModelInputError,
       "packedStaticQuantizeはlinearGemvReduce: parallelが必要",
     );
   });
@@ -121,7 +126,7 @@ describe("Gemmaのquant実行設定", () => {
         assertEquals(resolve(spec, {}, "test"), spec);
         continue;
       }
-      assertThrows(() => resolve(spec, {}, "test"), Error, `session.${key}は未対応`);
+      assertThrows(() => resolve(spec, {}, "test"), ModelInputError, `session.${key}は未対応`);
       rejected.push(key);
     }
     assertEquals([...accepted, ...rejected].sort(), Object.keys(full).sort());
@@ -147,7 +152,7 @@ describe("Gemmaのquant実行設定", () => {
         const overrides = {};
         // 実呼び出しが渡すoptionsは列挙可能なプロパティしか持たないので、同じ形で検査する。
         Object.defineProperty(overrides, key, { value, enumerable: true });
-        assertThrows(() => resolve(fast, overrides, "test"), Error, message);
+        assertThrows(() => resolve(fast, overrides, "test"), ModelInputError, message);
       }
     }
     assertEquals(conversions, 0);

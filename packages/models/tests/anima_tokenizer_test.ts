@@ -35,6 +35,7 @@ import {
   createTokenizers,
   PROMPT_MIN_TOKENS,
 } from "../src/anima/text/tokenizer.ts";
+import { ModelInputError } from "../src/errors.ts";
 import { splitAddedTokens } from "../src/text/added-tokens.ts";
 import { toCodePoints } from "../src/text/code-points.ts";
 
@@ -329,7 +330,7 @@ Deno.test("受理集合: 空文字・空白だけのプロンプトは fail loud
   assertEquals(caseById("only_space").t5Ids.length, 1);
   assertThrows(
     () => assertPromptTokenLengths("ネガティブプロンプト", 0, 1, fixture.maxLength),
-    Error,
+    ModelInputError,
     "ネガティブプロンプト",
   );
 });
@@ -347,7 +348,7 @@ Deno.test("受理集合: 1 文字のプロンプトは Qwen2 側が 1 トーク�
         single.t5Ids.length,
         fixture.maxLength,
       ),
-    Error,
+    ModelInputError,
     "Qwen2",
   );
 });
@@ -357,7 +358,7 @@ Deno.test("受理集合: 通常のタグ列は受理し、上限超過は拒否�
   assertPromptTokenLengths("プロンプト", tags.qwenIds.length, tags.t5Ids.length, fixture.maxLength);
   assertThrows(
     () => assertPromptTokenLengths("プロンプト", fixture.maxLength + 1, 4, fixture.maxLength),
-    Error,
+    ModelInputError,
     "上限",
   );
 });
@@ -381,7 +382,11 @@ Deno.test("AnimaTokenizers: 正 / ネガティブのどちらで落ちたかが�
   const ids = tokenizers.encode(tags.text);
   assertEquals([...ids.qwenIds], tags.qwenIds);
   assertEquals([...ids.t5Ids], tags.t5Ids);
-  assertThrows(() => tokenizers.encode("", "ネガティブプロンプト"), Error, "ネガティブプロンプト");
+  assertThrows(
+    () => tokenizers.encode("", "ネガティブプロンプト"),
+    ModelInputError,
+    "ネガティブプロンプト",
+  );
 });
 
 Deno.test("createTokenizers: バイト列（manifest の tokenizer / tokenizer_2）から組む", () => {

@@ -15,6 +15,8 @@
  * token 列が要る突合は**温度 0（= greedy 縮退）**で採る — 抽選が走る経路の parity は取れない。
  */
 
+import { assertAcceptableSeed } from "../request-gates.ts";
+
 const GOLDEN_GAMMA = 0x9e3779b97f4a7c15n;
 const MIX_1 = 0xbf58476d1ce4e5b9n;
 const MIX_2 = 0x94d049bb133111ebn;
@@ -36,9 +38,9 @@ export class Randu {
   #state: bigint;
 
   constructor(seed: number) {
-    if (!Number.isInteger(seed) || seed < 0 || seed > Number.MAX_SAFE_INTEGER) {
-      throw new RangeError(`seed ${seed} が非負の安全整数でない`);
-    }
+    // 受理集合の所有者は `request-gates.ts` の 1 本（同じ値域を写して持つと片方だけ緩む —
+    // ADR 0107 決定 6）。ここは条件を持たず、その門を通すだけである。
+    assertAcceptableSeed(seed);
     this.#state = BigInt(seed) & MASK_64;
   }
 

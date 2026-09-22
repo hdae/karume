@@ -11,6 +11,7 @@
 // 実装から採った fixture は 1 つも無い。分布そのものは χ² 門（下段）で縛る。
 
 import { assert, assertAlmostEquals, assertEquals, assertThrows } from "@std/assert";
+import { ModelInputError } from "../src/errors.ts";
 import {
   createSampler,
   isStopToken,
@@ -385,7 +386,7 @@ Deno.test("sampler: 全 token を禁止したら fail loudly（黙って 0 を�
 Deno.test("sampler: logit bias の token が語彙の外なら fail loudly", () => {
   assertThrows(
     () => createSampler({ logitBias: [[9, 1]] }).next(f32([1, 2]), []),
-    RangeError,
+    ModelInputError,
     "語彙",
   );
 });
@@ -395,12 +396,12 @@ Deno.test("sampler: 同じ token の logit bias を 2 度書いたら fail loudl
   // 片方だけが効く」ことになるので落とす。値が同じでも落とす（畳み方の疑義は同じ）。
   assertThrows(
     () => createSampler({ logitBias: [[2, 6], [2, -1]] }),
-    RangeError,
+    ModelInputError,
     "token 2 が 2 度出る",
   );
   assertThrows(
     () => samplerDistribution(f32([1, 2, 3]), { temperature: 1, logitBias: [[0, 1], [0, 1]] }, []),
-    RangeError,
+    ModelInputError,
     "token 0 が 2 度出る",
   );
 });
@@ -444,11 +445,53 @@ Deno.test("sampler: 受理できない指定は構築時に落ちる", () => {
   for (const spec of rejected) {
     assertThrows(
       () => createSampler(spec),
-      RangeError,
+      ModelInputError,
       undefined,
       JSON.stringify(Object.keys(spec)),
     );
   }
+});
+
+// ---------------------------------------------------------------------------
+// 失敗の分類（ADR 0107 — 呼び手の分岐先で型を割る）
+// ---------------------------------------------------------------------------
+
+Deno.test("sampler: 失敗の分類は呼び手の分岐先で決まる", async (t) => {
+  await t.step("指定の値域は入力起因（呼び手が値を直せば通る）", () => {
+    assertThrows(() => createSampler({ topP: 0 }), ModelInputError, "topP 0");
+    // seed の受理集合の所有者は `request-gates.ts` の 1 本（ADR 0107 決定 6）。ここが
+    // `ModelInputError` で落ちること自体が、`Randu` が自前の条件を持っていないことの対。
+    assertThrows(() => createSampler({ seed: -1 }), ModelInputError, "seed -1");
+  });
+
+  await t.step("語彙の外の logitBias も入力起因（語彙が判るのが最初の抽選なだけ）", () => {
+    assertThrows(
+      () => createSampler({ logitBias: [[9, 1]] }).next(f32([1, 2]), []),
+      ModelInputError,
+      "logitBias の token 9 が語彙 0..1 の外",
+    );
+  });
+
+  await t.step("logits の NaN は入力起因ではない（呼び手が要求を直しても直らない）", () => {
+    // 重みか配線の破れで、HTTP サーバーなら 500。同じ型で捕まると「入力を直せ」と返す形になる。
+    const error = assertThrows(
+      () => createSampler().next(f32([Number.NaN, 1]), []),
+      Error,
+      "NaN",
+    );
+    assert(!(error instanceof ModelInputError), "logits の NaN が入力起因に分類されている");
+  });
+
+  await t.step("履歴の token id が語彙の外も入力起因ではない（唯一の呼び元は検査済み）", () => {
+    // `createSampler` は公開面に出ておらず、`history` を渡すのは `GenerationSequence.generate`
+    // だけ（検査済み prompt + 自分が選んだ token）。ここが落ちるのは配線の破れである。
+    const error = assertThrows(
+      () => samplerDistribution(f32([1, 2]), { temperature: 1, repetitionPenalty: 2 }, [5]),
+      RangeError,
+      "語彙",
+    );
+    assert(!(error instanceof ModelInputError), "履歴の語彙外が入力起因に分類されている");
+  });
 });
 
 // ---------------------------------------------------------------------------

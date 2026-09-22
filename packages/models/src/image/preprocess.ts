@@ -36,6 +36,8 @@
  * **0.26% → 9.5%** へ跳ねる（18 幾何 × 224×224 = 2,709,504 標本の実測）。
  */
 
+import { ModelInputError } from "../errors.ts";
+
 /** RGB8 の画素列（行優先・画素あたり 3 バイト）と、その寸法。 */
 export type Rgb8Image = {
   readonly data: Uint8Array;
@@ -128,14 +130,21 @@ const buildTaps = (inSize: number, outSize: number, kernel: Kernel): readonly Ta
  */
 const round8 = (value: number): number => Math.min(255, Math.max(0, Math.floor(value + 0.5)));
 
-/** 入口の契約（正の整数寸法・長さの整合）を検査する。 */
+/**
+ * 入口の契約（正の整数寸法・長さの整合）を検査する。
+ *
+ * NOTE: {@link ModelInputError} なのは、見ているのが**呼び手が渡した画像そのもの**だから
+ * （家族 3 つの `preprocessPixelValues` は `estimate` / `segment` / `embedImage` が受けた
+ * `Rgb8Image` をそのまま流す）。打つ手は「渡す画像を直す」の 1 つ = HTTP なら 400 に当たる
+ * （ADR 0107 決定 2）。
+ */
 const assertRgb8 = (image: Rgb8Image): void => {
   const { data, width, height } = image;
   if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) {
-    throw new RangeError(`画像サイズ ${width}×${height} が正の整数でない`);
+    throw new ModelInputError(`画像サイズ ${width}×${height} が正の整数でない`);
   }
   if (data.length !== width * height * CHANNELS) {
-    throw new Error(`RGB8 の長さ ${data.length} が 3×${width}×${height} と違う`);
+    throw new ModelInputError(`RGB8 の長さ ${data.length} が 3×${width}×${height} と違う`);
   }
 };
 
@@ -158,8 +167,12 @@ export const resizeRgb8 = (
   filter: ResampleFilter = "bilinear",
 ): Rgb8Image => {
   assertRgb8(image);
+  // NOTE: 出力寸法も入力起因（ModelInputError）。家族 3 つが渡す `config.imageWidth` /
+  // `imageHeight` は parse 時点で `isPositiveInteger` を通っている（`siglip2/config.ts` ほか
+  // 2 家族の `readNumber`）ので、**パイプライン経由ではここへ到達しない** — 残る到達経路は
+  // barrel から `resizeRgb8` を直に叩く呼び手だけで、そこでは寸法が呼び手の要求そのもの。
   if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) {
-    throw new RangeError(`出力サイズ ${width}×${height} が正の整数でない`);
+    throw new ModelInputError(`出力サイズ ${width}×${height} が正の整数でない`);
   }
   const kernel = KERNELS[filter];
   const horizontal = buildTaps(image.width, width, kernel);
@@ -214,6 +227,12 @@ export const resizeRgb8 = (
  *
  * 重みは非負で総和 1 なので、入力の値域は出力でも保たれる（`[0, 1]` のマットが範囲外へ
  * 出ることはない — clamp を置いていないのはこの理由）。
+ *
+ * NOTE: 下の 2 つの検査は `RangeError` / 素の `Error` のまま据え置く（{@link resizeRgb8} と
+ * 違って {@link ModelInputError} にしない）。この関数は barrel にもサブパス面にも出ておらず、
+ * 呼び手は `birefnet` の `matteFromLogits` と `depth-anything` の `resampleDepth` の 2 つだけ
+ * で、どちらも**資産（`config.imageWidth` / `imageHeight`）と検査済みの画像寸法**しか渡さない。
+ * つまりここは**内部ヘルパの事前条件**であり、ADR 0107 決定 3 が適用範囲から外した側にある。
  */
 export const resizePlaneF32 = (
   plane: Float32Array,

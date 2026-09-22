@@ -11,6 +11,7 @@
  * 書く 5 ケース）で、突合は `packages/models/tests/irodori_reference_test.ts`。
  */
 
+import { ModelInputError } from "../../errors.ts";
 import { integratedLoudness } from "./loudness.ts";
 
 /**
@@ -91,7 +92,10 @@ export const reflectPadToHop = (
     throw new RangeError(`reflectPadToHop: hopLength ${hopLength} が正の整数でない`);
   }
   if (samples.length < hopLength) {
-    throw new RangeError(
+    // 長さの出どころは呼び手が渡した参照音声（`IrodoriSpeakerInput` の wav）なので 400 側
+    // （ADR 0107 決定 5 の「音声の寸法」）。直上の `hopLength` は配布形が宣言する数で、
+    // 呼び手が直せないため `RangeError` のまま残す。
+    throw new ModelInputError(
       `reflectPadToHop: 参照音声が ${samples.length} サンプルしかない（hopLength ${hopLength} が要る）`,
     );
   }

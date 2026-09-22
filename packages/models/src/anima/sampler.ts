@@ -14,12 +14,33 @@
  * （配布物ごとに変わりうる数なので、ここに定数として持たない — ADR 0038 §1）。
  */
 
+import { ModelInputError } from "../errors.ts";
 import { needsUncond } from "../generation/dpm-solver-multistep.ts";
 
 const f32 = Math.fround;
 
 /** `get_timestep_embedding` の `max_period`（diffusers の既定 10000）。 */
 const MAX_PERIOD = 10000;
+
+/**
+ * `steps` の受理集合（**2 以上の整数**）を見る門。**この 1 本が所有者**で、生成の入口
+ * （`pipeline.ts` の `generate`）も {@link sigmaSchedule} 自身もここを呼ぶ。
+ *
+ * NOTE: 入口が先に呼ぶ。梯子を組むのは text encoder / conditioner を回して DiT の重みを
+ * 上げ終えた後なので、梯子側だけに検査があると不正な `steps` が GB 級のロードの末に落ちる。
+ * 受理集合を両側に書くと必ず片方が緩むので、条件はここにしか置かない。
+ *
+ * 入力起因（呼び手が渡した生成ノブそのもの）なので {@link ModelInputError} を投げる —
+ * 梯子の構造検査（先頭が 1 / 狭義単調減少）は配布物の `shift` に対する内部の前提なので
+ * `RangeError` のままで、型で分かれる。
+ */
+export const assertAcceptableSteps = (steps: number): void => {
+  if (!Number.isInteger(steps) || steps < 2) {
+    throw new ModelInputError(
+      `steps ${steps} が 2 以上の整数でない（sigma の linspace が組めない）`,
+    );
+  }
+};
 
 /**
  * `FlowMatchEulerDiscreteScheduler.set_timesteps`（静的 shift 経路）の TS 実装。
@@ -57,9 +78,7 @@ const MAX_PERIOD = 10000;
 const SIGMA_HEAD_TOLERANCE = 2 ** -22;
 
 export const sigmaSchedule = (steps: number, shift: number): Float32Array<ArrayBuffer> => {
-  if (!Number.isInteger(steps) || steps < 2) {
-    throw new RangeError(`steps ${steps} が 2 以上の整数でない（linspace の分母が 0 になる）`);
-  }
+  assertAcceptableSteps(steps);
   const start = 1;
   const stop = 1 / steps;
   const step = (stop - start) / (steps - 1);

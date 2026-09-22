@@ -12,7 +12,8 @@
 //  ③ 運用上限（`maxTokens` / `maxFrames`）は配布形が宣言する — 欠けていれば読めない。
 //     ホスト側の `(T, T)` 表は 8·T² bytes 級なので、上限の無い配布形は無制限に膨らむ。
 
-import { assertEquals, assertRejects, assertThrows } from "@std/assert";
+import { assert, assertEquals, assertFalse, assertRejects, assertThrows } from "@std/assert";
+import { describe, it } from "@std/testing/bdd";
 import { parseManifest } from "@karume/hub";
 import {
   assertBertWidth,
@@ -27,6 +28,7 @@ import {
 } from "../src/sbv2/pipeline.ts";
 import { parseTokenizerAsset } from "../src/sbv2/text/asset.ts";
 import { stubModel } from "./helpers/stub-model.ts";
+import { ModelInputError } from "../src/errors.ts";
 import { Sbv2InputError } from "../src/sbv2/errors.ts";
 import { Randn } from "../src/sbv2/host/random.ts";
 import { parseSbv2PipelineConfig } from "../src/sbv2/config.ts";
@@ -375,8 +377,9 @@ Deno.test("assertSeed: 受理集合は非負の安全整数（Randn と同一条
   for (const bad of [-1, 1.5, 2 ** 53, Number.NaN, Number.POSITIVE_INFINITY]) {
     assertThrows(() => assertSeed(bad), Sbv2InputError, `seed ${bad} が非負の安全整数でない`);
     // 受理集合は `Randn` と 1 ビットも動かさない（緩めれば BigInt 変換が壊れ、締めれば
-    // 既存の呼び出しが落ちる）。型だけが違うことをここで固定する。
-    assertThrows(() => new Randn(bad), RangeError);
+    // 既存の呼び出しが落ちる）。どちらも所有者 `request-gates.ts` の 1 本を通るので、
+    // 型は入口が `Sbv2InputError`・生成器が親の `ModelInputError` という差だけになる。
+    assertThrows(() => new Randn(bad), ModelInputError);
   }
 });
 
@@ -420,6 +423,28 @@ Deno.test("assertTiledBert: 故障注入 — 走査が取りこぼした tile �
   );
   // 音素数との不一致（analysis と tile の齟齬）は従来どおり別の文言で落ちる。
   assertThrows(() => assertTiledBert(good, 4), Error, "BERT 展開長 3 が音素数 4 と違う");
+});
+
+describe("SBV2 の throw の分類軸（家族横断の分岐に乗るか）", () => {
+  // 複数家族を同じホストに載せた側は `instanceof ModelInputError` だけで 400 / 500 を分ける。
+  // SBV2 の型が `Sbv2InputError` のままでも、親が同じである限りその分岐は成立する。
+
+  it("入力起因の門は家族横断の ModelInputError で捕まる", () => {
+    const seed = assertThrows(() => assertSeed(-1));
+    assert(seed instanceof ModelInputError, "seed の不受理は 400 相当");
+    const tokens = assertThrows(() => assertTokenLimit(513, 512));
+    assert(tokens instanceof ModelInputError, "トークン上限の超過は 400 相当");
+    const phonemes = assertThrows(() => assertPhonemeLimit(513, 512));
+    assert(phonemes instanceof ModelInputError, "音素上限の超過は 400 相当");
+  });
+
+  it("内部不変条件の破れは ModelInputError ではない", () => {
+    // tile 走査の破れは呼び手が text も seed も直しようがない = 500 相当。入力起因と同じ型に
+    // なると、配線の故障を「入力を直せ」と呼び手へ返すことになる。
+    const broken = tileWithShortRepeat(new Float32Array([1, 2, 3, 10, 20, 30]), 2, [1, 2]);
+    const error = assertThrows(() => assertTiledBert(broken, 3), Error, "tile 走査の破れ");
+    assertFalse(error instanceof ModelInputError);
+  });
 });
 
 // ---- 構築時の資産 × グラフ突合（沈黙誤値クラスの門）------------------------

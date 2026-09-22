@@ -14,6 +14,7 @@
 
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import type { RunInputs, Session } from "@karume/runtime";
+import { ModelInputError } from "../src/errors.ts";
 import type { GenerationWiring } from "../src/generation/program.ts";
 import {
   assertGenerationRequestValues,
@@ -894,29 +895,29 @@ Deno.test("GenerationSequence: 受理集合は同期に落ちる（順番待ち�
   });
   assertThrows(
     () => sequence.generate({ prompt: [1], maxNewTokens: 0 }),
-    Error,
+    ModelInputError,
     "maxNewTokens 0",
   );
   assertThrows(
     () => sequence.generate({ prompt: [1], maxNewTokens: 1.5 }),
-    Error,
+    ModelInputError,
     "maxNewTokens 1.5",
   );
   // `Int32Array` の wrap も語彙外も黙って別 token に化ける（後者は範囲外 gather = NaN 汚染）。
   assertThrows(
     () => sequence.generate({ prompt: [1, VOCAB], maxNewTokens: 1 }),
-    Error,
+    ModelInputError,
     `prompt[1] ${VOCAB} が語彙 0..${VOCAB - 1} の外`,
   );
   assertThrows(
     () => sequence.generate({ prompt: [4294967297], maxNewTokens: 1 }),
-    Error,
+    ModelInputError,
     "prompt[0] 4294967297",
   );
   // sampler の指定も発行時に落とす（抽選は decode の途中で走るので、遅らせると深く潜る）。
   assertThrows(
     () => sequence.generate({ prompt: [1], maxNewTokens: 1, sampler: { temperature: -1 } }),
-    RangeError,
+    ModelInputError,
     "temperature -1",
   );
   assertEquals(fake.calls.length, 0);
@@ -936,10 +937,14 @@ Deno.test("受理集合の値域検査は 1 本の純関数（高レベル面と
   });
 
   await t.step("maxNewTokens の値域", () => {
-    assertThrows(() => assertGenerationRequestValues(VOCAB, { maxNewTokens: 0 }), Error, "0 が 1");
+    assertThrows(
+      () => assertGenerationRequestValues(VOCAB, { maxNewTokens: 0 }),
+      ModelInputError,
+      "0 が 1",
+    );
     assertThrows(
       () => assertGenerationRequestValues(VOCAB, { maxNewTokens: 1.5 }),
-      Error,
+      ModelInputError,
       "maxNewTokens 1.5",
     );
   });
@@ -947,12 +952,12 @@ Deno.test("受理集合の値域検査は 1 本の純関数（高レベル面と
   await t.step("stopTokens の語彙外と重複", () => {
     assertThrows(
       () => assertGenerationRequestValues(VOCAB, { maxNewTokens: 1, stopTokens: [VOCAB] }),
-      Error,
+      ModelInputError,
       `stopTokens[0] ${VOCAB} が語彙 0..${VOCAB - 1} の外`,
     );
     assertThrows(
       () => assertGenerationRequestValues(VOCAB, { maxNewTokens: 1, stopTokens: [2, 2] }),
-      Error,
+      ModelInputError,
       "token 2 が 2 度出る",
     );
   });
@@ -964,7 +969,7 @@ Deno.test("受理集合の値域検査は 1 本の純関数（高レベル面と
           maxNewTokens: 1,
           sampler: { temperature: -1 },
         }),
-      RangeError,
+      ModelInputError,
       "temperature -1",
     );
   });
@@ -977,10 +982,41 @@ Deno.test("受理集合の値域検査は 1 本の純関数（高レベル面と
       program: programOf(fake),
     });
     const request = { prompt: [1], maxNewTokens: 1, stopTokens: [2, 2] };
-    assertThrows(() => assertGenerationRequestValues(VOCAB, request), Error, "2 度出る");
-    assertThrows(() => sequence.generate(request), Error, "2 度出る");
+    assertThrows(
+      () => assertGenerationRequestValues(VOCAB, request),
+      ModelInputError,
+      "2 度出る",
+    );
+    assertThrows(() => sequence.generate(request), ModelInputError, "2 度出る");
     assertEquals(fake.calls.length, 0);
   });
+});
+
+Deno.test("GenerationSequence: 受理できない要求は 1 つの型で捕まる（ADR 0107）", async () => {
+  const fake = fakeSession();
+  const sequence = await createGenerationSequence({
+    session: fake.session,
+    program: programOf(fake),
+  });
+  // 値域 / 語彙 / 組合せ / sampler の 4 経路。型が 1 本でないと、複数家族を載せたホストは
+  // 400 を切り出すのに**メッセージの綴りを読む**しかなくなる（文言を変えた瞬間に黙って壊れる）。
+  const rejected: readonly GenerationRequest[] = [
+    { prompt: [1], maxNewTokens: 0 },
+    { prompt: [1, VOCAB], maxNewTokens: 1 },
+    { prompt: [1], maxNewTokens: 1, stopTokens: [2, 2] },
+    { prompt: [1], maxNewTokens: 1, sampler: { topK: 0 } },
+  ];
+  for (const request of rejected) {
+    // ホストが書く形（`catch` して `instanceof` で 400 / 500 を割る）をそのまま置く。
+    let caught: unknown;
+    try {
+      sequence.generate(request);
+    } catch (error) {
+      caught = error;
+    }
+    assert(caught instanceof ModelInputError, `入力起因で捕まらない: ${JSON.stringify(request)}`);
+  }
+  assertEquals(fake.calls.length, 0);
 });
 
 /** 発行後に書き換えるための可変版（公開型は全欄 readonly）。 */

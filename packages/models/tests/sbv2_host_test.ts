@@ -7,6 +7,7 @@
 
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { parseSafetensors } from "@karume/runtime";
+import { ModelInputError } from "../src/errors.ts";
 import { Sbv2InputError } from "../src/sbv2/errors.ts";
 import { durationsToFrames } from "../src/sbv2/host/duration.ts";
 import { buildZp } from "../src/sbv2/host/latent.ts";
@@ -212,8 +213,8 @@ Deno.test("encodeWav: 値域外はクリップし、丸めは floor(x+0.5) 相�
 });
 
 Deno.test("encodeWav: 不正なサンプリング周波数は落とす", () => {
-  assertThrows(() => encodeWav(new Float32Array(1), 0), RangeError);
-  assertThrows(() => encodeWav(new Float32Array(1), 44100.5), RangeError);
+  assertThrows(() => encodeWav(new Float32Array(1), 0), ModelInputError);
+  assertThrows(() => encodeWav(new Float32Array(1), 44100.5), ModelInputError);
 });
 
 Deno.test("writeSafetensors: 書いたものを読み戻せる（dump の運搬が閉じている）", () => {

@@ -7,6 +7,8 @@
 // 数値パリティ（`t_embed` 表の golden 突合）は資産が要るので `irodori_t_embed_test.ts`。
 
 import { assert, assertEquals, assertNotStrictEquals, assertThrows } from "@std/assert";
+import { describe, it } from "@std/testing/bdd";
+import { ModelInputError } from "../src/errors.ts";
 import { buildDitMask, SEGMENT_ORDER } from "../src/irodori/host/mask.ts";
 import { packCaptionIds, packIds } from "../src/irodori/host/pack.ts";
 import { patchReferenceLatent } from "../src/irodori/host/patch.ts";
@@ -112,7 +114,11 @@ Deno.test("sequenceLengthFromLogFrames: expm1 が有限でない出力は落と�
 
 Deno.test("sequenceLengthFromSeconds: 非有限の秒は落とす", () => {
   for (const seconds of [NaN, Infinity]) {
-    assertThrows(() => sequenceLengthFromSeconds(seconds, BOUNDS), Error, "durationSeconds");
+    assertThrows(
+      () => sequenceLengthFromSeconds(seconds, BOUNDS),
+      ModelInputError,
+      "durationSeconds",
+    );
   }
 });
 
@@ -308,7 +314,7 @@ Deno.test("packIds: 正規化を通す（全角空白は消える — `normalize
 Deno.test("packIds: 正規化後に空なら落とす（BOS だけの列を通さない）", () => {
   assertThrows(
     () => packIds(tinyTokenizer(), "　 ", 8, "caption"),
-    Error,
+    ModelInputError,
     "caption が正規化後に空",
   );
 });
@@ -381,4 +387,38 @@ Deno.test("Randn: 奇数長でも Box–Muller の対を持ち越さない", () 
   assertEquals([...head], [...single.slice(0, 3)], "先頭 3 要素までは同じ列");
   assertEquals(tail[0], single[4], "2 回目は次の対の cos から始まる（= 持ち越していない）");
   assert(tail[0] !== single[3], "2 回目の先頭が捨てたはずの sin を拾っている");
+});
+
+// ---- ADR 0107 の線引き（入力起因 / 内部不変条件）--------------------------
+
+describe("irodori の入力起因の失敗（ADR 0107）", () => {
+  // 縛るのは型そのもの。複数家族を 1 つのホストへ載せた側は `instanceof` でしか 400 / 500 を
+  // 分けられず、メッセージの文字列で分岐すると文言を変えた瞬間に黙って壊れる。
+  it("durationSeconds の非有限は ModelInputError で捕まる", () => {
+    assertThrows(() => sequenceLengthFromSeconds(NaN, BOUNDS), ModelInputError);
+  });
+
+  it("text が正規化後に空なら ModelInputError で捕まる", () => {
+    assertThrows(() => packIds(tinyTokenizer(), "　 ", 8, "text"), ModelInputError);
+  });
+
+  it("seed の値域外は生成器側でも ModelInputError で捕まる", () => {
+    // 受理集合の所有者は `request-gates.ts` の 1 本（ADR 0107 決定 6）。生成器が家族固有の写しを
+    // 持ち続けていると、ここだけ `RangeError` のまま残って入口と型が割れる。
+    for (const seed of [-1, 1.5, Number.MAX_SAFE_INTEGER + 2]) {
+      assertThrows(() => new Randn(seed), ModelInputError, "非負の安全整数でない");
+    }
+  });
+});
+
+describe("irodori の内部不変条件の破れ（ADR 0107 の線引きの裏面）", () => {
+  it("区間の使用長が宣言長を超えた破れは ModelInputError でない", () => {
+    // 呼び手が入力を直しても直らない配線の破れ（= 500 相当）。ここまで `ModelInputError` に
+    // すると、ホストは「入力を直せ」を返せない失敗まで 400 で返すことになる。
+    const error = assertThrows(() => buildDitMask(3, { ...USED, speaker: 6 }, CAPS), Error);
+    assert(
+      !(error instanceof ModelInputError),
+      "内部不変条件の破れが入力起因の型に混ざっている",
+    );
+  });
 });

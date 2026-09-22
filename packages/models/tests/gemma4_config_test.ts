@@ -21,6 +21,7 @@
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { parseManifest } from "@karume/hub";
 import { ExecutionError } from "@karume/runtime";
+import { ModelInputError } from "../src/errors.ts";
 import { type Gemma4PipelineConfig, parseGemma4PipelineConfig } from "../src/gemma/config.ts";
 import {
   assertChunkLength,
@@ -418,13 +419,17 @@ Deno.test("assertChunkLength: 実行時ノブの受理集合（宣言との関�
   const config = parseGemma4PipelineConfig(MINIMAL);
 
   await t.step("decode 形の専用値（1）を prefill 形として通さない", () => {
-    assertThrows(() => assertChunkLength(1, config), Error, "chunkLength 1 が 2 以上の整数でない");
+    assertThrows(
+      () => assertChunkLength(1, config),
+      ModelInputError,
+      "chunkLength 1 が 2 以上の整数でない",
+    );
   });
 
   await t.step("非整数は落とす", () => {
     assertThrows(
       () => assertChunkLength(3.5, config),
-      Error,
+      ModelInputError,
       "chunkLength 3.5 が 2 以上の整数でない",
     );
   });
@@ -436,7 +441,7 @@ Deno.test("assertChunkLength: 実行時ノブの受理集合（宣言との関�
   await t.step("宣言 maxChunkLength 超過（記号 M を焼いた trace 範囲の外）", () => {
     assertThrows(
       () => assertChunkLength(config.maxChunkLength + 1, config),
-      Error,
+      ModelInputError,
       `chunkLength 129 が配布形の宣言 maxChunkLength ${config.maxChunkLength} を超えた`,
     );
   });
@@ -451,7 +456,7 @@ Deno.test("assertChunkLength: 実行時ノブの受理集合（宣言との関�
     });
     assertThrows(
       () => assertChunkLength(1025, wide),
-      Error,
+      ModelInputError,
       "chunkLength 1025 が maxPosition 1024 を超えた",
     );
   });
@@ -474,7 +479,7 @@ Deno.test("assertGemma4ChunkBuckets: 受理集合は runtime に委ね、入口�
   await t.step("chunkLength ちょうどは prefill 形と重なるので落ちる（cause に元の診断）", () => {
     const error = assertThrows(
       () => assertGemma4ChunkBuckets([SHIPPED_CHUNK_LENGTH], SHIPPED_CHUNK_LENGTH),
-      Error,
+      ModelInputError,
     );
     assert(
       error.message.startsWith("Gemma4Pipeline: "),

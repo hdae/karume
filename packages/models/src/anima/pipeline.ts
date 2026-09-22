@@ -63,7 +63,7 @@ import {
   assertAnimaSamplerType,
   parseAnimaPipelineConfig,
 } from "./config.ts";
-import { cfgEulerStep, sigmaSchedule, timestepsProj } from "./sampler.ts";
+import { assertAcceptableSteps, cfgEulerStep, sigmaSchedule, timestepsProj } from "./sampler.ts";
 import {
   type DpmSolverMultistepInput,
   dpmSolverMultistepStep,
@@ -89,7 +89,9 @@ import {
 } from "./dit-tokens.ts";
 import { parseRopeBase, type RopeBase, ropeWidth } from "./rope-base.ts";
 import { type AnimaTokenizers, createTokenizers } from "./text/tokenizer.ts";
-import { assertAcceptableSeed, Randn } from "./random.ts";
+import { Randn } from "./random.ts";
+import { ModelInputError } from "../errors.ts";
+import { assertAcceptableSeed } from "../request-gates.ts";
 import { settleAbort } from "../concurrency/abort.ts";
 import { createOperationChain } from "../concurrency/serial.ts";
 import {
@@ -854,10 +856,11 @@ export class AnimaPipeline {
     // text encoder / conditioner を回して DiT の重みを上げ終えた後なので、`Randn` 側だけに
     // 検査があると不正な seed が GB 級のロードの末に落ちる。
     assertAcceptableSeed(seed);
-    if (!Number.isInteger(steps) || steps < 2) {
-      throw new Error(`steps ${steps} が 2 以上の整数でない（sigma の linspace が組めない）`);
+    // steps も同じ理由で入口に置く（受理集合の所有者は梯子側の `assertAcceptableSteps` 1 本）。
+    assertAcceptableSteps(steps);
+    if (!Number.isFinite(guidance)) {
+      throw new ModelInputError(`guidanceScale ${guidance} が有限の数でない`);
     }
-    if (!Number.isFinite(guidance)) throw new Error(`guidanceScale ${guidance} が有限の数でない`);
 
     const wantsUncond = needsUncond(guidance);
     const negativePrompt = resolveNegativePrompt(

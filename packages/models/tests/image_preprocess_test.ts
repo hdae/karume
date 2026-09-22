@@ -44,7 +44,14 @@
 // 越える overshoot** が出ること（負のローブを持つ三次カーネルでしか起きない）。
 
 import { assert, assertAlmostEquals, assertEquals, assertThrows } from "@std/assert";
-import { normalizeToNchw, resizeRgb8, type Rgb8Image } from "../src/image/preprocess.ts";
+import { describe, it } from "@std/testing/bdd";
+import { ModelInputError } from "../src/errors.ts";
+import {
+  normalizeToNchw,
+  resizePlaneF32,
+  resizeRgb8,
+  type Rgb8Image,
+} from "../src/image/preprocess.ts";
 
 type Case = {
   readonly name: string;
@@ -271,14 +278,54 @@ Deno.test("bicubic の縮小は台を縮尺ぶん伸ばす（DA-V2 の実運用�
 
 Deno.test("画素列の長さが寸法と合わなければ落ちる", () => {
   const image: Rgb8Image = { data: new Uint8Array(11), width: 2, height: 2 };
-  assertThrows(() => resizeRgb8(image, 4, 4), Error, "RGB8 の長さ 11");
-  assertThrows(() => normalizeToNchw(image, imageMean, imageStd), Error, "RGB8 の長さ 11");
+  assertThrows(() => resizeRgb8(image, 4, 4), ModelInputError, "RGB8 の長さ 11");
+  assertThrows(
+    () => normalizeToNchw(image, imageMean, imageStd),
+    ModelInputError,
+    "RGB8 の長さ 11",
+  );
 });
 
 Deno.test("寸法が正の整数でなければ落ちる", () => {
   const empty: Rgb8Image = { data: new Uint8Array(0), width: 0, height: 3 };
-  assertThrows(() => resizeRgb8(empty, 4, 4), RangeError, "画像サイズ 0×3");
+  assertThrows(() => resizeRgb8(empty, 4, 4), ModelInputError, "画像サイズ 0×3");
   const image: Rgb8Image = { data: new Uint8Array(12), width: 2, height: 2 };
-  assertThrows(() => resizeRgb8(image, 0, 4), RangeError, "出力サイズ 0×4");
-  assertThrows(() => resizeRgb8(image, 4, 2.5), RangeError, "出力サイズ 4×2.5");
+  assertThrows(() => resizeRgb8(image, 0, 4), ModelInputError, "出力サイズ 0×4");
+  assertThrows(() => resizeRgb8(image, 4, 2.5), ModelInputError, "出力サイズ 4×2.5");
+});
+
+// ---- 入力起因かどうかの分類（ADR 0107）------------------------------------
+
+describe("共通 image 層の失敗をホストが 400 / 500 に振り分けるとき", () => {
+  const image: Rgb8Image = { data: new Uint8Array(12), width: 2, height: 2 };
+
+  it("呼び手が渡した画像の寸法違反は ModelInputError で捕まる", () => {
+    const broken: Rgb8Image = { data: new Uint8Array(0), width: 0, height: 3 };
+    assertThrows(() => resizeRgb8(broken, 4, 4), ModelInputError);
+    assertThrows(() => normalizeToNchw(broken, imageMean, imageStd), ModelInputError);
+  });
+
+  it("呼び手が渡した画素列の長さ違反は ModelInputError で捕まる", () => {
+    const short: Rgb8Image = { data: new Uint8Array(11), width: 2, height: 2 };
+    assertThrows(() => resizeRgb8(short, 4, 4), ModelInputError);
+  });
+
+  it("呼び手が指定した出力寸法の違反も ModelInputError で捕まる", () => {
+    // 家族 3 つは `config.imageWidth` / `imageHeight`（parse 済みの正の整数）しか渡さないので、
+    // この経路の呼び手は barrel から `resizeRgb8` を直に叩く側だけ = 寸法は呼び手の要求。
+    assertThrows(() => resizeRgb8(image, 0, 4), ModelInputError);
+  });
+
+  it("内部ヘルパ resizePlaneF32 の事前条件は ModelInputError では**ない**", () => {
+    // 公開面に出ておらず、呼び手は birefnet / depth-anything のパイプライン内部だけ。
+    // 破れるのは配線であって呼び手の入力ではないので、500 相当の素の Error / RangeError のまま。
+    const lengthMismatch = assertThrows(() => resizePlaneF32(new Float32Array(5), 3, 2, 3, 2));
+    assert(lengthMismatch instanceof Error);
+    assert(
+      !(lengthMismatch instanceof ModelInputError),
+      "平面の長さ違反が ModelInputError になっている",
+    );
+    const badSize = assertThrows(() => resizePlaneF32(new Float32Array(6), 3, 2, 0, 2));
+    assert(!(badSize instanceof ModelInputError), "出力幅の違反が ModelInputError になっている");
+  });
 });

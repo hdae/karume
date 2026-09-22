@@ -2,6 +2,8 @@
 import type { SessionSpec } from "@karume/hub";
 import type { SessionOptions } from "@karume/runtime";
 
+import { ModelInputError } from "../errors.ts";
+
 type GemmaSessionOptions = Pick<
   SessionOptions,
   "linearGemvReduce" | "fuseRmsNormAdd" | "fuseLinearStaticQuantize" | "packedStaticQuantize"
@@ -17,7 +19,7 @@ export const resolveGemmaSessionOptions = (
     if (
       key !== "linearGemvReduce" && key !== "fuseRmsNormAdd" &&
       key !== "fuseLinearStaticQuantize" && key !== "packedStaticQuantize"
-    ) throw new Error(`${where}: session.${key}は未対応`);
+    ) throw new ModelInputError(`${where}: session.${key}は未対応`);
   }
   // ??はnullをquant定義へ戻すので使わない。不正な明示値は重み取得前に拒否する。
   const linearGemvReduce = overrides.linearGemvReduce === undefined
@@ -37,23 +39,23 @@ export const resolveGemmaSessionOptions = (
   if (
     linearGemvReduce !== undefined && linearGemvReduce !== "sequential" &&
     linearGemvReduce !== "parallel" && linearGemvReduce !== "parallel-subgroup32"
-  ) throw new Error(`${where}: linearGemvReduceが不正`);
+  ) throw new ModelInputError(`${where}: linearGemvReduceが不正`);
   if (fuseRmsNormAdd !== undefined && typeof fuseRmsNormAdd !== "boolean") {
-    throw new Error(`${where}: fuseRmsNormAddはbooleanでなければならない`);
+    throw new ModelInputError(`${where}: fuseRmsNormAddはbooleanでなければならない`);
   }
   if (fuseLinearStaticQuantize !== undefined && typeof fuseLinearStaticQuantize !== "boolean") {
-    throw new Error(`${where}: fuseLinearStaticQuantizeはbooleanでなければならない`);
+    throw new ModelInputError(`${where}: fuseLinearStaticQuantizeはbooleanでなければならない`);
   }
   if (packedStaticQuantize !== undefined && typeof packedStaticQuantize !== "boolean") {
-    throw new Error(`${where}: packedStaticQuantizeはbooleanでなければならない`);
+    throw new ModelInputError(`${where}: packedStaticQuantizeはbooleanでなければならない`);
   }
   if (fuseLinearStaticQuantize === true && linearGemvReduce !== "parallel") {
-    throw new Error(
+    throw new ModelInputError(
       `${where}: fuseLinearStaticQuantizeはlinearGemvReduce: parallelが必要`,
     );
   }
   if (packedStaticQuantize === true && linearGemvReduce !== "parallel") {
-    throw new Error(
+    throw new ModelInputError(
       `${where}: packedStaticQuantizeはlinearGemvReduce: parallelが必要`,
     );
   }

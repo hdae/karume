@@ -6,8 +6,10 @@
 // 資産があれば golden `outputs/series/dacvae-32dim/host/meta.json` の `wavScale`（上流の
 // リーダが int16 の両端で実測した値）とも突き合わせる（無ければその 1 本だけ SKIP）。
 
-import { assertEquals, assertThrows } from "@std/assert";
+import { assert, assertEquals, assertThrows } from "@std/assert";
+import { describe, it } from "@std/testing/bdd";
 import { decodeWav, encodeWav } from "../src/audio/wav.ts";
+import { ModelInputError } from "../src/errors.ts";
 
 /** golden `meta.json` の置き場（`tools/export-recipes/irodori/dacvae/host.py` の既定の出力先）。 */
 const HOST_GOLDEN = new URL(
@@ -219,8 +221,8 @@ Deno.test("decodeWav: RIFF/WAVE でないバイト列は落とす", () => {
   const bytes = new Uint8Array(64);
   ascii(bytes, 0, "RIFX");
   ascii(bytes, 8, "WAVE");
-  assertThrows(() => decodeWav(bytes), Error, "RIFF/WAVE ヘッダでない");
-  assertThrows(() => decodeWav(new Uint8Array(8)), Error, "バイトしかない");
+  assertThrows(() => decodeWav(bytes), ModelInputError, "RIFF/WAVE ヘッダでない");
+  assertThrows(() => decodeWav(new Uint8Array(8)), ModelInputError, "バイトしかない");
 });
 
 Deno.test("decodeWav: 未対応の format / bit 深度は落とす（黙って近似しない）", () => {
@@ -236,7 +238,7 @@ Deno.test("decodeWav: 未対応の format / bit 深度は落とす（黙って�
           payload: new Uint8Array(6),
         }),
       ),
-    Error,
+    ModelInputError,
     "format 1 / 24bit に未対応",
   );
   // A-law。
@@ -245,7 +247,7 @@ Deno.test("decodeWav: 未対応の format / bit 深度は落とす（黙って�
       decodeWav(
         buildWav({ format: 6, channels: 1, sampleRate: 8000, bits: 8, payload: new Uint8Array(4) }),
       ),
-    Error,
+    ModelInputError,
     "format 6 / 8bit に未対応",
   );
   // WAVE_FORMAT_EXTENSIBLE は SubFormat を読まないと種別が決まらないので受理しない。
@@ -260,7 +262,7 @@ Deno.test("decodeWav: 未対応の format / bit 深度は落とす（黙って�
           payload: new Uint8Array(4),
         }),
       ),
-    Error,
+    ModelInputError,
     "に未対応",
   );
 });
@@ -275,12 +277,12 @@ Deno.test("decodeWav: 'data' が無い / 長さが宣言と食い違うファイ
   });
   // data チャンクの宣言長だけを実体より大きくする（末尾 8 バイト = 'data' + 長さ の直後）。
   const truncated = complete.slice(0, complete.length - 2) as Uint8Array<ArrayBuffer>;
-  assertThrows(() => decodeWav(truncated), Error, "残りは");
+  assertThrows(() => decodeWav(truncated), ModelInputError, "残りは");
   // fmt だけのファイル（data 無し）。RIFF の宣言サイズも 36 バイトの器に揃える — 揃えないと
   // 「器が切り詰められている」ほうの門で先に落ち、data 欠落の門を踏まない。
   const fmtOnly = complete.slice(0, 36) as Uint8Array<ArrayBuffer>;
   new DataView(fmtOnly.buffer).setUint32(4, 36 - 8, true);
-  assertThrows(() => decodeWav(fmtOnly), Error, "'data' チャンクが無い");
+  assertThrows(() => decodeWav(fmtOnly), ModelInputError, "'data' チャンクが無い");
 });
 
 Deno.test("decodeWav: フレーム境界で割り切れない data は落とす", () => {
@@ -296,7 +298,7 @@ Deno.test("decodeWav: フレーム境界で割り切れない data は落とす"
           payload: new Uint8Array(6),
         }),
       ),
-    Error,
+    ModelInputError,
     "割り切れない",
   );
 });
@@ -312,7 +314,11 @@ Deno.test("decodeWav: RIFF の宣言サイズが物理長を超える器は落�
   // 物理長より 16 バイト多く名乗る。チャンク側は全て整合しているので、宣言サイズを読まない
   // 実装は最後まで問題なく読み切ってしまう。
   new DataView(complete.buffer).setUint32(4, complete.length - 8 + 16, true);
-  assertThrows(() => decodeWav(complete), Error, `RIFF が ${complete.length + 8} バイトを宣言`);
+  assertThrows(
+    () => decodeWav(complete),
+    ModelInputError,
+    `RIFF が ${complete.length + 8} バイトを宣言`,
+  );
 });
 
 Deno.test("decodeWav: data の宣言が RIFF の論理終端をはみ出すファイルは落とす", () => {
@@ -329,7 +335,7 @@ Deno.test("decodeWav: data の宣言が RIFF の論理終端をはみ出すフ�
   padded.set(complete);
   const view = new DataView(padded.buffer);
   view.setUint32(40, view.getUint32(40, true) + 8, true); // data チャンクの長さ欄（44 バイト定型）
-  assertThrows(() => decodeWav(padded), Error, "チャンク 'data' が 16 バイトを宣言");
+  assertThrows(() => decodeWav(padded), ModelInputError, "チャンク 'data' が 16 バイトを宣言");
 });
 
 Deno.test("decodeWav: fmt の block align / byte rate が導出値と矛盾するファイルは落とす", () => {
@@ -346,7 +352,7 @@ Deno.test("decodeWav: fmt の block align / byte rate が導出値と矛盾す�
   new DataView(badAlign.buffer).setUint16(32, 4, true);
   assertThrows(
     () => decodeWav(badAlign),
-    Error,
+    ModelInputError,
     "block align 宣言 4 が、1ch × 16bit から出る 2 と食い違う",
   );
   // byte rate だけを壊す（48000 × 2 = 96000）。fmt 定型では offset 28。
@@ -354,7 +360,7 @@ Deno.test("decodeWav: fmt の block align / byte rate が導出値と矛盾す�
   new DataView(badRate.buffer).setUint32(28, 192000, true);
   assertThrows(
     () => decodeWav(badRate),
-    Error,
+    ModelInputError,
     "byte rate 宣言 192000 が、48000Hz × block align 2 = 96000 と食い違う",
   );
 });
@@ -366,7 +372,11 @@ Deno.test("encodeWav: 非有限サンプルは位置と値付きで落とす（�
     const [value, text] of [[NaN, "NaN"], [Infinity, "Infinity"], [-Infinity, "-Infinity"]] as const
   ) {
     const samples = Float32Array.of(0.1, 0.2, value, 0.3);
-    assertThrows(() => encodeWav(samples, 48000), RangeError, `2 番目のサンプル ${text} が非有限`);
+    assertThrows(
+      () => encodeWav(samples, 48000),
+      ModelInputError,
+      `2 番目のサンプル ${text} が非有限`,
+    );
   }
   // 値域外の有限値は今までどおりクリップして通る（検査が全部を落としていない）。
   const clipped = new DataView(encodeWav(Float32Array.of(2, -2), 48000).buffer);
@@ -382,9 +392,9 @@ Deno.test("encodeWav: u32 に収まらない sampleRate / byte rate は落とす
   assertEquals(view.getUint32(28, true), 0xffff_fffe, "byte rate");
   // 1 つ上は sampleRate 自身は u32 に収まるが byte rate（×2）が溢れる。検査が無いと
   // `setUint32` が mod 2^32 で巻き戻し、byte rate 0 を宣言した **valid な WAV** が出る。
-  assertThrows(() => encodeWav(samples, 0x8000_0000), RangeError, "byte rate 4294967296");
+  assertThrows(() => encodeWav(samples, 0x8000_0000), ModelInputError, "byte rate 4294967296");
   // sampleRate 自身が u32 を超える場合も同じ門で落ちる。
-  assertThrows(() => encodeWav(samples, 0x1_0000_0000), RangeError, "u32 に収まらない");
+  assertThrows(() => encodeWav(samples, 0x1_0000_0000), ModelInputError, "u32 に収まらない");
 });
 
 Deno.test("encodeWav: RIFF チャンク長が u32 を超えるサンプル数は落とす", () => {
@@ -394,7 +404,39 @@ Deno.test("encodeWav: RIFF チャンク長が u32 を超えるサンプル数は
   const huge = { length: 2_147_483_630 } as unknown as Float32Array;
   assertThrows(
     () => encodeWav(huge, 48000),
-    RangeError,
+    ModelInputError,
     "RIFF チャンク長 4294967296 が u32 に収まらない",
   );
+});
+
+// ---- 入力起因かどうかの分類（ADR 0107）------------------------------------
+
+describe("共通 audio 層の失敗をホストが 400 / 500 に振り分けるとき", () => {
+  it("ホストが渡したバイト列の解析失敗は ModelInputError で捕まる", () => {
+    const notRiff = new Uint8Array(64);
+    ascii(notRiff, 0, "RIFX");
+    ascii(notRiff, 8, "WAVE");
+    assert(assertThrows(() => decodeWav(notRiff)) instanceof ModelInputError);
+    // 形式の検査（未対応の bit 深度）も同じ枝に落ちる。
+    const unsupported = buildWav({
+      format: 1,
+      channels: 1,
+      sampleRate: 48000,
+      bits: 24,
+      payload: new Uint8Array(6),
+    });
+    assert(assertThrows(() => decodeWav(unsupported)) instanceof ModelInputError);
+  });
+
+  it("呼び手が渡した波形 / 周波数の違反も ModelInputError で捕まる", () => {
+    assert(assertThrows(() => encodeWav(new Float32Array(1), 0)) instanceof ModelInputError);
+    assert(
+      assertThrows(() => encodeWav(Float32Array.of(0, NaN), 48000)) instanceof ModelInputError,
+    );
+  });
+
+  // NOTE: 内部不変条件の破れ（ModelInputError **でない**素の Error）は、この層には到達経路が
+  // 無い。`wav.ts` の throw は 16 本とも呼び手のバイト列 / 波形 / 周波数だけを見ており、資産にも
+  // 配線にも由来しない。「ModelInputError でない」側は共通 image 層が持つ
+  // （`image_preprocess_test.ts` の `resizePlaneF32` — 公開面に出ていない内部ヘルパ）。
 });

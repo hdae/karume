@@ -15,6 +15,7 @@
 import { assertChunkBuckets } from "@karume/runtime";
 import type { Manifest, ModelEntry, Quant } from "@karume/hub";
 
+import { ModelInputError } from "../errors.ts";
 import type { ModelComponent } from "../hub/components.ts";
 import type { GenerationGraph } from "../generation/program.ts";
 import {
@@ -266,18 +267,18 @@ export const assertChunkLength = (
   entry: string = gemmaEntryName("gemma4"),
 ): number => {
   if (!Number.isSafeInteger(chunkLength) || chunkLength < 2) {
-    throw new Error(
+    throw new ModelInputError(
       `${entry}: chunkLength ${chunkLength} が 2 以上の整数でない`,
     );
   }
   if (chunkLength > config.maxChunkLength) {
-    throw new Error(
+    throw new ModelInputError(
       `${entry}: chunkLength ${chunkLength} が配布形の宣言 maxChunkLength` +
         ` ${config.maxChunkLength} を超えた（記号 M を焼いた trace 範囲の外）`,
     );
   }
   if (chunkLength > config.maxPosition) {
-    throw new Error(
+    throw new ModelInputError(
       `${entry}: chunkLength ${chunkLength} が maxPosition ${config.maxPosition} を超えた`,
     );
   }
@@ -304,7 +305,7 @@ export const assertGemma4ChunkBuckets = (
   try {
     assertChunkBuckets(chunkBuckets, chunkLength);
   } catch (cause) {
-    throw new Error(
+    throw new ModelInputError(
       `${entry}: ${cause instanceof Error ? cause.message : String(cause)}`,
       { cause },
     );

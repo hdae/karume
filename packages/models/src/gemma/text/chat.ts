@@ -29,6 +29,7 @@
  * MUST: 全モジュール副作用ゼロ（表もインスタンスもモジュールスコープで組み立てない）。
  */
 
+import { ModelInputError } from "../../errors.ts";
 import type { GemmaTokenizer } from "./tokenizer.ts";
 
 /** 初版の射程に入る role（`assistant` は描画時に `model` へ写像される）。 */
@@ -95,24 +96,24 @@ const trim = (text: string): string => {
  */
 const assertPlainMessage = (message: Gemma4ChatMessage, where: string): void => {
   if (typeof message !== "object" || message === null) {
-    throw new Error(`${where} がオブジェクトでない`);
+    throw new ModelInputError(`${where} がオブジェクトでない`);
   }
   const extra = Object.keys(message).filter((key) => !MESSAGE_KEYS.includes(key));
   if (extra.length > 0) {
-    throw new Error(
+    throw new ModelInputError(
       `${where}: 射程外の欄 ${extra.join(" / ")}` +
         `（tools / reasoning / tool_calls などは初版では拒否する — ADR 0084 決定 5。` +
         `黙って無視すると「渡したのに効かない」が例外なしで通る）`,
     );
   }
   if (!ROLES.includes(message.role)) {
-    throw new Error(
+    throw new ModelInputError(
       `${where}.role '${String(message.role)}' が ${ROLES.join(" / ")} のどれでもない` +
         `（'model' は template の出力側の綴りで、入力の role ではない）`,
     );
   }
   if (typeof message.content !== "string") {
-    throw new Error(
+    throw new ModelInputError(
       `${where}.content が文字列でない` +
         `（画像 / 音声パートの配列は初版では拒否する — ADR 0084 決定 5）`,
     );
@@ -123,7 +124,7 @@ const assertPlainMessage = (message: Gemma4ChatMessage, where: string): void => 
     message.role === "assistant" &&
     (message.content.includes(START_OF_CHANNEL) || message.content.includes(END_OF_CHANNEL))
   ) {
-    throw new Error(
+    throw new ModelInputError(
       `${where}.content に thinking チャネルの綴り（${START_OF_CHANNEL} / ` +
         `${END_OF_CHANNEL}）がある（初版の射程外 — ADR 0084 決定 5）`,
     );
@@ -138,7 +139,9 @@ const assertPlainMessage = (message: Gemma4ChatMessage, where: string): void => 
  */
 const assertPlainConversation = (messages: readonly Gemma4ChatMessage[]): void => {
   if (messages.length === 0) {
-    throw new Error("gemma4ChatPrompt: 会話が空（上流の apply_chat_template も拒否する）");
+    throw new ModelInputError(
+      "gemma4ChatPrompt: 会話が空（上流の apply_chat_template も拒否する）",
+    );
   }
   messages.forEach((message, index) => {
     assertPlainMessage(message, `gemma4ChatPrompt: messages[${index}]`);
@@ -231,7 +234,7 @@ export const gemma4ChatPrompt = (
 export const renderGemma4ChatTurn = (message: Gemma4ChatMessage): string => {
   assertPlainMessage(message, "gemma4ChatTurn: message");
   if (message.role === "assistant") {
-    throw new Error(
+    throw new ModelInputError(
       `gemma4ChatTurn: role 'assistant' は差分にできない` +
         `（model turn は生成が埋める席で、template も連続 assistant を 1 つへ畳む — ` +
         `会話へ差し込むなら gemma4ChatPrompt で全体を描き直す）`,

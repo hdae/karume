@@ -14,6 +14,7 @@
  * 記号削除のぶんだけ conditioning が黙って別物になる。
  */
 
+import { ModelInputError } from "../../errors.ts";
 import { normalizeText } from "../text/normalize.ts";
 import type { IrodoriTokenizer } from "../text/tokenizer.ts";
 
@@ -48,7 +49,10 @@ export const packIds = (
 ): Int32Array<ArrayBuffer> => {
   const normalized = normalizeText(text).trim();
   if (normalized.length === 0) {
-    throw new Error(`irodori: ${where} が正規化後に空（合成する本文が無い）`);
+    // 本文は呼び手が渡した `IrodoriGenerateRequest.text` そのものなので 400 側（ADR 0107）。
+    // 直下の `packCaptionIds` の空検査は、パイプラインが空 caption を別経路へ振り分けた後で
+    // しか到達しない内部の前提なので素の `Error` のまま残す。
+    throw new ModelInputError(`irodori: ${where} が正規化後に空（合成する本文が無い）`);
   }
   return packBody(tokenizer, normalized, maxLength);
 };

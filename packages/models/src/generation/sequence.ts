@@ -421,7 +421,7 @@ export const assertGenerationRequestValues = (
   request: Pick<GenerationRequest, "maxNewTokens" | "stopTokens" | "sampler">,
 ): void => {
   if (!Number.isSafeInteger(request.maxNewTokens) || request.maxNewTokens < 1) {
-    throw new Error(`maxNewTokens ${request.maxNewTokens} が 1 以上の整数でない`);
+    throw new ModelInputError(`maxNewTokens ${request.maxNewTokens} が 1 以上の整数でない`);
   }
   // 停止 token は「出力に現れない id」なので、語彙外でも生成は**普通に完走してしまう**
   // （その id は抽選されないだけ）。効かない停止条件を静かに残さないため、program 側の
@@ -429,10 +429,10 @@ export const assertGenerationRequestValues = (
   const declared = new Set<number>();
   (request.stopTokens ?? []).forEach((token, index) => {
     if (!Number.isSafeInteger(token) || token < 0 || token >= vocabSize) {
-      throw new Error(`stopTokens[${index}] ${token} が語彙 0..${vocabSize - 1} の外`);
+      throw new ModelInputError(`stopTokens[${index}] ${token} が語彙 0..${vocabSize - 1} の外`);
     }
     // 重複は「同じ条件を 2 度書いた」以上の意味を持てない = 呼び手の取り違えの徴候。
-    if (declared.has(token)) throw new Error(`stopTokens に token ${token} が 2 度出る`);
+    if (declared.has(token)) throw new ModelInputError(`stopTokens に token ${token} が 2 度出る`);
     declared.add(token);
   });
   // 抽選器の指定もここで落とす。`createSampler` は検査と写しと `Randu` の初期化だけで外部状態を
@@ -998,7 +998,7 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
       // （2^32+1 → 1 = 別の有効 token id）ので、入口で落とす。語彙の外は embedding の
       // 範囲外 gather = 行ごと NaN 汚染になるので、同じ位置で見る。
       if (!Number.isSafeInteger(id) || id < 0 || id >= program.vocabSize) {
-        throw new Error(`prompt[${index}] ${id} が語彙 0..${program.vocabSize - 1} の外`);
+        throw new ModelInputError(`prompt[${index}] ${id} が語彙 0..${program.vocabSize - 1} の外`);
       }
     });
     // 抽選器は 1 生成に 1 つ（RNG 状態を step 越しに持つ）。指定の検査と、その指定の

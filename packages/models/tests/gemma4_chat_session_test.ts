@@ -30,6 +30,7 @@
 //    （入り切らないターンは KV を 1 本も取らない）／溢れポリシーは**末尾を残す**（値で判定）
 
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
+import { ModelInputError } from "../src/errors.ts";
 import {
   dropOldestTurns,
   type Gemma4ChatOverflow,
@@ -780,7 +781,7 @@ Deno.test("ChatSession capacity: 容量の関係は構築時に見る（設定�
   await t.step("chunkLength 未満（1 chunk すら入らない）", () => {
     assertThrows(
       () => new Gemma4ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS, capacity: 8 }),
-      Error,
+      ModelInputError,
       "capacity 8 が chunkLength 32 を下回る",
     );
   });
@@ -788,7 +789,7 @@ Deno.test("ChatSession capacity: 容量の関係は構築時に見る（設定�
   await t.step("maxPosition 超過（容量いっぱいの会話が位置上限の外を引く）", () => {
     assertThrows(
       () => new Gemma4ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS, capacity: 4097 }),
-      Error,
+      ModelInputError,
       "capacity 4097 が maxPosition 4096 を超えた",
     );
   });
@@ -796,7 +797,7 @@ Deno.test("ChatSession capacity: 容量の関係は構築時に見る（設定�
   await t.step("値域（安全整数でない容量）", () => {
     assertThrows(
       () => new Gemma4ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS, capacity: 64.5 }),
-      Error,
+      ModelInputError,
       "capacity 64.5 が 1 以上の整数でない",
     );
   });

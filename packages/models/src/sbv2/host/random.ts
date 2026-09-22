@@ -11,6 +11,8 @@
  * 比べて無視できる。
  */
 
+import { assertAcceptableSeed } from "../../request-gates.ts";
+
 const GOLDEN_GAMMA = 0x9e3779b97f4a7c15n;
 const MIX_1 = 0xbf58476d1ce4e5b9n;
 const MIX_2 = 0x94d049bb133111ebn;
@@ -32,9 +34,9 @@ export class Randn {
   #state: bigint;
 
   constructor(seed: number) {
-    if (!Number.isInteger(seed) || seed < 0 || seed > Number.MAX_SAFE_INTEGER) {
-      throw new RangeError(`seed ${seed} が非負の安全整数でない`);
-    }
+    // 受理集合の所有者は家族横断の `request-gates.ts` 1 本（anima / sbv2 / irodori で同じ値域）。
+    // ここに条件を写すと、片方だけ緩む形でいつか割れる。
+    assertAcceptableSeed(seed);
     this.#state = BigInt(seed) & MASK_64;
   }
 

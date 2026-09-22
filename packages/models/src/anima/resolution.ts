@@ -21,6 +21,7 @@
  * **このモジュールの定数が受理集合の正本**である。
  */
 
+import { ModelInputError } from "../errors.ts";
 import { ANIMA_SPATIAL_COMPRESSION } from "./dit-tokens.ts";
 
 /** 画像の寸法（ピクセル）。軸の順は綴りと同じ `幅 × 高さ`。 */
@@ -77,7 +78,7 @@ export const parseResolution = (raw: string): ImageSize => {
   const parts = raw.toLowerCase().split("x");
   const spelled = parts.length === 1 ? [parts[0], parts[0]] : parts;
   if (spelled.length !== 2 || spelled.some((part) => !/^\d+$/.test(part))) {
-    throw new Error(
+    throw new ModelInputError(
       `解像度 ${JSON.stringify(raw)} が WxH でも正方の略記でもない（例: 1344x768 / 512）`,
     );
   }
@@ -102,16 +103,16 @@ export const assertAcceptableResolution = (size: ImageSize): void => {
   const label = `${size.width}×${size.height}`;
   for (const [side, axis] of [[size.width, "幅"], [size.height, "高さ"]] as const) {
     if (!Number.isInteger(side)) {
-      throw new Error(`解像度 ${label} の${axis} ${side} が整数でない`);
+      throw new ModelInputError(`解像度 ${label} の${axis} ${side} が整数でない`);
     }
     if (side % RESOLUTION_GRANULARITY !== 0) {
-      throw new Error(
+      throw new ModelInputError(
         `解像度 ${label} の${axis} ${side} が ${RESOLUTION_GRANULARITY} の倍数でない` +
           `（latent が patch ${DIT_PATCH_SIDE} で割り切れない）`,
       );
     }
     if (side < MIN_RESOLUTION_SIDE) {
-      throw new Error(
+      throw new ModelInputError(
         `解像度 ${label} の${axis} ${side} が下限 ${MIN_RESOLUTION_SIDE} 未満` +
           `（VAE タイル decoder の latent ${
             MIN_RESOLUTION_SIDE / ANIMA_SPATIAL_COMPRESSION
@@ -119,7 +120,7 @@ export const assertAcceptableResolution = (size: ImageSize): void => {
       );
     }
     if (side > MAX_RESOLUTION_SIDE) {
-      throw new Error(
+      throw new ModelInputError(
         `解像度 ${label} の${axis} ${side} が上限 ${MAX_RESOLUTION_SIDE} 超` +
           `（rope 素表の天井 = latent ${MAX_LATENT_SIDE}）`,
       );

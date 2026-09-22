@@ -20,6 +20,7 @@
  */
 
 import { parseSafetensors, type Tensor } from "@karume/runtime";
+import { Sbv2InputError } from "./errors.ts";
 
 /** 配布形の safetensors に入っている表のテンソル名（`karume/dist.py` の綴りと対）。 */
 export const STYLE_TENSOR = "style_vectors";
@@ -68,6 +69,19 @@ const assertRow = (rows: number, cols: number, index: number, data: Float32Array
 };
 
 /**
+ * `styleWeight` の受理集合（**有限の数**）を見る門。入力起因なので型は `Sbv2InputError`
+ * （`errors.ts` の分類軸 — NaN / Inf は呼び手が値を直せば通る）。
+ *
+ * NOTE: `export` は**生成の入口**（`pipeline.ts` の `synthesizeSbv2`）が同じ集合で先に落とす
+ * ため。表引きに入るのはテキスト層を抜けた後なので、ここだけに検査があると打ち間違いが
+ * text_encoder を 1 run 払ってから落ちる。受理集合の所有者はこの 1 本で、入口は条件を写さずに
+ * これを呼ぶ（両側に条件を書くと必ず割れる）。
+ */
+export const assertFiniteStyleWeight = (weight: number): void => {
+  if (!Number.isFinite(weight)) throw new Sbv2InputError(`styleWeight ${weight} が有限の数でない`);
+};
+
+/**
  * スタイルベクトル `[1, cols]` を作る（`mean + (picked − mean) · weight`）。
  *
  * MUST: `mean` は**行 0**（SBV2 の規約 — `style_vectors.npy` の先頭行が平均スタイル）。
@@ -81,7 +95,7 @@ export const styleVector = (
   weight: number,
 ): Tensor => {
   assertRow(rows, cols, index, table);
-  if (!Number.isFinite(weight)) throw new Error(`styleWeight ${weight} が有限の数でない`);
+  assertFiniteStyleWeight(weight);
   const picked = index * cols;
   const data = new Float32Array(cols);
   for (let i = 0; i < cols; i += 1) {

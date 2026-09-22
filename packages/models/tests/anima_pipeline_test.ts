@@ -38,7 +38,9 @@ import {
   latentSnapshot,
   resolveNegativePrompt,
 } from "../src/anima/pipeline.ts";
-import { assertAcceptableSeed, Randn } from "../src/anima/random.ts";
+import { Randn } from "../src/anima/random.ts";
+import { ModelInputError } from "../src/errors.ts";
+import { assertAcceptableSeed } from "../src/request-gates.ts";
 
 const FILE = {
   path: "transformer/model.f16.safetensors",
@@ -244,8 +246,12 @@ Deno.test("assertAcceptableSeed: 生成の入口と Randn が同じ受理集合�
   // DiT の重みを上げ切った後なので、生成器側だけに検査があると GB 級のロードの末に落ちる）。
   // 受理集合を 2 か所に書かないことを、同じ入力・同じ文言で確かめる。
   for (const seed of [-1, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 1]) {
-    const direct = assertThrows(() => assertAcceptableSeed(seed), RangeError, "非負の安全整数");
-    const viaRandn = assertThrows(() => new Randn(seed), RangeError, "非負の安全整数");
+    const direct = assertThrows(
+      () => assertAcceptableSeed(seed),
+      ModelInputError,
+      "非負の安全整数",
+    );
+    const viaRandn = assertThrows(() => new Randn(seed), ModelInputError, "非負の安全整数");
     assertEquals(direct.message, viaRandn.message, `seed ${seed} の診断`);
   }
   for (const seed of [0, 42, Number.MAX_SAFE_INTEGER]) assertAcceptableSeed(seed);

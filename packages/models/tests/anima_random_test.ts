@@ -10,7 +10,9 @@
 // テスト不能として明記する（塞ぐには生成器の面を広げるしかなく、それは値の正本を緩める）。
 
 import { assert, assertEquals, assertThrows } from "@std/assert";
-import { assertAcceptableSeed, Randn } from "../src/anima/random.ts";
+import { ModelInputError } from "../src/errors.ts";
+import { Randn } from "../src/anima/random.ts";
+import { assertAcceptableSeed } from "../src/request-gates.ts";
 
 Deno.test("Randn: 同じ seed は同じ列・違う seed は違う列", () => {
   const first = new Randn(7).normals(64);
@@ -42,8 +44,8 @@ Deno.test("Randn: scale は同じ列に線形に効く（列そのものは seed
 Deno.test("Randn: seed の受理集合は assertAcceptableSeed と同じ（生成器側の入口）", () => {
   // 受理集合は 1 本しか持たない（`generate` の入口と生成器で条件が割れると、片方だけ緩む）。
   for (const seed of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
-    assertThrows(() => assertAcceptableSeed(seed), RangeError, "非負の安全整数でない");
-    assertThrows(() => new Randn(seed), RangeError, "非負の安全整数でない");
+    assertThrows(() => assertAcceptableSeed(seed), ModelInputError, "非負の安全整数でない");
+    assertThrows(() => new Randn(seed), ModelInputError, "非負の安全整数でない");
   }
   assertAcceptableSeed(0);
   assertEquals(new Randn(0).normals(2).length, 2);

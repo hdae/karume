@@ -12,6 +12,10 @@
  * 参照突合は**フィクスチャの `latents_init` を注入**して行う。
  */
 
+// seed の受理集合（非負の安全整数）は 3 家族で同じなので、所有者は家族横断の
+// `request-gates.ts` 1 本である（写しを持つと必ず片方が緩む）。
+import { assertAcceptableSeed } from "../request-gates.ts";
+
 const GOLDEN_GAMMA = 0x9e3779b97f4a7c15n;
 const MIX_1 = 0xbf58476d1ce4e5b9n;
 const MIX_2 = 0x94d049bb133111ebn;
@@ -26,19 +30,6 @@ const nextUint64 = (state: bigint): { readonly state: bigint; readonly value: bi
   z = ((z ^ (z >> 30n)) * MIX_1) & MASK_64;
   z = ((z ^ (z >> 27n)) * MIX_2) & MASK_64;
   return { state: next, value: (z ^ (z >> 31n)) & MASK_64 };
-};
-
-/**
- * seed の受理集合（非負の安全整数 — `BigInt` へ落とすので端数も負も表せない）。
- *
- * NOTE: `export` は**生成の入口**（`pipeline.ts` の `generate`）が同じ集合で先に落とすため。
- * 生成器を作るのは DiT の段に入った後なので、ここだけに検査があると GB 級のロードを待たされた
- * 末に落ちる。受理集合は 1 本しか持たない（両側に条件を書くと必ず割れる）。
- */
-export const assertAcceptableSeed = (seed: number): void => {
-  if (!Number.isInteger(seed) || seed < 0 || seed > Number.MAX_SAFE_INTEGER) {
-    throw new RangeError(`seed ${seed} が非負の安全整数でない`);
-  }
 };
 
 /** 決定的な標準正規列の生成器（`seed` が同じなら同じ列）。 */

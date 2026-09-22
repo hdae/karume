@@ -32,6 +32,7 @@ import { parseIrodoriPipelineConfig } from "../src/irodori/config.ts";
 import { assetJson } from "../src/irodori/admission.ts";
 import { latentSnapshot } from "../src/irodori/dit-loop.ts";
 import { assertIrodoriRequest, IrodoriPipeline } from "../src/irodori/pipeline.ts";
+import { ModelInputError } from "../src/errors.ts";
 
 const FILE = {
   path: "dit/model.f32.safetensors",
@@ -265,16 +266,20 @@ Deno.test("assertIrodoriRequest: 要求ノブの綴り違いは重い計算に�
   for (const codecTileFrames of [10, 0, 1.5]) {
     assertThrows(
       () => assertIrodoriRequest({ text, codecTileFrames }, config),
-      Error,
+      ModelInputError,
       "より大きい整数でない",
     );
   }
   for (const seed of [-1, 1.5]) {
-    assertThrows(() => assertIrodoriRequest({ text, seed }, config), RangeError, "非負の安全整数");
+    assertThrows(
+      () => assertIrodoriRequest({ text, seed }, config),
+      ModelInputError,
+      "非負の安全整数",
+    );
   }
   assertThrows(
     () => assertIrodoriRequest({ text, durationSeconds: NaN }, config),
-    Error,
+    ModelInputError,
     "durationSeconds",
   );
 
@@ -289,7 +294,7 @@ Deno.test("assertIrodoriRequest: codecTileFrames を渡さない要求でも既�
   const config = parseIrodoriPipelineConfig({ ...PIPELINE_CONFIG, codecHaloFrames: 91 });
   assertThrows(
     () => assertIrodoriRequest({ text: "テスト" }, config),
-    Error,
+    ModelInputError,
     "tileFrames 182 が halo 2 枚ぶん（182）より大きい整数でない",
   );
 });

@@ -7,6 +7,7 @@
 
 import { assertEquals, assertRejects, assertStringIncludes, assertThrows } from "@std/assert";
 import { parseSafetensors } from "@karume/runtime";
+import { ModelInputError } from "../src/errors.ts";
 import {
   type CodecTile,
   decodeTiles,
@@ -73,7 +74,7 @@ Deno.test("planCodecTiles: 複数枚なら decode 長は全タイル同一（pre
 Deno.test("planCodecTiles: halo 2 枚ぶん以下のタイル長は落とす（採用が 1 枚も残らない）", () => {
   assertThrows(
     () => planCodecTiles(300, { tileFrames: 16, haloFrames: HALO }),
-    Error,
+    ModelInputError,
     "halo 2 枚ぶん",
   );
 });

@@ -14,13 +14,17 @@
 // GPU が要る。そちらは `e2e_sbv2_wav_test.ts` が持つ。
 
 import { assert, assertEquals, assertNotEquals, assertThrows } from "@std/assert";
+import { describe, it } from "@std/testing/bdd";
 import {
+  assertFiniteStyleWeight,
   parseSbv2Table,
   SPEAKER_TENSOR,
   speakerEmbedding,
   STYLE_TENSOR,
   styleVector,
 } from "../src/sbv2/style.ts";
+import { ModelInputError } from "../src/errors.ts";
+import { Sbv2InputError } from "../src/sbv2/errors.ts";
 import { buildSafetensors, f32Bytes } from "./helpers/safetensors.ts";
 
 const COLS = 3;
@@ -216,11 +220,38 @@ Deno.test("行番号・weight・表の食い違いは fail loudly", async (t) =>
 
   await t.step("非有限の weight は落ちる（NaN が波形まで伝播する）", () => {
     for (const weight of [Number.NaN, Number.POSITIVE_INFINITY]) {
+      // 型は `Sbv2InputError`（400 相当）— 呼び手が weight を直せば通る要求で、同じ関数が
+      // 投げる行番号・表の食い違い（素の `Error` = 500）とは分岐先が違う。
       assertThrows(
         () => styleVector(STYLE_TABLE, rows, COLS, 1, weight),
-        Error,
+        Sbv2InputError,
         "有限の数でない",
       );
     }
+  });
+});
+
+describe("styleWeight の受理集合", () => {
+  const rows = STYLE_ROWS.length;
+
+  it("所有者は葉側の 1 本で、表引きは同じ門を通る（条件を 2 か所に持たない）", () => {
+    const viaGate = assertThrows(
+      () => assertFiniteStyleWeight(Number.NaN),
+      Sbv2InputError,
+      "styleWeight NaN が有限の数でない",
+    );
+    const viaTable = assertThrows(
+      () => styleVector(STYLE_TABLE, rows, COLS, 1, Number.NaN),
+      Sbv2InputError,
+    );
+    // 文言が一致することが「写しではなく同じ関数を通っている」ことの外から見える証拠。
+    assertEquals(viaTable.message, viaGate.message);
+    assertFiniteStyleWeight(0);
+    assertFiniteStyleWeight(-1.5);
+  });
+
+  it("入力起因なので家族横断の ModelInputError で捕まる", () => {
+    const error = assertThrows(() => assertFiniteStyleWeight(Number.POSITIVE_INFINITY));
+    assert(error instanceof ModelInputError, "styleWeight の不受理は 400 相当");
   });
 });

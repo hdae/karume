@@ -7,6 +7,7 @@
 
 import { assert, assertEquals, assertStrictEquals, assertThrows } from "@std/assert";
 import { cfgEulerStep, sigmaSchedule, timestepsProj } from "../src/anima/sampler.ts";
+import { ModelInputError } from "../src/errors.ts";
 // `needsUncond` の定義は更新則に依らない共通処理側にある（`sampler.ts` は import して使う）。
 import { needsUncond } from "../src/generation/dpm-solver-multistep.ts";
 
@@ -25,8 +26,8 @@ Deno.test("sigmaSchedule: 長さ steps+1・終端 0・単調減少", () => {
 });
 
 Deno.test("sigmaSchedule: steps < 2 は linspace の分母が 0 になるので落とす", () => {
-  assertThrows(() => sigmaSchedule(1, SHIFT), RangeError);
-  assertThrows(() => sigmaSchedule(2.5, SHIFT), RangeError);
+  assertThrows(() => sigmaSchedule(1, SHIFT), ModelInputError);
+  assertThrows(() => sigmaSchedule(2.5, SHIFT), ModelInputError);
 });
 
 Deno.test("sigmaSchedule: shift は manifest の値で効く（1 なら素の linspace）", () => {

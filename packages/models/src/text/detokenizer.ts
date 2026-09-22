@@ -32,6 +32,8 @@
  * {@link StreamingDetokenizer} の「確定した片だけ返す」契約には手を入れない。
  */
 
+import { ModelInputError } from "../errors.ts";
+
 /** id を綴りへ解決する口（ファミリ側が持つ知識をここへ渡す）。 */
 export type DetokenizerSource = {
   /** id が byte_fallback 語彙なら byte 値、そうでなければ `undefined`。 */
@@ -155,8 +157,10 @@ export const createStopStringFilter = (stopStrings: readonly string[]): StopStri
   const stops = [...stopStrings];
   const declared = new Set<string>();
   stops.forEach((stop, index) => {
-    if (stop === "") throw new Error(`stopStrings[${index}] が空文字列`);
-    if (declared.has(stop)) throw new Error(`stopStrings に ${JSON.stringify(stop)} が 2 度出る`);
+    if (stop === "") throw new ModelInputError(`stopStrings[${index}] が空文字列`);
+    if (declared.has(stop)) {
+      throw new ModelInputError(`stopStrings に ${JSON.stringify(stop)} が 2 度出る`);
+    }
     declared.add(stop);
   });
 

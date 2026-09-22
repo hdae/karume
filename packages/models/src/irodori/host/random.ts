@@ -14,6 +14,8 @@
  * **ノイズを外から注入**して行う（`IrodoriGenerateRequest.initialNoise`）。
  */
 
+import { assertAcceptableSeed } from "../../request-gates.ts";
+
 const GOLDEN_GAMMA = 0x9e3779b97f4a7c15n;
 const MIX_1 = 0xbf58476d1ce4e5b9n;
 const MIX_2 = 0x94d049bb133111ebn;
@@ -31,19 +33,13 @@ const nextUint64 = (state: bigint): { readonly state: bigint; readonly value: bi
 };
 
 /**
- * seed の受理集合（非負の安全整数 — `BigInt` へ落とすので端数も負も表せない）。
+ * 決定的な標準正規列の生成器（`seed` が同じなら同じ列）。
  *
- * NOTE: `export` は**生成の入口**（`pipeline.ts` の要求検査）が同じ集合で先に落とすため。
- * 生成器を作るのは DiT の段に入った後なので、ここだけに検査があると GB 級のロードと 5 グラフを
- * 回し終えた末に落ちる。受理集合は 1 本しか持たない（両側に条件を書くと必ず割れる）。
+ * NOTE: seed の受理集合（非負の安全整数）の所有者は `request-gates.ts` の
+ * {@link assertAcceptableSeed} 1 本で、この家族は写しを持たない（ADR 0107 決定 6）。生成器を
+ * 作るのは DiT の段に入った後なので、`pipeline.ts` の要求検査が**生成の入口**で同じ関数を
+ * 先に呼ぶ — ここだけに検査があると GB 級のロードと 5 グラフを回し終えた末に落ちる。
  */
-export const assertAcceptableSeed = (seed: number): void => {
-  if (!Number.isInteger(seed) || seed < 0 || seed > Number.MAX_SAFE_INTEGER) {
-    throw new RangeError(`seed ${seed} が非負の安全整数でない`);
-  }
-};
-
-/** 決定的な標準正規列の生成器（`seed` が同じなら同じ列）。 */
 export class Randn {
   #state: bigint;
 

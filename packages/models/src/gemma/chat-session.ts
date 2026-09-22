@@ -37,6 +37,7 @@
  */
 
 import { closeableGenerator } from "../concurrency/closeable-generator.ts";
+import { ModelInputError } from "../errors.ts";
 import type { GenerationProgram } from "../generation/program.ts";
 import { type SamplerSpec, snapshotSpec } from "../generation/sampler.ts";
 import {
@@ -299,16 +300,18 @@ export class Gemma4ChatSession {
     // 使うので、検査を sequence 側だけに任せると、長いターンでは `#shrink` が履歴を実際に
     // 切り詰めてから容量エラーになり、真因（宣言ミス）がどの診断にも出ない。
     if (!Number.isSafeInteger(this.#capacity) || this.#capacity < 1) {
-      throw new Error(`Gemma4ChatSession: capacity ${this.#capacity} が 1 以上の整数でない`);
+      throw new ModelInputError(
+        `Gemma4ChatSession: capacity ${this.#capacity} が 1 以上の整数でない`,
+      );
     }
     if (this.#capacity < host.program.chunkLength) {
-      throw new Error(
+      throw new ModelInputError(
         `Gemma4ChatSession: capacity ${this.#capacity} が chunkLength ` +
           `${host.program.chunkLength} を下回る（1 chunk すら入らない）`,
       );
     }
     if (this.#capacity > host.program.maxPosition) {
-      throw new Error(
+      throw new ModelInputError(
         `Gemma4ChatSession: capacity ${this.#capacity} が maxPosition ` +
           `${host.program.maxPosition} を超えた（容量いっぱいの会話がモデルの位置上限の外を引く）`,
       );

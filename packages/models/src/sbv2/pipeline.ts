@@ -65,6 +65,7 @@ import {
   type Sbv2PipelineConfig,
 } from "./config.ts";
 import {
+  assertFiniteStyleWeight,
   parseSbv2Table,
   type Sbv2Table,
   SPEAKER_TENSOR,
@@ -84,6 +85,8 @@ import { durationsToFrames } from "./host/duration.ts";
 import { buildZp } from "./host/latent.ts";
 import { Randn } from "./host/random.ts";
 import { buildRelattnTables } from "./relattn-tables.ts";
+import { ModelInputError } from "../errors.ts";
+import { assertAcceptableSeed } from "../request-gates.ts";
 import { createOperationChain } from "../concurrency/serial.ts";
 import {
   assertGpuFeaturesGranted,
@@ -443,21 +446,27 @@ const finiteKnob = (value: number, name: string): number => {
 };
 
 /**
- * `seed` の受理集合（非負の安全整数 — `host/random.ts` の `Randn` と同一条件）を見る門。
+ * `seed` の受理集合を見る門。条件そのものは持たず、家族横断の所有者
+ * {@link assertAcceptableSeed}（`request-gates.ts` — 非負の安全整数）へ委ねて型だけを被せ直す。
  *
  * MUST: 他のノブと同じ段（Session を張る前）で呼ぶ。唯一の検査が `Randn` のコンストラクタ
  * だけだと、実行不能と最初から判っている要求に text_encoder（配布形で 334MB）の構築と
  * 1 run を丸ごと払ってから落ちる（{@link assertTokenLimit} の位置の MUST と同じ理由）。
- * MUST: 型は `Sbv2InputError`。`Randn` が投げる `RangeError` は `errors.ts` の分類軸
- * （呼び手の要求の不受理 = `Sbv2InputError` / 内部不変条件の破れ = 素の `Error`）の外にあり、
- * HTTP を被せる消費側で 400 が 500 に化ける。`Randn` 側の検査はテスト専用の第 2 の門として
- * 残す（`examples/sbv2/dump.ts` が直接叩くので入口が 2 つある）。
+ * MUST: 型は `Sbv2InputError` を保つ。`Randn` 側も所有者に揃って `ModelInputError` を投げる
+ * ようになったので分類軸の外ではなくなったが、SBV2 だけを載せるホストは
+ * `instanceof Sbv2InputError` で 400 を切り出している（ADR 0072 決定 6 の線引き）ので、
+ * この入口の型を親へ緩めるのは破壊変更である。`Sbv2InputError` は `ModelInputError` の
+ * 派生なので、複数家族を載せたホストの横断の分岐にはそのまま乗る。
  *
  * NOTE: `export` は門を直接叩くテストのため（{@link assertTokenLimit} と同じ事情）。
  */
 export const assertSeed = (seed: number): void => {
-  if (!Number.isInteger(seed) || seed < 0 || seed > Number.MAX_SAFE_INTEGER) {
-    throw new Sbv2InputError(`seed ${seed} が非負の安全整数でない`);
+  try {
+    assertAcceptableSeed(seed);
+  } catch (cause) {
+    // 診断は所有者の文言をそのまま運ぶ（受理集合も文言も 2 か所に書かない）。
+    if (cause instanceof ModelInputError) throw new Sbv2InputError(cause.message, { cause });
+    throw cause;
   }
 };
 
@@ -704,7 +713,9 @@ export const synthesizeSbv2 = async (
   const defaults = state.config.defaults;
   const speaker = options.speaker ?? defaults.speaker;
   const style = options.style ?? defaults.style;
-  const styleWeight = finiteKnob(options.styleWeight ?? defaults.styleWeight, "styleWeight");
+  // `styleWeight` の受理集合の所有者は表引き側（`style.ts`）— 入口は条件を写さずそれを呼ぶ。
+  const styleWeight = options.styleWeight ?? defaults.styleWeight;
+  assertFiniteStyleWeight(styleWeight);
   const knobs: Sbv2Knobs = {
     sdpRatio: finiteKnob(options.sdpRatio ?? defaults.sdpRatio, "sdpRatio"),
     noiseScale: finiteKnob(options.noiseScale ?? defaults.noiseScale, "noiseScale"),
