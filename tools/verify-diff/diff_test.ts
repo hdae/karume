@@ -78,6 +78,21 @@ describe("results.json の境界の検査", () => {
     );
   });
 
+  it("ケース ID が重複した文書は throw する（2 本目の決着が黙って消えない）", () => {
+    assertThrows(
+      () =>
+        seat("deno-a", "2026-09-21", "anima", [
+          passing("base"),
+          { id: "base", status: "fail", elapsedMs: 2 },
+        ]),
+      Error,
+      "ケース ID が重複 'base'",
+    );
+    // 別の ID なら 2 件とも残る（重複だけを断る）。
+    const loaded = seat("deno-a", "2026-09-21", "anima", [passing("base"), passing("extra")]);
+    assertEquals(loaded.document.cases.map((one) => one.id), ["base", "extra"]);
+  });
+
   it("measurements を読む（非有限が null で来ても落ちない）", () => {
     const loaded = seat("deno-a", "2026-09-21", "golden", [{
       id: "activations",
@@ -130,6 +145,38 @@ describe("席の選び方", () => {
     assertEquals(report.families[0].environments, ["deno-a"]);
     assertEquals(report.families[0].selected[0].date, "2026-09-20");
     assertEquals(report.families[0].absent, ["deno-b"]);
+  });
+
+  it("--date に当たる席が無ければ警告する（当たれば警告は出ない）", () => {
+    const loaded = [seat("deno-a", "2026-09-21", "anima", [passing("base")])];
+    const missed = buildDiff(loaded, { date: "2026-02-30" });
+    assertEquals(missed.warnings, ["--date 2026-02-30 に当たる席が無い"]);
+    assertEquals(missed.families, []);
+    assertEquals(buildDiff(loaded, { date: "2026-09-21" }).warnings, []);
+  });
+
+  it("同じ系列・環境キー・日付の席が 2 つあれば両方の path を挙げて警告する", () => {
+    const first = seat("deno-a", "2026-09-21", "anima", [passing("base")]);
+    // 同型 GPU の 2 台は同じ環境キーを名乗るので、手コピーで別 path の同じ席が並ぶ。
+    const second: LoadedResults = {
+      ...seat("deno-a", "2026-09-21", "anima", [{ id: "base", status: "fail", elapsedMs: 2 }]),
+      path: "outputs/verify/copied/2026-09-21_anima/results.json",
+    };
+    const report = buildDiff([first, second]);
+    assertEquals(report.warnings, [
+      "同じ系列・環境キー・日付の席が 2 つある（anima / deno-a / 2026-09-21）— 片方だけを採る: " +
+      `${first.path} / ${second.path}`,
+    ]);
+    // 採るのは 1 本のまま（警告は「どちらが消えたか」を読み手に渡すためのもの）。
+    assertEquals(report.families[0].selected.map((one) => one.path), [first.path]);
+    // 日付が違えば「最新を採る」ので警告は出ない。
+    assertEquals(
+      buildDiff([
+        seat("deno-a", "2026-09-20", "anima", [passing("base")]),
+        seat("deno-a", "2026-09-21", "anima", [passing("base")]),
+      ]).warnings,
+      [],
+    );
   });
 
   it("--family で指定した系列だけを行列にし、当たらない指定は警告にする", () => {

@@ -188,13 +188,21 @@ export const parseResultsDocument = (value: unknown, source = "results.json"): R
   const environment = requireRecord(record.environment, `${source}.environment`);
   const cases = record.cases;
   if (!Array.isArray(cases)) throw new Error(`${source}: cases が配列でない`);
+  const parsed = cases.map((one, index) => parseEntry(one, `${source}.cases[${index}]`));
+  // 行はケース ID で引く（1 本目だけが採られる）ので、重複を通すと 2 本目以降の決着が
+  // 黙って消える — 読めない文書と同じく境界で落とす。
+  const ids = new Set<string>();
+  for (const entry of parsed) {
+    if (ids.has(entry.id)) throw new Error(`${source}: ケース ID が重複 '${entry.id}'`);
+    ids.add(entry.id);
+  }
   return {
     schema: 1,
     family: requireString(record, "family", source),
     environment: { key: requireString(environment, "key", `${source}.environment`) },
     checkout: parseCheckout(record.checkout, source),
     startedAt: requireString(record, "startedAt", source),
-    cases: cases.map((one, index) => parseEntry(one, `${source}.cases[${index}]`)),
+    cases: parsed,
   };
 };
 
@@ -350,6 +358,11 @@ export const buildDiff = (
       if (!present.has(family)) warnings.push(`--family ${family} に当たる結果が無い`);
     }
   }
+  // 日付の打ち間違い（暦に無い日・採っていない日）も「差異なし」に化けるので、--family と
+  // 同じく当たらなかった指定を必ず言う。
+  if (options.date !== undefined && !loaded.some((one) => one.date === options.date)) {
+    warnings.push(`--date ${options.date} に当たる席が無い`);
+  }
 
   const allEnvironments = [...new Set(loaded.map((one) => one.document.environment.key))].sort();
   const byFamily = new Map<string, Map<string, LoadedResults>>();
@@ -360,6 +373,15 @@ export const buildDiff = (
     const perEnvironment = byFamily.get(family) ?? new Map<string, LoadedResults>();
     byFamily.set(family, perEnvironment);
     const held = perEnvironment.get(environment.key);
+    // 同じ（系列, 環境キー, 日付）が 2 席あると片方は黙って捨てられる（同型 GPU の 2 台は同じ
+    // 環境キーを名乗るので、手コピーで普通に起こる）。どちらが残ったかは読み手に分からないので
+    // 両方の path を挙げる。終了コードは変えない（ADR 0106 の「1 は読めない・schema 違いだけ」）。
+    if (held !== undefined && held.date === entry.date && held.path !== entry.path) {
+      warnings.push(
+        `同じ系列・環境キー・日付の席が 2 つある（${family} / ${environment.key} / ${entry.date}）` +
+          `— 片方だけを採る: ${held.path} / ${entry.path}`,
+      );
+    }
     if (held === undefined || held.date < entry.date) perEnvironment.set(environment.key, entry);
   }
 

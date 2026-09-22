@@ -92,9 +92,18 @@ const SEAT = /^(\d{4}-\d{2}-\d{2})_.+$/;
 
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 
-/** 相対 path を cwd 基準のディレクトリ URL にする（tools/_shared/assets.ts は IR 解析ごと引き込むので写す）。 */
-const directoryUrl = (path: string): URL =>
-  new URL(path.endsWith("/") ? path : `${path}/`, `file://${Deno.cwd()}/`);
+/**
+ * OS path をディレクトリ URL にする（tools/_shared/assets.ts は IR 解析ごと引き込むので写す）。
+ *
+ * MUST: 区切りごとに `encodeURIComponent` してから組む（{@link childUrl} と同じ流儀）。path を
+ * そのまま `new URL` へ渡すと `#` / `?` / `%` が URL 構文として解かれ、実体 `x%41y` を渡したのに
+ * `xAy` を黙って読む（別の場所の結果を、打った綴りの根として表示する）形になる。
+ */
+const directoryUrl = (path: string): URL => {
+  const absolute = path.startsWith("/") ? path : `${Deno.cwd()}/${path}`;
+  const encoded = absolute.split("/").map(encodeURIComponent).join("/");
+  return new URL(`file://${encoded.endsWith("/") ? encoded : `${encoded}/`}`);
+};
 
 /** 子ディレクトリの URL（名前に `#` / `?` が入っても別の場所を指さないようにする）。 */
 const childUrl = (parent: URL, name: string): URL =>
