@@ -1,4 +1,4 @@
-"""Karume exporter — torch.export 済みモデルを IR v1（docs/ir-v1.md）へ落とす。
+"""Karume exporter — torch.export 済みモデルを IR v1（docs/ir-v2.md）へ落とす。
 
 公開面は `__all__` の 12 件が正本（列挙とここの説明は 1:1 — 機械門は
 `tests/test_architecture_boundary.py` の TestThePublicSurface）:

@@ -433,7 +433,7 @@ class TestRowSymbolBinding:
 
     段 1 の合格線そのもの: 通常の prefill / decode は R = 1 で走るので、torch.export が
     `Dim(min=1)` を 1 へ特殊化していれば既存経路が動かない。IR の `symbols` は名前の列だけで
-    上限を持たない（`docs/ir-v1.md`）ので、この性質を見られるのは焼いた ExportedProgram を
+    上限を持たない（`docs/ir-v2.md`）ので、この性質を見られるのは焼いた ExportedProgram を
     実際に別の行数で回す形だけ。
     """
 

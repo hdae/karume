@@ -14,7 +14,7 @@
 - Date: 2026-08-05（pre-mortem 3 レンズ・44 指摘を反映した改訂版）
 - 関連: ADR [0037](0037-karume-monorepo.md)（配布形の親決定）/
   [0033](0033-vae-fixed-tile-decode.md)（タイル VAE）/
-  [0034](0034-dit-dynamic-tokens.md)（S 形 DiT）/ [docs/ir-v1.md](../ir-v1.md)（コンテナ規約）
+  [0034](0034-dit-dynamic-tokens.md)（S 形 DiT）/ [docs/ir-v2.md](../ir-v2.md)（コンテナ規約）
 
 ## Context
 

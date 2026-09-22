@@ -5,7 +5,7 @@
   [0014](0014-layout-ops-full-write.md)（記号軸を要求実測が出るまで広げない規律）/
   [0046](0046-cat-symbolic-axis.md)（同じ規律で `cat` の連結軸だけを緩めた前例。`slice` /
   `flip` は静的専業のまま据え置くと明記）/ [0056](0056-gru-scan.md)（`gru_scan` — 本 ADR の
-  要求元）。仕様の正本は [ir-v1.md](../ir-v1.md) の「shape と次元言語」。
+  要求元）。仕様の正本は [ir-v2.md](../ir-v2.md) の「shape と次元言語」。
 - 要求の実測: 母音検出 CRNN（`export_vowel_detector.py`）。先頭が
   `Conv1d(kernel=5, stride=2, padding=2)` なので、入力の長さ軸を素の `Dim("T")` で宣言すると
   出力 extent が **`((T−1)//2)+1`**（床除算）になり次元言語に載らない。`2*Dim("T")` で

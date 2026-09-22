@@ -1488,7 +1488,7 @@ const prefixSliceGraph = (
   version: 1,
   requires: { ops: ["sym_prefix_slice"] },
   symbols: ["T"],
-  // 束縛は入力 shape の次元位置からしか取れない（docs/ir-v1.md）ので、T を素の形で運ぶ
+  // 束縛は入力 shape の次元位置からしか取れない（docs/ir-v2.md）ので、T を素の形で運ぶ
   // ダミー入力を 1 本置く。
   inputs: [{ name: "bind", dtype: "f32", shape: ["T"] }],
   outputs: ["y"],

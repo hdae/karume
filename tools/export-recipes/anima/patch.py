@@ -434,7 +434,7 @@ class AnimaDitTokens(nn.Module):
       {@link dit_unpatchify}）
 
     結果としてグラフ内に H / W が 1 つも現れず、トークン長 1 シンボル `S` の一次式だけで
-    書ける（次元言語は「1 次元 1 シンボルの一次式」— docs/ir-v1.md）。
+    書ける（次元言語は「1 次元 1 シンボルの一次式」— docs/ir-v2.md）。
 
     MUST: rope 表は `[1,1,S,head_dim]` で受けて `flatten(0, 2)` で 2 次元へ戻す。
     上流の `apply_rotary_emb` は**渡された表が 2 次元であること**を前提に `cos[None,None]`

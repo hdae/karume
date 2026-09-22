@@ -5,7 +5,8 @@ ADR [0108](decisions/0108-container-format.md) の具体化。`krm`（モデル�
 
 この文書が持たないもの:
 
-- **IR v2 のグラフ表現そのもの** → [ir-v1.md](ir-v1.md) の改訂版が正本（差分は §13）
+- **IR v2 のグラフ表現そのもの** → [ir-v2.md](ir-v2.md) が正本（v1 からの差分は §13・正準直列化の
+  規則も ir-v2.md の「正準直列化」節）
 - **manifest `karume/5`** → ADR [0038](decisions/0038-manifest-v1.md) 系の改訂が正本
 - **op の契約** → 実装の契約テーブル（`packages/runtime/src/ops/contracts.ts`）が正本
 - **実行既定**（`session` / `gpuFeatures` / `requiredLimits` / `label` / `description`）→
@@ -764,29 +765,36 @@ fail loudly** で止まる。
 
 ## 13. IR v2 の差分
 
-IR v1（[ir-v1.md](ir-v1.md)）からの差分は **3 点だけ**である。
+IR v1 からの差分は **4 点**である（正本は [ir-v2.md](ir-v2.md) — ここは束縛表との対応だけ）。
 
-### 13.1 `initializers[].storage` を束縛表へ外出しする
+### 13.1 `initializers[].storage` を束縛表へ外出しし、initializer 名を実体の鍵にする
 
 ```jsonc
 // IR v1
 "initializers": {
-  "w": { "tensor": "enc.w", "storage": { "dtype": "i4", "scale": "enc.w_scale", "group_size": 32 } }
+  "p_enc_w": { "tensor": "enc.w", "storage": { "dtype": "i4", "scale": "enc.w_scale", "group_size": 32 } }
 }
 
-// IR v2
+// IR v2 — 名前が v1 のテンソルキー（FQN / const.<hash>）そのものになる
 "initializers": {
-  "w": {}
+  "enc.w": {}
 }
 ```
 
-| 旧                                                    | 新の置き場                               |
-| ----------------------------------------------------- | ---------------------------------------- |
-| `initializers[].tensor`（safetensors のテンソルキー） | 消える（束縛表が block id で指す）       |
-| `storage.dtype`                                       | `binding[].encoding.codec`               |
-| `storage.scale`（scale テンソルのキー）               | `binding[].encoding.scale.block`         |
-| `storage.group_size`                                  | `binding[].encoding.groupSize`           |
-| `initializers[].shared`                               | **そのまま残る**（`{ "shared": true }`） |
+| 旧                                                    | 新の置き場                                                                                          |
+| ----------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `initializers[].tensor`（safetensors のテンソルキー） | **initializer 名そのもの**になる（束縛表は `(グラフ名, initializer 名)` で引き、block id は内部名） |
+| `storage.dtype`                                       | `binding[].encoding.codec`                                                                          |
+| `storage.scale`（scale テンソルのキー）               | `binding[].encoding.scale.block`                                                                    |
+| `storage.group_size`                                  | `binding[].encoding.groupSize`                                                                      |
+| `initializers[].shared`（`{ tensor: <貸し手キー> }`） | `{ "shared": true }` — **借り手の名前 = 貸し手の initializer 名** MUST（鍵は名前）                  |
+
+**名前を鍵にする理由**: v1 の initializer 名は torch.export の placeholder 名
+（`p_model_layers_0_mlp_gate_proj_weight`）で、上流の鍵（FQN）は `tensor` 欄が別に持っていた。
+`tensor` 欄を消すと、上流 checkpoint の取り込み（決定 19）と LoRA の対象解決（段 5）が鍵を失う。
+名前を FQN にすれば表を 1 つも足さずに済む（実測: ミラー 77 グラフの名前・キーは全て ASCII で
+最長 87 文字・衝突 0）。移行 CLI は v1 の `tensor` 欄で名前を付け替える（`values` とノードの
+参照も同時に）。
 
 狙いは「**1 アーキ・1 量子化方式・1 グラフ**」である。PTQ の席（格納 dtype / group /
 session ノブ）と、同一 config の重み差し替え（fine-tune）から、グラフが独立する。
@@ -830,7 +838,10 @@ models の `gemma/qat.ts` / `speculative.ts`。
 2. **77 グラフ全部で、新旧の適格述語の結果が一致する**
    （`plan.ts:451` / `plan.ts:496` / `plan.ts:519` — `executableOps` へ畳んだ後も同じ集合が出る）。
 3. **同じグラフを再 export するとグラフ記述がバイト同一になる。** `krg` の同一性を内容ハッシュで
-   判定する（§9）以上、`graphs[name]` の直列化まで決定的でなければならない。したがって
-   **IR v2 の直列化規則（キー順・数値の綴り）を段 1 で決め切る**。CPU 試作 ① はグラフ名だけを
-   整列し、IR 本体は Python 側の serialize 順をそのまま持っていた — この状態では、抽出した `krg`
-   と独立生成の `krg` のバイト同一は「同じ書き手で書いた場合」にしか成立しない。
+   判定する（§9）以上、`graphs[name]` の直列化まで決定的でなければならない。**IR v2 の直列化
+   規則は [ir-v2.md](ir-v2.md) の「正準直列化」節で決め切った**（2026-09-22 — キー順はスキーマ順、
+   名前キーの map は code point 順、数値の綴りは ECMAScript `Number::toString`、空白なし）。
+   グラフ記述全体（`graphs` のキー順・`const` 目次・`capabilities` の集合）も同じ規則に従う。
+   CPU 試作 ① はグラフ名だけを整列し、IR 本体は Python 側の serialize 順をそのまま持っていた —
+   その状態では、抽出した `krg` と独立生成の `krg` のバイト同一は「同じ書き手で書いた場合」に
+   しか成立しなかった。

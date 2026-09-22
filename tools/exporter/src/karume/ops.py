@@ -268,7 +268,7 @@ WEIGHT_CHANNEL_AXES: Mapping[str, int] = MappingProxyType(
 #: 超過を export 時点で落とすため（「export は緑、ブラウザだけ落ちる」を作らない）。
 STRIDED_RANK = 4
 
-#: IR v1 の意味論 dtype 語彙（docs/ir-v1.md）。
+#: IR v1 の意味論 dtype 語彙（docs/ir-v2.md）。
 SEMANTIC_DTYPES = frozenset({"f32", "i32", "bool"})
 #: f32 専業（実測グラフに i32 / bool 形が現れていない — 対称性のためには解禁しない）。
 F32_DTYPES = frozenset({"f32"})

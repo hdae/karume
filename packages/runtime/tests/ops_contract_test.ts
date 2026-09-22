@@ -53,8 +53,8 @@ const node = (
 });
 
 // MUST: doc は読まない（書式依存の抽出突合は脆く、恒真化の温床にもなる）。ここは**期待値
-// リテラル**で op 集合を固定するだけで、docs/ir-v1.md の一覧との同期は op 追加時の人手仕事
-// （契約 1 セット — ops.ts / ops.py / shapes.py / fixtures / CPU 参照 / golden / ir-v1.md）。
+// リテラル**で op 集合を固定するだけで、docs/ir-v2.md の一覧との同期は op 追加時の人手仕事
+// （契約 1 セット — ops.ts / ops.py / shapes.py / fixtures / CPU 参照 / golden / ir-v2.md）。
 Deno.test("契約表の op 集合が期待値リテラル 61 本と一致する", () => {
   assertEquals(UNARY_OPS.length, 19);
   assertEquals(BINARY_OPS.length, 6);

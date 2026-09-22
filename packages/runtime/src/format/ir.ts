@@ -1,6 +1,6 @@
 import { isI2Shape } from "./i2.ts";
 
-// IR v1（docs/ir-v1.md）のグラフ JSON 型と構造検証。
+// IR v1（docs/ir-v2.md）のグラフ JSON 型と構造検証。
 // 検証はここに 1 本化する: safetensors との突合は container.ts、次元文法は dims.ts が持ち、
 // 本ファイルはグラフ単体で決まる規則（宣言・SSA・トポロジカル順・語彙）だけを見る。
 
@@ -186,7 +186,7 @@ const RESERVED_STATE_DTYPES = ["f16"] as const;
 const MAX_STATE_RANK = 4;
 
 /**
- * initializer の意味論 dtype → 許される格納 dtype（docs/ir-v1.md「値と型」）。
+ * initializer の意味論 dtype → 許される格納 dtype（docs/ir-v2.md「値と型」）。
  *
  * MUST: 意味論と格納の組は**この表だけ**が決める。f32 の格納語彙は「f32 値の符号化」で、
  * i32 は生の int32 1 通りのみ（ADR 0010）— 交差を許すと `i32` 宣言の initializer が f16 の
@@ -441,7 +441,7 @@ const parseNodeStates = (
 
 /**
  * NaN / Infinity は JSON リテラルに無いが、`1e999` のような指数は Infinity へ丸まる。
- * 受理集合をブラウザ JSON.parse に揃える契約（docs/ir-v1.md）を保つため、非有限数を含む
+ * 受理集合をブラウザ JSON.parse に揃える契約（docs/ir-v2.md）を保つため、非有限数を含む
  * グラフは MUST NOT 受理。
  */
 const parseJson = (json: string): unknown => {

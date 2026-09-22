@@ -9,7 +9,7 @@ import {
   tryParseDim,
 } from "../src/format/dims.ts";
 
-// 文法の正本は tests/fixtures/dim-grammar.json（docs/ir-v1.md）。ここは表を全件回すだけで、
+// 文法の正本は tests/fixtures/dim-grammar.json（docs/ir-v2.md）。ここは表を全件回すだけで、
 // TS 側に受理集合の第 2 の定義を作らない。
 
 type ValidCase = {

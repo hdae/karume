@@ -9,7 +9,7 @@
 ## 表 1 — 格納型（資産に焼く形）
 
 正本 = `packages/runtime/src/format/ir.ts` の `STORAGE_DTYPES` と
-[ir-v1](ir-v1.md) の「格納 dtype」節。ADR 0006 以来「意味論は f32、格納だけを圧縮する」が骨格で、
+[ir-v1](ir-v2.md) の「格納 dtype」節。ADR 0006 以来「意味論は f32、格納だけを圧縮する」が骨格で、
 `i32` だけが例外（記号依存定数の生の int32）。
 
 | 格納型                 | 使うファミリ                                 | 状態                                                                       | 正本                                                                                                                                        |

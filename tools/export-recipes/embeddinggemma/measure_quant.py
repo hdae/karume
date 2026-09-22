@@ -11,7 +11,7 @@
        「linear + embedding」の 2 形で走らせ、差を語彙表の寄与として読む。
 
 NOTE: 対象 `linear+embedding` は**測定専用の形**。i4 の実行経路は消費 op が linear の重み
-スロットに限られる（ADR 0069 決定 5 / `docs/ir-v1.md` の `i4` 格納形）ので、embedding を
+スロットに限られる（ADR 0069 決定 5 / `docs/ir-v2.md` の `i4` 格納形）ので、embedding を
 4bit で「格納」する道はいま無い。ここで測るのは「その席が開いたときに何が起きるか」で、
 出荷形の主張ではない（`quant_methods` の測定専用方式も同じ立場）。
 
@@ -121,13 +121,13 @@ GROUP_SIZE = 32
 
 # ---- サイズ試算の bit 幅（格納規則の逐語）------------------------------------
 #
-# 出典は `docs/ir-v1.md` の `i4` 格納形（scale は **F32**・group ごと 1 個・group_size は 2 冪
+# 出典は `docs/ir-v2.md` の `i4` 格納形（scale は **F32**・group ごと 1 個・group_size は 2 冪
 # かつ 16 以上）と OCP Microscaling Formats v1.0（MX の共有 scale は E8M0 = 指数 1 バイト）。
 # k-means は格納形を持たない測定専用方式なので、**表のコストを込みで**素直に数える。
 
 #: 4bit 格子のペイロード（全方式共通 — 比較しているのは「格子の張り方」であって bit 数ではない）。
 PAYLOAD_BITS = 4.0
-#: group scale の bit 幅（`i4` の格納は F32 の group scale が MUST — `docs/ir-v1.md`）。
+#: group scale の bit 幅（`i4` の格納は F32 の group scale が MUST — `docs/ir-v2.md`）。
 F32_SCALE_BITS = 32.0
 #: MXFP4 の共有 scale は E8M0（指数 1 バイト）。
 MX_SCALE_BITS = 8.0

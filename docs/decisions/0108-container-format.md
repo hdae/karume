@@ -5,7 +5,7 @@
 - Date: 2026-09-22
 - 対象（段ごとに触る面の宣言 — 現時点では 1 行も実装していない）:
   - 仕様: [docs/container-v1.md](../container-v1.md)（新設 — 物理形式の正本）/
-    [docs/ir-v1.md](../ir-v1.md) → IR v2 へ改訂（`storage` の外出し・`scale` の rank 2 統一）
+    [docs/ir-v2.md](../ir-v2.md) → IR v2 へ改訂（`storage` の外出し・`scale` の rank 2 統一）
   - runtime: `packages/runtime/src/format/`（`container.ts` / `ir.ts` / `safetensors.ts` /
     `i2.ts` / `i4.ts` / `i8.ts`）・`packages/runtime/src/runtime/`（`session-build.ts` /
     `plan.ts` / `weight-residency.ts` / `executor.ts`）
@@ -17,7 +17,7 @@
   - 運用: `docs/release-runbook.md` / `hf-upload.zsh` / `karume dist` / 門番
     （`distribution_gate` / `assets_gate`）
 - **Supersedes**（本 ADR が上書きする既存決定 — 既存 ADR の本文には追記で対応する）:
-  - ADR [0003](0003-ir-v1.md) の**コンテナ規約**（`docs/ir-v1.md:86-91`「配布形は safetensors
+  - ADR [0003](0003-ir-v1.md) の**コンテナ規約**（`docs/ir-v2.md:86-91`「配布形は safetensors
     1 ファイル・`__metadata__.karume_ir` にグラフ JSON」）
   - ADR [0037](0037-karume-monorepo.md) **§3**（「独自拡張子 `.krm` は不採用」・
     「1 グラフ = 1 safetensors」）

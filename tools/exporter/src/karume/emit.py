@@ -498,7 +498,7 @@ def _plan_i8(
         # 黙って減るだけなので、i8 指定では受理しない。
         raise _unrounded(name, key, "per-channel scale が無い")
     if scale.dtype is not torch.float32:
-        # companion scale は F32 固定（ADR 0019 / docs/ir-v1.md）。writer は F16 もそのまま
+        # companion scale は F32 固定（ADR 0019 / docs/ir-v2.md）。writer は F16 もそのまま
         # 直列化でき、逆変換の等値検査も「同じ f16 scale で fake-quant 済み」なら通ってしまう
         # ので、計画段で落とす（診断が「書いた後の verify」から前倒しになる）。
         raise EmitError(

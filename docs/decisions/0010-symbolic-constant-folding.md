@@ -13,7 +13,7 @@ T 依存部分木）は、**エクスポータが Tmax（モデルの最大系�
 - IR v1 を改訂し、**initializer の意味論 i32 と格納 dtype `i32`（生の int32）**を追加する
   （現行の「格納語彙は f32 値の符号化」の明示的な例外）。
 - IR op **`sym_prefix_slice`** を追加: attrs `{ sym, slices: [{dim, coeff, offset}] }`。
-  次元言語 `coeff·sym+offset`（ir-v1.md）をそのまま流用する。
+  次元言語 `coeff·sym+offset`（ir-v2.md）をそのまま流用する。
 - 畳み込みの適格判定は「Tmax 実評価が prefix と可換」であること。**allowlist 掲載だけでは
   担保しない** — エクスポータが **2 点評価（異なる 2 つの T で評価して prefix 一致を実測）**で
   検査し、不一致は fail loudly（プロトタイプで実証済みの機構）。
@@ -39,7 +39,7 @@ T 依存部分木）は、**エクスポータが Tmax（モデルの最大系�
 
 ## 帰結
 
-- ir-v1.md の改訂（i32 initializer / storage `i32` / `sym_prefix_slice`）は実装波と同一
+- ir-v2.md の改訂（i32 initializer / storage `i32` / `sym_prefix_slice`）は実装波と同一
   コミットで行う。
 - Tmax はモデル属性（DeBERTa は 512）。Tmax を超える実行時系列長は束縛検査で fail loudly。
 - prefix 非可換な部分木は畳まず、未対応 op として全件列挙に出す（黙って残さない）。

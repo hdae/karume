@@ -1,6 +1,6 @@
 {
   "_doc": [
-    "次元言語 `coeff·sym+offset` の適合ケース表（docs/ir-v1.md『shape と次元言語』の正本）。",
+    "次元言語 `coeff·sym+offset` の適合ケース表（docs/ir-v2.md『shape と次元言語』の正本）。",
     "valid: 正準表記 → 分解結果。parse と format の往復が文字列同一であることも含む。",
     "invalid: 受理してはならない文字列（非正準表記・複数シンボル・負値・空白など）。",
     "eval: 束縛表 + 式 → 値。throws=true は評価が失敗しなければならないケース。",

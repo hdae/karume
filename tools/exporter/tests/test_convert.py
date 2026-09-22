@@ -589,7 +589,7 @@ class TestOutputs:
 class TestDuplicateOutputs:
     """同じ IR 値を 2 つの出力へ割り当てる形は `convert()` の時点で落とす。
 
-    出力名は集合（docs/ir-v1.md）で、受理側 `verify.parse_ir_graph` は重複を拒否する。
+    出力名は集合（docs/ir-v2.md）で、受理側 `verify.parse_ir_graph` は重複を拒否する。
     検出を受理側まで遅らせると、検証を挟まない `emit.write_model` の直呼びが
     「書けたが読めない」配布形をそのまま据える。
     """

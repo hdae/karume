@@ -98,7 +98,7 @@ shape 文字列ぶん）。**VAE decoder のグラフは解像度に対して構
 
 ### 2.1 越えられない壁 — 次元言語
 
-正本は `docs/ir-v1.md:135-146` と `src/format/dims.ts:5-10` /
+正本は `docs/ir-v2.md:135-146` と `src/format/dims.ts:5-10` /
 `tools/exporter/karume/dims.py:27-33`:
 
 > 次元式の正準文法: **`coeff·sym + offset` の一次式・1 次元 1 シンボル**
@@ -226,9 +226,9 @@ conv 本体は symbolic に載る【事実】:
   （`plan.ts:149-186` `assertStaticLayoutAxis`、ADR 0014）。
   DiT の S 軸に触るレイアウト op は無い（§2.2）ので抵触しない。
 - `sym_prefix_slice` の入力は Tmax 形の静的 shape（`plan.ts:123-147`）。
-- initializer は数値次元のみ（`docs/ir-v1.md:123`）。
+- initializer は数値次元のみ（`docs/ir-v2.md:123`）。
 - シンボルは「少なくとも 1 つの入力 shape に係数 1・オフセット 0 の素の形で出現」
-  （`docs/ir-v1.md:143-146`）。DiT-S 案は `tokens [1,S,68]` で満たす。
+  （`docs/ir-v2.md:143-146`）。DiT-S 案は `tokens [1,S,68]` で満たす。
 
 **したがって②の判定は holds**。ただし「空間次元 symbolic」を
 「latent の H と W をそのまま 2 シンボルで宣言する」意味に取るなら、
@@ -354,7 +354,7 @@ DiT は依然 512/1024 別資産）。
   `src/kernels/matmul.ts:19`、`src/kernels/softmax.ts:31`
 - `src/codegen/elementwise.ts:1-20,359`
 - `src/gpu/device.ts:78-95`
-- `docs/ir-v1.md:123,135-146`
+- `docs/ir-v2.md:123,135-146`
 - `.claude/ACTIVE_DESIGN.md`（M1-P2 / M1-P3 / M1-P4 / 画像デモ節）
 - `examples/anima/README.md:45,62,85-90,142-181`
 - `.venv/…/diffusers/models/transformers/transformer_cosmos.py:457-518`

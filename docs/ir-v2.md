@@ -1,8 +1,11 @@
-# IR v1 仕様
+# IR v2 仕様
 
-Karume のモデルフォーマット。ADR [0003](decisions/0003-ir-v1.md) の具体化。
-プロトタイプ IR（v0）の実証済み構造を土台に、格納メタの明示化・バージョニング・
-capability 宣言を加えた非互換改訂。確定範囲を定義し、拡張は本書を改訂して行う。
+Karume のグラフフォーマット。ADR [0003](decisions/0003-ir-v1.md)（v1）と
+ADR [0108](decisions/0108-container-format.md)（v2 — 格納の宣言をコンテナの束縛表へ外出し）の
+具体化。プロトタイプ IR（v0）の実証済み構造を土台に、バージョニング・capability 宣言を加えた
+非互換改訂。確定範囲を定義し、拡張は本書を改訂して行う。グラフを載せる**物理形式**（`krm` /
+`krg`・block / part・codec 台帳）は [container-v1](container-v1.md) が正本で、本書はグラフ JSON
+だけを定める。
 
 改訂履歴（未リリースにつきシムも移行も作らない — ADR 0003 の改訂手順）:
 
@@ -82,11 +85,20 @@ capability 宣言を加えた非互換改訂。確定範囲を定義し、拡張
   絞り、今 step の k/v を取らない past-only 形になる）③`initializers[].shared`（`tensor` の
   代わりに書く借り物宣言 — バイトを配布形に持たない）。3 つとも**欄を持たないグラフは無風**で、
   既存 IR への影響はゼロ。
+- **v2**（2026-09-22・ADR [0108](decisions/0108-container-format.md) 決定 11 / 17）:
+  **非互換改訂**。①`initializers[].storage` と `initializers[].tensor` を IR から外し、格納の
+  宣言はコンテナの束縛表へ移す（`initializers[name]` は `{}` か `{ "shared": true }`）
+  ②initializer 名を**実体の鍵**にする（エクスポータは FQN / `const.<hash>` で付ける）
+  ③scale は rank 2 group 形に統一し `rowAxis` を宣言に出す（束縛表側 —
+  [container-v1](container-v1.md) §6.1）④**正準直列化**の規則を定める（下の節 — `krg` の
+  同一性を内容ハッシュで判定する条件）。`version` は `2`。v1 との両読みは作らない（旧資産の
+  移行は container-v1 §12 の CLI）。
 
 ## コンテナ
 
-- 配布形は **safetensors 1 ファイル**。テンソル（重み・定数）と、`__metadata__` の
-  キー **`karume_ir`** にグラフ JSON（文字列）を持つ。
+- グラフ JSON はコンテナ（`krm` / `krg`）の**グラフ記述**に `graphs[<グラフ名>]` として載る
+  （[container-v1](container-v1.md) §2.1）。1 コンテナに複数グラフを持てる。実体（重み・定数）は
+  同じコンテナの block にあり、グラフとの対応は束縛表（§5）が持つ。
 - JSON に NaN / Infinity リテラルを含めてはならない（エクスポータは `allow_nan=False`
   相当で書く。パーサは検出したら fail loudly）。
 
@@ -95,28 +107,60 @@ capability 宣言を加えた非互換改訂。確定範囲を定義し、拡張
 ```jsonc
 {
   "format": "karume-ir",
-  "version": 1,
+  "version": 2,
   "requires": { "ops": ["matmul"] },
   "symbols": ["T"],
   "inputs": [{ "name": "x", "dtype": "f32", "shape": ["T", 128] }],
   "outputs": ["h"],
   "initializers": {
-    "w": { "tensor": "enc.w", "storage": { "dtype": "f32" } }
+    "enc.w": {}
   },
   "values": {
-    "w": { "dtype": "f32", "shape": [128, 64] },
+    "enc.w": { "dtype": "f32", "shape": [128, 64] },
     "h": { "dtype": "f32", "shape": ["T", 64] }
   },
-  "nodes": [{ "op": "matmul", "ins": ["x", "w"], "outs": ["h"], "attrs": {} }]
+  "nodes": [{ "op": "matmul", "ins": ["x", "enc.w"], "outs": ["h"], "attrs": {} }]
 }
 ```
 
-- `format` は固定文字列 `"karume-ir"`、`version` は整数 `1`。不一致は fail loudly。
+- `format` は固定文字列 `"karume-ir"`、`version` は整数 `2`。不一致は fail loudly。
 - **未知のトップレベルキーは fail loudly**（未リリースにつき前方互換チャネルは持たない。
   必要になったら本書の改訂で導入する）。上の 9 キーは**全て必須**で、省略可能な節は
   **`states` の 1 本だけ**（下の「state スロット」）。
 - `requires.ops` は nodes で実際に使われる op 名の集合と一致しなければならない（パーサが
   検証）。ランタイムは自分の対応表と突合し、非対応 op を**列挙して** fail loudly する。
+
+## 正準直列化
+
+グラフ JSON は**バイト列として一意**でなければならない（同じグラフを再 export するとグラフ記述が
+バイト同一になる — ADR 0108 決定 4・container-v1 §13.5。`krg` の同一性を内容ハッシュで判定する
+条件）。書き手（Python の exporter・移行 CLI・TS のテスト補助）は次の規則で直列化し、読み手は
+`parse → 正準化 → serialize` が入力バイト列と一致することをテストで確かめる。
+
+- **UTF-8・空白なし**（`,` と `:` の後に空白を置かない・改行を置かない）。
+- **オブジェクトのキー順**: 固定スキーマのオブジェクト（トップレベル・`inputs[]` の要素・
+  `values{}` の値・`states{}` の値・ノード）は**本書の例に現れる順**（トップレベルは `format` /
+  `version` / `requires` / `symbols` / `inputs` / `outputs` / `initializers` / `values` /
+  `states` / `nodes`、ノードは `op` / `ins` / `outs` / `attrs` / `states`、`states{}` の値は
+  `dtype` / `shape` / `external`）。**名前をキーに持つ map**（`initializers` / `values` /
+  `states` / ノードの `attrs` / ノードの `states`）は**キーの code point 順**（UTF-16 単位の順では
+  ない — 非 BMP 文字で順序が変わる。名前は実測で全て ASCII なので両者は一致する）。
+- **配列は宣言順のまま**（`inputs` / `outputs` / `nodes` / `ins` / `outs` / `shape` は順序が意味を
+  持つ）。順序に意味の無い集合（`requires.ops` / `symbols`）は **code point 順**に並べる。
+- **数値の綴りは ECMAScript の `Number::toString`**（ECMA-262 §6.1.6.1.20）に固定する。整数値は
+  小数点も指数も付けず（`1`・`10000` — `10000.0` とは書かない）、非整数は最短往復桁で、
+  指数表記になるのは `|x| < 1e-6` または `|x| ≥ 1e21` のときだけ（`1e-7`・`1e+21` — 指数の
+  ゼロ詰めをしない・`0.000001` は指数にしない）。`-0` は `0` と書く。NaN / Infinity は書けない
+  （値レベルで拒否 — 上の節）。JS 側は `JSON.stringify` がこの綴りそのものなので、**Python 側が
+  これを実装する**（`repr(1e-6)` = `1e-06`・`repr(10000.0)` = `10000.0` は正準ではない）。
+- **文字列のエスケープ**は JSON の最小形（`"` / `\` / 制御文字 U+0000〜U+001F だけをエスケープし、
+  `\b` `\f` `\n` `\r` `\t` は短縮形、他は `\u00XX` の小文字 hex。非 ASCII は生の UTF-8）。
+  JS `JSON.stringify` と Python `json.dumps(ensure_ascii=False)` の共通部分で、両者は一致する。
+- **省略可能な節**（`states` / ノードの `states` / `states[].external`）は**空・偽なら書かない**
+  （欄の不存在がそのまま宣言 — 常に出すと同じグラフが 2 通りの綴りを持つ）。
+
+読み手が空白や `\u` エスケープを含む**非正準の JSON を拒否するかどうか**は読み手の契約に属する
+（TS の `parseIrGraph` は JSON として受理し、正準性は書き手側の規則と往復テストで守る）。
 
 ## 値と型
 
@@ -128,113 +172,98 @@ capability 宣言を加えた非互換改訂。確定範囲を定義し、拡張
   （`packages/runtime/src/ops.ts` / `karume/ops.py`）で、ランタイムは非対応を列挙して fail loudly。
   グラフ入力の転送は 3 型とも可能。torch 既定の整数 i64 は **エクスポータ境界で i32 へ
   正規化**する（値域外は fail loudly）— IR に i64 は無い。
-- **格納 dtype**（`initializers[].storage.dtype`）:
-  `"f32" | "f16" | "bf16" | "i8" | "i4" | "i2" | "i32"`。`i32` 以外は**意味論 f32 の符号化**で、
-  `i32` だけが**生の int32**（記号依存定数の焼き込み先 —
-  ADR [0010](decisions/0010-symbolic-constant-folding.md)。「格納語彙は f32 の符号化」の
-  明示的な例外）。量子化格納は `storage.scale`（scale テンソルの safetensors キー）・
-  `storage.group_size` を持てる。**ランタイムが実行できるのは `f32` / `f16` / `i8` / `i4` / `i2` /
-  `i32`** — bf16 だけが「宣言としては valid、実行は fail loudly（capability 不足の診断付き）」。
-  `i4`（ADR [0069](decisions/0069-packed-w4-storage.md)）の適格は狭い —
-  **消費が linear / embedding / conv1d（`groups == 1`）の重みスロットのみ**の initializer が
-  packed のまま GPU 常駐し（0069 追記 6 の embedding 追補・追記 7 の conv1d 追補）、適格外は
-  ロード時に CPU で f32 展開される（正しさは保たれ VRAM 削減はゼロ）。
-- **`i2` の格納形と実行**（ADR [0097](decisions/0097-gemma4-qat-integration.md#追記-1--int2-格納と実行の契約2026-09-11)）:
-  論理形は正整数の rank 2 `[N,K]`、K は 16 の倍数。safetensors は `I2`、バイト数 `N*K/4`、
-  先頭は 4 byte 整列。1 byte に 4 要素を下位 2bit から `u=q+2` で詰め、整数 `[-2,1]` を保持する。
-  `storage.scale` は必須の F32 `[N,1]`、`group_size` はパース時に拒否する。
-  重みと scale は同じ shard（行分割時は先頭 piece）に置く。
-  linear / embedding の重みだけなら packed 常駐し、他の消費では CPU で f32 展開する。
-  復元は要素ごとの `fround(q*scale)`。linear の計算は f32 のみで、a8 / f16 は明示拒否する。
-- **`i4` の格納形**（ADR 0069 決定 2 / 3）: 行方向 group の対称量子化を packed 4bit で持つ。
-  テンソル shape は**論理形のまま**で、safetensors 側は `I4`・バイト長は `numel / 2`
-  （要素数が奇数の宣言は bit 総量が byte 境界に乗らないので fail loudly）・**テンソル先頭は
-  4 バイト整列** MUST（要素整列の概念を持たず、展開カーネルが `array<u32>` で束縛するため）。
-  宣言の規則は 3 点:
-  - `storage.group_size` が**必須**で、**2 冪かつ 16 以上**
-  - 量子化軸は「**先頭次元を行・残りを平坦化**した行長」（`numel / shape[0]` — rank2 の重みでは
-    最終次元そのもの・conv1d `[O,Cin,K]` では `Cin·K`）で、`行長 % group_size == 0` MUST
-    （端数 group を作らない制約が、行境界・group 境界のバイト整列を保証する）
-  - `storage.scale` も**必須**。実体は F32 で、形は **rank 非依存の rank2**
-    `[shape[0], 行長 / group_size]`（rank2 の重みでは従来の「同 rank・最終次元だけ group 数」と
-    同値 — 0069 追記 7）— i8 の keepdim broadcast 形とは別分岐
-
-  `group_size` を `i8` に付けた宣言は `非対応 group 量子化` として
-  capability 不足で落ちる（**group 量子化の格納は `i4` のみ**。黙って無視すると group ごとの
-  scale を per-channel として読む沈黙誤値になる）。
-- **`f16` の実行**（ADR [0018](decisions/0018-f16-weight-execution.md)）: 意味論はあくまで f32
-  （「格納のみ量子化・計算は f32」— ADR 0006）で、経路が**適格判定で 2 つに分かれる**。
+- **格納（codec）は IR に書かない**。initializer の実体の格納形はコンテナの**束縛表**
+  （[container-v1](container-v1.md) §5 — `binding[<グラフ名>][<initializer 名>].encoding`）が
+  持ち、IR が持つのは意味論 dtype と宣言 shape だけである（「1 アーキ・1 量子化方式・1 グラフ」—
+  ADR [0108](decisions/0108-container-format.md) 決定 17）。codec の語彙は台帳（container-v1
+  §6.3）: `f32` / `f16` / `bf16` / `i32` と量子化 4 種 `int8-sym` / `int4-sym-g` / `int2-off` /
+  `ternary`。`i32` 以外は**意味論 f32 の符号化**で、`i32` だけが**生の int32**（記号依存定数の
+  焼き込み先 — ADR [0010](decisions/0010-symbolic-constant-folding.md)。「格納語彙は f32 の
+  符号化」の明示的な例外）。**ランタイムが実行できるのは bf16 以外** — bf16 だけが「宣言としては
+  valid、実行は fail loudly（capability 不足の診断付き）」。
+- **合流層**（container-v1 §13.3）: グラフと束縛表を**重み取得前に合流**し、合流後表現に対して
+  格納の規則を掛ける（置き場は runtime `format/` の 1 箇所 — Python 側も同じ規則を鏡像で持ち、
+  二重実装しない）:
+  - 量子化 codec は `encoding.scale` が**必須**（既定 1.0 で補完しない — 書き忘れが
+    「量子化前の 1/127 倍の重み」で静かに走るのを塞ぐ・ADR 0019 / 0069）
+  - `int4-sym-g` の `groupSize` は **2 冪かつ 16 以上**で、行長（`numel / shape[rowAxis]`）を
+    割り切る MUST（端数 group を作らない制約が、行境界・group 境界のバイト整列を保証する —
+    ADR 0069 決定 2）。`int8-sym` / `int2-off` / `ternary` は per-channel（`groupSize` = 行長）
+  - scale の形は **rank 2 group 形 `[shape[rowAxis], 行長 / groupSize]`** に統一する
+    （container-v1 §6.1 — v1 の i8 が使っていた keepdim broadcast 形は廃止）。`rowAxis` は
+    宣言に出る（`conv_transpose1d` の重み `[Cin,Cout,K]` だけ 1・他は 0）
+  - 意味論と格納の組は**次の 2 通りだけ**（交差は fail loudly — i32 宣言が f16 のビット列として
+    読まれる沈黙誤値を塞ぐ）: 意味論 `f32` × `f32` / `f16` / `bf16` / 量子化 4 種、
+    意味論 `i32` × `i32`
+- **適格判定と 2 経路**（ADR [0018](decisions/0018-f16-weight-execution.md) /
+  [0019](decisions/0019-i8-weight-execution.md) / [0069](decisions/0069-packed-w4-storage.md)）:
+  意味論はあくまで f32（「格納のみ量子化・計算は f32」— ADR 0006）で、圧縮格納の initializer は
+  **適格判定**で経路が 2 つに分かれる。
   - **適格**（その initializer の消費が `linear` / `conv1d` / `conv2d` / `conv_transpose1d` /
-    `embedding` の**重みスロットだけ**）: 生の f16 ペイロードのまま GPU 常駐し、dequant は
-    カーネル内（`unpack2x16float` で 2 要素/語を展開 — 添字 `i` の値は
-    `unpack2x16float(w[i / 2])[i % 2]`）。VRAM は f32 比 ≈ 1/2。**要素数が奇数のときは末尾
-    2 バイトをゼロ詰め**して 4 バイト整列させる（読み出しは要素数で打ち切るので値に影響しない）。
+    `embedding` の**重みスロットだけ**）: 圧縮 payload のまま GPU 常駐し、dequant はカーネル内。
+    codec ごとの適格 op は台帳の `executableOps`（container-v1 §6.3）が正本 — `int4-sym-g` は
+    linear / embedding / conv1d（`groups == 1`）、`int2-off` / `ternary` は linear / embedding。
   - **適格外**（bias / norm 系の weight / その他の op / 重みスロットと他スロットの混在消費 /
-    消費ゼロ）: **ロード時に CPU で f32 へ展開**する。正しさは保たれるが VRAM 削減はゼロで、
-    縮むのは配信サイズだけ。bias が適格にならないのは ADR 0006 の「bias は常に f32」規則
-    そのもの（低精度適格判定に bias を含めない）。
+    消費ゼロ / `graph.outputs` に載った initializer）: **ロード時に CPU で f32 へ展開**する。
+    正しさは保たれるが VRAM 削減はゼロで、縮むのは配信サイズだけ。bias が適格にならないのは
+    ADR 0006 の「bias は常に f32」規則そのもの（低精度適格判定に bias を含めない）。
   - 内訳は `Session.diagnostics().storage`（GPU 常駐圧縮バイト数 / CPU 展開バイト数）で
-    取得できる — 「f16 指定なのに適格 0MB」を沈黙させないための常設診断（ADR 0006）。
-- **`i8` の実行**（ADR [0019](decisions/0019-i8-weight-execution.md)）: 方式は
-  **per-channel symmetric int8**（zero-point なし）。適格判定・2 経路・診断の枠組みは f16 と
-  **同じ 1 本**で、違うのは格納の詰め方と scale の扱いだけ。
-  - **パッキング**: 1 要素 = 符号付き 8bit。GPU 常駐時は **4 要素を 1 語（u32）へリトル
-    エンディアン順**に詰めた並びとして `array<u32>` で束縛し、`unpack4xI8` で展開する
-    （語 = `w[i / 4]`、レーン = `i % 4` を**平坦添字**から割り出す）。safetensors 上の
-    バイト列は素の I8 のままで、**要素数が 4 の倍数でないときだけ GPU バッファ側で末尾を
-    4 バイト境界までゼロ詰め**する（読み出しは要素数で打ち切るので値に影響しない）。
-    1 バイト要素なのでリーダの整列制約は無く、ファイル内の並び順は末尾側で構わない。
-  - **scale は companion テンソル**（`storage.scale` で**必須**宣言。無ければロード時に
-    fail loudly — 既定 1.0 で補完しない）。F32 で、**重みと同 rank の keepdim broadcast 形**
-    （`torch.amax(..., keepdim=True)` の出力そのもの — 例: linear `[out,in]` に対し
-    `[out,1]`）。実テンソル（他の initializer の `tensor` キー）との名前衝突は拒否する。
-  - **チャネル軸は出力チャネル**: linear / conv1d / conv2d / embedding は **0**、
-    **conv_transpose1d だけ 1**（重み `[Cin,Cout,K]` の転置レイアウト）。GPU 常駐経路では
-    scale を平坦に `wscale[出力チャネル]` と引くので、チャネル軸以外が 1 でない形は
-    Session 構築で落ちる。
-  - **scale の適用位置は「要素ごと」**（読み出し時 dequant — `out = Σ x·(q·s) + bias`）。
-    縮約の外で掛ける形（`(Σ x·q)·s`）は乗算が減るが、CPU 展開とのビット一致を失うので
-    採らない。この形のおかげで**適格経路（GPU）と適格外経路（CPU 展開）はビット単位で
-    同じ値**を出す（`q·s` の f32 丸めが両側とも 1 回）。
-  - VRAM は f32 比 ≈ 1/4（+ scale のオーバヘッド 1% 未満）。診断の
-    `residentCompressedBytes` には**scale バッファのバイト数も加算**する。
-- `initializers[].tensor` は safetensors のテンソルキー。safetensors 側 dtype は
-  `storage.dtype` と一致し（`i32` ↔ safetensors `I32`）、shape は宣言 shape と一致しなければ
-  ならない（ロード時検証）。
+    取得できる — 「圧縮指定なのに適格 0MB」を沈黙させないための常設診断（ADR 0006）。
+- **`f16`**: GPU 常駐時は `unpack2x16float` で 2 要素/語を展開する（添字 `i` の値は
+  `unpack2x16float(w[i / 2])[i % 2]`）。VRAM は f32 比 ≈ 1/2。要素数が奇数のときの末尾詰め物は
+  **書き手が block に焼く**（container-v1 §4.1 — 読み手側の整列分岐は無い）。
+- **`int8-sym`**（ADR 0019）: **per-channel symmetric int8**（zero-point なし・`q ∈ [−127, 127]`）。
+  GPU 常駐時は **4 要素を 1 語（u32）へリトルエンディアン順**に詰めた並びとして `array<u32>` で
+  束縛し、`unpack4xI8` で展開する（語 = `w[i / 4]`、レーン = `i % 4` を**平坦添字**から割り出す）。
+  **scale の適用位置は「要素ごと」**（読み出し時 dequant — `out = Σ x·(q·s) + bias`）。縮約の外で
+  掛ける形（`(Σ x·q)·s`）は乗算が減るが、CPU 展開とのビット一致を失うので採らない。この形の
+  おかげで**適格経路（GPU）と適格外経路（CPU 展開）はビット単位で同じ値**を出す（`q·s` の f32
+  丸めが両側とも 1 回）。VRAM は f32 比 ≈ 1/4（+ scale のオーバヘッド 1% 未満）。診断の
+  `residentCompressedBytes` には**scale バッファのバイト数も加算**する。
+- **`int4-sym-g`**（ADR 0069 決定 2 / 3）: 行方向 group の対称量子化を packed 4bit で持つ
+  （`q ∈ [−7, 7]`・`u = q + 8`・バイト内で要素 `2i` = 下位 nibble）。宣言 shape は**論理形の
+  まま**で、payload は `numel / 2` バイト（要素数が奇数の宣言は bit 総量が byte 境界に乗らないので
+  fail loudly）。展開カーネルは `array<u32>` で束縛する。
+- **`int2-off`**（ADR [0097](decisions/0097-gemma4-qat-integration.md#追記-1--int2-格納と実行の契約2026-09-11)）:
+  論理形は正整数の rank 2 `[N,K]`、K は 16 の倍数。1 バイトに 4 要素を下位 2bit から `u = q + 2`
+  で詰め、整数 `[−2, 1]` を保持する。復元は要素ごとの `fround(q·scale)`。linear の計算は f32
+  のみで、a8 / f16 は明示拒否する。**`ternary`** は値域 `{−1, 0, +1}` を主張する別名 codec で、
+  詰め方・復元・カーネルは `int2-off` と同一（container-v1 §6.3）。
+- **initializer 名は実体の鍵**である。v1 の `initializers[].tensor`（safetensors のテンソル
+  キー）は無く、束縛表が `(グラフ名, initializer 名)` で実体を指す（container-v1 §5）。
+  `initializers[name]` の値は **`{}`**（実体を持つ）か **`{ "shared": true }`**（下）の 2 形だけで、
+  他のキーは未知キーとして fail loudly。エクスポータは名前を**パラメータの FQN**
+  （`model.layers.0.mlp.gate_proj.weight`）と **`const.<sha256 先頭 16 hex>`**（定数 — 内容で
+  重複除去）で付ける。上流 checkpoint の取り込み（ADR 0108 決定 19）と LoRA の対象解決は、
+  この名前を鍵にする。宣言 shape / 意味論 dtype と実体は束縛の突合で一致しなければならない
+  （ロード時検証・不足も余剰も全件列挙で拒否）。
 - **共有 initializer（`shared`）**（ADR [0096](decisions/0096-speculative-decoding.md) 段 2 §1.3）:
-  `tensor` の**代わりに** `{ "shared": { "tensor": <貸し手コンテナのテンソルキー> } }` を書くと、
-  バイトを配布形に持たない宣言になる（実体は貸し手 Session が既に GPU へ載せた重み）。
+  `{ "shared": true }` と書くと、バイトをコンテナに持たない宣言になる（実体は貸し手 Session が
+  既に GPU へ載せた重み）。
 
   ```jsonc
   "initializers": {
-    "target_embed": { "shared": { "tensor": "model.lm_head.weight" }, "storage": { "dtype": "i8" } }
+    "model.lm_head.weight": { "shared": true }
   }
   ```
 
-  - `tensor` と `shared` は**排他**（`shared` を持つ宣言に `tensor` を書くと未知キーで
-    fail loudly）。`values{}` の dtype / shape 宣言は従来どおり**必須**。
-  - `storage.dtype` は宣言（貸し手と一致 MUST）。**`scale` / `group_size` は書かない** —
-    付随実体を持つのは貸し手側だけで、写すと同じ事実が 2 箇所に生える（i8 / i4 の
-    「scale 必須」規則もこの宣言には掛からない）。
-  - コンテナの突合（宣言 ↔ 実テンソルの完全一致・余剰検査）から**外れる**。実体の素性は
-    ロード側の門が見る（同一 device・宣言 shape・格納 dtype・消費席）。
+  - **名前は貸し手グラフの initializer 名と同じ** MUST。借り手はこの名前で
+    `SessionOptions.sharedWeights` から実体を受け取り、models 側は同名で貸し手の
+    `exportWeight` を引く（v1 の `shared.tensor` は要らない — 名前が鍵なので）。
+  - `values{}` の dtype / shape 宣言は従来どおり**必須**。格納（codec / scale / group）は
+    **書かない** — 貸し手の常駐重みが正本で、写すと同じ事実が 2 箇所に生える。
+  - 束縛表の突合集合から**外れる**（container-v1 §5 の借用形 `{ "shared": true }` と対）。実体の
+    素性はロード側の門が見る（同一 device・宣言 shape・消費席・チャネル軸 — 貸し手の codec が
+    借り手の消費 op で実行できること）。
 - **宣言完全性**: 全ての値（inputs・initializers・全ノード出力）はちょうど 1 箇所で宣言される
   — inputs は `inputs[]` で、**initializer と中間値・出力は `values{}` で**。実行時に毎ノード、
   宣言 shape/dtype と照合する。
-- initializer の宣言は**数値次元のみ**（記号次元不可）。意味論 dtype は **f32 / i32** で、
-  **意味論と格納の組は次の 2 通りだけ**（交差は fail loudly — i32 宣言が f16 のビット列として
-  読まれる沈黙誤値を塞ぐ）:
-  - 意味論 `f32` × 格納 `f32` / `f16` / `bf16` / `i8` / `i4` / `i2`
-  - 意味論 `i32` × 格納 `i32`
-
-  bool の initializer は語彙に無い（実測に無く、safetensors の `BOOL` は 1 バイト格納で
+- initializer の宣言は**数値次元のみ**（記号次元不可）。意味論 dtype は **f32 / i32**
+  （格納との組は上の合流層の規則）。bool の initializer は語彙に無い（実測に無く、1 バイト格納は
   4 バイト前提の転送と噛み合わない）。
-- `storage.scale` / `storage.group_size` は `storage.dtype: "i8"` / `"i4"` のときのみ許可。
-  `i8` では `scale` が**必須**（ADR 0019）、`i4` では `scale` と `group_size` の**両方が必須**
-  （ADR 0069 決定 2）。
 - 非有限数の拒否はリテラルだけでなく**値レベル**で行う（`1e999` は JSON として構文有効だが
-  Infinity に丸まるため、パース時 reviver で拒否）。safetensors ヘッダ側の未知キーは許容する
-  （外部フォーマット）— 未知キー拒否はグラフ JSON のみの規則。
+  Infinity に丸まるため、パース時 reviver で拒否）。descriptor 側（束縛表・block 目次）の規則は
+  container-v1 §0 が持つ — こちらも未知キーは fail loudly。
 
 ## shape と次元言語
 
@@ -304,8 +333,8 @@ capability 宣言を加えた非互換改訂。確定範囲を定義し、拡張
   論理長は GenerationContext が持つ。
 - 名前空間は値と別だが、**値名（inputs / initializers / ノード出力 / `values` の宣言）と同名の
   スロットは拒否する** — 別名前空間の同名は「スロット名の欄に値名を書いた / その逆」を検出
-  できなくするだけで表現力を足さない（`storage.scale` のキーを他 initializer の実体と衝突させ
-  ない規則と同じ流儀）。
+  できなくするだけで表現力を足さない（束縛表が scale の block を他 initializer の実体と衝突させ
+  ない規則①〈container-v1 §5〉と同じ流儀）。
 - **「層 × 均一 KV」の前提は無い**: スロットは「KV」を知らない汎用の器で、sliding 層と full 層は
   容量の違う別スロット、KV 共有層は**同一スロット名の参照**で表す（層数・レイアウトの欄は
   作らない）。

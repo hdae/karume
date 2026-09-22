@@ -15,7 +15,7 @@
   うえ**本文に訂正済みの形で反映した**。
 - 掃引 1 本（検収モデル構造）は構造化出力の失敗で欠落 → 単発レッグで補充（§6）。
 - 引用形式は「リポ/相対パス:行 @commit」。カルメ側の要所引用（container.ts / executor.ts /
-  ir-v1.md）はメインセッションが現物再確認済み。
+  ir-v2.md）はメインセッションが現物再確認済み。
 
 ## 1. KV state / GenerationContext の実行モデル（ADR① の根拠）
 
@@ -168,7 +168,7 @@ backing が退役・再構築され、**入れなければ**別 context の KV �
   型・確保・retain で前提 — recipe-builder.ts:318-353）・エクスポータの契約門
   （`len(node.outs) != 1` を明示拒否 — tools/exporter/src/karume/ops.py:1107-1110）にも
   同じ前提が焼かれている**（第 2 巡で判明 — §7）。IR スキーマは複数 outs を許可済み
-  （ir-v1.md）で **IR 仕様改訂が不要な点は維持**だが、変更範囲は contracts / plan /
+  （ir-v2.md）で **IR 仕様改訂が不要な点は維持**だが、変更範囲は contracts / plan /
   executor / recipe / recipe-builder / exporter の **6 点**で「独立小粒」ではない。
   出力 slot ごとに dtype / shape が異なる契約（top-k = 値 f32 + index i32）の設計も
   ADR④ の範囲（第 2 巡の見落とし指摘④ — medium）。
@@ -313,7 +313,7 @@ backing が退役・再構築され、**入れなければ**別 context の KV �
   **侵襲の小さい順に「bit 幅一般化（GGUF/safetensors 型・shape は論理のまま）」と
   「物理 shape 宣言（ORT 型）」の 2 案があり、ADR② はここを比較して選ぶ**（当初の
   「shape 等式を必ず破る」という同定は検証で refuted — §7）。
-  ir-v1 の `storage.group_size` は語彙として予約済み（ir-v1.md:100-104）で席は既にある。
+  ir-v1 の `storage.group_size` は語彙として予約済み（ir-v2.md:100-104）で席は既にある。
 
 ### 4.3 ADR 0019 reopen が明示すべき適用範囲
 
@@ -328,7 +328,7 @@ backing が退役・再構築され、**入れなければ**別 context の KV �
   zero point（対称のみ vs optional 非対称）・準位（16 vs 15）・対象と指標（SBV2 音声 SNR /
   発話長 vs テキスト生成）。棄却基準「発話長の系統的短縮」は**採用済み w8 でも観測されて
   いる**（0029:53 — 198→196 フレーム）ため w4 固有の基準として再利用不可。
-- docs/ir-v1.md:103・limitations.md:146 の「w4 不採用確定」記述は**現行コード
+- docs/ir-v2.md:103・limitations.md:146 の「w4 不採用確定」記述は**現行コード
   （container.ts:290 の groupSize 拒否）と一致しており今は stale ではない** — 0019 reopen が
   裁定された時の同期対象。
 
@@ -502,7 +502,7 @@ ADR 5 本（0066〜0070）を実コード + 参照 clone に対して照合。**
   （ADR 0067 決定 4）。
 - medium: f16 scale の丸めで tiny → 0 / inf（→ 0069 に有限非ゼロ admission）・shard
   フェンス前の明示 submit 要件（→ 0070 決定 3）。partially の残り =
-  「0 本 outs は ir-v1.md 改訂を要する」の明示（→ 0068 決定 1 精密化）。
+  「0 本 outs は ir-v2.md 改訂を要する」の明示（→ 0068 決定 1 精密化）。
 
 ## 8. 一次ソース
 

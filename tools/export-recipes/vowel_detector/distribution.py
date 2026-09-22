@@ -22,7 +22,7 @@
 ## `pipelineConfig` の出どころ
 
 特徴の契約（`sampleRate` / `featureDim` / `classes`）は上流 `feature_config.json` の逐語。
-`maxFrames` は**焼いたグラフの記号次元の上限**で、IR は値域を持たない（`docs/ir-v1.md` の
+`maxFrames` は**焼いたグラフの記号次元の上限**で、IR は値域を持たない（`docs/ir-v2.md` の
 `symbols` は名前だけ）ので配布形にしか無い数になる — SBV2 の `maxTokens` / `maxFrames` と
 同じ持ち方で、台本の定数との一致は `vowel_detector/tests/test_distribution.py` が突き合わせる。
 噛み合っていることは {@link assert_vowel_detector_graph} が実測する。

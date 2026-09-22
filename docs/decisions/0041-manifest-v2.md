@@ -106,7 +106,7 @@ path の基準が乖離）と、モデル列挙が機械可読にならない点
 
 レイヤー分割は DL 性能で**逆効果**と実測で確定した（事前承認の条件「実験がうまくいったら」を
 満たさない）。分割しないので「N shard : 1 グラフ」の非対称も生じず、**グラフ JSON は従来
-どおり safetensors ヘッダの `__metadata__.karume_ir`**（ir-v1.md — 334MB 中 0.085% で置き場を
+どおり safetensors ヘッダの `__metadata__.karume_ir`**（ir-v2.md — 334MB 中 0.085% で置き場を
 動かす動機も無い）。DL の高速化は取得層の **HTTP Range 並列**（cold 3.1× / warm 84 MB/s・
 manifest 無関係）が受け持つ — 別トラックで設計する。
 

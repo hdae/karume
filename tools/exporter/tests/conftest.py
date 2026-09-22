@@ -24,7 +24,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 #: ランタイムパッケージのテスト資産（適合ケース表は TS 実装と共有する）。
 RUNTIME_FIXTURES = REPO_ROOT / "packages" / "runtime" / "tests" / "fixtures"
 #: 次元文法の適合ケース表。TS 実装と Python 実装は**この 1 ファイル**で検証する
-#: （コピーを作ると同期が人手の規律に戻る — docs/ir-v1.md）。
+#: （コピーを作ると同期が人手の規律に戻る — docs/ir-v2.md）。
 DIM_GRAMMAR_PATH = RUNTIME_FIXTURES / "dim-grammar.json"
 DIM_GRAMMAR = json.loads(DIM_GRAMMAR_PATH.read_text(encoding="utf-8"))
 

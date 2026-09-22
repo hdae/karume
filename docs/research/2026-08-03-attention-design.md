@@ -379,7 +379,7 @@ SDPA の `scale` 引数（既定 `1/√D`）から `f32(math.sqrt(scale))` を�
 
 加えて **op 語彙台帳** `docs/op-vocabulary.md` の「分解禁止 11 op → 12 op」更新
 （`attention` が Core ATen 160 に含まれないことは台帳 L17 が既に明記済み）と
-`docs/ir-v1.md` の改訂履歴 1 行、ADR 1 本（0023 想定）。
+`docs/ir-v2.md` の改訂履歴 1 行、ADR 1 本（0023 想定）。
 
 ### 4.2 (ii) エクスポータ側の融合検出
 

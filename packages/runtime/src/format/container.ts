@@ -352,7 +352,7 @@ export const createShardValidator = (graph: IrGraph): ShardValidator => {
         if (initializer.shared !== undefined) continue;
         const where = `initializer '${name}'`;
         // 意味論 dtype と格納 dtype の組（f32 の符号化語彙 / i32 は生の int32）と数値 shape は
-        // parseIrGraph が保証済み（グラフ単体で決まる規則はパーサに一本化 — docs/ir-v1.md）。
+        // parseIrGraph が保証済み（グラフ単体で決まる規則はパーサに一本化 — docs/ir-v2.md）。
         // ここは実テンソルとの突合だけを見る。
         const declared = graph.values[name];
         const expected = STORAGE_ENCODING[initializer.storage.dtype];

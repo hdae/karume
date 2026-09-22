@@ -1,4 +1,4 @@
-"""torch.export 済み ExportedProgram → IR v1 グラフ（docs/ir-v1.md）。
+"""torch.export 済み ExportedProgram → IR v1 グラフ（docs/ir-v2.md）。
 
 入力はキュレーション済み decomp table を通した ExportedProgram（functionalize 済み・
 保存 op は高位のまま）。処理は 3 段:
@@ -73,7 +73,7 @@ from karume.shapes import assert_graph_shapes
 I32_MIN = -(2**31)
 I32_MAX = 2**31 - 1
 
-#: 焼いた定数の torch dtype → IR の格納 dtype（docs/ir-v1.md「値と型」）。
+#: 焼いた定数の torch dtype → IR の格納 dtype（docs/ir-v2.md「値と型」）。
 #:
 #: f32 は「f32 値の符号化」語彙の素通し、`i32` は生の int32（ADR 0010 の明示的な例外）。
 #: i64 はここに来る前に normalize_boundary_tensor が i32 へ落とす。ここに無い dtype
@@ -462,7 +462,7 @@ class Converter:
             return name
         if self.symbols_assigned:
             # 入力 shape に現れないシンボルはランタイムが束縛できない（束縛は入力 shape の
-            # 次元位置からしか取らない — docs/ir-v1.md）。IR に載せれば実行不能になる。
+            # 次元位置からしか取らない — docs/ir-v2.md）。IR に載せれば実行不能になる。
             raise NotImplementedError(
                 f"入力 shape に現れないシンボル {internal} が値に現れた"
                 f"（入力由来={self.sym_names}）— ランタイムが束縛できないため IR に載せられない"
@@ -851,7 +851,7 @@ class Converter:
         # 宣言するのは実際に shape へ出たシンボルだけ（静的グラフは []）。使わないシンボルを
         # 載せるとランタイムが「束縛する入力が無い」で落ちる。
         self.graph.symbols = list(self.sym_names.values())
-        # MUST: 出力名は**集合**（docs/ir-v1.md の outputs 欄・受理側 `verify.parse_ir_graph` が
+        # MUST: 出力名は**集合**（docs/ir-v2.md の outputs 欄・受理側 `verify.parse_ir_graph` が
         # 重複を拒否する）。重複は ①同じ値を 2 度返す forward ②構造同一の 2 出力を `_emit` の
         # CSE が 1 本へ畳んだ形、の 2 経路で出る。検証を挟まない `emit.write_model` の直呼びは
         # 受理側の門を通らないので、「書けたが読めない」配布形が残る — 組み立ての出口で落とす。
@@ -912,7 +912,7 @@ class Converter:
         if node.name in self.user_inputs:
             val = self._meta_val(node)
             # MUST: 入力は inputs[] だけで宣言する（values{} にも書くと IR v1 の
-            # 「宣言はちょうど 1 箇所」に反して二重宣言で拒否される — docs/ir-v1.md）。
+            # 「宣言はちょうど 1 箇所」に反して二重宣言で拒否される — docs/ir-v2.md）。
             self.graph.inputs.append(
                 IrInput(
                     name=node.name,

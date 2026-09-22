@@ -32,7 +32,7 @@ llama.cpp WebGPU が実運用している（調査 §4.1）。
   素朴 RTN へ帰属させた 0006:45 の側が不正確 — 調査 §7 wt LB-6 の検証済み補正）。
 - 0019 のその他（i8 経路・±127 対称・平坦添字・タイル読み込み時 dequant・fake-quant 規律）
   は**本 ADR の土台としてそのまま有効**。
-- 派生同期（実装波で）: ir-v1.md「group_size は実行経路が無い」・limitations の w4 項・
+- 派生同期（実装波で）: ir-v2.md「group_size は実行経路が無い」・limitations の w4 項・
   container の groupSize 拒否。
 
 ### 2. 格納の表現 = bit 幅一般化（shape は論理のまま — 裁定 3a）

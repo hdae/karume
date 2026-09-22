@@ -1,7 +1,7 @@
 # Karume exporter (core)
 
 Python tooling that lowers `torch.export`-ed models into Karume's **IR v1**
-([../../docs/ir-v1.md](../../docs/ir-v1.md)). Managed with uv; CPU-only torch (no GPU required).
+([../../docs/ir-v2.md](../../docs/ir-v2.md)). Managed with uv; CPU-only torch (no GPU required).
 
 The distribution form is a **graph shard followed by a sequence of weight shards**, always numbered
 `-NNNNN-of-NNNNN`. The leading shard carries the graph JSON under the `__metadata__` key `karume_ir`

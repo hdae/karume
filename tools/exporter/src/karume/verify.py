@@ -1,4 +1,4 @@
-"""IR v1 の受理規則を Python 側でも全部見る（docs/ir-v1.md）。
+"""IR v1 の受理規則を Python 側でも全部見る（docs/ir-v2.md）。
 
 TS 側の正本は packages/runtime/src/format/ir.ts（グラフ単体の規則）・
 packages/runtime/src/format/container.ts（配布形との
@@ -109,7 +109,7 @@ STORAGE_ENCODING = {
     "i32": "I32",
 }
 
-#: initializer の意味論 dtype → 許される格納 dtype（docs/ir-v1.md「値と型」）。
+#: initializer の意味論 dtype → 許される格納 dtype（docs/ir-v2.md「値と型」）。
 #: MUST: 交差を許さない — `i32` 宣言の initializer が f16 のビット列として読まれる
 #: 沈黙誤値になる。bool の initializer は語彙に無い。
 INITIALIZER_STORAGE = {"f32": ("f32", "f16", "bf16", "i8", "i4", "i2"), "i32": ("i32",)}
@@ -123,7 +123,7 @@ def parse_graph_json(text: str) -> Any:
 
     Python の json は `Infinity` / `NaN` リテラルを既定で受理するが、ブラウザの
     JSON.parse は落ちる。加えて `1e999` は構文として有効なまま Infinity へ丸まるので、
-    リテラル名だけでなく**値レベル**で弾く（docs/ir-v1.md）。
+    リテラル名だけでなく**値レベル**で弾く（docs/ir-v2.md）。
     """
 
     def reject_constant(literal: str) -> float:

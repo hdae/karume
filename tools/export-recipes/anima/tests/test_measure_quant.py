@@ -199,7 +199,7 @@ class TestMethodsAreNotStacked:
 
 
 class TestSizeProjection:
-    """表に載る bpw の出どころ（`docs/ir-v1.md` の i4 格納形と OCP MX の逐語）。"""
+    """表に載る bpw の出どころ（`docs/ir-v2.md` の i4 格納形と OCP MX の逐語）。"""
 
     @pytest.mark.parametrize("name", ["rtn-i4-g32", "nf4"])
     def test_group_absmax_methods_land_on_five_bits(self, name):

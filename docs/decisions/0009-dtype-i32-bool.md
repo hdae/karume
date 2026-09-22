@@ -6,7 +6,7 @@
 
 ## 決定
 
-- **意味論 i32 / bool の実行を解禁する**（M1-P2）。IR の宣言語彙（ir-v1.md）には両者とも
+- **意味論 i32 / bool の実行を解禁する**（M1-P2）。IR の宣言語彙（ir-v2.md）には両者とも
   既在 — 変えるのは実行系: 入力転送（`RUNTIME_SUPPORT.io`）、op 契約の dtype 集合、
   elementwise codegen の要素型パラメタ化。**要素型は WGSL 正準化キーに含める**
   （codegen 決定性の不変条件はそのまま）。

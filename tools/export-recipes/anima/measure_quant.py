@@ -896,13 +896,13 @@ W4_LATENTS_FILE = "w4_latents.safetensors"
 #: 16 centroid の 1 次元 k-means には桁で足りる（適用は常に全量 — core の `fit_stride`）。
 W4_KMEANS_FIT_BUDGET = 20_000_000
 
-# サイズ試算の bit 幅（格納規則の逐語）。出典は `docs/ir-v1.md` の `i4` 格納形（scale は
+# サイズ試算の bit 幅（格納規則の逐語）。出典は `docs/ir-v2.md` の `i4` 格納形（scale は
 # **F32**・group ごと 1 個）と OCP Microscaling Formats v1.0（MX の共有 scale は E8M0 =
 # 指数 1 バイト）。k-means は格納形を持たない測定専用方式なので、**表のコストを込みで**数える。
 
 #: 4bit 格子のペイロード（全方式共通 — 比較しているのは「格子の張り方」であって bit 数ではない）。
 W4_PAYLOAD_BITS = 4.0
-#: group scale の bit 幅（`i4` の格納は F32 の group scale が MUST — `docs/ir-v1.md`）。
+#: group scale の bit 幅（`i4` の格納は F32 の group scale が MUST — `docs/ir-v2.md`）。
 W4_F32_SCALE_BITS = 32.0
 #: MXFP4 の共有 scale は E8M0（指数 1 バイト）。
 W4_MX_SCALE_BITS = 8.0

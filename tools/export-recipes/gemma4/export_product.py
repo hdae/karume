@@ -113,7 +113,7 @@ ROW_SYMBOL = "R"
 #: k の上限が sliding ring の余裕（{@link decode.SLIDING_SLACK_ROWS} — 棄却されうる行数の上限）
 #: なので R ≤ 余裕 + 1。余裕と切り離して決めると「棄却行が live 窓を潰さない」設計が成立しない。
 #:
-#: NOTE: IR の `symbols` は名前の列だけで上限を持たない（`docs/ir-v1.md`）ので、この数は
+#: NOTE: IR の `symbols` は名前の列だけで上限を持たない（`docs/ir-v2.md`）ので、この数は
 #: **torch の guard を張る範囲**にしか効かない。ランタイム側の上限は context の `slidingSlack`
 #: （deferred run の `queryLength ≤ slidingSlack + 1`）が持つ。
 ROW_SYM_MAX = decode.SLIDING_SLACK_ROWS + 1

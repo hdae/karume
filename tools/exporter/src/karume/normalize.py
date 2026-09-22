@@ -1315,7 +1315,7 @@ def _select_to_squeeze(graph: Graph, stats: Counter) -> None:
 def _split_to_slices(graph: Graph, stats: Counter) -> None:
     """`split_with_sizes(x, sizes, dim)` + `getitem` → `slice` の列（ADR 0014）。
 
-    IR に多出力 op は無い（ノードは単一出力 — docs/ir-v1.md）ので、分割は取り出し口ごとの
+    IR に多出力 op は無い（ノードは単一出力 — docs/ir-v2.md）ので、分割は取り出し口ごとの
     slice に開く。実測は ConvFlow / ResidualCoupling の `torch.split(x, [half]*2, 1)`
     （recon §2）で、消費側は必ず `getitem` の定数添字。
 

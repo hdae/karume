@@ -149,7 +149,7 @@ SKIP_OPS で処理済みの `aten.sym_size.int` / `aten.alias.default` も、次
    整数バッファ読みが要る。添字は畳み込み定数（後述）由来なので、**i32 の initializer**
    が必要になる — 現状 `convert._add_const`（convert.py:302）と
    `_materialize_initializer`（convert.py:453）は意味論 f32 のみ、
-   `docs/ir-v1.md:55` も「initializer の意味論 dtype は f32 のみ（整数重みの語彙は将来の
+   `docs/ir-v2.md:55` も「initializer の意味論 dtype は f32 のみ（整数重みの語彙は将来の
    改訂）」と明記。相対位置表を焼き込む方針を採るなら **IR v1 の改訂が必須**。実測でも
    lifted な i64 スカラ定数（バケット表の 0）が畳み込み経路でこの制約に当たる。
 8. **mask 適用の bool 経路**: `mul`（i64 × i64 → i64[1,1,T,T] の mask 外積）→
@@ -344,7 +344,7 @@ conv1d, bmm, gather, +波0①なら sym_prefix_slice）。新規 WGSL カーネ�
 - repo `src/ops.ts` / `src/runtime/plan.ts` / `src/runtime/executor.ts` /
   `src/codegen/elementwise.ts` / `src/codegen/reduce.ts` / `src/kernels/matmul.ts` —
   dtype ギャップの具体化に読んだ実行系
-- repo `docs/ir-v1.md` / `docs/op-vocabulary.md` / `docs/decisions/0007-op-vocabulary.md`
+- repo `docs/ir-v2.md` / `docs/op-vocabulary.md` / `docs/decisions/0007-op-vocabulary.md`
   / `docs/limitations.md` / `.claude/ACTIVE_DESIGN.md`
 - 実測スクリプト: セッション作業域（揮発）。未対応 op 全件列挙+分類+dtype ヒストグラム、
   全ノードの dtype/shape 付きダンプ、ハンドラはあるが変換で落ちる形の洗い出しの3本。

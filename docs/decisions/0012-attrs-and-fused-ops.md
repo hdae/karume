@@ -13,7 +13,7 @@
 - **M0 の「全 op attrs 空」を撤去**する。契約テーブル（TS `packages/runtime/src/ops.ts` / Python
   `karume/ops.py`）に op ごとの attrs スキーマ（許容キー + 型 + 値域）を持たせ、
   未知キー・契約外値は従来どおり fail loudly。attrs の意味は契約テーブルが正本で、
-  ir-v1.md には器（op ごとの契約検査）だけを残す。
+  ir-v2.md には器（op ごとの契約検査）だけを残す。
 - **エクスポータの保存（分解抑止）リストを gelu のみ → ADR 0007 の 9 op へ拡張**する
   （linear / layer_norm / softmax / gelu / conv1d / conv2d / conv_transpose1d / embedding /
   masked_fill）。カーネル実装は実測グラフに出るものだけ（conv2d / conv_transpose1d は
@@ -27,7 +27,7 @@
   - レイアウト系（ADR 0011）: `reshape` / `permute`（dims）/ `expand` / `slice`
   - `cast`（to）/ `bitwise_not`（ADR 0009）/ `sym_prefix_slice`（ADR 0010）
 - `masked_fill` の埋め値 −3.4028234663852886e+38（f32 最小有限値）は非有限値拒否
-  （ir-v1.md）に抵触しないが、**JSON 往復で ulp 不変**であることをテストで固定する。
+  （ir-v2.md）に抵触しないが、**JSON 往復で ulp 不変**であることをテストで固定する。
 
 ## 帰結
 

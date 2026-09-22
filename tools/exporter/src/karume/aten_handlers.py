@@ -34,7 +34,7 @@ from karume.ops import GRU_SCAN_OP, GRU_SCAN_REVERSE_OP, STRIDED_RANK, static_qu
 
 aten = torch.ops.aten
 
-#: 意味論 dtype（docs/ir-v1.md「値と型」）。ここに無い torch dtype は fail loudly。
+#: 意味論 dtype（docs/ir-v2.md「値と型」）。ここに無い torch dtype は fail loudly。
 #:
 #: MUST: torch 既定の整数 int64 は **i32 として宣言する**（ADR 0009 の境界正規化）。
 #: WebGPU に 64bit 整数バッファが無いので、64bit の無い世界への変換点をエクスポータ

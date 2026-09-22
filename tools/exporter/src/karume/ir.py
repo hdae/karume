@@ -1,4 +1,4 @@
-"""IR v1（docs/ir-v1.md）のグラフ表現と JSON 直列化。
+"""IR v1（docs/ir-v2.md）のグラフ表現と JSON 直列化。
 
 TS 側の型は packages/runtime/src/format/ir.ts。ここは「エクスポータが組み立てる側」の器で、
 規則の検査は verify.py が受け持つ（組み立てと検査を同じ関数に混ぜると、
@@ -169,7 +169,7 @@ class IrGraph:
         """nodes で実際に使われる op 集合。
 
         MUST: 独立フィールドとして持たない — requires.ops と nodes の一致は IR v1 の
-        検査規則（docs/ir-v1.md）であり、二重管理すると「宣言だけ更新して実体が古い」
+        検査規則（docs/ir-v2.md）であり、二重管理すると「宣言だけ更新して実体が古い」
         グラフを作れてしまう。常に nodes から導出する。
         """
         return sorted({node.op for node in self.nodes})
@@ -198,7 +198,7 @@ class IrGraph:
     def to_json(self) -> str:
         """グラフ JSON 文字列。
 
-        allow_nan=False は必須（docs/ir-v1.md）— NaN / Infinity は JSON の標準リテラルに
+        allow_nan=False は必須（docs/ir-v2.md）— NaN / Infinity は JSON の標準リテラルに
         無く、ブラウザの JSON.parse が落ちる。受理集合をランタイム側に揃えるため、
         書き出しの時点で失敗させる。
         """

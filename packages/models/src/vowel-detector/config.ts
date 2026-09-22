@@ -23,7 +23,7 @@
  *
  * ## MUST: `minFrames` / `maxFrames` は配布形が宣言する運用範囲（TS 側に定数を持たない）
  *
- * グラフの時間軸は記号なので、**IR は値域を持たない**（`docs/ir-v1.md` の `symbols` は名前の
+ * グラフの時間軸は記号なので、**IR は値域を持たない**（`docs/ir-v2.md` の `symbols` は名前の
  * 列挙だけ）。焼くときに `Dim(min=…, max=…)` で宣言した記号 `T`（20ms 格子）の値域を
  * **入力側の単位（10ms フレーム）へ直したもの**を配布形から受け、`detect` が特徴抽出の直後に
  * 両側とも落とす（正本は `tools/export-recipes/vowel_detector/distribution.py`）。ここに既定値

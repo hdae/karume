@@ -76,7 +76,7 @@ const session = await prepared.createSession(gpu, weightShards);
 ## Documentation
 
 - [Repository](https://github.com/hdae/karume) — overview and examples
-- [docs/ir-v1.md](https://github.com/hdae/karume/blob/main/docs/ir-v1.md) — the IR format
+- [docs/ir-v2.md](https://github.com/hdae/karume/blob/main/docs/ir-v2.md) — the IR format
 - [docs/op-vocabulary.md](https://github.com/hdae/karume/blob/main/docs/op-vocabulary.md) — the
   operator vocabulary
 - [docs/decisions/](https://github.com/hdae/karume/tree/main/docs/decisions) — architecture
