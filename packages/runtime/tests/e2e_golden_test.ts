@@ -15,7 +15,7 @@ import { compareTensors, formatAllclose, type Tolerance } from "../src/reference
 import { ENVIRONMENT } from "./helpers/environment.ts";
 import { ioTensor } from "./helpers/golden-io.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
-import { openResults } from "./helpers/results.ts";
+import { type Measurement, openResults } from "./helpers/results.ts";
 import { readShard, resolveShards, streamShards } from "./helpers/shard-files.ts";
 
 /**
@@ -62,7 +62,7 @@ const GOLDEN_TOLERANCE: Tolerance = { atol: 1e-6, rtol: 1e-5 };
  * 1. Karume 独自基準（{@link GOLDEN_TOLERANCE}・全出力共通）で通れば **pass**。
  * 2. 落ちた出力にこの機の `spec` があればそれで測り直し、通れば **pass + warning** — 結果 JSON
  *    （`outputs/verify/<環境キー>/<日付>_golden/results.json`）の `note` に
- *    「どの出力が独自基準を超え、どの仕様帯で受理したか」が残る。
+ *    「どの出力を仕様帯で受理したか」が、`measurements` にその実測と受理に使った帯が残る。
  * 3. この機の `spec` が無い / `spec` でも落ちるなら **fail**（メッセージは従来どおり）。
  *
  * 独自基準は「従来この値で通っていた」を見失わないための目安であって仕様上の根拠は無く、
@@ -172,8 +172,10 @@ for (const model of MODELS) {
     ignore: !GPU_AVAILABLE,
     fn: async () => {
       const startedAt = performance.now();
-      /** Karume 独自基準を超えたが仕様帯で受理した出力（結果 JSON の note になる）。 */
+      /** Karume 独自基準を超えたが仕様帯で受理した出力名（結果 JSON の note になる）。 */
       const accepted: string[] = [];
+      /** 出力ごとの実測（合格した回も残す — 判定には使わない）。 */
+      const measurements: Measurement[] = [];
       /** 仕様帯でも受からなかった出力のメッセージ（1 本目でテストを落とす）。 */
       const failures: string[] = [];
       try {
@@ -217,22 +219,35 @@ for (const model of MODELS) {
             const expected = ioTensor(io, view, declared);
             // f32 は allclose、i32 / bool は厳密一致（整数演算に近似の余地は無い）
             const karume = compareTensors(outputs[name], expected, GOLDEN_TOLERANCE);
-            if (karume.pass) return;
             // 1 段目を落ちた出力だけが 2 段目（WGSL 仕様帯）へ来る。受かれば pass + warning。
-            const spec = specTolerance(model, name);
+            const spec = karume.pass ? undefined : specTolerance(model, name);
             if (spec === undefined) {
-              failures.push(`${where}: ${formatAllclose(karume)}`);
+              // 2 段目が無い（1 段目で受かった / この機に行が無い）= 1 段目が決着の段。
+              measurements.push({
+                output: name,
+                maxAbs: karume.maxAbsError,
+                maxRel: karume.maxRelError,
+                tolerance: GOLDEN_TOLERANCE,
+                stage: "karume",
+              });
+              if (!karume.pass) failures.push(`${where}: ${formatAllclose(karume)}`);
               return;
             }
             const report = compareTensors(outputs[name], expected, spec);
+            // 実測（maxAbs / maxRel）は帯に依らないので 2 段目の報告をそのまま採る。
+            measurements.push({
+              output: name,
+              maxAbs: report.maxAbsError,
+              maxRel: report.maxRelError,
+              tolerance: spec,
+              stage: "spec",
+            });
             if (!report.pass) {
               failures.push(`${where}: ${formatAllclose(report)}`);
               return;
             }
-            accepted.push(
-              `${name}: maxAbs=${karume.maxAbsError} maxRel=${karume.maxRelError} ` +
-                `（仕様帯 atol=${spec.atol} で受理）`,
-            );
+            // 数値は measurements が持つので、note は受理した出力名だけにする（二重に持たない）。
+            accepted.push(name);
           });
         } finally {
           await session.dispose();
@@ -245,8 +260,11 @@ for (const model of MODELS) {
           id: model,
           status: "fail",
           elapsedMs: Math.round(performance.now() - startedAt),
-          note: [...accepted, `例外: ${cause instanceof Error ? cause.message : String(cause)}`]
-            .join("; "),
+          note: [
+            ...(accepted.length === 0 ? [] : [`仕様帯で受理: ${accepted.join(", ")}`]),
+            `例外: ${cause instanceof Error ? cause.message : String(cause)}`,
+          ].join("; "),
+          measurements,
         });
         throw cause;
       }
@@ -255,7 +273,8 @@ for (const model of MODELS) {
         id: model,
         status: failures.length === 0 ? "pass" : "fail",
         elapsedMs: Math.round(performance.now() - startedAt),
-        ...(accepted.length === 0 ? {} : { note: accepted.join("; ") }),
+        ...(accepted.length === 0 ? {} : { note: `仕様帯で受理: ${accepted.join(", ")}` }),
+        measurements,
       });
       assert(failures.length === 0, failures[0]);
     },

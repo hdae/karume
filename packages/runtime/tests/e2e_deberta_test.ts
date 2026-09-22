@@ -41,6 +41,7 @@ import { acquireGpu, parseSafetensors, prepareModel, type Tensor } from "../mod.
 import { compareTensors, formatAllclose, type Tolerance } from "../src/reference/allclose.ts";
 import { ioTensor } from "./helpers/golden-io.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { type Measurement, openResults } from "./helpers/results.ts";
 import {
   modelPresent,
   readShard,
@@ -260,6 +261,14 @@ Deno.test({
   },
 });
 
+/**
+ * 決着と実測の置き場（`outputs/verify/<環境キー>/<日付>_deberta-golden/` — 消して安全）。
+ *
+ * 系列名を `<family>-golden` にするのは、models 側の e2e が素の family 名で同じ根へ書くため
+ * （同じ席に 2 モジュールが書くと互いの `cases` を上書きする）。
+ */
+const results = openResults("deberta-golden");
+
 for (const variant of VARIANTS) {
   /** 登録時点で必要なので同期列挙する（Deno.test の ignore 判定と同じ理由）。 */
   const files = goldenFiles(variant.root);
@@ -297,101 +306,130 @@ for (const variant of VARIANTS) {
 
   for (const file of files) {
     const caseName = caseNameOf(file);
+    /** ケース ID（variant が違えば同じケース名があるので組で持つ）。 */
+    const caseId = `${variant.name}/${caseName}`;
     Deno.test({
       name: `DeBERTa golden 突合: ${variant.name} / ${caseName}（実 GPU / torch CPU 期待値）`,
       ignore: !available || !GPU_AVAILABLE,
       fn: async () => {
-        const shards = resolveShards(new URL(MODEL_FILE, variant.root));
-        const [graphShard, ioBytes] = await Promise.all([
-          readShard(shards[0]),
-          readBuffer(variant.root, file),
-        ]);
-        const parsed = prepareModel(graphShard);
-        const io = parseSafetensors(ioBytes);
-
-        // 出力の本数で variant を見分ける（配布形 1 本出しと検証用 25 本出しの取り違えは
-        // shape が同じで数値にも出ない — 上の `outputs` の MUST）。
-        assertEquals(
-          parsed.graph.outputs.length,
-          variant.outputs,
-          `${variant.name}: graph.outputs の本数`,
-        );
-
-        // 系列と資産の格納 dtype が一致する（root 取り違え / 圧縮の掛け忘れの唯一の検出器
-        // — 上の `compressedStorage` の MUST）。「現れた圧縮 dtype の集合」が宣言とちょうど
-        // 一致することを見る（本数ではなく集合で見るのは、i8 系列に f16 資産が混ざる形を
-        // 「圧縮が 1 本以上ある」で通さないため）。
-        // NOTE: `i32` 格納（記号依存定数 — ADR 0010）は圧縮ではないのでここでは数えない。
-        const compressed = [
-          ...new Set(
-            Object.values(parsed.graph.initializers)
-              .map((initializer) => initializer.storage.dtype)
-              .filter((dtype) => dtype === "f16" || dtype === "i8"),
-          ),
-        ].sort();
-        assertEquals(
-          compressed,
-          variant.compressedStorage === undefined ? [] : [variant.compressedStorage],
-          `${variant.name}: 圧縮格納 dtype の集合が宣言と食い違う`,
-        );
-        // i8 は companion scale が無いと値が復元できない（ADR 0019）。宣言と実体の両方を見る
-        // — 宣言だけならキーが実在しない形が、実体だけなら別の重みの scale を読む形が通る。
-        if (variant.compressedStorage === "i8") {
-          // 実体は shard 列のどこかに居るので、名前の和で見る（どの shard に居るかまでは
-          // ここの関心ではない — co-shard 契約は container の shard 進行検証が持つ）。
-          const present = await shardTensorNames(shards);
-          for (const [name, initializer] of Object.entries(parsed.graph.initializers)) {
-            if (initializer.storage.dtype !== "i8") continue;
-            const scale = initializer.storage.scale;
-            assert(scale !== undefined, `${variant.name}: '${name}' に scale 宣言が無い`);
-            assert(
-              present.has(scale),
-              `${variant.name}: '${name}' の scale '${scale}' が資産に無い`,
-            );
-          }
-        }
-
-        // io の全テンソルがグラフの入出力とちょうど対応する（余りも欠けも無い）。
-        const expectedKeys = [
-          ...parsed.graph.inputs.map((spec) => `input.${spec.name}`),
-          ...parsed.graph.outputs.map((_, index) => `output.${index}`),
-        ].sort();
-        assertEquals([...io.tensors.keys()].sort(), expectedKeys, `${file} のテンソルキー`);
-
-        // 記号次元 T は golden の入力 shape の実長から束縛される（明示 bindings を渡さない）。
-        // ケースごとに T が違う（11 / 26 / 35 / 16）ので、宣言上限 Tmax = 512 に依存した実装
-        // （プランを Tmax で組む・相対位置表を Tmax で焼く等）はここで値か shape が壊れる。
-        const inputs: Record<string, Tensor> = {};
-        for (const spec of parsed.graph.inputs) {
-          const view = io.tensors.get(`input.${spec.name}`);
-          assert(view !== undefined, `input.${spec.name} が ${file} に無い`);
-          inputs[spec.name] = ioTensor(io, view, spec.dtype);
-        }
-
-        const gpu = await acquireGpu();
-        const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
+        const startedAt = performance.now();
+        /** 出力ごとの実測（合格した回も残す — 判定には使わない）。 */
+        const measurements: Measurement[] = [];
         try {
-          const outputs = await session.run(inputs);
-          assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());
+          const shards = resolveShards(new URL(MODEL_FILE, variant.root));
+          const [graphShard, ioBytes] = await Promise.all([
+            readShard(shards[0]),
+            readBuffer(variant.root, file),
+          ]);
+          const parsed = prepareModel(graphShard);
+          const io = parseSafetensors(ioBytes);
 
-          parsed.graph.outputs.forEach((name, index) => {
-            const view = io.tensors.get(`output.${index}`);
-            assert(view !== undefined, `output.${index} が ${file} に無い`);
-            const where = `${variant.name}/${caseName} output.${index} ('${name}')`;
-            const declared = parsed.graph.values[name].dtype;
-            assertEquals(outputs[name].shape, view.shape, `${where}: shape`);
-            assertEquals(outputs[name].dtype, declared, `${where}: dtype`);
-            const report = compareTensors(
-              outputs[name],
-              ioTensor(io, view, declared),
-              variant.tolerance,
-            );
-            assert(report.pass, `${where}: ${formatAllclose(report)}`);
+          // 出力の本数で variant を見分ける（配布形 1 本出しと検証用 25 本出しの取り違えは
+          // shape が同じで数値にも出ない — 上の `outputs` の MUST）。
+          assertEquals(
+            parsed.graph.outputs.length,
+            variant.outputs,
+            `${variant.name}: graph.outputs の本数`,
+          );
+
+          // 系列と資産の格納 dtype が一致する（root 取り違え / 圧縮の掛け忘れの唯一の検出器
+          // — 上の `compressedStorage` の MUST）。「現れた圧縮 dtype の集合」が宣言とちょうど
+          // 一致することを見る（本数ではなく集合で見るのは、i8 系列に f16 資産が混ざる形を
+          // 「圧縮が 1 本以上ある」で通さないため）。
+          // NOTE: `i32` 格納（記号依存定数 — ADR 0010）は圧縮ではないのでここでは数えない。
+          const compressed = [
+            ...new Set(
+              Object.values(parsed.graph.initializers)
+                .map((initializer) => initializer.storage.dtype)
+                .filter((dtype) => dtype === "f16" || dtype === "i8"),
+            ),
+          ].sort();
+          assertEquals(
+            compressed,
+            variant.compressedStorage === undefined ? [] : [variant.compressedStorage],
+            `${variant.name}: 圧縮格納 dtype の集合が宣言と食い違う`,
+          );
+          // i8 は companion scale が無いと値が復元できない（ADR 0019）。宣言と実体の両方を見る
+          // — 宣言だけならキーが実在しない形が、実体だけなら別の重みの scale を読む形が通る。
+          if (variant.compressedStorage === "i8") {
+            // 実体は shard 列のどこかに居るので、名前の和で見る（どの shard に居るかまでは
+            // ここの関心ではない — co-shard 契約は container の shard 進行検証が持つ）。
+            const present = await shardTensorNames(shards);
+            for (const [name, initializer] of Object.entries(parsed.graph.initializers)) {
+              if (initializer.storage.dtype !== "i8") continue;
+              const scale = initializer.storage.scale;
+              assert(scale !== undefined, `${variant.name}: '${name}' に scale 宣言が無い`);
+              assert(
+                present.has(scale),
+                `${variant.name}: '${name}' の scale '${scale}' が資産に無い`,
+              );
+            }
+          }
+
+          // io の全テンソルがグラフの入出力とちょうど対応する（余りも欠けも無い）。
+          const expectedKeys = [
+            ...parsed.graph.inputs.map((spec) => `input.${spec.name}`),
+            ...parsed.graph.outputs.map((_, index) => `output.${index}`),
+          ].sort();
+          assertEquals([...io.tensors.keys()].sort(), expectedKeys, `${file} のテンソルキー`);
+
+          // 記号次元 T は golden の入力 shape の実長から束縛される（明示 bindings を渡さない）。
+          // ケースごとに T が違う（11 / 26 / 35 / 16）ので、宣言上限 Tmax = 512 に依存した実装
+          // （プランを Tmax で組む・相対位置表を Tmax で焼く等）はここで値か shape が壊れる。
+          const inputs: Record<string, Tensor> = {};
+          for (const spec of parsed.graph.inputs) {
+            const view = io.tensors.get(`input.${spec.name}`);
+            assert(view !== undefined, `input.${spec.name} が ${file} に無い`);
+            inputs[spec.name] = ioTensor(io, view, spec.dtype);
+          }
+
+          const gpu = await acquireGpu();
+          const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
+          try {
+            const outputs = await session.run(inputs);
+            assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());
+
+            parsed.graph.outputs.forEach((name, index) => {
+              const view = io.tensors.get(`output.${index}`);
+              assert(view !== undefined, `output.${index} が ${file} に無い`);
+              const where = `${variant.name}/${caseName} output.${index} ('${name}')`;
+              const declared = parsed.graph.values[name].dtype;
+              assertEquals(outputs[name].shape, view.shape, `${where}: shape`);
+              assertEquals(outputs[name].dtype, declared, `${where}: dtype`);
+              const report = compareTensors(
+                outputs[name],
+                ioTensor(io, view, declared),
+                variant.tolerance,
+              );
+              measurements.push({
+                output: name,
+                maxAbs: report.maxAbsError,
+                maxRel: report.maxRelError,
+                tolerance: variant.tolerance,
+                stage: "karume",
+              });
+              assert(report.pass, `${where}: ${formatAllclose(report)}`);
+            });
+          } finally {
+            await session.dispose();
+            gpu.destroy();
+          }
+        } catch (cause) {
+          // 決着は投げる前に残す（決着の無いまま抜けると、この席には前回の走行の結果が居座る）。
+          await results.record({
+            id: caseId,
+            status: "fail",
+            elapsedMs: Math.round(performance.now() - startedAt),
+            measurements,
           });
-        } finally {
-          await session.dispose();
-          gpu.destroy();
+          throw cause;
         }
+        await results.record({
+          id: caseId,
+          status: "pass",
+          elapsedMs: Math.round(performance.now() - startedAt),
+          measurements,
+        });
       },
     });
   }

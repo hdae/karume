@@ -51,6 +51,7 @@ import { acquireGpu, parseSafetensors, prepareModel, type Tensor } from "../mod.
 import { compareTensors, formatAllclose, type Tolerance } from "../src/reference/allclose.ts";
 import { ioTensor } from "./helpers/golden-io.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { type Measurement, openResults } from "./helpers/results.ts";
 import { modelPresent, readShard, resolveShards, streamShards } from "./helpers/shard-files.ts";
 
 /**
@@ -408,80 +409,117 @@ Deno.test({
   },
 });
 
+/**
+ * 決着と実測の置き場（`outputs/verify/<環境キー>/<日付>_irodori-golden/` — 消して安全）。
+ *
+ * 系列名を `<family>-golden` にするのは、models 側の e2e（`irodori`）が同じ根へ書くため
+ * （同じ席に 2 モジュールが書くと互いの `cases` を上書きする）。
+ */
+const results = openResults("irodori-golden");
+
 for (const target of TARGETS) {
   for (const caseName of discoverCases(SERIES_ROOT, target)) {
+    /** ケース ID（ターゲットが違えば同じケース名があるので組で持つ）。 */
+    const caseId = `${target}/${caseName}`;
     Deno.test({
       name: `Irodori golden 突合: ${target} / ${caseName}（実 GPU / torch CPU 期待値）`,
       ignore: !AVAILABLE || !GPU_AVAILABLE,
       fn: async () => {
-        const ioFile = `${IO_PREFIX}${caseName}${IO_SUFFIX}`;
-        const shards = resolveShards(modelUrl(target));
-        const [graphShard, ioBytes] = await Promise.all([
-          readShard(shards[0]),
-          readBuffer(SERIES_ROOT, target, ioFile),
-        ]);
-        const parsed = prepareModel(graphShard);
-        const io = parseSafetensors(ioBytes);
-        // Object.hasOwn で見る（素の `TOLERANCES[target]` はプロトタイプ由来のキーを拾う）。
-        assert(Object.hasOwn(TOLERANCES, target), `${target} の tolerance が無い`);
-        const tolerances = TOLERANCES[target];
-        // 出力ごとに値域が違う（caption-proj の第 2 出力は norm 済みで 1 桁小さい）ので、
-        // 本数が合っていない表は「別の出力の閾値で突合する」形で静かに通ってしまう。
-        assertEquals(
-          tolerances.length,
-          parsed.graph.outputs.length,
-          `${target} の tolerance 本数が IR 出力数と違う`,
-        );
-
-        // io の全テンソルがグラフの入出力とちょうど対応する（余りも欠けも無い）。
-        const expectedKeys = [
-          ...parsed.graph.inputs.map((spec) => `input.${spec.name}`),
-          ...parsed.graph.outputs.map((_, index) => `output.${index}`),
-        ].sort();
-        assertEquals([...io.tensors.keys()].sort(), expectedKeys, `${ioFile} のテンソルキー`);
-
-        // 記号次元は golden の入力 shape の実長から束縛される（明示 bindings を渡さない）。
-        // ケースごとに長さが違う（テキスト系と duration は T = 7 / 13 / 22 / 29 / 144 / 404、
-        // speaker は S = 2 / 6 / 31 / 47 / 187 / 750、dit は S = 2 / 25 / 750）ので、宣言上限
-        // （テキスト系 Tmax = 512 = export_irodori.py の SYM_MAX / speaker Smax = 750 =
-        // speaker_sym_max / dit Smax = 750 = dit_sym_max — 帯マスクと RoPE 表の焼き付け点）に
-        // 依存した実装はここで値か shape が壊れる。speaker と dit は**上限そのもの**を踏む
-        // ケース（ref-max / dit-cond-max）を持たせてある（テキスト系の最長は 404）。
-        //
-        // dit の `mask` は**派生次元** `S+1519`（ADR 0046）で宣言されており、束縛源は
-        // `x_t` の次元 1 だけ。bindSymbols の 2 巡目が `mask` の実 shape（S+1519）を
-        // 評価し直して照合するので、派生形の評価が壊れればここで落ちる。
-        const inputs: Record<string, Tensor> = {};
-        for (const spec of parsed.graph.inputs) {
-          const view = io.tensors.get(`input.${spec.name}`);
-          assert(view !== undefined, `input.${spec.name} が ${ioFile} に無い`);
-          inputs[spec.name] = ioTensor(io, view, spec.dtype);
-        }
-
-        const gpu = await acquireGpu();
-        const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
+        const startedAt = performance.now();
+        /** 出力ごとの実測（合格した回も残す — 判定には使わない）。 */
+        const measurements: Measurement[] = [];
         try {
-          const outputs = await session.run(inputs);
-          assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());
+          const ioFile = `${IO_PREFIX}${caseName}${IO_SUFFIX}`;
+          const shards = resolveShards(modelUrl(target));
+          const [graphShard, ioBytes] = await Promise.all([
+            readShard(shards[0]),
+            readBuffer(SERIES_ROOT, target, ioFile),
+          ]);
+          const parsed = prepareModel(graphShard);
+          const io = parseSafetensors(ioBytes);
+          // Object.hasOwn で見る（素の `TOLERANCES[target]` はプロトタイプ由来のキーを拾う）。
+          assert(Object.hasOwn(TOLERANCES, target), `${target} の tolerance が無い`);
+          const tolerances = TOLERANCES[target];
+          // 出力ごとに値域が違う（caption-proj の第 2 出力は norm 済みで 1 桁小さい）ので、
+          // 本数が合っていない表は「別の出力の閾値で突合する」形で静かに通ってしまう。
+          assertEquals(
+            tolerances.length,
+            parsed.graph.outputs.length,
+            `${target} の tolerance 本数が IR 出力数と違う`,
+          );
 
-          parsed.graph.outputs.forEach((name, index) => {
-            const view = io.tensors.get(`output.${index}`);
-            assert(view !== undefined, `output.${index} が ${ioFile} に無い`);
-            const where = `${target}/${caseName} output.${index} ('${name}')`;
-            const declared = parsed.graph.values[name].dtype;
-            assertEquals(outputs[name].shape, view.shape, `${where}: shape`);
-            assertEquals(outputs[name].dtype, declared, `${where}: dtype`);
-            const report = compareTensors(
-              outputs[name],
-              ioTensor(io, view, declared),
-              tolerances[index],
-            );
-            assert(report.pass, `${where}: ${formatAllclose(report)}`);
+          // io の全テンソルがグラフの入出力とちょうど対応する（余りも欠けも無い）。
+          const expectedKeys = [
+            ...parsed.graph.inputs.map((spec) => `input.${spec.name}`),
+            ...parsed.graph.outputs.map((_, index) => `output.${index}`),
+          ].sort();
+          assertEquals([...io.tensors.keys()].sort(), expectedKeys, `${ioFile} のテンソルキー`);
+
+          // 記号次元は golden の入力 shape の実長から束縛される（明示 bindings を渡さない）。
+          // ケースごとに長さが違う（テキスト系と duration は T = 7 / 13 / 22 / 29 / 144 / 404、
+          // speaker は S = 2 / 6 / 31 / 47 / 187 / 750、dit は S = 2 / 25 / 750）ので、宣言上限
+          // （テキスト系 Tmax = 512 = export_irodori.py の SYM_MAX / speaker Smax = 750 =
+          // speaker_sym_max / dit Smax = 750 = dit_sym_max — 帯マスクと RoPE 表の焼き付け点）に
+          // 依存した実装はここで値か shape が壊れる。speaker と dit は**上限そのもの**を踏む
+          // ケース（ref-max / dit-cond-max）を持たせてある（テキスト系の最長は 404）。
+          //
+          // dit の `mask` は**派生次元** `S+1519`（ADR 0046）で宣言されており、束縛源は
+          // `x_t` の次元 1 だけ。bindSymbols の 2 巡目が `mask` の実 shape（S+1519）を
+          // 評価し直して照合するので、派生形の評価が壊れればここで落ちる。
+          const inputs: Record<string, Tensor> = {};
+          for (const spec of parsed.graph.inputs) {
+            const view = io.tensors.get(`input.${spec.name}`);
+            assert(view !== undefined, `input.${spec.name} が ${ioFile} に無い`);
+            inputs[spec.name] = ioTensor(io, view, spec.dtype);
+          }
+
+          const gpu = await acquireGpu();
+          const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
+          try {
+            const outputs = await session.run(inputs);
+            assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());
+
+            parsed.graph.outputs.forEach((name, index) => {
+              const view = io.tensors.get(`output.${index}`);
+              assert(view !== undefined, `output.${index} が ${ioFile} に無い`);
+              const where = `${target}/${caseName} output.${index} ('${name}')`;
+              const declared = parsed.graph.values[name].dtype;
+              assertEquals(outputs[name].shape, view.shape, `${where}: shape`);
+              assertEquals(outputs[name].dtype, declared, `${where}: dtype`);
+              const report = compareTensors(
+                outputs[name],
+                ioTensor(io, view, declared),
+                tolerances[index],
+              );
+              measurements.push({
+                output: name,
+                maxAbs: report.maxAbsError,
+                maxRel: report.maxRelError,
+                tolerance: tolerances[index],
+                stage: "karume",
+              });
+              assert(report.pass, `${where}: ${formatAllclose(report)}`);
+            });
+          } finally {
+            await session.dispose();
+            gpu.destroy();
+          }
+        } catch (cause) {
+          // 決着は投げる前に残す（決着の無いまま抜けると、この席には前回の走行の結果が居座る）。
+          await results.record({
+            id: caseId,
+            status: "fail",
+            elapsedMs: Math.round(performance.now() - startedAt),
+            measurements,
           });
-        } finally {
-          await session.dispose();
-          gpu.destroy();
+          throw cause;
         }
+        await results.record({
+          id: caseId,
+          status: "pass",
+          elapsedMs: Math.round(performance.now() - startedAt),
+          measurements,
+        });
       },
     });
   }

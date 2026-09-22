@@ -34,6 +34,7 @@ import {
 import { compareTensors, formatAllclose, type Tolerance } from "../src/reference/allclose.ts";
 import { ioTensor } from "./helpers/golden-io.ts";
 import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
+import { type Measurement, openResults } from "./helpers/results.ts";
 import { modelPresent, readShard, resolveShards, streamShards } from "./helpers/shard-files.ts";
 
 /**
@@ -212,6 +213,14 @@ const assertGqaForm = (model: PreparedModel): number => {
   return attentions.length;
 };
 
+/**
+ * 決着と実測の置き場（`outputs/verify/<環境キー>/<日付>_minicpm5-golden/` — 消して安全）。
+ *
+ * 系列名を `<family>-golden` にするのは、models 側の e2e が素の family 名で同じ根へ書くため
+ * （同じ席に 2 モジュールが書くと互いの `cases` を上書きする）。
+ */
+const results = openResults("minicpm5-golden");
+
 Deno.test({
   name: "MiniCPM5 資産: 期待するケースとモデル本体が揃っている",
   // 完全に空の環境だけ「生成していない」として SKIP。**何か 1 つでも**あれば欠けは FAIL
@@ -253,37 +262,64 @@ Deno.test({
       /** ケースごとの最終位置 1 位（全ケース同一 = 定数出力の検出に使う）。 */
       const tops: number[] = [];
       for (const caseName of CASES) {
-        const { inputs, expected } = await loadCase(caseName, parsed.graph.inputs);
-        const outputs = await session.run(inputs);
-        assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());
-        const actual = outputs[outputName];
-        const where = `${caseName} output.0 ('${outputName}')`;
-        assertEquals(actual.shape, expected.shape, `${where}: shape`);
-        assertEquals(actual.dtype, declared, `${where}: dtype`);
+        const startedAt = performance.now();
+        /** 出力ごとの実測（合格した回も残す — 判定には使わない）。 */
+        const measurements: Measurement[] = [];
+        try {
+          const { inputs, expected } = await loadCase(caseName, parsed.graph.inputs);
+          const outputs = await session.run(inputs);
+          assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());
+          const actual = outputs[outputName];
+          const where = `${caseName} output.0 ('${outputName}')`;
+          assertEquals(actual.shape, expected.shape, `${where}: shape`);
+          assertEquals(actual.dtype, declared, `${where}: dtype`);
 
-        // ① 数値
-        const report = compareTensors(actual, expected, MINICPM5_TOLERANCE);
-        assert(report.pass, `${where}: ${formatAllclose(report)}`);
+          // ① 数値
+          const report = compareTensors(actual, expected, MINICPM5_TOLERANCE);
+          measurements.push({
+            output: outputName,
+            maxAbs: report.maxAbsError,
+            maxRel: report.maxRelError,
+            tolerance: MINICPM5_TOLERANCE,
+            stage: "karume",
+          });
+          assert(report.pass, `${where}: ${formatAllclose(report)}`);
 
-        // ② 意味論（最終位置の 1 位）。①が緩んでも独立に残る線で、GQA の head 写像違い・
-        // mask の向き・RoPE の位置ずれはどれもここで 1 位を動かす。
-        const golden = greedyTop(expected, `${caseName} golden`);
-        const observed = greedyTop(actual, `${caseName} GPU`);
-        // 判定が成立する形であることを先に固定する（この門が運任せでないことの根拠）:
-        // golden の 1 位と 2 位の差が atol の 2 倍を超えていれば、①の許容内の数値差で 1 位は
-        // 動けない。実測の最小余裕は context-ja の 0.188 = atol 1e-3 の 188 倍。
-        assert(
-          golden.margin > 2 * MINICPM5_TOLERANCE.atol,
-          `${caseName}: golden の 1 位 / 2 位の差 ${golden.margin} が atol と同程度 — ` +
-            `この形では greedy 一致が数値差で反転しうる（門として成立しない）`,
-        );
-        assertEquals(
-          observed.top,
-          golden.top,
-          `${caseName}: 最終位置の 1 位が golden と違う（GPU 余裕 ${observed.margin} / ` +
-            `golden 余裕 ${golden.margin}）`,
-        );
-        tops.push(observed.top);
+          // ② 意味論（最終位置の 1 位）。①が緩んでも独立に残る線で、GQA の head 写像違い・
+          // mask の向き・RoPE の位置ずれはどれもここで 1 位を動かす。
+          const golden = greedyTop(expected, `${caseName} golden`);
+          const observed = greedyTop(actual, `${caseName} GPU`);
+          // 判定が成立する形であることを先に固定する（この門が運任せでないことの根拠）:
+          // golden の 1 位と 2 位の差が atol の 2 倍を超えていれば、①の許容内の数値差で 1 位は
+          // 動けない。実測の最小余裕は context-ja の 0.188 = atol 1e-3 の 188 倍。
+          assert(
+            golden.margin > 2 * MINICPM5_TOLERANCE.atol,
+            `${caseName}: golden の 1 位 / 2 位の差 ${golden.margin} が atol と同程度 — ` +
+              `この形では greedy 一致が数値差で反転しうる（門として成立しない）`,
+          );
+          assertEquals(
+            observed.top,
+            golden.top,
+            `${caseName}: 最終位置の 1 位が golden と違う（GPU 余裕 ${observed.margin} / ` +
+              `golden 余裕 ${golden.margin}）`,
+          );
+          tops.push(observed.top);
+        } catch (cause) {
+          // 決着は投げる前に残す（決着の無いまま抜けると、この席には前回の走行の結果が居座る）。
+          await results.record({
+            id: caseName,
+            status: "fail",
+            elapsedMs: Math.round(performance.now() - startedAt),
+            measurements,
+          });
+          throw cause;
+        }
+        await results.record({
+          id: caseName,
+          status: "pass",
+          elapsedMs: Math.round(performance.now() - startedAt),
+          measurements,
+        });
       }
       // 恒真化の門: 全ケースの 1 位が同一なら定数出力（export.py の `_sanity` と同じ独立線を
       // ランタイム側にも置く）。実測は ` Paris` / `東京` の 2 種が交互に出る。

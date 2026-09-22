@@ -66,6 +66,7 @@ import {
 import { compareTensors, formatAllclose, type Tolerance } from "../src/reference/allclose.ts";
 import { ioTensor } from "./helpers/golden-io.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { type Measurement, openResults } from "./helpers/results.ts";
 import { modelPresent, readShard, resolveShards, streamShards } from "./helpers/shard-files.ts";
 
 /**
@@ -450,6 +451,14 @@ for (const series of SERIES) {
   }
 }
 
+/**
+ * 決着と実測の置き場（`outputs/verify/<環境キー>/<日付>_birefnet-golden/` — 消して安全）。
+ *
+ * 系列名を `<family>-golden` にするのは、models 側の e2e（`birefnet`）が同じ根へ書くため
+ * （同じ席に 2 モジュールが書くと互いの `cases` を上書きする）。
+ */
+const results = openResults("birefnet-golden");
+
 for (const series of SERIES) {
   const found = discoveryOf(series);
   const root = seriesRoot(series);
@@ -493,56 +502,92 @@ for (const series of SERIES) {
 
   for (const entry of goldenCases) {
     const caseName = entry.name;
+    /** ケース ID（系列が違えば同じケース名があるので組で持つ）。 */
+    const caseId = `${series.name}/${caseName}`;
     Deno.test({
       name: `BiRefNet ${entry.label}: ${series.name} / ${caseName}（実 GPU / torch CPU 期待値）`,
       ignore: entry.ignore || !GPU_AVAILABLE,
       fn: async () => {
-        const shards = resolveShards(new URL(MODEL_FILE, root));
-        const [graphShard, ioBytes] = await Promise.all([
-          readShard(shards[0]),
-          readBuffer(root, `${IO_PREFIX}${caseName}${IO_SUFFIX}`),
-        ]);
-        const parsed = prepareModel(graphShard);
-        const io = parseSafetensors(ioBytes);
-
-        // io の全テンソルがグラフの入出力とちょうど対応する（余りも欠けも無い）。
-        const expectedKeys = [
-          ...parsed.graph.inputs.map((spec) => `input.${spec.name}`),
-          ...parsed.graph.outputs.map((_, index) => `output.${index}`),
-        ].sort();
-        assertEquals([...io.tensors.keys()].sort(), expectedKeys, "io.safetensors のテンソルキー");
-
-        const inputs = goldenInputs(parsed, io);
-
-        const gpu = await acquireGpu();
-        const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
+        const startedAt = performance.now();
+        /** 出力ごとの実測（合格した回も残す — 判定には使わない）。 */
+        const measurements: Measurement[] = [];
         try {
-          const outputs = await session.run(inputs);
-          assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());
+          const shards = resolveShards(new URL(MODEL_FILE, root));
+          const [graphShard, ioBytes] = await Promise.all([
+            readShard(shards[0]),
+            readBuffer(root, `${IO_PREFIX}${caseName}${IO_SUFFIX}`),
+          ]);
+          const parsed = prepareModel(graphShard);
+          const io = parseSafetensors(ioBytes);
 
-          const [name] = parsed.graph.outputs;
-          const view = io.tensors.get("output.0");
-          assert(view !== undefined, "output.0 が golden に無い");
-          const where = `${series.name} / ${caseName} output.0 ('${name}')`;
-          const declared = parsed.graph.values[name].dtype;
-          assertEquals(outputs[name].shape, view.shape, `${where}: shape`);
-          assertEquals(outputs[name].dtype, declared, `${where}: dtype`);
-          const expected = ioTensor(io, view, declared);
-          const report = compareTensors(outputs[name], expected, entry.tolerance);
-          assert(report.pass, `${where}: ${formatAllclose(report)}`);
-
-          // 値の近さとは別に、**マスクとしての判断**が torch と一致すること。
-          assert(outputs[name].dtype === "f32" && expected.dtype === "f32", `${where}: f32 でない`);
-          const disagreement = maskDisagreement(outputs[name].data, expected.data);
-          assert(
-            disagreement <= MASK_DISAGREEMENT_LIMIT,
-            `${where}: 二値マスクの不一致 ${(disagreement * 100).toFixed(4)}%` +
-              `（上限 ${MASK_DISAGREEMENT_LIMIT * 100}%）`,
+          // io の全テンソルがグラフの入出力とちょうど対応する（余りも欠けも無い）。
+          const expectedKeys = [
+            ...parsed.graph.inputs.map((spec) => `input.${spec.name}`),
+            ...parsed.graph.outputs.map((_, index) => `output.${index}`),
+          ].sort();
+          assertEquals(
+            [...io.tensors.keys()].sort(),
+            expectedKeys,
+            "io.safetensors のテンソルキー",
           );
-        } finally {
-          await session.dispose();
-          gpu.destroy();
+
+          const inputs = goldenInputs(parsed, io);
+
+          const gpu = await acquireGpu();
+          const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
+          try {
+            const outputs = await session.run(inputs);
+            assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());
+
+            const [name] = parsed.graph.outputs;
+            const view = io.tensors.get("output.0");
+            assert(view !== undefined, "output.0 が golden に無い");
+            const where = `${series.name} / ${caseName} output.0 ('${name}')`;
+            const declared = parsed.graph.values[name].dtype;
+            assertEquals(outputs[name].shape, view.shape, `${where}: shape`);
+            assertEquals(outputs[name].dtype, declared, `${where}: dtype`);
+            const expected = ioTensor(io, view, declared);
+            const report = compareTensors(outputs[name], expected, entry.tolerance);
+            measurements.push({
+              output: name,
+              maxAbs: report.maxAbsError,
+              maxRel: report.maxRelError,
+              tolerance: entry.tolerance,
+              stage: "karume",
+            });
+            assert(report.pass, `${where}: ${formatAllclose(report)}`);
+
+            // 値の近さとは別に、**マスクとしての判断**が torch と一致すること。
+            assert(
+              outputs[name].dtype === "f32" && expected.dtype === "f32",
+              `${where}: f32 でない`,
+            );
+            const disagreement = maskDisagreement(outputs[name].data, expected.data);
+            assert(
+              disagreement <= MASK_DISAGREEMENT_LIMIT,
+              `${where}: 二値マスクの不一致 ${(disagreement * 100).toFixed(4)}%` +
+                `（上限 ${MASK_DISAGREEMENT_LIMIT * 100}%）`,
+            );
+          } finally {
+            await session.dispose();
+            gpu.destroy();
+          }
+        } catch (cause) {
+          // 決着は投げる前に残す（決着の無いまま抜けると、この席には前回の走行の結果が居座る）。
+          await results.record({
+            id: caseId,
+            status: "fail",
+            elapsedMs: Math.round(performance.now() - startedAt),
+            measurements,
+          });
+          throw cause;
         }
+        await results.record({
+          id: caseId,
+          status: "pass",
+          elapsedMs: Math.round(performance.now() - startedAt),
+          measurements,
+        });
       },
     });
   }

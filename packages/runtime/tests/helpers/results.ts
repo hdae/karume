@@ -18,6 +18,7 @@
  * 分けない — 分けると「最新はどれか」を人が数えることになる）。
  */
 
+import type { Tolerance } from "../../src/reference/allclose.ts";
 import { ENVIRONMENT, type Environment } from "./environment.ts";
 
 /** 結果の根（`outputs/verify/`）。 */
@@ -28,6 +29,28 @@ const REPO_ROOT = new URL("../../../../", import.meta.url);
 
 /** ケース 1 件の決着。 */
 export type ResultStatus = "pass" | "fail" | "written" | "rewritten";
+
+/**
+ * 許容差判定の実測 1 本（golden 系列のケースが**出力ごとに**積む）。
+ *
+ * 許容差の判定は落ちたときにしか数値を見せないので、**合格した回の差**はどこにも残らない。
+ * 「この機でどれだけ差が出ているか」を毎回残しておくと、帯を緩めるかどうかの判断材料が
+ * 割れる前から手元に揃う（帯そのものの値・判定・assert はこの記録とは無関係）。
+ *
+ * MUST: 派生値（帯に対する比など）は持たない — 導けるものは読む側（`tools/verify-diff`）が
+ * 導く。2 か所に同じ数の別表現が乗ると、片方だけ直った形が作れてしまう。
+ * NOTE: 非有限（NaN / ±Inf）は `JSON.stringify` が `null` にする（読む側は null を受ける）。
+ */
+export type Measurement = {
+  /** グラフの出力名。 */
+  readonly output: string;
+  readonly maxAbs: number;
+  readonly maxRel: number;
+  /** 受理に使った帯。 */
+  readonly tolerance: Tolerance;
+  /** どの段で受理したか（fail のときは最後に測った段）。 */
+  readonly stage: "karume" | "spec";
+};
 
 /** `results.json` の `cases` に積む 1 件。 */
 export type ResultEntry = {
@@ -41,6 +64,8 @@ export type ResultEntry = {
   readonly artifact?: string;
   readonly elapsedMs: number;
   readonly note?: string;
+  /** 許容差判定の実測（数値突合を持たないケースは欄ごと持たない）。 */
+  readonly measurements?: readonly Measurement[];
 };
 
 /** 系列 1 本ぶんの結果の置き場。 */

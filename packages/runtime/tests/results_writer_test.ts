@@ -4,9 +4,9 @@
 // **その時点までの全件**で書き直されること（途中で落ちても直前までが残る）、実物の置き場が
 // 同じディレクトリ配下に閉じること。実 GPU も `outputs/` も要らない — 根と環境は注入する。
 
-import { assert, assertEquals, assertThrows } from "@std/assert";
+import { assert, assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import type { Environment } from "./helpers/environment.ts";
-import { openResults, type ResultEntry } from "./helpers/results.ts";
+import { type Measurement, openResults, type ResultEntry } from "./helpers/results.ts";
 
 const KEY = "deno-intel-graphics-bmg-g21";
 
@@ -92,6 +92,65 @@ Deno.test("結果の書き出し: 席を作った時点で走行中（cases 空�
     assertEquals(document.cases, [], "前回の走行の決着が今回の実物と同じ席に残っている");
     assertEquals(document.family, "golden");
     assert(document.startedAt.endsWith("Z"), "走行中マーカーが今回の startedAt を名乗っていない");
+  } finally {
+    Deno.removeSync(temporary, { recursive: true });
+  }
+});
+
+Deno.test("結果の書き出し: 許容差の実測が record に載せたとおりの形で残る", async () => {
+  const temporary = Deno.makeTempDirSync({ prefix: "karume-verify-" });
+  try {
+    const root = new URL(`file://${temporary}/`);
+    const results = openResults("golden", { root, environment: ENVIRONMENT });
+    // 合格した回の実測（これが残らないと「どれだけ差が出たか」は赤くなるまで分からない）。
+    const measurements: readonly Measurement[] = [
+      {
+        output: "sin",
+        maxAbs: 2.68e-5,
+        maxRel: 1.72e-5,
+        tolerance: { atol: 2 ** -11, rtol: 0 },
+        stage: "spec",
+      },
+      {
+        output: "gelu",
+        maxAbs: 1.19e-7,
+        maxRel: 1.83e-6,
+        tolerance: { atol: 1e-6, rtol: 1e-5 },
+        stage: "karume",
+      },
+    ];
+    await results.record({ id: "activations", status: "pass", elapsedMs: 31, measurements });
+    const document = JSON.parse(
+      await Deno.readTextFile(new URL("results.json", results.dir)),
+    ) as ResultsDocument;
+    assertEquals(document.cases[0].measurements, measurements);
+  } finally {
+    Deno.removeSync(temporary, { recursive: true });
+  }
+});
+
+Deno.test("結果の書き出し: 非有限の実測は null として書かれる", async () => {
+  const temporary = Deno.makeTempDirSync({ prefix: "karume-verify-" });
+  try {
+    const root = new URL(`file://${temporary}/`);
+    const results = openResults("golden", { root, environment: ENVIRONMENT });
+    // NaN / ±Inf（出力に非有限が混ざった回の実測）。JSON に綴りが無いので null になる —
+    // 読む側（tools/verify-diff）はこの null を「測れなかった」として受ける。
+    await results.record({
+      id: "activations",
+      status: "fail",
+      elapsedMs: 9,
+      measurements: [{
+        output: "sin",
+        maxAbs: Number.POSITIVE_INFINITY,
+        maxRel: Number.NaN,
+        tolerance: { atol: 1e-6, rtol: 1e-5 },
+        stage: "karume",
+      }],
+    });
+    const text = await Deno.readTextFile(new URL("results.json", results.dir));
+    assertStringIncludes(text, `"maxAbs": null`);
+    assertStringIncludes(text, `"maxRel": null`);
   } finally {
     Deno.removeSync(temporary, { recursive: true });
   }

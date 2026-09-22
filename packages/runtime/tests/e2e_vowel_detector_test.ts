@@ -41,6 +41,7 @@ import {
 import { compareTensors, formatAllclose, type Tolerance } from "../src/reference/allclose.ts";
 import { ioTensor } from "./helpers/golden-io.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { type Measurement, openResults } from "./helpers/results.ts";
 import { modelPresent, readShard, resolveShards, streamShards } from "./helpers/shard-files.ts";
 
 /**
@@ -192,55 +193,90 @@ Deno.test({
   },
 });
 
+/**
+ * 決着と実測の置き場（`outputs/verify/<環境キー>/<日付>_vowel-detector-golden/` — 消して安全）。
+ *
+ * 系列名を `<family>-golden` にするのは、models 側の e2e が素の family 名で同じ根へ書くため
+ * （同じ席に 2 モジュールが書くと互いの `cases` を上書きする）。
+ */
+const results = openResults("vowel-detector-golden");
+
 for (const caseName of golden) {
   Deno.test({
     name: `母音検出 golden 突合: ${caseName}（実 GPU / torch CPU 期待値）`,
     ignore: !available || !GPU_AVAILABLE,
     fn: async () => {
-      const shards = resolveShards(new URL(MODEL_FILE, SERIES_ROOT));
-      const [graphShard, ioBytes] = await Promise.all([
-        readShard(shards[0]),
-        readBuffer(SERIES_ROOT, `${IO_PREFIX}${caseName}${IO_SUFFIX}`),
-      ]);
-      const parsed = prepareModel(graphShard);
-      const io = parseSafetensors(ioBytes);
-
-      // io の全テンソルがグラフの入出力とちょうど対応する（余りも欠けも無い）。
-      const expectedKeys = [
-        ...parsed.graph.inputs.map((spec) => `input.${spec.name}`),
-        ...parsed.graph.outputs.map((_, index) => `output.${index}`),
-      ].sort();
-      assertEquals(
-        [...io.tensors.keys()].sort(),
-        expectedKeys,
-        `${caseName} の io.safetensors のテンソルキー`,
-      );
-      assertSymbolicTimeAxis(parsed);
-
-      const gpu = await acquireGpu();
-      const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
+      const startedAt = performance.now();
+      /** 出力ごとの実測（合格した回も残す — 判定には使わない）。 */
+      const measurements: Measurement[] = [];
       try {
-        const outputs = await session.run(goldenInputs(parsed, io));
-        assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());
+        const shards = resolveShards(new URL(MODEL_FILE, SERIES_ROOT));
+        const [graphShard, ioBytes] = await Promise.all([
+          readShard(shards[0]),
+          readBuffer(SERIES_ROOT, `${IO_PREFIX}${caseName}${IO_SUFFIX}`),
+        ]);
+        const parsed = prepareModel(graphShard);
+        const io = parseSafetensors(ioBytes);
 
-        parsed.graph.outputs.forEach((name, index) => {
-          const view = io.tensors.get(`output.${index}`);
-          assert(view !== undefined, `output.${index} が golden に無い`);
-          const where = `${SERIES_NAME} / ${caseName} output.${index} ('${name}')`;
-          const declared = parsed.graph.values[name].dtype;
-          assertEquals(outputs[name].shape, view.shape, `${where}: shape`);
-          assertEquals(outputs[name].dtype, declared, `${where}: dtype`);
-          const report = compareTensors(
-            outputs[name],
-            ioTensor(io, view, declared),
-            LOGIT_TOLERANCE,
-          );
-          assert(report.pass, `${where}: ${formatAllclose(report)}`);
+        // io の全テンソルがグラフの入出力とちょうど対応する（余りも欠けも無い）。
+        const expectedKeys = [
+          ...parsed.graph.inputs.map((spec) => `input.${spec.name}`),
+          ...parsed.graph.outputs.map((_, index) => `output.${index}`),
+        ].sort();
+        assertEquals(
+          [...io.tensors.keys()].sort(),
+          expectedKeys,
+          `${caseName} の io.safetensors のテンソルキー`,
+        );
+        assertSymbolicTimeAxis(parsed);
+
+        const gpu = await acquireGpu();
+        const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
+        try {
+          const outputs = await session.run(goldenInputs(parsed, io));
+          assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());
+
+          parsed.graph.outputs.forEach((name, index) => {
+            const view = io.tensors.get(`output.${index}`);
+            assert(view !== undefined, `output.${index} が golden に無い`);
+            const where = `${SERIES_NAME} / ${caseName} output.${index} ('${name}')`;
+            const declared = parsed.graph.values[name].dtype;
+            assertEquals(outputs[name].shape, view.shape, `${where}: shape`);
+            assertEquals(outputs[name].dtype, declared, `${where}: dtype`);
+            const report = compareTensors(
+              outputs[name],
+              ioTensor(io, view, declared),
+              LOGIT_TOLERANCE,
+            );
+            measurements.push({
+              output: name,
+              maxAbs: report.maxAbsError,
+              maxRel: report.maxRelError,
+              tolerance: LOGIT_TOLERANCE,
+              stage: "karume",
+            });
+            assert(report.pass, `${where}: ${formatAllclose(report)}`);
+          });
+        } finally {
+          await session.dispose();
+          gpu.destroy();
+        }
+      } catch (cause) {
+        // 決着は投げる前に残す（決着の無いまま抜けると、この席には前回の走行の結果が居座る）。
+        await results.record({
+          id: caseName,
+          status: "fail",
+          elapsedMs: Math.round(performance.now() - startedAt),
+          measurements,
         });
-      } finally {
-        await session.dispose();
-        gpu.destroy();
+        throw cause;
       }
+      await results.record({
+        id: caseName,
+        status: "pass",
+        elapsedMs: Math.round(performance.now() - startedAt),
+        measurements,
+      });
     },
   });
 }

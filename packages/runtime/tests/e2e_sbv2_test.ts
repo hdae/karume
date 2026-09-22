@@ -24,6 +24,7 @@ import { acquireGpu, parseSafetensors, prepareModel, type Tensor } from "../mod.
 import { compareTensors, formatAllclose, type Tolerance } from "../src/reference/allclose.ts";
 import { ioTensor } from "./helpers/golden-io.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { type Measurement, openResults } from "./helpers/results.ts";
 import {
   modelPresent,
   readShard,
@@ -618,6 +619,14 @@ const readBuffer = async (root: URL, target: string, file: string): Promise<Arra
 /** ターゲットの代表 path（配布形は shard 列 — 見つけ方は `resolveShards` が持つ）。 */
 const modelUrl = (root: URL, target: string): URL => new URL(`${target}/${MODEL_FILE}`, root);
 
+/**
+ * 決着と実測の置き場（`outputs/verify/<環境キー>/<日付>_sbv2-golden/` — 消して安全）。
+ *
+ * 系列名を `<family>-golden` にするのは、models 側の e2e（`sbv2`）が同じ根へ書くため
+ * （同じ席に 2 モジュールが書くと互いの `cases` を上書きする）。
+ */
+const results = openResults("sbv2-golden");
+
 for (const series of SERIES) {
   const targets = discoverTargets(series.root);
   const cases = targets.flatMap((target) => discoverCases(series.root, target));
@@ -657,107 +666,139 @@ for (const series of SERIES) {
   });
 
   for (const { target, caseName, ioFile } of cases) {
+    /** ケース ID（系列 / ターゲットが違えば同じケース名があるので組で持つ）。 */
+    const caseId = `${series.name}/${target}/${caseName}`;
     Deno.test({
       name:
         `SBV2 golden 突合: ${series.name} / ${target} / ${caseName}（実 GPU / torch CPU 期待値）`,
       ignore: !available || !GPU_AVAILABLE,
       fn: async () => {
-        const shards = resolveShards(modelUrl(series.root, target));
-        const [graphShard, ioBytes] = await Promise.all([
-          readShard(shards[0]),
-          readBuffer(series.root, target, ioFile),
-        ]);
-        const parsed = prepareModel(graphShard);
-        const io = parseSafetensors(ioBytes);
-        // Object.hasOwn で見る（素の `tolerances[target]` はプロトタイプ由来のキーを拾う）。
-        assert(
-          Object.hasOwn(series.tolerances, target),
-          `${series.name} 系列の ${target} の tolerance が無い`,
-        );
-        const tolerances = series.tolerances[target];
-        // 出力ごとに値域が違う（front の logs_p は他 3 本より 1 桁小さい）ので、本数が
-        // 合っていない表は「別の出力の閾値で突合する」形で静かに通ってしまう。
-        assertEquals(
-          tolerances.length,
-          parsed.graph.outputs.length,
-          `${series.name}/${target} の tolerance 本数が IR 出力数と違う`,
-        );
-
-        // 系列と資産の格納 dtype が一致する（root 取り違え / 圧縮の掛け忘れの唯一の検出器
-        // — 上の `compressedStorage` の MUST）。適格スロットは 5 ターゲットとも複数あるので、
-        // 「現れた圧縮 dtype の集合」が系列の宣言とちょうど一致することを見る（本数ではなく
-        // 集合で見るのは、f16 系列に i8 資産が混ざる形を「圧縮が 1 本以上ある」で通さないため）。
-        // NOTE: `i32` 格納（記号依存定数 — ADR 0010）は圧縮ではないのでここでは数えない。
-        const compressed = [
-          ...new Set(
-            Object.values(parsed.graph.initializers)
-              .map((initializer) => initializer.storage.dtype)
-              .filter((dtype) => dtype === "f16" || dtype === "i8"),
-          ),
-        ].sort();
-        assertEquals(
-          compressed,
-          series.compressedStorage === undefined ? [] : [series.compressedStorage],
-          `${series.name}/${target}: 圧縮格納 dtype の集合が系列と食い違う`,
-        );
-        // i8 は companion scale が無いと値が復元できない（ADR 0019）。宣言と実体の両方を見る
-        // — 宣言だけならキーが実在しない形が、実体だけなら別の重みの scale を読む形が通る。
-        if (series.compressedStorage === "i8") {
-          // 実体は shard 列のどこかに居るので、名前の和で見る（どの shard に居るかまでは
-          // ここの関心ではない — co-shard 契約は container の shard 進行検証が持つ）。
-          const present = await shardTensorNames(shards);
-          for (const [name, initializer] of Object.entries(parsed.graph.initializers)) {
-            if (initializer.storage.dtype !== "i8") continue;
-            const scale = initializer.storage.scale;
-            assert(scale !== undefined, `${series.name}/${target}: '${name}' に scale 宣言が無い`);
-            assert(
-              present.has(scale),
-              `${series.name}/${target}: '${name}' の scale '${scale}' が資産に無い`,
-            );
-          }
-        }
-
-        // io の全テンソルがグラフの入出力とちょうど対応する（余りも欠けも無い）。
-        const expectedKeys = [
-          ...parsed.graph.inputs.map((spec) => `input.${spec.name}`),
-          ...parsed.graph.outputs.map((_, index) => `output.${index}`),
-        ].sort();
-        assertEquals([...io.tensors.keys()].sort(), expectedKeys, `${ioFile} のテンソルキー`);
-
-        // 記号次元 P は golden の入力 shape の実長から束縛される（明示 bindings を渡さない）。
-        // ケースごとに P が違う（2 / 37 / 203 / 512 / 16）ので、宣言上限 Pmax = 512 に
-        // 依存した実装（プランを Pmax で組む等）はここで値か shape が壊れる。
-        const inputs: Record<string, Tensor> = {};
-        for (const spec of parsed.graph.inputs) {
-          const view = io.tensors.get(`input.${spec.name}`);
-          assert(view !== undefined, `input.${spec.name} が ${ioFile} に無い`);
-          inputs[spec.name] = ioTensor(io, view, spec.dtype);
-        }
-
-        const gpu = await acquireGpu();
-        const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
+        const startedAt = performance.now();
+        /** 出力ごとの実測（合格した回も残す — 判定には使わない）。 */
+        const measurements: Measurement[] = [];
         try {
-          const outputs = await session.run(inputs);
-          assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());
+          const shards = resolveShards(modelUrl(series.root, target));
+          const [graphShard, ioBytes] = await Promise.all([
+            readShard(shards[0]),
+            readBuffer(series.root, target, ioFile),
+          ]);
+          const parsed = prepareModel(graphShard);
+          const io = parseSafetensors(ioBytes);
+          // Object.hasOwn で見る（素の `tolerances[target]` はプロトタイプ由来のキーを拾う）。
+          assert(
+            Object.hasOwn(series.tolerances, target),
+            `${series.name} 系列の ${target} の tolerance が無い`,
+          );
+          const tolerances = series.tolerances[target];
+          // 出力ごとに値域が違う（front の logs_p は他 3 本より 1 桁小さい）ので、本数が
+          // 合っていない表は「別の出力の閾値で突合する」形で静かに通ってしまう。
+          assertEquals(
+            tolerances.length,
+            parsed.graph.outputs.length,
+            `${series.name}/${target} の tolerance 本数が IR 出力数と違う`,
+          );
 
-          parsed.graph.outputs.forEach((name, index) => {
-            const view = io.tensors.get(`output.${index}`);
-            assert(view !== undefined, `output.${index} が ${ioFile} に無い`);
-            const where = `${series.name}/${target}/${caseName} output.${index} ('${name}')`;
-            const declared = parsed.graph.values[name].dtype;
-            assertEquals(outputs[name].shape, view.shape, `${where}: shape`);
-            assertEquals(outputs[name].dtype, declared, `${where}: dtype`);
-            const report = compareTensors(
-              outputs[name],
-              ioTensor(io, view, declared),
-              tolerances[index],
-            );
-            assert(report.pass, `${where}: ${formatAllclose(report)}`);
+          // 系列と資産の格納 dtype が一致する（root 取り違え / 圧縮の掛け忘れの唯一の検出器
+          // — 上の `compressedStorage` の MUST）。適格スロットは 5 ターゲットとも複数あるので、
+          // 「現れた圧縮 dtype の集合」が系列の宣言とちょうど一致することを見る（本数ではなく
+          // 集合で見るのは、f16 系列に i8 資産が混ざる形を「圧縮が 1 本以上ある」で通さないため）。
+          // NOTE: `i32` 格納（記号依存定数 — ADR 0010）は圧縮ではないのでここでは数えない。
+          const compressed = [
+            ...new Set(
+              Object.values(parsed.graph.initializers)
+                .map((initializer) => initializer.storage.dtype)
+                .filter((dtype) => dtype === "f16" || dtype === "i8"),
+            ),
+          ].sort();
+          assertEquals(
+            compressed,
+            series.compressedStorage === undefined ? [] : [series.compressedStorage],
+            `${series.name}/${target}: 圧縮格納 dtype の集合が系列と食い違う`,
+          );
+          // i8 は companion scale が無いと値が復元できない（ADR 0019）。宣言と実体の両方を見る
+          // — 宣言だけならキーが実在しない形が、実体だけなら別の重みの scale を読む形が通る。
+          if (series.compressedStorage === "i8") {
+            // 実体は shard 列のどこかに居るので、名前の和で見る（どの shard に居るかまでは
+            // ここの関心ではない — co-shard 契約は container の shard 進行検証が持つ）。
+            const present = await shardTensorNames(shards);
+            for (const [name, initializer] of Object.entries(parsed.graph.initializers)) {
+              if (initializer.storage.dtype !== "i8") continue;
+              const scale = initializer.storage.scale;
+              assert(
+                scale !== undefined,
+                `${series.name}/${target}: '${name}' に scale 宣言が無い`,
+              );
+              assert(
+                present.has(scale),
+                `${series.name}/${target}: '${name}' の scale '${scale}' が資産に無い`,
+              );
+            }
+          }
+
+          // io の全テンソルがグラフの入出力とちょうど対応する（余りも欠けも無い）。
+          const expectedKeys = [
+            ...parsed.graph.inputs.map((spec) => `input.${spec.name}`),
+            ...parsed.graph.outputs.map((_, index) => `output.${index}`),
+          ].sort();
+          assertEquals([...io.tensors.keys()].sort(), expectedKeys, `${ioFile} のテンソルキー`);
+
+          // 記号次元 P は golden の入力 shape の実長から束縛される（明示 bindings を渡さない）。
+          // ケースごとに P が違う（2 / 37 / 203 / 512 / 16）ので、宣言上限 Pmax = 512 に
+          // 依存した実装（プランを Pmax で組む等）はここで値か shape が壊れる。
+          const inputs: Record<string, Tensor> = {};
+          for (const spec of parsed.graph.inputs) {
+            const view = io.tensors.get(`input.${spec.name}`);
+            assert(view !== undefined, `input.${spec.name} が ${ioFile} に無い`);
+            inputs[spec.name] = ioTensor(io, view, spec.dtype);
+          }
+
+          const gpu = await acquireGpu();
+          const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
+          try {
+            const outputs = await session.run(inputs);
+            assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());
+
+            parsed.graph.outputs.forEach((name, index) => {
+              const view = io.tensors.get(`output.${index}`);
+              assert(view !== undefined, `output.${index} が ${ioFile} に無い`);
+              const where = `${series.name}/${target}/${caseName} output.${index} ('${name}')`;
+              const declared = parsed.graph.values[name].dtype;
+              assertEquals(outputs[name].shape, view.shape, `${where}: shape`);
+              assertEquals(outputs[name].dtype, declared, `${where}: dtype`);
+              const report = compareTensors(
+                outputs[name],
+                ioTensor(io, view, declared),
+                tolerances[index],
+              );
+              measurements.push({
+                output: name,
+                maxAbs: report.maxAbsError,
+                maxRel: report.maxRelError,
+                tolerance: tolerances[index],
+                stage: "karume",
+              });
+              assert(report.pass, `${where}: ${formatAllclose(report)}`);
+            });
+          } finally {
+            await session.dispose();
+            gpu.destroy();
+          }
+        } catch (cause) {
+          // 決着は投げる前に残す（決着の無いまま抜けると、この席には前回の走行の結果が居座る）。
+          await results.record({
+            id: caseId,
+            status: "fail",
+            elapsedMs: Math.round(performance.now() - startedAt),
+            measurements,
           });
-        } finally {
-          await session.dispose();
-          gpu.destroy();
+          throw cause;
         }
+        await results.record({
+          id: caseId,
+          status: "pass",
+          elapsedMs: Math.round(performance.now() - startedAt),
+          measurements,
+        });
       },
     });
   }
