@@ -24,7 +24,7 @@ export type StubGraph = {
 export const stubModel = (graph: StubGraph): KarumeModel => ({
   graph: {
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: [] },
     symbols: [...(graph.symbols ?? [])],
     inputs: graph.inputs.map((input) => ({
@@ -44,4 +44,6 @@ export const stubModel = (graph: StubGraph): KarumeModel => ({
     nodes: [],
   },
   file: { buffer: new ArrayBuffer(0), metadata: new Map(), tensors: new Map() },
+  // 旧配布形の付随情報（companion scale のキー）— 初期化子を 1 本も持たないので空。
+  legacy: { scaleKeys: new Map() },
 });

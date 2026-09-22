@@ -114,6 +114,9 @@ export const CODEC_LEDGER: ReadonlyMap<CodecName, CodecEntry> = new Map<CodecNam
 export const isCodecName = (value: unknown): value is CodecName =>
   typeof value === "string" && CODEC_LEDGER.has(value as CodecName);
 
+/** 展開経路の種別（消費側の分岐はこれで行う — `ternary` は i2）。 */
+export const codecLayout = (codec: CodecName): CodecLayout => codecEntry(codec).layout;
+
 /** 台帳のエントリ（登録名は型で閉じているので必ず在る）。 */
 export const codecEntry = (codec: CodecName): CodecEntry => {
   const entry = CODEC_LEDGER.get(codec);
@@ -123,6 +126,19 @@ export const codecEntry = (codec: CodecName): CodecEntry => {
 
 /** 台帳の登録名を code point 順に並べたもの（診断用）。 */
 export const CODEC_NAMES: readonly CodecName[] = [...CODEC_LEDGER.keys()].sort();
+
+/**
+ * per-channel codec の `groupSize`（= 行長）。要素数 0 の退化形（`in_features = 0` など）は行長 0 で、
+ * `groupSize` は 1 以上 MUST なので 1 に丸める（group 数は {@link groupCount} が 1 に戻す）。
+ */
+export const perChannelGroupSize = (rowLength: number): number => Math.max(rowLength, 1);
+
+/**
+ * scale の group 数 `行長 / groupSize`（§6.1）。行長 0 の退化形は group 数 1（per-channel scale は
+ * 行ごとに 1 本あり、旧配布形の `[rows, 1]` と一致する）。
+ */
+export const groupCount = (rowLength: number, groupSize: number): number =>
+  rowLength === 0 ? 1 : rowLength / groupSize;
 
 /**
  * payload のバイト長（§6.1 の式）。`numel % blockElements == 0` MUST — 端数の packing block は

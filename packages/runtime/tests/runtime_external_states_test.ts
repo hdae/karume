@@ -305,14 +305,18 @@ const sharedGraph = (): GraphJson => {
 
 Deno.test("共有 initializer は tensor 無し・scale 無しで受理され、席が shared になる", () => {
   const graph = parse(sharedGraph());
-  assertEquals(graph.initializers["target_embed"].shared?.tensor, "model.lm_head.weight");
-  assertEquals(graph.initializers["target_embed"].tensor, undefined);
+  // 合流後は借り手の initializer 名 = 貸し手の initializer 名（`shared.tensor` は無い）。
+  assertEquals(graph.initializers["model.lm_head.weight"], { shared: true });
+  assertEquals(Object.hasOwn(graph.initializers, "target_embed"), false);
   validateGraphContracts(graph);
-  // 席は「借り物」で、期待する貸し手の席（i8 常駐・チャネル軸 0）まで決まる。
-  assertEquals(planWeightResidency(graph).get("target_embed"), {
+  // 席は「借り物」。期待する貸し手の席は借り手側の消費（適格判定 + チャネル軸 0）だけが決まり、
+  // 貸し手の codec と突き合わせるのは借り手 Session の構築時。
+  assertEquals(planWeightResidency(graph).get("model.lm_head.weight"), {
     seat: "shared",
-    expected: "i8",
-    channelAxis: 0,
+    eligible: true,
+    i4Eligible: true,
+    i2Eligible: true,
+    consumerAxis: 0,
   });
 });
 

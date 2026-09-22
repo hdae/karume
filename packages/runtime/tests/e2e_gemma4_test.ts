@@ -34,6 +34,7 @@
 import { assert, assertEquals } from "@std/assert";
 import {
   acquireGpu,
+  codecLayout,
   parseSafetensors,
   type PreparedModel,
   prepareModel,
@@ -275,8 +276,10 @@ const assertGemma4Form = (model: PreparedModel): number => {
 
   const census: Record<string, number> = {};
   for (const initializer of Object.values(graph.initializers)) {
-    const dtype = initializer.storage.dtype;
-    census[dtype] = (census[dtype] ?? 0) + 1;
+    // 共有 initializer（借り物）は格納を宣言しない — このモデルには 1 本も無い。
+    if (initializer.storage === undefined) continue;
+    const layout = codecLayout(initializer.storage.codec);
+    census[layout] = (census[layout] ?? 0) + 1;
   }
   for (const [dtype, expected] of Object.entries(STORAGE_EXPECTATION)) {
     assertEquals(

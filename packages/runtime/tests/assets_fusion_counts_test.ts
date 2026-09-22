@@ -185,11 +185,8 @@ const fusionCounts = (
     linearCompute: "f32",
     weightLayouts: new Map(
       [...planWeightResidency(graph)].flatMap(([name, weight]): [string, FusionWeightLayout][] => {
-        if (weight.seat === "i4") {
-          const groupSize = graph.initializers[name].storage.groupSize;
-          if (groupSize === undefined) throw Error("i4のgroup_sizeが無い");
-          return [[name, { storage: "i4", groupSize }]];
-        }
+        // group 長は席が持つ（合流後の宣言からは常駐プランナが導く — 同じ値を 2 度導かない）。
+        if (weight.seat === "i4") return [[name, { storage: "i4", groupSize: weight.groupSize }]];
         return weight.seat === "i2" || weight.seat === "i8" || weight.seat === "f16"
           ? [[name, { storage: weight.seat }]]
           : [];

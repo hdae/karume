@@ -20,8 +20,10 @@
 // FAIL にする（下の「資産の完全性」テスト）— そこは無音の見かけ成功になる。
 
 import { assert, assertEquals } from "@std/assert";
-import { acquireGpu, parseSafetensors, prepareModel, type Tensor } from "../mod.ts";
+import { acquireGpu, codecLayout, parseSafetensors, prepareModel, type Tensor } from "../mod.ts";
+import { extractIrGraph } from "../src/format/container.ts";
 import { compareTensors, formatAllclose, type Tolerance } from "../src/reference/allclose.ts";
+import { parseShard } from "../src/runtime/session-build.ts";
 import { assertAdapterMatchesEnvironment } from "./helpers/environment.ts";
 import { ioTensor } from "./helpers/golden-io.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
@@ -707,8 +709,10 @@ for (const series of SERIES) {
           const compressed = [
             ...new Set(
               Object.values(parsed.graph.initializers)
-                .map((initializer) => initializer.storage.dtype)
-                .filter((dtype) => dtype === "f16" || dtype === "i8"),
+                .flatMap((initializer) =>
+                  initializer.storage === undefined ? [] : [codecLayout(initializer.storage.codec)]
+                )
+                .filter((layout) => layout === "f16" || layout === "i8"),
             ),
           ].sort();
           assertEquals(
@@ -722,9 +726,13 @@ for (const series of SERIES) {
             // 実体は shard 列のどこかに居るので、名前の和で見る（どの shard に居るかまでは
             // ここの関心ではない — co-shard 契約は container の shard 進行検証が持つ）。
             const present = await shardTensorNames(shards);
+            // companion scale のテンソルキーは合流後のグラフには無い（供給計画が payload と
+            // 一緒に運ぶ）ので、旧配布形の宣言そのものから引く。
+            const { legacy } = extractIrGraph(parseShard(graphShard.bytes, graphShard.id));
             for (const [name, initializer] of Object.entries(parsed.graph.initializers)) {
-              if (initializer.storage.dtype !== "i8") continue;
-              const scale = initializer.storage.scale;
+              if (initializer.storage === undefined) continue;
+              if (codecLayout(initializer.storage.codec) !== "i8") continue;
+              const scale = legacy.scaleKeys.get(name);
               assert(
                 scale !== undefined,
                 `${series.name}/${target}: '${name}' に scale 宣言が無い`,

@@ -10,7 +10,7 @@
 //   ④ 計画鍵: 容量の違う貸し手を束ねた 2 本の借り手 context は**別鍵**（external スロットの容量が
 //      鍵に載っていることの検出器）
 //   ⑤ 共有重み: 貸し手の i8 embedding 表を借り手が読み、値が貸し手と**ビット一致**する。
-//      shape / dtype / 席の不一致は fail loudly・借り手が生きている間の貸し手 dispose も拒否
+//      shape / 席 / 行の軸の不一致は fail loudly・借り手が生きている間の貸し手 dispose も拒否
 //
 // MUST: 参照に渡すスロットは**GPU から読み戻す**（ホスト側オラクルの再現ではない）。借り手が
 // 読むのは貸し手が実際に書いた行なので、読み戻しでしか「同じ実体を見ている」ことを示せない。
@@ -741,6 +741,77 @@ const weightBorrowerGraph = (): GraphJson => ({
   ],
 });
 
+/**
+ * 行の軸の門の材料（貸し手）: conv1d の重みスロット = 行の軸 **0**（`[Cout,Cin,K]`）。
+ * 値は見ない（門は席と軸だけを見る）ので scale は恒等・payload は定数で埋める。
+ */
+const convLenderGraph = (): GraphJson => ({
+  format: "karume-ir",
+  version: 1,
+  requires: { ops: ["conv1d"] },
+  symbols: [],
+  inputs: [{ name: "x", dtype: "f32", shape: [1, 2, 6] }],
+  outputs: ["y"],
+  initializers: {
+    w: { tensor: "m.w", storage: { dtype: "i8", scale: "m.s" } },
+    b: { tensor: "m.b", storage: { dtype: "f32" } },
+  },
+  values: {
+    w: { dtype: "f32", shape: [4, 2, 3] },
+    b: { dtype: "f32", shape: [4] },
+    y: { dtype: "f32", shape: [1, 4, 4] },
+  },
+  nodes: [{
+    op: "conv1d",
+    ins: ["x", "w", "b"],
+    outs: ["y"],
+    attrs: { stride: 1, padding: 0, dilation: 1, groups: 1 },
+  }],
+});
+
+/** 同じバイト列を conv_transpose1d（`[Cin,Cout,K]` = 行の軸 **1**）で食う借り手。 */
+const convBorrowerGraph = (): GraphJson => ({
+  format: "karume-ir",
+  version: 1,
+  requires: { ops: ["conv_transpose1d"] },
+  symbols: [],
+  inputs: [{ name: "z", dtype: "f32", shape: [1, 4, 6] }],
+  outputs: ["u"],
+  initializers: {
+    borrowed: { shared: { tensor: "m.w" }, storage: { dtype: "i8" } },
+    c: { tensor: "m.c", storage: { dtype: "f32" } },
+  },
+  values: {
+    borrowed: { dtype: "f32", shape: [4, 2, 3] },
+    c: { dtype: "f32", shape: [2] },
+    u: { dtype: "f32", shape: [1, 2, 8] },
+  },
+  nodes: [{
+    op: "conv_transpose1d",
+    ins: ["z", "borrowed", "c"],
+    outs: ["u"],
+    attrs: { stride: 1, padding: 0 },
+  }],
+});
+
+const convLenderModel = (): ArrayBuffer =>
+  buildSafetensors([
+    { name: "m.b", dtype: "F32", shape: [4], data: f32Bytes(new Float32Array(4)) },
+    // 旧配布形の i8 scale は keepdim broadcast 形（軸 0 が行 → `[4,1,1]`）。
+    {
+      name: "m.s",
+      dtype: "F32",
+      shape: [4, 1, 1],
+      data: f32Bytes(Float32Array.from([1, 1, 1, 1])),
+    },
+    { name: "m.w", dtype: "I8", shape: [4, 2, 3], data: i8BytesFrom(new Array(24).fill(1)) },
+  ], { karume_ir: JSON.stringify(convLenderGraph()) });
+
+const convBorrowerModel = (): ArrayBuffer =>
+  graphModelBuffer(convBorrowerGraph(), [
+    { name: "m.c", dtype: "F32", shape: [2], data: f32Bytes(new Float32Array(2)) },
+  ]);
+
 const weightLenderModel = (table: ReturnType<typeof embedTable>): ArrayBuffer =>
   buildSafetensors([
     { name: "m.s", dtype: "F32", shape: [VOCAB, 1], data: f32Bytes(table.scale) },
@@ -757,7 +828,7 @@ Deno.test({
     const borrower = await createSession(
       gpu,
       openModel(graphModelBuffer(weightBorrowerGraph())),
-      { sharedWeights: { borrowed_embed: lender.exportWeight("embed") } },
+      { sharedWeights: { "m.w": lender.exportWeight("m.w") } },
     );
     try {
       const index = fill([VOCAB], (i) => VOCAB - 1 - i, "i32");
@@ -796,14 +867,14 @@ Deno.test({
 });
 
 Deno.test({
-  name: "共有 initializer の門: 過不足・shape / dtype・席の不一致は fail loudly（実 GPU）",
+  name: "共有 initializer の門: 過不足・shape・席・行の軸の不一致は fail loudly（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const table = embedTable();
     const gpu = await acquireGpu();
     const lender = await createSession(gpu, openModel(weightLenderModel(table)));
     try {
-      const shared = lender.exportWeight("embed");
+      const shared = lender.exportWeight("m.w");
       const build = (graph: GraphJson, weights?: Record<string, typeof shared>): Promise<Session> =>
         createSession(
           gpu,
@@ -816,11 +887,11 @@ Deno.test({
         () => build(weightBorrowerGraph()),
         ExecutionError,
       );
-      assert(missing.message.includes("不足 [borrowed_embed]"), missing.message);
+      assert(missing.message.includes("不足 [m.w]"), missing.message);
 
       // ② 余剰（宣言に無い名前）
       const surplus = await assertRejects(
-        () => build(weightBorrowerGraph(), { borrowed_embed: shared, unknown: shared }),
+        () => build(weightBorrowerGraph(), { "m.w": shared, unknown: shared }),
         ExecutionError,
       );
       assert(surplus.message.includes("余剰 [unknown]"), surplus.message);
@@ -830,19 +901,28 @@ Deno.test({
       wrongShape.values["borrowed_embed"].shape = [HIDDEN, VOCAB];
       wrongShape.values["y"].shape = [VOCAB, VOCAB];
       const shapeError = await assertRejects(
-        () => build(wrongShape, { borrowed_embed: shared }),
+        () => build(wrongShape, { "m.w": shared }),
         ExecutionError,
       );
       assert(shapeError.message.includes("宣言 shape"), shapeError.message);
 
-      // ④ 格納 dtype の不一致（貸し手は i8）
-      const wrongDtype = weightBorrowerGraph();
-      wrongDtype.initializers["borrowed_embed"].storage = { dtype: "f32" };
-      const dtypeError = await assertRejects(
-        () => build(wrongDtype, { borrowed_embed: shared }),
-        ExecutionError,
-      );
-      assert(dtypeError.message.includes("格納 dtype"), dtypeError.message);
+      // ④ 行の軸の不一致。借り手は格納を宣言しない（期待する席は貸し手の codec から導く）ので、
+      // 読み方の割れはこの軸が受け持つ: per-channel scale の軸は**消費側 op** から決まり、
+      // 貸し手 conv1d（軸 0）と借り手 conv_transpose1d（軸 1）では同じバイト列に別の行の
+      // scale が掛かる（例外は 1 つも出ない沈黙誤値）。
+      const axisLender = await createSession(gpu, openModel(convLenderModel()));
+      try {
+        const axisError = await assertRejects(
+          () =>
+            createSession(gpu, openModel(convBorrowerModel()), {
+              sharedWeights: { "m.w": axisLender.exportWeight("m.w") },
+            }),
+          ExecutionError,
+        );
+        assert(axisError.message.includes("行の軸"), axisError.message);
+      } finally {
+        await axisLender.dispose();
+      }
 
       // ⑤ 消費席の不一致。借り手が同じ表を**重みスロット以外**（elementwise の被演算子）で
       // 食う形は圧縮常駐の適格外 = 席 `expanded` で、貸し手の i8 席と組めない。通すと
@@ -862,16 +942,16 @@ Deno.test({
         nodes: [{ op: "add", ins: ["x", "borrowed_embed"], outs: ["y"], attrs: {} }],
       };
       const seatError = await assertRejects(
-        () => build(wrongSeat, { borrowed_embed: shared }),
+        () => build(wrongSeat, { "m.w": shared }),
         ExecutionError,
       );
       assert(seatError.message.includes("消費席が貸し手と互換でない"), seatError.message);
 
       // ⑥ 借り物の再輸出は拒否する（借用の連鎖は持たない）。
-      const chained = await build(weightBorrowerGraph(), { borrowed_embed: shared });
+      const chained = await build(weightBorrowerGraph(), { "m.w": shared });
       try {
         assertThrows(
-          () => chained.exportWeight("borrowed_embed"),
+          () => chained.exportWeight("m.w"),
           ExecutionError,
           "借り物の再輸出",
         );

@@ -215,46 +215,28 @@ const assertDrafterStates = (where: string, graph: DrafterGraph, target: Drafter
 /**
  * 共有 initializer（バイトを持たない宣言）を貸し手の initializer 名へ解決する。
  *
- * `shared.tensor` は**貸し手コンテナのテンソルキー**（`model.lm_head.weight`）なので、貸し手
- * グラフの initializer を `tensor` の一致で引き当てる。引けなければ fail loudly — 通すと
+ * 借り手の名前は**貸し手の initializer 名と同じ**（docs/ir-v2.md「共有 initializer」— 名前が
+ * 実体の鍵なので、対応表は恒等写像）。貸し手グラフに同名の実体が無ければ fail loudly — 通すと
  * `createSession` が「shared 宣言に対して重みが不足」と落ちるだけで、**どの表を借りそこねたか**が
- * 残らない。
+ * 残らない。格納の互換（貸し手の codec を借り手の消費席で実行できるか）は借り手 Session 構築時の
+ * 門（runtime の `resolveSharedWeights`）が見る。
  */
 const resolveSharedWeights = (
   where: string,
   graph: DrafterGraph,
   target: DrafterGraph,
 ): Readonly<Record<string, string>> => {
-  const byTensor = new Map<string, string[]>();
-  for (const name of Object.keys(target.initializers)) {
-    const tensor = target.initializers[name].tensor;
-    if (tensor === undefined) continue;
-    const found = byTensor.get(tensor);
-    if (found === undefined) byTensor.set(tensor, [name]);
-    else found.push(name);
-  }
   let shared: Record<string, string> = {};
   for (const name of Object.keys(graph.initializers)) {
-    const declared = graph.initializers[name].shared;
-    if (declared === undefined) continue;
-    const candidates = byTensor.get(declared.tensor) ?? [];
-    if (candidates.length !== 1) {
+    if (graph.initializers[name].shared === undefined) continue;
+    const lender = target.initializers[name];
+    if (lender === undefined || lender.shared !== undefined) {
       throw new Error(
-        `${where}: drafter の共有 initializer '${name}' が指すテンソル` +
-          ` '${declared.tensor}' を target グラフの initializer ${candidates.length} 本が主張する` +
-          `（ちょうど 1 本であること）`,
+        `${where}: drafter の共有 initializer '${name}' に対応する実体が target グラフに無い` +
+          `（借り手の名前は貸し手の initializer 名と同じであること）`,
       );
     }
-    const lender = candidates[0];
-    const lenderStorage = target.initializers[lender].storage.dtype;
-    if (graph.initializers[name].storage.dtype !== lenderStorage) {
-      throw new Error(
-        `${where}: drafter の共有 initializer '${name}' の格納 dtype` +
-          ` ${graph.initializers[name].storage.dtype} が target の '${lender}'` +
-          ` ${lenderStorage} と違う`,
-      );
-    }
-    shared = { ...shared, [name]: lender };
+    shared = { ...shared, [name]: name };
   }
   if (Object.keys(shared).length === 0) {
     throw new Error(

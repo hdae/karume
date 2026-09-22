@@ -185,7 +185,7 @@ Deno.test("上限を超える payload は席ごとの確保寸法で名指しさ
   assertStringIncludes(error.message, "重みバッファ 1 本");
   assertStringIncludes(
     error.message,
-    "initializer 'w' の payload（席 f16・確保 64 バイト）: " +
+    "initializer 'm.w' の payload（席 f16・確保 64 バイト）: " +
       "maxStorageBufferBindingSize 32 バイトを 32 バイト超える",
   );
 });
@@ -219,15 +219,15 @@ Deno.test("適格外席は f32 展開後の寸法で見る・companion scale も
     () => assertWeightsWithinLimits(residency, limits(16, 16)),
     ExecutionError,
   );
-  // 適格外の `g` は payload 16 バイト（= 上限ちょうど）だが、GPU に載るのは展開後の 32 バイト。
+  // 適格外の `m.g` は payload 16 バイト（= 上限ちょうど）だが、GPU に載るのは展開後の 32 バイト。
   assertStringIncludes(
     error.message,
-    "initializer 'g' の payload（f32 展開後）（席 expanded・確保 32 バイト）",
+    "initializer 'm.g' の payload（f32 展開後）（席 expanded・確保 32 バイト）",
   );
   // scale は payload と別に確保されるので、payload が通っても scale で落ちる。
-  assertStringIncludes(error.message, "initializer 'w' の scale（席 i8・確保 32 バイト）");
+  assertStringIncludes(error.message, "initializer 'm.w' の scale（席 i8・確保 32 バイト）");
   assertEquals(
-    error.message.includes("initializer 'w' の payload"),
+    error.message.includes("initializer 'm.w' の payload"),
     false,
     "16 バイトの payload は上限ちょうどで通る（scale だけが超過）",
   );

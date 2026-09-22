@@ -135,10 +135,11 @@ Deno.test("合成 IR: 記号は束縛で数値化され、格納と隣接と融�
   assertEquals(linear.bindings, { T: 3 });
   assertEquals(linear.binding_source, "cli");
 
-  // 格納は `ins` と同順（初期化子でない入力は null）。i4 は group 長と scale キーまで載る。
+  // 格納は `ins` と同順（初期化子でない入力は null）。dtype 欄は codec の登録名で、量子化 codec は
+  // group 長まで載る（scale は合流後の格納に無い — 供給計画が payload と一緒に運ぶ）。
   assertEquals(linear.storage, [
     null,
-    { tensor: "w.q", dtype: "i4", group_size: 16, scale: "w.scale" },
+    { tensor: "w.q", dtype: "int4-sym-g", group_size: 16 },
     { tensor: "b", dtype: "f32" },
   ]);
 
@@ -186,7 +187,7 @@ Deno.test("census 加重は同一の (op, shape, dtype, attrs, 格納, 融合) �
   );
   assertEquals(summary.node_count, 3);
   assertEquals(summary.by_op.linear, { nodes: 1, out_elements: 12 });
-  // 初期化子の格納シグネチャ（i4 は group 長込み）。素の elementwise は初期化子を持たない。
+  // 初期化子の格納シグネチャ（codec の登録名 + group 長）。素の elementwise は初期化子を持たない。
   assertEquals(summary.by_storage, { "f32+i4g16": 1, none: 2 });
   assertEquals(summary.by_fusion, {
     absorbed: { silu: 2 },
@@ -198,10 +199,14 @@ Deno.test("census 加重は同一の (op, shape, dtype, attrs, 格納, 融合) �
   assertEquals(summary.weights.every((weight) => weight.count === 1), true);
 
   // 加重行の格納は census 行と同じ**スロット同順の列**（集合の署名は別欄）。linear の
-  // `[x, W, bias]` で W だけが i4g32 という対応が、加重表だけを見て読める。
+  // `[x, W, bias]` で W だけが int4-sym-g という対応が、加重表だけを見て読める。
   const [linear] = summary.weights.filter((weight) => weight.op === "linear");
   assertEquals(linear.storage.length, linear.in_shapes.length);
-  assertEquals(linear.storage, [null, { dtype: "i4", group_size: 16 }, { dtype: "f32" }]);
+  assertEquals(linear.storage, [
+    null,
+    { dtype: "int4-sym-g", group_size: 16 },
+    { dtype: "f32" },
+  ]);
   assertEquals(linear.storage_signature, "f32+i4g16");
 });
 
@@ -251,8 +256,8 @@ Deno.test("census 加重: 格納の集合が同じでもスロット割り当て
   assertEquals(summary.weights.length, 2);
   assertEquals(summary.weights.map((weight) => weight.count), [1, 1]);
   assertEquals(summary.weights.map((weight) => weight.storage), [
-    [{ dtype: "i4", group_size: 16 }, { dtype: "f32" }],
-    [{ dtype: "f32" }, { dtype: "i4", group_size: 16 }],
+    [{ dtype: "int4-sym-g", group_size: 16 }, { dtype: "f32" }],
+    [{ dtype: "f32" }, { dtype: "int4-sym-g", group_size: 16 }],
   ]);
 });
 
@@ -371,8 +376,11 @@ Deno.test({
     }
     assertEquals(byStorage.get("f32+i4g32"), 276);
     // 276 本が畳まれて残る相異なる形は 12（attrs を加重キーに入れても linear は割れない）。
-    assertEquals(linears.filter((weight) => weight.storage_signature === "f32+i4g32").length, 12);
-    // lm_head だけが i8 重み（+ f32 bias）。
+    assertEquals(
+      linears.filter((weight) => weight.storage_signature === "f32+i4g32").length,
+      12,
+    );
+    // lm_head だけが i8 重み（+ f32 bias）。per-channel の group 長は行長 1536。
     assertEquals(byStorage.get("f32+i8"), 1);
     assertEquals(linears.reduce((total, weight) => total + weight.count, 0), 277);
     // 融合ヒットは実資産の門と同じ50（BSHDのq=35 / 所有k=15）。

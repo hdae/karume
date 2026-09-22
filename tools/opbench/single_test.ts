@@ -21,7 +21,7 @@ const GEMV_ROW: WeightRow = {
   in_dtypes: ["f32", "f32", "f32"],
   out_dtypes: ["f32"],
   attrs: {},
-  storage: [null, { dtype: "i4", group_size: 32 }, { dtype: "f32" }],
+  storage: [null, { dtype: "int4-sym-g", group_size: 32 }, { dtype: "f32" }],
   storage_signature: "f32+i4g32",
   fused_by: null,
   aliases_input: false,
@@ -60,7 +60,7 @@ Deno.test("buildCaseModel: 加重行 1 本から反復ぶんのノードを持�
   assertEquals(graph.nodes.length, 4);
   assertEquals(graph.outputs.length, 4);
   // 全ノードが同じ入力を読む（活性 x0 と初期化子 w1 / w2）。
-  for (const node of graph.nodes) assertEquals([...node.ins], ["x0", "w1", "w2"]);
+  for (const node of graph.nodes) assertEquals([...node.ins], ["x0", "m.w1", "m.w2"]);
   assertEquals(Object.keys(model.inputs), ["x0"]);
   const x0 = model.inputs["x0"];
   assert("data" in x0, "x0 はホスト配列");
@@ -77,7 +77,7 @@ Deno.test("buildCaseModel: i8 の scale は keepdim broadcast 形（先頭次元
       in_shapes: [[1, 8, 16], [4, 8, 3]],
       out_shapes: [[1, 4, 14]],
       in_dtypes: ["f32", "f32"],
-      storage: [null, { dtype: "i8" }],
+      storage: [null, { dtype: "int8-sym" }],
       storage_signature: "i8",
       op: "conv1d",
       attrs: { stride: 1, padding: 0, dilation: 1, groups: 1 },
@@ -215,7 +215,7 @@ Deno.test("buildCaseModel: i4 の行長が group_size で割り切れないと�
         row({
           in_shapes: [[1, 128], [64, 100]],
           in_dtypes: ["f32", "f32"],
-          storage: [null, { dtype: "i4", group_size: 32 }],
+          storage: [null, { dtype: "int4-sym-g", group_size: 32 }],
         }),
         1,
       ),
@@ -231,11 +231,11 @@ Deno.test("buildCaseModel: i4 なのに group_size 欄が無い行は落ちる",
         row({
           in_shapes: [[1, 128], [64, 128]],
           in_dtypes: ["f32", "f32"],
-          storage: [null, { dtype: "i4" }],
+          storage: [null, { dtype: "int4-sym-g" }],
         }),
         1,
       ),
     Error,
-    "i4 に group_size が無い",
+    "int4-sym-g に group_size が無い",
   );
 });

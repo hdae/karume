@@ -12,6 +12,22 @@
 
 export { ContainerError, openModel } from "./src/format/container.ts";
 export type { KarumeModel } from "./src/format/container.ts";
+/**
+ * Karume 専用コンテナ（`krm` / `krg` — ADR 0108・docs/container-v1.md）の読み口。`openContainer` は
+ * 外側の期待 hash で 2 文書を検証してから parse し、グラフと束縛表を合流する（重みの block は
+ * 要るときに取る）。`codecLayout` は codec 台帳の登録名 → 展開経路（`ternary` は `int2-off` と同じ
+ * i2 経路）で、models が格納の性質で分岐するときの唯一の読み口。
+ */
+export { openContainer } from "./src/format/container/open.ts";
+export type {
+  BlockSource,
+  ContainerInput,
+  DescriptorExpectation,
+  OpenedContainer,
+} from "./src/format/container/open.ts";
+export { ContainerFormatError } from "./src/format/container/header.ts";
+export { codecLayout } from "./src/format/container/codecs.ts";
+export type { CodecLayout, CodecName } from "./src/format/container/codecs.ts";
 export { DimError } from "./src/format/dims.ts";
 export { IrError } from "./src/format/ir.ts";
 /**
@@ -87,7 +103,13 @@ export type { RuntimeCapabilities } from "./src/ops.ts";
 
 export { DispatchLimitError } from "./src/codegen/errors.ts";
 
-export { createSession, createSessionFromShards, prepareModel } from "./src/runtime/executor.ts";
+export {
+  createSession,
+  createSessionFromContainer,
+  createSessionFromShards,
+  prepareContainer,
+  prepareModel,
+} from "./src/runtime/executor.ts";
 export { DEFAULT_PLAN_BACKING_BUDGET_BYTES } from "./src/runtime/session-types.ts";
 /**
  * 重み DL 前の admission の入口（ADR 0070 決定 5 / graph-first）。グラフ shard

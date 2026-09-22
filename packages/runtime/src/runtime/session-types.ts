@@ -401,7 +401,7 @@ export type SessionOptions = {
    * 貸し手 `Session.exportWeight()` の戻り）。
    *
    * グラフの `shared` 宣言**全部**に対して過不足なく与える MUST。門は 5 点（同一 device・
-   * 宣言 shape・格納 dtype・消費席・チャネル軸 — `resolveSharedWeights`）で、どれも破れは
+   * 宣言 shape・消費席（貸し手の codec から導く）・行の軸 — `resolveSharedWeights`）で、どれも破れは
    * 例外ではなく別の値として出るため fail loudly。
    *
    * 寿命: 借り手 Session が生きている間、貸し手 Session の `dispose()` は fail loudly になる

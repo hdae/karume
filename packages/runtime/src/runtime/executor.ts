@@ -20,8 +20,21 @@
  * 実行されないまま誤った値が静かに残る。
  */
 
-import { assertRuntimeSupport, extractIrGraph, type KarumeModel } from "../format/container.ts";
-import type { IrDtype, IrGraph } from "../format/ir.ts";
+import {
+  assertRuntimeSupport,
+  extractIrGraph,
+  type KarumeModel,
+  type ReadyInitializer,
+  type ReadyScale,
+} from "../format/container.ts";
+import {
+  assertTernaryCodes,
+  type InitializerSupply,
+  mergedGraph,
+} from "../format/container/bind.ts";
+import { groupCount } from "../format/container/codecs.ts";
+import type { OpenedContainer } from "../format/container/open.ts";
+import type { IrDtype, IrGraph, LegacyKeys } from "../format/ir.ts";
 import type { SafetensorsFile } from "../format/safetensors.ts";
 import { type ArenaStats, RunArena, STORAGE_USAGE } from "../gpu/arena.ts";
 import {
@@ -97,7 +110,7 @@ import {
   type PreparedPlan,
   type SessionState,
   shardOrigin,
-  type WeightShard,
+  type WeightBatch,
 } from "./session-build.ts";
 import type {
   EnqueueOptions,
@@ -672,10 +685,10 @@ export class Session {
     gpu: GpuContext,
     graph: IrGraph,
     residency: ReadonlyMap<string, WeightResidency>,
-    shards: AsyncIterable<WeightShard>,
+    batches: AsyncIterable<WeightBatch>,
     options: SessionOptions,
   ): Promise<Session> {
-    return new Session(await buildSessionState(gpu, graph, residency, shards, options));
+    return new Session(await buildSessionState(gpu, graph, residency, batches, options));
   }
 
   /**
@@ -1117,14 +1130,22 @@ export class Session {
         `exportWeight: initializer '${initializerName}' の重みバッファが台帳に無い`,
       );
     }
+    // 貸し手の codec（借り手の期待席はこれと借り手側の消費から導く）。共有宣言は上で落として
+    // いるので storage は必ず在る。
+    const lenderCodec = graph.initializers[initializerName].storage?.codec;
+    if (lenderCodec === undefined) {
+      throw new ExecutionError(
+        `exportWeight: initializer '${initializerName}' の格納が無い（簿記の破れ）`,
+      );
+    }
     return new SharedWeight({
       initializer: initializerName,
       gpu,
       buffer,
       resident: residentWeights.get(initializerName),
       seat: seat.seat,
-      channelAxis: seat.seat === "i8" || seat.seat === "i2" ? seat.channelAxis : undefined,
-      storage: graph.initializers[initializerName].storage.dtype,
+      rowAxis: seat.seat === "i8" || seat.seat === "i2" ? seat.rowAxis : undefined,
+      codec: lenderCodec,
       shape: graph.values[initializerName].shape.map(Number),
       retain: (): void => {
         if (this.#disposal !== undefined) {
@@ -2595,29 +2616,37 @@ export class Session {
  * のみ**公開する（`Session` / `GpuContext` と同じ流儀 — 直接構築すると capability 門と
  * 契約検査を迂回した「実行できないモデルの Session」が作れてしまう）。
  */
+/** {@link PreparedModel} の供給元 — 旧 shard 列（safetensors）か、開いたコンテナ（`krm`）か。 */
+type PreparedSource =
+  | {
+    readonly kind: "shards";
+    /** グラフ shard の parse 結果（小テンソルの正本 — validator.intake が重みとして消費する）。 */
+    readonly file: SafetensorsFile;
+    /**
+     * 失敗とフェンスの帰属先。**全量面は undefined**（帰属先が 1 つしかない単一ファイル面の
+     * 文言を変えない MUST — ADR 0070 受入①の契約）。
+     */
+    readonly origin: string | undefined;
+    readonly legacy: LegacyKeys;
+  }
+  | { readonly kind: "container"; readonly opened: OpenedContainer; readonly graphName: string };
+
 export class PreparedModel {
-  /** グラフ shard の parse 結果（小テンソルの正本 — validator.intake が重みとして消費する）。 */
-  readonly #file: SafetensorsFile;
+  readonly #source: PreparedSource;
   readonly #graph: IrGraph;
-  /**
-   * 失敗とフェンスの帰属先。**全量面は undefined**（帰属先が 1 つしかない単一ファイル面の
-   * 文言を変えない MUST — ADR 0070 受入①の契約）。
-   */
-  readonly #origin: string | undefined;
   /** 席とバイト数（グラフだけで決まる）— 見積りと構築が共有する 1 個。 */
   readonly #residency: ReadonlyMap<string, WeightResidency>;
 
-  private constructor(file: SafetensorsFile, graph: IrGraph, origin: string | undefined) {
-    // 非対応 op / 格納 dtype は全件列挙して落とす（1 件ずつ落とすと何本足りないか分からない）。
-    // MUST: この 2 門は**重み shard に触れる前**に通す（2 段境界の存在理由そのもの — 実行
+  private constructor(source: PreparedSource, graph: IrGraph) {
+    // 非対応 op / 格納は全件列挙して落とす（1 件ずつ落とすと何本足りないか分からない）。
+    // MUST: この 2 門は**重みに触れる前**に通す（2 段境界の存在理由そのもの — 実行
     // できないモデルの重みを DL してから落とすことがなくなる）。
     // NOTE: capability 不足も契約違反もモデル（グラフ）の性質で shard 由来ではないので帰属を
     // 足さない — 全量面と同じ文言のままにする。
     assertRuntimeSupport(graph, RUNTIME_SUPPORT);
     validateGraphContracts(graph);
-    this.#file = file;
+    this.#source = source;
     this.#graph = graph;
-    this.#origin = origin;
     this.#residency = planWeightResidency(graph);
   }
 
@@ -2625,19 +2654,44 @@ export class PreparedModel {
   static fromGraphShard(graphShard: ModelShard): PreparedModel {
     const origin = shardOrigin(0, graphShard.id);
     const file = parseShard(graphShard.bytes, origin);
-    let graph: IrGraph;
+    let parsed: { readonly graph: IrGraph; readonly legacy: LegacyKeys };
     try {
-      graph = extractIrGraph(file);
+      parsed = extractIrGraph(file);
     } catch (cause) {
       // 「先頭がグラフ shard でない」も shard の取り違え — どの資産を先頭に置いたのかを名乗る。
       throw attributeToShard(origin, cause);
     }
-    return new PreparedModel(file, graph, origin);
+    return new PreparedModel(
+      { kind: "shards", file, origin, legacy: parsed.legacy },
+      parsed.graph,
+    );
   }
 
   /** 全量面（openModel 済み）から prepare する（= 全テンソル同居のグラフ shard 1 本）。 */
   static fromModel(model: KarumeModel): PreparedModel {
-    return new PreparedModel(model.file, model.graph, undefined);
+    return new PreparedModel(
+      { kind: "shards", file: model.file, origin: undefined, legacy: model.legacy },
+      model.graph,
+    );
+  }
+
+  /**
+   * 開いたコンテナ（`krm` — {@link "../format/container/open.ts"} の `openContainer`）の 1 グラフから
+   * prepare する。合流（グラフ × 束縛表）は開いた時点で済んでいるので、ここは admission だけ。
+   */
+  static fromContainer(opened: OpenedContainer, graphName: string): PreparedModel {
+    const bound = opened.graphs[graphName];
+    if (bound === undefined) {
+      throw new ExecutionError(
+        `コンテナにグラフ '${graphName}' が無い（在るのは ${
+          Object.keys(opened.graphs).join(" / ")
+        }）`,
+      );
+    }
+    return new PreparedModel(
+      { kind: "container", opened, graphName },
+      mergedGraph(bound, graphName),
+    );
   }
 
   /**
@@ -2675,19 +2729,109 @@ export class PreparedModel {
     weightShards: AsyncIterable<ModelShard>,
     options: SessionOptions = {},
   ): Promise<Session> {
+    const source = this.#source;
+    if (source.kind !== "shards") {
+      throw new ExecutionError(
+        "コンテナから prepare した PreparedModel は createContainerSession(gpu, options) で Session にする（shard 列は受けない）",
+      );
+    }
     const iterator = weightShards[Symbol.asyncIterator]();
     try {
       // MUST: グラフ shard 自身のテンソルも重みとして同じ門を通す（ADR 0070 決定 1 — 検査・
       // アップロード・errorScope 規律を 2 面で分岐させない）。
-      const files = followingShards({ file: this.#file, origin: this.#origin }, iterator);
-      return await Session.build(gpu, this.#graph, this.#residency, files, options);
+      const batches = followingShards(
+        this.#graph,
+        source.legacy,
+        { file: source.file, origin: source.origin },
+        iterator,
+      );
+      return await Session.build(gpu, this.#graph, this.#residency, batches, options);
     } catch (cause) {
       // MUST: 後始末の失敗で本体の例外を上書きしない（run 側と同じ規律）。
       await iterator.return?.().catch(() => undefined);
       throw cause;
     }
   }
+
+  /**
+   * コンテナの block を part ごとに取り出して Session を作る（ADR 0108 決定 9 — errorScope は block
+   * ごと・フェンスは part ごと）。block は取得のたびに sha256 で検証する（container-v1 §7 の cold 経路）。
+   */
+  async createContainerSession(gpu: GpuContext, options: SessionOptions = {}): Promise<Session> {
+    const source = this.#source;
+    if (source.kind !== "container") {
+      throw new ExecutionError(
+        "旧 shard 列から prepare した PreparedModel は createSession(gpu, weightShards, options) で Session にする",
+      );
+    }
+    return await Session.build(
+      gpu,
+      this.#graph,
+      this.#residency,
+      containerBatches(source.opened, source.graphName),
+      options,
+    );
+  }
 }
+
+/**
+ * コンテナの供給計画を part ごとの {@link WeightBatch} に流す。part の中では initializer の宣言順
+ * （= 束縛表の並び）で、piece 列は添字順。scale は piece 1 と同じ part にある（規則③）ので、
+ * piece 1 の item に同乗させる。
+ */
+const containerBatches = async function* (
+  opened: OpenedContainer,
+  graphName: string,
+): AsyncGenerator<WeightBatch, void, unknown> {
+  const bound = opened.graphs[graphName];
+  if (bound === undefined) throw new ExecutionError(`コンテナにグラフ '${graphName}' が無い`);
+  const byPart = new Map<
+    number,
+    { readonly name: string; readonly supply: InitializerSupply; readonly index: number }[]
+  >();
+  for (const [name, supply] of bound.supplies) {
+    supply.blocks.forEach((block, index) => {
+      const list = byPart.get(block.part) ?? [];
+      list.push({ name, supply, index });
+      byPart.set(block.part, list);
+    });
+  }
+  for (const part of [...byPart.keys()].sort((a, b) => a - b)) {
+    const items: ReadyInitializer[] = [];
+    for (const { name, supply, index } of byPart.get(part) ?? []) {
+      const block = supply.blocks[index];
+      const where = `graph '${graphName}' initializer '${name}'`;
+      const payload = (await opened.readBlock(block.id)).subarray(0, block.payloadBytes);
+      if (supply.encoding.codec === "ternary") assertTernaryCodes(payload, where);
+      let scale: ReadyScale | undefined;
+      if (index === 0 && supply.scale !== undefined) {
+        const shape = bound.declaration.values[name].shape.map(Number);
+        const rowAxis = supply.encoding.rowAxis ?? 0;
+        const rows = shape[rowAxis];
+        const numel = shape.reduce((count, dim) => count * dim, 1);
+        const rowLength = rows === 0 ? 0 : numel / rows;
+        const groups = groupCount(rowLength, supply.encoding.groupSize ?? 1);
+        scale = {
+          bytes: (await opened.readBlock(supply.scale.id)).subarray(0, supply.scale.payloadBytes),
+          shape: [rows, groups],
+        };
+      }
+      const piece = supply.blocks.length === 1 ? undefined : {
+        rowOffset: block.rows[0],
+        rows: block.rows[1] - block.rows[0],
+        first: index === 0,
+        last: index === supply.blocks.length - 1,
+      };
+      items.push({
+        name,
+        payload,
+        ...(scale === undefined ? {} : { scale }),
+        ...(piece === undefined ? {} : { piece }),
+      });
+    }
+    yield { origin: `part ${part}`, items, scopePerItem: true };
+  }
+};
 
 /**
  * グラフ shard（配布形の先頭 shard = `__metadata__.karume_ir` + 小テンソル）だけで admission を
@@ -2755,3 +2899,24 @@ export const createSessionFromShards = async (
   // 失敗したときの `return()` が元の列（hub の async generator）まで届かない）。
   return await prepared.createSession(gpu, { [Symbol.asyncIterator]: () => iterator }, options);
 };
+
+/**
+ * 開いたコンテナ（`krm`）の 1 グラフで admission を済ませる 2 段境界の入口（コンテナ版の
+ * {@link prepareModel}）。合流（グラフ × 束縛表）は `openContainer` が済ませているので、ここで
+ * 落ちるのは capability 不足と IR 契約違反だけ — 重みの block を 1 つも取る前に分かる。
+ */
+export const prepareContainer = (opened: OpenedContainer, graphName: string): PreparedModel =>
+  PreparedModel.fromContainer(opened, graphName);
+
+/**
+ * 開いたコンテナの 1 グラフから Session を作る（{@link prepareContainer} +
+ * {@link PreparedModel.createContainerSession} の薄い合成）。block は part ごとにまとめて取り、
+ * 取るたびに sha256 で検証する（container-v1 §7）。
+ */
+export const createSessionFromContainer = async (
+  gpu: GpuContext,
+  opened: OpenedContainer,
+  graphName: string,
+  options: SessionOptions = {},
+): Promise<Session> =>
+  await prepareContainer(opened, graphName).createContainerSession(gpu, options);

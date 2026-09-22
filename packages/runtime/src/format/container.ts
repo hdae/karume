@@ -2,13 +2,21 @@
 // グラフ単体の規則は ir.ts が済ませている前提で、ここは宣言と実テンソルの突合、および
 // ランタイム対応表との突合だけを持つ。
 
+import { type CodecLayout, codecLayout, perChannelGroupSize } from "./container/codecs.ts";
 import { groupScaleShape } from "./i4.ts";
-import { type IrDtype, type IrGraph, type IrStorageDtype, parseIrGraph } from "./ir.ts";
+import {
+  type IrDtype,
+  type IrGraph,
+  type IrStorage,
+  type LegacyKeys,
+  parseLegacyIrGraph,
+} from "./ir.ts";
 import {
   declaredByteLength,
   parseSafetensors,
   type SafetensorsDtype,
   type SafetensorsFile,
+  tensorBytes,
   type TensorView,
 } from "./safetensors.ts";
 
@@ -25,6 +33,8 @@ export class ContainerError extends Error {
 export type KarumeModel = {
   readonly graph: IrGraph;
   readonly file: SafetensorsFile;
+  /** 旧配布形の付随情報（companion scale のキー）— shard validator が突合に使う。 */
+  readonly legacy: LegacyKeys;
 };
 
 /** op ごとの実行可能条件。op 名だけでは dtype と attrs の差が表せない。 */
@@ -69,7 +79,7 @@ export type RuntimeSupport = {
    * 結果は実行の可否ではなく VRAM の効き方を変えるだけなので、ここでは分岐しない
    * （適格 0MB を沈黙させないのは Session の診断の役目 — ADR 0006）。
    */
-  readonly storage: ReadonlySet<IrStorageDtype>;
+  readonly storage: ReadonlySet<CodecLayout>;
   /**
    * グラフ入力として転送できる意味論 dtype。
    *
@@ -88,7 +98,7 @@ export type RuntimeSupport = {
  * （実行可否の正本は {@link RuntimeSupport.storage} の実値 = src/ops.ts の `RUNTIME_SUPPORT`。
  * ここで数え上げると同じ事実を 2 箇所で持つことになり、増えたときに片方だけ腐る）。
  */
-const STORAGE_ENCODING: Readonly<Record<IrStorageDtype, SafetensorsDtype>> = {
+const STORAGE_ENCODING: Readonly<Record<CodecLayout, SafetensorsDtype>> = {
   f32: "F32",
   f16: "F16",
   bf16: "BF16",
@@ -114,7 +124,7 @@ const SCALE_DTYPE: SafetensorsDtype = "F32";
  * 開けたモデルではこの値が現物と厳密に一致する。
  */
 export const declaredPayloadBytes = (
-  storage: IrStorageDtype,
+  storage: CodecLayout,
   count: number,
   where: string,
 ): number => declaredByteLength(STORAGE_ENCODING[storage], count, where);
@@ -134,11 +144,11 @@ export const openModel = (buffer: ArrayBuffer): KarumeModel =>
  * 割れる（ADR 0070 決定 1 が「同一集合の shard 横断版」と言っているのはこの一本化のこと）。
  */
 const openModelFile = (file: SafetensorsFile): KarumeModel => {
-  const graph = extractIrGraph(file);
-  const validator = createShardValidator(graph);
+  const { graph, legacy } = extractIrGraph(file);
+  const validator = createShardValidator(graph, legacy);
   validator.intake(file);
   validator.finish();
-  return { graph, file };
+  return { graph, file, legacy };
 };
 
 /**
@@ -148,12 +158,14 @@ const openModelFile = (file: SafetensorsFile): KarumeModel => {
  * 「karume_ir があるか」を見るのはこの 1 箇所だけ — 重み shard は metadata を見ない
  * （{@link ShardValidator.intake} が metadata に触らないのはこのため）。
  */
-export const extractIrGraph = (file: SafetensorsFile): IrGraph => {
+export const extractIrGraph = (
+  file: SafetensorsFile,
+): { readonly graph: IrGraph; readonly legacy: LegacyKeys } => {
   const json = file.metadata.get(IR_METADATA_KEY);
   if (json === undefined) {
     throw new ContainerError(`__metadata__.${IR_METADATA_KEY} が無い（Karume モデルではない）`);
   }
-  return parseIrGraph(json);
+  return parseLegacyIrGraph(json);
 };
 
 /**
@@ -161,7 +173,7 @@ export const extractIrGraph = (file: SafetensorsFile): IrGraph => {
  * ADR 0090 の読み手契約）。
  *
  * 単独で 1 shard に収まらない大テンソルは**先頭次元（行）の連続範囲**へ割って、連続する
- * shard へ 1 本ずつ配られる。親名が宣言（`initializer.tensor`）に在るときだけ piece と
+ * shard へ 1 本ずつ配られる。親名が宣言（initializer 名 = 実体キー）に在るときだけ piece と
  * 解釈する MUST — 素のテンソル名に偶然この綴りが現れても、宣言に無ければ従来どおり余剰
  * （どの initializer からも参照されないテンソル）として落ちる。
  */
@@ -169,7 +181,7 @@ const PIECE_KEY = /^(.+)#(\d{5})-of-(\d{5})$/;
 
 /** piece キーの分解結果（{@link parsePieceKey}）。 */
 export type PieceKey = {
-  /** 親テンソルのキー（= `initializer.tensor`）。 */
+  /** 親テンソルのキー（= initializer 名）。 */
   readonly name: string;
   /** 1 始まりの位置。 */
   readonly index: number;
@@ -196,21 +208,38 @@ export const parsePieceKey = (key: string): PieceKey | undefined => {
 
 /** 分割テンソルの 1 本ぶんの位置（{@link ReadyInitializer.piece}）。 */
 export type InitializerPiece = {
-  /** この piece が始まる行（先頭次元）。行数は `view.shape[0]`。 */
+  /** この piece が始まる行（先頭次元）。 */
   readonly rowOffset: number;
+  /** この piece の行数。 */
+  readonly rows: number;
   /** piece 1（バッファ確保と companion scale の転送を担う席）。 */
   readonly first: boolean;
   /** piece n（末尾整列の詰め物を担う席）。 */
   readonly last: boolean;
 };
 
-/** その shard で**実体が確定した** initializer（payload と、あれば companion scale の view）。 */
+/**
+ * companion scale の実体（量子化 codec のみ・piece 列では piece 1 だけ）。
+ *
+ * `shape` は**rank 2 group 形** `[shape[rowAxis], 行長 / groupSize]`（container-v1 §6.1）に
+ * 正規化済み。旧配布形の i8 が持つ keepdim broadcast 形（`[out,1]` / `[1,Cout,1]`）はバイト列が
+ * 同じなので、形だけをここで読み替える（消費側は 1 形だけを扱う）。
+ */
+export type ReadyScale = {
+  readonly bytes: Uint8Array<ArrayBuffer>;
+  readonly shape: readonly [number, number];
+};
+
+/**
+ * 供給元（旧 shard の validator / コンテナの供給計画）から Session 構築へ渡る initializer 1 本ぶんの
+ * 実体。**バイト列**で受け渡す（safetensors の view でもコンテナの block でもない — 供給元の形を
+ * 消費側に漏らさない）。
+ */
 export type ReadyInitializer = {
   readonly name: string;
-  /** payload の実体 view（file 内）。piece 列では**その piece だけ**の view。 */
-  readonly view: TensorView;
-  /** scale の実体 view（`storage.scale` を持つ initializer のみ・piece 列では piece 1 だけ）。 */
-  readonly scale?: TensorView;
+  /** 格納 payload（丸ごと / その piece だけ）。整列の詰め物を含まない生バイト列。 */
+  readonly payload: Uint8Array<ArrayBuffer>;
+  readonly scale?: ReadyScale;
   /**
    * 分割テンソルの位置（丸ごと 1 本で来たときは undefined — ADR 0090）。
    *
@@ -219,8 +248,6 @@ export type ReadyInitializer = {
    * 詰め物が次の piece の先頭バイトを潰す沈黙誤値になる）。
    */
   readonly piece?: InitializerPiece;
-  /** view / scale が指す shard。逐次消費側は転送後にこの参照を手放す（ADR 0070 決定 3）。 */
-  readonly file: SafetensorsFile;
 };
 
 /** piece 列の進行状態（親テンソル 1 本ぶん — 完了した親は表から消える）。 */
@@ -265,7 +292,7 @@ const collectShardPieces = (
 };
 
 /**
- * companion scale の実体を突き合わせる（実在 = co-shard MUST・dtype・形）。
+ * companion scale の実体を突き合わせ、rank 2 group 形へ正規化する（実在 = co-shard MUST・F32・形）。
  *
  * MUST: 丸ごとの実体と piece 1 で**同じ規則**を掛ける。分割された重みでも scale は 1 本きりで、
  * 置き場所は「実体（piece 列なら piece 1）と同じ shard」だけが許される — 逐次消費は weight と
@@ -273,38 +300,28 @@ const collectShardPieces = (
  */
 const resolveScale = (
   name: string,
-  initializer: IrGraph["initializers"][string],
-  weightShape: readonly (number | string)[],
+  storage: IrStorage,
+  scaleKey: string | undefined,
+  weightShape: readonly number[],
   file: SafetensorsFile,
-): TensorView | undefined => {
-  const scaleKey = initializer.storage.scale;
+): ReadyScale | undefined => {
   if (scaleKey === undefined) return undefined;
   const scale = file.tensors.get(scaleKey);
   if (scale === undefined) {
     throw new ContainerError(
-      `initializer '${name}': scale テンソル '${scaleKey}' がファイルに無い（実体 '${initializer.tensor}' と同じ shard に置く MUST — companion scale の co-shard 契約・ADR 0070 決定 1）`,
+      `initializer '${name}': scale テンソル '${scaleKey}' がファイルに無い（実体 '${name}' と同じ shard に置く MUST — companion scale の co-shard 契約・ADR 0070 決定 1）`,
     );
   }
-  // group 形の scale を要求するのは格納 i4 だけ（ADR 0069 決定 3）。i8 に付いた
-  // group_size は語彙としては通る（実行できないことは assertRuntimeSupport が列挙する）
-  // ので、scale の形の分岐は group_size の有無ではなく**格納 dtype**で決める。
-  const groupSize = initializer.storage.dtype === "i4" ? initializer.storage.groupSize : undefined;
-  assertScaleTensor(name, scaleKey, scale, weightShape, groupSize);
-  if (
-    initializer.storage.dtype === "i2" &&
-    (scale.shape.length !== 2 || scale.shape[0] !== weightShape[0] || scale.shape[1] !== 1)
-  ) {
-    throw new ContainerError(`initializer '${name}': i2 の scale は [${weightShape[0]},1] が必要`);
-  }
-  return scale;
+  const shape = assertScaleTensor(name, scaleKey, scale, weightShape, storage);
+  return { bytes: tensorBytes(file, scale), shape };
 };
 
 /**
  * shard を 1 本ずつ受けて進行的に検査する器（ADR 0070 決定 1）。
  *
- * 突合集合は `initializer.tensor` と `storage.scale` が指す名前の**和**（+ 親が宣言に在る
- * piece キー — {@link parsePieceKey}）。shard ごとに決まること（余剰・重複・dtype / shape・
- * scale の形・co-shard・piece の並びと行範囲）は {@link intake} が即座に、全 shard 揃って
+ * 突合集合は initializer 名（= 実体のテンソルキー）と `legacy.scaleKeys` が指す名前の**和**（+ 親が
+ * 宣言に在る piece キー — {@link parsePieceKey}）。shard ごとに決まること（余剰・重複・dtype /
+ * shape・scale の形・co-shard・piece の並びと行範囲）は {@link intake} が即座に、全 shard 揃って
  * 初めて決まること（欠け・未完の piece 列）は {@link finish} が見る。
  */
 export type ShardValidator = {
@@ -314,25 +331,26 @@ export type ShardValidator = {
   finish(): void;
 };
 
-export const createShardValidator = (graph: IrGraph): ShardValidator => {
+export const createShardValidator = (graph: IrGraph, legacy: LegacyKeys): ShardValidator => {
   // グラフ単体で決まる規則は shard を 1 本も見ないうちに落とす（構築時 1 回）。
-  assertNoScaleKeyCollision(graph);
+  assertNoScaleKeyCollision(graph, legacy);
   // 突合集合（ADR 0070 決定 1）。scale は IR の値ではないので initializer 集合だけを正本に
   // すると i8 / i4 資産の scale が全て「余剰」になる。
   const declaredNames = new Set<string>();
   // piece キーの親として認める名前（実体キーだけ — scale は分割しない）。
   const declaredTensors = new Set<string>();
-  for (const initializer of Object.values(graph.initializers)) {
+  for (const [name, initializer] of Object.entries(graph.initializers)) {
     // 共有 initializer（ADR 0096 段 2 §1.3）はバイトを配布形に持たない — 突合集合に入れると
     // 「宣言に対して不足するテンソル」で必ず落ちる。実体の素性は借り手 Session 構築時に
-    // `SessionOptions.sharedWeights` の門が見る（貸し手の席・宣言 shape・格納 dtype）。
+    // `SessionOptions.sharedWeights` の門が見る（貸し手の席・宣言 shape・格納）。
     if (initializer.shared !== undefined) continue;
-    declaredNames.add(initializer.tensor);
-    declaredTensors.add(initializer.tensor);
-    if (initializer.storage.scale !== undefined) declaredNames.add(initializer.storage.scale);
+    declaredNames.add(name);
+    declaredTensors.add(name);
+    const scaleKey = legacy.scaleKeys.get(name);
+    if (scaleKey !== undefined) declaredNames.add(scaleKey);
   }
   const seen = new Set<string>();
-  /** 進行中の piece 列（キー = `initializer.tensor`）。 */
+  /** 進行中の piece 列（キー = initializer 名）。 */
   const progress = new Map<string, PieceProgress>();
 
   return {
@@ -346,26 +364,29 @@ export const createShardValidator = (graph: IrGraph): ShardValidator => {
       // 配布形の詰め方でアリーナ配置が変わるため。
       const pieces = collectShardPieces(file, declaredTensors);
       // 進行状態の更新は**全検査を通り抜けた後**にまとめて適用する（`seen` と同じ規律）。
-      const advanced: { readonly tensor: string; readonly next: PieceProgress | undefined }[] = [];
+      const advanced: { readonly name: string; readonly next: PieceProgress | undefined }[] = [];
       for (const [name, initializer] of Object.entries(graph.initializers)) {
         // 共有 initializer は shard に実体を持たない（突合集合の外 — validator 構築時の doc）。
         if (initializer.shared !== undefined) continue;
         const where = `initializer '${name}'`;
-        // 意味論 dtype と格納 dtype の組（f32 の符号化語彙 / i32 は生の int32）と数値 shape は
-        // parseIrGraph が保証済み（グラフ単体で決まる規則はパーサに一本化 — docs/ir-v2.md）。
-        // ここは実テンソルとの突合だけを見る。
+        // 意味論 dtype と codec の組と数値 shape はパーサ / 合流層が保証済み（グラフ単体で決まる
+        // 規則はそちらに一本化 — docs/ir-v2.md）。ここは実テンソルとの突合だけを見る。
         const declared = graph.values[name];
-        const expected = STORAGE_ENCODING[initializer.storage.dtype];
-        const view = file.tensors.get(initializer.tensor);
-        const shardPieces = pieces.byParent.get(initializer.tensor);
-        const state = progress.get(initializer.tensor);
+        const declaredShape = declared.shape.map(Number);
+        const storage = initializer.storage;
+        const codec = storage.codec;
+        const expected = STORAGE_ENCODING[codecLayout(codec)];
+        const scaleKey = legacy.scaleKeys.get(name);
+        const view = file.tensors.get(name);
+        const shardPieces = pieces.byParent.get(name);
+        const state = progress.get(name);
         if (shardPieces === undefined) {
           // MUST: piece 列の途中でこの親の piece が来ない shard は違反。分割は「連続する shard
           // へ 1 本ずつ」なので、途切れた列は後続 shard でも埋まらない — 欠けとして読了まで
           // 持ち越すと、どの shard から崩れたのかが失われる。
           if (state !== undefined) {
             throw new ContainerError(
-              `${where}: テンソル '${initializer.tensor}' の piece 列がこの shard で途切れた` +
+              `${where}: テンソル '${name}' の piece 列がこの shard で途切れた` +
                 `（${state.nextIndex - 1}/${state.count} まで受理・次は index ${state.nextIndex} ` +
                 "が要る — piece は連続する shard に 1 本ずつ置く MUST）",
             );
@@ -374,7 +395,7 @@ export const createShardValidator = (graph: IrGraph): ShardValidator => {
           if (view === undefined) continue;
           if (view.dtype !== expected) {
             throw new ContainerError(
-              `${where}: 格納 dtype '${initializer.storage.dtype}' に対し safetensors 側が ${view.dtype}（${expected} が必要）`,
+              `${where}: 格納 codec '${codec}' に対し safetensors 側が ${view.dtype}（${expected} が必要）`,
             );
           }
           if (
@@ -389,9 +410,8 @@ export const createShardValidator = (graph: IrGraph): ShardValidator => {
           }
           ready.push({
             name,
-            view,
-            scale: resolveScale(name, initializer, declared.shape, file),
-            file,
+            payload: tensorBytes(file, view),
+            scale: resolveScale(name, storage, scaleKey, declaredShape, file),
           });
           continue;
         }
@@ -399,7 +419,7 @@ export const createShardValidator = (graph: IrGraph): ShardValidator => {
         // 再定義（どちらのバイトが勝つかが転送順で決まる沈黙誤値）と同じ機序になる。
         if (view !== undefined) {
           throw new ContainerError(
-            `${where}: テンソル '${initializer.tensor}' が丸ごとと piece '${
+            `${where}: テンソル '${name}' が丸ごとと piece '${
               shardPieces[0].key
             }' の両方でこの shard に在る（1 テンソルは丸ごとか piece 列のどちらか一方）`,
           );
@@ -411,9 +431,9 @@ export const createShardValidator = (graph: IrGraph): ShardValidator => {
           );
         }
         const piece = shardPieces[0];
-        if (state === undefined && seen.has(initializer.tensor)) {
+        if (state === undefined && seen.has(name)) {
           throw new ContainerError(
-            `${where}: テンソル '${initializer.tensor}' は別の shard で実体が確定しているのに piece '${piece.key}' が来た（1 テンソルは丸ごとか piece 列のどちらか一方）`,
+            `${where}: テンソル '${name}' は別の shard で実体が確定しているのに piece '${piece.key}' が来た（1 テンソルは丸ごとか piece 列のどちらか一方）`,
           );
         }
         const expectedIndex = state?.nextIndex ?? 1;
@@ -429,7 +449,7 @@ export const createShardValidator = (graph: IrGraph): ShardValidator => {
         }
         if (piece.view.dtype !== expected) {
           throw new ContainerError(
-            `${where}: 格納 dtype '${initializer.storage.dtype}' に対し piece '${piece.key}' が ${piece.view.dtype}（${expected} が必要）`,
+            `${where}: 格納 codec '${codec}' に対し piece '${piece.key}' が ${piece.view.dtype}（${expected} が必要）`,
           );
         }
         // piece は親の**先頭次元の連続範囲**（dtype は親と同一・残りの次元は宣言と同値）。
@@ -443,7 +463,14 @@ export const createShardValidator = (graph: IrGraph): ShardValidator => {
             }] の行範囲でない（先頭次元は 1 以上の行数・残りの次元は宣言と同値）`,
           );
         }
-        const declaredRows = Number(declared.shape[0]);
+        // 規則④: rowAxis が 0 でない initializer は piece 分割できない（scale の行範囲が piece の
+        // 行範囲に対応しない — container-v1 §5）。
+        if (storage.rowAxis !== undefined && storage.rowAxis !== 0) {
+          throw new ContainerError(
+            `${where}: rowAxis ${storage.rowAxis} の initializer は piece 分割できない（piece '${piece.key}'）`,
+          );
+        }
+        const declaredRows = declaredShape[0];
         const rowOffset = state?.rows ?? 0;
         const covered = rowOffset + rows;
         if (covered > declaredRows) {
@@ -468,17 +495,16 @@ export const createShardValidator = (graph: IrGraph): ShardValidator => {
         }
         ready.push({
           name,
-          view: piece.view,
+          payload: tensorBytes(file, piece.view),
           // companion scale は piece 1 と同じ shard（co-shard MUST の piece 版）。2 本目以降の
           // shard に scale があれば「別 shard で定義済み」として再定義検査が落とす。
           scale: piece.index === 1
-            ? resolveScale(name, initializer, declared.shape, file)
+            ? resolveScale(name, storage, scaleKey, declaredShape, file)
             : undefined,
-          piece: { rowOffset, first: piece.index === 1, last },
-          file,
+          piece: { rowOffset, rows, first: piece.index === 1, last },
         });
         advanced.push({
-          tensor: initializer.tensor,
+          name,
           next: last
             ? undefined
             : { count: piece.count, nextIndex: piece.index + 1, rows: covered },
@@ -486,7 +512,7 @@ export const createShardValidator = (graph: IrGraph): ShardValidator => {
       }
       // 実体 → 宣言の 3 本。孤立 scale を余剰より先に見るのは帰属の問題（下の doc）。重複は
       // 突合集合に入っている名前でしか起きない（= 余剰と交わらない）ので、順は結果を変えない。
-      assertNoOrphanScale(graph, file, pieces.byParent, seen);
+      assertNoOrphanScale(graph, legacy, file, pieces.byParent, seen);
       assertNoSurplusTensors(declaredNames, pieces.keys, file);
       assertNoRedefinedTensors(seen, file);
       // 記録は全検査を通り抜けた後（途中で落ちた shard は「見た」ことにしない — 失敗した
@@ -494,13 +520,13 @@ export const createShardValidator = (graph: IrGraph): ShardValidator => {
       for (const name of file.tensors.keys()) seen.add(name);
       for (const step of advanced) {
         if (step.next !== undefined) {
-          progress.set(step.tensor, step.next);
+          progress.set(step.name, step.next);
           continue;
         }
-        progress.delete(step.tensor);
+        progress.delete(step.name);
         // 親名を「見た」ことにするのは**最後の piece を受理したとき**だけ（欠け検査の突合先
         // であり、以後の丸ごと再定義を落とす印でもある）。
-        seen.add(step.tensor);
+        seen.add(step.name);
       }
       return ready;
     },
@@ -512,21 +538,21 @@ export const createShardValidator = (graph: IrGraph): ShardValidator => {
         // 共有 initializer は「欠け」ではない（実体は貸し手が持つ — validator 構築時の doc）。
         if (initializer.shared !== undefined) continue;
         const where = `initializer '${name}'`;
-        const state = progress.get(initializer.tensor);
+        const state = progress.get(name);
         if (state !== undefined) {
           // 未完の piece 列も欠けの一種。どこまで来て何行残っているかまで言う（配布形を
           // 組み直す側は、この 2 つでどの piece から作り直すかを決める）。
           missing.push(
-            `${where}: テンソル '${initializer.tensor}' の piece 列が未完（piece ${
+            `${where}: テンソル '${name}' の piece 列が未完（piece ${
               state.nextIndex - 1
             }/${state.count} まで受理・残り ${
               Number(graph.values[name].shape[0]) - state.rows
             } 行）`,
           );
-        } else if (!seen.has(initializer.tensor)) {
-          missing.push(`${where}: テンソル '${initializer.tensor}' がファイルに無い`);
+        } else if (!seen.has(name)) {
+          missing.push(`${where}: テンソル '${name}' がファイルに無い`);
         }
-        const scaleKey = initializer.storage.scale;
+        const scaleKey = legacy.scaleKeys.get(name);
         if (scaleKey !== undefined && !seen.has(scaleKey)) {
           missing.push(`${where}: scale テンソル '${scaleKey}' がファイルに無い`);
         }
@@ -541,50 +567,36 @@ export const createShardValidator = (graph: IrGraph): ShardValidator => {
 };
 
 /**
- * initializer どうしのキーの取り違え 3 種を落とす: scale キーが**どの** initializer の実体キーと
- * も衝突しないこと、scale キーが 2 本の initializer で**共有されていない**こと、そして
- * **実体キーが共有されていない**こと。
+ * scale キーの取り違え 2 種を落とす: scale キーが**どの** initializer の実体キー（= 名前）とも
+ * 衝突しないこと、scale キーが 2 本の initializer で**共有されていない**こと。
  *
  * MUST: 別の initializer の実体を scale として読むと、dtype も shape も偶然合う組で沈黙誤値に
  * なる。共有も同じ機序で、チャネル数（i4 なら行数と group 数）さえ揃えば形検査を両方が通り、
- * 後発の重みが先発の scale で逆量子化される。IR v1 は重み tying を表現する語彙を持たない
- * （`storage.scale` はキー 1 本きり）ので、共有形は取り違えだけを意味する。
- * MUST: 実体キーの共有も同じ理由で落とす（**1 実体 1 initializer**）。エクスポータ側が
- * 1:1 を MUST として発行している規則の読み手側の鏡像で、通すと実行層が initializer 名ごとに
- * 確保・転送するため同じバイト列が 2 度 GPU へ上がり（無診断の VRAM 倍化）、i8 / i4 では
- * **同じ量子化バイトが 2 つの別 scale で逆量子化される**。
+ * 後発の重みが先発の scale で逆量子化される。旧配布形は重み tying を表現する語彙を持たない
+ * （scale はキー 1 本きり）ので、共有形は取り違えだけを意味する。実体キーの共有（1 実体
+ * 1 initializer）は改名時（`parseLegacyIrGraph`）が既に落としている。
  * グラフ単体で決まる規則なので shard を見る前（validator 構築時）に 1 回だけ掛ける —
  * shard ごとに掛けると、衝突相手が別 shard にいる配布形で検出が「たまたま同居したときだけ」に
  * なる。
  */
-const assertNoScaleKeyCollision = (graph: IrGraph): void => {
-  // 実体キー / scale キーの持ち主を記録しながら 1 走査で両向きを見る（宣言順のどちらが先でも
-  // 同じ帰属で落ちる）。どの診断も**相手の initializer 名**を名乗る MUST — 名前が出ないと
-  // 直す側はどちらを改名するか決められない。
-  const entityOwner = new Map<string, string>();
+const assertNoScaleKeyCollision = (graph: IrGraph, legacy: LegacyKeys): void => {
+  // どの診断も**相手の initializer 名**を名乗る MUST — 名前が出ないと直す側はどちらを改名するか
+  // 決められない。
   const scaleOwner = new Map<string, string>();
   for (const [name, initializer] of Object.entries(graph.initializers)) {
     // 共有 initializer は実体キーも scale キーも持たない（衝突の当事者になりえない）。
     if (initializer.shared !== undefined) continue;
-    const earlierScale = scaleOwner.get(initializer.tensor);
+    const earlierScale = scaleOwner.get(name);
     if (earlierScale !== undefined) {
       throw new ContainerError(
-        `initializer '${earlierScale}': scale テンソル '${initializer.tensor}' が initializer '${name}' の実体と同じキー`,
+        `initializer '${earlierScale}': scale テンソル '${name}' が initializer '${name}' の実体と同じキー`,
       );
     }
-    const earlierEntity = entityOwner.get(initializer.tensor);
-    if (earlierEntity !== undefined) {
-      throw new ContainerError(
-        `initializer '${name}': 実体テンソル '${initializer.tensor}' が initializer '${earlierEntity}' と共有されている（1 実体 1 initializer MUST）`,
-      );
-    }
-    entityOwner.set(initializer.tensor, name);
-    const scaleKey = initializer.storage.scale;
+    const scaleKey = legacy.scaleKeys.get(name);
     if (scaleKey === undefined) continue;
-    const entity = entityOwner.get(scaleKey);
-    if (entity !== undefined) {
+    if (Object.hasOwn(graph.initializers, scaleKey)) {
       throw new ContainerError(
-        `initializer '${name}': scale テンソル '${scaleKey}' が initializer '${entity}' の実体と同じキー`,
+        `initializer '${name}': scale テンソル '${scaleKey}' が initializer '${scaleKey}' の実体と同じキー`,
       );
     }
     const sharedWith = scaleOwner.get(scaleKey);
@@ -610,19 +622,20 @@ const assertNoScaleKeyCollision = (graph: IrGraph): void => {
  */
 const assertNoOrphanScale = (
   graph: IrGraph,
+  legacy: LegacyKeys,
   file: SafetensorsFile,
   pieces: ReadonlyMap<string, readonly ShardPiece[]>,
   seen: ReadonlySet<string>,
 ): void => {
   for (const [name, initializer] of Object.entries(graph.initializers)) {
     if (initializer.shared !== undefined) continue;
-    const scaleKey = initializer.storage.scale;
+    const scaleKey = legacy.scaleKeys.get(name);
     if (scaleKey === undefined) continue;
     if (!file.tensors.has(scaleKey) || seen.has(scaleKey)) continue;
-    const firstPiece = pieces.get(initializer.tensor)?.some((piece) => piece.index === 1) === true;
-    if (file.tensors.has(initializer.tensor) || firstPiece) continue;
+    const firstPiece = pieces.get(name)?.some((piece) => piece.index === 1) === true;
+    if (file.tensors.has(name) || firstPiece) continue;
     throw new ContainerError(
-      `initializer '${name}': scale テンソル '${scaleKey}' だけが shard にあり実体 '${initializer.tensor}' が無い（companion scale は weight と同一 shard に置く MUST — ADR 0070 決定 1）`,
+      `initializer '${name}': scale テンソル '${scaleKey}' だけが shard にあり実体 '${name}' が無い（companion scale は weight と同一 shard に置く MUST — ADR 0070 決定 1）`,
     );
   }
 };
@@ -671,41 +684,43 @@ const assertNoRedefinedTensors = (seen: ReadonlySet<string>, file: SafetensorsFi
 };
 
 /**
- * 量子化格納の scale テンソル（ADR 0019）の**形**を実テンソルと突き合わせる。
+ * 量子化格納の scale テンソル（ADR 0019）の**形**を実テンソルと突き合わせ、rank 2 group 形
+ * `[shape[rowAxis], 行長 / groupSize]` へ正規化した形を返す。
  *
  * MUST: scale は IR の値ではなく safetensors の**素のテンソル**なので、宣言完全性の検査
  * （parseIrGraph）が 1 つも掛からない — ここだけが門になる。
  *
  * 1. **F32**（scale を f16 のビット列として読むと全チャネルが桁違いの値になる）
- * 2. 形（`groupSize` の有無で 2 通り — ADR 0069 決定 3）
- *    - per-channel（i8）: 重みと**同 rank の keepdim broadcast 形**（各軸は 1 か重みと同値。
- *      1 軸だけがチャネル軸として残る形 — `torch.amax(..., keepdim=True)` の出力そのもの）
+ * 2. 形（group の刻みで 2 通り — ADR 0069 決定 3）
+ *    - per-channel（i8 / i2）: 重みと**同 rank の keepdim broadcast 形**（各軸は 1 か重みと同値。
+ *      伸びている軸は高々 1 本で、それが `rowAxis` と一致する）。要素数は `shape[rowAxis]`
  *    - group（i4）: **rank 非依存の rank 2 形** {@link groupScaleShape}。keepdim broadcast 形
- *      とは受理集合が交わらないので**別分岐**にする（broadcast 形の規則で見ると group 数の
- *      取り違えが「1 でも同値でもない軸」として落ちるだけで、正しい group 形も一緒に落ちる）
+ *      とは受理集合が交わらないので**別分岐**にする
  *
  * NOTE: 実在と名前衝突は別の層が持つ — 実在は co-shard 検査（{@link assertNoOrphanScale} と
  * intake の実体側）、衝突は {@link assertNoScaleKeyCollision}。どちらも「形」より前に決まる。
- * 「非 1 の軸が消費側 op のチャネル軸と一致するか」は op を知らないと決まらないので
- * ここでは見ない（GPU 常駐経路の平坦添字が掛かる条件 — src/runtime/executor.ts が見る）。
  */
 const assertScaleTensor = (
   name: string,
   scaleKey: string,
   view: TensorView,
-  weightShape: readonly (number | string)[],
-  /** group 量子化（格納 i4）の group 長。per-channel（i8）では undefined。 */
-  groupSize: number | undefined,
-): void => {
+  weightShape: readonly number[],
+  storage: IrStorage,
+): readonly [number, number] => {
   const where = `initializer '${name}'`;
   if (view.dtype !== SCALE_DTYPE) {
     throw new ContainerError(
       `${where}: scale テンソル '${scaleKey}' が ${view.dtype}（${SCALE_DTYPE} が必要）`,
     );
   }
-  if (groupSize !== undefined) {
+  const rowAxis = storage.rowAxis ?? 0;
+  const rowCount = weightShape[rowAxis] ?? 1;
+  const numel = weightShape.reduce((count, dim) => count * dim, 1);
+  const rowLength = rowCount === 0 ? 0 : numel / rowCount;
+  const groupSize = storage.groupSize ?? perChannelGroupSize(rowLength);
+  if (codecLayout(storage.codec) === "i4") {
     // 行（先頭次元）× group 数ちょうどの rank 2。行長が group で割り切れることは
-    // parseIrGraph が保証済み（ADR 0069 決定 2）。
+    // 合流層 / 旧パーサが保証済み（ADR 0069 決定 2）。
     const expected = groupScaleShape(weightShape, groupSize);
     if (view.shape.length !== expected.length) {
       throw new ContainerError(
@@ -721,7 +736,7 @@ const assertScaleTensor = (
         }]（group_size=${groupSize}）でない`,
       );
     }
-    return;
+    return [expected[0], expected[1]];
   }
   if (view.shape.length !== weightShape.length) {
     throw new ContainerError(
@@ -738,18 +753,26 @@ const assertScaleTensor = (
       }] へ broadcast できない`,
     );
   }
-  // MUST: 残る非 1 軸は**高々 1 本**（= keepdim 形の「チャネル軸だけが残る」）。broadcast 可能性
-  // だけでは重みと同形の per-element scale（`[O,I]`）も通り、GPU 常駐経路は `wscale[チャネル]` の
-  // 平坦添字で先頭要素しか読まない = 沈黙誤値になる。全軸 1（単一チャネルの退化形）は
-  // `torch.amax(..., keepdim=True)` の正当な出力なので受理する。
-  const channelAxes = view.shape.filter((dim) => dim !== 1).length;
-  if (channelAxes > 1) {
+  // MUST: 残る非 1 軸は**高々 1 本**（= keepdim 形の「チャネル軸だけが残る」）で、それが rowAxis
+  // と一致する。broadcast 可能性だけでは重みと同形の per-element scale（`[O,I]`）も通り、GPU
+  // 常駐経路は `wscale[チャネル]` の平坦添字で先頭要素しか読まない = 沈黙誤値になる。全軸 1
+  // （単一チャネルの退化形）は `torch.amax(..., keepdim=True)` の正当な出力なので受理する。
+  const channelAxes = view.shape.flatMap((dim, axis) => (dim !== 1 ? [axis] : []));
+  if (channelAxes.length > 1) {
     throw new ContainerError(
       `${where}: scale [${
         view.shape.join(",")
-      }] の非 1 軸が ${channelAxes} 本（per-channel scale は 1 本まで — チャネル軸だけが残る keepdim 形）`,
+      }] の非 1 軸が ${channelAxes.length} 本（per-channel scale は 1 本まで — チャネル軸だけが残る keepdim 形）`,
     );
   }
+  if (channelAxes.length === 1 && channelAxes[0] !== rowAxis) {
+    throw new ContainerError(
+      `${where}: scale [${view.shape.join(",")}] の伸びている軸 ${
+        channelAxes[0]
+      } が消費側から決まる行の軸 ${rowAxis} と違う`,
+    );
+  }
+  return [rowCount, 1];
 };
 
 /**
@@ -813,25 +836,21 @@ export const assertRuntimeSupport = (graph: IrGraph, support: RuntimeSupport): v
     if (unknown.length > 0) badAttrs.push(`${where}: ${unknown.join(", ")}`);
   });
 
-  const missingStorage = new Map<IrStorageDtype, string[]>();
-  // group 量子化を受理する格納は **i4 だけ**（ADR 0069 決定 2）。他の格納 dtype に付いた
-  // group_size は実行経路が無く、黙って無視すると group ごとの scale を per-channel として
-  // 読む沈黙誤値になるので、capability 不足で落とす。
-  const groupQuantized: string[] = [];
+  // 格納は展開経路（layout）で見る — `ternary` は `int2-off` と同じ i2 経路なので個別の対応は要らない。
+  // 共有 initializer は格納を持たない（実行可否は貸し手の常駐重みが決める — 借り手構築時の門）。
+  const missingStorage = new Map<CodecLayout, string[]>();
   for (const [name, initializer] of Object.entries(graph.initializers)) {
-    const dtype = initializer.storage.dtype;
-    if (!support.storage.has(dtype)) {
-      const users = missingStorage.get(dtype) ?? [];
-      users.push(name);
-      missingStorage.set(dtype, users);
-      continue;
-    }
-    if (dtype !== "i4" && initializer.storage.groupSize !== undefined) groupQuantized.push(name);
+    if (initializer.shared !== undefined) continue;
+    const layout = codecLayout(initializer.storage.codec);
+    if (support.storage.has(layout)) continue;
+    const users = missingStorage.get(layout) ?? [];
+    users.push(name);
+    missingStorage.set(layout, users);
   }
 
   if (
     missingOps.size === 0 && badDtypes.size === 0 && badAttrs.length === 0 &&
-    missingStorage.size === 0 && groupQuantized.length === 0
+    missingStorage.size === 0
   ) return;
 
   const diagnostics: string[] = [];
@@ -845,15 +864,8 @@ export const assertRuntimeSupport = (graph: IrGraph, support: RuntimeSupport): v
   if (badAttrs.length > 0) {
     diagnostics.push(`未実装 attrs (${badAttrs.length}): ${badAttrs.join(", ")}`);
   }
-  for (const [dtype, users] of [...missingStorage].sort((a, b) => a[0].localeCompare(b[0]))) {
-    diagnostics.push(`非対応 格納 dtype '${dtype}' (${users.length}): ${users.sort().join(", ")}`);
-  }
-  if (groupQuantized.length > 0) {
-    diagnostics.push(
-      `非対応 group 量子化 (${groupQuantized.length}): ${
-        groupQuantized.sort().join(", ")
-      }（group 量子化の格納は i4 のみ — ADR 0069）`,
-    );
+  for (const [layout, users] of [...missingStorage].sort((a, b) => a[0].localeCompare(b[0]))) {
+    diagnostics.push(`非対応 格納 '${layout}' (${users.length}): ${users.sort().join(", ")}`);
   }
   throw new ContainerError(`ランタイムの capability 不足 — ${diagnostics.join(" / ")}`);
 };

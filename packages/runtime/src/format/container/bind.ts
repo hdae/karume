@@ -14,7 +14,14 @@
  * - i2 経路（`int2-off` / `ternary`）の宣言 shape は正の rank 2 で行長は 16 の倍数
  */
 
-import { type CodecEntry, codecEntry, MIN_GROUP_SIZE, payloadBytes } from "./codecs.ts";
+import {
+  type CodecEntry,
+  codecEntry,
+  groupCount,
+  MIN_GROUP_SIZE,
+  payloadBytes,
+  perChannelGroupSize,
+} from "./codecs.ts";
 import type {
   ConstBlockRecord,
   DataBlockRecord,
@@ -26,7 +33,7 @@ import type {
 import { ContainerFormatError } from "./header.ts";
 import { BLOCK_TAIL_ALIGN } from "./limits.ts";
 import { isI2Shape } from "../i2.ts";
-import type { IrDeclaration, IrDtype } from "../ir.ts";
+import type { IrDeclaration, IrDtype, IrGraph, IrInitializer } from "../ir.ts";
 
 /** 実体 1 本ぶんの block（piece 列なら 1 piece）。 */
 export type SupplyBlock = {
@@ -190,9 +197,11 @@ const planSupply = (
   }
   const rowCount = shape[rowAxis];
   const rowLength = rowCount === 0 ? 0 : numel / rowCount;
-  if (entry.grouping === "channel" && groupSize !== rowLength) {
+  if (entry.grouping === "channel" && groupSize !== perChannelGroupSize(rowLength)) {
     fail(
-      `${where}: codec '${encoding.codec}' は per-channel なので groupSize は行長 ${rowLength} に等しい MUST（宣言は ${groupSize}）`,
+      `${where}: codec '${encoding.codec}' は per-channel なので groupSize は行長 ${
+        perChannelGroupSize(rowLength)
+      } に等しい MUST（宣言は ${groupSize}）`,
     );
   }
   if (entry.grouping === "group") {
@@ -210,7 +219,7 @@ const planSupply = (
   const scaleRef = encoding.scale;
   if (scaleRef === undefined) fail(`${where}: codec '${encoding.codec}' は scale 必須`);
   const scaleFound = locate(scaleRef.block, `${where} scale`);
-  const scaleBytes = rowCount * (rowLength / groupSize) * 4;
+  const scaleBytes = rowCount * groupCount(rowLength, groupSize) * 4;
   assertPadded(scaleFound.record, scaleBytes, `${where} scale`);
   const scale: SupplyBlock = {
     id: scaleFound.record.id,
@@ -231,6 +240,50 @@ const planSupply = (
     payloadBytes: zeroFound.record.length,
   };
   return { encoding, blocks, scale, zeroPoint, origin };
+};
+
+/**
+ * 合流結果 → ランタイムが実行するグラフ（initializer ごとの格納が確定した {@link IrGraph}）。
+ * 束縛表の `encoding` から `codec` / `groupSize` / `rowAxis` を写し、shared 宣言はそのまま渡す。
+ * `krg`（重みの供給が無い）でも const 供給と shared だけなら組める — 重みが要る initializer は
+ * 供給が無いので `IrGraph` にできない（fail loudly）。
+ */
+export const mergedGraph = (bound: BoundGraph, graphName: string): IrGraph => {
+  const initializers: Record<string, IrInitializer> = Object.create(null);
+  for (const [name, init] of Object.entries(bound.declaration.initializers)) {
+    if (init.shared) {
+      initializers[name] = { shared: true };
+      continue;
+    }
+    const supply = bound.supplies.get(name);
+    if (supply === undefined) {
+      fail(
+        `graph '${graphName}' initializer '${name}': 重みの供給が無い（krg だけでは Session を組めない）`,
+      );
+    }
+    const { codec, groupSize, rowAxis } = supply.encoding;
+    initializers[name] = {
+      storage: {
+        codec,
+        ...(groupSize === undefined ? {} : { groupSize }),
+        ...(rowAxis === undefined ? {} : { rowAxis }),
+      },
+    };
+  }
+  return { ...bound.declaration, initializers };
+};
+
+/**
+ * `ternary` の宣言の追加条件（container-v1 §6.3）: payload の全 2 bit コードが `{1, 2, 3}`
+ * （コード 0 = q − 2 は三値の値域外）。「三値である」という主張の検査可能な中身。
+ */
+export const assertTernaryCodes = (payload: Uint8Array<ArrayBuffer>, where: string): void => {
+  for (let i = 0; i < payload.byteLength; i += 1) {
+    const byte = payload[i];
+    if ((byte & 3) === 0 || (byte & 12) === 0 || (byte & 48) === 0 || (byte & 192) === 0) {
+      fail(`${where}: ternary の payload にコード 0（三値の値域外）がある（バイト ${i}）`);
+    }
+  }
 };
 
 /**

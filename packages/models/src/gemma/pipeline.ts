@@ -1341,7 +1341,7 @@ class GemmaPipeline {
   /**
    * drafter Session を 1 本張る（投機を指定したときだけ）。
    *
-   * 借りるのは target Session が既に GPU へ載せた埋め込み表で、`shared.tensor` →
+   * 借りるのは target Session が既に GPU へ載せた埋め込み表で、借り手の initializer 名 →
    * 貸し手 initializer 名の対応は admission が確定させてある（`./speculative.ts`）。
    * バイトは 1 つも複製されない。
    */

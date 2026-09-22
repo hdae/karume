@@ -57,8 +57,13 @@ export type Selection = {
   readonly excluded: Readonly<Record<string, number>>;
 };
 
-/** 合成できる格納 dtype（IR の語彙のうち、テスト helper が符号化を持つもの）。 */
-const SYNTHESIZABLE_STORAGE: ReadonlySet<string> = new Set(["f32", "f16", "i8", "i4"]);
+/** 合成できる格納 codec（台帳の登録名のうち、テスト helper が符号化を持つもの）。 */
+const SYNTHESIZABLE_STORAGE: ReadonlySet<string> = new Set([
+  "f32",
+  "f16",
+  "int8-sym",
+  "int4-sym-g",
+]);
 
 /** 加重行から測れる行を選ぶ。除外は理由ごとに数える。 */
 export const selectCases = (summary: CensusSummary, filter: CaseFilter = {}): Selection => {
@@ -222,7 +227,7 @@ export const buildCaseModel = (row: WeightRow, requestedReps: number): CaseModel
         graph.initializers[name] = { tensor, storage: { dtype: "f16" } };
         tensors.push({ name: tensor, dtype: "F16", shape, data: repeatTile(tileF16, 2, count) });
         return;
-      case "i8": {
+      case "int8-sym": {
         // per-channel scale は keepdim broadcast 形（チャネル軸 = 先頭次元・他は 1）。
         const scale = `m.s${slot}`;
         const scaleShape = shape.map((dim, axis) => (axis === 0 ? dim : 1));
@@ -236,8 +241,10 @@ export const buildCaseModel = (row: WeightRow, requestedReps: number): CaseModel
         });
         return;
       }
-      case "i4": {
-        if (ref.group_size === undefined) throw new Error(`slot ${slot}: i4 に group_size が無い`);
+      case "int4-sym-g": {
+        if (ref.group_size === undefined) {
+          throw new Error(`slot ${slot}: int4-sym-g に group_size が無い`);
+        }
         // group scale は rank 非依存の rank 2 = [先頭次元, 行長 / group]（ADR 0069 決定 2）。
         const rows = shape[0];
         const width = count / rows;

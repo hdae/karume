@@ -94,11 +94,15 @@ const SUFFIX = ".safetensors";
 /** 一致率の門（分母 = 3 ケース × 200 サイクル × 3 段）。 */
 const MATCH_FLOOR = 0.99;
 
-/** 実資産の形（config の `hidden_size` / `vocab_size` と、貸し手の共有 initializer 名）。 */
+/**
+ * 実資産の形（config の `hidden_size` / `vocab_size` と、共有 initializer の名前）。
+ *
+ * 共有 initializer の名前は借り手と貸し手で同じ（名前が実体の鍵 — docs/ir-v2.md）ので、
+ * 定数も 1 本で足りる。
+ */
 const HIDDEN = 1536;
 const VOCAB = 262144;
-const SHARED_TENSOR = "model.lm_head.weight";
-const SHARED_LENDER = "p_model_lm_head_weight";
+const SHARED_WEIGHT = "model.lm_head.weight";
 
 /** グラフ入力の名前（正本は `export_product.py` の定数）。 */
 const INPUT_IDS = "input_ids";
@@ -296,17 +300,18 @@ Deno.test({
       assertEquals(drafter.states[name].shape, target.states[name].shape, `${name} の形`);
     }
 
-    // 共有 initializer は 1 本で、バイトを持たない（`tensor` が無い）。
+    // 共有 initializer は 1 本で、バイトを持たない（格納が無い）。名前がそのまま貸し手の
+    // initializer 名（= 実体の鍵）。
     const shared = Object.keys(drafter.initializers).filter((name) =>
       drafter.initializers[name].shared !== undefined
     );
     assertEquals(shared.length, 1, "共有 initializer の本数");
-    assertEquals(drafter.initializers[shared[0]].tensor, undefined, "共有宣言がバイトを持っている");
     assertEquals(
-      drafter.initializers[shared[0]].shared?.tensor,
-      SHARED_TENSOR,
-      "共有 initializer が指す貸し手のテンソルキー",
+      drafter.initializers[shared[0]].storage,
+      undefined,
+      "共有宣言がバイトを持っている",
     );
+    assertEquals(shared[0], SHARED_WEIGHT, "共有 initializer が名乗る貸し手の initializer 名");
 
     // 門そのもの（`Gemma4Pipeline` が admission で通す 1 本）。貸し手の initializer 名まで解決する。
     const admitted = admitGemma4Drafter("test", drafter, {
@@ -317,7 +322,7 @@ Deno.test({
     });
     assertEquals(admitted.outputs, [...drafter.outputs], "admission が返す出口（段順）");
     assertEquals(admitted.hiddenSize, HIDDEN, "hidden の幅");
-    assertEquals(admitted.sharedWeights, { [shared[0]]: SHARED_LENDER }, "共有重みの対応表");
+    assertEquals(admitted.sharedWeights, { [shared[0]]: SHARED_WEIGHT }, "共有重みの対応表");
   },
 });
 
@@ -343,7 +348,7 @@ Deno.test({
     const stripped = {
       ...target,
       initializers: Object.fromEntries(
-        Object.entries(target.initializers).filter(([name]) => name !== SHARED_LENDER),
+        Object.entries(target.initializers).filter(([name]) => name !== SHARED_WEIGHT),
       ),
     };
     assertThrows(

@@ -38,8 +38,9 @@ export const inspectLlmGraph = (family: LlmFamily, graph: PreparedModel["graph"]
       state.dtype !== "f32" || state.external || !same(state.shape, [1, profile.kvHeads, "C", 128])
     )
   ) throw new Error(`${profile.name} の KV キャッシュ宣言と一致しません`);
-  const tables = Object.entries(graph.initializers).filter(([, init]) =>
-    typeof init.tensor === "string" && /rotary_emb\.(cos|sin)_table$/.test(init.tensor)
+  // initializer 名 = 実体の鍵（FQN — docs/ir-v2.md）。
+  const tables = Object.entries(graph.initializers).filter(([name, init]) =>
+    init.shared === undefined && /rotary_emb\.(cos|sin)_table$/.test(name)
   ).map(([name]) => graph.values[name]);
   const maxPosition = tables[0]?.shape[0];
   if (

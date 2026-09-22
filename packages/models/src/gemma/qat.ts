@@ -1,4 +1,5 @@
 /** QAT family の構造門。通常 Gemma の入口とは別に固定格納と SRQ を要求する。 */
+import { codecLayout } from "@karume/runtime";
 import type { ModelComponent } from "../hub/components.ts";
 import type { Gemma4PleIndex } from "./ple.ts";
 
@@ -73,7 +74,8 @@ export const admitGemma4Qat = (
     throw new Error("Gemma4QatPipeline: token embedding が1本でない");
   }
   const tokenWeight = embeddings[0].ins[0];
-  if (graph.initializers[tokenWeight]?.storage.dtype !== "i2") {
+  const tokenStorage = graph.initializers[tokenWeight]?.storage;
+  if (tokenStorage === undefined || codecLayout(tokenStorage.codec) !== "i2") {
     throw new Error("Gemma4QatPipeline: token embedding は固定 INT2 が必要");
   }
   let heads = 0, ordinary = 0;
@@ -81,9 +83,10 @@ export const admitGemma4Qat = (
   for (const node of graph.nodes) {
     if (node.op !== "linear") continue;
     const weight = graph.initializers[node.ins[1]];
+    // initializer 名 = 実体の鍵（FQN — docs/ir-v2.md）。
     if (
-      weight?.storage.dtype === "f32" &&
-      weight.tensor === "model.model.per_layer_model_projection.weight"
+      weight?.storage?.codec === "f32" &&
+      node.ins[1] === "model.model.per_layer_model_projection.weight"
     ) {
       ordinary++;
       continue;
@@ -98,10 +101,11 @@ export const admitGemma4Qat = (
         `Gemma4QatPipeline: linear の重み '${node.ins[1]}' は共有 initializer（QAT は受けない）`,
       );
     }
-    if (!["i2", "i4", "i8"].includes(weight.storage.dtype)) {
+    const layout = codecLayout(weight.storage.codec);
+    if (!["i2", "i4", "i8"].includes(layout)) {
       throw new Error("Gemma4QatPipeline: linear は固定 INT2/INT4/INT8 が必要");
     }
-    storages.add(weight.storage.dtype);
+    storages.add(layout);
     if (node.ins[1] === tokenWeight) {
       // 共有 head だけ前後の SRQ を要求しない。公式 checkpoint の lm_head は SRQ の scale が
       // 入出力とも 0（未較正 = 恒等）で、recipe は恒等 SRQ を IR に挟まない（ADR 0097）。

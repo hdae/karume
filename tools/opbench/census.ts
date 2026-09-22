@@ -10,6 +10,11 @@
  * 何本出るか）を与える。
  */
 
+import {
+  codecEntry,
+  codecLayout,
+  isCodecName,
+} from "../../packages/runtime/src/format/container/codecs.ts";
 import type { IrDtype, IrGraph } from "../../packages/runtime/src/format/ir.ts";
 import {
   bindSymbols,
@@ -33,10 +38,11 @@ import { resolveComponentBindings, type Scenario } from "../_shared/scenario.ts"
 
 /** 初期化子の格納（census 行の `storage` 欄 1 要素）。 */
 export type StorageRef = {
+  /** initializer 名（= 実体の鍵 — docs/ir-v2.md。共有 initializer は貸し手の名前と同じ）。 */
   readonly tensor: string;
+  /** 格納 codec の登録名（共有 initializer は格納を持たないので `shared`）。 */
   readonly dtype: string;
   readonly group_size?: number;
-  readonly scale?: string;
 };
 
 /** census.jsonl の 1 行（= IR ノード 1 本）。 */
@@ -230,15 +236,15 @@ export const censusComponent = (
 const storageOf = (graph: IrGraph, name: string): StorageRef | null => {
   if (!Object.hasOwn(graph.initializers, name)) return null;
   const initializer = graph.initializers[name];
+  // 共有 initializer（借り物 — ADR 0096 段 2 §1.3）は自分のバイトも格納も持たない（名前は
+  // 貸し手の initializer 名と同じ — docs/ir-v2.md）。
+  if (initializer.storage === undefined) return { tensor: name, dtype: "shared" };
   return {
-    // 共有 initializer（借り物 — ADR 0096 段 2 §1.3）は自分のバイトを持たないので、
-    // 実体キーは**貸し手コンテナ**のもの（`shared.tensor`）を名乗る。
-    tensor: initializer.shared === undefined ? initializer.tensor : initializer.shared.tensor,
-    dtype: initializer.storage.dtype,
+    tensor: name,
+    dtype: initializer.storage.codec,
     ...(initializer.storage.groupSize === undefined
       ? {}
       : { group_size: initializer.storage.groupSize }),
-    ...(initializer.storage.scale === undefined ? {} : { scale: initializer.storage.scale }),
   };
 };
 
@@ -247,10 +253,10 @@ const outElements = (row: CensusRow): number =>
   row.out_shapes.reduce((total, shape) => total + shape.reduce((size, dim) => size * dim, 1), 0);
 
 /**
- * 加重行 1 入力スロットぶんの格納。census 行の {@link StorageRef} から**テンソル名**
- * （`tensor` / `scale`）を落としてある — 加重行は層をまたいで畳んだ行なので、代表 1 本の
- * safetensors キーを載せると「この行のテンソル」と読めてしまう。カーネルの分かれ目になるのは
- * dtype と group 長だけで、そこは残す。
+ * 加重行 1 入力スロットぶんの格納。census 行の {@link StorageRef} から**テンソル名**（`tensor`）を
+ * 落としてある — 加重行は層をまたいで畳んだ行なので、代表 1 本の initializer 名を載せると
+ * 「この行のテンソル」と読めてしまう。カーネルの分かれ目になるのは展開経路（layout）と group 長
+ * だけで、そこは残す。
  */
 export type WeightStorage = {
   readonly dtype: string;
@@ -267,15 +273,21 @@ const weightStorage = (row: CensusRow): readonly (WeightStorage | null)[] =>
   );
 
 /**
- * ノードの格納シグネチャ（初期化子入力の格納 dtype を重複無しで並べたもの）。
- * `i4g32` のように group 長まで含める — 同じ i4 でも group 長でカーネルが変わる。
+ * 格納 1 本の綴り — 展開経路（`i4` / `i8` …）に、group 量子化の codec だけ group 長を付ける
+ * （`i4g32`）。同じ i4 でも group 長でカーネルが変わるが、per-channel の codec は行長が
+ * `groupSize` に写っているだけでカーネルは変わらないので付けない。
  */
+const storageToken = (ref: StorageRef): string => {
+  if (!isCodecName(ref.dtype)) return ref.dtype;
+  const layout = codecLayout(ref.dtype);
+  return codecEntry(ref.dtype).grouping === "group" && ref.group_size !== undefined
+    ? `${layout}g${ref.group_size}`
+    : layout;
+};
+
+/** ノードの格納シグネチャ（初期化子入力の格納の綴りを重複無しで並べたもの）。 */
 const storageSignature = (row: CensusRow): string => {
-  const tokens = new Set(
-    row.storage.filter((ref) => ref !== null).map((ref) =>
-      ref.group_size === undefined ? ref.dtype : `${ref.dtype}g${ref.group_size}`
-    ),
-  );
+  const tokens = new Set(row.storage.filter((ref) => ref !== null).map(storageToken));
   return tokens.size === 0 ? "none" : [...tokens].sort().join("+");
 };
 

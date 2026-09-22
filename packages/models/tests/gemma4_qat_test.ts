@@ -30,12 +30,15 @@ type Fault =
   | "extra-consumer"
   | "head-without-srq";
 
+/** f32 linear が 1 本だけ引く重み（門はこの initializer 名で projection を名指す）。 */
+const PROJECTION = "model.model.per_layer_model_projection.weight";
+
 const graphOf = (model: "e2b" | "e4b", fault?: Fault): Graph => {
   const hidden = model === "e2b" ? 1536 : 2560,
     layers = model === "e2b" ? 35 : 42;
   let raw: { op: string; ins: string[]; outs: string[] }[] = [
     { op: "embedding", ins: ["head", "input_ids"], outs: ["embedded"] },
-    { op: "linear", ins: ["embedded", "projection"], outs: ["projected"] },
+    { op: "linear", ins: ["embedded", PROJECTION], outs: ["projected"] },
     { op: "static_quantize", ins: ["projected"], outs: ["input4"] },
     { op: "linear", ins: ["input4", "w4"], outs: ["linear4"] },
     { op: "static_quantize", ins: ["linear4"], outs: ["input8"] },
@@ -44,20 +47,13 @@ const graphOf = (model: "e2b" | "e4b", fault?: Fault): Graph => {
     { op: "linear", ins: ["input2", "head"], outs: ["linear2"] },
     { op: "static_quantize", ins: ["linear2"], outs: ["logits"] },
   ];
+  // 合流後の initializer は**名前が実体の鍵**（docs/ir-v2.md）。門が f32 projection を
+  // 名指すのもこの名前なので、宣言名は FQN そのものにする。
   const initializers: Record<string, Graph["initializers"][string]> = {
-    head: {
-      tensor: "head.weight",
-      storage: { dtype: "i2", scale: "head.scale" },
-    },
-    projection: {
-      tensor: "model.model.per_layer_model_projection.weight",
-      storage: { dtype: "f32" },
-    },
-    w4: {
-      tensor: "w4",
-      storage: { dtype: "i4", scale: "s4", groupSize: 32 },
-    },
-    w8: { tensor: "w8", storage: { dtype: "i8", scale: "s8" } },
+    head: { storage: { codec: "int2-off" } },
+    [PROJECTION]: { storage: { codec: "f32" } },
+    w4: { storage: { codec: "int4-sym-g", groupSize: 32, rowAxis: 0 } },
+    w8: { storage: { codec: "int8-sym" } },
   };
   let pleShape: (string | number)[] = [1, "M", layers, 256];
   let inputs: Graph["inputs"] = [
@@ -84,7 +80,7 @@ const graphOf = (model: "e2b" | "e4b", fault?: Fault): Graph => {
       raw = [...raw, { op: "embedding", ins: ["head", "input_ids"], outs: ["embedded2"] }];
       break;
     case "embedding-i8":
-      initializers.head = { tensor: "head.weight", storage: { dtype: "i8", scale: "s" } };
+      initializers.head = { storage: { codec: "int8-sym" } };
       break;
     case "no-head":
       // head の linear が token embedding と別の重みを引く（共有 head が 0 本になる）。
@@ -94,19 +90,19 @@ const graphOf = (model: "e2b" | "e4b", fault?: Fault): Graph => {
       raw = raw.filter((_, i) => i !== 1);
       break;
     case "two-projections":
-      raw = [...raw, { op: "linear", ins: ["embedded", "projection"], outs: ["projected2"] }];
+      raw = [...raw, { op: "linear", ins: ["embedded", PROJECTION], outs: ["projected2"] }];
       break;
     case "linear-not-initializer":
       raw = raw.map((node, i) => i === 3 ? { ...node, ins: ["input4", "absent"] } : node);
       break;
     case "linear-shared":
-      initializers.w8 = { shared: { tensor: "lender.w8" }, storage: { dtype: "i8" } };
+      initializers.w8 = { shared: true };
       break;
     case "linear-f32":
-      initializers.w4 = { tensor: "w4", storage: { dtype: "f32" } };
+      initializers.w4 = { storage: { codec: "f32" } };
       break;
     case "only-i4":
-      initializers.w8 = { tensor: "w8", storage: { dtype: "i4", scale: "s8", groupSize: 32 } };
+      initializers.w8 = { storage: { codec: "int4-sym-g", groupSize: 32, rowAxis: 0 } };
       break;
     case "srq-before-missing":
       raw = raw.map((node, i) => i === 2 ? { ...node, op: "reshape" } : node);
@@ -128,7 +124,7 @@ const graphOf = (model: "e2b" | "e4b", fault?: Fault): Graph => {
   }
   return {
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: ["embedding", "linear", "static_quantize"] },
     symbols: ["M", "R", "C"],
     inputs,

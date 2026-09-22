@@ -14,7 +14,7 @@
 // MUST: 期待値は**丸め後の重み**（fake-quant — ADR 0006）で作る。丸め前の f32 で比較すると
 // 量子化誤差と実装誤差が混ざり、tolerance を緩める圧力になる。
 
-import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
+import { assert, assertEquals, assertThrows } from "@std/assert";
 import { assertRuntimeSupport, ContainerError, openModel } from "../src/format/container.ts";
 import { alignI8Payload, decodeI8, I8Error } from "../src/format/i8.ts";
 import { IrError, parseIrGraph } from "../src/format/ir.ts";
@@ -153,7 +153,7 @@ Deno.test("i8 の適格判定は f16 と同じ 1 本の判定を通る（新設�
   const eligible = (graph: GraphJson): readonly string[] =>
     [...eligibleCompressedInitializers(parseIrGraph(JSON.stringify(graph)))].sort();
   const storage = { dtype: "i8", scale: "m.s" };
-  assertEquals(eligible(linearGraph(storage)), ["w"]);
+  assertEquals(eligible(linearGraph(storage)), ["m.w"]);
   // 混在消費（weight スロット以外でも消費）は適格を失う
   assertEquals(
     eligible(linearGraph(
@@ -290,16 +290,18 @@ Deno.test("scale テンソルの実在・dtype・keepdim 形・名前衝突を�
 
 // group 量子化を受理する格納は i4 だけ（ADR 0069 決定 2）— i8 に付いた group_size は
 // 従来どおり capability 不足で落とす（group ごとの scale を per-channel として読む沈黙誤値）。
-Deno.test("i4 以外の格納 dtype に付いた group_size は capability 不足で落とす（ADR 0069）", () => {
-  const model = openModel(i8LinearModel(({ graph }) => {
-    graph.initializers["w"].storage = { dtype: "i8", scale: "m.s", group_size: 32 };
-  }));
+// 合流（旧配布形 → 実行グラフ）の時点で落ちる。旧は capability の層（assertRuntimeSupport）が
+// 見ていたが、合流後の宣言に「i8 なのに group」という形そのものが存在できない。
+Deno.test("i4 以外の格納 dtype に付いた group_size は合流で落とす（ADR 0069）", () => {
   const error = assertThrows(
-    () => assertRuntimeSupport(model.graph, RUNTIME_SUPPORT),
-    ContainerError,
-    "capability 不足",
+    () =>
+      openModel(i8LinearModel(({ graph }) => {
+        graph.initializers["w"].storage = { dtype: "i8", scale: "m.s", group_size: 32 };
+      })),
+    IrError,
+    "非対応 group 量子化",
   );
-  assertEquals(error.message.includes("非対応 group 量子化 (1): w"), true, error.message);
+  assertEquals(error.message.includes("graph.initializers['w']"), true, error.message);
   assertEquals(error.message.includes("i4 のみ"), true, error.message);
 });
 
@@ -314,7 +316,7 @@ Deno.test("bf16 は従来どおり capability 不足で fail loudly（i8 の門�
     ContainerError,
     "capability 不足",
   );
-  assertEquals(error.message.includes("非対応 格納 dtype 'bf16' (1): w"), true, error.message);
+  assertEquals(error.message.includes("非対応 格納 'bf16' (1): m.w"), true, error.message);
   // i8 は同じ門を通る（適格かどうかは実行可否と別軸）
   assertRuntimeSupport(openModel(i8LinearModel()).graph, RUNTIME_SUPPORT);
 });
@@ -920,8 +922,8 @@ Deno.test({
       assertEquals(storage.hostExpandedBytes, 48, "CPU 展開バイト数（f32 換算 12 要素）");
       const outputs = await session.run({ x });
       // 重みは実行に依らない定数なので、丸め後の値とビット単位で一致する
-      assertEquals(outputs["w"].shape, [3, 4]);
-      assertEquals([...outputs["w"].data], [...quantized.values]);
+      assertEquals(outputs["m.w"].shape, [3, 4]);
+      assertEquals([...outputs["m.w"].data], [...quantized.values]);
       // 同じ run の計算側も従来どおり（展開経路でも値は変わらない）
       const expected = applyReferenceOp(
         "linear",
@@ -1015,26 +1017,18 @@ Deno.test({
 
 /**
  * 適格経路の scale は**平坦添字で引ける形**でなければならない（ADR 0019）。broadcast 可能
- * なだけの形（重み `[3,4]` に対する `[1,4]`）は openModel を通るが、カーネルは `wscale[col]` と
- * 読むので沈黙誤値になる — Session 構築で落ちることを固定する。
+ * なだけの形（重み `[3,4]` に対する `[1,4]`）はカーネルが `wscale[col]` と読むので沈黙誤値に
+ * なる — 実体を受け取る intake（配布形を開く時点）で落ちることを固定する。
  */
-Deno.test({
-  name: "チャネル軸と食い違う scale は Session 構築で fail loudly（実 GPU）",
-  ignore: !GPU_AVAILABLE,
-  fn: async () => {
-    const model = openModel(i8LinearModel(({ tensors }) => {
-      // 重み [3,4] の軸 1 に沿った scale。broadcast は可能だがチャネル軸（0）ではない。
-      tensors[1] = { name: "m.s", dtype: "F32", shape: [1, 4], data: f32Bytes([1, 1, 1, 1]) };
-    }));
-    const gpu = await acquireGpu();
-    try {
-      await assertRejects(
-        () => createSession(gpu, model),
-        ExecutionError,
-        "keepdim 形でない",
-      );
-    } finally {
-      gpu.destroy();
-    }
-  },
+Deno.test("行の軸と食い違う scale は配布形を開く時点で fail loudly", () => {
+  const error = assertThrows(
+    () =>
+      openModel(i8LinearModel(({ tensors }) => {
+        // 重み [3,4] の軸 1 に沿った scale。broadcast は可能だが行の軸（0）ではない。
+        tensors[1] = { name: "m.s", dtype: "F32", shape: [1, 4], data: f32Bytes([1, 1, 1, 1]) };
+      })),
+    ContainerError,
+    "伸びている軸 1 が消費側から決まる行の軸 0 と違う",
+  );
+  assertEquals(error.message.includes("initializer 'm.w'"), true, error.message);
 });

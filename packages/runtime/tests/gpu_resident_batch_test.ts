@@ -1042,7 +1042,8 @@ Deno.test({
       const batch = await gpu.beginBatch();
       // MUST: どちらも await しない（失敗の帰属を finish に集める既存の形と同じ）。
       const pending = [
-        session.enqueue({ x: input(0) }, { batch, copyOutputs: { c: constSink } }),
+        // 合流後は initializer 名 = 実体のテンソルキー（`const.c`）がそのまま出力名になる。
+        session.enqueue({ x: input(0) }, { batch, copyOutputs: { "const.c": constSink } }),
         healthy.enqueue({ x: input(1) }, { batch, copyOutputs: { y: sink } }),
       ];
       const settled = Promise.allSettled(pending);

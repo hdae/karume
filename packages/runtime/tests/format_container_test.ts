@@ -7,7 +7,8 @@ import {
   type OpSupport,
   type RuntimeSupport,
 } from "../src/format/container.ts";
-import { type IrDtype, IrError, type IrStorageDtype } from "../src/format/ir.ts";
+import type { CodecLayout } from "../src/format/container/codecs.ts";
+import { type IrDtype, IrError } from "../src/format/ir.ts";
 import { RUNTIME_SUPPORT } from "../src/ops.ts";
 import {
   baseGraph,
@@ -28,7 +29,7 @@ const f32Only: OpSupport = {
 
 const M0_SUPPORT: RuntimeSupport = {
   ops: new Map([["matmul", f32Only], ["add", f32Only]]),
-  storage: new Set<IrStorageDtype>(["f32"]),
+  storage: new Set<CodecLayout>(["f32"]),
   io: new Set<IrDtype>(["f32"]),
 };
 
@@ -58,7 +59,8 @@ Deno.test("openModel: 正常系は graph と safetensors を結合して開け�
   const model = openModel(baseModelBuffer());
   assertEquals(model.graph.nodes.length, 2);
   assertEquals(model.file.tensors.get("enc.w")?.shape, [4, 3]);
-  assertEquals(model.graph.initializers["w"].tensor, "enc.w");
+  // 合流後の initializer は実体のテンソルキーで引く（宣言名 'w' → 'enc.w'）
+  assertEquals(model.graph.initializers["enc.w"], { storage: { codec: "f32" } });
   assertRuntimeSupport(model.graph, M0_SUPPORT);
 });
 
@@ -183,9 +185,15 @@ Deno.test("openModel: per-channel scale の非 1 軸が 2 本以上のものを�
   // 重みと同形（per-element scale）— broadcast 可能なので rank / broadcast の門は素通りする
   assertThrows(() => openModel(i8Model([4, 3], [4, 3])), ContainerError, "非 1 軸が 2 本");
   assertThrows(() => openModel(i8Model([4, 3, 2], [1, 3, 2])), ContainerError, "非 1 軸が 2 本");
-  // 対: チャネル軸 1 本の keepdim 形は軸の位置に依らず通る
+  // 対: 伸びている軸が行の軸（rowAxis）と一致する keepdim 形は通る
   assertEquals(openModel(i8Model([4, 3], [4, 1])).file.tensors.get("enc.w.scale")?.shape, [4, 1]);
-  assertEquals(openModel(i8Model([4, 3], [1, 3])).file.tensors.get("enc.w.scale")?.shape, [1, 3]);
+  // 伸びている軸が行の軸と違う形は intake で落ちる（以前は openModel を通り、GPU 経路で初めて
+  // 落ちていた）— 行の軸は宣言の `storage.rowAxis`（消費側 op から導いた軸）で、ここでは 0
+  assertThrows(
+    () => openModel(i8Model([4, 3], [1, 3])),
+    ContainerError,
+    "伸びている軸 1 が消費側から決まる行の軸 0 と違う",
+  );
   // 対: チャネル数 1 の退化形は `torch.amax(…, keepdim=True)` の出力が全軸 1 になる —
   // 「ちょうど 1 本」で締めると、この正当な形まで落ちる（executor 側の keepdim 検査も受理する）
   assertEquals(openModel(i8Model([1, 4], [1, 1])).file.tensors.get("enc.w.scale")?.shape, [1, 1]);
@@ -195,7 +203,9 @@ Deno.test("openModel: per-channel scale の非 1 軸が 2 本以上のものを�
 // per-channel の keepdim broadcast 形とは受理集合が交わらない別分岐。
 Deno.test("openModel: 格納 i4 は group 形の scale を受理する", () => {
   const model = openModel(i4Model());
-  assertEquals(model.graph.initializers["w"].storage.groupSize, 32);
+  assertEquals(model.graph.initializers["enc.w"], {
+    storage: { codec: "int4-sym-g", groupSize: 32, rowAxis: 0 },
+  });
   assertEquals(model.file.tensors.get("enc.w")?.byteLength, 128);
   assertEquals(model.file.tensors.get("enc.w.scale")?.shape, [4, 2]);
 });
@@ -466,34 +476,33 @@ Deno.test("assertRuntimeSupport: 非対応の格納 dtype を initializer 名つ
     ContainerError,
     "capability 不足",
   );
-  assertEquals(error.message.includes("'bf16' (1): b"), true, error.message);
-  assertEquals(error.message.includes("'f16' (1): w"), true, error.message);
+  assertEquals(error.message.includes("'bf16' (1): enc.b"), true, error.message);
+  assertEquals(error.message.includes("'f16' (1): enc.w"), true, error.message);
 });
 
 // group 量子化を受理する格納は i4 だけ（ADR 0069 決定 2）。他の格納 dtype に付いた group_size は
 // 実行経路が無く、黙って無視すると group ごとの scale を per-channel として読む沈黙誤値になる。
-Deno.test("assertRuntimeSupport: group_size は i4 だけが通り、他の格納 dtype では落ちる", () => {
+// 拒否の層は合流（`parseLegacyIrGraph` の改名と codec 付与）へ移った — capability 検査より
+// 手前で落ちるので、openModel が `IrError` を投げる。
+Deno.test("openModel: group_size は i4 だけが通り、他の格納 dtype では落ちる", () => {
   assertRuntimeSupport(openModel(i4Model()).graph, {
     ...M0_SUPPORT,
-    storage: new Set<IrStorageDtype>(["f32", "i4"]),
+    storage: new Set<CodecLayout>(["f32", "i4"]),
   });
 
   const graph = baseGraph();
   graph.initializers["w"].storage = { dtype: "i8", scale: "enc.w.scale", group_size: 32 };
-  const model = openModel(baseModelBuffer(graph, [
-    { name: "enc.w", dtype: "I8", shape: [4, 3], data: i8Bytes(12) },
-    { name: "enc.w.scale", dtype: "F32", shape: [4, 1], data: f32Bytes([1, 1, 1, 1]) },
-    { name: "enc.b", dtype: "F32", shape: [3], data: f32Bytes([1, 2, 3]) },
-  ]));
   const error = assertThrows(
     () =>
-      assertRuntimeSupport(model.graph, {
-        ...M0_SUPPORT,
-        storage: new Set<IrStorageDtype>(["f32", "i8"]),
-      }),
-    ContainerError,
-    "非対応 group 量子化 (1): w",
+      openModel(baseModelBuffer(graph, [
+        { name: "enc.w", dtype: "I8", shape: [4, 3], data: i8Bytes(12) },
+        { name: "enc.w.scale", dtype: "F32", shape: [4, 1], data: f32Bytes([1, 1, 1, 1]) },
+        { name: "enc.b", dtype: "F32", shape: [3], data: f32Bytes([1, 2, 3]) },
+      ])),
+    IrError,
+    "非対応 group 量子化",
   );
+  assertEquals(error.message.includes("graph.initializers['w']"), true, error.message);
   assertEquals(error.message.includes("i4 のみ"), true, error.message);
 });
 
@@ -515,15 +524,18 @@ Deno.test("openModel: 意味論 i32 の initializer は I32 テンソルと突�
     attrs: { sym: "T", slices: [{ dim: 0, coeff: 1, offset: 0 }] },
   }];
   const i32Tensor = { name: "enc.table", dtype: "I32", shape: [4, 3], data: new Uint8Array(48) };
-  assertEquals(openModel(baseModelBuffer(graph, [i32Tensor])).graph.values["table"].dtype, "i32");
+  assertEquals(
+    openModel(baseModelBuffer(graph, [i32Tensor])).graph.values["enc.table"].dtype,
+    "i32",
+  );
 
-  // 格納 dtype と safetensors の実 dtype が食い違う形は受理しない（要素は同じ 4 バイト）
+  // 格納 codec と safetensors の実 dtype が食い違う形は受理しない（要素は同じ 4 バイト）
   assertThrows(
     () =>
       openModel(
         baseModelBuffer(graph, [{ ...i32Tensor, dtype: "F32", data: f32Bytes(new Array(12)) }]),
       ),
     ContainerError,
-    "格納 dtype",
+    "格納 codec 'i32'",
   );
 });

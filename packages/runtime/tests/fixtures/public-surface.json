@@ -35,7 +35,19 @@
         "kind": "class"
       },
       {
+        "name": "BlockSource",
+        "kind": "typeAlias"
+      },
+      {
         "name": "ChunkBudgetStats",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "CodecLayout",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "CodecName",
         "kind": "typeAlias"
       },
       {
@@ -47,12 +59,24 @@
         "kind": "class"
       },
       {
+        "name": "ContainerFormatError",
+        "kind": "class"
+      },
+      {
+        "name": "ContainerInput",
+        "kind": "typeAlias"
+      },
+      {
         "name": "DEFAULT_PLAN_BACKING_BUDGET_BYTES",
         "kind": "variable"
       },
       {
         "name": "DEFAULT_SUBMIT_POLICY",
         "kind": "variable"
+      },
+      {
+        "name": "DescriptorExpectation",
+        "kind": "typeAlias"
       },
       {
         "name": "DeviceLostHandler",
@@ -157,6 +181,10 @@
       {
         "name": "OpContractError",
         "kind": "class"
+      },
+      {
+        "name": "OpenedContainer",
+        "kind": "typeAlias"
       },
       {
         "name": "ParamsCacheStats",
@@ -303,7 +331,15 @@
         "kind": "function"
       },
       {
+        "name": "codecLayout",
+        "kind": "function"
+      },
+      {
         "name": "createSession",
+        "kind": "function"
+      },
+      {
+        "name": "createSessionFromContainer",
         "kind": "function"
       },
       {
@@ -316,6 +352,10 @@
       },
       {
         "name": "estimateSessionMemory",
+        "kind": "function"
+      },
+      {
+        "name": "openContainer",
         "kind": "function"
       },
       {
@@ -332,6 +372,10 @@
       },
       {
         "name": "planWeightResidency",
+        "kind": "function"
+      },
+      {
+        "name": "prepareContainer",
         "kind": "function"
       },
       {

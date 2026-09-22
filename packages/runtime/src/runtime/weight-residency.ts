@@ -14,9 +14,14 @@
  * ときに検査・見積り・実ロードが別の寸法を主張する。
  */
 
-import { declaredPayloadBytes, declaredScaleBytes } from "../format/container.ts";
-import { groupScaleShape } from "../format/i4.ts";
-import type { IrGraph, IrStorageDtype } from "../format/ir.ts";
+import { declaredScaleBytes } from "../format/container.ts";
+import {
+  codecLayout,
+  type CodecName,
+  groupCount,
+  payloadBytes,
+} from "../format/container/codecs.ts";
+import type { IrGraph } from "../format/ir.ts";
 import { toSizeClass } from "../gpu/arena.ts";
 import type { GpuContext } from "../gpu/device.ts";
 import { RUNTIME_INTERNAL } from "../gpu/device.ts";
@@ -62,8 +67,8 @@ export type WeightResidency =
     readonly seat: "i8" | "i2";
     readonly payloadBytes: number;
     readonly scaleBytes: number;
-    /** per-channel scale が掛かる軸（消費側 op から決まる — ADR 0019）。 */
-    readonly channelAxis: number;
+    /** 行（per-channel scale が掛かる）の軸 — 宣言 `storage.rowAxis`（消費側 op の軸と一致することは検査済み）。 */
+    readonly rowAxis: 0 | 1;
   }
   | {
     readonly seat: "i4";
@@ -85,15 +90,14 @@ export type WeightResidency =
      */
     readonly seat: "shared";
     /**
-     * 借りる実体に**期待する席**（貸し手の分類と一致 MUST — 借り手 Session 構築の門が突合する）。
-     *
-     * MUST: 借り手側の消費（どの op の重みスロットで食うか）から**独立に**導き直す。貸し手が
-     * i4 常駐でも借り手の消費に展開経路が無ければ席は `expanded` になり、同じバッファが
-     * 「packed i4 のバイト列」と「f32 の値」の 2 通りに読まれる — 例外は 1 つも出ない。
+     * 借り手側の消費（適格判定）。借り手は格納を宣言しない（正本は貸し手の常駐重み）ので、
+     * 期待する席は貸し手の codec が分かる構築時に {@link resolveSharedWeights} が導く。
      */
-    readonly expected: Exclude<WeightResidency["seat"], "shared">;
-    /** i8 の per-channel scale が掛かる軸（`expected === "i8"` のときだけ）。 */
-    readonly channelAxis?: number;
+    readonly eligible: boolean;
+    readonly i4Eligible: boolean;
+    readonly i2Eligible: boolean;
+    /** 消費側 op から決まる per-channel scale の軸（重みスロットで消費されないときは無い）。 */
+    readonly consumerAxis?: 0 | 1;
   };
 
 /**
@@ -112,92 +116,109 @@ export const planWeightResidency = (graph: IrGraph): ReadonlyMap<string, WeightR
   // （ADR 0069 決定 5 とその追補 — 展開経路を持つカーネルはこの 3 つ）。
   const i4Eligible = i4EligibleInitializers(graph);
   const i2Eligible = i2EligibleInitializers(graph);
-  // i8 の per-channel scale が掛かる軸（消費側 op から決まる — ADR 0019）。
-  const channelAxes = weightChannelAxes(graph);
+  // per-channel scale の軸は**宣言**（`storage.rowAxis` — container-v1 §6.1）が正本。消費側 op から
+  // 決まる軸（ADR 0019）は突合点として残す — 宣言と食い違うと GPU 常駐経路が scale を別の軸に
+  // 当てる沈黙誤値になる。
+  const consumerAxes = weightChannelAxes(graph);
   const plan = new Map<string, WeightResidency>();
   for (const [name, initializer] of Object.entries(graph.initializers)) {
     const where = `initializer '${name}'`;
-    // initializer の宣言 shape は数値のみ（parseIrGraph が保証 — 記号次元は拒否）。
+    // initializer の宣言 shape は数値のみ（パーサが保証 — 記号次元は拒否）。
     const shape = graph.values[name].shape.map(Number);
     const count = numel(shape);
-    const storage = initializer.storage.dtype;
     // 共有 initializer は席だけを決める（バイト数は 1 つも数えない — 確保するのは貸し手）。
+    // 借り手は格納を宣言しないので、期待する席は貸し手の codec が分かる借り手構築時に
+    // 導く（{@link resolveSharedWeights}）— ここは借り手側の消費（適格判定）だけを持つ。
     if (initializer.shared !== undefined) {
-      const resident = storage === "i4"
-        ? eligible.has(name) && i4Eligible.has(name)
-        : storage === "i2"
-        ? eligible.has(name) && i2Eligible.has(name)
-        : eligible.has(name);
-      if (storage === "f32" || storage === "i32" || storage === "bf16") {
-        plan.set(name, { seat: "shared", expected: "raw" });
-      } else if (!resident) {
-        plan.set(name, { seat: "shared", expected: "expanded" });
-      } else if (storage === "i8" || storage === "i2") {
-        const channelAxis = channelAxes.get(name);
-        if (channelAxis === undefined) {
-          throw new ExecutionError(`${where}: per-channel scale のチャネル軸が決まらない`);
-        }
-        plan.set(name, { seat: "shared", expected: storage, channelAxis });
-      } else {
-        plan.set(name, { seat: "shared", expected: storage });
-      }
-      continue;
-    }
-    const payloadBytes = declaredPayloadBytes(storage, count, where);
-    if (storage === "f32" || storage === "i32" || storage === "bf16") {
-      // 圧縮しない格納は生バイトがそのまま GPU 表現。
-      plan.set(name, { seat: "raw", payloadBytes });
-      continue;
-    }
-    const resident = storage === "i4"
-      ? eligible.has(name) && i4Eligible.has(name)
-      : storage === "i2"
-      ? eligible.has(name) && i2Eligible.has(name)
-      : eligible.has(name);
-    if (!resident) {
-      plan.set(name, { seat: "expanded", payloadBytes, expandedBytes: count * 4 });
-      continue;
-    }
-    if (storage === "f16") {
-      plan.set(name, { seat: "f16", payloadBytes });
-      continue;
-    }
-    if (storage === "i8" || storage === "i2") {
-      const channelAxis = channelAxes.get(name);
-      if (channelAxis === undefined) {
-        throw new ExecutionError(`${where}: per-channel scale のチャネル軸が決まらない`);
-      }
-      const channels = shape[channelAxis];
-      if (channels === undefined) {
-        throw new ExecutionError(
-          `${where}: 重み [${shape.join(",")}] にチャネル軸 ${channelAxis} が無い`,
-        );
-      }
-      // GPU 常駐経路の scale は「チャネル軸だけが伸びた keepdim 形」でなければならない
-      // （executor の `assertChannelScale` が実テンソル側の門）ので、要素数はチャネル数に等しい。
+      const consumerAxis = consumerAxes.get(name);
       plan.set(name, {
-        seat: storage,
-        payloadBytes,
-        scaleBytes: declaredScaleBytes(channels, where),
-        channelAxis,
+        seat: "shared",
+        eligible: eligible.has(name),
+        i4Eligible: i4Eligible.has(name),
+        i2Eligible: i2Eligible.has(name),
+        ...(consumerAxis === 0 || consumerAxis === 1 ? { consumerAxis } : {}),
       });
       continue;
     }
-    // 値域（2 冪 ≥ 16・整除）と存在は parseIrGraph が保証済み。存在は型の上でだけ optional
-    // なので、黙って読み飛ばさず言い直す（「格納 i8 なのに scale が無い」と同じ流儀）。
-    const groupSize = initializer.storage.groupSize;
-    if (groupSize === undefined) {
-      throw new ExecutionError(`${where}: 格納 i4 なのに group_size が無い`);
+    const { codec, groupSize, rowAxis } = initializer.storage;
+    const layout = codecLayout(codec);
+    let bytes: number;
+    try {
+      bytes = payloadBytes(codec, count, where);
+    } catch (cause) {
+      throw new ExecutionError(cause instanceof Error ? cause.message : String(cause));
     }
-    plan.set(name, {
-      seat: "i4",
-      payloadBytes,
-      // group 形は container の検査と展開が共有する 1 本から引く（ADR 0069 決定 3）。
-      scaleBytes: declaredScaleBytes(numel(groupScaleShape(shape, groupSize)), where),
-      groupSize,
-    });
+    if (layout === "f32" || layout === "i32" || layout === "bf16") {
+      // 圧縮しない格納は生バイトがそのまま GPU 表現。
+      plan.set(name, { seat: "raw", payloadBytes: bytes });
+      continue;
+    }
+    const resident = layout === "i4"
+      ? eligible.has(name) && i4Eligible.has(name)
+      : layout === "i2"
+      ? eligible.has(name) && i2Eligible.has(name)
+      : eligible.has(name);
+    if (!resident) {
+      plan.set(name, { seat: "expanded", payloadBytes: bytes, expandedBytes: count * 4 });
+      continue;
+    }
+    if (layout === "f16") {
+      plan.set(name, { seat: "f16", payloadBytes: bytes });
+      continue;
+    }
+    // 量子化 codec: rowAxis / groupSize の存在と値域は合流層 / 旧パーサが保証済み。存在は型の上で
+    // だけ optional なので、黙って読み飛ばさず言い直す。
+    const axis = rowAxis ?? 0;
+    if (groupSize === undefined) {
+      throw new ExecutionError(`${where}: 量子化 codec '${codec}' なのに groupSize が無い`);
+    }
+    const consumerAxis = consumerAxes.get(name);
+    if (consumerAxis !== undefined && consumerAxis !== axis) {
+      throw new ExecutionError(
+        `${where}: 宣言の rowAxis ${axis} が消費側 op のチャネル軸 ${consumerAxis} と違う`,
+      );
+    }
+    const rows = shape[axis];
+    if (rows === undefined) {
+      throw new ExecutionError(`${where}: 重み [${shape.join(",")}] に行の軸 ${axis} が無い`);
+    }
+    const rowLength = rows === 0 ? 0 : count / rows;
+    // scale は rank 2 group 形 `[rows, 行長 / groupSize]`（per-channel は group 数 1）。
+    const scaleBytes = declaredScaleBytes(rows * groupCount(rowLength, groupSize), where);
+    if (layout === "i8" || layout === "i2") {
+      plan.set(name, { seat: layout, payloadBytes: bytes, scaleBytes, rowAxis: axis });
+      continue;
+    }
+    // i4 の group 形は先頭次元を行とする（展開カーネルと `decodeI4` の前提 — ADR 0069 決定 3）。
+    if (axis !== 0) {
+      throw new ExecutionError(
+        `${where}: group 量子化（${codec}）の rowAxis は 0 だけ（宣言は ${axis}）`,
+      );
+    }
+    plan.set(name, { seat: "i4", payloadBytes: bytes, scaleBytes, groupSize });
   }
   return plan;
+};
+
+/**
+ * 借り手側の消費（適格判定）と貸し手の codec から、借りる実体に**期待する席**を導く。
+ *
+ * MUST: 借り手側の消費から**独立に**導き直す。貸し手が i4 常駐でも借り手の消費に展開経路が
+ * 無ければ席は `expanded` になり、同じバッファが「packed i4 のバイト列」と「f32 の値」の
+ * 2 通りに読まれる — 例外は 1 つも出ない。
+ */
+const expectedSharedSeat = (
+  codec: CodecName,
+  seat: Extract<WeightResidency, { readonly seat: "shared" }>,
+): Exclude<WeightResidency["seat"], "shared"> => {
+  const layout = codecLayout(codec);
+  if (layout === "f32" || layout === "i32" || layout === "bf16") return "raw";
+  const resident = layout === "i4"
+    ? seat.eligible && seat.i4Eligible
+    : layout === "i2"
+    ? seat.eligible && seat.i2Eligible
+    : seat.eligible;
+  return resident ? layout : "expanded";
 };
 
 /**
@@ -218,10 +239,10 @@ export type SharedWeightInternals = {
   readonly resident: ResidentWeight | undefined;
   /** 貸し手の常駐席（借り手の期待席と一致 MUST）。 */
   readonly seat: Exclude<WeightResidency["seat"], "shared">;
-  /** i8 席の per-channel scale の軸（それ以外は undefined）。 */
-  readonly channelAxis: number | undefined;
-  /** 貸し手の宣言 格納 dtype。 */
-  readonly storage: IrStorageDtype;
+  /** i8 / i2 席の行（per-channel scale）の軸（それ以外は undefined）。 */
+  readonly rowAxis: 0 | 1 | undefined;
+  /** 貸し手の格納 codec（借り手の期待席はこれと借り手側の消費から導く）。 */
+  readonly codec: CodecName;
   /** 貸し手の宣言 shape。 */
   readonly shape: readonly number[];
   /** 借用を 1 本積む（借り手 Session の構築が成功したとき）。 */
@@ -252,13 +273,14 @@ export class SharedWeight {
  * 借り手グラフの共有 initializer 宣言と、渡された {@link SharedWeight} を突き合わせる
  * （ADR 0096 段 2 §2.2 の門）。返すのは注入すべき組（宣言順）。
  *
- * 見るのは 5 点:
+ * 見るのは 5 点（借り手は格納を宣言しないので「格納 dtype 一致」の門は無く、代わりに 4 で期待席を導く）:
  * 1. **過不足なし** — 宣言 1 本につき 1 つ（欠けは「バイトの無い重みで走る」、余りは
  *    「渡したつもりの重みが誰にも使われない」）
  * 2. **同一 device** — 別 device のバッファを束ねる bind group は validation で落ちるが、
  *    診断は真因から遠い
  * 3. **宣言 shape 一致** — バイト数だけでは `[2,3]` と `[3,2]` の取り違えが通る
- * 4. **格納 dtype 一致** — 宣言と実バイト列の読み方が割れる
+ * 4. **期待席の導出** — 借り手は格納を宣言しないので、貸し手の codec と借り手側の消費（適格判定）から
+ *    期待席を導く（`expectedSharedSeat`）。貸し手の実際の席と違えば同じバッファが別の読み方をされる
  * 5. **席の一致**（i8 は per-channel scale の軸まで） — 貸し手が i4 常駐でも借り手の消費に
  *    展開経路が無ければ席は `expanded` で、同じバッファが packed バイトと f32 の 2 通りに
  *    読まれる。i8 の軸違い（embedding と linear）も同じ機序で沈黙誤値になる
@@ -297,22 +319,22 @@ export const resolveSharedWeights = (
         `${where}: 宣言 shape [${shape.join(",")}] が貸し手の [${shared.shape.join(",")}] と違う`,
       );
     }
-    const storage = graph.initializers[name].storage.dtype;
-    if (storage !== shared.storage) {
-      throw new ExecutionError(
-        `${where}: 宣言 格納 dtype '${storage}' が貸し手の '${shared.storage}' と違う`,
-      );
-    }
     const seat = residency.get(name);
     if (seat === undefined || seat.seat !== "shared") {
       throw new ExecutionError(`${where}: 常駐分類が shared でない（簿記の破れ）`);
     }
-    if (seat.expected !== shared.seat || seat.channelAxis !== shared.channelAxis) {
+    // 借り手は格納を宣言しない — 貸し手の codec と借り手側の消費から期待席を導き、貸し手の
+    // 実際の席（と i8 / i2 の行の軸）と突き合わせる。
+    const expected = expectedSharedSeat(shared.codec, seat);
+    const expectedAxis = expected === "i8" || expected === "i2"
+      ? seat.consumerAxis ?? 0
+      : undefined;
+    if (expected !== shared.seat || expectedAxis !== shared.rowAxis) {
       throw new ExecutionError(
-        `${where}: 消費席が貸し手と互換でない（借り手は席 '${seat.expected}'${
-          seat.channelAxis === undefined ? "" : `・チャネル軸 ${seat.channelAxis}`
+        `${where}: 消費席が貸し手と互換でない（借り手は席 '${expected}'${
+          expectedAxis === undefined ? "" : `・行の軸 ${expectedAxis}`
         }・貸し手は席 '${shared.seat}'${
-          shared.channelAxis === undefined ? "" : `・チャネル軸 ${shared.channelAxis}`
+          shared.rowAxis === undefined ? "" : `・行の軸 ${shared.rowAxis}`
         }）— 同じバッファが別の読み方をされる`,
       );
     }

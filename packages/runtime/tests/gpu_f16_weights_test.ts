@@ -68,7 +68,7 @@ Deno.test("適格判定は融合 5 op の weight スロット消費だけを通�
 
   // 単独の weight 消費は適格。bias は同じグラフにいても**絶対に適格にならない**
   // （プロトタイプの f16 降格バグの逆 — ADR 0006 が名指しした規則）。
-  assertEquals(eligible(linearGraph("f16")), ["w"]);
+  assertEquals(eligible(linearGraph("f16")), ["m.w"]);
 
   // MUST: 同じ initializer が weight 以外でも消費されたら適格を失う（混在消費）。
   // 圧縮のまま上げると elementwise 側のカーネルが u32 を f32 として読む沈黙誤値になる。
@@ -86,7 +86,7 @@ Deno.test("適格判定は融合 5 op の weight スロット消費だけを通�
   const unused = linearGraph("f16");
   unused.initializers["dead"] = { tensor: "m.dead", storage: { dtype: "f16" } };
   unused.values["dead"] = { dtype: "f32", shape: [2] };
-  assertEquals(eligible(unused), ["w"]);
+  assertEquals(eligible(unused), ["m.w"]);
 });
 
 Deno.test("適格判定は 5 op それぞれの weight スロット位置を見る（bias / index は適格にしない）", () => {
@@ -140,7 +140,7 @@ Deno.test("graph 出力になった initializer は weight スロット消費だ
   twoWeights.requires.ops = ["linear"];
   twoWeights.initializers["w2"] = { tensor: "m.w2", storage: { dtype: "f16" } };
   twoWeights.values["w2"] = { dtype: "f32", shape: [3, 3] };
-  assertEquals(eligible(twoWeights), ["w2"]);
+  assertEquals(eligible(twoWeights), ["m.w2"]);
 });
 
 // ---------------------------------------------------------------------------
@@ -818,8 +818,8 @@ Deno.test({
       assertEquals(storage.hostExpandedBytes, quantized.values.byteLength, "CPU 展開バイト数");
       const outputs = await session.run({ x });
       // 重みは実行に依らない定数なので、丸め後の値とビット単位で一致する
-      assertEquals(outputs["w"].shape, [3, 4]);
-      assertEquals([...outputs["w"].data], [...quantized.values]);
+      assertEquals(outputs["m.w"].shape, [3, 4]);
+      assertEquals([...outputs["m.w"].data], [...quantized.values]);
       // 同じ run の計算側も従来どおり（展開経路でも値は変わらない）
       const expected = applyReferenceOp(
         "linear",
@@ -855,7 +855,7 @@ Deno.test("bf16 は capability 不足で fail loudly（f16 の門は bf16 まで
       "capability 不足",
     );
     assertEquals(
-      error.message.includes(`非対応 格納 dtype '${dtype}' (1): w`),
+      error.message.includes(`非対応 格納 '${dtype}' (1): m.w`),
       true,
       error.message,
     );

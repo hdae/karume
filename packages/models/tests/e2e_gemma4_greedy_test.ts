@@ -52,6 +52,7 @@
 import { assert, assertEquals } from "@std/assert";
 import {
   acquireGpu,
+  codecLayout,
   parseSafetensors,
   type PreparedModel,
   prepareModel,
@@ -477,14 +478,17 @@ const assertDecodeForm = (parsed: PreparedModel): void => {
   // linear − tied lm_head）。
   const storage: Record<string, number> = {};
   for (const initializer of Object.values(graph.initializers)) {
-    const dtype = initializer.storage.dtype;
-    storage[dtype] = (storage[dtype] ?? 0) + 1;
+    // 共有 initializer（借り物）は格納を持たない。黙って落とさず `shared` として数える。
+    const layout = initializer.storage === undefined
+      ? "shared"
+      : codecLayout(initializer.storage.codec);
+    storage[layout] = (storage[layout] ?? 0) + 1;
   }
-  for (const [dtype, expected] of Object.entries({ i8: 36, i4: 276 })) {
+  for (const [layout, expected] of Object.entries({ i8: 36, i4: 276 })) {
     assertEquals(
-      Object.hasOwn(storage, dtype) ? storage[dtype] : 0,
+      Object.hasOwn(storage, layout) ? storage[layout] : 0,
       expected,
-      `格納 ${dtype} の initializer 本数（全内訳 ${JSON.stringify(storage)}）`,
+      `格納 ${layout} の initializer 本数（全内訳 ${JSON.stringify(storage)}）`,
     );
   }
 };
