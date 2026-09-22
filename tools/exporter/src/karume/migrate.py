@@ -45,6 +45,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import shutil
 from collections import Counter
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -608,9 +609,15 @@ class WeightEntry:
         return (*self.shards, *(ref for _, ref in self.extras))
 
 
+#: `pipeline` の綴り `<name>/<major>`（hub の `parsePipeline` と同じ受理形 — 実物は文字列で、
+#: `{name, major}` のオブジェクトではない）。
+PIPELINE_RE = re.compile(r"^([A-Za-z0-9_-]+)/(\d+)$")
+
+
 @dataclass(frozen=True)
 class LegacyModel:
-    pipeline: Mapping[str, Any]
+    #: `<name>/<major>` の文字列そのまま（karume/5 へもこの綴りで写す）。
+    pipeline: str
     weights: Mapping[str, Mapping[str, WeightEntry]]
     assets: Mapping[str, FileRef]
     quants: Mapping[str, Any]
@@ -661,9 +668,11 @@ def _legacy_model(value: Any, where: str) -> LegacyModel:
         [],
         where,
     )
-    pipeline = _object(obj["pipeline"], f"{where}.pipeline")
-    _keys(pipeline, ["name", "major"], [], f"{where}.pipeline")
-    _text(pipeline["name"], f"{where}.pipeline.name")
+    pipeline = _text(obj["pipeline"], f"{where}.pipeline")
+    _require(
+        PIPELINE_RE.match(pipeline) is not None,
+        f"{where}.pipeline が '<name>/<major>' の形でない: {pipeline!r}",
+    )
     weights: dict[str, dict[str, WeightEntry]] = {}
     for component, labels in _object(obj["weights"], f"{where}.weights").items():
         entries: dict[str, WeightEntry] = {}
@@ -1145,7 +1154,7 @@ def _manifest_document(
         fold = folds[name]
         dropped = frozenset() if fold is None else fold.asset_names
         models[name] = {
-            "pipeline": dict(model.pipeline),
+            "pipeline": model.pipeline,
             "weights": {
                 component: {
                     dtype: {"container": containers[_Seat(name, component, dtype)].to_document()}
@@ -1182,7 +1191,7 @@ def _plan_ple(repo: Path, model: LegacyModel, where: str) -> _PleFold | None:
     index_ref = model.assets.get(PLE_INDEX_ASSET)
     if index_ref is None:
         return None
-    pipeline = str(model.pipeline["name"])
+    pipeline = model.pipeline.split("/", 1)[0]
     component = PLE_OWNER.get(pipeline)
     if component is None:
         raise MigrateError(

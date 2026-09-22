@@ -82,7 +82,7 @@ def model_entry(
     pipeline: str = "synthetic",
 ) -> dict[str, Any]:
     return {
-        "pipeline": {"name": pipeline, "major": 1},
+        "pipeline": f"{pipeline}/1",
         "weights": {name: dict(labels) for name, labels in weights.items()},
         "assets": dict(assets),
         "quants": dict(quants),
@@ -772,7 +772,7 @@ class TestThePleFold:
         self, gemma_repo: Path, tmp_path: Path
     ) -> None:
         manifest = json.loads((gemma_repo / "karume.json").read_text(encoding="utf-8"))
-        manifest["models"]["e2b"]["pipeline"]["name"] = "synthetic"
+        manifest["models"]["e2b"]["pipeline"] = "synthetic/1"
         (gemma_repo / "karume.json").write_text(json.dumps(manifest), encoding="utf-8")
 
         with pytest.raises(MigrateError, match="PLE の持ち主でない"):
