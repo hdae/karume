@@ -9,6 +9,19 @@
 
 ## now — 0.12.0 リリース後（2026-09-06）
 
+- **Karume 専用コンテナ形式の波（起票 2026-09-22）**: 配布形を safetensors 方言から専用コンテナ
+  （`krm` = モデル / `krg` = グラフ）へ移す。正本は [ADR 0108](decisions/0108-container-format.md)（proposed）と
+  [container-v1](container-v1.md)（proposed）。**段 0 は済（2026-09-22）** = ADR + 仕様 + CPU 試作
+  （container の読み書き 18 テスト緑・anima transformer の上流重みが 567/567 バイト一致・
+  LoRA のグラフ書き換え 454 本が `parseIrGraph` 通過）。試作の置き場は
+  `.claude/reviews/2026-09-22_codex-format-design/spikes/`（git 追跡外）。
+  段 0 の宿題だった `pushErrorScope('validation')` の同期区間を block 単位に割る費用は実測で閉じた
+  （push/pop 1.81 µs / 回・フェンス 13.0 ms / 回 — ADR 0108 決定 9 に追記済み）。段 1〜6 の作るものと検収は
+  ADR 0108 の段階分解の表が正本（ここには複写しない）。段 1 の前提だった `outputs/series/` の大掃除は
+  実施済み（2026-09-22・38 項目・約 141 GB — 削除一覧は
+  `.claude/reviews/2026-09-22_codex-format-design/outputs-cleanup-deleted.txt`。レーンが参照する系列は
+  段 1 後に新形式で再生成する）。
+
 - **モデル横断の追加調査（2026-09-10〜11）**: Qwen3-0.6B / MiniCPM5-2B の RTN / GPTQ と
   E4B の全 PLE を含むローカル pipeline は実機検証済み。E4B chat も CPU / Deno / Chrome で一致。
   [初期品質参考値](research/2026-09-12-llm-quality-baseline.md)はQwen/MiniCPMで保存済み。
