@@ -27,6 +27,7 @@ from karume.container import (
     ContainerFormatError,
     GraphDescriptor,
     ModelDescriptor,
+    ReadContainer,
     codec_entry,
     group_count,
     payload_bytes,
@@ -65,7 +66,7 @@ from karume.ops import (
     sym_prefix_slice_attrs,
 )
 from karume.shapes import assert_graph_shapes, declared_shape
-from karume.shards import SHARD_BYTE_LIMIT, parse_piece_key, resolve_shards
+from karume.shards import SHARD_BYTE_LIMIT, component_path, parse_piece_key, resolve_shards
 
 
 class IrError(ValueError):
@@ -1888,29 +1889,57 @@ def bind_graphs(graph: GraphDescriptor, model: ModelDescriptor | None) -> dict[s
     return bound
 
 
-def verify_container(paths: Sequence[str | Path]) -> dict[str, BoundGraph]:
-    """コンテナ（`krm` の part 列 / `krg` 1 本）を開き、合流まで通して供給計画を返す。
+@dataclass(frozen=True)
+class VerifiedContainer:
+    """{@link verify_container} の結果（開いた読み手と、合流で決まった供給計画）。"""
 
-    `paths` は単一形なら 1 本、分割形なら **part 0 から順に**並べた part 列。掛かるのは
-    「宣言で決まる規則」全部（読み手の構造検査 + 上の合流層）で、**実バイトは読まない** —
-    block / part の sha256 を突き合わせるのは {@link karume.container.ReadContainer.verify_blocks}
-    の側（§7 のハッシュ 3 分離）。
+    read: ReadContainer
+    graphs: dict[str, BoundGraph]
+
+
+def verify_container(paths: Sequence[str | Path], *, blocks: bool = False) -> VerifiedContainer:
+    """コンテナ（`krm` の part 列 / `krg` 1 本）を開き、合流まで通す。
+
+    `paths` は単一形なら 1 本、分割形なら **part 0 から順に**並べた part 列。既定で掛かるのは
+    「宣言で決まる規則」全部（読み手の構造検査 + 上の合流層）で、**実バイトは読まない**
+    （§7 のハッシュ 3 分離）。`blocks=True` は全 block を取り直して sha256 まで突き合わせる
+    — 「コンテナを検証する」経路はこの 1 本だけ MUST（CLI もここを通る）。
     """
     read = read_container([Path(path) for path in paths])
-    return bind_graphs(read.graph, read.model)
+    if blocks:
+        read.verify_blocks()
+    return VerifiedContainer(read, bind_graphs(read.graph, read.model))
+
+
+def container_parts(path: str | Path) -> tuple[Path, ...]:
+    """コンテナ 1 本の part 列（part 0 のファイル / 単一形 / 代表 path のどれを渡してもよい）。
+
+    分割形の part は旧 shard と同じ連番規約（`<stem>-NNNNN-of-NNNNN.krm` — §8）なので、
+    畳み込みと解決は {@link karume.shards} の 1 本道を借りる（単一形と連番の同居は
+    そこが fail loudly で受ける）。
+    """
+    return resolve_shards(component_path(Path(path)))
 
 
 # ---- CLI ------------------------------------------------------------------
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="配布形 safetensors を IR v1 の全規則で検証する")
+    parser = argparse.ArgumentParser(
+        description="配布形 safetensors を IR v1 の全規則で検証する"
+        "（`--container` でコンテナ形式 krm / krg）"
+    )
     parser.add_argument(
         "models",
         type=Path,
         nargs="+",
         help="検証する model.safetensors（複数指定可。分割された資産は**代表 path**を渡す"
         " — 連番の shard 列としてまとめて検証する）",
+    )
+    parser.add_argument(
+        "--container",
+        action="store_true",
+        help="引数をコンテナ（krm / krg）として検証する（part 0 のファイル・単一形・代表 path）",
     )
     return parser
 
@@ -1922,19 +1951,39 @@ def main(argv: Sequence[str] | None = None) -> None:
     まとめて検証する（`karume.shards.resolve_shards`）— shard 1 本だけを単体で検証しても
     「グラフが無い」「テンソルが足りない」としか言えず、宣言完全性も co-shard も見られない。
 
+    `--container` はコンテナ形式（`krm` / `krg`）の側で、2 文書の構造検査と合流（`bind_graphs`）
+    に加えて**全 block を取り直して sha256 を突き合わせる**。
+
     MUST: 落ちたファイルで止める（残りを検証して最後にまとめない）— 例外は規則違反の
     位置まで綴ってあるので、そのまま送出するのが最も情報量が多い。
     """
     args = build_parser().parse_args(argv)
     for path in args.models:
-        shards = resolve_shards(path)
-        graph = verify_shards(shards)
-        split = f" shards={len(shards)}" if len(shards) > 1 else ""
-        print(
-            f"{path}:{split} nodes={len(graph.nodes)} initializers={len(graph.initializers)}"
-            f" inputs={len(graph.inputs)} outputs={len(graph.outputs)}"
-            f" symbols={','.join(graph.symbols) if graph.symbols else '（静的）'}"
-        )
+        print(_verify_container_line(path) if args.container else _verify_shards_line(path))
+
+
+def _verify_shards_line(path: Path) -> str:
+    shards = resolve_shards(path)
+    graph = verify_shards(shards)
+    split = f" shards={len(shards)}" if len(shards) > 1 else ""
+    return (
+        f"{path}:{split} nodes={len(graph.nodes)} initializers={len(graph.initializers)}"
+        f" inputs={len(graph.inputs)} outputs={len(graph.outputs)}"
+        f" symbols={','.join(graph.symbols) if graph.symbols else '（静的）'}"
+    )
+
+
+def _verify_container_line(path: Path) -> str:
+    parts = container_parts(path)
+    verified = verify_container(parts, blocks=True)
+    read, bound = verified.read, verified.graphs
+    assets = sorted(read.model.assets) if read.model is not None else []
+    return (
+        f"{path}: parts={len(parts)} blocks={len(read.block_ids)}"
+        f" graphs={','.join(sorted(bound))}"
+        f" initializers={sum(len(graph.supplies) for graph in bound.values())}"
+        f" assets={','.join(assets) if assets else '（無し）'}"
+    )
 
 
 if __name__ == "__main__":

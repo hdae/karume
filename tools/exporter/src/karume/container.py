@@ -30,10 +30,10 @@ import hashlib
 import json
 import math
 import re
-from collections.abc import Buffer, Iterator, Mapping, Sequence
+from collections.abc import Buffer, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 
 from karume.ir import IrGraph
 from karume.shards import shard_name
@@ -100,6 +100,30 @@ CONST_KEY_PREFIX = "const."
 
 #: block の役割（§2.2）。`"const"` は const 目次側にしか現れない。
 BlockRole = Literal["weight", "scale", "zero-point", "asset"]
+
+
+class AssetInput(NamedTuple):
+    """資産 1 本の受け口（§2.2）— `(役割, 論理長, payload[, 専用 part か])`。
+
+    `role` は **models 側の解釈者名**（`ple-index` / `rope-base` …）で、runtime は解釈しない。
+    `length` は payload のバイト数（論理長）で、**宣言が先**に来る — block 長はこれを
+    {@link BLOCK_TAIL_ALIGN} の倍数へ切り上げた値になり、消費側は末尾の 0x00 を推測で剥がない
+    （ADR 0109 決定 4）。
+
+    `payload` は生バイトか、引かれたときだけ実体を作る呼び出し。後者は**引かれるたびに同じ
+    バイト列を返す** MUST（書き手は sha256 を採るときと書くときの 2 度引き、宣言と違う長さを
+    落とす）。
+
+    `dedicated_part` は**区間読みを要する資産**（PLE の `values` / `scales`）の印で、その
+    block は専用 part に単独で置かれる MUST（container-v1 §4.2）— 全量読みの資産
+    （索引・`rope_base`）どうしは 1 part を共有してよい。
+    """
+
+    role: str
+    length: int
+    payload: Buffer | Callable[[], Buffer]
+    dedicated_part: bool = False
+
 
 #: IR v2 のグラフ JSON の版（docs/ir-v2.md）。
 IR_V2_FORMAT = "karume-ir"
@@ -542,6 +566,19 @@ class PartRecord:
 
 
 @dataclass(frozen=True)
+class AssetRecord:
+    """モデル記述の `assets` 1 件（§2.2 — 名前 → block + 役割 + 論理長）。
+
+    `length` は payload のバイト数で、`block` の長さは**これを
+    {@link BLOCK_TAIL_ALIGN} の倍数へ切り上げた値** MUST（詰め物の量まで宣言で閉じる）。
+    """
+
+    block: str
+    role: str
+    length: int
+
+
+@dataclass(frozen=True)
 class WeightSupply:
     """束縛表の供給形（§5）。`block`（丸ごと 1 本）と `pieces`（2 本以上）は排他。"""
 
@@ -636,7 +673,7 @@ class ModelDescriptor:
     parts: tuple[PartRecord, ...]
     blocks: tuple[DataBlockRecord, ...]
     binding: Mapping[str, Mapping[str, WeightSupply]]
-    assets: Mapping[str, Mapping[str, str]]
+    assets: Mapping[str, AssetRecord]
     provenance: Provenance
 
     def to_document(self) -> dict[str, Any]:
@@ -674,7 +711,11 @@ class ModelDescriptor:
                 for graph in sorted(self.binding)
             },
             "assets": {
-                name: {"block": self.assets[name]["block"], "role": self.assets[name]["role"]}
+                name: {
+                    "block": self.assets[name].block,
+                    "role": self.assets[name].role,
+                    "length": self.assets[name].length,
+                }
                 for name in sorted(self.assets)
             },
             "provenance": self.provenance.to_document(),
@@ -1133,6 +1174,68 @@ def _plan_data_parts(
     return _DataPlan([part for part in parts if not part.is_empty], roles, supplies)
 
 
+@dataclass(frozen=True)
+class _AssetPlan:
+    parts: list[_PartBuilder]
+    #: 資産名 → モデル記述の 1 件。
+    bindings: dict[str, AssetRecord]
+
+
+def _asset_view(name: str, asset: AssetInput) -> memoryview:
+    """資産 1 本の実体（遅延の呼び出しはここで解決する）。呼び手は使い終わったら手放す。"""
+    raw = asset.payload() if callable(asset.payload) else asset.payload
+    try:
+        return memoryview(raw).cast("B")
+    except TypeError as cause:
+        raise ContainerFormatError(f"資産 '{name}': payload がバイト列でない") from cause
+
+
+def _plan_asset_parts(
+    assets: Mapping[str, AssetInput], part_bytes: int, block_bytes: int
+) -> _AssetPlan:
+    """資産を**重みと同居しない part** へ並べる（§4.2 — 区間読みの資産を走査の後ろに置かない）。
+
+    配置の順は**呼び手が渡した順**（PLE は token 順で渡る — 走査型の取得元で隣り合う token が
+    別 part へ散らない）。descriptor の `assets` の綴りは正準直列化が code point 順にする。
+
+    資産は piece 分割しない（行の刻みを知るのは役割ごとの索引で、descriptor は「名前 →
+    block」までしか持たない）— 1 block に収まらなければ fail loudly。`dedicated_part` の資産は
+    専用 part へ単独で置き、そうでない資産どうしは 1 part に同居してよい。
+    """
+    parts: list[_PartBuilder] = []
+    bindings: dict[str, AssetRecord] = {}
+    current: _PartBuilder | None = None
+    for serial, (name, asset) in enumerate(assets.items()):
+        where = f"資産 '{name}'"
+        if not name:
+            raise ContainerFormatError("資産名が空文字列")
+        if not isinstance(asset.role, str) or not asset.role:
+            raise ContainerFormatError(f"{where}: 役割が非空文字列でない（{asset.role!r}）")
+        if not isinstance(asset.length, int) or isinstance(asset.length, bool):
+            raise ContainerFormatError(f"{where}: 論理長が整数でない（{asset.length!r}）")
+        chunk = _stored_chunk(name, asset.length, 0, asset.length, True, where)
+        if chunk.length > block_bytes:
+            raise ContainerFormatError(
+                f"{where}: 資産は 1 block に収める必要があるが {chunk.length} バイト"
+                f"（上限 {block_bytes}）"
+            )
+        if chunk.length > part_bytes:
+            raise ContainerFormatError(
+                f"{where}: block {chunk.length} バイトが part 長 {part_bytes} を超える"
+            )
+        if asset.dedicated_part or current is None or current.probe([chunk.length]) > part_bytes:
+            current = _PartBuilder()
+            parts.append(current)
+        # block id は配置順の 0 始まり十進（`a.0` / `a.1` …）。
+        block_id = f"a.{serial}"
+        current.push(block_id, chunk)
+        bindings[name] = AssetRecord(block_id, asset.role, asset.length)
+        if asset.dedicated_part:
+            # 単独 MUST: 次の資産はこの part に同居させない（§4.2）。
+            current = None
+    return _AssetPlan(parts, bindings)
+
+
 # ---------------------------------------------------------------------------
 # 実体の取り出し（1 本ずつ・持ち越しは連続するあいだだけ）
 # ---------------------------------------------------------------------------
@@ -1174,6 +1277,33 @@ class _Payloads:
     def release(self) -> None:
         self._view = None
         self._key = None
+
+
+class _Sources(Mapping[str, Buffer]):
+    """テンソルと資産を 1 つの口に束ねる（block の `key` からどちらかを引く）。
+
+    資産名とテンソルキーが衝突すると block の実体が黙って入れ替わるので、束ねる時点で
+    全件列挙して拒否する。
+    """
+
+    def __init__(self, tensors: Mapping[str, Buffer], assets: Mapping[str, AssetInput]) -> None:
+        clash = sorted(set(assets) & set(tensors))
+        if clash:
+            raise ContainerFormatError(f"資産名がテンソルキーと衝突している: {', '.join(clash)}")
+        self._tensors = tensors
+        self._assets = dict(assets)
+
+    def __getitem__(self, key: str) -> Buffer:
+        asset = self._assets.get(key)
+        if asset is None:
+            return self._tensors[key]
+        return _asset_view(key, asset)
+
+    def __iter__(self) -> Iterator[str]:
+        return iter([*self._tensors, *self._assets])
+
+    def __len__(self) -> int:
+        return len(self._tensors) + len(self._assets)
 
 
 def _region_stream(
@@ -1342,6 +1472,7 @@ def write_model_container(
     *,
     graph_name: str,
     provenance: Provenance,
+    assets: Mapping[str, AssetInput] = {},
     part_bytes: int = DEFAULT_PART_BYTES,
     block_bytes: int = BLOCK_MAX_BYTES,
     single: bool = False,
@@ -1352,6 +1483,10 @@ def write_model_container(
     （`Mapping` を遅延にすれば全量はメモリに載らない）。`bindings` は shared でない initializer
     ぜんぶを覆う MUST で、`const.` で始まるキーは const 領域（part 1）へ、それ以外は重み
     （part 2 以降）へ行く。
+
+    `assets`（資産名 → {@link AssetInput}）は重みの part の**後ろ**に専用の part を並べて置く
+    （§4.2 — 区間読みの資産を重みの走査の後ろに置かない）。並ぶ順は**渡した順**で、
+    `dedicated_part` の資産は 1 block = 1 part になる。
 
     ファイル名は単一形が `path` そのもの、分割形が `<stem>-NNNNN-of-NNNNN<suffix>`（part 0 から）。
     """
@@ -1366,16 +1501,22 @@ def write_model_container(
     consts, weights = _split_initializers(document, bindings, graph_name)
     region = _build_const_region(graph_name, consts, block_bytes)
     data = _plan_data_parts(graph_name, weights, part_bytes, block_bytes)
-    _assert_block_budget(len(region.blocks) + sum(len(part.blocks) for part in data.parts))
-    if len(data.parts) + 2 > MAX_PARTS:
-        raise ContainerFormatError(f"part 件数 {len(data.parts) + 2} が上限 {MAX_PARTS} を超える")
+    asset_plan = _plan_asset_parts(assets, part_bytes, block_bytes)
+    builders = [*data.parts, *asset_plan.parts]
+    roles: dict[str, BlockRole] = {
+        **data.roles,
+        **{record.block: "asset" for record in asset_plan.bindings.values()},
+    }
+    _assert_block_budget(len(region.blocks) + sum(len(part.blocks) for part in builders))
+    if len(builders) + 2 > MAX_PARTS:
+        raise ContainerFormatError(f"part 件数 {len(builders) + 2} が上限 {MAX_PARTS} を超える")
 
     # ② 実体を 1 本ずつ流して block / part の sha256 を採る。
-    payloads = _Payloads(tensors)
+    payloads = _Payloads(_Sources(tensors, assets))
     region_hash, block_hashes = _hash_region(region.blocks, payloads)
     parts = [PartRecord(1, region.length, region_hash)]
     data_blocks: list[DataBlockRecord] = []
-    for index, builder in enumerate(data.parts):
+    for index, builder in enumerate(builders):
         part_hash, hashes = _hash_region(builder.blocks, payloads)
         block_hashes.update(hashes)
         parts.append(PartRecord(index + 2, builder.length, part_hash))
@@ -1387,7 +1528,7 @@ def write_model_container(
                     placed.offset,
                     placed.chunk.length,
                     hashes[placed.id],
-                    data.roles[placed.id],
+                    roles[placed.id],
                 )
             )
     payloads.release()
@@ -1398,7 +1539,7 @@ def write_model_container(
         parts=tuple(parts),
         blocks=tuple(data_blocks),
         binding={graph_name: data.supplies},
-        assets={},
+        assets=dict(asset_plan.bindings),
         provenance=provenance,
     )
     graph_bytes = serialize_graph_descriptor(graph_descriptor)
@@ -1411,11 +1552,11 @@ def write_model_container(
         raise ContainerFormatError(
             f"part 0 の長さ {part0_length} が part 長の天井 {PART_MAX_BYTES} を超える"
         )
-    regions = [region.blocks] + [builder.blocks for builder in data.parts]
+    regions = [region.blocks] + [builder.blocks for builder in builders]
     lengths = [part.length for part in parts]
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    payloads = _Payloads(tensors)
+    payloads = _Payloads(_Sources(tensors, assets))
     if single:
         offsets = derive_part_offsets(part0_length, lengths)
         with path.open("wb") as handle:
@@ -1835,15 +1976,16 @@ def _parse_model_descriptor(raw: bytes) -> ModelDescriptor:
             for name, value in supplies.items()
         }
 
-    assets: dict[str, dict[str, str]] = {}
+    assets: dict[str, AssetRecord] = {}
     for name, raw_asset in _require_object(root["assets"], f"{where}.assets").items():
         asset_where = f"{where}.assets['{name}']"
         obj = _require_object(raw_asset, asset_where)
-        _require_keys(obj, ["block", "role"], [], asset_where)
-        assets[name] = {
-            "block": _require_block_id(obj["block"], f"{asset_where}.block"),
-            "role": _require_string(obj["role"], f"{asset_where}.role"),
-        }
+        _require_keys(obj, ["block", "role", "length"], [], asset_where)
+        assets[name] = AssetRecord(
+            _require_block_id(obj["block"], f"{asset_where}.block"),
+            _require_string(obj["role"], f"{asset_where}.role"),
+            _require_index(obj["length"], f"{asset_where}.length"),
+        )
 
     prov = _require_object(root["provenance"], f"{where}.provenance")
     _require_keys(
@@ -1903,7 +2045,14 @@ def _validate_model_descriptor(descriptor: ModelDescriptor, codecs: Any) -> None
                     f"実体の先頭が part {first}（同一 part MUST）",
                 )
     for name, asset in descriptor.assets.items():
-        claim(asset["block"], "asset", f"{where}.assets['{name}']")
+        asset_where = f"{where}.assets['{name}']"
+        block = claim(asset.block, "asset", asset_where)
+        # 詰め物の量まで宣言で閉じる（消費側が末尾の 0x00 を推測で剥がない — §2.2）。
+        _require(
+            align_up(asset.length, BLOCK_TAIL_ALIGN) == block.length,
+            f"{asset_where}.length: 論理長 {asset.length} を {BLOCK_TAIL_ALIGN} の倍数へ"
+            f"切り上げた値が block '{asset.block}' の長さ {block.length} と違う",
+        )
     for block_id in sorted(set(by_id) - referenced):
         raise ContainerFormatError(
             f"{where}: block '{block_id}' がどこからも参照されていない（余剰）"

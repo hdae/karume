@@ -2,9 +2,9 @@
 # HF 配布リポのアップロードと断片化検証（docs/release-runbook.md §2 の台本）。
 #
 #     tools/release/hf-upload.zsh upload <repo-dir-name> [hf upload の追加引数…]
-#         models/<repo-dir-name> を hdae/<repo-dir-name> へ上げ、直後に全 safetensors の断片化を検証する
+#         models/<repo-dir-name> を hdae/<repo-dir-name> へ上げ、直後に全 safetensors / krm の断片化を検証する
 #     tools/release/hf-upload.zsh check <repo-dir-name>
-#         公開済みリポの全 safetensors について reconstruction の term 数を表にする（アップロードしない）
+#         公開済みリポの全 safetensors / krm について reconstruction の term 数を表にする（アップロードしない）
 #
 # ログは outputs/release/upload-<repo-dir-name>.log へ追記する（outputs/ は git 追跡外）。
 #
@@ -32,16 +32,16 @@ LOG=$ROOT/outputs/release/upload-$NAME.log
 mkdir -p "$ROOT/outputs/release"
 cd "$ROOT"
 
-# 全 safetensors の reconstruction terms 表（healthy なら 1 xorb = 1 term に近い・目安 ≥10 MiB/term）。
-# MUST: ローカルミラーが 0 件なら非 0 で落ちる。usage は「公開済みリポの全 safetensors」を名乗る
+# 全 safetensors / krm の reconstruction terms 表（healthy なら 1 xorb = 1 term に近い・目安 ≥10 MiB/term）。
+# MUST: ローカルミラーが 0 件なら非 0 で落ちる。usage は「公開済みリポの全 safetensors / krm」を名乗る
 # 一方で列挙するのは models/<repo> なので、手元にミラーが無いと 0 周して空表を成功として出す —
 # 「検証したが問題なし」と「何も検証していない」が同じ見え方になる（runbook §2 は全件を要求する）。
 fragmentation_table() {
   local tok cas casUrl access f rel hash stats terms xorbs size
   # (N.OL) = 該当なしなら空配列 / 通常ファイルのみ / サイズ降順（`ls -S` の並びと word splitting を兼ねる）。
-  local files=(models/$NAME/**/*.safetensors(N.OL))
+  local files=(models/$NAME/**/*.(safetensors|krm)(N.OL))
   if (( ${#files} == 0 )); then
-    echo "### models/$NAME に .safetensors が 1 本も無い（断片化を検証していない — ミラーを置くこと）"
+    echo "### models/$NAME に .safetensors / .krm が 1 本も無い（断片化を検証していない — ミラーを置くこと）"
     return 1
   fi
   tok=$(curl -sS "https://huggingface.co/api/models/$OWNER/$NAME/xet-read-token/main")

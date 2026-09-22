@@ -17,11 +17,13 @@ from container_fixture import (
     FIXTURE_BLOCK_BYTES,
     FIXTURE_PATH,
     GRAPH_NAME,
+    split_fixture_paths,
     synthetic_bindings,
     synthetic_graph,
     synthetic_tensors,
 )
 
+from karume import verify
 from karume.container import (
     BlockEncoding,
     ContainerFormatError,
@@ -94,7 +96,7 @@ class TestTheFixtureContainer:
     """言語横断 fixture（Python が書いた実物）が合流まで通る。"""
 
     def test_every_initializer_gets_a_supply(self) -> None:
-        bound = verify_container([FIXTURE_PATH])[GRAPH_NAME]
+        bound = verify_container([FIXTURE_PATH]).graphs[GRAPH_NAME]
 
         assert {name: supply.encoding.codec for name, supply in bound.supplies.items()} == {
             "big.weight": "int8-sym",
@@ -108,26 +110,26 @@ class TestTheFixtureContainer:
         assert "lm_head.weight" not in bound.supplies
 
     def test_a_const_initializer_is_supplied_from_the_graph(self) -> None:
-        bound = verify_container([FIXTURE_PATH])[GRAPH_NAME]
+        bound = verify_container([FIXTURE_PATH]).graphs[GRAPH_NAME]
         supply = bound.supplies["const.a1b2c3d4e5f60718"]
 
         assert supply.origin == "const"
         assert [block.part for block in supply.blocks] == [1]
 
     def test_a_piece_series_covers_the_rows_and_carries_its_payload_length(self) -> None:
-        supply = verify_container([FIXTURE_PATH])[GRAPH_NAME].supplies["big.weight"]
+        supply = verify_container([FIXTURE_PATH]).graphs[GRAPH_NAME].supplies["big.weight"]
 
         assert [block.rows for block in supply.blocks] == [(0, 8), (8, 16)]
         assert [block.payload_bytes for block in supply.blocks] == [256, 256]
 
     def test_a_tail_pad_is_outside_the_payload(self) -> None:
         """f16 の 42 バイトは 44 バイトの block に入る（差 2 バイトが詰め物）。"""
-        supply = verify_container([FIXTURE_PATH])[GRAPH_NAME].supplies["dec.weight"]
+        supply = verify_container([FIXTURE_PATH]).graphs[GRAPH_NAME].supplies["dec.weight"]
 
         assert [(block.length, block.payload_bytes) for block in supply.blocks] == [(44, 42)]
 
     def test_a_row_axis_1_scale_is_one_value_per_channel(self) -> None:
-        supply = verify_container([FIXTURE_PATH])[GRAPH_NAME].supplies["conv.weight"]
+        supply = verify_container([FIXTURE_PATH]).graphs[GRAPH_NAME].supplies["conv.weight"]
         assert supply.scale is not None
 
         # conv_transpose1d 形 [4,3,8]: 行数は shape[1] = 3。
@@ -146,7 +148,7 @@ class TestTheFixtureContainer:
             graph_name=GRAPH_NAME,
             block_bytes=FIXTURE_BLOCK_BYTES,
         )
-        bound = verify_container([path])[GRAPH_NAME]
+        bound = verify_container([path]).graphs[GRAPH_NAME]
 
         assert sorted(bound.supplies) == [
             "const.a1b2c3d4e5f60718",
@@ -294,3 +296,49 @@ class TestTheQuantizedRules:
                 WeightSupply(BlockEncoding("int8-sym"), block="w1"),
                 [("w1", 128, "weight")],
             )
+
+
+class TestTheContainerCli:
+    """`karume verify --container` — 2 文書の構造検査 + 合流 + 全 block の sha256。"""
+
+    def test_it_reports_the_split_form_from_the_part_0_file(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        part0 = split_fixture_paths()[0]
+        verify.main(["--container", str(part0)])
+        printed = capsys.readouterr().out
+
+        assert "parts=5" in printed
+        assert "graphs=synthetic-split" in printed
+        assert "initializers=3" in printed
+        assert "blocks=5" in printed
+        assert "assets=ple_index,rope_base" in printed
+
+    def test_it_reports_the_single_form(self, capsys: pytest.CaptureFixture[str]) -> None:
+        verify.main(["--container", str(FIXTURE_PATH)])
+        printed = capsys.readouterr().out
+
+        assert "parts=1" in printed
+        assert "graphs=synthetic" in printed
+        assert "assets=（無し）" in printed
+
+    def test_a_flipped_block_byte_is_caught(self, tmp_path: Path) -> None:
+        """block の sha256 まで見る（宣言が通るだけでは「検証した」と言わない）。"""
+        copied = tmp_path / FIXTURE_PATH.name
+        raw = bytearray(FIXTURE_PATH.read_bytes())
+        raw[-1] ^= 0xFF
+        copied.write_bytes(bytes(raw))
+
+        with pytest.raises(ContainerFormatError, match="sha256 が宣言と違う"):
+            verify.main(["--container", str(copied)])
+
+    def test_the_old_form_still_runs_without_the_flag(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """旧形式の `karume verify` はそのまま（`--container` は別の入口）。"""
+        seen: list[Path] = []
+        monkeypatch.setattr(verify, "_verify_shards_line", lambda path: seen.append(path) or "ok")
+        verify.main(["a/model.safetensors"])
+
+        assert seen == [Path("a/model.safetensors")]
+        assert capsys.readouterr().out == "ok\n"

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import re
+from itertools import count
 from pathlib import Path
 
 import pytest
@@ -22,11 +23,15 @@ from container_fixture import (
     FIXTURE_PART_BYTES,
     FIXTURE_PATH,
     GRAPH_NAME,
-    deterministic_bytes,
+    SPLIT_FIXTURE_PARTS,
     fixture_write_requested,
+    pattern_bytes,
+    split_asset_payloads,
+    split_fixture_paths,
     synthetic_bindings,
     synthetic_graph,
     synthetic_tensors,
+    write_split_container,
     write_synthetic_container,
 )
 
@@ -39,6 +44,7 @@ from karume.container import (
     HEADER_BYTES,
     MIN_GROUP_SIZE,
     PART_LENGTH_CHOICES,
+    AssetInput,
     ContainerFormatError,
     Encoding,
     Provenance,
@@ -439,7 +445,7 @@ class TestTheGraphContainer:
         """長さ 0 の part の前に詰め物を挿まない（§3 — 挿むと抽出結果がずれる）。"""
         graph = _minimal_graph()
         bindings = {"a.weight": Encoding("f32"), "b.weight": Encoding("f32")}
-        tensors = {"a.weight": deterministic_bytes(64, 5), "b.weight": deterministic_bytes(64, 6)}
+        tensors = {"a.weight": pattern_bytes(64, 5), "b.weight": pattern_bytes(64, 6)}
         written = write_model_container(
             tmp_path / "m.krm",
             graph,
@@ -483,9 +489,9 @@ class TestTheWriterRefusesWhatItCannotRepresent:
                 tmp_path / "m.krm",
                 graph,
                 {
-                    "a.weight": deterministic_bytes(64, 5),
-                    "b.weight": deterministic_bytes(64, 6),
-                    "const.0011223344556677": deterministic_bytes(1024, 7),
+                    "a.weight": pattern_bytes(64, 5),
+                    "b.weight": pattern_bytes(64, 6),
+                    "const.0011223344556677": pattern_bytes(1024, 7),
                 },
                 {
                     "a.weight": Encoding("f32"),
@@ -515,7 +521,7 @@ class TestTheWriterRefusesWhatItCannotRepresent:
         self, tmp_path: Path
     ) -> None:
         tensors = synthetic_tensors()
-        tensors["dec.weight"] = deterministic_bytes(40, 23)
+        tensors["dec.weight"] = pattern_bytes(40, 23)
 
         with pytest.raises(ContainerFormatError, match="宣言から決まる 42 バイトと違う"):
             write_model_container(
@@ -544,6 +550,142 @@ class TestTheWriterRefusesWhatItCannotRepresent:
                 graph_name=GRAPH_NAME,
                 provenance=Provenance(license="mit"),
             )
+
+
+class TestTheAssetIntake:
+    """資産の受け口（§2.2 / §4.2）— piece 分割せず、重みと part を共有しない。"""
+
+    @staticmethod
+    def _write(tmp_path: Path, assets: dict[str, AssetInput], **overrides: object) -> list[Path]:
+        return write_model_container(
+            tmp_path / "m.krm",
+            _minimal_graph(),
+            {"a.weight": pattern_bytes(64, 5), "b.weight": pattern_bytes(64, 6)},
+            {"a.weight": Encoding("f32"), "b.weight": Encoding("f32")},
+            graph_name="minimal",
+            provenance=Provenance(license="mit"),
+            assets=assets,
+            part_bytes=1024,
+            single=True,
+            **overrides,  # type: ignore[arg-type]
+        )
+
+    def test_a_lazy_payload_writes_the_same_bytes_as_a_plain_one(self, tmp_path: Path) -> None:
+        """遅延の呼び出しは「いつ引くか」だけを変える（出るバイト列は同じ）。"""
+        payload = pattern_bytes(37, 61)
+        plain = self._write(tmp_path / "a", {"x": AssetInput("rope-base", 37, payload)})
+        lazy = self._write(tmp_path / "b", {"x": AssetInput("rope-base", 37, lambda: payload)})
+
+        assert lazy[0].read_bytes() == plain[0].read_bytes()
+
+    def test_the_asset_blocks_never_share_a_part_with_weights(self, tmp_path: Path) -> None:
+        read = read_container(self._write(tmp_path, {"x": AssetInput("rope-base", 8, b"\x01" * 8)}))
+        assert read.model is not None
+        blocks = {block.id: block for block in read.model.blocks}
+        asset = blocks[read.model.assets["x"].block]
+
+        assert asset.role == "asset"
+        assert all(block.part != asset.part for block in blocks.values() if block.role != "asset")
+
+    def test_the_declared_length_survives_into_the_model_descriptor(self, tmp_path: Path) -> None:
+        """論理長は宣言の写し・block 長はそれを 4 の倍数へ切り上げた値（ADR 0109 決定 4）。"""
+        read = read_container(
+            self._write(tmp_path, {"x": AssetInput("rope-base", 37, b"\x01" * 37)})
+        )
+        assert read.model is not None
+        record = read.model.assets["x"]
+        block = next(block for block in read.model.blocks if block.id == record.block)
+
+        assert (record.role, record.length) == ("rope-base", 37)
+        assert block.length == 40
+        assert read.block(record.block) == b"\x01" * 37 + b"\x00" * 3
+
+    def test_a_dedicated_asset_gets_a_part_of_its_own(self, tmp_path: Path) -> None:
+        """区間読みを要する資産は専用 part に単独で置く MUST（container-v1 §4.2）。
+
+        全量読みの資産を**先に**渡すのは、専用 part が「直前の part の続き」にならないことまで
+        見るためである（後ろに開く側だけを見ると、この規則は空振りで緑になる）。
+        """
+        read = read_container(
+            self._write(
+                tmp_path,
+                {
+                    "idx": AssetInput("ple-index", 8, b"\x03" * 8),
+                    "v.0": AssetInput("ple-values", 8, b"\x01" * 8, dedicated_part=True),
+                    "v.1": AssetInput("ple-values", 8, b"\x02" * 8, dedicated_part=True),
+                    "tail": AssetInput("rope-base", 8, b"\x04" * 8),
+                },
+            )
+        )
+        assert read.model is not None
+        blocks = {block.id: block for block in read.model.blocks}
+        parts = {name: blocks[record.block].part for name, record in read.model.assets.items()}
+
+        # 専用 part は 1 block だけを持ち、全量読みの資産とも同居しない。
+        assert len({parts["idx"], parts["v.0"], parts["v.1"], parts["tail"]}) == 4
+        for name in ("v.0", "v.1"):
+            assert [block.id for block in read.model.blocks if block.part == parts[name]] == [
+                read.model.assets[name].block
+            ]
+
+    def test_the_physical_order_follows_the_call_order(self, tmp_path: Path) -> None:
+        """配置の順は**渡した順**（PLE は token 順で渡る）— 名前の辞書順ではない。"""
+        read = read_container(
+            self._write(
+                tmp_path,
+                {
+                    f"ple.values.{index}": AssetInput("ple-values", 8, bytes([index]) * 8)
+                    for index in (0, 1, 2, 10, 11)
+                },
+            )
+        )
+        assert read.model is not None
+        placed = sorted(
+            (block.part, block.offset, block.id)
+            for block in read.model.blocks
+            if block.role == "asset"
+        )
+
+        assert [entry[2] for entry in placed] == ["a.0", "a.1", "a.2", "a.3", "a.4"]
+        assert [read.model.assets[f"ple.values.{k}"].block for k in (0, 1, 2, 10, 11)] == [
+            entry[2] for entry in placed
+        ]
+
+    def test_an_asset_that_exceeds_the_block_limit_fails_loudly(self, tmp_path: Path) -> None:
+        """資産は piece 分割の機構を持たない（読み手は役割の索引で行を引く）。"""
+        with pytest.raises(ContainerFormatError, match="資産は 1 block に収める"):
+            self._write(
+                tmp_path, {"x": AssetInput("ple-values", 300, b"\x00" * 300)}, block_bytes=256
+            )
+
+    def test_an_empty_asset_fails_loudly(self, tmp_path: Path) -> None:
+        with pytest.raises(ContainerFormatError, match="長さ 0 の block は作らない"):
+            self._write(tmp_path, {"x": AssetInput("ple-values", 0, b"")})
+
+    def test_an_asset_name_that_collides_with_a_tensor_key_fails_loudly(
+        self, tmp_path: Path
+    ) -> None:
+        """衝突を許すと block の実体が黙って入れ替わる。"""
+        with pytest.raises(ContainerFormatError, match="テンソルキーと衝突"):
+            self._write(tmp_path, {"a.weight": AssetInput("ple-values", 8, b"\x01" * 8)})
+
+    def test_a_payload_that_differs_between_pulls_fails_loudly(self, tmp_path: Path) -> None:
+        """引かれるたびに同じバイト列を返す MUST（何度引く実装でも同じ結論になる形で見る）。"""
+        pulls = count(8)
+
+        with pytest.raises(ContainerFormatError, match="宣言から決まる 8 バイトと違う"):
+            self._write(tmp_path, {"x": AssetInput("ple-values", 8, lambda: b"\x01" * next(pulls))})
+
+    def test_a_payload_that_disagrees_with_the_declared_length_fails_loudly(
+        self, tmp_path: Path
+    ) -> None:
+        """宣言が先（配置は宣言で決まる）— 実体が違えば落とす。"""
+        with pytest.raises(ContainerFormatError, match="宣言から決まる 8 バイトと違う"):
+            self._write(tmp_path, {"x": AssetInput("ple-values", 8, b"\x01" * 12)})
+
+    def test_a_blank_role_fails_loudly(self, tmp_path: Path) -> None:
+        with pytest.raises(ContainerFormatError, match="役割が非空文字列でない"):
+            self._write(tmp_path, {"x": AssetInput("", 8, b"\x01" * 8)})
 
 
 class TestTheCrossLanguageFixture:
@@ -578,3 +720,45 @@ class TestTheCrossLanguageFixture:
         assert json.loads(read.graph_descriptor_bytes)["graphs"][GRAPH_NAME]["initializers"][
             "lm_head.weight"
         ] == {"shared": True}
+
+    def test_the_committed_split_fixture_matches_the_generator(self, tmp_path: Path) -> None:
+        rebuilt = [path.read_bytes() for path in write_split_container(tmp_path)]
+        committed = split_fixture_paths()
+        if fixture_write_requested():
+            committed[0].parent.mkdir(parents=True, exist_ok=True)
+            for path, raw in zip(committed, rebuilt, strict=True):
+                path.write_bytes(raw)
+
+        assert [path.read_bytes() for path in committed] == rebuilt, (
+            "分割形 fixture が書き手とずれている"
+            "（焼き直し: KARUME_FIXTURE=write uv run pytest tests/test_container.py -k fixture）"
+        )
+
+    def test_the_split_fixture_exercises_the_asset_and_empty_const_branches(self) -> None:
+        """資産 + 空 const + 重み part 2 本（単一形の fixture では踏めない分岐）。"""
+        paths = split_fixture_paths()
+        read = read_container(paths)
+        assert read.model is not None
+
+        assert len(paths) == SPLIT_FIXTURE_PARTS
+        assert read.graph.const_blocks == ()
+        assert read.model.parts[0].length == 0
+        assert paths[1].stat().st_size == 0
+        assert {name: record.role for name, record in read.model.assets.items()} == {
+            "ple_index": "ple-index",
+            "rope_base": "rope-base",
+        }
+        assert {name: record.length for name, record in read.model.assets.items()} == {
+            "ple_index": 64,
+            "rope_base": 37,
+        }
+        # 資産の block は重み block と part を共有しない（§4.2）。
+        asset_blocks = {record.block for record in read.model.assets.values()}
+        parts = {block.part for block in read.model.blocks if block.id in asset_blocks}
+        assert parts.isdisjoint(
+            {block.part for block in read.model.blocks if block.id not in asset_blocks}
+        )
+        # 奇数長の payload は末尾 0x00 で 4 バイト整列へ詰められる。
+        payloads = split_asset_payloads()
+        raw = read.block(read.model.assets["rope_base"].block)
+        assert raw == payloads["rope_base"] + b"\x00" * 3
