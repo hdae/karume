@@ -16,13 +16,13 @@
 
 import { bindGraphs, type BoundGraph } from "./bind.ts";
 import {
+  asSha256Hex,
   type ConstBlockRecord,
   type DataBlockRecord,
   type GraphDescriptor,
   type ModelDescriptor,
   parseGraphDescriptor,
   parseModelDescriptor,
-  type Sha256Hex,
   sha256Hex,
   validateAgainstGraph,
 } from "./descriptor.ts";
@@ -61,11 +61,14 @@ export type ContainerInput =
   | { readonly kind: "parts"; readonly parts: readonly Uint8Array<ArrayBuffer>[] }
   | { readonly kind: "source"; readonly source: BlockSource };
 
-/** 外側（manifest の FileRef / 呼び手の pin）が持つ 2 文書の期待値（§7 の①）。 */
+/**
+ * 外側（manifest `karume/5` の `container.descriptor` / 呼び手の pin）が持つ 2 文書の期待値（§7 の①）。
+ * `sha256` は小文字 16 進 64 文字（形式はここで検査する — 呼び手にブランド型を要求しない）。
+ */
 export type DescriptorExpectation = {
-  readonly graph: { readonly length: number; readonly sha256: Sha256Hex };
+  readonly graph: { readonly length: number; readonly sha256: string };
   /** `krm` のときだけ。`krg` では渡してはならない。 */
-  readonly model?: { readonly length: number; readonly sha256: Sha256Hex };
+  readonly model?: { readonly length: number; readonly sha256: string };
 };
 
 /**
@@ -175,16 +178,17 @@ export const partsSource = (parts: readonly Uint8Array<ArrayBuffer>[]): BlockSou
 
 const verifyDocument = async (
   bytes: Uint8Array<ArrayBuffer>,
-  expected: { readonly length: number; readonly sha256: Sha256Hex },
+  expected: { readonly length: number; readonly sha256: string },
   path: string,
 ): Promise<void> => {
+  const expectedHash = asSha256Hex(expected.sha256, `${path}の期待 sha256`);
   if (bytes.byteLength !== expected.length) {
     throw new ContainerFormatError(
       `${path}の長さ ${bytes.byteLength} が期待 ${expected.length} と違う`,
     );
   }
   const actual = await sha256Hex(bytes);
-  if (actual !== expected.sha256) {
+  if (actual !== expectedHash) {
     throw new ContainerFormatError(
       `${path}の sha256 が期待と違う（期待 ${expected.sha256} / 実物 ${actual}）`,
     );
