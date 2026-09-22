@@ -21,7 +21,7 @@ import {
   SCALE_DTYPES,
   type ScaleDtype,
 } from "./codecs.ts";
-import { ContainerFormatError } from "./header.ts";
+import { alignUp, ContainerFormatError } from "./header.ts";
 import {
   decodeJsonDocument,
   encodeJsonBytes,
@@ -145,6 +145,8 @@ export type WeightSupply =
 export type AssetBinding = {
   readonly block: string;
   readonly role: string;
+  /** payload のバイト数（論理長）。block 長はこれを 4 の倍数へ切り上げた値 MUST（末尾は 0x00 詰め）。 */
+  readonly length: number;
 };
 
 /** 出所（§2.3 — 本文は載せない）。 */
@@ -712,10 +714,11 @@ export const parseModelDescriptor = (bytes: Uint8Array<ArrayBuffer>): ModelDescr
     const assetPath = `${path}.assets['${name}']`;
     requireString(name, `${path}.assets のキー`);
     const assetObject = requireObject(raw, assetPath);
-    requireKeys(assetObject, ["block", "role"], [], assetPath);
+    requireKeys(assetObject, ["block", "role", "length"], [], assetPath);
     assets[name] = {
       block: requireBlockId(assetObject["block"], `${assetPath}.block`),
       role: requireString(assetObject["role"], `${assetPath}.role`),
+      length: requireIndex(assetObject["length"], `${assetPath}.length`),
     };
   }
 
@@ -843,7 +846,15 @@ export const validateModelDescriptor = (descriptor: ModelDescriptor): void => {
     }
   }
   for (const [name, asset] of Object.entries(descriptor.assets)) {
-    claim(asset.block, "asset", `${path}.assets['${name}']`);
+    const assetPath = `${path}.assets['${name}']`;
+    const block = claim(asset.block, "asset", assetPath);
+    // 資産は shape を持たないので論理長を自分で宣言する（§2.2）。block 長 = 論理長の 4 の倍数への
+    // 切り上げ MUST — 詰め物の量まで宣言で閉じる（消費側が末尾の 0x00 を推測で剥がない）。
+    if (alignUp(asset.length, BLOCK_TAIL_ALIGN) !== block.length) {
+      fail(
+        `${assetPath}.length: 論理長 ${asset.length} を ${BLOCK_TAIL_ALIGN} の倍数へ切り上げた値が block '${asset.block}' の長さ ${block.length} と違う`,
+      );
+    }
   }
   for (const id of byId.keys()) {
     if (!referenced.has(id)) fail(`${path}: block '${id}' がどこからも参照されていない（余剰）`);
@@ -939,7 +950,12 @@ export const serializeModelDescriptor = (descriptor: ModelDescriptor): Uint8Arra
           : { block: supply.block }),
         encoding: canonicalEncoding(supply.encoding),
       }))),
-    assets: sortedObject(descriptor.assets, (asset) => ({ block: asset.block, role: asset.role })),
+    assets: sortedObject(descriptor.assets, (asset) => ({
+      block: asset.block,
+      role: asset.role,
+      length: asset.length,
+    })),
+
     provenance: {
       license: descriptor.provenance.license,
       ...Object.fromEntries(

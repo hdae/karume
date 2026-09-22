@@ -389,7 +389,7 @@ const planDataParts = (input: ModelInput, partBytes: number, blockBytes: number)
     } else {
       placeGroup([{ id, payload }], path);
     }
-    assets[asset.name] = { block: id, role: asset.role };
+    assets[asset.name] = { block: id, role: asset.role, length: asset.bytes.byteLength };
   }
 
   return { parts: parts.filter((part) => !part.isEmpty), roles, binding, assets };

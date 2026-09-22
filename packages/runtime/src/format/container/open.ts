@@ -73,7 +73,7 @@ export type DescriptorExpectation = {
  */
 export type AssetReader = {
   readonly role: string;
-  /** block の長さ（詰め物込み — 論理長は models が役割の索引から導く）。 */
+  /** payload のバイト数（論理長 — 宣言値。block の詰め物は含まない）。 */
   readonly length: number;
   /**
    * `[offset, offset + length)` を返す。検証済みの取得元では区間だけを取る（block 全体は読まない —
@@ -317,13 +317,11 @@ export const openContainer = async (
     let verifiedBlock: Promise<Uint8Array<ArrayBuffer>> | undefined;
     return {
       role: binding.role,
-      length: found.record.length,
+      length: binding.length,
       read: async (offset, length) => {
-        if (offset < 0 || length < 0 || offset + length > found.record.length) {
+        if (offset < 0 || length < 0 || offset + length > binding.length) {
           throw new ContainerFormatError(
-            `資産 '${name}': ${offset}..${
-              offset + length
-            } が block 長 ${found.record.length} をはみ出す`,
+            `資産 '${name}': ${offset}..${offset + length} が論理長 ${binding.length} をはみ出す`,
           );
         }
         if (source.verified) {

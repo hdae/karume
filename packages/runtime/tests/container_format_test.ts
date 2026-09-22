@@ -494,7 +494,7 @@ describe("container round trip", () => {
     const trusted = await openContainer({ kind: "source", source: sourceOf(true) });
     const reader = trusted.asset("ple_table");
     assertEquals(reader.role, "ple-table");
-    assertEquals(reader.length, pleBlock.length);
+    assertEquals(reader.length, 400);
     reads.length = 0;
     assertEquals(await reader.read(16, 8), bytesOf(400, 32).subarray(16, 24));
     assertEquals(reads, [8]);
@@ -517,11 +517,7 @@ describe("container round trip", () => {
     );
 
     // 範囲外・未宣言・krg は fail loudly。
-    await assertRejects(
-      () => reader.read(pleBlock.length - 2, 4),
-      ContainerFormatError,
-      "はみ出す",
-    );
+    await assertRejects(() => reader.read(398, 4), ContainerFormatError, "はみ出す");
     assertThrows(() => trusted.asset("nope"), ContainerFormatError, "未宣言の資産");
     const graphOnly = await openContainer({ kind: "bytes", bytes: written.graphContainer });
     assertThrows(() => graphOnly.asset("ple_table"), ContainerFormatError, "未宣言の資産");
@@ -587,6 +583,9 @@ describe("container descriptor", () => {
     rejectsModel("未知キー", bytes, (doc) => {
       supply(doc).encoding.bits = 4;
     }, "未知のキー");
+    rejectsModel("資産の論理長と block 長の不整合", bytes, (doc) => {
+      anyOf(doc).assets.style_vectors.length = 296;
+    }, "切り上げた値が block");
     rejectsModel("非量子化に groupSize", bytes, (doc) => {
       anyOf(doc).binding.text_encoder["enc.weight"].encoding.groupSize = 32;
     }, "量子化でないので書けない");
