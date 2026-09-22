@@ -23,7 +23,7 @@
 // - `ref-default` — pad が 0 サンプルの恒等枝
 // - `ref-hot` — 振幅 3 倍（LUFS 測定そのものが値域に依らないこと）
 
-import { assertAlmostEquals, assertEquals, assertThrows } from "@std/assert";
+import { assert, assertAlmostEquals, assertEquals, assertThrows } from "@std/assert";
 import { parseSafetensors } from "@karume/runtime";
 import { integratedLoudness, kWeightingFilters } from "../src/irodori/host/loudness.ts";
 import { ModelInputError } from "../src/errors.ts";
@@ -201,10 +201,24 @@ Deno.test("normalizeReference: 非有限サンプルは位置付きで落とす�
     ) as Float32Array<ArrayBuffer>;
     assertThrows(
       () => normalizeReference(samples, SAMPLE_RATE),
-      Error,
+      ModelInputError,
       "参照音声の 7 番目のサンプルが非有限",
     );
   }
+});
+
+Deno.test("normalizeReference: 空の波形は入口で落とす（窓の門に化けさせない）", () => {
+  // 空波形は呼び手が渡した wav の寸法そのもの（ADR 0107 決定 5）。この検査が無いと
+  // `integratedLoudness` の「窓が導出できない」側に落ち、導出値（周波数・窓長）の門と
+  // 区別が付かなくなる。
+  assertThrows(
+    () => normalizeReference(new Float32Array(0), SAMPLE_RATE),
+    ModelInputError,
+    "参照音声のサンプルが 0 個",
+  );
+  // 逆側: 導出値の前提を見る `integratedLoudness` の `RangeError` は残す（呼び手は直せない）。
+  const windows = assertThrows(() => integratedLoudness(Float32Array.of(0.5, 0.5), 9));
+  assert(!(windows instanceof ModelInputError));
 });
 
 Deno.test("normalizeReference: 有限な入力は通る（検査が全部を落としていない）", () => {

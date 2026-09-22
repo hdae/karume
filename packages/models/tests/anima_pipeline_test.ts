@@ -210,7 +210,7 @@ Deno.test("resolveNegativePrompt: guidanceScale 1 で negativePrompt を渡し�
   // `needsUncond`）。
   assertThrows(
     () => resolveNegativePrompt("worst quality", undefined, 1),
-    Error,
+    ModelInputError,
     "negativePrompt は効かない",
   );
   // 落とすのは **request での明示指定**だけ。manifest の既定が埋まっているだけの状態は
@@ -222,7 +222,7 @@ Deno.test("resolveNegativePrompt: guidanceScale 1 で negativePrompt を渡し�
   // **requested の有無だけ**で決まり、fallback の有無では変わらない。
   assertThrows(
     () => resolveNegativePrompt("worst quality", "既定のネガ", 1),
-    Error,
+    ModelInputError,
     "negativePrompt は効かない",
   );
   assertEquals(resolveNegativePrompt(undefined, undefined, 1), undefined);
@@ -233,7 +233,7 @@ Deno.test("resolveNegativePrompt: uncond を計算する設定で negativePrompt
   // 空のまま GPU 経路へ入る。
   assertThrows(
     () => resolveNegativePrompt(undefined, undefined, 7),
-    Error,
+    ModelInputError,
     "negativePrompt が要る",
   );
   // 供給元は request > defaults の順。どちらかがあれば通る。

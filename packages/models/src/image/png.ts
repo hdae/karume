@@ -118,7 +118,11 @@ export const encodePng = async (
     for (let x = 0; x < width; x += 1) {
       const source = (y * width + x) * 4;
       if (rgba[source + 3] !== 255) {
-        throw new Error(`画素 (${x}, ${y}) のアルファが ${rgba[source + 3]}（255 でない）`);
+        // アルファも呼び手が渡した `rgba` の中身なので、寸法・長さと同じ入力起因である
+        // （打つ手は「255 に直す」の 1 つ — ADR 0107 決定 2）。
+        throw new ModelInputError(
+          `画素 (${x}, ${y}) のアルファが ${rgba[source + 3]}（255 でない）`,
+        );
       }
       const target = rowStart + 1 + x * 3;
       raw[target] = rgba[source];

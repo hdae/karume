@@ -17,6 +17,7 @@
 // 内部の分割の仕方は縛らない。
 
 import { assert, assertEquals, assertNotEquals, assertThrows } from "@std/assert";
+import { ModelInputError } from "../src/errors.ts";
 import { packCaptionIds, packIds } from "../src/irodori/host/pack.ts";
 import { normalizeText } from "../src/irodori/text/normalize.ts";
 import {
@@ -447,7 +448,13 @@ Deno.test("資産パーサ: scores は有限（minScore が汚れると未知ノ
 // ---- 境界（golden のケースが実際に叩いているもの）----------------------------
 
 Deno.test("対にならないサロゲートは受け付けない（正本に無い入力を黙って通さない）", () => {
-  assertThrows(() => tokenizer.encode("a\ud800b"), Error, "サロゲート");
+  // 生成要求の本文として通るので入力起因（ADR 0107 決定 2 — 文字を直せば通る）。受理条件の
+  // 正本は `toCodePoints` 1 本のままなので、所有者の診断は `cause` に残る。
+  const error = assertThrows(() => tokenizer.encode("a\ud800b"), ModelInputError, "サロゲート");
+  assert(error.cause instanceof Error);
+  assert(!(error.cause instanceof ModelInputError), "cause は共有ヘルパの素の Error");
+  // 逆側: 対になっているサロゲート（U+1F600 など）は通る。
+  assert(tokenizer.encode("a\ud83d\ude00b").length > 0);
 });
 
 Deno.test("追加語彙は格子の**前**に切り出される（語彙側の分割に負けない）", () => {

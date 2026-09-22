@@ -218,13 +218,51 @@ const assertNoNaN = (logits: Float32Array<ArrayBuffer>): void => {
   }
 };
 
-/** CPU/GPUで共通の最大値検査。非有限値をtokenへ畳まず、従来のエラーを返す。 */
-const checkedMaximum = (value: number, index: number): number => {
+/** 最大値が有限か（NaN は比較が全て false になるので最大値には入らない）。 */
+const hasFiniteMaximum = (logits: Float32Array<ArrayBuffer>): boolean => {
+  let maximum = Number.NEGATIVE_INFINITY;
+  for (let token = 0; token < logits.length; token += 1) {
+    if (logits[token] > maximum) maximum = logits[token];
+  }
+  return Number.isFinite(maximum);
+};
+
+/**
+ * 非有限の最大値を**出所で**分けて投げる。
+ *
+ * `raw`（加工**前**の logits）の最大値が有限なら、候補を消したのは呼び手が渡した `logitBias`
+ * で確定する — 打つ手は「禁止指定を外す」1 つなので入力起因（ADR 0107 決定 2）。加工前から
+ * 非有限ならモデル出力の故障で、呼び手が要求をどう直しても直らない = 素の `Error` のまま。
+ *
+ * MUST: 判定は**投げる直前**にだけ走らせる（`raw` の走査は語彙 V に比例するので、毎 step の
+ * 通常経路へ足さない）。
+ */
+const nonFiniteMaximum = (
+  message: string,
+  raw: Float32Array<ArrayBuffer> | undefined,
+): Error => (raw !== undefined && hasFiniteMaximum(raw)
+  ? new ModelInputError(message)
+  : new Error(message));
+
+/**
+ * CPU/GPUで共通の最大値検査。非有限値をtokenへ畳まず、従来のエラーを返す。
+ *
+ * `raw` を渡せる面（加工前 logits を持っている呼び手）だけが、非有限の最大値を
+ * {@link nonFiniteMaximum} の規則で入力起因と内部異常に分ける。
+ */
+const checkedMaximum = (
+  value: number,
+  index: number,
+  raw?: Float32Array<ArrayBuffer>,
+): number => {
   if (value !== value) {
     throw new Error(`logits[${index}] が NaN（非有限） — token id へ畳まずここで落とす`);
   }
   if (!Number.isFinite(value)) {
-    throw new Error(`logits の最大値が非有限（${value}） — token id へ畳まずここで落とす`);
+    throw nonFiniteMaximum(
+      `logits の最大値が非有限（${value}） — token id へ畳まずここで落とす`,
+      raw,
+    );
   }
   return index;
 };
@@ -237,7 +275,7 @@ const checkedMaximum = (value: number, index: number): number => {
  * NaN は同じ走査で位置ごとに落とし、最後に最大値の ±Infinity を拒否する。
  * 検査用に全語彙をもう一度走査せず、同値の先勝ちと最初の NaN のエラーを維持する。
  */
-const argmax = (logits: Float32Array<ArrayBuffer>): number => {
+const argmax = (logits: Float32Array<ArrayBuffer>, raw?: Float32Array<ArrayBuffer>): number => {
   let best = 0;
   let bestValue = Number.NEGATIVE_INFINITY;
   for (let token = 0; token < logits.length; token += 1) {
@@ -250,7 +288,7 @@ const argmax = (logits: Float32Array<ArrayBuffer>): number => {
       best = token;
     }
   }
-  return checkedMaximum(bestValue, best);
+  return checkedMaximum(bestValue, best, raw);
 };
 
 /**
@@ -399,8 +437,10 @@ export const samplerDistribution = (
   const processed = processLogits(logits, spec, history);
   const temperature = spec.temperature ?? 0;
   if (temperature === 0) {
+    // 加工前の `logits` を渡すのは、非有限の最大値の**出所**（モデル出力 / 呼び手の
+    // `logitBias`）を分けるため（{@link nonFiniteMaximum}）。
     return {
-      tokens: Int32Array.of(argmax(processed)),
+      tokens: Int32Array.of(argmax(processed, logits)),
       probabilities: Float64Array.of(1),
     };
   }
@@ -423,7 +463,11 @@ export const samplerDistribution = (
     if (processed[token] > peak) peak = processed[token];
   }
   if (!Number.isFinite(peak)) {
-    throw new Error(`候補の最大 logit が非有限（${peak}） — 全 token が禁止されている`);
+    // 温度 0 経路と同じ規則で出所を分ける（加工前が有限 = bias が候補を消した）。
+    throw nonFiniteMaximum(
+      `候補の最大 logit が非有限（${peak}） — 全 token が禁止されている`,
+      logits,
+    );
   }
   const weights = new Float64Array(candidates.length);
   let total = 0;

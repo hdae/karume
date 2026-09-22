@@ -234,7 +234,7 @@ Deno.test("行番号・weight・表の食い違いは fail loudly", async (t) =>
 describe("styleWeight の受理集合", () => {
   const rows = STYLE_ROWS.length;
 
-  it("所有者は葉側の 1 本で、表引きは同じ門を通る（条件を 2 か所に持たない）", () => {
+  it("表引きと葉側の門が同じ型・同じ診断を出す", () => {
     const viaGate = assertThrows(
       () => assertFiniteStyleWeight(Number.NaN),
       Sbv2InputError,
@@ -244,7 +244,9 @@ describe("styleWeight の受理集合", () => {
       () => styleVector(STYLE_TABLE, rows, COLS, 1, Number.NaN),
       Sbv2InputError,
     );
-    // 文言が一致することが「写しではなく同じ関数を通っている」ことの外から見える証拠。
+    // 観測できるのは「2 経路の診断が一致する」ことまで（条件と文言を写した実装でもこの
+    // assert は通るので、同じ関数を通っている証拠にはならない）。それでも、写しが入って
+    // 片方だけ緩んだ／文言がずれたときにはここが落ちる。
     assertEquals(viaTable.message, viaGate.message);
     assertFiniteStyleWeight(0);
     assertFiniteStyleWeight(-1.5);

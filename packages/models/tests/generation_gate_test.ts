@@ -18,6 +18,7 @@
 //    「誤って抜けた後のバースト」でしか起こりえず、代償は探索 1 回ぶんだからである。
 
 import { assert, assertAlmostEquals, assertEquals, assertThrows } from "@std/assert";
+import { ModelInputError } from "../src/errors.ts";
 import {
   createSpeculationGate,
   type SpeculationDecision,
@@ -704,4 +705,28 @@ Deno.test("ゲート T9 門: ノブの値域は生成時に fail loudly", async 
     });
     assert(gate.mode === "speculate");
   });
+});
+
+Deno.test("ゲート T9 門: ノブの不受理は家族横断の ModelInputError で捕まる", () => {
+  // ノブ束は `speculative.gate` で呼び手が渡すもので、値域も大小関係も「渡す値を直す」で通る
+  // = ADR 0107 決定 2 の入力起因。ホストの 400 / 500 の分岐に乗ることを型で縛る。
+  const rejected = [
+    { alpha: 0 },
+    { alpha: 1.5 },
+    { window: 1 },
+    { confirm: 0 },
+    { burst: 0 },
+    { burstMin: 9 },
+    { exploreBase: 8, exploreMax: 4 },
+    { earlyLeave: 0 },
+    { burstAbort: -1 },
+    { enter: -0.5 },
+  ];
+  for (const options of rejected) {
+    const error = assertThrows(() => createSpeculationGate(options));
+    assert(
+      error instanceof ModelInputError,
+      `${JSON.stringify(options)} の不受理が入力起因の型で飛んでいない`,
+    );
+  }
 });

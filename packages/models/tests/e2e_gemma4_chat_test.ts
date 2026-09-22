@@ -450,7 +450,7 @@ Deno.test({
         assertThrows(
           () => pipeline.estimateSessionMemory({ capacity: CHUNK_LENGTH - 1 }),
           Error,
-          `capacity ${CHUNK_LENGTH - 1} が chunkLength ${CHUNK_LENGTH} 未満`,
+          `capacity ${CHUNK_LENGTH - 1} が chunkLength ${CHUNK_LENGTH} を下回る`,
         );
         assertThrows(
           () => pipeline.estimateSessionMemory({ capacity: MAX_POSITION + 1 }),
@@ -462,11 +462,12 @@ Deno.test({
           Error,
           `chunkLength ${MAX_CHUNK_LENGTH + 1} が配布形の宣言 maxChunkLength`,
         );
-        // 安全整数でない容量は「chunkLength 未満」の門が受ける（値域の穴を作らない）。
+        // 安全整数でない容量は「1 以上の整数でない」の門が受ける（大小関係の診断とは分ける —
+        // `createGenerationSequence` / `Gemma4ChatSession` と同じ 3 本・値域の穴を作らない）。
         assertThrows(
           () => pipeline.estimateSessionMemory({ capacity: 1.5 }),
           Error,
-          "capacity 1.5 が chunkLength",
+          "capacity 1.5 が 1 以上の整数でない",
         );
       });
 

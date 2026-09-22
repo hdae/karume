@@ -48,6 +48,7 @@
  * その一致を持ち回るほうが素性が良い。
  */
 
+import { ModelInputError } from "../errors.ts";
 import { Fft } from "./fft.ts";
 
 /** 入力波形のサンプリング周波数。リサンプルはしない（違う周波数は呼び出し側が弾く）。 */
@@ -128,7 +129,9 @@ export const extractFeatures = (audio: Float32Array, melBasis: Float32Array): Vo
   }
   const frames = Math.floor((audio.length - N_FFT) / HOP) + 1;
   if (frames < 1) {
-    throw new Error(
+    // 波形は呼び手が渡した `detect` の引数そのもので、打つ手は「長い波形を渡す」1 つ
+    // （ADR 0107 決定 2）。直上の mel 基底は資産から来る数なので素の `Error` のまま。
+    throw new ModelInputError(
       `extractFeatures: 波形が ${audio.length} サンプルしかない` +
         `（${N_FFT} サンプル = ${(N_FFT / SAMPLE_RATE) * 1000}ms 以上が要る）`,
     );

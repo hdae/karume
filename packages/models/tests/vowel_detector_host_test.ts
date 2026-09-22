@@ -29,6 +29,7 @@
 // 数値が僅かにずれても文字列は割れるか一致するかのどちらかにしかならない。
 
 import { assert, assertEquals, assertThrows } from "@std/assert";
+import { ModelInputError } from "../src/errors.ts";
 import {
   DSP_WINDOW,
   extractFeatures,
@@ -151,9 +152,10 @@ Deno.test("特徴: フレーム数は floor((n − N_FFT) / HOP) + 1（librosa �
 });
 
 Deno.test("特徴: 1 フレームも取れない波形は fail loudly（NaN を撒かない）", () => {
+  // 波形は呼び手が渡した引数そのものなので入力起因（ADR 0107 決定 2 — 長く渡せば通る）。
   assertThrows(
     () => extractFeatures(new Float32Array(N_FFT - 1), melBasis),
-    Error,
+    ModelInputError,
     "サンプルしかない",
   );
 });
@@ -169,6 +171,9 @@ Deno.test("特徴: mel 基底の要素数が違えば受け付けない", () => 
     Error,
     "mel 基底が",
   );
+  // 逆側: mel 基底は資産から来る数なので、呼び手が波形を直しても直らない = 入力起因ではない。
+  const basis = assertThrows(() => extractFeatures(audio, new Float32Array(N_MELS * MEL_BINS - 1)));
+  assert(!(basis instanceof ModelInputError));
 });
 
 Deno.test("特徴: ZCR は np.signbit と同じで −0 を負と数える", () => {

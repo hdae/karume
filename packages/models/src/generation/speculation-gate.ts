@@ -109,6 +109,8 @@
  * 「`W1` の初回サンプルは 2 回目の decide」も「観測に混ぜる最初の cycle」まで遅れる。
  */
 
+import { ModelInputError } from "../errors.ts";
+
 /** 次の 1 cycle を投機で回すか、decode 形（M=1）の 1 step で回すか。 */
 export type SpeculationDecision = "speculate" | "plain";
 
@@ -190,17 +192,22 @@ export type SpeculationGate = {
   readonly mode: SpeculationDecision;
 };
 
-/** 正の有限数の門（比・係数のノブ）。 */
+/**
+ * 正の有限数の門（比・係数のノブ）。
+ *
+ * ノブはすべて呼び手が `speculative.gate` で渡す値なので、不受理は入力起因である
+ * （ADR 0107 決定 2 — 打つ手は「渡す値を直す」1 つ）。
+ */
 const assertPositive = (name: string, value: number): void => {
   if (!Number.isFinite(value) || value <= 0) {
-    throw new Error(`speculation gate: ${name} ${value} が正の有限数でない`);
+    throw new ModelInputError(`speculation gate: ${name} ${value} が正の有限数でない`);
   }
 };
 
 /** cycle 数の門 — 端数の cycle 数は「何 cycle ごと」を意味できない。 */
 const assertInterval = (name: string, value: number, least: number): void => {
   if (!Number.isSafeInteger(value) || value < least) {
-    throw new Error(`speculation gate: ${name} ${value} が ${least} 以上の整数でない`);
+    throw new ModelInputError(`speculation gate: ${name} ${value} が ${least} 以上の整数でない`);
   }
 };
 
@@ -223,7 +230,7 @@ export const createSpeculationGate = (
   const burstAbort = options.burstAbort ?? 0.15;
   assertPositive("alpha", alpha);
   // α > 1 の EWMA は過去へ負の重みを載せる（平均ではなくなる）ので上も閉じる。
-  if (alpha > 1) throw new Error(`speculation gate: alpha ${alpha} が 0 < α ≤ 1 の外`);
+  if (alpha > 1) throw new ModelInputError(`speculation gate: alpha ${alpha} が 0 < α ≤ 1 の外`);
   // ブロックが 1 cycle だと「ブロック集計」が 1 サンプルの判定に戻る（種付けの欠陥そのもの）。
   assertInterval("window", window, 2);
   assertInterval("confirm", confirm, 1);
@@ -231,7 +238,9 @@ export const createSpeculationGate = (
   assertInterval("burstMin", burstMin, 1);
   // `burstMin > burst` は「打ち切りが一度も発火しない」死んだノブなので、黙って通さない。
   if (burstMin > burst) {
-    throw new Error(`speculation gate: burstMin ${burstMin} が burst ${burst} を超えている`);
+    throw new ModelInputError(
+      `speculation gate: burstMin ${burstMin} が burst ${burst} を超えている`,
+    );
   }
   assertInterval("exploreBase", exploreBase, 1);
   assertInterval("exploreMax", exploreMax, exploreBase);

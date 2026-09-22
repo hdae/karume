@@ -3,8 +3,9 @@
 // hub は `pipelineConfig` を素通しするので、**ここが唯一の門**。主に縛るのは 2 つ:
 // ①必須欄の欠落・型違いを名指しで落とす ②未知キーを fail loudly（黙って既定へ縮退させない）。
 
-import { assertEquals, assertThrows } from "@std/assert";
+import { assert, assertEquals, assertThrows } from "@std/assert";
 import { parseAnimaPipelineConfig } from "../src/anima/config.ts";
+import { ModelInputError } from "../src/errors.ts";
 
 /** `models/karume-anima/karume.json` と同じ形（実配布物の写し）。 */
 const VALID = {
@@ -171,4 +172,12 @@ Deno.test("parseAnimaPipelineConfig: 既定の解像度も受理集合の内側�
     Error,
     "下限",
   );
+  // 逆側: 受理集合の条件は生成要求と共有するが、manifest 側で外れたのは資産の齟齬なので
+  // `ModelInputError` では**ない**（ADR 0107 決定 2）。元の例外は `cause` に残る。
+  const thrown = assertThrows(() =>
+    parseAnimaPipelineConfig(withDefaults({ resolution: { width: 1000, height: 1024 } }))
+  );
+  assert(thrown instanceof Error);
+  assert(!(thrown instanceof ModelInputError));
+  assert(thrown.cause instanceof ModelInputError);
 });

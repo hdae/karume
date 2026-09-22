@@ -375,7 +375,13 @@ Deno.test("assertSeed: 受理集合は非負の安全整数（Randn と同一条
   assertSeed(42);
   assertSeed(Number.MAX_SAFE_INTEGER);
   for (const bad of [-1, 1.5, 2 ** 53, Number.NaN, Number.POSITIVE_INFINITY]) {
-    assertThrows(() => assertSeed(bad), Sbv2InputError, `seed ${bad} が非負の安全整数でない`);
+    const thrown = assertThrows(
+      () => assertSeed(bad),
+      Sbv2InputError,
+      `seed ${bad} が非負の安全整数でない`,
+    );
+    // 包み直しは所有者の例外を捨てない（cause が所有者 `request-gates.ts` の送出そのもの）。
+    assert(thrown.cause instanceof ModelInputError, "所有者の例外を cause に残していない");
     // 受理集合は `Randn` と 1 ビットも動かさない（緩めれば BigInt 変換が壊れ、締めれば
     // 既存の呼び出しが落ちる）。どちらも所有者 `request-gates.ts` の 1 本を通るので、
     // 型は入口が `Sbv2InputError`・生成器が親の `ModelInputError` という差だけになる。

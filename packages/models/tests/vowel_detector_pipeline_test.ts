@@ -33,6 +33,7 @@
 
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { parseManifest } from "@karume/hub";
+import { ModelInputError } from "../src/errors.ts";
 import {
   parseVowelDetectorPipelineConfig,
   type VowelDetectorPipelineConfig,
@@ -320,9 +321,10 @@ Deno.test("運用上限: ちょうどの長さは通り、1 フレーム超過�
   const parsed = config();
   assertFrameLimit(parsed, 2);
   assertFrameLimit(parsed, MAX_FRAMES);
+  // 長さは呼び手が渡した波形の寸法なので入力起因（ADR 0107 決定 2 — 区切って渡せば通る）。
   const error = assertThrows(
     () => assertFrameLimit(parsed, MAX_FRAMES + 2),
-    Error,
+    ModelInputError,
     "音声が長すぎる",
   );
   // 何秒までなら通るのかが文言に出ていること（切り詰めの代わりに呼び出し側が区切るため）。
@@ -338,7 +340,7 @@ Deno.test("運用下限: ちょうどの長さは通り、1 フレーム不足�
   for (const frames of [MIN_FRAMES - 1, MIN_FRAMES - 2]) {
     const error = assertThrows(
       () => assertFrameFloor(parsed, frames),
-      Error,
+      ModelInputError,
       "音声が短すぎる",
       `frames=${frames}`,
     );
@@ -351,7 +353,7 @@ Deno.test("運用下限: ちょうどの長さは通り、1 フレーム不足�
 Deno.test("運用下限: 下限は配布形の宣言から来る（TS 側の定数ではない）", () => {
   // 同じ入力長が、宣言の下限が違う配布形では通ったり落ちたりする = 数の出所が manifest 側。
   const strict = config({ minFrames: 8 });
-  assertThrows(() => assertFrameFloor(strict, 6), Error, "8 フレーム");
+  assertThrows(() => assertFrameFloor(strict, 6), ModelInputError, "8 フレーム");
   assertFrameFloor(config({ minFrames: 2 }), 2);
 });
 

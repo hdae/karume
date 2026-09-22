@@ -308,6 +308,27 @@ Deno.test("gemma4 fromAssets: config は fromPretrained と同じ門を、バイ
   });
 });
 
+Deno.test("gemma4 fromAssets: quant 実行ノブの明示指定も資産を開く前に同じ型で落ちる", async () => {
+  // この面は manifest を持たないので `resolveGemmaSessionOptions` を通れない。門が無いと同じ
+  // 誤指定が Session 構築まで降りて runtime の `ExecutionError` に化け、`fromPretrained` と
+  // 分類が割れる（ADR 0107 決定 2）。`model` にゴミを渡しているので、落ちたのがこの門でないなら
+  // コンテナ側の文言になる。
+  const junk = new Uint8Array<ArrayBuffer>(new ArrayBuffer(8));
+  const error = await assertRejects(
+    () =>
+      Gemma4Pipeline.fromAssets({
+        config: MINIMAL as unknown as Gemma4PipelineConfig,
+        model: [junk],
+        tokenizer: junk,
+        pleIndex: junk,
+        openPleShard: () => Promise.reject(new Error("gemma4_config_test: PLE を読みに行った")),
+      }, { fuseLinearStaticQuantize: true, linearGemvReduce: "sequential" }),
+    ModelInputError,
+    "fuseLinearStaticQuantizeはlinearGemvReduce: parallelが必要",
+  );
+  assertEquals(error.message.includes("fromAssets"), true, error.message);
+});
+
 // ---- グラフ宣言との突合（RoPE の幅）----------------------------------------
 //
 // `pipelineConfig.rope.<層種>.headDim` は**ホストが作る表の幅そのもの**なので、グラフ入力の

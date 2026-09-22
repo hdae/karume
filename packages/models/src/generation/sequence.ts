@@ -835,18 +835,21 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
 ): Promise<GenerationSequence> => {
   const { session, program } = options;
   const capacity = options.capacity ?? program.capacity;
+  // capacity は公開入口（`sequence({ capacity })` / `chat`）が素通しする呼び手のノブなので、
+  // 3 条件とも入力起因（ADR 0107 決定 2）。`chat-session.ts` の同一条件・同一文言と型を揃える —
+  // 割れていると同じ指定が入口ごとに 400 / 500 へ分かれる。
   if (!Number.isSafeInteger(capacity) || capacity < 1) {
-    throw new Error(`capacity ${capacity} が 1 以上の整数でない`);
+    throw new ModelInputError(`capacity ${capacity} が 1 以上の整数でない`);
   }
   // 容量の関係は context を確保する前に見る（`parseGemma4PipelineConfig` が宣言に対して見るのと
   // 同じ 2 式を、実行時ノブに対しても通す）。
   if (capacity < program.chunkLength) {
-    throw new Error(
+    throw new ModelInputError(
       `capacity ${capacity} が chunkLength ${program.chunkLength} を下回る（1 chunk すら入らない）`,
     );
   }
   if (capacity > program.maxPosition) {
-    throw new Error(
+    throw new ModelInputError(
       `capacity ${capacity} が maxPosition ${program.maxPosition} を超えた` +
         `（容量いっぱいの会話がモデルの位置上限の外を引く）`,
     );
@@ -1089,7 +1092,9 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
         // 多ターンの連結（ADR 0083 決定 4）— 未 commit frontier を新 prompt の先頭へ。
         const promptIds = pendingToken === undefined ? prompt : [pendingToken, ...prompt];
         if (promptIds.length === 0) {
-          throw new Error(
+          // prompt は公開要求そのもので、打つ手は「token を入れる」1 つ（ADR 0107 決定 2）。
+          // 同じ関数が語彙外の id に投げる型と揃える。
+          throw new ModelInputError(
             "prompt が空（前ターンの pendingToken も無いので流す token が 1 つも無い）",
           );
         }

@@ -35,7 +35,7 @@
  * ## MUST: 全モジュール副作用ゼロ（import 時実行・グローバル可変状態の禁止 — CLAUDE.md）
  */
 
-import { resolveGemmaSessionOptions } from "./session-options.ts";
+import { assertGemmaSessionOverrides, resolveGemmaSessionOptions } from "./session-options.ts";
 import { createGemmaGreedyOutput, type GemmaGreedyOutput } from "./greedy-output.ts";
 import { admitGemma4Qat, assertGemma4QatPle } from "./qat.ts";
 import { closeableGenerator } from "../concurrency/closeable-generator.ts";
@@ -781,7 +781,10 @@ const assertSpeculative = (
 ): number => {
   const k = speculative.k ?? GEMMA4_DRAFT_STEPS;
   if (!Number.isSafeInteger(k) || k < 1 || k > GEMMA4_DRAFT_STEPS) {
-    throw new Error(
+    // `k` は呼び手のオプションの値域違反なので入力起因（ADR 0107 決定 2）。同じ事前ブロックに
+    // 並ぶ session / PLE の門と型を揃える。グラフ宣言との突き合わせ（生成面の
+    // `assertSpeculativeSetup`）は資産の齟齬なので素の `Error` のまま。
+    throw new ModelInputError(
       `${where}: speculative.k ${k} が 1..${GEMMA4_DRAFT_STEPS} の外` +
         `（配布形の drafter は ${GEMMA4_DRAFT_STEPS} 段で焼かれている — 出口の本数が上限）`,
     );
@@ -806,14 +809,15 @@ export const resolveGemma4PleResidency = (
   if (options.pleResidency === undefined) return "host";
   const residency = assertGemma4PleResidency(where, options.pleResidency);
   if (residency === "host") return residency;
+  // どちらも呼び手のオプション**だけ**で決まる組合せの違反なので入力起因（ADR 0107 決定 2）。
   if (options.maxResidentPleBytes !== undefined) {
-    throw new Error(
+    throw new ModelInputError(
       `${where}: pleResidency: "gpu" では maxResidentPleBytes が効かない` +
         `（GPU 常駐ではホスト側の行キャッシュを 1 度も引かない）`,
     );
   }
   if (options.speculative !== undefined) {
-    throw new Error(
+    throw new ModelInputError(
       `${where}: pleResidency: "gpu" と speculative は併用できない` +
         `（drafter の per-layer 入力は GPU 常駐席の範囲外 — ADR 0085 追記〈GPU 常駐席〉）`,
     );
@@ -1154,6 +1158,10 @@ class GemmaPipeline {
     }
     // 席の指定は資産を 1 バイトも開く前に見る（`loadPretrained` と同じ位置づけ）。
     resolveGemma4PleResidency(where, options);
+    // MUST: quant 実行ノブの明示指定も**ここで**見る。この面は manifest を持たないので
+    // `resolveGemmaSessionOptions` を通れず、通さないと同じ誤指定が Session 構築まで降りて
+    // runtime の `ExecutionError` に化ける = 入口ごとに分類が割れる（ADR 0107 決定 2）。
+    assertGemmaSessionOverrides(options, where);
     const config = parseGemma4PipelineConfig(input.config);
     if (input.model.length === 0) {
       throw new Error(
@@ -1614,9 +1622,15 @@ class GemmaPipeline {
       this.#state.config,
       entry,
     );
-    if (!Number.isSafeInteger(capacity) || capacity < chunkLength) {
+    // MUST: 整数条件と大小関係は**別の診断**で出す（`createGenerationSequence` /
+    // `Gemma4ChatSession` と同じ 3 本）。1 本に畳むと `capacity: NaN` も `1.5` も「未満」と
+    // 診断され、同じ指定が入口ごとに別の理由で落ちたように見える。
+    if (!Number.isSafeInteger(capacity) || capacity < 1) {
+      throw new ModelInputError(`${entry}: capacity ${capacity} が 1 以上の整数でない`);
+    }
+    if (capacity < chunkLength) {
       throw new ModelInputError(
-        `${entry}: capacity ${capacity} が chunkLength ${chunkLength} 未満`,
+        `${entry}: capacity ${capacity} が chunkLength ${chunkLength} を下回る（1 chunk すら入らない）`,
       );
     }
     if (capacity > wiring.maxPosition) {

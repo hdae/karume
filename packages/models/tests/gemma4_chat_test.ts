@@ -644,7 +644,7 @@ Deno.test("投機のゲートのノブ: 不正な値は重みを読む前に落�
       Gemma4Pipeline.fromPretrained("karume/gemma4-e2b", {
         speculative: { gate: { burstAbort: 0 } },
       }),
-    Error,
+    ModelInputError,
     "burstAbort 0 が正の有限数でない",
   );
   await assertRejects(
@@ -652,8 +652,14 @@ Deno.test("投機のゲートのノブ: 不正な値は重みを読む前に落�
       Gemma4Pipeline.fromPretrained("karume/gemma4-e2b", {
         speculative: { gate: { burst: 8, burstMin: 9 } },
       }),
-    Error,
+    ModelInputError,
     "burstMin 9 が burst 8 を超えている",
+  );
+  // 段数 `k` も同じ束の呼び手指定なので同じ型で落ちる（ADR 0107 決定 2）。
+  await assertRejects(
+    () => Gemma4Pipeline.fromPretrained("karume/gemma4-e2b", { speculative: { k: 0 } }),
+    ModelInputError,
+    "speculative.k 0 が 1..",
   );
 });
 

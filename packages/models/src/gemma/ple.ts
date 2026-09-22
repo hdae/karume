@@ -74,6 +74,7 @@
  */
 
 import type { Tensor } from "@karume/runtime";
+import { ModelInputError } from "../errors.ts";
 import {
   defaultGemma4PleResidentBytes,
   type Gemma4PleIndex,
@@ -289,21 +290,24 @@ type RowJob = {
 export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
   const { index, openShard, vocabSize } = options;
   const budget = options.maxResidentBytes ?? defaultGemma4PleResidentBytes(index);
+  // 予算は呼び手の `maxResidentPleBytes` そのものなので入力起因（ADR 0107 決定 2）。
   if (!Number.isSafeInteger(budget) || budget < 0) {
-    throw new Error(`maxResidentBytes ${budget} が 0 以上の整数でない`);
+    throw new ModelInputError(`maxResidentBytes ${budget} が 0 以上の整数でない`);
   }
   const shardBytes = index.shards.map((shard) => gemma4PleShardBytes(index, shard));
   const largest = largestShardBytes(index);
   // MUST: 「1 本すら載らない予算」は fail loudly。黙って超過すれば予算が意味を失い、黙って
   // 守れば gather が引けない — どちらも呼び手の指定を裏切る。0 は例外で、「常駐させない」
   // という指定として正当（読み終えた shard を即座に落とす形）。
+  // 資産の寸法と突き合わせるが、拒否しているのは呼び手が渡した予算の値なので入力起因。
   if (budget > 0 && budget < largest) {
-    throw new Error(
+    throw new ModelInputError(
       `maxResidentBytes ${budget} が PLE shard 1 本ぶん ${largest} バイトに満たない` +
         `（この索引の shard は ${index.shards.length} 本 — 常駐させないなら 0 を渡す）`,
     );
   }
   // ① sidecar の行数 と ② 主 embedding の vocab 行数（ADR 0085 決定 5 の相互照合）。
+  // こちらは焼いた組み合わせの齟齬なので素の `Error` のまま（呼び手は指定を直せない）。
   if (index.tokens !== vocabSize) {
     throw new Error(
       `PLE sidecar の行数 ${index.tokens} が主 embedding の vocab 行数 ${vocabSize} と違う` +

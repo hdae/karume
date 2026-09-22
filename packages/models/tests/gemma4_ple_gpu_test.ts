@@ -5,13 +5,14 @@
  * ③sidecar → 合成コンテナの突合（piece の並びと、繋ぎ直したバイト列が原本と一致すること）。
  * 実 GPU での値の一致は `e2e_gemma4_ple_gpu_test.ts` が持つ。
  */
-import { assertEquals, assertThrows } from "@std/assert";
+import { assert, assertEquals, assertThrows } from "@std/assert";
 import { parseSafetensors, prepareModel } from "@karume/runtime";
 import {
   buildGemma4PleGatherShards,
   gemma4PleGatherGraph,
   gemma4PleGpuBytes,
 } from "../src/gemma/ple-gpu.ts";
+import { ModelInputError } from "../src/errors.ts";
 import { resolveGemma4PleResidency } from "../src/gemma/pipeline.ts";
 import type { Gemma4PleIndex, Gemma4PleShard, Gemma4PleShardSource } from "../src/gemma/ple.ts";
 
@@ -97,16 +98,22 @@ Deno.test("pleResidency: 受理と、併用できないノブの拒否", () => {
     Error,
     "pleResidency",
   );
+  // 併用できないノブの組合せは呼び手のオプションだけで決まるので入力起因（ADR 0107 決定 2）。
   assertThrows(
     () => resolveGemma4PleResidency("T", { pleResidency: "gpu", maxResidentPleBytes: 0 }),
-    Error,
+    ModelInputError,
     "maxResidentPleBytes",
   );
   assertThrows(
     () => resolveGemma4PleResidency("T", { pleResidency: "gpu", speculative: {} }),
-    Error,
+    ModelInputError,
     "speculative",
   );
+  // 逆側: 綴り違いは「受理集合を引き直す」側なので入力起因にしない（決定 3 の除外）。
+  const misspelled = assertThrows(() =>
+    resolveGemma4PleResidency("T", { pleResidency: "GPU" as "gpu" })
+  );
+  assert(!(misspelled instanceof ModelInputError));
 });
 
 Deno.test("gather IR: embedding → mul の 2 ノードで、添字の形がそのまま per-layer の形になる", () => {

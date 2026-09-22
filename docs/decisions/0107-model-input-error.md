@@ -83,10 +83,13 @@ hub の `HubError` と SBV2 の `Sbv2InputError` と同じ流儀にする。こ�
 この 2 本は `instanceof` の外に**追加の情報**がある（家族固有の線引き / 構造化された欄）。
 情報が増えない分岐先は型で割らないので、**家族ごとの専用型は作らない**。
 
-### 5. 入力起因の `RangeError` 19 件も `ModelInputError` へ寄せる
+### 5. 入力起因の `RangeError` 21 箇所も `ModelInputError` へ寄せる
 
-対象は seed の値域・sampler の指定・画像 / 音声の寸法。公開挙動の変更なので CHANGELOG の
-Breaking に載せる（`instanceof RangeError` で分岐していたコードは追随が要る）。
+対象は seed の値域・sampler の指定・画像 / 音声の寸法。数えるのは **`throw` 箇所**で、内訳は
+seed 4 / anima の `steps` 1 / sampler 8 / 画像 3 / WAV 4 / 参照音声の長さ 1 である（門の本数で
+数えると seed の 4 箇所は決定 6 で 1 本へ畳まれるので 18 になる — 基準が違うと数も違う）。
+公開挙動の変更なので CHANGELOG の Breaking に載せる（`instanceof RangeError` で分岐していた
+コードは追随が要る）。
 
 ### 6. seed の受理集合は所有者を 1 本にする
 
@@ -98,9 +101,10 @@ Breaking に載せる（`instanceof RangeError` で分岐していたコード�
 ## 検討した代替案
 
 1. **標準型（`RangeError` / `TypeError`）に揃える**（新しい型を作らない）— 却下。判別子に
-   ならない。`packages/models/src/` の `RangeError` は 54 件あり、うち約 35 件は**内部ヘルパの
-   事前条件**（呼び手の入力ではなく配線の前提）なので、500 相当が同じ型に混ざる。`instanceof
-   RangeError` で 400 を切り出すと、配線の破れを「入力を直せ」と呼び手に返すことになる。
+   ならない。`packages/models/src/` の `RangeError` は置き換え前で 54 件あり、置き換え後に残る
+   33 件は**内部ヘルパの事前条件**（呼び手の入力ではなく配線の前提）なので、500 相当が同じ型に
+   混ざる。`instanceof RangeError` で 400 を切り出すと、配線の破れを「入力を直せ」と呼び手に
+   返すことになる。
    ADR 0072 決定 6 が「`RangeError` は分類軸の外」と決めているのはこの理由で、ここで方針を
    反転させる根拠は無い。
 2. **家族ごとの専用型を 8 本作る**（`Sbv2InputError` の形を横展開する）— 却下。起票の理由を
@@ -120,9 +124,20 @@ Breaking に載せる（`instanceof RangeError` で分岐していたコード�
   破壊変更**なので、迷ったら入れないのが安い側である。
 - `GenerationCapacityError` は親が増えただけで、`name` も欄も引数の形も変わらない。
   `instanceof GenerationCapacityError` で分岐していたコードは無影響。
-- **家族側の置き換えは完了している** — 生成要求の値域・型・組合せの検査 73 箇所（anima /
-  generation / gemma / sbv2 / irodori / image / audio）が `ModelInputError` を投げる。
-  メッセージは変えず型だけ差し替えた（型の分岐とメッセージの質は別物）。
+- **家族側の置き換えは完了している** — 生成要求の値域・型・組合せの検査 95 箇所（anima /
+  generation / gemma / sbv2 / irodori / image / audio / vowel-detector）が `ModelInputError` を
+  投げる（数えるのは `new ModelInputError` の箇所。初版は 73 箇所で、2026-09-22 のレビュー反映で
+  取りこぼし〈gemma の投機 / PLE ノブ・irodori の参照話者・vowel-detector の波形長・PNG の
+  アルファ・生成の `capacity` と空 prompt〉を足し、逆に資産の齟齬・内部不変条件だった 3 箇所
+  〈anima manifest の既定解像度・anima のプロンプト上限・gemma の manifest 単独の quant 宣言〉を
+  素の `Error` へ戻した）。
+  メッセージは変えず型だけ差し替えた（型の分岐とメッセージの質は別物）。**例外は anima の
+  `steps` 1 本**で、所有者を `sigmaSchedule` 側へ一本化したぶん入口の文言（「linspace の分母が
+  0 になる」）が所有者の文言（「sigma の linspace が組めない」）へ揃った。もう 1 本は gemma の
+  `estimateSessionMemory` の `capacity` 診断で、2026-09-22 のレビュー反映で整数条件（「1 以上の
+  整数でない」）と大小関係（「chunkLength … を下回る」）の 2 本に割り、`createGenerationSequence` /
+  `Gemma4ChatSession` と同文にした（1 本に畳んだ「未満」は `NaN` / `1.5` を大小関係として
+  誤診していた）。文言が動いたのはこの 2 本だけである。
 - 同じ受理集合を 2 か所に書いていた 3 本は**所有者を 1 本**にした: seed（4 本の写し →
   `request-gates.ts`）・anima の `steps`（入口と `sigmaSchedule`）・sbv2 の `styleWeight`
   （入口と表引き）。入口はいずれも所有者を呼ぶ形で、条件そのものは持たない。sbv2 の入口の

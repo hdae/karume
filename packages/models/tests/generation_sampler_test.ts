@@ -376,11 +376,43 @@ Deno.test("sampler: logit bias の -Infinity はその token を候補から外�
 
 Deno.test("sampler: 全 token を禁止したら fail loudly（黙って 0 を返さない）", () => {
   const banned: SamplerSpec["logitBias"] = [[0, -Infinity], [1, -Infinity]];
+  // 加工前の logits の最大値は有限なので、候補を消したのは呼び手の `logitBias` で確定する
+  // = 入力起因（ADR 0107 決定 2 — 打つ手は「禁止指定を外す」）。温度 0 / 温度ありの 2 経路とも。
   assertThrows(
     () => samplerDistribution(f32([1, 2]), { temperature: 1, logitBias: banned }, []),
-    Error,
-    "非有限",
+    ModelInputError,
+    "全 token が禁止されている",
   );
+  assertThrows(
+    () => samplerDistribution(f32([1, 2]), { temperature: 0, logitBias: banned }, []),
+    ModelInputError,
+    "logits の最大値が非有限",
+  );
+  assertThrows(
+    () => samplerDistribution(f32([1, 2]), { temperature: 1, topK: 1, logitBias: banned }, []),
+    ModelInputError,
+    "全 token が禁止されている",
+  );
+});
+
+Deno.test("sampler: 加工前から非有限な logits は入力起因ではない（bias と出所を分ける）", () => {
+  // 同じ 2 行が「モデル出力が元から全 −Infinity」でも通る。そちらは呼び手が `logitBias` を
+  // どう直しても直らない配線・重みの破れなので、素の `Error` のまま（ADR 0107 決定 2）。
+  for (const spec of [{ temperature: 0 }, { temperature: 1 }, { temperature: 1, topK: 1 }]) {
+    const error = assertThrows(() => samplerDistribution(f32([-Infinity, -Infinity]), spec, []));
+    assert(
+      !(error instanceof ModelInputError),
+      `${JSON.stringify(spec)}: モデル出力の故障が入力起因に分類されている`,
+    );
+  }
+  // 禁止指定が付いていても、加工前が非有限なら出所はモデル出力側のまま。
+  const withBias = assertThrows(() =>
+    samplerDistribution(f32([-Infinity, -Infinity]), {
+      temperature: 1,
+      logitBias: [[0, -Infinity]],
+    }, [])
+  );
+  assert(!(withBias instanceof ModelInputError));
 });
 
 Deno.test("sampler: logit bias の token が語彙の外なら fail loudly", () => {

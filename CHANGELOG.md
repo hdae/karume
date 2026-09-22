@@ -104,9 +104,11 @@ measurements in `docs/research/`.
 - **Breaking:** speculation stops enumerating acceptances at a stop token, and reports what was
   handed to the caller as `GenerationSpeculation.delivered`.
 - **Breaking:** input-caused failures that used to throw `RangeError` now throw
-  `ModelInputError` — the seed range, sampler settings, and image / audio sizes. Code branching
-  on `instanceof RangeError` for these has to switch to `ModelInputError`; plain `catch` is
-  unaffected, since `ModelInputError` extends `Error`.
+  `ModelInputError` — the seed range, sampler settings, image and audio sizes, and WAV sample
+  rate / sample values. Code branching on `instanceof RangeError` for these has to switch to
+  `ModelInputError`; plain `catch` is unaffected, since `ModelInputError` extends `Error`.
+  Branching on `err.name === "RangeError"` breaks the same way: the name is now
+  `"ModelInputError"`.
 
 ## [0.12.0] - 2026-09-06
 

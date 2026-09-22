@@ -140,7 +140,7 @@ for (const model of ["e2b", "e4b"] as const) {
           assertThrows(
             () => pipeline.estimateSessionMemory({ capacity: chunkLength - 1 }),
             Error,
-            `capacity ${chunkLength - 1} が chunkLength ${chunkLength} 未満`,
+            `capacity ${chunkLength - 1} が chunkLength ${chunkLength} を下回る`,
           );
           assertThrows(
             () => pipeline.estimateSessionMemory({ capacity: maxPosition + 1 }),

@@ -18,6 +18,7 @@
 
 import { assert, assertEquals, assertRejects, assertStrictEquals, assertThrows } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
+import { ModelInputError } from "../src/errors.ts";
 import {
   createGemma4Ple,
   defaultGemma4PleResidentBytes,
@@ -515,7 +516,7 @@ Deno.test("Gemma4Ple: shard 1 本すら載らない予算は構築時に fail lo
         // 小さい方（108）は載るが最大（252）は載らない = 引く id 次第で黙って超過する。
         maxResidentBytes: 251,
       }),
-    Error,
+    ModelInputError,
     "PLE shard 1 本ぶん 252 バイトに満たない",
   );
   // 最大 shard ちょうどは通る（0 も「常駐させない」指定として通る）。
@@ -540,7 +541,7 @@ Deno.test("Gemma4Ple: shard 1 本すら載らない予算は構築時に fail lo
         vocabSize: TOKENS,
         maxResidentBytes: -1,
       }),
-    Error,
+    ModelInputError,
     "0 以上の整数でない",
   );
   assertThrows(
@@ -551,7 +552,7 @@ Deno.test("Gemma4Ple: shard 1 本すら載らない予算は構築時に fail lo
         vocabSize: TOKENS,
         maxResidentBytes: 1.5,
       }),
-    Error,
+    ModelInputError,
     "0 以上の整数でない",
   );
 });
@@ -673,6 +674,12 @@ Deno.test("createGemma4Ple: vocab の相互照合は読み口に触る前に落�
     `PLE sidecar の行数 ${TOKENS} が主 embedding の vocab 行数 ${TOKENS + 1} と違う`,
   );
   assertEquals(reader.readAll.length, 0, "照合の前に shard を読みに行っている");
+  // 逆側: 焼いた組み合わせの齟齬なので、同じ関数の予算の門と違って入力起因では**ない**
+  // （呼び手が `maxResidentPleBytes` をどう直しても直らない — ADR 0107 決定 2）。
+  const mismatch = assertThrows(() =>
+    createGemma4Ple({ index: INDEX, openShard: reader.openShard, vocabSize: TOKENS + 1 })
+  );
+  assert(!(mismatch instanceof ModelInputError));
 });
 
 Deno.test("Gemma4Ple.gather: id の値域と空列は fail loudly（別 token の有効な行を引かせない）", async () => {

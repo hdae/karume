@@ -356,9 +356,10 @@ Deno.test("受理集合: 1 文字のプロンプトは Qwen2 側が 1 トーク�
 Deno.test("受理集合: 通常のタグ列は受理し、上限超過は拒否する", () => {
   const tags = caseById("tags");
   assertPromptTokenLengths("プロンプト", tags.qwenIds.length, tags.t5Ids.length, fixture.maxLength);
+  // 上限側は切り詰めが壊れたときにしか届かない内部不変条件なので、入力起因の型では飛ばない。
   assertThrows(
     () => assertPromptTokenLengths("プロンプト", fixture.maxLength + 1, 4, fixture.maxLength),
-    ModelInputError,
+    Error,
     "上限",
   );
 });
@@ -387,6 +388,23 @@ Deno.test("AnimaTokenizers: 正 / ネガティブのどちらで落ちたかが�
     ModelInputError,
     "ネガティブプロンプト",
   );
+});
+
+Deno.test("AnimaTokenizers: 対にならないサロゲートは両トークナイザへ渡す前に落とす", () => {
+  // 生成要求の本文として通るので入力起因（ADR 0107 決定 2 — 文字を直せば通る）。受理条件の
+  // 正本は `toCodePoints` 1 本のままなので、所有者の診断は `cause` に残る。
+  const tokenizers = new AnimaTokenizers(qwenAssets, t5Assets);
+  const error = assertThrows(
+    () => tokenizers.encode("a\ud800b", "ネガティブプロンプト"),
+    ModelInputError,
+    "ネガティブプロンプト",
+  );
+  assert(error.cause instanceof Error);
+  assert(!(error.cause instanceof ModelInputError), "cause は共有ヘルパの素の Error");
+  // 逆側: 門が全部を落としていないことの対（対になったサロゲートを通す側は
+  // `anima_input_error_test.ts` が所有者に対して直接見る — この fixture の Qwen2 語彙は
+  // 実配布の縮小版で、非 BMP のバイト token を持たない）。
+  assert(tokenizers.encode(caseById("tags").text).qwenIds.length >= PROMPT_MIN_TOKENS);
 });
 
 Deno.test("createTokenizers: バイト列（manifest の tokenizer / tokenizer_2）から組む", () => {

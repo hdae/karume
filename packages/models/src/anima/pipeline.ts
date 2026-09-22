@@ -378,15 +378,17 @@ export const resolveNegativePrompt = (
   guidance: number,
 ): string | undefined => {
   const wantsUncond = needsUncond(guidance);
+  // どちらも `negativePrompt` と `guidanceScale` の**組合せ**の違反で、打つ手は要求の側にある
+  // （ADR 0107 決定 3 の値域・型・組合せ）。同じ入口の `guidanceScale` 非有限と型を揃える。
   if (!wantsUncond && requested !== undefined) {
-    throw new Error(
+    throw new ModelInputError(
       `guidanceScale ${guidance} では uncond 側を計算しないので negativePrompt は効かない` +
         "（効かせるなら guidanceScale を 1 以外にする）",
     );
   }
   const negativePrompt = requested ?? fallback;
   if (wantsUncond && negativePrompt === undefined) {
-    throw new Error(
+    throw new ModelInputError(
       `guidanceScale ${guidance} は uncond 側を計算するので negativePrompt が要る` +
         "（manifest の pipelineConfig.defaults.negativePrompt か request で渡す）",
     );

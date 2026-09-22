@@ -381,6 +381,8 @@ Deno.test("多ターン: 続きだけのターン（prompt 空）は pendingToke
 });
 
 Deno.test("GenerationSequence: prompt が空で pendingToken も無ければ fail loudly", async () => {
+  // prompt は公開要求そのもので、打つ手は「token を入れる」1 つ = 入力起因（ADR 0107 決定 2）。
+  // 逆側（pendingToken があれば空 prompt を受理する）は直前の「続きだけのターン」が固定する。
   const fake = fakeSession();
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -388,7 +390,7 @@ Deno.test("GenerationSequence: prompt が空で pendingToken も無ければ fai
   });
   await assertRejects(
     () => drain(sequence.generate({ prompt: [], maxNewTokens: 1 })),
-    Error,
+    ModelInputError,
     "prompt が空",
   );
   assertEquals(fake.calls.length, 0);
@@ -565,6 +567,9 @@ Deno.test("capacity ノブ: 予算検査は program の既定ではなく選ん�
 });
 
 Deno.test("capacity ノブ: 関係を破る値は sequence を作る時点で fail loudly", async () => {
+  // 型まで縛るのは、公開入口 `sequence({ capacity })` と `chat({ capacity })` が**同じ指定**を
+  // 別の分類で返さないため。`gemma4_chat_session_test.ts` の同名 3 条件も `ModelInputError` を
+  // 期待しているので、片方だけ素の Error へ戻ればどちらかが赤になる（ADR 0107 決定 2）。
   const fake = fakeSession();
   // 1 chunk すら入らない容量（run を 1 本も出せない context を作らせない）。
   await assertRejects(
@@ -574,7 +579,7 @@ Deno.test("capacity ノブ: 関係を破る値は sequence を作る時点で fa
         program: programOf(fake),
         capacity: CHUNK_LENGTH - 1,
       }),
-    Error,
+    ModelInputError,
     `capacity ${CHUNK_LENGTH - 1} が chunkLength ${CHUNK_LENGTH} を下回る`,
   );
   // モデルの位置上限の外まで容量を取る形（容量いっぱいの会話が学習外の位置を踏む）。
@@ -585,7 +590,7 @@ Deno.test("capacity ノブ: 関係を破る値は sequence を作る時点で fa
         program: programOf(fake),
         capacity: 129,
       }),
-    Error,
+    ModelInputError,
     "capacity 129 が maxPosition 128 を超えた",
   );
   await assertRejects(
@@ -595,7 +600,7 @@ Deno.test("capacity ノブ: 関係を破る値は sequence を作る時点で fa
         program: programOf(fake),
         capacity: 8.5,
       }),
-    Error,
+    ModelInputError,
     "capacity 8.5 が 1 以上の整数でない",
   );
   assertEquals(fake.specs.length, 0, "context を 1 本も確保していない");

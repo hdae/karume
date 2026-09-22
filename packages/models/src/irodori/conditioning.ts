@@ -9,6 +9,7 @@
  * MUST: 全モジュール副作用ゼロ（import 時実行・グローバル可変状態の禁止 — CLAUDE.md）。
  */
 
+import { ModelInputError } from "../errors.ts";
 import { patchReferenceLatent } from "./host/patch.ts";
 import { prependMeanToken } from "./host/pooling.ts";
 import { normalizeReference, reflectPadToHop } from "./host/reference.ts";
@@ -65,7 +66,9 @@ const encodeReferenceAudio = async (
   const { config } = state;
   if (audio.sampleRate !== config.sampleRate) {
     // リサンプルは持たない（ADR 0048 の流儀 — 黙って近似せず、変換は呼び出し側の責務にする）。
-    throw new Error(
+    // 周波数は呼び手が渡した `IrodoriSpeakerInput.audio` の欄そのもので、打つ手は「変換して
+    // 渡し直す」1 つなので入力起因（ADR 0107 決定 2）。
+    throw new ModelInputError(
       `IrodoriPipeline: 参照音声が ${audio.sampleRate}Hz（配布形は ${config.sampleRate}Hz）` +
         " — リサンプルは持たないので、あらかじめ変換して渡す",
     );
@@ -92,6 +95,82 @@ const encodeReferenceAudio = async (
   );
 };
 
+/** speaker 条件の形を決める配布形の宣言（直接指定の門が読む欄だけ）。 */
+type SpeakerShape = {
+  readonly speakerDim: number;
+  readonly speakerRows: number;
+  readonly latentDim: number;
+  readonly speakerPatchSize: number;
+};
+
+/**
+ * speaker 条件の行数が宣言長に収まることを、呼び手が渡した値に対して見る。
+ *
+ * {@link rightPad} も同じ関係を見るが、あちらは条件を組み終えた後の最終突合せ（どの経路で
+ * 作っても宣言長を超えていない、という内部不変条件）なので素の `Error` のまま残す。
+ */
+const assertSpeakerRows = (rows: number, speakerRows: number, where: string): void => {
+  if (rows > speakerRows) {
+    throw new ModelInputError(
+      `IrodoriPipeline: ${where} が speaker 条件 ${rows} 行になり、宣言長 ${speakerRows} を超える`,
+    );
+  }
+};
+
+/**
+ * 直接指定された speaker state をそのまま条件にする（上流 `speaker_state_override` の経路）。
+ *
+ * MUST: `speaker` グラフも `speaker_norm` も平均トークン前置も**通さない**。加工すると、
+ * 配られた埋め込みが二重に正規化された別のベクトルとして条件に入る。
+ *
+ * 形も行数も呼び手が渡した埋め込みそのものなので、不受理は入力起因（ADR 0107 決定 2 —
+ * 打つ手は「渡す配列を直す」1 つ）。
+ *
+ * NOTE: `export` は門を直接叩くテストのため（{@link encodeSpeaker} へ届くには GPU と実資産が
+ * 要る）。`mod.ts` / サブパス面には出さない（ADR 0008）。
+ */
+export const conditionFromStateOverride = (
+  stateOverride: Float32Array<ArrayBuffer>,
+  config: SpeakerShape,
+): ConditionState => {
+  if (stateOverride.length === 0 || stateOverride.length % config.speakerDim !== 0) {
+    throw new ModelInputError(
+      `IrodoriPipeline: speaker.stateOverride の長さ ${stateOverride.length} が` +
+        ` speakerDim ${config.speakerDim} の正の倍数でない`,
+    );
+  }
+  const rows = stateOverride.length / config.speakerDim;
+  assertSpeakerRows(rows, config.speakerRows, "speaker.stateOverride");
+  return { data: stateOverride, rows };
+};
+
+/**
+ * 呼び手が直接渡した参照 latent を patch し、行数の上限まで見る（直接指定の門 1 本）。
+ *
+ * 受理条件の正本は {@link patchReferenceLatent} 1 本のまま。あの関数は codec encoder の出力
+ * （= モデル出力）も受けるので、そちらの破れは内部不変条件であって素の `Error` が正しい。
+ * 出所が呼び手だと分かるこの経路だけが**送出型を**入力起因へ上げる（ADR 0107 決定 2）。
+ *
+ * NOTE: `export` は {@link conditionFromStateOverride} と同じ事情。
+ */
+export const patchRequestedLatent = (
+  latent: Float32Array<ArrayBuffer>,
+  config: SpeakerShape,
+): ReturnType<typeof patchReferenceLatent> => {
+  let patched;
+  try {
+    patched = patchReferenceLatent(latent, config.latentDim, config.speakerPatchSize);
+  } catch (cause) {
+    throw new ModelInputError(
+      `IrodoriPipeline: speaker.latent — ${cause instanceof Error ? cause.message : String(cause)}`,
+      { cause },
+    );
+  }
+  // 平均トークン 1 本ぶんを足した行数が条件の長さ。speaker グラフを回す前に見る。
+  assertSpeakerRows(patched.tokens + 1, config.speakerRows, "speaker.latent");
+  return patched;
+};
+
 /** speaker 条件を組む（参照音声 / 参照 latent / 埋め込み直接指定 / 参照なしのゼロ短絡）。 */
 export const encodeSpeaker = async (
   state: IrodoriState,
@@ -104,23 +183,17 @@ export const encodeSpeaker = async (
     // `_no_reference_evidence` が実測済み）。区間マスクも全 0 になるので寄与は厳密に 0。
     return emptyCondition();
   }
-  if ("stateOverride" in input) {
-    const { stateOverride } = input;
-    if (stateOverride.length === 0 || stateOverride.length % config.speakerDim !== 0) {
-      throw new Error(
-        `IrodoriPipeline: speaker.stateOverride の長さ ${stateOverride.length} が` +
-          ` speakerDim ${config.speakerDim} の正の倍数でない`,
-      );
-    }
-    // MUST: `speaker` グラフも `speaker_norm` も平均トークン前置も通さない（上流
-    // `encode_conditions` の `speaker_state_override` 経路）。加工すると、配られた埋め込みが
-    // 二重に正規化された別のベクトルとして条件に入る。
-    return { data: stateOverride, rows: stateOverride.length / config.speakerDim };
-  }
-  const latent = "audio" in input
-    ? await encodeReferenceAudio(state, emit, input.audio)
-    : input.latent;
-  const patched = patchReferenceLatent(latent, config.latentDim, config.speakerPatchSize);
+  if ("stateOverride" in input) return conditionFromStateOverride(input.stateOverride, config);
+  // patch の破れの**出所**は 2 経路で違う（呼び手の latent = 入力起因 / codec encoder の出力 =
+  // 内部不変条件）ので、条件は 1 本のまま送出型だけを分ける。音声経路の行数は切り詰めで
+  // 宣言長に収まるので、そちらは最終突合せ（{@link rightPad}）に任せる。
+  const patched = "audio" in input
+    ? patchReferenceLatent(
+      await encodeReferenceAudio(state, emit, input.audio),
+      config.latentDim,
+      config.speakerPatchSize,
+    )
+    : patchRequestedLatent(input.latent, config);
   const encoded = await withStageSession(
     state,
     emit,

@@ -89,6 +89,7 @@ import {
 } from "./config.ts";
 import { extractFeatures, HOP, MEL_BINS, N_MELS, SAMPLE_RATE } from "./features.ts";
 import { type LabSegment, logitsToSegments, toLab } from "./postprocess.ts";
+import { ModelInputError } from "../errors.ts";
 import { createOperationChain } from "../concurrency/serial.ts";
 import {
   assertGpuFeaturesGranted,
@@ -313,7 +314,8 @@ export const assertFrameLimit = (
   frames: number,
 ): void => {
   if (frames <= config.maxFrames) return;
-  throw new Error(
+  // 長さの出どころは呼び手の波形なので入力起因（ADR 0107 決定 2 — 区切って渡せば通る）。
+  throw new ModelInputError(
     `VowelDetectorPipeline: 音声が長すぎる（10ms フレーム ${frames} 本 = ` +
       `${seconds(frames)} 秒）— この配布形が焼かれている上限は ` +
       `${config.maxFrames} フレーム（${seconds(config.maxFrames)} 秒）。` +
@@ -337,7 +339,8 @@ export const assertFrameFloor = (
   frames: number,
 ): void => {
   if (frames >= config.minFrames) return;
-  throw new Error(
+  // 上限側と同じく呼び手の波形の寸法（ADR 0107 決定 2）。
+  throw new ModelInputError(
     `VowelDetectorPipeline: 音声が短すぎる（10ms フレーム ${frames} 本 = ` +
       `${seconds(frames)} 秒）— この配布形が焼かれている最小長は ` +
       `${config.minFrames} フレーム（${seconds(config.minFrames)} 秒）。` +

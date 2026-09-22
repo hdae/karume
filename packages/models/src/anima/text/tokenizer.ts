@@ -24,6 +24,7 @@ import {
   parseAddedTokens,
   setUnique,
 } from "../../text/asset-gates.ts";
+import { assertEncodableText } from "../../text/code-points.ts";
 import { parseCodeRanges } from "./code-ranges.ts";
 import {
   type Qwen2Assets,
@@ -53,7 +54,8 @@ export const PROMPT_MIN_TOKENS = 2;
  *
  * 上限側は「切り詰めが効いていること」の検査でもある: T5 は `</s>` を足す前に切り詰めるので、
  * 順序を取り違えると `maxLength + 1` 個になる（shape エラーにならず conditioner の
- * 512 パディング検査まで沈黙する）。
+ * 512 パディング検査まで沈黙する）。送出型も下限と上限で割れる — 下限は呼び手が 1 語足せば
+ * 通る入力起因、上限は切り詰めが壊れたときだけ届く内部不変条件である。
  */
 export const assertPromptTokenLengths = (
   label: string,
@@ -70,7 +72,10 @@ export const assertPromptTokenLengths = (
       );
     }
     if (length > maxLength) {
-      throw new ModelInputError(
+      // 上限側は入力起因ではない（ADR 0107 決定 2）— 両トークナイザは `maxLength` で切り詰めて
+      // から返すので、ここに来るのは切り詰めが壊れたときだけ = 内部不変条件の破れである。
+      // 呼び手がプロンプトを短くしても直らないので素の `Error` のまま投げる。
+      throw new Error(
         `${label}の ${which} id 列が ${length} トークン（上限 ${maxLength}）`,
       );
     }
@@ -107,6 +112,9 @@ export class AnimaTokenizers {
    * （`label` はその際のメッセージに出す — 正 / ネガティブのどちらかが判る形にする）。
    */
   encode(prompt: string, label: string = "プロンプト"): AnimaPromptIds {
+    // 本文そのものの受理検査は**両トークナイザへ渡す前**に通す（ADR 0107 決定 2 の入力起因）。
+    // 語彙資産の解析も同じ条件を通るが、そちらの破れは資産の齟齬なので型を分ける。
+    assertEncodableText(prompt, label);
     const qwenIds = Int32Array.from(this.#qwen2.encode(prompt));
     const t5Ids = Int32Array.from(this.#t5.encode(prompt));
     assertPromptTokenLengths(label, qwenIds.length, t5Ids.length, this.#maxLength);

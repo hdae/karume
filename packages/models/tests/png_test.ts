@@ -136,7 +136,7 @@ Deno.test("encodePng: サイズが正の整数でなければ落とす（長さ�
 
 Deno.test("encodePng: 不透明でない画素は落とす（黙って不透明化しない）", async () => {
   const rgba = new Uint8ClampedArray([1, 2, 3, 254]);
-  await assertRejects(() => encodePng(rgba, 1, 1), Error, "アルファ");
+  await assertRejects(() => encodePng(rgba, 1, 1), ModelInputError, "アルファ");
   await assertRejects(
     () => encodePng(new Uint8ClampedArray(3), 1, 1),
     ModelInputError,
@@ -153,6 +153,14 @@ describe("encodePng の失敗をホストが 400 / 500 に振り分けるとき"
 
   it("呼び手が渡した RGBA の長さ違反も ModelInputError で捕まる", async () => {
     await assertRejects(() => encodePng(new Uint8ClampedArray(3), 1, 1), ModelInputError);
+  });
+
+  it("呼び手が渡した RGBA の中身（アルファ）の違反も同じ型で捕まる", async () => {
+    // 同じ引数の同じ関数で型が割れていると、ホストは寸法と中身で分岐を書き分ける羽目になる。
+    await assertRejects(
+      () => encodePng(new Uint8ClampedArray([1, 2, 3, 254]), 1, 1),
+      ModelInputError,
+    );
   });
 });
 

@@ -11,7 +11,7 @@
  * 取得キーが載る manifest の表。weights しか持たない family（画像系）と、資産表も併せて持つ
  * family（tokenizer / 表を配るもの）で「どこを直せばいいか」が違うので、文言に出す。
  */
-export type ManifestTables = "weights" | "weights / assets";
+type ManifestTables = "weights" | "weights / assets";
 
 /**
  * 取得済みバイト列を `openModel` へ渡せる ArrayBuffer にする。

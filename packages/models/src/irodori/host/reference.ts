@@ -52,6 +52,12 @@ export const normalizeReference = (
   samples: Float32Array,
   sampleRate: number,
 ): NormalizedReference => {
+  // MUST: 空波形はこの入口で落とす。この先の `integratedLoudness` は窓の本数が 0 になって
+  // `RangeError` を出すが、あれは導出値（`sampleRate` と窓長）の前提を見る門なので、呼び手の
+  // 波形の長さに対する診断としては出所が読めない（ADR 0107 決定 5 の「音声の寸法」）。
+  if (samples.length === 0) {
+    throw new ModelInputError("irodori: 参照音声のサンプルが 0 個（波形が空）");
+  }
   const refDb = integratedLoudness(samples, sampleRate);
   const loudnessGain = Math.exp((TARGET_DB - refDb) * GAIN_FACTOR);
   const scaled = new Float32Array(samples.length) as Float32Array<ArrayBuffer>;
@@ -61,7 +67,8 @@ export const normalizeReference = (
     // なので peak 判定を素通りし、+Inf は `peakGain = 1/∞ = 0` で**全サンプルを 0 に潰す**
     // （残るのは NaN 1 点だけ）— どちらも例外にならず「ほぼ無音の参照音声」として通る。
     if (!Number.isFinite(samples[i])) {
-      throw new Error(`irodori: 参照音声の ${i} 番目のサンプルが非有限（${samples[i]}）`);
+      // サンプル値は呼び手が渡した wav の中身なので入力起因（ADR 0107 決定 2）。
+      throw new ModelInputError(`irodori: 参照音声の ${i} 番目のサンプルが非有限（${samples[i]}）`);
     }
     // 代入した時点で f32 へ丸まる。peak は**丸めた後の値**で採る（上流も f32 テンソルの max）。
     scaled[i] = samples[i] * loudnessGain;

@@ -133,7 +133,14 @@ const parseResolutionEntry = (raw: unknown, where: string): ImageSize => {
   };
   // 既定値も受理集合の内側でなければならない（配布時に外れていたら fromAssets で落ちる —
   // 「生成を 1 回走らせて初めて分かる」を作らない）。
-  assertAcceptableResolution(size);
+  // MUST: 受理集合の条件は resolution.ts 1 本のまま借りるが、**送出型はここで戻す** — 落ちる
+  // 対象は配布 manifest の宣言であって呼び手の要求ではないので、入力起因ではなく資産の齟齬
+  // （ADR 0107 決定 2 の 500 側）。元の `ModelInputError` は `cause` に残す。
+  try {
+    assertAcceptableResolution(size);
+  } catch (cause) {
+    throw new Error(cause instanceof Error ? cause.message : String(cause), { cause });
+  }
   return size;
 };
 

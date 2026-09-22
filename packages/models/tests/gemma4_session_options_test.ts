@@ -1,8 +1,22 @@
-import { assertEquals, assertThrows } from "@std/assert";
+import { assert, assertEquals, assertThrows } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
 import type { SessionSpec } from "@karume/hub";
 import { ModelInputError } from "../src/errors.ts";
-import { resolveGemmaSessionOptions as resolve } from "../src/gemma/session-options.ts";
+import {
+  assertGemmaSessionOverrides,
+  resolveGemmaSessionOptions as resolve,
+} from "../src/gemma/session-options.ts";
+
+/** 入力起因でthrowしたならその文言を、通ったなら`undefined`を返す（2経路の判定の突合せ用）。 */
+const inputViolationOf = (run: () => void): string | undefined => {
+  try {
+    run();
+    return undefined;
+  } catch (error) {
+    assert(error instanceof ModelInputError);
+    return error.message;
+  }
+};
 
 describe("Gemmaのquant実行設定", () => {
   const fast = {
@@ -38,7 +52,7 @@ describe("Gemmaのquant実行設定", () => {
   it("未対応の宣言を上書きで隠さず、実効設定の不正な組合せを拒否する", () => {
     assertThrows(
       () => resolve({ linearCompute: "f32" }, {}, "test"),
-      ModelInputError,
+      Error,
       "session.linearCompute",
     );
     for (const linearGemvReduce of ["sequential", "parallel-subgroup32"] as const) {
@@ -79,7 +93,7 @@ describe("Gemmaのquant実行設定", () => {
     // parallelを伴わない宣言はquant由来でも拒否する（i4-fastはparallelを宣言する）。
     assertThrows(
       () => resolve({ packedStaticQuantize: true }, {}, "test"),
-      ModelInputError,
+      Error,
       "packedStaticQuantizeはlinearGemvReduce: parallelが必要",
     );
     assertThrows(
@@ -126,7 +140,7 @@ describe("Gemmaのquant実行設定", () => {
         assertEquals(resolve(spec, {}, "test"), spec);
         continue;
       }
-      assertThrows(() => resolve(spec, {}, "test"), ModelInputError, `session.${key}は未対応`);
+      assertThrows(() => resolve(spec, {}, "test"), Error, `session.${key}は未対応`);
       rejected.push(key);
     }
     assertEquals([...accepted, ...rejected].sort(), Object.keys(full).sort());
@@ -156,5 +170,75 @@ describe("Gemmaのquant実行設定", () => {
       }
     }
     assertEquals(conversions, 0);
+  });
+  it("manifest宣言だけで成立する不受理は入力起因にしない", () => {
+    // ADR 0107 決定2: 落ちる対象が配布manifestの宣言なら、呼び手が要求を直しても直らない
+    // （資産の齟齬 = 500相当）。overridesが空のときは条件が同じでも素のErrorで出す。
+    for (const quant of [{ linearCompute: "f32" }, { packedStaticQuantize: true }] as const) {
+      const thrown = assertThrows(() => resolve(quant, {}, "test"));
+      assert(thrown instanceof Error);
+      assert(!(thrown instanceof ModelInputError));
+    }
+  });
+  it("同じ条件でも上書きが関与すれば入力起因にする", () => {
+    // 逆側。quant単独では通る宣言が、明示上書きと組んだ途端に落ちるなら打つ手は「指定を直す」。
+    assertEquals(resolve({ linearGemvReduce: "sequential" }, {}, "test"), {
+      linearGemvReduce: "sequential",
+    });
+    assertThrows(
+      () => resolve({ linearGemvReduce: "sequential" }, { fuseLinearStaticQuantize: true }, "test"),
+      ModelInputError,
+      "fuseLinearStaticQuantizeはlinearGemvReduce: parallelが必要",
+    );
+    assertEquals(
+      resolve({ packedStaticQuantize: true, linearGemvReduce: "parallel" }, {}, "test"),
+      {
+        packedStaticQuantize: true,
+        linearGemvReduce: "parallel",
+      },
+    );
+    assertThrows(
+      () =>
+        resolve({ packedStaticQuantize: true, linearGemvReduce: "parallel" }, {
+          linearGemvReduce: "sequential",
+        }, "test"),
+      ModelInputError,
+      "packedStaticQuantizeはlinearGemvReduce: parallelが必要",
+    );
+  });
+});
+
+describe("Gemmaのquant実行設定（明示指定だけの門）", () => {
+  it("quant宣言を持たない面でも同じ値域・型・組合せで落とす", () => {
+    // fromAssets はmanifestを持たないので、既定 {} と突き合わせたときと同じ判定になる。
+    assertGemmaSessionOverrides({}, "test");
+    assertGemmaSessionOverrides({ linearGemvReduce: "parallel-subgroup32" }, "test");
+    assertThrows(
+      () => assertGemmaSessionOverrides({ fuseLinearStaticQuantize: true }, "test"),
+      ModelInputError,
+      "fuseLinearStaticQuantizeはlinearGemvReduce: parallelが必要",
+    );
+    const bogus = {};
+    Object.defineProperty(bogus, "fuseRmsNormAdd", { value: 1, enumerable: true });
+    assertThrows(
+      () => assertGemmaSessionOverrides(bogus, "test"),
+      ModelInputError,
+      "fuseRmsNormAddはbooleanでなければならない",
+    );
+  });
+  it("resolveが同じ明示指定に下す判定と一致する", () => {
+    // 2つの入口が同じ門を通っていることを、判定の一致で縛る（片方だけ緩むのを通さない）。
+    const explicit = [
+      {},
+      { linearGemvReduce: "parallel" },
+      { fuseLinearStaticQuantize: true },
+      { packedStaticQuantize: true, linearGemvReduce: "sequential" },
+      { packedStaticQuantize: true, linearGemvReduce: "parallel" },
+    ] as const;
+    for (const overrides of explicit) {
+      const viaGate = inputViolationOf(() => assertGemmaSessionOverrides(overrides, "test"));
+      const viaResolve = inputViolationOf(() => resolve({}, overrides, "test"));
+      assertEquals(viaGate, viaResolve);
+    }
   });
 });

@@ -6,9 +6,16 @@
 //
 // 数値パリティ（`t_embed` 表の golden 突合）は資産が要るので `irodori_t_embed_test.ts`。
 
-import { assert, assertEquals, assertNotStrictEquals, assertThrows } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertNotStrictEquals,
+  assertStrictEquals,
+  assertThrows,
+} from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
 import { ModelInputError } from "../src/errors.ts";
+import { conditionFromStateOverride, patchRequestedLatent } from "../src/irodori/conditioning.ts";
 import { buildDitMask, SEGMENT_ORDER } from "../src/irodori/host/mask.ts";
 import { packCaptionIds, packIds } from "../src/irodori/host/pack.ts";
 import { patchReferenceLatent } from "../src/irodori/host/patch.ts";
@@ -265,6 +272,66 @@ Deno.test("patchReferenceLatent: 端数のフレームは捨てて reshape す�
 Deno.test("patchReferenceLatent: 1 トークンも作れない参照は落とす", () => {
   assertThrows(() => patchReferenceLatent(new Float32Array(3 * 2), 2, 4), Error, "満たない");
   assertThrows(() => patchReferenceLatent(new Float32Array(5), 2, 4), Error, "倍数でない");
+  // 逆側: この関数は codec encoder の出力も受けるので、破れは内部不変条件のまま
+  // （出所を知らない関数が入力起因を名乗ると、モデル出力の故障が 400 になる — ADR 0107 決定 2）。
+  const shortcut = assertThrows(() => patchReferenceLatent(new Float32Array(5), 2, 4));
+  assert(!(shortcut instanceof ModelInputError));
+});
+
+// ---- speaker の直接指定（ADR 0107 決定 2 の入力起因）-----------------------
+
+describe("speaker を直接指定したときの受理集合", () => {
+  // 実重み v4-small と同じ関係（speakerRows−1 トークン + 平均トークン 1 本）を縮小して使う。
+  const SHAPE = { speakerDim: 4, speakerRows: 3, latentDim: 2, speakerPatchSize: 4 } as const;
+
+  it("stateOverride は speakerDim の正の倍数・宣言長以内だけを受ける", () => {
+    assertEquals(conditionFromStateOverride(new Float32Array(2 * 4), SHAPE).rows, 2);
+    // 行数ちょうどは通る（門が広すぎないことの対）。
+    assertEquals(conditionFromStateOverride(new Float32Array(3 * 4), SHAPE).rows, 3);
+    assertThrows(
+      () => conditionFromStateOverride(new Float32Array(0), SHAPE),
+      ModelInputError,
+      "正の倍数でない",
+    );
+    assertThrows(
+      () => conditionFromStateOverride(new Float32Array(5), SHAPE),
+      ModelInputError,
+      "正の倍数でない",
+    );
+    // 宣言長を超える行数は `rightPad` まで持ち越さずここで落とす。
+    assertThrows(
+      () => conditionFromStateOverride(new Float32Array(4 * 4), SHAPE),
+      ModelInputError,
+      "speaker 条件 4 行になり、宣言長 3 を超える",
+    );
+  });
+
+  it("stateOverride は加工せずそのまま条件になる（二重正規化を作らない）", () => {
+    const given = Float32Array.from({ length: 2 * 4 }, (_value, index) => index);
+    assertStrictEquals(conditionFromStateOverride(given, SHAPE).data, given);
+  });
+
+  it("latent は形の破れも行数超過も入力起因で落ちる（所有者の診断は cause に残る）", () => {
+    // 2 トークン + 平均 1 本 = 3 行はちょうど宣言長。
+    assertEquals(patchRequestedLatent(new Float32Array(8 * 2), SHAPE).tokens, 2);
+    const shape = assertThrows(
+      () => patchRequestedLatent(new Float32Array(5), SHAPE),
+      ModelInputError,
+      "倍数でない",
+    );
+    assert(shape.cause instanceof Error, "受理条件の所有者の診断を捨てていない");
+    assert(!(shape.cause instanceof ModelInputError));
+    assertThrows(
+      () => patchRequestedLatent(new Float32Array(3 * 2), SHAPE),
+      ModelInputError,
+      "満たない",
+    );
+    assertThrows(
+      () => patchRequestedLatent(new Float32Array(12 * 2), SHAPE),
+      ModelInputError,
+      "speaker 条件 4 行になり、宣言長 3 を超える",
+    );
+  });
 });
 
 Deno.test("rowMean: 列ごとの単純平均（マスク全 True の経路しか通らない）", () => {

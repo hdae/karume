@@ -25,7 +25,7 @@ import {
   asVocabId,
   parseAddedTokens,
 } from "../../text/asset-gates.ts";
-import { toCodePoints } from "../../text/code-points.ts";
+import { assertEncodableText, toCodePoints } from "../../text/code-points.ts";
 import { type UnigramModel, unigramTokenize, type UnigramVocabEntry } from "../../text/unigram.ts";
 
 /** Metaspace の置換文字（U+2581）。 */
@@ -68,6 +68,10 @@ export class IrodoriTokenizer {
    * null なので、ここで正規化すると二重掛けになる（`…` の縮約などが 2 回走る）。
    */
   encode(text: string): number[] {
+    // 本文そのものの受理検査は格子を解く前に通す（ADR 0107 決定 2 の入力起因）。下の
+    // 資産解析（`parseIrodoriTokenizerAssets`）も同じ条件を通るが、そちらの破れは資産の
+    // 齟齬なので素の `Error` のまま残す。
+    assertEncodableText(text, "irodori の本文");
     const ids: number[] = [];
     for (const chunk of splitAddedTokens(text, this.#added)) {
       if (chunk.added) {
