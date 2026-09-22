@@ -48,61 +48,6 @@
   （[ADR 0088 追記](decisions/0088-civitai-air-intake.md)）、docs の同期 11 件。**構造の 16 件（triage.md §6 の着手順 3 段）は
   コード品質管理の波の入力**（later の同名項に V2-01 を起票済み）。
 
-- **コード品質管理の波（2026-09-21 着手・承認済みの計画）**: 入力は `.claude/reviews/2026-09-21_chatgpt-reviews/triage.md` §6
-  （分割候補 15 本の着手順 3 段・重複実装・未使用 export）。段 1 = 1 ファイルに閉じるか純関数の移動だけの項目、
-  段 2 = family 内の責務分離と小さな共通層（sbv2 の資産門・gemma の admission / chat・ple の索引 codec / shard・hub 共通層）、
-  段 3 = コア実行層の大移動（device.ts の acquire / probe・fusion のルール分割〈ADR 0040 追記〉・irodori・executor の構築相・
-  recipe-builder の族別導出 — 1 ファイルずつ・executor / recipe-builder は最後）。分割しない 5 本（gemm / sequence /
-  generation-context / linear-gemv / state-attention 全体）は同 §3。未使用 export 11 件は段 3 の後に剥がす。
-  `deno.json` に `noUnusedLocals` / `noUnusedParameters` を有効化済み（赤は簡単に直せるものは直す方針）。
-  **段 1 済（2026-09-21）**: state-attention の行統計 WGSL を 1 本の生成器へ（スナップショット不変）・executor の出力解決 3 重と
-  発行準備を 1 本ずつに（await 列不変）・pipelineConfig の基本 reader を `models/src/config/readers.ts` へ（22 箇所）・
-  `withSession` を `session/with-session.ts` へ・tokenizer 資産の門を `text/asset-gates.ts` へ・Unicode 区間探索を
-  `text/code-ranges.ts` へ・`OpKind` を `OpContract["kind"]` から導出・混在テスト 5 本を `gpu_*` へ分割・opbench の rig と
-  single_file.py の来歴欠落を修正。残る重複（報告のみ）: `isRecord` / `readRecord`（anima / sbv2 / irodori / gemma）と
-  `isPositiveInteger`（birefnet / depth-anything / siglip2 / irodori）は別レイヤなので段 2 で個別判断。
-  **段 2 済（2026-09-21）**: gemma/pipeline.ts → `gemma/admission.ts`（受理集合の判定）+ `gemma/chat-turn.ts`（chat 1 ターンの変換と
-  後始末・公開型 4 本は barrel の import 元を付け替え）で 2,589 → 1,920 行・gemma/ple.ts → `ple-index.ts`（索引 codec と定数）+
-  `ple-shard.ts`（shard の読み口と検査）で ple.ts は所有者 + facade の 724 行・ple-gpu.ts の重複定数 3 本を import へ・
-  hub 共通層 `hub/asset-readers.ts`（資産バイト列 / JSON の読み口）+ `hub/graph-gates.ts`（graph 入力の静的次元）で 8 family の
-  複製を解消・sbv2 の tokenizer 資産門を `sbv2/text/asset.ts` へ・config の残り重複（isPositiveInteger / isRecord / readRecord）を
-  readers.ts へ。**残置（設計判断が要る）**: `Gemma4PipelineOptions` を引数に取る 4 本（assertSpeculative /
-  resolveGemma4PleResidency / buildGemma4Program / speculativeSetup）は admission.ts へ移すと pipeline.ts と循環するので
-  pipeline.ts に残した（寄せるなら gemma4 の公開型置き場を別に立てる — 2026-09-21 裁定: 新設するにしても後回し）。sbv2 の
-  staticInputDim は方針が逆向きで対象外。
-  **段 3 済（2026-09-21）**: 1 ファイルずつ、いずれも行の移動だけで本体はバイト同一（機械突合）。gpu/device.ts → `context.ts`（3 クラス）+
-  `acquire.ts`（取得・limits・カナリア）で device.ts は層の入口 54 行 / runtime/fusion.ts → `fusion-rule.ts` + `fusion-rules/<rule>.ts` × 7 で
-  fusion.ts は入口 481 行（[ADR 0040 追記](decisions/0040-fusion-pass.md)）/ irodori/pipeline.ts → `admission` / `conditioning` / `dit-loop` /
-  `stage` で 928 行（10 段の説明は pipeline.ts 冒頭に温存）/ executor.ts → `session-build.ts`（構築相・Session.build はファサード）で
-  2,745 行 / recipe-builder.ts → `RecipeBuildFace` の注入面 + `recipe-builders/{elementwise,layout,linear,norm,attention,conv}.ts` で
-  706 行。未使用の export 修飾子 18 本（レビューの 11 件のうち import の無い 10 件 + 族内 8 件）を外した。**波の結論**: 1,000 行超の
-  src は 18 本 → 16 本で、行数の削減より「規則・責務の所有者を 1 つにする」ことが成果（executor 2,745 / gemma pipeline 1,902 /
-  context 1,332 / session-build 1,081 / recipe-builders/attention 1,208 は分割後も 1,000 行超・分割しないと判定した gemm /
-  sequence / generation-context / linear-gemv / state-attention・info の reference/ops / shapes・未着手の anima pipeline /
-  ops/contracts / sbv2 pipeline / hub manifest）。
-
-- **decode 速度調査の波（2026-09-19〜20・2026-09-20 に区切り — 残りは later へ）**: 帰属と反証は [decode 速度の帰属と次に試すこと](research/2026-09-19-qat-speed-recon.md)、
-  候補の採否は [perf-ledger](perf-ledger.md) H-26〜H-29 / K-48〜K-53（K-45 / K-46 / K-47 は追記）。確定した事実: Deno の 23.8 ms/token のうち
-  10 ms は deno_webgpu の poll ループの sleep（karume 無関係・採否判定は Chrome で）・律速は帯域でも演算でもなく命令数 × 占有率と dispatch 本数・
-  「i8 計算」は方向として正（利得 0.9 ms・段 0 の kill 判定が先）・「i8 KV」は速度 0（メモリ項目へ）・WebML 285 tok/s の要因は実行構造（先行投入・presrq・1 pass）。
-  順序（research §10）: ⓪ 物差しを Chrome へ + GPU 1 セッションで確定する事実（GEMV 総時間・未帰属 49 dispatch・`per_layer_model_projection` の費用）— **済 2026-09-19（research §13: Chrome 壁 QAT 10.6〜10.8 / 通常 10.0 ms・GPU 7.0〜7.5 / 6.2 ms・非 GPU 3.3〜4.1・GEMV 4.0 ms・未帰属なし・K-51 は kill）** →
-  ① K-45 段 0 — **済 2026-09-19（research §14: 門通過・ただし律速は活性ロード本数で段 1 の形は裁定待ち）** → ② H-28 — **済 2026-09-19（`d1c848e`・opt-in・単独では効かず既定 host のまま・research §15）** → ③ H-27（先行投入）→ ④ K-45 段 1a — **済 2026-09-19（`57416eb` + 追補・opt-in・Chrome +8.3%・research §16）**・**`i4-fast` へ宣言済み 2026-09-20（ADR 0105 追記 2・M2 追試済み: 速度中立・id 列一致〈並列族の明示 fma 化 — 追記 4〉）・段 1b（整数内積）は棄却（lm_head に int8 活性が無い）** → ⑤ 小物（K-48 段 1 / K-49 / K-50 段 1 / K-51）→
-  ⑥ K-46 の再起票（メモリ項目）。併用後の見込みは Deno 約 7.5 ms（約 130 tok/s）/ Chrome 約 6.5 ms（約 150 tok/s）。
-  **区切り（2026-09-20）**: K-45 は `i4-fast` に宣言（M2 追試 = 速度中立・id 列一致・並列族の明示 fma 化 — ADR 0105 追記 2 / 4）・段 1b は棄却・
-  H-28 は残件 ①（通常 decode を同一 batch へ — `Session.enqueueRead`・ADR 0054 追記）と残件 ②（TTFT の帰属 — research §15.2: Chrome の VRAM 占有下で
-  prefill run が世代を追って遅くなる現象・席の欠陥ではない）を閉じた。**H-27 段 ②・小物（K-48 / K-49 / K-50）・K-46 は later へ**（復活条件つき）。
-
-- **QAT レビュー対応の波（2026-09-19）**: 裁定は [ADR 0097 追記 7](decisions/0097-gemma4-qat-integration.md)、
-  実測は [QAT レビューの実測記録](research/2026-09-19-qat-review.md)。中身は ①配布既定を通常 Gemma と
-  揃える（capacity 4096 / chunkLength 768 / trace 上限 768・対話 CLI の既定 256 token。既定 capacity と
-  trace 上限の定数を分け、焼く前に 3 式を検査する）②scale=0 の恒等 SRQ を recipe が挟まないようにし、
-  構造門を「共有 head だけ SRQ 省略可」へ緩める ③構造門・配布計画（`qat_plan`）・公開入口の失敗経路と
-  QAT RoPE の golden を埋める ④[glossary](glossary.md) と [quantization](quantization.md) を新設し、
-  散在していた用語と方式の索引をそこへ寄せる ⑤`reference.json` を schema 2 にする
-  （byte 一致フラグの廃止・本数の突合・未反映テンソルの記録）。
-  ローカル配布 `models/karume-gemma4-qat` / `models/karume-gemma4` は ADR 0104 の recipe で再ビルドする
-  （E2B の既定 quant が `i4-fast` になる）。512 超の文脈での品質検収はこの波に含めない。
-
 - **モデル横断の追加調査（2026-09-10〜11）**: Qwen3-0.6B / MiniCPM5-2B の RTN / GPTQ と
   E4B の全 PLE を含むローカル pipeline は実機検証済み。E4B chat も CPU / Deno / Chrome で一致。
   [初期品質参考値](research/2026-09-12-llm-quality-baseline.md)はQwen/MiniCPMで保存済み。
@@ -183,9 +128,6 @@
   `copyLatents` / onEvent / abort の応答性は公開面の契約なので削らない（数 step ごとに finish する境界も測る）。
   **固定入力だけの常駐化は測定済み・利得なし**（2026-09-10、1024px / CFG1 / Euler8、全 step / PNG 一致）。
   latent / scheduler を含む反復常駐と CFG>1 は未検証（[実測](research/2026-09-10-codex-mtp-optimization.md#ホスト待ちと既存融合の追加測定)）。
-- **sampler の top-p 単独指定 ✅ 2026-09-10**（H-11 残件）: f32 の安定 radix sort で順位・確率をビット同一に保ち、
-  全語彙の比較ソートを置換した。Gemma 実 logits 24 行の再生で 7.6〜7.8 倍（CPU 抽選だけ）。
-  [実測と適用範囲](research/2026-09-10-codex-mtp-optimization.md#共通サンプラーの-top-p-単独指定)。top-k 付きの配布既定は変更しない。
 - **slot backing をバケット run の前に退役させるか**（起票 2026-09-07・limitations「prefill バケット」）: 末尾 chunk の
   バケット run は chunkLength 形の backing が載ったまま arena に一時を確保し、非勘定側の窓が「最大バケット形 + prefill 形」に
   なる（既定で ≈1.67 倍）。generation のミス run で活性 backing を先に退役させれば窓は消えるが、次の 768 chunk で作り直しが
@@ -253,8 +195,6 @@
   sidecar は `extras` 席で shard 門の外 / `estimateSessionMemory` のロード面結線（Phase B
   持ち越し）/ `fromAssets` の位置づけ / large asset の reference-first 一般則 / cache-less
   streaming mode（26B A4B 級の前提 — CacheStorage quota が先に壁）。
-- **layer_norm の悪条件入力（分散 ≈0）**: ケース個別 tolerance の席で扱う
-  （[research 2026-08-31](research/2026-08-31-op-tolerance-measurement.md) §7 注記）。
 - **exporter core の `karume/__init__` が torch を eager import する**: `karume.dist` / `karume.modelcard`
   だけを使う配布・カード層（recipes の dist ドライバ）でも `import dist` で torch が丸ごと読まれる
   （2026-09-04 実測 — recipes 側は torch 非依存の `measurements.py` へ寄せ済み）。`__init__` の
@@ -282,6 +222,83 @@ K-46（int8 KV cache）を**同じ束で**進める。どちらも公式 mobile 
   収集する機能を足し、ユーザーが複数環境でサンプル集（名称・置き場は未定）を回した結果を集める
   （**起票のみ** — 収集する項目・置き場・オプトインの形は未設計）。
 - Pixel（8GB 級 Android Chrome）の `err.cause` 再判定 — [known-issues](known-issues.md)。
+
+## 消化済み（0.12.0 リリース後 — 2026-09-07〜21）
+
+- **コード品質管理の波（2026-09-21 着手・承認済みの計画）**: 入力は `.claude/reviews/2026-09-21_chatgpt-reviews/triage.md` §6
+  （分割候補 15 本の着手順 3 段・重複実装・未使用 export）。段 1 = 1 ファイルに閉じるか純関数の移動だけの項目、
+  段 2 = family 内の責務分離と小さな共通層（sbv2 の資産門・gemma の admission / chat・ple の索引 codec / shard・hub 共通層）、
+  段 3 = コア実行層の大移動（device.ts の acquire / probe・fusion のルール分割〈ADR 0040 追記〉・irodori・executor の構築相・
+  recipe-builder の族別導出 — 1 ファイルずつ・executor / recipe-builder は最後）。分割しない 5 本（gemm / sequence /
+  generation-context / linear-gemv / state-attention 全体）は同 §3。未使用 export 11 件は段 3 の後に剥がす。
+  `deno.json` に `noUnusedLocals` / `noUnusedParameters` を有効化済み（赤は簡単に直せるものは直す方針）。
+  **段 1 済（2026-09-21）**: state-attention の行統計 WGSL を 1 本の生成器へ（スナップショット不変）・executor の出力解決 3 重と
+  発行準備を 1 本ずつに（await 列不変）・pipelineConfig の基本 reader を `models/src/config/readers.ts` へ（22 箇所）・
+  `withSession` を `session/with-session.ts` へ・tokenizer 資産の門を `text/asset-gates.ts` へ・Unicode 区間探索を
+  `text/code-ranges.ts` へ・`OpKind` を `OpContract["kind"]` から導出・混在テスト 5 本を `gpu_*` へ分割・opbench の rig と
+  single_file.py の来歴欠落を修正。残る重複（報告のみ）: `isRecord` / `readRecord`（anima / sbv2 / irodori / gemma）と
+  `isPositiveInteger`（birefnet / depth-anything / siglip2 / irodori）は別レイヤなので段 2 で個別判断。
+  **段 2 済（2026-09-21）**: gemma/pipeline.ts → `gemma/admission.ts`（受理集合の判定）+ `gemma/chat-turn.ts`（chat 1 ターンの変換と
+  後始末・公開型 4 本は barrel の import 元を付け替え）で 2,589 → 1,920 行・gemma/ple.ts → `ple-index.ts`（索引 codec と定数）+
+  `ple-shard.ts`（shard の読み口と検査）で ple.ts は所有者 + facade の 724 行・ple-gpu.ts の重複定数 3 本を import へ・
+  hub 共通層 `hub/asset-readers.ts`（資産バイト列 / JSON の読み口）+ `hub/graph-gates.ts`（graph 入力の静的次元）で 8 family の
+  複製を解消・sbv2 の tokenizer 資産門を `sbv2/text/asset.ts` へ・config の残り重複（isPositiveInteger / isRecord / readRecord）を
+  readers.ts へ。**残置（設計判断が要る）**: `Gemma4PipelineOptions` を引数に取る 4 本（assertSpeculative /
+  resolveGemma4PleResidency / buildGemma4Program / speculativeSetup）は admission.ts へ移すと pipeline.ts と循環するので
+  pipeline.ts に残した（寄せるなら gemma4 の公開型置き場を別に立てる — 2026-09-21 裁定: 新設するにしても後回し）。sbv2 の
+  staticInputDim は方針が逆向きで対象外。
+  **段 3 済（2026-09-21）**: 1 ファイルずつ、いずれも行の移動だけで本体はバイト同一（機械突合）。gpu/device.ts → `context.ts`（3 クラス）+
+  `acquire.ts`（取得・limits・カナリア）で device.ts は層の入口 54 行 / runtime/fusion.ts → `fusion-rule.ts` + `fusion-rules/<rule>.ts` × 7 で
+  fusion.ts は入口 481 行（[ADR 0040 追記](decisions/0040-fusion-pass.md)）/ irodori/pipeline.ts → `admission` / `conditioning` / `dit-loop` /
+  `stage` で 928 行（10 段の説明は pipeline.ts 冒頭に温存）/ executor.ts → `session-build.ts`（構築相・Session.build はファサード）で
+  2,745 行 / recipe-builder.ts → `RecipeBuildFace` の注入面 + `recipe-builders/{elementwise,layout,linear,norm,attention,conv}.ts` で
+  706 行。未使用の export 修飾子 18 本（レビューの 11 件のうち import の無い 10 件 + 族内 8 件）を外した。**波の結論**: 1,000 行超の
+  src は 18 本 → 16 本で、行数の削減より「規則・責務の所有者を 1 つにする」ことが成果（executor 2,745 / gemma pipeline 1,902 /
+  context 1,332 / session-build 1,081 / recipe-builders/attention 1,208 は分割後も 1,000 行超・分割しないと判定した gemm /
+  sequence / generation-context / linear-gemv / state-attention・info の reference/ops / shapes・未着手の anima pipeline /
+  ops/contracts / sbv2 pipeline / hub manifest）。
+
+- **decode 速度調査の波（2026-09-19〜20・2026-09-20 に区切り — 残りは later へ）**: 帰属と反証は [decode 速度の帰属と次に試すこと](research/2026-09-19-qat-speed-recon.md)、
+  候補の採否は [perf-ledger](perf-ledger.md) H-26〜H-29 / K-48〜K-53（K-45 / K-46 / K-47 は追記）。確定した事実: Deno の 23.8 ms/token のうち
+  10 ms は deno_webgpu の poll ループの sleep（karume 無関係・採否判定は Chrome で）・律速は帯域でも演算でもなく命令数 × 占有率と dispatch 本数・
+  「i8 計算」は方向として正（利得 0.9 ms・段 0 の kill 判定が先）・「i8 KV」は速度 0（メモリ項目へ）・WebML 285 tok/s の要因は実行構造（先行投入・presrq・1 pass）。
+  順序（research §10）: ⓪ 物差しを Chrome へ + GPU 1 セッションで確定する事実（GEMV 総時間・未帰属 49 dispatch・`per_layer_model_projection` の費用）— **済 2026-09-19（research §13: Chrome 壁 QAT 10.6〜10.8 / 通常 10.0 ms・GPU 7.0〜7.5 / 6.2 ms・非 GPU 3.3〜4.1・GEMV 4.0 ms・未帰属なし・K-51 は kill）** →
+  ① K-45 段 0 — **済 2026-09-19（research §14: 門通過・ただし律速は活性ロード本数で段 1 の形は裁定待ち）** → ② H-28 — **済 2026-09-19（`d1c848e`・opt-in・単独では効かず既定 host のまま・research §15）** → ③ H-27（先行投入）→ ④ K-45 段 1a — **済 2026-09-19（`57416eb` + 追補・opt-in・Chrome +8.3%・research §16）**・**`i4-fast` へ宣言済み 2026-09-20（ADR 0105 追記 2・M2 追試済み: 速度中立・id 列一致〈並列族の明示 fma 化 — 追記 4〉）・段 1b（整数内積）は棄却（lm_head に int8 活性が無い）** → ⑤ 小物（K-48 段 1 / K-49 / K-50 段 1 / K-51）→
+  ⑥ K-46 の再起票（メモリ項目）。併用後の見込みは Deno 約 7.5 ms（約 130 tok/s）/ Chrome 約 6.5 ms（約 150 tok/s）。
+  **区切り（2026-09-20）**: K-45 は `i4-fast` に宣言（M2 追試 = 速度中立・id 列一致・並列族の明示 fma 化 — ADR 0105 追記 2 / 4）・段 1b は棄却・
+  H-28 は残件 ①（通常 decode を同一 batch へ — `Session.enqueueRead`・ADR 0054 追記）と残件 ②（TTFT の帰属 — research §15.2: Chrome の VRAM 占有下で
+  prefill run が世代を追って遅くなる現象・席の欠陥ではない）を閉じた。**H-27 段 ②・小物（K-48 / K-49 / K-50）・K-46 は later へ**（復活条件つき）。
+
+- **QAT レビュー対応の波（2026-09-19）**: 裁定は [ADR 0097 追記 7](decisions/0097-gemma4-qat-integration.md)、
+  実測は [QAT レビューの実測記録](research/2026-09-19-qat-review.md)。中身は ①配布既定を通常 Gemma と
+  揃える（capacity 4096 / chunkLength 768 / trace 上限 768・対話 CLI の既定 256 token。既定 capacity と
+  trace 上限の定数を分け、焼く前に 3 式を検査する）②scale=0 の恒等 SRQ を recipe が挟まないようにし、
+  構造門を「共有 head だけ SRQ 省略可」へ緩める ③構造門・配布計画（`qat_plan`）・公開入口の失敗経路と
+  QAT RoPE の golden を埋める ④[glossary](glossary.md) と [quantization](quantization.md) を新設し、
+  散在していた用語と方式の索引をそこへ寄せる ⑤`reference.json` を schema 2 にする
+  （byte 一致フラグの廃止・本数の突合・未反映テンソルの記録）。
+  ローカル配布 `models/karume-gemma4-qat` / `models/karume-gemma4` は ADR 0104 の recipe で再ビルドする
+  （E2B の既定 quant が `i4-fast` になる）。512 超の文脈での品質検収はこの波に含めない。
+
+- **sampler の top-p 単独指定 ✅ 2026-09-10**（H-11 残件）: f32 の安定 radix sort で順位・確率をビット同一に保ち、
+  全語彙の比較ソートを置換した。Gemma 実 logits 24 行の再生で 7.6〜7.8 倍（CPU 抽選だけ）。
+  [実測と適用範囲](research/2026-09-10-codex-mtp-optimization.md#共通サンプラーの-top-p-単独指定)。top-k 付きの配布既定は変更しない。
+- **layer_norm の悪条件入力（分散 ≈0）**: ケース個別 tolerance の席で扱う
+  （[research 2026-08-31](research/2026-08-31-op-tolerance-measurement.md) §7 注記）。
+- ~~生成 API 波（起票 2026-08-19）~~ **now 節へ昇格・設計正本化済み（2026-08-31）** — 起票が
+  書いていた形（`GenerationProgram` / stateful sequence / `generateGreedy` 格下げ）は
+  ADR [0083](decisions/0083-generation-api-surface.md) が正本。tokenizer は
+  [0084](decisions/0084-gemma-tokenizer-chat.md)・PLE 配布形は
+  [0085](decisions/0085-ple-host-gather.md)。実行計画と各段の合格線は **now 節**。
+- ~~R1 の残り~~ **消化済み（2026-08-29 — R1 統合波の節を参照）**: ロード面 API 工事 4 件も
+  exporter 自動分割規則も実装完了（ADR 0070 追記 2026-08-29 / ADR 0071 決定 4 撤回）。
+- HF 公開: **jvnv / irodori / anima の 3 リポは波 K-4 で公開済み**（2026-08-21）。FN は parked
+  （再配布の書面根拠なし）。以後の新モデルは runbook に従う
+- ~~**export-recipes の別リポジトリ分離**~~ **クローズ（ADR
+  [0092](decisions/0092-distribution-repos-and-sources.md) 決定 5 — 分離しない。動機だった
+  ライセンスの見え方は README 2 か所の carve-out と family 別 `THIRD_PARTY_NOTICES.md` で解く）**。
+  切り出し時の論点だった `_shared/paths.py` の REPO_ROOT 導出・runtime 適合 fixture の共有・
+  uv workspace の解体は、いずれも払わずに済む。
 
 ## 消化済み（0.12.0 リリース — 2026-09-06）
 
@@ -661,11 +678,6 @@ autoregressive 波の**残項目（波外へ送り）**:
 - **irodori adaLN i8 の出荷リグ A/B（起票 2026-08-24）**: sim で効いた adaLN i8（+13.1 MiB）が
   出荷リグでも読み上げ方を改善するかは未検証（sim → 出荷の転移限界 — 同 research §2）。
   復活 = `i8+dit4` 席（旧 `w4`）の品質不満、またはサイズ最適化の実需。
-- ~~生成 API 波（起票 2026-08-19）~~ **now 節へ昇格・設計正本化済み（2026-08-31）** — 起票が
-  書いていた形（`GenerationProgram` / stateful sequence / `generateGreedy` 格下げ）は
-  ADR [0083](decisions/0083-generation-api-surface.md) が正本。tokenizer は
-  [0084](decisions/0084-gemma-tokenizer-chat.md)・PLE 配布形は
-  [0085](decisions/0085-ple-host-gather.md)。実行計画と各段の合格線は **now 節**。
 - **バレル・ファミリープレフィックスの見直し（起票 2026-08-25 — ユーザー意向「今後見直し
   たい」）**: `mod.ts` の全ファミリ平面 export のためにシンボルへ族名プレフィックスが付くが、
   SBV2 族では「2」が変換イディオム（x2y）に誤読される実害が出た（`sbv2Utterance` →
@@ -724,13 +736,9 @@ autoregressive 波の**残項目（波外へ送り）**:
 
 ## release — リリース準備波（しばらく先）
 
-- ~~R1 の残り~~ **消化済み（2026-08-29 — R1 統合波の節を参照）**: ロード面 API 工事 4 件も
-  exporter 自動分割規則も実装完了（ADR 0070 追記 2026-08-29 / ADR 0071 決定 4 撤回）。
 - 実資産 CI gate（GitHub CI はローカル資産を踏まない問題）。**門番は消化済み**
   （`packages/runtime/tests/assets_gate_test.ts` + CI env `KARUME_ALLOW_NO_ASSETS=1` —
   2026-09-05）。残るのは golden の fixture 昇格 / release gate での資産取得の判断
-- HF 公開: **jvnv / irodori / anima の 3 リポは波 K-4 で公開済み**（2026-08-21）。FN は parked
-  （再配布の書面根拠なし）。以後の新モデルは runbook に従う
 - リポ直下 README の書き上げ・JSR npm 互換層の sideEffects 検証。**0.8.0 の範囲外
   （2026-09-03 裁定 — Status 行だけスタブと名乗る形へ差し替え済み）。復活条件 = 1.0 または
   対外アナウンス時**で、着手にはバンドルサイズの再実測が前提（2026-08-16 の gzip 実測は
@@ -766,11 +774,6 @@ autoregressive 波の**残項目（波外へ送り）**:
   arXiv:2411.01433）の一次精読（読み戻しは消せてもホスト側プール常駐の壁は残る、が現時点の読み）。
   page-fault 機構は**リポ外 spike で PoC 済み・実用可否は uncertain**（復活時は spike の実測を
   research へ転記してから設計スパイクに入る — now 節「MoE page-fault」）。
-- ~~**export-recipes の別リポジトリ分離**~~ **クローズ（ADR
-  [0092](decisions/0092-distribution-repos-and-sources.md) 決定 5 — 分離しない。動機だった
-  ライセンスの見え方は README 2 か所の carve-out と family 別 `THIRD_PARTY_NOTICES.md` で解く）**。
-  切り出し時の論点だった `_shared/paths.py` の REPO_ROOT 導出・runtime 適合 fixture の共有・
-  uv workspace の解体は、いずれも払わずに済む。
 
 - **karume-sbv2-fn の HF 公開**（2026-08-20 保留裁定 — 波 K で一時「出典表記つき公開」へ
   振れたが撤回）。upstream の書面条件 = Booth 頒布ページの「商用可・クレジット不要・マージ
