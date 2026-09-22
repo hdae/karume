@@ -203,6 +203,18 @@ def shard_path(path: Path, index: int, total: int) -> Path:
     return path.with_name(shard_name(path.name, index, total))
 
 
+def component_path(path: Path) -> Path:
+    """shard 連番のファイル名 → コンポーネントの**代表 path**（連番でなければそのまま）。
+
+    {@link shard_name} の逆向き。配布形を受ける入口は代表 path（{@link resolve_shards}）なので、
+    使い手が手元の現物（`model.f32-00001-of-00002.safetensors`）を指した呼び出しを、黙って
+    「1 本だけのコンポーネント」として扱わないための畳み込み。
+    """
+    name = PurePosixPath(path.name)
+    matched = re.fullmatch(rf"(.+)-\d{{{_INDEX_DIGITS}}}-of-\d{{{_INDEX_DIGITS}}}", name.stem)
+    return path if matched is None else path.with_name(f"{matched.group(1)}{name.suffix}")
+
+
 def _sequence_pattern(path: Path) -> re.Pattern[str]:
     """`path` と同じコンポーネントの shard ファイル名に一致する正規表現。
 

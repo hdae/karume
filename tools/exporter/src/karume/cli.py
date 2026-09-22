@@ -2,6 +2,8 @@
 
     karume dist --pipeline siglip2   # 受理集合が空の core 単体では落ちる（下の NOTE）
     karume verify ../../models/karume-anima/shared/transformer/model.f16-00001-of-00017.safetensors
+    karume migrate ../../models/karume-siglip2/vision/model.f16.safetensors --out /tmp/krm \
+        --license apache-2.0
 
 MUST: CLI は**引数を解釈しない**。先頭の 1 語でディスパッチし、残りはそのまま対応する
 `main(argv)` へ渡す（`--help` も素通しするので、使い方は各本体の parser が出す）。ここに
@@ -34,6 +36,12 @@ def run_dist(argv: Sequence[str]) -> None:
     return dist.main(argv)
 
 
+def run_migrate(argv: Sequence[str]) -> None:
+    from karume import migrate
+
+    return migrate.main(argv)
+
+
 def run_repack(argv: Sequence[str]) -> None:
     from karume import repack
 
@@ -49,6 +57,7 @@ def run_verify(argv: Sequence[str]) -> None:
 #: サブコマンド名 → （ハンドラ, 一覧に出す 1 行）。順序がそのまま `--help` の並び。
 COMMANDS: Mapping[str, tuple[Callable[[Sequence[str]], None], str]] = {
     "dist": (run_dist, "配布ディレクトリを組み立てて karume.json / README.md を書く"),
+    "migrate": (run_migrate, "旧配布形をコンテナ形式（krm / krg）へ移す（入力は読むだけ）"),
     "repack": (run_repack, "既存の配布形を shard 仕様 v3 へ詰め替える（バイトは変えない）"),
     "verify": (run_verify, "配布形 safetensors を IR v1 の全規則で検証する"),
 }

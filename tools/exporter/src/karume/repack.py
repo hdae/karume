@@ -82,7 +82,7 @@ class RepackError(ValueError):
 
 
 @dataclass(frozen=True)
-class _Stored:
+class SourceTensor:
     """入力側のテンソル 1 本 — **親としての宣言**と、現物の在処。
 
     分割テンソルは piece が別々のファイルに散っているので、在処は 1 点ではなく**区間の列**に
@@ -135,7 +135,7 @@ class _Fragment:
     segment: tuple[Path, int, int]
 
 
-def _join_pieces(name: str, fragments: Sequence[_Fragment]) -> _Stored:
+def _join_pieces(name: str, fragments: Sequence[_Fragment]) -> SourceTensor:
     """piece 列を親 1 本へ畳む（読み手契約 5 を全部ここで見る）。
 
     `fragments` は**読む順**（shard 番号順）に並んでいる。畳んだ宣言は親の dtype・全体
@@ -193,7 +193,7 @@ def _join_pieces(name: str, fragments: Sequence[_Fragment]) -> _Stored:
             )
         rows += entry.shape[0]
         previous = fragment.shard
-    return _Stored(
+    return SourceTensor(
         entry=ContainerEntry(
             name=name,
             dtype=head.dtype,
@@ -204,7 +204,7 @@ def _join_pieces(name: str, fragments: Sequence[_Fragment]) -> _Stored:
     )
 
 
-def read_component(paths: Sequence[Path]) -> tuple[dict[str, str], dict[str, _Stored]]:
+def read_component(paths: Sequence[Path]) -> tuple[dict[str, str], dict[str, SourceTensor]]:
     """コンポーネントの現物を読み、`(先頭 shard の __metadata__, 名前 → 現物)` を返す。
 
     受けるのは**旧規則の配布形も含む**列（単一ファイル / fat グラフ shard / 尾部スラック）—
@@ -219,7 +219,7 @@ def read_component(paths: Sequence[Path]) -> tuple[dict[str, str], dict[str, _St
     {@link karume.verify.verify_shards} が余剰として落とす。
     """
     metadata: dict[str, str] = {}
-    stored: dict[str, _Stored] = {}
+    stored: dict[str, SourceTensor] = {}
     fragments: dict[str, list[_Fragment]] = {}
     owner: dict[str, Path] = {}
     for index, path in enumerate(paths):
@@ -250,7 +250,7 @@ def read_component(paths: Sequence[Path]) -> tuple[dict[str, str], dict[str, _St
             segment = (path, data_start + begin, end - begin)
             parsed = parse_piece_key(name)
             if parsed is None:
-                stored[name] = _Stored(entry=entry, segments=(segment,))
+                stored[name] = SourceTensor(entry=entry, segments=(segment,))
                 continue
             parent, piece_index, piece_count = parsed
             fragments.setdefault(parent, []).append(
@@ -276,7 +276,7 @@ def read_component(paths: Sequence[Path]) -> tuple[dict[str, str], dict[str, _St
     return metadata, stored
 
 
-def _range_chunks(source: _Stored, begin: int, end: int) -> Iterator[bytes]:
+def _range_chunks(source: SourceTensor, begin: int, end: int) -> Iterator[bytes]:
     """親の**バイト範囲** `[begin, end)` を読み出し単位ずつ流す（丸読みしない）。
 
     範囲は区間の列（= piece の並び）を跨いでよい — 分割された入力を別の切り目で書き直すのが
@@ -304,12 +304,14 @@ def _range_chunks(source: _Stored, begin: int, end: int) -> Iterator[bytes]:
         cursor = stop
 
 
-def _payload_chunks(source: _Stored) -> Iterator[bytes]:
+def payload_chunks(source: SourceTensor) -> Iterator[bytes]:
     """1 本ぶん（親の全バイト）を読み出し単位ずつ流す。"""
     return _range_chunks(source, 0, source.entry.nbytes)
 
 
-def _fingerprints(stored: Mapping[str, _Stored]) -> dict[str, tuple[str, tuple[int, ...], str]]:
+def _fingerprints(
+    stored: Mapping[str, SourceTensor],
+) -> dict[str, tuple[str, tuple[int, ...], str]]:
     """名前 → (dtype, shape, sha256) — 詰め替えの前後で**一致する MUST** の写像。
 
     sha256 で見るのは、旧新を同時にメモリへ載せずに全バイトを突き合わせられる唯一の形だから
@@ -318,7 +320,7 @@ def _fingerprints(stored: Mapping[str, _Stored]) -> dict[str, tuple[str, tuple[i
     prints: dict[str, tuple[str, tuple[int, ...], str]] = {}
     for name, source in sorted(stored.items()):
         digest = hashlib.sha256()
-        for chunk in _payload_chunks(source):
+        for chunk in payload_chunks(source):
             digest.update(chunk)
         prints[name] = (source.entry.dtype, source.entry.shape, digest.hexdigest())
     return prints
@@ -343,7 +345,7 @@ def _assert_same_bytes(
 
 
 def plan_shards(
-    stored: Mapping[str, _Stored], graph_text: str, capacity: int
+    stored: Mapping[str, SourceTensor], graph_text: str, capacity: int
 ) -> list[tuple[str | Piece, ...]]:
     """現行の規則で shard 群を決める（規則の正本は {@link karume.shards.pack_shards}）。
 
@@ -368,7 +370,7 @@ def plan_shards(
     return groups
 
 
-def _piece_slice(source: _Stored, piece: Piece) -> tuple[_Stored, int, int]:
+def _piece_slice(source: SourceTensor, piece: Piece) -> tuple[SourceTensor, int, int]:
     """piece の行範囲 → 親の**バイト範囲**（`_range_chunks` へそのまま渡せる形）。
 
     1 行のバイト長は「親の合計バイト長 ÷ 行数」— 分割の可否を決めた
@@ -380,7 +382,7 @@ def _piece_slice(source: _Stored, piece: Piece) -> tuple[_Stored, int, int]:
 
 
 def _shard_reader(
-    sources: Mapping[str, tuple[_Stored, int, int]],
+    sources: Mapping[str, tuple[SourceTensor, int, int]],
 ) -> Callable[[ContainerEntry], Iterator[bytes]]:
     """entry → 生バイトの列（{@link karume.emit.write_container} へ渡す読み口）。"""
 
@@ -393,7 +395,7 @@ def _shard_reader(
 def _write_shards(
     staged: Path,
     groups: Sequence[Sequence[str | Piece]],
-    stored: Mapping[str, _Stored],
+    stored: Mapping[str, SourceTensor],
     metadata: Mapping[str, str],
 ) -> list[Path]:
     """shard 群を一時 path の連番として書く（先頭がグラフ shard）。
@@ -406,7 +408,7 @@ def _write_shards(
     for index, group in enumerate(groups, start=1):
         target = shard_path(staged, index, total)
         entries: list[ContainerEntry] = []
-        sources: dict[str, tuple[_Stored, int, int]] = {}
+        sources: dict[str, tuple[SourceTensor, int, int]] = {}
         for member in group:
             if isinstance(member, Piece):
                 source = stored[member.name]

@@ -58,6 +58,12 @@ CORE_MODULES: tuple[str, ...] = (
     "verify",
     # 容器の詰め替え（ADR 0081 の移行経路）。バイト列と宣言しか知らない。
     "repack",
+    # コンテナ形式（krm / krg）の書き手と自己検査用の読み手（ADR 0108）。
+    # バイト列・宣言・codec 台帳しか知らない。
+    "container",
+    # 旧配布形 → コンテナ形式の移行 CLI（container-v1 §12）。旧形式を読むのはここだけで、
+    # 知っているのは宣言と生バイト（family 知識も repo topology も持たない）。
+    "migrate",
     "pipeline",
     "goldens",
     "golden_models",

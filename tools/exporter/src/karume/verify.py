@@ -16,11 +16,23 @@ from __future__ import annotations
 import argparse
 import json
 import math
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
+from karume.container import (
+    BLOCK_TAIL_ALIGN,
+    BlockEncoding,
+    ContainerFormatError,
+    GraphDescriptor,
+    ModelDescriptor,
+    codec_entry,
+    group_count,
+    payload_bytes,
+    per_channel_group_size,
+    read_container,
+)
 from karume.dims import MAX_SAFE_INT, is_symbol_name, parse_dim, try_parse_dim
 from karume.emit import EmitError, eligible_compressed_initializers, weight_channel_axes
 from karume.ir import (
@@ -1611,6 +1623,281 @@ def verify_shards(paths: Sequence[str | Path]) -> IrGraph:
     assert_runtime_support(graph)
     assert_op_contracts(graph)
     return graph
+
+
+# ---- コンテナ形式（krm / krg）との突合 -------------------------------------
+#
+# TS 側 `packages/runtime/src/format/container/bind.ts`（合流層）の鏡像。descriptor 単体で
+# 決まる規則（2 文書の構造・block の配置・束縛表の過不足）は読み手
+# （{@link karume.container.read_container}）が既に見ているので、ここが掛けるのは
+# **宣言 shape を要する規則だけ**である:
+#
+# - 意味論 dtype と codec の組（`f32` の符号化 / `i32` は生の int32 — 交差は fail loudly）
+# - payload 長 = 宣言 shape と packing から決まる値。block 長との差は詰め物（0 以上 4 未満）だけ
+# - piece 列の末尾 = `shape[0]`。中間 piece に詰め物は無い
+# - `rowAxis != 0` の initializer は piece 分割不可
+# - group の刻み（per-channel は行長 / group codec は 2 冪 ≥ 16 で行長を割る）と scale 長
+# - i2 経路（`int2-off` / `ternary`）の宣言 shape は正の rank 2 で行長が 16 の倍数
+
+
+@dataclass(frozen=True)
+class SupplyBlock:
+    """実体 1 本ぶんの block（piece 列なら 1 piece）。"""
+
+    id: str
+    part: int
+    offset: int
+    length: int
+    #: この block が運ぶ先頭次元の行範囲（丸ごと 1 本なら `[0, shape[0]]`・rank 0 は `[0, 1]`）。
+    rows: tuple[int, int]
+    #: payload のバイト長（block 長から末尾の詰め物を除いたもの）。
+    payload_bytes: int
+
+
+@dataclass(frozen=True)
+class InitializerSupply:
+    """initializer 1 本の供給計画（実体をどの block から取るか）。"""
+
+    encoding: BlockEncoding
+    #: 実体の block 列（丸ごとなら 1 本）。
+    blocks: tuple[SupplyBlock, ...]
+    #: 供給元。const 領域（part 1・グラフの所有）か重み側（モデル記述）か。
+    origin: Literal["const", "model"]
+    #: companion scale の block（量子化 codec のみ）。
+    scale: SupplyBlock | None = None
+
+
+@dataclass(frozen=True)
+class BoundGraph:
+    """グラフ 1 本の合流結果（宣言 + shared でない initializer 全部の供給計画）。"""
+
+    declaration: Mapping[str, Any]
+    supplies: Mapping[str, InitializerSupply]
+
+
+def _located_block(
+    graph: GraphDescriptor, model: ModelDescriptor | None
+) -> Callable[[str, str], SupplyBlock]:
+    """block id → 在処（const 目次は part 1・モデル目次は宣言の part）。"""
+    const = {block.id: block for block in graph.const_blocks}
+    data = {block.id: block for block in (model.blocks if model is not None else ())}
+
+    def locate(block_id: str, where: str) -> SupplyBlock:
+        found = const.get(block_id)
+        part = 1
+        if found is None:
+            record = data.get(block_id)
+            if record is None:
+                raise ContainerFormatError(f"{where}: 未宣言の block '{block_id}'")
+            found, part = record, record.part
+        # rows / payload_bytes は呼び手（宣言 shape を知る側）が埋める。
+        return SupplyBlock(found.id, part, found.offset, found.length, (0, 0), 0)
+
+    return locate
+
+
+def _declared_tensor(
+    declaration: Mapping[str, Any], name: str, where: str
+) -> tuple[str, list[int]]:
+    """initializer の意味論 dtype と**具体 shape**（記号次元を持つ実体は在りえない）。"""
+    values = declaration.get("values")
+    if not isinstance(values, dict) or not isinstance(values.get(name), dict):
+        raise ContainerFormatError(f"{where}: `values` に dtype / shape 宣言が無い")
+    value = values[name]
+    dtype = value.get("dtype")
+    if dtype not in SEMANTIC_DTYPES:
+        raise ContainerFormatError(f"{where}: 意味論 dtype が語彙外: {dtype!r}")
+    raw = value.get("shape")
+    if not isinstance(raw, list):
+        raise ContainerFormatError(f"{where}: `values` の shape が配列でない")
+    shape: list[int] = []
+    for dim in raw:
+        if not isinstance(dim, int) or isinstance(dim, bool) or dim < 0:
+            raise ContainerFormatError(
+                f"{where}: initializer の shape に記号次元は使えない（{dim!r}）"
+            )
+        shape.append(dim)
+    return dtype, shape
+
+
+def _assert_padded(block: SupplyBlock, payload: int, where: str) -> None:
+    """block 長と payload 長の関係（container-v1 §4.1 — 詰め物は 0 以上 4 未満）。"""
+    if not 0 <= block.length - payload < BLOCK_TAIL_ALIGN:
+        raise ContainerFormatError(
+            f"{where}: block '{block.id}' の長さ {block.length} が payload {payload} バイト +"
+            f" 詰め物（{BLOCK_TAIL_ALIGN} 未満）でない"
+        )
+
+
+def _is_i2_shape(shape: Sequence[int]) -> bool:
+    """i2 経路の論理形 `[rows, width]`（`packages/runtime/src/format/i2.ts` の鏡像）。"""
+    return len(shape) == 2 and all(dim > 0 for dim in shape) and shape[1] % 16 == 0
+
+
+def _plan_pieces(
+    where: str,
+    shape: Sequence[int],
+    payload: int,
+    encoding: BlockEncoding,
+    pieces: Sequence[tuple[str, tuple[int, int]]],
+    locate: Callable[[str, str], SupplyBlock],
+) -> list[SupplyBlock]:
+    """piece 列の供給計画（行範囲 → バイト範囲）。並びと被覆は読み手が見た後の段。"""
+    if encoding.row_axis not in (None, 0):
+        raise ContainerFormatError(
+            f"{where}: rowAxis {encoding.row_axis} の initializer は piece 分割できない（規則④）"
+        )
+    rows = shape[0] if shape else 1
+    if not shape or rows == 0 or payload % rows != 0:
+        raise ContainerFormatError(
+            f"{where}: payload {payload} バイトが先頭次元 {rows} 行で割り切れないので"
+            " piece 分割できない"
+        )
+    if pieces[-1][1][1] != rows:
+        raise ContainerFormatError(
+            f"{where}: piece 列の末尾 {pieces[-1][1][1]} 行が宣言 shape の先頭次元 {rows} 行と"
+            "違う（規則④）"
+        )
+    row_bytes = payload // rows
+    planned: list[SupplyBlock] = []
+    for index, (block_id, (begin, end)) in enumerate(pieces):
+        by = f"{where} piece[{index}]"
+        found = locate(block_id, by)
+        piece_bytes = (end - begin) * row_bytes
+        if index < len(pieces) - 1:
+            # 中間 piece に詰め物は掛けられない（次の piece の先頭を潰す）。
+            if found.length != piece_bytes:
+                raise ContainerFormatError(
+                    f"{by}: 中間 piece の block 長 {found.length} が行範囲のバイト数"
+                    f" {piece_bytes} と違う（詰め物不可）"
+                )
+        else:
+            _assert_padded(found, piece_bytes, by)
+        planned.append(replace(found, rows=(begin, end), payload_bytes=piece_bytes))
+    return planned
+
+
+def _plan_supply(
+    where: str,
+    dtype: str,
+    shape: Sequence[int],
+    encoding: BlockEncoding,
+    block: str | None,
+    pieces: Sequence[tuple[str, tuple[int, int]]] | None,
+    locate: Callable[[str, str], SupplyBlock],
+    origin: Literal["const", "model"],
+) -> InitializerSupply:
+    """1 initializer ぶんの供給計画（宣言 shape × encoding × block 目次）。"""
+    entry = codec_entry(encoding.codec)
+    if entry.layout not in INITIALIZER_STORAGE.get(dtype, ()):
+        raise ContainerFormatError(
+            f"{where}: 意味論 dtype '{dtype}' に codec '{encoding.codec}' は組めない"
+        )
+    if entry.layout == "i2" and not _is_i2_shape(shape):
+        raise ContainerFormatError(
+            f"{where}: codec '{encoding.codec}' は正の rank 2・行長 16 の倍数の宣言 shape が要る"
+            f"（[{','.join(str(dim) for dim in shape)}]）"
+        )
+    numel = math.prod(shape)
+    payload = payload_bytes(encoding.codec, numel, where)
+    rows = shape[0] if shape else 1
+    if pieces is None:
+        if block is None:
+            raise ContainerFormatError(f"{where}: 供給形が `block` でも `pieces` でもない")
+        found = locate(block, where)
+        _assert_padded(found, payload, where)
+        blocks = [replace(found, rows=(0, rows), payload_bytes=payload)]
+    else:
+        blocks = _plan_pieces(where, shape, payload, encoding, pieces, locate)
+    if entry.scale == "forbidden":
+        return InitializerSupply(encoding, tuple(blocks), origin)
+
+    if encoding.row_axis is None or encoding.group_size is None or encoding.scale_block is None:
+        raise ContainerFormatError(
+            f"{where}: codec '{encoding.codec}' は量子化なので rowAxis / groupSize / scale が要る"
+        )
+    row_axis, group_size = encoding.row_axis, encoding.group_size
+    if not shape or len(shape) <= row_axis:
+        raise ContainerFormatError(
+            f"{where}: rowAxis {row_axis} に対して宣言 shape"
+            f" [{','.join(str(dim) for dim in shape)}] の rank が足りない"
+        )
+    row_count = shape[row_axis]
+    row_length = numel // row_count if row_count else 0
+    if entry.grouping == "channel" and group_size != per_channel_group_size(row_length):
+        raise ContainerFormatError(
+            f"{where}: codec '{encoding.codec}' は per-channel なので groupSize は行長"
+            f" {per_channel_group_size(row_length)} に等しい MUST（宣言は {group_size}）"
+        )
+    if entry.grouping == "group":
+        if group_size < MIN_GROUP_SIZE or group_size & (group_size - 1) != 0:
+            raise ContainerFormatError(
+                f"{where}: groupSize {group_size} が 2 冪かつ {MIN_GROUP_SIZE} 以上でない"
+                "（ADR 0069 決定 2）"
+            )
+        if row_length % group_size != 0:
+            raise ContainerFormatError(
+                f"{where}: 行長 {row_length}（= numel / shape[{row_axis}]）が groupSize"
+                f" {group_size} で割り切れない（ADR 0069 決定 2）"
+            )
+    scale_bytes = row_count * group_count(row_length, group_size) * 4
+    scale = locate(encoding.scale_block, f"{where} scale")
+    _assert_padded(scale, scale_bytes, f"{where} scale")
+    return InitializerSupply(
+        encoding,
+        tuple(blocks),
+        origin,
+        replace(scale, rows=(0, row_count), payload_bytes=scale_bytes),
+    )
+
+
+def bind_graphs(graph: GraphDescriptor, model: ModelDescriptor | None) -> dict[str, BoundGraph]:
+    """グラフ記述と束縛表を合流し、initializer ごとの供給計画を決める（TS `bindGraphs` の鏡像）。
+
+    `model` が `None`（`krg`）のときは const 供給だけが埋まる — 重みが要る initializer は
+    供給を持たない宣言として残る（`krg` だけでは Session を組めない）。
+    """
+    locate = _located_block(graph, model)
+    constants = {(entry.graph, entry.initializer): entry for entry in graph.constants}
+    bound: dict[str, BoundGraph] = {}
+    for graph_name, declaration in graph.graphs.items():
+        initializers = declaration.get("initializers")
+        if not isinstance(initializers, dict):
+            raise ContainerFormatError(f"graph '{graph_name}': `initializers` 節が無い")
+        supplies: dict[str, InitializerSupply] = {}
+        for name, init in initializers.items():
+            if isinstance(init, dict) and init.get("shared") is True:
+                continue
+            where = f"graph '{graph_name}' initializer '{name}'"
+            dtype, shape = _declared_tensor(declaration, name, where)
+            constant = constants.get((graph_name, name))
+            if constant is not None:
+                supplies[name] = _plan_supply(
+                    where, dtype, shape, constant.encoding, constant.block, None, locate, "const"
+                )
+                continue
+            supply = (model.binding.get(graph_name, {}) if model is not None else {}).get(name)
+            if supply is None:
+                if model is None:
+                    continue
+                raise ContainerFormatError(f"{where}: 束縛表に供給が無い")
+            supplies[name] = _plan_supply(
+                where, dtype, shape, supply.encoding, supply.block, supply.pieces, locate, "model"
+            )
+        bound[graph_name] = BoundGraph(declaration, supplies)
+    return bound
+
+
+def verify_container(paths: Sequence[str | Path]) -> dict[str, BoundGraph]:
+    """コンテナ（`krm` の part 列 / `krg` 1 本）を開き、合流まで通して供給計画を返す。
+
+    `paths` は単一形なら 1 本、分割形なら **part 0 から順に**並べた part 列。掛かるのは
+    「宣言で決まる規則」全部（読み手の構造検査 + 上の合流層）で、**実バイトは読まない** —
+    block / part の sha256 を突き合わせるのは {@link karume.container.ReadContainer.verify_blocks}
+    の側（§7 のハッシュ 3 分離）。
+    """
+    read = read_container([Path(path) for path in paths])
+    return bind_graphs(read.graph, read.model)
 
 
 # ---- CLI ------------------------------------------------------------------
