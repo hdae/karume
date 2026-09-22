@@ -130,7 +130,7 @@
   - `docs/perf-ledger.md`: 性能候補・採否・打ち切り条件。数値の正本は research。
   - `docs/research/`: 調査と実測の時点スナップショット。冒頭にその性格を示す 1 行を置く。
   - `docs/known-issues.md` / `docs/limitations.md`: 未解決バグ / 意図的な制約。
-  - `docs/ir-v1.md` / `docs/op-vocabulary.md`: IR 仕様 / op 語彙。
+  - `docs/ir-v2.md` / `docs/op-vocabulary.md`: IR 仕様 / op 語彙。
   - `docs/assets-layout.md` / `docs/release-runbook.md`: 資産配置 / 恒久的な公開手順。
 
 ### レビュー後の改善調査
