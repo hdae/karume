@@ -60,6 +60,8 @@ VAE tiling と再優先度付け）。波 0 の Q0 シムは 1024px で門通過
    S 以外の中間バッファ（案γ 波 2 以降: strided / ew / quantize_rows 入力）は**未着手のまま
    保留** — 波 1 の実測（下表: 時間 −2% 級）を踏まえ、VAE tiling と再優先度付けしてから
    決める（ACTIVE_DESIGN の案γ エントリが管理）。
+   **但し書き（2026-09-22）**: 管理席は [backlog](../backlog.md) の parked 節
+   （「全面 f16（案γ）」）。
 
 ## E2E（packages/runtime/tests/e2e_anima_s16_test.ts・tolerance は素の実測から導出）
 

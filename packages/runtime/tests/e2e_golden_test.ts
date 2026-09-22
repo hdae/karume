@@ -22,7 +22,7 @@ import { readShard, resolveShards, streamShards } from "./helpers/shard-files.ts
  * ここを超えただけでは赤にせず、2 段目の {@link OUTPUT_TOLERANCE}（WGSL 仕様帯）で受け止めて
  * warning として記録する。
  *
- * 実測（**全 31 モデル 73 出力**のうち f32 が 64 本。i32 / bool の 9 本は差 0 の厳密一致で、
+ * 実測（**全 32 モデル 76 出力**のうち f32 が 67 本。i32 / bool の 9 本は差 0 の厳密一致で、
  * この値の対象外 — ADR 0009。`argmax_pick` の 2 出力は添字なのでこちら側）の最悪値は
  * **maxAbs 4.77e-7**（deform_conv2d_block output.0）/
  * **maxRel 1.77e-5**（batch_matmul output.0）。前者は**その要素の値が 4.82 と他の golden より

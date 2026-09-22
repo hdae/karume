@@ -115,12 +115,12 @@ anima の文面（分割の有無に依らず正しい 1 本）が雛形。
 > 発生していない（`maxShards = 1`）から現行の文面が正しい」という前提は、**同じ 2026-08-30 に
 > 裁定された ADR [0081](0081-shard-spec-v2.md) 決定 3（常時分割）でその日のうちに失効した** —
 > テンソルを 1 本でも持つ全 family が 2 ファイル以上になるので、この MUST は全 family に掛かる。
-> **未履行**: `card.py` の overview 6 本（sbv2 / irodori / siglip2 / depth_anything /
-> birefnet / vowel_detector）と `distribution.py` の NOTICE 改変列挙 4 本（siglip2 /
-> depth_anything / birefnet / gemma4）が今も単一ファイルの綴りで、**anima 以外の公開済みリポ**
-> （siglip2 / depth-anything / irodori 2 本 / sbv2-jvnv・gemma4 は NOTICE 側だけ）で散文が
-> 配布形の実態と食い違う（いずれも MIT / CC BY-SA / Apache で改変告知義務の形ではないため、
-> 実害は説明の正確さに留まる）。birefnet / vowel-detector は未配布なので先回りの是正。
+> **未履行**: `card.py` の overview 3 本（sbv2 / irodori / vowel_detector）と
+> `distribution.py` の NOTICE 改変列挙 3 本（siglip2 / depth_anything / gemma4）が今も単一
+> ファイルの綴りで、**anima 以外の公開済みリポ**（irodori 2 本 / sbv2-jvnv・siglip2 /
+> depth-anything / gemma4 は NOTICE 側だけ）で散文が配布形の実態と食い違う（いずれも MIT /
+> CC BY-SA / Apache で改変告知義務の形ではないため、実害は説明の正確さに留まる）。
+> vowel-detector は未配布なので先回りの是正。
 > 雛形自身（anima の `CONTAINER_MODIFICATION`）の「1 ファイルに収まらないときだけ分割」も、
 > 0081 決定 3 に照らすと条件つきで誤り。
 > 是正はカードの焼き直し（= HF 再アップロード）とセットでしか公開物に届かないので、ADR

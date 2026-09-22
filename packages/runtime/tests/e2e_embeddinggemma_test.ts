@@ -3,8 +3,8 @@
 // tiny golden（tests/e2e_golden_test.ts）が「op 契約の被覆」を、実重み SBV2（tests/e2e_sbv2_test.ts）
 // が「音響チェーン側の実重み」を受け持つのに対し、こちらは**単一ベクトル出力の実重みテキスト系**
 // を受け持つ。対象は `outputs/series/embeddinggemma-300m/`（重み 1.2GB 級のためリポジトリ管理外
-// — `.gitignore` の `outputs/`）。生成は `tools/exporter/export_embeddinggemma.py`（コマンドは下の
-// GENERATE_COMMAND がそのまま正本）。
+// — `.gitignore` の `outputs/`）。生成は `tools/export-recipes/embeddinggemma/export.py`
+// （コマンドは下の GENERATE_COMMAND がそのまま正本）。
 //
 // SBV2 と違い格納 dtype 系列は f32 の 1 本のみ（f16 / i8 は別系列で決める話 — exporter 冒頭
 // docstring）なので、系列パラメタ化はしない。グラフも target 分割が無く 1 本（Transformer →

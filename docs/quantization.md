@@ -78,7 +78,7 @@ manifest へ保存できるキーの正本は `packages/hub/src/manifest.ts` の
 | RTN i8                              | あり                     | 製品             | ADR [0019](decisions/0019-i8-weight-execution.md)・[0029](decisions/0029-sbv2-i8-series-and-quant-quality.md) |
 | RTN i4                              | あり                     | 製品             | ADR [0069](decisions/0069-packed-w4-storage.md)                                                               |
 | GPTQ（`grid="rtn"`）                | あり（i4 席へ直結）      | 製品             | [perf-ledger](perf-ledger.md) Q-6                                                                             |
-| GPTQ の act-order / static-groups   | あり（格納形は不変）     | 任意・既定オフ   | [perf-ledger](perf-ledger.md)「GPTQ 掃引の再評価」                                                            |
+| GPTQ の act-order / static-groups   | あり（格納形は不変）     | 任意・既定オフ   | [backlog](backlog.md)「GPTQ 掃引の再評価」                                                                    |
 | AWQ                                 | 無し                     | 棄却             | [perf-ledger](perf-ledger.md) Q-7                                                                             |
 | NF4                                 | 無し（測定専用）         | 保留             | [perf-ledger](perf-ledger.md) Q-3                                                                             |
 | FP4（e2m1）                         | 無し                     | 保留（測定のみ） | `quant_methods.py`                                                                                            |
