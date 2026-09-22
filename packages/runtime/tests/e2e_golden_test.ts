@@ -12,6 +12,7 @@ import { assert, assertEquals } from "@std/assert";
 import { acquireGpu, capabilities, prepareModel, type Tensor } from "../mod.ts";
 import { parseSafetensors } from "../src/format/safetensors.ts";
 import { compareTensors, formatAllclose, type Tolerance } from "../src/reference/allclose.ts";
+import { ENVIRONMENT } from "./helpers/environment.ts";
 import { ioTensor } from "./helpers/golden-io.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { openResults } from "./helpers/results.ts";
@@ -47,16 +48,22 @@ import { readShard, resolveShards, streamShards } from "./helpers/shard-files.ts
 const GOLDEN_TOLERANCE: Tolerance = { atol: 1e-6, rtol: 1e-5 };
 
 /**
- * 出力ごとの **WGSL 仕様帯**（キーは `<model>/<出力名>`）= 判定の 2 段目。ここに行がある出力だけ、
- * {@link GOLDEN_TOLERANCE} を超えても赤にならずに済む。
+ * 出力ごとの **WGSL 仕様帯** = 判定の 2 段目。外側のキーは `<model>/<出力名>`、内側は
+ * **環境キー**（`<ランタイム>-<アダプタ名 slug>` — ADR 0106 決定 2）。**走らせている機の行がある
+ * 出力だけ**、{@link GOLDEN_TOLERANCE} を超えても赤にならずに済む。
+ *
+ * 行を環境キーごとに持つのは、**緩めを足した機の外へ緩めを広げない**ため。仕様帯が要るのは
+ * 「この GPU の実装がそこまで外れる」と実測で分かった出力だけで、同じ op を仕様どおりほぼ
+ * 正しく丸める機もある。行を全機共通にすると、そちらの機の退行検出の網まで同じだけ緩む。
+ * **行が無い機では 2 段目そのものが無い**: 1 段目の独自基準だけで測り、超えれば赤になる。
  *
  * 2 段の判定（裁定 2026-09-20）:
  *
  * 1. Karume 独自基準（{@link GOLDEN_TOLERANCE}・全出力共通）で通れば **pass**。
- * 2. 落ちた出力に `spec` があればそれで測り直し、通れば **pass + warning** — 結果 JSON
+ * 2. 落ちた出力にこの機の `spec` があればそれで測り直し、通れば **pass + warning** — 結果 JSON
  *    （`outputs/verify/<環境キー>/<日付>_golden/results.json`）の `note` に
  *    「どの出力が独自基準を超え、どの仕様帯で受理したか」が残る。
- * 3. `spec` が無い / `spec` でも落ちるなら **fail**（メッセージは従来どおり）。
+ * 3. この機の `spec` が無い / `spec` でも落ちるなら **fail**（メッセージは従来どおり）。
  *
  * 独自基準は「従来この値で通っていた」を見失わないための目安であって仕様上の根拠は無く、
  * **容易に撤廃してよい**（実装バグを掴む網は仕様帯の側にある — op 取り違え・添字ずれの誤差は
@@ -65,13 +72,34 @@ const GOLDEN_TOLERANCE: Tolerance = { atol: 1e-6, rtol: 1e-5 };
  * MUST: ここへ行を足すのは **op 単位・WGSL 仕様の精度保証の範囲内・実害が無い場合**に限り、
  * 根拠（仕様の該当節と実測値）を行ごとに書く。全体を一度に緩めない。
  *
- * - `activations/sin`: WGSL 仕様の `sin(x)` は |x| ≤ π で**絶対誤差 2⁻¹¹ まで**を許す（§ Accuracy
- *   of Concrete Floating Point Expressions）。golden の入力は [−1.28, 1.89] でこの区間の内側。
- *   NVIDIA（RTX 3080 Ti）はほぼ正しく丸めるので 1e-6 で通っていたが、Intel Arc B570（Mesa ANV）は
- *   x = 1.5908 で 2.68e-5（2026-09-20 実測 — 仕様の内・実装バグの O(1) からは 4 桁下）。
+ * - `activations/sin` の `deno-intel-graphics-bmg-g21`: WGSL 仕様の `sin(x)` は |x| ≤ π で
+ *   **絶対誤差 2⁻¹¹ まで**を許す（§ Accuracy of Concrete Floating Point Expressions）。golden の
+ *   入力は [−1.28, 1.89] でこの区間の内側。Intel Arc B570（Mesa ANV）は x = 1.5908 で 2.68e-5
+ *   （2026-09-20 実測 — 仕様の内・実装バグの O(1) からは 4 桁下）。NVIDIA（RTX 3080 Ti）は
+ *   ほぼ正しく丸めるので 1e-6 で通り、行を持たない。
  */
-const OUTPUT_TOLERANCE: Readonly<Record<string, { readonly spec: Tolerance }>> = {
-  "activations/sin": { spec: { atol: 2 ** -11, rtol: 0 } },
+const OUTPUT_TOLERANCE: Readonly<
+  Record<string, Readonly<Record<string, { readonly spec: Tolerance }>>>
+> = {
+  "activations/sin": {
+    "deno-intel-graphics-bmg-g21": { spec: { atol: 2 ** -11, rtol: 0 } },
+  },
+};
+
+/**
+ * この走行の機に対する仕様帯（無ければ `undefined` = 2 段目が無い）。
+ *
+ * 環境キーが無いのは GPU アダプタが取れない機だけで、そこでは golden テスト自体が登録時点で
+ * SKIP される（それでも行を引けないことに変わりはないので `undefined` を返す）。
+ */
+const specTolerance = (model: string, output: string): Tolerance | undefined => {
+  const environment = ENVIRONMENT.key;
+  if (environment === undefined) return undefined;
+  const key = `${model}/${output}`;
+  if (!Object.hasOwn(OUTPUT_TOLERANCE, key)) return undefined;
+  const byEnvironment = OUTPUT_TOLERANCE[key];
+  if (!Object.hasOwn(byEnvironment, environment)) return undefined;
+  return byEnvironment[environment].spec;
 };
 
 /** 決着と warning の置き場（`outputs/verify/<環境キー>/<日付>_golden/` — 消して安全）。 */
@@ -191,7 +219,7 @@ for (const model of MODELS) {
             const karume = compareTensors(outputs[name], expected, GOLDEN_TOLERANCE);
             if (karume.pass) return;
             // 1 段目を落ちた出力だけが 2 段目（WGSL 仕様帯）へ来る。受かれば pass + warning。
-            const spec = OUTPUT_TOLERANCE[`${model}/${name}`]?.spec;
+            const spec = specTolerance(model, name);
             if (spec === undefined) {
               failures.push(`${where}: ${formatAllclose(karume)}`);
               return;
