@@ -120,7 +120,7 @@ PLE_ROLES: Mapping[str, str] = {"values": "ple-values", "scales": "ple-scales"}
 PLE_METADATA_KEY = "karume_ple"
 
 #: 旧 PLE 索引の格納 → 1 バイトに詰まる要素数（`packages/models/src/gemma/ple-index.ts` の鏡像）。
-PLE_PACK_FACTOR: Mapping[str, int] = {"i2": 4, "i4": 2}
+PLE_PACK_FACTOR: Mapping[str, int] = {"i8": 1, "i2": 4, "i4": 2}
 
 #: PLE の scale 1 個ぶんのバイト数（f32 — 同上）。
 PLE_SCALE_BYTES = 4
@@ -1218,17 +1218,29 @@ def _plan_ple(repo: Path, model: LegacyModel, where: str) -> _PleFold | None:
 def read_ple_index(path: Path, where: str) -> dict[str, Any]:
     """旧 PLE 索引（`ple.json`）を読む。
 
-    受理集合は `packages/models/src/gemma/ple-index.ts` の鏡像で、容器へ畳めるのは packed 格納の
-    schema 2 だけ（schema 1 の i8 形は実資産に無い）。
+    受理集合は `packages/models/src/gemma/ple-index.ts` の鏡像 — schema 1（I8・`storage` 欄なし。
+    karume-gemma4 の実資産）と schema 2（packed の `i2` / `i4`・ADR 0097）。戻りの `storage` は
+    schema 1 でも `"i8"` に正規化してある（新索引 schema 3 は格納を必ず綴る）。
     """
-    root = _object(_read_json(path, where), where)
+    raw_root = _object(_read_json(path, where), where)
     # MUST: 版の判定を欄の検査より先に置く（{@link read_legacy_manifest} と同じ理由 — 別の版は
     # 「欄が欠けている」ではなく「その版は畳めない」と言うのが直す側にとって決定的）。
+    schema = raw_root.get("schema")
     _require(
-        root.get("schema") == 2,
-        f"{where}.schema が {root.get('schema')!r} — 容器へ畳めるのは packed 格納の schema 2 だけ",
+        schema in (1, 2),
+        f"{where}.schema が {schema!r} — 容器へ畳めるのは schema 1（i8）と 2（packed）だけ",
     )
-    _keys(root, ["schema", "storage", "tokens", "layers", "dim", "embedScale", "shards"], [], where)
+    if schema == 1:
+        _keys(raw_root, ["schema", "tokens", "layers", "dim", "embedScale", "shards"], [], where)
+        root: dict[str, Any] = {**raw_root, "storage": "i8"}
+    else:
+        _keys(
+            raw_root,
+            ["schema", "storage", "tokens", "layers", "dim", "embedScale", "shards"],
+            [],
+            where,
+        )
+        root = dict(raw_root)
     _require(
         root["storage"] in PLE_PACK_FACTOR,
         f"{where}.storage が {root['storage']!r}"
@@ -1424,7 +1436,9 @@ def _assert_ple_metadata(
     except json.JSONDecodeError as cause:
         raise MigrateError(f"{where}: {PLE_METADATA_KEY} が JSON として読めない") from cause
     found = _object(parsed, f"{where}.{PLE_METADATA_KEY}")
-    expected = {key: index[key] for key in ("schema", "storage", "tokens", "layers", "dim")}
+    # schema 1 の shard メタデータは `storage` を持たない（索引側は i8 へ正規化済み）。
+    keys = ("schema", "tokens", "layers", "dim") + (("storage",) if index["schema"] == 2 else ())
+    expected = {key: index[key] for key in keys}
     expected.update({key: declared[key] for key in ("start", "stop")})
     for key, value in expected.items():
         _require(

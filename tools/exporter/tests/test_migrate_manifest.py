@@ -577,10 +577,11 @@ def ple_rows(start: int, stop: int, width: int, seed: int) -> bytes:
     )
 
 
-def ple_common(layers: int = PLE_LAYERS, dim: int = PLE_DIM) -> dict[str, Any]:
+def ple_common(layers: int = PLE_LAYERS, dim: int = PLE_DIM, *, schema: int = 2) -> dict[str, Any]:
+    """旧索引 / shard メタデータの共通欄。schema 1（I8）は `storage` 欄を持たない（実資産の形）。"""
     return {
-        "schema": 2,
-        "storage": "i4",
+        "schema": schema,
+        **({"storage": "i4"} if schema == 2 else {}),
         "tokens": PLE_TOKENS,
         "layers": layers,
         "dim": dim,
@@ -589,13 +590,19 @@ def ple_common(layers: int = PLE_LAYERS, dim: int = PLE_DIM) -> dict[str, Any]:
 
 
 def stage_ple(
-    root: Path, directory: str, *, layers: int = PLE_LAYERS, dim: int = PLE_DIM
+    root: Path,
+    directory: str,
+    *,
+    layers: int = PLE_LAYERS,
+    dim: int = PLE_DIM,
+    schema: int = 2,
 ) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
     """旧 PLE sidecar（索引 + token 範囲 shard）を置き、`(索引の FileRef, assets)` を返す。
 
     `layers` / `dim` を動かせるのは、行バイト数から決まる門（4 の倍数 MUST）を踏むためである。
     """
-    values_row = layers * dim // 2
+    values_row = layers * dim // (2 if schema == 2 else 1)
+    values_dtype = "I4" if schema == 2 else "I8"
     scales_row = layers * 4
     assets: dict[str, dict[str, Any]] = {}
     shards: list[dict[str, Any]] = []
@@ -612,11 +619,15 @@ def stage_ple(
             path,
             container_order(
                 [
-                    ContainerEntry("values", "I4", (rows, layers, dim), rows * values_row),
+                    ContainerEntry("values", values_dtype, (rows, layers, dim), rows * values_row),
                     ContainerEntry("scales", "F32", (rows, layers), rows * scales_row),
                 ]
             ),
-            {"karume_ple": json.dumps({**ple_common(layers, dim), "start": start, "stop": stop})},
+            {
+                "karume_ple": json.dumps(
+                    {**ple_common(layers, dim, schema=schema), "start": start, "stop": stop}
+                )
+            },
             lambda entry, payloads=payloads: [payloads[entry.name]],
         )
         blob = path.read_bytes()
@@ -629,9 +640,10 @@ def stage_ple(
     index = place(
         root,
         f"{directory}/ple.json",
-        (json.dumps({**ple_common(layers, dim), "shards": shards}, indent=2) + "\n").encode(
-            "utf-8"
-        ),
+        (
+            json.dumps({**ple_common(layers, dim, schema=schema), "shards": shards}, indent=2)
+            + "\n"
+        ).encode("utf-8"),
     )
     return index, assets
 
@@ -641,7 +653,9 @@ def gemma_repo(tmp_path: Path) -> Path:
     return stage_gemma_repo(tmp_path / "gem")
 
 
-def stage_gemma_repo(root: Path, *, layers: int = PLE_LAYERS, dim: int = PLE_DIM) -> Path:
+def stage_gemma_repo(
+    root: Path, *, layers: int = PLE_LAYERS, dim: int = PLE_DIM, schema: int = 2
+) -> Path:
     """`gemma4` の PLE を持つリポ（部品 `model` に f32 / f16 の 2 席）。"""
     weights = {
         dtype: {
@@ -651,7 +665,7 @@ def stage_gemma_repo(root: Path, *, layers: int = PLE_LAYERS, dim: int = PLE_DIM
         }
         for dtype in ("f32", "f16")
     }
-    index, ple = stage_ple(root, "e2b/ple", layers=layers, dim=dim)
+    index, ple = stage_ple(root, "e2b/ple", layers=layers, dim=dim, schema=schema)
     tokenizer = place(root, "tokenizer.json", b"{}\n")
     entry = model_entry(
         {"model": weights},
@@ -747,6 +761,22 @@ class TestThePleFold:
         assert index_part not in {
             part_of[block.id] for block in read.model.blocks if block.role != "asset"
         }
+
+    def test_a_schema_1_i8_sidecar_folds_with_storage_i8(self, tmp_path: Path) -> None:
+        # karume-gemma4（非 QAT）の実資産は schema 1（I8・storage 欄なし）。新索引は格納を必ず綴る。
+        repo = stage_gemma_repo(tmp_path / "gem1", schema=1)
+        out = tmp_path / "out"
+        migrated(repo, out)
+        read = opened(out, container_of(out, "e2b", "model", "f32"))
+        index = json.loads(asset_payload(read, "ple_index"))
+
+        assert index["schema"] == 3
+        assert index["storage"] == "i8"
+        assert index["values"]["rowBytes"] == PLE_LAYERS * PLE_DIM
+        joined = b"".join(
+            asset_payload(read, block["asset"]) for block in index["values"]["blocks"]
+        )
+        assert joined == source_rows(repo, "e2b/ple", "values")
 
     def test_the_ple_assets_leave_the_manifest_and_the_files_are_not_copied(
         self, gemma_repo: Path, tmp_path: Path
