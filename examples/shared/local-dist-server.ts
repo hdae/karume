@@ -13,11 +13,11 @@
  *
  * ## なぜ HTTP でも全量読みにしないのか
  *
- * コンポーネントは配布形の時点で **shard 分割**されている（常時分割 — ADR 0081）。全量読み
- * （`local-assets.ts` + `from*Assets`）でも分割形は読めるが、その面は**全 shard を同時に
- * ホスト RAM へ載せる**（3.7GiB の DiT がそのまま常駐する）。取得層を通せば shard 面
- * （グラフ shard → `prepareModel` → 重み shard の逐次流し）がそのまま効いて RAM に載るのは
- * 常に「今の 1 本」だけになる。
+ * 部品は配布形の時点で **part 分割**されている（コンテナ — ADR 0109）。全量読み
+ * （`local-assets.ts` + `from*Assets`）でも分割形は読めるが、その面は**全 part を同時に
+ * ホスト RAM へ載せる**（3.7GiB の DiT がそのまま常駐する）。取得層を通せば取得面
+ * （descriptor → admission → 重みの part を温める → block の区間読み）がそのまま効いて、
+ * RAM に載るのは読んでいる block の周辺だけになる。
  *
  * 喋るのは hub が実際に叩く 2 経路だけ（revision 解決 API と resolve URL — 綴りの正本は
  * `@hdae/fetch-cache/hf` の `resolveHfRevision` / `hfResolveUrl`）。Range も HEAD も要らない
@@ -80,18 +80,20 @@ type ServedRepo = {
 };
 
 /**
- * manifest 全域の `FileRef`（全 model × 全 weights × 全 dtype の shards / extras + assets）。
+ * manifest 全域の `FileRef`（全 model × 全 weights × 全 dtype のコンテナの part + assets）。
  *
- * `resolveFiles` で 1 組の (model, quant) に絞らないのは、サーバが**選択より先に**立つため
+ * `resolveSelection` で 1 組の (model, quant) に絞らないのは、サーバが**選択より先に**立つため
  * （`serveLocalDist` は `dir` しか受け取らず、model / quant は後段の `fromPretrained` が決める）。
  * 表に載せ過ぎても実際に取りに来ない repo が増えるだけで害は無い。
+ *
+ * 長さ 0 の part は落とす（取得層も取りに来ない — ADR 0109 決定 3）。
  */
 const allFileRefs = (manifest: Manifest): readonly FileRef[] => {
   const refs: FileRef[] = [];
   for (const model of Object.values(manifest.models)) {
     for (const entry of Object.values(model.weights)) {
-      for (const files of Object.values(entry)) {
-        refs.push(...files.shards, ...Object.values(files.extras));
+      for (const dtype of Object.values(entry)) {
+        refs.push(...dtype.container.parts.filter((part) => part.size > 0));
       }
     }
     refs.push(...Object.values(model.assets));

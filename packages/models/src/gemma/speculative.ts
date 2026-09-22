@@ -248,7 +248,7 @@ const resolveSharedWeights = (
 };
 
 /**
- * drafter コンテナを「この target と組める MTP head か」で見る門（**重み shard を取る前**）。
+ * drafter コンテナを「この target と組める MTP head か」で見る門（**重みの part を取る前**）。
  *
  * 見るのは 5 つ — ①入力 6 本（順序込み）②出口 3 本 ③全スロットが external で貸し手と同名同形
  * ④共有 initializer が貸し手の initializer へ解決できる ⑤記号は貸し手の容量記号 1 本だけ。

@@ -15,11 +15,20 @@
 
 import { assert, assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import { parseIrGraph } from "../../packages/runtime/src/format/ir.ts";
-import { readIrGraph, resolveAsset } from "../_shared/assets.ts";
+import {
+  distributionFormat,
+  MANIFEST_FORMAT,
+  readIrGraph,
+  resolveAsset,
+} from "../_shared/assets.ts";
 import { buildCensusSummary, censusComponent, summarizeScenario } from "./census.ts";
 import { assertBindingKeys, defaultScenarios, parseScenario } from "../_shared/scenario.ts";
 
-const TARGET = { component: "unit", componentDtype: "i4", graphShard: new URL("file:///none") };
+const TARGET = {
+  component: "unit",
+  componentDtype: "i4",
+  graph: { kind: "shard", url: new URL("file:///none") },
+} as const;
 const IDENTITY = { family: "unit", model: "unit", quant: "i4" };
 
 /**
@@ -261,8 +270,9 @@ Deno.test("census 加重: 格納の集合が同じでもスロット割り当て
   ]);
 });
 
-/** 一時ディレクトリに置く配布形の manifest（資産解決は shard の実体を読まない）。 */
+/** 一時ディレクトリに置く配布形の manifest（資産解決は part の実体を読まない）。 */
 const DIST_MANIFEST = JSON.stringify({
+  format: MANIFEST_FORMAT,
   defaultModel: "m",
   models: {
     m: {
@@ -273,7 +283,22 @@ const DIST_MANIFEST = JSON.stringify({
         // `session` の欄ごと無い quant（配布形の多数派）。
         i8: { weights: { model: "i8" } },
       },
-      weights: { model: { i8: { shards: [{ path: "model/model.i8.safetensors" }] } } },
+      weights: {
+        model: {
+          i8: {
+            container: {
+              descriptor: {
+                graph: { length: 1, sha256: "1".repeat(64) },
+                model: { length: 1, sha256: "2".repeat(64) },
+              },
+              parts: [
+                { path: "model/model.i8-00001-of-00002.krm" },
+                { path: "model/model.i8-00002-of-00002.krm" },
+              ],
+            },
+          },
+        },
+      },
     },
   },
 });
@@ -322,18 +347,13 @@ Deno.test("シナリオ: --scenario の綴りと、実在しない component 名
  * （テストを消して無音で緑にしない — ADR 0005）。
  */
 const GEMMA4_DIR = new URL("../../models/karume-gemma4/", import.meta.url);
-const exists = (url: URL): boolean => {
-  try {
-    return Deno.statSync(url).isFile;
-  } catch (cause) {
-    if (cause instanceof Deno.errors.NotFound) return false;
-    throw cause;
-  }
-};
-const GEMMA4_AVAILABLE = exists(new URL("karume.json", GEMMA4_DIR));
+const GEMMA4_FORMAT = distributionFormat(GEMMA4_DIR);
+const GEMMA4_AVAILABLE = GEMMA4_FORMAT === MANIFEST_FORMAT;
 if (!GEMMA4_AVAILABLE) {
   console.warn(
-    `[karume] ${GEMMA4_DIR.pathname} に karume.json が無いため opbench の実資産 census を SKIP する`,
+    `[karume] ${GEMMA4_DIR.pathname} のミラーが ${
+      GEMMA4_FORMAT ?? "未生成"
+    }（この版が読むのは ${MANIFEST_FORMAT}）なため opbench の実資産 census を SKIP する`,
   );
 }
 
@@ -352,7 +372,7 @@ Deno.test({
     // 読める（実行に貸し手が要るのは opbench run の話で、数える側には効かない）。
     assertEquals(asset.components.map((target) => target.component), ["model", "drafter"]);
     const [target, drafterTarget] = asset.components;
-    const graph = await readIrGraph(target.graphShard);
+    const graph = await readIrGraph(target.graph);
     const [decode] = defaultScenarios("gemma4");
     assertEquals(decode.name, "decode");
     const census = censusComponent(graph, target, asset, decode);
@@ -389,7 +409,7 @@ Deno.test({
     // drafter（4 層 × k=3 段展開）: linear 68 / rms_norm 63 / attention 12（全部 readonly —
     // state_append は 0 本）/ argmax 3。記号は C だけなので既定表の M / R は未使用に数えない。
     const drafterCensus = censusComponent(
-      await readIrGraph(drafterTarget.graphShard),
+      await readIrGraph(drafterTarget.graph),
       drafterTarget,
       asset,
       decode,

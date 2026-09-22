@@ -2,9 +2,9 @@
 //
 // 突合の中身は `assertStaticDim` × 10 / `assertOutputScale` × 1 / `assertOutputDim` × 1 /
 // 記号次元が 1 本 × 1 で、どれも doc に「MUST: 落とさない。…**沈黙誤値**が出る」と書かれた門
-// （shape は合ったまま別の位置の条件を読む形）。`irodori_pipeline_test.ts` は「合成 IR
-// コンテナを組む器が無い」ため意図的にこの層を外しているが、器は
-// `tests/helpers/ir-container.ts` に置いたので、いまは資産なしで踏める。
+// （shape は合ったまま別の位置の条件を読む形）。`irodori_pipeline_test.ts` は「合成の容器を
+// 組む器が無い」ため意図的にこの層を外しているが、器は `tests/helpers/container-fixture.ts`
+// に置いたので、いまは実資産なしで踏める。
 //
 // 観測の仕掛け: 資産は**グラフ 8 本だけ**を渡し、`tokenizer` を入れない。
 //  - 正しい 8 本 → 落ちるのは `資産 'tokenizer' が無い`（= 突合を全部通過して次の段へ進んだ）
@@ -14,7 +14,12 @@
 import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import { parseManifest } from "@karume/hub";
 import { IrodoriPipeline } from "../src/irodori/pipeline.ts";
-import { tensorlessGraphAsset, type TensorlessGraphSpec } from "./helpers/ir-container.ts";
+import {
+  declaredContainer,
+  partAssets,
+  tensorlessContainer,
+  type TensorlessGraphSpec,
+} from "./helpers/container-fixture.ts";
 
 /** `models/karume-irodori-v4-small/karume.json` の `pipelineConfig` 実物（23 欄）。 */
 const CONFIG = {
@@ -108,13 +113,15 @@ const graphSpecs = (): Record<Component, TensorlessGraphSpec> => ({
   },
 });
 
-/** 1 本だけ差し替えたグラフ資産を組む（`tokenizer` は入れない — 観測の仕掛け）。 */
-const assetsWith = (
+/** 1 本だけ差し替えた容器 8 本を組む（`tokenizer` は入れない — 観測の仕掛け）。 */
+const assetsWith = async (
   patch: Partial<Record<Component, TensorlessGraphSpec>> = {},
-): Record<string, Uint8Array<ArrayBuffer>> => {
+): Promise<Record<string, Uint8Array<ArrayBuffer>>> => {
   const specs = { ...graphSpecs(), ...patch };
-  const assets: Record<string, Uint8Array<ArrayBuffer>> = {};
-  for (const name of COMPONENTS) assets[name] = tensorlessGraphAsset(specs[name]);
+  let assets: Record<string, Uint8Array<ArrayBuffer>> = {};
+  for (const name of COMPONENTS) {
+    assets = { ...assets, ...partAssets(name, await tensorlessContainer(name, specs[name])) };
+  }
   return assets;
 };
 
@@ -124,14 +131,11 @@ const manifestText = (): string => {
   let weights: Record<string, unknown> = {};
   let mapping: Record<string, string> = {};
   for (const name of COMPONENTS) {
-    weights = {
-      ...weights,
-      [name]: { f32: { shards: [{ ...FILE, path: `${name}/model.f32` }] } },
-    };
+    weights = { ...weights, [name]: { f32: declaredContainer(`${name}/model.f32`) } };
     mapping = { ...mapping, [name]: "f32" };
   }
   return JSON.stringify({
-    format: "karume/4",
+    format: "karume/5",
     generator: "karume/0.1.0",
     defaultModel: "v4-small",
     models: {
@@ -147,10 +151,12 @@ const manifestText = (): string => {
   });
 };
 
-const build = (patch: Partial<Record<Component, TensorlessGraphSpec>> = {}): Promise<unknown> =>
-  IrodoriPipeline.fromAssets({
+const build = async (
+  patch: Partial<Record<Component, TensorlessGraphSpec>> = {},
+): Promise<unknown> =>
+  await IrodoriPipeline.fromAssets({
     manifest: parseManifest(manifestText()),
-    assets: assetsWith(patch),
+    assets: await assetsWith(patch),
   });
 
 /** グラフ 1 本の入力 1 本の 1 軸だけを壊す。 */
@@ -340,9 +346,11 @@ Deno.test("admitIrodori: dit の記号次元が 1 本でなければ落とす（
     ],
     output: { name: "v", shape: ["B", "S", CONFIG.latentDim] },
   };
+  // 並びが宣言順（`S, B`）でないのは、容器のグラフ記述が**正準形**（記号は符号位置順 —
+  // container-v1 / `canonicalIrDocument`）で焼かれるため。文言はその読み戻しを名乗る。
   await assertRejects(
     () => build({ dit: twoSymbols }),
     Error,
-    "dit の記号次元が 1 本でない（[S, B]）",
+    "dit の記号次元が 1 本でない（[B, S]）",
   );
 });

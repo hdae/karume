@@ -41,25 +41,48 @@ import {
 import { Randn } from "../src/anima/random.ts";
 import { ModelInputError } from "../src/errors.ts";
 import { assertAcceptableSeed } from "../src/request-gates.ts";
+import { declaredContainer, partAssets, tensorlessContainer } from "./helpers/container-fixture.ts";
 
-const FILE = {
-  path: "transformer/model.f16.safetensors",
-  size: 16,
-  sha256: "a".repeat(64),
-};
+/** この系列の weights 部品（`src/anima/pipeline.ts` の `COMPONENT_KEYS` と同じ 4 本）。 */
+const WEIGHT_NAMES = ["text_encoder", "text_conditioner", "transformer", "vae_decoder"] as const;
+
+/**
+ * 開ける容器 4 本（宣言は最小）。anima の admission はグラフ突合を持たないので中身は問わない。
+ * `tokenizer` は入れない: 門を全部通った先で落ちる 1 本として残す。
+ */
+const COMPONENTS: Record<string, Uint8Array<ArrayBuffer>> = {};
+for (const name of WEIGHT_NAMES) {
+  Object.assign(
+    COMPONENTS,
+    partAssets(
+      name,
+      await tensorlessContainer(name, {
+        inputs: [{ name: "x", shape: [1, 4] }],
+        output: { name: "y", shape: [1, 4] },
+      }),
+    ),
+  );
+}
 
 /** `models/karume-anima/karume.json` の骨格（検査に要る欄だけ）。 */
 const manifestText = (patch: Record<string, unknown> = {}): string =>
   JSON.stringify({
-    format: "karume/4",
+    format: "karume/5",
     generator: "karume/0.1.0",
     defaultModel: "anima-turbo",
     models: {
       "anima-turbo": {
         pipeline: "anima/1",
-        weights: { transformer: { f16: { shards: [FILE] } } },
+        weights: Object.fromEntries(
+          WEIGHT_NAMES.map((name) => [name, { f16: declaredContainer(`${name}/model.f16`) }]),
+        ),
         assets: {},
-        quants: { "f16+dit8-a8-attn8-s16": { weights: { transformer: "f16" }, session: {} } },
+        quants: {
+          "f16+dit8-a8-attn8-s16": {
+            weights: Object.fromEntries(WEIGHT_NAMES.map((name) => [name, "f16"])),
+            session: {},
+          },
+        },
         defaultQuant: "f16+dit8-a8-attn8-s16",
         pipelineConfig: {
           scheduler: { shift: 3, numTrainTimesteps: 1000 },
@@ -79,7 +102,7 @@ const emptyAssets = {} as Record<string, Uint8Array<ArrayBuffer>>;
 Deno.test("fromAssets: pipeline の契約名が anima でない manifest を落とす", async () => {
   const manifest = parseManifest(manifestText({ pipeline: "sbv2/1" }));
   await assertRejects(
-    () => AnimaPipeline.fromAssets({ manifest, assets: emptyAssets }),
+    () => AnimaPipeline.fromAssets({ manifest, assets: COMPONENTS }),
     Error,
     "'sbv2/1'",
   );
@@ -90,7 +113,7 @@ Deno.test("fromAssets: 未知 major は fail loudly（検査責務は models 側
   // hub は `pipeline` の major を検査しない（読めるかどうかはパイプライン実装しか知らない）。
   assertEquals(manifest.models["anima-turbo"].pipeline, { name: "anima", major: 2 });
   await assertRejects(
-    () => AnimaPipeline.fromAssets({ manifest, assets: emptyAssets }),
+    () => AnimaPipeline.fromAssets({ manifest, assets: COMPONENTS }),
     Error,
     "major に未対応",
   );
@@ -99,7 +122,7 @@ Deno.test("fromAssets: 未知 major は fail loudly（検査責務は models 側
 Deno.test("fromAssets: pipelineConfig のスキーマ違反は構築時に落ちる", async () => {
   const manifest = parseManifest(manifestText({ pipelineConfig: {} }));
   await assertRejects(
-    () => AnimaPipeline.fromAssets({ manifest, assets: emptyAssets }),
+    () => AnimaPipeline.fromAssets({ manifest, assets: COMPONENTS }),
     Error,
     "pipelineConfig.scheduler: 無い",
   );
@@ -121,7 +144,7 @@ Deno.test("fromAssets: scheduler.type を宣言した manifest も同じ位置�
     }),
   );
   await assertRejects(
-    () => AnimaPipeline.fromAssets({ manifest, assets: emptyAssets }),
+    () => AnimaPipeline.fromAssets({ manifest, assets: COMPONENTS }),
     Error,
     "資産 'tokenizer' が無い",
   );
@@ -136,7 +159,7 @@ Deno.test("fromAssets: scheduler.type の未知値は資産に触る前に落ち
     }),
   );
   await assertRejects(
-    () => AnimaPipeline.fromAssets({ manifest, assets: emptyAssets }),
+    () => AnimaPipeline.fromAssets({ manifest, assets: COMPONENTS }),
     Error,
     "pipelineConfig.scheduler.type: 期待 'euler' / 'dpmpp-2m'",
   );
@@ -145,7 +168,7 @@ Deno.test("fromAssets: scheduler.type の未知値は資産に触る前に落ち
 Deno.test("fromAssets: 存在しない quant は利用可能な一覧を添えて落とす", async () => {
   const manifest = parseManifest(manifestText());
   await assertRejects(
-    () => AnimaPipeline.fromAssets({ manifest, assets: emptyAssets }, { quant: "f16+dit8-a8" }),
+    () => AnimaPipeline.fromAssets({ manifest, assets: COMPONENTS }, { quant: "f16+dit8-a8" }),
     Error,
     "利用可能: f16+dit8-a8-attn8-s16",
   );
@@ -156,7 +179,7 @@ Deno.test("fromAssets: 存在しない model は利用可能な一覧を添え�
   // （ADR 0041 §8）。
   const manifest = parseManifest(manifestText());
   await assertRejects(
-    () => AnimaPipeline.fromAssets({ manifest, assets: emptyAssets }, { model: "anima-xl" }),
+    () => AnimaPipeline.fromAssets({ manifest, assets: COMPONENTS }, { model: "anima-xl" }),
     Error,
     "利用可能: anima-turbo",
   );
@@ -168,9 +191,20 @@ Deno.test("fromAssets: manifest 契約を全て満たして初めて資産へ触
   // GPU の無い環境で `acquireGpu` の失敗に化けたらこの門が赤くなる。
   const manifest = parseManifest(manifestText());
   await assertRejects(
-    () => AnimaPipeline.fromAssets({ manifest, assets: emptyAssets }),
+    () => AnimaPipeline.fromAssets({ manifest, assets: COMPONENTS }),
     Error,
     "資産 'tokenizer' が無い",
+  );
+});
+
+Deno.test("fromAssets: 部品の容器が無ければ 2 形の綴りつきで落ちる（受け口の診断）", async () => {
+  // 容器が揃っていない Record では**部品の不在**で落ちる（manifest の文言では落ちない）=
+  // 上の門が資産の不在に巻き添えられていないことの対偶。
+  const manifest = parseManifest(manifestText());
+  await assertRejects(
+    () => AnimaPipeline.fromAssets({ manifest, assets: emptyAssets }),
+    Error,
+    "部品 'text_encoder' の容器が無い",
   );
 });
 
@@ -183,7 +217,7 @@ Deno.test("fromAssets: 中断済み signal は資産へ触る前に reason そ�
   const reason = new Error("中止ボタン");
   controller.abort(reason);
   const error = await assertRejects(() =>
-    AnimaPipeline.fromAssets({ manifest, assets: emptyAssets }, { signal: controller.signal })
+    AnimaPipeline.fromAssets({ manifest, assets: COMPONENTS }, { signal: controller.signal })
   );
   // 包まない（消費側が `error === controller.signal.reason` で自分の中断を識別できる）。
   assertStrictEquals(error, reason);
@@ -199,7 +233,7 @@ Deno.test("fromAssets: 実行開始後に届いた中断も最初の段境界で
   const reason = new Error("中止ボタン（実行中）");
   setTimeout(() => controller.abort(reason), 0);
   const error = await assertRejects(() =>
-    AnimaPipeline.fromAssets({ manifest, assets: emptyAssets }, { signal: controller.signal })
+    AnimaPipeline.fromAssets({ manifest, assets: COMPONENTS }, { signal: controller.signal })
   );
   assertStrictEquals(error, reason);
 });

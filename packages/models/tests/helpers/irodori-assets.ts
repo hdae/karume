@@ -10,8 +10,8 @@
  * のみ（横断不変条件）で、`fromAssets` はバイト列を受け取るだけの面。
  */
 
-import { parseManifest, resolveFiles } from "@karume/hub";
-import type { Manifest, ModelEntry } from "@karume/hub";
+import { parseManifest, resolveSelection } from "@karume/hub";
+import type { FileRef, Manifest, ModelEntry } from "@karume/hub";
 import { parseSafetensors } from "@karume/runtime";
 
 /** 配布形の置き場（`karume dist --pipeline irodori` の既定の出力先）。 */
@@ -69,21 +69,30 @@ export const modelEntry = (manifest: Manifest): ModelEntry => {
 export const hasQuantSeat = (quant: string): boolean =>
   manifestText !== undefined && Object.hasOwn(modelEntry(readManifest()).quants, quant);
 
-/** 配布形が要求する資産をローカルから読む（`fetchAssets` のローカル版 — 取得層を通さない）。 */
+/**
+ * 配布形が要求する資産をローカルから読む（`fetchAssets` のローカル版 — 取得層を通さない）。
+ *
+ * 部品は容器の part 列を `<部品>[i]` の綴りで並べる（part 0 から添字順・**長さ 0 の part も
+ * 並べる** — 添字が容器の中の id なので、飛ばすと以降が 1 つずつ繰り上がる）。
+ */
 export const loadLocalAssets = async (
   manifest: Manifest,
   quant: string,
 ): Promise<Record<string, Uint8Array<ArrayBuffer>>> => {
-  const files = resolveFiles(manifest, { model: MODEL, quant });
+  const selection = resolveSelection(manifest, { model: MODEL, quant });
   const byPath = new Map<string, Uint8Array<ArrayBuffer>>();
   let assets: Record<string, Uint8Array<ArrayBuffer>> = {};
-  for (const key of Object.keys(files)) {
-    const { path } = files[key];
-    const cached = byPath.get(path);
-    const bytes = cached ?? await Deno.readFile(new URL(path, ASSETS_DIR));
-    if (cached === undefined) byPath.set(path, bytes);
+  const read = async (key: string, ref: FileRef): Promise<void> => {
+    const cached = byPath.get(ref.path);
+    const bytes = cached ?? await Deno.readFile(new URL(ref.path, ASSETS_DIR));
+    if (cached === undefined) byPath.set(ref.path, bytes);
     assets = { ...assets, [key]: bytes };
+  };
+  for (const name of Object.keys(selection.containers)) {
+    const { parts } = selection.containers[name];
+    for (const [index, ref] of parts.entries()) await read(`${name}[${index}]`, ref);
   }
+  for (const name of Object.keys(selection.assets)) await read(name, selection.assets[name]);
   return assets;
 };
 

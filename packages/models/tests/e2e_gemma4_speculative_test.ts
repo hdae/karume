@@ -46,7 +46,6 @@ import {
   acquireGpu,
   type GenerationContext,
   parseSafetensors,
-  prepareModel,
   type SafetensorsFile,
   type Session,
   type SessionDiagnostics,
@@ -55,14 +54,13 @@ import {
 } from "@karume/runtime";
 import { Gemma4Pipeline, type GenerationRunPhase, type GenerationStop } from "../gemma.ts";
 import { parseGemma4PipelineConfig } from "../src/gemma/config.ts";
-import { createGemma4Ple, parseGemma4PleIndex } from "../src/gemma/ple.ts";
+import { createGemma4Ple } from "../src/gemma/ple.ts";
 import { gemma4RopeInputs, type Gemma4RopeSpec } from "../src/gemma/rope.ts";
 import { GEMMA4_DRAFT_STEPS } from "../src/gemma/speculative.ts";
 import type { SamplerSpec } from "../src/generation/sampler.ts";
-import { readShard, resolveShards, streamShards } from "../../runtime/tests/helpers/shard-files.ts";
+import { mirrorAvailable, openGemma4Ple, openMirrorComponent } from "./helpers/gemma-mirror.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { allResidentBytes, allResidentPleBytesOfMirror } from "./helpers/ple-budget.ts";
-import { openPleShardAt } from "./helpers/ple-source.ts";
 
 const MIRROR_DIR = new URL("../../../models/karume-gemma4/", import.meta.url);
 const GOLDEN_ROOT = new URL("../../../outputs/series/gemma4-e2b-drafter/", import.meta.url);
@@ -135,8 +133,17 @@ const exists = (url: URL): boolean => {
 
 const goldenPath = (name: string): URL => new URL(`${GOLDEN_PREFIX}${name}${SUFFIX}`, GOLDEN_ROOT);
 
-const MIRROR_PRESENT = exists(new URL(MANIFEST_FILENAME, MIRROR_DIR)) &&
-  exists(new URL("e2b/drafter/model.i8-00001-of-00002.safetensors", MIRROR_DIR));
+/**
+ * drafter 入りの `karume/5` ミラーか。
+ *
+ * MUST: ファイルの綴りではなく **manifest の宣言**で見る — 容器の part の path は書き手の規約
+ * （`<stem>-NNNNN-of-NNNNN.krm`）で、本数が変われば綴りも動く（ADR 0109 決定 3）。
+ */
+const MIRROR_PRESENT = ((): boolean => {
+  if (!mirrorAvailable(MIRROR_DIR)) return false;
+  const manifest = parseManifest(Deno.readTextFileSync(new URL(MANIFEST_FILENAME, MIRROR_DIR)));
+  return Object.hasOwn(manifest.models[manifest.defaultModel].weights, "drafter");
+})();
 const GOLDENS_PRESENT = CASES.every((name) => exists(goldenPath(name)));
 const AVAILABLE = MIRROR_PRESENT && GOLDENS_PRESENT;
 
@@ -181,9 +188,6 @@ const pipelineConfig = () => {
   const manifest = mirrorManifest();
   return parseGemma4PipelineConfig(manifest.models[manifest.defaultModel].pipelineConfig);
 };
-
-const pleIndex = () =>
-  parseGemma4PleIndex(JSON.parse(Deno.readTextFileSync(new URL("e2b/ple/ple.json", MIRROR_DIR))));
 
 // ---------------------------------------------------------------------------
 // 走行 1 本（sequence を開いて 1 ターン汲み、閉じる）
@@ -292,7 +296,7 @@ Deno.test({
       speculative: { k: GEMMA4_DRAFT_STEPS },
       // 参照経路（runtime の既定）— decode も verify も同じ縮約カーネルを通る席。
       stateAttentionReduce: "sequential",
-      maxResidentPleBytes: allResidentPleBytesOfMirror(MIRROR_DIR),
+      maxResidentPleBytes: await allResidentPleBytesOfMirror(MIRROR_DIR),
     });
     console.log(
       `[e2e] gemma4 投機①: pipeline ロード ${(performance.now() - started).toFixed(0)}ms`,
@@ -482,7 +486,7 @@ Deno.test({
     const started = performance.now();
     const pipeline = await Gemma4Pipeline.fromPretrained(denoDirectory(MIRROR_DIR), {
       speculative: { k: GEMMA4_DRAFT_STEPS },
-      maxResidentPleBytes: allResidentPleBytesOfMirror(MIRROR_DIR),
+      maxResidentPleBytes: await allResidentPleBytesOfMirror(MIRROR_DIR),
       onRunDiagnostics: (diagnostics, phase) => {
         records?.push(recordOf(diagnostics, phase));
       },
@@ -724,14 +728,14 @@ Deno.test({
     const rope: Gemma4RopeSpec = config.rope;
     const golden = await readGoldenCase("short-en");
     const prompt = golden.prompt;
-    const index = pleIndex();
+    const { index, openBlock } = await openGemma4Ple(MIRROR_DIR);
     const ple = createGemma4Ple({
       index,
-      openShard: (file) => openPleShardAt(new URL("e2b/ple/", MIRROR_DIR), file),
+      openBlock,
       vocabSize: VOCAB,
       maxResidentBytes: allResidentBytes(index),
     });
-    const shards = resolveShards(new URL("e2b/model/model.i4.safetensors", MIRROR_DIR));
+    const component = await openMirrorComponent(MIRROR_DIR, "model");
     const gpu = await acquireGpu();
 
     /**
@@ -794,10 +798,9 @@ Deno.test({
       fuseRmsNormAdd = false,
       fuseLinearStaticQuantize = false,
     ): Promise<RowPair> => {
-      const parsed = prepareModel(await readShard(shards[0]));
       // 出口 2 本の順序が契約（出力 0 = logits・出力 1 = 最終 norm 後 hidden）。
-      const logitsName = parsed.graph.outputs[0];
-      const session = await parsed.createSession(gpu, streamShards(shards.slice(1)), {
+      const logitsName = component.graph.outputs[0];
+      const session = await component.createSession(gpu, {
         stateAttentionReduce: reduce,
         linearGemvReduce,
         fuseRmsNormAdd,

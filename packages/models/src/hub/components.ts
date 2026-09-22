@@ -1,361 +1,284 @@
 /**
- * manifest の weights コンポーネントを **2 段境界 + shard 逐次面**へ載せる内部機構
- * （8 家族の `fromPretrained` が共有する 1 本 — ADR 0070 決定 3 / 決定 5）。
+ * manifest の weights 部品を**コンテナ（`krm`）**から Session へ載せる内部機構
+ * （8 系列の `fromPretrained` / `fromAssets` が共有する 1 本 — ADR 0109 決定 2 / 10・ADR 0108 決定 19）。
  *
  * MUST: barrel には出さない。ロード経路の綴りを揃えるための機構で、利用者が触る面ではない。
  *
- * ## なぜ経路を変えるのか
+ * ## 順序（「実行できないモデルの重みは 1 バイトも落とさない」— ADR 0070 決定 5 を継承）
  *
- * 従来のロードは `fetchAssets` でモデル**全量**をホスト RAM に載せてから `openModel` して
- * いた。そのため ①実行できないモデル（非対応 op / 契約違反）でも重みを全部落とすまで分からず
- * ②ホスト RAM のピークがモデル全量だった。ここでは各コンポーネントの**先頭 shard（= グラフ
- * shard）だけ**を先に取って {@link prepareModel} に通し（capability 門と契約検査はこの時点で
- * 落ちる）、続けて家族側の門（{@link FamilyAdmission}）を通し、重み shard は admission を
- * 通った直後にキャッシュへ落としておき、Session を組むその瞬間にキャッシュから 1 本ずつ流す
- * （ホスト RAM に載るのは常に「今の 1 本」だけ）。
+ * 1. 各部品の **part 0（descriptor）だけ**を温めて開く（`openContainer` — 2 文書を manifest の期待値で
+ *    照合し、グラフ × 束縛表の合流で**不足 / 余剰 0** を宣言だけで確かめる）。`prepareContainer` の
+ *    capability 門もここ。
+ * 2. 家族の門（{@link FamilyAdmission}）を通す。手元にあるのは各部品のグラフ宣言と資産の**宣言**
+ *    （名前 → 役割・論理長）。重み block と part を共有しない資産（索引・`rope_base` — 書き手の規約
+ *    container-v1 §4.2）は `asset(name)` でここでも読んでよい（PLE の索引 × 資産の全件突合がそれ）。
+ * 3. 通ったら重みの part（part 1 以降）を永続キャッシュへ落とす（`prefetchAssets` — 進捗・中断・
+ *    4 並列）。Session を組むその瞬間に block が part 順に読まれる（hub の取得面 — ホスト RAM に
+ *    載るのは seek 型の取得元で block の重ね合わせ、scan 型で part 1 本）。
+ * 4. 残りの資産（tokenizer 等 — manifest の `assets`）を全量で取る。
  *
- * MUST: admission を通したら `PreparedModel` は**その場で捨てる**（グラフ shard のバイト列を
- * 握り続けない）。shard 仕様 v2（ADR 0081 決定 1）でグラフ shard はデータ節 0 テンソルに
- * なったので握るコストは MB 級に下がったが、握って得るものも無い — Session はグラフ shard も
- * 含めた列を毎回流し直すので、残すのは `IrGraph`（JSON 由来の純データ）だけ（v2 以前は
- * グラフ shard が実重みを最大 1GiB 含み、anima 4 コンポーネントで 2.4GiB 常駐の実測が
- * この MUST の起点 — ADR 0070 追記 CX-4.2）。
+ * ## 部品差し替え席（{@link LoadContainerOptions.components} — ADR 0108 決定 19）
  *
- * ## 全量面（`from*Assets`）は温存する
+ * 役割 → {@link ComponentSource}（別の `karume/5` リポの同じ役割）で部品を差し替える。admission は
+ * **重みを 1 バイトも取る前**に ①グラフ記述の sha256 が manifest の宣言と一致（グラフ契約が同一の
+ * 部品だけ）②束縛表の不足 / 余剰 0（`openContainer` が descriptor だけで出す）③家族の門、を通す。
+ * 不足も余剰も全件列挙で拒否する（diffusers の `strict=False` は採らない）。
  *
- * 取得済みバイト列から組む入口は {@link wholeComponent} で同じ姿（{@link ModelComponent}）に
- * 畳む。Session の構築は全量面 `createSession` のままなので、失敗の帰属も文言も 1 文字も
- * 変わらない（ADR 0070 受入①の契約 — 全量面は `origin` を名乗らない）。
+ * ## 全量面（`from*Assets`）
  *
- * ただし取得キーが `<役割>[i]` の **shard 分割形**（`resolveFiles` の規約）で届いた役割だけは、全量面でも shard 逐次面へ流す（{@link
- * assetComponentOpener}）— 「`fromPretrained` で読める配布形は `fromAssets` でも読める」が
- * 全量面の契約（X2-101）。バイト列の連結はしない（shard は独立ヘッダの safetensors 1 本ずつで、
- * 連結しても単一コンテナにはならない）。
- *
- * ## 常駐させない資産（{@link LoadShardOptions.eagerAssets}）
- *
- * weights 以外の資産は既定で全量常駐だが、それが成立しない配布形がある（gemma4 の PLE sidecar =
- * 1 本 758MB × 3・ADR 0085 決定 3 の「触った shard だけ遅延ロード」）。`eagerAssets` を渡した
- * 家族は、並べなかった資産を**参照のまま**（{@link ShardComponents.deferred}）受け取り、要る
- * 1 本を {@link readCachedAsset} でキャッシュから読み直す。取得（prefetch）は重み shard と
- * 同じ 1 回に載るので、進捗の総量も DL の順序も変わらない。
+ * 取得済みバイト列から組む入口は {@link assetComponentOpener} で同じ姿（{@link ModelComponent}）に
+ * 畳む。部品キーは**単一形 `krm` のバイト列**（`<役割>`）か**分割形の part 列**（`<役割>[i]` —
+ * part 0 から添字順）。期待値（2 文書の sha256）は無い — 手元のバイト列は呼び手が保証する。
+ * 同期の供給口を返すために**全部品を先に開く**ので、この面では容器を開くのが家族 admission より
+ * 先になる（取得面と順序が逆）— 中断は家族の `fromAssets` 入口で先に見る。
  */
 
 import {
-  createSession,
-  createSessionFromShards,
+  type AssetReader,
+  type ContainerInput,
   type GpuContext,
   type KarumeModel,
-  type ModelShard,
-  openModel,
-  prepareModel,
+  openContainer,
+  type OpenedContainer,
+  prepareContainer,
+  type PreparedModel,
   type Session,
   type SessionOptions,
 } from "@karume/runtime";
 import {
   type AssetProgress,
+  type ContainerRef,
+  type DistributionSource,
   fetchAssets,
   type FileRef,
+  type HubRepoRef,
   type LoadedManifest,
+  loadManifest,
+  openContainerSource,
   prefetchAssets,
-  type ResolvedFiles,
-  streamAssets,
+  type ResolvedSelection,
+  resolveSelection,
   type StreamAssetsOptions,
 } from "@karume/hub";
+import { toManifestSource } from "./repo-ref.ts";
 
 /**
  * グラフ**宣言**を持つもの（`KarumeModel` と {@link ModelComponent} の共通面）。
  *
- * 宣言との突合（入出力の本数・静的次元と `pipelineConfig` の一致）は shard 面でも全量面でも
+ * 宣言との突合（入出力の本数・静的次元と `pipelineConfig` の一致）は取得面でも全量面でも
  * 同じ 1 本で書きたいので、検査 helper はこの面だけを受ける。
  */
 export type GraphOwner = {
   readonly graph: KarumeModel["graph"];
 };
 
-/** コンポーネント 1 本の「実行前の姿」= グラフ宣言 + Session の入口。 */
+/** コンポーネント 1 本の「実行前の姿」= グラフ宣言 + Session の入口 + 容器の資産。 */
 export type ModelComponent = GraphOwner & {
-  /**
-   * Session を 1 本張る。shard 面では**呼ぶたびに** shard 列（先頭のグラフ shard を含む）を
-   * 新しく流す（使い切った列を再利用できないため。全量面は `KarumeModel` からそのまま組む）。
-   */
+  /** Session を 1 本張る。呼ぶたびに block を part 順に読み直す（列は使い回さない）。 */
   readonly createSession: (gpu: GpuContext, options?: SessionOptions) => Promise<Session>;
+  /**
+   * 容器が宣言する資産名 → 役割（container-v1 §2.2 — runtime は役割を解釈しない）。家族が
+   * 「この部品に PLE がある / 無い」を**宣言だけ**で見る口（admission で使える）。
+   */
+  readonly assets: Readonly<Record<string, string>>;
+  /**
+   * 資産 1 本の読み口（未宣言は fail loudly）。開くだけでは 1 バイトも取らない — 区間読みは
+   * `read(offset, length)` のときだけ（PLE の行読み・`rope_base` の全量読みがこれ）。
+   *
+   * 呼ぶたびに新しい読み口を返す。未検証の取得元（全量面の part 列・ローカルディレクトリ）では
+   * 読み口が block を**寿命ぶん保持**する（runtime の `AssetReader`）ので、家族は読み口を 1 回の
+   * 読みより長く握らない（握ると家族側の常駐予算の外でホスト RAM が育つ）。
+   */
+  readonly asset: (name: string) => AssetReader;
 };
 
 /**
- * 取得キー → コンポーネントの供給口。全量面は「手元のバイト列を `openModel`」、shard 面は
- * 「prepare 済みの引き当て」で、パイプライン本体はどちらか知らずに同じ順序で組み立てる。
+ * 役割 → コンポーネントの供給口。全量面は「手元のバイト列を `openContainer`」、取得面は
+ * 「開いて admission 済みの引き当て」で、パイプライン本体はどちらか知らずに同じ順序で組み立てる。
  */
 export type ComponentOpener = (key: string) => ModelComponent;
 
-/** 全量面（取得済み 1 本）のコンポーネント。Session は全量面 `createSession` のまま。 */
-export const wholeComponent = (model: KarumeModel): ModelComponent => ({
-  graph: model.graph,
-  createSession: (gpu, options = {}) => createSession(gpu, model, options),
+/**
+ * 部品差し替えの出所（ADR 0108 決定 19 / ADR 0109 決定 10）— 別の `karume/5` リポの**同じ役割**。
+ * `model` / `quant` は省略時にそのリポの既定。
+ */
+export type ComponentSource = {
+  readonly source: string | HubRepoRef | DistributionSource;
+  readonly model?: string;
+  readonly quant?: string;
+};
+
+/**
+ * 家族側の admission — 「この manifest / このグラフでは、この家族として実行できない」を
+ * **重みの part を 1 バイトも取る前に**落とすための席（ADR 0070 決定 5 を継承）。
+ *
+ * `openContainer` / `prepareContainer`（合流・不足 / 余剰・capability）の直後・重み prefetch の**前**に
+ * 1 度だけ呼ばれ、手元にあるのは各部品の `IrGraph` と資産の宣言（{@link ModelComponent.assets} /
+ * `asset(name).length`）だけ。資産のバイト列はまだ無い（あれを待つと重み prefetch より前という
+ * 位置が保てない）。
+ *
+ * MUST: 家族はここで**自分の門を全部**通し、戻り値（parse 済み config / quant）と**同じ供給口**を
+ * 後段の状態構築へそのまま渡す — 同じ検査を前段と後段に 2 実装持つと、片方だけ更新された瞬間に
+ * 「前は通るが後で落ちる」形へ戻る。
+ */
+export type FamilyAdmission<Admitted> = (open: ComponentOpener) => Admitted | Promise<Admitted>;
+
+/** {@link loadContainerComponents} の戻り。 */
+export type ContainerComponents<Admitted> = {
+  /** weights 部品の供給口（渡した `componentKeys` 以外は fail loudly）。 */
+  readonly open: ComponentOpener;
+  /** manifest の `assets`（tokenizer 等）のバイト列 — 全量で受け取る。 */
+  readonly assets: Record<string, Uint8Array<ArrayBuffer>>;
+  /** 家族 admission（{@link FamilyAdmission}）が確定させた材料。 */
+  readonly admitted: Admitted;
+};
+
+/** {@link loadContainerComponents} の追加オプション（取得層のオプションはそのまま透過する）。 */
+export type LoadContainerOptions = StreamAssetsOptions & {
+  /**
+   * 部品差し替え席（役割 → 出所）。渡した役割は `componentKeys` の部分集合 MUST（未知の役割は
+   * fail loudly — 綴り間違いを黙って「差し替えない」に畳まない）。
+   */
+  readonly components?: Readonly<Record<string, ComponentSource>>;
+};
+
+/** 開いた容器 1 本を {@link ModelComponent} に畳む（取得面 / 全量面が共有する 1 本）。 */
+const containerComponent = (opened: OpenedContainer, prepared: PreparedModel): ModelComponent => ({
+  graph: prepared.graph,
+  createSession: (gpu, options = {}) => prepared.createContainerSession(gpu, options),
+  assets: Object.fromEntries(
+    Object.entries(opened.model?.assets ?? {}).map(([name, asset]) => [name, asset.role]),
+  ),
+  asset: (name) => opened.asset(name),
 });
 
-/** `<役割>[<添字>]` の添字部分（10 進整数のみ）。 */
-const SHARD_INDEX = /^\d+$/;
+/** 開いた部品の表から供給口を作る（開いていない役割は fail loudly）。 */
+const openerOf = (
+  where: string,
+  components: ReadonlyMap<string, ModelComponent>,
+): ComponentOpener =>
+(key) => {
+  const component = components.get(key);
+  if (component === undefined) {
+    throw new Error(
+      `${where}: 部品 '${key}' は開いていない（開いた部品: ${[...components.keys()].join(" / ")}）`,
+    );
+  }
+  return component;
+};
 
-/** `<役割>[<添字>]` の形をした取得キーの総数（連続本数との差が欠番の本数）。 */
+/** `<役割>[<添字>]` の添字部分（10 進整数のみ）。 */
+const PART_INDEX = /^\d+$/;
+
+/** 全量面の部品 1 本の読み方（単一形のキー 1 本 / 分割形の part キー列）。 */
+type ComponentKeyPlan =
+  | { readonly kind: "bytes"; readonly key: string }
+  | { readonly kind: "parts"; readonly keys: readonly string[] };
+
+/** `<役割>[<添字>]` の形をしたキーの総数（連続本数との差が欠番の本数）。 */
 const indexedKeyCount = (keys: readonly string[], componentKey: string): number => {
   const prefix = `${componentKey}[`;
   let count = 0;
   for (const key of keys) {
     if (!key.startsWith(prefix) || !key.endsWith("]")) continue;
-    if (SHARD_INDEX.test(key.slice(prefix.length, -1))) count += 1;
+    if (PART_INDEX.test(key.slice(prefix.length, -1))) count += 1;
   }
   return count;
 };
 
 /**
- * コンポーネント 1 本を「素の 1 本」と「shard 分割形」のどちらで読むか（と、どちらでもない
- * = キーごと無い）。
- */
-type ComponentKeyPlan =
-  | { readonly kind: "whole" }
-  | { readonly kind: "shards"; readonly keys: readonly string[] }
-  | { readonly kind: "absent" };
-
-/**
- * 取得キーの表からコンポーネント 1 本の読み方を決める — **全量面と shard 面が共有する 1 本**。
+ * 全量面の部品 1 本を「単一形 1 本」と「分割形の part 列」のどちらで読むか。
  *
  * MUST: 添字は `[0]` から欠番なく連続していること・素キーと `[i]` を混ぜないこと。どちらも
- * 取得キーの作り方が壊れている印で、黙って読み飛ばすと遠くの層から「重みが足りない」の形で
- * 落ちる（未対応・想定外は fail loudly）。
- *
- * MUST: 判定を 2 面へ複製しない（`Record` と `ResolvedFiles` の器の違いは述語 `has` と
- * キー一覧 `keys` で吸収する）。同じ規則を 2 実装持つと、片方だけ直った瞬間に「`fromPretrained`
- * で読める配布形は `fromAssets` でも読める」（X2-101）が向きを持って破れる。
- *
- * NOTE: 「連続本数と添字つきキーの総数が一致する」ことは、`assets` 側に紛れた `<役割>[n]` を
- * **全部**は排除しない — weights 由来の `[0..n-1]` の直後に続く綴りの資産（`dit[3]`）は連続の
- * 一部として取り込まれる。取得キーの名前空間そのものを分けない限り閉じない穴で、2 面で同じ形。
+ * キーの作り方が壊れている印で、黙って読み飛ばすと遠くの層から「part が足りない」の形で落ちる。
  */
 const planComponentKeys = (
   where: string,
-  has: (key: string) => boolean,
   keys: readonly string[],
   componentKey: string,
 ): ComponentKeyPlan => {
-  const shardKeys: string[] = [];
+  const has = (key: string): boolean => keys.includes(key);
+  const partKeys: string[] = [];
   for (let index = 0; has(`${componentKey}[${index}]`); index += 1) {
-    shardKeys.push(`${componentKey}[${index}]`);
+    partKeys.push(`${componentKey}[${index}]`);
   }
   const indexed = indexedKeyCount(keys, componentKey);
   const available = `（揃っているキー: ${keys.join(" / ")}）`;
   if (has(componentKey)) {
     if (indexed > 0) {
       throw new Error(
-        `${where}: 資産 '${componentKey}' が素のキーと shard 分割キー` +
+        `${where}: 部品 '${componentKey}' が単一形のキーと分割形のキー` +
           `（'${componentKey}[0]' 等）の両方で届いている（どちらか一方 MUST — ` +
           `添字つきのキーは ${indexed} 本）${available}`,
       );
     }
-    return { kind: "whole" };
+    return { kind: "bytes", key: componentKey };
   }
-  // キーごと無い（素も添字つきも 0 本）— 診断は呼び手の面ごとに違う。
-  if (indexed === 0) return { kind: "absent" };
-  if (shardKeys.length === 0) {
+  if (indexed === 0) {
     throw new Error(
-      `${where}: 資産 '${componentKey}' の shard 添字が [0] から始まっていない` +
+      `${where}: 部品 '${componentKey}' の容器が無い` +
+        `（単一形なら '${componentKey}'・分割形なら '${componentKey}[0]' から添字順）${available}`,
+    );
+  }
+  if (partKeys.length === 0) {
+    throw new Error(
+      `${where}: 部品 '${componentKey}' の part 添字が [0] から始まっていない` +
         `（'${componentKey}[0]' が無い / 添字つきのキーは ${indexed} 本）${available}`,
     );
   }
-  if (indexed !== shardKeys.length) {
+  if (indexed !== partKeys.length) {
     throw new Error(
-      `${where}: 資産 '${componentKey}' の shard 添字が [0] から連続していない` +
-        `（連続しているのは ${shardKeys.length} 本 / 添字つきのキーは ${indexed} 本）` +
-        available,
+      `${where}: 部品 '${componentKey}' の part 添字が [0] から連続していない` +
+        `（連続しているのは ${partKeys.length} 本 / 添字つきのキーは ${indexed} 本）${available}`,
     );
   }
-  return { kind: "shards", keys: shardKeys };
+  return { kind: "parts", keys: partKeys };
 };
 
 /**
- * 手元の shard 列を Session 構築のたびに新しい iterator で流す。
+ * 全量面（`from*Assets`）のコンポーネント供給口 — 8 系列が共有する 1 本。
  *
- * MUST: 呼ぶたびに新しい iterator を返す（{@link componentShardStream} と同じ理由 — 使い切った
- * 列を使い回すと 2 本目の Session 構築が空の列を受ける）。バイト列は呼び手の Record が持って
- * いるので、ここは参照を並べ直すだけ（全量面はホスト RAM に全量が載っている面 — shard 面の
- * 「今の 1 本だけ」の性質はここでは得られない）。
+ * `componentKeys` の部品を**先に全部開く**（`openContainer` は非同期なので、同期の
+ * {@link ComponentOpener} を返すには開いてから配るしかない）。`buffer` は家族側の資産アクセサ
+ * （「資産が無い」「bytes が buffer 全体を占めていない」の文言を家族側に残すため、part 1 本ずつも
+ * 同じ門を通す）。
  */
-const assetShardStream = (shards: readonly ModelShard[]): AsyncIterable<ModelShard> => ({
-  [Symbol.asyncIterator]: async function* () {
-    for (const shard of shards) yield shard;
-  },
-});
-
-/**
- * 全量面（`from*Assets`）のコンポーネント供給口 — 8 家族が共有する 1 本。
- *
- * 取得キーの形は `resolveFiles` の規約そのままで、2 形とも受ける:
- *
- * - 素の 1 本（`transformer`）… 従来どおり {@link wholeComponent}（全量面 `createSession`・
- *   失敗は `origin` を名乗らない）。
- * - **shard 分割形**（`transformer[0]` / `transformer[1]` / …）… 宣言順（= 添字順）の shard 列を
- *   そのまま {@link createSessionFromShards} へ流す（`fromPretrained` と同じ逐次面）。バイト列は
- *   連結しない — shard は独立ヘッダの safetensors 1 本ずつで、連結しても単一コンテナにならない。
- *   失敗とフェンスは shard 面の綴り（`shard [n] 'transformer[0]'`）で帰属する（帰属先が複数
- *   あるので名乗るのが正しい）。
- *
- * MUST: 添字は `[0]` から欠番なく連続していること・素キーと `[i]` を混ぜないこと（判定の実体は
- * {@link planComponentKeys} で、shard 面 {@link componentShards} と**同じ 1 本**）。どちらも
- * 取得キーの作り方が壊れている印で、黙って読み飛ばすと遠くの層から「重みが足りない」の形で
- * 落ちる（未対応・想定外は fail loudly）。
- *
- * `buffer` は家族側の資産アクセサ（`assetBuffer`）— 「資産が無い」「bytes が buffer 全体を
- * 占めていない」の文言を家族側に残すため、shard 1 本ずつも同じ門を通す。
- */
-export const assetComponentOpener = (
+export const assetComponentOpener = async (
   where: string,
   assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>,
   buffer: (key: string) => ArrayBuffer,
-): ComponentOpener =>
-(key) => {
-  const plan = planComponentKeys(
-    where,
-    (name) => Object.hasOwn(assets, name),
-    Object.keys(assets),
-    key,
-  );
-  // 素の 1 本（キーごと無い場合も含む — 「資産 X が無い」は家族側が揃っているキーつきで言う）。
-  if (plan.kind !== "shards") return wholeComponent(openModel(buffer(key)));
-  const shards = plan.keys.map((shardKey) => {
-    // 家族の門（bytes が buffer 全体を占めるか）を shard 1 本ずつにも通す。返る buffer は
-    // その view の buffer そのものなので、view を作り直しても写しは 1 バイトも起きない。
-    const bytes = buffer(shardKey);
-    return { id: shardKey, bytes: new Uint8Array(bytes) } satisfies ModelShard;
-  });
-  return {
-    // MUST: `PreparedModel` は握らず `IrGraph` だけ残す（モジュール doc の MUST と同じ規律 —
-    // Session はグラフ shard も含めた列を毎回流し直す）。
-    graph: prepareModel(shards[0]).graph,
-    createSession: (gpu, options = {}) =>
-      createSessionFromShards(gpu, assetShardStream(shards), options),
-  };
-};
-
-/**
- * 家族側の admission — 「この manifest / このグラフでは、この家族として実行できない」を
- * **重み shard を 1 バイトも取る前に**落とすための席（ADR 0070 決定 5 / CG3-1）。
- *
- * グラフ admission（{@link prepareModel}）の直後・`prefetchAssets` の**前**に 1 度だけ呼ばれ、
- * 手元にあるのは各コンポーネントの `IrGraph`（{@link ComponentOpener} 経由）と、家族が閉包で
- * 持ち込む manifest / 構築オプションだけ。extras / assets のバイト列はまだ無い（あれを待つと
- * 重み prefetch より前という位置が保てない）ので、資産を要る検査は後段に残る。
- *
- * MUST: 家族はここで**自分の門を全部**通し、戻り値（parse 済み config / quant / 開いた
- * コンポーネント）を後段の状態構築へそのまま渡す — 同じ検査を前段と後段に 2 実装持つと、
- * 片方だけ更新された瞬間に「前は通るが後で落ちる」形へ戻る。
- *
- * NOTE: この席は将来「admission の前倒しで extras の取得を並行に始める」拡張（DL スロット
- * 改善）が同居する予定の場所でもある。
- */
-export type FamilyAdmission<Admitted> = (open: ComponentOpener) => Admitted | Promise<Admitted>;
-
-/** {@link loadShardComponents} の戻り。 */
-export type ShardComponents<Admitted> = {
-  /** weights コンポーネントの供給口（渡した `componentKeys` 以外は fail loudly）。 */
-  readonly open: ComponentOpener;
-  /** コンポーネント以外の資産（extras / assets）のバイト列 — 従来どおり全量で受け取る。 */
-  readonly assets: Record<string, Uint8Array<ArrayBuffer>>;
-  /**
-   * 常駐させずに**参照だけ**返した資産（{@link LoadShardOptions.eagerAssets} で絞った残り）。
-   *
-   * バイト列は永続キャッシュに落ちている（下の prefetch）ので、家族側は要る 1 本だけを
-   * {@link readCachedAsset} で読み直す。
-   */
-  readonly deferred: ResolvedFiles;
-  /** 家族 admission（{@link FamilyAdmission}）が確定させた材料。 */
-  readonly admitted: Admitted;
-};
-
-/**
- * {@link loadShardComponents} の追加オプション（取得層のオプションはそのまま透過する）。
- */
-export type LoadShardOptions = StreamAssetsOptions & {
-  /**
-   * **全量で受け取る**資産キーの allowlist（省略時は残り全部 = 従来どおり）。
-   *
-   * MUST: 「常駐させない側」ではなく「常駐させる側」を並べる — 資産の一覧は manifest 次第で
-   * 増えるので、除外リストで書くと**新しく増えた資産が黙って全量常駐へ落ちる**。gemma4 の PLE
-   * sidecar は 1 本 758MB × 3 で、全量常駐は ADR 0085 決定 3（触った shard だけ遅延ロード）
-   * そのものを壊す。
-   */
-  readonly eagerAssets?: readonly string[];
-};
-
-/**
- * Session 構築のたびにコンポーネントの shard 列**全部**（先頭 = グラフ shard）を流す列。
- * ロード時に {@link streamAssets}（グラフ shard）と {@link prefetchAssets}（重み shard）で
- * 全 shard を永続キャッシュへ落としてあるので、この列は network に出ずキャッシュから 1 本ずつ
- * 読み直す。列は空になりえない（{@link componentShards} が 0 本を拒否する）。
- */
-const componentShardStream = (
-  loaded: LoadedManifest,
-  refs: readonly FileRef[],
-  options: StreamAssetsOptions,
-): AsyncIterable<ModelShard> => ({
-  // MUST: `streamAssets` の呼び出しは iterator を取る**その時**に置く（生成器を 1 本作って
-  // 使い回すと 2 本目の Session 構築が空の列を受ける）。
-  [Symbol.asyncIterator]: () => streamAssets(loaded, refs, options),
-});
-
-/**
- * コンポーネント 1 本の shard 列（宣言順 — 先頭がグラフ shard・ADR 0071）を取得キーの表から
- * 引く。キーの綴りは `resolveFiles` の規約そのもの（1 shard なら weights 名・複数なら
- * `<weights>[i]`）。
- *
- * MUST: 受理集合は全量面と**同じ 1 本**（{@link planComponentKeys}）から引く。素キーがあれば
- * `[i]` を見ない形だと、混ぜて届いた取得キーが黙って読み飛ばされ、残りが `consumed` に入らず
- * 資産として全量取得される（Session の shard 列からは消える）。
- */
-const componentShards = (
-  where: string,
-  files: ResolvedFiles,
-  key: string,
-  consumed: Set<string>,
-): readonly FileRef[] => {
-  const plan = planComponentKeys(
-    where,
-    (name) => Object.hasOwn(files, name),
-    Object.keys(files),
-    key,
-  );
-  if (plan.kind === "absent") {
-    throw new Error(
-      `${where}: コンポーネント '${key}' のファイルが manifest に無い` +
-        `（取得キー: ${Object.keys(files).join(" / ")}）`,
-    );
+  componentKeys: readonly string[],
+): Promise<ComponentOpener> => {
+  const keys = Object.keys(assets);
+  const components = new Map<string, ModelComponent>();
+  for (const key of componentKeys) {
+    const plan = planComponentKeys(where, keys, key);
+    const input: ContainerInput = plan.kind === "bytes"
+      ? { kind: "bytes", bytes: new Uint8Array(buffer(plan.key)) }
+      : { kind: "parts", parts: plan.keys.map((partKey) => new Uint8Array(buffer(partKey))) };
+    const opened = await openContainer(input);
+    components.set(key, containerComponent(opened, prepareContainer(opened, key)));
   }
-  if (plan.kind === "whole") {
-    consumed.add(key);
-    return [files[key]];
-  }
-  return plan.keys.map((shardKey) => {
-    consumed.add(shardKey);
-    return files[shardKey];
-  });
+  return openerOf(where, components);
 };
 
 /**
  * モデル全体で**1 本**の進捗ストリームにする（MUST — 消費者から見える契約）。
  *
- * 取得が「グラフ shard の逐次面 + 残り資産の全量面 + 重み shard の逐次面」へ割れても、呼び手が
- * 見る `total` は `resolveFiles` の size 合計のままで、`loaded` は全ファイルの受信済み合計。
+ * 取得が「descriptor の温め + 重み part の温め + 資産の全量面」へ割れ、差し替え席では取得元も
+ * 割れるが、呼び手が見る `total` は取る全ファイルの size 合計で、`loaded` は受信済み合計。
  * per-file の欄（`fileLoaded` / `fileTotal`）と `phase` は取得層のものを素通しする。
  *
- * NOTE: 引き当てのキーは `path` 1 本 — 進捗イベントが運ぶ識別子がそれしかないため（越境参照の
+ * NOTE: 引き当てのキーは `path` 1 本 — 進捗イベントが運ぶ識別子がそれしかないため（別リポの
  * 同名 path を区別できないのは公開イベント側の既知の穴 — `docs/backlog.md`）。
  */
 const aggregateProgress = (
-  files: ResolvedFiles,
+  refs: readonly FileRef[],
   onProgress: ((progress: AssetProgress) => void) | undefined,
 ): ((progress: AssetProgress) => void) | undefined => {
   if (onProgress === undefined) return undefined;
   const sizes = new Map<string, number>();
-  for (const key of Object.keys(files)) sizes.set(files[key].path, files[key].size);
+  for (const ref of refs) sizes.set(ref.path, ref.size);
   let total = 0;
   for (const size of sizes.values()) total += size;
   const received = new Map<string, number>();
@@ -367,167 +290,159 @@ const aggregateProgress = (
   };
 };
 
+/** 部品 1 本の出所（差し替え席なら別リポの manifest）。 */
+type Seat = {
+  readonly key: string;
+  readonly loaded: LoadedManifest;
+  readonly container: ContainerRef;
+};
+
+/** 実体を持つ part（長さ 0 の part は取得の対象外 — hub も取らない）。 */
+const nonEmptyParts = (parts: readonly FileRef[]): readonly FileRef[] =>
+  parts.filter((part) => part.size > 0);
+
 /**
- * グラフ shard だけを取って admission（グラフ + 家族）を通し、通った後に重み shard を永続
- * キャッシュへ落とし、残りの資産（extras / assets）を全量で取る。
- *
- * MUST: グラフ shard は**全コンポーネントぶんを 1 回の `streamAssets`** で流す — 家族ごとに
- * 呼び分けると取得層の同時取得が効かず、直列 DL に落ちる。同じ shard を 2 つのコンポーネントが
- * 共有する manifest は逐次面が重複として落とす（現行の配布形には存在しない）。
+ * 席ごとに選んだ FileRef を、manifest（取得元）ごとにまとめて温める。同じ manifest の part は
+ * 1 回の `prefetchAssets` に載せる — 家族ごと・部品ごとに呼び分けると取得層の同時取得が効かず、
+ * 直列 DL に落ちる。
+ */
+const prefetchSeats = async (
+  seats: readonly Seat[],
+  select: (seat: Seat) => readonly FileRef[],
+  options: StreamAssetsOptions,
+): Promise<void> => {
+  const bySource = new Map<LoadedManifest, FileRef[]>();
+  for (const seat of seats) {
+    const refs = bySource.get(seat.loaded) ?? [];
+    refs.push(...select(seat));
+    bySource.set(seat.loaded, refs);
+  }
+  for (const [loaded, refs] of bySource) {
+    if (refs.length > 0) await prefetchAssets(loaded, refs, options);
+  }
+};
+
+/**
+ * 各部品の descriptor（part 0）だけを取って admission（合流 + capability + 家族）を通し、通った後に
+ * 重みの part を永続キャッシュへ落とし、残りの資産（manifest の `assets`）を全量で取る。
  *
  * MUST: `admit`（{@link FamilyAdmission}）は省略できない席にする — 「実行できないモデルの
- * 重みは 1 バイトも落とさない」（決定 5）は runtime の capability 門だけでは満たせず、家族の
- * 門（pipeline 名 / major・`pipelineConfig` の schema・グラフと config の突合・共有 GPU の
+ * 重みは 1 バイトも落とさない」は runtime の capability 門だけでは満たせず、家族の門
+ * （pipeline 名 / major・`pipelineConfig` の schema・グラフと config の突合・共有 GPU の
  * feature）まで前段に揃って初めて文面どおりになる。
  *
- * NOTE: 逐次面は相 1 で渡した ref を全部キャッシュへ落としてから相 2 で 1 本ずつ引き渡すので、
- * 1 本目の admission が走るのは「全コンポーネントのグラフ shard が揃った後」になる。
- * 「実行できないモデルの**重み**を落とさない」という決定 5 の目的は満たす。
+ * MUST: 差し替え席（{@link LoadContainerOptions.components}）の検査（役割の実在・グラフ記述の
+ * 同一性）は descriptor を取る前に済ませる — 別リポの manifest を読むだけで判定できる。
  */
-export const loadShardComponents = async <Admitted>(
+export const loadContainerComponents = async <Admitted>(
   where: string,
   loaded: LoadedManifest,
-  files: ResolvedFiles,
+  selection: ResolvedSelection,
   componentKeys: readonly string[],
   admit: FamilyAdmission<Admitted>,
-  options: LoadShardOptions = {},
-): Promise<ShardComponents<Admitted>> => {
-  const { eagerAssets, ...streamOptions } = options;
-  const aggregated = aggregateProgress(files, streamOptions.onProgress);
+  options: LoadContainerOptions = {},
+): Promise<ContainerComponents<Admitted>> => {
+  const { components: replacements = {}, ...streamOptions } = options;
+  for (const key of Object.keys(replacements)) {
+    if (!componentKeys.includes(key)) {
+      throw new Error(
+        `${where}: components の '${key}' はこの系列の部品ではない` +
+          `（差し替えられる役割: ${componentKeys.join(" / ")}）`,
+      );
+    }
+  }
+
+  // 席（部品ごとの出所）— 差し替えは別リポの manifest を読んで**同じ役割**の容器を引く。
+  const seats: Seat[] = [];
+  for (const key of componentKeys) {
+    const base = selection.containers[key];
+    if (base === undefined) {
+      throw new Error(
+        `${where}: 部品 '${key}' の容器が manifest に無い` +
+          `（選択 ${selection.model} / ${selection.quant} が持つ部品: ${
+            Object.keys(selection.containers).join(" / ")
+          }）`,
+      );
+    }
+    const replacement = replacements[key];
+    if (replacement === undefined) {
+      seats.push({ key, loaded, container: base });
+      continue;
+    }
+    const seatWhere = `${where} components['${key}']`;
+    const { onProgress: _progress, ...manifestOptions } = streamOptions;
+    const other = await loadManifest(
+      toManifestSource(replacement.source, seatWhere),
+      manifestOptions,
+    );
+    const container = resolveSelection(other.manifest, {
+      ...(replacement.model === undefined ? {} : { model: replacement.model }),
+      ...(replacement.quant === undefined ? {} : { quant: replacement.quant }),
+      // 未知の役割名は resolveSelection が `ManifestReferenceError`（利用可能な部品つき）で落とす。
+      weights: [key],
+    }).containers[key];
+    if (container === undefined) {
+      throw new Error(`${seatWhere}: 参照先の manifest に部品 '${key}' の容器が無い`);
+    }
+    // グラフ契約の同一性 — 重みを 1 バイトも取る前に、2 つの manifest の宣言だけで見る。
+    if (container.descriptor.graph.sha256 !== base.descriptor.graph.sha256) {
+      throw new Error(
+        `${seatWhere}: グラフ記述が manifest の宣言と違う（差し替えられるのはグラフ記述の sha256 が` +
+          ` 同一の部品だけ — 宣言 ${base.descriptor.graph.sha256} / 差し替え ${container.descriptor.graph.sha256}）`,
+      );
+    }
+    seats.push({ key, loaded: other, container });
+  }
+
+  const aggregated = aggregateProgress(
+    [
+      ...seats.flatMap((seat) => nonEmptyParts(seat.container.parts)),
+      ...Object.values(selection.assets),
+    ],
+    streamOptions.onProgress,
+  );
   const hubOptions: StreamAssetsOptions = {
     ...streamOptions,
     ...(aggregated === undefined ? {} : { onProgress: aggregated }),
   };
-
-  const consumed = new Set<string>();
-  const shards = componentKeys.map((key) => componentShards(where, files, key, consumed));
-
-  // グラフ shard は宣言順に届く（相 2 は渡した `refs` の順）ので、位置で引き当てる。
-  //
-  // MUST: 取り出すのは `PreparedModel.graph`（`IrGraph` = JSON 由来の純データ）だけで、
-  // `PreparedModel` 自体はこの式を抜けた時点で到達不能にする — 束縛に残すとグラフ shard の
-  // バイト列がパイプラインの寿命いっぱい常駐する（モジュール doc の MUST）。
-  const graphs: GraphOwner["graph"][] = [];
-  for await (const asset of streamAssets(loaded, shards.map(([graph]) => graph), hubOptions)) {
-    // hub の `StreamedAsset` が runtime の `ModelShard` を**構造的に満たす**ことの門
-    // （両パッケージに同時に依存できるのは models だけなので、境界の構造互換はここでしか
-    // 型に固定できない）。構造が割れたらこの代入が赤くなる。
-    const graphShard: ModelShard = asset;
-    graphs.push(prepareModel(graphShard).graph);
-  }
-  if (graphs.length !== componentKeys.length) {
-    // 位置で引き当てるので、本数が合わないまま進むと**別のコンポーネントのグラフ**を配る。
-    throw new Error(
-      `${where}: グラフ shard が ${graphs.length} 本しか届いていない` +
-        `（期待 ${componentKeys.length} 本 — 逐次面の不変条件破れ）`,
-    );
-  }
-
-  // Session 構築時の相 2 は prefetch 済みキャッシュの読み直しなので、**進捗は流さない** —
-  // 流すと `complete` がロード完了の後にもう一度出て、集約 `loaded` が二重計上になる
-  // （「ロードが終わったのに進捗が動く」列になる）。
+  // Session 構築時の読みはキャッシュ済み part の区間読みなので、**進捗は流さない**（流すと
+  // `complete` がロード完了の後にもう一度出て、集約 `loaded` が二重計上になる）。
   //
   // MUST: `signal` も落とす — 呼び手が渡す signal は「このロード 1 回」の寿命を表す値で、
-  // Session 構築面へ持ち越すと `AbortSignal.timeout(120_000)` やアンマウント時の `abort()` が
-  // 「ロードは成功したのに以後の生成が全部落ちる」形になる（相 2 は shard ごとに
-  // `throwIfAborted()` を踏むので、キャッシュ完備でも確実に落ちる）。`headers` / `fetch` /
-  // `caches` / `onCacheError` は「取得の道具」なので寿命いっぱい持つのが正しく、`signal` だけが
-  // 別種の値。ロード**中**の中断は `hubOptions` 側が従来どおり担う。
-  const { onProgress: _loadProgress, signal: _loadSignal, ...sessionStreamOptions } = hubOptions;
+  // 取得面へ持ち越すと `AbortSignal.timeout(120_000)` やアンマウント時の `abort()` が
+  // 「ロードは成功したのに以後の生成が全部落ちる」形になる。`headers` / `fetch` / `caches` /
+  // `onCacheError` は「取得の道具」なので寿命いっぱい持つのが正しく、`signal` だけが別種の値。
+  const { onProgress: _loadProgress, signal: _loadSignal, ...sessionOptions } = hubOptions;
 
+  // 1. descriptor（part 0）だけを温めて開く。合流（不足 / 余剰 0）と capability 門はここで落ちる。
+  await prefetchSeats(seats, (seat) => [seat.container.parts[0]], hubOptions);
   const components = new Map<string, ModelComponent>();
-  componentKeys.forEach((key, index) => {
-    const componentRefs = shards[index];
-    components.set(key, {
-      graph: graphs[index],
-      createSession: (gpu, sessionOptions = {}) =>
-        // MUST: 流すのは shard 列**全部**（先頭のグラフ shard を含む）— admission 済みの
-        // `PreparedModel` を握らない代わりに、構築のたびにグラフ shard から組み直す。
-        createSessionFromShards(
-          gpu,
-          componentShardStream(loaded, componentRefs, sessionStreamOptions),
-          sessionOptions,
-        ),
-    });
-  });
+  for (const seat of seats) {
+    hubOptions.signal?.throwIfAborted();
+    const source = openContainerSource(seat.loaded, seat.container, sessionOptions);
+    const opened = await openContainer({ kind: "source", source }, seat.container.descriptor);
+    // グラフ名 = 役割名（書き手の規約 — ADR 0109 決定 8。無ければ prepareContainer が在るグラフを
+    // 列挙して落とす）。
+    components.set(seat.key, containerComponent(opened, prepareContainer(opened, seat.key)));
+  }
+  const open = openerOf(where, components);
 
-  const open: ComponentOpener = (key) => {
-    const component = components.get(key);
-    if (component === undefined) {
-      throw new Error(
-        `${where}: コンポーネント '${key}' は取得していない` +
-          `（取得済み: ${[...components.keys()].join(" / ")}）`,
-      );
-    }
-    return component;
-  };
-
-  // 家族 admission — グラフ admission の直後・重み prefetch の前（{@link FamilyAdmission}）。
-  // 供給口は下で返すものと**同じ 1 本**を渡す（前段だけ別の開き方をすると、後段が握るのと
-  // 別のコンポーネントを検査したことになる）。
+  // 2. 家族 admission — 合流 / capability の直後・重み prefetch の前。供給口は下で返すものと
+  // **同じ 1 本**を渡す（前段だけ別の開き方をすると、後段が握るのと別の部品を検査したことになる）。
   const admitted = await admit(open);
 
-  // 取得を 2 群へ割る。extras（`<weights>.<extra>`）と assets は IR コンテナとは限らないので
-  // 全量面のままで、`eagerAssets` を渡した家族だけが並べなかった資産を**参照のまま**受け取る
-  // （バイト列は下の prefetch でキャッシュに入る）。
-  let rest: ResolvedFiles = {};
-  let deferred: ResolvedFiles = {};
-  for (const key of Object.keys(files)) {
-    if (consumed.has(key)) continue;
-    if (eagerAssets !== undefined && !eagerAssets.includes(key)) {
-      deferred = { ...deferred, [key]: files[key] };
-      continue;
-    }
-    rest = { ...rest, [key]: files[key] };
-  }
+  // 3. 重みの part を落とす（全部品ぶんを取得元ごとに 1 回で — Session を遅延構築する家族で
+  // 「重みの DL が初回実行まで遅れ、ロード進捗にも現れない」形を無くす）。
+  await prefetchSeats(
+    seats,
+    (seat) => nonEmptyParts(seat.container.parts.slice(1)),
+    hubOptions,
+  );
 
-  // MUST: 重み shard の prefetch は admission **2 つとも**（グラフ = `prepareModel` / 家族 =
-  // 上の `admit`）の後に置く（決定 5 — 実行できないモデルの重みは 1 バイトも落とさない。
-  // 文面が無限定なので、家族の門が後段に残っていると実装がこの MUST より狭くなる — CG3-1）。
-  // ここで全コンポーネントぶんを 1 回で落とすのは、Session を遅延構築する家族で
-  // 「重みの DL が初回実行まで遅れ、ロード進捗にも現れない」形を無くすため
-  // （進捗の `total` は元から全ファイルの合計なので、集約は追加の細工なしで整合する）。
-  // グラフ shard は上の `streamAssets` の相 1 が既にキャッシュへ落としているので、ここで
-  // 落とすのは 2 本目以降だけでよい。**遅延資産も同じ 1 回に載せる** — 常駐させないだけで
-  // 「いつか必ず要るバイト列」なので、後回しにすると生成の途中で無進捗の DL が始まる。
-  const prefetched = [
-    ...shards.flatMap((componentRefs) => componentRefs.slice(1)),
-    ...Object.keys(deferred).map((key) => deferred[key]),
-  ];
-  if (prefetched.length > 0) await prefetchAssets(loaded, prefetched, hubOptions);
+  // 4. 残りの資産（tokenizer 等）は全量面のまま。
+  const assets = Object.keys(selection.assets).length === 0
+    ? {}
+    : await fetchAssets(loaded, selection.assets, hubOptions);
 
-  const assets = Object.keys(rest).length === 0 ? {} : await fetchAssets(loaded, rest, hubOptions);
-
-  return { open, assets, deferred, admitted };
-};
-
-/**
- * 遅延資産 1 本を**永続キャッシュから**読み直す（{@link ShardComponents.deferred} の相方）。
- *
- * `streamAssets` の相 1 は prefetch 済みなのでキャッシュヒットで済み、ホスト RAM に載るのは
- * その 1 本だけ。呼ぶたびに新しい列を作るのは、家族側の LRU が同じ shard を何度でも読み直す
- * ため（使い切った iterator を持ち回さない）。
- *
- * MUST: 返す `ArrayBuffer` は view が buffer 全体を占めていることを確かめてから渡す
- * （取得層の契約 — 崩れていたら `slice` で写さず落とす。1 本 758MB 級の資産で RAM ピークを
- * 倍にしない）。
- */
-export const readCachedAsset = async (
-  where: string,
-  loaded: LoadedManifest,
-  ref: FileRef,
-  options: StreamAssetsOptions = {},
-): Promise<ArrayBuffer> => {
-  for await (const asset of streamAssets(loaded, [ref], options)) {
-    const { bytes } = asset;
-    if (bytes.byteOffset !== 0 || bytes.byteLength !== bytes.buffer.byteLength) {
-      throw new Error(
-        `${where}: 資産 '${ref.path}' の bytes が buffer 全体を占めていない` +
-          `（byteOffset ${bytes.byteOffset} / byteLength ${bytes.byteLength} /` +
-          ` buffer ${bytes.buffer.byteLength}）`,
-      );
-    }
-    return bytes.buffer;
-  }
-  throw new Error(`${where}: 資産 '${ref.path}' が逐次面から 1 本も届かなかった`);
+  return { open, assets, admitted };
 };

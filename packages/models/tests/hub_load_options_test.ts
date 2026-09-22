@@ -8,7 +8,7 @@
 //  ① 定義済みの 6 欄が**同じ参照のまま**写ること（写しの途中で包み直さない）。
 //  ② 未定義の欄は**キーごと**現れないこと — `key: undefined` は「無指定」と別物として
 //     取得層の分岐に効きうる（明示 `undefined` の `fetch` が既定 `globalThis.fetch` を潰す等）。
-//  ③ `onProgress` は写さないこと（進捗は家族側が `loadShardComponents` へ別途載せる）。
+//  ③ `onProgress` は写さないこと（進捗は家族側が `loadContainerComponents` へ別途載せる）。
 //  ④ 型の門 — 8 家族**全て**が `onRetry` を受けること（欠けたら `deno task check` が赤くなる）。
 // 最後に、公開面から見た対として「anima の `fromPretrained` が `onRetry` を `loadManifest` まで
 // 運ぶ」ことを mock fetch の 429 で見る（1 家族で足りる — 運ぶ経路は 8 家族とも同じ 1 本）。
@@ -70,7 +70,7 @@ Deno.test("hubLoadOptions: 未定義の欄はキーごと無い（`key: undefine
 
 Deno.test("hubLoadOptions: onProgress は写さない（進捗は家族側が別途載せる）", () => {
   // manifest 取得に進捗は無く、資産取得の進捗は家族ごとに集約してから
-  // `loadShardComponents` へ渡す。ここで写すと集約前の生の進捗が二重に流れる。
+  // `loadContainerComponents` へ渡す。ここで写すと集約前の生の進捗が二重に流れる。
   const onProgress = (progress: AssetProgress): void => void progress;
   const hubOptions: Record<string, unknown> = hubLoadOptions({ onProgress, onRetry: noopRetry });
   assertEquals(Object.hasOwn(hubOptions, "onProgress"), false, "onProgress が写っている");
@@ -101,23 +101,37 @@ const REPO = "someone/karume-anima";
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 const MANIFEST_URL = `${HUB_URL}/${REPO}/resolve/${SHA}/karume.json`;
 
-/** 取得キー 1 本ぶんの dtype エントリ（実体は 1 度も届かないので sha256 は綴りだけ合わせる）。 */
-const weightEntry = (path: string) => ({
-  f16: { shards: [{ path, size: 42, sha256: "a".repeat(64) }] },
+/**
+ * 部品 1 本ぶんの dtype エントリ（実体は 1 度も届かないので sha256 は綴りだけ合わせる）。
+ * part 0 の size は「ヘッダ 24 + 2 文書」と一致させる（manifest の門 — container-v1 §8）。
+ */
+const weightEntry = (stem: string) => ({
+  f16: {
+    container: {
+      descriptor: {
+        graph: { length: 10, sha256: "b".repeat(64) },
+        model: { length: 8, sha256: "c".repeat(64) },
+      },
+      parts: [
+        { path: `${stem}-00001-of-00002.krm`, size: 42, sha256: "a".repeat(64) },
+        { path: `${stem}-00002-of-00002.krm`, size: 64, sha256: "d".repeat(64) },
+      ],
+    },
+  },
 });
 
 const MANIFEST = {
-  format: "karume/4",
+  format: "karume/5",
   generator: "karume/0.11.0",
   defaultModel: "anima",
   models: {
     anima: {
       pipeline: "anima/1",
       weights: {
-        text_encoder: weightEntry("text_encoder/model.safetensors"),
-        text_conditioner: weightEntry("text_conditioner/model.safetensors"),
-        transformer: weightEntry("transformer/model.safetensors"),
-        vae_decoder: weightEntry("vae_decoder/model.safetensors"),
+        text_encoder: weightEntry("text_encoder/model.f16"),
+        text_conditioner: weightEntry("text_conditioner/model.f16"),
+        transformer: weightEntry("transformer/model.f16"),
+        vae_decoder: weightEntry("vae_decoder/model.f16"),
       },
       quants: {
         f16: {
@@ -172,7 +186,7 @@ const createRateLimitedManifestFetch = (): { fetch: typeof globalThis.fetch; cal
 Deno.test("AnimaPipeline.fromPretrained: onRetry が loadManifest まで届く（429 で 1 回）", async () => {
   const { fetch, calls } = createRateLimitedManifestFetch();
   const retries: RetryDiagnostic[] = [];
-  // manifest の後（グラフ shard）は 404 なので落ちる。ここで見たいのは「家族の
+  // manifest の後（容器の part 0）は 404 なので落ちる。ここで見たいのは「家族の
   // `fromPretrained` が `onRetry` を取得層まで運ぶ」ことだけ。
   await assertRejects(() =>
     AnimaPipeline.fromPretrained({ repo: REPO, revision: SHA, hubUrl: HUB_URL }, {
@@ -188,7 +202,7 @@ Deno.test("AnimaPipeline.fromPretrained: onRetry が loadManifest まで届く�
   // 429 の後に取り直していること（= 通知だけ出して諦めた形でない）。
   assertEquals(calls.filter((url) => url === MANIFEST_URL).length, 2);
   assert(
-    calls.some((url) => url.endsWith("/text_encoder/model.safetensors")),
-    "manifest を読めていない（グラフ shard の取得まで進んでいない）",
+    calls.some((url) => url.endsWith("/text_encoder/model.f16-00001-of-00002.krm")),
+    "manifest を読めていない（descriptor の取得まで進んでいない）",
   );
 });

@@ -7,7 +7,7 @@
  *
  * ホスト経路（`./ple.ts`）は run ごとに `per_layer_inputs[1,M,layers,dim]` を**ホストで逆量子化
  * して writeBuffer** する。decode の 1 token でも 35,840 B の転送と行 1 本の逆量子化が要り、
- * prefill の 768 行では 27.5MB の転送になる。この席はその 2 つを消す — sidecar の量子化バイト列
+ * prefill の 768 行では 27.5MB の転送になる。この席はその 2 つを消す — PLE の量子化バイト列
  * を**ロード時に 1 度だけ** GPU へ上げ、run では token id だけを渡して GPU 内で引く。
  *
  * ## 機構（`./greedy-output.ts` と同じ手筋）
@@ -20,7 +20,7 @@
  * ## MUST: ホスト経路とビット一致する（ADR 0085 決定 4）
  *
  * 重みは `[tokens×layers, dim]`・添字は `id×layers + layer` の形で持つ。この形なら
- * **1 行 = 1 層ぶんの dim 要素**になり、格納 dtype に依らず sidecar の `scales[rows, layers]` が
+ * **1 行 = 1 層ぶんの dim 要素**になり、格納 dtype に依らず `scales` の `[tokens, layers]` が
  * そのまま行ごとの scale の並びになる（i8 / i2 は行 scale・i4 は `group_size = dim` の group
  * scale で、どちらも平坦添字は `id×layers + layer`）。逆量子化は `embedding` が
  * `f32(q) × scale` を 1 回の f32 乗算で行い、`embed_scale` はその**後**に別ノードで掛かる —
@@ -32,48 +32,45 @@
  * / `maxBufferSize`）に収まらない配布形はこの席を使えない** — 黙ってホスト経路へ退避せず、
  * 何バイト足りないかを添えて fail loudly にする。
  *
- * ## ロード（shard ごとに writeBuffer — ADR 0085 決定 2）
+ * ## ロード（block ごとに writeBuffer — ADR 0085 決定 2 / ADR 0109 決定 4）
  *
- * ホストで 1 本の巨大 ArrayBuffer に連結しない。sidecar の shard を 1 本ずつ読み、**ランタイムの
- * shard 逐次面**（ADR 0070 決定 3 / 0090 の piece）へ流す — ランタイムは piece を親 1 本ぶんの
- * GPU バッファへ行オフセット位置に `queue.writeBuffer` し、shard ごとにフェンスを 1 本立てて
- * 参照を手放す。器（合成 shard の buffer）は 1 本を使い回すので、ホスト RAM のピークは
- * 「最大 shard 1 本 + 器 1 本」に収まる。
+ * ホストで 1 本の巨大 ArrayBuffer に連結しない。索引が指す `values` の block を 1 本ずつ読み、
+ * **ランタイムの shard 逐次面**（ADR 0070 決定 3 / 0090 の piece）へ流す — ランタイムは piece を
+ * 親 1 本ぶんの GPU バッファへ行オフセット位置に `queue.writeBuffer` し、shard ごとにフェンスを
+ * 1 本立てて参照を手放す。器（合成 shard の buffer）は 1 本を使い回すので、ホスト RAM のピークは
+ * 「最大 block 1 本 + 器 1 本」に収まる。
  *
  * companion scale は piece 1 と同じ shard に置く契約（ADR 0090 決定 1）なので、**scale だけは
- * 先に全量を集める**（区間読みできる読み口なら shard あたり数 MB の 2 読みで済み、持たない
- * 読み口では shard を 1 度余分に読む）。
+ * 先に全量を集める**（`scales` の block は 1 行 140 B なので本数が少ない）。
+ *
+ * MUST: **読み口を 1 回の読みより長く持たない**（`./ple.ts` と同じ MUST）。検証済みでない
+ * 取得元の `AssetReader` は block を読み口の寿命ぶん保持するので、掴み続けると「1 本ずつ流す」
+ * 形がホスト RAM の上では成立しなくなる。
  *
  * MUST: 全モジュール副作用ゼロ（この関数群を呼ぶまで何も起きない）。
  */
 
 import {
+  type AssetReader,
   type BatchScope,
   type GpuContext,
   type ModelShard,
-  parseSafetensors,
-  parseSafetensorsHeader,
   type PreparedModel,
   prepareModel,
   type ResidentTensor,
   type RunInput,
   type RunInputs,
   type Session,
-  type TensorView,
 } from "@karume/runtime";
 import { disposeSteps } from "../session/dispose-steps.ts";
+import { readAssetRange } from "../hub/asset-readers.ts";
 import {
+  type Gemma4PleBlock,
+  gemma4PleBlockBytes,
   type Gemma4PleIndex,
-  type Gemma4PleShard,
-  HEADER_LENGTH_BYTES,
+  type Gemma4PleTable,
   packFactor,
-  SCALE_BYTES,
 } from "./ple-index.ts";
-import {
-  type Gemma4PleShardSource,
-  gemma4PleShardViews,
-  readGemma4PleHeaderPrefix,
-} from "./ple-shard.ts";
 
 /** PLE をどこに置くか（{@link Gemma4PipelineOptions.pleResidency} の値域）。 */
 export type Gemma4PleResidency = "host" | "gpu";
@@ -117,12 +114,12 @@ const ROW_SYMBOL = "M";
  */
 const HEADER_BYTES = 512;
 
+/** safetensors 先頭のヘッダ長欄（u64 LE）— 合成 shard を**書く**側が要る唯一のヘッダ定数。 */
+const HEADER_LENGTH_BYTES = 8;
+
 /** 格納 dtype → safetensors の綴り（合成コンテナが書く側）。 */
 const storageDtype = (index: Gemma4PleIndex): "I8" | "I4" | "I2" =>
   index.storage === "i2" ? "I2" : index.storage === "i4" ? "I4" : "I8";
-
-/** 格納 dtype → IR の綴り。 */
-const irStorage = (index: Gemma4PleIndex): "i8" | "i4" | "i2" => index.storage ?? "i8";
 
 /**
  * GPU 常駐に要るバイト数（**索引だけで決まる** — バイト列を読む前に分かる）。
@@ -133,8 +130,8 @@ const irStorage = (index: Gemma4PleIndex): "i8" | "i4" | "i2" => index.storage ?
 export const gemma4PleGpuBytes = (
   index: Gemma4PleIndex,
 ): { readonly values: number; readonly scales: number; readonly total: number } => {
-  const values = index.tokens * index.layers * index.dim / packFactor(index);
-  const scales = index.tokens * index.layers * SCALE_BYTES;
+  const values = index.tokens * index.values.rowBytes;
+  const scales = index.tokens * index.scales.rowBytes;
   return { values, scales, total: values + scales };
 };
 
@@ -151,7 +148,7 @@ export const gemma4PleGpuBytes = (
  */
 export const gemma4PleGatherGraph = (index: Gemma4PleIndex): Record<string, unknown> => {
   const rows = index.tokens * index.layers;
-  const storage = irStorage(index);
+  const storage = index.storage;
   return {
     format: "karume-ir",
     version: 1,
@@ -253,81 +250,38 @@ const writeSafetensors = (
 const pieceKey = (position: number, count: number): string =>
   `${WEIGHT_TENSOR}#${String(position).padStart(5, "0")}-of-${String(count).padStart(5, "0")}`;
 
-/** sidecar shard 1 本の読み口と、その中の `values` / `scales` の位置。 */
-type ShardHead = {
-  readonly source: Gemma4PleShardSource;
-  readonly values: TensorView;
-  readonly scales: TensorView;
-};
-
 /** 合成 shard 1 本が運ぶ piece の出どころ。 */
 type PiecePlan = {
-  readonly shard: number;
-  /** その shard の `values` 先頭から飛ばす行数（piece 1 を graph shard へ出した先頭だけ 1）。 */
+  /** 出どころの `values` block（索引の並び順）。 */
+  readonly block: Gemma4PleBlock;
+  /** その block の先頭から飛ばす行数（piece 1 を graph shard へ出した先頭だけ 1）。 */
   readonly skipRows: number;
   readonly rows: number;
 };
 
 /**
- * sidecar shard 1 本のヘッダを解き、`scales`（と先頭 shard だけ 1 行ぶんの `values`）を読む。
- *
- * 区間読みを持つ読み口では数 MB の 2〜3 読みで済む。持たない読み口では全量を 1 度読む
- * （この席のロードだけが払う費用 — 値も token 列も変わらない）。
+ * block 1 本の区間を読む（読み口は**この読み 1 回ぶん**だけ生かす — モジュール doc の MUST）。
  */
-const readShardHead = async (
-  index: Gemma4PleIndex,
-  shard: Gemma4PleShard,
-  source: Gemma4PleShardSource,
-  rowBytes: number,
-  wantFirstRow: boolean,
-): Promise<{
-  readonly head: ShardHead;
-  readonly scales: Uint8Array<ArrayBuffer>;
-  readonly firstRow?: Uint8Array<ArrayBuffer>;
-}> => {
-  const { range } = source;
-  if (range === undefined) {
-    const buffer = await source.readAll();
-    const file = parseSafetensors(buffer);
-    const { values, scales } = gemma4PleShardViews(file, index, shard);
-    return {
-      head: { source, values, scales },
-      // 全量 buffer はこの後捨てるので写す（sidecar 1 本 250MiB 級を掴み続けない）。
-      scales: new Uint8Array(
-        buffer.slice(scales.byteOffset, scales.byteOffset + scales.byteLength),
-      ),
-      ...(wantFirstRow
-        ? {
-          firstRow: new Uint8Array(
-            buffer.slice(values.byteOffset, values.byteOffset + rowBytes),
-          ),
-        }
-        : {}),
-    };
-  }
-  const prefix = await readGemma4PleHeaderPrefix(range, source.bytes, shard.file);
-  const header = parseSafetensorsHeader(prefix, source.bytes);
-  const { values, scales } = gemma4PleShardViews(header, index, shard);
-  const scaleBytes = new Uint8Array(await range.read(scales.byteOffset, scales.byteLength));
-  return {
-    head: { source, values, scales },
-    scales: scaleBytes,
-    ...(wantFirstRow
-      ? { firstRow: new Uint8Array(await range.read(values.byteOffset, rowBytes)) }
-      : {}),
-  };
-};
-
-/** piece 1 本ぶんの量子化バイト列を読む（区間読みがあればその区間だけ）。 */
-const readPiece = async (
-  head: ShardHead,
+const readBlockRange = async (
+  openBlock: (asset: string) => AssetReader,
+  block: Gemma4PleBlock,
   offset: number,
   length: number,
+): Promise<Uint8Array<ArrayBuffer>> =>
+  new Uint8Array(await readAssetRange(openBlock(block.asset), offset, length));
+
+/** `scales` の block を索引の順に読んで、1 本の行列へ並べ直す（companion scale の全量）。 */
+const readScaleTable = async (
+  table: Gemma4PleTable,
+  openBlock: (asset: string) => AssetReader,
+  total: number,
 ): Promise<Uint8Array<ArrayBuffer>> => {
-  const { range } = head.source;
-  if (range !== undefined) return new Uint8Array(await range.read(offset, length));
-  const buffer = await head.source.readAll();
-  return new Uint8Array(buffer, offset, length);
+  const bytes = new Uint8Array(new ArrayBuffer(total));
+  for (const block of table.blocks) {
+    const payload = await readBlockRange(openBlock, block, 0, gemma4PleBlockBytes(table, block));
+    bytes.set(payload, block.start * table.rowBytes);
+  }
+  return bytes;
 };
 
 /**
@@ -357,7 +311,8 @@ export type Gemma4PleResident = {
 export type Gemma4PleResidentOptions = {
   readonly gpu: GpuContext;
   readonly index: Gemma4PleIndex;
-  readonly openShard: (file: string) => Promise<Gemma4PleShardSource>;
+  /** 索引が指す block 1 本の読み口を開く（`open(MODEL).asset` そのもの）。 */
+  readonly openBlock: (asset: string) => AssetReader;
   /** 主 embedding の vocab 行数（id 空間の相互照合 — ADR 0085 決定 5）。 */
   readonly vocabSize: number;
   /** target が受け取るグラフ入力の名前。 */
@@ -381,52 +336,44 @@ export type Gemma4PleGatherShards = {
 };
 
 /**
- * sidecar から合成コンテナを組む（**GPU を 1 度も触らない**）。
+ * 索引の指す block から合成コンテナを組む（**GPU を 1 度も触らない**）。
  *
- * 段は 2 つ: ①全 shard の `scales`（と先頭 1 行）を集めて graph shard を作る ②sidecar の shard を
- * 1 本ずつ読み、piece 1 本ぶんの合成 shard として器へ書いて流す。piece 1 を先頭 1 行に切って
- * graph shard へ同居させてあるのは、companion scale の co-shard 契約（ADR 0090 決定 1）を
- * 満たしつつ graph shard を小さく保つためである（`PreparedModel` が Session 構築まで掴む）。
+ * 段は 2 つ: ①`scales` の block 全部（と `values` の先頭 1 行）を集めて graph shard を作る
+ * ②`values` の block を 1 本ずつ読み、piece 1 本ぶんの合成 shard として器へ書いて流す。piece 1 を
+ * 先頭 1 行に切って graph shard へ同居させてあるのは、companion scale の co-shard 契約
+ * （ADR 0090 決定 1）を満たしつつ graph shard を小さく保つためである（`PreparedModel` が
+ * Session 構築まで掴む）。
  *
  * NOTE: `export` は合成の突合を GPU 無しで縛るため（`mod.ts` / サブパス面には出さない）。
  */
 export const buildGemma4PleGatherShards = async (
   index: Gemma4PleIndex,
-  openShard: (file: string) => Promise<Gemma4PleShardSource>,
+  openBlock: (asset: string) => AssetReader,
   entry: string,
 ): Promise<Gemma4PleGatherShards> => {
   const factor = packFactor(index);
   const rowBytes = index.dim / factor;
   if (!Number.isSafeInteger(rowBytes) || rowBytes % 4 !== 0) {
     throw new Error(
-      `${entry}: PLE の 1 層ぶん ${index.dim} 要素（格納 ${irStorage(index)}）が` +
+      `${entry}: PLE の 1 層ぶん ${index.dim} 要素（格納 ${index.storage}）が` +
         ` ${rowBytes} バイトで 4 整列しない（合成コンテナの piece が組めない）`,
     );
   }
   const bytes = gemma4PleGpuBytes(index);
   // ── scale は piece 1 と同じ shard に置く契約（ADR 0090 決定 1）なので先に全量を集める。
-  const scaleBytes = new Uint8Array(new ArrayBuffer(bytes.scales));
-  const heads: ShardHead[] = [];
-  let firstRow: Uint8Array<ArrayBuffer> | undefined;
-  for (const [position, shard] of index.shards.entries()) {
-    const source = await openShard(shard.file);
-    const read = await readShardHead(index, shard, source, rowBytes, position === 0);
-    scaleBytes.set(read.scales, shard.start * index.layers * SCALE_BYTES);
-    if (read.firstRow !== undefined) firstRow = read.firstRow;
-    heads.push(read.head);
-  }
-  if (firstRow === undefined) throw new Error(`${entry}: PLE sidecar の先頭 shard が無い`);
+  const scaleBytes = await readScaleTable(index.scales, openBlock, bytes.scales);
+  const firstRow = await readBlockRange(openBlock, index.values.blocks[0], 0, rowBytes);
 
-  // ── piece の割り付け（piece 1 = 先頭 1 行で graph shard に同居・残りは sidecar shard 順）。
+  // ── piece の割り付け（piece 1 = 先頭 1 行で graph shard に同居・残りは values の block 順）。
   const plans: PiecePlan[] = [];
-  for (const [position, shard] of index.shards.entries()) {
+  for (const [position, block] of index.values.blocks.entries()) {
     const skipRows = position === 0 ? 1 : 0;
-    const rows = (shard.stop - shard.start) * index.layers - skipRows;
-    if (rows > 0) plans.push({ shard: position, skipRows, rows });
+    const rows = (block.stop - block.start) * index.layers - skipRows;
+    if (rows > 0) plans.push({ block, skipRows, rows });
   }
   const pieceCount = plans.length + 1;
   if (pieceCount < 2) {
-    throw new Error(`${entry}: PLE sidecar の行数 ${index.tokens * index.layers} が 2 行未満`);
+    throw new Error(`${entry}: PLE の行数 ${index.tokens * index.layers} が 2 行未満`);
   }
 
   const graphShard: ModelShard = {
@@ -465,14 +412,14 @@ export const buildGemma4PleGatherShards = async (
   );
   const weightShards = async function* (): AsyncGenerator<ModelShard, void, unknown> {
     for (const [position, plan] of plans.entries()) {
-      const head = heads[plan.shard];
-      const payload = await readPiece(
-        head,
-        head.values.byteOffset + plan.skipRows * rowBytes,
+      const payload = await readBlockRange(
+        openBlock,
+        plan.block,
+        plan.skipRows * rowBytes,
         plan.rows * rowBytes,
       );
       yield {
-        id: index.shards[plan.shard].file,
+        id: plan.block.asset,
         bytes: writeSafetensors(undefined, [{
           name: pieceKey(position + 2, pieceCount),
           dtype: storageDtype(index),
@@ -536,7 +483,7 @@ export const createGemma4PleResident = async (
   assertBindingLimits(options, bytes.values);
   const { graphShard, weightShards } = await buildGemma4PleGatherShards(
     index,
-    options.openShard,
+    options.openBlock,
     entry,
   );
 

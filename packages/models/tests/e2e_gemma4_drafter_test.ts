@@ -7,9 +7,10 @@
 // 配布形の pipeline がその drafter を**既定で**使うことまでである:
 //
 // ① 配布形（GPU 不要）… manifest の weights に `drafter` が居て、既定 quant が両方の役割を指す。
-//    `ResolveOptions.weights` の絞り込みが効き、**投機を使わないロードで drafter の shard が
-//    遅延資産へ落ちない**（落ちると `assertPleShardAssets` が「遅延資産 = PLE shard ちょうど」の
-//    門で落ち、投機と無関係のロードまで壊れる — この検出器だけが GPU 無しで踏める）
+//    `ResolveOptions.weights` の絞り込みが効き、**投機を使わないロードで drafter の容器が
+//    選択に残らない**（残ると descriptor も重みの part も落ちる）。併せて PLE の索引が
+//    `model` 容器の資産と全件で整合する（ADR 0109 決定 4 — 旧「遅延資産 = PLE shard ちょうど」の
+//    突合の後継で、この 2 本だけが GPU 無しで踏める）
 // ② コンテナの形（GPU 不要）… 入力 6 本（順序込み）/ 出口 3 本 / external スロット 4 本が
 //    target と同名同形 / 共有 initializer 1 本が target の initializer へ解決できる
 // ③ **draft の一致**（実 GPU）… 3 ケース × 200 サイクル × 3 段 = 1,800 本の draft token が、
@@ -34,26 +35,25 @@ import {
   MANIFEST_FILENAME,
   ManifestReferenceError,
   parseManifest,
-  type ResolvedFiles,
-  resolveFiles,
+  type ResolvedSelection,
+  resolveSelection,
 } from "@karume/hub";
 import {
   acquireGpu,
   ExecutionError,
   type GenerationContext,
   parseSafetensors,
-  prepareModel,
   type SafetensorsFile,
   type Session,
   type Tensor,
 } from "@karume/runtime";
 import { denoDirectory } from "@karume/hub/deno";
-import { assertPleShardAssets, GEMMA4_STATE_ATTENTION_REDUCE } from "../src/gemma/pipeline.ts";
+import { GEMMA4_STATE_ATTENTION_REDUCE } from "../src/gemma/pipeline.ts";
 import type { Gemma4Assets } from "../src/gemma/pipeline.ts";
 // MUST: 入口は**公開面**から取る（`src/...` を直に掴むと、面が痩せていても門が緑のままになる）。
 import { type Gemma4ChatMessage, Gemma4Pipeline } from "../gemma.ts";
 import { parseGemma4PipelineConfig } from "../src/gemma/config.ts";
-import { createGemma4Ple, type Gemma4Ple, parseGemma4PleIndex } from "../src/gemma/ple.ts";
+import { createGemma4Ple, type Gemma4Ple } from "../src/gemma/ple.ts";
 import { gemma4RopeInputNames, gemma4RopeInputs, type Gemma4RopeSpec } from "../src/gemma/rope.ts";
 import {
   admitGemma4Drafter,
@@ -63,10 +63,9 @@ import {
   openDrafterContext,
 } from "../src/gemma/speculative.ts";
 import { planPrefillChunks } from "../src/generation/greedy.ts";
-import { readShard, resolveShards, streamShards } from "../../runtime/tests/helpers/shard-files.ts";
+import { mirrorAvailable, openGemma4Ple, openMirrorComponent } from "./helpers/gemma-mirror.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { allResidentBytes, allResidentPleBytesOfMirror } from "./helpers/ple-budget.ts";
-import { openPleShardAt } from "./helpers/ple-source.ts";
 
 const MIRROR_DIR = new URL("../../../models/karume-gemma4/", import.meta.url);
 const GOLDEN_ROOT = new URL("../../../outputs/series/gemma4-e2b-drafter/", import.meta.url);
@@ -78,14 +77,6 @@ const ASSEMBLE_COMMAND = "cd tools/export-recipes && uv run python dist.py --pip
 /** 配布形の役割名（`Gemma4Pipeline` の同名定数と同じ綴り — 焼く側は `distribution.py`）。 */
 const MODEL = "model";
 const DRAFTER = "drafter";
-/**
- * 全量常駐で受け取る assets（`Gemma4Pipeline` の `EAGER_ASSETS` と同じ 2 本）。
- *
- * ①の遅延資産シミュレーションで要る — この 2 本を除いた残りが「遅延側」で、そこが PLE shard
- * ちょうどであることを本番と同じ門（{@link assertPleShardAssets}）に掛ける。
- */
-const EAGER_ASSETS: readonly string[] = ["tokenizer", "ple_index"];
-
 /** golden のケース（正本は `export_drafter.py` の GOLDEN_CASES）。 */
 const CASES = ["short-en", "readme-recipes", "readme-exporter"] as const;
 const GOLDEN_PREFIX = "drafter-golden.";
@@ -123,8 +114,17 @@ const exists = (url: URL): boolean => {
 
 const goldenPath = (name: string): URL => new URL(`${GOLDEN_PREFIX}${name}${SUFFIX}`, GOLDEN_ROOT);
 
-const MIRROR_PRESENT = exists(new URL(MANIFEST_FILENAME, MIRROR_DIR)) &&
-  exists(new URL("e2b/drafter/model.i8-00001-of-00002.safetensors", MIRROR_DIR));
+/**
+ * drafter 入りの `karume/5` ミラーか。
+ *
+ * MUST: ファイルの綴りではなく **manifest の宣言**で見る — 容器の part の path は書き手の規約
+ * （`<stem>-NNNNN-of-NNNNN.krm`）で、本数が変われば綴りも動く（ADR 0109 決定 3）。
+ */
+const MIRROR_PRESENT = ((): boolean => {
+  if (!mirrorAvailable(MIRROR_DIR)) return false;
+  const manifest = parseManifest(Deno.readTextFileSync(new URL(MANIFEST_FILENAME, MIRROR_DIR)));
+  return Object.hasOwn(manifest.models[manifest.defaultModel].weights, "drafter");
+})();
 const GOLDENS_PRESENT = CASES.every((name) => exists(goldenPath(name)));
 const AVAILABLE = MIRROR_PRESENT && GOLDENS_PRESENT;
 
@@ -167,26 +167,6 @@ Deno.test({
 // ① 配布形（GPU 不要）— manifest の役割と `ResolveOptions.weights` の絞り込み
 // ---------------------------------------------------------------------------
 
-/**
- * `loadShardComponents` の遅延側（= 全量常駐させない資産）を取得キーの表から再現する。
- *
- * MUST: 本番と同じ式で作る — 「コンポーネントとして消費したキー」と `eagerAssets` を除いた残りが
- * 遅延側である（`src/hub/components.ts`）。drafter の shard は**コンポーネントに指定しない限り
- * 消費されない**ので、取得キーの表に残っているとここへ落ちる。
- */
-const deferredKeys = (files: ResolvedFiles, componentKeys: readonly string[]): string[] => {
-  const consumed = new Set<string>();
-  for (const key of Object.keys(files)) {
-    for (const component of componentKeys) {
-      if (key === component || key.startsWith(`${component}[`)) consumed.add(key);
-    }
-  }
-  return Object.keys(files).filter((key) => !consumed.has(key) && !EAGER_ASSETS.includes(key));
-};
-
-const pleIndex = () =>
-  parseGemma4PleIndex(JSON.parse(Deno.readTextFileSync(new URL("e2b/ple/ple.json", MIRROR_DIR))));
-
 Deno.test({
   name: "gemma4 drafter 配布形: manifest の weights に drafter が居て quant が両方を指す",
   ignore: !MIRROR_PRESENT,
@@ -205,21 +185,23 @@ Deno.test({
 });
 
 Deno.test({
-  name: "gemma4 drafter 配布形: weights の絞り込みが drafter の shard を表から外す",
+  name: "gemma4 drafter 配布形: weights の絞り込みが drafter の容器を選択から外す",
   ignore: !MIRROR_PRESENT,
   fn: () => {
-    const target = resolveFiles(mirrorManifest(), { weights: [MODEL] });
-    const both = resolveFiles(mirrorManifest(), { weights: [MODEL, DRAFTER] });
+    const target = resolveSelection(mirrorManifest(), { weights: [MODEL] });
+    const both = resolveSelection(mirrorManifest(), { weights: [MODEL, DRAFTER] });
 
-    const drafterKeys = (files: ResolvedFiles) =>
-      Object.keys(files).filter((key) => key.startsWith(DRAFTER));
-    assertEquals(drafterKeys(target), [], "絞ったのに drafter の取得キーが残っている");
-    assertEquals(drafterKeys(both), [`${DRAFTER}[0]`, `${DRAFTER}[1]`], "drafter の shard 2 本");
-    // 絞っても target 側と assets は 1 本も動かない。
-    for (const key of Object.keys(target)) assertEquals(both[key], target[key], `${key} の参照`);
+    const components = (selection: ResolvedSelection) => Object.keys(selection.containers).sort();
+    assertEquals(components(target), [MODEL], "絞ったのに drafter の容器が残っている");
+    assertEquals(components(both), [DRAFTER, MODEL], "drafter を足した選択");
+    // 絞っても target 側の part 列と assets は 1 本も動かない。
+    assertEquals(both.containers[MODEL], target.containers[MODEL], "model の容器参照");
+    assertEquals(Object.keys(both.assets).sort(), Object.keys(target.assets).sort(), "assets");
+    // PLE は容器の資産（ADR 0109 決定 4）なので、manifest の assets には tokenizer しか残らない。
+    assertEquals(Object.keys(target.assets), ["tokenizer"], "manifest の assets");
 
     assertThrows(
-      () => resolveFiles(mirrorManifest(), { weights: [MODEL, "mtp"] }),
+      () => resolveSelection(mirrorManifest(), { weights: [MODEL, "mtp"] }),
       ManifestReferenceError,
       "weights 'mtp' は manifest に無い",
     );
@@ -227,31 +209,14 @@ Deno.test({
 });
 
 Deno.test({
-  name: "gemma4 drafter 配布形: 絞らないと投機なしのロードが遅延資産の門で落ちる",
+  name: "gemma4 drafter 配布形: PLE の索引が model 容器の資産と全件で整合する",
   ignore: !MIRROR_PRESENT,
-  fn: () => {
-    const index = pleIndex();
-    const where = "test";
-    // 投機なし = コンポーネントは model 1 本。絞れば遅延側は PLE shard ちょうど。
-    assertPleShardAssets(
-      where,
-      index,
-      deferredKeys(resolveFiles(mirrorManifest(), { weights: [MODEL] }), [MODEL]),
-    );
-    // 投機あり = 2 本とも消費されるので、やはり PLE shard ちょうど。
-    assertPleShardAssets(
-      where,
-      index,
-      deferredKeys(resolveFiles(mirrorManifest(), { weights: [MODEL, DRAFTER] }), [MODEL, DRAFTER]),
-    );
-    // 絞らずに model だけを組むと drafter の shard が遅延側へ落ちる（= 投機と無関係のロードが
-    // 壊れる）。この形が通ってしまうと、`weights` の絞り込みを外した退行が検出できない。
-    assertThrows(
-      () =>
-        assertPleShardAssets(where, index, deferredKeys(resolveFiles(mirrorManifest()), [MODEL])),
-      Error,
-      "assets にあって索引に無い",
-    );
+  fn: async () => {
+    // `openGemma4Ple` は `readGemma4PleIndex`（索引 × 容器の資産の全件列挙）を通す — drafter を
+    // 足しても足さなくても、PLE は `model` 容器の中だけで閉じる（旧 `deferred` の突合の後継）。
+    const { index } = await openGemma4Ple(MIRROR_DIR);
+    assertEquals(index.tokens, VOCAB, "索引の行数（= 主 embedding の vocab）");
+    assert(index.values.blocks.length > 1, "values の block が 1 本（vocab レンジ分割が無い）");
   },
 });
 
@@ -259,10 +224,8 @@ Deno.test({
 // ② コンテナの形（GPU 不要）
 // ---------------------------------------------------------------------------
 
-const targetShards = (): readonly URL[] =>
-  resolveShards(new URL("e2b/model/model.i4.safetensors", MIRROR_DIR));
-const drafterShards = (): readonly URL[] =>
-  resolveShards(new URL("e2b/drafter/model.i8.safetensors", MIRROR_DIR));
+const targetComponent = () => openMirrorComponent(MIRROR_DIR, MODEL);
+const drafterComponent = () => openMirrorComponent(MIRROR_DIR, DRAFTER);
 
 /** ミラーの `pipelineConfig`（RoPE の宣言と容量の出どころ）。 */
 const pipelineConfig = () => {
@@ -272,8 +235,8 @@ const pipelineConfig = () => {
 
 /** グラフ shard 1 本ずつを読んで宣言を取り出す（データ節は 1 バイトも要らない）。 */
 const readGraphs = async () => ({
-  target: prepareModel(await readShard(targetShards()[0])).graph,
-  drafter: prepareModel(await readShard(drafterShards()[0])).graph,
+  target: (await targetComponent()).graph,
+  drafter: (await drafterComponent()).graph,
 });
 
 Deno.test({
@@ -399,8 +362,6 @@ Deno.test("Gemma4Pipeline: speculative の k は 1..3・fromAssets では受け�
     },
     model: [],
     tokenizer: new Uint8Array(new ArrayBuffer(0)),
-    pleIndex: new Uint8Array(new ArrayBuffer(0)),
-    openPleShard: () => Promise.reject(new Error("test: 読まれないはず")),
   };
   await assertRejects(
     () => Gemma4Pipeline.fromAssets(assets, { speculative: {} }),
@@ -476,25 +437,21 @@ Deno.test({
       capacitySymbol: CAPACITY_SYMBOL,
     });
 
-    const index = pleIndex();
+    const { index, openBlock } = await openGemma4Ple(MIRROR_DIR);
     const ple: Gemma4Ple = createGemma4Ple({
       index,
-      openShard: (file) => openPleShardAt(new URL("e2b/ple/", MIRROR_DIR), file),
+      openBlock,
       vocabSize: VOCAB,
       // 全量常駐（読み直しゼロ — 予算は索引から導く）。
       maxResidentBytes: allResidentBytes(index),
     });
 
-    const targetFiles = targetShards();
-    const drafterFiles = drafterShards();
+    const targetOpened = await targetComponent();
+    const drafterOpened = await drafterComponent();
     const gpu = await acquireGpu();
     // 家族の既定（③PV の縮約形）で回す — 製品の decode と同じ実行形にする。
     const sessionOptions = { stateAttentionReduce: GEMMA4_STATE_ATTENTION_REDUCE };
-    const target: Session = await prepareModel(await readShard(targetFiles[0])).createSession(
-      gpu,
-      streamShards(targetFiles.slice(1)),
-      sessionOptions,
-    );
+    const target: Session = await targetOpened.createSession(gpu, sessionOptions);
     let drafterSession: Session | undefined;
     try {
       // 借りるのは埋め込み表 1 本（バイトは 1 つも複製されない）。
@@ -503,11 +460,10 @@ Deno.test({
           borrower,
         ) => [borrower, target.exportWeight(admitted.sharedWeights[borrower])]),
       );
-      drafterSession = await prepareModel(await readShard(drafterFiles[0])).createSession(
-        gpu,
-        streamShards(drafterFiles.slice(1)),
-        { ...sessionOptions, sharedWeights },
-      );
+      drafterSession = await drafterOpened.createSession(gpu, {
+        ...sessionOptions,
+        sharedWeights,
+      });
       const drafter: Gemma4Drafter = {
         session: drafterSession,
         graph: drafterGraph,
@@ -730,7 +686,7 @@ Deno.test({
     const started = performance.now();
     const pipeline = await Gemma4Pipeline.fromPretrained(denoDirectory(MIRROR_DIR), {
       speculative: { k: GEMMA4_DRAFT_STEPS },
-      maxResidentPleBytes: allResidentPleBytesOfMirror(MIRROR_DIR),
+      maxResidentPleBytes: await allResidentPleBytesOfMirror(MIRROR_DIR),
     });
     try {
       console.log(

@@ -25,7 +25,12 @@
 
 import { assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import { parseIrGraph } from "../../packages/runtime/src/format/ir.ts";
-import { readIrGraph, resolveAsset } from "../_shared/assets.ts";
+import {
+  distributionFormat,
+  MANIFEST_FORMAT,
+  readIrGraph,
+  resolveAsset,
+} from "../_shared/assets.ts";
 import { defaultScenarios, parseScenario } from "../_shared/scenario.ts";
 import { bindGraphSymbols } from "./binding.ts";
 import { aggregate, enumerateGraph, type GraphInput, reportScenario } from "./enumerate.ts";
@@ -328,32 +333,22 @@ const ASSET_CASES: readonly AssetCase[] = [
 const REPO = new URL("../../", import.meta.url);
 
 /**
- * 資産の有無。
- * MUST: NotFound 以外は伝播させる — 全 I/O エラーを「未生成」に丸めると、資産ルートの
- * マウント異常が SKIP に化けて、実行されていない検証が静かに緑になる。
- */
-const exists = async (url: URL): Promise<boolean> => {
-  try {
-    await Deno.stat(url);
-    return true;
-  } catch (cause) {
-    if (cause instanceof Deno.errors.NotFound) return false;
-    throw cause;
-  }
-};
-
-/**
  * 取得元ごとの有無。SKIP は**取得元 1 件ずつ**で、1 件も無い環境だけテストごと `ignore` する。
  * 全 AND（1 件でも欠けたら全部 SKIP）にすると、系列出力を 1 本消しただけで配布ミラーの門まで
  * 静かに落ちる。
+ *
+ * 判定は「この版が読める配布形か」（{@link distributionFormat}）— 旧 major のまま残っている
+ * ミラーは**移行待ち**であって、この列挙器の合否の話ではない。
  */
 const AVAILABLE = new Map<string, boolean>();
 for (const source of new Set(ASSET_CASES.map((entry) => entry.source))) {
-  const present = await exists(new URL(source, REPO));
+  const format = distributionFormat(new URL(`${source}/`, REPO));
+  const present = format === MANIFEST_FORMAT;
   AVAILABLE.set(source, present);
   if (!present) {
     console.warn(
-      `[karume] ${source} が無いため、この資産の融合候補の答え合わせを SKIP する` +
+      `[karume] ${source} が ${format ?? "未生成"}（読めるのは ${MANIFEST_FORMAT}）なため、` +
+        "この資産の融合候補の答え合わせを SKIP する" +
         "（列挙器の取りこぼしは実資産でしか検出できない）",
     );
   }
@@ -379,7 +374,7 @@ const assetCounts = async (
   }
   // 期待値は `<model>/<component>` のグラフに対するもの — defaultModel が別変種へ動けばここで気付く。
   assertEquals(`${asset.model}/${found.component}`, entry.graph, `${entry.source} の引き当て`);
-  const graph = await readIrGraph(found.graphShard);
+  const graph = await readIrGraph(found.graph);
   const bound = bindGraphSymbols(graph, entry.binds);
   const rows = aggregate(enumerateGraph(graph, bound, { maxWindow: 9, fused }).windows);
   const counts: Record<string, number> = Object.fromEntries(keys.map((key) => [key, 0]));
@@ -420,10 +415,13 @@ Deno.test({
  * なので、両道具が同じ束縛で同じグラフを見ていることがここで揃う。
  */
 const GEMMA4_DIR = new URL("../../models/karume-gemma4/", import.meta.url);
-const GEMMA4_AVAILABLE = await exists(new URL("karume.json", GEMMA4_DIR));
+const GEMMA4_FORMAT = distributionFormat(GEMMA4_DIR);
+const GEMMA4_AVAILABLE = GEMMA4_FORMAT === MANIFEST_FORMAT;
 if (!GEMMA4_AVAILABLE) {
   console.warn(
-    `[karume] ${GEMMA4_DIR.pathname} に karume.json が無いため既定シナリオの実走を SKIP する`,
+    `[karume] ${GEMMA4_DIR.pathname} のミラーが ${
+      GEMMA4_FORMAT ?? "未生成"
+    }（この版が読むのは ${MANIFEST_FORMAT}）なため既定シナリオの実走を SKIP する`,
   );
 }
 
@@ -437,8 +435,8 @@ Deno.test({
       asset.components.map(async (target): Promise<GraphInput> => ({
         component: target.component,
         graph: `${asset.model}/${target.component}`,
-        path: target.graphShard.pathname,
-        ir: await readIrGraph(target.graphShard),
+        path: target.graph.url.pathname,
+        ir: await readIrGraph(target.graph),
       })),
     );
     const scenarios = defaultScenarios(asset.family);

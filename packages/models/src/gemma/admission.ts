@@ -2,8 +2,8 @@
  * gemma4 の**受理（admission）**— 配布形の宣言・製品グラフ・実行時ノブがこの実装で走れるかを
  * 見る門と、門が確定させた材料。
  *
- * MUST: 家族の門はここへ集める。{@link Gemma4Pipeline} 側へ散らすと、shard 面では GB 級の重みを
- * 落とした**後**にしか落ちない — どの門がどの位置（GPU を取る前 / 資産を読む前 / 重み shard を
+ * MUST: 家族の門はここへ集める。{@link Gemma4Pipeline} 側へ散らすと、取得面では GB 級の重みを
+ * 落とした**後**にしか落ちない — どの門がどの位置（GPU を取る前 / 資産を読む前 / 重みの part を
  * 取る前）で呼ばれるかは各関数の doc が名乗る。
  *
  * ここが持つのは受理集合の判定だけで、Session も GPU も資産の読み口も持たない（構築と所有権は
@@ -16,7 +16,7 @@ import { assertChunkBuckets } from "@karume/runtime";
 import type { Manifest, ModelEntry, Quant } from "@karume/hub";
 
 import { ModelInputError } from "../errors.ts";
-import type { ModelComponent } from "../hub/components.ts";
+import type { GraphOwner } from "../hub/components.ts";
 import type { GenerationGraph } from "../generation/program.ts";
 import {
   GEMMA4_PIPELINE_MAJOR,
@@ -58,21 +58,22 @@ export type GemmaFamilyAdmission =
 const GRAPH_OUTPUTS = 2;
 
 /**
- * 家族 admission（GPU を取りに行く前・shard 面では重み prefetch の前に通す門）が確定させる材料。
+ * 家族 admission（GPU を取りに行く前・取得面では重み prefetch の前に通す門）が確定させる材料。
  *
- * NOTE: PLE loader はここに載せない — `wiring.derivedInputs.derive` の閉包が持つのが唯一の
- * 参照で、席を 2 つ作ると「片方だけ差し替えた」形が書ける。
+ * NOTE: コンポーネントの実体はここに載せない — 供給口（`ComponentOpener`）が前段と後段へ
+ * **同じ 1 本**で渡るので、開いた部品を材料へ写すと「前段が見たのと別の部品を後段が握る」形が
+ * 書ける（差し替え席が入って以降はなおさら）。
+ * NOTE: PLE loader も載せない — `wiring.derivedInputs.derive` の閉包が持つのが唯一の参照で、
+ * 席を 2 つ作ると「片方だけ差し替えた」形が書ける。
  */
 export type Gemma4Admission = {
-  readonly component: ModelComponent;
   readonly config: Gemma4PipelineConfig;
   /** 最終行 logits 出口の語彙数（id 空間の相互照合の基準 — ADR 0085 決定 5）。 */
   readonly vocabSize: number;
   /** full スロットの容量記号（`createGenerationContext` の束縛点）。 */
   readonly capacitySymbol: string;
-  /** 投機を指定したときだけ確定する drafter の材料（コンポーネント + 突合の結果）。 */
+  /** 投機を指定したときだけ確定する drafter の突合結果。 */
   readonly drafter?: {
-    readonly component: ModelComponent;
     readonly admission: Gemma4DrafterAdmission;
   };
 };
@@ -81,7 +82,7 @@ export type Gemma4Admission = {
  * 選んだ行の logits 出口の語彙数をグラフから引く（`[1, R, V]` — ADR 0083 決定 6）。
  *
  * MUST: 呼び手に宣言させない。V は主 embedding の行数そのもので、宣言と食い違えば PLE
- * sidecar との相互照合（ADR 0085 決定 5）が**間違った基準**で通ってしまう。形の検査は
+ * PLE の索引との相互照合（ADR 0085 決定 5）が**間違った基準**で通ってしまう。形の検査は
  * `createGenerationProgram` が同じ値でもう一度行う。
  *
  * MUST: 出口は**2 本ちょうど**（出力 0 = logits・出力 1 = 最終 norm 後 hidden）。順序は IR の
@@ -194,15 +195,16 @@ export const assertRopeInputShapes = (
 };
 
 /**
- * この製品グラフを gemma4 として実行できるかを見る（**重み shard を 1 バイトも取る前**）。
+ * この製品グラフを gemma4 として実行できるかを見る（**重みの part を 1 バイトも取る前**）。
  *
  * MUST: 家族の門はこの 1 本に集める（他ファミリの `admit*` と同じ規律 — `hub/components.ts` の
- * {@link FamilyAdmission} 席で呼ばれる）。後段へ散らすと、shard 面では GB 級の重みを落とした
+ * {@link FamilyAdmission} 席で呼ばれる）。後段へ散らすと、取得面では GB 級の重みを落とした
  * **後**にしか落ちない。
  *
- * NOTE: tokenizer / PLE sidecar の解析はここに置けない — admission の時点では assets を
- * まだ取っていない（取ってからでは重み prefetch より前という位置が保てない）ので、
- * {@link buildGemma4Program} に残る（anima の `#admit` と同じ分け方）。
+ * NOTE: tokenizer の解析はここに置けない — admission の時点では manifest の `assets` をまだ
+ * 取っていない（取ってからでは重み prefetch より前という位置が保てない）ので、
+ * {@link buildGemma4Program} に残る（anima の `#admit` と同じ分け方）。PLE の索引だけは
+ * **容器の資産**なので、この席と同じ位置で読める（`./ple-index.ts` の `readGemma4PleIndex`）。
  *
  * NOTE: `config` **単体**の検査はここには無い — 2 つの入口が**どちらも**
  * {@link parseGemma4PipelineConfig} を通してから呼ぶ（値域・関係・未知キーの門はそこが正本で、
@@ -210,16 +212,15 @@ export const assertRopeInputShapes = (
  * {@link assertRopeInputShapes} がその 1 本である（グラフはこの席で初めて手に入る）。
  */
 export const admitGemma4 = (
-  component: ModelComponent,
+  component: GraphOwner,
   config: Gemma4PipelineConfig,
-  drafter?: ModelComponent,
+  drafter?: GraphOwner,
 ): Gemma4Admission => {
   const { graph } = component;
   assertRopeInputShapes(graph, config);
   const vocabSize = vocabSizeOf(graph);
   const capacitySymbol = capacitySymbolOf(graph);
   return {
-    component,
     config,
     vocabSize,
     capacitySymbol,
@@ -227,7 +228,6 @@ export const admitGemma4 = (
     // 投機の知識で、target の門とは別の 1 本）。target の材料は**確定したもの**を渡す。
     ...(drafter === undefined ? {} : {
       drafter: {
-        component: drafter,
         admission: admitGemma4Drafter("Gemma4Pipeline", drafter.graph, {
           graph,
           rope: config.rope,
@@ -314,10 +314,10 @@ export const assertGemma4ChunkBuckets = (
 };
 
 /**
- * この manifest を gemma4 として実行できるかを見る（**GPU も重み shard も触る前**）。
+ * この manifest を gemma4 として実行できるかを見る（**GPU も重みの part も触る前**）。
  *
  * MUST: 未知 major は fail loudly（ADR 0038 §1 — 「古い実装 × 新しいリポ」の沈黙劣化を止める
- * 唯一の門）。`quant` の実在検査は取得の前に済ませる（`resolveFiles` も同じことを見るが、
+ * 唯一の門）。`quant` の実在検査は取得の前に済ませる（`resolveSelection` も同じことを見るが、
  * こちらは利用可能な一覧を添えて落とす）。
  *
  * MUST: 選ばれた `Quant` を**捨てずに返す** — `requiredLimits` の DL 前検査

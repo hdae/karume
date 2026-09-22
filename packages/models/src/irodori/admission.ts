@@ -26,16 +26,11 @@ import {
   assertRequiredLimitsSatisfied,
 } from "../session/gpu-features.ts";
 import { toSessionOptions } from "../session/options.ts";
-import {
-  assetComponentOpener,
-  type ComponentOpener,
-  type GraphOwner,
-  type ModelComponent,
-} from "../hub/components.ts";
+import { assetComponentOpener, type ComponentOpener, type GraphOwner } from "../hub/components.ts";
 import { readAssetBuffer, readAssetJson } from "../hub/asset-readers.ts";
 import { assertGraphInputDim } from "../hub/graph-gates.ts";
 
-/** manifest の weights / assets 表に現れる取得キー（ADR 0041 §3 の規約名）。 */
+/** manifest の weights / assets 表に現れる名前（ADR 0041 §3 の規約名）。 */
 export const BACKBONE = "backbone";
 export const TEXT_PROJ = "text_proj";
 export const CAPTION_PROJ = "caption_proj";
@@ -46,8 +41,20 @@ export const CODEC_DECODER = "codec_decoder";
 export const CODEC_ENCODER = "codec_encoder";
 export const TOKENIZER = "tokenizer";
 
+/** この系列の weights 部品（差し替え席が受ける役割名でもある・宣言順）。 */
+export const COMPONENT_KEYS = [
+  BACKBONE,
+  TEXT_PROJ,
+  CAPTION_PROJ,
+  SPEAKER,
+  DURATION,
+  DIT,
+  CODEC_DECODER,
+  CODEC_ENCODER,
+] as const;
+
 /**
- * 取得済みバイト列を `openModel` へ渡せる ArrayBuffer にする（門の本体は
+ * 取得済みバイト列を `openContainer` へ渡せる ArrayBuffer にする（門の本体は
  * {@link readAssetBuffer}）。
  */
 const assetBuffer = (
@@ -57,11 +64,11 @@ const assetBuffer = (
 
 /**
  * 全量面（`fromAssets`）のコンポーネント供給口（受け口の実装は 7 家族共有 —
- * {@link assetComponentOpener}）。素の 1 本は `openModel` で開いて全量面で組み、shard 分割形
- * （`dit[0]` / `dit[1]` / …）は `fromPretrained` と同じ shard 逐次面へ流す。
+ * {@link assetComponentOpener}）。部品のキーは単一形 `krm` の 1 本（`dit`）か、分割形の
+ * part 列（`dit[0]` / `dit[1]` / …）。
  */
-export const assetOpener = (assets: IrodoriAssets["assets"]): ComponentOpener =>
-  assetComponentOpener("irodori", assets, (key) => assetBuffer(assets, key));
+export const assetOpener = (assets: IrodoriAssets["assets"]): Promise<ComponentOpener> =>
+  assetComponentOpener("irodori", assets, (key) => assetBuffer(assets, key), COMPONENT_KEYS);
 
 /**
  * 資産 JSON を読む（decode / parse の門は {@link readAssetJson}）。
@@ -159,32 +166,23 @@ export type IrodoriAdmission = {
    */
   readonly ditSymbol: string;
   readonly ditSessionOptions: SessionOptions;
-  readonly backbone: ModelComponent;
-  readonly textProj: ModelComponent;
-  readonly captionProj: ModelComponent;
-  readonly speaker: ModelComponent;
-  readonly duration: ModelComponent;
-  readonly dit: ModelComponent;
-  readonly codecDecoder: ModelComponent;
-  readonly codecEncoder: ModelComponent;
 };
 
 /**
  * この manifest とこのグラフを irodori として実行できるかを見る（`hub/components.ts` の
- * 家族 admission 席 — shard 面では**重み shard を 1 バイトも取る前**に呼ばれる）。
+ * 家族 admission 席 — 取得面では**重みの part を 1 バイトも取る前**に呼ばれる）。
  *
- * MUST: 家族の門はこの 1 本に集める。後段へ散らすと、shard 面では GB 級の重みを落とした
+ * MUST: 家族の門はこの 1 本に集める。後段へ散らすと、取得面では GB 級の重みを落とした
  * **後**にしか落ちない（ADR 0070 決定 5 の文面より実装が狭くなる）。
  * MUST: manifest の契約違反と**グラフとの突合**は **GPU を取りに行く前**に落とす。順序が
  * ずれると、GPU の無い環境では別の例外に化けて「何が悪かったのか」が読み手に伝わらない。
  *
- * NOTE: 各段は不可分（`openModel` を途中で畳む口は無い）なので、
- * {@link IrodoriPipelineOptions.signal} の検査は**段の境目**にだけ置き、そこでイベントループへ
- * 1 度譲ってから検査する（{@link settleAbort}）— 同期解析の最中に届いた中断は次の境目で効く
- * （`options.gpu` 供給時も同様）。グラフとの突合（`assertStaticDim` 群）は開いたコンテナの
- * ヘッダを読むだけで、`openModel` 1 本より桁で軽いので境目を割らない。
- * NOTE: 資産（tokenizer）の解析はこの席へ置けない — admission の時点では extras をまだ
- * 取っていない（取ってからでは重み prefetch より前という位置が保てない）ので
+ * NOTE: {@link IrodoriPipelineOptions.signal} の検査は**段の境目**にだけ置き、そこで
+ * イベントループへ 1 度譲ってから検査する（{@link settleAbort}）— 同期解析の最中に届いた中断は
+ * 次の境目で効く（`options.gpu` 供給時も同様）。グラフとの突合（`assertStaticDim` 群）は
+ * 開いた容器の宣言を読むだけなので境目を割らない。
+ * NOTE: 資産（tokenizer）の解析はこの席へ置けない — admission の時点で手元にあるのは資産の
+ * **宣言**だけでバイト列はまだ無い（待つと重み prefetch より前という位置が保てない）ので
  * {@link "./pipeline.ts"} の `buildIrodoriState` に残る。
  */
 export const admitIrodori = async (
@@ -228,23 +226,17 @@ export const admitIrodori = async (
   }
   const quant = entry.quants[quantName];
 
-  // 資産の解析は GPU より前（docstring の順序 MUST）。8 本の `openModel` はそれぞれ不可分なので、
-  // 中断の検査はその境目に置く。
-  await settleAbort(options.signal);
-  const backbone = open(BACKBONE);
-  await settleAbort(options.signal);
-  const textProj = open(TEXT_PROJ);
-  await settleAbort(options.signal);
-  const captionProj = open(CAPTION_PROJ);
-  await settleAbort(options.signal);
+  // 8 本の部品が全部開けることをこの席で見る（開いていない役割は供給口が fail loudly）。
+  // 引き当ての間に中断の境目を置く。
+  for (const key of COMPONENT_KEYS) {
+    await settleAbort(options.signal);
+    open(key);
+  }
+  // グラフ突合は GPU より前（docstring の順序 MUST）。突合を掛けるのは下の 5 本。
   const speaker = open(SPEAKER);
-  await settleAbort(options.signal);
   const duration = open(DURATION);
-  await settleAbort(options.signal);
   const dit = open(DIT);
-  await settleAbort(options.signal);
   const codecDecoder = open(CODEC_DECODER);
-  await settleAbort(options.signal);
   const codecEncoder = open(CODEC_ENCODER);
 
   // グラフの宣言と pipelineConfig の突合（ホストの式が読む数は全て config 由来）。
@@ -304,19 +296,5 @@ export const admitIrodori = async (
     );
   }
 
-  return {
-    config,
-    quantName,
-    quant,
-    ditSymbol,
-    ditSessionOptions,
-    backbone,
-    textProj,
-    captionProj,
-    speaker,
-    duration,
-    dit,
-    codecDecoder,
-    codecEncoder,
-  };
+  return { config, quantName, quant, ditSymbol, ditSessionOptions };
 };

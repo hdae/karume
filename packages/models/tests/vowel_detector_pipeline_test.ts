@@ -6,13 +6,14 @@
 //
 // 押さえるのは 5 点:
 //
-// ① `fromAssets` は **manifest の契約違反を、資産を開く前・GPU を取りに行く前**に落とす
+// ① `fromAssets` は **manifest の契約違反を GPU を取りに行く前**に落とす
 //    （`src/vowel-detector/pipeline.ts` の `openVowelDetectorState` が掲げる MUST）。観測の
-//    仕掛けは SigLIP2 / BiRefNet と同じ — **全ケースで `assets` は空**にしておき、
-//     - 契約違反ケースが「その違反の文言」で落ちる = 資産解析より前に落ちている
-//     - 正しい manifest + 空 assets が `資産 'crnn' が無い` で落ちる = 契約検査が全部
-//       済んだ後に初めて資産へ触る（上の対偶）
+//    仕掛けは SigLIP2 / BiRefNet と同じ — **全ケースで容器は揃えて**おき、
+//     - 契約違反ケースが「その違反の文言」で落ちる = 資産が揃っていても manifest の門が先
+//     - 正しい manifest + 空の Record が `部品 'crnn' の容器が無い` で落ちる（受け口の診断）
 //    の 2 つで門の順序そのものを縛る。
+//    NOTE: 容器を開くのは admission の**前**（`assetComponentOpener` は同期の供給口を返すため
+//    先に全部品を開く — ADR 0109 の継ぎ目）。
 //
 // ② グラフ宣言との突合（`assertGraph`）の**拒否経路**。`fromAssets` の中では実資産が
 //    揃わないと踏めないので、門を直接叩く（`tests/helpers/stub-model.ts` が宣言だけの
@@ -49,6 +50,7 @@ import { FEATURE_DIM, MEL_BINS, N_MELS, SAMPLE_RATE } from "../src/vowel-detecto
 import { LIPSYNC_CLASSES } from "../src/vowel-detector/postprocess.ts";
 import { writeSafetensors } from "./helpers/safetensors-write.ts";
 import { type StubDim, stubModel } from "./helpers/stub-model.ts";
+import { declaredContainer, partAssets, tensorlessContainer } from "./helpers/container-fixture.ts";
 
 /**
  * 配布形が宣言する運用範囲
@@ -60,6 +62,16 @@ const MIN_FRAMES = 4;
 const MAX_FRAMES = 60_000;
 
 const fileRef = (path: string) => ({ path, size: 16, sha256: "a".repeat(64) });
+
+/** 宣言だけの `crnn` 容器（家族の門が読む形まで再現し、実行はしない）。 */
+const COMPONENT = partAssets(
+  "crnn",
+  await tensorlessContainer("crnn", {
+    symbols: ["T"],
+    inputs: [{ name: "features", shape: [1, "2T", FEATURE_DIM] }],
+    output: { name: "logits", shape: [1, "T", LIPSYNC_CLASSES.length] },
+  }),
+);
 
 /** `models/karume-vowel-detector/karume.json` の `pipelineConfig` 実物（5 欄）。 */
 const PIPELINE_CONFIG: Record<string, unknown> = {
@@ -73,14 +85,14 @@ const PIPELINE_CONFIG: Record<string, unknown> = {
 /** 配布形の骨格（検査に要る欄だけ）。`patch` は `models["crnn-epoch3"]` の中身を上書きする。 */
 const manifestText = (patch: Record<string, unknown> = {}): string =>
   JSON.stringify({
-    format: "karume/4",
+    format: "karume/5",
     generator: "karume/0.2.2",
     defaultModel: "crnn-epoch3",
     models: {
       "crnn-epoch3": {
         pipeline: "vowel-detector/1",
         weights: {
-          crnn: { f32: { shards: [fileRef("crnn-epoch3/model.f32.safetensors")] } },
+          crnn: { f32: declaredContainer("crnn-epoch3/model.f32") },
         },
         assets: { mel_basis: fileRef("crnn-epoch3/features/mel-basis.safetensors") },
         quants: { f32: { weights: { crnn: "f32" }, session: {} } },
@@ -96,7 +108,7 @@ const emptyAssets = {} as Record<string, Uint8Array<ArrayBuffer>>;
 Deno.test("fromAssets: 存在しない model は利用可能な一覧を添えて落とす", async () => {
   const manifest = parseManifest(manifestText());
   await assertRejects(
-    () => VowelDetectorPipeline.fromAssets({ manifest, assets: emptyAssets }, { model: "nope" }),
+    () => VowelDetectorPipeline.fromAssets({ manifest, assets: COMPONENT }, { model: "nope" }),
     Error,
     "model 'nope' は manifest に無い",
   );
@@ -105,7 +117,7 @@ Deno.test("fromAssets: 存在しない model は利用可能な一覧を添え�
 Deno.test("fromAssets: pipeline の契約名が vowel-detector でない manifest を落とす", async () => {
   const manifest = parseManifest(manifestText({ pipeline: "sbv2/1" }));
   await assertRejects(
-    () => VowelDetectorPipeline.fromAssets({ manifest, assets: emptyAssets }),
+    () => VowelDetectorPipeline.fromAssets({ manifest, assets: COMPONENT }),
     Error,
     "manifest の pipeline が 'sbv2/1'",
   );
@@ -115,7 +127,7 @@ Deno.test("fromAssets: 未知 major は fail loudly（検査責務は models 側
   // 「古い実装 × 新しいリポ」の沈黙劣化を止める唯一の門。hub は major を検査しない。
   const manifest = parseManifest(manifestText({ pipeline: "vowel-detector/2" }));
   await assertRejects(
-    () => VowelDetectorPipeline.fromAssets({ manifest, assets: emptyAssets }),
+    () => VowelDetectorPipeline.fromAssets({ manifest, assets: COMPONENT }),
     Error,
     "major に未対応",
   );
@@ -124,7 +136,7 @@ Deno.test("fromAssets: 未知 major は fail loudly（検査責務は models 側
 Deno.test("fromAssets: 存在しない quant は利用可能な一覧を添えて落とす", async () => {
   const manifest = parseManifest(manifestText());
   await assertRejects(
-    () => VowelDetectorPipeline.fromAssets({ manifest, assets: emptyAssets }, { quant: "nope" }),
+    () => VowelDetectorPipeline.fromAssets({ manifest, assets: COMPONENT }, { quant: "nope" }),
     Error,
     "quant 'nope' は manifest に無い",
   );
@@ -136,20 +148,31 @@ Deno.test("fromAssets: pipelineConfig の未知キーは構築時に落ちる", 
     manifestText({ pipelineConfig: { ...PIPELINE_CONFIG, max_frames: 200 } }),
   );
   await assertRejects(
-    () => VowelDetectorPipeline.fromAssets({ manifest, assets: emptyAssets }),
+    () => VowelDetectorPipeline.fromAssets({ manifest, assets: COMPONENT }),
     Error,
     "pipelineConfig: 未知キー 'max_frames'",
   );
 });
 
-Deno.test("fromAssets: manifest 契約を全て満たして初めて資産へ触る（門の順序の対偶）", async () => {
-  // 上の 5 ケースが「資産が空でも manifest の文言で落ちる」ことの裏返し。正しい manifest なら
-  // 検査は資産まで進み、**CRNN グラフ**の不在で落ちる（= 契約検査は全て資産より前）。
+Deno.test("fromAssets: 部品の容器が無ければ 2 形の綴りつきで落ちる（受け口の診断）", async () => {
+  // 上の 5 ケースの裏返し。容器が揃っていない Record では**部品の不在**で落ちる（manifest の
+  // 文言では落ちない）= 上のケースが資産の不在に巻き添えられていないことの対偶。
   const manifest = parseManifest(manifestText());
   await assertRejects(
     () => VowelDetectorPipeline.fromAssets({ manifest, assets: emptyAssets }),
     Error,
-    "資産 'crnn' が無い",
+    "部品 'crnn' の容器が無い",
+  );
+});
+
+Deno.test("fromAssets: 容器が揃っていれば資産（mel_basis）の不在まで進む", async () => {
+  // 家族の門を全部通った先に残るのは manifest の `assets`（全量面）— ここで初めて
+  // `mel_basis` の不在が見える（門の順序が資産の解析より前であることの対偶）。
+  const manifest = parseManifest(manifestText());
+  await assertRejects(
+    () => VowelDetectorPipeline.fromAssets({ manifest, assets: COMPONENT }),
+    Error,
+    "資産 'mel_basis' が無い",
   );
 });
 

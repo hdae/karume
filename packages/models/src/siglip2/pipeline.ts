@@ -59,7 +59,7 @@ import {
   type Manifest,
   type ModelEntry,
   type Quant,
-  resolveFiles,
+  resolveSelection,
 } from "@karume/hub";
 
 import {
@@ -79,19 +79,26 @@ import {
 import { disposeSteps } from "../session/dispose-steps.ts";
 import { toSessionOptions } from "../session/options.ts";
 import { toManifestSource } from "../hub/repo-ref.ts";
-import { type FromPretrainedHubOptions, hubLoadOptions } from "../hub/load-options.ts";
+import {
+  type FromPretrainedComponentOptions,
+  type FromPretrainedHubOptions,
+  hubLoadOptions,
+} from "../hub/load-options.ts";
 import {
   assetComponentOpener,
   type ComponentOpener,
   type GraphOwner,
-  loadShardComponents,
+  loadContainerComponents,
   type ModelComponent,
 } from "../hub/components.ts";
 import { readAssetBuffer } from "../hub/asset-readers.ts";
 import { assertGraphInputDim } from "../hub/graph-gates.ts";
 
-/** manifest の weights 表に現れる取得キー（ADR 0041 §3 の規約名）。 */
+/** manifest の weights 表に現れる部品名（ADR 0041 §3 の規約名）。 */
 const VISION = "vision";
+
+/** この系列の weights 部品（差し替え席が受ける役割名でもある）。 */
+const COMPONENT_KEYS = [VISION] as const;
 
 /** グラフ入力の名前（`tools/export-recipes/siglip2/export.py` の `INPUT_NAME`）。 */
 const PIXEL_VALUES = "pixel_values";
@@ -129,9 +136,13 @@ export type Siglip2PipelineOptions = {
  * NOTE: `headers` / `fetch` / `caches` / `onRetry` が **HTTP 取得元専用**であることを含め、
  * 取得層のノブの説明は {@link FromPretrainedHubOptions} に 1 本化してある。
  */
-export type Siglip2FromPretrainedOptions = Siglip2PipelineOptions & FromPretrainedHubOptions & {
-  readonly signal?: AbortSignal;
-};
+export type Siglip2FromPretrainedOptions =
+  & Siglip2PipelineOptions
+  & FromPretrainedHubOptions
+  & FromPretrainedComponentOptions
+  & {
+    readonly signal?: AbortSignal;
+  };
 
 /** 取得済み資産から直接組むときの入力（hub の `fetchAssets` の返り値をそのまま渡す）。 */
 export type Siglip2Assets = {
@@ -140,7 +151,7 @@ export type Siglip2Assets = {
 };
 
 /**
- * 取得済みバイト列を `openModel` へ渡せる ArrayBuffer にする（門の本体は
+ * 取得済みバイト列を `openContainer` へ渡せる ArrayBuffer にする（門の本体は
  * {@link readAssetBuffer}）。
  *
  * MUST: `slice` で写さない — so400m は 1 本 1.71GB あり、ホスト RAM のピークが倍になる。
@@ -152,11 +163,11 @@ const assetBuffer = (
 
 /**
  * 全量面（`fromAssets`）のコンポーネント供給口（受け口の実装は 7 家族共有 —
- * {@link assetComponentOpener}）。素の 1 本は `openModel` で開いて全量面で組み、shard 分割形
- * （`vision[0]` / `vision[1]` / …）は `fromPretrained` と同じ shard 逐次面へ流す。
+ * {@link assetComponentOpener}）。部品のキーは単一形 `krm` の 1 本（`vision`）か、分割形の
+ * part 列（`vision[0]` / `vision[1]` / …）。
  */
-const assetOpener = (assets: Siglip2Assets["assets"]): ComponentOpener =>
-  assetComponentOpener("siglip2", assets, (key) => assetBuffer(assets, key));
+const assetOpener = (assets: Siglip2Assets["assets"]): Promise<ComponentOpener> =>
+  assetComponentOpener("siglip2", assets, (key) => assetBuffer(assets, key), COMPONENT_KEYS);
 
 /**
  * グラフ入力の 1 軸ぶんの**静的**次元が `pipelineConfig` の宣言と一致することを見る。
@@ -251,14 +262,13 @@ type Siglip2Admission = {
   readonly config: Siglip2PipelineConfig;
   readonly quantName: string;
   readonly quant: Quant;
-  readonly vision: ModelComponent;
 };
 
 /**
  * この manifest とこのグラフを siglip2 として実行できるかを見る（`hub/components.ts` の
- * {@link FamilyAdmission} 席 — shard 面では**重み shard を 1 バイトも取る前**に呼ばれる）。
+ * {@link FamilyAdmission} 席 — 取得面では**重みの part を 1 バイトも取る前**に呼ばれる）。
  *
- * MUST: 家族の門はこの 1 本に集める。後段へ散らすと、shard 面では GB 級の重みを落とした
+ * MUST: 家族の門はこの 1 本に集める。後段へ散らすと、取得面では GB 級の重みを落とした
  * **後**にしか落ちない（ADR 0070 決定 5 の文面より実装が狭くなる）。
  * MUST: manifest の契約違反と**グラフとの突合**は **GPU を取りに行く前**に落とす。順序が
  * ずれると、GPU の無い環境では別の例外に化けて「何が悪かったのか」が読み手に伝わらない。
@@ -332,7 +342,7 @@ const admitSiglip2 = (
     );
   }
 
-  return { config, quantName, quant, vision };
+  return { config, quantName, quant };
 };
 
 /**
@@ -342,9 +352,12 @@ const admitSiglip2 = (
  */
 const openSiglip2State = async (
   admitted: Siglip2Admission,
+  open: ComponentOpener,
   options: Siglip2PipelineOptions = {},
 ): Promise<Siglip2State> => {
-  const { config, quant, quantName, vision } = admitted;
+  const { config, quant, quantName } = admitted;
+  // 供給口は admission が見たものと**同じ 1 本**（`open` は開いた部品を引き当てるだけ）。
+  const vision = open(VISION);
   // MUST: 宣言された feature は device 作成時にしか要求できない（ADR 0028）。共有 GPU を
   // 渡された場合は要求できないので、能力が足りないことを名指しして落とす（共有 GPU は
   // {@link admitSiglip2} が既に同じ 1 本で見ているが、自前で取った device はここが唯一の門）。
@@ -417,9 +430,11 @@ export class Siglip2Pipeline {
   }
 
   /**
-   * 配布形から取得して組む（`loadManifest` → `resolveFiles` → **各コンポーネントの
-   * グラフ shard だけ**を取って `prepareModel` → 残り資産の `fetchAssets` → 構築）。重み shard は
-   * Session を組むときに 1 本ずつ流れる（ADR 0070 — `src/hub/components.ts`）。
+   * 配布形から取得して組む（`loadManifest` → `resolveSelection` → **各部品の descriptor
+   * （part 0）だけ**を取って admission → 重みの part を温める → 残り資産の `fetchAssets` →
+   * 構築）。block は Session を組むその瞬間に part 順で読まれる（ADR 0109 —
+   * `src/hub/components.ts`）。部品を別リポの同じ役割で差し替えるときは
+   * {@link FromPretrainedComponentOptions.components}（役割は `vision` 1 本）。
    *
    * **`ref` は必須**（取得元に既定は無い — `src/hub/repo-ref.ts` の MUST）。パッケージ版が
    * 検証した取得元は {@link SIGLIP2_SOURCES}（`./config.ts`）の `"siglip2"` — 再現性を自分で
@@ -441,27 +456,27 @@ export class Siglip2Pipeline {
     );
     const hubOptions = hubLoadOptions(options);
     const loaded = await loadManifest(source, hubOptions);
-    const selection = {
+    const choice = {
       ...(options.model === undefined ? {} : { model: options.model }),
       ...(options.quant === undefined ? {} : { quant: options.quant }),
     };
-    const files = resolveFiles(loaded.manifest, selection);
+    const selection = resolveSelection(loaded.manifest, choice);
     const buildOptions: Siglip2PipelineOptions = {
       ...(options.gpu === undefined ? {} : { gpu: options.gpu }),
-      ...selection,
+      ...choice,
       ...(options.onRunDiagnostics === undefined
         ? {}
         : { onRunDiagnostics: options.onRunDiagnostics }),
     };
-    // 家族の門は admission 席で通す（重み shard を取る前 — `hub/components.ts`）。
-    const { admitted } = await loadShardComponents(
+    // 家族の門は admission 席で通す（重みの part を取る前 — `hub/components.ts`）。
+    const { admitted, open } = await loadContainerComponents(
       "Siglip2Pipeline.fromPretrained",
       loaded,
-      files,
-      [VISION],
+      selection,
+      COMPONENT_KEYS,
       async (open) => {
         const admitted = admitSiglip2(loaded.manifest, open, buildOptions);
-        // 配布形が宣言した `requiredLimits` は**重み shard を取る前**にここで見る
+        // 配布形が宣言した `requiredLimits` は**重みの part を取る前**にここで見る
         // （ADR 0089 決定 5 — 共有 GPU ならその limits、自前で取る経路はアダプタ実測値）。
         await assertRequiredLimitsBeforeDownload(
           admitted.quant.requiredLimits,
@@ -473,26 +488,28 @@ export class Siglip2Pipeline {
       {
         ...hubOptions,
         ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }),
+        ...(options.components === undefined ? {} : { components: options.components }),
       },
     );
-    return new Siglip2Pipeline(await openSiglip2State(admitted, buildOptions));
+    return new Siglip2Pipeline(await openSiglip2State(admitted, open, buildOptions));
   }
 
   /**
-   * 取得済みの manifest + 資産から組む。契約検査・資産の解釈・`openModel`・グラフとの突合を
+   * 取得済みの manifest + 資産から組む。契約検査・資産の解釈・`openContainer`・グラフとの突合を
    * 全てここで済ませ、**`vision` の Session を 1 本張って**返す（モジュール doc の MUST）。
    *
-   * 取得キーは `resolveFiles` の規約どおり **2 形とも受ける** — 素の 1 本（`vision`）と、
-   * shard 分割形（`vision[0]` / `vision[1]` / …）。分割形は
-   * バイト列を連結せず `fromPretrained` と同じ shard 逐次面へ流す。添字の欠番と素キーとの混在は
-   * fail loudly（受け口の実装は `src/hub/components.ts` の 1 本）。
+   * 部品のキーは **2 形とも受ける** — 単一形 `krm` のバイト列 1 本（`vision`）と、分割形の
+   * part 列（`vision[0]` / `vision[1]` / … — part 0 から添字順）。分割形はバイト列を連結せず
+   * part 列のまま開く。添字の欠番と単一形キーとの混在は fail loudly（受け口の実装は
+   * `src/hub/components.ts` の 1 本）。
    */
   static async fromAssets(
     input: Siglip2Assets,
     options: Siglip2PipelineOptions = {},
   ): Promise<Siglip2Pipeline> {
-    const admitted = admitSiglip2(input.manifest, assetOpener(input.assets), options);
-    return new Siglip2Pipeline(await openSiglip2State(admitted, options));
+    const open = await assetOpener(input.assets);
+    const admitted = admitSiglip2(input.manifest, open, options);
+    return new Siglip2Pipeline(await openSiglip2State(admitted, open, options));
   }
 
   /**

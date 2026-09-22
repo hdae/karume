@@ -1,13 +1,13 @@
 /** QAT family の構造門。通常 Gemma の入口とは別に固定格納と SRQ を要求する。 */
 import { codecLayout } from "@karume/runtime";
-import type { ModelComponent } from "../hub/components.ts";
-import type { Gemma4PleIndex } from "./ple.ts";
+import type { GraphOwner } from "../hub/components.ts";
+import type { Gemma4PleIndex } from "./ple-index.ts";
 
-type Graph = ModelComponent["graph"];
+type Graph = GraphOwner["graph"];
 export type Gemma4QatModel = "e2b" | "e4b";
 
 /**
- * モデル → PLE sidecar の格納型（TS 側の正本）。
+ * モデル → PLE の格納型（TS 側の正本）。
  *
  * MUST: 層数など別の鍵から導き直さない — 判別規則が 2 実装に割れると、3 つ目のモデルが
  * 増えたとき片方だけが古い写像を使い続ける。`Gemma4QatModel` に欄を足せば型検査が欠落を

@@ -49,8 +49,8 @@ switches. Unknown keys are rejected rather than silently ignored.
 | `--seed <n>`                     | asset default           | Sampling seed.                                                                                                     |
 | `--capacity <n>`                 | asset default           | Logical positions this conversation reserves KV for.                                                               |
 | `--chunk-length <n>`             | asset default           | Rows per prefill run.                                                                                              |
-| `--max-resident-ple-bytes <n>`   | twice the largest shard | Host RAM budget for the resident PLE sidecar.                                                                      |
-| `--ple-residency <host\|gpu>`    | `host`                  | Keep the PLE sidecar on the GPU and gather it there. Fails loudly when it does not fit one storage binding.        |
+| `--max-resident-ple-bytes <n>`   | twice the largest block | Host RAM budget for the resident PLE blocks and rows.                                                              |
+| `--ple-residency <host\|gpu>`    | `host`                  | Keep the PLE tables on the GPU and gather them there. Fails loudly when they do not fit one storage binding.       |
 | `--speculative`                  | off                     | Build the MTP drafter and speculate while decoding. Speed only — the token sequence does not change.               |
 | `--diagnostics`                  | off                     | Print the per-op GPU time breakdown of the last run of each turn to stderr. Not usable on macOS/Metal — see below. |
 

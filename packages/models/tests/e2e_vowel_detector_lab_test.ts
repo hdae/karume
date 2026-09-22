@@ -30,7 +30,7 @@
  */
 
 import { assert, assertEquals } from "@std/assert";
-import { parseManifest, resolveFiles } from "@karume/hub";
+import { parseManifest, resolveSelection } from "@karume/hub";
 import type { Manifest } from "@karume/hub";
 import { acquireGpu, prepareModel } from "@karume/runtime";
 import { decodeWav, VowelDetectorPipeline } from "../mod.ts";
@@ -118,10 +118,21 @@ const RUNNABLE = GPU_AVAILABLE && ASSETS_AVAILABLE;
 const loadLocalAssets = async (
   manifest: Manifest,
 ): Promise<Record<string, Uint8Array<ArrayBuffer>>> => {
-  const files = resolveFiles(manifest, {});
+  const selection = resolveSelection(manifest, {});
   let assets: Record<string, Uint8Array<ArrayBuffer>> = {};
-  for (const key of Object.keys(files)) {
-    assets = { ...assets, [key]: await Deno.readFile(new URL(files[key].path, DIST_DIR)) };
+  // MUST: 長さ 0 の part も並べる（添字が容器の中の id — 飛ばすと以降が 1 つずつ繰り上がる）。
+  for (const name of Object.keys(selection.containers)) {
+    const { parts } = selection.containers[name];
+    for (const [index, ref] of parts.entries()) {
+      assets = {
+        ...assets,
+        [`${name}[${index}]`]: await Deno.readFile(new URL(ref.path, DIST_DIR)),
+      };
+    }
+  }
+  for (const name of Object.keys(selection.assets)) {
+    const { path } = selection.assets[name];
+    assets = { ...assets, [name]: await Deno.readFile(new URL(path, DIST_DIR)) };
   }
   return assets;
 };

@@ -4,7 +4,7 @@
  * 束ねるのは 4 つで、どれも既に別の場所で正本を持っている:
  *
  * 1. 製品グラフ（PLE 外出し + 最終行 logits 出口）の Session — `tools/export-recipes/gemma4/
- *    export_product.py` が書く shard 列
+ *    export_product.py` の出力を移行 CLI が畳んだ容器）
  * 2. ホスト PLE gather（`src/gemma/ple.ts` — ADR
  *    [0085](../../../../docs/decisions/0085-ple-host-gather.md)）を
  *    {@link GenerationWiring.derivedInputs} の席へ差す
@@ -22,15 +22,15 @@
  * {@link Gemma4Pipeline.fromAssets} は取得済みバイト列から組む。**既定値は置かない** —
  * chunk 長も容量も位置上限も資産世代ごとに動くので、黙って古い数を使う形を作らない。
  *
- * MUST: PLE sidecar は配布形でも**全量常駐させない**（ADR 0085 決定 3）。`fromPretrained` は
- * shard を `assets` の遅延側で受け（`hub/components.ts` の `eagerAssets`）、触った 1 本だけを
- * 永続キャッシュから読み直す。
+ * MUST: PLE は配布形でも**全量常駐させない**（ADR 0085 決定 3）。索引も値も `model` 容器の
+ * 資産（ADR 0109 決定 4）で、触った block だけが永続キャッシュから区間読みされる。
  *
  * ## MUST: id 空間を相互照合する（ADR 0085 決定 5）
  *
- * tokenizer が生成しうる id / 主 embedding の vocab 行数 / PLE sidecar の行数を
- * {@link admitGemma4} が突き合わせる。ここがずれると **OOB ではなく「別 token の有効な行」**を
- * 引く（例外なしで沈黙して壊れる）ので、fail loudly の門を置く場所はここしかない。
+ * tokenizer が生成しうる id / 主 embedding の vocab 行数 / PLE の索引の行数を
+ * {@link admitGemma4} と {@link buildGemma4Program} が突き合わせる。ここがずれると **OOB では
+ * なく「別 token の有効な行」**を引く（例外なしで沈黙して壊れる）ので、fail loudly の門を置く
+ * 場所はここしかない。
  *
  * ## MUST: 全モジュール副作用ゼロ（import 時実行・グローバル可変状態の禁止 — CLAUDE.md）
  */
@@ -56,8 +56,7 @@ import {
   type DistributionSource,
   type HubRepoRef,
   loadManifest,
-  openAsset,
-  resolveFiles,
+  resolveSelection,
   type StreamAssetsOptions,
 } from "@karume/hub";
 
@@ -65,11 +64,15 @@ import { createOperationChain } from "../concurrency/serial.ts";
 import { ModelInputError } from "../errors.ts";
 import {
   assetComponentOpener,
-  loadShardComponents,
-  type ModelComponent,
-  readCachedAsset,
+  type ComponentOpener,
+  type GraphOwner,
+  loadContainerComponents,
 } from "../hub/components.ts";
-import { type FromPretrainedHubOptions, hubLoadOptions } from "../hub/load-options.ts";
+import {
+  type FromPretrainedComponentOptions,
+  type FromPretrainedHubOptions,
+  hubLoadOptions,
+} from "../hub/load-options.ts";
 import { readAssetBuffer } from "../hub/asset-readers.ts";
 import { toManifestSource } from "../hub/repo-ref.ts";
 import { disposeSteps } from "../session/dispose-steps.ts";
@@ -101,14 +104,8 @@ import {
   type SpeculationGateOptions,
 } from "../generation/speculation-gate.ts";
 import { type SamplerSpec, snapshotSpec } from "../generation/sampler.ts";
-import {
-  createGemma4Ple,
-  type Gemma4Ple,
-  type Gemma4PleIndex,
-  type Gemma4PleReadOptions,
-  type Gemma4PleShardSource,
-  parseGemma4PleIndex,
-} from "./ple.ts";
+import { createGemma4Ple, type Gemma4Ple } from "./ple.ts";
+import { type Gemma4PleIndex, readGemma4PleIndex } from "./ple-index.ts";
 import {
   assertGemma4PleResidency,
   createGemma4PleResident,
@@ -152,67 +149,34 @@ const INPUT_IDS = "input_ids";
 const PER_LAYER_INPUTS = "per_layer_inputs";
 const LAST_ROW = "last_row";
 
-/**
- * 配布形（manifest）の取得キー — weights 1 本と、全量で受け取る assets 2 本。
- *
- * MUST: PLE sidecar の shard は {@link EAGER_ASSETS} に**入れない**。1 本 250MiB 級 × 9 本で、全量常駐
- * させると ADR 0085 決定 3（触った shard だけ遅延ロード + LRU）そのものが成立しなくなる。
- * 取得キーは索引が書いたファイル名（`ple.json` の `shards[].file`）なので、遅延側の表は
- * 「eager に並べなかった残り」として自動的に PLE shard だけになる。
- */
+/** manifest の weights / assets 表に現れる名前（ADR 0041 §3 の規約名）。 */
 const MODEL = "model";
 /**
  * 投機（MTP drafter）を使うときだけ足す weights の役割（ADR 0096 段 2 §5）。
  *
- * MUST: 既定では**取得キーの表に載せない**（`resolveFiles` の `weights` で `model` だけに
- * 絞る）。載せると shard 面がこれを「用途不明の資産」として全量取得したうえ、遅延資産の
- * 突合（{@link assertPleShardAssets} は「遅延側 = PLE shard ちょうど」を要求する）が
- * **投機を使わないロードで**落ちる。
+ * MUST: 既定では**取る部品の表に載せない**（`resolveSelection` の `weights` で `model` だけに
+ * 絞る）。載せると投機を使わないロードでも drafter の descriptor と重みの part が落ちる。
  */
 const DRAFTER = "drafter";
 const TOKENIZER_ASSET = "tokenizer";
-const PLE_INDEX_ASSET = "ple_index";
-const EAGER_ASSETS: readonly string[] = [TOKENIZER_ASSET, PLE_INDEX_ASSET];
 
 /**
  * 取得済み資産から組むときの入力（**製品系列 1 世代ぶん**）。
  *
- * MUST: PLE sidecar だけ「バイト列」ではなく**読み口**を受ける。全量は i8 で 2,240MiB あり、
- * 常駐させると単一 ArrayBuffer 天井の議論（ADR 0085 決定 2）をホスト側で再現することになる。
- * 触った shard だけを遅延ロードする形（同 決定 3）が成立する唯一の受け方である。
+ * PLE はもう呼び手が用意する資産ではない — 索引も値も `model` 容器の中に在る（ADR 0109
+ * 決定 4）ので、この面も `model` の part 列を渡すだけで PLE まで揃う。
  */
 export type Gemma4Assets = {
   readonly config: Gemma4PipelineConfig;
-  /** 製品グラフのコンテナ shard 列（**宣言順** — 先頭がグラフ shard。ADR 0081）。 */
+  /**
+   * 製品グラフの容器（`krm`）の **part 列**（part 0 から添字順・長さ 0 の part も並べる）。
+   *
+   * MUST: 添字は part の id そのものである。長さ 0 の part を飛ばすと以降が 1 つずつ繰り上がり、
+   * 別の part として読まれる。
+   */
   readonly model: readonly Uint8Array<ArrayBuffer>[];
   /** compile 済み tokenizer 資産のバイト列（ADR 0084 決定 1）。 */
   readonly tokenizer: Uint8Array<ArrayBuffer>;
-  /** PLE sidecar の索引（`ple.json` のバイト列）。 */
-  readonly pleIndex: Uint8Array<ArrayBuffer>;
-  /**
-   * PLE sidecar shard 1 本の**読み口を開く**（ファイル / hub の `openAsset` — 呼び手の責務）。
-   *
-   * 返す読み口は全量（`readAll`）が必須で、区間読み（`range`）は任意能力である。`range` を
-   * 持たせない読み口では従来どおり「触った shard を全量読み → LRU 常駐」だけが起き、持たせると
-   * decode の 1 token が 253MiB の全量読みではなく 9,100 B の 2 読みになる（ADR 0085 追記
-   * 2026-09-07 — 方針表は `src/gemma/ple.ts` の `createGemma4Ple`）。
-   *
-   * 返した読み口の `readAll` / `range.read` が受ける `options.signal` は**その読みを起こした
-   * 生成**の中断で、**best-effort**（無視しても壊れない — 中断が「この shard を読み終わって
-   * から」効くだけ）。全量読みは 1 本 250MiB 級なので、対話的に止める使い方をするなら見る
-   * 価値がある。
-   *
-   * open 自身が受ける `options.signal` も**その open を起こした生成**の中断で、開く動作が待つ
-   * ぶん（hub の HF 取得元は在庫の無い参照で相 1 の温めを 1 度だけ挟む）に効く。
-   *
-   * MUST NOT: **開いた読み口が open 時の `options.signal` を保持しない**。handle は
-   * pipeline の寿命ぶんキャッシュされるので、最初の生成の signal を握った読み口を作ると、
-   * その生成が終わった後の読みが全部その中断に道連れになる。中断は読みごとの signal が担う。
-   */
-  readonly openPleShard: (
-    file: string,
-    options?: Gemma4PleReadOptions,
-  ) => Promise<Gemma4PleShardSource>;
 };
 
 export type Gemma4PipelineOptions = {
@@ -222,23 +186,22 @@ export type Gemma4PipelineOptions = {
    */
   readonly gpu?: GpuContext;
   /**
-   * PLE sidecar の常駐に使ってよい**ホスト RAM の上限（バイト）**（LRU — ADR 0085 決定 3）。
+   * PLE の常駐に使ってよい**ホスト RAM の上限（バイト）**（LRU — ADR 0085 決定 3）。
    *
-   * 省略時は最大 shard 2 本ぶん（`ple.ts` の `defaultGemma4PleResidentBytes`）。
-   * `0` は全量 shard も量子化行も保持しない。予算は値や token 列を変えない。
+   * 省略時は最大 block 2 本ぶん（`ple-index.ts` の `defaultGemma4PleResidentBytes`）。
+   * `0` は全量 block も量子化行も保持しない。予算は値や token 列を変えない。
    *
-   * NOTE: 本数ではなくバイトで受ける — shard 幅は資産世代で変わるので、「N 本」は世代ごとに
-   * 違う RAM を意味する（ADR 0085 追記 2026-09-02）。区間読みが無い取得元は全量 shard の
-   * LRU なので、予算を絞ると shard の読み直しが増える。
-   * NOTE: **区間読みを持つ取得元**（`denoDirectory` など）では、空きに載る全量 shard と、
-   * さらに残った空きの量子化行（最大 256 行）で予算を共有する。全量 shard を優先し、行の
-   * 保存では shard を追い出さない。予算を絞ると行の再利用が減る場合がある（ADR 0085）。
+   * NOTE: 本数ではなくバイトで受ける — block 幅は資産世代で変わるので、「N 本」は世代ごとに
+   * 違う RAM を意味する（ADR 0085 追記 2026-09-02）。
+   * NOTE: 空きに載る全量 block と、さらに残った空きの量子化行（最大 256 行）で予算を共有する。
+   * 全量 block を優先し、行の保存では block を追い出さない。予算を絞ると行の再利用が減り、
+   * block の読み直しが増える（ADR 0085）。
    */
   readonly maxResidentPleBytes?: number;
   /**
-   * PLE sidecar をどこに置くか（既定 `"host"` = 現行そのまま・ADR 0085 追記〈GPU 常駐席〉）。
+   * PLE をどこに置くか（既定 `"host"` = 現行そのまま・ADR 0085 追記〈GPU 常駐席〉）。
    *
-   * `"gpu"` は sidecar の量子化バイト列を**ロード時に 1 度だけ** GPU へ上げ、run ごとの
+   * `"gpu"` は PLE の量子化バイト列を**ロード時に 1 度だけ** GPU へ上げ、run ごとの
    * `per_layer_inputs` を GPU 内 gather で作る（ホストの逆量子化と writeBuffer が消える —
    * decode で約 0.25 ms/token）。prefill も decode も同じ経路を通る。
    *
@@ -388,8 +351,8 @@ export type Gemma4PipelineOptions = {
    * 投機デコード用の **MTP drafter を一緒に組む**（ADR 0096 — 省略時は組まない）。
    *
    * 指定すると配布形の `drafter` weights も取得し、target Session の埋め込み表 1 本を借りる
-   * drafter Session を 1 本張る（バイトは複製されない）。**指定しない限り drafter の shard は
-   * 1 バイトも落ちない** — 取得キーの表そのものから外れる（{@link DRAFTER} の MUST）。
+   * drafter Session を 1 本張る（バイトは複製されない）。**指定しない限り drafter の part は
+   * 1 バイトも落ちない** — 選択そのものから外れる（{@link DRAFTER} の MUST）。
    *
    * drafter が居る pipeline の `chat` / `sequence` は**既定で投機を張る**（1 verify run が
    * 最大 `k+1` token を確定させる）。ターン / 会話ごとに切るノブは
@@ -484,6 +447,7 @@ const defaultChunkBuckets = (chunkLength: number): readonly number[] =>
 export type Gemma4FromPretrainedOptions =
   & Gemma4PipelineOptions
   & FromPretrainedHubOptions
+  & FromPretrainedComponentOptions
   & {
     /** manifest のモデル名（省略時は `defaultModel`）。 */
     readonly model?: string;
@@ -615,7 +579,7 @@ type Gemma4State = {
    * MUST: `PreparedModel` ではなくグラフだけを持つ（`hub/components.ts` の同 MUST — 全量の
    * バイト列を掴んだままにしない）。
    */
-  readonly graph: ModelComponent["graph"];
+  readonly graph: GraphOwner["graph"];
   /** 生成ループが読む内部配線（`createGenerationSequence` へ渡す実体）。 */
   readonly wiring: GenerationWiring;
   /**
@@ -626,7 +590,7 @@ type Gemma4State = {
    */
   readonly program: GenerationProgram;
   /**
-   * PLE sidecar のホスト側キャッシュ（**{@link Gemma4Pipeline.dispose} の解放先**）。
+   * PLE のホスト側キャッシュ（**{@link Gemma4Pipeline.dispose} の解放先**）。
    *
    * MUST: 席は dispose のためだけ — 引くのは `wiring.derivedInputs.derive` の閉包だけである。
    * どちらも {@link buildGemma4Program} の 1 回の返り値なので「片方だけ差し替えた」形は書けず、
@@ -687,66 +651,24 @@ type Gemma4State = {
 };
 
 /**
- * 製品グラフ以外の資産（2 面が別の経路で用意し、解釈は 1 本に集める）。
- *
- * MUST: PLE sidecar だけ「バイト列」ではなく**読み口**を受ける（{@link Gemma4Assets} の同 MUST）。
+ * admission を通った材料のうち、家族の門が確定させた索引と manifest の資産（2 面が別の経路で
+ * 用意し、解釈は 1 本に集める）。
  */
 type Gemma4SidecarAssets = {
   readonly tokenizer: Uint8Array<ArrayBuffer>;
   /**
    * **解析済み**の PLE 索引。
    *
-   * MUST: 解析は面ごとに 1 回だけ（`ple.json` を 2 度開かない）。`fromPretrained` は遅延資産
-   * との突合にも索引が要るので、その 1 回をここへ持ち上げてある。
+   * MUST: 解析は面ごとに 1 回だけ（`ple_index` を 2 度開かない）。索引と容器の資産の突合
+   * （`./ple-index.ts` の `assertGemma4PleAssets`）にも索引が要るので、その 1 回を admission
+   * 席へ持ち上げてある。
    */
   readonly pleIndex: Gemma4PleIndex;
-  readonly openPleShard: (
-    file: string,
-    options?: Gemma4PleReadOptions,
-  ) => Promise<Gemma4PleShardSource>;
-};
-
-/** `ple.json` のバイト列を索引へ落とす（fatal decode → JSON → 受理形）。 */
-const parsePleIndexAsset = (bytes: Uint8Array<ArrayBuffer>): Gemma4PleIndex =>
-  parseGemma4PleIndex(
-    JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)),
-  );
-
-/**
- * PLE 索引が宣言する shard と、manifest の**遅延資産**が**ちょうど一致**することを見る門。
- *
- * MUST: 両方向を見る。索引にあって assets に無い shard は、その token 範囲を初めて引いた
- * ターン（= 会話の途中・3.7GiB のロード完了後）まで落ちない。assets にあって索引に無い
- * ファイルは「配布形が宣言した資産を 1 本も読まないまま動く」形で、永久に検出されない。
- * MUST: 呼ぶのは Session も重み shard も触る前（`#build` の前）。
- *
- * MUST: 「遅延資産 = PLE shard」が成り立つのは {@link EAGER_ASSETS} が tokenizer / ple_index の
- * 2 本ちょうどだからである（`deferred` は「eager に並べなかった残り」— `src/hub/components.ts`）。
- * eager を増やすときはこの式も直す。
- *
- * NOTE: `export` は門を直接叩くテストのため（実経路は配布形ミラー 3.7GiB のロードの後）。
- * `mod.ts` / サブパス面には出さない（ADR 0008）。
- */
-export const assertPleShardAssets = (
-  where: string,
-  index: Gemma4PleIndex,
-  deferredFiles: readonly string[],
-): void => {
-  const declared = new Set(index.shards.map((shard) => shard.file));
-  const supplied = new Set(deferredFiles);
-  const missing = [...declared].filter((file) => !supplied.has(file));
-  const extra = [...supplied].filter((file) => !declared.has(file));
-  if (missing.length === 0 && extra.length === 0) return;
-  throw new Error(
-    `${where}: PLE sidecar の索引と manifest の遅延資産が食い違う` +
-      `（索引にあって assets に無い: ${missing.join(" / ") || "なし"} /` +
-      ` assets にあって索引に無い: ${extra.join(" / ") || "なし"}）`,
-  );
 };
 
 /**
- * 取得済みバイト列を `openModel` へ渡せる ArrayBuffer にする（門の本体は 7 家族共有の
- * {@link readAssetBuffer} — 製品グラフの weight shard は 1 本 756MiB 級なので写さない）。
+ * 取得済みバイト列を `openContainer` へ渡せる ArrayBuffer にする（門の本体は 8 家族共有の
+ * {@link readAssetBuffer} — 製品グラフの part は 1 本 256MiB 級なので写さない）。
  */
 const assetBuffer = (
   where: string,
@@ -872,10 +794,11 @@ export const speculativeSetup = (
  * admission を通った材料 + 資産から静的配線を組む（`fromAssets` と `fromPretrained` が共有）。
  *
  * ここが id 空間の相互照合（ADR 0085 決定 5）を全部通す — ①tokenizer が生成しうる id
- * ②主 embedding の vocab 行数 ③PLE sidecar の行数。
+ * ②主 embedding の vocab 行数 ③PLE の索引の行数。
  */
 const buildGemma4Program = (
   admitted: Gemma4Admission,
+  open: ComponentOpener,
   assets: Gemma4SidecarAssets,
   options: Gemma4PipelineOptions,
   admission: GemmaFamilyAdmission,
@@ -885,11 +808,13 @@ const buildGemma4Program = (
   readonly tokenizer: GemmaTokenizer;
   readonly ple?: Gemma4Ple;
 } => {
-  const { config, vocabSize, capacitySymbol, component } = admitted;
+  const { config, vocabSize, capacitySymbol } = admitted;
   const entry = gemmaEntryName(admission.family);
+  // 供給口は admission が見たものと**同じ 1 本**（`open` は開いた部品を引き当てるだけ）。
+  const model = open(MODEL);
   if (admission.family === "gemma4-qat") {
     // model 名は admission が確定させた値をそのまま使う（層数から引き直さない）。
-    assertGemma4QatPle(admission.model, component.graph, assets.pleIndex);
+    assertGemma4QatPle(admission.model, model.graph, assets.pleIndex);
   }
   const ropeInputs = admission.family === "gemma4-qat" ? gemma4QatRopeInputs : gemma4RopeInputs;
   const tokenizer = new GemmaTokenizer(
@@ -902,12 +827,12 @@ const buildGemma4Program = (
         ` 主 embedding の vocab 行数 ${vocabSize} の外（別の語彙で焼かれた組み合わせ）`,
     );
   }
-  // ③ PLE sidecar の行数（この突合は `createGemma4Ple` が持つ — 同じ検査を 2 実装持たない）。
+  // ③ PLE の索引の行数（この突合は `createGemma4Ple` が持つ — 同じ検査を 2 実装持たない）。
   // GPU 常駐席ではホスト gather を組まず、同じ突合を `createGemma4PleResident` が通す。
   const ple = residency === "host"
     ? createGemma4Ple({
       index: assets.pleIndex,
-      openShard: assets.openPleShard,
+      openBlock: (asset) => model.asset(asset),
       vocabSize,
       ...(options.maxResidentPleBytes === undefined
         ? {}
@@ -921,12 +846,12 @@ const buildGemma4Program = (
     entry,
   );
   const wiring = createGenerationProgram({
-    graph: component.graph,
+    graph: model.graph,
     inputIds: INPUT_IDS,
     lastRow: LAST_ROW,
     // 出口は順序で引く（{@link GRAPH_OUTPUTS} — 本数は admission が既に見ている）。
-    logits: component.graph.outputs[0],
-    hidden: component.graph.outputs[1],
+    logits: model.graph.outputs[0],
+    hidden: model.graph.outputs[1],
     chunkLength,
     chunkBuckets: assertGemma4ChunkBuckets(
       options.chunkBuckets ?? defaultChunkBuckets(chunkLength),
@@ -941,7 +866,7 @@ const buildGemma4Program = (
     stopTokens: gemma4StopTokens(tokenizer),
     capacitySymbol,
     // ホスト由来の per-chunk 入力の席に PLE gather と RoPE の cos / sin を差す（ADR 0085 / 本波）。
-    // `options` は PLE へそのまま降ろす — shard 1 本 250MiB 級の読みが中断の届かない区間に
+    // `options` は PLE へそのまま降ろす — block 1 本 32MiB 級の読みが中断の届かない区間に
     // なるのを避ける（rope は同期の計算なので中断の窓を作らない）。
     // GPU 常駐席では `per_layer_inputs` の作り手が Session 側（常駐入力）へ移るので、
     // ホスト由来の席からは外して被覆だけを `residentInputs` で宣言する。
@@ -997,7 +922,7 @@ class GemmaPipeline {
       assertSpeculative(where, options.speculative);
     }
     // MUST: 席の指定は**資産を 1 バイトも読む前**に見る（`#build` でも同じ関数を通るが、
-    // そちらは 3.7GiB のロードの後である）。
+    // そちらは GB 級のロードの後である）。
     resolveGemma4PleResidency(where, options);
     const source = toManifestSource(
       ref,
@@ -1008,37 +933,38 @@ class GemmaPipeline {
     );
     const hubOptions: StreamAssetsOptions = hubLoadOptions(options);
     const loaded = await loadManifest(source, hubOptions);
-    const selection = {
+    const choice = {
       ...(options.model === undefined ? {} : { model: options.model }),
       ...(options.quant === undefined ? {} : { quant: options.quant }),
     };
     // MUST: 取る weights を役割で絞る（`ResolveOptions.weights`）。投機を使わないロードで
-    // drafter の shard が表に残ると、遅延資産の突合（{@link assertPleShardAssets}）が落ちる。
+    // drafter が表に残ると、その descriptor と重みの part まで落ちる。
     const componentKeys = options.speculative === undefined ? [MODEL] : [MODEL, DRAFTER];
-    const files = resolveFiles(loaded.manifest, {
-      ...selection,
+    const selection = resolveSelection(loaded.manifest, {
+      ...choice,
       weights: componentKeys,
     });
-    const { admitted, assets, deferred } = await loadShardComponents(
+    const { admitted, assets, open } = await loadContainerComponents(
       where,
       loaded,
-      files,
+      selection,
       componentKeys,
-      // 家族の門は admission 席で通す（重み shard を取る前 — `src/hub/components.ts`）。
+      // 家族の門は admission 席で通す（重みの part を取る前 — `src/hub/components.ts`）。
       async (open) => {
         const { config, quantName, quant } = gemma4ManifestConfig(
           loaded.manifest,
-          selection,
+          choice,
           family,
         );
-        // 未対応の宣言を無視して走らせない。重みshardの取得より前に拒否する。
+        // 未対応の宣言を無視して走らせない。重みの part の取得より前に拒否する。
         const quantSession = resolveGemmaSessionOptions(
           quant.session,
           options,
           `${where}: quant '${quantName}'`,
         );
+        const model = open(MODEL);
         const admitted = admitGemma4(
-          open(MODEL),
+          model,
           config,
           options.speculative === undefined ? undefined : open(DRAFTER),
         );
@@ -1047,12 +973,12 @@ class GemmaPipeline {
           ? {
             family,
             model: admitGemma4Qat(
-              admitted.component.graph,
-              selection.model ?? loaded.manifest.defaultModel,
+              model.graph,
+              choice.model ?? loaded.manifest.defaultModel,
             ),
           }
           : { family };
-        // 配布形が宣言した `requiredLimits` は**重み shard を取る前**にここで見る
+        // 配布形が宣言した `requiredLimits` は**重みの part を取る前**にここで見る
         // （ADR 0089 決定 5 — 共有 GPU ならその limits、自前で取る経路はアダプタ実測値）。
         // 他 7 家族と違って席が閉包側にあるのは、{@link admitGemma4} が構築オプションを
         // 受け取らない（グラフだけで決まる）ため。
@@ -1061,78 +987,30 @@ class GemmaPipeline {
           options.gpu,
           `${entry}: quant '${quantName}'`,
         );
-        return { ...admitted, quantSession, admission };
+        // PLE の索引は**容器の資産**（ADR 0109 決定 4）なので、この席で読めて突合まで閉じる —
+        // 索引が指す block が容器に在るか・役割と長さが宣言どおりかを全件列挙する。
+        //
+        // MUST: 宣言だけで落とせる門を**全部通した後**に置く。ここだけが部品のバイト列に触る段で
+        // ある（数 KB の索引 1 本 — `values` / `scales` の block は 1 本も読まない）。「重みを
+        // 1 バイトも取らない」が保てるのは、全量読みの資産が**重み block と同居しない**という
+        // 書き手の規約（ADR 0109 決定 4 / container-v1 §4.2）があるからで、索引の part を取っても
+        // 重みの part には手が伸びない。
+        const pleIndex = await readGemma4PleIndex(where, model);
+        return { ...admitted, pleIndex, quantSession, admission };
       },
       {
         ...hubOptions,
-        eagerAssets: EAGER_ASSETS,
         ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }),
+        ...(options.components === undefined ? {} : { components: options.components }),
       },
     );
-    // MUST: 遅延側は PLE sidecar **ちょうど**であること。索引が知らないファイルが残っていれば
-    // 「配布形が宣言した資産を 1 本も読まないまま動く」形で、逆に足りなければ会話の途中で
-    // 初めて落ちる（どちらもロードの時点で分かる）。
-    // 突合の本体は {@link assertPleShardAssets}（GPU も重み shard も触っていないこの位置で呼ぶ）。
-    const pleIndex = parsePleIndexAsset(
-      assetBytes(where, assets, PLE_INDEX_ASSET),
-    );
-    assertPleShardAssets(where, pleIndex, Object.keys(deferred));
-    // MUST: 取得層のオプションから `signal` を落とす（`hub/components.ts` の相 2 と同じ理由 —
-    // ロード 1 回の寿命を表す signal を、以後の生成が使う読み口へ持ち越さない）。載せ直すのは
-    // **その読みを起こした生成**の signal だけで、寿命が読み 1 回と一致する。
-    const { signal: _load, onProgress: _progress, ...streamOptions } = hubOptions;
-    // open に渡す `signal` は**温めの中断**用で、返る handle はそれを保持しない（hub ⑧ の契約）。
-    // HF 取得元は在庫の無い参照を開くとき相 1 の温めを 1 度だけ挟むので、全量 DL 1 本ぶんの待ちが
-    // open に乗る — その待ちを起こした生成の signal で降りられるようにする。handle は pipeline の
-    // 寿命ぶんキャッシュされる（`ple.ts` の `sources`）ので、handle 側が signal を保持していたら
-    // **最初の**生成の中断で以後の読みが全部道連れになる。読み 1 回の中断は `readAll` /
-    // `range.read` の `signal` が担う。
-    const openPleShard = async (
-      file: string,
-      readOptions: Gemma4PleReadOptions = {},
-    ): Promise<Gemma4PleShardSource> => {
-      if (!Object.hasOwn(deferred, file)) {
-        throw new Error(
-          `${where}: PLE sidecar の shard '${file}' が manifest の assets に無い` +
-            `（manifest が遅延資産として持つ shard: ${Object.keys(deferred).join(" / ")}）`,
-        );
-      }
-      const ref = deferred[file];
-      // 区間読みは**任意能力**（`openAsset` は取得元が持たなければ `undefined` を返す）。持たない
-      // 取得元では `range` を生やさず、従来どおり全量読み + LRU へ倒れる。
-      const reader = await openAsset(loaded, ref, {
-        ...streamOptions,
-        ...(readOptions.signal === undefined ? {} : { signal: readOptions.signal }),
-      });
-      return {
-        // 行の位置検査は**宣言 size** で行う（実体長ではない — `Gemma4PleShardSource.bytes`）。
-        bytes: ref.size,
-        readAll: (options: Gemma4PleReadOptions = {}) =>
-          readCachedAsset(where, loaded, ref, {
-            ...streamOptions,
-            ...(options.signal === undefined ? {} : { signal: options.signal }),
-          }),
-        ...(reader === undefined ? {} : {
-          range: {
-            cost: reader.cost,
-            read: async (
-              offset: number,
-              length: number,
-              options: Gemma4PleReadOptions = {},
-            ) =>
-              // hub が tight view を保証しているので、`buffer` がそのまま要求区間ちょうどになる。
-              (await reader.read(offset, length, options)).buffer,
-          },
-        }),
-      };
-    };
     return await GemmaPipeline.#build(
       admitted.admission,
       admitted,
+      open,
       {
         tokenizer: assetBytes(where, assets, TOKENIZER_ASSET),
-        pleIndex,
-        openPleShard,
+        pleIndex: admitted.pleIndex,
       },
       {
         ...options,
@@ -1153,7 +1031,7 @@ class GemmaPipeline {
     if (options.speculative !== undefined) {
       throw new Error(
         `${where}: speculative は受けられない` +
-          `（Gemma4Assets に drafter の shard 列が無い — 投機は fromPretrained から組む）`,
+          `（Gemma4Assets に drafter の容器が無い — 投機は fromPretrained から組む）`,
       );
     }
     // 席の指定は資産を 1 バイトも開く前に見る（`loadPretrained` と同じ位置づけ）。
@@ -1165,10 +1043,10 @@ class GemmaPipeline {
     const config = parseGemma4PipelineConfig(input.config);
     if (input.model.length === 0) {
       throw new Error(
-        `${where}: 製品グラフの shard 列が空（先頭がグラフ shard）`,
+        `${where}: 製品グラフの part 列が空（part 0 から添字順に並べる）`,
       );
     }
-    const shards = Object.fromEntries(
+    const parts = Object.fromEntries(
       input.model.map((
         bytes,
         index,
@@ -1177,23 +1055,27 @@ class GemmaPipeline {
         bytes,
       ]),
     );
-    const open = assetComponentOpener(
+    const open = await assetComponentOpener(
       where,
-      shards,
-      (key) => assetBuffer(where, shards, key),
+      parts,
+      (key) => assetBuffer(where, parts, key),
+      [MODEL],
     );
     // NOTE: `requiredLimits` の検査はこの面には無い — {@link Gemma4Assets} は manifest を
     // 持たない（バイト列と `config` だけ）ので、宣言そのものへ到達できない。実寸の検査は
     // Session 構築時の `assertWeightsWithinLimits`（ADR 0089 決定 1）が受け持つ。
-    const admitted = admitGemma4(open(MODEL), config);
+    const model = open(MODEL);
+    const admitted = admitGemma4(model, config);
+    // PLE の索引は容器の資産なので、取得面と**同じ 1 本**の門を通す（`readGemma4PleIndex` が
+    // 索引と block の整合まで見る）。
+    const pleIndex = await readGemma4PleIndex(where, model);
     // model 名はグラフと PLE の構成から判別する（この面は manifest を持たない）。
     const admission: GemmaFamilyAdmission = family === "gemma4-qat"
-      ? { family, model: admitGemma4Qat(admitted.component.graph) }
+      ? { family, model: admitGemma4Qat(model.graph) }
       : { family };
-    return await GemmaPipeline.#build(admission, admitted, {
+    return await GemmaPipeline.#build(admission, admitted, open, {
       tokenizer: input.tokenizer,
-      pleIndex: parsePleIndexAsset(input.pleIndex),
-      openPleShard: input.openPleShard,
+      pleIndex,
     }, options);
   }
 
@@ -1212,6 +1094,7 @@ class GemmaPipeline {
   static async #build(
     admission: GemmaFamilyAdmission,
     admitted: Gemma4Admission,
+    open: ComponentOpener,
     assets: Gemma4SidecarAssets,
     options: Gemma4PipelineOptions,
   ): Promise<Gemma4State> {
@@ -1219,6 +1102,7 @@ class GemmaPipeline {
     const residency = resolveGemma4PleResidency(entry, options);
     const { wiring, tokenizer, ple } = buildGemma4Program(
       admitted,
+      open,
       assets,
       options,
       admission,
@@ -1266,6 +1150,8 @@ class GemmaPipeline {
           `（GPU 内 gather は batch へ積むが、計測中は batch を開けない — ADR 0021）`,
       );
     }
+    // 供給口は admission が見たものと**同じ 1 本**（前段と後段が別の部品を握らない）。
+    const model = open(MODEL);
     let session: Session | undefined;
     let pleGpu: Gemma4PleResident | undefined;
     try {
@@ -1273,7 +1159,7 @@ class GemmaPipeline {
       pleGpu = residency === "host" ? undefined : await createGemma4PleResident({
         gpu,
         index: assets.pleIndex,
-        openShard: (file) => assets.openPleShard(file),
+        openBlock: (asset) => model.asset(asset),
         vocabSize: admitted.vocabSize,
         inputName: PER_LAYER_INPUTS,
         idsName: INPUT_IDS,
@@ -1281,7 +1167,7 @@ class GemmaPipeline {
         rows: [1, ...wiring.chunkBuckets, wiring.chunkLength],
         entry,
       });
-      session = await admitted.component.createSession(gpu, sessionOptions);
+      session = await model.createSession(gpu, sessionOptions);
       // GPU 常駐席では greedy を使わない run（prefill・診断付き decode）も包みを通す —
       // `per_layer_inputs` を差す場所がここしかない。greedy そのものを使うかは生成面が
       // `onRun` の有無で決めるので、包みの有無とは独立である。
@@ -1291,6 +1177,7 @@ class GemmaPipeline {
           : undefined;
       const drafter = await GemmaPipeline.#buildDrafter(
         admitted,
+        open,
         session,
         gpu,
         sessionOptions,
@@ -1302,7 +1189,7 @@ class GemmaPipeline {
         session,
         stateAttentionReduce: sessionOptions.stateAttentionReduce,
         ...(greedyOutput === undefined ? {} : { greedyOutput }),
-        graph: admitted.component.graph,
+        graph: model.graph,
         wiring,
         program: generationProgramFace(wiring),
         ...(ple === undefined ? {} : { ple }),
@@ -1347,12 +1234,14 @@ class GemmaPipeline {
    */
   static async #buildDrafter(
     admitted: Gemma4Admission,
+    open: ComponentOpener,
     target: Session,
     gpu: GpuContext,
     sessionOptions: SessionOptions,
   ): Promise<Gemma4Drafter | undefined> {
     const { drafter } = admitted;
     if (drafter === undefined) return undefined;
+    const component = open(DRAFTER);
     let sharedWeights: Record<string, SharedWeight> = {};
     for (const borrower of Object.keys(drafter.admission.sharedWeights)) {
       sharedWeights = {
@@ -1363,12 +1252,12 @@ class GemmaPipeline {
       };
     }
     return {
-      session: await drafter.component.createSession(gpu, {
+      session: await component.createSession(gpu, {
         ...sessionOptions,
         sharedWeights,
       }),
       // 見積り専用（`estimateSessionMemory` が drafter の常駐重みをこれから引く）。
-      graph: drafter.component.graph,
+      graph: component.graph,
       outputs: drafter.admission.outputs,
       rope: admitted.config.rope,
       hiddenSize: drafter.admission.hiddenSize,
@@ -1765,13 +1654,13 @@ class GemmaPipeline {
 
   /**
    * 解放する。渡した sequence を先に畳み、**drafter Session（居れば）→ target Session** の順に
-   * 畳み、**内部で取得した GPU だけ**破棄し、最後に PLE sidecar のホストキャッシュを返す。
+   * 畳み、**内部で取得した GPU だけ**破棄し、最後に PLE のホストキャッシュを返す。
    *
    * MUST: in-flight の生成の完了を待ってから破棄する（flush-before-destroy）— 破棄も鎖に
    * 載せることで、待ちと破棄の順序を 1 箇所で決める。2 度目以降も同じ完了を返す。
    *
    * MUST: PLE も解放する。GPU 常駐と違い**ホスト RAM**（{@link Gemma4PipelineOptions.maxResidentPleBytes}
-   * ぶん = 既定で最大 shard 2 本ぶん）なので、口が無いと「dispose 済みのハンドルを 1 つ持ち
+   * ぶん = 既定で最大 block 2 本ぶん）なので、口が無いと「dispose 済みのハンドルを 1 つ持ち
    * 続ける」だけでその RAM がプロセス寿命まで残る。
    *
    * MUST: 途中の 1 本が投げても**残りの段まで進む**。`#disposal` は失敗も含めて 1 本を保持する
@@ -1836,10 +1725,13 @@ export class Gemma4Pipeline extends GemmaPipeline {
     super(state);
   }
   /**
-   * 配布形から取得して組む（`loadManifest` → `resolveFiles` → **グラフ shard だけ**を
-   * 取って `prepareModel` → 家族 admission → 重み shard と PLE sidecar の prefetch →
-   * tokenizer と索引の取得 → 構築）。重み shard は Session を組むときに 1 本ずつ流れ、PLE
-   * sidecar は**触った 1 本だけ**が永続キャッシュから読み直される（ADR 0070 / 0085 決定 3）。
+   * 配布形から取得して組む（`loadManifest` → `resolveSelection` → **各部品の descriptor
+   * （part 0）だけ**を取って家族 admission → 重みの part を温める → tokenizer の取得 → 構築）。
+   * block は Session を組むその瞬間に part 順で読まれ、PLE は**触った block だけ**が永続
+   * キャッシュから区間読みされる（ADR 0109 / 0085 決定 3）。
+   *
+   * 部品を別リポの同じ役割で差し替えるときは
+   * {@link FromPretrainedComponentOptions.components}（役割は `model` と `drafter`）。
    *
    * **`ref` は必須**（取得元に既定は無い — `src/hub/repo-ref.ts` の MUST）。パッケージ版が検証した
    * 取得元は {@link GEMMA4_SOURCES}（`./config.ts`）の `"gemma4"` — 再現性を自分で固定するなら
@@ -1861,9 +1753,10 @@ export class Gemma4Pipeline extends GemmaPipeline {
    * 取得済み資産から組む。資産の解釈・グラフとの突合・id 空間の相互照合を全てここで済ませ、
    * **製品グラフの Session を 1 本張って**返す。
    *
-   * 製品グラフは配布形の時点で常に分割されている（ADR 0081）ので、`model` は**宣言順の
-   * shard 列**（先頭がグラフ shard）を受け、`fromPretrained` と同じ shard 逐次面へ流す
-   * （受け口の実装は `src/hub/components.ts` — 7 家族共有の {@link assetComponentOpener}）。
+   * `model` は容器（`krm`）の **part 列**（part 0 から添字順・長さ 0 の part も含む）を受け、
+   * バイト列を連結せず part 列のまま開く（受け口の実装は `src/hub/components.ts` — 8 家族共有の
+   * {@link assetComponentOpener}）。PLE も索引も容器の中に在るので、この面へ渡す資産は
+   * part 列と tokenizer だけである（ADR 0109 決定 4）。
    *
    * MUST: `config` は {@link fromPretrained} と**同じ門**（{@link parseGemma4PipelineConfig}）を
    * 通す。TS の型は未知キーも値域も見ないので、門が無いと `temperature: -1` のような宣言が

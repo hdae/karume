@@ -1,5 +1,7 @@
 /**
- * 8 家族の `fromPretrained` が hub へ透過するオプション — **型と写しの 1 本**。
+ * 8 家族の `fromPretrained` が共通で持つオプション — **型と写しの 1 本**。取得層へ透過する
+ * ノブ（{@link FromPretrainedHubOptions}）と、部品差し替え席
+ * （{@link FromPretrainedComponentOptions}）の 2 つ。
  *
  * MUST: 家族ごとに複製しない。以前は同じ 5 欄と同じスプレッドが 8 か所へ手書きで並んでいて、
  * hub が欄を 1 つ増やしたとき（0.11.0 の {@link FromPretrainedHubOptions.onRetry}）に 8 か所とも
@@ -16,6 +18,7 @@ import type {
   LoadManifestOptions,
   RetryDiagnostic,
 } from "@karume/hub";
+import type { ComponentSource } from "./components.ts";
 
 /**
  * `XFromPretrainedOptions` が共通で持つ取得層のノブ（hub へそのまま透過する）。
@@ -51,12 +54,29 @@ export type FromPretrainedHubOptions = {
 };
 
 /**
+ * `XFromPretrainedOptions` が共通で持つ**部品差し替え席**（ADR 0108 決定 19 / ADR 0109 決定 10）。
+ */
+export type FromPretrainedComponentOptions = {
+  /**
+   * 役割（manifest の weights 名）→ 別の `karume/5` リポの**同じ役割**。渡した役割の部品だけが
+   * その出所から来て、残りは元のリポのまま組む。
+   *
+   * MUST: 差し替えられるのは**グラフ記述（`descriptor.graph` の sha256）が同一**の部品だけ。
+   * 同一性は**重みを 1 バイトも取る前**に 2 つの manifest の宣言だけで見て、違えば拒否する
+   * （束縛表の不足 / 余剰 0 も descriptor だけで確かめる）。この系列が持たない役割名は
+   * fail loudly — 綴り間違いを黙って「差し替えない」に畳まない。
+   */
+  readonly components?: Readonly<Record<string, ComponentSource>>;
+};
+
+/**
  * `fromPretrained` のオプション → hub のオプション。**定義済みの欄だけ**を写す
  * （`key: undefined` を作らない — 明示的な `undefined` は「無指定」と別物として hub の
  * 分岐に効きうる）。
  *
- * `onProgress` は写さない — 進捗は家族ごとに集約の要否が違い、`loadShardComponents` へ渡す側で
- * 別途載せる（manifest 取得に進捗は無い）。
+ * `onProgress` は写さない — 進捗は家族ごとに集約の要否が違い、`loadContainerComponents` へ渡す
+ * 側で別途載せる（manifest 取得に進捗は無い）。`components` も写さない — 取得層のノブではなく
+ * 継ぎ目（`hub/components.ts`）が受ける席である。
  */
 export const hubLoadOptions = (
   options: FromPretrainedHubOptions & { readonly signal?: AbortSignal },

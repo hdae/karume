@@ -24,6 +24,15 @@
 export type { FromPretrainedHubOptions } from "./src/hub/load-options.ts";
 
 /**
+ * 8 家族の `fromPretrained` オプション型が共有する**部品差し替え席**（ADR 0108 決定 19 /
+ * ADR 0109 決定 10）— 役割（manifest の weights 名）→ 別の `karume/5` リポの同じ役割。
+ * 差し替えられるのは**グラフ記述の sha256 が同一**の部品だけで、同一性は重みを 1 バイトも
+ * 取る前に 2 つの manifest の宣言だけで見る。
+ */
+export type { FromPretrainedComponentOptions } from "./src/hub/load-options.ts";
+export type { ComponentSource } from "./src/hub/components.ts";
+
+/**
  * 入力起因の失敗（渡した要求そのものが受理できない = 入力を直せば通る）。**家族横断で 1 本**
  * なので、8 家族を同じホストに載せる側はこれ 1 つで 400 と 500 を分けられる。内部不変条件の
  * 破れ・資産の齟齬・GPU 容量は素の `Error` のまま飛ぶ（各サブパスを参照）。
@@ -178,17 +187,7 @@ export type {
  */
 export type { SpeculationGateOptions } from "./src/generation/speculation-gate.ts";
 /**
- * PLE sidecar shard 1 本の読み口（`Gemma4Assets.openPleShard` が返す形 — `fromAssets` を使う
- * 消費者が**実装する**側。区間読み `range` は任意能力で、持たせると decode の 1 token が
- * 全量読みではなく行 2 区間の読みになる。`./gemma` を参照）。
- */
-export type { Gemma4PleShardSource } from "./src/gemma/ple.ts";
-/**
- * `Gemma4PleShardSource` の読み 1 回へ透過するノブ（`signal` 1 本・best-effort。`./gemma` を参照）。
- */
-export type { Gemma4PleReadOptions } from "./src/gemma/ple.ts";
-/**
- * PLE sidecar の置き場（`Gemma4PipelineOptions.pleResidency` の値域 — 既定 `"host"`。
+ * PLE の置き場（`Gemma4PipelineOptions.pleResidency` の値域 — 既定 `"host"`。
  * `"gpu"` は量子化バイト列を GPU に常駐させ gather も GPU 内で行う opt-in の席。`./gemma` を参照）。
  */
 export type { Gemma4PleResidency } from "./src/gemma/ple-gpu.ts";

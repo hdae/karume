@@ -42,7 +42,7 @@
  */
 
 import { assertEquals, assertFalse, assertRejects, assertStrictEquals } from "@std/assert";
-import { parseManifest, resolveFiles } from "@karume/hub";
+import { type FileRef, parseManifest, resolveSelection, selectionRefs } from "@karume/hub";
 import { acquireGpu } from "@karume/runtime";
 import type { Manifest } from "@karume/hub";
 import {
@@ -192,9 +192,17 @@ const servedOrigins = (
     origins.set(key, served);
   };
   add(REPO, REVISION_SHA, dir, "karume.json");
-  const files = resolveFiles(manifest, { quant, ...(model === undefined ? {} : { model }) });
-  for (const key of Object.keys(files)) {
-    const ref = files[key];
+  const selection = resolveSelection(manifest, {
+    quant,
+    ...(model === undefined ? {} : { model }),
+  });
+  const refs: FileRef[] = [
+    ...Object.keys(selection.containers).flatMap((name) => [
+      ...selection.containers[name].parts,
+    ]),
+    ...Object.keys(selection.assets).map((name) => selection.assets[name]),
+  ];
+  for (const ref of refs) {
     if (ref.repo === undefined || ref.revision === undefined) {
       add(REPO, REVISION_SHA, dir, ref.path);
       continue;
@@ -504,10 +512,10 @@ Deno.test({
 // --- 全量面（fromAssets）で分割配布形を読む -----------------------------------
 //
 // 「`fromPretrained` で読める配布形は `fromAssets` でも読める」（X2-101）の門。実配布形の
-// transformer は quant `i8` でも 2 shard に割れていて、`resolveFiles` は `transformer[0]` /
-// `transformer[1]` を返す — その Record をそのまま全量面へ渡し、**上の CFG の門と同じ参照
-// sha256** を要求する。同じバイトを別の面から流し込んでいるだけなので、1 ビットも動かないのが
-// 正しい（動いたら shard 列の順序かグラフ shard の扱いが壊れている）。
+// 部品は容器 1 本が複数 part に割れていて、全量面へは `transformer[0]` / `transformer[1]` /
+// … の綴りで渡す — その Record をそのまま全量面へ渡し、**上の CFG の門と同じ参照 sha256** を
+// 要求する。同じバイトを別の面から流し込んでいるだけなので、1 ビットも動かないのが正しい
+// （動いたら part の並びか descriptor の扱いが壊れている）。
 
 /** ローカル配布形を全量読みする（`examples/shared/local-assets.ts` と同型の面）。 */
 const readLocalAssets = async (
@@ -515,19 +523,24 @@ const readLocalAssets = async (
   manifest: Manifest,
   quant: string,
 ): Promise<{ manifest: Manifest; assets: Record<string, Uint8Array<ArrayBuffer>> }> => {
-  const files = resolveFiles(manifest, { quant, model: BASE_MODEL });
+  const selection = resolveSelection(manifest, { quant, model: BASE_MODEL });
   const byPath = new Map<string, Uint8Array<ArrayBuffer>>();
   let assets: Record<string, Uint8Array<ArrayBuffer>> = {};
-  for (const key of Object.keys(files)) {
-    const ref = files[key];
+  const read = async (key: string, ref: FileRef): Promise<void> => {
     // 越境参照は (repo, commit SHA) からしか取れない — 全量面では解けないので fail loudly。
     if (ref.repo !== undefined) {
-      throw new Error(`全量面では越境参照 '${ref.repo}' を解けない（取得キー ${key}）`);
+      throw new Error(`全量面では越境参照 '${ref.repo}' を解けない（キー ${key}）`);
     }
     const bytes = byPath.get(ref.path) ?? await Deno.readFile(new URL(ref.path, dir));
     byPath.set(ref.path, bytes);
     assets = { ...assets, [key]: bytes };
+  };
+  // MUST: 長さ 0 の part も並べる（添字が容器の中の id — 飛ばすと以降が 1 つずつ繰り上がる）。
+  for (const name of Object.keys(selection.containers)) {
+    const { parts } = selection.containers[name];
+    for (const [index, ref] of parts.entries()) await read(`${name}[${index}]`, ref);
   }
+  for (const name of Object.keys(selection.assets)) await read(name, selection.assets[name]);
   return { manifest, assets };
 };
 
@@ -538,12 +551,12 @@ Deno.test({
   fn: async () => {
     const { quant } = BASE_REFERENCE;
     const input = await readLocalAssets(ASSETS_DIR, readManifest(), quant);
-    // 分割形であること自体をこの門で確かめる — 1 shard の配布形へ戻った日には、黙って
+    // 分割形であること自体をこの門で確かめる — 単一形の配布形へ戻った日には、黙って
     // 「全量面の門」に化けるのではなく理由を出して落とす（門の意味が消える方が危ない）。
-    const shardKeys = Object.keys(input.assets).filter((key) => key.endsWith("]"));
-    if (shardKeys.length < 2) {
+    const partKeys = Object.keys(input.assets).filter((key) => key.endsWith("]"));
+    if (partKeys.length < 2) {
       throw new Error(
-        `この配布形は shard 分割されていない（取得キー: ${Object.keys(input.assets).join(" / ")}）`,
+        `この配布形は part 分割されていない（キー: ${Object.keys(input.assets).join(" / ")}）`,
       );
     }
     await using pipeline = await AnimaPipeline.fromAssets(input, { model: BASE_MODEL, quant });
@@ -567,7 +580,7 @@ Deno.test({
 
 // --- fromPretrained（取得層込み）--------------------------------------------
 //
-// `loadManifest` → `resolveFiles` → 取得 → 構築の**実経路**は turbo の門が全て通るように
+// `loadManifest` → `resolveSelection` → 取得 → 構築の**実経路**は turbo の門が全て通るように
 // なったが、そこに**注入席とキャッシュの実体**を突き合わせるのはこの 1 本だけ。manifest の実
 // sha256 による integrity 検証が走る経路でもあり、資産の 3 点セット（path/size/sha256）が
 // 現物と合っていることの門を兼ねる。
@@ -581,7 +594,7 @@ Deno.test({
   fn: async () => {
     const quant = "f16+dit8-a8-attn8-s16";
     const resolution: ImageSize = { width: 512, height: 512 };
-    const files = resolveFiles(readManifest(), { quant });
+    const fetched = selectionRefs(resolveSelection(readManifest(), { quant }));
     const caches = new MemoryCacheStorage();
     // 観測席（onRunDiagnostics）の run 回数もこの実生成で併せて固定する（DiT は 1 step =
     // 1 run・text 系は各 1 run）。門の sha256 判定には一切影響しない追加観測。
@@ -615,7 +628,7 @@ Deno.test({
     // 複数 path は 1 エントリに畳まれる（越境参照ぶんも同じキーの作り方で、リポが違うだけ）。
     let entries = 0;
     for (const namespace of caches.namespaces.values()) entries += namespace.entries.size;
-    const expected = new Set(Object.keys(files).map((key) => files[key].sha256)).size + 1;
+    const expected = new Set(fetched.map((ref) => ref.sha256)).size + 1;
     if (entries !== expected) {
       throw new Error(`注入したキャッシュのエントリ数が ${entries}（期待 ${expected}）`);
     }

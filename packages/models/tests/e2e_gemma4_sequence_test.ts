@@ -36,7 +36,7 @@
 
 import { assert, assertEquals } from "@std/assert";
 import { acquireGpu, parseSafetensors, prepareModel, type SafetensorsFile } from "@karume/runtime";
-import { createGemma4Ple, gemma4PleShardBytes, parseGemma4PleIndex } from "../src/gemma/ple.ts";
+import { createGemma4Ple } from "../src/gemma/ple.ts";
 import { gemma4RopeInputNames, gemma4RopeInputs, type Gemma4RopeSpec } from "../src/gemma/rope.ts";
 import { createGenerationProgram, type GenerationWiring } from "../src/generation/program.ts";
 import {
@@ -52,8 +52,10 @@ import {
   streamShards,
 } from "../../runtime/tests/helpers/shard-files.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
-// PLE shard の読み口（`Deno.open` の位置読み = 費用の型 seek）は helper が正本。
-import { openPleShardAt } from "./helpers/ple-source.ts";
+// 系列出力の PLE sidecar を容器の資産と同じ面へ畳む adapter（recipe が `krm` を書くのは
+// 段 3 — ADR 0109 決定 8）。
+import { openSeriesPle } from "./helpers/ple-series.ts";
+import { gemma4PleTotalBytes } from "../src/gemma/ple-index.ts";
 
 const PRODUCT_ROOT = new URL("../../../outputs/series/gemma4-e2b-product/", import.meta.url);
 const GOLDEN_ROOT = new URL("../../../outputs/series/gemma4-e2b-decode/", import.meta.url);
@@ -195,18 +197,13 @@ Deno.test({
     const shards = resolveShards(new URL(MODEL_FILE, PRODUCT_ROOT));
     const parsed = prepareModel(await readShard(shards[0]));
 
-    const index = parseGemma4PleIndex(
-      JSON.parse(await Deno.readTextFile(new URL(PLE_INDEX_FILE, PRODUCT_ROOT))),
-    );
+    const { index, openBlock } = await openSeriesPle(PRODUCT_ROOT);
     const ple = createGemma4Ple({
       index,
-      openShard: (file) => openPleShardAt(PRODUCT_ROOT, file),
+      openBlock,
       vocabSize: VOCAB,
-      // 全 shard 常駐（生成の往復で読み直さない）= sidecar 全量ぶんの予算。
-      maxResidentBytes: index.shards.reduce(
-        (sum, shard) => sum + gemma4PleShardBytes(index, shard),
-        0,
-      ),
+      // 全 block 常駐（生成の往復で読み直さない）= PLE 全量ぶんの予算。
+      maxResidentBytes: gemma4PleTotalBytes(index),
     });
 
     /** 静的配線（停止集合とバケットだけを変えて作る — 他は同じ資産の同じ結線）。 */

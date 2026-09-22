@@ -63,7 +63,7 @@
  */
 
 import { assert, assertEquals, assertFalse, assertRejects, assertStrictEquals } from "@std/assert";
-import { parseManifest, resolveFiles } from "@karume/hub";
+import { type FileRef, parseManifest, resolveSelection } from "@karume/hub";
 import type { Manifest, ModelEntry } from "@karume/hub";
 import type { SessionDiagnostics } from "@karume/runtime";
 import {
@@ -213,16 +213,21 @@ const modelEntry = (manifest: Manifest): ModelEntry => {
 const loadLocalAssets = async (
   manifest: Manifest,
 ): Promise<Record<string, Uint8Array<ArrayBuffer>>> => {
-  const files = resolveFiles(manifest, { model: MODEL, quant: QUANT });
+  const selection = resolveSelection(manifest, { model: MODEL, quant: QUANT });
   const byPath = new Map<string, Uint8Array<ArrayBuffer>>();
   let assets: Record<string, Uint8Array<ArrayBuffer>> = {};
-  for (const key of Object.keys(files)) {
-    const { path } = files[key];
-    const cached = byPath.get(path);
-    const bytes = cached ?? await Deno.readFile(new URL(path, ASSETS_DIR));
-    if (cached === undefined) byPath.set(path, bytes);
+  const read = async (key: string, ref: FileRef): Promise<void> => {
+    const cached = byPath.get(ref.path);
+    const bytes = cached ?? await Deno.readFile(new URL(ref.path, ASSETS_DIR));
+    if (cached === undefined) byPath.set(ref.path, bytes);
     assets = { ...assets, [key]: bytes };
+  };
+  // MUST: 長さ 0 の part も並べる（添字が容器の中の id — 飛ばすと以降が 1 つずつ繰り上がる）。
+  for (const name of Object.keys(selection.containers)) {
+    const { parts } = selection.containers[name];
+    for (const [index, ref] of parts.entries()) await read(`${name}[${index}]`, ref);
   }
+  for (const name of Object.keys(selection.assets)) await read(name, selection.assets[name]);
   return assets;
 };
 

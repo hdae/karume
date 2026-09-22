@@ -1,28 +1,16 @@
 /** 固定 QAT の公開入口と共通会話層の結線を検収する。品質全般の検査ではない（ADR 0097）。 */
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
-import { parseManifest, resolveFiles } from "@karume/hub";
+import { gemma4MirrorAssets, mirrorAvailable } from "./helpers/gemma-mirror.ts";
 import { denoDirectory } from "@karume/hub/deno";
-import {
-  type Gemma4Assets,
-  Gemma4ChatSession,
-  Gemma4QatPipeline,
-  parseGemma4PipelineConfig,
-} from "../gemma4-qat.ts";
+import { type Gemma4Assets, Gemma4ChatSession, Gemma4QatPipeline } from "../gemma4-qat.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
 const root = new URL("../../../models/karume-gemma4-qat/", import.meta.url);
-const exists = (): boolean => {
-  try {
-    return Deno.statSync(new URL("karume.json", root)).isFile;
-  } catch (error) {
-    if (error instanceof Deno.errors.NotFound) return false;
-    throw error;
-  }
-};
-const available = exists();
+// 無い機も旧 major が残っている機も明示 SKIP（helper の MUST — ADR 0109 決定 9）。
+const available = mirrorAvailable(root);
 if (!available) {
   console.warn(
-    "[karume] models/karume-gemma4-qat/ が無いため QAT 実重み検査を SKIP。tools/export-recipes の dist.py --pipeline gemma4-qat で作成する。",
+    "[karume] models/karume-gemma4-qat/ が無い（か karume/5 でない）ため QAT 実重み検査を SKIP。tools/export-recipes の dist.py --pipeline gemma4-qat で作成する。",
   );
 }
 for (const model of ["e2b", "e4b"] as const) {
@@ -183,40 +171,9 @@ for (const model of ["e2b", "e4b"] as const) {
  * `fromPretrained` の Session と同時に張ると重みが 2 重に常駐するので、別テストにして
  * 順に走らせる（Deno のテストは既定で直列）。
  */
-const qatAssets = async (model: "e2b" | "e4b"): Promise<Gemma4Assets> => {
-  // `parseManifest` は**生のテキスト**を受ける（上限バイト数を自分で見るため）。
-  const manifest = parseManifest(await Deno.readTextFile(new URL("karume.json", root)));
-  const files = resolveFiles(manifest, { model, weights: ["model"] });
-  const readRef = async (key: string): Promise<Uint8Array<ArrayBuffer>> => {
-    const ref = files[key];
-    if (ref === undefined) {
-      throw new Error(
-        `test: 資産 '${key}' が配布形の表に無い（${Object.keys(files).join(" / ")}）`,
-      );
-    }
-    return await Deno.readFile(new URL(ref.path, root));
-  };
-  return {
-    config: parseGemma4PipelineConfig(manifest.models[model].pipelineConfig),
-    // 並びは manifest の宣言順（先頭がグラフ shard）。
-    model: await Promise.all(
-      Object.keys(files).filter((key) => key.startsWith("model[")).map(readRef),
-    ),
-    tokenizer: await readRef("tokenizer"),
-    pleIndex: await readRef("ple_index"),
-    openPleShard: (file) => {
-      const ref = files[file];
-      if (ref === undefined) {
-        throw new Error(`test: PLE shard '${file}' が配布形の表に無い`);
-      }
-      return Promise.resolve({
-        bytes: ref.size,
-        // NOTE: `Deno.readFile` が返す配列は tight（offset 0・buffer 長 = ファイル長）。
-        readAll: async () => (await Deno.readFile(new URL(ref.path, root))).buffer,
-      });
-    },
-  };
-};
+const qatAssets = (model: "e2b" | "e4b"): Promise<Gemma4Assets> =>
+  // PLE も `model` 容器の中に在る（ADR 0109 決定 4）ので、渡すのは part 列と tokenizer だけ。
+  gemma4MirrorAssets(root, { model });
 
 for (const model of ["e2b", "e4b"] as const) {
   Deno.test({

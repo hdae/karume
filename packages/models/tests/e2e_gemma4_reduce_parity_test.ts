@@ -21,11 +21,11 @@
 // も要らない — ADR 0086）。ミラーが無い環境では**明示 SKIP**。
 
 import { assert, assertEquals } from "@std/assert";
-import { MANIFEST_FILENAME } from "@karume/hub";
 import { denoDirectory } from "@karume/hub/deno";
 import { Gemma4Pipeline } from "../gemma.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { allResidentPleBytesOfMirror } from "./helpers/ple-budget.ts";
+import { mirrorAvailable } from "./helpers/gemma-mirror.ts";
 
 const MIRROR_DIR = new URL("../../../models/karume-gemma4/", import.meta.url);
 
@@ -64,7 +64,7 @@ const promptOf = (name: string): readonly number[] => {
 
 const AVAILABLE = ((): boolean => {
   try {
-    return Deno.statSync(new URL(MANIFEST_FILENAME, MIRROR_DIR)).isFile;
+    return mirrorAvailable(MIRROR_DIR);
   } catch (cause) {
     if (cause instanceof Deno.errors.NotFound) return false;
     throw cause;
@@ -111,7 +111,7 @@ Deno.test({
   name: "gemma4: ③PV の縮約順（parallel / sequential）で token 列が 1 個も動かない（実 GPU）",
   ignore: !AVAILABLE || !GPU_AVAILABLE,
   fn: async (t) => {
-    const maxResidentPleBytes = allResidentPleBytesOfMirror(MIRROR_DIR);
+    const maxResidentPleBytes = await allResidentPleBytesOfMirror(MIRROR_DIR);
     const runs: Run[][] = [];
     for (const reduce of REDUCERS) {
       await t.step(`stateAttentionReduce = ${reduce}`, async () => {

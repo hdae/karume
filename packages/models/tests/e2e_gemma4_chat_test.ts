@@ -28,9 +28,14 @@
 //
 // ## 資産
 //
-// `outputs/series/gemma4-e2b-product/`（製品グラフ + PLE sidecar）と
-// `outputs/series/gemma4-e2b-tokenizer/tokenizer.json`。どちらもリポジトリ管理外で、無い環境
-// では**明示 SKIP** する。
+// 配布形ミラー `models/karume-gemma4/`（`karume/5`）。リポジトリ管理外なので、無い環境では
+// **明示 SKIP** する。
+//
+// NOTE: 系列出力（`outputs/series/gemma4-e2b-product/`）からは組めない — PLE は ADR 0109 決定 4
+// で `model` 容器の資産へ移り、`fromAssets` が受けるのも容器の part 列になった。recipe が
+// `krm` を書くのは段 3（同 決定 8）なので、この面に渡せる実資産は移行済みミラーだけである。
+// 重みも PLE も同じ焼き直しなので golden の断定はそのまま保てる（取得元だけが
+// `e2e_gemma4_directory_test.ts` と違う）。
 
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 // MUST: 入口は**公開面**（`./gemma` サブパス）から取る — 消費者が書けない import で検収すると、
@@ -52,22 +57,14 @@ import {
   type SessionDiagnostics,
 } from "@karume/runtime";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
-// PLE shard の読み口（`Deno.open` の位置読み = 費用の型 seek）は helper が正本。
-import { openPleShardAt } from "./helpers/ple-source.ts";
-import { allResidentPleBytesAt } from "./helpers/ple-budget.ts";
+// ミラーから `Gemma4Assets` を組む helper（系列出力は旧形のままなので使えない — 冒頭の NOTE）。
+import { gemma4MirrorAssets, mirrorAvailable } from "./helpers/gemma-mirror.ts";
+import { allResidentPleBytesOfMirror } from "./helpers/ple-budget.ts";
 
-const PRODUCT_ROOT = new URL("../../../outputs/series/gemma4-e2b-product/", import.meta.url);
-const TOKENIZER_ASSET = new URL(
-  "../../../outputs/series/gemma4-e2b-tokenizer/tokenizer.json",
-  import.meta.url,
-);
-const PLE_INDEX_FILE = "ple.json";
-const MODEL_SHARD = /^model-\d+-of-\d+\.safetensors$/;
+const MIRROR_DIR = new URL("../../../models/karume-gemma4/", import.meta.url);
 
-/** SKIP 時にそのまま貼れる生成コマンド。 */
-const GENERATE_COMMAND =
-  "cd tools/export-recipes && uv run --with 'transformers==5.14.1' python -m gemma4.export_product" +
-  "（tokenizer 資産は … python -m gemma4.tokenizer）";
+/** SKIP 時にそのまま貼れる組み立てコマンド。 */
+const GENERATE_COMMAND = "cd tools/export-recipes && uv run python dist.py --pipeline gemma4";
 
 /** 実行条件は既存の gemma4 検収門と同値（同じ資産世代の裁定をそのまま使う）。 */
 const CHUNK_LENGTH = 768;
@@ -136,55 +133,22 @@ const caseOf = (name: string) => {
   return found;
 };
 
-const exists = (url: URL): boolean => {
-  try {
-    return Deno.statSync(url).isFile;
-  } catch (cause) {
-    if (cause instanceof Deno.errors.NotFound) return false;
-    throw cause;
-  }
-};
-
-const shardFiles = (): string[] => {
-  try {
-    return [...Deno.readDirSync(PRODUCT_ROOT)]
-      .map((entry) => entry.name)
-      .filter((name) => MODEL_SHARD.test(name))
-      .sort();
-  } catch {
-    return [];
-  }
-};
-
-const MODEL_SHARDS = shardFiles();
-const AVAILABLE = MODEL_SHARDS.length > 0 &&
-  exists(new URL(PLE_INDEX_FILE, PRODUCT_ROOT)) && exists(TOKENIZER_ASSET);
+const AVAILABLE = mirrorAvailable(MIRROR_DIR);
 
 if (!AVAILABLE) {
   console.warn(
-    `[karume] 製品系列 / tokenizer 資産が無いため Gemma 4 E2B chat 検収を SKIP する。` +
-      `生成: ${GENERATE_COMMAND}`,
+    `[karume] 配布形ミラー models/karume-gemma4/ が無いため Gemma 4 E2B chat 検収を SKIP する。` +
+      `組み立て: ${GENERATE_COMMAND}`,
   );
 }
 
-/**
- * ファイル 1 本を `ArrayBuffer` として読む。
- * MUST: view が buffer 全体を覆っているなら slice しない（PLE sidecar は 1 本 758MB 級）。
- */
-const readBuffer = async (root: URL, file: string): Promise<ArrayBuffer> => {
-  const bytes = await Deno.readFile(new URL(file, root));
-  if (bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength) {
-    return bytes.buffer;
-  }
-  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
-};
-
 const openPipeline = async (
   options: Gemma4PipelineOptions = {},
-): Promise<Gemma4Pipeline> => {
-  const model: Uint8Array<ArrayBuffer>[] = [];
-  for (const file of MODEL_SHARDS) model.push(new Uint8Array(await readBuffer(PRODUCT_ROOT, file)));
-  return await Gemma4Pipeline.fromAssets({
+): Promise<Gemma4Pipeline> =>
+  await Gemma4Pipeline.fromAssets({
+    ...(await gemma4MirrorAssets(MIRROR_DIR)),
+    // 宣言は配布形のものではなく**この門が固定した値**を使う（chunk 長・容量・rope の既定が
+    // ミラー側で動いても、golden を採ったときと同じ形で回す）。
     config: {
       chunkLength: CHUNK_LENGTH,
       maxChunkLength: MAX_CHUNK_LENGTH,
@@ -192,17 +156,12 @@ const openPipeline = async (
       capacity: CAPACITY,
       rope: ROPE,
     },
-    model,
-    tokenizer: await Deno.readFile(TOKENIZER_ASSET),
-    pleIndex: await Deno.readFile(new URL(PLE_INDEX_FILE, PRODUCT_ROOT)),
-    openPleShard: (file) => openPleShardAt(PRODUCT_ROOT, file),
-    // 予算は索引から導く（= sidecar 全量常駐 → 範囲をまたぐ会話でも読み直しゼロ）。定数で
-    // 書くと資産世代で shard 幅が変われば別の本数を意味してしまう — helper の doc。
   }, {
-    maxResidentPleBytes: allResidentPleBytesAt(new URL(PLE_INDEX_FILE, PRODUCT_ROOT)),
+    // 予算は索引から導く（= PLE 全量常駐 → 範囲をまたぐ会話でも読み直しゼロ）。定数で書くと
+    // 資産世代で block 幅が変われば別の本数を意味してしまう — helper の doc。
+    maxResidentPleBytes: await allResidentPleBytesOfMirror(MIRROR_DIR),
     ...options,
   });
-};
 
 Deno.test({
   name: "Gemma 4 E2B chat 検収: 文字列 in → 文字列 out・逐次と一括の一致（実 GPU）",

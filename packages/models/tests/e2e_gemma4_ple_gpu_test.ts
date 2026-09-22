@@ -30,9 +30,12 @@ import { acquireGpu, parseSafetensors, type Tensor } from "@karume/runtime";
 import { denoDirectory } from "@karume/hub/deno";
 import { Gemma4Pipeline } from "../gemma.ts";
 import { Gemma4QatPipeline } from "../gemma4-qat.ts";
-import { createGemma4Ple, parseGemma4PleIndex } from "../src/gemma/ple.ts";
+import { createGemma4Ple } from "../src/gemma/ple.ts";
 import { createGemma4PleResident, gemma4PleGpuBytes } from "../src/gemma/ple-gpu.ts";
-import { openPleShardAt } from "./helpers/ple-source.ts";
+// 系列出力の PLE sidecar を容器の資産と同じ面へ畳む adapter（recipe が `krm` を書くのは
+// 段 3 — ADR 0109 決定 8）。
+import { openSeriesPle } from "./helpers/ple-series.ts";
+import { mirrorAvailable, openGemma4Ple } from "./helpers/gemma-mirror.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { countFences } from "../../runtime/tests/helpers/fences.ts";
 
@@ -64,8 +67,8 @@ const isFile = (url: URL): boolean => {
 
 const PRODUCT_PRESENT = isFile(new URL(PLE_PROBE_FILE, PRODUCT_ROOT)) &&
   isFile(new URL(PLE_INDEX_FILE, PRODUCT_ROOT));
-const QAT_PRESENT = isFile(new URL("karume.json", QAT_ROOT));
-const GEMMA_PRESENT = isFile(new URL("karume.json", GEMMA_ROOT));
+const QAT_PRESENT = mirrorAvailable(QAT_ROOT);
+const GEMMA_PRESENT = mirrorAvailable(GEMMA_ROOT);
 
 if (!PRODUCT_PRESENT) {
   console.warn(
@@ -79,9 +82,6 @@ if (!QAT_PRESENT || !GEMMA_PRESENT) {
       "tools/export-recipes の dist.py で作成する。",
   );
 }
-
-const readIndex = async (root: URL) =>
-  parseGemma4PleIndex(JSON.parse(await Deno.readTextFile(new URL(PLE_INDEX_FILE, root))));
 
 /** u32 のビット列で突き合わせる（f32 の `===` は NaN と ±0 を取り逃がす）。 */
 const assertBitsEqual = (actual: Float32Array, expected: Float32Array, where: string): void => {
@@ -107,7 +107,7 @@ Deno.test({
   name: "PLE GPU 常駐: gather が golden ともホスト経路とも u32 完全一致（実GPU）",
   ignore: !PRODUCT_PRESENT || !GPU_AVAILABLE,
   fn: async () => {
-    const index = await readIndex(PRODUCT_ROOT);
+    const { index, openBlock } = await openSeriesPle(PRODUCT_ROOT);
     const probe = parseSafetensors(
       (await Deno.readFile(new URL(PLE_PROBE_FILE, PRODUCT_ROOT))).buffer,
     );
@@ -118,9 +118,8 @@ Deno.test({
     const golden = new Float32Array(probe.buffer, inputView.byteOffset, inputView.byteLength / 4);
     assertEquals(golden.length, tokens.length * index.layers * index.dim, "golden の要素数");
 
-    const openShard = (file: string) => openPleShardAt(PRODUCT_ROOT, file);
     const gpu = await acquireGpu();
-    const host = createGemma4Ple({ index, openShard, vocabSize: VOCAB, maxResidentBytes: 0 });
+    const host = createGemma4Ple({ index, openBlock, vocabSize: VOCAB, maxResidentBytes: 0 });
     try {
       const bytes = gemma4PleGpuBytes(index);
       assert(
@@ -131,7 +130,7 @@ Deno.test({
       const resident = await createGemma4PleResident({
         gpu,
         index,
-        openShard,
+        openBlock,
         vocabSize: VOCAB,
         inputName: "per_layer_inputs",
         idsName: "input_ids",
@@ -209,7 +208,8 @@ Deno.test({
   ignore: !GEMMA_PRESENT || !GPU_AVAILABLE,
   fn: async () => {
     const source = denoDirectory(GEMMA_ROOT);
-    const index = await readIndex(new URL("e2b/ple/", GEMMA_ROOT));
+    // 索引は配布形ミラーの `model` 容器の資産（ADR 0109 決定 4）— 開くのは part 0 と索引だけ。
+    const { index } = await openGemma4Ple(GEMMA_ROOT);
     const bytes = gemma4PleGpuBytes(index);
     const gpu = await acquireGpu();
     const fits = gpu.limits.maxStorageBufferBindingSize >= bytes.values &&

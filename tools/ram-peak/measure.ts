@@ -5,9 +5,9 @@
  *     deno run -A tools/ram-peak/measure.ts --family anima --source models/karume-anima \
  *         --model anima-turbo-v1.1 --quant f16 --steps 2 --size 512
  *     deno run -A tools/ram-peak/measure.ts --family gemma4 --source models/karume-gemma4
- *     # コンポーネント面（createSessionFromShards 直叩き・1 コンポーネントだけ・刻みノブ付き）
+ *     # 部品面（容器 1 本を直に開いて Session にする・1 部品だけ）
  *     deno run -A tools/ram-peak/measure.ts --mode component --source models/karume-anima \
- *         --model anima-turbo-v1.1 --quant f16 --component transformer --vessel true
+ *         --model anima-turbo-v1.1 --quant f16 --component transformer
  *
  * MUST: 1 構成 = 1 プロセス。ピークはプロセス終端で読む（Linux は `/proc/self/status` の
  * VmHWM = 高水位標・Mac は無いので `Deno.memoryUsage().rss` の 50ms サンプリング最大値のみ）。
@@ -16,14 +16,14 @@
  * 出力は JSON 1 行（研究記録の表はこれを集計する）。
  */
 
-import type { Manifest, ManifestShard } from "../_shared/assets.ts";
 import { denoDirectory } from "../../packages/hub/deno.ts";
+import { loadManifest, openContainerSource, resolveSelection } from "../../packages/hub/mod.ts";
 import { AnimaPipeline } from "../../packages/models/mod.ts";
 import { Gemma4Pipeline } from "../../packages/models/gemma.ts";
 import {
   acquireGpu,
-  createSessionFromShards,
-  type ModelShard,
+  createSessionFromContainer,
+  openContainer,
   type SessionBuildStats,
 } from "../../packages/runtime/mod.ts";
 
@@ -41,7 +41,6 @@ const KNOWN: ReadonlySet<string> = new Set([
   "steps",
   "size",
   "gc",
-  "vessel",
 ]);
 
 const args = new Map<string, string>();
@@ -64,10 +63,8 @@ const model = args.get("model");
 const quant = args.get("quant");
 const component = args.get("component") ?? "transformer";
 const steps = Number(args.get("steps") ?? "2");
-// 診断: shard 境界で明示 GC（`deno run --v8-flags=--expose-gc` が前提・無ければ no-op）。
+// 診断: Session を組む直前に明示 GC（`deno run --v8-flags=--expose-gc` が前提・無ければ no-op）。
 const explicitGc = args.get("gc") === "true";
-// コンポーネント面の読み手で器を使い回す（hub 逐次面の器の再利用と同じ形 — 新旧の A/B 用）。
-const reuseVessel = args.get("vessel") === "true";
 const size = Number(args.get("size") ?? "512");
 
 const mib = (bytes: number): number => Math.round(bytes / 1048576);
@@ -80,72 +77,38 @@ const vmHwm = async (): Promise<number | undefined> => {
 };
 
 /**
- * manifest から (model, component, quant) の shard 列を読み、1 本ずつ流す（hub と同じ順）。
+ * manifest から (model, component, quant) の容器 1 本を開く（取得面と**同じ読み口** —
+ * `openContainerSource` は開くだけでは 1 バイトも読まず、block は Session を組む間に part 順で
+ * 読まれる）。
  *
- * MUST: 選択の外れは既知一覧つきで落とす（`_shared/assets.ts` の resolveAsset と同じ体裁）。
- * 素の添字アクセスだと `--model` の打ち間違いが `Cannot read properties of undefined` という
- * 理由の読めない TypeError になる。
+ * MUST: 選択の外れは既知一覧つきで落とす。model / quant は `resolveSelection` が
+ * `ManifestReferenceError` に一覧を添えるので、ここで綴り直さない（同じ判定を 2 実装持たない）。
  */
-const componentShards = async (): Promise<
-  { readonly model: string; readonly quant: string; readonly shards: readonly ManifestShard[] }
+const openComponentContainer = async (): Promise<
+  {
+    readonly model: string;
+    readonly quant: string;
+    readonly opened: Awaited<ReturnType<typeof openContainer>>;
+  }
 > => {
-  const path = `${source}/karume.json`;
-  const manifest: Manifest = JSON.parse(await Deno.readTextFile(path));
-  const modelName = model ?? manifest.defaultModel;
-  if (!Object.hasOwn(manifest.models, modelName)) {
+  const loaded = await loadManifest(denoDirectory(source));
+  const selected = resolveSelection(loaded.manifest, {
+    ...(model === undefined ? {} : { model }),
+    ...(quant === undefined ? {} : { quant }),
+  });
+  const container = selected.containers[component];
+  if (container === undefined) {
     throw new Error(
-      `${path}: model '${modelName}' が無い（既知: ${Object.keys(manifest.models).join(" / ")}）`,
+      `${selected.model} / ${selected.quant} に component '${component}' が無い` +
+        `（既知: ${Object.keys(selected.containers).join(" / ")}）`,
     );
   }
-  const entry = manifest.models[modelName];
-  const quantName = quant ?? entry.defaultQuant;
-  if (!Object.hasOwn(entry.quants, quantName)) {
-    throw new Error(
-      `${path}: model '${modelName}' に quant '${quantName}' が無い` +
-        `（既知: ${Object.keys(entry.quants).join(" / ")}）`,
-    );
-  }
-  const selection = entry.quants[quantName].weights;
-  if (!Object.hasOwn(selection, component) || !Object.hasOwn(entry.weights, component)) {
-    throw new Error(
-      `${modelName} / ${quantName} に component '${component}' が無い` +
-        `（既知: ${Object.keys(entry.weights).join(" / ")}）`,
-    );
-  }
-  const dtype = selection[component];
-  const variants = entry.weights[component];
-  if (!Object.hasOwn(variants, dtype)) {
-    throw new Error(
-      `component '${component}' に格納 dtype '${dtype}' が無い` +
-        `（既知: ${Object.keys(variants).join(" / ")}）`,
-    );
-  }
-  return { model: modelName, quant: quantName, shards: variants[dtype].shards };
+  const opened = await openContainer(
+    { kind: "source", source: openContainerSource(loaded, container) },
+    container.descriptor,
+  );
+  return { model: selected.model, quant: selected.quant, opened };
 };
-async function* streamShards(shards: readonly ManifestShard[]): AsyncGenerator<ModelShard> {
-  const largest = shards.reduce((max, shard) => Math.max(max, shard.size), 0);
-  const vessel = reuseVessel ? new Uint8Array(new ArrayBuffer(largest)) : undefined;
-  for (const shard of shards) {
-    if (explicitGc) (globalThis as { gc?: () => void }).gc?.();
-    if (vessel === undefined) {
-      const bytes = await Deno.readFile(`${source}/${shard.path}`);
-      yield { id: shard.path, bytes: bytes as Uint8Array<ArrayBuffer> };
-      continue;
-    }
-    const file = await Deno.open(`${source}/${shard.path}`);
-    try {
-      let filled = 0;
-      while (filled < shard.size) {
-        const read = await file.read(vessel.subarray(filled, shard.size));
-        if (read === null) throw new Error(`${shard.path} が宣言 size より短い`);
-        filled += read;
-      }
-    } finally {
-      file.close();
-    }
-    yield { id: shard.path, bytes: new Uint8Array(vessel.buffer, 0, shard.size) };
-  }
-}
 
 let rssMax = 0;
 const sampler = setInterval(() => {
@@ -165,11 +128,13 @@ let resolved: { model: string | null; quant: string | null } = {
   quant: quant ?? null,
 };
 if (mode === "component") {
-  const target = await componentShards();
+  const target = await openComponentContainer();
   resolved = { model: target.model, quant: target.quant };
   const gpu = await acquireGpu();
   try {
-    const session = await createSessionFromShards(gpu, streamShards(target.shards));
+    if (explicitGc) (globalThis as { gc?: () => void }).gc?.();
+    // グラフ名 = 部品名（書き手の規約 — ADR 0109 決定 8）。
+    const session = await createSessionFromContainer(gpu, target.opened, component);
     loadMs = performance.now() - started;
     builds[component] = session.diagnostics().buildStats;
     await session.dispose();
@@ -209,7 +174,6 @@ console.log(JSON.stringify({
   family: mode === "component" ? null : family,
   component: mode === "component" ? component : null,
   explicitGc,
-  reuseVessel,
   // 測定条件（出力 1 行から構成が復元できることが冒頭 doc の名乗り）。anima の生成でしか
   // 効かないノブなので、他の経路では null を書いて「与えていない」と読めるようにする。
   steps: mode === "pipeline" && family === "anima" ? steps : null,

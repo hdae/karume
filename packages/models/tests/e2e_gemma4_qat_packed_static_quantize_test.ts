@@ -13,16 +13,14 @@ import { acquireGpu, type SessionDiagnostics } from "@karume/runtime";
 import { gemma4ChatPrompt } from "../gemma.ts";
 import { Gemma4QatPipeline } from "../gemma4-qat.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { mirrorAvailable } from "./helpers/gemma-mirror.ts";
 
 const root = new URL("../../../models/karume-gemma4-qat/", import.meta.url);
-let available = false;
-try {
-  available = Deno.statSync(new URL("karume.json", root)).isFile;
-} catch (error) {
-  if (!(error instanceof Deno.errors.NotFound)) throw error;
-}
+const available = mirrorAvailable(root);
 if (!available) {
-  console.warn(`[karume] ${root.pathname} が無いため packed 活性の e2e 検査を SKIP`);
+  console.warn(
+    `[karume] ${root.pathname} が無い（か karume/5 でない）ため packed 活性の e2e 検査を SKIP`,
+  );
 }
 
 /** QAT E2B decode 計画で packed になる SRQ の本数（assets_fusion_counts_test.ts と同じ値）。 */

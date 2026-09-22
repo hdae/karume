@@ -7,19 +7,19 @@ import { acquireGpu, type SessionDiagnostics } from "@karume/runtime";
 import { gemma4ChatPrompt, Gemma4Pipeline } from "../gemma.ts";
 import { type Gemma4QatFromPretrainedOptions, Gemma4QatPipeline } from "../gemma4-qat.ts";
 import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE } from "./helpers/gpu.ts";
+import { mirrorAvailable } from "./helpers/gemma-mirror.ts";
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
 for (const family of ["gemma4", "gemma4-qat"] as const) {
   const root = new URL(`../../../models/karume-${family}/`, import.meta.url);
-  let available = false;
-  try {
-    available = Deno.statSync(new URL("karume.json", root)).isFile;
-  } catch (error) {
-    if (!(error instanceof Deno.errors.NotFound)) throw error;
+  const available = mirrorAvailable(root);
+  if (!available) {
+    console.warn(
+      `[karume] ${root.pathname} が無い（か karume/5 でない）ためquantの実GPU検査をSKIP`,
+    );
   }
-  if (!available) console.warn(`[karume] ${root.pathname} が無いためquantの実GPU検査をSKIP`);
   describe({
     name: `${family}: quant定義からGEMVを選ぶ（実GPU）`,
     ignore: !available || !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
@@ -279,13 +279,15 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
               gpu.destroy();
             }
           }
-          // slice(1)なのは、先頭shard = グラフshardがadmissionの入力そのもので、門より前に
-          // 取る契約だから（packages/models/src/hub/components.ts の streamAssets 相 1）。
-          // 門の後にしか触れてはいけないのは2本目以降のshardとassets（tokenizer・PLE sidecar）で、
-          // そちらをまとめてこの集合に入れる。
+          // slice(1)なのは、part 0 = descriptor が admission の入力そのもので、門より前に
+          // 取る契約だから（packages/models/src/hub/components.ts の相 1）。門の後にしか
+          // 触れてはいけないのは part 1 以降と assets（tokenizer）で、そちらをまとめて
+          // この集合に入れる。
           const heavyPaths = new Set([
             ...Object.values(parsed.models.e2b.weights).flatMap((entry) =>
-              Object.values(entry).flatMap((files) => files.shards.slice(1).map((ref) => ref.path))
+              Object.values(entry).flatMap((weights) =>
+                weights.container.parts.slice(1).map((ref) => ref.path)
+              )
             ),
             ...Object.values(parsed.models.e2b.assets).map((ref) => ref.path),
           ]);

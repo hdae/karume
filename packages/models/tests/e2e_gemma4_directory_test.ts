@@ -20,13 +20,13 @@
 // 永続キャッシュへ**残さない**（疑似 HF 経路との違い）。
 
 import { assert, assertEquals } from "@std/assert";
-import { MANIFEST_FILENAME } from "@karume/hub";
 import { denoDirectory } from "@karume/hub/deno";
 // MUST: 入口は**公開面**（`./gemma` サブパス）から取る — `src/...` を直に掴むと、面が痩せていても
 // 門が緑のままになる（消費者が書けない経路で検収したことになる）。
 import { type Gemma4ChatMessage, Gemma4Pipeline } from "../gemma.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { allResidentPleBytesOfMirror } from "./helpers/ple-budget.ts";
+import { mirrorAvailable } from "./helpers/gemma-mirror.ts";
 
 const MIRROR_DIR = new URL("../../../models/karume-gemma4/", import.meta.url);
 
@@ -70,16 +70,7 @@ const caseOf = (name: string) => {
   return found;
 };
 
-const manifestExists = (): boolean => {
-  try {
-    return Deno.statSync(new URL(MANIFEST_FILENAME, MIRROR_DIR)).isFile;
-  } catch (cause) {
-    if (cause instanceof Deno.errors.NotFound) return false;
-    throw cause;
-  }
-};
-
-const AVAILABLE = manifestExists();
+const AVAILABLE = mirrorAvailable(MIRROR_DIR);
 
 if (!AVAILABLE) {
   console.warn(
@@ -130,9 +121,9 @@ Deno.test({
     const retryDiagnostics: string[] = [];
 
     const pipeline = await Gemma4Pipeline.fromPretrained(denoDirectory(MIRROR_DIR), {
-      // 予算は索引から導く（= sidecar 全量常駐 → 読み直しゼロ）。定数で書くと資産世代で
-      // shard 幅が変わったときに別の本数を意味してしまう — helper の doc。
-      maxResidentPleBytes: allResidentPleBytesOfMirror(MIRROR_DIR),
+      // 予算は索引から導く（= PLE 全量常駐 → 読み直しゼロ）。定数で書くと資産世代で block 幅が
+      // 変わったときに別の本数を意味してしまう — helper の doc。
+      maxResidentPleBytes: await allResidentPleBytesOfMirror(MIRROR_DIR),
       // HTTP 取得元専用のノブ。ローカル取得元では 1 つも効かない = 触られない。
       fetch: fetchStub,
       caches,

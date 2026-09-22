@@ -15,7 +15,7 @@
  * ## MUST: グラフは 1 本ずつ開いて閉じる
  *
  * {@link Sbv2Pipeline.fromAssets} は **Session を 1 本も張らない** — 開くのはコンテナ
- * （`openModel` = ヘッダ解析のみ）までで、GPU 常駐は {@link Sbv2Pipeline.generate} の中で
+ * （`openContainer` = 2 文書の解析のみ）までで、GPU 常駐は {@link Sbv2Pipeline.generate} の中で
  * 段ごとに張っては畳む。3 グラフ（text_encoder 334MB / front / voice）を同時に生かさない。
  *
  * MUST: この段取りは**公開 API 側でも**守る — `generate` は直列化鎖に載せ（並行呼び出しは
@@ -56,7 +56,7 @@ import {
   type Manifest,
   type ModelEntry,
   type Quant,
-  resolveFiles,
+  resolveSelection,
 } from "@karume/hub";
 import {
   parseSbv2PipelineConfig,
@@ -97,18 +97,22 @@ import {
 import { toSessionOptions } from "../session/options.ts";
 import { withSession } from "../session/with-session.ts";
 import { toManifestSource } from "../hub/repo-ref.ts";
-import { type FromPretrainedHubOptions, hubLoadOptions } from "../hub/load-options.ts";
+import {
+  type FromPretrainedComponentOptions,
+  type FromPretrainedHubOptions,
+  hubLoadOptions,
+} from "../hub/load-options.ts";
 import {
   assetComponentOpener,
   type ComponentOpener,
   type GraphOwner,
-  loadShardComponents,
+  loadContainerComponents,
   type ModelComponent,
 } from "../hub/components.ts";
 import { readAssetBuffer, readAssetJson } from "../hub/asset-readers.ts";
 
 /**
- * manifest の weights / assets 表に現れる取得キー（ADR 0041 §3 の規約名）。
+ * manifest の weights / assets 表に現れる名前（ADR 0041 §3 の規約名）。
  * NOTE: `style_vectors` / `speaker_embeddings` は取得キーと safetensors のテンソル名が同綴り
  * （`style.ts` の {@link STYLE_TENSOR} / {@link SPEAKER_TENSOR}）だが、別の語彙なので別に持つ。
  */
@@ -119,6 +123,9 @@ const TOKENIZER = "tokenizer";
 const SYMBOLS = "symbols";
 const STYLE_VECTORS = "style_vectors";
 const SPEAKER_EMBEDDINGS = "speaker_embeddings";
+
+/** この系列の weights 部品（差し替え席が受ける役割名でもある）。 */
+const COMPONENT_KEYS = [FRONT, VOICE, TEXT_ENCODER] as const;
 
 /**
  * front のグラフ出力の本数（logw_sdp / logw_dp / m_p / logs_p）。
@@ -184,9 +191,13 @@ export type Sbv2PipelineOptions = {
  * NOTE: `headers` / `fetch` / `caches` / `onRetry` が **HTTP 取得元専用**であることを含め、
  * 取得層のノブの説明は {@link FromPretrainedHubOptions} に 1 本化してある。
  */
-export type Sbv2FromPretrainedOptions = Sbv2PipelineOptions & FromPretrainedHubOptions & {
-  readonly signal?: AbortSignal;
-};
+export type Sbv2FromPretrainedOptions =
+  & Sbv2PipelineOptions
+  & FromPretrainedHubOptions
+  & FromPretrainedComponentOptions
+  & {
+    readonly signal?: AbortSignal;
+  };
 
 /** 取得済み資産から直接組むときの入力（hub の `fetchAssets` の返り値をそのまま渡す）。 */
 export type Sbv2Assets = {
@@ -194,7 +205,10 @@ export type Sbv2Assets = {
   readonly assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>;
 };
 
-/** 取得済みバイト列を `openModel` へ渡せる ArrayBuffer にする（門の本体は {@link readAssetBuffer}）。 */
+/**
+ * 取得済みバイト列を `openContainer` へ渡せる ArrayBuffer にする（門の本体は
+ * {@link readAssetBuffer}）。
+ */
 const assetBuffer = (
   assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>,
   key: string,
@@ -202,14 +216,14 @@ const assetBuffer = (
 
 /**
  * 全量面（`fromAssets`）のコンポーネント供給口（受け口の実装は 7 家族共有 —
- * {@link assetComponentOpener}）。素の 1 本は `openModel` で開いて全量面で組み、shard 分割形
- * （`voice[0]` / `voice[1]` / …）は `fromPretrained` と同じ shard 逐次面へ流す。
+ * {@link assetComponentOpener}）。部品のキーは単一形 `krm` の 1 本（`voice`）か、分割形の
+ * part 列（`voice[0]` / `voice[1]` / …）。
  *
  * NOTE: `export` は {@link openSbv2State} と同じ理由（dump 経路が全量面で state を組む —
  * `examples/sbv2/dump.ts`）。`mod.ts` / サブパス面には出さない。
  */
-export const assetOpener = (assets: Sbv2Assets["assets"]): ComponentOpener =>
-  assetComponentOpener("sbv2", assets, (key) => assetBuffer(assets, key));
+export const assetOpener = (assets: Sbv2Assets["assets"]): Promise<ComponentOpener> =>
+  assetComponentOpener("sbv2", assets, (key) => assetBuffer(assets, key), COMPONENT_KEYS);
 
 /**
  * 資産 JSON を読む（decode / parse の門は {@link readAssetJson}）。
@@ -539,23 +553,20 @@ type Sbv2Admission = {
   readonly config: Sbv2PipelineConfig;
   readonly quantName: string;
   readonly quant: Quant;
-  readonly front: ModelComponent;
-  readonly voice: ModelComponent;
-  readonly textEncoder: ModelComponent;
 };
 
 /**
  * この manifest とこのグラフを sbv2 として実行できるかを見る（`hub/components.ts` の
- * 家族 admission 席 — shard 面では**重み shard を 1 バイトも取る前**に呼ばれる）。
+ * 家族 admission 席 — 取得面では**重みの part を 1 バイトも取る前**に呼ばれる）。
  *
- * MUST: 家族の門はこの 1 本に集める。後段へ散らすと、shard 面では GB 級の重みを落とした
+ * MUST: 家族の門はこの 1 本に集める。後段へ散らすと、取得面では GB 級の重みを落とした
  * **後**にしか落ちない（ADR 0070 決定 5 の文面より実装が狭くなる）。
  * MUST: manifest の契約違反は **GPU を取りに行く前**に落とす。順序がずれると、GPU の無い
  * 環境では別の例外に化けて「何が悪かったのか」が読み手に伝わらない。
  *
  * NOTE: 表（`style_vectors` / `speaker_embeddings`）とグラフ幅の突合はこの席へ置けない —
- * admission の時点では資産をまだ取っていない（取ってからでは重み prefetch より前という
- * 位置が保てない）ので {@link buildSbv2State} に残る。
+ * admission の時点では資産のバイト列をまだ取っていない（取ってからでは重み prefetch より前と
+ * いう位置が保てない）ので {@link buildSbv2State} に残る。
  */
 const admitSbv2 = (
   manifest: Manifest,
@@ -595,9 +606,9 @@ const admitSbv2 = (
   }
   const quant = entry.quants[quantName];
 
-  const front = open(FRONT);
-  const voice = open(VOICE);
-  const textEncoder = open(TEXT_ENCODER);
+  // 部品が 3 本とも開けることをこの席で見る（供給口は後段と同じ 1 本 — 開いていない役割は
+  // fail loudly）。グラフ幅の突合は表のバイト列が要るので {@link buildSbv2State} に残る。
+  for (const key of COMPONENT_KEYS) open(key);
 
   // MUST: 共有 GPU の能力不足（feature / device limit）はこの席で落とす — 自前で取る場合と
   // 違って `acquireGpu` を待つ理由が無く、重みを落とす前に判る唯一の家族門（要求と検査の
@@ -611,7 +622,7 @@ const admitSbv2 = (
     );
   }
 
-  return { config, quantName, quant, front, voice, textEncoder };
+  return { config, quantName, quant };
 };
 
 /**
@@ -625,9 +636,14 @@ const admitSbv2 = (
 const buildSbv2State = async (
   admitted: Sbv2Admission,
   assets: Sbv2Assets["assets"],
+  open: ComponentOpener,
   options: Sbv2PipelineOptions = {},
 ): Promise<Sbv2State> => {
-  const { config, quant, quantName, front, voice, textEncoder } = admitted;
+  const { config, quant, quantName } = admitted;
+  // 供給口は admission が見たものと**同じ 1 本**（`open` は開いた部品を引き当てるだけ）。
+  const front = open(FRONT);
+  const voice = open(VOICE);
+  const textEncoder = open(TEXT_ENCODER);
   const rules = parseJpExtraRules(assetJson(assets, SYMBOLS), SYMBOLS);
   const tokenizer = parseTokenizerAsset(assetJson(assets, TOKENIZER), TOKENIZER);
   const styles = parseSbv2Table(assetBuffer(assets, STYLE_VECTORS), STYLE_TENSOR);
@@ -680,7 +696,7 @@ const buildSbv2State = async (
 /**
  * manifest + 資産から実行状態を組む（{@link Sbv2Pipeline.fromAssets} の中身 = 家族 admission
  * → 状態構築の 1 続き）。取得済みバイト列しか無い面（`fromAssets` / dump 台本）はここを入口に
- * する — shard 面は admission だけを {@link loadShardComponents} の席へ前倒しするので、
+ * する — 取得面は admission だけを {@link loadContainerComponents} の席へ前倒しするので、
  * この 2 段を別々に呼ぶ。
  */
 export const openSbv2State = async (
@@ -688,7 +704,7 @@ export const openSbv2State = async (
   open: ComponentOpener,
   options: Sbv2PipelineOptions = {},
 ): Promise<Sbv2State> =>
-  await buildSbv2State(admitSbv2(input.manifest, open, options), input.assets, options);
+  await buildSbv2State(admitSbv2(input.manifest, open, options), input.assets, open, options);
 
 /** 内部で取得した GPU だけを破棄する（渡された GpuContext は呼び出し側の所有物）。 */
 export const closeSbv2State = (state: Sbv2State): void => {
@@ -913,11 +929,13 @@ export class Sbv2Pipeline {
   }
 
   /**
-   * 配布形から取得して組む（`loadManifest` → `resolveFiles` → **各コンポーネントの
-   * グラフ shard だけ**を取って `prepareModel` → 残り資産の `fetchAssets` → 構築）。重み shard は
-   * Session を組むときに 1 本ずつ流れる（ADR 0070 — `src/hub/components.ts`）。文字列の
-   * `ref` は `{ repo }` と読む（= `main` 追従）。**`ref` は必須**（取得元に既定は無い —
-   * `src/hub/repo-ref.ts` の MUST）。
+   * 配布形から取得して組む（`loadManifest` → `resolveSelection` → **各部品の descriptor
+   * （part 0）だけ**を取って admission → 重みの part を温める → 残り資産の `fetchAssets` →
+   * 構築）。block は Session を組むその瞬間に part 順で読まれる（ADR 0109 —
+   * `src/hub/components.ts`）。部品を別リポの同じ役割で差し替えるときは
+   * {@link FromPretrainedComponentOptions.components}（`front` / `voice` / `text_encoder`）。
+   * 文字列の `ref` は `{ repo }` と読む（= `main` 追従）。**`ref` は必須**（取得元に既定は
+   * 無い — `src/hub/repo-ref.ts` の MUST）。
    *
    * 手元の配布形は**取得元ハンドル**で渡す（`localDirectory` / `@karume/hub/deno` の
    * `denoDirectory`）。HF の `owner/name` の綴りの門は通らず、network も CacheStorage も
@@ -934,27 +952,27 @@ export class Sbv2Pipeline {
     );
     const hubOptions = hubLoadOptions(options);
     const loaded = await loadManifest(source, hubOptions);
-    const selection = {
+    const choice = {
       ...(options.model === undefined ? {} : { model: options.model }),
       ...(options.quant === undefined ? {} : { quant: options.quant }),
     };
-    const files = resolveFiles(loaded.manifest, selection);
+    const selection = resolveSelection(loaded.manifest, choice);
     const buildOptions: Sbv2PipelineOptions = {
       ...(options.gpu === undefined ? {} : { gpu: options.gpu }),
-      ...selection,
+      ...choice,
       ...(options.onRunDiagnostics === undefined
         ? {}
         : { onRunDiagnostics: options.onRunDiagnostics }),
     };
-    // 家族の門は admission 席で通す（重み shard を取る前 — `hub/components.ts`）。
-    const { admitted, assets } = await loadShardComponents(
+    // 家族の門は admission 席で通す（重みの part を取る前 — `hub/components.ts`）。
+    const { admitted, assets, open } = await loadContainerComponents(
       "Sbv2Pipeline.fromPretrained",
       loaded,
-      files,
-      [FRONT, VOICE, TEXT_ENCODER],
+      selection,
+      COMPONENT_KEYS,
       async (open) => {
         const admitted = admitSbv2(loaded.manifest, open, buildOptions);
-        // 配布形が宣言した `requiredLimits` は**重み shard を取る前**にここで見る
+        // 配布形が宣言した `requiredLimits` は**重みの part を取る前**にここで見る
         // （ADR 0089 決定 5 — 共有 GPU ならその limits、自前で取る経路はアダプタ実測値）。
         await assertRequiredLimitsBeforeDownload(
           admitted.quant.requiredLimits,
@@ -966,25 +984,26 @@ export class Sbv2Pipeline {
       {
         ...hubOptions,
         ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }),
+        ...(options.components === undefined ? {} : { components: options.components }),
       },
     );
-    return new Sbv2Pipeline(await buildSbv2State(admitted, assets, buildOptions));
+    return new Sbv2Pipeline(await buildSbv2State(admitted, assets, open, buildOptions));
   }
 
   /**
-   * 取得済みの manifest + 資産から組む。契約検査・資産の解釈・`openModel` を全てここで済ませ、
-   * **Session は 1 本も張らない**（{@link openSbv2State}）。
+   * 取得済みの manifest + 資産から組む。契約検査・資産の解釈・`openContainer` を全てここで
+   * 済ませ、**Session は 1 本も張らない**（{@link openSbv2State}）。
    *
-   * 取得キーは `resolveFiles` の規約どおり **2 形とも受ける** — 素の 1 本（`voice`）と、
-   * shard 分割形（`voice[0]` / `voice[1]` / …）。分割形は
-   * バイト列を連結せず `fromPretrained` と同じ shard 逐次面へ流す。添字の欠番と素キーとの混在は
-   * fail loudly（受け口の実装は `src/hub/components.ts` の 1 本）。
+   * 部品のキーは **2 形とも受ける** — 単一形 `krm` のバイト列 1 本（`voice`）と、分割形の
+   * part 列（`voice[0]` / `voice[1]` / … — part 0 から添字順）。分割形はバイト列を連結せず
+   * part 列のまま開く。添字の欠番と単一形キーとの混在は fail loudly（受け口の実装は
+   * `src/hub/components.ts` の 1 本）。
    */
   static async fromAssets(
     input: Sbv2Assets,
     options: Sbv2PipelineOptions = {},
   ): Promise<Sbv2Pipeline> {
-    return new Sbv2Pipeline(await openSbv2State(input, assetOpener(input.assets), options));
+    return new Sbv2Pipeline(await openSbv2State(input, await assetOpener(input.assets), options));
   }
 
   /**

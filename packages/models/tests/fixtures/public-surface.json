@@ -67,6 +67,10 @@
         "kind": "typeAlias"
       },
       {
+        "name": "ComponentSource",
+        "kind": "typeAlias"
+      },
+      {
         "name": "DEPTH_ANYTHING_SOURCES",
         "kind": "variable"
       },
@@ -92,6 +96,10 @@
       },
       {
         "name": "DepthMap",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "FromPretrainedComponentOptions",
         "kind": "typeAlias"
       },
       {
@@ -179,15 +187,7 @@
         "kind": "typeAlias"
       },
       {
-        "name": "Gemma4PleReadOptions",
-        "kind": "typeAlias"
-      },
-      {
         "name": "Gemma4PleResidency",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "Gemma4PleShardSource",
         "kind": "typeAlias"
       },
       {
@@ -751,15 +751,7 @@
         "kind": "typeAlias"
       },
       {
-        "name": "Gemma4PleReadOptions",
-        "kind": "typeAlias"
-      },
-      {
         "name": "Gemma4PleResidency",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "Gemma4PleShardSource",
         "kind": "typeAlias"
       },
       {
@@ -941,15 +933,7 @@
         "kind": "typeAlias"
       },
       {
-        "name": "Gemma4PleReadOptions",
-        "kind": "typeAlias"
-      },
-      {
         "name": "Gemma4PleResidency",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "Gemma4PleShardSource",
         "kind": "typeAlias"
       },
       {

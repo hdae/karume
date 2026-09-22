@@ -98,7 +98,7 @@ import {
   type Manifest,
   type ModelEntry,
   type Quant,
-  resolveFiles,
+  resolveSelection,
 } from "@karume/hub";
 
 import {
@@ -123,19 +123,26 @@ import {
 import { disposeSteps } from "../session/dispose-steps.ts";
 import { toSessionOptions } from "../session/options.ts";
 import { toManifestSource } from "../hub/repo-ref.ts";
-import { type FromPretrainedHubOptions, hubLoadOptions } from "../hub/load-options.ts";
+import {
+  type FromPretrainedComponentOptions,
+  type FromPretrainedHubOptions,
+  hubLoadOptions,
+} from "../hub/load-options.ts";
 import {
   assetComponentOpener,
   type ComponentOpener,
   type GraphOwner,
-  loadShardComponents,
+  loadContainerComponents,
   type ModelComponent,
 } from "../hub/components.ts";
 import { readAssetBuffer } from "../hub/asset-readers.ts";
 import { assertGraphInputDim } from "../hub/graph-gates.ts";
 
-/** manifest の weights 表に現れる取得キー（ADR 0041 §3 の規約名）。 */
+/** manifest の weights 表に現れる部品名（ADR 0041 §3 の規約名）。 */
 const DEPTH = "depth";
+
+/** この系列の weights 部品（差し替え席が受ける役割名でもある）。 */
+const COMPONENT_KEYS = [DEPTH] as const;
 
 /** グラフ入力の名前（`tools/export-recipes/depth_anything/export.py` の `INPUT_NAME`）。 */
 const PIXEL_VALUES = "pixel_values";
@@ -187,6 +194,7 @@ export type DepthAnythingPipelineOptions = {
 export type DepthAnythingFromPretrainedOptions =
   & DepthAnythingPipelineOptions
   & FromPretrainedHubOptions
+  & FromPretrainedComponentOptions
   & {
     readonly signal?: AbortSignal;
   };
@@ -198,7 +206,7 @@ export type DepthAnythingAssets = {
 };
 
 /**
- * 取得済みバイト列を `openModel` へ渡せる ArrayBuffer にする（門の本体は
+ * 取得済みバイト列を `openContainer` へ渡せる ArrayBuffer にする（門の本体は
  * {@link readAssetBuffer}）。
  *
  * MUST: `slice` で写さない — 配布形は 1 本 99MB あり、ホスト RAM のピークが倍になる。
@@ -210,11 +218,16 @@ const assetBuffer = (
 
 /**
  * 全量面（`fromAssets`）のコンポーネント供給口（受け口の実装は 7 家族共有 —
- * {@link assetComponentOpener}）。素の 1 本は `openModel` で開いて全量面で組み、shard 分割形
- * （`depth[0]` / `depth[1]` / …）は `fromPretrained` と同じ shard 逐次面へ流す。
+ * {@link assetComponentOpener}）。部品のキーは単一形 `krm` の 1 本（`depth`）か、分割形の
+ * part 列（`depth[0]` / `depth[1]` / …）。
  */
-const assetOpener = (assets: DepthAnythingAssets["assets"]): ComponentOpener =>
-  assetComponentOpener("depth-anything", assets, (key) => assetBuffer(assets, key));
+const assetOpener = (assets: DepthAnythingAssets["assets"]): Promise<ComponentOpener> =>
+  assetComponentOpener(
+    "depth-anything",
+    assets,
+    (key) => assetBuffer(assets, key),
+    COMPONENT_KEYS,
+  );
 
 /**
  * グラフ入力の 1 軸ぶんの**静的**次元が `pipelineConfig` の宣言と一致することを見る。
@@ -358,14 +371,13 @@ type DepthAnythingAdmission = {
   readonly config: DepthAnythingPipelineConfig;
   readonly quantName: string;
   readonly quant: Quant;
-  readonly depth: ModelComponent;
 };
 
 /**
  * この manifest とこのグラフを depth-anything として実行できるかを見る（`hub/components.ts`
- * の家族 admission 席 — shard 面では**重み shard を 1 バイトも取る前**に呼ばれる）。
+ * の家族 admission 席 — 取得面では**重みの part を 1 バイトも取る前**に呼ばれる）。
  *
- * MUST: 家族の門はこの 1 本に集める。後段へ散らすと、shard 面では GB 級の重みを落とした
+ * MUST: 家族の門はこの 1 本に集める。後段へ散らすと、取得面では GB 級の重みを落とした
  * **後**にしか落ちない（ADR 0070 決定 5 の文面より実装が狭くなる）。
  * MUST: manifest の契約違反と**グラフとの突合**は **GPU を取りに行く前**に落とす。順序が
  * ずれると、GPU の無い環境では別の例外に化けて「何が悪かったのか」が読み手に伝わらない。
@@ -440,7 +452,7 @@ const admitDepthAnything = (
     );
   }
 
-  return { config, quantName, quant, depth };
+  return { config, quantName, quant };
 };
 
 /**
@@ -450,9 +462,12 @@ const admitDepthAnything = (
  */
 const openDepthAnythingState = async (
   admitted: DepthAnythingAdmission,
+  open: ComponentOpener,
   options: DepthAnythingPipelineOptions = {},
 ): Promise<DepthAnythingState> => {
-  const { config, quant, quantName, depth } = admitted;
+  const { config, quant, quantName } = admitted;
+  // 供給口は admission が見たものと**同じ 1 本**（`open` は開いた部品を引き当てるだけ）。
+  const depth = open(DEPTH);
   // MUST: 宣言された feature は device 作成時にしか要求できない（ADR 0028）。共有 GPU を
   // 渡された場合は要求できないので、能力が足りないことを名指しして落とす（共有 GPU は
   // {@link admitDepthAnything} が既に同じ 1 本で見ているが、自前で取った device は
@@ -536,9 +551,11 @@ export class DepthAnythingPipeline {
   }
 
   /**
-   * 配布形から取得して組む（`loadManifest` → `resolveFiles` → **各コンポーネントの
-   * グラフ shard だけ**を取って `prepareModel` → 残り資産の `fetchAssets` → 構築）。重み shard は
-   * Session を組むときに 1 本ずつ流れる（ADR 0070 — `src/hub/components.ts`）。
+   * 配布形から取得して組む（`loadManifest` → `resolveSelection` → **各部品の descriptor
+   * （part 0）だけ**を取って admission → 重みの part を温める → 残り資産の `fetchAssets` →
+   * 構築）。block は Session を組むその瞬間に part 順で読まれる（ADR 0109 —
+   * `src/hub/components.ts`）。部品を別リポの同じ役割で差し替えるときは
+   * {@link FromPretrainedComponentOptions.components}（役割は `depth` 1 本）。
    *
    * **`ref` は必須**（取得元に既定は無い — `src/hub/repo-ref.ts` の MUST）。パッケージ版が
    * 検証した取得元は {@link DEPTH_ANYTHING_SOURCES}（`./config.ts`）の `"depth-anything-v2"` —
@@ -560,27 +577,27 @@ export class DepthAnythingPipeline {
     );
     const hubOptions = hubLoadOptions(options);
     const loaded = await loadManifest(source, hubOptions);
-    const selection = {
+    const choice = {
       ...(options.model === undefined ? {} : { model: options.model }),
       ...(options.quant === undefined ? {} : { quant: options.quant }),
     };
-    const files = resolveFiles(loaded.manifest, selection);
+    const selection = resolveSelection(loaded.manifest, choice);
     const buildOptions: DepthAnythingPipelineOptions = {
       ...(options.gpu === undefined ? {} : { gpu: options.gpu }),
-      ...selection,
+      ...choice,
       ...(options.onRunDiagnostics === undefined
         ? {}
         : { onRunDiagnostics: options.onRunDiagnostics }),
     };
-    // 家族の門は admission 席で通す（重み shard を取る前 — `hub/components.ts`）。
-    const { admitted } = await loadShardComponents(
+    // 家族の門は admission 席で通す（重みの part を取る前 — `hub/components.ts`）。
+    const { admitted, open } = await loadContainerComponents(
       "DepthAnythingPipeline.fromPretrained",
       loaded,
-      files,
-      [DEPTH],
+      selection,
+      COMPONENT_KEYS,
       async (open) => {
         const admitted = admitDepthAnything(loaded.manifest, open, buildOptions);
-        // 配布形が宣言した `requiredLimits` は**重み shard を取る前**にここで見る
+        // 配布形が宣言した `requiredLimits` は**重みの part を取る前**にここで見る
         // （ADR 0089 決定 5 — 共有 GPU ならその limits、自前で取る経路はアダプタ実測値）。
         await assertRequiredLimitsBeforeDownload(
           admitted.quant.requiredLimits,
@@ -592,26 +609,28 @@ export class DepthAnythingPipeline {
       {
         ...hubOptions,
         ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }),
+        ...(options.components === undefined ? {} : { components: options.components }),
       },
     );
-    return new DepthAnythingPipeline(await openDepthAnythingState(admitted, buildOptions));
+    return new DepthAnythingPipeline(await openDepthAnythingState(admitted, open, buildOptions));
   }
 
   /**
-   * 取得済みの manifest + 資産から組む。契約検査・資産の解釈・`openModel`・グラフとの突合を
+   * 取得済みの manifest + 資産から組む。契約検査・資産の解釈・`openContainer`・グラフとの突合を
    * 全てここで済ませ、**`depth` の Session を 1 本張って**返す（モジュール doc の MUST）。
    *
-   * 取得キーは `resolveFiles` の規約どおり **2 形とも受ける** — 素の 1 本（`depth`）と、
-   * shard 分割形（`depth[0]` / `depth[1]` / …）。分割形は
-   * バイト列を連結せず `fromPretrained` と同じ shard 逐次面へ流す。添字の欠番と素キーとの混在は
-   * fail loudly（受け口の実装は `src/hub/components.ts` の 1 本）。
+   * 部品のキーは **2 形とも受ける** — 単一形 `krm` のバイト列 1 本（`depth`）と、分割形の
+   * part 列（`depth[0]` / `depth[1]` / … — part 0 から添字順）。分割形はバイト列を連結せず
+   * part 列のまま開く。添字の欠番と単一形キーとの混在は fail loudly（受け口の実装は
+   * `src/hub/components.ts` の 1 本）。
    */
   static async fromAssets(
     input: DepthAnythingAssets,
     options: DepthAnythingPipelineOptions = {},
   ): Promise<DepthAnythingPipeline> {
-    const admitted = admitDepthAnything(input.manifest, assetOpener(input.assets), options);
-    return new DepthAnythingPipeline(await openDepthAnythingState(admitted, options));
+    const open = await assetOpener(input.assets);
+    const admitted = admitDepthAnything(input.manifest, open, options);
+    return new DepthAnythingPipeline(await openDepthAnythingState(admitted, open, options));
   }
 
   /**

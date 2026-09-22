@@ -181,11 +181,11 @@ const runCensus = async (args: ReadonlyMap<string, readonly string[]>): Promise<
   const componentNames = asset.components.map((target) => target.component);
   for (const scenario of scenarios) assertBindingKeys(scenario, componentNames);
 
-  // グラフは先頭 shard のヘッダにしか無いので、コンポーネントごとに 1 度だけ読む。
+  // グラフ宣言は容器の part 0（系列出力は先頭 shard）にしか無いので、部品ごとに 1 度だけ読む。
   const graphs = await Promise.all(
     asset.components.map(async (target) => ({
       target,
-      graph: await readIrGraph(target.graphShard),
+      graph: await readIrGraph(target.graph),
     })),
   );
   // 修飾なしキーの誤綴りはグラフを読むまで判らない（記号の宣言集合は IR にしか無い）。

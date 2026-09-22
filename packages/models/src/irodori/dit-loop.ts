@@ -16,6 +16,7 @@
 
 import { disposeSteps } from "../session/dispose-steps.ts";
 import {
+  createSession,
   openModel,
   type ResidentTensor,
   type Session,
@@ -45,7 +46,7 @@ import {
   outputNameAt,
   withStageSession,
 } from "./stage.ts";
-import { type ModelComponent, wholeComponent } from "../hub/components.ts";
+import type { ModelComponent } from "../hub/components.ts";
 
 /**
  * 途中潜在を返す口を作る（**lazy copy** — 呼ばれたときだけ写す）。
@@ -237,13 +238,16 @@ export const runDitLoopResident = async (
       sessions.push(session);
       return session;
     };
+    // ホストが組んだ小グラフは配布形を通らない（バイト列がその場にある）ので、コンテナでは
+    // なく旧 IR 面（`openModel`）から直に Session にする — 容器に包む理由が無い。
+    const openHostGraph = async (bytes: ArrayBuffer): Promise<Session> => {
+      const session = await createSession(gpu, openModel(bytes), {});
+      sessions.push(session);
+      return session;
+    };
     const dit = await open(state.dit, state.ditSessionOptions);
-    // ホストが組んだ小グラフ 2 本は取得層を通らない（バイト列がその場にある）ので全量面のまま。
-    const combine = await open(
-      wholeComponent(openModel(combineGraph(frames, config.latentDim))),
-      {},
-    );
-    const euler = await open(wholeComponent(openModel(eulerGraph(frames, config.latentDim))), {});
+    const combine = await openHostGraph(combineGraph(frames, config.latentDim));
+    const euler = await openHostGraph(eulerGraph(frames, config.latentDim));
     // 強さは step に依らないので 1 度だけ作る。
     const scales = loop.uncondVariants.map((variant) => f32(Float32Array.of(variant.scale), [1]));
 

@@ -52,7 +52,7 @@ import {
   type Manifest,
   type ModelEntry,
   type Quant,
-  resolveFiles,
+  resolveSelection,
 } from "@karume/hub";
 
 import {
@@ -102,24 +102,33 @@ import {
 } from "../session/gpu-features.ts";
 import { toSessionOptions } from "../session/options.ts";
 import { toManifestSource } from "../hub/repo-ref.ts";
-import { type FromPretrainedHubOptions, hubLoadOptions } from "../hub/load-options.ts";
+import {
+  type FromPretrainedComponentOptions,
+  type FromPretrainedHubOptions,
+  hubLoadOptions,
+} from "../hub/load-options.ts";
 import {
   assetComponentOpener,
   type ComponentOpener,
   type GraphOwner,
-  loadShardComponents,
+  loadContainerComponents,
   type ModelComponent,
 } from "../hub/components.ts";
-import { readAssetBuffer } from "../hub/asset-readers.ts";
+import { readAssetBuffer, readWholeAsset } from "../hub/asset-readers.ts";
 
-/** manifest の weights / assets 表に現れる取得キー（ADR 0041 §3 の規約名）。 */
+/** manifest の weights / assets 表に現れる名前（ADR 0041 §3 の規約名）。 */
 const TEXT_ENCODER = "text_encoder";
 const TEXT_CONDITIONER = "text_conditioner";
 const TRANSFORMER = "transformer";
-const TRANSFORMER_ROPE_BASE = "transformer.rope_base";
 const VAE_DECODER = "vae_decoder";
 const TOKENIZER = "tokenizer";
 const TOKENIZER_2 = "tokenizer_2";
+
+/** `transformer` の容器が宣言する rope 素表の資産名（役割 `rope-base` — ADR 0109 決定 4）。 */
+const ROPE_BASE = "rope_base";
+
+/** この系列の weights 部品（差し替え席が受ける役割名でもある）。 */
+const COMPONENT_KEYS = [TEXT_ENCODER, TEXT_CONDITIONER, TRANSFORMER, VAE_DECODER] as const;
 
 /** 生成結果。`data` は RGBA 8bit（4 バイト / 画素・行優先）。 */
 export type GeneratedImage = {
@@ -270,7 +279,10 @@ export type AnimaPipelineOptions = {
  * NOTE: `headers` / `fetch` / `caches` / `onRetry` が **HTTP 取得元専用**であることを含め、
  * 欄ごとの説明は {@link FromPretrainedHubOptions} に 1 本化してある。
  */
-export type AnimaFromPretrainedOptions = AnimaPipelineOptions & FromPretrainedHubOptions;
+export type AnimaFromPretrainedOptions =
+  & AnimaPipelineOptions
+  & FromPretrainedHubOptions
+  & FromPretrainedComponentOptions;
 
 /** 取得済み資産から直接組むときの入力（hub の `fetchAssets` の返り値をそのまま渡す）。 */
 export type AnimaAssets = {
@@ -279,7 +291,7 @@ export type AnimaAssets = {
 };
 
 /**
- * 取得済みバイト列を `openModel` へ渡せる ArrayBuffer にする（門の本体は
+ * 取得済みバイト列を `openContainer` へ渡せる ArrayBuffer にする（門の本体は
  * {@link readAssetBuffer}）。
  *
  * MUST: `slice` で写さない — DiT は 1 本 3.7GiB あり、ホスト RAM のピークが倍になる。
@@ -291,11 +303,11 @@ const assetBuffer = (
 
 /**
  * 全量面（`fromAssets`）のコンポーネント供給口（受け口の実装は 7 家族共有 —
- * {@link assetComponentOpener}）。素の 1 本は `openModel` で開いて全量面で組み、shard 分割形
- * （`transformer[0]` / `transformer[1]` / …）は `fromPretrained` と同じ shard 逐次面へ流す。
+ * {@link assetComponentOpener}）。部品のキーは単一形 `krm` の 1 本（`transformer`）か、
+ * 分割形の part 列（`transformer[0]` / `transformer[1]` / …）。
  */
-const assetOpener = (assets: AnimaAssets["assets"]): ComponentOpener =>
-  assetComponentOpener("anima", assets, (key) => assetBuffer(assets, key));
+const assetOpener = (assets: AnimaAssets["assets"]): Promise<ComponentOpener> =>
+  assetComponentOpener("anima", assets, (key) => assetBuffer(assets, key), COMPONENT_KEYS);
 
 const assetBytes = (
   assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>,
@@ -581,11 +593,15 @@ export class AnimaPipeline {
   }
 
   /**
-   * 配布形から取得して組む（`loadManifest` → `resolveFiles` → **各コンポーネントの
-   * グラフ shard だけ**を取って `prepareModel` → 残り資産の `fetchAssets` → 構築）。重み shard は
-   * Session を組むときに 1 本ずつ流れる（ADR 0070 — `src/hub/components.ts`）。文字列の
-   * `ref` は `{ repo }` と読む（= `main` 追従）。**`ref` は必須**（取得元に既定は無い —
-   * `src/hub/repo-ref.ts` の MUST）。
+   * 配布形から取得して組む（`loadManifest` → `resolveSelection` → **各部品の descriptor
+   * （part 0）だけ**を取って admission → 重みの part を温める → 残り資産の `fetchAssets` →
+   * 構築）。block は Session を組むその瞬間に part 順で読まれる（ADR 0109 —
+   * `src/hub/components.ts`）。文字列の `ref` は `{ repo }` と読む（= `main` 追従）。
+   * **`ref` は必須**（取得元に既定は無い — `src/hub/repo-ref.ts` の MUST）。
+   *
+   * 部品を別リポの同じ役割で差し替えるときは
+   * {@link FromPretrainedComponentOptions.components}（`text_encoder` /
+   * `text_conditioner` / `transformer` / `vae_decoder`）。
    *
    * 手元の配布形は**取得元ハンドル**で渡す（`localDirectory` / `@karume/hub/deno` の
    * `denoDirectory`）。HF の `owner/name` の綴りの門は通らず、network も CacheStorage も
@@ -602,29 +618,29 @@ export class AnimaPipeline {
     );
     const hubOptions = hubLoadOptions(options);
     const loaded = await loadManifest(source, hubOptions);
-    const selection = {
+    const choice = {
       ...(options.model === undefined ? {} : { model: options.model }),
       ...(options.quant === undefined ? {} : { quant: options.quant }),
     };
-    const files = resolveFiles(loaded.manifest, selection);
+    const selection = resolveSelection(loaded.manifest, choice);
     // signal は取得層と構築の**両方**へ渡す（DL が終わった瞬間に中断が効かなくなる窓を作らない）。
     const buildOptions: AnimaPipelineOptions = {
       ...(options.gpu === undefined ? {} : { gpu: options.gpu }),
-      ...selection,
+      ...choice,
       ...(options.onRunDiagnostics === undefined
         ? {}
         : { onRunDiagnostics: options.onRunDiagnostics }),
       ...(options.signal === undefined ? {} : { signal: options.signal }),
     };
-    // 家族の門は admission 席で通す（重み shard を取る前 — `src/hub/components.ts`）。
-    const { admitted, assets, open } = await loadShardComponents(
+    // 家族の門は admission 席で通す（重みの part を取る前 — `src/hub/components.ts`）。
+    const { admitted, assets, open } = await loadContainerComponents(
       "AnimaPipeline.fromPretrained",
       loaded,
-      files,
-      [TEXT_ENCODER, TEXT_CONDITIONER, TRANSFORMER, VAE_DECODER],
+      selection,
+      COMPONENT_KEYS,
       async () => {
         const admitted = AnimaPipeline.#admit(loaded.manifest, buildOptions);
-        // 配布形が宣言した `requiredLimits` は**重み shard を取る前**にここで見る
+        // 配布形が宣言した `requiredLimits` は**重みの part を取る前**にここで見る
         // （ADR 0089 決定 5 — 共有 GPU ならその limits、自前で取る経路はアダプタ実測値）。
         await assertRequiredLimitsBeforeDownload(
           admitted.quant.requiredLimits,
@@ -636,6 +652,7 @@ export class AnimaPipeline {
       {
         ...hubOptions,
         ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }),
+        ...(options.components === undefined ? {} : { components: options.components }),
       },
     );
     return await AnimaPipeline.#build(admitted, assets, open, buildOptions);
@@ -643,23 +660,23 @@ export class AnimaPipeline {
 
   /**
    * この manifest を anima として実行できるかを見る（`src/hub/components.ts` の家族
-   * admission 席 — shard 面では**重み shard を 1 バイトも取る前**に呼ばれる）。
+   * admission 席 — 取得面では**重みの part を 1 バイトも取る前**に呼ばれる）。
    *
-   * MUST: 家族の門はこの 1 本に集める。後段へ散らすと、shard 面では GB 級の重みを落とした
+   * MUST: 家族の門はこの 1 本に集める。後段へ散らすと、取得面では GB 級の重みを落とした
    * **後**にしか落ちない（ADR 0070 決定 5 の文面より実装が狭くなる）。
    * MUST: manifest の契約違反は **GPU を取りに行く前**に落とす（他 6 家族と同じ順序）。
    *
    * NOTE: グラフを受け取らないのは、この家族が「グラフ宣言 × pipelineConfig」の突合を構築時に
    * 持たないため（patch 幾何と rope は解像度ごとに `planDynDit` が生成時に導く）。資産
-   * （tokenizer 2 本 / rope 素表）の解析もこの席へは置けない — admission の時点では extras を
-   * まだ取っていない（取ってからでは重み prefetch より前という位置が保てない）ので
-   * {@link AnimaPipeline.#build} に残る。
+   * （tokenizer 2 本 / rope 素表）の解析もこの席へは置けない — admission の時点で手元にあるのは
+   * 資産の**宣言**（名前 → 役割・論理長）だけでバイト列はまだ無い（待つと重み prefetch より前
+   * という位置が保てない）ので {@link AnimaPipeline.#build} に残る。
    */
   static #admit(
     manifest: Manifest,
     options: AnimaPipelineOptions,
   ): AnimaAdmission {
-    // 中断の検査は**段の境目**に置く（各段は不可分 — 3.7GiB の openModel を途中で畳む口は無い）。
+    // 中断の検査は**段の境目**に置く（各段は不可分 — 3.7GiB の部品を途中で畳む口は無い）。
     // 入口が最初の 1 本: 中断済みで呼ばれたら資産に 1 バイトも触らずに返す。
     options.signal?.throwIfAborted();
     const modelName = options.model ?? manifest.defaultModel;
@@ -744,7 +761,9 @@ export class AnimaPipeline {
     const textConditioner = open(TEXT_CONDITIONER);
     await settleAbort(options.signal);
     const transformer = open(TRANSFORMER);
-    const ropeBase = parseRopeBase(assetBuffer(assets, TRANSFORMER_ROPE_BASE));
+    // rope 素表は `transformer` の**容器の資産**（役割 `rope-base` — ADR 0109 決定 4）。
+    // 66 KB なので全量で読む（区間読みが要るのは PLE のような行単位の表だけ）。
+    const ropeBase = parseRopeBase(await readWholeAsset(transformer.asset(ROPE_BASE)));
     await settleAbort(options.signal);
     const vaeDecoder = open(VAE_DECODER);
 
@@ -794,19 +813,20 @@ export class AnimaPipeline {
    *   models 側。ADR 0038 §1）
    * - `pipelineConfig` の手書きスキーマ検証（未知キーも fail loudly）
    * - quant の `session` → runtime `SessionOptions` の**明示写像**と `gpuFeatures` の解釈
-   * - 全 weights / assets の `openModel` / rope 素表 / トークナイザ 2 本の解釈
+   * - 全 weights の `openContainer` / rope 素表 / トークナイザ 2 本の解釈
    *
-   * weights の取得キーは `resolveFiles` の規約どおり **2 形とも受ける** — 素の 1 本
-   * （`transformer`）と、shard 分割形（`transformer[0]` /
-   * `transformer[1]` / …）。分割形はバイト列を連結せず `fromPretrained` と同じ shard 逐次面へ
-   * 流す。添字の欠番と素キーとの混在は fail loudly（受け口の実装は `src/hub/components.ts`）。
+   * weights の部品キーは **2 形とも受ける** — 単一形 `krm` のバイト列 1 本（`transformer`）と、
+   * 分割形の part 列（`transformer[0]` / `transformer[1]` / … — part 0 から添字順）。分割形は
+   * バイト列を連結せず part 列のまま開く。添字の欠番と単一形キーとの混在は fail loudly
+   * （受け口の実装は `src/hub/components.ts`）。rope 素表は `transformer` の容器の資産なので、
+   * この面でも `assets` には並べない。
    *
    * MUST: manifest の契約違反と**資産の解析**は **GPU を取りに行く前**に落とす（他 6 家族と
    * 同じ順序）。順序がずれると、GPU の無い環境では別の例外に化けて「何が悪かったのか」が
    * 読み手に伝わらない。GPU 取得後に許される検査は GPU の能力（shader-f16）だけ。
    * MUST: Session は 1 本も張らない（VRAM の MUST — モジュール doc）。
    *
-   * NOTE: 各段は不可分（3.7GiB の `openModel` を途中で畳む口は無い）なので、
+   * NOTE: 各段は不可分（3.7GiB の部品を途中で畳む口は無い）なので、
    * {@link AnimaPipelineOptions.signal} の検査は**段の境目**にだけ置き、そこで
    * イベントループへ 1 度譲ってから検査する（{@link settleAbort}）— 同期解析の最中に
    * 届いた中断は次の境目で効く（`options.gpu` 供給時も同様）。
@@ -819,7 +839,7 @@ export class AnimaPipeline {
     return await AnimaPipeline.#build(
       admitted,
       input.assets,
-      assetOpener(input.assets),
+      await assetOpener(input.assets),
       options,
     );
   }

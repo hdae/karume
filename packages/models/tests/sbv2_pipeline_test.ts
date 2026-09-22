@@ -33,25 +33,48 @@ import { Sbv2InputError } from "../src/sbv2/errors.ts";
 import { Randn } from "../src/sbv2/host/random.ts";
 import { parseSbv2PipelineConfig } from "../src/sbv2/config.ts";
 import { tileBertToPhoneLevel, type TiledBert } from "../src/sbv2/text/bert-tile.ts";
+import { declaredContainer, partAssets, tensorlessContainer } from "./helpers/container-fixture.ts";
 
-const FILE = {
-  path: "front/model.i8.safetensors",
-  size: 16,
-  sha256: "a".repeat(64),
-};
+/** この系列の weights 部品（`src/sbv2/pipeline.ts` の `COMPONENT_KEYS` と同じ 3 本）。 */
+const WEIGHT_NAMES = ["front", "voice", "text_encoder"] as const;
+
+/**
+ * 開ける容器 3 本（宣言は最小 — グラフ幅の突合は下の門を直接叩く節が見る）。`fromAssets` は
+ * 供給口を作る時点で 3 本とも開くので、manifest の門を踏むケースでも容器は揃えておく。
+ */
+const COMPONENTS: Record<string, Uint8Array<ArrayBuffer>> = {};
+for (const name of WEIGHT_NAMES) {
+  Object.assign(
+    COMPONENTS,
+    partAssets(
+      name,
+      await tensorlessContainer(name, {
+        inputs: [{ name: "x", shape: [1, 4] }],
+        output: { name: "y", shape: [1, 4] },
+      }),
+    ),
+  );
+}
 
 /** `models/karume-sbv2-jvnv/karume.json` の骨格（検査に要る欄だけ）。 */
 const manifestText = (patch: Record<string, unknown> = {}): string =>
   JSON.stringify({
-    format: "karume/4",
+    format: "karume/5",
     generator: "karume/0.1.0",
     defaultModel: "FN4",
     models: {
       FN4: {
         pipeline: "sbv2/1",
-        weights: { front: { i8: { shards: [FILE] } } },
+        weights: Object.fromEntries(
+          WEIGHT_NAMES.map((name) => [name, { i8: declaredContainer(`${name}/model.i8`) }]),
+        ),
         assets: {},
-        quants: { i8: { weights: { front: "i8" }, session: {} } },
+        quants: {
+          i8: {
+            weights: Object.fromEntries(WEIGHT_NAMES.map((name) => [name, "i8"])),
+            session: {},
+          },
+        },
         defaultQuant: "i8",
         pipelineConfig: {
           styles: { Neutral: 0, high: 1 },
@@ -79,10 +102,21 @@ const emptyAssets = {} as Record<string, Uint8Array<ArrayBuffer>>;
 const withConfig = (config: Record<string, unknown>): string =>
   manifestText({ pipelineConfig: config });
 
+Deno.test("fromAssets: 部品の容器が無ければ 2 形の綴りつきで落ちる（受け口の診断）", async () => {
+  // 容器が揃っていない Record では**部品の不在**で落ちる（manifest の文言では落ちない）=
+  // 下の門が資産の不在に巻き添えられていないことの対偶。
+  const manifest = parseManifest(manifestText());
+  await assertRejects(
+    () => Sbv2Pipeline.fromAssets({ manifest, assets: emptyAssets }),
+    Error,
+    "部品 'front' の容器が無い",
+  );
+});
+
 Deno.test("fromAssets: pipeline の契約名が sbv2 でない manifest を落とす", async () => {
   const manifest = parseManifest(manifestText({ pipeline: "anima/1" }));
   await assertRejects(
-    () => Sbv2Pipeline.fromAssets({ manifest, assets: emptyAssets }),
+    () => Sbv2Pipeline.fromAssets({ manifest, assets: COMPONENTS }),
     Error,
     "'anima/1'",
   );
@@ -93,7 +127,7 @@ Deno.test("fromAssets: 未知 major は fail loudly（検査責務は models 側
   // hub は `pipeline` の major を検査しない（読めるかどうかはパイプライン実装しか知らない）。
   assertEquals(manifest.models["FN4"].pipeline, { name: "sbv2", major: 2 });
   await assertRejects(
-    () => Sbv2Pipeline.fromAssets({ manifest, assets: emptyAssets }),
+    () => Sbv2Pipeline.fromAssets({ manifest, assets: COMPONENTS }),
     Error,
     "major に未対応",
   );
@@ -102,7 +136,7 @@ Deno.test("fromAssets: 未知 major は fail loudly（検査責務は models 側
 Deno.test("fromAssets: 存在しない quant は利用可能な一覧を添えて落とす", async () => {
   const manifest = parseManifest(manifestText());
   await assertRejects(
-    () => Sbv2Pipeline.fromAssets({ manifest, assets: emptyAssets }, { quant: "f16" }),
+    () => Sbv2Pipeline.fromAssets({ manifest, assets: COMPONENTS }, { quant: "f16" }),
     Error,
     "利用可能: i8",
   );
@@ -112,7 +146,7 @@ Deno.test("fromAssets: 存在しない model は利用可能な一覧を添え�
   // v2 で増えた軸（ファミリーリポの別話者を打ち間違えたときの一次情報 — ADR 0041 §8）。
   const manifest = parseManifest(manifestText());
   await assertRejects(
-    () => Sbv2Pipeline.fromAssets({ manifest, assets: emptyAssets }, { model: "FN1" }),
+    () => Sbv2Pipeline.fromAssets({ manifest, assets: COMPONENTS }, { model: "FN1" }),
     Error,
     "利用可能: FN4",
   );
@@ -139,7 +173,7 @@ Deno.test("fromAssets: pipelineConfig の未知キーは構築時に落ちる", 
     }),
   );
   await assertRejects(
-    () => Sbv2Pipeline.fromAssets({ manifest, assets: emptyAssets }),
+    () => Sbv2Pipeline.fromAssets({ manifest, assets: COMPONENTS }),
     Error,
     "pipelineConfig: 未知キー 'sampleRate'",
   );
@@ -165,7 +199,7 @@ Deno.test("fromAssets: defaults.style が styles に無ければ構築時に落�
   );
   // 「生成を 1 回走らせて初めて分かる」を作らない — 既定は受理集合の内側であること。
   await assertRejects(
-    () => Sbv2Pipeline.fromAssets({ manifest, assets: emptyAssets }),
+    () => Sbv2Pipeline.fromAssets({ manifest, assets: COMPONENTS }),
     Error,
     "pipelineConfig.defaults.style: 'Angry' が styles に無い",
   );
@@ -190,7 +224,7 @@ Deno.test("fromAssets: defaults.speaker が speakers に無ければ構築時に
     }),
   );
   await assertRejects(
-    () => Sbv2Pipeline.fromAssets({ manifest, assets: emptyAssets }),
+    () => Sbv2Pipeline.fromAssets({ manifest, assets: COMPONENTS }),
     Error,
     "pipelineConfig.defaults.speaker: 'jvnv-F1-jp' が speakers に無い",
   );
@@ -217,7 +251,7 @@ Deno.test("fromAssets: 行番号が順列でない styles は構築時に落ち�
     }),
   );
   await assertRejects(
-    () => Sbv2Pipeline.fromAssets({ manifest, assets: emptyAssets }),
+    () => Sbv2Pipeline.fromAssets({ manifest, assets: COMPONENTS }),
     Error,
     "行番号が 0..1 の整数でない",
   );

@@ -28,11 +28,7 @@ import {
   assertGemma4ChunkBuckets,
   assertRopeInputShapes,
 } from "../src/gemma/admission.ts";
-import {
-  assertPleShardAssets,
-  GEMMA4_CHUNK_BUCKETS,
-  Gemma4Pipeline,
-} from "../src/gemma/pipeline.ts";
+import { GEMMA4_CHUNK_BUCKETS, Gemma4Pipeline } from "../src/gemma/pipeline.ts";
 import type { GenerationGraph } from "../src/generation/program.ts";
 import { stubModel } from "./helpers/stub-model.ts";
 
@@ -65,14 +61,31 @@ const SHIPPED_MAX_POSITION = 131072;
 const RECOMMENDED = { temperature: 1, topK: 64, topP: 0.95 } as const;
 
 const MIRROR = new URL("../../../models/karume-gemma4/karume.json", import.meta.url);
+/** この版が読む配布 manifest の major（旧版は読まない — ADR 0109 決定 1）。 */
+const MANIFEST_FORMAT = "karume/5";
 
+/**
+ * 配布形ミラーの `karume.json`（無い / 旧 major の機では SKIP）。
+ *
+ * MUST: 「format が `karume/5` か」で判定する。移行前のミラーが残っている機では parse 自体が
+ * 落ちるので、「ファイルが在る」を条件にすると門が赤くなるだけで何も言えない（`tools/_shared`
+ * の `distributionFormat` と同じ規律 — ADR 0109 決定 9 の共存期間）。
+ */
 const readMirror = (): string | undefined => {
+  let text: string;
   try {
-    return Deno.readTextFileSync(MIRROR);
+    text = Deno.readTextFileSync(MIRROR);
   } catch (cause) {
     if (cause instanceof Deno.errors.NotFound) return undefined;
     throw cause;
   }
+  const format = (JSON.parse(text) as { readonly format?: unknown }).format;
+  if (format === MANIFEST_FORMAT) return text;
+  console.warn(
+    `[karume] models/karume-gemma4/ の format が ${String(format)}（${MANIFEST_FORMAT} でない）` +
+      "ため配布形の宣言の門を SKIP する。",
+  );
+  return undefined;
 };
 
 Deno.test("gemma4 pipelineConfig: 3 つの数 + rope と optional な sampler を読む", () => {
@@ -276,8 +289,6 @@ Deno.test("gemma4 fromAssets: config は fromPretrained と同じ門を、バイ
       config: config as Gemma4PipelineConfig,
       model: [junk],
       tokenizer: junk,
-      pleIndex: junk,
-      openPleShard: () => Promise.reject(new Error("gemma4_config_test: PLE を読みに行った")),
     });
 
   await t.step("未知キー", async () => {
@@ -320,8 +331,6 @@ Deno.test("gemma4 fromAssets: quant 実行ノブの明示指定も資産を開�
         config: MINIMAL as unknown as Gemma4PipelineConfig,
         model: [junk],
         tokenizer: junk,
-        pleIndex: junk,
-        openPleShard: () => Promise.reject(new Error("gemma4_config_test: PLE を読みに行った")),
       }, { fuseLinearStaticQuantize: true, linearGemvReduce: "sequential" }),
     ModelInputError,
     "fuseLinearStaticQuantizeはlinearGemvReduce: parallelが必要",
@@ -537,64 +546,5 @@ Deno.test("assertGemma4ChunkBuckets: 受理集合は runtime に委ね、入口�
       assertGemma4ChunkBuckets(GEMMA4_CHUNK_BUCKETS, SHIPPED_CHUNK_LENGTH),
       GEMMA4_CHUNK_BUCKETS,
     );
-  });
-});
-
-// ---- PLE 索引と manifest の遅延資産の突合 -----------------------------------
-//
-// `fromPretrained` は「遅延側は PLE sidecar **ちょうど**」を MUST に掲げているが、実装は
-// 読み口を開くときの存在確認だけだった（= 索引が知らない資産は永久に検出されず、索引に
-// あって assets に無い shard はその範囲を初めて引いたターン = 会話の途中・3.7GiB のロード
-// 完了後まで落ちない）。門は `#build` の前（GPU も重み shard も未接触）に置く。
-
-/** 索引 3 本ぶんの最小形（値域は `parseGemma4PleIndex` の受理集合内）。 */
-const pleIndexOf = (files: readonly string[]) => ({
-  tokens: files.length,
-  layers: 1,
-  dim: 1,
-  embedScale: 1,
-  shards: files.map((file, index) => ({ file, start: index, stop: index + 1 })),
-});
-
-Deno.test("assertPleShardAssets: 索引と遅延資産がちょうど一致するときだけ通す", async (t) => {
-  const index = pleIndexOf(["ple/0.safetensors", "ple/1.safetensors"]);
-
-  await t.step("ちょうど一致（陰性対照 — 常に落ちる門になっていない）", () => {
-    assertPleShardAssets("test", index, ["ple/0.safetensors", "ple/1.safetensors"]);
-    // 集合として見る（manifest の並び順は索引の並び順と一致しなくてよい）。
-    assertPleShardAssets("test", index, ["ple/1.safetensors", "ple/0.safetensors"]);
-  });
-
-  await t.step("索引にあって assets に無い（会話の途中で初めて落ちる形）", () => {
-    const error = assertThrows(
-      () => assertPleShardAssets("test", index, ["ple/0.safetensors"]),
-      Error,
-      "PLE sidecar の索引と manifest の遅延資産が食い違う",
-    );
-    assert(error.message.includes("assets に無い: ple/1.safetensors"), error.message);
-  });
-
-  await t.step("assets にあって索引に無い（宣言した資産を 1 本も読まないまま動く形）", () => {
-    const error = assertThrows(
-      () =>
-        assertPleShardAssets("test", index, [
-          "ple/0.safetensors",
-          "ple/1.safetensors",
-          "ple/2.safetensors",
-        ]),
-      Error,
-      "PLE sidecar の索引と manifest の遅延資産が食い違う",
-    );
-    assert(error.message.includes("索引に無い: ple/2.safetensors"), error.message);
-  });
-
-  await t.step("両方向が同時に壊れた配布形は 2 つとも名指しする", () => {
-    const error = assertThrows(
-      () => assertPleShardAssets("test", index, ["ple/0.safetensors", "ple/9.safetensors"]),
-      Error,
-      "食い違う",
-    );
-    assert(error.message.includes("assets に無い: ple/1.safetensors"), error.message);
-    assert(error.message.includes("索引に無い: ple/9.safetensors"), error.message);
   });
 });

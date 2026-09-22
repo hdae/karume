@@ -1,5 +1,5 @@
 // 使い捨ての疑似 HF サーバの門（実 GPU も実資産も要らない — 127.0.0.1 の使い捨てポートと
-// 数バイトのダミー shard だけ）。
+// 数バイトのダミー part だけ）。
 //
 // 唯一の消費者（`packages/models/tests/e2e_gemma4_pretrained_test.ts`）は実 GPU + 実資産が要る
 // ので、パス門・配信表・起動時検査はここで縛る。観測はステータスコードと文言の部分一致。
@@ -13,8 +13,15 @@ const REPO = "karume-local/dist";
 const SHA = "0".repeat(40);
 const CROSS_REPO = "someone/shared";
 const CROSS_REVISION = "c".repeat(40);
-const SHARD_PATH = "net/model.safetensors";
+const PART0_PATH = "net/model.f16-00001-of-00002.krm";
+const PART1_PATH = "net/model.f16-00002-of-00002.krm";
 const CROSS_PATH = "text_encoder/model.safetensors";
+
+/** コンテナのヘッダ長（container-v1 §1）。part 0 は「ヘッダ + 2 文書ちょうど」。 */
+const HEADER_BYTES = 24;
+/** 合成 descriptor の 2 文書の長さ（中身は配られるだけ — 長さの整合が manifest の門）。 */
+const GRAPH_BYTES = 10;
+const MODEL_BYTES = 12;
 
 const sha256Hex = async (bytes: Uint8Array<ArrayBuffer>): Promise<string> =>
   [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))]
@@ -36,8 +43,11 @@ const buildDist = async (
 ): Promise<string> => {
   const dir = `${root}/dist`;
   await Deno.mkdir(`${dir}/net`, { recursive: true });
-  const shardBytes = encoder.encode("shard-bytes");
-  await Deno.writeFile(`${dir}/${SHARD_PATH}`, shardBytes);
+  const part0Bytes = new Uint8Array(new ArrayBuffer(HEADER_BYTES + GRAPH_BYTES + MODEL_BYTES))
+    .fill(0x41);
+  const part1Bytes = encoder.encode("part-bytes");
+  await Deno.writeFile(`${dir}/${PART0_PATH}`, part0Bytes);
+  await Deno.writeFile(`${dir}/${PART1_PATH}`, part1Bytes);
   const assets: Json = {};
   for (const [at, revision] of (options.cross ?? []).entries()) {
     assets[`cross${at}`] = {
@@ -53,13 +63,28 @@ const buildDist = async (
     await Deno.writeFile(`${root}/shared/${CROSS_PATH}`, encoder.encode("xxxx"));
   }
   const manifest = {
-    format: "karume/4",
+    format: "karume/5",
     generator: "karume/test",
     defaultModel: "m",
     models: {
       m: {
         pipeline: "anima/1",
-        weights: { net: { f16: { shards: [await fileRef(SHARD_PATH, shardBytes)] } } },
+        weights: {
+          net: {
+            f16: {
+              container: {
+                descriptor: {
+                  graph: { length: GRAPH_BYTES, sha256: "1".repeat(64) },
+                  model: { length: MODEL_BYTES, sha256: "2".repeat(64) },
+                },
+                parts: [
+                  await fileRef(PART0_PATH, part0Bytes),
+                  await fileRef(PART1_PATH, part1Bytes),
+                ],
+              },
+            },
+          },
+        },
         assets,
         quants: { f16: { weights: { net: "f16" }, session: {} } },
         defaultQuant: "f16",
@@ -105,10 +130,10 @@ Deno.test("serveLocalDist: resolve は 200 で返し content-length が実ファ
     const dir = await buildDist(root);
     await using server = serveLocalDist(dir);
     const hub = server.source.hubUrl;
-    const { status, body, length } = await get(`${hub}/${REPO}/resolve/${SHA}/${SHARD_PATH}`);
+    const { status, body, length } = await get(`${hub}/${REPO}/resolve/${SHA}/${PART1_PATH}`);
     assertEquals(status, 200);
-    assertEquals(body, "shard-bytes");
-    assertEquals(length, String(encoder.encode("shard-bytes").byteLength));
+    assertEquals(body, "part-bytes");
+    assertEquals(length, String(encoder.encode("part-bytes").byteLength));
   });
 });
 
@@ -122,7 +147,7 @@ Deno.test("serveLocalDist: 配布形の外へ出る path は 404（`..` / 先頭
         "..%2F..%2Fetc%2Fpasswd",
         "%2e%2e%2ffoo",
         "%2Fetc%2Fpasswd",
-        "net%2F%2Fmodel.safetensors",
+        "net%2F%2Fmodel.f16-00002-of-00002.krm",
       ]
     ) {
       const { status } = await get(`${hub}/${REPO}/resolve/${SHA}/${spelled}`);
@@ -137,10 +162,10 @@ Deno.test("serveLocalDist: revision が宣言と違えば 404、未知の repo �
     await using server = serveLocalDist(dir);
     const hub = server.source.hubUrl;
     assertEquals(
-      (await get(`${hub}/${REPO}/resolve/${"d".repeat(40)}/${SHARD_PATH}`)).status,
+      (await get(`${hub}/${REPO}/resolve/${"d".repeat(40)}/${PART1_PATH}`)).status,
       404,
     );
-    assertEquals((await get(`${hub}/someone/other/resolve/${SHA}/${SHARD_PATH}`)).status, 404);
+    assertEquals((await get(`${hub}/someone/other/resolve/${SHA}/${PART1_PATH}`)).status, 404);
     assertEquals((await get(`${hub}/api/models/someone/other/revision/main`)).status, 404);
   });
 });

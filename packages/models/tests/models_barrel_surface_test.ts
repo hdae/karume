@@ -11,28 +11,23 @@
 
 import { assert, assertEquals } from "@std/assert";
 import * as models from "../mod.ts";
-import type {
-  Gemma4PleReadOptions as BarrelPleReadOptions,
-  Gemma4PleShardSource as BarrelPleSource,
-} from "../mod.ts";
-import type {
-  Gemma4PleReadOptions as SubpathPleReadOptions,
-  Gemma4PleShardSource as SubpathPleSource,
-} from "../gemma.ts";
+import type { Gemma4FromPretrainedOptions as BarrelFromPretrained } from "../mod.ts";
+import type { ComponentSource } from "../mod.ts";
+import type { Gemma4FromPretrainedOptions as SubpathFromPretrained } from "../gemma.ts";
 
-// 型 export の両建て（`Gemma4PleShardSource` と、その関数引数に現れる `Gemma4PleReadOptions` —
-// どちらも `fromAssets` の呼び手が**実装する**面）。値ではないので `Object.keys` には出ず、
-// 実行時のアサートでは縛れない。落とせるのは **`deno test`（`verify` の test 段）の型検査**
-// だけ（`deno task check` はテストを対象に含めない）なので、両面から取った型を突き合わせる
-// 束縛をここに置く（片方の 1 行が消えれば test 段が赤）。値の assert は `noUnusedLocals` に
-// 束縛を「読まれない局所」と見なさせないためで、門の実体は型注釈と `satisfies` の側。
-Deno.test("barrel: PLE の型面（source / read options）は barrel とサブパスで同じ型", () => {
-  const source: BarrelPleSource = {
-    bytes: 0,
-    readAll: () => Promise.resolve(new ArrayBuffer(0)),
-  } satisfies SubpathPleSource;
-  const options: BarrelPleReadOptions = {} satisfies SubpathPleReadOptions;
-  assertEquals([source.bytes, Object.keys(options)], [0, []]);
+// 型 export の両建て（`Gemma4FromPretrainedOptions` と、その `components` 欄に現れる
+// `ComponentSource` — 部品差し替え席〈ADR 0108 決定 19 / ADR 0109 決定 10〉の面）。値ではないので
+// `Object.keys` には出ず、実行時のアサートでは縛れない。落とせるのは **`deno test`（`verify` の
+// test 段）の型検査**だけ（`deno task check` はテストを対象に含めない）ので、両面から取った型を
+// 突き合わせる束縛をここに置く（片方の 1 行が消えれば test 段が赤）。値の assert は
+// `noUnusedLocals` に束縛を「読まれない局所」と見なさせないためで、門の実体は型注釈と
+// `satisfies` の側。
+Deno.test("barrel: 部品差し替え席の型面は barrel とサブパスで同じ型", () => {
+  const source: ComponentSource = { source: "owner/name", quant: "i4" };
+  const options: BarrelFromPretrained = {
+    components: { model: source },
+  } satisfies SubpathFromPretrained;
+  assertEquals(Object.keys(options.components ?? {}), ["model"]);
 });
 
 Deno.test("barrel: 生成ループは公開面に無い（ADR 0083 決定 9 の格下げ）", () => {

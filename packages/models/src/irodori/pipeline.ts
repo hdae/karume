@@ -27,7 +27,7 @@
  * ## MUST: グラフは段ごとに開いて閉じる（`dit` と `codec_decoder` だけが複数 run）
  *
  * {@link IrodoriPipeline.fromAssets} は **Session を 1 本も張らない** — 開くのはコンテナ
- * （`openModel` = ヘッダ解析のみ）までで、GPU 常駐は {@link IrodoriPipeline.generate} の
+ * （`openContainer` = 2 文書の解析のみ）までで、GPU 常駐は {@link IrodoriPipeline.generate} の
  * 中で段ごとに張っては畳む。`backbone` だけで 1.26GB あるので、条件エンコーダと DiT を
  * 同時に生かさない。codec も同じ理由で DiT を畳んでから張る。DiT の段だけは `dit` に加えて
  * ホストで組んだ小グラフ 2 本（{@link "./dit-loop.ts"} の `runDitLoopResident`）を同時に張るが、
@@ -75,7 +75,7 @@ import {
   type HubRepoRef,
   loadManifest,
   type Manifest,
-  resolveFiles,
+  resolveSelection,
 } from "@karume/hub";
 
 import {
@@ -86,6 +86,7 @@ import {
   CAPTION_PROJ,
   CODEC_DECODER,
   CODEC_ENCODER,
+  COMPONENT_KEYS,
   DIT,
   DURATION,
   type IrodoriAdmission,
@@ -146,8 +147,16 @@ import {
   toAcquireGpuOptions,
 } from "../session/gpu-features.ts";
 import { toManifestSource } from "../hub/repo-ref.ts";
-import { type FromPretrainedHubOptions, hubLoadOptions } from "../hub/load-options.ts";
-import { loadShardComponents, type ModelComponent } from "../hub/components.ts";
+import {
+  type FromPretrainedComponentOptions,
+  type FromPretrainedHubOptions,
+  hubLoadOptions,
+} from "../hub/load-options.ts";
+import {
+  type ComponentOpener,
+  loadContainerComponents,
+  type ModelComponent,
+} from "../hub/components.ts";
 import { ModelInputError } from "../errors.ts";
 import { assertAcceptableSeed } from "../request-gates.ts";
 
@@ -322,7 +331,7 @@ export type IrodoriPipelineOptions = {
     diagnostics: SessionDiagnostics,
   ) => void;
   /**
-   * 構築の中断。{@link IrodoriPipeline.fromAssets} が段の境目（入口 / 各 `openModel` の間 /
+   * 構築の中断。{@link IrodoriPipeline.fromAssets} が段の境目（入口 / 各部品の間 /
    * トークナイザ解釈 / GPU 取得の前後）で検査する。入口を除く各境目では**イベントループへ
    * 1 度譲ってから**検査するので、同期解析の最中に届いた中断も次の境目で効く
    * （`options.gpu` を渡して await が 1 つも無い経路でも同じ）。
@@ -342,7 +351,10 @@ export type IrodoriPipelineOptions = {
  * NOTE: `headers` / `fetch` / `caches` / `onRetry` が **HTTP 取得元専用**であることを含め、
  * 欄ごとの説明は {@link FromPretrainedHubOptions} に 1 本化してある。
  */
-export type IrodoriFromPretrainedOptions = IrodoriPipelineOptions & FromPretrainedHubOptions;
+export type IrodoriFromPretrainedOptions =
+  & IrodoriPipelineOptions
+  & FromPretrainedHubOptions
+  & FromPretrainedComponentOptions;
 
 /** 取得済み資産から直接組むときの入力（hub の `fetchAssets` の返り値をそのまま渡す）。 */
 export type IrodoriAssets = {
@@ -385,23 +397,19 @@ export type IrodoriState = {
 const buildIrodoriState = async (
   admitted: IrodoriAdmission,
   assets: IrodoriAssets["assets"],
+  open: ComponentOpener,
   options: IrodoriPipelineOptions = {},
 ): Promise<IrodoriState> => {
-  const {
-    config,
-    quant,
-    quantName,
-    ditSymbol,
-    ditSessionOptions,
-    backbone,
-    textProj,
-    captionProj,
-    speaker,
-    duration,
-    dit,
-    codecDecoder,
-    codecEncoder,
-  } = admitted;
+  const { config, quant, quantName, ditSymbol, ditSessionOptions } = admitted;
+  // 供給口は admission が見たものと**同じ 1 本**（`open` は開いた部品を引き当てるだけ）。
+  const backbone = open(BACKBONE);
+  const textProj = open(TEXT_PROJ);
+  const captionProj = open(CAPTION_PROJ);
+  const speaker = open(SPEAKER);
+  const duration = open(DURATION);
+  const dit = open(DIT);
+  const codecDecoder = open(CODEC_DECODER);
+  const codecEncoder = open(CODEC_ENCODER);
 
   await settleAbort(options.signal);
   const tokenizer = new IrodoriTokenizer(
@@ -797,11 +805,14 @@ export class IrodoriPipeline {
   }
 
   /**
-   * 配布形から取得して組む（`loadManifest` → `resolveFiles` → **各コンポーネントの
-   * グラフ shard だけ**を取って `prepareModel` → 残り資産の `fetchAssets` → 構築）。重み shard は
-   * Session を組むときに 1 本ずつ流れる（ADR 0070 — `src/hub/components.ts`）。文字列の
-   * `ref` は `{ repo }` と読む（= `main` 追従）。**`ref` は必須**（取得元に既定は無い —
-   * `src/hub/repo-ref.ts` の MUST）。
+   * 配布形から取得して組む（`loadManifest` → `resolveSelection` → **各部品の descriptor
+   * （part 0）だけ**を取って admission → 重みの part を温める → 残り資産の `fetchAssets` →
+   * 構築）。block は Session を組むその瞬間に part 順で読まれる（ADR 0109 —
+   * `src/hub/components.ts`）。部品を別リポの同じ役割で差し替えるときは
+   * {@link FromPretrainedComponentOptions.components}（役割は `backbone` / `text_proj` /
+   * `caption_proj` / `speaker` / `duration` / `dit` / `codec_decoder` / `codec_encoder`）。
+   * 文字列の `ref` は `{ repo }` と読む（= `main` 追従）。**`ref` は必須**（取得元に既定は
+   * 無い — `src/hub/repo-ref.ts` の MUST）。
    *
    * 手元の配布形は**取得元ハンドル**で渡す（`localDirectory` / `@karume/hub/deno` の
    * `denoDirectory`）。HF の `owner/name` の綴りの門は通らず、network も CacheStorage も
@@ -818,29 +829,29 @@ export class IrodoriPipeline {
     );
     const hubOptions = hubLoadOptions(options);
     const loaded = await loadManifest(source, hubOptions);
-    const selection = {
+    const choice = {
       ...(options.model === undefined ? {} : { model: options.model }),
       ...(options.quant === undefined ? {} : { quant: options.quant }),
     };
-    const files = resolveFiles(loaded.manifest, selection);
+    const selection = resolveSelection(loaded.manifest, choice);
     // signal は取得層と構築の**両方**へ渡す（DL が終わった瞬間に中断が効かなくなる窓を作らない）。
     const buildOptions: IrodoriPipelineOptions = {
       ...(options.gpu === undefined ? {} : { gpu: options.gpu }),
-      ...selection,
+      ...choice,
       ...(options.onRunDiagnostics === undefined
         ? {}
         : { onRunDiagnostics: options.onRunDiagnostics }),
       ...(options.signal === undefined ? {} : { signal: options.signal }),
     };
-    // 家族の門は admission 席で通す（重み shard を取る前 — `hub/components.ts`）。
-    const { admitted, assets } = await loadShardComponents(
+    // 家族の門は admission 席で通す（重みの part を取る前 — `hub/components.ts`）。
+    const { admitted, assets, open } = await loadContainerComponents(
       "IrodoriPipeline.fromPretrained",
       loaded,
-      files,
-      [BACKBONE, TEXT_PROJ, CAPTION_PROJ, SPEAKER, DURATION, DIT, CODEC_DECODER, CODEC_ENCODER],
+      selection,
+      COMPONENT_KEYS,
       async (open) => {
         const admitted = await admitIrodori(loaded.manifest, open, buildOptions);
-        // 配布形が宣言した `requiredLimits` は**重み shard を取る前**にここで見る
+        // 配布形が宣言した `requiredLimits` は**重みの part を取る前**にここで見る
         // （ADR 0089 決定 5 — 共有 GPU ならその limits、自前で取る経路はアダプタ実測値）。
         await assertRequiredLimitsBeforeDownload(
           admitted.quant.requiredLimits,
@@ -852,27 +863,33 @@ export class IrodoriPipeline {
       {
         ...hubOptions,
         ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }),
+        ...(options.components === undefined ? {} : { components: options.components }),
       },
     );
-    return new IrodoriPipeline(await buildIrodoriState(admitted, assets, buildOptions));
+    return new IrodoriPipeline(await buildIrodoriState(admitted, assets, open, buildOptions));
   }
 
   /**
-   * 取得済みの manifest + 資産から組む。契約検査・資産の解釈・`openModel` を全てここで済ませ、
-   * **Session は 1 本も張らない**。{@link IrodoriPipelineOptions.signal} を渡すと段の境目で
-   * 中断できる（`admitIrodori` の NOTE）。
+   * 取得済みの manifest + 資産から組む。契約検査・資産の解釈・`openContainer` を全てここで
+   * 済ませ、**Session は 1 本も張らない**。{@link IrodoriPipelineOptions.signal} を渡すと段の
+   * 境目で中断できる（`admitIrodori` の NOTE）。
    *
-   * 取得キーは `resolveFiles` の規約どおり **2 形とも受ける** — 素の 1 本（`dit`）と、
-   * shard 分割形（`dit[0]` / `dit[1]` / …）。分割形は
-   * バイト列を連結せず `fromPretrained` と同じ shard 逐次面へ流す。添字の欠番と素キーとの混在は
-   * fail loudly（受け口の実装は `src/hub/components.ts` の 1 本）。
+   * 部品のキーは **2 形とも受ける** — 単一形 `krm` のバイト列 1 本（`dit`）と、分割形の
+   * part 列（`dit[0]` / `dit[1]` / … — part 0 から添字順）。分割形はバイト列を連結せず
+   * part 列のまま開く。添字の欠番と単一形キーとの混在は fail loudly（受け口の実装は
+   * `src/hub/components.ts` の 1 本）。
    */
   static async fromAssets(
     input: IrodoriAssets,
     options: IrodoriPipelineOptions = {},
   ): Promise<IrodoriPipeline> {
-    const admitted = await admitIrodori(input.manifest, assetOpener(input.assets), options);
-    return new IrodoriPipeline(await buildIrodoriState(admitted, input.assets, options));
+    // MUST: 入口の中断検査は容器を開く**前**（`admitIrodori` の入口と同じ 1 本を前倒しする）。
+    // 受け口は同期の供給口を返すために**先に全部品を開く**ので、ここを省くと中断済みの呼びが
+    // 8 本ぶんの容器を開いてから落ちる。
+    options.signal?.throwIfAborted();
+    const open = await assetOpener(input.assets);
+    const admitted = await admitIrodori(input.manifest, open, options);
+    return new IrodoriPipeline(await buildIrodoriState(admitted, input.assets, open, options));
   }
 
   /**

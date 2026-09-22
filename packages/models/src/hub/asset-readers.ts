@@ -5,7 +5,12 @@
  * ここだけになる。family ごとに違うのは**文言のラベル**（family 名と、取得キーが載る manifest の
  * 表）だけなので、それを引数で受けて手続きは 1 本に保つ — 文言は family 側の門として逐語で
  * 縛られている（`packages/models/tests/*_pipeline_test.ts`）ので、ラベルを落とさない。
+ *
+ * 容器の内側の資産（`rope_base` / PLE — ADR 0109 決定 4）は manifest の表に載らないので、
+ * 読み口は {@link readWholeAsset}（`AssetReader` 1 本を全量で読む）が受ける。
  */
+
+import type { AssetReader } from "@karume/runtime";
 
 /**
  * 取得キーが載る manifest の表。weights しか持たない family（画像系）と、資産表も併せて持つ
@@ -14,7 +19,7 @@
 type ManifestTables = "weights" | "weights / assets";
 
 /**
- * 取得済みバイト列を `openModel` へ渡せる ArrayBuffer にする。
+ * 取得済みバイト列を `openContainer` へ渡せる ArrayBuffer にする。
  *
  * MUST: `slice` で写さない — 重み 1 本が GB 級になる family があり、写すとホスト RAM のピークが
  * 倍になる。hub は buffer 全体を占める view を返す契約なので、崩れていたら**取得層の不変条件
@@ -42,6 +47,37 @@ export const readAssetBuffer = (
   }
   return bytes.buffer;
 };
+
+/**
+ * **容器の資産**の `[offset, offset + length)` を読んで、**自分の buffer を丸ごと占める**
+ * ArrayBuffer にする。
+ *
+ * MUST: buffer 全体を占めていなければ**写す**。区間読みの返りは取得元の器の view でありうるので、
+ * `bytes.buffer` をそのまま渡すと block の詰め物や隣の資産まで見せることになる（資産の論理長は
+ * 宣言値で、block 長はそれを 4 の倍数へ切り上げた値 — container-v1 §2.2）。写した後なら
+ * `new Float32Array(buffer)` のような整列要件のある view もそのまま作れる。
+ *
+ * NOTE: 範囲外の区間は runtime の `AssetReader.read` が宣言 `length` と突き合わせて落とす —
+ * 同じ検査をここへ写さない。
+ */
+export const readAssetRange = async (
+  reader: AssetReader,
+  offset: number,
+  length: number,
+): Promise<ArrayBuffer> => {
+  const bytes = await reader.read(offset, length);
+  return bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
+    ? bytes.buffer
+    : bytes.slice().buffer;
+};
+
+/**
+ * **容器の資産** 1 本を論理長ぶん全量読んで ArrayBuffer にする（全量パーサ =
+ * `parseSafetensors` / `JSON.parse` へ渡す口）。区間読みで足りる消費側（PLE の行読み）は
+ * {@link readAssetRange} を使う。
+ */
+export const readWholeAsset = (reader: AssetReader): Promise<ArrayBuffer> =>
+  readAssetRange(reader, 0, reader.length);
 
 /**
  * 資産 JSON を読む。

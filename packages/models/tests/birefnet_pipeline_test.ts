@@ -4,13 +4,14 @@
 //
 // 押さえるのは 4 点:
 //
-// ① `fromAssets` は **manifest の契約違反を、資産を開く前・GPU を取りに行く前**に落とす
+// ① `fromAssets` は **manifest の契約違反を GPU を取りに行く前**に落とす
 //    （`src/birefnet/pipeline.ts` の `openBirefnetState` が掲げる MUST）。観測の仕掛けは
-//    SigLIP2 側と同じ — **全ケースで `assets` は空**にしておき、
-//     - 契約違反ケースが「その違反の文言」で落ちる = 資産解析より前に落ちている
-//     - 正しい manifest + 空 assets が `資産 'matte' が無い` で落ちる = 契約検査が全部済んだ
-//       後に初めて資産へ触る（上の対偶）
+//    SigLIP2 側と同じ — **全ケースで容器は揃えて**おき、
+//     - 契約違反ケースが「その違反の文言」で落ちる = 資産が揃っていても manifest の門が先
+//     - 正しい manifest + 空の Record が `部品 'matte' の容器が無い` で落ちる（受け口の診断）
 //    の 2 つで門の順序そのものを縛る。
+//    NOTE: 容器を開くのは admission の**前**（`assetComponentOpener` は同期の供給口を返すため
+//    先に全部品を開く — ADR 0109 の継ぎ目）。
 //
 // ② グラフ宣言との突合（`assertStaticDim` / `assertMatteShape`）の**拒否経路**。ここは
 //    `fromAssets` の中では実 GPU と実資産が揃わないと踏めないので、門を直接叩く
@@ -40,12 +41,16 @@ import {
 } from "../src/birefnet/pipeline.ts";
 import { resizePlaneF32, type Rgb8Image } from "../src/image/preprocess.ts";
 import { stubModel } from "./helpers/stub-model.ts";
+import { declaredContainer, partAssets, tensorlessContainer } from "./helpers/container-fixture.ts";
 
-const FILE = {
-  path: "hr/matte/model.f32.safetensors",
-  size: 16,
-  sha256: "a".repeat(64),
-};
+/** 宣言だけの `matte` 容器（家族の門が読む形まで再現し、実行はしない）。 */
+const COMPONENT = partAssets(
+  "matte",
+  await tensorlessContainer("matte", {
+    inputs: [{ name: "pixel_values", shape: [1, 3, 1024, 1024] }],
+    output: { name: "y", shape: [1, 1, 1024, 1024] },
+  }),
+);
 
 /** `models/karume-birefnet-hr/karume.json` の `pipelineConfig` 実物（5 欄）。 */
 const PIPELINE_CONFIG: Record<string, unknown> = {
@@ -59,13 +64,13 @@ const PIPELINE_CONFIG: Record<string, unknown> = {
 /** 配布形の骨格（検査に要る欄だけ）。`patch` は `models["hr"]` の中身を上書きする。 */
 const manifestText = (patch: Record<string, unknown> = {}): string =>
   JSON.stringify({
-    format: "karume/4",
+    format: "karume/5",
     generator: "karume/0.2.2",
     defaultModel: "hr",
     models: {
       hr: {
         pipeline: "birefnet/1",
-        weights: { matte: { f32: { shards: [FILE] } } },
+        weights: { matte: { f32: declaredContainer("hr/matte/model.f32") } },
         // 実行に要るのはグラフ 1 本だけ（tokenizer も表も無い）。
         assets: {},
         quants: { f32: { weights: { matte: "f32" }, session: {} } },
@@ -81,7 +86,7 @@ const emptyAssets = {} as Record<string, Uint8Array<ArrayBuffer>>;
 Deno.test("fromAssets: 存在しない model は利用可能な一覧を添えて落とす", async () => {
   const manifest = parseManifest(manifestText());
   await assertRejects(
-    () => BirefnetPipeline.fromAssets({ manifest, assets: emptyAssets }, { model: "nope" }),
+    () => BirefnetPipeline.fromAssets({ manifest, assets: COMPONENT }, { model: "nope" }),
     Error,
     "model 'nope' は manifest に無い",
   );
@@ -90,7 +95,7 @@ Deno.test("fromAssets: 存在しない model は利用可能な一覧を添え�
 Deno.test("fromAssets: pipeline の契約名が birefnet でない manifest を落とす", async () => {
   const manifest = parseManifest(manifestText({ pipeline: "siglip2/1" }));
   await assertRejects(
-    () => BirefnetPipeline.fromAssets({ manifest, assets: emptyAssets }),
+    () => BirefnetPipeline.fromAssets({ manifest, assets: COMPONENT }),
     Error,
     "manifest の pipeline が 'siglip2/1'",
   );
@@ -100,7 +105,7 @@ Deno.test("fromAssets: 未知 major は fail loudly（検査責務は models 側
   // 「古い実装 × 新しいリポ」の沈黙劣化を止める唯一の門。hub は major を検査しない。
   const manifest = parseManifest(manifestText({ pipeline: "birefnet/2" }));
   await assertRejects(
-    () => BirefnetPipeline.fromAssets({ manifest, assets: emptyAssets }),
+    () => BirefnetPipeline.fromAssets({ manifest, assets: COMPONENT }),
     Error,
     "major に未対応",
   );
@@ -109,7 +114,7 @@ Deno.test("fromAssets: 未知 major は fail loudly（検査責務は models 側
 Deno.test("fromAssets: 存在しない quant は利用可能な一覧を添えて落とす", async () => {
   const manifest = parseManifest(manifestText());
   await assertRejects(
-    () => BirefnetPipeline.fromAssets({ manifest, assets: emptyAssets }, { quant: "nope" }),
+    () => BirefnetPipeline.fromAssets({ manifest, assets: COMPONENT }, { quant: "nope" }),
     Error,
     "quant 'nope' は manifest に無い",
   );
@@ -121,7 +126,7 @@ Deno.test("fromAssets: pipelineConfig の未知キーは構築時に落ちる", 
     manifestText({ pipelineConfig: { ...PIPELINE_CONFIG, image_mean: [0.5, 0.5, 0.5] } }),
   );
   await assertRejects(
-    () => BirefnetPipeline.fromAssets({ manifest, assets: emptyAssets }),
+    () => BirefnetPipeline.fromAssets({ manifest, assets: COMPONENT }),
     Error,
     "pipelineConfig: 未知キー 'image_mean'",
   );
@@ -132,20 +137,20 @@ Deno.test("fromAssets: bilinear 以外の補間を宣言した配布形は受理
     manifestText({ pipelineConfig: { ...PIPELINE_CONFIG, interpolation: "bicubic" } }),
   );
   await assertRejects(
-    () => BirefnetPipeline.fromAssets({ manifest, assets: emptyAssets }),
+    () => BirefnetPipeline.fromAssets({ manifest, assets: COMPONENT }),
     Error,
     "pipelineConfig.interpolation: この実装が対応するのは 'bilinear' だけ",
   );
 });
 
-Deno.test("fromAssets: manifest 契約を全て満たして初めて資産へ触る（門の順序の対偶）", async () => {
-  // 上の 6 ケースが「資産が空でも manifest の文言で落ちる」ことの裏返し。正しい manifest なら
-  // 検査は資産まで進み、`matte` の不在で落ちる（= 契約検査は全て資産より前）。
+Deno.test("fromAssets: 部品の容器が無ければ 2 形の綴りつきで落ちる（受け口の診断）", async () => {
+  // 上の 6 ケースの裏返し。容器が揃っていない Record では**部品の不在**で落ちる（manifest の
+  // 文言では落ちない）= 上のケースが資産の不在に巻き添えられていないことの対偶。
   const manifest = parseManifest(manifestText());
   await assertRejects(
     () => BirefnetPipeline.fromAssets({ manifest, assets: emptyAssets }),
     Error,
-    "資産 'matte' が無い",
+    "部品 'matte' の容器が無い",
   );
 });
 

@@ -19,23 +19,41 @@ const withDir = async (fn: (dir: URL) => Promise<void>): Promise<void> => {
 
 type Json = Record<string, unknown>;
 
-const shardRef = (path: string, cross?: Json): Json => ({
+const partRef = (path: string, cross?: Json): Json => ({
   path,
   size: 1,
   sha256: "0".repeat(64),
   ...(cross ?? {}),
 });
 
-/** 1 model / 1 component / 1 quant の最小 manifest（各ケースが 1 箇所だけ壊す）。 */
+/** part 列 1 本ぶんの容器（`resolveAsset` が見るのは part 0 の path だけ）。 */
+const container = (parts: readonly Json[]): Json => ({
+  descriptor: {
+    graph: { length: 1, sha256: "1".repeat(64) },
+    model: { length: 1, sha256: "2".repeat(64) },
+  },
+  parts,
+});
+
+/** 1 model / 1 部品 / 1 quant の最小 manifest（各ケースが 1 箇所だけ壊す）。 */
 const baseManifest = (): Json => ({
-  format: "karume/4",
+  format: "karume/5",
   defaultModel: "m",
   models: {
     m: {
       pipeline: "anima/1",
       defaultQuant: "i8",
       quants: { i8: { weights: { model: "i8" } } },
-      weights: { model: { i8: { shards: [shardRef("model/model.i8.safetensors")] } } },
+      weights: {
+        model: {
+          i8: {
+            container: container([
+              partRef("model/model.i8-00001-of-00002.krm"),
+              partRef("model/model.i8-00002-of-00002.krm"),
+            ]),
+          },
+        },
+      },
     },
   },
 });
@@ -106,33 +124,45 @@ Deno.test("resolveAsset（配布形）: 選ばれた格納 dtype が weights に
   });
 });
 
-Deno.test("resolveAsset（配布形）: shards が空なら診断つきで落ちる（TypeError にしない）", async () => {
+Deno.test("resolveAsset（配布形）: 旧 major の manifest は読めないと名指しで落ちる", async () => {
   await withDir(async (dir) => {
     const manifest = baseManifest();
-    const model = (manifest.models as Json).m as Json;
-    model.weights = { model: { i8: { shards: [] } } };
+    manifest.format = "karume/4";
     await writeManifest(dir, manifest);
     await assertRejects(
       () => resolveAsset(dir, undefined, undefined, undefined),
       Error,
-      "manifest の shards が空",
+      "format 'karume/4' はこの版が読めない",
     );
   });
 });
 
-Deno.test("resolveAsset（配布形）: 先頭 shard が越境参照なら --source の案内つきで落ちる", async () => {
+Deno.test("resolveAsset（配布形）: container.parts が空なら診断つきで落ちる（TypeError にしない）", async () => {
   await withDir(async (dir) => {
     const manifest = baseManifest();
     const model = (manifest.models as Json).m as Json;
+    model.weights = { model: { i8: { container: container([]) } } };
+    await writeManifest(dir, manifest);
+    await assertRejects(
+      () => resolveAsset(dir, undefined, undefined, undefined),
+      Error,
+      "manifest の container.parts が空",
+    );
+  });
+});
+
+Deno.test("resolveAsset（配布形）: part 0 が越境参照なら --source の案内つきで落ちる", async () => {
+  await withDir(async (dir) => {
+    const manifest = baseManifest();
+    const model = (manifest.models as Json).m as Json;
+    const cross = { repo: "hdae/other", revision: "c".repeat(40) };
     model.weights = {
       model: {
         i8: {
-          shards: [
-            shardRef("model/model.i8.safetensors", {
-              repo: "hdae/other",
-              revision: "c".repeat(40),
-            }),
-          ],
+          container: container([
+            partRef("model/model.i8-00001-of-00002.krm", cross),
+            partRef("model/model.i8-00002-of-00002.krm", cross),
+          ]),
         },
       },
     };
@@ -201,6 +231,10 @@ Deno.test("readIrGraph: __metadata__.karume_ir を持たない shard は落ち�
     await writeHeaderOnly(url, {
       "some.weight": { dtype: "F32", shape: [1], data_offsets: [0, 4] },
     });
-    await assertRejects(() => readIrGraph(url), Error, "__metadata__.karume_ir が無い");
+    await assertRejects(
+      () => readIrGraph({ kind: "shard", url }),
+      Error,
+      "__metadata__.karume_ir が無い",
+    );
   });
 });

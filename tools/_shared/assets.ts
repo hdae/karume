@@ -1,19 +1,19 @@
 /**
- * tools 共有: **資産ディレクトリ → コンポーネントごとのグラフ shard** の解決と、その IR の読み出し。
+ * tools 共有: **資産ディレクトリ → 部品ごとのグラフの在り処**の解決と、その IR の読み出し。
  *
  * opbench（静的 census）と fusion-hints（融合候補列挙）が同じ資産を同じ規則で見つけるための
- * 1 本。読むのは safetensors の**ヘッダ JSON だけ**（IR は先頭 shard の
- * `__metadata__.karume_ir` に載る — ADR 0070 決定 3 / ADR 0081）。実体は合計 GB 級なので
- * 1 バイトも読まない。
+ * 1 本。読むのは**グラフの宣言が載っている先頭だけ**（配布形なら容器の part 0 = ヘッダ +
+ * 2 文書・系列出力なら safetensors ヘッダの `__metadata__.karume_ir`）。実体は合計 GB 級なので
+ * 重みの block は 1 バイトも読まない。
  *
  * 資産は 2 形ある:
  *
- * - **配布形** — `karume.json`（manifest）を持つディレクトリ。shard の綴りを決めるのは manifest
- *   なので、ファイル名の推測をせず manifest の `shards[0]` をそのまま引く（sbv2 のように
- *   先頭 shard だけ `shared/` に居る形があり、コンポーネントのディレクトリを走査すると
- *   グラフ shard を取り落とす）
+ * - **配布形** — `karume.json`（manifest `karume/5`）を持つディレクトリ。部品 1 つが `krm`
+ *   コンテナ 1 本で、グラフ記述と束縛表は part 0 に載る（ADR 0109 決定 3）。ファイル名の推測を
+ *   せず manifest の `container.parts[0]` をそのまま引く
  * - **系列出力** — `outputs/series/<名前>/` 以下。manifest が無いので、ファイル名から代表 path を
  *   起こして {@link resolveShards}（Python 側 `karume.shards.resolve_shards` の鏡像）に解かせる
+ *   （こちらは旧 IR の safetensors 方言のまま）
  *
  * 公開する解決口は {@link resolveAsset} 1 本で、**格納 dtype は quant 表に従う**（配布形は
  * manifest の quant が選んだ dtype・系列出力は `--quant` かディレクトリに 1 つだけある
@@ -26,6 +26,13 @@
 import { resolveShards } from "../../packages/runtime/tests/helpers/shard-files.ts";
 import { type IrGraph, parseIrGraph } from "../../packages/runtime/src/format/ir.ts";
 import type { FusionLimits } from "../../packages/runtime/src/runtime/fusion.ts";
+import { bindGraphs, mergedGraph } from "../../packages/runtime/src/format/container/bind.ts";
+import {
+  parseGraphDescriptor,
+  parseModelDescriptor,
+} from "../../packages/runtime/src/format/container/descriptor.ts";
+import { readHeader } from "../../packages/runtime/src/format/container/header.ts";
+import { HEADER_BYTES } from "../../packages/runtime/src/format/container/limits.ts";
 
 /**
  * 融合計画に渡す device 能力。**WebGPU core の既定値**（128MiB / 65535）を固定で使う。
@@ -58,12 +65,64 @@ export const externalPath = (path: string): string => {
 };
 
 /**
- * safetensors のヘッダ JSON だけを読んで IR を取り出す。
+ * グラフ宣言の在り処（2 形）。どちらで読むかは**解決の時点で決まっている**ので、読み手が
+ * バイト列を覗いて推測しない（推測すると、取り違えた資産が「別の形だった」という理由で
+ * 静かに読み飛ばされる）。
+ */
+export type GraphSource =
+  /** 配布形: `krm` の part 0（ヘッダ + グラフ記述 + モデル記述）。グラフ名 = 部品名（決定 8）。 */
+  | { readonly kind: "container"; readonly url: URL; readonly graph: string }
+  /** 系列出力: 旧 IR（safetensors の `__metadata__.karume_ir`）を載せた先頭 shard。 */
+  | { readonly kind: "shard"; readonly url: URL };
+
+/** 先頭から `length` バイトだけ読む（重みの block へは進まない）。 */
+const readPrefix = async (source: URL, length: number): Promise<Uint8Array<ArrayBuffer>> => {
+  const file = await Deno.open(source, { read: true });
+  try {
+    const bytes = new Uint8Array(new ArrayBuffer(length));
+    await readExact(file, bytes, source);
+    return bytes;
+  } finally {
+    file.close();
+  }
+};
+
+/**
+ * 容器の part 0 から 1 グラフの IR を読む（グラフ記述 × 束縛表の合流まで — 格納 codec は
+ * 束縛表にしか無いので、合流しないと census の `storage` 欄が埋まらない）。
+ *
+ * MUST: 名指しのグラフが無ければ在るグラフを並べて落とす。黙って 1 本目を採ると、部品名と
+ * グラフ名がずれた容器で「別の部品を数えた表」が静かに出る。
+ */
+const readContainerGraph = async (url: URL, graphName: string): Promise<IrGraph> => {
+  const header = readHeader(await readPrefix(url, HEADER_BYTES));
+  const documents = await readPrefix(
+    url,
+    HEADER_BYTES + header.graphDescriptorLength + header.modelDescriptorLength,
+  );
+  const graph = parseGraphDescriptor(
+    documents.slice(HEADER_BYTES, HEADER_BYTES + header.graphDescriptorLength),
+  );
+  const model = header.kind === "model"
+    ? parseModelDescriptor(documents.slice(HEADER_BYTES + header.graphDescriptorLength))
+    : undefined;
+  const bound = bindGraphs(graph, model)[graphName];
+  if (bound === undefined) {
+    throw new Error(
+      `${url.pathname}: 容器にグラフ '${graphName}' が無い` +
+        `（在るのは ${Object.keys(graph.graphs).join(" / ")}）`,
+    );
+  }
+  return mergedGraph(bound, graphName);
+};
+
+/**
+ * safetensors のヘッダ JSON だけを読んで旧 IR を取り出す（系列出力）。
  *
  * MUST: `karume_ir` が無い shard は fail loudly。重み shard（metadata 無し）を先頭と取り違えた
  * ときに、空グラフの census が「ノード 0 本」として静かに出力されるのを防ぐ。
  */
-export const readIrGraph = async (source: URL): Promise<IrGraph> => {
+const readShardGraph = async (source: URL): Promise<IrGraph> => {
   const file = await Deno.open(source, { read: true });
   try {
     const lengthBytes = new Uint8Array(8);
@@ -85,6 +144,12 @@ export const readIrGraph = async (source: URL): Promise<IrGraph> => {
     file.close();
   }
 };
+
+/** グラフ宣言を 1 本読む（形は解決済み — {@link GraphSource}）。 */
+export const readIrGraph = async (source: GraphSource): Promise<IrGraph> =>
+  source.kind === "container"
+    ? await readContainerGraph(source.url, source.graph)
+    : await readShardGraph(source.url);
 
 /**
  * `into.length` バイトちょうど読む。
@@ -112,34 +177,62 @@ const readExact = async (handle: Deno.FsFile, into: Uint8Array, where: URL): Pro
 export type SessionDeclaration = Readonly<Record<string, string>>;
 
 /**
- * manifest のうち資産解決が引く欄だけ（綴りの正本は配布形なので、ここに焼かず読む）。
- *
- * NOTE: 道具どうしで綴りを 2 本持たないよう export している（`tools/ram-peak/measure.ts` が
- * 同じ manifest を別の目的で辿る）。検査は hub の `parseManifest` が持つので、ここは
- * 「読む欄の形」だけを名乗る型である。
+ * manifest のうち資産解決が引く欄だけ（綴りの正本は配布形なので、ここに焼かず読む）。検査は
+ * hub の `parseManifest` が持つので、ここは「読む欄の形」だけを名乗る型である。
  */
-export type Manifest = {
+type Manifest = {
+  /** `karume/<major>`。この道具が読むのは {@link MANIFEST_FORMAT} だけ。 */
+  readonly format: string;
   readonly defaultModel: string;
   readonly models: Readonly<Record<string, ManifestModel>>;
 };
-export type ManifestModel = {
+type ManifestModel = {
   readonly pipeline: string;
   readonly defaultQuant: string;
   readonly quants: Readonly<Record<string, ManifestQuant>>;
   readonly weights: Readonly<
-    Record<string, Readonly<Record<string, { readonly shards: readonly ManifestShard[] }>>>
+    Record<string, Readonly<Record<string, { readonly container: ManifestContainer }>>>
   >;
 };
-export type ManifestQuant = {
+type ManifestQuant = {
   readonly weights: Readonly<Record<string, string>>;
   /** 省略可（hub 側も未宣言を「ノブを 1 つも指定しない」として読む）。 */
   readonly session?: SessionDeclaration;
 };
-/** `size` はヘッダ込みのファイル長（ADR 0038 §2 の 3 点セットの 1 つ — 必ず在る）。 */
-export type ManifestShard = {
+/** 部品 1 つ = コンテナ 1 本。先頭が part 0（ヘッダ + 2 文書）— ADR 0109 決定 3。 */
+type ManifestContainer = {
+  readonly parts: readonly ManifestPart[];
+};
+/** `size` は part のファイル長（ADR 0038 §2 の 3 点セットの 1 つ — 必ず在る）。 */
+type ManifestPart = {
   readonly path: string;
   readonly size: number;
   readonly repo?: string;
+};
+
+/** この版が読む配布 manifest の major（旧版は読まない — ADR 0109 決定 1）。 */
+export const MANIFEST_FORMAT = "karume/5";
+
+/**
+ * 配布形ミラーが名乗る `format`（`karume.json` が無ければ `undefined`）。
+ *
+ * 実資産テストの SKIP 判定に使う（ADR 0005 の「無い環境は明示 SKIP」）。**真偽ではなく値を
+ * 返す**のは、SKIP の warn に「何が在ったのか」を書かせるため — 「無い」と「旧 major のまま」は
+ * 読み手のやることが違う（前者は生成、後者は移行）。
+ *
+ * MUST: NotFound 以外は伝播させる。全 I/O エラーを「未生成」に丸めると、資産ルートのマウント
+ * 異常が SKIP に化けて、実行されていない検証が静かに緑になる。
+ */
+export const distributionFormat = (root: URL): string | undefined => {
+  let text: string;
+  try {
+    text = Deno.readTextFileSync(new URL("karume.json", root));
+  } catch (cause) {
+    if (cause instanceof Deno.errors.NotFound) return undefined;
+    throw cause;
+  }
+  const format = (JSON.parse(text) as { readonly format?: unknown }).format;
+  return typeof format === "string" ? format : undefined;
 };
 
 /** 配布形の model 1 件（`--model` 省略時は `defaultModel`）。 */
@@ -159,20 +252,20 @@ const manifestModel = (
 };
 
 /**
- * manifest の shard 列から先頭 shard のローカル URL を作る。
+ * コンテナの part 列から part 0（グラフ記述の置き場）のローカル URL を作る。
  *
  * MUST: 越境参照（ADR 0038 §7）はローカルミラーの綴りを持たないので、ここで理由ごと落とす。
  * 黙って root 直下として解くと存在しない path を読みに行くだけだし、飛ばすと「候補ゼロの
- * コンポーネント」として表に出てしまう。
+ * 部品」として表に出てしまう。
  */
-const localGraphShard = (shards: readonly ManifestShard[], root: URL, where: string): URL => {
-  const [head] = shards;
-  // MUST: 空の shard 列を診断無しの TypeError にしない（manifest が壊れている、という理由が
-  // 読める形で落とす — 先頭 shard はグラフの置き場なので 0 本はあり得ない）。
-  if (head === undefined) throw new Error(`${where}: manifest の shards が空`);
+const localPart0 = (container: ManifestContainer | undefined, root: URL, where: string): URL => {
+  // MUST: 空の part 列を診断無しの TypeError にしない（manifest が壊れている、という理由が
+  // 読める形で落とす — part 0 はグラフの置き場なので 0 本はあり得ない）。
+  const head = container?.parts?.[0];
+  if (head === undefined) throw new Error(`${where}: manifest の container.parts が空`);
   if (head.repo !== undefined) {
     throw new Error(
-      `${where}: 先頭 shard が越境参照（repo '${head.repo}'）— ` +
+      `${where}: part 0 が越境参照（repo '${head.repo}'）— ` +
         "ローカルに落とした配布形を --source に渡す",
     );
   }
@@ -254,13 +347,13 @@ const storageGroups = (dir: URL): readonly (readonly [string, URL])[] => {
   return [...groups].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
 };
 
-/** census を掛ける 1 コンポーネント。 */
+/** census を掛ける 1 部品。 */
 export type ComponentTarget = {
   readonly component: string;
   /** 配布形の quant 表が選んだ格納 dtype キー（系列出力ではファイル名の infix）。 */
   readonly componentDtype: string;
-  /** グラフを載せている先頭 shard。 */
-  readonly graphShard: URL;
+  /** グラフ宣言の在り処（配布形は容器の part 0・系列出力は先頭 shard）。 */
+  readonly graph: GraphSource;
 };
 
 /** 1 資産ぶんの解決結果。 */
@@ -308,6 +401,14 @@ const resolveDistribution = async (
   family: string | undefined,
 ): Promise<AssetTargets> => {
   const manifest: Manifest = JSON.parse(await Deno.readTextFile(manifestUrl));
+  // MUST: major を見る。旧版の manifest は欄の形が違うので、見ないと `container` が無い形を
+  // 「part 列が空」という遠い理由で落とすことになる（ADR 0109 決定 1）。
+  if (manifest.format !== MANIFEST_FORMAT) {
+    throw new Error(
+      `${manifestUrl.pathname}: format '${manifest.format}' はこの版が読めない` +
+        `（読めるのは ${MANIFEST_FORMAT} — 配布形を移行する）`,
+    );
+  }
   const [modelName, entry] = manifestModel(manifest, manifestUrl, model);
   const quantName = quant ?? entry.defaultQuant;
   if (!Object.hasOwn(entry.quants, quantName)) {
@@ -335,7 +436,12 @@ const resolveDistribution = async (
     return {
       component,
       componentDtype: dtype,
-      graphShard: localGraphShard(variants[dtype].shards, root, `component '${component}'`),
+      // グラフ名 = 部品名（書き手の規約 — ADR 0109 決定 8）。
+      graph: {
+        kind: "container",
+        url: localPart0(variants[dtype].container, root, `component '${component}'`),
+        graph: component,
+      },
     };
   });
   return {
@@ -392,8 +498,8 @@ const resolveSeries = (
     return {
       component: relative === "" ? "model" : relative,
       componentDtype: dtype,
-      graphShard: resolveShards(representative)[0],
-    };
+      graph: { kind: "shard", url: resolveShards(representative)[0] },
+    } satisfies ComponentTarget;
   });
   const groupNames = new Set(components.map((target) => target.componentDtype));
   return {

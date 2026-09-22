@@ -47,11 +47,20 @@ import type {
   SamplerSpec,
   SpeculationGateOptions,
 } from "../../packages/models/gemma.ts";
-import { gemma4PleShardBytes, parseGemma4PleIndex } from "../../packages/models/src/gemma/ple.ts";
+import {
+  gemma4PleAssetSource,
+  gemma4PleTotalBytes,
+  readGemma4PleIndex,
+} from "../../packages/models/src/gemma/ple-index.ts";
 import { denoDirectory } from "../../packages/hub/deno.ts";
-import { MANIFEST_FILENAME, parseManifest } from "../../packages/hub/mod.ts";
-import type { ModelEntry } from "../../packages/hub/mod.ts";
-import { acquireGpu } from "../../packages/runtime/mod.ts";
+import {
+  loadManifest,
+  MANIFEST_FILENAME,
+  openContainerSource,
+  parseManifest,
+  resolveSelection,
+} from "../../packages/hub/mod.ts";
+import { acquireGpu, openContainer } from "../../packages/runtime/mod.ts";
 import type { GpuTimingStats, SessionDiagnostics } from "../../packages/runtime/mod.ts";
 // `mod.ts` の `Session` は型としてしか出ていない（構築の入口を絞る面 — ADR 0008）ので、
 // prototype を包むための**値**は src から取る。計測の道具だけがここへ降りる。
@@ -315,23 +324,28 @@ const sha256Hex = async (text: string): Promise<string> => {
 };
 
 /**
- * PLE sidecar を**全量常駐**させるバイト数（ミラーの索引から導く）。
+ * PLE を**全量常駐**させるバイト数（ミラーの `model` 容器が持つ索引から導く）。
  *
- * 勘定は `packages/models/tests/helpers/ple-budget.ts` と同じ（manifest の `ple_index` 資産 →
- * `ple.json` → shard バイトの合計）。予算を定数で書かないのは、shard 幅が資産世代で変わるため
- * 「N 本ぶん」が世代ごとに違う RAM を意味するからで（ADR 0085 追記）、計測では**読み直しゼロ**に
- * 固定したい — 常駐が薄いと 1 ターンの間に shard の読み直しが入り、その壁が生成相に混ざる。
+ * 勘定は `packages/models/tests/helpers/ple-budget.ts` と同じ（容器の資産 `ple_index` →
+ * block バイトの合計）。予算を定数で書かないのは、block 幅が資産世代で変わるため「N 本ぶん」が
+ * 世代ごとに違う RAM を意味するからで（ADR 0085 追記）、計測では**読み直しゼロ**に固定したい —
+ * 常駐が薄いと 1 ターンの間に block の読み直しが入り、その壁が生成相に混ざる。
+ *
+ * 読むのは part 0（descriptor）と索引の block だけで、重みの part には触らない。
  */
-const allResidentPleBytes = (mirror: URL, entry: ModelEntry): number => {
-  if (!Object.hasOwn(entry.assets, "ple_index")) {
-    throw new Error(`${mirror.href}: manifest に 'ple_index' 資産が無い（drafter 入りの配布形か）`);
+const allResidentPleBytes = async (mirror: URL): Promise<number> => {
+  const loaded = await loadManifest(denoDirectory(mirror.pathname));
+  const container = resolveSelection(loaded.manifest, { weights: ["model"] }).containers["model"];
+  if (container === undefined) {
+    throw new Error(`${mirror.href}: manifest に部品 'model' の容器が無い`);
   }
-  const indexPath = entry.assets["ple_index"].path;
-  const index = parseGemma4PleIndex(
-    JSON.parse(Deno.readTextFileSync(new URL(indexPath, mirror))),
-    indexPath,
+  const opened = await openContainer(
+    { kind: "source", source: openContainerSource(loaded, container) },
+    container.descriptor,
   );
-  return index.shards.reduce((sum, shard) => sum + gemma4PleShardBytes(index, shard), 0);
+  return gemma4PleTotalBytes(
+    await readGemma4PleIndex(`mtp-bench ${mirror.href}`, gemma4PleAssetSource(opened)),
+  );
 };
 
 /**
@@ -359,7 +373,7 @@ const resolveAsset = async (
       defaultQuant: entry.defaultQuant,
       manifestSha256: await sha256Hex(text),
     },
-    maxResidentPleBytes: maxResidentPleBytesArg ?? allResidentPleBytes(mirror, entry),
+    maxResidentPleBytes: maxResidentPleBytesArg ?? await allResidentPleBytes(mirror),
   };
 };
 

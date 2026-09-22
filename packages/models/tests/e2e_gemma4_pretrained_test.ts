@@ -36,6 +36,7 @@ import type { Gemma4ChatMessage } from "../src/gemma/text/chat.ts";
 import { serveLocalDist } from "../../../examples/shared/local-dist-server.ts";
 import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE } from "./helpers/gpu.ts";
 import { allResidentPleBytesOfMirror } from "./helpers/ple-budget.ts";
+import { mirrorAvailable } from "./helpers/gemma-mirror.ts";
 
 const MIRROR_DIR = new URL("../../../models/karume-gemma4/", import.meta.url);
 
@@ -43,12 +44,12 @@ const MIRROR_DIR = new URL("../../../models/karume-gemma4/", import.meta.url);
 const ASSEMBLE_COMMAND = "cd tools/export-recipes && uv run python dist.py --pipeline gemma4";
 
 /**
- * PLE の常駐に使う予算（バイト）。索引から導く = sidecar 全量常駐で、token 範囲をまたぐ会話でも
- * 読み直しが起きない。定数（旧: 768MiB = 現行世代の shard 3 本）で書くと、資産世代で shard 幅が
- * 変われば同じ数が別の本数を意味してしまう（ADR 0085 追記 2026-09-02 の「本数ではなくバイト」は
- * テスト側の定数にも同じく効く）。ミラーが無い環境では評価しない（SKIP 判定の後で呼ぶ）。
+ * PLE の常駐に使う予算（バイト）。索引から導く = PLE 全量常駐で、token 範囲をまたぐ会話でも
+ * 読み直しが起きない。定数（旧: 768MiB）で書くと、資産世代で block 幅が変われば同じ数が別の
+ * 本数を意味してしまう（ADR 0085 追記 2026-09-02 の「本数ではなくバイト」はテスト側の定数にも
+ * 同じく効く）。ミラーが無い環境では評価しない（SKIP 判定の後で呼ぶ）。
  */
-const maxResidentPleBytes = (): number => allResidentPleBytesOfMirror(MIRROR_DIR);
+const maxResidentPleBytes = (): Promise<number> => allResidentPleBytesOfMirror(MIRROR_DIR);
 
 /** 上流 `generation_config.json` の推奨（配布形が `pipelineConfig.sampler` へ焼いた値）。 */
 const RECOMMENDED_SAMPLER = { temperature: 1, topK: 64, topP: 0.95 } as const;
@@ -84,17 +85,11 @@ const caseOf = (name: string) => {
   return found;
 };
 
-const manifestText = (): string | undefined => {
-  try {
-    return Deno.readTextFileSync(new URL(MANIFEST_FILENAME, MIRROR_DIR));
-  } catch (cause) {
-    if (cause instanceof Deno.errors.NotFound) return undefined;
-    throw cause;
-  }
-};
-
-const MANIFEST_TEXT = manifestText();
-const AVAILABLE = MANIFEST_TEXT !== undefined;
+// 無い機も旧 major が残っている機も明示 SKIP（helper の MUST — ADR 0109 決定 9）。
+const AVAILABLE = mirrorAvailable(MIRROR_DIR);
+const MANIFEST_TEXT = AVAILABLE
+  ? Deno.readTextFileSync(new URL(MANIFEST_FILENAME, MIRROR_DIR))
+  : undefined;
 
 if (!AVAILABLE) {
   console.warn(
@@ -144,7 +139,7 @@ Deno.test({
   fn: async (t) => {
     await using server = serveLocalDist(new URL(".", MIRROR_DIR).pathname);
     const pipeline = await Gemma4Pipeline.fromPretrained(server.source, {
-      maxResidentPleBytes: maxResidentPleBytes(),
+      maxResidentPleBytes: await maxResidentPleBytes(),
     });
     try {
       await t.step("② 配布形が宣言した推奨サンプラが省略時の既定として載っている", () => {
@@ -218,7 +213,7 @@ Deno.test({
         try {
           const pipeline = await Gemma4Pipeline.fromPretrained(server.source, {
             gpu,
-            maxResidentPleBytes: maxResidentPleBytes(),
+            maxResidentPleBytes: await maxResidentPleBytes(),
             onRunDiagnostics: (diagnostics) => {
               for (const entry of diagnostics.lastRunTiming?.entries ?? []) keys.add(entry.key);
             },

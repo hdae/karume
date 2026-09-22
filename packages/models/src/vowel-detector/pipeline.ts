@@ -78,7 +78,7 @@ import {
   type Manifest,
   type ModelEntry,
   type Quant,
-  resolveFiles,
+  resolveSelection,
 } from "@karume/hub";
 
 import {
@@ -99,12 +99,16 @@ import {
 } from "../session/gpu-features.ts";
 import { toSessionOptions } from "../session/options.ts";
 import { toManifestSource } from "../hub/repo-ref.ts";
-import { type FromPretrainedHubOptions, hubLoadOptions } from "../hub/load-options.ts";
+import {
+  type FromPretrainedComponentOptions,
+  type FromPretrainedHubOptions,
+  hubLoadOptions,
+} from "../hub/load-options.ts";
 import {
   assetComponentOpener,
   type ComponentOpener,
   type GraphOwner,
-  loadShardComponents,
+  loadContainerComponents,
   type ModelComponent,
 } from "../hub/components.ts";
 import { readAssetBuffer } from "../hub/asset-readers.ts";
@@ -129,6 +133,9 @@ const FRAMES_PER_SECOND = SAMPLE_RATE / HOP;
  * `tools/export-recipes/vowel_detector/distribution.py` の `VOWEL_DETECTOR_GRAPH_ROLE`）。
  */
 const GRAPH_ROLE = "crnn";
+
+/** この系列の weights 部品（差し替え席が受ける役割名でもある）。 */
+const COMPONENT_KEYS = [GRAPH_ROLE] as const;
 
 /** {@link VowelDetectorPipeline.detect} の結果（上流 `@hdae/vowel-detector` の `DetectResult`）。 */
 export type VowelDetectorResult = {
@@ -172,6 +179,7 @@ export type VowelDetectorPipelineOptions = {
 export type VowelDetectorFromPretrainedOptions =
   & VowelDetectorPipelineOptions
   & FromPretrainedHubOptions
+  & FromPretrainedComponentOptions
   & {
     readonly signal?: AbortSignal;
   };
@@ -183,7 +191,7 @@ export type VowelDetectorAssets = {
 };
 
 /**
- * 取得済みバイト列を `openModel` / `parseSafetensors` へ渡せる ArrayBuffer にする
+ * 取得済みバイト列を `openContainer` / `parseSafetensors` へ渡せる ArrayBuffer にする
  * （門の本体は {@link readAssetBuffer}）。
  */
 const assetBuffer = (
@@ -193,11 +201,16 @@ const assetBuffer = (
 
 /**
  * 全量面（`fromAssets`）のコンポーネント供給口（受け口の実装は 7 家族共有 —
- * {@link assetComponentOpener}）。素の 1 本は `openModel` で開いて全量面で組み、shard 分割形
- * （`crnn[0]` / `crnn[1]` / …）は `fromPretrained` と同じ shard 逐次面へ流す。
+ * {@link assetComponentOpener}）。部品のキーは単一形 `krm` の 1 本（`crnn`）か、分割形の
+ * part 列（`crnn[0]` / `crnn[1]` / …）。
  */
-const assetOpener = (assets: VowelDetectorAssets["assets"]): ComponentOpener =>
-  assetComponentOpener("vowel-detector", assets, (key) => assetBuffer(assets, key));
+const assetOpener = (assets: VowelDetectorAssets["assets"]): Promise<ComponentOpener> =>
+  assetComponentOpener(
+    "vowel-detector",
+    assets,
+    (key) => assetBuffer(assets, key),
+    COMPONENT_KEYS,
+  );
 
 /**
  * mel 基底の資産（1 テンソルの f32 safetensors `[80, 257]`）を読む。
@@ -368,22 +381,21 @@ type VowelDetectorAdmission = {
   readonly config: VowelDetectorPipelineConfig;
   readonly quantName: string;
   readonly quant: Quant;
-  readonly graph: ModelComponent;
   /** 時間軸の記号名（`assertGraph` がグラフから読んだもの）。 */
   readonly symbol: string;
 };
 
 /**
  * この manifest とこのグラフを vowel-detector として実行できるかを見る（`hub/components.ts`
- * の家族 admission 席 — shard 面では**重み shard を 1 バイトも取る前**に呼ばれる）。
+ * の家族 admission 席 — 取得面では**重みの part を 1 バイトも取る前**に呼ばれる）。
  *
- * MUST: 家族の門はこの 1 本に集める。後段へ散らすと、shard 面では GB 級の重みを落とした
+ * MUST: 家族の門はこの 1 本に集める。後段へ散らすと、取得面では GB 級の重みを落とした
  * **後**にしか落ちない（ADR 0070 決定 5 の文面より実装が狭くなる）。
  * MUST: manifest の契約違反と**グラフとの突合**は **GPU を取りに行く前**に落とす。順序が
  * ずれると、GPU の無い環境では別の例外に化けて「何が悪かったのか」が読み手に伝わらない。
  *
- * NOTE: 資産（`mel_basis`）の解析はこの席へ置けない — admission の時点では extras を
- * まだ取っていない（取ってからでは重み prefetch より前という位置が保てない）。
+ * NOTE: 資産（`mel_basis`）の解析はこの席へ置けない — admission の時点ではバイト列をまだ
+ * 取っていない（取ってからでは重み prefetch より前という位置が保てない）。
  */
 const admitVowelDetector = (
   manifest: Manifest,
@@ -443,7 +455,7 @@ const admitVowelDetector = (
     );
   }
 
-  return { config, quantName, quant, graph, symbol };
+  return { config, quantName, quant, symbol };
 };
 
 /**
@@ -456,9 +468,12 @@ const admitVowelDetector = (
 const openVowelDetectorState = async (
   admitted: VowelDetectorAdmission,
   assets: VowelDetectorAssets["assets"],
+  open: ComponentOpener,
   options: VowelDetectorPipelineOptions = {},
 ): Promise<VowelDetectorState> => {
-  const { config, quant, quantName, graph, symbol } = admitted;
+  const { config, quant, quantName, symbol } = admitted;
+  // 供給口は admission が見たものと**同じ 1 本**（`open` は開いた部品を引き当てるだけ）。
+  const graph = open(GRAPH_ROLE);
   const melBasis = parseMelBasis(assetBuffer(assets, MEL_BASIS));
 
   // MUST: 宣言された feature は device 作成時にしか要求できない（ADR 0028）。共有 GPU を
@@ -576,9 +591,11 @@ export class VowelDetectorPipeline {
   }
 
   /**
-   * 配布形から取得して組む（`loadManifest` → `resolveFiles` → **各コンポーネントの
-   * グラフ shard だけ**を取って `prepareModel` → 残り資産の `fetchAssets` → 構築）。重み shard は
-   * Session を組むときに 1 本ずつ流れる（ADR 0070 — `src/hub/components.ts`）。文字列の
+   * 配布形から取得して組む（`loadManifest` → `resolveSelection` → **各部品の descriptor
+   * （part 0）だけ**を取って admission → 重みの part を温める → 残り資産の `fetchAssets` →
+   * 構築）。block は Session を組むその瞬間に part 順で読まれる（ADR 0109 —
+   * `src/hub/components.ts`）。部品を別リポの同じ役割で差し替えるときは
+   * {@link FromPretrainedComponentOptions.components}（役割は `crnn` 1 本）。文字列の
    * `ref` は `{ repo }` と読む（= `main` 追従）。**`ref` は必須**（取得元に既定は無い —
    * `src/hub/repo-ref.ts` の MUST。このファミリは公開配布リポを持たないので pin 定数も無い）。
    *
@@ -593,27 +610,27 @@ export class VowelDetectorPipeline {
     const source = toManifestSource(ref, "VowelDetectorPipeline.fromPretrained");
     const hubOptions = hubLoadOptions(options);
     const loaded = await loadManifest(source, hubOptions);
-    const selection = {
+    const choice = {
       ...(options.model === undefined ? {} : { model: options.model }),
       ...(options.quant === undefined ? {} : { quant: options.quant }),
     };
-    const files = resolveFiles(loaded.manifest, selection);
+    const selection = resolveSelection(loaded.manifest, choice);
     const buildOptions: VowelDetectorPipelineOptions = {
       ...(options.gpu === undefined ? {} : { gpu: options.gpu }),
-      ...selection,
+      ...choice,
       ...(options.onRunDiagnostics === undefined
         ? {}
         : { onRunDiagnostics: options.onRunDiagnostics }),
     };
-    // 家族の門は admission 席で通す（重み shard を取る前 — `hub/components.ts`）。
-    const { admitted, assets } = await loadShardComponents(
+    // 家族の門は admission 席で通す（重みの part を取る前 — `hub/components.ts`）。
+    const { admitted, assets, open } = await loadContainerComponents(
       "VowelDetectorPipeline.fromPretrained",
       loaded,
-      files,
-      [GRAPH_ROLE],
+      selection,
+      COMPONENT_KEYS,
       async (open) => {
         const admitted = admitVowelDetector(loaded.manifest, open, buildOptions);
-        // 配布形が宣言した `requiredLimits` は**重み shard を取る前**にここで見る
+        // 配布形が宣言した `requiredLimits` は**重みの part を取る前**にここで見る
         // （ADR 0089 決定 5 — 共有 GPU ならその limits、自前で取る経路はアダプタ実測値）。
         await assertRequiredLimitsBeforeDownload(
           admitted.quant.requiredLimits,
@@ -625,29 +642,31 @@ export class VowelDetectorPipeline {
       {
         ...hubOptions,
         ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }),
+        ...(options.components === undefined ? {} : { components: options.components }),
       },
     );
     return new VowelDetectorPipeline(
-      await openVowelDetectorState(admitted, assets, buildOptions),
+      await openVowelDetectorState(admitted, assets, open, buildOptions),
     );
   }
 
   /**
-   * 取得済みの manifest + 資産から組む。契約検査・資産の解釈・`openModel`・グラフとの突合を
+   * 取得済みの manifest + 資産から組む。契約検査・資産の解釈・`openContainer`・グラフとの突合を
    * 全てここで済ませる（Session はまだ張らない — モジュール doc の MUST）。
    *
-   * 取得キーは `resolveFiles` の規約どおり **2 形とも受ける** — 素の 1 本（`crnn`）と、
-   * shard 分割形（`crnn[0]` / `crnn[1]` / …）。分割形は
-   * バイト列を連結せず `fromPretrained` と同じ shard 逐次面へ流す。添字の欠番と素キーとの混在は
-   * fail loudly（受け口の実装は `src/hub/components.ts` の 1 本）。
+   * 部品のキーは **2 形とも受ける** — 単一形 `krm` のバイト列 1 本（`crnn`）と、分割形の
+   * part 列（`crnn[0]` / `crnn[1]` / … — part 0 から添字順）。分割形はバイト列を連結せず
+   * part 列のまま開く。添字の欠番と単一形キーとの混在は fail loudly（受け口の実装は
+   * `src/hub/components.ts` の 1 本）。
    */
   static async fromAssets(
     input: VowelDetectorAssets,
     options: VowelDetectorPipelineOptions = {},
   ): Promise<VowelDetectorPipeline> {
-    const admitted = admitVowelDetector(input.manifest, assetOpener(input.assets), options);
+    const open = await assetOpener(input.assets);
+    const admitted = admitVowelDetector(input.manifest, open, options);
     return new VowelDetectorPipeline(
-      await openVowelDetectorState(admitted, input.assets, options),
+      await openVowelDetectorState(admitted, input.assets, open, options),
     );
   }
 

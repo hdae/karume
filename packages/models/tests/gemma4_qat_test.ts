@@ -2,6 +2,8 @@ import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { admitGemma4Qat, assertGemma4QatModel, assertGemma4QatPle } from "../src/gemma/qat.ts";
 import { gemma4QatRopeInputs, gemma4RopeInputs, type Gemma4RopeSpec } from "../src/gemma/rope.ts";
 import { Gemma4QatPipeline } from "../gemma4-qat.ts";
+import type { Gemma4PleIndex } from "../src/gemma/ple-index.ts";
+import { pleFixture } from "./helpers/ple-fixture.ts";
 
 type Graph = Parameters<typeof admitGemma4Qat>[0];
 
@@ -143,14 +145,15 @@ const graphOf = (model: "e2b" | "e4b", fault?: Fault): Graph => {
   };
 };
 
-const pleIndexOf = (model: "e2b" | "e4b") => ({
-  tokens: 262144,
-  layers: model === "e2b" ? 35 : 42,
-  dim: 256,
-  embedScale: 16,
-  storage: model === "e2b" ? "i4" as const : "i2" as const,
-  shards: [{ file: "ple.safetensors", start: 0, stop: 262144 }],
-});
+/** 索引 1 本（block 1 本の合成 — 寸法だけが門の対象なので桁は小さくてよい）。 */
+const pleIndexOf = (model: "e2b" | "e4b"): Gemma4PleIndex =>
+  pleFixture({
+    tokens: 64,
+    layers: model === "e2b" ? 35 : 42,
+    dim: 256,
+    embedScale: 16,
+    storage: model === "e2b" ? "i4" : "i2",
+  }).index;
 
 Deno.test("固定 QAT の family admission", async (t) => {
   for (const model of ["e2b", "e4b"] as const) {

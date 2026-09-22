@@ -41,12 +41,8 @@ import {
   type SafetensorsFile,
   type Tensor,
 } from "@karume/runtime";
-import {
-  createGemma4Ple,
-  defaultGemma4PleResidentBytes,
-  type Gemma4Ple,
-  parseGemma4PleIndex,
-} from "../src/gemma/ple.ts";
+import { createGemma4Ple, type Gemma4Ple } from "../src/gemma/ple.ts";
+import { defaultGemma4PleResidentBytes, type Gemma4PleIndex } from "../src/gemma/ple-index.ts";
 import { gemma4RopeInputNames, gemma4RopeInputs, type Gemma4RopeSpec } from "../src/gemma/rope.ts";
 import { planPrefillChunks } from "../src/generation/greedy.ts";
 import {
@@ -58,8 +54,9 @@ import {
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 // 全量常駐の予算は helper が正本（同じ式を e2e ごとに写さない）。
 import { allResidentBytes } from "./helpers/ple-budget.ts";
-// 実ファイルの読み口（`Deno.open` の位置読み = 費用の型 seek）も helper が正本。
-import { openPleShardAt } from "./helpers/ple-source.ts";
+// 系列出力の PLE sidecar を容器の資産と同じ面へ畳む adapter（recipe が `krm` を書くのは
+// 段 3 — ADR 0109 決定 8）。
+import { openSeriesPle } from "./helpers/ple-series.ts";
 
 const PRODUCT_ROOT = new URL("../../../outputs/series/gemma4-e2b-product/", import.meta.url);
 const GOLDEN_ROOT = new URL("../../../outputs/series/gemma4-e2b-decode/", import.meta.url);
@@ -302,33 +299,13 @@ const goldenF32 = (file: SafetensorsFile, name: string): Float32Array<ArrayBuffe
   return new Float32Array(file.buffer, view.byteOffset, view.byteLength / 4);
 };
 
-/**
- * 索引を読んで loader を組む（shard の読みは実ファイル — hub は通さない）。
- *
- * `range: false` は**区間読みを持たない読み口**（従来経路 = 全量読み + LRU）。②の突合門が
- * 両方を回すのは、行読みが入っても値が 1 bit も動かないことを実資産で見るためである。
- */
-const openPle = async (
-  maxResidentBytes: number,
-  options: { readonly range?: boolean } = {},
-): Promise<Gemma4Ple> => {
-  const index = parseGemma4PleIndex(
-    JSON.parse(await Deno.readTextFile(new URL(PLE_INDEX_FILE, PRODUCT_ROOT))),
-  );
-  return createGemma4Ple({
-    index,
-    openShard: async (file) => {
-      const source = await openPleShardAt(PRODUCT_ROOT, file);
-      if (options.range === false) return { bytes: source.bytes, readAll: source.readAll };
-      return source;
-    },
-    vocabSize: VOCAB,
-    maxResidentBytes,
-  });
+/** 索引を読んで loader を組む（block の読みは実ファイル — hub は通さない）。 */
+const openPle = async (maxResidentBytes: number): Promise<Gemma4Ple> => {
+  const { index, openBlock } = await openSeriesPle(PRODUCT_ROOT);
+  return createGemma4Ple({ index, openBlock, vocabSize: VOCAB, maxResidentBytes });
 };
 
-const readPleIndex = async () =>
-  parseGemma4PleIndex(JSON.parse(await Deno.readTextFile(new URL(PLE_INDEX_FILE, PRODUCT_ROOT))));
+const readPleIndex = async (): Promise<Gemma4PleIndex> => (await openSeriesPle(PRODUCT_ROOT)).index;
 
 /**
  * ② PLE 逆量子化のビット一致（ADR 0085 決定 4）+ 遅延ロード / LRU（決定 3）。
@@ -350,8 +327,8 @@ Deno.test({
     assertEquals(index.dim, PLE_DIM, "sidecar の層当たり次元");
     assertEquals(index.embedScale, Math.sqrt(PLE_DIM), "embed scale（hidden_per_layer ** 0.5）");
     assert(
-      index.shards.length > 1,
-      `sidecar が ${index.shards.length} 本（vocab レンジ分割が無い）`,
+      index.values.blocks.length > 1,
+      `PLE の values が ${index.values.blocks.length} block（vocab レンジ分割が無い）`,
     );
 
     const probeFile = parseSafetensors(await readBuffer(PRODUCT_ROOT, PLE_PROBE_FILE));
@@ -362,13 +339,17 @@ Deno.test({
       tokens.length * LAYERS * PLE_DIM,
       "参照 per_layer_inputs の要素数",
     );
-    // probe は shard 境界の両側を踏むので、全 shard を触る（触らないと LRU の観測が空振りする）。
-    const touched = new Set(
-      tokens.map((token) => index.shards.findIndex((shard) => token < shard.stop)),
+    // probe は block 境界の両側を踏むので、全 block を触る（触らないと方針表の観測が空振りする）。
+    const blockOf = (token: number): number =>
+      index.values.blocks.findIndex((block) => token < block.stop);
+    const touched = new Set(tokens.map(blockOf));
+    assertEquals(
+      touched.size,
+      index.values.blocks.length,
+      "probe が踏む values block 数（全 block を踏むこと）",
     );
-    assertEquals(touched.size, index.shards.length, "probe が踏む shard 数（全 shard を踏むこと）");
 
-    // 既定の予算（= 最大 shard 2 本ぶん）で引く。本数ではなくバイトで頭打ちになることを見る。
+    // 既定の予算（= 最大 block 2 本ぶん）で引く。本数ではなくバイトで頭打ちになることを見る。
     const budget = defaultGemma4PleResidentBytes(index);
     /** torch の 35 表経路との厳密一致（tolerance を持たない）。 */
     const assertProbeMatch = (data: Float32Array, where: string): void => {
@@ -391,47 +372,54 @@ Deno.test({
       );
     };
 
-    // ②-a 従来経路（区間読みを持たない読み口）— 触った shard だけ読み、LRU がバイト予算で落とす。
-    const full = await openPle(budget, { range: false });
-    const byFull = await full.gather(tokens);
-    assertEquals(byFull.dtype, "f32", "gather の dtype");
-    assertEquals(byFull.shape, [1, tokens.length, LAYERS, PLE_DIM], "gather の shape");
-    assert("data" in byFull && byFull.data instanceof Float32Array);
-    assertProbeMatch(byFull.data, "全量経路");
-    const fullStats = full.stats();
-    assertEquals(fullStats.loads, index.shards.length, "取りに行った shard 数（触ったぶんだけ）");
-    assertEquals(fullStats.rowReads, 0, "区間読みを持たない口で行読みが起きている");
-    assertEquals(fullStats.resident, 2, "常駐 shard 数（既定 = 最大 shard 2 本ぶんで頭打ち）");
-    assert(
-      fullStats.residentBytes <= budget,
-      `常駐 ${fullStats.residentBytes} バイトが予算 ${budget} を超えている`,
-    );
-
-    // ②-b 行読み経路（seek の読み口）— probe は shard あたり数行なので方針表は全段が行読み。
-    // 253MiB の全量読みは 1 本も起きず、値は ②-a と**ビット同一**であること。
+    // ②-a 行読み経路 — probe は block あたり数行なので方針表は全段が行読みになる。
+    // 32MiB の全量読みは 1 本も起きない。
     const distinct = new Set(tokens).size;
-    const rows = await openPle(budget, { range: true });
+    const rows = await openPle(budget);
     const byRows = await rows.gather(tokens);
+    assertEquals(byRows.dtype, "f32", "gather の dtype");
+    assertEquals(byRows.shape, [1, tokens.length, LAYERS, PLE_DIM], "gather の shape");
     assert("data" in byRows && byRows.data instanceof Float32Array);
     assertProbeMatch(byRows.data, "行読み経路");
-    assertEquals(
-      [...new Uint32Array(byRows.data.buffer)],
-      [...new Uint32Array(byFull.data.buffer)],
-      "行読みの値が全量経路とビット一致しない",
-    );
     const rowStats = rows.stats();
-    assertEquals(rowStats.loads, 0, "行読みで済む gather なのに shard 全量を読んでいる");
-    assertEquals(rowStats.rowReads, distinct, "行読みの行数が一意 token 数と違う");
+    assertEquals(rowStats.loads, 0, "行読みで済む gather なのに block 全量を読んでいる");
+    assertEquals(rowStats.rowReads, distinct * 2, "行読みは values / scales の 2 表ぶん");
     assertEquals(rowStats.resident, 0, "行読みなのに常駐している");
+
+    // ②-b 全量経路 — probe の token をその block の先頭 32 行と一緒に引くと、触った block は
+    // どれも下限（32 行）に届くので方針表が全量読みへ倒れる。probe の位置は列の先頭に置いて
+    // あるので、比べるのは同じ要素数の前半だけでよい。値が **1 bit も動かない**ことが門である。
+    const filler = [...touched].flatMap((position) =>
+      Array.from({ length: 32 }, (_row, row) => index.values.blocks[position].start + row)
+    );
+    const full = await openPle(allResidentBytes(index));
+    const byFull = await full.gather([...tokens, ...filler]);
+    assert("data" in byFull && byFull.data instanceof Float32Array);
+    assertProbeMatch(byFull.data.subarray(0, expected.length), "全量経路");
+    assertEquals(
+      [...new Uint32Array(byFull.data.buffer, 0, expected.length)],
+      [...new Uint32Array(byRows.data.buffer)],
+      "全量読みの値が行読みとビット一致しない",
+    );
+    const fullStats = full.stats();
+    assertEquals(
+      fullStats.loads,
+      touched.size +
+        new Set(
+          filler.concat(tokens).map((token) =>
+            index.scales.blocks.findIndex((block) => token < block.stop)
+          ),
+        ).size,
+      "全量で読んだ block 数（values + scales の触ったぶん）",
+    );
+    assertEquals(fullStats.rowReads, 0, "全量読みへ倒れた gather で行読みが起きている");
 
     console.log(
       `[e2e] gemma4 product PLE: probe ${tokens.length} token（一意 ${distinct}）× ${LAYERS} 層 ×` +
-        ` ${PLE_DIM} 次元が torch とビット一致 / 全量経路 = shard ${fullStats.loads} 本ロード・` +
-        `常駐 ${fullStats.resident} 本（${(fullStats.residentBytes / 1024 / 1024).toFixed(0)} / ` +
-        `予算 ${
-          (budget / 1024 / 1024).toFixed(0)
-        } MiB）/ 行読み経路 = 全量 ${rowStats.loads} 本・` +
-        `行 ${rowStats.rowReads} 本`,
+        ` ${PLE_DIM} 次元が torch とビット一致 / 行読み経路 = 全量 ${rowStats.loads} 本・` +
+        `行 ${rowStats.rowReads} 区間（予算 ${(budget / 1024 / 1024).toFixed(0)} MiB）/ ` +
+        `全量経路 = block ${fullStats.loads} 本ロード・常駐 ${fullStats.resident} 本` +
+        `（${(fullStats.residentBytes / 1024 / 1024).toFixed(0)} MiB）`,
     );
   },
 });
@@ -718,12 +706,16 @@ Deno.test({
             `（キャッシュが効いていない）`,
         );
         assert(
-          stats.loads <= index.shards.length,
-          `shard 取得 ${stats.loads} 回が本数 ${index.shards.length} を超える（読み直しが起きている）`,
+          stats.loads <= index.values.blocks.length + index.scales.blocks.length,
+          `block 取得 ${stats.loads} 回が本数 ${
+            index.values.blocks.length + index.scales.blocks.length
+          } を超える（読み直しが起きている）`,
         );
         console.log(
           `[e2e] gemma4 product PLE 遅延ロード: gather ${totalGathers} 回 / shard 取得 ` +
-            `${stats.loads} 回（全 ${index.shards.length} 本中）`,
+            `${stats.loads} 回（全 ${
+              index.values.blocks.length + index.scales.blocks.length
+            } 本中）`,
         );
       });
     } finally {

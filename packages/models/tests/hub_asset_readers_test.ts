@@ -1,7 +1,7 @@
 // 取得済み資産バイト列の読み口（`src/hub/asset-readers.ts`）。7 family が同じ 1 本を通るので、
 // ここが受理集合を広げると全 family の資産門が一斉に緩む。
 //
-// 見るのは 4 点:
+// 見るのは 5 点（最後の 1 点は容器の内側の資産 — `readWholeAsset`）:
 //
 // ① **写さない**こと。返るのは view の `buffer` そのもの（GB 級の重みで RAM ピークが倍に
 //    ならない条件）で、同一性で縛れる。
@@ -11,7 +11,9 @@
 // ④ decode 段（不正 UTF-8）と parse 段（JSON 構文違反）を別の文言で落とす。
 
 import { assertEquals, assertStrictEquals, assertThrows } from "@std/assert";
-import { readAssetBuffer, readAssetJson } from "../src/hub/asset-readers.ts";
+import { openContainer } from "@karume/runtime";
+import { readAssetBuffer, readAssetJson, readWholeAsset } from "../src/hub/asset-readers.ts";
+import { tensorlessContainer } from "./helpers/container-fixture.ts";
 
 /** buffer 全体を占める view（hub が返す契約どおりの形）。 */
 const wholeView = (bytes: readonly number[]): Uint8Array<ArrayBuffer> => Uint8Array.from(bytes);
@@ -110,4 +112,28 @@ Deno.test("readAssetJson: 資産そのものが無い場合は buffer 段の文�
     Error,
     "sbv2: 資産 'symbols' が無い（manifest の weights / assets に symbols が要る）",
   );
+});
+
+// ---- 容器の資産（`readWholeAsset`）------------------------------------------
+//
+// 容器の内側の資産（`rope_base` / PLE の索引）は manifest の表に載らないので、読み口は
+// `AssetReader` 1 本。見るのは 2 点: **論理長ぶんだけ**返ること（block の詰め物を渡さない）と、
+// 返る ArrayBuffer が payload だけを占めること（`parseSafetensors` がそのまま読める形）。
+
+Deno.test("readWholeAsset: 論理長ぶんだけ読み、詰め物を含まない buffer を返す", async () => {
+  // 長さ 6 の資産（block 長は 4 の倍数へ切り上がるので 8 バイト = 詰め物 2 バイト）。
+  const payload = Uint8Array.from([1, 2, 3, 4, 5, 6]) as Uint8Array<ArrayBuffer>;
+  const written = await tensorlessContainer(
+    "unit",
+    { inputs: [{ name: "x", shape: [1, 2] }], output: { name: "y", shape: [1, 2] } },
+    [{ name: "probe", role: "test-probe", bytes: payload }],
+  );
+  const opened = await openContainer({ kind: "bytes", bytes: written.single });
+  const reader = opened.asset("probe");
+  assertEquals(reader.role, "test-probe");
+  assertEquals(reader.length, payload.byteLength);
+
+  const buffer = await readWholeAsset(reader);
+  assertEquals(buffer.byteLength, payload.byteLength, "詰め物まで返している");
+  assertEquals([...new Uint8Array(buffer)], [...payload]);
 });

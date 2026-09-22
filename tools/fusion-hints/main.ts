@@ -179,13 +179,13 @@ const buildReport = async (options: Options): Promise<SourceReport> => {
         graph: name,
         // percent encode を解いてから資産根ぶんを落とす（報告の `path` 欄は人が読む path で、
         // `%20` の混じった綴りは手で開けない）。根は末尾 `/` なので境界に escape は跨がらない。
-        path: decodeURIComponent(target.graphShard.pathname)
+        path: decodeURIComponent(target.graph.url.pathname)
           .slice(decodeURIComponent(root.pathname).length),
-        ir: await readIrGraph(target.graphShard),
+        ir: await readIrGraph(target.graph),
       });
     } catch (cause) {
       // 読めない 1 本で全体を止めない。ただし黙って落とさず、理由を報告に残す
-      // （IR を載せない shard を先頭と取り違えた形はここに出る）。記号の未束縛はここではなく
+      // （IR を載せない先頭を取り違えた形はここに出る）。記号の未束縛はここではなく
       // reportScenario が打ち切る — 既定値で計画を進めないため。
       const reason = cause instanceof Error ? cause.message : String(cause);
       skipped.push({ name, reason });
