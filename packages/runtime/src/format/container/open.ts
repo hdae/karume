@@ -68,6 +68,22 @@ export type DescriptorExpectation = {
   readonly model?: { readonly length: number; readonly sha256: Sha256Hex };
 };
 
+/**
+ * 資産 1 本の読み口（役割の解釈は models — container-v1 §2.2。runtime は名前 → block までしか知らない）。
+ */
+export type AssetReader = {
+  readonly role: string;
+  /** block の長さ（詰め物込み — 論理長は models が役割の索引から導く）。 */
+  readonly length: number;
+  /**
+   * `[offset, offset + length)` を返す。検証済みの取得元では区間だけを取る（block 全体は読まない —
+   * 数百 MiB の表から数 KB の行だけを引く消費側のための面）。未検証の取得元では block を 1 度取って
+   * sha256 を検証し、この読み口が生きている間は保持してそこから切る（保持する本数は呼び手が読み口の
+   * 寿命で決める）。
+   */
+  read(offset: number, length: number): Promise<Uint8Array<ArrayBuffer>>;
+};
+
 /** 開いたコンテナ。 */
 export type OpenedContainer = {
   readonly header: ContainerHeader;
@@ -86,6 +102,8 @@ export type OpenedContainer = {
    * sha256 を検証する（§7 — 未検証の取得元だけが block ごとに一括 digest）。
    */
   readBlock(id: string): Promise<Uint8Array<ArrayBuffer>>;
+  /** 資産 1 本の読み口を開く（`krg` と未宣言の名前は fail loudly）。開くだけでは 1 バイトも取らない。 */
+  asset(name: string): AssetReader;
   /** `[ヘッダ'][グラフ記述][詰め物][const 領域]` を組み立てて返す（`krg` のバイトコピー抽出 — §9）。 */
   extractGraph(): Promise<Uint8Array<ArrayBuffer>>;
 };
@@ -292,6 +310,31 @@ export const openContainer = async (
     return bytes;
   };
 
+  const asset: OpenedContainer["asset"] = (name) => {
+    const binding = model?.assets[name];
+    if (binding === undefined) throw new ContainerFormatError(`未宣言の資産 '${name}'`);
+    const found = locate(binding.block);
+    let verifiedBlock: Promise<Uint8Array<ArrayBuffer>> | undefined;
+    return {
+      role: binding.role,
+      length: found.record.length,
+      read: async (offset, length) => {
+        if (offset < 0 || length < 0 || offset + length > found.record.length) {
+          throw new ContainerFormatError(
+            `資産 '${name}': ${offset}..${
+              offset + length
+            } が block 長 ${found.record.length} をはみ出す`,
+          );
+        }
+        if (source.verified) {
+          return await source.read(found.part, found.record.offset + offset, length);
+        }
+        verifiedBlock ??= readBlock(binding.block);
+        return (await verifiedBlock).subarray(offset, offset + length);
+      },
+    };
+  };
+
   const extractGraph = async (): Promise<Uint8Array<ArrayBuffer>> => {
     const regionLength = graph.const.length;
     const region = regionLength === 0
@@ -309,5 +352,5 @@ export const openContainer = async (
     return assembleGraphContainer(graphBytes.slice(), region.slice());
   };
 
-  return { header, graph, model, graphs, source, locate, readBlock, extractGraph };
+  return { header, graph, model, graphs, source, locate, readBlock, asset, extractGraph };
 };

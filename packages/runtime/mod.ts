@@ -20,6 +20,7 @@ export type { KarumeModel } from "./src/format/container.ts";
  */
 export { openContainer } from "./src/format/container/open.ts";
 export type {
+  AssetReader,
   BlockSource,
   ContainerInput,
   DescriptorExpectation,

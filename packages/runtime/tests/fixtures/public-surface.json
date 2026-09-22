@@ -27,6 +27,10 @@
         "kind": "typeAlias"
       },
       {
+        "name": "AssetReader",
+        "kind": "typeAlias"
+      },
+      {
         "name": "BatchScope",
         "kind": "class"
       },

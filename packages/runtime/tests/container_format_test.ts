@@ -473,6 +473,60 @@ describe("container round trip", () => {
     );
   });
 
+  it("資産の読み口は区間だけを返し、未検証の取得元では block を 1 度検証してから切る", async () => {
+    const written = await writeModelContainer(syntheticModel(), OPTIONS);
+    const parts = written.parts.map((part) => part.slice());
+    const ple = written.model.assets["ple_table"];
+    const pleBlock = written.model.blocks.find((block) => block.id === ple.block);
+    if (pleBlock === undefined) throw new Error("ple_table の block が無い");
+    const reads: number[] = [];
+    const sourceOf = (verified: boolean): BlockSource => ({
+      partCount: parts.length,
+      verified,
+      partLength: (index) => parts[index].byteLength,
+      read: (part, offset, length) => {
+        reads.push(length);
+        return Promise.resolve(parts[part].subarray(offset, offset + length));
+      },
+    });
+
+    // 検証済み: 区間の長さだけを取りに行く（block 全体 400 B は読まない）。
+    const trusted = await openContainer({ kind: "source", source: sourceOf(true) });
+    const reader = trusted.asset("ple_table");
+    assertEquals(reader.role, "ple-table");
+    assertEquals(reader.length, pleBlock.length);
+    reads.length = 0;
+    assertEquals(await reader.read(16, 8), bytesOf(400, 32).subarray(16, 24));
+    assertEquals(reads, [8]);
+
+    // 未検証: 初回に block 全体を 1 度取って検証し、2 度目は取りに行かない。
+    const untrusted = await openContainer({ kind: "source", source: sourceOf(false) });
+    const cached = untrusted.asset("ple_table");
+    reads.length = 0;
+    assertEquals(await cached.read(0, 4), bytesOf(400, 32).subarray(0, 4));
+    assertEquals(await cached.read(396, 4), bytesOf(400, 32).subarray(396, 400));
+    assertEquals(reads, [pleBlock.length]);
+
+    // 改ざんは未検証の取得元でだけ捕まる（検証済みは取得層が保証する側）。
+    parts[pleBlock.part][pleBlock.offset + 5] ^= 0x40;
+    const tampered = await openContainer({ kind: "source", source: sourceOf(false) });
+    await assertRejects(
+      () => tampered.asset("ple_table").read(0, 4),
+      ContainerFormatError,
+      "sha256 が宣言と違う",
+    );
+
+    // 範囲外・未宣言・krg は fail loudly。
+    await assertRejects(
+      () => reader.read(pleBlock.length - 2, 4),
+      ContainerFormatError,
+      "はみ出す",
+    );
+    assertThrows(() => trusted.asset("nope"), ContainerFormatError, "未宣言の資産");
+    const graphOnly = await openContainer({ kind: "bytes", bytes: written.graphContainer });
+    assertThrows(() => graphOnly.asset("ple_table"), ContainerFormatError, "未宣言の資産");
+  });
+
   it("分割形の part 本数と長さは宣言と一致しなければならない", async () => {
     const written = await writeModelContainer(syntheticModel(), OPTIONS);
     await assertRejects(
