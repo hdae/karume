@@ -537,3 +537,67 @@ descriptor を取るのが 2 周目になる）。
 - 差し込みで**外れる融合は `linearStaticQuantize` の 1 本だけ**
   （`packages/runtime/src/runtime/fusion-rules/linear-static-quantize.ts`）。anima は
   `static_quantize` が 0 本なので実質 0 件である。
+
+## 追記 1 — 段 1 の実装で確定した点（2026-09-22）
+
+段 0 の設計を実装に落とす過程で決めた / 訂正した点。仕様の正本は [container-v1](../container-v1.md) と
+[ir-v2](../ir-v2.md) で、ここは「なぜそうしたか」だけを持つ。
+
+1. **initializer 名 = 実体の鍵**（IR v2）。v1 の initializer 名は torch.export の placeholder 名で、
+   上流の鍵（FQN）は `tensor` 欄が別に持っていた。`tensor` 欄を束縛表へ外出しすると、上流 checkpoint の
+   取り込み（決定 19）と LoRA の対象解決（段 5）が鍵を失う。名前を FQN（定数は `const.<hash>`）にすれば
+   表を 1 つも足さずに済む（ミラー 77 グラフで名前・キーは全て ASCII・最長 87 文字・衝突 0 を実測）。
+   共有 initializer は**借り手の名前 = 貸し手の initializer 名**（`shared.tensor` は不要になった）。
+2. **正準直列化の規則**（決定 4 の条件）: 空白なし・キーはスキーマ順・名前キーの map は code point 順・
+   数値の綴りは ECMAScript `Number::toString`（JS 側は `JSON.stringify` がそのまま正準で、Python 側が
+   これを実装する）。descriptor の配列順も固定（`const.blocks` は offset 昇順 MUST・`blocks` は
+   (part, offset)・`constants` は (graph, initializer)）。
+3. **仕様の訂正 5 点**（container-v1 §「改訂履歴」）: ①`capabilities.codecs` はモデル記述の `codecs` へ
+   （グラフ記述は `krm` / `krg` でバイト同一 MUST なので、束縛表に依存する欄を持てない）②束縛表から
+   借用形を外す（shared 宣言は IR 側だけ。束縛表のキー集合は「shared でも const 供給でもない
+   initializer」と完全一致）③`rowAxis` / `groupSize` / `scale` は量子化 codec のみ ④`int8-sym` の packing
+   は 1 要素 / 1 バイト / 整列 4（4 / 4 / 1 だと `numel % 4 == 0` という v1 に無い制約が入る）
+   ⑤配列順の固定（上 2）。
+4. **`rowAxis` は宣言が正本だが、消費側 op の軸との突合は残す**（§13.2 の「`weightChannelAxes` は消える」を
+   訂正）。宣言だけで scale の意味は閉じるが、消費側と食い違う宣言は GPU 常駐経路が scale を別の軸に
+   当てる沈黙誤値になるので、`planWeightResidency` が突合点として持つ。group 形（`int4-sym-g`）の
+   `rowAxis` は 0 だけ（展開カーネルと `decodeI4` が先頭次元を行とする）。
+5. **要素数 0 の退化形**（`in_features = 0` など）: per-channel の `groupSize` は行長 0 では 1 以上 MUST を
+   満たせないので **1**、group 数は **1**（per-channel scale は行ごとに 1 本あり、旧配布形の `[rows, 1]`
+   と一致）。§6.1 の `scaleShape` の式はこの退化形を含む。
+6. **共有 initializer の門**: 借り手は格納を宣言しないので、旧 5 点のうち「宣言 格納 dtype が貸し手と
+   一致」は消え、代わりに**貸し手の codec と借り手側の消費（適格判定）から期待席を導いて**貸し手の
+   実際の席（i8 / i2 は行の軸まで）と突き合わせる。
+7. **段 3 までの暫定接着**（両読みではない）: 旧配布形の読み手は残るが、①旧 v1 ローダ（`parseIrGraph`）は
+   読んだ時点で合流後の形へ写す（改名・codec 写像・`rowAxis` / `groupSize` の導出）②旧 shard の validator
+   は供給計画と同じ `ReadyInitializer`（バイト列 + rank 2 の scale）を返す。消費側（Session 構築・
+   常駐計画・models）は**合流後の 1 語彙**だけを見る。旧形式を読むコードは段 3 で削除する。
+8. **errorScope は block ごと・フェンスは part ごと**（決定 9 の実装）: 供給の単位 `WeightBatch`（旧 shard
+   1 本 / コンテナの part 1 本）ごとに空 submit + 完了待ちを 1 回、errorScope はコンテナでは item
+   （block）ごと、旧 shard では batch ごと（従来どおり）。
+9. **`krg` 単独では Session を組めない**（重みの供給が無い）— 設計どおり。const 供給と shared だけの
+   グラフは例外的に組める。
+10. **公開面**: `openContainer` / `prepareContainer` / `createSessionFromContainer` / `codecLayout`（codec →
+    展開経路。models が格納の性質で分岐する唯一の読み口）/ `ContainerFormatError`。
+11. **検収③の縮図**を `gpu_container_session_test.ts` に固定: 同じ重みバイト列から `krm` 経路と旧 safetensors
+    経路が同じ出力バイト列・同じ常駐バイト数・同じ見積りを出す（i4 + group scale / f16 / i8 + per-channel
+    scale・piece 分割込み）。
+12. **Python の書き手（段 1）は 1 コンテナ 1 グラフ**（`write_model_container(..., graph_name=…)`・
+    bindings はテンソルキー直下の flat map）。現行配布形の部品（component）1 本 = グラフ 1 本に対応
+    する。1 コンテナに複数グラフ（sbv2 の 4 グラフ級・決定 20 の「quant 席 1 つに container 1 つ」）を
+    載せる口は段 2（manifest `karume/5`）の裁定で足す。資産（`assets`）の受け口も同じく段 3
+    （PLE sidecar の専用 part）まで作らない。`provenance.writer` は呼び手が渡す（自動で焼くと版を
+    上げるたびに言語横断 fixture のバイトが動く）。part 長は天井（1024 MiB）だけを強制し、集合
+    `{256, 512, 768, 1024}` は既定値と定数で示す。
+13. **`__proto__` キーは両側で塞ぐ**（container-v1 §0）。
+14. **移行 CLI（段 1）の面**: コンポーネント単位（1 コンポーネント = 1 グラフ = 1 コンテナ）・manifest は
+    読まない / 書かない・`--license` 必須・グラフ名の既定は親ディレクトリ名・`provenance.writer` の
+    既定は生成器タグ・自己検査は payload 部で突合・`.partial` → 検査 → 据え替え（container-v1 §12）。
+    `karume verify` のコンテナ席（移行済み資産を CLI から検査する口）は段 2 で足す。
+15. **検収の状況（段 1 時点）**: ①CPU 逐語突合は実ミラー 3 コンポーネント（depth-anything-v2 small /
+    depth f32・sbv2 shared / text_encoder i8 と i4）で initializer 1,281 本の sha256 が一致。128 鎖全本は、
+    ディレクトリを跨ぐ shard 列（上 14 の未対応）を旧 manifest から引く経路が段 3 で入ってから閉じる。
+    ②77 グラフ全部で新旧の適格述語 3 本・codec 写像・`rowAxis` / `groupSize` が改名表を通して一致
+    （initializer 18,515 本・量子化 4,533 本・不一致 0）。③縮図（追記 11）は緑。④参照行は 1 行も書いて
+    いない。⑤Python が書いた fixture を TS が開いて `parse → serialize` がバイト同一、writer の決定性は
+    pytest で固定（同じグラフを 2 度書いてバイト同一）。

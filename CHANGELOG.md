@@ -17,6 +17,12 @@ measurements in `docs/research/`.
 
 ### Added
 
+- Karume container format (`krm` / `krg`, ADR 0108, stage 1): the runtime opens a container
+  (`openContainer`), admits one of its graphs (`prepareContainer`) and builds a session from its
+  blocks (`createSessionFromContainer`) with per-block sha256 verification; `codecLayout` maps a
+  codec name to its decode path. The exporter gains `karume.container` (writer / reader, canonical
+  JSON with ECMAScript number spelling) and `karume migrate` (old shards → `krm`). IR v2 replaces
+  IR v1 (`docs/ir-v2.md`).
 - Gemma 4 QAT family: `gemma4-qat` pipelines for E2B / E4B with fixed INT2 / INT4 storage, fixed
   static re-quantization (SRQ) whose rounding is preserved on both CPU and GPU, PLE read back
   whole or row by row, and a chat CLI example.
@@ -95,6 +101,13 @@ measurements in `docs/research/`.
 
 ### Breaking
 
+- **Breaking:** the runtime's in-memory graph (`IrGraph`) now uses the merged storage vocabulary:
+  `initializers[name]` is `{ storage: { codec, groupSize?, rowAxis? } }` or `{ shared: true }`,
+  initializer names are the tensor keys (the exporter's FQN / `const.<hash>`), and the `tensor` /
+  `storage.dtype` / `storage.scale` fields are gone. `openModel` / `extractIrGraph` return the
+  legacy scale keys alongside the graph, `createShardValidator` takes them as a second argument,
+  `ReadyInitializer` carries bytes instead of safetensors views, and capability diagnostics say
+  `非対応 格納 '<layout>'`. Shared initializers are named after the lender's initializer.
 - **Breaking:** the PLE read surface is a handle (`openPleShard`); decode reads the rows it needs
   instead of the whole shard.
 - **Breaking:** the Gemma 4 product graph exits on the selected R rows as logits plus hidden

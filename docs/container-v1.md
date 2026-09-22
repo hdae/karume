@@ -35,6 +35,9 @@ ADR [0108](decisions/0108-container-format.md) の具体化。`krm`（モデル�
 - 「block id」は 1〜64 文字の文字列（`[A-Za-z0-9._:-]+`）。
 - shape の要素は非負整数、または `coeff·sym+offset` の正準表記（IR v1 の次元言語と同一）。
 - 未対応・宣言外・不足・余剰はすべて**全件列挙で拒否**する（黙って近似しない）。
+- JSON のキー `__proto__` は**書けない・読めない**（読み手は非有限数・深さと同じ門で拒否し、書き手は
+  正準直列化で拒否する）。素の `{}` へ代入すると [[Prototype]] 設定に化けて宣言が黙って消える名前で、
+  テンソルキーがそのまま initializer 名になる v2 では理屈の上で綴れてしまうため、両側で塞ぐ。
 - 本書の JSON 例に現れる `"…"` は**紙面上の省略**である（実物は §0 の規則どおり小文字 16 進
   64 文字）。例は形を示すもので、値そのものは規範ではない — 規範は各節の欄の表である。
 
@@ -463,6 +466,11 @@ scaleShape = [ shape[rowAxis], rowLength / groupSize ]
 rowLength  = numel / shape[rowAxis]
 ```
 
+**要素数 0 の退化形**（`in_features = 0` など・行長 0）: per-channel の `groupSize` は 1 以上 MUST を
+満たせないので **1**、group 数は **1**（per-channel scale は行ごとに 1 本あり、旧配布形の `[rows, 1]` と
+一致する）。group codec（`int4-sym-g`）の `rowAxis` は **0** だけ（展開カーネルと `decodeI4` が
+先頭次元を行とする）。
+
 今日 i8 だけが使っている「重みと同 rank の keepdim broadcast 形」は廃止する。i8 の per-channel は
 「行 = `rowAxis` の次元・group 長 = 行長」とみなすと `[shape[rowAxis], 1]` になり、i2 が既に
 採っている形（`[N,1]`）と同じものになるからである。
@@ -646,6 +654,9 @@ warm で digest を走らせないのは現行の規律の継承である（`pac
   64 B 整列規則」から導くので、長さ 0 の part に詰め物を与えると const が空の `krm` からの
   抽出結果と直接書いた `krg` がずれる（§9）。
 - **HF の公式配布は分割形のみ**。
+- **ファイル名**（exporter / 移行 CLI の規約 — manifest はこれを FileRef で指す）: 単一形は
+  `<stem>.krm`、分割形は `<stem>-NNNNN-of-NNNNN.krm`（part 0 から・5 桁ゼロ詰め・旧 shard と同じ
+  綴り規約）、`krg` は `<stem>.krg`。
 - 単一形を HF に置くこと自体は「ダウンロード用資産」として禁止しない。**制限は場所ではなく
   取得能力で説明する**（§11 の `fromContainer` の上限）。
 - 単一形 `krm` は `krg` を**内包する**（§9 でそのまま抜ける）。
@@ -666,7 +677,9 @@ krg = [ヘッダ'][グラフ記述（krm からのバイトコピー）][const �
 - したがって「`krm` から抜いた `krg`」と「最初から `krg` として書いた同じグラフ」は
   **バイト同一**になり、`krg` の同一性を**内容ハッシュ**で判定できる。
 - `krg` が**持たない**もの: **重みの束縛表**（重みの要求は `graphs[].values` の宣言 shape /
-  dtype から導出する）・`provenance`・重み block・scale block。
+  dtype から導出する）・`provenance`・重み block・scale block。したがって **`krg` 単独では Session を
+  組めない**（`createSessionFromContainer` は「重みの供給が無い」で fail loudly。const 供給と shared
+  だけのグラフは例外的に組める）。
 - `krg` が**持つ**もの: `const.constants`（const block → initializer の束縛表）と
   `const.length`。どちらもグラフ記述の中にあり、**`krg` 単独で `const.*` を供給できる唯一の
   手段**である（`const` の `encoding` をどこからも読めなくなるのを防ぐ）。
@@ -746,6 +759,17 @@ fail loudly** で止まる。
 - **旧入力は保持する**（CLI は入力を消さない・書き換えない）。
 - 実装は Python（exporter 側 — `repack.py` の「生バイトと IR を変えず詰め方だけ動かす」層を
   流用する）。
+- **段 1 の CLI 面**（`karume migrate <代表 path | 旧単一形> --out <dir> --license <識別子>
+  [--graph] [--single]`）: コンポーネント（グラフ 1 本）単位で、manifest は読まないし書かない
+  （`karume/5` の生成は段 3 の dist 側）。グラフ名の既定は親ディレクトリ名（= `karume.json` の
+  weights のキー）。`--license` は必須（既定値で出所を偽らない）。`provenance.writer` の既定は生成器
+  タグ（`karume/<版>`）なので、不変条件 4「決定的」は**同じ版のもとで**の主張である。
+- 自己検査（不変条件 5）は **payload 部**で突き合わせる（block 全体の sha256 は詰め物を含むので
+  新旧で一致しない）。出力は `.partial` へ書き、検査を通ってから据え替える（落ちた回は何も残さない）。
+- 旧 scale の**形**（keepdim / group 形）が `rowAxis` / `groupSize` から決まる形と一致することを焼く前に
+  見る（正方の重みでは per-column の `[1,N]` と per-channel の `[N,1]` がバイト数で区別できない）。
+- 未対応: ディレクトリを跨ぐ shard 列（sbv2 の `shared/front` / `shared/voice` は shard 2 が話者
+  ディレクトリに居る）は代表 path からは組み立てられない — 旧 manifest から列を引く経路（段 3）で扱う。
 
 不変条件:
 
@@ -811,7 +835,9 @@ session ノブ）と、同一 config の重み差し替え（fine-tune）から�
 ### 13.2 scale を rank 2 group 形へ統一し、`rowAxis` を宣言に出す
 
 §6.1 のとおり。i8 の keepdim broadcast 形は廃止し、`conv_transpose1d` の i8 だけ
-`rowAxis: 1` と宣言する。`weightChannelAxes`（`plan.ts:411-435`）は消える。
+`rowAxis: 1` と宣言する。消費側 op から軸を**導く**のはやめるが、`weightChannelAxes`（`plan.ts`）は
+**宣言との突合**として残す — 宣言と消費側の軸が食い違うと GPU 常駐経路が scale を別の軸に当てる
+沈黙誤値になる（実装は `planWeightResidency`）。
 
 ### 13.3 合流層 — 規則は 1 箇所に置く
 

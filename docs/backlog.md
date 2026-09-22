@@ -15,6 +15,13 @@
   （container の読み書き 18 テスト緑・anima transformer の上流重みが 567/567 バイト一致・
   LoRA のグラフ書き換え 454 本が `parseIrGraph` 通過）。試作の置き場は
   `.claude/reviews/2026-09-22_codex-format-design/spikes/`（git 追跡外）。
+  **段 1 進行中（2026-09-22 夜）**: IR v2 仕様（`ir-v2.md`・正準直列化）/ TS の読み手（`format/container/`）/
+  合流後の語彙で Session を組む経路（`createSessionFromContainer`・検収③の縮図 `gpu_container_session_test.ts` 緑）/
+  Python の writer + reader（`karume.container`・言語横断 fixture）/ 移行 CLI（`karume migrate`・実ミラー 3 コンポーネントで
+  initializer 1,281 本の sha256 一致）/ 合流層の鏡像 `verify_container` まで済 = **段 1 の納品物は揃った**
+  （検収の状況は ADR 0108 追記 1 の 15）。**段 2 へ持ち越す宿題**: ①128 鎖全本の逐語突合（ディレクトリを跨ぐ
+  shard 列を旧 manifest から引く経路が要る）②`karume verify` のコンテナ席 ③1 コンテナ複数グラフと `assets` の
+  受け口（manifest `karume/5` の裁定と同時）④`provenance.writer` の既定（生成器タグ）の是非。
   段 0 の宿題だった `pushErrorScope('validation')` の同期区間を block 単位に割る費用は実測で閉じた
   （push/pop 1.81 µs / 回・フェンス 13.0 ms / 回 — ADR 0108 決定 9 に追記済み）。段 1〜6 の作るものと検収は
   ADR 0108 の段階分解の表が正本（ここには複写しない）。段 1 の前提だった `outputs/series/` の大掃除は
