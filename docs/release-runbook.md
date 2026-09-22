@@ -119,7 +119,8 @@ export HF_XET_DEDUPLICATION_GLOBAL_DEDUP_QUERY_ENABLED=false
       1.4.3 で後継とされた `HF_XET_MIN_SPACING_BETWEEN_GLOBAL_DEDUP_QUERIES` を巨大値にする形は
       **効かない**（2026-08-29 実測）。さらに 1.4.3 では**リポ自身の履歴に同一 chunk がある
       場合の repo 内 dedup がどのノブでも止まらない**（同日 anima の text_encoder で実測。
-      shard 分割後の 0.8.0 では再現せず — 結果は backlog の 0.8.0 消化済み節）。
+      shard 分割後の 0.8.0 では再現せず — 結果は
+      [退避した消化済み節](research/2026-09-22-backlog-archive-0.5.0-to-0.12.0.md)の 0.8.0 節）。
 - [ ] **`~/.cache/huggingface/xet/*/shard-cache` を毎回退避する**（再アップロードだけでなく
       **初回でも**）。global dedup のヒットでサーバから取り寄せた shard がここに残り、
       次のアップロードはそれを引き当てて断片化を継承する

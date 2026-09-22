@@ -4,7 +4,9 @@
   recipe 側の席名一斉改名と `karume/4` emit、deno 側の `linearCompute` / `attentionCompute` の値
   `"i8a8"` → `"a8"` 改名まで完了し、[0075](0075-quant-presentation.md) の繰り上げと同乗した。
   公開リポの再アップロードと pin 更新（[0073](0073-models-source-pin.md)）は **0.5.0 で
-  消化済み**（4 リポの revision は [backlog](../backlog.md) の 0.5.0 節が記録）。SBV2 の
+  消化済み**（4 リポの revision は
+  [退避した backlog の消化済み節](../research/2026-09-22-backlog-archive-0.5.0-to-0.12.0.md)の
+  0.5.0 節が記録）。SBV2 の
   yomi 依存分離は同乗せず 0.6.0 へ送った〈backlog〉。起票は 2026-08-21 のユーザー裁定
   「起票お願いします」）
 - Date: 2026-08-21
