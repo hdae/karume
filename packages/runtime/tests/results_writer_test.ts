@@ -4,9 +4,20 @@
 // **その時点までの全件**で書き直されること（途中で落ちても直前までが残る）、実物の置き場が
 // 同じディレクトリ配下に閉じること。実 GPU も `outputs/` も要らない — 根と環境は注入する。
 
-import { assert, assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertRejects,
+  assertStringIncludes,
+  assertThrows,
+} from "@std/assert";
 import type { Environment } from "./helpers/environment.ts";
-import { type Measurement, openResults, type ResultEntry } from "./helpers/results.ts";
+import {
+  type Measurement,
+  openResults,
+  recordFailure,
+  type ResultEntry,
+} from "./helpers/results.ts";
 
 const KEY = "deno-intel-graphics-bmg-g21";
 
@@ -151,6 +162,37 @@ Deno.test("結果の書き出し: 非有限の実測は null として書かれ�
     const text = await Deno.readTextFile(new URL("results.json", results.dir));
     assertStringIncludes(text, `"maxAbs": null`);
     assertStringIncludes(text, `"maxRel": null`);
+  } finally {
+    Deno.removeSync(temporary, { recursive: true });
+  }
+});
+
+// 失敗した回の決着は「残すのが務め」だが、その書き込みが落ちたときに throw すると、呼び手の
+// catch が抱えている元の検証例外（何が壊れたのかを言う唯一の診断）が I/O 例外に置き換わる。
+Deno.test("結果の書き出し: 記録できなくても recordFailure は throw せず、黙りもしない", async () => {
+  const temporary = Deno.makeTempDirSync({ prefix: "karume-verify-" });
+  try {
+    const root = new URL(`file://${temporary}/`);
+    // 故障注入: 席の親（環境キーのディレクトリ）を通常ファイルにする = 席を作れない置き場。
+    Deno.writeTextFileSync(new URL(KEY, root), "");
+    const results = openResults("golden", { root, environment: ENVIRONMENT });
+    const entry: ResultEntry = { id: "activations", status: "fail", elapsedMs: 3 };
+    // 故障注入が効いていることを先に固定する（素の record が通るなら下の検査は何も言わない）。
+    await assertRejects(() => results.record(entry));
+
+    const said: string[] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]): void => {
+      said.push(args.map(String).join(" "));
+    };
+    try {
+      // 元の検証例外を置き換えないので、ここは投げずに戻る。
+      await recordFailure(results, entry);
+    } finally {
+      console.error = original;
+    }
+    assertEquals(said.length, 1, "記録できなかったことを黙って飲み込んだ");
+    assertStringIncludes(said[0], "activations");
   } finally {
     Deno.removeSync(temporary, { recursive: true });
   }

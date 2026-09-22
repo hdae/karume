@@ -231,8 +231,13 @@ golden `activations` の `sin` は許容差を WGSL 仕様帯へ寄せて消化�
   30 回超繰り返す tiny golden（`e2e_golden_test.ts` の 32 モデル）でも、末尾のケースが
   `requestDevice` の `Not enough memory left` か重みアップロードの `GpuOutOfMemoryError` で赤になる
   ことがあり、同じファイルを続けて回すと赤の本数が増える（1 回目 2 本・直後の 2 回目 7 本）。
-  単独実行（`--filter`）は緑で、数分置くと戻る。赤の本数はその走行までに積んだ解放の遅れの量で、
-  退行の大きさではない。
+  単独実行（`--filter`）は緑で、数分置くと戻る。**ここまでが観測**。
+  **推定（切り分け未了）**: 赤の本数はその走行までに積んだ解放の遅れの量で、退行の大きさでは
+  ない。ただしこの観測を採った時点のテストには `acquireGpu` から `gpu.destroy()` までを
+  try/finally で守っていない経路があり（`createSession` が投げると破棄に届かず、その走行の残りが
+  破棄されない device を抱えたまま進む）、**同じ走行の中で本数を増やす別経路**として混ざっていた。
+  破棄漏れ自体は塞いだ（`e2e_golden` / `e2e_sbv2` / `e2e_gemma4` / `e2e_minicpm5`）ので、次に同じ
+  形が出たら本数の出方を測り直して原因を 1 つへ寄せる。
   運用の回避は上の「フル走行が稀にフレークする」節が正本。
 - **Deno は timestamp-query の値を ns へ換算しない**（ext/webgpu は wgpu の raw tick をそのまま
   返す。WebGPU 仕様は ns）。B570 の Vulkan `timestampPeriod` は 52.0833 ns なので、Deno での

@@ -59,9 +59,10 @@ import {
   type Tensor,
 } from "../mod.ts";
 import { compareTensors, formatAllclose, type Tolerance } from "../src/reference/allclose.ts";
+import { assertAdapterMatchesEnvironment } from "./helpers/environment.ts";
 import { ioTensor } from "./helpers/golden-io.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
-import { type Measurement, openResults } from "./helpers/results.ts";
+import { type Measurement, openResults, recordFailure } from "./helpers/results.ts";
 import { modelPresent, readShard, resolveShards, streamShards } from "./helpers/shard-files.ts";
 
 /**
@@ -284,6 +285,9 @@ for (const caseName of DISCOVERED) {
         const inputs = goldenInputs(parsed, io);
 
         const gpu = await acquireGpu();
+        // 参照値・結果をこの機の行として残す経路なので、キーを採ったアダプタと実行アダプタの
+        // 同一性をここで見る（複数 GPU の機で取り違えると、別の機の帯で測ることになる）。
+        assertAdapterMatchesEnvironment(gpu);
         const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
         try {
           const outputs = await session.run(inputs);
@@ -312,7 +316,7 @@ for (const caseName of DISCOVERED) {
         }
       } catch (cause) {
         // 決着は投げる前に残す（決着の無いまま抜けると、この席には前回の走行の結果が居座る）。
-        await results.record({
+        await recordFailure(results, {
           id: caseName,
           status: "fail",
           elapsedMs: Math.round(performance.now() - startedAt),

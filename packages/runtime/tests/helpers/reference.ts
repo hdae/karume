@@ -211,12 +211,22 @@ export const openReferences = (
   };
   const lookup = (caseId: string): string | undefined =>
     key === undefined ? undefined : cases[caseId]?.[key];
+  /**
+   * 現環境の行を**ディスクから**読む（判定の唯一の材料）。
+   *
+   * MUST: 突合の判定は開いた時点の写しではなく最新のディスク行に対して行う。同じ環境キーで
+   * 2 ハンドルを開くと、写しで判定する形は先に書かれた行を「無い」と見なし、`write` が
+   * その行を黙って上書きする（冒頭表の MUST「`write` は行があるケースを上書きしない」が破れる）。
+   */
+  const onDiskLookup = (caseId: string): string | undefined =>
+    key === undefined ? undefined : readDocument(fixtureUrl).cases[caseId]?.[key];
   const record = (caseId: string, sha256: string): "written" | "rewritten" => {
     const current = requireKey();
-    const previous = cases[caseId]?.[current];
     // MUST: 書く直前に読み直す。開いた時点の写しをそのまま書き戻すと、その間に別のハンドルが
     // 足した**他環境の行**が消える（「他環境の行には決して触らない」はこの読み直しで成り立つ）。
     const onDisk = readDocument(fixtureUrl).cases;
+    // 旧値も同じ読み直しから採る（写しから採ると、別ハンドルが足した行を「無かった」と報告する）。
+    const previous = onDisk[caseId]?.[current];
     onDisk[caseId] = { ...onDisk[caseId], [current]: sha256 };
     Deno.writeTextFileSync(fixtureUrl, serialize(onDisk));
     cases[caseId] = { ...cases[caseId], [current]: sha256 };
@@ -229,7 +239,7 @@ export const openReferences = (
     lacksReference: (caseId: string): boolean => mode === undefined && lookup(caseId) === undefined,
     record,
     check: (caseId: string, sha256: string): ReferenceCheck => {
-      const expected = lookup(caseId);
+      const expected = onDiskLookup(caseId);
       if (expected === undefined) {
         if (mode === undefined) {
           throw new Error(

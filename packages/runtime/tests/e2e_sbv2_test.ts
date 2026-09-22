@@ -22,9 +22,10 @@
 import { assert, assertEquals } from "@std/assert";
 import { acquireGpu, parseSafetensors, prepareModel, type Tensor } from "../mod.ts";
 import { compareTensors, formatAllclose, type Tolerance } from "../src/reference/allclose.ts";
+import { assertAdapterMatchesEnvironment } from "./helpers/environment.ts";
 import { ioTensor } from "./helpers/golden-io.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
-import { type Measurement, openResults } from "./helpers/results.ts";
+import { type Measurement, openResults, recordFailure } from "./helpers/results.ts";
 import {
   modelPresent,
   readShard,
@@ -753,39 +754,47 @@ for (const series of SERIES) {
           }
 
           const gpu = await acquireGpu();
-          const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
+          // 参照値・結果をこの機の行として残す経路なので、キーを採ったアダプタと実行アダプタの
+          // 同一性をここで見る（複数 GPU の機で取り違えると、別の機の帯で測ることになる）。
+          assertAdapterMatchesEnvironment(gpu);
+          // MUST: device の破棄は `createSession` の失敗も通す。取り逃がすと、その走行の残りが
+          // 破棄されない device を抱えたまま進み、後続が OOM で赤くなる（known-issues の遅延解放）。
           try {
-            const outputs = await session.run(inputs);
-            assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());
+            const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
+            try {
+              const outputs = await session.run(inputs);
+              assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());
 
-            parsed.graph.outputs.forEach((name, index) => {
-              const view = io.tensors.get(`output.${index}`);
-              assert(view !== undefined, `output.${index} が ${ioFile} に無い`);
-              const where = `${series.name}/${target}/${caseName} output.${index} ('${name}')`;
-              const declared = parsed.graph.values[name].dtype;
-              assertEquals(outputs[name].shape, view.shape, `${where}: shape`);
-              assertEquals(outputs[name].dtype, declared, `${where}: dtype`);
-              const report = compareTensors(
-                outputs[name],
-                ioTensor(io, view, declared),
-                tolerances[index],
-              );
-              measurements.push({
-                output: name,
-                maxAbs: report.maxAbsError,
-                maxRel: report.maxRelError,
-                tolerance: tolerances[index],
-                stage: "karume",
+              parsed.graph.outputs.forEach((name, index) => {
+                const view = io.tensors.get(`output.${index}`);
+                assert(view !== undefined, `output.${index} が ${ioFile} に無い`);
+                const where = `${series.name}/${target}/${caseName} output.${index} ('${name}')`;
+                const declared = parsed.graph.values[name].dtype;
+                assertEquals(outputs[name].shape, view.shape, `${where}: shape`);
+                assertEquals(outputs[name].dtype, declared, `${where}: dtype`);
+                const report = compareTensors(
+                  outputs[name],
+                  ioTensor(io, view, declared),
+                  tolerances[index],
+                );
+                measurements.push({
+                  output: name,
+                  maxAbs: report.maxAbsError,
+                  maxRel: report.maxRelError,
+                  tolerance: tolerances[index],
+                  stage: "karume",
+                });
+                assert(report.pass, `${where}: ${formatAllclose(report)}`);
               });
-              assert(report.pass, `${where}: ${formatAllclose(report)}`);
-            });
+            } finally {
+              await session.dispose();
+            }
           } finally {
-            await session.dispose();
             gpu.destroy();
           }
         } catch (cause) {
           // 決着は投げる前に残す（決着の無いまま抜けると、この席には前回の走行の結果が居座る）。
-          await results.record({
+          await recordFailure(results, {
             id: caseId,
             status: "fail",
             elapsedMs: Math.round(performance.now() - startedAt),

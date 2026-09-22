@@ -113,6 +113,28 @@ Deno.test("参照 fixture: 先に 2 ハンドルを開いて順に書いても�
   });
 });
 
+Deno.test("参照 fixture: 同じ環境キーの 2 ハンドルでも、後発の write は先発の行を上書きしない", () => {
+  withFixture({}, (fixtureUrl) => {
+    // 両方を**書く前に**開く。開いた時点の写しで判定すると、後発は「行が無い」と見なして
+    // 先発の行を上書きする（`write` の意味論が rewrite に化ける）。
+    const first = openReferences(fixtureUrl, { environment: environment(CURRENT), mode: "write" });
+    const second = openReferences(fixtureUrl, { environment: environment(CURRENT), mode: "write" });
+    assertEquals(first.check("case-1", SHA_A), { status: "written" });
+    // 後発は最新のディスク行と比較する側へ落ちる（違う実測なら赤）。
+    assertEquals(second.check("case-1", SHA_B), { status: "fail", expected: SHA_A });
+    const document = JSON.parse(Deno.readTextFileSync(fixtureUrl)) as {
+      cases: Record<string, Record<string, string>>;
+    };
+    assertEquals(
+      document.cases["case-1"],
+      { [CURRENT]: SHA_A },
+      "後発の write が先発の行を上書きした",
+    );
+    // 逆側: 同じ実測なら緑（「常に赤」で通しているのではないことを固定する）。
+    assertEquals(second.check("case-1", SHA_A), { status: "pass", expected: SHA_A });
+  });
+});
+
 // --- 参照門の緑条件（登録したケース集合で数える）---------------------------------
 //
 // 門が守るのは「この環境の参照値がまだ 1 件も無いので sha 門が全 SKIP された」を無音の緑に

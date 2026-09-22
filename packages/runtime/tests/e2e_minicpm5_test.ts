@@ -32,9 +32,10 @@ import {
   type Tensor,
 } from "../mod.ts";
 import { compareTensors, formatAllclose, type Tolerance } from "../src/reference/allclose.ts";
+import { assertAdapterMatchesEnvironment } from "./helpers/environment.ts";
 import { ioTensor } from "./helpers/golden-io.ts";
 import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
-import { type Measurement, openResults } from "./helpers/results.ts";
+import { type Measurement, openResults, recordFailure } from "./helpers/results.ts";
 import { modelPresent, readShard, resolveShards, streamShards } from "./helpers/shard-files.ts";
 
 /**
@@ -245,88 +246,116 @@ Deno.test({
   name: "MiniCPM5 golden 突合: 4 ケースの logits と最終位置 greedy（実 GPU / torch CPU 期待値）",
   ignore: !AVAILABLE || !GPU_AVAILABLE,
   fn: async () => {
-    const shards = resolveShards(new URL(MODEL_FILE, SERIES_ROOT));
-    const parsed = prepareModel(await readShard(shards[0]));
-    assertEquals(parsed.graph.inputs.map((spec) => spec.name), ["input_ids"], "グラフ入力");
-    assertEquals(parsed.graph.outputs.length, 1, "graph.outputs の本数（1-shot の logits 1 本）");
-    const outputName = parsed.graph.outputs[0];
-    const declared = parsed.graph.values[outputName].dtype;
-    // MUST: 形の検査は数値門でも独立に持つ — 下の census は timestamp-query が無い device で
-    // SKIP するので、そこに結線しておくと `repeat_kv` 実体化形（Hkv=16）へ再エクスポートした
-    // 資産が数値だけ通って GQA の検収でなくなる（数値は実体化形と完全に同じ）。
-    assertGqaForm(parsed);
-
-    const gpu = await acquireGpu();
-    const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
+    /** 系列全体の所要時間（ケースの外で落ちた回の決着に載せる）。 */
+    const seriesStartedAt = performance.now();
+    /** ケースの catch が既に決着を残したか（残していれば系列の席を二重に積まない）。 */
+    let caseSettled = false;
     try {
-      /** ケースごとの最終位置 1 位（全ケース同一 = 定数出力の検出に使う）。 */
-      const tops: number[] = [];
-      for (const caseName of CASES) {
-        const startedAt = performance.now();
-        /** 出力ごとの実測（合格した回も残す — 判定には使わない）。 */
-        const measurements: Measurement[] = [];
+      const shards = resolveShards(new URL(MODEL_FILE, SERIES_ROOT));
+      const parsed = prepareModel(await readShard(shards[0]));
+      assertEquals(parsed.graph.inputs.map((spec) => spec.name), ["input_ids"], "グラフ入力");
+      assertEquals(parsed.graph.outputs.length, 1, "graph.outputs の本数（1-shot の logits 1 本）");
+      const outputName = parsed.graph.outputs[0];
+      const declared = parsed.graph.values[outputName].dtype;
+      // MUST: 形の検査は数値門でも独立に持つ — 下の census は timestamp-query が無い device で
+      // SKIP するので、そこに結線しておくと `repeat_kv` 実体化形（Hkv=16）へ再エクスポートした
+      // 資産が数値だけ通って GQA の検収でなくなる（数値は実体化形と完全に同じ）。
+      assertGqaForm(parsed);
+
+      const gpu = await acquireGpu();
+      // 参照値・結果をこの機の行として残す経路なので、キーを採ったアダプタと実行アダプタの
+      // 同一性をここで見る（複数 GPU の機で取り違えると、別の機の帯で測ることになる）。
+      assertAdapterMatchesEnvironment(gpu);
+      // MUST: device の破棄は `createSession` の失敗も通す。取り逃がすと、その走行の残りが
+      // 破棄されない device を抱えたまま進み、後続が OOM で赤くなる（known-issues の遅延解放）。
+      try {
+        const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
         try {
-          const { inputs, expected } = await loadCase(caseName, parsed.graph.inputs);
-          const outputs = await session.run(inputs);
-          assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());
-          const actual = outputs[outputName];
-          const where = `${caseName} output.0 ('${outputName}')`;
-          assertEquals(actual.shape, expected.shape, `${where}: shape`);
-          assertEquals(actual.dtype, declared, `${where}: dtype`);
+          /** ケースごとの最終位置 1 位（全ケース同一 = 定数出力の検出に使う）。 */
+          const tops: number[] = [];
+          for (const caseName of CASES) {
+            const startedAt = performance.now();
+            /** 出力ごとの実測（合格した回も残す — 判定には使わない）。 */
+            const measurements: Measurement[] = [];
+            try {
+              const { inputs, expected } = await loadCase(caseName, parsed.graph.inputs);
+              const outputs = await session.run(inputs);
+              assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());
+              const actual = outputs[outputName];
+              const where = `${caseName} output.0 ('${outputName}')`;
+              assertEquals(actual.shape, expected.shape, `${where}: shape`);
+              assertEquals(actual.dtype, declared, `${where}: dtype`);
 
-          // ① 数値
-          const report = compareTensors(actual, expected, MINICPM5_TOLERANCE);
-          measurements.push({
-            output: outputName,
-            maxAbs: report.maxAbsError,
-            maxRel: report.maxRelError,
-            tolerance: MINICPM5_TOLERANCE,
-            stage: "karume",
-          });
-          assert(report.pass, `${where}: ${formatAllclose(report)}`);
+              // ① 数値
+              const report = compareTensors(actual, expected, MINICPM5_TOLERANCE);
+              measurements.push({
+                output: outputName,
+                maxAbs: report.maxAbsError,
+                maxRel: report.maxRelError,
+                tolerance: MINICPM5_TOLERANCE,
+                stage: "karume",
+              });
+              assert(report.pass, `${where}: ${formatAllclose(report)}`);
 
-          // ② 意味論（最終位置の 1 位）。①が緩んでも独立に残る線で、GQA の head 写像違い・
-          // mask の向き・RoPE の位置ずれはどれもここで 1 位を動かす。
-          const golden = greedyTop(expected, `${caseName} golden`);
-          const observed = greedyTop(actual, `${caseName} GPU`);
-          // 判定が成立する形であることを先に固定する（この門が運任せでないことの根拠）:
-          // golden の 1 位と 2 位の差が atol の 2 倍を超えていれば、①の許容内の数値差で 1 位は
-          // 動けない。実測の最小余裕は context-ja の 0.188 = atol 1e-3 の 188 倍。
-          assert(
-            golden.margin > 2 * MINICPM5_TOLERANCE.atol,
-            `${caseName}: golden の 1 位 / 2 位の差 ${golden.margin} が atol と同程度 — ` +
-              `この形では greedy 一致が数値差で反転しうる（門として成立しない）`,
-          );
-          assertEquals(
-            observed.top,
-            golden.top,
-            `${caseName}: 最終位置の 1 位が golden と違う（GPU 余裕 ${observed.margin} / ` +
-              `golden 余裕 ${golden.margin}）`,
-          );
-          tops.push(observed.top);
-        } catch (cause) {
-          // 決着は投げる前に残す（決着の無いまま抜けると、この席には前回の走行の結果が居座る）。
-          await results.record({
-            id: caseName,
-            status: "fail",
-            elapsedMs: Math.round(performance.now() - startedAt),
-            measurements,
-          });
-          throw cause;
+              // ② 意味論（最終位置の 1 位）。①が緩んでも独立に残る線で、GQA の head 写像違い・
+              // mask の向き・RoPE の位置ずれはどれもここで 1 位を動かす。
+              const golden = greedyTop(expected, `${caseName} golden`);
+              const observed = greedyTop(actual, `${caseName} GPU`);
+              // 判定が成立する形であることを先に固定する（この門が運任せでないことの根拠）:
+              // golden の 1 位と 2 位の差が atol の 2 倍を超えていれば、①の許容内の数値差で 1 位は
+              // 動けない。実測の最小余裕は context-ja の 0.188 = atol 1e-3 の 188 倍。
+              assert(
+                golden.margin > 2 * MINICPM5_TOLERANCE.atol,
+                `${caseName}: golden の 1 位 / 2 位の差 ${golden.margin} が atol と同程度 — ` +
+                  `この形では greedy 一致が数値差で反転しうる（門として成立しない）`,
+              );
+              assertEquals(
+                observed.top,
+                golden.top,
+                `${caseName}: 最終位置の 1 位が golden と違う（GPU 余裕 ${observed.margin} / ` +
+                  `golden 余裕 ${golden.margin}）`,
+              );
+              tops.push(observed.top);
+            } catch (cause) {
+              // 決着は投げる前に残す（決着の無いまま抜けると、この席には前回の走行の結果が居座る）。
+              caseSettled = true;
+              await recordFailure(results, {
+                id: caseName,
+                status: "fail",
+                elapsedMs: Math.round(performance.now() - startedAt),
+                measurements,
+              });
+              throw cause;
+            }
+            await results.record({
+              id: caseName,
+              status: "pass",
+              elapsedMs: Math.round(performance.now() - startedAt),
+              measurements,
+            });
+          }
+          // 恒真化の門: 全ケースの 1 位が同一なら定数出力（export.py の `_sanity` と同じ独立線を
+          // ランタイム側にも置く）。実測は ` Paris` / `東京` の 2 種が交互に出る。
+          assert(new Set(tops).size > 1, `全ケースの最終位置の 1 位が同一 ${tops[0]} — 定数出力`);
+        } finally {
+          await session.dispose();
         }
-        await results.record({
-          id: caseName,
-          status: "pass",
-          elapsedMs: Math.round(performance.now() - startedAt),
-          measurements,
+      } finally {
+        gpu.destroy();
+      }
+    } catch (cause) {
+      // ケースの外（資産の読み・Session 構築・恒真化の門・解放）で落ちた回も席に残す。
+      // 決着の無いまま抜けると、この席には同じ日の前回の走行の決着がそのまま居座る。
+      // ケース自身が落ちた回は既にそのケースの席に残っているので、ここでは積まない。
+      if (!caseSettled) {
+        await recordFailure(results, {
+          id: "series",
+          status: "fail",
+          elapsedMs: Math.round(performance.now() - seriesStartedAt),
+          note: `ケースの外で失敗: ${cause instanceof Error ? cause.message : String(cause)}`,
         });
       }
-      // 恒真化の門: 全ケースの 1 位が同一なら定数出力（export.py の `_sanity` と同じ独立線を
-      // ランタイム側にも置く）。実測は ` Paris` / `東京` の 2 種が交互に出る。
-      assert(new Set(tops).size > 1, `全ケースの最終位置の 1 位が同一 ${tops[0]} — 定数出力`);
-    } finally {
-      await session.dispose();
-      gpu.destroy();
+      throw cause;
     }
   },
 });

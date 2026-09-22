@@ -62,6 +62,11 @@ export type ResultEntry = {
   readonly actual?: string;
   /** 実物のファイル名（{@link Results.dir} からの相対）。 */
   readonly artifact?: string;
+  /**
+   * ケース 1 件の所要時間。**計測範囲は系列ごとの実装に依る**（Session を 1 本だけ組んで
+   * 複数ケースを回す系列では、構築と解放はどのケースにも入らない）。系列をまたいだ時間の
+   * 比較には使わない — 同じ系列の走行どうしを見るための欄である。
+   */
   readonly elapsedMs: number;
   readonly note?: string;
   /** 許容差判定の実測（数値突合を持たないケースは欄ごと持たない）。 */
@@ -179,4 +184,25 @@ export const openResults = (
       await Deno.writeTextFile(new URL("results.json", dir), documentText());
     },
   };
+};
+
+/**
+ * 失敗した回の決着を残す（**記録の失敗で元の検証例外を置き換えない**）。
+ *
+ * 呼ぶのは検証例外を掴んだ catch の中だけである。そこで {@link Results.record} を裸で待つと、
+ * 席が作れない・書けないといった I/O 障害がそのまま伝播して、呼び手が抱えている元の例外
+ * —— 何が壊れたのかを言う唯一の診断 —— が I/O 例外に置き換わる。記録できなかったことは
+ * `console.error` で言い、元の例外は呼び手がそのまま投げる。
+ *
+ * NOTE: 成功側の `record` はこれを通さない（書けないなら fail loudly が筋で、消す診断も無い）。
+ */
+export const recordFailure = async (results: Results, entry: ResultEntry): Promise<void> => {
+  try {
+    await results.record(entry);
+  } catch (cause) {
+    console.error(
+      `[karume] ケース '${entry.id}' の決着を results.json へ記録できなかった: ` +
+        `${cause instanceof Error ? cause.message : String(cause)}`,
+    );
+  }
 };

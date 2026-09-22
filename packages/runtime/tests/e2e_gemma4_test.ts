@@ -40,9 +40,10 @@ import {
   type Tensor,
 } from "../mod.ts";
 import { compareTensors, formatAllclose, type Tolerance } from "../src/reference/allclose.ts";
+import { assertAdapterMatchesEnvironment } from "./helpers/environment.ts";
 import { ioTensor } from "./helpers/golden-io.ts";
 import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
-import { type Measurement, openResults } from "./helpers/results.ts";
+import { type Measurement, openResults, recordFailure } from "./helpers/results.ts";
 import { modelPresent, readShard, resolveShards, streamShards } from "./helpers/shard-files.ts";
 
 /**
@@ -321,94 +322,122 @@ Deno.test({
   name: "Gemma 4 E2B golden 突合: 3 ケースの logits と最終位置 greedy（実 GPU / torch CPU 期待値）",
   ignore: !AVAILABLE || !GPU_AVAILABLE,
   fn: async () => {
-    const shards = resolveShards(new URL(MODEL_FILE, SERIES_ROOT));
-    const parsed = prepareModel(await readShard(shards[0]));
-    assertEquals(parsed.graph.inputs.map((spec) => spec.name), ["input_ids"], "グラフ入力");
-    assertEquals(parsed.graph.outputs.length, 1, "graph.outputs の本数（1-shot の logits 1 本）");
-    const outputName = parsed.graph.outputs[0];
-    const declared = parsed.graph.values[outputName].dtype;
-    // MUST: 形と格納の検査は数値門でも独立に持つ — 下の census は timestamp-query が無い device
-    // で SKIP するので、そこに結線しておくと `repeat_kv` 実体化形へ再エクスポートした資産や
-    // f32 に落ちた資産が数値だけ通り、MQA / 混成格納の検収でなくなる。
-    assertGemma4Form(parsed);
-
-    const gpu = await acquireGpu();
-    const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
+    /** 系列全体の所要時間（ケースの外で落ちた回の決着に載せる）。 */
+    const seriesStartedAt = performance.now();
+    /** ケースの catch が既に決着を残したか（残していれば系列の席を二重に積まない）。 */
+    let caseSettled = false;
     try {
-      /** ケースごとの最終位置 1 位（全ケース同一 = 定数出力の検出に使う）。 */
-      const tops: number[] = [];
-      for (const caseName of CASES) {
-        const startedAt = performance.now();
-        /** 出力ごとの実測（合格した回も残す — 判定には使わない）。 */
-        const measurements: Measurement[] = [];
+      const shards = resolveShards(new URL(MODEL_FILE, SERIES_ROOT));
+      const parsed = prepareModel(await readShard(shards[0]));
+      assertEquals(parsed.graph.inputs.map((spec) => spec.name), ["input_ids"], "グラフ入力");
+      assertEquals(parsed.graph.outputs.length, 1, "graph.outputs の本数（1-shot の logits 1 本）");
+      const outputName = parsed.graph.outputs[0];
+      const declared = parsed.graph.values[outputName].dtype;
+      // MUST: 形と格納の検査は数値門でも独立に持つ — 下の census は timestamp-query が無い device
+      // で SKIP するので、そこに結線しておくと `repeat_kv` 実体化形へ再エクスポートした資産や
+      // f32 に落ちた資産が数値だけ通り、MQA / 混成格納の検収でなくなる。
+      assertGemma4Form(parsed);
+
+      const gpu = await acquireGpu();
+      // 参照値・結果をこの機の行として残す経路なので、キーを採ったアダプタと実行アダプタの
+      // 同一性をここで見る（複数 GPU の機で取り違えると、別の機の帯で測ることになる）。
+      assertAdapterMatchesEnvironment(gpu);
+      // MUST: device の破棄は `createSession` の失敗も通す。取り逃がすと、その走行の残りが
+      // 破棄されない device を抱えたまま進み、後続が OOM で赤くなる（known-issues の遅延解放）。
+      try {
+        const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
         try {
-          const { inputs, expected } = await loadCase(caseName, parsed.graph.inputs);
-          const outputs = await session.run(inputs);
-          assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());
-          const actual = outputs[outputName];
-          const where = `${caseName} output.0 ('${outputName}')`;
-          assertEquals(actual.shape, expected.shape, `${where}: shape`);
-          assertEquals(actual.dtype, declared, `${where}: dtype`);
+          /** ケースごとの最終位置 1 位（全ケース同一 = 定数出力の検出に使う）。 */
+          const tops: number[] = [];
+          for (const caseName of CASES) {
+            const startedAt = performance.now();
+            /** 出力ごとの実測（合格した回も残す — 判定には使わない）。 */
+            const measurements: Measurement[] = [];
+            try {
+              const { inputs, expected } = await loadCase(caseName, parsed.graph.inputs);
+              const outputs = await session.run(inputs);
+              assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());
+              const actual = outputs[outputName];
+              const where = `${caseName} output.0 ('${outputName}')`;
+              assertEquals(actual.shape, expected.shape, `${where}: shape`);
+              assertEquals(actual.dtype, declared, `${where}: dtype`);
 
-          // ② 数値
-          const report = compareTensors(actual, expected, GEMMA4_TOLERANCE);
-          measurements.push({
-            output: outputName,
-            maxAbs: report.maxAbsError,
-            maxRel: report.maxRelError,
-            tolerance: GEMMA4_TOLERANCE,
-            stage: "karume",
-          });
-          assert(report.pass, `${where}: ${formatAllclose(report)}`);
+              // ② 数値
+              const report = compareTensors(actual, expected, GEMMA4_TOLERANCE);
+              measurements.push({
+                output: outputName,
+                maxAbs: report.maxAbsError,
+                maxRel: report.maxRelError,
+                tolerance: GEMMA4_TOLERANCE,
+                stage: "karume",
+              });
+              assert(report.pass, `${where}: ${formatAllclose(report)}`);
 
-          // ③ 意味論（最終位置の 1 位）。②が緩んでも独立に残る線で、MQA の head 写像違い・
-          // 層種別 mask の取り違え・RoPE の位置ずれ・PLE の層割り付け違いはどれもここで 1 位を
-          // 動かす。
-          const golden = greedyTop(expected, `${caseName} golden`);
-          const observed = greedyTop(actual, `${caseName} GPU`);
-          // 判定が成立する形であることを先に固定する（この門が運任せでないことの根拠）:
-          // golden の 1 位と 2 位の差が atol の 2 倍を超えていれば、②の許容内の数値差で 1 位は
-          // 動けない。
-          assert(
-            golden.margin > 2 * GEMMA4_TOLERANCE.atol,
-            `${caseName}: golden の 1 位 / 2 位の差 ${golden.margin} が atol と同程度 — ` +
-              `この形では greedy 一致が数値差で反転しうる（門として成立しない）`,
-          );
-          assertEquals(
-            observed.top,
-            golden.top,
-            `${caseName}: 最終位置の 1 位が golden と違う（GPU 余裕 ${observed.margin} / ` +
-              `golden 余裕 ${golden.margin}）`,
-          );
-          console.log(
-            `[e2e] gemma4 1-shot ${caseName}: T=${expected.shape[1]} / top=${observed.top} / ` +
-              `golden 余裕 ${golden.margin.toExponential(3)} / ${formatAllclose(report)}`,
-          );
-          tops.push(observed.top);
-        } catch (cause) {
-          // 決着は投げる前に残す（決着の無いまま抜けると、この席には前回の走行の結果が居座る）。
-          await results.record({
-            id: caseName,
-            status: "fail",
-            elapsedMs: Math.round(performance.now() - startedAt),
-            measurements,
-          });
-          throw cause;
+              // ③ 意味論（最終位置の 1 位）。②が緩んでも独立に残る線で、MQA の head 写像違い・
+              // 層種別 mask の取り違え・RoPE の位置ずれ・PLE の層割り付け違いはどれもここで 1 位を
+              // 動かす。
+              const golden = greedyTop(expected, `${caseName} golden`);
+              const observed = greedyTop(actual, `${caseName} GPU`);
+              // 判定が成立する形であることを先に固定する（この門が運任せでないことの根拠）:
+              // golden の 1 位と 2 位の差が atol の 2 倍を超えていれば、②の許容内の数値差で 1 位は
+              // 動けない。
+              assert(
+                golden.margin > 2 * GEMMA4_TOLERANCE.atol,
+                `${caseName}: golden の 1 位 / 2 位の差 ${golden.margin} が atol と同程度 — ` +
+                  `この形では greedy 一致が数値差で反転しうる（門として成立しない）`,
+              );
+              assertEquals(
+                observed.top,
+                golden.top,
+                `${caseName}: 最終位置の 1 位が golden と違う（GPU 余裕 ${observed.margin} / ` +
+                  `golden 余裕 ${golden.margin}）`,
+              );
+              console.log(
+                `[e2e] gemma4 1-shot ${caseName}: T=${expected.shape[1]} / top=${observed.top} / ` +
+                  `golden 余裕 ${golden.margin.toExponential(3)} / ${formatAllclose(report)}`,
+              );
+              tops.push(observed.top);
+            } catch (cause) {
+              // 決着は投げる前に残す（決着の無いまま抜けると、この席には前回の走行の結果が居座る）。
+              caseSettled = true;
+              await recordFailure(results, {
+                id: caseName,
+                status: "fail",
+                elapsedMs: Math.round(performance.now() - startedAt),
+                measurements,
+              });
+              throw cause;
+            }
+            await results.record({
+              id: caseName,
+              status: "pass",
+              elapsedMs: Math.round(performance.now() - startedAt),
+              measurements,
+            });
+          }
+          // 恒真化の門: 全ケースの 1 位が同一なら定数出力（export.py の `_sanity` と同じ独立線を
+          // ランタイム側にも置く）。期待は ` Paris` / `東京` の 2 種（export.py の
+          // `GREEDY_EXPECTATIONS`）。
+          assert(new Set(tops).size > 1, `全ケースの最終位置の 1 位が同一 ${tops[0]} — 定数出力`);
+        } finally {
+          await session.dispose();
         }
-        await results.record({
-          id: caseName,
-          status: "pass",
-          elapsedMs: Math.round(performance.now() - startedAt),
-          measurements,
+      } finally {
+        gpu.destroy();
+      }
+    } catch (cause) {
+      // ケースの外（資産の読み・Session 構築・恒真化の門・解放）で落ちた回も席に残す。
+      // 決着の無いまま抜けると、この席には同じ日の前回の走行の決着がそのまま居座る。
+      // ケース自身が落ちた回は既にそのケースの席に残っているので、ここでは積まない。
+      if (!caseSettled) {
+        await recordFailure(results, {
+          id: "series",
+          status: "fail",
+          elapsedMs: Math.round(performance.now() - seriesStartedAt),
+          note: `ケースの外で失敗: ${cause instanceof Error ? cause.message : String(cause)}`,
         });
       }
-      // 恒真化の門: 全ケースの 1 位が同一なら定数出力（export.py の `_sanity` と同じ独立線を
-      // ランタイム側にも置く）。期待は ` Paris` / `東京` の 2 種（export.py の
-      // `GREEDY_EXPECTATIONS`）。
-      assert(new Set(tops).size > 1, `全ケースの最終位置の 1 位が同一 ${tops[0]} — 定数出力`);
-    } finally {
-      await session.dispose();
-      gpu.destroy();
+      throw cause;
     }
   },
 });
