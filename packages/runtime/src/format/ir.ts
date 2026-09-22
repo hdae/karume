@@ -4,6 +4,7 @@ import { isI2Shape } from "./i2.ts";
 // 検証はここに 1 本化する: safetensors との突合は container.ts、次元文法は dims.ts が持ち、
 // 本ファイルはグラフ単体で決まる規則（宣言・SSA・トポロジカル順・語彙）だけを見る。
 
+import { canonicalJsonValue, sortedByCodePoints, sortedObject } from "./container/json.ts";
 import { isSymbolName, parseDim, tryParseDim } from "./dims.ts";
 
 /** 意味論 dtype。計算は常にこの型で行う（f16/bf16/i8 は格納だけの概念）。 */
@@ -107,18 +108,39 @@ export type IrNode = {
   readonly states: Readonly<Record<string, string>>;
 };
 
-export type IrGraph = {
+/** initializer 以外の節（v1 / v2 / 合流後で共通）。 */
+type IrGraphBase = {
   readonly format: typeof IR_FORMAT;
-  readonly version: typeof IR_VERSION;
+  /** v1（旧配布形）は 1、v2 は 2。 */
+  readonly version: number;
   readonly requires: { readonly ops: readonly string[] };
   readonly symbols: readonly string[];
   readonly inputs: readonly IrInput[];
   readonly outputs: readonly string[];
-  readonly initializers: Readonly<Record<string, IrInitializer>>;
   readonly values: Readonly<Record<string, IrValueInfo>>;
   /** state スロット宣言（省略時は空 — 出さないグラフは無風）。 */
   readonly states: Readonly<Record<string, IrStateSlot>>;
   readonly nodes: readonly IrNode[];
+};
+
+/**
+ * IR v2 の initializer 宣言（docs/ir-v2.md）。格納（codec / scale / group）は持たない — 実体との
+ * 対応はコンテナの束縛表が `(グラフ名, initializer 名)` で持つ。`shared` は貸し手 Session の重みを
+ * 借りる宣言（名前は貸し手の initializer 名と同じ MUST）。
+ */
+export type IrDeclaredInitializer = { readonly shared: boolean };
+
+/**
+ * IR v2 のグラフ = **計算契約**（格納の宣言を持たない）。コンテナのグラフ記述 `graphs[name]` の
+ * 中身で、束縛表との合流（`format/container/bind.ts`）で {@link IrGraph} になる。
+ */
+export type IrDeclaration = IrGraphBase & {
+  readonly initializers: Readonly<Record<string, IrDeclaredInitializer>>;
+};
+
+/** ランタイムが実行するグラフ（initializer ごとの格納が確定した形）。 */
+export type IrGraph = IrGraphBase & {
+  readonly initializers: Readonly<Record<string, IrInitializer>>;
 };
 
 export class IrError extends Error {
@@ -129,7 +151,10 @@ export class IrError extends Error {
 }
 
 const IR_FORMAT = "karume-ir";
-const IR_VERSION = 1;
+/** 旧配布形（safetensors 方言）の IR 版。読み手は段 3 で退役する（ADR 0108 決定 18）。 */
+const IR_VERSION_V1 = 1;
+/** IR v2（docs/ir-v2.md）。 */
+export const IR_VERSION = 2;
 
 const TOP_LEVEL_KEYS = [
   "format",
@@ -458,8 +483,18 @@ const parseJson = (json: string): unknown => {
   }
 };
 
-export const parseIrGraph = (json: string): IrGraph => {
-  const root = asPlainObject(parseJson(json), "graph");
+/**
+ * グラフ JSON のパースの核（v1 / v2 共通）。initializer の値の読み方だけを `parseInitializer` で
+ * 差し替える — v1（旧配布形・`tensor` + `storage`）は {@link parseIrGraph}、v2（IR の宣言のみ・
+ * 格納は束縛表）は {@link parseIrDeclaration}。グラフ単体で決まる規則（宣言・SSA・トポロジカル順・
+ * 語彙・states）は両者で同じ 1 本を通る。
+ */
+const parseIrDocument = <I>(
+  document: unknown,
+  expectedVersion: number,
+  parseInitializer: (obj: Record<string, unknown>, where: string) => I,
+): IrGraphBase & { readonly initializers: Readonly<Record<string, I>> } => {
+  const root = asPlainObject(document, "graph");
   checkKeys(root, TOP_LEVEL_KEYS, OPTIONAL_TOP_LEVEL_KEYS, "graph");
 
   const format = root["format"];
@@ -467,8 +502,8 @@ export const parseIrGraph = (json: string): IrGraph => {
     throw new IrError(`graph.format が '${IR_FORMAT}' でない: ${JSON.stringify(format)}`);
   }
   const version = root["version"];
-  if (version !== IR_VERSION) {
-    throw new IrError(`graph.version が ${IR_VERSION} でない: ${JSON.stringify(version)}`);
+  if (version !== expectedVersion) {
+    throw new IrError(`graph.version が ${expectedVersion} でない: ${JSON.stringify(version)}`);
   }
 
   const requires = asPlainObject(root["requires"], "graph.requires");
@@ -514,7 +549,7 @@ export const parseIrGraph = (json: string): IrGraph => {
   }
 
   // MUST: values と同じ理由で null プロトタイプ（上のコメント参照）。
-  const initializers: Record<string, IrInitializer> = Object.create(null);
+  const initializers: Record<string, I> = Object.create(null);
   for (
     const [name, raw] of Object.entries(asPlainObject(root["initializers"], "graph.initializers"))
   ) {
@@ -523,26 +558,7 @@ export const parseIrGraph = (json: string): IrGraph => {
     // 配布形に居座る）。
     asNonEmptyString(name, "graph.initializers の initializer 名");
     const where = `graph.initializers['${name}']`;
-    const obj = asPlainObject(raw, where);
-    // 欄の有無が形を判別する（`states` 欄と同じ流儀 — ADR 0096 段 2 §1.3）。`shared` を持つ
-    // 宣言は `tensor` を持てない（checkKeys の必須集合そのものが違う）ので、「バイトも書いた
-    // うえで借りる」という両義の形は綴れない。
-    if (Object.hasOwn(obj, "shared")) {
-      checkKeys(obj, ["shared", "storage"], [], where);
-      const sharedWhere = `${where}.shared`;
-      const shared = asPlainObject(obj["shared"], sharedWhere);
-      checkKeys(shared, ["tensor"], [], sharedWhere);
-      initializers[name] = {
-        shared: { tensor: asNonEmptyString(shared["tensor"], `${sharedWhere}.tensor`) },
-        storage: parseStorage(obj["storage"], `${where}.storage`, true),
-      };
-      continue;
-    }
-    checkKeys(obj, ["tensor", "storage"], [], where);
-    initializers[name] = {
-      tensor: asNonEmptyString(obj["tensor"], `${where}.tensor`),
-      storage: parseStorage(obj["storage"], `${where}.storage`),
-    };
+    initializers[name] = parseInitializer(asPlainObject(raw, where), where);
   }
 
   // MUST: values と同じ理由で null プロトタイプ（上のコメント参照）。省略は空スロット集合として
@@ -579,14 +595,14 @@ export const parseIrGraph = (json: string): IrGraph => {
   });
 
   checkSymbolBindability(symbols, inputs, states, values);
-  const defined = checkDefinitions(inputs, initializers, nodes, outputs);
-  checkDeclarations(inputs, initializers, values, nodes, defined);
+  const defined = checkDefinitions(inputs, Object.keys(initializers), nodes, outputs);
+  checkDeclarations(inputs, Object.keys(initializers), values, nodes, defined);
   checkStateSlots(states, values, defined, nodes);
   checkRequiredOps(requiredOps, nodes);
 
   return {
     format: IR_FORMAT,
-    version: IR_VERSION,
+    version: expectedVersion,
     requires: { ops: requiredOps },
     symbols,
     inputs,
@@ -597,6 +613,113 @@ export const parseIrGraph = (json: string): IrGraph => {
     nodes,
   };
 };
+
+/**
+ * **旧配布形（IR v1）**のグラフ JSON — `initializers[].tensor` + `storage` を持つ形。
+ *
+ * NOTE: 旧 safetensors 配布形の読み手はコンテナ形式の波の段 3 で退役する（ADR 0108 決定 18 —
+ * 両読みは作らず、旧形式を読むのは移行 CLI だけになる）。それまで `fromPretrained` のレーンは
+ * この入口で走る。
+ */
+export const parseIrGraph = (json: string): IrGraph => {
+  const graph = parseIrDocument(parseJson(json), IR_VERSION_V1, (obj, where): IrInitializer => {
+    // 欄の有無が形を判別する（`states` 欄と同じ流儀 — ADR 0096 段 2 §1.3）。`shared` を持つ
+    // 宣言は `tensor` を持てない（checkKeys の必須集合そのものが違う）ので、「バイトも書いた
+    // うえで借りる」という両義の形は綴れない。
+    if (Object.hasOwn(obj, "shared")) {
+      checkKeys(obj, ["shared", "storage"], [], where);
+      const sharedWhere = `${where}.shared`;
+      const shared = asPlainObject(obj["shared"], sharedWhere);
+      checkKeys(shared, ["tensor"], [], sharedWhere);
+      return {
+        shared: { tensor: asNonEmptyString(shared["tensor"], `${sharedWhere}.tensor`) },
+        storage: parseStorage(obj["storage"], `${where}.storage`, true),
+      };
+    }
+    checkKeys(obj, ["tensor", "storage"], [], where);
+    return {
+      tensor: asNonEmptyString(obj["tensor"], `${where}.tensor`),
+      storage: parseStorage(obj["storage"], `${where}.storage`),
+    };
+  });
+  for (const [name, initializer] of Object.entries(graph.initializers)) {
+    checkLegacyStorage(name, initializer, graph.values[name]);
+  }
+  return graph;
+};
+
+/**
+ * **IR v2**（docs/ir-v2.md）のグラフ JSON — 格納の宣言を持たない**計算契約**。実体との対応は
+ * コンテナの束縛表が持ち、合流（`format/container/bind.ts`）で {@link IrGraph} になる。
+ *
+ * `initializers[name]` は `{}`（実体を持つ）か `{ "shared": true }`（貸し手 Session の重みを借りる —
+ * 名前は貸し手の initializer 名と同じ MUST）の 2 形だけ。
+ */
+export const parseIrDeclaration = (json: string): IrDeclaration =>
+  parseIrDeclarationValue(parseJson(json));
+
+/**
+ * JSON.parse 済みの値（非有限数・深さの検査は呼び手が済ませている — descriptor の読み手）から
+ * IR v2 を読む。
+ */
+export const parseIrDeclarationValue = (document: unknown): IrDeclaration =>
+  parseIrDocument(document, IR_VERSION, (obj, where): IrDeclaredInitializer => {
+    checkKeys(obj, [], ["shared"], where);
+    if (!Object.hasOwn(obj, "shared")) return { shared: false };
+    // MUST: 書けるのは `true` だけ（`states[].external` と同じ規則 — `false` は欄の不存在と同じ
+    // 宣言なので、2 通りの綴りを許すと正準直列化が 1 つに決まらない）。
+    if (obj["shared"] !== true) {
+      throw new IrError(
+        `${where}.shared: ${
+          JSON.stringify(obj["shared"])
+        } は書けない（借り物のときだけ true を書く）`,
+      );
+    }
+    return { shared: true };
+  });
+
+/**
+ * IR v2 の**正準直列化**（docs/ir-v2.md「正準直列化」）— 同じグラフは同じバイト列になる
+ * （`krg` の同一性を内容ハッシュで判定する条件 — ADR 0108 決定 4）。
+ *
+ * - 固定スキーマのオブジェクトは本書の例に現れるキー順、名前をキーに持つ map（`initializers` /
+ *   `values` / `states` / ノードの `attrs` と `states`）と順序に意味の無い集合（`requires.ops` /
+ *   `symbols`）は code point 順。
+ * - 数値の綴りは `JSON.stringify`（= ECMAScript `Number::toString`）がそのまま正準。
+ * - 省略可能な節（`states` / ノードの `states` / `external`）は空・偽なら書かない。
+ */
+export const canonicalIrDocument = (graph: IrDeclaration): Record<string, unknown> => ({
+  format: IR_FORMAT,
+  version: IR_VERSION,
+  requires: { ops: sortedByCodePoints(graph.requires.ops) },
+  symbols: sortedByCodePoints(graph.symbols),
+  inputs: graph.inputs.map((input) => ({
+    name: input.name,
+    dtype: input.dtype,
+    shape: [...input.shape],
+  })),
+  outputs: [...graph.outputs],
+  initializers: sortedObject(graph.initializers, (init) => (init.shared ? { shared: true } : {})),
+  values: sortedObject(graph.values, (value) => ({ dtype: value.dtype, shape: [...value.shape] })),
+  ...(Object.keys(graph.states).length === 0 ? {} : {
+    states: sortedObject(graph.states, (slot) => ({
+      dtype: slot.dtype,
+      shape: [...slot.shape],
+      ...(slot.external ? { external: true } : {}),
+    })),
+  }),
+  nodes: graph.nodes.map((node) => ({
+    op: node.op,
+    ins: [...node.ins],
+    outs: [...node.outs],
+    attrs: canonicalJsonValue(node.attrs),
+    ...(Object.keys(node.states).length === 0 ? {} : { states: sortedObject(node.states) }),
+  })),
+});
+
+/** 正準直列化したグラフ JSON 文字列。 */
+export const canonicalIrJson = (graph: IrDeclaration): string =>
+  JSON.stringify(canonicalIrDocument(graph));
 
 /** shape に現れるシンボル名を集める（次元位置の出現のみ — 要素数からの逆算はしない）。 */
 const symbolsIn = (shape: readonly IrDim[], into: Set<string>): void => {
@@ -654,7 +777,7 @@ const checkSymbolBindability = (
 /** SSA 単一代入 + トポロジカル順（前方参照拒否）+ outputs の定義済み検査。 */
 const checkDefinitions = (
   inputs: readonly IrInput[],
-  initializers: Readonly<Record<string, IrInitializer>>,
+  initializerNames: readonly string[],
   nodes: readonly IrNode[],
   outputs: readonly string[],
 ): ReadonlySet<string> => {
@@ -666,7 +789,7 @@ const checkDefinitions = (
     defined.add(name);
   };
   for (const input of inputs) define(input.name, "graph.inputs");
-  for (const name of Object.keys(initializers)) define(name, "graph.initializers");
+  for (const name of initializerNames) define(name, "graph.initializers");
   nodes.forEach((node, index) => {
     const where = `graph.nodes[${index}] (${node.op})`;
     for (const ref of node.ins) {
@@ -726,7 +849,7 @@ const checkGroupQuantizedShape = (
  */
 const checkDeclarations = (
   inputs: readonly IrInput[],
-  initializers: Readonly<Record<string, IrInitializer>>,
+  initializerNames: readonly string[],
   values: Readonly<Record<string, IrValueInfo>>,
   nodes: readonly IrNode[],
   defined: ReadonlySet<string>,
@@ -740,40 +863,23 @@ const checkDeclarations = (
       throw new IrError(`graph.values['${name}']: どのノードでも定義されない宣言`);
     }
   }
-  for (const name of Object.keys(initializers)) {
+  for (const name of initializerNames) {
     if (!Object.hasOwn(values, name)) {
       throw new IrError(`graph.initializers['${name}']: values に dtype/shape 宣言が無い`);
     }
     // MUST: グラフ単体で決まる仕様規則はパーサ 1 箇所で見る — ロード経路ごとに書くと規則が
-    // 割れる。格納 dtype の実行可否（f16/bf16/i8 は宣言のみ）は宣言の valid 性とは別の層で、
-    // assertRuntimeSupport が持つ。
-    const allowedStorage = INITIALIZER_STORAGE.get(values[name].dtype);
-    if (allowedStorage === undefined) {
+    // 割れる。意味論 dtype と格納 codec の組は合流層（v2）/ checkLegacyStorage（v1）が持ち、
+    // 格納の実行可否は assertRuntimeSupport が持つ。
+    if (!INITIALIZER_STORAGE.has(values[name].dtype)) {
       throw new IrError(
         `graph.values['${name}']: initializer の意味論 dtype '${
           values[name].dtype
         }' は語彙外（f32 / i32 のみ）`,
       );
     }
-    const storageDtype = initializers[name].storage.dtype;
-    if (storageDtype === "i2" && !isI2Shape(values[name].shape)) {
-      throw new IrError(`graph.values['${name}']: i2 は正の rank 2・行長は16の倍数が必要`);
-    }
-    if (!allowedStorage.includes(storageDtype)) {
-      throw new IrError(
-        `graph.initializers['${name}']: 意味論 dtype '${
-          values[name].dtype
-        }' に格納 dtype '${storageDtype}' は組めない（${allowedStorage.join(" / ")} のみ）`,
-      );
-    }
-    // initializer は束縛前に確定していなければ safetensors 側 shape と突合できない。
+    // initializer は束縛前に確定していなければ実体の shape と突合できない。
     if (values[name].shape.some((dim) => typeof dim !== "number")) {
       throw new IrError(`graph.values['${name}']: initializer の shape に記号次元は使えない`);
-    }
-    // 共有 initializer は group 長を宣言しない（正本は貸し手の席）ので、行長の整除も
-    // 貸し手側の宣言に対して既に掛かっている — ここで掛けると「group 長が無い」で必ず落ちる。
-    if (storageDtype === "i4" && initializers[name].shared === undefined) {
-      checkGroupQuantizedShape(name, initializers[name], values[name]);
     }
   }
   for (const node of nodes) {
@@ -782,6 +888,30 @@ const checkDeclarations = (
         throw new IrError(`graph.values: ノード出力 '${out}' の dtype/shape 宣言が無い`);
       }
     }
+  }
+};
+
+/**
+ * 旧配布形（v1）の格納宣言がグラフ単体で満たす規則 — 意味論 dtype × 格納 dtype の組・i2 の形・
+ * i4 の行長整除。v2 では同じ規則を合流層（`format/container/bind.ts`）が束縛表に対して掛ける。
+ */
+const checkLegacyStorage = (name: string, initializer: IrInitializer, value: IrValueInfo): void => {
+  const allowedStorage = INITIALIZER_STORAGE.get(value.dtype) ?? [];
+  const storageDtype = initializer.storage.dtype;
+  if (storageDtype === "i2" && !isI2Shape(value.shape)) {
+    throw new IrError(`graph.values['${name}']: i2 は正の rank 2・行長は16の倍数が必要`);
+  }
+  if (!allowedStorage.includes(storageDtype)) {
+    throw new IrError(
+      `graph.initializers['${name}']: 意味論 dtype '${value.dtype}' に格納 dtype '${storageDtype}' は組めない（${
+        allowedStorage.join(" / ")
+      } のみ）`,
+    );
+  }
+  // 共有 initializer は group 長を宣言しない（正本は貸し手の席）ので、行長の整除も
+  // 貸し手側の宣言に対して既に掛かっている — ここで掛けると「group 長が無い」で必ず落ちる。
+  if (storageDtype === "i4" && initializer.shared === undefined) {
+    checkGroupQuantizedShape(name, initializer, value);
   }
 };
 
