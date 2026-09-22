@@ -104,7 +104,7 @@ MANIFEST_FILE = "karume.json"
 EXTRA_ASSETS: Mapping[str, tuple[str, str]] = {"rope_base": ("rope_base", "rope-base")}
 
 #: PLE sidecar の持ち主（pipeline 名 → 畳み先の部品名 — ADR 0109 決定 4 / 0085）。
-PLE_OWNER: Mapping[str, str] = {"gemma4": "model"}
+PLE_OWNER: Mapping[str, str] = {"gemma4": "model", "gemma4-qat": "model"}
 
 #: 旧 manifest の assets に居る PLE 索引の名前。新しい容器でも同じ名前の資産になる。
 PLE_INDEX_ASSET = "ple_index"
