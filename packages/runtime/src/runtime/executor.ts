@@ -664,6 +664,9 @@ export class Session {
    *
    * NOTE: `submitPolicy` の構成ミス（gpuTiming 有効 × querySet 容量を超える `maxChunkSize`）は
    * run の途中ではなくここ（SubmitScheduler の構築）で `SubmitPolicyError` になる。
+   * NOTE: 本体を `buildSessionState` へ出した 89c1ccd 以降、構築の完了通知は microtask 1 段ぶん
+   * 後ろへ動いている（受容済み — 増えた境界の手前では state がどの呼び出し側からも到達不能で、
+   * GPU の待機位置とフェンス順序は不変）。
    */
   static async build(
     gpu: GpuContext,
@@ -895,12 +898,21 @@ export class Session {
     options: EnqueueOptions,
     read: PromiseWithResolvers<RunOutputs> | undefined,
   ): Promise<void> {
+    // MUST: `options.batch` を読むのは**ここ 1 度だけ**。利用者は getter を仕込めるので読むたびに
+    // 別の区間が返り得て、検査した区間・`enter` する区間・`#readBatch` に覚える区間が食い違うと
+    // ①自己デッドロックと dispose 済みの検査が素通りする ②`enqueueRead` の「決着まで後続 enqueue を
+    // 拒む」門が別の区間に掛かり、読む slot を上書きされる（沈黙誤値）。以降はこの `scope` だけを見る。
+    // MUST: `[RUNTIME_INTERNAL]` の取り出しもこの try の中で行う（外に置くと getter の throw が
+    // そのまま同期 throw として漏れ、「受理の失敗は戻り Promise の reject で返す」が崩れる）。
+    let scope: EnqueueOptions["batch"];
+    let batch: EnqueueOptions["batch"][typeof RUNTIME_INTERNAL];
     try {
-      this.#assertEnqueueAdmissible(options.batch);
+      scope = options.batch;
+      this.#assertEnqueueAdmissible(scope);
+      batch = scope[RUNTIME_INTERNAL];
     } catch (cause) {
       return Promise.reject(cause);
     }
-    const batch = options.batch[RUNTIME_INTERNAL];
     // MUST: 受け口の検査とリース取得は `#serialize` に積む**前**に済ませる。本体はマイクロ
     // タスクを 1 段挟むので、本体で取ると「未 await の enqueue を積んだ直後に finish()」で
     // finish が先に決着し、積んだぶんが 1 本も dispatch されないまま区間が成功で終わる。
@@ -915,7 +927,7 @@ export class Session {
       captured = captureInputs(inputs);
       const generation = options.generation;
       capturedOptions = {
-        batch: options.batch,
+        batch: scope,
         ...(generation === undefined ? {} : {
           generation: {
             context: generation.context,
@@ -974,7 +986,7 @@ export class Session {
     if (read !== undefined) {
       // MUST: 決着まで同じ Session の後続 enqueue を拒む（読む slot の上書きを塞ぐ）。解除は
       // 区間の決着（成否によらず release）— リースの finalizer と同じ時点。
-      this.#readBatch = options.batch;
+      this.#readBatch = scope;
       batch.onSettled({
         complete: () => undefined,
         fail: () => undefined,
