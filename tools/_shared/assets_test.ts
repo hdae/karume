@@ -4,8 +4,13 @@
 // 成功経路は census_test.ts（配布形）と enumerate_test.ts（実資産）が押さえている。ここが
 // 見るのは「未対応・想定外は fail loudly」— 選択が外れたときに、理由と既知一覧が出ること。
 
-import { assertRejects } from "@std/assert";
+import { assertEquals, assertRejects } from "@std/assert";
 import { readIrGraph, resolveAsset } from "./assets.ts";
+import {
+  type ModelInput,
+  writeModelContainer,
+} from "../../packages/runtime/tests/helpers/container-write.ts";
+import { type IrDeclaration, parseIrDeclaration } from "../../packages/runtime/src/format/ir.ts";
 
 /** 一時ディレクトリを 1 つ作って渡す（終わったら消す）。 */
 const withDir = async (fn: (dir: URL) => Promise<void>): Promise<void> => {
@@ -62,13 +67,42 @@ const writeManifest = async (dir: URL, manifest: Json): Promise<void> => {
   await Deno.writeTextFile(new URL("karume.json", dir), JSON.stringify(manifest));
 };
 
-/** safetensors のヘッダ（8 バイト長 + JSON）だけを持つファイル。実体テンソルは書かない。 */
-const writeHeaderOnly = async (url: URL, header: Json): Promise<void> => {
-  const json = new TextEncoder().encode(JSON.stringify(header));
-  const bytes = new Uint8Array(8 + json.length);
-  new DataView(bytes.buffer).setBigUint64(0, BigInt(json.length), true);
-  bytes.set(json, 8);
-  await Deno.writeFile(url, bytes);
+/** initializer 1 本を 1 ノードで消費する最小の IR v2 グラフ（合成容器の中身）。 */
+const declaration = (initializer: string): IrDeclaration =>
+  parseIrDeclaration(JSON.stringify({
+    format: "karume-ir",
+    version: 2,
+    requires: { ops: ["matmul"] },
+    symbols: ["T"],
+    inputs: [{ name: "x", dtype: "f32", shape: ["T", 4] }],
+    outputs: ["y"],
+    initializers: { [initializer]: {} },
+    values: {
+      [initializer]: { dtype: "f32", shape: [4, 4] },
+      y: { dtype: "f32", shape: ["T", 4] },
+    },
+    nodes: [{ op: "matmul", ins: ["x", initializer], outs: ["y"], attrs: {} }],
+  }));
+
+/** 名前を挙げたグラフを 1 本ずつ持つ `krm` を、part 0 だけ渡せる分割形で書く。 */
+const writeContainer = async (url: URL, graphNames: readonly string[]): Promise<void> => {
+  const input: ModelInput = {
+    graphs: Object.fromEntries(
+      graphNames.map((name) => [name, declaration(`${name}.weight`)]),
+    ),
+    consts: [],
+    weights: graphNames.map((name) => ({
+      graph: name,
+      initializer: `${name}.weight`,
+      bytes: new Uint8Array(new ArrayBuffer(4 * 4 * 4)),
+      encoding: { codec: "f32" },
+    })),
+    assets: [],
+    provenance: { license: "test", writer: "karume-test/1" },
+  };
+  const written = await writeModelContainer(input);
+  // part 0 だけを据える（`readIrGraph` が読むのはヘッダ + 2 文書だけ）。
+  await Deno.writeFile(url, written.parts[0]);
 };
 
 Deno.test("resolveAsset（配布形）: model の選択が外れたら既知一覧つきで落ちる", async () => {
@@ -181,8 +215,10 @@ Deno.test("resolveAsset（配布形）: part 0 が越境参照なら --source �
 Deno.test("resolveAsset（系列出力）: 格納 dtype グループが複数あるなら --quant を促して落ちる", async () => {
   await withDir(async (dir) => {
     await Deno.mkdir(new URL("net/", dir));
-    await Deno.writeFile(new URL("net/model.f16.safetensors", dir), new Uint8Array(0));
-    await Deno.writeFile(new URL("net/model.i8.safetensors", dir), new Uint8Array(0));
+    await Deno.writeFile(new URL("net/model.f16-00001-of-00002.krm", dir), new Uint8Array(0));
+    await Deno.writeFile(new URL("net/model.f16-00002-of-00002.krm", dir), new Uint8Array(0));
+    await Deno.writeFile(new URL("net/model.i8-00001-of-00002.krm", dir), new Uint8Array(0));
+    await Deno.writeFile(new URL("net/model.i8-00002-of-00002.krm", dir), new Uint8Array(0));
     await assertRejects(
       () => resolveAsset(dir, undefined, undefined, "anima"),
       Error,
@@ -198,7 +234,8 @@ Deno.test("resolveAsset（系列出力）: 格納 dtype グループが複数あ
 
 Deno.test("resolveAsset（系列出力）: --model は配布形だけのノブなので落ちる", async () => {
   await withDir(async (dir) => {
-    await Deno.writeFile(new URL("model.safetensors", dir), new Uint8Array(0));
+    await Deno.writeFile(new URL("model-00001-of-00002.krm", dir), new Uint8Array(0));
+    await Deno.writeFile(new URL("model-00002-of-00002.krm", dir), new Uint8Array(0));
     await assertRejects(
       () => resolveAsset(dir, "m", undefined, "anima"),
       Error,
@@ -211,7 +248,8 @@ Deno.test("resolveAsset（系列出力）: ディレクトリ名から家族名�
   await withDir(async (dir) => {
     const root = new URL("foo-bar/", dir);
     await Deno.mkdir(root);
-    await Deno.writeFile(new URL("model.safetensors", root), new Uint8Array(0));
+    await Deno.writeFile(new URL("model-00001-of-00002.krm", root), new Uint8Array(0));
+    await Deno.writeFile(new URL("model-00002-of-00002.krm", root), new Uint8Array(0));
     await assertRejects(
       () => resolveAsset(root, undefined, undefined, undefined),
       Error,
@@ -225,16 +263,36 @@ Deno.test("resolveAsset（系列出力）: ディレクトリ名から家族名�
   });
 });
 
-Deno.test("readIrGraph: __metadata__.karume_ir を持たない shard は落ちる（空グラフを出さない）", async () => {
+Deno.test("readIrGraph: 名指しのグラフが無い容器は既知一覧つきで落ちる（別の部品を数えない）", async () => {
   await withDir(async (dir) => {
-    const url = new URL("model.safetensors", dir);
-    await writeHeaderOnly(url, {
-      "some.weight": { dtype: "F32", shape: [1], data_offsets: [0, 4] },
-    });
+    const url = new URL("model-00001-of-00003.krm", dir);
+    await writeContainer(url, ["vision"]);
     await assertRejects(
-      () => readIrGraph({ kind: "shard", url }),
+      () => readIrGraph({ url, graph: "text_encoder" }),
       Error,
-      "__metadata__.karume_ir が無い",
+      "容器にグラフ 'text_encoder' が無い",
     );
+    await assertRejects(
+      () => readIrGraph({ url, graph: "text_encoder" }),
+      Error,
+      "在るのは vision",
+    );
+  });
+});
+
+Deno.test("readIrGraph: 名指しが無く 2 グラフある容器は落ちる（1 本目を黙って採らない）", async () => {
+  await withDir(async (dir) => {
+    const url = new URL("model-00001-of-00004.krm", dir);
+    await writeContainer(url, ["front", "voice"]);
+    await assertRejects(() => readIrGraph({ url }), Error, "グラフが 2 本ある");
+  });
+});
+
+Deno.test("readIrGraph: 名指しの無い 1 グラフの容器は、その唯一のグラフを読む", async () => {
+  await withDir(async (dir) => {
+    const url = new URL("model-00001-of-00003.krm", dir);
+    await writeContainer(url, ["caption_proj"]);
+    const graph = await readIrGraph({ url });
+    assertEquals(Object.keys(graph.initializers), ["caption_proj.weight"]);
   });
 });

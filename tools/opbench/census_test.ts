@@ -27,7 +27,7 @@ import { assertBindingKeys, defaultScenarios, parseScenario } from "../_shared/s
 const TARGET = {
   component: "unit",
   componentDtype: "i4",
-  graph: { kind: "shard", url: new URL("file:///none") },
+  graph: { url: new URL("file:///none"), graph: "unit" },
 } as const;
 const IDENTITY = { family: "unit", model: "unit", quant: "i4" };
 
@@ -322,7 +322,8 @@ Deno.test("summary ヘッダの session: 配布形は宣言の写し・系列出
     // 系列出力は manifest を持たない = 実行変種が宣言されていない（呼び手が与える）。
     const seriesRoot = new URL(`file://${temp}/gemma4-series/`);
     await Deno.mkdir(seriesRoot, { recursive: true });
-    await Deno.writeTextFile(new URL("model.f32.safetensors", seriesRoot), "");
+    await Deno.writeTextFile(new URL("model.f32-00001-of-00002.krm", seriesRoot), "");
+    await Deno.writeTextFile(new URL("model.f32-00002-of-00002.krm", seriesRoot), "");
     const series = await resolveAsset(seriesRoot, undefined, undefined, undefined);
     assertEquals(series.session, undefined);
     assertEquals(buildCensusSummary("series", series, []).session, null);

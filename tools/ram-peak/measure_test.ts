@@ -46,7 +46,7 @@ if (!GPU_AVAILABLE) {
   );
 }
 
-/** 合成配布形の部品名（= グラフ名 — ADR 0109 決定 8）。 */
+/** 合成配布形の部品名（= グラフ名 — container-v1 §12）。 */
 const COMPONENT = "dit";
 
 /**

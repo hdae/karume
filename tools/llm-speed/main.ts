@@ -1,17 +1,10 @@
 import { assert, assertEquals } from "@std/assert";
-import { acquireGpu, prepareModel } from "../../packages/runtime/mod.ts";
+import { acquireGpu } from "../../packages/runtime/mod.ts";
 import { denoDirectory } from "../../packages/hub/deno.ts";
 import { gemma4ChatPrompt, Gemma4Pipeline } from "../../packages/models/gemma.ts";
 import { Gemma4QatPipeline } from "../../packages/models/gemma4-qat.ts";
 import { gemma4StopTokens } from "../../packages/models/src/gemma/text/chat.ts";
-import {
-  readShard,
-  resolveShards,
-  streamShards,
-} from "../../packages/runtime/tests/helpers/shard-files.ts";
-import { createLlmTokenizer, record } from "../../examples/shared/llm-tokenizer.ts";
-import { localFileUrl } from "../../examples/shared/llm-source.ts";
-import { inspectLlmGraph, LlmSequence } from "../../examples/shared/llm-generate.ts";
+import { record } from "../../examples/shared/llm-tokenizer.ts";
 import { generationTimer, type GenerationTiming } from "../../examples/shared/generation-timing.ts";
 
 type Case = { case: string; prompt: string; inputIds: number[] };
@@ -28,29 +21,47 @@ type Result = GenerationTiming & {
   stopReason: string;
   promptTokens: number;
 };
-type Profile =
-  | {
-    name: string;
-    family: "gemma4" | "gemma4-qat";
-    model: "e2b" | "e4b";
-    source: string;
-    tokenizer: string;
-  }
-  | { name: string; family: "minicpm5" | "qwen3"; source: string; tokenizer: string };
-const profileFrom = (raw: unknown): Profile => {
+/**
+ * 比較対象は**配布形の Gemma 4 だけ**（`tools/llm-baseline/data.py` の profile が正本）。
+ *
+ * 系列出力（`outputs/series/`）を直に読む枝は持たない。研究記録として残る旧形の系列は容器
+ * （krm）に変換しておらず、読める profile も `data.py` から外してある — 呼び手の無い枝を
+ * 残すと、動かない経路が型検査を通ったまま腐る。旧形の実測は `docs/research/` にある。
+ */
+type Profile = {
+  name: string;
+  family: "gemma4" | "gemma4-qat";
+  model: "e2b" | "e4b";
+  source: string;
+  tokenizer: string;
+};
+/**
+ * 入力 JSON（`prepare.py` の出力）の profile を読む。`unknown` 境界の検査なので、
+ * 綴りの違いはここで fail loudly にする（テストから直に叩けるよう export する）。
+ */
+export const profileFrom = (raw: unknown): Profile => {
   const root = record(raw, "inputs");
   assert(typeof root.model === "string");
   const p = record(root.profile, "profile");
   assert(typeof p.checkpoint === "string");
   const tokenizer = `${p.checkpoint.replace(/\/+$/, "")}/tokenizer.json`;
   const family = p.family;
-  if (family === "gemma4" || family === "gemma4-qat") {
-    assert(typeof p.distribution === "string" && (p.model === "e2b" || p.model === "e4b"));
-    return { name: root.model, family, model: p.model, source: p.distribution, tokenizer };
-  }
-  assert(family === "minicpm5" || family === "qwen3");
-  assert(typeof p.series === "string");
-  return { name: root.model, family, source: p.series, tokenizer };
+  assert(
+    family === "gemma4" || family === "gemma4-qat",
+    `llm-speed が測れるのは配布形の gemma4 / gemma4-qat だけである（profile の family は ` +
+      `${
+        JSON.stringify(family)
+      }）。系列出力を直に読む枝は無い — tools/llm-baseline/data.py を見よ。`,
+  );
+  assert(
+    typeof p.distribution === "string",
+    `${root.model} の profile に配布形の置き場（distribution）が無い`,
+  );
+  assert(
+    p.model === "e2b" || p.model === "e4b",
+    `${root.model} の profile の model が e2b / e4b で無い`,
+  );
+  return { name: root.model, family, model: p.model, source: p.distribution, tokenizer };
 };
 const ids = (raw: unknown): number[] => {
   assert(
@@ -151,7 +162,7 @@ const main = async (): Promise<void> => {
     maxNewTokens: data.maxNewTokens,
     sampler: { temperature: 0 },
     placement: "packed-weights",
-    pleBudget: profile.family.startsWith("gemma4") ? "default-two-shards" : undefined,
+    pleBudget: "default-two-shards",
     compute: "f32",
     textDecodingTimed: false,
     inputSha256: await digest(inputsPath),
@@ -187,95 +198,51 @@ const main = async (): Promise<void> => {
     await save(`${out}/summary.json`, { ...metadata, loadSeconds: loaded, cases });
   };
   const started = performance.now();
-  if (profile.family === "gemma4" || profile.family === "gemma4-qat") {
-    const common = { gpu, model: profile.model, chunkLength: 64 };
-    await using pipeline = profile.family === "gemma4"
-      ? await Gemma4Pipeline.fromPretrained(denoDirectory(profile.source), common)
-      : await Gemma4QatPipeline.fromPretrained(denoDirectory(profile.source), {
-        ...common,
-        model: profile.model,
-      });
-    await gpu.device.queue.onSubmittedWorkDone();
-    const loaded = (performance.now() - started) / 1000;
+  const common = { gpu, model: profile.model, chunkLength: 64 };
+  await using pipeline = profile.family === "gemma4"
+    ? await Gemma4Pipeline.fromPretrained(denoDirectory(profile.source), common)
+    : await Gemma4QatPipeline.fromPretrained(denoDirectory(profile.source), {
+      ...common,
+      model: profile.model,
+    });
+  await gpu.device.queue.onSubmittedWorkDone();
+  const loaded = (performance.now() - started) / 1000;
+  assertEquals(
+    [...gemma4StopTokens(pipeline.tokenizer)].sort((a, b) => a - b),
+    [...data.stopTokens].sort((a, b) => a - b),
+  );
+  for (const c of data.cases) {
     assertEquals(
-      [...gemma4StopTokens(pipeline.tokenizer)].sort((a, b) => a - b),
-      [...data.stopTokens].sort((a, b) => a - b),
+      gemma4ChatPrompt(pipeline.tokenizer, [{ role: "user", content: c.prompt }]),
+      c.inputIds,
     );
-    for (const c of data.cases) {
-      assertEquals(
-        gemma4ChatPrompt(pipeline.tokenizer, [{ role: "user", content: c.prompt }]),
-        c.inputIds,
-      );
-    }
-    await runCases(async (prompt) => {
-      await gpu.device.queue.onSubmittedWorkDone();
-      const timer = generationTimer();
-      const sequence = await pipeline.sequence({ capacity: data.capacity });
-      await using _sequence = { [Symbol.asyncDispose]: () => sequence.dispose() };
-      const stream = sequence.generate({
-        prompt,
-        maxNewTokens: data.maxNewTokens,
-        stopTokens: data.stopTokens,
-        sampler: { temperature: 0 },
-      });
-      const tokenIds: number[] = [];
-      for await (const event of stream) {
-        if (event.kind === "token") {
-          timer.onToken();
-          tokenIds.push(event.id);
-        }
-      }
-      const stop = await stream.done;
-      return {
-        ...timer.finish(),
-        tokenIds,
-        stopToken: stop.reason === "eos" || stop.reason === "stop-token" ? stop.token : null,
-        stopReason: stop.reason,
-        promptTokens: prompt.length,
-      };
-    }, loaded);
-  } else {
-    const tokenizer = createLlmTokenizer(
-      profile.family,
-      JSON.parse(await Deno.readTextFile(profile.tokenizer)),
-      JSON.parse(
-        await Deno.readTextFile(new URL("../../examples/shared/llm-unicode.json", import.meta.url)),
-      ),
-    );
-    assertEquals(
-      [...tokenizer.stopTokens].sort((a, b) => a - b),
-      [...data.stopTokens].sort((a, b) => a - b),
-    );
-    for (const c of data.cases) assertEquals(tokenizer.chat(c.prompt), c.inputIds);
-    const shards = resolveShards(localFileUrl(`${profile.source}/model.safetensors`));
-    const prepared = prepareModel(await readShard(shards[0]));
-    const graph = inspectLlmGraph(profile.family, prepared.graph);
-    const session = await prepared.createSession(gpu, streamShards(shards.slice(1)));
-    await using _session = { [Symbol.asyncDispose]: () => session.dispose() };
-    await gpu.device.queue.onSubmittedWorkDone();
-    const loaded = (performance.now() - started) / 1000;
-    await runCases(async (prompt) => {
-      await gpu.device.queue.onSubmittedWorkDone();
-      const timer = generationTimer();
-      await using sequence = new LlmSequence(session, graph);
-      const tokenIds: number[] = [];
-      let stopToken: number | null = null;
-      for await (const token of sequence.stream(prompt, data.maxNewTokens, data.stopTokens)) {
-        if (data.stopTokens.includes(token)) {
-          stopToken = token;
-          continue;
-        }
-        timer.onToken();
-        tokenIds.push(token);
-      }
-      return {
-        ...timer.finish(),
-        tokenIds,
-        stopToken,
-        stopReason: stopToken === null ? "max-tokens" : "eos",
-        promptTokens: prompt.length,
-      };
-    }, loaded);
   }
+  await runCases(async (prompt) => {
+    await gpu.device.queue.onSubmittedWorkDone();
+    const timer = generationTimer();
+    const sequence = await pipeline.sequence({ capacity: data.capacity });
+    await using _sequence = { [Symbol.asyncDispose]: () => sequence.dispose() };
+    const stream = sequence.generate({
+      prompt,
+      maxNewTokens: data.maxNewTokens,
+      stopTokens: data.stopTokens,
+      sampler: { temperature: 0 },
+    });
+    const tokenIds: number[] = [];
+    for await (const event of stream) {
+      if (event.kind === "token") {
+        timer.onToken();
+        tokenIds.push(event.id);
+      }
+    }
+    const stop = await stream.done;
+    return {
+      ...timer.finish(),
+      tokenIds,
+      stopToken: stop.reason === "eos" || stop.reason === "stop-token" ? stop.token : null,
+      stopReason: stop.reason,
+      promptTokens: prompt.length,
+    };
+  }, loaded);
 };
 if (import.meta.main) await main();

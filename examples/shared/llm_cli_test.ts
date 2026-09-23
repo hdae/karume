@@ -29,39 +29,60 @@ const withDirectory = async (fn: (root: string) => Promise<void>): Promise<void>
 };
 Deno.test("LLM source: ローカルの GPTQ を優先し、量子化と明示 path も選べる", async () => {
   await withDirectory(async (root) => {
-    await Deno.mkdir(`${root}/qwen3-06b-i8-2026-09-10-probe`);
+    await Deno.mkdir(`${root}/qwen3-06b-i8`);
     assertEquals(
       await selectLlmSource("qwen3", undefined, undefined, root),
-      `${root}/qwen3-06b-i8-2026-09-10-probe`,
+      `${root}/qwen3-06b-i8`,
     );
-    await Deno.mkdir(`${root}/qwen3-06b-gptq-i4-2026-09-10-probe`);
+    await Deno.mkdir(`${root}/qwen3-06b-gptq-i4`);
     assertEquals(
       await selectLlmSource("qwen3", undefined, undefined, root),
-      `${root}/qwen3-06b-gptq-i4-2026-09-10-probe`,
+      `${root}/qwen3-06b-gptq-i4`,
     );
     assertEquals(
       await selectLlmSource("qwen3", undefined, "i8", root),
-      `${root}/qwen3-06b-i8-2026-09-10-probe`,
+      `${root}/qwen3-06b-i8`,
     );
     assertEquals(await selectLlmSource("qwen3", "/chosen", undefined, root), "/chosen");
     await assertRejects(() => selectLlmSource("qwen3", "/chosen", "i4", root), Error, "排他");
   });
 });
-Deno.test("LLM source: 複数の同種実験・資産不在・未対応 quant は黙って選ばない", async () => {
+Deno.test("LLM source: 資産不在・未対応 quant は黙って選ばない", async () => {
   await withDirectory(async (root) => {
     await assertRejects(
       () => selectLlmSource("qwen3", undefined, undefined, root),
       Error,
-      "変換済みモデルが",
+      "変換済みの系列が",
     );
     await assertRejects(
       () => selectLlmSource("qwen3", undefined, "unknown", root),
       Error,
       "未対応",
     );
+  });
+});
+/**
+ * 旧 shard 形の研究記録（`-probe`）は容器ではないので選ばない。2026-09-23 までは正規表現で
+ * 拾っていて、デモは `model.krm` の素の `NotFound` で落ちていた（案内も出なかった）。
+ */
+Deno.test("LLM source: 旧 shard 形の -probe 系列は選ばず、在ることを名指して落ちる", async () => {
+  await withDirectory(async (root) => {
+    await Deno.mkdir(`${root}/qwen3-06b-gptq-i4-2026-09-10-probe`);
     await Deno.mkdir(`${root}/qwen3-06b-i8-2026-09-10-probe`);
-    await Deno.mkdir(`${root}/qwen3-06b-i8-2026-09-11-probe`);
-    await assertRejects(() => selectLlmSource("qwen3", undefined, undefined, root), Error, "複数");
+    const error = await assertRejects(
+      () => selectLlmSource("qwen3", undefined, undefined, root),
+      Error,
+      "qwen3-06b-gptq-i4-2026-09-10-probe",
+    );
+    assertEquals(error.message.includes("qwen3-06b-i8-2026-09-10-probe"), true, error.message);
+    assertEquals(error.message.includes("容器ではないので読めません"), true, error.message);
+    // 量子化を名指ししても旧形へは落ちない。
+    await assertRejects(
+      () => selectLlmSource("qwen3", undefined, "i8", root),
+      Error,
+      "変換済みの系列が",
+    );
+    // 変換済みが 1 本でも在れば、旧形が同居していてもそちらを選ぶ。
     await Deno.mkdir(`${root}/qwen3-06b-i8`);
     assertEquals(
       await selectLlmSource("qwen3", undefined, undefined, root),

@@ -126,9 +126,9 @@ QAT_REFERENCE_FILE = "reference.json"
 QAT_SHARDS_FIELD = REFERENCE_SHARDS_FIELD
 QAT_BLOCKS_FIELD = REFERENCE_BLOCKS_FIELD
 
-#: 変換しない系列の接尾（実験の記録と棄却の記録）。どちらも `tools/llm-baseline/data.py` が
-#: **旧 shard 形のまま**読む席で、配布にも TS 側の検収にも入らない（出所は
-#: `examples/*/README.md`）。移しても読み手が引かない。
+#: 変換しない系列の接尾（実験の記録と棄却の記録）。**読み手がいない**ので移さない — 配布にも
+#: TS 側の検収にも入らず、`tools/llm-baseline/data.py` の profile も 2026-09-23 に外した
+#: （llm-speed は配布形専用になった）。実測そのものは `docs/research/` に文章として残る。
 UNREFERENCED_SUFFIXES: tuple[str, ...] = ("-probe", "-rejected")
 
 

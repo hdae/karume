@@ -11,18 +11,19 @@ from transformers import AutoTokenizer
 
 
 def profiles(root: Path) -> dict:
+    """評価できるモデル → 公式 checkpoint と**配布形**（`karume/5` の `karume.json`）。
+
+    読むのは容器（`krm`）だけである。旧 shard 形のまま残している `-probe` 系列
+    （gemma4 E4B / MiniCPM5-2B / Qwen3-0.6B の 2026-09 の実験）は**この表に席を持たない** —
+    両読みは実装しない（container-v1 §12）。当時の測定そのものは時点スナップショットとして
+    `docs/research/` に残っており、再計測するなら系列を容器へ焼き直してから表に足す。
+    """
     return {
         "gemma4-e2b": {
             "family": "gemma4",
             "checkpoint": root / "inputs/gemma4/gemma-4-E2B-it",
             "distribution": root / "models/karume-gemma4",
             "model": "e2b",
-        },
-        "gemma4-e4b": {
-            "family": "gemma4",
-            "checkpoint": root / "inputs/gemma4/gemma-4-E4B-it",
-            "distribution": root / "outputs/series/gemma4-e4b-pipeline-2026-09-11-probe",
-            "model": "e4b",
         },
         "gemma4-qat-e2b": {
             "family": "gemma4-qat",
@@ -35,16 +36,6 @@ def profiles(root: Path) -> dict:
             "checkpoint": root / "inputs/gemma4-qat/gemma-4-E4B-it-qat-mobile-transformers",
             "distribution": root / "models/karume-gemma4-qat",
             "model": "e4b",
-        },
-        "minicpm5-2b": {
-            "family": "minicpm5",
-            "checkpoint": root / "inputs/minicpm5/MiniCPM5-2B",
-            "series": root / "outputs/series/minicpm5-2b-gptq-i4-2026-09-10-probe",
-        },
-        "qwen3-06b": {
-            "family": "qwen3",
-            "checkpoint": root / "inputs/qwen3/Qwen3-0.6B",
-            "series": root / "outputs/series/qwen3-06b-gptq-i4-2026-09-10-probe",
         },
     }
 

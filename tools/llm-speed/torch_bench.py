@@ -47,7 +47,7 @@ def timing(start: float, first: float | None, end: float, count: int) -> dict:
 
 def main() -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "llm-baseline"))
-    from run import stored_paths
+    from run import container_paths
     from weights import StoredWeights, fingerprint, load_float_model, load_qat
 
     parser = argparse.ArgumentParser(description=__doc__)
@@ -71,7 +71,7 @@ def main() -> None:
         raise ValueError("未知の入力形式")
     name = fixture["model"]
     profile = {
-        k: Path(v) if k in ("checkpoint", "series", "distribution") else v
+        k: Path(v) if k in ("checkpoint", "distribution") else v
         for k, v in fixture["profile"].items()
     }
     qat = profile["family"] == "gemma4-qat"
@@ -116,14 +116,14 @@ def main() -> None:
     if any(len(c["inputIds"]) + max_new - 1 > fixture["capacity"] for c in data["cases"]):
         raise ValueError("固定入力が容量を超える")
     started = time.perf_counter()
-    shards = []
-    ple = None
+    parts: list[Path] = []
     stored = None
     if args.weights == "stored":
-        shards, ple = stored_paths(profile)
-        stored = StoredWeights(shards)
+        # PLE は同じ容器の資産（ADR 0109 決定 4）— 指紋も読みも part 列だけで閉じる。
+        parts = container_paths(profile)
+        stored = StoredWeights(parts)
     if qat:
-        model, checks = load_qat(profile["checkpoint"], stored, ple)
+        model, checks = load_qat(profile["checkpoint"], stored)
         if qat_model == "text":
             # 同じ公式量子化層を使い、テキストに不要なmultimodalの表全体展開を避ける。
             with torch.device("meta"):
@@ -135,7 +135,7 @@ def main() -> None:
         else:
             model.model.language_model.set_attn_implementation(args.attention)
     else:
-        model, checks = load_float_model(profile["checkpoint"], profile["family"], stored, ple)
+        model, checks = load_float_model(profile["checkpoint"], profile["family"], stored)
         # 復元時の同値なParameterを公式の共有参照へ戻してからdeviceへ転送する。
         model.tie_weights()
         model.set_attn_implementation(args.attention)
@@ -172,12 +172,7 @@ def main() -> None:
         fingerprint(profile["checkpoint"] / "config.json"),
         fingerprint(profile["checkpoint"] / "tokenizer.json"),
     ]
-    files.extend(fingerprint(p) for p in shards)
-    if ple is not None:
-        files.append(fingerprint(ple))
-        files.extend(
-            fingerprint(ple.parent / s["file"]) for s in json.loads(ple.read_text())["shards"]
-        )
+    files.extend(fingerprint(p) for p in parts)
     if args.weights == "source" or qat:
         files.extend(fingerprint(p) for p in sorted(profile["checkpoint"].glob("*.safetensors")))
     save(

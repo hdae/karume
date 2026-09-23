@@ -313,14 +313,30 @@ class TestEveryCallSiteIsListed:
             assert any(argument.arg == "graph_name" for argument in node.args.kwonlyargs)
 
 
-#: 仕様の正本（`docs/container-v1.md`）。`RECIPES_ROOT` は `tools/export-recipes/`。
-DOCS_ROOT = RECIPES_ROOT.parent.parent / "docs"
+#: リポジトリの根（`RECIPES_ROOT` は `tools/export-recipes/`）。
+REPO_ROOT = RECIPES_ROOT.parent.parent
+
+#: 仕様の正本（`docs/container-v1.md`）。
+DOCS_ROOT = REPO_ROOT / "docs"
 
 #: グラフ名 = weights のキー を述べている唯一の仕様節。
 CONTAINER_SPEC_SECTION = "12. 移行 CLI の契約"
 
-#: グラフ名の話の指し先として**使ってはいけない**綴り（part 列 / FileRef の話をしている決定）。
-WRONG_POINTER = "ADR 0109 決定 3"
+#: グラフ名の話の指し先として**使ってはいけない**綴り。
+#:
+#: 決定 3 は `container` 欄（descriptor の期待値 + part の FileRef 列）、決定 8 は移行 CLI の
+#: リポ丸ごとモードの話で、どちらも**グラフ名を述べていない**。片方だけ縛ると、同じ種類の
+#: 誤指しがもう片方の綴りで復活する（実際に決定 3 を潰した後、決定 8 で 6 箇所に再発した）。
+WRONG_POINTERS = ("ADR 0109 決定 3", "ADR 0109 決定 8")
+
+#: 誤指しを走査する根（`docs/` は ADR 自身が住む場所なので外す）。
+POINTER_SCAN_ROOTS = ("packages", "tools", "examples")
+
+#: 走査する綴り（読み手の TS と書き手の Python の両方 — 誤指しは両側で起きる）。
+POINTER_SCAN_SUFFIXES = (".py", ".ts")
+
+#: 走査から外すディレクトリ名（生成物・依存の取り込み先）。
+POINTER_SCAN_SKIP = frozenset({"__pycache__", ".venv", "node_modules"})
 
 
 def _spec_section(document: Path, heading: str) -> str:
@@ -333,6 +349,17 @@ def _spec_section(document: Path, heading: str) -> str:
         len(rest),
     )
     return "\n".join(rest[:stop])
+
+
+def _scanned_sources() -> list[Path]:
+    """誤指しを走査するソース一覧（この門自身は除く）。"""
+    return sorted(
+        path
+        for root in POINTER_SCAN_ROOTS
+        for suffix in POINTER_SCAN_SUFFIXES
+        for path in (REPO_ROOT / root).rglob(f"*{suffix}")
+        if POINTER_SCAN_SKIP.isdisjoint(path.parts) and path != Path(__file__).resolve()
+    )
 
 
 class TestThePointerNamesTheDocumentThatCarriesTheClaim:
@@ -351,35 +378,48 @@ class TestThePointerNamesTheDocumentThatCarriesTheClaim:
         assert "グラフ名の既定は親ディレクトリ名" in section
         assert "weights のキー" in section
 
-    def test_the_old_pointer_does_not_state_the_rule(self) -> None:
-        """対（非恒真）: 元の指し先には「グラフ名」という語が 1 度も出ない。"""
+    def test_the_old_pointers_do_not_state_the_rule(self) -> None:
+        """対（非恒真）: 誤りの指し先 2 つが住む節には「グラフ名」という語が 1 度も出ない。"""
         decision = _spec_section(
             DOCS_ROOT / "decisions" / "0109-manifest-v5-container.md", "Decision"
         )
 
         assert "### 3. `container` 欄" in decision
+        assert "### 8. 段 2 の書き手は移行 CLI の**リポ丸ごとモード**" in decision
         assert "グラフ名" not in decision
 
-    def test_no_recipe_cites_the_old_pointer_for_the_naming_rule(self) -> None:
-        """部品の名前の話をしている行が {@link WRONG_POINTER} を指していないこと。
+    def test_no_source_cites_an_old_pointer_for_the_naming_rule(self) -> None:
+        """グラフ名 / 部品名を綴る行が {@link WRONG_POINTERS} を指していないこと。
+
+        走査は読み手（TS）と書き手（Python）の両方 — 誤指しは recipe だけでなく runtime /
+        models / hub のテストや tools 側の注釈でも起きる（実際そうなった）。
 
         NOTE: この門自身のソースは走査から外す — 除外しないと、上の 2 本が綴る「なぜ
         その指し先が誤りか」の説明文が自分の網に掛かる（門は他人の綴りを見る道具）。
         """
         offenders = [
-            f"{path.relative_to(RECIPES_ROOT)}:{number}"
-            for path in sorted(RECIPES_ROOT.rglob("*.py"))
-            if "__pycache__" not in path.parts
-            and ".venv" not in path.parts
-            and path != Path(__file__).resolve()
+            f"{path.relative_to(REPO_ROOT)}:{number} ({pointer})"
+            for path in _scanned_sources()
             for number, line in enumerate(path.read_text(encoding="utf-8").split("\n"), start=1)
-            if WRONG_POINTER in line and ("グラフ名" in line or "部品名" in line)
+            for pointer in WRONG_POINTERS
+            if pointer in line and ("グラフ名" in line or "部品名" in line)
         ]
 
         assert offenders == [], (
-            f"部品の名前の指し先が {WRONG_POINTER} になっている: {offenders} —"
-            f" 正本は container-v1 §{CONTAINER_SPEC_SECTION.split('.')[0]}"
+            f"グラフ名 / 部品名の指し先が {' / '.join(WRONG_POINTERS)} になっている:"
+            f" {offenders} — 正本は container-v1"
+            f" §{CONTAINER_SPEC_SECTION.split('.')[0]}"
         )
+
+    def test_the_scan_really_reaches_both_languages(self) -> None:
+        """対（走査が空・片言語だけに縮退していないこと）。"""
+        scanned = _scanned_sources()
+        suffixes = {path.suffix for path in scanned}
+        roots = {path.relative_to(REPO_ROOT).parts[0] for path in scanned}
+
+        assert suffixes == set(POINTER_SCAN_SUFFIXES), suffixes
+        assert roots == set(POINTER_SCAN_ROOTS), roots
+        assert Path(__file__).resolve() not in scanned
 
     def test_the_deberta_note_points_at_the_gate_that_really_runs(self) -> None:
         """deberta の写しが名指しする突合の門が**実在**すること（F-2 の取り違え）。"""

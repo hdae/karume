@@ -9,8 +9,8 @@
  *         --scenario long=M:1,C:8192 --out <dir>
  *
  * 1 実行 = 1 資産 = `census.jsonl` 1 本 + `summary.json` 1 本（先例 = tools/ram-peak/measure.ts の
- * 「1 構成 = 1 プロセス」）。GPU も重みバイトも使わない — 読むのは先頭 shard の safetensors
- * ヘッダだけ。
+ * 「1 構成 = 1 プロセス」）。GPU も重みバイトも使わない — 読むのは容器の part 0（ヘッダ +
+ * グラフ記述 + モデル記述）だけ。
  */
 
 import { directoryUrl, externalPath, readIrGraph, resolveAsset } from "../_shared/assets.ts";
@@ -181,7 +181,7 @@ const runCensus = async (args: ReadonlyMap<string, readonly string[]>): Promise<
   const componentNames = asset.components.map((target) => target.component);
   for (const scenario of scenarios) assertBindingKeys(scenario, componentNames);
 
-  // グラフ宣言は容器の part 0（系列出力は先頭 shard）にしか無いので、部品ごとに 1 度だけ読む。
+  // グラフ宣言は容器の part 0 にしか無いので、部品ごとに 1 度だけ読む（配布形も系列出力も同じ）。
   const graphs = await Promise.all(
     asset.components.map(async (target) => ({
       target,

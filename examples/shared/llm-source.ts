@@ -1,4 +1,11 @@
-/** 実験 LLM のローカル系列だけを選ぶ。公開配布形はまだ無いので、取得・再変換は行わない。 */
+/**
+ * 実験 LLM のローカル系列だけを選ぶ。公開配布形はまだ無いので、取得・再変換は行わない。
+ *
+ * 選ぶのは**容器（krm）に変換済みの系列だけ**。`<name>-<quant>-<日付>-probe` の綴りで残って
+ * いる系列は旧 shard 形の研究記録で、容器としては読めない（変換しない — 実測は
+ * `docs/research/`）。それを既定で拾っていた頃は、デモが `model.krm` の素の `NotFound` で
+ * 落ちて、利用者には「資産が壊れている」としか見えなかった。今は旧形を名指して落とす。
+ */
 import type { LlmFamily } from "./llm-tokenizer.ts";
 
 export const llmProfile = (family: LlmFamily): {
@@ -58,22 +65,26 @@ export const selectLlmSource = async (
     entries = [];
   }
   const name = llmProfile(family).name;
+  const candidates = entries.filter((entry) => entry.isDirectory || entry.isSymlink).map((
+    entry,
+  ) => entry.name);
   for (const selected of quant === undefined ? LLM_QUANTS : [quant]) {
     const canonical = `${name}-${selected}`;
-    const candidates = entries.filter((entry) => entry.isDirectory || entry.isSymlink).map((
-      entry,
-    ) => entry.name);
     if (candidates.includes(canonical)) return `${root}/${canonical}`;
-    const dated = new RegExp(
-      `^${name}${selected === "f32" ? "" : `-${selected}`}-\\d{4}-\\d{2}-\\d{2}-probe$`,
-    );
-    const found = candidates.filter((entry) => dated.test(entry)).sort();
-    if (found.length > 1) {
-      throw new Error(`${name} の ${selected} が複数ある: ${found.join(", ")}（--source で指定）`);
-    }
-    if (found.length === 1) return `${root}/${found[0]}`;
   }
+  // 旧 shard 形のまま残る研究記録（`<name>[-<quant>]-YYYY-MM-DD-probe`）。容器ではないので
+  // 選ばないが、**在ることは診断に出す** — 「資産があるのに読めない」を利用者が自力で
+  // 切り分けられないまま NotFound だけを見る形にしない。
+  const legacy = candidates
+    .filter((entry) => new RegExp(`^${name}(-[a-z0-9-]+)?-\\d{4}-\\d{2}-\\d{2}-probe$`).test(entry))
+    .sort();
+  const wanted = quant === undefined ? LLM_QUANTS.join(" / ") : quant;
   throw new Error(
-    `${name} の変換済みモデルが ${root} に無い（--source <系列ディレクトリ> で指定）。公式の未変換重みは読めません。`,
+    `${name} の容器（krm）に変換済みの系列が ${root} に無い（探した量子化: ${wanted}）。` +
+      (legacy.length === 0
+        ? ""
+        : `旧 shard 形の系列は在りますが容器ではないので読めません: ${legacy.join(", ")}` +
+          "（研究記録 — docs/research/ 参照。変換しません）。") +
+      "--source <変換済み系列ディレクトリ> で指定してください。公式の未変換重みは読めません。",
   );
 };

@@ -2,29 +2,28 @@
  * tools 共有: **資産ディレクトリ → 部品ごとのグラフの在り処**の解決と、その IR の読み出し。
  *
  * opbench（静的 census）と fusion-hints（融合候補列挙）が同じ資産を同じ規則で見つけるための
- * 1 本。読むのは**グラフの宣言が載っている先頭だけ**（配布形なら容器の part 0 = ヘッダ +
- * 2 文書・系列出力なら safetensors ヘッダの `__metadata__.karume_ir`）。実体は合計 GB 級なので
- * 重みの block は 1 バイトも読まない。
+ * 1 本。読むのは**グラフの宣言が載っている part 0 だけ**（ヘッダ + 2 文書）。実体は合計 GB 級
+ * なので重みの block は 1 バイトも読まない。
  *
- * 資産は 2 形ある:
+ * 資産はどちらも `krm` コンテナで、違うのは**部品の見つけ方**だけである:
  *
  * - **配布形** — `karume.json`（manifest `karume/5`）を持つディレクトリ。部品 1 つが `krm`
  *   コンテナ 1 本で、グラフ記述と束縛表は part 0 に載る（ADR 0109 決定 3）。ファイル名の推測を
  *   せず manifest の `container.parts[0]` をそのまま引く
  * - **系列出力** — `outputs/series/<名前>/` 以下。manifest が無いので、ファイル名から代表 path を
- *   起こして {@link resolveShards}（Python 側 `karume.shards.resolve_shards` の鏡像）に解かせる
- *   （こちらは旧 IR の safetensors 方言のまま）
+ *   起こして {@link resolveParts}（Python 側 `karume.container.container_parts` の鏡像）に
+ *   連番を解かせる
  *
  * 公開する解決口は {@link resolveAsset} 1 本で、**格納 dtype は quant 表に従う**（配布形は
  * manifest の quant が選んだ dtype・系列出力は `--quant` かディレクトリに 1 つだけある
  * グループ）。census 加重は格納で変わる（i4 の group 数など）ので、どの dtype を測ったのかが
  * 表の意味そのもの。融合候補の列挙は格納に依らない（候補はノード列だけで決まる）が、道具に
- * よって別の dtype の shard を開くと 2 つの表が同じ資産の別の面を指すことになるので、
+ * よって別の dtype の容器を開くと 2 つの表が同じ資産の別の面を指すことになるので、
  * 解決口を分けない。
  */
 
-import { resolveShards } from "../../packages/runtime/tests/helpers/shard-files.ts";
-import { type IrGraph, parseIrGraph } from "../../packages/runtime/src/format/ir.ts";
+import { resolveParts } from "../../packages/runtime/tests/helpers/container-files.ts";
+import type { IrGraph } from "../../packages/runtime/src/format/ir.ts";
 import type { FusionLimits } from "../../packages/runtime/src/runtime/fusion.ts";
 import { bindGraphs, mergedGraph } from "../../packages/runtime/src/format/container/bind.ts";
 import {
@@ -64,16 +63,19 @@ export const externalPath = (path: string): string => {
   return absolute.length > 1 ? absolute.replace(/\/+$/, "") : absolute;
 };
 
-/**
- * グラフ宣言の在り処（2 形）。どちらで読むかは**解決の時点で決まっている**ので、読み手が
- * バイト列を覗いて推測しない（推測すると、取り違えた資産が「別の形だった」という理由で
- * 静かに読み飛ばされる）。
- */
-export type GraphSource =
-  /** 配布形: `krm` の part 0（ヘッダ + グラフ記述 + モデル記述）。グラフ名 = 部品名（決定 8）。 */
-  | { readonly kind: "container"; readonly url: URL; readonly graph: string }
-  /** 系列出力: 旧 IR（safetensors の `__metadata__.karume_ir`）を載せた先頭 shard。 */
-  | { readonly kind: "shard"; readonly url: URL };
+/** グラフ宣言の在り処 — `krm` の part 0（ヘッダ + グラフ記述 + モデル記述）。 */
+export type GraphSource = {
+  readonly url: URL;
+  /**
+   * 期待するグラフ名。配布形は**部品名 = manifest の weights キー**（container-v1 §12）で、
+   * 名前が容器の宣言と食い違えば {@link readIrGraph} が落とす。
+   *
+   * 系列出力は manifest を持たないので省略する（`undefined` = 容器が宣言する唯一のグラフ）。
+   * 容器は 1 本 1 グラフ（ADR 0109 決定 2）なので一意に決まり、2 本以上ある容器は
+   * 名指しが要る資産として fail loudly になる。
+   */
+  readonly graph?: string;
+};
 
 /** 先頭から `length` バイトだけ読む（重みの block へは進まない）。 */
 const readPrefix = async (source: URL, length: number): Promise<Uint8Array<ArrayBuffer>> => {
@@ -91,10 +93,13 @@ const readPrefix = async (source: URL, length: number): Promise<Uint8Array<Array
  * 容器の part 0 から 1 グラフの IR を読む（グラフ記述 × 束縛表の合流まで — 格納 codec は
  * 束縛表にしか無いので、合流しないと census の `storage` 欄が埋まらない）。
  *
+ * `graphName` を省略した呼びは「唯一のグラフ」を採る（系列出力 — {@link GraphSource}）。
+ *
  * MUST: 名指しのグラフが無ければ在るグラフを並べて落とす。黙って 1 本目を採ると、部品名と
- * グラフ名がずれた容器で「別の部品を数えた表」が静かに出る。
+ * グラフ名がずれた容器で「別の部品を数えた表」が静かに出る。省略された呼びでも同じ理由で
+ * 2 本以上の容器は落とす（どちらを数えたのか分からない表を出さない）。
  */
-const readContainerGraph = async (url: URL, graphName: string): Promise<IrGraph> => {
+const readContainerGraph = async (url: URL, graphName: string | undefined): Promise<IrGraph> => {
   const header = readHeader(await readPrefix(url, HEADER_BYTES));
   const documents = await readPrefix(
     url,
@@ -106,50 +111,32 @@ const readContainerGraph = async (url: URL, graphName: string): Promise<IrGraph>
   const model = header.kind === "model"
     ? parseModelDescriptor(documents.slice(HEADER_BYTES + header.graphDescriptorLength))
     : undefined;
-  const bound = bindGraphs(graph, model)[graphName];
+  const declared = Object.keys(graph.graphs);
+  const name = graphName ?? soleGraphName(declared, url);
+  const bound = bindGraphs(graph, model)[name];
   if (bound === undefined) {
     throw new Error(
-      `${url.pathname}: 容器にグラフ '${graphName}' が無い` +
-        `（在るのは ${Object.keys(graph.graphs).join(" / ")}）`,
+      `${url.pathname}: 容器にグラフ '${name}' が無い（在るのは ${declared.join(" / ")}）`,
     );
   }
-  return mergedGraph(bound, graphName);
+  return mergedGraph(bound, name);
 };
 
-/**
- * safetensors のヘッダ JSON だけを読んで旧 IR を取り出す（系列出力）。
- *
- * MUST: `karume_ir` が無い shard は fail loudly。重み shard（metadata 無し）を先頭と取り違えた
- * ときに、空グラフの census が「ノード 0 本」として静かに出力されるのを防ぐ。
- */
-const readShardGraph = async (source: URL): Promise<IrGraph> => {
-  const file = await Deno.open(source, { read: true });
-  try {
-    const lengthBytes = new Uint8Array(8);
-    await readExact(file, lengthBytes, source);
-    const length = Number(new DataView(lengthBytes.buffer).getBigUint64(0, true));
-    const headerBytes = new Uint8Array(length);
-    await readExact(file, headerBytes, source);
-    const header: unknown = JSON.parse(new TextDecoder().decode(headerBytes));
-    const metadata = (header as { readonly __metadata__?: Record<string, string> }).__metadata__;
-    const ir = metadata?.karume_ir;
-    if (ir === undefined) {
-      throw new Error(
-        `${source.pathname}: safetensors ヘッダに __metadata__.karume_ir が無い` +
-          "（グラフを載せるのは先頭 shard だけ — 重み shard を指していないか）",
-      );
-    }
-    return parseIrGraph(ir);
-  } finally {
-    file.close();
+/** 名指しの無い容器（系列出力）が宣言する唯一のグラフ名。 */
+const soleGraphName = (declared: readonly string[], url: URL): string => {
+  const [sole] = declared;
+  if (declared.length !== 1 || sole === undefined) {
+    throw new Error(
+      `${url.pathname}: グラフが ${declared.length} 本ある（${declared.join(" / ")}）` +
+        " — 系列出力は 1 容器 1 グラフのはず",
+    );
   }
+  return sole;
 };
 
-/** グラフ宣言を 1 本読む（形は解決済み — {@link GraphSource}）。 */
+/** グラフ宣言を 1 本読む（在り処は解決済み — {@link GraphSource}）。 */
 export const readIrGraph = async (source: GraphSource): Promise<IrGraph> =>
-  source.kind === "container"
-    ? await readContainerGraph(source.url, source.graph)
-    : await readShardGraph(source.url);
+  await readContainerGraph(source.url, source.graph);
 
 /**
  * `into.length` バイトちょうど読む。
@@ -296,11 +283,11 @@ const directoryName = (dir: URL): string =>
   decodeURIComponent(dir.pathname).replace(/\/$/, "").split("/").pop() ?? "";
 
 /**
- * `model.safetensors` / `model.<dtype>.safetensors` と、その shard 連番形。
- * NOTE: 連番の綴り（`-NNNNN-of-NNNNN`）を解くのは {@link resolveShards} の仕事で、ここは
- * 「代表 path がどれか」だけを拾う。
+ * `model.krm` / `model.<dtype>.krm` と、その part 連番形。
+ * NOTE: 連番の綴り（`-NNNNN-of-NNNNN`）を解くのは {@link resolveParts} の仕事で、ここは
+ * 「代表 path がどれか」だけを拾う（分割形は代表 path 自体が書かれない）。
  */
-const MODEL_FILE = /^model(?:\.(?<dtype>[^.\-]+))?(?:-\d{5}-of-\d{5})?\.safetensors$/;
+const MODEL_FILE = /^model(?:\.(?<dtype>[^.\-]+))?(?:-\d{5}-of-\d{5})?\.krm$/;
 
 /** 系列出力のコンポーネント 1 件（重みファイルを持つディレクトリ）。 */
 type ComponentDirectory = {
@@ -312,7 +299,7 @@ type ComponentDirectory = {
 /**
  * 重みファイルを持つディレクトリの列。1 件も無ければ空を返す（診断の綴りは呼び手が持つ）。
  *
- * NOTE: 探すのは根の直下 1 階層まで。配布形と同じく `<コンポーネント>/model*.safetensors` が
+ * NOTE: 探すのは根の直下 1 階層まで。配布形と同じく `<コンポーネント>/model*.krm` が
  * 系列出力の綴りで、それより深い置き方をする資産は無い。
  */
 const componentDirectories = (root: URL): readonly ComponentDirectory[] => {
@@ -339,10 +326,7 @@ const storageGroups = (dir: URL): readonly (readonly [string, URL])[] => {
     if (match === null) continue;
     const dtype = match.groups?.dtype ?? "";
     const name = dtype === "" ? "native" : dtype;
-    groups.set(
-      name,
-      new URL(dtype === "" ? "model.safetensors" : `model.${dtype}.safetensors`, dir),
-    );
+    groups.set(name, new URL(dtype === "" ? "model.krm" : `model.${dtype}.krm`, dir));
   }
   return [...groups].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
 };
@@ -352,7 +336,7 @@ export type ComponentTarget = {
   readonly component: string;
   /** 配布形の quant 表が選んだ格納 dtype キー（系列出力ではファイル名の infix）。 */
   readonly componentDtype: string;
-  /** グラフ宣言の在り処（配布形は容器の part 0・系列出力は先頭 shard）。 */
+  /** グラフ宣言の在り処（どちらの形でも容器の part 0）。 */
   readonly graph: GraphSource;
 };
 
@@ -378,7 +362,8 @@ export type AssetTargets = {
  *
  * @param model 配布形の model 名（省略時は `defaultModel`）。系列出力では受けない。
  * @param quant 配布形の quant 名（省略時は `defaultQuant`）。系列出力では格納 dtype の
- *   グループ名（`model.i8-*.safetensors` の `i8`）。
+ *   グループ名（`model.i8-*.krm` の `i8`）。系列出力の連番は infix を持たない形が普通で、
+ *   その場合グループは `native` 1 つだけになる（格納の正本は容器の束縛表）。
  */
 export const resolveAsset = async (
   root: URL,
@@ -436,9 +421,8 @@ const resolveDistribution = async (
     return {
       component,
       componentDtype: dtype,
-      // グラフ名 = 部品名（書き手の規約 — ADR 0109 決定 8）。
+      // グラフ名 = 部品名（= manifest の weights キー — container-v1 §12）。
       graph: {
-        kind: "container",
         url: localPart0(variants[dtype].container, root, `component '${component}'`),
         graph: component,
       },
@@ -477,12 +461,12 @@ const resolveSeries = (
   }
   const directories = componentDirectories(root);
   if (directories.length === 0) {
-    throw new Error(`${root.pathname}: model*.safetensors を持つディレクトリが無い`);
+    throw new Error(`${root.pathname}: model*.krm を持つディレクトリが無い`);
   }
   const components = directories.map(({ relative, dir }) => {
     const groups = storageGroups(dir);
     if (groups.length === 0) {
-      throw new Error(`${dir.pathname}: model*.safetensors が無い`);
+      throw new Error(`${dir.pathname}: model*.krm が無い`);
     }
     const chosen = quant === undefined
       ? soleGroup(groups, dir)
@@ -498,7 +482,10 @@ const resolveSeries = (
     return {
       component: relative === "" ? "model" : relative,
       componentDtype: dtype,
-      graph: { kind: "shard", url: resolveShards(representative)[0] },
+      // グラフ名は名乗らない — 系列出力は manifest を持たないので、容器が宣言する唯一の
+      // グラフを採る（{@link GraphSource}）。部品ディレクトリ名は weights キーと綴りが
+      // ずれることがある（`caption-proj` / `deberta/full-24layer`）ので、名前を導かない。
+      graph: { url: resolveParts(representative)[0] },
     } satisfies ComponentTarget;
   });
   const groupNames = new Set(components.map((target) => target.componentDtype));

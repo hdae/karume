@@ -13,48 +13,31 @@ from pathlib import Path
 import torch
 import transformers
 from data import profiles
-from karume.legacy import resolve_shards
-from karume.verify import assert_reader_layout
-from safetensors.torch import load_file
 from scoring import accuracy, token_nll, windows
-from weights import StoredWeights, fingerprint, load_float_model, load_qat
+from weights import MODEL_GRAPH, StoredWeights, fingerprint, load_float_model, load_qat
+
+#: 読む配布 manifest の major（旧版は読まない — ADR 0109 決定 1）。
+MANIFEST_FORMAT = "karume/5"
 
 
-def stored_paths(profile: dict) -> tuple[list[Path], Path | None]:
-    if "series" in profile:
-        path = profile["series"] / "model.safetensors"
-        shards = list(resolve_shards(path))
-        _assert_layouts(shards)
-        return shards, None
+def container_paths(profile: dict) -> list[Path]:
+    """評価に使う部品 1 本のコンテナを、manifest が宣言する **part 列**として返す。
+
+    ファイル名の推測はしない（連番の綴りは manifest が持つ）。読み手の規約検査・2 文書の
+    parse・束縛表との合流は {@link StoredWeights} が通す `verify_container` の担当で、
+    ここが見るのは「どの part を渡すか」だけである。
+    """
     root = profile["distribution"]
     manifest = json.loads((root / "karume.json").read_text())
-    if manifest["format"] != "karume/4":
-        raise ValueError("karume/4 の配布形が必要")
+    if manifest["format"] != MANIFEST_FORMAT:
+        raise ValueError(f"{MANIFEST_FORMAT} の配布形が必要（読んだのは {manifest['format']}）")
     model = manifest["models"][profile["model"]]
-    declarations = model["weights"]["model"]["i4"]["shards"]
-    if any("repo" in shard for shard in declarations):
+    quant = model["defaultQuant"]
+    dtype = model["quants"][quant]["weights"][MODEL_GRAPH]
+    parts = model["weights"][MODEL_GRAPH][dtype]["container"]["parts"]
+    if any("repo" in part for part in parts):
         raise ValueError("越境参照はこのローカル評価では未対応")
-    shards = [root / shard["path"] for shard in declarations]
-    _assert_layouts(shards)
-    ple = [
-        root / value["path"]
-        for value in model["assets"].values()
-        if value["path"].endswith("/ple.json") or value["path"] == "ple.json"
-    ]
-    if len(ple) != 1:
-        raise ValueError("PLE索引が一意ではありません")
-    return shards, ple[0]
-
-
-def _assert_layouts(shards: list[Path]) -> None:
-    """旧 shard 列のリーダ規約（既知 dtype・宣言長の一致・隙間なし・整列）を 1 本ずつ通す。
-
-    NOTE: 旧配布形（`karume/4`）を丸ごと検証する門は退役した（容器の門は
-    `karume.verify.verify_container`）。このツールが読むのは旧形のままなので、生き残っている
-    リーダ規約の門だけを掛ける — 容器化は段 3c。
-    """
-    for shard in shards:
-        assert_reader_layout(shard)
+    return [root / part["path"] for part in parts]
 
 
 def save(path: Path, value: object) -> None:
@@ -98,17 +81,11 @@ def main() -> None:
     files = [fingerprint(path) for path in sorted(checkpoint.glob("*.safetensors"))]
     files += [fingerprint(checkpoint / "config.json"), tokenizer]
     stored = None
-    ple = None
     if args.weights == "stored":
-        shards, ple = stored_paths(profile)
-        files += [fingerprint(path) for path in shards]
-        if ple is not None:
-            files.append(fingerprint(ple))
-            files += [
-                fingerprint(ple.parent / shard["file"])
-                for shard in json.loads(ple.read_text())["shards"]
-            ]
-        stored = StoredWeights(shards)
+        # PLE は同じ容器の資産（ADR 0109 決定 4）なので、指紋は part 列だけで閉じる。
+        parts = container_paths(profile)
+        files += [fingerprint(path) for path in parts]
+        stored = StoredWeights(parts)
     save(
         args.out / "inputs.json",
         {
@@ -120,24 +97,11 @@ def main() -> None:
         },
     )
     if profile["family"] == "gemma4-qat":
-        if stored is None or ple is None:
-            raise ValueError("QATの固定重みとPLEが必要")
-        model, checks = load_qat(checkpoint, stored, ple)
+        if stored is None:
+            raise ValueError("QATの固定重みが必要")
+        model, checks = load_qat(checkpoint, stored)
     else:
-        model, checks = load_float_model(checkpoint, profile["family"], stored, ple)
-    if args.weights == "stored" and "series" in profile:
-        fixture_path = profile["series"] / "io.capital-en.safetensors"
-        fixture = load_file(fixture_path)
-        with torch.inference_mode():
-            actual = model(input_ids=fixture["input.input_ids"].long(), use_cache=False).logits
-        expected = fixture["output.0"]
-        # 既存の公式モデルへの復元検証と同じ絶対誤差の門。期待値は変更しない。
-        torch.testing.assert_close(actual, expected, atol=1e-3, rtol=0)
-        checks["fixture"] = {
-            **fingerprint(fixture_path),
-            "maxAbs": float((actual - expected).abs().max()),
-            "atol": 1e-3,
-        }
+        model, checks = load_float_model(checkpoint, profile["family"], stored)
     save(args.out / "loader.json", checks)
     print(
         json.dumps(

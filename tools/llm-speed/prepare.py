@@ -29,7 +29,7 @@ def main() -> None:
     if args.checkpoint is not None:
         profile["checkpoint"] = args.checkpoint.resolve()
     if args.source is not None:
-        profile["series" if "series" in profile else "distribution"] = args.source.resolve()
+        profile["distribution"] = args.source.resolve()
     checkpoint = profile["checkpoint"]
     tokenizer = AutoTokenizer.from_pretrained(checkpoint, local_files_only=True)
     if args.chat_template is not None:

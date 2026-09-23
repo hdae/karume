@@ -1,10 +1,6 @@
 /** MiniCPM5 / Qwen3 の対話 CLI。--prompt は単発、--completion は文章継続。 */
-import { acquireGpu, prepareModel } from "../../packages/runtime/mod.ts";
-import {
-  readShard,
-  resolveShards,
-  streamShards,
-} from "../../packages/runtime/tests/helpers/shard-files.ts";
+import { acquireGpu, prepareContainer } from "../../packages/runtime/mod.ts";
+import { openSeriesContainer } from "../../packages/runtime/tests/helpers/container-files.ts";
 import { createLlmTokenizer, type LlmFamily } from "./llm-tokenizer.ts";
 import { LLM_QUANTS, llmProfile, localFileUrl, selectLlmSource } from "./llm-source.ts";
 import {
@@ -16,6 +12,17 @@ import {
 } from "./llm-generate.ts";
 import { LlmChat, readLlmLines } from "./llm-chat.ts";
 import { formatGenerationTiming, generationTimer } from "./generation-timing.ts";
+
+/** 系列出力の容器の代表 path（実体は `model-NNNNN-of-NNNNN.krm` の part 列）。 */
+const MODEL_FILE = "model.krm";
+/**
+ * 容器の中のグラフ名 = 配布 manifest の weights キー（container-v1 §12）。
+ *
+ * NOTE: ここだけは `packages/runtime/tests/helpers/series-graphs.ts` の表から引かない —
+ * あの表に載るのは**実重み e2e が開く系列**で、このデモが読む MiniCPM5 / Qwen3 の変換済み
+ * 系列は e2e の対象外（手元で焼いた実験資産・{@link selectLlmSource} が選ぶ）だから。
+ */
+const GRAPH_NAME = "model";
 
 export const runLlmCli = async (family: LlmFamily, argv = Deno.args): Promise<void> => {
   const profile = llmProfile(family);
@@ -83,8 +90,10 @@ export const runLlmCli = async (family: LlmFamily, argv = Deno.args): Promise<vo
     : flags.has("--completion")
     ? tokenizer.encode(prompt, true)
     : tokenizer.chat(prompt, args.get("--system"));
-  const shards = resolveShards(localFileUrl(`${source.replace(/\/+$/, "")}/model.safetensors`));
-  const prepared = prepareModel(await readShard(shards[0]));
+  const opened = await openSeriesContainer(
+    localFileUrl(`${source.replace(/\/+$/, "")}/${MODEL_FILE}`),
+  );
+  const prepared = prepareContainer(opened, GRAPH_NAME);
   const graph = inspectLlmGraph(family, prepared.graph);
   if (ids !== undefined) checkLlmRequest(ids, maxNewTokens, graph);
   note(
@@ -102,7 +111,7 @@ export const runLlmCli = async (family: LlmFamily, argv = Deno.args): Promise<vo
     const gpu = await acquireGpu();
     using _destroy = { [Symbol.dispose]: () => gpu.destroy() };
     const loaded = performance.now();
-    const session = await prepared.createSession(gpu, streamShards(shards.slice(1)));
+    const session = await prepared.createContainerSession(gpu);
     await using _release = { [Symbol.asyncDispose]: () => session.dispose() };
     note(`  loaded ${((performance.now() - loaded) / 1000).toFixed(2)}s\n`);
     if (!flags.has("--no-warmup")) {
