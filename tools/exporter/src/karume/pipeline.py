@@ -67,8 +67,9 @@ def _assert_graph_name(graph_name: str) -> str:
     MUST: 既定を持たない（`provenance` と同じ扱い）— 呼び手は**作業席**（`<部品>.staging/`）へ
     書くので、親ディレクトリ名を既定にすると全系列のグラフ名が `<部品>.staging` になる。
     語彙には `.` が入るので fail loudly もせず、ランタイムが部品名で引いた時点で初めて
-    「コンテナにグラフが無い」になる。据え替え先を知っているのは呼び手だけなので、
-    呼び手が名乗る（container-v1 §12 — 移行 CLI が使う部品名と同じ綴り MUST）。
+    「コンテナにグラフが無い」になる。部品名（= `karume.json` の weights のキー）を知って
+    いるのは呼び手だけなので、呼び手が名乗る（container-v1 §12 — 移行 CLI が使う部品名と
+    同じ綴り MUST）。
     """
     if GRAPH_NAME_PATTERN.match(graph_name) is None:
         raise ContainerFormatError(
@@ -99,10 +100,14 @@ def publish_model(
     綴っていた頃は、書き出し側の変更が写しの側で黙って壊れた。
 
     `provenance` は**必須**（既定値で出所を偽らない — `license` を落とした配布形を作らない）。
-    `graph_name` も**必須**で、綴りは**配布形の部品名**（`karume.json` の weights のキー =
-    据え替え先のディレクトリ名）MUST — ランタイムはグラフを名前で引き、移行 CLI も部品名で
-    焼くので、ここが作業席の名前（`<部品>.staging`）になると「移行済みミラー」と「再 export
-    した系列」が別物になる（{@link _assert_graph_name}）。
+    `graph_name` も**必須**で、綴りは**配布形の部品名 = `karume.json` の weights のキー**
+    MUST（container-v1 §12）— ランタイムは `prepareContainer(opened,
+    <weights キー>)` でグラフを名前で引き、移行 CLI も同じキーで焼く。**据え替え先の
+    ディレクトリ名とは一致しないことがある**（系列直下に容器を置く family は
+    `siglip2-so400m-patch14-384` のような系列名が、irodori は `caption-proj` のような
+    ハイフン綴りがディレクトリ名になる — キーはそれぞれ `vision` / `caption_proj`）ので、
+    **呼び手は部品名を定数で名乗る**（ディレクトリから導かない）。作業席の名前
+    （`<部品>.staging`）を拾わせない側の門は {@link _assert_graph_name}。
     `assets`（資産名 → {@link karume.container.AssetInput}）は PLE 索引や `rope_base` のような
     「重みではないが同じ容器で配るバイト列」の席で、重みの part の**後ろ**の専用 part に載る
     （ADR 0109 決定 4）。
@@ -174,8 +179,9 @@ def export_to_file(
     戻り — 混成では両者を合流して渡す）。`weight_dtype_overrides`（テンソルキー → dtype）は
     1 本単位の明示指定で既定に優先する（混成格納 — 線引きは `emit._plan_weight_dtype`）。
 
-    `provenance` と `graph_name`（= 配布形の部品名）は**必須** — 意味と理由は
-    {@link publish_model}。書き出し以降（原子性・part 分割・後始末）も向こうが持つ。
+    `provenance` と `graph_name`（= 配布形の部品名 = `karume.json` の weights のキー）は
+    **必須** — 意味と理由は {@link publish_model}。書き出し以降（原子性・part 分割・後始末）も
+    向こうが持つ。
     """
     graph, tensors = export_module(
         module,

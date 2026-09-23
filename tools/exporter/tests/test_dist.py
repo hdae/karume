@@ -27,7 +27,8 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 import pytest
-from ir_fixtures import ir_container, ir_parts, with_an_unknown_op
+from ir_fixtures import ir_container as _ir_container
+from ir_fixtures import ir_parts, with_an_unknown_op
 
 from karume import dist, limits, verify
 from karume.artifacts import SUPERSEDED_SUFFIX
@@ -87,6 +88,21 @@ def _write_series(root: Path, payloads: Sequence[bytes], name: str = "model.krm"
     return root / name
 
 
+#: 合成計画の weights のキー（= 部品名）。`_synthetic_plan` が据える席は全部この 1 語。
+COMPONENT = "w"
+
+
+def ir_container(*, mark: str, named: str = COMPONENT, **extra: Any) -> list[bytes]:
+    """{@link ir_fixtures.ir_container} を**部品名で名乗らせる**既定で包む。
+
+    組み立ては「容器のグラフ名 == weights のキー」を見る
+    （{@link karume.dist.assert_weight_components_verified}）ので、`mark` から導いた綴り
+    （`weights-D1` など）のままだと実物には無い形の入力になる。`mark` はテンソルキーの接頭辞
+    （= バイト列の作り分け）のままで、グラフ名だけを席のキーに合わせる。
+    """
+    return _ir_container(mark=mark, named=named, **extra)
+
+
 def _ref(path: str) -> dict[str, Any]:
     """3 点セットの偽値（規模上限の検査は件数しか見ないので中身は形だけで足りる）。"""
     return {"path": path, "size": 1, "sha256": "0" * 64}
@@ -96,7 +112,7 @@ def _present(out_dir: Path) -> list[str]:
     return sorted(str(path.relative_to(out_dir)) for path in out_dir.rglob("*") if path.is_file())
 
 
-def _synthetic_series(root: Path, mark: str) -> Path:
+def _synthetic_series(root: Path, mark: str, named: str = COMPONENT) -> Path:
     """`mark` ごとに違う正当な IR コンテナ系列を `root/<mark>/` へ書いて**代表 path** を返す。
 
     weights の席が指せるのは配置（`source`）だけなので（`dist.ModelPlan.__post_init__`）、
@@ -104,19 +120,21 @@ def _synthetic_series(root: Path, mark: str) -> Path:
     重みテンソルのキー接頭辞（`mark`）— **同じ長さの `mark` はサイズが同じで中身だけが違う**
     列になり、長さを変えるとサイズも変わる（共有判定の前置フィルタを観測する側の道具）。
     """
-    return _write_series(root / mark, ir_container(mark=mark))
+    return _write_series(root / mark, ir_container(mark=mark, named=named))
 
 
-def _part_rel_paths(rel_path: str, mark: str) -> list[str]:
+def _part_rel_paths(rel_path: str, mark: str, named: str = COMPONENT) -> list[str]:
     """{@link _synthetic_series} の系列が据わる**モデルサブツリー内**の相対 path（宣言と同じ順）。
 
     配布形は常に分割される（container-v1 §8）ので、1 役は必ず複数要素の part 列になる。
     """
-    total = len(ir_container(mark=mark))
+    total = len(ir_container(mark=mark, named=named))
     return [numbered_name(rel_path, index, total) for index in range(1, total + 1)]
 
 
-def _part_refs(prefix: str, rel_path: str, mark: str) -> list[dict[str, Any]]:
+def _part_refs(
+    prefix: str, rel_path: str, mark: str, named: str = COMPONENT
+) -> list[dict[str, Any]]:
     """`prefix/` 配下へ据わった {@link _synthetic_series} の 3 点セット（宣言と同じ順）。"""
     return [
         {
@@ -125,19 +143,21 @@ def _part_refs(prefix: str, rel_path: str, mark: str) -> list[dict[str, Any]]:
             "sha256": hashlib.sha256(payload).hexdigest(),
         }
         for rel, payload in zip(
-            _part_rel_paths(rel_path, mark), ir_container(mark=mark), strict=True
+            _part_rel_paths(rel_path, mark, named),
+            ir_container(mark=mark, named=named),
+            strict=True,
         )
     ]
 
 
-def _part_paths(prefix: str, rel_path: str, mark: str) -> list[str]:
+def _part_paths(prefix: str, rel_path: str, mark: str, named: str = COMPONENT) -> list[str]:
     """{@link _part_refs} の path だけ（`verify_dist` の返り値と突き合わせる並び）。"""
-    return [ref["path"] for ref in _part_refs(prefix, rel_path, mark)]
+    return [ref["path"] for ref in _part_refs(prefix, rel_path, mark, named)]
 
 
-def _part_sizes(prefix: str, rel_path: str, mark: str) -> dict[str, int]:
+def _part_sizes(prefix: str, rel_path: str, mark: str, named: str = COMPONENT) -> dict[str, int]:
     """{@link _part_refs} の `{path: size}`（`verify_dist` の返り値そのものの形）。"""
-    return {ref["path"]: ref["size"] for ref in _part_refs(prefix, rel_path, mark)}
+    return {ref["path"]: ref["size"] for ref in _part_refs(prefix, rel_path, mark, named)}
 
 
 def _synthetic_plan(root: Path, name: str, rel_path: str, mark: str) -> ModelPlan:
@@ -575,10 +595,10 @@ class TestPlanGates:
             pipeline="anima/1",
             artifacts={
                 "encoder": Artifact(
-                    rel_path="model.krm", source=_synthetic_series(series, "encoder")
+                    rel_path="model.krm", source=_synthetic_series(series, "encoder", "enc")
                 ),
                 "decoder": Artifact(
-                    rel_path="model.krm", source=_synthetic_series(series, "decoder")
+                    rel_path="model.krm", source=_synthetic_series(series, "decoder", "dec")
                 ),
             },
             weights={
@@ -1057,6 +1077,73 @@ class TestAtomicReplacement:
         assert self._siblings(out_dir) == []
 
 
+class TestTheGraphNameMatchesTheWeightsKey:
+    """容器のグラフ名 == その席の weights のキー（container-v1 §12）。
+
+    ランタイムは `prepareContainer(opened, <weights キー>)` で**名前で**引くので、綴りが
+    割れた容器は manifest ごと据わり、利用者の `createSession` で初めて「コンテナにグラフが
+    無い」になる。書き手側の綴りの門（recipe の定数と AST の突合）はソースしか見ないので、
+    現物と宣言を突き合わせるのはここだけ。
+    """
+
+    @staticmethod
+    def _plan(series: Path, rel_path: str = "w/model.krm") -> ModelPlan:
+        return ModelPlan(
+            name="A",
+            pipeline="anima/1",
+            artifacts={"w": Artifact(rel_path=rel_path, source=series)},
+            weights={"w": {"f16": WeightFiles(file="w")}},
+            assets={},
+            quants={"f16": {"weights": {"w": "f16"}, "session": {}}},
+            default_quant="f16",
+            pipeline_config={},
+        )
+
+    def test_a_container_named_after_the_series_directory_fails_loudly(
+        self, tmp_path: Path
+    ) -> None:
+        """置き場の名前（系列名）で名乗った容器は配らせない — この門の存在理由。"""
+        series = _write_series(
+            tmp_path / "series" / "w", ir_container(mark="w", named="siglip2-so400m-patch14-384")
+        )
+        out_dir = tmp_path / "models" / "named-after-the-directory"
+
+        with pytest.raises(DistError, match="容器のグラフ名"):
+            assemble_family([self._plan(series)], out_dir, "A")
+        assert not out_dir.exists()
+
+    def test_the_same_series_named_after_the_part_passes(self, tmp_path: Path) -> None:
+        """対（恒真でない）: 同じ素材を部品名で名乗らせれば通る。"""
+        series = _write_series(tmp_path / "series" / "w", ir_container(mark="w", named="w"))
+        out_dir = tmp_path / "models" / "named-after-the-part"
+
+        manifest = assemble_family([self._plan(series)], out_dir, "A")
+
+        assert set(manifest["models"]["A"]["weights"]) == {"w"}
+
+    def test_one_container_cannot_fill_two_different_keys(self, tmp_path: Path) -> None:
+        """1 本の容器は 1 本のグラフしか持たないので、2 つの席の両方は名乗れない。
+
+        バイト同一の共有（同じキーの席）は通る形なので、dedupe をキーまで含めて畳まないと
+        この形が門をすり抜ける。
+        """
+        series = _write_series(tmp_path / "series" / "w", ir_container(mark="w", named="w"))
+        plan = replace(
+            self._plan(series),
+            artifacts={
+                "w": Artifact(rel_path="w/model.krm", source=series),
+                "v": Artifact(rel_path="v/model.krm", source=series),
+            },
+            weights={"w": {"f16": WeightFiles("w")}, "v": {"f16": WeightFiles("v")}},
+            quants={"f16": {"weights": {"w": "f16", "v": "f16"}, "session": {}}},
+        )
+        out_dir = tmp_path / "models" / "two-keys"
+
+        with pytest.raises(DistError, match=r"容器のグラフ名 \['w'\] が weights のキー 'v'"):
+            assemble_family([plan], out_dir, "A")
+        assert not out_dir.exists()
+
+
 class TestExternalComponents:
     """越境コンポーネント参照（ADR 0038 §7 の `repo` / `revision` 席）— **opt-in**。
 
@@ -1079,10 +1166,11 @@ class TestExternalComponents:
             artifacts={
                 "text_encoder": Artifact(
                     "text_encoder/model.krm",
-                    source=_synthetic_series(series, shared or self._SHARED),
+                    source=_synthetic_series(series, shared or self._SHARED, "text_encoder"),
                 ),
                 "transformer": Artifact(
-                    "transformer/model.krm", source=_synthetic_series(series, self._OWN)
+                    "transformer/model.krm",
+                    source=_synthetic_series(series, self._OWN, "transformer"),
                 ),
             },
             weights={
@@ -1127,8 +1215,8 @@ class TestExternalComponents:
         assert not any(is_external_ref(ref) for _, ref in dist._declared_refs(manifest))
         assert sorted(verify_dist(out_dir)) == sorted(
             [
-                *_part_paths("plain", "text_encoder/model.krm", self._SHARED),
-                *_part_paths("plain", "transformer/model.krm", self._OWN),
+                *_part_paths("plain", "text_encoder/model.krm", self._SHARED, "text_encoder"),
+                *_part_paths("plain", "transformer/model.krm", self._OWN, "transformer"),
             ]
         )
 
@@ -1145,7 +1233,7 @@ class TestExternalComponents:
 
         entry = manifest["models"]["borrower"]["weights"]["text_encoder"]["f16"]
         assert entry["container"]["parts"] == self._pinned(
-            _part_refs("source", "text_encoder/model.krm", self._SHARED)
+            _part_refs("source", "text_encoder/model.krm", self._SHARED, "text_encoder")
         )
 
     def test_the_referenced_bytes_are_not_stored_here_a_second_time(self, tmp_path: Path) -> None:
@@ -1163,7 +1251,7 @@ class TestExternalComponents:
         assert not (out_dir / "borrower" / "text_encoder").exists()
         # 越境参照は実在検査の対象外で、自リポ固有の役割だけが現物として残る。
         assert sorted(verify_dist(out_dir)) == _part_paths(
-            "borrower", "transformer/model.krm", self._OWN
+            "borrower", "transformer/model.krm", self._OWN, "transformer"
         )
 
     @pytest.mark.parametrize("revision", ["main", "v0.4.3", "0123456789abcdef", "A" * 40, "0" * 41])
@@ -1235,7 +1323,9 @@ class TestExternalComponents:
             external=self._components(source),
         )
 
-        expected = self._pinned(_part_refs("source", "text_encoder/model.krm", self._SHARED))
+        expected = self._pinned(
+            _part_refs("source", "text_encoder/model.krm", self._SHARED, "text_encoder")
+        )
         assert (
             manifest["models"]["A"]["weights"]["text_encoder"]["f16"]["container"]["parts"]
             == expected
@@ -1250,7 +1340,7 @@ class TestExternalComponents:
         assert not (out_dir / SHARED_DIRNAME / "text_encoder").exists()
         # 自リポ固有の役割は 2 モデルで同一バイトなので従来どおり `shared/` へ畳まれる。
         assert sorted(verify_dist(out_dir)) == _part_paths(
-            SHARED_DIRNAME, "transformer/model.krm", self._OWN
+            SHARED_DIRNAME, "transformer/model.krm", self._OWN, "transformer"
         )
 
     def test_it_refuses_a_family_where_one_model_holds_different_bytes(
@@ -1284,8 +1374,11 @@ class TestExternalComponents:
         """
         source = tmp_path / "models" / "karume-source"
         series = tmp_path / "series"
-        shared_series = _synthetic_series(series, self._SHARED)
+        shared_series = _synthetic_series(series, self._SHARED, "text_encoder")
         # 同じバイト列を 2 つの相対 path で宣言する参照元（借り手ごとに別の席が当たる）。
+        # 2 つ目の席は**同じ weights のキーの別 dtype ラベル** — キーを変えると「容器の
+        # グラフ名 ≠ weights のキー」になり、組み立ての門（{@link
+        # karume.dist.assert_weight_components_verified}）が参照の曖昧さより先に落とす。
         base = self._plan("source", series)
         assemble_family(
             [
@@ -1297,17 +1390,20 @@ class TestExternalComponents:
                     },
                     weights={
                         **base.weights,
-                        "alt_encoder": {"f16": WeightFiles("alt_encoder")},
+                        "text_encoder": {
+                            "f16": WeightFiles("text_encoder"),
+                            "i8": WeightFiles("alt_encoder"),
+                        },
                     },
                     quants={
                         "f16": {
-                            "weights": {
-                                "text_encoder": "f16",
-                                "transformer": "f16",
-                                "alt_encoder": "f16",
-                            },
+                            "weights": {"text_encoder": "f16", "transformer": "f16"},
                             "session": {},
-                        }
+                        },
+                        "i8": {
+                            "weights": {"text_encoder": "i8", "transformer": "f16"},
+                            "session": {},
+                        },
                     },
                 )
             ],
@@ -2007,7 +2103,7 @@ class TestExternalPartitionedComponents:
     _REPO = "hdae/karume-source"
     #: part 1（const 領域）が**空でない**容器を使う — 0 バイトの part は「長さを保った
     #: まま書き換える」故障注入の被験体にならない（同じ長さの別バイト列が無い）。
-    _SHARDS = tuple(ir_container(mark="text-encoder"))
+    _SHARDS = tuple(ir_container(mark="text-encoder", named="text_encoder"))
     _OWN = "transformer"
 
     def _series(self, root: Path, payloads: Sequence[bytes]) -> Path:
@@ -2027,7 +2123,7 @@ class TestExternalPartitionedComponents:
                 "text_encoder": Artifact("text_encoder/model.krm", source=series),
                 "transformer": Artifact(
                     "transformer/model.krm",
-                    source=_synthetic_series(series.parent, self._OWN),
+                    source=_synthetic_series(series.parent, self._OWN, "transformer"),
                 ),
             },
             weights={
@@ -2100,7 +2196,7 @@ class TestExternalPartitionedComponents:
 
         assert not (out_dir / "borrower" / "text_encoder").exists()
         assert sorted(verify_dist(out_dir)) == _part_paths(
-            "borrower", "transformer/model.krm", self._OWN
+            "borrower", "transformer/model.krm", self._OWN, "transformer"
         )
 
     @pytest.mark.parametrize("victim", [0, 1, 2])
@@ -2126,7 +2222,7 @@ class TestExternalPartitionedComponents:
 
     def test_the_smallest_component_is_referenced_part_by_part(self, tmp_path: Path) -> None:
         """数 KB の役割でも参照は part ごと（常時分割 — 代表 path 1 本の参照は無い）。"""
-        whole = tuple(ir_container(mark="whole-text-encoder"))
+        whole = tuple(ir_container(mark="whole-text-encoder", named="text_encoder"))
         series = self._series(tmp_path / "series", whole)
         source = self._source_dist(tmp_path, series)
         out_dir = tmp_path / "models" / "karume-borrower"

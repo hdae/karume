@@ -1004,33 +1004,41 @@ def assert_plan_sources(plans: Sequence[ModelPlan]) -> None:
                 raise DistError(f"{plan.name}.{role}: 組み立ての入力が無い: {artifact.source}")
 
 
-def weight_components(partitioned: Sequence[PartitionedPlan]) -> list[tuple[Path, ...]]:
-    """weights が指す**ローカル**コンテナの part 列（添字順）を全部集める。
+def weight_components(partitioned: Sequence[PartitionedPlan]) -> list[tuple[tuple[Path, ...], str]]:
+    """weights が指す**ローカル**コンテナの part 列（添字順）と、その席の weights のキーを集める。
 
-    共有コンポーネント（複数モデルが同じ系列を指す席）は part 列**そのもの**で dedupe する
-    — 同じバイト列を 2 度検証しても結論は変わらない。生成物（`payload`）の役割は weights に
-    現れない（{@link ModelPlan.__post_init__} が入口で落とす）ので、ここは全役割を集める。
+    共有コンポーネント（複数モデルが同じ系列を指す席）は (part 列, キー) で dedupe する
+    — 同じバイト列を同じ名前で 2 度検証しても結論は変わらない。**キーまで含めて**畳むのは、
+    1 本のコンテナが 2 つの違うキーの席に据わっている形が {@link
+    assert_weight_components_verified} のグラフ名の門に掛かる欠陥そのものだから（1 本の
+    コンテナは 1 本のグラフしか持たないので、両方は成立しえない）。生成物（`payload`）の
+    役割は weights に現れない（{@link ModelPlan.__post_init__} が入口で落とす）ので、ここは
+    全役割を集める。
 
     NOTE: 見るのは weights だけ。`assets`（tokenizer・スタイル表などの table safetensors）は
     コンテナではないので、コンテナの門を掛ける先ではない。
     """
-    components: list[tuple[Path, ...]] = []
-    seen: set[tuple[Path, ...]] = set()
+    components: list[tuple[tuple[Path, ...], str]] = []
+    seen: set[tuple[tuple[Path, ...], str]] = set()
     for item in partitioned:
-        roles = sorted(
-            {files.file for labels in item.plan.weights.values() for files in labels.values()}
+        seats = sorted(
+            {
+                (files.file, component)
+                for component, labels in item.plan.weights.items()
+                for files in labels.values()
+            }
         )
-        for role in roles:
+        for role, component in seats:
             sources: list[Path] = []
             for member in item.parts[role]:
                 source = item.plan.artifacts[member].source
                 assert source is not None  # ModelPlan.__post_init__ の不変条件
                 sources.append(source)
-            parts = tuple(sources)
-            if parts in seen:
+            entry = (tuple(sources), component)
+            if entry in seen:
                 continue
-            seen.add(parts)
-            components.append(parts)
+            seen.add(entry)
+            components.append(entry)
     return components
 
 
@@ -1052,14 +1060,28 @@ def assert_weight_components_verified(partitioned: Sequence[PartitionedPlan]) ->
     MUST: IR の受理規則をここで掛ける — 構造検査だけだと「語彙外の op / ランタイム未対応の
     attrs / 契約違反の shape」を宣言した容器が配布形に据わり、利用者の `createSession` で
     初めて落ちる（`karume.verify` のモジュール doc が掲げる目的の、組み立て側の半分）。
+
+    MUST: **容器のグラフ名 == その席の weights のキー**もここで見る。ランタイムは
+    `prepareContainer(opened, <weights キー>)` で名前で引く（container-v1 §12）ので、綴りが
+    割れた容器は manifest ごと据わり、利用者の `createSession` で初めて「コンテナにグラフが
+    無い」になる。書き手側の綴りの門（各 recipe の定数と AST の突合）はソースしか見ないので、
+    **現物と宣言を突き合わせる唯一の門**がここである。
     """
-    for parts in weight_components(partitioned):
+    for parts, component in weight_components(partitioned):
         try:
-            assert_ir_accepted(verify_container(parts).read)
+            verified = verify_container(parts)
+            assert_ir_accepted(verified.read)
         except (ContainerError, ContainerFormatError) as cause:
             raise DistError(
                 f"{parts[0]}: 組み立ての入力がコンテナの規則を満たさない: {cause}"
             ) from cause
+        graphs = set(verified.read.graph.graphs)
+        if graphs != {component}:
+            raise DistError(
+                f"{parts[0]}: 容器のグラフ名 {sorted(graphs)} が weights のキー"
+                f" '{component}' と違う — ランタイムはこのキーでグラフを引く"
+                "（container-v1 §12）ので、このまま配ると createSession で落ちる"
+            )
 
 
 def assert_root_files(root_files: Mapping[str, str]) -> None:

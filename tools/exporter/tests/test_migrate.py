@@ -72,7 +72,7 @@ ROPE_BASE_ASSET, ROPE_BASE_ROLE = EXTRA_ASSETS[ROPE_BASE_NAME]
 #: とは別の軸で、資産 1 本ぶんの大きさを決める）。
 PLE_BLOCK_BYTES = 64
 
-#: 移行の呼び手が渡す出所（`--license` は必須・`writer` は CLI が既定を埋める）。
+#: 移行の呼び手が渡す出所（`--license` は必須・`writer` は明示したときだけ載る）。
 PROVENANCE = Provenance(license="apache-2.0", writer="karume/test")
 
 #: 合成資産（数 KiB）で part またぎと piece 分割を踏むために下げた寸法。
@@ -460,19 +460,37 @@ class TestTheCli:
         assert (tmp_path / "out" / "model.i4-00001-of-00003.krm").is_file()
         assert "parts 3" in printed and "payloads" in printed
 
-    def test_the_writer_defaults_to_the_generator_tag(
+    def test_the_writer_is_absent_unless_the_caller_names_one(
         self, component: tuple[Path, dict[str, str], dict[str, bytes]], tmp_path: Path
     ) -> None:
-        from karume.dist import generator_tag
+        """MUST: 既定では `writer` を**書かない**（生成器タグを埋めない）。
 
+        埋めると、移行した容器と recipe が直接 export した容器（`PROVENANCE` はどれも
+        `writer` を綴らない）が永久に別バイトになる — 実測で、ミラー 7 リポの part 0 が
+        `,"writer":"karume/0.12.0"` の 25 バイトぶんだけ焼き直しと食い違っていた。
+        ツールの版は `karume.json` の `generator` 欄が 1 箇所で持つ。
+        """
         path, _, _ = component
         migrate.main([str(path), "--out", str(tmp_path / "out"), "--license", "mit"])
-        parts = sorted((tmp_path / "out").glob("*.krm"))
-        read = read_container(parts)
+        read = read_container(sorted((tmp_path / "out").glob("*.krm")))
 
         assert read.model is not None
         assert read.model.provenance.license == "mit"
-        assert read.model.provenance.writer == generator_tag()
+        assert read.model.provenance.writer is None
+        assert "writer" not in read.model.provenance.to_document()
+
+    def test_an_explicit_writer_is_still_written(
+        self, component: tuple[Path, dict[str, str], dict[str, bytes]], tmp_path: Path
+    ) -> None:
+        """対（恒真でない）: 明示すれば載る — 落ちたのは「既定」であって席ではない。"""
+        path, _, _ = component
+        migrate.main(
+            [str(path), "--out", str(tmp_path / "out"), "--license", "mit", "--writer", "acme/1"]
+        )
+        read = read_container(sorted((tmp_path / "out").glob("*.krm")))
+
+        assert read.model is not None
+        assert read.model.provenance.writer == "acme/1"
 
     @pytest.mark.parametrize("missing", [["--license", "mit"], ["--out", "/tmp/out"]])
     def test_it_requires_both_the_output_directory_and_the_license(
@@ -630,13 +648,19 @@ class TestTheMigratedContainerMatchesADirectWrite:
             }
             return migrated, direct
         ple = legacy_ple_sidecar(repo)
-        refs = tuple(
-            (name, FileRef(name, (repo / name).stat().st_size, "0" * 64))
-            for name in (PLE_INDEX_FILE, PLE_SHARD_FILE)
-        )
-        index = migrate.read_ple_index(repo / PLE_INDEX_FILE, where)
-        fold = migrate._PleFold("enc", ((PLE_INDEX_ASSET, refs[0][1]), refs[1]), index)
-        migrated = migrate._ple_assets(repo, fold, PLE_BLOCK_BYTES, where)
+        if kind == "ple-sidecar":
+            # 系列ディレクトリを移す経路（`migrate_series` が通る口 — 在処は索引が名乗る）。
+            migrated = migrate.ple_sidecar_assets(
+                repo / PLE_INDEX_FILE, where=where, block_bytes=PLE_BLOCK_BYTES
+            )
+        else:
+            refs = tuple(
+                (name, FileRef(name, (repo / name).stat().st_size, "0" * 64))
+                for name in (PLE_INDEX_FILE, PLE_SHARD_FILE)
+            )
+            index = migrate.read_ple_index(repo / PLE_INDEX_FILE, where)
+            fold = migrate._PleFold("enc", ((PLE_INDEX_ASSET, refs[0][1]), refs[1]), index)
+            migrated = migrate._ple_assets(repo, fold, PLE_BLOCK_BYTES, where)
         direct = ple_assets(
             storage=ple.storage,
             tokens=ple.tokens,
@@ -649,12 +673,15 @@ class TestTheMigratedContainerMatchesADirectWrite:
         )
         return migrated, direct
 
-    @pytest.mark.parametrize("kind", ["rope_base", "ple"])
+    @pytest.mark.parametrize("kind", ["rope_base", "ple", "ple-sidecar"])
     def test_both_routes_place_the_same_assets(self, tmp_path: Path, kind: str) -> None:
         """資産を同梱した容器も両経路でバイト同一（契約の「重み + scale + const + 資産 1 本」）。
 
         `rope_base` は通常 part に載る資産、PLE は **1 block = 1 part**（`dedicated_part`）の
-        資産で、物理配置の規則が別 — どちらも踏む。
+        資産で、物理配置の規則が別 — どちらも踏む。PLE は在処の引き方が 2 つあるので
+        （旧 manifest の `assets` / 索引が名乗るファイル名）、**両方**を直接書きと突き合わせる
+        — 資産の block id は呼び手が渡した dict の順で決まる（`_plan_asset_parts` は並べ直さない）
+        ので、経路ごとに並びが割れると「同じ値・別バイトの容器」ができる。
         """
         migrated_assets, direct_assets = self._asset_material(tmp_path, kind)
         graph, tensors, scales, _ = self._material("f32")

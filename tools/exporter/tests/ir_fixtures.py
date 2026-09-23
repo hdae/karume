@@ -106,6 +106,7 @@ def _write(
     tensors: dict[str, torch.Tensor],
     *,
     mark: str,
+    named: str | None,
     storage: str,
     scales: dict[str, torch.Tensor],
     overrides: dict[str, str],
@@ -127,7 +128,7 @@ def _write(
             stored.graph,
             stored.tensors,
             stored.bindings,
-            graph_name=graph_name(mark),
+            graph_name=named if named is not None else graph_name(mark),
             provenance=FIXTURE_PROVENANCE,
             assets=assets,
             part_bytes=part_bytes,
@@ -139,6 +140,7 @@ def _write(
 def ir_container(
     *,
     mark: str = "fixture",
+    named: str | None = None,
     storage: str = "f32",
     inputs: Sequence[tuple[str, Shape]] = (),
     outputs: Sequence[Shape] = ([1],),
@@ -177,6 +179,11 @@ def ir_container(
     「記号次元を持つグラフを配らない」側の門を試すための故障注入の席で、束縛点を持たない記号を
     名乗るのは実物には無い形である — 束縛点のある記号は `inputs` の shape に綴ればよい。
 
+    `named` は容器のグラフ名 = **部品名**（`karume.json` の weights のキー）。既定は `mark` から
+    導いた綴りで、weights の席へ挿すフィクスチャは**そのキーで名乗らせる** MUST — 組み立ては
+    グラフ名とキーの一致を見る（{@link karume.dist.assert_weight_components_verified}）ので、
+    `mark` 由来の綴り（`siglip2-vision` など）のままだと実物には無い形の入力になる。
+
     `part_bytes` / `block_bytes` は寸法の差し込み（`publish_container` の席）— 合成の小さい重みを
     **複数 part** / **piece 列**へ割らせるための席で、既定は実物と同じ 256 MiB / 32 MiB。何本に
     なるかは現物のバイト数が決めるので、渡した側は本数を仮定せず**現物を観測する**こと。
@@ -188,6 +195,7 @@ def ir_container(
         graph,
         tensors,
         mark=mark,
+        named=named,
         storage=storage,
         scales=scales,
         overrides=overrides,
@@ -219,7 +227,7 @@ def fill_spec(count: int, *, mark: str) -> tuple[IrGraph, dict[str, torch.Tensor
     return IrGraph(initializers=initializers, values=values, outputs=names[:1]), tensors
 
 
-def ir_parts(count: int, *, mark: str) -> list[bytes]:
+def ir_parts(count: int, *, mark: str, named: str | None = None) -> list[bytes]:
     """`count` 本の part 列になる正当なコンテナ（添字順 — 先頭が part 0）。
 
     何本に割れるかは現物のバイト数が決めるので、同じ大きさのテンソルを `count - 2` 本並べ、
@@ -234,6 +242,7 @@ def ir_parts(count: int, *, mark: str) -> list[bytes]:
         graph,
         tensors,
         mark=mark,
+        named=named,
         storage="f32",
         scales={},
         overrides={},

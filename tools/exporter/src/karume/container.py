@@ -784,8 +784,13 @@ def weight_channel_axes(graph: IrGraph) -> dict[str, int]:
     return axes
 
 
-def _concrete_shape(graph: IrGraph, name: str, where: str) -> list[int]:
-    """initializer の宣言 shape（記号次元を持つ実体は在りえない）。"""
+def concrete_shape(graph: IrGraph, name: str, where: str) -> list[int]:
+    """initializer の宣言 shape（記号次元を持つ実体は在りえない）。
+
+    移行 CLI（`karume.migrate._assert_scale_layouts`）も同じ判定を要るので、束縛の導出
+    （{@link container_bindings}）と**同じ 1 本**を公開面に置く。写しを持つと、記号次元の
+    扱いが片方だけ動いた日に「書き手は落ちるのに移行は通る」形が作れる。
+    """
     value = graph.values.get(name)
     if value is None:
         raise ContainerFormatError(f"{where}: `values` に宣言が無い")
@@ -832,7 +837,7 @@ def container_bindings(graph: IrGraph) -> dict[str, Encoding]:
             raise ContainerFormatError(
                 f"{where}: 量子化格納 '{storage.dtype}' なのに scale の宣言が無い"
             )
-        shape = _concrete_shape(graph, name, where)
+        shape = concrete_shape(graph, name, where)
         row_axis = axes.get(name, 0)
         if len(shape) <= row_axis:
             raise ContainerFormatError(

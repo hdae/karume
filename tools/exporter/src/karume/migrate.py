@@ -62,6 +62,7 @@ from karume.container import (
     Provenance,
     base_path,
     codec_entry,
+    concrete_shape,
     container_bindings,
     sequence_siblings,
 )
@@ -141,16 +142,15 @@ class _SourcePayloads(Mapping[str, bytes]):
 
 
 def _concrete_shape(graph: IrGraph, name: str, where: str) -> list[int]:
-    """initializer の宣言 shape（記号次元を持つ実体は在りえない）。"""
-    value = graph.values.get(name)
-    if value is None:
-        raise MigrateError(f"{where}: `values` に宣言が無い")
-    shape: list[int] = []
-    for dim in value.shape:
-        if not isinstance(dim, int):
-            raise MigrateError(f"{where}: initializer の shape に記号次元がある（{dim!r}）")
-        shape.append(dim)
-    return shape
+    """initializer の宣言 shape（{@link karume.container.concrete_shape} の翻訳層）。
+
+    本体は書き手と**同じ 1 本**で、ここが足すのは例外の語彙の翻訳だけ（{@link _bindings} と
+    同じ形）— 移行 CLI の呼び手は `MigrateError` だけを捕まえる。
+    """
+    try:
+        return concrete_shape(graph, name, where)
+    except ContainerFormatError as cause:
+        raise MigrateError(str(cause)) from cause
 
 
 def _bindings(graph: IrGraph) -> dict[str, Encoding]:
@@ -247,6 +247,7 @@ def migrate_component(
     *,
     provenance: Provenance,
     graph_name: str | None = None,
+    assets: Mapping[str, AssetInput] = {},
     single: bool = False,
     write_graph: bool = False,
     _part_bytes: int = DEFAULT_PART_BYTES,
@@ -258,6 +259,12 @@ def migrate_component(
     （{@link karume.container.base_path} が畳む）。`graph_name` の既定は**親ディレクトリ名**
     （配布形のコンポーネント名）で、コンテナの語彙（`[A-Za-z0-9._-]{1,64}`）から外れる場合は
     明示する。
+
+    `assets`（資産名 → {@link karume.container.AssetInput}）は旧 shard 列の**隣に散っている**
+    バイト列（PLE sidecar・`rope_base`）を同じ容器へ畳む席。リポ丸ごとモードは旧 manifest の
+    宣言から自分で組む（{@link _convert_unit}）ので、ここを使うのは manifest を持たない
+    置き場（系列ディレクトリ）を移す呼び手 — 畳み方（どのファイルがどの資産名か）は family を
+    知っている側にしか決められないので、core は受け取るだけにする（ADR 0065）。
 
     `_part_bytes` / `_block_bytes` は**テストからのみ触る**寸法の差し込み（合成の小さな資産で
     part またぎと piece 分割を踏むため）— 公開ノブではない。
@@ -275,6 +282,7 @@ def migrate_component(
         final,
         provenance=provenance,
         graph_name=name,
+        assets=assets,
         single=single,
         graph_path=final.with_suffix(GRAPH_SUFFIX) if write_graph else None,
         part_bytes=_part_bytes,
@@ -1143,32 +1151,65 @@ def _segment_reader(
     return read
 
 
+def ple_sidecar_assets(
+    index_path: Path, *, where: str | None = None, block_bytes: int = BLOCK_MAX_BYTES
+) -> dict[str, AssetInput]:
+    """旧 PLE sidecar（`ple.json` + **同じディレクトリに並ぶ** shard 列）を容器の資産へ畳む。
+
+    manifest を持たない置き場（export 系列のディレクトリ）を移す呼び手の入口。畳み方は
+    リポ丸ごとモードと**同じ 1 本**（{@link _fold_ple}）で、違うのは shard の在処を
+    旧 manifest の `assets` から引くか索引が名乗るファイル名から引くかだけである。
+
+    NOTE: この経路では畳み先の門のうち**並びと本数の 2 つは自明に真**（列を索引そのものから
+    組むので）— 効くのは旧 manifest から在処を引く側だけである。したがって「索引に載って
+    いない `ple-*.safetensors` が現物に在る」を見るのは**呼び手の責務**で、ここは通す。
+    """
+    at = str(index_path) if where is None else where
+    index = read_ple_index(index_path, at)
+    directory = index_path.parent
+    shards = [(str(entry["file"]), directory / str(entry["file"])) for entry in index["shards"]]
+    return _fold_ple(shards, index, block_bytes, at)
+
+
 def _ple_assets(
     repo: Path, fold: _PleFold | None, block_bytes: int, where: str
 ) -> dict[str, AssetInput]:
-    """旧 PLE sidecar を容器の資産へ畳む（組み立て自体は {@link ple_assets} の 1 本）。
+    """旧 manifest が宣言した PLE sidecar を容器の資産へ畳む（在処は `assets` の FileRef）。"""
+    if fold is None:
+        return {}
+    # 先頭は索引そのもの（畳み先では新しい索引に置き換わる）ので落とす。
+    shards = [(name, repo / ref.path) for name, ref in fold.refs[1:]]
+    return _fold_ple(shards, fold.index, block_bytes, where)
+
+
+def _fold_ple(
+    shards: Sequence[tuple[str, Path]],
+    index: Mapping[str, Any],
+    block_bytes: int,
+    where: str,
+) -> dict[str, AssetInput]:
+    """PLE shard 列 → 容器の資産（組み立て自体は {@link ple_assets} の 1 本）。
 
     ここが持つのは**旧 sidecar の読み取り**だけ — 索引と現物の突合（行数・バイト長・shard の
     並び・`karume_ple` メタデータ）を済ませ、token 順に連結した区間列を読み口として渡す。旧
     shard の境界は意味を持たない（全 shard を token 順に連結して切り直す）。
     """
-    if fold is None:
-        return {}
-    index = fold.index
-    shard_refs = fold.refs[1:]  # 先頭は索引そのもの（畳み先では新しい索引に置き換わる）。
     tokens, layers, dim = index["tokens"], index["layers"], index["dim"]
     try:
         row_bytes = ple_row_bytes(index["storage"], layers, dim)
     except PleError as cause:
         raise MigrateError(f"{where}: {cause}") from cause
     segments: dict[str, list[tuple[Path, int, int]]] = {"values": [], "scales": []}
-    for position, (name, ref) in enumerate(shard_refs):
+    _require(
+        len(shards) == len(index["shards"]),
+        f"{where}: PLE shard が {len(shards)} 本（索引は {len(index['shards'])} 本）",
+    )
+    for position, (name, path) in enumerate(shards):
         declared = index["shards"][position]
         _require(
             name == declared["file"],
             f"{where}: PLE shard の並びが索引と違う（{position} 番目は '{declared['file']}'）",
         )
-        path = repo / ref.path
         rows = declared["stop"] - declared["start"]
         metadata, entries, data_start = _read_sidecar_header(path)
         _assert_ple_metadata(metadata, index, declared, f"{where} の '{name}'")
@@ -1265,7 +1306,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--upstream-revision", default=None, help="provenance.upstreamRevision（上流の revision）"
     )
     parser.add_argument(
-        "--writer", default=None, help=f"provenance.writer（既定: {generator_tag()}）"
+        "--writer",
+        default=None,
+        help="provenance.writer（既定: 書かない — 呼び手が明示したときだけ容器に載る）",
     )
     parser.add_argument(
         "--graph-name",
@@ -1286,13 +1329,19 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     MUST: 落ちたところで止める（残りを移して最後にまとめない）— 例外は破れた不変条件まで
     綴ってあるので、そのまま送出するのが最も情報量が多い。
+
+    MUST: `provenance.writer` は**既定で書かない**。生成器タグを既定で埋めると、移行した容器と
+    recipe が直接 export した容器（`PROVENANCE` はどれも `writer` を綴らない）が永久に別バイト
+    になり、「ミラーを焼き直したらモデル記述だけが動く」形になる。ツールの版を持つ席は
+    `karume.json` の `generator` 欄 1 箇所で、容器側に写しを置く理由が無い（golden が
+    `writer` を書かない理由と同じ — {@link karume.goldens.GOLDEN_PROVENANCE}）。
     """
     args = build_parser().parse_args(argv)
     provenance = Provenance(
         license=args.license,
         notice=args.notice,
         upstream_revision=args.upstream_revision,
-        writer=args.writer if args.writer is not None else generator_tag(),
+        writer=args.writer,
     )
     if args.manifest is not None:
         _run_repository(args, provenance)
