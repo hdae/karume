@@ -1,7 +1,7 @@
 # ACTIVE_DESIGN — Karume
 
 > 現在の設計とレビューの入口。履歴はADR / research / gitに置き、作業順は[backlog](../docs/backlog.md)、性能の採否は[perf-ledger](../docs/perf-ledger.md)を正本とする。
-> Last updated: 2026-09-23（コンテナ形式の波 段2進行中 — 段1完了・ADR 0109〈manifest karume/5〉accepted・hub / runtime / exporter / modelsの2a〜2e済・ローカルミラー11本を`karume/5`へ移行済み・残りは2f〈RAMピークharness〉と1系列の再アップロード。backlogの消化済み12節は[退避スナップショット](../docs/research/2026-09-22-backlog-archive-0.5.0-to-0.12.0.md)へ移し、backlogは運用契約どおり未消化項目だけになった）
+> Last updated: 2026-09-23（コンテナ形式の波 段2進行中 — 段1完了・ADR 0109〈manifest karume/5〉accepted・hub / runtime / exporter / modelsの2a〜2e済・ローカルミラー11本を`karume/5`へ移行済み・2f〈RAMピークharness `tools/ram-peak/matrix.ts`・検収②③は[研究記録](../docs/research/2026-09-23-container-ram-peak.md)〉も済・残りはirodori-v4.1-smallの再アップロードとpin更新。backlogの消化済み12節は[退避スナップショット](../docs/research/2026-09-22-backlog-archive-0.5.0-to-0.12.0.md)へ移し、backlogは運用契約どおり未消化項目だけになった）
 
 ## 現在の焦点
 

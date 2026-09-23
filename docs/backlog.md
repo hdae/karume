@@ -25,9 +25,12 @@
   block 化 schema 3・`karume verify --container`）/ 2e models（8 系列の container 経路・部品差し替え席
   `components`・PLE を容器の資産から）。**検収①は閉じた**（ミラー 11 本を移行 → TS の読み手で一意 108 容器・
   block 40,939 本・initializer 31,882 本・66.8 GiB の sha256 と合流を全件確認 — ADR 0108 追記 3 の 7）。
-  ローカルミラーは `models/`（移行済み `karume/5`）と `models-v4/`（旧・git 追跡外）の 2 本。**残り** =
-  2f（RAM ピーク harness の cold / warm / local と digest 計数 = 検収②③・irodori-v4.1-small の再アップロード
-  と pin 更新 = 検収①の実 pin）。持ち越した宿題のうち 128 鎖の突合・`karume verify` のコンテナ席・`assets` の
+  ローカルミラーは `models/`（移行済み `karume/5`）と、旧 `karume/4` のミラーはリポ外
+  `~/workspace/karume-models-v4/`（git 追跡外）。2f（RAM ピーク harness `tools/ram-peak/matrix.ts`）も済 —
+  検収②③は[研究記録](research/2026-09-23-container-ram-peak.md)（warm は payload の digest 0 回・scan 型の
+  ピークは seek 型の約 2 倍）。**残り** = irodori-v4.1-small の再アップロードと pin 更新（検収①の実 pin）。
+  **段 3 へ持ち越す RAM ピークの改善候補**（実測で採否）: hub の scan 型で取得層の `readFile` に器を渡す /
+  runtime の `containerBatches` を part 単位の items から block（予算）単位の yield へ / `slice()` を view に。持ち越した宿題のうち 128 鎖の突合・`karume verify` のコンテナ席・`assets` の
   受け口は段 2 で閉じ、1 コンテナ複数グラフは形式の能力のまま `karume/5` では使わない（ADR 0109 決定 2）。
   段 0 の宿題だった `pushErrorScope('validation')` の同期区間を block 単位に割る費用は実測で閉じた
   （push/pop 1.81 µs / 回・フェンス 13.0 ms / 回 — ADR 0108 決定 9 に追記済み）。段 1〜6 の作るものと検収は

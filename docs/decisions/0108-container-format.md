@@ -685,3 +685,13 @@ manifest の形は ADR [0109](0109-manifest-v5-container.md)、PLE は ADR [0085
    506 MiB）。読み口は費用型を持たないので seek / scan の方針表は消え、全量読みへ倒す下限は
    `min(32, block の行数)`。読み 1 本を途中で畳む口は無い（`AssetReader.read` は signal を受けない）ので
    中断は gather の段の境目だけ。
+10. **検収②③（RAM ピーク harness・warm の digest）**: `tools/ram-peak/matrix.ts` を新設し、実資産 3 構成
+    （gemma4 e2b `i4-fast` / irodori v4.1-small `i8-a8` / anima turbo `f16+dit8-a8-attn8-s16`）で cold →
+    warm → local を各 3 回測った（[研究記録](../research/2026-09-23-container-ram-peak.md)）。warm は
+    3 構成とも **payload の digest 0 回・キャッシュ書込 0 本**（descriptor 2 文書の突合は開くたびに掛かる —
+    container-v1 §7 の①）。ホスト RAM のピークは seek 型（ローカルの位置読み・ブラウザの Blob）で
+    「part 1 本 + block 1 本」の見積りに収まり、Deno の HF 経由（scan 型）はその約 2 倍（part 2〜3 本が
+    同時に生きる — 取得層の新規バッファ + hub の 1 枠 + runtime の part 単位の items）。改善候補は段 3
+    （「part 長の既定の見直し」と同じ回）で実測して採否を付ける。Range 取得（段 6）の前倒し条件
+    「cold のピークが part 長 + 重ね合わせを超える」には、seek 型では当たらず scan 型で当たる — ただし
+    scan 型の超過は取得ではなく保持の重複が原因なので、Range ではなく上の候補で閉じる。
