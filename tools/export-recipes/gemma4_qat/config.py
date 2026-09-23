@@ -26,8 +26,14 @@ DEFAULT_CAPACITY = 4096
 DEFAULT_CHUNK_LENGTH = 768
 
 #: `reference.json` の schema 版。schema 2 で「常に True の bytes 一致フラグ」を落とし、
-#: 照合した固定重みの本数・格納内訳・PLE shard 本数を配布側が現物と突き合わせる形にした。
-REFERENCE_SCHEMA = 2
+#: 照合した固定重みの本数・格納内訳・PLE の本数を配布側が現物と突き合わせる形にした。
+#:
+#: schema 3 は**PLE の数え方の繰り上げ**: sidecar の shard 本数（`pleShards`）から容器の資産の
+#: block 本数（`pleBlocks`）へ変わった。block の切り方は旧 shard 境界を無視するので 2 つは
+#: 別の数で、schema を据え置くと旧世代の記録が版の門を素通りして「欄が無い」でだけ落ちる
+#: （何が食い違っているか綴られない）。移行は記録も schema 3 へ追随させる
+#: （`migrate_series.rewrite_qat_reference`）。
+REFERENCE_SCHEMA = 3
 
 
 def checkpoint_name(model: str) -> str:

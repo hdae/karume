@@ -84,6 +84,13 @@ DEFAULT_OUT_DIR = SERIES_ROOT / "embeddinggemma-300m"
 
 MODEL_FILE = "model.krm"
 
+#: 容器のグラフ名 = **配布形の部品名**（= `karume.json` の weights のキー —
+#: container-v1 §12）。この recipe は配布形を組まない（`distribution.py` が無い）が、グラフ名は
+#: ランタイムが `prepareContainer(opened, <weights キー>)` で引く綴りなので、組む日が来た
+#: ときに据わっている容器がそのまま使えるよう、**部品 1 つの系列の慣例**（`model`）で
+#: 名乗っておく。系列ディレクトリ名（`embeddinggemma-300m`）とは一致しない。
+GRAPH_NAME = "model"
+
 #: 容器へ焼く出所（container-v1 §2.3）。この recipe は配布形を組まない（カードも
 #: `distribution.py` も無い）ので、識別子の出どころは上流モデルカードの宣言そのもので、
 #: `THIRD_PARTY_NOTICES.md` が「使った revision に対しては未確認」と記録している値である。
@@ -417,8 +424,8 @@ def export_series(
             (example_ids, example_mask),
             staged / MODEL_FILE,
             provenance=PROVENANCE,
-            # グラフ名は**部品名**（= karume.json の weights のキー = 据え替え先のディレクトリ名）。
-            graph_name=out_dir.name,
+            # グラフ名は**部品名**（{@link GRAPH_NAME}）— ディレクトリ名から導かない。
+            graph_name=GRAPH_NAME,
             dynamic_shapes=({1: seq}, {1: seq}),
             preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
         )

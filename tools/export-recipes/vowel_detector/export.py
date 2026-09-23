@@ -116,6 +116,7 @@ from karume.ir import IrGraph
 from karume.pipeline import export_to_file
 
 from .card import VOWEL_DETECTOR_LICENSE
+from .distribution import VOWEL_DETECTOR_GRAPH_ROLE
 from .patch import gru_forward
 
 #: 実重みの親（手置きの入力素材 — docs/assets-layout.md）。
@@ -503,8 +504,10 @@ def export_series(ckpt: Path, out_dir: Path, length: int) -> dict[str, Any]:
             (example,),
             staged / MODEL_FILE,
             provenance=PROVENANCE,
-            # グラフ名は**部品名**（= karume.json の weights のキー = 据え替え先のディレクトリ名）。
-            graph_name=out_dir.name,
+            # グラフ名は**部品名**（= karume.json の weights のキー）。ディレクトリ名から
+            # 導かない — この family の容器は系列直下に据わるので、ディレクトリ名は系列名
+            # （`vowel-detector-<チェックポイント名>`）であって部品名ではない（container-v1 §12）。
+            graph_name=VOWEL_DETECTOR_GRAPH_ROLE,
             # MUST: 記号は出力の 20ms 格子側に置く（`2*Dim("T")` — モジュール docstring の
             # 「長さ軸」）。素の `Dim("T")` だと conv の出力が床除算になり次元言語に載らない。
             dynamic_shapes={INPUT_NAME: {1: 2 * Dim("T", min=SYM_MIN, max=SYM_MAX)}},

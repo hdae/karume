@@ -111,6 +111,7 @@ from torch.export import Dim
 from _shared.paths import INPUTS_ROOT, SERIES_ROOT
 from gemma4 import ple, rope
 from gemma4.card import GEMMA4_LICENSE
+from gemma4.distribution import GEMMA4_ROLE
 from karume.artifacts import staged_publication
 from karume.container import Provenance, container_parts
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION, normalize_boundary_tensor
@@ -815,9 +816,10 @@ def export_series(model_dir: Path, out_dir: Path, *, sym_max: int = SYM_MAX) -> 
             (example_ids,),
             staged / MODEL_FILE,
             provenance=PROVENANCE,
-            # グラフ名は**部品名**（= karume.json の weights のキー = 据え替え先の
-            # ディレクトリ名）。
-            graph_name=out_dir.name,
+            # グラフ名は**部品名**（= karume.json の weights のキー）。ディレクトリ名から
+            # 導かない — 系列名（`gemma4-e2b-product`）も作業席の名前も部品名とは一致しない
+            # （container-v1 §12）。
+            graph_name=GEMMA4_ROLE,
             dynamic_shapes=({1: seq},),
             preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
             weight_dtype="i8",

@@ -11,6 +11,7 @@ from _shared.container_read import read_layouts
 from _shared.licenses import apache_license_2_0
 from gemma4.distribution import (
     GEMMA4_ASSETS,
+    GEMMA4_ROLE,
     assert_gemma4_graph,
     assert_gemma4_ple_assets,
     assert_gemma4_tokenizer,
@@ -158,18 +159,43 @@ def qat_quants(model: str) -> Mapping[str, Any]:
     return quants
 
 
+#: 旧 sidecar 世代の記録が名乗る PLE の本数 → 容器の資産の block 本数（schema 3 の繰り上げ）。
+REFERENCE_SHARDS_FIELD = "pleShards"
+REFERENCE_BLOCKS_FIELD = "pleBlocks"
+
+
+def assert_reference_generation(reference: Mapping[str, Any], where: Path) -> None:
+    """検収記録が**今の世代**であること（版の不一致は欄の不在で綴る）。
+
+    MUST: 旧世代を名指しで落とす — schema を据え置いたまま欄名だけ変えると、古い記録は版の
+    門を素通りして「`pleBlocks`（= None）が現物と違う」でだけ落ち、実際に足りないのが
+    **欄そのもの**であることがどこにも出ない。
+    """
+    schema = reference.get("schema")
+    if schema == REFERENCE_SCHEMA:
+        return
+    if REFERENCE_SHARDS_FIELD in reference:
+        raise DistError(
+            f"{where}: 旧 sidecar 世代の検収記録（schema {schema} —"
+            f" `{REFERENCE_SHARDS_FIELD}` を持ち `{REFERENCE_BLOCKS_FIELD}` を持たない）。"
+            " PLE は容器の資産へ畳まれ、数える単位が shard から block へ変わった"
+            " — 系列を移行（`migrate_series`）するか再 export する"
+        )
+    raise DistError(f"{where}: QAT reference の schema が {schema}（期待 {REFERENCE_SCHEMA}）")
+
+
 def qat_plan(series_dir: Path, model: str) -> ModelPlan:
     """検査した1系列から配布計画を作る。元チェックポイントの再ダウンロードは不要。"""
     source = series_dir / series_name(model)
     reference = json.loads((source / "reference.json").read_text())
+    assert_reference_generation(reference, source / "reference.json")
     if (
-        reference.get("schema") != REFERENCE_SCHEMA
-        or reference.get("family") != "gemma4-qat"
+        reference.get("family") != "gemma4-qat"
         or reference.get("model") != model
         or reference.get("maxChunkLength") != MAX_CHUNK_LENGTH
         or reference.get("maxSelectedRows") != MAX_SELECTED_ROWS
     ):
-        raise DistError("QAT reference の schema/family/model/trace範囲が合わない")
+        raise DistError("QAT reference の family/model/trace範囲が合わない")
     container = source / "model.krm"
     index = gemma4_ple_index(container, storage=f"i{PLE_BITS[model]}")
     for dtype in FIXED_STORAGE_DTYPES:
@@ -180,12 +206,24 @@ def qat_plan(series_dir: Path, model: str) -> ModelPlan:
     assert_qat_graph(graph, layouts)
     # 変換時の検証結果は「何本を照合したか」で突き合わせる（常に True のフラグは門にならない）。
     counts = fixed_storage_counts(graph, layouts)
-    if (
-        reference.get("fixedWeights") != sum(counts.values())
-        or reference.get("storageCounts") != counts
-        or reference.get("pleBlocks") != len(index["values"]["blocks"])
-    ):
-        raise DistError("QAT reference の固定重み本数・格納内訳・PLE block 本数が現物と違う")
+    actual = {
+        "fixedWeights": sum(counts.values()),
+        "storageCounts": counts,
+        REFERENCE_BLOCKS_FIELD: len(index["values"]["blocks"]),
+    }
+    differing = {
+        field: (reference.get(field), value)
+        for field, value in actual.items()
+        if reference.get(field) != value
+    }
+    if differing:
+        raise DistError(
+            "QAT reference の固定重み本数・格納内訳・PLE block 本数が現物と違う: "
+            + " / ".join(
+                f"{field} 記録 {recorded} ≠ 現物 {value}"
+                for field, (recorded, value) in sorted(differing.items())
+            )
+        )
     config = gemma4_text_config(source)
     where = str(source / "config.json")
     rope = gemma4_rope(config, where)
@@ -196,7 +234,7 @@ def qat_plan(series_dir: Path, model: str) -> ModelPlan:
     assert_gemma4_ple_assets(container, index)
     assert_gemma4_tokenizer(source / "tokenizer.json", vocab)
     artifacts = {
-        "model": Artifact("model/model.i4.krm", source=container),
+        GEMMA4_ROLE: Artifact(f"{GEMMA4_ROLE}/model.i4.krm", source=container),
         "tokenizer": Artifact("tokenizer/tokenizer.json", source=source / "tokenizer.json"),
     }
     quant_modes = qat_quants(model)
@@ -204,7 +242,9 @@ def qat_plan(series_dir: Path, model: str) -> ModelPlan:
         name=model,
         pipeline="gemma4-qat/1",
         artifacts=artifacts,
-        weights={"model": {"i4": WeightFiles("model")}},
+        # 部品名は通常 Gemma と同じ 1 語（書き手 `gemma4_qat/export.py` も同じ定数で
+        # 容器のグラフを名乗る — container-v1 §12）。
+        weights={GEMMA4_ROLE: {"i4": WeightFiles(GEMMA4_ROLE)}},
         assets=GEMMA4_ASSETS,
         quants=quant_modes,
         default_quant=QAT_DEFAULT_QUANT[model],

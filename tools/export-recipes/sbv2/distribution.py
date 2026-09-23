@@ -194,19 +194,34 @@ SBV2_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {
     "voice_i8": ("i4",),
 }
 
+#: 配布形に載る部品名 = manifest の weights のキー = **容器のグラフ名**（container-v1 §12 —
+#: ランタイムは `prepareContainer(opened, <weights キー>)` で名前で引く）。書き手はここから
+#: 引く: `front` / `voice` は `sbv2/export.py` の `TARGET_*`、`text_encoder` は別台本
+#: （`deberta/export.py`）が写しを持つ（produce 側が consume 側を import する向きは作らない
+#: — {@link EXPORT_PROVENANCE_FILE} と同じ理由で、一致は deberta 側のテストが突き合わせる）。
+#:
+#: NOTE: `dp` / `flow` / `dec` は golden 検証専用の単体グラフで配布形に載らない（モジュール
+#: docstring）ので、部品名を持たない — 書き手はターゲット名をそのままグラフ名にする。
+SBV2_TEXT_ENCODER_COMPONENT = "text_encoder"
+SBV2_FRONT_ROLE = "front"
+SBV2_VOICE_ROLE = "voice"
+
 #: weights の宣言（dtype ラベル → 役割名）。dtype キーは ADR 0041 §3 の統一形（v1 の `{file}` /
 #: `{variants}` の 2 形は消えた）。どの役割でも `i4` は**混成の系列**を指すラベルで、実体は
 #: 「i4 適格な重みが i4 group32・残りは i8」— 適格の範囲は台本ごとに違い、`text_encoder` は
 #: linear + 語彙表（`deberta/export.py`）、`front` / `voice` は linear + conv1d
 #: （`sbv2/export.py` — groups == 1 かつ行長が group32 で割り切れるもの）。
 SBV2_WEIGHTS: Mapping[str, Mapping[str, WeightFiles]] = {
-    "text_encoder": {"i8": WeightFiles("text_encoder"), "i4": WeightFiles("text_encoder_i4")},
-    "front": {
+    SBV2_TEXT_ENCODER_COMPONENT: {
+        "i8": WeightFiles("text_encoder"),
+        "i4": WeightFiles("text_encoder_i4"),
+    },
+    SBV2_FRONT_ROLE: {
         "f16": WeightFiles("front_f16"),
         "i8": WeightFiles("front_i8"),
         "i4": WeightFiles("front_i4"),
     },
-    "voice": {
+    SBV2_VOICE_ROLE: {
         "f16": WeightFiles("voice_f16"),
         "i8": WeightFiles("voice_i8"),
         "i4": WeightFiles("voice_i4"),

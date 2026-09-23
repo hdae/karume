@@ -117,6 +117,13 @@ _SBV2_GRAPH_OUTPUTS = 1
 _SBV2_BERT_FROM_END = 1
 
 
+#: 役割（dtype ラベルつきの席）→ **部品名** = manifest の weights のキー = 容器のグラフ名
+#: （container-v1 §12）。`text_encoder` と `text_encoder_i4` は同じ 1 つの部品の 2 dtype なので、
+#: 名乗る綴りは 1 つ。宣言から導く（写しを持つと片方だけ動く）。
+_SBV2_COMPONENTS: Mapping[str, str] = {
+    files.file: component for component, labels in SBV2_WEIGHTS.items() for files in labels.values()
+}
+
 #: 役割 → その系列の格納 dtype（IR の語彙）。
 _SBV2_STORAGES: Mapping[str, str] = {
     "text_encoder": "i8",
@@ -161,6 +168,8 @@ def _sbv2_container(
         axis: Any = 4 if sym_max is None else _SBV2_TEXT_ENCODER_SYMBOL
         return ir_container(
             mark=mark,
+            # 疑似系列も**部品名で名乗る**（組み立ての門がグラフ名とキーの一致を見る）。
+            named=_SBV2_COMPONENTS[role],
             storage=dtype,
             inputs=tuple((name, (1, axis)) for name in inputs),
             outputs=[[1, axis]] * outputs,
@@ -174,6 +183,7 @@ def _sbv2_container(
     ceiling = expectation.sym_max if sym_max is None else sym_max
     return ir_container(
         mark=mark,
+        named=_SBV2_COMPONENTS[role],
         storage=dtype,
         inputs=(("x", (expectation.symbol,)),),
         baked=(expectation.symbol, ceiling) if baked else None,

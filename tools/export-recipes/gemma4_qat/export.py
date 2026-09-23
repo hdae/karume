@@ -13,6 +13,7 @@ from safetensors import safe_open
 
 from _shared.gemma_tokenizer import asset_payload, compile_tokenizer
 from _shared.paths import INPUTS_ROOT, SERIES_ROOT
+from gemma4.distribution import GEMMA4_ROLE
 from gemma4.export import MODEL_FILE, PROVENANCE
 from gemma4.export_product import PLE_PROBE_FILE, PROBE_INPUTS_KEY, assert_ple_assets
 from gemma4.provenance import checkpoint_fingerprint
@@ -84,8 +85,10 @@ def export_qat(model_dir: Path, destination: Path, model: str) -> dict[str, Any]
                 traced.graph,
                 traced.tensors,
                 provenance=PROVENANCE,
-                # グラフ名は**部品名**（= 据え替え先のディレクトリ名 — 作業席の名前ではない）。
-                graph_name=destination.name,
+                # グラフ名は**部品名**（= karume.json の weights のキー）。QAT 系列の部品名は
+                # 通常 Gemma と同じ 1 語（`gemma4_qat.distribution` の weights も同じ定数で名乗る）
+                # で、系列名（`gemma4-qat-<モデル>-product`）とは一致しない（container-v1 §12）。
+                graph_name=GEMMA4_ROLE,
                 fixed_weights=traced.fixed,
                 assets=ple.assets,
             )

@@ -129,6 +129,7 @@ from torch.export import Dim
 
 from _shared.paths import INPUTS_ROOT, SERIES_ROOT
 from irodori.card import IRODORI_LICENSE
+from irodori.distribution import IRODORI_CODEC_ROLES
 from karume.artifacts import staged_publication
 from karume.container import Provenance, container_parts
 from karume.convert import normalize_boundary_tensor
@@ -1032,9 +1033,10 @@ def export_series(
                 (by_case[longest],),
                 staged / MODEL_FILE,
                 provenance=PROVENANCE,
-                # グラフ名は**部品名**（= karume.json の weights のキー
-                # = 据え替え先のディレクトリ名）。
-                graph_name=target_dir.name,
+                # グラフ名は**部品名**（= karume.json の weights のキー）。コーデックの
+                # ディレクトリ名（`decoder`）とキー（`codec_decoder`）は綴りが違うので
+                # 逆引き表を通す（container-v1 §12）。
+                graph_name=IRODORI_CODEC_ROLES[target],
                 dynamic_shapes=({axis.axis: sequence},),
                 symbol_names=(axis.symbol,),
                 weight_dtype=dtype,

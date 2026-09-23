@@ -1768,7 +1768,11 @@ class TestTheVoiceFamilyIsDecidedByAnAllowList:
 
     @pytest.mark.parametrize("name", ["my-fn-voice", "F3", "sbv2", "copy-of-FN4"])
     def test_an_unknown_directory_name_fails_loudly(self, name: str) -> None:
-        with pytest.raises(ValueError, match="どの声のファミリーの綴りにも当たらない"):
+        # 専用の型で落ちる（素の `ValueError` だと、呼び手の `except` がこの法的事実の門と
+        # 「引数が変」一般を区別できない — リポの流儀は `Error` サブクラス）。
+        with pytest.raises(
+            export_sbv2.Sbv2FamilyError, match="どの声のファミリーの綴りにも当たらない"
+        ):
             export_sbv2.sbv2_family(Path("inputs/sbv2") / name)
 
     def test_every_family_in_the_allow_list_has_a_card_profile(self) -> None:

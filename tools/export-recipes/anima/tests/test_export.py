@@ -60,6 +60,18 @@ class TestTargets:
         assert set(export_anima.LORA_PREFIXES) <= set(export_anima.TARGETS)
         assert set(export_anima.LORA_PREFIXES) == {"transformer", "text_conditioner"}
 
+    def test_emit_refuses_a_target_outside_the_table(self, tmp_path):
+        """MUST: ターゲット名はそのまま容器のグラフ名（= weights のキー）になる。
+
+        表の外の綴りを受けると「ランタイムが引けない容器」が焼ける。門を外すと
+        `BUILDERS[target]` の `KeyError` まで落ちず、`BUILDERS` に表外の席が生えた日に
+        素通りする（綴りの門は `TARGETS` しか見ない）。
+        """
+        with pytest.raises(AssertionError, match="未知のターゲット"):
+            export_anima.emit_target("vae_encoder", argparse.Namespace(), tmp_path / "out")
+
+        assert not (tmp_path / "out").exists()
+
 
 class TestLoraProvenance:
     """焼いた LoRA の帰属は系列に残す（融合後の重みからは復元できない唯一の事実）。"""

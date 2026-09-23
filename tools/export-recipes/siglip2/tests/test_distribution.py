@@ -155,6 +155,9 @@ def _siglip2_container(
     shape: Shape = list(input_shape) if input_shape is not None else [1, 3, height, width]
     return ir_container(
         mark="siglip2-vision",
+        # 疑似系列も**部品名で名乗る**（容器のグラフ名 = manifest の weights のキー
+        # MUST・container-v1 §12 — 組み立ての門がこの一致を見る）。
+        named=SIGLIP2_ROLE,
         storage=storage,
         inputs=((input_name, shape),),
         outputs=[[1, hidden]] * outputs,

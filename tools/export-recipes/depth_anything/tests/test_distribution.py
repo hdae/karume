@@ -137,6 +137,9 @@ def _depth_anything_container(
     depth: Shape = list(depth_shape) if depth_shape is not None else [1, shape[2], shape[3]]
     return ir_container(
         mark="depth-anything",
+        # 疑似系列も**部品名で名乗る**（容器のグラフ名 = manifest の weights のキー
+        # MUST・container-v1 §12 — 組み立ての門がこの一致を見る）。
+        named=DEPTH_ANYTHING_ROLE,
         storage=storage,
         inputs=((input_name, shape),),
         outputs=[depth] * outputs,

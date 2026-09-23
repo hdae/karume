@@ -97,6 +97,19 @@ IRODORI_CODEC_DIRS: Mapping[str, str] = {
 #: グラフを持つ役割の全体（Irodori 本体 6 + コーデック 2）。
 IRODORI_GRAPH_ROLES: tuple[str, ...] = (*IRODORI_SERIES_DIRS, *IRODORI_CODEC_DIRS)
 
+#: 系列のターゲットディレクトリ名 → 役割名（上の 2 表の逆引き）。**書き手が容器のグラフを
+#: 名乗るための表**で、グラフ名は manifest の weights のキーと一致すること MUST
+#: （container-v1 §12 — ランタイムは `prepareContainer(opened, <weights キー>)` で引く）。
+#: Irodori はディレクトリ名（`caption-proj` / コーデックの `decoder`）とキー
+#: （`caption_proj` / `codec_decoder`）が綴りから違うので、書き手がディレクトリ名を
+#: そのまま名乗ると**ランタイムがグラフを引けない容器**が黙って焼ける。
+IRODORI_SERIES_ROLES: Mapping[str, str] = {
+    directory: role for role, directory in IRODORI_SERIES_DIRS.items()
+}
+IRODORI_CODEC_ROLES: Mapping[str, str] = {
+    directory: role for role, directory in IRODORI_CODEC_DIRS.items()
+}
+
 #: `irodori/dacvae/convert.py` が書く構成ファイルと、そこから読む 2 つのキー。**sampleRate /
 #: hopLength を直書きしない**ための出どころ（`irodori.dacvae.export.hop_length` と同じ式
 #: — `hop_length = prod(encoder_rates)`）。

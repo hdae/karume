@@ -34,6 +34,7 @@ from karume.container import container_parts
 from karume.pipeline import export_module, export_to_file, publish_model
 from karume.verify import verify_container
 from vowel_detector import export as vd
+from vowel_detector.distribution import VOWEL_DETECTOR_GRAPH_ROLE, VOWEL_DETECTOR_WEIGHTS
 
 #: tiny な合成重みの寸法（特徴 83 次元だけは {@link vd.build_cases} と揃える）。
 TINY_HIDDEN = 4
@@ -596,3 +597,31 @@ class TestStagedPublication:
             vd.export_series(tmp_path / "ckpt.pt", out_dir, TINY_LENGTH)
 
         assert not out_dir.exists()
+
+
+class TestGraphNameIsThePartName:
+    """据えた容器のグラフ名が**部品名**（= `karume.json` の weights のキー）であること。
+
+    ランタイムは `prepareContainer(opened, <weights キー>)` でグラフを名前で引く
+    （container-v1 §12）。この family の容器は系列直下に据わるので**ディレクトリ名は系列名**であって
+    部品名ではなく、書き手がディレクトリから導くと「ランタイムが引けない容器」が黙って
+    焼ける（書き手も `karume dist` もグラフ名を weights のキーと突き合わせない）。
+
+    綴りの門は全 family 横断で `tests/test_graph_names.py` が AST で掛けるが、**実物を書いて
+    読み直す**のはここだけ — 置き場の名前を部品名と違う綴りにしてあるので、導出に戻ると落ちる。
+    """
+
+    def test_the_published_container_names_the_weights_key(
+        self, monkeypatch, tmp_path: Path, tiny_module: vd.Crnn
+    ) -> None:
+        TestStagedPublication._stage_tiny(monkeypatch, tiny_module)
+        monkeypatch.setattr(vd, "_sanity", lambda _logits: {})
+        # 部品名（`crnn`）とは違う綴りの置き場 — 実物の系列名と同じ形。
+        out_dir = tmp_path / "vowel-detector-jsut-crnn"
+
+        vd.export_series(tmp_path / "ckpt.pt", out_dir, TINY_LENGTH)
+
+        read = verify_container(container_parts(out_dir / vd.MODEL_FILE)).read
+
+        assert list(read.graph.graphs) == [VOWEL_DETECTOR_GRAPH_ROLE]
+        assert VOWEL_DETECTOR_GRAPH_ROLE in VOWEL_DETECTOR_WEIGHTS

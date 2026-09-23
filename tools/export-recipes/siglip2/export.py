@@ -109,6 +109,7 @@ from karume.pipeline import export_to_file
 
 from . import patch
 from .card import SIGLIP2_LICENSE
+from .distribution import SIGLIP2_ROLE
 
 #: 実重みの親（`hf download google/<名前> --local-dir inputs/siglip2/<名前>` の展開先）。
 MODELS_ROOT = INPUTS_ROOT / "siglip2"
@@ -474,8 +475,10 @@ def export_series(
             (example,),
             staged / MODEL_FILE,
             provenance=PROVENANCE,
-            # グラフ名は**部品名**（= karume.json の weights のキー = 据え替え先のディレクトリ名）。
-            graph_name=out_dir.name,
+            # グラフ名は**部品名**（= karume.json の weights のキー）。ディレクトリ名から
+            # 導かない — この family の容器は系列直下に据わるので、ディレクトリ名は系列名
+            # （`siglip2-so400m-patch14-384`）であって部品名ではない（container-v1 §12）。
+            graph_name=SIGLIP2_ROLE,
             symbol_names=(),
         )
         declared = tuple(item.name for item in graph.inputs)

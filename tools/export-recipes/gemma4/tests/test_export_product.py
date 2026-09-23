@@ -330,6 +330,38 @@ class TestAssertPleAssets:
         # 重みの part + 索引の part に加えて、block 1 本につき part が 1 つ増える。
         assert len(container_parts(container)) > blocks
 
+    def test_each_block_is_decoded_only_once(self, monkeypatch, tiny_ple):
+        """MUST: 同じ block を 2 度読まない（probe は 1 block の両端と中を踏む）。
+
+        行ごとに読み直す形（cache の鍵が `(資産, token)`）だと、同じ資産を最大 3 度復号する
+        — 実物では 1 block が数十 MB なので検収の実時間に効くが、落ちも数値のずれも起きない。
+        呼びの回数でしか固定できない。
+        """
+        container, index, probe, reference, _ = tiny_ple
+        # 対（恒真でない）: probe が 2 行以上載っている block が**値と scale の両方**に在る。
+        # 合わせて最大を取ると scale 側だけで 2 を満たす（1 block に多数行が載る）ので、
+        # 値の経路が「1 block 1 行」になった日に重複読みを縛らないまま緑で通る。
+        crowded = {
+            key: max(
+                sum(block["start"] <= token < block["stop"] for token in probe)
+                for block in index[key]["blocks"]
+            )
+            for key in (product.PLE_VALUES_KEY, product.PLE_SCALES_KEY)
+        }
+        assert min(crowded.values()) >= 2, crowded
+        read: list[str] = []
+        original = product.read_asset
+
+        def _counted(opened, name: str):
+            read.append(name)
+            return original(opened, name)
+
+        monkeypatch.setattr(product, "read_asset", _counted)
+
+        product.assert_ple_assets(container, index, probe, reference)
+
+        assert sorted(read) == sorted(set(read))
+
     def test_a_layer_shifted_scale_is_detected(self, tiny_ple):
         """MUST: scale の層ずれは形も型も dtype も合う（`torch.equal` でしか捕まらない）。"""
         container, index, probe, reference, _ = tiny_ple

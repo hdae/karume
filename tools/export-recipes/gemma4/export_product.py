@@ -81,6 +81,7 @@ from _shared.paths import SERIES_ROOT
 from gemma4 import export as one_shot
 from gemma4 import export_decode as decode
 from gemma4 import ple, provenance
+from gemma4.distribution import GEMMA4_ROLE
 from karume.artifacts import staged_publication
 from karume.container import BLOCK_MAX_BYTES, AssetInput, container_parts
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION
@@ -428,6 +429,9 @@ def assert_ple_assets(
     MUST: 読んだ block は **probe 行だけ取り出して捨てる**（block 丸ごとを器に残さない）—
     probe は全 block の両端を踏むので、残すと PLE 全量（E2B で約 2.35 GB）がこの門の実行中に
     もう一度 RAM に載る。容器も 1 度だけ開く（block ごとに `verify_container` を回さない）。
+    MUST: 同じ block を**2 度読まない** — probe は 1 block の両端と中を踏むので、行ごとに
+    読み直すと同じ数十 MB の資産を最大 3 度復号する。要る行を先に集めてから block 単位で
+    1 度だけ読む（常駐は行の器だけで変わらない）。
     """
     layers = int(index["layers"])
     dim = int(index["dim"])
@@ -438,16 +442,19 @@ def assert_ple_assets(
 
     rebuilt = torch.zeros(expected_shape, dtype=torch.float32)
     opened = open_container(container)
-    cache: dict[tuple[str, int], torch.Tensor] = {}
 
-    def row_of(
-        block: Mapping[str, Any], token: int, dtype: torch.dtype, width: int
-    ) -> torch.Tensor:
-        """block 1 本から `token` の 1 行だけを `[層, 幅]` で取り、残りは捨てる。"""
-        name = str(block["asset"])
-        if (name, token) not in cache:
+    def rows_of(
+        wanted: Sequence[tuple[Mapping[str, Any], int]], dtype: torch.dtype, width: int
+    ) -> dict[tuple[str, int], torch.Tensor]:
+        """要る `(block, token)` を **block 1 本につき 1 度の読み**で集める（残りは捨てる）。"""
+        by_asset: dict[str, tuple[Mapping[str, Any], set[int]]] = {}
+        for block, token in wanted:
+            by_asset.setdefault(str(block["asset"]), (block, set()))[1].add(token)
+        picked: dict[tuple[str, int], torch.Tensor] = {}
+        for name, (block, tokens) in by_asset.items():
             raw = bytearray(read_asset(opened, name))
-            rows = int(block["stop"]) - int(block["start"])
+            start = int(block["start"])
+            rows = int(block["stop"]) - start
             expected = rows * layers * width * torch.empty(0, dtype=dtype).element_size()
             if len(raw) != expected:
                 raise AssertionError(
@@ -455,29 +462,35 @@ def assert_ple_assets(
                     f" [{block['start']}, {block['stop']}) から組んだ期待は {expected}"
                 )
             view = torch.frombuffer(raw, dtype=dtype).reshape(rows, layers, width)
-            cache[(name, token)] = view[token - int(block["start"])].clone()
-        return cache[(name, token)]
+            for token in sorted(tokens):
+                picked[(name, token)] = view[token - start].clone()
+            # 次の block を読む前に block 丸ごとの器を手放す（`view` は `raw` を共有する）。
+            del view, raw
+        return picked
 
-    covered = 0
+    located: list[tuple[int, int, Mapping[str, Any], Mapping[str, Any]]] = []
     for position, token in enumerate(probe):
-        located = {
+        blocks = {
             key: _locate_block(index[key]["blocks"], token)
             for key in (PLE_VALUES_KEY, PLE_SCALES_KEY)
         }
-        if any(block is None for block in located.values()):
+        values_block = blocks[PLE_VALUES_KEY]
+        scales_block = blocks[PLE_SCALES_KEY]
+        if values_block is None or scales_block is None:
             continue
-        values_block = located[PLE_VALUES_KEY]
-        scales_block = located[PLE_SCALES_KEY]
-        assert values_block is not None and scales_block is not None
-        quantized = row_of(values_block, token, torch.int8, dim).to(torch.float32)
-        scale = row_of(scales_block, token, torch.float32, 1)
-        rebuilt[0, position] = quantized * scale * embed_scale
-        covered += 1
-    if covered != len(probe):
+        located.append((position, token, values_block, scales_block))
+    if len(located) != len(probe):
         raise AssertionError(
-            f"probe {len(probe)} 本のうち {covered} 本しか block の範囲に載っていない"
+            f"probe {len(probe)} 本のうち {len(located)} 本しか block の範囲に載っていない"
             "（索引の [start, stop) が vocab を覆っていない）"
         )
+
+    values = rows_of([(block, token) for _p, token, block, _s in located], torch.int8, dim)
+    scales = rows_of([(block, token) for _p, token, _v, block in located], torch.float32, 1)
+    for position, token, values_block, scales_block in located:
+        quantized = values[(str(values_block["asset"]), token)].to(torch.float32)
+        scale = scales[(str(scales_block["asset"]), token)]
+        rebuilt[0, position] = quantized * scale * embed_scale
     if not torch.equal(rebuilt, reference):
         worst = float((rebuilt - reference).abs().max())
         raise AssertionError(
@@ -743,8 +756,10 @@ def export_series(
                 surgical,
                 tensors,
                 staged / one_shot.MODEL_FILE,
-                # グラフ名は**部品名**（= 据え替え先のディレクトリ名 — 作業席の名前ではない）。
-                graph_name=out_dir.name,
+                # グラフ名は**部品名**（= karume.json の weights のキー）。ディレクトリ名から
+                # 導かない — 系列名（`gemma4-e2b-product`）も作業席の名前も部品名とは一致しない
+                # （container-v1 §12）。
+                graph_name=GEMMA4_ROLE,
                 weight_dtype="i8",
                 weight_scales=scales,
                 weight_dtype_overrides=dict.fromkeys(int4.scales, "i4"),

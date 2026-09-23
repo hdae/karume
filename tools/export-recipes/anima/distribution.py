@@ -398,18 +398,30 @@ ANIMA_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {
     "transformer_i8": ("i4",),
 }
 
+#: グラフを持つ部品名 = manifest の weights のキー = **容器のグラフ名**（container-v1 §12 —
+#: ランタイムは `prepareContainer(opened, <weights キー>)` で名前で引く）。
+#:
+#: MUST: 書き手（`anima/export.py` の `TARGET_*`）はここから引く。Anima は系列ディレクトリ名
+#: が同じ綴りになるが、それは**規約であって導出ではない** — 書き手は作業席
+#: （`<部品>.staging/`）へ書くので、ディレクトリから導くと全系列のグラフ名が作業席の名前に
+#: なる（`karume.pipeline._assert_graph_name` の MUST）。
+ANIMA_TEXT_ENCODER_ROLE = "text_encoder"
+ANIMA_TEXT_CONDITIONER_ROLE = "text_conditioner"
+ANIMA_TRANSFORMER_ROLE = "transformer"
+ANIMA_VAE_DECODER_ROLE = "vae_decoder"
+
 #: weights の宣言（dtype ラベル → 役割名）。ラベルは**格納 dtype 語彙**で、
 #: {@link STORAGE_REQUIREMENTS} が要求する格納形と 1:1（ADR 0041 §3）。`i4` は**混成の系列**を
 #: 指すラベルで、実体は「i4 適格な重みが i4 group32・残りは i8」（`anima/export.py`）。
 ANIMA_WEIGHTS: Mapping[str, Mapping[str, WeightFiles]] = {
-    "text_encoder": {"f16": WeightFiles("text_encoder")},
-    "text_conditioner": {"f16": WeightFiles("text_conditioner")},
-    "transformer": {
+    ANIMA_TEXT_ENCODER_ROLE: {"f16": WeightFiles("text_encoder")},
+    ANIMA_TEXT_CONDITIONER_ROLE: {"f16": WeightFiles("text_conditioner")},
+    ANIMA_TRANSFORMER_ROLE: {
         "f16": WeightFiles("transformer_f16"),
         "i8": WeightFiles("transformer_i8"),
         "i4": WeightFiles("transformer_i4"),
     },
-    "vae_decoder": {"f16": WeightFiles("vae_decoder")},
+    ANIMA_VAE_DECODER_ROLE: {"f16": WeightFiles("vae_decoder")},
 }
 
 #: assets の宣言（quant 選択に依存しない無条件ファイル — ADR 0041 §3）。

@@ -114,6 +114,7 @@ from karume.pipeline import export_to_file
 
 from . import patch
 from .card import DEPTH_ANYTHING_LICENSE
+from .distribution import DEPTH_ANYTHING_ROLE
 from .measurements import CONVT_MAXDIFF
 
 #: 実重みの親（`inputs/depth-anything/<名前>/` に HF の 3 ファイルを展開した先）。
@@ -584,8 +585,10 @@ def export_series(
             (example,),
             staged / MODEL_FILE,
             provenance=PROVENANCE,
-            # グラフ名は**部品名**（= karume.json の weights のキー = 据え替え先のディレクトリ名）。
-            graph_name=out_dir.name,
+            # グラフ名は**部品名**（= karume.json の weights のキー）。ディレクトリ名から
+            # 導かない — この family の容器は系列直下に据わるので、ディレクトリ名は系列名
+            # （`depth-anything-v2-small-hf`）であって部品名ではない（container-v1 §12）。
+            graph_name=DEPTH_ANYTHING_ROLE,
             symbol_names=(),
         )
         declared = tuple(item.name for item in graph.inputs)

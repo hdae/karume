@@ -240,7 +240,7 @@ from karume.rope import ROPE_BUFFER_NAMES, assert_rope_lifted
 
 from . import patch
 from .card import IRODORI_LICENSE
-from .distribution import CALIB_PROVENANCE_FILE
+from .distribution import CALIB_PROVENANCE_FILE, IRODORI_SERIES_ROLES
 
 if TYPE_CHECKING:  # 実行時は遅延 import（下の {@link _fake_quant_i4} の NOTE）
     from karume.quant_calib import StageSpec
@@ -2405,9 +2405,10 @@ def export_series(
                 example,
                 staged / MODEL_FILE,
                 provenance=PROVENANCE,
-                # グラフ名は**部品名**（= karume.json の weights のキー = 据え替え先の
-                # ディレクトリ名）。
-                graph_name=target_dir.name,
+                # グラフ名は**部品名**（= karume.json の weights のキー）。ディレクトリ名
+                # とは綴りが違う（`caption-proj` → `caption_proj`）ので逆引き表を通す
+                # （container-v1 §12）。
+                graph_name=IRODORI_SERIES_ROLES[target],
                 dynamic_shapes=tuple(
                     _dynamic_axis(axis.dynamic.get(index), seq) for index in range(len(example))
                 ),

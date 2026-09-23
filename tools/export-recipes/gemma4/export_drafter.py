@@ -97,6 +97,7 @@ from gemma4 import export as one_shot
 from gemma4 import export_decode as decode
 from gemma4 import export_product as product
 from gemma4 import ple, provenance
+from gemma4.distribution import GEMMA4_DRAFTER_ROLE
 from karume.artifacts import staged_publication
 from karume.container import container_parts
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION
@@ -1034,8 +1035,10 @@ def export_series(
             shared_graph,
             {name: value for name, value in remaining.items() if name in _declared(shared_graph)},
             provenance=one_shot.PROVENANCE,
-            # グラフ名は**部品名**（= 据え替え先のディレクトリ名 — 作業席の名前ではない）。
-            graph_name=out_dir.name,
+            # グラフ名は**部品名**（= karume.json の weights のキー）。ディレクトリ名から
+            # 導かない — 系列名（`gemma4-e2b-product`）も作業席の名前も部品名とは一致しない
+            # （container-v1 §12）。
+            graph_name=GEMMA4_DRAFTER_ROLE,
             weight_dtype="i8",
             weight_scales=scales,
         )

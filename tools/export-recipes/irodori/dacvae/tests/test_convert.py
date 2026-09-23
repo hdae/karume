@@ -153,9 +153,47 @@ class TestConvert:
         assert json.loads((tmp_path / "metadata.json").read_text(encoding="utf-8")) == METADATA
         with safe_open(str(target), framework="pt") as handle:
             header = handle.metadata()
-        assert header[cv.SOURCE_FILE_KEY] == ckpt.name
-        assert header[cv.SOURCE_SHA256_KEY] == cv._sha256(ckpt) == summary["source_sha256"]
-        assert json.loads(header[cv.SOURCE_METADATA_KEY]) == METADATA
+        source = json.loads(header[cv.SOURCE_KEY])
+        assert source[cv.SOURCE_FILE_KEY] == ckpt.name
+        assert source[cv.SOURCE_SHA256_KEY] == cv._sha256(ckpt) == summary["source_sha256"]
+        assert source[cv.SOURCE_METADATA_KEY] == METADATA
+
+    def test_the_header_carries_exactly_one_metadata_key(self, tmp_path):
+        """MUST: `__metadata__` の鍵は 1 本（`safetensors` は並びを保存しない）。
+
+        2 本以上置くと、同じ入力から出るヘッダのバイト列が実行ごとに動く — データ節は
+        同一なのにファイルの sha256 だけが動き、「資産が変わった」と読める差分になる。
+        """
+        cv.convert(_write_ckpt(tmp_path))
+
+        with safe_open(str(tmp_path / "weights.safetensors"), framework="pt") as handle:
+            header = handle.metadata()
+
+        assert list(header) == [cv.SOURCE_KEY]
+
+    def test_two_runs_write_the_same_bytes(self, tmp_path):
+        """MUST: 同じ入力からはファイル**全体**が同じバイト列（再生成で差分が出ない）。
+
+        `__metadata__` に鍵を 2 本以上置いていた頃は、データ節もテンソル宣言も完全一致の
+        まま sha256 だけが 3 回とも違った（実測）。
+        """
+        ckpt = _write_ckpt(tmp_path)
+        first = (tmp_path / "a" / "weights.safetensors").resolve()
+        second = (tmp_path / "b" / "weights.safetensors").resolve()
+        first.parent.mkdir()
+        second.parent.mkdir()
+
+        cv.convert(ckpt, first)
+        cv.convert(ckpt, second)
+
+        assert cv._sha256(first) == cv._sha256(second)
+        # 対（恒真でない）: 別の入力なら sha256 は動く。
+        other = (tmp_path / "c" / "weights.safetensors").resolve()
+        other.parent.mkdir()
+        torch.save({"state_dict": {"a.weight": torch.ones(2)}, "metadata": METADATA}, ckpt)
+        cv.convert(ckpt, other)
+
+        assert cv._sha256(other) != cv._sha256(first)
 
     def test_a_run_that_fails_a_gate_leaves_the_previous_output_in_place(
         self, tmp_path, monkeypatch

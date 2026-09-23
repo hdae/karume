@@ -146,6 +146,7 @@ from karume.pipeline import export_to_file
 
 from . import patch
 from .card import BIREFNET_LICENSE
+from .distribution import BIREFNET_ROLE
 
 #: 実重みの親（`inputs/birefnet/<名前>/` に HF の 7 ファイルを展開した先）。
 MODELS_ROOT = INPUTS_ROOT / "birefnet"
@@ -569,8 +570,10 @@ def export_series(
             (example,),
             staged / MODEL_FILE,
             provenance=PROVENANCE,
-            # グラフ名は**部品名**（= karume.json の weights のキー = 据え替え先のディレクトリ名）。
-            graph_name=out_dir.name,
+            # グラフ名は**部品名**（= karume.json の weights のキー）。ディレクトリ名から
+            # 導かない — この family の容器は系列直下に据わるので、ディレクトリ名は系列名
+            # （`birefnet-hr-<解像度>`）であって部品名ではない（container-v1 §12）。
+            graph_name=BIREFNET_ROLE,
             symbol_names=(),
         )
         declared = tuple(item.name for item in graph.inputs)

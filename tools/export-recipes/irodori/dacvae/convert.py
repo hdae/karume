@@ -22,9 +22,15 @@ IR export の入力素材として扱える形に**中身を変えずに**詰め
 `.pth` の外側は `{state_dict, metadata}` のラッパ dict で、`metadata` はテンソルを含まない
 純粋な構成値（`kwargs`）。safetensors の `__metadata__` は**文字列しか持てない**ので、
 構造つきの正本は同ディレクトリの `metadata.json` に書き、`__metadata__` には出所
-（元ファイル名と sha256）と同じ内容のコンパクト JSON を 1 本の文字列として載せる
+（元ファイル名・sha256・構成値）を**キー 1 本**に畳んだ正準 JSON を載せる
 （safetensors が単体で持ち出されても素性が追える）。両者は**この 1 パスで同じ源から**
 書かれ、片方だけ更新される経路は無い。
+
+MUST: `__metadata__` の鍵は 1 つだけ（{@link SOURCE_KEY}）。`safetensors` は `__metadata__` を
+Rust 側の `HashMap` で持ち、**並びを保存も整列もしない** — 実測で、同じ入力から 3 通りの
+並びが出た（鍵 3 本の頃）。鍵が 2 つ以上あるとヘッダのバイト列が実行ごとに動き、下の
+「同じ入力からは同じバイト列」が成立しない（データ節は同一なのにファイルの sha256 だけが
+動くので、「資産が変わった」と読める差分になる）。
 
 ## 書き出し経路
 
@@ -33,7 +39,9 @@ IR export の入力素材として扱える形に**中身を変えずに**詰め
 Karume のリーダはデータ節を「隙間なく・要素サイズに整列して」覆うことを要求するので
 （docs/limitations.md）、書いた直後に `verify.assert_reader_layout` で同じ規則を通す。
 なお本チェックポイントは全 F32 なので整列制約は自明に満たされるが、検査は無条件で通す。
-並びはキーの昇順に固定する（同じ入力からは同じバイト列 — 再生成で差分が出ない）。
+テンソルの並びはキーの昇順に固定し、`__metadata__` は鍵 1 本・値もキー昇順の正準 JSON に
+する（同じ入力からは**ファイル全体が**同じバイト列 — 再生成で差分が出ない）。門は
+`dacvae/tests/test_convert.py::TestConvert::test_two_runs_write_the_same_bytes`。
 
 書き先は**作業席**で、門を全部通ってから正規 path へ据える（ADR 0052 — 他の書き手と同じ
 規律）。出力先が手置き資産と同居するディレクトリなので、据え替えは
@@ -71,7 +79,11 @@ DEFAULT_CKPT = INPUTS_ROOT / "irodori" / "dacvae-32dim" / "weights.pth"
 #: `.pth` の外側ラッパに期待する鍵。増減はモデル配布側の変更なので fail loudly。
 WRAPPER_KEYS = ("state_dict", "metadata")
 
-#: `__metadata__` に載せる鍵（safetensors の仕様上、値は文字列だけ）。
+#: `__metadata__` の**唯一の**鍵（値は 1 本の正準 JSON 文字列 — モジュール doc の MUST）。
+SOURCE_KEY = "karume_source"
+
+#: その正準 JSON の中の鍵（safetensors の仕様上、`__metadata__` の値は文字列だけなので
+#: 構造はここで持つ）。
 SOURCE_FILE_KEY = "source_file"
 SOURCE_SHA256_KEY = "source_sha256"
 SOURCE_METADATA_KEY = "source_metadata"
@@ -124,6 +136,21 @@ def _metadata_json(metadata: object) -> str:
     return text
 
 
+def _source_document(ckpt: Path, source_sha256: str, metadata: object) -> str:
+    """`__metadata__` の唯一の値（出所 3 欄をキー昇順の正準 JSON へ畳んだもの）。
+
+    畳む前に {@link _metadata_json} の往復の門を通し、**その往復を生き延びた値**をそのまま
+    埋める（門を通した値と載せる値が別物にならない）。`sort_keys` は決定性の片側で、もう
+    片側（`__metadata__` の鍵を 1 本に保つ）はモジュール doc の MUST。
+    """
+    document = {
+        SOURCE_FILE_KEY: ckpt.name,
+        SOURCE_SHA256_KEY: source_sha256,
+        SOURCE_METADATA_KEY: json.loads(_metadata_json(metadata)),
+    }
+    return json.dumps(document, ensure_ascii=False, sort_keys=True)
+
+
 def _assert_byte_identical(path: Path, tensors: Mapping[str, torch.Tensor]) -> int:
     """書いた safetensors を**別実装のリーダ**で読み直し、全テンソルのバイト一致を見る。
 
@@ -167,7 +194,7 @@ def convert(ckpt: Path, out: Path | None = None) -> dict[str, object]:
 
     source_sha256 = _sha256(ckpt)
     state_dict, metadata = _load_checkpoint(ckpt)
-    metadata_text = _metadata_json(metadata)
+    source_text = _source_document(ckpt, source_sha256, metadata)
 
     # detach は保険（weights_only=True の読み込みは requires_grad を持たない）。contiguous は
     # writer が numpy 経由で生バイトを書く前提。どちらも値は変えない。
@@ -182,11 +209,8 @@ def convert(ckpt: Path, out: Path | None = None) -> dict[str, object]:
         save_file(
             {key: tensors[key] for key in sorted(tensors)},
             str(staged_weights),
-            metadata={
-                SOURCE_FILE_KEY: ckpt.name,
-                SOURCE_SHA256_KEY: source_sha256,
-                SOURCE_METADATA_KEY: metadata_text,
-            },
+            # MUST: 鍵は 1 本（モジュール doc）— `__metadata__` の並びは保存されない。
+            metadata={SOURCE_KEY: source_text},
         )
         assert_reader_layout(staged_weights)
         matched = _assert_byte_identical(staged_weights, tensors)

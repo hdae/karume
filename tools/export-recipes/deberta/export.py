@@ -136,6 +136,17 @@ INPUT_ORDER: tuple[str, ...] = ("input_ids", "attention_mask", "c2p_pos", "p2c_p
 
 MODEL_FILE = "model.krm"
 
+#: 容器のグラフ名 = **配布形の部品名**（= `karume.json` の weights のキー —
+#: container-v1 §12）。この台本は SBV2 の `text_encoder` 席を焼くだけなので、正本は消費側
+#: （`sbv2.distribution.SBV2_TEXT_ENCODER_COMPONENT`）にある。
+#:
+#: MUST: 綴りは読み手と一致させる。写しを持つのは {@link LICENSE} と同じ理由 — produce 側が
+#: consume 側を import する向きは作らない。一致を毎回突き合わせるのは全 family 横断の門
+#: `tests/test_graph_names.py::TestTheNamesAreTheWeightsKeys` の
+#: `test_deberta_names_the_seat_its_consumer_declares`（`deberta/tests/test_export.py` は
+#: この定数を見ない）。系列ディレクトリ名（`full-24layer` / `dev-2layer`）とは一致しない。
+GRAPH_NAME = "text_encoder"
+
 #: 容器へ焼く出所（container-v1 §2.3）。この recipe は SBV2 の `text_encoder` 席を焼くだけで
 #: 自分のカードを持たないので、ライセンス識別子の正本は消費側のカード
 #: （`sbv2.card.SBV2_TEXT_ENCODER_LICENSE`・実地確認 2026-08-07）にある。
@@ -625,8 +636,9 @@ def export_variant(
             tuple(example_args[key] for key in INPUT_ORDER),
             staged / MODEL_FILE,
             provenance=PROVENANCE,
-            # グラフ名は**部品名**（= karume.json の weights のキー = 据え替え先のディレクトリ名）。
-            graph_name=out_dir.name,
+            # グラフ名は**部品名**（{@link GRAPH_NAME}）— ディレクトリ名（`full-24layer`）
+            # から導かない。
+            graph_name=GRAPH_NAME,
             # 添字表は `[T, T]` — 両軸が同じ記号（正方であることを export の段で縛る）。
             dynamic_shapes=({1: seq}, {1: seq}, {0: seq, 1: seq}, {0: seq, 1: seq}),
             weight_dtype=BASE_WEIGHT_DTYPES[dtype],

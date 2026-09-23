@@ -36,6 +36,7 @@ from karume.dist import (
     resolve_card_renderer,
     verify_dist,
 )
+from karume.verify import verify_container
 from vowel_detector.distribution import (
     PIPELINE,
     VOWEL_DETECTOR_COPYRIGHTS,
@@ -143,7 +144,9 @@ def _vowel_detector_container(
         list(out_shape) if out_shape is not None else [1, "T", len(_VOWEL_DETECTOR_CLASSES)]
     )
     return ir_container(
-        mark="vowel-detector",
+        # 疑似系列も**部品名で名乗る**（= 実物と同じ規約 — 容器のグラフ名は manifest の
+        # weights のキー MUST・container-v1 §12）。
+        mark=VOWEL_DETECTOR_GRAPH_ROLE,
         storage=storage,
         inputs=((input_name, shape),),
         outputs=[logits] * outputs,
@@ -207,6 +210,25 @@ class TestVowelDetectorLayout:
     def test_it_never_carries_the_io_fixtures(self, vowel_detector_assembled) -> None:
         out_dir, _ = vowel_detector_assembled
         assert list(out_dir.rglob("io.*")) == []
+
+    def test_the_container_graph_is_named_after_the_weights_key(
+        self, vowel_detector_assembled
+    ) -> None:
+        """据わった容器の part 0 が名乗るグラフ名 = manifest の weights のキー。
+
+        ランタイムは `prepareContainer(opened, <weights キー>)` でグラフを名前で引く
+        （container-v1 §12）。`karume dist` はこの 2 つを突き合わせない（宣言の構造検査と
+        合流までしか見ない）ので、綴りが割れても**manifest も配置も緑**のまま据わり、
+        利用者の `createSession` で初めて落ちる。疑似系列 1 本ぶんをここで見る。
+        """
+        out_dir, manifest = vowel_detector_assembled
+        weights = _vowel_detector_model(manifest)["weights"]
+        assert weights, "weights が空だと以下の主張が恒真になる"
+
+        for key, labels in weights.items():
+            for entry in labels.values():
+                parts = [out_dir / ref["path"] for ref in entry["container"]["parts"]]
+                assert list(verify_container(parts).read.graph.graphs) == [key]
 
     def test_the_graph_is_one_role_and_the_mel_basis_is_an_asset(
         self, vowel_detector_assembled

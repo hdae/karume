@@ -101,10 +101,10 @@ from karume.quantize import (
     round_weights_to_f16,
 )
 
-# 出所記録のファイル名は**読み手側**（配布の組み立て）が持つ — 綴りを 2 箇所に置くと、
-# 片方だけ動いた日に「書いたのに読まれない記録」が黙って生える（anima の
-# `CALIB_PROVENANCE_FILE` と同じ向き）。
-from sbv2.distribution import EXPORT_PROVENANCE_FILE
+# 出所記録のファイル名と**配布形の部品名**は読み手側（配布の組み立て）が持つ — 綴りを
+# 2 箇所に置くと、片方だけ動いた日に「書いたのに読まれない記録」や「ランタイムが引けない
+# グラフ名」が黙って生える（anima の `CALIB_PROVENANCE_FILE` と同じ向き）。
+from sbv2.distribution import EXPORT_PROVENANCE_FILE, SBV2_FRONT_ROLE, SBV2_VOICE_ROLE
 
 from . import patch
 from .card import SBV2_CARD_PROFILES
@@ -157,11 +157,21 @@ SBV2_FAMILY_DIRS: Mapping[str, tuple[str, ...]] = {
 }
 
 
+class Sbv2FamilyError(ValueError):
+    """`--model-dir` の綴りから声のファミリー（= 出所とライセンス）が決まらない。
+
+    リポの流儀は `Error` サブクラス（`DistError` / `RopeSpecError` / `ContainerReadError`）。
+    素の `ValueError` だと、呼び手の `except` がこの**法的事実の門**と「引数が変」一般を
+    区別できない — 握り潰しの経路が生えた日に、黙って既定のライセンスを名乗る配布形へ
+    戻る（{@link SBV2_FAMILY_DIRS} の MUST が防いでいるもの）。
+    """
+
+
 def sbv2_family(model_dir: Path) -> str:
     """`--model-dir` のディレクトリ名 → 声のファミリー（`fn` / `jvnv`）。
 
     判定は {@link SBV2_FAMILY_DIRS} の許可リストだけで、どれにも当たらない名前は
-    **fail loudly**（同定数の MUST）。
+    **fail loudly**（同定数の MUST — {@link Sbv2FamilyError}）。
     """
     name = model_dir.name
     for family, prefixes in SBV2_FAMILY_DIRS.items():
@@ -170,7 +180,7 @@ def sbv2_family(model_dir: Path) -> str:
     listed = " / ".join(
         f"{family}: {', '.join(prefixes)}" for family, prefixes in sorted(SBV2_FAMILY_DIRS.items())
     )
-    raise ValueError(
+    raise Sbv2FamilyError(
         f"'{name}' がどの声のファミリーの綴りにも当たらない（既知の接頭辞 — {listed}）"
         " — 出所とライセンスが決まらないので配布形を焼かない"
         "（README の '--model-dir' の規約に合わせる）"
@@ -209,11 +219,15 @@ def default_out_root(model_dir: Path, dtype: str) -> Path:
     return SERIES_ROOT / f"sbv2-{model_dir.name}{suffix}"
 
 
+#: ターゲット名（系列のサブディレクトリ名でもある）。`front` / `voice` は**配布形の部品名**
+#: でもあるので、綴りの正本は torch を要らない側（`sbv2/distribution.py`）から引く — 容器の
+#: グラフ名は manifest の weights のキーと一致すること MUST（container-v1 §12）。`dp` /
+#: `flow` / `dec` は golden 検証専用で配布形に載らないので、ここが唯一の綴り。
 TARGET_DP = "dp"
-TARGET_FRONT = "front"
+TARGET_FRONT = SBV2_FRONT_ROLE
 TARGET_FLOW = "flow"
 TARGET_DEC = "dec"
-TARGET_VOICE = "voice"
+TARGET_VOICE = SBV2_VOICE_ROLE
 TARGETS = (TARGET_DP, TARGET_FRONT, TARGET_FLOW, TARGET_DEC, TARGET_VOICE)
 CONFIG_FILE = "config.json"
 STYLE_FILE = "style_vectors.npy"
@@ -949,9 +963,9 @@ def export_dp(
             (example["h"], example["x_mask"], example["g"]),
             staged / MODEL_FILE,
             provenance=sbv2_provenance(model_dir),
-            # グラフ名は**部品名**（= karume.json の weights のキー = 据え替え先の
-            # ディレクトリ名）。
-            graph_name=out_dir.name,
+            # グラフ名は**部品名**（= karume.json の weights のキー）。ディレクトリ名から
+            # 導かない（container-v1 §12）— 作業席は `<ターゲット>.staging/`。
+            graph_name=TARGET_DP,
             dynamic_shapes=({2: phonemes}, {2: phonemes}, {}),
             symbol_names=("P",),
             weight_dtype=BASE_WEIGHT_DTYPES[dtype],
@@ -1016,9 +1030,9 @@ def export_front(
             tuple(example[declared] for declared in FRONT_INPUT_ORDER),
             staged / MODEL_FILE,
             provenance=sbv2_provenance(model_dir),
-            # グラフ名は**部品名**（= karume.json の weights のキー = 据え替え先の
-            # ディレクトリ名）。
-            graph_name=out_dir.name,
+            # グラフ名は**部品名**（= karume.json の weights のキー）。ディレクトリ名から
+            # 導かない（container-v1 §12）— 作業席は `<ターゲット>.staging/`。
+            graph_name=TARGET_FRONT,
             dynamic_shapes=dynamic_shapes,
             symbol_names=("P",),
             weight_dtype=BASE_WEIGHT_DTYPES[dtype],
@@ -1097,9 +1111,9 @@ def export_flow(
             tuple(example[declared] for declared in FLOW_INPUT_ORDER),
             staged / MODEL_FILE,
             provenance=sbv2_provenance(model_dir),
-            # グラフ名は**部品名**（= karume.json の weights のキー = 据え替え先の
-            # ディレクトリ名）。
-            graph_name=out_dir.name,
+            # グラフ名は**部品名**（= karume.json の weights のキー）。ディレクトリ名から
+            # 導かない（container-v1 §12）— 作業席は `<ターゲット>.staging/`。
+            graph_name=TARGET_FLOW,
             dynamic_shapes=dynamic_shapes,
             symbol_names=("T",),
             weight_dtype=BASE_WEIGHT_DTYPES[dtype],
@@ -1151,9 +1165,9 @@ def export_dec(
             tuple(example[declared] for declared in DEC_INPUT_ORDER),
             staged / MODEL_FILE,
             provenance=sbv2_provenance(model_dir),
-            # グラフ名は**部品名**（= karume.json の weights のキー = 据え替え先の
-            # ディレクトリ名）。
-            graph_name=out_dir.name,
+            # グラフ名は**部品名**（= karume.json の weights のキー）。ディレクトリ名から
+            # 導かない（container-v1 §12）— 作業席は `<ターゲット>.staging/`。
+            graph_name=TARGET_DEC,
             dynamic_shapes=({2: frames}, {}),
             symbol_names=("T",),
             weight_dtype=BASE_WEIGHT_DTYPES[dtype],
@@ -1214,9 +1228,9 @@ def export_voice(
             tuple(example[declared] for declared in FLOW_INPUT_ORDER),
             staged / MODEL_FILE,
             provenance=sbv2_provenance(model_dir),
-            # グラフ名は**部品名**（= karume.json の weights のキー = 据え替え先の
-            # ディレクトリ名）。
-            graph_name=out_dir.name,
+            # グラフ名は**部品名**（= karume.json の weights のキー）。ディレクトリ名から
+            # 導かない（container-v1 §12）— 作業席は `<ターゲット>.staging/`。
+            graph_name=TARGET_VOICE,
             dynamic_shapes=dynamic_shapes,
             symbol_names=("T",),
             weight_dtype=BASE_WEIGHT_DTYPES[dtype],

@@ -90,15 +90,15 @@ def _build_series(series_dir: Path, *, method: str = ADALN_I8_CALIB_METHOD) -> P
     sources = anima_sources(series_dir, MODEL)
     write_component(
         sources.base / "text_encoder" / "model.krm",
-        ir_container(mark="te", storage="f16"),
+        ir_container(mark="te", named="text_encoder", storage="f16"),
     )
     write_component(
         sources.text_conditioner / "text_conditioner" / "model.krm",
-        ir_container(mark="tc", storage="f16"),
+        ir_container(mark="tc", named="text_conditioner", storage="f16"),
     )
     write_component(
         sources.base / "vae_decoder" / "model.krm",
-        ir_container(mark="vae", storage="f16"),
+        ir_container(mark="vae", named="vae_decoder", storage="f16"),
     )
     _write(sources.tokenizers / "qwen2-tokenizer.json", b'{"qwen2": true}')
     _write(sources.tokenizers / "t5-tokenizer.json", b'{"t5": true}')
@@ -111,7 +111,13 @@ def _build_series(series_dir: Path, *, method: str = ADALN_I8_CALIB_METHOD) -> P
     ):
         write_component(
             series / "transformer" / "model.krm",
-            ir_container(mark=f"dit-{storage}", storage=storage, assets={ROPE_BASE_ASSET: rope}),
+            ir_container(
+                mark=f"dit-{storage}",
+                # 疑似系列も**部品名で名乗る**（グラフ名 = weights のキー・container-v1 §12）。
+                named="transformer",
+                storage=storage,
+                assets={ROPE_BASE_ASSET: rope},
+            ),
         )
     _write(variant / "transformer" / CALIB_PROVENANCE_FILE, _calib_record(method, MODEL))
     return variant

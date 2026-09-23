@@ -26,7 +26,9 @@ import torch
 from gemma4.distribution import (
     GEMMA4_DEFAULT_MODEL,
     GEMMA4_DRAFT_STEPS,
+    GEMMA4_DRAFTER_ROLE,
     GEMMA4_DRAFTER_SUFFIX,
+    GEMMA4_ROLE,
     GEMMA4_ROPE_LAYER_TYPES,
     GEMMA4_ROPE_PARTS,
     gemma4_rope_input_name,
@@ -155,8 +157,13 @@ def _publish(
     *,
     assets: Mapping[str, AssetInput] = {},
     block_bytes: int = BLOCK_MAX_BYTES,
+    named: str = GEMMA4_ROLE,
 ) -> list[bytes]:
-    """書いて読み直して検証し、part ごとのバイト列を添字順に返す（実物と同じ 1 本道）。"""
+    """書いて読み直して検証し、part ごとのバイト列を添字順に返す（実物と同じ 1 本道）。
+
+    `named` は容器のグラフ名 = **部品名**（manifest の weights のキー MUST・container-v1 §12）。
+    貸し手は `model`、借り手は `drafter` で、組み立ての門がこの一致を見る。
+    """
     stored = stored_model(
         graph,
         tensors,
@@ -170,7 +177,7 @@ def _publish(
             stored.graph,
             stored.tensors,
             stored.bindings,
-            graph_name="model",
+            graph_name=named,
             provenance=FIXTURE_PROVENANCE,
             assets=assets,
             block_bytes=block_bytes,
@@ -478,7 +485,7 @@ def drafter_container(
         },
         nodes=nodes,
     )
-    return _publish(graph, tensors, storage, scales, overrides)
+    return _publish(graph, tensors, storage, scales, overrides, named=GEMMA4_DRAFTER_ROLE)
 
 
 def tokenizer_asset(*, vocab: int = VOCAB, format_id: str = TOKENIZER_FORMAT) -> dict[str, Any]:

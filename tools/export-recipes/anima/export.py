@@ -109,6 +109,10 @@ from _shared.paths import SERIES_ROOT
 from anima.distribution import (
     ADALN_I8_TAG,
     ANIMA_MODELS,
+    ANIMA_TEXT_CONDITIONER_ROLE,
+    ANIMA_TEXT_ENCODER_ROLE,
+    ANIMA_TRANSFORMER_ROLE,
+    ANIMA_VAE_DECODER_ROLE,
     CALIB_DEVICES,
     CALIB_PROVENANCE_FILE,
     CALIB_SHIPPABLE_DEVICE,
@@ -195,10 +199,13 @@ DEFAULT_OUT_ROOTS = {
     "i4": SERIES_ROOT / "anima-i4",
 }
 
-TARGET_TEXT_ENCODER = "text_encoder"
-TARGET_TEXT_CONDITIONER = "text_conditioner"
-TARGET_TRANSFORMER = "transformer"
-TARGET_VAE_DECODER = "vae_decoder"
+#: ターゲット名 = **部品名**（= karume.json の weights のキー = 容器のグラフ名）。綴りの
+#: 正本は torch を要らない側（`anima/distribution.py`）— 系列ディレクトリ名も同じ綴りに
+#: なるが、書き手は作業席へ書くのでディレクトリからは導かない（container-v1 §12）。
+TARGET_TEXT_ENCODER = ANIMA_TEXT_ENCODER_ROLE
+TARGET_TEXT_CONDITIONER = ANIMA_TEXT_CONDITIONER_ROLE
+TARGET_TRANSFORMER = ANIMA_TRANSFORMER_ROLE
+TARGET_VAE_DECODER = ANIMA_VAE_DECODER_ROLE
 TARGETS = (
     TARGET_TEXT_ENCODER,
     TARGET_TEXT_CONDITIONER,
@@ -1095,7 +1102,16 @@ def emit_target(target: str, args: argparse.Namespace, out_dir: Path) -> dict[st
     綴りは {@link _shared.decode_series._publish}・据え替えと後片付けの規律は core の原語
     {@link karume.artifacts.staged_publication}）。据える単位が**ターゲットのディレクトリ丸ごと**
     なので、容器と出所記録（LoRA / 校正）が食い違った組も作れない。
+
+    MUST: `target` は {@link TARGETS} の要素（= 部品名 = `karume.json` の weights のキー）。
+    ここで名乗る綴りがそのまま容器のグラフ名になるので、表の外の文字列を受けると**ランタイムが
+    引けない容器**が黙って焼ける（`BUILDERS` に表外の席が生えた日に、綴りの門は緑のまま）。
     """
+    if target not in TARGETS:
+        raise AssertionError(
+            f"未知のターゲット '{target}'（既知: {', '.join(TARGETS)}）"
+            " — ターゲット名はそのまま容器のグラフ名になる"
+        )
     started = time.perf_counter()
     component = BUILDERS[target](args, False)
     out_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -1107,9 +1123,9 @@ def emit_target(target: str, args: argparse.Namespace, out_dir: Path) -> dict[st
             component.example,
             staged / MODEL_FILE,
             provenance=PROVENANCE,
-            # グラフ名は**部品名**（= karume.json の weights のキー = 据え替え先の
-            # ディレクトリ名）。作業席の名前を拾わせないため呼び手が名乗る。
-            graph_name=out_dir.name,
+            # グラフ名は**部品名**（= karume.json の weights のキー）。ターゲット名が
+            # そのまま部品名なので、ディレクトリ名からは導かない（container-v1 §12）。
+            graph_name=target,
             assets=_host_table_assets(component),
             dynamic_shapes=component.dynamic_shapes,
             symbol_names=component.symbol_names,

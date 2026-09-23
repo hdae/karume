@@ -94,7 +94,9 @@ def _rope_asset(payload: bytes = _ROPE_BASE) -> dict[str, AssetInput]:
     return {ROPE_BASE_ASSET: AssetInput(ROPE_BASE_ROLE, len(payload), payload)}
 
 
-def _weights_container(role: str, storage: str, *, rope: bytes | None = None) -> list[bytes]:
+def _weights_container(
+    role: str, storage: str, *, named: str, rope: bytes | None = None
+) -> list[bytes]:
     """weights の席へ挿す**正当なコンテナ**（役割ごとに違うバイト列）。
 
     組み立ては入力コンテナを開いて宣言の全規則で見る
@@ -106,7 +108,12 @@ def _weights_container(role: str, storage: str, *, rope: bytes | None = None) ->
     `rope` は transformer の席だけが持つ資産（渡すと専用 part が 1 本増える）。
     """
     return ir_container(
-        mark=role, storage=storage, assets={} if rope is None else _rope_asset(rope)
+        mark=role,
+        # 疑似系列も**部品名で名乗る**（容器のグラフ名 = manifest の weights のキー MUST・
+        # container-v1 §12）。`mark` はバイト列の作り分けで、綴りは部品名と一致しない。
+        named=named,
+        storage=storage,
+        assets={} if rope is None else _rope_asset(rope),
     )
 
 
@@ -114,12 +121,18 @@ def _weights_container(role: str, storage: str, *, rope: bytes | None = None) ->
 #: `STORAGE_REQUIREMENTS` が要求する格納の語彙を束縛表に持つ。transformer の 3 役は
 #: rope 素表を資産として同梱するので part が 1 本多い（{@link _TRANSFORMER_PARTS}）。
 _PAYLOADS = {
-    "text_encoder": _weights_container("text-encoder", "f16"),
-    "text_conditioner": _weights_container("text-conditioner", "f16"),
-    "transformer_f16": _weights_container("transformer-f16", "f16", rope=_ROPE_BASE),
-    "transformer_i8": _weights_container("transformer-i8", "i8", rope=_ROPE_BASE),
-    "transformer_i4": _weights_container("transformer-i4", "i4", rope=_ROPE_BASE),
-    "vae_decoder": _weights_container("vae-decoder", "f16"),
+    "text_encoder": _weights_container("text-encoder", "f16", named="text_encoder"),
+    "text_conditioner": _weights_container("text-conditioner", "f16", named="text_conditioner"),
+    "transformer_f16": _weights_container(
+        "transformer-f16", "f16", named="transformer", rope=_ROPE_BASE
+    ),
+    "transformer_i8": _weights_container(
+        "transformer-i8", "i8", named="transformer", rope=_ROPE_BASE
+    ),
+    "transformer_i4": _weights_container(
+        "transformer-i4", "i4", named="transformer", rope=_ROPE_BASE
+    ),
+    "vae_decoder": _weights_container("vae-decoder", "f16", named="vae_decoder"),
     "tokenizer": b'{"qwen2": true}',
     "tokenizer_2": b'{"t5": true}',
 }
@@ -231,7 +244,10 @@ def _build_series(
             _PAYLOADS[role]
             if not mark and rope == _ROPE_BASE
             else _weights_container(
-                f"{role}{mark.decode('utf-8')}" if mark else role, storage, rope=rope
+                f"{role}{mark.decode('utf-8')}" if mark else role,
+                storage,
+                named="transformer",
+                rope=rope,
             )
         )
         write_component(series / "transformer" / "model.krm", payload)
@@ -447,7 +463,7 @@ class TestRopeBase:
         sources = _build_series(tmp_path / "series")
         replace_component(
             sources.transformer["i8"] / "transformer" / "model.krm",
-            _weights_container("transformer-i8", "i8"),
+            _weights_container("transformer-i8", "i8", named="transformer"),
         )
 
         with pytest.raises(DistError, match=r"資産 'rope_base' が無い"):
@@ -828,7 +844,7 @@ class TestStorageGate:
         sources = _build_series(tmp_path / "series")
         replace_component(
             sources.base / "text_encoder" / "model.krm",
-            _weights_container("text-encoder", "f32"),
+            _weights_container("text-encoder", "f32", named="text_encoder"),
         )
         out_dir = tmp_path / "models" / ANIMA_TURBO_MODEL_NAME
         with pytest.raises(DistError, match=r"text_encoder: .* f16 が無い"):
@@ -840,7 +856,7 @@ class TestStorageGate:
         sources = _build_series(tmp_path / "series")
         replace_component(
             sources.transformer["i8"] / "transformer" / "model.krm",
-            _weights_container("transformer-i8", "f16", rope=_ROPE_BASE),
+            _weights_container("transformer-i8", "f16", named="transformer", rope=_ROPE_BASE),
         )
         with pytest.raises(DistError, match=r"transformer_i8: .* i8 が無い"):
             _assemble_anima(sources, tmp_path / "models" / ANIMA_TURBO_MODEL_NAME)
@@ -854,7 +870,7 @@ class TestStorageGate:
         sources = _build_series(tmp_path / "series", with_i4=True)
         replace_component(
             sources.transformer["i4"] / "transformer" / "model.krm",
-            _weights_container("transformer-i4", "i8", rope=_ROPE_BASE),
+            _weights_container("transformer-i4", "i8", named="transformer", rope=_ROPE_BASE),
         )
         with pytest.raises(DistError, match=r"transformer_i4: .* i4 が無い"):
             _assemble_anima(sources, tmp_path / "models" / "i4-seat", spec=_i4_seat())
@@ -872,7 +888,7 @@ class TestStorageGate:
         sources = _build_series(tmp_path / "series")
         replace_component(
             sources.transformer["i8"] / "transformer" / "model.krm",
-            _weights_container("transformer-i4", "i4", rope=_ROPE_BASE),
+            _weights_container("transformer-i4", "i4", named="transformer", rope=_ROPE_BASE),
         )
         with pytest.raises(DistError, match=r"transformer_i8: .* i4 がある"):
             _assemble_anima(sources, tmp_path / "models" / ANIMA_TURBO_MODEL_NAME)
@@ -924,6 +940,7 @@ class TestStorageGate:
                     _weights_container(
                         "swapped-series",
                         series.removeprefix("transformer_"),
+                        named="transformer",
                         rope=_ROPE_BASE,
                     ),
                 )

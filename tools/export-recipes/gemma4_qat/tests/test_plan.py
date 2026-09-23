@@ -15,7 +15,12 @@ from typing import Any
 
 import pytest
 
-from gemma4_qat.config import DEFAULT_CAPACITY, DEFAULT_CHUNK_LENGTH, MAX_CHUNK_LENGTH
+from gemma4_qat.config import (
+    DEFAULT_CAPACITY,
+    DEFAULT_CHUNK_LENGTH,
+    MAX_CHUNK_LENGTH,
+    REFERENCE_SCHEMA,
+)
 from gemma4_qat.distribution import qat_plan
 from gemma4_qat.tests import series_fixture as fixture
 from karume.dist import DistError
@@ -67,6 +72,28 @@ class TestQatPlanGate:
         broken[fault] = "e4b" if fault == "model" else 1
         with pytest.raises(DistError, match="reference"):
             qat_plan(_series(tmp_path, reference=broken), "e2b")
+
+    def test_it_names_the_old_sidecar_generation_by_the_field_it_carries(
+        self, tmp_path: Path
+    ) -> None:
+        """MUST: 旧 sidecar 世代（`pleShards` を持つ）は**名指しで**落ちる。
+
+        schema を据え置いたまま欄名だけ動かすと、古い記録は版の門を素通りして
+        「`pleBlocks`（= None）が現物と違う」でだけ落ちる — 実際に足りないのが**欄そのもの**
+        であることがどこにも綴られない（手元の 2 系列が実際にこの形で止まっていた）。
+        """
+        broken = fixture.reference_record("e2b")
+        broken["schema"] = REFERENCE_SCHEMA - 1
+        broken["pleShards"] = broken.pop("pleBlocks")
+
+        with pytest.raises(DistError, match="旧 sidecar 世代") as raised:
+            qat_plan(_series(tmp_path, reference=broken), "e2b")
+
+        assert "pleShards" in str(raised.value) and "pleBlocks" in str(raised.value)
+
+    def test_a_record_of_the_current_generation_passes_that_gate(self, tmp_path: Path) -> None:
+        """対（恒真でない）: 同じ記録を schema 3 + `pleBlocks` に戻せば通る。"""
+        assert qat_plan(_series(tmp_path), "e2b").pipeline == "gemma4-qat/1"
 
     @pytest.mark.parametrize(
         ("field", "value"),
