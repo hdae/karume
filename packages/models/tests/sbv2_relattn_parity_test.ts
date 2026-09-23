@@ -14,16 +14,18 @@
 // SKIP し、生成器そのものの性質を見るテスト（故障注入）は常に走る。
 
 import { assert, assertEquals, assertThrows } from "@std/assert";
-import { parseSafetensors, prepareModel } from "@karume/runtime";
-import { readShard, resolveShards } from "../../runtime/tests/helpers/shard-files.ts";
+import { parseSafetensors, prepareContainer } from "@karume/runtime";
+import { openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
+import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
 import { buildRelattnTables, RELATTN_WINDOW_SIZE } from "../src/sbv2/relattn-tables.ts";
 
 /**
  * 系列 root。綴りの `sbv2-F1` は `sbv2/export.py` の `default_out_root()` が `--model-dir` の
  * ディレクトリ名から導いたもので、**当面この 1 話者を決め打ち**する。
  */
-const MODELS_ROOT = new URL("../../../outputs/series/sbv2-F1/", import.meta.url);
-const MODEL_FILE = "model.safetensors";
+const SERIES_NAME = "sbv2-F1";
+const MODELS_ROOT = new URL(`../../../outputs/series/${SERIES_NAME}/`, import.meta.url);
+const MODEL_FILE = "model.krm";
 const IO_PREFIX = "io.";
 const IO_SUFFIX = ".safetensors";
 
@@ -125,9 +127,11 @@ for (const target of TABLE_INPUT_TARGETS) {
       // `idx_v` はコンテナに焼き込まれていて幅が `2w+1`**。ここが TS の窓幅定数と食い違えば
       // ホストは違う幅の埋め込みを前提に添字を作っている — shape エラーにならず黙って
       // 誤るクラスなので、コンテナから読んだ幅で TS 側の定数を検算する。
-      // グラフを持つのは配布形の**先頭 shard** だけ（ADR 0081）。
-      const shards = resolveShards(new URL(`${target}/${MODEL_FILE}`, MODELS_ROOT));
-      const model = prepareModel(await readShard(shards[0]));
+      // グラフ記述は容器の part 0 にある（container-v1 §12）— 重みの block は 1 つも取らない。
+      // グラフ名は helpers/series-graphs.ts の 1 本から引く（門番と同じ正本）。この系列では
+      // 部品ディレクトリ名と同じ綴りになるが、それは事実であって規則ではない。
+      const opened = await openSeriesContainer(new URL(`${target}/${MODEL_FILE}`, MODELS_ROOT));
+      const model = prepareContainer(opened, seriesGraph(SERIES_NAME, target));
       const baked = model.graph.nodes
         .filter((node) => node.op === "sym_prefix_slice")
         .map((node) => model.graph.values[node.ins[0]].shape);

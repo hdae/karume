@@ -32,28 +32,24 @@
 import { assert, assertEquals } from "@std/assert";
 import { parseManifest, resolveSelection } from "@karume/hub";
 import type { Manifest } from "@karume/hub";
-import { acquireGpu, prepareModel } from "@karume/runtime";
+import { acquireGpu, prepareContainer } from "@karume/runtime";
 import { decodeWav, VowelDetectorPipeline } from "../mod.ts";
 import { parseMelBasis } from "../src/vowel-detector/pipeline.ts";
 import { extractFeatures, FEATURE_DIM } from "../src/vowel-detector/features.ts";
 import { logitsToSegments, toLab } from "../src/vowel-detector/postprocess.ts";
-import {
-  modelPresent,
-  readShard,
-  resolveShards,
-  streamShards,
-} from "../../runtime/tests/helpers/shard-files.ts";
+import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
+import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
 /** 配布形（`karume dist --pipeline vowel-detector` の出力）。 */
 const DIST_DIR = new URL("../../../models/karume-vowel-detector/", import.meta.url);
+const SERIES_NAME = "vowel-detector-crnn-epoch3";
 /** 系列（`tools/export-recipes/vowel_detector/export.py` の出力 — 直接経路の相手）。 */
-const SERIES_DIR = new URL(
-  "../../../outputs/series/vowel-detector-crnn-epoch3/",
-  import.meta.url,
-);
-/** 系列コンポーネントの代表 path（実体は shard 列 — 見つけ方は `resolveShards` が持つ）。 */
-const SERIES_MODEL = new URL("model.safetensors", SERIES_DIR);
+const SERIES_DIR = new URL(`../../../outputs/series/${SERIES_NAME}/`, import.meta.url);
+/** 系列コンポーネントの代表 path（実体は part 連番 — 見つけ方は `resolveParts` が持つ）。 */
+const SERIES_MODEL = new URL("model.krm", SERIES_DIR);
+/** 容器の中のグラフ名（表は helpers/series-graphs.ts の 1 本 — 門番と同じ正本から引く）。 */
+const SERIES_GRAPH = seriesGraph(SERIES_NAME);
 /** 実音声コーパス（凍結コピー — ホスト資産なので消すと焼き直し + 凍結し直しが要る）。 */
 const CORPUS_DIR = new URL("../../../outputs/misc/corpus/", import.meta.url);
 
@@ -146,10 +142,9 @@ const loadLocalAssets = async (
 const directLab = async (audio: Float32Array, melBasis: Float32Array): Promise<string> => {
   const features = extractFeatures(audio, melBasis);
   const usable = features.frames - (features.frames % TIME_STRIDE);
-  const shards = resolveShards(SERIES_MODEL);
-  const prepared = prepareModel(await readShard(shards[0]));
+  const prepared = prepareContainer(await openSeriesContainer(SERIES_MODEL), SERIES_GRAPH);
   const gpu = await acquireGpu();
-  const session = await prepared.createSession(gpu, streamShards(shards.slice(1)));
+  const session = await prepared.createContainerSession(gpu);
   try {
     const outputs = await session.run({
       [INPUT_NAME]: {

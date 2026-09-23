@@ -26,7 +26,7 @@
 //
 // ## 資産
 //
-// `outputs/series/gemma4-e2b-product/`（コンテナ + PLE sidecar）と
+// `outputs/series/gemma4-e2b-product/`（重みと PLE の資産が同居する容器）と
 // `outputs/series/gemma4-e2b-decode/`（期待列の正本）。どちらもリポジトリ管理外で、無い環境では
 // **明示 SKIP** する。
 
@@ -34,8 +34,8 @@ import { assert, assertEquals } from "@std/assert";
 import {
   acquireGpu,
   parseSafetensors,
+  prepareContainer,
   type PreparedModel,
-  prepareModel,
   type SafetensorsFile,
   type Tensor,
 } from "@karume/runtime";
@@ -43,22 +43,19 @@ import { createGemma4Ple, type Gemma4Ple } from "../src/gemma/ple.ts";
 import { gemma4RopeInputs, type Gemma4RopeSpec } from "../src/gemma/rope.ts";
 import { planPrefillChunks } from "../src/generation/greedy.ts";
 import { createSampler, isStopToken, type SamplerSpec } from "../src/generation/sampler.ts";
-import {
-  modelPresent,
-  readShard,
-  resolveShards,
-  streamShards,
-} from "../../runtime/tests/helpers/shard-files.ts";
+import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
+import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
-// 系列出力の PLE sidecar を容器の資産と同じ面へ畳む adapter（recipe が `krm` を書くのは
-// 段 3 — ADR 0109 決定 8）。
-import { openSeriesPle } from "./helpers/ple-series.ts";
+// 開いた容器から PLE の索引と block の読み口を組む（ADR 0109 決定 4）。
+import { seriesPleHandle } from "./helpers/ple-series.ts";
 import { gemma4PleTotalBytes } from "../src/gemma/ple-index.ts";
 
-const PRODUCT_ROOT = new URL("../../../outputs/series/gemma4-e2b-product/", import.meta.url);
+const PRODUCT_NAME = "gemma4-e2b-product";
+const PRODUCT_ROOT = new URL(`../../../outputs/series/${PRODUCT_NAME}/`, import.meta.url);
 const GOLDEN_ROOT = new URL("../../../outputs/series/gemma4-e2b-decode/", import.meta.url);
-const MODEL_FILE = "model.safetensors";
-const PLE_INDEX_FILE = "ple.json";
+const MODEL_FILE = "model.krm";
+/** 容器の中のグラフ名（表は helpers/series-graphs.ts の 1 本 — 門番と同じ正本から引く）。 */
+const MODEL_GRAPH = seriesGraph(PRODUCT_NAME);
 const GREEDY_PREFIX = "greedy.";
 const SUFFIX = ".safetensors";
 
@@ -112,11 +109,10 @@ const exists = (url: URL): boolean => {
 };
 
 const MODEL_PRESENT = modelPresent(new URL(MODEL_FILE, PRODUCT_ROOT));
-const SIDECAR_PRESENT = exists(new URL(PLE_INDEX_FILE, PRODUCT_ROOT));
 const GOLDENS_PRESENT = EXPECTED_CASES.every(({ name }) =>
   exists(new URL(`${GREEDY_PREFIX}${name}${SUFFIX}`, GOLDEN_ROOT))
 );
-const AVAILABLE = MODEL_PRESENT && SIDECAR_PRESENT && GOLDENS_PRESENT;
+const AVAILABLE = MODEL_PRESENT && GOLDENS_PRESENT;
 
 if (!MODEL_PRESENT) {
   console.warn(
@@ -127,7 +123,7 @@ if (!MODEL_PRESENT) {
 
 /**
  * ファイル 1 本を `ArrayBuffer` として読む。
- * MUST: view が buffer 全体を覆っているなら slice しない（PLE sidecar は 1 本 758MB 級）。
+ * MUST: view が buffer 全体を覆っているなら slice しない（この面の golden は大きい）。
  */
 const readBuffer = async (root: URL, file: string): Promise<ArrayBuffer> => {
   const bytes = await Deno.readFile(new URL(file, root));
@@ -251,11 +247,12 @@ Deno.test({
   name: "Gemma 4 E2B sampler 検収: 温度 0 の parity と EOS 集合の停止判定（実 GPU）",
   ignore: !AVAILABLE || !GPU_AVAILABLE,
   fn: async (t) => {
-    const shards = resolveShards(new URL(MODEL_FILE, PRODUCT_ROOT));
-    const parsed = prepareModel(await readShard(shards[0]));
+    // 容器は 1 度だけ開く（重みも PLE も同じ `model` 容器の中にある）。
+    const opened = await openSeriesContainer(new URL(MODEL_FILE, PRODUCT_ROOT));
+    const parsed = prepareContainer(opened, MODEL_GRAPH);
     const logitsName = parsed.graph.outputs[0];
 
-    const { index, openBlock } = await openSeriesPle(PRODUCT_ROOT);
+    const { index, openBlock } = await seriesPleHandle(opened, `test: ${PRODUCT_ROOT.pathname}`);
     const ple = createGemma4Ple({
       index,
       openBlock,
@@ -265,7 +262,7 @@ Deno.test({
     });
 
     const gpu = await acquireGpu();
-    const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
+    const session = await parsed.createContainerSession(gpu);
     try {
       await t.step("① 温度 0 の sampler で 3 ケース × 16 step が期待列と厳密一致", async () => {
         for (const { name, firstStop } of EXPECTED_CASES) {

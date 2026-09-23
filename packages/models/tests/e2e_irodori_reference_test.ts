@@ -14,14 +14,10 @@
 // 資産が欠けた環境と GPU 無し環境は生成コマンド付きで**明示 SKIP**する（ADR 0005）。
 
 import { assertEquals } from "@std/assert";
-import { acquireGpu, parseSafetensors, prepareModel } from "@karume/runtime";
+import { acquireGpu, parseSafetensors, prepareContainer } from "@karume/runtime";
 import { normalizeReference, reflectPadToHop } from "../src/irodori/host/reference.ts";
-import {
-  modelPresent,
-  readShard,
-  resolveShards,
-  streamShards,
-} from "../../runtime/tests/helpers/shard-files.ts";
+import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
+import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
 /** 実重み v4-small の運用値（`pipelineConfig` が運ぶ数と同じ）。 */
@@ -61,9 +57,14 @@ const CASES: readonly string[] = ["ref-default", "ref-short", "ref-odd"];
 
 const GOLDEN_DIR = new URL("../../../outputs/series/dacvae-32dim/host/", import.meta.url);
 const ENCODER_URL = new URL(
-  "../../../outputs/series/dacvae-32dim/encoder/model.safetensors",
+  "../../../outputs/series/dacvae-32dim/encoder/model.krm",
   import.meta.url,
 );
+/**
+ * 容器の中のグラフ名（表は helpers/series-graphs.ts の 1 本 — 門番と同じ正本から引く）。
+ * ディレクトリ名 `encoder` とは綴りが違う。
+ */
+const ENCODER_GRAPH = seriesGraph("dacvae-32dim", "encoder");
 
 const HOST_COMMAND =
   "cd tools/exporter && uv run --with descript-audiotools --with einops --with 'transformers==5.14.1' python dacvae_host.py";
@@ -77,8 +78,6 @@ const readBytes = async (url: URL): Promise<ArrayBuffer | undefined> => {
     : (bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer);
 };
 
-/** encoder の配布形（先頭がグラフ shard — ADR 0081。分割されていなければ 1 本）。 */
-const ENCODER_SHARDS = resolveShards(ENCODER_URL);
 const ENCODER_PRESENT = modelPresent(ENCODER_URL);
 const caseBytes = new Map<string, ArrayBuffer>();
 for (const name of CASES) {
@@ -108,10 +107,10 @@ Deno.test({
   name: "e2e(実GPU): 参照音声 → 正規化 → pad → codec encoder が golden の latent と一致する",
   ignore: !RUNNABLE,
   fn: async () => {
-    const prepared = prepareModel(await readShard(ENCODER_SHARDS[0]));
+    const prepared = prepareContainer(await openSeriesContainer(ENCODER_URL), ENCODER_GRAPH);
     const gpu = await acquireGpu();
     try {
-      const session = await prepared.createSession(gpu, streamShards(ENCODER_SHARDS.slice(1)), {});
+      const session = await prepared.createContainerSession(gpu, {});
       try {
         let worst = 0;
         for (const name of CASES) {

@@ -41,7 +41,12 @@
 // 独立。
 
 import { assert, assertEquals } from "@std/assert";
-import { acquireGpu, parseSafetensors, type PreparedModel, prepareModel } from "@karume/runtime";
+import {
+  acquireGpu,
+  parseSafetensors,
+  prepareContainer,
+  type PreparedModel,
+} from "@karume/runtime";
 import { normalizeToNchw, type ResampleFilter, resizeRgb8 } from "../src/image/preprocess.ts";
 import { encodePng } from "../src/image/png.ts";
 // NOTE: PNG デコーダは karume 本体が持たない設計（preprocess.ts のモジュール doc —— 入口は
@@ -49,7 +54,8 @@ import { encodePng } from "../src/image/png.ts";
 // models → runtime は**正方向**の依存で、かつ両者とも `tests/` は publish から除外される
 // （packages/*/deno.json の `publish.exclude`）ので、配布物には影響しない。
 import { decodePng } from "../../runtime/tests/helpers/png-decode.ts";
-import { readShard, resolveShards, streamShards } from "../../runtime/tests/helpers/shard-files.ts";
+import { openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
+import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
 import { openResults } from "../../runtime/tests/helpers/results.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
@@ -111,7 +117,9 @@ const IMAGE_COMMAND = "deno task demo:eval-images --source <Anima 配布形の�
 const SERIES_ROOT = new URL(`../../../outputs/series/${SERIES_NAME}/`, import.meta.url);
 /** 入力の実画像コーパス（凍結コピー — ホスト資産なので消すと焼き直しが要る）。 */
 const CORPUS_DIR = new URL("../../../outputs/misc/corpus/", import.meta.url);
-const MODEL_FILE = "model.safetensors";
+const MODEL_FILE = "model.krm";
+/** 容器の中のグラフ名（表は helpers/series-graphs.ts の 1 本 — 門番と同じ正本から引く）。 */
+const MODEL_GRAPH = seriesGraph(SERIES_NAME);
 const IO_PREFIX = "io.";
 const IO_SUFFIX = ".safetensors";
 
@@ -422,8 +430,8 @@ Deno.test({
     // 入力は**実画像を TS 前処理で通したもの**（golden の入力ではない）— 「PNG を渡したら
     // 意味のある深度が返る」ところまでを検査にする。ついでに深度地図を PNG で書き出す
     // （数値の門だけでは形が見えないため — 目視確認用の成果物であって、門ではない）。
-    const shards = resolveShards(new URL(MODEL_FILE, SERIES_ROOT));
-    const parsed = prepareModel(await readShard(shards[0]));
+    const opened = await openSeriesContainer(new URL(MODEL_FILE, SERIES_ROOT));
+    const parsed = prepareContainer(opened, MODEL_GRAPH);
     const [outputName] = parsed.graph.outputs;
     const width = staticDim(parsed, 3);
     const height = staticDim(parsed, 2);
@@ -433,7 +441,7 @@ Deno.test({
     const started = performance.now();
 
     const gpu = await acquireGpu();
-    const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
+    const session = await parsed.createContainerSession(gpu);
     const means = new Map<string, { near: number; far: number }>();
     try {
       // 4 枚を 1 Session で回す（重みは 99MB — 画像ごとに組み直す理由が無い）。

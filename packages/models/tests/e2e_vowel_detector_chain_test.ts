@@ -49,19 +49,15 @@
 // 資産が無い環境では**明示 SKIP** する（系列ごと・音声ごとに独立）。ADR 0005 の「全 SKIP は
 // 明示 FAIL」門番は *GPU アダプタの有無* だけを見ており、この SKIP とは独立。golden ケースの
 // 列挙と完全性（中途半端な資産は FAIL）は runtime 側の「資産の完全性」テストが持つ — ここが
-// 要るのはグラフ本体と WAV だけなので、系列の有無も `model.safetensors` の有無で見る。
+// 要るのはグラフ本体と WAV だけなので、系列の有無も `model.krm` の有無で見る。
 
 import { assert, assertEquals } from "@std/assert";
-import { acquireGpu, type PreparedModel, prepareModel } from "@karume/runtime";
+import { acquireGpu, prepareContainer, type PreparedModel } from "@karume/runtime";
 import { decodeWav } from "../src/audio/wav.ts";
 import { extractFeatures, FEATURE_DIM, SAMPLE_RATE } from "../src/vowel-detector/features.ts";
 import { logitsToSegments, toLab } from "../src/vowel-detector/postprocess.ts";
-import {
-  modelPresent,
-  readShard,
-  resolveShards,
-  streamShards,
-} from "../../runtime/tests/helpers/shard-files.ts";
+import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
+import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
 /**
@@ -263,7 +259,9 @@ const SERIES_ROOT = new URL(`../../../outputs/series/${SERIES_NAME}/`, import.me
 /** 実音声コーパス（凍結コピー — ホスト資産なので消すと焼き直し + 凍結し直しが要る）。 */
 const CORPUS_DIR = new URL("../../../outputs/misc/corpus/", import.meta.url);
 const FIXTURE_PATH = new URL("./fixtures/vowel-detector/parity.json", import.meta.url);
-const MODEL_FILE = "model.safetensors";
+const MODEL_FILE = "model.krm";
+/** 容器の中のグラフ名（表は helpers/series-graphs.ts の 1 本 — 門番と同じ正本から引く）。 */
+const MODEL_GRAPH = seriesGraph(SERIES_NAME);
 const INPUT_NAME = "features";
 
 const audioFile = (entry: Case): string => `vowel-${entry.name}.wav`;
@@ -370,13 +368,13 @@ for (const entry of CASES) {
       const usable = features.frames - (features.frames % 2);
       assertEquals(usable, entry.length, `${entry.name} の偶数化フレーム数`);
 
-      const shards = resolveShards(new URL(MODEL_FILE, SERIES_ROOT));
-      const parsed = prepareModel(await readShard(shards[0]));
+      const opened = await openSeriesContainer(new URL(MODEL_FILE, SERIES_ROOT));
+      const parsed = prepareContainer(opened, MODEL_GRAPH);
       assertSymbolicTimeAxis(parsed);
       const [outputName] = parsed.graph.outputs;
 
       const gpu = await acquireGpu();
-      const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
+      const session = await parsed.createContainerSession(gpu);
       let logits: Float32Array;
       try {
         const output = (await session.run({

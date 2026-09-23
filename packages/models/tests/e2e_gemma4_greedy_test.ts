@@ -54,24 +54,23 @@ import {
   acquireGpu,
   codecLayout,
   parseSafetensors,
+  prepareContainer,
   type PreparedModel,
-  prepareModel,
   type SafetensorsFile,
   type SessionDiagnostics,
   type Tensor,
 } from "@karume/runtime";
 import { generateGreedy } from "../src/generation/greedy.ts";
 import { gemma4RopeInputs, type Gemma4RopeSpec } from "../src/gemma/rope.ts";
-import {
-  modelPresent,
-  readShard,
-  resolveShards,
-  streamShards,
-} from "../../runtime/tests/helpers/shard-files.ts";
+import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
+import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
 import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE } from "./helpers/gpu.ts";
 
-const SERIES_ROOT = new URL("../../../outputs/series/gemma4-e2b-decode/", import.meta.url);
-const MODEL_FILE = "model.safetensors";
+const SERIES_NAME = "gemma4-e2b-decode";
+const SERIES_ROOT = new URL(`../../../outputs/series/${SERIES_NAME}/`, import.meta.url);
+const MODEL_FILE = "model.krm";
+/** 容器の中のグラフ名（表は helpers/series-graphs.ts の 1 本 — 門番と同じ正本から引く）。 */
+const MODEL_GRAPH = seriesGraph(SERIES_NAME);
 const IO_PREFIX = "io.";
 const GREEDY_PREFIX = "greedy.";
 const SUFFIX = ".safetensors";
@@ -275,8 +274,8 @@ if (!AVAILABLE) {
 /**
  * ファイル 1 本を `ArrayBuffer` として読む。
  *
- * MUST: view が buffer 全体を覆っているなら slice しない — model.safetensors は約 4GiB・
- * io.context-en は 627MB で、無条件の `slice` は峰値を倍増させる（1-shot 門と同じ理由）。
+ * MUST: view が buffer 全体を覆っているなら slice しない — io.context-en は 627MB で、
+ * 無条件の `slice` は峰値を倍増させる（1-shot 門と同じ理由）。
  */
 const readBuffer = async (file: string): Promise<ArrayBuffer> => {
   const bytes = await Deno.readFile(new URL(file, SERIES_ROOT));
@@ -535,8 +534,8 @@ Deno.test({
   name: "Gemma 4 E2B decode 検収: 固定 token id 列の parity（実 GPU / torch CPU 期待値）",
   ignore: !AVAILABLE || !GPU_AVAILABLE,
   fn: async (t) => {
-    const shards = resolveShards(new URL(MODEL_FILE, SERIES_ROOT));
-    const parsed = prepareModel(await readShard(shards[0]));
+    const opened = await openSeriesContainer(new URL(MODEL_FILE, SERIES_ROOT));
+    const parsed = prepareContainer(opened, MODEL_GRAPH);
     const [logitsName, tokenName] = parsed.graph.outputs;
 
     await t.step("① 形の前提: states 形 chunk グラフである", () => {
@@ -544,7 +543,7 @@ Deno.test({
     });
 
     const gpu = await acquireGpu();
-    const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
+    const session = await parsed.createContainerSession(gpu);
     try {
       await t.step("② greedy parity: 3 ケース × 16 step が torch の期待列と厳密一致", async () => {
         /** ケースごとの prefill chunk 本数（多 chunk prefill を踏んだことの実測）。 */
@@ -878,15 +877,15 @@ Deno.test({
     "Gemma 4 E2B decode census: states 形カーネル族と混成格納のキー（実 GPU / timestamp-query）",
   ignore: !AVAILABLE || !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
   fn: async () => {
-    const shards = resolveShards(new URL(MODEL_FILE, SERIES_ROOT));
-    const parsed = prepareModel(await readShard(shards[0]));
+    const opened = await openSeriesContainer(new URL(MODEL_FILE, SERIES_ROOT));
+    const parsed = prepareContainer(opened, MODEL_GRAPH);
     const [, tokenName] = parsed.graph.outputs;
     // 最短ケース（T=6）で足りる — 見るのは走ったパイプラインの種類と本数。
     const golden = await loadGreedy("capital-en");
     assert(golden.prompt.length <= CHUNK_LENGTH, "census は 1 chunk で踏むケースを使う");
 
     const gpu = await acquireGpu({ gpuTiming: true });
-    const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
+    const session = await parsed.createContainerSession(gpu);
     // 混成格納の常駐そのもの（ADR 0069 の検収条件 — キー検査と独立の実測線）。適格落ちは
     // 例外を出さず CPU で f32 展開されるだけなので、hostExpandedBytes が唯一の直接観測。
     const storage = session.diagnostics().storage;

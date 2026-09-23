@@ -28,23 +28,22 @@ import { assert, assertEquals } from "@std/assert";
 import {
   acquireGpu,
   parseSafetensors,
+  prepareContainer,
   type PreparedModel,
-  prepareModel,
   type SafetensorsFile,
 } from "@karume/runtime";
 import { generateGreedy } from "../src/generation/greedy.ts";
 import { gemma4RopeInputs, type Gemma4RopeSpec } from "../src/gemma/rope.ts";
-import {
-  modelPresent,
-  readShard,
-  resolveShards,
-  streamShards,
-} from "../../runtime/tests/helpers/shard-files.ts";
+import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
+import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
-const TOKEN_ROOT = new URL("../../../outputs/series/gemma4-e2b-decode-token/", import.meta.url);
+const TOKEN_NAME = "gemma4-e2b-decode-token";
+const TOKEN_ROOT = new URL(`../../../outputs/series/${TOKEN_NAME}/`, import.meta.url);
 const GOLDEN_ROOT = new URL("../../../outputs/series/gemma4-e2b-decode/", import.meta.url);
-const MODEL_FILE = "model.safetensors";
+const MODEL_FILE = "model.krm";
+/** 容器の中のグラフ名（表は helpers/series-graphs.ts の 1 本 — 門番と同じ正本から引く）。 */
+const MODEL_GRAPH = seriesGraph(TOKEN_NAME);
 const GREEDY_PREFIX = "greedy.";
 const SUFFIX = ".safetensors";
 /** 出所記録のファイル名と版（綴りの正本は `gemma4/provenance.py`）。 */
@@ -320,8 +319,8 @@ Deno.test({
   name: "Gemma 4 E2B token-only 検収: 系列間交差 parity（実 GPU / opt-in 系列の期待列）",
   ignore: !AVAILABLE || !GPU_AVAILABLE,
   fn: async (t) => {
-    const shards = resolveShards(new URL(MODEL_FILE, TOKEN_ROOT));
-    const parsed = prepareModel(await readShard(shards[0]));
+    const opened = await openSeriesContainer(new URL(MODEL_FILE, TOKEN_ROOT));
+    const parsed = prepareContainer(opened, MODEL_GRAPH);
     const tokenName = parsed.graph.outputs[0];
 
     await t.step("① 形の前提: token-only 出口である", () => {
@@ -329,7 +328,7 @@ Deno.test({
     });
 
     const gpu = await acquireGpu();
-    const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
+    const session = await parsed.createContainerSession(gpu);
     try {
       // 混成格納の常駐（ADR 0069 の検収条件 — 適格落ちは例外を出さず CPU 展開されるだけ
       // なので、hostExpandedBytes が唯一の直接観測）。

@@ -31,11 +31,11 @@
 // 配布形ミラー `models/karume-gemma4/`（`karume/5`）。リポジトリ管理外なので、無い環境では
 // **明示 SKIP** する。
 //
-// NOTE: 系列出力（`outputs/series/gemma4-e2b-product/`）からは組めない — PLE は ADR 0109 決定 4
-// で `model` 容器の資産へ移り、`fromAssets` が受けるのも容器の part 列になった。recipe が
-// `krm` を書くのは段 3（同 決定 8）なので、この面に渡せる実資産は移行済みミラーだけである。
-// 重みも PLE も同じ焼き直しなので golden の断定はそのまま保てる（取得元だけが
-// `e2e_gemma4_directory_test.ts` と違う）。
+// NOTE: 系列出力（`outputs/series/gemma4-e2b-product/`）も `krm` を書くようになったが、この面は
+// 系列からは組めない — `fromAssets` が受けるのは**manifest が持つもの**（part 列のキー・
+// model / quant の選択軸・2 文書の期待 hash）で、manifest を持たない系列出力には無いからである
+// （`helpers/gemma-mirror.ts` のモジュール doc と同じ理由）。重みも PLE も同じ焼き直しなので
+// golden の断定はそのまま保てる（取得元だけが `e2e_gemma4_directory_test.ts` と違う）。
 
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 // MUST: 入口は**公開面**（`./gemma` サブパス）から取る — 消費者が書けない import で検収すると、

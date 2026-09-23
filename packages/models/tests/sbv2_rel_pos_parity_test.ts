@@ -14,14 +14,22 @@
 // `symbols.json` が無い環境では SKIP する。
 
 import { assert, assertEquals, assertThrows } from "@std/assert";
-import { parseSafetensors, prepareModel } from "@karume/runtime";
-import { readShard, resolveShards } from "../../runtime/tests/helpers/shard-files.ts";
+import { parseSafetensors, prepareContainer } from "@karume/runtime";
+import { openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
+import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
 import { buildRelPosTables } from "../src/sbv2/text/rel-pos-tables.ts";
 import { parseJpExtraRules } from "../src/sbv2/text/symbols.ts";
 
+const SERIES_NAME = "deberta-i8";
+const SERIES_COMPONENT = "sbv2-22layer";
 /** 表を入力で受ける text_encoder の系列（配布形と同じ variant）。 */
-const SERIES_ROOT = new URL("../../../outputs/series/deberta-i8/sbv2-22layer/", import.meta.url);
-const MODEL_FILE = "model.safetensors";
+const SERIES_ROOT = new URL(
+  `../../../outputs/series/${SERIES_NAME}/${SERIES_COMPONENT}/`,
+  import.meta.url,
+);
+const MODEL_FILE = "model.krm";
+/** 容器の中のグラフ名（表は helpers/series-graphs.ts の 1 本 — 門番と同じ正本から引く）。 */
+const GRAPH = seriesGraph(SERIES_NAME, SERIES_COMPONENT);
 const IO_PREFIX = "io.";
 const IO_SUFFIX = ".safetensors";
 
@@ -134,8 +142,11 @@ Deno.test({
     // 昇格が効いていれば、T で切り出す `sym_prefix_slice` は 1 本も残らない（残っていたら
     // Tmax=512 の `[1,512,512]` を抱えたまま = 2MiB の死荷重）。値は正しいまま容量だけが
     // 戻る類なので、E2E では捕まらない。
-    // グラフを持つのは配布形の**先頭 shard** だけ（ADR 0081）。
-    const model = prepareModel(await readShard(resolveShards(new URL(MODEL_FILE, SERIES_ROOT))[0]));
+    // グラフ記述は容器の part 0 にある（container-v1 §12）— 重みの block は 1 つも取らない。
+    const model = prepareContainer(
+      await openSeriesContainer(new URL(MODEL_FILE, SERIES_ROOT)),
+      GRAPH,
+    );
     const baked = model.graph.nodes.filter((node) => node.op === "sym_prefix_slice");
     assertEquals(baked.length, 0, "焼き込み表（sym_prefix_slice）の本数");
     assertEquals(

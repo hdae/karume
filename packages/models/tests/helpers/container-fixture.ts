@@ -110,7 +110,7 @@ const declarationOf = (spec: TensorlessGraphSpec): IrDeclaration =>
     }],
   });
 
-/** 宣言だけの容器 1 本（グラフ名 = 部品名 — ADR 0109 決定 8）。 */
+/** 宣言だけの容器 1 本（グラフ名 = 配布 manifest の weights キー — container-v1 §12）。 */
 export const tensorlessContainer = async (
   graph: string,
   spec: TensorlessGraphSpec,

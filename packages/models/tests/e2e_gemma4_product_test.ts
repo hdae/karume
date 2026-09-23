@@ -28,44 +28,48 @@
 //
 // ## 資産
 //
-// `outputs/series/gemma4-e2b-product/`（コンテナ 1.51GiB + PLE sidecar 2.22GiB — リポジトリ
-// 管理外）と `outputs/series/gemma4-e2b-decode/`（期待列の正本）。製品系列が無い環境では
+// `outputs/series/gemma4-e2b-product/`（容器 3.73GiB — グラフと重みに PLE の資産 2.22GiB が
+// 同居する。リポジトリ管理外）と `outputs/series/gemma4-e2b-decode/`（期待列の正本）。製品系列が無い環境では
 // **明示 SKIP** し、自系列があるのに正本が欠けている形は SKIP でなく **FAIL** にする。
 
 import { assert, assertEquals } from "@std/assert";
 import {
   acquireGpu,
   parseSafetensors,
+  prepareContainer,
   type PreparedModel,
-  prepareModel,
   type SafetensorsFile,
   type Tensor,
 } from "@karume/runtime";
 import { createGemma4Ple, type Gemma4Ple } from "../src/gemma/ple.ts";
-import { defaultGemma4PleResidentBytes, type Gemma4PleIndex } from "../src/gemma/ple-index.ts";
+import {
+  defaultGemma4PleResidentBytes,
+  gemma4PleBlockBytes,
+  gemma4PleBlockOf,
+  type Gemma4PleIndex,
+  type Gemma4PleTable,
+  PLE_INDEX_ASSET,
+} from "../src/gemma/ple-index.ts";
 import { gemma4RopeInputNames, gemma4RopeInputs, type Gemma4RopeSpec } from "../src/gemma/rope.ts";
 import { planPrefillChunks } from "../src/generation/greedy.ts";
-import {
-  modelPresent,
-  readShard,
-  resolveShards,
-  streamShards,
-} from "../../runtime/tests/helpers/shard-files.ts";
+import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
+import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 // 全量常駐の予算は helper が正本（同じ式を e2e ごとに写さない）。
 import { allResidentBytes } from "./helpers/ple-budget.ts";
-// 系列出力の PLE sidecar を容器の資産と同じ面へ畳む adapter（recipe が `krm` を書くのは
-// 段 3 — ADR 0109 決定 8）。
+// 系列出力の容器から PLE の索引と block の読み口を組む（ADR 0109 決定 4）。
 import { openSeriesPle } from "./helpers/ple-series.ts";
 
-const PRODUCT_ROOT = new URL("../../../outputs/series/gemma4-e2b-product/", import.meta.url);
+const PRODUCT_NAME = "gemma4-e2b-product";
+const PRODUCT_ROOT = new URL(`../../../outputs/series/${PRODUCT_NAME}/`, import.meta.url);
 const GOLDEN_ROOT = new URL("../../../outputs/series/gemma4-e2b-decode/", import.meta.url);
-const MODEL_FILE = "model.safetensors";
+const MODEL_FILE = "model.krm";
+/** 容器の中のグラフ名（表は helpers/series-graphs.ts の 1 本 — 門番と同じ正本から引く）。 */
+const MODEL_GRAPH = seriesGraph(PRODUCT_NAME);
 const GREEDY_PREFIX = "greedy.";
 const SUFFIX = ".safetensors";
 
-/** PLE sidecar の索引・逆量子化参照（綴りの正本は `gemma4/export_product.py`）。 */
-const PLE_INDEX_FILE = "ple.json";
+/** PLE の逆量子化参照（綴りの正本は `gemma4/export_product.py`）。索引は容器の資産側。 */
 const PLE_PROBE_FILE = "ple.probe.safetensors";
 const PROBE_TOKENS_KEY = "tokens";
 const PROBE_INPUTS_KEY = "per_layer_inputs";
@@ -135,11 +139,10 @@ const exists = (url: URL): boolean => {
 };
 
 const MODEL_PRESENT = modelPresent(new URL(MODEL_FILE, PRODUCT_ROOT));
-const SIDECAR_PRESENT = exists(new URL(PLE_INDEX_FILE, PRODUCT_ROOT));
 const GOLDENS_PRESENT = EXPECTED_CASES.every((name) =>
   exists(new URL(`${GREEDY_PREFIX}${name}${SUFFIX}`, GOLDEN_ROOT))
 );
-const AVAILABLE = MODEL_PRESENT && SIDECAR_PRESENT && GOLDENS_PRESENT;
+const AVAILABLE = MODEL_PRESENT && GOLDENS_PRESENT;
 
 if (!MODEL_PRESENT) {
   console.warn(
@@ -149,19 +152,20 @@ if (!MODEL_PRESENT) {
 }
 
 /**
- * 依存資産の完全性（欠落を SKIP に畳まない）。この門は 2 系列 + sidecar に依存する:
- * 製品系列の model（自系列 — 無ければ「未生成」で SKIP が正しい）と、同じ系列の PLE sidecar、
- * そして logits opt-in 系列の greedy golden（期待列の正本）。**自系列があるのに片割れが
- * 欠けている**のは未生成でなく欠損なので、SKIP でなく FAIL にする。
+ * 依存資産の完全性（欠落を SKIP に畳まない）。この門は 2 系列に依存する: 製品系列の容器
+ * （自系列 — 無ければ「未生成」で SKIP が正しい）と、logits opt-in 系列の greedy golden
+ * （期待列の正本）。容器の中も同じ規律で、**グラフはあるのに PLE の資産が無い**（外出しが
+ * 効いていない焼き方）は未生成でなく欠損なので、SKIP でなく FAIL にする。
  */
 Deno.test({
-  name: "Gemma 4 E2B 製品資産: PLE sidecar と期待列の正本が揃っている",
+  name: "Gemma 4 E2B 製品資産: PLE の資産と期待列の正本が揃っている",
   ignore: !MODEL_PRESENT,
-  fn: () => {
+  fn: async () => {
+    const opened = await openSeriesContainer(new URL(MODEL_FILE, PRODUCT_ROOT));
     assert(
-      SIDECAR_PRESENT,
-      `${PLE_INDEX_FILE} が ${PRODUCT_ROOT.pathname} に無い（コンテナはあるのに PLE sidecar が` +
-        `欠けている — この資産では per_layer_inputs を作れない）`,
+      Object.hasOwn(opened.model?.assets ?? {}, PLE_INDEX_ASSET),
+      `${MODEL_FILE} に資産 '${PLE_INDEX_ASSET}' が無い（グラフはあるのに PLE が外出しされて` +
+        `いない — この資産では per_layer_inputs を作れない）`,
     );
     assert(
       exists(new URL(PLE_PROBE_FILE, PRODUCT_ROOT)),
@@ -274,8 +278,8 @@ Deno.test({
 
 /**
  * ファイル 1 本を `ArrayBuffer` として読む。
- * MUST: view が buffer 全体を覆っているなら slice しない — PLE sidecar は 1 本 758MB 級で、
- * 無条件の `slice` はピークを倍増させる。
+ * MUST: view が buffer 全体を覆っているなら slice しない — この面で読む golden は 1 本
+ * 数百 MB 級になり得るので、無条件の `slice` はピークを倍増させる。
  */
 const readBuffer = async (root: URL, file: string): Promise<ArrayBuffer> => {
   const bytes = await Deno.readFile(new URL(file, root));
@@ -308,6 +312,54 @@ const openPle = async (maxResidentBytes: number): Promise<Gemma4Ple> => {
 const readPleIndex = async (): Promise<Gemma4PleIndex> => (await openSeriesPle(PRODUCT_ROOT)).index;
 
 /**
+ * 全量読みへ倒す一意行数の下限（`src/gemma/ple.ts` の `FULL_BLOCK_ROWS` の写し）。
+ *
+ * 実装側は export していないので、ここは**方針表の写し**である。ずれたら下の期待値が実測と
+ * 合わなくなって落ちるので、黙って別の方針を検収することはない。
+ */
+const FULL_BLOCK_ROWS = 32;
+
+/** 表 1 本ぶんの方針（{@link planTable} の戻り）。 */
+type TableExpectation = {
+  /** probe が踏んだ block 添字。 */
+  readonly touched: readonly number[];
+  /** 全量読みへ倒れる block 添字（一意行数が下限に届いたもの）。 */
+  readonly full: readonly number[];
+  /** 行読みへ倒れる区間の本数（全量へ倒れなかった block の一意行数の合計）。 */
+  readonly rowReads: number;
+};
+
+/**
+ * 索引と引く id から、`src/gemma/ple.ts` の方針表が倒す先を**表ごとに**数える。
+ *
+ * MUST: values と scales を別々に数える。2 表の block 境界は独立で（1 行 = 値 8,960B /
+ * scale 140B なので同じ block 上限でも跨ぐ token 数が桁で違う）、「values は行読み・scales は
+ * 同じ block に 32 行以上載るので全量読み」という**混在**が実資産の既定の姿である。
+ */
+const planTable = (table: Gemma4PleTable, ids: readonly number[]): TableExpectation => {
+  const grouped = new Map<number, Set<number>>();
+  for (const id of ids) {
+    const position = gemma4PleBlockOf(table, id);
+    const rows = grouped.get(position);
+    if (rows === undefined) grouped.set(position, new Set([id]));
+    else rows.add(id);
+  }
+  const full: number[] = [];
+  let rowReads = 0;
+  for (const [position, rows] of grouped) {
+    const block = table.blocks[position];
+    // 下限は block の行数と小さい方（細い block は全行が下限）。
+    if (rows.size >= Math.min(FULL_BLOCK_ROWS, block.stop - block.start)) full.push(position);
+    else rowReads += rows.size;
+  }
+  return { touched: [...grouped.keys()], full, rowReads };
+};
+
+/** 全量読みへ倒れる block が占めるバイト（予算の頭打ちに掛からないことを見るため）。 */
+const fullBytesOf = (table: Gemma4PleTable, plan: TableExpectation): number =>
+  plan.full.reduce((sum, position) => sum + gemma4PleBlockBytes(table, table.blocks[position]), 0);
+
+/**
  * ② PLE 逆量子化のビット一致（ADR 0085 決定 4）+ 遅延ロード / LRU（決定 3）。
  *
  * 参照は台本が **35 表経路の torch** で採った `ple.probe.safetensors` — PLE をグラフに残して
@@ -319,12 +371,12 @@ const readPleIndex = async (): Promise<Gemma4PleIndex> => (await openSeriesPle(P
  */
 Deno.test({
   name: "Gemma 4 E2B 製品検収: PLE 逆量子化がグラフ内 embedding とビット一致（GPU 不要）",
-  ignore: !MODEL_PRESENT || !SIDECAR_PRESENT,
+  ignore: !MODEL_PRESENT,
   fn: async () => {
     const index = await readPleIndex();
-    assertEquals(index.tokens, VOCAB, "sidecar の token 行数（= 主 embedding の vocab）");
-    assertEquals(index.layers, LAYERS, "sidecar の層数");
-    assertEquals(index.dim, PLE_DIM, "sidecar の層当たり次元");
+    assertEquals(index.tokens, VOCAB, "索引の token 行数（= 主 embedding の vocab）");
+    assertEquals(index.layers, LAYERS, "索引の層数");
+    assertEquals(index.dim, PLE_DIM, "索引の層当たり次元");
     assertEquals(index.embedScale, Math.sqrt(PLE_DIM), "embed scale（hidden_per_layer ** 0.5）");
     assert(
       index.values.blocks.length > 1,
@@ -372,9 +424,14 @@ Deno.test({
       );
     };
 
-    // ②-a 行読み経路 — probe は block あたり数行なので方針表は全段が行読みになる。
-    // 32MiB の全量読みは 1 本も起きない。
-    const distinct = new Set(tokens).size;
+    // ②-a 行読み経路 — 方針表は**表ごとに**倒れる（2 表の block 境界は独立）。values は block
+    // あたり数行なので全段が行読み。scales は 1 本の block が十数万 token を覆うので、probe の
+    // 大半が同じ block に載り、その block だけが下限（32 行）に届いて全量読みへ倒れる。
+    // 期待値は索引と probe の id から計算する（本数を定数で書くと資産世代で意味が変わる）。
+    const distinctIds = [...new Set(tokens)];
+    const distinct = distinctIds.length;
+    const valuePlan = planTable(index.values, distinctIds);
+    const scalePlan = planTable(index.scales, distinctIds);
     const rows = await openPle(budget);
     const byRows = await rows.gather(tokens);
     assertEquals(byRows.dtype, "f32", "gather の dtype");
@@ -382,9 +439,34 @@ Deno.test({
     assert("data" in byRows && byRows.data instanceof Float32Array);
     assertProbeMatch(byRows.data, "行読み経路");
     const rowStats = rows.stats();
-    assertEquals(rowStats.loads, 0, "行読みで済む gather なのに block 全量を読んでいる");
-    assertEquals(rowStats.rowReads, distinct * 2, "行読みは values / scales の 2 表ぶん");
-    assertEquals(rowStats.resident, 0, "行読みなのに常駐している");
+    // 期待値の前提: 全量へ倒れるぶんが既定予算に収まること（溢れると方針表が諦めて行読みへ戻る）。
+    const plannedFullBytes = fullBytesOf(index.values, valuePlan) +
+      fullBytesOf(index.scales, scalePlan);
+    assert(
+      plannedFullBytes <= budget,
+      `全量読みへ倒れる ${plannedFullBytes} バイトが既定予算 ${budget} バイトを超える` +
+        `（この門の期待値は「予算で諦めない」前提で立てている）`,
+    );
+    assertEquals(
+      valuePlan.full.length,
+      0,
+      "values は block あたり数行しか踏まないのに全量読みへ倒れている（行読み経路が消えた）",
+    );
+    assertEquals(
+      rowStats.loads,
+      scalePlan.full.length,
+      "全量読みへ倒れた block 数（values は 0・scales は probe の行が 32 以上載る block のぶん）",
+    );
+    assertEquals(
+      rowStats.rowReads,
+      valuePlan.rowReads + scalePlan.rowReads,
+      "行読みの区間数（表ごとに、全量へ倒れなかった block の一意行数の合計）",
+    );
+    assertEquals(
+      rowStats.resident,
+      scalePlan.full.length,
+      "常駐 block 数（全量読みへ倒れたぶんだけ常駐する）",
+    );
 
     // ②-b 全量経路 — probe の token をその block の先頭 32 行と一緒に引くと、触った block は
     // どれも下限（32 行）に届くので方針表が全量読みへ倒れる。probe の位置は列の先頭に置いて
@@ -402,14 +484,17 @@ Deno.test({
       "全量読みの値が行読みとビット一致しない",
     );
     const fullStats = full.stats();
+    const combined = [...new Set([...tokens, ...filler])];
+    const valueFull = planTable(index.values, combined);
+    const scaleFull = planTable(index.scales, combined);
+    assertEquals(
+      valueFull.rowReads + scaleFull.rowReads,
+      0,
+      "filler を足しても下限に届かない block がある（②-b の前提が崩れている）",
+    );
     assertEquals(
       fullStats.loads,
-      touched.size +
-        new Set(
-          filler.concat(tokens).map((token) =>
-            index.scales.blocks.findIndex((block) => token < block.stop)
-          ),
-        ).size,
+      valueFull.full.length + scaleFull.full.length,
       "全量で読んだ block 数（values + scales の触ったぶん）",
     );
     assertEquals(fullStats.rowReads, 0, "全量読みへ倒れた gather で行読みが起きている");
@@ -626,8 +711,8 @@ Deno.test({
   name: "Gemma 4 E2B 製品検収: 交差 parity（実 GPU / ホスト PLE + ホスト argmax）",
   ignore: !AVAILABLE || !GPU_AVAILABLE,
   fn: async (t) => {
-    const shards = resolveShards(new URL(MODEL_FILE, PRODUCT_ROOT));
-    const parsed = prepareModel(await readShard(shards[0]));
+    const opened = await openSeriesContainer(new URL(MODEL_FILE, PRODUCT_ROOT));
+    const parsed = prepareContainer(opened, MODEL_GRAPH);
     const logitsName = parsed.graph.outputs[0];
 
     await t.step("① 形の前提: PLE 外出し + 最終行 logits 出口である", () => {
@@ -639,7 +724,7 @@ Deno.test({
     // 読み直さないことだけを見る）。
     const ple = await openPle(allResidentBytes(index));
     const gpu = await acquireGpu();
-    const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
+    const session = await parsed.createContainerSession(gpu);
     try {
       const storage = session.diagnostics().storage;
       assert(storage !== undefined, "diagnostics.storage が無い");

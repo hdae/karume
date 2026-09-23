@@ -421,7 +421,7 @@ export const loadContainerComponents = async <Admitted>(
     hubOptions.signal?.throwIfAborted();
     const source = openContainerSource(seat.loaded, seat.container, sessionOptions);
     const opened = await openContainer({ kind: "source", source }, seat.container.descriptor);
-    // グラフ名 = 役割名（書き手の規約 — ADR 0109 決定 8。無ければ prepareContainer が在るグラフを
+    // グラフ名 = 役割名（書き手の規約 — container-v1 §12。無ければ prepareContainer が在るグラフを
     // 列挙して落とす）。
     components.set(seat.key, containerComponent(opened, prepareContainer(opened, seat.key)));
   }

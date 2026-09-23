@@ -1,155 +1,54 @@
 /**
- * recipe の**系列出力**（`outputs/series/**` の `ple.json` + `ple-NNNNN.safetensors`）を、
- * 容器の資産と同じ面（{@link Gemma4PleHandle}）へ畳むテスト用アダプタ。
+ * recipe の**系列出力**（`outputs/series/**` の `model.krm`）が持つ PLE を、ミラーと同じ面
+ * （{@link Gemma4PleHandle}）で開く。
  *
- * ## なぜ要るのか
+ * ## なぜ 1 本の合成関数で済むのか
  *
- * 配布形は ADR 0109 決定 4 で PLE を `model` 容器の資産（役割 `ple-values` / `ple-scales` の
- * block 列 + 索引 `ple_index`）へ移したが、**recipe が `krm` を直接書くのは段 3**（同 決定 8）
- * なので、段 2 の系列出力は旧形の sidecar のままである。torch との突合（`ple.probe`）と
- * 素の decode golden はその系列出力に対する門なので、資産を差し替えるのではなく**読み口を
- * 合わせる**。移行 CLI は shard を token 順に連結して行の倍数で切り直すだけなので、値は
- * 移行前後でビット同一であり、断定の力は変わらない。
+ * PLE は ADR 0109 決定 4 で `model` 容器の資産（索引 `ple_index` + 役割 `ple-values` /
+ * `ple-scales` の block 列）へ移り、recipe も段 3 で `krm` を直接書くようになった。つまり
+ * 系列出力とミラーの違いは**容器の開け方だけ**（代表 path を直に指すか manifest 経由か）で、
+ * 索引の読み口は models の公開部品（`gemma4PleAssetSource` + `readGemma4PleIndex`）が
+ * そのまま使える。旧 sidecar（`ple.json` + `ple-NNNNN.safetensors`）を畳む暫定アダプタは
+ * ここから消えた。
  *
- * ## 畳み方
- *
- * 旧 shard 1 本は `values [rows, layers, dim]` と `scales [rows, layers]` が連続で並んだ
- * safetensors なので、**そのテンソル領域がそのまま block 1 本**になる（asset 名は
- * `<ファイル名>:values` / `<ファイル名>:scales`）。索引は schema 3 の文書を組み立ててから
- * `parseGemma4PleIndex` に通す — 受理集合（区間の連続性・`rowBytes` の整合）の門を
- * テスト側に写さないためである。
- *
- * NOTE: hub / runtime の**テストの都合**は import しない（`helpers/memory-cache.ts` の規律）。
- * ここが触るのは公開面（`@karume/runtime` の safetensors パーサ）だけである。
+ * NOTE: `helpers/memory-cache.ts` の規律（他パッケージのテスト**内部**へ依存しない — 向こうの
+ * 都合がこちらへ漏れる）はそのまま効いている。`container-files.ts` から借りているのは
+ * **容器という形式の綴り**（part 連番の見つけ方と区間の読み方 = Python 側 `container_parts` の
+ * 鏡像）であって、runtime のテストの都合ではない。形式の綴りを models 側へ写すと、焼く側と
+ * 読み返す側で規則が割れる。
  */
 
-import { parseSafetensorsHeader, safetensorsHeaderLength } from "@karume/runtime";
-import type { AssetReader, SafetensorsHeader, TensorView } from "@karume/runtime";
-import { parseGemma4PleIndex, SCALE_BYTES } from "../../src/gemma/ple-index.ts";
+import type { OpenedContainer } from "@karume/runtime";
+import { openSeriesContainer } from "../../../runtime/tests/helpers/container-files.ts";
+import { gemma4PleAssetSource, readGemma4PleIndex } from "../../src/gemma/ple-index.ts";
 import type { Gemma4PleHandle } from "./gemma-mirror.ts";
 
-/** 旧索引（`ple.json`）のうち、この面が読む欄だけ。 */
-type LegacyIndex = {
-  readonly storage?: "i2" | "i4";
-  readonly tokens: number;
-  readonly layers: number;
-  readonly dim: number;
-  readonly embedScale: number;
-  readonly shards: readonly {
-    readonly file: string;
-    readonly start: number;
-    readonly stop: number;
-  }[];
-};
-
-/** block 1 本の実体（旧 shard の中のテンソル領域）。 */
-type Region = {
-  readonly url: URL;
-  readonly offset: number;
-  readonly length: number;
-};
-
-const HEADER_LENGTH_BYTES = 8;
-
-const readAt = async (
-  url: URL,
-  offset: number,
-  length: number,
-): Promise<Uint8Array<ArrayBuffer>> => {
-  const handle = await Deno.open(url, { read: true });
-  try {
-    await handle.seek(offset, Deno.SeekMode.Start);
-    const into = new Uint8Array(new ArrayBuffer(length));
-    let filled = 0;
-    while (filled < length) {
-      const read = await handle.read(into.subarray(filled));
-      if (read === null) {
-        throw new Error(
-          `test: ${url.pathname} が offset ${offset} からの ${length} バイトに足りない`,
-        );
-      }
-      filled += read;
-    }
-    return into;
-  } finally {
-    handle.close();
-  }
-};
-
-/** safetensors のヘッダだけを 2 段で読む。 */
-const readHeader = async (url: URL): Promise<SafetensorsHeader> => {
-  const { size } = await Deno.stat(url);
-  const head = await readAt(url, 0, HEADER_LENGTH_BYTES);
-  const headerLength = safetensorsHeaderLength(head);
-  const prefix = new Uint8Array(new ArrayBuffer(HEADER_LENGTH_BYTES + headerLength));
-  prefix.set(head);
-  prefix.set(await readAt(url, HEADER_LENGTH_BYTES, headerLength), HEADER_LENGTH_BYTES);
-  return parseSafetensorsHeader(prefix, size);
-};
-
-const tensorOf = (header: SafetensorsHeader, name: string, url: URL): TensorView => {
-  const view = header.tensors.get(name);
-  if (view === undefined) throw new Error(`test: ${url.pathname} にテンソル '${name}' が無い`);
-  return view;
-};
+/** 系列出力の `model` 容器の代表 path（実体は part 連番 — 見つけ方は `resolveParts` が持つ）。 */
+export const SERIES_MODEL_FILE = "model.krm";
 
 /**
- * 系列出力の PLE sidecar を開く（索引 + block の読み口）。
+ * 既に開いている容器から PLE の索引と block の読み口を組む。
  *
- * `root` は `ple.json` と shard が並ぶディレクトリ（recipe の系列出力）。
+ * `readGemma4PleIndex` は索引と容器の資産を**両方向で**突き合わせる（索引が指す資産が在るか /
+ * 容器の PLE 資産が索引に載っているか / 役割と論理長）ので、片方だけ焼き直した系列出力は
+ * ここで落ちる。
  */
-export const openSeriesPle = async (root: URL): Promise<Gemma4PleHandle> => {
-  const legacy = JSON.parse(
-    await Deno.readTextFile(new URL("ple.json", root)),
-  ) as LegacyIndex;
-  const factor = legacy.storage === "i2" ? 4 : legacy.storage === "i4" ? 2 : 1;
-  const rowBytes = {
-    values: legacy.layers * legacy.dim / factor,
-    scales: legacy.layers * SCALE_BYTES,
-  } as const;
-  const regions = new Map<string, Region>();
-  const blocks = { values: [] as unknown[], scales: [] as unknown[] };
-  for (const shard of legacy.shards) {
-    const url = new URL(shard.file, root);
-    const header = await readHeader(url);
-    for (const table of ["values", "scales"] as const) {
-      const view = tensorOf(header, table, url);
-      const asset = `${shard.file}:${table}`;
-      regions.set(asset, { url, offset: view.byteOffset, length: view.byteLength });
-      blocks[table].push({ asset, start: shard.start, stop: shard.stop });
-    }
-  }
-  const index = parseGemma4PleIndex(
-    {
-      schema: 3,
-      storage: legacy.storage ?? "i8",
-      tokens: legacy.tokens,
-      layers: legacy.layers,
-      dim: legacy.dim,
-      embedScale: legacy.embedScale,
-      values: { rowBytes: rowBytes.values, blocks: blocks.values },
-      scales: { rowBytes: rowBytes.scales, blocks: blocks.scales },
-    },
-    `${root.pathname}ple.json`,
+export const seriesPleHandle = async (
+  opened: OpenedContainer,
+  where: string,
+): Promise<Gemma4PleHandle> => ({
+  index: await readGemma4PleIndex(where, gemma4PleAssetSource(opened)),
+  openBlock: (asset) => opened.asset(asset),
+});
+
+/**
+ * 系列出力の PLE を代表 path から開く（容器を自分で開く呼び手のための 1 行）。
+ *
+ * 重みも同じターンで読む呼び手は、容器を 2 度開かずに {@link seriesPleHandle} へ
+ * `openSeriesContainer` の結果を渡す。
+ */
+export const openSeriesPle = async (root: URL): Promise<Gemma4PleHandle> =>
+  await seriesPleHandle(
+    await openSeriesContainer(new URL(SERIES_MODEL_FILE, root)),
+    `test: ${decodeURIComponent(root.pathname)}`,
   );
-  return {
-    index,
-    openBlock: (asset: string): AssetReader => {
-      const region = regions.get(asset);
-      if (region === undefined) throw new Error(`test: PLE の block '${asset}' が系列出力に無い`);
-      return {
-        role: asset.endsWith(":values") ? "ple-values" : "ple-scales",
-        length: region.length,
-        read: (offset, length) => {
-          if (offset < 0 || length < 0 || offset + length > region.length) {
-            throw new Error(
-              `test: block '${asset}' の区間 [${offset}, ${offset + length}) が長さ` +
-                ` ${region.length} の外`,
-            );
-          }
-          return readAt(region.url, region.offset + offset, length);
-        },
-      };
-    },
-  };
-};

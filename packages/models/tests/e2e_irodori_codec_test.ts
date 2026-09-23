@@ -13,14 +13,10 @@
 // 資産が欠けた環境と GPU 無し環境は生成コマンド付きで**明示 SKIP**する（ADR 0005）。
 
 import { assertEquals } from "@std/assert";
-import { acquireGpu, parseSafetensors, prepareModel, type Tensor } from "@karume/runtime";
+import { acquireGpu, parseSafetensors, prepareContainer, type Tensor } from "@karume/runtime";
 import { decodeTiles, planCodecTiles } from "../src/irodori/codec.ts";
-import {
-  modelPresent,
-  readShard,
-  resolveShards,
-  streamShards,
-} from "../../runtime/tests/helpers/shard-files.ts";
+import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
+import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
 /** 実重み v4-small の運用値（`pipelineConfig` が運ぶ数と同じ）。 */
@@ -35,9 +31,14 @@ const HALO_FRAMES = 8;
 const GATE_TILE_FRAMES = 64;
 
 const DECODER_URL = new URL(
-  "../../../outputs/series/dacvae-32dim/decoder/model.safetensors",
+  "../../../outputs/series/dacvae-32dim/decoder/model.krm",
   import.meta.url,
 );
+/**
+ * 容器の中のグラフ名（表は helpers/series-graphs.ts の 1 本 — 門番と同じ正本から引く）。
+ * ディレクトリ名 `decoder` とは綴りが違う。
+ */
+const DECODER_GRAPH = seriesGraph("dacvae-32dim", "decoder");
 const LATENT_URL = new URL(
   "../../../outputs/series/irodori-v4-small/pipeline/case.full.safetensors",
   import.meta.url,
@@ -55,8 +56,6 @@ const readFile = async (url: URL): Promise<ArrayBuffer | undefined> => {
     : bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
 };
 
-/** decoder の配布形（先頭がグラフ shard — ADR 0081。分割されていなければ 1 本）。 */
-const DECODER_SHARDS = resolveShards(DECODER_URL);
 const DECODER_PRESENT = modelPresent(DECODER_URL);
 const latentBytes = await readFile(LATENT_URL);
 const ASSETS_AVAILABLE = DECODER_PRESENT && latentBytes !== undefined;
@@ -85,10 +84,10 @@ Deno.test({
   fn: async () => {
     const latent = readLatent();
     const frames = latent.length / LATENT_DIM;
-    const prepared = prepareModel(await readShard(DECODER_SHARDS[0]));
+    const prepared = prepareContainer(await openSeriesContainer(DECODER_URL), DECODER_GRAPH);
     const gpu = await acquireGpu();
     try {
-      const session = await prepared.createSession(gpu, streamShards(DECODER_SHARDS.slice(1)), {});
+      const session = await prepared.createContainerSession(gpu, {});
       try {
         const run = async (
           slice: Float32Array<ArrayBuffer>,

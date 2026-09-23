@@ -4,11 +4,12 @@
  *
  * ## なぜ系列出力ではなくミラーなのか
  *
- * PLE は ADR 0109 決定 4 で `model` 容器の資産（`ple_index` + `ple-values` / `ple-scales` の
- * block 列）へ移り、recipe の系列出力（`outputs/series/**` の素の safetensors + `ple.json`）は
- * **段 3 まで旧形のまま**である（ADR 0109 決定 8）。したがって `fromAssets` / `createGemma4Ple`
- * に渡せる実資産は移行済みミラーだけで、系列出力からは組めない。重みも PLE も同じ焼き直し
- * なので、golden の断定はそのまま保てる。
+ * 系列出力も `krm` を書くようになったので、容器を開いて 1 部品を走らせる
+ * だけなら `helpers/ple-series.ts` の経路で足りる。ミラーが要るのは**manifest が持つもの**を
+ * 見る席だけである — `fromAssets` の全量面が受ける part 列のキー（`<部品>[i]`）、model /
+ * quant の選択軸、2 文書の期待 hash（`container.descriptor`）。系列出力には manifest が
+ * 無いのでこれらは組めない。重みも PLE も同じ焼き直しなので、golden の断定はどちらから
+ * 読んでも同じである。
  *
  * NOTE: hub / runtime の**テストの都合**は import しない（`helpers/memory-cache.ts` の規律）。
  * ここが触るのは公開面（`@karume/hub` / `@karume/hub/deno` / `@karume/runtime` と models の
@@ -72,7 +73,7 @@ const openModelContainer = async (
 /**
  * ミラーの部品 1 本を**区間読みで**開き、宣言と Session の入口を返す。
  *
- * 旧 shard 面（`prepareModel` + `streamShards`）の置き換え — 部品は容器 1 本になり、block は
+ * 旧 shard 面（`prepareModel` + shard 列の逐次読み）の置き換え — 部品は容器 1 本になり、block は
  * Session を組むその瞬間に part 順で読まれる（ADR 0109 決定 7）。
  */
 export const openMirrorComponent = async (
@@ -98,7 +99,7 @@ export const openMirrorComponent = async (
     { kind: "source", source: openContainerSource(loaded, container) },
     container.descriptor,
   );
-  // グラフ名 = 役割名（書き手の規約 — ADR 0109 決定 8）。
+  // グラフ名 = 配布 manifest の weights キー（書き手の規約 — container-v1 §12）。
   const prepared = prepareContainer(opened, key);
   return {
     graph: prepared.graph,

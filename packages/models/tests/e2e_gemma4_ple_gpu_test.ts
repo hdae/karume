@@ -15,11 +15,11 @@
  *
  * ## 資産
  *
- * ①② は `outputs/series/gemma4-qat-e2b-product/`（probe と sidecar が同じ世代で並ぶ唯一の場所 —
- * リポジトリ管理外）、③ は配布形ミラー `models/karume-gemma4-qat/` と `models/karume-gemma4/`。
+ * ①② は `outputs/series/gemma4-qat-e2b-product/`（probe と PLE の資産が同じ世代で並ぶ唯一の
+ * 場所 — リポジトリ管理外）、③ は配布形ミラー `models/karume-gemma4-qat/` と `models/karume-gemma4/`。
  * 無い環境では**明示 SKIP** する（ADR 0005）。
  *
- * ## 通常 Gemma 4（i8 sidecar）は device 次第
+ * ## 通常 Gemma 4（i8 の PLE）は device 次第
  *
  * 単一束縛なので、i8 の 2.19GiB が `maxStorageBufferBindingSize` に収まらない device では
  * この席そのものが使えない。③はその場合「不足を名乗って fail loudly する」ことを見る
@@ -32,17 +32,16 @@ import { Gemma4Pipeline } from "../gemma.ts";
 import { Gemma4QatPipeline } from "../gemma4-qat.ts";
 import { createGemma4Ple } from "../src/gemma/ple.ts";
 import { createGemma4PleResident, gemma4PleGpuBytes } from "../src/gemma/ple-gpu.ts";
-// 系列出力の PLE sidecar を容器の資産と同じ面へ畳む adapter（recipe が `krm` を書くのは
-// 段 3 — ADR 0109 決定 8）。
-import { openSeriesPle } from "./helpers/ple-series.ts";
+// 系列出力の容器から PLE の索引と block の読み口を組む（ADR 0109 決定 4）。
+import { openSeriesPle, SERIES_MODEL_FILE } from "./helpers/ple-series.ts";
 import { mirrorAvailable, openGemma4Ple } from "./helpers/gemma-mirror.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { countFences } from "../../runtime/tests/helpers/fences.ts";
+import { modelPresent } from "../../runtime/tests/helpers/container-files.ts";
 
 const PRODUCT_ROOT = new URL("../../../outputs/series/gemma4-qat-e2b-product/", import.meta.url);
 const QAT_ROOT = new URL("../../../models/karume-gemma4-qat/", import.meta.url);
 const GEMMA_ROOT = new URL("../../../models/karume-gemma4/", import.meta.url);
-const PLE_INDEX_FILE = "ple.json";
 const PLE_PROBE_FILE = "ple.probe.safetensors";
 const PROBE_TOKENS_KEY = "tokens";
 const PROBE_INPUTS_KEY = "per_layer_inputs";
@@ -65,8 +64,10 @@ const isFile = (url: URL): boolean => {
   }
 };
 
+// PLE は容器の資産なので、索引の有無は容器の有無と同じ（欠けていれば `openSeriesPle` が
+// 資産の突合で fail loudly する）。
 const PRODUCT_PRESENT = isFile(new URL(PLE_PROBE_FILE, PRODUCT_ROOT)) &&
-  isFile(new URL(PLE_INDEX_FILE, PRODUCT_ROOT));
+  modelPresent(new URL(SERIES_MODEL_FILE, PRODUCT_ROOT));
 const QAT_PRESENT = mirrorAvailable(QAT_ROOT);
 const GEMMA_PRESENT = mirrorAvailable(GEMMA_ROOT);
 
