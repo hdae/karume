@@ -33,13 +33,14 @@
 // FAIL にする（下の「資産の完全性」テスト）— そこは無音の見かけ成功になる。
 
 import { assert, assertEquals } from "@std/assert";
-import { acquireGpu, parseSafetensors, prepareModel, type Tensor } from "../mod.ts";
+import { acquireGpu, parseSafetensors, prepareContainer, type Tensor } from "../mod.ts";
 import { compareTensors, formatAllclose, type Tolerance } from "../src/reference/allclose.ts";
 import { assertAdapterMatchesEnvironment } from "./helpers/environment.ts";
 import { ioTensor } from "./helpers/golden-io.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { type Measurement, openResults, recordFailure } from "./helpers/results.ts";
-import { modelPresent, readShard, resolveShards, streamShards } from "./helpers/shard-files.ts";
+import { modelPresent, openSeriesContainer } from "./helpers/container-files.ts";
+import { seriesComponents } from "./helpers/series-graphs.ts";
 
 /**
  * DACVAE decoder（`out_proj` + 4 段 upsample + 波形ヘッド）の torch CPU 期待値との突合に使う
@@ -109,8 +110,24 @@ const TOLERANCES: Readonly<Record<string, readonly Tolerance[]>> = {
   "encoder": [ENCODER_TOLERANCE],
 };
 
-const SERIES_ROOT = new URL("../../../outputs/series/dacvae-32dim/", import.meta.url);
-const MODEL_FILE = "model.safetensors";
+const SERIES_NAME = "dacvae-32dim";
+const SERIES_ROOT = new URL(`../../../outputs/series/${SERIES_NAME}/`, import.meta.url);
+const MODEL_FILE = "model.krm";
+
+/**
+ * ターゲット（置き場のディレクトリ）→ 容器の中のグラフ名。ディレクトリ名とは綴りが違う —
+ * 配布ではコーデックの役割名で並ぶ。
+ *
+ * MUST: 表の実体は `helpers/series-graphs.ts` の 1 本（門番 `assets_gate_test.ts` と同じ
+ * 正本）。e2e が自前の表を持つと、片方だけ書き換えても誰も落ちない。
+ */
+const GRAPH_NAMES: Readonly<Record<string, string>> = seriesComponents(SERIES_NAME);
+
+/** ターゲットのグラフ名（表に無いターゲットは fail loudly — 黙って別のグラフを読まない）。 */
+const graphName = (target: string): string => {
+  assert(Object.hasOwn(GRAPH_NAMES, target), `${target} のグラフ名が表に無い`);
+  return GRAPH_NAMES[target];
+};
 const IO_PREFIX = "io.";
 const IO_SUFFIX = ".safetensors";
 
@@ -176,7 +193,7 @@ const readBuffer = async (root: URL, target: string, file: string): Promise<Arra
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
 };
 
-/** ターゲットの代表 path（配布形は shard 列 — 見つけ方は `resolveShards` が持つ）。 */
+/** ターゲットの代表 path（容器は part 列 — 見つけ方は `resolveParts` が持つ）。 */
 const modelUrl = (target: string): URL => new URL(`${target}/${MODEL_FILE}`, SERIES_ROOT);
 
 /** 登録時点で必要なので同期列挙する（Deno.test の ignore 判定と同じ理由）。 */
@@ -199,6 +216,7 @@ Deno.test({
   fn: () => {
     assertEquals(TARGETS, EXPECTED_TARGETS, `${SERIES_ROOT.pathname} のターゲット`);
     assertEquals(Object.keys(TOLERANCES).sort(), EXPECTED_TARGETS, "ターゲット別 tolerance の表");
+    assertEquals(Object.keys(GRAPH_NAMES).sort(), EXPECTED_TARGETS, "ターゲット別グラフ名の表");
     for (const target of TARGETS) {
       assert(Object.hasOwn(EXPECTED_CASES, target), `${target} の期待ケース表が無い`);
       assertEquals(
@@ -232,12 +250,11 @@ for (const target of TARGETS) {
         const measurements: Measurement[] = [];
         try {
           const ioFile = `${IO_PREFIX}${caseName}${IO_SUFFIX}`;
-          const shards = resolveShards(modelUrl(target));
-          const [graphShard, ioBytes] = await Promise.all([
-            readShard(shards[0]),
+          const [opened, ioBytes] = await Promise.all([
+            openSeriesContainer(modelUrl(target)),
             readBuffer(SERIES_ROOT, target, ioFile),
           ]);
-          const parsed = prepareModel(graphShard);
+          const parsed = prepareContainer(opened, graphName(target));
           const io = parseSafetensors(ioBytes);
           // Object.hasOwn で見る（素の `TOLERANCES[target]` はプロトタイプ由来のキーを拾う）。
           assert(Object.hasOwn(TOLERANCES, target), `${target} の tolerance が無い`);
@@ -271,7 +288,7 @@ for (const target of TARGETS) {
           // 参照値・結果をこの機の行として残す経路なので、キーを採ったアダプタと実行アダプタの
           // 同一性をここで見る（複数 GPU の機で取り違えると、別の機の帯で測ることになる）。
           assertAdapterMatchesEnvironment(gpu);
-          const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
+          const session = await parsed.createContainerSession(gpu);
           try {
             const outputs = await session.run(inputs);
             assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());

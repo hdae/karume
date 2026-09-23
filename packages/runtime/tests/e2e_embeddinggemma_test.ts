@@ -9,7 +9,7 @@
 // SBV2 と違い格納 dtype 系列は f32 の 1 本のみ（f16 / i8 は別系列で決める話 — exporter 冒頭
 // docstring）なので、系列パラメタ化はしない。グラフも target 分割が無く 1 本（Transformer →
 // masked mean → Dense×2 → L2 正規化）で、ディレクトリ構造も
-// `outputs/series/embeddinggemma-300m/{model,io.<case>}.safetensors` とフラット。
+// `outputs/series/embeddinggemma-300m/{model-NNNNN-of-NNNNN.krm,io.<case>.safetensors}` とフラット。
 //
 // 資産が無い環境では**明示 SKIP**する。ADR 0005 の「全 SKIP は明示 FAIL」門番
 // （tests/gpu_gate_test.ts）は *GPU アダプタの有無* だけを見ており、この SKIP とは独立。
@@ -17,13 +17,14 @@
 // （下の「資産の完全性」テスト）— そこは無音の見かけ成功になる。
 
 import { assert, assertEquals } from "@std/assert";
-import { acquireGpu, parseSafetensors, prepareModel, type Tensor } from "../mod.ts";
+import { acquireGpu, parseSafetensors, prepareContainer, type Tensor } from "../mod.ts";
 import { compareTensors, formatAllclose, type Tolerance } from "../src/reference/allclose.ts";
 import { assertAdapterMatchesEnvironment } from "./helpers/environment.ts";
 import { ioTensor } from "./helpers/golden-io.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { type Measurement, openResults, recordFailure } from "./helpers/results.ts";
-import { modelPresent, readShard, resolveShards, streamShards } from "./helpers/shard-files.ts";
+import { modelPresent, openSeriesContainer } from "./helpers/container-files.ts";
+import { seriesGraph } from "./helpers/series-graphs.ts";
 
 /**
  * 実重み EmbeddingGemma-300m の torch CPU 期待値との突合に使う許容誤差。
@@ -55,8 +56,11 @@ import { modelPresent, readShard, resolveShards, streamShards } from "./helpers/
  */
 const EMBEDDINGGEMMA_TOLERANCE: Tolerance = { atol: 1e-6, rtol: 1e-5 };
 
-const SERIES_ROOT = new URL("../../../outputs/series/embeddinggemma-300m/", import.meta.url);
-const MODEL_FILE = "model.safetensors";
+const SERIES_NAME = "embeddinggemma-300m";
+const SERIES_ROOT = new URL(`../../../outputs/series/${SERIES_NAME}/`, import.meta.url);
+const MODEL_FILE = "model.krm";
+/** 容器の中のグラフ名（表は helpers/series-graphs.ts の 1 本 — 門番と同じ正本から引く）。 */
+const GRAPH_NAME = seriesGraph(SERIES_NAME);
 const IO_PREFIX = "io.";
 const IO_SUFFIX = ".safetensors";
 
@@ -146,12 +150,11 @@ for (const caseName of CASES) {
       /** 出力ごとの実測（合格した回も残す — 判定には使わない）。 */
       const measurements: Measurement[] = [];
       try {
-        const shards = resolveShards(new URL(MODEL_FILE, SERIES_ROOT));
-        const [graphShard, ioBytes] = await Promise.all([
-          readShard(shards[0]),
+        const [opened, ioBytes] = await Promise.all([
+          openSeriesContainer(new URL(MODEL_FILE, SERIES_ROOT)),
           readBuffer(SERIES_ROOT, `${IO_PREFIX}${caseName}${IO_SUFFIX}`),
         ]);
-        const parsed = prepareModel(graphShard);
+        const parsed = prepareContainer(opened, GRAPH_NAME);
         const io = parseSafetensors(ioBytes);
 
         // io の全テンソルがグラフの入出力とちょうど対応する（余りも欠けも無い）。
@@ -176,7 +179,7 @@ for (const caseName of CASES) {
         // 参照値・結果をこの機の行として残す経路なので、キーを採ったアダプタと実行アダプタの
         // 同一性をここで見る（複数 GPU の機で取り違えると、別の機の帯で測ることになる）。
         assertAdapterMatchesEnvironment(gpu);
-        const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
+        const session = await parsed.createContainerSession(gpu);
         try {
           const outputs = await session.run(inputs);
           assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());

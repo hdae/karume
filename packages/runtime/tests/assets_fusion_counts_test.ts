@@ -6,8 +6,8 @@
  * `lastRunFusions` を常設した理由がここで、**その数字に突合相手を与える**のが本ファイル。
  *
  * `planFusions` は純関数なので、実資産から IR を読んで計画するだけで判定できる（1 dispatch も
- * 出さない）。安全のため safetensors の**ヘッダだけ**を読む — 実体は合計 7GB 級で、
- * IR は `__metadata__.karume_ir` に載っている。
+ * 出さない）。読むのは容器の **part 0**（ヘッダ + 2 文書 — container-v1 §3）だけで、重みの
+ * block へは進まない（実体は合計 7GB 級）。
  *
  * MUST: 資産は `models/karume-anima/`（公式 5 変種同居・既定 = anima-turbo-v1.1 —
  * ADR 0087）と `outputs/series/embeddinggemma-300m/` / `gemma4-e2b-decode{,-token}` /
@@ -27,48 +27,38 @@
  */
 
 import { assertEquals } from "@std/assert";
-import { type IrGraph, parseIrGraph } from "../src/format/ir.ts";
+import type { IrGraph } from "../src/format/ir.ts";
 import { type FusionCounts, type FusionWeightLayout, planFusions } from "../src/runtime/fusion.ts";
 import { bindSymbols, countUses, planGraph } from "../src/runtime/plan.ts";
 import { planWeightResidency } from "../src/runtime/weight-residency.ts";
+import { resolveParts } from "./helpers/container-files.ts";
+import { seriesGraph } from "./helpers/series-graphs.ts";
 import {
   type ContainerManifest,
   containerPart0,
   readContainerGraph,
 } from "./helpers/container-graph.ts";
-import { resolveShards } from "./helpers/shard-files.ts";
 
 const ANIMA_DIR = new URL("../../../models/karume-anima/", import.meta.url);
-/**
- * グラフを持つのは配布形の**先頭 shard** だけ（ADR 0081）。分割されていない資産では代表 path
- * そのものが返るので、どちらの形でも同じ 1 行で足りる。
- */
-const GEMMA_MODEL = resolveShards(
-  new URL("../../../outputs/series/embeddinggemma-300m/model.safetensors", import.meta.url),
-)[0];
-const IRODORI_DIR = new URL("../../../models/karume-irodori-v4-small/", import.meta.url);
 
-/** safetensors のヘッダ JSON だけを読む（実体は読まない）。 */
-const readIrGraph = async (source: URL): Promise<IrGraph> => {
-  const file = await Deno.open(source, { read: true });
-  try {
-    const lengthBytes = new Uint8Array(8);
-    await file.read(lengthBytes);
-    const length = Number(new DataView(lengthBytes.buffer).getBigUint64(0, true));
-    const headerBytes = new Uint8Array(length);
-    for (let read = 0; read < length;) {
-      const chunk = await file.read(headerBytes.subarray(read));
-      if (chunk === null) {
-        throw new Error(`${source.pathname}: ヘッダ ${length} バイトを読み切れない`);
-      }
-      read += chunk;
-    }
-    const header = JSON.parse(new TextDecoder().decode(headerBytes));
-    return parseIrGraph(header.__metadata__.karume_ir);
-  } finally {
-    file.close();
-  }
-};
+/** 系列出力の容器の読み口（part 0 の path と、その容器が名乗るグラフ名）。 */
+type SeriesSource = { readonly part0: URL; readonly graph: string };
+
+/**
+ * 系列出力の容器の **part 0**（グラフ記述と束縛表はここに載る — container-v1 §3）と
+ * グラフ名。分割されていない容器では代表 path そのものが part 0 になるので、どちらの形でも
+ * 同じ 1 行で足りる。
+ *
+ * MUST: グラフ名は綴らず `helpers/series-graphs.ts` の表から引く（門番 `assets_gate_test.ts`
+ * と同じ 1 本）。読み手ごとに綴ると、片方だけ書き換えても誰も落ちない。
+ */
+const seriesSource = (series: string): SeriesSource => ({
+  part0: resolveParts(new URL(`../../../outputs/series/${series}/model.krm`, import.meta.url))[0],
+  graph: seriesGraph(series),
+});
+
+const GEMMA_MODEL = seriesSource("embeddinggemma-300m");
+const IRODORI_DIR = new URL("../../../models/karume-irodori-v4-small/", import.meta.url);
 
 /**
  * 融合ヒット数は**ノード列だけ**で決まる（格納 dtype はどの initializer をどう読むかしか
@@ -142,10 +132,10 @@ const readAnimaGraph = (component: string, dtype: string): Promise<IrGraph> => {
   return readContainerGraph(new URL(head.path, mirror), component);
 };
 
-const GEMMA_AVAILABLE = await exists(GEMMA_MODEL);
+const GEMMA_AVAILABLE = await exists(GEMMA_MODEL.part0);
 if (!GEMMA_AVAILABLE) {
   console.warn(
-    `[karume] ${GEMMA_MODEL.pathname} が無いため EmbeddingGemma の融合ヒット数を SKIP する`,
+    `[karume] ${GEMMA_MODEL.part0.pathname} が無いため EmbeddingGemma の融合ヒット数を SKIP する`,
   );
 }
 
@@ -306,7 +296,7 @@ Deno.test({
   name: "実資産の EmbeddingGemma は rope 48（head 幅 256・窓内 passthrough 込み）を掴む",
   ignore: !GEMMA_AVAILABLE,
   fn: async () => {
-    const graph = await readIrGraph(GEMMA_MODEL);
+    const graph = await readContainerGraph(GEMMA_MODEL.part0, GEMMA_MODEL.graph);
     const expected: FusionCounts = { ...NONE, rope: 48 };
     // ヒット数は T に依存しない（Tmax = 512 の内側で 2 点）。
     for (const sequence of [12, 318]) {
@@ -319,29 +309,23 @@ Deno.test({
   },
 });
 
-const GEMMA4_DECODE_MODEL = resolveShards(
-  new URL("../../../outputs/series/gemma4-e2b-decode/model.safetensors", import.meta.url),
-)[0];
-const GEMMA4_TOKEN_MODEL = resolveShards(
-  new URL("../../../outputs/series/gemma4-e2b-decode-token/model.safetensors", import.meta.url),
-)[0];
-const MINICPM5_DECODE_MODEL = resolveShards(
-  new URL("../../../outputs/series/minicpm5-1b-decode/model.safetensors", import.meta.url),
-)[0];
+const GEMMA4_DECODE_MODEL = seriesSource("gemma4-e2b-decode");
+const GEMMA4_TOKEN_MODEL = seriesSource("gemma4-e2b-decode-token");
+const MINICPM5_DECODE_MODEL = seriesSource("minicpm5-1b-decode");
 
-const GEMMA4_DECODE_AVAILABLE = await exists(GEMMA4_DECODE_MODEL) &&
-  await exists(GEMMA4_TOKEN_MODEL);
+const GEMMA4_DECODE_AVAILABLE = await exists(GEMMA4_DECODE_MODEL.part0) &&
+  await exists(GEMMA4_TOKEN_MODEL.part0);
 if (!GEMMA4_DECODE_AVAILABLE) {
   console.warn(
-    `[karume] ${GEMMA4_DECODE_MODEL.pathname} と ${GEMMA4_TOKEN_MODEL.pathname} が揃っていない` +
+    `[karume] ${GEMMA4_DECODE_MODEL.part0.pathname} と ${GEMMA4_TOKEN_MODEL.part0.pathname} が揃っていない` +
       "ため Gemma 4 decode の融合ヒット数を SKIP する",
   );
 }
 
-const MINICPM5_DECODE_AVAILABLE = await exists(MINICPM5_DECODE_MODEL);
+const MINICPM5_DECODE_AVAILABLE = await exists(MINICPM5_DECODE_MODEL.part0);
 if (!MINICPM5_DECODE_AVAILABLE) {
   console.warn(
-    `[karume] ${MINICPM5_DECODE_MODEL.pathname} が無いため MiniCPM5 decode の融合ヒット数を` +
+    `[karume] ${MINICPM5_DECODE_MODEL.part0.pathname} が無いため MiniCPM5 decode の融合ヒット数を` +
       " SKIP する",
   );
 }
@@ -361,7 +345,7 @@ Deno.test({
         ["token-only", GEMMA4_TOKEN_MODEL],
       ] as const
     ) {
-      const graph = await readIrGraph(source);
+      const graph = await readContainerGraph(source.part0, source.graph);
       assertEquals(decodeFusionCounts(graph, 1), { ...NONE, rope: 50 }, `${name} decode（M=1）`);
       assertEquals(
         decodeFusionCounts(graph, 32),
@@ -436,7 +420,10 @@ Deno.test({
   name: "実資産の MiniCPM5 decode は rope 48 / silu 24 を掴む（M 非依存）",
   ignore: !MINICPM5_DECODE_AVAILABLE,
   fn: async () => {
-    const graph = await readIrGraph(MINICPM5_DECODE_MODEL);
+    const graph = await readContainerGraph(
+      MINICPM5_DECODE_MODEL.part0,
+      MINICPM5_DECODE_MODEL.graph,
+    );
     const expected: FusionCounts = { ...NONE, rope: 48, silu: 24 };
     for (const rows of [1, 32]) {
       assertEquals(decodeFusionCounts(graph, rows), expected, `M=${rows}`);

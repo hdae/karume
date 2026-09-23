@@ -7,7 +7,7 @@
 // が痩せて消費者が内部パスを直に掴む —— は、どちらも型検査では赤くならない。面ごとに増減を
 // 見ることでその移動を差分として出す。
 //
-// 門の実体は runtime 側に 1 本だけ置く（`shard-files.ts` 等と同じパッケージ跨ぎ相対 import）。
+// 門の実体は runtime 側に 1 本だけ置く（`container-files.ts` 等と同じパッケージ跨ぎ相対 import）。
 
 import { assertPublicSurface } from "../../runtime/tests/helpers/public-surface.ts";
 

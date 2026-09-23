@@ -27,8 +27,8 @@ import { assert, assertEquals } from "@std/assert";
 import {
   acquireGpu,
   parseSafetensors,
+  prepareContainer,
   type PreparedModel,
-  prepareModel,
   type Tensor,
 } from "../mod.ts";
 import { compareTensors, formatAllclose, type Tolerance } from "../src/reference/allclose.ts";
@@ -36,7 +36,8 @@ import { assertAdapterMatchesEnvironment } from "./helpers/environment.ts";
 import { ioTensor } from "./helpers/golden-io.ts";
 import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
 import { type Measurement, openResults, recordFailure } from "./helpers/results.ts";
-import { modelPresent, readShard, resolveShards, streamShards } from "./helpers/shard-files.ts";
+import { modelPresent, openSeriesContainer } from "./helpers/container-files.ts";
+import { seriesGraph } from "./helpers/series-graphs.ts";
 
 /**
  * 生 logits（`[1,T,130560]`）の torch CPU 期待値との突合に使う許容誤差。
@@ -68,8 +69,11 @@ import { modelPresent, readShard, resolveShards, streamShards } from "./helpers/
  */
 const MINICPM5_TOLERANCE: Tolerance = { atol: 1e-3, rtol: 0 };
 
-const SERIES_ROOT = new URL("../../../outputs/series/minicpm5-1b/", import.meta.url);
-const MODEL_FILE = "model.safetensors";
+const SERIES_NAME = "minicpm5-1b";
+const SERIES_ROOT = new URL(`../../../outputs/series/${SERIES_NAME}/`, import.meta.url);
+const MODEL_FILE = "model.krm";
+/** 容器の中のグラフ名（表は helpers/series-graphs.ts の 1 本 — 門番と同じ正本から引く）。 */
+const GRAPH_NAME = seriesGraph(SERIES_NAME);
 const IO_PREFIX = "io.";
 const IO_SUFFIX = ".safetensors";
 
@@ -251,8 +255,10 @@ Deno.test({
     /** ケースの catch が既に決着を残したか（残していれば系列の席を二重に積まない）。 */
     let caseSettled = false;
     try {
-      const shards = resolveShards(new URL(MODEL_FILE, SERIES_ROOT));
-      const parsed = prepareModel(await readShard(shards[0]));
+      const parsed = prepareContainer(
+        await openSeriesContainer(new URL(MODEL_FILE, SERIES_ROOT)),
+        GRAPH_NAME,
+      );
       assertEquals(parsed.graph.inputs.map((spec) => spec.name), ["input_ids"], "グラフ入力");
       assertEquals(parsed.graph.outputs.length, 1, "graph.outputs の本数（1-shot の logits 1 本）");
       const outputName = parsed.graph.outputs[0];
@@ -269,7 +275,7 @@ Deno.test({
       // MUST: device の破棄は `createSession` の失敗も通す。取り逃がすと、その走行の残りが
       // 破棄されない device を抱えたまま進み、後続が OOM で赤くなる（known-issues の遅延解放）。
       try {
-        const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
+        const session = await parsed.createContainerSession(gpu);
         try {
           /** ケースごとの最終位置 1 位（全ケース同一 = 定数出力の検出に使う）。 */
           const tops: number[] = [];
@@ -378,12 +384,14 @@ Deno.test({
   name: "MiniCPM5 census: attention 24 本が全て GQA 変種のキーで走る（実 GPU / timestamp-query）",
   ignore: !AVAILABLE || !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
   fn: async () => {
-    const shards = resolveShards(new URL(MODEL_FILE, SERIES_ROOT));
-    const parsed = prepareModel(await readShard(shards[0]));
+    const parsed = prepareContainer(
+      await openSeriesContainer(new URL(MODEL_FILE, SERIES_ROOT)),
+      GRAPH_NAME,
+    );
     const layers = assertGqaForm(parsed);
 
     const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
-    const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
+    const session = await parsed.createContainerSession(gpu);
     try {
       // 最短のケース（T=6）1 本で足りる — 見るのは走ったパイプラインの種類と本数。
       const { inputs } = await loadCase("capital-en", parsed.graph.inputs);

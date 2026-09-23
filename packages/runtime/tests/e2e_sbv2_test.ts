@@ -20,21 +20,20 @@
 // FAIL にする（下の「資産の完全性」テスト）— そこは無音の見かけ成功になる。
 
 import { assert, assertEquals } from "@std/assert";
-import { acquireGpu, codecLayout, parseSafetensors, prepareModel, type Tensor } from "../mod.ts";
-import { extractIrGraph } from "../src/format/container.ts";
+import {
+  acquireGpu,
+  codecLayout,
+  parseSafetensors,
+  prepareContainer,
+  type Tensor,
+} from "../mod.ts";
 import { compareTensors, formatAllclose, type Tolerance } from "../src/reference/allclose.ts";
-import { parseShard } from "../src/runtime/session-build.ts";
 import { assertAdapterMatchesEnvironment } from "./helpers/environment.ts";
 import { ioTensor } from "./helpers/golden-io.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { type Measurement, openResults, recordFailure } from "./helpers/results.ts";
-import {
-  modelPresent,
-  readShard,
-  resolveShards,
-  shardTensorNames,
-  streamShards,
-} from "./helpers/shard-files.ts";
+import { modelPresent, openSeriesContainer } from "./helpers/container-files.ts";
+import { seriesComponents, seriesGraph } from "./helpers/series-graphs.ts";
 
 /**
  * 実重み SBV2 dp の torch CPU 期待値との突合に使う許容誤差。
@@ -496,7 +495,7 @@ const I8_TOLERANCES: Readonly<Record<string, readonly Tolerance[]>> = {
   voice: [SBV2_I8_VOICE_TOLERANCE],
 };
 
-const MODEL_FILE = "model.safetensors";
+const MODEL_FILE = "model.krm";
 const IO_PREFIX = "io.";
 const IO_SUFFIX = ".safetensors";
 
@@ -508,6 +507,8 @@ const GENERATE_COMMAND = "cd tools/export-recipes && uv run --group sbv2 python 
 type Sbv2Series = {
   /** テスト名に出る系列名。 */
   readonly name: string;
+  /** `outputs/series/` 直下のディレクトリ名（グラフ名の表を引くキー）。 */
+  readonly directory: string;
   readonly root: URL;
   /** ターゲット → 出力位置ごとの許容誤差（**系列ごとに実測導出**）。 */
   readonly tolerances: Readonly<Record<string, readonly Tolerance[]>>;
@@ -537,12 +538,14 @@ type Sbv2Series = {
 const SERIES: readonly Sbv2Series[] = [
   {
     name: "f32",
+    directory: "sbv2-F1",
     root: new URL("../../../outputs/series/sbv2-F1/", import.meta.url),
     tolerances: TOLERANCES,
     generate: GENERATE_COMMAND,
   },
   {
     name: "f16",
+    directory: "sbv2-F1-f16",
     root: new URL("../../../outputs/series/sbv2-F1-f16/", import.meta.url),
     tolerances: F16_TOLERANCES,
     compressedStorage: "f16",
@@ -550,6 +553,7 @@ const SERIES: readonly Sbv2Series[] = [
   },
   {
     name: "i8",
+    directory: "sbv2-F1-i8",
     root: new URL("../../../outputs/series/sbv2-F1-i8/", import.meta.url),
     tolerances: I8_TOLERANCES,
     compressedStorage: "i8",
@@ -558,18 +562,28 @@ const SERIES: readonly Sbv2Series[] = [
 ];
 
 /**
- * 生成されているはずのターゲットとケース。**列挙結果ではなくここで固定する** — 列挙だけに
- * 頼ると生成を一部だけ流した環境でテストが黙って消え、「緑だが未検証」になる。正本は
- * `tools/exporter/export_sbv2.py` の TARGET / GOLDEN_CASES。
+ * 生成されているはずのターゲット（= 置き場のディレクトリ名）。**列挙結果ではなくここで
+ * 固定する** — 列挙だけに頼ると生成を一部だけ流した環境でテストが黙って消え、「緑だが未検証」
+ * になる。正本は `tools/exporter/export_sbv2.py` の TARGET。
  *
  * MUST: ターゲットを足すときはこの表も同時に伸ばす（増えたターゲットは等値検査で FAIL
  * するので、伸ばし忘れは黙って通らない）。**ADR 0013 の 5 本が揃った状態**。
  *
- * NOTE: ケース名の `p<n>` は front 系の P（音素数）由来だが、flow 系では **T（フレーム数）**
- * を指す。1 本の表を全ターゲットで共有する（＝どのターゲットもケースを欠かせない）ことを
- * 優先して名前は据え置いた。長さの正本は `tools/exporter/export_sbv2.py` の GOLDEN_CASES。
+ * NOTE: この系列ではディレクトリ名と容器の中のグラフ名が同じ綴りだが、`prepareContainer` へ
+ * 渡すのは `helpers/series-graphs.ts` の表から引いた名前である（綴りの一致は事実であって
+ * 規則ではない — 他系列は `caption-proj` → `caption_proj` のように割れる）。下の等値検査が、
+ * その表とこの一覧の食い違いをその場で落とす。
  */
 const EXPECTED_TARGETS = ["dec", "dp", "flow", "front", "voice"] as const;
+
+/**
+ * 生成されているはずのケース。固定する理由はターゲットと同じ。長さの正本は
+ * `tools/exporter/export_sbv2.py` の GOLDEN_CASES。
+ *
+ * NOTE: ケース名の `p<n>` は front 系の P（音素数）由来だが、flow 系では **T（フレーム数）**
+ * を指す。1 本の表を全ターゲットで共有する（＝どのターゲットもケースを欠かせない）ことを
+ * 優先して名前は据え置いた。
+ */
 const EXPECTED_CASES = ["p2", "p203", "p37", "p512", "padded"] as const;
 
 /**
@@ -619,7 +633,7 @@ const readBuffer = async (root: URL, target: string, file: string): Promise<Arra
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
 };
 
-/** ターゲットの代表 path（配布形は shard 列 — 見つけ方は `resolveShards` が持つ）。 */
+/** ターゲットの代表 path（容器は part 列 — 見つけ方は `resolveParts` が持つ）。 */
 const modelUrl = (root: URL, target: string): URL => new URL(`${target}/${MODEL_FILE}`, root);
 
 /**
@@ -657,6 +671,13 @@ for (const series of SERIES) {
         [...EXPECTED_TARGETS].sort(),
         `${series.name} 系列の tolerance の表`,
       );
+      // グラフ名の表（helpers/series-graphs.ts）もターゲット一覧と等値で塞ぐ。穴が空くと
+      // 突合の直前に fail loudly する形になるが、それは golden を 1 本読んだ後なので遅い。
+      assertEquals(
+        Object.keys(seriesComponents(series.directory)).sort(),
+        [...EXPECTED_TARGETS].sort(),
+        `${series.directory} のグラフ名の表`,
+      );
       for (const target of targets) {
         assertEquals(
           discoverCases(series.root, target).map((entry) => entry.caseName),
@@ -680,12 +701,11 @@ for (const series of SERIES) {
         /** 出力ごとの実測（合格した回も残す — 判定には使わない）。 */
         const measurements: Measurement[] = [];
         try {
-          const shards = resolveShards(modelUrl(series.root, target));
-          const [graphShard, ioBytes] = await Promise.all([
-            readShard(shards[0]),
+          const [opened, ioBytes] = await Promise.all([
+            openSeriesContainer(modelUrl(series.root, target)),
             readBuffer(series.root, target, ioFile),
           ]);
-          const parsed = prepareModel(graphShard);
+          const parsed = prepareContainer(opened, seriesGraph(series.directory, target));
           const io = parseSafetensors(ioBytes);
           // Object.hasOwn で見る（素の `tolerances[target]` はプロトタイプ由来のキーを拾う）。
           assert(
@@ -720,29 +740,10 @@ for (const series of SERIES) {
             series.compressedStorage === undefined ? [] : [series.compressedStorage],
             `${series.name}/${target}: 圧縮格納 dtype の集合が系列と食い違う`,
           );
-          // i8 は companion scale が無いと値が復元できない（ADR 0019）。宣言と実体の両方を見る
-          // — 宣言だけならキーが実在しない形が、実体だけなら別の重みの scale を読む形が通る。
-          if (series.compressedStorage === "i8") {
-            // 実体は shard 列のどこかに居るので、名前の和で見る（どの shard に居るかまでは
-            // ここの関心ではない — co-shard 契約は container の shard 進行検証が持つ）。
-            const present = await shardTensorNames(shards);
-            // companion scale のテンソルキーは合流後のグラフには無い（供給計画が payload と
-            // 一緒に運ぶ）ので、旧配布形の宣言そのものから引く。
-            const { legacy } = extractIrGraph(parseShard(graphShard.bytes, graphShard.id));
-            for (const [name, initializer] of Object.entries(parsed.graph.initializers)) {
-              if (initializer.storage === undefined) continue;
-              if (codecLayout(initializer.storage.codec) !== "i8") continue;
-              const scale = legacy.scaleKeys.get(name);
-              assert(
-                scale !== undefined,
-                `${series.name}/${target}: '${name}' に scale 宣言が無い`,
-              );
-              assert(
-                present.has(scale),
-                `${series.name}/${target}: '${name}' の scale '${scale}' が資産に無い`,
-              );
-            }
-          }
+          // NOTE: i8 の companion scale（ADR 0019）の実在はここでは見ない。容器では束縛表が
+          // scale を block id で指し、`openContainer` の合流層が目次との突合と長さ検査
+          // （行数 × group 数 × 4）まで済ませている（container-v1 §5 / §7）ので、宣言と実体を
+          // 別々に見る門は恒真になる。旧 shard 形ではこの 2 つが独立だったため門があった。
 
           // io の全テンソルがグラフの入出力とちょうど対応する（余りも欠けも無い）。
           const expectedKeys = [
@@ -768,7 +769,7 @@ for (const series of SERIES) {
           // MUST: device の破棄は `createSession` の失敗も通す。取り逃がすと、その走行の残りが
           // 破棄されない device を抱えたまま進み、後続が OOM で赤くなる（known-issues の遅延解放）。
           try {
-            const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
+            const session = await parsed.createContainerSession(gpu);
             try {
               const outputs = await session.run(inputs);
               assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());

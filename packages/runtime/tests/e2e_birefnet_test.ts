@@ -58,8 +58,8 @@ import { assert, assertEquals } from "@std/assert";
 import {
   acquireGpu,
   parseSafetensors,
+  prepareContainer,
   type PreparedModel,
-  prepareModel,
   type SafetensorsFile,
   type Tensor,
 } from "../mod.ts";
@@ -68,7 +68,8 @@ import { assertAdapterMatchesEnvironment } from "./helpers/environment.ts";
 import { ioTensor } from "./helpers/golden-io.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { type Measurement, openResults, recordFailure } from "./helpers/results.ts";
-import { modelPresent, readShard, resolveShards, streamShards } from "./helpers/shard-files.ts";
+import { modelPresent, openSeriesContainer } from "./helpers/container-files.ts";
+import { seriesGraph } from "./helpers/series-graphs.ts";
 
 /**
  * **BiRefNet_HR / 合成画像**ケース（入力が golden とビット同一）の突合に使う許容誤差。
@@ -276,7 +277,7 @@ const SERIES: readonly Series[] = [
 ];
 
 const SERIES_PARENT = new URL("../../../outputs/series/", import.meta.url);
-const MODEL_FILE = "model.safetensors";
+const MODEL_FILE = "model.krm";
 const IO_PREFIX = "io.";
 const IO_SUFFIX = ".safetensors";
 
@@ -463,6 +464,8 @@ const results = openResults("birefnet-golden");
 for (const series of SERIES) {
   const found = discoveryOf(series);
   const root = seriesRoot(series);
+  /** 容器の中のグラフ名（表は helpers/series-graphs.ts の 1 本 — 門番と同じ正本から引く）。 */
+  const graphName = seriesGraph(series.name);
 
   Deno.test({
     name: `BiRefNet 資産: ${series.name} — 期待するケースとモデル本体が揃っている`,
@@ -513,12 +516,11 @@ for (const series of SERIES) {
         /** 出力ごとの実測（合格した回も残す — 判定には使わない）。 */
         const measurements: Measurement[] = [];
         try {
-          const shards = resolveShards(new URL(MODEL_FILE, root));
-          const [graphShard, ioBytes] = await Promise.all([
-            readShard(shards[0]),
+          const [opened, ioBytes] = await Promise.all([
+            openSeriesContainer(new URL(MODEL_FILE, root)),
             readBuffer(root, `${IO_PREFIX}${caseName}${IO_SUFFIX}`),
           ]);
-          const parsed = prepareModel(graphShard);
+          const parsed = prepareContainer(opened, graphName);
           const io = parseSafetensors(ioBytes);
 
           // io の全テンソルがグラフの入出力とちょうど対応する（余りも欠けも無い）。
@@ -538,7 +540,7 @@ for (const series of SERIES) {
           // 参照値・結果をこの機の行として残す経路なので、キーを採ったアダプタと実行アダプタの
           // 同一性をここで見る（複数 GPU の機で取り違えると、別の機の帯で測ることになる）。
           assertAdapterMatchesEnvironment(gpu);
-          const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
+          const session = await parsed.createContainerSession(gpu);
           try {
             const outputs = await session.run(inputs);
             assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());
@@ -606,16 +608,15 @@ for (const series of SERIES) {
       // （順序そのものが検査対象 — `birefnet/export.py` の `_sanity` と同じ形で、あちらは
       // torch 側に掛かっている）。実測は円内 / 円外が BiRefNet_HR で +10.96 / −9.64、
       // Lucida で +3.37 / −9.69（合成画像に対する応答の深さが系列で違う）。
-      const shards = resolveShards(new URL(MODEL_FILE, root));
-      const graphShard = await readShard(shards[0]);
+      const opened = await openSeriesContainer(new URL(MODEL_FILE, root));
       const ioBytes = await readBuffer(root, `${IO_PREFIX}${DISC_CASE}${IO_SUFFIX}`);
-      const parsed = prepareModel(graphShard);
+      const parsed = prepareContainer(opened, graphName);
       const io = parseSafetensors(ioBytes);
       const size = staticDim(parsed, 3);
       assertEquals(size, staticDim(parsed, 2), "円の判別は正方形の入力を前提にする");
 
       const gpu = await acquireGpu();
-      const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
+      const session = await parsed.createContainerSession(gpu);
       try {
         const [name] = parsed.graph.outputs;
         const output = (await session.run(goldenInputs(parsed, io)))[name];

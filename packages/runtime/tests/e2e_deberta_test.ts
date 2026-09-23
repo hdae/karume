@@ -37,21 +37,20 @@
 // 「資産の完全性」テスト）— そこは無音の見かけ成功になる。
 
 import { assert, assertEquals } from "@std/assert";
-import { acquireGpu, codecLayout, parseSafetensors, prepareModel, type Tensor } from "../mod.ts";
-import { extractIrGraph } from "../src/format/container.ts";
+import {
+  acquireGpu,
+  codecLayout,
+  parseSafetensors,
+  prepareContainer,
+  type Tensor,
+} from "../mod.ts";
 import { compareTensors, formatAllclose, type Tolerance } from "../src/reference/allclose.ts";
-import { parseShard } from "../src/runtime/session-build.ts";
 import { assertAdapterMatchesEnvironment } from "./helpers/environment.ts";
 import { ioTensor } from "./helpers/golden-io.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { type Measurement, openResults, recordFailure } from "./helpers/results.ts";
-import {
-  modelPresent,
-  readShard,
-  resolveShards,
-  shardTensorNames,
-  streamShards,
-} from "./helpers/shard-files.ts";
+import { modelPresent, openSeriesContainer } from "./helpers/container-files.ts";
+import { seriesGraph } from "./helpers/series-graphs.ts";
 
 /**
  * **f32 系列 / full-24layer**（全層 hidden_states 25 本出し）の torch CPU 期待値との突合に
@@ -133,7 +132,7 @@ const DEBERTA_I8_TOLERANCE: Tolerance = { atol: 7e-4, rtol: 0 };
  */
 const DEBERTA_I8_22LAYER_TOLERANCE: Tolerance = { atol: 1.5e-4, rtol: 0 };
 
-const MODEL_FILE = "model.safetensors";
+const MODEL_FILE = "model.krm";
 const IO_PREFIX = "io.";
 const IO_SUFFIX = ".safetensors";
 /** w8a8 鏡像 io の prefix（`deberta/export.py` の `ACT_IO_PREFIX`）— この門は読まない。 */
@@ -148,6 +147,13 @@ type DebertaVariant = {
   /** テスト名に出る綴り（`<系列>/<variant ディレクトリ>`）。 */
   readonly name: string;
   readonly root: URL;
+  /**
+   * 容器の中のグラフ名。
+   *
+   * MUST: 綴らず `helpers/series-graphs.ts` の表から引く（門番 `assets_gate_test.ts` と
+   * 同じ 1 本）。表と e2e が別々にグラフ名を持つと、片方だけ書き換えても誰も落ちない。
+   */
+  readonly graph: string;
   /** **variant ごとに実測導出**（上の MUST）。 */
   readonly tolerance: Tolerance;
   /**
@@ -179,6 +185,7 @@ const VARIANTS: readonly DebertaVariant[] = [
   {
     name: "f32/full-24layer",
     root: new URL("../../../outputs/series/deberta/full-24layer/", import.meta.url),
+    graph: seriesGraph("deberta", "full-24layer"),
     tolerance: DEBERTA_TOLERANCE,
     outputs: 25,
     generate: `${GENERATE_COMMAND} --layers 24`,
@@ -186,6 +193,7 @@ const VARIANTS: readonly DebertaVariant[] = [
   {
     name: "i8/full-24layer",
     root: new URL("../../../outputs/series/deberta-i8/full-24layer/", import.meta.url),
+    graph: seriesGraph("deberta-i8", "full-24layer"),
     tolerance: DEBERTA_I8_TOLERANCE,
     outputs: 25,
     compressedStorage: "i8",
@@ -194,6 +202,7 @@ const VARIANTS: readonly DebertaVariant[] = [
   {
     name: "i8/sbv2-22layer",
     root: new URL("../../../outputs/series/deberta-i8/sbv2-22layer/", import.meta.url),
+    graph: seriesGraph("deberta-i8", "sbv2-22layer"),
     tolerance: DEBERTA_I8_22LAYER_TOLERANCE,
     outputs: 1,
     compressedStorage: "i8",
@@ -319,12 +328,11 @@ for (const variant of VARIANTS) {
         /** 出力ごとの実測（合格した回も残す — 判定には使わない）。 */
         const measurements: Measurement[] = [];
         try {
-          const shards = resolveShards(new URL(MODEL_FILE, variant.root));
-          const [graphShard, ioBytes] = await Promise.all([
-            readShard(shards[0]),
+          const [opened, ioBytes] = await Promise.all([
+            openSeriesContainer(new URL(MODEL_FILE, variant.root)),
             readBuffer(variant.root, file),
           ]);
-          const parsed = prepareModel(graphShard);
+          const parsed = prepareContainer(opened, variant.graph);
           const io = parseSafetensors(ioBytes);
 
           // 出力の本数で variant を見分ける（配布形 1 本出しと検証用 25 本出しの取り違えは
@@ -354,26 +362,10 @@ for (const variant of VARIANTS) {
             variant.compressedStorage === undefined ? [] : [variant.compressedStorage],
             `${variant.name}: 圧縮格納 dtype の集合が宣言と食い違う`,
           );
-          // i8 は companion scale が無いと値が復元できない（ADR 0019）。宣言と実体の両方を見る
-          // — 宣言だけならキーが実在しない形が、実体だけなら別の重みの scale を読む形が通る。
-          if (variant.compressedStorage === "i8") {
-            // 実体は shard 列のどこかに居るので、名前の和で見る（どの shard に居るかまでは
-            // ここの関心ではない — co-shard 契約は container の shard 進行検証が持つ）。
-            const present = await shardTensorNames(shards);
-            // companion scale のテンソルキーは合流後のグラフには無い（供給計画が payload と
-            // 一緒に運ぶ）ので、旧配布形の宣言そのものから引く。
-            const { legacy } = extractIrGraph(parseShard(graphShard.bytes, graphShard.id));
-            for (const [name, initializer] of Object.entries(parsed.graph.initializers)) {
-              if (initializer.storage === undefined) continue;
-              if (codecLayout(initializer.storage.codec) !== "i8") continue;
-              const scale = legacy.scaleKeys.get(name);
-              assert(scale !== undefined, `${variant.name}: '${name}' に scale 宣言が無い`);
-              assert(
-                present.has(scale),
-                `${variant.name}: '${name}' の scale '${scale}' が資産に無い`,
-              );
-            }
-          }
+          // NOTE: i8 の companion scale（ADR 0019）の実在はここでは見ない。容器では束縛表が
+          // scale を block id で指し、`openContainer` の合流層が目次との突合と長さ検査
+          // （行数 × group 数 × 4）まで済ませている（container-v1 §5 / §7）ので、宣言と実体を
+          // 別々に見る門は恒真になる。旧 shard 形ではこの 2 つが独立だったため門があった。
 
           // io の全テンソルがグラフの入出力とちょうど対応する（余りも欠けも無い）。
           const expectedKeys = [
@@ -396,7 +388,7 @@ for (const variant of VARIANTS) {
           // 参照値・結果をこの機の行として残す経路なので、キーを採ったアダプタと実行アダプタの
           // 同一性をここで見る（複数 GPU の機で取り違えると、別の機の帯で測ることになる）。
           assertAdapterMatchesEnvironment(gpu);
-          const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
+          const session = await parsed.createContainerSession(gpu);
           try {
             const outputs = await session.run(inputs);
             assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());

@@ -33,8 +33,8 @@ import { assert, assertEquals } from "@std/assert";
 import {
   acquireGpu,
   parseSafetensors,
+  prepareContainer,
   type PreparedModel,
-  prepareModel,
   type SafetensorsFile,
   type Tensor,
 } from "../mod.ts";
@@ -43,7 +43,8 @@ import { assertAdapterMatchesEnvironment } from "./helpers/environment.ts";
 import { ioTensor } from "./helpers/golden-io.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { type Measurement, openResults, recordFailure } from "./helpers/results.ts";
-import { modelPresent, readShard, resolveShards, streamShards } from "./helpers/shard-files.ts";
+import { modelPresent, openSeriesContainer } from "./helpers/container-files.ts";
+import { seriesGraph } from "./helpers/series-graphs.ts";
 
 /**
  * 合成 golden（torch CPU 期待値）との突合に使う許容誤差。
@@ -91,13 +92,15 @@ const CLASS_COUNT = 8;
 const EXPECTED_GOLDEN = ["noise", "ramp", "silence", "voiced"] as const;
 
 const SERIES_PARENT = new URL("../../../outputs/series/", import.meta.url);
-const MODEL_FILE = "model.safetensors";
+const MODEL_FILE = "model.krm";
 const IO_PREFIX = "io.";
 const IO_SUFFIX = ".safetensors";
 const INPUT_NAME = "features";
 
 const SERIES_NAME = "vowel-detector-crnn-epoch3";
 const SERIES_ROOT = new URL(`${SERIES_NAME}/`, SERIES_PARENT);
+/** 容器の中のグラフ名（表は helpers/series-graphs.ts の 1 本 — 門番と同じ正本から引く）。 */
+const GRAPH_NAME = seriesGraph(SERIES_NAME);
 
 /** SKIP 時にそのまま貼れる生成コマンド（グラフは 1 本 — 長さの指定は要らない）。 */
 const GENERATE_COMMAND = "cd tools/export-recipes && uv run python -m vowel_detector.export";
@@ -211,12 +214,11 @@ for (const caseName of golden) {
       /** 出力ごとの実測（合格した回も残す — 判定には使わない）。 */
       const measurements: Measurement[] = [];
       try {
-        const shards = resolveShards(new URL(MODEL_FILE, SERIES_ROOT));
-        const [graphShard, ioBytes] = await Promise.all([
-          readShard(shards[0]),
+        const [opened, ioBytes] = await Promise.all([
+          openSeriesContainer(new URL(MODEL_FILE, SERIES_ROOT)),
           readBuffer(SERIES_ROOT, `${IO_PREFIX}${caseName}${IO_SUFFIX}`),
         ]);
-        const parsed = prepareModel(graphShard);
+        const parsed = prepareContainer(opened, GRAPH_NAME);
         const io = parseSafetensors(ioBytes);
 
         // io の全テンソルがグラフの入出力とちょうど対応する（余りも欠けも無い）。
@@ -235,7 +237,7 @@ for (const caseName of golden) {
         // 参照値・結果をこの機の行として残す経路なので、キーを採ったアダプタと実行アダプタの
         // 同一性をここで見る（複数 GPU の機で取り違えると、別の機の帯で測ることになる）。
         assertAdapterMatchesEnvironment(gpu);
-        const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
+        const session = await parsed.createContainerSession(gpu);
         try {
           const outputs = await session.run(goldenInputs(parsed, io));
           assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());

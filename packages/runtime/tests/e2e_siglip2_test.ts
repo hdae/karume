@@ -50,8 +50,8 @@ import { assert, assertEquals } from "@std/assert";
 import {
   acquireGpu,
   parseSafetensors,
+  prepareContainer,
   type PreparedModel,
-  prepareModel,
   type SafetensorsFile,
   type Tensor,
 } from "../mod.ts";
@@ -60,7 +60,8 @@ import { assertAdapterMatchesEnvironment } from "./helpers/environment.ts";
 import { ioTensor } from "./helpers/golden-io.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { type Measurement, openResults, recordFailure } from "./helpers/results.ts";
-import { modelPresent, readShard, resolveShards, streamShards } from "./helpers/shard-files.ts";
+import { modelPresent, openSeriesContainer } from "./helpers/container-files.ts";
+import { seriesGraph } from "./helpers/series-graphs.ts";
 
 /**
  * 実重み SigLIP2 **base**（`patch16-224`）の torch CPU 期待値との突合に使う許容誤差。
@@ -203,7 +204,7 @@ const SERIES: readonly Series[] = [
 ];
 
 const SERIES_PARENT = new URL("../../../outputs/series/", import.meta.url);
-const MODEL_FILE = "model.safetensors";
+const MODEL_FILE = "model.krm";
 const IO_PREFIX = "io.";
 const IO_SUFFIX = ".safetensors";
 
@@ -312,6 +313,8 @@ const results = openResults("siglip2-golden");
 
 for (const series of SERIES) {
   const root = seriesRoot(series);
+  /** 容器の中のグラフ名（表は helpers/series-graphs.ts の 1 本 — 門番と同じ正本から引く）。 */
+  const graphName = seriesGraph(series.name);
   /** 登録時点で必要なので同期列挙する（Deno.test の ignore 判定と同じ理由）。 */
   const discovered = discoverCases(root);
   const realNames = new Set<string>(REAL_CASES);
@@ -390,12 +393,11 @@ for (const series of SERIES) {
         /** 出力ごとの実測（合格した回も残す — 判定には使わない）。 */
         const measurements: Measurement[] = [];
         try {
-          const shards = resolveShards(new URL(MODEL_FILE, root));
-          const [graphShard, ioBytes] = await Promise.all([
-            readShard(shards[0]),
+          const [opened, ioBytes] = await Promise.all([
+            openSeriesContainer(new URL(MODEL_FILE, root)),
             readBuffer(root, `${IO_PREFIX}${caseName}${IO_SUFFIX}`),
           ]);
-          const parsed = prepareModel(graphShard);
+          const parsed = prepareContainer(opened, graphName);
           const io = parseSafetensors(ioBytes);
 
           // io の全テンソルがグラフの入出力とちょうど対応する（余りも欠けも無い）。
@@ -415,7 +417,7 @@ for (const series of SERIES) {
           // 参照値・結果をこの機の行として残す経路なので、キーを採ったアダプタと実行アダプタの
           // 同一性をここで見る（複数 GPU の機で取り違えると、別の機の帯で測ることになる）。
           assertAdapterMatchesEnvironment(gpu);
-          const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
+          const session = await parsed.createContainerSession(gpu);
           try {
             const outputs = await session.run(inputs);
             assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());
@@ -481,12 +483,14 @@ for (const series of SERIES) {
       // その幅では順序が反転しないことを実測してある（2026-08-14: 人物対と最悪の交差対の差は
       // base 0.1196 / so400m 0.0747 なのに対し、入力を TS 前処理へ差し替えたときの各 cosine の
       // 動きは最大 1.6e-3 —— 2 桁小さい）。
-      const shards = resolveShards(new URL(MODEL_FILE, root));
-      const parsed = prepareModel(await readShard(shards[0]));
+      const parsed = prepareContainer(
+        await openSeriesContainer(new URL(MODEL_FILE, root)),
+        graphName,
+      );
       const [outputName] = parsed.graph.outputs;
 
       const gpu = await acquireGpu();
-      const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
+      const session = await parsed.createContainerSession(gpu);
       const pooled = new Map<string, Float32Array>();
       try {
         // 4 ケースを 1 Session で回す（重みは 350MB〜1.7GB — ケースごとに組み直す理由が無い）。

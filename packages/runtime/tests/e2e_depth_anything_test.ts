@@ -53,8 +53,8 @@ import { assert, assertEquals } from "@std/assert";
 import {
   acquireGpu,
   parseSafetensors,
+  prepareContainer,
   type PreparedModel,
-  prepareModel,
   type SafetensorsFile,
   type Tensor,
 } from "../mod.ts";
@@ -63,7 +63,8 @@ import { assertAdapterMatchesEnvironment } from "./helpers/environment.ts";
 import { ioTensor } from "./helpers/golden-io.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { type Measurement, openResults, recordFailure } from "./helpers/results.ts";
-import { modelPresent, readShard, resolveShards, streamShards } from "./helpers/shard-files.ts";
+import { modelPresent, openSeriesContainer } from "./helpers/container-files.ts";
+import { seriesGraph } from "./helpers/series-graphs.ts";
 
 /**
  * **golden の入力で回した**ときの許容誤差（合成 4 + 実画像 4 の全 8 ケース共通）。
@@ -108,7 +109,9 @@ const GENERATE = "cd tools/export-recipes && uv run --group depth-anything-prepr
   " python -m depth_anything.export --real-images";
 
 const SERIES_ROOT = new URL(`../../../outputs/series/${SERIES_NAME}/`, import.meta.url);
-const MODEL_FILE = "model.safetensors";
+const MODEL_FILE = "model.krm";
+/** 容器の中のグラフ名（表は helpers/series-graphs.ts の 1 本 — 門番と同じ正本から引く）。 */
+const GRAPH_NAME = seriesGraph(SERIES_NAME);
 const IO_PREFIX = "io.";
 const IO_SUFFIX = ".safetensors";
 
@@ -267,12 +270,11 @@ for (const caseName of DISCOVERED) {
       /** 出力ごとの実測（合格した回も残す — 判定には使わない）。 */
       const measurements: Measurement[] = [];
       try {
-        const shards = resolveShards(new URL(MODEL_FILE, SERIES_ROOT));
-        const [graphShard, ioBytes] = await Promise.all([
-          readShard(shards[0]),
+        const [opened, ioBytes] = await Promise.all([
+          openSeriesContainer(new URL(MODEL_FILE, SERIES_ROOT)),
           readBuffer(`${IO_PREFIX}${caseName}${IO_SUFFIX}`),
         ]);
-        const parsed = prepareModel(graphShard);
+        const parsed = prepareContainer(opened, GRAPH_NAME);
         const io = parseSafetensors(ioBytes);
 
         // io の全テンソルがグラフの入出力とちょうど対応する（余りも欠けも無い）。
@@ -288,7 +290,7 @@ for (const caseName of DISCOVERED) {
         // 参照値・結果をこの機の行として残す経路なので、キーを採ったアダプタと実行アダプタの
         // 同一性をここで見る（複数 GPU の機で取り違えると、別の機の帯で測ることになる）。
         assertAdapterMatchesEnvironment(gpu);
-        const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
+        const session = await parsed.createContainerSession(gpu);
         try {
           const outputs = await session.run(inputs);
           assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());
@@ -344,14 +346,16 @@ Deno.test({
     // いなければ落ちる。閾値は置かない（順序そのものが検査対象 — `depth_anything/export.py`
     // の `_sanity` と同じ形で、あちらは torch 側に掛かっている）。実測は
     // ramp 0.7705 / noise 0.4128 / checker 0.0414 / disc −0.1837（torch 側と 4 桁一致）。
-    const shards = resolveShards(new URL(MODEL_FILE, SERIES_ROOT));
-    const parsed = prepareModel(await readShard(shards[0]));
+    const parsed = prepareContainer(
+      await openSeriesContainer(new URL(MODEL_FILE, SERIES_ROOT)),
+      GRAPH_NAME,
+    );
     const size = staticDim(parsed, 3);
     assertEquals(size, staticDim(parsed, 2), "相関は正方形の入力を前提にする");
     const [name] = parsed.graph.outputs;
 
     const gpu = await acquireGpu();
-    const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
+    const session = await parsed.createContainerSession(gpu);
     const correlations = new Map<string, number>();
     try {
       for (const caseName of SYNTHETIC_CASES) {
