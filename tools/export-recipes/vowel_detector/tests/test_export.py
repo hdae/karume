@@ -26,13 +26,13 @@ from pathlib import Path
 
 import pytest
 import torch
-from safetensors.torch import load_file, save_file
+from safetensors.torch import load_file
 from torch.export import Dim
 
 from _shared.paths import SERIES_ROOT
-from karume import emit
-from karume.pipeline import export_to_file
-from karume.shards import parse_piece_key, resolve_shards
+from karume.container import container_parts
+from karume.pipeline import export_module, export_to_file, publish_model
+from karume.verify import verify_container
 from vowel_detector import export as vd
 
 #: tiny な合成重みの寸法（特徴 83 次元だけは {@link vd.build_cases} と揃える）。
@@ -108,14 +108,21 @@ def tiny_module() -> vd.Crnn:
     return vd.Crnn(hidden=TINY_HIDDEN, gru_hidden=TINY_GRU_HIDDEN).eval()
 
 
+def _tiny_shapes() -> dict[str, dict[int, Dim]]:
+    """台本と**同じ宣言**（記号長 `2T`）。"""
+    return {vd.INPUT_NAME: {1: 2 * Dim("T", min=vd.SYM_MIN, max=vd.SYM_MAX)}}
+
+
 def _export_tiny(module: vd.Crnn, out_dir: Path):
-    """台本と**同じ宣言**（記号長 `2T`）で 1 本 export する。"""
+    """台本と**同じ宣言**で 1 本 export する。"""
     example = vd.build_cases(TINY_LENGTH)[0][1]
     return export_to_file(
         module,
         (example,),
         out_dir / vd.MODEL_FILE,
-        dynamic_shapes={vd.INPUT_NAME: {1: 2 * Dim("T", min=vd.SYM_MIN, max=vd.SYM_MAX)}},
+        provenance=vd.PROVENANCE,
+        graph_name="tiny",
+        dynamic_shapes=_tiny_shapes(),
         symbol_names=("T",),
     )
 
@@ -195,7 +202,9 @@ class TestSymbolicLength:
             tiny_module,
             (example,),
             long_dir / vd.MODEL_FILE,
-            dynamic_shapes={vd.INPUT_NAME: {1: 2 * Dim("T", min=vd.SYM_MIN, max=vd.SYM_MAX)}},
+            provenance=vd.PROVENANCE,
+            graph_name="tiny",
+            dynamic_shapes=_tiny_shapes(),
             symbol_names=("T",),
         )
 
@@ -272,13 +281,14 @@ class TestCheckpointBytes:
         with pytest.raises(AssertionError, match="バイト列が一致しない"):
             vd.assert_checkpoint_bytes(out_dir / vd.MODEL_FILE, state_dict)
 
-    def test_a_missing_initializer_fails_loudly(self, exported, tmp_path: Path) -> None:
-        module, _graph, _out_dir = exported
-        stripped = tmp_path / "stripped.safetensors"
-        save_file({"conv.0.bias": module.state_dict()["conv.0.bias"]}, str(stripped))
+    def test_a_missing_initializer_fails_loudly(self, exported) -> None:
+        """MUST: ckpt の鍵が容器に 1 本でも無ければ落とす（黙って一部だけ突き合わせない）。"""
+        module, _graph, out_dir = exported
+        state_dict = dict(module.state_dict())
+        state_dict["conv.0.absent"] = state_dict["conv.0.bias"].clone()
 
         with pytest.raises(AssertionError, match="initializer に無い"):
-            vd.assert_checkpoint_bytes(stripped, module.state_dict())
+            vd.assert_checkpoint_bytes(out_dir / vd.MODEL_FILE, state_dict)
 
     def test_a_weight_that_is_not_in_the_checkpoint_fails_loudly(self, exported) -> None:
         """MUST: 重みが別名で入る形を落とす（畳み込み定数だけが `const.` を名乗れる）。"""
@@ -470,42 +480,52 @@ class TestCli:
 
 
 class TestCheckpointBytesOfASplitComponent:
-    """分割テンソル（piece — ADR 0090）を含む配布形でも突合は成立する。
+    """分割テンソル（piece — container-v1 §4.2）を含む配布形でも突合は成立する。
 
-    容量を人工的に下げて conv の重み（tiny でも 1 行 1,660 バイト）を行で割らせる。畳まない
+    block 上限を人工的に下げて conv の重み（tiny でも 1 行 1,660 バイト）を行で割らせる。畳まない
     リーダなら state_dict の鍵が全部「欠けている」に化けるので、この 1 本で読み替えの有無が
     決まる。
     """
 
-    def split_export(self, tmp_path: Path, module: vd.Crnn, monkeypatch) -> Path:
-        monkeypatch.setattr(emit, "SHARD_DATA_CAPACITY", 2048)
-        _export_tiny(module, tmp_path)
+    def split_export(self, tmp_path: Path, module: vd.Crnn) -> Path:
+        """block 上限を 2KiB に差し込んで書く（`publish_model` の寸法の席）。"""
+        example = vd.build_cases(TINY_LENGTH)[0][1]
+        graph, tensors = export_module(
+            module, (example,), dynamic_shapes=_tiny_shapes(), symbol_names=("T",)
+        )
+        publish_model(
+            tmp_path / vd.MODEL_FILE,
+            graph,
+            tensors,
+            provenance=vd.PROVENANCE,
+            graph_name="tiny",
+            _block_bytes=2048,
+        )
         return tmp_path / vd.MODEL_FILE
 
-    def test_the_component_really_carries_pieces(self, tmp_path, tiny_module, monkeypatch) -> None:
+    def test_the_component_really_carries_pieces(self, tmp_path, tiny_module) -> None:
         """前提の観測点 — piece が 1 本も無ければこのテストは空振りになる。"""
-        path = self.split_export(tmp_path, tiny_module, monkeypatch)
+        path = self.split_export(tmp_path, tiny_module)
 
-        keys = [
-            key
-            for shard in resolve_shards(path)
-            for key in load_file(shard)
-            if parse_piece_key(key) is not None
+        verified = verify_container(container_parts(path))
+        split = [
+            name
+            for bound in verified.graphs.values()
+            for name, supply in bound.supplies.items()
+            if len(supply.blocks) > 1
         ]
-        assert keys
+        assert split
 
-    def test_every_checkpoint_tensor_is_still_byte_identical(
-        self, tmp_path, tiny_module, monkeypatch
-    ) -> None:
-        path = self.split_export(tmp_path, tiny_module, monkeypatch)
+    def test_every_checkpoint_tensor_is_still_byte_identical(self, tmp_path, tiny_module) -> None:
+        path = self.split_export(tmp_path, tiny_module)
 
         matched = vd.assert_checkpoint_bytes(path, tiny_module.state_dict())
 
         assert matched == len(tiny_module.state_dict())
 
-    def test_a_changed_byte_still_fails_loudly(self, tmp_path, tiny_module, monkeypatch) -> None:
+    def test_a_changed_byte_still_fails_loudly(self, tmp_path, tiny_module) -> None:
         """畳んだ実体で突き合わせている（分割で門が緩まない）。"""
-        path = self.split_export(tmp_path, tiny_module, monkeypatch)
+        path = self.split_export(tmp_path, tiny_module)
         state_dict = dict(tiny_module.state_dict())
         tampered = state_dict["conv.0.weight"].clone()
         tampered[0, 0, 0] += 1.0

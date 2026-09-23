@@ -46,6 +46,22 @@ def _ref(path: str, size: int, digit: str) -> dict[str, Any]:
     return {"path": path, "size": size, "sha256": digit * 64}
 
 
+def _container(*refs: dict[str, Any]) -> dict[str, Any]:
+    """weights の 1 dtype ぶん（`karume/5` の `container` — ADR 0109 決定 3）。
+
+    `descriptor` はカードが読まない欄なので、形だけ実物どおりに置く（2 文書の長さと sha256）。
+    """
+    return {
+        "container": {
+            "descriptor": {
+                "graph": {"length": 40, "sha256": "0" * 64},
+                "model": {"length": 24, "sha256": "1" * 64},
+            },
+            "parts": list(refs),
+        }
+    }
+
+
 def _birefnet_manifest(model: str = MODEL) -> dict[str, Any]:
     """BiRefNet 系の最小 manifest（解像度以外は実物と重ならない偽値）。"""
     side = int(model)
@@ -56,9 +72,7 @@ def _birefnet_manifest(model: str = MODEL) -> dict[str, Any]:
         "models": {
             model: {
                 "pipeline": BIREFNET_SUPPORTED_PIPELINE,
-                "weights": {
-                    "matte": {"f32": {"shards": [_ref("m/model.f32.safetensors", 13, "d")]}}
-                },
+                "weights": {"matte": {"f32": _container(_ref("m/model.f32.safetensors", 13, "d"))}},
                 "assets": {},
                 "quants": {"f32": {"weights": {"matte": "f32"}, "session": {}}},
                 "defaultQuant": "f32",

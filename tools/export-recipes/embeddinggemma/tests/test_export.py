@@ -52,7 +52,9 @@ def exported_batch3(tmp_path):
     """`query-en` 相当の 1 行を 3 行に複製したケースを export して `(wrapper, graph, out_dir)`。"""
     torch.manual_seed(0)
     wrapper = TinyEmbedding()
-    graph = export_to_file(wrapper, CASE_B3[1:], tmp_path / eg.MODEL_FILE)
+    graph = export_to_file(
+        wrapper, CASE_B3[1:], tmp_path / eg.MODEL_FILE, provenance=eg.PROVENANCE, graph_name="tiny"
+    )
     return wrapper, graph, tmp_path
 
 
@@ -91,7 +93,13 @@ class TestWriteIoPreservesTheBatchDimension:
         """batch=1 の従来経路は `_sanity` 側の reshape(-1) で吸収される（挙動不変の確認）。"""
         torch.manual_seed(0)
         wrapper = TinyEmbedding()
-        graph = export_to_file(wrapper, CASE_B1[1:], tmp_path / eg.MODEL_FILE)
+        graph = export_to_file(
+            wrapper,
+            CASE_B1[1:],
+            tmp_path / eg.MODEL_FILE,
+            provenance=eg.PROVENANCE,
+            graph_name="tiny",
+        )
 
         _, embeddings = eg._write_io(wrapper, graph, (CASE_B1,), tmp_path)
 

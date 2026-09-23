@@ -106,7 +106,7 @@ golden の入力（decoder の実 latent / encoder の正規化済み波形）�
 
 ## 出力レイアウト
 
-    outputs/series/dacvae-32dim/<target>/model.safetensors      重み・定数 + karume_ir
+    outputs/series/dacvae-32dim/<target>/model.krm              重み・定数 + 2 文書の記述
     outputs/series/dacvae-32dim/<target>/io.<case>.safetensors  入力と torch CPU 期待出力
 
 io のテンソルキー規約は他系列と同じ（`input.<グラフ入力名>` / `output.<位置>`）。
@@ -128,12 +128,13 @@ from torch import nn
 from torch.export import Dim
 
 from _shared.paths import INPUTS_ROOT, SERIES_ROOT
+from irodori.card import IRODORI_LICENSE
 from karume.artifacts import staged_publication
+from karume.container import Provenance, container_parts
 from karume.convert import normalize_boundary_tensor
 from karume.ir import IrGraph
 from karume.pipeline import export_to_file
 from karume.quantize import fake_quant_int8, round_weights_to_f16
-from karume.shards import resolve_shards
 
 #: 実重みの置き場（`hf download Aratako/Semantic-DACVAE-Japanese-32dim` の展開先を
 #: `irodori/dacvae/convert.py` で safetensors 化したもの）。
@@ -153,7 +154,11 @@ WEIGHT_DTYPES: tuple[str, ...] = ("f32", "f16", "i8")
 
 WEIGHTS_FILE = "weights.safetensors"
 METADATA_FILE = "metadata.json"
-MODEL_FILE = "model.safetensors"
+MODEL_FILE = "model.krm"
+
+#: 容器へ焼く出所（container-v1 §2.3）。コーデックは上流 `Aratako/Semantic-DACVAE-Japanese-32dim`
+#: で、ライセンス識別子はカード側の正本（{@link irodori.card.IRODORI_LICENSE}）と同じ 1 本。
+PROVENANCE = Provenance(license=IRODORI_LICENSE)
 IO_PREFIX = "io."
 IO_SUFFIX = ".safetensors"
 INPUT_PREFIX = "input."
@@ -931,7 +936,7 @@ def _graph_summary(graph: IrGraph, path: Path) -> dict[str, Any]:
         "symbols": list(graph.symbols),
         "inputs": [[spec.name, list(spec.shape)] for spec in graph.inputs],
         "output_shapes": [list(graph.values[name].shape) for name in graph.outputs],
-        "model_bytes": sum(p.stat().st_size for p in resolve_shards(path)),
+        "model_bytes": sum(p.stat().st_size for p in container_parts(path)),
     }
 
 
@@ -1026,6 +1031,10 @@ def export_series(
                 graphs[target],
                 (by_case[longest],),
                 staged / MODEL_FILE,
+                provenance=PROVENANCE,
+                # グラフ名は**部品名**（= karume.json の weights のキー
+                # = 据え替え先のディレクトリ名）。
+                graph_name=target_dir.name,
                 dynamic_shapes=({axis.axis: sequence},),
                 symbol_names=(axis.symbol,),
                 weight_dtype=dtype,

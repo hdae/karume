@@ -1,63 +1,79 @@
-"""QAT PLE を固定 packed のまま token-major sidecar へ書く（ADR 0097 追記 4）。"""
+"""QAT PLE を固定 packed のまま**容器の資産**へ組む（ADR 0097 追記 4 / ADR 0109 決定 4）。"""
 
 from __future__ import annotations
 
-import hashlib
-import json
 import math
+from collections.abc import Buffer, Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, NamedTuple
 
 import torch
 from safetensors.torch import save_file
 
 from gemma4.export_product import (
-    PLE_INDEX_FILE,
     PLE_PROBE_FILE,
     PROBE_INPUTS_KEY,
     PROBE_TOKENS_KEY,
-    plan_ple_shards,
     ple_probe_tokens,
+    spill_payload,
 )
-from karume.dist import safetensors_header
-from karume.emit import ContainerEntry, container_order, write_container
-from karume.shards import SHARD_DATA_CAPACITY, shard_name
-from karume.verify import assert_reader_layout
+from karume.container import AssetInput
+from karume.ple import ple_assets, ple_block_ranges
 
 if TYPE_CHECKING:
     from transformers.integrations.gemma_quant import QuantizedEmbedding
 
 
-def _assert_bytes(path: Path, payloads: dict[str, torch.Tensor]) -> None:
-    """書き出しを正規 reader で検査し、全 payload をブロック読みで元の固定 bytes と照合する。"""
-    assert_reader_layout(path)
-    header = safetensors_header(path)
-    with path.open("rb") as stream:
-        base = 8 + int.from_bytes(stream.read(8), "little")
-        for key, tensor in payloads.items():
-            begin, end = header[key]["data_offsets"]
-            stream.seek(base + begin)
-            digest = hashlib.sha256()
-            left = end - begin
-            while left:
-                block = stream.read(min(left, 1 << 20))
-                if not block:
-                    raise ValueError(f"{path}: {key} の payload が途中で終わる")
-                digest.update(block)
-                left -= len(block)
-            if digest.digest() != hashlib.sha256(memoryview(tensor.numpy())).digest():
-                raise ValueError(f"{path}: {key} が上流の固定 bytes と違う")
+class PleBuild(NamedTuple):
+    """{@link build_ple} の戻り — 容器へ渡す資産と、参照の突合に要る事実。"""
+
+    #: `publish_model(assets=…)` へそのまま渡す資産（索引 + `values` / `scales` の block 列）。
+    assets: dict[str, AssetInput]
+    #: 逆量子化ビット一致の参照に使う散点 token id。
+    probe: tuple[int, ...]
+    #: `values` の block 本数（`reference.json` の突合相手）。
+    blocks: int
+    #: token-major の payload を落とした作業席の一時ファイル（配布物ではない）。
+    spills: tuple[Path, ...]
+
+    def discard(self) -> None:
+        """一時ファイルを消す（作業席ごと据わる前に呼ぶ MUST — 配布物に混ざらない）。"""
+        for path in self.spills:
+            path.unlink(missing_ok=True)
 
 
-def write_ple(
-    module: QuantizedEmbedding,
-    layers: int,
-    dim: int,
-    destination: Path,
-    *,
-    shard_capacity: int = SHARD_DATA_CAPACITY,
-) -> dict[str, Any]:
-    """固定表と上流モジュールによる散点参照を保存する。destination は staging 側が作る。"""
+def _spill_reader(tensor: torch.Tensor, path: Path) -> Callable[[int, int], Buffer]:
+    """行優先に連結済みの実体を作業席の一時ファイルへ落とし、その区間読みを返す。
+
+    QAT の PLE は上流が既に token-major（`values[tokens, layers*dim//factor]` /
+    `scales[tokens, layers]`）で持っているので、転置は要らず素のバイト列がそのまま payload。
+
+    MUST: 実体を**持ち越さない**（製品系列の {@link gemma4.export_product._spill_tables} と
+    同じ規律）— メモリ上のテンソルを掴む読み口にすると、packed の実体が `trace_qat` と
+    書き出しの間ずっと常駐する。落としてしまえば呼び手は上流モジュールごと手放せる。
+    """
+    spill_payload(memoryview(tensor.numpy()).cast("B"), path)
+
+    def read(begin: int, end: int) -> Buffer:
+        with path.open("rb") as handle:
+            handle.seek(begin)
+            raw = handle.read(end - begin)
+        if len(raw) != end - begin:
+            raise AssertionError(f"{path}: PLE の区間 [{begin}, {end}) が途中で尽きた")
+        return raw
+
+    return read
+
+
+def build_ple(module: QuantizedEmbedding, layers: int, dim: int, destination: Path) -> PleBuild:
+    """固定表を容器の資産へ組み、散点参照（probe）を系列へ書く。
+
+    `destination` は staging 側が作る席で、ここが書くのは**配布物でない** probe だけである
+    （資産そのものは容器の中へ入るので、書くのは `publish_model` の仕事）。
+
+    MUST: 上流の固定整数と scale を**再量子化しない** — 検査するのは形と値域だけで、
+    バイト列は 1 ビットも作り替えずに資産の payload になる。
+    """
     bits, tokens = module.num_bits, module.num_embeddings
     if bits not in (2, 4) or layers <= 0 or dim <= 0 or dim % 16:
         raise ValueError("PLE は I2/I4、正の layers、16の倍数の dim が必要")
@@ -79,45 +95,13 @@ def write_ple(
     if not torch.isfinite(scales).all() or not (scales > 0).all():
         raise ValueError("PLE scales は正の有限数が必要")
     scales = scales.contiguous()
-    ranges = plan_ple_shards(tokens, layers * (dim // factor + 4), shard_capacity)
-    probe = ple_probe_tokens(tokens, ranges)
+    storage = f"i{bits}"
+    ranges = ple_block_ranges(storage=storage, tokens=tokens, layers=layers, dim=dim)
+    probe = ple_probe_tokens(tokens, ranges["values"])
     with torch.inference_mode():
         expected = module(torch.tensor([list(probe)], dtype=torch.int64)).reshape(
             1, len(probe), layers, dim
         )
-    common = {
-        "schema": 2,
-        "storage": f"i{bits}",
-        "tokens": tokens,
-        "layers": layers,
-        "dim": dim,
-        "embedScale": embed_scale,
-    }
-    shards = []
-    for number, (start, stop) in enumerate(ranges, 1):
-        rows = stop - start
-        file = shard_name("ple.safetensors", number, len(ranges))
-        path = destination / file
-        payloads = {"values": values[start:stop], "scales": scales[start:stop]}
-        entries = container_order(
-            [
-                ContainerEntry(
-                    "values", f"I{bits}", (rows, layers, dim), payloads["values"].numel()
-                ),
-                ContainerEntry("scales", "F32", (rows, layers), payloads["scales"].numel() * 4),
-            ]
-        )
-        metadata = {**common, "start": start, "stop": stop}
-        write_container(
-            path,
-            entries,
-            {"karume_ple": json.dumps(metadata)},
-            lambda entry, payloads=payloads: [memoryview(payloads[entry.name].numpy()).cast("B")],
-        )
-        _assert_bytes(path, payloads)
-        shards.append({"file": file, "start": start, "stop": stop})
-    index = {**common, "shards": shards}
-    (destination / PLE_INDEX_FILE).write_text(json.dumps(index, indent=2) + "\n")
     save_file(
         {
             PROBE_TOKENS_KEY: torch.tensor(probe, dtype=torch.int32),
@@ -125,4 +109,14 @@ def write_ple(
         },
         str(destination / PLE_PROBE_FILE),
     )
-    return index
+    spills = {key: destination / f".ple.{key}.spill" for key in ("values", "scales")}
+    assets = ple_assets(
+        storage=storage,
+        tokens=tokens,
+        layers=layers,
+        dim=dim,
+        embed_scale=embed_scale,
+        read_values=_spill_reader(values, spills["values"]),
+        read_scales=_spill_reader(scales, spills["scales"]),
+    )
+    return PleBuild(assets, probe, len(ranges["values"]), tuple(spills.values()))

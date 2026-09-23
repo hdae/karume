@@ -54,10 +54,10 @@ from gemma4.tests.test_export import (
     WINDOW,
 )
 from karume.artifacts import SUPERSEDED_SUFFIX
+from karume.container import numbered_name
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION
 from karume.ir import IrGraph, IrInitializer, IrInput, IrNode, IrStorage, IrValue
 from karume.pipeline import export_module
-from karume.shards import shard_name
 from karume.states import StatesFormError, StatesPlan, to_states_form
 
 #: decode 側の tiny な層構成。**KV 共有が成立する最小形**にしてある — 共有開始（層 3）より
@@ -907,6 +907,7 @@ class TestExportedDecodeForm:
             surgical,
             tensors,
             tmp_path / gx.MODEL_FILE,
+            graph_name="tiny",
             weight_dtype="i8",
             weight_scales=scales,
             weight_dtype_overrides=dict.fromkeys(int4.scales, "i4"),
@@ -1184,10 +1185,14 @@ class TestLoadWrapper:
 #: 系列の門（`GREEDY_CASES` の絞り込みと第 1 継続の突合）が実物と違う枝を通る。
 TINY_CASE_NAMES = ("capital-en", "capital-ja")
 
-#: tiny 系列が据えるコンテナのファイル名。配布形は**常時分割**（ADR 0081）なので、単一
-#: ファイルは出ない — tiny 模型は数 KB なので「グラフ shard + weight shard 1 本」の 2 本になる。
-#: 連番は焼かずに {@link karume.shards.shard_name} から引く（規則が動けばここも一緒に動く）。
-TINY_CONTAINER_FILES = [shard_name(gx.MODEL_FILE, index, 2) for index in (1, 2)]
+#: tiny 系列が据えるコンテナのファイル名。配布形は**常時分割**（container-v1 §8）なので、単一
+#: ファイルは出ない — tiny 模型は数 KB なので「2 文書 + const 領域 + 重み」の 3 本になる。
+#: 連番は焼かずに {@link karume.container.numbered_name} から引く（規則が動けばここも一緒に動く）。
+TINY_CONTAINER_PARTS = 3
+TINY_CONTAINER_FILES = [
+    numbered_name(gx.MODEL_FILE, index, TINY_CONTAINER_PARTS)
+    for index in range(1, TINY_CONTAINER_PARTS + 1)
+]
 
 #: 系列ごとの要約の欄（順序込み）。ここが変わると実走の記録の形が変わる。
 DECODE_SUMMARY_KEYS = [

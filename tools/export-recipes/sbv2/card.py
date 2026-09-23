@@ -235,7 +235,12 @@ def _sbv2_base_weights(profile: Sbv2CardProfile) -> list[str]:
     ]
 
 
-def _sbv2_quants(model: Mapping[str, Any], *, abbreviations: Mapping[str, str]) -> list[str]:
+def _sbv2_quants(
+    model: Mapping[str, Any],
+    *,
+    abbreviations: Mapping[str, str],
+    host_assets: Mapping[str, int] = {},
+) -> list[str]:
     """汎用の quant 表に、SBV2 の**丸め方**の備考を足した節。
 
     表は「どの席がどの格納 dtype か」しか言えない（manifest がそこまでしか持たない）ので、
@@ -247,7 +252,7 @@ def _sbv2_quants(model: Mapping[str, Any], *, abbreviations: Mapping[str, str]) 
     出す 1 行で、こちらは「その格納をどう作ったか」という台本側の知識（ADR 0075 決定 5）。
     """
     default = model["defaultQuant"]
-    table = quants(model, abbreviations=abbreviations)
+    table = quants(model, abbreviations=abbreviations, host_assets=host_assets)
     notes: list[str] = []
     for name in model["quants"]:
         rounding = SBV2_QUANT_ROUNDING.get(name)
@@ -393,6 +398,7 @@ def render_sbv2_model_card(
     repo: str,
     profile: Sbv2CardProfile,
     abbreviations: Mapping[str, str],
+    host_assets: Mapping[str, int] = {},
 ) -> str:
     """SBV2 配布形の `README.md` 本文を組み立てる（純関数・末尾改行つき）。
 
@@ -417,7 +423,7 @@ def render_sbv2_model_card(
             *model_sections(
                 manifest,
                 (
-                    partial(_sbv2_quants, abbreviations=abbreviations),
+                    partial(_sbv2_quants, abbreviations=abbreviations, host_assets=host_assets),
                     _sbv2_styles,
                     _sbv2_speakers,
                     _sbv2_defaults,

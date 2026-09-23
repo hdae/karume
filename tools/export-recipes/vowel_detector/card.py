@@ -14,6 +14,7 @@ MUST: **数値・ダウンロード量・quant 表・dtype ラベルは 1 つ残
 from __future__ import annotations
 
 from collections.abc import Mapping
+from functools import partial
 from typing import Any
 
 from karume.modelcard import (
@@ -233,7 +234,9 @@ def _vowel_detector_shape(model: Mapping[str, Any]) -> list[str]:
     ]
 
 
-def render_vowel_detector_model_card(manifest: Mapping[str, Any], repo: str) -> str:
+def render_vowel_detector_model_card(
+    manifest: Mapping[str, Any], repo: str, host_assets: Mapping[str, int] = {}
+) -> str:
     """母音検出配布形の `README.md` 本文を組み立てる（純関数・末尾改行つき）。"""
     require_pipeline(manifest, VOWEL_DETECTOR_SUPPORTED_PIPELINE)
     return render(
@@ -247,6 +250,8 @@ def render_vowel_detector_model_card(manifest: Mapping[str, Any], repo: str) -> 
             models(manifest),
             [""],
             _vowel_detector_usage(manifest, repo),
-            *model_sections(manifest, (quants, _vowel_detector_shape)),
+            *model_sections(
+                manifest, (partial(quants, host_assets=host_assets), _vowel_detector_shape)
+            ),
         )
     )

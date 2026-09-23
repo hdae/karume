@@ -42,7 +42,7 @@ NOTE: `pool_mask` は全 1 で採る（マスク無しで呼ぶ以上、0 を混
 
 ## 出力レイアウト
 
-    outputs/series/embeddinggemma-300m/model.safetensors     重み・定数 + __metadata__.karume_ir
+    outputs/series/embeddinggemma-300m/model.krm             重み・定数 + 2 文書の記述
     outputs/series/embeddinggemma-300m/io.<case>.safetensors 入力と torch CPU での期待出力
 
 io のテンソルキー規約は tiny golden / DeBERTa と同じ（`input.<グラフ入力名>` / `output.<位置>`）。
@@ -70,11 +70,11 @@ from torch.export import Dim
 
 from _shared.paths import INPUTS_ROOT, SERIES_ROOT
 from karume.artifacts import staged_publication
+from karume.container import Provenance, container_parts
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION, normalize_boundary_tensor
 from karume.ir import IrGraph
 from karume.pipeline import export_to_file
 from karume.rope import assert_rope_lifted
-from karume.shards import resolve_shards
 
 #: 公式重みの置き場（`hf download google/embeddinggemma-300m` の展開先）。
 DEFAULT_MODEL_DIR = INPUTS_ROOT / "embeddinggemma" / "google-300m"
@@ -82,7 +82,15 @@ DEFAULT_MODEL_DIR = INPUTS_ROOT / "embeddinggemma" / "google-300m"
 #: 生成物の既定の置き場。格納 dtype は f32 のみ（f16 / i8 は別系列で決める話）。
 DEFAULT_OUT_DIR = SERIES_ROOT / "embeddinggemma-300m"
 
-MODEL_FILE = "model.safetensors"
+MODEL_FILE = "model.krm"
+
+#: 容器へ焼く出所（container-v1 §2.3）。この recipe は配布形を組まない（カードも
+#: `distribution.py` も無い）ので、識別子の出どころは上流モデルカードの宣言そのもので、
+#: `THIRD_PARTY_NOTICES.md` が「使った revision に対しては未確認」と記録している値である。
+PROVENANCE = Provenance(license="gemma")
+
+#: **上流チェックポイント**の重みファイル名（HF の綴り — 出力の容器とは別物）。
+CHECKPOINT_FILE = "model.safetensors"
 IO_PREFIX = "io."
 IO_SUFFIX = ".safetensors"
 INPUT_PREFIX = "input."
@@ -198,7 +206,7 @@ def load_dense(model_dir: Path, name: str) -> nn.Linear:
     if config["bias"]:
         raise ValueError(f"{name}: bias 付きの Dense は想定外（公式配布は bias=false）")
     dense = nn.Linear(config["in_features"], config["out_features"], bias=False)
-    weight = load_file(str(model_dir / name / MODEL_FILE))[DENSE_WEIGHT_KEY]
+    weight = load_file(str(model_dir / name / CHECKPOINT_FILE))[DENSE_WEIGHT_KEY]
     if tuple(weight.shape) != tuple(dense.weight.shape):
         raise ValueError(
             f"{name}: 重み shape {tuple(weight.shape)} が config の"
@@ -408,6 +416,9 @@ def export_series(
             wrapper,
             (example_ids, example_mask),
             staged / MODEL_FILE,
+            provenance=PROVENANCE,
+            # グラフ名は**部品名**（= karume.json の weights のキー = 据え替え先のディレクトリ名）。
+            graph_name=out_dir.name,
             dynamic_shapes=({1: seq}, {1: seq}),
             preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
         )
@@ -421,7 +432,7 @@ def export_series(
         "nodes": len(graph.nodes),
         "outputs": len(graph.outputs),
         "initializers": len(graph.initializers),
-        "model_bytes": sum(p.stat().st_size for p in resolve_shards(out_dir / MODEL_FILE)),
+        "model_bytes": sum(p.stat().st_size for p in container_parts(out_dir / MODEL_FILE)),
         "ops": sorted(graph.required_ops),
         "symbols": list(graph.symbols),
         "io": written,

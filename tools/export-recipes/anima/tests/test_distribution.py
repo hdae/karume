@@ -22,15 +22,16 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from ir_fixtures import ir_container
-from shard_series import (
+from container_series import (
+    part_paths,
     placed_paths,
     read_component,
     replace_component,
-    shard_paths,
     write_component,
 )
+from ir_fixtures import ir_container
 
+from _shared.container_read import read_asset
 from anima.card import ATTRIBUTION_NOTICE
 from anima.distribution import (
     ANIMA_AESTHETIC_MODEL_NAME,
@@ -53,6 +54,8 @@ from anima.distribution import (
     OFFICIAL_NOTICE_MARKDOWN,
     OFFICIAL_PIPELINE,
     OUTPUT_PATHS,
+    ROPE_BASE_ASSET,
+    ROPE_BASE_ROLE,
     STORAGE_REQUIREMENTS,
     AnimaModel,
     AnimaSources,
@@ -65,6 +68,7 @@ from anima.distribution import (
 )
 from dist import main
 from karume.artifacts import STAGING_SUFFIX
+from karume.container import AssetInput, container_parts
 from karume.dist import (
     MANIFEST_FILENAME,
     MANIFEST_FORMAT,
@@ -79,68 +83,53 @@ from karume.dist import (
     resolve_card_renderer,
     verify_dist,
 )
-from karume.shards import resolve_shards
+
+#: transformer 容器へ同梱する rope 素表（資産 `rope_base` — ADR 0109 決定 4）。中身は実物と
+#: 同じく 1 本の safetensors のバイト列だが、容器は解釈しないので**任意のバイト列でよい**。
+_ROPE_BASE = b"rope-base-table"
 
 
-def _fake_safetensors(
-    dtype: str, payload: bytes, metadata: Mapping[str, str] | None = None
-) -> bytes:
-    """格納 dtype の門を通る最小の safetensors（8 バイト長 + ヘッダ JSON + データ節）。
-
-    `metadata` を渡すと `__metadata__` 節が付く（IR コンテナを要求する門のため）。
-    """
-    header: dict[str, Any] = {
-        "w": {"dtype": dtype, "shape": [len(payload)], "data_offsets": [0, len(payload)]}
-    }
-    if metadata is not None:
-        header["__metadata__"] = dict(metadata)
-    encoded = json.dumps(header).encode("utf-8")
-    return len(encoded).to_bytes(8, "little") + encoded + payload
+def _rope_asset(payload: bytes = _ROPE_BASE) -> dict[str, AssetInput]:
+    """`rope_base` 1 本ぶんの資産宣言（名前と役割の正本は `anima.distribution`）。"""
+    return {ROPE_BASE_ASSET: AssetInput(ROPE_BASE_ROLE, len(payload), payload)}
 
 
-def _mixed_safetensors(dtypes: tuple[str, ...], payload: bytes) -> bytes:
-    """複数の格納 dtype が同居するヘッダ（混成系列 = i4 の実物の形）。
+def _weights_container(role: str, storage: str, *, rope: bytes | None = None) -> list[bytes]:
+    """weights の席へ挿す**正当なコンテナ**（役割ごとに違うバイト列）。
 
-    i4 系列は「適格な重みが I4・残りが I8・適格外と scale が F32」の 3 種が並ぶので、単一 dtype
-    の偽資産では**圧縮席どうしの取り違え**（i4 系列 → i8 席）を再現できない。
-    """
-    header: dict[str, Any] = {}
-    for index, dtype in enumerate(dtypes):
-        start = index * len(payload)
-        header[f"w{index}"] = {
-            "dtype": dtype,
-            "shape": [len(payload)],
-            "data_offsets": [start, start + len(payload)],
-        }
-    encoded = json.dumps(header).encode("utf-8")
-    return len(encoded).to_bytes(8, "little") + encoded + payload * len(dtypes)
-
-
-def _weights_container(role: str, storage: str) -> list[bytes]:
-    """weights の席へ挿す**正当な IR コンテナ**（役割ごとに違うバイト列）。
-
-    組み立ては入力コンテナを IR v1 の全規則で見る
+    組み立ては入力コンテナを開いて宣言の全規則で見る
     （`karume.dist.assert_weight_components_verified`）ので、weights の席は本物でなければ
-    ならない。格納 dtype の集合は実物と同じ形（適格な重みだけが圧縮・bias / 定数 / scale は
-    F32・i4 は I4 + I8 + F32 の混成）になるので、{@link ANIMA_STORAGE_FORBIDDEN} の
+    ならない。格納の語彙は実物と同じ形（適格な重みだけが圧縮・bias / 定数 / scale は
+    f32・i4 は i4 + i8 + f32 の混成）になるので、{@link ANIMA_STORAGE_FORBIDDEN} の
     不在検査もこの形に掛かる。
+
+    `rope` は transformer の席だけが持つ資産（渡すと専用 part が 1 本増える）。
     """
-    return ir_container(mark=role, storage=storage)
+    return ir_container(
+        mark=role, storage=storage, assets={} if rope is None else _rope_asset(rope)
+    )
 
 
 #: 偽資産の中身（役割ごとに違うバイト列 — 取り違えがハッシュで見える）。モデル 5 役は
-#: `STORAGE_REQUIREMENTS` が要求する dtype をヘッダに持つ。rope_base は weights ではなく
-#: extras の席（IR コンテナではない）なので、ヘッダだけの偽資産のままでよい。
+#: `STORAGE_REQUIREMENTS` が要求する格納の語彙を束縛表に持つ。transformer の 3 役は
+#: rope 素表を資産として同梱するので part が 1 本多い（{@link _TRANSFORMER_PARTS}）。
 _PAYLOADS = {
     "text_encoder": _weights_container("text-encoder", "f16"),
     "text_conditioner": _weights_container("text-conditioner", "f16"),
-    "transformer_f16": _weights_container("transformer-f16", "f16"),
-    "transformer_i8": _weights_container("transformer-i8", "i8"),
-    "transformer_i4": _weights_container("transformer-i4", "i4"),
-    "rope_base": _fake_safetensors("F32", b"rope-base-table"),
+    "transformer_f16": _weights_container("transformer-f16", "f16", rope=_ROPE_BASE),
+    "transformer_i8": _weights_container("transformer-i8", "i8", rope=_ROPE_BASE),
+    "transformer_i4": _weights_container("transformer-i4", "i4", rope=_ROPE_BASE),
     "vae_decoder": _weights_container("vae-decoder", "f16"),
     "tokenizer": b'{"qwen2": true}',
     "tokenizer_2": b'{"t5": true}',
+}
+
+#: transformer の席の part 本数（資産 `rope_base` の専用 part が 1 本増える）。
+_TRANSFORMER_PARTS = len(_PAYLOADS["transformer_f16"])
+
+#: 役割名 → part 本数（{@link placed_paths} / {@link part_paths} の上書き）。
+_PART_TOTALS: Mapping[str, int] = {
+    f"transformer_{storage}": _TRANSFORMER_PARTS for storage in ("f16", "i8", "i4")
 }
 
 
@@ -225,30 +214,28 @@ def _build_series(
             sources,
             transformer={**sources.transformer, "i4": series_dir / f"{model}-i4-dyn"},
         )
-    write_component(sources.base / "text_encoder" / "model.safetensors", _PAYLOADS["text_encoder"])
+    write_component(sources.base / "text_encoder" / "model.krm", _PAYLOADS["text_encoder"])
     write_component(
-        sources.text_conditioner / "text_conditioner" / "model.safetensors",
+        sources.text_conditioner / "text_conditioner" / "model.krm",
         _PAYLOADS["text_conditioner"],
     )
-    write_component(sources.base / "vae_decoder" / "model.safetensors", _PAYLOADS["vae_decoder"])
+    write_component(sources.base / "vae_decoder" / "model.krm", _PAYLOADS["vae_decoder"])
     # 配布に入ってはいけない E2E フィクスチャ（系列には実際にこれが並んでいる）。
     _write(sources.base / "text_encoder" / "io.t005.safetensors", b"io-fixture")
     _write(sources.base / "vae_decoder" / "io.case0.safetensors", b"io-fixture")
-    ropes = {"f16": None, "i8": i8_rope, "i4": i4_rope}
+    ropes = {"f16": _ROPE_BASE, "i8": i8_rope or _ROPE_BASE, "i4": i4_rope or _ROPE_BASE}
     for storage, series in sources.transformer.items():
         role = f"transformer_{storage}"
+        rope = ropes[storage]
         payload = (
             _PAYLOADS[role]
-            if not mark
-            else _weights_container(f"{role}{mark.decode('utf-8')}", storage)
+            if not mark and rope == _ROPE_BASE
+            else _weights_container(
+                f"{role}{mark.decode('utf-8')}" if mark else role, storage, rope=rope
+            )
         )
-        write_component(series / "transformer" / "model.safetensors", payload)
+        write_component(series / "transformer" / "model.krm", payload)
         _write(series / "transformer" / "io.s01024t0699.safetensors", b"io-fixture")
-        rope = ropes[storage]
-        _write(
-            series / "transformer" / "rope_base.safetensors",
-            _PAYLOADS["rope_base"] if rope is None else rope,
-        )
     # 校正条件は i4 系列だけが持つ（f16 / i8 は校正の対象外）。
     if "i4" in sources.transformer:
         _write(
@@ -303,9 +290,9 @@ def _in_subtree(
     """モデルサブツリー内の期待 path（ADR 0041 §9 の一様レイアウト）。
 
     省略時はそのモデルが**宣言した格納形だけ**（i4 席を持たないモデルに i4 のファイルは出ない）
-    を、配布形に現れる形へ展開する — weights の 5 役は shard 連番になり（ADR 0081）、
-    rope_base（extras）と tokenizer（assets）は 1 ファイルのまま。`storages` は席を注入して
-    組んだ木を見るときだけ渡す（{@link _i4_seat}）。
+    を、配布形に現れる形へ展開する — weights の 5 役は part 連番になり（container-v1 §8）、
+    tokenizer（assets）は 1 ファイルのまま。`storages` は席を注入して組んだ木を見るときだけ
+    渡す（{@link _i4_seat}）。
     """
     if paths is None:
         storages = anima_model(model).storages if storages is None else storages
@@ -314,7 +301,7 @@ def _in_subtree(
             for role, rel in OUTPUT_PATHS.items()
             if not role.startswith("transformer_") or role.removeprefix("transformer_") in storages
         }
-        paths = placed_paths(declared, ANIMA_WEIGHTS)
+        paths = placed_paths(declared, ANIMA_WEIGHTS, _PART_TOTALS)
     return [f"{model}/{rel}" for rel in paths]
 
 
@@ -357,8 +344,8 @@ class TestLayout:
     def test_it_renames_the_two_transformer_series_into_dtype_files(self, assembled) -> None:
         out_dir, _ = assembled
         subtree = out_dir / ANIMA_TURBO_MODEL_NAME / "transformer"
-        assert read_component(subtree / "model.f16.safetensors") == _PAYLOADS["transformer_f16"]
-        assert read_component(subtree / "model.i8.safetensors") == _PAYLOADS["transformer_i8"]
+        assert read_component(subtree / "model.f16.krm") == _PAYLOADS["transformer_f16"]
+        assert read_component(subtree / "model.i8.krm") == _PAYLOADS["transformer_i8"]
 
     def test_no_shipped_model_places_an_i4_file(self, assembled) -> None:
         """配布の i4 席は全モデルから消えた（2026-09-01 裁定）— ファイルも 1 本も出ない。"""
@@ -374,7 +361,7 @@ class TestLayout:
         """
         out_dir, _ = assembled_with_i4
         placed = out_dir / ANIMA_TURBO_MODEL_NAME / OUTPUT_PATHS["transformer_i4"]
-        assert placed.name == "model.i4.safetensors"
+        assert placed.name == "model.i4.krm"
         assert read_component(placed) == _PAYLOADS["transformer_i4"]
         assert _present(out_dir) == sorted(
             [
@@ -411,8 +398,8 @@ class TestPlacementStrategy:
         out_dir, _ = assembled
         placed = out_dir / ANIMA_TURBO_MODEL_NAME / OUTPUT_PATHS["text_encoder"]
         assert read_component(placed) == _PAYLOADS["text_encoder"]
-        # 独立コピーであることは shard 1 本ずつに掛かる（分割で漏れる席を作らない）。
-        assert [shard.stat().st_nlink for shard in resolve_shards(placed)] == [1, 1]
+        # 独立コピーであることは part 1 本ずつに掛かる（分割で漏れる席を作らない）。
+        assert [part.stat().st_nlink for part in container_parts(placed)] == [1, 1, 1]
 
     def test_a_series_rewrite_does_not_reach_the_dist(self, tmp_path: Path) -> None:
         """系列の再 export（truncate 上書き）が組み立て済み配布形へ波及しないこと。
@@ -423,30 +410,48 @@ class TestPlacementStrategy:
         sources = _build_series(tmp_path / "series")
         out_dir = tmp_path / "models" / ANIMA_TURBO_MODEL_NAME
         _assemble_anima(sources, out_dir)
-        # 書き直すのは系列の**グラフ shard**（再 export は shard ごとに truncate 上書きする）。
-        source = resolve_shards(sources.base / "text_encoder" / "model.safetensors")[0]
+        # 書き直すのは系列の **part 0**（再 export は part ごとに truncate 上書きする）。
+        source = container_parts(sources.base / "text_encoder" / "model.krm")[0]
         with source.open("wb") as handle:
-            handle.write(_fake_safetensors("F16", b"rewritten-after-assembly"))
+            handle.write(b"rewritten-after-assembly")
         placed = out_dir / ANIMA_TURBO_MODEL_NAME / OUTPUT_PATHS["text_encoder"]
         assert read_component(placed) == _PAYLOADS["text_encoder"]
 
     def test_it_stops_when_an_input_is_missing(self, tmp_path: Path) -> None:
         sources = _build_series(tmp_path / "series")
-        for shard in resolve_shards(sources.base / "vae_decoder" / "model.safetensors"):
-            shard.unlink()
+        for part in container_parts(sources.base / "vae_decoder" / "model.krm"):
+            part.unlink()
         with pytest.raises(DistError, match="組み立ての入力が無い"):
             _assemble_anima(sources, tmp_path / "models" / ANIMA_TURBO_MODEL_NAME)
 
 
 class TestRopeBase:
-    def test_it_collapses_the_two_series_into_one_file(self, assembled) -> None:
-        out_dir, manifest = assembled
-        entry = manifest["models"][ANIMA_TURBO_MODEL_NAME]["weights"]["transformer"]
-        f16_extra = entry["f16"]["extras"]["rope_base"]
-        i8_extra = entry["i8"]["extras"]["rope_base"]
-        assert f16_extra == i8_extra
-        assert f16_extra["path"] == f"{ANIMA_TURBO_MODEL_NAME}/{OUTPUT_PATHS['rope_base']}"
-        assert (out_dir / f16_extra["path"]).read_bytes() == _PAYLOADS["rope_base"]
+    def test_every_series_carries_the_same_table_inside_its_own_container(self, assembled) -> None:
+        """rope 素表は容器の資産（ADR 0109 決定 4）— 系列ごとに 1 本入り、中身は同一。"""
+        out_dir, _ = assembled
+        placed = [
+            out_dir / ANIMA_TURBO_MODEL_NAME / OUTPUT_PATHS[f"transformer_{storage}"]
+            for storage in ("f16", "i8")
+        ]
+        assert [read_asset(path, ROPE_BASE_ASSET) for path in placed] == [_ROPE_BASE] * 2
+
+    def test_a_series_without_the_asset_fails_in_the_assembly_vocabulary(
+        self, tmp_path: Path
+    ) -> None:
+        """`rope_base` を持たない系列を transformer 席へ指した運用事故（静的系列の取り違え）。
+
+        MUST: 診断は `DistError`（組み立ての語彙）— 読み手側の例外をそのまま上げると、
+        組み立ての失敗が「容器読みの不具合」に見える（`assert_storage` が
+        `ContainerFormatError` を翻訳しているのと同じ流儀）。
+        """
+        sources = _build_series(tmp_path / "series")
+        replace_component(
+            sources.transformer["i8"] / "transformer" / "model.krm",
+            _weights_container("transformer-i8", "i8"),
+        )
+
+        with pytest.raises(DistError, match=r"資産 'rope_base' が無い"):
+            _assemble_anima(sources, tmp_path / "models" / ANIMA_TURBO_MODEL_NAME)
 
     def test_it_refuses_to_pick_a_side_when_the_series_disagree(self, tmp_path: Path) -> None:
         sources = _build_series(tmp_path / "series", i8_rope=b"rope-base-table-DIFFERENT")
@@ -817,16 +822,16 @@ class TestCalibProvenance:
 
 
 class TestStorageGate:
-    """格納 dtype の門（実測の事故が根拠 — `--dtype` 付け忘れの素 F32 は PNG 門まで沈黙した）。"""
+    """格納の門（実測の事故が根拠 — `--dtype` 付け忘れの素 f32 は PNG 門まで沈黙した）。"""
 
     def test_it_stops_when_an_f16_component_is_stored_as_raw_f32(self, tmp_path: Path) -> None:
         sources = _build_series(tmp_path / "series")
         replace_component(
-            sources.base / "text_encoder" / "model.safetensors",
-            _fake_safetensors("F32", b"text-encoder-weights"),
+            sources.base / "text_encoder" / "model.krm",
+            _weights_container("text-encoder", "f32"),
         )
         out_dir = tmp_path / "models" / ANIMA_TURBO_MODEL_NAME
-        with pytest.raises(DistError, match=r"text_encoder: .* F16 が無い"):
+        with pytest.raises(DistError, match=r"text_encoder: .* f16 が無い"):
             _assemble_anima(sources, out_dir)
         # 検査は配置の前 — 途中の配布形を 1 ファイルも残さない（rope 不一致と同じ規律）。
         assert not out_dir.exists()
@@ -834,30 +839,30 @@ class TestStorageGate:
     def test_it_stops_when_the_i8_transformer_lacks_i8_storage(self, tmp_path: Path) -> None:
         sources = _build_series(tmp_path / "series")
         replace_component(
-            sources.transformer["i8"] / "transformer" / "model.safetensors",
-            _fake_safetensors("F16", b"transformer-i8-weights"),
+            sources.transformer["i8"] / "transformer" / "model.krm",
+            _weights_container("transformer-i8", "f16", rope=_ROPE_BASE),
         )
-        with pytest.raises(DistError, match=r"transformer_i8: .* I8 が無い"):
+        with pytest.raises(DistError, match=r"transformer_i8: .* i8 が無い"):
             _assemble_anima(sources, tmp_path / "models" / ANIMA_TURBO_MODEL_NAME)
 
     def test_it_stops_when_the_i4_transformer_lacks_i4_storage(self, tmp_path: Path) -> None:
-        """i4 席へ i8 系列が入る取り違え — 要求が I8 のままだと素通りして沈黙する。
+        """i4 席へ i8 系列が入る取り違え — 要求が i8 のままだと素通りして沈黙する。
 
         席は配布から降りたが要求表（`STORAGE_REQUIREMENTS`）には残っているので、注入した
         席で門を守る（{@link _i4_seat}）。
         """
         sources = _build_series(tmp_path / "series", with_i4=True)
         replace_component(
-            sources.transformer["i4"] / "transformer" / "model.safetensors",
-            _fake_safetensors("I8", b"transformer-i4-weights"),
+            sources.transformer["i4"] / "transformer" / "model.krm",
+            _weights_container("transformer-i4", "i8", rope=_ROPE_BASE),
         )
-        with pytest.raises(DistError, match=r"transformer_i4: .* I4 が無い"):
+        with pytest.raises(DistError, match=r"transformer_i4: .* i4 が無い"):
             _assemble_anima(sources, tmp_path / "models" / "i4-seat", spec=_i4_seat())
 
     def test_it_stops_when_the_i4_series_lands_in_the_i8_seat(self, tmp_path: Path) -> None:
         """逆向きの取り違え（i4 系列 → i8 席）— 存在検査だけでは**素通りする**。
 
-        i4 系列は混成で既定格納が i8 なので必ず I8 を含み、「I8 を含む」を満たしてしまう。
+        i4 系列は混成で既定格納が i8 なので必ず i8 を含み、「i8 を含む」を満たしてしまう。
         既定 quant `f16+dit8-a8-attn8-s16` が i4 常駐を掴むと、`c285f97` 以降の `a8` の述語は
         i4 も受ける
         （ADR 0076）ので fail loudly せず w4a8 の数値契約で走る — ADR 0076 決定 6 が席に
@@ -866,10 +871,10 @@ class TestStorageGate:
         """
         sources = _build_series(tmp_path / "series")
         replace_component(
-            sources.transformer["i8"] / "transformer" / "model.safetensors",
-            _mixed_safetensors(("I4", "I8", "F32"), b"transformer-i4-weights"),
+            sources.transformer["i8"] / "transformer" / "model.krm",
+            _weights_container("transformer-i4", "i4", rope=_ROPE_BASE),
         )
-        with pytest.raises(DistError, match=r"transformer_i8: .* I4 がある"):
+        with pytest.raises(DistError, match=r"transformer_i8: .* i4 がある"):
             _assemble_anima(sources, tmp_path / "models" / ANIMA_TURBO_MODEL_NAME)
 
     def test_no_transformer_series_slips_into_another_series_seat(self) -> None:
@@ -878,11 +883,11 @@ class TestStorageGate:
         席が増えた日に片方の表だけ更新されると、網から漏れた組み合わせが黙って配布形に並ぶ
         （系列 root の取り違えは数値の門では原理的に検出できない — ADR 0027 / 0029）。
         """
-        #: 系列 → そのヘッダが**必ず含む**格納 dtype（i4 は混成で既定格納が i8 なので I8 も含む）。
+        #: 系列 → その束縛表が**必ず含む**格納の語彙（i4 は混成で既定格納が i8 なので i8 も含む）。
         headers = {
-            "transformer_f16": {"F32", "F16"},
-            "transformer_i8": {"F32", "I8"},
-            "transformer_i4": {"F32", "I8", "I4"},
+            "transformer_f16": {"f32", "f16"},
+            "transformer_i8": {"f32", "i8"},
+            "transformer_i4": {"f32", "i8", "i4"},
         }
         # MUST: 列挙元を production の表へ縛る。ここをテスト内 dict のままにすると、4 本目の
         # 系列が `STORAGE_REQUIREMENTS` に生えて `headers` に足されなかったとき、docstring が
@@ -906,17 +911,21 @@ class TestStorageGate:
         呼びが外れた瞬間に非対角が緑になって落ちる。i4 席は配布から降りたので、3 席そろった
         盤面を作るために席を注入する（{@link _i4_seat} — 表は 3 席のまま残っている）。
         """
-        # 挿し込むのは**正当な IR コンテナ**（対角は組み立てまで通るので本物が要る）。格納 dtype
-        # の集合は系列そのままで、f16 = {F32, F16} / i8 = {F32, I8} / i4 = {F32, I8, I4}。
+        # 挿し込むのは**正当なコンテナ**（対角は組み立てまで通るので本物が要る）。格納の語彙
+        # は系列そのままで、f16 = {f32, f16} / i8 = {f32, i8} / i4 = {f32, i8, i4}。
         seats = [f"transformer_{storage}" for storage in I4_SEAT_STORAGES]
         for seat in seats:
             for series in seats:
                 sources = _build_series(tmp_path / f"series-{seat}-{series}", with_i4=True)
                 storage = seat.removeprefix("transformer_")
-                target = sources.transformer[storage] / "transformer" / "model.safetensors"
+                target = sources.transformer[storage] / "transformer" / "model.krm"
                 replace_component(
                     target,
-                    _weights_container("swapped-series", series.removeprefix("transformer_")),
+                    _weights_container(
+                        "swapped-series",
+                        series.removeprefix("transformer_"),
+                        rope=_ROPE_BASE,
+                    ),
                 )
                 out_dir = tmp_path / "models" / f"{seat}-{series}"
 
@@ -927,10 +936,10 @@ class TestStorageGate:
                     with pytest.raises(DistError):
                         _assemble_anima(sources, out_dir, spec=_i4_seat())
 
-    def test_it_stops_when_a_header_is_not_safetensors(self, tmp_path: Path) -> None:
+    def test_it_stops_when_the_component_is_not_a_container(self, tmp_path: Path) -> None:
         sources = _build_series(tmp_path / "series")
-        replace_component(sources.base / "vae_decoder" / "model.safetensors", b"not-a-safetensors")
-        with pytest.raises(DistError, match="ヘッダが読めない"):
+        replace_component(sources.base / "vae_decoder" / "model.krm", b"not-a-container")
+        with pytest.raises(DistError, match="コンテナとして読めない"):
             _assemble_anima(sources, tmp_path / "models" / ANIMA_TURBO_MODEL_NAME)
 
 
@@ -981,7 +990,8 @@ class TestManifest:
         for name, entry in weights.items():
             assert sorted(entry) == sorted(declared[name]), name
             for files in entry.values():
-                assert sorted(files) in (["shards"], ["extras", "shards"])
+                assert sorted(files) == ["container"]
+                assert sorted(files["container"]) == ["descriptor", "parts"]
 
     def test_the_unconditional_files_live_in_assets(self, assembled) -> None:
         _, manifest = assembled
@@ -992,11 +1002,11 @@ class TestManifest:
 
     def test_it_derives_size_and_sha256_from_the_placed_files(self, assembled) -> None:
         out_dir, manifest = assembled
-        shards = manifest["models"][ANIMA_TURBO_MODEL_NAME]["weights"]["text_encoder"]["f16"][
-            "shards"
-        ]
-        # 3 点セットは shard 1 本ずつに掛かる（列のどこかだけ古い、を作れない）。
-        for ref, payload in zip(shards, _PAYLOADS["text_encoder"], strict=True):
+        parts = manifest["models"][ANIMA_TURBO_MODEL_NAME]["weights"]["text_encoder"]["f16"][
+            "container"
+        ]["parts"]
+        # 3 点セットは part 1 本ずつに掛かる（列のどこかだけ古い、を作れない）。
+        for ref, payload in zip(parts, _PAYLOADS["text_encoder"], strict=True):
             assert ref["size"] == len(payload)
             assert ref["sha256"] == hashlib.sha256(payload).hexdigest()
             assert (out_dir / ref["path"]).read_bytes() == payload
@@ -1136,8 +1146,8 @@ class TestVerifyDist:
 
     def test_it_catches_a_file_that_no_longer_matches_its_declared_size(self, assembled) -> None:
         out_dir, _ = assembled
-        # 分割された役割は shard 1 本の破損で落ちる（列の中の 1 本も突合の対象）。
-        target = resolve_shards(out_dir / ANIMA_TURBO_MODEL_NAME / OUTPUT_PATHS["vae_decoder"])[1]
+        # 分割された役割は part 1 本の破損で落ちる（列の中の 1 本も突合の対象）。
+        target = container_parts(out_dir / ANIMA_TURBO_MODEL_NAME / OUTPUT_PATHS["vae_decoder"])[1]
         target.unlink()  # ハードリンクを外してから書く（源の系列を壊さない）
         target.write_bytes(b"shorter")
         with pytest.raises(DistError, match="size が manifest と違う"):
@@ -1242,18 +1252,6 @@ class TestVerifyDistStructure:
         with pytest.raises(DistError, match="レイアウトはモデル別サブツリー"):
             verify_dist(out_dir)
 
-    def test_it_refuses_two_references_to_one_path_that_disagree(self, assembled) -> None:
-        """同一 path の共有は合法だが、{size, sha256} の食い違いは取得層を振動させる。"""
-        out_dir, _ = assembled
-
-        def bend(manifest: dict) -> None:
-            entry = manifest["models"][ANIMA_TURBO_MODEL_NAME]["weights"]["transformer"]
-            entry["i8"]["extras"]["rope_base"]["size"] += 1
-
-        _rewrite(out_dir, bend)
-        with pytest.raises(DistError, match="食い違う"):
-            verify_dist(out_dir)
-
 
 class TestFamilyAssembly:
     """1 リポに複数モデル（ADR 0041 §2）+ 共有ファイルは `shared/` に 1 回だけ（§5）。
@@ -1284,67 +1282,67 @@ class TestFamilyAssembly:
     def test_it_places_a_byte_identical_file_once_under_shared(self, family) -> None:
         out_dir, manifest = family
         # 畳まれるのは**コンポーネント丸ごと**（shard 列がそのまま shared/ の下へ移る）。
-        shared = [f"{SHARED_DIRNAME}/{rel}" for rel in shard_paths(OUTPUT_PATHS["text_encoder"])]
+        shared = [f"{SHARED_DIRNAME}/{rel}" for rel in part_paths(OUTPUT_PATHS["text_encoder"])]
         for name in manifest["models"]:
-            refs = manifest["models"][name]["weights"]["text_encoder"]["f16"]["shards"]
+            refs = manifest["models"][name]["weights"]["text_encoder"]["f16"]["container"]["parts"]
             assert [ref["path"] for ref in refs] == shared
         for rel, payload in zip(shared, _PAYLOADS["text_encoder"], strict=True):
             assert (out_dir / rel).read_bytes() == payload
         # 各モデルのサブツリーには残らない（1 回だけ置く = 重複を配らない）。
         for name in manifest["models"]:
-            for rel in shard_paths(OUTPUT_PATHS["text_encoder"]):
+            for rel in part_paths(OUTPUT_PATHS["text_encoder"]):
                 assert not (out_dir / name / rel).exists()
 
     def test_it_keeps_the_files_that_differ_inside_each_model_subtree(self, family) -> None:
+        """重みの part はモデルごとに別物なのでサブツリーに残る。
+
+        末尾の part だけは**資産 `rope_base` の専用 part**で、rope 素表は幾何だけで決まるので
+        モデル間でバイト同一 — 畳みは part 単位なので、そこだけ `shared/` へ移る
+        （`karume/4` の `extras` が畳まれていたのと同じ事実が、part の粒度で出る）。
+        """
         out_dir, manifest = family
         paths = {
-            name: [ref["path"] for ref in entry["weights"]["transformer"]["i8"]["shards"]]
+            name: [
+                ref["path"] for ref in entry["weights"]["transformer"]["i8"]["container"]["parts"]
+            ]
             for name, entry in manifest["models"].items()
         }
+        numbered = part_paths(OUTPUT_PATHS["transformer_i8"], _TRANSFORMER_PARTS)
         assert paths == {
-            name: [f"{name}/{rel}" for rel in shard_paths(OUTPUT_PATHS["transformer_i8"])]
+            name: [
+                *(f"{name}/{rel}" for rel in numbered[:-1]),
+                f"{SHARED_DIRNAME}/{numbered[-1]}",
+            ]
             for name in FAMILY_MODELS
         }
-        assert [(out_dir / rel).read_bytes() for rel in paths[FAMILY_MODELS[0]]] != [
-            (out_dir / rel).read_bytes() for rel in paths[FAMILY_MODELS[1]]
+        assert [(out_dir / rel).read_bytes() for rel in paths[FAMILY_MODELS[0]][:-1]] != [
+            (out_dir / rel).read_bytes() for rel in paths[FAMILY_MODELS[1]][:-1]
         ]
 
     def test_the_shared_and_the_private_files_together_cover_the_tree(self, family) -> None:
         out_dir, _ = family
-        # rope 素表は幾何だけで決まるのでモデル間でもバイト同一 — 付帯資産（extras）も
-        # 同じ規則で畳まれる。
+        # rope 素表は transformer の容器の中なので、畳みの単位はコンポーネント丸ごとのまま。
         shared_roles = (
             "text_encoder",
             "text_conditioner",
             "vae_decoder",
             "tokenizer",
             "tokenizer_2",
-            "rope_base",
         )
-        # weights の席は shard 連番へ展開される（ADR 0081）— 畳む単位はコンポーネント丸ごと。
+        # weights の席は part 連番へ展開される（container-v1 §8）。
         expected = [
             f"{SHARED_DIRNAME}/{rel}"
             for rel in placed_paths(
-                {role: OUTPUT_PATHS[role] for role in shared_roles}, ANIMA_WEIGHTS
+                {role: OUTPUT_PATHS[role] for role in shared_roles}, ANIMA_WEIGHTS, _PART_TOTALS
             )
         ]
-        expected += [
-            f"{model}/{rel}"
-            for model in FAMILY_MODELS
-            for storage in anima_model(model).storages
-            for rel in shard_paths(OUTPUT_PATHS[f"transformer_{storage}"])
-        ]
-        assert _present(out_dir) == sorted([*expected, MANIFEST_FILENAME])
-
-    def test_a_shared_extra_is_referenced_from_every_dtype_of_every_model(self, family) -> None:
-        """付帯資産（extras）も同じ規則で畳まれる — 参照側は 4 箇所とも同じ path を書く。"""
-        _, manifest = family
-        paths = {
-            entry["extras"]["rope_base"]["path"]
-            for model in manifest["models"].values()
-            for entry in model["weights"]["transformer"].values()
-        }
-        assert paths == {f"{SHARED_DIRNAME}/{OUTPUT_PATHS['rope_base']}"}
+        # 重みの part はモデルごと・末尾の資産 part（rope 素表）だけがモデル間で畳まれる。
+        for model in FAMILY_MODELS:
+            for storage in anima_model(model).storages:
+                numbered = part_paths(OUTPUT_PATHS[f"transformer_{storage}"], _TRANSFORMER_PARTS)
+                expected += [f"{model}/{rel}" for rel in numbered[:-1]]
+                expected.append(f"{SHARED_DIRNAME}/{numbered[-1]}")
+        assert _present(out_dir) == sorted(set(expected) | {MANIFEST_FILENAME})
 
     def test_it_leaves_no_empty_directory_behind_after_folding(self, family) -> None:
         out_dir, _ = family
@@ -1355,11 +1353,30 @@ class TestFamilyAssembly:
         ]
         assert empty == []
 
+    def test_it_refuses_two_references_to_one_path_that_disagree(self, family) -> None:
+        """同一 path の共有は合法だが、{size, sha256} の食い違いは取得層を振動させる。
+
+        共有が起きるのは family 側（rope 素表の専用 part が 2 モデルで畳まれる席）で、曲げる
+        のは **part 0 以外** — part 0 の size は「ヘッダ + 2 文書」から決まるので、
+        {@link karume.dist.assert_container_limits} が先に落ちて path の突合まで届かない。
+        """
+        out_dir, _ = family
+
+        def bend(manifest: dict) -> None:
+            entry = manifest["models"][FAMILY_MODELS[0]]["weights"]["transformer"]["i8"]
+            entry["container"]["parts"][-1]["size"] += 1
+
+        _rewrite(out_dir, bend)
+        with pytest.raises(DistError, match="食い違う"):
+            verify_dist(out_dir)
+
     def test_the_assembled_family_verifies(self, family) -> None:
         out_dir, manifest = family
         declared = verify_dist(out_dir)
-        # 共有ぶんは 1 本に畳まれるので、宣言 path は「モデル数 × 役割数」より少ない。
-        assert len(declared) < len(OUTPUT_PATHS) * len(manifest["models"])
+        # 共有ぶんは 1 本に畳まれるので、宣言 path は「モデル数 × 1 モデルぶんの part 数」
+        # より少ない。
+        per_model = len(placed_paths(OUTPUT_PATHS, ANIMA_WEIGHTS, _PART_TOTALS))
+        assert len(declared) < per_model * len(manifest["models"])
 
     def test_it_reassembles_a_family_over_a_previous_run(self, tmp_path: Path) -> None:
         """畳んだ後の木をもう一度組んでも落ちない（`shared/` の既存ファイルを踏み直す経路）。"""
@@ -1430,7 +1447,7 @@ class TestAtomicReplacement:
             [anima_plan(sources, ANIMA_TURBO_MODEL_NAME)],
             out_dir,
             ANIMA_TURBO_MODEL_NAME,
-            render_card=lambda manifest: f"{manifest['defaultModel']}\n",
+            render_card=lambda manifest, host_assets: f"{manifest['defaultModel']}\n",
         )
         card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
         assert card == f"{ANIMA_TURBO_MODEL_NAME}\n"
@@ -1531,11 +1548,10 @@ class TestModelCard:
         selected = {ref["path"] for ref in model["assets"].values()}
         for role, label in model["quants"][ANIMA_DEFAULT_QUANT]["weights"].items():
             entry = model["weights"][role][label]
-            selected |= {ref["path"] for ref in entry["shards"]}
-            selected |= {ref["path"] for ref in entry.get("extras", {}).values()}
+            selected |= {ref["path"] for ref in entry["container"]["parts"]}
         total = sum((out_dir / path).stat().st_size for path in selected)
 
-        # 表の廃止で shard 1 本ずつの path も size も出なくなった（読み手が知るのは合計）。
+        # 表の廃止で part 1 本ずつの path も size も出なくなった（読み手が知るのは合計）。
         for rel_path in _in_subtree(ANIMA_TURBO_MODEL_NAME):
             assert f"`{rel_path}`" not in card
         row = next(

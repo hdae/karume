@@ -27,10 +27,13 @@ from pathlib import Path
 
 import pytest
 import torch
+from container_series import write_component
+from ir_fixtures import ir_container
 from safetensors import safe_open
 from torch import nn
 from torch.export import Dim
 
+from _shared.container_read import read_asset, read_asset_declarations
 from gemma4 import export as gx
 from gemma4 import export_decode as decode
 from gemma4 import export_product as product
@@ -40,18 +43,20 @@ from gemma4.tests.test_export import HIDDEN, PLE_DIM, TINY_SYM_MAX, VOCAB, WINDO
 from gemma4.tests.test_export_decode import (
     DECODE_LAYER_TYPES,
     OWNER_LAYERS,
-    TINY_CONTAINER_FILES,
     _tiny_decode_config,
 )
+from karume.container import container_parts
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION
 from karume.pipeline import export_module
+from karume.ple import PLE_INDEX_ASSET, PleError, ple_block_ranges, ple_row_bytes
 from karume.quantize import quantize_to_int8
-from karume.shards import SHARD_DATA_CAPACITY
 from karume.states import to_states_form
 
-#: tiny 系列で **2 本以上**の sidecar を作らせる容量（実物は既定の容量で 9 本 — 1 本しか
-#: 出ない容量で driver を回すと、連番・索引・probe の shard 跨ぎが 1 度も踏まれない）。
-TINY_PLE_LIMIT = product.ple_token_bytes(len(DECODE_LAYER_TYPES), PLE_DIM) * (VOCAB // 2)
+#: tiny 系列で **2 本以上**の block を作らせる block 上限（実物は既定の 32 MiB で 9 本 —
+#: 1 本しか出ない上限で driver を回すと、block 列・索引・probe の block 跨ぎが 1 度も踏まれない）。
+TINY_PLE_BLOCK = ple_row_bytes(product.PLE_STORAGE, len(DECODE_LAYER_TYPES), PLE_DIM)[
+    product.PLE_VALUES_KEY
+] * (VOCAB // 2)
 
 #: 系列の要約の欄（順序込み）。ここが変わると実走の記録の形が変わる。
 PRODUCT_SUMMARY_KEYS = [
@@ -61,7 +66,7 @@ PRODUCT_SUMMARY_KEYS = [
     "initializers",
     "model_bytes",
     "ple_bytes",
-    "ple_shards",
+    "ple_blocks",
     "ple_probe_tokens",
     "ops",
     "symbols",
@@ -85,46 +90,42 @@ class TestPleTokenBytes:
         assert product.ple_token_bytes(35, 256) == 9100
 
 
-class TestPlanPleShards:
+class TestPleBlockRanges:
+    """block の切り方は core（{@link karume.ple.ple_block_ranges}）が持つ — ここは使い方の門。"""
+
+    @staticmethod
+    def _values(tokens: int, layers: int, dim: int, block_bytes: int):
+        return ple_block_ranges(
+            storage=product.PLE_STORAGE,
+            tokens=tokens,
+            layers=layers,
+            dim=dim,
+            block_bytes=block_bytes,
+        )[product.PLE_VALUES_KEY]
+
     def test_it_covers_the_vocabulary_without_gaps_or_overlaps(self):
-        ranges = product.plan_ple_shards(1000, 10, limit=4000)
+        ranges = self._values(1000, 1, 8, 4000)
 
         assert ranges[0][0] == 0
         assert ranges[-1][1] == 1000
         for previous, following in pairwise(ranges):
             assert previous[1] == following[0]
 
-    def test_it_takes_the_minimum_count_under_the_limit(self):
-        """上限 4000 バイト = 400 token/本 なので 1000 token は 3 本ちょうど。"""
-        ranges = product.plan_ple_shards(1000, 10, limit=4000)
+    def test_it_fills_every_block_to_the_limit(self):
+        """block は**行の倍数**で上限まで詰める（1 行 8 バイト・上限 4000 → 500 行/本）。"""
+        rows = [stop - start for start, stop in self._values(1000, 1, 8, 4000)]
 
-        assert len(ranges) == 3
+        assert rows == [500, 500]
 
-    def test_it_evens_the_rows_instead_of_leaving_a_remainder_shard(self):
-        """k を先に決めてから均す（ADR 0081 の書き手ポリシーと同型 — 端数 shard を作らない）。"""
-        rows = [stop - start for start, stop in product.plan_ple_shards(1000, 10, limit=4000)]
+    def test_every_block_stays_under_the_limit(self):
+        row = ple_row_bytes(product.PLE_STORAGE, 35, 256)[product.PLE_VALUES_KEY]
+        for start, stop in self._values(262144, 35, 256, 32 * 1024 * 1024):
+            assert (stop - start) * row <= 32 * 1024 * 1024
 
-        assert rows == [334, 333, 333]
-
-    def test_every_shard_stays_under_the_limit(self):
-        for start, stop in product.plan_ple_shards(262144, 9100):
-            assert (stop - start) * 9100 <= SHARD_DATA_CAPACITY
-
-    def test_the_real_model_lands_on_nine_shards(self):
-        """実物の見込み（262,144 token × 9,100B = 2,275MiB → 既定の容量で 9 本）。
-
-        既定は書き手の容量（{@link karume.shards.SHARD_DATA_CAPACITY}）— 受理上限が
-        ファイル長で測る値になったので、sidecar もヘッダぶんを空けた容量で切る。
-        """
-        ranges = product.plan_ple_shards(262144, 9100)
-
-        assert len(ranges) == 9
-        assert ranges[-1][1] == 262144
-
-    def test_a_single_token_over_the_limit_fails_loudly(self):
+    def test_a_single_row_over_the_limit_fails_loudly(self):
         """分割の粒度がこれ以上細かくできない形（黙って上限を破らない）。"""
-        with pytest.raises(ValueError, match="shard 上限"):
-            product.plan_ple_shards(4, 4096, limit=1024)
+        with pytest.raises(PleError, match="block 上限"):
+            self._values(4, 1, 4096, 1024)
 
 
 class TestPleTableRows:
@@ -149,8 +150,14 @@ class TestPleTableRows:
 
 
 class TestPleProbeTokens:
-    def test_it_touches_both_sides_of_every_shard_boundary(self):
-        ranges = product.plan_ple_shards(1000, 10, limit=4000)
+    @staticmethod
+    def _ranges():
+        return ple_block_ranges(
+            storage=product.PLE_STORAGE, tokens=1000, layers=1, dim=8, block_bytes=4000
+        )[product.PLE_VALUES_KEY]
+
+    def test_it_touches_both_sides_of_every_block_boundary(self):
+        ranges = self._ranges()
 
         probe = product.ple_probe_tokens(1000, ranges)
 
@@ -159,7 +166,7 @@ class TestPleProbeTokens:
             assert stop - 1 in probe
 
     def test_it_is_sorted_unique_and_inside_the_vocabulary(self):
-        ranges = product.plan_ple_shards(1000, 10, limit=4000)
+        ranges = self._ranges()
 
         probe = product.ple_probe_tokens(1000, ranges)
 
@@ -217,90 +224,153 @@ class TestQuantizedPleTables:
 
 
 @pytest.fixture
-def tiny_sidecar(tiny_tables, tmp_path):
-    """tiny な sidecar を 2 本以上へ割って書き、`(索引, probe, 参照)` を返す。"""
+def tiny_ple(tiny_tables, tmp_path):
+    """tiny な PLE を 2 block 以上へ割って容器へ据え、`(容器 path, 索引, probe, 参照)` を返す。"""
     scales = _quantize_tables(tiny_tables)
     layers = len(DECODE_LAYER_TYPES)
     embed_scale = float(PLE_DIM) ** 0.5
-    ranges = product.plan_ple_shards(
-        VOCAB, product.ple_token_bytes(layers, PLE_DIM), limit=TINY_PLE_LIMIT
-    )
-    assert len(ranges) > 1, "tiny 系列でも shard 跨ぎを踏ませる"
+    ranges = ple_block_ranges(
+        storage=product.PLE_STORAGE,
+        tokens=VOCAB,
+        layers=layers,
+        dim=PLE_DIM,
+        block_bytes=TINY_PLE_BLOCK,
+    )[product.PLE_VALUES_KEY]
+    assert len(ranges) > 1, "tiny 系列でも block 跨ぎを踏ませる"
     probe = product.ple_probe_tokens(VOCAB, ranges)
     with torch.no_grad():
         reference = ple.per_layer_inputs(
             tiny_tables, torch.tensor([list(probe)], dtype=torch.int64), embed_scale
         )
     values, row_scales = product.quantized_ple_tables(tiny_tables, scales)
-    index = product.ple_index(VOCAB, layers, PLE_DIM, embed_scale)
-    index["shards"] = product.write_ple_shards(values, row_scales, ranges, tmp_path, index)
-    return index, probe, reference
+    spill_dir = tmp_path / "staging"
+    spill_dir.mkdir()
+    built = product.ple_container_assets(
+        values,
+        row_scales,
+        tokens=VOCAB,
+        layers=layers,
+        dim=PLE_DIM,
+        embed_scale=embed_scale,
+        spill_dir=spill_dir,
+        block_bytes=TINY_PLE_BLOCK,
+    )
+    # 実物と同じ順序 — 一時ファイルへ落とした直後に i8 実体を手放す（export 中に持たない）。
+    values.clear()
+    row_scales.clear()
+    container = tmp_path / "model.krm"
+    write_component(container, ir_container(mark="ple-probe", assets=built.assets))
+    index = json.loads(bytes(built.assets[PLE_INDEX_ASSET].payload))
+    return container, index, probe, reference, built
 
 
-class TestAssertPleSidecar:
-    def test_the_written_bytes_rebuild_the_table_major_path_bit_for_bit(
-        self, tiny_sidecar, tmp_path
-    ):
-        index, probe, reference = tiny_sidecar
+class TestThePleSpill:
+    """PLE の実体は**作業席の一時ファイル**へ 1 度だけ落ち、据え替えの前に消える。
 
-        product.assert_ple_sidecar(tmp_path, index, probe, reference)
+    遅延読み口がメモリ上の 35 表を掴んだままだと、i8 の実体（E2B で約 2.35 GB）が
+    `torch.export` と変換の間ずっと常駐する（台本の RAM 予算は README の 24GB）。落として
+    しまえば呼び手は `values.clear()` を export の**前**へ戻せる。
+    """
 
-    def test_the_shards_are_token_major_with_per_row_scales(self, tiny_sidecar, tmp_path):
-        """配布形そのもの（ADR 0085 決定 1）— `[token][layer][dim]` i8 + `[token][layer]` f32。"""
-        index, _, _ = tiny_sidecar
+    def test_the_payload_lands_in_the_working_seat(self, tiny_ple) -> None:
+        *_, built = tiny_ple
+        layers = len(DECODE_LAYER_TYPES)
 
-        shard = index["shards"][0]
-        with safe_open(str(tmp_path / shard["file"]), framework="pt") as handle:
-            rows = shard["stop"] - shard["start"]
-            assert handle.get_slice(product.PLE_VALUES_KEY).get_shape() == [
-                rows,
-                len(DECODE_LAYER_TYPES),
-                PLE_DIM,
-            ]
-            assert handle.get_slice(product.PLE_SCALES_KEY).get_shape() == [
-                rows,
-                len(DECODE_LAYER_TYPES),
-            ]
-            assert handle.get_slice(product.PLE_VALUES_KEY).get_dtype() == "I8"
+        assert len(built.spills) == 2
+        sizes = {path.name: path.stat().st_size for path in built.spills}
+        assert sizes == {
+            ".ple.values.spill": VOCAB * layers * PLE_DIM,
+            ".ple.scales.spill": VOCAB * layers * 4,
+        }
 
-    def test_each_shard_declares_its_own_token_range(self, tiny_sidecar, tmp_path):
-        """索引と shard の自己申告が食い違う組を読み手が落とせる形（沈黙誤値の防波堤）。"""
-        index, _, _ = tiny_sidecar
+    def test_the_assets_read_from_the_spill_after_the_tables_are_released(self, tiny_ple) -> None:
+        """35 表を手放した**後**でも資産の payload が引ける（= 実体は表ではなくファイル）。"""
+        _, index, _, _, built = tiny_ple
+        block = index[product.PLE_VALUES_KEY]["blocks"][0]
 
-        for shard in index["shards"]:
-            with safe_open(str(tmp_path / shard["file"]), framework="pt") as handle:
-                declared = json.loads(handle.metadata()[product.PLE_METADATA_KEY])
-            assert declared["start"] == shard["start"]
-            assert declared["stop"] == shard["stop"]
-            assert declared["schema"] == product.PLE_SCHEMA
-            assert declared["tokens"] == VOCAB
+        payload = built.assets[block["asset"]].payload
 
-    def test_a_layer_shifted_scale_is_detected(self, tiny_sidecar, tmp_path):
+        assert len(bytes(payload())) == built.assets[block["asset"]].length
+
+    def test_discard_removes_the_temporary_files(self, tiny_ple) -> None:
+        """MUST: 据え替えの前に消す（作業席ごと据わるので、残すと配布物に混ざる）。"""
+        _, _, _, _, built = tiny_ple
+
+        built.discard()
+
+        assert [path for path in built.spills if path.exists()] == []
+
+
+class TestAssertPleAssets:
+    def test_the_written_bytes_rebuild_the_table_major_path_bit_for_bit(self, tiny_ple):
+        container, index, probe, reference, _ = tiny_ple
+
+        product.assert_ple_assets(container, index, probe, reference)
+
+    def test_the_blocks_are_token_major_with_per_row_scales(self, tiny_ple):
+        """配布形そのもの（ADR 0085 決定 1）— 1 行 = `layer × dim` の i8 + `layer` 本の f32。"""
+        container, index, _, _, _ = tiny_ple
+        layers = len(DECODE_LAYER_TYPES)
+
+        assert index["storage"] == product.PLE_STORAGE
+        assert index[product.PLE_VALUES_KEY]["rowBytes"] == layers * PLE_DIM
+        assert index[product.PLE_SCALES_KEY]["rowBytes"] == layers * 4
+        declared = read_asset_declarations(container)
+        for key in (product.PLE_VALUES_KEY, product.PLE_SCALES_KEY):
+            table = index[key]
+            for block in table["blocks"]:
+                rows = block["stop"] - block["start"]
+                assert declared[block["asset"]][1] == rows * table["rowBytes"]
+
+    def test_every_block_lands_in_a_part_of_its_own(self, tiny_ple):
+        """区間読みを要する block は**専用 part に単独**（container-v1 §4.2）。"""
+        container, index, _, _, _ = tiny_ple
+        blocks = sum(len(index[key]["blocks"]) for key in ("values", "scales"))
+
+        # 重みの part + 索引の part に加えて、block 1 本につき part が 1 つ増える。
+        assert len(container_parts(container)) > blocks
+
+    def test_a_layer_shifted_scale_is_detected(self, tiny_ple):
         """MUST: scale の層ずれは形も型も dtype も合う（`torch.equal` でしか捕まらない）。"""
-        index, probe, reference = tiny_sidecar
+        container, index, probe, reference, _ = tiny_ple
         shifted = reference.clone()
         shifted[0, :, 0] = reference[0, :, 1]
 
         with pytest.raises(AssertionError, match="ビット一致しない"):
-            product.assert_ple_sidecar(tmp_path, index, probe, shifted)
+            product.assert_ple_assets(container, index, probe, shifted)
 
-    def test_an_off_by_one_token_range_is_detected(self, tiny_sidecar, tmp_path):
+    def test_an_off_by_one_token_range_is_detected(self, tiny_ple):
         """範囲を 1 行ずらすと**別 token の有効な行**が出る（ADR 0085 決定 5 の沈黙誤値）。"""
-        index, probe, reference = tiny_sidecar
-        moved = dict(index)
-        moved["shards"] = [{**shard, "start": shard["start"] + 1} for shard in index["shards"]]
+        container, index, probe, reference, _ = tiny_ple
+        moved = {
+            **index,
+            **{
+                key: {
+                    **index[key],
+                    "blocks": [
+                        {**block, "start": block["start"] + 1} for block in index[key]["blocks"]
+                    ],
+                }
+                for key in ("values", "scales")
+            },
+        }
 
         with pytest.raises(AssertionError):
-            product.assert_ple_sidecar(tmp_path, moved, probe, reference)
+            product.assert_ple_assets(container, moved, probe, reference)
 
-    def test_a_probe_outside_every_range_is_detected(self, tiny_sidecar, tmp_path):
+    def test_a_probe_outside_every_range_is_detected(self, tiny_ple):
         """索引が vocab を覆っていない形（probe が無検査で素通りしない）。"""
-        index, probe, reference = tiny_sidecar
-        truncated = dict(index)
-        truncated["shards"] = index["shards"][:-1]
+        container, index, probe, reference, _ = tiny_ple
+        truncated = {
+            **index,
+            **{
+                key: {**index[key], "blocks": index[key]["blocks"][:-1]}
+                for key in ("values", "scales")
+            },
+        }
 
         with pytest.raises(AssertionError, match="覆っていない"):
-            product.assert_ple_sidecar(tmp_path, truncated, probe, reference)
+            product.assert_ple_assets(container, truncated, probe, reference)
 
 
 # ---- eager 同値 ------------------------------------------------------------
@@ -499,6 +569,7 @@ class TestExportedProductForm:
             surgical,
             tensors,
             tmp_path / gx.MODEL_FILE,
+            graph_name="tiny",
             weight_dtype="i8",
             weight_scales=scales,
             weight_dtype_overrides=dict.fromkeys(int4.scales, "i4"),
@@ -723,10 +794,16 @@ def tiny_product_series(monkeypatch, tmp_path_factory):
         )
     monkeypatch.setattr(gx, "build_cases", lambda model_dir, sym_max, window: cases)
     monkeypatch.setattr(gx, "load_tokenizer", lambda model_dir: _StubSeriesTokenizer())
+    # tiny 系列でも PLE を 2 block 以上へ割らせる（block 跨ぎを 1 度は踏む）。
     monkeypatch.setattr(
         product,
-        "plan_ple_shards",
-        functools.partial(product.plan_ple_shards, limit=TINY_PLE_LIMIT),
+        "ple_block_ranges",
+        functools.partial(ple_block_ranges, block_bytes=TINY_PLE_BLOCK),
+    )
+    monkeypatch.setattr(
+        product,
+        "ple_container_assets",
+        functools.partial(product.ple_container_assets, block_bytes=TINY_PLE_BLOCK),
     )
     seen: dict[str, dict[str, int]] = {}
 
@@ -739,7 +816,7 @@ def tiny_product_series(monkeypatch, tmp_path_factory):
 
 
 class TestExportSeries:
-    def test_it_publishes_the_container_the_sidecar_and_the_provenance(
+    def test_it_publishes_the_container_the_probe_and_the_provenance(
         self, tiny_product_series, tmp_path
     ):
         cases, checkpoint, reference, seen = tiny_product_series
@@ -752,15 +829,13 @@ class TestExportSeries:
             reference=reference,
         )
 
-        shards = [str(shard["file"]) for shard in summary["ple_shards"]]
-        assert len(shards) > 1, "tiny 系列でも sidecar の連番を踏ませる"
+        assert summary["ple_blocks"][product.PLE_VALUES_KEY] > 1, "block 跨ぎを踏ませる"
+        # PLE は容器の資産なので、系列には独立したファイルとして現れない。
         assert sorted(path.name for path in out_dir.iterdir()) == sorted(
             [
-                product.PLE_INDEX_FILE,
                 product.PLE_PROBE_FILE,
                 provenance_file(),
-                *shards,
-                *TINY_CONTAINER_FILES,
+                *_container_files(out_dir),
             ]
         )
         assert list(summary) == PRODUCT_SUMMARY_KEYS
@@ -769,7 +844,7 @@ class TestExportSeries:
         # 作業席も退避席も残らない（据え替えの後片付けは core の原語の担当）。
         assert list(tmp_path.iterdir()) == [out_dir]
 
-    def test_the_index_describes_every_shard_and_the_dequantization(
+    def test_the_index_describes_every_block_and_the_dequantization(
         self, tiny_product_series, tmp_path
     ):
         _, checkpoint, reference, _ = tiny_product_series
@@ -782,16 +857,17 @@ class TestExportSeries:
             reference=reference,
         )
 
-        index = json.loads((out_dir / product.PLE_INDEX_FILE).read_text(encoding="utf-8"))
-        assert index["schema"] == product.PLE_SCHEMA
+        index = _published_index(out_dir)
+        assert index["storage"] == product.PLE_STORAGE
         assert index["tokens"] == VOCAB
         assert index["layers"] == len(DECODE_LAYER_TYPES)
         assert index["dim"] == PLE_DIM
         assert index["embedScale"] == pytest.approx(float(PLE_DIM) ** 0.5)
-        assert index["shards"][0]["start"] == 0
-        assert index["shards"][-1]["stop"] == VOCAB
+        blocks = index[product.PLE_VALUES_KEY]["blocks"]
+        assert blocks[0]["start"] == 0
+        assert blocks[-1]["stop"] == VOCAB
 
-    def test_the_probe_reference_matches_the_written_sidecar(self, tiny_product_series, tmp_path):
+    def test_the_probe_reference_matches_the_published_assets(self, tiny_product_series, tmp_path):
         """据えた資産だけで逆量子化ビット一致が言えること（TS 側の門が読む 2 本の対）。"""
         _, checkpoint, reference, _ = tiny_product_series
         out_dir = tmp_path / "series"
@@ -803,12 +879,14 @@ class TestExportSeries:
             reference=reference,
         )
 
-        index = json.loads((out_dir / product.PLE_INDEX_FILE).read_text(encoding="utf-8"))
+        index = _published_index(out_dir)
         with safe_open(str(out_dir / product.PLE_PROBE_FILE), framework="pt") as handle:
             probe = handle.get_tensor(product.PROBE_TOKENS_KEY)
             expected = handle.get_tensor(product.PROBE_INPUTS_KEY)
 
-        product.assert_ple_sidecar(out_dir, index, [int(token) for token in probe], expected)
+        product.assert_ple_assets(
+            out_dir / gx.MODEL_FILE, index, [int(token) for token in probe], expected
+        )
 
     def test_a_stale_reference_series_is_rejected_before_the_export(
         self, tiny_product_series, tmp_path
@@ -834,7 +912,17 @@ def provenance_file() -> str:
     return provenance.REFERENCE_FILE
 
 
-def test_the_quantized_values_survive_a_round_trip_through_the_shards(tiny_tables, tmp_path):
+def _container_files(out_dir: Path) -> list[str]:
+    """据わったコンテナの part ファイル名（本数は書いたバイト数が決める）。"""
+    return [path.name for path in container_parts(out_dir / gx.MODEL_FILE)]
+
+
+def _published_index(out_dir: Path) -> dict:
+    """据えた容器の資産 `ple_index` を読む（配布形そのものから引く）。"""
+    return json.loads(read_asset(out_dir / gx.MODEL_FILE, PLE_INDEX_ASSET))
+
+
+def test_the_quantized_values_survive_a_round_trip_through_the_blocks(tiny_tables, tmp_path):
     """全 token・全層の再配置が i8 のバイト列として保たれること（probe の外側も見る）。"""
     scales = _quantize_tables(tiny_tables)
     layers = len(DECODE_LAYER_TYPES)
@@ -843,17 +931,31 @@ def test_the_quantized_values_survive_a_round_trip_through_the_shards(tiny_table
         for index, table in enumerate(tiny_tables)
     ]
     values, row_scales = product.quantized_ple_tables(tiny_tables, scales)
-    ranges = product.plan_ple_shards(
-        VOCAB, product.ple_token_bytes(layers, PLE_DIM), limit=TINY_PLE_LIMIT
+    spill_dir = tmp_path / "staging"
+    spill_dir.mkdir()
+    built = product.ple_container_assets(
+        values,
+        row_scales,
+        tokens=VOCAB,
+        layers=layers,
+        dim=PLE_DIM,
+        embed_scale=float(PLE_DIM) ** 0.5,
+        spill_dir=spill_dir,
+        block_bytes=TINY_PLE_BLOCK,
     )
-    index = product.ple_index(VOCAB, layers, PLE_DIM, float(PLE_DIM) ** 0.5)
-    index["shards"] = product.write_ple_shards(values, row_scales, ranges, tmp_path, index)
+    values.clear()
+    row_scales.clear()
+    container = tmp_path / "model.krm"
+    write_component(container, ir_container(mark="ple-roundtrip", assets=built.assets))
+    index = json.loads(bytes(built.assets[PLE_INDEX_ASSET].payload))
 
-    for shard in index["shards"]:
-        with safe_open(str(tmp_path / shard["file"]), framework="pt") as handle:
-            block = handle.get_tensor(product.PLE_VALUES_KEY)
-        start, stop = shard["start"], shard["stop"]
+    for block in index[product.PLE_VALUES_KEY]["blocks"]:
+        start, stop = block["start"], block["stop"]
+        raw = read_asset(container, str(block["asset"]))
+        rows = torch.frombuffer(bytearray(raw), dtype=torch.int8).reshape(
+            stop - start, layers, PLE_DIM
+        )
         for layer in range(layers):
-            assert torch.equal(block[:, layer], expected[layer][start:stop]), (
-                f"shard {shard['file']} の層 {layer}"
+            assert torch.equal(rows[:, layer], expected[layer][start:stop]), (
+                f"block {block['asset']} の層 {layer}"
             )

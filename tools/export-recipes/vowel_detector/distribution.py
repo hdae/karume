@@ -130,18 +130,18 @@ VOWEL_DETECTOR_N_MELS = 80
 #: 出力の相対 path（**モデルサブツリー内**）— 配置表と manifest が共有する 1 箇所。格納 dtype を
 #: ファイル名に出すのは他ファミリと同じ形。
 VOWEL_DETECTOR_OUTPUT_PATHS: Mapping[str, str] = {
-    VOWEL_DETECTOR_GRAPH_ROLE: "model.f32.safetensors",
+    VOWEL_DETECTOR_GRAPH_ROLE: "model.f32.krm",
     VOWEL_DETECTOR_MEL_BASIS_KEY: f"features/{VOWEL_DETECTOR_MEL_BASIS_KEY}.safetensors",
 }
 
 #: 格納 dtype の要求（他ファミリと同じ根拠 — 素の資産が組み立て・ロード・実行を全て通って
-#: 参照一致の門まで沈黙した実測事故）。mel 基底はこちらが書く F32 なので載せない。
-VOWEL_DETECTOR_STORAGE_REQUIREMENTS: Mapping[str, str] = {VOWEL_DETECTOR_GRAPH_ROLE: "F32"}
+#: 参照一致の門まで沈黙した実測事故）。mel 基底はこちらが書く f32 なので載せない。
+VOWEL_DETECTOR_STORAGE_REQUIREMENTS: Mapping[str, str] = {VOWEL_DETECTOR_GRAPH_ROLE: "f32"}
 
-#: 各役割の safetensors ヘッダに**あってはならない**格納 dtype（{@link assert_storage_absent}）。
+#: 各役割の束縛表に**あってはならない**格納の語彙（{@link assert_storage_absent}）。
 #: {@link VOWEL_DETECTOR_STORAGE_REQUIREMENTS} は「要求 dtype が在るか」の片方向検査で、**圧縮
 #: 系列も適格外の重み**（bias / norm / グラフ定数・i8 の per-channel scale・i4 の group scale）を
-#: F32 で持つため「F32 を含む」は f16 / i8 / i4 の資産でも真になる — f32 席へ圧縮系列を挿し込む
+#: f32 で持つため「f32 を含む」は f16 / i8 / i4 の資産でも真になる — f32 席へ圧縮系列を挿し込む
 #: 取り違えが存在検査だけでは素通りする。
 #:
 #: この台本（`vowel_detector/export.py`）は f32 しか焼かないが、禁止表が閉じるのは**系列 root の
@@ -154,7 +154,7 @@ VOWEL_DETECTOR_STORAGE_REQUIREMENTS: Mapping[str, str] = {VOWEL_DETECTOR_GRAPH_R
 #: （anima / irodori / sbv2 と同じ規律）。I32 を載せないのは、i32 が圧縮ではなく素の格納
 #: （`karume.emit` の plain 側）で、添字表として素の系列にも普通に居るから。
 VOWEL_DETECTOR_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {
-    VOWEL_DETECTOR_GRAPH_ROLE: ("F16", "I8", "I4")
+    VOWEL_DETECTOR_GRAPH_ROLE: ("f16", "i8", "i4")
 }
 
 #: weights の宣言（dtype ラベル → 役割名）。グラフは 1 本で dtype も 1 つしかないので quant 表は
@@ -222,7 +222,7 @@ def vowel_detector_placements(sources: VowelDetectorSources) -> dict[str, Path]:
     この表に無いものは出力へ入らない（系列に並ぶ `io.*.safetensors` はこれで落ちる）。
     mel 基底は配置ではなく変換の出力なので、ここには現れない（SBV2 の表 2 本と同じ形）。
     """
-    return {VOWEL_DETECTOR_GRAPH_ROLE: sources.series / "model.safetensors"}
+    return {VOWEL_DETECTOR_GRAPH_ROLE: sources.series / "model.krm"}
 
 
 def vowel_detector_feature_config(model_dir: Path) -> Mapping[str, Any]:

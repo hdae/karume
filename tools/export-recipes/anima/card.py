@@ -433,7 +433,10 @@ EXTRA_ORIGINS_INTRO = (
 
 
 def render_base_card(
-    manifest: Mapping[str, Any], repo: str, abbreviations: Mapping[str, str]
+    manifest: Mapping[str, Any],
+    repo: str,
+    abbreviations: Mapping[str, str],
+    host_assets: Mapping[str, int] = {},
 ) -> str:
     """公式リポ（CircleStone の 5 変種同居）配布形の `README.md` 本文。
 
@@ -456,14 +459,17 @@ def render_base_card(
             _usage(manifest, repo),
             *model_sections(
                 manifest,
-                (partial(quants, abbreviations=abbreviations), _defaults),
+                (partial(quants, abbreviations=abbreviations, host_assets=host_assets), _defaults),
             ),
         )
     )
 
 
 def render_extra_card(
-    manifest: Mapping[str, Any], repo: str, abbreviations: Mapping[str, str]
+    manifest: Mapping[str, Any],
+    repo: str,
+    abbreviations: Mapping[str, str],
+    host_assets: Mapping[str, int] = {},
 ) -> str:
     """追加学習リポ（第三者 fine-tune）配布形の `README.md` 本文。"""
     require_pipeline(manifest, SUPPORTED_PIPELINE)
@@ -482,7 +488,7 @@ def render_extra_card(
             _usage(manifest, repo),
             *model_sections(
                 manifest,
-                (partial(quants, abbreviations=abbreviations), _defaults),
+                (partial(quants, abbreviations=abbreviations, host_assets=host_assets), _defaults),
             ),
         )
     )

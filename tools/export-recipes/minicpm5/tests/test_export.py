@@ -72,6 +72,8 @@ def _export_tiny(tmp_path: Path, wrapper) -> IrGraph:
         wrapper,
         (ids,),
         tmp_path / mc.MODEL_FILE,
+        provenance=mc.PROVENANCE,
+        graph_name="tiny",
         dynamic_shapes=({1: Dim("T", min=2, max=TINY_SYM_MAX)},),
         preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
     )

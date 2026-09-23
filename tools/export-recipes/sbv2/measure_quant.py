@@ -120,7 +120,6 @@ import hashlib
 import json
 import math
 import re
-import struct
 import time
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
@@ -135,9 +134,12 @@ import torch
 from safetensors.torch import load_file
 from torch import nn
 
+from _shared.container_read import read_layouts
 from _shared.paths import BENCH_ROOT, DIST_ROOT, EXAMPLES_ROOT
 from deberta.calib_texts import CALIB_TEXTS
 from karume.act_quant import quantize_rows
+from karume.container import container_parts
+from karume.dist import ir_graph
 from karume.ir import MIN_GROUP_SIZE
 from karume.quant_calib import (
     CalibMethod,
@@ -874,24 +876,12 @@ def build_projections(
 
 # ---- 配布形に対する縮小試算 --------------------------------------------------
 
-#: 配布 safetensors の scale テンソルの接頭（`karume.scale.<重みのキー>`）。
-DIST_SCALE_PREFIX = "karume.scale."
-
 #: DeBERTa の配布グラフにだけ付くテンソル名の接頭（22 層 variant — 層番号は測定側の 24 層の
 #: 部分集合なので、これを外せば丸めの対象集合と同じ FQN 空間になる）。
 DIST_BERT_PREFIX = "model."
 
-
-def read_safetensors_header(path: Path) -> dict[str, Any]:
-    """safetensors のヘッダ（先頭 8 バイト LE 長 + JSON）だけを読む。
-
-    本体を読まないのは、配布形が GiB 級で、要るのが名前・dtype・`data_offsets` だけだから。
-    """
-    with path.open("rb") as handle:
-        length = struct.unpack("<Q", handle.read(8))[0]
-        header = json.loads(handle.read(length))
-    header.pop("__metadata__", None)
-    return header
+#: 配布形のコンテナの拡張子（container-v1 §1）。
+CONTAINER_SUFFIX = ".krm"
 
 
 def project_distribution(
@@ -921,27 +911,27 @@ def project_distribution(
     groups: dict[str, list[int]] = defaultdict(lambda: [0, 0, 0])
     unmatched = 0
     for path in files:
-        if path.suffix != ".safetensors":
+        # コンテナ 1 本につき 1 度だけ数える（part 0 を起点にして連番の残りは飛ばす）。
+        if path.suffix != CONTAINER_SUFFIX or path != container_parts(path)[0]:
             continue
-        header = read_safetensors_header(path)
+        values = ir_graph(path).get("values") or {}
         bucket = "shared（DeBERTa text_encoder）" if "shared" in path.parts else "話者ごとの net_g"
-        for key, entry in header.items():
-            if entry["dtype"] != "I8" or len(entry["shape"]) != 2:
+        for key, layout in sorted(read_layouts(path).items()):
+            shape = (values.get(key) or {}).get("shape") or []
+            if layout != "i8" or len(shape) != 2:
                 continue
             if key not in linear_fqns and key.removeprefix(DIST_BERT_PREFIX) not in linear_fqns:
                 unmatched += 1
                 continue
-            out_channels, in_axis = entry["shape"]
+            out_channels, in_axis = int(shape[0]), int(shape[1])
             if in_axis % group_size:
                 raise AssertionError(
                     f"{path}: '{key}' の in 軸 {in_axis} が group {group_size} で割り切れない"
                 )
-            scale = header.get(DIST_SCALE_PREFIX + key)
-            if scale is None:
-                raise AssertionError(f"{path}: '{key}' に対応する scale テンソルが無い")
             row = groups[bucket]
             row[0] += 1
-            row[1] += tensor_bytes(entry) + tensor_bytes(scale)
+            # i8 は「値 O·I バイト + per-channel scale 4·O バイト」（容器の payload そのもの）。
+            row[1] += out_channels * in_axis + 4 * out_channels
             row[2] += out_channels * in_axis // 2 + 4 * out_channels * (in_axis // group_size)
     delta = sum(row[1] - row[2] for row in groups.values())
     return {
@@ -965,11 +955,6 @@ def project_distribution(
         "formula": f"i8 = O·I + 4·O バイト / i4 = O·I/2 + 4·O·(I/{group_size}) バイト"
         "（linear の重みスロットだけ・分母は配布形の実ファイル総バイト）",
     }
-
-
-def tensor_bytes(entry: Mapping[str, Any]) -> int:
-    start, end = entry["data_offsets"]
-    return int(end) - int(start)
 
 
 # ---- 1 構成の実行 ------------------------------------------------------------

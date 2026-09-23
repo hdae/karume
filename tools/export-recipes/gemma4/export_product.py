@@ -27,20 +27,18 @@ chunk 系列の経路（素材の読み方・RoPE のホスト供給・KV 共有
   MUST）。prefill の読み戻しは `[1,M,V]` 形の 32MiB から 1MiB へ減る。
   MUST: 出力順は **logits → hidden** 固定（ランタイムはスロット番号で読む）。
 
-## PLE sidecar（token-major + vocab レンジ shard）
+## PLE（token-major + vocab レンジ block・容器の資産）
 
 グラフから外した 35 表は **token-major**（`[token][layer][256]` i8 + `[token][layer]` の
-per-row scale）へ再配置し、**vocab の範囲**で shard する（ADR 0085 決定 1 / 2）。1 token の
+per-row scale）へ再配置し、**vocab の範囲**で block に切る（ADR 0085 決定 1 / 2）。1 token の
 PLE が連続 1 読み（8,960B + 35 scale）になる形で、後から「キャッシュから行だけ読む」
-（同 ADR の代替案 b）へ移るときに再 export も再アップロードも要らない。1 shard の大きさは
-書き手の容量（{@link karume.shards.SHARD_DATA_CAPACITY}）をそのまま使う。
+（同 ADR の代替案 b）へ移るときに再 export も再アップロードも要らない。
 
-NOTE: sidecar は **IR コンテナではない**（付帯資産 — ADR 0038 §2 の extras と同じ位置づけで、
-読み手は `parseSafetensors` の厳格リーダ）。したがって ADR 0081 の読み手契約 1（shard 0 =
-グラフ shard・データ節空）は掛からず、掛かるのはバイト上限だけ。連番の綴りは
-{@link karume.shards.shard_name} を共有する。
+置き場は**モデル容器の資産**（`ple_index` / `ple.values.<k>` / `ple.scales.<k>` — ADR 0109
+決定 4）。切り方も索引の綴りも core の {@link karume.ple.ple_assets} 1 本が持つ（移行 CLI と
+同じ 1 本 — 2 経路で綴ると block の切り目が黙ってずれる）。
 
-MUST: 再配置は **ビット同一**であること（{@link assert_ple_sidecar}）。i8 値と per-row scale の
+MUST: 再配置は **ビット同一**であること（{@link assert_ple_assets}）。i8 値と per-row scale の
 対応を 1 層ずらしても形も型も dtype も合うので、`ple.py` の分割検査と同じ理由で
 `torch.equal` の門が要る。
 
@@ -58,40 +56,40 @@ TS 側の loader の出力と突き合わせて見る。
 
 ## 出力レイアウト
 
-    outputs/series/gemma4-e2b-product/model.safetensors        重み・定数 + karume_ir
-    outputs/series/gemma4-e2b-product/ple.json                 sidecar の索引（shard の token 範囲）
-    outputs/series/gemma4-e2b-product/ple-NNNNN-of-NNNNN.safetensors  PLE sidecar
-    outputs/series/gemma4-e2b-product/ple.probe.safetensors    逆量子化ビット一致の参照
-    outputs/series/gemma4-e2b-product/reference.json           出所記録（指紋 + 流用 golden）
+    outputs/series/gemma4-e2b-product/model.krm                 重み・定数 + 2 文書 + PLE の資産
+    outputs/series/gemma4-e2b-product/ple.probe.safetensors     逆量子化ビット一致の参照
+    outputs/series/gemma4-e2b-product/reference.json            出所記録（指紋 + 流用 golden）
 """
 
 from __future__ import annotations
 
 import json
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Buffer, Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import torch
-from safetensors import safe_open
 from safetensors.torch import save_file
 from torch.export import Dim
 from torch.nn import functional
 
+from _shared.container_read import open_container, read_asset
 from _shared.decode_series import assert_case_room, positions_for
 from _shared.paths import SERIES_ROOT
 from gemma4 import export as one_shot
 from gemma4 import export_decode as decode
 from gemma4 import ple, provenance
 from karume.artifacts import staged_publication
+from karume.container import BLOCK_MAX_BYTES, AssetInput, container_parts
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION
 from karume.ir import IrGraph
 from karume.ops import ARGMAX_OP, EMBEDDING_OP
 from karume.pipeline import export_module
+from karume.ple import PLE_INDEX_ASSET, ple_assets, ple_block_ranges, ple_row_bytes
 from karume.quantize import quantize_to_int8
 from karume.shapes import declared_shape
-from karume.shards import SHARD_DATA_CAPACITY, resolve_shards, shard_name
 from karume.states import to_states_form
 
 #: 生成物の既定の置き場（既存 2 系列とは別ディレクトリ — 入口も出口も違う別資産）。
@@ -122,25 +120,19 @@ ROW_SYM_MAX = decode.SLIDING_SLACK_ROWS + 1
 #: 生きていることを IR で確かめられない。上限側（{@link ROW_SYM_MAX}）は Dim の宣言が持つ。
 EXAMPLE_ROWS = 2
 
-#: PLE sidecar の代表 path（実ファイルは常に連番 — {@link karume.shards.shard_name}）と、
-#: 索引・逆量子化参照のファイル名。読み手は `packages/models/src/gemma/ple.ts`。
-PLE_FILE = "ple.safetensors"
-PLE_INDEX_FILE = "ple.json"
+#: 逆量子化ビット一致の参照のファイル名（**配布物ではない** — 系列に残る検収用の golden）。
 PLE_PROBE_FILE = "ple.probe.safetensors"
 
-#: sidecar shard のテンソルキー（`values` = token-major i8 / `scales` = per-row f32）。
+#: PLE の格納（`values` の詰め方 — `scales` は常に f32）。
+PLE_STORAGE = "i8"
+
+#: 行の種別（索引の欄名でもある — `karume.ple.PLE_ROLES` の綴り）。
 PLE_VALUES_KEY = "values"
 PLE_SCALES_KEY = "scales"
 
 #: `ple.probe.safetensors` のテンソルキー。
 PROBE_TOKENS_KEY = "tokens"
 PROBE_INPUTS_KEY = "per_layer_inputs"
-
-#: 索引と shard メタデータの版（読み手が知らない版を黙って読まないための欄）。
-PLE_SCHEMA = 1
-
-#: shard の safetensors `__metadata__` に置く索引の写し（1 本だけで自己記述になる形）。
-PLE_METADATA_KEY = "karume_ple"
 
 
 class ProductChunkWrapper(decode.DecodeChunkWrapper):
@@ -224,12 +216,13 @@ def load_wrapper(model_dir: Path) -> ProductChunkWrapper:
 
 
 def ple_token_bytes(layers: int, dim: int) -> int:
-    """1 token ぶんの sidecar バイト数（i8 値 `layers × dim` + f32 scale `layers`）。
+    """1 token ぶんの PLE バイト数（i8 値 `layers × dim` + f32 scale `layers`）。
 
     E2B は 35 × 256 + 35 × 4 = **9,100 バイト/token**。token-major の狙いそのもので、
     1 token の PLE がこの長さの**連続 1 読み**になる（ADR 0085 決定 1）。
     """
-    return layers * dim + layers * 4
+    row_bytes = ple_row_bytes(PLE_STORAGE, layers, dim)
+    return row_bytes[PLE_VALUES_KEY] + row_bytes[PLE_SCALES_KEY]
 
 
 def ple_table_rows(tables: Sequence[torch.nn.Module], vocab_size: int) -> int:
@@ -257,42 +250,11 @@ def ple_table_rows(tables: Sequence[torch.nn.Module], vocab_size: int) -> int:
     return found
 
 
-def plan_ple_shards(
-    tokens: int, token_bytes: int, limit: int = SHARD_DATA_CAPACITY
-) -> tuple[tuple[int, int], ...]:
-    """vocab を容量内の**最小本数**へ割り、行数を均した `[start, stop)` の列。
-
-    方針は {@link karume.shards.pack_shards} と同型（最小本数 k を先に決めてから均す —
-    端数 shard を作らない・ADR 0081）。単位が **1 token 固定長**なので貪欲の最小本数は
-    `ceil(総量 / 容量)` に一致し、均しも行数の等分で済む（対の原子性も可変長も無い）。
-    `limit` の既定は書き手の容量 {@link karume.shards.SHARD_DATA_CAPACITY}（sidecar は遅延
-    ロードで触った shard だけをホストへ読むので、容量がそのまま 1 回の読みの上限になる）。
-
-    MUST: 1 token が単独で容量を超える形は fail loudly（層数か層当たり次元が想定外に大きい
-    — 分割の粒度をこれ以上細かくできないので、黙って容量を破るしかなくなる）。
-    """
-    if tokens < 1:
-        raise ValueError(f"PLE sidecar の token 数 {tokens} が 1 以上でない")
-    if token_bytes < 1:
-        raise ValueError(f"PLE sidecar の 1 token {token_bytes} バイトが 1 以上でない")
-    per_shard = limit // token_bytes
-    if per_shard < 1:
-        raise ValueError(f"1 token {token_bytes:,} バイトが shard 上限 {limit:,} を超える")
-    count = -(-tokens // per_shard)
-    ranges: list[tuple[int, int]] = []
-    start = 0
-    for opened in range(count):
-        rows = -(-(tokens - start) // (count - opened))
-        ranges.append((start, start + rows))
-        start += rows
-    return tuple(ranges)
-
-
 def ple_probe_tokens(tokens: int, ranges: Sequence[tuple[int, int]]) -> tuple[int, ...]:
-    """逆量子化ビット一致の参照に使う**散点** token id（shard 境界の両側 + 両端 + 中央）。
+    """逆量子化ビット一致の参照に使う**散点** token id（block 境界の両側 + 両端 + 中央）。
 
-    連続 N 個だと 1 つの shard しか踏まず、別 shard だけの取り違え（範囲の off-by-one・
-    scale の層ずれ）が門に映らない（{@link gemma4.ple.probe_rows} と同じ理由の shard 版）。
+    連続 N 個だと 1 つの block しか踏まず、別 block だけの取り違え（範囲の off-by-one・
+    scale の層ずれ）が門に映らない（{@link gemma4.ple.probe_rows} と同じ理由の block 版）。
     """
     picked: list[int] = []
     for start, stop in ranges:
@@ -326,66 +288,132 @@ def quantized_ple_tables(
     return values, row_scales
 
 
-def _shard_metadata(index: Mapping[str, Any], start: int, stop: int) -> dict[str, str]:
-    """shard 1 本の `__metadata__`（索引の写し + 自分の token 範囲）。
+#: 一時ファイルへ落とすときの 1 回ぶんの行数の目安（バイト）。転置の中間が RAM に載る量なので、
+#: 35 表ぶんの実体（E2B で約 2.35 GB）より 2 桁小さく取る。
+_SPILL_CHUNK_BYTES = 64 * 1024 * 1024
 
-    索引（`ple.json`）と shard の自己申告が食い違う組み合わせを読み手が落とせる形にする —
-    片方だけ作り直した資産は、範囲がずれたまま**形も dtype も合う**（= 別 token の有効な行を
-    引く・ADR 0085 決定 5 と同じ沈黙誤値）。
+
+def spill_payload(payload: Buffer, path: Path) -> None:
+    """連結済みの payload を `path` へ 1 度だけ落とす（QAT 側 {@link gemma4_qat.ple} と共有）。
+
+    MUST: 落とし先は**作業席の一時ファイル**で、呼び手は据え替えの前に消す（配布物ではない）。
     """
-    record = {key: value for key, value in index.items() if key != "shards"}
-    return {PLE_METADATA_KEY: json.dumps({**record, "start": start, "stop": stop})}
+    with path.open("wb") as handle:
+        handle.write(payload)
 
 
-def write_ple_shards(
+def _spill_tables(
+    tables: Sequence[torch.Tensor], stride: int, rows: int, path: Path
+) -> Callable[[int, int], bytes]:
+    """層ごとの表を **token-major に連結した payload** として `path` へ 1 度だけ落とし、
+    その区間読みを返す。
+
+    `tables` は**層ごと**（table-major）に持っているので、行の塊ごとに 35 本から `stack` して
+    token-major へ転置しながら書く（転置の中間は 1 塊ぶんだけ生きる）。
+
+    MUST: 落とし先は**作業席の一時ファイル**で、呼び手は落とした直後に元の実体を手放す
+    （`values.clear()` / `row_scales.clear()`）— 遅延読み口がメモリ上の 35 表を掴んだままだと、
+    i8 の実体（E2B で約 2.35 GB）が torch.export と変換の間ずっと常駐する（台本の RAM 予算は
+    README の 24GB）。据え替えの前に消すので配布物には出ない。
+
+    MUST: 同じ区間からは**同じバイト列**が返る（書き手は sha256 を採るときと書くときの
+    2 度引く）— 落とした後のファイルは誰も書き換えない。
+    """
+    per_chunk = max(1, _SPILL_CHUNK_BYTES // stride)
+    with path.open("wb") as handle:
+        for start in range(0, rows, per_chunk):
+            stop = min(start + per_chunk, rows)
+            chunk = torch.stack([table[start:stop] for table in tables], dim=1).contiguous()
+            handle.write(memoryview(chunk.numpy()).cast("B"))
+    written = path.stat().st_size
+    if written != rows * stride:
+        raise AssertionError(f"{path}: {written} バイト — {rows} 行 × {stride} バイトと違う")
+
+    def read(begin: int, end: int) -> bytes:
+        if begin % stride or end % stride:
+            raise AssertionError(f"PLE の区間 [{begin}, {end}) が 1 行 {stride} バイトの倍数でない")
+        with path.open("rb") as handle:
+            handle.seek(begin)
+            raw = handle.read(end - begin)
+        if len(raw) != end - begin:
+            raise AssertionError(f"{path}: PLE の区間 [{begin}, {end}) が途中で尽きた")
+        return raw
+
+    return read
+
+
+@dataclass(frozen=True)
+class PleContainerAssets:
+    """{@link ple_container_assets} の戻り — 容器へ渡す資産と、消してよい一時ファイル。"""
+
+    #: `publish_model(assets=…)` へそのまま渡す資産（索引 + `values` / `scales` の block 列）。
+    assets: dict[str, AssetInput]
+    #: token-major の payload を落とした作業席の一時ファイル（配布物ではない）。
+    spills: tuple[Path, ...]
+
+    def discard(self) -> None:
+        """一時ファイルを消す（作業席ごと据わる前に呼ぶ MUST — 配布物に混ざらない）。"""
+        for path in self.spills:
+            path.unlink(missing_ok=True)
+
+
+def ple_container_assets(
     values: Sequence[torch.Tensor],
     row_scales: Sequence[torch.Tensor],
-    ranges: Sequence[tuple[int, int]],
-    out_dir: Path,
-    index: Mapping[str, Any],
-) -> list[dict[str, Any]]:
-    """token-major の shard 列を書き、索引の `shards` 欄を返す。
+    *,
+    tokens: int,
+    layers: int,
+    dim: int,
+    embed_scale: float,
+    spill_dir: Path,
+    block_bytes: int = BLOCK_MAX_BYTES,
+) -> PleContainerAssets:
+    """PLE を**モデル容器の資産**へ組む（索引 schema 3 + `values` / `scales` の block 列）。
 
-    `values` / `row_scales` は**層ごと**（table-major）に持っているので、shard 1 本ぶんの
-    行範囲を 35 本から `stack` して token-major へ転置する。転置がビット同一であることは
-    {@link assert_ple_sidecar} が書いたバイト列を読み直して見る。
+    切り方も索引の綴りも core の {@link karume.ple.ple_assets} が持つ（移行 CLI と同じ 1 本）。
+    ここが足すのは「層ごとの表 → token-major の連結 payload」の読み口だけである。
+
+    MUST: 実体は `spill_dir`（作業席）の一時ファイルへ**1 度だけ**落とす（{@link _spill_tables}
+    の MUST）— 呼び手はこの呼び出しの直後に `values` / `row_scales` を手放し、export 中に
+    i8 の実体を持ち越さない。
     """
-    written: list[dict[str, Any]] = []
-    total = len(ranges)
-    for position, (start, stop) in enumerate(ranges, start=1):
-        name = shard_name(PLE_FILE, position, total)
-        block = torch.stack([table[start:stop] for table in values], dim=1).contiguous()
-        scale = torch.stack([row[start:stop] for row in row_scales], dim=1).contiguous()
-        save_file(
-            {PLE_VALUES_KEY: block, PLE_SCALES_KEY: scale},
-            str(out_dir / name),
-            metadata=_shard_metadata(index, start, stop),
-        )
-        written.append({"file": name, "start": start, "stop": stop})
-        print(
-            f"[ple] {name} tokens [{start}, {stop}) / {(out_dir / name).stat().st_size:,} バイト",
-            file=sys.stderr,
-            flush=True,
-        )
-    return written
-
-
-def ple_index(tokens: int, layers: int, dim: int, embed_scale: float) -> dict[str, Any]:
-    """`ple.json` の骨（`shards` 欄は {@link write_ple_shards} が埋める）。"""
-    return {
-        "schema": PLE_SCHEMA,
-        "tokens": tokens,
-        "layers": layers,
-        "dim": dim,
-        "embedScale": embed_scale,
-        "shards": [],
+    row_bytes = ple_row_bytes(PLE_STORAGE, layers, dim)
+    spills = {key: spill_dir / f".ple.{key}.spill" for key in (PLE_VALUES_KEY, PLE_SCALES_KEY)}
+    readers = {
+        PLE_VALUES_KEY: _spill_tables(
+            values, row_bytes[PLE_VALUES_KEY], tokens, spills[PLE_VALUES_KEY]
+        ),
+        PLE_SCALES_KEY: _spill_tables(
+            row_scales, row_bytes[PLE_SCALES_KEY], tokens, spills[PLE_SCALES_KEY]
+        ),
     }
+    return PleContainerAssets(
+        ple_assets(
+            storage=PLE_STORAGE,
+            tokens=tokens,
+            layers=layers,
+            dim=dim,
+            embed_scale=embed_scale,
+            read_values=readers[PLE_VALUES_KEY],
+            read_scales=readers[PLE_SCALES_KEY],
+            block_bytes=block_bytes,
+        ),
+        tuple(spills.values()),
+    )
 
 
-def assert_ple_sidecar(
-    out_dir: Path, index: Mapping[str, Any], probe: Sequence[int], reference: torch.Tensor
+def _locate_block(blocks: Sequence[Mapping[str, Any]], token: int) -> Mapping[str, Any] | None:
+    """token を含む block（索引は昇順の隙間なし分割なので線形走査で足りる — probe は散点）。"""
+    for block in blocks:
+        if int(block["start"]) <= token < int(block["stop"]):
+            return block
+    return None
+
+
+def assert_ple_assets(
+    container: Path, index: Mapping[str, Any], probe: Sequence[int], reference: torch.Tensor
 ) -> None:
-    """書いた sidecar から probe token を組み直し、35 表経路と**ビット一致**することを見る。
+    """据えた容器の資産から probe token を組み直し、35 表経路と**ビット一致**することを見る。
 
     参照側（`reference`）は {@link gemma4.ple.per_layer_inputs} が fake-quant 済みの 35 表から
     組んだ `[1,P,35,256]` そのもの — つまり **PLE をグラフに残していたら embedding op が
@@ -393,10 +421,13 @@ def assert_ple_sidecar(
     — ADR 0019 の ±127 論証）。再配置側は**書いたバイト列を読み直し**、ホストと同じ順序
     （`f32(i8) * scale` → `* embed_scale`）で組む。
 
-    MUST: `torch.equal`（ビット一致）で見る — scale の対応を 1 層ずらしても、shard の範囲を
+    MUST: `torch.equal`（ビット一致）で見る — scale の対応を 1 層ずらしても、block の範囲を
     1 行ずらしても、形も型も dtype も合ったまま**別 token の有効な行**が出る。
     MUST: 読み直す（in-memory の配列を突き合わせない）— 転置は正しいのに書き出しの
     dtype / 形 / 順序が違う形を、この門が受け止める最後の位置。
+    MUST: 読んだ block は **probe 行だけ取り出して捨てる**（block 丸ごとを器に残さない）—
+    probe は全 block の両端を踏むので、残すと PLE 全量（E2B で約 2.35 GB）がこの門の実行中に
+    もう一度 RAM に載る。容器も 1 度だけ開く（block ごとに `verify_container` を回さない）。
     """
     layers = int(index["layers"])
     dim = int(index["dim"])
@@ -406,44 +437,51 @@ def assert_ple_sidecar(
         raise AssertionError(f"参照 {tuple(reference.shape)} が {expected_shape} でない")
 
     rebuilt = torch.zeros(expected_shape, dtype=torch.float32)
+    opened = open_container(container)
+    cache: dict[tuple[str, int], torch.Tensor] = {}
+
+    def row_of(
+        block: Mapping[str, Any], token: int, dtype: torch.dtype, width: int
+    ) -> torch.Tensor:
+        """block 1 本から `token` の 1 行だけを `[層, 幅]` で取り、残りは捨てる。"""
+        name = str(block["asset"])
+        if (name, token) not in cache:
+            raw = bytearray(read_asset(opened, name))
+            rows = int(block["stop"]) - int(block["start"])
+            expected = rows * layers * width * torch.empty(0, dtype=dtype).element_size()
+            if len(raw) != expected:
+                raise AssertionError(
+                    f"資産 '{name}' が {len(raw)} バイト — 索引の範囲"
+                    f" [{block['start']}, {block['stop']}) から組んだ期待は {expected}"
+                )
+            view = torch.frombuffer(raw, dtype=dtype).reshape(rows, layers, width)
+            cache[(name, token)] = view[token - int(block["start"])].clone()
+        return cache[(name, token)]
+
     covered = 0
-    for shard in index["shards"]:
-        start, stop = int(shard["start"]), int(shard["stop"])
-        path = out_dir / str(shard["file"])
-        with safe_open(str(path), framework="pt") as handle:
-            stored = sorted(handle.keys())
-            if stored != sorted([PLE_VALUES_KEY, PLE_SCALES_KEY]):
-                raise AssertionError(f"{path.name}: テンソルキーが {stored}")
-            values = handle.get_slice(PLE_VALUES_KEY)
-            scales = handle.get_slice(PLE_SCALES_KEY)
-            rows = stop - start
-            if values.get_shape() != [rows, layers, dim]:
-                raise AssertionError(
-                    f"{path.name}: '{PLE_VALUES_KEY}' が {values.get_shape()} —"
-                    f" token-major [{rows}, {layers}, {dim}] でない"
-                )
-            if scales.get_shape() != [rows, layers]:
-                raise AssertionError(
-                    f"{path.name}: '{PLE_SCALES_KEY}' が {scales.get_shape()} —"
-                    f" [{rows}, {layers}] でない"
-                )
-            for position, token in enumerate(probe):
-                if not start <= token < stop:
-                    continue
-                row = token - start
-                quantized = values[row : row + 1].to(torch.float32)
-                scale = scales[row : row + 1].to(torch.float32).unsqueeze(-1)
-                rebuilt[0, position] = (quantized * scale)[0] * embed_scale
-                covered += 1
+    for position, token in enumerate(probe):
+        located = {
+            key: _locate_block(index[key]["blocks"], token)
+            for key in (PLE_VALUES_KEY, PLE_SCALES_KEY)
+        }
+        if any(block is None for block in located.values()):
+            continue
+        values_block = located[PLE_VALUES_KEY]
+        scales_block = located[PLE_SCALES_KEY]
+        assert values_block is not None and scales_block is not None
+        quantized = row_of(values_block, token, torch.int8, dim).to(torch.float32)
+        scale = row_of(scales_block, token, torch.float32, 1)
+        rebuilt[0, position] = quantized * scale * embed_scale
+        covered += 1
     if covered != len(probe):
         raise AssertionError(
-            f"probe {len(probe)} 本のうち {covered} 本しか shard の範囲に載っていない"
+            f"probe {len(probe)} 本のうち {covered} 本しか block の範囲に載っていない"
             "（索引の [start, stop) が vocab を覆っていない）"
         )
     if not torch.equal(rebuilt, reference):
         worst = float((rebuilt - reference).abs().max())
         raise AssertionError(
-            "PLE sidecar の再配置が 35 表経路とビット一致しない"
+            "PLE の再配置が 35 表経路とビット一致しない"
             f"（最大絶対差 {worst}）— i8 値と per-row scale の対応か token 範囲がずれている"
         )
 
@@ -603,9 +641,9 @@ def export_series(
     sym_max: int = one_shot.SYM_MAX,
     reference: Path = REFERENCE_DIR,
 ) -> dict[str, Any]:
-    """製品グラフのコンテナ + PLE sidecar + 出所記録を書き、要約を返す。
+    """製品グラフのコンテナ（PLE を資産として同梱）+ 出所記録を書き、要約を返す。
 
-    MUST: 生成物は作業席へ書き、**全ての門**（sidecar のビット一致・形検査・1-shot 期待表との
+    MUST: 生成物は作業席へ書き、**全ての門**（PLE のビット一致・形検査・1-shot 期待表との
     sanity）を通してから据える。門より前に final へ置くと、落ちた実走が「検収門を通れる資産」を
     残す（据え替えと後片付けの規律は core の原語 {@link karume.artifacts.staged_publication}）。
     MUST: 流用する golden の検めは席へ入る**前**（落ちるなら数十分の export を始める前に落とす）。
@@ -629,8 +667,9 @@ def export_series(
     # {@link ple_table_rows}）。
     tokens = ple_table_rows(wrapper.per_layer, int(config.vocab_size))
     embed_scale = float(wrapper.per_layer_scale)
-    ranges = plan_ple_shards(tokens, ple_token_bytes(layers, dim))
-    probe = ple_probe_tokens(tokens, ranges)
+    # block の切り目は寸法だけで決まる（実体は要らない）ので、i8 へ落とす前に probe を選べる。
+    ranges = ple_block_ranges(storage=PLE_STORAGE, tokens=tokens, layers=layers, dim=dim)
+    probe = ple_probe_tokens(tokens, ranges[PLE_VALUES_KEY])
 
     # PLE をグラフから外す前に、①逆量子化ビット一致の参照 ②各ケースのグラフ入力 を
     # **35 表経路**（台本 3 本が通す {@link gemma4.ple.per_layer_inputs}）で 1 度だけ組む。
@@ -658,12 +697,20 @@ def export_series(
     with staged_publication(out_dir) as staged:
         # ディレクトリの席は書き手が作る（原語は席を作らない — path しか渡さない）。
         staged.mkdir()
-        index = ple_index(tokens, layers, dim, embed_scale)
-        index["shards"] = write_ple_shards(values, row_scales, ranges, staged, index)
-        assert_ple_sidecar(staged, index, probe, probe_reference)
-        (staged / PLE_INDEX_FILE).write_text(
-            json.dumps(index, indent=1, ensure_ascii=False) + "\n", encoding="utf-8"
+        ple_assets_built = ple_container_assets(
+            values,
+            row_scales,
+            tokens=tokens,
+            layers=layers,
+            dim=dim,
+            embed_scale=embed_scale,
+            spill_dir=staged,
         )
+        assets = ple_assets_built.assets
+        # MUST: i8 実体は**ここで**手放す（以降は模型ぶんの RAM だけで export へ入る）— 資産の
+        # 読み口は作業席の一時ファイルを指しているので、35 表を生かしておく理由がもう無い。
+        values.clear()
+        row_scales.clear()
         save_file(
             {
                 PROBE_TOKENS_KEY: torch.tensor(list(probe), dtype=torch.int32).contiguous(),
@@ -671,36 +718,44 @@ def export_series(
             },
             str(staged / PLE_PROBE_FILE),
         )
-        # sidecar は据えたので i8 実体を手放す（以降は模型ぶんの RAM だけで export へ入る）。
-        values.clear()
-        row_scales.clear()
 
         print("[export] torch.export → 変換", file=sys.stderr, flush=True)
-        example_rope = decode.rope_args(specs, positions_for(example_ids))
-        graph, tensors = export_module(
-            wrapper,
-            (
-                example_ids,
-                *example_rope,
-                case_inputs[example_name],
-                decode.last_rows_for(example_ids, EXAMPLE_ROWS),
-            ),
-            dynamic_shapes=(*({1: seq} for _ in range(2 + len(example_rope))), {0: rows}),
-            # 割り当ては user 入力 placeholder の出現順（`karume.convert._assign_input_symbols`）
-            # なので、`input_ids[1,M]` → `last_row[R]` の順で並べる。
-            symbol_names=(decode.SEQ_SYMBOL, ROW_SYMBOL),
-            preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
-        )
-        print("[export] states 形へ手術 → 書き出し", file=sys.stderr, flush=True)
-        surgical = to_states_form(graph, decode.states_plan(graph, config))
-        verified = decode._write_container(
-            surgical,
-            tensors,
-            staged / one_shot.MODEL_FILE,
-            weight_dtype="i8",
-            weight_scales=scales,
-            weight_dtype_overrides=dict.fromkeys(int4.scales, "i4"),
-        )
+        try:
+            example_rope = decode.rope_args(specs, positions_for(example_ids))
+            graph, tensors = export_module(
+                wrapper,
+                (
+                    example_ids,
+                    *example_rope,
+                    case_inputs[example_name],
+                    decode.last_rows_for(example_ids, EXAMPLE_ROWS),
+                ),
+                dynamic_shapes=(*({1: seq} for _ in range(2 + len(example_rope))), {0: rows}),
+                # 割り当ては user 入力 placeholder の出現順
+                # （`karume.convert._assign_input_symbols`）なので、`input_ids[1,M]` →
+                # `last_row[R]` の順で並べる。
+                symbol_names=(decode.SEQ_SYMBOL, ROW_SYMBOL),
+                preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
+            )
+            print("[export] states 形へ手術 → 書き出し", file=sys.stderr, flush=True)
+            surgical = to_states_form(graph, decode.states_plan(graph, config))
+            verified = decode._write_container(
+                surgical,
+                tensors,
+                staged / one_shot.MODEL_FILE,
+                # グラフ名は**部品名**（= 据え替え先のディレクトリ名 — 作業席の名前ではない）。
+                graph_name=out_dir.name,
+                weight_dtype="i8",
+                weight_scales=scales,
+                weight_dtype_overrides=dict.fromkeys(int4.scales, "i4"),
+                assets=assets,
+            )
+        finally:
+            # MUST: 一時ファイルは据え替えの前に消す（作業席ごと据わるので、残すと配布物に混ざる）。
+            ple_assets_built.discard()
+        index = json.loads(bytes(assets[PLE_INDEX_ASSET].payload))
+        print("[ple] 据えた容器の資産から probe を組み直す", file=sys.stderr, flush=True)
+        assert_ple_assets(staged / one_shot.MODEL_FILE, index, probe, probe_reference)
         # i8 の initializer は **PLE 35 表を外したぶんだけ減る** — 残るのは主 embedding
         # （tied lm_head と同一実体）1 本。台帳の本数から引くので、外し漏れは本数で落ちる。
         form = assert_ir_form_product(
@@ -745,17 +800,18 @@ def export_series(
         record = provenance.build_record(out_dir, model_dir, reference_goldens)
         provenance.write_record(staged, record)
 
-    ple_bytes = sum((out_dir / str(shard["file"])).stat().st_size for shard in index["shards"])
     return {
         "dir": str(out_dir),
         "nodes": len(verified.nodes),
         "outputs": len(verified.outputs),
         "initializers": len(verified.initializers),
         "model_bytes": sum(
-            path.stat().st_size for path in resolve_shards(out_dir / one_shot.MODEL_FILE)
+            path.stat().st_size for path in container_parts(out_dir / one_shot.MODEL_FILE)
         ),
-        "ple_bytes": ple_bytes,
-        "ple_shards": index["shards"],
+        # PLE は容器の中の資産なので、バイト数は索引が名乗る行数 × 1 行から出す
+        # （容器の part はグラフの重みと同居するので、ファイルサイズからは切り出せない）。
+        "ple_bytes": tokens * ple_token_bytes(layers, dim),
+        "ple_blocks": {key: len(index[key]["blocks"]) for key in (PLE_VALUES_KEY, PLE_SCALES_KEY)},
         "ple_probe_tokens": list(probe),
         "ops": sorted(verified.required_ops),
         "symbols": list(verified.symbols),

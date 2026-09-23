@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from functools import partial
 from typing import Any
 
 from karume.modelcard import (
@@ -85,6 +86,10 @@ def irodori_upstream(model_name: str) -> IrodoriUpstream:
 #: 再配布しているので `base_model` にも帰属節にも並べる。
 IRODORI_CODEC_MODEL = "Aratako/Semantic-DACVAE-Japanese-32dim"
 
+#: 配布形のライセンス識別子（上の実地確認どおり上流も同梱コーデックも MIT）。容器へ焼く出所
+#: （`irodori.export.PROVENANCE`）もここから引く — 2 表が独立に動く形にしない。
+IRODORI_LICENSE = "mit"
+
 
 def _irodori_metadata(upstream: IrodoriUpstream) -> CardMetadata:
     return CardMetadata(
@@ -94,7 +99,7 @@ def _irodori_metadata(upstream: IrodoriUpstream) -> CardMetadata:
         # anima と同型。
         # 旧「f32 のまま・quantized ではない」は i8 系列同梱前の陳腐化した前提だった）。
         base_model_relation="quantized",
-        license="mit",
+        license=IRODORI_LICENSE,
         tags=("text-to-speech", "webgpu", "japanese"),
     )
 
@@ -277,7 +282,9 @@ def _irodori_defaults(model: Mapping[str, Any]) -> list[str]:
     ]
 
 
-def render_irodori_model_card(manifest: Mapping[str, Any], repo: str) -> str:
+def render_irodori_model_card(
+    manifest: Mapping[str, Any], repo: str, host_assets: Mapping[str, int] = {}
+) -> str:
     """Irodori 配布形の `README.md` 本文を組み立てる（純関数・末尾改行つき）。"""
     require_pipeline(manifest, IRODORI_SUPPORTED_PIPELINE)
     upstream = irodori_upstream(manifest["defaultModel"])
@@ -292,6 +299,9 @@ def render_irodori_model_card(manifest: Mapping[str, Any], repo: str) -> str:
             models(manifest),
             [""],
             _irodori_usage(manifest, repo),
-            *model_sections(manifest, (quants, _irodori_shape, _irodori_defaults)),
+            *model_sections(
+                manifest,
+                (partial(quants, host_assets=host_assets), _irodori_shape, _irodori_defaults),
+            ),
         )
     )

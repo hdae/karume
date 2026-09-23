@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from functools import partial
 from typing import Any
 
 from karume.modelcard import (
@@ -347,7 +348,12 @@ def _birefnet_shape(model: Mapping[str, Any]) -> list[str]:
     ]
 
 
-def render_birefnet_model_card(manifest: Mapping[str, Any], repo: str, checkpoint: str) -> str:
+def render_birefnet_model_card(
+    manifest: Mapping[str, Any],
+    repo: str,
+    checkpoint: str,
+    host_assets: Mapping[str, int] = {},
+) -> str:
     """BiRefNet 系配布形の `README.md` 本文を組み立てる（純関数・末尾改行つき）。
 
     `checkpoint` はこのリポが配る重み（`"hr"` / `"lucida"`）— manifest に並ぶモデル名は
@@ -366,6 +372,6 @@ def render_birefnet_model_card(manifest: Mapping[str, Any], repo: str, checkpoin
             models(manifest),
             [""],
             _birefnet_usage(manifest, repo),
-            *model_sections(manifest, (quants, _birefnet_shape)),
+            *model_sections(manifest, (partial(quants, host_assets=host_assets), _birefnet_shape)),
         )
     )

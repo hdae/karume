@@ -73,7 +73,7 @@ class TestQatPlanGate:
         [
             ("fixedWeights", 4),
             ("storageCounts", {"i2": 1, "i4": 2, "i8": 1}),
-            ("pleShards", 2),
+            ("pleBlocks", 2),
         ],
     )
     def test_it_reconciles_the_recorded_counts_with_the_series_itself(
@@ -94,10 +94,9 @@ class TestQatPlanGate:
             qat_plan(_series(tmp_path, ple_bits=2), "e2b")
 
     def test_it_refuses_a_container_missing_one_of_the_mixed_storages(self, tmp_path: Path) -> None:
-        """固定混成（I2 + I4 + I8）が揃わない容器は QAT の配布形として通さない。"""
-        container = fixture.qat_container(mlp_bits=4)
-        with pytest.raises(DistError, match="I8"):
-            qat_plan(_series(tmp_path, container=container), "e2b")
+        """固定混成（i2 + i4 + i8）が揃わない容器は QAT の配布形として通さない。"""
+        with pytest.raises(DistError, match="i8"):
+            qat_plan(_series(tmp_path, container_kwargs={"mlp_bits": 4}), "e2b")
 
     def test_it_refuses_a_capacity_beyond_the_model_limit(self, tmp_path: Path) -> None:
         """既定容量（4096）× 位置上限の小さい上流 — 長い会話でだけ落ちる形を焼かない。"""
@@ -109,6 +108,7 @@ class TestQatPlanGate:
         self, tmp_path: Path
     ) -> None:
         """出口 2 本は行軸まで同型なので、取り違えを落とせるのは幅の突合だけ。"""
-        container = fixture.qat_container(hidden_size=fixture.HIDDEN + 16)
         with pytest.raises(DistError, match="hidden"):
-            qat_plan(_series(tmp_path, container=container), "e2b")
+            qat_plan(
+                _series(tmp_path, container_kwargs={"hidden_size": fixture.HIDDEN + 16}), "e2b"
+            )

@@ -86,7 +86,7 @@ batch は**静的 1**。動的軸は時間 `T` の 1 本だけ（`symbol_names=(
 `vowel-detector-crnn-epoch3`）。**長さは綴りに入らない** — グラフが 1 本だからで、
 系列を分けるのはチェックポイントの世代だけ:
 
-    outputs/series/<系列名>/model.safetensors     重み・定数 + __metadata__
+    outputs/series/<系列名>/model.krm             重み・定数 + 2 文書の記述
     outputs/series/<系列名>/io.<case>.safetensors 入力と torch CPU 期待出力
 
 io のテンソルキー規約は tiny golden / DeBERTa / SigLIP2 と同じ
@@ -103,18 +103,19 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from safetensors import safe_open
 from safetensors.torch import save_file
 from torch import nn
 from torch.export import Dim
 
+from _shared.container_read import read_stored
 from _shared.paths import INPUTS_ROOT, SERIES_ROOT
 from karume.artifacts import staged_publication
+from karume.container import Provenance, container_parts
 from karume.convert import normalize_boundary_tensor
 from karume.ir import IrGraph
 from karume.pipeline import export_to_file
-from karume.shards import parse_piece_key, resolve_shards
 
+from .card import VOWEL_DETECTOR_LICENSE
 from .patch import gru_forward
 
 #: 実重みの親（手置きの入力素材 — docs/assets-layout.md）。
@@ -155,7 +156,11 @@ SYM_MIN = MIN_LENGTH // LENGTH_MULTIPLE
 #: **利用者の手元の確保失敗**として出る。
 SYM_MAX = 30_000
 
-MODEL_FILE = "model.safetensors"
+MODEL_FILE = "model.krm"
+
+#: 容器へ焼く出所（container-v1 §2.3）。ライセンス識別子はカード側の正本
+#: （{@link vowel_detector.card.VOWEL_DETECTOR_LICENSE}）から引く — 2 表が独立に動く形にしない。
+PROVENANCE = Provenance(license=VOWEL_DETECTOR_LICENSE)
 IO_PREFIX = "io."
 IO_SUFFIX = ".safetensors"
 INPUT_PREFIX = "input."
@@ -437,25 +442,22 @@ def _assert_largest(expected: str, values: Mapping[str, float], claim: str) -> N
 
 
 def assert_checkpoint_bytes(path: Path, state_dict: Mapping[str, torch.Tensor]) -> int:
-    """emit した initializer が上流 `.pt` の state_dict と**バイト一致**することを見る。
+    """据えた容器の initializer が上流 `.pt` の state_dict と**バイト一致**することを見る。
 
-    重みの変換は「読んで書くだけ」なので、値が変われば変換が壊れている。dtype・shape だけ
+    重みの変換は「読んで書くだけ」なので、値が変われば変換が壊れている。格納形・shape だけ
     でなく生バイト列で突き合わせる（NaN のビット列や −0.0 まで含めて「値が変わっていない」を
-    主張するため）。読み直しは**別実装のリーダ**（`safetensors.safe_open`）で行う。
+    主張するため）。この系列は f32 格納しか焼かないので、payload はそのまま上流のバイト列と
+    同じ並びになる。
 
     重み由来でない initializer（畳み込みで焼かれた定数）は `const.` 接頭辞を持つので、
     それ以外の余剰キーは「重みが黙って書き換えられて別名で入った」形として落とす。
     一致した本数を返す。
 
-    MUST: 突合は**全 shard の和**で見る（ADR 0081 — 配布形は常に「グラフ shard + weight
-    shard 列」）。代表 path 1 本だけを開く形にすると、テンソルを 1 本も持たないグラフ shard を
-    読んで「全部欠けている」になる（分割前は代表 path が現物だったので素で通っていた）。
-
-    MUST: 分割テンソル（`<親名>#NNNNN-of-NNNNN` — ADR 0090）は**親 1 本へ畳んで**から突き合わ
-    せる。行の連続範囲を index 順に `torch.cat` すれば親の実体そのものなので、突合の意味は
-    分割の有無で変わらない（畳まないと state_dict の鍵が全部「欠けている」に化ける）。
+    MUST: 読むのは**part 列の和**（{@link _shared.container_read.read_stored}）— 代表 path
+    1 本だけを開く形にすると、テンソルを 1 本も持たない part 0 を読んで「全部欠けている」に
+    なる。piece 分割された席も供給計画が行の順に畳むので、突合の意味は分割の有無で変わらない。
     """
-    stored = _read_initializers(resolve_shards(path))
+    stored = read_stored(path)
     missing = sorted(set(state_dict) - set(stored))
     if missing:
         raise AssertionError(f"{path}: state_dict の鍵が initializer に無い: {missing}")
@@ -465,36 +467,15 @@ def assert_checkpoint_bytes(path: Path, state_dict: Mapping[str, torch.Tensor]) 
     for name in sorted(set(stored) & set(state_dict)):
         source = state_dict[name]
         found = stored[name]
-        if found.dtype != source.dtype or tuple(found.shape) != tuple(source.shape):
+        if found.layout != "f32" or found.shape != tuple(source.shape):
             raise AssertionError(
-                f"テンソル '{name}': dtype / shape 不一致"
+                f"テンソル '{name}': 格納 / shape 不一致"
                 f"（元 {source.dtype} {tuple(source.shape)} /"
-                f" 読み直し {found.dtype} {tuple(found.shape)}）"
+                f" 読み直し {found.layout} {found.shape}）"
             )
-        if found.numpy().tobytes() != source.numpy().tobytes():
+        if found.payload != source.numpy().tobytes():
             raise AssertionError(f"テンソル '{name}': バイト列が一致しない")
     return len(state_dict)
-
-
-def _read_initializers(shards: Sequence[Path]) -> dict[str, torch.Tensor]:
-    """shard 列の全テンソル（piece は親へ畳む）。読み直しは**別実装のリーダ**で行う。
-
-    piece の連結は先頭次元（行）方向の `torch.cat` — 配布形の piece は親の行の連続範囲なので、
-    index 順に積めば親の実体に戻る（規則の正本は `karume.shards`）。
-    """
-    whole: dict[str, torch.Tensor] = {}
-    pieces: dict[str, list[tuple[int, torch.Tensor]]] = {}
-    for shard in shards:
-        with safe_open(str(shard), framework="pt") as handle:
-            for key in handle.keys():  # noqa: SIM118
-                parsed = parse_piece_key(key)
-                if parsed is None:
-                    whole[key] = handle.get_tensor(key)
-                else:
-                    pieces.setdefault(parsed[0], []).append((parsed[1], handle.get_tensor(key)))
-    for name, found in pieces.items():
-        whole[name] = torch.cat([tensor for _index, tensor in sorted(found)], dim=0)
-    return whole
 
 
 def export_series(ckpt: Path, out_dir: Path, length: int) -> dict[str, Any]:
@@ -521,6 +502,9 @@ def export_series(ckpt: Path, out_dir: Path, length: int) -> dict[str, Any]:
             module,
             (example,),
             staged / MODEL_FILE,
+            provenance=PROVENANCE,
+            # グラフ名は**部品名**（= karume.json の weights のキー = 据え替え先のディレクトリ名）。
+            graph_name=out_dir.name,
             # MUST: 記号は出力の 20ms 格子側に置く（`2*Dim("T")` — モジュール docstring の
             # 「長さ軸」）。素の `Dim("T")` だと conv の出力が床除算になり次元言語に載らない。
             dynamic_shapes={INPUT_NAME: {1: 2 * Dim("T", min=SYM_MIN, max=SYM_MAX)}},
@@ -540,7 +524,7 @@ def export_series(ckpt: Path, out_dir: Path, length: int) -> dict[str, Any]:
         "nodes": len(graph.nodes),
         "outputs": len(graph.outputs),
         "initializers": len(graph.initializers),
-        "model_bytes": sum(p.stat().st_size for p in resolve_shards(out_dir / MODEL_FILE)),
+        "model_bytes": sum(p.stat().st_size for p in container_parts(out_dir / MODEL_FILE)),
         "export_seconds": round(elapsed, 2),
         "ops": sorted(graph.required_ops),
         "symbols": list(graph.symbols),

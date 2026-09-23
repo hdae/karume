@@ -77,12 +77,11 @@ from safetensors.torch import load_file, save_file
 from torch import nn
 
 from _shared.calib_provenance import calib_complaint
+from _shared.container_read import StoredTensor, read_stored, weight_tensors
+from karume.container import container_parts
 from karume.convert import normalize_boundary_tensor
-from karume.dist import ir_graph, safetensors_header
 from karume.emit import unpack_int4
 from karume.quantize import dequantize_int4
-from karume.shards import parse_piece_key, resolve_shards
-from karume.verify import READER_DTYPE_BITS
 
 from . import export as ex
 from . import patch
@@ -726,7 +725,7 @@ def t_embed_table(source: ex.IrodoriSource, schedule: torch.Tensor, dim: int) ->
     return torch.cat(rows, dim=0).contiguous()
 
 
-#: i4 系列の読み戻しで受け付ける格納 dtype → `(safetensors の dtype 名, 生バイトを載せる器)`。
+#: i4 系列の読み戻しで受け付ける格納の layout → 生バイトを載せる器。
 #:
 #: i4 は packed 4bit（1 バイトに 2 要素 — ADR 0069 決定 2）なので器は uint8 で、論理形へ戻すのは
 #: `karume.emit.unpack_int4`。i8 が並ぶのは **block 外の 5 本**（`in_proj` / `out_proj` /
@@ -734,24 +733,14 @@ def t_embed_table(source: ex.IrodoriSource, schedule: torch.Tensor, dim: int) ->
 #: （どちらも聴感裁定 2026-08-23 で i4 から外した。`irodori.export._fake_quant_i4`）。
 #: ここに無い格納（f16 / bf16）が `dit` のコンテナに現れたら、i8+dit4 席の混成が想定と違う形で
 #: 出荷されている（{@link restore_dit_from_i4_series} が落とす）。
-_RESTORE_STORAGE: Mapping[str, tuple[str, torch.dtype]] = {
-    "f32": ("F32", torch.float32),
-    "i8": ("I8", torch.int8),
-    "i4": ("I4", torch.uint8),
+_RESTORE_STORAGE: Mapping[str, torch.dtype] = {
+    "f32": torch.float32,
+    "i8": torch.int8,
+    "i4": torch.uint8,
 }
 
-#: 逆変換に scale が要る格納 dtype（宣言に scale が無ければ読み戻せない = 即エラー）。
+#: 逆変換に scale が要る格納（宣言に scale が無ければ読み戻せない = 即エラー）。
 _SCALED_STORAGE = frozenset({"i8", "i4"})
-
-#: 持ち上げ定数のテンソルキーの接頭辞（`karume.convert` が `const.<digest16>` で振る）。
-#:
-#: コンテナに並ぶのは**ラッパ所有パラメタと持ち上げ定数の 2 種だけ**なので、上書き対象の席は
-#: これを除いた残りで決まる。綴りが core 側で動いたら、定数が「モジュールに無いパラメタ」として
-#: 形の門に掛かる — 黙って通る側には倒れない。
-_LIFTED_CONST_PREFIX = "const."
-
-#: safetensors のヘッダ長を書く先頭バイト数（データ節の開始位置 = これ + ヘッダ長）。
-_HEADER_LENGTH_BYTES = 8
 
 
 class RestoredDit(NamedTuple):
@@ -804,192 +793,37 @@ def _shippable_calib(series_dir: Path) -> Mapping[str, Any]:
     return record
 
 
-def _stored_parameters(graph: Mapping[str, Any], where: Path) -> dict[str, tuple[str, str | None]]:
-    """IR の initializer 宣言から「パラメタ席のテンソルキー → `(格納 dtype, scale キー)`」を引く。
+def _restored_tensor(container: Path, key: str, entry: StoredTensor) -> torch.Tensor:
+    """容器の格納 payload を論理形の torch テンソルへ（i4 は nibble 展開まで）。
 
-    scale のキーを綴りから組み立てず**宣言から引く**のは、格納の正本が IR だから
-    （`karume.emit` は `karume.scale.<重みキー>` で振るが、それは書き手側の実装詳細で、
-    読み手が写経すると 2 箇所で独立に動ける）。i4 / i8 なのに scale の宣言が無い席は即エラー
-    （逆変換の足場が無い = 読み戻せない）。
+    展開そのものは**書き下ろさず** core（`karume.emit.unpack_int4`）を呼ぶ。payload の長さが
+    宣言（shape × codec）と食い違う形は容器側の検証（`karume.verify.verify_container`）が
+    先に落とすので、ここが見るのは「読み戻せる格納か」だけである。
     """
-    initializers = graph.get("initializers")
-    if not isinstance(initializers, dict):
-        raise SystemExit(f"{where}: IR メタデータに initializers が無い")
-    stored: dict[str, tuple[str, str | None]] = {}
-    for name, raw in sorted(initializers.items()):
-        storage = raw.get("storage") if isinstance(raw, dict) else None
-        key = raw.get("tensor") if isinstance(raw, dict) else None
-        if not isinstance(key, str) or not isinstance(storage, dict):
-            raise SystemExit(f"{where}: initializer '{name}' の宣言が読めない")
-        if key.startswith(_LIFTED_CONST_PREFIX):
-            continue
-        dtype = storage.get("dtype")
-        if dtype not in _RESTORE_STORAGE:
-            raise SystemExit(
-                f"{where}: '{key}' の格納 {dtype!r} は読み戻せない"
-                f"（i8+dit4 席の dit に並ぶのは {' / '.join(sorted(_RESTORE_STORAGE))} だけ）"
-            )
-        scale = storage.get("scale")
-        if dtype in _SCALED_STORAGE and not isinstance(scale, str):
-            raise SystemExit(f"{where}: {dtype} 格納の '{key}' に scale の宣言が無い")
-        if key in stored:
-            raise SystemExit(f"{where}: テンソルキー '{key}' を 2 つの initializer が指している")
-        stored[key] = (dtype, scale if dtype in _SCALED_STORAGE else None)
-    return stored
-
-
-#: テンソル 1 本の在処（収容 shard・データ節内の `[begin, end)`）。piece 列は index 順に並ぶ。
-_Parts = dict[str, tuple[tuple[Path, int, int], ...]]
-
-
-def _entry_offsets(container: Path, key: str, entry: Any) -> tuple[int, int]:
-    """ヘッダ項目の `data_offsets`（形が違えば即エラー）。"""
-    offsets = entry.get("data_offsets") if isinstance(entry, dict) else None
-    if not isinstance(offsets, list) or len(offsets) != 2:
-        raise SystemExit(f"{container}: '{key}' のヘッダ項目が読めない")
-    return int(offsets[0]), int(offsets[1])
-
-
-def _fold_piece_entries(
-    container: Path, name: str, found: list[tuple[int, int, Path, Any]]
-) -> tuple[dict[str, Any], tuple[tuple[Path, int, int], ...]]:
-    """piece 列を親 1 本の宣言と区間列へ畳む（読み手契約 5 — ADR 0090 決定 1）。
-
-    宣言は親の dtype と全体 shape（先頭次元 = 各 piece の行数の和）。ここで畳まないと i4 席の
-    集合突合が piece キーで数えられ、「I4 格納のテンソルが 1 本も無い」と誤って落ちる。
-    """
-    ordered = sorted(found)
-    count = ordered[0][1]
-    if [index for index, *_rest in ordered] != list(range(1, count + 1)):
+    holder = _RESTORE_STORAGE.get(entry.layout)
+    if holder is None:
         raise SystemExit(
-            f"{container}: '{name}' の piece 連番 1..{count} が揃っていない"
-            f"（現物 {[index for index, *_rest in ordered]}）"
+            f"{container}: '{key}' の格納 {entry.layout!r} は読み戻せない"
+            f"（i8+dit4 席の dit に並ぶのは {' / '.join(sorted(_RESTORE_STORAGE))} だけ）"
         )
-    head = ordered[0][3]
-    rows = 0
-    parts: list[tuple[Path, int, int]] = []
-    for index, _count, shard, entry in ordered:
-        if entry.get("dtype") != head.get("dtype"):
-            raise SystemExit(
-                f"{container}: '{name}' の piece {index} が {entry.get('dtype')!r}"
-                f"（piece 1 は {head.get('dtype')!r}）— dtype は親と同一 MUST"
-            )
-        shape = entry.get("shape")
-        if not isinstance(shape, list) or not shape or shape[1:] != head["shape"][1:]:
-            raise SystemExit(
-                f"{container}: '{name}' の piece {index} の shape {shape} が"
-                f" piece 1 の {head['shape']} と先頭次元以外で違う"
-            )
-        rows += int(shape[0])
-        begin, end = _entry_offsets(container, name, entry)
-        parts.append((shard, begin, end))
-    return {"dtype": head["dtype"], "shape": [rows, *head["shape"][1:]]}, tuple(parts)
+    flat = torch.frombuffer(bytearray(entry.payload), dtype=holder)
+    shape = list(entry.shape)
+    return unpack_int4(flat, shape) if entry.layout == "i4" else flat.reshape(shape)
 
 
-def _component_headers(container: Path) -> tuple[dict[str, Any], _Parts]:
-    """コンポーネント全 shard のヘッダを 1 枚へ畳み、テンソルキー → 在処の区間列も返す。
+def _restored_scale(container: Path, key: str, entry: StoredTensor) -> torch.Tensor:
+    """companion scale を逆変換が要る形（`[行, group 数]`）へ。
 
-    MUST: 代表 path 1 本だけを見ない — 配布形は常に「グラフ shard（データ節 0 本）+ weight
-    shard 列」（ADR 0081）なので、先頭を読むだけでは I4 のテンソルが 1 本も見えず、
-    「i4 系列ではない」と誤って落ちる。`__metadata__` は畳んだ表に入れない（IR の取り出しは
-    `karume.dist.ir_graph` の側の仕事で、あちらがグラフ shard を名指しで読む）。
-
-    分割テンソル（`<親名>#NNNNN-of-NNNNN` — ADR 0090）も**親 1 本へ畳む**。畳んだ宣言は親の
-    dtype と全体 shape で、在処は piece の index 順に並ぶ区間列になる（配布形の shard 順の
-    整合そのものは `karume verify` が持つ — ここは読むために要る整合だけを見る）。
+    per-channel（i8）は group 数 1 なので `[行, 1]` の keepdim 形になり、ブロードキャストが
+    そのまま軸に乗る（{@link _dequantize_stored} の NOTE）。
     """
-    merged: dict[str, Any] = {}
-    parts: _Parts = {}
-    pieces: dict[str, list[tuple[int, int, Path, Any]]] = {}
-    owner: dict[str, Path] = {}
-    for shard in resolve_shards(container):
-        for key, entry in safetensors_header(shard).items():
-            if key == "__metadata__":
-                continue
-            if key in owner:
-                raise SystemExit(
-                    f"{container}: テンソル '{key}' が {owner[key].name} と {shard.name} に"
-                    "重複している（shard 跨ぎの重複は配布形の不変条件違反）"
-                )
-            owner[key] = shard
-            parsed = parse_piece_key(key)
-            if parsed is None:
-                merged[key] = entry
-                parts[key] = ((shard, *_entry_offsets(container, key, entry)),)
-                continue
-            name, index, count = parsed
-            pieces.setdefault(name, []).append((index, count, shard, entry))
-    for name, found in pieces.items():
-        if name in merged:
-            raise SystemExit(
-                f"{container}: テンソル '{name}' が丸ごとと piece の両方でコンテナに居る"
-                "（1 テンソルはどちらか一方 MUST）"
-            )
-        merged[name], parts[name] = _fold_piece_entries(container, name, found)
-    return merged, parts
-
-
-def _read_stored(
-    container: Path,
-    header: Mapping[str, Any],
-    parts: Mapping[str, tuple[tuple[Path, int, int], ...]],
-    expected: Mapping[str, str],
-) -> dict[str, torch.Tensor]:
-    """コンテナの生バイトを論理形の torch テンソルへ読む（I4 は nibble 展開まで・I8 は素の器）。
-
-    MUST: `safetensors` のリーダを通さない — ライブラリ（0.8.0）の dtype 語彙に `I4` が無く、
-    packed 4bit を含むコンテナは開く時点で落ちる（`karume.verify` が自前リーダを持つのと同じ
-    理由）。展開そのものは**書き下ろさず** core（`karume.emit.unpack_int4`）を呼ぶ。
-
-    `expected` は「テンソルキー → IR が宣言した格納 dtype」、`parts` は
-    {@link _component_headers} が引いた在処の区間列（分割テンソルなら piece の index 順）。
-    データ節のオフセットは **shard ごとに独立**（ADR 0081）なので、shard 単位でまとめて開いて
-    から席を引き、最後に親ごとへ連結する（行は連続メモリ順なので、バイト列の連結がそのまま
-    親の実体になる）。ヘッダの dtype が宣言と食い違う / 宣言した形と実バイト長が合わない、は
-    どちらも即エラー（宣言と実体の 2 面を突き合わせる）。
-    """
-    by_shard: dict[Path, list[tuple[str, int, int, int]]] = {}
-    for key in sorted(expected):
-        found = parts.get(key)
-        if found is None or not isinstance(header.get(key), dict):
-            raise SystemExit(f"{container}: テンソル '{key}' がコンテナに無い")
-        for position, (shard, begin, end) in enumerate(found):
-            by_shard.setdefault(shard, []).append((key, position, begin, end))
-
-    raw: dict[tuple[str, int], bytes] = {}
-    for shard, wanted in by_shard.items():
-        with shard.open("rb") as stream:
-            head = stream.read(_HEADER_LENGTH_BYTES)
-            data_start = _HEADER_LENGTH_BYTES + int.from_bytes(head, "little")
-            for key, position, begin, end in wanted:
-                stream.seek(data_start + begin)
-                chunk = stream.read(end - begin)
-                if len(chunk) != end - begin:
-                    raise SystemExit(f"{shard}: '{key}' のデータ節がファイル末尾で切れている")
-                raw[(key, position)] = chunk
-
-    values: dict[str, torch.Tensor] = {}
-    for key in sorted(expected):
-        dtype = expected[key]
-        name, container_dtype = _RESTORE_STORAGE[dtype]
-        entry = header[key]
-        if entry.get("dtype") != name:
-            raise SystemExit(
-                f"{container}: '{key}' は IR の宣言が {dtype} なのにヘッダは"
-                f" {entry.get('dtype')!r}（宣言と実体が割れている）"
-            )
-        shape = entry.get("shape")
-        if not isinstance(shape, list):
-            raise SystemExit(f"{container}: '{key}' のヘッダ項目が読めない")
-        blob = b"".join(raw[(key, position)] for position in range(len(parts[key])))
-        bits = math.prod(int(dim) for dim in shape) * READER_DTYPE_BITS[name]
-        if bits % 8 or len(blob) != bits // 8:
-            raise SystemExit(
-                f"{container}: '{key}' の宣言 {shape} × {name} と実バイト {len(blob)} が食い違う"
-            )
-        flat = torch.frombuffer(bytearray(blob), dtype=container_dtype)
-        values[key] = unpack_int4(flat, shape) if dtype == "i4" else flat.reshape(shape)
-    return values
+    if entry.scale is None or entry.group_size is None:
+        raise SystemExit(f"{container}: {entry.layout} 格納の '{key}' に scale の宣言が無い")
+    rows = entry.shape[0] if entry.shape else 1
+    row_length = math.prod(entry.shape[1:]) if len(entry.shape) > 1 else 1
+    return torch.frombuffer(bytearray(entry.scale), dtype=torch.float32).reshape(
+        rows, row_length // entry.group_size
+    )
 
 
 def _dequantize_stored(dtype: str, raw: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
@@ -1028,24 +862,24 @@ def restore_dit_from_i4_series(wrapper: nn.Module, series_dir: Path) -> Restored
     - **形**: 上書き対象の FQN がラッパ所有パラメタと過不足なく一致すること（コンテナに在るのに
       モジュールに無い / 逆、どちらも即エラー）。ずれたまま通すと、上書きされなかった重みだけが
       i8 の値で golden に載る
-    - **本数**: ヘッダの I4 テンソルの集合と、IR の宣言から i4 として上書きした集合が一致する
-      こと（本数はコンテナが正 — 期待値を焼かない）。**I8 は数えない** — 段 1 と同じ丸めなので
-      「i4 系列を読んでいる」の証拠にならず、i4 側の集合一致だけがそれを言える
+    - **本数**: i4 格納のテンソルが 1 本でも在ること（本数はコンテナが正 — 期待値を焼かない）。
+      **i8 は数えない** — 段 1 と同じ丸めなので「i4 系列を読んでいる」の証拠にならない
     - **席の効き**: 上書きで値が動いた i4 パラメタが 1 本も無い、を落とす（読み戻しが効いて
       いないのに i8 golden を i8+dit4 golden と呼ぶ事故は、数値も形も合うので他のどの門にも
       掛からない）
+
+    NOTE: `karume/4` には「ヘッダの I4 集合 = IR 宣言の i4 集合」という突合があったが、容器では
+    格納の正本が束縛表 1 本（宣言と実体が別々に動けない — container-v1 §5）になったので、
+    その突合は恒真になった。宣言と payload の噛み合わせは `verify_container` が受ける。
     """
     container = series_dir / ex.MODEL_FILE
-    if not all(shard.is_file() for shard in resolve_shards(container)):
+    if not all(part.is_file() for part in container_parts(container)):
         raise SystemExit(
             f"i4 系列のコンテナが無い: {container}"
             "（`python -m irodori.export --dtype i4` を先に走らせる）"
         )
     calib = _shippable_calib(series_dir)
-    # ヘッダは 2 度読む（オフセット表と IR メタデータ）— IR の取り出しは core の `ir_graph` に
-    # 任せて綴りを写経しない。読むのはどちらもヘッダだけで、数 GB のデータ節は舐めない。
-    header, parts = _component_headers(container)
-    stored = _stored_parameters(ir_graph(container), container)
+    stored = weight_tensors(read_stored(container))
     owned = dict(wrapper.named_parameters())
     absent = sorted(set(owned) - set(stored))
     extra = sorted(set(stored) - set(owned))
@@ -1055,22 +889,9 @@ def restore_dit_from_i4_series(wrapper: nn.Module, series_dir: Path) -> Restored
             f" コンテナに無い {absent[:3]} / モジュールに無い {extra[:3]}"
             "（DitGraph の構成と export した系列のどちらかが動いている）"
         )
-    int4_keys = frozenset(key for key, (dtype, _scale) in stored.items() if dtype == "i4")
-    packed_keys = {
-        key
-        for key, entry in header.items()
-        if isinstance(entry, dict) and entry.get("dtype") == "I4"
-    }
-    if packed_keys != int4_keys:
-        raise SystemExit(
-            f"{container}: I4 格納のテンソル {len(packed_keys)} 本に対し、i4 として読み戻す宣言は"
-            f" {len(int4_keys)} 本（過不足: {sorted(packed_keys ^ int4_keys)[:3]}）"
-        )
+    int4_keys = frozenset(key for key, entry in stored.items() if entry.layout == "i4")
     if not int4_keys:
-        raise SystemExit(f"{container}: I4 格納のテンソルが 1 本も無い（i4 系列ではない）")
-    expected = {key: dtype for key, (dtype, _scale) in stored.items()}
-    expected.update({scale: "f32" for _dtype, scale in stored.values() if scale is not None})
-    values = _read_stored(container, header, parts, expected)
+        raise SystemExit(f"{container}: i4 格納のテンソルが 1 本も無い（i4 系列ではない）")
 
     # 1 本ずつ「戻して → 比べて → 書いて → 捨てる」。全部を f32 で持ってから書くと、`dit` の
     # f32 一式（1.4GB 級）と同じ大きさの複製がもう 1 つ同時に生きる（`karume.emit` が格納側で
@@ -1078,9 +899,14 @@ def restore_dit_from_i4_series(wrapper: nn.Module, series_dir: Path) -> Restored
     # モジュールが golden を書くことはない。
     changed = 0
     with torch.no_grad():
-        for key, (dtype, scale_key) in sorted(stored.items()):
-            raw = values.pop(key)
-            value = raw if scale_key is None else _dequantize_stored(dtype, raw, values[scale_key])
+        for key in sorted(stored):
+            entry = stored[key]
+            raw = _restored_tensor(container, key, entry)
+            value = (
+                _dequantize_stored(entry.layout, raw, _restored_scale(container, key, entry))
+                if entry.layout in _SCALED_STORAGE
+                else raw
+            )
             parameter = owned[key]
             if tuple(value.shape) != tuple(parameter.shape):
                 raise SystemExit(
@@ -1090,7 +916,7 @@ def restore_dit_from_i4_series(wrapper: nn.Module, series_dir: Path) -> Restored
             # MUST: 効き門に数えるのは **i4 の席だけ**。i8 の 149 本は段 1 の i8 丸めと
             # 同じ scale・同じ格子なので値が動かないのが正常で、数に入れると「i4 が 1 本も
             # 効いていない」を i8 の一致が埋め合わせて隠す。
-            if dtype == "i4" and not torch.equal(parameter.detach(), value):
+            if entry.layout == "i4" and not torch.equal(parameter.detach(), value):
                 changed += 1
             parameter.copy_(value)
             del raw, value
@@ -1099,7 +925,7 @@ def restore_dit_from_i4_series(wrapper: nn.Module, series_dir: Path) -> Restored
             f"{container}: 読み戻した i4 {len(int4_keys)} 本が段 1（i8 丸め）の値と全て同じ"
             " — i4 の読み戻しが効いていない（i8 golden を i8+dit4 golden と呼ぶ事故）"
         )
-    int8 = sum(1 for dtype, _scale in stored.values() if dtype == "i8")
+    int8 = sum(1 for entry in stored.values() if entry.layout == "i8")
     plain = len(stored) - len(int4_keys) - int8
     print(
         f"[fake-quant] {ex.TARGET_DIT}: i4 系列の出荷バイトで上書きした —"
@@ -1123,7 +949,7 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path, dtype: str = "f32") -
 
     source = ex.IrodoriSource(source_dir)
     text_config, model_config = ex.read_configs(model_dir)
-    state = load_file(str(model_dir / ex.MODEL_FILE))
+    state = load_file(str(model_dir / ex.CHECKPOINT_FILE))
     backbone = ex.load_backbone(source, state, text_config)
     hidden_size = int(backbone.hidden_size)
     text_projector = ex.load_projector(

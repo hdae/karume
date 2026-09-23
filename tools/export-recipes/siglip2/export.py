@@ -77,7 +77,7 @@ MUST: 実画像 golden には**元画像の sha256** を `__metadata__` に載�
 系列名は `--model-dir` のディレクトリ名（既定の `inputs/siglip2/siglip2-base-patch16-224/`
 なら `siglip2-base-patch16-224`）:
 
-    outputs/series/<系列名>/model.safetensors     重み・定数 + __metadata__
+    outputs/series/<系列名>/model.krm             重み・定数 + 2 文書の記述
     outputs/series/<系列名>/io.<case>.safetensors 入力と torch CPU 期待出力
 
 io のテンソルキー規約は tiny golden / DeBERTa / EmbeddingGemma と同じ
@@ -101,12 +101,14 @@ from torch import nn
 
 from _shared.paths import INPUTS_ROOT, MISC_ROOT, SERIES_ROOT
 from karume.artifacts import staged_publication
+from karume.container import Provenance, container_parts
 from karume.convert import normalize_boundary_tensor
+from karume.dist import NOTICE_FILENAME
 from karume.ir import IrGraph
 from karume.pipeline import export_to_file
-from karume.shards import resolve_shards
 
 from . import patch
+from .card import SIGLIP2_LICENSE
 
 #: 実重みの親（`hf download google/<名前> --local-dir inputs/siglip2/<名前>` の展開先）。
 MODELS_ROOT = INPUTS_ROOT / "siglip2"
@@ -130,7 +132,11 @@ def default_out_dir(model_dir: Path) -> Path:
     return SERIES_ROOT / model_dir.name
 
 
-MODEL_FILE = "model.safetensors"
+MODEL_FILE = "model.krm"
+
+#: 容器へ焼く出所（container-v1 §2.3）。ライセンス識別子はカード側の正本
+#: （{@link siglip2.card.SIGLIP2_LICENSE}）から引く — 2 表が独立に動く形にしない。
+PROVENANCE = Provenance(license=SIGLIP2_LICENSE, notice=NOTICE_FILENAME)
 IO_PREFIX = "io."
 IO_SUFFIX = ".safetensors"
 INPUT_PREFIX = "input."
@@ -463,7 +469,15 @@ def export_series(
         # ディレクトリの席は書き手が作る（原語は席を作らない — path しか渡さない）。
         staged.mkdir()
         # 動的軸は無い（解像度もパッチ数も固定 — モジュール docstring）。
-        graph = export_to_file(wrapper, (example,), staged / MODEL_FILE, symbol_names=())
+        graph = export_to_file(
+            wrapper,
+            (example,),
+            staged / MODEL_FILE,
+            provenance=PROVENANCE,
+            # グラフ名は**部品名**（= karume.json の weights のキー = 据え替え先のディレクトリ名）。
+            graph_name=out_dir.name,
+            symbol_names=(),
+        )
         declared = tuple(item.name for item in graph.inputs)
         if declared != (INPUT_NAME,):
             raise AssertionError(f"グラフ入力の並びが {declared} で、期待の {(INPUT_NAME,)} と違う")
@@ -475,7 +489,7 @@ def export_series(
         "nodes": len(graph.nodes),
         "outputs": len(graph.outputs),
         "initializers": len(graph.initializers),
-        "model_bytes": sum(p.stat().st_size for p in resolve_shards(out_dir / MODEL_FILE)),
+        "model_bytes": sum(p.stat().st_size for p in container_parts(out_dir / MODEL_FILE)),
         "ops": sorted(graph.required_ops),
         "symbols": list(graph.symbols),
         "io": written,

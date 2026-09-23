@@ -46,6 +46,22 @@ def _ref(path: str, size: int, digit: str) -> dict[str, Any]:
     return {"path": path, "size": size, "sha256": digit * 64}
 
 
+def _container(*refs: dict[str, Any]) -> dict[str, Any]:
+    """weights の 1 dtype ぶん（`karume/5` の `container` — ADR 0109 決定 3）。
+
+    `descriptor` はカードが読まない欄なので、形だけ実物どおりに置く（2 文書の長さと sha256）。
+    """
+    return {
+        "container": {
+            "descriptor": {
+                "graph": {"length": 40, "sha256": "0" * 64},
+                "model": {"length": 24, "sha256": "1" * 64},
+            },
+            "parts": list(refs),
+        }
+    }
+
+
 def _siglip2_manifest(model: str = "base") -> dict[str, Any]:
     """SigLIP2 の最小 manifest（テンプレート取り違えの門を両向きに見るための相手）。"""
     return {
@@ -56,7 +72,7 @@ def _siglip2_manifest(model: str = "base") -> dict[str, Any]:
             model: {
                 "pipeline": SIGLIP2_SUPPORTED_PIPELINE,
                 "weights": {
-                    "vision": {"f32": {"shards": [_ref("v/model.f32.safetensors", 11, "c")]}}
+                    "vision": {"f32": _container(_ref("v/model.f32.safetensors", 11, "c"))}
                 },
                 "assets": {},
                 "quants": {"f32": {"weights": {"vision": "f32"}, "session": {}}},
@@ -90,14 +106,14 @@ def _sbv2_manifest() -> dict[str, Any]:
             "ZA": {
                 "pipeline": SBV2_SUPPORTED_PIPELINE,
                 "weights": {
-                    "text_encoder": {"i8": {"shards": [text_encoder]}},
+                    "text_encoder": {"i8": _container(text_encoder)},
                     "front": {
-                        "f16": {"shards": [_ref("ZA/front/model.f16.safetensors", 666, "f")]},
-                        "i8": {"shards": [_ref("ZA/front/model.i8.safetensors", 777, "0")]},
+                        "f16": _container(_ref("ZA/front/model.f16.safetensors", 666, "f")),
+                        "i8": _container(_ref("ZA/front/model.i8.safetensors", 777, "0")),
                     },
                     "voice": {
-                        "f16": {"shards": [_ref("ZA/voice/model.f16.safetensors", 888, "1")]},
-                        "i8": {"shards": [_ref("ZA/voice/model.i8.safetensors", 999, "2")]},
+                        "f16": _container(_ref("ZA/voice/model.f16.safetensors", 888, "1")),
+                        "i8": _container(_ref("ZA/voice/model.i8.safetensors", 999, "2")),
                     },
                 },
                 "assets": {
@@ -140,9 +156,9 @@ def _sbv2_manifest() -> dict[str, Any]:
             "ZB": {
                 "pipeline": SBV2_SUPPORTED_PIPELINE,
                 "weights": {
-                    "text_encoder": {"i8": {"shards": [text_encoder]}},
-                    "front": {"i8": {"shards": [_ref("ZB/front/model.i8.safetensors", 100, "7")]}},
-                    "voice": {"i8": {"shards": [_ref("ZB/voice/model.i8.safetensors", 200, "8")]}},
+                    "text_encoder": {"i8": _container(text_encoder)},
+                    "front": {"i8": _container(_ref("ZB/front/model.i8.safetensors", 100, "7"))},
+                    "voice": {"i8": _container(_ref("ZB/voice/model.i8.safetensors", 200, "8"))},
                 },
                 "assets": {
                     "tokenizer": tokenizer,
@@ -287,7 +303,9 @@ class TestSbv2Derivation:
 
     def test_it_takes_the_sizes_from_the_manifest(self, sbv2_card: str) -> None:
         manifest = _sbv2_manifest()
-        manifest["models"]["ZA"]["weights"]["text_encoder"]["i8"]["shards"][0]["size"] = 12345
+        manifest["models"]["ZA"]["weights"]["text_encoder"]["i8"]["container"]["parts"][0][
+            "size"
+        ] = 12345
         moved = render_sbv2_model_card(manifest, REPO, SBV2_FN_PROFILE, SBV2_QUANT_ABBREVIATIONS)
         assert "| 2.17 KiB (" in sbv2_card
         assert "| 2.17 KiB (" not in moved

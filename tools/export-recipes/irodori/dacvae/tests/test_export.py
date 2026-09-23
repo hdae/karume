@@ -386,7 +386,13 @@ class TestWriteIo:
     def exported(self, tmp_path):
         torch.manual_seed(0)
         module = TinyGraph()
-        graph = export_to_file(module, (torch.randn(1, 3, 4),), tmp_path / ex.MODEL_FILE)
+        graph = export_to_file(
+            module,
+            (torch.randn(1, 3, 4),),
+            tmp_path / ex.MODEL_FILE,
+            provenance=ex.PROVENANCE,
+            graph_name="tiny",
+        )
         return module, graph, tmp_path
 
     def test_writes_one_file_per_case(self, exported):

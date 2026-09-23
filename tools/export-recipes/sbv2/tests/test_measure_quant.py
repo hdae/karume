@@ -20,9 +20,13 @@ from pathlib import Path
 
 import pytest
 import torch
-from safetensors.torch import save_file
 from torch import nn
 
+from karume.container import Provenance
+from karume.emit import stored_model
+from karume.ir import IrGraph, IrInitializer, IrInput, IrNode, IrStorage, IrValue
+from karume.publish import publish_container
+from karume.quantize import channel_scale
 from sbv2 import measure_quant as measure
 
 #: 合成モデルの初期化 seed（方式の差を見るテストは値が退化していないことが前提）。
@@ -319,17 +323,54 @@ class TestW4GroupSizeReach:
         assert moved, f"{kind} の丸めが g で動かない"
 
 
+#: 合成配布形の part 本数（2 文書 + const 領域 + 重み）。
+DIST_PARTS = 3
+
+_LINEAR_KEY = "enc_p.style_proj.weight"
+_EMB_KEY = "enc_p.emb.weight"
+
+
 def _write_dist(root: Path) -> None:
-    """配布形の最小形（linear の重み 1 本 + embedding 1 本 + それぞれの scale）を書く。"""
+    """配布形の最小形（i8 の linear 1 本 + i8 の embedding 1 本）をコンテナとして書く。
+
+    どちらも rank 2 の i8 なので、「形だけで引くと embedding が混ざる」失敗モードが
+    そのまま再現できる（{@link measure.project_distribution} の docstring）。
+    """
     root.mkdir(parents=True, exist_ok=True)
-    save_file(
-        {
-            "enc_p.style_proj.weight": torch.ones(8, 64, dtype=torch.int8),
-            measure.DIST_SCALE_PREFIX + "enc_p.style_proj.weight": torch.ones(8, 1),
-            "enc_p.emb.weight": torch.ones(4, 32, dtype=torch.int8),
-            measure.DIST_SCALE_PREFIX + "enc_p.emb.weight": torch.ones(4, 1),
-        },
-        str(root / "model.i8.safetensors"),
+    initializers = {
+        "w_linear": IrInitializer(tensor=_LINEAR_KEY, storage=IrStorage(dtype="f32")),
+        "w_emb": IrInitializer(tensor=_EMB_KEY, storage=IrStorage(dtype="f32")),
+    }
+    tensors = {_LINEAR_KEY: torch.zeros(8, 64), _EMB_KEY: torch.zeros(4, 32)}
+    values = {
+        "x": IrValue(dtype="f32", shape=[1, 64]),
+        "w_linear": IrValue(dtype="f32", shape=[8, 64]),
+        "w_emb": IrValue(dtype="f32", shape=[4, 32]),
+        "h": IrValue(dtype="f32", shape=[1, 8]),
+        "e": IrValue(dtype="f32", shape=[1, 1, 32]),
+    }
+    graph = IrGraph(
+        inputs=[
+            IrInput(name="x", dtype="f32", shape=[1, 64]),
+            IrInput(name="ids", dtype="i32", shape=[1, 1]),
+        ],
+        outputs=["h", "e"],
+        initializers=initializers,
+        values=values,
+        nodes=[
+            IrNode(op="linear", ins=["x", "w_linear"], outs=["h"], attrs={}),
+            IrNode(op="embedding", ins=["w_emb", "ids"], outs=["e"], attrs={"padding_idx": -1}),
+        ],
+    )
+    scales = {key: channel_scale(tensor, 0) for key, tensor in tensors.items()}
+    stored = stored_model(graph, tensors, weight_dtype="i8", weight_scales=scales)
+    publish_container(
+        root / "model.i8.krm",
+        stored.graph,
+        stored.tensors,
+        stored.bindings,
+        graph_name="front",
+        provenance=Provenance(license="apache-2.0", writer="karume-fixture"),
     )
 
 
@@ -371,7 +412,7 @@ class TestDistributionProjection:
             "shared（DeBERTa text_encoder）",
             "話者ごとの net_g",
         ]
-        assert projection["files"] == 2
+        assert projection["files"] == 2 * DIST_PARTS
 
     def test_it_measures_the_shrink_against_the_real_file_bytes(self, tmp_path: Path) -> None:
         _write_dist(tmp_path / "F1" / "front")
@@ -379,16 +420,6 @@ class TestDistributionProjection:
         total = sum(path.stat().st_size for path in tmp_path.rglob("*") if path.is_file())
         assert projection["total_bytes"] == total
         assert projection["shrink_of_total"] == projection["delta_bytes"] / total
-
-    def test_it_fails_loudly_when_the_scale_tensor_is_missing(self, tmp_path: Path) -> None:
-        target = tmp_path / "F1" / "front"
-        target.mkdir(parents=True)
-        save_file(
-            {"enc_p.style_proj.weight": torch.ones(8, 64, dtype=torch.int8)},
-            str(target / "model.i8.safetensors"),
-        )
-        with pytest.raises(AssertionError, match="scale テンソルが無い"):
-            measure.project_distribution(tmp_path, self.LINEAR, DEFAULT_G)
 
 
 class TestConfigSelection:

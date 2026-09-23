@@ -23,6 +23,7 @@ import json
 import re
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import torch
@@ -32,8 +33,9 @@ from gemma4 import export as gx
 from gemma4 import export_decode as decode
 from gemma4 import export_drafter as drafter
 from gemma4.rope import FULL_ATTENTION, SLIDING_ATTENTION
+from karume.container import ir_v2_document
 from karume.dist import DistError
-from karume.ir import IrGraph, IrInitializer, IrInput, IrNode, IrState, IrStorage, IrValue
+from karume.ir import IrState
 from karume.pipeline import publish_model
 from karume.verify import parse_ir_graph
 
@@ -67,7 +69,6 @@ def _tiny_lender() -> drafter.LenderSlots:
         },
         slots={SLIDING_ATTENTION: ("l0.k", "l0.v"), FULL_ATTENTION: ("l1.k", "l1.v")},
         shared_tensor=TINY_SHARED_TENSOR,
-        shared_initializer="lender_embed",
     )
 
 
@@ -211,33 +212,42 @@ class TestTheSpellingsMirrorTheDistribution:
         assert list(drafter.DRAFTER_INPUTS[2:]) == list(decode.ROPE_INPUTS)
 
 
-def _lender_graph() -> IrGraph:
-    """貸し手の製品コンテナに相当する最小グラフ（states 4 本 + 主表の embedding）。"""
-    return IrGraph(
-        symbols=[decode.CAPACITY_SYMBOL],
-        inputs=[IrInput(name="tok", dtype="i32", shape=[1, 1])],
-        outputs=["e"],
-        initializers={
-            "lender_embed": IrInitializer(
-                tensor=TINY_SHARED_TENSOR, storage=IrStorage(dtype="i8", scale="s")
-            )
+def _lender_document() -> dict[str, Any]:
+    """貸し手の製品コンテナのグラフ記述（**IR v2 の文書** — states 4 本 + 主表の embedding）。
+
+    v2 では initializer 名がテンソルキーそのもの（docs/ir-v2.md）なので、共有の指し先と
+    宣言の名前は同じ 1 語になる。格納は文書に現れない（正本は束縛表）ので、
+    {@link _lender_layouts} が別に渡す。
+    """
+    return {
+        "format": "karume-ir",
+        "version": 2,
+        "requires": {"ops": ["embedding"]},
+        "symbols": [decode.CAPACITY_SYMBOL],
+        "inputs": [{"name": "tok", "dtype": "i32", "shape": [1, 1]}],
+        "outputs": ["e"],
+        "initializers": {TINY_SHARED_TENSOR: {}},
+        "values": {
+            TINY_SHARED_TENSOR: {"dtype": "f32", "shape": [TINY_VOCAB, TINY_BACKBONE]},
+            "e": {"dtype": "f32", "shape": [1, 1, TINY_BACKBONE]},
         },
-        values={
-            "lender_embed": IrValue(dtype="f32", shape=[TINY_VOCAB, TINY_BACKBONE]),
-            "e": IrValue(dtype="f32", shape=[1, 1, TINY_BACKBONE]),
+        "states": {
+            name: {"dtype": "f32", "shape": shape} for name, shape in _tiny_lender().shapes.items()
         },
-        states={
-            name: IrState(dtype="f32", shape=shape) for name, shape in _tiny_lender().shapes.items()
-        },
-        nodes=[
-            IrNode(
-                op="embedding",
-                ins=["lender_embed", "tok"],
-                outs=["e"],
-                attrs={"padding_idx": -1},
-            )
+        "nodes": [
+            {
+                "op": "embedding",
+                "ins": [TINY_SHARED_TENSOR, "tok"],
+                "outs": ["e"],
+                "attrs": {"padding_idx": -1},
+            }
         ],
-    )
+    }
+
+
+def _lender_layouts() -> dict[str, str]:
+    """貸し手の束縛表（テンソルキー → 格納の layout）。主表は i8 常駐。"""
+    return {TINY_SHARED_TENSOR: "i8"}
 
 
 class TestReadingTheLender:
@@ -245,7 +255,8 @@ class TestReadingTheLender:
 
     def test_the_shared_tensor_key_is_read_from_the_lender_container(self):
         found = drafter.lender_slots(
-            _lender_graph(),
+            _lender_document(),
+            _lender_layouts(),
             SimpleNamespace(),
             SimpleNamespace(
                 vocab_size=TINY_VOCAB,
@@ -265,12 +276,13 @@ class TestReadingTheLender:
 
     def test_a_lender_without_the_owner_slot_is_rejected(self):
         """貸し手のスロット名が変わった世代は「スロットが無い」で落ちる（沈黙しない）。"""
-        graph = _lender_graph()
-        graph.states.pop("l0.k")
+        graph = _lender_document()
+        graph["states"].pop("l0.k")
 
         with pytest.raises(AssertionError, match=re.escape("state スロット 'l0.k' が無い")):
             drafter.lender_slots(
                 graph,
+                _lender_layouts(),
                 SimpleNamespace(),
                 SimpleNamespace(
                     vocab_size=TINY_VOCAB,
@@ -283,19 +295,23 @@ class TestReadingTheLender:
 
     def test_a_lender_with_two_candidate_tables_is_rejected(self):
         """主表が 1 本に決まらなければ落とす（どちらを借りるかを勘で決めない）。"""
-        graph = _lender_graph()
-        graph.initializers["other"] = IrInitializer(
-            tensor="lender.other", storage=IrStorage(dtype="i8", scale="s2")
-        )
-        graph.values["other"] = IrValue(dtype="f32", shape=[TINY_VOCAB, TINY_BACKBONE])
-        graph.values["e2"] = IrValue(dtype="f32", shape=[1, 1, TINY_BACKBONE])
-        graph.nodes.append(
-            IrNode(op="embedding", ins=["other", "tok"], outs=["e2"], attrs={"padding_idx": -1})
+        graph = _lender_document()
+        graph["initializers"]["lender.other"] = {}
+        graph["values"]["lender.other"] = {"dtype": "f32", "shape": [TINY_VOCAB, TINY_BACKBONE]}
+        graph["values"]["e2"] = {"dtype": "f32", "shape": [1, 1, TINY_BACKBONE]}
+        graph["nodes"].append(
+            {
+                "op": "embedding",
+                "ins": ["lender.other", "tok"],
+                "outs": ["e2"],
+                "attrs": {"padding_idx": -1},
+            }
         )
 
         with pytest.raises(AssertionError, match=r"主埋め込み表.*が 2 本"):
             drafter.lender_slots(
                 graph,
+                {**_lender_layouts(), "lender.other": "i8"},
                 SimpleNamespace(),
                 SimpleNamespace(
                     vocab_size=TINY_VOCAB,
@@ -369,10 +385,13 @@ def tiny_drafter():
 
 
 def _point_the_shared_tensor_elsewhere(borrow: dict, lend: dict) -> None:
-    """共有 initializer の指し先だけを別のキーへ差し替える（貸し手には無い綴り）。"""
+    """共有 initializer の指し先だけを別のキーへ差し替える（貸し手には無い綴り）。
+
+    IR v2 では指し先 = initializer の名前なので、鍵を付け替える。
+    """
     del lend
-    shared = next(entry for entry in borrow["initializers"].values() if "shared" in entry)
-    shared["shared"]["tensor"] = "someone.else"
+    name = next(key for key, entry in borrow["initializers"].items() if entry.get("shared"))
+    borrow["initializers"]["someone.else"] = borrow["initializers"].pop(name)
 
 
 class TestExportedDrafterForm:
@@ -398,9 +417,11 @@ class TestExportedDrafterForm:
             init.tensor for init in shared_graph.initializers.values() if not init.is_shared
         }
         verified = publish_model(
-            tmp_path / "model.safetensors",
+            tmp_path / gx.MODEL_FILE,
             shared_graph,
             {name: value for name, value in remaining.items() if name in declared},
+            provenance=gx.PROVENANCE,
+            graph_name="tiny",
         )
         return verified, config, lender
 
@@ -454,8 +475,8 @@ class TestExportedDrafterForm:
     def test_the_distribution_gate_accepts_the_pair(self, tiny_container):
         """配る側の門は借り手 + 貸し手の**組**で見る（片方だけ差し替えた世代を落とす）。"""
         verified, config, _ = tiny_container
-        borrowed = verified.to_dict()
-        lent = _lender_graph().to_dict()
+        borrowed = ir_v2_document(verified)
+        lent = _lender_document()
         rope = gemma4_distribution.gemma4_rope(config.get_text_config(), "tiny")
 
         gemma4_distribution.assert_gemma4_drafter_graph(
@@ -477,8 +498,8 @@ class TestExportedDrafterForm:
     )
     def test_the_distribution_gate_is_effective(self, tiny_container, mutate, message):
         verified, config, _ = tiny_container
-        borrowed = verified.to_dict()
-        lent = _lender_graph().to_dict()
+        borrowed = ir_v2_document(verified)
+        lent = _lender_document()
         mutate(borrowed, lent)
         rope = gemma4_distribution.gemma4_rope(config.get_text_config(), "tiny")
 

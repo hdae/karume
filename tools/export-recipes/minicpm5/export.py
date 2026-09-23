@@ -52,7 +52,7 @@ MUST: 出た IR の形は {@link assert_ir_form} が**必ず検査**する。`re
 
 ## 出力レイアウト
 
-    outputs/series/minicpm5-1b/model.safetensors     重み・定数 + __metadata__.karume_ir
+    outputs/series/minicpm5-1b/model.krm             重み・定数 + 2 文書の記述
     outputs/series/minicpm5-1b/io.<case>.safetensors 入力と torch CPU での期待出力
 
 io のテンソルキー規約は tiny golden / DeBERTa / EmbeddingGemma と同じ
@@ -75,12 +75,12 @@ from torch.export import Dim
 
 from _shared.paths import INPUTS_ROOT, SERIES_ROOT
 from karume.artifacts import staged_publication
+from karume.container import Provenance, container_parts
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION, normalize_boundary_tensor
 from karume.ir import IrGraph
 from karume.pipeline import export_to_file
 from karume.rope import assert_rope_lifted
 from karume.shapes import declared_shape
-from karume.shards import resolve_shards
 
 #: 公式重みの置き場（`hf download openbmb/MiniCPM5-1B` の展開先）。
 DEFAULT_MODEL_DIR = INPUTS_ROOT / "minicpm5" / "MiniCPM5-1B"
@@ -88,7 +88,14 @@ DEFAULT_MODEL_DIR = INPUTS_ROOT / "minicpm5" / "MiniCPM5-1B"
 #: 生成物の既定の置き場。格納 dtype は f32 のみ（f16 / i8 / w4 は別系列で決める話）。
 DEFAULT_OUT_DIR = SERIES_ROOT / "minicpm5-1b"
 
-MODEL_FILE = "model.safetensors"
+MODEL_FILE = "model.krm"
+
+#: 容器へ焼く出所（container-v1 §2.3）。この recipe は配布形を組まない（カードも
+#: `distribution.py` も無い）ので、識別子の出どころは上流モデルカードの宣言そのもので、
+#: `THIRD_PARTY_NOTICES.md` が「使った revision に対しては未確認」と記録している値である。
+PROVENANCE = Provenance(
+    license="apache-2.0", upstream_revision="4e9de7a0778dc1c362e983e6858f0e77542cbdca"
+)
 IO_PREFIX = "io."
 IO_SUFFIX = ".safetensors"
 INPUT_PREFIX = "input."
@@ -486,6 +493,9 @@ def export_series(model_dir: Path, out_dir: Path, *, sym_max: int = SYM_MAX) -> 
             wrapper,
             (example_ids,),
             staged / MODEL_FILE,
+            provenance=PROVENANCE,
+            # グラフ名は**部品名**（= karume.json の weights のキー = 据え替え先のディレクトリ名）。
+            graph_name=out_dir.name,
             dynamic_shapes=({1: seq},),
             preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
         )
@@ -503,7 +513,7 @@ def export_series(model_dir: Path, out_dir: Path, *, sym_max: int = SYM_MAX) -> 
         "nodes": len(graph.nodes),
         "outputs": len(graph.outputs),
         "initializers": len(graph.initializers),
-        "model_bytes": sum(p.stat().st_size for p in resolve_shards(out_dir / MODEL_FILE)),
+        "model_bytes": sum(p.stat().st_size for p in container_parts(out_dir / MODEL_FILE)),
         "ops": sorted(graph.required_ops),
         "symbols": list(graph.symbols),
         "io": written,

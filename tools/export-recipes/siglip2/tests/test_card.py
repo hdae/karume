@@ -36,6 +36,22 @@ def _ref(path: str, size: int, digit: str) -> dict[str, Any]:
     return {"path": path, "size": size, "sha256": digit * 64}
 
 
+def _container(*refs: dict[str, Any]) -> dict[str, Any]:
+    """weights の 1 dtype ぶん（`karume/5` の `container` — ADR 0109 決定 3）。
+
+    `descriptor` はカードが読まない欄なので、形だけ実物どおりに置く（2 文書の長さと sha256）。
+    """
+    return {
+        "container": {
+            "descriptor": {
+                "graph": {"length": 40, "sha256": "0" * 64},
+                "model": {"length": 24, "sha256": "1" * 64},
+            },
+            "parts": list(refs),
+        }
+    }
+
+
 def _siglip2_manifest(model: str = "base") -> dict[str, Any]:
     """SigLIP2 の最小 manifest（値は実物と重ならない偽値）。"""
     return {
@@ -46,7 +62,7 @@ def _siglip2_manifest(model: str = "base") -> dict[str, Any]:
             model: {
                 "pipeline": SIGLIP2_SUPPORTED_PIPELINE,
                 "weights": {
-                    "vision": {"f32": {"shards": [_ref("v/model.f32.safetensors", 11, "c")]}}
+                    "vision": {"f32": _container(_ref("v/model.f32.safetensors", 11, "c"))}
                 },
                 "assets": {},
                 "quants": {"f32": {"weights": {"vision": "f32"}, "session": {}}},

@@ -15,6 +15,7 @@ MUST: **数値・ダウンロード量・quant 表・dtype ラベルは 1 つ残
 from __future__ import annotations
 
 from collections.abc import Mapping
+from functools import partial
 from typing import Any
 
 from karume.modelcard import (
@@ -216,7 +217,9 @@ def _siglip2_shape(model: Mapping[str, Any]) -> list[str]:
     ]
 
 
-def render_siglip2_model_card(manifest: Mapping[str, Any], repo: str) -> str:
+def render_siglip2_model_card(
+    manifest: Mapping[str, Any], repo: str, host_assets: Mapping[str, int] = {}
+) -> str:
     """SigLIP2 配布形の `README.md` 本文を組み立てる（純関数・末尾改行つき）。"""
     require_pipeline(manifest, SIGLIP2_SUPPORTED_PIPELINE)
     return render(
@@ -230,6 +233,6 @@ def render_siglip2_model_card(manifest: Mapping[str, Any], repo: str) -> str:
             models(manifest),
             [""],
             _siglip2_usage(manifest, repo),
-            *model_sections(manifest, (quants, _siglip2_shape)),
+            *model_sections(manifest, (partial(quants, host_assets=host_assets), _siglip2_shape)),
         )
     )

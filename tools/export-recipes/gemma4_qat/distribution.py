@@ -7,17 +7,17 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from _shared.container_read import read_layouts
 from _shared.licenses import apache_license_2_0
 from gemma4.distribution import (
+    GEMMA4_ASSETS,
     assert_gemma4_graph,
-    assert_gemma4_ple_shards,
+    assert_gemma4_ple_assets,
     assert_gemma4_tokenizer,
-    gemma4_assets,
     gemma4_hidden_size,
     gemma4_max_position,
     gemma4_pipeline_config,
     gemma4_ple_index,
-    gemma4_ple_role,
     gemma4_rope,
     gemma4_sampler,
     gemma4_text_config,
@@ -48,8 +48,13 @@ from .config import (
 )
 
 
-def assert_qat_graph(graph: Mapping[str, Any]) -> None:
-    """通常 Gemma や SRQ の落ちた QAT を同じ配布として通さない。"""
+def assert_qat_graph(graph: Mapping[str, Any], layouts: Mapping[str, str]) -> None:
+    """通常 Gemma や SRQ の落ちた QAT を同じ配布として通さない。
+
+    `layouts` はテンソルキー → 格納の layout（{@link _shared.container_read.read_layouts}）—
+    IR v2 のグラフ記述は格納を持たない（正本は束縛表）ので、固定格納の判定はそちらから引く。
+    IR v2 では initializer の名前がテンソルキーそのものなので、両者は同じ鍵で引ける。
+    """
     nodes, initializers = graph["nodes"], graph["initializers"]
     producers = {value: node for node in nodes for value in node["outs"]}
     consumers: dict[str, list[Mapping[str, Any]]] = {}
@@ -62,17 +67,17 @@ def assert_qat_graph(graph: Mapping[str, Any]) -> None:
     if len(embeddings) != 1:
         raise DistError("QAT token embedding が1本でない")
     token_weight = embeddings[0]["ins"][0]
-    if initializers[token_weight].get("storage", {}).get("dtype") != "i2":
-        raise DistError("QAT token embedding は固定 I2 が必要")
+    if token_weight not in initializers or layouts.get(token_weight) != "i2":
+        raise DistError("QAT token embedding は固定 i2 が必要")
     head_count = 0
     ordinary_count = 0
     for node in nodes:
         if node["op"] != "linear":
             continue
-        weight = initializers.get(node["ins"][1], {})
-        dtype = weight.get("storage", {}).get("dtype", "f32")
+        key = node["ins"][1]
+        dtype = layouts.get(key, "f32") if key in initializers else "f32"
         if dtype == "f32":
-            if weight.get("tensor") != "model.model.per_layer_model_projection.weight":
+            if key != "model.model.per_layer_model_projection.weight":
                 raise DistError("QAT の固定量子化でない linear が許可した projection 以外に在る")
             ordinary_count += 1
             continue
@@ -101,11 +106,11 @@ def assert_qat_graph(graph: Mapping[str, Any]) -> None:
 FIXED_STORAGE_DTYPES: tuple[str, ...] = ("i2", "i4", "i8")
 
 
-def fixed_storage_counts(graph: Mapping[str, Any]) -> dict[str, int]:
-    """IR の initializer を固定格納の dtype 別に数える（`reference.json` の突合相手）。"""
+def fixed_storage_counts(graph: Mapping[str, Any], layouts: Mapping[str, str]) -> dict[str, int]:
+    """束縛表の initializer を固定格納の語彙別に数える（`reference.json` の突合相手）。"""
     counts = dict.fromkeys(FIXED_STORAGE_DTYPES, 0)
-    for entry in graph["initializers"].values():
-        dtype = entry.get("storage", {}).get("dtype")
+    for key in graph["initializers"]:
+        dtype = layouts.get(key)
         if dtype in counts:
             counts[dtype] += 1
     return counts
@@ -165,21 +170,22 @@ def qat_plan(series_dir: Path, model: str) -> ModelPlan:
         or reference.get("maxSelectedRows") != MAX_SELECTED_ROWS
     ):
         raise DistError("QAT reference の schema/family/model/trace範囲が合わない")
-    index = gemma4_ple_index(source, storage=f"i{PLE_BITS[model]}")
-    container = source / "model.safetensors"
-    for dtype in ("I2", "I4", "I8"):
+    container = source / "model.krm"
+    index = gemma4_ple_index(container, storage=f"i{PLE_BITS[model]}")
+    for dtype in FIXED_STORAGE_DTYPES:
         assert_storage("model", container, {"model": dtype})
-    assert_storage_absent("model", container, {"model": ("F16",)})
+    assert_storage_absent("model", container, {"model": ("f16",)})
     graph = ir_graph(container)
-    assert_qat_graph(graph)
+    layouts = read_layouts(container)
+    assert_qat_graph(graph, layouts)
     # 変換時の検証結果は「何本を照合したか」で突き合わせる（常に True のフラグは門にならない）。
-    counts = fixed_storage_counts(graph)
+    counts = fixed_storage_counts(graph, layouts)
     if (
         reference.get("fixedWeights") != sum(counts.values())
         or reference.get("storageCounts") != counts
-        or reference.get("pleShards") != len(index["shards"])
+        or reference.get("pleBlocks") != len(index["values"]["blocks"])
     ):
-        raise DistError("QAT reference の固定重み本数・格納内訳・PLE shard 本数が現物と違う")
+        raise DistError("QAT reference の固定重み本数・格納内訳・PLE block 本数が現物と違う")
     config = gemma4_text_config(source)
     where = str(source / "config.json")
     rope = gemma4_rope(config, where)
@@ -187,25 +193,19 @@ def qat_plan(series_dir: Path, model: str) -> ModelPlan:
     assert_gemma4_graph(graph, container, index, rope, gemma4_hidden_size(config, where))
     if index["tokens"] != vocab:
         raise DistError("QAT PLE とグラフの語彙数が違う")
-    placements = {
-        gemma4_ple_role(i): source / shard["file"] for i, shard in enumerate(index["shards"])
-    }
-    assert_gemma4_ple_shards(placements, index)
+    assert_gemma4_ple_assets(container, index)
     assert_gemma4_tokenizer(source / "tokenizer.json", vocab)
     artifacts = {
-        "model": Artifact("model/model.i4.safetensors", source=container),
+        "model": Artifact("model/model.i4.krm", source=container),
         "tokenizer": Artifact("tokenizer/tokenizer.json", source=source / "tokenizer.json"),
-        "ple_index": Artifact("ple/ple.json", source=source / "ple.json"),
     }
-    for role, path in placements.items():
-        artifacts[role] = Artifact(f"ple/{path.name}", source=path)
     quant_modes = qat_quants(model)
     return ModelPlan(
         name=model,
         pipeline="gemma4-qat/1",
         artifacts=artifacts,
         weights={"model": {"i4": WeightFiles("model")}},
-        assets=gemma4_assets(index),
+        assets=GEMMA4_ASSETS,
         quants=quant_modes,
         default_quant=QAT_DEFAULT_QUANT[model],
         # 3 式（chunkLength ≤ maxChunkLength / chunkLength ≤ capacity / capacity ≤ maxPosition）
@@ -226,7 +226,7 @@ def repo_name(model: str) -> str:
     return "karume-gemma4-qat"
 
 
-def render_card(manifest: Mapping[str, Any], repo: str) -> str:
+def render_card(manifest: Mapping[str, Any], repo: str, host_assets: Mapping[str, int] = {}) -> str:
     """数値・モデル一覧・量子化表を manifest から描く。固定値保持を再量子化と呼ばない。"""
     require_pipeline(manifest, "gemma4-qat/1")
     upstream = tuple(f"google/{checkpoint_name(model)}" for model in manifest["models"])
@@ -255,7 +255,7 @@ def render_card(manifest: Mapping[str, Any], repo: str) -> str:
         models(manifest),
     ]
     for name, model in manifest["models"].items():
-        sections.extend([[f"## {name}", ""], quants(model)])
+        sections.extend([[f"## {name}", ""], quants(model, host_assets=host_assets)])
     return render(sections)
 
 
@@ -271,8 +271,9 @@ The actual included models are identified in README.md and karume.json.
     + """
 
 The text decoder was extracted, its graph was converted to Karume states form, per-layer embeddings
-were moved to a host-read sidecar, and rotary inputs are generated on the host. Fixed quantized
-integers and scales were retained without requantization. Vision, audio, and MTP are not included.
+were moved to container assets the host reads, and rotary inputs are generated on the host.
+Fixed quantized integers and scales were retained without requantization.
+Vision, audio, and MTP are not included.
 No upstream implementation source code is redistributed by this recipe.
 """
 )

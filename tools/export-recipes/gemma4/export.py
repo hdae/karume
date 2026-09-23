@@ -77,7 +77,7 @@ scale 台帳が実値と食い違う）。格納は既定 `i8` + linear を 1 �
 
 ## 出力レイアウト
 
-    outputs/series/gemma4-e2b/model.safetensors     重み・定数 + __metadata__.karume_ir
+    outputs/series/gemma4-e2b/model.krm             重み・定数 + 2 文書の記述
     outputs/series/gemma4-e2b/io.<case>.safetensors 入力と torch CPU での期待出力
 
 io のテンソルキー規約は tiny golden / DeBERTa / EmbeddingGemma / MiniCPM5 と同じ
@@ -110,14 +110,16 @@ from torch.export import Dim
 
 from _shared.paths import INPUTS_ROOT, SERIES_ROOT
 from gemma4 import ple, rope
+from gemma4.card import GEMMA4_LICENSE
 from karume.artifacts import staged_publication
+from karume.container import Provenance, container_parts
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION, normalize_boundary_tensor
+from karume.dist import NOTICE_FILENAME
 from karume.ir import IrGraph
 from karume.pipeline import export_to_file
 from karume.quantize import Int4Report, Int8Report, fake_quant_int4, fake_quant_int8
 from karume.rope import assert_rope_lifted
 from karume.shapes import declared_shape
-from karume.shards import resolve_shards
 
 #: 公式重みの置き場（`hf download google/gemma-4-E2B-it` の展開先）。
 DEFAULT_MODEL_DIR = INPUTS_ROOT / "gemma4" / "gemma-4-E2B-it"
@@ -125,7 +127,18 @@ DEFAULT_MODEL_DIR = INPUTS_ROOT / "gemma4" / "gemma-4-E2B-it"
 #: 生成物の既定の置き場。
 DEFAULT_OUT_DIR = SERIES_ROOT / "gemma4-e2b"
 
-MODEL_FILE = "model.safetensors"
+MODEL_FILE = "model.krm"
+
+#: **上流チェックポイント**の重みファイル名（HF の綴り — 出力の容器とは別物）。分けて持つのは、
+#: 配布形が `.krm` へ移っても読む側の綴りは上流が決めるため（`gemma4.provenance` の
+#: `FINGERPRINT_FILES` と同じ事実）。
+CHECKPOINT_FILE = "model.safetensors"
+
+#: 容器へ焼く出所（container-v1 §2.3）。ライセンス識別子はカード側の正本
+#: （{@link gemma4.card.GEMMA4_LICENSE}）から引く — 2 表が独立に動く形にしない。
+#: 3 系列（1-shot / decode / product）と drafter はどれも同じ上流チェックポイント由来なので、
+#: 出所も 1 本を共有する。
+PROVENANCE = Provenance(license=GEMMA4_LICENSE, notice=NOTICE_FILENAME)
 IO_PREFIX = "io."
 IO_SUFFIX = ".safetensors"
 INPUT_PREFIX = "input."
@@ -461,7 +474,7 @@ def load_model_and_tables(model_dir: Path) -> tuple[nn.Module, nn.ModuleList]:
 
     register_attention()
     config = load_text_config(model_dir)
-    model_file = model_dir / MODEL_FILE
+    model_file = model_dir / CHECKPOINT_FILE
     rows, _ = ple.per_layer_table_shape(model_file, PLE_CHECKPOINT_KEY)
     if rows != int(config.vocab_size_per_layer_input):
         raise ValueError(
@@ -801,6 +814,10 @@ def export_series(model_dir: Path, out_dir: Path, *, sym_max: int = SYM_MAX) -> 
             wrapper,
             (example_ids,),
             staged / MODEL_FILE,
+            provenance=PROVENANCE,
+            # グラフ名は**部品名**（= karume.json の weights のキー = 据え替え先の
+            # ディレクトリ名）。
+            graph_name=out_dir.name,
             dynamic_shapes=({1: seq},),
             preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
             weight_dtype="i8",
@@ -826,7 +843,7 @@ def export_series(model_dir: Path, out_dir: Path, *, sym_max: int = SYM_MAX) -> 
         "nodes": len(graph.nodes),
         "outputs": len(graph.outputs),
         "initializers": len(graph.initializers),
-        "model_bytes": sum(p.stat().st_size for p in resolve_shards(out_dir / MODEL_FILE)),
+        "model_bytes": sum(p.stat().st_size for p in container_parts(out_dir / MODEL_FILE)),
         "ops": sorted(graph.required_ops),
         "symbols": list(graph.symbols),
         "io": written,

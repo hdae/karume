@@ -479,7 +479,11 @@ class TestIoNaming:
             reference=None,
         )
         graph = export_anima.export_to_file(
-            Two(), component.cases[0][1], tmp_path / "model.safetensors"
+            Two(),
+            component.cases[0][1],
+            tmp_path / export_anima.MODEL_FILE,
+            provenance=export_anima.PROVENANCE,
+            graph_name="tiny",
         )
 
         with pytest.raises(AssertionError, match="グラフ入力名が宣言と不一致"):

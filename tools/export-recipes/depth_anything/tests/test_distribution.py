@@ -1,7 +1,7 @@
 """Depth Anything V2 の配布 recipe（`depth_anything.distribution`）— 組み立て 1 周ぶんの単体テスト。
 
-実資産は使わない。組み立てへ届く入力は数 KB の**正当な最小 IR コンテナ**（`ir_fixtures`）で、
-門に落とされることを見るケースだけが従来の偽資産のまま（{@link _depth_anything_container}）。
+実資産は使わない。組み立てへ届く入力は数 KB の**正当な最小コンテナ**（`ir_fixtures`）で、
+門に落とされることを見るケースも同じ器で作る（{@link _depth_anything_container}）。
 前処理定数の出どころ（`preprocessor_config.json`）も合成 JSON で足りる。
 
 manifest v2（`karume/2` — ADR 0041）以降、リポ内レイアウトは一律「モデル別サブツリー +
@@ -20,8 +20,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from ir_fixtures import ir_container
-from shard_series import placed_paths, write_component
+from container_series import placed_paths, write_component
+from ir_fixtures import Shape, ir_container
 
 from _shared.licenses import APACHE_LICENSE_2_0_PATH
 from depth_anything.card import (
@@ -51,23 +51,6 @@ from karume.dist import (
     resolve_card_renderer,
     verify_dist,
 )
-from karume.ir import IR_METADATA_KEY
-
-
-def _fake_safetensors(
-    dtype: str, payload: bytes, metadata: Mapping[str, str] | None = None
-) -> bytes:
-    """格納 dtype の門を通る最小の safetensors（8 バイト長 + ヘッダ JSON + データ節）。
-
-    `metadata` を渡すと `__metadata__` 節が付く（IR コンテナを要求する門のため）。
-    """
-    header: dict[str, Any] = {
-        "w": {"dtype": dtype, "shape": [len(payload)], "data_offsets": [0, len(payload)]}
-    }
-    if metadata is not None:
-        header["__metadata__"] = dict(metadata)
-    encoded = json.dumps(header).encode("utf-8")
-    return len(encoded).to_bytes(8, "little") + encoded + payload
 
 
 def _write(path: Path, payload: bytes) -> None:
@@ -81,7 +64,7 @@ def _in_subtree(model: str, paths: Iterable[str]) -> list[str]:
 
 
 def _placed_paths() -> list[str]:
-    """配布形に現れる相対 path（weights の席は shard 連番に展開される — ADR 0081）。"""
+    """配布形に現れる相対 path（weights の席は part 連番に展開される — container-v1 §8）。"""
     return placed_paths(DEPTH_ANYTHING_OUTPUT_PATHS, DEPTH_ANYTHING_WEIGHTS)
 
 
@@ -127,55 +110,37 @@ _DEPTH_ANYTHING_PREPROCESSOR: Mapping[str, Any] = {
 }
 
 
-def _depth_anything_graph(
+def _depth_anything_container(
     *,
-    shape: Sequence[Any] = (1, 3, _DEPTH_ANYTHING_HEIGHT, _DEPTH_ANYTHING_WIDTH),
-    out_shape: Sequence[Any] | None = None,
-    name: str = "pixel_values",
+    storage: str = "f32",
+    input_name: str = "pixel_values",
+    input_shape: Sequence[Any] | None = None,
+    depth_shape: Sequence[Any] | None = None,
     outputs: int = 1,
     symbols: Sequence[str] = (),
-) -> str:
-    """門が読む最小の IR メタデータ（入力 1 本・出力の宣言・記号次元）。"""
-    names = [f"out_{index}" for index in range(outputs)]
-    depth = list(out_shape) if out_shape is not None else [1, shape[2], shape[3]]
-    return json.dumps(
-        {
-            "inputs": [{"name": name, "shape": list(shape)}],
-            "outputs": names,
-            "values": {output: {"dtype": "f32", "shape": depth} for output in names},
-            "symbols": list(symbols),
-        }
-    )
+) -> list[bytes]:
+    """系列に置く深度推定グラフの中身（part 列 — 先頭が part 0）。
 
+    組み立てへ届く形は**正当なコンテナ**でなければならない（組み立ては入力を開いて宣言の全
+    規則で見る — `karume.dist.assert_weight_components_verified`）ので、門に落とす側も同じ器で
+    作り、**宣言だけを実物とずらす**。
 
-def _depth_anything_container(
-    dtype: str, graph: str | None, storage: str | None
-) -> bytes | list[bytes]:
-    """系列に置く深度推定グラフの中身。
-
-    組み立てへ届く既定の形は**正当な IR コンポーネント**でなければならない（組み立ては入力を
-    IR v1 の全規則で見る — `karume.dist.assert_weight_components_verified`）。正当な側は
-    shard 列（`list[bytes]`・先頭がグラフ shard — ADR 0081）で、偽コンテナは代表 path 1 本の
-    `bytes` のまま（計画の門で止まるので分割の側まで届かない）。
-
-    軸は 2 本ある:
-
-    - `dtype` は**単一 dtype の偽コンテナ**が名乗るヘッダ dtype。要求検査（「F32 が無い」）を
-      見るケースはこちらでしか作れない — 実物どおりの f16 系列は F32 も含むので、要求検査は
-      通ってしまう。
-    - `storage` は**実物どおりの混成コンテナ**の格納形（f16 / i8 / i4 は適格外の重みと bias が
-      F32 で残り、i4 はさらに I8 が混ざる）。禁止表（{@link DEPTH_ANYTHING_STORAGE_FORBIDDEN}）の
-      門はこの形でしか試せない。
+    `storage` は実物どおりの混成コンポーネントの格納形（f16 / i8 / i4 は適格外の重みと bias が
+    f32 で残り、i4 はさらに i8 が混ざる）— 禁止表（{@link DEPTH_ANYTHING_STORAGE_FORBIDDEN}）の門は
+    この形でしか試せない。残りの引数はグラフ宣言の各軸で、既定は実物どおり。
     """
-    if storage is not None or (graph is None and dtype == "F32"):
-        return ir_container(
-            mark="depth-anything",
-            storage=storage if storage is not None else dtype.lower(),
-            inputs=(("pixel_values", (1, 3, _DEPTH_ANYTHING_HEIGHT, _DEPTH_ANYTHING_WIDTH)),),
-            outputs=([1, _DEPTH_ANYTHING_HEIGHT, _DEPTH_ANYTHING_WIDTH],),
-        )
-    return _fake_safetensors(
-        dtype, b"depth-anything-weights", {IR_METADATA_KEY: graph or _depth_anything_graph()}
+    shape: Shape = (
+        list(input_shape)
+        if input_shape is not None
+        else [1, 3, _DEPTH_ANYTHING_HEIGHT, _DEPTH_ANYTHING_WIDTH]
+    )
+    depth: Shape = list(depth_shape) if depth_shape is not None else [1, shape[2], shape[3]]
+    return ir_container(
+        mark="depth-anything",
+        storage=storage,
+        inputs=((input_name, shape),),
+        outputs=[depth] * outputs,
+        symbols=symbols,
     )
 
 
@@ -183,10 +148,8 @@ def _build_depth_anything_sources(
     root: Path,
     *,
     model: str = DEPTH_ANYTHING_DEFAULT_MODEL,
-    graph: str | None = None,
-    dtype: str = "F32",
-    storage: str | None = None,
     preprocessor: Mapping[str, Any] | None = _DEPTH_ANYTHING_PREPROCESSOR,
+    **container: Any,
 ) -> DepthAnythingSources:
     """系列 + 実重みの置き場を偽資産で再現する（配布しない `io.*` の混入込み）。
 
@@ -197,9 +160,7 @@ def _build_depth_anything_sources(
         series=root / "outputs" / "series" / depth_anything_series_name(model),
         model=root / "inputs" / "depth-anything" / depth_anything_checkpoint(model),
     )
-    write_component(
-        sources.series / "model.safetensors", _depth_anything_container(dtype, graph, storage)
-    )
+    write_component(sources.series / "model.krm", _depth_anything_container(**container))
     # 配布に入ってはいけない E2E フィクスチャ（系列には実際にこれが並んでいる）。
     _write(sources.series / "io.ramp.safetensors", b"io-fixture")
     if preprocessor is not None:
@@ -265,13 +226,7 @@ class TestDepthAnythingLayout:
         )
         assert verify_dist(out_dir)
 
-    def test_it_refuses_a_compressed_asset_in_the_f32_seat(self, tmp_path: Path) -> None:
-        """格納形は系列ディレクトリ名でなくヘッダが正（`--dtype` 付け忘れの逆向き）。"""
-        sources = _build_depth_anything_sources(tmp_path, dtype="F16")
-        with pytest.raises(DistError, match="F32 が無い"):
-            depth_anything_plan(sources)
-
-    @pytest.mark.parametrize(("storage", "intruder"), [("f16", "F16"), ("i8", "I8"), ("i4", "I4")])
+    @pytest.mark.parametrize(("storage", "intruder"), [("f16", "f16"), ("i8", "i8"), ("i4", "i4")])
     def test_it_refuses_a_real_compressed_series_in_the_f32_seat(
         self, tmp_path: Path, storage: str, intruder: str
     ) -> None:
@@ -405,19 +360,14 @@ class TestDepthAnythingGraphGate:
 
     def test_it_refuses_a_graph_baked_for_another_resolution(self, tmp_path: Path) -> None:
         """サイズが違えば事前学習解像度も違う（Small 518² / 別サイズの組み合わせ）。"""
-        sources = _build_depth_anything_sources(
-            tmp_path, graph=_depth_anything_graph(shape=(1, 3, 518, 518))
-        )
+        sources = _build_depth_anything_sources(tmp_path, input_shape=(1, 3, 518, 518))
         with pytest.raises(DistError, match="前処理の寸法と焼かれた解像度が別の版"):
             depth_anything_plan(sources)
 
     def test_it_refuses_a_graph_whose_axes_are_transposed(self, tmp_path: Path) -> None:
         """非正方の寸法だけが検出できる取り違え（`[1,3,W,H]`）。"""
         sources = _build_depth_anything_sources(
-            tmp_path,
-            graph=_depth_anything_graph(
-                shape=(1, 3, _DEPTH_ANYTHING_WIDTH, _DEPTH_ANYTHING_HEIGHT)
-            ),
+            tmp_path, input_shape=(1, 3, _DEPTH_ANYTHING_WIDTH, _DEPTH_ANYTHING_HEIGHT)
         )
         with pytest.raises(DistError, match="前処理の寸法と焼かれた解像度が別の版"):
             depth_anything_plan(sources)
@@ -425,31 +375,26 @@ class TestDepthAnythingGraphGate:
     def test_it_refuses_a_depth_map_with_a_channel_axis(self, tmp_path: Path) -> None:
         """`[1, 1, H, W]` は要素数では `[1, H, W]` と区別できない（階数まで見る）。"""
         sources = _build_depth_anything_sources(
-            tmp_path,
-            graph=_depth_anything_graph(
-                out_shape=(1, 1, _DEPTH_ANYTHING_HEIGHT, _DEPTH_ANYTHING_WIDTH)
-            ),
+            tmp_path, depth_shape=(1, 1, _DEPTH_ANYTHING_HEIGHT, _DEPTH_ANYTHING_WIDTH)
         )
         with pytest.raises(DistError, match="チャネル軸なし"):
             depth_anything_plan(sources)
 
     def test_it_refuses_a_graph_with_a_second_output(self, tmp_path: Path) -> None:
         """中間段まで出す別 export は、位置で引く後段が別の値を深度として読む。"""
-        sources = _build_depth_anything_sources(tmp_path, graph=_depth_anything_graph(outputs=2))
+        sources = _build_depth_anything_sources(tmp_path, outputs=2)
         with pytest.raises(DistError, match="深度マップ 1 本だけ"):
             depth_anything_plan(sources)
 
     def test_it_refuses_a_graph_with_a_symbolic_axis(self, tmp_path: Path) -> None:
         """解像度もパッチ数も固定なので、動かす軸は 1 本も無い。"""
-        sources = _build_depth_anything_sources(
-            tmp_path, graph=_depth_anything_graph(symbols=("T",))
-        )
+        sources = _build_depth_anything_sources(tmp_path, symbols=("T",))
         with pytest.raises(DistError, match="記号次元"):
             depth_anything_plan(sources)
 
     def test_it_refuses_a_renamed_input(self, tmp_path: Path) -> None:
         """実行側は名前で束ねるので、綴りが変われば束ねられない。"""
-        sources = _build_depth_anything_sources(tmp_path, graph=_depth_anything_graph(name="px"))
+        sources = _build_depth_anything_sources(tmp_path, input_name="px")
         with pytest.raises(DistError, match="グラフ入力"):
             depth_anything_plan(sources)
 

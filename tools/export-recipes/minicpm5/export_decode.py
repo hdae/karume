@@ -47,7 +47,7 @@ mask 入力を落とし、Tmax² 定数と `sym_prefix_slice` を刈る。{@link
 
 ## 出力レイアウト
 
-    outputs/series/minicpm5-1b-decode/model.safetensors         重み・定数 + karume_ir
+    outputs/series/minicpm5-1b-decode/model.krm                 重み・定数 + 2 文書の記述
     outputs/series/minicpm5-1b-decode/io.<case>.safetensors     無 pad 全長の入出力
     outputs/series/minicpm5-1b-decode/greedy.<case>.safetensors greedy 継続 K step の期待列
 
@@ -74,12 +74,12 @@ from torch.nn import functional
 from _shared.decode_series import _write_greedy, assert_case_room, positions_for
 from _shared.paths import SERIES_ROOT
 from karume.artifacts import staged_publication
+from karume.container import container_parts
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION, normalize_boundary_tensor
 from karume.ir import IrGraph
 from karume.ops import ARGMAX_OP, ATTENTION_OP, STATE_APPEND_OP
 from karume.pipeline import export_module, publish_model
 from karume.shapes import declared_shape
-from karume.shards import resolve_shards
 from karume.states import StateAttentionSpec, StatesPlan, to_states_form
 from minicpm5 import export as one_shot
 
@@ -424,7 +424,9 @@ def assert_ir_form_decode(
     }
 
 
-def _write_container(graph: IrGraph, tensors: Mapping[str, torch.Tensor], path: Path) -> IrGraph:
+def _write_container(
+    graph: IrGraph, tensors: Mapping[str, torch.Tensor], path: Path, *, graph_name: str
+) -> IrGraph:
     """手術済みグラフを書いて検証する（公開の 3 段は `pipeline.publish_model` に預ける）。
 
     `export_to_file` は export → 書き出しが 1 本道で手術を挟む隙間が無いので、書き出し以降
@@ -432,11 +434,11 @@ def _write_container(graph: IrGraph, tensors: Mapping[str, torch.Tensor], path: 
     検査も、shard 分割（ADR 0070 決定 1）とその据え替え・後始末も core が持つ。
 
     刈り込みで死んだ initializer（mask の Tmax² 定数）は格納テンソルからも落とす —
-    `write_model` は宣言と格納の**完全一致**を要求する。
+    `stored_model` は宣言と格納の**完全一致**を要求する。
     """
     declared = {init.tensor for init in graph.initializers.values()}
     stored = {name: tensor for name, tensor in tensors.items() if name in declared}
-    return publish_model(path, graph, stored)
+    return publish_model(path, graph, stored, provenance=one_shot.PROVENANCE, graph_name=graph_name)
 
 
 def _write_io(
@@ -515,7 +517,10 @@ def export_series(
         config = wrapper.model.config
         print("[export] states 形へ手術 → 書き出し", file=sys.stderr, flush=True)
         surgical = to_states_form(graph, states_plan(graph, int(config.num_hidden_layers)))
-        verified = _write_container(surgical, tensors, staging / one_shot.MODEL_FILE)
+        # グラフ名は**部品名**（= 据え替え先のディレクトリ名 — 作業席の名前ではない）。
+        verified = _write_container(
+            surgical, tensors, staging / one_shot.MODEL_FILE, graph_name=out_dir.name
+        )
         form = assert_ir_form_decode(verified, config)
 
         print("[io] 全長 forward", file=sys.stderr, flush=True)
@@ -545,7 +550,9 @@ def export_series(
         "outputs": len(verified.outputs),
         "initializers": len(verified.initializers),
         "pruned_initializers": len(graph.initializers) - len(verified.initializers),
-        "model_bytes": sum(p.stat().st_size for p in resolve_shards(out_dir / one_shot.MODEL_FILE)),
+        "model_bytes": sum(
+            p.stat().st_size for p in container_parts(out_dir / one_shot.MODEL_FILE)
+        ),
         "ops": sorted(verified.required_ops),
         "symbols": list(verified.symbols),
         "io": io_written,

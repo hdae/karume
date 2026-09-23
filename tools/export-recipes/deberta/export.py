@@ -14,7 +14,7 @@ transformers は **5.14.1 でピン**する（recon §6-5 — モデリングコ
 
 出力レイアウト（Deno 側 `packages/runtime/tests/e2e_deberta_test.ts` が列挙する）:
 
-    outputs/series/deberta/<variant>/model.safetensors     重み・定数 + __metadata__.karume_ir
+    outputs/series/deberta/<variant>/model.krm             重み・定数 + 2 文書の記述
     outputs/series/deberta/<variant>/io.<case>.safetensors 入力と torch CPU での期待出力
 
 io のテンソルキー規約は tiny golden と同じ（`input.<グラフ入力名>` / `output.<位置>`）。
@@ -62,6 +62,7 @@ from torch.export import Dim
 from _shared.paths import SERIES_ROOT
 from karume.act_quant import attach_act_quant, detach_act_quant
 from karume.artifacts import staged_publication
+from karume.container import Provenance, container_parts
 from karume.convert import normalize_boundary_tensor
 from karume.ir import IrGraph
 from karume.pipeline import export_to_file
@@ -72,7 +73,6 @@ from karume.quantize import (
     fake_quant_int8,
     iter_quant_targets,
 )
-from karume.shards import resolve_shards
 
 from . import calib, patch
 from .calib_texts import CALIB_TEXTS
@@ -134,7 +134,18 @@ InputArgs = Mapping[str, torch.Tensor]
 #: 黙ってずれると golden の入力だけが入れ替わる）。
 INPUT_ORDER: tuple[str, ...] = ("input_ids", "attention_mask", "c2p_pos", "p2c_pos")
 
-MODEL_FILE = "model.safetensors"
+MODEL_FILE = "model.krm"
+
+#: 容器へ焼く出所（container-v1 §2.3）。この recipe は SBV2 の `text_encoder` 席を焼くだけで
+#: 自分のカードを持たないので、ライセンス識別子の正本は消費側のカード
+#: （`sbv2.card.SBV2_TEXT_ENCODER_LICENSE`・実地確認 2026-08-07）にある。
+#:
+#: MUST: 綴りは読み手と一致させる。写しを持つのは {@link EXPORT_PROVENANCE_FILE} と同じ理由 —
+#: produce 側が consume 側を import する向きは作らない。一致は
+#: `deberta/tests/test_export.py` が毎回突き合わせる。
+LICENSE = "cc-by-sa-4.0"
+
+PROVENANCE = Provenance(license=LICENSE)
 IO_PREFIX = "io."
 #: w8a8 鏡像 io の prefix。**`io.` で始まらない**こと MUST — Deno 側の通常ケース列挙は
 #: `startsWith("io.")` なので、`io.` 始まりにすると鏡像が w8 の golden として拾われる。
@@ -613,6 +624,9 @@ def export_variant(
             wrapper,
             tuple(example_args[key] for key in INPUT_ORDER),
             staged / MODEL_FILE,
+            provenance=PROVENANCE,
+            # グラフ名は**部品名**（= karume.json の weights のキー = 据え替え先のディレクトリ名）。
+            graph_name=out_dir.name,
             # 添字表は `[T, T]` — 両軸が同じ記号（正方であることを export の段で縛る）。
             dynamic_shapes=({1: seq}, {1: seq}, {0: seq, 1: seq}, {0: seq, 1: seq}),
             weight_dtype=BASE_WEIGHT_DTYPES[dtype],
@@ -630,7 +644,7 @@ def export_variant(
             mirror, attached = _write_mirror_io(wrapper, graph, cases, staged)
         _write_export_provenance(out_dir.name, sym_max, staged)
 
-    model_bytes = sum(p.stat().st_size for p in resolve_shards(out_dir / MODEL_FILE))
+    model_bytes = sum(p.stat().st_size for p in container_parts(out_dir / MODEL_FILE))
     return {
         "layers": num_layers,
         "dir": str(out_dir),

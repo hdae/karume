@@ -27,6 +27,22 @@ def _ref(path: str, size: int, digit: str) -> dict[str, Any]:
     return {"path": path, "size": size, "sha256": digit * 64}
 
 
+def _container(*refs: dict[str, Any]) -> dict[str, Any]:
+    """weights の 1 dtype ぶん（`karume/5` の `container` — ADR 0109 決定 3）。
+
+    `descriptor` はカードが読まない欄なので、形だけ実物どおりに置く（2 文書の長さと sha256）。
+    """
+    return {
+        "container": {
+            "descriptor": {
+                "graph": {"length": 40, "sha256": "0" * 64},
+                "model": {"length": 24, "sha256": "1" * 64},
+            },
+            "parts": list(refs),
+        }
+    }
+
+
 #: 偽 manifest のモデル名。帰属（上流リポ・表示名）はモデル名から `IRODORI_UPSTREAMS` で
 #: 引くようになった（2026-09-01）ので、ここだけは実在キーを使う — それ以外の値は偽のまま。
 MODEL = "v4.1-small"
@@ -42,8 +58,8 @@ def _irodori_manifest(model: str = MODEL) -> dict[str, Any]:
             model: {
                 "pipeline": IRODORI_SUPPORTED_PIPELINE,
                 "weights": {
-                    "backbone": {"f16": {"shards": [_ref("ZA/backbone/model.f16.st", 11, "a")]}},
-                    "dit": {"f16": {"shards": [_ref("ZA/dit/model.f16.st", 13, "b")]}},
+                    "backbone": {"f16": _container(_ref("ZA/backbone/model.f16.st", 11, "a"))},
+                    "dit": {"f16": _container(_ref("ZA/dit/model.f16.st", 13, "b"))},
                 },
                 "assets": {},
                 "quants": {

@@ -11,60 +11,89 @@ from safetensors import safe_open
 from torch import nn
 
 pytest.importorskip("transformers")
+from container_series import write_component
 from transformers.integrations.gemma_quant import QuantizedEmbedding, QuantizedLinear
 
-from gemma4.distribution import assert_gemma4_ple_shards, gemma4_ple_index, gemma4_ple_role
+from gemma4.distribution import assert_gemma4_ple_assets, gemma4_ple_index
 from gemma4_qat.checkpoint import TraceLinear, fixed_trace_weights, load_qat
-from gemma4_qat.ple import write_ple
-from gemma4_qat.tests.series_fixture import packed_embedding
+from gemma4_qat.ple import build_ple
+from gemma4_qat.tests.series_fixture import packed_embedding, qat_container
+from karume.container import AssetInput
 from karume.dist import DistError
+from karume.ple import PLE_INDEX_ASSET, PLE_INDEX_ROLE
+
+
+def _publish(tmp_path: Path, bits: int, *, bend=None, rows: int = 9):
+    """packed PLE を資産として載せた容器を据え、`(代表 path, 索引, probe の参照)` を返す。
+
+    `bend` は索引 JSON だけを 1 箇所曲げる口（資産の block 列はそのまま — 「索引だけ古い
+    組み合わせ」を作る席）。
+    """
+    module = packed_embedding(bits, rows=rows)
+    build = build_ple(module, 3, 32, tmp_path)
+    assets = dict(build.assets)
+    if bend is not None:
+        index = json.loads(bytes(assets[PLE_INDEX_ASSET].payload))
+        bend(index)
+        payload = json.dumps(index, ensure_ascii=False).encode("utf-8")
+        assets[PLE_INDEX_ASSET] = AssetInput(PLE_INDEX_ROLE, len(payload), payload)
+    container = tmp_path / "model.krm"
+    write_component(container, qat_container(vocab=rows, assets=assets))
+    build.discard()
+    return container, json.loads(bytes(assets[PLE_INDEX_ASSET].payload)), module
 
 
 class TestPackedPle:
     @pytest.mark.parametrize("bits", [2, 4])
-    def test_multiple_shards_preserve_bytes_and_upstream_probe(self, tmp_path: Path, bits: int):
-        module = packed_embedding(bits)
-        index = write_ple(module, 3, 32, tmp_path, shard_capacity=3 * 3 * (32 * bits // 8 + 4))
-        assert len(index["shards"]) == 3
-        parsed = gemma4_ple_index(tmp_path, storage=f"i{bits}")
-        placements = {
-            gemma4_ple_role(i): tmp_path / s["file"] for i, s in enumerate(index["shards"])
-        }
-        assert_gemma4_ple_shards(placements, parsed)
+    def test_the_blocks_preserve_bytes_and_the_upstream_probe(self, tmp_path: Path, bits: int):
+        container, index, module = _publish(tmp_path, bits)
+
+        parsed = gemma4_ple_index(container, storage=f"i{bits}")
+        assert_gemma4_ple_assets(container, parsed)
+        assert parsed["values"]["blocks"][-1]["stop"] == index["tokens"]
+
         with safe_open(str(tmp_path / "ple.probe.safetensors"), framework="pt") as handle:
             ids = handle.get_tensor("tokens")
             actual = handle.get_tensor("per_layer_inputs")
         with torch.inference_mode():
             expected = module(ids.to(torch.int64).unsqueeze(0)).reshape(1, len(ids), 3, 32)
         assert torch.equal(actual.view(torch.int32), expected.view(torch.int32))
-        with pytest.raises(DistError, match="schema"):
-            gemma4_ple_index(tmp_path)
-        with pytest.raises(DistError, match="storage"):
-            gemma4_ple_index(tmp_path, storage="i4" if bits == 2 else "i2")
 
-    @pytest.mark.parametrize("fault", ["schema", "storage", "gap", "dim", "scale"])
-    def test_distribution_rejects_inconsistent_index(self, tmp_path: Path, fault: str):
-        index = write_ple(packed_embedding(4), 3, 32, tmp_path)
-        if fault == "gap":
-            index["shards"][0]["start"] = 1
-        else:
+        with pytest.raises(DistError, match="storage"):
+            gemma4_ple_index(container, storage="i4" if bits == 2 else "i2")
+
+    @pytest.mark.parametrize("fault", ["schema", "storage", "gap", "dim", "scale", "unknown"])
+    def test_distribution_rejects_an_inconsistent_index(self, tmp_path: Path, fault: str):
+        def bend(index: dict) -> None:
+            if fault == "gap":
+                index["values"]["blocks"][0]["start"] = 1
+                return
             key, value = {
                 "schema": ("schema", 1),
                 "storage": ("storage", "i2"),
                 "dim": ("dim", 31),
                 "scale": ("embedScale", 0),
+                "unknown": ("strategy", "token-major"),
             }[fault]
             index[key] = value
-        (tmp_path / "ple.json").write_text(json.dumps(index))
-        with pytest.raises(DistError):
-            gemma4_ple_index(tmp_path, storage="i4")
 
-    def test_shard_metadata_detects_a_different_generation(self, tmp_path: Path):
-        index = write_ple(packed_embedding(2), 3, 32, tmp_path)
-        parsed = gemma4_ple_index(tmp_path, storage="i2")
-        parsed["embedScale"] += 1
-        with pytest.raises(DistError, match="食い違う"):
-            assert_gemma4_ple_shards({"ple_1": tmp_path / index["shards"][0]["file"]}, parsed)
+        container, _, _ = _publish(tmp_path, 4, bend=bend)
+        with pytest.raises(DistError):
+            gemma4_ple_index(container, storage="i4")
+
+    def test_an_index_that_names_an_absent_asset_is_detected(self, tmp_path: Path):
+        """索引だけ差し替えた組み合わせは**形も dtype も合う**まま別 token の行を引く。"""
+        container, _, _ = _publish(
+            tmp_path,
+            2,
+            bend=lambda index: index["values"]["blocks"][0].__setitem__(
+                "asset", "ple.values.absent"
+            ),
+        )
+        parsed = gemma4_ple_index(container, storage="i2")
+
+        with pytest.raises(DistError, match="容器に無い"):
+            assert_gemma4_ple_assets(container, parsed)
 
     @pytest.mark.parametrize("fault", ["dtype", "shape", "negative", "nan", "embedScale"])
     def test_writer_rejects_invalid_fixed_values(self, tmp_path: Path, fault: str):
@@ -80,7 +109,7 @@ class TestPackedPle:
         else:
             module.embedding_scale[0, 0] = -1 if fault == "negative" else float("nan")
         with pytest.raises(ValueError):
-            write_ple(module, 3, 32, tmp_path)
+            build_ple(module, 3, 32, tmp_path)
 
 
 class TestTraceLinear:
@@ -172,3 +201,36 @@ class TestCheckpointAdmission:
             saved = fixed_trace_weights(wrapper)
             assert saved["model.lm_head.weight"].packed.data_ptr() == head.weight.data_ptr()
             assert wrapper.model.lm_head.weight is wrapper.model.model.embed_tokens.weight
+
+
+class TestThePleSpill:
+    """PLE の実体は**作業席の一時ファイル**へ落ち、据え替えの前に消える。
+
+    上流の packed 実体を掴む読み口にすると、`trace_qat` と書き出しの間ずっと常駐する
+    （製品系列の `gemma4.export_product._spill_tables` と同じ規律）。
+    """
+
+    def test_the_payload_lands_in_the_working_seat(self, tmp_path: Path) -> None:
+        build = build_ple(packed_embedding(4, rows=9), 3, 32, tmp_path)
+
+        assert len(build.spills) == 2
+        assert all(path.stat().st_size > 0 for path in build.spills)
+
+    def test_discard_removes_the_temporary_files(self, tmp_path: Path) -> None:
+        build = build_ple(packed_embedding(4, rows=9), 3, 32, tmp_path)
+
+        build.discard()
+
+        assert [path for path in build.spills if path.exists()] == []
+
+    def test_the_assets_still_read_after_the_module_is_released(self, tmp_path: Path) -> None:
+        """実体はファイル側にあるので、上流モジュールを手放しても payload が引ける。"""
+        module = packed_embedding(4, rows=9)
+        build = build_ple(module, 3, 32, tmp_path)
+        index = json.loads(bytes(build.assets[PLE_INDEX_ASSET].payload))
+        name = str(index["values"]["blocks"][0]["asset"])
+        del module
+
+        payload = build.assets[name].payload
+
+        assert len(bytes(payload())) == build.assets[name].length

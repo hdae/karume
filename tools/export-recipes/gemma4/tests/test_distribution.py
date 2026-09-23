@@ -14,14 +14,16 @@ core だけで観測できる層（規模上限・quant 完全写像・staging/s
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
+from functools import partial
 from pathlib import Path
 from typing import Any
 
 import pytest
+from container_series import placed_paths, replace_component
 from ir_fixtures import ir_container
-from shard_series import placed_paths, replace_component, write_component
 
+from _shared.container_read import read_asset, read_asset_declarations
 from _shared.licenses import APACHE_LICENSE_2_0_PATH
 from gemma4 import distribution as gemma4_distribution
 from gemma4.card import GEMMA4_UPSTREAM, render_gemma4_model_card
@@ -32,7 +34,6 @@ from gemma4.distribution import (
     GEMMA4_DRAFTER_ROLE,
     GEMMA4_MAX_CHUNK_LENGTH,
     GEMMA4_OUTPUT_PATHS,
-    GEMMA4_PLE_INDEX_ROLE,
     GEMMA4_ROLE,
     GEMMA4_TOKENIZER_ROLE,
     GEMMA4_WEIGHTS,
@@ -45,6 +46,7 @@ from gemma4.distribution import (
 )
 from gemma4.rope import FULL_ATTENTION, SLIDING_ATTENTION
 from gemma4.tests import product_fixture as fixture
+from karume.container import AssetInput, container_parts
 from karume.dist import (
     MANIFEST_FILENAME,
     DistError,
@@ -52,6 +54,53 @@ from karume.dist import (
     resolve_card_renderer,
     verify_dist,
 )
+from karume.ple import PLE_INDEX_ASSET, PLE_INDEX_ROLE
+
+#: 役割名 → part 本数（PLE の資産は専用 part を取るので `model` だけ多い）。
+_PART_TOTALS: Mapping[str, int] = {GEMMA4_ROLE: len(fixture.product_container())}
+
+#: PLE の寸法（索引を曲げるときの元値）。
+_PLE_DIMS: Mapping[str, int] = {"layers": fixture.LAYERS, "dim": fixture.DIM}
+
+
+def _shift_first_block(index: dict[str, Any]) -> None:
+    """先頭 block の末尾を 1 行縮める（範囲が連続しない索引）。"""
+    for key in ("values", "scales"):
+        index[key]["blocks"][0]["stop"] -= 1
+
+
+def _rename_first_block(index: dict[str, Any]) -> None:
+    """先頭 block の資産名だけを容器に無い綴りへ差し替える。"""
+    index["values"]["blocks"][0]["asset"] = "ple.values.absent"
+
+
+def _container_with_ple(
+    *,
+    tokens: int = fixture.VOCAB,
+    layers: int = fixture.LAYERS,
+    dim: int = fixture.DIM,
+    bend: Callable[[dict[str, Any]], None] | None = None,
+) -> list[bytes]:
+    """製品コンテナ（PLE の索引だけを 1 箇所曲げられる形）。
+
+    索引は資産 `ple_index` の payload なので、曲げるのは**その JSON だけ** — 資産の block 列は
+    そのままにしておくと「索引だけ古い組み合わせ」がそのまま作れる。
+    """
+    assets = dict(
+        fixture.ple_container_assets(
+            tokens=tokens, layers=layers, dim=dim, block_bytes=_PLE_BLOCK_BYTES
+        )
+    )
+    if bend is not None:
+        index = json.loads(bytes(assets[PLE_INDEX_ASSET].payload))
+        bend(index)
+        payload = json.dumps(index, ensure_ascii=False).encode("utf-8")
+        assets[PLE_INDEX_ASSET] = AssetInput(PLE_INDEX_ROLE, len(payload), payload)
+    return fixture.product_container(assets=assets)
+
+
+#: tiny な PLE を 2 block 以上へ割る block 上限（block 跨ぎを 1 度は踏む）。
+_PLE_BLOCK_BYTES = fixture.LAYERS * fixture.DIM * (fixture.VOCAB // 2)
 
 #: 合成の寸法で成立する実行時ノブ（実物は 768 / 4096・合成の位置上限は 37）。
 SMALL_CHUNK = 2
@@ -125,13 +174,10 @@ class TestGemma4Layout:
         self, gemma4_assembled
     ) -> None:
         out_dir, _ = gemma4_assembled
-        index = fixture.ple_index([(0, 4), (4, fixture.VOCAB)])
+        # PLE は `model` 容器の資産なので、配布形に独立したファイルとしては現れない。
         expected = _in_subtree(
             GEMMA4_DEFAULT_MODEL,
-            [
-                *placed_paths(GEMMA4_OUTPUT_PATHS, GEMMA4_WEIGHTS),
-                *(f"ple/{shard['file']}" for shard in index["shards"]),
-            ],
+            placed_paths(GEMMA4_OUTPUT_PATHS, GEMMA4_WEIGHTS, _PART_TOTALS),
         )
         # 法的テキスト 2 本（Apache 2.0 §4）とカードは manifest が宣言しないメタ席。
         assert _present(out_dir) == sorted(
@@ -174,23 +220,19 @@ class TestGemma4Layout:
         out_dir, _ = gemma4_assembled
         assert list(out_dir.rglob("drafter-golden.*")) == []
 
-    def test_the_sidecar_asset_names_are_the_index_file_names(self, gemma4_assembled) -> None:
-        """MUST: 取得キー = `ple.json` の `shards[].file`（読み手はそれ 1 本で引く）。"""
+    def test_the_ple_blocks_live_inside_the_model_container(self, gemma4_assembled) -> None:
+        """MUST: PLE は容器の資産（ADR 0109 決定 4）— manifest の `assets` には出ない。"""
         out_dir, manifest = gemma4_assembled
         model = _model(manifest)
-        index = json.loads(
-            (out_dir / model["assets"][GEMMA4_PLE_INDEX_ROLE]["path"]).read_text(encoding="utf-8")
-        )
-        declared = [shard["file"] for shard in index["shards"]]
-        assert declared, "索引が shard を 1 本も持たない"
-        for file in declared:
-            assert file in model["assets"]
-        sidecars = sorted(
-            name
-            for name in model["assets"]
-            if name not in (GEMMA4_TOKENIZER_ROLE, GEMMA4_PLE_INDEX_ROLE)
-        )
-        assert sidecars == sorted(declared)
+        assert list(model["assets"]) == [GEMMA4_TOKENIZER_ROLE]
+
+        placed = out_dir / model["weights"][GEMMA4_ROLE]["i4"]["container"]["parts"][0]["path"]
+        index = json.loads(read_asset(placed, PLE_INDEX_ASSET))
+        declared = read_asset_declarations(placed)
+        blocks = [block["asset"] for block in index["values"]["blocks"]]
+        assert blocks, "索引が block を 1 本も持たない"
+        for name in blocks:
+            assert name in declared
 
     def test_it_reassembles_over_a_previous_run(self, tmp_path: Path) -> None:
         first_dir, first = _assemble(tmp_path)
@@ -368,9 +410,11 @@ class TestGemma4Graph:
                 [1, fixture.ROW_SYMBOL, fixture.VOCAB],
                 [1, fixture.ROW_SYMBOL, fixture.HIDDEN],
             ),
+            # PLE は同じ容器の資産なので、差し替えた容器にも載せる（索引の門で先に落ちない）。
+            assets=fixture.ple_container_assets(block_bytes=_PLE_BLOCK_BYTES),
         )
         sources = _build(tmp_path)
-        replace_component(sources.product / "model.safetensors", wrong)
+        replace_component(sources.product / "model.krm", wrong)
         with pytest.raises(DistError, match="グラフ入力が"):
             gemma4_plan(sources)
 
@@ -383,13 +427,14 @@ class TestGemma4Graph:
             # 行軸が記号でない logits（`[1, 4, V]` — 焼いた行数の資産）。
             container=fixture.product_container(vocab=fixture.VOCAB),
         )
-        write_component(
-            sources.product / "model.safetensors",
+        replace_component(
+            sources.product / "model.krm",
             ir_container(
                 mark="rows",
                 storage="i4",
                 inputs=(("input_ids", [1, "M"]),),
                 outputs=([1, 4, fixture.VOCAB], [1, 4, fixture.HIDDEN]),
+                assets=fixture.ple_container_assets(block_bytes=_PLE_BLOCK_BYTES),
             ),
         )
         with pytest.raises(DistError, match=r"\[1, R, \*\] でない"):
@@ -452,85 +497,79 @@ class TestGemma4Graph:
             gemma4_plan(sources)
 
     @pytest.mark.parametrize(("field", "axis"), [("layers", 2), ("dim", 3)])
-    def test_it_refuses_a_sidecar_shaped_for_another_graph(
+    def test_it_refuses_a_ple_index_shaped_for_another_graph(
         self, tmp_path: Path, field: str, axis: int
     ) -> None:
-        index = fixture.ple_index([(0, 4), (4, fixture.VOCAB)])
-        index[field] = int(index[field]) + 1
         sources = _sources(tmp_path)
-        fixture.write_series(sources.product, sources.tokenizer, sources.model, index=index)
+        fixture.write_series(
+            sources.product,
+            sources.tokenizer,
+            sources.model,
+            # 2 ずつ動かすのは、PLE の 1 行が 4 の倍数でなければ block を切れないため。
+            container=_container_with_ple(**{field: int(_PLE_DIMS[field]) + 2}),
+        )
         with pytest.raises(DistError, match=f"軸 {axis}"):
             gemma4_plan(sources)
 
 
-class TestGemma4Sidecar:
-    """PLE sidecar — 索引の形と、shard の現物が名乗る世代。"""
+class TestGemma4Ple:
+    """PLE の索引（容器の資産 `ple_index`）の形と、資産宣言との噛み合わせ。"""
 
-    def test_it_refuses_a_sidecar_whose_rows_are_not_the_vocabulary(self, tmp_path: Path) -> None:
+    def test_it_refuses_an_index_whose_rows_are_not_the_vocabulary(self, tmp_path: Path) -> None:
         """MUST: 行数が語彙数と違えば**別 token の有効な行**を引く（ADR 0085 決定 5）。"""
         sources = _sources(tmp_path)
         fixture.write_series(
             sources.product,
             sources.tokenizer,
             sources.model,
-            index=fixture.ple_index([(0, 4)], tokens=4),
+            container=_container_with_ple(tokens=fixture.VOCAB - 2),
         )
         with pytest.raises(DistError, match="製品グラフの語彙数"):
             gemma4_plan(sources)
 
-    @pytest.mark.parametrize(
-        ("ranges", "message"),
-        [
-            ([(0, 3), (4, 6)], "連続しない"),
-            ([(0, 4), (4, 4)], "が空"),
-            ([(0, 4)], "shard の合計"),
-        ],
-    )
-    def test_it_refuses_an_index_that_is_not_a_partition(
-        self, tmp_path: Path, ranges: list[tuple[int, int]], message: str
-    ) -> None:
-        sources = _sources(tmp_path)
-        index = fixture.ple_index(ranges)
-        with pytest.raises(DistError, match=message):
-            fixture.write_series(sources.product, sources.tokenizer, sources.model, index=index)
-            gemma4_plan(sources)
-
-    def test_it_refuses_an_index_with_unknown_keys(self, tmp_path: Path) -> None:
-        index = fixture.ple_index([(0, 4), (4, fixture.VOCAB)])
-        index["strategy"] = "token-major"
-        sources = _sources(tmp_path)
-        fixture.write_series(sources.product, sources.tokenizer, sources.model, index=index)
-        with pytest.raises(DistError, match="未知キー"):
-            gemma4_plan(sources)
-
-    def test_it_refuses_a_shard_that_names_another_generation(self, tmp_path: Path) -> None:
-        """索引だけ差し替えた組み合わせは**形も dtype も合う**まま別 token の行を引く。"""
-        index = fixture.ple_index([(0, 4), (4, fixture.VOCAB)])
+    def test_it_refuses_an_index_that_is_not_a_partition(self, tmp_path: Path) -> None:
+        """範囲が連続しない索引は「引けない id」か「2 本が同じ id」を作る（沈黙誤値）。"""
         sources = _sources(tmp_path)
         fixture.write_series(
             sources.product,
             sources.tokenizer,
             sources.model,
-            index=index,
-            shard_metadata={
-                0: {
-                    "schema": fixture.PLE_SCHEMA,
-                    "tokens": index["tokens"],
-                    "layers": index["layers"],
-                    "dim": index["dim"],
-                    "embedScale": index["embedScale"],
-                    "start": 0,
-                    # 範囲だけがずれた写し（テンソルの形は索引どおり）。
-                    "stop": 3,
-                }
-            },
+            container=_container_with_ple(bend=_shift_first_block),
         )
-        with pytest.raises(DistError, match="索引と食い違う"):
+        with pytest.raises(DistError, match="連続しない"):
             gemma4_plan(sources)
 
-    def test_it_refuses_a_missing_shard(self, tmp_path: Path) -> None:
+    def test_it_refuses_an_index_with_unknown_keys(self, tmp_path: Path) -> None:
+        sources = _sources(tmp_path)
+        fixture.write_series(
+            sources.product,
+            sources.tokenizer,
+            sources.model,
+            container=_container_with_ple(
+                bend=lambda index: index.__setitem__("strategy", "token-major")
+            ),
+        )
+        with pytest.raises(DistError, match="未知キー"):
+            gemma4_plan(sources)
+
+    def test_it_refuses_an_index_that_names_an_asset_the_container_lacks(
+        self, tmp_path: Path
+    ) -> None:
+        """索引だけ差し替えた組み合わせは**形も dtype も合う**まま別 token の行を引く。"""
+        sources = _sources(tmp_path)
+        fixture.write_series(
+            sources.product,
+            sources.tokenizer,
+            sources.model,
+            container=_container_with_ple(bend=_rename_first_block),
+        )
+        with pytest.raises(DistError, match="容器に無い"):
+            gemma4_plan(sources)
+
+    def test_it_refuses_a_missing_part(self, tmp_path: Path) -> None:
+        """part 列の 1 本でも欠ければ落とす（容器として開けない）。"""
         sources = _build(tmp_path)
-        (sources.product / "ple-00001-of-00002.safetensors").unlink()
+        container_parts(sources.product / "model.krm")[-1].unlink()
         with pytest.raises(DistError):
             gemma4_plan(sources)
 
@@ -597,35 +636,33 @@ class TestGemma4Sampler:
 class TestGemma4Storage:
     """系列 root の取り違え — 数値の門では原理的に検出できないので、ここが唯一の検出器。"""
 
-    @pytest.mark.parametrize(("storage", "message"), [("f32", "I4 が無い"), ("f16", "I4 が無い")])
+    @pytest.mark.parametrize(("storage", "message"), [("f32", "i4 が無い"), ("f16", "i4 が無い")])
     def test_it_refuses_a_container_without_the_packed_int4_weights(
         self, tmp_path: Path, storage: str, message: str
     ) -> None:
         sources = _build(tmp_path)
         replace_component(
-            sources.product / "model.safetensors", ir_container(mark="plain", storage=storage)
+            sources.product / "model.krm", ir_container(mark="plain", storage=storage)
         )
         with pytest.raises(DistError, match=message):
             gemma4_plan(sources)
 
     def test_it_refuses_a_container_carrying_half_precision(self, tmp_path: Path) -> None:
-        """F16 の混入は「別 family の系列 root を指した」印にしかならない。"""
+        """f16 の混入は「別 family の系列 root を指した」印にしかならない。"""
         sources = _build(tmp_path)
-        replace_component(
-            sources.product / "model.safetensors", ir_container(mark="half", storage="f16")
-        )
+        replace_component(sources.product / "model.krm", ir_container(mark="half", storage="f16"))
         with pytest.raises(DistError):
             gemma4_plan(sources)
 
     def test_it_refuses_a_drafter_whose_linear_weights_fell_to_int4(self, tmp_path: Path) -> None:
-        """drafter に I4 が在れば落とす — 受理率が 1 〜 3 割落ちるだけの資産の唯一の検出器。
+        """drafter に i4 が在れば落とす — 受理率が 1 〜 3 割落ちるだけの資産の唯一の検出器。
 
-        出力ヘッドは i8 のままなので存在検査（I8 が在る）では素通りし、shape も manifest も
+        出力ヘッドは i8 のままなので存在検査（i8 が在る）では素通りし、shape も manifest も
         正しいまま配れてしまう（`gemma4/export_drafter.py` の 2026-09-08 実測）。
         """
         sources = _build(tmp_path, drafter_bytes=fixture.drafter_container(storage="i4"))
 
-        with pytest.raises(DistError, match="I4 がある"):
+        with pytest.raises(DistError, match="i4 がある"):
             gemma4_plan(sources)
 
 
@@ -654,6 +691,38 @@ class TestGemma4Card:
         profiles = gemma4_distribution.PIPELINE.card_profiles
         assert list(profiles) == ["gemma4"]
         assert resolve_card_renderer(gemma4_distribution.PIPELINE, None) is profiles["gemma4"]
+
+    def test_the_card_counts_the_container_assets_as_host_read(self, tmp_path: Path) -> None:
+        """PLE は容器の資産へ移った（ADR 0109 決定 4）— Download の内訳注記がそれを数える。
+
+        `karume/4` では PLE が独立したファイル（manifest の `assets`）だったので、path 集合で
+        数えれば足りた。容器の中へ入った今は宣言が `container` 側にしか無いので、組み立てが
+        引いて渡す（{@link karume.dist.container_asset_bytes}）— 数え落とすと「Download の
+        大半が host 読みの表」という、この注記が存在する唯一の実例で注記が黙って消える。
+        """
+        sources = _build(tmp_path)
+        out_dir = tmp_path / "models" / gemma4_repo_name(GEMMA4_DEFAULT_MODEL)
+        assemble_family(
+            [gemma4_plan(sources, GEMMA4_DEFAULT_MODEL)],
+            out_dir,
+            GEMMA4_DEFAULT_MODEL,
+            render_card=partial(render_gemma4_model_card, repo="hdae/karume-gemma4"),
+            root_files=gemma4_distribution.PIPELINE.root_files,
+        )
+
+        card = (out_dir / "README.md").read_text(encoding="utf-8")
+
+        assert "of assets, read on the host" in card
+
+    def test_the_note_is_absent_when_the_container_assets_are_not_counted(
+        self, gemma4_assembled
+    ) -> None:
+        """恒真化の門 — 独立ファイルの assets（tokenizer）だけでは注記の条件を満たさない。"""
+        _, manifest = gemma4_assembled
+
+        card = render_gemma4_model_card(manifest, "hdae/karume-gemma4")
+
+        assert "of assets, read on the host" not in card
 
     def test_it_renders_the_attribution_and_the_declared_defaults(self, gemma4_assembled) -> None:
         _, manifest = gemma4_assembled

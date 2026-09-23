@@ -28,6 +28,22 @@ def _ref(path: str, size: int, digit: str) -> dict[str, Any]:
     return {"path": path, "size": size, "sha256": digit * 64}
 
 
+def _container(*refs: dict[str, Any]) -> dict[str, Any]:
+    """weights の 1 dtype ぶん（`karume/5` の `container` — ADR 0109 決定 3）。
+
+    `descriptor` はカードが読まない欄なので、形だけ実物どおりに置く（2 文書の長さと sha256）。
+    """
+    return {
+        "container": {
+            "descriptor": {
+                "graph": {"length": 40, "sha256": "0" * 64},
+                "model": {"length": 24, "sha256": "1" * 64},
+            },
+            "parts": list(refs),
+        }
+    }
+
+
 def _vowel_detector_manifest() -> dict[str, Any]:
     """母音検出の最小 manifest（値は実物と重ならない偽値）。"""
     return {
@@ -38,7 +54,7 @@ def _vowel_detector_manifest() -> dict[str, Any]:
             "ZA": {
                 "pipeline": VOWEL_DETECTOR_SUPPORTED_PIPELINE,
                 "weights": {
-                    "detector": {"f32": {"shards": [_ref("ZA/detector/model.f32.st", 11, "a")]}},
+                    "detector": {"f32": _container(_ref("ZA/detector/model.f32.st", 11, "a"))},
                 },
                 "assets": {},
                 "quants": {"f32": {"weights": {"detector": "f32"}, "session": {}}},

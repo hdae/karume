@@ -115,7 +115,7 @@ NOTE: `--real-images` も同じ `birefnet` グループで回る（SigLIP2 が `
 
 ## 出力レイアウト
 
-    outputs/series/<系列名>/model.safetensors     重み・定数 + __metadata__
+    outputs/series/<系列名>/model.krm             重み・定数 + 2 文書の記述
     outputs/series/<系列名>/io.<case>.safetensors 入力と torch CPU 期待出力
 
 io のテンソルキー規約は tiny golden / DeBERTa / SigLIP2 と同じ
@@ -138,12 +138,14 @@ from torch import nn
 
 from _shared.paths import INPUTS_ROOT, MISC_ROOT, SERIES_ROOT
 from karume.artifacts import staged_publication
+from karume.container import Provenance, container_parts
 from karume.convert import normalize_boundary_tensor
+from karume.dist import NOTICE_FILENAME
 from karume.ir import IrGraph
 from karume.pipeline import export_to_file
-from karume.shards import resolve_shards
 
 from . import patch
+from .card import BIREFNET_LICENSE
 
 #: 実重みの親（`inputs/birefnet/<名前>/` に HF の 7 ファイルを展開した先）。
 MODELS_ROOT = INPUTS_ROOT / "birefnet"
@@ -161,7 +163,11 @@ DEFAULT_RESOLUTION = 1024
 #: 解像度の刻み（S%32 = 本体側の PatchMerging / S%64 = 半解像度枝の同じ要求）。
 RESOLUTION_MULTIPLE = 64
 
-MODEL_FILE = "model.safetensors"
+MODEL_FILE = "model.krm"
+
+#: 容器へ焼く出所（container-v1 §2.3）。ライセンス識別子はカード側の正本
+#: （{@link birefnet.card.BIREFNET_LICENSE}）から引く — 2 表が独立に動く形にしない。
+PROVENANCE = Provenance(license=BIREFNET_LICENSE, notice=NOTICE_FILENAME)
 IO_PREFIX = "io."
 IO_SUFFIX = ".safetensors"
 INPUT_PREFIX = "input."
@@ -558,7 +564,15 @@ def export_series(
         # ディレクトリの席は書き手が作る（原語は席を作らない — path しか渡さない）。
         staged.mkdir()
         # 動的軸は無い（解像度は系列ごとに固定 — モジュール docstring）。
-        graph = export_to_file(wrapper, (example,), staged / MODEL_FILE, symbol_names=())
+        graph = export_to_file(
+            wrapper,
+            (example,),
+            staged / MODEL_FILE,
+            provenance=PROVENANCE,
+            # グラフ名は**部品名**（= karume.json の weights のキー = 据え替え先のディレクトリ名）。
+            graph_name=out_dir.name,
+            symbol_names=(),
+        )
         declared = tuple(item.name for item in graph.inputs)
         if declared != (INPUT_NAME,):
             raise AssertionError(f"グラフ入力の並びが {declared} で、期待の {(INPUT_NAME,)} と違う")
@@ -571,7 +585,7 @@ def export_series(
         "nodes": len(graph.nodes),
         "outputs": len(graph.outputs),
         "initializers": len(graph.initializers),
-        "model_bytes": sum(p.stat().st_size for p in resolve_shards(out_dir / MODEL_FILE)),
+        "model_bytes": sum(p.stat().st_size for p in container_parts(out_dir / MODEL_FILE)),
         "ops": sorted(graph.required_ops),
         "symbols": list(graph.symbols),
         "io": written,

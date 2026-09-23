@@ -83,7 +83,7 @@ MUST: 実画像 golden には**元画像の sha256** を `__metadata__` に載�
 
 ## 出力レイアウト
 
-    outputs/series/<系列名>/model.safetensors     重み・定数 + __metadata__
+    outputs/series/<系列名>/model.krm             重み・定数 + 2 文書の記述
     outputs/series/<系列名>/io.<case>.safetensors 入力と torch CPU 期待出力
 
 io のテンソルキー規約は tiny golden / DeBERTa / SigLIP2 / BiRefNet と同じ
@@ -106,12 +106,14 @@ from torch import nn
 
 from _shared.paths import INPUTS_ROOT, MISC_ROOT, SERIES_ROOT
 from karume.artifacts import staged_publication
+from karume.container import Provenance, container_parts
 from karume.convert import normalize_boundary_tensor
+from karume.dist import NOTICE_FILENAME
 from karume.ir import IrGraph
 from karume.pipeline import export_to_file
-from karume.shards import resolve_shards
 
 from . import patch
+from .card import DEPTH_ANYTHING_LICENSE
 from .measurements import CONVT_MAXDIFF
 
 #: 実重みの親（`inputs/depth-anything/<名前>/` に HF の 3 ファイルを展開した先）。
@@ -124,7 +126,11 @@ CORPUS_ROOT = MISC_ROOT / "corpus"
 #: 既定のモデル（`--model-dir` 未指定のとき — 上流で唯一の Apache-2.0）。
 DEFAULT_MODEL_DIR = MODELS_ROOT / "Depth-Anything-V2-Small-hf"
 
-MODEL_FILE = "model.safetensors"
+MODEL_FILE = "model.krm"
+
+#: 容器へ焼く出所（container-v1 §2.3）。ライセンス識別子はカード側の正本
+#: （{@link depth_anything.card.DEPTH_ANYTHING_LICENSE}）から引く — 2 表が独立に動く形にしない。
+PROVENANCE = Provenance(license=DEPTH_ANYTHING_LICENSE, notice=NOTICE_FILENAME)
 IO_PREFIX = "io."
 IO_SUFFIX = ".safetensors"
 INPUT_PREFIX = "input."
@@ -573,7 +579,15 @@ def export_series(
         # ディレクトリの席は書き手が作る（原語は席を作らない — path しか渡さない）。
         staged.mkdir()
         # 動的軸は無い（解像度は事前学習の 1 点に固定 — モジュール docstring）。
-        graph = export_to_file(wrapper, (example,), staged / MODEL_FILE, symbol_names=())
+        graph = export_to_file(
+            wrapper,
+            (example,),
+            staged / MODEL_FILE,
+            provenance=PROVENANCE,
+            # グラフ名は**部品名**（= karume.json の weights のキー = 据え替え先のディレクトリ名）。
+            graph_name=out_dir.name,
+            symbol_names=(),
+        )
         declared = tuple(item.name for item in graph.inputs)
         if declared != (INPUT_NAME,):
             raise AssertionError(f"グラフ入力の並びが {declared} で、期待の {(INPUT_NAME,)} と違う")
@@ -589,7 +603,7 @@ def export_series(
         "nodes": len(graph.nodes),
         "outputs": len(graph.outputs),
         "initializers": len(graph.initializers),
-        "model_bytes": sum(p.stat().st_size for p in resolve_shards(out_dir / MODEL_FILE)),
+        "model_bytes": sum(p.stat().st_size for p in container_parts(out_dir / MODEL_FILE)),
         "ops": sorted(graph.required_ops),
         "symbols": list(graph.symbols),
         "io": written,

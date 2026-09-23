@@ -99,16 +99,16 @@ SIGLIP2_RESCALE_FACTOR = 1.0 / 255.0
 
 #: 出力の相対 path（**モデルサブツリー内**）— 配置表と manifest が共有する 1 箇所。格納 dtype を
 #: ファイル名に出すのは Irodori と同じ形（系列が 2 本並んでも取り違えようがない綴り）。
-SIGLIP2_OUTPUT_PATHS: Mapping[str, str] = {SIGLIP2_ROLE: f"{SIGLIP2_ROLE}/model.f32.safetensors"}
+SIGLIP2_OUTPUT_PATHS: Mapping[str, str] = {SIGLIP2_ROLE: f"{SIGLIP2_ROLE}/model.f32.krm"}
 
 #: 格納 dtype の要求（Anima / SBV2 / Irodori と同じ根拠 — 素の資産が組み立て・ロード・実行を
 #: 全て通って参照一致の門まで沈黙した実測事故）。
-SIGLIP2_STORAGE_REQUIREMENTS: Mapping[str, str] = {SIGLIP2_ROLE: "F32"}
+SIGLIP2_STORAGE_REQUIREMENTS: Mapping[str, str] = {SIGLIP2_ROLE: "f32"}
 
-#: 各役割の safetensors ヘッダに**あってはならない**格納 dtype（{@link assert_storage_absent}）。
+#: 各役割の束縛表に**あってはならない**格納の語彙（{@link assert_storage_absent}）。
 #: {@link SIGLIP2_STORAGE_REQUIREMENTS} は「要求 dtype が在るか」の片方向検査で、**圧縮系列も
-#: 適格外の重み**（bias / norm / グラフ定数・i8 の per-channel scale・i4 の group scale）を F32 で
-#: 持つため「F32 を含む」は f16 / i8 / i4 の資産でも真になる — f32 席へ圧縮系列を挿し込む
+#: 適格外の重み**（bias / norm / グラフ定数・i8 の per-channel scale・i4 の group scale）を f32 で
+#: 持つため「f32 を含む」は f16 / i8 / i4 の資産でも真になる — f32 席へ圧縮系列を挿し込む
 #: 取り違えが存在検査だけでは素通りする。
 #:
 #: この台本（`siglip2/export.py`）は f32 しか焼かないが、禁止表が閉じるのは**系列 root の
@@ -120,7 +120,7 @@ SIGLIP2_STORAGE_REQUIREMENTS: Mapping[str, str] = {SIGLIP2_ROLE: "F32"}
 #: f32 以外）を**全部**名指しする — 1 つでも抜けると、抜けた格納形だけが黙って素通りする
 #: （anima / irodori / sbv2 と同じ規律）。I32 を載せないのは、i32 が圧縮ではなく素の格納
 #: （`karume.emit` の plain 側）で、添字表として素の系列にも普通に居るから。
-SIGLIP2_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {SIGLIP2_ROLE: ("F16", "I8", "I4")}
+SIGLIP2_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {SIGLIP2_ROLE: ("f16", "i8", "i4")}
 
 #: weights の宣言（dtype ラベル → 役割名）。dtype が 1 つしかないので quant 表は空でよい
 #: （{@link complete_quant_weights} が完全写像へ埋める）。
@@ -188,7 +188,7 @@ def siglip2_placements(sources: Siglip2Sources) -> dict[str, Path]:
 
     この表に無いものは出力へ入らない（系列に並ぶ `io.*.safetensors` はこれで落ちる）。
     """
-    return {SIGLIP2_ROLE: sources.series / "model.safetensors"}
+    return {SIGLIP2_ROLE: sources.series / "model.krm"}
 
 
 def siglip2_preprocessor(model_dir: Path) -> Mapping[str, Any]:
@@ -357,8 +357,8 @@ were made:
 
 - The **vision tower only** was extracted; the text tower was never read, so zero-shot
   classification and image/text similarity are not possible from this repository.
-- The graph was re-expressed in the Karume container format (a safetensors file whose
-  `__metadata__` carries the graph).
+- The graph was re-expressed in the Karume container format (a `.krm` part sequence whose
+  first part carries the graph and model descriptors).
 - Two rewrites were needed to export the graph and are **bit-exact**: the patch embedding's
   string padding became its numeric equivalent, and the position-embedding row gather became a
   direct addition.

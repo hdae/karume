@@ -28,12 +28,12 @@ IR export の入力素材として扱える形に**中身を変えずに**詰め
 
 ## 書き出し経路
 
-`karume.emit` の writer をそのまま借りる。Karume のリーダはデータ節を「隙間なく・要素サイズに
-整列して」覆うことを要求し（docs/limitations.md）、その並び順の実装を 2 本に増やさないため
-（`emit.write_model` は IR グラフを `__metadata__` に埋める**配布形**専用なので、その下層の
-`_write_order` / `_save_ordered` だけを使う。`tests/test_emit.py` も同じ層を直接叩いている）。
-書いた直後に `verify.assert_reader_layout` でリーダ規則を写した検査を通す。
+`safetensors.torch.save_file` で素直に書く。これは配布形ではなく**手置き資産の隣に置く入力**
+（`inputs/irodori/dacvae-32dim/weights.safetensors`）で、配布形の器（`krm`）とは別の話である。
+Karume のリーダはデータ節を「隙間なく・要素サイズに整列して」覆うことを要求するので
+（docs/limitations.md）、書いた直後に `verify.assert_reader_layout` で同じ規則を通す。
 なお本チェックポイントは全 F32 なので整列制約は自明に満たされるが、検査は無条件で通す。
+並びはキーの昇順に固定する（同じ入力からは同じバイト列 — 再生成で差分が出ない）。
 
 書き先は**作業席**で、門を全部通ってから正規 path へ据える（ADR 0052 — 他の書き手と同じ
 規律）。出力先が手置き資産と同居するディレクトリなので、据え替えは
@@ -59,10 +59,10 @@ from pathlib import Path
 
 import torch
 from safetensors import safe_open
+from safetensors.torch import save_file
 
 from _shared.paths import INPUTS_ROOT
 from karume.artifacts import staged_publication
-from karume.emit import _save_ordered, _write_order
 from karume.verify import assert_reader_layout
 
 #: 既定の入力（手置きの実重み — `inputs/<family>/<name>/`）。
@@ -179,11 +179,10 @@ def convert(ckpt: Path, out: Path | None = None) -> dict[str, object]:
         staged_publication(target) as staged_weights,
         staged_publication(metadata_path) as staged_metadata,
     ):
-        _save_ordered(
-            staged_weights,
-            tensors,
-            _write_order(tensors),
-            {
+        save_file(
+            {key: tensors[key] for key in sorted(tensors)},
+            str(staged_weights),
+            metadata={
                 SOURCE_FILE_KEY: ckpt.name,
                 SOURCE_SHA256_KEY: source_sha256,
                 SOURCE_METADATA_KEY: metadata_text,

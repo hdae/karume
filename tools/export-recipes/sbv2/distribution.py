@@ -94,8 +94,8 @@ SBV2_TEXT_ENCODER_INPUTS: tuple[str, ...] = (
     "p2c_pos",
 )
 
-#: initializer 名から encoder の層番号を拾う（`p_model_encoder_layer_<i>_...` — torch.export が
-#: FQN を正規化した綴り）。層数の門はこれで数える。
+#: initializer 名から encoder の層番号を拾う（IR v2 の initializer 名 = テンソルキー
+#: `model.encoder.layer.<i>....` — docs/ir-v2.md）。層数の門はこれで数える。
 SBV2_LAYER_PATTERN = re.compile(r"layer[._](\d+)[._]")
 
 #: `sbv2.demo assets` が書くホスト資産の置き場と綴り。系列（IR + io）ではないので
@@ -136,14 +136,14 @@ SBV2_SPEAKER_KEY = "speaker_embeddings"
 #: 格納形（i4 混成）が後から生えた席だから — 既存席の役割名を動かすと配布形の path も
 #: 動くので、増える側にだけ接尾辞を付ける。
 SBV2_OUTPUT_PATHS: Mapping[str, str] = {
-    "text_encoder": "text_encoder/model.i8.safetensors",
-    "text_encoder_i4": "text_encoder/model.i4.safetensors",
-    "front_f16": "front/model.f16.safetensors",
-    "front_i8": "front/model.i8.safetensors",
-    "front_i4": "front/model.i4.safetensors",
-    "voice_f16": "voice/model.f16.safetensors",
-    "voice_i8": "voice/model.i8.safetensors",
-    "voice_i4": "voice/model.i4.safetensors",
+    "text_encoder": "text_encoder/model.i8.krm",
+    "text_encoder_i4": "text_encoder/model.i4.krm",
+    "front_f16": "front/model.f16.krm",
+    "front_i8": "front/model.i8.krm",
+    "front_i4": "front/model.i4.krm",
+    "voice_f16": "voice/model.f16.krm",
+    "voice_i8": "voice/model.i8.krm",
+    "voice_i4": "voice/model.i4.krm",
     "tokenizer": "tokenizer/deberta-tokenizer.json",
     "symbols": "text/symbols.json",
     "style_vectors": "styles/style_vectors.safetensors",
@@ -166,32 +166,32 @@ SBV2_TEXT_ENCODER_ROLES: tuple[str, ...] = ("text_encoder", "text_encoder_i4")
 #: する。I8 を要求しても i8 系列が素通りしてしまい、席の取り違えが沈黙する（i4 席に i8 系列が
 #: 入ると、サイズだけが元に戻った配布形が層数も形も合ったまま組み上がる）。
 SBV2_STORAGE_REQUIREMENTS: Mapping[str, str] = {
-    "text_encoder": "I8",
-    "text_encoder_i4": "I4",
-    "front_f16": "F16",
-    "front_i8": "I8",
-    "front_i4": "I4",
-    "voice_f16": "F16",
-    "voice_i8": "I8",
-    "voice_i4": "I4",
+    "text_encoder": "i8",
+    "text_encoder_i4": "i4",
+    "front_f16": "f16",
+    "front_i8": "i8",
+    "front_i4": "i4",
+    "voice_f16": "f16",
+    "voice_i8": "i8",
+    "voice_i4": "i4",
 }
 
-#: 各役割の safetensors ヘッダに**あってはならない**格納 dtype（{@link assert_storage_absent}）。
+#: 各役割の束縛表に**あってはならない**格納の語彙（{@link assert_storage_absent}）。
 #: {@link SBV2_STORAGE_REQUIREMENTS} の存在検査は片方向なので、**圧縮席どうしの取り違え**が
 #: 素通りする — i4 系列は混成（F32 + I8 + I4）で、i4 適格外の重みは i8 のまま残るので
 #: **必ず I8 を含む**。したがって i4 系列を `text_encoder` / `front_i8` / `voice_i8` の i8 席へ
 #: 挿し込むと「I8 を含む」を満たしてしまい、組み立ても verify_dist も manifest 検査も全部通る。
-#: 出来上がるのは「席名も path も `model.i8.safetensors` なのに中身は i4 混成」という配布形で、
+#: 出来上がるのは「席名も path も `model.i8.krm` なのに中身は i4 混成」という配布形で、
 #: i8 席は f32 compute なので実行も例外を出さず、音が i4 の品質で出るだけで沈黙する。
 #: MUST: 禁止は**役割ごとに集合**で持つ（1 dtype だけ書くと 4 本目の系列が生えた日に、名指し
 #: しなかったほうが黙って素通りする — anima / irodori と同じ規律）。f16 席は I8 / I4 の
 #: 両方の不在で二重に締める。
 SBV2_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {
-    "text_encoder": ("I4",),
-    "front_f16": ("I8", "I4"),
-    "front_i8": ("I4",),
-    "voice_f16": ("I8", "I4"),
-    "voice_i8": ("I4",),
+    "text_encoder": ("i4",),
+    "front_f16": ("i8", "i4"),
+    "front_i8": ("i4",),
+    "voice_f16": ("i8", "i4"),
+    "voice_i8": ("i4",),
 }
 
 #: weights の宣言（dtype ラベル → 役割名）。dtype キーは ADR 0041 §3 の統一形（v1 の `{file}` /
@@ -426,14 +426,14 @@ def sbv2_placements(sources: Sbv2Sources) -> dict[str, Path]:
     safetensors）は配置ではなく**変換**なのでここには現れない。
     """
     return {
-        "text_encoder": sources.text_encoder / "model.safetensors",
-        "text_encoder_i4": sources.text_encoder_i4 / "model.safetensors",
-        "front_f16": sources.series_f16 / "front" / "model.safetensors",
-        "front_i8": sources.series_i8 / "front" / "model.safetensors",
-        "front_i4": sources.series_i4 / "front" / "model.safetensors",
-        "voice_f16": sources.series_f16 / "voice" / "model.safetensors",
-        "voice_i8": sources.series_i8 / "voice" / "model.safetensors",
-        "voice_i4": sources.series_i4 / "voice" / "model.safetensors",
+        "text_encoder": sources.text_encoder / "model.krm",
+        "text_encoder_i4": sources.text_encoder_i4 / "model.krm",
+        "front_f16": sources.series_f16 / "front" / "model.krm",
+        "front_i8": sources.series_i8 / "front" / "model.krm",
+        "front_i4": sources.series_i4 / "front" / "model.krm",
+        "voice_f16": sources.series_f16 / "voice" / "model.krm",
+        "voice_i8": sources.series_i8 / "voice" / "model.krm",
+        "voice_i4": sources.series_i4 / "voice" / "model.krm",
         "tokenizer": sources.demo / SBV2_TOKENIZER_FILE,
         "symbols": sources.demo / SBV2_SYMBOLS_FILE,
     }
@@ -487,15 +487,15 @@ def sbv2_knob_defaults(symbols_path: Path) -> dict[str, Any]:
 
 
 def sbv2_ir_graph(path: Path) -> Mapping[str, Any]:
-    """配布候補の safetensors ヘッダから IR のグラフ JSON を読む（テンソルは 1 バイトも読まない）。
+    """配布候補のグラフ記述から IR v2 のグラフ JSON を読む（重みは 1 バイトも読まない）。
 
     グラフを見る門が 2 つある（{@link assert_bert_hidden} の層 / 出力 / 入力と、
     {@link assert_baked_sym_max} の焼き込み次元）ので、読み取りと不整合の名指しはここ 1 本。
 
     実体は core の {@link karume.dist.ir_graph} をそのまま呼ぶ — 以前はここに同じ読み取りを
-    写していたが、配布形が常時分割になった（ADR 0081）ときに**写しの側だけが代表 path を
-    直接開いたまま**残った（グラフ shard を名指しで読むのは core 側だけ）。名前を残すのは
-    上の 2 門が同じ綴りで引くため。
+    写していたが、配布形が常時分割になった（container-v1 §8）ときに**写しの側だけが代表 path
+    を直接開いたまま**残った（part 0 を名指しで読むのは core 側だけ）。名前を残すのは上の
+    2 門が同じ綴りで引くため。
     """
     return ir_graph(path)
 

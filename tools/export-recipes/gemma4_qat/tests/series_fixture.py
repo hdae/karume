@@ -1,13 +1,13 @@
 """QAT の配布 recipe が入力に使う**正当な最小の系列**（固定格納のコンテナ + PLE + 資産）。
 
 `gemma4/tests/product_fixture.py` の QAT 版。違いは固定量子化そのもの — 混成格納
-（I2 の共有 head / I4 / I8）と、量子化 linear の前後の SRQ、schema 2 の packed PLE
-（`gemma4_qat.ple.write_ple` が書く）、そして `reference.json` である。
+（i2 の共有 head / i4 / i8）と、量子化 linear の前後の SRQ、packed PLE（`gemma4_qat.ple`
+が容器の資産へ組む）、そして `reference.json` である。
 
-MUST: safetensors のバイト列も IR の規則も PLE の索引も手で綴らない（`product_fixture` の
-同 MUST）— 規則の写しを持つと、規則が動いた日にフィクスチャだけが古びて「テストは緑・
-実物だけ落ちる」になる。書き出しは実物と同じ 1 本道（`karume.emit.write_model` /
-`gemma4_qat.ple.write_ple`）を通す。
+MUST: 容器のバイト列も IR の規則も PLE の索引も手で綴らない（`product_fixture` の同 MUST）
+— 規則の写しを持つと、規則が動いた日にフィクスチャだけが古びて「テストは緑・実物だけ
+落ちる」になる。書き出しは実物と同じ 1 本道（`karume.emit.stored_model` →
+`karume.publish.publish_container`・`gemma4_qat.ple.build_ple`）を通す。
 
 MUST: **実物と違う数**にする（語彙 9・層 3・次元 32・hidden 16・位置上限 8192）— 寸法を
 焼き込んでいれば落ちる。
@@ -19,7 +19,7 @@ MUST: **実物と違う数**にする（語彙 9・層 3・次元 32・hidden 16
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -39,8 +39,9 @@ from gemma4.distribution import (
 from gemma4.rope import FULL_ATTENTION, SLIDING_ATTENTION
 from gemma4.tests.product_fixture import tokenizer_asset
 from gemma4_qat.config import MAX_CHUNK_LENGTH, MAX_SELECTED_ROWS, REFERENCE_SCHEMA
-from gemma4_qat.ple import write_ple
-from karume.emit import FixedQuantizedWeight, write_model
+from gemma4_qat.ple import build_ple
+from karume.container import AssetInput, Provenance
+from karume.emit import FixedQuantizedWeight, stored_model
 from karume.ir import (
     IrGraph,
     IrInitializer,
@@ -50,7 +51,10 @@ from karume.ir import (
     IrStorage,
     IrValue,
 )
-from karume.verify import verify_shards
+from karume.publish import publish_container
+
+#: フィクスチャの出所（`--license` を落とした配布形は作らない — container-v1 §12）。
+FIXTURE_PROVENANCE = Provenance(license="apache-2.0", writer="karume-fixture")
 
 #: 合成の寸法（実物は語彙 262144・層 35/42・次元 256・hidden 1536/2560）。
 #: `HIDDEN` が 16 の倍数なのは I2 格納の整列要求（`karume.emit._plan_fixed_weights`）。
@@ -159,14 +163,16 @@ def qat_container(
     hidden_size: int = HIDDEN,
     head_dims: Mapping[str, int] | None = None,
     mlp_bits: int = 8,
+    assets: Mapping[str, AssetInput] | None = None,
 ) -> list[bytes]:
-    """QAT 製品グラフ 1 本ぶんの shard バイト列（読む順 — 先頭がグラフ shard）。
+    """QAT 製品グラフ 1 本ぶんの part バイト列（読む順 — 先頭が part 0）。
 
-    形は実物の縮小版: token embedding は I2 で、同じ initializer を head linear が重みに使う
-    （共有 head・前後の SRQ は持たない）。ほかに I4 / I8 の量子化 linear が 1 本ずつあり、
+    形は実物の縮小版: token embedding は i2 で、同じ initializer を head linear が重みに使う
+    （共有 head・前後の SRQ は持たない）。ほかに i4 / i8 の量子化 linear が 1 本ずつあり、
     どちらも前後に SRQ を持つ。非量子化の linear は許可された projection 1 本だけ。
+    PLE は容器の**資産**として同梱される（ADR 0109 決定 4）。
 
-    `mlp_bits` は混成格納の故障注入の口（`4` にすると I8 がヘッダから消える）。
+    `mlp_bits` は混成格納の故障注入の口（`4` にすると i8 が束縛表から消える）。
     """
     widths = {**ROPE_HEAD_DIMS, **dict(head_dims or {})}
     initializers: dict[str, IrInitializer] = {}
@@ -278,12 +284,18 @@ def qat_container(
         },
         nodes=nodes,
     )
+    stored = stored_model(graph, tensors, fixed_weights=fixed)
     with TemporaryDirectory() as staging:
-        written = write_model(
-            Path(staging) / "model.safetensors", graph, tensors, fixed_weights=fixed
+        result = publish_container(
+            Path(staging) / "model.krm",
+            stored.graph,
+            stored.tensors,
+            stored.bindings,
+            graph_name="model",
+            provenance=FIXTURE_PROVENANCE,
+            assets={} if assets is None else assets,
         )
-        verify_shards(written)
-        return [path.read_bytes() for path in written]
+        return [path.read_bytes() for path in result.parts]
 
 
 def reference_record(
@@ -291,7 +303,7 @@ def reference_record(
     *,
     fixed_weights: int = 3,
     storage_counts: Mapping[str, int] | None = None,
-    ple_shards: int = 1,
+    ple_blocks: int = 1,
     **overrides: Any,
 ) -> dict[str, Any]:
     """`reference.json` の中身（既定は {@link qat_container} が実際に作る本数）。"""
@@ -307,7 +319,7 @@ def reference_record(
             storage_counts if storage_counts is not None else {"i2": 1, "i4": 1, "i8": 1}
         ),
         "weightFiles": 1,
-        "pleShards": ple_shards,
+        "pleBlocks": ple_blocks,
         "upstreamUnused": {"kvCacheScales": 6, "vision": 0, "audio": 0},
     }
     record.update(overrides)
@@ -318,7 +330,7 @@ def write_series(
     source: Path,
     model: str,
     *,
-    container: Sequence[bytes] | None = None,
+    container_kwargs: Mapping[str, Any] | None = None,
     ple_bits: int | None = None,
     ple_rows: int = VOCAB,
     reference: Mapping[str, Any] | None = None,
@@ -326,15 +338,22 @@ def write_series(
     text_config: Mapping[str, Any] | None = None,
     generation_config: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """1 系列ぶんを書き、使った `reference.json` の中身を返す。"""
-    from shard_series import write_component  # conftest が張る recipe 共有ヘルパ
+    """1 系列ぶんを書き、使った `reference.json` の中身を返す。
+
+    PLE は容器の資産なので、容器は常に {@link qat_container} が組む — 呼び手が差し替えたい
+    軸（`mlp_bits` / `hidden_size` …）は `container_kwargs` で渡す。
+    """
+    from container_series import write_component  # conftest が張る recipe 共有ヘルパ
 
     source.mkdir(parents=True, exist_ok=True)
-    write_component(
-        source / "model.safetensors", list(container if container is not None else qat_container())
-    )
     bits = ple_bits if ple_bits is not None else (4 if model == "e2b" else 2)
-    write_ple(packed_embedding(bits, rows=ple_rows), LAYERS, DIM, source)
+    ple = build_ple(packed_embedding(bits, rows=ple_rows), LAYERS, DIM, source)
+    write_component(
+        source / "model.krm",
+        qat_container(assets=ple.assets, **dict(container_kwargs or {})),
+    )
+    # 実物と同じ順序 — 一時ファイルは容器が据わったら消す（系列に残さない）。
+    ple.discard()
     (source / "tokenizer.json").write_text(
         json.dumps(dict(tokenizer if tokenizer is not None else tokenizer_asset(vocab=VOCAB))),
         encoding="utf-8",
@@ -352,6 +371,8 @@ def write_series(
         json.dumps(dict(generation_config if generation_config is not None else GENERATION_CONFIG)),
         encoding="utf-8",
     )
-    record = dict(reference if reference is not None else reference_record(model))
+    record = dict(
+        reference if reference is not None else reference_record(model, ple_blocks=ple.blocks)
+    )
     (source / "reference.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     return record

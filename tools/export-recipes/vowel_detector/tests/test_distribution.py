@@ -22,9 +22,9 @@ from typing import Any
 
 import numpy as np
 import pytest
-from ir_fixtures import ir_container
+from container_series import placed_paths, write_component
+from ir_fixtures import Shape, ir_container
 from safetensors.numpy import load_file
-from shard_series import placed_paths, write_component
 
 from _shared.licenses import MIT_COPYRIGHT_PLACEHOLDER, MIT_LICENSE_PATH
 from dist import default_out_dir, main
@@ -36,7 +36,6 @@ from karume.dist import (
     resolve_card_renderer,
     verify_dist,
 )
-from karume.ir import IR_METADATA_KEY
 from vowel_detector.distribution import (
     PIPELINE,
     VOWEL_DETECTOR_COPYRIGHTS,
@@ -51,22 +50,6 @@ from vowel_detector.distribution import (
     vowel_detector_repo_name,
     vowel_detector_series_name,
 )
-
-
-def _fake_safetensors(
-    dtype: str, payload: bytes, metadata: Mapping[str, str] | None = None
-) -> bytes:
-    """格納 dtype の門を通る最小の safetensors（8 バイト長 + ヘッダ JSON + データ節）。
-
-    `metadata` を渡すと `__metadata__` 節が付く（IR コンテナを要求する門のため）。
-    """
-    header: dict[str, Any] = {
-        "w": {"dtype": dtype, "shape": [len(payload)], "data_offsets": [0, len(payload)]}
-    }
-    if metadata is not None:
-        header["__metadata__"] = dict(metadata)
-    encoded = json.dumps(header).encode("utf-8")
-    return len(encoded).to_bytes(8, "little") + encoded + payload
 
 
 def _write(path: Path, payload: bytes) -> None:
@@ -134,57 +117,37 @@ def _vowel_detector_feature_config(**patch: Any) -> dict[str, Any]:
     }
 
 
-def _vowel_detector_graph(
+def _vowel_detector_container(
     *,
+    storage: str = "f32",
     feature_dim: int = _VOWEL_DETECTOR_N_MELS + 3,
-    name: str = "features",
-    outputs: int = 1,
+    input_name: str = "features",
     in_shape: Sequence[Any] | None = None,
     out_shape: Sequence[Any] | None = None,
-    symbols: Sequence[str] = ("T",),
-) -> str:
-    """門が読む最小の IR メタデータ（入力 1 本・出力の宣言・記号次元）。"""
-    names = [f"out_{index}" for index in range(outputs)]
-    logits = list(out_shape) if out_shape is not None else [1, "T", len(_VOWEL_DETECTOR_CLASSES)]
-    shape = list(in_shape) if in_shape is not None else [1, "2T", feature_dim]
-    return json.dumps(
-        {
-            "inputs": [{"name": name, "shape": shape}],
-            "outputs": names,
-            "values": {output: {"dtype": "f32", "shape": logits} for output in names},
-            "symbols": list(symbols),
-        }
-    )
+    outputs: int = 1,
+    symbols: Sequence[str] = (),
+) -> list[bytes]:
+    """系列に置く母音検出グラフの中身（part 列 — 先頭が part 0）。
 
+    組み立てへ届く形は**正当なコンテナ**でなければならない（組み立ては入力を開いて宣言の全
+    規則で見る — `karume.dist.assert_weight_components_verified`）ので、門に落とす側も同じ器で
+    作り、**宣言だけを実物とずらす**。
 
-def _vowel_detector_container(
-    dtype: str, graph: str | None, storage: str | None
-) -> bytes | list[bytes]:
-    """系列に置く母音検出グラフの中身。
-
-    組み立てへ届く既定の形は**正当な IR コンポーネント**でなければならない（組み立ては入力を
-    IR v1 の全規則で見る — `karume.dist.assert_weight_components_verified`）。正当な側は
-    shard 列（`list[bytes]`・先頭がグラフ shard — ADR 0081）で、偽コンテナは代表 path 1 本の
-    `bytes` のまま（計画の門で止まるので分割の側まで届かない）。
-
-    軸は 2 本ある:
-
-    - `dtype` は**単一 dtype の偽コンテナ**が名乗るヘッダ dtype。要求検査（「F32 が無い」）を
-      見るケースはこちらでしか作れない — 実物どおりの f16 系列は F32 も含むので、要求検査は
-      通ってしまう。
-    - `storage` は**実物どおりの混成コンテナ**の格納形（f16 / i8 / i4 は適格外の重みと bias が
-      F32 で残り、i4 はさらに I8 が混ざる）。禁止表（{@link VOWEL_DETECTOR_STORAGE_FORBIDDEN}）の
-      門はこの形でしか試せない。
+    `storage` は実物どおりの混成コンポーネントの格納形（f16 / i8 / i4 は適格外の重みと bias が
+    f32 で残り、i4 はさらに i8 が混ざる）— 禁止表（{@link VOWEL_DETECTOR_STORAGE_FORBIDDEN}）の
+    門はこの形でしか試せない。残りの引数はグラフ宣言の各軸で、既定は実物どおり
+    （記号 `T` は入力 shape の `2T` が束縛するので、`symbols` は足すだけの席）。
     """
-    if storage is not None or (graph is None and dtype == "F32"):
-        return ir_container(
-            mark="vowel-detector",
-            storage=storage if storage is not None else dtype.lower(),
-            inputs=(("features", (1, "2T", _VOWEL_DETECTOR_N_MELS + 3)),),
-            outputs=([1, "T", len(_VOWEL_DETECTOR_CLASSES)],),
-        )
-    return _fake_safetensors(
-        dtype, b"vowel-detector", {IR_METADATA_KEY: graph or _vowel_detector_graph()}
+    shape: Shape = list(in_shape) if in_shape is not None else [1, "2T", feature_dim]
+    logits: Shape = (
+        list(out_shape) if out_shape is not None else [1, "T", len(_VOWEL_DETECTOR_CLASSES)]
+    )
+    return ir_container(
+        mark="vowel-detector",
+        storage=storage,
+        inputs=((input_name, shape),),
+        outputs=[logits] * outputs,
+        symbols=symbols,
     )
 
 
@@ -192,12 +155,10 @@ def _build_vowel_detector_sources(
     root: Path,
     *,
     model: str = VOWEL_DETECTOR_DEFAULT_MODEL,
-    graph: str | None = None,
     feature_config: Mapping[str, Any] | None = None,
     omit_feature_config: bool = False,
     omit_graph: bool = False,
-    dtype: str = "F32",
-    storage: str | None = None,
+    **container: Any,
 ) -> VowelDetectorSources:
     """系列 1 本と上流素材を偽資産で再現する（配布しない `io.*` の混入込み）。
 
@@ -210,10 +171,7 @@ def _build_vowel_detector_sources(
         model_name=model,
     )
     if not omit_graph:
-        write_component(
-            sources.series / "model.safetensors",
-            _vowel_detector_container(dtype, graph, storage),
-        )
+        write_component(sources.series / "model.krm", _vowel_detector_container(**container))
         # 配布に入ってはいけない E2E フィクスチャ（系列には実際にこれが並んでいる）。
         _write(sources.series / "io.silence.safetensors", b"io-fixture")
     if not omit_feature_config:
@@ -284,13 +242,7 @@ class TestVowelDetectorLayout:
         )
         assert verify_dist(out_dir)
 
-    def test_it_refuses_a_compressed_asset_in_the_f32_seat(self, tmp_path: Path) -> None:
-        """格納形は系列ディレクトリ名でなくヘッダが正（`--dtype` 付け忘れの逆向き）。"""
-        sources = _build_vowel_detector_sources(tmp_path, dtype="F16")
-        with pytest.raises(DistError, match="F32 が無い"):
-            vowel_detector_plan(sources)
-
-    @pytest.mark.parametrize(("storage", "intruder"), [("f16", "F16"), ("i8", "I8"), ("i4", "I4")])
+    @pytest.mark.parametrize(("storage", "intruder"), [("f16", "f16"), ("i8", "i8"), ("i4", "i4")])
     def test_it_refuses_a_real_compressed_series_in_the_f32_seat(
         self, tmp_path: Path, storage: str, intruder: str
     ) -> None:
@@ -400,11 +352,8 @@ class TestVowelDetectorGraphGate:
         """
         sources = _build_vowel_detector_sources(
             tmp_path,
-            graph=_vowel_detector_graph(
-                in_shape=[1, 500, _VOWEL_DETECTOR_N_MELS + 3],
-                out_shape=[1, 250, len(_VOWEL_DETECTOR_CLASSES)],
-                symbols=(),
-            ),
+            in_shape=[1, 500, _VOWEL_DETECTOR_N_MELS + 3],
+            out_shape=[1, 250, len(_VOWEL_DETECTOR_CLASSES)],
         )
         with pytest.raises(DistError, match="記号次元"):
             vowel_detector_plan(sources)
@@ -412,44 +361,38 @@ class TestVowelDetectorGraphGate:
     def test_it_refuses_a_graph_whose_input_is_not_twice_the_symbol(self, tmp_path: Path) -> None:
         """入力が `T` のままだと、実行時の束縛が 2 倍ずれて `.lab` の時間が伸びる。"""
         sources = _build_vowel_detector_sources(
-            tmp_path,
-            graph=_vowel_detector_graph(in_shape=[1, "T", _VOWEL_DETECTOR_N_MELS + 3]),
+            tmp_path, in_shape=[1, "T", _VOWEL_DETECTOR_N_MELS + 3]
         )
         with pytest.raises(DistError, match="10ms 格子の長さは記号 T の 2 倍"):
             vowel_detector_plan(sources)
 
     def test_it_refuses_a_graph_with_another_feature_dim(self, tmp_path: Path) -> None:
-        sources = _build_vowel_detector_sources(
-            tmp_path, graph=_vowel_detector_graph(feature_dim=80)
-        )
+        sources = _build_vowel_detector_sources(tmp_path, feature_dim=80)
         with pytest.raises(DistError, match="期待は"):
             vowel_detector_plan(sources)
 
     def test_it_refuses_a_graph_whose_output_is_not_the_20ms_grid(self, tmp_path: Path) -> None:
         """出力が 10ms 格子のまま焼かれていると、`.lab` の時間が 2 倍に伸びる。"""
         sources = _build_vowel_detector_sources(
-            tmp_path,
-            graph=_vowel_detector_graph(out_shape=[1, "2T", len(_VOWEL_DETECTOR_CLASSES)]),
+            tmp_path, out_shape=[1, "2T", len(_VOWEL_DETECTOR_CLASSES)]
         )
         with pytest.raises(DistError, match="20ms 格子"):
             vowel_detector_plan(sources)
 
     def test_it_refuses_a_graph_with_a_second_output(self, tmp_path: Path) -> None:
-        sources = _build_vowel_detector_sources(tmp_path, graph=_vowel_detector_graph(outputs=2))
+        sources = _build_vowel_detector_sources(tmp_path, outputs=2)
         with pytest.raises(DistError, match="ロジット 1 本だけ"):
             vowel_detector_plan(sources)
 
     def test_it_refuses_a_graph_with_a_second_symbol(self, tmp_path: Path) -> None:
         """記号は時間軸 1 本きり（2 本目はホストが束縛を渡せない）。"""
-        sources = _build_vowel_detector_sources(
-            tmp_path, graph=_vowel_detector_graph(symbols=("T", "S"))
-        )
+        sources = _build_vowel_detector_sources(tmp_path, symbols=("S",))
         with pytest.raises(DistError, match="記号次元"):
             vowel_detector_plan(sources)
 
     def test_it_refuses_a_renamed_input(self, tmp_path: Path) -> None:
         """実行側は名前で束ねるので、綴りが変われば束ねられない。"""
-        sources = _build_vowel_detector_sources(tmp_path, graph=_vowel_detector_graph(name="mel"))
+        sources = _build_vowel_detector_sources(tmp_path, input_name="mel")
         with pytest.raises(DistError, match="グラフ入力"):
             vowel_detector_plan(sources)
 

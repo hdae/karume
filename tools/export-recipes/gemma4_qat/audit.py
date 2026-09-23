@@ -1,41 +1,35 @@
-"""分割後の固定整数・scale を入力 bytes と突合する。"""
+"""据えた容器の固定整数・scale を入力 bytes と突合する。"""
 
 from __future__ import annotations
 
 import hashlib
-import json
 from collections.abc import Mapping
 from pathlib import Path
 
+import torch
+
+from _shared.container_read import read_stored
 from karume.emit import FixedQuantizedWeight
-from karume.shards import parse_piece_key, resolve_shards
+
+
+def _digest(tensor: torch.Tensor) -> bytes:
+    return hashlib.sha256(memoryview(tensor.numpy())).digest()
 
 
 def assert_fixed_bytes(path: Path, fixed: Mapping[str, FixedQuantizedWeight]) -> None:
-    """piece をファイル順に連結した digest を照合する。f32 展開はしない。"""
-    expected = {key: value.packed for key, value in fixed.items()}
-    expected.update({f"karume.scale.{key}": value.scale for key, value in fixed.items()})
-    digests = {key: hashlib.sha256() for key in expected}
-    for shard in resolve_shards(path):
-        with shard.open("rb") as stream:
-            length = int.from_bytes(stream.read(8), "little")
-            header = json.loads(stream.read(length))
-            for name, entry in header.items():
-                if name == "__metadata__":
-                    continue
-                piece = parse_piece_key(name)
-                key = name if piece is None else piece[0]
-                if key not in digests:
-                    continue
-                begin, end = entry["data_offsets"]
-                stream.seek(8 + length + begin)
-                left = end - begin
-                while left:
-                    block = stream.read(min(left, 1 << 20))
-                    if not block:
-                        raise ValueError(f"{shard}: {name} が途中で終わる")
-                    digests[key].update(block)
-                    left -= len(block)
-    for key, tensor in expected.items():
-        if digests[key].digest() != hashlib.sha256(memoryview(tensor.numpy())).digest():
+    """容器から取り直した payload を入力 bytes と照合する。f32 展開はしない。
+
+    piece に割れた席も供給計画が行の順に畳むので（{@link _shared.container_read.read_stored}）、
+    突合の意味は分割の有無で変わらない。companion scale は同じ供給計画がぶら下げて持つ。
+    """
+    stored = read_stored(path)
+    for key, value in fixed.items():
+        entry = stored.get(key)
+        if entry is None:
+            raise ValueError(f"{path}: 固定重み '{key}' が容器に無い")
+        if hashlib.sha256(entry.payload).digest() != _digest(value.packed):
             raise ValueError(f"{path}: 固定 payload {key} が入力 bytes と違う")
+        if entry.scale is None:
+            raise ValueError(f"{path}: 固定重み '{key}' に companion scale が無い")
+        if hashlib.sha256(entry.scale).digest() != _digest(value.scale):
+            raise ValueError(f"{path}: 固定 scale {key} が入力 bytes と違う")

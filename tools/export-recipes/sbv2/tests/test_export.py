@@ -19,8 +19,10 @@ import math
 import re
 import subprocess
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import torch
@@ -28,6 +30,7 @@ from safetensors import safe_open
 from torch import nn
 
 from _shared.paths import REPO_ROOT, SERIES_ROOT
+from karume.container import codec_entry, container_parts
 from karume.dims import parse_dim
 from karume.emit import EmitError
 from karume.ops import EMITTABLE_OPS
@@ -37,11 +40,24 @@ from karume.quantize import (
     fake_quant_int8,
     quantize_to_int8,
 )
-from karume.verify import verify_model
+from karume.verify import verify_container
 from sbv2 import export as export_sbv2
 from sbv2 import patch as patch_sbv2
+from sbv2.card import SBV2_CARD_PROFILES
 
 MODEL_DIR = export_sbv2.DEFAULT_MODEL_DIR
+
+
+def _speaker_dir(root: Path) -> Path:
+    """規約どおりの `--model-dir`（jvnv の話者 id — `export_sbv2.SBV2_FAMILY_DIRS`）。
+
+    合成の席でも綴りを規約に合わせるのは、`sbv2_provenance` がここから**法的事実**を引くため
+    （どのファミリーでもない名前は fail loudly — 黙って片方のライセンスを名乗らない）。
+    """
+    speaker = root / export_sbv2.SBV2_FAMILY_DIRS["jvnv"][0]
+    speaker.mkdir(parents=True, exist_ok=True)
+    return speaker
+
 
 _WEIGHTS_PRESENT = (
     MODEL_DIR.is_dir()
@@ -49,6 +65,38 @@ _WEIGHTS_PRESENT = (
     and (MODEL_DIR / export_sbv2.CONFIG_FILE).is_file()
 )
 _PACKAGE_PRESENT = importlib.util.find_spec("style_bert_vits2") is not None
+
+
+def _verified_graph(path: Path) -> Mapping[str, Any]:
+    """据えた容器を**全規則で**検証し、IR v2 のグラフ文書を返す。
+
+    `karume/4` の `verify_model` の置き換え。block の sha256 まで取り直す（`blocks=True`）ので、
+    「書けたが読めない」配布形はここで落ちる。`karume/5` は 1 コンテナ 1 グラフ（ADR 0109
+    決定 2）なので、`graphs` の唯一の値を返す。
+    """
+    verified = verify_container(container_parts(path), blocks=True)
+    return next(iter(verified.read.graph.graphs.values()))
+
+
+def _storage_layouts(path: Path) -> dict[str, str]:
+    """テンソルキー → 格納の layout（IR v2 のグラフ記述は格納を持たない — 正本は束縛表）。"""
+    verified = verify_container(container_parts(path))
+    return {
+        name: codec_entry(supply.encoding.codec).layout
+        for bound in verified.graphs.values()
+        for name, supply in bound.supplies.items()
+    }
+
+
+def _scale_blocks(path: Path) -> dict[str, str | None]:
+    """テンソルキー → companion scale の block id（量子化でなければ `None`）。"""
+    verified = verify_container(container_parts(path))
+    return {
+        name: (None if supply.scale is None else supply.scale.id)
+        for bound in verified.graphs.values()
+        for name, supply in bound.supplies.items()
+    }
+
 
 requires_weights = pytest.mark.skipif(
     not (_WEIGHTS_PRESENT and _PACKAGE_PRESENT),
@@ -128,14 +176,18 @@ class TestDurationPredictorExport:
     def test_the_container_passes_the_full_verification(self, exported):
         out, _ = exported
 
-        verify_model(out / export_sbv2.MODEL_FILE)
+        _verified_graph(out / export_sbv2.MODEL_FILE)
 
     def test_the_graph_declares_the_wrapper_argument_names(self, exported):
         out, summary = exported
-        graph = verify_model(out / export_sbv2.MODEL_FILE)
+        graph = _verified_graph(out / export_sbv2.MODEL_FILE)
 
-        assert [spec.name for spec in graph.inputs] == ["h", "x_mask", "g"]
-        assert [spec.shape for spec in graph.inputs] == [[1, 192, "P"], [1, 1, "P"], [1, 512, 1]]
+        assert [spec["name"] for spec in graph["inputs"]] == ["h", "x_mask", "g"]
+        assert [spec["shape"] for spec in graph["inputs"]] == [
+            [1, 192, "P"],
+            [1, 1, "P"],
+            [1, 512, 1],
+        ]
         assert summary["symbols"] == ["P"]
 
     def test_the_graph_stays_inside_the_current_contract(self, exported):
@@ -162,16 +214,16 @@ class TestDurationPredictorExport:
     def test_io_shapes_bind_the_symbol_to_the_case_length(self, exported, case):
         out, _ = exported
         name, length, _ = case
-        graph = verify_model(out / export_sbv2.MODEL_FILE)
+        graph = _verified_graph(out / export_sbv2.MODEL_FILE)
         tensors = _io_tensors(out, name)
 
-        for spec in graph.inputs:
-            actual = list(tensors[f"input.{spec.name}"].shape)
+        for spec in graph["inputs"]:
+            actual = list(tensors[f"input.{spec['name']}"].shape)
             declared = [
                 length if isinstance(dim, str) and parse_dim(dim).sym == "P" else dim
-                for dim in spec.shape
+                for dim in spec["shape"]
             ]
-            assert actual == declared, spec.name
+            assert actual == declared, spec["name"]
         assert list(tensors["output.0"].shape) == [1, 1, length]
         assert tensors["output.0"].dtype == torch.float32
 
@@ -827,10 +879,11 @@ class TestWeightDtypeSeries:
         monkeypatch.setattr(export_sbv2, "load_net_g", lambda _model_dir: (net_g, hps))
         out = tmp_path / export_sbv2.TARGET_DP
 
-        summary = export_sbv2.export_dp(tmp_path, out, cases=_TINY_CASES, dtype=dtype)
+        # `--model-dir` の名前が声のファミリーを決める（出所とライセンスの正本 —
+        # `export_sbv2.SBV2_FAMILY_DIRS`）ので、合成の席も規約どおりの綴りにする。
+        summary = export_sbv2.export_dp(_speaker_dir(tmp_path), out, cases=_TINY_CASES, dtype=dtype)
 
-        graph = verify_model(out / export_sbv2.MODEL_FILE)
-        stored = {name: init.storage.dtype for name, init in graph.initializers.items()}
+        stored = _storage_layouts(out / export_sbv2.MODEL_FILE)
         compressed = {name for name, storage in stored.items() if storage in ("f16", "i8", "i4")}
         if dtype == "f32":
             assert compressed == set(), stored
@@ -842,7 +895,8 @@ class TestWeightDtypeSeries:
             assert summary["compressed_tensors"] == 2
         if dtype in ("i8", "i4"):
             # companion scale の宣言（ADR 0019 / 0069）— 無いと値が復元できない。
-            scale_keys = {graph.initializers[name].storage.scale for name in compressed}
+            scales = _scale_blocks(out / export_sbv2.MODEL_FILE)
+            scale_keys = {scales[name] for name in compressed}
             assert None not in scale_keys, stored
             assert len(scale_keys) == len(compressed), "scale キーが重みごとに分かれていない"
             assert summary["scale_bytes"] > 0
@@ -883,7 +937,7 @@ class TestWeightDtypeSeries:
         out = tmp_path / export_sbv2.TARGET_DP
 
         with pytest.raises(EmitError, match="keepdim 形"):
-            export_sbv2.export_dp(tmp_path, out, cases=_TINY_CASES, dtype="i4")
+            export_sbv2.export_dp(_speaker_dir(tmp_path), out, cases=_TINY_CASES, dtype="i4")
 
         # 門より前に final を作らない（`_staged_target` の MUST）。
         assert not out.exists()
@@ -1034,14 +1088,14 @@ class TestFrontExport:
     def test_the_container_passes_the_full_verification(self, exported_front):
         out, _ = exported_front
 
-        verify_model(out / export_sbv2.MODEL_FILE)
+        _verified_graph(out / export_sbv2.MODEL_FILE)
 
     def test_the_graph_declares_the_wrapper_argument_names(self, exported_front):
         out, summary = exported_front
-        graph = verify_model(out / export_sbv2.MODEL_FILE)
+        graph = _verified_graph(out / export_sbv2.MODEL_FILE)
 
-        assert [spec.name for spec in graph.inputs] == list(export_sbv2.FRONT_INPUT_ORDER)
-        assert [spec.shape for spec in graph.inputs] == [
+        assert [spec["name"] for spec in graph["inputs"]] == list(export_sbv2.FRONT_INPUT_ORDER)
+        assert [spec["shape"] for spec in graph["inputs"]] == [
             [1, "P"],
             [1, 1, "P"],
             [1, "P"],
@@ -1068,15 +1122,15 @@ class TestFrontExport:
         いずれも入力は記号を含まない静的形でなければならない。
         """
         out, _ = exported_front
-        graph = verify_model(out / export_sbv2.MODEL_FILE)
+        graph = _verified_graph(out / export_sbv2.MODEL_FILE)
         sources = []
-        for node in graph.nodes:
-            if node.op != "sym_prefix_slice":
+        for node in graph["nodes"]:
+            if node["op"] != "sym_prefix_slice":
                 continue
-            assert node.attrs["sym"] == "P"
-            shape = graph.values[node.ins[0]].shape
+            assert node["attrs"]["sym"] == "P"
+            shape = graph["values"][node["ins"][0]]["shape"]
             assert all(isinstance(dim, int) for dim in shape), shape
-            sources.append((tuple(shape), graph.values[node.ins[0]].dtype))
+            sources.append((tuple(shape), graph["values"][node["ins"][0]]["dtype"]))
 
         pmax = export_sbv2.SYM_MAX
         window = 2 * export_sbv2.EXPECTED_WINDOW_SIZE + 1
@@ -1095,11 +1149,11 @@ class TestFrontExport:
         Pmax=512 だからこそ焼き込みで済む、という裁定の前提がここで壊れれば見える。
         """
         out, _ = exported_front
-        graph = verify_model(out / export_sbv2.MODEL_FILE)
+        graph = _verified_graph(out / export_sbv2.MODEL_FILE)
         baked = sum(
-            math.prod(graph.values[name].shape) * 4
-            for name in graph.initializers
-            if name.startswith("const_")
+            math.prod(graph["values"][name]["shape"]) * 4
+            for name in graph["initializers"]
+            if name.startswith("const.")
         )
 
         assert baked < 3 * 1024 * 1024, baked
@@ -1124,16 +1178,16 @@ class TestFrontExport:
     def test_io_shapes_bind_the_symbol_to_the_case_length(self, exported_front, case):
         out, _ = exported_front
         name, length, _ = case
-        graph = verify_model(out / export_sbv2.MODEL_FILE)
+        graph = _verified_graph(out / export_sbv2.MODEL_FILE)
         tensors = _io_tensors(out, name)
 
-        for spec in graph.inputs:
-            actual = list(tensors[f"input.{spec.name}"].shape)
+        for spec in graph["inputs"]:
+            actual = list(tensors[f"input.{spec['name']}"].shape)
             declared = [
                 length if isinstance(dim, str) and parse_dim(dim).sym == "P" else dim
-                for dim in spec.shape
+                for dim in spec["shape"]
             ]
-            assert actual == declared, spec.name
+            assert actual == declared, spec["name"]
         # logw_sdp / logw_dp は [1,1,P]、m_p / logs_p は [1,192,P]。
         assert [list(tensors[f"output.{index}"].shape) for index in range(4)] == [
             [1, 1, length],
@@ -1319,14 +1373,14 @@ class TestFlowExport:
     def test_the_container_passes_the_full_verification(self, exported_flow):
         out, _ = exported_flow
 
-        verify_model(out / export_sbv2.MODEL_FILE)
+        _verified_graph(out / export_sbv2.MODEL_FILE)
 
     def test_the_graph_declares_the_wrapper_argument_names(self, exported_flow):
         out, summary = exported_flow
-        graph = verify_model(out / export_sbv2.MODEL_FILE)
+        graph = _verified_graph(out / export_sbv2.MODEL_FILE)
 
-        assert [spec.name for spec in graph.inputs] == list(export_sbv2.FLOW_INPUT_ORDER)
-        assert [spec.shape for spec in graph.inputs] == [
+        assert [spec["name"] for spec in graph["inputs"]] == list(export_sbv2.FLOW_INPUT_ORDER)
+        assert [spec["shape"] for spec in graph["inputs"]] == [
             [1, 192, "T"],
             [1, 1, "T"],
             [1, 512, 1],
@@ -1334,7 +1388,7 @@ class TestFlowExport:
             ["T", "T"],
         ]
         # 表は i64 → i32（境界正規化 — ADR 0009）と f32。
-        assert [spec.dtype for spec in graph.inputs][3:] == ["i32", "f32"]
+        assert [spec["dtype"] for spec in graph["inputs"]][3:] == ["i32", "f32"]
         assert summary["symbols"] == ["T"]
 
     def test_the_graph_stays_inside_the_current_contract(self, exported_flow):
@@ -1354,11 +1408,11 @@ class TestFlowExport:
         value 側の `idx_v` `(Tmax, 2w+1)` 1 本だけで、こちらは 4096×9 で 150KB 級。
         """
         out, _ = exported_flow
-        graph = verify_model(out / export_sbv2.MODEL_FILE)
+        graph = _verified_graph(out / export_sbv2.MODEL_FILE)
         sources = [
-            tuple(graph.values[node.ins[0]].shape)
-            for node in graph.nodes
-            if node.op == "sym_prefix_slice"
+            tuple(graph["values"][node["ins"][0]]["shape"])
+            for node in graph["nodes"]
+            if node["op"] == "sym_prefix_slice"
         ]
 
         tmax = export_sbv2.FLOW_SYM_MAX
@@ -1368,11 +1422,11 @@ class TestFlowExport:
     def test_the_baked_constants_stay_far_below_the_promoted_tables(self, exported_flow):
         """焼き込み定数の総量が 1MB 未満（「昇格しないと 134MB」の対照）。"""
         out, _ = exported_flow
-        graph = verify_model(out / export_sbv2.MODEL_FILE)
+        graph = _verified_graph(out / export_sbv2.MODEL_FILE)
         baked = sum(
-            math.prod(graph.values[name].shape) * 4
-            for name in graph.initializers
-            if name.startswith("const_")
+            math.prod(graph["values"][name]["shape"]) * 4
+            for name in graph["initializers"]
+            if name.startswith("const.")
         )
 
         assert baked < 1024 * 1024, baked
@@ -1397,16 +1451,16 @@ class TestFlowExport:
     def test_io_shapes_bind_the_symbol_to_the_case_length(self, exported_flow, case):
         out, _ = exported_flow
         name, length, _ = case
-        graph = verify_model(out / export_sbv2.MODEL_FILE)
+        graph = _verified_graph(out / export_sbv2.MODEL_FILE)
         tensors = _io_tensors(out, name)
 
-        for spec in graph.inputs:
-            actual = list(tensors[f"input.{spec.name}"].shape)
+        for spec in graph["inputs"]:
+            actual = list(tensors[f"input.{spec['name']}"].shape)
             declared = [
                 length if isinstance(dim, str) and parse_dim(dim).sym == "T" else dim
-                for dim in spec.shape
+                for dim in spec["shape"]
             ]
-            assert actual == declared, spec.name
+            assert actual == declared, spec["name"]
         assert list(tensors["output.0"].shape) == [1, 192, length]
 
     @pytest.mark.parametrize("case", export_sbv2.GOLDEN_CASES, ids=lambda case: case[0])
@@ -1494,15 +1548,15 @@ class TestDecExport:
     def test_the_container_passes_the_full_verification(self, exported_dec):
         out, _ = exported_dec
 
-        verify_model(out / export_sbv2.MODEL_FILE)
+        _verified_graph(out / export_sbv2.MODEL_FILE)
 
     def test_the_graph_declares_the_generator_argument_names(self, exported_dec):
         out, summary = exported_dec
-        graph = verify_model(out / export_sbv2.MODEL_FILE)
+        graph = _verified_graph(out / export_sbv2.MODEL_FILE)
 
         # ラッパを置いていないので `Generator.forward(x, g)` の引数名がそのまま出る。
-        assert [spec.name for spec in graph.inputs] == list(export_sbv2.DEC_INPUT_ORDER)
-        assert [spec.shape for spec in graph.inputs] == [[1, 192, "T"], [1, 512, 1]]
+        assert [spec["name"] for spec in graph["inputs"]] == list(export_sbv2.DEC_INPUT_ORDER)
+        assert [spec["shape"] for spec in graph["inputs"]] == [[1, 192, "T"], [1, 512, 1]]
         assert summary["symbols"] == ["T"]
 
     def test_the_graph_stays_inside_the_current_contract(self, exported_dec):
@@ -1523,8 +1577,8 @@ class TestDecExport:
     def test_the_output_length_is_the_upsampling_product(self, exported_dec):
         """出力長が厳密に 512·T（ConvTranspose の `pad=(k−u)//2` が効いている）。"""
         out, _ = exported_dec
-        graph = verify_model(out / export_sbv2.MODEL_FILE)
-        shape = graph.values[graph.outputs[0]].shape
+        graph = _verified_graph(out / export_sbv2.MODEL_FILE)
+        shape = graph["values"][graph["outputs"][0]]["shape"]
 
         assert shape[:2] == [1, 1]
         assert parse_dim(shape[2]).coeff == 512
@@ -1604,15 +1658,15 @@ class TestVoiceExport:
     def test_the_container_passes_the_full_verification(self, exported_voice):
         out, _ = exported_voice
 
-        verify_model(out / export_sbv2.MODEL_FILE)
+        _verified_graph(out / export_sbv2.MODEL_FILE)
 
     def test_the_graph_takes_the_flow_inputs_and_returns_audio(self, exported_voice):
         out, summary = exported_voice
-        graph = verify_model(out / export_sbv2.MODEL_FILE)
+        graph = _verified_graph(out / export_sbv2.MODEL_FILE)
 
-        assert [spec.name for spec in graph.inputs] == list(export_sbv2.FLOW_INPUT_ORDER)
+        assert [spec["name"] for spec in graph["inputs"]] == list(export_sbv2.FLOW_INPUT_ORDER)
         assert summary["outputs"] == 1
-        assert parse_dim(graph.values[graph.outputs[0]].shape[2]).coeff == 512
+        assert parse_dim(graph["values"][graph["outputs"][0]]["shape"][2]).coeff == 512
 
     def test_the_fusion_covers_both_halves(self, exported_voice, exported_flow, exported_dec):
         """融合グラフが flow と dec の op を**両方**持つ（片方が落ちていない）。
@@ -1696,3 +1750,34 @@ def _io_tensors(out_dir, case_name) -> dict[str, torch.Tensor]:
     with safe_open(str(path), framework="pt") as handle:
         # safe_open は Mapping ではないので keys() が唯一の列挙手段。
         return {key: handle.get_tensor(key) for key in handle.keys()}  # noqa: SIM118
+
+
+class TestTheVoiceFamilyIsDecidedByAnAllowList:
+    """`--model-dir` の綴りから**法的事実**（ライセンス）を引く判定。
+
+    「`FN` で始まらなければ jvnv」と二値で決めていた頃は、想定外のディレクトリ名が黙って
+    jvnv の `cc-by-sa-4.0` を名乗る配布形になった — 配ってからでないと誰も気づけない
+    沈黙誤値なので、許可リストから外れた名前は fail loudly MUST。
+    """
+
+    @pytest.mark.parametrize(
+        ("name", "family"), [("FN4", "fn"), ("FN", "fn"), ("F1", "jvnv"), ("M2", "jvnv")]
+    )
+    def test_a_known_prefix_resolves_to_its_family(self, name: str, family: str) -> None:
+        assert export_sbv2.sbv2_family(Path("inputs/sbv2") / name) == family
+
+    @pytest.mark.parametrize("name", ["my-fn-voice", "F3", "sbv2", "copy-of-FN4"])
+    def test_an_unknown_directory_name_fails_loudly(self, name: str) -> None:
+        with pytest.raises(ValueError, match="どの声のファミリーの綴りにも当たらない"):
+            export_sbv2.sbv2_family(Path("inputs/sbv2") / name)
+
+    def test_every_family_in_the_allow_list_has_a_card_profile(self) -> None:
+        """許可リストとカードの帰属表が同じ集合（片方だけ増える形を閉じる）。"""
+        assert set(export_sbv2.SBV2_FAMILY_DIRS) == set(SBV2_CARD_PROFILES)
+
+    @pytest.mark.parametrize(("name", "family"), [("FN4", "fn"), ("F1", "jvnv")])
+    def test_the_license_comes_from_the_card_profile(self, name: str, family: str) -> None:
+        provenance = export_sbv2.sbv2_provenance(Path("inputs/sbv2") / name)
+
+        assert provenance.license == SBV2_CARD_PROFILES[family].metadata.license
+        assert provenance.upstream_revision == SBV2_CARD_PROFILES[family].source_version

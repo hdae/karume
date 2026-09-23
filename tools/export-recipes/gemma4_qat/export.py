@@ -9,14 +9,17 @@ from pathlib import Path
 from typing import Any
 
 import torch
+from safetensors import safe_open
 
 from _shared.gemma_tokenizer import asset_payload, compile_tokenizer
 from _shared.paths import INPUTS_ROOT, SERIES_ROOT
+from gemma4.export import MODEL_FILE, PROVENANCE
+from gemma4.export_product import PLE_PROBE_FILE, PROBE_INPUTS_KEY, assert_ple_assets
 from gemma4.provenance import checkpoint_fingerprint
 from karume import publish_model
 from karume.artifacts import staged_publication
-from karume.dist import safetensors_header
-from karume.shards import resolve_shards
+from karume.container import container_parts
+from karume.ple import PLE_INDEX_ASSET
 
 from .audit import assert_fixed_bytes
 from .checkpoint import load_qat
@@ -27,7 +30,7 @@ from .config import (
     REFERENCE_SCHEMA,
     series_name,
 )
-from .ple import write_ple
+from .ple import build_ple
 from .trace import trace_qat
 
 #: 上流 checkpoint のうち text 変換が**読まない**テンソル群（ヘッダの綴りで数える）。
@@ -46,16 +49,17 @@ def upstream_unused(model_dir: Path) -> dict[str, int]:
     containers = sorted(model_dir.glob("*.safetensors"))
     if not containers:
         raise ValueError(f"{model_dir}: safetensors が 1 本も無い")
-    names = [
-        name
-        for container in containers
-        for name in safetensors_header(container)
-        if name != "__metadata__"
-    ]
+    names = [name for container in containers for name in _upstream_tensor_names(container)]
     return {
         group: sum(any(marker in name for marker in markers) for name in names)
         for group, markers in UNUSED_UPSTREAM_MARKERS.items()
     }
+
+
+def _upstream_tensor_names(path: Path) -> list[str]:
+    """上流 safetensors の**ヘッダだけ**からテンソル名を引く（実体は 1 バイトも読まない）。"""
+    with safe_open(str(path), framework="np") as handle:
+        return list(handle.keys())
 
 
 def export_qat(model_dir: Path, destination: Path, model: str) -> dict[str, Any]:
@@ -66,16 +70,34 @@ def export_qat(model_dir: Path, destination: Path, model: str) -> dict[str, Any]
     compiled = compile_tokenizer(raw)
     with staged_publication(destination) as staged:
         staged.mkdir(parents=True)
-        index = write_ple(
+        ple = build_ple(
             loaded.ple,
             loaded.config.num_hidden_layers,
             loaded.config.hidden_size_per_layer_input,
             staged,
         )
-        traced = trace_qat(loaded, torch.tensor([[2, 105, 2364, 107]], dtype=torch.int64))
-        target = staged / "model.safetensors"
-        publish_model(target, traced.graph, traced.tensors, fixed_weights=traced.fixed)
+        target = staged / MODEL_FILE
+        try:
+            traced = trace_qat(loaded, torch.tensor([[2, 105, 2364, 107]], dtype=torch.int64))
+            publish_model(
+                target,
+                traced.graph,
+                traced.tensors,
+                provenance=PROVENANCE,
+                # グラフ名は**部品名**（= 据え替え先のディレクトリ名 — 作業席の名前ではない）。
+                graph_name=destination.name,
+                fixed_weights=traced.fixed,
+                assets=ple.assets,
+            )
+        finally:
+            # MUST: 一時ファイルは据え替えの前に消す（作業席ごと据わるので、残すと配布物に混ざる）。
+            ple.discard()
         assert_fixed_bytes(target, traced.fixed)
+        # PLE の逆量子化ビット一致は**据えた容器から読み直して**見る（製品系列と同じ門）。
+        index = json.loads(bytes(ple.assets[PLE_INDEX_ASSET].payload))
+        with safe_open(str(staged / PLE_PROBE_FILE), framework="pt") as handle:
+            reference = handle.get_tensor(PROBE_INPUTS_KEY)
+        assert_ple_assets(target, index, ple.probe, reference)
         source = {"repo": f"google/{CHECKPOINTS[model]}", "checkpoint": checkpoint}
         (staged / "tokenizer.json").write_text(
             json.dumps(asset_payload(compiled, source=source), ensure_ascii=False) + "\n"
@@ -97,8 +119,8 @@ def export_qat(model_dir: Path, destination: Path, model: str) -> dict[str, Any]
                 dtype: sum(value.dtype == dtype for value in traced.fixed.values())
                 for dtype in ("i2", "i4", "i8")
             },
-            "weightFiles": len(resolve_shards(target)),
-            "pleShards": len(index["shards"]),
+            "weightFiles": len(container_parts(target)),
+            "pleBlocks": ple.blocks,
             "upstreamUnused": upstream_unused(model_dir),
         }
         (staged / "reference.json").write_text(json.dumps(record, indent=2) + "\n")

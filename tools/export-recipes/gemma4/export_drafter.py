@@ -70,7 +70,7 @@ golden は丸めた後の `wrapper` をそのまま回す（{@link export_series
 
 ## 出力レイアウト
 
-    outputs/series/gemma4-e2b-drafter/model.safetensors        重み + karume_ir（グラフ shard 先頭）
+    outputs/series/gemma4-e2b-drafter/model.krm                重み + 2 文書の記述
     outputs/series/gemma4-e2b-drafter/drafter-golden.<case>.safetensors  期待 draft 列
     outputs/series/gemma4-e2b-drafter/reference.json           出所記録（target / drafter の指紋）
 """
@@ -90,6 +90,7 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 from torch import nn
 
+from _shared.container_read import read_layouts
 from _shared.decode_series import PROMPT_KEY
 from _shared.paths import REPO_ROOT, SERIES_ROOT
 from gemma4 import export as one_shot
@@ -97,15 +98,15 @@ from gemma4 import export_decode as decode
 from gemma4 import export_product as product
 from gemma4 import ple, provenance
 from karume.artifacts import staged_publication
+from karume.container import container_parts
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION
+from karume.dist import ir_graph
 from karume.emit import bakeable_initializers
-from karume.ir import IR_METADATA_KEY, IrGraph, IrInitializer, IrShared, IrStorage
+from karume.ir import IrGraph, IrInitializer, IrShared, IrStorage
 from karume.ops import ARGMAX_OP, ATTENTION_OP, EMBEDDING_OP, STATE_APPEND_OP, attention_readonly
 from karume.pipeline import publish_model
 from karume.quantize import fake_quant_int8
-from karume.shards import resolve_shards
 from karume.states import ExternalAttentionSpec, ExternalStatesPlan, to_external_states_form
-from karume.verify import parse_ir_graph
 
 #: 生成物の既定の置き場（製品系列とは別ディレクトリ — 単独では実行できない別資産）。
 DEFAULT_OUT_DIR = SERIES_ROOT / "gemma4-e2b-drafter"
@@ -282,7 +283,7 @@ def load_target_embed(model_dir: Path, config: Any) -> nn.Module:
     from transformers.models.gemma4.modeling_gemma4 import Gemma4TextScaledWordEmbedding
 
     key = one_shot.PLE_CHECKPOINT_KEY.replace("embed_tokens_per_layer", "embed_tokens")
-    with safe_open(str(model_dir / one_shot.MODEL_FILE), framework="pt") as handle:
+    with safe_open(str(model_dir / one_shot.CHECKPOINT_FILE), framework="pt") as handle:
         if key not in set(handle.keys()):
             raise AssertionError(f"target チェックポイントに '{key}' が無い: {model_dir}")
         weight = handle.get_tensor(key).to(torch.float32)
@@ -381,24 +382,23 @@ class LenderSlots:
     shapes: Mapping[str, list[Any]]
     #: 層種別 → (k スロット名, v スロット名)。
     slots: Mapping[str, tuple[str, str]]
-    #: 共有する主表の**貸し手コンテナのテンソルキー**。
+    #: 共有する主表の**貸し手コンテナのテンソルキー**（IR v2 では initializer 名そのもの）。
     shared_tensor: str
-    #: 貸し手グラフでのその initializer 名（診断用）。
-    shared_initializer: str
 
 
-def lender_graph(product_dir: Path) -> IrGraph:
-    """製品コンテナの先頭 shard から貸し手のグラフを読む（ヘッダだけ — 実体は触らない）。"""
-    shards = resolve_shards(product_dir / one_shot.MODEL_FILE)
-    with safe_open(str(shards[0]), framework="pt") as handle:
-        metadata = handle.metadata() or {}
-    text = metadata.get(IR_METADATA_KEY)
-    if text is None:
-        raise AssertionError(f"{shards[0]}: 先頭 shard に '{IR_METADATA_KEY}' が無い")
-    return parse_ir_graph(text)
+def lender_container(product_dir: Path) -> Path:
+    """製品コンテナの代表 path（part 列の解決は読み手が持つ）。"""
+    return product_dir / one_shot.MODEL_FILE
 
 
-def lender_slots(graph: IrGraph, config: Any, target_config: Any) -> LenderSlots:
+def lender_graph(product_dir: Path) -> Mapping[str, Any]:
+    """製品コンテナのグラフ記述（**IR v2 の文書**）を読む — 重みは 1 バイトも触らない。"""
+    return ir_graph(lender_container(product_dir))
+
+
+def lender_slots(
+    graph: Mapping[str, Any], layouts: Mapping[str, str], config: Any, target_config: Any
+) -> LenderSlots:
     """貸し手のスロット実形と共有テンソルキーを、製品コンテナの宣言から引く。
 
     MUST: 形も名前も**貸し手から読む**（drafter の config からは導かない）。借り手の宣言は
@@ -407,8 +407,14 @@ def lender_slots(graph: IrGraph, config: Any, target_config: Any) -> LenderSlots
 
     MUST: 共有する主表は「embedding の重みスロットで消費される `[V, H]` の initializer」を
     **構造で**引く（キーの綴りを写経しない）。1 本に決まらなければ fail loudly。
+
+    `layouts` はテンソルキー → 格納の layout（{@link _shared.container_read.read_layouts}）—
+    IR v2 のグラフ記述は格納を持たない（正本は束縛表）ので、常駐形の突合はそちらから引く。
     """
     owners = decode.kv_owner_layers(target_config)
+    states = graph.get("states") or {}
+    initializers = graph.get("initializers") or {}
+    values = graph.get("values") or {}
     slots: dict[str, tuple[str, str]] = {}
     shapes: dict[str, list[Any]] = {}
     for layer_type in decode.ROPE_LAYER_TYPES:
@@ -417,42 +423,38 @@ def lender_slots(graph: IrGraph, config: Any, target_config: Any) -> LenderSlots
         owner = owners[layer_type]
         pair = (decode.slot_name(owner, "k"), decode.slot_name(owner, "v"))
         for name in pair:
-            slot = graph.states.get(name)
+            slot = states.get(name)
             if slot is None:
                 raise AssertionError(
-                    f"貸し手グラフに state スロット '{name}' が無い（宣言 {sorted(graph.states)}）"
+                    f"貸し手グラフに state スロット '{name}' が無い（宣言 {sorted(states)}）"
                 )
-            shapes[name] = list(slot.shape)
+            shapes[name] = list(slot["shape"])
         slots[layer_type] = pair
 
     vocab, hidden = int(target_config.vocab_size), int(target_config.hidden_size)
     weight_slot_names = {
-        node.ins[0] for node in graph.nodes if node.op == EMBEDDING_OP and node.ins
+        node["ins"][0] for node in graph["nodes"] if node["op"] == EMBEDDING_OP and node["ins"]
     }
     candidates = sorted(
         name
         for name in weight_slot_names
-        if name in graph.initializers and list(graph.values[name].shape) == [vocab, hidden]
+        if name in initializers and list(values[name]["shape"]) == [vocab, hidden]
     )
     if len(candidates) != 1:
         raise AssertionError(
             f"貸し手グラフの主埋め込み表（embedding の重みスロット・[{vocab}, {hidden}]）が"
             f" {len(candidates)} 本: {candidates}"
         )
-    initializer = graph.initializers[candidates[0]]
-    if initializer.is_shared or initializer.tensor is None:
-        raise AssertionError(f"貸し手の主表 '{candidates[0]}' が実体を持たない（共有宣言）")
-    if initializer.storage.dtype != drafter_shared_storage(config).dtype:
+    key = candidates[0]
+    if initializers[key].get("shared") is True:
+        raise AssertionError(f"貸し手の主表 '{key}' が実体を持たない（共有宣言）")
+    layout = layouts.get(key)
+    if layout != drafter_shared_storage(config).dtype:
         raise AssertionError(
-            f"貸し手の主表の格納が '{initializer.storage.dtype}' —"
+            f"貸し手の主表の格納が '{layout}' —"
             f" 借り手の宣言 '{drafter_shared_storage(config).dtype}' と違う"
         )
-    return LenderSlots(
-        shapes=shapes,
-        slots=slots,
-        shared_tensor=initializer.tensor,
-        shared_initializer=candidates[0],
-    )
+    return LenderSlots(shapes=shapes, slots=slots, shared_tensor=key)
 
 
 def drafter_shared_storage(_config: Any) -> IrStorage:
@@ -1008,7 +1010,12 @@ def export_series(
     print("[quant] i8 per-channel（nn.Linear 全部 + 共有主表）", file=sys.stderr, flush=True)
     int8, scales = quantize_wrapper(wrapper)
 
-    lender = lender_slots(lender_graph(product_dir), config, one_shot.load_text_config(model_dir))
+    lender = lender_slots(
+        lender_graph(product_dir),
+        read_layouts(lender_container(product_dir)),
+        config,
+        one_shot.load_text_config(model_dir),
+    )
     specs = decode.rope_specs(text)
     example = example_inputs(wrapper, specs)
 
@@ -1026,6 +1033,9 @@ def export_series(
             staged / one_shot.MODEL_FILE,
             shared_graph,
             {name: value for name, value in remaining.items() if name in _declared(shared_graph)},
+            provenance=one_shot.PROVENANCE,
+            # グラフ名は**部品名**（= 据え替え先のディレクトリ名 — 作業席の名前ではない）。
+            graph_name=out_dir.name,
             weight_dtype="i8",
             weight_scales=scales,
         )
@@ -1045,9 +1055,9 @@ def export_series(
         "initializers": len(verified.initializers),
         "shared_initializer": shared_name,
         "model_bytes": sum(
-            path.stat().st_size for path in resolve_shards(out_dir / one_shot.MODEL_FILE)
+            path.stat().st_size for path in container_parts(out_dir / one_shot.MODEL_FILE)
         ),
-        "shards": [path.name for path in resolve_shards(out_dir / one_shot.MODEL_FILE)],
+        "parts": [path.name for path in container_parts(out_dir / one_shot.MODEL_FILE)],
         "ops": sorted(verified.required_ops),
         "symbols": list(verified.symbols),
         "quantized": {"i8": int8.describe()},

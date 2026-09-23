@@ -84,7 +84,14 @@ def exported(tmp_path):
     """tiny なラッパを 1 本 export して `(wrapper, graph, out_dir)` を返す。"""
     torch.manual_seed(0)
     wrapper = TinyVisionPooler()
-    graph = export_to_file(wrapper, (CASES[0][1],), tmp_path / sg.MODEL_FILE, symbol_names=())
+    graph = export_to_file(
+        wrapper,
+        (CASES[0][1],),
+        tmp_path / sg.MODEL_FILE,
+        provenance=sg.PROVENANCE,
+        graph_name="tiny",
+        symbol_names=(),
+    )
     return wrapper, graph, tmp_path
 
 
@@ -116,7 +123,14 @@ class TestWriteIo:
         """MUST: 出力は pooler_output 1 本 — 2 本目が生えると io の位置規約が黙ってずれる。"""
         torch.manual_seed(0)
         wrapper = TwoOutputPooler()
-        graph = export_to_file(wrapper, (CASES[0][1],), tmp_path / sg.MODEL_FILE, symbol_names=())
+        graph = export_to_file(
+            wrapper,
+            (CASES[0][1],),
+            tmp_path / sg.MODEL_FILE,
+            provenance=sg.PROVENANCE,
+            graph_name="tiny",
+            symbol_names=(),
+        )
 
         with pytest.raises(AssertionError, match="pooler_output は 1 本"):
             sg._write_io(wrapper, graph, CASES, tmp_path)

@@ -26,8 +26,8 @@ docs/research/2026-08-02-anima-recon.md）。素の diffusers モジュールは
 
 MUST: `--dit-graph dyn` は **transformer 専用の追加系列**で、静的系列を置き換えない
 （既存資産・E2E・tolerance を 1 つも動かさないのが波 T2 の前提）。patchify /
-unpatchify / rope 表の構築はホストへ出るので、系列ディレクトリには `model.safetensors` と
-golden io に加えて **`rope_base.safetensors`**（ホストが rope 表を組むための軸別素表）が並ぶ。
+unpatchify / rope 表の構築はホストへ出るので、容器には重みに加えて **資産 `rope_base`**
+（ホストが rope 表を組むための軸別素表 — ADR 0109 決定 4）が入る。
 
 MUST: `--dtype i8` は **transformer 専用**（ADR 0019 の系列設計）。DiT の −1.87GiB が支配項で、
 text / cond / VAE は `outputs/series/anima-f16/` を共有する。加えて VAE は「CausalConv3d の時間方向
@@ -84,7 +84,7 @@ MUST: `--lora` は **DiT の層切り詰め（`--num-layers`）より前**に焼
 
 出力レイアウト（tiny golden / SBV2 と同じ規約）:
 
-    <out>/<target>/model.safetensors      重み・定数 + __metadata__.karume_ir
+    <out>/<target>/model.krm              重み・定数 + 2 文書の記述（+ 資産 `rope_base`）
     <out>/<target>/io.<case>.safetensors  入力と torch CPU での期待出力
     <out>/<target>/lora_provenance.json   焼き込んだ LoRA の帰属（`--lora` を焼いた対象のみ）
     <out>/<target>/calib_provenance.json  i4 の丸め条件（`--dtype i4` の transformer のみ）
@@ -101,7 +101,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from safetensors.torch import save_file
+from safetensors.torch import save, save_file
 from torch import nn
 from torch.export import Dim
 
@@ -113,14 +113,17 @@ from anima.distribution import (
     CALIB_PROVENANCE_FILE,
     CALIB_SHIPPABLE_DEVICE,
     LORA_PROVENANCE_FILE,
+    ROPE_BASE_ASSET,
+    ROPE_BASE_ROLE,
 )
 from karume.artifacts import staged_publication
+from karume.container import AssetInput, Provenance, container_parts
 from karume.convert import (
     PRESERVED_OP_PREFIXES,
     PRESERVED_OP_PREFIXES_WITH_ATTENTION,
     normalize_boundary_tensor,
 )
-from karume.dist import sha256_file
+from karume.dist import NOTICE_FILENAME, sha256_file
 from karume.emit import storage_breakdown
 from karume.ir import IrGraph
 from karume.pipeline import export_to_file
@@ -133,10 +136,10 @@ from karume.quantize import (
     iter_quant_targets,
     round_weights_to_f16,
 )
-from karume.shards import resolve_shards
 
 from . import calib, patch
 from .calib_prompts import CALIB_PROMPTS, DEFAULT_CALIB_PROMPTS, calibration_prompts
+from .card import ANIMA_METADATA
 
 #: この recipe が扱う格納 dtype（irodori / deberta と同じく **recipe 固有の集合**）。
 #: core の `karume.emit.WEIGHT_DTYPES` から引かない — core が書ける集合（i4 追加 —
@@ -218,9 +221,12 @@ DIT_GRAPHS = ("static", "dyn")
 #: `--dit-graph dyn` の系列ディレクトリ接尾辞（既定 out を静的系列と分けるため）。
 DYN_SUFFIX = "-dyn"
 
-MODEL_FILE = "model.safetensors"
-#: ホストが rope 表を組むための軸別素表（`--dit-graph dyn` のときだけ書く）。
-ROPE_BASE_FILE = "rope_base.safetensors"
+MODEL_FILE = "model.krm"
+
+#: 容器へ焼く出所（container-v1 §2.3）。ライセンス識別子はカード側の正本
+#: （{@link anima.card.ANIMA_METADATA}）から引く — 2 表が独立に動く形にしない。
+PROVENANCE = Provenance(license=ANIMA_METADATA.license, notice=NOTICE_FILENAME)
+
 IO_PREFIX = "io."
 IO_SUFFIX = ".safetensors"
 INPUT_PREFIX = "input."
@@ -285,7 +291,7 @@ class Component:
     #: ここを通す必要がある。第 2 引数は**ケース番号** — ケースごとに解像度が違う系列では
     #: 後段の形もケースで変わるので、1 本の恒等な関数では足りない。既定は恒等。
     verify_adapter: Callable[[torch.Tensor, int], torch.Tensor] | None = None
-    #: グラフの外でホストが使う素表（`<out>/rope_base.safetensors` へ書く。既定では空）。
+    #: グラフの外でホストが使う素表（容器の資産 `rope_base` に載せる。既定では空）。
     host_tables: Mapping[str, torch.Tensor] = field(default_factory=dict)
 
     @property
@@ -1067,6 +1073,19 @@ def _write_io(component: Component, graph: IrGraph, out_dir: Path) -> list[str]:
     return written
 
 
+def _host_table_assets(component: Component) -> dict[str, AssetInput]:
+    """ホスト素表を容器の資産へ（持たないターゲットは空）。
+
+    payload は素表 1 本ぶんの **safetensors のバイト列そのもの**。テンソルの器を外さないのは、
+    読み手（models 側の rope 組み立て）が軸ごとの名前と shape を要るため — 資産は「重みでは
+    ないが同じ容器で配るバイト列」の席で、容器はその中身を解釈しない（ADR 0109 決定 4）。
+    """
+    if not component.host_tables:
+        return {}
+    payload = save(dict(component.host_tables))
+    return {ROPE_BASE_ASSET: AssetInput(ROPE_BASE_ROLE, len(payload), payload)}
+
+
 def emit_target(target: str, args: argparse.Namespace, out_dir: Path) -> dict[str, Any]:
     """1 ターゲットの IR コンテナと golden io を書き、要約を返す。
 
@@ -1087,6 +1106,11 @@ def emit_target(target: str, args: argparse.Namespace, out_dir: Path) -> dict[st
             component.module,
             component.example,
             staged / MODEL_FILE,
+            provenance=PROVENANCE,
+            # グラフ名は**部品名**（= karume.json の weights のキー = 据え替え先の
+            # ディレクトリ名）。作業席の名前を拾わせないため呼び手が名乗る。
+            graph_name=out_dir.name,
+            assets=_host_table_assets(component),
             dynamic_shapes=component.dynamic_shapes,
             symbol_names=component.symbol_names,
             weight_dtype=BASE_WEIGHT_DTYPES[args.dtype],
@@ -1095,11 +1119,6 @@ def emit_target(target: str, args: argparse.Namespace, out_dir: Path) -> dict[st
             preserved=TARGET_PRESERVED[target],
         )
         written = _write_io(component, graph, staged)
-        if component.host_tables:
-            # ホスト素表は IR コンテナの外に置く（グラフが使わないテンソルを model.safetensors へ
-            # 混ぜると、initializer とテンソルキーの 1:1 検査〈verify_model〉が壊れる）。
-            save_file(dict(component.host_tables), str(staged / ROPE_BASE_FILE))
-            written.append(ROPE_BASE_FILE)
         provenance = _write_lora_provenance(args, target, staged)
         if provenance is not None:
             written.append(provenance)
@@ -1130,7 +1149,7 @@ def emit_target(target: str, args: argparse.Namespace, out_dir: Path) -> dict[st
         "plain_bytes": breakdown.plain_bytes,
         # i8 の companion scale（ランタイムの residentCompressedBytes も同じものを足す）。
         "scale_bytes": breakdown.scale_bytes,
-        "model_bytes": sum(p.stat().st_size for p in resolve_shards(out_dir / MODEL_FILE)),
+        "model_bytes": sum(p.stat().st_size for p in container_parts(out_dir / MODEL_FILE)),
         "ops": sorted(graph.required_ops),
         "symbols": list(graph.symbols),
         "io": written,

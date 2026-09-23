@@ -122,16 +122,16 @@ BIREFNET_IMAGE_MEAN: tuple[float, float, float] = (0.485, 0.456, 0.406)
 BIREFNET_IMAGE_STD: tuple[float, float, float] = (0.229, 0.224, 0.225)
 
 #: 出力の相対 path（**モデルサブツリー内**）— 配置表と manifest が共有する 1 箇所。
-BIREFNET_OUTPUT_PATHS: Mapping[str, str] = {BIREFNET_ROLE: f"{BIREFNET_ROLE}/model.f32.safetensors"}
+BIREFNET_OUTPUT_PATHS: Mapping[str, str] = {BIREFNET_ROLE: f"{BIREFNET_ROLE}/model.f32.krm"}
 
 #: 格納 dtype の要求（Anima / SBV2 / Irodori / SigLIP2 と同じ根拠 — 素の資産が組み立て・
 #: ロード・実行を全て通って参照一致の門まで沈黙した実測事故）。
-BIREFNET_STORAGE_REQUIREMENTS: Mapping[str, str] = {BIREFNET_ROLE: "F32"}
+BIREFNET_STORAGE_REQUIREMENTS: Mapping[str, str] = {BIREFNET_ROLE: "f32"}
 
-#: 各役割の safetensors ヘッダに**あってはならない**格納 dtype（{@link assert_storage_absent}）。
+#: 各役割の束縛表に**あってはならない**格納の語彙（{@link assert_storage_absent}）。
 #: {@link BIREFNET_STORAGE_REQUIREMENTS} は「要求 dtype が在るか」の片方向検査で、**圧縮系列も
-#: 適格外の重み**（bias / norm / グラフ定数・i8 の per-channel scale・i4 の group scale）を F32 で
-#: 持つため「F32 を含む」は f16 / i8 / i4 の資産でも真になる — f32 席へ圧縮系列を挿し込む
+#: 適格外の重み**（bias / norm / グラフ定数・i8 の per-channel scale・i4 の group scale）を f32 で
+#: 持つため「f32 を含む」は f16 / i8 / i4 の資産でも真になる — f32 席へ圧縮系列を挿し込む
 #: 取り違えが存在検査だけでは素通りする。
 #:
 #: この台本（`birefnet/export.py`）は f32 しか焼かないが、禁止表が閉じるのは**系列 root の
@@ -143,8 +143,8 @@ BIREFNET_STORAGE_REQUIREMENTS: Mapping[str, str] = {BIREFNET_ROLE: "F32"}
 #: f32 以外）を**全部**名指しする — 1 つでも抜けると、抜けた格納形だけが黙って素通りする
 #: （anima / irodori / sbv2 と同じ規律）。I32 を載せないのは、i32 が圧縮ではなく素の格納
 #: （`karume.emit` の plain 側）だから — 実際この family の系列は i32 の添字表を 1 本持つので
-#: ヘッダは F32 + I32（2026-08-30 の実測）で、I32 を禁じると既存の配布物が赤になる。
-BIREFNET_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {BIREFNET_ROLE: ("F16", "I8", "I4")}
+#: 束縛表は f32 + i32（2026-08-30 の実測）で、i32 を禁じると既存の配布物が赤になる。
+BIREFNET_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {BIREFNET_ROLE: ("f16", "i8", "i4")}
 
 #: weights の宣言（dtype ラベル → 役割名）。dtype が 1 つしかないので quant 表は空でよい。
 BIREFNET_WEIGHTS: Mapping[str, Mapping[str, WeightFiles]] = {
@@ -236,7 +236,7 @@ def birefnet_placements(sources: BirefnetSources) -> dict[str, Path]:
 
     この表に無いものは出力へ入らない（系列に並ぶ `io.*.safetensors` はこれで落ちる）。
     """
-    return {BIREFNET_ROLE: sources.series / "model.safetensors"}
+    return {BIREFNET_ROLE: sources.series / "model.krm"}
 
 
 def birefnet_pipeline_config(graph: Mapping[str, Any], path: Path, model: str) -> dict[str, Any]:
@@ -390,8 +390,8 @@ BIREFNET_NOTICE_TEMPLATE = """# NOTICE
 This repository redistributes a modified form of `{repo}`, which is licensed under
 the MIT License (see `LICENSE.md`). The following changes were made:
 
-- The graph was re-expressed in the Karume container format (a graph shard whose
-  `__metadata__` carries the graph, followed by the weight shards it names).
+- The graph was re-expressed in the Karume container format (a `.krm` part sequence whose
+  first part carries the graph and model descriptors, followed by the weight parts they name).
 - The upstream `forward` was rewritten layout-only and **bit-exact**: windowing, the
   shifted-window roll, spatial padding and the patch merges became equivalent operations.
 - Two modules were rewritten in a form that is equivalent up to floating-point rounding:

@@ -196,7 +196,7 @@ MUST: `--dtype` は emit 専用（`export_sbv2.py` の `--verify` 排他と同�
 
 ## 出力レイアウト
 
-    outputs/series/irodori-v4-small/<target>/model.safetensors      重み・定数 + karume_ir
+    outputs/series/irodori-v4-small/<target>/model.krm              重み・定数 + 2 文書の記述
     outputs/series/irodori-v4-small/<target>/io.<case>.safetensors  入力と torch CPU 期待出力
 
 io のテンソルキー規約は tiny golden / DeBERTa と同じ（`input.<グラフ入力名>` / `output.<位置>`）。
@@ -222,6 +222,7 @@ from torch.export import Dim
 
 from _shared.paths import INPUTS_ROOT, SERIES_ROOT
 from karume.artifacts import staged_publication
+from karume.container import Provenance, container_parts
 from karume.convert import (
     PRESERVED_OP_PREFIXES,
     PRESERVED_OP_PREFIXES_WITH_ATTENTION,
@@ -236,9 +237,9 @@ from karume.quantize import (
     round_weights_to_f16,
 )
 from karume.rope import ROPE_BUFFER_NAMES, assert_rope_lifted
-from karume.shards import resolve_shards
 
 from . import patch
+from .card import IRODORI_LICENSE
 from .distribution import CALIB_PROVENANCE_FILE
 
 if TYPE_CHECKING:  # 実行時は遅延 import（下の {@link _fake_quant_i4} の NOTE）
@@ -272,7 +273,17 @@ REFERENCE_LATENT_COMMAND = (
     " python -m irodori.dacvae.host"
 )
 
-MODEL_FILE = "model.safetensors"
+MODEL_FILE = "model.krm"
+
+#: **上流チェックポイント**の重みファイル名（HF の綴り — 出力の容器とは別物）。
+#: `irodori.distribution.IRODORI_CKPT_FILE` と同じ事実で、読み手と書き手が別モジュールなので
+#: 写しを持つ（向きは produce → consume の一方向 MUST）。
+CHECKPOINT_FILE = "model.safetensors"
+
+#: 容器へ焼く出所（container-v1 §2.3）。ライセンス識別子はカード側の正本
+#: （{@link irodori.card.IRODORI_LICENSE}）から引く — 2 表が独立に動く形にしない。
+PROVENANCE = Provenance(license=IRODORI_LICENSE)
+
 TOKENIZER_FILE = "tokenizer/tokenizer.json"
 IO_PREFIX = "io."
 IO_SUFFIX = ".safetensors"
@@ -643,13 +654,13 @@ def read_configs(model_dir: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     MUST: HF から config を引き直さない — チェックポイントに埋まっている dict が、この重みが
     実際に構成されたときの形の正本（`text_encoder_revision` 込み）。
     """
-    with safe_open(str(model_dir / MODEL_FILE), framework="pt") as handle:
+    with safe_open(str(model_dir / CHECKPOINT_FILE), framework="pt") as handle:
         metadata = handle.metadata()
     if metadata is None:
-        raise SystemExit(f"{model_dir / MODEL_FILE} に __metadata__ が無い")
+        raise SystemExit(f"{model_dir / CHECKPOINT_FILE} に __metadata__ が無い")
     missing = [key for key in (TEXT_CONFIG_META_KEY, MODEL_CONFIG_META_KEY) if key not in metadata]
     if missing:
-        raise SystemExit(f"{model_dir / MODEL_FILE} の __metadata__ に {missing} が無い")
+        raise SystemExit(f"{model_dir / CHECKPOINT_FILE} の __metadata__ に {missing} が無い")
     return (
         json.loads(metadata[TEXT_CONFIG_META_KEY]),
         json.loads(metadata[MODEL_CONFIG_META_KEY]),
@@ -1741,7 +1752,7 @@ def _graph_summary(graph: IrGraph, path: Path) -> dict[str, Any]:
         "initializers": len(graph.initializers),
         "ops": sorted(graph.required_ops),
         "symbols": list(graph.symbols),
-        "model_bytes": sum(p.stat().st_size for p in resolve_shards(path)),
+        "model_bytes": sum(p.stat().st_size for p in container_parts(path)),
     }
 
 
@@ -2179,7 +2190,7 @@ def export_series(
             f"projector 型 {model_config['pretrained_projector_type']!r} は未対応"
             "（v4-Small は residual_mlp）"
         )
-    state = load_file(str(model_dir / MODEL_FILE))
+    state = load_file(str(model_dir / CHECKPOINT_FILE))
     backbone = load_backbone(source, state, text_config)
     hidden_size = int(backbone.hidden_size)
     projectors = {
@@ -2393,6 +2404,10 @@ def export_series(
                 graphs[target],
                 example,
                 staged / MODEL_FILE,
+                provenance=PROVENANCE,
+                # グラフ名は**部品名**（= karume.json の weights のキー = 据え替え先の
+                # ディレクトリ名）。
+                graph_name=target_dir.name,
                 dynamic_shapes=tuple(
                     _dynamic_axis(axis.dynamic.get(index), seq) for index in range(len(example))
                 ),

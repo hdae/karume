@@ -141,7 +141,14 @@ def exported(tmp_path):
     """tiny なラッパを 1 本 export して `(wrapper, graph, out_dir)` を返す。"""
     torch.manual_seed(0)
     wrapper = TinyMatte()
-    graph = export_to_file(wrapper, (CASES[0][1],), tmp_path / bn.MODEL_FILE, symbol_names=())
+    graph = export_to_file(
+        wrapper,
+        (CASES[0][1],),
+        tmp_path / bn.MODEL_FILE,
+        provenance=bn.PROVENANCE,
+        graph_name="tiny",
+        symbol_names=(),
+    )
     return wrapper, graph, tmp_path
 
 
@@ -285,7 +292,14 @@ class TestWriteIo:
         """MUST: 出力はマット 1 本 — 2 本目が生えると io の位置規約が黙ってずれる。"""
         torch.manual_seed(0)
         wrapper = TwoOutputMatte()
-        graph = export_to_file(wrapper, (CASES[0][1],), tmp_path / bn.MODEL_FILE, symbol_names=())
+        graph = export_to_file(
+            wrapper,
+            (CASES[0][1],),
+            tmp_path / bn.MODEL_FILE,
+            provenance=bn.PROVENANCE,
+            graph_name="tiny",
+            symbol_names=(),
+        )
 
         with pytest.raises(AssertionError, match="マットは 1 本"):
             bn._write_io(wrapper, graph, CASES, tmp_path)

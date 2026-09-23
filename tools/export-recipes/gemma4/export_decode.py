@@ -108,7 +108,7 @@ causal も窓も**述語計算**になるので mask tensor は要らない。�
 
 ## 出力レイアウト
 
-    outputs/series/gemma4-e2b-decode/model.safetensors         重み・定数 + karume_ir
+    outputs/series/gemma4-e2b-decode/model.krm                 重み・定数 + 2 文書の記述
     outputs/series/gemma4-e2b-decode/io.<case>.safetensors     無 pad 全長の入出力
     outputs/series/gemma4-e2b-decode/greedy.<case>.safetensors greedy 継続 K step の期待列
 
@@ -137,12 +137,12 @@ from gemma4 import export as one_shot
 from gemma4 import ple, provenance
 from gemma4 import rope as rope_math
 from karume.artifacts import staged_publication
+from karume.container import AssetInput, container_parts
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION, normalize_boundary_tensor
 from karume.ir import IrGraph, IrNode
 from karume.ops import ARGMAX_OP, ATTENTION_OP, LINEAR_OP, STATE_APPEND_OP
 from karume.pipeline import export_module, publish_model
 from karume.shapes import declared_shape
-from karume.shards import resolve_shards
 from karume.states import StateAttentionSpec, StatesPlan, to_states_form
 
 #: 生成物の既定の置き場（1-shot 系列とは別ディレクトリ — グラフの形が違う別資産）。
@@ -970,18 +970,20 @@ def _write_container(
     tensors: Mapping[str, torch.Tensor],
     path: Path,
     *,
+    graph_name: str,
     weight_dtype: str,
     weight_scales: Mapping[str, torch.Tensor],
     weight_dtype_overrides: Mapping[str, str],
+    assets: Mapping[str, AssetInput] = {},
 ) -> IrGraph:
     """手術済みグラフを書いて検証する（公開の 3 段は `pipeline.publish_model` に預ける）。
 
     `export_to_file` は export → 書き出しが 1 本道で手術を挟む隙間が無いので、書き出し以降
     だけを core の入口から呼ぶ。**規則も原子性も再実装しない** — states 節・順序・shape の
-    検査も、shard 分割（ADR 0070 決定 1）とその据え替え・後始末も core が持つ。
+    検査も、part 分割（container-v1 §4.2）とその据え替え・後始末も core が持つ。
 
     刈り込みで死んだ initializer（mask の Tmax² 定数）は格納テンソルからも落とす —
-    `write_model` は宣言と格納の**完全一致**を要求する。scale 台帳（`weight_scales`）は
+    `stored_model` は宣言と格納の**完全一致**を要求する。scale 台帳（`weight_scales`）は
     刈られた重みの分が残っていてもよい（emit は計画した本数しか引かない）が、
     `weight_dtype_overrides` の側は**未知キーで fail loudly** になる — linear の重みが手術で
     消える形は起きてはならないので、その門はそのまま効かせる。
@@ -992,9 +994,12 @@ def _write_container(
         path,
         graph,
         stored,
+        provenance=one_shot.PROVENANCE,
+        graph_name=graph_name,
         weight_dtype=weight_dtype,
         weight_scales=weight_scales,
         weight_dtype_overrides=weight_dtype_overrides,
+        assets=assets,
     )
 
 
@@ -1125,6 +1130,8 @@ def export_series(
             surgical,
             tensors,
             container,
+            # グラフ名は**部品名**（= 据え替え先のディレクトリ名 — 作業席の名前ではない）。
+            graph_name=out_dir.name,
             weight_dtype="i8",
             weight_scales=scales,
             weight_dtype_overrides=dict.fromkeys(int4.scales, "i4"),
@@ -1205,7 +1212,9 @@ def export_series(
         "outputs": len(verified.outputs),
         "initializers": len(verified.initializers),
         **pruned,
-        "model_bytes": sum(p.stat().st_size for p in resolve_shards(out_dir / one_shot.MODEL_FILE)),
+        "model_bytes": sum(
+            p.stat().st_size for p in container_parts(out_dir / one_shot.MODEL_FILE)
+        ),
         "ops": sorted(verified.required_ops),
         "symbols": list(verified.symbols),
         **written,

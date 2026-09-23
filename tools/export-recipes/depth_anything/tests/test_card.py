@@ -37,6 +37,22 @@ def _ref(path: str, size: int, digit: str) -> dict[str, Any]:
     return {"path": path, "size": size, "sha256": digit * 64}
 
 
+def _container(*refs: dict[str, Any]) -> dict[str, Any]:
+    """weights の 1 dtype ぶん（`karume/5` の `container` — ADR 0109 決定 3）。
+
+    `descriptor` はカードが読まない欄なので、形だけ実物どおりに置く（2 文書の長さと sha256）。
+    """
+    return {
+        "container": {
+            "descriptor": {
+                "graph": {"length": 40, "sha256": "0" * 64},
+                "model": {"length": 24, "sha256": "1" * 64},
+            },
+            "parts": list(refs),
+        }
+    }
+
+
 def _depth_anything_manifest(model: str = "small") -> dict[str, Any]:
     """Depth Anything V2 の最小 manifest（値は実物と重ならない偽値）。"""
     return {
@@ -46,9 +62,7 @@ def _depth_anything_manifest(model: str = "small") -> dict[str, Any]:
         "models": {
             model: {
                 "pipeline": DEPTH_ANYTHING_SUPPORTED_PIPELINE,
-                "weights": {
-                    "depth": {"f32": {"shards": [_ref("d/model.f32.safetensors", 17, "e")]}}
-                },
+                "weights": {"depth": {"f32": _container(_ref("d/model.f32.safetensors", 17, "e"))}},
                 "assets": {},
                 "quants": {"f32": {"weights": {"depth": "f32"}, "session": {}}},
                 "defaultQuant": "f32",

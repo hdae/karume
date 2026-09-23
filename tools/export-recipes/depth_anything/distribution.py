@@ -106,17 +106,17 @@ DEPTH_ANYTHING_RESCALE_FACTOR = 1.0 / 255.0
 
 #: 出力の相対 path（**モデルサブツリー内**）— 配置表と manifest が共有する 1 箇所。
 DEPTH_ANYTHING_OUTPUT_PATHS: Mapping[str, str] = {
-    DEPTH_ANYTHING_ROLE: f"{DEPTH_ANYTHING_ROLE}/model.f32.safetensors"
+    DEPTH_ANYTHING_ROLE: f"{DEPTH_ANYTHING_ROLE}/model.f32.krm"
 }
 
 #: 格納 dtype の要求（Anima / SBV2 / Irodori / SigLIP2 / BiRefNet と同じ根拠 — 素の資産が
 #: 組み立て・ロード・実行を全て通って参照一致の門まで沈黙した実測事故）。
-DEPTH_ANYTHING_STORAGE_REQUIREMENTS: Mapping[str, str] = {DEPTH_ANYTHING_ROLE: "F32"}
+DEPTH_ANYTHING_STORAGE_REQUIREMENTS: Mapping[str, str] = {DEPTH_ANYTHING_ROLE: "f32"}
 
-#: 各役割の safetensors ヘッダに**あってはならない**格納 dtype（{@link assert_storage_absent}）。
+#: 各役割の束縛表に**あってはならない**格納の語彙（{@link assert_storage_absent}）。
 #: {@link DEPTH_ANYTHING_STORAGE_REQUIREMENTS} は「要求 dtype が在るか」の片方向検査で、**圧縮
 #: 系列も適格外の重み**（bias / norm / グラフ定数・i8 の per-channel scale・i4 の group scale）を
-#: F32 で持つため「F32 を含む」は f16 / i8 / i4 の資産でも真になる — f32 席へ圧縮系列を挿し込む
+#: f32 で持つため「f32 を含む」は f16 / i8 / i4 の資産でも真になる — f32 席へ圧縮系列を挿し込む
 #: 取り違えが存在検査だけでは素通りする。
 #:
 #: この台本（`depth_anything/export.py`）は f32 しか焼かないが、禁止表が閉じるのは**系列 root の
@@ -129,7 +129,7 @@ DEPTH_ANYTHING_STORAGE_REQUIREMENTS: Mapping[str, str] = {DEPTH_ANYTHING_ROLE: "
 #: （anima / irodori / sbv2 と同じ規律）。I32 を載せないのは、i32 が圧縮ではなく素の格納
 #: （`karume.emit` の plain 側）で、添字表として素の系列にも普通に居るから。
 DEPTH_ANYTHING_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {
-    DEPTH_ANYTHING_ROLE: ("F16", "I8", "I4")
+    DEPTH_ANYTHING_ROLE: ("f16", "i8", "i4")
 }
 
 #: weights の宣言（dtype ラベル → 役割名）。dtype が 1 つしかないので quant 表は空でよい
@@ -205,7 +205,7 @@ def depth_anything_placements(sources: DepthAnythingSources) -> dict[str, Path]:
 
     この表に無いものは出力へ入らない（系列に並ぶ `io.*.safetensors` はこれで落ちる）。
     """
-    return {DEPTH_ANYTHING_ROLE: sources.series / "model.safetensors"}
+    return {DEPTH_ANYTHING_ROLE: sources.series / "model.krm"}
 
 
 def depth_anything_preprocessor(model_dir: Path) -> Mapping[str, Any]:
@@ -367,8 +367,8 @@ This repository redistributes a modified form of the Depth Anything V2 checkpoin
 `README.md`, which is licensed under the Apache License, Version 2.0 (see `LICENSE.md`). The
 following changes were made:
 
-- The graph was re-expressed in the Karume container format (a safetensors file whose
-  `__metadata__` carries the graph).
+- The graph was re-expressed in the Karume container format (a `.krm` part sequence whose
+  first part carries the graph and model descriptors).
 - Two rewrites were needed to export the graph and are **bit-exact**: the last fusion stage's
   upsample takes an explicit output size instead of a scale factor, and the position-embedding
   interpolation is pinned to the pretraining resolution where it is the identity.

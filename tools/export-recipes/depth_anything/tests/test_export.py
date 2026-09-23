@@ -70,7 +70,14 @@ def exported(tmp_path):
     """tiny なラッパを 1 本 export して `(wrapper, graph, out_dir)` を返す。"""
     torch.manual_seed(0)
     wrapper = TinyDepth()
-    graph = export_to_file(wrapper, (TINY_CASES[0][1],), tmp_path / da.MODEL_FILE, symbol_names=())
+    graph = export_to_file(
+        wrapper,
+        (TINY_CASES[0][1],),
+        tmp_path / da.MODEL_FILE,
+        provenance=da.PROVENANCE,
+        graph_name="tiny",
+        symbol_names=(),
+    )
     return wrapper, graph, tmp_path
 
 
@@ -232,7 +239,12 @@ class TestWriteIo:
         torch.manual_seed(0)
         wrapper = TwoOutputDepth()
         graph = export_to_file(
-            wrapper, (TINY_CASES[0][1],), tmp_path / da.MODEL_FILE, symbol_names=()
+            wrapper,
+            (TINY_CASES[0][1],),
+            tmp_path / da.MODEL_FILE,
+            provenance=da.PROVENANCE,
+            graph_name="tiny",
+            symbol_names=(),
         )
 
         with pytest.raises(AssertionError, match="深度マップは 1 本"):

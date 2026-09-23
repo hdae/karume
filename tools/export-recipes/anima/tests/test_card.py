@@ -54,36 +54,54 @@ def _ref(path: str, size: int, digit: str) -> dict[str, Any]:
     return {"path": path, "size": size, "sha256": digit * 64}
 
 
+def _container(*refs: dict[str, Any]) -> dict[str, Any]:
+    """weights の 1 dtype ぶん（`karume/5` の `container` — ADR 0109 決定 3）。
+
+    `descriptor` はカードが読まない欄なので、形だけ実物どおりに置く（2 文書の長さと sha256）。
+    """
+    return {
+        "container": {
+            "descriptor": {
+                "graph": {"length": 40, "sha256": "0" * 64},
+                "model": {"length": 24, "sha256": "1" * 64},
+            },
+            "parts": list(refs),
+        }
+    }
+
+
+def _numbered(model: str, label: str, index: int, total: int) -> str:
+    """transformer の part 1 本ぶんの相対 path（連番規約は container-v1 §8）。"""
+    return f"{model}/transformer/model.{label}-{index:05d}-of-{total:05d}.krm"
+
+
 def _two_model_manifest(default_name: str, second_name: str) -> dict[str, Any]:
     """ADR 0041 の形を保った最小の manifest（値は実物と重ならない偽値）。
 
     2 モデルで、`shared/` の text_encoder を共有する形にしてある。既定モデルは guidance 1
     （= 負プロンプトが効かない席）、2 本目は CFG 側なので、1 枚のカードで両方の分岐を通る。
     """
-    shared_encoder = _ref("shared/text_encoder/model.safetensors", 111, "a")
-    rope = _ref(f"{default_name}/transformer/rope_base.safetensors", 333, "c")
+    shared_encoder = _ref("shared/text_encoder/model.krm", 111, "a")
     return {
-        "format": "karume/4",
+        "format": "karume/5",
         "generator": "karume/9.9.9",
         "defaultModel": default_name,
         "models": {
             default_name: {
                 "pipeline": SUPPORTED_PIPELINE,
                 "weights": {
-                    "text_encoder": {"f16": {"shards": [shared_encoder]}},
+                    "text_encoder": {"f16": _container(shared_encoder)},
+                    # rope 素表は容器の**資産**（ADR 0109 決定 4）— 専用 part として part 列に
+                    # 並ぶので、席ごとに 333 B が 1 本ずつ増える形になる。
                     "transformer": {
-                        "f16": {
-                            "shards": [
-                                _ref(f"{default_name}/transformer/model.f16.safetensors", 222, "b")
-                            ],
-                            "extras": {"rope_base": rope},
-                        },
-                        "i8": {
-                            "shards": [
-                                _ref(f"{default_name}/transformer/model.i8.safetensors", 444, "d")
-                            ],
-                            "extras": {"rope_base": rope},
-                        },
+                        "f16": _container(
+                            _ref(_numbered(default_name, "f16", 1, 2), 222, "b"),
+                            _ref(_numbered(default_name, "f16", 2, 2), 333, "c"),
+                        ),
+                        "i8": _container(
+                            _ref(_numbered(default_name, "i8", 1, 2), 444, "d"),
+                            _ref(_numbered(default_name, "i8", 2, 2), 333, "9"),
+                        ),
                     },
                 },
                 "assets": {"tokenizer": _ref("shared/tokenizer/qwen2.json", 555, "e")},
@@ -118,13 +136,9 @@ def _two_model_manifest(default_name: str, second_name: str) -> dict[str, Any]:
             second_name: {
                 "pipeline": SUPPORTED_PIPELINE,
                 "weights": {
-                    "text_encoder": {"f16": {"shards": [shared_encoder]}},
+                    "text_encoder": {"f16": _container(shared_encoder)},
                     "transformer": {
-                        "i8": {
-                            "shards": [
-                                _ref(f"{second_name}/transformer/model.i8.safetensors", 666, "f")
-                            ]
-                        }
+                        "i8": _container(_ref(f"{second_name}/transformer/model.i8.krm", 666, "f"))
                     },
                 },
                 "assets": {"tokenizer": _ref("shared/tokenizer/qwen2.json", 555, "e")},
@@ -189,16 +203,17 @@ def _quant_row(card: str, name: str) -> str:
 
 
 def _sharded_manifest() -> dict[str, Any]:
-    """1 コンポーネントが複数ファイルへ割れた配布形（1GiB 超の分割 — ADR 0071 / 0070 追記）。
+    """重みが**さらに多くの part** へ割れた配布形（1GiB 超の分割 — container-v1 §8）。
 
-    実配布の anima はこの形（transformer が 2〜4 shard）。単一 shard のフィクスチャしか無いと、
-    「コンテナ = 1 個の safetensors ファイル」という散文が事実と食い違ったまま素通りする
-    （実際に公開カードで起きた — X2-103）。
+    実配布の anima はこの形（transformer が 2〜4 part + 資産の part）。重みが 1 part きりの
+    フィクスチャしか無いと、「コンテナ = 1 個のファイル」という散文が事実と食い違ったまま
+    素通りする（実際に公開カードで起きた — X2-103）。
     """
     manifest = _official_manifest()
-    manifest["models"][OFFICIAL_DEFAULT]["weights"]["transformer"]["f16"]["shards"] = [
-        _ref(f"{OFFICIAL_DEFAULT}/transformer/model.f16-00001-of-00002.safetensors", 777, "1"),
-        _ref(f"{OFFICIAL_DEFAULT}/transformer/model.f16-00002-of-00002.safetensors", 888, "2"),
+    manifest["models"][OFFICIAL_DEFAULT]["weights"]["transformer"]["f16"]["container"]["parts"] = [
+        _ref(_numbered(OFFICIAL_DEFAULT, "f16", 1, 3), 777, "1"),
+        _ref(_numbered(OFFICIAL_DEFAULT, "f16", 2, 3), 888, "2"),
+        _ref(_numbered(OFFICIAL_DEFAULT, "f16", 3, 3), 333, "c"),
     ]
     return manifest
 
@@ -211,10 +226,10 @@ def sharded_card() -> str:
 class TestShardedDistribution:
     """分割された配布形（実配布の形）でカードが事実と食い違わないこと。"""
 
-    def test_it_counts_every_shard_of_a_split_component(self, card: str, sharded_card: str) -> None:
-        """Download 欄は shard を 1 本残らず足す（先頭 shard だけだと配布量が過小に出る）。
+    def test_it_counts_every_part_of_a_split_component(self, card: str, sharded_card: str) -> None:
+        """Download 欄は part を 1 本残らず足す（part 0 だけだと配布量が過小に出る）。
 
-        分割前の f16 席は 111 + 222 + rope 333 + tokenizer 555 = 1,221 B（= 1.19 KiB）、
+        分割前の f16 席は 111 + 222 + rope の part 333 + tokenizer 555 = 1,221 B（= 1.19 KiB）、
         分割後は 222 が 777 + 888 に割れて 2,664 B（= 2.60 KiB）。
         """
         assert "| 1.19 KiB (" in _quant_row(card, "f16")
@@ -536,7 +551,7 @@ class TestDerivation:
     """MUST: 数値・ダウンロード量・quant 表は manifest 由来（手書きが混ざっていない）。"""
 
     def test_each_model_section_counts_only_its_own_files(self, card: str) -> None:
-        """節ごとに数え直す — 既定席は 111 + i8 444 + rope 333 + tokenizer 555 = 1,443 B
+        """節ごとに数え直す — 既定席は 111 + i8 444 + rope の part 333 + tokenizer 555 = 1,443 B
         （= 1.41 KiB）、2 本目は 111 + i8 666 + tokenizer 555 = 1,332 B（= 1.30 KiB）。
         """
         _, _, rest = card.partition(f"## Model: {OFFICIAL_DEFAULT}")
@@ -546,13 +561,13 @@ class TestDerivation:
         assert "| 1.30 KiB (666 B shared; 555 B of assets, read on the host) |" in second
         # shard 1 本 1 行の表は廃止（2026-09-03 裁定）— 重みの path はカードに 1 つも出ない。
         assert f"{OFFICIAL_DEFAULT}/transformer" not in card
-        assert "shared/text_encoder/model.safetensors" not in card
+        assert "shared/text_encoder/model.krm" not in card
 
-    def test_it_counts_the_extra_in_every_seat_that_declares_it(self, card: str) -> None:
-        """付帯資産（`extras` の rope 素表）も落ちるファイル — 両 dtype の席が同じ 1 本を持つ。"""
+    def test_it_counts_the_asset_part_in_every_seat_that_declares_it(self, card: str) -> None:
+        """資産（rope 素表）の専用 part も落ちるファイル — 両 dtype の席が 1 本ずつ持つ。"""
         manifest = _official_manifest()
         for entry in manifest["models"][OFFICIAL_DEFAULT]["weights"]["transformer"].values():
-            del entry["extras"]
+            del entry["container"]["parts"][-1]
         dropped = _official(manifest)
 
         assert "| 1.19 KiB (" in _quant_row(card, "f16")
@@ -571,9 +586,9 @@ class TestDerivation:
 
     def test_it_takes_the_sizes_from_the_manifest(self, card: str) -> None:
         manifest = _official_manifest()
-        manifest["models"][OFFICIAL_DEFAULT]["weights"]["text_encoder"]["f16"]["shards"][0][
-            "size"
-        ] = 999
+        manifest["models"][OFFICIAL_DEFAULT]["weights"]["text_encoder"]["f16"]["container"][
+            "parts"
+        ][0]["size"] = 999
         moved = _official(manifest)
         assert "| 1.41 KiB (" in _quant_row(card, "f16+dit8-a8")
         assert "| 2.28 KiB (" in _quant_row(moved, "f16+dit8-a8")

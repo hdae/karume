@@ -36,6 +36,22 @@ def _ref(path: str, size: int, digit: str) -> dict[str, Any]:
     return {"path": path, "size": size, "sha256": digit * 64}
 
 
+def _container(*refs: dict[str, Any]) -> dict[str, Any]:
+    """weights の 1 dtype ぶん（`karume/5` の `container` — ADR 0109 決定 3）。
+
+    `descriptor` はカードが読まない欄なので、形だけ実物どおりに置く（2 文書の長さと sha256）。
+    """
+    return {
+        "container": {
+            "descriptor": {
+                "graph": {"length": 40, "sha256": "0" * 64},
+                "model": {"length": 24, "sha256": "1" * 64},
+            },
+            "parts": list(refs),
+        }
+    }
+
+
 def _qat_manifest(model: str = "e2b") -> dict[str, Any]:
     """QAT の最小 manifest（値は実物と重ならない偽値）。"""
     return {
@@ -46,7 +62,7 @@ def _qat_manifest(model: str = "e2b") -> dict[str, Any]:
             model: {
                 "pipeline": QAT_PIPELINE,
                 "weights": {
-                    "model": {"i4": {"shards": [_ref("model/model.i4.safetensors", 13, "a")]}}
+                    "model": {"i4": _container(_ref("model/model.i4.safetensors", 13, "a"))}
                 },
                 "assets": {"ple_index": _ref("ple/ple.json", 7, "b")},
                 "quants": {

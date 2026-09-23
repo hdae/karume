@@ -534,7 +534,9 @@ class TestExportedDecodeForm:
         wrapper = decode.load_wrapper(_tiny_checkpoint(tmp_path / "ckpt"), positions=TINY_POSITIONS)
         graph, tensors = _export_tiny_decode(wrapper)
         surgical = to_states_form(graph, decode.states_plan(graph, LAYERS))
-        verified = decode._write_container(surgical, tensors, tmp_path / one_shot.MODEL_FILE)
+        verified = decode._write_container(
+            surgical, tensors, tmp_path / one_shot.MODEL_FILE, graph_name="tiny"
+        )
         return graph, verified, wrapper
 
     def test_the_container_is_a_verified_states_form_graph(self, tiny_container):

@@ -1,12 +1,12 @@
-"""配布 recipe のテストが入力に使う**正当な最小の製品系列**（コンテナ + PLE sidecar + 資産）。
+"""配布 recipe のテストが入力に使う**正当な最小の製品系列**（コンテナ + PLE の資産 + 資産）。
 
 共有の `ir_fixtures.ir_container`（`tools/exporter/tests/`）は state スロットを持てないので、
 gemma4 の門が読む形（full スロットの容量記号 `C` が **states にだけ**現れる = 入力 shape から
 決まらない記号がちょうど 1 本）を作れない。ここが持つのはその差分だけで、書き出しは共有の
-1 本道（`karume.emit.write_model` → `karume.verify.verify_shards`）を通る。
+1 本道（`karume.emit.stored_model` → `karume.publish.publish_container`）を通る。
 
-MUST: safetensors のバイト列も IR の規則も手で綴らない（`ir_fixtures` の同 MUST）— 規則の
-写しを持つと、規則が動いた日にフィクスチャだけが古びて「テストは緑・実物だけ落ちる」になる。
+MUST: 容器のバイト列も IR の規則も手で綴らない（`ir_fixtures` の同 MUST）— 規則の写しを
+持つと、規則が動いた日にフィクスチャだけが古びて「テストは緑・実物だけ落ちる」になる。
 
 MUST: **実物と違う数**にする（語彙 6・層 2・次元 3・hidden 5・位置上限 37・headDim 4/8）—
 寸法を焼き込んでいれば落ちる。
@@ -22,7 +22,6 @@ from typing import Any
 
 import numpy as np
 import torch
-from safetensors.numpy import save_file
 
 from gemma4.distribution import (
     GEMMA4_DEFAULT_MODEL,
@@ -34,7 +33,8 @@ from gemma4.distribution import (
     gemma4_series_name,
 )
 from gemma4.rope import FULL_ATTENTION, SLIDING_ATTENTION
-from karume.emit import write_model
+from karume.container import BLOCK_MAX_BYTES, AssetInput, Provenance
+from karume.emit import stored_model
 from karume.ir import (
     IrGraph,
     IrInitializer,
@@ -45,6 +45,8 @@ from karume.ir import (
     IrStorage,
     IrValue,
 )
+from karume.ple import ple_assets
+from karume.publish import publish_container
 from karume.quantize import (
     channel_scale,
     dequantize_int4,
@@ -52,7 +54,9 @@ from karume.quantize import (
     quantize_to_int4,
     quantize_to_int8,
 )
-from karume.verify import verify_shards
+
+#: フィクスチャの出所（`--license` を落とした配布形は作らない — container-v1 §12）。
+FIXTURE_PROVENANCE = Provenance(license="apache-2.0", writer="karume-fixture")
 
 #: 合成の寸法（実物は 262144 / 35 / 256 / 2048）。`HIDDEN` は hidden 出口の幅で、**VOCAB とも
 #: DIM とも違う数**にする（logits と hidden を取り違えた組が幅で落ちる）。
@@ -60,7 +64,9 @@ from karume.verify import verify_shards
 #: グラフの幅を突き合わせるので、フィクスチャの中で割れていると正当な組が組めない。
 VOCAB = 6
 LAYERS = 2
-DIM = 3
+#: PLE の 1 行は **4 の倍数**でなければ block を行の倍数で切れない（container-v1 §4.1）ので、
+#: `LAYERS * DIM` が 4 で割り切れる数にする（実物は 35 × 256）。
+DIM = 10
 HIDDEN = 16
 
 #: 上流 `config.json` の `text_config` のうち、配布 recipe が読む欄だけを持つ最小形。
@@ -112,10 +118,8 @@ _OUT = 4
 #: 退役した「表を焼く」形の initializer 名（残骸の門に使う — 現行の資産には 1 本も無い）。
 BAKED_ROPE_TABLE = "model.model.rotary_emb.full_attention_cos_table"
 
-#: PLE sidecar の綴り（`gemma4.export_product` / `packages/models/src/gemma/ple.ts` の正本）。
-PLE_INDEX_FILE = "ple.json"
-PLE_SCHEMA = 1
-PLE_METADATA_KEY = "karume_ple"
+#: PLE の綴り（`karume.ple` / `packages/models/src/gemma/ple-index.ts` の正本）。
+PLE_STORAGE = "i8"
 PLE_EMBED_SCALE = 2.0
 
 #: 貸し手の主表テンソルキー（{@link product_container} の `declare` が組む綴り）。借り手の
@@ -142,6 +146,68 @@ def _ramp(*shape: int) -> torch.Tensor:
     return torch.arange(total, dtype=torch.float32).reshape(*shape) / total
 
 
+def _publish(
+    graph: IrGraph,
+    tensors: Mapping[str, torch.Tensor],
+    storage: str,
+    scales: Mapping[str, torch.Tensor],
+    overrides: Mapping[str, str],
+    *,
+    assets: Mapping[str, AssetInput] = {},
+    block_bytes: int = BLOCK_MAX_BYTES,
+) -> list[bytes]:
+    """書いて読み直して検証し、part ごとのバイト列を添字順に返す（実物と同じ 1 本道）。"""
+    stored = stored_model(
+        graph,
+        tensors,
+        weight_dtype=storage,
+        weight_scales=scales,
+        weight_dtype_overrides=overrides,
+    )
+    with TemporaryDirectory() as staging:
+        result = publish_container(
+            Path(staging) / "model.krm",
+            stored.graph,
+            stored.tensors,
+            stored.bindings,
+            graph_name="model",
+            provenance=FIXTURE_PROVENANCE,
+            assets=assets,
+            block_bytes=block_bytes,
+        )
+        return [path.read_bytes() for path in result.parts]
+
+
+def ple_container_assets(
+    *,
+    tokens: int = VOCAB,
+    layers: int = LAYERS,
+    dim: int = DIM,
+    embed_scale: float = PLE_EMBED_SCALE,
+    block_bytes: int = BLOCK_MAX_BYTES,
+) -> dict[str, AssetInput]:
+    """PLE を容器の資産へ（索引 schema 3 + `values` / `scales` の block 列）。
+
+    切り方も索引の綴りも core の {@link karume.ple.ple_assets} が持つ — 写しを綴ると、規則が
+    動いた日にフィクスチャだけが古びる。`block_bytes` を下げると block が複数本へ割れる
+    （索引と資産宣言の突合を複数 block で踏む席）。
+    """
+    values = np.arange(tokens * layers * dim, dtype=np.int8).reshape(tokens, layers * dim)
+    scales = np.full((tokens, layers), 0.5, dtype=np.float32)
+    value_bytes = memoryview(values).cast("B")
+    scale_bytes = memoryview(scales).cast("B")
+    return ple_assets(
+        storage=PLE_STORAGE,
+        tokens=tokens,
+        layers=layers,
+        dim=dim,
+        embed_scale=embed_scale,
+        read_values=lambda begin, end: value_bytes[begin:end],
+        read_scales=lambda begin, end: scale_bytes[begin:end],
+        block_bytes=block_bytes,
+    )
+
+
 def product_container(
     *,
     vocab: int = VOCAB,
@@ -152,8 +218,12 @@ def product_container(
     baked_rope: bool = False,
     free_symbol: bool = True,
     swap_outputs: bool = False,
+    assets: Mapping[str, AssetInput] | None = None,
 ) -> list[bytes]:
-    """製品グラフ 1 本ぶんの shard バイト列（読む順 — 先頭がグラフ shard）。
+    """製品グラフ 1 本ぶんの part バイト列（読む順 — 先頭が part 0）。
+
+    PLE は容器の**資産**として同梱される（ADR 0109 決定 4）— `assets` を渡さなければ
+    {@link ple_container_assets} の既定を載せる。
 
     `head_dims` は RoPE 派生入力の幅の上書き（宣言と食い違う世代を作る門のため）。
     `baked_rope` は退役した「表を焼く」形の initializer を 1 本混ぜる（残骸の門）。
@@ -270,17 +340,16 @@ def product_container(
         },
         nodes=nodes,
     )
-    with TemporaryDirectory() as staging:
-        written = write_model(
-            Path(staging) / "model.safetensors",
-            graph,
-            tensors,
-            weight_dtype="i4",
-            weight_scales=scales,
-            weight_dtype_overrides=overrides,
-        )
-        verify_shards(written)
-        return [path.read_bytes() for path in written]
+    return _publish(
+        graph,
+        tensors,
+        "i4",
+        scales,
+        overrides,
+        assets=ple_container_assets(tokens=vocab, layers=layers, dim=dim)
+        if assets is None
+        else assets,
+    )
 
 
 def drafter_container(
@@ -294,7 +363,7 @@ def drafter_container(
     capacity_symbol: str | None = CAPACITY_SYMBOL,
     storage: str = "i8",
 ) -> list[bytes]:
-    """**借り手**グラフ 1 本ぶんの shard バイト列（ADR 0096 段 2 — 単独では実行できない資産）。
+    """**借り手**グラフ 1 本ぶんの part バイト列（ADR 0096 段 2 — 単独では実行できない資産）。
 
     貸し手（{@link product_container}）と噛み合う形にする: 同じスロット名 `l0.k` / `l0.v` を
     **external** で宣言し、共有 initializer が貸し手の主表テンソルキーを名指し、記号は容量の
@@ -409,79 +478,7 @@ def drafter_container(
         },
         nodes=nodes,
     )
-    with TemporaryDirectory() as staging:
-        written = write_model(
-            Path(staging) / "model.safetensors",
-            graph,
-            tensors,
-            weight_dtype=storage,
-            weight_scales=scales,
-            weight_dtype_overrides=overrides,
-        )
-        verify_shards(written)
-        return [path.read_bytes() for path in written]
-
-
-def ple_shard_bytes(
-    start: int, stop: int, index: Mapping[str, Any], *, metadata: Mapping[str, Any] | None
-) -> bytes:
-    """PLE sidecar shard 1 本（token-major の i8 値 + per-row f32 scale）。
-
-    `metadata` を明示すると `__metadata__.karume_ple` の中身を差し替えられる（索引と食い違う
-    組み合わせの門）。`None` は索引そのままの正当な写し。
-    """
-    rows = stop - start
-    layers = int(index["layers"])  # type: ignore[arg-type]
-    dim = int(index["dim"])  # type: ignore[arg-type]
-    declared = dict(
-        metadata
-        if metadata is not None
-        else {
-            "schema": PLE_SCHEMA,
-            "tokens": index["tokens"],
-            "layers": layers,
-            "dim": dim,
-            "embedScale": index["embedScale"],
-            "start": start,
-            "stop": stop,
-        }
-    )
-    values = np.arange(rows * layers * dim, dtype=np.int8).reshape(rows, layers, dim)
-    scales = np.full((rows, layers), 0.5, dtype=np.float32)
-    with TemporaryDirectory() as staging:
-        path = Path(staging) / "ple.safetensors"
-        save_file(
-            {"values": values, "scales": scales},
-            str(path),
-            metadata={PLE_METADATA_KEY: json.dumps(declared)},
-        )
-        return path.read_bytes()
-
-
-def ple_index(
-    ranges: Sequence[tuple[int, int]],
-    *,
-    tokens: int = VOCAB,
-    layers: int = LAYERS,
-    dim: int = DIM,
-) -> dict[str, Any]:
-    """`ple.json` の中身（ファイル名は実物と同じ連番の綴り）。"""
-    total = len(ranges)
-    return {
-        "schema": PLE_SCHEMA,
-        "tokens": tokens,
-        "layers": layers,
-        "dim": dim,
-        "embedScale": PLE_EMBED_SCALE,
-        "shards": [
-            {
-                "file": f"ple-{position + 1:05d}-of-{total:05d}.safetensors",
-                "start": start,
-                "stop": stop,
-            }
-            for position, (start, stop) in enumerate(ranges)
-        ],
-    }
+    return _publish(graph, tensors, storage, scales, overrides)
 
 
 def tokenizer_asset(*, vocab: int = VOCAB, format_id: str = TOKENIZER_FORMAT) -> dict[str, Any]:
@@ -497,22 +494,20 @@ def write_series(
     container: Sequence[bytes] | None = None,
     drafter: Path | None = None,
     drafter_bytes: Sequence[bytes] | None = None,
-    index: Mapping[str, Any] | None = None,
-    shard_metadata: Mapping[int, Mapping[str, Any]] | None = None,
     tokenizer: Mapping[str, Any] | None = None,
     generation_config: Mapping[str, Any] | None = None,
     text_config: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
-    """系列 2 本 + チェックポイントを書き、使った `ple.json` の中身を返す。
+) -> None:
+    """系列 2 本 + チェックポイントを書く。
 
-    `shard_metadata` は shard 位置 → `__metadata__.karume_ple` の差し替え（門のため）。
     製品系列には**配布へ入らない**同居物（`ple.probe.safetensors` / `reference.json`）も置く
-    — 出力 path 表に載らないものが混ざらないことの証跡になる。
+    — 出力 path 表に載らないものが混ざらないことの証跡になる。PLE は製品コンテナの**資産**
+    なので、系列に独立したファイルとしては現れない（ADR 0109 決定 4）。
     """
-    from shard_series import write_component  # conftest が張る recipe 共有ヘルパ
+    from container_series import write_component  # conftest が張る recipe 共有ヘルパ
 
-    shards = list(container if container is not None else product_container())
-    write_component(product / "model.safetensors", shards)
+    parts = list(container if container is not None else product_container())
+    write_component(product / "model.krm", parts)
     # 借り手（drafter）系列は既定で product の隣に置く（既存の呼び出しを 1 つも書き換えずに
     # 済ませるため — 系列名の綴りは配布 recipe が持つ 1 箇所から組む）。
     borrower = (
@@ -521,21 +516,12 @@ def write_series(
         else product.parent / gemma4_series_name(GEMMA4_DEFAULT_MODEL, GEMMA4_DRAFTER_SUFFIX)
     )
     write_component(
-        borrower / "model.safetensors",
+        borrower / "model.krm",
         list(drafter_bytes if drafter_bytes is not None else drafter_container()),
     )
     # 配布へ入らない同居物（golden と出所記録）— 出力 path 表に載らないことの証跡。
     (borrower / "drafter-golden.short-en.safetensors").write_bytes(b"not distributed")
     (borrower / "reference.json").write_text("{}\n", encoding="utf-8")
-    declared = dict(index if index is not None else ple_index([(0, 4), (4, VOCAB)]))
-    (product / PLE_INDEX_FILE).write_text(
-        json.dumps(declared, indent=1, ensure_ascii=False) + "\n", encoding="utf-8"
-    )
-    for position, shard in enumerate(declared["shards"]):  # type: ignore[arg-type]
-        override = (shard_metadata or {}).get(position)
-        (product / str(shard["file"])).write_bytes(
-            ple_shard_bytes(int(shard["start"]), int(shard["stop"]), declared, metadata=override)
-        )
     (product / "ple.probe.safetensors").write_bytes(b"not distributed")
     (product / "reference.json").write_text("{}\n", encoding="utf-8")
 
@@ -559,4 +545,3 @@ def write_series(
         ),
         encoding="utf-8",
     )
-    return declared

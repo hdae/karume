@@ -8,9 +8,12 @@ from gemma4_qat.config import CHECKPOINTS, checkpoint_name, series_name
 from gemma4_qat.distribution import QAT_DEFAULT_QUANT, assert_qat_graph, qat_quants, repo_name
 from karume.dist import DistError, assert_quant_presentation
 
+#: 非量子化のまま残ってよい唯一の linear のテンソルキー（構造門が名指しで許可する 1 本）。
+PROJECTION = "model.model.per_layer_model_projection.weight"
+
 
 def graph_fixture():
-    """正当な最小の QAT グラフ。
+    """正当な最小の QAT グラフ（**IR v2 の文書** — initializer 名 = テンソルキー）。
 
     量子化 linear は 2 本 — 共有 head（token embedding と同じ initializer）と、ごく普通の
     量子化 linear 1 本。前者は前後の SRQ を持たない（上流 lm_head の SRQ scale が 0 = 恒等
@@ -18,23 +21,25 @@ def graph_fixture():
     故障注入は**普通の linear 側**へ掛ける。
     """
     return {
-        "initializers": {
-            "weight": {"tensor": "head", "storage": {"dtype": "i2"}},
-            "mlp": {"tensor": "mlp", "storage": {"dtype": "i4"}},
-            "projection": {
-                "tensor": "model.model.per_layer_model_projection.weight",
-                "storage": {"dtype": "f32"},
-            },
-        },
+        "initializers": {"head": {}, "mlp": {}, PROJECTION: {}},
         "nodes": [
-            {"op": "embedding", "ins": ["weight", "input_ids"], "outs": ["embedded"]},
-            {"op": "linear", "ins": ["embedded", "projection"], "outs": ["projected"]},
+            {"op": "embedding", "ins": ["head", "input_ids"], "outs": ["embedded"]},
+            {"op": "linear", "ins": ["embedded", PROJECTION], "outs": ["projected"]},
             {"op": "static_quantize", "ins": ["projected"], "outs": ["rounded"]},
             {"op": "linear", "ins": ["rounded", "mlp"], "outs": ["mlp_out"]},
             {"op": "static_quantize", "ins": ["mlp_out"], "outs": ["hidden"]},
-            {"op": "linear", "ins": ["hidden", "weight"], "outs": ["logits"]},
+            {"op": "linear", "ins": ["hidden", "head"], "outs": ["logits"]},
         ],
     }
+
+
+def layouts_fixture():
+    """{@link graph_fixture} の束縛表（テンソルキー → 格納の layout）。
+
+    IR v2 のグラフ記述は格納を持たない（正本は束縛表 — docs/ir-v2.md）ので、格納の故障注入は
+    こちら側へ掛ける。
+    """
+    return {"head": "i2", "mlp": "i4", PROJECTION: "f32"}
 
 
 #: {@link graph_fixture} の head linear（最後のノード）の位置。
@@ -57,41 +62,45 @@ class TestQatGraph:
     def test_accepts_fixed_head_sharing_and_explicit_srq(self):
         graph = graph_fixture()
         before = deepcopy(graph)
-        assert_qat_graph(graph)
+        assert_qat_graph(graph, layouts_fixture())
         assert graph == before
 
     def test_accepts_a_shared_head_that_still_carries_its_srq(self):
         """head の SRQ は「省略してよい」であって禁止ではない（scale>0 で焼かれた形も通す）。"""
-        assert_qat_graph(wrap_head_with_srq(graph_fixture()))
+        assert_qat_graph(wrap_head_with_srq(graph_fixture()), layouts_fixture())
 
     @pytest.mark.parametrize(
         "fault", ["embedding", "before", "after", "extra_consumer", "unquantized", "untied"]
     )
     def test_detects_a_broken_qat_contract(self, fault):
         graph = graph_fixture()
+        layouts = layouts_fixture()
         if fault == "embedding":
-            graph["initializers"]["weight"]["storage"]["dtype"] = "i8"
+            layouts["head"] = "i8"
         elif fault in ("before", "after"):
             graph["nodes"][2 if fault == "before" else 4]["op"] = "reshape"
         elif fault == "extra_consumer":
             graph["nodes"].append({"op": "reshape", "ins": ["mlp_out"], "outs": ["unrounded"]})
         elif fault == "unquantized":
-            graph["initializers"]["projection"]["tensor"] = "another.linear.weight"
+            graph["initializers"]["another.linear.weight"] = graph["initializers"].pop(PROJECTION)
+            graph["nodes"][1]["ins"][1] = "another.linear.weight"
+            layouts["another.linear.weight"] = layouts.pop(PROJECTION)
         else:
             # 共有でなくなった head は普通の量子化 linear になるので SRQ を補う — 残る違反を
             # 「共有 head が 1 本でない」1 つに絞り、SRQ 欠落の経路と取り違えないため。
-            graph["initializers"]["separate"] = deepcopy(graph["initializers"]["weight"])
+            graph["initializers"]["separate"] = {}
+            layouts["separate"] = "i2"
             wrap_head_with_srq(graph)["nodes"][HEAD_NODE + 1]["ins"][1] = "separate"
         with pytest.raises(DistError):
-            assert_qat_graph(graph)
+            assert_qat_graph(graph, layouts)
 
     def test_only_the_shared_head_may_omit_its_srq(self):
         """省略を許すのは共有 head だけ — 同じ省略を普通の量子化 linear がすると落ちる。"""
-        assert_qat_graph(graph_fixture())
+        assert_qat_graph(graph_fixture(), layouts_fixture())
         graph = graph_fixture()
         graph["nodes"][2]["op"] = "reshape"
         with pytest.raises(DistError, match="固定 SRQ"):
-            assert_qat_graph(graph)
+            assert_qat_graph(graph, layouts_fixture())
 
     @pytest.mark.parametrize("model", ["e2b", "e4b"])
     def test_models_share_only_the_qat_family(self, model):

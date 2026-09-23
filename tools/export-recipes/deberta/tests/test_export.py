@@ -80,7 +80,13 @@ def exported(tmp_path):
     torch.manual_seed(0)
     wrapper = TinyText()
     example = tuple(CASES[0][1].values())
-    graph = export_to_file(wrapper, example, tmp_path / export_deberta.MODEL_FILE)
+    graph = export_to_file(
+        wrapper,
+        example,
+        tmp_path / export_deberta.MODEL_FILE,
+        provenance=export_deberta.PROVENANCE,
+        graph_name="tiny",
+    )
     return wrapper, graph, tmp_path
 
 
@@ -126,6 +132,16 @@ class TestExportProvenance:
         from sbv2.distribution import EXPORT_PROVENANCE_FILE
 
         assert export_deberta.EXPORT_PROVENANCE_FILE == EXPORT_PROVENANCE_FILE
+
+    def test_the_license_matches_the_card_that_redistributes_this_encoder(self):
+        """MUST: 容器へ焼く出所のライセンス識別子は、この重みを再配布するカードの正本と同じ。
+
+        `deberta` は自分のカードを持たない（SBV2 の `text_encoder` 席を焼くだけ）ので、識別子の
+        正本は消費側にある。写しを 2 つ持つ以上、独立に動く形にはしない。
+        """
+        from sbv2.card import SBV2_TEXT_ENCODER_LICENSE
+
+        assert export_deberta.PROVENANCE.license == SBV2_TEXT_ENCODER_LICENSE
 
     def test_it_records_the_variant_and_the_symbolic_maximum(self, tmp_path):
         """記録の欄は読み手が突き合わせる 2 つ（`target` / `sym_max`）そのもの。"""
@@ -311,7 +327,13 @@ class TestMirrorIo:
 
         wrapper = NoLinear()
         example = tuple(CASES[0][1].values())
-        graph = export_to_file(wrapper, example, tmp_path / export_deberta.MODEL_FILE)
+        graph = export_to_file(
+            wrapper,
+            example,
+            tmp_path / export_deberta.MODEL_FILE,
+            provenance=export_deberta.PROVENANCE,
+            graph_name="tiny",
+        )
 
         with pytest.raises(SystemExit, match="適格 linear が 0 本"):
             export_deberta._write_mirror_io(wrapper, graph, CASES, tmp_path)

@@ -33,6 +33,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from safetensors import safe_open
+
 from _shared.calib_provenance import calib_complaint
 from _shared.paths import INPUTS_ROOT
 from karume.dist import (
@@ -47,7 +49,6 @@ from karume.dist import (
     complete_quant_weights,
     graph_inputs,
     ir_graph,
-    safetensors_header,
 )
 
 from .card import render_irodori_model_card
@@ -168,50 +169,50 @@ def irodori_role(role: str, dtype: str) -> str:
 
 
 #: 出力の相対 path（**モデルサブツリー内**）— 配置表と manifest が共有する 1 箇所。
-#: 格納 dtype をファイル名に出すのは Anima / SBV2 と同じ形（`model.f16.safetensors`）で、
+#: 格納 dtype をファイル名に出すのは Anima / SBV2 と同じ形（`model.f16.krm`）で、
 #: 1 つのディレクトリに系列 2 本が並んでも取り違えようがない綴りにするため。
 IRODORI_OUTPUT_PATHS: Mapping[str, str] = {
     **{
-        irodori_role(role, dtype): f"{role}/model.{dtype}.safetensors"
+        irodori_role(role, dtype): f"{role}/model.{dtype}.krm"
         for dtype, roles in IRODORI_DTYPE_ROLES.items()
         for role in roles
     },
     "tokenizer": f"{IRODORI_TOKENIZER_DIR}/{IRODORI_TOKENIZER_FILE}",
 }
 
-#: 各役割の safetensors ヘッダに**要求する**格納 dtype（Anima / SBV2 と同じ根拠 — 素の F32
-#: 資産が組み立て・ロード・実行を全て通って参照一致の門まで沈黙した実測事故）。圧縮系列は
-#: fake-quant 対象だけが F16 / I8 / I4 になる（bias / norm / グラフ定数、i8 の per-channel scale と
-#: i4 の group scale は F32 のまま）ので「その dtype を含む」を要求する。tokenizer は JSON なので
+#: 各役割の束縛表に**要求する**格納の語彙（Anima / SBV2 と同じ根拠 — 素の f32 資産が
+#: 組み立て・ロード・実行を全て通って参照一致の門まで沈黙した実測事故）。圧縮系列は
+#: fake-quant 対象だけが f16 / i8 / i4 になる（bias / norm / グラフ定数、i8 の per-channel scale と
+#: i4 の group scale は f32 のまま）ので「その語彙を含む」を要求する。tokenizer は JSON なので
 #: 載せない。
 IRODORI_STORAGE_REQUIREMENTS: Mapping[str, str] = {
-    irodori_role(role, dtype): dtype.upper()
+    irodori_role(role, dtype): dtype
     for dtype, roles in IRODORI_DTYPE_ROLES.items()
     for role in roles
 }
 
-#: 各役割の safetensors ヘッダに**あってはならない**格納 dtype（{@link assert_storage_absent}）。
-#: f32 席は「F32 を含む」だけでは圧縮系列の資産と区別できない（圧縮系列も適格外の重み
-#: — bias / norm / グラフ定数 / i8 の per-channel scale / i4 の group scale — を F32 で持つ）ので、
-#: **圧縮側の格納 dtype 全部**の不在を併せて要求して初めて系列 × 格納 dtype が集合として一意に
-#: なる。逆向き（圧縮席へ f32 資産）は {@link assert_storage} が要求 dtype の不在で落とす。
+#: 各役割の束縛表に**あってはならない**格納の語彙（{@link assert_storage_absent}）。
+#: f32 席は「f32 を含む」だけでは圧縮系列の資産と区別できない（圧縮系列も適格外の重み
+#: — bias / norm / グラフ定数 / i8 の per-channel scale / i4 の group scale — を f32 で持つ）ので、
+#: **圧縮側の格納の語彙全部**の不在を併せて要求して初めて系列 × 格納が集合として一意に
+#: なる。逆向き（圧縮席へ f32 資産）は {@link assert_storage} が要求の不在で落とす。
 #:
-#: MUST: **i8 席も I4 の不在を要求する**（`dit` だけが両方の系列を持つ）。i4 系列は
-#: **I4 + I8 + F32 の混成**（block 内の adaLN 以外 168 本が I4・block 外 5 本 + adaLN 144 本が
-#: I8・bias / norm / scale が F32 — 聴感裁定 2026-08-23 で block 外と adaLN を i4 から外した。
+#: MUST: **i8 席も i4 の不在を要求する**（`dit` だけが両方の系列を持つ）。i4 系列は
+#: **i4 + i8 + f32 の混成**（block 内の adaLN 以外 168 本が i4・block 外 5 本 + adaLN 144 本が
+#: i8・bias / norm / scale が f32 — 聴感裁定 2026-08-23 で block 外と adaLN を i4 から外した。
 #: `irodori.export._fake_quant_i4`）なので、
-#: 「I8 を含む」という要求検査は i4 系列でも満たされてしまう。i8 席と i4 系列を分けているのは
+#: 「i8 を含む」という要求検査は i4 系列でも満たされてしまう。i8 席と i4 系列を分けているのは
 #: **この禁止表だけ**で、外すと既定席 `i8-a8` の `linearCompute: "a8"` が i4 常駐で走る w4a8
 #: 経路（ADR 0076）へ黙って化ける。混成になる前も「i4 系列が i8 席を名乗れるかどうかが上流の
 #: 適格率次第」で同じ穴が空いていた — 混成でその穴が常時開いた形になっただけ。
 IRODORI_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {
     **{
         irodori_role(role, IRODORI_PLAIN_DTYPE): tuple(
-            dtype.upper() for dtype in IRODORI_WEIGHT_DTYPES if dtype != IRODORI_PLAIN_DTYPE
+            dtype for dtype in IRODORI_WEIGHT_DTYPES if dtype != IRODORI_PLAIN_DTYPE
         )
         for role in IRODORI_GRAPH_ROLES
     },
-    **{irodori_role(role, "i8"): ("I4",) for role in IRODORI_DTYPE_ROLES["i4"]},
+    **{irodori_role(role, "i8"): ("i4",) for role in IRODORI_DTYPE_ROLES["i4"]},
 }
 
 #: weights の宣言（dtype ラベル → 役割名）。8 グラフとも f32 / f16 / i8 の 3 席を持ち（`dit` は
@@ -500,7 +501,7 @@ def irodori_placements(sources: IrodoriSources) -> dict[str, Path]:
                 else sources.codec_series_by_dtype[dtype]
             )
             directory = (IRODORI_SERIES_DIRS | IRODORI_CODEC_DIRS)[role]
-            placements[irodori_role(role, dtype)] = series / directory / "model.safetensors"
+            placements[irodori_role(role, dtype)] = series / directory / "model.krm"
     return placements
 
 
@@ -513,7 +514,8 @@ def irodori_model_config(model_dir: Path) -> Mapping[str, Any]:
     path = model_dir / IRODORI_CKPT_FILE
     if not path.is_file():
         raise DistError(f"組み立ての入力が無い: {path}")
-    metadata = safetensors_header(path).get("__metadata__")
+    with safe_open(str(path), framework="np") as handle:
+        metadata = handle.metadata()
     if not isinstance(metadata, dict) or IRODORI_CONFIG_META_KEY not in metadata:
         raise DistError(f"{path} の __metadata__ に '{IRODORI_CONFIG_META_KEY}' が無い")
     try:

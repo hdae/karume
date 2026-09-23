@@ -97,6 +97,7 @@ class TestExportedTokenForm:
             surgical,
             tensors,
             tmp_path / gx.MODEL_FILE,
+            graph_name="tiny",
             weight_dtype="i8",
             weight_scales=scales,
             weight_dtype_overrides=dict.fromkeys(int4.scales, "i4"),

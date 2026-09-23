@@ -16,6 +16,7 @@ MUST: **数値・ダウンロード量・quant 表・dtype ラベルは 1 つ残
 from __future__ import annotations
 
 from collections.abc import Mapping
+from functools import partial
 from typing import Any
 
 from karume.modelcard import (
@@ -260,7 +261,9 @@ def _depth_anything_shape(model: Mapping[str, Any]) -> list[str]:
     ]
 
 
-def render_depth_anything_model_card(manifest: Mapping[str, Any], repo: str) -> str:
+def render_depth_anything_model_card(
+    manifest: Mapping[str, Any], repo: str, host_assets: Mapping[str, int] = {}
+) -> str:
     """Depth Anything V2 配布形の `README.md` 本文を組み立てる（純関数・末尾改行つき）。"""
     require_pipeline(manifest, DEPTH_ANYTHING_SUPPORTED_PIPELINE)
     return render(
@@ -274,6 +277,8 @@ def render_depth_anything_model_card(manifest: Mapping[str, Any], repo: str) -> 
             models(manifest),
             [""],
             _depth_anything_usage(manifest, repo),
-            *model_sections(manifest, (quants, _depth_anything_shape)),
+            *model_sections(
+                manifest, (partial(quants, host_assets=host_assets), _depth_anything_shape)
+            ),
         )
     )

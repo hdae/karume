@@ -21,8 +21,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from container_series import write_component
 from ir_fixtures import ir_container
-from shard_series import write_component
 
 from anima import eval_dist
 from anima.distribution import (
@@ -31,10 +31,13 @@ from anima.distribution import (
     ANIMA_TURBO_MODEL_NAME,
     CALIB_PROVENANCE_FILE,
     CALIB_SHIPPABLE_METHOD,
+    ROPE_BASE_ASSET,
+    ROPE_BASE_ROLE,
     anima_model,
     anima_sources,
     assert_calib_provenance,
 )
+from karume.container import AssetInput
 from karume.dist import DistError
 
 #: 素版の視認対象（i4 席が配布から外れているモデル — 2026-08-24 の裁定）。
@@ -80,26 +83,26 @@ def _calib_record(method: str, model: str) -> bytes:
 def _build_series(series_dir: Path, *, method: str = ADALN_I8_CALIB_METHOD) -> Path:
     """素版 1 モデルの系列（f16 / i8 の配布系列 + **変種の i4 系列**）を偽資産で作る。
 
-    weights の席だけは**正当な IR コンテナ**（組み立ては入力を IR v1 の全規則で見る —
-    `karume.dist.assert_weight_components_verified`）。rope 素表は extras の席なので
-    IR コンテナではなく、従来どおりヘッダだけの偽資産でよい。
+    weights の席は**正当なコンテナ**（組み立ては入力を開いて宣言の全規則で見る —
+    `karume.dist.assert_weight_components_verified`）。rope 素表は transformer の容器の
+    **資産**（ADR 0109 決定 4）なので、同じ器の中へ入る。
     """
     sources = anima_sources(series_dir, MODEL)
     write_component(
-        sources.base / "text_encoder" / "model.safetensors",
+        sources.base / "text_encoder" / "model.krm",
         ir_container(mark="te", storage="f16"),
     )
     write_component(
-        sources.text_conditioner / "text_conditioner" / "model.safetensors",
+        sources.text_conditioner / "text_conditioner" / "model.krm",
         ir_container(mark="tc", storage="f16"),
     )
     write_component(
-        sources.base / "vae_decoder" / "model.safetensors",
+        sources.base / "vae_decoder" / "model.krm",
         ir_container(mark="vae", storage="f16"),
     )
     _write(sources.tokenizers / "qwen2-tokenizer.json", b'{"qwen2": true}')
     _write(sources.tokenizers / "t5-tokenizer.json", b'{"t5": true}')
-    rope = _fake_safetensors("F32", b"rope")
+    rope = AssetInput(ROPE_BASE_ROLE, 4, b"rope")
     variant = series_dir / eval_dist.EVAL_SERIES.format(model=MODEL)
     for series, storage in (
         (sources.transformer["f16"], "f16"),
@@ -107,10 +110,9 @@ def _build_series(series_dir: Path, *, method: str = ADALN_I8_CALIB_METHOD) -> P
         (variant, "i4"),
     ):
         write_component(
-            series / "transformer" / "model.safetensors",
-            ir_container(mark=f"dit-{storage}", storage=storage),
+            series / "transformer" / "model.krm",
+            ir_container(mark=f"dit-{storage}", storage=storage, assets={ROPE_BASE_ASSET: rope}),
         )
-        _write(series / "transformer" / "rope_base.safetensors", rope)
     _write(variant / "transformer" / CALIB_PROVENANCE_FILE, _calib_record(method, MODEL))
     return variant
 
@@ -132,9 +134,7 @@ class TestEvalPlan:
 
         plan = eval_dist.eval_plan(tmp_path / "series", MODEL)
 
-        assert (
-            plan.artifacts["transformer_i4"].source == variant / "transformer" / "model.safetensors"
-        )
+        assert plan.artifacts["transformer_i4"].source == variant / "transformer" / "model.krm"
         assert eval_dist.EVAL_SERIES.format(model=MODEL) != f"{MODEL}-i4-dyn"
 
     def test_a_series_calibrated_for_shipping_is_refused(self, tmp_path):

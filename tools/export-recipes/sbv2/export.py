@@ -41,7 +41,7 @@ MUST: `--verify` は**ターゲットを 1 つだけ取る**（`--verify front` 
 出力レイアウト（Deno 側 `packages/runtime/tests/e2e_sbv2_test.ts` が列挙する）。系列名は
 `--model-dir` のディレクトリ名から導く（既定の `inputs/sbv2/F1/` なら `sbv2-F1`）:
 
-    outputs/series/sbv2-F1/<target>/model.safetensors     重み・定数 + __metadata__.karume_ir
+    outputs/series/sbv2-F1/<target>/model.krm             重み・定数 + 2 文書の記述
     outputs/series/sbv2-F1/<target>/io.<case>.safetensors 入力と torch CPU での期待出力
 
 io のテンソルキー規約は tiny golden / DeBERTa と同じ（`input.<グラフ入力名>` /
@@ -86,6 +86,7 @@ from torch.export import Dim
 
 from _shared.paths import INPUTS_ROOT, SERIES_ROOT
 from karume.artifacts import staged_publication
+from karume.container import Provenance, container_parts
 from karume.convert import normalize_boundary_tensor
 from karume.emit import storage_breakdown
 from karume.ir import IrGraph
@@ -99,7 +100,6 @@ from karume.quantize import (
     iter_quant_targets,
     round_weights_to_f16,
 )
-from karume.shards import resolve_shards
 
 # 出所記録のファイル名は**読み手側**（配布の組み立て）が持つ — 綴りを 2 箇所に置くと、
 # 片方だけ動いた日に「書いたのに読まれない記録」が黙って生える（anima の
@@ -107,6 +107,7 @@ from karume.shards import resolve_shards
 from sbv2.distribution import EXPORT_PROVENANCE_FILE
 
 from . import patch
+from .card import SBV2_CARD_PROFILES
 
 #: 実重みの置き場。リポジトリ管理外（`.gitignore` の `inputs/`）で、手で配置する。
 DEFAULT_MODEL_DIR = INPUTS_ROOT / "sbv2" / "F1"
@@ -140,6 +141,58 @@ BASE_WEIGHT_DTYPES: Mapping[str, str] = {"f32": "f32", "f16": "f16", "i8": "i8",
 I4_MODULE_TYPES: tuple[type[nn.Module], ...] = (nn.Linear, nn.Conv1d)
 
 
+#: `--model-dir` のディレクトリ名の接頭辞 → 声のファミリー（README の
+#: 「the default `--model-dir` is `inputs/sbv2/F1`」と「`inputs/sbv2/FN*`」の規約そのもの）。
+#:
+#: MUST: **許可リスト**で決める。「`FN` で始まらなければ jvnv」と二値で決めていた頃は、想定外の
+#: ディレクトリ名（新しい話者・手元の写しの名前・`FN` を含まない FN 系の別綴り）が**黙って**
+#: jvnv のライセンス（`cc-by-sa-4.0`）を名乗る配布形になった — 法的事実の沈黙誤値で、配って
+#: からでないと誰も気づけない。
+#:
+#: NOTE: 手元の入力ディレクトリの綴りは**上流リポジトリのディレクトリ名**
+#: （`sbv2.card.Sbv2CardProfile.source_dirs` = `jvnv-F1-jp/` …）とは別で、jvnv 側は話者 id だけ。
+SBV2_FAMILY_DIRS: Mapping[str, tuple[str, ...]] = {
+    "fn": ("FN",),
+    "jvnv": ("F1", "F2", "M1", "M2"),
+}
+
+
+def sbv2_family(model_dir: Path) -> str:
+    """`--model-dir` のディレクトリ名 → 声のファミリー（`fn` / `jvnv`）。
+
+    判定は {@link SBV2_FAMILY_DIRS} の許可リストだけで、どれにも当たらない名前は
+    **fail loudly**（同定数の MUST）。
+    """
+    name = model_dir.name
+    for family, prefixes in SBV2_FAMILY_DIRS.items():
+        if name.startswith(prefixes):
+            return family
+    listed = " / ".join(
+        f"{family}: {', '.join(prefixes)}" for family, prefixes in sorted(SBV2_FAMILY_DIRS.items())
+    )
+    raise ValueError(
+        f"'{name}' がどの声のファミリーの綴りにも当たらない（既知の接頭辞 — {listed}）"
+        " — 出所とライセンスが決まらないので配布形を焼かない"
+        "（README の '--model-dir' の規約に合わせる）"
+    )
+
+
+def sbv2_provenance(model_dir: Path) -> Provenance:
+    """系列の容器へ焼く出所（container-v1 §2.3）。
+
+    SBV2 は声のファミリーごとに**別の法的事実**を持つ（`sbv2.card.SBV2_CARD_PROFILES` —
+    FN 系は `other` + Booth の頒布条件、jvnv 系は JVNV コーパス由来の `cc-by-sa-4.0`）。
+    識別子の正本はカード側なので、ここは**どちらのファミリーか**だけを決める
+    （{@link sbv2_family}）。
+    """
+    profile = SBV2_CARD_PROFILES[sbv2_family(model_dir)]
+    return Provenance(
+        license=profile.metadata.license,
+        # 上流 checkpoint の版（カードが名乗る `source_version` — 既に在る値だけを渡す）。
+        upstream_revision=profile.source_version,
+    )
+
+
 def default_out_root(model_dir: Path, dtype: str) -> Path:
     """生成物の既定の置き場（`outputs/series/sbv2-<実重みのディレクトリ名>{,-f16,-i8,-i4}/`）。
 
@@ -164,7 +217,8 @@ TARGET_VOICE = "voice"
 TARGETS = (TARGET_DP, TARGET_FRONT, TARGET_FLOW, TARGET_DEC, TARGET_VOICE)
 CONFIG_FILE = "config.json"
 STYLE_FILE = "style_vectors.npy"
-MODEL_FILE = "model.safetensors"
+MODEL_FILE = "model.krm"
+
 IO_PREFIX = "io."
 IO_SUFFIX = ".safetensors"
 INPUT_PREFIX = "input."
@@ -855,7 +909,7 @@ def _summary(
         "plain_bytes": breakdown.plain_bytes,
         # i8 の companion scale（ADR 0019）。f32 / f16 では 0。
         "scale_bytes": breakdown.scale_bytes,
-        "model_bytes": sum(p.stat().st_size for p in resolve_shards(out_dir / MODEL_FILE)),
+        "model_bytes": sum(p.stat().st_size for p in container_parts(out_dir / MODEL_FILE)),
         "ops": sorted(graph.required_ops),
         "symbols": list(graph.symbols),
         "io": list(written),
@@ -894,6 +948,10 @@ def export_dp(
             module,
             (example["h"], example["x_mask"], example["g"]),
             staged / MODEL_FILE,
+            provenance=sbv2_provenance(model_dir),
+            # グラフ名は**部品名**（= karume.json の weights のキー = 据え替え先の
+            # ディレクトリ名）。
+            graph_name=out_dir.name,
             dynamic_shapes=({2: phonemes}, {2: phonemes}, {}),
             symbol_names=("P",),
             weight_dtype=BASE_WEIGHT_DTYPES[dtype],
@@ -957,6 +1015,10 @@ def export_front(
             module,
             tuple(example[declared] for declared in FRONT_INPUT_ORDER),
             staged / MODEL_FILE,
+            provenance=sbv2_provenance(model_dir),
+            # グラフ名は**部品名**（= karume.json の weights のキー = 据え替え先の
+            # ディレクトリ名）。
+            graph_name=out_dir.name,
             dynamic_shapes=dynamic_shapes,
             symbol_names=("P",),
             weight_dtype=BASE_WEIGHT_DTYPES[dtype],
@@ -1034,6 +1096,10 @@ def export_flow(
             module,
             tuple(example[declared] for declared in FLOW_INPUT_ORDER),
             staged / MODEL_FILE,
+            provenance=sbv2_provenance(model_dir),
+            # グラフ名は**部品名**（= karume.json の weights のキー = 据え替え先の
+            # ディレクトリ名）。
+            graph_name=out_dir.name,
             dynamic_shapes=dynamic_shapes,
             symbol_names=("T",),
             weight_dtype=BASE_WEIGHT_DTYPES[dtype],
@@ -1084,6 +1150,10 @@ def export_dec(
             module,
             tuple(example[declared] for declared in DEC_INPUT_ORDER),
             staged / MODEL_FILE,
+            provenance=sbv2_provenance(model_dir),
+            # グラフ名は**部品名**（= karume.json の weights のキー = 据え替え先の
+            # ディレクトリ名）。
+            graph_name=out_dir.name,
             dynamic_shapes=({2: frames}, {}),
             symbol_names=("T",),
             weight_dtype=BASE_WEIGHT_DTYPES[dtype],
@@ -1143,6 +1213,10 @@ def export_voice(
             module,
             tuple(example[declared] for declared in FLOW_INPUT_ORDER),
             staged / MODEL_FILE,
+            provenance=sbv2_provenance(model_dir),
+            # グラフ名は**部品名**（= karume.json の weights のキー = 据え替え先の
+            # ディレクトリ名）。
+            graph_name=out_dir.name,
             dynamic_shapes=dynamic_shapes,
             symbol_names=("T",),
             weight_dtype=BASE_WEIGHT_DTYPES[dtype],

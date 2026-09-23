@@ -1,7 +1,8 @@
 """BiRefNet 系の配布 recipe（`birefnet.distribution`）— 組み立て 1 周ぶんの単体テスト。
 
-実資産は使わない。組み立てへ届く入力は数 KB の**正当な最小 IR コンテナ**（`ir_fixtures`）で、
-門に落とされることを見るケースだけが従来の偽資産のまま（{@link _birefnet_container}）。
+実資産は使わない。組み立てへ届く入力は数 KB の**正当な最小コンテナ**（`ir_fixtures`）で、
+門に落とされることを見るケースも同じ器で作る（{@link _birefnet_container}）— 組み立ては入力を
+コンテナとして開くので、手で綴った偽物は門の手前で別の理由で落ちる。
 
 manifest v2（`karume/2` — ADR 0041）以降、リポ内レイアウトは一律「モデル別サブツリー +
 `shared/`」なので、期待 path は全て `<モデル名>/…` を頭に持つ。
@@ -19,8 +20,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from ir_fixtures import ir_container
-from shard_series import placed_paths, write_component
+from container_series import placed_paths, write_component
+from ir_fixtures import Shape, ir_container
 
 from _shared.licenses import mit_license
 from birefnet.card import BIREFNET_UPSTREAM
@@ -52,23 +53,6 @@ from karume.dist import (
     resolve_card_renderer,
     verify_dist,
 )
-from karume.ir import IR_METADATA_KEY
-
-
-def _fake_safetensors(
-    dtype: str, payload: bytes, metadata: Mapping[str, str] | None = None
-) -> bytes:
-    """格納 dtype の門を通る最小の safetensors（8 バイト長 + ヘッダ JSON + データ節）。
-
-    `metadata` を渡すと `__metadata__` 節が付く（IR コンテナを要求する門のため）。
-    """
-    header: dict[str, Any] = {
-        "w": {"dtype": dtype, "shape": [len(payload)], "data_offsets": [0, len(payload)]}
-    }
-    if metadata is not None:
-        header["__metadata__"] = dict(metadata)
-    encoded = json.dumps(header).encode("utf-8")
-    return len(encoded).to_bytes(8, "little") + encoded + payload
 
 
 def _write(path: Path, payload: bytes) -> None:
@@ -82,7 +66,7 @@ def _in_subtree(model: str, paths: Iterable[str]) -> list[str]:
 
 
 def _placed_paths() -> list[str]:
-    """配布形に現れる相対 path（weights の席は shard 連番に展開される — ADR 0081）。"""
+    """配布形に現れる相対 path（weights の席は part 連番に展開される — container-v1 §8）。"""
     return placed_paths(BIREFNET_OUTPUT_PATHS, BIREFNET_WEIGHTS)
 
 
@@ -115,55 +99,35 @@ _BIREFNET_CONFIG_KEYS = (
 _DEFAULT_SIDE = int(BIREFNET_DEFAULT_MODEL)
 
 
-def _birefnet_graph(
+def _birefnet_container(
     *,
-    shape: Sequence[Any] = (1, 3, _DEFAULT_SIDE, _DEFAULT_SIDE),
-    out_shape: Sequence[Any] | None = None,
-    name: str = "pixel_values",
+    storage: str = "f32",
+    side: int = _DEFAULT_SIDE,
+    input_name: str = "pixel_values",
+    input_shape: Sequence[Any] | None = None,
+    matte_shape: Sequence[Any] | None = None,
     outputs: int = 1,
     symbols: Sequence[str] = (),
-) -> str:
-    """門が読む最小の IR メタデータ（入力 1 本・出力の宣言・記号次元）。"""
-    names = [f"out_{index}" for index in range(outputs)]
-    matte = list(out_shape) if out_shape is not None else [1, 1, shape[2], shape[3]]
-    return json.dumps(
-        {
-            "inputs": [{"name": name, "shape": list(shape)}],
-            "outputs": names,
-            "values": {output: {"dtype": "f32", "shape": matte} for output in names},
-            "symbols": list(symbols),
-        }
-    )
+) -> list[bytes]:
+    """系列に置くマット推定グラフの中身（part 列 — 先頭が part 0）。
 
+    組み立てへ届く形は**正当なコンテナ**でなければならない（組み立ては入力を開いて宣言の全
+    規則で見る — `karume.dist.assert_weight_components_verified`）ので、門に落とす側も同じ器で
+    作り、**宣言だけを実物とずらす**。
 
-def _birefnet_container(
-    dtype: str, graph: str | None, storage: str | None, side: int = _DEFAULT_SIDE
-) -> bytes | list[bytes]:
-    """系列に置くマット推定グラフの中身。
-
-    組み立てへ届く既定の形は**正当な IR コンポーネント**でなければならない（組み立ては入力を
-    IR v1 の全規則で見る — `karume.dist.assert_weight_components_verified`）。正当な側は
-    shard 列（`list[bytes]`・先頭がグラフ shard — ADR 0081）で、偽コンテナは代表 path 1 本の
-    `bytes` のまま（計画の門で止まるので分割の側まで届かない）。
-
-    軸は 2 本ある:
-
-    - `dtype` は**単一 dtype の偽コンテナ**が名乗るヘッダ dtype。要求検査（「F32 が無い」）を
-      見るケースはこちらでしか作れない — 実物どおりの f16 系列は F32 も含むので、要求検査は
-      通ってしまう。
-    - `storage` は**実物どおりの混成コンポーネント**の格納形（f16 / i8 / i4 は適格外の重みと
-      bias が F32 で残り、i4 はさらに I8 が混ざる）。禁止表
-      （{@link BIREFNET_STORAGE_FORBIDDEN}）の門はこの形でしか試せない。
+    `storage` は実物どおりの混成コンポーネントの格納形（f16 / i8 / i4 は適格外の重みと bias が
+    f32 で残り、i4 はさらに i8 が混ざる）— 禁止表（{@link BIREFNET_STORAGE_FORBIDDEN}）の門は
+    この形でしか試せない。残りの引数はグラフ宣言の各軸（入力の名前 / shape・マットの shape・
+    出力の本数・記号次元）で、既定は実物どおり。
     """
-    if storage is not None or (graph is None and dtype == "F32"):
-        return ir_container(
-            mark="birefnet-matte",
-            storage=storage if storage is not None else dtype.lower(),
-            inputs=(("pixel_values", (1, 3, side, side)),),
-            outputs=([1, 1, side, side],),
-        )
-    return _fake_safetensors(
-        dtype, b"birefnet-matte-weights", {IR_METADATA_KEY: graph or _birefnet_graph()}
+    shape: Shape = list(input_shape) if input_shape is not None else [1, 3, side, side]
+    matte: Shape = list(matte_shape) if matte_shape is not None else [1, 1, shape[2], shape[3]]
+    return ir_container(
+        mark="birefnet-matte",
+        storage=storage,
+        inputs=((input_name, shape),),
+        outputs=[matte] * outputs,
+        symbols=symbols,
     )
 
 
@@ -173,9 +137,7 @@ def _build_birefnet_sources(
     checkpoint: str = BIREFNET_HR_CHECKPOINT,
     model: str = BIREFNET_DEFAULT_MODEL,
     side: int | None = None,
-    graph: str | None = None,
-    dtype: str = "F32",
-    storage: str | None = None,
+    **container: Any,
 ) -> BirefnetSources:
     """系列を偽資産で再現する（配布しない `io.*` の混入込み）。
 
@@ -188,8 +150,8 @@ def _build_birefnet_sources(
         series=root / "outputs" / "series" / birefnet_series_name(checkpoint, model)
     )
     write_component(
-        sources.series / "model.safetensors",
-        _birefnet_container(dtype, graph, storage, side=side if side is not None else int(model)),
+        sources.series / "model.krm",
+        _birefnet_container(side=side if side is not None else int(model), **container),
     )
     # 配布に入ってはいけない E2E フィクスチャ（系列には実際にこれが並んでいる）。
     _write(sources.series / "io.ramp.safetensors", b"io-fixture")
@@ -250,22 +212,15 @@ class TestBirefnetLayout:
         assert first == assemble_family(plans, out_dir, BIREFNET_DEFAULT_MODEL)
         assert verify_dist(out_dir)
 
-    def test_it_refuses_a_compressed_asset_in_the_f32_seat(self, tmp_path: Path) -> None:
-        """格納形は系列ディレクトリ名でなくヘッダが正（`--dtype` 付け忘れの逆向き）。"""
-        sources = _build_birefnet_sources(tmp_path, dtype="F16")
-        with pytest.raises(DistError, match="F32 が無い"):
-            birefnet_plan(sources, BIREFNET_HR_CHECKPOINT)
-
-    @pytest.mark.parametrize(("storage", "intruder"), [("f16", "F16"), ("i8", "I8"), ("i4", "I4")])
+    @pytest.mark.parametrize(("storage", "intruder"), [("f16", "f16"), ("i8", "i8"), ("i4", "i4")])
     def test_it_refuses_a_real_compressed_series_in_the_f32_seat(
         self, tmp_path: Path, storage: str, intruder: str
     ) -> None:
         """実物どおりの圧縮系列は**要求検査を満たす** — 禁止表だけが系列 root の取り違えを見る。
 
-        圧縮系列も適格外の重みと bias を F32 で持つので「F32 を含む」は真になり、上の
-        単一 dtype の偽資産と違って要求検査では 1 バイトも落ちない。落ちるべき理由は
-        「f32 席に別系列の資産が居る」で、数値の門では原理的に検出できない
-        （ADR 0027 / 0029）。
+        圧縮系列も適格外の重みと bias を f32 で持つので「f32 を含む」は真になり、要求検査では
+        1 バイトも落ちない。落ちるべき理由は「f32 席に別系列の資産が居る」で、数値の門では
+        原理的に検出できない（ADR 0027 / 0029）。
         """
         sources = _build_birefnet_sources(tmp_path, storage=storage)
         with pytest.raises(DistError, match=rf"{BIREFNET_ROLE}: .* {intruder} がある"):
@@ -306,7 +261,7 @@ class TestBirefnetGraphGate:
 
     def test_it_refuses_a_graph_baked_for_another_resolution(self, tmp_path: Path) -> None:
         """モデル名は利用者が `model: "1024"` と綴る値そのもの — 中身とずれたら配れない。"""
-        sources = _build_birefnet_sources(tmp_path, graph=_birefnet_graph(shape=(1, 3, 512, 512)))
+        sources = _build_birefnet_sources(tmp_path, input_shape=(1, 3, 512, 512))
         with pytest.raises(DistError, match=rf"モデル '{BIREFNET_DEFAULT_MODEL}' が名乗る"):
             birefnet_plan(sources, BIREFNET_HR_CHECKPOINT)
 
@@ -328,44 +283,40 @@ class TestBirefnetGraphGate:
             birefnet_sources(tmp_path, BIREFNET_HR_CHECKPOINT, "512")
 
     def test_it_refuses_a_graph_whose_input_is_not_square(self, tmp_path: Path) -> None:
-        sources = _build_birefnet_sources(
-            tmp_path, graph=_birefnet_graph(shape=(1, 3, _DEFAULT_SIDE, 512))
-        )
+        sources = _build_birefnet_sources(tmp_path, input_shape=(1, 3, _DEFAULT_SIDE, 512))
         with pytest.raises(DistError, match=rf"モデル '{BIREFNET_DEFAULT_MODEL}' が名乗る"):
             birefnet_plan(sources, BIREFNET_HR_CHECKPOINT)
 
     def test_it_refuses_a_graph_with_another_channel_count(self, tmp_path: Path) -> None:
         sources = _build_birefnet_sources(
-            tmp_path,
-            graph=_birefnet_graph(shape=(1, 4, _DEFAULT_SIDE, _DEFAULT_SIDE)),
+            tmp_path, input_shape=(1, 4, _DEFAULT_SIDE, _DEFAULT_SIDE)
         )
         with pytest.raises(DistError, match="batch もチャネル数も静的"):
             birefnet_plan(sources, BIREFNET_HR_CHECKPOINT)
 
     def test_it_refuses_a_graph_with_a_second_output(self, tmp_path: Path) -> None:
         """multi-scale supervision 込みの export は、位置で引く後段が別の値を α として読む。"""
-        sources = _build_birefnet_sources(tmp_path, graph=_birefnet_graph(outputs=2))
+        sources = _build_birefnet_sources(tmp_path, outputs=2)
         with pytest.raises(DistError, match="マット 1 本"):
             birefnet_plan(sources, BIREFNET_HR_CHECKPOINT)
 
     def test_it_refuses_a_matte_that_is_not_one_channel(self, tmp_path: Path) -> None:
         """要素数だけ見る実装なら通ってしまう形（`[1, 3, S, S]` = 中間予測 3 枚）。"""
         sources = _build_birefnet_sources(
-            tmp_path,
-            graph=_birefnet_graph(out_shape=[1, 3, _DEFAULT_SIDE, _DEFAULT_SIDE]),
+            tmp_path, matte_shape=[1, 3, _DEFAULT_SIDE, _DEFAULT_SIDE]
         )
         with pytest.raises(DistError, match="入力と同じ寸法の 1 チャネル"):
             birefnet_plan(sources, BIREFNET_HR_CHECKPOINT)
 
     def test_it_refuses_a_graph_with_a_symbolic_axis(self, tmp_path: Path) -> None:
         """解像度も窓マスクも定数として焼かれているので、動かす軸は 1 本も無い。"""
-        sources = _build_birefnet_sources(tmp_path, graph=_birefnet_graph(symbols=("T",)))
+        sources = _build_birefnet_sources(tmp_path, symbols=("T",))
         with pytest.raises(DistError, match="記号次元"):
             birefnet_plan(sources, BIREFNET_HR_CHECKPOINT)
 
     def test_it_refuses_a_renamed_input(self, tmp_path: Path) -> None:
         """実行側は名前で束ねるので、綴りが変われば束ねられない。"""
-        sources = _build_birefnet_sources(tmp_path, graph=_birefnet_graph(name="pixels"))
+        sources = _build_birefnet_sources(tmp_path, input_name="pixels")
         with pytest.raises(DistError, match="グラフ入力"):
             birefnet_plan(sources, BIREFNET_HR_CHECKPOINT)
 

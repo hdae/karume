@@ -4,21 +4,19 @@
 `karume.dist` が持つ。ここが持つのは **gemma4 固有の事実**だけ: どの系列ディレクトリから何を
 拾い、配布形のどの path へ、どの dtype ラベルで並べ、どの quant を既定にするか。
 
-配布するのは**グラフ 2 本（製品 + 借り手の drafter）+ 同じ digest set の付帯資産 2 種**
-（ADR 0084 決定 5 / 0096 段 2）:
+配布するのは**グラフ 2 本（製品 + 借り手の drafter）+ 付帯資産 1 種**
+（ADR 0084 決定 5 / 0096 段 2 / 0109 決定 4）:
 
-- `model` — 製品グラフのコンテナ（`gemma4/export_product.py` が書く shard 列。PLE を外し、
-  出口を最終行 logits にした 1 系列）。格納は**混成**で、埋め込みが i8・linear が packed i4。
+- `model` — 製品グラフのコンテナ（`gemma4/export_product.py` が書く `.krm` の part 列。PLE を
+  グラフから外し、出口を最終行 logits にした 1 系列）。格納は**混成**で、埋め込みが i8・
+  linear が packed i4。**PLE はこの容器の資産**として同梱される（ADR 0109 決定 4）— 索引
+  `ple_index`（schema 3）と `ple.values.<k>` / `ple.scales.<k>` の block 列で、weights では
+  ない（ホストが `per_layer_inputs` を組むための表）。読み手は
+  `packages/models/src/gemma/ple-index.ts`。
 - `drafter` — MTP drafter のコンテナ（`gemma4/export_drafter.py`・ADR 0096 段 2）。格納は
   **i8 単一**で、linear まで i8（i4 g32 に落とすと受理率が 1 〜 3 割落ちる — 台本の実測）。
   役割ごとに dtype ラベルが違うので、quant 表の `weights` 写像は 2 席とも埋まる。
 - `tokenizer` — compile 済みトークナイザ資産（`gemma4/tokenizer.py`・ADR 0084 決定 1）
-- PLE sidecar — 索引 `ple.json` と token 範囲 shard（ADR 0085）。**weights ではない**
-  （IR コンテナでもグラフでもなく、ホストが `per_layer_inputs` を組むための表）ので
-  `assets` の席に載る。shard は 1 本ずつ独立の資産で、**asset 名は索引が書いた
-  ファイル名そのもの** — 読み手（`packages/models/src/gemma/ple.ts`）は `ple.json` の
-  `shards[].file` を鍵に引くので、そこに別の綴りを挟むと索引と取得キーの対応が
-  「位置で合わせる」形になり、片方だけ並べ替えた組が黙って通る。
 
 `pipelineConfig` は 2 系統に割れる（Irodori と同じ分け方）: **モデルが決める数**
 （`maxPosition` = 上流 `text_config.max_position_embeddings`・`rope` = 層種別ごとの式の
@@ -50,8 +48,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from _shared.container_read import read_asset, read_asset_declarations
 from _shared.licenses import apache_license_2_0
 from _shared.paths import INPUTS_ROOT
+from karume.container import ContainerFormatError
 from karume.dist import (
     Artifact,
     DistError,
@@ -64,8 +64,16 @@ from karume.dist import (
     complete_quant_weights,
     graph_inputs,
     ir_graph,
-    safetensors_header,
 )
+from karume.ple import (
+    PLE_INDEX_ASSET,
+    PLE_INDEX_ROLE,
+    PLE_INDEX_SCHEMA,
+    PLE_PACK_FACTOR,
+    PLE_ROLES,
+    PLE_SCALE_BYTES,
+)
+from karume.verify import ContainerError
 
 from .card import GEMMA4_UPSTREAM, render_gemma4_model_card
 from .rope import (
@@ -102,11 +110,9 @@ GEMMA4_TOKENIZER_SUFFIX = "tokenizer"
 #: MTP drafter の系列接尾（`gemma4/export_drafter.py` の `DEFAULT_OUT_DIR`）。
 GEMMA4_DRAFTER_SUFFIX = "drafter"
 
-#: 系列側のファイル名（`gemma4.export.MODEL_FILE` / `export_product.PLE_INDEX_FILE` /
-#: `tokenizer.ASSET_PATH` の綴り）。**代表 path** なので、分割されていれば
-#: {@link karume.dist.component_shards} が連番へ解決する。
-GEMMA4_MODEL_FILE = "model.safetensors"
-GEMMA4_PLE_INDEX_FILE = "ple.json"
+#: 系列側のファイル名（`gemma4.export.MODEL_FILE` / `tokenizer.ASSET_PATH` の綴り）。
+#: **代表 path** なので、分割されていれば {@link karume.dist.component_parts} が連番へ解決する。
+GEMMA4_MODEL_FILE = "model.krm"
 GEMMA4_TOKENIZER_FILE = "tokenizer.json"
 
 #: 上流チェックポイントが持つ推奨サンプラの出どころ（ADR 0083 決定 7）と、モデルが決める数
@@ -122,11 +128,6 @@ GEMMA4_ROLE = "model"
 GEMMA4_TOKENIZER_ROLE = "tokenizer"
 #: MTP drafter の役割名（weights の 2 本目 — 貸し手 `model` が居ないと単独では実行できない）。
 GEMMA4_DRAFTER_ROLE = "drafter"
-GEMMA4_PLE_INDEX_ROLE = "ple_index"
-GEMMA4_PLE_ROLE_PREFIX = "ple_"
-
-#: 配布形の中の PLE sidecar の置き場（モデルサブツリー内）。
-GEMMA4_PLE_DIR = "ple"
 
 #: グラフ入力の名前と並び（正本は `gemma4/export_product.py` — ラッパの forward 引数名）。
 #: 実行側は名前で束ねるので、1 つでも綴りが変われば束ねられない。RoPE の 4 本はホストが
@@ -174,35 +175,34 @@ GEMMA4_DRAFT_STEPS = 3
 
 #: 出力の相対 path（**モデルサブツリー内**）— 配置表と manifest が共有する 1 箇所。格納 dtype を
 #: ファイル名に出すのは他 family と同じ形（系列が 2 本並んでも取り違えようがない綴り）。
-#: PLE shard は索引が書いたファイル名をそのまま使うので、この表には代表の 3 席だけが載る。
+#: PLE は `model` 容器の資産なので、この表に席を持たない（ADR 0109 決定 4）。
 GEMMA4_OUTPUT_PATHS: Mapping[str, str] = {
-    GEMMA4_ROLE: f"{GEMMA4_ROLE}/model.i4.safetensors",
-    GEMMA4_DRAFTER_ROLE: f"{GEMMA4_DRAFTER_ROLE}/model.i8.safetensors",
+    GEMMA4_ROLE: f"{GEMMA4_ROLE}/model.i4.krm",
+    GEMMA4_DRAFTER_ROLE: f"{GEMMA4_DRAFTER_ROLE}/model.i8.krm",
     GEMMA4_TOKENIZER_ROLE: f"{GEMMA4_TOKENIZER_SUFFIX}/{GEMMA4_TOKENIZER_FILE}",
-    GEMMA4_PLE_INDEX_ROLE: f"{GEMMA4_PLE_DIR}/{GEMMA4_PLE_INDEX_FILE}",
 }
 
-#: コンテナのヘッダに**必ず在る**格納 dtype。製品グラフは混成なので 2 つとも要求する（他
-#: family の {@link assert_storage} は 1 dtype ずつしか見ないので、表を 2 枚持って 2 度掛ける）。
-#: I8 は埋め込み（i4 適格外・recipe README の "not int4-eligible"）・I4 は linear の重み。
+#: 容器の束縛表に**必ず在る**格納の語彙。製品グラフは混成なので 2 つとも要求する（他
+#: family の {@link assert_storage} は 1 つずつしか見ないので、表を 2 枚持って 2 度掛ける）。
+#: i8 は埋め込み（i4 適格外・recipe README の "not int4-eligible"）・i4 は linear の重み。
 #: 片方だけを要求すると「埋め込みまで i4 に落ちた系列」「linear が i8 のままの系列」が
 #: それぞれ素通りする — どちらも shape も manifest も正しいまま、品質と速度だけが変わる。
 #: drafter は**単一格納**（linear まで i8 — `gemma4/export_drafter.py` の実測）なので、要求は
-#: I8 の 1 枚だけで、2 枚目の表に行を持たない。
-GEMMA4_STORAGE_REQUIREMENTS: Mapping[str, str] = {GEMMA4_ROLE: "I4", GEMMA4_DRAFTER_ROLE: "I8"}
-GEMMA4_STORAGE_ALSO_REQUIRED: Mapping[str, str] = {GEMMA4_ROLE: "I8"}
+#: i8 の 1 枚だけで、2 枚目の表に行を持たない。
+GEMMA4_STORAGE_REQUIREMENTS: Mapping[str, str] = {GEMMA4_ROLE: "i4", GEMMA4_DRAFTER_ROLE: "i8"}
+GEMMA4_STORAGE_ALSO_REQUIRED: Mapping[str, str] = {GEMMA4_ROLE: "i8"}
 
-#: 各役割の safetensors ヘッダに**あってはならない**格納 dtype（{@link assert_storage_absent}）。
-#: 台本が焼く格納形は i8 + i4 + f32 の 1 系列だけなので、F16 の混入は「別 family の系列 root を
+#: 各役割の束縛表に**あってはならない**格納の語彙（{@link assert_storage_absent}）。
+#: 台本が焼く格納形は i8 + i4 + f32 の 1 系列だけなので、f16 の混入は「別 family の系列 root を
 #: 指した」印にしかならない（系列 root の取り違えは数値の門では原理的に検出できない —
 #: ADR 0027 / 0029。他 family と同じ規律で、書き出しうる圧縮格納のうち**在ってはならない側を
 #: 全部**名指しする）。
-#: drafter は I4 も禁止側 — 存在検査（I8 が在る）は「linear だけ i4 に落ちた drafter」を
+#: drafter は i4 も禁止側 — 存在検査（i8 が在る）は「linear だけ i4 に落ちた drafter」を
 #: 素通りさせる（出力ヘッドの i8 で要求が満たされる）。受理率が 1 〜 3 割落ちるだけの資産は
 #: 形も manifest も正しいままなので、ここが唯一の検出器になる。
 GEMMA4_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {
-    GEMMA4_ROLE: ("F16",),
-    GEMMA4_DRAFTER_ROLE: ("F16", "I4"),
+    GEMMA4_ROLE: ("f16",),
+    GEMMA4_DRAFTER_ROLE: ("f16", "i4"),
 }
 
 #: 格納 dtype のラベル（quant 席の綴りでもある）。役割ごとに**基底格納が 1 つずつ**なので
@@ -287,23 +287,24 @@ GEMMA4_SAMPLER_FIELDS: tuple[tuple[str, str], ...] = (
 #: compile 済みトークナイザ資産の形式識別子（書き手は `_shared/gemma_tokenizer.py`）。
 GEMMA4_TOKENIZER_FORMAT = "karume-gemma-tokenizer/1"
 
-#: PLE sidecar の索引の版と欄（読み手 `packages/models/src/gemma/ple.ts` の
-#: `SCHEMA` / `INDEX_KEYS` / `SHARD_KEYS` の鏡像 — 焼く側が先に落とす）。
-GEMMA4_PLE_SCHEMA = 1
+#: PLE 索引の版と欄（読み手 `packages/models/src/gemma/ple-index.ts` の
+#: `SCHEMA` / `INDEX_KEYS` / `TABLE_KEYS` / `BLOCK_KEYS` の鏡像 — 焼く側が先に落とす）。
+#: 版そのものは書き手（`karume.ple`）と共有する。
+GEMMA4_PLE_SCHEMA = PLE_INDEX_SCHEMA
+GEMMA4_PLE_VALUES_KEY = "values"
+GEMMA4_PLE_SCALES_KEY = "scales"
 GEMMA4_PLE_INDEX_KEYS: tuple[str, ...] = (
     "schema",
+    "storage",
     "tokens",
     "layers",
     "dim",
     "embedScale",
-    "shards",
+    GEMMA4_PLE_VALUES_KEY,
+    GEMMA4_PLE_SCALES_KEY,
 )
-GEMMA4_PLE_SHARD_KEYS: tuple[str, ...] = ("file", "start", "stop")
-
-#: sidecar shard のテンソルキーと `__metadata__` の席（`export_product.py` の同名定数）。
-GEMMA4_PLE_VALUES_KEY = "values"
-GEMMA4_PLE_SCALES_KEY = "scales"
-GEMMA4_PLE_METADATA_KEY = "karume_ple"
+GEMMA4_PLE_TABLE_KEYS: tuple[str, ...] = ("rowBytes", "blocks")
+GEMMA4_PLE_BLOCK_KEYS: tuple[str, ...] = ("asset", "start", "stop")
 
 
 def gemma4_checkpoint(model: str) -> str:
@@ -382,37 +383,99 @@ def _offset(raw: Mapping[str, Any], key: str, where: str) -> int:
     return value
 
 
-def gemma4_ple_index(product: Path, *, storage: str | None = None) -> Mapping[str, Any]:
-    """PLE sidecar の索引を読んで**形まで**落とす（読み手 `ple.ts` の受理集合の鏡像）。
+def gemma4_ple_table(
+    root: Mapping[str, Any], name: str, row_bytes: int, tokens: int, where: str
+) -> dict[str, Any]:
+    """索引の表 1 本（`values` / `scales`）を検査して読む。
 
-    storage を明示した QAT 呼び手だけ schema 2 / I2・I4 を受ける。省略時は従来の schema 1 / I8。
-
-    MUST: 範囲は `[0, tokens)` の**隙間も重なりも無い昇順分割**であること。緩めると「引けない
-    id がある索引」や「2 本が同じ id を持つ索引」が通り、後者は**どちらの行を引いたか**で
-    結果が変わる（例外の出ない沈黙誤値）。読み手も同じ検査を持つが、配ってから利用者の手元で
-    初めて落ちる形にしない。
+    MUST: block の範囲は `[0, tokens)` の**隙間も重なりも無い昇順分割**であること。緩めると
+    「引けない id がある索引」や「2 本が同じ id を持つ索引」が通り、後者は**どちらの行を
+    引いたか**で結果が変わる（例外の出ない沈黙誤値）。
+    MUST: `rowBytes` は宣言（層数 / 次元 / 格納）から決まる値と一致すること。ここがずれると
+    行 offset の掛け算だけが静かにずれ、形も dtype も合ったまま別 token の行を引く。
     """
-    path = product / GEMMA4_PLE_INDEX_FILE
-    where = str(path)
-    raw = _read_json(path, "PLE sidecar の索引")
+    at = f"{where}.{name}"
+    table = root.get(name)
+    if not isinstance(table, dict):
+        raise DistError(f"{at}: オブジェクトでない")
+    extra = sorted(set(table) - set(GEMMA4_PLE_TABLE_KEYS))
+    if extra:
+        raise DistError(f"{at}: 未知キー {extra}（許可: {list(GEMMA4_PLE_TABLE_KEYS)}）")
+    declared = _positive_int(table, "rowBytes", at)
+    if declared != row_bytes:
+        raise DistError(f"{at}.rowBytes {declared} が宣言から決まる {row_bytes} と違う")
+    blocks = table.get("blocks")
+    if not isinstance(blocks, list) or not blocks:
+        raise DistError(f"{at}.blocks が非空の配列でない")
+    seen: set[str] = set()
+    expected = 0
+    for position, entry in enumerate(blocks):
+        block_at = f"{at}.blocks[{position}]"
+        if not isinstance(entry, dict):
+            raise DistError(f"{block_at}: オブジェクトでない")
+        unknown = sorted(set(entry) - set(GEMMA4_PLE_BLOCK_KEYS))
+        if unknown:
+            raise DistError(
+                f"{block_at}: 未知キー {unknown}（許可: {list(GEMMA4_PLE_BLOCK_KEYS)}）"
+            )
+        asset = entry.get("asset")
+        if not isinstance(asset, str) or not asset:
+            raise DistError(f"{block_at}: asset が非空の文字列でない（{asset!r}）")
+        if asset in seen:
+            raise DistError(f"{block_at}: asset '{asset}' が重複している")
+        seen.add(asset)
+        start = _offset(entry, "start", block_at)
+        stop = _offset(entry, "stop", block_at)
+        if start != expected:
+            raise DistError(
+                f"{block_at}: start {start} が直前の block の末尾 {expected} と連続しない"
+            )
+        if stop <= start:
+            raise DistError(f"{block_at}: 範囲 [{start}, {stop}) が空")
+        expected = stop
+    if expected != tokens:
+        raise DistError(f"{at}: block の合計 {expected} 行が tokens {tokens} と違う")
+    return {"rowBytes": row_bytes, "blocks": blocks}
+
+
+def gemma4_ple_index(container: Path, *, storage: str = "i8") -> Mapping[str, Any]:
+    """`model` 容器の資産 `ple_index` を読んで**形まで**落とす。
+
+    読み手（`packages/models/src/gemma/ple-index.ts` の `parseGemma4PleIndex`）の受理集合の
+    鏡像で、**schema 3 だけ**を受ける（旧 sidecar の索引は配布形ごと退役した — ADR 0109
+    決定 1 の major 繰り上げ規則）。`storage` は呼び手が要求する格納（QAT は `i2` / `i4`）。
+
+    MUST: 配ってから利用者の手元で初めて落ちる形にしない — 同じ検査を組み立て側でも掛ける。
+    """
+    where = f"{container} の資産 '{PLE_INDEX_ASSET}'"
+    if storage not in PLE_PACK_FACTOR:
+        raise DistError(f"未対応 PLE storage: {storage}")
+    try:
+        payload = read_asset(container, PLE_INDEX_ASSET)
+    except (KeyError, ContainerError, ContainerFormatError) as cause:
+        raise DistError(f"{where} が読めない: {cause}") from cause
+    try:
+        raw = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise DistError(f"{where} が JSON として読めない") from error
     if not isinstance(raw, dict):
         raise DistError(f"{where}: 最上位オブジェクトでない")
-    if storage not in (None, "i2", "i4"):
-        raise DistError(f"未対応 PLE storage: {storage}")
-    keys = (*GEMMA4_PLE_INDEX_KEYS, "storage") if storage else GEMMA4_PLE_INDEX_KEYS
-    unknown = sorted(set(raw) - set(keys))
+    unknown = sorted(set(raw) - set(GEMMA4_PLE_INDEX_KEYS))
     if unknown:
-        raise DistError(f"{where}: 未知キー {unknown}（許可: {list(keys)}）")
-    schema = 2 if storage else GEMMA4_PLE_SCHEMA
-    if raw.get("schema") != schema:
-        raise DistError(f"{where}: schema が {raw.get('schema')!r}（期待 {schema}）")
-    if storage and raw.get("storage") != storage:
-        raise DistError(f"{where}: storage が期待 {storage} と違う")
+        raise DistError(f"{where}: 未知キー {unknown}（許可: {list(GEMMA4_PLE_INDEX_KEYS)}）")
+    if raw.get("schema") != GEMMA4_PLE_SCHEMA:
+        raise DistError(
+            f"{where}: schema が {raw.get('schema')!r}（期待 {GEMMA4_PLE_SCHEMA}）"
+            " — 旧 sidecar の索引は読まない"
+        )
+    if raw.get("storage") != storage:
+        raise DistError(f"{where}: storage が {raw.get('storage')!r}（期待 {storage}）")
     tokens = _positive_int(raw, "tokens", where)
     layers = _positive_int(raw, "layers", where)
     dim = _positive_int(raw, "dim", where)
-    if storage and dim % 16:
-        raise DistError(f"{where}: packed PLE の dim は16の倍数が必要")
+    factor = PLE_PACK_FACTOR[storage]
+    if dim % factor:
+        raise DistError(f"{where}: dim {dim} が格納 '{storage}' の詰め数 {factor} で割り切れない")
     scale = raw.get("embedScale")
     if (
         not isinstance(scale, int | float)
@@ -421,92 +484,37 @@ def gemma4_ple_index(product: Path, *, storage: str | None = None) -> Mapping[st
         or scale <= 0
     ):
         raise DistError(f"{where}: embedScale が正の有限数でない（{scale!r}）")
-    shards = raw.get("shards")
-    if not isinstance(shards, list) or not shards:
-        raise DistError(f"{where}: shards が非空の配列でない")
-    seen: set[str] = set()
-    expected = 0
-    for position, entry in enumerate(shards):
-        at = f"{where} の shards[{position}]"
-        if not isinstance(entry, dict):
-            raise DistError(f"{at}: オブジェクトでない")
-        extra = sorted(set(entry) - set(GEMMA4_PLE_SHARD_KEYS))
-        if extra:
-            raise DistError(f"{at}: 未知キー {extra}（許可: {list(GEMMA4_PLE_SHARD_KEYS)}）")
-        file = entry.get("file")
-        if not isinstance(file, str) or not file:
-            raise DistError(f"{at}: file が非空の文字列でない（{file!r}）")
-        if file in seen:
-            raise DistError(f"{at}: file '{file}' が重複している")
-        seen.add(file)
-        start = _offset(entry, "start", at)
-        stop = _offset(entry, "stop", at)
-        if start != expected:
-            raise DistError(f"{at}: start {start} が直前の shard の末尾 {expected} と連続しない")
-        if stop <= start:
-            raise DistError(f"{at}: 範囲 [{start}, {stop}) が空")
-        expected = stop
-    if expected != tokens:
-        raise DistError(f"{where}: shard の合計 {expected} 行が tokens {tokens} と違う")
     return {
+        "storage": storage,
         "tokens": tokens,
         "layers": layers,
         "dim": dim,
         "embedScale": scale,
-        "shards": shards,
-        **({"storage": storage} if storage else {}),
+        GEMMA4_PLE_VALUES_KEY: gemma4_ple_table(
+            raw, GEMMA4_PLE_VALUES_KEY, layers * dim // factor, tokens, where
+        ),
+        GEMMA4_PLE_SCALES_KEY: gemma4_ple_table(
+            raw, GEMMA4_PLE_SCALES_KEY, layers * PLE_SCALE_BYTES, tokens, where
+        ),
     }
 
 
-def gemma4_ple_role(position: int) -> str:
-    """PLE shard 1 本ぶんの役割名（索引の並び順 = 1 始まりの番号）。"""
-    return f"{GEMMA4_PLE_ROLE_PREFIX}{position + 1}"
-
-
-def gemma4_output_paths(index: Mapping[str, Any]) -> dict[str, str]:
-    """役割名 → 配布形の相対 path（**モデルサブツリー内**）。
-
-    PLE shard の相対 path は索引が書いたファイル名をそのまま使う — asset 名（= 取得キー）も
-    同じ綴りなので、読み手は `ple.json` の `shards[].file` 1 本で取得キーも path も引ける。
-    """
-    paths = dict(GEMMA4_OUTPUT_PATHS)
-    for position, shard in enumerate(index["shards"]):
-        paths[gemma4_ple_role(position)] = f"{GEMMA4_PLE_DIR}/{shard['file']}"
-    return paths
-
-
-def gemma4_placements(sources: Gemma4Sources, index: Mapping[str, Any]) -> dict[str, Path]:
-    """役割名 → 出所のファイル。出力の path は {@link gemma4_output_paths} が持つ。
+def gemma4_placements(sources: Gemma4Sources) -> dict[str, Path]:
+    """役割名 → 出所のファイル。出力の path は {@link GEMMA4_OUTPUT_PATHS} が持つ。
 
     この表に無いものは出力へ入らない（製品系列に同居する `ple.probe.safetensors` と
     `reference.json`・drafter 系列の `drafter-golden.*.safetensors` はこれで落ちる — どれも
-    検収と出所記録のためのもので実行に要らない）。
+    検収と出所記録のためのもので実行に要らない）。PLE は `model` 容器の中なので席を持たない。
     """
-    placements = {
+    return {
         GEMMA4_ROLE: sources.product / GEMMA4_MODEL_FILE,
         GEMMA4_DRAFTER_ROLE: sources.drafter / GEMMA4_MODEL_FILE,
         GEMMA4_TOKENIZER_ROLE: sources.tokenizer / GEMMA4_TOKENIZER_FILE,
-        GEMMA4_PLE_INDEX_ROLE: sources.product / GEMMA4_PLE_INDEX_FILE,
     }
-    for position, shard in enumerate(index["shards"]):
-        placements[gemma4_ple_role(position)] = sources.product / str(shard["file"])
-    return placements
 
 
-def gemma4_assets(index: Mapping[str, Any]) -> dict[str, str]:
-    """assets の宣言（asset 名 → 役割名）。
-
-    MUST: PLE shard の asset 名は**索引が書いたファイル名そのもの**。読み手は
-    `openPleShard(shard.file)` で引くので、ここに別の綴り（連番や意味名）を挟むと索引と
-    取得キーの対応が「並び順で合わせる」形になり、片方だけ並べ替えた組が黙って通る。
-    """
-    assets = {
-        GEMMA4_TOKENIZER_ROLE: GEMMA4_TOKENIZER_ROLE,
-        GEMMA4_PLE_INDEX_ROLE: GEMMA4_PLE_INDEX_ROLE,
-    }
-    for position, shard in enumerate(index["shards"]):
-        assets[str(shard["file"])] = gemma4_ple_role(position)
-    return assets
+#: assets の宣言（asset 名 → 役割名）。PLE は容器の中へ移ったので、残るのはトークナイザ 1 本。
+GEMMA4_ASSETS: Mapping[str, str] = {GEMMA4_TOKENIZER_ROLE: GEMMA4_TOKENIZER_ROLE}
 
 
 def gemma4_vocab_size(graph: Mapping[str, Any], path: Path) -> int:
@@ -621,7 +629,8 @@ def assert_gemma4_graph(
 
     MUST: PLE の層数と層当たり次元は**グラフ入力の宣言**と**索引**の両方が持つ（前者は
     `per_layer_inputs[1, M, 35, 256]`・後者は `layers` / `dim`）。食い違ったまま配ると、
-    ホストが組む表と GPU が読む形が別物になる — shape が合う組み合わせでは沈黙する。
+    ホストが組む表と GPU が読む形が別物になる — shape が合う組み合わせでは沈黙する
+    （索引は同じ容器の資産だが、書き手が別々に組むので噛み合わせは残る）。
 
     MUST: RoPE 派生入力の幅は `pipelineConfig.rope` の `headDim` と一致すること。宣言と
     グラフは別々の正本（config / コンテナ）から来るので、噛み合わせはここでしか見られない
@@ -660,11 +669,8 @@ def assert_gemma4_graph(
                     f"{path} の入力 '{name}' が {list(declared)!r} — 宣言した headDim から組んだ"
                     f" 期待 {[1, sequence, head_dim]} と違う（表とグラフが別世代）"
                 )
-    baked = sorted(
-        key
-        for key, entry in (graph.get("initializers") or {}).items()
-        if isinstance(entry, dict) and BAKED_TABLE_INFIX in str(entry.get("tensor", ""))
-    )
+    # IR v2 では initializer 名がテンソルキーそのもの（docs/ir-v2.md）— 綴りで拾う。
+    baked = sorted(key for key in (graph.get("initializers") or {}) if BAKED_TABLE_INFIX in key)
     if baked:
         raise DistError(
             f"{path}: 焼き込んだ RoPE 表の initializer が {len(baked)} 本残っている: {baked[:4]}"
@@ -680,8 +686,8 @@ def assert_gemma4_graph(
         if per_layer[axis] != index[field]:
             raise DistError(
                 f"{path} の入力 '{GEMMA4_PER_LAYER_INPUTS}' の軸 {axis} が {per_layer[axis]!r}、"
-                f"{GEMMA4_PLE_INDEX_FILE} の {field} は {index[field]}"
-                " — グラフと PLE sidecar が別世代"
+                f"資産 '{PLE_INDEX_ASSET}' の {field} は {index[field]}"
+                " — グラフと PLE が別世代"
             )
     outputs = graph.get("outputs")
     values = graph.get("values")
@@ -779,19 +785,17 @@ def assert_gemma4_drafter_graph(
             )
 
     initializers = graph.get("initializers") or {}
+    # IR v2 では initializer 名がテンソルキーそのもの（docs/ir-v2.md）なので、共有宣言の
+    # **名前が指し先**になる（v1 の `shared.tensor` の席はもう無い）。
     shared = sorted(
         name
         for name, entry in initializers.items()
-        if isinstance(entry, dict) and isinstance(entry.get("shared"), dict)
+        if isinstance(entry, dict) and entry.get("shared") is True
     )
     if len(shared) != 1:
         raise DistError(f"{path}: 共有 initializer が {len(shared)} 本 {shared}（1 本ちょうど）")
-    tensor = initializers[shared[0]]["shared"].get("tensor")
-    lent_tensors = {
-        entry.get("tensor")
-        for entry in (lender.get("initializers") or {}).values()
-        if isinstance(entry, dict)
-    }
+    tensor = shared[0]
+    lent_tensors = set(lender.get("initializers") or {})
     if tensor not in lent_tensors:
         raise DistError(
             f"{path}: 共有 initializer の指し先 '{tensor}' が貸し手 {lender_path} に無い"
@@ -812,69 +816,50 @@ def assert_gemma4_drafter_graph(
         )
 
 
-def assert_gemma4_ple_shards(placements: Mapping[str, Path], index: Mapping[str, Any]) -> None:
-    """sidecar shard の現物が索引と同じ資産世代を名乗ることを、配置の前に見る。
+def assert_gemma4_ple_assets(container: Path, index: Mapping[str, Any]) -> None:
+    """索引が名指しする block が、その容器の資産として**同じ役割・同じ長さ**で在ることを見る。
 
-    MUST: 範囲まで突き合わせる（読み手 `ple.ts` の `assertShardMetadata` と同じ規律）— 索引
-    だけ差し替えた組み合わせは**形も dtype も合う**まま別 token の行を引く。ヘッダしか読まない
-    ので 2.4GiB の再読みにはならない。
+    MUST: 索引と容器の宣言は別々に動きうる（索引は書き手が組んだ JSON・資産宣言は容器の
+    モデル記述）ので、噛み合わせはここでしか見られない — 索引だけ差し替えた組み合わせは
+    **形も dtype も合う**まま別 token の行を引く（読み手 `ple-index.ts` の
+    `assertGemma4PleAssets` と同じ規律）。宣言しか読まないので数 GB の再読みにはならない。
     """
-    for position, shard in enumerate(index["shards"]):
-        path = placements[gemma4_ple_role(position)]
-        # 実在検査を先に置く（`assert_plan_sources` は組み立て側の門で、こちらの計画段では
-        # まだ走っていない）— 素の OSError で落ちると「何を焼き直せばよいか」が伝わらない。
-        if not path.is_file():
-            raise DistError(f"組み立ての入力が無い: {path}（{GEMMA4_PLE_INDEX_FILE} が名指し）")
-        header = safetensors_header(path)
-        rows = int(shard["stop"]) - int(shard["start"])
-        for key, dtype, shape in (
-            (
-                GEMMA4_PLE_VALUES_KEY,
-                str(index.get("storage", "i8")).upper(),
-                [rows, index["layers"], index["dim"]],
-            ),
-            (GEMMA4_PLE_SCALES_KEY, "F32", [rows, index["layers"]]),
-        ):
-            spec = header.get(key)
-            if not isinstance(spec, dict):
-                raise DistError(f"{path}: テンソル '{key}' が無い（別形式の資産）")
-            if spec.get("dtype") != dtype:
+    try:
+        declared = read_asset_declarations(container)
+    except (KeyError, ContainerError, ContainerFormatError) as cause:
+        raise DistError(f"{container}: 資産の宣言が読めない: {cause}") from cause
+    seen = {PLE_INDEX_ASSET}
+    if declared.get(PLE_INDEX_ASSET, (None, 0))[0] != PLE_INDEX_ROLE:
+        raise DistError(
+            f"{container}: 資産 '{PLE_INDEX_ASSET}' の役割が"
+            f" {declared.get(PLE_INDEX_ASSET, (None, 0))[0]!r}（期待 '{PLE_INDEX_ROLE}'）"
+        )
+    for key, role in PLE_ROLES.items():
+        table = index[key]
+        for block in table["blocks"]:
+            name = str(block["asset"])
+            seen.add(name)
+            found = declared.get(name)
+            if found is None:
                 raise DistError(
-                    f"{path}: '{key}' の格納 dtype が {spec.get('dtype')!r}（{dtype} でない）"
+                    f"{container}: 索引が名指しする資産 '{name}' が容器に無い"
+                    f"（宣言: {sorted(declared)[:4]}…）"
                 )
-            if spec.get("shape") != shape:
+            expected = (int(block["stop"]) - int(block["start"])) * table["rowBytes"]
+            if found != (role, expected):
                 raise DistError(
-                    f"{path}: '{key}' の形が {spec.get('shape')!r}（索引から組んだ期待は {shape}）"
+                    f"{container}: 資産 '{name}' が {found}"
+                    f"（索引から組んだ期待は ('{role}', {expected})）"
                 )
-        metadata = header.get("__metadata__")
-        raw = metadata.get(GEMMA4_PLE_METADATA_KEY) if isinstance(metadata, dict) else None
-        if not isinstance(raw, str):
-            raise DistError(
-                f"{path}: __metadata__.{GEMMA4_PLE_METADATA_KEY} が無い（別形式の資産）"
-            )
-        declared = json.loads(raw)
-        if not isinstance(declared, dict):
-            raise DistError(f"{path}: {GEMMA4_PLE_METADATA_KEY} が最上位オブジェクトでない")
-        expected = {
-            "schema": 2 if "storage" in index else GEMMA4_PLE_SCHEMA,
-            **({"storage": index["storage"]} if "storage" in index else {}),
-            "tokens": index["tokens"],
-            "layers": index["layers"],
-            "dim": index["dim"],
-            "embedScale": index["embedScale"],
-            "start": shard["start"],
-            "stop": shard["stop"],
-        }
-        wrong = [
-            f"{key} {declared.get(key)!r} ≠ {want!r}"
-            for key, want in expected.items()
-            if declared.get(key) != want
-        ]
-        if wrong:
-            raise DistError(
-                f"{path}: {GEMMA4_PLE_METADATA_KEY} が索引と食い違う（{' / '.join(wrong)}）"
-                " — 片方だけ作り直した組み合わせ"
-            )
+    surplus = sorted(
+        name
+        for name, (role, _length) in declared.items()
+        if name not in seen and role in {PLE_INDEX_ROLE, *PLE_ROLES.values()}
+    )
+    if surplus:
+        raise DistError(
+            f"{container}: 索引が指していない PLE の資産がある: {surplus} — 索引だけ古い組み合わせ"
+        )
 
 
 def assert_gemma4_tokenizer(path: Path, vocab_size: int) -> None:
@@ -994,8 +979,7 @@ def gemma4_pipeline_config(
 def gemma4_plan(sources: Gemma4Sources, model: str = GEMMA4_DEFAULT_MODEL) -> ModelPlan:
     """gemma4 1 モデルぶんの計画を組む（検査と読み取りをここで全部済ませる）。"""
     assert_model_name(model)
-    index = gemma4_ple_index(sources.product)
-    placements = gemma4_placements(sources, index)
+    placements = gemma4_placements(sources)
     for role, source in placements.items():
         assert_storage(role, source, GEMMA4_STORAGE_REQUIREMENTS)
         assert_storage(role, source, GEMMA4_STORAGE_ALSO_REQUIRED)
@@ -1004,6 +988,7 @@ def gemma4_plan(sources: Gemma4Sources, model: str = GEMMA4_DEFAULT_MODEL) -> Mo
     where = str(sources.model / GEMMA4_CONFIG_FILE)
     rope = gemma4_rope(text_config, where)
     container = placements[GEMMA4_ROLE]
+    index = gemma4_ple_index(container)
     graph = ir_graph(container)
     vocab_size = gemma4_vocab_size(graph, container)
     hidden_size = gemma4_hidden_size(text_config, where)
@@ -1014,10 +999,10 @@ def gemma4_plan(sources: Gemma4Sources, model: str = GEMMA4_DEFAULT_MODEL) -> Mo
     )
     if index["tokens"] != vocab_size:
         raise DistError(
-            f"{sources.product / GEMMA4_PLE_INDEX_FILE}: tokens {index['tokens']} が製品グラフの"
+            f"{container} の資産 '{PLE_INDEX_ASSET}': tokens {index['tokens']} が製品グラフの"
             f"語彙数 {vocab_size} と違う — 別の語彙で焼かれた組み合わせ"
         )
-    assert_gemma4_ple_shards(placements, index)
+    assert_gemma4_ple_assets(container, index)
     assert_gemma4_tokenizer(placements[GEMMA4_TOKENIZER_ROLE], vocab_size)
     pipeline_config = gemma4_pipeline_config(
         gemma4_max_position(text_config, where),
@@ -1027,15 +1012,15 @@ def gemma4_plan(sources: Gemma4Sources, model: str = GEMMA4_DEFAULT_MODEL) -> Mo
         max_chunk_length=GEMMA4_MAX_CHUNK_LENGTH,
         capacity=GEMMA4_CAPACITY,
     )
-    output_paths = gemma4_output_paths(index)
     return ModelPlan(
         name=model,
         pipeline=GEMMA4_PIPELINE,
         artifacts={
-            role: Artifact(output_paths[role], source=source) for role, source in placements.items()
+            role: Artifact(GEMMA4_OUTPUT_PATHS[role], source=source)
+            for role, source in placements.items()
         },
         weights=GEMMA4_WEIGHTS,
-        assets=gemma4_assets(index),
+        assets=GEMMA4_ASSETS,
         # requiredLimits は書かない — core の dist が組み立て時に一括導出して焼く
         # （karume/limits.py。計画側の手書きは二重管理として拒否される）。
         quants=complete_quant_weights(
@@ -1069,12 +1054,13 @@ This repository redistributes a modified form of `google/gemma-4-E2B-it`, which 
 the Apache License, Version 2.0 (see `LICENSE.md`). The following changes were made:
 
 - The **text decoder only** was extracted; the vision and audio towers were never read.
-- The graph was re-expressed in the Karume container format (a safetensors file whose
-  `__metadata__` carries the graph) in a states form suited to chunked prefill and decode.
+- The graph was re-expressed in the Karume container format (a `.krm` part sequence whose
+  first part carries the graph and model descriptors) in a states form suited to chunked prefill
+  and decode.
 - **Linear weights were quantized** to packed int4 (group 32) and the embedding tables to int8.
   The values are therefore not bit-identical to the source checkpoint.
-- The **per-layer embedding tables were moved out of the graph** into a sidecar that the host
-  gathers, and the exit was narrowed to the selected rows' logits and final hidden states.
+- The **per-layer embedding tables were moved out of the graph** into container assets that the
+  host gathers, and the exit was narrowed to the selected rows' logits and final hidden states.
 - **Rotary position embeddings were moved out of the graph**: the cosine and sine rows are built
   by the host from the declared parameters and passed in as ordinary graph inputs.
 

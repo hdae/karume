@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -18,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from _shared.calib_provenance import calib_complaint
+from _shared.container_read import ContainerReadError, read_asset
 from anima.card import (
     ATTRIBUTION_NOTICE,
     render_base_card,
@@ -29,12 +31,22 @@ from karume.dist import (
     ModelPlan,
     Pipeline,
     WeightFiles,
+    assert_component_present,
     assert_model_name,
     assert_storage,
     assert_storage_absent,
     complete_quant_weights,
-    sha256_file,
 )
+
+#: ホストが rope 表を組むための軸別素表（容器の**資産** — ADR 0109 決定 4）の名前と役割。
+#: 中身は 1 本の safetensors のバイト列そのもの（旧 `rope_base.safetensors` を畳んだ形）で、
+#: 容器はそれを解釈しない。
+#:
+#: MUST: 綴りは移行 CLI の写し表（`karume.migrate.EXTRA_ASSETS`）と一致させる — 「旧リポから
+#: 移した容器」と「直接書いた容器」で資産名が割れると、models 側が引けなくなる。書き手
+#: （`anima/export.py`）もここから引く（torch を要る側から要らない側へは import しない）。
+ROPE_BASE_ASSET = "rope_base"
+ROPE_BASE_ROLE = "rope-base"
 
 #: 公式 Turbo 変種のモデル名（= 公式リポの既定モデル — 上流 README が「まず Turbo を」と
 #: 推奨・2026-09-01 裁定）。上流の名乗りをそのまま使う（ADR 0077）。旧 `anima-turbo`
@@ -184,13 +196,12 @@ EXTRA_NOTICE_MARKDOWN = notice_markdown(
 #: 出力の相対 path（**モデルサブツリー内**）— 配置表と manifest が共有する 1 箇所。
 #: 役割名でだけ引くので、綴りが 2 箇所で独立に動くことは起きない。
 OUTPUT_PATHS: Mapping[str, str] = {
-    "text_encoder": "text_encoder/model.safetensors",
-    "text_conditioner": "text_conditioner/model.safetensors",
-    "transformer_f16": "transformer/model.f16.safetensors",
-    "transformer_i8": "transformer/model.i8.safetensors",
-    "transformer_i4": "transformer/model.i4.safetensors",
-    "rope_base": "transformer/rope_base.safetensors",
-    "vae_decoder": "vae_decoder/model.safetensors",
+    "text_encoder": "text_encoder/model.krm",
+    "text_conditioner": "text_conditioner/model.krm",
+    "transformer_f16": "transformer/model.f16.krm",
+    "transformer_i8": "transformer/model.i8.krm",
+    "transformer_i4": "transformer/model.i4.krm",
+    "vae_decoder": "vae_decoder/model.krm",
     "tokenizer": "tokenizer/qwen2-tokenizer.json",
     "tokenizer_2": "tokenizer_2/t5-tokenizer.json",
 }
@@ -355,36 +366,36 @@ ANIMA_AESTHETIC_PIPELINE_CONFIG: Mapping[str, Any] = {
     },
 }
 
-#: 各役割の safetensors ヘッダに**要求する格納 dtype**（存在検査）。実測の事故が根拠:
-#: f16 系列のつもりで `--dtype` を付け忘れた素の F32 資産は、組み立て・ロード・実行の全てを
-#: 通って**PNG の参照一致まで露見しなかった**。格納形は series ディレクトリ名でなくヘッダが正。
-#: f16 系列は fake-quant 対象だけが F16 になる（norm/bias 等は F32 のまま）ので「F16 を含む」
-#: を要求する。rope_base（F32 のみ）と tokenizer（JSON）はここに載せない。
-#: i4 系列は**混成**（F32 + I8 + I4 が同居する）なので **I4 を要求する** — {@link assert_storage}
-#: は「要求 dtype がヘッダに在る」を見るので、I8 を要求すると i8 系列が i4 席へ入っても素通りし、
+#: 各役割の束縛表に**要求する格納の語彙**（存在検査）。実測の事故が根拠:
+#: f16 系列のつもりで `--dtype` を付け忘れた素の f32 資産は、組み立て・ロード・実行の全てを
+#: 通って**PNG の参照一致まで露見しなかった**。格納形は series ディレクトリ名でなく束縛表が正。
+#: f16 系列は fake-quant 対象だけが f16 になる（norm/bias 等は f32 のまま）ので「f16 を含む」
+#: を要求する。tokenizer（JSON）はここに載せない。
+#: i4 系列は**混成**（f32 + i8 + i4 が同居する）なので **i4 を要求する** — {@link assert_storage}
+#: は「要求の語彙が束縛表に在る」を見るので、i8 を要求すると i8 系列が i4 席へ入っても素通りし、
 #: 席の取り違えが沈黙する（sbv2 の i4 席と同じ規律）。
 STORAGE_REQUIREMENTS: Mapping[str, str] = {
-    "text_encoder": "F16",
-    "text_conditioner": "F16",
-    "transformer_f16": "F16",
-    "transformer_i8": "I8",
-    "transformer_i4": "I4",
-    "vae_decoder": "F16",
+    "text_encoder": "f16",
+    "text_conditioner": "f16",
+    "transformer_f16": "f16",
+    "transformer_i8": "i8",
+    "transformer_i4": "i4",
+    "vae_decoder": "f16",
 }
 
-#: 各役割の safetensors ヘッダに**あってはならない**格納 dtype（{@link assert_storage_absent}）。
+#: 各役割の束縛表に**あってはならない**格納の語彙（{@link assert_storage_absent}）。
 #: 存在検査だけでは**圧縮席どうしの取り違え**が素通りする — i4 系列は混成で、既定格納が i8
-#: （`anima/export.py` の `BASE_WEIGHT_DTYPES`）なので **必ず I8 を含む**。したがって i4 系列を
-#: `transformer_i8` へ挿し込む取り違えは「I8 を含む」を満たしてしまい、組み立ても verify_dist も
+#: （`anima/export.py` の `BASE_WEIGHT_DTYPES`）なので **必ず i8 を含む**。したがって i4 系列を
+#: `transformer_i8` へ挿し込む取り違えは「i8 を含む」を満たしてしまい、組み立ても verify_dist も
 #: ロードも通る。実害は既定 quant `f16+dit8-a8-attn8-s16` に出る: 宣言した `linearCompute: "a8"`
 #: の述語は `c285f97` 以降 i4 常駐も受ける（ADR 0076）ので、常駐が i4 だと fail loudly せず
 #: **w4a8 の数値契約**（group 部分縮約）で走る — ADR 0076 決定 6 が「画が荒れるので席に載せない」
 #: と決めた構成が、席名が int8 を名乗ったまま既定席で沈黙して出る。
 #: MUST: 禁止は**役割ごとに集合**で持つ（1 つだけだと 4 本目の系列が生えた日に、名指ししなかった
-#: ほうが黙って素通りする — irodori と同じ規律）。f16 席は I8 / I4 の不在で二重に締まる。
+#: ほうが黙って素通りする — irodori と同じ規律）。f16 席は i8 / i4 の不在で二重に締まる。
 ANIMA_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {
-    "transformer_f16": ("I8", "I4"),
-    "transformer_i8": ("I4",),
+    "transformer_f16": ("i8", "i4"),
+    "transformer_i8": ("i4",),
 }
 
 #: weights の宣言（dtype ラベル → 役割名）。ラベルは**格納 dtype 語彙**で、
@@ -394,9 +405,9 @@ ANIMA_WEIGHTS: Mapping[str, Mapping[str, WeightFiles]] = {
     "text_encoder": {"f16": WeightFiles("text_encoder")},
     "text_conditioner": {"f16": WeightFiles("text_conditioner")},
     "transformer": {
-        "f16": WeightFiles("transformer_f16", {"rope_base": "rope_base"}),
-        "i8": WeightFiles("transformer_i8", {"rope_base": "rope_base"}),
-        "i4": WeightFiles("transformer_i4", {"rope_base": "rope_base"}),
+        "f16": WeightFiles("transformer_f16"),
+        "i8": WeightFiles("transformer_i8"),
+        "i4": WeightFiles("transformer_i4"),
     },
     "vae_decoder": {"f16": WeightFiles("vae_decoder")},
 }
@@ -567,27 +578,39 @@ def transformer_series(sources: AnimaSources) -> tuple[Path, ...]:
     return tuple(sources.transformer.values())
 
 
-def shared_rope_base(sources: AnimaSources) -> Path:
-    """全 transformer 系列の rope 素表がバイト同一であることを確かめ、1 本化する元を返す。
+def assert_shared_rope_base(sources: AnimaSources) -> None:
+    """全 transformer 系列の rope 素表がバイト同一であることを確かめる。
 
-    MUST: `rope_base.safetensors` は f16 / i8 / i4 の各系列に同名で並ぶ。全てのバイト同一を
-    sha256 で確かめてから 1 本化する — 食い違ったまま 1 つを選ぶと、選ばれなかった系列の
-    quant が「別の幾何の rope 表で走る」形になり、ロードも実行も通って絵だけが静かに壊れる。
+    MUST: 素表は容器の**資産** `rope_base`（ADR 0109 決定 4）として f16 / i8 / i4 の各系列に
+    入る。全てのバイト同一を sha256 で確かめる — 食い違ったまま配ると、どれか 1 つの quant が
+    「別の幾何の rope 表で走る」形になり、ロードも実行も通って絵だけが静かに壊れる。
+    `karume/4` では 1 本のファイルへ畳んでいたので「どれを配るか」の選択でもあったが、容器
+    ごとに 1 本入る今は**一致の検査だけ**が残る。
     """
-    candidates = [
-        series / "transformer" / "rope_base.safetensors" for series in transformer_series(sources)
-    ]
-    for path in candidates:
-        if not path.is_file():
-            raise DistError(f"組み立ての入力が無い: {path}")
-    digests = {path: sha256_file(path) for path in candidates}
+    containers = [series / "transformer" / "model.krm" for series in transformer_series(sources)]
+    for path in containers:
+        assert_component_present(path)
+    digests = {path: hashlib.sha256(_rope_base_of(path)).hexdigest() for path in containers}
     if len(set(digests.values())) != 1:
         listing = "\n".join(f"  {digest}  {path}" for path, digest in digests.items())
         raise DistError(
-            "rope_base.safetensors が系列間でバイト同一でない — 1 本化できない。"
+            f"資産 '{ROPE_BASE_ASSET}' が系列間でバイト同一でない — 同じ幾何で配れない。"
             f"どちらが正かはここでは決められないので組み立てを止める:\n{listing}"
         )
-    return candidates[0]
+
+
+def _rope_base_of(path: Path) -> bytes:
+    """`rope_base` 資産を読む（読み手の例外を**組み立ての語彙**へ翻訳する）。
+
+    MUST: 診断は `DistError` で出す。`rope_base` を持つのは `--dit-graph dyn` の系列だけなので、
+    静的系列を transformer 席へ指した運用事故がここへ来る — 読み手側の例外をそのまま上げると、
+    組み立ての失敗が「容器読みの不具合」に見える（`assert_storage` が `ContainerFormatError` を
+    翻訳しているのと同じ流儀）。
+    """
+    try:
+        return read_asset(path, ROPE_BASE_ASSET)
+    except ContainerReadError as cause:
+        raise DistError(f"{path}: {cause}") from cause
 
 
 def assert_lora_provenance(sources: AnimaSources, expected: str | None) -> None:
@@ -684,15 +707,14 @@ def anima_placements(sources: AnimaSources) -> dict[str, Path]:
     この表に無いものは出力へ入らない（`io.*.safetensors` を落とす仕掛けはこれで足りる）。
     """
     placements = {
-        "text_encoder": sources.base / "text_encoder" / "model.safetensors",
-        "text_conditioner": sources.text_conditioner / "text_conditioner" / "model.safetensors",
-        "rope_base": shared_rope_base(sources),
-        "vae_decoder": sources.base / "vae_decoder" / "model.safetensors",
+        "text_encoder": sources.base / "text_encoder" / "model.krm",
+        "text_conditioner": sources.text_conditioner / "text_conditioner" / "model.krm",
+        "vae_decoder": sources.base / "vae_decoder" / "model.krm",
         "tokenizer": sources.tokenizers / "qwen2-tokenizer.json",
         "tokenizer_2": sources.tokenizers / "t5-tokenizer.json",
     }
     for storage, series in sources.transformer.items():
-        placements[f"transformer_{storage}"] = series / "transformer" / "model.safetensors"
+        placements[f"transformer_{storage}"] = series / "transformer" / "model.krm"
     return placements
 
 
@@ -739,6 +761,7 @@ def anima_plan(
     assert_lora_provenance(sources, spec.lora_sha256)
     if "i4" in spec.storages:
         assert_calib_provenance(sources, spec)
+    assert_shared_rope_base(sources)
     placements = anima_placements(sources)
     for role, source in placements.items():
         assert_storage(role, source, STORAGE_REQUIREMENTS)
