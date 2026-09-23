@@ -1,25 +1,43 @@
-"""export → 正規化 → 変換 → 書き出し → 検証の一本道。
+"""export → 正規化 → 変換 → 格納変換 → 公開の一本道。
 
 エクスポート台本（モデルごとのスクリプト）が段の順序を各自で書くと、正規化の抜けや
 検証漏れが台本ごとに散る。順序はここ 1 箇所で決める。
+
+配布形は**コンテナ**（`krm` — container-v1）で、書き出しの 3 段（書く → 読み直して検証 →
+据え替え）は `karume.publish` が持つ。ここが足すのは「どの名前で・どの出所で・どの資産を
+同梱して据えるか」だけである。
 """
 
 from __future__ import annotations
 
-import os
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
 import torch
 
+from karume.container import (
+    BLOCK_MAX_BYTES,
+    DEFAULT_PART_BYTES,
+    GRAPH_NAME_PATTERN,
+    AssetInput,
+    ContainerFormatError,
+    Provenance,
+    sequence_siblings,
+)
 from karume.convert import PRESERVED_OP_PREFIXES, convert, curated_decompositions
-from karume.emit import FixedQuantizedWeight, write_model
+from karume.emit import FixedQuantizedWeight, stored_model
 from karume.ir import IrGraph
 from karume.normalize import normalize_graph
-from karume.shards import shard_path, shard_siblings
-from karume.verify import verify_shards
+from karume.publish import publish_container
+from karume.verify import assert_op_contracts, assert_runtime_support
+
+#: コンテナ（モデル容器）の拡張子（container-v1 §1 — 種別は magic が持つが名前も分けておく）。
+MODEL_SUFFIX = ".krm"
+
+#: 退役した配布形の拡張子。据わった後に**同じコンポーネントの**残骸だけを消す
+#: （`karume.publish` の後始末は `.krm` の連番しか知らないので、ここが 1 段足す）。
+LEGACY_SUFFIX = ".safetensors"
 
 
 def export_module(
@@ -30,7 +48,7 @@ def export_module(
     symbol_names: Sequence[str] = ("T",),
     preserved: Sequence[str] = PRESERVED_OP_PREFIXES,
 ) -> tuple[IrGraph, dict[str, torch.Tensor]]:
-    """nn.Module を IR v1 グラフ + 格納テンソルへ変換する。
+    """nn.Module を IR グラフ + 格納テンソルへ変換する。
 
     `preserved` は分解を止める高位 op の接頭辞集合（既定は 11 op）。**ターゲット別**に
     差し替えられるのは融合 attention（ADR 0023）のためで、SDPA 保存は
@@ -43,77 +61,93 @@ def export_module(
     return convert(decomposed, symbol_names=symbol_names)
 
 
+def _assert_graph_name(graph_name: str) -> str:
+    """容器のグラフ名が語彙（`[A-Za-z0-9._-]{1,64}`）に収まることを落とす。
+
+    MUST: 既定を持たない（`provenance` と同じ扱い）— 呼び手は**作業席**（`<部品>.staging/`）へ
+    書くので、親ディレクトリ名を既定にすると全系列のグラフ名が `<部品>.staging` になる。
+    語彙には `.` が入るので fail loudly もせず、ランタイムが部品名で引いた時点で初めて
+    「コンテナにグラフが無い」になる。据え替え先を知っているのは呼び手だけなので、
+    呼び手が名乗る（container-v1 §12 — 移行 CLI が使う部品名と同じ綴り MUST）。
+    """
+    if GRAPH_NAME_PATTERN.match(graph_name) is None:
+        raise ContainerFormatError(
+            f"グラフ名 '{graph_name}' がコンテナの語彙（{GRAPH_NAME_PATTERN.pattern}）から外れる"
+        )
+    return graph_name
+
+
 def publish_model(
     path: str | Path,
     graph: IrGraph,
     tensors: dict[str, torch.Tensor],
     *,
+    provenance: Provenance,
+    graph_name: str,
     weight_dtype: str = "f32",
     weight_scales: Mapping[str, torch.Tensor] | None = None,
     weight_dtype_overrides: Mapping[str, str] | None = None,
     fixed_weights: Mapping[str, FixedQuantizedWeight] | None = None,
+    assets: Mapping[str, AssetInput] = {},
+    single: bool = False,
+    _part_bytes: int = DEFAULT_PART_BYTES,
+    _block_bytes: int = BLOCK_MAX_BYTES,
 ) -> IrGraph:
-    """書き出し → 検証 → 据え替えの 3 段（変換済みのグラフを受ける入口）。
+    """格納変換 → 公開の 3 段（変換済みのグラフを受ける入口）。
 
-    MUST: 配布形を作る経路は**この 1 本**を通る。手術を挟む台本（decode 変種の
-    `_write_container`）が同じ 3 段を各自で綴っていた頃は、shard 分割のような書き出し側の
-    変更が「一時 path をそのまま検証する」写しの側で黙って壊れた（分割されると `path` 自身は
-    書かれない）。原子性の規律も後始末も 1 箇所に置く。
+    MUST: 配布形を作る経路は**この 1 本**を通る。手術を挟む台本（decode 変種）が同じ段を各自で
+    綴っていた頃は、書き出し側の変更が写しの側で黙って壊れた。
 
-    MUST: 書き出しの直後に verify を通す — 「書けたが読めない」ファイルを配布物として
-    残さないための門（ADR 0005 の fail loudly 規律）。門を実効にするため、書き出しと検証は
-    **同じディレクトリの一時ファイル**に対して行い、verify が通ってはじめて `os.replace` で
-    `path` へ差し替える（同一ディレクトリなので置換は原子的）。書き出しか検証が落ちたときは
-    一時ファイル（分割時は連番ぶんも）を捨て、既存の `path` は 1 バイトも変えない —
-    直接 truncate すると「再エクスポートに失敗した」だけで手元の正常な配布物が消える。
+    `provenance` は**必須**（既定値で出所を偽らない — `license` を落とした配布形を作らない）。
+    `graph_name` も**必須**で、綴りは**配布形の部品名**（`karume.json` の weights のキー =
+    据え替え先のディレクトリ名）MUST — ランタイムはグラフを名前で引き、移行 CLI も部品名で
+    焼くので、ここが作業席の名前（`<部品>.staging`）になると「移行済みミラー」と「再 export
+    した系列」が別物になる（{@link _assert_graph_name}）。
+    `assets`（資産名 → {@link karume.container.AssetInput}）は PLE 索引や `rope_base` のような
+    「重みではないが同じ容器で配るバイト列」の席で、重みの part の**後ろ**の専用 part に載る
+    （ADR 0109 決定 4）。
 
-    コンポーネントは**常に**連番の shard 列として据わる（常時分割 — ADR 0081。テンソルを
-    1 本でも持つなら「グラフ shard + weight shard 1 本以上」）。**据え替えはファイル単位でしか
-    原子的にならない**ので、中断した回は「前回の形と今回の形が混ざったコンポーネント」を
-    残しうる — その現場は `shards.resolve_shards` が組み立て時に fail loudly で受ける
-    （黙って一方を配らない）。据わった後に**前回の出力の残り**（分割数が変わった /
-    旧規則の単一ファイルが残っていた回の置き去り）を消すのは、単一ファイルを truncate で
-    上書きしていたのと同じ意味の後始末で、このコンポーネントの出力名以外には触れない。
+    出力名は `path` の拡張子を `.krm` にしたもの。既定の分割形では part 0 から
+    `<stem>-NNNNN-of-NNNNN.krm` の連番になり、`path` 自身は書かれない（HF の公式配布は
+    分割形だけ — container-v1 §8）。`single=True` は手元用の単一形。
 
-    NOTE: `total == 1` の枝（連番を付けずに `path` 自身へ据える）に落ちるのは、ADR 0081 以降は
-    **テンソルを 1 本も持たないコンポーネント**だけ（`shards.pack_shards` はグラフ shard 1 本
-    `[()]` を返す）。重みを持つコンポーネントは最小でも 2 本になるので、この枝はもう
-    「小さい資産は単一ファイル」を意味しない。
+    戻すのは**格納宣言を commit したグラフ**（実際に焼いた `storage` を持つビュー）。渡された
+    `graph` は 1 バイトも変えない。「書いたものが読めるか」は `karume.publish` の読み直し検証
+    （payload / 資産 / 2 文書の突合）が済ませている。
 
-    NOTE: この原子性はここの層のもの。`emit.write_model` を直接呼ぶ経路（検証を挟まない
-    書き出し）は原子化の外で、渡された path をその場で truncate する。
+    MUST: 書き出しの**前**に IR の受理規則（ランタイム支援 + op 契約）を掛ける — 台本は
+    `to_states_form` のようなグラフ手術を挟むので、変換段の検査だけでは「書けるがランタイムが
+    読めない」容器を止められない。掛ける相手は `stored_model` が commit したグラフ（実際に
+    焼く格納を持つビュー）で、落ちた回は **1 バイトも据わらない**。
     """
-    final = Path(path)
-    # 一意 suffix — 同じ final を狙う別プロセス / 別ターゲットの一時ファイルと衝突させない。
-    staged = final.with_name(f"{final.name}.{uuid4().hex}.partial")
-    try:
-        written = write_model(
-            staged,
-            graph,
-            tensors,
-            weight_dtype=weight_dtype,
-            weight_scales=weight_scales,
-            weight_dtype_overrides=weight_dtype_overrides,
-            fixed_weights=fixed_weights,
-        )
-        verified = verify_shards(written)
-        total = len(written)
-        published = [
-            final if total == 1 else shard_path(final, index, total)
-            for index in range(1, total + 1)
-        ]
-        for source, target in zip(written, published, strict=True):
-            os.replace(source, target)
-    except BaseException:
-        # 書き出しが途中で落ちた回は返り値が無いので、一時 path の**名前の形**から拾う
-        # （分割の途中まで書けた連番も残骸なので同じ席に居る）。
-        for leftover in shard_siblings(staged):
-            leftover.unlink(missing_ok=True)
-        raise
-    for stale in shard_siblings(final):
-        if stale not in published:
-            stale.unlink()
-    return verified
+    final = Path(path).with_suffix(MODEL_SUFFIX)
+    stored = stored_model(
+        graph,
+        tensors,
+        weight_dtype=weight_dtype,
+        weight_scales=weight_scales,
+        weight_dtype_overrides=weight_dtype_overrides,
+        fixed_weights=fixed_weights,
+    )
+    assert_runtime_support(stored.graph)
+    assert_op_contracts(stored.graph)
+    publish_container(
+        final,
+        stored.graph,
+        stored.tensors,
+        stored.bindings,
+        graph_name=_assert_graph_name(graph_name),
+        provenance=provenance,
+        assets=assets,
+        single=single,
+        part_bytes=_part_bytes,
+        block_bytes=_block_bytes,
+    )
+    # 退役した配布形の残骸（同じコンポーネントの旧 shard 列）を据わった後に消す。名前の形が
+    # 一致するものだけを拾うので、同居する `io.*.safetensors` や provenance の類には触らない。
+    for stale in sequence_siblings(final.with_suffix(LEGACY_SUFFIX)):
+        stale.unlink()
+    return stored.graph
 
 
 def export_to_file(
@@ -121,23 +155,27 @@ def export_to_file(
     args: tuple[Any, ...],
     path: str | Path,
     *,
+    provenance: Provenance,
+    graph_name: str,
     dynamic_shapes: Any = None,
     symbol_names: Sequence[str] = ("T",),
     weight_dtype: str = "f32",
     weight_scales: Mapping[str, torch.Tensor] | None = None,
     weight_dtype_overrides: Mapping[str, str] | None = None,
     preserved: Sequence[str] = PRESERVED_OP_PREFIXES,
+    assets: Mapping[str, AssetInput] = {},
 ) -> IrGraph:
-    """変換して書き出し、書いた配布形を IR v1 の全規則で検証して返す（export → 公開の一本道）。
+    """変換して `krm` として据え、格納宣言を commit したグラフを返す（export → 公開の一本道）。
 
-    `weight_dtype` が `"f16"` / `"i8"` のとき適格な重みスロットだけが圧縮格納になる
-    （ADR 0018 / 0019）。呼び出し側は**丸め（fake-quant）を参照・golden の採取より前に
-    済ませておく** MUST — 掛け忘れは write_model が fail loudly で落とす（emit.py の適格判定）。
+    `weight_dtype` が `"f16"` / `"i8"` / `"i4"` のとき適格な重みスロットだけが圧縮格納になる
+    （ADR 0018 / 0019 / 0069）。呼び出し側は**丸め（fake-quant）を参照・golden の採取より前に
+    済ませておく** MUST — 掛け忘れは `emit.stored_model` が fail loudly で落とす。
     `weight_scales` は i8 / i4 の scale 台帳（`quantize.fake_quant_int8` / `fake_quant_int4` の
     戻り — 混成では両者を合流して渡す）。`weight_dtype_overrides`（テンソルキー → dtype）は
     1 本単位の明示指定で既定に優先する（混成格納 — 線引きは `emit._plan_weight_dtype`）。
 
-    書き出し以降（原子性・shard 分割・後始末）は {@link publish_model} が持つ。
+    `provenance` と `graph_name`（= 配布形の部品名）は**必須** — 意味と理由は
+    {@link publish_model}。書き出し以降（原子性・part 分割・後始末）も向こうが持つ。
     """
     graph, tensors = export_module(
         module,
@@ -150,7 +188,10 @@ def export_to_file(
         path,
         graph,
         tensors,
+        provenance=provenance,
         weight_dtype=weight_dtype,
         weight_scales=weight_scales,
         weight_dtype_overrides=weight_dtype_overrides,
+        assets=assets,
+        graph_name=graph_name,
     )

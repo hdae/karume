@@ -1,8 +1,11 @@
-"""配布形（safetensors + `__metadata__` へのグラフ JSON 埋め込み）の書き出し。
+"""配布形の**格納変換**と、容器へ渡す材料（生バイト + 束縛表）の組み立て。
 
-格納の分岐は **f16（ADR 0018）と i8（ADR 0019）と i4（ADR 0069）**。分岐が増えても「格納形式
-= ランタイムが受理する形式」の対応が 1 箇所で決まるよう、書き出し経路はこの関数だけにする
+器そのもの（`krm` の物理形式・descriptor・block / part の配置）は `karume.container` が持ち、
+公開の 3 段（書く → 読み直して検証 → 据え替え）は `karume.publish` が持つ。ここが決めるのは
+**どの initializer をどの格納で焼くか**だけで、それが {@link stored_model} の 1 本道に閉じる
 （ここが枝分かれすると export は緑のまま実行だけ落ちる）。
+
+格納の分岐は **f16（ADR 0018）と i8（ADR 0019）と i4（ADR 0069）**。
 
 ## 適格判定（ADR 0018 / 0019 — f16 と i8 で**同じ規則**・i4 だけ狭い）
 
@@ -31,7 +34,7 @@ initializer だけ**:
 
 ## companion scale（ADR 0019 / 0069）
 
-scale は safetensors の**素のテンソル**として同じファイルに入り、IR 側は `storage.scale` で
+scale は**独立したテンソルキー**として同じ容器に入り、IR 側は `storage.scale` で
 そのキーを明示宣言する。キーは `_scale_key`（`karume.scale.<重みキー>`）で機械的に作り、
 **実テンソルとの衝突**を書き出し前に検査する（衝突すると「別の重みを scale として読む」
 形になり、ロードは通って値だけが壊れる）。形は格納で 2 通り — i8 は per-channel の keepdim
@@ -42,48 +45,41 @@ fake-quant が使った値を `quantize.fake_quant_int8` / `quantize.fake_quant_
 受け取ってそのまま書く — ここで amax から引き直すと f32 の
 丸めで 1ulp 動きうるので、golden を採ったときの重みとの対応が壊れる。
 
-## safetensors の並び順（ADR 0063 — docs/limitations.md）
+## 容器へ渡す 3 点（{@link StoredModel}）
 
-Karume のリーダはデータ節を「隙間なく・型ごとの整列単位に整列して」覆うことを要求する。
-要素数が奇数の F16（バイト長 ≡ 2 mod 4）の**直後**に F32 / I32 を置くと絶対 offset が
-4 の倍数から外れてロードできない。並べ替えはエクスポータの責務なので、書き出し順を
-`_write_order` が明示的に決める（`safetensors.torch.save_file` は自前の順序で書くため
-使わない — 順序を外部ライブラリの実装詳細に預けない）。並びは**整列単位の降順** —
-F32 / I32 / **I4** が 4 バイト整列群（I4 の節は必ず 8 の倍数バイトなので、後続の整列を崩さない
-— ADR 0069 追記 2）、次に F16、**I8 は要素サイズ 1 で整列制約が無いぶん任意長を作れる**ので
-末尾。書いた直後の `verify.assert_reader_layout` がリーダ規則を写して検査する。
+配置（block の切り方・part の詰め方・並び順）は `karume.container` の責務なので、ここが渡すのは
+「格納宣言を commit したグラフ」「テンソルキー → **格納後の生バイト**」「テンソルキー →
+{@link karume.container.Encoding}」の 3 点だけである。
 
-## shard 分割（ADR 0081 — 規則の正本は `karume.shards`）
-
-コンポーネントは**常に**連番の shard 列として書かれる（単一ファイル配布形は廃止）。先頭は
-**グラフ shard**（`karume_ir` だけ・データ節は空）で、実データは後続の weight shard 列に載る。
-各 shard のデータ節は `shards.SHARD_DATA_CAPACITY` 以下で、本数は「容量下の最小本数」・その
-本数で均した割り付け（規則の正本は `karume.shards`）。容量に収まらないテンソルは**先頭次元
-（行）で割って** `<親名>#NNNNN-of-NNNNN` の piece として連続 shard へ配る（shard 仕様 v3）—
-piece の実体は「行範囲を切ってから格納変換を掛けた」バイト列で、companion scale は行数が
-重みと同じときだけ同じ行範囲で切る（i8 の keepdim 形も i4 の group 形も先頭次元が行なので、
-この 1 本の規則で両方が正しく切れる）。並び順の規約（上節）は shard の**中**で閉じて満たす —
-各 shard は自分のテンソルだけを宣言する独立に整合な safetensors なので、リーダ規則は shard
-単位で写せる。
+- 生バイトの口は**遅延**（{@link _StoredTensors}）— 引かれた 1 本だけを変換して返す。全件を
+  先に変換すると、呼び出し側が持つ f32 集合と同時に生きてピーク RAM が両者の和になる
+  （Irodori 規模で f32 3.44GB に f16 1.72GB / i8 0.87GB が重なる）。書き手は実体を**2 度引く**
+  （sha256 を採る走査と書き出しの走査 — container-v1 §4.1）ので、同じキーからは**毎回同じ
+  バイト列**が返る MUST。変換は決定的なのでこれは成立する。
+- 束縛表は {@link karume.container.container_bindings} の 1 本から出す（移行 CLI と**同じ関数**・
+  torch を要らない側に在る）。2 経路で導くと「宣言 i4 / 実体 i8」のような、形も型も合う
+  沈黙誤値が作れる。
 """
 
 from __future__ import annotations
 
-import json
-from collections.abc import Buffer, Callable, Iterable, Iterator, Mapping, Sequence, Set
+from collections.abc import Buffer, Iterator, Mapping, Sequence, Set
 from dataclasses import dataclass, replace
-from pathlib import Path
-from types import MappingProxyType
 from typing import Literal
 
 import torch
 
-from karume.ir import IR_METADATA_KEY, MIN_GROUP_SIZE, IrGraph, IrInitializer, IrNode, IrStorage
+from karume.container import (
+    Encoding,
+    bakeable_initializers,
+    container_bindings,
+    weight_channel_axes,
+)
+from karume.ir import MIN_GROUP_SIZE, IrGraph, IrInitializer, IrNode, IrStorage
 from karume.ops import (
     CONV1D_OP,
     EMBEDDING_OP,
     LINEAR_OP,
-    WEIGHT_CHANNEL_AXES,
     WEIGHT_SLOTS,
     conv1d_attrs,
 )
@@ -94,14 +90,6 @@ from karume.quantize import (
     group_size_of,
     quantize_to_int4,
     quantize_to_int8,
-)
-from karume.shards import (
-    SHARD_DATA_CAPACITY,
-    Piece,
-    assert_co_shard,
-    assert_shard_partition,
-    pack_shards,
-    shard_path,
 )
 
 #: 書き出せる格納 dtype（重みスロット向け）。bf16 は実行経路が無い（ADR 0006）。
@@ -122,41 +110,10 @@ WEIGHT_DTYPES = ("f32", "f16", "i8", "i4")
 #: （2026-08-20 ユーザー裁定: permuted pack は買わない）。
 I4_WEIGHT_OPS: frozenset[str] = frozenset({LINEAR_OP, EMBEDDING_OP, CONV1D_OP})
 
-#: torch dtype → safetensors dtype 名 / 1 要素の **bit** 数。ここに無い dtype は fail loudly。
-#: bit 単位で持つのは packed 4bit（1 バイトに 2 要素 — ADR 0069 決定 2）が要素バイト数で
-#: 表せないため。
-_SAFETENSORS_DTYPE: Mapping[torch.dtype, tuple[str, int]] = {
-    torch.float32: ("F32", 32),
-    torch.float16: ("F16", 16),
-    torch.int32: ("I32", 32),
-    torch.int8: ("I8", 8),
-}
-
-#: 圧縮格納 dtype → safetensors dtype 名 / 1 要素の bit 数。ヘッダを**変換前**に決めるための
-#: 対応（`_stored_dtype_of`）。torch dtype を経由しないのは i4 のため — packed の器は uint8
-#: だが、宣言は `I4` + **論理 numel** で、器の dtype からは引けない（ADR 0069 決定 2）。
-_STORAGE_ENCODING: Mapping[str, tuple[str, int]] = {
-    "f16": ("F16", 16),
-    "i8": ("I8", 8),
-    "i4": ("I4", 4),
-    "i2": ("I2", 2),
-}
-
-#: 書き出し順の第 1 キー（safetensors dtype → 群）。**整列単位の降順** — 4 バイト整列を必要と
-#: する F32 / I32 / I4 を先に置き、次に F16（奇数要素はさらに後ろ）、末尾へ任意長を作れる I8 を
-#: 寄せる（上の「並び順」節）。F32 → I32 の順と群内の名前昇順は `safetensors.torch.save_file`
-#: が f32 のみのファイルに対して出す並びと一致するので、f16 / i8 / i4 を含まない資産のバイト列
-#: はこの writer に切り替えても変わらない。
-_DTYPE_GROUP = {"F32": 0, "I32": 1, "I4": 2, "I2": 2, "F16": 3, "I8": 4}
-
 #: packed nibble の offset（格納値は `u = q + 8`・値域 [1,15] で 0 は未使用 = 15 準位）。
 #: 非対称化する日にはこの定数が「`storage.zero_point` 省略時の既定 = 8」へ読み替わるだけで、
 #: pack 形式・pack 順・値域は動かない（ADR 0069 決定 3 の予約 2）。
 INT4_OFFSET = 8
-
-#: safetensors のヘッダ長はこの倍数へパディングする（データ節先頭を 4 バイト境界へ載せる
-#: ための整列。`save_file` と同じ規約で、余りは空白で埋める）。
-_HEADER_ALIGN = 8
 
 
 class EmitError(ValueError):
@@ -183,16 +140,6 @@ class StorageBreakdown:
             f"適格 {self.compressed_tensors} 本 / {self.compressed_bytes:,} B{scale}, "
             f"適格外 {self.plain_tensors} 本 / {self.plain_bytes:,} B"
         )
-
-
-def bakeable_initializers(graph: IrGraph) -> set[str]:
-    """このコンテナに**実体を書く** initializer の名前（共有宣言を除いた集合）。
-
-    共有 initializer（ADR 0096 段 2）は貸し手のバイトを借りるだけなので、格納の計画・適格判定・
-    宣言と実体の突合はどれもこの集合を走査する（1 箇所に閉じる — 除外を各所に書き写すと、
-    書き足した走査だけが `tensor = None` を引く）。
-    """
-    return {name for name, init in graph.initializers.items() if not init.is_shared}
 
 
 def eligible_compressed_initializers(graph: IrGraph) -> set[str]:
@@ -223,32 +170,6 @@ def eligible_compressed_initializers(graph: IrGraph) -> set[str]:
             else:
                 disqualified.add(name)
     return eligible - disqualified
-
-
-def weight_channel_axes(graph: IrGraph) -> dict[str, int]:
-    """重みスロットで消費される initializer → per-channel 軸
-    （`packages/runtime/src/runtime/plan.ts` の鏡像）。
-
-    軸は**消費側の op** から引く（重みの shape だけでは linear `[out,in]` と
-    conv_transpose1d `[Cin,Cout,K]` を区別できない）。同じ initializer を軸の違う op が
-    消費している場合は 1 つに決まらないので fail loudly。
-    """
-    bakeable = bakeable_initializers(graph)
-    axes: dict[str, int] = {}
-    for node in graph.nodes:
-        slot = WEIGHT_SLOTS.get(node.op)
-        if slot is None or slot >= len(node.ins):
-            continue
-        name = node.ins[slot]
-        if name not in bakeable:
-            continue
-        axis = WEIGHT_CHANNEL_AXES[node.op]
-        if axes.setdefault(name, axis) != axis:
-            raise EmitError(
-                f"initializer '{name}': 消費 op ごとに per-channel 軸が違う"
-                f"（{axes[name]} と {axis}）— 1 本の scale では表せない"
-            )
-    return axes
 
 
 def _has_i4_kernel(node: IrNode) -> bool:
@@ -358,7 +279,7 @@ def i4_eligible_initializers(
 
 
 def _scale_key(tensor_key: str) -> str:
-    """companion scale の safetensors キー（重みキーから機械的に作る）。"""
+    """companion scale のテンソルキー（重みキーから機械的に作る）。"""
     return f"karume.scale.{tensor_key}"
 
 
@@ -471,10 +392,6 @@ class _StoragePlan:
     conversions: dict[str, _Conversion]
 
 
-#: 変換なし（素のテンソルをそのまま書く）— `_write_order` / `_save_ordered` の既定。
-_NO_CONVERSIONS: Mapping[str, _Conversion] = MappingProxyType({})
-
-
 def _plan_i8(
     graph: IrGraph,
     reserved: Set[str],
@@ -564,7 +481,8 @@ def _plan_i4(
     except QuantizeError as cause:
         raise EmitError(f"initializer '{name}' ({key}): {cause}") from cause
     # 受理集合（2 冪かつ 16 以上）は宣言層と同じ規則を**書く前に**張る（`_plan_i8` が scale の
-    # keepdim 形を verify と二段で見るのと同じ流儀）。書いた後の門は `verify.parse_ir_graph`。
+    # keepdim 形を verify と二段で見るのと同じ流儀）。書いた後の門は
+    # `verify.ir_graph_from_container`（据えた容器の束縛表から IR を起こし直す側）。
     if group_size & (group_size - 1) or group_size < MIN_GROUP_SIZE:
         raise EmitError(
             f"initializer '{name}' ({key}): scale から引いた group_size {group_size} が"
@@ -816,7 +734,8 @@ def _plan_weight_dtype(
 def _convert_for_storage(key: str, tensor: torch.Tensor, conversion: _Conversion) -> torch.Tensor:
     """圧縮格納への変換と、実データを読む適格性検査（重い側 — 1 本ぶんだけ生かす）。
 
-    ここで落ちるとデータ節を書きかけたファイルが残る（`write_model` の docstring）。
+    ここで落ちても最終名には 1 バイトも残らない — 書き出しは一時 path（`.partial`）へ行い、
+    据え替えは検証を通った回だけ（`karume.publish` のモジュール doc の 3 段）。
     """
     if conversion.fixed_payload is not None:
         return conversion.fixed_payload
@@ -900,351 +819,70 @@ def storage_breakdown(graph: IrGraph) -> StorageBreakdown:
     )
 
 
-def _write_order(
-    tensors: Mapping[str, torch.Tensor],
-    conversions: Mapping[str, _Conversion] = _NO_CONVERSIONS,
-) -> list[str]:
-    """書き出し順（データ節に並ぶ順）— 規則は {@link container_order}。
+# ---------------------------------------------------------------------------
+# 容器へ渡す材料
+# ---------------------------------------------------------------------------
 
-    `conversions` を渡すと、そのテンソルは**変換後**の dtype で並べる（変換はまだ掛けない
-    — 順序は変換前の要素数と計画だけで決まる）。
+
+class _StoredTensors(Mapping[str, Buffer]):
+    """テンソルキー → **格納後の生バイト**の遅延写像（引かれた 1 本だけを変換する）。
+
+    MUST: 同じキーからは**毎回同じバイト列**を返す（書き手は sha256 の走査と書き出しの走査で
+    2 度引く — container-v1 §4.1）。変換は決定的なので成立するが、ここに乱択やキャッシュ無効化
+    を入れた瞬間に「宣言した sha256 と実バイトが違う容器」が出る。
+
+    MUST: 変換済みを持ち越さない（同時に生きる圧縮テンソルは 1 本 — 書き手側の
+    `container._Payloads` が 1 本だけ掴む）。
     """
-    return [entry.name for entry in container_order(_entries(tensors, conversions))]
 
+    def __init__(
+        self,
+        tensors: Mapping[str, torch.Tensor],
+        conversions: Mapping[str, _Conversion],
+    ) -> None:
+        self._tensors = tensors
+        self._conversions = conversions
 
-def _dtype_of(tensor: torch.Tensor, name: str) -> tuple[str, int]:
-    entry = _SAFETENSORS_DTYPE.get(tensor.dtype)
-    if entry is None:
-        raise EmitError(
-            f"テンソル '{name}': dtype {tensor.dtype} は配布形に書けない"
-            f"（{' / '.join(label for label, _ in _SAFETENSORS_DTYPE.values())} のみ）"
-        )
-    return entry
+    def __getitem__(self, key: str) -> Buffer:
+        tensor = self._tensors[key]
+        conversion = self._conversions.get(key)
+        if conversion is not None:
+            tensor = _convert_for_storage(key, tensor, conversion)
+        elif tensor.is_meta:
+            raise EmitError(f"テンソル '{key}': meta のまま格納しようとしている（実体が無い）")
+        # memoryview 経由で渡す（`tobytes()` は 1 本ぶんの複製を作る — DiT の重みは
+        # 1 テンソルで数百 MB あり、ピーク RAM をそのぶん押し上げる）。
+        return memoryview(tensor.contiguous().numpy()).cast("B")
 
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._tensors)
 
-def _stored_dtype_of(
-    name: str, tensor: torch.Tensor, conversion: _Conversion | None
-) -> tuple[str, int]:
-    """**格納後**の safetensors dtype と 1 要素の bit 数。
-
-    圧縮変換は**論理**要素数も shape も変えないので、ヘッダは変換前のテンソルと計画だけで
-    決まる（= データ節を流しながら書ける）。i4 で変わるのはバイト長だけで、それも
-    `論理 numel × bits / 8` として同じ式から出る（ADR 0069 決定 2 — shape は論理形のまま）。
-    """
-    if conversion is not None:
-        return _STORAGE_ENCODING[conversion.dtype]
-    return _dtype_of(tensor, name)
-
-
-def _payload_bytes(name: str, dtype_name: str, count: int, bits: int) -> int:
-    """論理要素数と bit 幅からデータ節のバイト長を出す。
-
-    MUST: bit 総量が byte 境界に乗らない形（I4 の要素数が奇数）は fail loudly — 末尾要素が
-    半バイトだけ突き出し、テンソルの長さが宣言から一意に決まらない
-    （リーダ側 `verify.assert_reader_layout` と同じ規則を書き出し側でも張る）。
-    """
-    total = count * bits
-    if total % 8:
-        raise EmitError(
-            f"テンソル '{name}': {dtype_name}（1 要素 {bits}bit）の要素数 {count} が"
-            " 奇数で byte 境界に乗らない"
-        )
-    return total // 8
+    def __len__(self) -> int:
+        return len(self._tensors)
 
 
 @dataclass(frozen=True)
-class ContainerEntry:
-    """データ節に並ぶテンソル 1 本の**宣言**（safetensors dtype・論理 shape・バイト長）。
+class StoredModel:
+    """容器へ渡す 3 点（モジュール doc の「容器へ渡す 3 点」）。"""
 
-    実体を持たないのは、書き出しがヘッダを**変換前に**決めて実データを 1 本ずつ流す形だから
-    （{@link write_model} の 3 段）。同じ理由で、torch のテンソルを 1 本も持たない書き手
-    （容器の詰め替え — `karume.repack`）も、この宣言だけで同じ並び規約・同じヘッダを組める
-    （規則の写しを持たせない）。
-    """
-
-    name: str
-    #: safetensors dtype 名（`F32` / `I4` …）— **格納後**の綴り。
-    dtype: str
-    #: **論理** shape（i4 は packed の器ではなく論理形のまま — ADR 0069 決定 2）。
-    shape: tuple[int, ...]
-    #: データ節に占めるバイト長（論理要素数 × 格納 bit 幅 / 8）。
-    nbytes: int
+    #: 格納宣言を commit したグラフ（渡された `graph` は 1 バイトも変えない）。
+    graph: IrGraph
+    #: テンソルキー → 格納後の生バイト（遅延・1 本ずつ）。
+    tensors: Mapping[str, Buffer]
+    #: テンソルキー → 容器の格納宣言。
+    bindings: Mapping[str, Encoding]
 
 
-def container_order(entries: Iterable[ContainerEntry]) -> list[ContainerEntry]:
-    """宣言を**データ節に並ぶ順**へ並べ替える（並び順の規約はモジュール doc）。
-
-    第 1 キーは dtype 群（F32 → I32 → **I4** → F16 → **I8**）、F16 のうち**要素数が奇数のもの**
-    （バイト長 ≡ 2 mod 4）はさらに後ろへ寄せる。第 2 キーは名前昇順。
-
-    これで「4 バイト整列を要求するテンソルの前に、4 の倍数でないバイト長のテンソルが来る」
-    ことが構造的に起こらない — 奇数 F16 より前は全て 4 の倍数長なので累積 offset は 4 の
-    倍数を保ち、奇数 F16 どうしは 2 バイト整列だけを要求するので偶数 offset で足りる。
-    I4 も**先頭 4 バイト整列**を要求する（要素整列の概念が無く、展開カーネルが `array<u32>` で
-    束縛する — ADR 0069 決定 2）ぶん F32 / I32 と同じ群に置く。バイト長は必ず 8 の倍数
-    （量子化軸が 2 冪 ≥ 16 の group_size で割り切れる ⇒ 要素数は 16 の倍数）なので、群内の
-    どこに来ても後続の整列を崩さない。I8 は要素サイズ 1 で整列制約が無いかわりに**任意の
-    バイト長**を作るので、群の末尾に置く（F16 より前に来ると 2 バイト整列すら壊す）。
-    """
-    return sorted(
-        entries,
-        key=lambda entry: (
-            _DTYPE_GROUP[entry.dtype],
-            # 「後ろへ寄せる」の対象は F16 だけ（I8 は既に最後の群で、群内の順序は整列に
-            # 影響しない — 名前昇順のまま安定させる）。
-            1 if entry.dtype == "F16" and entry.nbytes % 4 else 0,
-            entry.name,
-        ),
-    )
-
-
-def _entry_of(name: str, tensor: torch.Tensor, conversion: _Conversion | None) -> ContainerEntry:
-    """テンソル 1 本の**格納後**の宣言（実データは読まない — 計画と shape だけで決まる）。"""
-    dtype_name, bits = _stored_dtype_of(name, tensor, conversion)
-    return ContainerEntry(
-        name=name,
-        dtype=dtype_name,
-        shape=tuple(tensor.shape),
-        nbytes=_payload_bytes(name, dtype_name, tensor.numel(), bits),
-    )
-
-
-def _piece_entry_of(
-    piece: Piece, tensor: torch.Tensor, conversion: _Conversion | None
-) -> ContainerEntry:
-    """分割テンソルの 1 断片の宣言（キーは piece キー・shape は行範囲ぶん）。
-
-    dtype は親と同じで、shape は先頭次元だけが行数に変わる（読み手契約 5）。バイト長は
-    丸ごとと同じ式（論理要素数 × 格納 bit 幅 / 8）から出るので、行の切り方が i4 の packed
-    バイト長と食い違うことはない（1 行が整数バイトであることは `karume.shards` が見ている）。
-    """
-    dtype_name, bits = _stored_dtype_of(piece.name, tensor, conversion)
-    shape = (piece.end - piece.begin, *tuple(tensor.shape)[1:])
-    count = 1
-    for dim in shape:
-        count *= dim
-    return ContainerEntry(
-        name=piece.key,
-        dtype=dtype_name,
-        shape=shape,
-        nbytes=_payload_bytes(piece.key, dtype_name, count, bits),
-    )
-
-
-def _member_entry(
-    member: str | Piece,
-    tensors: Mapping[str, torch.Tensor],
-    conversions: Mapping[str, _Conversion],
-) -> ContainerEntry:
-    """member（丸ごとの名前 / {@link Piece}）1 つぶんの宣言。"""
-    if isinstance(member, Piece):
-        return _piece_entry_of(member, tensors[member.name], conversions.get(member.name))
-    return _entry_of(member, tensors[member], conversions.get(member))
-
-
-def _entries(
-    tensors: Mapping[str, torch.Tensor],
-    conversions: Mapping[str, _Conversion] = _NO_CONVERSIONS,
-    order: Sequence[str | Piece] | None = None,
-) -> list[ContainerEntry]:
-    """格納後の宣言を全件（`order` を渡せばその順で・piece も受ける）。"""
-    return [
-        _member_entry(member, tensors, conversions)
-        for member in (list(tensors) if order is None else order)
-    ]
-
-
-def write_container(
-    path: Path,
-    entries: Sequence[ContainerEntry],
-    metadata: Mapping[str, str],
-    payload: Callable[[ContainerEntry], Iterable[Buffer]],
-) -> None:
-    """safetensors を**宣言の順で**書く（`save_file` は自前の順序で書くので使わない）。
-
-    レイアウトは仕様どおり `[u64 LE ヘッダ長][ヘッダ JSON][データ節]`。ヘッダ JSON は
-    `__metadata__` を先頭に、テンソルは `entries` の順（= データ節に並ぶ順）で載せる
-    （HF のリーダはヘッダの宣言順にオフセットの連続性を見る）。
-
-    実体は `payload` が 1 本ずつ**バイト列の列**として渡す — 書き手が torch のテンソルを
-    変換しながら流す形（{@link _save_ordered}）でも、別ファイルから生バイトを写す形
-    （`karume.repack`）でも、ここから下は同じ 1 本道になる。
-
-    MUST: 流したバイト数が宣言と食い違ったら fail loudly。ヘッダの `data_offsets` は宣言だけ
-    から積むので、1 本でも短い / 長いと**以降の全テンソルが黙ってずれる**（読み手は隙間なしの
-    検査を通ってしまい、値だけが別物になる）。
-
-    MUST: 1 本ぶんを書き終えたらバッファを手放す（`release()` + `del`）。持ち越すと、次の 1 本
-    の変換と前の 1 本の実体が同時に生きて、`write_model` が守っている「同時に生きる圧縮
-    テンソルは 1 本」の不変条件が破れる（DiT の重みは 1 テンソルで数百 MB）。
-    """
-    header: dict[str, object] = {"__metadata__": dict(metadata)}
-    offset = 0
-    for entry in entries:
-        header[entry.name] = {
-            "dtype": entry.dtype,
-            "shape": list(entry.shape),
-            "data_offsets": [offset, offset + entry.nbytes],
-        }
-        offset += entry.nbytes
-    blob = json.dumps(header, separators=(",", ":")).encode("utf-8")
-    padding = -len(blob) % _HEADER_ALIGN
-    blob += b" " * padding
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("wb") as handle:
-        handle.write(len(blob).to_bytes(8, "little"))
-        handle.write(blob)
-        for entry in entries:
-            written = 0
-            for chunk in payload(entry):
-                view = memoryview(chunk).cast("B")
-                handle.write(view)
-                written += view.nbytes
-                view.release()
-                del chunk
-            if written != entry.nbytes:
-                raise EmitError(
-                    f"テンソル '{entry.name}': 宣言 {entry.nbytes} バイトに対し"
-                    f" {written} バイトを流した（データ節が宣言とずれる）"
-                )
-
-
-def _piece_conversion(conversion: _Conversion, tensor: torch.Tensor, piece: Piece) -> _Conversion:
-    """断片へ掛ける変換（companion scale を同じ行範囲で切る）。
-
-    MUST: 切るのは **scale の先頭次元が重みの行数と同じときだけ**。i8 の keepdim 形は
-    per-channel 軸が 0 なら `[行,1,…]`・軸が 0 でなければ `[1,…]`、i4 の group 形は
-    `[行, 行長/group]` なので、この 1 つの述語で「行ごとに違う scale は切る・行方向へ
-    broadcast される scale はそのまま」が決まる。切り方を間違えると形も型も合ったまま
-    値だけがずれる（変換の逆変換ビット一致門は断片ごとに掛かるので、そこで落ちる）。
-    """
-    if conversion.fixed_payload is not None:
-        conversion = replace(
-            conversion, fixed_payload=conversion.fixed_payload[piece.begin : piece.end]
-        )
-    scale = conversion.scale
-    if scale is None or not scale.shape or int(scale.shape[0]) != int(tensor.shape[0]):
-        return conversion
-    return replace(conversion, scale=scale[piece.begin : piece.end])
-
-
-def _member_order(
-    members: Sequence[str | Piece],
-    tensors: Mapping[str, torch.Tensor],
-    conversions: Mapping[str, _Conversion],
-) -> list[str | Piece]:
-    """member 群を**データ節に並ぶ順**へ並べ替える（規約は {@link container_order}）。
-
-    {@link _write_order} の member 版（piece は piece キーで並ぶ — 親名 + 連番なので、同じ親の
-    断片は名前昇順でも index 順に並ぶ）。
-    """
-    entries = _entries(tensors, conversions, members)
-    by_key = {entry.name: member for entry, member in zip(entries, members, strict=True)}
-    return [by_key[entry.name] for entry in container_order(entries)]
-
-
-def _save_ordered(
-    path: Path,
-    tensors: Mapping[str, torch.Tensor],
-    members: Sequence[str | Piece],
-    metadata: Mapping[str, str],
-    conversions: Mapping[str, _Conversion] = _NO_CONVERSIONS,
-) -> None:
-    """member 群を**指定順で** safetensors へ書く（器の綴りは {@link write_container}）。
-
-    `conversions` に載ったテンソルは**書く直前に 1 本ずつ**圧縮格納へ変換し、書いたら
-    即座に手放す。MUST: 変換済みを次の 1 本へ持ち越さない（同時に生きる圧縮テンソルを
-    1 本に保つのがこの writer の存在理由）。分割テンソルは**行範囲を切ってから**変換する
-    ので、同時に生きるのは断片 1 つぶんだけで、親を丸ごと変換した中間物は作らない。変換に
-    伴う検査が落ちるとデータ節を書きかけたファイルが残る — 配布物の原子性は
-    `pipeline.export_to_file` の一時ファイル層が持つ。
-    """
-    entries = _entries(tensors, conversions, members)
-    by_key = {entry.name: member for entry, member in zip(entries, members, strict=True)}
-
-    def payload(entry: ContainerEntry) -> Iterator[Buffer]:
-        member = by_key[entry.name]
-        if isinstance(member, Piece):
-            source = tensors[member.name]
-            tensor = source[member.begin : member.end]
-            conversion = conversions.get(member.name)
-            if conversion is not None:
-                conversion = _piece_conversion(conversion, source, member)
-        else:
-            tensor = tensors[member]
-            conversion = conversions.get(member)
-        if conversion is not None:
-            tensor = _convert_for_storage(entry.name, tensor, conversion)
-        # memoryview 経由で書く（`tobytes()` は 1 本ぶんの複製を作る — DiT の重みは
-        # 1 テンソルで数百 MB あり、ピーク RAM をそのぶん押し上げる）。
-        yield memoryview(tensor.numpy()).cast("B")
-
-    write_container(path, entries, metadata, payload)
-
-
-def _companion_pairs(conversions: Mapping[str, _Conversion]) -> dict[str, str]:
-    """weight ↔ companion scale の**対称**写像（原子対の綴りはここ 1 箇所）。
-
-    scale を持つのは i8 / i4 の計画だけ（f16 は scale を持たない）。キーの導出は
-    {@link _scale_key} と同じ 1 本道で、別々に綴ると「対だと思っていない対」が生まれる。
-    """
-    pairs: dict[str, str] = {}
-    for key, conversion in conversions.items():
-        if conversion.scale is None:
-            continue
-        scale_key = _scale_key(key)
-        pairs[key] = scale_key
-        pairs[scale_key] = key
-    return pairs
-
-
-def _shard_groups(
-    tensors: Mapping[str, torch.Tensor],
-    order: Sequence[str],
-    conversions: Mapping[str, _Conversion],
-    capacity: int,
-) -> list[tuple[str | Piece, ...]]:
-    """書き出し順を shard へ割り付ける（規則の正本は `karume.shards`）。
-
-    返るのは先頭が空のグラフ shard で始まる列。バイト数も shape も**実データを読まずに**出る
-    （論理要素数 × 格納 bit 幅 — `_stored_dtype_of` がヘッダを変換前に決めるのと同じ導出）
-    ので、割り付けはピーク RAM に一切載らない。`capacity` はデータ節に詰める上限。
-    """
-    entries = _entries(tensors, conversions, order)
-    payload_bytes = {entry.name: entry.nbytes for entry in entries}
-    # shape は**格納後**の宣言から採る（分割の要否と 1 行のバイト長がここで決まる — i4 は
-    # 論理形のままなので、packed バイト長 ÷ 行数がそのまま 1 行のバイト長になる）。
-    shapes = {entry.name: entry.shape for entry in entries}
-    companions = _companion_pairs(conversions)
-    groups = pack_shards(order, payload_bytes, shapes, companions, capacity=capacity)
-    # 規則（pack_shards）と検査（下 2 本）を分けて持つ — 割り付けの入口が増えた日に、
-    # 規則の写経ではなく検査が受け止める（ADR 0070 決定 1 の受入条件⑤と同じ集合）。
-    assert_shard_partition(groups, order, shapes)
-    assert_co_shard(groups, companions)
-    return groups
-
-
-def write_model(
-    path: str | Path,
+def stored_model(
     graph: IrGraph,
-    tensors: dict[str, torch.Tensor],
+    tensors: Mapping[str, torch.Tensor],
     *,
     weight_dtype: str = "f32",
     weight_scales: Mapping[str, torch.Tensor] | None = None,
     weight_dtype_overrides: Mapping[str, str] | None = None,
     fixed_weights: Mapping[str, FixedQuantizedWeight] | None = None,
-    _shard_capacity: int | None = None,
-) -> list[Path]:
-    """グラフと格納テンソルを配布形へ書き、書いた shard の path を**順に**返す。
-
-    書くのは**常に** `<拡張子の前>-NNNNN-of-NNNNN<拡張子>` の連番で、`path` 自身は 1 バイトも
-    書かれない（単一ファイル配布形の廃止 — ADR 0081）。先頭は**グラフ shard**（`karume_ir`
-    だけを持ち、データ節は空 = 8 バイトのヘッダ長 + ヘッダ JSON で終わる器）で、実データは
-    後続の weight shard 列に載る。`karume_ir` を持つのは先頭だけ（ADR 0070 決定 3）。
-
-    `_shard_capacity` は**テストからのみ触る**データ節容量の差し込み（合成の小テンソルで
-    分割とテンソル分割を起こすため）。公開ノブではない — 配布形の不変条件なので、既定は定数
-    （`shards.SHARD_DATA_CAPACITY`）で、呼び出しのたびにモジュール属性として引く。
+) -> StoredModel:
+    """格納変換を計画し、容器へ渡す {@link StoredModel} を組む（1 バイトも書かない）。
 
     `weight_dtype` が `"f16"` / `"i8"` / `"i4"` のとき、**適格な重みスロットだけ**が圧縮格納に
     なる（宣言と実体が 1 経路で決まる — 別々に決めると「宣言 f16 / 実体 f32」の沈黙誤読が
@@ -1252,43 +890,25 @@ def write_model(
     限定で、conv1d はさらに `groups == 1` と格納行長の整除が要る
     （{@link i4_eligible_initializers} — ADR 0069 決定 5 とその追補）。
 
-    `fixed_weights` は固定 packed 値を再量子化せず保存する入口（ADR 0097）。
-    対応する `tensors` は論理形だけの f32/meta とし、meta のキー集合と完全一致させる。
-    linear / embedding の rank2 重みに限り、I2 / I4 / I8 の混成を保持する。
-    実 f32 値との二重指定と、自動量子化の dtype / scale / override 指定との混在は拒否する。
+    `fixed_weights` は固定 packed 値を再量子化せず保存する入口（ADR 0097）。対応する `tensors`
+    は論理形だけの f32/meta とし、meta のキー集合と完全一致させる。linear / embedding の rank2
+    重みに限り、I2 / I4 / I8 の混成を保持する。実 f32 値との二重指定と、自動量子化の
+    dtype / scale / override 指定との混在は拒否する。
 
     `weight_dtype_overrides`（テンソルキー → 格納 dtype）は 1 本単位の明示指定で、既定
     `weight_dtype` に**優先**する（混成格納 — 意味と fail loudly の線引きは
     `_plan_weight_dtype` の docstring）。scale が要る dtype を混ぜるときは `weight_scales` に
     i8 / i4 の台帳を**合流して**渡す（キー空間が FQN で重ならないので 1 つの Mapping で足りる）。
 
-    MUST: 「計画（実データを読まない検査）→ データ節を 1 本ずつ変換しながら流す →
-    全バイトを書き終えてから宣言を commit」の 3 段で進める。
+    MUST: 計画段で圧縮テンソルを作らない（実データを読む検査は {@link _StoredTensors} が
+    引かれたときに 1 本ずつ受け持つ）。全件を先に変換すると、呼び出し側が持つ f32 集合と同時に
+    生きてピーク RAM が両者の和になる。
 
-    1. 圧縮テンソルを先にまとめて作ると、呼び出し側が持つ f32 集合と同時に生きてピーク
-       RAM が両者の和になる（Irodori 規模で f32 3.44GB + f16 1.72GB / i8 0.87GB）。
-       ヘッダは「変換前の shape・要素数 + 計画の格納 dtype」だけで決まるので、データ節を
-       流しながらでも宣言は動かない。
-    2. MUST: commit は `dataclasses.replace` の**ビューの中だけ**に閉じ、渡された `graph` は
-       1 バイトも変えない。呼び出し側の宣言を書き換えると、同じ graph を使い回す経路
-       （別 dtype で書き直す / 内訳を数える）が前回の圧縮宣言を引きずる — f32 の計画は
-       空プランで宣言を**復元しない**ので、f16 → f32 の順に書くと「宣言 f16 / 実体 f32」の
-       壊れたコンテナがそのまま出る。書いた後の宣言が要る呼び手は `verify_model` の戻り
-       （= ファイルから読み直したグラフ）を使う。
-
-    NOTE: 書き出し中の検査（f16 の往復・i8 / i4 の逆変換）が落ちると書きかけのファイルが残る
-    — 配布物の原子性は `pipeline.export_to_file` の一時ファイル層が持つ。
-
-    NOTE: この関数は**書き出しだけ**で、受理側の門（`verify.verify_shards`）は通さない。
-    配布形を作るなら `pipeline.publish_model`（書き出し → 検証 → 据え替えの 3 段）を通す —
-    直呼びは「書けたが読めない」配布形をそのまま据えられる面。
-
-    `weight_scales` は `quantize.fake_quant_int8` / `quantize.fake_quant_int4` が返した
-    **FQN → scale** の台帳（`"i8"` / `"i4"` のときだけ要る）。キーは safetensors のテンソル
-    キーと同じ空間で、`id(tensor)` 突合はしない（ADR 0006）。i4 の `storage.group_size` は
-    この scale の形から引く（`quantize.group_size_of`）。
+    MUST: commit は `dataclasses.replace` の**ビューの中だけ**に閉じ、渡された `graph` は
+    1 バイトも変えない。呼び出し側の宣言を書き換えると、同じ graph を使い回す経路
+    （別 dtype で書き直す / 内訳を数える）が前回の圧縮宣言を引きずる。
     """
-    # 共有 initializer（ADR 0096 段 2）はこのコンテナに実体を持たないので、宣言 / 格納の
+    # 共有 initializer（ADR 0096 段 2）はこの容器に実体を持たないので、宣言 / 格納の
     # 完全一致からは外す（宣言の storage はそのまま焼く — 計画も変換も掛からない）。
     declared = {graph.initializers[name].tensor for name in bakeable_initializers(graph)}
     stored = set(tensors)
@@ -1303,7 +923,6 @@ def write_model(
         raise EmitError("f32/meta の論理重みと fixed_weights のキー集合が一致しない")
     if fixed and (weight_dtype != "f32" or weight_scales or weight_dtype_overrides):
         raise EmitError("fixed_weights と自動量子化指定は同時に使えない")
-    out = Path(path)
     contiguous = {key: value.detach().contiguous() for key, value in tensors.items()}
     plan = (
         _plan_fixed_weights(graph, contiguous, fixed)
@@ -1312,24 +931,10 @@ def write_model(
             graph, contiguous, weight_dtype, weight_scales or {}, weight_dtype_overrides or {}
         )
     )
-    source = {**contiguous, **plan.scales}
     committed = replace(graph, initializers={**graph.initializers, **plan.declarations})
-    metadata = {IR_METADATA_KEY: committed.to_json()}
-    order = _write_order(source, plan.conversions)
-    capacity = SHARD_DATA_CAPACITY if _shard_capacity is None else _shard_capacity
-    groups = _shard_groups(source, order, plan.conversions, capacity)
-    total = len(groups)
-    written: list[Path] = []
-    for index, group in enumerate(groups, start=1):
-        target = shard_path(out, index, total)
-        # MUST: `karume_ir` は**先頭 shard だけ**（ADR 0070 決定 3 — 後続への再登場は
-        # ランタイムが fail loudly で拒否する）。後続の `__metadata__` は空で書く。
-        _save_ordered(
-            target,
-            source,
-            _member_order(group, source, plan.conversions),
-            metadata if index == 1 else {},
-            plan.conversions,
-        )
-        written.append(target)
-    return written
+    source = {**contiguous, **plan.scales}
+    return StoredModel(
+        graph=committed,
+        tensors=_StoredTensors(source, plan.conversions),
+        bindings=container_bindings(committed),
+    )

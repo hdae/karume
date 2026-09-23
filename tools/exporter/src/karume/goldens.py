@@ -1,6 +1,6 @@
 """tiny golden fixtures の生成（後段の Deno E2E テストがこれを読む）。
 
-固定 seed の小モデルを torch.export → IR v1 コンテナ化し、torch CPU での期待出力を
+固定 seed の小モデルを torch.export → コンテナ（`krm`）化し、torch CPU での期待出力を
 同じディレクトリに置く。契約表の全 op を全モデル合計で必ず被覆する（COVERAGE 検査）。
 
     uv run python -m karume.goldens --out ../../packages/runtime/tests/fixtures/golden
@@ -28,6 +28,7 @@ from safetensors.torch import save_file
 from torch import nn
 from torch.export import Dim
 
+from karume.container import Provenance
 from karume.convert import (
     PRESERVED_OP_PREFIXES,
     PRESERVED_OP_PREFIXES_WITH_ATTENTION,
@@ -81,8 +82,12 @@ from karume.ops import EMITTABLE_OPS
 from karume.pipeline import export_to_file
 from karume.quantize import fake_quant_int8
 
-MODEL_FILE = "model.safetensors"
+MODEL_FILE = "model.krm"
 IO_FILE = "io.safetensors"
+
+#: golden の出所。`writer` は**書かない** — 生成器タグを焼くと、パッケージ版を上げただけで
+#: 全 golden のバイト列が動き、「資産が変わった」と読める再生成の前提が壊れる。
+GOLDEN_PROVENANCE = Provenance(license="mit")
 #: io.safetensors のキー規約。入力はグラフ入力名、出力は graph.outputs の位置で引く。
 INPUT_PREFIX = "input."
 OUTPUT_PREFIX = "output."
@@ -459,7 +464,7 @@ def _assert_not_trivial(where: str, tensor: torch.Tensor) -> None:
 
 
 def generate_golden(spec: GoldenSpec, root: Path) -> IrGraph:
-    """1 モデル分の model.safetensors と io.safetensors を書き、グラフを返す。"""
+    """1 モデル分のコンテナ（`model.krm` の part 列）と io.safetensors を書き、グラフを返す。"""
     generator = _rng()
     module = spec.build(generator).eval()
     args = spec.example_inputs(generator)
@@ -471,6 +476,10 @@ def generate_golden(spec: GoldenSpec, root: Path) -> IrGraph:
         module,
         args,
         out_dir / MODEL_FILE,
+        provenance=GOLDEN_PROVENANCE,
+        # グラフ名は**部品名**（= 置き場のディレクトリ名 = TS 側が引く名前）。既定は無い
+        # （`pipeline._assert_graph_name` の MUST）ので、ここで綴る。
+        graph_name=spec.name,
         dynamic_shapes=spec.dynamic_shapes,
         symbol_names=spec.symbol_names,
         weight_dtype=spec.weight_dtype,

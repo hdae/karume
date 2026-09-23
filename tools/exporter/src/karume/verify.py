@@ -1,14 +1,17 @@
-"""IR v1 の受理規則を Python 側でも全部見る（docs/ir-v2.md）。
+"""IR の受理規則を Python 側でも全部見る（docs/ir-v2.md）と、コンテナとの合流。
 
 TS 側の正本は packages/runtime/src/format/ir.ts（グラフ単体の規則）・
-packages/runtime/src/format/container.ts（配布形との
-突合とランタイム対応表）。エクスポータが「書けるがランタイムが読めない」ファイルを
-出さないよう、書き出し経路の最後で同じ規則を通す。
+packages/runtime/src/format/container/*.ts（コンテナとの突合とランタイム対応表）。
+エクスポータが「書けるがランタイムが読めない」ファイルを出さないよう、書き出し経路の最後で
+同じ規則を通す。
 
 MUST: ここは fail loudly の門であって近似の場ではない — 未知キーも非正準表記も
 黙って無視せず、必ず例外にする（未リリースにつき前方互換チャネルは持たない）。
 
-    uv run karume verify ../../models/anima-turbo/transformer/model.f16.safetensors
+    uv run karume verify ../../models/karume-irodori/v4.1-small/dit/model.i8.krm
+
+`parse_ir_graph`（IR v1 JSON の parse）が残っているのは、移行 CLI が旧 shard の
+`__metadata__` を読むのに要るから（container-v1 §12）— 配布形の検証はコンテナだけを受ける。
 """
 
 from __future__ import annotations
@@ -29,16 +32,15 @@ from karume.container import (
     ModelDescriptor,
     ReadContainer,
     codec_entry,
+    container_parts,
     group_count,
     payload_bytes,
     per_channel_group_size,
     read_container,
 )
-from karume.dims import MAX_SAFE_INT, is_symbol_name, parse_dim, try_parse_dim
-from karume.emit import EmitError, eligible_compressed_initializers, weight_channel_axes
+from karume.dims import MAX_SAFE_INT, DimError, is_symbol_name, parse_dim, try_parse_dim
 from karume.ir import (
     IR_FORMAT,
-    IR_METADATA_KEY,
     IR_VERSION,
     MIN_GROUP_SIZE,
     IrDim,
@@ -58,6 +60,7 @@ from karume.ops import (
     OP_CONTRACTS,
     STATE_APPEND_OP,
     STRIDED_RANK_OPS,
+    OpContractError,
     assert_node_contract,
     assert_strided_rank,
     attention_readonly,
@@ -66,7 +69,6 @@ from karume.ops import (
     sym_prefix_slice_attrs,
 )
 from karume.shapes import assert_graph_shapes, declared_shape
-from karume.shards import SHARD_BYTE_LIMIT, component_path, parse_piece_key, resolve_shards
 
 
 class IrError(ValueError):
@@ -1070,7 +1072,7 @@ class _StoredTensor:
 def _read_header(path: str | Path) -> tuple[dict[str, Any], int, int]:
     """ヘッダ JSON と `(データ節の絶対開始位置, データ節のバイト長)` を返す。
 
-    MUST: 宣言長を read へ渡す前にファイル実長で拘束する（`dist.safetensors_header` と
+    MUST: 宣言長を read へ渡す前にファイル実長で拘束する（`legacy.safetensors_header` と
     同型の防御）。u64 をそのまま渡すと規則違反が ContainerError ではなく
     OverflowError / MemoryError として漏れ、門の診断が「不正なファイル」ではなく
     「エクスポータが壊れた」に見える。
@@ -1112,7 +1114,7 @@ def _read_container(
     `assert_reader_layout` と同じ理由でもある。
 
     NOTE: レイアウト規則（隙間なし・整列・宣言バイト長の一致）は `assert_reader_layout` の
-    担当で、呼び出し側（`verify_model`）が**先に**通す。ここは宣言の読み取りだけ。
+    担当で、呼び出し側が**先に**通す。ここは宣言の読み取りだけ。
     """
     header, data_start, data_length = _read_header(path)
     raw = header.get("__metadata__", {})
@@ -1202,428 +1204,6 @@ def assert_reader_layout(path: str | Path) -> None:
         cursor = end
     if cursor != data_length:
         raise ContainerError(f"データ節末尾に未使用領域が {data_length - cursor} バイトある")
-
-
-def _assert_scale_tensor(
-    stored: Mapping[str, _StoredTensor],
-    graph: IrGraph,
-    name: str,
-    scale_key: str,
-    weight_shape: list[Any],
-    channel_axis: int | None,
-    group_size: int | None = None,
-) -> None:
-    """量子化格納の scale テンソルを実ファイルと突き合わせる
-    （`packages/runtime/src/format/container.ts` の鏡像）。
-
-    MUST: 5 点すべてを見る。scale は IR の値ではなく safetensors の**素のテンソル**なので、
-    ここを緩めるとロード時（ランタイム）まで誤りが出ない — 「書けたが読めない」ファイルを
-    配布物として残さないのが `verify_model` の役目（ADR 0005）。
-
-    1. **実在**する
-    2. **F32**（scale を別 dtype のビット列として読むと全チャネルが桁違いの値になる）
-    3. 形（`group_size` の有無で 2 通り — ADR 0069 決定 3）
-       - per-channel（i8）: **重みと同 rank の keepdim broadcast 形**（各軸は 1 か重みと同値・
-         残る非 1 軸は高々 1 本 — 重みと同形の per-element scale は適格外でも受理しない）
-       - group（i4）: **rank2**（行数 = 重みの先頭次元・最終次元 = 行長 / `group_size`）。
-         rank2 の重みでは「同 rank・最終次元だけ group 数」と同値で、conv1d `[Cout,Cin,K]` は
-         `[Cout, (Cin·K)/g]`（`karume.quantize.storage_rows`）。keepdim broadcast 形とは
-         受理集合が交わらないので**別分岐**
-    4. `channel_axis` が決まる（= 適格重み）なら、**その軸だけが伸びた keepdim 形ちょうど**
-       （group 形は行軸が先頭に固定されているので 4 の対象外）
-    5. **他 initializer の実体との名前衝突が無い**（別の重みを scale として読む形）
-
-    NOTE: 3 と 4 の切り分けはランタイムの 2 経路そのもの。適格外（ホストで f32 展開 —
-    `packages/runtime/src/format/i8.ts` の decodeI8）は汎用 keepdim broadcast を stride で
-    引くので 3 まで、適格（圧縮のまま GPU 常駐）はカーネルが `wscale[出力チャネル]` と
-    平坦に読むので `packages/runtime/src/runtime/executor.ts` の assertChannelScale が 4 を
-    要求する。TS 側は container.ts が 3 まで・executor が 4 と層が分かれるが、verify は
-    配布形 1 ファイルだけで両層を通せるのでここで両方見る（軸の導出はランタイム
-    `plan.ts` の鏡像 = `emit.weight_channel_axes`）。
-    """
-    where = f"initializer '{name}'"
-    view = stored.get(scale_key)
-    if view is None:
-        raise ContainerError(f"{where}: scale テンソル '{scale_key}' がファイルに無い")
-    for other, initializer in graph.initializers.items():
-        if initializer.tensor == scale_key:
-            raise ContainerError(
-                f"{where}: scale テンソル '{scale_key}' が initializer '{other}' の実体と同じキー"
-            )
-    if view.dtype != "F32":
-        raise ContainerError(f"{where}: scale テンソル '{scale_key}' が {view.dtype}（F32 が必要）")
-    shape = list(view.shape)
-    if group_size is not None:
-        # 格納行（先頭次元を除く平坦化）が group 数に置き換わった rank2 形ちょうど。行長が
-        # 割り切れることは parse_ir_graph が保証済み（ADR 0069 決定 2）。
-        if len(shape) != 2:
-            raise ContainerError(
-                f"{where}: scale {shape} の rank が重み {weight_shape} の group 形（rank2）と違う"
-            )
-        row_length = 1
-        for dim in weight_shape[1:]:
-            row_length *= dim
-        expected = [weight_shape[0], row_length // group_size]
-        if shape != expected:
-            raise ContainerError(
-                f"{where}: scale {shape} が重み {weight_shape} の group 形 {expected}"
-                f"（group_size={group_size}）でない"
-            )
-        return
-    if len(shape) != len(weight_shape):
-        raise ContainerError(
-            f"{where}: scale {shape} の rank が重み {weight_shape} と違う"
-            "（keepdim broadcast 形が必要）"
-        )
-    if any(dim != 1 and dim != weight_shape[axis] for axis, dim in enumerate(shape)):
-        raise ContainerError(f"{where}: scale {shape} が重み {weight_shape} へ broadcast できない")
-    # MUST: 残る非 1 軸は**高々 1 本**（TS 側 container.ts の鏡像 — 適格・適格外の区別なく
-    # 掛かる）。broadcast 可能性だけでは重みと同形の per-element scale（`[O,I]`）も通り、
-    # ロードの入口（`createSession`）だけが落ちる配布形が作れる。全軸 1（単一チャネルの
-    # 退化形）は `torch.amax(..., keepdim=True)` の正当な出力なので受理する。
-    channel_axes = sum(1 for dim in shape if dim != 1)
-    if channel_axes > 1:
-        raise ContainerError(
-            f"{where}: scale {shape} の非 1 軸が {channel_axes} 本"
-            "（per-channel scale は 1 本まで — チャネル軸だけが残る keepdim 形）"
-        )
-    if channel_axis is None:
-        return
-    expected = [dim if axis == channel_axis else 1 for axis, dim in enumerate(weight_shape)]
-    if shape != expected:
-        raise ContainerError(
-            f"{where}: scale {shape} が重み {weight_shape} のチャネル軸 {channel_axis} の"
-            f" keepdim 形 {expected} でない（適格重みの scale はカーネルが平坦に引く）"
-        )
-
-
-def _assert_no_surplus_tensors(graph: IrGraph, stored: Mapping[str, _StoredTensor]) -> None:
-    """ファイル中の全テンソルがどこかから参照されていることを検査する（宣言 → 実体の逆向き）。
-
-    MUST: fail loudly。宣言側の走査だけでは「使われなくなった重みが配布形に残っている」形が
-    素通りし、`karume verify` は緑なのにブラウザの `createSession`（shard intake の
-    `assertNoSurplusTensors` — `packages/runtime/src/format/container.ts`）で落ちる、という
-    非対称になる。書く側（`emit.write_model` の `declared != stored`）も dist 側（宣言外
-    ファイル検査）も既に両方向を見ているので、緩いのは読み返しのここだけだった。
-
-    突合集合は `initializer.tensor ∪ storage.scale`（ランタイムと同じ — ADR 0070 決定 1）。
-    scale は IR の値ではないので initializer だけを正本にすると i8 / i4 資産の scale が
-    全て「余剰」になる。
-
-    NOTE: 余剰は**全件列挙**する（1 件ずつ落とすと、削る側が何本余っているのか分からない）。
-    """
-    declared: set[str] = set()
-    for initializer in graph.initializers.values():
-        # 共有 initializer（ADR 0096 段 2）はこのコンテナに実体を持たない — 突合集合に足すと
-        # 「宣言はあるのにファイルに無い」側の門（verify_shards）と鏡像で矛盾する。
-        if initializer.is_shared:
-            continue
-        declared.add(initializer.tensor)
-        if initializer.storage.scale is not None:
-            declared.add(initializer.storage.scale)
-    surplus = sorted(set(stored) - declared)
-    if surplus:
-        raise ContainerError(
-            f"どの initializer からも参照されないテンソル ({len(surplus)}): {', '.join(surplus)}"
-        )
-
-
-def assert_shard_byte_limits(shards: Sequence[tuple[str | Path, int]]) -> None:
-    """全 shard の**ファイル長**が上限に収まっていることを落とす（`karume.shards` の鏡像）。
-
-    上限は {@link karume.shards.SHARD_BYTE_LIMIT} **1 本だけ**で、席（先頭 / 末尾）による
-    例外は無い（ADR 0081 — 尾部スラック則の廃止）。測るのは**ファイル長**（データ節ではない）—
-    読み手が確保するのはファイル 1 本ぶんのバイト列で、ヘッダもそこに載る（hub は manifest の
-    `size`、ここは実ファイル長で見る）。書き手はヘッダぶんの余裕を残して詰めるので
-    （`shards.SHARD_DATA_CAPACITY`）、ここに掛かるのは余裕を食い潰したコンポーネントと
-    規則外の資産だけになる。
-
-    MUST: 読み返し側にも張る。上限は書く側（`shards.pack_shards`）にしか門が無く、規則を
-    守っていない shard 列（手で組んだ / 別実装が書いた / 外部ツールの出力）は `karume verify`
-    も `karume dist` も緑で通り、**ブラウザで初めて落ちる**（Chromium の単一 ArrayBuffer 上限・
-    取得層のバイト予算）。co-shard の門（{@link verify_shards}）と同じ層・同じ理由づけ。
-
-    `shards` は読む順（= shard 番号順）の `(path, ファイル長)`。
-    """
-    for index, (path, size) in enumerate(shards):
-        if size > SHARD_BYTE_LIMIT:
-            raise ContainerError(
-                f"{path}: shard[{index}] のファイル長が {size:,} バイトで"
-                f"上限 {SHARD_BYTE_LIMIT:,} を超える（分割規則 — ADR 0090）"
-            )
-
-
-def assert_empty_graph_shard(path: str | Path, names: Sequence[str]) -> None:
-    """先頭 shard が**グラフ専用**（テンソル 0 本）であることを落とす（ADR 0081 の読み手契約 1）。
-
-    MUST: 読み返しで張る。グラフ shard に実重みが載った配布形（旧規則の fat グラフ shard・
-    単一ファイル）は、グラフ 1 本ぶんで admission を判断する経路（ADR 0070 決定 5）に対して
-    「グラフを読むには数 GB を取り切るしかない」形になる。ここが緩いと、**書き手だけを直しても
-    旧規則で焼いた資産が黙って配れてしまう**。
-
-    データ節に宣言外のバイトが残っている形は {@link assert_reader_layout} の担当（呼び出し側が
-    先に通す）なので、ここが見るのは宣言の本数だけ。
-    """
-    if names:
-        raise ContainerError(
-            f"{path}: グラフ shard がテンソルを {len(names)} 本持っている"
-            f"（{', '.join(sorted(names)[:3])}… — 先頭 shard は `{IR_METADATA_KEY}` だけを"
-            "載せる器で、データ節は空 MUST・ADR 0081）"
-        )
-
-
-@dataclass(frozen=True)
-class _PieceView:
-    """読み込み中の piece 1 本（畳む前 — 連番と収容 shard の並びを見るための材料）。"""
-
-    shard: int
-    index: int
-    count: int
-    view: _StoredTensor
-    nbytes: int
-
-
-def _stored_bytes(view: _StoredTensor) -> int:
-    """宣言（dtype と論理 shape）から格納バイト長を出す。
-
-    `assert_reader_layout` が `data_offsets` の差と一致することを先に見ているので、宣言だけで
-    実バイト長になる（オフセットを 2 度読まない）。
-    """
-    count = 1
-    for dim in view.shape:
-        count *= dim
-    return count * READER_DTYPE_BITS[view.dtype] // 8
-
-
-def _join_pieces(name: str, pieces: Sequence[_PieceView]) -> tuple[_StoredTensor, int]:
-    """piece 列を親 1 本へ畳み、`(親の宣言, piece 1 の shard)` を返す（読み手契約 5 の門）。
-
-    `pieces` は**読む順**（shard 番号順）。ランタイム側の shard intake が同じ規則で親バッファへ
-    書き戻すので、ここが緩むと「verify は緑・`createSession` だけ落ちる」非対称が piece の分だけ
-    増える。
-    """
-    shards = [piece.shard for piece in pieces]
-    repeated = sorted({shard for shard in shards if shards.count(shard) > 1})
-    if repeated:
-        raise ContainerError(
-            f"テンソル '{name}': shard{repeated} に同じ親の piece が 2 本ある"
-            "（piece は連続する shard に 1 本ずつ — ADR 0090）"
-        )
-    # count >= 2 と index の域は `parse_piece_key` が既に見ている（域外の綴りはそもそも piece と
-    # 解釈されず、畳んだ親ではなく余剰テンソルとして落ちる）。ここが見るのは**列**の整合。
-    count = pieces[0].count
-    if len(pieces) != count:
-        raise ContainerError(
-            f"テンソル '{name}': piece が {len(pieces)} 本で宣言の総数 {count} と合わない"
-        )
-    head = pieces[0].view
-    rows = 0
-    previous: int | None = None
-    for position, piece in enumerate(pieces, start=1):
-        where = f"テンソル '{name}': piece {piece.index}"
-        if piece.count != count:
-            raise ContainerError(
-                f"テンソル '{name}': piece の総数が {count} と {piece.count} で食い違っている"
-            )
-        if piece.index != position:
-            raise ContainerError(
-                f"テンソル '{name}': shard 順で {position} 本目の piece が index {piece.index}"
-                "（index は shard 順に 1 から増える）"
-            )
-        if previous is not None and piece.shard != previous + 1:
-            raise ContainerError(
-                f"{where} が shard[{piece.shard}]・前の piece が shard[{previous}]"
-                "（piece は連続する shard に 1 本ずつ）"
-            )
-        if piece.view.dtype != head.dtype:
-            raise ContainerError(
-                f"{where} の dtype が {piece.view.dtype}（piece 1 は {head.dtype}）"
-            )
-        if piece.view.shape[1:] != head.shape[1:]:
-            raise ContainerError(
-                f"{where} の残り次元 {piece.view.shape[1:]} が piece 1 の {head.shape[1:]} と違う"
-            )
-        if not piece.view.shape or piece.view.shape[0] < 1:
-            raise ContainerError(f"{where} が 1 行未満（piece は 1 行以上 MUST）")
-        if position < count and piece.nbytes % 4:
-            raise ContainerError(
-                f"{where} が {piece.nbytes} バイトで 4 の倍数でない"
-                "（末尾以外の piece は 4 バイト整列 MUST — 読み手が親バッファへオフセット書きする）"
-            )
-        rows += piece.view.shape[0]
-        previous = piece.shard
-    return _StoredTensor(dtype=head.dtype, shape=[rows, *head.shape[1:]]), pieces[0].shard
-
-
-def _read_shard_set(
-    paths: Sequence[str | Path],
-) -> tuple[str, dict[str, _StoredTensor], dict[str, int]]:
-    """shard 列を読み、`(グラフ JSON, 全テンソルの宣言, テンソル → 所属 shard 添字)` を返す。
-
-    MUST: レイアウト規則は **shard ごと**に張る（各 shard は独立に整合な safetensors —
-    ADR 0070 決定 1）。`karume_ir` を持つのは先頭 1 本だけで、その先頭はテンソルを 1 本も
-    持たない（ADR 0081）。後続への `karume_ir` 再登場も、shard を跨いだ同名テンソルの重複も
-    fail loudly（ランタイム側 `createShardValidator` の鏡像）。バイト上限
-    （{@link assert_shard_byte_limits}）は列全体の並びで決まるので、全 shard のヘッダを
-    読んでから 1 回だけ見る。
-
-    分割テンソル（piece キー — 読み手契約 5）は**親 1 本へ畳む**（{@link _join_pieces}）。
-    畳んだ宣言は「親の dtype・全体 shape」なので、以降の突合（宣言 shape・scale の形・余剰）は
-    分割の有無を知らずに済む。所属 shard は **piece 1** の shard で、co-shard の門がそこを見る。
-    親が宣言に無い piece キーは畳んだ親の名前のまま残り、`_assert_no_surplus_tensors` が余剰と
-    して落とす（piece だけを見て「この親は宣言されているか」を答えられる層はここではない）。
-    """
-    if not paths:
-        raise ContainerError("検証する shard が 1 本も無い")
-    text: str | None = None
-    stored: dict[str, _StoredTensor] = {}
-    owner: dict[str, int] = {}
-    pieces: dict[str, list[_PieceView]] = {}
-    keys: dict[str, int] = {}
-    sizes: list[tuple[str | Path, int]] = []
-    for index, path in enumerate(paths):
-        assert_reader_layout(path)
-        metadata, tensors, file_size = _read_container(path)
-        sizes.append((path, file_size))
-        embedded = metadata.get(IR_METADATA_KEY)
-        if index == 0:
-            if embedded is None:
-                raise ContainerError(
-                    f"__metadata__.{IR_METADATA_KEY} が無い（Karume モデルではない）"
-                )
-            text = embedded
-            assert_empty_graph_shard(path, list(tensors))
-        elif embedded is not None:
-            raise ContainerError(
-                f"shard[{index}] ({path}): {IR_METADATA_KEY} を持っている"
-                " — グラフ shard は先頭 1 本だけ（ADR 0070 決定 3）"
-            )
-        for name, view in tensors.items():
-            if name in keys:
-                raise ContainerError(
-                    f"テンソル '{name}' が shard[{keys[name]}] と shard[{index}] に重複している"
-                )
-            keys[name] = index
-            parsed = parse_piece_key(name)
-            if parsed is None:
-                stored[name] = view
-                owner[name] = index
-                continue
-            parent, piece_index, piece_count = parsed
-            pieces.setdefault(parent, []).append(
-                _PieceView(
-                    shard=index,
-                    index=piece_index,
-                    count=piece_count,
-                    view=view,
-                    nbytes=_stored_bytes(view),
-                )
-            )
-    for parent in sorted(pieces):
-        if parent in stored:
-            raise ContainerError(
-                f"テンソル '{parent}' が丸ごとと piece の両方でコンテナに居る"
-                "（1 テンソルはどちらか一方 MUST — ADR 0090）"
-            )
-        stored[parent], owner[parent] = _join_pieces(parent, pieces[parent])
-    assert_shard_byte_limits(sizes)
-    assert text is not None  # 先頭 shard の分岐が保証する
-    return text, stored, owner
-
-
-def verify_model(path: str | Path) -> IrGraph:
-    """コンポーネントの**代表 path** を shard 列へ解決して IR v1 の全規則で検証する。
-
-    配布形は常に連番の shard 列なので（ADR 0081）、入口は「代表 path 1 本」で、実際に何本へ
-    割れているかは現物が決める（{@link karume.shards.resolve_shards}）。列を自分で持っている
-    呼び手は {@link verify_shards} を直に呼ぶ。
-    """
-    return verify_shards(resolve_shards(Path(path)))
-
-
-def verify_shards(paths: Sequence[str | Path]) -> IrGraph:
-    """配布形の shard 列（先頭 = グラフ shard）を IR v1 の全規則で検証する。
-
-    見る集合は分割前と同一 — 宣言と実体の突合・scale の 5 点・余剰テンソル・ランタイム支援・
-    op 契約は**全 shard の和**に対して掛かる（ADR 0070 決定 1 の宣言完全性を書いた直後に
-    確かめる）。分割で増える門は 6 つ: shard ごとのレイアウト規則・`karume_ir` の在処・
-    **グラフ shard が空**（{@link assert_empty_graph_shard} — ADR 0081）・**ファイル長の
-    上限**（{@link assert_shard_byte_limits}）・**co-shard**（weight と companion scale が
-    同じ shard に居る MUST。分割された重みは piece 1 の shard）・**piece 列の整合**
-    （{@link _read_shard_set} が畳むときに見る連番 / 連続 shard / dtype / 残り次元 / 整列）。
-    """
-    text, stored, owner = _read_shard_set(paths)
-    graph = parse_ir_graph(text)
-    # per-channel scale の受理形は「圧縮のまま GPU 常駐するか」で 2 通りに分かれる
-    # （_assert_scale_tensor の 3 / 4）。判定も軸の導出もランタイム
-    # （packages/runtime/src/runtime/plan.ts）と同じものを使う — 別実装にすると
-    # 「verify は緑・ロードだけ落ちる」がこの 2 経路の境目で復活する。
-    eligible = eligible_compressed_initializers(graph)
-    try:
-        channel_axes = weight_channel_axes(graph)
-    except EmitError as cause:
-        raise ContainerError(str(cause)) from cause
-    # MUST: 1 実体 1 initializer。2 本の initializer が同じテンソルを指す形は IR v1 に重み tying
-    # の語彙が無い以上取り違えでしかなく、runtime（container.ts の createShardValidator）も
-    # 同じ理由で落とす — こちらが通すと「karume verify は緑・ロードだけ落ちる」が復活する。
-    entity_owner: dict[str, str] = {}
-    for name, initializer in graph.initializers.items():
-        where = f"initializer '{name}'"
-        # 共有 initializer（ADR 0096 段 2）は**このコンテナにバイトを持たない** — 実体との突合
-        # （dtype / shape / co-shard）は貸し手側のコンテナで既に済んでおり、借り手が同じ検査を
-        # 掛ける相手はここに存在しない。宣言の妥当性（storage / values / 消費席）は
-        # グラフ単体の規則が見る。
-        if initializer.is_shared:
-            continue
-        earlier = entity_owner.get(initializer.tensor)
-        if earlier is not None:
-            raise ContainerError(
-                f"{where}: 実体テンソル '{initializer.tensor}' が initializer '{earlier}' と"
-                "共有されている（1 実体 1 initializer MUST）"
-            )
-        entity_owner[initializer.tensor] = name
-        view = stored.get(initializer.tensor)
-        if view is None:
-            raise ContainerError(f"{where}: テンソル '{initializer.tensor}' がファイルに無い")
-        expected = STORAGE_ENCODING[initializer.storage.dtype]
-        if view.dtype != expected:
-            raise ContainerError(
-                f"{where}: 格納 dtype '{initializer.storage.dtype}' に対し safetensors 側が"
-                f" {view.dtype}（{expected} が必要）"
-            )
-        declared = graph.values[name].shape
-        if declared != view.shape:
-            raise ContainerError(f"{where}: 宣言 shape {declared} ≠ 実テンソル {view.shape}")
-        scale = initializer.storage.scale
-        if scale is not None:
-            # group 形の scale を要求するのは格納 i4 だけ（ADR 0069 決定 3）。i8 に付いた
-            # group_size は語彙としては通る（実行できないことは assert_runtime_support が
-            # 列挙する）ので、形の分岐は group_size の有無ではなく**格納 dtype**で決める。
-            _assert_scale_tensor(
-                stored,
-                graph,
-                name,
-                scale,
-                declared,
-                channel_axes.get(name) if name in eligible else None,
-                initializer.storage.group_size if initializer.storage.dtype == "i4" else None,
-            )
-            if initializer.storage.dtype == "i2" and stored[scale].shape != [declared[0], 1]:
-                raise ContainerError(f"{where}: i2 の scale は [{declared[0]},1] が必要")
-            if owner[scale] != owner[initializer.tensor]:
-                # MUST: 逐次消費（ADR 0070 決定 3）は weight と scale を同時に要求するので、
-                # 跨いだ配布形は「参照を手放す」契約と両立しない。書く側の割り付け
-                # （`karume.shards.pack_shards`）は構造的に破れないが、読み返しでも見る
-                # — 手で組んだ / 別実装が書いた shard 列がここを通る。
-                raise ContainerError(
-                    f"{where}: 重み '{initializer.tensor}' が shard"
-                    f"[{owner[initializer.tensor]}]・scale '{scale}' が shard[{owner[scale]}] に"
-                    "分かれている（co-shard MUST — ADR 0070 決定 1）"
-                )
-    _assert_no_surplus_tensors(graph, stored)
-    assert_runtime_support(graph)
-    assert_op_contracts(graph)
-    return graph
 
 
 # ---- コンテナ形式（krm / krg）との突合 -------------------------------------
@@ -1889,6 +1469,88 @@ def bind_graphs(graph: GraphDescriptor, model: ModelDescriptor | None) -> dict[s
     return bound
 
 
+#: 供給を持たない initializer の格納（意味論 dtype → 生の格納）。共有宣言（ADR 0096 段 2）と
+#: `krg`（束縛表そのものが無い）だけが該当する席で、どちらも**この容器に実体が無い**。
+_PLAIN_STORAGE_FOR: Mapping[str, str] = {"f32": "f32", "i32": "i32"}
+
+
+def _storage_document(encoding: BlockEncoding) -> dict[str, Any]:
+    """束縛表の `encoding` → IR v1 の `storage` 記述子（{@link karume.container.Encoding} の逆）。
+
+    `scale` は v1 では「scale テンソルのキー」だが、容器では scale は block なので **block id**
+    をそのまま綴る（診断が現物の名前を指す）。`group_size` を出すのは group codec だけ — 旧
+    per-channel の宣言は `group_size` を持たず、容器側の `groupSize`（= 行長）は台帳から導ける
+    写しなので、戻すと「i8 に group_size が付いた」形（ランタイム支援の門が落とす形）になる。
+    """
+    entry = codec_entry(encoding.codec)
+    document: dict[str, Any] = {"dtype": entry.layout}
+    if entry.scale == "required":
+        document["scale"] = encoding.scale_block
+        if entry.grouping == "group":
+            document["group_size"] = encoding.group_size
+    return document
+
+
+def ir_graph_from_container(read: ReadContainer, graph_name: str) -> IrGraph:
+    """コンテナの 2 文書 → IR v1 の {@link IrGraph}（`parse_ir_graph` の検査群を全部通す）。
+
+    グラフ記述が持つのは **IR v2 の文書**（docs/ir-v2.md — initializer 名がテンソルキーで、
+    格納は束縛表へ出ている）なので、v1 との差は `version` と `initializers` の 2 点だけである。
+    ここが戻すのは「その 2 点を埋めた v1 文書」を {@link parse_ir_graph} へ通した結果で、
+    宣言の完全性・SSA・前方参照・記号の束縛可能性・state スロットの規則は**同じ 1 本**が見る
+    （v2 用に検査を書き写すと、規則が動いた日に片方だけが古びる）。
+
+    格納の正本は**束縛表**（`encoding.codec`）で、供給を持たない席（共有宣言と `krg`）だけは
+    意味論 dtype の生の格納を置く — その席はこの容器に 1 バイトも持たないので、格納の主張は
+    貸し手の容器（と、その容器に掛かる同じ門）が持つ。
+    """
+    declaration = read.graph.graphs.get(graph_name)
+    if declaration is None:
+        raise ContainerError(
+            f"コンテナにグラフ '{graph_name}' が無い（宣言: {sorted(read.graph.graphs)}）"
+        )
+    where = f"graph '{graph_name}'"
+    supplies = bind_graphs(read.graph, read.model)[graph_name].supplies
+    root = _as_object(declaration, where)
+    values = _as_object(root.get("values"), f"{where}.values")
+    declared = _as_object(root.get("initializers"), f"{where}.initializers")
+    initializers: dict[str, Any] = {}
+    for name, raw in declared.items():
+        supply = supplies.get(name)
+        if supply is not None:
+            initializers[name] = {"tensor": name, "storage": _storage_document(supply.encoding)}
+            continue
+        semantic = _as_object(values.get(name), f"{where}.values['{name}']").get("dtype")
+        plain = _PLAIN_STORAGE_FOR.get(semantic) if isinstance(semantic, str) else None
+        if plain is None:
+            raise ContainerError(
+                f"{where} initializer '{name}': 供給が無いのに意味論 dtype が"
+                f" {semantic!r}（生の格納を持てない）"
+            )
+        shared = _as_object(raw, f"{where}.initializers['{name}']").get("shared") is True
+        borrowed = {"shared": {"tensor": name}} if shared else {"tensor": name}
+        initializers[name] = {**borrowed, "storage": {"dtype": plain}}
+    document = {**root, "version": IR_VERSION, "initializers": initializers}
+    return parse_ir_graph(json.dumps(document, separators=(",", ":"), allow_nan=False))
+
+
+def assert_ir_accepted(read: ReadContainer) -> None:
+    """容器が宣言する全グラフに **IR の受理規則**を掛ける（op 語彙 / ランタイム支援 / op 契約）。
+
+    MUST: 配布形を作る経路と受け入れる経路の両方がここを通る（`karume dist` の入力検査と
+    `karume verify`）。構造検査（{@link verify_container}）は「容器として開けるか」しか見ない
+    ので、これが抜けると**語彙外の op を宣言した容器**が配布形に据わり、利用者の
+    `createSession` で初めて落ちる（モジュール doc が掲げる目的そのもの）。
+    """
+    for name in sorted(read.graph.graphs):
+        try:
+            graph = ir_graph_from_container(read, name)
+            assert_runtime_support(graph)
+            assert_op_contracts(graph)
+        except (ContainerError, ContainerFormatError, IrError, OpContractError, DimError) as cause:
+            raise ContainerError(f"graph '{name}': {cause}") from cause
+
+
 @dataclass(frozen=True)
 class VerifiedContainer:
     """{@link verify_container} の結果（開いた読み手と、合流で決まった供給計画）。"""
@@ -1911,72 +1573,47 @@ def verify_container(paths: Sequence[str | Path], *, blocks: bool = False) -> Ve
     return VerifiedContainer(read, bind_graphs(read.graph, read.model))
 
 
-def container_parts(path: str | Path) -> tuple[Path, ...]:
-    """コンテナ 1 本の part 列（part 0 のファイル / 単一形 / 代表 path のどれを渡してもよい）。
-
-    分割形の part は旧 shard と同じ連番規約（`<stem>-NNNNN-of-NNNNN.krm` — §8）なので、
-    畳み込みと解決は {@link karume.shards} の 1 本道を借りる（単一形と連番の同居は
-    そこが fail loudly で受ける）。
-    """
-    return resolve_shards(component_path(Path(path)))
-
-
 # ---- CLI ------------------------------------------------------------------
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="配布形 safetensors を IR v1 の全規則で検証する"
-        "（`--container` でコンテナ形式 krm / krg）"
+        description="コンテナ（krm / krg）を全規則で検証する（2 文書 + 合流 + 全 block の sha256）"
     )
     parser.add_argument(
         "models",
         type=Path,
         nargs="+",
-        help="検証する model.safetensors（複数指定可。分割された資産は**代表 path**を渡す"
-        " — 連番の shard 列としてまとめて検証する）",
-    )
-    parser.add_argument(
-        "--container",
-        action="store_true",
-        help="引数をコンテナ（krm / krg）として検証する（part 0 のファイル・単一形・代表 path）",
+        help="検証するコンテナ（複数指定可。part 0 のファイル・単一形・代表 path のどれでもよい"
+        " — 分割形は連番の part 列としてまとめて検証する）",
     )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    """指定された配布形を 1 コンポーネントずつ検証する。
+    """指定されたコンテナを 1 本ずつ検証する。
 
-    引数は**コンポーネントの代表 path** で、分割されていれば連番の shard 列へ解決してから
-    まとめて検証する（`karume.shards.resolve_shards`）— shard 1 本だけを単体で検証しても
-    「グラフが無い」「テンソルが足りない」としか言えず、宣言完全性も co-shard も見られない。
+    引数は**コンテナの代表 path**（part 0 の現物を渡してもよい）で、分割されていれば連番の
+    part 列へ解決してからまとめて検証する（{@link karume.container.container_parts}）—
+    part 1 本だけを単体で検証しても「2 文書が無い」としか言えず、合流も block の sha256 も
+    見られない。
 
-    `--container` はコンテナ形式（`krm` / `krg`）の側で、2 文書の構造検査と合流（`bind_graphs`）
-    に加えて**全 block を取り直して sha256 を突き合わせる**。
+    掛かるのは 2 文書の構造検査・合流（`bind_graphs`）・**全 block を取り直した sha256 の
+    突合**と、IR の受理規則（{@link assert_ir_accepted} — 組み立て側の門と**同じ 1 本**）である。
 
     MUST: 落ちたファイルで止める（残りを検証して最後にまとめない）— 例外は規則違反の
     位置まで綴ってあるので、そのまま送出するのが最も情報量が多い。
     """
     args = build_parser().parse_args(argv)
     for path in args.models:
-        print(_verify_container_line(path) if args.container else _verify_shards_line(path))
-
-
-def _verify_shards_line(path: Path) -> str:
-    shards = resolve_shards(path)
-    graph = verify_shards(shards)
-    split = f" shards={len(shards)}" if len(shards) > 1 else ""
-    return (
-        f"{path}:{split} nodes={len(graph.nodes)} initializers={len(graph.initializers)}"
-        f" inputs={len(graph.inputs)} outputs={len(graph.outputs)}"
-        f" symbols={','.join(graph.symbols) if graph.symbols else '（静的）'}"
-    )
+        print(_verify_container_line(path))
 
 
 def _verify_container_line(path: Path) -> str:
     parts = container_parts(path)
     verified = verify_container(parts, blocks=True)
     read, bound = verified.read, verified.graphs
+    assert_ir_accepted(read)
     assets = sorted(read.model.assets) if read.model is not None else []
     return (
         f"{path}: parts={len(parts)} blocks={len(read.block_ids)}"

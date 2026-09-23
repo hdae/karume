@@ -21,13 +21,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from ir_fixtures import ir_container, ir_shards
+from legacy_writer import Entry, legacy_fill_shards, legacy_shards, order, write_safetensors
 
-from karume import migrate
-from karume.container import AssetRecord, Provenance
-from karume.emit import ContainerEntry, container_order, write_container
+from karume import migrate, publish
+from karume.container import AssetRecord, Provenance, numbered_name
 from karume.migrate import MigrateError, migrate_repository, parse_cross_repo
-from karume.shards import shard_name
 
 PROVENANCE = Provenance(license="apache-2.0", writer="karume/test")
 
@@ -65,7 +63,7 @@ def stage_component(
     """shard 列を**shard ごとの置き場**へ並べて FileRef 列を返す（列がディレクトリを跨げる）。"""
     total = len(shards)
     return [
-        place(root, shard_name(f"{directory}/{stem}.safetensors", index, total), blob)
+        place(root, numbered_name(f"{directory}/{stem}.safetensors", index, total), blob)
         for index, (directory, blob) in enumerate(zip(directories, shards, strict=True), start=1)
     ]
 
@@ -108,11 +106,11 @@ def repo(tmp_path: Path) -> Path:
     """2 モデルが `encoder` を共有し、`decoder` の列がディレクトリを跨ぐリポ。"""
     root = tmp_path / "src"
     encoder = stage_component(
-        root, ["shared/encoder"] * 2, "model.f32", ir_container(mark="enc", storage="f32")
+        root, ["shared/encoder"] * 2, "model.f32", legacy_shards(mark="enc", storage="f32")
     )
     # 列がディレクトリを跨ぐ形（グラフ shard は共有ディレクトリ・重み shard は話者ディレクトリ）。
     decoder = stage_component(
-        root, ["shared/decoder", "alpha/decoder"], "model.f32", ir_container(mark="dec")
+        root, ["shared/decoder", "alpha/decoder"], "model.f32", legacy_shards(mark="dec")
     )
     rope = place(root, "alpha/decoder/rope_base.safetensors", b"rope-base-table\n")
     tokenizer = place(root, "tokenizer.json", b'{"model":"synthetic"}\n')
@@ -223,11 +221,30 @@ class TestTheRepositoryManifest:
             assert ref["sha256"] == hashlib.sha256(blob).hexdigest()
 
     def test_a_zero_length_part_is_written_and_declared_with_size_zero(
-        self, repo: Path, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
-        """const が空でも part 1 は 0 バイトのファイルとして並ぶ（ADR 0109 決定 3）。"""
+        """const が空でも part 1 は 0 バイトのファイルとして並ぶ（ADR 0109 決定 3）。
+
+        被験体は**定数を 1 本も持たない**コンポーネント（`legacy_fill_shards`）— const を
+        持つ合成では part 1 が埋まってしまい、0 バイトの席そのものを踏めない。
+        """
+        root = tmp_path / "empty-const"
+        plain = stage_component(
+            root, ["alpha/encoder"] * 2, "model.f32", legacy_fill_shards(2, mark="plain")
+        )
+        write_manifest(
+            root,
+            {
+                "alpha": model_entry(
+                    {"encoder": {"f32": {"shards": plain}}},
+                    {},
+                    {"full": quant({"encoder": "f32"})},
+                )
+            },
+            "alpha",
+        )
         out = tmp_path / "out"
-        migrated(repo, out)
+        migrated(root, out)
         parts = container_of(out, "alpha", "encoder", "f32")["parts"]
 
         assert parts[1]["size"] == 0
@@ -304,7 +321,7 @@ class TestTheRepositoryManifest:
             root,
             ["shared/multi", "alpha/multi", "beta/multi"],
             "model.f32",
-            ir_shards(3, mark="multi"),
+            legacy_fill_shards(3, mark="multi"),
         )
         write_manifest(
             root,
@@ -322,10 +339,10 @@ class TestTheRepositoryManifest:
     def test_a_shard_row_with_mixed_stems_fails_loudly(self, tmp_path: Path) -> None:
         """出力の stem は旧 shard 名から取る（揃っていなければ推測せずに止まる）。"""
         root = tmp_path / "src"
-        blobs = ir_container(mark="mix")
+        blobs = legacy_shards(mark="mix")
         mixed = [
-            place(root, shard_name("shared/mix/model.f32.safetensors", 1, 2), blobs[0]),
-            place(root, shard_name("shared/mix/other.f32.safetensors", 2, 2), blobs[1]),
+            place(root, numbered_name("shared/mix/model.f32.safetensors", 1, 2), blobs[0]),
+            place(root, numbered_name("shared/mix/other.f32.safetensors", 2, 2), blobs[1]),
         ]
         write_manifest(
             root,
@@ -370,7 +387,7 @@ class TestTheRepositoryManifest:
                 raise OSError("据え替えの途中で落ちた回")
             real(source, target)
 
-        monkeypatch.setattr(migrate.os, "replace", flaky)
+        monkeypatch.setattr(publish.os, "replace", flaky)
         with pytest.raises(OSError, match="据え替えの途中"):
             migrated(repo, out)
 
@@ -439,7 +456,7 @@ class TestTheExtras:
 def borrower(tmp_path: Path, repo: Path) -> Path:
     """`hdae/lender` の `alpha.encoder.f32` を借りるリポ（自前の重みは 1 本）。"""
     root = tmp_path / "borrower"
-    own = stage_component(root, ["gamma/decoder"] * 2, "model.f32", ir_container(mark="own"))
+    own = stage_component(root, ["gamma/decoder"] * 2, "model.f32", legacy_shards(mark="own"))
     lender = json.loads((repo / "karume.json").read_text(encoding="utf-8"))
     borrowed = [
         {**ref, "repo": "hdae/lender", "revision": "a" * 40}
@@ -608,19 +625,18 @@ def stage_ple(
     shards: list[dict[str, Any]] = []
     for position, (start, stop) in enumerate(PLE_RANGES, start=1):
         rows = stop - start
-        name = shard_name("ple.safetensors", position, len(PLE_RANGES))
+        name = numbered_name("ple.safetensors", position, len(PLE_RANGES))
         path = root / directory / name
         path.parent.mkdir(parents=True, exist_ok=True)
         payloads = {
             "values": ple_rows(start, stop, values_row, 11),
             "scales": ple_rows(start, stop, scales_row, 23),
         }
-        write_container(
-            path,
-            container_order(
+        blob = write_safetensors(
+            order(
                 [
-                    ContainerEntry("values", values_dtype, (rows, layers, dim), rows * values_row),
-                    ContainerEntry("scales", "F32", (rows, layers), rows * scales_row),
+                    Entry("values", values_dtype, (rows, layers, dim), payloads["values"]),
+                    Entry("scales", "F32", (rows, layers), payloads["scales"]),
                 ]
             ),
             {
@@ -628,9 +644,8 @@ def stage_ple(
                     {**ple_common(layers, dim, schema=schema), "start": start, "stop": stop}
                 )
             },
-            lambda entry, payloads=payloads: [payloads[entry.name]],
         )
-        blob = path.read_bytes()
+        path.write_bytes(blob)
         assets[name] = {
             "path": f"{directory}/{name}",
             "size": len(blob),
@@ -660,7 +675,7 @@ def stage_gemma_repo(
     weights = {
         dtype: {
             "shards": stage_component(
-                root, ["e2b/model"] * 2, f"model.{dtype}", ir_container(mark="g", storage=dtype)
+                root, ["e2b/model"] * 2, f"model.{dtype}", legacy_shards(mark="g", storage=dtype)
             )
         }
         for dtype in ("f32", "f16")
@@ -682,7 +697,7 @@ def source_rows(repo: Path, directory: str, key: str) -> bytes:
     out = bytearray()
     for position in range(1, len(PLE_RANGES) + 1):
         blob = (
-            repo / directory / shard_name("ple.safetensors", position, len(PLE_RANGES))
+            repo / directory / numbered_name("ple.safetensors", position, len(PLE_RANGES))
         ).read_bytes()
         length = struct.unpack("<Q", blob[:8])[0]
         spec = json.loads(blob[8 : 8 + length])[key]

@@ -13,13 +13,26 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Sequence
+from pathlib import Path
 
 import pytest
+import torch
 
+from karume.container import Provenance
+from karume.emit import stored_model
 from karume.ir import IrGraph
 from karume.ops import OpContractError
+from karume.publish import publish_container
 from karume.states import StateAttentionSpec, StatesFormError, StatesPlan, to_states_form
-from karume.verify import IrError, assert_op_contracts, assert_runtime_support, parse_ir_graph
+from karume.verify import (
+    IrError,
+    assert_ir_accepted,
+    assert_op_contracts,
+    assert_runtime_support,
+    ir_graph_from_container,
+    parse_ir_graph,
+    verify_container,
+)
 
 #: q の宣言 shape（`[B,H,M,D]` — H=8）と k / v の宣言 shape（`[B,Hkv,M,D]` — Hkv=2 の GQA 4:1）。
 Q = [1, 8, "T", 16]
@@ -414,3 +427,47 @@ class TestTheOrderCheckIsEffective:
 
         with pytest.raises(IrError, match="より後に読者"):
             assert_op_contracts(parsed)
+
+
+class TestTheStatesFormSurvivesTheContainer:
+    """手術済みグラフが容器の 2 文書から**起こし直せる**（`verify.ir_graph_from_container`）。
+
+    容器のグラフ文書は IR v2（initializer 名がテンソルキー・格納は束縛表へ出ている）なので、
+    `karume dist` と `karume verify` の門は v1 へ起こし直してから規則を掛ける。`states` 節と
+    ノードの `states` 欄は v2 でもそのまま載るが、落とすと**参照完全性の検査が通らなくなる**
+    （宣言したスロットを誰も参照しない形になる）ので、往復そのものを固定する。
+    """
+
+    def _published(self, tmp_path: Path) -> list[Path]:
+        graph = to_states_form(source(), plan(SPEC))
+        tensors = {}
+        for name, initializer in graph.initializers.items():
+            if initializer.is_shared:
+                continue
+            assert initializer.tensor is not None
+            shape = [int(dim) for dim in graph.values[name].shape]
+            dtype = torch.int32 if initializer.storage.dtype == "i32" else torch.float32
+            tensors[initializer.tensor] = torch.zeros(shape, dtype=dtype)
+        stored = stored_model(graph, tensors)
+        result = publish_container(
+            tmp_path / "model.krm",
+            stored.graph,
+            stored.tensors,
+            stored.bindings,
+            graph_name="dec",
+            provenance=Provenance(license="mit"),
+        )
+        return list(result.parts)
+
+    def test_the_slots_and_their_references_round_trip(self, tmp_path: Path) -> None:
+        read = verify_container(self._published(tmp_path)).read
+
+        restored = ir_graph_from_container(read, "dec")
+
+        assert sorted(restored.states) == ["l0.k", "l0.v"]
+        referenced = {slot for node in restored.nodes for slot in node.states.values()}
+        assert referenced == set(restored.states)
+
+    def test_the_acceptance_gate_passes_on_the_container(self, tmp_path: Path) -> None:
+        """組み立て（`karume dist`）と `karume verify` が通る形そのもの。"""
+        assert_ir_accepted(verify_container(self._published(tmp_path)).read)

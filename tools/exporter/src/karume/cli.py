@@ -1,8 +1,7 @@
-"""`karume` コマンド — dist / repack / verify のサブコマンド式ディスパッチ。
+"""`karume` コマンド — dist / migrate / verify のサブコマンド式ディスパッチ。
 
     karume dist --pipeline siglip2   # 受理集合が空の core 単体では落ちる（下の NOTE）
-    karume verify ../../models/karume-anima/shared/transformer/model.f16-00001-of-00017.safetensors
-    karume verify --container /tmp/krm/model.f16-00001-of-00003.krm  # コンテナ（krm / krg）
+    karume verify ../../models/karume-irodori/v4.1-small/dit/model.i8.krm
     karume migrate ../../models/karume-siglip2/vision/model.f16.safetensors --out /tmp/krm \
         --license apache-2.0
 
@@ -43,12 +42,6 @@ def run_migrate(argv: Sequence[str]) -> None:
     return migrate.main(argv)
 
 
-def run_repack(argv: Sequence[str]) -> None:
-    from karume import repack
-
-    return repack.main(argv)
-
-
 def run_verify(argv: Sequence[str]) -> None:
     from karume import verify
 
@@ -59,11 +52,7 @@ def run_verify(argv: Sequence[str]) -> None:
 COMMANDS: Mapping[str, tuple[Callable[[Sequence[str]], None], str]] = {
     "dist": (run_dist, "配布ディレクトリを組み立てて karume.json / README.md を書く"),
     "migrate": (run_migrate, "旧配布形をコンテナ形式（krm / krg）へ移す（入力は読むだけ）"),
-    "repack": (run_repack, "既存の配布形を shard 仕様 v3 へ詰め替える（バイトは変えない）"),
-    "verify": (
-        run_verify,
-        "配布形 safetensors を IR v1 の全規則で検証する（--container でコンテナ krm / krg）",
-    ),
+    "verify": (run_verify, "コンテナ（krm / krg）を全規則で検証する"),
 }
 
 

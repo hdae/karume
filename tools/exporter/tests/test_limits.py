@@ -15,7 +15,6 @@ from karume.limits import (
     WEBGPU_DEFAULT_LIMITS,
     LimitsError,
     max_state_slot_bytes,
-    max_tensor_payload,
     required_limits,
     state_bindings,
 )
@@ -99,28 +98,19 @@ class TestWhatTheDeclarationDoesNotCover:
     数える）なら、下の期待値が `{}` から両上限入りへ変わる。
     """
 
-    #: 重みは 1 本 1 MiB（既定の内側）。
-    _WEIGHT_BYTES: ClassVar[int] = 1024 * 1024
     #: 中間ノード出力の宣言 shape（f32 で 960 MiB = binding 既定の 7.5 倍・birefnet 1024² の形）。
     _INTERMEDIATE_SHAPE: ClassVar[list[int]] = [1, 240, 1024, 1024]
 
     def test_a_graph_whose_intermediates_dwarf_its_weights_declares_nothing(self) -> None:
-        """重みが既定の内側なら、ノード出力が既定の 7.5 倍でも欄は生えない。"""
-        header = {
-            "w0": _tensor(0, self._WEIGHT_BYTES),
-            "w1": _tensor(self._WEIGHT_BYTES, 2 * self._WEIGHT_BYTES),
-        }
+        """ノード出力が既定の 7.5 倍でも、state を持たないグラフの需要は 0（欄は生えない）。"""
         graph = {
             "values": {"cat": {"dtype": "f32", "shape": self._INTERMEDIATE_SHAPE}},
             "nodes": [{"op": "cat", "ins": ["w0", "w1"], "outs": ["cat"], "attrs": {}}],
         }
 
-        demand = max(
-            max_tensor_payload(header, "where"),
-            max_state_slot_bytes(graph, {}, "where"),
-        )
+        demand = max_state_slot_bytes(graph, {}, "where")
 
-        assert demand == self._WEIGHT_BYTES
+        assert demand == 0
         assert required_limits(demand) == {}
 
     def test_the_same_number_would_be_declared_if_it_came_from_a_stored_tensor(self) -> None:
@@ -137,69 +127,6 @@ class TestWhatTheDeclarationDoesNotCover:
             "maxBufferSize": intermediate,
             "maxStorageBufferBindingSize": intermediate,
         }
-
-
-class TestTensorPayloadDemand:
-    """需要の 1 本目 — **格納 payload そのままの**最大テンソル。"""
-
-    def test_it_takes_the_largest_payload_of_the_header(self) -> None:
-        header = {"a": _tensor(0, 64), "b": _tensor(64, 4160), "c": _tensor(4160, 4176)}
-
-        assert max_tensor_payload(header, "where") == 4096
-
-    def test_it_ignores_the_metadata_entry(self) -> None:
-        """`__metadata__`（グラフ JSON）はテンソルではない — 数 MB でも需要にならない。"""
-        header = {"__metadata__": {"karume_ir": "x" * 4096}, "a": _tensor(0, 64)}
-
-        assert max_tensor_payload(header, "where") == 64
-
-    def test_a_graph_shard_has_no_demand_at_all(self) -> None:
-        """ADR 0081 のグラフ shard（データ節が空）は 0 — 呼び手が全 shard の最大を採る。"""
-        assert max_tensor_payload({"__metadata__": {"karume_ir": "{}"}}, "where") == 0
-
-    def test_the_stored_width_is_what_counts(self) -> None:
-        """i4 の 1 本は i4 の寸法のまま（f32 へ展開した後の寸法を要求に書かない）。"""
-        header = {"packed": _tensor(0, 512, dtype="I8"), "scale": _tensor(512, 640)}
-
-        assert max_tensor_payload(header, "where") == 512
-
-    @pytest.mark.parametrize(
-        "offsets", [[0], [0, 16, 32], "0-16", [16, 0], [-16, 0], [0.0, 16.0], [True, False]]
-    )
-    def test_it_refuses_a_broken_offsets_declaration(self, offsets: Any) -> None:
-        """壊れた宣言を 0 として素通しすると、需要が黙って小さく出る。"""
-        with pytest.raises(LimitsError, match="data_offsets"):
-            max_tensor_payload({"a": {"dtype": "F32", "data_offsets": offsets}}, "where")
-
-    def test_the_pieces_of_one_tensor_are_summed_into_the_parent(self) -> None:
-        """分割テンソル（ADR 0090）の需要は**親の全体長**（1 テンソル = 1 GPU バッファ）。
-
-        断片の最大を採ると要求が過小に焼かれ、「宣言は満たすのに `createSession` で落ちる」
-        という最も損な形になる。
-        """
-        header = {
-            "w#00001-of-00003": _tensor(0, 512),
-            "w#00002-of-00003": _tensor(512, 1024),
-            "w#00003-of-00003": _tensor(1024, 1280),
-            "other": _tensor(1280, 1920),
-        }
-
-        assert max_tensor_payload(header, "where") == 1280
-
-    def test_a_piece_run_smaller_than_a_whole_tensor_does_not_win(self) -> None:
-        """合算しても最大でなければ需要にならない（採るのは親どうしの最大）。"""
-        header = {"w#00001-of-00002": _tensor(0, 64), "w#00002-of-00002": _tensor(64, 128)}
-
-        assert max_tensor_payload({**header, "big": _tensor(128, 1024)}, "where") == 896
-
-    def test_a_key_that_only_looks_like_a_piece_stays_its_own_tensor(self) -> None:
-        """域外の綴りは piece ではない（`parse_piece_key` の鏡像 — 親へ合算しない）。
-
-        合算してしまう実装なら 100 + 64 = 164 が需要になる。
-        """
-        header = {"w#00003-of-00002": _tensor(0, 100), "w#00001-of-00002": _tensor(100, 164)}
-
-        assert max_tensor_payload(header, "where") == 100
 
 
 class TestStateSlotDemand:

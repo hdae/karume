@@ -41,10 +41,8 @@ MUST: 自己検査（書いたものを読み直して initializer ごとに sha
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import math
-import os
 import re
 import shutil
 from collections import Counter
@@ -52,23 +50,20 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any
-from uuid import uuid4
 
 from karume.container import (
     BLOCK_MAX_BYTES,
-    CODEC_FOR_STORAGE,
     DEFAULT_PART_BYTES,
     GRAPH_NAME_PATTERN,
     AssetInput,
+    ContainerFormatError,
+    DocumentRef,
     Encoding,
     Provenance,
-    ReadContainer,
-    canonical_json,
+    base_path,
     codec_entry,
-    container_paths,
-    per_channel_group_size,
-    read_container,
-    write_model_container,
+    container_bindings,
+    sequence_siblings,
 )
 from karume.dist import (
     REPO_RE,
@@ -77,14 +72,19 @@ from karume.dist import (
     file_ref,
     generator_tag,
     manifest_text,
-    safetensors_header,
     sha256_file,
 )
-from karume.emit import EmitError, weight_channel_axes
 from karume.ir import IR_METADATA_KEY, IrGraph
-from karume.repack import SourceTensor, payload_chunks, read_component
-from karume.shards import component_path, resolve_shards, shard_siblings
-from karume.verify import BoundGraph, bind_graphs, parse_ir_graph
+from karume.legacy import (
+    SourceTensor,
+    payload_chunks,
+    read_component,
+    resolve_shards,
+    safetensors_header,
+)
+from karume.ple import PLE_INDEX_ASSET, PLE_PACK_FACTOR, PleError, ple_assets, ple_row_bytes
+from karume.publish import PublishError, PublishResult, publish_container
+from karume.verify import parse_ir_graph
 
 #: 新コンテナの拡張子（§1 — 種別は magic が持つが、ファイル名も分けておく）。
 MODEL_SUFFIX = ".krm"
@@ -106,57 +106,17 @@ EXTRA_ASSETS: Mapping[str, tuple[str, str]] = {"rope_base": ("rope_base", "rope-
 #: PLE sidecar の持ち主（pipeline 名 → 畳み先の部品名 — ADR 0109 決定 4 / 0085）。
 PLE_OWNER: Mapping[str, str] = {"gemma4": "model", "gemma4-qat": "model"}
 
-#: 旧 manifest の assets に居る PLE 索引の名前。新しい容器でも同じ名前の資産になる。
-PLE_INDEX_ASSET = "ple_index"
-
-#: 新しい PLE 索引の版（block 列を指す形 — 旧 sidecar の schema 2 を置き換える）。
-PLE_INDEX_SCHEMA = 3
-
-#: PLE の資産の役割（models 側の解釈者名 — runtime は解釈しない）。
-PLE_INDEX_ROLE = "ple-index"
-PLE_ROLES: Mapping[str, str] = {"values": "ple-values", "scales": "ple-scales"}
-
 #: 旧 PLE shard が持つメタデータのキー（索引との整合をここで突き合わせる）。
 PLE_METADATA_KEY = "karume_ple"
-
-#: 旧 PLE 索引の格納 → 1 バイトに詰まる要素数（`packages/models/src/gemma/ple-index.ts` の鏡像）。
-PLE_PACK_FACTOR: Mapping[str, int] = {"i8": 1, "i2": 4, "i4": 2}
-
-#: PLE の scale 1 個ぶんのバイト数（f32 — 同上）。
-PLE_SCALE_BYTES = 4
 
 
 class MigrateError(ValueError):
     """移行の前提が破れた（写し先の無い格納・宣言と現物の食い違い・出力先の残骸）。"""
 
 
-@dataclass(frozen=True)
-class DocumentRef:
-    """descriptor 1 文書ぶんの期待値（manifest `karume/5` の `container.descriptor`）。"""
-
-    length: int
-    sha256: str
-
-    def to_document(self) -> dict[str, Any]:
-        return {"length": self.length, "sha256": self.sha256}
-
-
-@dataclass(frozen=True)
-class MigrationResult:
-    """1 コンポーネントの移行結果。"""
-
-    #: 据えた `krm` の part 列（part 0 から。単一形なら 1 本）。
-    parts: tuple[Path, ...]
-    #: `--graph` で書いた `krg`（書かなければ `None`）。
-    graph: Path | None
-    #: 供給計画を組んだ initializer の本数。
-    initializers: int
-    #: 旧実体と sha256 を突き合わせた payload の本数（実体 + companion scale）。
-    payloads: int
-    #: 突き合わせた資産の本数（extras と PLE — 部品単位モードでは 0）。
-    assets: int
-    #: 2 文書（グラフ記述 / モデル記述）の `(バイト長, sha256)`。
-    descriptor: tuple[DocumentRef, DocumentRef]
+#: 1 コンポーネントの移行結果（据えた part 列・2 文書・突き合わせた本数）。公開の 3 段は
+#: `karume.publish` と共有なので、結果の器も同じものを使う。
+MigrationResult = PublishResult
 
 
 class _SourcePayloads(Mapping[str, bytes]):
@@ -193,56 +153,17 @@ def _concrete_shape(graph: IrGraph, name: str, where: str) -> list[int]:
     return shape
 
 
-def container_bindings(graph: IrGraph) -> dict[str, Encoding]:
-    """IR v1 の `storage` → コンテナの束縛（**テンソルキー** → {@link Encoding}）。
+def _bindings(graph: IrGraph) -> dict[str, Encoding]:
+    """旧 IR の `storage` → コンテナの束縛。
 
-    共有 initializer（バイトを持たない宣言）は束縛を持たない。`rowAxis` は消費側 op から引き
-    （`emit.weight_channel_axes`）、per-channel の `groupSize` は行長（= numel / 行数）になる。
-    group codec（`int4-sym-g`）の旧 scale は先頭次元を行として焼かれているので、消費 op が軸 1 を
-    要求する形は写せない（fail loudly — 黙って軸 0 として宣言すると値が入れ替わる）。
+    MUST: 導出は書き手と**同じ 1 本**（{@link karume.container.container_bindings}）を通る。
+    移行側で別に綴ると、同じ資産から「旧形から移した容器」と「直接書いた容器」で別の束縛が
+    出る。ここが足すのは例外の語彙の翻訳だけ。
     """
     try:
-        axes = weight_channel_axes(graph)
-    except EmitError as cause:
+        return container_bindings(graph)
+    except ContainerFormatError as cause:
         raise MigrateError(str(cause)) from cause
-    bindings: dict[str, Encoding] = {}
-    for name, initializer in graph.initializers.items():
-        if initializer.is_shared:
-            continue
-        where = f"initializer '{name}'"
-        key = initializer.tensor
-        if key is None:
-            raise MigrateError(f"{where}: `tensor` も `shared` も無い（IR v1 として不正）")
-        storage = initializer.storage
-        codec = CODEC_FOR_STORAGE.get(storage.dtype)
-        if codec is None:
-            raise MigrateError(f"{where}: 旧格納 dtype '{storage.dtype}' の写し先が台帳に無い")
-        entry = codec_entry(codec)
-        if entry.scale == "forbidden":
-            bindings[key] = Encoding(codec)
-            continue
-        if storage.scale is None:
-            raise MigrateError(f"{where}: 量子化格納 '{storage.dtype}' なのに scale の宣言が無い")
-        shape = _concrete_shape(graph, name, where)
-        row_axis = axes.get(name, 0)
-        if len(shape) <= row_axis:
-            raise MigrateError(f"{where}: rowAxis {row_axis} に対して宣言 shape {shape} が浅い")
-        if entry.grouping == "group":
-            if storage.group_size is None:
-                raise MigrateError(f"{where}: group 量子化なのに group_size の宣言が無い")
-            if row_axis != 0:
-                raise MigrateError(
-                    f"{where}: 消費 op の per-channel 軸が {row_axis} だが、旧 group scale は"
-                    "先頭次元を行として焼かれている（写せる形が無い）"
-                )
-            group_size = storage.group_size
-        else:
-            row_count = shape[row_axis]
-            group_size = per_channel_group_size(math.prod(shape) // row_count if row_count else 0)
-        bindings[key] = Encoding(
-            codec, group_size=group_size, row_axis=row_axis, scale_key=storage.scale
-        )
-    return bindings
 
 
 def _expected_scale_shape(shape: Sequence[int], encoding: Encoding) -> list[int]:
@@ -305,92 +226,13 @@ def _assert_tensor_cover(
         )
 
 
-def _source_digest(source: SourceTensor) -> str:
-    digest = hashlib.sha256()
-    for chunk in payload_chunks(source):
-        digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _assert_payloads_match(
-    read_back: ReadContainer,
-    bound: BoundGraph,
-    bindings: Mapping[str, Encoding],
-    sources: Mapping[str, SourceTensor],
-) -> int:
-    """書いたコンテナの payload を旧実体と突き合わせる（§12 の不変条件 5）。
-
-    取り直しは {@link karume.container.ReadContainer.block} 越しなので、block ごとの sha256 も
-    同時に検証される。突き合わせるのは block 全体ではなく **payload 部**（末尾の詰め物は
-    この移行で新たに焼かれるバイトで、旧配布形には無い）。
-    """
-    checked = 0
-    for name, supply in sorted(bound.supplies.items()):
-        digest = hashlib.sha256()
-        for block in supply.blocks:
-            digest.update(read_back.block(block.id)[: block.payload_bytes])
-        _assert_digest(f"initializer '{name}'", digest.hexdigest(), sources[name])
-        checked += 1
-        scale_key = bindings[name].scale_key
-        if supply.scale is not None and scale_key is not None:
-            raw = read_back.block(supply.scale.id)[: supply.scale.payload_bytes]
-            _assert_digest(
-                f"initializer '{name}' の scale '{scale_key}'",
-                hashlib.sha256(raw).hexdigest(),
-                sources[scale_key],
-            )
-            checked += 1
-    return checked
-
-
-def _assert_digest(where: str, actual: str, source: SourceTensor) -> None:
-    expected = _source_digest(source)
-    if actual != expected:
-        raise MigrateError(
-            f"{where}: payload の sha256 が旧配布形と違う（旧 {expected} / 新 {actual}）"
-        )
-
-
-def _assert_assets_match(read_back: ReadContainer, assets: Mapping[str, AssetInput]) -> int:
-    """書いた容器の資産を、渡した payload と突き合わせる（§12 の不変条件 5 を資産へ広げたもの）。
-
-    突き合わせるのは **payload 部**で、末尾の詰め物が 0x00 であることも見る（詰め物は §4.1 の
-    とおりこの移行で新たに焼かれるバイトなので、旧側には相手が無い）。
-    """
-    model = read_back.model
-    if model is None:  # pragma: no cover - krm を読み直した直後なので在る
-        raise MigrateError("krg には資産を載せられない")
-    for name in sorted(assets):
-        asset = assets[name]
-        binding = model.assets.get(name)
-        if binding is None:
-            raise MigrateError(f"資産 '{name}' が書いた容器の宣言に無い")
-        if binding.role != asset.role:
-            raise MigrateError(
-                f"資産 '{name}': 役割が '{binding.role}'（渡したのは '{asset.role}'）"
-            )
-        if binding.length != asset.length:
-            raise MigrateError(
-                f"資産 '{name}': 宣言の論理長が {binding.length}（渡したのは {asset.length}）"
-            )
-        raw = memoryview(read_back.block(binding.block))
-        payload = asset.payload
-        expected = memoryview(payload() if callable(payload) else payload).cast("B")
-        if expected.nbytes != asset.length:
-            raise MigrateError(
-                f"資産 '{name}': 引き直した実体が {expected.nbytes} バイト"
-                f"（宣言は {asset.length}）— 引かれるたびに同じバイト列を返す MUST"
-            )
-        if raw[: expected.nbytes] != expected:
-            raise MigrateError(f"資産 '{name}': payload が渡したバイト列と違う")
-        if bytes(raw[expected.nbytes :]) != b"\x00" * (raw.nbytes - expected.nbytes):
-            raise MigrateError(f"資産 '{name}': 末尾の詰め物が 0x00 でない")
-    return len(assets)
-
-
 def _assert_no_leftovers(final: Path, graph_path: Path | None) -> None:
-    """出力先に前回の成果物が残っていない（**消さずに止まる** — どれを配るかが決まらない）。"""
-    existing = [str(path) for path in shard_siblings(final)]
+    """出力先に前回の成果物が残っていない（**消さずに止まる** — どれを配るかが決まらない）。
+
+    MUST: 移行だけがこの門を持つ（export の再実行は前回の出力を据え替えてよいが、移行は
+    「旧入力は読むだけ・出力先は空から作る」が成立条件なので、残骸を黙って消さない）。
+    """
+    existing = [str(path) for path in sequence_siblings(final)]
     if graph_path is not None and graph_path.is_file():
         existing.append(str(graph_path))
     if existing:
@@ -413,14 +255,14 @@ def migrate_component(
     """コンポーネント 1 つ（旧単一形 / 旧 shard 列）を `krm` へ移す。
 
     `path` は代表 path でも手元の現物（`...-00001-of-00002.safetensors`）でもよい
-    （{@link karume.shards.component_path} が畳む）。`graph_name` の既定は**親ディレクトリ名**
+    （{@link karume.container.base_path} が畳む）。`graph_name` の既定は**親ディレクトリ名**
     （配布形のコンポーネント名）で、コンテナの語彙（`[A-Za-z0-9._-]{1,64}`）から外れる場合は
     明示する。
 
     `_part_bytes` / `_block_bytes` は**テストからのみ触る**寸法の差し込み（合成の小さな資産で
     part またぎと piece 分割を踏むため）— 公開ノブではない。
     """
-    source = component_path(Path(path))
+    source = base_path(Path(path))
     name = graph_name if graph_name is not None else source.parent.name
     if GRAPH_NAME_PATTERN.match(name) is None:
         raise MigrateError(
@@ -455,66 +297,34 @@ def _migrate_shards(
     """**明示の shard 列**を 1 本の `krm` へ移す（部品単位モードとリポ丸ごとモードの共通経路）。
 
     `shard_paths` は読む順（先頭がグラフ shard）。列を組むのは呼び手で、代表 path からの復元
-    （{@link karume.shards.resolve_shards}）も旧 manifest の宣言もここへ来る前に済んでいる。
+    （{@link karume.legacy.resolve_shards}）も旧 manifest の宣言もここへ来る前に済んでいる。
+
+    MUST: 書く → 読み直して検証 → 据え替えの 3 段は export の一本道と**同じ 1 本**
+    （{@link karume.publish.publish_container}）を通る。ここが足すのは旧形の読み取りと、
+    旧形にしか無い前提（scale の形・テンソルの過不足・出力先が空であること）の検査だけである。
     """
     metadata, stored = read_component(shard_paths)
     graph = parse_ir_graph(metadata[IR_METADATA_KEY])
-    bindings = container_bindings(graph)
+    bindings = _bindings(graph)
     _assert_tensor_cover(bindings, stored)
     _assert_scale_layouts(graph, bindings, stored)
-
     _assert_no_leftovers(final, graph_path)
-    staged = final.with_name(f"{final.stem}.{uuid4().hex}.partial{MODEL_SUFFIX}")
-    replaced: list[Path] = []
     try:
-        written = write_model_container(
-            staged,
+        return publish_container(
+            final,
             graph,
             _SourcePayloads(stored),
             bindings,
             graph_name=graph_name,
             provenance=provenance,
             assets=assets,
+            single=single,
+            graph_path=graph_path,
             part_bytes=part_bytes,
             block_bytes=block_bytes,
-            single=single,
         )
-        read_back = read_container(written)
-        bound = bind_graphs(read_back.graph, read_back.model)[graph_name]
-        payloads = _assert_payloads_match(read_back, bound, bindings, stored)
-        checked = _assert_assets_match(read_back, assets)
-        documents = (
-            DocumentRef(
-                len(read_back.graph_descriptor_bytes),
-                hashlib.sha256(read_back.graph_descriptor_bytes).hexdigest(),
-            ),
-            DocumentRef(
-                len(read_back.model_descriptor_bytes),
-                hashlib.sha256(read_back.model_descriptor_bytes).hexdigest(),
-            ),
-        )
-        published = [final] if single else list(container_paths(final, len(written)))
-        # MUST: `krg` は据え替えの**前**に抜く（読み手は一時 path の part を指している）。
-        if graph_path is not None:
-            graph_path.write_bytes(read_back.extract_graph())
-        for staged_part, target in zip(written, published, strict=True):
-            os.replace(staged_part, target)
-            replaced.append(target)
-    except BaseException:
-        # 書き出しが途中で落ちた回は返り値が無いので、一時 path の**名前の形**から拾う。
-        for leftover in shard_siblings(staged):
-            leftover.unlink(missing_ok=True)
-        # MUST: 据え替えの途中で落ちた回も**何も残さない**（半分だけ公開された容器を残すと、
-        # 次の実行が「前回の成果物が残っている」で止まる — §12）。
-        for target in replaced:
-            target.unlink(missing_ok=True)
-        # `krg` は抽出できた後に落ちた回だけ在る（前段の門が「先に在った」形を除いてある）。
-        if graph_path is not None:
-            graph_path.unlink(missing_ok=True)
-        raise
-    return MigrationResult(
-        tuple(published), graph_path, len(bound.supplies), payloads, checked, documents
-    )
+    except PublishError as cause:
+        raise MigrateError(str(cause)) from cause
 
 
 # ---- 旧 manifest（`karume/4`）の読み取り -----------------------------------
@@ -975,7 +785,7 @@ def _crossed_container(cross: CrossRepo, entry: WeightEntry, seat: _Seat) -> Con
         container = _object(raw, label)
         head = container.get("parts")
         _require(isinstance(head, list) and head, f"{label}.parts が非空の配列でない")
-        key = component_path(Path(_file_ref(head[0], f"{label}.parts[0]").path)).as_posix()
+        key = base_path(Path(_file_ref(head[0], f"{label}.parts[0]").path)).as_posix()
         candidates.add(key)
         if key == wanted and found is None:
             found = (label, container)
@@ -1075,7 +885,7 @@ def _output_location(shards: Sequence[FileRef], where: str) -> tuple[str, str]:
             name.suffix == ".safetensors",
             f"{where}: 旧 shard '{ref.path}' の拡張子が .safetensors でない",
         )
-        stems.add(component_path(Path(name.name)).stem)
+        stems.add(base_path(Path(name.name)).stem)
     _require(
         len(stems) == 1, f"{where}: shard 列のファイル名の stem が揃っていない: {sorted(stems)}"
     )
@@ -1323,9 +1133,11 @@ def _read_segments(segments: Sequence[tuple[Path, int, int]], begin: int, end: i
 
 
 def _segment_reader(
-    segments: tuple[tuple[Path, int, int], ...], begin: int, end: int
-) -> Callable[[], bytes]:
-    def read() -> bytes:
+    segments: tuple[tuple[Path, int, int], ...],
+) -> Callable[[int, int], bytes]:
+    """連結した区間列に対する「バイト範囲を読む」呼び出し（{@link ple_assets} の受け口）。"""
+
+    def read(begin: int, end: int) -> bytes:
         return _read_segments(segments, begin, end)
 
     return read
@@ -1334,24 +1146,21 @@ def _segment_reader(
 def _ple_assets(
     repo: Path, fold: _PleFold | None, block_bytes: int, where: str
 ) -> dict[str, AssetInput]:
-    """PLE sidecar を容器の資産へ（索引 schema 3 + `values` / `scales` の block 列）。
+    """旧 PLE sidecar を容器の資産へ畳む（組み立て自体は {@link ple_assets} の 1 本）。
 
-    旧 shard の境界は意味を持たない（全 shard を token 順に連結して切り直す）。block は**行の
-    倍数**で ≤ `block_bytes` に切るので、行バイト数が 4 の倍数であるかぎり詰め物は要らない。
-
-    返す並びが**そのまま物理配置の順**（token 順 — 区間読みの block は 1 block = 1 part）。
+    ここが持つのは**旧 sidecar の読み取り**だけ — 索引と現物の突合（行数・バイト長・shard の
+    並び・`karume_ple` メタデータ）を済ませ、token 順に連結した区間列を読み口として渡す。旧
+    shard の境界は意味を持たない（全 shard を token 順に連結して切り直す）。
     """
     if fold is None:
         return {}
     index = fold.index
     shard_refs = fold.refs[1:]  # 先頭は索引そのもの（畳み先では新しい索引に置き換わる）。
     tokens, layers, dim = index["tokens"], index["layers"], index["dim"]
-    factor = PLE_PACK_FACTOR[index["storage"]]
-    _require(
-        dim % factor == 0,
-        f"{where}: dim {dim} が格納 '{index['storage']}' の詰め数 {factor} で割り切れない",
-    )
-    row_bytes = {"values": layers * dim // factor, "scales": layers * PLE_SCALE_BYTES}
+    try:
+        row_bytes = ple_row_bytes(index["storage"], layers, dim)
+    except PleError as cause:
+        raise MigrateError(f"{where}: {cause}") from cause
     segments: dict[str, list[tuple[Path, int, int]]] = {"values": [], "scales": []}
     for position, (name, ref) in enumerate(shard_refs):
         declared = index["shards"][position]
@@ -1379,46 +1188,20 @@ def _ple_assets(
                 f"{where} の '{name}'.{key}: {entry.nbytes} バイトが"
                 f" {rows} 行 × {expected} バイトと違う",
             )
-            _require(
-                expected % 4 == 0,
-                f"{where}: {key} の 1 行 {expected} バイトが 4 の倍数でない"
-                "（行の倍数で block に切れない）",
-            )
             segments[key].append((path, data_start + entry.begin, entry.nbytes))
-
-    assets: dict[str, AssetInput] = {}
-    document: dict[str, Any] = {
-        "schema": PLE_INDEX_SCHEMA,
-        "storage": index["storage"],
-        "tokens": tokens,
-        "layers": layers,
-        "dim": dim,
-        "embedScale": index["embedScale"],
-    }
-    for key, role in PLE_ROLES.items():
-        stride = row_bytes[key]
-        per_block = block_bytes // stride
-        _require(
-            per_block >= 1,
-            f"{where}: {key} の 1 行 {stride} バイトが block 上限 {block_bytes} を超える",
+    try:
+        return ple_assets(
+            storage=index["storage"],
+            tokens=tokens,
+            layers=layers,
+            dim=dim,
+            embed_scale=index["embedScale"],
+            read_values=_segment_reader(tuple(segments["values"])),
+            read_scales=_segment_reader(tuple(segments["scales"])),
+            block_bytes=block_bytes,
         )
-        placed = tuple(segments[key])
-        blocks: list[dict[str, Any]] = []
-        for start in range(0, tokens, per_block):
-            stop = min(start + per_block, tokens)
-            name = f"ple.{key}.{len(blocks)}"
-            blocks.append({"asset": name, "start": start, "stop": stop})
-            # 区間読みを要する block なので専用 part に単独で置く（container-v1 §4.2）。
-            assets[name] = AssetInput(
-                role,
-                (stop - start) * stride,
-                _segment_reader(placed, start * stride, stop * stride),
-                dedicated_part=True,
-            )
-        document[key] = {"rowBytes": stride, "blocks": blocks}
-    encoded = canonical_json(document).encode("utf-8")
-    assets[PLE_INDEX_ASSET] = AssetInput(PLE_INDEX_ROLE, len(encoded), encoded)
-    return assets
+    except PleError as cause:
+        raise MigrateError(f"{where}: {cause}") from cause
 
 
 def _assert_ple_metadata(

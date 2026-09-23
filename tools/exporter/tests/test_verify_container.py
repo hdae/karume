@@ -22,6 +22,7 @@ from container_fixture import (
     synthetic_graph,
     synthetic_tensors,
 )
+from ir_fixtures import ir_container, with_an_unknown_op
 
 from karume import verify
 from karume.container import (
@@ -33,6 +34,7 @@ from karume.container import (
     PartRecord,
     Provenance,
     WeightSupply,
+    numbered_name,
     write_graph_container,
 )
 from karume.verify import InitializerSupply, bind_graphs, verify_container
@@ -299,13 +301,13 @@ class TestTheQuantizedRules:
 
 
 class TestTheContainerCli:
-    """`karume verify --container` — 2 文書の構造検査 + 合流 + 全 block の sha256。"""
+    """`karume verify` — 2 文書の構造検査 + 合流 + 全 block の sha256（受けるのは容器だけ）。"""
 
     def test_it_reports_the_split_form_from_the_part_0_file(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         part0 = split_fixture_paths()[0]
-        verify.main(["--container", str(part0)])
+        verify.main([str(part0)])
         printed = capsys.readouterr().out
 
         assert "parts=5" in printed
@@ -315,7 +317,7 @@ class TestTheContainerCli:
         assert "assets=ple_index,rope_base" in printed
 
     def test_it_reports_the_single_form(self, capsys: pytest.CaptureFixture[str]) -> None:
-        verify.main(["--container", str(FIXTURE_PATH)])
+        verify.main([str(FIXTURE_PATH)])
         printed = capsys.readouterr().out
 
         assert "parts=1" in printed
@@ -330,15 +332,96 @@ class TestTheContainerCli:
         copied.write_bytes(bytes(raw))
 
         with pytest.raises(ContainerFormatError, match="sha256 が宣言と違う"):
-            verify.main(["--container", str(copied)])
+            verify.main([str(copied)])
 
-    def test_the_old_form_still_runs_without_the_flag(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        """旧形式の `karume verify` はそのまま（`--container` は別の入口）。"""
-        seen: list[Path] = []
-        monkeypatch.setattr(verify, "_verify_shards_line", lambda path: seen.append(path) or "ok")
-        verify.main(["a/model.safetensors"])
+    def test_the_retired_flag_is_gone(self) -> None:
+        """`--container` は退役した（受けるのは容器だけなので選択肢そのものが無い）。
 
-        assert seen == [Path("a/model.safetensors")]
-        assert capsys.readouterr().out == "ok\n"
+        残っていると「旧形式も受ける入口がある」と読めてしまう — 旧形式を読むのは移行 CLI
+        だけ MUST（container-v1 §12）。
+        """
+        with pytest.raises(SystemExit) as raised:
+            verify.main(["--container", str(FIXTURE_PATH)])
+
+        assert raised.value.code == 2
+
+
+class TestTheIrAcceptanceGate:
+    """容器の 2 文書から `IrGraph` を起こし、IR の受理規則を掛ける
+    （{@link karume.verify.ir_graph_from_container} / {@link karume.verify.assert_ir_accepted}）。
+
+    構造検査（上のクラス群）は「容器として開けるか」しか見ない。op 語彙・ランタイム支援・
+    op 契約はここが受け持つ — 組み立て（`karume dist`）と `karume verify` が**同じ 1 本**を通る。
+    """
+
+    def _written(self, tmp_path: Path, parts: Sequence[bytes]) -> list[Path]:
+        paths = [
+            tmp_path / numbered_name("model.krm", index, len(parts))
+            for index in range(1, len(parts) + 1)
+        ]
+        for path, payload in zip(paths, parts, strict=True):
+            path.write_bytes(payload)
+        return paths
+
+    def test_the_storage_declaration_comes_from_the_binding_table(self, tmp_path: Path) -> None:
+        """束縛表の codec が IR v1 の `storage` へ戻る（宣言の正本は 1 つ）。"""
+        paths = self._written(tmp_path, ir_container(mark="gate", storage="i4"))
+        read = verify_container(paths).read
+
+        graph = verify.ir_graph_from_container(read, "gate")
+        storages = {
+            name: init.storage.dtype
+            for name, init in graph.initializers.items()
+            if init.storage.dtype != "f32"
+        }
+
+        # i4 系列は混成（i4 適格な重みが i4・相方が i8）— 容器の束縛表から両方が戻る。
+        assert sorted(set(storages.values())) == ["i4", "i8"]
+        for name, init in graph.initializers.items():
+            if init.storage.dtype in ("i4", "i8"):
+                assert init.storage.scale is not None, name
+
+    def test_a_missing_graph_name_fails_loudly(self, tmp_path: Path) -> None:
+        paths = self._written(tmp_path, ir_container(mark="gate"))
+        read = verify_container(paths).read
+
+        with pytest.raises(verify.ContainerError, match="グラフ 'absent' が無い"):
+            verify.ir_graph_from_container(read, "absent")
+
+    def test_a_container_declaring_an_unknown_op_is_rejected(self, tmp_path: Path) -> None:
+        paths = self._written(tmp_path, with_an_unknown_op(ir_container(mark="gate")))
+        read = verify_container(paths).read
+
+        with pytest.raises(verify.ContainerError, match="非対応 op"):
+            verify.assert_ir_accepted(read)
+
+    def test_the_same_container_without_the_unknown_op_is_accepted(self, tmp_path: Path) -> None:
+        """対照 — 門が「常に落ちる」のではないことの裏側。"""
+        paths = self._written(tmp_path, ir_container(mark="gate"))
+
+        verify.assert_ir_accepted(verify_container(paths).read)
+
+    def test_the_cli_rejects_a_container_declaring_an_unknown_op(self, tmp_path: Path) -> None:
+        """`karume verify` も組み立てと**同じ門**を通る（受け入れ側の半分）。"""
+        paths = self._written(tmp_path, with_an_unknown_op(ir_container(mark="gate")))
+
+        with pytest.raises(verify.ContainerError, match="非対応 op"):
+            verify.main([str(paths[0])])
+
+    def test_a_graph_container_is_accepted(self, tmp_path: Path) -> None:
+        """`krg` は束縛表を持たない — 供給の無い席は意味論 dtype の生の格納で起こす。
+
+        格納の主張はこの容器に実体を持たない席のもの（貸し手 / `krm` 側の事実）なので、
+        ここが見るのは op 語彙とランタイム支援・契約の側だけになる。
+        """
+        bindings = synthetic_bindings()
+        path = write_graph_container(
+            tmp_path / "synthetic.krg",
+            synthetic_graph(),
+            synthetic_tensors(),
+            {name: bindings[name] for name in bindings if name.startswith("const.")},
+            graph_name=GRAPH_NAME,
+            block_bytes=FIXTURE_BLOCK_BYTES,
+        )
+
+        verify.assert_ir_accepted(verify_container([path]).read)

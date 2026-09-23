@@ -1,4 +1,9 @@
-"""quant が要求する device limit（manifest の optional `requiredLimits`）の導出。
+"""quant が要求する device limit（manifest の optional `requiredLimits`）の導出（純関数側）。
+
+重みテンソルの需要（常駐 1 バッファの最大バイト数）は**コンテナの合流**から出るので
+`karume.dist.component_demand_bytes` が持ち、ここが持つのは state スロットの寸法と、需要 →
+`requiredLimits` の写像だけである。
+
 
 読み手は hub — 宣言があれば**取得の前に**「このデバイスでは動かない」を出せる（宣言の無い
 quant は GB 級を落としてから `createSession` で初めて落ちる）。綴りの正本は
@@ -38,7 +43,6 @@ from collections.abc import Mapping
 from typing import Any
 
 from karume.dims import DimError, DimExpr, eval_dim, try_parse_dim
-from karume.shards import parse_piece_key
 
 
 class LimitsError(ValueError):
@@ -80,40 +84,6 @@ def required_limits(demand: int) -> dict[str, int]:
     if demand < 0:
         raise LimitsError(f"需要 {demand} バイトが負")
     return {name: demand for name, default in WEBGPU_DEFAULT_LIMITS.items() if demand > default}
-
-
-def max_tensor_payload(header: Mapping[str, Any], where: str) -> int:
-    """safetensors ヘッダの**最大テンソル payload バイト数**（テンソル 0 本なら 0）。
-
-    数えるのは `data_offsets` の差 = **格納形そのままのバイト数**（f16 / i8 / i4 は圧縮寸法の
-    まま）。1 テンソルが 1 つの storage buffer になるので、この値がそのまま需要になる。
-
-    MUST: 分割テンソル（`<親名>#NNNNN-of-NNNNN` — ADR 0090 決定 1）は**親へ畳んで
-    合算**する。GPU 側は分割を知らず親 1 本ぶんのバッファを確保するので、断片の最大を採ると
-    `requiredLimits` が過小に焼かれ、「宣言は満たすのに `createSession` で落ちる」という最も
-    損な形になる。呼び手はコンポーネント全 shard のヘッダを 1 枚へ畳んで渡す
-    （`karume.dist.component_demand_bytes` — 断片は shard を跨いで散る）。
-
-    グラフ shard（ADR 0081 の「`karume_ir` だけ・データ節は空」）は 0 を返す。
-    """
-    totals: dict[str, int] = {}
-    for name, spec in header.items():
-        if name == "__metadata__":
-            continue
-        offsets = spec.get("data_offsets") if isinstance(spec, Mapping) else None
-        if not isinstance(offsets, list) or len(offsets) != 2:
-            raise LimitsError(f"{where}: テンソル '{name}' の data_offsets が 2 要素でない")
-        begin, end = offsets
-        if any(isinstance(value, bool) or not isinstance(value, int) for value in (begin, end)):
-            raise LimitsError(f"{where}: テンソル '{name}' の data_offsets が整数でない")
-        if not 0 <= begin <= end:
-            raise LimitsError(
-                f"{where}: テンソル '{name}' の data_offsets [{begin}, {end}] が昇順の非負でない"
-            )
-        parsed = parse_piece_key(name)
-        owner = name if parsed is None else parsed[0]
-        totals[owner] = totals.get(owner, 0) + (end - begin)
-    return max(totals.values(), default=0)
 
 
 def state_bindings(
@@ -160,7 +130,7 @@ def max_state_slot_bytes(
     スロットは `createGenerationContext` が容量ぶん丸ごと確保する常駐バッファ（1 スロット =
     1 バッファ = 1 binding）なので、記号を**配布形が許す最大容量**で束縛した寸法がそのまま
     需要になる。KV 容量の大きい系列では**最大テンソルより state の方が大きい**（どちらも
-    1 バッファのまま — 重みは shard を跨いで配れるが、GPU 側で 1 本に戻る）。
+    1 バッファのまま — 重みは part を跨いで配れるが、GPU 側で 1 本に戻る）。
     """
     states = graph.get("states")
     if states is None:

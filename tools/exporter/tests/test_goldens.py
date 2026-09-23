@@ -15,6 +15,7 @@ import pytest
 import torch
 from safetensors import safe_open
 
+from karume.container import container_parts
 from karume.dims import eval_dim, parse_dim
 from karume.goldens import (
     GOLDEN_SPECS,
@@ -24,11 +25,11 @@ from karume.goldens import (
     MODEL_FILE,
     OUTPUT_PREFIX,
     generate_all,
+    generate_golden,
 )
 from karume.ir import IrGraph
 from karume.ops import EMITTABLE_OPS
-from karume.shards import resolve_shards
-from karume.verify import verify_model
+from karume.verify import verify_container
 
 #: コミット済み golden の置き場。**リポの綴りはテスト側が持つ** — 生成側（`karume.goldens`）は
 #: 置き場を引数で受けるだけで repo topology を知らない（ADR 0065 Consequences）。
@@ -233,36 +234,43 @@ def _declared_shape(graph: IrGraph, name: str) -> list:
     return graph.values[name].shape
 
 
-def _model_shards(root: Path, name: str) -> tuple[Path, ...]:
-    """モデルの現物（グラフ shard + weight shard 列）。
+#: コミット済み golden に `krm` の現物が在るか（skip 条件）。
+#:
+#: MUST: 探す綴りは**連番**（`model-NNNNN-of-NNNNN.krm`）— 代表 path `model.krm` 自身は
+#: 書かれない（{@link _model_parts} の docstring）ので、`model.krm*` で探すと 1 本も一致せず
+#: 「krm が置かれた時点で自動で戻る」が永久に成立しない（= 突合の永久無効化）。
+COMMITTED_CONTAINERS = sorted(
+    GOLDEN_ROOT.glob(f"*/{Path(MODEL_FILE).stem}-*{Path(MODEL_FILE).suffix}")
+)
 
-    配布形は常に連番へ分割されるので（ADR 0081）、代表 path `model.safetensors` 自身は
-    書かれない — 現物を数えるのは `resolve_shards` の役目。
+
+def _model_parts(root: Path, name: str) -> tuple[Path, ...]:
+    """モデルの現物（コンテナの part 列 — part 0 から）。
+
+    配布形は常に連番へ分割されるので（container-v1 §8）、代表 path `model.krm` 自身は
+    書かれない — 現物を数えるのは `container_parts` の役目。
     """
-    return resolve_shards(root / name / MODEL_FILE)
+    return container_parts(root / name / MODEL_FILE)
 
 
 class TestLayout:
     @pytest.mark.parametrize("spec", GOLDEN_SPECS, ids=lambda s: s.name)
-    def test_each_model_directory_has_the_shards_and_the_io(self, generated, spec):
-        root, graphs = generated
+    def test_each_model_directory_has_the_parts_and_the_io(self, generated, spec):
+        root, _ = generated
 
-        shards = _model_shards(root, spec.name)
-        assert all(shard.is_file() for shard in shards)
+        parts = _model_parts(root, spec.name)
+        assert all(part.is_file() for part in parts)
         assert (root / spec.name / IO_FILE).is_file()
-        if graphs[spec.name].initializers:
-            # 先頭 = グラフ shard・以降 = weight shard（重みがあれば 2 本以上 — ADR 0081）。
-            assert len(shards) >= 2
-            assert not (root / spec.name / MODEL_FILE).exists()
-        else:
-            # 重みが 1 本も無い golden はグラフ shard だけ（weight shard を空で作らない）。
-            assert shards == (root / spec.name / MODEL_FILE,)
+        # part 0（2 文書）+ part 1（const 領域）は**常に**並ぶ（container-v1 §8）ので、
+        # 重みを 1 本も持たない golden でも 2 本以上になり、代表 path 自身は書かれない。
+        assert len(parts) >= 2
+        assert not (root / spec.name / MODEL_FILE).exists()
 
     @pytest.mark.parametrize("spec", GOLDEN_SPECS, ids=lambda s: s.name)
     def test_each_model_passes_the_full_verification(self, generated, spec):
         root, _ = generated
 
-        verify_model(root / spec.name / MODEL_FILE)
+        verify_container(_model_parts(root, spec.name), blocks=True)
 
     @pytest.mark.parametrize("spec", GOLDEN_SPECS, ids=lambda s: s.name)
     def test_io_keys_follow_the_naming_convention(self, generated, spec):
@@ -319,7 +327,7 @@ class TestLayout:
     def test_fixtures_stay_small(self, generated, spec):
         root, _ = generated
 
-        for path in (*_model_shards(root, spec.name), root / spec.name / IO_FILE):
+        for path in (*_model_parts(root, spec.name), root / spec.name / IO_FILE):
             assert path.stat().st_size < MAX_FILE_BYTES
 
 
@@ -335,16 +343,34 @@ class TestDeterminism:
     """
 
     @pytest.mark.parametrize("spec", GOLDEN_SPECS, ids=lambda s: s.name)
+    def test_two_runs_produce_the_same_model_bytes(self, generated, tmp_path, spec):
+        """同じ seed から 2 度生成してバイト一致（決定性そのものを被験体にする）。
+
+        置き場が違ってもバイトは動かない（ファイル名は中身に入らない）。
+        """
+        root, _ = generated
+        generate_golden(spec, tmp_path)
+
+        assert [path.read_bytes() for path in _model_parts(root, spec.name)] == [
+            path.read_bytes() for path in _model_parts(tmp_path, spec.name)
+        ]
+
+    @pytest.mark.skipif(
+        not COMMITTED_CONTAINERS,
+        reason="コミット済み golden がまだ旧配布形（safetensors）— 再生成は TS 側の読み手と"
+        "同じ段で行う（段 3a の契約外）。krm が置かれた時点でこの門は自動で戻る",
+    )
+    @pytest.mark.parametrize("spec", GOLDEN_SPECS, ids=lambda s: s.name)
     def test_regeneration_matches_the_committed_model(self, generated, spec):
         root, _ = generated
 
-        generated_shards = _model_shards(root, spec.name)
-        committed = _model_shards(GOLDEN_ROOT, spec.name)
-        assert [path.name for path in committed] == [path.name for path in generated_shards], (
-            f"生成物が未コミット（ADR 0081 の分割へ再生成が要る）: {GOLDEN_ROOT / spec.name}"
+        generated_parts = _model_parts(root, spec.name)
+        committed = _model_parts(GOLDEN_ROOT, spec.name)
+        assert [path.name for path in committed] == [path.name for path in generated_parts], (
+            f"生成物が未コミット: {GOLDEN_ROOT / spec.name}"
         )
         assert [path.read_bytes() for path in committed] == [
-            path.read_bytes() for path in generated_shards
+            path.read_bytes() for path in generated_parts
         ]
 
     @pytest.mark.skipif(
@@ -359,3 +385,36 @@ class TestDeterminism:
         committed = GOLDEN_ROOT / spec.name / IO_FILE
         assert committed.is_file(), f"生成物が未コミット: {committed}"
         assert committed.read_bytes() == (root / spec.name / IO_FILE).read_bytes()
+
+
+class TestTheCommittedComparisonCanComeBack:
+    """skip 条件が「置いた瞬間に戻る」綴りであることを、合成の置き場で確かめる。
+
+    MUST: 条件は**連番**（`model-NNNNN-of-NNNNN.krm`）で探す。代表 path `model.krm` は
+    書かれない仕様なので、`model.krm*` で探すと 1 本も一致せず、golden を `krm` へ再生成した
+    後も突合が skip のまま沈黙する（既存テストの実質的な無効化）。
+    """
+
+    @staticmethod
+    def _committed(root: Path) -> list[Path]:
+        """`test_goldens` の skip 条件と**同じ 1 本**の綴りで探す。"""
+        return sorted(root.glob(f"*/{Path(MODEL_FILE).stem}-*{Path(MODEL_FILE).suffix}"))
+
+    def test_a_directory_of_committed_parts_is_found(self, tmp_path: Path) -> None:
+        root = tmp_path / "golden"
+        (root / "mlp").mkdir(parents=True)
+        (root / "mlp" / "model-00001-of-00002.krm").write_bytes(b"0")
+        (root / "mlp" / "model-00002-of-00002.krm").write_bytes(b"1")
+
+        assert [path.name for path in self._committed(root)] == [
+            "model-00001-of-00002.krm",
+            "model-00002-of-00002.krm",
+        ]
+
+    def test_a_directory_of_legacy_shards_is_not_found(self, tmp_path: Path) -> None:
+        """対照 — 旧配布形しか無い間は skip のまま（今のリポジトリの状態）。"""
+        root = tmp_path / "golden"
+        (root / "mlp").mkdir(parents=True)
+        (root / "mlp" / "model-00001-of-00002.safetensors").write_bytes(b"0")
+
+        assert self._committed(root) == []

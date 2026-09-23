@@ -51,16 +51,19 @@ CORE_MODULES: tuple[str, ...] = (
     "quant_calib",
     "act_quant",
     "emit",
-    # 配布コンテナの shard 分割規則（ADR 0070 決定 1）。path とバイト数しか知らない。
-    "shards",
     # quant の `requiredLimits` 導出（ADR 0038 §7）。寸法と WebGPU の既定値しか知らない。
     "limits",
     "verify",
-    # 容器の詰め替え（ADR 0081 の移行経路）。バイト列と宣言しか知らない。
-    "repack",
     # コンテナ形式（krm / krg）の書き手と自己検査用の読み手（ADR 0108）。
     # バイト列・宣言・codec 台帳しか知らない。
     "container",
+    # 配布形を据える 3 段（書く → 読み直して検証 → 据え替え）。path とバイト列しか知らない。
+    "publish",
+    # PLE を容器の資産へ組む純関数（ADR 0085 / 0109 決定 4）。行バイト数と block 上限だけ。
+    "ple",
+    # 旧配布形（safetensors 方言）の**読み取り専用**の層（container-v1 §12）。移行 CLI 専用で、
+    # 知っているのはバイト列と宣言だけ。
+    "legacy",
     # 旧配布形 → コンテナ形式の移行 CLI（container-v1 §12）。旧形式を読むのはここだけで、
     # 知っているのは宣言と生バイト（family 知識も repo topology も持たない）。
     "migrate",
@@ -377,3 +380,77 @@ class TestTheBoundaryCheckItself:
             "karume/regressed.py:1 -> karume.patch_newmodel",
             "karume/regressed.py:1 -> karume.patch_newmodel.apply_all_patches",
         ]
+
+
+#: 旧配布形を読むだけの経路（移行 CLI）が到達してよい core モジュールの起点。
+MIGRATION_ENTRY = "migrate"
+
+#: 移行 CLI の import グラフへ引き込まない重い依存。
+#:
+#: MUST: `torch` を入れない。`karume migrate` が読むのは旧 shard のバイト列と宣言だけで、
+#: 格納変換（torch 依存）は 1 度も通らない — 束縛表の写像（`container_bindings`）を torch 側の
+#: モジュールへ置くと、移行の import グラフが 1 GB 級の依存を丸ごと引く（`dist` が
+#: `karume.verify` の import を関数内へ遅延していたのと同じ理由）。
+MIGRATION_FORBIDDEN = frozenset({"torch"})
+
+
+def karume_closure(entry: str) -> dict[str, list[str]]:
+    """`karume.<entry>` から辿れる core モジュール → その import 先（完全修飾名）。
+
+    走査は検査 1 / 2 と**同じ {@link imported_modules}**（`ast` なので関数内の遅延 import も
+    拾う）。`karume` 直下のモジュールだけを辿り、外部パッケージは葉として記録する。
+    """
+    reached: dict[str, list[str]] = {}
+    pending = [entry]
+    while pending:
+        name = pending.pop()
+        if name in reached:
+            continue
+        dotted = [item for _, item in imported_modules(core_module(name))]
+        reached[name] = dotted
+        for item in dotted:
+            parts = item.split(".")
+            if parts[0] == "karume" and len(parts) >= 2 and parts[1] in CORE_MODULES:
+                pending.append(parts[1])
+    return reached
+
+
+class TestTheMigrationPathStaysIndependentOfTorch:
+    """移行 CLI の import グラフに torch が現れない（F-12 の再発防止）。
+
+    NOTE: `python -c "import karume.migrate"` の `sys.modules` では測れない — パッケージの
+    `__init__` が公開面（`stored_model` など torch 側）を eager に import するので、どの
+    サブモジュールを import しても torch が載る。見たいのは**モジュールの依存方向**なので、
+    走査は境界の門と同じ `ast` で行う。
+    """
+
+    def test_no_module_reachable_from_migrate_imports_torch(self) -> None:
+        closure = karume_closure(MIGRATION_ENTRY)
+        offenders = sorted(
+            f"karume/{name}.py -> {item}"
+            for name, imports in closure.items()
+            for item in imports
+            if item.split(".")[0] in MIGRATION_FORBIDDEN
+        )
+
+        assert offenders == []
+
+    def test_the_closure_really_walks_the_graph(self) -> None:
+        """恒真化の門 — 起点だけでなく、そこから辿った先まで名簿に載っている。"""
+        closure = karume_closure(MIGRATION_ENTRY)
+
+        assert MIGRATION_ENTRY in closure
+        # 移行は容器・旧形の読み手・公開の 3 段・合流を必ず通る。
+        assert {"container", "legacy", "publish", "verify", "ple", "dist"} <= set(closure)
+
+    def test_the_closure_catches_a_module_that_reaches_torch(self) -> None:
+        """検出側が本当に torch を見つける（`emit` を起点にすれば必ず出る）。"""
+        closure = karume_closure("emit")
+        offenders = [
+            item
+            for imports in closure.values()
+            for item in imports
+            if item.split(".")[0] in MIGRATION_FORBIDDEN
+        ]
+
+        assert offenders

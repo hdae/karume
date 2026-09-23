@@ -21,13 +21,11 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
-from pathlib import Path
-from tempfile import TemporaryDirectory
 
 import pytest
 import torch
 
-from karume.emit import EmitError, write_model
+from karume.emit import EmitError, stored_model
 from karume.ir import (
     IrGraph,
     IrInitializer,
@@ -51,7 +49,6 @@ from karume.verify import (
     assert_op_contracts,
     assert_runtime_support,
     parse_ir_graph,
-    verify_shards,
 )
 
 #: 借り手の q（`[B,H,1,D]` — H=4・M は 1 ちょうど MUST）と、trace 用に置く K / V 入力の形。
@@ -496,34 +493,20 @@ class TestTheContainerExcludesSharedDeclarations:
         """宣言 / 格納の完全一致から外れる（借り手の shard にバイトは 1 つも無い）。"""
         graph, tensors, scales = _shared_container_graph()
 
-        with TemporaryDirectory() as staging:
-            written = write_model(
-                Path(staging) / "model.safetensors",
-                graph,
-                tensors,
-                weight_dtype="i8",
-                weight_scales=scales,
-            )
-            verified = verify_shards(written)
+        committed = stored_model(graph, tensors, weight_dtype="i8", weight_scales=scales).graph
 
         # 宣言された storage はそのまま焼かれる（計画も変換も掛からない）。
-        assert verified.initializers["target_embed"].shared == IrShared(
+        assert committed.initializers["target_embed"].shared == IrShared(
             tensor="model.lm_head.weight"
         )
-        assert verified.initializers["target_embed"].storage == IrStorage(dtype="i8")
+        assert committed.initializers["target_embed"].storage == IrStorage(dtype="i8")
         # 自前の重みは従来どおり i8 へ計画される（除外が「全部素通し」ではない対照）。
-        assert verified.initializers["w"].storage.dtype == "i8"
+        assert committed.initializers["w"].storage.dtype == "i8"
 
     def test_a_shared_tensor_key_present_in_the_container_is_surplus(self):
         """借り手が同名のバイトを持っていたら余剰（貸し手と二重に持つ形を拒否する）。"""
         graph, tensors, scales = _shared_container_graph()
         tensors = {**tensors, "model.lm_head.weight": torch.zeros(16, 8)}
 
-        with TemporaryDirectory() as staging, pytest.raises(EmitError, match="余剰"):
-            write_model(
-                Path(staging) / "model.safetensors",
-                graph,
-                tensors,
-                weight_dtype="i8",
-                weight_scales=scales,
-            )
+        with pytest.raises(EmitError, match="余剰"):
+            stored_model(graph, tensors, weight_dtype="i8", weight_scales=scales)

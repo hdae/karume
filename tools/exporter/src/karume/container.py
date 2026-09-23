@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any, Literal, NamedTuple
 
 from karume.ir import IrGraph
-from karume.shards import shard_name
+from karume.ops import WEIGHT_CHANNEL_AXES, WEIGHT_SLOTS
 
 _MIB = 1024 * 1024
 
@@ -740,6 +740,123 @@ def _encode_descriptor(document: Mapping[str, Any], label: str) -> bytes:
 
 
 # ---------------------------------------------------------------------------
+# IR の `storage` 宣言 → 束縛表（§6.3 の写像）
+# ---------------------------------------------------------------------------
+#
+# MUST: この写像は**torch を要らない側**に置く。書き手（`karume.emit.stored_model`）と移行 CLI
+# （`karume.migrate`）の両方が通る 1 本なので、格納変換の層（torch 依存）へ置くと移行 CLI が
+# torch を import グラフへ引き込む（旧 shard を読むだけの経路に 1 GB 級の依存が乗る）。
+
+
+def bakeable_initializers(graph: IrGraph) -> set[str]:
+    """このコンテナに**実体を書く** initializer の名前（共有宣言を除いた集合）。
+
+    共有 initializer（ADR 0096 段 2）は貸し手のバイトを借りるだけなので、格納の計画・適格判定・
+    宣言と実体の突合はどれもこの集合を走査する（1 箇所に閉じる — 除外を各所に書き写すと、
+    書き足した走査だけが `tensor = None` を引く）。
+    """
+    return {name for name, init in graph.initializers.items() if not init.is_shared}
+
+
+def weight_channel_axes(graph: IrGraph) -> dict[str, int]:
+    """重みスロットで消費される initializer → per-channel 軸
+    （`packages/runtime/src/runtime/plan.ts` の鏡像）。
+
+    軸は**消費側の op** から引く（重みの shape だけでは linear `[out,in]` と
+    conv_transpose1d `[Cin,Cout,K]` を区別できない）。同じ initializer を軸の違う op が
+    消費している場合は 1 つに決まらないので fail loudly。
+    """
+    bakeable = bakeable_initializers(graph)
+    axes: dict[str, int] = {}
+    for node in graph.nodes:
+        slot = WEIGHT_SLOTS.get(node.op)
+        if slot is None or slot >= len(node.ins):
+            continue
+        name = node.ins[slot]
+        if name not in bakeable:
+            continue
+        axis = WEIGHT_CHANNEL_AXES[node.op]
+        if axes.setdefault(name, axis) != axis:
+            raise ContainerFormatError(
+                f"initializer '{name}': 消費 op ごとに per-channel 軸が違う"
+                f"（{axes[name]} と {axis}）— 1 本の scale では表せない"
+            )
+    return axes
+
+
+def _concrete_shape(graph: IrGraph, name: str, where: str) -> list[int]:
+    """initializer の宣言 shape（記号次元を持つ実体は在りえない）。"""
+    value = graph.values.get(name)
+    if value is None:
+        raise ContainerFormatError(f"{where}: `values` に宣言が無い")
+    shape: list[int] = []
+    for dim in value.shape:
+        if not isinstance(dim, int):
+            raise ContainerFormatError(f"{where}: initializer の shape に記号次元がある（{dim!r}）")
+        shape.append(dim)
+    return shape
+
+
+def container_bindings(graph: IrGraph) -> dict[str, Encoding]:
+    """IR の `storage` 宣言 → コンテナの束縛（**テンソルキー** → {@link Encoding}）。
+
+    MUST: 書き手（{@link karume.emit.stored_model}）と移行 CLI（`karume.migrate`）は
+    **この 1 本**から束縛を出す。2 経路で導くと、同じ資産から「宣言 i4 / 実体 i8」のように
+    形も型も合う沈黙誤値が作れる（container-v1 §12 の写像規則）。
+
+    共有 initializer（バイトを持たない宣言）は束縛を持たない。`rowAxis` は**消費側 op** から
+    引き（{@link weight_channel_axes}）、per-channel の `groupSize` は行長（= numel / 行数）に
+    なる。group codec（`int4-sym-g`）の scale は先頭次元を行として焼かれているので、消費 op が
+    軸 1 を要求する形は写せない（fail loudly — 黙って軸 0 として宣言すると値が入れ替わる）。
+    """
+    axes = weight_channel_axes(graph)
+    bindings: dict[str, Encoding] = {}
+    for name, initializer in graph.initializers.items():
+        if initializer.is_shared:
+            continue
+        where = f"initializer '{name}'"
+        key = initializer.tensor
+        if key is None:
+            raise ContainerFormatError(f"{where}: `tensor` も `shared` も無い（IR として不正）")
+        storage = initializer.storage
+        codec = CODEC_FOR_STORAGE.get(storage.dtype)
+        if codec is None:
+            raise ContainerFormatError(
+                f"{where}: 格納 dtype '{storage.dtype}' の写し先が codec 台帳に無い"
+            )
+        entry = codec_entry(codec)
+        if entry.scale == "forbidden":
+            bindings[key] = Encoding(codec)
+            continue
+        if storage.scale is None:
+            raise ContainerFormatError(
+                f"{where}: 量子化格納 '{storage.dtype}' なのに scale の宣言が無い"
+            )
+        shape = _concrete_shape(graph, name, where)
+        row_axis = axes.get(name, 0)
+        if len(shape) <= row_axis:
+            raise ContainerFormatError(
+                f"{where}: rowAxis {row_axis} に対して宣言 shape {shape} が浅い"
+            )
+        if entry.grouping == "group":
+            if storage.group_size is None:
+                raise ContainerFormatError(f"{where}: group 量子化なのに group_size の宣言が無い")
+            if row_axis != 0:
+                raise ContainerFormatError(
+                    f"{where}: 消費 op の per-channel 軸が {row_axis} だが、group scale は"
+                    "先頭次元を行として焼かれている（写せる形が無い）"
+                )
+            group_size = storage.group_size
+        else:
+            row_count = shape[row_axis]
+            group_size = per_channel_group_size(math.prod(shape) // row_count if row_count else 0)
+        bindings[key] = Encoding(
+            codec, group_size=group_size, row_axis=row_axis, scale_key=storage.scale
+        )
+    return bindings
+
+
+# ---------------------------------------------------------------------------
 # ヘッダと part の配置（§1 / §8 / §9）
 # ---------------------------------------------------------------------------
 
@@ -812,11 +929,177 @@ def read_header(raw: bytes) -> ContainerHeader:
     return ContainerHeader(kind, version, graph_length, model_length)
 
 
+#: 連番の桁数（`<stem>-NNNNN-of-NNNNN<suffix>` — §8。旧 shard と同じ綴り規約）。
+SEQUENCE_DIGITS = 5
+
+#: 連番が表せる最大の添字（桁数からの派生値 — part 件数の上限とは別の制約）。
+_MAX_SEQUENCE_INDEX = 10**SEQUENCE_DIGITS - 1
+
+#: 連番ファイル名の逆向き（`<stem>-NNNNN-of-NNNNN` → `<stem>`）。
+_SEQUENCE_STEM = re.compile(rf"^(.+)-\d{{{SEQUENCE_DIGITS}}}-of-\d{{{SEQUENCE_DIGITS}}}$")
+
+
+def numbered_name(name: str, index: int, total: int) -> str:
+    """`<拡張子の前>-NNNNN-of-NNNNN<拡張子>`（`index` は 1 始まり — §8）。
+
+    `name` は path 片でもよい（最終要素だけを書き換える）— 配布形の相対 path と手元の実 path が
+    同じ綴りから出る。
+    """
+    if not 1 <= index <= total <= min(MAX_PARTS, _MAX_SEQUENCE_INDEX):
+        raise ContainerFormatError(
+            f"連番 {index}/{total} が 1..{min(MAX_PARTS, _MAX_SEQUENCE_INDEX)} の範囲に無い"
+        )
+    parsed = Path(name)
+    numbered = f"{index:0{SEQUENCE_DIGITS}d}-of-{total:0{SEQUENCE_DIGITS}d}"
+    return str(parsed.with_name(f"{parsed.stem}-{numbered}{parsed.suffix}"))
+
+
+def numbered_path(path: Path, index: int, total: int) -> Path:
+    """{@link numbered_name} の `Path` 版（親ディレクトリはそのまま）。"""
+    return path.with_name(numbered_name(path.name, index, total))
+
+
+def base_path(path: Path) -> Path:
+    """連番のファイル名 → **代表 path**（連番でなければそのまま）。
+
+    {@link numbered_name} の逆向き。手元の現物（`model.i8-00001-of-00003.krm`）を指した
+    呼び出しを、黙って「1 本だけの容器」として扱わないための畳み込み。
+    """
+    name = Path(path.name)
+    matched = _SEQUENCE_STEM.fullmatch(name.stem)
+    return path if matched is None else path.with_name(f"{matched.group(1)}{name.suffix}")
+
+
+def _sequence_pattern(path: Path) -> re.Pattern[str]:
+    """`path` と同じ代表 path に属する連番ファイル名に一致する正規表現。
+
+    stem / suffix は `re.escape` する — 実 path にはドットもハイフンも入るので、素で埋めると
+    無関係なファイルを拾う（glob も同じ理由で使わない: `[` を含む名前が黙って別解釈になる）。
+    """
+    name = Path(path.name)
+    stem, suffix = re.escape(name.stem), re.escape(name.suffix)
+    return re.compile(rf"^{stem}-(\d{{{SEQUENCE_DIGITS}}})-of-(\d{{{SEQUENCE_DIGITS}}}){suffix}$")
+
+
+def resolve_sequence(path: Path) -> tuple[Path, ...]:
+    """代表 path → 実在する連番の列（分割されていなければ 1 要素）。
+
+    返すのは常に添字順。分割されていない現物と存在しない現物はどちらも `(path,)` を返す
+    （不在の診断は呼び手の門が持つ — ここで先回りすると綴りが 2 つに割れる）。
+
+    MUST: 曖昧な現場は fail loudly。単一形と連番の**同居**、`of` の食い違い、番号の欠け /
+    はみ出しは、どれも「どのバイト列を配るか」が一意に決まらない。
+    """
+    parent = path.parent
+    if not parent.is_dir():
+        return (path,)
+    pattern = _sequence_pattern(path)
+    found: dict[int, Path] = {}
+    totals: set[int] = set()
+    for entry in parent.iterdir():
+        match = pattern.fullmatch(entry.name)
+        if match is None or not entry.is_file():
+            continue
+        found[int(match.group(1))] = entry
+        totals.add(int(match.group(2)))
+    if not found:
+        return (path,)
+    if path.is_file():
+        raise ContainerFormatError(
+            f"{path}: 単一形と連番（{len(found)} 本）が同居している"
+            " — 前回の書き出しの残骸を消してからやり直す"
+        )
+    if len(totals) != 1:
+        raise ContainerFormatError(f"{path}: 連番の総数が {sorted(totals)} と食い違っている")
+    total = totals.pop()
+    missing = sorted(set(range(1, total + 1)) - set(found))
+    surplus = sorted(set(found) - set(range(1, total + 1)))
+    if missing or surplus:
+        raise ContainerFormatError(
+            f"{path}: 連番 1..{total} が揃っていない（欠け {missing} / はみ出し {surplus}）"
+        )
+    return tuple(found[index] for index in range(1, total + 1))
+
+
+def sequence_siblings(path: Path) -> tuple[Path, ...]:
+    """この代表 path の出力になりうる実在ファイル（代表 path + 連番の全件）。
+
+    後片付け（前回の書き出しが別の分割数で残した現物）と一時ファイルの掃除が使う。番号の
+    整合は見ない — **壊れた残骸ほど拾えなければ困る**ので、名前の形だけで拾う。
+    """
+    siblings = [path] if path.is_file() else []
+    parent = path.parent
+    if parent.is_dir():
+        pattern = _sequence_pattern(path)
+        siblings.extend(
+            entry
+            for entry in sorted(parent.iterdir())
+            if pattern.fullmatch(entry.name) and entry.is_file()
+        )
+    return tuple(siblings)
+
+
 def container_paths(path: Path, part_count: int) -> list[Path]:
-    """分割形のファイル名（part 0 から・`shards.shard_name` と同じ規約）。"""
+    """分割形のファイル名（part 0 から・§8 の連番規約）。"""
     return [
-        path.parent / shard_name(path.name, index + 1, part_count) for index in range(part_count)
+        path.parent / numbered_name(path.name, index + 1, part_count) for index in range(part_count)
     ]
+
+
+def container_parts(path: str | Path) -> tuple[Path, ...]:
+    """コンテナ 1 本の part 列（part 0 のファイル / 単一形 / 代表 path のどれを渡してもよい）。
+
+    分割形の part は §8 の連番規約なので、畳み込みと解決は {@link base_path} /
+    {@link resolve_sequence} の 1 本道を借りる（単一形と連番の同居はそこが fail loudly で受ける）。
+    """
+    return resolve_sequence(base_path(Path(path)))
+
+
+@dataclass(frozen=True)
+class DocumentRef:
+    """descriptor 1 文書ぶんの期待値（manifest `karume/5` の `container.descriptor`）。
+
+    2 文書それぞれの**バイト長 + sha256**で、part 0 ファイルの sha256 とは別の事実である
+    （ADR 0109 決定 3）。`graph` 文書の sha256 はそのまま `krg` の同一性（ADR 0108 決定 4）に使う。
+    """
+
+    length: int
+    sha256: str
+
+    def to_document(self) -> dict[str, Any]:
+        return {"length": self.length, "sha256": self.sha256}
+
+
+def read_descriptor_refs(path: Path) -> tuple[DocumentRef, DocumentRef]:
+    """part 0 のファイルから 2 文書の `(バイト長, sha256)` を採る（グラフ記述 → モデル記述）。
+
+    読むのはヘッダ + 2 文書だけ（part 0 は上限 32 MiB × 2 + 24 B なので全量に載る）。構造の
+    妥当性は見ない — 検証は {@link karume.verify.verify_container} の担当で、ここは manifest へ
+    焼く期待値を**置いた現物から**採るためだけの読み口である。
+
+    MUST: 開くのは 1 度きりで、ヘッダの 24 B のために現物を丸ごと読まない — 呼び手
+    （`karume.dist._materialize_family`）は「単一形かどうか」を判定する**前に**ここを通るので、
+    全量読みにすると単一形の容器を weights 席へ挿した組み立てが、規則違反として落ちる前に
+    数 GB を RAM へ載せる。
+    """
+    with path.open("rb") as handle:
+        header = read_header(handle.read(HEADER_BYTES))
+        if header.kind != "model":
+            raise ContainerFormatError(f"{path}: krm でない（magic が {MAGIC_GRAPH!r}）")
+        graph_bytes = handle.read(header.graph_length)
+        model_bytes = handle.read(header.model_length)
+    for label, raw, expected in (
+        ("グラフ記述", graph_bytes, header.graph_length),
+        ("モデル記述", model_bytes, header.model_length),
+    ):
+        if len(raw) != expected:
+            raise ContainerFormatError(
+                f"{path}: {label}が宣言の {expected} バイトに足りない（{len(raw)} バイト）"
+            )
+    return (
+        DocumentRef(header.graph_length, hashlib.sha256(graph_bytes).hexdigest()),
+        DocumentRef(header.model_length, hashlib.sha256(model_bytes).hexdigest()),
+    )
 
 
 def derive_part_offsets(part0_length: int, part_lengths: Sequence[int]) -> list[int]:
@@ -1325,14 +1608,29 @@ def _region_stream(
         cursor = placed.offset + placed.chunk.length
 
 
-def _hash_region(blocks: Sequence[_Placed], payloads: _Payloads) -> tuple[str, dict[str, str]]:
-    """region の sha256 と block ごとの sha256（詰め物込み — §4.1）を 1 度の走査で採る。"""
+def _emit_region(
+    blocks: Sequence[_Placed], payloads: _Payloads, target: Path | None
+) -> tuple[str, dict[str, str]]:
+    """region を 1 度の走査で流し、part の sha256 と block ごとの sha256（詰め物込み — §4.1）を
+    採る。`target` が在れば**同じ走査で**そこへ書く。
+
+    MUST: 書き出しと digest は {@link _region_stream} の 1 本を共有する（§4.1 の「詰め物込みで
+    digest を取る」が両側で別々に綴られると、part の sha256 と実バイトが静かにずれる）。
+    書きながら採れるので、分割形では実体を**1 度しか引かない**（格納変換は引くたびに走る）。
+    """
     region = hashlib.sha256()
     digests: dict[str, Any] = {}
-    for block_id, chunk in _region_stream(blocks, payloads):
-        region.update(chunk)
-        if block_id is not None:
-            digests.setdefault(block_id, hashlib.sha256()).update(chunk)
+    handle = None if target is None else target.open("wb")
+    try:
+        for block_id, chunk in _region_stream(blocks, payloads):
+            if handle is not None:
+                handle.write(chunk)
+            region.update(chunk)
+            if block_id is not None:
+                digests.setdefault(block_id, hashlib.sha256()).update(chunk)
+    finally:
+        if handle is not None:
+            handle.close()
     return region.hexdigest(), {key: digest.hexdigest() for key, digest in digests.items()}
 
 
@@ -1426,7 +1724,7 @@ def write_graph_container(
     region = _build_const_region(graph_name, consts, block_bytes)
     _assert_block_budget(len(region.blocks))
     payloads = _Payloads(const_tensors)
-    _, block_hashes = _hash_region(region.blocks, payloads)
+    _, block_hashes = _emit_region(region.blocks, payloads, None)
     payloads.release()
     descriptor = _graph_descriptor(graph_name, document, region, block_hashes)
     graph_bytes = serialize_graph_descriptor(descriptor)
@@ -1512,12 +1810,23 @@ def write_model_container(
         raise ContainerFormatError(f"part 件数 {len(builders) + 2} が上限 {MAX_PARTS} を超える")
 
     # ② 実体を 1 本ずつ流して block / part の sha256 を採る。
+    #
+    # **分割形はここで data part を書いてしまう**（part 0 は別ファイルなので最後に書ける）—
+    # 実体を引くのは 1 度きりで、格納変換も 1 度しか走らない。単一形は part 0 が先頭に来るうえ、
+    # その中身が後ろの part の sha256 に依存するので**2 度引く**（一時ファイルを挟むと
+    # モデル全量ぶんの書き込みが 1 回増える — モジュール doc の選択）。
+    path.parent.mkdir(parents=True, exist_ok=True)
+    written = [path] if single else container_paths(path, len(builders) + 2)
     payloads = _Payloads(_Sources(tensors, assets))
-    region_hash, block_hashes = _hash_region(region.blocks, payloads)
+    region_hash, block_hashes = _emit_region(
+        region.blocks, payloads, None if single else written[1]
+    )
     parts = [PartRecord(1, region.length, region_hash)]
     data_blocks: list[DataBlockRecord] = []
     for index, builder in enumerate(builders):
-        part_hash, hashes = _hash_region(builder.blocks, payloads)
+        part_hash, hashes = _emit_region(
+            builder.blocks, payloads, None if single else written[index + 2]
+        )
         block_hashes.update(hashes)
         parts.append(PartRecord(index + 2, builder.length, part_hash))
         for placed in builder.blocks:
@@ -1552,13 +1861,10 @@ def write_model_container(
         raise ContainerFormatError(
             f"part 0 の長さ {part0_length} が part 長の天井 {PART_MAX_BYTES} を超える"
         )
-    regions = [region.blocks] + [builder.blocks for builder in builders]
-    lengths = [part.length for part in parts]
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payloads = _Payloads(_Sources(tensors, assets))
     if single:
-        offsets = derive_part_offsets(part0_length, lengths)
+        regions = [region.blocks, *(builder.blocks for builder in builders)]
+        offsets = derive_part_offsets(part0_length, [part.length for part in parts])
+        payloads = _Payloads(_Sources(tensors, assets))
         with path.open("wb") as handle:
             handle.write(header)
             handle.write(graph_bytes)
@@ -1570,16 +1876,11 @@ def write_model_container(
         payloads.release()
         return [path]
 
-    written = container_paths(path, len(regions) + 1)
+    # data part は②で据わっている。残るのは part 0 だけ。
     with written[0].open("wb") as handle:
         handle.write(header)
         handle.write(graph_bytes)
         handle.write(model_bytes)
-    for index, blocks in enumerate(regions):
-        with written[index + 1].open("wb") as handle:
-            for _, piece in _region_stream(blocks, payloads):
-                handle.write(piece)
-    payloads.release()
     return written
 
 

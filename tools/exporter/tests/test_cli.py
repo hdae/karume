@@ -5,14 +5,14 @@
 
 NOTE: `export-*` サブコマンドと台本ローダ（旧 `load_script`）は名簿ごと消えた
 （ADR 0065 段 3+4 完了 — 台本は `tools/export-recipes/<family>/` へ出た）ので、その主張は
-このファイルから**被験体ごと**居なくなった。残るのは dist / verify の 2 コマンド。
+このファイルから**被験体ごと**居なくなった。残るのは dist / migrate / verify の 3 コマンド。
 """
 
 from __future__ import annotations
 
 import pytest
 
-from karume import cli, dist, migrate, repack, verify
+from karume import cli, dist, migrate, verify
 
 
 def _spy(monkeypatch: pytest.MonkeyPatch, target: object, name: str) -> list[list[str]]:
@@ -30,13 +30,8 @@ class TestDispatch:
 
     def test_it_forwards_the_rest_of_argv_to_verify(self, monkeypatch: pytest.MonkeyPatch) -> None:
         seen = _spy(monkeypatch, verify, "main")
-        cli.main(["verify", "a/model.safetensors", "b/model.safetensors"])
-        assert seen == [["a/model.safetensors", "b/model.safetensors"]]
-
-    def test_it_forwards_the_rest_of_argv_to_repack(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        seen = _spy(monkeypatch, repack, "main")
-        cli.main(["repack", "a/model.safetensors", "--out", "/tmp/out"])
-        assert seen == [["a/model.safetensors", "--out", "/tmp/out"]]
+        cli.main(["verify", "a/model.krm", "b/model.krm"])
+        assert seen == [["a/model.krm", "b/model.krm"]]
 
     def test_it_forwards_the_rest_of_argv_to_migrate(self, monkeypatch: pytest.MonkeyPatch) -> None:
         seen = _spy(monkeypatch, migrate, "main")
@@ -69,10 +64,11 @@ class TestUsage:
             cli.main(["publish"])
         assert raised.value.code == 2
 
-    def test_the_export_commands_are_gone(self) -> None:
-        """名簿は dist / migrate / repack / verify の 4 つ — 台本は wheel の外（ADR 0065 段 3+4）。
+    def test_the_roster_is_dist_migrate_and_verify(self) -> None:
+        """名簿は dist / migrate / verify の 3 つ。
 
         `karume export-siglip2` が残っていると、wheel に無い台本を wheel の CLI が読む形が
-        「たまたま作業ツリーでだけ動く」経路として復活する。
+        「たまたま作業ツリーでだけ動く」経路として復活する。`karume repack`（shard 仕様への
+        詰め替え）は配布形が `krm` になった段 3a で退役した。
         """
-        assert sorted(cli.COMMANDS) == ["dist", "migrate", "repack", "verify"]
+        assert sorted(cli.COMMANDS) == ["dist", "migrate", "verify"]

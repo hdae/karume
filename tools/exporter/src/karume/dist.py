@@ -1,7 +1,7 @@
 """配布ディレクトリの組み立て — 系列ディレクトリ群 → HF へそのまま上げられる 1 リポ形。
 
 仕様の正本は ADR 0041（`docs/decisions/0041-manifest-v2.md`）。ここが作るのは §2 の形で
-並んだファイル群と、それを宣言する `karume.json`（`karume/4`）、そして manifest から機械導出
+並んだファイル群と、それを宣言する `karume.json`（`karume/5`）、そして manifest から機械導出
 したモデルカード `README.md`（ADR 0037 §3 の「そのまま HF リポとして上げられる形」）。
 
 **リポ内レイアウトは一律「モデル別サブツリー + `shared/` + 直下 `karume.json` / `README.md`」**
@@ -33,16 +33,16 @@ MUST: 系列に散らばる `io.*.safetensors`（E2E の入出力フィクスチ
 出力へ入るのは pipeline ごとの出力 path 表に載ったファイルだけで、表に無いものは黙って
 混ざらない。
 
-MUST: 検査（weights コンテナの IR v1 全検証 / 格納 dtype / rope 素表のバイト同一 /
-スタイル表・話者表の行数）は**配置の前**に**全モデルぶん**済ませる — 落ちるなら途中の配布形を
-1 ファイルも残さない。組み立ては「計画（{@link ModelPlan} を組む = 検査と読み取りの全部）→
-実体化（{@link assemble_family}）」の 2 段で、前段は 1 バイトも書かない。
+MUST: 検査（weights コンテナの全検証 / 格納 / rope 素表のバイト同一 / スタイル表・話者表の
+行数）は**配置の前**に**全モデルぶん**済ませる — 落ちるなら途中の配布形を 1 ファイルも
+残さない。組み立ては「計画（{@link ModelPlan} を組む = 検査と読み取りの全部）→ 実体化
+（{@link assemble_family}）」の 2 段で、前段は 1 バイトも書かない。
 
 MUST: **入力コンテナは「過去に検証済み」と信頼しない** — weights が指すコンポーネントは
-{@link assert_weight_components_verified} が `karume.verify.verify_shards` で丸ごと見る
-（読むのは safetensors のヘッダだけ）。組み立てが自前で読むのは格納 dtype と IR メタデータの
-一部（{@link ir_graph}）でしかないので、ここを省くと node / op / storage の壊れた系列が
-family 固有の門をすり抜けて配布形に据わり、利用者の `createSession` で初めて落ちる。
+{@link assert_weight_components_verified} が `karume.verify.verify_container` で丸ごと見る
+（読むのは 2 文書だけ）。組み立てが自前で読むのは格納と IR の一部（{@link ir_graph}）でしか
+ないので、ここを省くと descriptor / 束縛表の壊れた系列が family 固有の門をすり抜けて配布形に
+据わり、利用者の `createSession` で初めて落ちる。
 
 配置は常に**独立したコピー**（ハードリンク禁止 — 2026-08-09 裁定・ADR 0041 追記）。系列の
 書き手は既存ファイルを truncate で上書きするため、リンク共有した配布形は系列の再 export で
@@ -81,29 +81,39 @@ import numpy as np
 from safetensors.numpy import save
 
 from karume.artifacts import ArtifactSwapError, staged_publication
-from karume.ir import IR_METADATA_KEY
-from karume.limits import LimitsError, max_state_slot_bytes, max_tensor_payload, required_limits
-from karume.modelcard import HF_OWNER
 
-# `MAX_SHARDS`（1 dtype エントリが並べられる shard 数の上限）は import で引く — 書く側〈分割〉と
-# 宣言側〈manifest 検査〉が同じ綴りを見るため。{@link verify_dist} は手元のどの配布形にも掛け
+# 上限（part 件数・part 長の天井・descriptor 長）は import で引く — 書く側と宣言側
+# （manifest 検査）が同じ綴りを見るため。{@link verify_dist} は手元のどの配布形にも掛け
 # られる門なので、上限を知らない検査になっていると受理集合が 2 つに割れる。
-from karume.shards import MAX_SHARDS, ShardError, resolve_shards, shard_name
+from karume.container import (
+    HEADER_BYTES,
+    MAX_DESCRIPTOR_BYTES,
+    MAX_PARTS,
+    PART_MAX_BYTES,
+    ContainerFormatError,
+    DocumentRef,
+    codec_entry,
+    container_parts,
+    numbered_name,
+    read_descriptor_refs,
+)
+from karume.limits import LimitsError, max_state_slot_bytes, required_limits
+from karume.modelcard import HF_OWNER
+from karume.verify import ContainerError, VerifiedContainer, assert_ir_accepted, verify_container
 
 # ---- ① 共有部: 置き場の綴り・共有席の決定・配置・ハッシュ・宣言と現物の突合 -------
 
 #: manifest のファイル名（ADR 0041 §1 — リポジトリ直下の固定名）。
 MANIFEST_FILENAME = "karume.json"
 
-#: manifest の形式識別子（ADR 0041 §1 — hub は 1 形しか読まない）。`karume/4` は quant エントリ
-#: へ表示欄（`label` / `description` — ADR 0075 決定 1）を足した形。weights の dtype エントリが
-#: **shard 列**（`{shards, extras?}`）である点は `karume/3`（ADR 0070 決定 1）から変わらない。
-#: 列の先頭は必ずグラフ shard で、実重みは後続に載る（常時分割 — ADR 0081）。
+#: manifest の形式識別子（ADR 0109 決定 1 — hub は 1 形しか読まない）。`karume/5` は weights の
+#: dtype エントリが**コンテナの入口**（`{container: {descriptor, parts}}`）になった形で、
+#: `karume/4` の shard 列（`{shards, extras?}`）も `extras` の席も退役した（extras の実物 1 種
+#: `rope_base` はコンテナの資産へ移った — ADR 0109 決定 4）。
 #:
-#: MUST: 表示欄は optional でも**後方互換ではない** — hub の quant パーサは未知キーを fail
-#: loudly で拒否するので、欄を足した manifest は旧クライアントから読めない（ADR 0075 決定 4 —
-#: 黙って読めない形にせず major で断絶を宣言する）。
-MANIFEST_FORMAT = "karume/4"
+#: MUST: 旧 major は読まない（両読みは実装しない — ADR 0109 決定 1）。黙って読める形にせず
+#: major で断絶を宣言する。
+MANIFEST_FORMAT = "karume/5"
 
 #: モデルカードのファイル名（ADR 0037 §3 — HF が frontmatter を読む固定名）。
 MODEL_CARD_FILENAME = "README.md"
@@ -123,7 +133,15 @@ META_PATHS = frozenset({MANIFEST_FILENAME, MODEL_CARD_FILENAME})
 #: 改変を告げる Notice の 2 つだけ。名前を集合で縛るのは、ここが「任意ファイルを直下へ
 #: 持ち込む口」ではないことを**検査で**示すため（型では法的テキストかどうかを言えない）。
 #: {@link META_PATHS} と同じく**在ることは要求しない**（要求する pipeline だけが渡す）。
-LEGAL_PATHS = frozenset({"LICENSE.md", "NOTICE.md"})
+
+#: 改変告知の置き場（配布リポ直下）。容器の `provenance.notice` が指すのはこの **path 断片**で、
+#: 本文は容器に載らない（container-v1 §2.3）。
+NOTICE_FILENAME = "NOTICE.md"
+
+#: 上流ライセンス本文の置き場（同上）。
+LICENSE_FILENAME = "LICENSE.md"
+
+LEGAL_PATHS = frozenset({LICENSE_FILENAME, NOTICE_FILENAME})
 
 #: 規模上限（ADR 0041 §7）。hub が同じ値で弾くので、**焼く側で先に落とす**
 #: （配布してから利用者の手元で初めて分かる形にしない）。
@@ -142,10 +160,9 @@ MAX_MANIFEST_BYTES = 1024 * 1024
 #: があるので、そちらを包含することをテストで突き合わせる（`tests/test_dist.py` の
 #: `TestDtypeLabelVocabulary`）— 片方だけが古びる失敗様式は、その 1 本で機械化してある。
 #:
-#: 縛るのは、モデルカードの「`I4` は safetensors の方言」注記（{@link karume.modelcard.quants}）
-#: が**ラベルの綴り**で条件を立てるため。ラベルを `w4` のような席名で綴った家族では、i4 を含む
-#: 配布形なのに注記が黙って消える — カード自身が「ラベルは格納 dtype 語彙」と主張している以上、
-#: その主張を保証する門が要る。
+#: 縛るのは、ラベルが「格納 dtype 語彙」であるという主張をカードが本文で述べるため
+#: （{@link karume.modelcard.quants}）。格納の正本は descriptor の `encoding.codec` で、
+#: ラベルは選択・表示の語彙（ADR 0071 決定 3）— その線引きをラベル側の受理集合で固定する。
 STORAGE_DTYPE_LABELS = frozenset({"f32", "f16", "bf16", "i8", "i4", "i2", "i32"})
 
 #: quant の表示欄（ADR 0075 決定 1）の文字数上限。`label` は選択肢に出す短い表示名、
@@ -186,104 +203,105 @@ class DistError(ValueError):
     """組み立ての前提が破れた（資産の欠落・rope 素表の不一致・manifest と現物の食い違い）。"""
 
 
-def safetensors_header(path: Path) -> Mapping[str, Any]:
-    """safetensors のヘッダ JSON だけを読む（数 GB のペイロードを舐めない）。"""
-    size = path.stat().st_size
-    with path.open("rb") as stream:
-        header_len = int.from_bytes(stream.read(8), "little")
-        # 宣言長はファイル実長で拘束する（不正な 8 バイトをそのまま read すると巨大確保になる）。
-        if header_len <= 0 or header_len > size - 8:
-            raise DistError(
-                f"{path}: safetensors ヘッダが読めない（ヘッダ長 {header_len} がファイル長"
-                f" {size} と矛盾）"
-            )
-        try:
-            header = json.loads(stream.read(header_len))
-        except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise DistError(f"{path}: safetensors ヘッダが読めない") from error
-    if not isinstance(header, dict):
-        raise DistError(f"{path}: safetensors ヘッダが最上位オブジェクトでない")
-    return header
+def component_parts(path: Path) -> tuple[Path, ...]:
+    """コンポーネントの代表 path → 実在する part 列（連番が無ければ代表 path 自身の 1 要素）。
 
-
-def component_shards(path: Path) -> tuple[Path, ...]:
-    """コンポーネントの代表 path → 実在する shard 列（連番が無ければ代表 path 自身の 1 要素）。
-
-    分割規則（`karume.shards`）の失敗を組み立ての語彙へ翻訳するだけの薄い層。組み立て側の
-    入口はここ 1 箇所で、格納 dtype の門も IR メタデータの読みも計画の展開も同じ列を見る。
+    連番規約（container-v1 §8）の失敗を組み立ての語彙へ翻訳するだけの薄い層。組み立て側の
+    入口はここ 1 箇所で、格納の門も IR の読みも計画の展開も同じ列を見る。
     """
     try:
-        return resolve_shards(path)
-    except ShardError as cause:
+        return container_parts(path)
+    except ContainerFormatError as cause:
         raise DistError(str(cause)) from cause
 
 
 def assert_component_present(path: Path) -> None:
-    """コンポーネントの現物（単一ファイル or shard 列）が在ることを落とす。
+    """コンポーネントの現物（part 列）が在ることを落とす。
 
     綴りを 1 箇所に持つのは、不在の診断が「代表 path」で出続けるようにするため — 分割の
     有無で診断のファイル名が変わると、系列を焼き直す側が何を探せばよいか分からなくなる。
     """
-    if not all(shard.is_file() for shard in component_shards(path)):
+    if not all(part.is_file() for part in component_parts(path)):
         raise DistError(f"組み立ての入力が無い: {path}")
 
 
-def storage_dtypes(path: Path) -> set[str]:
-    """コンポーネントのテンソル dtype 集合（**全 shard の和**・ヘッダだけ読む）。
+def _container_of(path: Path) -> VerifiedContainer:
+    """コンポーネントを開いて合流まで通す（{@link karume.verify.verify_container} の薄い翻訳）。
 
-    和で見るのは、混成 dtype の資産が分割されると dtype が shard ごとに散るため（`i4` 系列の
-    scale は F32・重みは I4 で、同じ shard に居るとは限らない）。1 本目だけを見る形にすると、
-    {@link assert_storage} の要求 dtype が「たまたま先頭に居たか」で通ったり落ちたりする。
+    NOTE: path 単位の覚書は**置かない** — 系列ディレクトリは据え替えで書き換わる可変な場所
+    （モジュール doc）なので、プロセス寿命の写しは「同じ path の別の現物」を黙って返す。
+    同じ需要計算の中で 2 度開いていた経路は、開いた結果を引き回す形で畳んである
+    （{@link component_demand_bytes}）。
     """
+    assert_component_present(path)
+    try:
+        return verify_container(component_parts(path))
+    except (ContainerError, ContainerFormatError) as cause:
+        raise DistError(f"{path}: コンテナとして読めない: {cause}") from cause
+
+
+def storage_dtypes(path: Path) -> set[str]:
+    """コンポーネントが実際に使っている**格納の語彙**（codec の展開経路 — 束縛表の和）。
+
+    語彙は codec 台帳の `layout`（`f32` / `f16` / `bf16` / `i32` / `i8` / `i4` / `i2`）で、
+    safetensors 方言の dtype 名（`F16` / `I4`）は退役した。和で見るのは、混成の資産は 1 本の
+    容器に複数の codec が同居するため（`i4` 系列の scale は f32・重みは i4）。
+
+    MUST: 正本は**束縛表**（descriptor の `encoding.codec`）であって dtype ラベルではない
+    （ADR 0071 決定 3 の「ラベルは格納を主張しない」— ラベルは選択と表示の語彙）。
+    """
+    verified = _container_of(path)
     found: set[str] = set()
-    for shard in component_shards(path):
-        header = safetensors_header(shard)
-        found |= {spec["dtype"] for name, spec in header.items() if name != "__metadata__"}
+    for bound in verified.graphs.values():
+        for supply in bound.supplies.values():
+            entry = codec_entry(supply.encoding.codec)
+            found.add(entry.layout)
+            if supply.scale is not None:
+                # companion scale は f32 固定（container-v1 §6.1）— 混成の資産が「f32 を含む」
+                # ことの根拠はここなので、束縛表から明示的に足す。
+                found.add("f32")
     return found
 
 
 def assert_storage(role: str, path: Path, requirements: Mapping[str, str]) -> None:
-    """役割が要求する格納 dtype がヘッダに存在することを検査する（無関係な役割は素通し）。
+    """役割が要求する格納が束縛表に存在することを検査する（無関係な役割は素通し）。
 
     要求表を引数で受けるのは、役割名が pipeline 間で衝突するため（Anima の `text_encoder` は
-    F16 を要求し、SBV2 の `text_encoder` は I8 を要求する）。1 つの表に混ぜると、どちらかの
+    f16 を要求し、SBV2 の `text_encoder` は i8 を要求する）。1 つの表に混ぜると、どちらかの
     要求が黙って他方に掛かる。
     """
     required = requirements.get(role)
     if required is None:
         return
-    assert_component_present(path)
     found = storage_dtypes(path)
     if required not in found:
         raise DistError(
-            f"{role}: {path} の格納 dtype に {required} が無い（実際: {sorted(found)}）。"
+            f"{role}: {path} の格納に {required} が無い（実際: {sorted(found)}）。"
             "系列を焼いたときの --dtype を確認する（f16 系列は --dtype f16 の fake-quant が必要）"
         )
 
 
 def assert_storage_absent(role: str, path: Path, forbidden: Mapping[str, tuple[str, ...]]) -> None:
-    """役割が**持ってはならない**格納 dtype がヘッダに無いことを検査する（無関係な役割は素通し）。
+    """役割が**持ってはならない**格納が束縛表に無いことを検査する（無関係な役割は素通し）。
 
     {@link assert_storage} の存在検査だけでは **f32 席に圧縮系列の資産を挿し込む取り違えが
-    素通りする** — 圧縮系列のコンテナは適格外の重み（bias / norm / グラフ定数・i8 なら
-    per-channel scale も）を F32 で持つので、「F32 を含む」は f16 / i8 資産でも真になる。
-    片方向の存在検査を両側から挟んで初めて「系列 × 格納 dtype」が集合として一意に決まる
-    （ADR 0027 / 0029 の検出限界 — **系列 root の取り違えは数値網では原理的に検出できない**
-    ので、ここが唯一の検出器）。
+    素通りする** — 圧縮系列の容器は適格外の重み（bias / norm / グラフ定数・量子化の scale も）
+    を f32 で持つので、「f32 を含む」は f16 / i8 資産でも真になる。片方向の存在検査を両側から
+    挟んで初めて「系列 × 格納」が集合として一意に決まる（ADR 0027 / 0029 の検出限界 —
+    **系列 root の取り違えは数値網では原理的に検出できない**ので、ここが唯一の検出器）。
 
     MUST: 禁止は**役割ごとに集合**で持つ（1 つだけだと圧縮系列が 2 本以上あるときに、名指し
     しなかったほうが黙って素通りする）。逆向き（圧縮席に f32 資産）は {@link assert_storage}
-    が要求 dtype の不在で落とすので、禁止表は素の席にだけ要る。
+    が要求の不在で落とすので、禁止表は素の席にだけ要る。
     """
     banned = forbidden.get(role)
     if not banned:
         return
-    assert_component_present(path)
     found = storage_dtypes(path)
     intruders = [dtype for dtype in banned if dtype in found]
     if intruders:
         raise DistError(
-            f"{role}: {path} の格納 dtype に {' / '.join(intruders)} がある"
+            f"{role}: {path} の格納に {' / '.join(intruders)} がある"
             f"（実際: {sorted(found)}）。"
             f"素の f32 系列を指すべき席に圧縮系列の資産が混ざっている"
             "（系列 root の取り違え — 数値の門では検出できないのでここで落とす）"
@@ -319,7 +337,7 @@ class Artifact:
     出所は 2 通りだけ: 系列からの**配置**（`source`）と、組み立てが作る**生成物**（`payload`
     — `.npy` / ckpt から移した表など）。どちらか一方だけを持つ。生成物をバイト列で持つのは、
     「置く前に中身が確定している」ことを共有判定（{@link assemble_family}）と同じ規律で
-    扱えるようにするため。生成物を据えられるのは `assets` / `extras` の席だけで、weights が
+    扱えるようにするため。生成物を据えられるのは `assets` の席だけで、weights が
     指す役割は配置に限る（{@link ModelPlan.__post_init__}）。
     """
 
@@ -347,23 +365,22 @@ def table_payload(key: str, table: np.ndarray) -> bytes:
     return save({key: table})
 
 
-def ir_graph(path: Path) -> Mapping[str, Any]:
-    """コンテナの `__metadata__` から IR グラフの JSON を読む（ヘッダだけ読む）。
+def ir_graph(path: Path, verified: VerifiedContainer | None = None) -> Mapping[str, Any]:
+    """コンテナのグラフ記述から **IR v2 のグラフ JSON** を読む（part 0 だけ読む）。
 
-    分割されたコンポーネントでは**グラフ shard（先頭）**から読む（ADR 0070 決定 1 — 後続の
-    shard は `karume_ir` を持たない）。
+    `karume/5` の容器は 1 コンテナ 1 グラフ（ADR 0109 決定 2）なので、`graphs` の唯一の値を
+    返す。IR v1 との差は 4 点（docs/ir-v2.md）で、呼び手に効くのは **initializer 名が
+    テンソルキーへ改名されている**ことと `storage` が束縛表へ出ていることの 2 つ。
+
+    `verified` を渡すとその容器をそのまま使う（開き直さない）— 同じ需要計算の中で合流結果と
+    グラフ文書の両方を使う呼び手（{@link component_demand_bytes}）が 2 度開かないための席。
     """
-    graph_shard = component_shards(path)[0]
-    metadata = safetensors_header(graph_shard).get("__metadata__")
-    if not isinstance(metadata, dict) or IR_METADATA_KEY not in metadata:
-        raise DistError(f"{path}: IR メタデータ（{IR_METADATA_KEY}）が無い")
-    try:
-        graph = json.loads(metadata[IR_METADATA_KEY])
-    except json.JSONDecodeError as error:
-        raise DistError(f"{path}: IR メタデータが JSON として読めない") from error
-    if not isinstance(graph, dict):
-        raise DistError(f"{path}: IR メタデータが最上位オブジェクトでない")
-    return graph
+    graphs = (verified if verified is not None else _container_of(path)).read.graph.graphs
+    if len(graphs) != 1:
+        raise DistError(
+            f"{path}: グラフが {len(graphs)} 本ある（`karume/5` は 1 コンテナ 1 グラフ）"
+        )
+    return next(iter(graphs.values()))
 
 
 def graph_inputs(graph: Mapping[str, Any], path: Path) -> dict[str, list[Any]]:
@@ -423,20 +440,18 @@ def preprocessor_channels(
 
 @dataclass(frozen=True)
 class WeightFiles:
-    """weights の 1 dtype ぶん（`karume/3` 以降の `{shards, extras?}`）。中身は**役割名**。
+    """weights の 1 dtype ぶん（`karume/5` の `{container}`）。中身は**役割名**。
 
     実 path は {@link Artifact} 側が持つ — 共有の畳み込みで path が `shared/…` へ動くので、
     宣言側が path を直に握っていると 2 箇所が独立に動く。
 
-    `file` が単数なのは、**分割は表ではなく現物が決める**ため（ADR 0070 決定 1 — 何本に
-    割れるかは書いたバイト数で決まり、pipeline の表には書けない）。ここが指すのは
-    コンポーネントの**代表 1 役**で、実際に何本の shard として宣言されるかは
-    {@link expand_weight_shards} が組み立て時に現物から解決する（先頭がグラフ shard・
-    実重みは後続 — ADR 0081）。
+    席が 1 つだけなのは、コンテナが**部品の役割 1 つ**に対応するため（ADR 0109 決定 2）。
+    `karume/4` の `extras` は退役し、実物 1 種（`rope_base`）はコンテナの資産へ移った
+    （ADR 0109 決定 4）。ここが指すのはコンテナの**代表 1 役**で、実際に何本の part として
+    宣言されるかは {@link expand_weight_parts} が組み立て時に現物から解決する。
     """
 
     file: str
-    extras: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -461,15 +476,15 @@ class ModelPlan:
     def __post_init__(self) -> None:
         """weights の席が指す役割は**系列からの配置**（`source`）だけ MUST。
 
-        生成物（`payload`）は IR コンテナではないので、weights に据わると
-        {@link expand_weight_shards} の分割解決も {@link bake_required_limits} の需要も
-        {@link assert_weight_components_verified} の IR v1 全検証も掛からないまま
-        `shards: [1 要素]` として宣言される（表・sidecar の役割名を weights へ渡す綴り誤りが
+        生成物（`payload`）はコンテナではないので、weights に据わると
+        {@link expand_weight_parts} の part 解決も {@link bake_required_limits} の需要も
+        {@link assert_weight_components_verified} の全検証も掛からないまま
+        `parts: [1 要素]` として宣言される（表・sidecar の役割名を weights へ渡す綴り誤りが
         全門緑で通り、利用者の `createSession` で初めて落ちる）。計画の受け口で落とす。
         """
         for labels in self.weights.values():
             for files in labels.values():
-                # 役割そのものの欠落は展開が役割名を綴って落とす（{@link expand_weight_shards}）。
+                # 役割そのものの欠落は展開が役割名を綴って落とす（{@link expand_weight_parts}）。
                 artifact = self.artifacts.get(files.file)
                 if artifact is not None and artifact.source is None:
                     raise DistError(
@@ -478,44 +493,38 @@ class ModelPlan:
                     )
 
 
-class ShardedPlan(NamedTuple):
-    """{@link expand_weight_shards} の出力 — shard 展開済みの計画と、その振り分け表。"""
+class PartitionedPlan(NamedTuple):
+    """{@link expand_weight_parts} の出力 — part 展開済みの計画と、その振り分け表。"""
 
     plan: ModelPlan
-    #: weights の代表役割名 → **順序付き**の shard 役割名（分割前は 1 要素 = 代表役割そのもの）。
-    shards: Mapping[str, tuple[str, ...]]
+    #: weights の代表役割名 → **順序付き**の part 役割名（part 0 から。単一形なら 1 要素）。
+    parts: Mapping[str, tuple[str, ...]]
 
 
-#: 展開で作る shard 役割名の綴り（`<代表役割>#<1 始まりの番号>`）。役割名は manifest に出ない
+#: 展開で作る part 役割名の綴り（`<代表役割>#<1 始まりの番号>`）。役割名は manifest に出ない
 #: 内部キーなので、`#` は「recipe が書いた役割名」と衝突しないための区切りでしかない。
-SHARD_ROLE_SEPARATOR = "#"
+PART_ROLE_SEPARATOR = "#"
 
 
-def expand_weight_shards(plan: ModelPlan) -> ShardedPlan:
-    """weights の役割が**分割されたコンポーネント**を指しているとき、shard ごとの役割へ展開する。
+def expand_weight_parts(plan: ModelPlan) -> PartitionedPlan:
+    """weights の役割が**分割形のコンテナ**を指しているとき、part ごとの役割へ展開する。
 
-    MUST: 分割の有無は**現物から**解決する（{@link component_shards}）— 何本に割れるかは
+    MUST: part の本数は**現物から**解決する（{@link component_parts}）— 何本に割れるかは
     書いたバイト数で決まるので、pipeline の表にも recipe の定数にも書けない。表に書かせると
     「再 export で本数が変わったのに宣言は前回のまま」という、形も型も合う沈黙誤宣言が作れる。
 
-    連番になっていない役割（旧規則で焼かれた単一ファイルの系列）は 1 要素の列として素通しする
-    — 組み立ての IR v1 全検証（{@link assert_weight_components_verified} のグラフ shard 空の門）
-    が名指しで落とす。
-    展開が起きた役割は代表役割を**artifacts から外し**、shard 1 本ごとに `Artifact` を作る
+    単一形（連番でない現物）は 1 要素の列として素通しする — `karume/5` の `container.parts` は
+    2 要素以上 MUST（ADR 0109 決定 3）なので、{@link _assert_manifest_shape} が名指しで落とす。
+    展開が起きた役割は代表役割を**artifacts から外し**、part 1 本ごとに `Artifact` を作る
     （相対 path は代表 path へ同じ連番規則を掛けたもの — 系列側のファイル名と配布形の
     ファイル名が同じ 1 本の綴りから出る）。
     """
     roles = sorted({files.file for labels in plan.weights.values() for files in labels.values()})
-    # weights 以外の席（assets / extras）から**同じ役割**を指している綴りは、展開で役割名が
-    # 消えると宣言の側だけが行き場を失う。数は数本なので、集めて名指しで落とす。
-    elsewhere = set(plan.assets.values()) | {
-        role
-        for labels in plan.weights.values()
-        for files in labels.values()
-        for role in files.extras.values()
-    }
+    # weights 以外の席（assets）から**同じ役割**を指している綴りは、展開で役割名が消えると
+    # 宣言の側だけが行き場を失う。数は数本なので、集めて名指しで落とす。
+    elsewhere = set(plan.assets.values())
     artifacts = dict(plan.artifacts)
-    shards: dict[str, tuple[str, ...]] = {}
+    parts: dict[str, tuple[str, ...]] = {}
     for role in roles:
         artifact = plan.artifacts.get(role)
         if artifact is None:
@@ -524,29 +533,31 @@ def expand_weight_shards(plan: ModelPlan) -> ShardedPlan:
                 f"（役割: {sorted(plan.artifacts)}）"
             )
         assert artifact.source is not None  # ModelPlan.__post_init__ の不変条件
-        sources = component_shards(artifact.source)
+        sources = component_parts(artifact.source)
         if len(sources) == 1:
-            shards[role] = (role,)
+            parts[role] = (role,)
             continue
         if role in elsewhere:
             raise DistError(
-                f"{plan.name}: 分割されたコンポーネントの役割 '{role}' を assets / extras も"
-                "指している（それらの席は 1 ファイル参照なので、複数 shard を宣言できない）"
+                f"{plan.name}: 分割形のコンテナの役割 '{role}' を assets も指している"
+                "（あちらの席は 1 ファイル参照なので、複数 part を宣言できない）"
             )
         del artifacts[role]
         members: list[str] = []
         total = len(sources)
         for index, source in enumerate(sources, start=1):
-            member = f"{role}{SHARD_ROLE_SEPARATOR}{index}"
+            member = f"{role}{PART_ROLE_SEPARATOR}{index}"
             if member in artifacts:
                 raise DistError(
-                    f"{plan.name}: shard 役割名 '{member}' が既存の役割と衝突する"
-                    f"（'{SHARD_ROLE_SEPARATOR}' を含む役割名は使えない）"
+                    f"{plan.name}: part 役割名 '{member}' が既存の役割と衝突する"
+                    f"（'{PART_ROLE_SEPARATOR}' を含む役割名は使えない）"
                 )
-            artifacts[member] = Artifact(shard_name(artifact.rel_path, index, total), source=source)
+            artifacts[member] = Artifact(
+                numbered_name(artifact.rel_path, index, total), source=source
+            )
             members.append(member)
-        shards[role] = tuple(members)
-    return ShardedPlan(replace(plan, artifacts=artifacts), shards)
+        parts[role] = tuple(members)
+    return PartitionedPlan(replace(plan, artifacts=artifacts), parts)
 
 
 def generator_tag() -> str:
@@ -671,29 +682,31 @@ def component_demand_bytes(
 ) -> int:
     """コンポーネント 1 つの**常駐 1 バッファの最大バイト数**（重みテンソル / state スロット）。
 
-    読むのは safetensors の**ヘッダだけ**（数 GB のペイロードは舐めない）。`memo` は代表 path
-    単位の覚え書き — 複数の quant が同じコンポーネントを選ぶ席（共有 text_encoder のような形）
-    で、数 MB のグラフ JSON を読み直さないため。
+    読むのは **part 0 の 2 文書だけ**（重みの payload は 1 バイトも舐めない）。`memo` は代表
+    path 単位の覚え書き — 複数の quant が同じコンポーネントを選ぶ席（共有 text_encoder の
+    ような形）で、同じ descriptor を読み直さないため。
 
-    導出規則の正本は {@link karume.limits}（純関数側）。ここが足すのは「配布に入る現物のどこを
-    入口にするか」だけ — 代表 path から shard 列とグラフを引く。
-
-    MUST: 全 shard のヘッダを**1 枚へ畳んでから**渡す。分割テンソル（ADR 0090 決定 1）の
-    断片は shard を跨いで散るので、shard ごとに最大を採ると断片 1 つぶんしか数えられない
-    （GPU 側は親 1 本のバッファを確保する — `karume.limits.max_tensor_payload`）。shard 跨ぎの
-    同名テンソルは禁止なので、キーで畳んでも衝突しない。
+    MUST: 需要は**合流した供給計画**（`bind_graphs`）から出す。piece 列に割れた重みは GPU 側で
+    親 1 本のバッファに戻る（container-v1 §5 の規則④）ので、piece ごとの最大を採ると
+    `requiredLimits` が過小に焼かれ、「宣言は満たすのに `createSession` で落ちる」という最も
+    損な形になる。companion scale は別バッファなので別に数える。const 領域（part 1）の
+    initializer も常駐するので同じ集合に入る。
     """
     remembered = memo.get(source)
     if remembered is not None:
         return remembered
+    verified = _container_of(source)
+    demand = 0
+    for bound in verified.graphs.values():
+        for supply in bound.supplies.values():
+            demand = max(demand, sum(block.payload_bytes for block in supply.blocks))
+            if supply.scale is not None:
+                demand = max(demand, supply.scale.payload_bytes)
     try:
-        merged: dict[str, Any] = {}
-        for shard in component_shards(source):
-            for name, spec in safetensors_header(shard).items():
-                if name != "__metadata__":
-                    merged[name] = spec
-        demand = max_tensor_payload(merged, str(source))
-        demand = max(demand, max_state_slot_bytes(ir_graph(source), pipeline_config, str(source)))
+        demand = max(
+            demand,
+            max_state_slot_bytes(ir_graph(source, verified), pipeline_config, str(source)),
+        )
     except LimitsError as cause:
         raise DistError(str(cause)) from cause
     memo[source] = demand
@@ -730,7 +743,7 @@ def bake_required_limits(plan: ModelPlan) -> ModelPlan:
             artifact = plan.artifacts.get(files.file)
             if artifact is None:
                 raise DistError(f"{where}.weights: 役割 '{files.file}' が artifacts に無い")
-            # extras / assets は見ない — 表・tokenizer・sidecar が GPU の常駐バッファになるかは
+            # assets は見ない — 表・tokenizer・sidecar が GPU の常駐バッファになるかは
             # family 側の事情で、コンテナの宣言からは決まらない。
             assert artifact.source is not None  # ModelPlan.__post_init__ の不変条件
             demand = max(
@@ -839,28 +852,66 @@ def _plan_shared(plans: Sequence[ModelPlan]) -> list[_SharedSeat]:
     return shared
 
 
+def container_asset_bytes(source: Path) -> int:
+    """容器が宣言する資産の**論理長の和**（ADR 0109 決定 4 — PLE / `rope_base` が入った席）。
+
+    読むのは descriptor だけ（payload は 1 バイトも読まない）。モデルカードの「host 読みの
+    資産」の勘定がここを引く — 資産は part の中に入ったので、manifest の `assets`（= 独立した
+    ファイルの席）を数えるだけでは、容器へ移った表が内訳から黙って消える。
+    """
+    model = _container_of(source).read.model
+    return 0 if model is None else sum(record.length for record in model.assets.values())
+
+
 def _model_entry(
     plan: ModelPlan,
     refs: Mapping[str, dict[str, Any]],
-    shards: Mapping[str, tuple[str, ...]],
+    parts: Mapping[str, tuple[str, ...]],
+    descriptors: Mapping[str, tuple[DocumentRef, DocumentRef]],
+    host_assets: dict[str, int],
 ) -> dict:
-    """1 モデルぶんの manifest エントリ（ADR 0041 §2）。`refs` は役割名 → 3 点セット。
+    """1 モデルぶんの manifest エントリ（ADR 0109 決定 3）。`refs` は役割名 → 3 点セット。
 
-    `shards` は {@link expand_weight_shards} が現物から解決した振り分け表（代表役割 →
-    順序付き shard 役割）。
+    `parts` は {@link expand_weight_parts} が現物から解決した振り分け表（代表役割 → 順序付き
+    part 役割）、`descriptors` は**置いた現物**の part 0 から採った 2 文書の期待値。
+
+    `host_assets`（part 0 の配布相対 path → {@link container_asset_bytes}）は**書き足し先**で、
+    manifest には載らない（モデルカードの内訳注記だけが読む派生値 — 宣言は容器が持つ）。
+
+    MUST: 資産の勘定は **quant が選ぶ席だけ**を開く。どの quant も選ばない dtype 席まで開くと、
+    入力コンテナの門（{@link assert_weight_components_verified}）が唯一の検出器である穴に
+    2 つ目の検出点ができ、あちらの故障注入（門を外すと壊れた容器が据わる）が恒真化する。
     """
+    selected = {
+        (name, label)
+        for quant in plan.quants.values()
+        for name, label in quant.get("weights", {}).items()
+    }
     weights: dict[str, Any] = {}
     for name, labels in plan.weights.items():
         entry: dict[str, Any] = {}
         for label, files in labels.items():
-            extras = {extra: refs[role] for extra, role in files.extras.items()}
-            # `shards` は順序付きの列で、**先頭がグラフ shard**（`karume_ir` を持つコンテナ）。
-            # 並びは shard 番号順 MUST — hub は順序を保存し、runtime は先頭を graph shard と
-            # して受ける（ADR 0071 決定 2）。
+            graph_ref, model_ref = descriptors[files.file]
+            # `parts` は順序付きの列で、**先頭が part 0**（ヘッダ + 2 文書のファイル）。
+            # 並びは添字順 MUST — 添字が part の id なので、列を触った瞬間に識別子が壊れる
+            # （container-v1 §8 / ADR 0109 決定 3）。
+            members = parts[files.file]
+            placed = [refs[role] for role in members]
             entry[label] = {
-                "shards": [refs[role] for role in shards[files.file]],
-                **({"extras": extras} if extras else {}),
+                "container": {
+                    "descriptor": {
+                        "graph": graph_ref.to_document(),
+                        "model": model_ref.to_document(),
+                    },
+                    "parts": placed,
+                }
             }
+            if (name, label) in selected:
+                # 資産の宣言は**出所の容器**から採る（置いた現物と同じバイト列であることは
+                # {@link verify_dist} と越境の突合が別に見る）。
+                head = plan.artifacts[members[0]].source
+                assert head is not None  # ModelPlan.__post_init__ の不変条件
+                host_assets[placed[0]["path"]] = container_asset_bytes(head)
         weights[name] = entry
     return {
         "pipeline": plan.pipeline,
@@ -953,61 +1004,61 @@ def assert_plan_sources(plans: Sequence[ModelPlan]) -> None:
                 raise DistError(f"{plan.name}.{role}: 組み立ての入力が無い: {artifact.source}")
 
 
-def weight_components(sharded: Sequence[ShardedPlan]) -> list[tuple[Path, ...]]:
-    """weights が指す**ローカル**コンポーネントの shard 列（読む順）を全部集める。
+def weight_components(partitioned: Sequence[PartitionedPlan]) -> list[tuple[Path, ...]]:
+    """weights が指す**ローカル**コンテナの part 列（添字順）を全部集める。
 
-    共有コンポーネント（複数モデルが同じ系列を指す席）は shard 列**そのもの**で dedupe する
+    共有コンポーネント（複数モデルが同じ系列を指す席）は part 列**そのもの**で dedupe する
     — 同じバイト列を 2 度検証しても結論は変わらない。生成物（`payload`）の役割は weights に
     現れない（{@link ModelPlan.__post_init__} が入口で落とす）ので、ここは全役割を集める。
 
-    NOTE: 見るのは weights だけ。`assets` / `extras`（tokenizer・スタイル表・rope 素表などの
-    table safetensors）は IR コンテナではないので、IR の門を掛ける先ではない。
+    NOTE: 見るのは weights だけ。`assets`（tokenizer・スタイル表などの table safetensors）は
+    コンテナではないので、コンテナの門を掛ける先ではない。
     """
     components: list[tuple[Path, ...]] = []
     seen: set[tuple[Path, ...]] = set()
-    for item in sharded:
+    for item in partitioned:
         roles = sorted(
             {files.file for labels in item.plan.weights.values() for files in labels.values()}
         )
         for role in roles:
             sources: list[Path] = []
-            for member in item.shards[role]:
+            for member in item.parts[role]:
                 source = item.plan.artifacts[member].source
                 assert source is not None  # ModelPlan.__post_init__ の不変条件
                 sources.append(source)
-            shards = tuple(sources)
-            if shards in seen:
+            parts = tuple(sources)
+            if parts in seen:
                 continue
-            seen.add(shards)
-            components.append(shards)
+            seen.add(parts)
+            components.append(parts)
     return components
 
 
-def assert_weight_components_verified(sharded: Sequence[ShardedPlan]) -> None:
-    """weights の全コンポーネントを **IR v1 の全規則**で検証する（配置の前）。
+def assert_weight_components_verified(partitioned: Sequence[PartitionedPlan]) -> None:
+    """weights の全コンテナを**宣言で決まる全規則**で検証する（配置の前）。
 
     MUST: 組み立ては入力コンテナを「過去に検証済み」と信頼しない。系列ディレクトリは
-    truncate で上書きされる可変な場所（モジュール doc）なので、**古いエクスポータで焼いた系列を
-    `--series` で指す**運用事故が現実にありうる。組み立てが自前で見るのは格納 dtype と
-    IR メタデータの一部（{@link ir_graph} は `karume_ir` を `json.loads` するだけ）なので、
-    node / op / storage の壊れは family 固有の門をすり抜けて配布形に据わり、利用者の
-    `createSession` で初めて落ちる。
+    据え替えで書き換わる可変な場所（モジュール doc）なので、**古いエクスポータで焼いた系列を
+    `--series` で指す**運用事故が現実にありうる。組み立てが自前で見るのは格納と IR の一部
+    （{@link ir_graph}）なので、descriptor / 束縛表の壊れは family 固有の門をすり抜けて配布形に
+    据わり、利用者の `createSession` で初めて落ちる。
 
-    読むのは safetensors の**ヘッダだけ**（`verify._read_shard_set`）なので、数 GB の再読みは
-    起きない。
+    掛かるのは読み手の構造検査（2 文書・block 目次・codec 台帳）と合流（`bind_graphs`）と、
+    **IR の受理規則**（op 語彙 / ランタイム支援 / op 契約 —
+    {@link karume.verify.assert_ir_accepted}）である。どれも**宣言だけ**を見るので、数 GB の
+    payload は 1 バイトも読まない（container-v1 §7 のハッシュ 3 分離）。block の sha256 は
+    書き手側の据え替え前検証（`karume.publish`）が既に通している。
 
-    NOTE: `karume.verify` の import は関数の中に置く — `karume.dist` の import グラフへ
-    `karume.emit` 経由の torch を引き込まないため（`karume.cli` の遅延ディスパッチと同じ規律）。
+    MUST: IR の受理規則をここで掛ける — 構造検査だけだと「語彙外の op / ランタイム未対応の
+    attrs / 契約違反の shape」を宣言した容器が配布形に据わり、利用者の `createSession` で
+    初めて落ちる（`karume.verify` のモジュール doc が掲げる目的の、組み立て側の半分）。
     """
-    from karume.ops import OpContractError
-    from karume.verify import ContainerError, IrError, verify_shards
-
-    for shards in weight_components(sharded):
+    for parts in weight_components(partitioned):
         try:
-            verify_shards(shards)
-        except (ContainerError, IrError, OpContractError) as cause:
+            assert_ir_accepted(verify_container(parts).read)
+        except (ContainerError, ContainerFormatError) as cause:
             raise DistError(
-                f"{shards[0]}: 組み立ての入力が IR v1 の規則を満たさない: {cause}"
+                f"{parts[0]}: 組み立ての入力がコンテナの規則を満たさない: {cause}"
             ) from cause
 
 
@@ -1027,8 +1078,99 @@ def assert_root_files(root_files: Mapping[str, str]) -> None:
         )
 
 
+#: 長さ 0 の実体（const が空の part 1）が名乗る sha256。実体は 1 通りしかないので値も 1 つに
+#: 決まる（ADR 0109 決定 3 — hub の `EMPTY_SHA256` と同値）。
+EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+
+def assert_container_limits(where: str, container: Mapping[str, Any]) -> None:
+    """コンテナの入口 1 件が `karume/5` の上限と規則に収まることを落とす（ADR 0109 決定 6）。
+
+    MUST: 上限の綴りは**コンテナ側の定数**（`karume.container`）から引く — hub 側
+    （`packages/hub/src/manifest.ts`）も同じ値を持つので、写しを 3 つ目に増やさない。突合は
+    `tests/test_dist.py` の定数突合テストが機械で見る。
+
+    見るのは**宣言だけで閉じるもの**（件数・天井・`size: 0` の規則・part 0 の長さ・越境の
+    一様性・descriptor 長）。descriptor と parts の整合・block 目次・codec 台帳の突合は
+    `verify_container` が持つので、ここには置かない（検査点を 2 つにしない）。
+
+    MUST: 欄の欠落も `DistError` で落とす（素の添字で `KeyError` / `TypeError` を出さない）—
+    {@link verify_dist} は**外から来た `karume.json`**（手元のどの配布形でも）を受ける門なので、
+    組み立ての語彙から外れた例外が出ると「壊れた manifest」と「門の不具合」が区別できない。
+    """
+    documents: list[int] = []
+    descriptor = _dist_object(container.get("descriptor"), f"{where}.descriptor")
+    for key in ("graph", "model"):
+        document = _dist_object(descriptor.get(key), f"{where}.descriptor.{key}")
+        length = document.get("length")
+        if not isinstance(length, int) or isinstance(length, bool) or length <= 0:
+            raise DistError(f"{where}.descriptor.{key}.length が正整数でない（{length!r}）")
+        if length > MAX_DESCRIPTOR_BYTES:
+            raise DistError(
+                f"{where}.descriptor.{key}.length {length} が上限 {MAX_DESCRIPTOR_BYTES} を超えた"
+            )
+        documents.append(length)
+    parts = container.get("parts")
+    if not isinstance(parts, list) or len(parts) < 2:
+        found = f"{len(parts)} 件" if isinstance(parts, list) else repr(parts)
+        raise DistError(
+            f"{where}.parts が 2 件以上の配列でない（実際: {found}）"
+            " — part 0〈descriptor〉+ part 1〈const〉が要る（container-v1 §8）"
+        )
+    if len(parts) > MAX_PARTS:
+        raise DistError(f"{where}.parts が {len(parts)} 件で上限 {MAX_PARTS} を超えた")
+    refs = [_dist_part_ref(part, f"{where}.parts[{index}]") for index, part in enumerate(parts)]
+    part0 = HEADER_BYTES + documents[0] + documents[1]
+    if refs[0]["size"] != part0:
+        raise DistError(
+            f"{where}.parts[0]: part 0 の size {refs[0]['size']} が"
+            f" ヘッダ {HEADER_BYTES} + 2 文書 {documents[0]} + {documents[1]} = {part0} と違う"
+        )
+    head = (refs[0].get("repo"), refs[0].get("revision"))
+    for index, ref in enumerate(refs):
+        if ref["size"] > PART_MAX_BYTES:
+            raise DistError(
+                f"{where}.parts[{index}]: part '{ref['path']}' が {ref['size']} バイトで"
+                f" 上限 {PART_MAX_BYTES}（part 長の天井 — container-v1 §10）を超えた"
+            )
+        # 長さ 0 は「const が空の part 1」の形だけ。part 0 はここへ来るまでに
+        # 「ヘッダ + 2 文書」ちょうどであることが済んでいる（2 文書は正整数なので 0 に
+        # ならない）ので、残る規則は空列の sha256 だけ。
+        if ref["size"] == 0 and ref["sha256"] != EMPTY_SHA256:
+            raise DistError(
+                f"{where}.parts[{index}]: size 0 の sha256 が空列の値 {EMPTY_SHA256} でない"
+            )
+        # 越境参照は**容器単位**（ADR 0109 決定 3）— 片方だけ・混在は、残りの part を
+        # セッションの repo へ取りに行く形になり、そこには無いので取得の途中で初めて落ちる。
+        if (ref.get("repo"), ref.get("revision")) != head:
+            raise DistError(
+                f"{where}.parts[{index}]: 越境参照が容器の中で混在している"
+                f"（part 0 は {head[0] or '自リポ'} / この part は {ref.get('repo') or '自リポ'}）"
+            )
+
+
+def _dist_object(value: Any, where: str) -> Mapping[str, Any]:
+    """manifest の 1 節をオブジェクトとして受ける（欄の欠落を組み立ての語彙へ翻訳する）。"""
+    if not isinstance(value, dict):
+        raise DistError(f"{where} がオブジェクトでない（実際: {value!r}）")
+    return value
+
+
+def _dist_part_ref(value: Any, where: str) -> Mapping[str, Any]:
+    """part 1 件の 3 点セット（`path` / `size` / `sha256`）が揃っていることを落とす。"""
+    ref = _dist_object(value, where)
+    if not isinstance(ref.get("path"), str) or not ref["path"]:
+        raise DistError(f"{where}.path が非空の文字列でない（実際: {ref.get('path')!r}）")
+    size = ref.get("size")
+    if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+        raise DistError(f"{where}.size が非負整数でない（実際: {size!r}）")
+    if not isinstance(ref.get("sha256"), str) or not ref["sha256"]:
+        raise DistError(f"{where}.sha256 が非空の文字列でない（実際: {ref.get('sha256')!r}）")
+    return ref
+
+
 def assert_manifest_limits(manifest: Mapping[str, Any]) -> None:
-    """規模上限（ADR 0041 §7）を焼く側で先に落とす。"""
+    """規模上限（ADR 0041 §7 + ADR 0109 決定 6）を焼く側で先に落とす。"""
     models = manifest["models"]
     if len(models) > MAX_MODELS:
         raise DistError(f"models が {len(models)} 件で上限 {MAX_MODELS} を超えた")
@@ -1040,6 +1182,11 @@ def assert_manifest_limits(manifest: Mapping[str, Any]) -> None:
             quants=model["quants"],
             pipeline_config=model["pipelineConfig"],
         )
+        for component, labels in model["weights"].items():
+            for label, entry in labels.items():
+                assert_container_limits(
+                    f"{name}.weights.{component}.{label}.container", entry["container"]
+                )
     total = len(manifest_text(manifest).encode("utf-8"))
     if total > MAX_MANIFEST_BYTES:
         raise DistError(f"manifest が {total} バイトで上限 {MAX_MANIFEST_BYTES} を超えた")
@@ -1057,13 +1204,24 @@ def manifest_text(manifest: Mapping[str, Any]) -> str:
     return json.dumps(manifest, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
 
 
+def _descriptor_refs(part0: Path) -> tuple[DocumentRef, DocumentRef]:
+    """part 0 のファイル → 2 文書の期待値（読み取りの失敗を組み立ての語彙へ翻訳する）。"""
+    try:
+        return read_descriptor_refs(part0)
+    except ContainerFormatError as cause:
+        raise DistError(f"{part0}: 2 文書の期待値を採れない: {cause}") from cause
+
+
 def _materialize_family(
-    sharded: Sequence[ShardedPlan],
+    partitioned: Sequence[PartitionedPlan],
     out_dir: Path,
     default_model: str,
     external: Mapping[str, Mapping[str, Any]],
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], dict[str, int]]:
     """検査済みの計画群を `out_dir` へ並べ、`karume.json` を書いて manifest を返す。
+
+    戻りの 2 本目はモデルカード用の派生値（part 0 の配布相対 path →
+    {@link container_asset_bytes}）— manifest には載らない（正本は容器の資産宣言）。
 
     ① 共有席を決める（{@link _plan_shared} — 出所の sha256 だけを見る）→ ② 共有席は
     `shared/` へ 1 回だけ・残りは各モデルのサブツリーへ置く → ③ 現物から manifest。
@@ -1079,7 +1237,7 @@ def _materialize_family(
     （配布先を直接更新しないので、途中で落ちても捨てるだけで済む）。
     """
     out_dir.mkdir(parents=True, exist_ok=True)
-    plans = [item.plan for item in sharded]
+    plans = [item.plan for item in partitioned]
     placed: dict[tuple[str, str], str] = {}
     digests: dict[str, str] = {}
     folded: dict[tuple[str, str], str] = {}
@@ -1123,7 +1281,8 @@ def _materialize_family(
             digests[rel_path] = sha256_file(out_dir / rel_path)
 
     models: dict[str, Any] = {}
-    for item in sharded:
+    host_assets: dict[str, int] = {}
+    for item in partitioned:
         plan = item.plan
         refs = {}
         for role in plan.artifacts:
@@ -1133,7 +1292,20 @@ def _materialize_family(
                 continue
             rel_path = placed[(plan.name, role)]
             refs[role] = file_ref(out_dir, rel_path, digests[rel_path])
-        models[plan.name] = _model_entry(plan, refs, item.shards)
+        # descriptor の期待値も**置いた現物**から採る（表と現物が食い違う失敗様式を構造的に
+        # 消す — モジュール doc の MUST）。越境参照の席は自リポに置かないので、代わりに
+        # 手元の出所から採る — {@link external_refs} が「参照先は自分で組むはずだったバイト列と
+        # 同一」まで確かめてあるので、同じ事実になる。
+        descriptors: dict[str, tuple[DocumentRef, DocumentRef]] = {}
+        for role, members in item.parts.items():
+            head = members[0]
+            if head in external:
+                source = plan.artifacts[head].source
+                assert source is not None  # ModelPlan.__post_init__ の不変条件
+                descriptors[role] = _descriptor_refs(source)
+            else:
+                descriptors[role] = _descriptor_refs(out_dir / placed[(plan.name, head)])
+        models[plan.name] = _model_entry(plan, refs, item.parts, descriptors, host_assets)
     manifest = {
         "format": MANIFEST_FORMAT,
         "generator": generator_tag(),
@@ -1142,14 +1314,14 @@ def _materialize_family(
     }
     assert_manifest_limits(manifest)
     (out_dir / MANIFEST_FILENAME).write_text(manifest_text(manifest), encoding="utf-8")
-    return manifest
+    return manifest, host_assets
 
 
 def assemble_family(
     plans: Sequence[ModelPlan],
     out_dir: Path,
     default_model: str,
-    render_card: Callable[[Mapping[str, Any]], str] | None = None,
+    render_card: Callable[..., str] | None = None,
     root_files: Mapping[str, str] | None = None,
     external: ExternalComponents | None = None,
 ) -> dict[str, Any]:
@@ -1184,13 +1356,13 @@ def assemble_family(
         raise DistError("組み立てるモデルが 1 つも無い")
     # MUST: `requiredLimits` は組み立てが**現物から**導いて焼く（{@link bake_required_limits}）
     # — 宣言の意味は「このバイト列を常駐させるのに要る device limit」なので、配布に入る現物
-    # 以外に正本は無い。展開より前に置くのは、導出の入口が**代表 path**（`component_shards` /
-    # `ir_graph` が受ける口）だから — 展開後の shard 役割からは代表 path を引き直せない。
+    # 以外に正本は無い。展開より前に置くのは、導出の入口が**代表 path**（`component_parts` /
+    # `ir_graph` が受ける口）だから — 展開後の part 役割からは代表 path を引き直せない。
     plans = [bake_required_limits(plan) for plan in plans]
     # MUST: 展開は**全ての門より前**（1 バイトも書く前）— 展開後の役割が持つ相対 path も
     # 出所も、以降の検査（path の収まり・入力の実在・共有の畳み込み）に掛かる必要がある。
-    sharded = [expand_weight_shards(plan) for plan in plans]
-    plans = [item.plan for item in sharded]
+    partitioned = [expand_weight_parts(plan) for plan in plans]
+    plans = [item.plan for item in partitioned]
     names = [plan.name for plan in plans]
     if len(set(names)) != len(names):
         raise DistError(f"モデル名が重複している: {names}")
@@ -1202,19 +1374,19 @@ def assemble_family(
     assert_root_files(root_files or {})
     # 入力コンテナの全検証は**実在検査の後・1 バイトも書く前**（ヘッダしか読まないので、
     # ここに置いても数 GB の再読みにはならない）。
-    assert_weight_components_verified(sharded)
+    assert_weight_components_verified(partitioned)
     # 越境参照は**複数モデルへ掛けてよい**。MUST: 指定役割の現物が全モデルで参照先とバイト
     # 同一（plan ごとの {@link external_refs} の突合 + 全 plan の参照一致）でなければ落とす —
     # 「同じ役割名が別バイトを指す」形が曖昧さの実体なので、モデル数で代理せずそれを直接
     # 検査する（食い違えば役割名と両モデル名を綴って fail loudly）。
     #
-    # 分割されたコンポーネントも越境参照にできる — `shards` は**要素ごとに**従来の FileRef
-    # 検査を通る配列なので（ADR 0038 §7 / ADR 0071 決定 2）、shard 1 本を参照 1 つで指せる。
-    # 展開（{@link expand_weight_shards}）が代表役割を shard 役割へ割った後にここへ来るので、
-    # {@link external_refs} は shard ごとに参照先の現物を引き当てる。
+    # 分割形のコンテナも越境参照にできる — `container.parts` は**要素ごとに**従来の FileRef
+    # 検査を通る配列なので（ADR 0038 §7 / ADR 0109 決定 3）、part 1 本を参照 1 つで指せる。
+    # 展開（{@link expand_weight_parts}）が代表役割を part 役割へ割った後にここへ来るので、
+    # {@link external_refs} は part ごとに参照先の現物を引き当てる。
     references: dict[str, dict[str, Any]] = {}
     if external is not None:
-        resolved = [(item.plan.name, external_refs(external, item)) for item in sharded]
+        resolved = [(item.plan.name, external_refs(external, item)) for item in partitioned]
         first_model, references = resolved[0]
         for model_name, refs in resolved[1:]:
             differing = sorted(
@@ -1231,14 +1403,17 @@ def assemble_family(
 
     try:
         with staged_publication(out_dir) as staging:
-            manifest = _materialize_family(sharded, staging, default_model, references)
+            manifest, host_assets = _materialize_family(
+                partitioned, staging, default_model, references
+            )
             # 法的テキストは検証の**前**に置く — 例外側に居ることを組み立てのたびに
             # {@link verify_dist} で通しておかないと、例外が外れた回に据わってから気づく。
             for name, text in (root_files or {}).items():
                 (staging / name).write_text(text, encoding="utf-8")
             verify_dist(staging)
             if render_card is not None:
-                (staging / MODEL_CARD_FILENAME).write_text(render_card(manifest), encoding="utf-8")
+                card = render_card(manifest, host_assets=host_assets)
+                (staging / MODEL_CARD_FILENAME).write_text(card, encoding="utf-8")
     except ArtifactSwapError as error:
         # 据え替えの失敗を組み立ての失敗と取り違えない（原因の I/O 故障は連鎖に残る）。
         raise DistError(str(error)) from error
@@ -1253,10 +1428,9 @@ def _declared_refs(manifest: Mapping[str, Any]) -> Iterator[tuple[str, Mapping[s
     for model_name, model in manifest["models"].items():
         for name, labels in model["weights"].items():
             for label, entry in labels.items():
-                for index, ref in enumerate(entry["shards"]):
-                    yield f"models.{model_name}.weights.{name}.{label}.shards[{index}]", ref
-                for extra, ref in entry.get("extras", {}).items():
-                    yield f"models.{model_name}.weights.{name}.{label}.extras.{extra}", ref
+                where = f"models.{model_name}.weights.{name}.{label}.container.parts"
+                for index, ref in enumerate(entry["container"]["parts"]):
+                    yield f"{where}[{index}]", ref
         for name, ref in model["assets"].items():
             yield f"models.{model_name}.assets.{name}", ref
 
@@ -1271,12 +1445,12 @@ def is_external_ref(ref: Mapping[str, Any]) -> bool:
 
 
 def _assert_manifest_shape(manifest: Mapping[str, Any]) -> None:
-    """`karume/4` の構造整合（hub のパーサが受理する形かを焼いた側でも見る）。
+    """`karume/5` の構造整合（hub のパーサが受理する形かを焼いた側でも見る）。
 
     ここが見るのは**この配布形が自分で閉じているか**だけ — `defaultModel` / `defaultQuant` の
-    指し先、quant の weights 完全写像、weights の shard 列、そしてレイアウト（ADR 0041 §9）。
+    指し先、quant の weights 完全写像、weights のコンテナ入口、そしてレイアウト（ADR 0041 §9）。
     hub の全検査を写経しても正本が 2 つになるだけなので、写すのは「組み立てが壊れたら真っ先に
-    破れる」規則に絞る。
+    破れる」規則に絞る（上限と part の規則は {@link assert_container_limits}）。
     """
     if manifest.get("format") != MANIFEST_FORMAT:
         raise DistError(f"format が '{MANIFEST_FORMAT}' でない: {manifest.get('format')!r}")
@@ -1300,17 +1474,29 @@ def _assert_manifest_shape(manifest: Mapping[str, Any]) -> None:
                         f"{model_name}.weights.{name} の dtype ラベル '{label}' が格納 dtype"
                         f" 語彙 {sorted(STORAGE_DTYPE_LABELS)} に無い"
                     )
-                # MUST: shard 列は**非空**（先頭がグラフ shard = `karume_ir` を持つコンテナ）。
-                # v2 の `{file}` を持ったままの manifest もここで落ちる — 形式識別子だけ書き換え
-                # て中身が旧形の配布形は、hub が読めないのに焼く側では通ってしまう。
-                shards = entry.get("shards")
-                if not isinstance(shards, list) or not 1 <= len(shards) <= MAX_SHARDS:
-                    # 実物が列なら件数だけを言う（上限超えの列をそのまま綴ると診断が数 MB になる）。
-                    found = f"{len(shards)} 要素" if isinstance(shards, list) else repr(shards)
+                # MUST: dtype エントリはコンテナの入口 1 つだけ（ADR 0109 決定 3）。`karume/4`
+                # の `{shards, extras?}` を持ったままの manifest もここで落ちる — 形式識別子
+                # だけ書き換えて中身が旧形の配布形は、hub が読めないのに焼く側では通ってしまう。
+                if set(entry) != {"container"}:
                     raise DistError(
-                        f"{model_name}.weights.{name}.{label}.shards が"
-                        f" 1〜{MAX_SHARDS} 要素の配列でない（実際: {found}）"
+                        f"{model_name}.weights.{name}.{label} の欄が ['container'] でない"
+                        f"（実際: {sorted(entry)}）"
                     )
+                container = entry["container"]
+                if not isinstance(container, dict) or set(container) != {"descriptor", "parts"}:
+                    found = sorted(container) if isinstance(container, dict) else repr(container)
+                    raise DistError(
+                        f"{model_name}.weights.{name}.{label}.container の欄が"
+                        f" ['descriptor', 'parts'] でない（実際: {found}）"
+                    )
+                descriptor = container["descriptor"]
+                if not isinstance(descriptor, dict) or set(descriptor) != {"graph", "model"}:
+                    found = sorted(descriptor) if isinstance(descriptor, dict) else repr(descriptor)
+                    raise DistError(
+                        f"{model_name}.weights.{name}.{label}.container.descriptor の欄が"
+                        f" ['graph', 'model'] でない（実際: {found}）"
+                    )
+                assert_container_limits(f"{model_name}.weights.{name}.{label}.container", container)
         if model["defaultQuant"] not in quants:
             raise DistError(
                 f"{model_name}.defaultQuant '{model['defaultQuant']}' が"
@@ -1446,8 +1632,8 @@ class ExternalComponents:
     dist: Path
     #: 参照元 dist の中のモデル名（同じ相対 path をどのモデルの席から採るか）。
     model: str
-    #: 参照へ差し替える役割名。分割されたコンポーネントを指す役割は、shard 1 本ごとの参照
-    #: （manifest の `shards` 配列の各要素）へ展開される（{@link external_refs}）。
+    #: 参照へ差し替える役割名。分割形のコンテナを指す役割は、part 1 本ごとの参照
+    #: （manifest の `container.parts` 配列の各要素）へ展開される（{@link external_refs}）。
     roles: tuple[str, ...]
 
     def __post_init__(self) -> None:
@@ -1486,13 +1672,13 @@ def _external_ref(
     artifact: Artifact,
     memo: dict[Path, str],
     *,
-    sharded_seat: bool,
+    part_seat: bool,
 ) -> dict[str, Any]:
     """越境ファイル参照 1 つ（{@link external_refs} の 1 要素）。
 
-    `sharded_seat` は「この席が shard 列を書けるか」— weights の dtype エントリだけが真で、
-    assets / extras は偽（1 ファイル参照しか書けない席）。偽の席で参照先が分割されていたら
-    fail loudly: 黙って先頭 shard だけを指すと、残りのバイト列がどこからも取れない配布形が
+    `part_seat` は「この席が part 列を書けるか」— weights の dtype エントリだけが真で、
+    assets は偽（1 ファイル参照しか書けない席）。偽の席で参照先が分割形だったら
+    fail loudly: 黙って part 0 だけを指すと、残りのバイト列がどこからも取れない配布形が
     出来上がる。
     """
     seats = [
@@ -1501,13 +1687,13 @@ def _external_ref(
     ]
     found = [seat for seat in seats if seat in declared]
     if not found:
-        if not sharded_seat and any(
-            len(component_shards(components.dist / seat)) > 1 for seat in seats
+        if not part_seat and any(
+            len(component_parts(components.dist / seat)) > 1 for seat in seats
         ):
             raise DistError(
-                f"越境参照は分割されたコンポーネントに掛けられない: ['{role}']"
-                "（1 役が複数 shard へ割れているので 1 つの参照では指せない）"
-                " — assets / extras の席は 1 ファイル参照しか書けない"
+                f"越境参照は分割形のコンテナに掛けられない: ['{role}']"
+                "（1 役が複数 part へ割れているので 1 つの参照では指せない）"
+                " — assets の席は 1 ファイル参照しか書けない"
             )
         raise DistError(
             f"役割 '{role}' のファイルが参照元 {components.dist} に無い"
@@ -1535,7 +1721,7 @@ def _external_ref(
 
 
 def external_refs(
-    components: ExternalComponents, sharded: ShardedPlan
+    components: ExternalComponents, partitioned: PartitionedPlan
 ) -> dict[str, dict[str, Any]]:
     """役割名 → 越境ファイル参照 `{repo, revision, path, size, sha256}`。
 
@@ -1543,17 +1729,18 @@ def external_refs(
     サブツリーか `shared/` かは向こうの組み立てが決めた事実で、こちらからは導けない）。
     宣言に無い役割は fail loudly — 参照先に無いものは参照できない。
 
-    **分割されたコンポーネントは shard 役割ごとに 1 つの参照**を返す（manifest の `shards`
-    配列の各要素が参照になる — ADR 0038 §7 / ADR 0071 決定 2）。`repo` / `revision` は全要素
-    同一で、`path` / `size` / `sha256` は shard ごとに別。並びは {@link expand_weight_shards}
-    が**現物から**解決した shard 番号順そのままなので、先頭 = グラフ shard の規約は参照でも
-    変わらない。shard のファイル名は連番と総数を綴りに持つ（`-NNNNN-of-NNNNN`）ので、参照先の
-    分割数がこちらと違えば「参照元に無い」で必ず落ちる（本数の食い違いは黙って解決しない）。
+    **分割形のコンテナは part 役割ごとに 1 つの参照**を返す（manifest の `container.parts`
+    配列の各要素が参照になる — ADR 0038 §7 / ADR 0109 決定 3）。`repo` / `revision` は全要素
+    同一 MUST（越境は容器単位）で、`path` / `size` / `sha256` は part ごとに別。並びは
+    {@link expand_weight_parts} が**現物から**解決した添字順そのままなので、先頭 = part 0 の
+    規約は参照でも変わらない。part のファイル名は連番と総数を綴りに持つ（`-NNNNN-of-NNNNN`）
+    ので、参照先の part 数がこちらと違えば「参照元に無い」で必ず落ちる（本数の食い違いは
+    黙って解決しない）。
 
     MUST: 宣言と現物の突合を越境でも切らさない。`size` / `sha256` はローカルの実ファイルから
     採り、さらに**自分で組むはずだったバイト列と一致すること**まで確かめる — 一致しない参照は
     「別のモデルの重みを自分のものとして配る」形になり、shape も manifest も正しいまま沈黙する。
-    分割されている役割はこの突合を**shard 列の全要素**へ掛ける。
+    分割形の役割はこの突合を**part 列の全要素**へ掛ける。
 
     NOTE: 参照元の参照（多段）は辿らない。{@link _declared_sizes} が越境参照を外すので、
     参照元がさらに別リポを指している席はここで「宣言に無い」として落ちる。
@@ -1562,14 +1749,14 @@ def external_refs(
     if not manifest_path.is_file():
         raise DistError(f"越境参照の参照元に {MANIFEST_FILENAME} が無い: {manifest_path}")
     declared = set(_declared_sizes(json.loads(manifest_path.read_text(encoding="utf-8"))))
-    plan = sharded.plan
+    plan = partitioned.plan
     memo: dict[Path, str] = {}
     refs: dict[str, dict[str, Any]] = {}
     for role in components.roles:
-        # weights の役割は振り分け表に載っている（分割されていれば shard 役割へ割れていて、
-        # 代表役割は artifacts から消えている）。載っていない役割は assets / extras の席
-        # なので代表役割のまま 1 ファイル参照を引く。
-        for member in sharded.shards.get(role, (role,)):
+        # weights の役割は振り分け表に載っている（分割形なら part 役割へ割れていて、代表役割は
+        # artifacts から消えている）。載っていない役割は assets の席なので代表役割のまま
+        # 1 ファイル参照を引く。
+        for member in partitioned.parts.get(role, (role,)):
             artifact = plan.artifacts.get(member)
             if artifact is None:
                 raise DistError(
@@ -1582,7 +1769,7 @@ def external_refs(
                 member,
                 artifact,
                 memo,
-                sharded_seat=role in sharded.shards,
+                part_seat=role in partitioned.parts,
             )
     return refs
 
@@ -1624,8 +1811,12 @@ def resolve_external_components(
 # ---- ③ pipeline 別ディスパッチと CLI -----------------------------------------
 
 
-#: モデルカードの描き手（manifest とリポ ID から本文 1 枚）。
-CardRenderer = Callable[[Mapping[str, Any], str], str]
+#: モデルカードの描き手（manifest とリポ ID と「host 読みの資産」の勘定から本文 1 枚）。
+#:
+#: `host_assets`（part 0 の配布相対 path → 容器が宣言する資産の論理長の和）は manifest から
+#: 導けない**容器の事実**なので、組み立てが引いて渡す（ADR 0109 決定 4 で PLE / `rope_base` が
+#: 容器の中へ入り、独立したファイルの席が消えた）。
+CardRenderer = Callable[[Mapping[str, Any], str, Mapping[str, int]], str]
 
 
 @dataclass(frozen=True)

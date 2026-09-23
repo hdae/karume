@@ -84,14 +84,25 @@ def _ref(path: str, size: int, sha: str) -> dict[str, Any]:
     return {"path": path, "size": size, "sha256": sha}
 
 
+def _container(*refs: dict[str, Any]) -> dict[str, Any]:
+    """コンテナの入口 1 件（カードが読むのは `parts` の size だけ）。"""
+    return {
+        "descriptor": {
+            "graph": {"length": 64, "sha256": "0" * 64},
+            "model": {"length": 32, "sha256": "1" * 64},
+        },
+        "parts": list(refs),
+    }
+
+
 def _manifest() -> dict[str, Any]:
-    """2 モデル・共有資産つきの偽 manifest（ADR 0041 §2 の形）。
+    """2 モデル・共有資産つきの偽 manifest（ADR 0109 決定 3 の形）。
 
     モデルの並びは `zeta` → `alpha` で辞書順と**逆** — 並べ替えが混ざれば表の順で分かる。
-    `tables` は f16 / i8 の両 dtype が同一 path を指す形（rope_base の 1 本化と同型）。
+    `tables` は f16 / i8 の両 dtype が同一 path を指す形（共有部品と同型）。
     """
     return {
-        "format": "karume/4",
+        "format": "karume/5",
         "generator": "karume/9.9.9",
         "defaultModel": "zeta",
         "models": {
@@ -100,14 +111,16 @@ def _manifest() -> dict[str, Any]:
                 "weights": {
                     "front": {
                         "f16": {
-                            "shards": [_ref("zeta/front-f16.safetensors", 4096, "a" * 64)],
-                            "extras": {"rope": _ref("zeta/front-rope.safetensors", 64, "b" * 64)},
+                            "container": _container(
+                                _ref("zeta/front-f16-00001-of-00002.krm", 4096, "a" * 64),
+                                _ref("zeta/front-f16-00002-of-00002.krm", 64, "b" * 64),
+                            )
                         },
-                        "i8": {"shards": [_ref("zeta/front-i8.safetensors", 2048, "c" * 64)]},
+                        "i8": {"container": _container(_ref("zeta/front-i8.krm", 2048, "c" * 64))},
                     },
                     "tables": {
-                        "f16": {"shards": [_ref("zeta/tables.safetensors", 128, "d" * 64)]},
-                        "i8": {"shards": [_ref("zeta/tables.safetensors", 128, "d" * 64)]},
+                        "f16": {"container": _container(_ref("zeta/tables.krm", 128, "d" * 64))},
+                        "i8": {"container": _container(_ref("zeta/tables.krm", 128, "d" * 64))},
                     },
                 },
                 "assets": {"tokenizer": _ref("shared/tokenizer.json", 32, "e" * 64)},
@@ -126,7 +139,9 @@ def _manifest() -> dict[str, Any]:
             "alpha": {
                 "pipeline": "fake/1",
                 "weights": {
-                    "front": {"f16": {"shards": [_ref("alpha/front.safetensors", 512, "f" * 64)]}}
+                    "front": {
+                        "f16": {"container": _container(_ref("alpha/front.krm", 512, "f" * 64))}
+                    }
                 },
                 "assets": {},
                 "quants": {"f16": {"weights": {"front": "f16"}, "session": {}}},
@@ -145,12 +160,12 @@ def _row(lines: Sequence[str], name: str) -> str:
 class TestQuantsDownload:
     """Download 欄 = その席を選んだ読み手が実際に落とすバイト数（2026-09-03 裁定）。
 
-    shard 上限 256 MiB でファイル本数が 3〜4 倍になり、shard 1 本 1 行のファイル表は廃止した。
-    読み手が知りたい「このプリセットで何 GiB 落ちるか」を席ごとの合計 1 セルで持つ。
+    part の本数が多いのでファイル 1 本 1 行の表は廃止した。読み手が知りたい「このプリセットで
+    何 GiB 落ちるか」を席ごとの合計 1 セルで持つ。
     """
 
-    def test_it_sums_the_shards_extras_and_assets_the_quant_selects(self) -> None:
-        """f16 = front 4,096 + rope 64 + tables 128 + tokenizer 32 = 4,320 B（= 4.22 KiB）。"""
+    def test_it_sums_the_parts_and_assets_the_quant_selects(self) -> None:
+        """f16 = front part 4,096 + 64 + tables 128 + tokenizer 32 = 4,320 B（= 4.22 KiB）。"""
         lines = quants(_manifest()["models"]["zeta"])
 
         assert "| 4.22 KiB (32 B shared) |" in _row(lines, "f16")
@@ -162,7 +177,9 @@ class TestQuantsDownload:
         席ごとに数え直していなければ、f16 側の重みを動かしたとき w8 の欄も動く。
         """
         manifest = _manifest()
-        manifest["models"]["zeta"]["weights"]["front"]["f16"]["shards"][0]["size"] = 1 << 30
+        manifest["models"]["zeta"]["weights"]["front"]["f16"]["container"]["parts"][0]["size"] = (
+            1 << 30
+        )
 
         before = _row(quants(_manifest()["models"]["zeta"]), "w8")
         after = _row(quants(manifest["models"]["zeta"]), "w8")
@@ -170,18 +187,19 @@ class TestQuantsDownload:
         assert after == before
         assert "| 1.00 GiB (" in _row(quants(manifest["models"]["zeta"]), "f16")
 
-    def test_it_counts_the_extras_of_the_selected_dtype(self) -> None:
-        """付帯資産（`extras`）も落ちるファイル — f16 だけが持つ rope 64 B が合計に入る。"""
+    def test_it_counts_every_part_of_the_selected_container(self) -> None:
+        """part は 1 本ずつ落ちるファイル — f16 の 2 本目 64 B が合計に入る。"""
         manifest = _manifest()
-        del manifest["models"]["zeta"]["weights"]["front"]["f16"]["extras"]
+        parts = manifest["models"]["zeta"]["weights"]["front"]["f16"]["container"]["parts"]
+        del parts[1]
 
         assert "| 4.16 KiB (" in _row(quants(manifest["models"]["zeta"]), "f16")
 
     def test_a_file_two_components_point_at_is_counted_once(self) -> None:
         """1 本のファイルを 2 席が指す形（1 本化済みの rope_base と同型）で二重に数えない。"""
         manifest = _manifest()
-        front = manifest["models"]["zeta"]["weights"]["front"]["f16"]["shards"]
-        manifest["models"]["zeta"]["weights"]["tables"]["f16"]["shards"] = front
+        front = manifest["models"]["zeta"]["weights"]["front"]["f16"]["container"]["parts"]
+        manifest["models"]["zeta"]["weights"]["tables"]["f16"]["container"]["parts"] = front
 
         # front 4,096 + rope 64 + tokenizer 32 = 4,192 B（tables の 128 は同一 path なので消える）。
         assert "| 4.09 KiB (" in _row(quants(manifest["models"]["zeta"]), "f16")
@@ -200,11 +218,11 @@ class TestQuantsDownload:
     def test_bytes_borrowed_from_another_repository_count_as_shared(self) -> None:
         """越境参照（ADR 0038 §7）も 2 度は落ちない — 同じ「落とし直さない量」に入る。"""
         manifest = _manifest()
-        manifest["models"]["alpha"]["weights"]["front"]["f16"]["shards"] = [
+        manifest["models"]["alpha"]["weights"]["front"]["f16"]["container"]["parts"] = [
             {
                 "repo": "hdae/karume-source",
                 "revision": "9" * 40,
-                "path": "source/front.safetensors",
+                "path": "source/front.krm",
                 "size": 512,
                 "sha256": "f" * 64,
             }
@@ -253,7 +271,9 @@ class TestDownloadSizeUnits:
         self, size: int, spelled: str
     ) -> None:
         manifest = _manifest()
-        manifest["models"]["alpha"]["weights"]["front"]["f16"]["shards"][0]["size"] = size
+        manifest["models"]["alpha"]["weights"]["front"]["f16"]["container"]["parts"][0]["size"] = (
+            size
+        )
 
         assert f"| {spelled} |" in _row(quants(manifest["models"]["alpha"]), "f16")
 
@@ -294,11 +314,11 @@ class TestQuantsNotes:
     def test_it_names_the_repository_borrowed_bytes_come_from(self) -> None:
         """指し先（リポ + pin した commit）まで出して初めて注記が事実になる。"""
         manifest = _manifest()
-        manifest["models"]["alpha"]["weights"]["front"]["f16"]["shards"] = [
+        manifest["models"]["alpha"]["weights"]["front"]["f16"]["container"]["parts"] = [
             {
                 "repo": "hdae/karume-source",
                 "revision": "9" * 40,
-                "path": "source/front.safetensors",
+                "path": "source/front.krm",
                 "size": 512,
                 "sha256": "f" * 64,
             }
@@ -320,74 +340,16 @@ class TestQuantsNotes:
             for line in quants(_manifest()["models"]["zeta"])
         )
 
-    def test_an_i4_component_flags_the_safetensors_dialect(self) -> None:
-        """`I4` は公式仕様に無い語（docs/limitations.md）— 公式パーサで開けない事実を添える。"""
-        manifest = _manifest()
-        manifest["models"]["zeta"]["weights"]["front"]["i4"] = {
-            "shards": [_ref("zeta/front-i4.safetensors", 1024, "1" * 64)]
-        }
+    def test_it_names_the_container_form_of_the_weights(self) -> None:
+        """重みは `.krm` の part 列で配られる — 読み手が現物の形を目にする前に知れる 1 行。
 
-        assert any(
-            line.startswith("A component stored as `i4`")
-            for line in quants(manifest["models"]["zeta"])
-        )
+        `I4` / `I2` が safetensors の方言だという注記は、配布形が safetensors でなくなった段で
+        退役した（ADR 0109 決定 3）— 掛からない主張をカードに残さない。
+        """
+        lines = quants(_manifest()["models"]["zeta"])
 
-    def test_a_model_without_i4_says_nothing_about_the_dialect(self) -> None:
-        """f16 / i8 だけの配布形は公式互換のまま — 掛からない注意書きを載せない。"""
-        assert not any(
-            line.startswith("A component stored as `i4`")
-            for line in quants(_manifest()["models"]["zeta"])
-        )
-
-    def test_the_i4_note_keeps_the_wording_already_published(self) -> None:
-        """i2 を条件へ足しても、既に配った i4 系列のカードのバイト列は動かさない。"""
-        manifest = _manifest()
-        manifest["models"]["zeta"]["weights"]["front"]["i4"] = {
-            "shards": [_ref("zeta/front-i4.safetensors", 1024, "1" * 64)]
-        }
-
-        assert (
-            "A component stored as `i4` uses a packed int4 dtype (`I4`) that is **not part of the"
-            " official safetensors specification** — the official `safetensors` library rejects a"
-            " file that contains it (checked with 0.8.0). Karume's runtime and exporter read it;"
-            " files without `i4` stay fully compatible."
-        ) in quants(manifest["models"]["zeta"])
-
-    def test_an_i2_component_flags_the_safetensors_dialect(self) -> None:
-        """`I2`（ADR 0097 の INT2 格納）も公式 0.8.0 では開けない（2026-09-19 実測）。"""
-        manifest = _manifest()
-        manifest["models"]["zeta"]["weights"]["front"]["i2"] = {
-            "shards": [_ref("zeta/front-i2.safetensors", 512, "2" * 64)]
-        }
-
-        assert any(
-            line.startswith("A component stored as `i2` uses a packed int2 dtype (`I2`)")
-            for line in quants(manifest["models"]["zeta"])
-        )
-
-    def test_a_model_with_both_packed_dialects_flags_each_one(self) -> None:
-        """2 つの席を持つ配布形には注記も 2 本 — 順序は固定（描画は決定的）。"""
-        manifest = _manifest()
-        manifest["models"]["zeta"]["weights"]["front"]["i4"] = {
-            "shards": [_ref("zeta/front-i4.safetensors", 1024, "1" * 64)]
-        }
-        manifest["models"]["zeta"]["weights"]["tables"]["i2"] = {
-            "shards": [_ref("zeta/tables-i2.safetensors", 64, "2" * 64)]
-        }
-
-        flagged = [
-            line.split(" uses")[0]
-            for line in quants(manifest["models"]["zeta"])
-            if line.startswith("A component stored as")
-        ]
-        assert flagged == ["A component stored as `i4`", "A component stored as `i2`"]
-
-    def test_a_model_without_a_packed_dialect_flags_nothing(self) -> None:
-        """f16 / i8 だけの配布形では方言の注記が 1 本も出ない（i2 側も含めて）。"""
-        assert not any(
-            line.startswith("A component stored as")
-            for line in quants(_manifest()["models"]["zeta"])
-        )
+        assert any(line.startswith("Weights ship as Karume container files") for line in lines)
+        assert not any(line.startswith("A component stored as") for line in lines)
 
 
 class TestQuantsSection:

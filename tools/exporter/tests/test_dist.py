@@ -20,23 +20,34 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, ClassVar
 
 import pytest
-from ir_fixtures import ir_container, ir_shards
-from safetensors.numpy import load, save
+from ir_fixtures import ir_container, ir_parts, with_an_unknown_op
 
 from karume import dist, limits, verify
 from karume.artifacts import SUPERSEDED_SUFFIX
+from karume.container import (
+    BLOCK_MAX_BYTES,
+    HEADER_BYTES,
+    MAX_DESCRIPTOR_BYTES,
+    MAX_PARTS,
+    PART_MAX_BYTES,
+    canonical_json,
+    numbered_name,
+    read_descriptor_refs,
+    read_header,
+    write_header,
+)
 from karume.dist import (
     MANIFEST_FILENAME,
     MANIFEST_FORMAT,
     MAX_QUANT_DESCRIPTION_CHARS,
     MAX_QUANT_LABEL_CHARS,
-    MAX_SHARDS,
     PIPELINES,
     SHARED_DIRNAME,
     STORAGE_DTYPE_LABELS,
@@ -59,15 +70,12 @@ from karume.dist import (
     preprocessor_channels,
     resolve_card_renderer,
     resolve_external_components,
-    safetensors_header,
     verify_dist,
 )
-from karume.ir import IR_METADATA_KEY
-from karume.shards import parse_piece_key, shard_name
 
 
-def _write_series(root: Path, payloads: Sequence[bytes], name: str = "model.safetensors") -> Path:
-    """shard 列を系列ディレクトリへ連番で書き、**代表 path** を返す。
+def _write_series(root: Path, payloads: Sequence[bytes], name: str = "model.krm") -> Path:
+    """part 列を系列ディレクトリへ連番で書き、**代表 path** を返す。
 
     配布形は常に分割される（ADR 0081）ので、系列側の現物も常に連番 — 代表 path 自身は
     書かない（書くと「単一ファイルと連番の同居」になり、組み立てが fail loudly する）。
@@ -75,7 +83,7 @@ def _write_series(root: Path, payloads: Sequence[bytes], name: str = "model.safe
     root.mkdir(parents=True, exist_ok=True)
     total = len(payloads)
     for index, payload in enumerate(payloads, start=1):
-        (root / shard_name(name, index, total)).write_bytes(payload)
+        (root / numbered_name(name, index, total)).write_bytes(payload)
     return root / name
 
 
@@ -99,16 +107,16 @@ def _synthetic_series(root: Path, mark: str) -> Path:
     return _write_series(root / mark, ir_container(mark=mark))
 
 
-def _shard_rel_paths(rel_path: str, mark: str) -> list[str]:
+def _part_rel_paths(rel_path: str, mark: str) -> list[str]:
     """{@link _synthetic_series} の系列が据わる**モデルサブツリー内**の相対 path（宣言と同じ順）。
 
-    配布形は常に分割される（ADR 0081）ので、1 役は必ず複数要素の shard 列になる。
+    配布形は常に分割される（container-v1 §8）ので、1 役は必ず複数要素の part 列になる。
     """
     total = len(ir_container(mark=mark))
-    return [shard_name(rel_path, index, total) for index in range(1, total + 1)]
+    return [numbered_name(rel_path, index, total) for index in range(1, total + 1)]
 
 
-def _shard_refs(prefix: str, rel_path: str, mark: str) -> list[dict[str, Any]]:
+def _part_refs(prefix: str, rel_path: str, mark: str) -> list[dict[str, Any]]:
     """`prefix/` 配下へ据わった {@link _synthetic_series} の 3 点セット（宣言と同じ順）。"""
     return [
         {
@@ -117,19 +125,19 @@ def _shard_refs(prefix: str, rel_path: str, mark: str) -> list[dict[str, Any]]:
             "sha256": hashlib.sha256(payload).hexdigest(),
         }
         for rel, payload in zip(
-            _shard_rel_paths(rel_path, mark), ir_container(mark=mark), strict=True
+            _part_rel_paths(rel_path, mark), ir_container(mark=mark), strict=True
         )
     ]
 
 
-def _shard_paths(prefix: str, rel_path: str, mark: str) -> list[str]:
-    """{@link _shard_refs} の path だけ（`verify_dist` の返り値と突き合わせる並び）。"""
-    return [ref["path"] for ref in _shard_refs(prefix, rel_path, mark)]
+def _part_paths(prefix: str, rel_path: str, mark: str) -> list[str]:
+    """{@link _part_refs} の path だけ（`verify_dist` の返り値と突き合わせる並び）。"""
+    return [ref["path"] for ref in _part_refs(prefix, rel_path, mark)]
 
 
-def _shard_sizes(prefix: str, rel_path: str, mark: str) -> dict[str, int]:
-    """{@link _shard_refs} の `{path: size}`（`verify_dist` の返り値そのものの形）。"""
-    return {ref["path"]: ref["size"] for ref in _shard_refs(prefix, rel_path, mark)}
+def _part_sizes(prefix: str, rel_path: str, mark: str) -> dict[str, int]:
+    """{@link _part_refs} の `{path: size}`（`verify_dist` の返り値そのものの形）。"""
+    return {ref["path"]: ref["size"] for ref in _part_refs(prefix, rel_path, mark)}
 
 
 def _synthetic_plan(root: Path, name: str, rel_path: str, mark: str) -> ModelPlan:
@@ -227,10 +235,25 @@ class TestManifestLimits:
     """規模上限（ADR 0041 §7）は hub も同じ値で弾く — 配ってから落ちる形にしない。"""
 
     @staticmethod
+    def _container() -> dict[str, Any]:
+        """規模上限の検査が通る最小のコンテナ入口（part 0 の長さは 2 文書から決まる）。"""
+        graph, model = 40, 24
+        return {
+            "descriptor": {
+                "graph": {"length": graph, "sha256": "0" * 64},
+                "model": {"length": model, "sha256": "1" * 64},
+            },
+            "parts": [
+                {"path": "m/w-00001-of-00002.krm", "size": 24 + graph + model, "sha256": "2" * 64},
+                {"path": "m/w-00002-of-00002.krm", "size": 64, "sha256": "3" * 64},
+            ],
+        }
+
+    @staticmethod
     def _model(config: Any = None) -> dict[str, Any]:
         return {
             "pipeline": "anima/1",
-            "weights": {"w": {"f16": {"shards": [_ref("m/w.safetensors")]}}},
+            "weights": {"w": {"f16": {"container": TestManifestLimits._container()}}},
             "assets": {},
             "quants": {"f16": {"weights": {"w": "f16"}, "session": {}}},
             "defaultQuant": "f16",
@@ -260,18 +283,18 @@ class TestManifestLimits:
             assert_manifest_limits(self._manifest({"m": self._model(oversized)}))
 
 
-class TestShardDeclaration:
-    """`karume/4` の weights は dtype ごとに **shard 列**を持つ（ADR 0070 決定 1 の欄）。
+class TestPartDeclaration:
+    """`karume/5` の weights は dtype ごとに**コンテナの入口**を持つ（ADR 0109 決定 3 の欄）。
 
     ここが見るのは**欄の形**（v2 の `file` が残っていないこと・3 点セットが現物へ届くこと・
-    列の値域）で、何本に割れるかを現物から解決する側は {@link TestShardExpansion}。
+    列の値域）で、何本に割れるかを現物から解決する側は {@link TestPartExpansion}。
     """
 
     _MARK = "weights-A"
-    _REL_PATH = "w/model.safetensors"
+    _REL_PATH = "w/model.krm"
 
     def _assemble(self, tmp_path: Path) -> tuple[Path, dict[str, Any]]:
-        out_dir = tmp_path / "models" / "sharded"
+        out_dir = tmp_path / "models" / "partitioned"
         plans = [_synthetic_plan(tmp_path / "series", "A", self._REL_PATH, self._MARK)]
         return out_dir, assemble_family(plans, out_dir, "A")
 
@@ -283,49 +306,157 @@ class TestShardDeclaration:
             json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
         )
 
-    def test_the_format_identifier_names_the_fourth_manifest_version(self) -> None:
+    def test_the_format_identifier_names_the_fifth_manifest_version(self) -> None:
         """形式識別子は hub と 1 文字も違えられない（hub は 1 形しか読まない）。
 
-        `karume/4` は quant の表示欄（ADR 0075 決定 1）を足した形 — 欄は optional でも hub の
-        allowlist が未知キーを拒否するので、major を上げずに足すと旧クライアントが黙って
-        読めなくなる（ADR 0075 決定 4）。
+        `karume/5` は weights の dtype エントリを**コンテナの入口**へ置き換えた形（ADR 0109
+        決定 3）— 旧 major は読まないので、上げ忘れると hub が unsupported format で落とす。
         """
-        assert MANIFEST_FORMAT == "karume/4"
+        assert MANIFEST_FORMAT == "karume/5"
 
-    def test_it_declares_the_container_as_a_shard_list_of_three_point_sets(
+    def test_it_declares_the_container_as_a_part_list_of_three_point_sets(
         self, tmp_path: Path
     ) -> None:
         out_dir, manifest = self._assemble(tmp_path)
         entry = manifest["models"]["A"]["weights"]["w"]["f16"]
 
         # v2 の `file` は残っていない（2 形が同居すると hub が「どちらを読むか」を持つ）。
-        assert list(entry) == ["shards"]
-        assert entry["shards"] == _shard_refs("A", self._REL_PATH, self._MARK)
-        for ref, payload in zip(entry["shards"], ir_container(mark=self._MARK), strict=True):
+        assert list(entry) == ["container"]
+        assert entry["container"]["parts"] == _part_refs("A", self._REL_PATH, self._MARK)
+        for ref, payload in zip(
+            entry["container"]["parts"], ir_container(mark=self._MARK), strict=True
+        ):
             assert (out_dir / ref["path"]).read_bytes() == payload
 
-    def test_the_shards_are_covered_by_the_declaration_check(self, tmp_path: Path) -> None:
-        """突合は shard 列を辿って現物へ届く（列に移して素通りしはじめると宣言外扱いになる）。"""
+    def test_the_parts_are_covered_by_the_declaration_check(self, tmp_path: Path) -> None:
+        """突合は part 列を辿って現物へ届く（列に移して素通りしはじめると宣言外扱いになる）。"""
         out_dir, _ = self._assemble(tmp_path)
-        assert verify_dist(out_dir) == _shard_sizes("A", self._REL_PATH, self._MARK)
+        assert verify_dist(out_dir) == _part_sizes("A", self._REL_PATH, self._MARK)
 
     def test_it_refuses_a_manifest_that_kept_the_v2_single_file_form(self, tmp_path: Path) -> None:
         """形式識別子だけ v3 で中身が `{file}` の manifest は、hub が読めないのでここで落とす。"""
         out_dir, manifest = self._assemble(tmp_path)
-        ref = manifest["models"]["A"]["weights"]["w"]["f16"]["shards"][0]
+        ref = manifest["models"]["A"]["weights"]["w"]["f16"]["container"]["parts"][0]
         self._rewrite_weights(out_dir, {"file": ref})
-        with pytest.raises(DistError, match="shards が"):
+        with pytest.raises(DistError, match=r"の欄が \['container'\] でない"):
             verify_dist(out_dir)
 
-    @pytest.mark.parametrize("shards", [[], "A/w/model.safetensors"])
-    def test_it_refuses_a_shard_list_that_is_not_a_non_empty_array(
-        self, tmp_path: Path, shards: Any
+    @pytest.mark.parametrize("parts", [[], "A/w/model.krm"])
+    def test_it_refuses_a_part_list_that_is_not_a_two_element_array(
+        self, tmp_path: Path, parts: Any
     ) -> None:
-        """空の列（= 重みを 1 本も指さない dtype 席）も、列ですらない値も受理しない。"""
-        out_dir, _ = self._assemble(tmp_path)
-        self._rewrite_weights(out_dir, {"shards": shards})
-        with pytest.raises(DistError, match=f"1〜{MAX_SHARDS} 要素の配列でない"):
+        """空の列（= part を 1 本も指さない dtype 席）も、列ですらない値も受理しない。
+
+        `container.parts` は part 0（descriptor）+ part 1（const）の **2 要素以上** MUST
+        （ADR 0109 決定 3 / container-v1 §8）。
+        """
+        out_dir, manifest = self._assemble(tmp_path)
+        entry = manifest["models"]["A"]["weights"]["w"]["f16"]["container"]
+        self._rewrite_weights(out_dir, {"container": {**entry, "parts": parts}})
+        with pytest.raises(DistError, match="2 件以上の配列でない"):
             verify_dist(out_dir)
+
+
+class TestTheContainerEntryLimits:
+    """`karume/5` の `container` 入口 1 件に掛かる上限と規則（ADR 0109 決定 6）。
+
+    この関数は hub のパーサ（`packages/hub/src/manifest.ts` の `parseContainer`）の**唯一の
+    Python 側の鏡**で、緩んだ回は「焼けたのに hub が読めない manifest」として利用者側で初めて
+    出る。規則 1 本ずつに故障注入を掛けて、どれも実際に落ちることを固定する。
+
+    MUST: 欄の欠落も `DistError` で落ちる（素の添字の `KeyError` / `TypeError` にしない）—
+    {@link karume.dist.verify_dist} は**外から来た `karume.json`** を受ける門なので、組み立ての
+    語彙から外れた例外が出ると「壊れた manifest」と「門の不具合」が区別できない。
+    """
+
+    _MARK = "limits-A"
+    _REL_PATH = "w/model.krm"
+
+    def _assemble(self, tmp_path: Path) -> tuple[Path, dict[str, Any]]:
+        out_dir = tmp_path / "models" / "limits"
+        plans = [_synthetic_plan(tmp_path / "series", "A", self._REL_PATH, self._MARK)]
+        return out_dir, assemble_family(plans, out_dir, "A")
+
+    @staticmethod
+    def _rewrite(out_dir: Path, mutate) -> None:
+        """据わった `karume.json` の container 入口だけを書き換える（現物はそのまま）。"""
+        manifest = json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+        mutate(manifest["models"]["A"]["weights"]["w"]["f16"]["container"])
+        (out_dir / MANIFEST_FILENAME).write_text(
+            json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+
+    @staticmethod
+    def _zero_length(container: dict[str, Any]) -> None:
+        container["descriptor"]["graph"]["length"] = 0
+
+    @staticmethod
+    def _oversized_descriptor(container: dict[str, Any]) -> None:
+        container["descriptor"]["model"]["length"] = MAX_DESCRIPTOR_BYTES + 1
+
+    @staticmethod
+    def _too_many_parts(container: dict[str, Any]) -> None:
+        container["parts"] = [container["parts"][0]] * (MAX_PARTS + 1)
+
+    @staticmethod
+    def _part0_size_off_by_one(container: dict[str, Any]) -> None:
+        container["parts"][0]["size"] += 1
+
+    @staticmethod
+    def _empty_part_with_a_wrong_digest(container: dict[str, Any]) -> None:
+        container["parts"][1] = {**container["parts"][1], "size": 0, "sha256": "f" * 64}
+
+    @staticmethod
+    def _oversized_part(container: dict[str, Any]) -> None:
+        container["parts"][-1] = {**container["parts"][-1], "size": PART_MAX_BYTES + 1}
+
+    @staticmethod
+    def _mixed_cross_repo(container: dict[str, Any]) -> None:
+        container["parts"][-1] = {
+            **container["parts"][-1],
+            "repo": "hdae/other",
+            "revision": "a" * 40,
+        }
+
+    @staticmethod
+    def _missing_descriptor_length(container: dict[str, Any]) -> None:
+        del container["descriptor"]["graph"]["length"]
+
+    @staticmethod
+    def _missing_part_size(container: dict[str, Any]) -> None:
+        del container["parts"][1]["size"]
+
+    @staticmethod
+    def _part_ref_is_not_an_object(container: dict[str, Any]) -> None:
+        container["parts"][1] = "A/w/model-00002-of-00003.krm"
+
+    @pytest.mark.parametrize(
+        ("mutate", "message"),
+        [
+            ("_zero_length", "length が正整数でない"),
+            ("_oversized_descriptor", "が上限"),
+            ("_too_many_parts", "上限"),
+            ("_part0_size_off_by_one", "part 0 の size"),
+            ("_empty_part_with_a_wrong_digest", "size 0 の sha256"),
+            ("_oversized_part", "part 長の天井"),
+            ("_mixed_cross_repo", "越境参照が容器の中で混在"),
+            ("_missing_descriptor_length", "length が正整数でない"),
+            ("_missing_part_size", "size が非負整数でない"),
+            ("_part_ref_is_not_an_object", "オブジェクトでない"),
+        ],
+    )
+    def test_a_rule_break_fails_loudly(self, tmp_path: Path, mutate: str, message: str) -> None:
+        out_dir, _ = self._assemble(tmp_path)
+        self._rewrite(out_dir, getattr(self, mutate))
+
+        with pytest.raises(DistError, match=message):
+            verify_dist(out_dir)
+
+    def test_the_assembled_manifest_passes_every_rule(self, tmp_path: Path) -> None:
+        """対照 — 組み立てが焼いた manifest はそのまま通る（門が「常に落ちる」ではない）。"""
+        out_dir, _ = self._assemble(tmp_path)
+
+        assert verify_dist(out_dir)
 
 
 class TestDtypeLabelVocabulary:
@@ -339,7 +470,7 @@ class TestDtypeLabelVocabulary:
     """
 
     _MARK = "weights-A"
-    _REL_PATH = "w/model.safetensors"
+    _REL_PATH = "w/model.krm"
 
     def _distribution(self, tmp_path: Path, label: str) -> Path:
         """据わった配布形の manifest だけを `label` の dtype 席へ書き換えて返す。"""
@@ -367,13 +498,13 @@ class TestDtypeLabelVocabulary:
         """`i4` は語彙の内側（カード側の i4 注記の pin と対になる綴り）。"""
         out_dir = self._distribution(tmp_path, "i4")
 
-        assert verify_dist(out_dir) == _shard_sizes("A", self._REL_PATH, self._MARK)
+        assert verify_dist(out_dir) == _part_sizes("A", self._REL_PATH, self._MARK)
 
     def test_it_accepts_the_packed_int2_label(self, tmp_path: Path) -> None:
         """`i2`（ADR 0097 の INT2 格納）も語彙の内側 — INT2 を名乗る配布形が組めること。"""
         out_dir = self._distribution(tmp_path, "i2")
 
-        assert verify_dist(out_dir) == _shard_sizes("A", self._REL_PATH, self._MARK)
+        assert verify_dist(out_dir) == _part_sizes("A", self._REL_PATH, self._MARK)
 
     def test_the_label_vocabulary_covers_every_storage_dtype_of_the_ir_gate(self) -> None:
         """ラベル語彙は IR 検証側の格納 dtype 語彙を包含する（写しの追随漏れの機械化）。
@@ -394,7 +525,7 @@ class TestPlanGates:
 
     def test_it_refuses_too_many_models_before_writing_anything(self, tmp_path: Path) -> None:
         plans = [
-            _synthetic_plan(tmp_path / "series", f"m{index}", "w/model.safetensors", f"w{index}")
+            _synthetic_plan(tmp_path / "series", f"m{index}", "w/model.krm", f"w{index}")
             for index in range(33)
         ]
         out_dir = tmp_path / "models" / "too-many"
@@ -425,7 +556,7 @@ class TestPlanGates:
 
     def test_it_refuses_a_model_name_that_is_not_a_path_segment(self, tmp_path: Path) -> None:
         """名前検査は recipe 側にしか無かった（core の組み立て経路は素通しだった）。"""
-        plans = [_synthetic_plan(tmp_path / "series", "../escape", "w/model.safetensors", "w")]
+        plans = [_synthetic_plan(tmp_path / "series", "../escape", "w/model.krm", "w")]
         out_dir = tmp_path / "models" / "bad-name"
 
         with pytest.raises(DistError, match="許可文字"):
@@ -444,10 +575,10 @@ class TestPlanGates:
             pipeline="anima/1",
             artifacts={
                 "encoder": Artifact(
-                    rel_path="model.safetensors", source=_synthetic_series(series, "encoder")
+                    rel_path="model.krm", source=_synthetic_series(series, "encoder")
                 ),
                 "decoder": Artifact(
-                    rel_path="model.safetensors", source=_synthetic_series(series, "decoder")
+                    rel_path="model.krm", source=_synthetic_series(series, "decoder")
                 ),
             },
             weights={
@@ -503,7 +634,7 @@ class TestQuantPresentation:
 
     def test_the_plan_gate_catches_it_before_writing_anything(self, tmp_path: Path) -> None:
         """計画段の門（ADR 0041 §7 の規模上限と同じ席）— 数 GB を並べてから落とさない。"""
-        plan = _synthetic_plan(tmp_path / "series", "A", "w/model.safetensors", "w")
+        plan = _synthetic_plan(tmp_path / "series", "A", "w/model.krm", "w")
         oversized = {
             "f16": {**plan.quants["f16"], "label": "x" * (MAX_QUANT_LABEL_CHARS + 1)},
         }
@@ -527,7 +658,7 @@ class TestManifestJsonLiterals:
             manifest_text({"format": MANIFEST_FORMAT, "models": {"a": {"scale": float("inf")}}})
 
     def test_it_writes_a_finite_manifest_with_a_trailing_newline(self) -> None:
-        assert manifest_text({"format": MANIFEST_FORMAT}).endswith('"karume/4"\n}\n')
+        assert manifest_text({"format": MANIFEST_FORMAT}).endswith('"karume/5"\n}\n')
 
     @pytest.mark.parametrize("bad", [float("inf"), float("-inf"), float("nan")])
     def test_it_refuses_a_non_finite_preprocessor_channel(self, bad: float) -> None:
@@ -561,7 +692,7 @@ class TestFamilyAssembly:
         宣言する sha256 とは**別のバイト列**を読む配布形になる。長さを揃えてあるので
         `verify_dist` の size 突合も重複 path の 3 点セット突合も緑のまま = 沈黙する経路。
         """
-        rel_path = "text_encoder/model.safetensors"
+        rel_path = "text_encoder/model.krm"
         first, second = "weights-D1", "weights-D2"
         assert [len(item) for item in ir_container(mark=first)] == [
             len(item) for item in ir_container(mark=second)
@@ -575,8 +706,8 @@ class TestFamilyAssembly:
 
         expected: list[str] = []
         for name, mark in (("A", first), ("B", first), ("C", second), ("D", second)):
-            refs = manifest["models"][name]["weights"]["w"]["f16"]["shards"]
-            assert refs == _shard_refs(name, rel_path, mark), name
+            refs = manifest["models"][name]["weights"]["w"]["f16"]["container"]["parts"]
+            assert refs == _part_refs(name, rel_path, mark), name
             for ref, payload in zip(refs, ir_container(mark=mark), strict=True):
                 assert (out_dir / ref["path"]).read_bytes() == payload, name
             expected.extend(ref["path"] for ref in refs)
@@ -604,9 +735,9 @@ class TestFamilyAssembly:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """同じ相対 path でもサイズが違えば中身も必ず違う — hash を採る前に非共有が決まる。"""
-        rel_path = "text_encoder/model.safetensors"
+        rel_path = "text_encoder/model.krm"
         short, long = "weights-A", "a-much-longer-mark"
-        # 席は shard ごとなので、**どの shard も**相方とサイズが違っていないと前置は掛からない。
+        # 席は part ごとなので、**どの part も**相方とサイズが違っていないと前置は掛からない。
         assert all(
             len(first) != len(second)
             for first, second in zip(ir_container(mark=short), ir_container(mark=long), strict=True)
@@ -621,8 +752,8 @@ class TestFamilyAssembly:
 
         assert taken == []
         for name, mark in (("A", short), ("B", long)):
-            refs = manifest["models"][name]["weights"]["w"]["f16"]["shards"]
-            assert [ref["path"] for ref in refs] == _shard_paths(name, rel_path, mark), name
+            refs = manifest["models"][name]["weights"]["w"]["f16"]["container"]["parts"]
+            assert [ref["path"] for ref in refs] == _part_paths(name, rel_path, mark), name
             for ref, payload in zip(refs, ir_container(mark=mark), strict=True):
                 assert (out_dir / ref["path"]).read_bytes() == payload, name
         assert not (out_dir / SHARED_DIRNAME).exists()
@@ -631,7 +762,7 @@ class TestFamilyAssembly:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """サイズが同じ中身違いは前置では落とせない — 従来どおり出所 sha256 が弁別する。"""
-        rel_path = "text_encoder/model.safetensors"
+        rel_path = "text_encoder/model.krm"
         first, second = "weights-D1", "weights-D2"
         assert [len(item) for item in ir_container(mark=first)] == [
             len(item) for item in ir_container(mark=second)
@@ -644,11 +775,11 @@ class TestFamilyAssembly:
         out_dir = tmp_path / "models" / "equal-sized"
         manifest = assemble_family(plans, out_dir, "A")
 
-        # 席は shard ごと（2 モデル × 2 shard）— どの席も同サイズの相方を持つので全部が読まれる。
-        assert taken == _shard_rel_paths(rel_path, first) * 2
+        # 席は part ごと（2 モデル × 2 part）— どの席も同サイズの相方を持つので全部が読まれる。
+        assert taken == _part_rel_paths(rel_path, first) * 2
         for name, mark in (("A", first), ("B", second)):
-            refs = manifest["models"][name]["weights"]["w"]["f16"]["shards"]
-            assert [ref["path"] for ref in refs] == _shard_paths(name, rel_path, mark), name
+            refs = manifest["models"][name]["weights"]["w"]["f16"]["container"]["parts"]
+            assert [ref["path"] for ref in refs] == _part_paths(name, rel_path, mark), name
             for ref, payload in zip(refs, ir_container(mark=mark), strict=True):
                 assert (out_dir / ref["path"]).read_bytes() == payload, name
         assert not (out_dir / SHARED_DIRNAME).exists()
@@ -661,7 +792,7 @@ class TestFamilyAssembly:
         同じ相対 path に「畳める組」と「サイズ違いの単独」が同居する形が、前置を相対 path
         ごとに掛けてしまった場合（= 組まで巻き添えに落ちる）と結果が割れる唯一の形。
         """
-        rel_path = "text_encoder/model.safetensors"
+        rel_path = "text_encoder/model.krm"
         shared_mark, odd = "same-bytes", "a-longer-byte-string"
         assert all(
             len(first) != len(second)
@@ -677,12 +808,14 @@ class TestFamilyAssembly:
         out_dir = tmp_path / "models" / "mixed"
         manifest = assemble_family(plans, out_dir, "A")
 
-        assert taken == _shard_rel_paths(rel_path, shared_mark) * 2
-        shared_refs = _shard_refs(SHARED_DIRNAME, rel_path, shared_mark)
+        assert taken == _part_rel_paths(rel_path, shared_mark) * 2
+        shared_refs = _part_refs(SHARED_DIRNAME, rel_path, shared_mark)
         for name in ("A", "B"):
-            assert manifest["models"][name]["weights"]["w"]["f16"]["shards"] == shared_refs, name
-        loner_refs = _shard_refs("C", rel_path, odd)
-        assert manifest["models"]["C"]["weights"]["w"]["f16"]["shards"] == loner_refs
+            assert (
+                manifest["models"][name]["weights"]["w"]["f16"]["container"]["parts"] == shared_refs
+            ), name
+        loner_refs = _part_refs("C", rel_path, odd)
+        assert manifest["models"]["C"]["weights"]["w"]["f16"]["container"]["parts"] == loner_refs
         for ref, payload in zip(loner_refs, ir_container(mark=odd), strict=True):
             assert (out_dir / ref["path"]).read_bytes() == payload
         for ref, payload in zip(shared_refs, ir_container(mark=shared_mark), strict=True):
@@ -708,7 +841,7 @@ class TestFamilyAssembly:
 
         monkeypatch.setattr("karume.dist.materialize", corrupt)
         plans = [
-            _synthetic_plan(tmp_path / "series", name, "w/model.safetensors", "same-bytes")
+            _synthetic_plan(tmp_path / "series", name, "w/model.krm", "same-bytes")
             for name in ("A", "B")
         ]
         with pytest.raises(DistError, match="出所と食い違う"):
@@ -727,7 +860,7 @@ class TestRootFiles:
         out_dir = tmp_path / "models" / "legal"
         texts = {"LICENSE.md": "ライセンス原文\n", "NOTICE.md": "notice\n"}
         assemble_family(
-            [_synthetic_plan(tmp_path / "series", "A", "w/model.safetensors", "w")],
+            [_synthetic_plan(tmp_path / "series", "A", "w/model.krm", "w")],
             out_dir,
             "A",
             root_files=texts,
@@ -736,7 +869,7 @@ class TestRootFiles:
         for name, text in texts.items():
             assert (out_dir / name).read_text(encoding="utf-8") == text
         # manifest は 1 つも宣言していない（資産ではない）が、検査は通る。
-        assert sorted(verify_dist(out_dir)) == _shard_paths("A", "w/model.safetensors", "w")
+        assert sorted(verify_dist(out_dir)) == _part_paths("A", "w/model.krm", "w")
 
     def test_it_refuses_a_name_outside_the_legal_seat_before_writing_anything(
         self, tmp_path: Path
@@ -745,7 +878,7 @@ class TestRootFiles:
         out_dir = tmp_path / "models" / "smuggled"
         with pytest.raises(DistError, match="法的テキスト専用の席"):
             assemble_family(
-                [_synthetic_plan(tmp_path / "series", "A", "w/model.safetensors", "w")],
+                [_synthetic_plan(tmp_path / "series", "A", "w/model.krm", "w")],
                 out_dir,
                 "A",
                 root_files={"LICENSE.md": "ok", "config.json": "{}"},
@@ -757,7 +890,7 @@ class TestRootFiles:
     ) -> None:
         """例外は**その 2 つの名前**だけに掛かる — 席を使わない family の網は緩まない。"""
         out_dir = tmp_path / "models" / "plain"
-        plan = _synthetic_plan(tmp_path / "series", "A", "w/model.safetensors", "w")
+        plan = _synthetic_plan(tmp_path / "series", "A", "w/model.krm", "w")
         assemble_family([plan], out_dir, "A")
         (out_dir / "leftover.safetensors").write_bytes(b"stale")
 
@@ -768,7 +901,7 @@ class TestRootFiles:
         """例外は名前でなく**相対 path** — モデルサブツリーに紛れた同名は従来どおり落ちる。"""
         out_dir = tmp_path / "models" / "nested"
         assemble_family(
-            [_synthetic_plan(tmp_path / "series", "A", "w/model.safetensors", "w")],
+            [_synthetic_plan(tmp_path / "series", "A", "w/model.krm", "w")],
             out_dir,
             "A",
             root_files={"NOTICE.md": "notice\n"},
@@ -823,7 +956,7 @@ class TestAtomicReplacement:
         （不変の主張が空振りする）— 故障注入の観測には版の違いが要る。
         """
         return [
-            _synthetic_plan(root, name, "w/model.safetensors", f"{version}-{name}")
+            _synthetic_plan(root, name, "w/model.krm", f"{version}-{name}")
             for name in ("A", "B", "C")
         ]
 
@@ -850,7 +983,7 @@ class TestAtomicReplacement:
         assemble_family(self._versioned_plans(tmp_path / "series", "v1"), out_dir, "A")
         before = self._snapshot(out_dir)
 
-        def explode(manifest: Mapping[str, Any]) -> str:
+        def explode(manifest: Mapping[str, Any], host_assets: Mapping[str, int]) -> str:
             raise DistError("カードが描けない")
 
         with pytest.raises(DistError, match="カードが描けない"):
@@ -872,9 +1005,12 @@ class TestAtomicReplacement:
         assemble_family(self._versioned_plans(tmp_path / "series", "v1"), out_dir, "A")
         before = self._snapshot(out_dir)
 
+        # MUST: 系列は**注入の前**に書く — `os.replace` はモジュールが共有なので、系列側の
+        # 据え替え（`karume.publish`）まで巻き込むと被験体が組み立ての据え替えでなくなる。
+        plans = self._versioned_plans(tmp_path / "series", "v2")
         self._fail_replace_at(monkeypatch, nth=2)
         with pytest.raises(DistError, match="据え替え") as failure:
-            assemble_family(self._versioned_plans(tmp_path / "series", "v2"), out_dir, "A")
+            assemble_family(plans, out_dir, "A")
 
         # 原因（I/O 故障）は連鎖で残す — 据え替えの失敗と組み立ての失敗を取り違えない。
         assert isinstance(failure.value.__cause__, OSError)
@@ -890,9 +1026,10 @@ class TestAtomicReplacement:
         assemble_family(self._versioned_plans(tmp_path / "series", "v1"), out_dir, "A")
         before = self._snapshot(out_dir)
 
+        plans = self._versioned_plans(tmp_path / "series", "v2")
         self._fail_replace_at(monkeypatch, nth=1)
         with pytest.raises(DistError, match="退避") as failure:
-            assemble_family(self._versioned_plans(tmp_path / "series", "v2"), out_dir, "A")
+            assemble_family(plans, out_dir, "A")
 
         # 原因（I/O 故障）は連鎖で残す — 退避の失敗と組み立ての失敗を取り違えない。
         assert isinstance(failure.value.__cause__, OSError)
@@ -941,11 +1078,11 @@ class TestExternalComponents:
             pipeline="anima/1",
             artifacts={
                 "text_encoder": Artifact(
-                    "text_encoder/model.safetensors",
+                    "text_encoder/model.krm",
                     source=_synthetic_series(series, shared or self._SHARED),
                 ),
                 "transformer": Artifact(
-                    "transformer/model.safetensors", source=_synthetic_series(series, self._OWN)
+                    "transformer/model.krm", source=_synthetic_series(series, self._OWN)
                 ),
             },
             weights={
@@ -990,8 +1127,8 @@ class TestExternalComponents:
         assert not any(is_external_ref(ref) for _, ref in dist._declared_refs(manifest))
         assert sorted(verify_dist(out_dir)) == sorted(
             [
-                *_shard_paths("plain", "text_encoder/model.safetensors", self._SHARED),
-                *_shard_paths("plain", "transformer/model.safetensors", self._OWN),
+                *_part_paths("plain", "text_encoder/model.krm", self._SHARED),
+                *_part_paths("plain", "transformer/model.krm", self._OWN),
             ]
         )
 
@@ -1007,8 +1144,8 @@ class TestExternalComponents:
         )
 
         entry = manifest["models"]["borrower"]["weights"]["text_encoder"]["f16"]
-        assert entry["shards"] == self._pinned(
-            _shard_refs("source", "text_encoder/model.safetensors", self._SHARED)
+        assert entry["container"]["parts"] == self._pinned(
+            _part_refs("source", "text_encoder/model.krm", self._SHARED)
         )
 
     def test_the_referenced_bytes_are_not_stored_here_a_second_time(self, tmp_path: Path) -> None:
@@ -1025,8 +1162,8 @@ class TestExternalComponents:
 
         assert not (out_dir / "borrower" / "text_encoder").exists()
         # 越境参照は実在検査の対象外で、自リポ固有の役割だけが現物として残る。
-        assert sorted(verify_dist(out_dir)) == _shard_paths(
-            "borrower", "transformer/model.safetensors", self._OWN
+        assert sorted(verify_dist(out_dir)) == _part_paths(
+            "borrower", "transformer/model.krm", self._OWN
         )
 
     @pytest.mark.parametrize("revision", ["main", "v0.4.3", "0123456789abcdef", "A" * 40, "0" * 41])
@@ -1044,17 +1181,13 @@ class TestExternalComponents:
         source = tmp_path / "models" / "karume-source"
         # 参照元は `transformer` しか持たない配布形。
         assemble_family(
-            [
-                _synthetic_plan(
-                    tmp_path / "series", "source", "transformer/model.safetensors", self._OWN
-                )
-            ],
+            [_synthetic_plan(tmp_path / "series", "source", "transformer/model.krm", self._OWN)],
             source,
             "source",
         )
         out_dir = tmp_path / "models" / "karume-borrower"
 
-        # 綴りは展開後の shard 役割（`<代表役割>#<番号>`）— 参照は shard 1 本ごとに解決する。
+        # 綴りは展開後の part 役割（`<代表役割>#<番号>`）— 参照は part 1 本ごとに解決する。
         with pytest.raises(DistError, match="役割 'text_encoder#1' のファイルが参照元"):
             assemble_family(
                 [self._plan("borrower", tmp_path / "series")],
@@ -1102,18 +1235,22 @@ class TestExternalComponents:
             external=self._components(source),
         )
 
-        expected = self._pinned(
-            _shard_refs("source", "text_encoder/model.safetensors", self._SHARED)
+        expected = self._pinned(_part_refs("source", "text_encoder/model.krm", self._SHARED))
+        assert (
+            manifest["models"]["A"]["weights"]["text_encoder"]["f16"]["container"]["parts"]
+            == expected
         )
-        assert manifest["models"]["A"]["weights"]["text_encoder"]["f16"]["shards"] == expected
-        assert manifest["models"]["B"]["weights"]["text_encoder"]["f16"]["shards"] == expected
+        assert (
+            manifest["models"]["B"]["weights"]["text_encoder"]["f16"]["container"]["parts"]
+            == expected
+        )
         # 参照したバイト列は自リポのどの席（モデル別サブツリー・`shared/`）にも無い。
         assert not (out_dir / "A" / "text_encoder").exists()
         assert not (out_dir / "B" / "text_encoder").exists()
         assert not (out_dir / SHARED_DIRNAME / "text_encoder").exists()
         # 自リポ固有の役割は 2 モデルで同一バイトなので従来どおり `shared/` へ畳まれる。
-        assert sorted(verify_dist(out_dir)) == _shard_paths(
-            SHARED_DIRNAME, "transformer/model.safetensors", self._OWN
+        assert sorted(verify_dist(out_dir)) == _part_paths(
+            SHARED_DIRNAME, "transformer/model.krm", self._OWN
         )
 
     def test_it_refuses_a_family_where_one_model_holds_different_bytes(
@@ -1156,7 +1293,7 @@ class TestExternalComponents:
                     base,
                     artifacts={
                         **base.artifacts,
-                        "alt_encoder": Artifact("alt/model.safetensors", source=shared_series),
+                        "alt_encoder": Artifact("alt/model.krm", source=shared_series),
                     },
                     weights={
                         **base.weights,
@@ -1183,7 +1320,7 @@ class TestExternalComponents:
             borrower,
             artifacts={
                 **borrower.artifacts,
-                "text_encoder": Artifact("alt/model.safetensors", source=shared_series),
+                "text_encoder": Artifact("alt/model.krm", source=shared_series),
             },
         )
 
@@ -1210,7 +1347,7 @@ class TestExternalComponents:
     def test_the_cli_wires_the_five_flags_through(self, tmp_path: Path) -> None:
         """`main` 経由の一本通し（合成 pipeline は 1 役 `w` の計画を返す）。"""
         source = tmp_path / "models" / "karume-source"
-        assemble_family([_synthetic_plan(tmp_path, "m", "w/model.safetensors", "w")], source, "m")
+        assemble_family([_synthetic_plan(tmp_path, "m", "w/model.krm", "w")], source, "m")
         out_dir = tmp_path / "models" / "karume-borrower"
 
         main(
@@ -1236,9 +1373,9 @@ class TestExternalComponents:
         )
 
         manifest = json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
-        refs = manifest["models"]["m"]["weights"]["w"]["f16"]["shards"]
+        refs = manifest["models"]["m"]["weights"]["w"]["f16"]["container"]["parts"]
         assert [ref["repo"] for ref in refs] == ["hdae/karume-source"] * len(refs)
-        assert [ref["path"] for ref in refs] == _shard_paths("m", "w/model.safetensors", "w")
+        assert [ref["path"] for ref in refs] == _part_paths("m", "w/model.krm", "w")
         assert verify_dist(out_dir) == {}
 
 
@@ -1251,8 +1388,8 @@ class TestExternalComponents:
 _ONE_PROFILE_PIPELINE = Pipeline(
     default_model="m",
     repo_name=lambda model: f"karume-solo-{model}",
-    plan=lambda series_dir, model: _synthetic_plan(series_dir, model, "w/model.safetensors", "w"),
-    card_profiles={"solo": lambda manifest, repo: "solo"},
+    plan=lambda series_dir, model: _synthetic_plan(series_dir, model, "w/model.krm", "w"),
+    card_profiles={"solo": lambda manifest, repo, host_assets: "solo"},
 )
 
 #: 帰属が 2 通りある合成 pipeline（描き手は名前ごとに別の関数オブジェクト）。
@@ -1263,10 +1400,10 @@ _ONE_PROFILE_PIPELINE = Pipeline(
 _TWO_PROFILE_PIPELINE = Pipeline(
     default_model="m",
     repo_name=lambda model: f"karume-{model}",
-    plan=lambda series_dir, model: _synthetic_plan(series_dir, model, "w/model.safetensors", "w"),
+    plan=lambda series_dir, model: _synthetic_plan(series_dir, model, "w/model.krm", "w"),
     card_profiles={
-        "fn": lambda manifest, repo: "fn",
-        "jvnv": lambda manifest, repo: "jvnv",
+        "fn": lambda manifest, repo, host_assets: "fn",
+        "jvnv": lambda manifest, repo, host_assets: "jvnv",
     },
 )
 
@@ -1392,20 +1529,20 @@ class TestCardProfile:
         assert profiles["fn"] is not profiles["jvnv"]
 
 
-class TestShardExpansion:
-    """分割されたコンポーネントは、現物から解決した**複数要素の shard 列**として宣言される。
+class TestPartExpansion:
+    """分割されたコンポーネントは、現物から解決した**複数要素の part 列**として宣言される。
 
-    何本に割れるかは書いたバイト数で決まる（`karume.shards`）ので、pipeline の表には書けない
-    — 組み立ては代表 path から現物を辿る（{@link karume.dist.expand_weight_shards}）。
+    何本に割れるかは書いたバイト数で決まる（`karume.container`）ので、pipeline の表には書けない
+    — 組み立ては代表 path から現物を辿る（{@link karume.dist.expand_weight_parts}）。
     """
 
     def _plan(self, series: Path, sources: Sequence[bytes]) -> ModelPlan:
-        """1 役だけの計画。系列側は shard 列（先頭 = グラフ shard）を連番で持つ。"""
+        """1 役だけの計画。系列側は part 列（先頭 = part 0 の 2 文書）を連番で持つ。"""
         source = _write_series(series, sources)
         return ModelPlan(
             name="A",
             pipeline="anima/1",
-            artifacts={"w": Artifact(rel_path="w/model.safetensors", source=source)},
+            artifacts={"w": Artifact(rel_path="w/model.krm", source=source)},
             weights={"w": {"f16": WeightFiles(file="w")}},
             assets={},
             quants={"f16": {"weights": {"w": "f16"}, "session": {}}},
@@ -1413,58 +1550,61 @@ class TestShardExpansion:
             pipeline_config={},
         )
 
-    def test_a_split_component_is_declared_as_an_ordered_shard_list(self, tmp_path: Path) -> None:
-        payloads = ir_shards(3, mark="w")
+    def test_a_split_component_is_declared_as_an_ordered_part_list(self, tmp_path: Path) -> None:
+        payloads = ir_parts(3, mark="w")
         plan = self._plan(tmp_path / "series", payloads)
-        out_dir = tmp_path / "models" / "sharded"
+        out_dir = tmp_path / "models" / "partitioned"
 
         manifest = assemble_family([plan], out_dir, "A")
 
         entry = manifest["models"]["A"]["weights"]["w"]["f16"]
-        assert [ref["path"] for ref in entry["shards"]] == [
-            "A/w/model-00001-of-00003.safetensors",
-            "A/w/model-00002-of-00003.safetensors",
-            "A/w/model-00003-of-00003.safetensors",
+        assert [ref["path"] for ref in entry["container"]["parts"]] == [
+            "A/w/model-00001-of-00003.krm",
+            "A/w/model-00002-of-00003.krm",
+            "A/w/model-00003-of-00003.krm",
         ]
-        # 並びは shard 番号順 MUST（先頭 = グラフ shard）。中身も番号どおりに置かれている。
-        assert [ref["size"] for ref in entry["shards"]] == [len(item) for item in payloads]
-        assert [ref["sha256"] for ref in entry["shards"]] == [
+        # 並びは part 番号順 MUST（先頭 = part 0 の 2 文書）。中身も番号どおりに置かれている。
+        assert [ref["size"] for ref in entry["container"]["parts"]] == [
+            len(item) for item in payloads
+        ]
+        assert [ref["sha256"] for ref in entry["container"]["parts"]] == [
             hashlib.sha256(item).hexdigest() for item in payloads
         ]
-        for ref, payload in zip(entry["shards"], payloads, strict=True):
+        for ref, payload in zip(entry["container"]["parts"], payloads, strict=True):
             assert (out_dir / ref["path"]).read_bytes() == payload
 
-    def test_the_shards_are_covered_by_the_declaration_check(self, tmp_path: Path) -> None:
+    def test_the_split_parts_are_covered_by_the_declaration_check(self, tmp_path: Path) -> None:
         """突合は列を辿って現物へ届く（宣言外ファイル検査に落ちない）。"""
-        payloads = ir_shards(2, mark="w")
+        payloads = ir_parts(3, mark="w")
         plan = self._plan(tmp_path / "series", payloads)
-        out_dir = tmp_path / "models" / "sharded"
+        out_dir = tmp_path / "models" / "partitioned"
 
         assemble_family([plan], out_dir, "A")
 
         assert verify_dist(out_dir) == {
-            "A/w/model-00001-of-00002.safetensors": len(payloads[0]),
-            "A/w/model-00002-of-00002.safetensors": len(payloads[1]),
+            f"A/w/model-{index:05d}-of-{len(payloads):05d}.krm": len(payload)
+            for index, payload in enumerate(payloads, start=1)
         }
 
     def test_the_smallest_component_still_declares_two_elements(self, tmp_path: Path) -> None:
-        """数 KB の資産でも「グラフ shard + weight shard」の 2 要素（常時分割 — ADR 0081）。"""
+        """数 KB の資産でも part 0（2 文書）+ part 1（const）の 2 要素以上（ADR 0109 決定 3）。"""
         plan = self._plan(tmp_path / "series", ir_container(mark="w"))
         out_dir = tmp_path / "models" / "whole"
 
         manifest = assemble_family([plan], out_dir, "A")
 
         entry = manifest["models"]["A"]["weights"]["w"]["f16"]
-        assert [ref["path"] for ref in entry["shards"]] == [
-            "A/w/model-00001-of-00002.safetensors",
-            "A/w/model-00002-of-00002.safetensors",
+        assert [ref["path"] for ref in entry["container"]["parts"]] == [
+            "A/w/model-00001-of-00003.krm",
+            "A/w/model-00002-of-00003.krm",
+            "A/w/model-00003-of-00003.krm",
         ]
 
     def test_the_leftovers_of_a_previous_export_fail_loudly(self, tmp_path: Path) -> None:
         """単一ファイルと連番の同居は「どちらを配るか」が一意に決まらない。"""
         series = tmp_path / "series"
-        plan = self._plan(series, ir_shards(2, mark="w"))
-        (series / "model.safetensors").write_bytes(b"stale")
+        plan = self._plan(series, ir_parts(3, mark="w"))
+        (series / "model.krm").write_bytes(b"stale")
 
         with pytest.raises(DistError, match="同居"):
             assemble_family([plan], tmp_path / "models" / "mixed", "A")
@@ -1472,11 +1612,11 @@ class TestShardExpansion:
     def test_a_split_component_that_another_seat_also_names_fails_loudly(
         self, tmp_path: Path
     ) -> None:
-        """assets / extras の席は 1 ファイル参照 — 複数 shard になった役割は指せない。"""
-        plan = self._plan(tmp_path / "series", ir_shards(2, mark="w"))
+        """assets の席は 1 ファイル参照 — 複数 part になった役割は指せない。"""
+        plan = self._plan(tmp_path / "series", ir_parts(3, mark="w"))
         plan = replace(plan, assets={"table": "w"})
 
-        with pytest.raises(DistError, match="assets / extras も"):
+        with pytest.raises(DistError, match="assets も指している"):
             assemble_family([plan], tmp_path / "models" / "aliased", "A")
 
 
@@ -1492,8 +1632,8 @@ class TestRequiredLimits:
     #: フィクスチャの最大テンソル = linear 重み 4×32 の f32 = 512 バイト（`ir_fixtures`）。
     _LARGEST_TENSOR: ClassVar[int] = 512
 
-    #: 上の 512 バイトの重み（1 行 128 バイト）を **2 piece** へ割る書き手容量（ADR 0090）。
-    _PIECE_CAPACITY: ClassVar[int] = 256
+    #: 上の 512 バイトの重み（1 行 128 バイト）を **2 piece** へ割る block 上限（§4.1）。
+    _PIECE_BLOCK: ClassVar[int] = 256
 
     def _plan(
         self,
@@ -1501,14 +1641,16 @@ class TestRequiredLimits:
         *,
         pipeline_config: Mapping[str, Any] | None = None,
         quant: Mapping[str, Any] | None = None,
-        capacity: int | None = None,
+        block_bytes: int | None = None,
     ) -> ModelPlan:
         """1 役だけの計画（weights の席は正当な IR コンテナ = 導出の入口）。"""
-        source = _write_series(series, ir_container(mark="w", capacity=capacity))
+        source = _write_series(
+            series, ir_container(mark="w", block_bytes=block_bytes or BLOCK_MAX_BYTES)
+        )
         return ModelPlan(
             name="A",
             pipeline="anima/1",
-            artifacts={"w": Artifact(rel_path="w/model.safetensors", source=source)},
+            artifacts={"w": Artifact(rel_path="w/model.krm", source=source)},
             weights={"w": {"f16": WeightFiles(file="w")}},
             assets={},
             quants={"f16": {"weights": {"w": "f16"}, "session": {}, **(quant or {})}},
@@ -1553,16 +1695,16 @@ class TestRequiredLimits:
             "maxStorageBufferBindingSize": self._LARGEST_TENSOR,
         }
 
-    def test_a_tensor_split_across_shards_is_baked_as_its_whole_parent(
+    def test_a_tensor_split_into_pieces_is_baked_as_its_whole_parent(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """分割テンソル（ADR 0090 決定 1）の需要は**親の全長**（GPU は piece を知らない）。
+        """piece 列（container-v1 §5 の規則④）の需要は**親の全長**（GPU は piece を知らない）。
 
-        導出は全 shard のヘッダを 1 枚へ畳んでから最大を採る（`dist.component_demand_bytes`）。
-        shard ごとに最大を採る形へ退化すると、ここは断片 1 本ぶん（256 バイト）になり
-        `maxBufferSize` の欄が消える — 「宣言は満たすのに `createSession` で落ちる」形。
-        対照は直上の {@link test_it_bakes_the_largest_tensor_of_the_container}（piece ゼロの
-        同じ系列でも同じ 512 が出る）。
+        導出は合流した供給計画の block を足し上げる（`dist.component_demand_bytes`）。piece ごと
+        に最大を採る形へ退化すると、ここは断片 1 本ぶん（256 バイト）になり `maxBufferSize` の
+        欄が消える — 「宣言は満たすのに `createSession` で落ちる」形。対照は直上の
+        {@link test_it_bakes_the_largest_tensor_of_the_container}（piece ゼロの同じ系列でも
+        同じ 512 が出る）。
         """
         monkeypatch.setattr(
             limits,
@@ -1570,19 +1712,15 @@ class TestRequiredLimits:
             {"maxBufferSize": 400, "maxStorageBufferBindingSize": 200},
         )
         out_dir = tmp_path / "models" / "limits"
-        plan = self._plan(tmp_path / "series", capacity=self._PIECE_CAPACITY)
+        plan = self._plan(tmp_path / "series", block_bytes=self._PIECE_BLOCK)
 
         manifest = self._assemble(tmp_path, plan)
 
         # 被験体が本当に割れていること — 割れなかった日に主張が黙って恒真化しないための観測。
         entry = manifest["models"]["A"]["weights"]["w"]["f16"]
-        pieces = [
-            name
-            for ref in entry["shards"]
-            for name in safetensors_header(out_dir / ref["path"])
-            if parse_piece_key(name) is not None
-        ]
-        assert len(pieces) == 2
+        parts = [out_dir / ref["path"] for ref in entry["container"]["parts"]]
+        supplies = verify.verify_container(parts).graphs["w"].supplies
+        assert max(len(supply.blocks) for supply in supplies.values()) == 2
         assert manifest["models"]["A"]["quants"]["f16"]["requiredLimits"] == {
             "maxBufferSize": self._LARGEST_TENSOR,
             "maxStorageBufferBindingSize": self._LARGEST_TENSOR,
@@ -1616,7 +1754,9 @@ class TestRequiredLimits:
         monkeypatch.setattr(
             dist,
             "ir_graph",
-            lambda path: {"states": {"kv": {"dtype": "f32", "shape": [1, 1, "C", 512]}}},
+            lambda path, verified=None: {
+                "states": {"kv": {"dtype": "f32", "shape": [1, 1, "C", 512]}}
+            },
         )
         plan = self._plan(tmp_path / "series", pipeline_config={"maxPosition": 200_000})
 
@@ -1636,7 +1776,9 @@ class TestRequiredLimits:
         monkeypatch.setattr(
             dist,
             "ir_graph",
-            lambda path: {"states": {"kv": {"dtype": "f32", "shape": [1, 1, "C", 512]}}},
+            lambda path, verified=None: {
+                "states": {"kv": {"dtype": "f32", "shape": [1, 1, "C", 512]}}
+            },
         )
         plan = self._plan(tmp_path / "series")
 
@@ -1659,7 +1801,9 @@ class TestRequiredLimits:
         monkeypatch.setattr(
             dist,
             "ir_graph",
-            lambda path: {"states": {"kv": {"dtype": "f32", "shape": [1, 1, "C", 512]}}},
+            lambda path, verified=None: {
+                "states": {"kv": {"dtype": "f32", "shape": [1, 1, "C", 512]}}
+            },
         )
         out_dir = tmp_path / "models" / "limits"
 
@@ -1672,60 +1816,75 @@ class TestRequiredLimits:
 class TestInputContainerVerification:
     """組み立ては入力コンテナを「過去に検証済み」と信頼しない（CG4-1）。
 
-    系列ディレクトリは truncate で上書きされる可変な場所（`dist` のモジュール doc）なので、
+    系列ディレクトリは据え替えで書き換わる可変な場所（`dist` のモジュール doc）なので、
     **古いエクスポータで焼いた系列を `--series` で指す**運用事故が現実にありうる。組み立てが
-    自前で読むのは格納 dtype と IR メタデータの一部だけなので、node / op / storage の壊れは
-    family 固有の門をすり抜けて配布形に据わり、利用者の `createSession` で初めて落ちる。
+    自前で読むのは格納と IR の一部だけなので、descriptor / 束縛表の壊れは family 固有の門を
+    すり抜けて配布形に据わり、利用者の `createSession` で初めて落ちる。
     """
 
-    #: 語彙に無い op（差し替え先）。`requires.ops` ごと差し替えるので、宣言の整合は保たれる
-    #: — 落ちる先は**ランタイム支援の突合**であって JSON の形ではない。
-    _UNSUPPORTED: ClassVar[str] = "linear_v2"
-
     def _tampered(self, payloads: Sequence[bytes]) -> list[bytes]:
-        """weight shard はそのままで、**グラフ shard** の `karume_ir` の op だけを差し替えた列。
+        """重みの part はそのままで、**part 0 のグラフ記述**を手で書き換えた列。
 
-        4.md の失敗シナリオそのもの（手作業の改竄 / 別実装の出力）— 格納 dtype の門も
-        宣言の門も通り、`verify_dist` も緑になる形。
+        手作業の改竄 / 別実装の出力そのもの — `capabilities.ops` を `graphs[].requires.ops` の
+        和集合からずらす（container-v1 §2.1 の不変条件）。宣言外ファイル検査も size 突合も
+        緑のままなので、落とせるのは入力コンテナを開き直す門だけ。
         """
-        graph_shard, *rest = payloads
-        header_length = int.from_bytes(graph_shard[:8], "little")
-        header = json.loads(graph_shard[8 : 8 + header_length])
-        graph = json.loads(header["__metadata__"][IR_METADATA_KEY])
-        swapped = {node["op"] for node in graph["nodes"]}
-        for node in graph["nodes"]:
-            node["op"] = self._UNSUPPORTED
-        graph["requires"]["ops"] = sorted(
-            {self._UNSUPPORTED if op in swapped else op for op in graph["requires"]["ops"]}
+        part0, *rest = payloads
+        header = read_header(part0[:HEADER_BYTES])
+        begin = HEADER_BYTES
+        graph = json.loads(part0[begin : begin + header.graph_length])
+        model = part0[begin + header.graph_length :]
+        graph["capabilities"]["ops"] = [*graph["capabilities"]["ops"], "linear_v2"]
+        rewritten = canonical_json(graph).encode("utf-8")
+        head = write_header(
+            kind="model", graph_length=len(rewritten), model_length=header.model_length
         )
-        tensors = load(graph_shard)
-        return [save(tensors, {IR_METADATA_KEY: json.dumps(graph)}), *rest]
+        return [head + rewritten + model, *rest]
 
-    def _plan(self, series: Path, payloads: Sequence[bytes]) -> ModelPlan:
-        source = _write_series(series, payloads)
+    def _plan(self, series: Path) -> ModelPlan:
+        """2 席のモデル — **quant が選ばない席**（`f32`）の容器だけを改竄する。
+
+        MUST: 被験体は選ばれない席。選ばれる席は `requiredLimits` の導出が同じ容器を開くので、
+        preflight を外しても別の門が落とす = 恒真化の観測にならない。preflight だけが見るのは
+        「どの quant も選ばない dtype 席」で、そこが壊れたまま配られる形が閉じている穴。
+        """
         return ModelPlan(
             name="A",
             pipeline="anima/1",
-            artifacts={"w": Artifact(rel_path="w/model.safetensors", source=source)},
-            weights={"w": {"f16": WeightFiles(file="w")}},
+            artifacts={
+                "w": Artifact(
+                    rel_path="w/model.f16.krm",
+                    source=_write_series(
+                        series / "sound", ir_container(mark="sound"), "model.f16.krm"
+                    ),
+                ),
+                "broken": Artifact(
+                    rel_path="w/model.f32.krm",
+                    source=_write_series(
+                        series / "broken",
+                        self._tampered(ir_container(mark="broken")),
+                        "model.f32.krm",
+                    ),
+                ),
+            },
+            weights={"w": {"f16": WeightFiles(file="w"), "f32": WeightFiles(file="broken")}},
             assets={},
             quants={"f16": {"weights": {"w": "f16"}, "session": {}}},
             default_quant="f16",
             pipeline_config={},
         )
 
-    def test_a_weights_container_the_runtime_cannot_execute_fails_loudly(
+    def test_a_weights_container_whose_declaration_is_inconsistent_fails_loudly(
         self, tmp_path: Path
     ) -> None:
-        plan = self._plan(tmp_path / "series", self._tampered(ir_container()))
         out_dir = tmp_path / "models" / "tampered"
 
-        # 落ちる層まで見る — 「JSON が読めない」ではなく**ランタイム支援の突合**で落ちること
-        # そのものが、この門が閉じている穴（形も宣言も整った非実行グラフ）の定義。
+        # 落ちる層まで見る — 「ファイルが無い」ではなく**コンテナの構造検査**で落ちること
+        # そのものが、この門が閉じている穴（現物は揃っているのに宣言が整合しない）の定義。
         with pytest.raises(
-            DistError, match="IR v1 の規則を満たさない: ランタイムの capability 不足 — 非対応 op"
+            DistError, match=r"コンテナの規則を満たさない: graphDescriptor\.capabilities\.ops"
         ):
-            assemble_family([plan], out_dir, "A")
+            assemble_family([self._plan(tmp_path / "series")], out_dir, "A")
         assert not out_dir.exists()
 
     def test_without_the_preflight_the_same_distribution_is_assembled(
@@ -1733,14 +1892,57 @@ class TestInputContainerVerification:
     ) -> None:
         """故障注入 — 門を外すと壊れたコンテナがそのまま据わる（恒真化していないことの証明）。
 
-        他の門（格納 dtype・宣言と現物の突合・宣言外ファイル検査）はどれもこの改竄を見ない、
-        が上の 1 本の意味そのもの。
+        他の門（宣言と現物の突合・宣言外ファイル検査）はどれもこの改竄を見ない、が上の 1 本の
+        意味そのもの。
         """
-        monkeypatch.setattr(dist, "assert_weight_components_verified", lambda sharded: None)
-        plan = self._plan(tmp_path / "series", self._tampered(ir_container()))
+        monkeypatch.setattr(dist, "assert_weight_components_verified", lambda partitioned: None)
         out_dir = tmp_path / "models" / "tampered"
 
-        assemble_family([plan], out_dir, "A")
+        assemble_family([self._plan(tmp_path / "series")], out_dir, "A")
+
+        assert (out_dir / MANIFEST_FILENAME).is_file()
+
+    def _unknown_op_plan(self, series: Path) -> ModelPlan:
+        """weights の席が**語彙外の op を宣言した容器**を指す計画（構造検査は通る形）。
+
+        被験体は quant が選ぶ席にする — IR の受理規則は「どの席の容器も配布形へ据わる前に
+        通る」ことが主張なので、選ばれない席で観測すると穴の位置が別になる。
+        """
+        source = _write_series(series / "odd", with_an_unknown_op(ir_container(mark="odd")))
+        return ModelPlan(
+            name="A",
+            pipeline="anima/1",
+            artifacts={"w": Artifact(rel_path="w/model.f16.krm", source=source)},
+            weights={"w": {"f16": WeightFiles(file="w")}},
+            assets={},
+            quants={"f16": {"weights": {"w": "f16"}, "session": {}}},
+            default_quant="f16",
+            pipeline_config={},
+        )
+
+    def test_a_weights_container_that_declares_an_unknown_op_fails_loudly(
+        self, tmp_path: Path
+    ) -> None:
+        """構造は正しいが**ランタイムが実行できない** IR を宣言した容器を据えない。
+
+        `verify_container` は op 語彙に触れないので、これを落とせるのは IR の受理規則
+        （{@link karume.verify.assert_ir_accepted}）だけ — 抜けると「語彙外の op を宣言した
+        容器」が配布形に据わり、利用者の `createSession` で初めて落ちる。
+        """
+        out_dir = tmp_path / "models" / "odd"
+
+        with pytest.raises(DistError, match="非対応 op"):
+            assemble_family([self._unknown_op_plan(tmp_path / "series")], out_dir, "A")
+        assert not out_dir.exists()
+
+    def test_without_the_preflight_the_unknown_op_container_is_assembled(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """故障注入 — 門を外すと語彙外 op の容器がそのまま据わる（恒真化していないことの証明）。"""
+        monkeypatch.setattr(dist, "assert_weight_components_verified", lambda partitioned: None)
+        out_dir = tmp_path / "models" / "odd"
+
+        assemble_family([self._unknown_op_plan(tmp_path / "series")], out_dir, "A")
 
         assert (out_dir / MANIFEST_FILENAME).is_file()
 
@@ -1748,16 +1950,14 @@ class TestInputContainerVerification:
         """生成物（`payload`）は IR コンテナではない — weights の席に据えたら計画の受け口で落ちる。
 
         素通しにすると、その役割だけ IR v1 の全検証も分割解決も需要の導出も掛からないまま
-        `shards: [1 要素]` として宣言される（表・sidecar の役割名を weights へ渡す綴り誤りが
+        `parts: [1 要素]` として宣言される（表・資産の役割名を weights へ渡す綴り誤りが
         全門緑で通り、利用者の `createSession` で初めて落ちる）。
         """
         with pytest.raises(DistError, match=r"A\.weights: 役割 'w' が生成物（payload）を指す"):
             ModelPlan(
                 name="A",
                 pipeline="anima/1",
-                artifacts={
-                    "w": Artifact(rel_path="w/model.safetensors", payload=b"not-a-container")
-                },
+                artifacts={"w": Artifact(rel_path="w/model.krm", payload=b"not-a-container")},
                 weights={"w": {"f16": WeightFiles(file="w")}},
                 assets={},
                 quants={"f16": {"weights": {"w": "f16"}, "session": {}}},
@@ -1773,7 +1973,7 @@ class TestInputContainerVerification:
             pipeline="anima/1",
             artifacts={
                 "w": Artifact(
-                    rel_path="w/model.safetensors",
+                    rel_path="w/model.krm",
                     source=_synthetic_series(tmp_path / "series", "w"),
                 ),
                 "table": Artifact(rel_path="tables/table.safetensors", payload=b"not-a-container"),
@@ -1794,8 +1994,8 @@ class TestInputContainerVerification:
         }
 
 
-class TestExternalShardedComponents:
-    """**分割されたコンポーネントへの越境参照** — `shards` 配列の各要素が 1 つの参照になる
+class TestExternalPartitionedComponents:
+    """**分割されたコンポーネントへの越境参照** — `container.parts` の各要素が 1 つの参照になる
     （ADR 0038 §7 / ADR 0071 決定 2「各要素は従来の FileRef 検査をそのまま通す」）。
 
     実需は turbo リポの共有 text_encoder（1GiB 超で複数本へ割れる）で、1 役 = 1 参照しか
@@ -1805,11 +2005,13 @@ class TestExternalShardedComponents:
 
     _REVISION = "0123456789abcdef0123456789abcdef01234567"
     _REPO = "hdae/karume-source"
-    _SHARDS = tuple(ir_shards(3, mark="text-encoder"))
+    #: part 1（const 領域）が**空でない**容器を使う — 0 バイトの part は「長さを保った
+    #: まま書き換える」故障注入の被験体にならない（同じ長さの別バイト列が無い）。
+    _SHARDS = tuple(ir_container(mark="text-encoder"))
     _OWN = "transformer"
 
     def _series(self, root: Path, payloads: Sequence[bytes]) -> Path:
-        """系列出力を書いて**代表 path** を返す（連番 = 現物が決める shard 列）。"""
+        """系列出力を書いて**代表 path** を返す（連番 = 現物が決める part 列）。"""
         return _write_series(root, payloads)
 
     def _plan(self, name: str, series: Path) -> ModelPlan:
@@ -1822,9 +2024,9 @@ class TestExternalShardedComponents:
             name=name,
             pipeline="anima/1",
             artifacts={
-                "text_encoder": Artifact("text_encoder/model.safetensors", source=series),
+                "text_encoder": Artifact("text_encoder/model.krm", source=series),
                 "transformer": Artifact(
-                    "transformer/model.safetensors",
+                    "transformer/model.krm",
                     source=_synthetic_series(series.parent, self._OWN),
                 ),
             },
@@ -1858,8 +2060,8 @@ class TestExternalShardedComponents:
             }
         )
 
-    def test_every_shard_becomes_its_own_pinned_reference(self, tmp_path: Path) -> None:
-        """repo / revision は全要素同一・path / size / sha256 は shard ごと・並びは番号順。"""
+    def test_every_part_becomes_its_own_pinned_reference(self, tmp_path: Path) -> None:
+        """repo / revision は全要素同一・path / size / sha256 は part ごと・並びは番号順。"""
         series = self._series(tmp_path / "series", self._SHARDS)
         source = self._source_dist(tmp_path, series)
         out_dir = tmp_path / "models" / "karume-borrower"
@@ -1872,19 +2074,19 @@ class TestExternalShardedComponents:
         )
 
         entry = manifest["models"]["borrower"]["weights"]["text_encoder"]["f16"]
-        assert entry["shards"] == [
+        assert entry["container"]["parts"] == [
             {
                 "repo": self._REPO,
                 "revision": self._REVISION,
-                "path": f"source/text_encoder/model-{index:05d}-of-00003.safetensors",
+                "path": f"source/text_encoder/model-{index:05d}-of-00003.krm",
                 "size": len(payload),
                 "sha256": hashlib.sha256(payload).hexdigest(),
             }
             for index, payload in enumerate(self._SHARDS, start=1)
         ]
 
-    def test_the_referenced_shards_are_not_stored_here_a_second_time(self, tmp_path: Path) -> None:
-        """参照の存在理由そのもの — 全 shard が向こう側に残り、自リポは固有の役割だけ持つ。"""
+    def test_the_referenced_parts_are_not_stored_here_a_second_time(self, tmp_path: Path) -> None:
+        """参照の存在理由そのもの — 全 part が向こう側に残り、自リポは固有の役割だけ持つ。"""
         series = self._series(tmp_path / "series", self._SHARDS)
         source = self._source_dist(tmp_path, series)
         out_dir = tmp_path / "models" / "karume-borrower"
@@ -1897,21 +2099,19 @@ class TestExternalShardedComponents:
         )
 
         assert not (out_dir / "borrower" / "text_encoder").exists()
-        assert sorted(verify_dist(out_dir)) == _shard_paths(
-            "borrower", "transformer/model.safetensors", self._OWN
+        assert sorted(verify_dist(out_dir)) == _part_paths(
+            "borrower", "transformer/model.krm", self._OWN
         )
 
     @pytest.mark.parametrize("victim", [0, 1, 2])
-    def test_it_checks_every_shard_against_the_source_distribution(
+    def test_it_checks_every_part_against_the_source_distribution(
         self, tmp_path: Path, victim: int
     ) -> None:
-        """突合は shard 列の**全要素**へ届く（先頭だけ見る形なら後続の改竄が沈黙する）。"""
+        """突合は part 列の**全要素**へ届く（先頭だけ見る形なら後続の改竄が沈黙する）。"""
         series = self._series(tmp_path / "series", self._SHARDS)
         source = self._source_dist(tmp_path, series)
         # 参照元の現物だけを、長さを保ったまま書き換える（size ではなく sha256 の門を踏む）。
-        tampered = (
-            source / "source" / "text_encoder" / (f"model-{victim + 1:05d}-of-00003.safetensors")
-        )
+        tampered = source / "source" / "text_encoder" / (f"model-{victim + 1:05d}-of-00003.krm")
         tampered.write_bytes(bytes(len(self._SHARDS[victim])))
         out_dir = tmp_path / "models" / "karume-borrower"
 
@@ -1924,8 +2124,8 @@ class TestExternalShardedComponents:
             )
         assert not out_dir.exists()
 
-    def test_the_smallest_component_is_referenced_shard_by_shard(self, tmp_path: Path) -> None:
-        """数 KB の役割でも参照は shard ごと（常時分割 — 代表 path 1 本の参照は無い）。"""
+    def test_the_smallest_component_is_referenced_part_by_part(self, tmp_path: Path) -> None:
+        """数 KB の役割でも参照は part ごと（常時分割 — 代表 path 1 本の参照は無い）。"""
         whole = tuple(ir_container(mark="whole-text-encoder"))
         series = self._series(tmp_path / "series", whole)
         source = self._source_dist(tmp_path, series)
@@ -1939,11 +2139,11 @@ class TestExternalShardedComponents:
         )
 
         entry = manifest["models"]["borrower"]["weights"]["text_encoder"]["f16"]
-        assert entry["shards"] == [
+        assert entry["container"]["parts"] == [
             {
                 "repo": self._REPO,
                 "revision": self._REVISION,
-                "path": f"source/text_encoder/model-{index:05d}-of-00002.safetensors",
+                "path": f"source/text_encoder/model-{index:05d}-of-00003.krm",
                 "size": len(payload),
                 "sha256": hashlib.sha256(payload).hexdigest(),
             }
@@ -1951,7 +2151,7 @@ class TestExternalShardedComponents:
         ]
 
     def test_an_asset_seat_cannot_point_at_a_split_component(self, tmp_path: Path) -> None:
-        """assets / extras は 1 ファイル参照しか書けない席 — 先頭 shard だけを黙って指さない。
+        """assets は 1 ファイル参照しか書けない席 — 先頭 part だけを黙って指さない。
 
         参照元では weights の役割として分割されているコンポーネントを、こちら側では assets の
         席から指した形（席が違えば同じ綴りの役割が別の意味を持つ）。
@@ -1965,13 +2165,156 @@ class TestExternalShardedComponents:
             base,
             artifacts={
                 **base.artifacts,
-                "text_encoder": Artifact("text_encoder/model.safetensors", payload=b"local-copy"),
+                "text_encoder": Artifact("text_encoder/model.krm", payload=b"local-copy"),
             },
             weights={"transformer": {"f16": WeightFiles("transformer")}},
             assets={"encoder": "text_encoder"},
             quants={"f16": {"weights": {"transformer": "f16"}, "session": {}}},
         )
 
-        with pytest.raises(DistError, match="越境参照は分割されたコンポーネントに掛けられない"):
+        with pytest.raises(DistError, match="越境参照は分割形のコンテナに掛けられない"):
             assemble_family([borrower], out_dir, "borrower", external=self._components(source))
         assert not out_dir.exists()
+
+
+class TestTheManifestHubReads:
+    """`karume dist` が書いた `karume.json` を hub の `karume/5` の規則がそのまま受理する。
+
+    見るのは**宣言だけで閉じる**面（ADR 0109 決定 6）— 上限と `size: 0` の規則は
+    {@link karume.dist.assert_container_limits}、選択が引く形（`container.descriptor` /
+    `container.parts`）はここで綴る。TS 側 parser の写経はしない（正本が 2 つになる）が、
+    **同じ値を持つ定数**だけは下の {@link TestTheHubConstants} が機械で突き合わせる。
+    """
+
+    _MARK = "hub-reader"
+
+    def _assembled(self, tmp_path: Path) -> tuple[Path, dict[str, Any]]:
+        plan = _synthetic_plan(tmp_path / "series", "A", "dit/model.krm", self._MARK)
+        out_dir = tmp_path / "models" / "karume-synthetic"
+        return out_dir, assemble_family([plan], out_dir, "A")
+
+    def test_the_written_manifest_passes_the_declared_limits(self, tmp_path: Path) -> None:
+        """据わった `karume.json` を読み直しても同じ門を通る（返り値だけの飾りではない）。"""
+        out_dir, _ = self._assembled(tmp_path)
+
+        written = json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+
+        assert written["format"] == "karume/5"
+        assert_manifest_limits(written)
+        verify_dist(out_dir)
+
+    def test_the_selection_finds_a_descriptor_and_a_part_list(self, tmp_path: Path) -> None:
+        """`resolveSelection` が引く形 — quant → 部品 → dtype → `container`。"""
+        _, manifest = self._assembled(tmp_path)
+        model = manifest["models"]["A"]
+        label = model["quants"][model["defaultQuant"]]["weights"]["w"]
+
+        container = model["weights"]["w"][label]["container"]
+
+        assert sorted(container) == ["descriptor", "parts"]
+        assert sorted(container["descriptor"]) == ["graph", "model"]
+        assert len(container["parts"]) >= 2
+        assert all(sorted(ref) == ["path", "sha256", "size"] for ref in container["parts"])
+
+    def test_the_descriptor_expectation_matches_the_part_zero_that_was_placed(
+        self, tmp_path: Path
+    ) -> None:
+        """2 文書の期待値は**置いた現物**から採る（表と現物が独立に動かない）。"""
+        out_dir, manifest = self._assembled(tmp_path)
+        container = manifest["models"]["A"]["weights"]["w"]["f16"]["container"]
+
+        part0 = out_dir / container["parts"][0]["path"]
+        graph, model = read_descriptor_refs(part0)
+
+        assert container["descriptor"]["graph"] == graph.to_document()
+        assert container["descriptor"]["model"] == model.to_document()
+        # part 0 は「ヘッダ + 2 文書ちょうど」（container-v1 §8）。
+        assert container["parts"][0]["size"] == HEADER_BYTES + graph.length + model.length
+
+    def test_the_parts_open_as_a_container(self, tmp_path: Path) -> None:
+        """宣言した part 列をそのまま渡せばコンテナとして開ける（並びは添字順 MUST）。"""
+        out_dir, manifest = self._assembled(tmp_path)
+        container = manifest["models"]["A"]["weights"]["w"]["f16"]["container"]
+
+        parts = [out_dir / ref["path"] for ref in container["parts"]]
+        verified = verify.verify_container(parts, blocks=True)
+
+        assert verified.read.model is not None
+        assert len(verified.read.model.parts) == len(parts) - 1
+
+
+def _evaluate_product(expression: str) -> int:
+    """`1024 * 2 ** 20` のような**積と冪だけ**の式を数にする。
+
+    MUST: `eval` を持ち込まない — TS 側が右辺の綴りを変えた日（別の定数を参照する・関数呼び出しに
+    なる）に、突合が「値が違う」ではなく `SyntaxError` / `NameError` で落ちる。そのときに読み手が
+    知りたいのは「どちらの値が動いたか」であって Python の例外名ではない。受理集合を積と冪に
+    絞ってあるので、式の形が変わればここが**そう言って**落ちる。
+    """
+    total = 1
+    tokens = [token.strip() for token in expression.replace("**", "^").split("*")]
+    for token in tokens:
+        if "^" in token:
+            base, power = (part.strip() for part in token.split("^"))
+            total *= int(base) ** int(power)
+        else:
+            total *= int(token)
+    return total
+
+
+class TestTheHubConstants:
+    """コンテナの上限は **hub と exporter で同じ値**（ADR 0109 決定 6 の「独立に持つ」）。
+
+    値を導出で結ばずそれぞれの言語で綴る決定なので、片方だけが動いた日に落ちる門をここに置く
+    （`packages/hub/src/manifest.ts` は Python から読めるテキストなので、突合は機械でできる）。
+    """
+
+    _MANIFEST_TS: ClassVar[Path] = (
+        Path(__file__).resolve().parents[3] / "packages" / "hub" / "src" / "manifest.ts"
+    )
+
+    def _declared(self, name: str) -> int:
+        source = self._MANIFEST_TS.read_text(encoding="utf-8")
+        match = re.search(rf"^const {name} = ([^;]+);", source, re.MULTILINE)
+        assert match is not None, f"{name} が {self._MANIFEST_TS} に無い"
+        return _evaluate_product(match.group(1))
+
+    @pytest.mark.parametrize(
+        ("python_value", "typescript_name"),
+        [
+            (MAX_PARTS, "MAX_PARTS"),
+            (PART_MAX_BYTES, "MAX_PART_BYTES"),
+            (MAX_DESCRIPTOR_BYTES, "MAX_DESCRIPTOR_BYTES"),
+            (HEADER_BYTES, "CONTAINER_HEADER_BYTES"),
+        ],
+    )
+    def test_the_limit_agrees_with_the_hub(self, python_value: int, typescript_name: str) -> None:
+        assert python_value == self._declared(typescript_name)
+
+    def test_the_empty_sha256_agrees_with_the_hub(self) -> None:
+        """長さ 0 の part が名乗る sha256 は 1 つに決まる（ADR 0109 決定 3）。"""
+        source = self._MANIFEST_TS.read_text(encoding="utf-8")
+        match = re.search(r'^const EMPTY_SHA256 = "([0-9a-f]+)";', source, re.MULTILINE)
+        assert match is not None
+
+        assert match.group(1) == dist.EMPTY_SHA256
+
+
+class TestTheHubConstantReader:
+    """定数突合の読み手そのもの（`eval` を持ち込まない受理集合）。
+
+    TS 側が右辺の綴りを変えた日に「値が違う」ではなく Python の例外名で落ちると、読み手が
+    知りたいこと（どちらの値が動いたか）が診断から消える。
+    """
+
+    @pytest.mark.parametrize(
+        ("expression", "value"),
+        [("1024", 1024), ("1024 * 1024", 1048576), ("1024 * 2 ** 20", 1073741824), ("24", 24)],
+    )
+    def test_a_product_of_literals_is_evaluated(self, expression: str, value: int) -> None:
+        assert _evaluate_product(expression) == value
+
+    @pytest.mark.parametrize("expression", ["MAX_PARTS", "1 + 1", "readLimit()"])
+    def test_anything_but_a_product_of_literals_fails_loudly(self, expression: str) -> None:
+        with pytest.raises(ValueError):
+            _evaluate_product(expression)

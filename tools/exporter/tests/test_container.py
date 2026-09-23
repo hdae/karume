@@ -51,6 +51,7 @@ from karume.container import (
     canonical_json,
     ir_v2_document,
     read_container,
+    read_descriptor_refs,
     serialize_graph_descriptor,
     serialize_model_descriptor,
     write_graph_container,
@@ -762,3 +763,41 @@ class TestTheCrossLanguageFixture:
         payloads = split_asset_payloads()
         raw = read.block(read.model.assets["rope_base"].block)
         assert raw == payloads["rope_base"] + b"\x00" * 3
+
+
+class TestTheDescriptorReadIsBounded:
+    """`read_descriptor_refs` は part 0 を**丸ごと RAM へ載せない**（ヘッダ + 2 文書だけ）。
+
+    呼び手（`karume.dist._materialize_family`）は「単一形かどうか」を判定する**前に**ここを
+    通る。全量読みにすると、単一形の容器を weights 席へ挿した組み立てが、規則違反として
+    落ちる前に数 GB を読む（段 2 で harness を入れた RAM ピークの関心事）。
+    """
+
+    def test_it_never_reads_the_whole_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path = write_synthetic_container(tmp_path / "model.krm", single=True)[0]
+
+        def forbidden(self: Path) -> bytes:
+            raise AssertionError(f"{self}: 現物を丸ごと読んだ（ヘッダ + 2 文書だけ MUST）")
+
+        monkeypatch.setattr(Path, "read_bytes", forbidden)
+        graph, model = read_descriptor_refs(path)
+
+        assert graph.length > 0
+        assert model.length > 0
+
+    def test_a_graph_container_is_refused(self, tmp_path: Path) -> None:
+        """`krg` は 2 文書を持たない（モデル記述が無い）— manifest の期待値を採る口ではない。"""
+        bindings = synthetic_bindings()
+        path = write_graph_container(
+            tmp_path / "synthetic.krg",
+            synthetic_graph(),
+            synthetic_tensors(),
+            {name: bindings[name] for name in bindings if name.startswith("const.")},
+            graph_name=GRAPH_NAME,
+            block_bytes=FIXTURE_BLOCK_BYTES,
+        )
+
+        with pytest.raises(ContainerFormatError, match="krm でない"):
+            read_descriptor_refs(path)

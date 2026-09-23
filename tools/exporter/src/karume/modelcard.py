@@ -21,18 +21,18 @@ NOTE: 描画部品（{@link frontmatter} / {@link models} / {@link quants} /
 そこだけをプロファイルに分けて**呼び出し側に明示させる**（選ばせる規則は
 {@link karume.dist.resolve_card_renderer}）。
 
-manifest（現行は `karume/4` — ADR 0041 で複数モデル化し、ADR 0070 決定 1 で weights の
-dtype エントリが shard 列になり、ADR 0075 決定 1 で quant へ表示欄が付いた形）は
+manifest（現行は `karume/5` — ADR 0041 で複数モデル化し、ADR 0075 決定 1 で quant へ表示欄が
+付き、ADR 0109 決定 3 で weights の dtype エントリが**コンテナの入口**になった形）は
 **1 リポに複数モデル**を持てるので、カードも
 「リポ全体の説明 → モデル一覧 → 使い方 → モデルごとの節」の形にする。モデルごとの節が
 `## Model: <name>` で、その中に quant 表・（SBV2 は）スタイル表と話者表が並ぶ。
 単一モデルのリポでも同じ形で描く（配布形のレイアウトが一様なのと同じ理由 — 2 個目が増えた
 瞬間に構成が変わるカードは、読み手の目印も壊す）。
 
-shard 上限を 256 MiB へ下げてファイル本数が 3〜4 倍になったので、**shard 1 本 1 行のファイル表は
-廃止した**（2026-09-03 裁定 — 5 モデルのリポでカードの半分が表になり、読み手が知りたい
-「このプリセットで何 GiB 落ちるか」がその中に埋もれた）。per-file の `size` / `sha256` の正本は
-`karume.json` で、カードは quant ごとの合計（{@link quants} の Download 欄）だけを持つ。
+ファイル本数が多いので、**ファイル 1 本 1 行の表は廃止した**（2026-09-03 裁定 — 5 モデルの
+リポでカードの半分が表になり、読み手が知りたい「このプリセットで何 GiB 落ちるか」がその中に
+埋もれた）。per-file の `size` / `sha256` の正本は `karume.json` で、カードは quant ごとの
+合計（{@link quants} の Download 欄）だけを持つ。
 
 MUST: **数値・ダウンロード量・quant 表・dtype ラベル・スタイル表・話者表は 1 つ残らず manifest
 から導出する**。手書きのサイズや dtype 名は資産と独立に動けてしまい、「表と現物が食い違う」
@@ -68,22 +68,6 @@ HF_OWNER = "hdae"
 _SHA_DIGITS = 16
 
 _UNITS = (("GiB", 1 << 30), ("MiB", 1 << 20), ("KiB", 1 << 10))
-
-#: 公式 safetensors 仕様に無い **packed 整数の格納ラベル** → 注記に綴る整数の幅。
-#: 注記の順序は固定（描画は決定的 — 本モジュールの MUST）。
-#:
-#: 実測 2026-09-19（`safetensors` 0.8.0 の `safe_open`・I2 / I4 の 1 テンソルだけの最小
-#: コンテナ）: どちらもヘッダの解析で `unknown variant` として拒否される（受理語彙は BOOL /
-#: F4 / F6_* / U8 / I8 / F8_* / I16 / U16 / F16 / BF16 / I32 / U32 / F32 / C64 / F64 / I64 /
-#: U64）。同じ書き方の I8 / F32 は開ける。
-#:
-#: NOTE: 条件を**ラベルの綴り**で立てるのは、カードが manifest だけから導出するため（この
-#: モジュールの MUST）— コンテナのヘッダ実 dtype は組み立て時に {@link karume.dist.storage_dtypes}
-#: が読むが、その結果は manifest にも `ModelPlan` にも載らないのでカードからは到達できない。
-#: 限界: 混成コンテナを 1 語のラベルで名乗る配布形（QAT は I2 + I4 + I8 を `i4` と綴る —
-#: ADR 0097 追記 5）では、名乗らなかったほうの方言に注記が掛からない。掛かる側の注記は出るので
-#: 「公式パーサで開けない」事実自体は読み手に届く。
-_PACKED_DIALECT_LABELS: Mapping[str, str] = {"i4": "int4", "i2": "int2"}
 
 
 @dataclass(frozen=True)
@@ -147,14 +131,13 @@ def _is_shared(ref: Mapping[str, Any]) -> bool:
 
 
 def _collect(refs: dict[str, Mapping[str, Any]], weight_files: Mapping[str, Any]) -> None:
-    """1 つの dtype エントリのファイル（shard 列 + 付帯）を **path で一意化**して足す。
+    """1 つの dtype エントリのファイル（コンテナの part 列）を **path で一意化**して足す。
 
-    一意化は 2 つのコンポーネントが同じファイルを指す形（1 本化済みの rope_base と同型）で
-    バイトを二重に数えないため。
+    一意化は 2 つの部品が同じコンテナを指す形（`shared/` に畳まれた席と同型）でバイトを
+    二重に数えないため。`karume/4` の `extras` は退役し、実物はコンテナの資産になった
+    （= part の中なので、足す先はこの 1 本だけ — ADR 0109 決定 4）。
     """
-    for ref in weight_files["shards"]:
-        refs.setdefault(ref["path"], ref)
-    for ref in weight_files.get("extras", {}).values():
+    for ref in weight_files["container"]["parts"]:
         refs.setdefault(ref["path"], ref)
 
 
@@ -291,19 +274,26 @@ def _presentation(quant: Mapping[str, Any]) -> str:
     return description or "—"
 
 
-def _download(model: Mapping[str, Any], quant: Mapping[str, Any]) -> str:
+def _download(
+    model: Mapping[str, Any], quant: Mapping[str, Any], host_assets: Mapping[str, int]
+) -> str:
     """quant 表の Download 欄 — この席を選んだときに落ちる合計と、合計と GPU 常駐量の差。
 
     注記は 2 つ。`shared` は「2 本目のモデルではこの分を落とさない」量（{@link _is_shared}）で、
-    assets は**ホスト側で読むだけで GPU に載らない**分（gemma4 の PLE sidecar のように
-    Download の大半が assets という配布形がある）。後者は無視できない比率のときだけ添える —
-    どのカードにも書くと、数 MiB の tokenizer に読み手の目を向けさせるだけになる。
+    assets は**ホスト側で読むだけで GPU に載らない**分（gemma4 の PLE のように Download の
+    大半が assets という配布形がある）。後者は無視できない比率のときだけ添える — どのカードにも
+    書くと、数 MiB の tokenizer に読み手の目を向けさせるだけになる。
+
+    MUST: assets の勘定は**独立したファイルの席**（manifest の `assets`）と**容器が宣言する
+    資産**（`host_assets` — ADR 0109 決定 4 で容器の中へ入った PLE / `rope_base`）の和で採る。
+    前者だけを数えると、資産を容器へ畳んだ配布形で内訳の説明だけが黙って消える。
     """
     refs = _quant_refs(model, quant)
     asset_paths = {ref["path"] for ref in model["assets"].values()}
     total = sum(ref["size"] for ref in refs)
     shared = sum(ref["size"] for ref in refs if _is_shared(ref))
     assets = sum(ref["size"] for ref in refs if ref["path"] in asset_paths)
+    assets += sum(host_assets.get(path, 0) for path in _container_heads(model, quant))
     notes = []
     if shared:
         notes.append(f"{_download_size(shared)} shared")
@@ -312,8 +302,19 @@ def _download(model: Mapping[str, Any], quant: Mapping[str, Any]) -> str:
     return _download_size(total) + (f" ({'; '.join(notes)})" if notes else "")
 
 
+def _container_heads(model: Mapping[str, Any], quant: Mapping[str, Any]) -> set[str]:
+    """その quant が選ぶコンテナの **part 0 の path**（`host_assets` の鍵 — 同じ容器は 1 度）。"""
+    return {
+        model["weights"][name][label]["container"]["parts"][0]["path"]
+        for name, label in quant["weights"].items()
+    }
+
+
 def quants(
-    model: Mapping[str, Any], *, abbreviations: Mapping[str, str] | None = None
+    model: Mapping[str, Any],
+    *,
+    abbreviations: Mapping[str, str] | None = None,
+    host_assets: Mapping[str, int] = {},
 ) -> list[str]:
     """quant 表（ADR 0074 の席名 + ADR 0075 の表示欄 + 席ごとのダウンロード量）。
 
@@ -321,6 +322,10 @@ def quants(
     **略称は recipe が定めるので、対応をカードに必ず出す**（ADR 0074 決定 4）— 表の 1 列目と
     Weights 列の綴りが繋がるのはこの 1 行だけで、無いと `bert4` がどの部品の話か読めない。
     略称を使っていない family は渡さない（トークンが weights 名そのものなら対応表は要らない）。
+
+    `host_assets`（part 0 の path → 容器が宣言する資産の論理長の和）は組み立てが
+    {@link karume.dist.container_asset_bytes} から引いて渡す**容器の事実**で、manifest からは
+    導けない。渡さない呼び手（カードだけを組み直すテスト）では内訳注記が容器の資産を数えない。
 
     表の後ろの注記は、廃止したファイル表から**掛かるときだけ**引き継いだもの（sha256 の正本の
     所在・dtype 語彙・`i4` 方言・`shared/`・越境参照）。掛からない配布形に載せると事実でない
@@ -339,7 +344,8 @@ def quants(
         )
         mark = " (default)" if name == default else ""
         lines.append(
-            f"| `{name}`{mark} | {_presentation(quant)} | {_download(model, quant)} |"
+            f"| `{name}`{mark} | {_presentation(quant)} |"
+            f" {_download(model, quant, host_assets)} |"
             f" {weights} | {_session(quant)} |"
         )
     lines += [
@@ -360,20 +366,9 @@ def quants(
         " layer.",
         "Dtype labels use the runtime's **storage dtype vocabulary** (`f16` / `i8` / `i4` /"
         " `i2`), not the `fp16` spelling common elsewhere in the ecosystem.",
+        "Weights ship as Karume container files (`.krm`), split into numbered parts;"
+        " a part is fetched and verified on its own.",
     ]
-    # `I4` / `I2` は safetensors の方言（ADR 0069・ADR 0097 追記 1・docs/limitations.md）—
-    # 公式パーサで開けない事実は、その配布形を選んだ読み手にだけ関わるので、その綴りの席が
-    # あるときだけ綴る（全カードに載せると事実でない主張になる）。条件の立て方と限界は
-    # {@link _PACKED_DIALECT_LABELS}。
-    for label, width in _PACKED_DIALECT_LABELS.items():
-        if any(label in entry for entry in model["weights"].values()):
-            lines.append(
-                f"A component stored as `{label}` uses a packed {width} dtype"
-                f" (`{label.upper()}`) that is **not part of the official safetensors"
-                " specification** — the official `safetensors` library rejects a file that"
-                " contains it (checked with 0.8.0). Karume's runtime and exporter read it; files"
-                f" without `{label}` stay fully compatible."
-            )
     if any(ref["path"].startswith("shared/") for ref in refs):
         lines.append(
             "A path under `shared/` is one this model shares byte for byte with another model in"

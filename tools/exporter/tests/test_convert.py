@@ -13,6 +13,7 @@ from conftest import SYM_MAX, node_ops, only_node
 from torch import nn
 from torch.export import Dim
 
+from karume.container import Provenance
 from karume.convert import (
     Converter,
     UnsupportedAtenOpsError,
@@ -756,7 +757,9 @@ class TestSymbolicCatEndToEnd:
         graph = export_to_file(
             SymbolicCatJoin(),
             (torch.randn(1, 6, 4), torch.randn(1, 3, 4), torch.randn(1, 9, 1)),
-            tmp_path / "model.safetensors",
+            tmp_path / "model.krm",
+            provenance=Provenance(license="mit"),
+            graph_name="cat",
             dynamic_shapes=({1: dyn_t}, None, {1: dyn_t + 3}),
         )
 
