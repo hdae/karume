@@ -6,7 +6,6 @@ import argparse
 import json
 import math
 import platform
-import re
 import resource
 import time
 from pathlib import Path
@@ -14,8 +13,8 @@ from pathlib import Path
 import torch
 import transformers
 from data import profiles
-from karume.shards import resolve_shards
-from karume.verify import verify_model
+from karume.legacy import resolve_shards
+from karume.verify import assert_reader_layout
 from safetensors.torch import load_file
 from scoring import accuracy, token_nll, windows
 from weights import StoredWeights, fingerprint, load_float_model, load_qat
@@ -24,8 +23,9 @@ from weights import StoredWeights, fingerprint, load_float_model, load_qat
 def stored_paths(profile: dict) -> tuple[list[Path], Path | None]:
     if "series" in profile:
         path = profile["series"] / "model.safetensors"
-        verify_model(path)
-        return list(resolve_shards(path)), None
+        shards = list(resolve_shards(path))
+        _assert_layouts(shards)
+        return shards, None
     root = profile["distribution"]
     manifest = json.loads((root / "karume.json").read_text())
     if manifest["format"] != "karume/4":
@@ -35,8 +35,7 @@ def stored_paths(profile: dict) -> tuple[list[Path], Path | None]:
     if any("repo" in shard for shard in declarations):
         raise ValueError("越境参照はこのローカル評価では未対応")
     shards = [root / shard["path"] for shard in declarations]
-    virtual = re.sub(r"-\d{5}-of-\d{5}(?=\.safetensors$)", "", str(shards[0]))
-    verify_model(Path(virtual))
+    _assert_layouts(shards)
     ple = [
         root / value["path"]
         for value in model["assets"].values()
@@ -45,6 +44,17 @@ def stored_paths(profile: dict) -> tuple[list[Path], Path | None]:
     if len(ple) != 1:
         raise ValueError("PLE索引が一意ではありません")
     return shards, ple[0]
+
+
+def _assert_layouts(shards: list[Path]) -> None:
+    """旧 shard 列のリーダ規約（既知 dtype・宣言長の一致・隙間なし・整列）を 1 本ずつ通す。
+
+    NOTE: 旧配布形（`karume/4`）を丸ごと検証する門は退役した（容器の門は
+    `karume.verify.verify_container`）。このツールが読むのは旧形のままなので、生き残っている
+    リーダ規約の門だけを掛ける — 容器化は段 3c。
+    """
+    for shard in shards:
+        assert_reader_layout(shard)
 
 
 def save(path: Path, value: object) -> None:

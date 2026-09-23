@@ -10,8 +10,7 @@ import torch
 from accelerate import init_empty_weights
 from karume.emit import unpack_int4
 from karume.quantize import dequantize_int4
-from karume.shards import parse_piece_key
-from karume.verify import _read_header
+from karume.legacy import parse_piece_key, safetensors_header
 from safetensors import safe_open
 from torch import nn
 from transformers import (
@@ -20,6 +19,18 @@ from transformers import (
     Gemma4ForCausalLM,
     Gemma4ForConditionalGeneration,
 )
+
+
+def _read_header(path: Path) -> tuple[dict, int]:
+    """旧 safetensors のヘッダ JSON と**データ節の絶対開始位置**（旧形の読みは karume.legacy）。
+
+    core 側の読み手（`karume.legacy.safetensors_header`）はヘッダしか返さないので、データ節の
+    起点だけここで数える（先頭 8 バイトが u64 LE のヘッダ長 — safetensors の規約）。
+    """
+    header = dict(safetensors_header(path))
+    with path.open("rb") as source:
+        base = 8 + int.from_bytes(source.read(8), "little")
+    return header, base
 
 
 def fingerprint(path: Path) -> dict:
@@ -35,7 +46,7 @@ class StoredWeights:
         self.pieces = {}
         self.graph = None
         for path in shards:
-            header, base, _ = _read_header(path)
+            header, base = _read_header(path)
             if self.graph is None:
                 self.graph = json.loads(header["__metadata__"]["karume_ir"])
             for key, entry in header.items():
@@ -318,7 +329,7 @@ def assert_qat_stored(model: nn.Module, stored: StoredWeights, ple_index: Path) 
         raise ValueError("QAT PLE の宣言が違います")
     for shard in layout["shards"]:
         path = ple_index.parent / shard["file"]
-        header, base, _ = _read_header(path)
+        header, base = _read_header(path)
         for key, expected in [
             ("values", embedding.embedding_quantized[shard["start"] : shard["stop"]]),
             ("scales", embedding.embedding_scale[shard["start"] : shard["stop"]]),

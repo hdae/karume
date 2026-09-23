@@ -1,9 +1,14 @@
 import json
 
 import torch
-from karume.shards import piece_key
 from safetensors.torch import save_file
 from weights import StoredWeights
+
+#: 旧配布形の piece キー（`<名前>#NNNNN-of-NNNNN` — 読み手は karume.legacy.parse_piece_key）。
+#: 旧形を**書く**のはテストだけなので、綴りはここに持つ。
+def piece_key(name: str, index: int, total: int) -> str:
+    return f"{name}#{index:05d}-of-{total:05d}"
+
 
 
 def test_split_int4_restores_signed_values_and_group_scales(tmp_path):
