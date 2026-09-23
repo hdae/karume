@@ -17,7 +17,7 @@
   `.claude/reviews/2026-09-22_codex-format-design/spikes/`（git 追跡外）。
   **段 1 は済（2026-09-22 夜）**: IR v2 仕様 / TS の読み手 / 合流後の語彙で Session を組む経路 / Python の
   writer + reader / 移行 CLI / 合流層の鏡像 `verify_container`（検収の状況は ADR 0108 追記 1 の 15）。
-  **段 2 進行中（2026-09-22 深夜〜）**: 裁定は [ADR 0109](decisions/0109-manifest-v5-container.md)（manifest
+  **段 2 は済（2026-09-22 深夜〜09-23）**: 裁定は [ADR 0109](decisions/0109-manifest-v5-container.md)（manifest
   `karume/5` — 容器は部品 × dtype・2 文書の期待値 + part 0 を含む全 part の FileRef・model 単位の `assets` は
   残す・取得単位は part・block の sha256 は未検証の取得元だけ・Range は段 6 のまま）。済 = 2a 仕様 / 2b hub
   （`resolveSelection` / `openContainerSource`）/ 2c runtime（`BlockSource.verified`・`asset(name)`・
@@ -28,7 +28,9 @@
   ローカルミラーは `models/`（移行済み `karume/5`）と、旧 `karume/4` のミラーはリポ外
   `~/workspace/karume-models-v4/`（git 追跡外）。2f（RAM ピーク harness `tools/ram-peak/matrix.ts`）も済 —
   検収②③は[研究記録](research/2026-09-23-container-ram-peak.md)（warm は payload の digest 0 回・scan 型の
-  ピークは seek 型の約 2 倍）。**残り** = irodori-v4.1-small の再アップロードと pin 更新（検収①の実 pin）。
+  ピークは seek 型の約 2 倍）。irodori-v4.1-small の再アップロードと pin 更新も済（検収①の実 pin — SHA 固定の取得元で
+  `fromPretrained` → `generate` を通し、取得が全て pin の revision・同じ文と seed の WAV がローカルミラー経由と
+  byte 同一）。
   **段 3 へ持ち越す RAM ピークの改善候補**（実測で採否）: hub の scan 型で取得層の `readFile` に器を渡す /
   runtime の `containerBatches` を part 単位の items から block（予算）単位の yield へ / `slice()` を view に。持ち越した宿題のうち 128 鎖の突合・`karume verify` のコンテナ席・`assets` の
   受け口は段 2 で閉じ、1 コンテナ複数グラフは形式の能力のまま `karume/5` では使わない（ADR 0109 決定 2）。

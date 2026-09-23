@@ -33,6 +33,8 @@ measurements in `docs/research/`.
   PLE sidecar becomes container assets (index schema 3 over row-aligned blocks). `karume migrate
   --manifest` converts a whole `karume/4` repository (including PLE and cross-repository references)
   and writes the `karume/5` manifest; `karume verify --container` checks a container from the CLI.
+  `IRODORI_SOURCES["irodori-v4.1-small"]` now pins the `karume/5` re-upload of that repository; the
+  other pins still name `karume/4` revisions, which only the released packages can read until stage 3.
 - Gemma 4 QAT family: `gemma4-qat` pipelines for E2B / E4B with fixed INT2 / INT4 storage, fixed
   static re-quantization (SRQ) whose rounding is preserved on both CPU and GPU, PLE read back
   whole or row by row, and a chat CLI example.

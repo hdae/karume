@@ -678,9 +678,11 @@ manifest の形は ADR [0109](0109-manifest-v5-container.md)、PLE は ADR [0085
    一意な容器 108 本・block 40,939 本・initializer 31,882 本・66.8 GiB の sha256 と合流（不足 / 余剰 0）を
    全件通した（越境 4 容器は karume-anima 側と同一実体）。「128 鎖」はモデルごとに数えた延べ数で、
    共有部品を畳むと 108 本。
-8. **段 2 の間の共存**: hub は `karume/5` だけを読む。ローカルミラーは `models/`（移行済み）と
-   `models-v4/`（旧・git 追跡外）の 2 本を置き、レーンは `models/` で回す。HF の pin は irodori-v4.1-small
-   だけ段 2 で更新し、残りは段 3 まで旧版パッケージからだけ動く。
+8. **段 2 の間の共存**: hub は `karume/5` だけを読む。ローカルミラーは `models/`（移行済み）と、旧
+   `karume/4` のミラーはリポ外 `~/workspace/karume-models-v4/`（git 追跡外）に置き、レーンは `models/` で
+   回す。HF の pin は irodori-v4.1-small だけ段 2 で更新した（検収①の実 pin: SHA 固定の取得元で
+   `fromPretrained` → `generate` を通し、取得 26 本が全て pin の revision・同じ文と seed の WAV が
+   ローカルミラー経由と byte 同一）。残りの pin は段 3 まで旧版パッケージからだけ動く。
 9. **PLE 側で変わった規律**: 既定の常駐上限は「最大 block 2 本ぶん」（約 64 MiB — 旧は最大 shard 2 本 ≈
    506 MiB）。読み口は費用型を持たないので seek / scan の方針表は消え、全量読みへ倒す下限は
    `min(32, block の行数)`。読み 1 本を途中で畳む口は無い（`AssetReader.read` は signal を受けない）ので
