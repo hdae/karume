@@ -75,7 +75,7 @@ export const IRODORI_SOURCES = {
   },
   "irodori-v4.1-small": {
     repo: "hdae/karume-irodori-v4.1-small",
-    revision: "4f237fa35565feac72f102c848ee7f47ddd9cc28",
+    revision: "2856d43dd5688e2c58e6d68d5994f9c2ce115025",
   },
 } as const satisfies Record<string, HubRepoRef>;
 
