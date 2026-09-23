@@ -36,7 +36,7 @@ import type { Gemma4ChatMessage } from "../src/gemma/text/chat.ts";
 import { serveLocalDist } from "../../../examples/shared/local-dist-server.ts";
 import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE } from "./helpers/gpu.ts";
 import { allResidentPleBytesOfMirror } from "./helpers/ple-budget.ts";
-import { mirrorAvailable } from "./helpers/gemma-mirror.ts";
+import { mirrorAvailable, openGemma4Ple } from "./helpers/gemma-mirror.ts";
 
 const MIRROR_DIR = new URL("../../../models/karume-gemma4/", import.meta.url);
 
@@ -101,35 +101,26 @@ if (!AVAILABLE) {
 Deno.test({
   name: "gemma4 配布形: manifest の宣言と PLE 索引の対応（GPU 不要）",
   ignore: !AVAILABLE,
-  fn: () => {
+  fn: async () => {
     const manifest = parseManifest(MANIFEST_TEXT ?? "");
     const entry = manifest.models[manifest.defaultModel];
     assertEquals(entry.pipeline, { name: "gemma4", major: 1 }, "pipeline 契約");
     // weights の役割は製品グラフ + 投機の drafter の 2 本ちょうど（ADR 0096 段 2 で
-    // `drafter` が増えた）。PLE も tokenizer も**依然 assets の席**で、weights には来ない —
-    // ここが増えたら「sidecar を weights へ戻した」退行である。
+    // `drafter` が増えた）。tokenizer は manifest の assets の席、PLE は `model` 容器の資産
+    // （ADR 0109 決定 4）— ここが増えたら「sidecar を weights へ戻した」退行である。
     assertEquals(
       Object.keys(entry.weights),
       ["model", "drafter"],
-      "weights は製品グラフ + drafter の 2 本（PLE も tokenizer も assets の席）",
+      "weights は製品グラフ + drafter の 2 本（PLE は容器の資産・tokenizer は assets の席）",
     );
-    // ④ 索引が名指しする shard ファイル名が、そのまま manifest の asset 名（= 取得キー）。
-    const index = JSON.parse(
-      Deno.readTextFileSync(new URL(entry.assets["ple_index"].path, MIRROR_DIR)),
-    ) as { readonly shards: readonly { readonly file: string }[] };
-    const declared = index.shards.map((shard) => shard.file);
-    assert(declared.length > 0, "PLE 索引が shard を 1 本も持たない");
-    for (const file of declared) {
-      assert(
-        Object.hasOwn(entry.assets, file),
-        `PLE 索引の '${file}' が manifest の assets に無い（取得キーは索引の綴りそのもの）`,
-      );
-    }
-    // 逆向き（assets 側に索引の知らない sidecar が残っていない）。
-    const sidecars = Object.keys(entry.assets).filter(
-      (name) => name !== "tokenizer" && name !== "ple_index",
-    );
-    assertEquals([...sidecars].sort(), [...declared].sort(), "assets の sidecar と索引の対応");
+    assertEquals(Object.keys(entry.assets), ["tokenizer"], "manifest の assets は tokenizer だけ");
+    // ④ 索引（schema 3）が名指しする block が、そのまま `model` 容器の資産として在る — 突合は
+    // helper（`readGemma4PleIndex`）が全件で行い、片方だけ焼き直したミラーはここで落ちる。
+    const { index } = await openGemma4Ple(MIRROR_DIR);
+    assert(index.values.blocks.length > 0, "PLE 索引が values の block を 1 本も持たない");
+    assert(index.scales.blocks.length > 0, "PLE 索引が scales の block を 1 本も持たない");
+    assertEquals(index.values.blocks.at(-1)?.stop, index.tokens, "values の区間が tokens で閉じる");
+    assertEquals(index.scales.blocks.at(-1)?.stop, index.tokens, "scales の区間が tokens で閉じる");
   },
 });
 
