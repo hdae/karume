@@ -10,20 +10,24 @@
 //    `[Cin,Cout,K]` は軸 1 — 軸 0 と読むと golden の実 scale と一致しない）。
 
 import { assert, assertEquals, assertThrows } from "@std/assert";
-import { extractIrGraph, openModel } from "../src/format/container.ts";
+import { mergedGraph } from "../src/format/container/bind.ts";
+import type { InitializerSupply } from "../src/format/container/bind.ts";
+import { openModel } from "../src/format/container.ts";
 import { IrError, type IrGraph, type LegacyKeys, parseIrGraph } from "../src/format/ir.ts";
-import { parseSafetensors, type TensorView } from "../src/format/safetensors.ts";
+import type { TensorView } from "../src/format/safetensors.ts";
 import { planWeightResidency, type WeightResidency } from "../src/runtime/weight-residency.ts";
 import { f32Bytes, type GraphJson, type TensorSpec } from "./helpers/format.ts";
 import { f16BytesFromBits, f32ToF16Bits } from "./helpers/f16.ts";
+import { openSeriesContainer } from "./helpers/container-files.ts";
 import { graphModelBuffer } from "./helpers/graph.ts";
-import { resolveShards } from "./helpers/shard-files.ts";
 
 const GOLDEN_ROOT = new URL("./fixtures/golden/", import.meta.url);
+/** golden 1 件の容器の代表 path（`goldens.py` の `MODEL_FILE`）。 */
+const MODEL_FILE = "model.krm";
 
 /**
- * 席とバイト数の突合に要るぶんだけの面。shard 列（ADR 0081 の配布形）でも単一ファイルでも
- * 同じ形にして、テスト側が「何本のファイルから来たか」を意識しないで済むようにする。
+ * 席とバイト数の突合に要るぶんだけの面（**合成グラフ側**）。実配布の golden は容器から
+ * 開くので {@link openGoldenContainer} と {@link assertDeclaredBytesMatchContainer} を使う。
  */
 type ResidencyTarget = {
   readonly graph: IrGraph;
@@ -34,18 +38,25 @@ type ResidencyTarget = {
 };
 
 /**
- * golden 1 件を shard 列として開く（先頭がグラフ shard・重みは後続 shard に居る）。
- * ここは GPU も Session も通さないので、`prepareModel` ではなく素の container 面で開く。
+ * golden 1 件の**容器**を開き、合流後のグラフと供給計画を返す（グラフ名 = 置き場の
+ * ディレクトリ名 — `goldens.py` の `graph_name=spec.name`）。
+ *
+ * ここは GPU も Session も通さないので、`prepareContainer` ではなく素の合流面で開く。
+ * 読むのはヘッダと 2 文書だけで、block へは 1 バイトも進まない。
  */
-const openGolden = (model: string): ResidencyTarget => {
-  const files = resolveShards(new URL(`${model}/model.safetensors`, GOLDEN_ROOT))
-    .map((file) => parseSafetensors(Deno.readFileSync(file).buffer));
-  const tensors = new Map<string, TensorView>();
-  for (const file of files) {
-    for (const [name, view] of file.tensors) tensors.set(name, view);
-  }
-  const { graph, legacy } = extractIrGraph(files[0]);
-  return { graph, legacy, tensors };
+const openGoldenContainer = async (
+  model: string,
+): Promise<{
+  readonly graph: IrGraph;
+  readonly supplies: ReadonlyMap<string, InitializerSupply>;
+}> => {
+  const opened = await openSeriesContainer(new URL(`${model}/${MODEL_FILE}`, GOLDEN_ROOT));
+  const bound = opened.graphs[model];
+  assert(
+    bound !== undefined,
+    `容器にグラフ '${model}' が無い（在るのは ${Object.keys(opened.graphs).join(" / ")}）`,
+  );
+  return { graph: mergedGraph(bound, model), supplies: bound.supplies };
 };
 
 const openGraph = (graph: GraphJson, tensors: readonly TensorSpec[] = []): ResidencyTarget => {
@@ -58,7 +69,7 @@ const f16Zeros = (count: number): Uint8Array<ArrayBuffer> =>
   f16BytesFromBits(new Array(count).fill(f32ToF16Bits(0)));
 
 /** 名前 → 席（期待値との突合は席だけを見る — バイト数は現物との突合が別に見る）。 */
-const seats = (model: ResidencyTarget): Record<string, WeightResidency["seat"]> =>
+const seats = (model: { readonly graph: IrGraph }): Record<string, WeightResidency["seat"]> =>
   Object.fromEntries(
     [...planWeightResidency(model.graph)].map(([name, plan]) => [name, plan.seat]),
   );
@@ -90,18 +101,50 @@ const assertDeclaredBytesMatchFile = (model: ResidencyTarget): void => {
   }
 };
 
+/**
+ * 宣言由来のバイト数を**容器の供給計画**と突き合わせる（payload と scale の両方）。
+ *
+ * 常駐プランナ（`weight-residency.ts`）と容器の合流層（`format/container/bind.ts`）は同じ量を
+ * **別々に**導く — 前者は IR の宣言 shape と席から、後者は束縛表の encoding と目次から。
+ * したがってここは 2 実装の突合であって恒真ではない。チャネル軸の取り違え
+ * （conv_transpose1d の `[Cin,Cout,K]` は行軸 1）は scale のバイト数の違いとして出る。
+ */
+const assertDeclaredBytesMatchContainer = (golden: {
+  readonly graph: IrGraph;
+  readonly supplies: ReadonlyMap<string, InitializerSupply>;
+}): void => {
+  const { graph, supplies } = golden;
+  const plan = planWeightResidency(graph);
+  for (const [name, initializer] of Object.entries(graph.initializers)) {
+    const seat = plan.get(name);
+    assert(seat !== undefined, `initializer '${name}' の席が無い`);
+    // 共有宣言（借り物 — ADR 0096 段 2 §1.3）は実体を容器に持たないので、この助手の対象外
+    // （対象の資産に 1 本も無いことを門にする）。
+    assert(initializer.shared === undefined, `initializer '${name}' が共有宣言`);
+    assert(seat.seat !== "shared", `initializer '${name}' の席が shared`);
+    const supply = supplies.get(name);
+    assert(supply !== undefined, `initializer '${name}' の供給計画が無い`);
+    // piece 分割された実体は block 列で来る（container-v1 §5）ので payload は足し合わせる。
+    const payloadBytes = supply.blocks.reduce((total, block) => total + block.payloadBytes, 0);
+    assertEquals(seat.payloadBytes, payloadBytes, `${name} の payload バイト数`);
+    if (seat.seat !== "i8" && seat.seat !== "i4") continue;
+    assert(supply.scale !== undefined, `initializer '${name}' に scale の供給が無い`);
+    assertEquals(seat.scaleBytes, supply.scale.payloadBytes, `${name} の scale バイト数`);
+  }
+};
+
 // ---------------------------------------------------------------------------
 // 既存 fixture（実エクスポータが書いた配布形）との突合
 // ---------------------------------------------------------------------------
 
-Deno.test("golden `mlp`: 圧縮しない格納は全て生バイト常駐の席", () => {
-  const model = openGolden("mlp");
+Deno.test("golden `mlp`: 圧縮しない格納は全て生バイト常駐の席", async () => {
+  const model = await openGoldenContainer("mlp");
   assertEquals(seats(model), { w1: "raw", b1: "raw", w2: "raw", b2: "raw" });
-  assertDeclaredBytesMatchFile(model);
+  assertDeclaredBytesMatchContainer(model);
 });
 
-Deno.test("golden `i8_weights`: 重みスロット消費の i8 は全て i8 常駐（bias は f32 のまま）", () => {
-  const model = openGolden("i8_weights");
+Deno.test("golden `i8_weights`: 重みスロット消費の i8 は全て i8 常駐（bias は f32 のまま）", async () => {
+  const model = await openGoldenContainer("i8_weights");
   assertEquals(seats(model), {
     // embedding / linear / conv1d / conv_transpose1d / conv2d の重みスロット
     "table.weight": "i8",
@@ -117,13 +160,13 @@ Deno.test("golden `i8_weights`: 重みスロット消費の i8 は全て i8 常�
     "image.bias": "raw",
   });
   // conv_transpose1d の `up.weight` は `[Cin,Cout,K]` = [5,2,3] でチャネル軸が **1**。
-  // 軸 0 と取り違えると scale が 5 要素（20 バイト）になり、現物の 2 要素（8 バイト）と外れる。
-  assertDeclaredBytesMatchFile(model);
+  // 軸 0 と取り違えると scale が 5 要素（20 バイト）になり、容器側の 2 要素（8 バイト）と外れる。
+  assertDeclaredBytesMatchContainer(model);
 });
 
-Deno.test("golden `conv_transpose` / `embedding_lookup`: 宣言由来バイト数が現物と一致", () => {
-  assertDeclaredBytesMatchFile(openGolden("conv_transpose"));
-  assertDeclaredBytesMatchFile(openGolden("embedding_lookup"));
+Deno.test("golden `conv_transpose` / `embedding_lookup`: 宣言由来バイト数が容器と一致", async () => {
+  assertDeclaredBytesMatchContainer(await openGoldenContainer("conv_transpose"));
+  assertDeclaredBytesMatchContainer(await openGoldenContainer("embedding_lookup"));
 });
 
 // ---------------------------------------------------------------------------

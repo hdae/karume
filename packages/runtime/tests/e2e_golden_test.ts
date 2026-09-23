@@ -9,7 +9,13 @@
 // テスト側のフィクスチャ読みなので src/format/safetensors.ts を直に使う。
 
 import { assert, assertEquals } from "@std/assert";
-import { acquireGpu, capabilities, prepareModel, type Tensor } from "../mod.ts";
+import {
+  acquireGpu,
+  capabilities,
+  type OpenedContainer,
+  prepareContainer,
+  type Tensor,
+} from "../mod.ts";
 import { parseSafetensors } from "../src/format/safetensors.ts";
 import {
   compareTensors,
@@ -21,7 +27,7 @@ import { assertAdapterMatchesEnvironment, ENVIRONMENT } from "./helpers/environm
 import { ioTensor } from "./helpers/golden-io.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { type Measurement, openResults, recordFailure } from "./helpers/results.ts";
-import { readShard, resolveShards, streamShards } from "./helpers/shard-files.ts";
+import { openSeriesContainer } from "./helpers/container-files.ts";
 
 /**
  * torch CPU 期待値との突合に使う許容誤差 = **判定の 1 段目**（Karume 独自基準・全出力共通）。
@@ -126,12 +132,17 @@ const readBuffer = async (model: string, file: string): Promise<ArrayBuffer> => 
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
 };
 
+/** golden 1 件の容器の代表 path（`goldens.py` の `MODEL_FILE`）。 */
+const MODEL_FILE = "model.krm";
+
 /**
- * golden 1 件の配布形 shard 列（先頭がグラフ shard — ADR 0081）。テンソルを 1 本も持たない
- * spec は分割されないので `model.safetensors` 1 本のまま来る（見つけ方はどちらも同じ）。
+ * golden 1 件の容器を開く。テンソルを 1 本も持たない spec は分割されないので単一形のまま
+ * 来る（見つけ方はどちらも同じ — `resolveParts`）。
+ *
+ * **グラフ名は置き場のディレクトリ名**（`goldens.py` の `graph_name=spec.name`）。
  */
-const modelShards = (model: string): readonly URL[] =>
-  resolveShards(new URL(`${model}/model.safetensors`, GOLDEN_ROOT));
+const openGolden = async (model: string): Promise<OpenedContainer> =>
+  await openSeriesContainer(new URL(`${model}/${MODEL_FILE}`, GOLDEN_ROOT));
 
 Deno.test("golden fixtures が 1 件以上あり、全件がテストとして登録される", () => {
   // 列挙が空でも「テストが 0 本で緑」になるだけなので、ここで下限を固定する（ADR 0005）。
@@ -160,7 +171,7 @@ const OPS_WITHOUT_GOLDEN: readonly string[] = ["state_append", "topk"];
 Deno.test("全 golden の requires.ops が実行可能な op 集合を覆う", async () => {
   const covered = new Set<string>();
   for (const model of MODELS) {
-    const graph = prepareModel(await readShard(modelShards(model)[0])).graph;
+    const graph = prepareContainer(await openGolden(model), model).graph;
     for (const op of graph.requires.ops) covered.add(op);
   }
   const uncovered = capabilities().ops.filter((op) => !covered.has(op));
@@ -184,12 +195,11 @@ for (const model of MODELS) {
       /** 仕様帯でも受からなかった出力のメッセージ（1 本目でテストを落とす）。 */
       const failures: string[] = [];
       try {
-        const shards = modelShards(model);
-        const [graphShard, ioBytes] = await Promise.all([
-          readShard(shards[0]),
+        const [opened, ioBytes] = await Promise.all([
+          openGolden(model),
           readBuffer(model, "io.safetensors"),
         ]);
-        const parsed = prepareModel(graphShard);
+        const parsed = prepareContainer(opened, model);
         const io = parseSafetensors(ioBytes);
 
         // io の全テンソルがグラフの入出力とちょうど対応する（余りも欠けも無い）。
@@ -215,7 +225,7 @@ for (const model of MODELS) {
         // MUST: device の破棄は `createSession` の失敗も通す。取り逃がすと、その走行の残りが
         // 破棄されない device を抱えたまま進み、後続が OOM で赤くなる（known-issues の遅延解放）。
         try {
-          const session = await parsed.createSession(gpu, streamShards(shards.slice(1)));
+          const session = await parsed.createContainerSession(gpu);
           try {
             const outputs = await session.run(inputs);
             assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());
