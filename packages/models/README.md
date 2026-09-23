@@ -31,7 +31,7 @@ pinned to a commit SHA.
 ```ts
 import { BIREFNET_SOURCES, BirefnetPipeline } from "@karume/models/birefnet";
 
-// Fetches the manifest, admits the model, streams the weight shards, opens a GPU session.
+// Fetches the manifest, admits the model from the container descriptors, fetches the parts, opens a GPU session.
 const pipeline = await BirefnetPipeline.fromPretrained(BIREFNET_SOURCES["birefnet-hr"]);
 
 // `rgb` is a tight RGB8 pixel buffer (width * height * 3), decoded by the caller.

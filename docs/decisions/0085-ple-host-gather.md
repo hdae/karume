@@ -272,3 +272,30 @@ perf-ledger H-28。決定 3（遅延ロード + LRU）と決定 6（PLE は通�
   一致、を見る。CPU 側は `gemma_ple_gpu_test.ts`（席の受理・gather IR の形・合成コンテナの突合）。
   **速度の採否はまだ付いていない** — Deno CLI の decode は deno_webgpu の 10 ms/token 床を含むので
   判定に使えず、M2 / Chrome の計測は未検収である。
+
+## 追記（2026-09-22 — sidecar はコンテナの資産へ: 索引 schema 3 と block 列）
+
+配布形がコンテナ（`krm` — ADR [0108](0108-container-format.md) / [0109](0109-manifest-v5-container.md)
+決定 4）へ移り、PLE sidecar は manifest の `assets` から消えて**モデル容器の資産**になった。
+
+- **索引 schema 3**（資産 `ple_index`・役割 `ple-index`・正準 JSON）:
+  `{ schema: 3, storage: "i8" | "i4" | "i2", tokens, layers, dim, embedScale,
+  values: { rowBytes, blocks: [{ asset, start, stop }, …] }, scales: { rowBytes, blocks: […] } }`。
+  `values` と `scales` は**別々の行列**で、token の半開区間（昇順・隙間なし・先頭 0・末尾 `tokens`）が
+  block（資産 `ple.values.<k>` / `ple.scales.<k>`・役割 `ple-values` / `ple-scales`）を指す。旧 shard の
+  境界は消え、書き手が block 上限（32 MiB）以下・**行の倍数**で切り直す。`rowBytes` は
+  `layers × dim / packFactor`（i8 = 1・i4 = 2・i2 = 4）と `layers × 4`。
+- **読み口は block 単位**（`openBlock(asset) → AssetReader` = 容器の `asset(name)`）。token → (block, 行 offset)
+  は索引の二分探索 + `(token − start) × rowBytes`。区間読みの費用型（seek / scan）の方針表は消えた —
+  読み口は費用型を持たず、検証済みの取得元では区間だけを取り、未検証の取得元では block を 1 度検証して
+  読み口の寿命だけ保持する（runtime の `AssetReader`）。残るのは決定 3 の LRU（**block 単位**で数える —
+  既定の常駐上限は「最大 block 2 本ぶん」= 約 64 MiB）と行 LRU、`Gemma4PleStats`、GPU 常駐席
+  （block ごとに全量を上げる）。
+- **admission で索引 × 資産を全件突合**する（`values.blocks` / `scales.blocks` の asset が容器の資産に
+  役割つきで在り、論理長が `(stop − start) × rowBytes` と一致）。索引は重み block と part を共有しない
+  資産なので、重みを 1 バイトも取る前に読める（container-v1 §4.2）。
+- 区間読みを要する block は **1 block = 1 part**（container-v1 §4.2 の「専用 part に単独」）。gemma4 E2B
+  では `values` 約 72 block + `scales` 数 block が part になる（part 件数の上限 1024 の内側）。
+- 旧 sidecar（schema 1 / 2 の safetensors）を読む処理は移行 CLI（`karume migrate --manifest`）だけが持つ。
+  系列出力（`outputs/series/`）が旧形で残る段 3 までは、テスト helper `ple-series.ts` が旧 shard の
+  テンソル領域をそのまま block 1 本の資産として畳む（値はビット同一・段 3 で退役）。

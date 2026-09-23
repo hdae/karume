@@ -15,13 +15,20 @@
   （container の読み書き 18 テスト緑・anima transformer の上流重みが 567/567 バイト一致・
   LoRA のグラフ書き換え 454 本が `parseIrGraph` 通過）。試作の置き場は
   `.claude/reviews/2026-09-22_codex-format-design/spikes/`（git 追跡外）。
-  **段 1 進行中（2026-09-22 夜）**: IR v2 仕様（`ir-v2.md`・正準直列化）/ TS の読み手（`format/container/`）/
-  合流後の語彙で Session を組む経路（`createSessionFromContainer`・検収③の縮図 `gpu_container_session_test.ts` 緑）/
-  Python の writer + reader（`karume.container`・言語横断 fixture）/ 移行 CLI（`karume migrate`・実ミラー 3 コンポーネントで
-  initializer 1,281 本の sha256 一致）/ 合流層の鏡像 `verify_container` まで済 = **段 1 の納品物は揃った**
-  （検収の状況は ADR 0108 追記 1 の 15）。**段 2 へ持ち越す宿題**: ①128 鎖全本の逐語突合（ディレクトリを跨ぐ
-  shard 列を旧 manifest から引く経路が要る）②`karume verify` のコンテナ席 ③1 コンテナ複数グラフと `assets` の
-  受け口（manifest `karume/5` の裁定と同時）④`provenance.writer` の既定（生成器タグ）の是非。
+  **段 1 は済（2026-09-22 夜）**: IR v2 仕様 / TS の読み手 / 合流後の語彙で Session を組む経路 / Python の
+  writer + reader / 移行 CLI / 合流層の鏡像 `verify_container`（検収の状況は ADR 0108 追記 1 の 15）。
+  **段 2 進行中（2026-09-22 深夜〜）**: 裁定は [ADR 0109](decisions/0109-manifest-v5-container.md)（manifest
+  `karume/5` — 容器は部品 × dtype・2 文書の期待値 + part 0 を含む全 part の FileRef・model 単位の `assets` は
+  残す・取得単位は part・block の sha256 は未検証の取得元だけ・Range は段 6 のまま）。済 = 2a 仕様 / 2b hub
+  （`resolveSelection` / `openContainerSource`）/ 2c runtime（`BlockSource.verified`・`asset(name)`・
+  `assets[].length`）/ 2d exporter（`karume migrate --manifest` のリポ丸ごとモード・資産の受け口・PLE の
+  block 化 schema 3・`karume verify --container`）/ 2e models（8 系列の container 経路・部品差し替え席
+  `components`・PLE を容器の資産から）。**検収①は閉じた**（ミラー 11 本を移行 → TS の読み手で一意 108 容器・
+  block 40,939 本・initializer 31,882 本・66.8 GiB の sha256 と合流を全件確認 — ADR 0108 追記 3 の 7）。
+  ローカルミラーは `models/`（移行済み `karume/5`）と `models-v4/`（旧・git 追跡外）の 2 本。**残り** =
+  2f（RAM ピーク harness の cold / warm / local と digest 計数 = 検収②③・irodori-v4.1-small の再アップロード
+  と pin 更新 = 検収①の実 pin）。持ち越した宿題のうち 128 鎖の突合・`karume verify` のコンテナ席・`assets` の
+  受け口は段 2 で閉じ、1 コンテナ複数グラフは形式の能力のまま `karume/5` では使わない（ADR 0109 決定 2）。
   段 0 の宿題だった `pushErrorScope('validation')` の同期区間を block 単位に割る費用は実測で閉じた
   （push/pop 1.81 µs / 回・フェンス 13.0 ms / 回 — ADR 0108 決定 9 に追記済み）。段 1〜6 の作るものと検収は
   ADR 0108 の段階分解の表が正本（ここには複写しない）。段 1 の前提だった `outputs/series/` の大掃除は

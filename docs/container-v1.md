@@ -634,7 +634,10 @@ rowLength  = numel / shape[rowAxis]
 
 `BlockSource` が「検証済み」を名乗り、`readBlock` は名乗らない取得元にだけ digest を掛ける。
 warm で digest を走らせないのは現行の規律の継承である（`packages/hub/src/fetch.ts:66-73` —
-キャッシュヒットで GB 級の digest を起こさない）。block の sha256 は段 6 の Range 取得で「届いた分だけ
+キャッシュヒットで GB 級の digest を起こさない）。**「0 回」は重みの block と資産の payload について**
+であり、上の手順 3（2 文書を期待値と突合してから parse する）は cold でも warm でも開くたびに掛かる
+（descriptor は 32 MiB 以下・実資産では数百 KB）。取得層の cold の part 全量の逐次 sha256 は純 TS 実装
+なので、`crypto.subtle.digest` の計数（`tools/ram-peak`）には現れない。block の sha256 は段 6 の Range 取得で「届いた分だけ
 検証する」ための契約として残る。
 
 **ファイル全体の sha256**（`parts[].sha256`）は**公開・再梱包の突合用**として分離する。

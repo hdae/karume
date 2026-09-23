@@ -645,3 +645,43 @@ descriptor を取るのが 2 周目になる）。
 9. **小段の順**: 2a 仕様 → 2b hub → 2c runtime → 2d exporter（リポ丸ごとモード + 全ミラー移行 +
    128 鎖突合）→ 2e models（8 系列の container 経路・部品差し替え席・PLE / extras の asset 化）→
    2f 検収（harness・再アップロード・docs 同期）。
+
+## 追記 3 — 段 2 の実装で確定した点（2026-09-22〜23）
+
+manifest の形は ADR [0109](0109-manifest-v5-container.md)、PLE は ADR [0085](0085-ple-host-gather.md)
+追記 2026-09-22 が正本。ここは段 2 の実装で決めた / 訂正した点と検収の状況だけ。
+
+1. **資産は論理長を宣言する**（`assets[].length` — container-v1 §2.2 訂正 2 ⑤）。資産は shape を持たず
+   descriptor から payload 長を復元できないので、消費側が末尾の 0x00 詰めを推測で剥ぐ形になっていた
+   （PLE 索引の JSON がその実例）。block 長 = 論理長の 4 の倍数への切り上げ MUST を parse で突き合わせる。
+2. **区間読みの資産は 1 block = 1 part、全量読みの資産は資産どうしで part を共有してよい**（重み block とは
+   同居しない）。書き手の `AssetInput.dedicated_part` が区別する。gemma4 E2B の `model` 容器は 83 part
+   （重み 8 + 資産 74 + descriptor + const）になる。
+3. **hub の取得面は温めを持たない**（`openContainerSource` は同期・区間読みだけ）。温めは呼び手が
+   `prefetchAssets` で行い、順序は descriptor（part 0）→ admission → 重みの part → 資産。取得面の中で全 part を
+   温めると「実行できないモデルの重みは 1 バイトも落とさない」が面の内側から壊れる。併せて `runPrefetchPhase`
+   の相 1 の能力判定を ref ごとにし、ローカルセッション + HF 越境の温めが飛ぶ既存不具合を直した。
+4. **models の継ぎ目**（`hub/components.ts`）: `ModelComponent` は `graph` / `createSession` に加えて容器の
+   資産の宣言（`assets: 名前 → 役割`）と読み口（`asset(name)`）を持つ。admission は各部品のグラフ宣言と
+   資産の宣言で判定し、重み block と part を共有しない資産（索引・`rope_base`）はそこで読んでよい。
+   全量面 `assetComponentOpener` は同期の供給口を返すために全部品を先に開く（admission より先）。
+5. **部品差し替え席**は `ComponentSource = { source, model?, quant? }`（別の `karume/5` リポの同じ役割）。
+   admission = ①グラフ記述の sha256 が manifest の宣言と一致 ②束縛の不足 / 余剰 0（`openContainer`）
+   ③家族の門。①は 2 つの manifest だけで判定するので descriptor すら取らずに落ちる。QAT のように活性
+   scale をグラフへ焼く系列では checkpoint ごとにグラフ記述が変わり、差し替えは拒否される（段 5 で
+   「グラフ同一性の方針」を宣言するまでの規律）。
+6. **移行 CLI のリポ丸ごとモードで実ミラーから拾った 3 点**（合成 manifest だけのテストでは見えなかった）:
+   `pipeline` は `"<name>/<major>"` の文字列・`gemma4-qat` も PLE の持ち主・karume-gemma4（非 QAT）の PLE
+   索引は schema 1（I8・`storage` 欄なし）。schema 3 では `storage` を必ず綴る（`i8` へ正規化）。
+7. **検収①（CPU の逐語突合）は閉じた**: ミラー 11 本を `karume migrate --manifest` で移行（69 GiB・自己検査 =
+   旧 shard の payload と initializer ごとに一致）し、TS の読み手（`openContainer` + `readBlock`）で
+   一意な容器 108 本・block 40,939 本・initializer 31,882 本・66.8 GiB の sha256 と合流（不足 / 余剰 0）を
+   全件通した（越境 4 容器は karume-anima 側と同一実体）。「128 鎖」はモデルごとに数えた延べ数で、
+   共有部品を畳むと 108 本。
+8. **段 2 の間の共存**: hub は `karume/5` だけを読む。ローカルミラーは `models/`（移行済み）と
+   `models-v4/`（旧・git 追跡外）の 2 本を置き、レーンは `models/` で回す。HF の pin は irodori-v4.1-small
+   だけ段 2 で更新し、残りは段 3 まで旧版パッケージからだけ動く。
+9. **PLE 側で変わった規律**: 既定の常駐上限は「最大 block 2 本ぶん」（約 64 MiB — 旧は最大 shard 2 本 ≈
+   506 MiB）。読み口は費用型を持たないので seek / scan の方針表は消え、全量読みへ倒す下限は
+   `min(32, block の行数)`。読み 1 本を途中で畳む口は無い（`AssetReader.read` は signal を受けない）ので
+   中断は gather の段の境目だけ。

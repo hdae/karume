@@ -23,6 +23,16 @@ measurements in `docs/research/`.
   codec name to its decode path. The exporter gains `karume.container` (writer / reader, canonical
   JSON with ECMAScript number spelling) and `karume migrate` (old shards → `krm`). IR v2 replaces
   IR v1 (`docs/ir-v2.md`).
+- Karume container format, stage 2 (ADR 0109): manifest `karume/5` puts a container behind every
+  `weights.<component>.<dtype>` (`descriptor` expectations plus the part `FileRef`s); hub resolves a
+  selection to containers and assets (`resolveSelection` / `selectionRefs`) and opens a container as a
+  `BlockSource` for the runtime (`openContainerSource`, range reads over the warmed cache, no digest on
+  a warm hit). Every pipeline's `fromPretrained` accepts `components` to swap one component for the
+  same role in another `karume/5` repository (admitted before any weight bytes are fetched). Container
+  assets carry a declared logical length and are read through `OpenedContainer.asset(name)`; Gemma's
+  PLE sidecar becomes container assets (index schema 3 over row-aligned blocks). `karume migrate
+  --manifest` converts a whole `karume/4` repository (including PLE and cross-repository references)
+  and writes the `karume/5` manifest; `karume verify --container` checks a container from the CLI.
 - Gemma 4 QAT family: `gemma4-qat` pipelines for E2B / E4B with fixed INT2 / INT4 storage, fixed
   static re-quantization (SRQ) whose rounding is preserved on both CPU and GPU, PLE read back
   whole or row by row, and a chat CLI example.
@@ -110,6 +120,19 @@ measurements in `docs/research/`.
   `非対応 格納 '<layout>'`. Shared initializers are named after the lender's initializer.
 - **Breaking:** the PLE read surface is a handle (`openPleShard`); decode reads the rows it needs
   instead of the whole shard.
+- **Breaking:** hub reads manifest `karume/5` only (no `karume/4`); `resolveFiles` / `ResolvedFiles` /
+  `WeightFiles` are replaced by `resolveSelection` / `ResolvedSelection` / `WeightContainer`, the
+  `<weights>[i]` fetch-key convention and the 256 MiB shard limit are gone, and `fetchAssets` takes a
+  plain `Record<string, FileRef>`. Published repositories keep working from the previously released
+  packages; this main reads only repositories re-uploaded in the container format.
+- **Breaking:** `from*Assets` take containers instead of safetensors — a component key maps to a
+  single-form `krm` (`transformer`) or to its parts (`transformer[0]`, `transformer[1]`, …).
+  `Gemma4Assets` loses `pleIndex` / `openPleShard` (the PLE lives in the `model` container) and the
+  `Gemma4PleShardSource` / `Gemma4PleReadOptions` types are gone; the default PLE resident budget is
+  now two blocks (about 64 MiB) instead of two shards.
+- **Breaking:** container descriptors declare `assets[].length` (payload bytes; the block length is
+  that rounded up to 4) — containers written by the stage-1 writer must be rewritten; `BlockSource`
+  gains a required `verified` flag and `DescriptorExpectation.sha256` is a plain string.
 - **Breaking:** the Gemma 4 product graph exits on the selected R rows as logits plus hidden
   state, and the default bucket set gains 4 and 8 — distributions must be re-exported.
 - **Breaking:** the Gemma 4 drafter's calling convention was aligned with the upstream layout and
