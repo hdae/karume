@@ -36,9 +36,10 @@
  * `Deno.readFile` で読むのはテスト側だけで、パッケージ本体は Web 標準 API のみ
  * （fs を持ち込まない — 横断不変条件）。
  *
- * NOTE: 越境参照（別リポの (repo, commit SHA)）の実資産門は、公式リポが自己完結になったため
- * ここからは一旦消えた — 復活先は `karume-anima-extra` のローカルミラー（リリース時に越境で
- * 焼く — release-runbook）。それまで越境の検査は hub 側の単体テストが持つ。
+ * NOTE: 越境参照（別リポの (repo, commit SHA)）の実資産門は、公式リポが自己完結（ADR 0087）
+ * なので**追加変種の配布形** `models/karume-anima-extra/`（リリース時に公式リポの commit SHA へ
+ * 越境で焼く — release-runbook）が持つ（下の「越境参照」節）。extra のミラーが無い環境では
+ * その節だけを明示 SKIP する。
  */
 
 import { assertEquals, assertFalse, assertRejects, assertStrictEquals } from "@std/assert";
@@ -116,6 +117,23 @@ if (!ASSETS_AVAILABLE) {
 
 const RUNNABLE = GPU_AVAILABLE && ASSETS_AVAILABLE;
 
+/**
+ * 追加変種の配布形（リポ直下 `models/karume-anima-extra/` — anima-wai-v1.0 /
+ * anima-copycat-20260610）。共有部品は公式リポへの越境参照なので、公式のミラー
+ * （{@link ASSETS_DIR}）と揃って初めて走る。
+ */
+const EXTRA_ASSETS_DIR = new URL("../../../models/karume-anima-extra/", import.meta.url);
+const extraManifestText = await Deno.readTextFile(new URL("karume.json", EXTRA_ASSETS_DIR)).catch(
+  () => undefined,
+);
+if (extraManifestText === undefined) {
+  console.warn(
+    `[karume] ${EXTRA_ASSETS_DIR.pathname} に karume.json が無いため越境参照の e2e を SKIP する` +
+      "（release-runbook の越境参照の手順で公式リポの commit SHA へ焼く）",
+  );
+}
+const EXTRA_RUNNABLE = RUNNABLE && extraManifestText !== undefined;
+
 const sha256Hex = async (bytes: Uint8Array<ArrayBuffer>): Promise<string> =>
   Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)))
     .map((byte) => byte.toString(16).padStart(2, "0"))
@@ -136,11 +154,12 @@ const REVISION_RE = /^\/api\/models\/(.+)\/revision\/(.+)$/;
 const RESOLVE_RE = /^\/(.+?)\/resolve\/([^/]+)\/(.+)$/;
 
 /**
- * 越境参照の repo → ローカルミラー。公式リポは自己完結（ADR 0087）なので現在は空 —
- * `karume-anima-extra` のミラー（リリース時に越境で焼く）が生えたら、その門と一緒に
- * エントリを戻す。表と配り分けの機構は残す（消すと復活時に配線から書き直しになる）。
+ * 越境参照の repo → ローカルミラー。公式リポは自己完結（ADR 0087）で、越境で取るのは
+ * extra（{@link EXTRA_ASSETS_DIR}）の共有部品（text_encoder / vae_decoder / tokenizer 2 本）
+ * だけ。ミラーは repo 単位で、revision は取得元のキー（{@link originKey}）が manifest の宣言の
+ * まま持つ — ミラーの中身がその commit と食い違えば取得層の integrity 検証が落とす。
  */
-const CROSS_REPO_MIRRORS: ReadonlyMap<string, URL> = new Map();
+const CROSS_REPO_MIRRORS: ReadonlyMap<string, URL> = new Map([["hdae/karume-anima", ASSETS_DIR]]);
 
 /** 取得元 1 つ（repo + revision）が配る内容。 */
 type ServedOrigin = { readonly dir: URL; readonly paths: Set<string> };
@@ -448,6 +467,13 @@ const BASE_REFERENCE = {
   negativePrompt: "low quality, worst quality, blurry, bad anatomy, jpeg artifacts",
 } as const;
 
+/** セッション repo として配る配布形 1 つ（置き場・manifest・選ぶモデル）。 */
+type DistributionSource = {
+  readonly dir: URL;
+  readonly manifest: Manifest;
+  readonly model: string;
+};
+
 /** 組み上がった base の pipeline を {@link BASE_REFERENCE} のノブで 1 枚焼き、sha を突き合わせる。 */
 const assertBasePng = async (
   label: string,
@@ -482,19 +508,23 @@ const assertBasePng = async (
  * （デモの `--source` と同型 — `examples/shared/local-dist-server.ts`）。分割形は全量面
  * （`fromAssets`）でも読めるが、そちらは全 part がホスト RAM に同時に載る面で、門としては
  * 下の 1 本（同じ参照 sha を要求する）で別に閉じる。
+ *
+ * `source` はセッション repo として配る配布形（省略時は公式リポの素の base）。越境参照の門
+ * （下の「越境参照」節）が extra の変種を同じノブで通すのに使う。
  */
 const assertBaseReferencePng = async (
   label: string,
-  options: { readonly sampler?: AnimaSamplerType } = {},
+  options: { readonly sampler?: AnimaSamplerType; readonly source?: DistributionSource } = {},
 ): Promise<void> => {
-  const manifest = readManifest();
+  const { dir, manifest, model } = options.source ??
+    { dir: ASSETS_DIR, manifest: readManifest(), model: BASE_MODEL };
   const { quant } = BASE_REFERENCE;
-  const server = serveAssets(servedOrigins(manifest, quant, ASSETS_DIR, BASE_MODEL));
+  const server = serveAssets(servedOrigins(manifest, quant, dir, model));
   try {
     // MUST: `caches` は公開面の注入席から渡す（実 Cache Storage に数 GB を書かない）。
     await using pipeline = await AnimaPipeline.fromPretrained(
       { repo: REPO, hubUrl: `http://127.0.0.1:${server.addr.port}` },
-      { model: BASE_MODEL, quant, caches: new MemoryCacheStorage() },
+      { model, quant, caches: new MemoryCacheStorage() },
     );
     await assertBasePng(label, pipeline, options);
   } finally {
@@ -577,6 +607,44 @@ Deno.test({
   ignore: !RUNNABLE || references.lacksReference("base-cfg-dpmpp"),
   fn: () => assertBaseReferencePng("base-cfg-dpmpp", { sampler: "dpmpp-2m" }),
 });
+
+// --- 越境参照（extra の変種）--------------------------------------------------
+//
+// extra の変種は transformer / text_conditioner だけを自前で持ち、text_encoder /
+// vae_decoder / tokenizer 2 本を公式リポの (repo, commit SHA) への越境参照で焼く
+// （ADR 0038 §7）。取得層がそれを**宣言された (repo, revision) のまま**取りに行くことを、
+// ローカル HTTP が取得元ごとに配り分ける形で実資産に通す — 越境の path はセッション repo
+// 側には 1 本も載せないので、取得層がセッション repo へ取り違えれば 404 で落ちる。
+//
+// ノブは素の base の CFG の門と同じ（extra の変種はどれも CFG 既定の fine-tune）。
+
+/** extra の変種（ケース ID = `extra-<モデル>-cfg`）。 */
+const EXTRA_MODELS = ["anima-wai-v1.0", "anima-copycat-20260610"] as const;
+const extraCaseIdOf = (model: string): string => `extra-${model}-cfg`;
+
+for (const model of EXTRA_MODELS) {
+  const label = extraCaseIdOf(model);
+  Deno.test({
+    name:
+      `e2e(実GPU): extra ${model} を越境参照込みで組み、CFG ${BASE_REFERENCE.guidanceScale} / ` +
+      `${BASE_REFERENCE.steps}step の PNG が参照 sha256 と一致する`,
+    ignore: !EXTRA_RUNNABLE || references.lacksReference(label),
+    fn: async () => {
+      const manifest = parseManifest(extraManifestText as string);
+      const sessionOrigin = originKey(REPO, REVISION_SHA);
+      const crossOrigins = [
+        ...servedOrigins(manifest, BASE_REFERENCE.quant, EXTRA_ASSETS_DIR, model).keys(),
+      ].filter((key) => key !== sessionOrigin);
+      // 越境を 1 本も含まない配布形へ戻った日に、黙って「越境の門」に化けないように落とす。
+      if (crossOrigins.length === 0) {
+        throw new Error(`${model} の選択が越境参照を 1 本も含まない（門の意味が消える）`);
+      }
+      await assertBaseReferencePng(label, {
+        source: { dir: EXTRA_ASSETS_DIR, manifest, model },
+      });
+    },
+  });
+}
 
 // --- fromPretrained（取得層込み）--------------------------------------------
 //
@@ -874,6 +942,8 @@ const CASE_IDS: readonly string[] = [
   "base-cfg-dpmpp",
   "fromPretrained-512",
   "onEvent-1024",
+  // extra のミラーが無い機では節ごと SKIP する — 参照値の欠けとして数えない。
+  ...(EXTRA_RUNNABLE ? EXTRA_MODELS.map(extraCaseIdOf) : []),
 ];
 if (RUNNABLE) references.warnMissing(CASE_IDS);
 
