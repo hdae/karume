@@ -311,3 +311,16 @@ Gemmaの温度0decodeは補助selectorと常駐入出力をこの欄へ載せ、
 投機対応pipelineも非投機の会話を開けるので、この補助勘定を合成後まで保持する。
 [ADR 0083](0083-generation-api-surface.md#gemmaの温度0生成の小出力2026-09-12)と
 [検証記録](../research/2026-09-10-codex-mtp-optimization.md#gemmaの温度0decodeの小出力化2026-09-12)を参照。
+
+## 追記（2026-09-24）— 器の使い回しは退役し、RAM ピークの数え方は container-v1 §11 へ
+
+- **2026-09-02 追記の器の使い回し（係数 1 化）は退役した**。器の貸し出し（`FileReadOptions.into`・
+  `DirectoryAdapter.readFileInto`・HF 取得元の `into` 配線）、それを渡していた逐次面 `streamAssets`、器の
+  prefix view を受ける `ModelShard` は、ADR [0108](0108-container-format.md) 段 3d（`9e905d9f`）で逐次面ごと
+  削除した。取得層に器を渡して使い回す形は 0108 追記 5 の 4 で採らなかった（hub の scan 型の view 化と
+  衝突し、PLE の並行行読みを直列にするため）。したがって「係数 1」は現行の経路の性質ではない。
+- **決定 1〜3 と 2026-08-31 追記の RAM ピーク目標「O(最大 shard)」は、現行では取得元の型（seek / scan）で
+  分かれる数え方に置き換わった**。正本は [container-v1](../container-v1.md) §11 で、式はここに複製しない。
+  決定 3 のフェンスが律するのは staging だけである（決定 3 内の同日の追記）。
+- **決定 1 の co-shard MUST（weight と companion scale は同一 shard）は、container-v1 §5 の規則③
+  （companion scale の block は実体と同一 part・piece 列なら piece 1 と同一 part）へ移った**。

@@ -138,3 +138,18 @@ shard 1GiB 上限（ADR 0081）の門は書き手側にしか無かった。
   呼び手が生成形状を決めた後に使う面（limitations「未実装」節はそのまま）。
 - 残る裁定 = 書き手の shard 目標値（512 or 256MiB — ADR 0081 側の 2 値化）。C-2 候補 = テンソル単位
   ストリーミング（ピーク → 定数 + 最大テンソル）。
+
+## 追記（2026-09-24 — 「manifest の最大 shard」の読み替え）
+
+2026-09-02 追記の「判断に効く数字はホスト側（manifest の最大 shard から導ける）」は、ADR
+[0108](0108-container-format.md) の容器では取得元の型で分かれる。seek 型（ローカルの位置読み・ブラウザの
+Blob）は宣言の最大 block から閉じる。scan 型（Deno の HF 経由）は最大 part に GC を待つ前の器が加わり、
+その本数は宣言からは閉じない（0108 追記 5 の 5）。数え方の正本は [container-v1](../container-v1.md) §11。
+同じ追記の Phase C-1（器の使い回し）は 0108 段 3d で退役し（ADR [0070](0070-shard-loading-admission.md) の
+2026-09-24 追記）、C-2 候補（テンソル単位ストリーミング）は段 3e で block 粒度として全経路に
+入った（0108 追記 5 の 3）。ホスト RAM を減らす効果があるのは seek 型だけで、scan 型では block が保持枠の
+view なので減らない（container-v1 §11）。決定 1 の「shard ループ前」は、現行では part ごとの batch ループの前
+（`assertWeightsWithinLimits` の呼び出し位置）で、検査の意味は変わらない。決定 4 の「`shards` の各 `size` の
+検査（Python 正本 `shards.py`）」は、`shards` 欄と `shards.py` が退役したので、現行では
+`packages/hub/src/manifest.ts` が `container.parts` だけに掛ける part 長の天井（1024 MiB・閉区間）と読む
+（Python 正本は `tools/exporter/src/karume/container.py` の `PART_MAX_BYTES`）。

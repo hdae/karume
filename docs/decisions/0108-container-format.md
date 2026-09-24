@@ -269,7 +269,9 @@ NOTE: 設計案 v2 はこの流儀の先例として `distribution.py:570` の�
   staging だけで、CPU 側のバイト列は `writeBuffer` が戻った時点で手放してよい（WebGPU 仕様: content
   timeline で呼び出しの時点に `dataContents` を写す）。Session 構築は part の block を 1 本ずつ読んでは
   上げて手放す（`WeightBatch.items` の lazy 化）ので、JS 側で参照が生きる重みのバイト列は part 1 本
-  ぶんから item 1 本ぶん（block 1 本 + 同乗 scale + 展開席の f32 展開結果）になる。ただし scan 型の
+  ぶんから item 1 本ぶん（block 1 本 + 同乗 scale + 展開席の f32 展開結果。展開席の piece 列の間は
+  持ち越し scale の写し〈その initializer の scale 全量〉がもう 1 本生きる — 数え方の正本は container-v1
+  §11）になる。ただし scan 型の
   取得元では block が hub の保持枠の view なので、上限は保持枠 1 本 + GC を待つ前の器のまま（container-v1
   §11）。段 3e の実測では scan 型の external 最大が最大 part の約 1.5〜4.4 本だった（追記 5 の 5）。フェンスは part ごと
   1 回のまま。実機での成立は `packages/runtime/tests/gpu_write_buffer_copy_test.ts`（戻った直後に
@@ -707,6 +709,135 @@ manifest の形は ADR [0109](0109-manifest-v5-container.md)、PLE は ADR [0085
     「cold のピークが part 長 + 重ね合わせを超える」には、seek 型では当たらず scan 型で当たる — ただし
     scan 型の超過は取得ではなく保持の重複が原因なので、Range ではなく上の候補で閉じる。
 
+## 追記 4 — 段 3a〜3d の実装で確定した点（2026-09-23〜24）
+
+書き手を `krm` の 1 本にし（3a）、系列出力を移し（3b）、テストと道具を追随させ（3c）、旧配布形の
+読み手を削除した（3d）回で決めた / 訂正した点と、段 3 の検収①②の状況。part 長の既定と RAM ピーク
+（検収③）は追記 5 が持つ。形式は [container-v1](../container-v1.md)、manifest は ADR
+[0109](0109-manifest-v5-container.md) が正本。
+
+1. **書き手は 1 本**（3a・`8086ed37`）。recipe の `publish_model` / `export_to_file` と `karume migrate` は、
+   同じ公開の 3 段（書く → 読み直して検証 → 据え替え — `karume.publish.publish_container`）を通る。
+   書き手が 2 本あると「移行済みミラー」と「再 export した系列」が別物になるため。`provenance` と
+   `graph_name` は必須にした（既定値で出所を偽らない・作業席名 `<部品>.staging` をグラフ名に拾わない）。
+   同一性は「旧 shard → `karume migrate`」と「直接書き」が part 列ごとバイト同一であることで固定した
+   （f32 / f16 / i8 / i4・`rope_base`・PLE の専用 part）。`karume repack` と旧 shard の書き手は退役し、
+   旧形式を読むのは移行専用の `karume.legacy` だけになった。追記 2 の 5 の「dist.py / recipe が `krm` を
+   直接書くのは段 3」はここ（recipe 側は `d2630521`）で済んだ。
+2. **`karume dist` は `karume/5` を組み、現物を宣言と突き合わせる**（3a・3b）。`weights.<部品>.<dtype>.container`
+   （2 文書の期待値 + part の FileRef 列）を書き、容器のグラフ名の集合が weights のキーと違えば組み立ての
+   前に落とす（`DistError`）。IR の受理規則（ランタイム支援 + op 契約 — `assert_runtime_support` /
+   `assert_op_contracts`）は export / `karume dist` / `karume verify` の 3 経路で同じ関数を掛ける。据えた容器の
+   2 文書から IR を起こし直して掛ける（`verify.ir_graph_from_container`）のは dist と verify の 2 経路で、export は
+   書く前のグラフ（`stored.graph`）に直接掛ける。
+3. **追記 1 の 14 の訂正 — 容器のグラフ名 = 部品名 = `karume.json` の weights のキー** MUST（3b・`2bbd013b` /
+   `0b86439e`）。規則の本文は container-v1 §2.1、なぜ規則にしたかは ADR 0109 追記 1 が持つ。ディレクトリ名は
+   規則にしない — 系列直下に容器を置く family ではディレクトリ名が系列名になり、irodori の `caption-proj`
+   （キーは `caption_proj`）や deberta の `full-24layer`（キーは `text_encoder`）のように綴りも違う。recipe は
+   グラフ名を定数で名乗り、AST の門 `tools/export-recipes/tests/test_graph_names.py` が「定数であること」と
+   「名乗るグラフ名が配布計画の weights のキーと対応すること」を見る（配布形に載らないグラフを名乗る
+   family・他 family の計画と突き合わせる family といった例外の扱いもこの門が持つ）。現物の側は上の 2 の
+   `karume dist` の門が、容器のグラフ名と weights のキーを検査する。
+4. **追記 1 の 14 の訂正 — `provenance.writer` は既定で書かない**（3b・`2bbd013b`）。既定で生成器タグを
+   焼くと、移行した容器と recipe が直接書いた容器の part 0 が版の分だけ永久に食い違い、同じ資産の
+   バイト同一が主張できない。ツールの版は `karume.json` の `generator` 欄 1 箇所が持つ。
+5. **全資産の移行**（3b・3c）。`outputs/series/` の旧 shard 形 54 系列 / 135 部品 / 70.9 GiB を
+   `python -m migrate_series` で `krm` へ移した（値はビット同一・sidecar は容器の資産・golden と json は
+   不変 — `0b86439e`）。「系列 → 部品 → weights キー → sidecar の畳み方」の対応は family しか知らないので、
+   core に系列モードは作らず、recipe 側の駆動に置いた（ADR 0065 の境界）。PLE（gemma4 / gemma4-qat）と
+   `rope_base`（anima）は recipe が容器の資産として直接書く（`d2630521`）。git 追跡の golden fixture
+   32 モデルは `karume.goldens` で焼き直し（旧 safetensors 50 本 → part 78 本・`io.*` は不変 —
+   `2bde1baf`）、packed PLE fixture は recipe の本番経路で再生成した（`f5736ac0`）。実証は 2 組ある。
+   ①`karume dist` の焼き直し（siglip2 / gemma4 / gemma4-qat）は、現ミラーと重み・資産の part でバイト同一。
+   ②recipe の直接 export（vowel-detector / deberta 3 variant / gemma4-e2b-product）は、移行結果と全 part で
+   バイト同一。
+6. **追記 1 の 7（段 3 までの暫定接着）を閉じた**（3d・`9e905d9f`・決定 18）。runtime から、旧 safetensors
+   方言の読み手・shard の進行検証・IR v1 ローダが消え、Session の供給元は容器 1 種（`BoundContainer`）に
+   なった。`parseSafetensors` は素の safetensors の付帯資産を読むために残し、方言 dtype `I4` / `I2` だけ
+   拒否する。hub は shard の逐次面（`streamAssets`）と使い回しの器（`into` / `readFileInto`）を削除した。
+   テストと道具は 3c で容器面へ移した（実資産 e2e は part 列の位置読みで開く
+   `packages/runtime/tests/helpers/container-files.ts`、系列 → 部品 → グラフ名の表は門番と e2e が共有する
+   `helpers/series-graphs.ts` の 1 本）。
+7. **決定 17 の合流層は `packages/runtime/src/format/container/bind.ts`**（3d）。2 文書に依存しない
+   `bindDeclarations` と、2 文書から引き当て口を組む外皮 `bindGraphs` の 2 段で、`krm` もメモリ内容器（下の 8）も
+   同じ `bindDeclarations` を通る。旧 `parseIrGraph` の storage 規則は 2 箇所に分かれた。scale /
+   `groupSize` / `rowAxis` の有無（量子化 codec では必須・それ以外では禁止）は記述文書の読み手（`descriptor.ts` の `parseEncoding`）が見て、メモリ内容器は
+   入力形が違うので同じ有無を `memory.ts` で見直す。値の側（codec × 意味論 dtype・`groupSize` の値域・行長の
+   整除・i2 経路の shape・scale 長）と、piece の被覆・中間 piece の長さ 4 の倍数・整数の行境界は `bind.ts` が
+   持つ。IR の読み手は格納を持たない IR v2 の宣言 1 種（`parseIrDeclaration` /
+   `parseIrDeclarationValue`）である。本文・段階分解表・段 5 の見積りに残る `parseIrGraph` / `prepareModel`
+   と、対象欄の `format/container.ts` は段 0 時点の名前で、書き換えない。
+8. **メモリ内容器**（3d・`9e905d9f`）— `openMemoryContainer`（`packages/runtime/src/format/container/memory.ts`）は、
+   手元のバイト列を**容器ファイルを書かずに** `krm` と同じ合流・admission・構築の経路へ載せる供給面で、
+   `openContainer` と同じ `BoundContainer` を返す。対象は models がホストで組むグラフ（irodori の CFG 合成 /
+   Euler 更新・gemma の最大値選択・PLE gather）と、道具の合成モデルである。旧 `createSession(gpu, model)` が
+   持っていた「手元のグラフを Session にする」口を、形式を増やさずに容器面へ寄せるために置いた。
+   - **入力**: `graphs`（グラフ名 → IR v2 宣言）と `tensors`（グラフ名 → initializer 名 → 供給）。shared で
+     ない initializer は過不足なく供給する MUST（不足も余剰も全件列挙で落ちる）。
+   - **供給の 2 形**: `bytes`（丸ごと 1 本 — 渡した器をそのまま返し、複製しない）と `pieces`（先頭次元の
+     行範囲 + `read()` の読み口を 2 本以上 — バイト列を抱えず、`readBlock` のたびに `read()` を引き直す）の
+     排他。量子化 codec は `encoding` に f32 の scale（rank 2・4 B 整列）と `groupSize` を持つ。
+   - **part の割り方**: 丸ごとの供給は宣言順に積み、既定の part 長（256 MiB）を超えるところで次の part へ
+     移る（companion scale は実体と同じ part）。piece は 1 本 = 1 part で、scale は piece 1 と同じ part
+     （規則③）。part は Session 構築のフェンスの単位なので、この割り方が決めるのは構築時の staging の
+     上限である（ホスト RAM は part の割り方に依らない — 追記 5 の 3）。
+   - **sha256 は掛けない**。渡されたバイト列はネットワークもディスクも通っていないので、宣言と現物の
+     食い違いを検証する相手が無い（block の digest は未検証の取得元のための門 — 決定 8）。
+   - **検査の門**: 束縛規則は上の 7 の合流層が `krm` と同じ 1 本で見る。この層が持つのは、上の 7 の
+     encoding の有無の見直しと、合成に閉じた 5 つである — 宣言との対応（不足 / 余剰・未宣言のグラフ名）、
+     `pieces` が 2 本以上、合成した block id の衝突、scale のバイト位置の 4 B 整列、`readBlock` の取得長と合成した宣言長の一致。ホストで組む宣言は
+     必ず公開面の `parseIrDeclarationValue`（`openContainer` が容器の宣言に掛けるのと同じ門）を通す。
+     `krm` 経路では記述文書の読み手が非有限数と入れ子の深さを検査するが、メモリ内容器ではこの 2 つを
+     呼び手が持つ（`packages/runtime/mod.ts` の doc）。
+9. **追記 1 の 10 の公開面の増減**（3d・公開面スナップショット）。runtime は −8 / +9 で、削除は `openModel` /
+   `KarumeModel` / `ModelShard` / `createSession` / `createSessionFromShards` / `prepareModel` /
+   `estimateSessionMemory` / `ContainerError`、追加は `openMemoryContainer` / `BoundContainer` /
+   `MemoryContainerInput` / `MemoryEncoding` / `MemoryPiece` / `MemoryTensor` / `parseIrDeclarationValue` /
+   `IrDeclaration` / `RuntimeSupportError`。hub は −3（`streamAssets` / `StreamedAsset` / `StreamAssetsOptions`）、
+   models は増減なし。追記 1 の 10 の 5 つは残る。capability 不足は `RuntimeSupportError`、容器の規則違反は
+   `ContainerFormatError` に分かれた。見積りは `prepareContainer(...).estimate()` が持つ。
+10. **追記 1 の 11 の縮図の後継と、独立オラクルの喪失**（3d）。`gpu_container_session_test.ts`（`krm` 経路と
+    旧 safetensors 経路の A/B）は旧経路と一緒に削除した。後継の `packages/runtime/tests/gpu_memory_container_test.ts`
+    は、同じ合成モデル（linear i4 + group scale → add f16 → linear i8 + per-channel scale + bias f32・piece
+    分割込み）で `krm` とメモリ内容器を突き合わせ、piece の割り方は 2 経路でわざと違えてある。ただし
+    2 経路は合流層から Session 構築までを共有するので、この縮図の出力を**別実装で**押さえる A/B は
+    無くなった。合流か構築の誤りは両辺に同じだけ乗り、この 1 本では検出できない。見積りの A/B
+    （`runtime_prepare_model_test.ts`）も同じ形である。緩和として外部の正解が 2 つ残る。①codec ごとの
+    GPU テストは CPU 参照（`applyReferenceOp` + `decodeI4` / `decodeI8`）と突き合わせる。②実資産の環境別
+    sha256 参照行（ADR 0106）は段 3 の間 1 行も書き換えていない（最終変更 `689157c7`・2026-09-20）ので、
+    行がある環境では新しい経路が旧経路で焼いた出力とビット同一であることを押さえている（anima /
+    irodori / sbv2）。3 codec 混在 × piece 分割の縮図には外部の正解が無く、これを戻す作業は
+    [backlog](../backlog.md) の later に置く。
+11. **検収②は成立**（3c・`dcd6fb1c`）。`packages/runtime/tests/distribution_gate_test.ts` は `karume.json` を
+    hub のパーサで読み、`karume/5` を名指しで断言し、既定の model / quant が選ぶ全容器の part の実在と長さを
+    宣言と突き合わせる（越境参照の part はローカルミラーに実体が無いので対象外）。`assets_gate_test.ts` は manifest を持たない系列について、容器を part 列として開き
+    （本数・長さ・2 文書の parse・束縛表との合流まで）、名乗るグラフ名が期待の weights キーであることを
+    見る。どちらも block の sha256 は読まない（実バイトの突合は各 e2e が `openContainer` の経路で通る —
+    決定 8）。射程の限りとして、配布形の門番が見るのは既定 quant だけで、他の quant 席の part は e2e が
+    開くまで検査されない。
+12. **検収①は条件つき成立**。CHANGELOG の Breaking は `994bdad8` で記載した。レーンはこの開発機（Intel
+    Arc B570・Deno 2.9.6）で 14 本を回した。3d のコミット本文（`9e905d9f`）は単独再走込みで全 14 レーン緑と
+    記録している。3e 後の通常走行では 12 / 14 が緑で、赤の 2 本は [known-issues](../known-issues.md)
+    「Intel Arc B570」節の環境要因である。①`test:core` の OOM 門
+    （`gpu_generation_context_test.ts`「state 確保の失敗は out-of-memory errorScope で fail loudly」— `destroy()`
+    の解放が次の device poll まで遅れる）。②`test:models:birefnet` の 2048² が device lost になり、Deno の
+    panic で走行ごと止まる（1024² の 11 本は緑）。ADR 0005 のリリース判定（緑必須）は、この 2 本を緑に
+    できる環境で満たす。
+13. **全 pin の移行は段 3 から release の波へ移す**（段階分解表の段 3「全 pin の移行」と、追記 2 の 6・
+    追記 3 の 8 の「残りの pin は段 3 まで」の訂正）。段 3 で pin は 1 本も動いておらず、`karume/5` を指すのは
+    段 2 で上げ直した irodori-v4.1-small だけである。残り 9 リポの再アップロードと pin の差し替えは
+    リリースの回に行う。[release-runbook](../release-runbook.md) §0 の順序（version bump → 焼き直し →
+    アップロード → pin → JSR publish）が非可換 MUST で、manifest の `generator` 欄がパッケージ版を写すので、
+    bump 前に上げると古い版を名乗る配布形が HF に載るため。再アップロードでは新 manifest が参照しない
+    旧ファイルを同じリポから消し、pin は削除後の main で焼く（irodori-v4.1-small で実施 — 旧 safetensors
+    65 本・5.84 GiB を削除して pin を付け替えた `1c952948`。旧 revision の pin は履歴から解決できる）。
+    リポの削除 → 再作成は、公開版の pin を持つリポでは使わない（決定 18 の「履歴は残す」）。台本
+    `hf-upload.zsh` は段 2 で `*.krm` に追随済み（`f33f7be2`）。manifest 側の訂正は ADR 0109 追記 1。
+14. **block 上限の見直し（32 → 16 MiB）は段 3 では測らなかった**。決定 5 は「段 3 の RAM ピーク実測まで
+    持ち越す」としていたが、段 3e で測ったのは part 長だけである（追記 5）。見直しは段 6（新 bit 幅・
+    Range 取得の回）へ持ち越す。下げる前に要るものは決定 5 のとおり（const の上限を超える定数の逃げ道
+    〈container-v1 §10 の未決〉と、block 件数・descriptor の倍増の評価）。
+
 ## 追記 5 — 段 3e の実測で確定した点（2026-09-24）
 
 段 3 の「part 長の既定の見直し」と、段 2 から持ち越した RAM ピークの改善候補 3 つの採否。実測の正本は
@@ -733,7 +864,8 @@ cold / warm / local × 3 回の中央値）で、ここは決めた点と検収�
    器が最大 part 長で常駐して gemma4 の host PLE の decode 中に約 +224 MiB 増える見込み（**推測**）。
 5. **検収③（part 長を動かした構成の再測・宣言からの事前見積りとの一致）**: seek 型は成立 — 3 と 2(c) の
    後は part 長に依らず external 最大 71〜139 MiB で、item 1 本（最大 block 32 MiB + 同乗 scale + 展開席の
-   f32 展開結果）と固定分の見積りの桁に収まる。scan 型は「保持枠 1 本 + GC を待つ前の器」で、GC を待つ
+   f32 展開結果）と固定分の見積りの桁に収まる。展開席の piece 列の間は、これに持ち越し scale の写し
+   （scale 全量）が 1 本加わる（式の正本は container-v1 §11）。scan 型は「保持枠 1 本 + GC を待つ前の器」で、GC を待つ
    本数は宣言からは閉じない（part 256 の anima で最大 part の約 4.4 本 = run 1,139 MiB）。warm の payload
    digest 0 回・キャッシュ書込 0 本（段 2 の検収③）は全 27 構成で保たれた。
 6. **Range 取得（段 6）の前倒し条件**（追記 2 の 2）について、追記 3 の 10 の見立て（scan 型の超過は保持の

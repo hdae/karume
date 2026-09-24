@@ -183,3 +183,34 @@ ADR 0108 決定 19 の `fromPretrained(source, { components: { <役割>: Compone
 - モデルカード（`modelcard.py`）と `hf-upload.zsh` の断片化表は `*.krm` を歩く形へ追随する
   （カードは段 3・upload は段 2 で前倒し）。
 - 検収は ADR 0108 の段階分解表 段 2 の ①〜④。
+
+## 追記 1 — グラフ名の規則と pin 移行の時期（2026-09-24）
+
+段 3（3a〜3d）の実装で決めた点のうち manifest に掛かるもの。容器の形式側は ADR
+[0108](0108-container-format.md) 追記 4、規則の本文は [container-v1](../container-v1.md) §2.1 が正本。
+
+1. **容器のグラフ名 = 部品名 = `karume.json` の `weights` のキー** MUST（決定 2 の補足）。
+   - **なぜ規則にするか**: 読み手はグラフを名前で引く（models の部品は `prepareContainer(opened, <weights の
+     キー>)` で Session を組む）。manifest は部品 × dtype ごとに容器を 1 本指し、容器は 1 グラフだけを持つので、
+     manifest から容器の中のグラフへ渡れる名前は weights のキーしか無い。書き手が別の綴りを名乗ると、
+     移行済みミラー（移行 CLI のリポ丸ごとモードはキーで焼く）と再 export した系列が別物になり、しかも
+     manifest の parse も容器の parse も通るので、利用者のロードで「コンテナにグラフが無い」として初めて
+     落ちる。
+   - **置き場のディレクトリ名は規則にしない**。系列直下に容器を置く family ではディレクトリ名が系列名に
+     なり（siglip2 の系列ディレクトリに対してキーは `vision`）、irodori の `caption-proj` はキーが
+     `caption_proj`、deberta の `full-24layer` はキーが `text_encoder` である。そのため export の一本道は
+     `graph_name` を必須にして既定を持たず、recipe は部品名を定数で名乗る。
+   - **検査点**: `karume dist` が組み立ての前に、現物の容器のグラフ名の集合とその席の weights のキーを
+     突き合わせる（`DistError`）。recipe の綴りは AST の門（`tools/export-recipes/tests/test_graph_names.py`）が
+     定数であることと、名乗るグラフ名が配布計画の weights のキーと対応することで固定する（例外的な family の
+     扱いもこの門が持つ）。
+2. **決定 9 の訂正 — 残りの pin の移行は段 3 ではなく release の波で行う**。段 3 で pin は 1 本も動いて
+   いない。`karume/5` を指すのは段 2 の irodori-v4.1-small だけで、残り 9 リポは release の波まで
+   旧版パッケージからだけ動く。[release-runbook](../release-runbook.md) §0 の順序（version bump → 焼き直し →
+   アップロード → pin → JSR publish）が非可換 MUST で、manifest の `generator` 欄がパッケージ版を写すため、
+   bump 前に上げると古い版を名乗る配布形が HF に載る。上げ直しでは新 manifest が参照しない旧ファイルを
+   同じリポから消し、pin は削除後の main で焼く（HF の履歴は残す — ADR 0108 決定 18）。手順は
+   release-runbook が持つ。
+3. **本文の段 3 への持ち越しは済んだ**。決定 8 の「dist.py / recipe が `krm` を直接書く」は段 3a / 3b、
+   Consequences の「`StreamedAsset` 系の shard 面の退役」は段 3d（hub の `streamAssets` / `StreamedAsset` /
+   `StreamAssetsOptions` を削除）で入った。

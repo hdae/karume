@@ -144,3 +144,8 @@ ADR [0070](0070-shard-loading-admission.md) 追記 2026-09-02）で、ロード�
 分割形と単一形はバイト列の並びが同じで「切れ目があるか否か」だけが違う（0108 決定 2 / 3）。
 0108 は **proposed** で実装は未着手なので、**実装が入るまでは現行のまま**であり、本文は
 書き換えていない。
+
+**2026-09-24**: ADR 0108 は accepted となり、段 3d（`9e905d9f`）で旧読み手（runtime の shard 進行検証・
+hub の逐次面 `streamAssets`）が消えたので、上の上書きは発効した。グラフは part 0 の descriptor が持ち、
+manifest の `shards` 欄も ADR [0109](0109-manifest-v5-container.md) で退役した。旧 shard 列を読むのは
+移行 CLI の旧形読み取り（`tools/exporter/src/karume/legacy.py`）だけである。

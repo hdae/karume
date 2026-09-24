@@ -299,3 +299,23 @@ perf-ledger H-28。決定 3（遅延ロード + LRU）と決定 6（PLE は通�
 - 旧 sidecar（schema 1 / 2 の safetensors）を読む処理は移行 CLI（`karume migrate --manifest`）だけが持つ。
   系列出力（`outputs/series/`）が旧形で残る段 3 までは、テスト helper `ple-series.ts` が旧 shard の
   テンソル領域をそのまま block 1 本の資産として畳む（値はビット同一・段 3 で退役）。
+
+## 追記（2026-09-24 — GPU 常駐席のロード機構とホスト RAM ピークを現行へ）
+
+2026-09-19 追記の「ロード」項の機構は、ADR [0108](0108-container-format.md) 段 3d（`9e905d9f`・旧配布形の
+読み手の削除）と段 3e（Session 構築の block 逐次化）で変わった。本文は書き換えず、現行をここに書く。
+
+- **退役した語**: 「ランタイムの shard 逐次面」「合成 shard の器は 1 本を使い回す」「sidecar の最大 shard
+  1 本 + 器 1 本」「piece 1 は先頭 1 行に切って graph shard へ同居させる」「区間読みできない読み口では
+  sidecar を 1 度余分に読む」は、どれも現行の経路に無い。
+- **現行の経路**: 索引が指す `values` の block 列を**メモリ内容器**（`openMemoryContainer` — 0108 追記 4 の 8）の
+  `pieces` として渡し、Session 構築は piece を 1 本読んでは親 1 本ぶんの GPU バッファへ行オフセット位置に
+  `writeBuffer` して、その反復で手放す（ADR 0070 決定 3 の 2026-09-24 追記）。companion scale は piece 1 と
+  同じ part に置く規則（container-v1 §5 の規則③）なので、`scales` の block 列を先に全量読んで 1 本に集めて
+  渡す。
+- **ホスト RAM のピークは「scale 表の全量 + 最大 values block 1 本」**（E2B で 35 MiB + 32 MiB 以下）。
+  scale は 1 倍で数え、× 2 にはならない。メモリ内容器は渡された scale の器を複製せずに返し
+  （`packages/runtime/src/format/container/memory.ts` の `readBlock`）、Session 構築の scale は写しを作らない
+  view で（`session-build.ts` の `scaleTensor`）、`ple` は `embedding` の重みスロットでしか消費されないので
+  席は圧縮のまま載る。scale の写しを作るのは展開席の piece 列の「持ち越し scale」だけで、PLE はそこを
+  通らない。数え方の正本は [container-v1](../container-v1.md) §11。
