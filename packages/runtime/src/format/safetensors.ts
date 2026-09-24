@@ -18,10 +18,12 @@ export type SafetensorsDtype =
   | "BOOL";
 
 /**
- * dtype → 1 要素の byte 数（サイズ表）。バイト長の検証は `numel × bytes` の厳密一致。
+ * dtype → 1 要素の byte 数。バイト長の検証は `numel × bytes` の厳密一致で、テンソル先頭に
+ * 要求する byte 整列もこの値（コピーせず typed array view を張る前提 — view の要素整列 =
+ * 要素サイズ）。
  *
- * MUST: 整列表（{@link DTYPE_ALIGN}）と分けて持つ — 「1 要素の大きさ」と「テンソル先頭に
- * 要求する整列」は別の概念で、片方の都合でもう片方を動かすと検査の意味が入れ替わる。
+ * NOTE: 付帯資産の語彙には packed 型（要素サイズと整列要求が割れる 4bit / 2bit 詰めの類）が
+ * 無いので 1 表で足りる。packed 型を受理する日は整列表を分け直す（ADR 0069 決定 2 の 3 面分離）。
  */
 const DTYPE_BYTES: Readonly<Record<SafetensorsDtype, number>> = {
   F32: 4,
@@ -31,19 +33,6 @@ const DTYPE_BYTES: Readonly<Record<SafetensorsDtype, number>> = {
   U8: 1,
   I32: 4,
   // U32 は意味論 bool の実表現（u32 の 0/1 — ADR 0009）。golden の io がこの形で書かれる。
-  U32: 4,
-  I64: 8,
-  BOOL: 1,
-};
-
-/** dtype → テンソル**先頭**に要求する byte 整列（整列表）。コピーせず typed array view を張る前提。 */
-const DTYPE_ALIGN: Readonly<Record<SafetensorsDtype, number>> = {
-  F32: 4,
-  F16: 2,
-  BF16: 2,
-  I8: 1,
-  U8: 1,
-  I32: 4,
   U32: 4,
   I64: 8,
   BOOL: 1,
@@ -225,8 +214,8 @@ export const safetensorsHeaderLength = (prefix: Uint8Array<ArrayBuffer> | ArrayB
  * ファイル先頭の区間（8 + ヘッダ長バイト以上）と**ファイル全長**からヘッダを解く。
  *
  * データ節のバイトを 1 つも読まずに済むのは、被覆・整列・末尾の検査が「宣言の集合」と
- * 「ファイル長」だけで閉じているため。行だけを区間読みする呼び手（PLE の decode 経路）は
- * この表の byteOffset / byteLength をそのまま読み口へ渡す。
+ * 「ファイル長」だけで閉じているため。資産を区間読みする呼び手は、この表の byteOffset /
+ * byteLength をそのまま読み口へ渡せる。
  *
  * prefix が足りない場合は必要な長さを文言に載せて fail loudly — 呼び手が読み足す長さを
  * 例外から決められる MUST（勝手に 0 埋めして解くと壊れたヘッダを黙って受理する）。
@@ -296,7 +285,7 @@ export const parseSafetensorsHeader = (
         `${where}: データ節の範囲外 [${entry.begin}, ${entry.end}) データ節長=${dataLength}`,
       );
     }
-    const align = DTYPE_ALIGN[entry.dtype];
+    const align = DTYPE_BYTES[entry.dtype];
     if ((dataStart + entry.begin) % align !== 0) {
       // コピーを作らず typed array view を張る前提が崩れるため受理しない。
       throw new SafetensorsError(
@@ -324,10 +313,12 @@ export const parseSafetensorsHeader = (
  * ファイル全体を 1 本の ArrayBuffer で受け取り、テンソル表を厳密に検査して view を返す。
  * view はコピーを作らず buffer 上の byteOffset / byteLength で参照する。
  *
- * `byteLength` はファイルの実長（既定 = buffer 全体）。供給側が **器を使い回す**（最大 shard 長の
- * buffer へ毎回の shard を先頭から読む — ADR 0070 追記の RAM ピーク係数 1 化）と buffer の末尾に
- * 前回の残りが居るので、ファイル長を別に受けて「データ節末尾の未使用領域」の検査をその長さで
- * 行う。buffer より長い指定は fail loudly（ファイルが器に収まっていない）。
+ * このリーダの読み手は付帯資産（rope 素表・style 表・mel 基底・golden の io 等）で、Session の
+ * 重みは容器 `krm` の経路が読む。
+ *
+ * `byteLength` はファイルの実長（既定 = buffer 全体）。ファイルより長い buffer の先頭に
+ * 読み込んだ場合は、末尾の余白を「データ節末尾の未使用領域」と取り違えないよう実長を別に
+ * 渡す。buffer より長い指定は fail loudly（ファイルが buffer に収まっていない）。
  *
  * 検査そのものは {@link parseSafetensorsHeader} の 1 実装だけが持つ MUST — 全量経路と区間読み
  * 経路で受理する形が食い違わないため。
