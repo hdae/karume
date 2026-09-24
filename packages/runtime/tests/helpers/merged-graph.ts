@@ -12,9 +12,10 @@ import { mergedGraph } from "../../src/format/container/bind.ts";
 import {
   codecEntry,
   type CodecName,
-  groupCount,
+  groupScaleShape,
   payloadBytes,
   perChannelGroupSize,
+  quantizedRowLength,
   scaleBytes,
 } from "../../src/format/container/codecs.ts";
 import type { IrGraph } from "../../src/format/ir.ts";
@@ -35,7 +36,6 @@ const encodingOf = (
   spec: StorageSpec | undefined,
   dtype: string,
   shape: readonly number[],
-  numel: number,
   name: string,
 ): EncodingInput => {
   const codec: CodecName = spec === undefined
@@ -46,8 +46,7 @@ const encodingOf = (
   const entry = codecEntry(codec);
   if (entry.scale === "forbidden") return { codec };
   const rowAxis = typeof spec === "object" ? spec.rowAxis ?? 0 : 0;
-  const rowCount = shape[rowAxis];
-  const rowLength = rowCount === 0 ? 0 : numel / rowCount;
+  const rowLength = quantizedRowLength(shape, rowAxis);
   const groupSize = entry.grouping === "channel"
     ? perChannelGroupSize(rowLength)
     : typeof spec === "object" && spec.groupSize !== undefined
@@ -58,7 +57,12 @@ const encodingOf = (
     ...(rowAxis === 0 ? {} : { rowAxis }),
     groupSize,
     scale: {
-      bytes: zeros(scaleBytes(rowCount * groupCount(rowLength, groupSize), `${name} の scale`)),
+      bytes: zeros(
+        scaleBytes(
+          groupScaleShape(shape, rowAxis, groupSize).reduce((count, dim) => count * dim, 1),
+          `${name} の scale`,
+        ),
+      ),
       dtype: "f32",
     },
   };
@@ -75,7 +79,7 @@ export const autoTensors = (
       const value = declaration.values[name];
       const shape = value.shape.map(Number);
       const numel = shape.reduce((count, dim) => count * dim, 1);
-      const encoding = encodingOf(storage[name], value.dtype, shape, numel, name);
+      const encoding = encodingOf(storage[name], value.dtype, shape, name);
       return {
         graph: GRAPH_NAME,
         initializer: name,

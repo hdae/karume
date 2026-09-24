@@ -17,7 +17,7 @@
 import {
   codecLayout,
   type CodecName,
-  groupCount,
+  groupScaleShape,
   payloadBytes,
   scaleBytes,
 } from "../format/container/codecs.ts";
@@ -182,9 +182,7 @@ export const planWeightResidency = (graph: IrGraph): ReadonlyMap<string, WeightR
     if (rows === undefined) {
       throw new ExecutionError(`${where}: 重み [${shape.join(",")}] に行の軸 ${axis} が無い`);
     }
-    const rowLength = rows === 0 ? 0 : count / rows;
-    // scale は rank 2 group 形 `[rows, 行長 / groupSize]`（per-channel は group 数 1）。
-    const scale = scaleBytes(rows * groupCount(rowLength, groupSize), where);
+    const scale = scaleBytes(numel(groupScaleShape(shape, axis, groupSize)), where);
     if (layout === "i8" || layout === "i2") {
       plan.set(name, { seat: layout, payloadBytes: bytes, scaleBytes: scale, rowAxis: axis });
       continue;

@@ -26,7 +26,7 @@ import {
   type InitializerSupply,
   mergedGraph,
 } from "../format/container/bind.ts";
-import { groupCount } from "../format/container/codecs.ts";
+import { groupScaleShape } from "../format/container/codecs.ts";
 import type { IrDtype, IrGraph } from "../format/ir.ts";
 import { type ArenaStats, RunArena, STORAGE_USAGE } from "../gpu/arena.ts";
 import {
@@ -2688,8 +2688,12 @@ export class PreparedModel {
  *
  * block は part を読み切ってから渡すのではなく、`items` を 1 本引くたびに 1 本読む（lazy —
  * {@link WeightBatch.items}）。
+ *
+ * パッケージ内向けに export しているのはテスト用（GPU に触れずに item を引けるので、アダプタ
+ * 無し環境でも Session 構築へ渡る scale 形を突き合わせられる）。`mod.ts` の公開面には出さない
+ * （ADR 0008）。
  */
-const containerBatches = async function* (
+export const containerBatches = async function* (
   opened: BoundContainer,
   graphName: string,
 ): AsyncGenerator<WeightBatch, void, unknown> {
@@ -2718,14 +2722,13 @@ const containerBatches = async function* (
       let scale: ReadyScale | undefined;
       if (index === 0 && supply.scale !== undefined) {
         const shape = bound.declaration.values[name].shape.map(Number);
-        const rowAxis = supply.encoding.rowAxis ?? 0;
-        const rows = shape[rowAxis];
-        const numel = shape.reduce((count, dim) => count * dim, 1);
-        const rowLength = rows === 0 ? 0 : numel / rows;
-        const groups = groupCount(rowLength, supply.encoding.groupSize ?? 1);
         scale = {
           bytes: (await opened.readBlock(supply.scale.id)).subarray(0, supply.scale.payloadBytes),
-          shape: [rows, groups],
+          shape: groupScaleShape(
+            shape,
+            supply.encoding.rowAxis ?? 0,
+            supply.encoding.groupSize ?? 1,
+          ),
         };
       }
       const piece = supply.blocks.length === 1 ? undefined : {

@@ -18,10 +18,11 @@ import {
   type CodecEntry,
   codecEntry,
   type CodecName,
-  groupCount,
+  groupScaleShape,
   MIN_GROUP_SIZE,
   payloadBytes,
   perChannelGroupSize,
+  quantizedRowLength,
   scaleBytes,
 } from "./codecs.ts";
 import type {
@@ -292,7 +293,7 @@ const planSupply = (
     fail(`${where}: rowAxis ${rowAxis} に対して宣言 shape [${shape.join(",")}] の rank が足りない`);
   }
   const rowCount = shape[rowAxis];
-  const rowLength = rowCount === 0 ? 0 : numel / rowCount;
+  const rowLength = quantizedRowLength(shape, rowAxis);
   if (entry.grouping === "channel" && groupSize !== perChannelGroupSize(rowLength)) {
     fail(
       `${where}: codec '${encoding.codec}' は per-channel なので groupSize は行長 ${
@@ -316,7 +317,7 @@ const planSupply = (
   if (scaleRef === undefined) fail(`${where}: codec '${encoding.codec}' は scale 必須`);
   const scaleFound = locate(scaleRef.block, `${where} scale`);
   const scalePayload = declaredScaleBytes(
-    rowCount * groupCount(rowLength, groupSize),
+    numelOf(groupScaleShape(shape, rowAxis, groupSize)),
     `${where} scale`,
   );
   assertPadded(scaleFound.record, scalePayload, `${where} scale`);

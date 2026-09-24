@@ -11,6 +11,8 @@
  * ADR 0069 決定 4 ③）も同じ式で張られているため、TS / Python / WGSL の 3 実装が同じ数を出す。
  */
 
+import { groupScaleShape } from "./container/codecs.ts";
+
 /** 要素数（format 層は src/ops.ts に依存しない — i8.ts と同じ理由でこの 1 行だけ持つ）。 */
 const numel = (shape: readonly number[]): number => shape.reduce((count, dim) => count * dim, 1);
 
@@ -29,32 +31,9 @@ export class I4Error extends Error {
 const rowLength = (shape: readonly number[]): number => numel(shape) / shape[0];
 
 /**
- * group scale の論理形 = **rank 非依存の rank 2 規則**
- * `[shape[0], (numel / shape[0]) / groupSize]`（ADR 0069 決定 3 / 波 J-5b の一般化）。
- *
- * rank 2 の重み（linear `[O,I]` / embedding `[V,D]`）では従来の「同 rank・最終次元だけ
- * group 数」と**同値**なので、既存資産の検査結果は 1 件も変わらない。conv1d `[O,Cin,K]` →
- * `[O, (Cin·K)/g]` が唯一の新しい形。
- *
- * MUST: 検査側（合流層 `format/container/bind.ts` — scale block の長さ `shape[rowAxis] ·
- * 行長 / groupSize · 4` と group の刻み）と展開側（{@link decodeI4}）は同じ形を前提にする。
- * 式は今 2 箇所にあるので、片方を変えるときは他方も同じ回で変える — 受理した形と展開が
- * 読む形が静かに食い違うと、group scale が 1 チャネル 1 値として配られる沈黙誤値になる。
- * NOTE: 割り切れない / 記号次元は非整数・NaN のまま返す（呼び出し側が「形が違う」として
- * fail loudly にする — ここで投げると検査側のエラー型が混ざる）。
- */
-export const groupScaleShape = (
-  shape: readonly (number | string)[],
-  groupSize: number,
-): readonly number[] => {
-  const dims = shape.map(Number);
-  return [dims[0], rowLength(dims) / groupSize];
-};
-
-/**
  * packed 4bit のバイト列を group 形 scale で f32 へ展開する。
  *
- * `scaleShape` は {@link groupScaleShape} の rank 2 形（ADR 0069 決定 3 — i8 の keepdim
+ * `scaleShape` は {@link groupScaleShape}（行の軸 0）の rank 2 形（ADR 0069 決定 3 — i8 の keepdim
  * broadcast 形とは受理集合が交わらない別物。取り違えはここで fail loudly にする — 黙って
  * broadcast 解釈すると group scale が 1 チャネル 1 値として配られる沈黙誤値になる）。
  *
@@ -83,8 +62,8 @@ export const decodeI4 = (
   if (!Number.isInteger(groupSize) || groupSize < 1 || width % groupSize !== 0) {
     throw new I4Error(`group_size ${groupSize} が量子化軸（行長）${width} を割り切らない`);
   }
-  const groups = width / groupSize;
-  const expected = groupScaleShape(shape, groupSize);
+  const expected = groupScaleShape(shape, 0, groupSize);
+  const groups = expected[1];
   if (
     scaleShape.length !== expected.length ||
     scaleShape.some((dim, axis) => dim !== expected[axis])

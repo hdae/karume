@@ -137,8 +137,37 @@ export const perChannelGroupSize = (rowLength: number): number => Math.max(rowLe
  * scale の group 数 `行長 / groupSize`（§6.1）。行長 0 の退化形は group 数 1（per-channel scale は
  * 行ごとに 1 本あり、旧配布形の `[rows, 1]` と一致する）。
  */
-export const groupCount = (rowLength: number, groupSize: number): number =>
+const groupCount = (rowLength: number, groupSize: number): number =>
   rowLength === 0 ? 1 : rowLength / groupSize;
+
+/**
+ * 量子化行の長さ = `numel / shape[rowAxis]`（行の軸を除いた残りを平坦化した長さ — conv1d
+ * `[O,Cin,K]` の行軸 0 なら `Cin·K`）。行数 0 の退化形は 0（除算の NaN を作らない）。
+ */
+export const quantizedRowLength = (shape: readonly number[], rowAxis: number): number => {
+  const rows = shape[rowAxis];
+  return rows === 0 ? 0 : shape.reduce((count, dim) => count * dim, 1) / rows;
+};
+
+/**
+ * companion scale の論理形 = **rank 非依存の rank 2** `[shape[rowAxis], 行長 / groupSize]`
+ * （§6.1 / ADR 0069 決定 3）。per-channel codec は group 数 1 の `[rows, 1]`。
+ *
+ * MUST: scale の形はこの 1 本からだけ導く。合流層（scale block の長さ）・常駐プランナ（scale の
+ * バイト数）・容器から Session 構築へ渡す scale 形・CPU 展開 `decodeI4` の突合が同じ形を前提に
+ * しており、どれか 1 つが別の式を持つと、受理した形と展開が読む形が静かに食い違う（group scale が
+ * 1 チャネル 1 値として配られる沈黙誤値）。
+ * NOTE: 割り切れない組は非整数のまま返す（整除の検査は呼び手の担当 — ここで投げると呼び手ごとの
+ * エラー型が混ざる）。
+ */
+export const groupScaleShape = (
+  shape: readonly number[],
+  rowAxis: number,
+  groupSize: number,
+): readonly [number, number] => [
+  shape[rowAxis],
+  groupCount(quantizedRowLength(shape, rowAxis), groupSize),
+];
 
 /**
  * payload のバイト長（§6.1 の式）。`numel % blockElements == 0` MUST — 端数の packing block は
