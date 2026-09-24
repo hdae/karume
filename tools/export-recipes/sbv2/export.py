@@ -221,7 +221,7 @@ def default_out_root(model_dir: Path, dtype: str) -> Path:
 
 #: ターゲット名（系列のサブディレクトリ名でもある）。`front` / `voice` は**配布形の部品名**
 #: でもあるので、綴りの正本は torch を要らない側（`sbv2/distribution.py`）から引く — 容器の
-#: グラフ名は manifest の weights のキーと一致すること MUST（container-v1 §12）。`dp` /
+#: グラフ名は manifest の weights のキーと一致すること MUST（container-v1 §2.1）。`dp` /
 #: `flow` / `dec` は golden 検証専用で配布形に載らないので、ここが唯一の綴り。
 TARGET_DP = "dp"
 TARGET_FRONT = SBV2_FRONT_ROLE
@@ -964,7 +964,7 @@ def export_dp(
             staged / MODEL_FILE,
             provenance=sbv2_provenance(model_dir),
             # グラフ名は**部品名**（= karume.json の weights のキー）。ディレクトリ名から
-            # 導かない（container-v1 §12）— 作業席は `<ターゲット>.staging/`。
+            # 導かない（container-v1 §2.1）— 作業席は `<ターゲット>.staging/`。
             graph_name=TARGET_DP,
             dynamic_shapes=({2: phonemes}, {2: phonemes}, {}),
             symbol_names=("P",),
@@ -1031,7 +1031,7 @@ def export_front(
             staged / MODEL_FILE,
             provenance=sbv2_provenance(model_dir),
             # グラフ名は**部品名**（= karume.json の weights のキー）。ディレクトリ名から
-            # 導かない（container-v1 §12）— 作業席は `<ターゲット>.staging/`。
+            # 導かない（container-v1 §2.1）— 作業席は `<ターゲット>.staging/`。
             graph_name=TARGET_FRONT,
             dynamic_shapes=dynamic_shapes,
             symbol_names=("P",),
@@ -1112,7 +1112,7 @@ def export_flow(
             staged / MODEL_FILE,
             provenance=sbv2_provenance(model_dir),
             # グラフ名は**部品名**（= karume.json の weights のキー）。ディレクトリ名から
-            # 導かない（container-v1 §12）— 作業席は `<ターゲット>.staging/`。
+            # 導かない（container-v1 §2.1）— 作業席は `<ターゲット>.staging/`。
             graph_name=TARGET_FLOW,
             dynamic_shapes=dynamic_shapes,
             symbol_names=("T",),
@@ -1166,7 +1166,7 @@ def export_dec(
             staged / MODEL_FILE,
             provenance=sbv2_provenance(model_dir),
             # グラフ名は**部品名**（= karume.json の weights のキー）。ディレクトリ名から
-            # 導かない（container-v1 §12）— 作業席は `<ターゲット>.staging/`。
+            # 導かない（container-v1 §2.1）— 作業席は `<ターゲット>.staging/`。
             graph_name=TARGET_DEC,
             dynamic_shapes=({2: frames}, {}),
             symbol_names=("T",),
@@ -1229,7 +1229,7 @@ def export_voice(
             staged / MODEL_FILE,
             provenance=sbv2_provenance(model_dir),
             # グラフ名は**部品名**（= karume.json の weights のキー）。ディレクトリ名から
-            # 導かない（container-v1 §12）— 作業席は `<ターゲット>.staging/`。
+            # 導かない（container-v1 §2.1）— 作業席は `<ターゲット>.staging/`。
             graph_name=TARGET_VOICE,
             dynamic_shapes=dynamic_shapes,
             symbol_names=("T",),

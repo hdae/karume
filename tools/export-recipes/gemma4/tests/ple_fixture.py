@@ -35,7 +35,7 @@ FIXTURE_ROOT = REPO_ROOT / "packages" / "models" / "tests" / "fixtures" / "gemma
 #: 容器の代表 path（TS 側 `helpers/ple-series.ts` の `SERIES_MODEL_FILE` と同じ綴り）。
 MODEL_FILE = "model.krm"
 
-#: 容器の中のグラフ名（= 配布 manifest の weights キー — container-v1 §12）。
+#: 容器の中のグラフ名（= 配布 manifest の weights キー — container-v1 §2.1）。
 GRAPH_NAME = "model"
 
 #: 出所。`writer` は**書かない** — 生成器タグを焼くと、パッケージ版を上げただけで fixture の

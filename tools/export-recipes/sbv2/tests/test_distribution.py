@@ -118,7 +118,7 @@ _SBV2_BERT_FROM_END = 1
 
 
 #: 役割（dtype ラベルつきの席）→ **部品名** = manifest の weights のキー = 容器のグラフ名
-#: （container-v1 §12）。`text_encoder` と `text_encoder_i4` は同じ 1 つの部品の 2 dtype なので、
+#: （container-v1 §2.1）。`text_encoder` と `text_encoder_i4` は同じ 1 つの部品の 2 dtype なので、
 #: 名乗る綴りは 1 つ。宣言から導く（写しを持つと片方だけ動く）。
 _SBV2_COMPONENTS: Mapping[str, str] = {
     files.file: component for component, labels in SBV2_WEIGHTS.items() for files in labels.values()

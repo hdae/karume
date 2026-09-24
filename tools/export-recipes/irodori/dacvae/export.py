@@ -1035,7 +1035,7 @@ def export_series(
                 provenance=PROVENANCE,
                 # グラフ名は**部品名**（= karume.json の weights のキー）。コーデックの
                 # ディレクトリ名（`decoder`）とキー（`codec_decoder`）は綴りが違うので
-                # 逆引き表を通す（container-v1 §12）。
+                # 逆引き表を通す（container-v1 §2.1）。
                 graph_name=IRODORI_CODEC_ROLES[target],
                 dynamic_shapes=({axis.axis: sequence},),
                 symbol_names=(axis.symbol,),

@@ -161,7 +161,7 @@ def _publish(
 ) -> list[bytes]:
     """書いて読み直して検証し、part ごとのバイト列を添字順に返す（実物と同じ 1 本道）。
 
-    `named` は容器のグラフ名 = **部品名**（manifest の weights のキー MUST・container-v1 §12）。
+    `named` は容器のグラフ名 = **部品名**（manifest の weights のキー MUST・container-v1 §2.1）。
     貸し手は `model`、借り手は `drafter` で、組み立ての門がこの一致を見る。
     """
     stored = stored_model(

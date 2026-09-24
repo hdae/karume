@@ -6,7 +6,7 @@
  * 状態になる（門番は「期待どおり」と言い、e2e は別のグラフを読む）。
  *
  * グラフ名は**配布 manifest の weights キー**であって、置き場のディレクトリ名ではない
- * （container-v1 §12）。両者は綴りが一致しない — `caption-proj` のグラフは `caption_proj`・
+ * （container-v1 §2.1）。両者は綴りが一致しない — `caption-proj` のグラフは `caption_proj`・
  * `deberta/full-24layer` のグラフは `text_encoder`・`dacvae` の `decoder` / `encoder` は
  * `codec_decoder` / `codec_encoder`。ディレクトリ名からグラフ名を導く規則を書くと、家族
  * ごとの例外が読み手の数だけ生えるので、表を引く形に固定する。

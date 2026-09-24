@@ -16,7 +16,7 @@ import { formatGenerationTiming, generationTimer } from "./generation-timing.ts"
 /** 系列出力の容器の代表 path（実体は `model-NNNNN-of-NNNNN.krm` の part 列）。 */
 const MODEL_FILE = "model.krm";
 /**
- * 容器の中のグラフ名 = 配布 manifest の weights キー（container-v1 §12）。
+ * 容器の中のグラフ名 = 配布 manifest の weights キー（container-v1 §2.1）。
  *
  * NOTE: ここだけは `packages/runtime/tests/helpers/series-graphs.ts` の表から引かない —
  * あの表に載るのは**実重み e2e が開く系列**で、このデモが読む MiniCPM5 / Qwen3 の変換済み

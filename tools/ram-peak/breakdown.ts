@@ -38,7 +38,7 @@ export type BlockBytes = {
 
 /** 容器 1 本の内訳。 */
 export type ComponentBreakdown = {
-  /** 部品名（manifest の `weights` のキー = グラフ名 — container-v1 §12）。 */
+  /** 部品名（manifest の `weights` のキー = グラフ名 — container-v1 §2.1）。 */
   readonly component: string;
   readonly partCount: number;
   /** part 0（ヘッダ + 2 文書）のバイト数。 */

@@ -1,6 +1,6 @@
 """Karume exporter — torch.export 済みモデルを IR（docs/ir-v2.md）とコンテナ（`krm`）へ落とす。
 
-公開面は `__all__` の 12 件が正本（列挙とここの説明は 1:1 — 機械門は
+公開面は `__all__` の 13 件が正本（列挙とここの説明は 1:1 — 機械門は
 `tests/test_architecture_boundary.py` の TestThePublicSurface）:
 IR の型と metadata キー（`IR_METADATA_KEY` / `IrGraph`）・変換（`convert` /
 `curated_decompositions` / `normalize_graph`）・格納変換（`FixedQuantizedWeight` /

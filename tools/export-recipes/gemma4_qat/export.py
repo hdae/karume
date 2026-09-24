@@ -87,7 +87,7 @@ def export_qat(model_dir: Path, destination: Path, model: str) -> dict[str, Any]
                 provenance=PROVENANCE,
                 # グラフ名は**部品名**（= karume.json の weights のキー）。QAT 系列の部品名は
                 # 通常 Gemma と同じ 1 語（`gemma4_qat.distribution` の weights も同じ定数で名乗る）
-                # で、系列名（`gemma4-qat-<モデル>-product`）とは一致しない（container-v1 §12）。
+                # で、系列名（`gemma4-qat-<モデル>-product`）とは一致しない（container-v1 §2.1）。
                 graph_name=GEMMA4_ROLE,
                 fixed_weights=traced.fixed,
                 assets=ple.assets,

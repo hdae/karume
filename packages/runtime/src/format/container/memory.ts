@@ -98,8 +98,9 @@ export type MemoryContainerInput = {
  *
  * - 丸ごと供給は宣言順に積み、累積が {@link DEFAULT_PART_BYTES} を超えるところで次の part へ
  *   移る（容器の書き手が part 長で切るのと同じ刻み）。companion scale は実体と同じ part。
- * - `pieces` は **piece 1 本 = 1 part = フェンス 1 回**。「器 1 本ぶんの RAM」という呼び手の
- *   `read()` の性質をそのまま Session 構築の RAM ピークにする（規則③どおり scale は piece 1）。
+ * - `pieces` は **piece 1 本 = 1 part = フェンス 1 回**。staging を piece 1 本ぶんに抑えるための
+ *   割り方で、ホスト RAM は part の割り方に依らない（Session 構築は item を 1 本ずつ上げて手放す —
+ *   container-v1 §11）。規則③どおり scale は piece 1 と同じ part に置く。
  *
  * 丸ごと供給の累積はグラフ横断で共有する（`containerBatches` は 1 グラフぶんしか消費しないので、
  * 多グラフ容器ではフェンスが余分に増えるだけ — staging が閾値を超える過小分割は起きない）。

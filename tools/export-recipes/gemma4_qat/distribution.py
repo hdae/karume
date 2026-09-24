@@ -243,7 +243,7 @@ def qat_plan(series_dir: Path, model: str) -> ModelPlan:
         pipeline="gemma4-qat/1",
         artifacts=artifacts,
         # 部品名は通常 Gemma と同じ 1 語（書き手 `gemma4_qat/export.py` も同じ定数で
-        # 容器のグラフを名乗る — container-v1 §12）。
+        # 容器のグラフを名乗る — container-v1 §2.1）。
         weights={GEMMA4_ROLE: {"i4": WeightFiles(GEMMA4_ROLE)}},
         assets=GEMMA4_ASSETS,
         quants=quant_modes,

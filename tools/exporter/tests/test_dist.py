@@ -529,7 +529,7 @@ class TestDtypeLabelVocabulary:
     def test_the_label_vocabulary_covers_every_storage_dtype_of_the_ir_gate(self) -> None:
         """ラベル語彙は IR 検証側の格納 dtype 語彙を包含する（写しの追随漏れの機械化）。
 
-        `STORAGE_DTYPE_LABELS` は `packages/runtime/src/format/ir.ts` の人手の写しで、同じ
+        `STORAGE_DTYPE_LABELS` は codec 台帳の展開経路の語彙（`CodecLayout`）の人手の写しで、同じ
         パッケージに 2 本目の写し（`karume.verify.STORAGE_DTYPES`）がある。IR としては通る
         格納 dtype がラベル語彙に無いと、**その dtype を名乗る配布形を組んだ瞬間**に
         `verify_dist` が落ちる（ADR 0097 の `i2` で実際に起きていた食い違い）。
@@ -1078,7 +1078,7 @@ class TestAtomicReplacement:
 
 
 class TestTheGraphNameMatchesTheWeightsKey:
-    """容器のグラフ名 == その席の weights のキー（container-v1 §12）。
+    """容器のグラフ名 == その席の weights のキー（container-v1 §2.1）。
 
     ランタイムは `prepareContainer(opened, <weights キー>)` で**名前で**引くので、綴りが
     割れた容器は manifest ごと据わり、利用者の `createSession` で初めて「コンテナにグラフが

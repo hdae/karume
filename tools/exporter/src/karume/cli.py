@@ -1,9 +1,10 @@
 """`karume` コマンド — dist / migrate / verify のサブコマンド式ディスパッチ。
 
     karume dist --pipeline siglip2   # 受理集合が空の core 単体では落ちる（下の NOTE）
-    karume verify ../../models/karume-irodori/v4.1-small/dit/model.i8.krm
-    karume migrate ../../models/karume-siglip2/vision/model.f16.safetensors --out /tmp/krm \
-        --license apache-2.0
+    karume verify ../../models/karume-irodori-v4.1-small/v4.1-small/dit/model.i8.krm
+    # <old-mirror> = 旧 karume/4 形（safetensors）のミラー（リポ外）
+    karume migrate <old-mirror>/<series>/model.f16.safetensors --out /tmp/krm \
+        --license apache-2.0 --graph-name vision
 
 MUST: CLI は**引数を解釈しない**。先頭の 1 語でディスパッチし、残りはそのまま対応する
 `main(argv)` へ渡す（`--help` も素通しするので、使い方は各本体の parser が出す）。ここに
@@ -58,7 +59,8 @@ COMMANDS: Mapping[str, tuple[Callable[[Sequence[str]], None], str]] = {
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="karume", description="Karume exporter — torch.export 済みモデルを IR v1 へ落とす"
+        prog="karume",
+        description="Karume exporter — torch.export 済みモデルを IR とコンテナ（krm）へ落とす",
     )
     subcommands = parser.add_subparsers(
         dest="command", required=True, metavar=f"{{{','.join(COMMANDS)}}}"

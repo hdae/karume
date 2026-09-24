@@ -587,7 +587,7 @@ def export_series(
             provenance=PROVENANCE,
             # グラフ名は**部品名**（= karume.json の weights のキー）。ディレクトリ名から
             # 導かない — この family の容器は系列直下に据わるので、ディレクトリ名は系列名
-            # （`depth-anything-v2-small-hf`）であって部品名ではない（container-v1 §12）。
+            # （`depth-anything-v2-small-hf`）であって部品名ではない（container-v1 §2.1）。
             graph_name=DEPTH_ANYTHING_ROLE,
             symbol_names=(),
         )

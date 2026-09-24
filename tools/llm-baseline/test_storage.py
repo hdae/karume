@@ -17,7 +17,7 @@ from weights import StoredWeights
 from karume.container import Encoding, Provenance, write_model_container
 from karume.ir import IrGraph, IrInitializer, IrInput, IrNode, IrStorage, IrValue
 
-#: 容器が名乗るグラフ名 = manifest の weights キー（container-v1 §12）。
+#: 容器が名乗るグラフ名 = manifest の weights キー（container-v1 §2.1）。
 GRAPH = "model"
 
 

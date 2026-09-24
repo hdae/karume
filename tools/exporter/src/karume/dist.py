@@ -154,10 +154,12 @@ MAX_MANIFEST_BYTES = 1024 * 1024
 
 #: weights の dtype ラベルの受理語彙 = runtime の**格納 dtype 語彙**。
 #:
-#: NOTE: 正本は `packages/runtime/src/format/ir.ts` の `STORAGE_DTYPES` だが、あちらは export
-#: されていないモジュール私有定数で、op 契約表のような機械突合の正本ファイルも無い — ここは
-#: **人手の写し**。ただし同じパッケージ内に IR 検証側の写し（{@link karume.verify.STORAGE_DTYPES}）
-#: があるので、そちらを包含することをテストで突き合わせる（`tests/test_dist.py` の
+#: NOTE: 正本は codec 台帳の展開経路の語彙（TS `packages/runtime/src/format/container/codecs.ts`
+#: の `CodecLayout` 型・Python {@link karume.container.CodecEntry} の `layout`）だが、TS 側の layout
+#: の値は export された `CODEC_LEDGER` の各エントリが実行時の値として持つだけで、layout 語彙の
+#: 一覧定数も、op 契約表のような機械突合の正本ファイルも無い — ここは**人手の写し**。ただし
+#: 同じパッケージ内に IR 検証側の写し（{@link karume.verify.STORAGE_DTYPES}）があるので、
+#: そちらを包含することをテストで突き合わせる（`tests/test_dist.py` の
 #: `TestDtypeLabelVocabulary`）— 片方だけが古びる失敗様式は、その 1 本で機械化してある。
 #:
 #: 縛るのは、ラベルが「格納 dtype 語彙」であるという主張をカードが本文で述べるため
@@ -1062,7 +1064,7 @@ def assert_weight_components_verified(partitioned: Sequence[PartitionedPlan]) ->
     初めて落ちる（`karume.verify` のモジュール doc が掲げる目的の、組み立て側の半分）。
 
     MUST: **容器のグラフ名 == その席の weights のキー**もここで見る。ランタイムは
-    `prepareContainer(opened, <weights キー>)` で名前で引く（container-v1 §12）ので、綴りが
+    `prepareContainer(opened, <weights キー>)` で名前で引く（container-v1 §2.1）ので、綴りが
     割れた容器は manifest ごと据わり、利用者の `createSession` で初めて「コンテナにグラフが
     無い」になる。書き手側の綴りの門（各 recipe の定数と AST の突合）はソースしか見ないので、
     **現物と宣言を突き合わせる唯一の門**がここである。
@@ -1080,7 +1082,7 @@ def assert_weight_components_verified(partitioned: Sequence[PartitionedPlan]) ->
             raise DistError(
                 f"{parts[0]}: 容器のグラフ名 {sorted(graphs)} が weights のキー"
                 f" '{component}' と違う — ランタイムはこのキーでグラフを引く"
-                "（container-v1 §12）ので、このまま配ると createSession で落ちる"
+                "（container-v1 §2.1）ので、このまま配ると createSession で落ちる"
             )
 
 

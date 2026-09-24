@@ -1,4 +1,4 @@
-"""実重み SigLIP2 の **vision tower** を IR v1 コンテナ + golden io へ書き出す台本。
+"""実重み SigLIP2 の **vision tower** をコンテナ（`krm`）+ golden io へ書き出す台本。
 
 `embeddinggemma/export.py` と同じ役割（実重み・単一ベクトル出力の数値一致）を、画像側で
 受け持つ。生成物は `outputs/series/` 配下で、リポジトリ直下の `.gitignore` によりコミット
@@ -477,7 +477,7 @@ def export_series(
             provenance=PROVENANCE,
             # グラフ名は**部品名**（= karume.json の weights のキー）。ディレクトリ名から
             # 導かない — この family の容器は系列直下に据わるので、ディレクトリ名は系列名
-            # （`siglip2-so400m-patch14-384`）であって部品名ではない（container-v1 §12）。
+            # （`siglip2-so400m-patch14-384`）であって部品名ではない（container-v1 §2.1）。
             graph_name=SIGLIP2_ROLE,
             symbol_names=(),
         )

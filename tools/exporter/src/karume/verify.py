@@ -1,17 +1,20 @@
 """IR の受理規則を Python 側でも全部見る（docs/ir-v2.md）と、コンテナとの合流。
 
-TS 側の正本は packages/runtime/src/format/ir.ts（グラフ単体の規則）・
-packages/runtime/src/format/container/*.ts（コンテナとの突合とランタイム対応表）。
+TS 側の正本は packages/runtime/src/format/ir.ts（グラフ単体の規則 — `parseIrDeclarationValue`）・
+packages/runtime/src/format/container/*.ts（2 文書の構造・codec 台帳・合流）・
+packages/runtime/src/ops/support.ts（ランタイム対応表との突合 — `assertRuntimeSupport`）。
 エクスポータが「書けるがランタイムが読めない」ファイルを出さないよう、書き出し経路の最後で
 同じ規則を通す。
 
 MUST: ここは fail loudly の門であって近似の場ではない — 未知キーも非正準表記も
 黙って無視せず、必ず例外にする（未リリースにつき前方互換チャネルは持たない）。
 
-    uv run karume verify ../../models/karume-irodori/v4.1-small/dit/model.i8.krm
+    uv run karume verify ../../models/karume-irodori-v4.1-small/v4.1-small/dit/model.i8.krm
 
-`parse_ir_graph`（IR v1 JSON の parse）が残っているのは、移行 CLI が旧 shard の
-`__metadata__` を読むのに要るから（container-v1 §12）— 配布形の検証はコンテナだけを受ける。
+`parse_ir_graph` は exporter 内部の器（IR v1 — `karume.ir`）の JSON を検証しつつ読む。使う経路は
+3 つ: 容器の 2 文書から起こし直した文書の検査（{@link ir_graph_from_container}）・移行 CLI が
+旧 shard の `__metadata__` を読む経路（container-v1 §12）・公開面（`karume.__all__`）。
+配布形の検証（CLI）はコンテナだけを受ける。
 """
 
 from __future__ import annotations
@@ -76,7 +79,11 @@ class IrError(ValueError):
 
 
 class ContainerError(ValueError):
-    """配布形（safetensors + 埋め込みグラフ）の結合規則、または capability 不足。"""
+    """コンテナの合流規則・safetensors のレイアウト規則の違反、または capability 不足。
+
+    合流規則は 2 文書 + 束縛表に、safetensors のレイアウト規則は移行 CLI の入力（旧 shard）と
+    資産に掛かる。
+    """
 
 
 TOP_LEVEL_KEYS = (
@@ -98,8 +105,9 @@ OPTIONAL_TOP_LEVEL_KEYS = ("states",)
 SEMANTIC_DTYPES = ("f32", "i32", "bool")
 STORAGE_DTYPES = ("f32", "f16", "bf16", "i8", "i4", "i2", "i32")
 
-#: scale / group_size の記述子を持てる格納 dtype（量子化格納）。TS 側
-#: `packages/runtime/src/format/ir.ts` の QUANTIZED_STORAGE_DTYPES の鏡像。
+#: scale / group_size の記述子を持てる格納 dtype（量子化格納）。TS 側は codec 台帳
+#: （`packages/runtime/src/format/container/codecs.ts` の CODEC_LEDGER）で `scale: "required"` の
+#: codec の layout がこの 3 語に当たる。
 QUANTIZED_STORAGE_DTYPES = ("i8", "i4", "i2")
 
 #: state スロットの dtype 語彙。現状 f32 のみ（ADR 0066 決定 2）。
@@ -324,7 +332,8 @@ def _parse_storage(value: Any, where: str, *, shared: bool = False) -> IrStorage
     if dtype not in QUANTIZED_STORAGE_DTYPES and (has_scale or has_group_size):
         raise IrError(f"{where}: 格納 dtype '{dtype}' に scale / group_size は付けられない")
     # MUST: i8 / i4 は scale を**明示宣言**する
-    # （ADR 0019 / 0069・TS 側 packages/runtime/src/format/ir.ts の鏡像）。
+    # （ADR 0019 / 0069・TS 側は codec 台帳の `scale: "required"` と
+    # packages/runtime/src/format/container/descriptor.ts の parseEncoding の鏡像）。
     # 既定 1.0 で補完すると、scale の書き忘れが「全チャネル 1.0 で dequant した重み」に化けて
     # ロードも実行も通ってしまう（差が O(scale) で出るのに、どこにも例外が出ない）。
     if dtype in QUANTIZED_STORAGE_DTYPES and not has_scale and not shared:
@@ -350,7 +359,8 @@ def _parse_storage(value: Any, where: str, *, shared: bool = False) -> IrStorage
         if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
             raise IrError(f"{where}.group_size: 正整数でない")
         # TS 側は JSON の数値として読むので 2^53−1 を超える値は整数として持てない
-        # （packages/runtime/src/format/ir.ts）。ここで受理するとランタイムだけが落ちる。
+        # （packages/runtime/src/format/container/descriptor.ts の parseEncoding — `groupSize` は
+        # 安全整数のみ受理）。ここで受理するとランタイムだけが落ちる。
         if raw > MAX_SAFE_INT:
             raise IrError(f"{where}.group_size: {raw} が安全整数 2^53−1 を超える")
         # MUST: i4 の group 長は 2 冪かつ 16 以上（ADR 0069 決定 2 — ORT と同制約）。この制約が
@@ -398,7 +408,14 @@ def _parse_node_states(
 
 
 def parse_ir_graph(text: str) -> IrGraph:
-    """グラフ JSON を検証しつつ読む（packages/runtime/src/format/ir.ts parseIrGraph と同義）。"""
+    """グラフ JSON（IR v1 の器）を検証しつつ読む。
+
+    TS 側はグラフ単体の規則を packages/runtime/src/format/ir.ts の parseIrDeclarationValue、格納の
+    規則（scale 必須・groupSize など）を packages/runtime/src/format/container/descriptor.ts の
+    parseEncoding と packages/runtime/src/format/container/bind.ts の束縛（bindGraphs）が持つ
+    （それらを合わせたものと同義）。bind.ts の mergedGraph は合流の結果を IrGraph に写すだけで、
+    検査はしない。
+    """
     root = _as_object(parse_graph_json(text), "graph")
     _check_keys(root, TOP_LEVEL_KEYS, OPTIONAL_TOP_LEVEL_KEYS, "graph")
 
@@ -606,7 +623,7 @@ def _check_definitions(
 
 def _check_group_quantized_shape(name: str, initializer: IrInitializer, value: IrValue) -> None:
     """group 量子化格納（i4）の宣言 shape と group 長の整合（ADR 0069 決定 2・
-    TS 側 checkGroupQuantizedShape の鏡像）。
+    TS 側は合流層 packages/runtime/src/format/container/bind.ts の group の刻みの検査）。
 
     量子化軸は**格納行**（先頭次元を除く残りの平坦化 — linear `[O,I]` の in 軸・embedding
     `[V,D]` の D 軸・conv1d `[Cout,Cin,K]` の受容野 `Cin·K`）で、その行長が `group_size` で
@@ -669,7 +686,7 @@ def _check_declarations(
                 f"graph.initializers['{name}']: 意味論 dtype '{values[name].dtype}' に"
                 f" 格納 dtype '{storage_dtype}' は組めない（{' / '.join(allowed)} のみ）"
             )
-        # initializer は束縛前に確定していなければ safetensors 側 shape と突合できない。
+        # initializer は束縛前に確定していなければ束縛表の block 長と突合できない。
         if any(not isinstance(dim, int) for dim in values[name].shape):
             raise IrError(f"graph.values['{name}']: initializer の shape に記号次元は使えない")
         if storage_dtype == "i2":
@@ -857,7 +874,8 @@ def _assert_state_order(graph: IrGraph) -> None:
 
 
 def assert_runtime_support(graph: IrGraph) -> None:
-    """M0 ランタイムが実行できる形かを突合する（packages/runtime/src/format/container.ts と同義）。
+    """M0 ランタイムが実行できる形かを突合する（packages/runtime/src/ops/support.ts の
+    assertRuntimeSupport と同義）。
 
     MUST: op 名だけでなく**意味論 dtype と attrs まで**見る。名前だけの突合は
     「対応表にはあるのに実行時に落ちる」を作る（ADR 0005）。非対応は**全件列挙**する。
@@ -918,8 +936,11 @@ def assert_runtime_support(graph: IrGraph) -> None:
     missing_storage: dict[str, list[str]] = {}
     # group 量子化を受理する格納は **i4 だけ**（ADR 0069 決定 2）。他の格納 dtype に付いた
     # group_size は実行経路が無く、黙って無視すると group ごとの scale を per-channel として
-    # 読む沈黙誤値になるので、capability 不足で落とす（TS 側 assertRuntimeSupport の鏡像 —
-    # ここが無いと「verify は緑・ブラウザだけ落ちる」非対称になる）。
+    # 読む沈黙誤値になるので、capability 不足で落とす。TS 側は合流層（bind.ts）がこの形を拒む:
+    # codec 台帳の `grouping` が "channel" の codec では groupSize = 行長 MUST（group を持つ
+    # codec は int4-sym-g だけ）。容器から起こした
+    # 文書（{@link ir_graph_from_container}）は group codec にしか group_size を出さないので
+    # ここに届かず、届くのは v1 文書を直に渡す経路だけ。
     group_quantized: list[str] = []
     for name, initializer in graph.initializers.items():
         dtype = initializer.storage.dtype
@@ -987,10 +1008,12 @@ def assert_op_contracts(graph: IrGraph) -> None:
     assert_graph_shapes(graph)
 
 
-# ---- 配布形（safetensors）との突合 -----------------------------------------
+# ---- safetensors のレイアウト（旧 shard・資産）------------------------------
 
 #: safetensors dtype → 1 要素の **bit** 数（サイズ表）。バイト長は `numel × bits / 8` の
-#: 厳密一致で見る。正本は TS 側 `packages/runtime/src/format/safetensors.ts` の DTYPE_BITS。
+#: 厳密一致で見る。TS 側 `packages/runtime/src/format/safetensors.ts` の DTYPE_BYTES の
+#: **上位集合**で、方言 dtype の `I4` / `I2` はこの表だけが持つ（TS の読み手は受理しない —
+#: 旧 shard を読む移行 CLI が要る）。
 #: MUST: 整列表（READER_DTYPE_ALIGN）と分けて持つ（ADR 0069 決定 2 の 3 面分離）— `I4` は
 #: 1 バイトに 2 要素を詰めるので「要素サイズ = 整列」が成り立たない。
 READER_DTYPE_BITS = {
@@ -1048,8 +1071,8 @@ def _as_reader_entry(value: Any, where: str) -> dict[str, Any]:
 
     MUST: 素で添字しない。3 キーの欠落・項目がオブジェクトでない形・shape が配列でない形は
     `KeyError` / `TypeError` として漏れ、門の診断が「不正なファイル」ではなく「エクスポータが
-    壊れた」に見える（ヘッダ長をファイル実長で拘束するのと同じ理由）。`karume verify` は
-    外部で作られた safetensors も食う公開 CLI なので、到達経路が実在する。
+    壊れた」に見える（ヘッダ長をファイル実長で拘束するのと同じ理由）。`karume migrate` は
+    外部で作られた旧 shard を食う公開 CLI なので、到達経路が実在する。
     """
     if not isinstance(value, dict):
         raise ContainerError(f"{where}: ヘッダ項目がオブジェクトでない: {value!r}")
@@ -1137,13 +1160,14 @@ def _read_container(
 
 
 def assert_reader_layout(path: str | Path) -> None:
-    """Karume のリーダ（`packages/runtime/src/format/safetensors.ts`）が読めるレイアウトかを見る。
+    """safetensors のレイアウト規則を見る（TS 側 `format/safetensors.ts` と同じ規則）。
 
     HF の `safe_open` は読めるのに Karume が読めないファイルが作れる — リーダは
     「データ節を隙間なく覆う」「各テンソルの**絶対** offset が dtype の整列単位に整列している」
     を要求し、後者は要素数が奇数の F16（バイト長 ≡ 2 mod 4）の直後に F32 / I32 / I4 を置くと
-    破れる（docs/limitations.md）。並び順はエクスポータの責務なので、**書いた側で**
-    その責務を果たせているかをここで検査する。
+    破れる（docs/limitations.md）。使う経路は 2 つ: 移行 CLI が旧 shard を読む前の入力検査
+    （`karume.legacy`）と、資産の safetensors を書いた直後の門（recipe の資産の書き手）。
+    方言 dtype の `I4` / `I2` だけは TS の読み手より余分に受理する（旧 shard の読み取り用）。
 
     MUST: この検査は `safetensors` のリーダを通さない（通すと同じ規則の再実装ではなく
     「別のリーダが読めた」だけの主張になる）。ヘッダ JSON を直に読んで規則を写す。

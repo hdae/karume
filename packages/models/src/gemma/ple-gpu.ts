@@ -35,18 +35,26 @@
  * ## ロード（piece ごとに writeBuffer — ADR 0085 決定 2 / ADR 0109 決定 4）
  *
  * ホストで 1 本の巨大 ArrayBuffer に連結しない。索引が指す `values` の block を**メモリ内容器の
- * piece**（`openMemoryContainer` の `pieces`）としてそのまま渡す — Session 構築は part
- * （= piece 1 本）ごとに `read()` を呼び、親 1 本ぶんの GPU バッファへ行オフセット位置に
- * `queue.writeBuffer` し、part ごとにフェンスを 1 本立てて参照を手放す。piece のバイト列は
- * その 1 回の読みぶんしか確保しない（器は使い回さず piece ごとに取る）ので、`values` 由来の
- * ホスト RAM は「最大 block 1 本」に収まる。
+ * piece**（`openMemoryContainer` の `pieces`）としてそのまま渡す。Session 構築は piece ごとに
+ * `read()` を 1 回呼び、親 1 本ぶんの GPU バッファへ行オフセット位置に `queue.writeBuffer` して、
+ * **その反復で参照を手放す**（`writeBuffer` は呼んだ時点でバイト列を写す — ADR 0070 決定 3 の
+ * 2026-09-24 追記）。メモリ内容器は piece 1 本を part 1 本に置くのでフェンスは part ごとに 1 回
+ * 立つが、フェンスが律するのは staging だけでホスト RAM ではない。piece のバイト列はその 1 回の
+ * 読みぶんしか確保しない（器は使い回さず piece ごとに取る）ので、`values` 由来のホスト RAM は
+ * 「最大 block 1 本」に収まる。scan 型の取得元でも、PLE の block は 1 block = 1 part の専用 part
+ * （container-v1 §4.2）なので保持枠が握るのはその block の part だけである（区間が part ちょうど
+ * でなければ `readAssetRange` の写しがもう 1 本乗る）。
  *
- * companion scale は piece 1 と同じ part に置かれる契約（container-v1 §13.3 の規則③）なので、
- * **scale だけは先に全量を集める**。ここが構築時ピークの支配項である — `scales` は
- * `tokens × layers × 4` バイトで、E2B（262,144 token × 35 層）なら 1 本の器に 35 MiB を
- * 集める。容器はその器をそのまま抱える（複製しない）ので、ホスト RAM のピークは
- * 「scale 表の全量 + 最大 block 1 本」である。「最大 block 1 本」だけで見積もると支配項を
- * 丸ごと落とす。
+ * companion scale は piece 1 と同じ part に置かれる契約（container-v1 §5 の規則③）で、
+ * ランタイムは piece 1 の時点で scale の全量を 1 本の GPU バッファへ書くので、**scale だけは先に
+ * 全量を集める**。ここが構築時ピークの支配項である — `scales` は `tokens × layers × 4` バイトで、
+ * E2B（262,144 token × 35 層）なら 1 本の器に 35 MiB を集める。容器はその器をそのまま抱えて
+ * 構築の間生かす（複製しない）。`ple` は `embedding` の重みスロットでしか消費されないので席は
+ * 圧縮のまま載り、展開席の piece 列が取る「持ち越し scale の写し」（container-v1 §11）も作らない。
+ * したがってホスト RAM のピークは「scale 表の全量 + 最大 block 1 本」である（写しが無いので
+ * scale は 1 本ぶん）。「最大 block 1 本」だけで見積もると支配項を丸ごと落とす。scale 表は
+ * `krm` の block 上限（32 MiB）を受けない — メモリ内容器は合成した block の長さを上限と
+ * 突き合わせない。
  *
  * MUST: **読み口を 1 回の読みより長く持たない**（`./ple.ts` と同じ MUST）。検証済みでない
  * 取得元の `AssetReader` は block を読み口の寿命ぶん保持するので、掴み続けると「1 本ずつ流す」

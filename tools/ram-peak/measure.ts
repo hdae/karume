@@ -281,7 +281,7 @@ const runComponent = async (
   const gpu = await acquireGpu();
   try {
     if (options.explicitGc) (globalThis as { gc?: () => void }).gc?.();
-    // グラフ名 = 部品名（= manifest の weights キー — container-v1 §12）。
+    // グラフ名 = 部品名（= manifest の weights キー — container-v1 §2.1）。
     const session = await createSessionFromContainer(gpu, opened, options.component);
     onDiagnostics(options.component, session.diagnostics());
     await session.dispose();

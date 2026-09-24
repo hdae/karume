@@ -1133,7 +1133,7 @@ def export_series(
             container,
             # グラフ名は**部品名**（= karume.json の weights のキー）。ディレクトリ名から
             # 導かない — 系列名（`gemma4-e2b-product`）も作業席の名前も部品名とは一致しない
-            # （container-v1 §12）。
+            # （container-v1 §2.1）。
             graph_name=GEMMA4_ROLE,
             weight_dtype="i8",
             weight_scales=scales,

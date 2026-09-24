@@ -506,7 +506,7 @@ def export_series(ckpt: Path, out_dir: Path, length: int) -> dict[str, Any]:
             provenance=PROVENANCE,
             # グラフ名は**部品名**（= karume.json の weights のキー）。ディレクトリ名から
             # 導かない — この family の容器は系列直下に据わるので、ディレクトリ名は系列名
-            # （`vowel-detector-<チェックポイント名>`）であって部品名ではない（container-v1 §12）。
+            # （`vowel-detector-<チェックポイント名>`）であって部品名ではない（container-v1 §2.1）。
             graph_name=VOWEL_DETECTOR_GRAPH_ROLE,
             # MUST: 記号は出力の 20ms 格子側に置く（`2*Dim("T")` — モジュール docstring の
             # 「長さ軸」）。素の `Dim("T")` だと conv の出力が床除算になり次元言語に載らない。

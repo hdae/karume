@@ -145,7 +145,7 @@ def _vowel_detector_container(
     )
     return ir_container(
         # 疑似系列も**部品名で名乗る**（= 実物と同じ規約 — 容器のグラフ名は manifest の
-        # weights のキー MUST・container-v1 §12）。
+        # weights のキー MUST・container-v1 §2.1）。
         mark=VOWEL_DETECTOR_GRAPH_ROLE,
         storage=storage,
         inputs=((input_name, shape),),
@@ -217,9 +217,9 @@ class TestVowelDetectorLayout:
         """据わった容器の part 0 が名乗るグラフ名 = manifest の weights のキー。
 
         ランタイムは `prepareContainer(opened, <weights キー>)` でグラフを名前で引く
-        （container-v1 §12）。`karume dist` はこの 2 つを突き合わせない（宣言の構造検査と
-        合流までしか見ない）ので、綴りが割れても**manifest も配置も緑**のまま据わり、
-        利用者の `createSession` で初めて落ちる。疑似系列 1 本ぶんをここで見る。
+        （container-v1 §2.1）。`karume dist` は組み立ての前にこの 2 つを突き合わせる
+        （`DistError`）が、ここは据わった現物の part 0 を読み直して、名乗りがキーそのもので
+        あることを疑似系列 1 本ぶんで見る（門の外で綴りが動いても気づける）。
         """
         out_dir, manifest = vowel_detector_assembled
         weights = _vowel_detector_model(manifest)["weights"]

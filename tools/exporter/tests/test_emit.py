@@ -470,7 +470,7 @@ class TestI8Storage:
         """companion scale は F32 固定（ADR 0019）。writer は F16 もそのまま直列化できる。
 
         逆変換の等値検査は「同じ f16 scale で fake-quant 済み」なら通ってしまうので、
-        検出は計画段の dtype 検査でしか掛からない（後段の `verify_model` は書いた後）。
+        検出は計画段の dtype 検査でしか掛からない（後段の `verify_container` は書いた後）。
         """
         graph, tensors, scales = int8_weight_graph()
         half = {key: value.to(torch.float16) for key, value in scales.items()}
@@ -945,10 +945,10 @@ class TestI4Storage:
         bound(path)
 
     def test_the_i4_file_passes_the_full_verification(self, tmp_path):
-        """emit → verify_model の往復が i4 で最後まで通る（実行 capability は第 3 便で開放済み）。
+        """i4 の書き出しが読み直しと合流の全規則を最後まで通る（実行 capability は開放済み）。
 
-        ここが緑なのは、自前リーダ（`verify._read_container`）が I4 コンテナを読めていること
-        そのもの — `safetensors` の `safe_open` はこのファイルを開けない。宣言・shape・
+        ここが緑なのは、書き出し経路の読み直し（`karume.container.read_container` → 合流
+        `verify.bind_graphs`）が `int4-sym-g` の block を受理できていることそのもの。宣言・shape・
         group 形 scale・runtime support・op 契約の全規則を通る。
         """
         graph, tensors, scales = int4_weight_graph()
@@ -1006,7 +1006,7 @@ class TestI4Storage:
         assert torch.equal(restored, expected)
 
     def test_the_conv1d_i4_file_passes_the_full_verification(self, tmp_path):
-        """emit → verify_model の往復が rank3 の i4 でも最後まで通る。
+        """emit → verify_container の往復が rank3 の i4 でも最後まで通る。
 
         group 形の検査（`_check_group_quantized_shape` / `_assert_scale_tensor`）が rank2 の
         scale を rank3 の重みに対して受理する — ここが同 rank を要求したままだと、書けた
@@ -1092,7 +1092,7 @@ class TestI4Storage:
         bound(path)
 
     def test_the_embedding_i4_file_passes_the_full_verification(self, tmp_path):
-        """emit → verify_model の往復が embedding の i4 でも最後まで通る。
+        """emit → verify_container の往復が embedding の i4 でも最後まで通る。
 
         group 形の検査（`_check_group_quantized_shape` — 最終次元 % group_size）は
         embedding `[V,D]` の D 軸でそのまま成立する。
@@ -1287,7 +1287,7 @@ class TestSuccessLeavesTheGraphUntouched:
         plain = write_component(tmp_path / "plain.safetensors", graph, tensors)
 
         assert stored_layout(plain, "enc.w") == "f32"
-        # 宣言と実体が食い違っていれば verify_model がここで落ちる。
+        # 宣言と実体が食い違っていれば verify_container がここで落ちる。
         assert written_graph(plain).to_dict() == graph.to_dict()
 
 

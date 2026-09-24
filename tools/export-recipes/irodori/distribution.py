@@ -99,7 +99,7 @@ IRODORI_GRAPH_ROLES: tuple[str, ...] = (*IRODORI_SERIES_DIRS, *IRODORI_CODEC_DIR
 
 #: 系列のターゲットディレクトリ名 → 役割名（上の 2 表の逆引き）。**書き手が容器のグラフを
 #: 名乗るための表**で、グラフ名は manifest の weights のキーと一致すること MUST
-#: （container-v1 §12 — ランタイムは `prepareContainer(opened, <weights キー>)` で引く）。
+#: （container-v1 §2.1 — ランタイムは `prepareContainer(opened, <weights キー>)` で引く）。
 #: Irodori はディレクトリ名（`caption-proj` / コーデックの `decoder`）とキー
 #: （`caption_proj` / `codec_decoder`）が綴りから違うので、書き手がディレクトリ名を
 #: そのまま名乗ると**ランタイムがグラフを引けない容器**が黙って焼ける。

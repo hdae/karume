@@ -194,7 +194,7 @@ SBV2_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {
     "voice_i8": ("i4",),
 }
 
-#: 配布形に載る部品名 = manifest の weights のキー = **容器のグラフ名**（container-v1 §12 —
+#: 配布形に載る部品名 = manifest の weights のキー = **容器のグラフ名**（container-v1 §2.1 —
 #: ランタイムは `prepareContainer(opened, <weights キー>)` で名前で引く）。書き手はここから
 #: 引く: `front` / `voice` は `sbv2/export.py` の `TARGET_*`、`text_encoder` は別台本
 #: （`deberta/export.py`）が写しを持つ（produce 側が consume 側を import する向きは作らない

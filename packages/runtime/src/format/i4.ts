@@ -36,8 +36,10 @@ const rowLength = (shape: readonly number[]): number => numel(shape) / shape[0];
  * group 数」と**同値**なので、既存資産の検査結果は 1 件も変わらない。conv1d `[O,Cin,K]` →
  * `[O, (Cin·K)/g]` が唯一の新しい形。
  *
- * MUST: 検査側（format/container.ts）と展開側（{@link decodeI4}）が**この 1 本を共有する**
- * — 2 箇所に規則を書くと、受理した形と展開が読む形が静かに食い違う。
+ * MUST: 検査側（合流層 `format/container/bind.ts` — scale block の長さ `shape[rowAxis] ·
+ * 行長 / groupSize · 4` と group の刻み）と展開側（{@link decodeI4}）は同じ形を前提にする。
+ * 式は今 2 箇所にあるので、片方を変えるときは他方も同じ回で変える — 受理した形と展開が
+ * 読む形が静かに食い違うと、group scale が 1 チャネル 1 値として配られる沈黙誤値になる。
  * NOTE: 割り切れない / 記号次元は非整数・NaN のまま返す（呼び出し側が「形が違う」として
  * fail loudly にする — ここで投げると検査側のエラー型が混ざる）。
  */

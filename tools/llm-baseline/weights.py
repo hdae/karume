@@ -37,7 +37,7 @@ STORAGE_DTYPES = {
     "i2": torch.uint8,
 }
 
-#: 部品名 = 容器が名乗るグラフ名 = manifest の weights キー（container-v1 §12）。
+#: 部品名 = 容器が名乗るグラフ名 = manifest の weights キー（container-v1 §2.1）。
 MODEL_GRAPH = "model"
 
 

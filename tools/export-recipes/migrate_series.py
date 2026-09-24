@@ -146,7 +146,7 @@ class Component:
 
     #: 旧 shard 列が並ぶディレクトリ（`krm` もここへ据わる）。
     directory: Path
-    #: 容器のグラフ名 = 配布形の部品名 = `karume.json` の weights のキー（container-v1 §12）。
+    #: 容器のグラフ名 = 配布形の部品名 = `karume.json` の weights のキー（container-v1 §2.1）。
     graph_name: str
 
     @property

@@ -68,7 +68,7 @@ def _assert_graph_name(graph_name: str) -> str:
     書くので、親ディレクトリ名を既定にすると全系列のグラフ名が `<部品>.staging` になる。
     語彙には `.` が入るので fail loudly もせず、ランタイムが部品名で引いた時点で初めて
     「コンテナにグラフが無い」になる。部品名（= `karume.json` の weights のキー）を知って
-    いるのは呼び手だけなので、呼び手が名乗る（container-v1 §12 — 移行 CLI が使う部品名と
+    いるのは呼び手だけなので、呼び手が名乗る（container-v1 §2.1 — 移行 CLI が使う部品名と
     同じ綴り MUST）。
     """
     if GRAPH_NAME_PATTERN.match(graph_name) is None:
@@ -101,7 +101,7 @@ def publish_model(
 
     `provenance` は**必須**（既定値で出所を偽らない — `license` を落とした配布形を作らない）。
     `graph_name` も**必須**で、綴りは**配布形の部品名 = `karume.json` の weights のキー**
-    MUST（container-v1 §12）— ランタイムは `prepareContainer(opened,
+    MUST（container-v1 §2.1）— ランタイムは `prepareContainer(opened,
     <weights キー>)` でグラフを名前で引き、移行 CLI も同じキーで焼く。**据え替え先の
     ディレクトリ名とは一致しないことがある**（系列直下に容器を置く family は
     `siglip2-so400m-patch14-384` のような系列名が、irodori は `caption-proj` のような

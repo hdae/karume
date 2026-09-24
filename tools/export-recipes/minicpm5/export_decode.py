@@ -518,7 +518,7 @@ def export_series(
         print("[export] states 形へ手術 → 書き出し", file=sys.stderr, flush=True)
         surgical = to_states_form(graph, states_plan(graph, int(config.num_hidden_layers)))
         # グラフ名は**部品名**（1-shot 台本と同じ綴り — `minicpm5.export.GRAPH_NAME`）。
-        # ディレクトリ名から導かない（container-v1 §12）。
+        # ディレクトリ名から導かない（container-v1 §2.1）。
         verified = _write_container(
             surgical, tensors, staging / one_shot.MODEL_FILE, graph_name=one_shot.GRAPH_NAME
         )

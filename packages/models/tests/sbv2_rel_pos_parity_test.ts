@@ -142,7 +142,7 @@ Deno.test({
     // 昇格が効いていれば、T で切り出す `sym_prefix_slice` は 1 本も残らない（残っていたら
     // Tmax=512 の `[1,512,512]` を抱えたまま = 2MiB の死荷重）。値は正しいまま容量だけが
     // 戻る類なので、E2E では捕まらない。
-    // グラフ記述は容器の part 0 にある（container-v1 §12）— 重みの block は 1 つも取らない。
+    // グラフ記述は容器の part 0 にある（container-v1 §8）— 重みの block は 1 つも取らない。
     const model = prepareContainer(
       await openSeriesContainer(new URL(MODEL_FILE, SERIES_ROOT)),
       GRAPH,

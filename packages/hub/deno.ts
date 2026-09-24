@@ -20,7 +20,7 @@ import {
 
 /**
  * root の下の実体を指す位置。文字列 root は**そのまま継ぐ** — manifest の path は POSIX 相対
- * （`transformer/model.safetensors`）で、`..` は parse 時に弾かれている（`ManifestPathError`）
+ * （`transformer/model-00001-of-00004.krm`）で、`..` は parse 時に弾かれている（`ManifestPathError`）
  * ので、`URL` を通して正規化する必要が無い。逆に `URL` を通すと Windows のドライブ文字を
  * `file:` へ写す綴りが要るため、文字列のままの方が壊れにくい。
  */

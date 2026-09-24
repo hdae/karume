@@ -67,7 +67,7 @@ export const externalPath = (path: string): string => {
 export type GraphSource = {
   readonly url: URL;
   /**
-   * 期待するグラフ名。配布形は**部品名 = manifest の weights キー**（container-v1 §12）で、
+   * 期待するグラフ名。配布形は**部品名 = manifest の weights キー**（container-v1 §2.1）で、
    * 名前が容器の宣言と食い違えば {@link readIrGraph} が落とす。
    *
    * 系列出力は manifest を持たないので省略する（`undefined` = 容器が宣言する唯一のグラフ）。
@@ -421,7 +421,7 @@ const resolveDistribution = async (
     return {
       component,
       componentDtype: dtype,
-      // グラフ名 = 部品名（= manifest の weights キー — container-v1 §12）。
+      // グラフ名 = 部品名（= manifest の weights キー — container-v1 §2.1）。
       graph: {
         url: localPart0(variants[dtype].container, root, `component '${component}'`),
         graph: component,

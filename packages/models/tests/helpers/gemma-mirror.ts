@@ -98,7 +98,7 @@ export const openMirrorComponent = async (
     { kind: "source", source: openContainerSource(loaded, container) },
     container.descriptor,
   );
-  // グラフ名 = 配布 manifest の weights キー（書き手の規約 — container-v1 §12）。
+  // グラフ名 = 配布 manifest の weights キー（書き手の規約 — container-v1 §2.1）。
   const prepared = prepareContainer(opened, key);
   return {
     graph: prepared.graph,

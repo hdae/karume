@@ -113,7 +113,7 @@ def _build_series(series_dir: Path, *, method: str = ADALN_I8_CALIB_METHOD) -> P
             series / "transformer" / "model.krm",
             ir_container(
                 mark=f"dit-{storage}",
-                # 疑似系列も**部品名で名乗る**（グラフ名 = weights のキー・container-v1 §12）。
+                # 疑似系列も**部品名で名乗る**（グラフ名 = weights のキー・container-v1 §2.1）。
                 named="transformer",
                 storage=storage,
                 assets={ROPE_BASE_ASSET: rope},

@@ -10,11 +10,11 @@
 **旧形式を読む処理はこの層にだけ置く**（§12）— 新しい読み手は `karume/5` と新コンテナしか読まず、
 両読みは実装しない。ここが動かすのは**容器と宣言の形**だけである:
 
-- **payload の生バイトは 1 バイトも変えない**（`repack.py` の不変条件 1 を継承）。末尾の詰め物は
+- **payload の生バイトは 1 バイトも変えない**。末尾の詰め物は
   §4.1 のとおり**新たに焼かれる**ので、突き合わせるのは block 全体ではなく initializer ごとの
   payload（旧 shard の実体の sha256 = 新 block の payload 部の sha256）。
-- **IR は v1 → v2 へ再 serialize する**（`repack.py` の不変条件 2「`karume_ir` の逐語同一」は
-  退役）。改名と正準直列化は {@link karume.container.ir_v2_document}。
+- **IR は v1 → v2 へ再 serialize する**（逐語同一は保たない）。改名と正準直列化は
+  {@link karume.container.ir_v2_document}。
 - **codec は台帳へ写す**（`i8 → int8-sym` / `i4 → int4-sym-g` / `i2 → int2-off`）。`ternary` へは
   写さない — 値域が部分集合でも「三値である」という主張は量子化器の側がするもの。
 - **`rowAxis` は消費側 op から引く**（`emit.weight_channel_axes` の鏡像 — `conv_transpose1d`
@@ -23,7 +23,7 @@
 
 MUST: 自己検査（書いたものを読み直して initializer ごとに sha256 を突き合わせる）を**通してから
 据える** — 書き出しは一時 path（`.partial`）へ行い、検査が通った回だけ `os.replace` で本番名へ
-移す（`repack.repack_component` と同じ規律）。**旧入力は読むだけ**で、消しも書き換えもしない。
+移す。**旧入力は読むだけ**で、消しも書き換えもしない。
 
 リポ丸ごとモード（`--manifest`）が足すのは 4 つである（ADR 0109 決定 3 / 4 / 8）:
 

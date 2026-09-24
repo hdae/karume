@@ -46,7 +46,7 @@ if (!GPU_AVAILABLE) {
   );
 }
 
-/** 合成配布形の部品名（= グラフ名 — container-v1 §12）。 */
+/** 合成配布形の部品名（= グラフ名 — container-v1 §2.1）。 */
 const COMPONENT = "dit";
 
 /**

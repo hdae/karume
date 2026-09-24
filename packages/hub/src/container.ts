@@ -146,8 +146,8 @@ export const openContainerSource = (
   /**
    * scan 経路の保持枠。**同時に持つのは 1 part ぶんだけ**（別の part を読んだら前を手放す）。
    * 切り出しは器の view なので、枠が握る part の器のほかにホスト RAM は乗らない — 重みの読み手
-   * （runtime の `containerBatches`）は part の全 block の view をフェンスまで溜めるが、どれも
-   * この器の中を指す。part の境界では、手放した器が GC されるまで一時的に 2 part ぶんが生きる。
+   * （runtime の `containerBatches`）は block を 1 本ずつ引いて、上げた反復で手放す（引いた view も
+   * この器の中を指す）。part の境界では、手放した器が GC されるまで一時的に 2 part ぶんが生きる。
    *
    * MUST: **in-flight の全量読みも同じ席に置く** — 席を「決着したバイト列」だけにすると、同じ
    * part への並行 read が全員 readFile へ入り、その瞬間だけ part 長 × 本数が生きる。

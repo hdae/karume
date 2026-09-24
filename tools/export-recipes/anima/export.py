@@ -201,7 +201,7 @@ DEFAULT_OUT_ROOTS = {
 
 #: ターゲット名 = **部品名**（= karume.json の weights のキー = 容器のグラフ名）。綴りの
 #: 正本は torch を要らない側（`anima/distribution.py`）— 系列ディレクトリ名も同じ綴りに
-#: なるが、書き手は作業席へ書くのでディレクトリからは導かない（container-v1 §12）。
+#: なるが、書き手は作業席へ書くのでディレクトリからは導かない（container-v1 §2.1）。
 TARGET_TEXT_ENCODER = ANIMA_TEXT_ENCODER_ROLE
 TARGET_TEXT_CONDITIONER = ANIMA_TEXT_CONDITIONER_ROLE
 TARGET_TRANSFORMER = ANIMA_TRANSFORMER_ROLE
@@ -1124,7 +1124,7 @@ def emit_target(target: str, args: argparse.Namespace, out_dir: Path) -> dict[st
             staged / MODEL_FILE,
             provenance=PROVENANCE,
             # グラフ名は**部品名**（= karume.json の weights のキー）。ターゲット名が
-            # そのまま部品名なので、ディレクトリ名からは導かない（container-v1 §12）。
+            # そのまま部品名なので、ディレクトリ名からは導かない（container-v1 §2.1）。
             graph_name=target,
             assets=_host_table_assets(component),
             dynamic_shapes=component.dynamic_shapes,

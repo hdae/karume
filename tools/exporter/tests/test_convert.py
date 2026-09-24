@@ -744,7 +744,7 @@ class SymbolicCatJoin(nn.Module):
 
 
 class TestSymbolicCatEndToEnd:
-    """記号軸 cat のグラフが export → 書き出し → verify_model まで通る（ADR 0046）。"""
+    """記号軸 cat のグラフが export → 書き出し → verify_container まで通る（ADR 0046）。"""
 
     def test_a_derived_input_dimension_survives_the_range_constraint_scan(self, tmp_path, dyn_t):
         """MUST: 派生次元は range_constraints に **sympy の `Add`** としても並ぶ。

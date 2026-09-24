@@ -1,4 +1,5 @@
-"""IR v1（docs/ir-v2.md）のグラフ表現と JSON 直列化。
+"""IR v1（docs/ir-v2.md）のグラフ表現と JSON 直列化 — exporter 内部の器。配布形へは
+`karume.container.ir_v2_document` が v2 の文書へ写して書く。
 
 TS 側の型は packages/runtime/src/format/ir.ts。ここは「エクスポータが組み立てる側」の器で、
 規則の検査は verify.py が受け持つ（組み立てと検査を同じ関数に混ぜると、

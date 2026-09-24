@@ -451,7 +451,7 @@ class TestWhatIsNotConverted:
 class TestTheFamilyTableMatchesTheDistributionDeclarations:
     """部品名の表が `<family>/distribution.py` の weights と食い違っていないこと。
 
-    ドライバが名乗る綴りは配布形の部品名そのもの（container-v1 §12）なので、片方だけ動いた
+    ドライバが名乗る綴りは配布形の部品名そのもの（container-v1 §2.1）なので、片方だけ動いた
     日に「移行した容器だけがランタイムから引けない」形になる。
     """
 

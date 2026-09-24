@@ -137,7 +137,7 @@ INPUT_ORDER: tuple[str, ...] = ("input_ids", "attention_mask", "c2p_pos", "p2c_p
 MODEL_FILE = "model.krm"
 
 #: 容器のグラフ名 = **配布形の部品名**（= `karume.json` の weights のキー —
-#: container-v1 §12）。この台本は SBV2 の `text_encoder` 席を焼くだけなので、正本は消費側
+#: container-v1 §2.1）。この台本は SBV2 の `text_encoder` 席を焼くだけなので、正本は消費側
 #: （`sbv2.distribution.SBV2_TEXT_ENCODER_COMPONENT`）にある。
 #:
 #: MUST: 綴りは読み手と一致させる。写しを持つのは {@link LICENSE} と同じ理由 — produce 側が

@@ -2407,7 +2407,7 @@ def export_series(
                 provenance=PROVENANCE,
                 # グラフ名は**部品名**（= karume.json の weights のキー）。ディレクトリ名
                 # とは綴りが違う（`caption-proj` → `caption_proj`）ので逆引き表を通す
-                # （container-v1 §12）。
+                # （container-v1 §2.1）。
                 graph_name=IRODORI_SERIES_ROLES[target],
                 dynamic_shapes=tuple(
                     _dynamic_axis(axis.dynamic.get(index), seq) for index in range(len(example))

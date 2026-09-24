@@ -183,7 +183,8 @@ def publish_container(
     走査で **2 度引く**ので、同じキーからは毎回同じバイト列が返る MUST。
 
     `part_bytes` / `block_bytes` は寸法の差し込み（テストが小さな資産で part またぎと piece
-    分割を踏むための席）— 既定を動かすのは段 3e の実測後（container-v1 §4.2）。
+    分割を踏むための席）。既定値は、`part_bytes` が container-v1 §4.2 の既定（256 MiB）、
+    `block_bytes` が §4.1 / §10 の block 上限（32 MiB）である。
 
     MUST: 呼び手は**作業席**（`karume.artifacts.staged_publication` の中）へ据える。据え替えの
     途中で落ちた回は「据えかけた part を消して何も残さない」で閉じるので、`final` が

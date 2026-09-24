@@ -239,7 +239,7 @@ def _irodori_input(dtype: str, role: str, spec: _Spec | None = None) -> list[byt
     return ir_container(
         mark=f"irodori-{role}-{dtype}",
         # 疑似系列も**部品名で名乗る**（容器のグラフ名 = manifest の weights のキー
-        # MUST・container-v1 §12 — 組み立ての門がこの一致を見る）。
+        # MUST・container-v1 §2.1 — 組み立ての門がこの一致を見る）。
         named=role,
         storage=dtype,
         inputs=tuple((name, shape) for name, shape in inputs),

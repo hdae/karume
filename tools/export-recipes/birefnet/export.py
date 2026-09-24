@@ -572,7 +572,7 @@ def export_series(
             provenance=PROVENANCE,
             # グラフ名は**部品名**（= karume.json の weights のキー）。ディレクトリ名から
             # 導かない — この family の容器は系列直下に据わるので、ディレクトリ名は系列名
-            # （`birefnet-hr-<解像度>`）であって部品名ではない（container-v1 §12）。
+            # （`birefnet-hr-<解像度>`）であって部品名ではない（container-v1 §2.1）。
             graph_name=BIREFNET_ROLE,
             symbol_names=(),
         )

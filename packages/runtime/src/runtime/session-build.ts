@@ -175,7 +175,8 @@ export type ReadyInitializer = {
  *
  * MUST: `Float32Array` の view はコピーせずに張る（scale は重み本体に比べれば小さいが、
  * ここで無条件コピーを挟むと「生バイトのまま常駐」の経路が二重確保になる）。バイト位置の
- * 4 バイト整列は供給元が保証する（safetensors の F32 / コンテナの 64 B 整列 block）。
+ * 4 バイト整列は供給元が保証する（コンテナの 64 B 整列 block / メモリ内容器の scale の
+ * `byteOffset % 4` の門）。
  */
 const scaleTensor = (
   item: ReadyInitializer,
@@ -264,9 +265,12 @@ export type WeightBatch = {
    * part の block の実体列。1 本引くたびに block を 1 本読む（lazy）ので、消費側は 1 本ずつ
    * 上げて手放す — `queue.writeBuffer` は呼んだ時点でバイト列を写す（WebGPU 仕様）ので、
    * フェンスまで握らない。JS 側に生きる重みのバイト列は part 1 本ではなく item 1 本（block 1 本
-   * + piece 1 なら同乗する scale の block + 展開席ならその f32 展開結果）になる。scan 型の取得元
-   * （hub）では block が保持枠の器の view なので、上限は保持枠 1 本（part 境界では GC まで 2 part）
-   * のまま（container-v1 §11）。
+   * + piece 1 なら同乗する scale の block + 展開席ならその f32 展開結果）と、展開席の piece 列の
+   * 間だけ生きる持ち越し scale の写し（その initializer の scale 全量 — piece 1 で写し、最後の
+   * piece で手放す）になる。scan 型の取得元（hub）では block と同乗 scale が保持枠の器の view
+   * なので、そこに保持枠 1 本 + GC を待つ器が重なる（持ち越し scale の写しと展開結果は値なので
+   * scan 型でも保持枠の外に乗る）。GC を待つ器の本数は宣言からは閉じない — 実測では external
+   * 最大が最大 part の約 1.5〜4.4 本だった（container-v1 §11）。
    *
    * MUST: 1 度だけ、次の batch を引く前に最後まで回す。scan 型の取得元（hub）は part 順の
    * 直列読みを前提に part を 1 枠だけ保持するので、途中で次の part を引くと part 全量の

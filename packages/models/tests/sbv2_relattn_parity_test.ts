@@ -127,7 +127,7 @@ for (const target of TABLE_INPUT_TARGETS) {
       // `idx_v` はコンテナに焼き込まれていて幅が `2w+1`**。ここが TS の窓幅定数と食い違えば
       // ホストは違う幅の埋め込みを前提に添字を作っている — shape エラーにならず黙って
       // 誤るクラスなので、コンテナから読んだ幅で TS 側の定数を検算する。
-      // グラフ記述は容器の part 0 にある（container-v1 §12）— 重みの block は 1 つも取らない。
+      // グラフ記述は容器の part 0 にある（container-v1 §8）— 重みの block は 1 つも取らない。
       // グラフ名は helpers/series-graphs.ts の 1 本から引く（門番と同じ正本）。この系列では
       // 部品ディレクトリ名と同じ綴りになるが、それは事実であって規則ではない。
       const opened = await openSeriesContainer(new URL(`${target}/${MODEL_FILE}`, MODELS_ROOT));

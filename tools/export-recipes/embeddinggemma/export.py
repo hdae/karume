@@ -85,7 +85,7 @@ DEFAULT_OUT_DIR = SERIES_ROOT / "embeddinggemma-300m"
 MODEL_FILE = "model.krm"
 
 #: 容器のグラフ名 = **配布形の部品名**（= `karume.json` の weights のキー —
-#: container-v1 §12）。この recipe は配布形を組まない（`distribution.py` が無い）が、グラフ名は
+#: container-v1 §2.1）。この recipe は配布形を組まない（`distribution.py` が無い）が、グラフ名は
 #: ランタイムが `prepareContainer(opened, <weights キー>)` で引く綴りなので、組む日が来た
 #: ときに据わっている容器がそのまま使えるよう、**部品 1 つの系列の慣例**（`model`）で
 #: 名乗っておく。系列ディレクトリ名（`embeddinggemma-300m`）とは一致しない。
