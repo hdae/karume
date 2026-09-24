@@ -14,25 +14,25 @@ deno task demo:qwen3 --completion --prompt "The capital of France is" --max-new-
 printf '%s\n' 'Explain WebGPU briefly.' | deno task demo:qwen3
 ```
 
-The CLI prefers local GPTQ i4, then i8, RTN i4, f16, and f32. It searches `outputs/series/` for
-`qwen3-06b-<quant>/`, then for the matching dated experiment directory
-(e.g. `qwen3-06b-gptq-i4-2026-09-10-probe/`). For f32, the dated directory omits `-f32`.
-Multiple dated directories for the same quant require an explicit selection; it never silently
-chooses the newest weights. The selected path is printed to stderr.
+The CLI prefers local GPTQ i4, then i8, RTN i4, f16, and f32: it picks the first
+`outputs/series/qwen3-06b-<quant>/` that exists. The selected path is printed to stderr. Dated
+experiment directories (`qwen3-06b-…-YYYY-MM-DD-probe/`) are in the earlier safetensors form; the
+CLI does not read them, and names them in its error instead of skipping them silently.
 
 ```sh
 deno task demo:qwen3 \
-  --source outputs/series/qwen3-06b-gptq-i4-2026-09-10-probe \
+  --source outputs/series/qwen3-06b-gptq-i4 \
   --tokenizer inputs/qwen3/Qwen3-0.6B/tokenizer.json \
   --prompt "日本の首都を都市名だけで答えてください。" --json
 ```
 
-`--source` takes an exporter **series directory**, containing `model.safetensors` or its numbered
-shards. These experimental models do not yet have a public karume distribution. No model is downloaded
-or converted automatically, and original Hugging Face weights cannot be passed directly to `--source`.
-The default tokenizer is `inputs/qwen3/Qwen3-0.6B/tokenizer.json` from the official local model.
-Use `--source` to select another series, or `--quant` to select a quantization; the two options are
-mutually exclusive.
+`--source` takes an exporter **series directory** holding the container as a part sequence
+(`model-NNNNN-of-NNNNN.krm`, graph name `model`). This repository has no recipe that produces such a
+series for Qwen3 today, and these experimental models do not have a public karume distribution. No
+model is downloaded or converted automatically, and original Hugging Face weights cannot be passed
+directly to `--source`. The default tokenizer is `inputs/qwen3/Qwen3-0.6B/tokenizer.json` from the
+official local model. Use `--source` to select another series, or `--quant` to select a
+quantization; the two options are mutually exclusive.
 
 | Option                 | Default | Meaning                                                                  |
 | ---------------------- | ------- | ------------------------------------------------------------------------ |

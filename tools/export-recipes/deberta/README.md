@@ -57,35 +57,36 @@ uv run --with 'transformers==5.14.1' python -m deberta.export --dtype i4 --layer
   growth stays readable off the goldens (ADR 0026).
 
 ```
-outputs/series/deberta/dev-2layer/model.safetensors      2 layers (130 nodes / 208MB)
+outputs/series/deberta/dev-2layer/model-NNNNN-of-NNNNN.krm      2 layers (130 nodes / 208MB)
 outputs/series/deberta/dev-2layer/io.<case>.safetensors
-outputs/series/deberta/sbv2-22layer/model.safetensors    22 layers (1 output) — the f32 counterpart
-                                                         of the shipped i8 / i4 series
+outputs/series/deberta/sbv2-22layer/model-NNNNN-of-NNNNN.krm    22 layers (1 output) — the f32
+                                                                counterpart of the shipped i8 / i4 series
 outputs/series/deberta/sbv2-22layer/io.<case>.safetensors
-outputs/series/deberta/full-24layer/model.safetensors    24 layers (1230 nodes / 1.32GB / 25 outputs)
+outputs/series/deberta/full-24layer/model-NNNNN-of-NNNNN.krm    24 layers (1230 nodes / 1.32GB / 25 outputs)
 outputs/series/deberta/full-24layer/io.<case>.safetensors
 
-outputs/series/deberta-i8/dev-2layer/model.safetensors        2 layers in i8 storage
-outputs/series/deberta-i8/sbv2-22layer/model.safetensors      22 layers in i8 storage (1130 nodes /
-                                                              294.5MB / 1 output) — shipped
-outputs/series/deberta-i8/full-24layer/model.safetensors      24 layers in i8 storage (319MB)
+outputs/series/deberta-i8/dev-2layer/model-NNNNN-of-NNNNN.krm   2 layers in i8 storage
+outputs/series/deberta-i8/sbv2-22layer/model-NNNNN-of-NNNNN.krm 22 layers in i8 storage (1130 nodes /
+                                                                294.5MB / 1 output) — shipped
+outputs/series/deberta-i8/full-24layer/model-NNNNN-of-NNNNN.krm 24 layers in i8 storage (319MB)
 outputs/series/deberta-i8/<variant>/io.<case>.safetensors       w8 goldens (activations in f32)
 outputs/series/deberta-i8/<variant>/io-i8a8.<case>.safetensors  w8a8 mirror (--act-quant)
 
-outputs/series/deberta-i4/sbv2-22layer/model.safetensors      22 layers, linear in i4 / the rest in
-                                                              i8 (1128 nodes / 202.5MB / 1 output)
-outputs/series/deberta-i4/sbv2-22layer/io.<case>.safetensors  goldens taken after the i4 rounding
+outputs/series/deberta-i4/sbv2-22layer/model-NNNNN-of-NNNNN.krm 22 layers, linear in i4 / the rest in
+                                                                i8 (1128 nodes / 202.5MB / 1 output)
+outputs/series/deberta-i4/sbv2-22layer/io.<case>.safetensors    goldens taken after the i4 rounding
 
-outputs/series/<series>/<variant>/export_provenance.json      the symbolic-dimension ceiling this
-                                                              variant was baked at (--sym-max)
+outputs/series/<series>/<variant>/export_provenance.json        the symbolic-dimension ceiling this
+                                                                variant was baked at (--sym-max)
 ```
 
-`model.safetensors` above names the **component**, not one file: every container is written as a
-numbered shard sequence — `model-00001-of-00003.safetensors` (graph only, no tensors) followed by
-`model-00002-of-00003.safetensors` … (the weight shards; ADR 0081), and the byte counts are the
-component totals. `export_provenance.json` is the only way the `--sym-max` ceiling travels: DeBERTa
-promoted its relative-position index tables to graph **inputs** (ADR 0045 wave 3), so no baked
-constant carries that ceiling any more and the distribution recipe has to read the record instead
+Each container is one component written as a numbered part sequence — `model-00001-of-00003.krm`
+(the header and the two descriptors, no weights), `model-00002-of-00003.krm` (the const region) and
+the weight parts after it (container-v1 §8) — and the byte counts are the component totals. The node
+counts and byte sizes above are point-in-time values measured on the earlier safetensors form.
+`export_provenance.json` is the only way the `--sym-max` ceiling travels: DeBERTa promoted its
+relative-position index tables to graph **inputs** (ADR 0045 wave 3), so no baked constant carries
+that ceiling any more and the distribution recipe has to read the record instead
 (`sbv2.distribution.assert_sym_provenance`).
 
 The io tensor key naming is the same as the tiny goldens (`input.<graph input name>` /

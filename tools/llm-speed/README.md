@@ -1,8 +1,9 @@
 # LLM generation speed baseline
 
 Compare Deno/WebGPU with the official PyTorch/Transformers implementations using the same local
-model assets, input token IDs, stop tokens, greedy sampling, and timing definitions. Supports
-`gemma4-e2b`, `gemma4-e4b`, `gemma4-qat-e2b`, `gemma4-qat-e4b`, `minicpm5-2b`, and `qwen3-06b`.
+model assets, input token IDs, stop tokens, greedy sampling, and timing definitions. Supports the
+local distributions `gemma4-e2b`, `gemma4-qat-e2b`, and `gemma4-qat-e4b` (the profile table in
+`../llm-baseline/data.py`, which lists only distributions in container form).
 Run commands from the repository root. Only the selected model needs to be present locally.
 
 ## Prepare an isolated Python environment
@@ -29,14 +30,14 @@ fallback. CPU is available through `--device cpu`, but its numbers are a separat
 
 ```sh
 "$speed_dir/venv/bin/python" tools/llm-speed/prepare.py \
-  --model qwen3-06b \
-  --checkpoint inputs/qwen3/Qwen3-0.6B \
-  --source outputs/series/qwen3-06b-gptq-i4-2026-09-10-probe \
+  --model gemma4-e2b \
+  --checkpoint inputs/gemma4/gemma-4-E2B-it \
+  --source models/karume-gemma4 \
   --out "$speed_dir/inputs"
 ```
 
 `--checkpoint` points to the official local configuration and tokenizer directory. `--source` points
-to the converted series for MiniCPM5/Qwen3, or the distribution root for normal/QAT Gemma. Defaults
+to the distribution root (the directory holding `karume.json`) for normal or QAT Gemma. Defaults
 are the explicit local profiles in `../llm-baseline/data.py`; override them when your paths differ.
 Preparation reads only local files. If the checkpoint lacks its official chat template, provide that
 file with `--chat-template /path/to/chat_template.jinja`; the tool does not invent a template.
@@ -61,7 +62,7 @@ PYTHONPATH=tools/exporter/src:tools/export-recipes \
 Run only one GPU job at a time, including GPU tests. Every output directory must be new. Failed and
 interrupted runs preserve their artifacts; retry in a new directory. The tools never modify model
 assets. Normal models can also be measured with `--dtype bfloat16` or `float16`, as a separate
-precision condition. Normal E4B's dense float32 weights alone exceed the RTX 3080 Ti's memory;
+precision condition. When the dense weights in the chosen dtype do not fit the free GPU memory,
 `capacity.json` records that rejection before transfer, with no hidden offload or dtype change.
 
 Both runners support `--warmups 1 --repeats 3` (defaults). PyTorch additionally accepts
@@ -105,9 +106,10 @@ dequantization just to read a PAD row. Use `--qat-model conditional` to measure 
 PAD lookup; the text path is validated separately and is not a silent fallback.
 
 Normal Gemma's large per-layer embedding (PLE) table uses CPU row lookup and transfers selected rows
-in PyTorch. Deno uses its default host PLE cache budget (two largest shards); QAT PyTorch keeps packed
-PLE on the device. These placements are recorded. PyTorch uses dynamic KV cache, SDPA attention by
-default, and no `torch.compile`. Float32 matrix multiplication precision is set to `highest`.
+in PyTorch. Deno uses its default host PLE cache budget (two largest PLE blocks); QAT PyTorch keeps
+packed PLE on the device. These placements are recorded. PyTorch uses dynamic KV cache, SDPA
+attention by default, and no `torch.compile`. Float32 matrix multiplication precision is set to
+`highest`.
 
 `--weights source` measures the unconverted normal checkpoint and requires its original weight
 files. It is a different weight condition. Stored normal runs only need the official configuration,

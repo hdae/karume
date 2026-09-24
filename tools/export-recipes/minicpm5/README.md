@@ -35,8 +35,8 @@ when either is lost:
 Output layout:
 
 ```
-outputs/series/minicpm5-1b/model.safetensors     weights/constants + __metadata__.karume_ir
-outputs/series/minicpm5-1b/io.<case>.safetensors input tensors and expected outputs from torch CPU
+outputs/series/minicpm5-1b/model-NNNNN-of-NNNNN.krm  the container: graph + weights/constants as a part sequence
+outputs/series/minicpm5-1b/io.<case>.safetensors      input tensors and expected outputs from torch CPU
 ```
 
 The io tensor key convention is the same as the tiny goldens, DeBERTa and EmbeddingGemma
@@ -80,9 +80,9 @@ Two structural differences from the 1-shot recipe, and the export fails loudly w
 Output layout:
 
 ```
-outputs/series/minicpm5-1b-decode/model.safetensors         weights/constants + karume_ir
-outputs/series/minicpm5-1b-decode/io.<case>.safetensors     unpadded inputs and expected outputs
-outputs/series/minicpm5-1b-decode/greedy.<case>.safetensors greedy continuation of K = 16 steps
+outputs/series/minicpm5-1b-decode/model-NNNNN-of-NNNNN.krm  the container: graph + weights/constants as a part sequence
+outputs/series/minicpm5-1b-decode/io.<case>.safetensors      unpadded inputs and expected outputs
+outputs/series/minicpm5-1b-decode/greedy.<case>.safetensors  greedy continuation of K = 16 steps
 ```
 
 The `io.*` files use the same key convention as the 1-shot series and cover all four cases at their

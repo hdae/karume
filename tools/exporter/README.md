@@ -1,23 +1,28 @@
 # Karume exporter (core)
 
-Python tooling that lowers `torch.export`-ed models into Karume's **IR v1**
-([../../docs/ir-v2.md](../../docs/ir-v2.md)). Managed with uv; CPU-only torch (no GPU required).
+Python tooling that lowers `torch.export`-ed models into Karume's IR and writes them as Karume
+containers — [../../docs/ir-v2.md](../../docs/ir-v2.md) specifies the graph JSON and
+[../../docs/container-v1.md](../../docs/container-v1.md) the file format. Managed with uv; CPU-only
+torch (no GPU required).
 
-The distribution form is a **graph shard followed by a sequence of weight shards**, always numbered
-`-NNNNN-of-NNNNN`. The leading shard carries the graph JSON under the `__metadata__` key `karume_ir`
-and nothing else (its data section is empty, and `karume_ir` appears in that shard only); the
-tensors (weights and constants) live in the weight shards after it. Every shard is at most **256 MiB
-measured as the file length**, and a tensor that does not fit one shard is split into row-range
-pieces spread over consecutive shards. The single-file distribution form was retired (ADR
-[0081](../../docs/decisions/0081-shard-spec-v2.md) /
-[0090](../../docs/decisions/0090-shard-spec-v3-tensor-pieces.md)).
+The distribution form is a **`krm` container** (ADR
+[0108](../../docs/decisions/0108-container-format.md)), written as a numbered part sequence
+`<stem>-NNNNN-of-NNNNN.krm`. Part 0 holds a 24-byte header and two JSON descriptors: the graph
+descriptor carries the IR v2 graphs, and the model descriptor carries the binding table (which
+initializer is supplied by which block, with which codec), the block and part tables, and the
+provenance. Part 1 is the const region (a zero-length file when there are no constants), and parts
+2 onward hold the weight and asset blocks. A **block** — at most 32 MiB, 64-byte aligned,
+zero-padded to a multiple of 4 bytes — is the unit that is fetched, checked against its sha256 and
+released. A **part** — 256 MiB by default; 512 / 768 / 1024 MiB can be chosen — is the unit that is
+transferred. A tensor larger than one block is bound as row-range pieces. The retired safetensors
+distribution form is read only by `karume migrate`.
 
 The PyPI distribution `karume` is the **generic exporter core only** — the export path (dims / ir /
-ops / shapes / convert / aten_handlers / normalize / quantize / act_quant / emit / verify /
-pipeline / goldens / golden_models), the sharding and distribution layer, and the generic
-model-card renderer; the full list is the module table below. Model-specific recipes — patch
-layers, export scripts, reference pipelines, dist recipes, card templates and their provenance —
-live outside the wheel in [`../export-recipes/`](../export-recipes/README.md), and the dependency
+ops / shapes / convert / aten_handlers / normalize / quantize / act_quant / emit / verify / pipeline
+/ goldens / golden_models), the container writer and the distribution layer, and the generic
+model-card renderer; the full list is the module table below. Model-specific recipes — patch layers,
+export scripts, reference pipelines, dist recipes, card templates and their provenance — live
+outside the wheel in [`../export-recipes/`](../export-recipes/README.md), and the dependency
 direction is **recipe → core only** (ADR
 [0065](../../docs/decisions/0065-exporter-core-recipe-split.md), enforced by
 `tests/test_architecture_boundary.py`).
@@ -45,14 +50,26 @@ op survives `run_decompositions` as a single node instead of unrolling T times.
 ## Usage (from a script)
 
 ```python
-from karume import export_to_file
+from karume import Provenance, export_to_file
 
-graph = export_to_file(module, (x,), "model.safetensors", dynamic_shapes=({0: dim},))
+graph = export_to_file(
+    module,
+    (x,),
+    "model.krm",
+    provenance=Provenance(license="apache-2.0"),
+    graph_name="model",
+    dynamic_shapes=({0: dim},),
+)
 ```
 
-`export_to_file` runs export → normalize → convert → write → **verify**. It is the gate that keeps a
-file that was written but cannot be read by the runtime from being left behind as a distributable,
-so the path is never branched.
+`export_to_file` runs export → normalize → convert → write → **re-read and verify** → swap into
+place (`publish_model`). It is the gate that keeps a file that was written but cannot be read by the
+runtime from being left behind as a distributable, so the path is never branched. Two keyword
+arguments are required and have no default. `provenance` names the license identifier (never the
+license text), so a distributable cannot misstate its provenance by accident. `graph_name` is the
+component name — the `weights` key in `karume.json` — under which the runtime looks the graph up
+(container-v1 §2.1); it is spelled by the caller, never derived from the output directory. The
+container lands next to `path` as `model-NNNNN-of-NNNNN.krm`, and `path` itself is not written.
 
 ## CLI (`karume`)
 
@@ -63,11 +80,11 @@ the CLI — for example `karume dist --card-profile`, which is required only whe
 offers more than one attribution profile, a rule the body derives from the registry it is handed.
 Dispatch is a lazy import.
 
-| Subcommand      | Wrapped body                                                                              |
-| --------------- | ----------------------------------------------------------------------------------------- |
-| `karume dist`   | `karume.dist` (assembles the distribution form from the pipeline registry it is handed)   |
-| `karume verify` | `karume.verify` (validates the distribution form against every IR v1 rule)                |
-| `karume repack` | `karume.repack` (repacks a component into the current shard rules — no tensor byte moves) |
+| Subcommand       | Wrapped body                                                                                                                            |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `karume dist`    | `karume.dist` (assembles the distribution form — `krm` parts plus a `karume/5` `karume.json` — from the pipeline registry it is handed) |
+| `karume migrate` | `karume.migrate` (converts the retired safetensors form into `krm` / `krg`; the input is only read)                                     |
+| `karume verify`  | `karume.verify` (validates a `krm` / `krg` container: both descriptors, the merge of graph and binding table, and every block's sha256) |
 
 There is no `export-*` among them: every export script left the wheel for
 `tools/export-recipes/<family>/`, and so did the loader that used to read a script by path (ADR
@@ -78,10 +95,27 @@ and the repository's own spellings for `--series` and `--out`. The seat stays he
 assembly engine itself is core (ADR 0065 decision 1).
 
 ```sh
-uv run karume verify ../../models/karume-anima/shared/transformer/model.f16-00001-of-00017.safetensors
+uv run karume verify ../../models/karume-irodori-v4.1-small/v4.1-small/dit/model.i8.krm
 ```
 
-`karume migrate --part-bytes {256,512,768,1024}` picks the part length in MiB from the writer's choice set (container-v1 §4.2 / ADR 0108 — default 256; any other value fails loudly).
+`karume verify` accepts part 0, a single-file container, or the representative path
+(`model.i8.krm`); a split container is verified as its whole numbered part sequence.
+
+`karume migrate` has two modes, and neither modifies its input. **Component mode** converts the
+components given by their representative paths (`model.f16.safetensors`, or the actual
+`-00001-of-0000N` file): `karume migrate <path>... --out <dir> --license <id> [--graph-name <name>]
+[--single] [--graph]`. The graph name defaults to the parent directory's name; `--graph-name`
+overrides it and is accepted only when a single path is given. **Repository mode**
+(`--manifest <karume.json>`) reads a whole `karume/4` distribution, converts every component and
+writes a `karume/5` manifest. `--license` is required in both modes.
+`--part-bytes {256,512,768,1024}` picks the part length in MiB from the writer's choice set
+(container-v1 §4.2 / ADR 0108 — default 256; any other value fails loudly). The output is written as
+`.partial` and swapped into place only after the self-check, which compares every initializer's
+payload bytes with the old file, passes. To convert the series outputs of the recipes, use the
+repository driver
+[`tools/export-recipes/migrate_series.py`](../export-recipes/README.md#series-migration-driver)
+instead: it knows which directory holds which component, and the graph name is the component name,
+not the directory name.
 
 ### `karume dist` — the assembly engine
 
@@ -137,8 +171,8 @@ golden, is the implementation contract (ADR 0005).
 ### Golden layout
 
 ```
-packages/runtime/tests/fixtures/golden/<model>/model.safetensors   weights/constants + __metadata__.karume_ir
-packages/runtime/tests/fixtures/golden/<model>/io.safetensors      input tensors and expected outputs from torch CPU
+packages/runtime/tests/fixtures/golden/<model>/model-NNNNN-of-NNNNN.krm   the container (graph + weights/constants) as a part sequence
+packages/runtime/tests/fixtures/golden/<model>/io.safetensors             input tensors and expected outputs from torch CPU
 ```
 
 Tensor key naming convention in `io.safetensors`:
@@ -149,7 +183,7 @@ Tensor key naming convention in `io.safetensors`:
 | `output.<i>`   | `<i>` is the **position in `graph.outputs`** (0-based).       |
 
 Symbolic dimension bindings are not stored separately — they come from the dimension positions of
-the input shapes (the same binding rule as IR v1: for a dimension that appears with coefficient 1
+the input shapes (the same binding rule as the IR: for a dimension that appears with coefficient 1
 and offset 0, such as `"T"`, its actual length is the bound value). The current goldens bake every
 symbolic dimension to `GOLDEN_T`.
 
@@ -264,11 +298,11 @@ other 4 ops.
 ## Compressed weight storage (f16 / i8 / i4 — ADR 0018 / 0019 / 0069)
 
 Storage compression is emit-side and model-independent: which initializers may be stored
-compressed, how the fake-quant is defined, and in what order the tensors are written. The
+compressed, how the fake-quant is defined, and what is handed to the container. The
 per-model measurements these rules were derived against stay with the recipes (for example
 [`../export-recipes/anima/README.md`](../export-recipes/anima/README.md)).
 
-### Eligibility and write order
+### Eligibility and placement
 
 **Eligibility is the AND of 2 conditions** (`src/karume/emit.py`):
 
@@ -285,24 +319,13 @@ per-model measurements these rules were derived against stay with the recipes (f
 Specifying f16 while 0 tensors are eligible also fails with `EmitError` (the writer-side counterpart
 of ADR 0006's "never let 0MB eligible stay silent").
 
-**safetensors ordering** (`docs/limitations.md`): Karume's reader requires the data section to be
-covered "without gaps and aligned to the element size", so placing an F32 / I32 tensor immediately
-after an **F16 with an odd element count** (byte length ≡ 2 mod 4) makes loading fail on an
-alignment violation. Ordering is the exporter's responsibility, so it does not use `save_file` but
-decides the order and writes the file itself (never entrusting the order to the implementation
-detail of an external library):
-
-    F32 (name ascending) → I32 (name ascending) → even-count F16 → **odd-count F16 (last)**
-
-Everything before the odd F16 group has a length that is a multiple of 4, so the cumulative offset
-stays a multiple of 4, and odd F16 tensors among themselves only need 2-byte alignment. Right after
-writing, `verify_model` runs a **check that transcribes Karume's reader rules**
-(`assert_reader_layout`) — HF's `safe_open` **can still read** files with alignment violations, so
-going through it alone would not detect the problem (the fault injection in `tests/test_emit.py`
-demonstrates this). For a file that contains no f16 / i8 at all, this ordering is **byte-identical**
-to the output of `save_file` (confirmed on the 29 f32 tiny goldens — the f32-series assets do not
-move by a single byte when the writer is swapped; only `i8_weights`, the 30th, uses compressed
-storage).
+**Placement is the container's job** (`karume.container`, container-v1 §4.1): every block starts
+64-byte aligned and is zero-padded to a multiple of 4 bytes, so the order in which tensors of
+different storage dtypes are written has no effect on alignment. `emit` decides only which storage
+each initializer gets, and hands the raw bytes plus their encodings to the container
+(`stored_model`). Right after writing, `publish_model` reads the container back and compares the
+payload bytes of every initializer and scale, by sha256, with what it was handed; only then does it
+swap the result into place.
 
 ### Per-channel int8 (`--dtype i8`)
 
@@ -318,8 +341,8 @@ storage).
   `packages/runtime/src/ops.ts`), the conformance table (`channel_axis` in
   `packages/runtime/tests/fixtures/op-contracts.json`) cross-checks from both sides.
 - Matching is by **FQN** (`<module>.weight`) — `id(tensor)` is not used (ADR 0006). `convert.py`
-  uses the FQN verbatim as the safetensors tensor key, so it meshes with the emit side in the same
-  namespace.
+  uses the FQN verbatim as the tensor key, which also becomes the initializer name in the
+  container (container-v1 §13.1), so it meshes with the emit side in the same namespace.
 - 0 targets fails loudly with `QuantizeError` (never silently allowing "`--dtype i8` was given, yet
   what got written is effectively f32").
 
@@ -327,38 +350,37 @@ storage).
 shared). The second one, "inverse-transform bit equality", becomes `torch.equal(q8.to(f32) · scale,
 t)` for i8. **The scale written out is exactly the one the fake-quant used** (never recomputed).
 
-**Companion scales**: an F32 tensor named `karume.scale.<weight key>` goes into the same file, and
-the IR declares that key explicitly via `storage.scale` (**mandatory for `i8`** — defaulting it to
-1.0 would turn a forgotten declaration into "a weight dequantized with 1.0 on every channel", which
-would load and run just fine). Name collisions with real tensors are checked before writing.
-
-**Ordering**: I8 has an element size of 1 and therefore no alignment constraint, but it does produce
-**arbitrary byte lengths**, so it goes after the existing F16 rules = **last**. Placing it earlier
-would push the following absolute offsets off the multiple of their element size (the fault
-injection in `test_emit.py` demonstrates this — HF's `safe_open` can still read them).
-
-    F32 (name ascending) → I32 → even-count F16 → odd-count F16 → **I8 (last)**
+**Companion scales**: the exporter keys the scale as an F32 tensor `karume.scale.<weight key>` and
+declares it on the weight through `storage.scale` in its in-memory IR (**mandatory for `i8`** —
+defaulting it to 1.0 would turn a forgotten declaration into "a weight dequantized with 1.0 on every
+channel", which would load and run just fine). In the written container the scale is a block of its
+own in the rank-2 form `[rows, 1]`, bound to its weight through the binding table (codec `int8-sym`,
+`encoding.scale.block` — container-v1 §13.1). Name collisions with real tensors are checked before
+writing.
 
 ### Group-wise int4 (`weight_dtype="i4"` — ADR 0069)
 
 **Eligibility is narrower than f16 / i8**: on top of the AND of 2 conditions above, an i4 initializer
-must be consumed **only by the weight slot of `linear`** (`linear_weight_initializers`). The
-execution path starts at linear, so an initializer that is also consumed by another weight slot
-(`embedding` / the conv family) cannot be stored as i4. With the **default** `weight_dtype="i4"` such
-a weight silently stays f32 — the same landing pad as an i8-ineligible weight, and the counterpart of
-the runtime's `eligible ∩ linearOnly`; without it an ordinary LLM (linear + embedding) could not be
-exported at all. An **explicit** i4 on a non-linear weight fails loudly instead (see below).
+must be consumed **only by the weight slots of `linear` / `embedding` / `conv1d`**
+(`emit.I4_WEIGHT_OPS`, `i4_eligible_initializers`), and its stored row length must be divisible by
+its group length. Those three are the only ops with an i4 expansion path, and `conv1d` has one only
+when `groups == 1`; a weight also consumed by another weight slot (`conv2d` / `conv_transpose1d` /
+a grouped `conv1d`) cannot be stored as i4. With the **default** `weight_dtype="i4"` such a weight
+silently stays f32 — the same landing pad as an i8-ineligible weight, and the counterpart of the
+runtime's `eligible ∩ i4Eligible`; without it a graph that mixes convolutions in could not be
+exported at all. An **explicit** i4 on an ineligible weight fails loudly instead (see below).
 
 **Definition of the quantization** (`src/karume/quantize.py`, `fake_quant_int4`): symmetric int4
-along the K (input) axis, per group of `group_size` elements —
-`scale = clamp(amax_group / 7, f32 tiny)` and `q = clamp(round(w/scale), ±7)`. **−8 is not used**, so
-the largest-magnitude element of a group lands on `q = ±7` and is restored exactly, which makes the
-fake-quant **idempotent**. The target is `nn.Linear.weight` by default (bias and norm weights are
-never touched); `op_types` opts in to the wider set the i8 path uses (`QUANT_MODULE_TYPES` — conv
-family and embedding), where a group runs along the flattened receptive field of one output channel.
-That widening is for **measuring** quantization error: only the linear entries of the returned ledger
-can be handed to `write_model`. `group_size` defaults to **32** and must be a **power of two ≥ 16**;
-the quantized axis has to be divisible by it. 0 targets fails loudly with `QuantizeError`.
+along the K (input) axis, per group of `group_size` elements — `scale = clamp(amax_group / 7, f32
+tiny)` and `q = clamp(round(w/scale), ±7)`. **−8 is not used**, so the largest-magnitude element of
+a group lands on `q = ±7` and is restored exactly, which makes the fake-quant **idempotent**. The
+target is `nn.Linear.weight` by default (bias and norm weights are never touched); `op_types` opts
+in to the wider set the i8 path uses (`QUANT_MODULE_TYPES` — conv family and embedding), where a
+group runs along the flattened receptive field of one output channel. That widening is for
+**measuring** quantization error: only the entries of the returned ledger whose weights are
+i4-eligible can be handed to `stored_model` / `publish_model`. `group_size` defaults to **32** and
+must be a **power of two ≥ 16**; the quantized axis has to be divisible by it. 0 targets fails
+loudly with `QuantizeError`.
 
 **Packing order** (`emit.pack_int4` is authoritative, and `tests/test_emit.py` pins it by byte
 value): two elements that are **adjacent in flat index** share one byte, element `2i` in the **low**
@@ -367,27 +389,24 @@ is deliberately **not** llama.cpp's Q4_0 split-half layout — mixing the two up
 whose shapes and types still match, so only this rule and its byte-level test stand between the two.
 An odd element count fails loudly (the last element would stick out by half a byte).
 
-**Companion scales**: like i8, an F32 tensor named `karume.scale.<weight key>` goes into the same
-file and is declared through `storage.scale`, but the shape is the **group form** — same rank as the
-weight with the last dimension replaced by the group count (`[…, K/group_size]`) — and
-`storage.group_size` is declared alongside it. The scale is the one the fake-quant used, verbatim.
-The inverse-transform check runs on the **stored bytes** (`dequantize_int4(unpack_int4(packed))`),
+**Companion scales**: like i8, the scale is keyed `karume.scale.<weight key>` and declared through
+`storage.scale` in the in-memory IR, but it is the **group form** — rank 2, the rows of the weight
+by the group count (`[rows, row_length/group_size]`) — and `storage.group_size` is declared
+alongside it. In the container the weight is bound with codec `int4-sym-g`, its `groupSize` and its
+scale block (container-v1 §13.1 / §13.2). The scale is the one the fake-quant used, verbatim. The
+inverse-transform check runs on the **stored bytes** (`dequantize_int4(unpack_int4(packed))`),
 because a mistaken pack order is otherwise a silent wrong-value bug.
-
-**Ordering**: an I4 data section is always a multiple of 8 bytes, so it belongs to the 4-byte-aligned
-group and goes with F32 / I32 (ADR 0069 addendum 2):
-
-    F32 (name ascending) → I32 → **I4 / I2** (name ascending) → even-count F16 → odd-count F16 → I8 (last)
 
 ### Mixed storage (`weight_dtype_overrides` — ADR 0069 addendum 4)
 
-`export_to_file` / `write_model` take `weight_dtype_overrides` (**tensor key (FQN) → storage dtype**),
-which takes precedence over the single default `weight_dtype`. This is what an LLM needs: "embedding
-i8, linear i4" (first used by Gemma 4 E2B — `../export-recipes/gemma4/`). Pass the merged i8 + i4
-ledgers in one `weight_scales` mapping (the key space is the FQN, so they never collide). On the
-fake-quant side, `fake_quant_int8` / `fake_quant_int4` take an `include` predicate over module FQNs
-so that each weight is rounded exactly once — rounding one weight through both would leave the scale
-ledger disagreeing with the actual values.
+`export_to_file` / `publish_model` / `stored_model` take `weight_dtype_overrides` (**tensor key
+(FQN) → storage dtype**), which takes precedence over the single default `weight_dtype`. This is
+what an LLM needs: "embedding i8, linear i4" (first used by Gemma 4 E2B —
+`../export-recipes/gemma4/`). Pass the merged i8 + i4 ledgers in one `weight_scales` mapping (the
+key space is the FQN, so they never collide). On the fake-quant side, `fake_quant_int8` /
+`fake_quant_int4` take an `include` predicate over module FQNs so that each weight is rounded
+exactly once — rounding one weight through both would leave the scale ledger disagreeing with the
+actual values.
 
 Where the default `weight_dtype` **silently leaves ineligible weights as f32**, an explicit override
 **fails loudly whenever it cannot be honoured** — the caller wrote the intent one tensor at a time,
@@ -398,50 +417,53 @@ so there is no room for silently choosing another storage. The 4 branches:
 | the key is no initializer's tensor | `EmitError` (a typo would silently drop the requested compression) |
 | the initializer is not eligible    | `EmitError` (consumed outside a weight slot)                       |
 | the tensor is not f32              | `EmitError` (compressed storage takes f32 values only)             |
-| `"i4"` on a non-linear weight      | `EmitError` (the i4 eligibility above)                             |
+| `"i4"` on an i4-ineligible weight  | `EmitError` (the i4 eligibility above)                             |
 
 An explicit `"f32"` is the opposite direction: it **exempts** one tensor from a compressed default.
 That is mandatory for the RoPE position tables of the decode series, which land in an `embedding`
 weight slot and would otherwise be rounded by an i8 default — unlike weight rounding, angle error
 there accumulates along the position axis.
 
-**`write_model` alone does not run the reader-side gate.** It writes the container; a distribution
-form must go through `publish_model`, which is the one path that writes, verifies and only then
-swaps the result into place.
+**`stored_model` writes nothing and runs no reader-side gate.** It plans the storage and returns the
+raw bytes and encodings; a distribution form must go through `publish_model`, the one path that
+writes, re-reads and verifies, and only then swaps the result into place.
 
 ## Module structure
 
-| Module          | Role                                                                                                                                                                                   |
-| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `dims`          | dimension language `coeff·sym+offset`. The grammar is authoritative in `packages/runtime/tests/fixtures/dim-grammar.json`                                                              |
-| `ir`            | IR v1 graph representation and JSON serialization (`allow_nan=False`)                                                                                                                  |
-| `ops`           | op contract table (the counterpart of TS-side `packages/runtime/src/ops.ts`)                                                                                                           |
-| `shapes`        | output shape rules (the counterpart of TS-side `computeOutputShape`; declared shapes are compared on every node)                                                                       |
-| `convert`       | ExportedProgram → IR graph engine (graph traversal, constant folding, CSE — dispatches to the handler table)                                                                           |
-| `aten_handlers` | the aten op → IR mapping table (per-op handlers + fused ops; the growth point when a model family is added)                                                                            |
-| `normalize`     | FX equivalence rewrites that do not grow the vocabulary (pass registration)                                                                                                            |
-| `emit`          | writing to safetensors                                                                                                                                                                 |
-| `verify`        | all IR v1 rules + distribution-form comparison + runtime capability comparison                                                                                                         |
-| `pipeline`      | `export_module` / `export_to_file` / `publish_model`, the above laid out as one straight path (`publish_model` is the only way a distribution form is produced: write → verify → swap) |
-| `goldens`       | the golden spec table and generation driver                                                                                                                                            |
-| `golden_models` | the tiny golden fixtures themselves — `nn.Module` definitions and input generators                                                                                                     |
-| `quantize`      | weight fake-quant for the storage dtypes (f16 rounding / per-channel symmetric i8)                                                                                                     |
-| `act_quant`     | per-token symmetric i8 fake-quant for activations (the torch mirror of the w8a8 execution path)                                                                                        |
-| `extents`       | identity of dimension lengths — the one place symbolic (`SymInt`) lengths are compared without a guard                                                                                 |
-| `rope`          | model-independent export check that RoPE frequency buffers were lifted out to constant-folding leaves                                                                                  |
-| `custom_ops`    | the `karume::` operators (`gru_scan` / `gru_scan_reverse`) registered with `torch.library`                                                                                             |
-| `quant_calib`   | calibration-driven rounding on the storage grid `quantize` defines (GPTQ ships; AWQ is measurement only)                                                                               |
-| `quant_methods` | **measurement-only** rounding methods with no storage path (FP4 / NF4 / MXFP4 / k-means codebooks)                                                                                     |
-| `states`        | the post-export surgery that rewrites an attention graph into the states form (ADR 0067)                                                                                               |
-| `shards`        | the shard rules — reader contract, packing policy and tensor pieces (ADR 0081 / 0090)                                                                                                  |
-| `limits`        | derivation of a quant's `requiredLimits` from the assets themselves (residency only — ADR 0089)                                                                                        |
-| `repack`        | repacking an existing component into the current shard rules without moving a tensor byte                                                                                              |
-| `artifacts`     | transactional publication: build in staging, swap into place only after every gate is green (ADR 0052)                                                                                 |
-| `dist`          | generic assembly engine: series directories → one distribution directory (ADR 0041 / 0052; the pipeline registry is injected)                                                          |
-| `modelcard`     | generic model-card rendering — pure functions deriving the card from the manifest (ADR 0037 §3 frontmatter)                                                                            |
-| `cli`           | the `karume` entry point (`dist` / `verify` / `repack`, lazy dispatch)                                                                                                                 |
+| Module          | Role                                                                                                                                                            |
+| --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `dims`          | dimension language `coeff·sym+offset`. The grammar is authoritative in `packages/runtime/tests/fixtures/dim-grammar.json`                                       |
+| `ir`            | the in-memory IR graph (still shaped as IR v1) and its JSON serialization (`allow_nan=False`); the container writes it as IR v2                                 |
+| `ops`           | op contract table (the counterpart of TS-side `packages/runtime/src/ops.ts`)                                                                                    |
+| `shapes`        | output shape rules (the counterpart of TS-side `computeOutputShape`; declared shapes are compared on every node)                                                |
+| `convert`       | ExportedProgram → IR graph engine (graph traversal, constant folding, CSE — dispatches to the handler table)                                                    |
+| `aten_handlers` | the aten op → IR mapping table (per-op handlers + fused ops; the growth point when a model family is added)                                                     |
+| `normalize`     | FX equivalence rewrites that do not grow the vocabulary (pass registration)                                                                                     |
+| `emit`          | storage planning: which initializer gets which storage, and the raw bytes plus encodings handed to the container (`stored_model`)                               |
+| `verify`        | all IR rules + the merge of a container's graph and binding table + runtime capability comparison                                                               |
+| `pipeline`      | `export_module` / `export_to_file` / `publish_model`, the above laid out as one straight path (`publish_model` is the only way a distribution form is produced) |
+| `container`     | the `krm` / `krg` writer and the self-check reader — header, the two descriptors, binding table, codec ledger, canonical JSON (docs/container-v1.md)            |
+| `publish`       | the one path that places a distribution form: write → re-read and verify payloads, assets and descriptors → swap into place                                     |
+| `goldens`       | the golden spec table and generation driver                                                                                                                     |
+| `golden_models` | the tiny golden fixtures themselves — `nn.Module` definitions and input generators                                                                              |
+| `quantize`      | weight fake-quant for the storage dtypes (f16 rounding / per-channel symmetric i8)                                                                              |
+| `act_quant`     | per-token symmetric i8 fake-quant for activations (the torch mirror of the w8a8 execution path)                                                                 |
+| `extents`       | identity of dimension lengths — the one place symbolic (`SymInt`) lengths are compared without a guard                                                          |
+| `rope`          | model-independent export check that RoPE frequency buffers were lifted out to constant-folding leaves                                                           |
+| `custom_ops`    | the `karume::` operators (`gru_scan` / `gru_scan_reverse`) registered with `torch.library`                                                                      |
+| `quant_calib`   | calibration-driven rounding on the storage grid `quantize` defines (GPTQ ships; AWQ is measurement only)                                                        |
+| `quant_methods` | **measurement-only** rounding methods with no storage path (FP4 / NF4 / MXFP4 / k-means codebooks)                                                              |
+| `states`        | the post-export surgery that rewrites an attention graph into the states form (ADR 0067)                                                                        |
+| `ple`           | assembles per-layer embedding tables into container assets (`ple_index` + `ple.values.<k>` / `ple.scales.<k>` — ADR 0085 / 0109)                                |
+| `limits`        | derivation of a quant's `requiredLimits` from the assets themselves (residency only — ADR 0089)                                                                 |
+| `artifacts`     | transactional publication: build in staging, swap into place only after every gate is green (ADR 0052)                                                          |
+| `migrate`       | `karume migrate`: converts the retired safetensors form into `krm` / `krg` (component mode and repository mode)                                                 |
+| `legacy`        | read-only access to the retired safetensors shard form, for the migration paths only                                                                            |
+| `dist`          | generic assembly engine: series directories → one distribution directory (ADR 0041 / 0052; the pipeline registry is injected)                                   |
+| `modelcard`     | generic model-card rendering — pure functions deriving the card from the manifest (ADR 0037 §3 frontmatter)                                                     |
+| `cli`           | the `karume` entry point (`dist` / `migrate` / `verify`, lazy dispatch)                                                                                         |
 
-That table is the whole wheel (27 modules). No module here is model-specific: the wheel carries no
+That table is the whole wheel (30 modules). No module here is model-specific: the wheel carries no
 `patch_*`, no export script and no family name table. That is a machine gate, not a convention —
 `tests/test_architecture_boundary.py` fails the moment core imports a recipe (ADR 0065 decision 3).
 
@@ -458,8 +480,9 @@ ranges of attrs / output shape rules (including the rank ceiling of the strided-
 
 `shapes` does **not** take the declared shapes attached by torch's meta as authoritative — it
 computes shapes independently from the contract rules and compares them on every node, failing the
-export on a mismatch (this runs both at the exit of `convert` and in `verify_model`). Only the
-decisions that need bindings (zero-length axes, exceeding Tmax) are held by the runtime-side layer.
+export on a mismatch (this runs both at the exit of `convert` and in `assert_op_contracts`, which
+`publish_model` applies before writing). Only the decisions that need bindings (zero-length axes,
+exceeding Tmax) are held by the runtime-side layer.
 
 ## Supported scope (as of perf-a)
 
@@ -469,19 +492,19 @@ and Python-side `ops.py` compare against it). What follows is a copy, so on any 
 conformance table is the correct one.
 
 - **The semantic dtypes are f32 / i32 / bool** (ADR 0009). torch's i64 is normalized to i32 at the
-  exporter boundary (out of range fails loudly). **The storage dtypes are f32 / f16 / bf16 / i8 /
-  i4 / i2 / i32** (i32 is raw int32 — the explicit exception of ADR 0010). An initializer's semantic
+  exporter boundary (out of range fails loudly). **The storage dtypes are f32 / f16 / bf16 / i8 / i4
+  / i2 / i32** (i32 is raw int32 — the explicit exception of ADR 0010). An initializer's semantic
   dtype is f32 or i32, and the semantic/storage pairs are only `f32 × {f32,f16,bf16,i8,i4,i2}` and
-  `i32 × i32` (the cross products fail loudly).
-  Fixed `i2` uses low-bit-first packing of `q+2` for `q ∈ [-2,1]`, rank-2 weights with
-  a row width divisible by 16, and F32 `[rows,1]` scales (ADR 0097). It is supported by
-  the low-level writer and reader; `write_model` does not add automatic INT2 quantization.
-  To preserve existing quantized values, pass `fixed_weights={key: FixedQuantizedWeight(dtype,
-  packed, scale)}` to `write_model` or `publish_model`. The corresponding `tensors[key]` must be a
-  shape-only f32 meta tensor. This accepts rank-2 linear/embedding weights in fixed I2/I4/I8,
-  retains their bytes through row sharding, and rejects simultaneous automatic quantization
-  options or real f32 values. The model recipe remains responsible for validating the upstream
-  quantization and activation rounding (ADR 0097).
+  `i32 × i32` (the cross products fail loudly). Fixed `i2` uses low-bit-first packing of `q+2` for
+  `q ∈ [-2,1]`, rank-2 weights with a row width divisible by 16, and F32 `[rows,1]` scales (ADR
+  0097); in the container it is codec `int2-off`. `stored_model` does not add automatic INT2
+  quantization. To preserve existing quantized values, pass `fixed_weights={key:
+  FixedQuantizedWeight(dtype, packed, scale)}` to `stored_model` or `publish_model`. The
+  corresponding `tensors[key]` must be a shape-only f32 meta tensor. This accepts rank-2
+  linear/embedding weights in fixed I2/I4/I8, retains their bytes when a tensor is bound as
+  row-range pieces, and rejects simultaneous automatic quantization options or real f32 values. The
+  model recipe remains responsible for validating the upstream quantization and activation rounding
+  (ADR 0097).
 - The IR vocabulary has **61** ops, of which the exporter can emit **59**: `topk` and `state_append`
   are in the vocabulary but no `torch.export` graph produces them (`topk` waits on the multi-output
   getitem wiring, and `state_append` is the effect op the decode-graph script emits — ADR 0067
@@ -502,7 +525,7 @@ conformance table is the correct one.
     also accepts bool input → i32) / `argmax` (fixed to the last dim as well — it collapses to
     length 1, so the rank is preserved; f32 → i32, no attrs) / `cumsum` (last dim)
   - layout (ADR 0011 / 0014): `reshape` / `permute` / `expand` (f32 unlocked as well) / `slice` /
-    `cat` (**the only variadic-arity op in IR v1**) / `pad` / `flip`
+    `cat` (**the only variadic-arity op in the IR**) / `pad` / `flip`
   - fixed activation rounding (ADR 0097): `static_quantize`, f32 input/output with unchanged shape and a required, nonnegative, exactly representable f32 `scale`; scale=0 is a bit-preserving identity
   - symbolic prefix slice (ADR 0010): `sym_prefix_slice`
   - fused ops (ADR 0012 / 0015 / 0017 / 0023): `linear` / `layer_norm` / **`rms_norm`** /

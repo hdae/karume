@@ -94,22 +94,23 @@ cd ../.. && deno test -A packages/runtime/tests/e2e_sbv2_test.ts packages/models
 ```
 
 ```
-outputs/series/sbv2-FN4/dp/model.safetensors       IR   17 nodes /  12 initializers /   1.78MB
-outputs/series/sbv2-FN4/front/model.safetensors    IR  911 nodes / 263 initializers /  33.4MB (2.1MB of baked tables)
-outputs/series/sbv2-FN4/flow/model.safetensors     IR 1589 nodes / 458 initializers / 158.9MB (0.15MB of baked tables)
-outputs/series/sbv2-FN4/dec/model.safetensors      IR  246 nodes / 197 initializers /  58.7MB
-outputs/series/sbv2-FN4/voice/model.safetensors    IR 1836 nodes / 655 initializers / 217.6MB
-outputs/series/sbv2-FN4/<target>/io.<case>.safetensors        inputs and expected torch CPU outputs
-outputs/series/sbv2-FN4/<target>/export_provenance.json       the symbolic-dimension ceiling this
-                                                              target was baked at (--sym-max)
+outputs/series/sbv2-FN4/dp/model-NNNNN-of-NNNNN.krm      IR   17 nodes /  12 initializers /   1.78MB
+outputs/series/sbv2-FN4/front/model-NNNNN-of-NNNNN.krm   IR  911 nodes / 263 initializers /  33.4MB (2.1MB of baked tables)
+outputs/series/sbv2-FN4/flow/model-NNNNN-of-NNNNN.krm    IR 1589 nodes / 458 initializers / 158.9MB (0.15MB of baked tables)
+outputs/series/sbv2-FN4/dec/model-NNNNN-of-NNNNN.krm     IR  246 nodes / 197 initializers /  58.7MB
+outputs/series/sbv2-FN4/voice/model-NNNNN-of-NNNNN.krm   IR 1836 nodes / 655 initializers / 217.6MB
+outputs/series/sbv2-FN4/<target>/io.<case>.safetensors   inputs and expected torch CPU outputs
+outputs/series/sbv2-FN4/<target>/export_provenance.json  the symbolic-dimension ceiling this
+                                                         target was baked at (--sym-max)
 ```
 
-`model.safetensors` above names the **component**, not one file: every container is written as a
-numbered shard sequence — `model-00001-of-00003.safetensors` (graph only, no tensors) followed by
-`model-00002-of-00003.safetensors` … (the weight shards; ADR 0081), and the byte counts are the
-component totals. `export_provenance.json` is what the distribution recipe cross-checks the ceiling
-against (`sbv2.distribution.assert_sym_provenance`), because `--sym-max` takes any value while the
-shipped `pipelineConfig` bakes a constant.
+Each container is one component written as a numbered part sequence — `model-00001-of-00003.krm`
+(the header and the two descriptors, no weights), `model-00002-of-00003.krm` (the const region) and
+the weight parts after it (container-v1 §8) — and the byte counts are the component totals. The node
+counts and byte sizes above are point-in-time values measured on the earlier safetensors form.
+`export_provenance.json` is what the distribution recipe cross-checks the ceiling against
+(`sbv2.distribution.assert_sym_provenance`), because `--sym-max` takes any value while the shipped
+`pipelineConfig` bakes a constant.
 
 #### Storage dtype series (`--dtype f16` / `--dtype i8` / `--dtype i4` — ADR 0018 / 0019 / 0069)
 
@@ -135,7 +136,8 @@ set of compression candidates is determined solely by the `WEIGHT_SLOTS` weight 
 depend on the storage dtype.) The ratio is higher for `front` alone because the baked
 relative-position tables (2.1MB of i32 / f32 constants) are ineligible for weight slots and stay
 f32. The totals are f32 470.34MB → f16 237.57MB (50.5%) → **i8 121.81MB (25.9%)**, and the i8
-companion scales are 505,576 B (0.42% of the compressed bytes).
+companion scales are 505,576 B (0.42% of the compressed bytes). These storage figures are
+point-in-time values measured on the earlier safetensors form.
 
 `--dtype i4` is a **mixed series** `outputs/series/sbv2-FN4-i4/<target>/`: eligible `nn.Linear`
 and `nn.Conv1d` weights in group-32 i4 (ADR 0069 and its conv1d addendum — wave J-5b), everything
@@ -150,6 +152,8 @@ series.
 | ------- | ------------ | ------------ | ---------------------------: | ---------------------: |
 | `front` | 10,324,816 B | 7,381,496 B  |                  62 (2 + 60) |              7,684,672 |
 | `voice` | 55,516,968 B | 36,039,208 B |                230 (4 + 226) |             51,386,368 |
+
+The storage sizes are point-in-time values measured on the earlier safetensors form.
 
 The gain is negligible on purpose: net_g carries only 6 linears (`enc_p.style_proj` /
 `enc_p.encoder.spk_emb_linear` in `front`, the 4 `flow_rev.flow.flows.<i>.enc.spk_emb_linear` in

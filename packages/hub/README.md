@@ -88,9 +88,12 @@ const local = await loadManifest(denoDirectory("./models/karume-gemma4"));
 ## Documentation
 
 - [Repository](https://github.com/hdae/karume) — overview and examples
-- [docs/decisions/0038-manifest-v1.md](https://github.com/hdae/karume/blob/main/docs/decisions/0038-manifest-v1.md)
-  and [docs/decisions/0041-manifest-v2.md](https://github.com/hdae/karume/blob/main/docs/decisions/0041-manifest-v2.md)
-  — the manifest and fetch-layer specification
+- [docs/decisions/0109-manifest-v5-container.md](https://github.com/hdae/karume/blob/main/docs/decisions/0109-manifest-v5-container.md)
+  — the `karume/5` manifest, on top of
+  [0038](https://github.com/hdae/karume/blob/main/docs/decisions/0038-manifest-v1.md) and
+  [0041](https://github.com/hdae/karume/blob/main/docs/decisions/0041-manifest-v2.md)
+- [docs/container-v1.md](https://github.com/hdae/karume/blob/main/docs/container-v1.md) — the
+  container format the manifest points at
 - [docs/decisions/](https://github.com/hdae/karume/tree/main/docs/decisions) — architecture
   decision records, the source of truth for the design
 

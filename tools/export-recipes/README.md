@@ -9,12 +9,11 @@ Face repository.
 
 Model-specific export recipes for the Karume exporter. Everything here is **repo-only**: it is never
 published to PyPI, and the wheel ([`../exporter/`](../exporter/README.md) = PyPI `karume`) contains
-none of it. The split is ADR
-[0065](../../docs/decisions/0065-exporter-core-recipe-split.md) — the generic `torch.export` → IR v1
-core is one distribution; upstream-derived model code and the family knowledge around it (patch
-layers, export scripts, reference pipelines, dist recipes, card templates, provenance) is not
-shipped with it. Dependencies point **one way, recipe → core**, and that is a machine gate
-(`../exporter/tests/test_architecture_boundary.py`), not a convention.
+none of it. The split is ADR [0065](../../docs/decisions/0065-exporter-core-recipe-split.md) — the
+generic `torch.export` → `krm` container core is one distribution; upstream-derived model code and
+the family knowledge around it (patch layers, export scripts, reference pipelines, dist recipes,
+card templates, provenance) is not shipped with it. Dependencies point **one way, recipe → core**,
+and that is a machine gate (`../exporter/tests/test_architecture_boundary.py`), not a convention.
 
 Helpers shared by several families that cannot be promoted into the generic core live in
 [`_shared/`](_shared/) — the repository's own path spellings (`models/` / `outputs/` / `inputs/`),
@@ -61,7 +60,7 @@ uv run --with 'transformers==5.14.1' python -m deberta.export --layers 2
 
 `karume dist` assembles a distribution directory but holds no family knowledge — the pipeline
 registry is injected, and the registry inside the wheel is empty. `dist.py` in this directory is
-that injection: it composes 10 pipeline seats across 8 families with the core engine and passes
+that injection: it composes 11 pipeline seats across 9 families with the core engine and passes
 the repository's own spellings for `--series` (`outputs/series/`) and `--out` (`models/`).
 
 ```sh
@@ -79,6 +78,25 @@ assembling several models into one repository, `--card-profile` for attribution,
 card written after `verify_dist` — is the engine's contract and is documented in
 [`../exporter/README.md`](../exporter/README.md).
 
+## Series migration driver
+
+`migrate_series.py` converts series outputs (`outputs/series/`) that still hold the retired
+safetensors shards into `krm` containers in the same directory. The old files are only read and are
+not deleted; goldens, `ple.probe.safetensors`, JSON / text records and asset directories are left
+untouched, except that a QAT series' `reference.json` is rewritten to count PLE blocks instead of
+the old shards. The two sidecars become container assets: `rope_base.safetensors` becomes the asset
+`rope_base`, and the PLE sidecar becomes `ple_index` + `ple.values.<k>` / `ple.scales.<k>`. The
+driver lives here rather than in `karume migrate` because only the families' `distribution.py` knows
+which directory holds which component, and a directory name is not a component name
+(`caption-proj` holds `caption_proj`). The first failing component stops the run and stays
+partially written; remove it by hand before running again.
+
+```sh
+cd tools/export-recipes
+uv run python -m migrate_series --only deberta --dry-run
+uv run python -m migrate_series                          # every series a distribution references
+```
+
 ## THIRD_PARTY_NOTICES
 
 Every family directory carries a `THIRD_PARTY_NOTICES.md` recording what that recipe is known to
@@ -89,19 +107,20 @@ release gate, and this reorganization only creates its precondition.
 
 ## Families
 
-| Family                                | What it emits                                                                                                                              | README                                               |
-| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------- |
-| `anima` (text-to-image)               | 4 graphs (text_encoder / text_conditioner / transformer / vae_decoder) + host reference fixtures, tokenizer assets                         | [anima/README.md](anima/README.md)                   |
-| `sbv2` (text-to-speech)               | 5 graphs (dp / front / flow / dec / voice) + demo assets and the torch reference for the voice demo                                        | [sbv2/README.md](sbv2/README.md)                     |
-| `deberta` (text encoder)              | the real-weight DeBERTa-v2 series — shipped as the `text_encoder` seat of the SBV2 distribution, no dist recipe here                       | [deberta/README.md](deberta/README.md)               |
-| `irodori` (text-to-speech)            | 6 text-side graphs + the 2 DACVAE codec graphs, tokenizer asset and full-loop reference fixtures                                           | [irodori/README.md](irodori/README.md)               |
-| `siglip2` (image feature extraction)  | the vision tower's `pooler_output` as one graph + the preprocessing parity fixture                                                         | [siglip2/README.md](siglip2/README.md)               |
-| `birefnet` (image segmentation)       | matte logits as one graph per model × resolution (BiRefNet_HR / Lucida)                                                                    | [birefnet/README.md](birefnet/README.md)             |
-| `depth-anything` (depth estimation)   | relative depth as one graph at the pretrained 518² point (Small is the only distributable license)                                         | [depth_anything/README.md](depth_anything/README.md) |
-| `embeddinggemma` (sentence embedding) | one graph covering all 5 SentenceTransformer modules — series only, no distribution                                                        | [embeddinggemma/README.md](embeddinggemma/README.md) |
-| `vowel-detector` (lip-sync vowels)    | the CRNN as one graph with a symbolic length                                                                                               | [vowel_detector/README.md](vowel_detector/README.md) |
-| `minicpm5` (causal LM, 1-shot)        | MiniCPM5-1B as one prefill-shaped graph — the GQA acceptance fixture (ADR 0067), series only                                               | [minicpm5/README.md](minicpm5/README.md)             |
-| `gemma4` (causal LM, 1-shot + decode) | Gemma 4 E2B as 3 series (1-shot / states-form decode / token-only exit) — the mixed i8 × i4 fixture, plus the `karume-gemma4` distribution | [gemma4/README.md](gemma4/README.md)                 |
+| Family                                | What it emits                                                                                                                                       | README                                               |
+| ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| `anima` (text-to-image)               | 4 graphs (text_encoder / text_conditioner / transformer / vae_decoder) + host reference fixtures, tokenizer assets                                  | [anima/README.md](anima/README.md)                   |
+| `sbv2` (text-to-speech)               | 5 graphs (dp / front / flow / dec / voice) + demo assets and the torch reference for the voice demo                                                 | [sbv2/README.md](sbv2/README.md)                     |
+| `deberta` (text encoder)              | the real-weight DeBERTa-v2 series — shipped as the `text_encoder` seat of the SBV2 distribution, no dist recipe here                                | [deberta/README.md](deberta/README.md)               |
+| `irodori` (text-to-speech)            | 6 text-side graphs + the 2 DACVAE codec graphs, tokenizer asset and full-loop reference fixtures                                                    | [irodori/README.md](irodori/README.md)               |
+| `siglip2` (image feature extraction)  | the vision tower's `pooler_output` as one graph + the preprocessing parity fixture                                                                  | [siglip2/README.md](siglip2/README.md)               |
+| `birefnet` (image segmentation)       | matte logits as one graph per model × resolution (BiRefNet_HR / Lucida)                                                                             | [birefnet/README.md](birefnet/README.md)             |
+| `depth-anything` (depth estimation)   | relative depth as one graph at the pretrained 518² point (Small is the only distributable license)                                                  | [depth_anything/README.md](depth_anything/README.md) |
+| `embeddinggemma` (sentence embedding) | one graph covering all 5 SentenceTransformer modules — series only, no distribution                                                                 | [embeddinggemma/README.md](embeddinggemma/README.md) |
+| `vowel-detector` (lip-sync vowels)    | the CRNN as one graph with a symbolic length                                                                                                        | [vowel_detector/README.md](vowel_detector/README.md) |
+| `minicpm5` (causal LM, 1-shot)        | MiniCPM5-1B as one prefill-shaped graph — the GQA acceptance fixture (ADR 0067), series only                                                        | [minicpm5/README.md](minicpm5/README.md)             |
+| `gemma4` (causal LM, 1-shot + decode) | Gemma 4 E2B as 3 series (1-shot / states-form decode / token-only exit) — the mixed i8 × i4 fixture, plus the `karume-gemma4` distribution          | [gemma4/README.md](gemma4/README.md)                 |
+| `gemma4-qat` (causal LM, mobile QAT)  | the official Gemma 4 E2B / E4B mobile QAT text decoders with their fixed INT2/INT4/INT8 payloads and PLE, plus the `karume-gemma4-qat` distribution | [gemma4_qat/README.md](gemma4_qat/README.md)         |
 
 ## Patch layers
 

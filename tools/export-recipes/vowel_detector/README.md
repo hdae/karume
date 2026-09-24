@@ -55,9 +55,10 @@ for anyway). Binding `T` from the derived `2T` axis is ADR 0057.
 | export time         | 8.1 s                        | **0.6 s**       |
 | initializers        | 23                           | 23              |
 
-(Measured 2026-08-14, torch 2.13.0+cpu, on the real checkpoint. The 23 initializers are the 22
-checkpoint tensors plus one folded constant — the zero initial hidden state. The weights are
-2,658,976 B, so the graph JSON is now under 10 KB instead of growing by ~5.27 KB per input frame.)
+(Measured 2026-08-14, torch 2.13.0+cpu, on the real checkpoint, in the earlier safetensors form. The
+23 initializers are the 22 checkpoint tensors plus one folded constant — the zero initial hidden
+state. The weights are 2,658,976 B, so the graph JSON is now under 10 KB instead of growing by ~5.27
+KB per input frame.)
 
 The rewrite is **bit-exact against `nn.GRU`**, which is the whole basis for keeping the golden
 values: `--verify` compares the two eager paths at five lengths, and every emit compares them again

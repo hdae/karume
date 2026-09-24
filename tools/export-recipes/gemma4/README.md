@@ -70,8 +70,8 @@ them is lost:
 Output layout:
 
 ```
-outputs/series/gemma4-e2b/model.safetensors     weights/constants + __metadata__.karume_ir
-outputs/series/gemma4-e2b/io.<case>.safetensors input tensors and expected outputs from torch CPU
+outputs/series/gemma4-e2b/model-NNNNN-of-NNNNN.krm  the container: graph + weights/constants as a part sequence
+outputs/series/gemma4-e2b/io.<case>.safetensors      input tensors and expected outputs from torch CPU
 ```
 
 The io tensor key convention is the same as the tiny goldens, DeBERTa, EmbeddingGemma and MiniCPM5
@@ -148,9 +148,9 @@ Three structural differences from the 1-shot recipe, and the export fails loudly
 Output layout:
 
 ```
-outputs/series/gemma4-e2b-decode/model.safetensors         weights/constants + karume_ir
-outputs/series/gemma4-e2b-decode/io.<case>.safetensors     unpadded inputs and expected outputs
-outputs/series/gemma4-e2b-decode/greedy.<case>.safetensors greedy continuation of K = 16 steps
+outputs/series/gemma4-e2b-decode/model-NNNNN-of-NNNNN.krm  the container: graph + weights/constants as a part sequence
+outputs/series/gemma4-e2b-decode/io.<case>.safetensors      unpadded inputs and expected outputs
+outputs/series/gemma4-e2b-decode/greedy.<case>.safetensors  greedy continuation of K = 16 steps
 ```
 
 The `io.*` files use the same key convention as the 1-shot series and cover all three cases at their
@@ -227,38 +227,40 @@ two changes that ship together in a single re-export (ADR
   outputs by slot number. Sampling, temperature, top-k and the RNG stay on the host (ADR 0083
   decision 6); the read-back for a prefill chunk drops from 32 MiB (`[1, M, V]`) to 1 MiB.
 
-The tables are redistributed as a **sidecar** next to the container:
+The tables are redistributed as **assets of the product container**, not as weights (ADR
+[0109](../../../docs/decisions/0109-manifest-v5-container.md) decision 4):
 
 ```
-outputs/series/gemma4-e2b-product/ple.json                        index: 262,144 tokens / 35 / 256 / embed scale
-outputs/series/gemma4-e2b-product/ple-NNNNN-of-NNNNN.safetensors  values [rows,35,256] i8 + scales [rows,35] f32
-outputs/series/gemma4-e2b-product/ple.probe.safetensors           the dequantization reference
+outputs/series/gemma4-e2b-product/model-NNNNN-of-NNNNN.krm  the container: graph + weights/constants + the PLE assets
+outputs/series/gemma4-e2b-product/ple.probe.safetensors     the dequantization reference
+outputs/series/gemma4-e2b-product/reference.json            checkpoint fingerprints and borrowed-golden digests
 ```
 
-The layout is **token-major and sharded by vocabulary range** (ADR 0085 decisions 1 and 2), which
-makes one token's PLE a single contiguous 9,100-byte read; a table-major layout would need 35
-scattered reads per token the moment a host wants to read rows instead of whole files. Splitting is
-not an optimization here: the full int8 table is 2,348,810,240 bytes and a single Chromium
-`ArrayBuffer` tops out at 2,145,386,496. The per-shard ceiling is the one constant from ADR
-[0090](../../../docs/decisions/0090-shard-spec-v3-tensor-pieces.md) (256 MiB, measured as the file
-length), and the writer fills at most `SHARD_DATA_CAPACITY` = 256 MiB − 1 MiB of header allowance,
-which puts the real model at nine shards. The count is not a constant of this document: it moves
-with every re-export, and the value that holds today is pinned by
-`tests/test_export_product.py::test_the_real_model_lands_on_nine_shards`. The sidecar is not an IR
-container, so the graph-shard contract does not apply to it — only the byte ceiling and the
-`-NNNNN-of-NNNNN` spelling are shared.
+The PLE assets are an index, `ple_index` (role `ple-index`, schema 3: 262,144 tokens / 35 / 256 /
+embed scale), and two block sequences: `ple.values.<k>` (role `ple-values`, i8 `[rows,35,256]`) and
+`ple.scales.<k>` (role `ple-scales`, f32 `[rows,35]`). The layout is **token-major and cut by
+vocabulary range** (ADR 0085 decisions 1 and 2), which makes one token's PLE a single contiguous
+9,100-byte read; a table-major layout would need 35 scattered reads per token the moment a host
+wants to read rows instead of whole blocks. Splitting is not an optimization here: the full int8
+table is 2,348,810,240 bytes and a single Chromium `ArrayBuffer` tops out at 2,145,386,496. Each
+block holds a whole number of rows within the container's 32 MiB block ceiling, and because the host
+reads rows by range, every PLE block sits alone in a part of its own (container-v1 §4.2). The block
+count follows the block ceiling rather than this document; today's E2B product container carries
+71 value blocks and 2 scale blocks. The cutting rule and the index spelling are core code
+(`karume.ple`), shared with `karume migrate`, so the recipe and the migration produce the same
+blocks.
 
 Two properties are checked inside the export, because both fail with the right shape, dtype and
 element count:
 
 - the re-layout is **bit-identical** to the 35-table path. The reference is what
   `ple.per_layer_inputs` computes from the fake-quantized tables — that is, the value the in-graph
-  `embedding` and the `mul` after it used to produce — and the check reads the written shard bytes
-  back rather than comparing in memory. A scale shifted by one layer, or a shard range off by one
-  row, yields a valid row of a _different_ token.
-- the sidecar row count comes from the **split tables**, never from
+  `embedding` and the `mul` after it used to produce — and the check reads the PLE assets of the
+  written container back rather than comparing in memory. A scale shifted by one layer, or a block
+  range off by one row, yields a valid row of a _different_ token.
+- the PLE row count comes from the **split tables**, never from
   `config.vocab_size_per_layer_input`: `load_model_and_tables` replaces that field with the 8 probe
-  rows it keeps on the model, and reading it there produces an 8-token sidecar that is internally
+  rows it keeps on the model, and reading it there produces an 8-token index that is internally
   consistent. It must also equal the main embedding's vocabulary, which is the writer's half of the
   id-space cross-check (ADR 0085 decision 5).
 
@@ -417,29 +419,30 @@ cd tools/export-recipes
 uv run python dist.py --pipeline gemma4        # → models/karume-gemma4/ (~4.0 GiB)
 ```
 
-The distribution folds **three series** into one HF repository: the product container
-(`gemma4-e2b-product`, split at the same 256 MiB ceiling — seven shards as it is exported today)
-plus its PLE sidecar, the MTP drafter container (`gemma4-e2b-drafter` — two shards in the second
-`weights` role, fetched only when a pipeline asks for `speculative`), and the compiled tokenizer
-asset (`gemma4-e2b-tokenizer`). The acceptance-only files that live beside the containers
-(`ple.probe.safetensors`, `reference.json`, `drafter-golden.*.safetensors`) are not in the
-placement table and therefore never reach the output. Layout inside the repository:
+The distribution folds **three series** into one HF repository. The product container
+(`gemma4-e2b-product`) holds the weights and the PLE assets in one `krm`, split into parts of the
+default 256 MiB length, with every PLE block in a part of its own. The MTP drafter container
+(`gemma4-e2b-drafter`) is the second `weights` role, fetched only when a pipeline asks for
+`speculative`. The third is the compiled tokenizer asset (`gemma4-e2b-tokenizer`). The
+acceptance-only files that live beside the containers (`ple.probe.safetensors`, `reference.json`,
+`drafter-golden.*.safetensors`) are not in the placement table and therefore never reach the output.
+Layout inside the repository:
 
-| Manifest seat                        | Path                                              |
-| ------------------------------------ | ------------------------------------------------- |
-| `weights.model.i4.shards`            | `e2b/model/model.i4-NNNNN-of-NNNNN.safetensors`   |
-| `weights.drafter.i8.shards`          | `e2b/drafter/model.i8-NNNNN-of-NNNNN.safetensors` |
-| `assets.tokenizer`                   | `e2b/tokenizer/tokenizer.json`                    |
-| `assets.ple_index`                   | `e2b/ple/ple.json`                                |
-| `assets.<the index's own file name>` | `e2b/ple/ple-NNNNN-of-NNNNN.safetensors`          |
+| Manifest seat                  | Path                                      |
+| ------------------------------ | ----------------------------------------- |
+| `weights.model.i4.container`   | `e2b/model/model.i4-NNNNN-of-NNNNN.krm`   |
+| `weights.drafter.i8.container` | `e2b/drafter/model.i8-NNNNN-of-NNNNN.krm` |
+| `assets.tokenizer`             | `e2b/tokenizer/tokenizer.json`            |
 
-The PLE sidecar rides in the `assets` seat rather than `weights` — it is not an IR container, and
-the host reads only the vocabulary ranges a conversation touches (ADR
-[0085](../../../docs/decisions/0085-ple-host-gather.md) decision 3). **The asset name of a sidecar
-shard is the file name the index itself writes**, so `packages/models/src/gemma/ple.ts` can look up
-a fetch key with the one spelling it already has (`ple.json`'s `shards[].file`); introducing a
-second naming would make the correspondence positional, and a reordering of either side would pass
-silently.
+Each `container` seat carries `descriptor` (the expected length and sha256 of the two descriptors)
+and `parts` (every part, part 0 included — ADR
+[0109](../../../docs/decisions/0109-manifest-v5-container.md) decision 3). The PLE tables have no
+manifest seat of their own: they are assets inside the `model` container, reached through its
+`ple_index` asset, and the host reads only the vocabulary ranges a conversation touches (ADR
+[0085](../../../docs/decisions/0085-ple-host-gather.md) decision 3). **A block is looked up by the
+asset name the index itself records**, so `packages/models/src/gemma/ple-index.ts` needs no second
+naming; a second naming would make the correspondence positional, and a reordering of either side
+would pass silently.
 
 `pipelineConfig` splits the way Irodori's does. Derived from the checkpoint's own files, never
 copied by hand: `maxPosition` (`text_config.max_position_embeddings` — the model's declared position
@@ -471,9 +474,10 @@ dtype and manifest all correct, and shows up only as wrong values):
   `k = 3` draft tokens; every one of its state slots is `external` and matches a lender slot by
   name, dtype and shape; exactly one initializer is `shared` and names a tensor key the product
   container really carries; its single symbol is the lender's capacity symbol, same spelling
-- `per_layer_inputs`' layer and dim axes match the sidecar index
-- the sidecar index is a gap-free ascending partition of `[0, tokens)`, `tokens` equals `V`, and
-  every shard's tensors and `__metadata__.karume_ple` name the same generation as the index
+- `per_layer_inputs`' layer and dim axes match the PLE index
+- the PLE index is a gap-free ascending partition of `[0, tokens)`, `tokens` equals `V`, every
+  block the index names is an asset of the `model` container with the same role and length, and no
+  PLE asset is left that the index does not name
 - the compiled tokenizer names the compile format and has exactly `V` rows
 - the checkpoint's recommended sampler is present and inside the range the TypeScript
   `pipelineConfig` parser accepts

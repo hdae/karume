@@ -116,15 +116,16 @@ and the rope tables). The design rationale is in
   series (the CLI rejects specifying them). `--resolution` **has no effect and is therefore
   rejected** too — the golden resolutions are fixed at `DIT_DYN_RESOLUTIONS = (512, 1024)` and the
   graph itself carries no resolution.
-- Alongside `model.safetensors` / `io.*`, the series directory holds **`rope_base.safetensors`**
-  (64KiB). It is the **per-axis base table** the host (`packages/models/src/anima/dit-tokens.ts`)
-  uses to assemble the rope tables, cut out of the `model.rope` output. **Why it is needed**: torch's f32
-  trigonometric functions can be 1 ulp off from the correctly rounded value (measured: over 8,192
-  position × frequency combinations, cos 472 and sin 231 cases), and JS's `Math.cos` cannot
-  reproduce them. The static graph has torch's values baked in, so bit identity is only achievable
-  by permuting the base table. The base table is **independent of the resolution**, and its number
-  of rows (= the length of the upstream `seq = arange(max(max_size))`) is the model-side upper bound
-  (for Anima, 128 = latent 256 = the equivalent of 2048px).
+- The container of this series carries one extra asset next to its weights, **`rope_base`** (role
+  `rope-base`, 64KiB — ADR 0109 decision 4). It is the **per-axis base table** the host
+  (`packages/models/src/anima/dit-tokens.ts`) uses to assemble the rope tables, cut out of the
+  `model.rope` output. **Why it is needed**: torch's f32 trigonometric functions can be 1 ulp off
+  from the correctly rounded value (measured: over 8,192 position × frequency combinations, cos 472
+  and sin 231 cases), and JS's `Math.cos` cannot reproduce them. The static graph has torch's values
+  baked in, so bit identity is only achievable by permuting the base table. The base table is
+  **independent of the resolution**, and its number of rows (= the length of the upstream `seq =
+  arange(max(max_size))`) is the model-side upper bound (for Anima, 128 = latent 256 = the
+  equivalent of 2048px).
 - `--verify transformer --dit-graph dyn` compares "host patchify → S form → host unpatchify" against
   the **pre-patch diffusers path**. Measured (with the turbo LoRA fused and f16 rounding applied):
   **`bit_exact=True` / maxdiff 0.000e+00 in both cases** (S=1,024 and S=4,096).
@@ -133,6 +134,9 @@ and the rope tables). The design rationale is in
   Anima gate is `packages/models/tests/e2e_anima_test.ts` (exact PNG SHA-256 equality).
 
 ### Measurements (as of wave 2; DiT / Qwen3 with `--num-layers 2`, the rest full)
+
+The file sizes in this README's measurement tables are point-in-time values measured on the earlier
+safetensors form (`model.safetensors`).
 
 | Target             | IR nodes | model.safetensors | symbols       | max rank |
 | ------------------ | -------- | ----------------- | ------------- | -------- |
@@ -231,10 +235,9 @@ later would leave only the reference computed on the original weights, making th
 mixture of "quantization error + implementation error" — which only ever loosens the tolerance, i.e.
 a breakage that **stays green while losing detection power**.
 
-Which initializers are eligible for f16 storage, and the write order that keeps the container
-readable, are the **core** emit contract — see "Compressed weight storage" in
-[`../../exporter/README.md`](../../exporter/README.md). The measurements below are what that
-contract was exercised against on Anima.
+Which initializers are eligible for f16 storage is the **core** emit contract — see "Compressed
+weight storage" in [`../../exporter/README.md`](../../exporter/README.md). The measurements below
+are what that contract was exercised against on Anima.
 
 #### Measurements (2026-08-03, `--dtype f16` at full depth, separate processes)
 
@@ -337,8 +340,8 @@ when spelled out with `--target` / `--verify`). Two reasons:
    therefore harmless, but i8's per-channel scale **counts even the discarded elements into amax**
    (a shifted scale moves the value of every element).
 
-The definition of the per-channel quantization, the eligibility check, the companion scales and the
-I8 write order are the **core** contract (same section of
+The definition of the per-channel quantization, the eligibility check and the companion scales are
+the **core** contract (same section of
 [`../../exporter/README.md`](../../exporter/README.md)). One consequence is Anima-specific: since
 matching is by FQN, **`--dtype i8` applies the rounding to the exported wrapper (`AnimaDit`)**
 (applying it to the inner `model` would make the FQN prefixes disagree).
@@ -487,7 +490,7 @@ matched / one of `lora_A`, `lora_B` missing / a shape mismatch. A per-component 
 legitimately happen, so that is reported through `FuseReport.is_noop` instead (not raised).
 
 Every target the LoRA is actually fused into also gets a **`lora_provenance.json`** next to its
-`model.safetensors` (the fused file name and its sha256). The fused weights cannot tell you which
+container (the fused LoRA file name and its sha256). The fused weights cannot tell you which
 LoRA went in, so the side that fuses it is the only one that can record the fact; at assembly time
 `anima/distribution.py` compares that record against the sha256 the model declares
 (`AnimaModel.lora_sha256`) and refuses to build on a mismatch or a missing record. Without the
@@ -583,7 +586,7 @@ treats the missing keys as the "do not compute uncond" branch).
 
 The **authoritative host-side numbers** for the host-side VAE decode tiling (splitting the VAE
 decode into fixed latent 64×64 tiles). The VAE decoder graph is **structurally invariant with
-respect to resolution** (the `model.safetensors` for 512px and for 1024px agree exactly, down to the
+respect to resolution** (the exports for 512px and for 1024px agree exactly, down to the
 node sequence and the weight bytes — recon `docs/research/2026-08-03-dynres-vae-tiling.md` §1.2), so
 the 512px assets can be used directly as the tile decoder. **Nothing is added to the IR or the
 runtime**; only cutting, blending and pasting live on the host

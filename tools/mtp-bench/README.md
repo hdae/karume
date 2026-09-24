@@ -91,7 +91,7 @@ One process = one configuration (the convention of `tools/ram-peak/measure.ts`).
    3-minute process warms up by about +4% in `plain`). Each speculative mode is bracketed by the same
    number of `plain` turns (two on each side), the two of them are never adjacent, and alternating
    their seats across rounds keeps the monotone drift from landing on one of them.
-5. Summarise with **medians**, never means: a single turn can spike (PLE shard re-reads, clock state
+5. Summarise with **medians**, never means: a single turn can spike (PLE block re-reads, clock state
    changes), and a mean carries the spike into the ratio.
 
 **Without `--warm`, the gate starts cold in every `auto` turn.** One turn is one sequence, and the
@@ -295,7 +295,7 @@ after sampling — so the `plain` bucket is comparable across modes.
 | `w1Probe`              | decode, in steady `speculate` — the plain steps the gate takes to keep `W1` fresh (one per exploration interval)                                                                                                |
 | `plain`                | decode, with no gate (a `plain` turn) or in steady `plain` (the gate's steady state)                                                                                                                            |
 | `unmeasured`           | Runs the gate kept out of its own wall statistics (`gate.measured === false`): the first cycle of every turn and the budget-tail forced plain. The wall is still counted here — it just did not feed a decision |
-| `cold` / `rest`        | A **second, independent** split of the same runs: the turn's first 8 generation runs and everything after them. Reads how far the cold miss reaches (PLE shards, the first PreparedPlan / bind group)           |
+| `cold` / `rest`        | A **second, independent** split of the same runs: the turn's first 8 generation runs and everything after them. Reads how far the cold miss reaches (PLE blocks, the first PreparedPlan / bind group)           |
 
 Within one turn (`turns[].trace`) the six situation buckets are mutually exclusive and sum to
 `cold + rest`; the per-field medians in `summary.<mode>.trace` do not add up that way. `prefill` and
@@ -350,8 +350,8 @@ no removable gate is added to karume.
   into `docs/perf-ledger.md`.
 - The PLE budget default is computed from the `ple_index` asset inside the mirror's `model`
   container the same way
-  `packages/models/tests/helpers/ple-budget.ts` does it. Byte budgets, not shard counts: shard width
-  changes with the asset generation, so "N shards" means a different amount of RAM per generation
+  `packages/models/tests/helpers/ple-budget.ts` does it. Byte budgets, not block counts: block width
+  changes with the asset generation, so "N blocks" means a different amount of RAM per generation
   (ADR 0085).
 - `--k` is passed through to the library, which owns the range gate. This tool does not re-implement
   a second gate for the same knob.

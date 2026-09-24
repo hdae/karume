@@ -14,19 +14,23 @@ deno task demo:minicpm5 --completion --prompt "The capital of France is" --max-n
 printf '%s\n' '日本の首都を都市名だけで答えてください。' | deno task demo:minicpm5
 ```
 
-The CLI prefers local GPTQ i4, then i8, RTN i4, f16, and f32. It searches `outputs/series/` for
-`minicpm5-2b-<quant>/`, then a matching dated experiment directory. For f32, the dated directory omits
-`-f32`. If several dated directories match, select one with `--source`:
+The CLI prefers local GPTQ i4, then i8, RTN i4, f16, and f32: it picks the first
+`outputs/series/minicpm5-2b-<quant>/` that exists. Dated experiment directories
+(`minicpm5-2b-…-YYYY-MM-DD-probe/`) are in the earlier safetensors form; the CLI does not read them,
+and names them in its error instead of skipping them silently. To pick a series explicitly, use
+`--source`:
 
 ```sh
 deno task demo:minicpm5 \
-  --source outputs/series/minicpm5-2b-gptq-i4-2026-09-10-probe \
+  --source outputs/series/minicpm5-2b-gptq-i4 \
   --tokenizer inputs/minicpm5/MiniCPM5-2B/tokenizer.json \
   --prompt "日本の首都を都市名だけで答えてください。" --json
 ```
 
-`--source` takes an exporter **series directory** containing `model.safetensors` or its numbered shards.
-Use either `--source` or `--quant`, not both. The default tokenizer is
+`--source` takes an exporter **series directory** holding the container as a part sequence
+(`model-NNNNN-of-NNNNN.krm`, graph name `model`). This repository cannot produce such a series for
+MiniCPM5-2B today: the [MiniCPM5 recipe](../../tools/export-recipes/minicpm5/README.md) exports the
+1B model only. Use either `--source` or `--quant`, not both. The default tokenizer is
 `inputs/minicpm5/MiniCPM5-2B/tokenizer.json` from the official local model. Nothing is downloaded or
 converted automatically; original Hugging Face weights cannot be used directly as a series.
 The selected path is printed to stderr.
@@ -47,12 +51,12 @@ in past assistant messages, so ordinary turns can reuse their cache. A changed p
 or length-limited answer is rebuilt from the displayed conversation. `/reset` releases the cache.
 
 This example uses a 128-token KV cache and 64 rows per prefill chunk. Input length plus
-`max-new-tokens - 1` must fit within 128. Chat removes the oldest complete question/answer pairs with a
-notice, keeping the system message and current question. A question that still does not fit is rejected
-without losing the conversation. Single-response requests are checked before allocating GPU weights.
-Use `--max-new-tokens 32` to leave more space for history.
-This is a short-context experimental example, not the original model's context limit.
-The measured GPTQ i4 weights occupy about 1.78 GB on disk; GPU usage also includes cache and workspace.
+`max-new-tokens - 1` must fit within 128. Chat removes the oldest complete question/answer pairs
+with a notice, keeping the system message and current question. A question that still does not fit
+is rejected without losing the conversation. Single-response requests are checked before allocating
+GPU weights. Use `--max-new-tokens 32` to leave more space for history. This is a short-context
+experimental example, not the original model's context limit. The measured GPTQ i4 weights occupied
+about 1.78 GB on disk in the earlier safetensors form; GPU usage also includes cache and workspace.
 
 See [the measurement record](../../docs/research/2026-09-10-codex-mtp-optimization.md).
 A public distribution and a published `MiniCPM5Pipeline` API are still pending.

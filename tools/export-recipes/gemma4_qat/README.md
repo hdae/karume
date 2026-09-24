@@ -22,14 +22,14 @@ uv run python dist.py --pipeline gemma4-qat --model e2b --model e4b \
   --out ../../models/karume-gemma4-qat
 ```
 
-Place original checkpoints in `inputs/gemma4-qat/<checkpoint-name>/`, or pass `--input`.
-Exports go to `outputs/series/gemma4-qat-<model>-product/`, or `--out`. The export verifies every
-fixed packed payload and scale after sharding and publishes all files together only after checks
-pass. `reference.json` records checkpoint fingerprints, trace bounds, how many fixed weights and
-PLE shards were verified, and how many upstream tensors this text-only conversion never read
-(KV cache scales, vision, audio). Distribution assembly reconciles those counts against the series
-itself. Exporting into an existing output replaces that complete series; use a new directory to
-retain previous measurements.
+Place original checkpoints in `inputs/gemma4-qat/<checkpoint-name>/`, or pass `--input`. Exports go
+to `outputs/series/gemma4-qat-<model>-product/`, or `--out`. The export verifies every fixed packed
+payload and scale after writing the container, reads the PLE assets back from it, and publishes all
+files together only after checks pass. `reference.json` records checkpoint fingerprints, trace
+bounds, how many fixed weights and PLE blocks were verified, and how many upstream tensors this
+text-only conversion never read (KV cache scales, vision, audio). Distribution assembly reconciles
+those counts against the series itself. Exporting into an existing output replaces that complete
+series; use a new directory to retain previous measurements.
 
 The distribution family is `gemma4-qat/1`, with models `e2b` and `e4b`. The `i4` quant is
 fixed mixed INT2/INT4/INT8 with SRQ and reference GEMV summation. E2B defaults to

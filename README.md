@@ -4,9 +4,10 @@ A general-purpose NN inference stack running on WebGPU (Deno + browser, pure Typ
 `@karume/runtime` itself has zero external dependencies, and the other packages depend only on
 packages built from Web-standard APIs). Composed of three JSR packages — `@karume/runtime`
 (IR execution) / `@karume/hub` (model resolution, fetch, and caching) / `@karume/models`
-(pipelines and tokenizer) — plus the PyPI package `karume` that lowers PyTorch models to IR
-(the installed CLI ships `dist` / `repack` / `verify` — see `karume --help`; the `export*`
-commands run from the repository work tree only).
+(pipelines and tokenizer) — plus the PyPI package `karume` that lowers PyTorch models to IR and
+writes them as Karume containers (`krm`) (the installed CLI ships `dist` / `migrate` / `verify` —
+see `karume --help`; per-model exports are recipes run from the repository work tree as
+`python -m <family>.export`, see [tools/export-recipes/](tools/export-recipes/README.md)).
 
 Status: **pre-1.0** (this page is a stub; the current design's source of truth is
 [docs/decisions/](docs/decisions/))
@@ -22,5 +23,6 @@ Experimental fixed mobile QAT: [Gemma 4 QAT E2B / E4B](examples/gemma4-qat/READM
 with a separate `gemma4-qat` pipeline and local chat CLI.
 
 Experimental local LLM examples: [MiniCPM5-2B](examples/minicpm5/README.md) and
-[Qwen3-0.6B](examples/qwen3/README.md). These CLIs use existing converted assets in `outputs/series/`;
-see their READMEs for commands and the current context limit.
+[Qwen3-0.6B](examples/qwen3/README.md). These CLIs read a locally converted series in container form
+(`krm`) from `outputs/series/`; this repository cannot produce such a series today (see their
+READMEs).

@@ -17,8 +17,8 @@ not a graph input (the band masks fold to constants sliced by `sym_prefix_slice`
 and tokenization stay on the host. Output layout:
 
 ```
-outputs/series/embeddinggemma-300m/model.safetensors     weights/constants + __metadata__.karume_ir
-outputs/series/embeddinggemma-300m/io.<case>.safetensors input tensors and expected outputs from torch CPU
+outputs/series/embeddinggemma-300m/model-NNNNN-of-NNNNN.krm  the container: graph + weights/constants as a part sequence
+outputs/series/embeddinggemma-300m/io.<case>.safetensors      input tensors and expected outputs from torch CPU
 ```
 
 The io tensor key convention is the same as the tiny goldens and DeBERTa (`input.<graph input name>`
