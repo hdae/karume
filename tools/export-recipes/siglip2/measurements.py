@@ -3,10 +3,10 @@
 置き場を patch 層から分けているのは import 連鎖のため。実測幅を語る綴りは配布側
 （`siglip2.card` のモデルカード / `siglip2.distribution` の改変告知）が引くが、それらは
 `dist.py` ドライバの import 連鎖に乗っている。数を `siglip2.patch` が持つと、配布側の import
-連鎖に patch 層（torch 依存）が入る。NOTE: 現状は exporter core の `karume/__init__` が
-`karume.convert` を eager に引くため、`import dist` だけでも torch は読まれる（2026-09-04 実測 —
-backlog 起票）。ここで達成しているのは「patch 層を配布経路の連鎖から外す」と「実測幅の綴りを
-1 か所にする」の 2 点で、torch の起動コストが消えるのは core が遅延化された日から。
+連鎖に patch 層（torch 依存）が入る。exporter core の `karume/__init__` は公開面を初回参照で
+解決する（PEP 562）ので、`import dist` は torch を読まない（2026-09-24 実測）。ここで patch 層を
+配布経路の連鎖から外しておかないと、その性質がこのファイル経由で崩れる。もう 1 つの狙いは
+実測幅の綴りを 1 か所にすること。
 ここは定数と文字列化だけの葉モジュールで、
 `gemma4.distribution` が `SYM_MAX` を torch を読まない側へ写しているのと同じ向き
 （あちらは写しで同値をテストが見るが、こちらは**正本ごと**こちらに置くので写しにならない）。
