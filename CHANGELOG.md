@@ -35,6 +35,13 @@ measurements in `docs/research/`.
   and writes the `karume/5` manifest; `karume verify --container` checks a container from the CLI.
   `IRODORI_SOURCES["irodori-v4.1-small"]` now pins the `karume/5` re-upload of that repository; the
   other pins still name `karume/4` revisions, which only the released packages can read until stage 3.
+- Karume container format, stage 3 (ADR 0108): the exporter writes `krm` directly (`publish_model` /
+  `export_to_file` with `provenance` and `graph_name`; PLE tables and `rope_base` become container
+  assets), `karume dist` bakes a `karume/5` repository from container series, and the runtime gains an
+  in-memory container (`openMemoryContainer`) that feeds host-built graphs and already-decoded
+  tensors through the same admission and upload path as a `krm` without writing one —
+  `parseIrDeclarationValue` / `IrDeclaration` are on the runtime surface so callers can build the
+  declarations for it. Gemma's on-device PLE gather and Irodori's host graphs go through it.
 - Gemma 4 QAT family: `gemma4-qat` pipelines for E2B / E4B with fixed INT2 / INT4 storage, fixed
   static re-quantization (SRQ) whose rounding is preserved on both CPU and GPU, PLE read back
   whole or row by row, and a chat CLI example.
@@ -116,10 +123,9 @@ measurements in `docs/research/`.
 - **Breaking:** the runtime's in-memory graph (`IrGraph`) now uses the merged storage vocabulary:
   `initializers[name]` is `{ storage: { codec, groupSize?, rowAxis? } }` or `{ shared: true }`,
   initializer names are the tensor keys (the exporter's FQN / `const.<hash>`), and the `tensor` /
-  `storage.dtype` / `storage.scale` fields are gone. `openModel` / `extractIrGraph` return the
-  legacy scale keys alongside the graph, `createShardValidator` takes them as a second argument,
-  `ReadyInitializer` carries bytes instead of safetensors views, and capability diagnostics say
-  `非対応 格納 '<layout>'`. Shared initializers are named after the lender's initializer.
+  `storage.dtype` / `storage.scale` fields are gone; `ReadyInitializer` carries bytes instead of
+  safetensors views, and capability diagnostics say `非対応 格納 '<layout>'`. Shared initializers
+  are named after the lender's initializer.
 - **Breaking:** the PLE read surface is a handle (`openPleShard`); decode reads the rows it needs
   instead of the whole shard.
 - **Breaking:** hub reads manifest `karume/5` only (no `karume/4`); `resolveFiles` / `ResolvedFiles` /
@@ -147,6 +153,24 @@ measurements in `docs/research/`.
   `ModelInputError`; plain `catch` is unaffected, since `ModelInputError` extends `Error`.
   Branching on `err.name === "RangeError"` breaks the same way: the name is now
   `"ModelInputError"`.
+- **Breaking:** the safetensors distribution form is gone from the runtime (ADR 0108 §18):
+  `openModel`, `KarumeModel`, `ContainerError`, `createSession(gpu, model)`, `prepareModel`,
+  `createSessionFromShards`, `ModelShard`, `PreparedModel.createSession` and
+  `estimateSessionMemory` are removed, and IR v1 JSON (`version: 1` with `tensor` / `storage`
+  initializers) is no longer parsed. Open a `krm` with `openContainer` or build one in memory with
+  `openMemoryContainer`, then `prepareContainer` → `estimate()` → `createContainerSession()`;
+  estimate a graph you already hold with `estimateGraphMemory`. Capability shortfalls throw
+  `RuntimeSupportError`; descriptor, binding and supply violations throw `ContainerFormatError`.
+  `parseSafetensors` stays for plain safetensors assets, but the packed `I4` / `I2` dialect dtypes
+  are rejected (`SafetensorsDtype` shrinks to the official set).
+- **Breaking:** hub's shard streaming face is gone: `streamAssets`, `StreamedAsset`,
+  `StreamAssetsOptions`, `FileReadOptions.into` and `DirectoryAdapter.readFileInto` are removed
+  (`fetchAssets`, `prefetchAssets`, `openAsset` and `openContainerSource` remain).
+- **Breaking:** exporter: `karume repack` is removed and `karume verify` checks containers only;
+  `publish_model` / `export_to_file` require `provenance` and `graph_name` (the graph name must equal
+  the manifest `weights` key — `karume dist` refuses otherwise), `WeightFiles.extras` is gone, the
+  Gemma 4 QAT `reference.json` is schema 3 (`pleBlocks`), and `tools/llm-speed` profiles
+  distributions only.
 
 ## [0.12.0] - 2026-09-06
 
