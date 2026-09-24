@@ -9,7 +9,7 @@
 
 | 根                                         | 中身                                                               | 例                                                             |
 | ------------------------------------------ | ------------------------------------------------------------------ | -------------------------------------------------------------- |
-| `models/`                                  | **配布形だけ**（1 ディレクトリ = 1 HF リポ・そのまま上げられる）   | `models/karume-anima-turbo/` / `models/karume-sbv2-jvnv/`      |
+| `models/`                                  | **配布形だけ**（1 ディレクトリ = 1 HF リポ・そのまま上げられる）   | `models/karume-anima/` / `models/karume-sbv2-jvnv/`            |
 | `outputs/series/`                          | exporter の系列出力（コンテナ + golden フィクスチャ `io.*`）       | `outputs/series/sbv2-F1-f16/`                                  |
 | `outputs/examples/<model>/`                | examples 台本の既定出力先（`<model>` = `--source` の basename）    | `outputs/examples/karume-sbv2-jvnv/*.wav`                      |
 | `outputs/bench/<model>/<日付>_<目的>/`     | e2e ダンプ・ベンチ・視認評価（**消して安全** — 旧 `demo/` の後継） | `outputs/bench/karume-anima/2026-08-30_e2e-mismatch/`          |
@@ -23,12 +23,12 @@
   トークナイザは `<系列名>-tokenizer/tokenizer.json`（例
   `outputs/series/gemma4-e2b-tokenizer/`）、anima のデモ用表は `anima-demo/text/`。export 系列の
   ディレクトリへは混ぜない（`dist` の宣言外ファイル検査が拾う）。
-- **例外は同一コンポーネントの sidecar** — gemma4 製品系列の PLE（`ple.json` /
-  `ple-NNNNN-of-NNNNN.safetensors` / `ple.probe.safetensors`）は系列ディレクトリの**中**に置く。
-  トークナイザと違って独立コンポーネントではなく、製品グラフと**同じ配布 digest set の一員**
-  （ADR [0085](decisions/0085-ple-host-gather.md) Consequences / ADR
-  [0084](decisions/0084-gemma-tokenizer-chat.md) 決定 5）なので、別ディレクトリに据えると
-  「新しいグラフ + 古い PLE」の組が作れてしまう（据え替えは系列ディレクトリごと 1 回）。
+- gemma4 製品系列の PLE（索引 `ple_index` と `ple.values.<k>` / `ple.scales.<k>` の block）は
+  製品容器 `krm` の**資産**として part 列の中に入る（ADR
+  [0109](decisions/0109-manifest-v5-container.md) 決定 4）ので、系列ディレクトリに別ファイルを
+  持たない。トークナイザと違って独立コンポーネントではなく、製品グラフと**同じ容器の一員**なので、
+  「新しいグラフ + 古い PLE」の組は作れない。系列直下の `ple.probe.safetensors`（逆量子化の参照）は
+  `io.*` と同じ e2e のフィクスチャで、配布しない。
 - `bench/` の `<日付>_<目的>` は実行日 YYYY-MM-DD + 短い識別スラグ（`e2e-mismatch` /
   `eval-images` / `quant-sim` 等）。ファイル取り違え防止のための規約で、機械（テスト・台本）も
   この形で書く。
@@ -98,10 +98,10 @@ uv run python dist.py --pipeline vowel-detector      # → models/karume-vowel-d
   Apache-2.0）に応じて `LICENSE.md` / `NOTICE.md` をリポ直下へ同梱する（決定 7 — 公開状態に
   依らず効く常設ルール）。
 
-- `karume-gemma4` は**系列 2 本**（`gemma4-e2b-product` の製品コンテナ + PLE sidecar と
-  `gemma4-e2b-tokenizer` の compile 済み資産）を 1 リポへ畳む。PLE sidecar は `assets` の席に載り、
-  **asset 名は `ple.json` が書いた shard のファイル名そのもの**（読み手が索引 1 本で取得キーも
-  引けるようにするため — 詳細は `tools/export-recipes/gemma4/README.md`）。上流が Apache 2.0 なので
+- `karume-gemma4` は**系列 3 本**（`gemma4-e2b-product` の製品コンテナ〈PLE は容器の資産〉・
+  `gemma4-e2b-drafter` の MTP drafter コンテナ・`gemma4-e2b-tokenizer` の compile 済み資産）を
+  1 リポへ畳む。manifest の `assets` の席に載るのは tokenizer だけ（詳細は
+  `tools/export-recipes/gemma4/README.md`）。上流が Apache 2.0 なので
   リポ直下に `LICENSE.md` / `NOTICE.md` が入る（`karume.dist` の法的テキスト席）。リポ名は
   家族 1 リポの規則（E4B / 12B が同居する器 — ADR
   [0092](decisions/0092-distribution-repos-and-sources.md) 決定 1）で `karume-gemma4`
@@ -116,10 +116,11 @@ uv run python dist.py --pipeline vowel-detector      # → models/karume-vowel-d
 
 - 仕様の正本は ADR [0041](decisions/0041-manifest-v2.md)（リポ内レイアウト = モデル別
   サブツリー + `shared/`・**配置は常に独立コピー** — ハードリンク禁止の理由も同 ADR 追記）+
-  ADR [0071](decisions/0071-manifest-v3-shards.md)（shard 欄）+ ADR
-  [0075](decisions/0075-quant-presentation.md)（quant の `label` / `description`・
-  `requiredLimits`・ファイル参照の越境 `repo` / `revision`）。**現行 format は `karume/4`**
-  （hub は単一形パース = `karume/4` 以外を読まない — `packages/hub/src/manifest.ts`）。
+  ADR [0075](decisions/0075-quant-presentation.md)（quant の `label` / `description`・
+  `requiredLimits`・ファイル参照の越境 `repo` / `revision`）+ ADR
+  [0109](decisions/0109-manifest-v5-container.md)（`weights.<部品>.<dtype>.container`）。
+  **現行 format は `karume/5`**（hub は単一形パース = `karume/5` 以外を読まない —
+  `packages/hub/src/manifest.ts`）。
   `karume.json` は現物から導出（手書き禁止 — ADR 0038）。
 - 組み立ては冪等（再実行で置き換え）。`verify_dist` が宣言と現物の突合・宣言外ファイル検査まで
   行い、モデルカード `README.md` は検証済み manifest から機械生成される（帰属は
@@ -163,9 +164,9 @@ export HF_XET_DEDUPLICATION_GLOBAL_DEDUP_QUERY_ENABLED=false
 機序と実測は
 [research/2026-08-09-xet-fragmentation.md](research/2026-08-09-xet-fragmentation.md)。
 
-- 上げたら**必ず検証する** — 全 safetensors について reconstruction の term 数を数え、
+- 上げたら**必ず検証する** — 全 krm（と資産の safetensors）について reconstruction の term 数を数え、
   `MiB/レンジ` が 10 を下回っていないか見る（手順は同ドキュメント §9・サンプル数本では
-  shard 間の偏りを見落とす）。健全なら 1 xorb = 1 term に近くなる。
+  ファイル間の偏りを見落とす）。健全なら 1 xorb = 1 term に近くなる。
 - アップロードの前には**毎回** `~/.cache/huggingface/xet/*/shard-cache` を退避する（初回でも
   global dedup のヒットで取り寄せた shard が残り、次のアップロードでそこへ dedup ヒットする）。
 
@@ -178,3 +179,5 @@ export HF_XET_DEDUPLICATION_GLOBAL_DEDUP_QUERY_ENABLED=false
 - **回復は可能**: shard-cache を退避し、4 本の env と 1.6.0 の hf で同一バイトを上げ直すと
   健全な xorb が新規に書かれる（実施した形はリポ削除 → 再作成・再アップ。同一リポ内の
   delete → 再 up の 2 コミット法は未検証）。1.4.3 では回復手段が無かった（片道ラチェット）。
+  ただし**公開 pin のあるリポでは削除 → 再作成を使わない** — 削除は履歴ごと消え、旧版パッケージが
+  pin した revision が失われる（[release-runbook](release-runbook.md) §2）。

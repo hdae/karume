@@ -3,7 +3,7 @@
 WebGPU 汎用 NN 推論スタックの monorepo（Deno + ブラウザ両対応・純 TS + WGSL・ランタイム
 依存ゼロ）。JSR `@karume/runtime`（IR 実行）/ `@karume/hub`（HF revision resolve・DL・cache・
 model / quant 解決）/ `@karume/models`（パイプライン・tokenizer）+ PyPI `karume`（tools/exporter —
-torch.export → IR v1・uv 管理）。設計の正本は [docs/decisions/](docs/decisions/)。現在の
+torch.export → コンテナ `krm`〈IR v2〉・uv 管理）。設計の正本は [docs/decisions/](docs/decisions/)。現在の
 焦点と落とし穴は [.claude/ACTIVE_DESIGN.md](.claude/ACTIVE_DESIGN.md)
 （レビュー・計画タスクは必読）。
 
@@ -25,8 +25,8 @@ torch.export → IR v1・uv 管理）。設計の正本は [docs/decisions/](doc
 
 - `packages/runtime/` — 公開 API は mod.ts の**薄い面のみ**（ADR 0008）。`src/` が本体
   （gpu / codegen / kernels / format / ops / reference / runtime）
-- `packages/hub/` — manifest 解決・fetch・cache（仕様の正本は ADR 0038 §4 + 0041 / 0071 /
-  0075〈manifest は `karume/4`〉+ 0080〈取得層〉+ 0086〈取得元抽象〉）
+- `packages/hub/` — manifest 解決・fetch・cache（仕様の正本は ADR 0038 §4 + 0041 +
+  0075〈quant の表示名〉+ 0109〈manifest は `karume/5`〉+ 0080〈取得層〉+ 0086〈取得元抽象〉）
 - `packages/models/` — **barrel（mod.ts）+ ファミリ別サブパス export の両建て**
 - `tools/exporter/` — PyPI `karume` = **汎用 core のみ**（src layout・境界は machine gate —
   ADR 0065）/ `tools/export-recipes/` — モデル別 recipe（wheel 外・uv workspace 共有 venv・

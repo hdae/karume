@@ -296,7 +296,7 @@ for_device_loss: 99 }` — wgpu 自体の既定は「しきい値なし」）。
 `VK_EXT_memory_budget` でドライバが申告する動的な値。**バッファ本数・アップロード経路・
 flush 頻度をどう変えても天井は動かない**（判定に入るのは合計量と要求サイズだけ —
 6 通りの書き方で同値だった実測と整合）。97% 線を越える `createBuffer` は OOM を返し、
-99% 線は submit / poll のたびに判定されて **device 消失**になる（`createSession` 途中の
+99% 線は submit / poll のたびに判定されて **device 消失**になる（Session 構築途中の
 消失が同一プロセスの後続を道連れにする実測の説明もこれ）。
 
 - 実測（RTX 3080 Ti 12,288MiB・Deno 2.9.4 / wgpu 29.0.1・2026-08-03 時点）: 総確保 7,280MiB で
@@ -336,18 +336,19 @@ Deno 2.9.6 の `ext/webgpu/buffer.rs`（`mapAsync`）と `queue.rs`（`onSubmitt
 
 ## bf16 格納は宣言のみ受理・実行は fail loudly
 
-IR v1 の格納スキーマとしては受理するが、実行経路が無く `createSession` が capability 不足と
-して全件列挙で拒否する。設計は [decisions/0006](decisions/0006-quantization.md) で確定済み。
+codec 台帳に `bf16` が登録されているので宣言としては受理するが、実行経路が無く `prepareContainer` が
+capability 不足（`RuntimeSupportError`）として重みを取る前に全件列挙で拒否する（[ir-v2](ir-v2.md)
+「値と型」）。設計は [decisions/0006](decisions/0006-quantization.md) で確定済み。
 
 group 量子化（w4）は [decisions/0069](decisions/0069-packed-w4-storage.md) で**解禁・実行
-経路も実装済み**（2026-08-18）— 格納 dtype `i4`（packed 4bit・K 方向 group の対称量子化）。
-制約は `group_size` が 2 冪かつ 16 以上・量子化軸（先頭次元を行とした平坦行長 — rank2 では
-最終次元そのもの）が `group_size` で割り切れること・scale companion（F32・rank2
-`[行数, 行長/group_size]`）が必須の 3 点。**適格は f16 / i8 より狭く「消費が linear /
+経路も実装済み**（2026-08-18）— codec `int4-sym-g`（格納型 `i4`・packed 4bit・K 方向 group の
+対称量子化）。制約は `groupSize` が 2 冪かつ 16 以上・量子化軸（先頭次元を行とした平坦行長 — rank2 では
+最終次元そのもの）が `groupSize` で割り切れること・scale companion（f32・rank2
+`[行数, 行長/groupSize]`）が必須の 3 点。**適格は f16 / i8 より狭く「消費が linear /
 embedding / conv1d（`groups == 1`）の重みスロットのみ」**（0069 決定 5 と追記 6 / 7 —
 conv2d / conv_transpose1d への追補は需要が出た op から）で、適格外はロード時 CPU 展開
-（VRAM 削減ゼロ）。`i4` 以外の格納 dtype に
-付いた `storage.group_size` は解禁後も `非対応 group 量子化` として落ちる（黙って
+（VRAM 削減ゼロ）。per-channel の codec（`int8-sym` /
+`int2-off` / `ternary`）の `groupSize` は行長に等しい MUST で、違えば合流層が落とす（黙って
 per-channel として読むと沈黙誤値になるため）。
 
 **f16 は 2026-08-03 に解禁**（[decisions/0018](decisions/0018-f16-weight-execution.md)）、
@@ -358,9 +359,11 @@ per-channel として読むと沈黙誤値になるため）。
 内訳は `Session.diagnostics().storage` で観測する（ADR 0006 の常設診断。i8 の
 `residentCompressedBytes` には scale バッファのバイト数も入る）。
 
-i8 は `storage.scale`（重みと同 rank の keepdim broadcast 形・F32）の**宣言が必須**で、
-チャネル軸は出力チャネル（`conv_transpose1d` だけ軸 1）。scale の欠落・dtype 違い・
-broadcast できない形・実テンソルとの名前衝突・チャネル軸違いはすべてロード時に落ちる。
+i8 は `encoding.scale`（rank 2 `[shape[rowAxis], 1]`・f32）の**宣言が必須**で、行の軸
+`rowAxis` は出力チャネル（`conv_transpose1d` だけ軸 1）。scale の欠落・dtype 違い・長さ違いは
+重みを取る前に合流層で落ちる。`rowAxis` と消費 op のチャネル軸の突き合わせは GPU 常駐の席の
+initializer にだけ掛かり、食い違えば重みを取る前に `prepareContainer` の常駐計画で落ちる。
+適格外で f32 へ展開する席は宣言の `rowAxis` で復元するので、突き合わせなしでも値はずれない。
 
 ## hub: 相 1（streaming prefetch）は CacheStorage 必須で fail loud
 
@@ -368,7 +371,7 @@ broadcast できない形・実テンソルとの名前衝突・チャネル軸�
 素 fetch へ縮退する余地が構造的に無く、fail loud で落ちる（ADR
 [0070](decisions/0070-shard-loading-admission.md) 追記）。`onCacheError` 診断が届くのは相 2 のみ。
 
-## `estimateSessionMemory` の `workspaceBytes` は近似（非勘定は `unaccounted` が列挙する）
+## 見積り（`PreparedModel.estimate` / `estimateGraphMemory`）の `workspaceBytes` は近似（非勘定は `unaccounted` が列挙する）
 
 `scenarios[].workspaceBytes` は融合**前**のノード列に対する生存区間シミュレーションで、実構築が
 畳む / 割る形は勘定に入らない。非勘定は `unaccounted` 欄が逐語で列挙する — ①融合が畳んで消す
@@ -484,8 +487,8 @@ i4 / i8 格納 × f32 計算の linear は 1 ≤ M ≤ 64 で GEMV 族（ADR [00
   （借りる埋め込み表を除く）と借り手 context の lengths 8 バイトを合算する（段 3）。
 - **drafter の格納は i8 単一**（linear まで i8 per-channel）。linear を i4 g32 に落とした資産は
   `dist.py` が拒否する（受理数 E[a] が丸め無し比 −15〜−33% 落ちる — ADR 0096 追記 2026-09-08）。
-  ただしこの門（`tools/export-recipes/gemma4/distribution.py`）は safetensors ヘッダの格納 dtype を
-  「I8 が在る / F16・I4 が無い」で見る **混入検出**であって、「全 linear が i8」の保証ではない
+  ただしこの門（`tools/export-recipes/gemma4/distribution.py`）は容器の束縛表の格納を
+  「i8 が在る / f16・i4 が無い」で見る **混入検出**であって、「全 linear が i8」の保証ではない
   （norm 用の f32 が要るので f32 の全禁止では塞げず、i8 が 1 本でも在れば存在検査は満たされる —
   一部の linear だけ f32 で焼いた資産は通る）。
 - **admission が照合するのは構造だけ**（`packages/models/src/gemma/speculative.ts`）— drafter グラフの
@@ -536,84 +539,80 @@ i4 / i8 格納 × f32 計算の linear は 1 ≤ M ≤ 64 で GEMV 族（ADR [00
 - **配送の粒度**: 1 verify で最大 k+1 個の `token` イベントが続けて届く（position は `pastLength + 1 + i`）。
   `GenerationStop.tokens` は配送した数（停止 token 含む）で、run 数は `speculation.cycles + draftRuns`。
 
-## gemma4 `fromAssets`: PLE の読み口は `readPleShard`（全量バイト列）から `openPleShard`（handle）へ変わった（次のリリース・破壊的変更）
+## gemma4 `fromAssets`: `Gemma4Assets` は `config` / `model`（part 列）/ `tokenizer` の 3 欄 — PLE の読み口は渡さない（次のリリース・破壊的変更）
 
-`Gemma4Assets.readPleShard(file) → ArrayBuffer` は **`openPleShard(file) → Gemma4PleShardSource`**（`{ bytes, readAll,
-range?: { cost: "seek" | "scan", read(offset, length) } }`）に置き換わった（ADR
-[0085](decisions/0085-ple-host-gather.md) 追記 2026-09-07）。`fromAssets` の呼び手は読み口を実装し直す — 全量しか出せない
-読み口は `range` を省けばよく（従来どおり shard 全量 + LRU で動く）、ファイルや遅延 Blob を持つ読み口は `range` を
-出すと decode の 1 token が行 2 区間（8,960 B + 140 B）の読みで済む。`fromPretrained` は取得元の能力（hub の `openAsset`）
-から自動で組む: `denoDirectory` は位置読み（seek）、HF 取得元は取得層 0.8.0 の `openHfFile`（ブラウザ = 遅延 Blob の slice で seek /
-Deno = 本文ストリームの読み飛ばしで scan）。テスト用の実装例は
-`packages/models/tests/helpers/ple-source.ts`。
+PLE は索引（`ple_index`・schema 3）と行列の block ごと `model` 容器の資産に入ったので（ADR
+[0109](decisions/0109-manifest-v5-container.md) 決定 4）、`fromAssets` の呼び手が PLE の読み口を別に渡す席は
+無くなった（公開版の `Gemma4Assets` の `pleIndex` / `readPleShard` は削除 —
+[CHANGELOG](../CHANGELOG.md) の Unreleased の Breaking）。`model` は part 0 から添字順の part 列で渡す — 長さ 0 の
+part も飛ばさない（添字が part の id そのもので、飛ばすと以降が別の part として読まれる —
+`packages/models/src/gemma/pipeline.ts` の `Gemma4Assets`）。decode の PLE は容器の資産の区間読み
+（`AssetReader.read`）で行を引く（`packages/models/src/gemma/ple.ts`）。
 
-## `fromAssets`（全量面）に分割配布形を渡すと、全 shard がホスト RAM に同時常駐する
+## `fromAssets`（全量面）に分割形の容器を渡すと、全 part がホスト RAM に同時常駐する
 
-`fromPretrained` で読める配布形は `fromAssets` でも読める（取得キーが `<役割>[i]` の shard 列は
-連結せず、`fromPretrained` と同じ shard 逐次面へ流す — `packages/models/src/hub/components.ts` の
+`fromPretrained` で読める配布形は `fromAssets` でも読める（取得キーが `<役割>[i]` の part 列は
+連結せず、part 列のまま容器として開く — `packages/models/src/hub/components.ts` の
 `assetComponentOpener`）。ただし全量面の入口は**取得済みバイト列の Record** なので、呼び出し側が
-Record を組んだ時点で**全 shard がホスト RAM へ同時に載っている**。R1 が獲得した
-「ホスト RAM に載るのは今の 1 本だけ」という性質が成り立つのは取得層を通る面
-（`fromPretrained` / `prefetchAssets` + `streamAssets`）だけで、全量面で縮むのは**単一
-ArrayBuffer の大きさ**（Chromium の壁 — 下記）であって合計の常駐量ではない。ローカルの
+Record を組んだ時点で**全 part がホスト RAM へ同時に載っている**。ホスト RAM のピークを取得元の型ごとの
+上限に抑える性質（下の節）が成り立つのは取得層を通る面（`fromPretrained`）だけで、全量面で縮むのは
+**単一 ArrayBuffer の大きさ**（Chromium の壁 — 下記）であって合計の常駐量ではない。ローカルの
 デバッグ・`examples/` 用途を想定した面という位置づけは変わらない。
 
-添字の欠番や、素キー（`transformer`）と分割キー（`transformer[0]`）の混在は **shard の語を含む
-診断**で fail loudly（黙って片方を採らない）。
+添字が `[0]` から始まらない・連続しない列や、素キー（`transformer`）と分割キー（`transformer[0]`）の
+混在は **部品名と part 添字を名乗る診断**で fail loudly（黙って片方を採らない）。
 
-## ホスト RAM ピークの係数 1 化は組み込みの 2 取得元だけ（外部実装の取得元は `into` を実装したときに揃う）
+## ロード時のホスト RAM ピークは取得元の型で決まる（seek 型は item 1 本・scan 型は part 1 本 + GC 待ち）
 
-逐次面の器の使い回し（ADR [0070](decisions/0070-shard-loading-admission.md) 追記 2026-09-02）で、
-ロード時のホスト RAM ピークは「約 0.45GB + 最大 shard 1 本」になった。効くのは**取得元が器へ読める
-経路**で、組み込みの 2 取得元はどちらも使う — ディレクトリ（Deno の `denoDirectory`・`readFileInto`
-を実装したディレクトリアダプター）と HF（取得層 `@hdae/fetch-cache` 0.6.0 の「与えられた buffer へ
-読む」口 — Linux 実測: gemma4 cold 1,740 → 703 MiB・warm 1,408 → 684 MiB・anima f16 warm 2,242 → 743
-MiB）。外部実装の `DistributionSource` は `FileReadOptions.into` を呼んで器へ読むときだけ同じ係数に
-なり、呼ばずに tight view を返す実装は従来の係数のまま（契約は `packages/hub/src/source.ts`）。
-**器を呼んだ上で別の buffer の view を返す実装は fail loudly**（借りた器が使われないまま居座る形
-なので、`streamAssets` が器の契約違反として落とす）。呼ばない実装は従来どおり通る。
+Session 構築は block を 1 本読んでは GPU へ上げて手放す（`queue.writeBuffer` は呼んだ時点でバイト列を写すので、
+CPU 側の解放はフェンスを待たない）。取得元が位置読みできる **seek 型**（ローカルの `denoDirectory`・ブラウザの
+遅延 Blob — Chrome は未実測）では、JS 側に生きる重みは item 1 本（block 32 MiB 以下 + 同乗 scale + 展開席の
+f32 展開結果と持ち越し scale の写し）で、part 長に依らない。位置読みできない **scan 型**（Deno の HF 経由）は
+hub が part を全量読みして保持枠に置き、block をその器の view として切り出すので、ピークはおおむね part 長と
+ともに伸び、GC を待つ器の本数は宣言からは決まらない（実測で external の最大は最大 part の約 1.5〜4.4 本）。
+外部実装の `DistributionSource` がどちらになるかは `openFile` の有無と、返す読み口の `cost`（`seek` /
+`scan`）で決まる（`packages/hub/src/container.ts`）。数え方の正本は [container-v1](container-v1.md) §11、
+実測は ADR [0108](decisions/0108-container-format.md) 追記 5 と
+[研究記録](research/2026-09-24-part-length-ram-peak.md)。
 
 ## MoE は全エキスパート VRAM 常駐が前提（エキスパート単位の動的ロード/退避はしない）
 
 by-design（2026-08-31 裁定）。MoE モデルの VRAM 予算は **active でなく総パラメータ**で組む —
 「使う expert だけロードする」動的常駐は提供しない。根拠は 3 層の構造衝突（実測記録 =
 [research/2026-08-31-freetoken-moe-over-arraybuffer.md](research/2026-08-31-freetoken-moe-over-arraybuffer.md)）:
-①`ShardValidator.finish()` は宣言された全 initializer の存在を要求する（全量/逐次 2 面で
-共有された唯一の門 — 穴を開けると受理集合の一本化が崩れる）②重み常駐は Session 構築時
-1 回組みで退避/再ロードの席が無い ③IR v1 に値依存の実行選択が無く（op-vocabulary の意図的
+①容器の束縛表は宣言された全 initializer の供給を要求する（`krm` では 2 文書の突合
+`validateAgainstGraph`、メモリ内容器では `openMemoryContainer` の対応検査が不足と余剰を fail loudly で
+落とす — 穴を開けると受理集合の一本化が崩れる）②重み常駐は Session 構築時
+1 回組みで退避/再ロードの席が無い ③IR に値依存の実行選択が無く（op-vocabulary の意図的
 保留・`topk` も static-k）、MoE は全 expert を計算して gate で畳む dense 展開でしか書けない。
 さらに外部要因として、expert キャッシュ系の先行手法（FreeToken ほか）が前提にする
 「device 起動の host メモリ転送」が WebGPU に存在しない。復活条件つきの再検討席は
 [backlog](backlog.md) parked。
 
-## 要素数が奇数の f16 テンソル・I8 テンソルは safetensors 上の並び順に制約がある
+## 付帯資産の safetensors はデータ節の被覆と要素整列を要求する（公式の `safe_open` が読めても拒否しうる）
 
-裁定の正本は ADR [0063](decisions/0063-safetensors-physical-layout.md)。リーダはデータ節の
-「隙間なし・整列単位（I4 は先頭 4 バイト）整列」を要求し（違反は `SafetensorsError`）、
-エクスポータは書き出し順
-「F32 → I32 → I4 → 偶数要素 F16 → 奇数要素 F16 → I8」+ `verify.assert_reader_layout` で保証する。
-HF の `safe_open` は整列違反を読めてしまうので、そちらを通すだけでは検出できない。
+容器でない付帯資産（sbv2 のスタイル表・anima の rope 素表・vowel-detector の表など）を読む厳格リーダ
+`parseSafetensors` は、データ節を「隙間なく覆う・各テンソルの絶対 offset が dtype の要素サイズに整列する」
+ことを要求し、違反は `SafetensorsError` で落とす（裁定の正本は ADR
+[0063](decisions/0063-safetensors-physical-layout.md)）。要素数が奇数の f16 の直後に 4 バイト型を置いた
+ファイルはこの整列を破る。HF の `safe_open` は整列違反を読めてしまうので、そちらを通すだけでは検出できない
+（exporter 側の同じ規則の検査は `karume.verify.assert_reader_layout`）。重みの容器（`krm`）にこの制約は
+無い — block の先頭は 64 B 整列で、並び順は書き手の配置が決める（[container-v1](container-v1.md) §4.1）。
 
-## 格納 dtype `I4` は safetensors の方言（公式パーサは読めない）
+## 量子化格納（`i4` / `i2`）は Karume の容器でだけ配る（汎用の safetensors ツールでは読めない）
 
-INT2 の `I2` も karume の追加語彙であり、公式 safetensors reader との互換形式ではない
-（[ADR 0097](decisions/0097-gemma4-qat-integration.md)）。IR 上の INT2 は行ごとの scale、
-linear / embedding の packed 実行に対応し、linearCompute は f32 に限る。
+packed int4 / int2（ADR [0069](decisions/0069-packed-w4-storage.md) /
+[0097](decisions/0097-gemma4-qat-integration.md)）は容器 `krm` の codec（`int4-sym-g` / `int2-off`）として
+焼く。容器は Karume 専用の形式なので、読めるのは Karume のランタイムと exporter（`karume.container`）
+だけである（HF へのアップロード・DL は内容非依存なので通る）。付帯資産の safetensors は公式の dtype 語彙の
+部分集合しか受理せず、旧配布形が使っていた方言 dtype `I4` / `I2` は拒否する
+（`packages/runtime/src/format/safetensors.ts`）。
 
-packed int4（ADR [0069](decisions/0069-packed-w4-storage.md)）は safetensors ヘッダに
-dtype `I4` を書くが、これは**公式仕様に無い語**で、公式 safetensors ライブラリは該当
-テンソルを含むファイルを拒否する（実測 2026-09-01・safetensors 0.8.0 — 受理 dtype は
-`F4` / `F6_*` / F8 系まで拡張済みだが int4 系は無い）。sub-byte の機構自体（論理 shape +
-bit 幅からのバイト長導出）は公式 `F4` と同型で、非互換は dtype 名の 1 点。
+INT2 の実行は行ごとの scale で、linear / embedding の packed 実行に対応し、`linearCompute` は f32 に限る
+（[ADR 0097](decisions/0097-gemma4-qat-integration.md) 追記 1）。
 
-- 影響: i4 テンソルを含む shard は **karume のリーダ / exporter 以外では読めない**
-  （HF へのアップロード・DL は内容非依存なので通る）。i4 を含まない shard は公式互換のまま。
-- 対象: i4 系列を含む配布形すべて（例: gemma4-e2b — この配布形の重みは i4 のみ・irodori `w4`・
-  sbv2 `w8-bert4` の text_encoder）。**モデルカードには注記済み**（0.8.0 のカード再発行 —
-  格納 dtype に `i4` を含む配布形にだけ出る）。
-- 公式仕様への追随提案（upstream への I4/U4 追加要望）はしない — 2026-09-01 ユーザー裁定。
-  目指す方向が違うため、将来は**別形式 / 独自形式への移行**を検討する（器は次の
-  manifest format 変更時 — [backlog](backlog.md) の次波計画）。
+- 公式 safetensors 仕様への追随提案（upstream への I4/U4 追加要望）はしない — 2026-09-01 ユーザー裁定。
+  目指す方向が違うため、配布形は専用コンテナ（ADR [0108](decisions/0108-container-format.md)）へ移った。
 
 ## gather / embedding の範囲外添字は GPU で NaN 汚染になる（例外にならない）
 
@@ -640,7 +639,7 @@ i32 算術 99 本は全て mask 由来の構造的有界値で該当ゼロ（189
 ## exporter: `x + 0` の恒等除去は −0 入力で torch と乖離しうる（div / sqrt の下流）
 
 `normalize._drop_identity_add` は `add(x, 0)`（加数が Python スカラの 0）を x へ畳む。f32 で
-値が変わるのは x = −0.0 のときだけで、`x + 0.0` は +0.0 を返す。IR v1 には**符号付きゼロを
+値が変わるのは x = −0.0 のときだけで、`x + 0.0` は +0.0 を返す。IR v2 には**符号付きゼロを
 区別する op が実在する** — `div` は `1/(+0) = +∞` / `1/(−0) = −∞`、`sqrt` は `sqrt(±0) = ±0`
 （参照実装も素の除算と `Math.sqrt`）— ので、消した add の下流が div の分母や sqrt の引数へ
 届く形では torch と符号が反転しうる（最小反例は 2026-08-16 レビューで実証済み:
@@ -660,7 +659,7 @@ bitwise_not は bool のみ）。語彙 allowlist 凍結（ADR 0007）の dtype 
 
 WebGPU のストレージバッファに 1bit 型が無いため、bool は GPU 格納・入出力
 （`Tensor.data` = Uint32Array）とも u32 の 0 / 1（ADR 0009）。safetensors の `BOOL`
-（1 バイト格納）は 4 バイト前提の転送と噛み合わないため、bool の initializer は IR v1 の
+（1 バイト格納）は 4 バイト前提の転送と噛み合わないため、bool の initializer は IR v2 の
 語彙に無い（必要になったら格納規約ごと改訂）。
 
 ## strided コピー族（permute / expand / slice / cat / sym_prefix_slice / masked_fill の mask）は rank ≤ 4
@@ -734,7 +733,7 @@ fail loudly（実行上限そのものは緩めない）。
 - op が持つのは**隠れ側の逐次だけ**。入力側 GEMM（`x·W_ihᵀ + b_ih`）は**呼び手が既存 `linear`
   で用意する**（IR 上は別ノード）。この分割のおかげで入力側の重みは f16 / i8 格納の適格の
   ままだが、**`W_hh` は op 内スロットなので低精度格納の適格外**（`WEIGHT_SLOTS` に載らない）。
-- 出力は `y[T,N,H]` **だけで `h_n` を返さない**（IR v1 の単一出力前提）。最終状態を消費する
+- 出力は `y[T,N,H]` **だけで `h_n` を返さない**（op 契約の出力は 1 本）。最終状態を消費する
   モデルは現状表現できない。
 - **多層 / 双方向 / `has_biases=False` / `batch_first` / `dropout` の欄が無い**。層と方向は
   エクスポータがノードを並べて表す（`aten.gru` の `Tensor[16]` は IR に載らない）。
@@ -917,7 +916,7 @@ EmbeddingGemma と同じ静的方式（B=1・呼び出し側が列を詰める�
   が全体を 0 にする）なので、ホストがゼロ行列を置けば同値。**恒真化しないよう同 export
   台本の `_no_reference_evidence` が毎 emit 実測する**（非ゼロ latent を
   全 0 マスクで通し、出力の最大絶対値が 0 でなければ export ごと落ちる）。
-- **平均トークンの前置（`_prepend_masked_mean_token`）は現行パイプラインではホスト**。IR v1 の
+- **平均トークンの前置（`_prepend_masked_mean_token`）は現行パイプラインではホスト**。IR v2 の
   `cat` は `1 + S → S+1` を受理する（ADR [0046](decisions/0046-cat-symbolic-axis.md)）ので、
   残置の理由を「記号軸 `cat` 非対応」とはしない。ホスト側の作業は軸 1 の平均と concat だけで、
   モデル計算（重みを使う演算）は残らない。GPU 側へ移すかは別途の設計判断。
@@ -1095,11 +1094,11 @@ linear 族など残りの op の話。
   ため、`linearCompute: "i8a8"`（0.5.0 で `"a8"` へ改名した旧綴り）が例外も警告も無く f32 で
   走っていた。
 - **`EstimateOptions.maxStorageBufferBindingSize` の値域検査**（正の安全整数）は
-  `estimateSessionMemory` / `estimateGraphMemory` の**入口**で走る。従来は states 形 attention の
+  `estimateGraphMemory`（`PreparedModel.estimate` も同じ実装）の**入口**で走る。従来は states 形 attention の
   一時を数える経路の内側にしか無く、states 形を持たないグラフでは −1 / 1.5 / NaN が黙って
   受理されていた（読まないので数字は変わらなかった）。
 - **`SubmitPolicy.maxChunkSize` の実効上限は gpuTiming 有効な device で 1,024**（query 2,048 =
-  querySet 容量）。超える政策は `createSession` の `SubmitScheduler` 構築時に `SubmitPolicyError`
+  querySet 容量）。超える政策は Session 構築時（`SubmitScheduler` の構築）に `SubmitPolicyError`
   で落ちる（0.9.0 までは run の途中で落ちていた）。
 
 ## GitHub CI はローカル資産（`outputs/`）依存のテストを踏まない（検証範囲の制約）
@@ -1197,7 +1196,7 @@ finish・使用予約・staging・区間ロックが取り残されるので、�
 
 ## DL 前の GPU 適合チェックは quant が宣言した feature と limits まで（合計・空きは見ない）
 
-quant が宣言する GPU 前提のうち、重み shard を取る前（家族 admission）に突き合わせるのは
+quant が宣言する GPU 前提のうち、重みの part を取る前（家族 admission）に突き合わせるのは
 `gpuFeatures`（共有 GPU を渡された経路のみ — 自前で device を取る経路は要求として `acquireGpu`
 へ渡す）と `requiredLimits`（ADR 0089 決定 5・2026-09-01 結線）。limits の突き合わせ相手は、
 共有 GPU なら `GpuContext.limits`、自前で取る経路なら直前に読んだアダプタ実測値
@@ -1215,7 +1214,8 @@ quant が宣言する GPU 前提のうち、重み shard を取る前（家族 a
   超える現物 = BiRefNet 1024²（1 binding 320MiB・GPU 総確保 約 1.7GiB — 上の BiRefNet 節）。
   中間の上限超過（slot 実寸 > `maxStorageBufferBindingSize` / 領域 > `maxBufferSize`）は ADR
   [0093](decisions/0093-transient-liveness-packing.md) 決定 5 の計画時 preflight が、Session 構築時と
-  `estimateSessionMemory` の**両方で確保の前にノード名つきで全件列挙して落とす**（2026-09-05 結線）。
+  見積り（`estimateGraphMemory` — `PreparedModel.estimate` も同じ実装）の**両方で確保の前にノード名つきで
+  全件列挙して落とす**（2026-09-05 結線）。
 - gemma4 の `fromAssets` は manifest を受け取らない（`Gemma4Assets` はバイト列と config だけ）
   ため宣言に到達できず、この面の守りは構築時検査のみ。`fromAssets` 一般は DL が無いので
   事前判定の席自体が無い（共有 GPU を渡した場合だけ admission で見る）。
@@ -1233,36 +1233,43 @@ quant が宣言する GPU 前提のうち、重み shard を取る前（家族 a
 abort())` / `AbortSignal.timeout`）との順序が失われ、「実行開始後に届いた中断は最初の段境界で
 効く」という門が負荷次第で破れる（2026-09-05 実測）。中断を確実に観測できることを速度より優先する。
 
-## ブラウザ: Chromium は単一 ArrayBuffer を 2,145,386,496 バイトで打ち切る（分割前の旧資産のみ該当）
+## ブラウザ: Chromium は単一 ArrayBuffer を 2,145,386,496 バイトで打ち切る（単一形の容器を全量で渡す口だけに掛かる）
 
 Chromium（Chrome / Edge — 全 OS 共通・Mac も同じ）は PartitionAlloc の意図的なセキュリティ
 設計として 2³¹ − 2MiB = 2,145,386,496 バイトを超える単一 ArrayBuffer の確保を必ず失敗させる
-（フラグで緩和不可）。これを超える配布ファイル — 例: Base 系 f16 の transformer
-3,913,609,588 B — は全量面 / 逐次面のどちらでも materialize できず、**原理的にロード不能**
-（実測は 2026-08-25 調査 — 経緯は git）。消費側の判定条件は「manifest の各ファイル `size` が
-この値を超える quant 席を選択肢から外す」。i8（1,962,502,636 B）は壁の内側だが余裕は
-約 183MB しかなく、重み増で同じ壁に当たる。恒久解（shard 分割配布 + ロード面接続 = R1）は
-下記のとおり実装・公開済み。
+（フラグで緩和不可・実測は 2026-08-25 調査 — 経緯は git）。
 
-なお 2026-08-28（fetch-cache 0.5.0 追従 — ADR 0080）から、この壁は**ダウンロード前に**
-落ちる: hub が `expectedBytes`（manifest `size`）を渡すため、受信バッファの確保に失敗する
-大きさは 1 バイトも受信せず throw される（`cause` = RangeError — 帯域と時間を捨てた後に
-落ちる事故が消えた）。
+配布形はこの壁の内側に収まる。HF の公式配布は分割形の容器で part 長の天井は 1024 MiB、Session 構築が
+一度に扱うのは block（32 MiB 以下）である（ADR [0108](decisions/0108-container-format.md) 決定 5 / 6）。
+壁が残るのは**単一形の容器を全量の ArrayBuffer で渡す口**（`openContainer({ kind: "bytes" })`・全量面の
+単一キー）だけで、上限を超える単一形は `openContainer` が「分割形で読む」よう促して fail loudly で落とす
+（`packages/runtime/src/format/container/limits.ts` の `MAX_SINGLE_CONTAINER_BYTES`）。
 
-**根本解は 2026-08-29 の R1 統合波で実装済み**: exporter が 1GiB 超のコンポーネントを
-shard 分割し（`karume.shards` — ADR 0070 追記 2026-08-29）、ロードは shard 逐次面が
-1 shard ずつ materialize する（単一バッファは常に ≤ 256MiB — ファイル長の受理上限・ADR 0090。上限超えの
-テンソルは piece で割れる）。Base f16 の実ロード +
-生成は分割配布形で実証済み。公開 HF リポ 2 本（anima / anima-turbo）も 2026-08-29 に分割形で
-上げ直し済み。**この制約が残るのは「分割前に焼かれた手元の旧資産」だけ**（`outputs/` の
-旧 series 等 — 再 export で自動的に規則内へ入る）。
+2026-08-28（fetch-cache 0.5.0 追従 — ADR 0080）から、この壁は**ダウンロード前に**落ちる: hub が
+`expectedBytes`（manifest `size`）を渡すため、受信バッファの確保に失敗する大きさは 1 バイトも受信せず
+throw される（`cause` = RangeError — 帯域と時間を捨てた後に落ちる事故が消えた）。
 
-## 配布形: 1 行が shard 容量を超えるテンソルは配布できない（by-design — ADR 0090）
+## 配布形: 1 行が block 上限（32 MiB）を超えるテンソルと、32 MiB を超える const は配布できない（by-design — ADR 0108 決定 5）
 
-テンソル分割（piece）は先頭次元（行）の境界でしか切らない — 各 piece が親と同じ dtype・残り次元を持つ
-普通のテンソルなので、読み手・書き手・検査が型の規則を共有できる。したがって 1 行（先頭次元 1 つぶんの
-バイト列）が書き手の容量（256MiB − ヘッダ余裕 1MiB）を超えるテンソル（例: shape `[2, 2^27]` の f32）は
-配布できず、exporter が fail loudly で落とす。実資産の行は最大数 KB で、該当は無い。
+piece（テンソルの分割）は先頭次元（行）の境界でしか切らない — 各 piece の範囲は束縛表の `pieces[].rows` で、
+読み手・書き手・検査が同じ行の規則を共有できる（[container-v1](container-v1.md) §5 の規則④）。したがって次の
+形は配布できず、export が fail loudly で落とす（`karume.container`）: 1 行（先頭次元 1 つぶんのバイト列）が
+block 上限を超えるテンソル（例: shape `[2, 2^24]` の f32 — 1 行 64 MiB）、`rowAxis` が 1 で 32 MiB を超える
+initializer（scale の行範囲が piece の行範囲に対応しないので分割できない）、32 MiB を超える const（const は
+piece の機構を持たない — container-v1 §10）。1 block で持つ scale が 32 MiB を超える量子化 initializer も
+配布できない。これを落とすのは書き手ではなく、publish が書いた容器を読み直すときの block 長の検査
+（`karume.container` の `read_container`）で、recipe と `karume migrate` はどちらも publish を通る。
+実資産に該当は無い。
+
+## 配布形: 旧配布形（safetensors 1 ファイル / shard 列・manifest `karume/4` 以前）は読めない — 移行は `karume migrate`（`karume/4` はリポ丸ごとの `--manifest`・それ以前は部品単位の位置引数 — ADR 0108 決定 18）
+
+現行のパッケージが読むのは manifest `karume/5` とコンテナ（`krm` / `krg`）だけで、両読みはしない。旧 manifest は
+hub が「未対応の major」として落とし（`packages/hub/src/manifest.ts`）、旧 safetensors を容器として渡すと runtime が
+「未知の magic」で落とす（`packages/runtime/src/format/container/header.ts`）。旧形式を読む処理は移行 CLI
+（`tools/exporter` の `uv run karume migrate` — 部品単位の位置引数か、`--manifest` のリポ丸ごとモード）にだけ置き、
+入力は読むだけで消さない。旧版のパッケージは旧 revision（40 桁 SHA）を pin しているので、旧版のまま使う限り
+旧配布形は動き続ける。HF の公開リポのうち `karume/5` へ上げ直したのは irodori-v4.1-small だけで、残りは
+release の波で上げ直すまで現行のパッケージからは読めない（[backlog](backlog.md) の release 節）。
 
 ## hub: キャッシュは credential で隔離しない（by-design — 2026-08-28 裁定）
 
@@ -1387,7 +1394,7 @@ VRAM は容量に比例して伸びる（full 層 KV
   小さい側で出る）+ 65,536（手実測）: live 4,096 / 16,384 / 65,536 で ③' vs f64 = 8.6e-9 / 1.5e-8 /
   1.8e-8（帯の 1/100・2026-09-03 レビュー実測）。
   `Gemma4PipelineOptions.stateAttentionReduce: "sequential"` で参照経路へ戻せる。
-  低レベル面（`createSession` を自分で呼ぶ消費者）の既定は runtime のまま `"sequential"`。
+  低レベル面（`createSessionFromContainer` / `createContainerSession` を自分で呼ぶ消費者）の既定は runtime のまま `"sequential"`。
 - `chunkLength` の上限は焼いた記号 `M` の trace 上限で、配布形が `pipelineConfig.maxChunkLength`
   として宣言する（E2B は 768）。超える値は宣言の門で落ちる（2026-09-03 実測: 宣言が無かった頃は
   `chunkLength: 1024` が黙って通り、prefill が 2 chunk に割れて token 列も 768 と同一だった）。
@@ -1465,7 +1472,8 @@ ADR [0091](decisions/0091-gemma4-host-rope-variable-capacity.md)）— を超え
 ある**（上の「Metal には効かない」注記 — wgpu-hal metal の `check_if_oom()` は no-op。
 known-issues「Metal で out-of-memory errorScope が沈黙する」）。つまり Metal では
 「単発上限は事前に確実に落ちる・合計の物理超過は依然黙って進み得る」が残る。緩和候補は必要量の
-事前見積り（`estimateSessionMemory`）を呼び手へ渡すことだが、見積りはグラフ入力の記号次元が全て
+事前見積り（`PreparedModel.estimate` / `estimateGraphMemory`、gemma4 は `Gemma4Pipeline.estimateSessionMemory`）を
+呼び手へ渡すことだが、見積りはグラフ入力の記号次元が全て
 束縛されていることを要し、ロード時に束縛値を持つ家族は gemma4 だけなので、席の設計は Phase B の
 実測後に行う（ADR 0089 追記 2026-09-01 — 未実装）。
 
@@ -1489,8 +1497,8 @@ known-issues「Metal で out-of-memory errorScope が沈黙する」）。つま
   [0096](decisions/0096-speculative-decoding.md) 段 2 で入った `ResolveOptions.weights`）。守る側の
   候補は「label（`<model>/<quant>`）が対象と違う選択」なので、同じ label の別の部分集合は守らないし
   `alsoEvicted` にも載らない。帰結は 3 点:
-  - **「本体は残して drafter だけ消す」はそのまま書けない**。`resolveFiles` は weights を絞っても
-    assets を全数展開するので、絞った選択の参照集合に tokenizer / PLE などの共通 assets が入り、
+  - **「本体は残して drafter だけ消す」はそのまま書けない**。`resolveSelection` は weights を絞っても
+    assets を全数展開するので、絞った選択の参照集合に tokenizer などの共通 assets が入り、
     **残るのは本体 weights だけ**になる（その (model, quant) は部分在庫に落ちる — 詳細と回避は
     [known-issues](known-issues.md) の該当節）。
   - **対象と同じ label の `protect` は無視される**（守る側の候補が「label が違う選択」だけなので）。
@@ -1594,7 +1602,7 @@ RTX/Chromeとカーネル数値の検収を行い、M2の性能検収は残る�
 
 ## gemma4: PLE の GPU 常駐席が要るもの（2026-09-19・opt-in）
 
-`pleResidency: "gpu"` は PLE sidecar の量子化バイト列を**単一の storage 束縛**として GPU に置く
+`pleResidency: "gpu"` は PLE（`model` 容器の資産）の量子化バイト列を**単一の storage 束縛**として GPU に置く
 （[ADR 0085 追記](decisions/0085-ple-host-gather.md)）。既定は `"host"` で、従来の挙動・数値・
 token 列は 1 つも変わらない。
 

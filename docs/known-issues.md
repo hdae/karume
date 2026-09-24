@@ -234,7 +234,7 @@ golden `activations` の `sin` は許容差を WGSL 仕様帯へ寄せて消化�
   単独実行（`--filter`）は緑で、数分置くと戻る。**ここまでが観測**。
   **推定（切り分け未了）**: 赤の本数はその走行までに積んだ解放の遅れの量で、退行の大きさでは
   ない。ただしこの観測を採った時点のテストには `acquireGpu` から `gpu.destroy()` までを
-  try/finally で守っていない経路があり（`createSession` が投げると破棄に届かず、その走行の残りが
+  try/finally で守っていない経路があり（Session 構築が投げると破棄に届かず、その走行の残りが
   破棄されない device を抱えたまま進む）、**同じ走行の中で本数を増やす別経路**として混ざっていた。
   破棄漏れ自体は塞いだ（`e2e_golden` / `e2e_sbv2` / `e2e_gemma4` / `e2e_minicpm5`）ので、次に同じ
   形が出たら本数の出方を測り直して原因を 1 つへ寄せる。
@@ -279,19 +279,21 @@ batch>1 のマスク畳み込み対応）で、コア変換基盤への設計判
 2026-08-25 に修正済み — 真因復元 + バイト予算 + 検証直列化。**0.7.0 でリリース済み**）。
 最有力仮説はメモリ逼迫（turbo i4 でも完走時常駐 ~2.56GiB + 検証一時。i8 ではブラウザ強制
 終了の報告あり）だが、回線切断・アプリ側 abort と見え方が同一のため、修正版で `err.cause`
-を実機観測するまで確定できない。常駐そのものの削減（shard 配布 + streamAssets 接続 —
-R1 統合波）も 0.7.0 に同梱済み。残タスク = 修正版・分割配布での実機再観測のみ。
+を実機観測するまで確定できない。常駐そのものの削減は 0.7.0 の shard 分割配布（R1 統合波）で入り、
+現行はコンテナの block 単位の取得と Session 構築に置き換わった（ブラウザの取得元は seek 型 —
+ADR [0108](decisions/0108-container-format.md) 追記 5）。残タスク = anima の HF 配布を `karume/5` で
+上げ直した後（release の波 — [backlog](backlog.md) の release 節）の実機再観測のみ。
 
-## hub: `evictCachedAssets` で weights を `drafter` だけに絞っても共通 assets（tokenizer / PLE）が消える
+## hub: `evictCachedAssets` で weights を `drafter` だけに絞っても共通 assets（tokenizer）が消える
 
 `evictCachedAssets(loaded, { model, quant, weights: ["drafter"] })` は「本体は残して drafter だけ
-消す」意図で書けるが、**残るのは本体 weights だけで、tokenizer / PLE などの assets は消える** —
+消す」意図で書けるが、**残るのは本体 weights だけで、tokenizer などの assets は消える** —
 その (model, quant) は「そのまま使える在庫」ではなくなる（次の起動で assets が再 DL される）。
 2026-09-09 にコードを読んで導いた（実機での再現は未観測）。
 
 機序は 2 段:
 
-1. `resolveFiles`（`packages/hub/src/resolve.ts`）は **weights の絞り込みに関わらず assets を
+1. `resolveSelection`（`packages/hub/src/resolve.ts`）は **weights の絞り込みに関わらず assets を
    全数展開する**（コメント「assets は常に全数」）。絞った選択の参照集合 = drafter の weights
    ファイル + assets 全数になり、assets が削除候補に入る。
 2. `packages/hub/src/inventory.ts` の参照勘定は「**対象と同じ (model, quant) は守る側に数えない**」
@@ -302,7 +304,7 @@ R1 統合波）も 0.7.0 に同梱済み。残タスク = 修正版・分割配�
 結果は静かで、`EvictedAssets.alsoEvicted` は**他の (model, quant)** しか名乗らない（同じ選択が
 部分在庫に落ちたことは載らない）。確認するには `listCachedAssets` を絞らずに引き直すしかない。
 
-運用の回避 = **drafter だけを消したいときは evict を使わず、drafter の shard を手で消す**
+運用の回避 = **drafter だけを消したいときは evict を使わず、drafter の容器の part を手で消す**
 （`protect` では回避できない）。修正案 = 部分 weights の evict では共通 assets を既定で保持する
 （「絞った選択」の参照集合から assets を外す / 対象と同じ label の残りを守る側に数える、のどちらか）。
 どちらも「選択単位の削除」の粒度の定義を変えるので設計裁定が要る — ここは起票のみ。
