@@ -13,16 +13,33 @@
  * もう 1 組: 同じ `krm` を、block を写して返す取得元と、hub の scan 経路と同じく part の器の view を
  * 返す取得元（器の block の外は毒）から読み、出力と常駐バイト数が一致すること。読み手のどこかが
  * byteOffset を落とすと、器の先頭や毒を読んで割れる。
+ *
+ * 外部の正解: 上の 2 組は合流層から Session 構築までを両辺で共有するので、そこの誤りは両辺に
+ * 同じだけ乗って一致してしまう。そこで格納バイト列を CPU の codec 展開（`decodeI4` / `decodeF16` /
+ * `decodeI8`）で f32 へ戻し、CPU 参照（`applyReferenceOp`）で linear → add → linear を辿った出力とも
+ * 許容差で突き合わせる。展開を 1 つ取り違えた参照（i4 の scale を 1 チャネルずらす）が同じ出力で
+ * 落ちることも同じケースで見る — 許容差が codec 展開の誤りを通すほど緩くないことの確認。
  */
 
 import { assert, assertEquals, assertRejects } from "@std/assert";
+import type { BoundContainer } from "../src/format/container/bind.ts";
 import { ContainerFormatError } from "../src/format/container/header.ts";
 import { type MemoryContainerInput, openMemoryContainer } from "../src/format/container/memory.ts";
 import { type BlockSource, openContainer } from "../src/format/container/open.ts";
+import { decodeF16 } from "../src/format/f16.ts";
+import { decodeI4 } from "../src/format/i4.ts";
+import { decodeI8 } from "../src/format/i8.ts";
 import { type IrDeclaration, parseIrDeclaration } from "../src/format/ir.ts";
 import { acquireGpu } from "../src/gpu/device.ts";
-import { createSessionFromContainer, prepareContainer } from "../src/runtime/executor.ts";
-import { f32Bytes, fill } from "./helpers/model-fixture.ts";
+import { compareTensors, formatAllclose } from "../src/reference/allclose.ts";
+import { applyReferenceOp, type RefTensor, refTensor } from "../src/reference/ops.ts";
+import {
+  createSessionFromContainer,
+  prepareContainer,
+  type Tensor,
+} from "../src/runtime/executor.ts";
+import { GEMM_TOLERANCE } from "./helpers/op-tolerance.ts";
+import { f32Bytes, fill, type FilledTensor } from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { quantizeF16 } from "./helpers/f16.ts";
 import { quantizeI4 } from "./helpers/i4.ts";
@@ -159,6 +176,39 @@ const memoryInput = (q: Quantized, counter: { reads: number }): MemoryContainerI
   },
 });
 
+/**
+ * 縮図の CPU 参照: 容器へ渡したのと同じ格納バイト列を本番の CPU 展開で f32 に戻し、参照 op で
+ * グラフの 3 ノードを辿る。合流層・Session 構築と実装を共有せず、常駐席の i4 / i8 は GPU 側の
+ * 展開（カーネル内の unpack + scale）とも独立なので、2 経路が同じだけ誤る箇所もここで割れる
+ * （f16 は展開席でホストの `decodeF16` を通るため、そこだけは参照と同じ実装）。
+ * `i4Scale` は fault injection 用（既定は格納した scale そのもの）。
+ */
+const referenceOutput = (
+  q: Quantized,
+  x: FilledTensor,
+  i4Scale: Float32Array<ArrayBuffer> = q.w1.scale,
+): RefTensor => {
+  const w = weights();
+  const w1 = refTensor([H, K], decodeI4(q.w1.bytes, [H, K], i4Scale, q.w1.scaleShape, 16));
+  const h = refTensor([H], decodeF16(q.h16));
+  const w2 = refTensor([N, H], decodeI8(q.w2.bytes, [N, H], q.w2.scale, q.w2.scaleShape));
+  const t = applyReferenceOp(
+    "linear",
+    [refTensor(x.shape, x.data), w1, refTensor([H], w.b1.data)],
+    {},
+    [M, H],
+  );
+  const u = applyReferenceOp("add", [t, h], {}, [M, H]);
+  return applyReferenceOp("linear", [u, w2, refTensor([N], w.b2.data)], {}, [M, N]);
+};
+
+/** i4 の group scale を出力チャネル 1 本ぶんずらす（行 r が行 r+1 の scale を読む）。 */
+const shiftI4ScaleOneChannel = (q: Quantized): Float32Array<ArrayBuffer> => {
+  const groups = q.w1.scaleShape[1];
+  const scale = q.w1.scale;
+  return Float32Array.from(scale, (_, i) => scale[(i + groups) % scale.length]);
+};
+
 const OPTIONS = { partBytes: 1024, blockBytes: 128 } as const;
 
 const POISON = 0xff;
@@ -257,6 +307,44 @@ describe("memory container session", { ignore: !GPU_AVAILABLE }, () => {
         prepareContainer(memory, "main").estimate(),
         prepareContainer(opened, "main").estimate(),
       );
+    } finally {
+      gpu.destroy();
+    }
+  });
+
+  it("krm とメモリ内容器の出力は、格納バイト列を CPU で展開して参照 op で辿った出力と許容差内で一致する", async () => {
+    const q = quantize();
+    const written = await writeModelContainer(containerInput(q), OPTIONS);
+    const x = fill([M, K], (i) => ((i * 7) % 11) / 11 - 0.5);
+    const expected = referenceOutput(q, x);
+    const miswired = referenceOutput(q, x, shiftI4ScaleOneChannel(q));
+    const sources: readonly (readonly [string, BoundContainer])[] = [
+      ["krm", await openContainer({ kind: "parts", parts: written.parts })],
+      ["メモリ内容器", openMemoryContainer(memoryInput(q, { reads: 0 }))],
+    ];
+    const gpu = await acquireGpu();
+    try {
+      for (const [label, container] of sources) {
+        const session = await createSessionFromContainer(gpu, container, "main");
+        let output: Tensor;
+        try {
+          output = (await session.run({ x }))["y"];
+        } finally {
+          await session.dispose();
+        }
+        assertEquals(output.shape, expected.shape, label);
+        const report = compareTensors(output, expected, GEMM_TOLERANCE);
+        assertEquals(report.pass, true, `${label}: ${formatAllclose(report)}`);
+        // 同じ出力が、展開を 1 つ取り違えた参照では落ちる（許容差が codec の誤りを通さない）。
+        const miswiredReport = compareTensors(output, miswired, GEMM_TOLERANCE);
+        assertEquals(
+          miswiredReport.pass,
+          false,
+          `${label}: i4 の scale を 1 チャネルずらした参照でも通った（${
+            formatAllclose(miswiredReport)
+          }）`,
+        );
+      }
     } finally {
       gpu.destroy();
     }
