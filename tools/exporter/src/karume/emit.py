@@ -284,7 +284,13 @@ def _scale_key(tensor_key: str) -> str:
 
 
 def pack_int2(quantized: torch.Tensor) -> torch.Tensor:
-    """固定整数 [-2,1] を下位2bitから詰める。量子化やscaleの変更は行わない（ADR 0097）。"""
+    """固定整数 [-2,1] を下位2bitから詰める。量子化やscaleの変更は行わない。
+
+    i2 のバイト順の正本（ADR 0097）: 平坦添字で連続する 4 要素が 1 バイトに入り、要素 `4i` が
+    最下位 2bit、格納値は offset 2 の `u = q + 2`。書き手（gemma4_qat recipe）は上流の packed
+    バイトをそのまま渡すので本体はこの関数を呼ばない。それでも順序を取り違えると形も型も合う
+    沈黙誤値にしかならないので、順序はここに置き、`tests/test_i2_storage.py` がバイト値で固定する。
+    """
     if quantized.dtype != torch.int8:
         raise EmitError("INT2 の整数列は int8 の器が必要")
     flat = quantized.reshape(-1)

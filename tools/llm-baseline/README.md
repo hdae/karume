@@ -80,8 +80,9 @@ one target at each window boundary. No external model implementation source is c
 
 ```sh
 PYTHONPATH=tools/export-recipes tools/.venv/bin/python -m pytest -q tools/llm-baseline
-uvx ruff check tools/llm-baseline
-uvx ruff format --check --line-length 100 tools/llm-baseline
+cd tools/export-recipes
+uv run ruff check --config pyproject.toml ../llm-baseline
+uv run ruff format --check --config pyproject.toml ../llm-baseline
 ```
 
 The [initial evaluation record](../../docs/research/2026-09-12-llm-quality-baseline.md) documents

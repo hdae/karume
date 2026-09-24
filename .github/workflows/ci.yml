@@ -123,3 +123,11 @@ jobs:
         run: uv run --locked ruff check
       - name: Format
         run: uv run --locked ruff format --check
+      # tools/llm-baseline は workspace 外の台本群で自前の ruff 設定を持たないので、recipe と同じ
+      # 設定で縛る。--config を明示するのは、祖先に設定が無いファイルへの ruff の設定探索に頼らない
+      # ため。pytest は載せない: テストが transformers / accelerate を importorskip 無しで読み、
+      # 既定 sync では入らない。
+      - name: Lint (llm-baseline)
+        run: uv run --locked ruff check --config pyproject.toml ../llm-baseline
+      - name: Format (llm-baseline)
+        run: uv run --locked ruff format --check --config pyproject.toml ../llm-baseline

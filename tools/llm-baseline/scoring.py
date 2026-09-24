@@ -6,7 +6,7 @@ import math
 from collections.abc import Iterator
 
 import torch
-from torch.nn import functional as F
+from torch.nn import functional
 
 
 def windows(tokens: int, length: int, stride: int) -> Iterator[tuple[int, int, int]]:
@@ -33,7 +33,7 @@ def token_nll(logits: torch.Tensor, ids: list[int], score_start: int) -> list[fl
     if not torch.isfinite(scores).all():
         raise ValueError("非有限の logits")
     targets = torch.tensor(ids[score_start:], device=scores.device, dtype=torch.int64)
-    return F.cross_entropy(scores, targets, reduction="none").double().tolist()
+    return functional.cross_entropy(scores, targets, reduction="none").double().tolist()
 
 
 def accuracy(correct: int, count: int) -> dict:
