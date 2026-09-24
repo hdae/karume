@@ -55,8 +55,8 @@
       "packages/models": {
         "dependencies": [
           "jsr:@hdae/yomi@~0.4.2",
-          "jsr:@karume/hub@0.12",
-          "jsr:@karume/runtime@0.12"
+          "jsr:@karume/hub@0.13",
+          "jsr:@karume/runtime@0.13"
         ]
       }
     }

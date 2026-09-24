@@ -1,6 +1,6 @@
 {
   "name": "@karume/models",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "license": "MIT",
   "exports": {
     ".": "./mod.ts",
@@ -15,8 +15,8 @@
     "./gemma4-qat": "./gemma4-qat.ts"
   },
   "imports": {
-    "@karume/hub": "jsr:@karume/hub@^0.12.0",
-    "@karume/runtime": "jsr:@karume/runtime@^0.12.0",
+    "@karume/hub": "jsr:@karume/hub@^0.13.0",
+    "@karume/runtime": "jsr:@karume/runtime@^0.13.0",
     "@hdae/yomi": "jsr:@hdae/yomi@^0.4.2",
     "@hdae/yomi/loader": "jsr:@hdae/yomi@^0.4.2/loader"
   },
