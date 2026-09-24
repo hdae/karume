@@ -247,7 +247,7 @@ class TestShardedDistribution:
         for text in (card, sharded_card, extra_card):
             flat = " ".join(text.split())
             assert "a single safetensors file" not in flat
-            assert "split across numbered shards" in flat
+            assert "`.krm` part sequence" in flat
 
     def test_it_does_not_advertise_the_local_asset_entry_point(
         self, card: str, sharded_card: str, extra_card: str

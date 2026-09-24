@@ -110,7 +110,7 @@ def _weights_container(
     return ir_container(
         mark=role,
         # 疑似系列も**部品名で名乗る**（容器のグラフ名 = manifest の weights のキー MUST・
-        # container-v1 §12）。`mark` はバイト列の作り分けで、綴りは部品名と一致しない。
+        # container-v1 §2.1）。`mark` はバイト列の作り分けで、綴りは部品名と一致しない。
         named=named,
         storage=storage,
         assets={} if rope is None else _rope_asset(rope),
@@ -1682,7 +1682,10 @@ class TestLegalTexts:
         assert flat.count("modified as follows:") == 1
         # 実際にした改変（コンテナ形式への変換と量子化系列の追加）が列挙されていること。
         assert "converted into the container format" in flat
-        assert "split across numbered shards when a component is too large for one file" in flat
+        assert (
+            "a `.krm` part sequence whose first part carries the graph and model descriptors"
+            in flat
+        )
         assert "An int8-quantized series of the transformer was added alongside the f16 one" in flat
 
     def test_the_notice_disclaims_any_official_standing(self, tmp_path: Path) -> None:

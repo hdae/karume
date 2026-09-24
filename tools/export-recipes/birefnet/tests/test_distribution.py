@@ -125,7 +125,7 @@ def _birefnet_container(
     return ir_container(
         mark="birefnet-matte",
         # 疑似系列も**部品名で名乗る**（容器のグラフ名 = manifest の weights のキー
-        # MUST・container-v1 §12 — 組み立ての門がこの一致を見る）。
+        # MUST・container-v1 §2.1 — 組み立ての門がこの一致を見る）。
         named=BIREFNET_ROLE,
         storage=storage,
         inputs=((input_name, shape),),
@@ -351,7 +351,7 @@ class TestBirefnetModelCard:
         assert "one alpha byte per pixel" in card
         # 単一ファイル配布形は廃止済み（ADR 0081 決定 3）— 器の説明が現物と食い違わない。
         assert "a single safetensors file" not in card
-        assert "graph shard" in card
+        assert "`.krm` part sequence" in card
         # カードは**検証を通った**配布形から描かれる。
         assert verify_dist(out_dir)
 
@@ -438,7 +438,7 @@ class TestBirefnetResolutionFamily:
             assert (config["imageWidth"], config["imageHeight"]) == (int(model), int(model))
 
     def test_the_layout_keeps_each_models_graph_in_its_own_subtree(self, tmp_path: Path) -> None:
-        """グラフ shard は寸法の宣言そのものなので、**共有席へ畳まれてはいけない**。"""
+        """part 0（グラフ記述を持つ part）は寸法の宣言なので、共有席へ畳まれてはいけない。"""
         placed = sorted(verify_dist(self._run(tmp_path)))
         graph_shard = _placed_paths()[0]
         for model in BIREFNET_MODELS:
