@@ -1,7 +1,8 @@
 """配布リポ直下へ同梱するライセンス原文（`karume.dist.Pipeline.root_files` の `LICENSE.md`）。
 
 ADR [0092](../../../../docs/decisions/0092-distribution-repos-and-sources.md) 決定 7 —
-Apache-2.0 は「全文 + §4(b) の改変告知」、MIT は「全文 + 著作権行」を配布リポ直下へ置く。
+Apache-2.0 は「全文 + §4(b) の改変告知」、MIT は「全文 + 著作権行」、CC BY-SA 4.0 は
+「条文 + §3(a) の帰属と改変の表示」を配布リポ直下へ置く。
 原文は family ごとに違わないので、家族の recipe が各自 1 部ずつ持つ形にはしない
 （家族が増えるたびに逐語コピーが増え、どれが原本か言えなくなる）。
 
@@ -21,6 +22,11 @@ LICENSES_DIR = Path(__file__).parent
 
 APACHE_LICENSE_2_0_PATH = LICENSES_DIR / "apache_license_2_0.txt"
 
+#: CC BY-SA 4.0 の条文（creativecommons.org の legalcode の plain-text 版を逐語で）。
+#: §3(a)(1)(C) は「条文そのものか URI」を求める — URI だけでも満たせるが、配布リポが HF の
+#: 外へ写されても条文が一緒に動くよう、Apache と同じく全文を置く。
+CC_BY_SA_4_0_PATH = LICENSES_DIR / "cc_by_sa_4_0.txt"
+
 #: MIT の本文テンプレート。著作権行のブロックだけが差し込み口
 #: （{@link MIT_COPYRIGHT_PLACEHOLDER}）で、残りは逐語。
 MIT_LICENSE_PATH = LICENSES_DIR / "mit.txt"
@@ -32,6 +38,11 @@ MIT_COPYRIGHT_PLACEHOLDER = "{copyright}"
 def apache_license_2_0() -> str:
     """Apache License 2.0 の原文（逐語）。"""
     return APACHE_LICENSE_2_0_PATH.read_text(encoding="utf-8")
+
+
+def cc_by_sa_4_0() -> str:
+    """Creative Commons Attribution-ShareAlike 4.0 International の条文（逐語）。"""
+    return CC_BY_SA_4_0_PATH.read_text(encoding="utf-8")
 
 
 def mit_license(copyright_lines: Sequence[str]) -> str:

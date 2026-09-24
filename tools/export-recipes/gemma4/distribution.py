@@ -325,8 +325,9 @@ def gemma4_repo_name(_model: str) -> str:
     """配布リポ名（家族 1 リポなので、どのモデルでも同じ 1 つ — `karume-` prefix はリポ名裁定
     2026-08-09）。
 
-    `Pipeline.repo_name` は「単一モデルを組んだときの既定の出力先」を答える席で、家族が
-    1 リポに畳まれた今はモデル名を見ない。
+    `Pipeline.repo_name` はカードの Usage 例に載る repo 名の正本（`karume.dist.resolve_repo`）で、
+    単一モデルを組んだときの既定の出力先も答える席。家族が 1 リポに畳まれた今はモデル名を
+    見ない。
     """
     return GEMMA4_REPO_NAME
 

@@ -37,7 +37,7 @@ from anima.card import (
 )
 from anima.distribution import ANIMA_QUANT_ABBREVIATIONS
 
-#: 使い方スニペットに綴られるリポ ID（組み立て先のディレクトリ名から dist が渡す）。
+#: 使い方スニペットに綴られるリポ ID（pipeline の宣言から dist が渡す）。
 REPO = "hdae/fake-repo"
 
 #: 公式リポのフィクスチャが並べるモデル（既定 = Turbo = guidance 1 の席）。

@@ -27,7 +27,8 @@ from gemma4.distribution import PIPELINE as GEMMA4_PIPELINE
 from gemma4_qat.distribution import PIPELINE as GEMMA4_QAT_PIPELINE
 from irodori.distribution import PIPELINE as IRODORI_PIPELINE
 from karume.dist import PIPELINES as CORE_PIPELINES
-from karume.dist import DistError
+from karume.dist import DistError, resolve_repo
+from sbv2.distribution import FN_PIPELINE as SBV2_FN_PIPELINE
 from sbv2.distribution import PIPELINE as SBV2_PIPELINE
 from siglip2.distribution import PIPELINE as SIGLIP2_PIPELINE
 from vowel_detector.distribution import PIPELINE as VOWEL_DETECTOR_PIPELINE
@@ -38,6 +39,7 @@ RECIPE_PIPELINES = {
     "anima": ANIMA_OFFICIAL_PIPELINE,
     "anima-extra": ANIMA_EXTRA_PIPELINE,
     "sbv2": SBV2_PIPELINE,
+    "sbv2-fn": SBV2_FN_PIPELINE,
     "irodori": IRODORI_PIPELINE,
     "siglip2": SIGLIP2_PIPELINE,
     "birefnet": BIREFNET_PIPELINE,
@@ -100,21 +102,38 @@ class TestRegistry:
         assert base.root_files["LICENSE.md"] != derived.root_files["LICENSE.md"]
         assert base.root_files["NOTICE.md"] != derived.root_files["NOTICE.md"]
 
+    def test_the_two_sbv2_voice_families_stay_separate_pipelines(self) -> None:
+        """SBV2 の JVNV 系（`sbv2`）と FN 系（`sbv2-fn`）も**別の席**。
+
+        ライセンスがファミリーごとに違う（JVNV = CC BY-SA 4.0・FN = Booth の頒布条件で同梱
+        できる条文が無い）ので、1 つに畳むと FN のリポが CC BY-SA の条文と JVNV の帰属を名乗る。
+        """
+        jvnv = dist.PIPELINES["sbv2"]
+        fn = dist.PIPELINES["sbv2-fn"]
+
+        assert jvnv is not fn
+        assert sorted(jvnv.card_profiles) == ["jvnv"]
+        assert sorted(fn.card_profiles) == ["fn"]
+        assert "Attribution-ShareAlike 4.0" in jvnv.root_files["LICENSE.md"]
+        assert fn.root_files == {}
+
     def test_every_distribution_pipeline_ships_its_legal_text(self) -> None:
         """配布リポ直下に `LICENSE.md` と `NOTICE.md` の**両方**を置く席（ADR 0092 決定 7）。
 
-        既公開の irodori（MIT）/ sbv2-jvnv（CC BY-SA）はまだ同梱していない — 次に上げ直す
-        回で是正する（backlog）ので、ここは**今揃っている席**を名指しで固定する。名指しに
-        するのは、新しい family が黙って同梱なしで生えるのを「表に載せ忘れた」形で見える
-        ようにするため。
+        名指しにするのは、新しい family が黙って同梱なしで生えるのを「表に載せ忘れた」形で
+        見えるようにするため。
 
         vowel-detector はここに入らない: MIT が要求するのは「全文 + 著作権行」だけで、
         改変告知（`NOTICE.md`）の宛先が無い（上流と著作権者が同じ）。許諾表示そのものは
         下の `test_the_mit_only_pipeline_still_ships_its_permission_notice` が見る。
+        `sbv2-fn` も入らない: HF 公開が保留で、上流の書面条件（Booth の頒布ページ）に同梱
+        できるライセンス文が無い（{@link sbv2.distribution.FN_PIPELINE}）。
         """
         expected = {
             "anima",
             "anima-extra",
+            "sbv2",
+            "irodori",
             "gemma4",
             "gemma4-qat",
             "siglip2",
@@ -165,6 +184,48 @@ class TestDefaultPlaces:
         """ファミリーリポの名前（例 `karume-sbv2-jvnv`）はモデル名の並びからは決まらない。"""
         with pytest.raises(DistError, match="--out"):
             dist.default_out_dir(SBV2_PIPELINE, ["jvnv-F1", "jvnv-F2"])
+
+
+#: 公開中のリポを焼く手順（pipeline・`--model` の並び・`--repo`）→ 焼き先 `models/<名前>/`。
+#: `tools/release/hf-upload.zsh` はこのディレクトリを `hdae/<名前>` へ上げるので、カードの
+#: Usage 例がこの名前を指さないと公開カードが別のリポを指す。
+RELEASE_REPOSITORIES = [
+    (
+        "anima",
+        [
+            "anima-turbo-v1.1",
+            "anima-v1.0",
+            "anima-aesthetic-v1.1",
+            "anima-turbo-v1.0",
+            "anima-aesthetic-v1.0",
+        ],
+        None,
+        "karume-anima",
+    ),
+    ("anima-extra", ["anima-wai-v1.0", "anima-copycat-20260610"], None, "karume-anima-extra"),
+    ("birefnet", ["1024", "2048"], None, "karume-birefnet-hr"),
+    ("lucida", ["1024", "2048"], None, "karume-lucida"),
+    ("depth-anything", ["small"], None, "karume-depth-anything-v2"),
+    ("gemma4", ["e2b"], None, "karume-gemma4"),
+    ("irodori", ["v4-small"], None, "karume-irodori-v4-small"),
+    ("irodori", ["v4.1-small"], None, "karume-irodori-v4.1-small"),
+    ("sbv2", ["F1", "F2", "M1", "M2"], "hdae/karume-sbv2-jvnv", "karume-sbv2-jvnv"),
+    ("siglip2", ["base", "so400m"], None, "karume-siglip2"),
+]
+
+
+class TestReleaseRepositories:
+    """公開リポの焼き直しで、カードの Usage 例が上げ先のリポ名のまま変わらないこと。
+
+    repo の出所が出力ディレクトリ名から pipeline の宣言へ移っても、手順どおりの `--out`
+    （`models/<リポ名>/`）で焼いたカードは同じバイトになる（違うのは別名で焼いたときだけ）。
+    """
+
+    @pytest.mark.parametrize(("pipeline", "models", "repo", "directory"), RELEASE_REPOSITORIES)
+    def test_the_card_names_the_repository_it_is_uploaded_to(
+        self, pipeline: str, models: list[str], repo: str | None, directory: str
+    ) -> None:
+        assert resolve_repo(dist.PIPELINES[pipeline], models, repo) == f"hdae/{directory}"
 
 
 #: README の受理集合を綴る 1 文（`--pipeline` の引数として叩ける名前がバッククォートで並ぶ）。

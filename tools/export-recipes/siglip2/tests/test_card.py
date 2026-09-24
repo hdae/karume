@@ -23,7 +23,7 @@ from siglip2.card import (
     render_siglip2_model_card,
 )
 
-#: 使い方スニペットに綴られるリポ ID（組み立て先のディレクトリ名から dist が渡す）。
+#: 使い方スニペットに綴られるリポ ID（pipeline の宣言から dist が渡す）。
 REPO = "hdae/fake-repo"
 
 #: 別 family の pipeline 契約（**綴りをそのまま持つ** — recipe 間のコード結合を作らないため）。

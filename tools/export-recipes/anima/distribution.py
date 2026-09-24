@@ -831,9 +831,9 @@ EXTRA_REPO_NAME = "karume-anima-extra"
 def _official_repo_name(_model: str) -> str:
     """公式リポ名（ADR 0087 で 5 変種が 1 リポへ畳まれたのでモデル名を見ない）。
 
-    `Pipeline.repo_name` は「単一モデルを組んだときの既定の出力先」を答える席で、ここが
-    `karume-<モデル名>` を返すと `--out` 省略時の出力先とカードの Usage 例が実在しない
-    リポ名になる。
+    `Pipeline.repo_name` はカードの Usage 例に載る repo 名の正本（`karume.dist.resolve_repo`）で、
+    単一モデルを組んだときの既定の出力先も答える席。ここが `karume-<モデル名>` を返すと
+    `--out` 省略時の出力先とカードの Usage 例が実在しないリポ名になる。
     """
     return OFFICIAL_REPO_NAME
 

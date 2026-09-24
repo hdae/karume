@@ -71,11 +71,13 @@ uv run python dist.py --model anima-turbo-v1.1 --model anima-v1.0 \
 uv run python dist.py --pipeline irodori             # → models/karume-irodori-v4-small/
 uv run python dist.py --pipeline irodori \
     --model v4.1-small                               # → models/karume-irodori-v4.1-small/
-uv run python dist.py --pipeline sbv2 --card-profile jvnv \
-    --model F1 --model F2 --model M1 --model M2 --out ../../models/karume-sbv2-jvnv
-uv run python dist.py --pipeline sbv2 --card-profile fn \
+uv run python dist.py --pipeline sbv2 \
+    --model F1 --model F2 --model M1 --model M2 --out ../../models/karume-sbv2-jvnv \
+    --repo hdae/karume-sbv2-jvnv                     # 話者ごとにリポ名を宣言する pipeline なので束ねた名前は明示
+uv run python dist.py --pipeline sbv2-fn \
     --model FN1 --model FN2 --model FN3 --model FN4 --model FN5 --model FN6 \
-    --model FN7 --model FN8 --model FN9 --model FN10 --out ../../models/karume-sbv2-fn
+    --model FN7 --model FN8 --model FN9 --model FN10 --out ../../models/karume-sbv2-fn \
+    --repo hdae/karume-sbv2-fn
 uv run python dist.py --pipeline gemma4              # → models/karume-gemma4/（約 4.0GiB）
 uv run python dist.py --pipeline siglip2 \
     --model base --model so400m \

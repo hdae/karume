@@ -103,8 +103,14 @@ from karume.quantize import (
 
 # 出所記録のファイル名と**配布形の部品名**は読み手側（配布の組み立て）が持つ — 綴りを
 # 2 箇所に置くと、片方だけ動いた日に「書いたのに読まれない記録」や「ランタイムが引けない
-# グラフ名」が黙って生える（anima の `CALIB_PROVENANCE_FILE` と同じ向き）。
-from sbv2.distribution import EXPORT_PROVENANCE_FILE, SBV2_FRONT_ROLE, SBV2_VOICE_ROLE
+# グラフ名」が黙って生える（anima の `CALIB_PROVENANCE_FILE` と同じ向き）。声のファミリーの
+# 許可リストも同じ側に置く — 組み立てがリポの境界（Pipeline の席）に同じ表を使うため。
+from sbv2.distribution import (
+    EXPORT_PROVENANCE_FILE,
+    SBV2_FAMILY_DIRS,
+    SBV2_FRONT_ROLE,
+    SBV2_VOICE_ROLE,
+)
 
 from . import patch
 from .card import SBV2_CARD_PROFILES
@@ -139,22 +145,6 @@ BASE_WEIGHT_DTYPES: Mapping[str, str] = {"f32": "f32", "f16": "f16", "i8": "i8",
 #: `dec` の `ups` は型で自然に落ちる）。実際の適格はこの型に `groups == 1` と行長の整除を
 #: 掛けた積（{@link _i4_module_names}）。
 I4_MODULE_TYPES: tuple[type[nn.Module], ...] = (nn.Linear, nn.Conv1d)
-
-
-#: `--model-dir` のディレクトリ名の接頭辞 → 声のファミリー（README の
-#: 「the default `--model-dir` is `inputs/sbv2/F1`」と「`inputs/sbv2/FN*`」の規約そのもの）。
-#:
-#: MUST: **許可リスト**で決める。「`FN` で始まらなければ jvnv」と二値で決めていた頃は、想定外の
-#: ディレクトリ名（新しい話者・手元の写しの名前・`FN` を含まない FN 系の別綴り）が**黙って**
-#: jvnv のライセンス（`cc-by-sa-4.0`）を名乗る配布形になった — 法的事実の沈黙誤値で、配って
-#: からでないと誰も気づけない。
-#:
-#: NOTE: 手元の入力ディレクトリの綴りは**上流リポジトリのディレクトリ名**
-#: （`sbv2.card.Sbv2CardProfile.source_dirs` = `jvnv-F1-jp/` …）とは別で、jvnv 側は話者 id だけ。
-SBV2_FAMILY_DIRS: Mapping[str, tuple[str, ...]] = {
-    "fn": ("FN",),
-    "jvnv": ("F1", "F2", "M1", "M2"),
-}
 
 
 class Sbv2FamilyError(ValueError):

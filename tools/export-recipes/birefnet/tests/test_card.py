@@ -27,7 +27,7 @@ from birefnet.card import (
     render_birefnet_model_card,
 )
 
-#: 使い方スニペットに綴られるリポ ID（組み立て先のディレクトリ名から dist が渡す）。
+#: 使い方スニペットに綴られるリポ ID（pipeline の宣言から dist が渡す）。
 REPO = "hdae/fake-repo"
 
 #: このリポが配る重み（pipeline 席が渡す軸 — manifest には無い）。

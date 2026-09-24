@@ -60,19 +60,19 @@ uv run --with 'transformers==5.14.1' python -m deberta.export --layers 2
 
 `karume dist` assembles a distribution directory but holds no family knowledge — the pipeline
 registry is injected, and the registry inside the wheel is empty. `dist.py` in this directory is
-that injection: it composes 11 pipeline seats across 9 families with the core engine and passes
+that injection: it composes 12 pipeline seats across 9 families with the core engine and passes
 the repository's own spellings for `--series` (`outputs/series/`) and `--out` (`models/`).
 
 ```sh
 cd tools/export-recipes
 uv run python dist.py                                   # default = anima
 uv run python dist.py --pipeline irodori
-uv run python dist.py --pipeline sbv2 --card-profile fn
-uv run python dist.py --pipeline sbv2 --card-profile jvnv \
-    --model F1 --model F2 --out ../../models/karume-sbv2-jvnv
+uv run python dist.py --pipeline sbv2-fn                # FN voices (not published)
+uv run python dist.py --pipeline sbv2 \
+    --model F1 --model F2 --out ../../models/karume-sbv2-jvnv --repo hdae/karume-sbv2-jvnv
 ```
 
-The accepted set is `anima` / `anima-extra` / `sbv2` / `irodori` / `siglip2` / `birefnet` /
+The accepted set is `anima` / `anima-extra` / `sbv2` / `sbv2-fn` / `irodori` / `siglip2` / `birefnet` /
 `lucida` / `depth-anything` / `vowel-detector` / `gemma4` / `gemma4-qat`. What the flags mean — `--model` for
 assembling several models into one repository, `--card-profile` for attribution, and the model
 card written after `verify_dist` — is the engine's contract and is documented in

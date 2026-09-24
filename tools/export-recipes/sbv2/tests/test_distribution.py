@@ -33,8 +33,10 @@ from container_series import (
 from ir_fixtures import ir_container
 from safetensors.numpy import load_file, save_file
 
+from _shared.licenses import CC_BY_SA_4_0_PATH
 from dist import main
 from karume.dist import (
+    LEGAL_PATHS,
     MANIFEST_FILENAME,
     MANIFEST_FORMAT,
     MODEL_CARD_FILENAME,
@@ -45,11 +47,15 @@ from karume.dist import (
     resolve_card_renderer,
     verify_dist,
 )
+from sbv2.card import SBV2_JVNV_CORPUS_PAGE, SBV2_JVNV_PROFILE, SBV2_TEXT_ENCODER_MODEL
 from sbv2.distribution import (
     EXPORT_PROVENANCE_FILE,
+    FN_PIPELINE,
     PIPELINE,
     SBV2_DEFAULT_MODEL,
     SBV2_DEFAULT_QUANT,
+    SBV2_FAMILY_DIRS,
+    SBV2_JVNV_NOTICE_MARKDOWN,
     SBV2_KNOB_KEYS,
     SBV2_MAX_FRAMES,
     SBV2_MAX_TOKENS,
@@ -63,6 +69,7 @@ from sbv2.distribution import (
     SBV2_STYLE_KEY,
     SBV2_SYM_EXPECTATIONS,
     SBV2_TEXT_ENCODER_INPUTS,
+    SBV2_TEXT_ENCODER_LAYERS,
     SBV2_TEXT_ENCODER_VARIANT,
     SBV2_WEIGHTS,
     Sbv2Sources,
@@ -1354,16 +1361,7 @@ class TestSbv2Cli:
         knobs, sources = self._sources(tmp_path, SBV2_DEFAULT_MODEL)
         self._reroot(tmp_path, monkeypatch)
 
-        main(
-            [
-                "--pipeline",
-                "sbv2",
-                "--card-profile",
-                "fn",
-                "--series",
-                str(sources.series_f16.parent),
-            ]
-        )
+        main(["--pipeline", "sbv2", "--series", str(sources.series_f16.parent)])
 
         out_dir = tmp_path / "models" / sbv2_repo_name(SBV2_DEFAULT_MODEL)
         expected = _in_subtree(SBV2_DEFAULT_MODEL, _placed_paths())
@@ -1386,9 +1384,7 @@ class TestSbv2Cli:
         main(
             [
                 "--pipeline",
-                "sbv2",
-                "--card-profile",
-                "fn",
+                "sbv2-fn",
                 "--model",
                 "FN7",
                 "--series",
@@ -1424,6 +1420,8 @@ class TestSbv2Cli:
                 str(first.series_f16.parent),
                 "--out",
                 str(out_dir),
+                "--repo",
+                "hdae/karume-sbv2-jvnv",
             ]
         )
 
@@ -1440,52 +1438,148 @@ class TestSbv2Cli:
         assert "license: cc-by-sa-4.0" in card
         assert "rufflet17" not in card
 
-    def test_it_refuses_to_assemble_sbv2_without_an_attribution_profile(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize(("pipeline", "model"), [("sbv2", "FN4"), ("sbv2-fn", "F1")])
+    def test_it_refuses_a_voice_of_the_other_family_before_assembling(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pipeline: str, model: str
     ) -> None:
-        """カードの帰属を選ばせる — しかも**組み立てる前**に落ちる（残骸を作らない）。"""
-        _, sources = self._sources(tmp_path, SBV2_DEFAULT_MODEL)
+        """リポ直下の条文と帰属はファミリーで決まる — 他ファミリーの声は**組み立てる前**に
+        落ちる（残骸を作らない）。通すと FN の声が CC BY-SA の条文を名乗る配布形が成立する。
+        """
+        _, sources = self._sources(tmp_path, model)
         self._reroot(tmp_path, monkeypatch)
 
-        with pytest.raises(DistError, match="--card-profile"):
-            main(["--pipeline", "sbv2", "--series", str(sources.series_f16.parent)])
+        with pytest.raises(DistError, match="リポに入らない"):
+            main(
+                [
+                    "--pipeline",
+                    pipeline,
+                    "--model",
+                    model,
+                    "--series",
+                    str(sources.series_f16.parent),
+                ]
+            )
 
         assert not (tmp_path / "models").exists()
 
 
+@requires_sbv2_package
+class TestSbv2LegalText:
+    """配布リポ直下の CC BY-SA 4.0 の条文と帰属・改変の表示（ADR 0092 決定 7）。"""
+
+    @staticmethod
+    def _assemble(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pipeline: str, model: str):
+        _, sources = TestSbv2Cli._sources(tmp_path, model)
+        TestSbv2Cli._reroot(tmp_path, monkeypatch)
+        out_dir = tmp_path / "dist"
+        main(
+            [
+                "--pipeline",
+                pipeline,
+                "--model",
+                model,
+                "--series",
+                str(sources.series_f16.parent),
+                "--out",
+                str(out_dir),
+            ]
+        )
+        return out_dir
+
+    def test_the_jvnv_repository_ships_the_license_text_byte_identical(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """§3(a)(1)(C) — 載せるのは**この条文のコピー**（要約でも整形でもない）。
+
+        組み立ての経路のどこかで整形や改行変換が入ると 1 バイト動くが、散文としては妥当な
+        ままなので他の門は素通りする。
+        """
+        out_dir = self._assemble(tmp_path, monkeypatch, "sbv2", "F1")
+        assert (out_dir / "LICENSE.md").read_bytes() == CC_BY_SA_4_0_PATH.read_bytes()
+
+    def test_the_legal_text_passes_the_undeclared_file_gate(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """manifest が宣言しない 2 枚は `LEGAL_PATHS` の席として `verify_dist` を通る。"""
+        out_dir = self._assemble(tmp_path, monkeypatch, "sbv2", "F1")
+
+        assert sorted(LEGAL_PATHS) == ["LICENSE.md", "NOTICE.md"]
+        assert all((out_dir / name).is_file() for name in LEGAL_PATHS)
+        assert sorted(verify_dist(out_dir)) == sorted(_in_subtree("F1", _placed_paths()))
+
+    def test_the_notice_credits_both_works_and_states_the_changes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """§3(a)(1)(A)(B) と §3(b) — 出所 2 本・改変の表示・同一ライセンス継承。"""
+        out_dir = self._assemble(tmp_path, monkeypatch, "sbv2", "F1")
+        notice = (out_dir / "NOTICE.md").read_text(encoding="utf-8")
+
+        assert notice == SBV2_JVNV_NOTICE_MARKDOWN
+        assert "https://huggingface.co/litagin/style_bert_vits2_jvnv" in notice
+        assert f"https://huggingface.co/{SBV2_TEXT_ENCODER_MODEL}" in notice
+        assert SBV2_JVNV_CORPUS_PAGE in notice
+        # 改変の表示: 22 層への切り詰め（text encoder の構造が変わる唯一の改変）と量子化。
+        assert f"first {SBV2_TEXT_ENCODER_LAYERS} encoder layers" in notice
+        assert "quantized" in notice
+        assert "licensed under CC BY-SA 4.0 as well" in notice
+
+    def test_the_notice_holds_for_any_subset_of_the_voices(self) -> None:
+        """MUST: 声は 1 本ずつ名指ししない — 1 組の `root_files` が `--model` の部分集合にも
+        載るので、名指した瞬間に組まなかった声まで名乗る（内訳はカードが manifest から名乗る）。
+        """
+        for source_dir in SBV2_JVNV_PROFILE.source_dirs:
+            assert source_dir not in SBV2_JVNV_NOTICE_MARKDOWN, source_dir
+        assert "(`README.md`) lists which ones this repository holds" in SBV2_JVNV_NOTICE_MARKDOWN
+
+    def test_the_fn_repository_carries_no_legal_text(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """FN 系は同梱できる条文が無い（Booth の頒布条件だけ）— CC BY-SA を名乗らせない。"""
+        out_dir = self._assemble(tmp_path, monkeypatch, "sbv2-fn", "FN4")
+
+        assert not (out_dir / "LICENSE.md").exists()
+        assert not (out_dir / "NOTICE.md").exists()
+        assert verify_dist(out_dir)
+
+
 class TestSbv2CardProfile:
-    """帰属プロファイルの選択（`--card-profile`）— 誤帰属は配ってからでないと気づけない。
+    """帰属プロファイル — ファミリーごとの Pipeline がそれぞれ**1 つだけ**持つ。
 
     engine 側の規則（1 つなら省略で通る / 2 つ以上なら明示必須）は
     `tools/exporter/tests/test_dist.py` の `TestCardProfile` が合成 pipeline で持つ。ここは
-    **SBV2 の表が実際に 2 つの帰属を持つ**ことと、名前ごとに別の描き手へ解けることを見る。
+    **各席の帰属が自分のファミリーのもの**で、他ファミリーの名前を受け付けないことを見る。
     """
 
-    def test_it_refuses_to_pick_an_attribution_when_several_exist(self) -> None:
-        """既定を黙って選ぶと、新しいファミリーへ前のファミリーの帰属がそのまま残る。"""
-        with pytest.raises(DistError, match="--card-profile") as error:
-            resolve_card_renderer(PIPELINE, None)
-        assert "fn" in str(error.value)
-        assert "jvnv" in str(error.value)
+    @pytest.mark.parametrize(("pipeline", "family"), [(PIPELINE, "jvnv"), (FN_PIPELINE, "fn")])
+    def test_each_family_resolves_to_its_own_attribution_without_a_choice(
+        self, pipeline, family: str
+    ) -> None:
+        assert sorted(pipeline.card_profiles) == [family]
+        assert resolve_card_renderer(pipeline, None) is pipeline.card_profiles[family]
+        assert resolve_card_renderer(pipeline, family) is pipeline.card_profiles[family]
 
-    def test_it_refuses_a_profile_it_does_not_have(self) -> None:
-        with pytest.raises(DistError, match="jvnv"):
-            resolve_card_renderer(PIPELINE, "FN9")
+    @pytest.mark.parametrize(("pipeline", "other"), [(PIPELINE, "fn"), (FN_PIPELINE, "jvnv")])
+    def test_it_refuses_the_other_familys_attribution(self, pipeline, other: str) -> None:
+        """`--pipeline sbv2 --card-profile fn` は JVNV の声に FN の帰属を描く形 — 落とす。"""
+        with pytest.raises(DistError, match=f"'{other}' は無い"):
+            resolve_card_renderer(pipeline, other)
 
-    def test_it_resolves_each_name_to_its_own_renderer(self) -> None:
-        """名前ごとに別の描き手（束ね違いなら 2 つのファミリーが同じカードを描く）。"""
-        profiles = PIPELINE.card_profiles
-        assert sorted(profiles) == ["fn", "jvnv"]
-        assert resolve_card_renderer(PIPELINE, "jvnv") is profiles["jvnv"]
-        assert profiles["fn"] is not profiles["jvnv"]
+    def test_the_two_families_render_different_cards(self) -> None:
+        """束ね違いなら 2 つのファミリーが同じカードを描く。"""
+        assert PIPELINE.card_profiles["jvnv"] is not FN_PIPELINE.card_profiles["fn"]
 
 
 class TestSbv2PipelineEntry:
-    """`--pipeline sbv2` の 1 行が指す先（ドライバが core の表へ合成する席）。"""
+    """`--pipeline sbv2` / `sbv2-fn` の 1 行が指す先（ドライバが core の表へ合成する席）。"""
 
     def test_it_carries_the_default_model_and_the_repo_name(self) -> None:
         assert PIPELINE.default_model == SBV2_DEFAULT_MODEL
         assert PIPELINE.repo_name(SBV2_DEFAULT_MODEL) == f"karume-sbv2-{SBV2_DEFAULT_MODEL}"
+
+    def test_each_default_model_belongs_to_its_own_family(self) -> None:
+        """既定のモデルが他ファミリーの声だと、`--model` 省略の 1 周が必ず門で落ちる。"""
+        assert PIPELINE.default_model.startswith(SBV2_FAMILY_DIRS["jvnv"])
+        assert FN_PIPELINE.default_model.startswith(SBV2_FAMILY_DIRS["fn"])
 
     def test_its_card_refuses_another_pipelines_manifest(self) -> None:
         manifest = {"models": {"m": {"pipeline": "sbv2/0"}}}

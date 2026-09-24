@@ -21,8 +21,14 @@ quant（速度 / サイズ優先の opt-in）。
 `text_encoder` の出所は `deberta` recipe が書く系列だが、参照するのは**その出力 path だけ**
 （コードの import は持たない — shared 席は資産の共有であって結合ではない）。
 
-公開面は {@link PIPELINE} 1 つ（`karume.dist.Pipeline`）— リポの dist ドライバ
-（`tools/export-recipes/dist.py`）がこれを core の PIPELINES へ合成する。
+公開面は**声のファミリーごとの 2 つ**（`karume.dist.Pipeline`）— {@link PIPELINE}
+（`--pipeline sbv2` = JVNV 系・公開リポ `karume-sbv2-jvnv`）と {@link FN_PIPELINE}
+（`--pipeline sbv2-fn` = FN 系・公開保留）。リポの dist ドライバ（`tools/export-recipes/dist.py`）
+がこれを core の PIPELINES へ合成する。割れているのは anima の公式 / 追加学習と同じ理由:
+`root_files`（配布リポ直下の `LICENSE.md` / `NOTICE.md`）は Pipeline に固定で載る 1 組で、
+ライセンスはファミリーごとに違う（JVNV 系は CC BY-SA 4.0・FN 系は Booth の頒布条件）。
+1 つに畳むと、どちらかのファミリーのリポが自分のものでない条文と帰属を名乗る — 散文としては
+妥当なままなので `verify_dist` も manifest 検査も素通りし、配ってからでないと誰も気づけない。
 """
 
 from __future__ import annotations
@@ -38,6 +44,7 @@ from typing import Any, NamedTuple
 import numpy as np
 from safetensors import safe_open
 
+from _shared.licenses import cc_by_sa_4_0
 from _shared.paths import INPUTS_ROOT, MISC_ROOT
 from karume.dist import (
     Artifact,
@@ -52,12 +59,40 @@ from karume.dist import (
     ir_graph,
     table_payload,
 )
-from sbv2.card import SBV2_CARD_PROFILES, render_sbv2_model_card
+from sbv2.card import (
+    SBV2_CARD_PROFILES,
+    SBV2_JVNV_CORPUS_PAGE,
+    SBV2_JVNV_CORPUS_PAPER_URL,
+    SBV2_JVNV_LICENSE_URL,
+    SBV2_JVNV_PROFILE,
+    SBV2_TEXT_ENCODER_MODEL,
+    render_sbv2_model_card,
+)
 
 #: 既定のモデル名 — 系列の綴り（`sbv2-F1{,-f16,-i8}`）と実重みの置き場を束ねる 1 語。
 #: `sbv2.export.default_out_root` が `--model-dir` のディレクトリ名から系列名を作るので、
 #: 読み手のこちらも同じ 1 語から組む。
 SBV2_DEFAULT_MODEL = "F1"
+
+#: FN 系の Pipeline（{@link FN_PIPELINE}）の既定のモデル名（`sbv2/README.md` が手順に使う話者）。
+SBV2_FN_DEFAULT_MODEL = "FN4"
+
+#: モデル名（= `--model-dir` のディレクトリ名）の接頭辞 → 声のファミリー（README の
+#: 「the default `--model-dir` is `inputs/sbv2/F1`」と「`inputs/sbv2/FN*`」の規約そのもの）。
+#: 書き出し（`sbv2.export.sbv2_family` — 容器へ焼くライセンス）と組み立て（ファミリーごとの
+#: Pipeline が受け付けるモデル）が同じこの 1 表を引く。
+#:
+#: MUST: **許可リスト**で決める。「`FN` で始まらなければ jvnv」と二値で決めていた頃は、想定外の
+#: ディレクトリ名（新しい話者・手元の写しの名前・`FN` を含まない FN 系の別綴り）が**黙って**
+#: jvnv のライセンス（`cc-by-sa-4.0`）を名乗る配布形になった — 法的事実の沈黙誤値で、配って
+#: からでないと誰も気づけない。
+#:
+#: NOTE: 手元の入力ディレクトリの綴りは**上流リポジトリのディレクトリ名**
+#: （`sbv2.card.Sbv2CardProfile.source_dirs` = `jvnv-F1-jp/` …）とは別で、jvnv 側は話者 id だけ。
+SBV2_FAMILY_DIRS: Mapping[str, tuple[str, ...]] = {
+    "fn": ("FN",),
+    "jvnv": ("F1", "F2", "M1", "M2"),
+}
 
 #: 系列名とリポ名の接頭辞（`sbv2-<モデル名>`）。
 SBV2_SERIES_PREFIX = "sbv2"
@@ -944,15 +979,127 @@ def sbv2_dist_plan(series_dir: Path, model: str) -> ModelPlan:
     return sbv2_plan(sources, sbv2_knob_defaults(sources.demo / SBV2_SYMBOLS_FILE), model)
 
 
-#: `--pipeline sbv2` の 1 行（ドライバが core の PIPELINES へ合成する）。
-PIPELINE = Pipeline(
-    default_model=SBV2_DEFAULT_MODEL,
-    repo_name=sbv2_repo_name,
-    plan=sbv2_dist_plan,
-    card_profiles={
-        name: partial(
-            render_sbv2_model_card, profile=profile, abbreviations=SBV2_QUANT_ABBREVIATIONS
+def sbv2_family_dist_plan(series_dir: Path, model: str, family: str) -> ModelPlan:
+    """1 つの声のファミリーの Pipeline として 1 モデルの計画を組む。
+
+    MUST: そのファミリーのモデル（{@link SBV2_FAMILY_DIRS}）以外は**組む前に**落とす。
+    リポ直下の条文・帰属・カードはファミリーで決まるので、FN の声を JVNV 系の Pipeline で
+    組むと、FN の重みが CC BY-SA 4.0 の条文と JVNV の帰属を名乗る配布形が成立してしまう。
+    """
+    prefixes = SBV2_FAMILY_DIRS[family]
+    if not model.startswith(prefixes):
+        raise DistError(
+            f"モデル {model!r} は声のファミリー {family!r} のリポに入らない"
+            f"（入るのは接頭辞 {', '.join(prefixes)}）— リポ直下の条文と帰属が中身と食い違うので"
+            " 組み立てを止める（ファミリーごとに別の --pipeline を使う）"
         )
-        for name, profile in SBV2_CARD_PROFILES.items()
-    },
-)
+    return sbv2_dist_plan(series_dir, model)
+
+
+#: JVNV 系の声の出所（カードの `base_model` の先頭 = 重みの出所そのもの）。
+_JVNV_VOICES_REPO = SBV2_JVNV_PROFILE.metadata.base_model[0]
+
+
+def _owner(repo: str) -> str:
+    """HF リポの名前空間（上流が作成者として名乗っている唯一の綴り）。"""
+    return repo.split("/")[0]
+
+
+#: JVNV 系の改変・帰属の表示（CC BY-SA 4.0 §3(a)(1) と §3(b)）。条文は `LICENSE.md` が持つ。
+#:
+#: 対象は 2 つ — 声（`litagin/style_bert_vits2_jvnv`）と、全モデルが共有して再配布する
+#: text encoder（`ku-nlp/deberta-v2-large-japanese-char-wwm`）。どちらも CC BY-SA 4.0 なので、
+#: 同一ライセンス継承（§3(b)）はリポ全体で矛盾しない。
+#:
+#: MUST: 文面は配布形の中身と対応していること — 値としては妥当な散文なので `verify_dist` も
+#: manifest 検査も素通りし、配ってからでないと食い違いに気づけない。出所・学習データ・部品名・
+#: 層数はカードと組み立てが使う同じ定数から組む（本文とカードで別の事実を名乗らない）。
+#:
+#: MUST: 声は 1 本ずつ名指ししない（「JVNV コーパス由来の話者・内訳はモデルカード」と書く）。
+#: `root_files` は Pipeline に固定の 1 組で、組むモデルの部分集合（例 `--model F1 --model F2`）
+#: でも同じ文面が載るので、名指した瞬間に組まなかった声まで名乗る。内訳はカードが manifest から
+#: 名乗る。
+#:
+#: NOTE: 上流の 2 リポはどちらも著作権表示を配っていない（HF のメタデータと README だけ）ので、
+#: §3(a)(1)(A)(ii) の「保持する著作権表示」は無い。作成者は上流が名乗る名前空間で示す。
+SBV2_JVNV_NOTICE_MARKDOWN = f"""# NOTICE
+
+This repository redistributes modified forms of two works licensed under the Creative Commons
+Attribution-ShareAlike 4.0 International license (CC BY-SA 4.0 — the full text is in `LICENSE.md`
+and at <{SBV2_JVNV_LICENSE_URL}>):
+
+- **Voices**: Style-Bert-VITS2 JP-Extra models of JVNV-corpus speakers from
+  <https://huggingface.co/{_JVNV_VOICES_REPO}>
+  (published by `{_owner(_JVNV_VOICES_REPO)}`) — the model card
+  (`README.md`) lists which ones this repository holds. They were trained on the JVNV corpus
+  (<{SBV2_JVNV_CORPUS_PAPER_URL}>; corpus page: <{SBV2_JVNV_CORPUS_PAGE}>).
+  The source repository states that the corpus's CC BY-SA 4.0 license carries over to the models.
+- **Text encoder**: <https://huggingface.co/{SBV2_TEXT_ENCODER_MODEL}>
+  (published by `{_owner(SBV2_TEXT_ENCODER_MODEL)}`).
+
+The following changes were made:
+
+- Each voice was re-expressed in the Karume container format (a `.krm` part sequence whose first
+  part carries the graph and model descriptors) as two fused graphs: `front` (phoneme encoder +
+  duration predictors) and `voice` (flow + HiFi-GAN decoder). Its style vectors and speaker
+  embeddings are shipped as separate tables that the host indexes at run time.
+- The text encoder was **truncated to its first {SBV2_TEXT_ENCODER_LAYERS} encoder layers** (it
+  now ends at the hidden state Style-Bert-VITS2 reads; the layers after it were dropped) and
+  re-expressed in the same container format as `text_encoder`.
+- **The weights were quantized**: the voices are stored as `f16` / `i8` / mixed and the text
+  encoder as `i8` / mixed, where the mixed form stores the group-quantizable weights as `i4` and
+  everything else as `i8`.
+
+No retraining and no fine-tuning were performed. The original checkpoints are not distributed here.
+The modified forms in this repository are licensed under CC BY-SA 4.0 as well, with no further
+restrictions.
+"""
+
+
+def sbv2_jvnv_root_files() -> dict[str, str]:
+    """JVNV 系の配布リポ直下へ入れる法的テキスト（`karume.dist.Pipeline.root_files`）。
+
+    CC BY-SA 4.0 §3(a)(1)(C) / §3(b)(2) は「条文そのものか URI」を求める。URI だけでも満たせるが、
+    リポが HF の外へ写されても条文が一緒に動くよう全文を置く（{@link _shared.licenses.cc_by_sa_4_0}
+    を**逐語で** — 整形するとコピーではなくなる）。帰属と改変の表示は `NOTICE.md` が持つ。
+    """
+    return {
+        "LICENSE.md": cc_by_sa_4_0(),
+        "NOTICE.md": SBV2_JVNV_NOTICE_MARKDOWN,
+    }
+
+
+def _sbv2_pipeline(family: str, default_model: str, root_files: Mapping[str, str]) -> Pipeline:
+    """1 つの声のファミリー = 1 つの配布リポぶんの Pipeline を組む。
+
+    ファミリーを**ここで 1 回だけ**束ねる — 受け付けるモデル（`plan`）・カードの帰属
+    （`card_profiles`）・リポ直下の法的テキスト（`root_files`）が同じ 1 語から入るので、
+    どれか 1 つだけが別のファミリーを指す形が作れない。帰属の選択肢は 1 つなので
+    `--card-profile` は省略で通る（明示しても同じ名前で通る）。
+    """
+    return Pipeline(
+        default_model=default_model,
+        repo_name=sbv2_repo_name,
+        plan=lambda series_dir, model: sbv2_family_dist_plan(series_dir, model, family),
+        card_profiles={
+            family: partial(
+                render_sbv2_model_card,
+                profile=SBV2_CARD_PROFILES[family],
+                abbreviations=SBV2_QUANT_ABBREVIATIONS,
+            )
+        },
+        root_files=root_files,
+    )
+
+
+#: `--pipeline sbv2` の 1 行（JVNV 系 — 公開リポ `karume-sbv2-jvnv`）。
+#:
+#: MUST: FN 系と**別の Pipeline**にする — 理由はモジュール doc の末段。
+PIPELINE = _sbv2_pipeline("jvnv", SBV2_DEFAULT_MODEL, sbv2_jvnv_root_files())
+
+#: `--pipeline sbv2-fn` の 1 行（FN 系 — HF 公開は保留・カード機構だけ維持）。
+#:
+#: 法的テキストは置かない: 上流の書面条件は Booth の頒布ページだけで、同梱できるライセンス文が
+#: 無い（`sbv2.card.SBV2_FN_METADATA` の実地確認）。公開を決める日に、その条件に合わせてここを
+#: 埋める。
+FN_PIPELINE = _sbv2_pipeline("fn", SBV2_FN_DEFAULT_MODEL, {})

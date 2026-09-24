@@ -86,6 +86,22 @@ def irodori_upstream(model_name: str) -> IrodoriUpstream:
 #: 再配布しているので `base_model` にも帰属節にも並べる。
 IRODORI_CODEC_MODEL = "Aratako/Semantic-DACVAE-Japanese-32dim"
 
+#: コーデックの重みの上流の鎖（2026-09-24 に HF の models API と各 README で確認）。
+#: `IRODORI_CODEC_MODEL`（`47376ee2…`・`license: mit`）の `base_model` は
+#: `IRODORI_CODEC_PARENT_MODEL`（`96adcf19…`・`license: mit`）で、README は "originally
+#: facebook/dacvae-watermarked" / "Weights derived from facebook/dacvae-watermarked" と書く。
+#: 親の `base_model` は `IRODORI_CODEC_ORIGIN_MODEL`（`8680102d…`・`license: apache-2.0`）。
+#: 元の重みは Apache 2.0 なので、MIT の帰属に加えて Apache の条文と帰属を配布リポに置く
+#: （`irodori.distribution.irodori_root_files`）。元のコードリポ（GitHub
+#: `facebookresearch/dacvae`）の `LICENSE` も Apache 2.0。HF 側・GitHub 側とも `NOTICE`
+#: ファイルは無く（2026-09-24 のファイル一覧）、保持すべき上流の告知文は無い。
+#:
+#: NOTE: HF の `facebook/dacvae-watermarked` の README 末尾は "licensed under the SAM License"
+#: と書いており、同じリポの license タグ（`apache-2.0`）と食い違う。GitHub 側の README は
+#: "licensed under Apache-2.0" と書く。ここでは機械可読なタグと同梱の `LICENSE` に合わせる。
+IRODORI_CODEC_PARENT_MODEL = "Aratako/Semantic-DACVAE-Japanese"
+IRODORI_CODEC_ORIGIN_MODEL = "facebook/dacvae-watermarked"
+
 #: 配布形のライセンス識別子（上の実地確認どおり上流も同梱コーデックも MIT）。容器へ焼く出所
 #: （`irodori.export.PROVENANCE`）もここから引く — 2 表が独立に動く形にしない。
 IRODORI_LICENSE = "mit"
@@ -163,12 +179,18 @@ def _irodori_base_weights(upstream: IrodoriUpstream) -> list[str]:
         " licensed **MIT**",
         "  (as of retrieval). Upstream ships it as a separate repository; it is redistributed here",
         "  in the container format as the `codec_decoder` / `codec_encoder` components so that",
-        "  text-to-audio runs from this repository alone.",
-        "- **Changes made here**: conversion into the Karume container format and **quantization**",
-        "  of the weights — every component is stored as `f32` / `f16` / `i8` series, and `dit`",
-        "  adds an `i4` series rounded with GPTQ calibration (the quant table below says which",
-        "  storage each quant selects). No retraining, no fine-tuning — the `f32` series is the",
-        "  source checkpoint's own values, re-laid out per graph.",
+        "  text-to-audio runs from this repository alone. Its weights derive from"
+        f" [{IRODORI_CODEC_ORIGIN_MODEL}](https://huggingface.co/{IRODORI_CODEC_ORIGIN_MODEL}),",
+        f"  licensed **Apache-2.0** (as of retrieval), by way of {IRODORI_CODEC_PARENT_MODEL};",
+        "  the Apache License 2.0 text is included in `LICENSE.md` for the codec components.",
+        "- **Changes made here** (also listed in `NOTICE.md`): conversion into the Karume",
+        "  container format and **quantization** of the weights — every component is stored",
+        "  as `f32` / `f16` / `i8` series, and `dit` adds an `i4` series rounded with GPTQ",
+        "  calibration (the quant table below says which storage each quant selects; `f32` is",
+        "  not quantized). The codec stores its weight-normalized convolutions as effective",
+        "  weights, keeps only the mean half of `quantizer.in_proj` in `codec_encoder`, and",
+        "  bypasses the watermarking branch in `codec_decoder`; constant sub-expressions are",
+        "  precomputed. No retraining, no fine-tuning.",
     ]
 
 

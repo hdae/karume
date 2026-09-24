@@ -6,7 +6,9 @@
 
 **帰属はテンプレートと別の軸**（{@link Sbv2CardProfile}）。同じ SBV2 のテンプレートでも、
 どのファミリーの重みを配るかで出所・ライセンス・引用が丸ごと変わるので、そこだけを
-プロファイルに分けて**呼び出し側に明示させる**。
+プロファイルに分けて持つ。どのプロファイルで描くかは **Pipeline が決める** — 声の
+ファミリーごとに別の Pipeline（`sbv2` = JVNV・`sbv2-fn` = FN — `sbv2/distribution.py`）が
+それぞれ自分のプロファイルを 1 つだけ持つので、呼び出し側が選ぶ余地は無い。
 
 MUST: **数値・ダウンロード量・quant 表・dtype ラベル・スタイル表・話者表は 1 つ残らず manifest
 から導出する**（`karume.modelcard` の同 MUST がそのまま掛かる）。ここが持ってよい定数は、
@@ -80,7 +82,8 @@ class Sbv2CardProfile:
     SBV2 のテンプレートは 1 つでも、帰属（出所・ライセンス・再配布の条件・引用）はファミリー
     ごとに**別の法的事実**になる。決め打ちのまま別ファミリーのリポへ描くと、表も使い方も
     正しいのに帰属だけが前のファミリーのまま残る — 配ってからでないと誰も気づけない誤りなので、
-    ここが席として分けて持つ（選択は {@link SBV2_CARD_PROFILES} 経由で**明示**）。
+    ここが席として分けて持つ（どれを使うかはファミリー別の Pipeline が 1 つだけ持つことで
+    決まる — `sbv2/distribution.py` の `PIPELINE` / `FN_PIPELINE`）。
 
     `attribution` が行の並びそのものなのは、この席に入るのが導出できない散文（ライセンス条項の
     要約・引用・再配布条件）だから。機械的に組める 2 行（Voices / Architecture）だけは
@@ -151,6 +154,14 @@ SBV2_JVNV_METADATA = CardMetadata(
 #: CC BY-SA 4.0 の条文（BY の「ライセンス URL を示す」を、カード自身が満たすための 1 本）。
 SBV2_JVNV_LICENSE_URL = "https://creativecommons.org/licenses/by-sa/4.0/"
 
+#: 声の学習データ（JVNV コーパス）の論文と頒布ページ。カードの帰属と配布リポ直下の
+#: `NOTICE.md`（`sbv2.distribution.SBV2_JVNV_NOTICE_MARKDOWN`）が同じ綴りを引く。
+SBV2_JVNV_CORPUS_PAPER = "arXiv:2310.06072"
+SBV2_JVNV_CORPUS_PAPER_URL = "https://arxiv.org/abs/2310.06072"
+SBV2_JVNV_CORPUS_PAGE = (
+    "https://sites.google.com/site/shinnosuketakamichi/research-topics/jvnv_corpus"
+)
+
 SBV2_JVNV_PROFILE = Sbv2CardProfile(
     metadata=SBV2_JVNV_METADATA,
     title="Style-Bert-VITS2 JVNV — Karume",
@@ -182,8 +193,8 @@ SBV2_JVNV_PROFILE = Sbv2CardProfile(
         # 論文題は 1 行に収める（折り返すと、題での検索が本文にあるのに当たらなくなる）。
         "  *JVNV: A Corpus of Japanese Emotional Speech with Verbal Content and"
         " Nonverbal Expressions*,",
-        "  [arXiv:2310.06072](https://arxiv.org/abs/2310.06072). Corpus page:",
-        "  <https://sites.google.com/site/shinnosuketakamichi/research-topics/jvnv_corpus>",
+        f"  [{SBV2_JVNV_CORPUS_PAPER}]({SBV2_JVNV_CORPUS_PAPER_URL}). Corpus page:",
+        f"  <{SBV2_JVNV_CORPUS_PAGE}>",
         "- **Training implementation**:"
         " [Style-Bert-VITS2](https://github.com/litagin02/Style-Bert-VITS2)",
         "  (AGPL-3.0). Karume's runtime contains **none of that code**: it is an independent",

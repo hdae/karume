@@ -19,7 +19,7 @@ import pytest
 
 from irodori.card import IRODORI_SUPPORTED_PIPELINE, render_irodori_model_card
 
-#: 使い方スニペットに綴られるリポ ID（組み立て先のディレクトリ名から dist が渡す）。
+#: 使い方スニペットに綴られるリポ ID（pipeline の宣言から dist が渡す）。
 REPO = "hdae/fake-repo"
 
 

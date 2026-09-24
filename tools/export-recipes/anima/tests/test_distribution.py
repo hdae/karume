@@ -1578,10 +1578,10 @@ class TestModelCard:
         scale = {"B": 1, "KiB": 1 << 10, "MiB": 1 << 20, "GiB": 1 << 30}[unit]
         assert abs(float(value.replace(",", "")) * scale - total) <= total * 0.005
 
-    def test_it_names_the_repository_after_the_assembled_directory(self, tmp_path: Path) -> None:
-        """ファミリーリポの ID は pipeline の定数にできない — 組み立て先から引く。"""
+    def test_it_names_the_repository_the_pipeline_declares(self, tmp_path: Path) -> None:
+        """リポ ID は pipeline の宣言から引く — 組み立て先（`tmp/dist`）の名前は写らない。"""
         card = (self._run(tmp_path) / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
-        assert '  repo: "hdae/dist",' in card
+        assert '  repo: "hdae/karume-anima",' in card
 
     def test_it_leaves_the_tree_verifiable_after_writing_the_card(self, tmp_path: Path) -> None:
         out_dir = self._run(tmp_path)

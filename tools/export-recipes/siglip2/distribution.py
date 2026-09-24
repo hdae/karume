@@ -155,8 +155,9 @@ def siglip2_checkpoint(model: str) -> str:
 def siglip2_repo_name(_model: str) -> str:
     """配布リポ名（家族 1 リポなので、どのモデルでも同じ 1 つ）。
 
-    `Pipeline.repo_name` は「単一モデルを組んだときの既定の出力先」を答える席で、家族が
-    1 リポに畳まれた今はモデル名を見ない。`--model` を 2 つ渡す本番の組み立ては
+    `Pipeline.repo_name` はカードの Usage 例に載る repo 名の正本（`karume.dist.resolve_repo`）で、
+    単一モデルを組んだときの既定の出力先も答える席。家族が 1 リポに畳まれた今はモデル名を
+    見ない。`--model` を 2 つ渡す本番の組み立ては
     `--out` が要る（複数モデルの行き先はドライバが導出しない — `dist.default_out_dir`）。
     """
     return SIGLIP2_REPO_NAME

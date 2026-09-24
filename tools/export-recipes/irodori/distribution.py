@@ -36,6 +36,7 @@ from typing import Any, NamedTuple
 from safetensors import safe_open
 
 from _shared.calib_provenance import calib_complaint
+from _shared.licenses import apache_license_2_0, mit_license
 from _shared.paths import INPUTS_ROOT
 from karume.dist import (
     Artifact,
@@ -51,7 +52,13 @@ from karume.dist import (
     ir_graph,
 )
 
-from .card import render_irodori_model_card
+from .card import (
+    IRODORI_CODEC_MODEL,
+    IRODORI_CODEC_ORIGIN_MODEL,
+    IRODORI_CODEC_PARENT_MODEL,
+    IRODORI_TEXT_BACKBONE_MODEL,
+    render_irodori_model_card,
+)
 
 #: 既定のモデル名 — 系列（`outputs/series/irodori-<この名前>/`）と実重みの置き場
 #: （`inputs/irodori/<この名前>/`）を束ねる 1 語。`irodori.tokenizer_ref.default_out_dir` が
@@ -291,8 +298,8 @@ IRODORI_QUANT_SEATS: Mapping[str, QuantSeat] = {
         "f32",
         {},
         label="Full precision (f32)",
-        description="Every graph in f32 storage — the largest download, and the source"
-        " checkpoint's own values re-laid out per graph.",
+        description="Every graph in f32 storage — the largest download, with no quantization"
+        " applied.",
     ),
     "f16": QuantSeat(
         "f16",
@@ -809,6 +816,125 @@ def irodori_dist_plan(series_dir: Path, model: str) -> ModelPlan:
     return irodori_plan(irodori_sources(series_dir, model), model)
 
 
+#: MIT の著作権行（配布リポ直下の `LICENSE.md`）。上流の HF リポ 3 本（本体 2 版とコーデック）は
+#: `license: mit` を名乗るだけで原文を同梱していないので、原文は共有テンプレートから組む。
+#:
+#: - Aratako の行は上流の実装リポ（GitHub `Aratako/Irodori-TTS`）の `LICENSE` の行を、同じ
+#:   作者の重み（本体・コーデック）にも当てたもの（2026-09-24 ユーザー裁定）。
+#: - SB Intuitions の行は text backbone の素（`sbintuitions/modernbert-ja-310m`）が同梱している
+#:   `LICENSE` の行（2026-09-24 に上流 main で確認）。backbone はその fine-tune なので、MIT の
+#:   「著作権表示を全ての複製に含める」は派生の再配布でも落とせない（lucida の 2 行と同じ向き）。
+#:
+#: 並びは `mit_license` の規約どおり配布物に近い順。v4 / v4.1 のどちらのリポでも同じ 2 行に
+#: なる（backbone は両版で同一 — `irodori.card.IRODORI_TEXT_BACKBONE_MODEL` の実測・コーデックは
+#: 両版とも同じ別リポの 1 本）。
+IRODORI_COPYRIGHTS: tuple[str, ...] = (
+    "Copyright (c) 2026 Aratako",
+    "Copyright (c) 2025 SB Intuitions",
+)
+
+#: 改変告知。MIT は要求しないが、格納形を変えて量子化した配布形であることは利用者が最初に
+#: 確かめたい事実なので、`LICENSE.md` と同じ席で 1 枚出す。コーデックの重みは上流が
+#: `facebook/dacvae-watermarked`（Apache 2.0）由来と書いており、Apache 2.0 §4(b) は改変した
+#: ファイルに改変の告知を求める。このため MIT の帰属と合わせて、**格納値に及ぶ改変を 1 つ残らず**
+#: 列挙する（コーデックの 3 点の出所は `irodori/dacvae/export.py` の前処理と境界の節 —
+#: weight_norm の焼き込み・encoder の `in_proj` の mean 側への切り詰め・透かし枝のバイパス）。
+#: 「f32 系列は上流の値のまま」とは書かない — コーデックの f32 系列は上の 3 点で上流の格納値と
+#: 違う（出力のビット一致は実測されているが、格納値の同一ではない）。
+#:
+#: コーデックの元の重み（{@link irodori.card.IRODORI_CODEC_ORIGIN_MODEL} — Apache 2.0）は
+#: 名指しで帰属する。Apache 2.0 §4(a) は条文の写し（{@link irodori_license_markdown}）を、§4(c) は
+#: 帰属の保持を求める。§4(d) の保持対象（上流の `NOTICE`）は HF 側・GitHub 側とも無い
+#: （2026-09-24 のファイル一覧 — 経緯は `irodori.card` の同定数のコメント）。
+#:
+#: MUST: 本体の上流リポは名指ししない（「`README.md` に載っている checkpoint」と書く）。
+#: `root_files` は Pipeline に固定の 1 組で、この Pipeline は v4 / v4.1 の 2 リポを組むので、
+#: 版を名指しした瞬間にどちらかのリポの告知が中身と食い違う。版はカードが manifest から名乗る。
+#:
+#: MUST: 文面は配布形の中身と対応していること — 値としては妥当な散文なので `verify_dist` も
+#: manifest 検査も素通りし、配ってからでないと食い違いに気づけない。部品名は
+#: {@link IRODORI_WEIGHTS} のキー（= manifest の weights）から組み、同梱する上流 2 本は
+#: カードと同じ定数から引く。
+#: Apache 2.0 が掛かる部品（manifest の weights のキー = {@link IRODORI_CODEC_DIRS} のキー）。
+#: NOTICE と `LICENSE.md` の見出しが同じ 1 語から組む — 片方だけが別の部品を指す形にしない。
+_IRODORI_CODEC_COMPONENTS = " / ".join(f"`{role}`" for role in IRODORI_CODEC_DIRS)
+
+IRODORI_NOTICE_MARKDOWN = f"""# NOTICE
+
+This repository redistributes a modified form of the Irodori-TTS checkpoint listed in `README.md`
+and of the DACVAE codec `{IRODORI_CODEC_MODEL}` (which upstream ships as a
+separate repository), both licensed under the MIT License (see `LICENSE.md`). The checkpoint's
+text backbone was fine-tuned from `{IRODORI_TEXT_BACKBONE_MODEL}`, which is licensed under the
+MIT License as well; its copyright notice is kept in `LICENSE.md`.
+
+The codec's weights derive from
+[`{IRODORI_CODEC_ORIGIN_MODEL}`](https://huggingface.co/{IRODORI_CODEC_ORIGIN_MODEL}), which is
+licensed under the Apache License, Version 2.0: the model card of `{IRODORI_CODEC_MODEL}` states
+that it was derived from
+[`{IRODORI_CODEC_PARENT_MODEL}`](https://huggingface.co/{IRODORI_CODEC_PARENT_MODEL}) (MIT),
+itself fine-tuned from `{IRODORI_CODEC_ORIGIN_MODEL}`. The Apache License 2.0 text is included in
+`LICENSE.md` and covers the codec components ({_IRODORI_CODEC_COMPONENTS}); the changes made to
+them are listed below.
+
+The following changes were made:
+
+- The model and the codec were split into these graphs and re-expressed in the Karume container
+  format (a `.krm` part sequence whose first part carries the graph and model descriptors):
+  {", ".join(f"`{name}`" for name in IRODORI_WEIGHTS)}.
+- The codec was adapted for deterministic inference. Its weight-normalized convolutions are stored
+  as their effective weights (weight normalization folded in, in place of the upstream
+  `weight_g` / `weight_v` pairs). `codec_encoder` keeps only the mean half of
+  `quantizer.in_proj` (the first half of its output channels; the scale half is unused when
+  encoding deterministically). `codec_decoder` bypasses the watermarking branch, keeping only its
+  waveform output layers on the decoding path.
+- Constant sub-expressions of the graphs, such as rotary position tables and the reciprocals in
+  the codec's Snake activations, were precomputed and stored as constants.
+- **The weights were quantized**: every graph is also stored as `f16` and `i8`, and `dit` adds an
+  `i4` series rounded with GPTQ calibration. The `f32` series is not quantized.
+
+No retraining and no fine-tuning were performed. The original checkpoints are not distributed here.
+"""
+
+
+def irodori_license_markdown() -> str:
+    """`LICENSE.md` — MIT（全部品）と Apache 2.0（コーデック 2 部品）の条文を 1 ファイルに併記。
+
+    `root_files` の席は `LICENSE.md` 1 つ（`karume.dist.LEGAL_PATHS`）なので、2 つ目の条文は
+    区切り（`---`）と適用範囲を名乗る見出しの後ろへ続ける。先頭は MIT の本文 + 著作権行
+    （{@link IRODORI_COPYRIGHTS}）のままにする — MIT はコーデックも含む全部品に掛かる
+    （`IRODORI_CODEC_MODEL` と親はどちらも `license: mit`）。
+
+    MUST: 2 条文とも本文へは触らない（整形した瞬間に許諾表示のコピーではなくなる）。Apache の
+    原文は行頭の字下げで Markdown の段落・リストとして崩れるので、フェンスの中へ逐語で置く
+    （原文に ``` は現れない — `tests/test_licenses.py` の digest 凍結が原文の動きを落とす）。
+    """
+    return (
+        mit_license(IRODORI_COPYRIGHTS)
+        + "\n---\n\n"
+        + f"## Apache License 2.0 — codec components ({_IRODORI_CODEC_COMPONENTS})\n\n"
+        + f"The codec components {_IRODORI_CODEC_COMPONENTS} derive from"
+        + f" `{IRODORI_CODEC_ORIGIN_MODEL}`, which is\n"
+        + "licensed under the Apache License, Version 2.0 (see `NOTICE.md`). They are covered by"
+        + " the license\nbelow in addition to the MIT License above; every other component is"
+        + " covered by the MIT License\nalone.\n\n"
+        + "```text\n"
+        + apache_license_2_0()
+        + "```\n"
+    )
+
+
+def irodori_root_files() -> dict[str, str]:
+    """配布リポ直下へ入れる法的テキスト（`karume.dist.Pipeline.root_files`）。
+
+    `LICENSE.md` は MIT + Apache 2.0 の併記（{@link irodori_license_markdown}）、`NOTICE.md` は
+    帰属と改変告知（{@link IRODORI_NOTICE_MARKDOWN}）。
+    """
+    return {
+        "LICENSE.md": irodori_license_markdown(),
+        "NOTICE.md": IRODORI_NOTICE_MARKDOWN,
+    }
+
+
 #: `--pipeline irodori` の 1 行（ドライバが core の PIPELINES へ合成する）。
 PIPELINE = Pipeline(
     default_model=IRODORI_DEFAULT_MODEL,
@@ -817,4 +943,7 @@ PIPELINE = Pipeline(
     # 帰属は 1 通りだけ（上流 1 リポの重みを格納形へ落とし直したもの）— 選択肢が無いので
     # 省略で通る。2 つ目のファミリーが生えた瞬間に明示が要求されはじめる。
     card_profiles={"irodori": render_irodori_model_card},
+    # 上流ライセンス（MIT・コーデックの元の重みの Apache 2.0）の再配布条件は配布リポ 1 つに
+    # 掛かるので、組み立ての回数によらずここで 1 回（ADR 0092 決定 7）。
+    root_files=irodori_root_files(),
 )

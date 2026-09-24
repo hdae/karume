@@ -28,16 +28,26 @@ from container_series import part_paths, placed_paths, replace_component, write_
 from ir_fixtures import ir_container
 from safetensors.numpy import save
 
+from _shared.licenses import apache_license_2_0, mit_license
 from dist import default_out_dir, main
+from irodori.card import (
+    IRODORI_CODEC_MODEL,
+    IRODORI_CODEC_ORIGIN_MODEL,
+    IRODORI_CODEC_PARENT_MODEL,
+    IRODORI_TEXT_BACKBONE_MODEL,
+    IRODORI_UPSTREAMS,
+)
 from irodori.distribution import (
     CALIB_PROVENANCE_FILE,
     CALIB_SHIPPABLE_METHOD,
     IRODORI_CODEC_DIRS,
     IRODORI_CODEC_HALO_FRAMES,
     IRODORI_CODEC_NAME,
+    IRODORI_COPYRIGHTS,
     IRODORI_DEFAULT_MODEL,
     IRODORI_DTYPE_ROLES,
     IRODORI_GRAPH_ROLES,
+    IRODORI_NOTICE_MARKDOWN,
     IRODORI_OUTPUT_PATHS,
     IRODORI_QUANT_ABBREVIATIONS,
     IRODORI_QUANT_SEATS,
@@ -50,12 +60,14 @@ from irodori.distribution import (
     PIPELINE,
     IrodoriSources,
     irodori_calib_floor,
+    irodori_license_markdown,
     irodori_plan,
     irodori_repo_name,
     irodori_series_name,
     irodori_sources,
 )
 from karume.dist import (
+    LEGAL_PATHS,
     MANIFEST_FILENAME,
     MODEL_CARD_FILENAME,
     DistError,
@@ -978,7 +990,8 @@ class TestIrodoriModelCard:
         assert "there is no resampler" in card
         # 非タイルの encoder は長尺参照で落ちうる（limitations 起票済みの by-design 制約）。
         assert "`codec_encoder` is not tiled" in card
-        assert '  repo: "hdae/dist",' in card
+        # repo は出力先（`tmp/dist`）ではなく pipeline の宣言から綴られる。
+        assert '  repo: "hdae/karume-irodori-v4-small",' in card
         # revision は object ref 形の中にコメントアウトで置く（外すだけで pin できる）。
         assert '  // revision: "<full commit sha>",' in card
         # Usage は「コメントを外すだけで次の一歩へ進める」形（裁定 2026-08-12）: voice cloning の
@@ -998,6 +1011,140 @@ class TestIrodoriModelCard:
         assert f"up to {_IRODORI_DIT_SYM_MAX} frames" in card
         # カードは**検証を通った**配布形から描かれる（表と現物が食い違ったまま説明が生えない）。
         assert verify_dist(out_dir)
+
+
+class TestIrodoriLegalText:
+    """配布リポ直下の法的テキスト（ADR 0092 決定 7）— v4 / v4.1 の 2 リポとも同じ 2 枚。
+
+    上流は 2 系統: MIT（Irodori 本体・text backbone・コーデックの直接の上流）と、コーデックの
+    元の重み `facebook/dacvae-watermarked` の Apache 2.0。`LICENSE.md` は両条文を併記し、
+    `NOTICE.md` は両方を名指しで帰属する。
+    """
+
+    @staticmethod
+    def _assemble(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model: str) -> Path:
+        from irodori import distribution
+
+        sources = _build_irodori_sources(tmp_path, model=model)
+        monkeypatch.setattr(distribution, "INPUTS_ROOT", tmp_path / "inputs")
+        out_dir = tmp_path / "dist"
+        main(
+            [
+                "--pipeline",
+                "irodori",
+                "--model",
+                model,
+                "--series",
+                str(sources.series.parent),
+                "--out",
+                str(out_dir),
+            ]
+        )
+        return out_dir
+
+    @pytest.mark.parametrize("model", sorted(IRODORI_UPSTREAMS))
+    def test_it_ships_the_license_text_byte_identical(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model: str
+    ) -> None:
+        """組み立ての経路は `LICENSE.md` を 1 バイトも動かさない（条文の逐語性は下の 2 本が見る）。
+
+        組み立ての経路のどこかで整形や改行変換が入ると 1 バイト動くが、散文としては妥当な
+        ままなので他の門は素通りする（`read_text` の改行変換で CRLF が畳まれないよう bytes で）。
+        """
+        out_dir = self._assemble(tmp_path, monkeypatch, model)
+        license_text = (out_dir / "LICENSE.md").read_bytes().decode("utf-8")
+
+        assert license_text == irodori_license_markdown()
+
+    def test_the_license_opens_with_the_mit_text_for_every_component(self) -> None:
+        """MIT §「著作権表示と許諾表示を含めること」— 差し込み口以外は本文テンプレそのもの。"""
+        license_text = PIPELINE.root_files["LICENSE.md"]
+
+        assert license_text.startswith(mit_license(IRODORI_COPYRIGHTS))
+        assert license_text.count("Permission is hereby granted, free of charge") == 1
+
+    def test_the_license_carries_the_apache_text_verbatim_for_the_codec(self) -> None:
+        """Apache 2.0 §4(a) — コーデックの元の重みの条文の写しを、適用範囲の見出しの後ろへ逐語で。
+
+        見出しが名乗る部品はコーデックの 2 本だけ（manifest の weights のキーの綴り）。MIT の本文の
+        後ろに置く（先頭の MIT を崩さない）。
+        """
+        license_text = PIPELINE.root_files["LICENSE.md"]
+        apache = apache_license_2_0()
+        mit_end = len(mit_license(IRODORI_COPYRIGHTS))
+
+        assert license_text.count(apache) == 1
+        assert license_text.index(apache) > mit_end
+        heading = next(
+            line
+            for line in license_text[mit_end:].splitlines()
+            if line.startswith("## Apache License 2.0")
+        )
+        for role in IRODORI_GRAPH_ROLES:
+            assert (f"`{role}`" in heading) == (role in IRODORI_CODEC_DIRS), role
+        assert license_text.index(heading) < license_text.index(apache)
+        assert IRODORI_CODEC_ORIGIN_MODEL in license_text[mit_end:]
+
+    def test_it_keeps_the_text_backbones_copyright_next_to_the_authors(self) -> None:
+        """backbone は `modernbert-ja-310m` の fine-tune — MIT は派生でも上流の表示を落とせない。"""
+        license_text = PIPELINE.root_files["LICENSE.md"]
+
+        assert "Copyright (c) 2026 Aratako\nCopyright (c) 2025 SB Intuitions\n" in license_text
+        assert (
+            "The above copyright notice and this permission notice shall be included in all"
+            in license_text
+        )
+
+    @pytest.mark.parametrize("model", sorted(IRODORI_UPSTREAMS))
+    def test_the_legal_text_passes_the_undeclared_file_gate(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model: str
+    ) -> None:
+        """manifest が宣言しない 2 枚は `LEGAL_PATHS` の席として `verify_dist` を通る。"""
+        out_dir = self._assemble(tmp_path, monkeypatch, model)
+
+        assert sorted(LEGAL_PATHS) == ["LICENSE.md", "NOTICE.md"]
+        assert all((out_dir / name).is_file() for name in LEGAL_PATHS)
+        assert sorted(verify_dist(out_dir)) == sorted(_in_subtree(model, _placed_paths()))
+
+    def test_the_notice_names_the_bundled_upstreams_and_every_graph(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """告知が名指す部品は manifest の weights と同じ集合（片方だけ増える形を閉じる）。"""
+        out_dir = self._assemble(tmp_path, monkeypatch, IRODORI_DEFAULT_MODEL)
+        notice = (out_dir / "NOTICE.md").read_text(encoding="utf-8")
+        manifest = json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+
+        assert notice == IRODORI_NOTICE_MARKDOWN
+        assert IRODORI_CODEC_MODEL in notice
+        assert IRODORI_TEXT_BACKBONE_MODEL in notice
+        for component in _irodori_model(manifest)["weights"]:
+            assert f"`{component}`" in notice, component
+        assert "quantized" in notice
+
+    def test_the_notice_attributes_both_upstream_licenses(self) -> None:
+        """NOTICE は上流 2 系統を名指す: MIT（Irodori 側）と Apache 2.0（コーデックの元の重み）。
+
+        Apache 2.0 §4(c) は帰属の保持を求める — コーデックの直接の上流（MIT）だけを名乗ると、
+        元の重みが Apache であることが配布リポのどこにも残らない。
+        """
+        notice = IRODORI_NOTICE_MARKDOWN
+
+        assert "licensed under the MIT License" in notice
+        assert IRODORI_CODEC_MODEL in notice
+        assert f"https://huggingface.co/{IRODORI_CODEC_ORIGIN_MODEL}" in notice
+        assert f"https://huggingface.co/{IRODORI_CODEC_PARENT_MODEL}" in notice
+        assert "licensed under the Apache License, Version 2.0" in notice
+        for role in IRODORI_CODEC_DIRS:
+            assert f"`{role}`" in notice, role
+
+    def test_the_notice_holds_for_either_version_repository(self) -> None:
+        """MUST: 本体の上流リポは名指ししない — 1 組の `root_files` が v4 / v4.1 の 2 リポへ
+        載るので、版を名指しした瞬間にどちらかのリポの告知が中身と食い違う。
+        """
+        for upstream in IRODORI_UPSTREAMS.values():
+            assert upstream.repo not in IRODORI_NOTICE_MARKDOWN
+            assert upstream.display not in IRODORI_NOTICE_MARKDOWN
+        assert "the Irodori-TTS checkpoint listed in `README.md`" in IRODORI_NOTICE_MARKDOWN
 
 
 class TestIrodoriCli:

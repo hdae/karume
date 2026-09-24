@@ -1,6 +1,7 @@
 """配布リポ直下へ同梱するライセンス原文（`_shared.licenses`）。
 
-原文は「逐語のコピー」であることが要件そのもの（Apache 2.0 §4(a) / MIT の許諾表示）なので、
+原文は「逐語のコピー」であることが要件そのもの（Apache 2.0 §4(a) / MIT の許諾表示 /
+CC BY-SA 4.0 §3(a)(1)(C)）なので、
 ここで固定するのは**要約に化けていないこと**（条項が現物として居る）と、MIT の差し込み口が
 著作権行**だけ**を動かすことの 2 点。文面の言い換えは値としては妥当な散文になってしまい、
 配ってからでないと食い違いに気づけない。
@@ -19,9 +20,11 @@ import pytest
 
 from _shared.licenses import (
     APACHE_LICENSE_2_0_PATH,
+    CC_BY_SA_4_0_PATH,
     MIT_COPYRIGHT_PLACEHOLDER,
     MIT_LICENSE_PATH,
     apache_license_2_0,
+    cc_by_sa_4_0,
     mit_license,
 )
 
@@ -35,10 +38,16 @@ from _shared.licenses import (
 #: バイト列（差し込み口より外は逐語でなければならない、というのがこの門の主張）。
 APACHE_LICENSE_2_0_SHA256 = "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
 MIT_LICENSE_SHA256 = "c43f56ab1c4a9c8366b6843ba495421ed57950827d5e0d82bc3b9021b8bc0444"
+#: 出所は <https://creativecommons.org/licenses/by-sa/4.0/legalcode.txt>（CC 自身が配る
+#: plain-text 版 — HTML 版から起こすと折り返しと記号が取り手ごとに変わる）。
+CC_BY_SA_4_0_SHA256 = "28a9529c7d0bb4dc51f4bf5c116a3d16ef247a052f7591466768ddf563fd1cf5"
 
 #: Apache 2.0 の節見出し（`   1. ` 〜 `   9. ` の 9 個）。digest が動いたとき「何が変わったか」
 #: を読める形にするための補助 — 行数と違い、追記と削除が相殺しても通らない。
 APACHE_SECTION_HEADING = re.compile(r"^   \d\. ", re.MULTILINE)
+
+#: CC BY-SA 4.0 の節見出し（`Section 1 -- ` 〜 `Section 8 -- ` の 8 個）。用途は上と同じ。
+CC_BY_SA_SECTION_HEADING = re.compile(r"^Section \d -- ", re.MULTILINE)
 
 
 def _digest(path) -> str:
@@ -64,6 +73,27 @@ class TestApache:
         assert len(APACHE_SECTION_HEADING.findall(text)) == 9
         assert "   9. Accepting Warranty or Additional Liability." in text
         assert text.count("\n") == 201
+
+
+class TestCcBySa:
+    def test_it_is_the_license_text_and_not_a_summary(self) -> None:
+        text = cc_by_sa_4_0()
+        assert text.startswith("Attribution-ShareAlike 4.0 International\n")
+        # §3(a)（帰属と改変の表示）と §3(b)（同一ライセンス継承）が同梱の要求の出どころ。
+        assert "b. indicate if You modified the Licensed Material and" in text
+        assert "The Adapter's License You apply must be a Creative Commons" in text
+
+    def test_the_file_is_byte_for_byte_the_original(self) -> None:
+        """MUST: 原文は整形しない — 折り返しの変更も条項の欠落も追記もここで落ちる。"""
+        assert _digest(CC_BY_SA_4_0_PATH) == CC_BY_SA_4_0_SHA256
+
+    def test_the_eight_sections_and_the_line_count_are_intact(self) -> None:
+        """digest が動いた日に「何が変わったか」を読むための補助検査。"""
+        text = cc_by_sa_4_0()
+
+        assert len(CC_BY_SA_SECTION_HEADING.findall(text)) == 8
+        assert "Section 8 -- Interpretation." in text
+        assert text.count("\n") == 428
 
 
 class TestMit:

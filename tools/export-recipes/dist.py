@@ -7,9 +7,9 @@
     uv run python dist.py                                  # 既定 = anima（公式 5 変種 — ADR 0087）
     uv run python dist.py --pipeline anima-extra           # 追加学習系（越境参照 — リリース時）
     uv run python dist.py --pipeline irodori
-    uv run python dist.py --pipeline sbv2 --card-profile fn
-    uv run python dist.py --pipeline sbv2 --card-profile jvnv \\
-        --model F1 --model F2 --out ../../models/karume-sbv2-jvnv
+    uv run python dist.py --pipeline sbv2-fn               # FN 系（HF 公開は保留）
+    uv run python dist.py --pipeline sbv2 \\
+        --model F1 --model F2 --out ../../models/karume-sbv2-jvnv --repo hdae/karume-sbv2-jvnv
     uv run python dist.py --pipeline siglip2 \\
         --model base --model so400m --out ../../models/karume-siglip2
     uv run python dist.py --pipeline lucida                # BiRefNet_HR の派生（別リポ）
@@ -45,6 +45,8 @@ PIPELINES: Mapping[str, Pipeline] = {
     "anima": anima_distribution.OFFICIAL_PIPELINE,
     "anima-extra": anima_distribution.EXTRA_PIPELINE,
     "sbv2": sbv2_distribution.PIPELINE,
+    # 声のファミリーはライセンスが違う（JVNV = CC BY-SA 4.0・FN = Booth の頒布条件）ので別席。
+    "sbv2-fn": sbv2_distribution.FN_PIPELINE,
     "irodori": irodori_distribution.PIPELINE,
     "siglip2": siglip2_distribution.PIPELINE,
     "birefnet": birefnet_distribution.PIPELINE,
