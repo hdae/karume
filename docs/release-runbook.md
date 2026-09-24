@@ -130,10 +130,22 @@ export HF_XET_DEDUPLICATION_GLOBAL_DEDUP_QUERY_ENABLED=false
 - [ ] **台本は機械の門も兼ねる**（人の目視に依存しない）: `upload` は shard-cache の退避に
       失敗した時点で非 0 終了し、アップロード後に `global_dedup_query_enabled = false` と
       CAS 照会 0 回を検査して不一致なら非 0 終了する。`check` は `models/<repo>` に
-      `.safetensors` が 1 本も無ければ非 0 で落ちる（空表を「検証したが問題なし」として出さない）
+      `.krm` / `.safetensors` が 1 本も無ければ非 0 で落ちる（空表を「検証したが問題なし」として出さない）
 - [ ] アップロード: `tools/release/hf-upload.zsh upload <repo>`（中身は
       `tools/.venv/bin/hf upload hdae/<repo> models/<repo> . --repo-type model` —
       `models/` は 1 ディレクトリ = 1 HF リポ — assets-layout。追加引数はそのまま hf へ渡る）
+- [ ] **配布形を変えた回（`karume/4` → `karume/5` など）は、新しい manifest が参照しない旧形のファイルを
+      同じアップロードで消す**: `tools/release/hf-upload.zsh upload <repo> --delete '*.safetensors'`。
+      `hf upload` は手元に無いファイルを消さないので、指定しないと旧形のファイルが main に残る。
+      glob は `/` をまたいで入れ子の path にも当たる。同じ呼び出しで上げ直す path は削除から外れるので、
+      sbv2 の `speakers/` / `styles/` のような資産の safetensors は残る。削除はアップロードの最初のコミットに
+      乗り、大きいリポは複数コミット（`(part N)` — huggingface_hub のコミット分割の番号で、容器の part とは
+      別物）に分かれる。どれも huggingface_hub 1.27 の `upload_folder` の実装の振る舞いで、仕様の保証ではない
+      — 版を上げたら確かめ直す
+- [ ] **pin は削除後の main で焼く**: §3 の SHA はアップロードの全コミットが済んだ後の main
+      （台本のログの `### main sha` 行）から取る。削除を別の回に分けると main が動き、pin を 2 回付け替える
+      ことになる（実例: irodori-v4.1-small は旧 safetensors 65 本を後から消して pin を付け替えた — `1c952948`）。
+      旧 revision のファイルは HF の履歴に残り、公開済みの旧版パッケージは旧 pin から読み続ける
 - [ ] **リポ名の改名（該当回のみ）**: `hf repos move <old> <new>` で改める。旧名は API /
       resolve とも **HTTP 307** で新名へリダイレクトするので既公開の参照は切れないが、
       **リダイレクトが生きていることを実際に叩いて確認**する —
@@ -144,7 +156,7 @@ export HF_XET_DEDUPLICATION_GLOBAL_DEDUP_QUERY_ENABLED=false
 
 ### アップロード直後の断片化検証（必須）
 
-**全 safetensors を表にする**（代表 2〜3 本のサンプルでは足りない — 2026-09-04 の siglip2 は
+**全 krm / safetensors を表にする**（代表 2〜3 本のサンプルでは足りない — 2026-09-04 の siglip2 は
 so400m の 7 shard 中 5 本だけが断片化しており、サンプルの当たり外れで見落とす）。
 `tools/release/hf-upload.zsh upload` は終了時に表を出す。公開済みリポを後から見るときは
 `tools/release/hf-upload.zsh check <repo>`。表の中身は research §9 の再現手順そのもの:
@@ -163,6 +175,10 @@ curl -sS -H "Authorization: Bearer <accessToken>" "<casUrl>/v1/reconstructions/<
       同一リポ内の delete → 再 up の 2 コミット法は**効かない**（2026-09-05 実測 — 同一バイトは転送されず元の
       xorb を参照したまま）。同一 checkpoint の 2 解像度を同居させたリポでは削除 → 再作成でも 2048 側の shard
       1 本が回復しなかった（[research 2026-08-09 の 2026-09-05 追記](research/2026-08-09-xet-fragmentation.md)）。
+      **MUST NOT: 公開 pin のあるリポでは削除 → 再作成を使わない**（ADR 0108 決定 18 — HF リポの履歴は残し、
+      公開済みの旧版パッケージは旧 revision の pin から読み続ける）。リポを削除すると旧 pin が 404 になるという
+      見立ては**推測**（実機では確かめていない）。公開 pin のあるリポで断片化したら、削除せずに
+      止めて裁定を仰ぐ。
       **hf_xet 1.4.3 では回復手段が無い**（片道ラチェット — 同バイト上げ直しは hf CLI が転送ごと
       スキップし、2 コミット法も不発。2026-08-29 実測）。観測値は §5 の記録へ残す
 

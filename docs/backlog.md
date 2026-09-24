@@ -41,21 +41,10 @@
   実施済み（2026-09-22・38 項目・約 141 GB — 削除一覧は
   `.claude/reviews/2026-09-22_codex-format-design/outputs-cleanup-deleted.txt`。レーンが参照する系列は
   段 1 後に新形式で再生成する）。
-  **次は 3f（docs）**。段 3d から持ち越した項目:
-  - ADR 0085 の RAM 記述: GPU 常駐席の節が旧実装の語（shard 逐次面・使い回す器・「最大 shard 1 本 + 器 1 本」）の
-    ままで、構築時ピークの支配項（最大 block + scale 全量 × 2）と食い違う。
-  - `packages/models/src/gemma/ple-gpu.ts` 冒頭の doc: 「part ごとにフェンスを 1 本立てて参照を手放す」は段 3e の
-    候補 2(c) の後は古い（参照は `writeBuffer` が戻った時点で手放し、フェンスは part ごと 1 回のまま）。ピークは
-    「scale 表の全量 + 最大 block 1 本」と書いており、上の ADR 0085 の支配項（× 2）とどちらに揃えるかは実装に照らして決める。
-  - docs の死んだ参照: 段 3d で消えた `STORAGE_DTYPES`（`quantization.md` / `glossary.md` の正本ポインタ）と
-    `streamAssets`（limitations / known-issues / ADR 0070 / 0080 / 0085 / 0086 ほか）。
-  - exporter README: 出力を旧 shard（safetensors + `__metadata__.karume_ir`）として説明している節と、CLI 節の
-    サブコマンド表（`karume repack` があり `karume migrate` が無い）。`tools/export-recipes/*/README.md` の系列出力図（`model.safetensors`）も同種。
-  - `DTYPE_BYTES` / `DTYPE_ALIGN` の統合: I4 が消えて全 dtype で同値になった 2 表
-    （`packages/runtime/src/format/safetensors.ts`）を 1 本に畳む。
-  - 独立オラクル喪失の記録: `gpu_container_session_test.ts` の削除で、合成モデル（3 codec × piece 分割）の
-    出力を旧 safetensors 経路という別実装で押さえる A/B が消えた（後継は krm と、同じ構築経路を共有する
-    メモリ内容器の一致だけを見る）。被覆の穴として記録する。
+  **段 3f 済（2026-09-24）**: docs を段 3d / 3e の実装へ揃えた。段 3a〜3d で決めた点と検収①②の状況は
+  ADR 0108 追記 4、RAM の数え方は [container-v1](container-v1.md) §11 が正本。
+  段 3 の作るもののうち HF の全 pin の移行（残り 9 リポの再アップロード）は release の波へ移した（release 節の
+  「HF 配布リポの `karume/5` 再アップロード」項が正本）。段 4〜6 の作るものと検収は ADR 0108 の段階分解の表が正本。
 
 - **モデル横断の追加調査（2026-09-10〜11）**: Qwen3-0.6B / MiniCPM5-2B の RTN / GPTQ と
   E4B の全 PLE を含むローカル pipeline は実機検証済み。E4B chat も CPU / Deno / Chrome で一致。
@@ -74,7 +63,8 @@
   [添付参照資料の現行再検証](research/2026-09-14-reference-rope-optimization.md)からK-41のpermuteコピー削減を実装しM2検収済み。[K-42のattention融合](research/2026-09-15-attention-fusion.md)もM2の80生成で出力一致を確認したが利得は無く、任意指定に残す。[K-43の保留候補併用](research/2026-09-15-held-combinations.md)から単独の[linear→SRQ融合](research/2026-09-15-linear-static-quantize-fusion.md)をK-44として統合した。常駐scaleの借用・丸め障壁・元のSRQとの数値比較を検収。[M2のQAT40生成](research/2026-09-15-m2-linear-srq-adoption.md)も検収済み。[高速quant宣言と明示上書き](research/2026-09-15-gemma-fast-quant.md)を統合。次は投入政策・prefillバケットの適用判断。同じM2追試は再依頼しない。広い併用は未統合で、gate/up入力共有の費用調査も残る。
   広いchunk/複数容量への一括適用は見送り。ChromeのGPU Instance消失は原因の切り分けを残す。
   残件は配布 recipe / source 表、長文と広い品質評価。実験資産を公開済みモデルとして扱わない。
-  手元の試走は [MiniCPM5 CLI](../examples/minicpm5/README.md) / [Qwen3 CLI](../examples/qwen3/README.md) を使える。
+  [MiniCPM5 CLI](../examples/minicpm5/README.md) / [Qwen3 CLI](../examples/qwen3/README.md) は容器（`krm`）の系列を読む。
+  旧 shard 形の `-probe` 系列は読まず、今はリポ内でその容器の系列を作れない（各 README）。
   容量 128 の対話・履歴整理・reset・中断と、公式 CPU 参照への多ターン一致を検収済み。
   Anima w4a8 / drafter / f16 GEMM の既存形状比較は不採用で完了。f16 M=1 GEMV は
   [単体・Qwen の検収](research/2026-09-10-codex-mtp-optimization.md#f16-格納-m1-の-gemv2026-09-11)に基づき採用（K-25）。
@@ -146,11 +136,12 @@ later の「decode 速度の残り」。
   「ミス run の arena 一時（最大でバケット形 1 本ぶん）」が乗る（既定の梯子なら 768 形 + 256 形 ≈ 1.33 倍）。
   generation のミス run で活性 backing を先に退役させれば窓は消えるが、次の 768 chunk で作り直しが
   1 回増える。4 GB 級端末で効くかを見てから裁定。
-- **既公開 2 リポの `LICENSE.md` / `NOTICE.md` 同梱是正**（起票 2026-09-04 — ADR
+- **既公開 3 リポの `LICENSE.md` / `NOTICE.md` 同梱是正**（起票 2026-09-04 — ADR
   [0092](decisions/0092-distribution-repos-and-sources.md) 決定 7）: `karume-irodori-v4-small` /
   `karume-irodori-v4.1-small`（MIT = 全文 + 著作権行）と `karume-sbv2-jvnv`（CC BY-SA）は
-  法的テキストの同梱が漏れている（`verify_dist` の `LEGAL_PATHS` 席）。**次にこの 2 リポを
+  法的テキストの同梱が漏れている（`verify_dist` の `LEGAL_PATHS` 席）。**次にこの 3 リポを
   上げ直す回に同乗**させる（2026-09-04 ユーザー裁定 — 是正単独の再アップはしない）。
+  その回は release 節の `karume/5` 再アップロードで、3 リポとも同乗させる。
   未公開の vowel-detector は同梱済み（2026-09-05 — `PIPELINE.root_files` に MIT 全文 +
   著作権行）なので、初回公開時に漏れることはない。
   同じ上げ直し波に**カード / NOTICE の常時分割の文面是正**も乗せる（ADR
@@ -167,9 +158,8 @@ later の「decode 速度の残り」。
   資源表の「最大 binding」を 256 / 878 MiB から cat_211 込みの 320 / 1,280 MiB へ訂正した（`d116d7e`）ので、
   公開済みカードの数値は古い。次にこの 2 リポを上げ直す回に同乗させる（是正単独の再アップはしない —
   上と同じ扱い）。
-- **テスト被覆の残（起票 2026-09-05）**: `packages/runtime/tests/helpers/shard-files.ts` の
-  `readExact` 短読みと `shardTensorNames` の非オブジェクトヘッダ、`SubmitScheduler` の
-  `#encodeTimedChunk` 内の copy 分岐（`packages/runtime/src/gpu/submit.ts`）は依然として未検証。
+- **テスト被覆の残（起票 2026-09-05）**: `SubmitScheduler` の `#encodeTimedChunk` 内の copy 分岐
+  （`packages/runtime/src/gpu/submit.ts`）は依然として未検証。
 - **Metal `--diagnostics` の切り分け実験**: query set の同時生存本数と `destroy()` 滞留の
   どちらが支配かの A/B。手順①②と修正候補は [known-issues](known-issues.md) の該当節が正本。
   実機が要るのでユーザー実行。
@@ -184,14 +174,14 @@ later の「decode 速度の残り」。
   の回に）③ADR [0033](decisions/0033-vae-fixed-tile-decode.md) 決定 5「TS 側が幾何そのものを
   突合する」経路の不在（幾何 JSON を 1 本吐くか、決定 5 を実態へ追記するかの裁定）。
 - **モデルカードのピーク VRAM 列（起票 2026-09-04）**: `karume dist` が TS 側の見積り
-  （`estimateSessionMemory` 系）をカード生成時に呼び、quant 表へピーク VRAM 列を出す。現状の
+  （`prepareContainer(...).estimate()` 系）をカード生成時に呼び、quant 表へピーク VRAM 列を出す。現状の
   カードは格納バイトしか出さないので、読み手が自分の GPU で動くかを判断できない。
 - **ChatSession の要約型 overflow ポリシー**: `onOverflow` は差し替え可能なのでポリシー実装
   1 本として入る。再検討条件「窓を広げた後」は ADR
   [0091](decisions/0091-gemma4-host-rope-variable-capacity.md)（capacity が実行時ノブ）で成立
   — ADR [0083](decisions/0083-generation-api-surface.md) 追記の見送り記述の行き先はここ。
 - **HF CDN の同時本数の実測**: 接続ごとの上限が実測されたら、DL 並列本数の定数引き上げか末尾
-  向け shard 細分化を再起票する（DL スロット改善自体は kill —
+  向け part 細分化を再起票する（DL スロット改善自体は kill —
   [research 2026-09-02](research/2026-09-02-cold-load-dl-timeline.md)）。
 - **GPTQ 掃引の再評価**: 既定は現状維持で確定・opt-in 実装は温存（正本 =
   [research 2026-08-31](research/2026-08-31-gptq-axes-sweep.md)）。復活条件 = **多モデル ×
@@ -206,8 +196,7 @@ later の「decode 速度の残り」。
 - **メモリ管理波の隣接起票**（正本 = ADR [0089](decisions/0089-memory-limits-preflight.md)
   Consequences / ADR [0090](decisions/0090-shard-spec-v3-tensor-pieces.md)）:
   `GpuContext.createResident` の確保は errorScope 頼みのまま（run 時 transient は計画時の
-  preflight で確保前に落ちる）/ gemma4 PLE sidecar は `assets` 席で shard 上限の対象外
-  （by-design・現物は 9 本とも上限以下）/ `fromAssets` の位置づけ / large asset の
+  preflight で確保前に落ちる）/ `fromAssets` の位置づけ / large asset の
   reference-first 一般則。
 - **exporter core の `karume/__init__` が torch を eager import する**: `karume.dist` / `karume.modelcard`
   だけを使う配布・カード層（recipes の dist ドライバ）でも `import dist` で torch が丸ごと読まれる
@@ -222,7 +211,7 @@ later の「decode 速度の残り」。
 **ユーザー実機（Claude からは実行できない）**:
 
 - Chrome での HF 経路の RAM ピーク追試（Deno 側は実測済み —
-  [research 2026-09-02](research/2026-09-02-shard-size-ram-peak.md)）。
+  [research 2026-09-24](research/2026-09-24-part-length-ram-peak.md)）。
   **性能のブラウザ計測はこの波（a）から外す（2026-09-04 ユーザー裁定）** — ブラウザで採れるのは
   Dawn / wgpu の実装差だけで、カーネル候補の採否には効かない。代替 = TS パッケージ側に性能情報を
   収集する機能を足し、ユーザーが複数環境でサンプル集（名称・置き場は未定）を回した結果を集める
@@ -231,6 +220,42 @@ later の「decode 速度の残り」。
 
 ## later
 
+- **HTTP Range 取得（ADR 0108 段 6）の前倒し候補（起票 2026-09-24・判断はリリース後）**: ADR
+  [0109](decisions/0109-manifest-v5-container.md) 決定 7 の前倒し条件は「段 2 の RAM ピーク harness で cold の
+  ピークが『part 長 + 重ね合わせ』を超える」こと。段 3e で保持の重複は消えたが、scan 型（Deno の HF 経由）の
+  cold はまだ part 長 + 最大 block を超える。残りは hub の保持枠 1 本と GC を待つ part で、原因は part 単位の
+  全量読み（取得の粒度）に移った。条件は形式上成り立ったまま（[研究記録](research/2026-09-24-part-length-ram-peak.md)
+  の 7・ADR 0108 追記 5）。当たるのは Deno の HF 経由だけ。parked の「hub Range 並列 + prefetch」（断片化対策）とは
+  動機が別。
+- **gemma4 の run 時間の伸びの帰属（起票 2026-09-24）**: 段 3e の M2 で gemma4 の run が +0.14〜+0.55 s 伸びた。
+  run の窓には重みの供給が入らないので、供給経路の遅れではない読み。原因は未切り分け（研究記録の 4 と
+  「残った問い」）。
+- **縮図に外部の正解を戻す（起票 2026-09-24 — ADR 0108 追記 4）**: 3 codec 混在 × piece 分割の合成モデル
+  （`packages/runtime/tests/gpu_memory_container_test.ts`）は、合流層と構築経路を共有する 2 経路（krm と
+  メモリ内容器）の一致しか見ていない。戻し方は 2 案。CPU 参照の連鎖（`decodeI4` / `decodeI8` +
+  `applyReferenceOp`）で期待値を立てるか、縮図の出力に環境別の sha256 参照行（ADR 0106）を足す。
+- **PLE のメモリ内容器のフェンス本数（起票 2026-09-24）**: GPU 常駐席の PLE は piece 1 本 = part 1 本で
+  メモリ内容器へ渡すので、Session 構築のフェンスが piece の本数ぶん立つ
+  （`packages/runtime/src/format/container/memory.ts` の part 割り）。**推測**の見積りは、E2B の values 約 72 block
+  × フェンス 13.0 ms（ADR 0108 決定 9 の Arc B570 実測）で約 0.94 s。段 3e 後はホスト RAM が part 割りに依らない
+  ので、piece を束ねて増えるのは staging だけ。未実測。
+- **`pack_int2` / `unpack_int2` の置き場（起票 2026-09-24）**: `tools/exporter/src/karume/emit.py` の 2 関数は src に
+  呼び手が無く、テスト（`test_i2_storage.py`）だけが使う。i2 のバイト順の正本として src に残すか、テスト helper
+  へ移すかを決める。判断には ADR 0097 の意図（exporter が自前で i2 を詰める日が来るか）が要る。
+- **`parseSafetensors` の 2 引数形（`byteLength`）の置き場（起票 2026-09-24）**: 公開面
+  （`packages/runtime/mod.ts`）にあるが、器の使い回しが段 3d で退役してから本番の呼び手は 0 件で、
+  残るのは `packages/runtime/tests/format_safetensors_test.ts` の 2 引数形のケース（doc とテスト名は
+  「最大 shard 長の器を使い回す」前提のまま）。公開面から外す（Breaking）か、資産の読み手の口として
+  残して doc を現行にするかを決める。
+- **i4 の group scale の形の式が 2 箇所にある（起票 2026-09-24）**: 検査側（合流層
+  `packages/runtime/src/format/container/bind.ts` の scale block 長と group の刻み）と展開側
+  （`packages/runtime/src/format/i4.ts` の `groupScaleShape` → `decodeI4`）が同じ形を別々の式で求める。
+  段 3d までは検査側が `format/container.ts` で `groupScaleShape` を共有していた。1 本に戻すか、
+  両者の一致を fixture で固定するかを決める。
+- **container-v1 §6.2 の codec 台帳と実装のずれ（起票 2026-09-24）**: 仕様の台帳エントリは `decodeCpu` /
+  `executableOps` / `wgsl` を持つが、実装の `CodecEntry`（`packages/runtime/src/format/container/codecs.ts`）は
+  `layout` / `packing` / `scale` / `grouping` / `zeroPoint` だけで、圧縮のまま常駐できる op の判定は今も別々の
+  述語（`packages/runtime/src/runtime/plan.ts`）。仕様を実装へ寄せるか、実装を台帳へ畳むかを決める。
 - **実重み golden 11 本の結果記録の包み（起票 2026-09-22）**: 各 e2e に同型の try / catch / record が
   並ぶので、helpers 側に「ケース 1 件を記録付きで回す」薄い包みを置いて重複を消す（size S）。
 
@@ -353,6 +378,30 @@ later の「decode 速度の残り」。
 
 ## release — リリース準備波（しばらく先）
 
+- **HF 配布リポの `karume/5` 再アップロード（残り 9 リポ・起票 2026-09-24 — ADR 0108 決定 18・ADR 0109 決定 9）**:
+  pin のある 10 リポのうち `karume/5` を指すのは `irodori-v4.1-small` だけ。残りの `anima` / `anima-extra` /
+  `birefnet-hr` / `lucida` / `depth-anything-v2` / `gemma4` / `irodori-v4-small` / `sbv2-jvnv` / `siglip2` の 9 本は
+  `karume/4` の revision を指し、HEAD の hub では読めない（旧版パッケージからだけ動く）。`gemma4-qat` は未公開で
+  pin が無い。手順は [release-runbook](release-runbook.md) の §0〜§3（bump → `karume dist` で焼き直し →
+  旧 `*.safetensors` の削除つきアップロード → 削除後の main で pin）。
+  - `irodori-v4.1-small` も焼き直して上げ直す。今の pin はカードが `karume/4` と safetensors 方言を名乗り、
+    `LICENSE.md` / `NOTICE.md` も無い（移行 CLI の出力ミラーをそのまま上げたため）。移行 CLI のミラーは
+    どのリポも上げない。
+  - `anima` を先に上げて main の SHA を確定し、`anima-extra` をその SHA の越境参照で焼き直す（runbook §0）。
+    ローカルミラーの extra は旧 `karume/4` の anima revision を指している。上げた後に now 残件の
+    「anima-extra 越境の実資産門の復活」を行う。
+  - anima の系列 14 本を再 export する（上流 checkpoint から CPU で）。公式 4 変種（turbo-v1.1 / aesthetic-v1.1 /
+    turbo-v1.0 / aesthetic-v1.0）と copycat の系列が `outputs/series/` に無く、`karume dist` が組めない。
+  - sbv2 の front f16 / i8 はミラーが旧世代の export を移行したもので、系列から焼き直すと initializer 名が
+    変わる（値と出力は同じ）。
+  - 同乗: now 残件の法的テキスト同梱・カード / NOTICE の文面是正・depth-anything と birefnet・lucida の
+    カード再発行。
+- **vowel-detector の初回公開の前提（起票 2026-09-24）**: recipe は上流の `feature_config.json` を
+  `inputs/vowel-detector/` 直下から読む。この開発機は上流リポを丸ごと置いた形なので、組み立ての前に
+  `cp inputs/vowel-detector/assets/feature_config.json inputs/vowel-detector/` を 1 回打つ。
+- **`tools/llm-baseline` の lint の門（起票 2026-09-24）**: pyproject も CI ジョブも無く、README の手動の
+  `uvx ruff check` / `ruff format --check` だけが頼り（2026-09-24 時点で ruff check は赤）。exporter /
+  export-recipes と同じ設定で CI に載せるか、export-recipes の workspace メンバーへ寄せるかを決める。
 - 実資産 CI gate（GitHub CI はローカル資産を踏まない問題）。**門番は消化済み**
   （`packages/runtime/tests/assets_gate_test.ts` + CI env `KARUME_ALLOW_NO_ASSETS=1` —
   2026-09-05）。残るのは golden の fixture 昇格 / release gate での資産取得の判断
@@ -365,10 +414,9 @@ later の「decode 速度の残り」。
   **公開済みは 7 家族 10 エントリで、重み行（Revision used / Weights license）が未記録なのは
   irodori / sbv2 / siglip2 の 3 家族**（anima / depth_anything / gemma4 / birefnet・lucida は記入済み）。
   コード依存ブロック（transformers / PyTorch 等）の Code license / Attribution は上流 LICENSE の
-  現物で 2026-09-05 に記入済み。重み行が埋まらない構造要因 = **上流 revision を機械可読に残す席が
-  リポに無い**（`<FAMILY>_SOURCES` は karume 配布リポの pin であって上流ではない）ので、
-  `provenance.py` 系へ `upstream_revision` 欄を足す（**再 export 同乗** — W-G4-4 の `sym_max` 欄と
-  同じ回に）
+  現物で 2026-09-05 に記入済み。上流 revision を機械可読に残す席は容器の
+  `provenance.upstreamRevision`（[container-v1](container-v1.md) §2.3）。埋めているのは sbv2 と minicpm5 の
+  recipe だけなので、irodori / siglip2 ほかは**再 export の回に埋める**（W-G4-4 の `sym_max` 欄と同じ回に）
 - 「semantic surface と実装済み subset の分離」方針の再裁定（attention / deform_conv2d /
   gather / conv_transpose1d / upsample_bilinear2d — 観測 subset を op 意味論にしない統一規約）
 
@@ -378,8 +426,8 @@ later の「decode 速度の残り」。
   「性能波 K-21 → H-15 は済」項と [perf-ledger](perf-ledger.md) の K-20 行。
 
 - **IR への値依存実行選択（MoE エキスパート動的常駐の前提）**（2026-08-31 裁定 — 入れない）。
-  エキスパート単位のロード/退避は ①`ShardValidator` 全件門 ②重み常駐の不変 Map ③IR v1 の
-  値依存実行選択なし、の 3 重衝突で、機能追加でなく 3 モジュール横断の再設計になる（実測記録 =
+  エキスパート単位のロード/退避は ①容器の合流層（`bindDeclarations` — krm の入口 `bindGraphs` もここへ委ねる。束縛表の
+  全件突合は `validateAgainstGraph`）が重みの取得前に全 initializer の束縛を突き合わせる全件門 ②重み常駐の不変 Map ③IR に値依存の実行選択が無い、の 3 重衝突で、機能追加でなく 3 モジュール横断の再設計になる（実測記録 =
   [research 2026-08-31](research/2026-08-31-freetoken-moe-over-arraybuffer.md)）。当面の公式
   スタンス = **MoE は全 expert VRAM 常駐・総パラメータで予算**（[limitations](limitations.md)）。
   「未着荷 initializer」席の新設も本項に従属して見送り（同裁定）。復活 = VRAM に乗らない MoE の

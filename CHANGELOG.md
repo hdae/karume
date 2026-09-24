@@ -19,7 +19,8 @@ measurements in `docs/research/`.
 
 - Karume container format (`krm` / `krg`, ADR 0108, stage 1): the runtime opens a container
   (`openContainer`), admits one of its graphs (`prepareContainer`) and builds a session from its
-  blocks (`createSessionFromContainer`) with per-block sha256 verification; `codecLayout` maps a
+  blocks (`createSessionFromContainer`), checking each block's sha256 when the source has not
+  already verified the whole file (ADR 0109); `codecLayout` maps a
   codec name to its decode path. The exporter gains `karume.container` (writer / reader, canonical
   JSON with ECMAScript number spelling) and `karume migrate` (old shards → `krm`). IR v2 replaces
   IR v1 (`docs/ir-v2.md`).
@@ -34,7 +35,8 @@ measurements in `docs/research/`.
   --manifest` converts a whole `karume/4` repository (including PLE and cross-repository references)
   and writes the `karume/5` manifest; `karume verify --container` checks a container from the CLI.
   `IRODORI_SOURCES["irodori-v4.1-small"]` now pins the `karume/5` re-upload of that repository; the
-  other pins still name `karume/4` revisions, which only the released packages can read until stage 3.
+  other pins still name `karume/4` revisions, which only the released packages can read until the release
+  re-uploads those repositories.
 - Karume container format, stage 3 (ADR 0108): the exporter writes `krm` directly (`publish_model` /
   `export_to_file` with `provenance` and `graph_name`; PLE tables and `rope_base` become container
   assets), `karume dist` bakes a `karume/5` repository from container series,
@@ -52,7 +54,8 @@ measurements in `docs/research/`.
   self-financing gate that falls back to plain decode in contexts where speculation loses.
 - Range reads for assets: `openAsset` and `AssetRangeReader` in hub, a directory adapter that
   reads at an offset, `parseSafetensorsHeader` / `safetensorsHeaderLength` on the runtime surface,
-  and Hugging Face range reads through fetch-cache 0.8.0.
+  and range reads over Hugging Face files once fetch-cache 0.8.0 has fetched and verified them whole
+  (no HTTP Range requests).
 - `Session.enqueueRead` reads graph outputs back at the batch's terminal fence; PLE can be kept
   resident on the GPU as an opt-in, with `per_layer_inputs` gathered on device.
 - Chat CLI examples for MiniCPM5 and Qwen3, and a headless-Chrome benchmark page that compares
@@ -136,8 +139,6 @@ measurements in `docs/research/`.
   `storage.dtype` / `storage.scale` fields are gone; `ReadyInitializer` carries bytes instead of
   safetensors views, and capability diagnostics say `非対応 格納 '<layout>'`. Shared initializers
   are named after the lender's initializer.
-- **Breaking:** the PLE read surface is a handle (`openPleShard`); decode reads the rows it needs
-  instead of the whole shard.
 - **Breaking:** hub reads manifest `karume/5` only (no `karume/4`); `resolveFiles` / `ResolvedFiles` /
   `WeightFiles` are replaced by `resolveSelection` / `ResolvedSelection` / `WeightContainer`, the
   `<weights>[i]` fetch-key convention and the 256 MiB shard limit are gone, and `fetchAssets` takes a
@@ -145,9 +146,9 @@ measurements in `docs/research/`.
   packages; this main reads only repositories re-uploaded in the container format.
 - **Breaking:** `from*Assets` take containers instead of safetensors — a component key maps to a
   single-form `krm` (`transformer`) or to its parts (`transformer[0]`, `transformer[1]`, …).
-  `Gemma4Assets` loses `pleIndex` / `openPleShard` (the PLE lives in the `model` container) and the
-  `Gemma4PleShardSource` / `Gemma4PleReadOptions` types are gone; the default PLE resident budget is
-  now two blocks (about 64 MiB) instead of two shards.
+  Gemma's PLE lives in the `model` container: `Gemma4Assets` loses `pleIndex` / `readPleShard`, decode
+  reads only the PLE rows it needs instead of whole sidecar shards, and the default PLE resident budget
+  is now two blocks (about 64 MiB) instead of two shards.
 - **Breaking:** container descriptors declare `assets[].length` (payload bytes; the block length is
   that rounded up to 4) — containers written by the stage-1 writer must be rewritten; `BlockSource`
   gains a required `verified` flag and `DescriptorExpectation.sha256` is a plain string.
