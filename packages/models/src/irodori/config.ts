@@ -71,11 +71,11 @@ export const IRODORI_PIPELINE_MAJOR = 1;
 export const IRODORI_SOURCES = {
   "irodori-v4-small": {
     repo: "hdae/karume-irodori-v4-small",
-    revision: "f65e4b7b7ccb8d6342733b1f4ab0d83e9557e456",
+    revision: "5581655045153f4bceb1d054fe23db78b019dd1f",
   },
   "irodori-v4.1-small": {
     repo: "hdae/karume-irodori-v4.1-small",
-    revision: "2856d43dd5688e2c58e6d68d5994f9c2ce115025",
+    revision: "fb5a627965b1d1c18edc85631151b67d658c316c",
   },
 } as const satisfies Record<string, HubRepoRef>;
 

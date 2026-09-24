@@ -61,7 +61,7 @@ export const SBV2_PIPELINE_MAJOR = 1;
 export const SBV2_SOURCES = {
   "sbv2-jvnv": {
     repo: "hdae/karume-sbv2-jvnv",
-    revision: "4578c3edb2050bcd1a3d183ca6ac9e4287478546",
+    revision: "101becff45856a0ad477457b54d1c927ca4d5d08",
   },
 } as const satisfies Record<string, HubRepoRef>;
 

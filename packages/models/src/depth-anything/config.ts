@@ -85,7 +85,7 @@ export const DEPTH_ANYTHING_PIPELINE_MAJOR = 1;
 export const DEPTH_ANYTHING_SOURCES = {
   "depth-anything-v2": {
     repo: "hdae/karume-depth-anything-v2",
-    revision: "70c8138f328311b3f145b695e34399ca42649b01",
+    revision: "b3969c2e64dba345a4ec996231abd642c06a8efd",
   },
 } as const satisfies Record<string, HubRepoRef>;
 

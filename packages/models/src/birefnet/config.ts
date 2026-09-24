@@ -83,11 +83,11 @@ export const BIREFNET_PIPELINE_MAJOR = 1;
 export const BIREFNET_SOURCES = {
   "birefnet-hr": {
     repo: "hdae/karume-birefnet-hr",
-    revision: "e3fbcb5d6e44a499f07524525fc34d21fda88ef8",
+    revision: "b470ac9ab676d18356f666da10fae15d2f5351ad",
   },
   "lucida": {
     repo: "hdae/karume-lucida",
-    revision: "191b1da194d02e8fd794b70b43df6e08e34e15c5",
+    revision: "779ee5afcb946d7c147bf63414e81037873d2306",
   },
 } as const satisfies Record<string, HubRepoRef>;
 
