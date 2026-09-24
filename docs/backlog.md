@@ -198,13 +198,6 @@ later の「decode 速度の残り」。
   `GpuContext.createResident` の確保は errorScope 頼みのまま（run 時 transient は計画時の
   preflight で確保前に落ちる）/ `fromAssets` の位置づけ / large asset の
   reference-first 一般則。
-- **exporter core の `karume/__init__` が torch を eager import する**: `karume.dist` / `karume.modelcard`
-  だけを使う配布・カード層（recipes の dist ドライバ）でも `import dist` で torch が丸ごと読まれる
-  （2026-09-04 実測 — recipes 側は torch 非依存の `measurements.py` へ寄せ済み）。`__init__` の
-  re-export を遅延化するか、`karume.dist` / `karume.modelcard` を本体から独立に import できる形にする
-  （PyPI `karume` の公開面の設計判断 — ADR 0065 の境界）。
-- **examples/ の README 整備**: 残るのは anima / irodori / sbv2 / vowel-detector の 4 ファミリ
-  （リポ直下 / models / exporter と同じく英語 — CLAUDE.md）。
 
 **decode 速度の残り**（H-27 段 ② / 小物 K-48・K-49・K-50 / K-46）は later の同名項が正本。
 
@@ -236,45 +229,32 @@ later の「decode 速度の残り」。
   全量読み（取得の粒度）に移った。条件は形式上成り立ったまま（[研究記録](research/2026-09-24-part-length-ram-peak.md)
   の 7・ADR 0108 追記 5）。当たるのは Deno の HF 経由だけ。parked の「hub Range 並列 + prefetch」（断片化対策）とは
   動機が別。
-- **gemma4 の run 時間の伸びの帰属（起票 2026-09-24）**: 段 3e の M2 で gemma4 の run が +0.14〜+0.55 s 伸びた。
-  run の窓には重みの供給が入らないので、供給経路の遅れではない読み。原因は未切り分け（研究記録の 4 と
-  「残った問い」）。
-- **縮図に外部の正解を戻す（起票 2026-09-24 — ADR 0108 追記 4）**: 3 codec 混在 × piece 分割の合成モデル
-  （`packages/runtime/tests/gpu_memory_container_test.ts`）は、合流層と構築経路を共有する 2 経路（krm と
-  メモリ内容器）の一致しか見ていない。戻し方は 2 案。CPU 参照の連鎖（`decodeI4` / `decodeI8` +
-  `applyReferenceOp`）で期待値を立てるか、縮図の出力に環境別の sha256 参照行（ADR 0106）を足す。
+- **未検証の取得元（ローカル）で host PLE の行読みが block 全体の sha256 を毎回掛ける（起票 2026-09-24）**:
+  host PLE は行を読むたびに読み口を開き直すので、未検証の取得元では 1 行の読みが毎回 block 1 本ぶんの読みと
+  sha256 になる（1 run で 28 回 × 32 MiB）。段 3e の M2 で gemma4 の run が伸びた件はこれとメモリ確保の費用に
+  帰属済み（[研究記録](research/2026-09-24-prerelease-gpu-measurements.md) の 1）。直し方は、開いた容器が
+  検証済みの block を覚えて 2 回目以降を区間読みにする（検証済みキャッシュ）か、block の digest を 1 回にする形。
+  local のファイルが読みの間に差し替えられる形（TOCTOU）の扱いを ADR で決めるのが先。
 - **PLE のメモリ内容器のフェンス本数（起票 2026-09-24）**: GPU 常駐席の PLE は piece 1 本 = part 1 本で
   メモリ内容器へ渡すので、Session 構築のフェンスが piece の本数ぶん立つ
-  （`packages/runtime/src/format/container/memory.ts` の part 割り）。**推測**の見積りは、E2B の values 約 72 block
-  × フェンス 13.0 ms（ADR 0108 決定 9 の Arc B570 実測）で約 0.94 s。段 3e 後はホスト RAM が part 割りに依らない
-  ので、piece を束ねて増えるのは staging だけ。未実測。
-- **`pack_int2` / `unpack_int2` の置き場（起票 2026-09-24）**: `tools/exporter/src/karume/emit.py` の 2 関数は src に
-  呼び手が無く、テスト（`test_i2_storage.py`）だけが使う。i2 のバイト順の正本として src に残すか、テスト helper
-  へ移すかを決める。判断には ADR 0097 の意図（exporter が自前で i2 を詰める日が来るか）が要る。
-- **`parseSafetensors` の 2 引数形（`byteLength`）の置き場（起票 2026-09-24）**: 公開面
-  （`packages/runtime/mod.ts`）にあるが、器の使い回しが段 3d で退役してから本番の呼び手は 0 件で、
-  残るのは `packages/runtime/tests/format_safetensors_test.ts` の 2 引数形のケース（doc とテスト名は
-  「最大 shard 長の器を使い回す」前提のまま）。公開面から外す（Breaking）か、資産の読み手の口として
-  残して doc を現行にするかを決める。
-- **i4 の group scale の形の式が 2 箇所にある（起票 2026-09-24）**: 検査側（合流層
-  `packages/runtime/src/format/container/bind.ts` の scale block 長と group の刻み）と展開側
-  （`packages/runtime/src/format/i4.ts` の `groupScaleShape` → `decodeI4`）が同じ形を別々の式で求める。
-  段 3d までは検査側が `format/container.ts` で `groupScaleShape` を共有していた。1 本に戻すか、
-  両者の一致を fixture で固定するかを決める。
+  （`packages/runtime/src/format/container/memory.ts` の part 割り）。実測済み（QAT E2B / E4B —
+  [研究記録](research/2026-09-24-prerelease-gpu-measurements.md) の 2）: piece を part へ束ねると E2B でフェンスが
+  37 → 6 本になり、PLE 構築は約 −0.2 s・代償は構築時の VRAM +192 MiB。**束ねるかは利用者の裁定待ち**
+  （実装の規模は研究記録の 2 の結論）。
 - **container-v1 §6.2 の codec 台帳と実装のずれ（起票 2026-09-24）**: 仕様の台帳エントリは `decodeCpu` /
   `executableOps` / `wgsl` を持つが、実装の `CodecEntry`（`packages/runtime/src/format/container/codecs.ts`）は
   `layout` / `packing` / `scale` / `grouping` / `zeroPoint` だけで、圧縮のまま常駐できる op の判定は今も別々の
   述語（`packages/runtime/src/runtime/plan.ts`）。仕様を実装へ寄せるか、実装を台帳へ畳むかを決める。
-- **実重み golden 11 本の結果記録の包み（起票 2026-09-22）**: 各 e2e に同型の try / catch / record が
-  並ぶので、helpers 側に「ケース 1 件を記録付きで回す」薄い包みを置いて重複を消す（size S）。
+- **depth / birefnet の実資産 e2e が結果記録を包みの外で呼ぶ（起票 2026-09-24）**:
+  `packages/models/tests/e2e_depth_anything_real_test.ts` と `e2e_birefnet_real_test.ts` は catch で
+  `results.record` を直接呼ぶので、記録が I/O で落ちると元の検証例外が置き換わる（`runRecordedCase` /
+  `recordFailure` の形に揃えると防げる）。
 
 - **コード品質管理の波の残置（起票 2026-09-22 — 出典は
   [退避した消化済み節](research/2026-09-22-backlog-archive-0.5.0-to-0.12.0.md)〈0.12.0 リリース後〉の同波）**:
   - `Gemma4PipelineOptions` を引数に取る 4 本（`assertSpeculative` / `resolveGemma4PleResidency` /
     `buildGemma4Program` / `speculativeSetup`）の置き場（`pipeline-options.ts` の新設は 2026-09-21 裁定で後回し）。
-  - sbv2 の `staticInputDim` は方針が逆向きで共通層の対象外のまま。
   - Unicode 区間表の検査は文言が違い各 family に残っている（二分探索だけ `text/code-ranges.ts` へ寄せた）。
-  - `models/src/session/with-session.ts` の単体テストが無い。
   - `reference/ops.ts` と `ops/shapes.ts` の分割（info — 可変状態も循環も無く実害ゼロ）。
 
 - **decode 速度の残り（2026-09-20 に now から移動）**: H-27 段 ②（先行投入・ADR 0066 の opt-in 例外・greedy 限定・期待 Deno −5 / Chrome −2.2 ms）、
@@ -290,8 +270,6 @@ later の「decode 速度の残り」。
   attention / FFN → causal Conv3d VAE → scheduler と段寿命の順に検収する案。runtime 語彙と数値契約の判断が先。
   H3 は公開重みの規模・未公開の後段・ライセンス条件から構造調査に留める。
   [構成と容量試算](research/2026-09-10-codex-mtp-optimization.md#動画生成の事前調査-wan-と-minimax-h3)。
-- **examples/anima に `--sampler` ノブ（起票 2026-08-25）**: request 側 `sampler` 席
-  （ADR 0078）を CLI デモから振れるようにする小改修。
 - **anima 素版 i4 の品質改善（起票 2026-08-24 — 配布スキップ裁定の復活レバー）**: 残るのは
   turbo 側の i4 席で**未検証のまま残した可能性の一覧**（専用幾何・g16・校正量・もう 1 つの
   劣化機序 — いずれも「試してダメ」ではなく「試していない」）だけで、正本は
@@ -326,13 +304,6 @@ later の「decode 速度の残り」。
   **tokenizer〈Gemma SPM BPE + byte_fallback〉の実装と EG 資産 compile は生成 API 波の段 1a に
   同乗済み**（2026-08-31 裁定 9 — ADR [0084](decisions/0084-gemma-tokenizer-chat.md) 決定 6。実装は
   共用・資産は別 compile）。batch>1 export の変換段の壁は [known-issues](known-issues.md)。
-- **w8a8 鏡像門の設置**: `e2e_deberta_w8a8_test.ts`（ADR
-  [0026](decisions/0026-w8a8-deberta-deployment.md) 決定 3 — `e2e_deberta_test.ts` は移植済み・
-  鏡像側だけ未設置。2026-08-16 裁定で起票）。
-- **Anima ホスト糊 parity の常設門化**: `sigmaSchedule` / `cfgEulerStep` / `denormalizeLatents` /
-  `padSequence` の「fixture と全 4 実装 bit 同一」は recipe README に実測記録として残るだけで、
-  `outputs/series/anima-pipeline*` を読む常設テストは Deno / pytest のどちらにも存在しない
-  （2026-08-16 判明 — fixture 4 変種は再エミット済みで前提は解消済み）。
 - **ORT Web 対比ベンチ慣行**（2026-08-16 ユーザー裁定）: 両対応モデルで定期測定し、
   遅すぎないか・ボトルネックはどこかを調査する。**gemma4 では慣行が先に立ち上がっている**
   （器は `tools/llm-speed/browser` = `deno task bench:llm-browser`・記録は
@@ -352,12 +323,6 @@ later の「decode 速度の残り」。
   （他 6 家族の `signal` は取得層へ透過するだけで段境界の検査は持たない）。**生成ループの席は
   LLM 面では実装済み**（ADR [0083](decisions/0083-generation-api-surface.md) 決定 5 —
   他家族への横展開は需要待ちのまま）。
-- **`AssetProgress.path` が越境参照を識別できない（起票 2026-08-25・優先度低）**: 進捗イベントの
-  `path` は文字列 1 本で、越境コンポーネント参照（ADR
-  [0038](decisions/0038-manifest-v1.md) §7 追記）が入った以上**別リポの同名 path と区別が
-  付かない**（取得層の同一性キーは `fileRefKey` へ移ったが、公開イベント側は `path` のまま）。
-  消費側がファイル別の進捗を path でキーにすると 2 本が混ざる。埋め方は `repo` / `revision` を
-  イベントへ足すか `fileRefKey` を出すか — 公開面の追加なので breaking 波に乗せる。
 - **anima 大解像度の省 RAM タイル逐次組み立て（起票 2026-08-24 裁定）**: VAE decode のタイルを
   貯めずに順次合成できれば、ピーク RAM が下がる（`decodeTiled` は今も全枚数を配列に溜めてから
   合成する）。動機だった 8 解像度の受理復帰は ADR
@@ -410,9 +375,6 @@ later の「decode 速度の残り」。
 - **vowel-detector の初回公開の前提（起票 2026-09-24）**: recipe は上流の `feature_config.json` を
   `inputs/vowel-detector/` 直下から読む。この開発機は上流リポを丸ごと置いた形なので、組み立ての前に
   `cp inputs/vowel-detector/assets/feature_config.json inputs/vowel-detector/` を 1 回打つ。
-- **`tools/llm-baseline` の lint の門（起票 2026-09-24）**: pyproject も CI ジョブも無く、README の手動の
-  `uvx ruff check` / `ruff format --check` だけが頼り（2026-09-24 時点で ruff check は赤）。exporter /
-  export-recipes と同じ設定で CI に載せるか、export-recipes の workspace メンバーへ寄せるかを決める。
 - 実資産 CI gate（GitHub CI はローカル資産を踏まない問題）。**門番は消化済み**
   （`packages/runtime/tests/assets_gate_test.ts` + CI env `KARUME_ALLOW_NO_ASSETS=1` —
   2026-09-05）。残るのは golden の fixture 昇格 / release gate での資産取得の判断

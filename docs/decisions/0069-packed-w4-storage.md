@@ -334,3 +334,9 @@ w4 横展開 + 量子化方式スクリーニング波（backlog now 節）に�
 3. **スコープ**: この裁定は SBV2 net_g（RTN・全役割）のもの。anima の g 軸（別 research
    §8-5）へは一般化しない — J-4 と同時に裁く。測定リグの g 引数化（`--w4-group-size`・
    `e813b8c`）は資産として残る。
+
+## 追記 10（2026-09-24・scale 形の式の置き場）
+
+- 追記 7 の 2 が指す runtime の `format/i4.groupScaleShape` は `format/container/codecs.ts` の
+  `groupScaleShape`（引数に `rowAxis` が増えた）へ移り、合流層・常駐プランナ・容器から Session 構築へ渡す
+  scale 形・CPU 展開 `decodeI4` の全てがこの 1 本から形を導く（`e034a136`）。

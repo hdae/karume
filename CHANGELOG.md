@@ -85,6 +85,34 @@ measurements in `docs/research/`.
   accepted as given, exported from the barrel and from every pipeline subpath, so a host that
   loads several families tells a 400 from a 500 with a single `instanceof` instead of reading
   message strings. `Sbv2InputError` and `GenerationCapacityError` are now subclasses of it.
+- `ANIMA_SAMPLER_TYPES` in `@karume/models` (barrel and `./anima`): the frozen list of values
+  `AnimaGenerateRequest.sampler` accepts; `AnimaSamplerType` is now derived from it (same union).
+- hub's `AssetProgress` carries the file's origin as optional `repo` / `revision` (the declared
+  cross-repository target, or the session's repository and resolved SHA), so per-file progress can
+  tell apart same-path files from different repositories; the aggregated progress stream in
+  `@karume/models` keys files by (repo, revision, path) instead of `path` alone.
+- English READMEs for the Anima, Irodori, SBV2 and vowel-detector example CLIs
+  (`examples/<family>/README.md`: sources, options, output files and constraints), and a
+  `--sampler <euler|dpmpp-2m>` option for `examples/anima`; the output file name carries the
+  sampler when it is given, so sampler A/B runs no longer overwrite each other.
+- Distribution legal files: re-baked Irodori repositories (`karume-irodori-v4-small` /
+  `karume-irodori-v4.1-small`) ship `LICENSE.md` (MIT) and `NOTICE.md`, and `karume-sbv2-jvnv` ships
+  `LICENSE.md` (CC BY-SA 4.0) and `NOTICE.md`. The export recipes split SBV2 into two pipelines by
+  voice family: `--pipeline sbv2` (JVNV, with the attribution files) and `--pipeline sbv2-fn` (FN).
+- The DeBERTa w8a8 mirror gate (`packages/runtime/tests/e2e_deberta_w8a8_test.ts`, ADR 0026
+  decision 3): runs `linearCompute: "a8"` against the torch act-quant mirror goldens
+  (`io-i8a8.<case>`) with a strict tolerance on output.0/1, a collapse ceiling on the deeper layers,
+  and a pipeline-key census (192 i8a8 linears / 192 `quantize_rows` / no other linear kernel).
+- More test gates: the mixed-codec miniature model (i4 group-scale linear → f16 add → i8
+  per-channel linear, piece-split) in `gpu_memory_container_test.ts` is again checked against an
+  independent CPU reference (codec decode + reference ops), not only krm vs in-memory container
+  agreement, and a miswired-scale reference is asserted to fail; the Anima host glue
+  (`sigmaSchedule` / `cfgEulerStep` / `denormalizeLatents` / `padSequence`) is checked bit for bit
+  against all four `pipeline_ref.py` reference fixtures (`anima_host_glue_parity_test.ts`; skipped
+  with a reason when the fixtures are absent); GPU tests pin the models-internal `withSession` scope
+  (dispose on success and failure, observe ordering, pass-through of results and errors); CI lints
+  and format-checks `tools/llm-baseline` with the export-recipes ruff settings, and `pack_int2` /
+  `unpack_int2` are documented as the canonical i2 byte order (ADR 0097).
 
 ### Changed
 
@@ -109,6 +137,14 @@ measurements in `docs/research/`.
 - Golden tolerances are two-tier: outputs are checked against Karume's own bound first and,
   where a WGSL accuracy bound is declared for that output, against the specification bound;
   exceeding only the first is recorded in `results.json` rather than failed.
+- `karume` (PyPI) no longer imports torch at package import: the public names in `karume.__all__`
+  resolve lazily on first access (PEP 562), so torch-free modules such as `karume.dist`,
+  `karume.modelcard` and `karume.container` import in ~0.15 s instead of ~1.8 s. `__all__` and what
+  each name resolves to are unchanged.
+- `karume dist` takes the repository name in the model card's Usage example from the pipeline's
+  declaration instead of deriving it from the `--out` directory name. The new `--repo OWNER/NAME`
+  overrides the declaration (and then requires `--out`); when the models being bundled declare
+  different names (e.g. the four JVNV voices of `karume-sbv2-jvnv`), `--repo` is required.
 
 ### Fixed
 
@@ -130,6 +166,10 @@ measurements in `docs/research/`.
   error scopes are still settling.
 - The runtime README's minimal example tears the device down through `gpu.destroy()` (calling
   `device.destroy()` directly fires `onDeviceLost` as an unexpected loss).
+- An i4 weight whose rows are zero-length (e.g. `[R, 0]`) now expands on the CPU path instead of
+  failing with a scale-shape mismatch: the companion-scale shape `[shape[rowAxis], rowLength /
+  groupSize]` comes from a single function shared by the container binder, the residency planner,
+  the container-to-session path and `decodeI4`.
 
 ### Breaking
 
@@ -182,6 +222,10 @@ measurements in `docs/research/`.
   the manifest `weights` key — `karume dist` refuses otherwise), `WeightFiles.extras` is gone, the
   Gemma 4 QAT `reference.json` is schema 3 (`pleBlocks`), and `tools/llm-speed` profiles
   distributions only.
+- **Breaking:** `parseSafetensors` no longer takes a second `byteLength` argument; the whole
+  `ArrayBuffer` is treated as the file, so trailing bytes past the data section are rejected as
+  unused space. Callers that read a file into a larger reusable buffer must pass a tight
+  `ArrayBuffer` (e.g. `buffer.slice(0, length)`) or use `parseSafetensorsHeader(prefix, fileLength)`.
 
 ## [0.12.0] - 2026-09-06
 

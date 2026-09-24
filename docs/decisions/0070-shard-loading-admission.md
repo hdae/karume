@@ -324,3 +324,6 @@ Gemmaの温度0decodeは補助selectorと常駐入出力をこの欄へ載せ、
   決定 3 のフェンスが律するのは staging だけである（決定 3 内の同日の追記）。
 - **決定 1 の co-shard MUST（weight と companion scale は同一 shard）は、container-v1 §5 の規則③
   （companion scale の block は実体と同一 part・piece 列なら piece 1 と同一 part）へ移った**。
+- **2026-09-02 追記の「`parseSafetensors` はファイル長を別に受け、末尾未使用領域の検査をその長さで行う」は旧い**。
+  2 引数形（`byteLength`）は `80c4cd74` で公開面から外れ、今の `parseSafetensors` は渡された `ArrayBuffer`
+  全体をファイルとして読む（データ区間の後ろの余りは未使用領域として拒否する）。

@@ -116,9 +116,12 @@ byte-for-byte by `packages/models/tests/sbv2_rel_pos_parity_test.ts`.
 On the Deno side: the real-weight DeBERTa E2E is `packages/runtime/tests/e2e_deberta_test.ts`
 (ported 2026-08-16 — 3 variants × 4 cases against the regular `io.<case>` series, with per-variant
 measured tolerances and the storage-declaration check that catches a series-root mix-up). The
-`io-i8a8.<case>` mirror series still has no consumer: `e2e_deberta_w8a8_test.ts` (ADR 0026
-decision 3) remains unported, so the mirror is only guarded against leaking into the regular
-enumeration.
+`io-i8a8.<case>` mirror series is read by `packages/runtime/tests/e2e_deberta_w8a8_test.ts` (ADR 0026
+decision 3, `full-24layer` only): it runs `linearCompute: "a8"` against the mirror with a strict
+tolerance on output.0/1, a collapse ceiling on the deeper layers, and a pipeline-key census (every
+linear runs as an i8a8 GEMM plus `quantize_rows`). Its tolerances start from the historical values
+below and have not been re-derived from new measurements yet (every run records each output's
+maxAbs in `results.json` for that).
 
 The `io-i8a8.<case>` files written by `--act-quant` are the **w8a8** (`linearCompute: "a8"`)
 mirror. The regular `io.<case>` MUST be taken **without the hook** (taking it with the hook still
@@ -126,8 +129,8 @@ applied would contaminate the w8-side E2E expectations with activation quantizat
 kept apart from `io.` so that a Deno-side enumeration of regular cases (startsWith `io.`) does not
 pick up the mirror.
 
-Historical measurement (from the pre-migration numerical E2E, kept here only as background for
-whoever ports the gate back): the w8 tolerance was a dedicated value matched to the error
+Historical measurement (from the pre-migration numerical E2E, kept here as background for both
+gates' tolerances): the w8 tolerance was a dedicated value matched to the error
 accumulation of 24 layers and separate from the tiny goldens' `GOLDEN_TOLERANCE`, with **the f32 and
 i8 series running through the same structure and the tolerance alone derived from measurements per
 series** (no reuse across series); the w8a8 mirror was **not a numerical parity net** (activation

@@ -807,7 +807,8 @@ manifest の形は ADR [0109](0109-manifest-v5-container.md)、PLE は ADR [0085
     sha256 参照行（ADR 0106）は段 3 の間 1 行も書き換えていない（最終変更 `689157c7`・2026-09-20）ので、
     行がある環境では新しい経路が旧経路で焼いた出力とビット同一であることを押さえている（anima /
     irodori / sbv2）。3 codec 混在 × piece 分割の縮図には外部の正解が無く、これを戻す作業は
-    [backlog](../backlog.md) の later に置く。
+    [backlog](../backlog.md) の later に置く。2026-09-24: `bafe1316` で縮図に CPU 参照の連鎖
+    （`decodeI4` / `decodeF16` / `decodeI8` + `applyReferenceOp`）を外部の正解として戻した。
 11. **検収②は成立**（3c・`dcd6fb1c`）。`packages/runtime/tests/distribution_gate_test.ts` は `karume.json` を
     hub のパーサで読み、`karume/5` を名指しで断言し、既定の model / quant が選ぶ全容器の part の実在と長さを
     宣言と突き合わせる（越境参照の part はローカルミラーに実体が無いので対象外）。`assets_gate_test.ts` は manifest を持たない系列について、容器を part 列として開き

@@ -588,8 +588,9 @@ rowLength  = numel / shape[rowAxis]
   `quantize.py:312`（`DEFAULT_GROUP_SIZE`）、scale = `clamp(amax / 7, f32 tiny)` は
   `quantize.py:397`、`q = round(w/scale).clamp(−7, 7)` は `quantize.py:413`、pack 順の正本
   `tools/exporter/src/karume/emit.py:313-332`（`pack_int4`）、offset 定数 `emit.py:113-116`
-  （`INT4_OFFSET = 8`）、group scale 形 `packages/runtime/src/format/i4.ts:44-50`、CPU 展開
-  `i4.ts:63-118`。
+  （`INT4_OFFSET = 8`）、group scale 形 `packages/runtime/src/format/container/codecs.ts` の
+  `groupScaleShape`（合流層・常駐プランナ・構築・CPU 展開が共有する 1 本）、CPU 展開
+  `packages/runtime/src/format/i4.ts` の `decodeI4`。
 - `int2-off`: 形の条件 `packages/runtime/src/format/i2.ts:7-10`、CPU 展開 `i2.ts:40-41`、pack
   `emit.py:286-296`（`pack_int2` — 値域 `[-2,1]` 外を拒否）、scale は F32 の `[N,1]`・group 不可（ADR 0097
   追記 1）。
