@@ -30,6 +30,12 @@ ADR [0108](decisions/0108-container-format.md) の具体化。`krm`（モデル�
   seek / scan の分岐）④§12 に移行 CLI のリポ丸ごとモード（`karume/5` を書く）⑤§2.2 の `assets` に
   `length`（payload の論理長・block 長はその 4 の倍数への切り上げ MUST）を足し、PLE の役割名を実装の
   `ple-values` / `ple-scales` / `ple-index` に揃える。
+- v1 訂正 3（2026-09-24・段 3 の実装 — ADR 0108 追記 4 / 5・ADR 0109 追記 1）: ①§2.1 に**グラフ名の
+  規則**（容器のグラフ名 = 部品名 = `weights` のキー MUST）②§4.2 の part 長の既定は 256 MiB のまま・
+  §4.1 の block 上限の見直しは段 6 へ ③§11 の RAM の数え方を 3 項（呼び手の持ち物・処理中の item・
+  取得の保持）にし、持ち越し scale の写しを足す・フェンスは part ごと 1 回で staging だけを律する
+  ④§12 を現行の CLI 面へ（2 モード・`provenance.writer` は既定で書かない・`--part-bytes`・
+  `--cross-repo`）⑤削除済みの実装への参照を現行の置き場へ。
 
 ## 0. 記法と共通規則
 
@@ -110,6 +116,21 @@ descriptor を**グラフ記述**と**モデル記述**の 2 文書に割る理�
 | `const.length`          | u64      | 必須 | const 領域のバイト長（§3）。const が無いときは `0`                                                         |
 | `const.blocks`          | 配列     | 必須 | const block の目次（§3）。const が無いときは空配列                                                         |
 | `const.constants`       | 配列     | 必須 | const block を initializer へ結ぶ**束縛表**（§3）。const が無いときは空配列                                |
+
+**グラフ名の規則**（配布形を書く経路すべてに掛かる — export の一本道・`karume dist`・`karume migrate`）:
+
+- **容器のグラフ名 = 配布形の部品名 = `karume.json` の `weights` のキー** MUST。ランタイムはグラフを
+  名前で引く（`prepareContainer(opened, <weights のキー>)`）ので、綴りが割れた容器は manifest ごと据わり、
+  利用者の `createSession` で初めて「コンテナにグラフが無い」で落ちる（理由の記録は ADR
+  [0109](decisions/0109-manifest-v5-container.md) 追記 1）。
+- **置き場のディレクトリ名は規則ではない**。部品名と一致しないことがある（系列直下に容器を置く family
+  ではディレクトリ名が系列名になる — siglip2 のキーは `vision`。irodori の `caption-proj` ディレクトリの
+  キーは `caption_proj`）。書き手は部品名を定数で名乗り、ディレクトリから導かない（export の一本道
+  `karume.pipeline` は `graph_name` を必須にして既定を持たない）。
+- 検査は 2 箇所: `karume dist` が組み立ての前に、現物の容器のグラフ名の集合がその席の `weights` の
+  キーと一致することを見る（`tools/exporter/src/karume/dist.py` — 食い違いは `DistError`）。models の
+  合流（`packages/models/src/hub/components.ts`）は `weights` のキーでグラフを引き、無ければ
+  `prepareContainer` が在るグラフを列挙して落ちる。
 
 `const.blocks[]` の要素:
 
@@ -308,13 +329,14 @@ block 上限を 32 MiB **以下**とする根拠は 3 点である（CPU 試作 
 - 並行 digest は効く（16 MiB × 16 を `Promise.all` で **3,702 MiB/s** = 69.2 ms。逐次 16 MiB の
   2.07 倍・256 MiB 一括の 4.0 倍）。一括 digest ではこれが取れない。
 - ブラウザは未測。Chrome は digest の入力を Blink 内部へ全量コピーする
-  （`packages/hub/src/fetch.ts:68-70` の記録）ので、block 化はブラウザでこそ効くはずである
+  （`packages/hub/src/fetch.ts:66` の記録）ので、block 化はブラウザでこそ効くはずである
   （**推測** — コピー量が block 長で頭打ちになる）。
 
 **将来の見直し（上限を 16 MiB へ下げる）**: サイズを交互に回した実測では 16 MiB = 1,784 MiB/s に
 対し 32 MiB = 938 MiB/s で、速さだけを見れば 16 MiB が有利である。下げるときの副作用は 2 つ —
 ①**const の上限が先に壊れる**（birefnet の 29.3 MB が入らなくなり、§3 の未決 3 案のどれかが要る）
-②**block 件数と descriptor が倍に膨らむ**。切り替えは定数 1 つなので、段 3 の RAM ピーク実測まで
+②**block 件数と descriptor が倍に膨らむ**。切り替えは定数 1 つである。段 3 の RAM ピーク実測は
+part 長だけを測り、block 上限は測らなかったので、見直しは段 6（新 bit 幅・Range 取得の回）へ
 持ち越す。
 
 **撤回した根拠**: 草案は「32 MiB ちょうどまで 1,865 MiB/s・33 MiB から 948 MiB/s と半減する」
@@ -343,21 +365,23 @@ block 上限を 32 MiB **以下**とする根拠は 3 点である（CPU 試作 
 - **part 長は書き手が選ぶ**: `{256, 512, 768, 1024} MiB` のいずれか（既定 **256 MiB**）。
   part 0 / 1 は実長で、この集合の制約を受けない（ただし §10 の「part 長の天井」には従う）。
   なお **part 0 はモデル記述の `parts` に載らない**（自己参照になるため — §2.2）。
-- **区間読みを要する資産は専用 part に単独で置く** MUST。今日の PLE sidecar がこれに当たる
-  （1 token あたり値 8,960 B + scale 140 B = 9,100 B を 2 回に分けて読む —
-  `packages/models/src/gemma/ple-shard.ts:320-337`）。取得元によっては区間読みが scan
+- **区間読みを要する資産は専用 part に単独で置く** MUST（1 block = 1 part）。PLE の `ple-values` /
+  `ple-scales` の block 列がこれに当たる（1 token あたり値 8,960 B + scale 140 B = 9,100 B を 2 回に
+  分けて読む — ADR 0109 決定 4・ADR 0108 追記 3 の 2）。取得元によっては区間読みが scan
   （offset 比例・Deno の既定経路）なので、同居させると「part 先頭からの走査」になって
   区間読みの利点が消える。
 - manifest と descriptor の**両方**が各 part の長さを宣言する。読み手は 1 バイトも取る前に
-  宿主 RAM を見積れる（ADR 0089 の流儀）。
-- **exporter の既定を 256 から動かすのは段 3 の検収後**（段 1 / 2 は取得単位がまだ part なので、
-  1024 MiB を選ぶとピークが +768 MiB 乗る）。段 2 の取得面は ADR 0109 決定 7 — 区間読みが seek 型の
-  取得元（ブラウザの Blob・ローカルの区間読み）は block ごとに読み、scan 型（Deno の既定）は part を
-  1 度に読んで block に切る。
-- part 件数 ≤ 1024（現行 `MAX_SHARDS` を継承 — `packages/hub/src/manifest.ts:57` /
-  `tools/exporter/src/karume/shards.py:108`）。
+  宿主 RAM を見積れる（ADR 0089 の流儀 — 取得元の型で閉じ方が違う点は §11）。
+- **既定は 256 MiB**（ADR 0108 追記 5 の 1 — 段 3e の実測）。seek 型の取得元（ブラウザの Blob・
+  ローカルの区間読み）は block ごとに読むので、ホスト RAM のピークは part 長に依らない。scan 型
+  （HF 経由 — 取得層の戦略 stream）は part を 1 度に読んで block に切り、hub の保持枠が part を握るので、ピークが
+  おおむね part 長とともに伸びる。既定を上げて得るのは part 本数だけで、区間読みの資産は専用 part
+  なので本数もほとんど減らない。取得面は ADR 0109 決定 7。
+- part 件数 ≤ 1024（旧 `MAX_SHARDS` の値を継承 — 定数は `MAX_PARTS`: Python 正本
+  `tools/exporter/src/karume/container.py`・hub `packages/hub/src/manifest.ts`・runtime
+  `packages/runtime/src/format/container/limits.ts`）。
 
-**旧 `SHARD_BYTE_LIMIT` = 256 MiB**（`shards.py:92` / `manifest.ts:84`）の根拠 3 点の行き先:
+**旧 `SHARD_BYTE_LIMIT` = 256 MiB**（旧 shard 配布形の shard 長の上限）の根拠 3 点の行き先:
 
 | #  | 旧根拠                                                             | 行き先                                                                |
 | -- | ------------------------------------------------------------------ | --------------------------------------------------------------------- |
@@ -404,8 +428,8 @@ block 上限を 32 MiB **以下**とする根拠は 3 点である（CPU 試作 
     倍数でないもの（bool 表・奇数長の f16 など）は**詰め物込みで宣言し**、**消費側は宣言 shape
     から論理長を導く**（block 長を論理長として使わない）。
   - **詰め物を掛けてよいのは、丸ごと 1 本の block と piece 列の末尾だけ**である。**中間 piece に
-    掛けてはならない**（掛けると次の piece の先頭を潰す — `session-build.ts:816-819` が今そう
-    書いている）。したがって**中間 piece のバイト長は元から 4 の倍数 MUST** で、書き手は行の
+    掛けてはならない**（掛けると次の piece の先頭を潰す — `session-build.ts` の `tailAligned` の注記が
+    そう書いている）。したがって**中間 piece のバイト長は元から 4 の倍数 MUST** で、書き手は行の
     刻みを `4/gcd(rowBytes, 4)` に丸めて切り、丸め切れないときは fail loudly。
 - **③ companion scale の block は実体と同一 part**。piece 列のときは **piece 1 と同一 part**。
   zero-point の block も同じ規則に従う。
@@ -451,8 +475,8 @@ block 上限を 32 MiB **以下**とする根拠は 3 点である（CPU 試作 
 （`bits = blockBytes · 8 / blockElements`）。`bits` を宣言に置くと非整数 bpw が表せず、payload
 バイト長も決まらない。
 
-**payload バイト長の算出**（現行の `numel × bits / 8` 厳密一致
-（`packages/runtime/src/format/safetensors.ts:139-152`）の一般化）:
+**payload バイト長の算出**（旧配布形の `numel × bits / 8` 厳密一致の一般化 — 実装は
+`packages/runtime/src/format/container/codecs.ts` の `payloadBytes`）:
 
 ```text
 numel % blockElements == 0                   ← MUST
@@ -462,13 +486,13 @@ payloadBytes = numel / blockElements * blockBytes
 **`packing` は台帳の写しであり、読み手にとっては照合用である。** 読み手は宣言された
 `packing` が台帳エントリの値と**一致することを検査し、食い違えば fail loudly** にする
 （導出できる事実を独立に更新される欄として持つのではなく、cross-package 不変条件の突合点として
-置く — 現行 `manifest.ts:80` が `SHARD_BYTE_LIMIT` の綴りを Python 正本と突き合わせているのと
-同じ流儀）。これは「別の版の台帳で書かれた資産」を静かに受理しないための門である。
+置く — hub の `manifest.ts` が `MAX_PARTS` / `MAX_DESCRIPTOR_BYTES` を Python 正本（`container.py`）
+と同値に置き、突合点として名指ししているのと同じ流儀）。これは「別の版の台帳で書かれた資産」を静かに受理しないための門である。
 
-**`rowAxis` を宣言に出す**のがこの版の実質的な改善点である。今日、i8 の per-channel scale の
-チャネル軸は宣言に書かれておらず、**消費側 op から導いている**
-（`packages/runtime/src/runtime/plan.ts:411-435` の `weightChannelAxes`。消費 op が食い違うと
-`plan.ts:424-428` で落ちる）。`rowAxis` を宣言に出すと、**宣言だけで scale の意味が閉じる**。
+**`rowAxis` を宣言に出す**のがこの版の実質的な改善点である。IR v1 では、i8 の per-channel scale の
+チャネル軸は宣言に書かれておらず、**消費側 op から導いていた**
+（`packages/runtime/src/runtime/plan.ts` の `weightChannelAxes` — 今は宣言との突合として残り、消費 op が
+食い違うと落ちる — §13.2）。`rowAxis` を宣言に出すと、**宣言だけで scale の意味が閉じる**。
 
 **scale の形は rank 2 group 形に一本化する**:
 
@@ -482,7 +506,8 @@ rowLength  = numel / shape[rowAxis]
 一致する）。group codec（`int4-sym-g`）の `rowAxis` は **0** だけ（展開カーネルと `decodeI4` が
 先頭次元を行とする）。
 
-今日 i8 だけが使っている「重みと同 rank の keepdim broadcast 形」は廃止する。i8 の per-channel は
+旧配布形で i8 だけが使っていた「重みと同 rank の keepdim broadcast 形」は廃止した（読むのは移行 CLI
+だけ — §12）。i8 の per-channel は
 「行 = `rowAxis` の次元・group 長 = 行長」とみなすと `[shape[rowAxis], 1]` になり、i2 が既に
 採っている形（`[N,1]`）と同じものになるからである。
 
@@ -522,7 +547,7 @@ rowLength  = numel / shape[rowAxis]
 
 `decodeCpu` と `wgsl.unpackScalar` が**同じエントリに並ぶ**ことで、「pack 順の正本は 1 箇所」
 という現行の MUST（`packages/runtime/src/format/i4.ts:5-7`・
-`tools/exporter/src/karume/emit.py:392-400`）が構造として守られる。
+`tools/exporter/src/karume/emit.py:313-332` の `pack_int4`）が構造として守られる。
 
 ### 6.3 初版の codec 台帳（4 種）
 
@@ -562,14 +587,18 @@ rowLength  = numel / shape[rowAxis]
 - `int4-sym-g`: 値域 `quantize.py:307`（`INT4_MAX = 7`）、既定 group 長 32 は
   `quantize.py:312`（`DEFAULT_GROUP_SIZE`）、scale = `clamp(amax / 7, f32 tiny)` は
   `quantize.py:397`、`q = round(w/scale).clamp(−7, 7)` は `quantize.py:413`、pack 順の正本
-  `tools/exporter/src/karume/emit.py:392-412`（`pack_int4`）、offset 定数 `emit.py:152-154`
+  `tools/exporter/src/karume/emit.py:313-332`（`pack_int4`）、offset 定数 `emit.py:113-116`
   （`INT4_OFFSET = 8`）、group scale 形 `packages/runtime/src/format/i4.ts:44-50`、CPU 展開
   `i4.ts:63-118`。
 - `int2-off`: 形の条件 `packages/runtime/src/format/i2.ts:7-10`、CPU 展開 `i2.ts:40-41`、pack
-  `emit.py:365-376`（値域 `[-2,1]` 外を拒否）、scale は F32 の `[N,1]`・group 不可（ADR 0097
+  `emit.py:286-296`（`pack_int2` — 値域 `[-2,1]` 外を拒否）、scale は F32 の `[N,1]`・group 不可（ADR 0097
   追記 1）。
-- 宣言規則（scale 必須 / group_size の要否 / 値域）: `packages/runtime/src/format/ir.ts:296-345`、
-  i4 の行長整除は `ir.ts:685-720`。Python の鏡像は `tools/exporter/src/karume/verify.py:297-345`。
+- 宣言規則は 2 箇所に分かれる。scale / `groupSize` の有無は descriptor の読み手
+  `packages/runtime/src/format/container/descriptor.ts`（`parseEncoding`）と、入力形が違うメモリ内容器
+  `packages/runtime/src/format/container/memory.ts` が見る。`groupSize` の値域・行長の整除・i2 系の宣言
+  shape・scale 長は合流層 `packages/runtime/src/format/container/bind.ts`（`bindDeclarations`）が見る。
+  Python の鏡像は `tools/exporter/src/karume/verify.py` の `bind_graphs` で、その `_plan_supply` は有無も
+  見る。
 
 **`ternary` が別名の codec である理由**（値は `int2-off` と 1 つも違わないのに分ける理由）:
 
@@ -633,7 +662,7 @@ rowLength  = numel / shape[rowAxis]
 | 未検証の取得元（`fromContainer(bytes)`・ローカルディレクトリ） | **block ごとに一括 digest**（32 MiB 以下なので §4.1 の速い側に収まる）                 |
 
 `BlockSource` が「検証済み」を名乗り、`readBlock` は名乗らない取得元にだけ digest を掛ける。
-warm で digest を走らせないのは現行の規律の継承である（`packages/hub/src/fetch.ts:66-73` —
+warm で digest を走らせないのは現行の規律の継承である（`packages/hub/src/fetch.ts:71-72` —
 キャッシュヒットで GB 級の digest を起こさない）。**「0 回」は重みの block と資産の payload について**
 であり、上の手順 3（2 文書を期待値と突合してから parse する）は cold でも warm でも開くたびに掛かる
 （descriptor は 32 MiB 以下・実資産では数百 KB）。取得層の cold の part 全量の逐次 sha256 は純 TS 実装
@@ -723,10 +752,10 @@ krg = [ヘッダ'][グラフ記述（krm からのバイトコピー）][const �
 | block 件数（1 コンテナ）                  |                                 65,536 | const 目次とモデル目次の合計（**暫定値**）                                                                              |
 | part 長（part 2 以降）                    | `{256, 512, 768, 1024} MiB` のいずれか | §4.2                                                                                                                    |
 | part 長の天井（part 0 / 1 を含む全 part） |            1,073,741,824 B（1024 MiB） | part 2 以降の集合の最大値と同じ値を part 0 / 1 にも掛ける — 器の寸法を宣言から見積る式を 1 本に保つ                     |
-| part 件数                                 |                                   1024 | 現行 `MAX_SHARDS`（`manifest.ts:57` / `shards.py:108`）                                                                 |
+| part 件数                                 |                                   1024 | 旧 `MAX_SHARDS` の値を継承（`MAX_PARTS` — §4.2）                                                                        |
 | 1 FileRef のバイト数                      |                                 16 GiB | 現行 `MAX_FILE_BYTES`（`packages/hub/src/manifest.ts:51`）                                                              |
 | `graphs` の個数                           |                                     64 | 実資産の最大は sbv2 の 4 グラフ級（**暫定値**）                                                                         |
-| **`fromContainer(bytes)` の全量**         |                    **2,145,386,496 B** | Chromium の単一 ArrayBuffer 上限（実測として `packages/hub/src/fetch.ts:68-70` に記録）。**この口にだけ残る制限**       |
+| **`fromContainer(bytes)` の全量**         |                    **2,145,386,496 B** | Chromium の単一 ArrayBuffer 上限（実測として `packages/hub/src/fetch.ts:67` に記録）。**この口にだけ残る制限**          |
 
 **暫定値について**: `graphs` の個数 64・block 件数 65,536・descriptor の長さ 32 MiB は、実測
 （IR 最大 610,143 B / 本・重複除去 47 本で 9.0 MiB・sbv2 で 4 グラフ級）から**余裕を取って置いた
@@ -747,20 +776,45 @@ fail loudly** で止まる。
 - 重ね合わせは**本数と合計バイトの両方**で制限する（例: 「転送中 1 本 + 受信・検証中 1 本」）。
   本数だけで律速を決めると、ピークが「同時本数 × その時点で一番大きいファイル」で決まって
   しまう（実測: anima turbo i4 の先頭 4 本で計 2.503 GiB を同時前確保 —
-  `packages/hub/src/fetch.ts:64-70`）。
+  `packages/hub/src/fetch.ts:62-64`）。
 - **展開（decode）は別の処理単位にする**。1 bit → f32 は 32 倍・i2 → f32 は 16 倍に膨らむので、
   取得の重ね合わせと展開の重ね合わせを同じ予算で数えない。
 - 準備時に取るのは **part 0 だけ**。const（part 1）は要るときに取る。
-- **段 2 の取得単位は part**（ADR 0109 決定 7）: cold は取得層が part 全量を流して検証しキャッシュへ
-  落とし（ヒープに part は載らない）、区間読みは seek 型で block ごと・scan 型で part 1 度。Session
-  構築は item（block 1 本 + piece 1 なら同乗する scale の block）を 1 本読んでは上げて手放すので、
-  重みのホスト RAM の上限は seek 型で item 1 本ぶん = block 1 本 + 同乗 scale + 展開席ならその f32
-  展開結果（格納のビット幅に反比例 — i4 で block の 8 倍・i2 で 16 倍）、scan 型で hub の保持枠
-  1 本（part 長 — 切り出しは器の view で写しは乗らない）+ GC を待つ前の器 + 展開席の f32 展開結果。
-  GC を待つ器の本数は宣言からは閉じず、段 3e の実測では external 最大が最大 part の約 1.5〜4.4 本だった
-  （[研究記録](research/2026-09-24-part-length-ram-peak.md)）。HTTP Range は段 6。
-- 見積りは**宣言だけで閉じる**: `parts[].length` と `blocks[].length` から、1 バイトも取る前に
-  「最大同時ホスト RAM」を計算できる（ADR 0089 の流儀）。
+- **取得単位は part**（ADR 0109 決定 7 — HTTP Range は段 6）: cold は取得層が part 全量を流して検証し
+  キャッシュへ落とす（ヒープに part は載らない）。区間読みは seek 型の取得元（ブラウザの Blob・
+  ローカルの区間読み）で block ごと、scan 型（HF 経由 — 取得層の戦略 stream）で part を 1 度全量読んで block に切る。
+  scan 型の切り出しは hub の保持枠が握る part の器の view で、写しは乗らない
+  （`packages/hub/src/container.ts`）。
+- **Session 構築は item を 1 本読んでは上げて手放す**（`packages/runtime/src/runtime/session-build.ts`
+  の batch ループ）。item は block 1 本で、丸ごとの initializer と piece 1 は同乗する scale の block も
+  連れる。`queue.writeBuffer` は呼んだ時点でバイト列を写すので、item への参照はその反復で尽きる
+  （フェンスまで握らない — 下の「GPU 転送」）。
+
+**数え方**: Session 構築中の重み由来のホスト RAM を、次の 3 項の和で数える。staging（`writeBuffer` の
+溜め込み）は別の軸で、下の「GPU 転送」が律する。
+
+| 項               | seek 型                                                                                                                                                                                                     | scan 型                                                                                             |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| ① 呼び手の持ち物 | `krm` では 0。メモリ内容器（`openMemoryContainer`）では、呼び手が丸ごと供給で渡した `bytes` と companion scale（容器は複製せずに抱える）。`pieces` の `read()` が取得元を通るなら、③ はその取得元の型に従う | seek 型と同じ                                                                                       |
+| ② 処理中の item  | block 1 本 + 同乗 scale + 展開席ならその f32 展開結果（格納のビット幅に反比例 — i4 で block の 8 倍・i2 で 16 倍）+ 展開席の piece 列なら持ち越し scale の写し                                              | 展開席の f32 展開結果 + 持ち越し scale の写し（block と同乗 scale は ③ の器の view なので足さない） |
+| ③ 取得の保持     | 0（② の block が区間ぶんの tight view そのもの）                                                                                                                                                            | hub の保持枠 1 本（part 長）+ GC を待つ前の器                                                       |
+| 宣言から閉じるか | 閉じる                                                                                                                                                                                                      | 閉じない（③ の GC を待つ器の本数）                                                                  |
+
+- **持ち越し scale の写し**: 展開席（CPU で f32 へ展開して載せる席）の piece 列では、companion scale の
+  実体が piece 1 の part にしか無い（§5 の規則③）ので、piece 1 で scale 全量を値として写し、列の最後の
+  piece まで持ち越す（`session-build.ts` の `carriedScales`）。view のまま抱えると、scale の器
+  （seek 型なら scale の block・scan 型なら part の保持枠）が列の最後まで生き残るためである。その代わり
+  **piece 列の間だけ scale 全量が 1 本余分に生きる**。piece 1 の時点では同乗 scale の view と写しが
+  同時に生きる（scale が 2 本）。`krm` では scale も block 上限（32 MiB）の内側にある。圧縮席（packed の
+  まま常駐する席）は写しを取らない — scale は piece 1 でそのまま GPU へ書く。
+- 見積りが**宣言だけで閉じる**のは seek 型である: `parts[].length` と `blocks[].length` から、1 バイトも
+  取る前に「最大同時ホスト RAM」を計算できる（ADR 0089 の流儀）。scan 型は最大 part に GC を待つ器が
+  重なり、器の本数は宣言からは閉じない。宣言から出せるのは下限（保持枠 1 本 = 最大 part 長）までで、
+  段 3e の実測では external 最大が最大 part の約 1.5〜4.4 本だった
+  （[研究記録](research/2026-09-24-part-length-ram-peak.md)）。
+- 「part」はここで 2 つの意味を持つ（hub の part とメモリ内容器の part）。どちらもフェンスの単位で、
+  staging の上限を決める。配信粒度として効くのは hub の part だけで、RAM に効くのは scan 型の ③ である。
+  ホスト RAM のピークは part の割り方に依らない（staging の置き場は実装依存で、実測は wgpu / Deno だけ）。
 
 ### GPU 転送
 
@@ -769,8 +823,11 @@ fail loudly** で止まる。
   `queue.writeBuffer(buffer, dstOffset, …)` を block ごとに呼ぶ。
 - wgpu（Deno）の `writeBuffer` staging は **submit 完了まで解放されない**（実測: `createBuffer`
   2 GiB 後 2,311 MiB → `writeBuffer` 後 4,359 MiB → `queue.submit([])` + 完了待ちで 2,306 MiB —
-  `docs/research/2026-08-08-vram-oom-misreport.md:70-76`）。したがって現行の「空 submit +
-  `onSubmittedWorkDone`」（ADR 0070 決定 3）を **block 単位**で保つ。
+  `docs/research/2026-08-08-vram-oom-misreport.md:70-76`）。したがって「空 submit +
+  `onSubmittedWorkDone`」のフェンス（ADR 0070 決定 3）を **part ごとに 1 回**立てる。フェンスが律する
+  のは staging だけで、CPU 側のバイト列は `writeBuffer` が戻った時点で手放してよい（WebGPU 仕様 —
+  呼び出しの時点で写す。ADR 0108 決定 9 の追記・ADR 0070 決定 3 の追記。実機の固定は
+  `packages/runtime/tests/gpu_write_buffer_copy_test.ts`）。
 - **errorScope の粒度は block・フェンス（空 submit + `onSubmittedWorkDone`）の粒度は part**
   （ADR 0108 決定 9 の実測: push/pop は 1.81 µs / 回、フェンスは 13.0 ms / 回。pop だけ block
   ごとにしてフェンスを 256 MiB ごと 1 回にすると、現行相当より速い 0.77 倍）。
@@ -785,44 +842,61 @@ fail loudly** で止まる。
 だけを読み、**両読みは実装しない**。
 
 - **入力**: 旧単一形 safetensors / 旧 shard 列 / 旧 manifest（`karume/4`）。
-- **出力**: 新 `krm`（+ 必要なら共有 `krg`）と新 manifest（`karume/5`）。
+- **出力**: 新 `krm`（部品単位モードで `--graph` を渡したときは `krg` も）と、リポ丸ごとモードでは
+  新 manifest（`karume/5`）。
 - **旧入力は保持する**（CLI は入力を消さない・書き換えない）。
-- 実装は Python（exporter 側 — `repack.py` の「生バイトと IR を変えず詰め方だけ動かす」層を
-  流用する）。
-- **段 1 の CLI 面**（`karume migrate <代表 path | 旧単一形> --out <dir> --license <識別子>
-  [--graph] [--single]`）: コンポーネント（グラフ 1 本）単位で、manifest は読まないし書かない。
-  グラフ名の既定は親ディレクトリ名（= `karume.json` の weights のキー）。`--license` は必須（既定値で
-  出所を偽らない）。`provenance.writer` の既定は生成器タグ（`karume/<版>`）なので、不変条件 4
-  「決定的」は**同じ版のもとで**の主張である。
-- **段 2 のリポ丸ごとモード**（`karume migrate --manifest <karume.json> --out <dir> --license …`）: 旧
-  `karume/4` を読み、全 (モデル, 部品, dtype) を `krm` へ変換し、`assets` を写して `karume/5` の
-  `karume.json` を書く（ADR 0109 決定 8）。dist.py / recipe が `krm` を直接書くのは段 3。
+- 実装は Python（`tools/exporter/src/karume/migrate.py`）。旧形の読み取りは移行 CLI（`migrate.py` と
+  `legacy.py`）にだけ置く。`legacy.py` は safetensors の shard 列と piece キーを、`migrate.py` は旧
+  `karume/4` manifest と PLE sidecar / 索引を読む。書く → 読み直して検証 → 据え替えの 3 段は、export の一本道と**同じ 1 本**
+  （`karume.publish.publish_container`）を通る。移行 CLI が足すのは旧形の読み取りと、旧形にしか無い
+  前提（scale の形・テンソルの過不足・出力先が空であること）の検査だけである。
+- **両モード共通の指定**: `--out <dir>`、`--license <識別子>`（必須 — 既定値で出所を偽らない）、
+  `--notice <参照>` / `--upstream-revision <revision>`（`provenance` の省略可の欄 — §2.3）、
+  `--writer <識別>`、`--part-bytes {256,512,768,1024}`（part 長 MiB・既定 256 — §4.2。集合外は拒否）。
+- **`provenance.writer` は既定で書かない**（`--writer` を明示したときだけ容器に載る）。ツールの版を
+  持つのは `karume.json` の `generator` 欄 1 箇所である。容器に版を焼くと、移行した容器と recipe が
+  直接書いた容器のモデル記述が、版の分だけ永久に食い違う。
+- **部品単位モード**（`karume migrate <代表 path | 旧単一形>… --out <dir> --license <識別子>
+  [--graph-name <名前>] [--single] [--graph]`）: コンポーネント（グラフ 1 本）単位で、manifest は
+  読まないし書かない。代表 path の代わりに手元の現物（`…-00001-of-00002.safetensors`）を渡してもよい。
+  グラフ名の既定は親ディレクトリ名で、`--graph-name` で明示できる（位置引数が 1 本のときだけ）。
+  規則は §2.1 のとおり weights のキー MUST なので、親ディレクトリ名が部品名と違う置き場では
+  `--graph-name` で部品名を名乗る。`--single` は単一形の `krm` を書く（既定は分割形）。`--graph` は
+  `krg` も書く。shard 列は代表 path から組むので、ディレクトリを跨ぐ shard 列（sbv2 の `shared/front` /
+  `shared/voice` は shard 2 が話者ディレクトリに居る）は組み立てられない — リポ丸ごとモードを使う。
+- **リポ丸ごとモード**（`karume migrate --manifest <karume.json> --out <dir> --license <識別子>
+  [--cross-repo <owner/name>=<変換済みディレクトリ>@<40 桁 revision>]…`）: 旧 `karume/4` を読み、
+  全 (モデル, 部品, dtype) を `krm` へ変換し、`assets` を写して `karume/5` の `karume.json` を書く
+  （ADR 0109 決定 8）。shard 列を旧 manifest の宣言から組むので、ディレクトリを跨ぐ列もここで解ける。
+  グラフ名は `weights` のキーそのもの（§2.1）。越境参照の列は変換せず、`--cross-repo` が指す変換済み
+  ディレクトリの `karume/5` から `container` を引き写す。
+- **モード間で併用できない指定**（どれも fail loudly）: `--manifest` と位置引数。リポ丸ごとモードでの
+  `--graph-name` / `--graph`（グラフ名はキーが決め、`karume/5` は共有 `krg` の席を持たない — ADR 0109
+  決定 5）と `--single`（`container.parts` は part 0 + part 1 の 2 要素以上 MUST・HF の公式配布は分割形
+  だけ — ADR 0109 決定 3・§8）。部品単位モードでの `--cross-repo`。
 - 自己検査（不変条件 5）は **payload 部**で突き合わせる（block 全体の sha256 は詰め物を含むので
   新旧で一致しない）。出力は `.partial` へ書き、検査を通ってから据え替える（落ちた回は何も残さない）。
 - 旧 scale の**形**（keepdim / group 形）が `rowAxis` / `groupSize` から決まる形と一致することを焼く前に
   見る（正方の重みでは per-column の `[1,N]` と per-channel の `[N,1]` がバイト数で区別できない）。
-- 未対応: ディレクトリを跨ぐ shard 列（sbv2 の `shared/front` / `shared/voice` は shard 2 が話者
-  ディレクトリに居る）は代表 path からは組み立てられない — リポ丸ごとモードが旧 manifest から列を引く。
 
 不変条件:
 
 1. **生バイト同一**: 各 initializer の実体 / scale の **payload バイト列**（`numel × bits / 8`
-   バイトぶん）が 1 バイトも変わらない。`repack.py` の不変条件 ① を継承する。
+   バイトぶん）が 1 バイトも変わらない。
    - **末尾 padding は新たに焼かれる**（§4.1）ので、「生バイト同一」は payload について言う。
      block 全体（padding 込み）の sha256 は新旧で一致しない。
-2. **IR は v1 → v2 へ再 serialize する**。`repack.py` の不変条件 ②（`karume_ir` の逐語同一）は
-   **退役**する。
+2. **IR は v1 → v2 へ再 serialize する**（改名と正準直列化が入るので、IR の逐語同一は保証しない）。
 3. **codec は既存 3 種へ写像する**: `i8 → int8-sym` / `i4 → int4-sym-g` / `i2 → int2-off`。
    **`ternary` へは変換しない**（値域が部分集合でも、三値であるという主張は量子化器の側が
    するものである）。
 4. **決定的**: 同じ入力から**バイト同一の出力**が出る（part への詰め方・block の切り方・JSON の
    キー順がすべて入力から決まる）。
-5. **自己検査**: 変換後の `blocks[].sha256` と、旧 shard から取り出した実体の sha256 が
-   **initializer ごとに一致する**ことを CLI 自身が検査してから書き出す（書けたのに読めない
-   ものを作らない — `verify.assert_reader_layout` と同じ流儀）。
-6. **piece キーの綴りは消える**。旧 `<名前>#00002-of-00003`
-   （`packages/runtime/src/format/container.ts:168`）は `binding[].pieces[].rows` になる。
-   名前空間に物理配置が漏れなくなる。
+5. **自己検査**: 書いた容器を読み直し、block の **payload 部**の sha256 と、旧 shard から取り出した
+   実体の sha256 が **initializer ごとに一致する**ことを CLI 自身が検査してから据える（書けたのに
+   読めないものを作らない — `verify.assert_reader_layout` と同じ流儀）。
+6. **piece キーの綴りは消える**。旧 `<名前>#00002-of-00003` は `binding[].pieces[].rows` になる。
+   名前空間に物理配置が漏れなくなる。旧綴りを解釈するのは移行 CLI の旧形の読み取り（`legacy.py`）
+   だけである。
 
 ## 13. IR v2 の差分
 
@@ -877,16 +951,21 @@ session ノブ）と、同一 config の重み差し替え（fine-tune）から�
 外出しは**可逆**でなければならない。重み取得前に**グラフ + 選択済み binding を合流**し、
 合流後表現に対して:
 
-- 現行 `parseIrGraph` の storage 規則一式（`packages/runtime/src/format/ir.ts:296-345, 685-720`）
-  — 量子化 codec は scale 必須 / `int4-sym-g` は `groupSize` 必須で 2 冪 ≥ 16 /
-  `int2-off` は group 不可 / 行長の整除
-- `prepareModel` の検査・常駐計画・見積り
+- 格納の規則一式 — 量子化 codec は scale 必須 / `int4-sym-g` は `groupSize` 必須で 2 冪 ≥ 16 /
+  `int2-off` は group 不可 / 行長の整除 / payload 長と block 長の突合 / piece の門（先頭次元の被覆・
+  中間 piece に詰め物無し・`rowAxis != 0` は分割不可）
+- `prepareContainer` の検査・常駐計画・見積り（合流後表現を実行グラフへ写す `mergedGraph` の後段）
 
-を走らせる。**置き場は runtime の `format/` の 1 箇所**。読み手は runtime 5 モジュールと
-models の `gemma/qat.ts` / `speculative.ts`。
+を走らせる。**格納の規則の置き場は runtime の `format/container/` の中で 2 つに分かれる**。scale /
+`groupSize` の有無は descriptor の読み手 `descriptor.ts`（`parseEncoding`）が見る。メモリ内容器
+（`openMemoryContainer`）は入力形が違うので、同じ有無を `memory.ts` が見る。値域・行長の整除・i2 系の
+宣言 shape・scale 長・payload 長・piece の門は `bind.ts` が見る — 2 文書に依存しない `bindDeclarations`
+と、2 文書から呼ぶ外皮 `bindGraphs`。メモリ内容器も同じ `bindDeclarations` を通る。IR の宣言の読み手は `parseIrDeclaration` /
+`parseIrDeclarationValue`（`packages/runtime/src/format/ir.ts`）の 1 種で、ホスト製のグラフも
+`parseIrDeclarationValue` を通してからメモリ内容器へ渡す（`packages/runtime/mod.ts` の doc）。
 
 **Python 側も合流後表現を既存検査へ渡し、規則を二重実装しない**
-（`tools/exporter/src/karume/verify.py:297-345` の鏡像はそのまま生かす）。
+（`tools/exporter/src/karume/verify.py` の `bind_graphs` が TS `bindGraphs` の鏡像）。
 
 ### 13.4 変わらないもの
 
