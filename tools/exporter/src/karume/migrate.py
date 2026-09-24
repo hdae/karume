@@ -55,6 +55,7 @@ from karume.container import (
     BLOCK_MAX_BYTES,
     DEFAULT_PART_BYTES,
     GRAPH_NAME_PATTERN,
+    PART_LENGTH_CHOICES,
     AssetInput,
     ContainerFormatError,
     DocumentRef,
@@ -110,9 +111,27 @@ PLE_OWNER: Mapping[str, str] = {"gemma4": "model", "gemma4-qat": "model"}
 #: 旧 PLE shard が持つメタデータのキー（索引との整合をここで突き合わせる）。
 PLE_METADATA_KEY = "karume_ple"
 
+#: CLI の `--part-bytes` の単位（MiB — 選択集合がちょうど MiB の整数倍）。
+_MIB = 1024 * 1024
+
 
 class MigrateError(ValueError):
     """移行の前提が破れた（写し先の無い格納・宣言と現物の食い違い・出力先の残骸）。"""
+
+
+def _assert_part_length(part_bytes: int) -> None:
+    """part 長は**書き手の選択集合**の 1 つ MUST（container-v1 §4.2 / ADR 0108）。
+
+    書き手（{@link karume.container.write_model_container}）が強制するのは天井だけなので、
+    集合の検査はここで持つ — 天井の内側の半端な値（300 MiB など）を黙って通すと、part 長を
+    比べるつもりの焼き直しが集合外の容器を配布物に混ぜる。
+    """
+    if part_bytes not in PART_LENGTH_CHOICES:
+        choices = ", ".join(str(choice // _MIB) for choice in PART_LENGTH_CHOICES)
+        raise MigrateError(
+            f"part 長 {part_bytes} バイトが書き手の選択集合 {{{choices}}} MiB の外"
+            " — container-v1 §4.2 / ADR 0108"
+        )
 
 
 #: 1 コンポーネントの移行結果（据えた part 列・2 文書・突き合わせた本数）。公開の 3 段は
@@ -250,7 +269,7 @@ def migrate_component(
     assets: Mapping[str, AssetInput] = {},
     single: bool = False,
     write_graph: bool = False,
-    _part_bytes: int = DEFAULT_PART_BYTES,
+    part_bytes: int = DEFAULT_PART_BYTES,
     _block_bytes: int = BLOCK_MAX_BYTES,
 ) -> MigrationResult:
     """コンポーネント 1 つ（旧単一形 / 旧 shard 列）を `krm` へ移す。
@@ -266,9 +285,11 @@ def migrate_component(
     置き場（系列ディレクトリ）を移す呼び手 — 畳み方（どのファイルがどの資産名か）は family を
     知っている側にしか決められないので、core は受け取るだけにする（ADR 0065）。
 
-    `_part_bytes` / `_block_bytes` は**テストからのみ触る**寸法の差し込み（合成の小さな資産で
-    part またぎと piece 分割を踏むため）— 公開ノブではない。
+    `part_bytes` は part 長（書き手の選択集合 {@link karume.container.PART_LENGTH_CHOICES} の
+    1 つ — 集合外は `MigrateError`）。`_block_bytes` は**テストからのみ触る**寸法の差し込み
+    （合成の小さな資産で piece 分割を踏むため）— 公開ノブではない。
     """
+    _assert_part_length(part_bytes)
     source = base_path(Path(path))
     name = graph_name if graph_name is not None else source.parent.name
     if GRAPH_NAME_PATTERN.match(name) is None:
@@ -285,7 +306,7 @@ def migrate_component(
         assets=assets,
         single=single,
         graph_path=final.with_suffix(GRAPH_SUFFIX) if write_graph else None,
-        part_bytes=_part_bytes,
+        part_bytes=part_bytes,
         block_bytes=_block_bytes,
     )
 
@@ -647,17 +668,19 @@ def migrate_repository(
     *,
     provenance: Provenance,
     cross_repos: Sequence[CrossRepo] = (),
-    _part_bytes: int = DEFAULT_PART_BYTES,
+    part_bytes: int = DEFAULT_PART_BYTES,
     _block_bytes: int = BLOCK_MAX_BYTES,
 ) -> RepositoryResult:
     """旧 `karume/4` のリポを丸ごと `karume/5` + `krm` へ移す（ADR 0109 決定 8）。
 
-    旧リポは**読むだけ**で、成果物は全部 `out_dir` の下に出る。`_part_bytes` / `_block_bytes`
-    はテストからのみ触る寸法の差し込み（部品単位モードと同じ）。
+    旧リポは**読むだけ**で、成果物は全部 `out_dir` の下に出る。`part_bytes`（書き手の選択集合 —
+    集合外は `MigrateError`）と `_block_bytes`（テストからのみ触る寸法の差し込み）は部品単位
+    モードと同じ。
 
     MUST: 書くのは**分割形だけ**（単一形の席が無い）— `karume/5` の `container.parts` は
     part 0 + part 1 の 2 要素以上 MUST で、単一形はその形を作れない（ADR 0109 決定 3）。
     """
+    _assert_part_length(part_bytes)
     source = Path(manifest_path)
     repo = source.parent.resolve()
     out = Path(out_dir).resolve()
@@ -704,7 +727,7 @@ def migrate_repository(
                 str(seat),
                 provenance=provenance,
                 fold=folding,
-                part_bytes=_part_bytes,
+                part_bytes=part_bytes,
                 block_bytes=_block_bytes,
             )
             converted[unit] = found
@@ -1321,6 +1344,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="単一形の krm を書く（既定は分割形・部品単位モードだけ）",
     )
     parser.add_argument("--graph", action="store_true", help="krg（グラフ容器）も書き出す")
+    choices = [choice // _MIB for choice in PART_LENGTH_CHOICES]
+    parser.add_argument(
+        "--part-bytes",
+        type=int,
+        choices=choices,
+        default=DEFAULT_PART_BYTES // _MIB,
+        help=f"part 長 — 書き手の選択集合 {{{','.join(map(str, choices))}}} MiB",
+    )
     return parser
 
 
@@ -1362,6 +1393,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             graph_name=args.graph_name,
             single=args.single,
             write_graph=args.graph,
+            part_bytes=args.part_bytes * _MIB,
         )
         graph = f" + {result.graph.name}" if result.graph is not None else ""
         print(
@@ -1394,6 +1426,7 @@ def _run_repository(args: argparse.Namespace, provenance: Provenance) -> None:
         args.out,
         provenance=provenance,
         cross_repos=[parse_cross_repo(spec) for spec in args.cross_repo],
+        part_bytes=args.part_bytes * _MIB,
     )
     for converted in result.converted:
         print(

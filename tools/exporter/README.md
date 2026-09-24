@@ -81,6 +81,8 @@ assembly engine itself is core (ADR 0065 decision 1).
 uv run karume verify ../../models/karume-anima/shared/transformer/model.f16-00001-of-00017.safetensors
 ```
 
+`karume migrate --part-bytes {256,512,768,1024}` picks the part length in MiB from the writer's choice set (container-v1 §4.2 / ADR 0108 — default 256; any other value fails loudly).
+
 ### `karume dist` — the assembly engine
 
 `--model` names the model to assemble (it moves the series it reads, the subtree it writes and the

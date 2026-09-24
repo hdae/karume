@@ -24,7 +24,7 @@ import pytest
 from legacy_writer import Entry, legacy_fill_shards, legacy_shards, order, write_safetensors
 
 from karume import migrate, publish
-from karume.container import AssetRecord, Provenance, numbered_name
+from karume.container import PART_LENGTH_CHOICES, AssetRecord, Provenance, numbered_name
 from karume.migrate import MigrateError, migrate_repository, parse_cross_repo
 
 PROVENANCE = Provenance(license="apache-2.0", writer="karume/test")
@@ -32,6 +32,8 @@ PROVENANCE = Provenance(license="apache-2.0", writer="karume/test")
 #: 合成資産（数 KiB）で part またぎと資産の block 分割を踏むために下げた寸法。
 SMALL_PART_BYTES = 1024
 SMALL_BLOCK_BYTES = 512
+
+MIB = 1024 * 1024
 
 #: 越境参照の pin（40 桁 hex 小文字 — `dist.REVISION_RE` の受理形）。
 REVISION = "0" * 39 + "1"
@@ -101,6 +103,17 @@ def write_manifest(root: Path, models: Mapping[str, Any], default_model: str) ->
     return path
 
 
+@pytest.fixture(autouse=True)
+def small_parts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """書き手の選択集合（256 MiB〜）に**合成資産の寸法**を足す（このモジュールの全ケース）。
+
+    数 KiB の合成リポは集合の part 長では part を割らないので、`migrated` の寸法を通すために
+    集合を広げる。集合の検査そのもの（集合外は落ちる）は `TestThePartLength` が本物の集合で見る
+    （あのクラスはこの fixture を同名の fixture で打ち消す）。
+    """
+    monkeypatch.setattr(migrate, "PART_LENGTH_CHOICES", (*PART_LENGTH_CHOICES, SMALL_PART_BYTES))
+
+
 @pytest.fixture
 def repo(tmp_path: Path) -> Path:
     """2 モデルが `encoder` を共有し、`decoder` の列がディレクトリを跨ぐリポ。"""
@@ -140,7 +153,7 @@ def migrated(repo: Path, out: Path, **overrides: Any) -> migrate.RepositoryResul
         repo / "karume.json",
         out,
         provenance=PROVENANCE,
-        _part_bytes=SMALL_PART_BYTES,
+        part_bytes=SMALL_PART_BYTES,
         _block_bytes=SMALL_BLOCK_BYTES,
         **overrides,
     )
@@ -955,3 +968,73 @@ class TestTheCli:
     def test_it_requires_either_a_component_or_a_manifest(self, tmp_path: Path) -> None:
         with pytest.raises(MigrateError, match="代表 path か --manifest"):
             migrate.main(["--out", str(tmp_path), "--license", "mit"])
+
+
+class TestThePartLength:
+    """リポ丸ごとモードも part 長を選べる（書き手の選択集合 — container-v1 §4.2 / ADR 0108）。"""
+
+    @pytest.fixture
+    def small_parts(self) -> None:
+        """モジュールの autouse（集合を合成寸法で広げる）を打ち消す — 本物の集合で見る。"""
+
+    @staticmethod
+    def _spy(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+        """書き手に届いた part 長を呼ばれた順に拾う（書き出しは素通し）。"""
+        seen: list[int] = []
+        original = publish.write_model_container
+
+        def spy(*args, **kwargs):
+            seen.append(kwargs["part_bytes"])
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(publish, "write_model_container", spy)
+        return seen
+
+    @pytest.mark.parametrize(
+        ("flag", "expected"), [([], 256 * MIB), (["--part-bytes", "512"], 512 * MIB)]
+    )
+    def test_every_container_is_written_with_the_chosen_length(
+        self,
+        repo: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        flag: list[str],
+        expected: int,
+    ) -> None:
+        """既定は 256 MiB・`--part-bytes 512` は 512 MiB のバイト数として全容器の書き手に届く。"""
+        seen = self._spy(monkeypatch)
+        out = tmp_path / "out"
+        migrate.main(
+            ["--manifest", str(repo / "karume.json"), "--out", str(out), "--license", "mit", *flag]
+        )
+
+        assert seen == [expected, expected]
+        # 選んだ part 長で書いた容器が karume/5 の `container.parts` として宣言され、読み直せる。
+        for component in ("encoder", "decoder"):
+            container = container_of(out, "alpha", component, "f32")
+            assert len(container["parts"]) >= 2
+            assert opened(out, container).header.kind == "model"
+
+    def test_the_function_default_is_256_mib(
+        self, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """関数を直接呼ぶ経路の既定（CLI は既定値を明示で渡すので、CLI の門では守れない）。"""
+        seen = self._spy(monkeypatch)
+        migrate_repository(repo / "karume.json", tmp_path / "out", provenance=PROVENANCE)
+
+        assert seen == [256 * MIB, 256 * MIB]
+
+    def test_a_length_outside_the_choices_fails_loudly_before_writing(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        out = tmp_path / "out"
+
+        with pytest.raises(
+            MigrateError,
+            match=r"part 長 314572800 バイトが書き手の選択集合 \{256, 512, 768, 1024\} MiB の外",
+        ):
+            migrate_repository(
+                repo / "karume.json", out, provenance=PROVENANCE, part_bytes=300 * MIB
+            )
+
+        assert not out.exists()

@@ -32,6 +32,7 @@ from legacy_writer import (
 
 from karume import migrate, publish
 from karume.container import (
+    PART_LENGTH_CHOICES,
     AssetInput,
     ContainerFormatError,
     Encoding,
@@ -78,6 +79,11 @@ PROVENANCE = Provenance(license="apache-2.0", writer="karume/test")
 #: 合成資産（数 KiB）で part またぎと piece 分割を踏むために下げた寸法。
 SMALL_PART_BYTES = 512
 SMALL_BLOCK_BYTES = 256
+
+#: 1 block と companion scale の一群が入らない part 長（配置が決まらない回を作る）。
+UNPLACEABLE_PART_BYTES = 64
+
+MIB = 1024 * 1024
 
 
 def read_safetensors(blob: bytes) -> tuple[dict[str, str], dict[str, bytes]]:
@@ -156,6 +162,34 @@ def scale_keys(graph: IrGraph) -> dict[str, str]:
         for init in graph.initializers.values()
         if init.tensor is not None and init.storage.scale is not None
     }
+
+
+@pytest.fixture
+def small_parts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """書き手の選択集合（256 MiB〜）に**合成資産の寸法**を足す。
+
+    数 KiB の合成資産は集合の part 長では part を割らないので、part またぎを踏む回だけ集合を
+    広げる。集合の検査そのもの（集合外は落ちる）は `TestThePartLength` が本物の集合で見る。
+    """
+    monkeypatch.setattr(
+        migrate,
+        "PART_LENGTH_CHOICES",
+        (*PART_LENGTH_CHOICES, SMALL_PART_BYTES, UNPLACEABLE_PART_BYTES),
+    )
+
+
+@pytest.fixture
+def written_part_bytes(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """書き手（`write_model_container`）に届いた part 長を呼ばれた順に拾う（書き出しは素通し）。"""
+    seen: list[int] = []
+    original = publish.write_model_container
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs["part_bytes"])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(publish, "write_model_container", spy)
+    return seen
 
 
 @pytest.fixture
@@ -266,14 +300,17 @@ class TestTheMigratedContainer:
             migrate_component(path, tmp_path / "out", provenance=PROVENANCE)
 
     def test_the_split_form_is_named_like_a_shard_series(
-        self, component: tuple[Path, dict[str, str], dict[str, bytes]], tmp_path: Path
+        self,
+        component: tuple[Path, dict[str, str], dict[str, bytes]],
+        tmp_path: Path,
+        small_parts: None,
     ) -> None:
         path, _, _ = component
         result = migrate_component(
             path,
             tmp_path / "out",
             provenance=PROVENANCE,
-            _part_bytes=SMALL_PART_BYTES,
+            part_bytes=SMALL_PART_BYTES,
             _block_bytes=SMALL_BLOCK_BYTES,
         )
         total = len(result.parts)
@@ -318,7 +355,10 @@ class TestTheMigratedContainer:
             migrate_component(path, tmp_path / "out", provenance=PROVENANCE)
 
     def test_a_failed_migration_leaves_nothing_behind(
-        self, component: tuple[Path, dict[str, str], dict[str, bytes]], tmp_path: Path
+        self,
+        component: tuple[Path, dict[str, str], dict[str, bytes]],
+        tmp_path: Path,
+        small_parts: None,
     ) -> None:
         """検査を通してから据える — 落ちた回は一時ファイルごと消える（本番名は生まれない）。"""
         path, _, _ = component
@@ -327,7 +367,7 @@ class TestTheMigratedContainer:
 
         with pytest.raises(ContainerFormatError):
             # 1 block と companion scale の一群が入らない part 長（配置が決まらない）。
-            migrate_component(path, out, provenance=PROVENANCE, _part_bytes=64)
+            migrate_component(path, out, provenance=PROVENANCE, part_bytes=UNPLACEABLE_PART_BYTES)
 
         assert sorted(out.iterdir()) == []
 
@@ -515,6 +555,67 @@ class TestTheCli:
                     "shared",
                 ]
             )
+
+
+class TestThePartLength:
+    """part 長は書き手の選択集合 {256, 512, 768, 1024} MiB の 1 つ（container-v1 §4.2）。"""
+
+    def test_the_default_is_256_mib(
+        self,
+        component: tuple[Path, dict[str, str], dict[str, bytes]],
+        tmp_path: Path,
+        written_part_bytes: list[int],
+    ) -> None:
+        path, _, _ = component
+        migrate.main([str(path), "--out", str(tmp_path / "cli"), "--license", "mit"])
+        migrate_component(path, tmp_path / "api", provenance=PROVENANCE)
+
+        assert written_part_bytes == [256 * MIB, 256 * MIB]
+
+    def test_the_cli_hands_the_chosen_mib_to_the_writer_as_bytes(
+        self,
+        component: tuple[Path, dict[str, str], dict[str, bytes]],
+        tmp_path: Path,
+        written_part_bytes: list[int],
+    ) -> None:
+        path, _, _ = component
+        out = tmp_path / "out"
+        migrate.main([str(path), "--out", str(out), "--license", "mit", "--part-bytes", "512"])
+
+        assert written_part_bytes == [512 * MIB]
+        assert read_container(sorted(out.glob("*.krm"))).header.kind == "model"
+
+    @pytest.mark.parametrize("part_bytes", [300 * MIB, SMALL_PART_BYTES])
+    def test_a_length_outside_the_choices_fails_loudly_before_writing(
+        self,
+        component: tuple[Path, dict[str, str], dict[str, bytes]],
+        tmp_path: Path,
+        part_bytes: int,
+    ) -> None:
+        """天井（1024 MiB）の内側でも集合外なら止まる — 書き手の天井検査とは別の門。"""
+        path, _, _ = component
+        out = tmp_path / "out"
+
+        with pytest.raises(MigrateError, match=r"選択集合 \{256, 512, 768, 1024\} MiB の外"):
+            migrate_component(path, out, provenance=PROVENANCE, part_bytes=part_bytes)
+
+        assert not out.exists()
+
+    def test_the_cli_refuses_a_length_outside_the_choices(self, tmp_path: Path) -> None:
+        with pytest.raises(SystemExit) as raised:
+            migrate.main(
+                [
+                    "a/model.safetensors",
+                    "--out",
+                    str(tmp_path),
+                    "--license",
+                    "mit",
+                    "--part-bytes",
+                    "300",
+                ]
+            )
+
+        assert raised.value.code == 2
 
 
 class TestTheSelfCheck:
