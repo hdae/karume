@@ -445,9 +445,9 @@ export type StorageDiagnostics = {
  * ## 帰属の限界（この分解が到達できる上限）
  *
  * 計測はホスト時計（`performance.now()`）だけで、**GPU フェンスを 1 本も追加しない**
- * （追加すると shard ごとの submit 1 回という契約が崩れ、瞬間ピークが重み 1 本ぶん押し上がる —
- * ADR 0070 決定 3）。したがって `queue.writeBuffer` の**実 GPU 転送時間はホスト時計から分離
- * できず**、shard 末尾のフェンス待ち（{@link SessionBuildStats.uploadFenceMs}）に丸ごと吸われる。
+ * （追加すると part ごとの submit 1 回という契約が崩れ、瞬間ピークが重み 1 本ぶん押し上がる —
+ * ADR 0108 決定 9）。したがって `queue.writeBuffer` の**実 GPU 転送時間はホスト時計から分離
+ * できず**、part 末尾のフェンス待ち（{@link SessionBuildStats.uploadFenceMs}）に丸ごと吸われる。
  * MUST: この 7 席から「転送そのものの速度」を読まないこと。分解の上限は
  * **「ホストが費やした時間」（shardWait / decode / bufferCreate / writeBufferIssue）と
  * 「GPU の完了を待った時間」（uploadFence）の 2 区分**で、後者の内訳（実転送 / キュー待ち /
@@ -458,16 +458,21 @@ export type StorageDiagnostics = {
  * {@link StorageDiagnostics.residentCompressedBytes}、確保したバッファ本数は
  * {@link SessionDiagnostics.weights} の `allocCount`。
  * NOTE: グラフ検証・パイプライン生成の費用はここに**入らない** — 前者は構築相の外
- * （`prepareModel` 相）で、後者は構築相にそもそも存在しない（パイプラインは初回 run で作られる。
+ * （`prepareContainer` 相）で、後者は構築相にそもそも存在しない（パイプラインは初回 run で作られる。
  * 構築直後の `pipelineCount` は 0）。混ぜると「構築費」の定義が濁る。
  */
 export type SessionBuildStats = {
-  /** 消費した shard の本数（全量面は 1）。 */
+  /**
+   * 消費した供給単位（容器の part）の本数。
+   *
+   * NOTE: 欄名は旧名（shard）の据え置き — 公開面なので改名は breaking。
+   */
   readonly shardCount: number;
   /**
-   * shard 列の**次の 1 本を待った**時間の総和（`for await` の反復待ち）。shard 面では
-   * ネットワーク / ディスクの費用がここに集まるので、この席が構築費からその帰属を分離する
-   * 唯一の点になる（大きければ遅いのは Karume ではなく供給側）。
+   * 供給単位（part）の列の**次の 1 本を待った**時間の総和（`for await` の反復待ち）。
+   * part を取得しながら構築する呼び手では、ネットワーク / ディスクの費用がここに集まるので、
+   * この席が構築費からその帰属を分離する唯一の点になる（大きければ遅いのは Karume ではなく
+   * 供給側）。欄名は旧名の据え置き。
    */
   readonly shardWaitMs: number;
   /**
@@ -491,7 +496,7 @@ export type SessionBuildStats = {
    */
   readonly uploadedBytes: number;
   /**
-   * shard ごとの明示 submit の完了を待った時間の総和（ADR 0070 決定 3 のフェンス）。
+   * 供給単位（part）ごとの明示 submit の完了を待った時間の総和（ADR 0108 決定 9 のフェンス）。
    * 実 GPU 転送時間はここに吸われている（上の「帰属の限界」）。
    */
   readonly uploadFenceMs: number;

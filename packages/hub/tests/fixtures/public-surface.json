@@ -171,14 +171,6 @@
         "kind": "typeAlias"
       },
       {
-        "name": "StreamAssetsOptions",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "StreamedAsset",
-        "kind": "typeAlias"
-      },
-      {
         "name": "WeightContainer",
         "kind": "typeAlias"
       },
@@ -236,10 +228,6 @@
       },
       {
         "name": "selectionRefs",
-        "kind": "function"
-      },
-      {
-        "name": "streamAssets",
         "kind": "function"
       }
     ],

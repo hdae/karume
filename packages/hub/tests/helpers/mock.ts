@@ -300,7 +300,7 @@ const notFound = (): Response =>
  * 固定文言の生 `AbortError` で reject する。
  *
  * `withChromeAbortShape`（body 読み取り中）との違いが要るのは、取得層が段によって別の包み方を
- * するため — 逐次面 相 1 の `prefetchUrl` は転送中断を `cache.put` の reject 経由で包み直すので
+ * するため — 温め面（相 1）の `prefetchUrl` は転送中断を `cache.put` の reject 経由で包み直すので
  * signal の reason が復元されるが、応答待ちの中断は生の `AbortError` のまま上がってくる。
  */
 export const abortWhileAwaitingResponse = (

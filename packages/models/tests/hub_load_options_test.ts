@@ -154,7 +154,7 @@ const MANIFEST = {
 
 /**
  * `karume.json` の**初回だけ** 429（`retry-after: 0`）を返し、2 回目で manifest を返す `fetch`。
- * それ以外の URL（= グラフ shard）は 404 — 見たいのは manifest 取得までの経路だけなので、
+ * それ以外の URL（= 容器の part）は 404 — 見たいのは manifest 取得までの経路だけなので、
  * その先は落ちてよい。
  */
 const createRateLimitedManifestFetch = (): { fetch: typeof globalThis.fetch; calls: string[] } => {

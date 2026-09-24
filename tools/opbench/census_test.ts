@@ -14,7 +14,8 @@
  */
 
 import { assert, assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
-import { parseIrGraph } from "../../packages/runtime/src/format/ir.ts";
+import { type MemoryTensor, parseIrDeclarationValue } from "../../packages/runtime/mod.ts";
+import { memoryGraph } from "../_shared/ir-memory.ts";
 import {
   distributionFormat,
   MANIFEST_FORMAT,
@@ -32,42 +33,61 @@ const TARGET = {
 const IDENTITY = { family: "unit", model: "unit", quant: "i4" };
 
 /**
+ * 合成 IR の initializer 実体（census は格納の**宣言**しか見ないので、値は 0 でよい）。
+ * 長さだけは合流層の門に合わせる — payload は宣言 shape と codec から決まり、companion scale は
+ * `チャネル数 × group 数 × 4` バイト（f32）。
+ */
+const zeros = (bytes: number): Uint8Array<ArrayBuffer> => new Uint8Array(bytes);
+
+/** `[4, 32]` の i4（group 長 16）: payload 128 要素 / 2 = 64 バイト・scale は 4 行 × 2 group。 */
+const i4g16Tensor = (): MemoryTensor => ({
+  bytes: zeros(64),
+  encoding: { codec: "int4-sym-g", groupSize: 16, scale: zeros(4 * 2 * 4) },
+});
+
+/** `[4, 32]` の f32: 128 要素 × 4 バイト。 */
+const f32Tensor = (elements: number): MemoryTensor => ({
+  bytes: zeros(elements * 4),
+  encoding: { codec: "f32" },
+});
+
+/**
  * 合成 IR: `linear(x, w, b) → sigmoid → mul` の 3 ノード。後ろ 2 本は silu ルールが畳むので、
  * 「畳まれたノードにルール名が付く」ことと「畳まれても census に残る」ことを同時に見られる。
  */
-const UNIT_GRAPH = parseIrGraph(JSON.stringify({
-  format: "karume-ir",
-  version: 1,
-  requires: { ops: ["linear", "sigmoid", "mul"] },
-  symbols: ["T"],
-  inputs: [{ name: "x", dtype: "f32", shape: [1, "T", 32] }],
-  outputs: ["y"],
-  initializers: {
-    w: { tensor: "w.q", storage: { dtype: "i4", scale: "w.scale", group_size: 16 } },
-    b: { tensor: "b", storage: { dtype: "f32" } },
-  },
-  values: {
-    w: { dtype: "f32", shape: [4, 32] },
-    b: { dtype: "f32", shape: [4] },
-    h: { dtype: "f32", shape: [1, "T", 4] },
-    s: { dtype: "f32", shape: [1, "T", 4] },
-    y: { dtype: "f32", shape: [1, "T", 4] },
-  },
-  nodes: [
-    { op: "linear", ins: ["x", "w", "b"], outs: ["h"], attrs: {} },
-    { op: "sigmoid", ins: ["h"], outs: ["s"], attrs: {} },
-    { op: "mul", ins: ["h", "s"], outs: ["y"], attrs: {} },
-  ],
-}));
+const UNIT_GRAPH = memoryGraph(
+  parseIrDeclarationValue({
+    format: "karume-ir",
+    version: 2,
+    requires: { ops: ["linear", "sigmoid", "mul"] },
+    symbols: ["T"],
+    inputs: [{ name: "x", dtype: "f32", shape: [1, "T", 32] }],
+    outputs: ["y"],
+    initializers: { w: {}, b: {} },
+    values: {
+      w: { dtype: "f32", shape: [4, 32] },
+      b: { dtype: "f32", shape: [4] },
+      h: { dtype: "f32", shape: [1, "T", 4] },
+      s: { dtype: "f32", shape: [1, "T", 4] },
+      y: { dtype: "f32", shape: [1, "T", 4] },
+    },
+    nodes: [
+      { op: "linear", ins: ["x", "w", "b"], outs: ["h"], attrs: {} },
+      { op: "sigmoid", ins: ["h"], outs: ["s"], attrs: {} },
+      { op: "mul", ins: ["h", "s"], outs: ["y"], attrs: {} },
+    ],
+  }),
+  { w: i4g16Tensor(), b: f32Tensor(4) },
+);
 
 /**
  * 合成 IR: 同じ入力から出る `permute` 2 本（`dims` だけ違う）と `slice` 2 本（属性の値は同じで
  * **キーの書き順だけ**違う）。どれも出力なので融合の対象にならず、加重が attrs だけで割れる /
  * 畳まれることを他の要因抜きで見られる。
  */
-const ATTRS_GRAPH = parseIrGraph(JSON.stringify({
+const ATTRS_GRAPH = memoryGraph(parseIrDeclarationValue({
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["permute", "slice"] },
   symbols: [],
   inputs: [{ name: "x", dtype: "f32", shape: [1, 4, 4, 4] }],
@@ -96,32 +116,35 @@ const ATTRS_GRAPH = parseIrGraph(JSON.stringify({
  * NOTE: 加重キーの doc が例に挙げる `linear` の `[x, W, bias]` はここでは組めない — rank 1 の
  * bias は行長が常に 1 で、i4 の group 長（16 以上）で割り切れない（ADR 0069 決定 2）。
  */
-const SLOT_GRAPH = parseIrGraph(JSON.stringify({
-  format: "karume-ir",
-  version: 1,
-  requires: { ops: ["add"] },
-  symbols: [],
-  inputs: [],
-  outputs: ["o1", "o2"],
-  initializers: {
-    a4: { tensor: "a4.q", storage: { dtype: "i4", scale: "a4.scale", group_size: 16 } },
-    af: { tensor: "af", storage: { dtype: "f32" } },
-    b4: { tensor: "b4.q", storage: { dtype: "i4", scale: "b4.scale", group_size: 16 } },
-    bf: { tensor: "bf", storage: { dtype: "f32" } },
+const SLOT_GRAPH = memoryGraph(
+  parseIrDeclarationValue({
+    format: "karume-ir",
+    version: 2,
+    requires: { ops: ["add"] },
+    symbols: [],
+    inputs: [],
+    outputs: ["o1", "o2"],
+    initializers: { a4: {}, af: {}, b4: {}, bf: {} },
+    values: {
+      a4: { dtype: "f32", shape: [4, 32] },
+      af: { dtype: "f32", shape: [4, 32] },
+      b4: { dtype: "f32", shape: [4, 32] },
+      bf: { dtype: "f32", shape: [4, 32] },
+      o1: { dtype: "f32", shape: [4, 32] },
+      o2: { dtype: "f32", shape: [4, 32] },
+    },
+    nodes: [
+      { op: "add", ins: ["a4", "af"], outs: ["o1"], attrs: {} },
+      { op: "add", ins: ["bf", "b4"], outs: ["o2"], attrs: {} },
+    ],
+  }),
+  {
+    a4: i4g16Tensor(),
+    af: f32Tensor(128),
+    b4: i4g16Tensor(),
+    bf: f32Tensor(128),
   },
-  values: {
-    a4: { dtype: "f32", shape: [4, 32] },
-    af: { dtype: "f32", shape: [4, 32] },
-    b4: { dtype: "f32", shape: [4, 32] },
-    bf: { dtype: "f32", shape: [4, 32] },
-    o1: { dtype: "f32", shape: [4, 32] },
-    o2: { dtype: "f32", shape: [4, 32] },
-  },
-  nodes: [
-    { op: "add", ins: ["a4", "af"], outs: ["o1"], attrs: {} },
-    { op: "add", ins: ["bf", "b4"], outs: ["o2"], attrs: {} },
-  ],
-}));
+);
 
 const unitScenario = (bindings: Readonly<Record<string, number>>) => ({
   name: "unit",
@@ -148,7 +171,7 @@ Deno.test("合成 IR: 記号は束縛で数値化され、格納と隣接と融�
   // group 長まで載る（scale は合流後の格納に無い — 供給計画が payload と一緒に運ぶ）。
   assertEquals(linear.storage, [
     null,
-    { tensor: "w.q", dtype: "int4-sym-g", group_size: 16 },
+    { tensor: "w", dtype: "int4-sym-g", group_size: 16 },
     { tensor: "b", dtype: "f32" },
   ]);
 

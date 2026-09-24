@@ -771,7 +771,7 @@ Deno.test("DerivedRunInputs: pad 行込みの id 列と位置列が渡り、入�
 
 Deno.test("DerivedRunInputs: 生成の signal が derive まで降りる（best-effort の材料）", async () => {
   // 派生入力の材料は配布形によっては GB 級の遅延ロード（gemma4 の PLE sidecar）。降ろさないと
-  // 「停止を押しても shard を読み終わるまで返らない」区間ができる。
+  // 「停止を押しても block を読み終わるまで返らない」区間ができる。
   const fake = fakeSession({ tokens: [5, 6] });
   const seen: (AbortSignal | undefined)[] = [];
   const controller = new AbortController();

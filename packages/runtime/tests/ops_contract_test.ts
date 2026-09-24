@@ -1,5 +1,5 @@
 import { assert, assertEquals, assertStrictEquals, assertThrows } from "@std/assert";
-import type { OpSupport } from "../src/format/container.ts";
+import type { OpSupport } from "../src/ops/support.ts";
 import type { IrNode } from "../src/format/ir.ts";
 import {
   arityFits,

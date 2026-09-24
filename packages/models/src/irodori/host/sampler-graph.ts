@@ -1,10 +1,21 @@
 /**
- * Euler サンプラの GPU 側 2 グラフ（**ホストで組む** IR v1 — exporter は通さない）。
+ * Euler サンプラの GPU 側 2 グラフ（**ホストで組む** IR v2 の宣言 — exporter は通さない）。
  *
  * DiT ループを 1 batch に束ねる（H-5）と、CFG 合成と Euler 更新だけがホストに残って
  * 「forward ごとに readback → 再アップロード」を強いる。この 2 演算は要素ごとの
  * add / sub / mul でしか無いので、配布形に足すのではなく**その場で組んだ小さな IR**を
  * 別 Session で回し、潜在は常駐テンソルのまま GPU に置いたままにする。
+ *
+ * ## MUST: 組んだ宣言は `parseIrDeclarationValue` に通す
+ *
+ * ここは exporter も容器の読み手も経由しないので、通さないとグラフ単体で決まる規則
+ * （SSA・前方参照・トポロジカル順・`requires.ops` と実使用 op の一致・未知キー）が 1 つも
+ * 検査されない。合流層（宣言 × 供給）と `prepareContainer`（capability + op 契約）はその
+ * 種の壊れ方を見ないので、編集の誤りは Session 構築か実行まで落ちてこない。
+ *
+ * MUST NOT: 下のリテラルに省略可能な `states` を書き足さない。書かないことで、リテラルは
+ * {@link IrDeclaration} として型が付かず（`states` が欠ける）、`parseIrDeclarationValue` の
+ * 戻り値だけがこの関数の返り値になれる。包みを外した編集は `deno check` で落ちる。
  *
  * ## MUST: 演算の結合順・引数順は TS 正本（`sampler.ts`）と 1 演算ずつ一致させる
  *
@@ -21,51 +32,7 @@
  * 行う。
  */
 
-/** ここで組むグラフの JSON 形（IR v1 の部分集合 — 初期化子も記号も持たない）。 */
-type SamplerGraphJson = {
-  readonly format: "karume-ir";
-  readonly version: 1;
-  readonly requires: { readonly ops: readonly string[] };
-  readonly symbols: readonly [];
-  readonly inputs: readonly {
-    readonly name: string;
-    readonly dtype: "f32";
-    readonly shape: readonly number[];
-  }[];
-  readonly outputs: readonly string[];
-  readonly initializers: Readonly<Record<string, never>>;
-  readonly values: Readonly<
-    Record<string, { readonly dtype: "f32"; readonly shape: readonly number[] }>
-  >;
-  readonly nodes: readonly {
-    readonly op: string;
-    readonly ins: readonly string[];
-    readonly outs: readonly string[];
-    readonly attrs: Readonly<Record<string, never>>;
-  }[];
-};
-
-/** グラフ JSON を載せる safetensors `__metadata__` のキー（runtime の `IR_METADATA_KEY`）。 */
-const IR_METADATA_KEY = "karume_ir";
-
-/**
- * テンソルを 1 本も持たない配布形バイト列にする（`openModel` がそのまま読める）。
- *
- * 重みが要らないグラフなのでデータ節は空。ヘッダは 8 バイト境界へ空白で詰める（safetensors の
- * 慣例で、runtime の整列検査もこれを前提にしている）。
- */
-const packGraph = (graph: SamplerGraphJson): ArrayBuffer => {
-  const headerBytes = new TextEncoder().encode(
-    JSON.stringify({ __metadata__: { [IR_METADATA_KEY]: JSON.stringify(graph) } }),
-  );
-  const headerLength = headerBytes.length + ((8 - (headerBytes.length % 8)) % 8);
-  const buffer = new ArrayBuffer(8 + headerLength);
-  const bytes = new Uint8Array(buffer);
-  new DataView(buffer).setBigUint64(0, BigInt(headerLength), true);
-  bytes.set(headerBytes, 8);
-  bytes.fill(0x20, 8 + headerBytes.length, 8 + headerLength);
-  return buffer;
-};
+import { type IrDeclaration, parseIrDeclarationValue } from "@karume/runtime";
 
 /** 潜在 1 本の shape（DiT の `x_t` / 速度場と同じ `[1, S, latentDim]`）。 */
 const latentShape = (frames: number, latentDim: number): readonly number[] => [
@@ -107,11 +74,11 @@ export const EULER_OUTPUT = "x_next";
  * 変種は 1 本ずつこのグラフに通す — 正本 {@link combineCfg} が変種順に 1 本ずつ畳むのと
  * 同じ積み方にするため。強さ `s` は shape `[1]` の入力で、値ごとにグラフを組み直さない。
  */
-export const combineGraph = (frames: number, latentDim: number): ArrayBuffer => {
+export const combineGraph = (frames: number, latentDim: number): IrDeclaration => {
   const rows = latentShape(frames, latentDim);
-  return packGraph({
+  return parseIrDeclarationValue({
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: ["sub", "mul", "add"] },
     symbols: [],
     inputs: [
@@ -130,17 +97,22 @@ export const combineGraph = (frames: number, latentDim: number): ArrayBuffer => 
     nodes: [
       { op: "sub", ins: [COMBINE_INPUTS.cond, COMBINE_INPUTS.variant], outs: ["diff"], attrs: {} },
       { op: "mul", ins: [COMBINE_INPUTS.scale, "diff"], outs: ["scaled"], attrs: {} },
-      { op: "add", ins: [COMBINE_INPUTS.accumulator, "scaled"], outs: [COMBINE_OUTPUT], attrs: {} },
+      {
+        op: "add",
+        ins: [COMBINE_INPUTS.accumulator, "scaled"],
+        outs: [COMBINE_OUTPUT],
+        attrs: {},
+      },
     ],
   });
 };
 
 /** Euler 更新 `x_next = x + dt·v`（2 ノード — 正本 {@link eulerStep} と同順）。 */
-export const eulerGraph = (frames: number, latentDim: number): ArrayBuffer => {
+export const eulerGraph = (frames: number, latentDim: number): IrDeclaration => {
   const rows = latentShape(frames, latentDim);
-  return packGraph({
+  return parseIrDeclarationValue({
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: ["mul", "add"] },
     symbols: [],
     inputs: [

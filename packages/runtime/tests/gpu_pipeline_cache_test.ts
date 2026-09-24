@@ -1,5 +1,4 @@
 import { assert, assertEquals, assertRejects, assertStrictEquals, assertThrows } from "@std/assert";
-import { openModel } from "../src/format/container.ts";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { GpuInternalError, GpuValidationError } from "../src/gpu/error-scope.ts";
 import {
@@ -9,8 +8,8 @@ import {
   SessionPipelines,
   StorageRoleError,
 } from "../src/gpu/pipeline-cache.ts";
-import { createSession } from "../src/runtime/executor.ts";
-import { fill, graphModelBuffer, singleOpGraph } from "./helpers/graph.ts";
+import { createSessionFromContainer } from "../src/runtime/executor.ts";
+import { fill, openGraphModel, singleOpDeclaration } from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
 /** PipelineCache が触る面だけを持つフェイク。DOM 型全体は再現しないため cast で渡す。 */
@@ -283,11 +282,11 @@ Deno.test({
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
-    const model = () => openModel(graphModelBuffer(singleOpGraph("relu", [[8, 8]], [[8, 8]])));
+    const model = () => openGraphModel(singleOpDeclaration("relu", [[8, 8]], [[8, 8]]));
     const x = fill([8, 8], (i) => (i % 13) - 6);
 
     try {
-      const first = await createSession(gpu, model());
+      const first = await createSessionFromContainer(gpu, await model(), "model");
       assertEquals(
         first.diagnostics().pipelineCount,
         0,
@@ -303,7 +302,7 @@ Deno.test({
       );
       await first.dispose();
 
-      const second = await createSession(gpu, model());
+      const second = await createSessionFromContainer(gpu, await model(), "model");
       assertEquals(
         second.diagnostics().devicePipelineCount,
         used,

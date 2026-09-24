@@ -2,12 +2,10 @@
 // エクスポータが出す隣接 2 ノードだけを 1 dispatch へ畳み、掴めない形は素の列へ落ちる。
 
 import { assertEquals } from "@std/assert";
-import { openModel } from "../src/format/container.ts";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { siluKey } from "../src/kernels/silu.ts";
-import { createSession, type Tensor } from "../src/runtime/executor.ts";
-import type { GraphJson } from "./helpers/format.ts";
-import { fill, graphModelBuffer } from "./helpers/graph.ts";
+import { createSessionFromContainer, type Tensor } from "../src/runtime/executor.ts";
+import { type DeclarationJson, fill, GRAPH_NAME, openModelBytes } from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
 
 // 256 スレッド workgroup の端数を通す長さ。
@@ -28,14 +26,14 @@ type SiluGraphOptions = {
  * `interpose` は 0 dispatch の別名を 1 本挟むだけで、値も物理 dispatch 数も変えずに
  * strict matcher の隣接条件だけを外す（= 同一バックエンド上の正本を作る）。
  */
-const siluGraph = (order: MulOrder, options: SiluGraphOptions = {}): GraphJson => {
+const siluGraph = (order: MulOrder, options: SiluGraphOptions = {}): DeclarationJson => {
   const sigmoidName = "sigmoid";
   const mulSigmoidName = options.interpose ? "sigmoid_alias" : sigmoidName;
-  const values: GraphJson["values"] = {
+  const values: DeclarationJson["values"] = {
     sigmoid: { dtype: "f32", shape: [...SHAPE] },
     y: { dtype: "f32", shape: [...SHAPE] },
   };
-  const inputs: GraphJson["inputs"] = [{ name: "x", dtype: "f32", shape: [...SHAPE] }];
+  const inputs: DeclarationJson["inputs"] = [{ name: "x", dtype: "f32", shape: [...SHAPE] }];
   if (options.interpose) values.sigmoid_alias = { dtype: "f32", shape: [...SHAPE] };
   if (options.extraConsumer) values.sigmoid_copy = { dtype: "f32", shape: [...SHAPE] };
   if (options.xExtraConsumer) values.x_copy = { dtype: "f32", shape: [...SHAPE] };
@@ -43,7 +41,12 @@ const siluGraph = (order: MulOrder, options: SiluGraphOptions = {}): GraphJson =
     inputs.push({ name: "z", dtype: "f32", shape: [...SHAPE] });
   }
 
-  const nodes: GraphJson["nodes"] = [{ op: "sigmoid", ins: ["x"], outs: [sigmoidName], attrs: {} }];
+  const nodes: DeclarationJson["nodes"] = [{
+    op: "sigmoid",
+    ins: ["x"],
+    outs: [sigmoidName],
+    attrs: {},
+  }];
   if (options.interpose) {
     nodes.push({ op: "reshape", ins: [sigmoidName], outs: [mulSigmoidName], attrs: {} });
   }
@@ -68,7 +71,7 @@ const siluGraph = (order: MulOrder, options: SiluGraphOptions = {}): GraphJson =
   ];
   return {
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: {
       ops: [
         "sigmoid",
@@ -133,10 +136,15 @@ Deno.test({
     const x = testInput();
     try {
       for (const order of ["xs", "sx"] as const) {
-        const fused = await createSession(gpu, openModel(graphModelBuffer(siluGraph(order))));
-        const primitive = await createSession(
+        const fused = await createSessionFromContainer(
           gpu,
-          openModel(graphModelBuffer(siluGraph(order, { interpose: true }))),
+          await openModelBytes(siluGraph(order), []),
+          GRAPH_NAME,
+        );
+        const primitive = await createSessionFromContainer(
+          gpu,
+          await openModelBytes(siluGraph(order, { interpose: true }), []),
+          GRAPH_NAME,
         );
         try {
           const fusedOut = (await fused.run({ x })).y;
@@ -180,13 +188,15 @@ Deno.test({
   fn: async () => {
     const gpu = await acquireGpu();
     const x = testInput();
-    const fused = await createSession(
+    const fused = await createSessionFromContainer(
       gpu,
-      openModel(graphModelBuffer(siluGraph("xs", { xExtraConsumer: true }))),
+      await openModelBytes(siluGraph("xs", { xExtraConsumer: true }), []),
+      GRAPH_NAME,
     );
-    const primitive = await createSession(
+    const primitive = await createSessionFromContainer(
       gpu,
-      openModel(graphModelBuffer(siluGraph("xs", { interpose: true, xExtraConsumer: true }))),
+      await openModelBytes(siluGraph("xs", { interpose: true, xExtraConsumer: true }), []),
+      GRAPH_NAME,
     );
     try {
       const fusedOut = await fused.run({ x });
@@ -213,7 +223,7 @@ Deno.test({
     const z = fill(SHAPE, (i) => Math.cos(i * 0.19) * 2.7 - i / 911);
     const cases: readonly {
       readonly name: string;
-      readonly graph: GraphJson;
+      readonly graph: DeclarationJson;
       readonly inputs: Readonly<Record<string, Tensor>>;
       readonly dispatches: number;
     }[] = [
@@ -244,7 +254,11 @@ Deno.test({
     ];
     try {
       for (const testCase of cases) {
-        const session = await createSession(gpu, openModel(graphModelBuffer(testCase.graph)));
+        const session = await createSessionFromContainer(
+          gpu,
+          await openModelBytes(testCase.graph, []),
+          GRAPH_NAME,
+        );
         try {
           await session.run(testCase.inputs);
           assertEquals(

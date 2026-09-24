@@ -1,8 +1,9 @@
 # opbench — static op census
 
 A CLI that reads a karume asset and writes **one row per IR node**, with every symbolic dimension
-resolved to a concrete number. No GPU, no weight bytes: it only reads the safetensors _header_ of
-each component's first shard, where the whole IR graph lives (`__metadata__.karume_ir`).
+resolved to a concrete number. No GPU, no weight bytes: it only reads _part 0_ of each component's
+`krm` container — the header plus the graph and model descriptors, where the IR declaration and its
+binding table live.
 
 This is stage 1 of the op-microbenchmark harness. It answers two questions that were previously
 answered by extrapolation:
@@ -24,7 +25,7 @@ deno run -A tools/opbench/main.ts census --source <dir> --out <dir> [options]
 | `--source <dir>`                      | A distribution mirror (a directory with `karume.json`) or a series output directory under `outputs/series/`                                |
 | `--out <dir>`                         | Where `census.jsonl` and `summary.json` are written                                                                                        |
 | `--model <name>`                      | Distribution form only. Defaults to the manifest's `defaultModel`                                                                          |
-| `--quant <name>`                      | Distribution form: the manifest quant (defaults to `defaultQuant`). Series form: the storage-dtype group (`model.i8-*.safetensors` → `i8`) |
+| `--quant <name>`                      | Distribution form: the manifest quant (defaults to `defaultQuant`). Series form: the storage-dtype group (`model.i8-*.krm` → `i8`)         |
 | `--family <name>`                     | Overrides the family inferred from the manifest pipeline id or the series directory name                                                   |
 | `--scenario <name>=<SYM>:<value>[,…]` | Symbol bindings. May be repeated; each one produces a separate `scenario` value in the output. Defaults to the family's built-in scenarios |
 
@@ -73,19 +74,19 @@ does not actually reach the graph is visible rather than silent.
 
 ### `census.jsonl` — one JSON object per line, one line per IR node
 
-| Field                                                      | Meaning                                                                                                                                                                                  |
-| ---------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `family`, `model`, `quant`, `component`, `component_dtype` | Which asset and component the node came from                                                                                                                                             |
-| `scenario`, `bindings`, `binding_source`                   | The scenario that produced the numbers, its effective bindings for this component, and whether they came from the built-in table (`default`) or `--scenario` (`cli`)                     |
-| `node_index`                                               | Position in `graph.nodes` (also the identity used by `producers` / `consumers`)                                                                                                          |
-| `op`, `attrs`                                              | The op and its attributes, verbatim from the IR                                                                                                                                          |
-| `in_shapes`, `out_shapes`                                  | Fully resolved shapes. `in_shapes` follows `ins`; `out_shapes` follows output slot order                                                                                                 |
-| `in_dtypes`, `out_dtypes`                                  | Semantic dtypes (`f32` / `i32` / `bool`) — computation is always in the semantic type                                                                                                    |
-| `storage`                                                  | Aligned with `ins`. `null` for a non-initializer input; otherwise the initializer's storage: safetensors key, storage dtype, and for group quantization the `group_size` and `scale` key |
-| `state_shapes`                                             | Resolved shapes of the state slots this node touches (empty for nodes that touch none)                                                                                                   |
-| `fused_by`                                                 | The fusion rule that absorbed this node, or `null` if it runs as a plain node                                                                                                            |
-| `aliases_input`                                            | The node produces zero dispatches because its output aliases its input (`reshape` always, identity `expand` when no axis is replicated)                                                  |
-| `producers`, `consumers`                                   | Adjacent node indices, for reconstructing the dataflow around a candidate                                                                                                                |
+| Field                                                      | Meaning                                                                                                                                                                   |
+| ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `family`, `model`, `quant`, `component`, `component_dtype` | Which asset and component the node came from                                                                                                                              |
+| `scenario`, `bindings`, `binding_source`                   | The scenario that produced the numbers, its effective bindings for this component, and whether they came from the built-in table (`default`) or `--scenario` (`cli`)      |
+| `node_index`                                               | Position in `graph.nodes` (also the identity used by `producers` / `consumers`)                                                                                           |
+| `op`, `attrs`                                              | The op and its attributes, verbatim from the IR                                                                                                                           |
+| `in_shapes`, `out_shapes`                                  | Fully resolved shapes. `in_shapes` follows `ins`; `out_shapes` follows output slot order                                                                                  |
+| `in_dtypes`, `out_dtypes`                                  | Semantic dtypes (`f32` / `i32` / `bool`) — computation is always in the semantic type                                                                                     |
+| `storage`                                                  | Aligned with `ins`. `null` for a non-initializer input; otherwise the initializer's storage: initializer name, storage codec, and for group quantization the `group_size` |
+| `state_shapes`                                             | Resolved shapes of the state slots this node touches (empty for nodes that touch none)                                                                                    |
+| `fused_by`                                                 | The fusion rule that absorbed this node, or `null` if it runs as a plain node                                                                                             |
+| `aliases_input`                                            | The node produces zero dispatches because its output aliases its input (`reshape` always, identity `expand` when no axis is replicated)                                   |
+| `producers`, `consumers`                                   | Adjacent node indices, for reconstructing the dataflow around a candidate                                                                                                 |
 
 ### `summary.json`
 
@@ -122,7 +123,7 @@ Per scenario:
     input), so `linear`'s `[x, W, bias]` shows which slot is `i4g32` and which is `f32`. Slot order
     is part of the key: two nodes with the same set of storage dtypes but a different assignment to
     slots are separate rows, because they select different kernels. It carries
-    the storage dtype and group length only — the safetensors keys belong to one layer and cannot
+    the storage dtype and group length only — the initializer names belong to one layer and cannot
     describe a row that collapsed many. `storage_signature` is the set signature (`f32+i4g32`) that
     `by_storage` counts by.
 
@@ -285,9 +286,9 @@ header of `comparison.json`, so a column that failed everywhere cannot be read a
 - Finding the asset (`tools/_shared/assets.ts`) and the scenario table (`tools/_shared/scenario.ts`)
   are shared with `tools/fusion-hints`. There is **one resolver**, and it always follows the quant
   table for the storage dtype (the manifest quant for a distribution mirror, `--quant` or the single
-  group present for a series output), so both tools open the same first shard of the same component.
-  Series shard sequences are resolved through `resolveShards`, the mirror of the exporter's
-  `karume.shards.resolve_shards`.
+  group present for a series output), so both tools open part 0 of the same component's container.
+  Series part sequences are resolved through `resolveParts`, the mirror of the exporter's
+  `karume.container.container_parts`.
 - Whether a scenario is valid is decided in one place too (`resolveComponentBindings`): a
   `<component>.SYM` key naming a symbol the component does not declare, and a symbol the shapes use
   but the scenario does not bind, both fail with the same message in either tool.

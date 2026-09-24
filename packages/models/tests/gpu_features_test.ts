@@ -6,7 +6,7 @@
 // 取得後の検査（`assertGpuFeaturesGranted`）も GPU 無しで踏む。`GpuContext` は runtime が値と
 // して公開しない（`acquireGpu` が唯一の入口 — ADR 0008）ので、向こうの helper
 // `fake-gpu.ts` の `fakeGpuContext`（= **実物の `GpuContext`** に fake device を包む）を使う
-// （`shard_loading_test.ts` の⑧が先例）。自前に偽物を組むと検査対象そのものが偽物になるが、
+// （`container_loading_test.ts` の⑧が先例）。自前に偽物を組むと検査対象そのものが偽物になるが、
 // 実物を包む限り検査対象は本物のままである。
 //
 // 有効側の対照（feature を持つ device では通る）だけは helper に features を渡す口が要るので

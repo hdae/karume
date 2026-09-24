@@ -4,7 +4,7 @@
  *     # 配布形（karume.json のある根 — 既定モデル・家族の既定シナリオ）
  *     deno run -A tools/fusion-hints/main.ts enumerate --source models/karume-anima \
  *         --out outputs/bench/karume-anima/2026-09-03_fusion-hints
- *     # 系列出力（先頭 shard を木から探す）・シナリオは明示
+ *     # 系列出力（各コンポーネントの part 0 を木から探す）・シナリオは明示
  *     deno run -A tools/fusion-hints/main.ts enumerate --source outputs/series/gemma4-e2b-decode \
  *         --scenario decode=M:1,C:640 --max-window 9
  *

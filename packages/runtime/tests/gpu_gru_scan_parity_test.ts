@@ -21,15 +21,20 @@
 // を毎ケース確かめる（走査方向を無視した実装は前者だけでは緑のまま通る）。
 
 import { assert, assertEquals } from "@std/assert";
-import { openModel } from "../src/format/container.ts";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
-import { createSession, type Tensor } from "../src/runtime/executor.ts";
-import type { GraphJson } from "./helpers/format.ts";
-import { fill, type FilledTensor, graphModelBuffer, singleOpGraph } from "./helpers/graph.ts";
+import { createSessionFromContainer, type Tensor } from "../src/runtime/executor.ts";
+import {
+  type DeclarationJson,
+  fill,
+  type FilledTensor,
+  GRAPH_NAME,
+  openModelBytes,
+  singleOpDeclaration,
+} from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
-type NodeJson = GraphJson["nodes"][number];
-type ValueSpec = GraphJson["values"][string];
+type NodeJson = DeclarationJson["nodes"][number];
+type ValueSpec = DeclarationJson["values"][string];
 
 type Geometry = {
   readonly time: number;
@@ -53,7 +58,7 @@ type Geometry = {
  * MUST: 逆方向は**走査順だけ**を反転し、`cat` へ渡す並びは順方向の時間順のままにする
  * （`flip` を挟まない = op が畳んでいる形と同じ意味論）。
  */
-const decomposedGraph = (geometry: Geometry, reverse: boolean): GraphJson => {
+const decomposedGraph = (geometry: Geometry, reverse: boolean): DeclarationJson => {
   const { time, batch, hidden } = geometry;
   const gates = 3 * hidden;
   const nodes: NodeJson[] = [];
@@ -142,7 +147,7 @@ const decomposedGraph = (geometry: Geometry, reverse: boolean): GraphJson => {
 
   return {
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: {
       ops: ["linear", "slice", "reshape", "add", "sub", "mul", "sigmoid", "tanh", "cat"],
     },
@@ -162,10 +167,14 @@ const decomposedGraph = (geometry: Geometry, reverse: boolean): GraphJson => {
 
 const run = async (
   gpu: GpuContext,
-  graph: GraphJson,
+  graph: DeclarationJson,
   inputs: Readonly<Record<string, FilledTensor>>,
 ): Promise<Tensor> => {
-  const session = await createSession(gpu, openModel(graphModelBuffer(graph)));
+  const session = await createSessionFromContainer(
+    gpu,
+    await openModelBytes(graph, []),
+    GRAPH_NAME,
+  );
   try {
     return (await session.run(inputs))["y"];
   } finally {
@@ -230,10 +239,10 @@ const saturatedInputsFor = (geometry: Geometry): Record<string, FilledTensor> =>
   };
 };
 
-const scanGraph = (op: string, geometry: Geometry): GraphJson => {
+const scanGraph = (op: string, geometry: Geometry): DeclarationJson => {
   const { time, batch, hidden } = geometry;
   const gates = 3 * hidden;
-  return singleOpGraph(
+  return singleOpDeclaration(
     op,
     [[time, batch, gates], [batch, hidden], [gates, hidden], [gates]],
     [[time, batch, hidden]],

@@ -2,33 +2,46 @@
 // 同じ形を引くため。期待値そのものは各テストに置く — 手計算定数を helper へ逃がすと恒真化する）。
 
 import { assertEquals } from "@std/assert";
-import { type KarumeModel, openModel } from "../../src/format/container.ts";
 import type { AdmissionReport, AdmissionScenario } from "../../src/runtime/estimate.ts";
+import { prepareContainer, type PreparedModel } from "../../src/runtime/executor.ts";
+import type { EncodingInput, TensorInput } from "./container-write.ts";
 import { f16BytesFromBits, f32ToF16Bits } from "./f16.ts";
-import { f32Bytes, type GraphJson, type TensorSpec } from "./format.ts";
-import { graphModelBuffer } from "./graph.ts";
+import { type DeclarationJson, f32Bytes, GRAPH_NAME, memoryModel } from "./model-fixture.ts";
 
+/**
+ * 宣言 + 供給 → `PreparedModel`（admission の入口）。
+ *
+ * 供給元は**メモリ内容器**にしてある: 見積りは合流後の `IrGraph` だけで決まり `krm` の目次には
+ * 1 バイトも依らないので、容器を書く（= sha256 を掛ける非同期）経路を通す理由が無い。
+ */
 export const openGraph = (
-  graph: GraphJson,
-  tensors: readonly TensorSpec[] = [],
-): KarumeModel => openModel(graphModelBuffer(graph, tensors));
+  graph: DeclarationJson,
+  tensors: readonly TensorInput[] = [],
+): PreparedModel => prepareContainer(memoryModel(graph, tensors), GRAPH_NAME);
+
+/**
+ * 供給 1 本（IR v2 では**initializer 名がそのまま実体の鍵**なので、渡すのは宣言の名前）。
+ * 既定の格納は `f32`（丸ごと 1 本・companion scale なし）。
+ */
+export const weight = (
+  initializer: string,
+  bytes: Uint8Array<ArrayBuffer>,
+  encoding: EncodingInput = { codec: "f32" },
+): TensorInput => ({ graph: GRAPH_NAME, initializer, bytes, encoding });
 
 /** f16 のバイト列（値そのものは見ないので 0 で埋める — 見るのはバイト数だけ）。 */
 export const f16Zeros = (count: number): Uint8Array<ArrayBuffer> =>
   f16BytesFromBits(new Array(count).fill(f32ToF16Bits(0)));
 
 /** 記号容量 `C` の k と数値容量の v を持つグラフ（append は 1 スロット 1 本 MUST）。 */
-export const stateGraph = (): GraphJson => ({
+export const stateGraph = (): DeclarationJson => ({
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["matmul", "state_append"] },
   symbols: ["T", "C"],
   inputs: [{ name: "x", dtype: "f32", shape: ["T", 4] }],
   outputs: ["y"],
-  initializers: {
-    w: { tensor: "m.w", storage: { dtype: "f32" } },
-    chunk: { tensor: "m.chunk", storage: { dtype: "f32" } },
-  },
+  initializers: { w: {}, chunk: {} },
   values: {
     w: { dtype: "f32", shape: [4, 3] },
     chunk: { dtype: "f32", shape: [1, 2, 4, 4] },
@@ -45,16 +58,13 @@ export const stateGraph = (): GraphJson => ({
   ],
 });
 
-export const stateModel = (): KarumeModel =>
-  openGraph(stateGraph(), [
-    { name: "m.w", dtype: "F32", shape: [4, 3], data: f32Bytes(new Array(12).fill(0)) },
-    {
-      name: "m.chunk",
-      dtype: "F32",
-      shape: [1, 2, 4, 4],
-      data: f32Bytes(new Array(32).fill(0)),
-    },
-  ]);
+/** {@link stateGraph} に対応する供給（値は見ないので 0 で埋める）。 */
+export const stateTensors = (): readonly TensorInput[] => [
+  weight("w", f32Bytes(new Array(12).fill(0))),
+  weight("chunk", f32Bytes(new Array(32).fill(0))),
+];
+
+export const stateModel = (): PreparedModel => openGraph(stateGraph(), stateTensors());
 
 /**
  * states 形 attention 1 本 + `state_append` 2 本（gpu_state_execution_test の実行形と同じ姿の
@@ -65,7 +75,7 @@ export const stateModel = (): KarumeModel =>
  * `Hkv·C·D·4` で H に依らないので、H を上げると「スロットは束縛上限に収まるが S の 1 行は
  * 収まらない」形（= 行ブロックが複数枚に割れる形）を絞った device 上で作れる。
  */
-export const stateAttentionGraph = (window?: number, heads = 4): GraphJson => {
+export const stateAttentionGraph = (window?: number, heads = 4): DeclarationJson => {
   const windowAttrs: Record<string, number> = window === undefined ? {} : { window };
   const append = (name: string, slot: string) => ({
     op: "state_append",
@@ -76,7 +86,7 @@ export const stateAttentionGraph = (window?: number, heads = 4): GraphJson => {
   });
   return {
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: ["attention", "state_append"] },
     symbols: ["M", "C"],
     inputs: [

@@ -62,8 +62,15 @@ export type PleFixture = {
 export const quantized = (id: number, layer: number, column: number): number =>
   id * 10 + layer * 2 + column;
 
-/** per-row scale は `1 / 2^(層+1)`（2 冪で厳密）。 */
-export const scaleOf = (layer: number): number => 1 / 2 ** (layer + 1);
+/**
+ * per-row scale は `(id+1) / 2^(層+1)`。
+ *
+ * MUST: **token にも依存させる**。層だけの関数にすると scale 表は 1 token 行ぶんの繰り返しに
+ * なり、行の入れ替え・巡回・block の取り違えが「同じバイト列」になって、並びを見る主張が
+ * どれも無感になる（scale がずれると形も dtype も合ったまま別 token で逆量子化する沈黙誤値）。
+ * 分子は整数・分母は 2 冪なので f32 で厳密（逆量子化の期待値がテスト側で閉じる条件）。
+ */
+export const scaleOf = (id: number, layer: number): number => (id + 1) / 2 ** (layer + 1);
 
 /** 格納 dtype で切り詰めた後の量子化値（packed は符号付き範囲へ折り返す）。 */
 export const storedValue = (
@@ -85,7 +92,7 @@ export const expectedValue = (
   layer: number,
   column: number,
 ): number =>
-  Math.fround(storedValue(spec.storage ?? "i8", id, layer, column) * scaleOf(layer)) *
+  Math.fround(storedValue(spec.storage ?? "i8", id, layer, column) * scaleOf(id, layer)) *
   spec.embedScale;
 
 /** 表 1 本ぶんの block 分割（`[start, stop)` の昇順・隙間なし）。 */
@@ -136,7 +143,7 @@ const scalesBlockBytes = (
   const scales = new Float32Array((stop - start) * spec.layers);
   for (let row = 0; row < stop - start; row += 1) {
     for (let layer = 0; layer < spec.layers; layer += 1) {
-      scales[row * spec.layers + layer] = scaleOf(layer);
+      scales[row * spec.layers + layer] = scaleOf(start + row, layer);
     }
   }
   return new Uint8Array(scales.buffer);

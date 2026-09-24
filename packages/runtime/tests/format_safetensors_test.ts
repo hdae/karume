@@ -11,7 +11,7 @@ import {
   f32Bytes,
   packSafetensors,
   packSafetensorsRaw,
-} from "./helpers/format.ts";
+} from "./helpers/safetensors.ts";
 
 const F32_2 = f32Bytes([1, 2]);
 
@@ -21,12 +21,12 @@ Deno.test("parseSafetensors: 正常系はテンソル表と __metadata__ を取�
       { name: "a", dtype: "F32", shape: [2, 1], data: f32Bytes([1, 2]) },
       { name: "b", dtype: "I8", shape: [3], data: new Uint8Array([7, 8, 9]) },
     ],
-    { karume_ir: "{}", extra: "x" },
+    { note: "{}", extra: "x" },
   );
   const file = parseSafetensors(buffer);
 
   assertEquals([...file.tensors.keys()].sort(), ["a", "b"]);
-  assertEquals(file.metadata.get("karume_ir"), "{}");
+  assertEquals(file.metadata.get("note"), "{}");
   assertEquals(file.metadata.get("extra"), "x");
 
   const a = file.tensors.get("a");
@@ -79,6 +79,19 @@ Deno.test("parseSafetensors: 未対応 dtype を拒否する", () => {
     new Uint8Array(8),
   );
   assertThrows(() => parseSafetensors(buffer), SafetensorsError, "未対応の dtype");
+
+  // 旧配布形の方言だった packed 4bit / 2bit（公式 safetensors には無い綴り）も同じ門で落ちる
+  // MUST — 黙って受理すると、容器（`krm`）へ移したはずの量子化格納が資産経路から戻ってくる。
+  for (const dtype of ["I4", "I2"]) {
+    assertThrows(
+      () =>
+        parseSafetensors(
+          packSafetensors({ w: { dtype, shape: [8], data_offsets: [0, 4] } }, new Uint8Array(4)),
+        ),
+      SafetensorsError,
+      "未対応の dtype",
+    );
+  }
 });
 
 Deno.test("parseSafetensors: shape と data_offsets のサイズ不一致を拒否する", () => {
@@ -149,42 +162,6 @@ Deno.test("parseSafetensors: 要素サイズに整列しないテンソルを拒
       b: { dtype: "F32", shape: [1], data_offsets: [1, 5] },
     },
     new Uint8Array(5),
-  );
-  assertThrows(() => parseSafetensors(buffer), SafetensorsError, "整列していない");
-});
-
-// ADR 0069 決定 2: I4 は shape を論理形のまま持ち、バイト数だけが bit 幅から決まる（numel/2）。
-Deno.test("parseSafetensors: I4 は論理 shape のまま numel/2 バイトで受理する", () => {
-  const buffer = buildSafetensors([
-    { name: "w", dtype: "I4", shape: [3, 32], data: new Uint8Array(48) },
-  ]);
-  const file = parseSafetensors(buffer);
-  const view = file.tensors.get("w");
-  if (view === undefined) throw new Error("tensor w が無い");
-
-  assertEquals(view.shape, [3, 32]);
-  assertEquals(view.byteLength, 48);
-  // 4bit の TypedArray は存在しないので view は raw バイトのまま（3 面目 = raw + 論理 numel）
-  assertEquals(tensorBytes(file, view).byteLength, 48);
-});
-
-// 要素数が奇数だと bit 総量が byte 境界に乗らず、末尾要素が半バイトだけ突き出す。
-Deno.test("parseSafetensors: 要素数が奇数の I4 を拒否する", () => {
-  const buffer = packSafetensors(
-    { w: { dtype: "I4", shape: [3], data_offsets: [0, 2] } },
-    new Uint8Array(2),
-  );
-  assertThrows(() => parseSafetensors(buffer), SafetensorsError, "byte 境界に乗らない");
-});
-
-// I4 は要素整列（0.5 バイト）ではなく「テンソル先頭が 4 バイト整列」を要求する（u32 束縛）。
-Deno.test("parseSafetensors: I4 のテンソル先頭が 4 バイト整列していない形を拒否する", () => {
-  const buffer = packSafetensors(
-    {
-      a: { dtype: "I8", shape: [2], data_offsets: [0, 2] },
-      w: { dtype: "I4", shape: [4], data_offsets: [2, 4] },
-    },
-    new Uint8Array(4),
   );
   assertThrows(() => parseSafetensors(buffer), SafetensorsError, "整列していない");
 });
@@ -284,7 +261,7 @@ const HEADER_FIXTURE = buildSafetensors(
     { name: "a", dtype: "F32", shape: [2, 1], data: f32Bytes([1, 2]) },
     { name: "b", dtype: "I8", shape: [3], data: new Uint8Array([7, 8, 9]) },
   ],
-  { karume_ir: "{}", extra: "x" },
+  { note: "{}", extra: "x" },
 );
 
 Deno.test("parseSafetensorsHeader: ヘッダ区間だけで全量解析と同じ表を返す", () => {
@@ -382,5 +359,46 @@ Deno.test("safetensorsHeaderLength: 8 バイト未満の prefix を拒否する"
     () => safetensorsHeaderLength(new Uint8Array(new ArrayBuffer(7))),
     SafetensorsError,
     "先頭 8 バイトが必要",
+  );
+});
+
+/**
+ * **2 引数形**（`parseSafetensors(buffer, byteLength)`）— 供給側が最大 shard 長の buffer を
+ * 使い回し、そこへ毎回の shard を先頭から読む形では、buffer の末尾に前回の残骸が居る。
+ * 長さの検査が buffer 全体ではなく**渡された長さ**で行われることと、長さの取り違えが黙って
+ * 通らないことを縛る。
+ */
+const PREFIX_FILE = buildSafetensors([
+  { name: "a", dtype: "F32", shape: [2], data: f32Bytes([1, 2]) },
+]);
+
+Deno.test("parseSafetensors: byteLength を渡せば buffer 末尾の余白（前回の残骸）を無視する", () => {
+  const buffer = new ArrayBuffer(PREFIX_FILE.byteLength + 64);
+  const bytes = new Uint8Array(buffer);
+  bytes.set(new Uint8Array(PREFIX_FILE));
+  bytes.fill(0xab, PREFIX_FILE.byteLength); // 前の shard の残骸に見せる
+  const file = parseSafetensors(buffer, PREFIX_FILE.byteLength);
+
+  const view = file.tensors.get("a");
+  if (view === undefined) throw new Error("tensor a が無い");
+  assertEquals(view.shape, [2]);
+  assertEquals(tensorBytes(file, view), f32Bytes([1, 2]));
+
+  // 長さを渡さなければ余白は「末尾の未使用領域」として従来どおり落ちる。
+  assertThrows(() => parseSafetensors(buffer), SafetensorsError, "未使用領域");
+});
+
+Deno.test("parseSafetensors: buffer より長い byteLength・負・非整数は拒否する", () => {
+  for (const bad of [PREFIX_FILE.byteLength + 1, -1, 1.5]) {
+    assertThrows(() => parseSafetensors(PREFIX_FILE, bad), SafetensorsError, "収まっていない");
+  }
+});
+
+Deno.test("parseSafetensors: byteLength がヘッダ長やデータ節より短ければ従来の門で落ちる", () => {
+  assertThrows(() => parseSafetensors(PREFIX_FILE, 4), SafetensorsError, "短すぎる");
+  assertThrows(
+    () => parseSafetensors(PREFIX_FILE, PREFIX_FILE.byteLength - 4),
+    SafetensorsError,
+    "範囲外",
   );
 });

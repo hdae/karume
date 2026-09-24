@@ -1,11 +1,10 @@
 import { assert, assertEquals, assertRejects } from "@std/assert";
-import { acquireGpu, createSession, openModel } from "../mod.ts";
+import { acquireGpu, createSessionFromContainer } from "../mod.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
-import { fill, graphModelBuffer } from "./helpers/graph.ts";
-import type { GraphJson } from "./helpers/format.ts";
-const graph = (): GraphJson => ({
+import { type DeclarationJson, fill, openGraphModel } from "./helpers/model-fixture.ts";
+const graph = (): DeclarationJson => ({
   format: "karume-ir",
-  version: 1,
+  version: 2,
   symbols: [],
   requires: { ops: ["relu", "neg"] },
   inputs: [{ name: "x", dtype: "f32", shape: [4] }],
@@ -25,10 +24,7 @@ for (const fail of [false, true]) {
     ignore: !GPU_AVAILABLE,
     fn: async () => {
       const gpu = await acquireGpu();
-      const session = await createSession(
-        gpu,
-        openModel(graphModelBuffer(graph())),
-      );
+      const session = await createSessionFromContainer(gpu, await openGraphModel(graph()), "model");
       const original = gpu.device.createComputePipelineAsync.bind(gpu.device);
       const gate = Promise.withResolvers<void>(),
         both = Promise.withResolvers<void>();

@@ -8,16 +8,12 @@
 // なので、算式そのものを手計算の定数で押さえる。
 
 import { assertEquals } from "@std/assert";
-import { type KarumeModel, openModel } from "../src/format/container.ts";
-import { estimateSessionMemory } from "../src/runtime/estimate.ts";
-import { f32Bytes, type GraphJson, type TensorSpec } from "./helpers/format.ts";
-import { graphModelBuffer } from "./helpers/graph.ts";
+import type { PreparedModel } from "../src/runtime/executor.ts";
+import { openGraph, weight } from "./helpers/estimate-graphs.ts";
+import { f32Bytes } from "./helpers/model-fixture.ts";
 
-const openGraph = (graph: GraphJson, tensors: readonly TensorSpec[] = []): KarumeModel =>
-  openModel(graphModelBuffer(graph, tensors));
-
-const workspaceBytes = (model: KarumeModel): number => {
-  const report = estimateSessionMemory(model);
+const workspaceBytes = (model: PreparedModel): number => {
+  const report = model.estimate();
   assertEquals(report.scenarios.map((scenario) => scenario.name), ["run"]);
   return report.scenarios[0].workspaceBytes;
 };
@@ -26,19 +22,15 @@ const workspaceBytes = (model: KarumeModel): number => {
  * `x[1,2] → matmul(w1[2,2]) → h1[1,2] → matmul(w2[2,3]) → h2[1,3] → matmul(w3[3,1]) → h3[1,1]`
  * の 3 段。中間は 8 / 12 / 4 バイトで、**同時に生きるのは高々 2 本**（8+12 = 20）。
  */
-const chainModel = (): KarumeModel =>
+const chainModel = (): PreparedModel =>
   openGraph({
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: ["matmul"] },
     symbols: [],
     inputs: [{ name: "x", dtype: "f32", shape: [1, 2] }],
     outputs: ["h3"],
-    initializers: {
-      w1: { tensor: "m.w1", storage: { dtype: "f32" } },
-      w2: { tensor: "m.w2", storage: { dtype: "f32" } },
-      w3: { tensor: "m.w3", storage: { dtype: "f32" } },
-    },
+    initializers: { w1: {}, w2: {}, w3: {} },
     values: {
       w1: { dtype: "f32", shape: [2, 2] },
       w2: { dtype: "f32", shape: [2, 3] },
@@ -53,9 +45,9 @@ const chainModel = (): KarumeModel =>
       { op: "matmul", ins: ["h2", "w3"], outs: ["h3"], attrs: {} },
     ],
   }, [
-    { name: "m.w1", dtype: "F32", shape: [2, 2], data: f32Bytes(new Array(4).fill(1)) },
-    { name: "m.w2", dtype: "F32", shape: [2, 3], data: f32Bytes(new Array(6).fill(1)) },
-    { name: "m.w3", dtype: "F32", shape: [3, 1], data: f32Bytes(new Array(3).fill(1)) },
+    weight("w1", f32Bytes(new Array(4).fill(1))),
+    weight("w2", f32Bytes(new Array(6).fill(1))),
+    weight("w3", f32Bytes(new Array(3).fill(1))),
   ]);
 
 Deno.test("中間の総量は領域の総和（読み書きの同居禁止で領域が割れ、配り直しはサイズに依らない）", () => {
@@ -69,10 +61,10 @@ Deno.test("中間の総量は領域の総和（読み書きの同居禁止で領
  * `relu` の鎖（形が動かないので中間は全て同じサイズクラス）。`outputs` を差し替えて
  * 「pinned が 1 本増えると slot が 1 本増える」を対にして見る。
  */
-const reluChainModel = (outputs: readonly string[]): KarumeModel =>
+const reluChainModel = (outputs: readonly string[]): PreparedModel =>
   openGraph({
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: ["relu"] },
     symbols: [],
     inputs: [{ name: "x", dtype: "f32", shape: [1, 2] }],

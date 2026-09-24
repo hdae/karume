@@ -12,7 +12,7 @@
 // ② **PLE 逆量子化のビット一致**（ADR 0085 決定 4）: ホスト loader の gather が、台本が torch の
 //    35 表経路で採った `ple.probe.safetensors`（= PLE をグラフに残していたら `embedding` +
 //    直後の `mul` が出していた値そのもの）と**厳密一致**する。GPU を要さない。
-//    併せて「触った shard だけ遅延ロード + LRU」（決定 3）を実測で見る。
+//    併せて「触った block だけ遅延ロード + LRU」（決定 3）を実測で見る。
 // ③ **交差 parity**: ホスト PLE gather + ホスト `argmax(logits)` の greedy ループが、logits
 //    opt-in 系列の `greedy.<case>.safetensors`（torch full re-forward の期待列）と 3 ケース ×
 //    K=16 で厳密一致する。PLE を外に出しても・出口から argmax を外しても**機能が不変**である
@@ -642,7 +642,7 @@ type GenerationRecord = { readonly tokens: number[]; readonly gathers: number };
  * 値契約は「ホストが 0 で埋める」であって「PLE を 0 にする」ではない）。
  */
 const generate = async (
-  session: Awaited<ReturnType<PreparedModel["createSession"]>>,
+  session: Awaited<ReturnType<PreparedModel["createContainerSession"]>>,
   logitsName: string,
   ple: Gemma4Ple,
   prompt: readonly number[],
@@ -720,7 +720,7 @@ Deno.test({
     });
 
     const index = await readPleIndex();
-    // 全 shard 常駐（LRU の観測は GPU 不要の②が持つ — こちらは生成の往復で shard を
+    // 全 block 常駐（LRU の観測は GPU 不要の②が持つ — こちらは生成の往復で block を
     // 読み直さないことだけを見る）。
     const ple = await openPle(allResidentBytes(index));
     const gpu = await acquireGpu();
@@ -782,12 +782,12 @@ Deno.test({
               `${(performance.now() - started).toFixed(0)}ms`,
           );
         }
-        // 遅延ロードが実効（恒真でない）: gather は数十回走るのに、shard の取得は最大でも
+        // 遅延ロードが実効（恒真でない）: gather は数十回走るのに、block の取得は最大でも
         // 本数ぶん。毎回読み直す実装ならここが gather 回数まで伸びる。
         const stats = ple.stats();
         assert(
           totalGathers > stats.loads,
-          `PLE gather ${totalGathers} 回に対し shard 取得 ${stats.loads} 回` +
+          `PLE gather ${totalGathers} 回に対し block 取得 ${stats.loads} 回` +
             `（キャッシュが効いていない）`,
         );
         assert(
@@ -797,7 +797,7 @@ Deno.test({
           } を超える（読み直しが起きている）`,
         );
         console.log(
-          `[e2e] gemma4 product PLE 遅延ロード: gather ${totalGathers} 回 / shard 取得 ` +
+          `[e2e] gemma4 product PLE 遅延ロード: gather ${totalGathers} 回 / block 取得 ` +
             `${stats.loads} 回（全 ${
               index.values.blocks.length + index.scales.blocks.length
             } 本中）`,

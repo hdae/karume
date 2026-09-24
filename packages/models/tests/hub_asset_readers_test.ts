@@ -5,7 +5,7 @@
 //
 // ① **写さない**こと。返るのは view の `buffer` そのもの（GB 級の重みで RAM ピークが倍に
 //    ならない条件）で、同一性で縛れる。
-// ② buffer 全体を占めない view は落とす。通すと `openModel` は隣のバイト列をヘッダとして読む。
+// ② buffer 全体を占めない view は落とす。通すと `openContainer` は隣のバイト列をヘッダとして読む。
 // ③ 文言のラベル（family 名と manifest の表）は呼び手が渡したものが逐語で出る — 各 family の
 //    テストが文言を逐語 assert しているので、ここが落とすと 5 本が一斉に赤になる。
 // ④ decode 段（不正 UTF-8）と parse 段（JSON 構文違反）を別の文言で落とす。
@@ -54,7 +54,7 @@ Deno.test("readAssetBuffer: 資産の有無は Object.hasOwn で見る（prototy
 });
 
 Deno.test("readAssetBuffer: buffer 全体を占めない view は取得層の不変条件破れとして落ちる", () => {
-  // 先頭を 1 バイト飛ばした view。返してしまうと `openModel` は隣のバイト列をヘッダに読む。
+  // 先頭を 1 バイト飛ばした view。返してしまうと `openContainer` は隣のバイト列をヘッダに読む。
   const backing = wholeView([1, 2, 3, 4]);
   const shifted = new Uint8Array(backing.buffer, 1, 2);
   assertThrows(

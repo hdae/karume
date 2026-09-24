@@ -3,12 +3,10 @@
 // そのまま複製されることを固定する。
 
 import { assertEquals } from "@std/assert";
-import { openModel } from "../src/format/container.ts";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { UPSAMPLE_2X_KEY } from "../src/kernels/upsample2x.ts";
-import { createSession, type Tensor } from "../src/runtime/executor.ts";
-import type { GraphJson } from "./helpers/format.ts";
-import { fill, graphModelBuffer } from "./helpers/graph.ts";
+import { createSessionFromContainer, type Tensor } from "../src/runtime/executor.ts";
+import { type DeclarationJson, fill, GRAPH_NAME, openModelBytes } from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
 
 // B>1 / C>1、H/W は奇数、かつ 2*3*5*7=210 は workgroup 幅 256 の非整数倍。
@@ -18,13 +16,13 @@ const WIDE = [30, 7, 2] as const;
 const OUT = [2, 3, 10, 14] as const;
 
 /** 実 exporter の reshape→expand→reshape→reshape→expand→reshape を逐語で組む。 */
-const upsampleGraph = (interpose: boolean, scaleWidth = 2): GraphJson => {
+const upsampleGraph = (interpose: boolean, scaleWidth = 2): DeclarationJson => {
   const wide = [FIRST_RESHAPE[0], FIRST_RESHAPE[1], scaleWidth];
   const wideReshape = [6, 5, 7 * scaleWidth];
   const tallReshape = [6, 5, 1, 7 * scaleWidth];
   const tall = [6, 5, 2, 7 * scaleWidth];
   const out = [2, 3, 10, 7 * scaleWidth];
-  const values: GraphJson["values"] = {
+  const values: DeclarationJson["values"] = {
     first_reshape: { dtype: "f32", shape: [...FIRST_RESHAPE] },
     wide: { dtype: "f32", shape: wide },
     wide_reshape: { dtype: "f32", shape: wideReshape },
@@ -33,7 +31,7 @@ const upsampleGraph = (interpose: boolean, scaleWidth = 2): GraphJson => {
     y: { dtype: "f32", shape: out },
   };
   if (interpose) values.first_alias = { dtype: "f32", shape: [...FIRST_RESHAPE] };
-  const nodes: GraphJson["nodes"] = [
+  const nodes: DeclarationJson["nodes"] = [
     { op: "reshape", ins: ["x"], outs: ["first_reshape"], attrs: {} },
   ];
   if (interpose) {
@@ -49,7 +47,7 @@ const upsampleGraph = (interpose: boolean, scaleWidth = 2): GraphJson => {
   );
   return {
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: ["reshape", "expand"] },
     symbols: [],
     inputs: [{ name: "x", dtype: "f32", shape: [...SHAPE] }],
@@ -124,8 +122,16 @@ Deno.test({
       0x7fc01234,
       0xff801234,
     ]);
-    const fused = await createSession(gpu, openModel(graphModelBuffer(upsampleGraph(false))));
-    const primitive = await createSession(gpu, openModel(graphModelBuffer(upsampleGraph(true))));
+    const fused = await createSessionFromContainer(
+      gpu,
+      await openModelBytes(upsampleGraph(false), []),
+      GRAPH_NAME,
+    );
+    const primitive = await createSessionFromContainer(
+      gpu,
+      await openModelBytes(upsampleGraph(true), []),
+      GRAPH_NAME,
+    );
     try {
       const fusedOut = (await fused.run({ x })).y;
       const primitiveOut = (await primitive.run({ x })).y;
@@ -159,7 +165,11 @@ Deno.test({
     try {
       const outputGraph = upsampleGraph(false);
       outputGraph.outputs = ["wide", "y"];
-      const outputSession = await createSession(gpu, openModel(graphModelBuffer(outputGraph)));
+      const outputSession = await createSessionFromContainer(
+        gpu,
+        await openModelBytes(outputGraph, []),
+        GRAPH_NAME,
+      );
       try {
         await outputSession.run({ x });
         assertEquals(
@@ -177,7 +187,11 @@ Deno.test({
       consumerGraph.nodes.push({ op: "neg", ins: ["wide"], outs: ["wide_copy"], attrs: {} });
       consumerGraph.requires.ops.push("neg");
       consumerGraph.outputs = ["wide_copy", "y"];
-      const consumerSession = await createSession(gpu, openModel(graphModelBuffer(consumerGraph)));
+      const consumerSession = await createSessionFromContainer(
+        gpu,
+        await openModelBytes(consumerGraph, []),
+        GRAPH_NAME,
+      );
       try {
         await consumerSession.run({ x });
         assertEquals(
@@ -191,7 +205,11 @@ Deno.test({
       }
 
       const nearGraph = upsampleGraph(false, 3);
-      const nearSession = await createSession(gpu, openModel(graphModelBuffer(nearGraph)));
+      const nearSession = await createSessionFromContainer(
+        gpu,
+        await openModelBytes(nearGraph, []),
+        GRAPH_NAME,
+      );
       try {
         const output = (await nearSession.run({ x })).y;
         assertEquals(nearSession.diagnostics().submit.dispatchCount, 2, "x2 以外は fallback");

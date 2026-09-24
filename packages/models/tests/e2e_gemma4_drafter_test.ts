@@ -233,7 +233,7 @@ const pipelineConfig = () => {
   return parseGemma4PipelineConfig(entry.pipelineConfig);
 };
 
-/** グラフ shard 1 本ずつを読んで宣言を取り出す（データ節は 1 バイトも要らない）。 */
+/** 部品 1 本ずつの記述文書から宣言を取り出す（データ節は 1 バイトも要らない）。 */
 const readGraphs = async () => ({
   target: (await targetComponent()).graph,
   drafter: (await drafterComponent()).graph,

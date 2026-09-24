@@ -16,16 +16,19 @@ import {
 import { GpuValidationError } from "../src/gpu/error-scope.ts";
 import { DEFAULT_SUBMIT_POLICY } from "../src/gpu/submit.ts";
 import { BUFFER_USAGE } from "../src/gpu/webgpu-constants.ts";
-import { createSession, type Tensor } from "../src/runtime/executor.ts";
+import { createSessionFromContainer, type Tensor } from "../src/runtime/executor.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
 import type { EnqueueRead, RunOutputs } from "../src/runtime/session-types.ts";
-import { openModel } from "../src/format/container.ts";
-import { graphModelBuffer, singleOpGraph } from "./helpers/graph.ts";
+import { openGraphModel, singleOpDeclaration } from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
 const input = (): Tensor => ({ dtype: "f32", shape: [3], data: Float32Array.of(1, 2, 3) });
-const session = (gpu: GpuContext) =>
-  createSession(gpu, openModel(graphModelBuffer(singleOpGraph("neg", [[3]], [[3]]))));
+const session = async (gpu: GpuContext) =>
+  await createSessionFromContainer(
+    gpu,
+    await openGraphModel(singleOpDeclaration("neg", [[3]], [[3]])),
+    "model",
+  );
 const test = (name: string, fn: () => Promise<void>): void =>
   Deno.test({ name, ignore: !GPU_AVAILABLE, fn });
 

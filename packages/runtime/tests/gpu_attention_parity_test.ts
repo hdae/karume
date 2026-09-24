@@ -17,12 +17,17 @@
 // 畳むので、B=1 だけでは軸の取り違えが値に出ない。
 
 import { assert, assertEquals, assertRejects } from "@std/assert";
-import { openModel } from "../src/format/container.ts";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
-import { createSession, type Tensor } from "../src/runtime/executor.ts";
+import { createSessionFromContainer, type Tensor } from "../src/runtime/executor.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
-import type { GraphJson } from "./helpers/format.ts";
-import { fill, type FilledTensor, graphModelBuffer, singleOpGraph } from "./helpers/graph.ts";
+import {
+  type DeclarationJson,
+  fill,
+  type FilledTensor,
+  GRAPH_NAME,
+  openGraphModel,
+  singleOpDeclaration,
+} from "./helpers/model-fixture.ts";
 import { attentionPvKey, attentionQkKey } from "../src/kernels/attention.ts";
 import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
 
@@ -54,12 +59,12 @@ type Shape = {
  * 書くのが要点で、融合側は同じ加算を ①QK の書き出し epilogue で行う（丸めの位置も回数も
  * 同じ = ビット同一の根拠）。
  */
-const decomposedGraph = (shape: Shape, masked = false): GraphJson => {
+const decomposedGraph = (shape: Shape, masked = false): DeclarationJson => {
   const { b, h, m, n, d } = shape;
   const heads = b * h;
   return {
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: {
       ops: ["mul", "permute", "reshape", "bmm", "softmax", "expand", ...(masked ? ["add"] : [])],
     },
@@ -124,7 +129,7 @@ const decomposedGraph = (shape: Shape, masked = false): GraphJson => {
 };
 
 /** 上のグラフの `mul` は 2 本とも同じ scale 入力を取る（k 側の ins を後から差す）。 */
-const withScaleInput = (graph: GraphJson): GraphJson => {
+const withScaleInput = (graph: DeclarationJson): DeclarationJson => {
   for (const node of graph.nodes) {
     if (node.op === "mul" && node.ins.length === 1) node.ins.push("sc");
   }
@@ -133,10 +138,10 @@ const withScaleInput = (graph: GraphJson): GraphJson => {
 
 const run = async (
   gpu: GpuContext,
-  graph: GraphJson,
+  graph: DeclarationJson,
   inputs: Readonly<Record<string, FilledTensor>>,
 ): Promise<Tensor> => {
-  const session = await createSession(gpu, openModel(graphModelBuffer(graph)));
+  const session = await createSessionFromContainer(gpu, await openGraphModel(graph), GRAPH_NAME);
   try {
     return (await session.run(inputs))["y"];
   } finally {
@@ -208,7 +213,7 @@ Deno.test({
 
         const fused = await run(
           gpu,
-          singleOpGraph("attention", [q.shape, k.shape, v.shape], [[b, h, m, d]], {
+          singleOpDeclaration("attention", [q.shape, k.shape, v.shape], [[b, h, m, d]], {
             attrs: { scale },
           }),
           { x0: q, x1: k, x2: v },
@@ -275,9 +280,14 @@ Deno.test({
 
         const fused = await run(
           gpu,
-          singleOpGraph("attention", [q.shape, k.shape, v.shape, mask.shape], [[b, h, m, d]], {
-            attrs: { scale },
-          }),
+          singleOpDeclaration(
+            "attention",
+            [q.shape, k.shape, v.shape, mask.shape],
+            [[b, h, m, d]],
+            {
+              attrs: { scale },
+            },
+          ),
           { x0: q, x1: k, x2: v, x3: mask },
         );
         const split = await run(gpu, withScaleInput(decomposedGraph(shape, true)), {
@@ -308,7 +318,7 @@ Deno.test({
         // 添字を取り違えても値は変わるが、この門が守るのは「mask が丸ごと無視されていない」形。
         const unmasked = await run(
           gpu,
-          singleOpGraph("attention", [q.shape, k.shape, v.shape], [[b, h, m, d]], {
+          singleOpDeclaration("attention", [q.shape, k.shape, v.shape], [[b, h, m, d]], {
             attrs: { scale },
           }),
           { x0: q, x1: k, x2: v },
@@ -341,7 +351,7 @@ const MASK_WIRING_SHAPE = { b: 1, h: 2, m: 8, n: 8, d: 8 };
 
 /** mask 付き 1 ノードのグラフと入力（結線テストと census が同じ形を撃つ）。 */
 const maskedAttention = (): {
-  graph: ReturnType<typeof singleOpGraph>;
+  graph: ReturnType<typeof singleOpDeclaration>;
   inputs: Record<string, Tensor>;
 } => {
   const { b, h, m, n, d } = MASK_WIRING_SHAPE;
@@ -349,7 +359,7 @@ const maskedAttention = (): {
   const k = fill([b, h, n, d], KEY);
   const v = fill([b, h, n, d], VALUE);
   const mask = { dtype: "f32" as const, shape: [1, 1, m, n], data: bandMask(m, n, 2, -1e30) };
-  const graph = singleOpGraph(
+  const graph = singleOpDeclaration(
     "attention",
     [q.shape, k.shape, v.shape, mask.shape],
     [[b, h, m, d]],
@@ -366,7 +376,7 @@ Deno.test({
     try {
       const { graph, inputs } = maskedAttention();
       // i8a8 との組み合わせは fail loudly（縮退しない）
-      const i8a8 = await createSession(gpu, openModel(graphModelBuffer(graph)), {
+      const i8a8 = await createSessionFromContainer(gpu, await openGraphModel(graph), GRAPH_NAME, {
         attentionCompute: "a8",
       });
       try {
@@ -396,7 +406,11 @@ Deno.test({
     const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
     try {
       const { graph, inputs } = maskedAttention();
-      const session = await createSession(gpu, openModel(graphModelBuffer(graph)));
+      const session = await createSessionFromContainer(
+        gpu,
+        await openGraphModel(graph),
+        GRAPH_NAME,
+      );
       try {
         await session.run(inputs);
         const entries = session.diagnostics().lastRunTiming?.entries ?? [];
@@ -447,13 +461,19 @@ Deno.test({
         const mask = { dtype: "f32" as const, shape: [1, 1, m, n], data: bandMask(m, n, 2, -1e30) };
         const attrs = { scale: halfScale(d) };
 
-        const masked = await createSession(
+        const masked = await createSessionFromContainer(
           gpu,
-          openModel(graphModelBuffer(
-            singleOpGraph("attention", [q.shape, k.shape, v.shape, mask.shape], [[b, h, m, d]], {
+          await openGraphModel(
+            singleOpDeclaration("attention", [q.shape, k.shape, v.shape, mask.shape], [[
+              b,
+              h,
+              m,
+              d,
+            ]], {
               attrs,
             }),
-          )),
+          ),
+          GRAPH_NAME,
           { attentionCompute: "a8" },
         );
         try {
@@ -467,11 +487,14 @@ Deno.test({
           await masked.dispose();
         }
 
-        const plain = await createSession(
+        const plain = await createSessionFromContainer(
           gpu,
-          openModel(graphModelBuffer(
-            singleOpGraph("attention", [q.shape, k.shape, v.shape], [[b, h, m, d]], { attrs }),
-          )),
+          await openGraphModel(
+            singleOpDeclaration("attention", [q.shape, k.shape, v.shape], [[b, h, m, d]], {
+              attrs,
+            }),
+          ),
+          GRAPH_NAME,
           { attentionCompute: "a8" },
         );
         try {

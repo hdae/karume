@@ -42,7 +42,7 @@ export type FromPretrainedHubOptions = {
    * 取得層が 429 / 503 を取り直す 1 回ごとの通知先（待機に入る**前**に届く）。アプリが
    * 「rate limit 中・あと N 秒待つ」を出せるようにするための席で、無指定だと数十秒の沈黙に見える。
    *
-   * 届く範囲は manifest 取得（`loadManifest`）と資産取得（shard の逐次面・prefetch・全量面）の
+   * 届く範囲は manifest 取得（`loadManifest`）と資産取得（容器の part の逐次面・prefetch・全量面）の
    * **両方** — この 1 本が `fromPretrained` の取得全部へ渡る。リスナーが throw しても取得は
    * 落ちない（取得層が隔離して warn する）。
    */

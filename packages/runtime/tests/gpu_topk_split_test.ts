@@ -1,7 +1,11 @@
 import { assert, assertEquals } from "@std/assert";
-import { acquireGpu, createSession, estimateSessionMemory, openModel } from "../mod.ts";
-import { graphModelBuffer, singleOpGraph } from "./helpers/graph.ts";
-import type { GraphJson } from "./helpers/format.ts";
+import { acquireGpu, prepareContainer } from "../mod.ts";
+import {
+  type DeclarationJson,
+  GRAPH_NAME,
+  openModelBytes,
+  singleOpDeclaration,
+} from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
 Deno.test({
@@ -34,13 +38,13 @@ Deno.test({
         bits[4 * dim + 8192] = 0x7f800000;
         bits[6 * dim + 8192] = 0xffc04321;
         bits[7 * dim + 8192] = 0x80000000;
-        const graph = singleOpGraph("topk", [[rows, dim]], [[rows, 1], [rows, 1]], {
+        const graph = singleOpDeclaration("topk", [[rows, dim]], [[rows, 1], [rows, 1]], {
           outDtypes: ["f32", "i32"],
           attrs: { k: 1 },
         });
-        const model = openModel(graphModelBuffer(graph));
-        const expected = estimateSessionMemory(model);
-        const session = await createSession(gpu, model);
+        const prepared = prepareContainer(await openModelBytes(graph, []), GRAPH_NAME);
+        const expected = prepared.estimate();
+        const session = await prepared.createContainerSession(gpu);
         try {
           const out = await session.run({
             x0: { dtype: "f32", shape: [rows, dim], data },
@@ -70,9 +74,9 @@ Deno.test({
   },
 });
 
-const intermediateGraph = (rows: number, dim: number): GraphJson => ({
+const intermediateGraph = (rows: number, dim: number): DeclarationJson => ({
   format: "karume-ir",
-  version: 1,
+  version: 2,
   symbols: [],
   requires: { ops: ["neg", "topk"] },
   inputs: [{ name: "x", dtype: "f32", shape: [rows, dim] }],
@@ -98,10 +102,10 @@ Deno.test({
     const rows = 8, dim = 32769;
     const gpu = await acquireGpu();
     try {
-      const session = await createSession(
-        gpu,
-        openModel(graphModelBuffer(intermediateGraph(rows, dim))),
-      );
+      const session = await prepareContainer(
+        await openModelBytes(intermediateGraph(rows, dim), []),
+        GRAPH_NAME,
+      ).createContainerSession(gpu);
       try {
         for (let frame = 0; frame < 2; frame++) {
           const data = new Float32Array(rows * dim).fill(1000);
@@ -126,10 +130,10 @@ Deno.test({
   },
 });
 
-Deno.test("topk1 mergeで同時に必要な元入力・部分結果・2出力を見積りに含める", () => {
+Deno.test("topk1 mergeで同時に必要な元入力・部分結果・2出力を見積りに含める", async () => {
   const rows = 512, dim = 16384;
-  const model = openModel(graphModelBuffer(intermediateGraph(rows, dim)));
-  const estimate = estimateSessionMemory(model);
+  const opened = await openModelBytes(intermediateGraph(rows, dim), []);
+  const estimate = prepareContainer(opened, GRAPH_NAME).estimate();
   // mergeは元入力と部分結果を読みつつ、値と添字を別の領域に書く必要がある。
   const minimum = rows * dim * 4 + rows * 4 * 8 + rows * 8;
   const workspace = estimate.scenarios[0].workspaceBytes;
@@ -143,14 +147,20 @@ Deno.test({
     const gpu = await acquireGpu();
     try {
       for (const dim of [16383, 16384, 262144]) {
-        const model = openModel(graphModelBuffer(singleOpGraph(
-          "topk",
-          [[0, dim]],
-          [[0, 1], [0, 1]],
-          { outDtypes: ["f32", "i32"], attrs: { k: 1 } },
-        )));
-        const expected = estimateSessionMemory(model);
-        const session = await createSession(gpu, model);
+        const prepared = prepareContainer(
+          await openModelBytes(
+            singleOpDeclaration(
+              "topk",
+              [[0, dim]],
+              [[0, 1], [0, 1]],
+              { outDtypes: ["f32", "i32"], attrs: { k: 1 } },
+            ),
+            [],
+          ),
+          GRAPH_NAME,
+        );
+        const expected = prepared.estimate();
+        const session = await prepared.createContainerSession(gpu);
         try {
           for (let frame = 0; frame < 2; frame++) {
             const out = await session.run({

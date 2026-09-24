@@ -28,7 +28,6 @@
 
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { gridStrideWorkgroups, tiledWorkgroups } from "../src/codegen/dispatch.ts";
-import { openModel } from "../src/format/container.ts";
 import { RunArena } from "../src/gpu/arena.ts";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
 import { PipelineCache } from "../src/gpu/pipeline-cache.ts";
@@ -56,14 +55,14 @@ import {
 } from "../src/kernels/attention.ts";
 import { quantizeRowsTieMargin, referenceAttentionQkI8a8 } from "../src/reference/i8a8.ts";
 import {
-  createSession,
+  createSessionFromContainer,
   I8A8_DOT,
   type I8a8Dot,
   type SessionOptions,
   type Tensor,
 } from "../src/runtime/executor.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
-import { fill, graphModelBuffer, singleOpGraph } from "./helpers/graph.ts";
+import { fill, GRAPH_NAME, openGraphModel, singleOpDeclaration } from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
 
 const STORAGE_IN = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
@@ -448,10 +447,15 @@ const runAttention = async (
   const q = fill([b, h, m, d], QUERY);
   const k = fill([b, h, n, d], KEY);
   const v = fill([b, h, n, d], VALUE);
-  const graph = singleOpGraph("attention", [q.shape, k.shape, v.shape], [[b, h, m, d]], {
+  const graph = singleOpDeclaration("attention", [q.shape, k.shape, v.shape], [[b, h, m, d]], {
     attrs: { scale: halfScale(d) },
   });
-  const session = await createSession(gpu, openModel(graphModelBuffer(graph)), options);
+  const session = await createSessionFromContainer(
+    gpu,
+    await openGraphModel(graph),
+    GRAPH_NAME,
+    options,
+  );
   try {
     const outputs = await session.run({ x0: q, x1: k, x2: v });
     const timing = session.diagnostics().lastRunTiming;

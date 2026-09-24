@@ -1,19 +1,31 @@
 // Session のライフサイクルと fail loudly（実 GPU — createSession が device を要求するため）。
-// GPU に依らない 1 本（IR パーサの束縛検査）は runtime_executor_test.ts に置く。
+// GPU に依らない 1 本（IR パーサの束縛検査）は runtime_executor_test.ts に置く。例外は
+// "__proto__" の 2 本で、krm 側の拒否とメモリ経路側の実行が同じ 2 つのフィクスチャを共有する
+// ため片割れ（krm 側）だけがここに GPU 無しで同居する。
 
-import { assertEquals, assertRejects } from "@std/assert";
+import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import { DispatchLimitError } from "../src/codegen/errors.ts";
-import { ContainerError, openModel } from "../src/format/container.ts";
+import { ContainerFormatError } from "../src/format/container/header.ts";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { defaultGemmGeometry, gemmTileN } from "../src/kernels/gemm-geometry.ts";
 import { DEFAULT_SUBMIT_POLICY } from "../src/gpu/submit.ts";
+import { RuntimeSupportError } from "../src/ops/support.ts";
 import { allclose, compareTensors, formatAllclose } from "../src/reference/allclose.ts";
 import { applyReferenceOp, applyReferenceOpOutputs, refTensor } from "../src/reference/ops.ts";
-import { createSession, type SessionOptions, type Tensor } from "../src/runtime/executor.ts";
+import {
+  createSessionFromContainer,
+  type SessionOptions,
+  type Tensor,
+} from "../src/runtime/executor.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
-import { B, chainGraph, chainModelBuffer, W } from "./helpers/chain-graph.ts";
-import { f32Bytes, type GraphJson } from "./helpers/format.ts";
-import { fill, graphModelBuffer } from "./helpers/graph.ts";
+import { B, chainGraph, openChainModel, W } from "./helpers/chain-graph.ts";
+import {
+  type DeclarationJson,
+  f32Bytes,
+  fill,
+  memoryModel,
+  openGraphModel,
+} from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
 const expectedChain = (x: Tensor): ArrayLike<number> => {
@@ -27,7 +39,7 @@ Deno.test({
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
-    const session = await createSession(gpu, openModel(chainModelBuffer()));
+    const session = await createSessionFromContainer(gpu, await openChainModel(), "model");
     try {
       const x = fill([5, 4], (i) => ((i % 11) - 5) * 0.5);
       const outputs = await session.run({ x });
@@ -56,9 +68,9 @@ Deno.test({
  * `__proto__:` は own key ではなく [[Prototype]] 指定になり、JSON.stringify に載らないまま
  * テストが検査対象を外す。
  */
-const protoInputGraph = (): GraphJson => ({
+const protoInputGraph = (): DeclarationJson => ({
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["relu"] },
   symbols: ["__proto__"],
   inputs: [{ name: "__proto__", dtype: "f32", shape: ["__proto__", 3] }],
@@ -68,9 +80,9 @@ const protoInputGraph = (): GraphJson => ({
   nodes: [{ op: "relu", ins: ["__proto__"], outs: ["y"], attrs: {} }],
 });
 
-const protoOutputGraph = (): GraphJson => ({
+const protoOutputGraph = (): DeclarationJson => ({
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["relu"] },
   symbols: ["T"],
   inputs: [{ name: "x", dtype: "f32", shape: ["T", 3] }],
@@ -80,15 +92,32 @@ const protoOutputGraph = (): GraphJson => ({
   nodes: [{ op: "relu", ins: ["x"], outs: ["__proto__"], attrs: {} }],
 });
 
+// krm 経路は記述文書の JSON を `assertJsonSafe` に通すので、"__proto__" が **キー** として
+// 現れる宣言（= 出力名 / 値名）はそこで fail loudly になる — 黙って消えないことの krm 側の形は
+// 「受理されない」であって「名前が届く」ではない。入力名 / シンボル名の側は JSON の値にしか
+// 現れないため krm でも受理され、名前が届くかどうかはメモリ経路と同じ経路で決まる。
+// GPU は要らないので ignore の外に置く。
+Deno.test("'__proto__' を値名に持つ宣言は krm が黙って消さずに拒否する", async () => {
+  const error = await assertRejects(
+    () => openGraphModel(protoOutputGraph()),
+    ContainerFormatError,
+  );
+  assertStringIncludes(error.message, "__proto__");
+});
+
 Deno.test({
-  name: "'__proto__' という入力名 / シンボル名 / 出力名が黙って消えない（実 GPU）",
+  name: "'__proto__' という入力名 / シンボル名 / 出力名がメモリ内容器で黙って消えない（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
     const x = fill([4, 3], (i) => ((i % 7) - 3) * 0.5);
     const expected = applyReferenceOp("relu", [x]).data;
     try {
-      const byInput = await createSession(gpu, openModel(graphModelBuffer(protoInputGraph())));
+      const byInput = await createSessionFromContainer(
+        gpu,
+        memoryModel(protoInputGraph(), []),
+        "model",
+      );
       try {
         // 計算キー MUST（上のフィクスチャと同じ理由 — リテラルでは run に名前が届かない）
         const outputs = await byInput.run({ ["__proto__"]: x });
@@ -97,7 +126,11 @@ Deno.test({
         await byInput.dispose();
       }
 
-      const byOutput = await createSession(gpu, openModel(graphModelBuffer(protoOutputGraph())));
+      const byOutput = await createSessionFromContainer(
+        gpu,
+        memoryModel(protoOutputGraph(), []),
+        "model",
+      );
       try {
         const outputs = await byOutput.run({ x });
         // 素の `{}` に戻すと、ブラウザでは Tensor が [[Prototype]] に化けてこの出力だけ
@@ -126,12 +159,12 @@ Deno.test({
  * 計数を 1 でも取り違えると、`g` の確保がプールから `h` のバッファを受け取り、`r` の中身が
  * 静かに exp(x) に化ける（例外は出ない）。
  */
-const aliasGraph = (aliasOp: "reshape" | "expand"): GraphJson => {
+const aliasGraph = (aliasOp: "reshape" | "expand"): DeclarationJson => {
   // 恒等 expand は複製軸を持たないので入出力 shape が完全一致する形でしか別名化されない。
   const aliasShape = aliasOp === "reshape" ? ["2T", 2] : ["T", 4];
   return {
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: ["neg", aliasOp, "exp", "add"] },
     symbols: ["T"],
     inputs: [{ name: "x", dtype: "f32", shape: ["T", 4] }],
@@ -165,7 +198,11 @@ for (
     ignore: !GPU_AVAILABLE,
     fn: async () => {
       const gpu = await acquireGpu();
-      const session = await createSession(gpu, openModel(graphModelBuffer(aliasGraph(aliasOp))));
+      const session = await createSessionFromContainer(
+        gpu,
+        await openGraphModel(aliasGraph(aliasOp)),
+        "model",
+      );
       try {
         const x = fill([3, 4], (i) => ((i % 7) - 3) * 0.5);
         const outputs = await session.run({ x });
@@ -221,9 +258,9 @@ for (
  * しないので（`Session.#activateBacking`）、1 回ずつでは `bakeBindGroups` の slot 1 束縛・
  * pin 済み出力写像・backed readback の欠落や入れ替わりがアリーナ経路の緑の裏に隠れる。
  */
-const topkLifetimeGraph = (pinIndices: boolean): GraphJson => ({
+const topkLifetimeGraph = (pinIndices: boolean): DeclarationJson => ({
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["topk", "neg", "exp"] },
   symbols: [],
   inputs: [{ name: "x", dtype: "f32", shape: [3, 8] }],
@@ -255,9 +292,10 @@ Deno.test({
       const exponent = applyReferenceOp("exp", [negated]);
 
       // ① 添字をグラフ出力にする形（ピン留めが多出力の slot 1 に効くこと）
-      const session = await createSession(
+      const session = await createSessionFromContainer(
         gpu,
-        openModel(graphModelBuffer(topkLifetimeGraph(true))),
+        await openGraphModel(topkLifetimeGraph(true)),
+        "model",
       );
       try {
         const outputs = await session.run({ x });
@@ -291,9 +329,10 @@ Deno.test({
 
       // ② 添字が誰にも消費されない形（到達不能な値 — 定義ぶんの解放が閉じることの確認。
       // 閉じていなければ run 末尾の assertDrained が落ちる）
-      const orphan = await createSession(
+      const orphan = await createSessionFromContainer(
         gpu,
-        openModel(graphModelBuffer(topkLifetimeGraph(false))),
+        await openGraphModel(topkLifetimeGraph(false)),
+        "model",
       );
       try {
         const outputs = await orphan.run({ x });
@@ -325,7 +364,7 @@ Deno.test({
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
-    const session = await createSession(gpu, openModel(chainModelBuffer()));
+    const session = await createSessionFromContainer(gpu, await openChainModel(), "model");
     try {
       const batch = [
         fill([5, 4], (i) => ((i % 11) - 5) * 0.5),
@@ -354,7 +393,7 @@ Deno.test({
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
-    const session = await createSession(gpu, openModel(chainModelBuffer()));
+    const session = await createSessionFromContainer(gpu, await openChainModel(), "model");
     try {
       const x = fill([6, 4], (i) => ((i % 9) - 4) * 0.5);
       const running = session.run({ x });
@@ -378,7 +417,7 @@ Deno.test({
   fn: async () => {
     const gpu = await acquireGpu();
     // 既定の initialChunkSize=16 では 3 dispatch のグラフがチャンク途中 submit を通らない
-    const session = await createSession(gpu, openModel(chainModelBuffer()), {
+    const session = await createSessionFromContainer(gpu, await openChainModel(), "model", {
       submitPolicy: {
         timeBudgetMs: DEFAULT_SUBMIT_POLICY.timeBudgetMs,
         initialChunkSize: 1,
@@ -409,7 +448,7 @@ Deno.test({
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
-    const session = await createSession(gpu, openModel(chainModelBuffer()));
+    const session = await createSessionFromContainer(gpu, await openChainModel(), "model");
     try {
       assertEquals(session.diagnostics().lastRun, undefined);
       // 重み 2 本は明示 async ステージでアップロード済み
@@ -441,15 +480,17 @@ Deno.test({
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
+    const opened = await openChainModel();
     try {
       // `"i8a8"` は 0.5.0 で `"a8"` へ改名した綴り（ADR 0074 決定 3・互換シム無し）。検査が
       // 無いと下流の等値比較（`=== "a8"`）が全て外れ、opt-in が適用されないまま既定の f32 で
       // 走る = 「a8 を測った」と読める沈黙。
       const error = await assertRejects(
         () =>
-          createSession(
+          createSessionFromContainer(
             gpu,
-            openModel(chainModelBuffer()),
+            opened,
+            "model",
             jsCallerOptions({ linearCompute: "i8a8", attentionScoreStorage: "s16" }),
           ),
         ExecutionError,
@@ -461,7 +502,7 @@ Deno.test({
       assertEquals(error.message.includes("'f32' / 'a8' / 'f16'"), true, error.message);
 
       // 対照: union 内の綴りは従来どおり構築が通る（上が「何を渡しても落ちる」ではない証明）。
-      const session = await createSession(gpu, openModel(chainModelBuffer()), {
+      const session = await createSessionFromContainer(gpu, opened, "model", {
         linearCompute: "a8",
         attentionScoreStorage: "f16",
       });
@@ -477,6 +518,7 @@ Deno.test({
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
+    const opened = await openChainModel();
     try {
       for (
         const options of [
@@ -488,7 +530,7 @@ Deno.test({
         ]
       ) {
         await assertRejects(
-          () => createSession(gpu, openModel(chainModelBuffer()), options),
+          () => createSessionFromContainer(gpu, opened, "model", options),
           ExecutionError,
           "linearGemvReduce",
         );
@@ -504,6 +546,7 @@ Deno.test({
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
+    const opened = await openChainModel();
     try {
       // 予算は「保持集合の上限」（ADR 0095 決定 1）で、見積り（estimate.ts）が勘定側に載せる量
       // でもある。負 / 非整数 / NaN を黙って受けると、`#evictBackingsFor` の比較が常に偽 /
@@ -511,7 +554,7 @@ Deno.test({
       for (const budget of [-1, 1.5, Number.NaN]) {
         await assertRejects(
           () =>
-            createSession(gpu, openModel(chainModelBuffer()), {
+            createSessionFromContainer(gpu, opened, "model", {
               planBackingBudgetBytes: budget,
             }),
           ExecutionError,
@@ -520,7 +563,7 @@ Deno.test({
       }
       // 対照: 0（従来の容量 1）と正の整数は通る（上の 3 本が「何を渡しても落ちる」ではない証明）。
       for (const budget of [0, 4096]) {
-        const session = await createSession(gpu, openModel(chainModelBuffer()), {
+        const session = await createSessionFromContainer(gpu, opened, "model", {
           planBackingBudgetBytes: budget,
         });
         await session.dispose();
@@ -536,6 +579,7 @@ Deno.test({
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
+    const opened = await openChainModel();
     try {
       // 目標は「スレッド数 = n × y タイル数」がこれに届くまで rows を半分にする限界値
       // （src/kernels/linear-gemv.ts）。0 / 負 / NaN を黙って受けると比較が常に偽になり、
@@ -543,7 +587,7 @@ Deno.test({
       for (const target of [0, -1, 1.5, Number.NaN]) {
         await assertRejects(
           () =>
-            createSession(gpu, openModel(chainModelBuffer()), {
+            createSessionFromContainer(gpu, opened, "model", {
               linearGemvRowsThreadTarget: target,
             }),
           ExecutionError,
@@ -552,7 +596,7 @@ Deno.test({
       }
       // 対照: 正の整数は通る（上の 4 本が「何を渡しても落ちる」ではない証明）。
       for (const target of [1, 2048]) {
-        const session = await createSession(gpu, openModel(chainModelBuffer()), {
+        const session = await createSessionFromContainer(gpu, opened, "model", {
           linearGemvRowsThreadTarget: target,
         });
         await session.dispose();
@@ -568,7 +612,7 @@ Deno.test({
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
-    const session = await createSession(gpu, openModel(chainModelBuffer()));
+    const session = await createSessionFromContainer(gpu, await openChainModel(), "model");
     try {
       // 対照: 成功 run の直後は「直近 run」の 4 席が揃って埋まる。
       await session.run({ x: fill([8, 4], (i) => i * 0.25) });
@@ -606,7 +650,7 @@ Deno.test({
  * 消費者ゼロの値はノード境界で解放されないとプール再利用から外れ、確保が 1 本増えて
  * peakTransientBytes が実際より大きく出る。
  */
-const deadValueGraph = (): GraphJson => ({
+const deadValueGraph = (): DeclarationJson => ({
   ...chainGraph(),
   values: {
     w: { dtype: "f32", shape: [4, 3] },
@@ -629,7 +673,11 @@ Deno.test({
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
-    const session = await createSession(gpu, openModel(chainModelBuffer(deadValueGraph())));
+    const session = await createSessionFromContainer(
+      gpu,
+      await openChainModel(deadValueGraph()),
+      "model",
+    );
     try {
       const x = fill([8, 4], (i) => ((i % 11) - 5) * 0.5);
       const outputs = await session.run({ x });
@@ -649,7 +697,7 @@ Deno.test({
 });
 
 Deno.test({
-  name: "capability 不足（非対応 op / 非対応 格納 dtype）は createSession で落ちる（実 GPU）",
+  name: "capability 不足（非対応 op / 非対応 格納 dtype）は Session 構築で落ちる（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
@@ -661,20 +709,32 @@ Deno.test({
       const foreign = chainGraph();
       foreign.requires.ops = ["matmul", "add", "conv_transpose2d"];
       foreign.nodes[2] = { op: "conv_transpose2d", ins: ["g"], outs: ["y"], attrs: {} };
+      const foreignModel = await openChainModel(foreign);
       await assertRejects(
-        () => createSession(gpu, openModel(chainModelBuffer(foreign))),
-        ContainerError,
+        () => createSessionFromContainer(gpu, foreignModel, "model"),
+        RuntimeSupportError,
       );
 
       // NOTE: 非対応格納の代表は **bf16**（f16 は ADR 0018 で実行経路が入った — 適格判定に
       // 関わらず実行できるので、もう capability 不足にはならない）。
-      const quantized = chainGraph();
-      quantized.initializers.w = { tensor: "enc.w", storage: { dtype: "bf16" } };
-      const buffer = graphModelBuffer(quantized, [
-        { name: "enc.w", dtype: "BF16", shape: [4, 3], data: new Uint8Array(24) },
-        { name: "enc.b", dtype: "F32", shape: [3], data: f32Bytes([...B]) },
+      const bf16Model = await openChainModel(chainGraph(), [
+        {
+          graph: "model",
+          initializer: "w",
+          bytes: new Uint8Array(new ArrayBuffer(24)),
+          encoding: { codec: "bf16" },
+        },
+        {
+          graph: "model",
+          initializer: "b",
+          bytes: f32Bytes([...B]),
+          encoding: { codec: "f32" },
+        },
       ]);
-      await assertRejects(() => createSession(gpu, openModel(buffer)), ContainerError);
+      await assertRejects(
+        () => createSessionFromContainer(gpu, bf16Model, "model"),
+        RuntimeSupportError,
+      );
     } finally {
       gpu.destroy();
     }
@@ -682,7 +742,7 @@ Deno.test({
 });
 
 Deno.test({
-  name: "契約外のグラフ（非空 attrs / op が受理しない dtype）は createSession で落ちる（実 GPU）",
+  name: "契約外のグラフ（非空 attrs / op が受理しない dtype）は Session 構築で落ちる（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
@@ -690,18 +750,20 @@ Deno.test({
       // どちらも capability 突合（op 名 + dtype + attrs）が最初の門で捕まえる
       const withAttrs = chainGraph();
       withAttrs.nodes[2].attrs = { approximate: "tanh" };
+      const withAttrsModel = await openChainModel(withAttrs);
       await assertRejects(
-        () => createSession(gpu, openModel(chainModelBuffer(withAttrs))),
-        ContainerError,
+        () => createSessionFromContainer(gpu, withAttrsModel, "model"),
+        RuntimeSupportError,
         "未実装 attrs (1): nodes[2] (relu): approximate",
       );
 
       // i32 の転送自体は解禁済み（ADR 0009）だが、matmul は f32 専業なので op 契約で落ちる
       const intInput = chainGraph();
       intInput.inputs = [{ name: "x", dtype: "i32", shape: ["T", 4] }];
+      const intInputModel = await openChainModel(intInput);
       await assertRejects(
-        () => createSession(gpu, openModel(chainModelBuffer(intInput))),
-        ContainerError,
+        () => createSessionFromContainer(gpu, intInputModel, "model"),
+        RuntimeSupportError,
         "非対応 意味論 dtype (1): 値 'x': i32",
       );
     } finally {
@@ -715,9 +777,9 @@ Deno.test({
  * mask 外積 mul(i32) → 真偽化 cast → bitwise_not → 重み化 cast → f32 の重み掛け。
  * 出力に bool を 1 本置いて readback の非 f32 経路も踏む。
  */
-const maskGraph = (): GraphJson => ({
+const maskGraph = (): DeclarationJson => ({
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["mul", "cast", "bitwise_not"] },
   symbols: ["T"],
   inputs: [
@@ -748,7 +810,11 @@ Deno.test({
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
-    const session = await createSession(gpu, openModel(graphModelBuffer(maskGraph())));
+    const session = await createSessionFromContainer(
+      gpu,
+      await openGraphModel(maskGraph()),
+      "model",
+    );
     try {
       const mcol = fill([4, 1], (i) => (i === 2 ? 0 : 1), "i32");
       const mrow = fill([1, 4], (i) => (i === 3 ? 0 : 1), "i32");
@@ -781,7 +847,11 @@ Deno.test({
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
-    const session = await createSession(gpu, openModel(graphModelBuffer(maskGraph())));
+    const session = await createSessionFromContainer(
+      gpu,
+      await openGraphModel(maskGraph()),
+      "model",
+    );
     try {
       const mrow = fill([1, 4], () => 1, "i32");
       const scores = fill([4, 4], () => 1);
@@ -814,7 +884,7 @@ Deno.test({
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
-    const session = await createSession(gpu, openModel(chainModelBuffer()));
+    const session = await createSessionFromContainer(gpu, await openChainModel(), "model");
     try {
       // 宣言 [T,4] に対する rank / 数値次元の不一致
       await assertRejects(() => session.run({ x: fill([5], () => 1) }), ExecutionError);
@@ -852,7 +922,7 @@ Deno.test({
     wrong.values.h = { dtype: "f32", shape: ["T", 4] };
     wrong.values.g = { dtype: "f32", shape: ["T", 4] };
     wrong.values.y = { dtype: "f32", shape: ["T", 4] };
-    const session = await createSession(gpu, openModel(chainModelBuffer(wrong)));
+    const session = await createSessionFromContainer(gpu, await openChainModel(wrong), "model");
     try {
       await assertRejects(() => session.run({ x: fill([3, 4], () => 1) }), ExecutionError);
       assertEquals(session.diagnostics().submit.dispatchCount, 0);
@@ -876,9 +946,9 @@ Deno.test({
     // assertRejects だけが静かに落ちるドリフトが 16 → 64 → 128 と 2 度起きた形）。
     const tileN = gemmTileN(defaultGemmGeometry());
     const n = gpu.limits.maxComputeWorkgroupsPerDimension * tileN + tileN;
-    const graph: GraphJson = {
+    const graph: DeclarationJson = {
       format: "karume-ir",
-      version: 1,
+      version: 2,
       requires: { ops: ["relu", "matmul"] },
       symbols: [],
       inputs: [
@@ -896,7 +966,7 @@ Deno.test({
         { op: "matmul", ins: ["t", "x1"], outs: ["y"], attrs: {} },
       ],
     };
-    const session = await createSession(gpu, openModel(graphModelBuffer(graph)));
+    const session = await createSessionFromContainer(gpu, await openGraphModel(graph), "model");
     try {
       await assertRejects(
         () => session.run({ x0: fill([1, 1], () => 1), x1: fill([1, n], () => 1) }),
@@ -925,7 +995,7 @@ Deno.test({
   fn: async () => {
     const gpu = await acquireGpu();
     try {
-      const model = openModel(chainModelBuffer());
+      const model = await openChainModel();
       let conversions = 0;
       const object = {
         [Symbol.toPrimitive](): string {
@@ -941,7 +1011,7 @@ Deno.test({
       Object.defineProperty(options, "stateAttentionReduce", { value: object });
       await assertRejects(
         async () => {
-          const session = await createSession(gpu, model, options);
+          const session = await createSessionFromContainer(gpu, model, "model", options);
           // 回帰時にも、誤って構築したSessionをテスト側で解放してから失敗させる。
           await session.dispose();
         },

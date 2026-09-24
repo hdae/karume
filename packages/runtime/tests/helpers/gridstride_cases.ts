@@ -133,7 +133,7 @@ import { alignI8Payload } from "../../src/format/i8.ts";
 import type { WeightStorage } from "../../src/kernels/weight-storage.ts";
 import { f32ToF16Bits, quantizeF16 } from "./f16.ts";
 import { quantizeI8 } from "./i8.ts";
-import { fill, type FilledTensor } from "./graph.ts";
+import { fill, type FilledTensor } from "./model-fixture.ts";
 
 /** 決定的なデータ列（乱数は使わない — 失敗が再現しないため）。 */
 const SIGNED = (i: number): number => ((i % 13) - 6) * 0.75;

@@ -16,7 +16,6 @@
 
 import { assert, assertEquals } from "@std/assert";
 import { gridStrideWorkgroups } from "../src/codegen/dispatch.ts";
-import { openModel } from "../src/format/container.ts";
 import { RunArena } from "../src/gpu/arena.ts";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
 import { PipelineCache } from "../src/gpu/pipeline-cache.ts";
@@ -33,8 +32,8 @@ import {
   DEFORM_CONV2D_WORKGROUP_SIZE,
   deformConv2dParams,
 } from "../src/kernels/deform-conv2d.ts";
-import { createSession, type Tensor } from "../src/runtime/executor.ts";
-import { fill, graphModelBuffer, singleOpGraph } from "./helpers/graph.ts";
+import { createSessionFromContainer, type Tensor } from "../src/runtime/executor.ts";
+import { fill, GRAPH_NAME, openModelBytes, singleOpDeclaration } from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
 const STORAGE_IN = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
@@ -296,13 +295,17 @@ const runDeform = async (
   outShape: readonly number[],
   padding: readonly [number, number],
 ): Promise<Tensor> => {
-  const graph = singleOpGraph(
+  const graph = singleOpDeclaration(
     "deform_conv2d",
     inputs.map((input) => input.shape),
     [outShape],
     { attrs: { padding: [...padding] } },
   );
-  const session = await createSession(gpu, openModel(graphModelBuffer(graph)));
+  const session = await createSessionFromContainer(
+    gpu,
+    await openModelBytes(graph, []),
+    GRAPH_NAME,
+  );
   try {
     const named: Record<string, Tensor> = {};
     inputs.forEach((input, index) => {

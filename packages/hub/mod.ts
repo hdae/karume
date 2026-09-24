@@ -8,11 +8,11 @@
  * 読み口は `@karume/hub/deno` 等のサブパス）/ モデルと実行構成を選ぶ
  * （{@link resolveSelection} — 平坦な FileRef 列は {@link selectionRefs}）/ コンテナ 1 本を
  * 区間読みで読む（{@link openContainerSource} — 温めは {@link prefetchAssets} が先。
- * `@karume/runtime` の `openContainer` にそのまま渡せる）/ 資産を取る（{@link fetchAssets}）/
- * ファイルを 2 相で
- * 逐次受け取る（{@link streamAssets} — RAM ピーク O(最大ファイル)。
- * `docs/decisions/0070-shard-loading-admission.md` 決定 2）/ 資産を先に永続キャッシュへ落とす
- * （{@link prefetchAssets} — 逐次面の相 1 単体）/ 資産 1 本の区間だけを読む
+ * `@karume/runtime` の `openContainer` にそのまま渡せる）/ 資産を取る（{@link fetchAssets} —
+ * 選択ぶんの全量を RAM に載せる面。RAM ピークは「同時取得のバイト予算 + 完走済みの合計」で、
+ * 全量を握れないモデルは容器面〈{@link openContainerSource}〉の区間読みで、必要なブロックだけを
+ * その都度読む）/ 資産を先に永続キャッシュへ落とす
+ * （{@link prefetchAssets} — バイト列を RAM に載せない温めだけの面）/ 資産 1 本の区間だけを読む
  * （{@link openAsset} — 取得元が持たなければ `undefined`）/ 失敗を型で捌く
  * （{@link HubError} 以下）/ キャッシュの診断を受け取る（{@link CacheDiagnostic}）/
  * 取得層の再試行（429 / 503 の `Retry-After` 追従）の通知を受け取る（{@link RetryDiagnostic}）/
@@ -97,8 +97,7 @@ export type {
   EvictedAssets,
   KeptAsset,
 } from "./src/inventory.ts";
-export { fetchAssets, loadManifest, prefetchAssets, streamAssets } from "./src/fetch.ts";
-export type { StreamedAsset } from "./src/fetch.ts";
+export { fetchAssets, loadManifest, prefetchAssets } from "./src/fetch.ts";
 /**
  * 資産 1 本の区間読み（{@link openAsset} — 全量ではなく `[offset, offset + length)` だけを引く。
  * **任意能力**なので、持たない取得元では `undefined` が返り、呼び手は全量読みへ倒す）。
@@ -114,7 +113,6 @@ export type {
   LoadedManifest,
   LoadManifestOptions,
   RetryDiagnostic,
-  StreamAssetsOptions,
 } from "./src/session.ts";
 
 /**

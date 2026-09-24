@@ -31,9 +31,10 @@ resolved once, in `loadManifest`, and every later call fetches from that same pi
 ```ts
 import { fetchAssets, loadManifest, resolveSelection } from "@karume/hub";
 
-const loaded = await loadManifest({ repo: "hdae/karume-birefnet-hr" });
-const selection = resolveSelection(loaded.manifest, { model: "1024" });
+const loaded = await loadManifest({ repo: "hdae/karume-gemma4" });
+const selection = resolveSelection(loaded.manifest);
 const assets = await fetchAssets(loaded, selection.assets);
+// [ "model", "drafter" ] [ "tokenizer" ] — the default model and quantization of that manifest.
 console.log(Object.keys(selection.containers), Object.keys(assets));
 ```
 
@@ -47,20 +48,23 @@ where the source can only scan).
 import { openContainerSource, prefetchAssets, selectionRefs } from "@karume/hub";
 
 await prefetchAssets(loaded, selectionRefs(selection));
-const container = selection.containers["matte"];
+const container = selection.containers["model"];
 const source = openContainerSource(loaded, container);
 // openContainer({ kind: "source", source }, container.descriptor) — see @karume/runtime
 ```
 
-To keep host memory flat while reading plain assets one at a time, `streamAssets` yields verified
-byte ranges in the order the refs were given, so peak RAM stays at the size of the largest file.
+A single plain asset can also be read range by range instead of whole, when only a few kilobytes of
+a large table are needed: `openAsset` returns a reader when the source supports it, and `undefined`
+when it does not, so the caller falls back to `fetchAssets` in one place. What the range costs
+depends on the source: a local directory seeks and reads that range only, while a Hugging Face
+source warms the whole file into the cache once before the first range is served — there the saving
+is in what is decoded, not in what is transferred.
 
 ```ts
-import { streamAssets } from "@karume/hub";
+import { openAsset } from "@karume/hub";
 
-for await (const asset of streamAssets(loaded, Object.values(files))) {
-  console.log(asset.id, asset.bytes.byteLength);
-}
+const reader = await openAsset(loaded, selection.assets["tokenizer"]);
+const head = reader === undefined ? undefined : await reader.read(0, 64);
 ```
 
 A distribution that already sits on disk is passed as a source handle instead of a repository

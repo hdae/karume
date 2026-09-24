@@ -153,3 +153,21 @@ export const payloadBytes = (codec: CodecName, numel: number, where: string): nu
   }
   return (numel / blockElements) * blockBytes;
 };
+
+/**
+ * companion scale の payload バイト長（要素数 → バイト数 — {@link payloadBytes} の scale 版）。
+ * scale の dtype は初版では f32 の 1 通りきり（{@link SCALE_DTYPES}）なので 1 要素 4 バイト。
+ *
+ * MUST: 安全整数の外は fail loudly。バイト数は確保寸法と block 長の突合に使われるので、
+ * 丸まった値を通すと「宣言と現物が一致している」という突合門の主張が壊れる。
+ */
+export const scaleBytes = (count: number, where: string): number => {
+  if (!Number.isSafeInteger(count) || count < 0) {
+    throw new Error(`${where}: scale の要素数 ${count} が非負の安全整数でない`);
+  }
+  const bytes = count * 4;
+  if (!Number.isSafeInteger(bytes)) {
+    throw new Error(`${where}: scale のバイト数 ${bytes} が安全整数の外`);
+  }
+  return bytes;
+};

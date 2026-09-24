@@ -9,7 +9,6 @@
 // ③ が無いと、前後の enqueue の入力が入れ替わっても「どちらも計算はされている」ので気づけない。
 
 import { assert, assertEquals, assertRejects, assertStrictEquals, assertThrows } from "@std/assert";
-import { openModel } from "../src/format/container.ts";
 import {
   acquireGpu,
   type BatchScope,
@@ -20,11 +19,10 @@ import {
   RUNTIME_INTERNAL,
 } from "../src/gpu/device.ts";
 import { GpuValidationError, popFailureScopes, pushFailureScopes } from "../src/gpu/error-scope.ts";
-import { createSession, type Session, type Tensor } from "../src/runtime/executor.ts";
+import { createSessionFromContainer, type Session, type Tensor } from "../src/runtime/executor.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
+import { type DeclarationJson, f32Bytes, openGraphModel } from "./helpers/model-fixture.ts";
 import { countFences } from "./helpers/fences.ts";
-import { f32Bytes, type GraphJson } from "./helpers/format.ts";
-import { graphModelBuffer } from "./helpers/graph.ts";
 import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE } from "./helpers/gpu.ts";
 import { DEFAULT_SUBMIT_POLICY } from "../src/gpu/submit.ts";
 
@@ -34,9 +32,9 @@ const COUNT = ROWS * COLS;
 const BYTES = COUNT * 4;
 
 /** y = x + x（= 2x）。生産側。 */
-const PRODUCER: GraphJson = {
+const PRODUCER: DeclarationJson = {
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["add"] },
   symbols: [],
   inputs: [{ name: "x", dtype: "f32", shape: [ROWS, COLS] }],
@@ -47,9 +45,9 @@ const PRODUCER: GraphJson = {
 };
 
 /** w = z * z。消費側（生産側の出力を常駐テンソル経由で受ける）。 */
-const CONSUMER: GraphJson = {
+const CONSUMER: DeclarationJson = {
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["mul"] },
   symbols: [],
   inputs: [{ name: "z", dtype: "f32", shape: [ROWS, COLS] }],
@@ -85,11 +83,11 @@ const bits = (data: Tensor["data"] | ArrayBuffer): readonly number[] =>
       : new Uint32Array(data.buffer, data.byteOffset, data.length),
   );
 
-const producerSession = (gpu: GpuContext): Promise<Session> =>
-  createSession(gpu, openModel(graphModelBuffer(PRODUCER)));
+const producerSession = async (gpu: GpuContext): Promise<Session> =>
+  await createSessionFromContainer(gpu, await openGraphModel(PRODUCER), "model");
 
-const consumerSession = (gpu: GpuContext): Promise<Session> =>
-  createSession(gpu, openModel(graphModelBuffer(CONSUMER)));
+const consumerSession = async (gpu: GpuContext): Promise<Session> =>
+  await createSessionFromContainer(gpu, await openGraphModel(CONSUMER), "model");
 
 Deno.test({
   name: "常駐入力は writeBuffer 無しで束ねられ、ホスト入力の run とビット一致する（実 GPU）",
@@ -608,9 +606,9 @@ Deno.test({
 });
 
 /** y = reshape(x)（[ROWS,COLS] → [COUNT]）。出力が入力の**別名**になる縮退グラフ。 */
-const ALIAS: GraphJson = {
+const ALIAS: DeclarationJson = {
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["reshape"] },
   symbols: [],
   inputs: [{ name: "x", dtype: "f32", shape: [ROWS, COLS] }],
@@ -709,7 +707,7 @@ Deno.test({
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
-    const session = await createSession(gpu, openModel(graphModelBuffer(ALIAS)));
+    const session = await createSessionFromContainer(gpu, await openGraphModel(ALIAS), "model");
     const state = await gpu.createResident(BYTES, "state");
     try {
       const batch = await gpu.beginBatch();
@@ -1005,14 +1003,14 @@ Deno.test({
  * グラフ出力に initializer 名を書いた形（IR が許す）。その値は焼き込みの値写像に載らないので
  * `copyOutputs` の相手にはできない（実行のたびに同じ定数を GPU 内でコピーするだけ）。
  */
-const INITIALIZER_OUTPUT: GraphJson = {
+const INITIALIZER_OUTPUT: DeclarationJson = {
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["add"] },
   symbols: [],
   inputs: [{ name: "x", dtype: "f32", shape: [ROWS, COLS] }],
   outputs: ["y", "c"],
-  initializers: { c: { tensor: "const.c", storage: { dtype: "f32" } } },
+  initializers: { c: {} },
   values: {
     c: { dtype: "f32", shape: [ROWS, COLS] },
     y: { dtype: "f32", shape: [ROWS, COLS] },
@@ -1020,12 +1018,12 @@ const INITIALIZER_OUTPUT: GraphJson = {
   nodes: [{ op: "add", ins: ["x", "x"], outs: ["y"], attrs: {} }],
 };
 
-const initializerOutputModel = (): ArrayBuffer =>
-  graphModelBuffer(INITIALIZER_OUTPUT, [{
-    name: "const.c",
-    dtype: "F32",
-    shape: [ROWS, COLS],
-    data: f32Bytes(Array.from({ length: COUNT }, (_, i) => i * 0.25)),
+const openInitializerOutputModel = () =>
+  openGraphModel(INITIALIZER_OUTPUT, [{
+    graph: "model",
+    initializer: "c",
+    bytes: f32Bytes(Array.from({ length: COUNT }, (_, i) => i * 0.25)),
+    encoding: { codec: "f32" },
   }]);
 
 Deno.test({
@@ -1034,7 +1032,11 @@ Deno.test({
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
-    const session = await createSession(gpu, openModel(initializerOutputModel()));
+    const session = await createSessionFromContainer(
+      gpu,
+      await openInitializerOutputModel(),
+      "model",
+    );
     const healthy = await producerSession(gpu);
     const constSink = await gpu.createResident(BYTES, "const-sink");
     const sink = await gpu.createResident(BYTES, "sink");
@@ -1042,8 +1044,8 @@ Deno.test({
       const batch = await gpu.beginBatch();
       // MUST: どちらも await しない（失敗の帰属を finish に集める既存の形と同じ）。
       const pending = [
-        // 合流後は initializer 名 = 実体のテンソルキー（`const.c`）がそのまま出力名になる。
-        session.enqueue({ x: input(0) }, { batch, copyOutputs: { "const.c": constSink } }),
+        // IR v2 では initializer 名がそのまま実体の鍵なので、宣言どおり `c` が出力名になる。
+        session.enqueue({ x: input(0) }, { batch, copyOutputs: { c: constSink } }),
         healthy.enqueue({ x: input(1) }, { batch, copyOutputs: { y: sink } }),
       ];
       const settled = Promise.allSettled(pending);

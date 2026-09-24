@@ -35,9 +35,8 @@ import {
   stateQkTiledKey,
 } from "../src/kernels/state-attention.ts";
 import { acquireGpu, type GpuContext, RUNTIME_INTERNAL } from "../src/gpu/device.ts";
-import { openModel } from "../src/format/container.ts";
 import {
-  createSession,
+  createSessionFromContainer,
   ROW_BLOCK_SPLIT,
   type Session,
   type SessionOptions,
@@ -48,8 +47,7 @@ import type { PlanBackingStats } from "../src/runtime/session-types.ts";
 import type { BakedGroups } from "../src/runtime/recipe.ts";
 import { OpContractError } from "../src/ops.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
-import type { GraphJson } from "./helpers/format.ts";
-import { graphModelBuffer } from "./helpers/graph.ts";
+import { type DeclarationJson, GRAPH_NAME, openGraphModel } from "./helpers/model-fixture.ts";
 import { halfScale, seeded } from "./helpers/state-dispatch.ts";
 import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
 
@@ -90,7 +88,7 @@ type StateModel = {
  * 違う別の計画で、1 つの Session / 1 つの context がその 2 本を跨ぐのが ADR 0066 決定 4 の
  * 実行形そのもの。
  */
-const stateGraph = (model: StateModel): GraphJson => {
+const stateGraph = (model: StateModel): DeclarationJson => {
   const { heads, kvHeads, depth, capacity, window } = model;
   const windowAttrs = window === undefined ? {} : { window };
   const append = (name: string, slot: string) => ({
@@ -102,7 +100,7 @@ const stateGraph = (model: StateModel): GraphJson => {
   });
   return {
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: ["attention", "state_append"] },
     symbols: capacity === "C" ? ["M", "C"] : ["M"],
     inputs: [
@@ -131,11 +129,17 @@ const stateGraph = (model: StateModel): GraphJson => {
   };
 };
 
-const stateSession = (
+const stateSession = async (
   gpu: GpuContext,
   model: StateModel,
   options: SessionOptions = {},
-): Promise<Session> => createSession(gpu, openModel(graphModelBuffer(stateGraph(model))), options);
+): Promise<Session> =>
+  await createSessionFromContainer(
+    gpu,
+    await openGraphModel(stateGraph(model)),
+    GRAPH_NAME,
+    options,
+  );
 
 /** 1 step ぶんの入力（`M` 行ぶん — 有効なのは先頭 `queryLength` 行）。 */
 type StepInputs = {
@@ -541,11 +545,11 @@ Deno.test({
  * 読むだけのグラフ（ADR 0096 段 2 §2.1）。書き手（`state_append`）を持たないので、論理長を
  * 進めるのも確定させるのも貸し手の側。
  */
-const verifyBorrowerGraph = (capacity: number): GraphJson => {
+const verifyBorrowerGraph = (capacity: number): DeclarationJson => {
   const model = verifyModel(capacity);
   return {
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: ["attention"] },
     symbols: [],
     inputs: [{ name: "q", dtype: "f32", shape: [1, model.heads, 1, model.depth] }],
@@ -584,9 +588,10 @@ const runBorrowedVerifyChain = async (
   const capacity = VERIFY_WINDOW + VERIFY_SLACK;
   const model = verifyModel(capacity);
   const lender = await stateSession(gpu, model);
-  const borrower = await createSession(
+  const borrower = await createSessionFromContainer(
     gpu,
-    openModel(graphModelBuffer(verifyBorrowerGraph(capacity))),
+    await openGraphModel(verifyBorrowerGraph(capacity)),
+    GRAPH_NAME,
   );
   const lenderContext = await lender.createGenerationContext({
     chunkLength: 16,

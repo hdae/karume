@@ -1,14 +1,16 @@
 // safetensors リーダ（読み取り専用・I/O を持たない — 呼び出し側が ArrayBuffer を渡す）。
 // レイアウト: [u64 LE ヘッダ長][ヘッダ JSON][データ節]。data_offsets はデータ節先頭からの相対。
 
-/** M0 で扱う格納 dtype と、エクスポータが出しうる整数／真偽テンソルのみ。未知は fail loudly。 */
+/**
+ * 付帯資産の safetensors が持ちうる格納 dtype（公式 safetensors の語彙の部分集合）。未知は
+ * fail loudly — packed 4bit / 2bit のような**方言 dtype は受理しない**（配布形は容器 `krm` へ
+ * 移っており、量子化格納は容器の codec が担う）。
+ */
 export type SafetensorsDtype =
   | "F32"
   | "F16"
   | "BF16"
   | "I8"
-  | "I4"
-  | "I2"
   | "U8"
   | "I32"
   | "U32"
@@ -16,41 +18,30 @@ export type SafetensorsDtype =
   | "BOOL";
 
 /**
- * dtype → 1 要素の **bit** 数（サイズ表）。バイト長の検証は `numel × bits / 8` の厳密一致で、
- * 8 で割り切れない bit 総量は受理しない。
+ * dtype → 1 要素の byte 数（サイズ表）。バイト長の検証は `numel × bytes` の厳密一致。
  *
- * MUST: 整列表（{@link DTYPE_ALIGN}）と分けて持つ（ADR 0069 決定 2 の 3 面分離）。I4 は
- * 1 バイトに 2 要素を詰めるので「要素サイズ = 整列」が成り立たず、1 本の表で両方を賄うと
- * 4bit 格納でどちらかが必ず壊れる。
+ * MUST: 整列表（{@link DTYPE_ALIGN}）と分けて持つ — 「1 要素の大きさ」と「テンソル先頭に
+ * 要求する整列」は別の概念で、片方の都合でもう片方を動かすと検査の意味が入れ替わる。
  */
-const DTYPE_BITS: Readonly<Record<SafetensorsDtype, number>> = {
-  F32: 32,
-  F16: 16,
-  BF16: 16,
-  I8: 8,
-  // packed 4bit（ADR 0069 決定 2）。shape は論理形のままで、バイト数だけが bit 幅から決まる。
-  I4: 4,
-  I2: 2,
-  U8: 8,
-  I32: 32,
+const DTYPE_BYTES: Readonly<Record<SafetensorsDtype, number>> = {
+  F32: 4,
+  F16: 2,
+  BF16: 2,
+  I8: 1,
+  U8: 1,
+  I32: 4,
   // U32 は意味論 bool の実表現（u32 の 0/1 — ADR 0009）。golden の io がこの形で書かれる。
-  U32: 32,
-  I64: 64,
-  BOOL: 8,
+  U32: 4,
+  I64: 8,
+  BOOL: 1,
 };
 
-/**
- * dtype → テンソル**先頭**に要求する byte 整列（整列表）。要素サイズと一致するのは要素整列の
- * 概念を持つ dtype だけで、**I4 は 4**（要素境界ではなく、展開カーネルが `array<u32>` として
- * 束縛する都合 — ADR 0069 決定 2）。
- */
+/** dtype → テンソル**先頭**に要求する byte 整列（整列表）。コピーせず typed array view を張る前提。 */
 const DTYPE_ALIGN: Readonly<Record<SafetensorsDtype, number>> = {
   F32: 4,
   F16: 2,
   BF16: 2,
   I8: 1,
-  I4: 4,
-  I2: 4,
   U8: 1,
   I32: 4,
   U32: 4,
@@ -107,7 +98,8 @@ type DeclaredTensor = {
 const isPlainObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
-const isKnownDtype = (dtype: string): dtype is SafetensorsDtype => Object.hasOwn(DTYPE_BITS, dtype);
+const isKnownDtype = (dtype: string): dtype is SafetensorsDtype =>
+  Object.hasOwn(DTYPE_BYTES, dtype);
 
 const asIndex = (value: unknown, where: string, what: string): number => {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
@@ -132,26 +124,10 @@ const elementCount = (shape: readonly number[], where: string): number => {
  *
  * MUST: 宣言由来のバイト長を求める側（実バイトを見ない見積り・常駐プランナ）は**この 1 本を
  * 通す** — パーサの実バイト検証（下の「サイズ不一致」門）が使うのと同じ式なので、両者が
- * 食い違うことが原理的に起きない。別式で書くと I4 の 4bit 詰めのような非自明な dtype で
- * 片方だけが腐る。
+ * 食い違うことが原理的に起きない。
  */
-export const declaredByteLength = (
-  dtype: SafetensorsDtype,
-  count: number,
-  where: string,
-): number => {
-  const bits = count * DTYPE_BITS[dtype];
-  // MUST: bit 総量が byte 境界に乗らない形（I4 の要素数が奇数）は fail loudly。末尾要素が
-  // 半バイトだけ突き出すので、テンソルの長さが宣言から一意に決まらない。
-  if (bits % 8 !== 0) {
-    throw new SafetensorsError(
-      `${where}: ${dtype}（1 要素 ${
-        DTYPE_BITS[dtype]
-      }bit）の要素数 ${count} が奇数で byte 境界に乗らない`,
-    );
-  }
-  return bits / 8;
-};
+export const declaredByteLength = (dtype: SafetensorsDtype, count: number): number =>
+  count * DTYPE_BYTES[dtype];
 
 const parseDeclaration = (name: string, raw: unknown): DeclaredTensor => {
   const where = `tensor '${name}'`;
@@ -182,7 +158,7 @@ const parseDeclaration = (name: string, raw: unknown): DeclaredTensor => {
   }
 
   const count = elementCount(shape, where);
-  const expected = declaredByteLength(dtype, count, where);
+  const expected = declaredByteLength(dtype, count);
   if (end - begin !== expected) {
     throw new SafetensorsError(
       `${where}: サイズ不一致 offsets=${end - begin} 期待=${expected}（${dtype} [${
@@ -322,8 +298,7 @@ export const parseSafetensorsHeader = (
     }
     const align = DTYPE_ALIGN[entry.dtype];
     if ((dataStart + entry.begin) % align !== 0) {
-      // コピーを作らず typed array view を張る前提（I4 は u32 として束縛する前提）が
-      // 崩れるため受理しない。
+      // コピーを作らず typed array view を張る前提が崩れるため受理しない。
       throw new SafetensorsError(
         `${where}: 絶対 offset ${
           dataStart + entry.begin
@@ -373,9 +348,9 @@ export const parseSafetensors = (
 /**
  * テンソルの生バイト（コピーしない）。
  *
- * NOTE: dtype 別の TypedArray は返さない。I4 に対応する TypedArray は存在しないが、この面は
- * 最初から「raw バイト + 論理 numel（{@link TensorView.shape}）」なので 4bit 格納でも
- * 表現が足りている（ADR 0069 決定 2 の 3 面目）。
+ * NOTE: dtype 別の TypedArray は返さない。呼び手が欲しい形（f32 / u32 / bf16 の再解釈）は
+ * 資産ごとに違うので、この面は「raw バイト + dtype + 論理 shape（{@link TensorView}）」までを
+ * 渡し、view の張り方は呼び手に委ねる。
  */
 export const tensorBytes = (file: SafetensorsFile, view: TensorView): Uint8Array<ArrayBuffer> =>
   new Uint8Array(file.buffer, view.byteOffset, view.byteLength);

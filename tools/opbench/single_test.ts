@@ -2,7 +2,7 @@
 // K-11 の形（M=1 の i4 linear）が GEMV 族のキーで測れること。
 
 import { assert, assertEquals, assertThrows } from "@std/assert";
-import { acquireGpu, openModel } from "../../packages/runtime/mod.ts";
+import { acquireGpu, prepareContainer } from "../../packages/runtime/mod.ts";
 import type { CensusSummary, WeightRow } from "./census.ts";
 import {
   buildCaseModel,
@@ -53,25 +53,27 @@ const summaryOf = (weights: readonly WeightRow[], scenario = "unit"): CensusSumm
   }],
 });
 
-Deno.test("buildCaseModel: 加重行 1 本から反復ぶんのノードを持つ配布形が組める（openModel が読む）", () => {
+Deno.test("buildCaseModel: 加重行 1 本から反復ぶんのノードを持つメモリ内容器が組める（prepareContainer が読む）", () => {
   const model = buildCaseModel(GEMV_ROW, 4);
   assertEquals(model.reps, 4);
-  const { graph, file } = openModel(model.bytes);
+  const graph = prepareContainer(model.container, "case").graph;
   assertEquals(graph.nodes.length, 4);
   assertEquals(graph.outputs.length, 4);
-  // 全ノードが同じ入力を読む（活性 x0 と初期化子 w1 / w2）。
-  for (const node of graph.nodes) assertEquals([...node.ins], ["x0", "m.w1", "m.w2"]);
+  // 全ノードが同じ入力を読む（活性 x0 と初期化子 w1 / w2 — v2 は initializer 名がそのまま鍵）。
+  for (const node of graph.nodes) assertEquals([...node.ins], ["x0", "w1", "w2"]);
   assertEquals(Object.keys(model.inputs), ["x0"]);
   const x0 = model.inputs["x0"];
   assert("data" in x0, "x0 はホスト配列");
   assertEquals(x0.shape, [1, 128]);
-  // i4 の scale は rank 2 の group 形 [rows, 行長 / group]、i8 なら keepdim 形になる（container の門が検査）。
-  assertEquals(file.tensors.get("m.s1")?.shape, [64, 4]);
-  assertEquals(file.tensors.get("m.w1")?.dtype, "I4");
-  assertEquals(file.tensors.get("m.w2")?.dtype, "F32");
+  // i4 の scale は rank 2 の group 形 [rows, 行長 / group] = [64, 4] なので block は 64×4×4 バイト。
+  const w1 = model.container.graphs["case"].supplies.get("w1");
+  assertEquals(w1?.encoding.codec, "int4-sym-g");
+  assertEquals(w1?.encoding.groupSize, 32);
+  assertEquals(w1?.scale?.payloadBytes, 64 * 4 * 4);
+  assertEquals(model.container.graphs["case"].supplies.get("w2")?.encoding.codec, "f32");
 });
 
-Deno.test("buildCaseModel: i8 の scale は keepdim broadcast 形（先頭次元がチャネル）", () => {
+Deno.test("buildCaseModel: i8 の scale は先頭次元をチャネルとする（rowAxis 0・1 行 1 本）", () => {
   const model = buildCaseModel(
     row({
       in_shapes: [[1, 8, 16], [4, 8, 3]],
@@ -84,9 +86,39 @@ Deno.test("buildCaseModel: i8 の scale は keepdim broadcast 形（先頭次元
     }),
     1,
   );
-  const { file } = openModel(model.bytes);
-  assertEquals(file.tensors.get("m.s1")?.shape, [4, 1, 1]);
-  assertEquals(file.tensors.get("m.w1")?.dtype, "I8");
+  const w1 = model.container.graphs["case"].supplies.get("w1");
+  assertEquals(w1?.encoding.codec, "int8-sym");
+  // conv1d の重み [4, 8, 3] はチャネル軸 0（4 本）・行長 24 → group 長 = 行長・scale は 4 本 × 4 バイト。
+  assertEquals(w1?.encoding.rowAxis, 0);
+  assertEquals(w1?.encoding.groupSize, 24);
+  assertEquals(w1?.scale?.payloadBytes, 4 * 4);
+});
+
+Deno.test("buildCaseModel: i8 の軸が付くのは重みスロットだけ（conv_transpose1d の bias は軸 0）", () => {
+  const model = buildCaseModel(
+    row({
+      // conv_transpose1d の重みは [Cin, Cout, K]（チャネル軸 1）・bias は [Cout] の rank 1。
+      in_shapes: [[1, 4, 8], [4, 4, 3], [4]],
+      out_shapes: [[1, 4, 10]],
+      in_dtypes: ["f32", "f32", "f32"],
+      storage: [null, { dtype: "int8-sym" }, { dtype: "int8-sym" }],
+      storage_signature: "i8",
+      op: "conv_transpose1d",
+      attrs: { stride: 1, padding: 0 },
+    }),
+    1,
+  );
+  // 軸を全スロットに掛けると rank 1 の bias が合流層（宣言 shape の rank 検査）で落ちる。
+  assertEquals(prepareContainer(model.container, "case").graph.nodes.length, 1);
+  const supplies = model.container.graphs["case"].supplies;
+  // 重みスロット（1）は台帳どおり軸 1 = Cout 4 本・行長 Cin×K = 12。
+  assertEquals(supplies.get("w1")?.encoding.rowAxis, 1);
+  assertEquals(supplies.get("w1")?.encoding.groupSize, 12);
+  assertEquals(supplies.get("w1")?.scale?.payloadBytes, 4 * 4);
+  // 重み以外のスロット（2）は軸 0 — rank 1 の [4] でも組める（軸 1 を付けると合流層で落ちる）。
+  assertEquals(supplies.get("w2")?.encoding.rowAxis, 0);
+  assertEquals(supplies.get("w2")?.encoding.groupSize, 1);
+  assertEquals(supplies.get("w2")?.scale?.payloadBytes, 4 * 4);
 });
 
 Deno.test("buildCaseModel: 反復は出力 readback の上限で抑えられる", () => {

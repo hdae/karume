@@ -10,8 +10,9 @@
  *    {@link ../manifest.ts MAX_MANIFEST_BYTES}・sha256 の期待値は**持てない**）
  * 3. ある `FileRef` の全量バイト（{@link PinnedSource.readFile} — sha256 / size の期待値つき）
  * 4. ある `FileRef` を「RAM に載せずに、後で 3 が安く済む状態にする」
- *    （{@link PinnedSource.prefetchFile} = 逐次面の相 1。**optional 能力**であって、持たない
- *    取得元が正当 — HTTP + 永続キャッシュ固有の最適化で、直接読める取得元には意味がない）
+ *    （{@link PinnedSource.prefetchFile} = 温め面 `prefetchAssets` の相 1。**optional 能力**で
+ *    あって、持たない取得元が正当 — HTTP + 永続キャッシュ固有の最適化で、直接読める取得元には
+ *    意味がない）
  * 5. 越境 (repo, revision) → 別の取得元（{@link PinnedSource.originFor}）
  *
  * 取得経路の外側に、キャッシュ在庫の管理面（`inventory.ts` の照会と削除）がもう 2 つ乗る
@@ -76,24 +77,12 @@ export type FileReadOptions = {
    */
   readonly onProgress: (loaded: number) => void;
   readonly sizeViolation: SizeViolation;
-  /**
-   * 器の貸し出し（逐次面だけが渡す）。呼ぶと **`ref.size` 以上の長さの buffer** が返り、取得元は
-   * そこへ実体を先頭から読み、器の prefix view（byteOffset 0 / byteLength = `ref.size`）を返して
-   * よい。器は shard ごとに使い回されるので、ホスト RAM に同時に載る shard は常に 1 本になる
-   * （ADR 0070 追記 — 係数 1 化）。
-   *
-   * 使えない取得元（取得層が自前で buffer を確保する外部実装の取得元）は**呼ばずに**従来どおり
-   * tight view を返す — 呼ばなければ器は確保されない（遅延確保）。組み込みの 2 取得元
-   * 〈ディレクトリ / HF〉はどちらも使う。MUST: 呼んだら器へ読む（呼んで別の buffer を返すと、
-   * 器 1 本ぶんの RAM が無駄に居座る）。
-   */
-  readonly into?: () => Uint8Array<ArrayBuffer>;
 };
 
 /**
  * 資産 1 本の**区間読み口**（{@link PinnedSource.openFile} が返す ⑧の能力）。全量読み
  * （{@link PinnedSource.readFile}）と違い、宣言 size のうち欲しい `[offset, offset + length)` だけを
- * 返す — 数百 MiB の shard から数 KB の行だけを引く消費側（層ごとの埋め込み表の decode）のための面。
+ * 返す — 数百 MiB の part から数 KB の行だけを引く消費側（層ごとの埋め込み表の decode）のための面。
  *
  * {@link cost} が**費用の型**を名乗るのは、消費側が「行読みに切り替えてよい行数の上限」をそれで
  * 変えるから: `"scan"` の取得元では 1 行が offset に比例した読み飛ばしを伴うので、全量 1 回の方が
@@ -159,8 +148,8 @@ export type PinnedSource = {
   readonly readFile: (ref: FileRef, options: FileReadOptions) => Promise<Uint8Array>;
   /**
    * ④相 1（optional 能力）— RAM に載せずに、後続の {@link readFile} が安く済む状態にする。
-   * **持たない取得元が正当**で、その場合は逐次面が相 2（直接逐次読み）だけで同じ RAM 目標を
-   * 満たす（ADR 0070 決定 2 の読み替え）。
+   * **持たない取得元が正当**で、その場合は温め面が no-op になる（直接読める取得元では「後の
+   * 読みが安く済む状態」が最初から満たされている）。
    */
   readonly prefetchFile?: (ref: FileRef, options: FileReadOptions) => Promise<void>;
   /**

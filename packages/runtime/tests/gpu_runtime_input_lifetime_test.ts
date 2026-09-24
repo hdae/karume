@@ -11,16 +11,14 @@
 // （どちらも run の戻り値の見た目は正常）。④ は負の門で、契約を clone 側へ倒したら赤くなる。
 
 import { assert, assertEquals } from "@std/assert";
-import { openModel } from "../src/format/container.ts";
 import { acquireGpu, type GpuContext, type ResidentTensor } from "../src/gpu/device.ts";
 import {
-  createSession,
+  createSessionFromContainer,
   type RunInput,
   type Session,
   type Tensor,
 } from "../src/runtime/executor.ts";
-import type { GraphJson } from "./helpers/format.ts";
-import { graphModelBuffer } from "./helpers/graph.ts";
+import { type DeclarationJson, openGraphModel } from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
 const ROWS = 4;
@@ -33,9 +31,9 @@ const BYTES = COUNT * 4;
  * 材料**になる形（= 発行後の書き換えが「束縛が衝突」という無関係な失敗に化ける形）を実際に
  * 通すため。
  */
-const GRAPH: GraphJson = {
+const GRAPH: DeclarationJson = {
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["add"] },
   symbols: ["N"],
   inputs: [{ name: "x", dtype: "f32", shape: ["N", COLS] }],
@@ -70,8 +68,8 @@ const bits = (data: Tensor["data"] | ArrayBuffer): readonly number[] =>
       : new Uint32Array(data.buffer, data.byteOffset, data.length),
   );
 
-const openSession = (gpu: GpuContext): Promise<Session> =>
-  createSession(gpu, openModel(graphModelBuffer(GRAPH)));
+const openSession = async (gpu: GpuContext): Promise<Session> =>
+  await createSessionFromContainer(gpu, await openGraphModel(GRAPH), "model");
 
 Deno.test({
   name: "run 直後の shape 書き換えは解決 shape に届かない（発行時 snapshot・実 GPU）",

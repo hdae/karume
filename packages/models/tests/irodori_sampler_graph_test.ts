@@ -14,12 +14,16 @@
  * 押さえる。
  */
 
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertThrows } from "@std/assert";
 import {
   acquireGpu,
-  createSession,
+  createSessionFromContainer,
   type GpuContext,
-  openModel,
+  type IrDeclaration,
+  IrError,
+  openMemoryContainer,
+  parseIrDeclarationValue,
+  type Session,
   type Tensor,
 } from "@karume/runtime";
 import {
@@ -96,6 +100,21 @@ const countFences = (gpu: GpuContext): { readonly count: () => number; restore: 
   };
 };
 
+/**
+ * ホストで組んだ宣言（重み 0 本）をメモリ内容器に載せて Session にする
+ * （`dit-loop.ts` の `openHostGraph` と同じ組み方）。
+ */
+const hostSession = (
+  gpu: GpuContext,
+  name: string,
+  declaration: IrDeclaration,
+): Promise<Session> =>
+  createSessionFromContainer(
+    gpu,
+    openMemoryContainer({ graphs: { [name]: declaration }, tensors: {} }),
+    name,
+  );
+
 /** 1 step ぶんの材料（cond の速度場 / 変種ごとの速度場 / 刻み幅）。 */
 type Step = {
   readonly cond: Float32Array<ArrayBuffer>;
@@ -133,8 +152,8 @@ const residentLoop = async (
   initial: Float32Array<ArrayBuffer>,
   steps: readonly Step[],
 ): Promise<{ readonly x: ArrayBuffer; readonly fences: number }> => {
-  const combine = await createSession(gpu, openModel(combineGraph(FRAMES, LATENT_DIM)));
-  const euler = await createSession(gpu, openModel(eulerGraph(FRAMES, LATENT_DIM)));
+  const combine = await hostSession(gpu, "combine", combineGraph(FRAMES, LATENT_DIM));
+  const euler = await hostSession(gpu, "euler", eulerGraph(FRAMES, LATENT_DIM));
   const xT = await gpu.createResident(BYTES, "x_t");
   const vCond = await gpu.createResident(BYTES, "v_cond");
   const vVariant = await gpu.createResident(BYTES, "v_variant");
@@ -177,6 +196,19 @@ const residentLoop = async (
     accumulator.dispose();
   }
 };
+
+Deno.test("ホストで組む宣言はグラフ単体の規則を通る（前方参照は宣言の段で落ちる）", () => {
+  const declaration = eulerGraph(FRAMES, LATENT_DIM);
+  // 陰性対照: 組んだ宣言そのものは通る（= 検出器が常に赤なわけではない）。
+  assertEquals(parseIrDeclarationValue({ ...declaration }), declaration);
+  // ノード順を入れ替えると `step` が前方参照になる。合流（宣言 × 供給）も `prepareContainer`
+  // （capability + op 契約）もノード順を見ないので、落とせるのはこの門だけ。
+  assertThrows(
+    () => parseIrDeclarationValue({ ...declaration, nodes: [...declaration.nodes].reverse() }),
+    IrError,
+    "前方参照",
+  );
+});
 
 Deno.test({
   name: "常駐 CFG + Euler ループは TS 正本とビット一致し、フェンスは batch の 1 本（実 GPU）",

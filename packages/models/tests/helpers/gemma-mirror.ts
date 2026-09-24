@@ -73,8 +73,7 @@ const openModelContainer = async (
 /**
  * ミラーの部品 1 本を**区間読みで**開き、宣言と Session の入口を返す。
  *
- * 旧 shard 面（`prepareModel` + shard 列の逐次読み）の置き換え — 部品は容器 1 本になり、block は
- * Session を組むその瞬間に part 順で読まれる（ADR 0109 決定 7）。
+ * 部品は容器 1 本で、block は Session を組むその瞬間に part 順で読まれる（ADR 0109 決定 7）。
  */
 export const openMirrorComponent = async (
   mirror: URL,

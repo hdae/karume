@@ -15,45 +15,56 @@
 // 量子化誤差と実装誤差が混ざり、tolerance を緩める圧力になる。
 
 import { assert, assertEquals, assertThrows } from "@std/assert";
-import { assertRuntimeSupport, ContainerError, openModel } from "../src/format/container.ts";
+import { perChannelGroupSize } from "../src/format/container/codecs.ts";
+import { ContainerFormatError } from "../src/format/container/header.ts";
+import type { OpenedContainer } from "../src/format/container/open.ts";
 import { alignI8Payload, decodeI8, I8Error } from "../src/format/i8.ts";
-import { IrError, parseIrGraph } from "../src/format/ir.ts";
+import type { IrGraph } from "../src/format/ir.ts";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
 import { compareTensors, formatAllclose } from "../src/reference/allclose.ts";
 import { GEMM_TOLERANCE } from "./helpers/op-tolerance.ts";
 import { applyReferenceOp, type RefTensor, refTensor } from "../src/reference/ops.ts";
 import { RUNTIME_SUPPORT } from "../src/ops.ts";
+import { assertRuntimeSupport, RuntimeSupportError } from "../src/ops/support.ts";
 import {
   eligibleCompressedInitializers,
   ExecutionError,
   weightChannelAxes,
 } from "../src/runtime/plan.ts";
-import { createSession, type Tensor } from "../src/runtime/executor.ts";
-import { buildSafetensors, f32Bytes, type GraphJson, type TensorSpec } from "./helpers/format.ts";
+import {
+  createSessionFromContainer,
+  prepareContainer,
+  type Tensor,
+} from "../src/runtime/executor.ts";
+import type { EncodingInput, TensorInput } from "./helpers/container-write.ts";
 import { i8BytesFrom, quantizeI8 } from "./helpers/i8.ts";
-import { fill, type FilledTensor } from "./helpers/graph.ts";
+import { mergeTensors } from "./helpers/merged-graph.ts";
+import {
+  type DeclarationJson,
+  f32Bytes,
+  fill,
+  type FilledTensor,
+  GRAPH_NAME,
+  openModelBytes,
+} from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
 const SIGNED = (i: number): number => ((i % 13) - 6) * 0.75;
 const POSITIVE = (i: number): number => 0.125 + (i % 17) * 0.5;
 
-/** `linear(x, w, b)` 1 本のグラフ（w は i8 + scale）。`extra` で w の消費を足せる。 */
-const linearGraph = (
-  storage: Record<string, unknown>,
-  extra: GraphJson["nodes"] = [],
-  extraValues: GraphJson["values"] = {},
+/** `linear(x, w, b)` 1 本の宣言（w は i8 + scale）。`extra` で w の消費を足せる。 */
+const linearDeclaration = (
+  extra: DeclarationJson["nodes"] = [],
+  extraValues: DeclarationJson["values"] = {},
   extraOutputs: readonly string[] = [],
-): GraphJson => ({
+): DeclarationJson => ({
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["linear", ...extra.map((node) => node.op)] },
   symbols: [],
   inputs: [{ name: "x", dtype: "f32", shape: [2, 4] }],
   outputs: ["y", ...extraOutputs],
-  initializers: {
-    w: { tensor: "m.w", storage },
-    b: { tensor: "m.b", storage: { dtype: "f32" } },
-  },
+  initializers: { w: {}, b: {} },
   values: {
     w: { dtype: "f32", shape: [3, 4] },
     b: { dtype: "f32", shape: [3] },
@@ -62,6 +73,34 @@ const linearGraph = (
   },
   nodes: [{ op: "linear", ins: ["x", "w", "b"], outs: ["y"], attrs: {} }, ...extra],
 });
+
+/** {@link linearDeclaration} の重み [3,4] を i8 量子化したもの（scale は行ごと 3 本）。 */
+const LINEAR_W = quantizeI8(fill([3, 4], POSITIVE).data, [3, 4], 0);
+
+/** {@link linearDeclaration} への供給。`encoding` を差し替えて 1 点だけ壊せる。 */
+const linearTensors = (
+  encoding: EncodingInput = {
+    codec: "int8-sym",
+    groupSize: 4,
+    scale: { bytes: f32Bytes(LINEAR_W.scale), dtype: "f32" },
+  },
+  bytes: Uint8Array<ArrayBuffer> = LINEAR_W.bytes,
+): TensorInput[] => [
+  { graph: GRAPH_NAME, initializer: "w", bytes, encoding },
+  {
+    graph: GRAPH_NAME,
+    initializer: "b",
+    bytes: f32Bytes([0.5, -0.25, 1]),
+    encoding: { codec: "f32" },
+  },
+];
+
+/** 宣言 + 供給を合流した `IrGraph`（同期 — メモリ内容器 1 本ぶん）。 */
+const mergedI8 = (
+  declaration: DeclarationJson,
+  encoding?: EncodingInput,
+  bytes?: Uint8Array<ArrayBuffer>,
+): IrGraph => mergeTensors(declaration, linearTensors(encoding, bytes));
 
 // ---------------------------------------------------------------------------
 // CPU 側の展開（ホスト鏡像の仕様）
@@ -150,14 +189,12 @@ Deno.test("alignI8Payload: 4 バイト境界までゼロ詰めし、整列済み
 // ---------------------------------------------------------------------------
 
 Deno.test("i8 の適格判定は f16 と同じ 1 本の判定を通る（新設していない）", () => {
-  const eligible = (graph: GraphJson): readonly string[] =>
-    [...eligibleCompressedInitializers(parseIrGraph(JSON.stringify(graph)))].sort();
-  const storage = { dtype: "i8", scale: "m.s" };
-  assertEquals(eligible(linearGraph(storage)), ["m.w"]);
+  const eligible = (declaration: DeclarationJson): readonly string[] =>
+    [...eligibleCompressedInitializers(mergedI8(declaration))].sort();
+  assertEquals(eligible(linearDeclaration()), ["w"]);
   // 混在消費（weight スロット以外でも消費）は適格を失う
   assertEquals(
-    eligible(linearGraph(
-      storage,
+    eligible(linearDeclaration(
       [{ op: "add", ins: ["w", "w"], outs: ["z"], attrs: {} }],
       { z: { dtype: "f32", shape: [3, 4] } },
       ["z"],
@@ -169,16 +206,14 @@ Deno.test("i8 の適格判定は f16 と同じ 1 本の判定を通る（新設�
 Deno.test("graph 出力になった i8 initializer も同じ 1 本の判定で適格外", () => {
   // MUST: readback は semantic f32（4 バイト / 要素）を仮定して重みバッファから写すので、
   // i8（1 バイト / 要素 + scale）のまま常駐させると copy が実バッファをはみ出す。
-  const eligible = eligibleCompressedInitializers(
-    parseIrGraph(JSON.stringify(linearGraph({ dtype: "i8", scale: "m.s" }, [], {}, ["w"]))),
-  );
+  const eligible = eligibleCompressedInitializers(mergedI8(linearDeclaration([], {}, ["w"])));
   assertEquals([...eligible], []);
 });
 
 Deno.test("チャネル軸は消費側 op から決まる（conv_transpose1d だけ 1）", () => {
   const axisOf = (op: string, ins: readonly string[]): number | undefined => {
     const graph = {
-      initializers: { w: { tensor: "m.w", storage: { dtype: "i8", scale: "m.s" } } },
+      initializers: { w: { storage: { codec: "int8-sym", groupSize: 4, rowAxis: 0 } } },
       nodes: [{ op, ins: [...ins], outs: ["y"], attrs: {} }],
     };
     return weightChannelAxes(graph as never).get("w");
@@ -196,7 +231,7 @@ Deno.test("チャネル軸は消費側 op から決まる（conv_transpose1d だ
 
 Deno.test("同じ重みを軸の違う 2 op が食う形は fail loudly", () => {
   const graph = {
-    initializers: { w: { tensor: "m.w", storage: { dtype: "i8", scale: "m.s" } } },
+    initializers: { w: { storage: { codec: "int8-sym", groupSize: 4, rowAxis: 0 } } },
     nodes: [
       { op: "linear", ins: ["x", "w", "b"], outs: ["y"], attrs: {} },
       { op: "conv_transpose1d", ins: ["x", "w", "b"], outs: ["z"], attrs: {} },
@@ -206,119 +241,39 @@ Deno.test("同じ重みを軸の違う 2 op が食う形は fail loudly", () => 
 });
 
 // ---------------------------------------------------------------------------
-// ロード時検証（scale の宣言と実テンソル — GPU 非依存）
+// 合流層の検証（宣言 × 供給 — GPU 非依存）
 // ---------------------------------------------------------------------------
 
-/** i8 の linear モデル（scale は keepdim [3,1]）。`mutate` で 1 点だけ壊せる。 */
-const i8LinearModel = (
-  mutate: (parts: {
-    graph: GraphJson;
-    tensors: TensorSpec[];
-  }) => void = () => {},
-): ArrayBuffer => {
-  const weight = fill([3, 4], POSITIVE);
-  const quantized = quantizeI8(weight.data, [3, 4], 0);
-  const graph = linearGraph({ dtype: "i8", scale: "m.s" });
-  // MUST: I8 はファイル末尾（1 バイト要素なので後続テンソルの整列を壊す）
-  const tensors: TensorSpec[] = [
-    { name: "m.b", dtype: "F32", shape: [3], data: f32Bytes([0.5, -0.25, 1]) },
-    { name: "m.s", dtype: "F32", shape: [3, 1], data: f32Bytes(quantized.scale) },
-    { name: "m.w", dtype: "I8", shape: [3, 4], data: quantized.bytes },
-  ];
-  mutate({ graph, tensors });
-  return buildSafetensors(tensors, { karume_ir: JSON.stringify(graph) });
-};
-
-Deno.test("i8 は scale の宣言が必須（既定 1.0 で補完しない）", () => {
-  assertThrows(
-    () =>
-      openModel(i8LinearModel(({ graph }) => {
-        graph.initializers["w"].storage = { dtype: "i8" };
-      })),
-    IrError,
-    "scale",
-  );
-});
-
-Deno.test("scale テンソルの実在・dtype・keepdim 形・名前衝突をロード時に見る", () => {
-  // 実在しない
-  assertThrows(
-    () =>
-      openModel(i8LinearModel(({ graph }) => {
-        graph.initializers["w"].storage = { dtype: "i8", scale: "m.missing" };
-      })),
-    ContainerError,
-    "がファイルに無い",
-  );
-  // F32 でない（f16 のビット列として読むと全チャネルが桁違いになる）
-  assertThrows(
-    () =>
-      openModel(i8LinearModel(({ tensors }) => {
-        tensors[1] = { name: "m.s", dtype: "F16", shape: [3, 1], data: new Uint8Array(6) };
-      })),
-    ContainerError,
-    "F32 が必要",
-  );
-  // rank が重みと違う（[3] は keepdim 形ではない）
-  assertThrows(
-    () =>
-      openModel(i8LinearModel(({ tensors }) => {
-        tensors[1] = { name: "m.s", dtype: "F32", shape: [3], data: f32Bytes([1, 1, 1]) };
-      })),
-    ContainerError,
-    "rank",
-  );
-  // broadcast できない（軸 0 が 2 で重みの 3 と違う）
-  assertThrows(
-    () =>
-      openModel(i8LinearModel(({ tensors }) => {
-        tensors[1] = { name: "m.s", dtype: "F32", shape: [2, 1], data: f32Bytes([1, 1]) };
-      })),
-    ContainerError,
-    "broadcast できない",
-  );
-  // 実テンソルとの名前衝突（別の initializer の実体を scale として読む形）
-  assertThrows(
-    () =>
-      openModel(i8LinearModel(({ graph }) => {
-        graph.initializers["w"].storage = { dtype: "i8", scale: "m.b" };
-      })),
-    ContainerError,
-    "実体と同じキー",
-  );
-});
-
-// group 量子化を受理する格納は i4 だけ（ADR 0069 決定 2）— i8 に付いた group_size は
-// 従来どおり capability 不足で落とす（group ごとの scale を per-channel として読む沈黙誤値）。
-// 合流（旧配布形 → 実行グラフ）の時点で落ちる。旧は capability の層（assertRuntimeSupport）が
-// 見ていたが、合流後の宣言に「i8 なのに group」という形そのものが存在できない。
-Deno.test("i4 以外の格納 dtype に付いた group_size は合流で落とす（ADR 0069）", () => {
+// group 量子化を受理する codec は int4-sym-g だけ（ADR 0069 決定 2）— per-channel codec に
+// 行長と違う groupSize を付けた形は合流層が落とす（group ごとの scale を per-channel として
+// 読む沈黙誤値）。
+Deno.test("per-channel codec に行長と違う groupSize を付けると合流で落とす（ADR 0069）", () => {
   const error = assertThrows(
     () =>
-      openModel(i8LinearModel(({ graph }) => {
-        graph.initializers["w"].storage = { dtype: "i8", scale: "m.s", group_size: 32 };
-      })),
-    IrError,
-    "非対応 group 量子化",
+      mergedI8(linearDeclaration(), {
+        codec: "int8-sym",
+        groupSize: 2,
+        scale: { bytes: f32Bytes(LINEAR_W.scale), dtype: "f32" },
+      }),
+    ContainerFormatError,
+    "per-channel なので groupSize は行長 4 に等しい MUST",
   );
-  assertEquals(error.message.includes("graph.initializers['w']"), true, error.message);
-  assertEquals(error.message.includes("i4 のみ"), true, error.message);
+  assertEquals(error.message.includes("initializer 'w'"), true, error.message);
 });
 
 Deno.test("bf16 は従来どおり capability 不足で fail loudly（i8 の門が開いても変わらない）", () => {
-  const graph = linearGraph({ dtype: "bf16" });
-  const model = openModel(buildSafetensors([
-    { name: "m.b", dtype: "F32", shape: [3], data: new Uint8Array(12) },
-    { name: "m.w", dtype: "BF16", shape: [3, 4], data: new Uint8Array(24) },
-  ], { karume_ir: JSON.stringify(graph) }));
   const error = assertThrows(
-    () => assertRuntimeSupport(model.graph, RUNTIME_SUPPORT),
-    ContainerError,
+    () =>
+      assertRuntimeSupport(
+        mergedI8(linearDeclaration(), { codec: "bf16" }, new Uint8Array(new ArrayBuffer(24))),
+        RUNTIME_SUPPORT,
+      ),
+    RuntimeSupportError,
     "capability 不足",
   );
-  assertEquals(error.message.includes("非対応 格納 'bf16' (1): m.w"), true, error.message);
+  assertEquals(error.message.includes("非対応 格納 'bf16' (1): w"), true, error.message);
   // i8 は同じ門を通る（適格かどうかは実行可否と別軸）
-  assertRuntimeSupport(openModel(i8LinearModel()).graph, RUNTIME_SUPPORT);
+  assertRuntimeSupport(mergedI8(linearDeclaration()), RUNTIME_SUPPORT);
 });
 
 // ---------------------------------------------------------------------------
@@ -339,42 +294,40 @@ type WeightedCase = {
   readonly attrs?: Record<string, unknown>;
 };
 
-/** weight を i8 initializer にした単一ノードのグラフ + 配布形バイト列。 */
+/** weight を i8 initializer にした単一ノードの宣言 + 開いた容器。 */
 const weightedModel = (
   testCase: WeightedCase,
   quantized: ReturnType<typeof quantizeI8>,
-): ArrayBuffer => {
-  const values: GraphJson["values"] = {
+): Promise<OpenedContainer> => {
+  const values: DeclarationJson["values"] = {
     w: { dtype: "f32", shape: [...testCase.weight.shape] },
     y: { dtype: "f32", shape: [...testCase.outShape] },
   };
-  const initializers: GraphJson["initializers"] = {
-    w: { tensor: "m.w", storage: { dtype: "i8", scale: "m.s" } },
-  };
-  // MUST: I8（1 バイト要素）は**ファイル末尾**に置く。後続の F32 の絶対 offset が 4 の倍数から
-  // 外れてリーダの整列検査で落ちる（格納の並べ方の制約であって i8 経路の問題ではない）。
-  const tensors: TensorSpec[] = [];
+  const initializers: DeclarationJson["initializers"] = { w: {} };
+  const tensors: TensorInput[] = [];
   if (testCase.bias !== undefined) {
     values["b"] = { dtype: "f32", shape: [...testCase.bias.shape] };
-    initializers["b"] = { tensor: "m.b", storage: { dtype: "f32" } };
+    initializers["b"] = {};
     tensors.push({
-      name: "m.b",
-      dtype: "F32",
-      shape: [...testCase.bias.shape],
-      data: new Uint8Array(testCase.bias.data.buffer.slice(0)),
+      graph: GRAPH_NAME,
+      initializer: "b",
+      bytes: new Uint8Array(testCase.bias.data.buffer.slice(0)),
+      encoding: { codec: "f32" },
     });
   }
+  // per-channel の groupSize は台帳（`codecs.ts`）から引く（行長 = numel / shape[rowAxis]・
+  // groups は 1）— テスト側で数え直すと、供給の長さと期待の長さが同じ誤りを共有する。
+  const numel = testCase.weight.shape.reduce((count, dim) => count * dim, 1);
   tensors.push({
-    name: "m.s",
-    dtype: "F32",
-    shape: [...quantized.scaleShape],
-    data: f32Bytes(quantized.scale),
-  });
-  tensors.push({
-    name: "m.w",
-    dtype: "I8",
-    shape: [...testCase.weight.shape],
-    data: quantized.bytes,
+    graph: GRAPH_NAME,
+    initializer: "w",
+    bytes: quantized.bytes,
+    encoding: {
+      codec: "int8-sym",
+      rowAxis: testCase.channelAxis === 1 ? 1 : 0,
+      groupSize: perChannelGroupSize(numel / testCase.weight.shape[testCase.channelAxis]),
+      scale: { bytes: f32Bytes(quantized.scale), dtype: "f32" },
+    },
   });
   // ins の並びは契約どおり（embedding は weight が先頭・他は x の次）
   const ins = testCase.op === "embedding" ? ["w", ...testCase.inputs.map(([name]) => name)] : [
@@ -382,9 +335,9 @@ const weightedModel = (
     "w",
     ...(testCase.bias === undefined ? [] : ["b"]),
   ];
-  const graph: GraphJson = {
+  const declaration: DeclarationJson = {
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: [testCase.op] },
     symbols: [],
     inputs: testCase.inputs.map(([name, tensor]) => ({
@@ -397,7 +350,7 @@ const weightedModel = (
     values,
     nodes: [{ op: testCase.op, ins, outs: ["y"], attrs: { ...testCase.attrs } }],
   };
-  return buildSafetensors(tensors, { karume_ir: JSON.stringify(graph) });
+  return openModelBytes(declaration, tensors);
 };
 
 /**
@@ -478,7 +431,11 @@ Deno.test({
           quantized.bytes.byteLength % 4 !== 0,
           `${testCase.name}: 重みの総要素数が 4 の倍数（ゼロ詰め経路を踏まない）`,
         );
-        const session = await createSession(gpu, openModel(weightedModel(testCase, quantized)));
+        const session = await createSessionFromContainer(
+          gpu,
+          await weightedModel(testCase, quantized),
+          GRAPH_NAME,
+        );
         let output: Tensor;
         let residentBytes: number;
         try {
@@ -574,7 +531,11 @@ Deno.test({
           new Set(quantized.scale).size > 1,
           `${testCase.name}: scale が全チャネルで同じ`,
         );
-        const session = await createSession(gpu, openModel(weightedModel(testCase, quantized)));
+        const session = await createSessionFromContainer(
+          gpu,
+          await weightedModel(testCase, quantized),
+          GRAPH_NAME,
+        );
         let output: Tensor;
         try {
           output = (await session.run({ x: testCase.inputs[0][1] }))["y"];
@@ -624,26 +585,32 @@ Deno.test({
     }
     const bytes = i8BytesFrom(quantized);
     const scale = Float32Array.from({ length: vocab }, (_, row) => 0.1 + row * 0.003);
-    const graph: GraphJson = {
+    const declaration: DeclarationJson = {
       format: "karume-ir",
-      version: 1,
+      version: 2,
       requires: { ops: ["embedding"] },
       symbols: [],
       inputs: [{ name: "index", dtype: "i32", shape: [vocab] }],
       outputs: ["y"],
-      initializers: { w: { tensor: "m.w", storage: { dtype: "i8", scale: "m.s" } } },
+      initializers: { w: {} },
       values: {
         w: { dtype: "f32", shape: [vocab, hidden] },
         y: { dtype: "f32", shape: [vocab, hidden] },
       },
       nodes: [{ op: "embedding", ins: ["w", "index"], outs: ["y"], attrs: { padding_idx: -1 } }],
     };
-    const model = buildSafetensors([
-      { name: "m.s", dtype: "F32", shape: [vocab, 1], data: f32Bytes(scale) },
-      { name: "m.w", dtype: "I8", shape: [vocab, hidden], data: bytes },
-    ], { karume_ir: JSON.stringify(graph) });
+    const opened = await openModelBytes(declaration, [{
+      graph: GRAPH_NAME,
+      initializer: "w",
+      bytes,
+      encoding: {
+        codec: "int8-sym",
+        groupSize: hidden,
+        scale: { bytes: f32Bytes(scale), dtype: "f32" },
+      },
+    }]);
     const gpu = await acquireGpu();
-    const session = await createSession(gpu, openModel(model));
+    const session = await createSessionFromContainer(gpu, opened, GRAPH_NAME);
     let actual: Float32Array<ArrayBuffer>;
     try {
       const outputs = await session.run({ index: fill([vocab], (i) => i, "i32") });
@@ -685,23 +652,21 @@ const poisonedI8Graph = (
   weightShape: readonly number[],
   outShape: readonly number[],
   bias?: readonly number[],
-): GraphJson => {
+): DeclarationJson => {
   const count = outShape.reduce((total, dim) => total * dim, 1);
-  const values: GraphJson["values"] = {
+  const values: DeclarationJson["values"] = {
     poison: { dtype: "f32", shape: [count] },
     w: { dtype: "f32", shape: [...weightShape] },
     y: { dtype: "f32", shape: [...outShape] },
   };
-  const initializers: GraphJson["initializers"] = {
-    w: { tensor: "m.w", storage: { dtype: "i8", scale: "m.s" } },
-  };
+  const initializers: DeclarationJson["initializers"] = { w: {} };
   if (bias !== undefined) {
     values["b"] = { dtype: "f32", shape: [...bias] };
-    initializers["b"] = { tensor: "m.b", storage: { dtype: "f32" } };
+    initializers["b"] = {};
   }
   return {
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: ["cast", op] },
     symbols: [],
     inputs: [
@@ -734,8 +699,8 @@ Deno.test({
       // linear（タイル形）と embedding（grid-stride + 範囲外分岐）の 2 本で踏む
       const cases: readonly {
         readonly name: string;
-        readonly graph: GraphJson;
-        readonly tensors: readonly TensorSpec[];
+        readonly graph: DeclarationJson;
+        readonly tensors: readonly TensorInput[];
         readonly inputs: Record<string, Tensor>;
         readonly count: number;
       }[] = [
@@ -752,16 +717,23 @@ Deno.test({
               [4, 3],
               [3],
             ),
-            // I8 は末尾（後続 F32 の整列が崩れるため — weightedModel の MUST）
             tensors: [
               {
-                name: "m.b",
-                dtype: "F32",
-                shape: [3],
-                data: new Uint8Array(bias.data.buffer.slice(0)),
+                graph: GRAPH_NAME,
+                initializer: "b",
+                bytes: new Uint8Array(bias.data.buffer.slice(0)),
+                encoding: { codec: "f32" },
               },
-              { name: "m.s", dtype: "F32", shape: [3, 1], data: f32Bytes(quantized.scale) },
-              { name: "m.w", dtype: "I8", shape: [3, 7], data: quantized.bytes },
+              {
+                graph: GRAPH_NAME,
+                initializer: "w",
+                bytes: quantized.bytes,
+                encoding: {
+                  codec: "int8-sym",
+                  groupSize: 7,
+                  scale: { bytes: f32Bytes(quantized.scale), dtype: "f32" },
+                },
+              },
             ],
             inputs: { x: fill([4, 7], SIGNED) },
             count: 12,
@@ -779,8 +751,16 @@ Deno.test({
               [4, 3],
             ),
             tensors: [
-              { name: "m.s", dtype: "F32", shape: [5, 1], data: f32Bytes(quantized.scale) },
-              { name: "m.w", dtype: "I8", shape: [5, 3], data: quantized.bytes },
+              {
+                graph: GRAPH_NAME,
+                initializer: "w",
+                bytes: quantized.bytes,
+                encoding: {
+                  codec: "int8-sym",
+                  groupSize: 3,
+                  scale: { bytes: f32Bytes(quantized.scale), dtype: "f32" },
+                },
+              },
             ],
             inputs: { idx: fill([4], (i) => i % 5, "i32") },
             count: 12,
@@ -788,10 +768,8 @@ Deno.test({
         })(),
       ];
       for (const testCase of cases) {
-        const model = openModel(
-          buildSafetensors(testCase.tensors, { karume_ir: JSON.stringify(testCase.graph) }),
-        );
-        const session = await createSession(gpu, model);
+        const opened = await openModelBytes(testCase.graph, testCase.tensors);
+        const session = await createSessionFromContainer(gpu, opened, GRAPH_NAME);
         try {
           const outputs = await session.run({
             seed: fill([testCase.count], () => POISON),
@@ -829,19 +807,33 @@ Deno.test({
     const weight = fill([3, 4], POSITIVE);
     const quantized = quantizeI8(weight.data, [3, 4], 0);
     const bias = fill([3], SIGNED);
-    const tensors: readonly TensorSpec[] = [
-      { name: "m.b", dtype: "F32", shape: [3], data: new Uint8Array(bias.data.buffer.slice(0)) },
-      { name: "m.s", dtype: "F32", shape: [3, 1], data: f32Bytes(quantized.scale) },
-      { name: "m.w", dtype: "I8", shape: [3, 4], data: quantized.bytes },
+    const tensors: readonly TensorInput[] = [
+      {
+        graph: GRAPH_NAME,
+        initializer: "b",
+        bytes: new Uint8Array(bias.data.buffer.slice(0)),
+        encoding: { codec: "f32" },
+      },
+      {
+        graph: GRAPH_NAME,
+        initializer: "w",
+        bytes: quantized.bytes,
+        encoding: {
+          codec: "int8-sym",
+          groupSize: 4,
+          scale: { bytes: f32Bytes(quantized.scale), dtype: "f32" },
+        },
+      },
     ];
     const x = fill([2, 4], SIGNED);
     const run = async (
       gpu: GpuContext,
-      graph: GraphJson,
+      declaration: DeclarationJson,
     ): Promise<{ readonly y: Tensor; readonly resident: number; readonly expanded: number }> => {
-      const session = await createSession(
+      const session = await createSessionFromContainer(
         gpu,
-        openModel(buildSafetensors(tensors, { karume_ir: JSON.stringify(graph) })),
+        await openModelBytes(declaration, tensors),
+        GRAPH_NAME,
       );
       try {
         const outputs = await session.run({ x });
@@ -857,13 +849,11 @@ Deno.test({
     };
     const gpu = await acquireGpu();
     try {
-      const storage = { dtype: "i8", scale: "m.s" };
-      const eligible = await run(gpu, linearGraph(storage));
+      const eligible = await run(gpu, linearDeclaration());
       // w を add でも消費する = 混在消費（同じ linear ノードは残す）
       const mixed = await run(
         gpu,
-        linearGraph(
-          storage,
+        linearDeclaration(
           [{ op: "add", ins: ["w", "w"], outs: ["z"], attrs: {} }],
           { z: { dtype: "f32", shape: [3, 4] } },
           ["z"],
@@ -906,24 +896,35 @@ Deno.test({
     const weight = fill([3, 4], POSITIVE);
     const quantized = quantizeI8(weight.data, [3, 4], 0);
     const bias = fill([3], SIGNED);
-    const model = openModel(buildSafetensors([
-      { name: "m.b", dtype: "F32", shape: [3], data: new Uint8Array(bias.data.buffer.slice(0)) },
-      { name: "m.s", dtype: "F32", shape: [3, 1], data: f32Bytes(quantized.scale) },
-      { name: "m.w", dtype: "I8", shape: [3, 4], data: quantized.bytes },
-    ], {
-      karume_ir: JSON.stringify(linearGraph({ dtype: "i8", scale: "m.s" }, [], {}, ["w"])),
-    }));
+    const opened = await openModelBytes(linearDeclaration([], {}, ["w"]), [
+      {
+        graph: GRAPH_NAME,
+        initializer: "b",
+        bytes: new Uint8Array(bias.data.buffer.slice(0)),
+        encoding: { codec: "f32" },
+      },
+      {
+        graph: GRAPH_NAME,
+        initializer: "w",
+        bytes: quantized.bytes,
+        encoding: {
+          codec: "int8-sym",
+          groupSize: 4,
+          scale: { bytes: f32Bytes(quantized.scale), dtype: "f32" },
+        },
+      },
+    ]);
     const x = fill([2, 4], SIGNED);
     const gpu = await acquireGpu();
-    const session = await createSession(gpu, model);
+    const session = await createSessionFromContainer(gpu, opened, GRAPH_NAME);
     try {
       const storage = session.diagnostics().storage;
       assertEquals(storage.residentCompressedBytes, 0, "グラフ出力の重みは圧縮常駐しない");
       assertEquals(storage.hostExpandedBytes, 48, "CPU 展開バイト数（f32 換算 12 要素）");
       const outputs = await session.run({ x });
       // 重みは実行に依らない定数なので、丸め後の値とビット単位で一致する
-      assertEquals(outputs["m.w"].shape, [3, 4]);
-      assertEquals([...outputs["m.w"].data], [...quantized.values]);
+      assertEquals(outputs["w"].shape, [3, 4]);
+      assertEquals([...outputs["w"].data], [...quantized.values]);
       // 同じ run の計算側も従来どおり（展開経路でも値は変わらない）
       const expected = applyReferenceOp(
         "linear",
@@ -955,18 +956,14 @@ Deno.test({
     const weight = quantizeI8(fill([3, 7], POSITIVE).data, [3, 7], 0);
     const bias = quantizeI8(fill([3], SIGNED).data, [3], 0);
     const scale = fill([3], POSITIVE);
-    const graph: GraphJson = {
+    const declaration: DeclarationJson = {
       format: "karume-ir",
-      version: 1,
+      version: 2,
       requires: { ops: ["linear", "mul"] },
       symbols: [],
       inputs: [{ name: "x", dtype: "f32", shape: [2, 7] }],
       outputs: ["y"],
-      initializers: {
-        w: { tensor: "m.w", storage: { dtype: "i8", scale: "m.ws" } },
-        b: { tensor: "m.b", storage: { dtype: "i8", scale: "m.bs" } },
-        s: { tensor: "m.s", storage: { dtype: "f32" } },
-      },
+      initializers: { w: {}, b: {}, s: {} },
       values: {
         w: { dtype: "f32", shape: [3, 7] },
         b: { dtype: "f32", shape: [3] },
@@ -979,15 +976,37 @@ Deno.test({
         { op: "mul", ins: ["h", "s"], outs: ["y"], attrs: {} },
       ],
     };
-    const model = openModel(buildSafetensors([
-      { name: "m.ws", dtype: "F32", shape: [3, 1], data: f32Bytes(weight.scale) },
-      { name: "m.bs", dtype: "F32", shape: [3], data: f32Bytes(bias.scale) },
-      { name: "m.s", dtype: "F32", shape: [3], data: new Uint8Array(scale.data.buffer.slice(0)) },
-      { name: "m.b", dtype: "I8", shape: [3], data: bias.bytes },
-      { name: "m.w", dtype: "I8", shape: [3, 7], data: weight.bytes },
-    ], { karume_ir: JSON.stringify(graph) }));
+    const opened = await openModelBytes(declaration, [
+      {
+        graph: GRAPH_NAME,
+        initializer: "w",
+        bytes: weight.bytes,
+        encoding: {
+          codec: "int8-sym",
+          groupSize: 7,
+          scale: { bytes: f32Bytes(weight.scale), dtype: "f32" },
+        },
+      },
+      {
+        graph: GRAPH_NAME,
+        initializer: "b",
+        bytes: bias.bytes,
+        // bias は rank 1（行 = 3・行長 1）— per-channel の groupSize は行長 1。
+        encoding: {
+          codec: "int8-sym",
+          groupSize: 1,
+          scale: { bytes: f32Bytes(bias.scale), dtype: "f32" },
+        },
+      },
+      {
+        graph: GRAPH_NAME,
+        initializer: "s",
+        bytes: new Uint8Array(scale.data.buffer.slice(0)),
+        encoding: { codec: "f32" },
+      },
+    ]);
     const gpu = await acquireGpu();
-    const session = await createSession(gpu, model);
+    const session = await createSessionFromContainer(gpu, opened, GRAPH_NAME);
     try {
       const storage = session.diagnostics().storage;
       // 適格: 21 バイト → 4 バイト整列で 24、+ scale 3 要素 12 バイト
@@ -1018,17 +1037,24 @@ Deno.test({
 /**
  * 適格経路の scale は**平坦添字で引ける形**でなければならない（ADR 0019）。broadcast 可能
  * なだけの形（重み `[3,4]` に対する `[1,4]`）はカーネルが `wscale[col]` と読むので沈黙誤値に
- * なる — 実体を受け取る intake（配布形を開く時点）で落ちることを固定する。
+ * なる — 消費側 op の軸と突き合わせる admission（`planWeightResidency`）で落ちることを固定する。
  */
-Deno.test("行の軸と食い違う scale は配布形を開く時点で fail loudly", () => {
-  const error = assertThrows(
-    () =>
-      openModel(i8LinearModel(({ tensors }) => {
-        // 重み [3,4] の軸 1 に沿った scale。broadcast は可能だが行の軸（0）ではない。
-        tensors[1] = { name: "m.s", dtype: "F32", shape: [1, 4], data: f32Bytes([1, 1, 1, 1]) };
-      })),
-    ContainerError,
-    "伸びている軸 1 が消費側から決まる行の軸 0 と違う",
+Deno.test("消費側の軸と食い違う rowAxis は admission（prepareContainer）で fail loudly", async () => {
+  // 重み [3,4] の軸 1 を行と宣言した形。容器としては整合するが、消費側（linear）の
+  // チャネル軸は 0 — 通すとカーネルが別の軸の scale を引く沈黙誤値になる。
+  const opened = await openModelBytes(
+    linearDeclaration(),
+    linearTensors({
+      codec: "int8-sym",
+      rowAxis: 1,
+      groupSize: 3,
+      scale: { bytes: f32Bytes([1, 1, 1, 1]), dtype: "f32" },
+    }),
   );
-  assertEquals(error.message.includes("initializer 'm.w'"), true, error.message);
+  const error = assertThrows(
+    () => prepareContainer(opened, GRAPH_NAME),
+    ExecutionError,
+    "宣言の rowAxis 1 が消費側 op のチャネル軸 0 と違う",
+  );
+  assertEquals(error.message.includes("initializer 'w'"), true, error.message);
 });

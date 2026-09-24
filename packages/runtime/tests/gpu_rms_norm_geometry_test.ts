@@ -1,6 +1,5 @@
 // RMS の 128 スレッド版は、256 版の下半分の加算順序を維持する。
 import { assert, assertEquals } from "@std/assert";
-import { openModel } from "../src/format/container.ts";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
 import { BUFFER_USAGE as U, MAP_MODE } from "../src/gpu/webgpu-constants.ts";
 import {
@@ -12,8 +11,14 @@ import {
 } from "../src/kernels/rms-norm.ts";
 import { compareTensors, formatAllclose } from "../src/reference/allclose.ts";
 import { applyReferenceOp, refTensor } from "../src/reference/ops.ts";
-import { createSession } from "../src/runtime/executor.ts";
-import { buildSafetensors, f32Bytes, type GraphJson } from "./helpers/format.ts";
+import { createSessionFromContainer } from "../src/runtime/executor.ts";
+import type { OpenedContainer } from "../src/format/container/open.ts";
+import {
+  type DeclarationJson,
+  f32Bytes,
+  GRAPH_NAME,
+  openModelBytes,
+} from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
 import { opTolerance } from "./helpers/op-tolerance.ts";
 
@@ -77,22 +82,28 @@ const direct = async (
   return values;
 };
 
-const model = (rows: number, dim: number, weight: Float32Array<ArrayBuffer>): ArrayBuffer => {
-  const graph: GraphJson = {
+const model = (
+  rows: number,
+  dim: number,
+  weight: Float32Array<ArrayBuffer>,
+): Promise<OpenedContainer> => {
+  const graph: DeclarationJson = {
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: ["rms_norm"] },
     symbols: [],
     inputs: [{ name: "x", dtype: "f32", shape: [rows, dim] }],
     outputs: ["y"],
-    initializers: { w: { tensor: "w", storage: { dtype: "f32" } } },
+    initializers: { w: {} },
     values: { w: { dtype: "f32", shape: [dim] }, y: { dtype: "f32", shape: [rows, dim] } },
     nodes: [{ op: "rms_norm", ins: ["x", "w"], outs: ["y"], attrs: { eps: 1e-6 } }],
   };
-  return buildSafetensors(
-    [{ name: "w", dtype: "F32", shape: [dim], data: f32Bytes([...weight]) }],
-    { karume_ir: JSON.stringify(graph) },
-  );
+  return openModelBytes(graph, [{
+    graph: GRAPH_NAME,
+    initializer: "w",
+    bytes: f32Bytes([...weight]),
+    encoding: { codec: "f32" },
+  }]);
 };
 const bits = (data: Float32Array<ArrayBuffer>): Uint32Array<ArrayBuffer> =>
   new Uint32Array(data.buffer, data.byteOffset, data.length);
@@ -115,7 +126,11 @@ Deno.test({
         if (dim <= 128) {
           assertEquals(bits(await direct(gpu, RMS_NORM_128_WGSL, x, weight)), bits(expected));
         }
-        const session = await createSession(gpu, openModel(model(rows, dim, weight)));
+        const session = await createSessionFromContainer(
+          gpu,
+          await model(rows, dim, weight),
+          GRAPH_NAME,
+        );
         try {
           const input = refTensor([rows, dim], x);
           const { y } = await session.run({ x: input });

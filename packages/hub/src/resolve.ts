@@ -147,8 +147,8 @@ export const resolveSelection = (
  * 1 バイトも来ず、読み手も `partLength` が 0 を答えた時点で読みに行かない — 列に残すと
  * 進捗の総量とファイル数だけが水増しされる。
  * MUST: 同一性（{@link fileRefKey}）で**一意化する**。同じ実体を 2 つの名前が指す形（別名の
- * assets・複数の部品が共有する資産）は manifest として正当だが、この列を受ける面（
- * `prefetchAssets` / `streamAssets`）は重複を呼び手の誤りとして拒否する。畳むのは表を作る
+ * assets・複数の部品が共有する資産）は manifest として正当だが、この列を受ける面
+ * （`prefetchAssets`）は重複を呼び手の誤りとして拒否する。畳むのは表を作る
  * ここ 1 か所で、面ごとに書くと片方だけ畳み忘れる。
  */
 export const selectionRefs = (selection: ResolvedSelection): readonly FileRef[] => {

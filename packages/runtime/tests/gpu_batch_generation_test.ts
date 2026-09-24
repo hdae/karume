@@ -1,15 +1,19 @@
 import { assertEquals, assertRejects, assertStrictEquals, assertThrows } from "@std/assert";
-import { acquireGpu, createSession, openModel, type Tensor } from "../mod.ts";
+import { acquireGpu, createSessionFromContainer, type Tensor } from "../mod.ts";
 import { RUNTIME_INTERNAL } from "../src/gpu/device.ts";
-import type { GraphJson } from "./helpers/format.ts";
-import { graphModelBuffer, singleOpGraph } from "./helpers/graph.ts";
+import {
+  type DeclarationJson,
+  GRAPH_NAME,
+  openGraphModel,
+  singleOpDeclaration,
+} from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { countFences } from "./helpers/fences.ts";
-const graph = (window?: number): GraphJson => {
+const graph = (window?: number): DeclarationJson => {
   const attrs = window === undefined ? {} : { window };
   return {
     format: "karume-ir",
-    version: 1,
+    version: 2,
     symbols: ["M"],
     requires: { ops: ["attention", "state_append"] },
     initializers: {},
@@ -54,7 +58,11 @@ const inputs = (rows: number, phase: number): Record<string, Tensor> =>
   );
 const open = async (window?: number) => {
   const gpu = await acquireGpu(),
-    session = await createSession(gpu, openModel(graphModelBuffer(graph(window))));
+    session = await createSessionFromContainer(
+      gpu,
+      await openGraphModel(graph(window)),
+      GRAPH_NAME,
+    );
   return { gpu, session };
 };
 const test = (name: string, fn: () => Promise<void>): void =>
@@ -216,9 +224,10 @@ test("batch generation: 後続Session失敗は書き込み済みcontextをpoison
   const { gpu, session } = await open(),
     context = await session.createGenerationContext({ chunkLength: 4 }),
     sink = await gpu.createResident(16);
-  const downstream = await createSession(
+  const downstream = await createSessionFromContainer(
     gpu,
-    openModel(graphModelBuffer(singleOpGraph("neg", [[4]], [[4]]))),
+    await openGraphModel(singleOpDeclaration("neg", [[4]], [[4]])),
+    GRAPH_NAME,
   );
   try {
     const batch = await gpu.beginBatch();
@@ -350,7 +359,7 @@ test("batch generation: 借り手は貸し手の予約も終端まで保ち論�
   const { gpu, session } = await open(4);
   const lender = await session.createGenerationContext({ chunkLength: 4 });
   const g = graph(4);
-  const borrowerGraph: GraphJson = {
+  const borrowerGraph: DeclarationJson = {
     ...g,
     symbols: [],
     requires: { ops: ["attention"] },
@@ -367,7 +376,11 @@ test("batch generation: 借り手は貸し手の予約も終端まで保ち論�
       states: { k: "kslot", v: "vslot" },
     }],
   };
-  const reader = await createSession(gpu, openModel(graphModelBuffer(borrowerGraph)));
+  const reader = await createSessionFromContainer(
+    gpu,
+    await openGraphModel(borrowerGraph),
+    GRAPH_NAME,
+  );
   const borrower = await reader.createGenerationContext({ chunkLength: 1, borrow: lender });
   const sink = await gpu.createResident(16);
   try {

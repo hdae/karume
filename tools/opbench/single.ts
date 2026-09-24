@@ -13,14 +13,20 @@
  * は fail loudly の文言をそのまま除外理由に載せて次の行へ進む — 1 行の失敗で掃引全体を止めない。
  */
 
-import type { GpuContext, RunInputs, SessionOptions, Tensor } from "../../packages/runtime/mod.ts";
-import { createSession, openModel } from "../../packages/runtime/mod.ts";
-import {
-  buildSafetensors,
-  type GraphJson,
-  type TensorSpec,
-} from "../../packages/runtime/tests/helpers/format.ts";
+import type {
+  BoundContainer,
+  GpuContext,
+  MemoryTensor,
+  RunInputs,
+  Session,
+  SessionOptions,
+  Tensor,
+} from "../../packages/runtime/mod.ts";
+import { createSessionFromContainer, parseIrDeclarationValue } from "../../packages/runtime/mod.ts";
+import { perChannelGroupSize } from "../../packages/runtime/src/format/container/codecs.ts";
+import { WEIGHT_CHANNEL_AXES, WEIGHT_SLOTS } from "../../packages/runtime/src/ops/names.ts";
 import { f32ToF16Bits } from "../../packages/runtime/tests/helpers/f16.ts";
+import { memoryContainer } from "../_shared/ir-memory.ts";
 import { toSessionOptions } from "../../packages/models/src/session/options.ts";
 import type { SessionSpec } from "../../packages/hub/src/manifest.ts";
 import type { SessionDeclaration } from "../_shared/assets.ts";
@@ -162,11 +168,27 @@ const constantScale = (count: number): Uint8Array<ArrayBuffer> =>
 const elementCount = (shape: readonly number[]): number =>
   shape.reduce((total, dim) => total * dim, 1);
 
+/**
+ * 量子化 initializer のチャネル軸（`Encoding.rowAxis`）。台帳を引くのは、v1 の配布形では
+ * ローダが消費側 op から導いていた軸が、v2 では**供給側が宣言する欄**になったため — 合成側が
+ * 独自表を持つと、本番の容器と違う軸で scale を並べたケースを黙って測ることになる。
+ *
+ * 軸が付くのは {@link WEIGHT_SLOTS} が指す**重みスロット**だけ（それ以外は 0）— v1 ローダも
+ * 重みスロットの initializer にしか軸を付けていなかったので、bias 等が i8 格納の行を軸 1 で
+ * 組んで落とさないため。
+ */
+const channelAxis = (op: string, slot: number): 0 | 1 =>
+  slot === WEIGHT_SLOTS.get(op) && WEIGHT_CHANNEL_AXES.get(op) === 1 ? 1 : 0;
+
 /** 反復ぶんの出力 readback がこの量を超えないよう反復数を抑える（メモリと readback 時間の歯止め）。 */
 export const MAX_OUTPUT_BYTES = 256 * 1024 * 1024;
 
+/** 合成グラフの名前（容器 1 本 = グラフ 1 本）。 */
+const GRAPH_NAME = "case";
+
 export type CaseModel = {
-  readonly bytes: ArrayBuffer;
+  /** 合成した重みを載せたメモリ内容器（グラフ名は {@link GRAPH_NAME}）。 */
+  readonly container: BoundContainer;
   readonly inputs: RunInputs;
   /** 実際に組んだ反復数（出力バイト上限で減ることがある）。 */
   readonly reps: number;
@@ -176,9 +198,11 @@ export type CaseModel = {
  * 1 行から「同じ op を `reps` 本並べた」グラフを組む。全ノードが同じ入力を読み、出力だけ別名。
  * 1 run に reps 本の dispatch が載るので、timing モードは 1 pass ≈ 目標長まで積める。
  *
- * 初期化子は格納 dtype ごとにテスト helper で符号化する（本番の pack はエクスポータの担当 —
- * helper は仕様を書き下したもの）。i8 のチャネル軸は**先頭次元**（channel_rows 規則 — linear
- * `[O,I]` / conv1d `[O,Cin,K]` とも先頭がチャネル）。
+ * 初期化子は格納 codec ごとにこの場で符号化し、容器を書かずに**メモリ内容器**へ載せる
+ * （本番の pack はエクスポータの担当 — ここは仕様を書き下したもの）。量子化 codec の
+ * チャネル軸は消費側 op の重み軸台帳（`WEIGHT_CHANNEL_AXES`）から引く — `conv_transpose1d`
+ * だけ `[Cin, Cout, K]` で軸 1 がチャネルで、他は先頭次元。軸が付くのは重みスロット
+ * （`WEIGHT_SLOTS`）だけで、bias 等の他スロットは軸 0。
  */
 export const buildCaseModel = (row: WeightRow, requestedReps: number): CaseModel => {
   const outBytes = row.out_shapes.reduce((total, shape) => total + elementCount(shape) * 4, 0);
@@ -189,18 +213,18 @@ export const buildCaseModel = (row: WeightRow, requestedReps: number): CaseModel
       outBytes === 0 ? requestedReps : Math.floor(MAX_OUTPUT_BYTES / outBytes),
     ),
   );
-  const graph: GraphJson = {
-    format: "karume-ir",
-    version: 1,
-    requires: { ops: [row.op] },
-    symbols: [],
-    inputs: [],
-    outputs: [],
-    initializers: {},
-    values: {},
-    nodes: [],
-  };
-  const tensors: TensorSpec[] = [];
+  // 宣言の節は積みながら組み、最後に 1 度だけ読み手（`parseIrDeclarationValue`）へ通す。
+  const declaredInputs: { name: string; dtype: string; shape: (number | string)[] }[] = [];
+  const declaredOutputs: string[] = [];
+  const declaredInitializers: Record<string, Record<string, never>> = {};
+  const declaredValues: Record<string, { dtype: string; shape: (number | string)[] }> = {};
+  const declaredNodes: {
+    op: string;
+    ins: string[];
+    outs: string[];
+    attrs: Record<string, unknown>;
+  }[] = [];
+  const tensors: Record<string, MemoryTensor> = {};
   const inputs: Record<string, Tensor> = {};
   const ins: string[] = [];
   row.storage.forEach((ref, slot) => {
@@ -208,37 +232,37 @@ export const buildCaseModel = (row: WeightRow, requestedReps: number): CaseModel
     const dtype = row.in_dtypes[slot];
     if (ref === null) {
       const name = `x${slot}`;
-      graph.inputs.push({ name, dtype, shape });
+      declaredInputs.push({ name, dtype, shape });
       inputs[name] = { dtype: "f32", shape, data: fillValues(shape) };
       ins.push(name);
       return;
     }
+    // v2 では initializer 名がそのまま実体の鍵（別名のテンソル名は無い）。
     const name = `w${slot}`;
-    const tensor = `m.${name}`;
     const count = elementCount(shape);
-    graph.values[name] = { dtype, shape };
+    declaredValues[name] = { dtype, shape };
+    declaredInitializers[name] = {};
     ins.push(name);
     switch (ref.dtype) {
       case "f32":
-        graph.initializers[name] = { tensor, storage: { dtype: "f32" } };
-        tensors.push({ name: tensor, dtype: "F32", shape, data: repeatTile(tileF32, 4, count) });
+        tensors[name] = { bytes: repeatTile(tileF32, 4, count), encoding: { codec: "f32" } };
         return;
       case "f16":
-        graph.initializers[name] = { tensor, storage: { dtype: "f16" } };
-        tensors.push({ name: tensor, dtype: "F16", shape, data: repeatTile(tileF16, 2, count) });
+        tensors[name] = { bytes: repeatTile(tileF16, 2, count), encoding: { codec: "f16" } };
         return;
       case "int8-sym": {
-        // per-channel scale は keepdim broadcast 形（チャネル軸 = 先頭次元・他は 1）。
-        const scale = `m.s${slot}`;
-        const scaleShape = shape.map((dim, axis) => (axis === 0 ? dim : 1));
-        graph.initializers[name] = { tensor, storage: { dtype: "i8", scale } };
-        tensors.push({ name: tensor, dtype: "I8", shape, data: repeatTile(tileI8, 1, count) });
-        tensors.push({
-          name: scale,
-          dtype: "F32",
-          shape: scaleShape,
-          data: constantScale(shape[0]),
-        });
+        // per-channel scale は rank 2 の `[チャネル軸の長さ, 1]`（group 長 = 行長 = 1 行 1 scale）。
+        const rowAxis = channelAxis(row.op, slot);
+        const rows = shape[rowAxis];
+        tensors[name] = {
+          bytes: repeatTile(tileI8, 1, count),
+          encoding: {
+            codec: "int8-sym",
+            rowAxis,
+            groupSize: perChannelGroupSize(rows === 0 ? 0 : count / rows),
+            scale: constantScale(rows),
+          },
+        };
         return;
       }
       case "int4-sym-g": {
@@ -253,19 +277,15 @@ export const buildCaseModel = (row: WeightRow, requestedReps: number): CaseModel
             `slot ${slot}: 行長 ${width} が group_size ${ref.group_size} で割り切れない`,
           );
         }
-        const scale = `m.s${slot}`;
         const groups = width / ref.group_size;
-        graph.initializers[name] = {
-          tensor,
-          storage: { dtype: "i4", scale, group_size: ref.group_size },
+        tensors[name] = {
+          bytes: repeatTile(tileI4, 1, count / 2),
+          encoding: {
+            codec: "int4-sym-g",
+            groupSize: ref.group_size,
+            scale: constantScale(rows * groups),
+          },
         };
-        tensors.push({ name: tensor, dtype: "I4", shape, data: repeatTile(tileI4, 1, count / 2) });
-        tensors.push({
-          name: scale,
-          dtype: "F32",
-          shape: [rows, groups],
-          data: constantScale(rows * groups),
-        });
         return;
       }
       default:
@@ -275,12 +295,23 @@ export const buildCaseModel = (row: WeightRow, requestedReps: number): CaseModel
   for (let rep = 0; rep < reps; rep += 1) {
     const outs = row.out_shapes.map((_, slot) => `y${rep}_${slot}`);
     outs.forEach((name, slot) => {
-      graph.values[name] = { dtype: row.out_dtypes[slot], shape: [...row.out_shapes[slot]] };
-      graph.outputs.push(name);
+      declaredValues[name] = { dtype: row.out_dtypes[slot], shape: [...row.out_shapes[slot]] };
+      declaredOutputs.push(name);
     });
-    graph.nodes.push({ op: row.op, ins: [...ins], outs, attrs: { ...row.attrs } });
+    declaredNodes.push({ op: row.op, ins: [...ins], outs, attrs: { ...row.attrs } });
   }
-  return { bytes: buildSafetensors(tensors, { karume_ir: JSON.stringify(graph) }), inputs, reps };
+  const declaration = parseIrDeclarationValue({
+    format: "karume-ir",
+    version: 2,
+    requires: { ops: [row.op] },
+    symbols: [],
+    inputs: declaredInputs,
+    outputs: declaredOutputs,
+    initializers: declaredInitializers,
+    values: declaredValues,
+    nodes: declaredNodes,
+  });
+  return { container: memoryContainer(GRAPH_NAME, declaration, tensors), inputs, reps };
 };
 
 const LINEAR_COMPUTE = new Set(["f32", "a8", "f16"]);
@@ -388,7 +419,7 @@ export const createHeater = async (
   gpu: GpuContext,
 ): Promise<Heater & { dispose(): Promise<void> }> => {
   const model = buildCaseModel(HEATER_ROW, 8);
-  const session = await createSession(gpu, openModel(model.bytes), {});
+  const session = await createSessionFromContainer(gpu, model.container, GRAPH_NAME, {});
   return {
     run: async () => {
       const started = performance.now();
@@ -412,9 +443,9 @@ const withSession = async <T>(
   gpu: GpuContext,
   options: SessionOptions,
   model: CaseModel,
-  body: (session: Awaited<ReturnType<typeof createSession>>) => Promise<T>,
+  body: (session: Session) => Promise<T>,
 ): Promise<T> => {
-  const session = await createSession(gpu, openModel(model.bytes), options);
+  const session = await createSessionFromContainer(gpu, model.container, GRAPH_NAME, options);
   try {
     return await body(session);
   } finally {

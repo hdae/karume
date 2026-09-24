@@ -14,12 +14,20 @@
 // 0 を毒値にすると pad のゼロ領域と区別できない。
 
 import { assert, assertEquals } from "@std/assert";
-import { openModel } from "../src/format/container.ts";
 import { acquireGpu, type AcquireGpuOptions } from "../src/gpu/device.ts";
 import { referenceLinearI8a8 } from "../src/reference/i8a8.ts";
-import { createSession, type SessionOptions, type Tensor } from "../src/runtime/executor.ts";
-import { buildSafetensors, f32Bytes, type GraphJson } from "./helpers/format.ts";
-import { fill, graphModelBuffer } from "./helpers/graph.ts";
+import {
+  createSessionFromContainer,
+  type SessionOptions,
+  type Tensor,
+} from "../src/runtime/executor.ts";
+import {
+  type DeclarationJson,
+  f32Bytes,
+  fill,
+  GRAPH_NAME,
+  openModelBytes,
+} from "./helpers/model-fixture.ts";
 import { quantizeI8 } from "./helpers/i8.ts";
 import { GPU_AVAILABLE, SHADER_F16_AVAILABLE } from "./helpers/gpu.ts";
 
@@ -37,11 +45,11 @@ const poisonGraph = (
   outShape: readonly number[],
   operands: readonly { readonly name: string; readonly shape: readonly number[] }[],
   node: { readonly op: string; readonly attrs: Record<string, unknown> },
-): GraphJson => {
+): DeclarationJson => {
   const count = outShape.reduce((total, dim) => total * dim, 1);
   return {
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: ["cast", node.op] },
     symbols: [],
     inputs: [
@@ -66,13 +74,18 @@ const poisonGraph = (
 };
 
 const runPoisoned = async (
-  graph: GraphJson,
+  graph: DeclarationJson,
   inputs: Readonly<Record<string, Tensor>>,
   options: SessionOptions = {},
   acquire: AcquireGpuOptions = {},
 ): Promise<{ readonly output: Tensor; readonly reuseCount: number }> => {
   const gpu = await acquireGpu(acquire);
-  const session = await createSession(gpu, openModel(graphModelBuffer(graph)), options);
+  const session = await createSessionFromContainer(
+    gpu,
+    await openModelBytes(graph, []),
+    GRAPH_NAME,
+    options,
+  );
   try {
     const count = graph.inputs[0].shape[0] as number;
     const outputs = await session.run({ seed: fill([count], () => POISON), ...inputs });
@@ -516,9 +529,9 @@ const i8a8PoisonGraph = (
   m: number,
   n: number,
   k: number,
-): GraphJson => ({
+): DeclarationJson => ({
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["cast", "linear"] },
   symbols: [],
   inputs: [
@@ -526,10 +539,7 @@ const i8a8PoisonGraph = (
     { name: "x", dtype: "f32", shape: [m, k] },
   ],
   outputs: ["y"],
-  initializers: {
-    w: { tensor: "m.w", storage: { dtype: "i8", scale: "m.s" } },
-    b: { tensor: "m.b", storage: { dtype: "f32" } },
-  },
+  initializers: { w: {}, b: {} },
   values: {
     poison: { dtype: "f32", shape: [poisonCount] },
     w: { dtype: "f32", shape: [n, k] },
@@ -572,14 +582,28 @@ Deno.test({
     const gpu = await acquireGpu();
     try {
       for (const testCase of cases) {
-        const model = openModel(buildSafetensors([
-          { name: "m.b", dtype: "F32", shape: [n], data: f32Bytes(bias.data) },
-          { name: "m.s", dtype: "F32", shape: [n, 1], data: f32Bytes(quantized.scale) },
-          { name: "m.w", dtype: "I8", shape: [n, k], data: quantized.bytes },
-        ], {
-          karume_ir: JSON.stringify(i8a8PoisonGraph(testCase.poisonCount, m, n, k)),
-        }));
-        const session = await createSession(gpu, model, { linearCompute: "a8" });
+        const model = await openModelBytes(i8a8PoisonGraph(testCase.poisonCount, m, n, k), [
+          {
+            graph: GRAPH_NAME,
+            initializer: "b",
+            bytes: f32Bytes(bias.data),
+            encoding: { codec: "f32" },
+          },
+          {
+            graph: GRAPH_NAME,
+            initializer: "w",
+            bytes: quantized.bytes,
+            // per-channel（groupSize = 行長 K）・`rowAxis` は linear の重みのチャネル軸 0。
+            encoding: {
+              codec: "int8-sym",
+              groupSize: k,
+              scale: { dtype: "f32", bytes: f32Bytes(quantized.scale) },
+            },
+          },
+        ]);
+        const session = await createSessionFromContainer(gpu, model, GRAPH_NAME, {
+          linearCompute: "a8",
+        });
         try {
           const outputs = await session.run({
             seed: fill([testCase.poisonCount], () => POISON),

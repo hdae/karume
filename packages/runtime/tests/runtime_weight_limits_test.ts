@@ -16,11 +16,11 @@
 // そのものは「limits を絞ったフェイク device」でしか決定論的に固定できない。
 
 import { assertEquals, assertRejects, assertStringIncludes, assertThrows } from "@std/assert";
-import { openModel } from "../src/format/container.ts";
-import { type IrGraph, parseIrGraph } from "../src/format/ir.ts";
+import type { BoundContainer } from "../src/format/container/bind.ts";
+import type { IrGraph } from "../src/format/ir.ts";
 import { GpuContext, readAdapterInfo, type RequiredLimits } from "../src/gpu/device.ts";
 import { estimateGraphMemory } from "../src/runtime/estimate.ts";
-import { createSession } from "../src/runtime/executor.ts";
+import { createSessionFromContainer } from "../src/runtime/executor.ts";
 import {
   assertChunkLength,
   GenerationContext,
@@ -28,9 +28,15 @@ import {
 } from "../src/runtime/generation-context.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
 import { assertWeightsWithinLimits, planWeightResidency } from "../src/runtime/weight-residency.ts";
-import { baseGraph, f32Bytes, type GraphJson, withStateReaders } from "./helpers/format.ts";
 import { f16BytesFromBits, f32ToF16Bits } from "./helpers/f16.ts";
-import { graphModelBuffer } from "./helpers/graph.ts";
+import { autoTensors, mergeGraph, type StorageMap } from "./helpers/merged-graph.ts";
+import {
+  baseDeclaration,
+  type DeclarationJson,
+  GRAPH_NAME,
+  memoryModel,
+  withStateReaders,
+} from "./helpers/model-fixture.ts";
 
 // ---------------------------------------------------------------------------
 // 材料（グラフ・フェイク device）
@@ -40,16 +46,16 @@ import { graphModelBuffer } from "./helpers/graph.ts";
  * linear 1 本（重み `w` は f16 で適格 = payload がそのまま GPU に載る）。
  * w の payload は 8×4×2 = **64 バイト**・bias `b` は f32 の生バイト常駐で **32 バイト**。
  */
-const f16LinearGraph = (): GraphJson => ({
+const f16LinearGraph = (): DeclarationJson => ({
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["linear"] },
   symbols: [],
   inputs: [{ name: "x", dtype: "f32", shape: [2, 4] }],
   outputs: ["y"],
   initializers: {
-    w: { tensor: "m.w", storage: { dtype: "f16" } },
-    b: { tensor: "m.b", storage: { dtype: "f32" } },
+    w: {},
+    b: {},
   },
   values: {
     w: { dtype: "f32", shape: [8, 4] },
@@ -69,17 +75,17 @@ const f16LinearGraph = (): GraphJson => ({
  * scale が payload より大きいのは意図的（`[8,2]` は行が短くチャネルが多い）— scale を数えない
  * 実装が「payload だけ見て通す」形をここで踏む。
  */
-const mixedSeatGraph = (): GraphJson => ({
+const mixedSeatGraph = (): DeclarationJson => ({
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["linear", "mul"] },
   symbols: [],
   inputs: [{ name: "x", dtype: "f32", shape: [2, 2] }],
   outputs: ["y"],
   initializers: {
-    w: { tensor: "m.w", storage: { dtype: "i8", scale: "m.s" } },
-    b: { tensor: "m.b", storage: { dtype: "f32" } },
-    g: { tensor: "m.g", storage: { dtype: "f16" } },
+    w: {},
+    b: {},
+    g: {},
   },
   values: {
     w: { dtype: "f32", shape: [8, 2] },
@@ -94,9 +100,15 @@ const mixedSeatGraph = (): GraphJson => ({
   ],
 });
 
-/** グラフ JSON → 常駐計画（配布形のバイト列は 1 バイトも要らない — プランナは純関数）。 */
-const residencyOf = (graph: GraphJson): ReturnType<typeof planWeightResidency> =>
-  planWeightResidency(parseIrGraph(JSON.stringify(graph)));
+/** このファイルの 2 グラフの格納（IR v2 の宣言は持たない — 束縛表側の欄）。 */
+const STORAGE: StorageMap = { w: "f16", g: "f16" };
+const MIXED_STORAGE: StorageMap = { w: "int8-sym", g: "f16" };
+
+/** 宣言 → 常駐計画（重みの中身は 1 バイトも要らない — プランナは純関数）。 */
+const residencyOf = (
+  graph: DeclarationJson,
+  storage: StorageMap,
+): ReturnType<typeof planWeightResidency> => planWeightResidency(mergeGraph(graph, storage));
 
 /**
  * 上限 2 本だけを指定した limits（他のキーは門が見ないので WebGPU core 既定で埋める）。
@@ -176,7 +188,7 @@ Deno.test("assertChunkLength は 1..u32 上限の整数だけを通す", () => {
 // ---------------------------------------------------------------------------
 
 Deno.test("上限を超える payload は席ごとの確保寸法で名指しされる", () => {
-  const residency = residencyOf(f16LinearGraph());
+  const residency = residencyOf(f16LinearGraph(), STORAGE);
   // w は 64 バイト（束縛上限 32 を超える）・b は 32 バイトちょうどで通る。
   const error = assertThrows(
     () => assertWeightsWithinLimits(residency, limits(32, 64)),
@@ -185,13 +197,13 @@ Deno.test("上限を超える payload は席ごとの確保寸法で名指しさ
   assertStringIncludes(error.message, "重みバッファ 1 本");
   assertStringIncludes(
     error.message,
-    "initializer 'm.w' の payload（席 f16・確保 64 バイト）: " +
+    "initializer 'w' の payload（席 f16・確保 64 バイト）: " +
       "maxStorageBufferBindingSize 32 バイトを 32 バイト超える",
   );
 });
 
 Deno.test("上限は maxStorageBufferBindingSize と maxBufferSize の 2 本とも見る", () => {
-  const residency = residencyOf(f16LinearGraph());
+  const residency = residencyOf(f16LinearGraph(), STORAGE);
   // 束縛上限だけが緩い device（仕様が期待する大小関係が崩れた形）でも素通ししない。
   const bufferOnly = assertThrows(
     () => assertWeightsWithinLimits(residency, limits(1024, 32)),
@@ -214,7 +226,7 @@ Deno.test("上限は maxStorageBufferBindingSize と maxBufferSize の 2 本と�
 });
 
 Deno.test("適格外席は f32 展開後の寸法で見る・companion scale も 1 本として見る", () => {
-  const residency = residencyOf(mixedSeatGraph());
+  const residency = residencyOf(mixedSeatGraph(), MIXED_STORAGE);
   const error = assertThrows(
     () => assertWeightsWithinLimits(residency, limits(16, 16)),
     ExecutionError,
@@ -222,12 +234,12 @@ Deno.test("適格外席は f32 展開後の寸法で見る・companion scale も
   // 適格外の `m.g` は payload 16 バイト（= 上限ちょうど）だが、GPU に載るのは展開後の 32 バイト。
   assertStringIncludes(
     error.message,
-    "initializer 'm.g' の payload（f32 展開後）（席 expanded・確保 32 バイト）",
+    "initializer 'g' の payload（f32 展開後）（席 expanded・確保 32 バイト）",
   );
   // scale は payload と別に確保されるので、payload が通っても scale で落ちる。
-  assertStringIncludes(error.message, "initializer 'm.w' の scale（席 i8・確保 32 バイト）");
+  assertStringIncludes(error.message, "initializer 'w' の scale（席 i8・確保 32 バイト）");
   assertEquals(
-    error.message.includes("initializer 'm.w' の payload"),
+    error.message.includes("initializer 'w' の payload"),
     false,
     "16 バイトの payload は上限ちょうどで通る（scale だけが超過）",
   );
@@ -235,7 +247,7 @@ Deno.test("適格外席は f32 展開後の寸法で見る・companion scale も
 
 Deno.test("超過は全件を 1 回で列挙する（1 本ずつ落とさない）", () => {
   const error = assertThrows(
-    () => assertWeightsWithinLimits(residencyOf(mixedSeatGraph()), limits(16, 16)),
+    () => assertWeightsWithinLimits(residencyOf(mixedSeatGraph(), MIXED_STORAGE), limits(16, 16)),
     ExecutionError,
   );
   // w.scale / b / g の 3 本（w.payload だけが 16 バイトで通る）。
@@ -248,13 +260,13 @@ Deno.test("超過は全件を 1 回で列挙する（1 本ずつ落とさない�
 });
 
 Deno.test("上限ぴったりは通る（境界の内側 / 外側）", () => {
-  const mixed = residencyOf(mixedSeatGraph());
+  const mixed = residencyOf(mixedSeatGraph(), MIXED_STORAGE);
   // 最大の確保は 32 バイト（w.scale / b / g の展開後）。
   assertWeightsWithinLimits(mixed, limits(32, 32));
   assertThrows(() => assertWeightsWithinLimits(mixed, limits(31, 32)), ExecutionError);
   assertThrows(() => assertWeightsWithinLimits(mixed, limits(32, 31)), ExecutionError);
 
-  const f16 = residencyOf(f16LinearGraph());
+  const f16 = residencyOf(f16LinearGraph(), STORAGE);
   assertWeightsWithinLimits(f16, limits(64, 64));
   assertThrows(() => assertWeightsWithinLimits(f16, limits(63, 64)), ExecutionError);
 });
@@ -263,24 +275,26 @@ Deno.test("上限ぴったりは通る（境界の内側 / 外側）", () => {
 // Session 構築の入口で実際に通ること（確保より前に落ちる）
 // ---------------------------------------------------------------------------
 
-/** f16LinearGraph に対応する実配布形（宣言と現物のバイト数は container の門が見る）。 */
-const f16LinearModelBuffer = (): ArrayBuffer =>
-  graphModelBuffer(f16LinearGraph(), [
-    // 整列降順（F32 → F16）で詰める（整列単位を跨がせない）。
-    { name: "m.b", dtype: "F32", shape: [8], data: f32Bytes(new Array(8).fill(0)) },
-    {
-      name: "m.w",
-      dtype: "F16",
-      shape: [8, 4],
-      data: f16BytesFromBits(new Array(32).fill(f32ToF16Bits(0))),
-    },
-  ]);
+/** f16LinearGraph に対応する供給（宣言と現物のバイト数は合流層の門が見る）。 */
+const f16LinearModel = (): BoundContainer => {
+  const graph = f16LinearGraph();
+  // `w` だけは実バイト列を渡す（f16 の payload 長が宣言から決まることを合流層が見る）。
+  const supplied = autoTensors(graph, STORAGE).map((tensor) =>
+    tensor.initializer === "w"
+      ? {
+        ...tensor,
+        bytes: f16BytesFromBits(new Array(32).fill(f32ToF16Bits(0))),
+      }
+      : tensor
+  );
+  return memoryModel(graph, supplied);
+};
 
 Deno.test("createSession は上限超過の重みを createBuffer より前に落とす", async () => {
   const spy: AllocSpy = { createBuffer: 0 };
   const gpu = spyGpu(spy, limits(32, 64));
   const error = await assertRejects(
-    () => createSession(gpu, openModel(f16LinearModelBuffer())),
+    () => createSessionFromContainer(gpu, f16LinearModel(), GRAPH_NAME),
     ExecutionError,
   );
   assertStringIncludes(error.message, "device の上限を超える（確保の前に検出）");
@@ -296,7 +310,7 @@ Deno.test("上限に収まる重みは門を素通りして確保へ進む（門
   const gpu = spyGpu(spy, limits(1024, 1024));
   // 同じモデル・同じ経路で、違うのは limits だけ。確保まで進んだことは注入した失敗で分かる。
   const error = await assertRejects(
-    () => createSession(gpu, openModel(f16LinearModelBuffer())),
+    () => createSessionFromContainer(gpu, f16LinearModel(), GRAPH_NAME),
     Error,
   );
   assertStringIncludes(error.message, "注入: createBuffer が呼ばれた");
@@ -307,11 +321,11 @@ Deno.test("上限に収まる重みは門を素通りして確保へ進む（門
 // state スロット側（既存の束縛上限ゲートの補完 — ADR 0066 追記 5）
 // ---------------------------------------------------------------------------
 
-/** state スロット 1 本（`kv`）だけを持つグラフ（参照側 = state_append は helpers が足す）。 */
+/** state スロット 1 本（`kv`）だけを持つグラフ（参照側の `state_append` は withStateReaders が足す）。 */
 const stateGraph = (shape: readonly number[]): IrGraph => {
-  const graph = baseGraph();
+  const graph = baseDeclaration();
   graph.states = { kv: { dtype: "f32", shape: [...shape] } };
-  return parseIrGraph(JSON.stringify(withStateReaders(graph)));
+  return mergeGraph(withStateReaders(graph));
 };
 
 const stateHost = (gpu: GpuContext, graph: IrGraph): GenerationContextHost => ({
@@ -379,7 +393,7 @@ Deno.test("state スロットが両上限に収まれば確保へ進む（門は
  * （`stateGraph([8])` と同じ大きさなので境界の数字も同じ）。
  */
 const pairedStateGraph = (): IrGraph => {
-  const graph = baseGraph();
+  const graph = baseDeclaration();
   graph.inputs.push({ name: "chunk", dtype: "f32", shape: [1, 2, 1, 4] });
   graph.states = { kv: { dtype: "f32", shape: [1, 2, 1, 4] } };
   graph.requires.ops.push("state_append");
@@ -390,7 +404,7 @@ const pairedStateGraph = (): IrGraph => {
     attrs: {},
     states: { slot: "kv" },
   });
-  return parseIrGraph(JSON.stringify(graph));
+  return mergeGraph(graph);
 };
 
 /** 同じグラフ・同じ上限で見積りを引く（state スロットは `kv` 1 本 = 8 要素 × 4 = 32 バイト）。 */

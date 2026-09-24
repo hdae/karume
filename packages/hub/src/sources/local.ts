@@ -7,9 +7,9 @@
  *
  * - **世代を持たない** — 手元のディレクトリは「今そこにある内容」しかなく、可変 ref も commit
  *   SHA も無い。暗黙 `main` の警告も出ない（固定するものが無い）。
- * - **相 1（prefetch）を持たない** — CacheStorage を通らないので「温める」に意味がない。
- *   逐次面は相 2 だけで同じ RAM ピーク（O(最大 shard)）を満たす（`source.ts` ④）。バイト列の
- *   複製が 1 つも増えないのがローカル取得元の最大の利点で、キャッシュへ写すのは害でしかない。
+ * - **相 1（prefetch）を持たない** — CacheStorage を通らないので「温める」に意味がない
+ *   （`source.ts` ④）。バイト列の複製が 1 つも増えないのがローカル取得元の最大の利点で、
+ *   キャッシュへ写すのは害でしかない。
  * - **区間読み（`source.ts` ⑧）を持てる** — アダプターが位置読み（`readFileRange`）を持つときだけ
  *   `openFile` が生え、費用の型は `"seek"`（offset に依らない）。
  *   ⑧ が見るのは**宣言 size の境界だけ**で、全量面の size 門（`sizeViolation`）も sha256 も
@@ -40,23 +40,18 @@ import {
 } from "../source.ts";
 
 /**
- * ディレクトリ 1 つぶんの読み口。**この 1 メソッドが取得元の全て**で、実装は
+ * ディレクトリ 1 つぶんの読み口。**必須はこの 1 メソッド（`readFile`）だけ**で、実装は
  * `@karume/hub/deno` の `denoDirectory`（`Deno.readFile`）のほか、ブラウザでは OPFS
  * （`FileSystemDirectoryHandle` → `File.arrayBuffer()`）・IndexedDB・File System Access の
  * picker が同じ形で乗る。
  *
  * MUST: `readFile` が返す `Uint8Array` は **buffer 全体を占める**（tight view）— 共通層はここで
- * 受けたバイト列をそのまま `openModel` へ渡すので、余白のある view を返すと辻褄合わせの `slice`
- * で RAM ピークが倍増する（共通層の tight view 検査がその場で落とす）。
+ * 受けたバイト列をそのまま `openContainer` の `bytes` 入力へ渡すので、余白のある view を返すと
+ * 辻褄合わせの `slice` で RAM ピークが倍増する（共通層の tight view 検査がその場で落とす）。
  * MUST: 欠損は fail loudly（`undefined` や空バイト列を返さない）。エラーには**実体のパス**を
  * 載せる — 共通層が付けられるのは manifest 上の相対 path までで、「どのディレクトリの下を
  * 探したか」を知っているのはアダプターだけ。
- * MUST: `signal` を透過する（大きい shard の読みは中断できなければならない）。
- *
- * `readFileInto`（任意）は逐次面の**器の使い回し**のための面: 実体を `target` の先頭へ読み、
- * **ファイルの実長**を返す。`target` に収まらないファイルは読まずに（または途中で止めて）実長だけ
- * を返す — size 違反を名乗るのは共通層（`sizeViolation`）で、アダプターは判定しない。持たない
- * アダプターは `readFile` だけで従来どおり動く（器は確保されない）。
+ * MUST: `signal` を透過する（大きい part の読みは中断できなければならない）。
  *
  * `readFileRange`（任意）は**区間読み**（`source.ts` ⑧）の実体側: `[offset, offset + length)` を
  * `length` ちょうど返す（足りなければ throw — 短い戻りを返さない）。ディレクトリの実体は位置読みが
@@ -68,11 +63,6 @@ export type DirectoryAdapter = {
     path: string,
     options: { readonly signal?: AbortSignal },
   ) => Promise<Uint8Array<ArrayBuffer>>;
-  readonly readFileInto?: (
-    path: string,
-    target: Uint8Array<ArrayBuffer>,
-    options: { readonly signal?: AbortSignal },
-  ) => Promise<number>;
   readonly readFileRange?: (
     path: string,
     offset: number,
@@ -185,7 +175,7 @@ const pinnedLocalSource = (
       const bytes = await adapter.readFile(MANIFEST_FILENAME, {
         ...(signal === undefined ? {} : { signal }),
       });
-      // NOTE: 全量を読んでから門を見る（アダプターは逐次面を持たない）。手元の実体に対する
+      // NOTE: 全量を読んでから門を見る（アダプターは全量読みしか持たない）。手元の実体に対する
       // 形式検査で、送出側の悪意を想定する門ではないので、読み切ってから落として構わない
       // （HF 取得元の `karume.json` も取得層に厳密一致なしの上限が無いため、同じく全量受信後に
       // `parseManifest` が見る — `sources/hf.ts`）。
@@ -197,21 +187,8 @@ const pinnedLocalSource = (
       parse(bytes);
     },
 
-    readFile: async (ref, { signal, sizeViolation, into }) => {
+    readFile: async (ref, { signal, sizeViolation }) => {
       const abort = signal === undefined ? {} : { signal };
-      // 器を貸されていて、アダプターが器へ読めるなら、その経路（ホスト RAM に載る shard は常に
-      // 1 本）。どちらか欠ければ従来の全量読み（新しい buffer）。
-      if (into !== undefined && adapter.readFileInto !== undefined) {
-        const vessel = into();
-        if (vessel.byteLength < ref.size) {
-          throw new Error(
-            `hub: ${ref.path} の器（${vessel.byteLength} バイト）が宣言 size ${ref.size} より小さい`,
-          );
-        }
-        const actual = await adapter.readFileInto(ref.path, vessel.subarray(0, ref.size), abort);
-        if (actual !== ref.size) throw sizeViolation(actual, origin.integrity);
-        return new Uint8Array(vessel.buffer, 0, ref.size);
-      }
       const bytes = await adapter.readFile(ref.path, abort);
       // 検証は size 厳密一致だけ（sha256 は信頼する）。onProgress は 1 度も呼ばない —
       // 受信の途中という状態が無いので、共通層が complete の 1 点で閉じる。

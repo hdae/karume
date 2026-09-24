@@ -1,58 +1,72 @@
 // 公開面（mod.ts）だけで書く E2E。ADR 0008 の「面と実装の乖離を機械検出する」常設テスト。
 // MUST: src/ を直接 import しない — 内部直参照で書くと、公開面から落ちた機能を検出できない。
+// テスト補助の helper も引かない（helper が src/ を引いていると、この門の検出力がそのぶん減る）。
 
-import { assertAlmostEquals, assertEquals, assertThrows } from "@std/assert";
+import { assertAlmostEquals, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import {
   acquireGpu,
+  type BoundContainer,
   capabilities,
-  createSession,
+  ContainerFormatError,
+  createSessionFromContainer,
   type FusionCounts,
   type GenerationRun,
   type GpuContext,
-  openModel,
+  openContainer,
+  openMemoryContainer,
+  parseSafetensors,
   SafetensorsError,
   type Session,
   type SessionDiagnostics,
   type Tensor,
 } from "../mod.ts";
-import { f32Bytes, type GraphJson } from "./helpers/format.ts";
-import { graphModelBuffer } from "./helpers/graph.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
-
-/** y[T] = Σ_c (x[T,3] · w[3,2] + b[2])。記号次元 T を含む 3 ノードのグラフ。 */
-const GRAPH: GraphJson = {
-  format: "karume-ir",
-  version: 1,
-  requires: { ops: ["matmul", "add", "sum"] },
-  symbols: ["T"],
-  inputs: [{ name: "x", dtype: "f32", shape: ["T", 3] }],
-  outputs: ["y"],
-  initializers: {
-    w: { tensor: "proj.weight", storage: { dtype: "f32" } },
-    b: { tensor: "proj.bias", storage: { dtype: "f32" } },
-  },
-  values: {
-    w: { dtype: "f32", shape: [3, 2] },
-    b: { dtype: "f32", shape: [2] },
-    h: { dtype: "f32", shape: ["T", 2] },
-    g: { dtype: "f32", shape: ["T", 2] },
-    y: { dtype: "f32", shape: ["T"] },
-  },
-  nodes: [
-    { op: "matmul", ins: ["x", "w"], outs: ["h"], attrs: {} },
-    { op: "add", ins: ["h", "b"], outs: ["g"], attrs: {} },
-    { op: "sum", ins: ["g"], outs: ["y"], attrs: { dim: 1 } },
-  ],
-};
 
 const W = [0.5, -1.5, 2, 0.25, -0.75, 1];
 const B = [0.125, -0.5];
 
-const modelBytes = (): ArrayBuffer =>
-  graphModelBuffer(GRAPH, [
-    { name: "proj.weight", dtype: "F32", shape: [3, 2], data: f32Bytes(W) },
-    { name: "proj.bias", dtype: "F32", shape: [2], data: f32Bytes(B) },
-  ]);
+const f32Bytes = (values: readonly number[]): Uint8Array<ArrayBuffer> => {
+  const array = Float32Array.from(values);
+  return new Uint8Array(array.buffer);
+};
+
+/**
+ * y[T] = Σ_c (x[T,3] · w[3,2] + b[2])。記号次元 T を含む 3 ノードのグラフを、公開面の
+ * **メモリ内容器**（手元のバイト列をそのまま供給する面）で組む。
+ */
+const model = (): BoundContainer =>
+  openMemoryContainer({
+    graphs: {
+      model: {
+        format: "karume-ir",
+        version: 2,
+        requires: { ops: ["add", "matmul", "sum"] },
+        symbols: ["T"],
+        inputs: [{ name: "x", dtype: "f32", shape: ["T", 3] }],
+        outputs: ["y"],
+        initializers: { w: { shared: false }, b: { shared: false } },
+        values: {
+          w: { dtype: "f32", shape: [3, 2] },
+          b: { dtype: "f32", shape: [2] },
+          h: { dtype: "f32", shape: ["T", 2] },
+          g: { dtype: "f32", shape: ["T", 2] },
+          y: { dtype: "f32", shape: ["T"] },
+        },
+        states: {},
+        nodes: [
+          { op: "matmul", ins: ["x", "w"], outs: ["h"], attrs: {}, states: {} },
+          { op: "add", ins: ["h", "b"], outs: ["g"], attrs: {}, states: {} },
+          { op: "sum", ins: ["g"], outs: ["y"], attrs: { dim: 1 }, states: {} },
+        ],
+      },
+    },
+    tensors: {
+      model: {
+        w: { bytes: f32Bytes(W), encoding: { codec: "f32" } },
+        b: { bytes: f32Bytes(B), encoding: { codec: "f32" } },
+      },
+    },
+  });
 
 /** ノードごとに f32 へ丸めながら手計算する（実装とは独立した参照）。 */
 const expectedRows = (x: readonly number[], rows: number): Float32Array<ArrayBuffer> => {
@@ -74,8 +88,7 @@ Deno.test({
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
-    const model = openModel(modelBytes());
-    const session = await createSession(gpu, model);
+    const session = await createSessionFromContainer(gpu, model(), "model");
     try {
       const rows = 4;
       const values = Array.from({ length: rows * 3 }, (_, i) => ((i % 9) - 4) * 0.5);
@@ -140,7 +153,7 @@ Deno.test({
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
-    const session = await createSession(gpu, openModel(modelBytes()));
+    const session = await createSessionFromContainer(gpu, model(), "model");
     try {
       const empty: Tensor = { dtype: "f32", shape: [0, 3], data: new Float32Array(0) };
       const outputs = await session.run({ x: empty });
@@ -188,13 +201,18 @@ Deno.test("生成 run の第 3 引数が公開型で名指しできる（ADR 006
   assertEquals(typeof asThirdArgument, "function");
 });
 
-Deno.test("公開面が capability 照会とモデル解析の失敗型を提供する", () => {
+Deno.test("公開面が capability 照会とモデル解析の失敗型を提供する", async () => {
   const ops = capabilities().ops;
   for (const op of ["matmul", "add", "sum", "gelu", "amax"]) {
     assertEquals(ops.includes(op), true, op);
   }
   assertEquals(capabilities().storage, ["f16", "f32", "i2", "i32", "i4", "i8"]);
-  assertThrows(() => openModel(new ArrayBuffer(4)), SafetensorsError);
+  // 容器（`krm` / `krg`）の解析失敗と、付帯資産（safetensors）の解析失敗の 2 型。
+  await assertRejects(
+    () => openContainer({ kind: "bytes", bytes: new Uint8Array(new ArrayBuffer(4)) }),
+    ContainerFormatError,
+  );
+  assertThrows(() => parseSafetensors(new ArrayBuffer(4)), SafetensorsError);
 });
 
 Deno.test("この E2E は公開面（mod.ts）以外の実装を import しない", async () => {

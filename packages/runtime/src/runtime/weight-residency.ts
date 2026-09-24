@@ -5,8 +5,8 @@
  * MUST: 分類の正本はここ 1 本（{@link planWeightResidency}）。Session 構築（executor.ts）と
  * 見積り（estimate.ts）が別々に「適格判定 + 格納 dtype の分岐」を書くと、片方だけ直された
  * ときに **見積りと実ロードが別のモデルを説明する**（例外も警告も出ない）。
- * MUST: 実テンソル（safetensors）を見ない。バイト数は宣言 shape と格納メタデータから導き、
- * 実バイトとの一致は container の突合門が保証する（{@link declaredPayloadBytes} の doc）。
+ * MUST: 実テンソルを見ない。バイト数は宣言 shape と格納メタデータから導き、実バイトとの一致は
+ * 容器の突合門（合流層の payload 長検査と、構築相の「宣言由来 N バイト」検査）が保証する。
  *
  * 席から「実際に確保される GPU バッファ」への写像（{@link planWeightBuffers}）と、その寸法を
  * device の絶対上限と突き合わせる門（{@link assertWeightsWithinLimits}）も同じ理由でここに置く
@@ -14,12 +14,12 @@
  * ときに検査・見積り・実ロードが別の寸法を主張する。
  */
 
-import { declaredScaleBytes } from "../format/container.ts";
 import {
   codecLayout,
   type CodecName,
   groupCount,
   payloadBytes,
+  scaleBytes,
 } from "../format/container/codecs.ts";
 import type { IrGraph } from "../format/ir.ts";
 import { toSizeClass } from "../gpu/arena.ts";
@@ -184,9 +184,9 @@ export const planWeightResidency = (graph: IrGraph): ReadonlyMap<string, WeightR
     }
     const rowLength = rows === 0 ? 0 : count / rows;
     // scale は rank 2 group 形 `[rows, 行長 / groupSize]`（per-channel は group 数 1）。
-    const scaleBytes = declaredScaleBytes(rows * groupCount(rowLength, groupSize), where);
+    const scale = scaleBytes(rows * groupCount(rowLength, groupSize), where);
     if (layout === "i8" || layout === "i2") {
-      plan.set(name, { seat: layout, payloadBytes: bytes, scaleBytes, rowAxis: axis });
+      plan.set(name, { seat: layout, payloadBytes: bytes, scaleBytes: scale, rowAxis: axis });
       continue;
     }
     // i4 の group 形は先頭次元を行とする（展開カーネルと `decodeI4` の前提 — ADR 0069 決定 3）。
@@ -195,7 +195,7 @@ export const planWeightResidency = (graph: IrGraph): ReadonlyMap<string, WeightR
         `${where}: group 量子化（${codec}）の rowAxis は 0 だけ（宣言は ${axis}）`,
       );
     }
-    plan.set(name, { seat: "i4", payloadBytes: bytes, scaleBytes, groupSize });
+    plan.set(name, { seat: "i4", payloadBytes: bytes, scaleBytes: scale, groupSize });
   }
   return plan;
 };
@@ -424,14 +424,14 @@ const bufferLabel = (buffer: WeightBuffer): string =>
 /**
  * 重み 1 本ずつの確保寸法を device の絶対上限と突き合わせ、超過があれば**確保の前に**落とす。
  *
- * 動機は「確保失敗の検出は shard 単位 errorScope に全面依存」（ADR 0070 決定 4）の弱点 —
+ * 動機は「確保失敗の検出は block（item）単位 errorScope に全面依存」（ADR 0108 決定 9）の弱点 —
  * docs/known-issues.md「Metal で out-of-memory errorScope が沈黙する」が名指しした修正候補
  * （重み経路への明示サイズ門）そのもの。errorScope の網では 3 点足りない:
  * ①**実装依存** — 上限超過そのものは validation で捕まる実装が普通だが、同じ経路の
  * out-of-memory scope が黙る device は実在する（M2 実測）。網の成立を実装の報告品質に賭ける形が
  * 残るかぎり「確保失敗 = 無効バッファへの no-op writeBuffer = ゴミを読む」が通り得る。
- * ②**遅い** — 検出は shard を上げ始めた後で、数 GiB 転送してからになる。
- * ③**粒度が粗い** — 名乗れるのは失敗した shard までで、どの重みが何バイト超えたのかは出ない。
+ * ②**遅い** — 検出は重みを上げ始めた後で、数 GiB 転送してからになる。
+ * ③**粒度が粗い** — 名乗れるのは失敗した block までで、どの重みが何バイト超えたのかは出ない。
  * 寸法は確保より前に宣言だけで確定している（常駐計画は prepare 相の純関数）ので、決定論的に
  * 落とせるぶんはここで落とす。
  *
@@ -466,7 +466,8 @@ export const assertWeightsWithinLimits = (
   throw new ExecutionError(
     `重みバッファ ${violations.length} 本が device の上限を超える（確保の前に検出）:\n` +
       `${violations.join("\n")}\n` +
-      "1 バッファ単位の上限なので shard を分けても解消しない — より小さい格納 dtype で export し" +
+      "1 バッファ単位の上限なので block を分けても（piece に割っても）解消しない — " +
+      "より小さい格納 dtype で export し" +
       "直すか、重みを分割してグラフを組み直すこと",
   );
 };

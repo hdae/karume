@@ -20,11 +20,16 @@
 // 一度も発火せず、両者が素の softmax として一致するだけの恒真テストになる）。
 
 import { assert, assertEquals } from "@std/assert";
-import { openModel } from "../src/format/container.ts";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
-import { createSession, type Tensor } from "../src/runtime/executor.ts";
-import type { GraphJson } from "./helpers/format.ts";
-import { fill, type FilledTensor, graphModelBuffer, singleOpGraph } from "./helpers/graph.ts";
+import { createSessionFromContainer, type Tensor } from "../src/runtime/executor.ts";
+import {
+  type DeclarationJson,
+  fill,
+  type FilledTensor,
+  GRAPH_NAME,
+  openModelBytes,
+  singleOpDeclaration,
+} from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
 /** f32 の最小有限値。「行 max が −inf でない」は `amax_row >= この値` と同値。 */
@@ -49,9 +54,9 @@ const NEG_F32_MAX = -3.4028234663852886e+38;
  * （limitations.md）、全 −inf 行の `amax` は −inf ではなく −F32_MAX を返す — masked_fill の
  * 埋め値と区別が付かない。要素ごとに判定してから畳むこの形が正しい写像。
  */
-const guardedGraph = (rows: number, dim: number): GraphJson => ({
+const guardedGraph = (rows: number, dim: number): DeclarationJson => ({
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: {
     ops: ["softmax", "ge_scalar", "sum", "cast", "bitwise_not", "reshape", "masked_fill"],
   },
@@ -82,10 +87,14 @@ const guardedGraph = (rows: number, dim: number): GraphJson => ({
 
 const run = async (
   gpu: GpuContext,
-  graph: GraphJson,
+  graph: DeclarationJson,
   inputs: Readonly<Record<string, FilledTensor>>,
 ): Promise<Tensor> => {
-  const session = await createSession(gpu, openModel(graphModelBuffer(graph)));
+  const session = await createSessionFromContainer(
+    gpu,
+    await openModelBytes(graph, []),
+    GRAPH_NAME,
+  );
   try {
     return (await session.run(inputs))["y"];
   } finally {
@@ -165,7 +174,7 @@ Deno.test({
 
         const safe = await run(
           gpu,
-          singleOpGraph("safe_softmax", [[rows, dim]], [[rows, dim]], { attrs: { dim: 1 } }),
+          singleOpDeclaration("safe_softmax", [[rows, dim]], [[rows, dim]], { attrs: { dim: 1 } }),
           { x0: x },
         );
         const guarded = await run(gpu, guardedGraph(rows, dim), { x });
@@ -219,12 +228,12 @@ Deno.test({
         const x = fill([rows, dim], SCORE);
         const safe = await run(
           gpu,
-          singleOpGraph("safe_softmax", [[rows, dim]], [[rows, dim]], { attrs: { dim: 1 } }),
+          singleOpDeclaration("safe_softmax", [[rows, dim]], [[rows, dim]], { attrs: { dim: 1 } }),
           { x0: x },
         );
         const plain = await run(
           gpu,
-          singleOpGraph("softmax", [[rows, dim]], [[rows, dim]], { attrs: { dim: 1 } }),
+          singleOpDeclaration("softmax", [[rows, dim]], [[rows, dim]], { attrs: { dim: 1 } }),
           { x0: x },
         );
         assertEquals([...bits(safe)], [...bits(plain)], `[${rows},${dim}]`);

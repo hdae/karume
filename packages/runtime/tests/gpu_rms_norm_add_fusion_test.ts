@@ -1,11 +1,14 @@
 import { assertEquals, assertRejects } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
 import { acquireGpu } from "../src/gpu/device.ts";
-import { openModel } from "../src/format/container.ts";
-import { createSession, type SessionOptions, type Tensor } from "../src/runtime/executor.ts";
+import {
+  createSessionFromContainer,
+  type SessionOptions,
+  type Tensor,
+} from "../src/runtime/executor.ts";
 import { BUFFER_USAGE as U, MAP_MODE } from "../src/gpu/webgpu-constants.ts";
 import { rmsNormAddWgsl, rmsNormParams } from "../src/kernels/rms-norm.ts";
-import { fill, graphModelBuffer } from "./helpers/graph.ts";
+import { fill, GRAPH_NAME, openModelBytes } from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { rmsNormAddGraph } from "./helpers/rms-norm-add-graph.ts";
 
@@ -36,14 +39,16 @@ describe({
             let firstRow: Uint32Array<ArrayBuffer> | undefined;
             for (const rows of [1, 4, 8, 40, 64]) {
               const options = { rows, dim, normFirst };
-              const fused = await createSession(
+              const fused = await createSessionFromContainer(
                 gpu,
-                openModel(graphModelBuffer(rmsNormAddGraph(options))),
+                await openModelBytes(rmsNormAddGraph(options), []),
+                GRAPH_NAME,
                 { fuseRmsNormAdd: true },
               );
-              const reference = await createSession(
+              const reference = await createSessionFromContainer(
                 gpu,
-                openModel(graphModelBuffer(rmsNormAddGraph({ ...options, normOutput: true }))),
+                await openModelBytes(rmsNormAddGraph({ ...options, normOutput: true }), []),
+                GRAPH_NAME,
               );
               try {
                 for (const pattern of ["finite", "cancel", "special", "zeros"]) {
@@ -113,9 +118,10 @@ describe({
         const x = fill([rows, dim], (i) => Math.sin(i * .713 + .19) * 4),
           w = fill([dim], () => 1),
           r = fill([rows, dim], () => 0);
-        const reference = await createSession(
+        const reference = await createSessionFromContainer(
           gpu,
-          openModel(graphModelBuffer(rmsNormAddGraph({ rows, dim }))),
+          await openModelBytes(rmsNormAddGraph({ rows, dim }), []),
+          GRAPH_NAME,
         );
         try {
           const expected = words((await reference.run({ x, w, r })).y);
@@ -166,13 +172,14 @@ describe({
     });
     it("boolean以外を黙って受理しない", async () => {
       const gpu = await acquireGpu();
+      const opened = await openModelBytes(rmsNormAddGraph(), []);
       try {
         for (const value of [null, 0, "true"]) {
           const options: SessionOptions = {};
           // 公開境界へ不正値を注入し、型だけで守ったつもりにならない。
           Reflect.set(options, "fuseRmsNormAdd", value);
           await assertRejects(
-            () => createSession(gpu, openModel(graphModelBuffer(rmsNormAddGraph())), options),
+            () => createSessionFromContainer(gpu, opened, GRAPH_NAME, options),
             Error,
             "fuseRmsNormAdd",
           );

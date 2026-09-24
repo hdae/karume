@@ -1,5 +1,4 @@
 import { assert, assertEquals, assertInstanceOf, assertRejects } from "@std/assert";
-import { openModel } from "../src/format/container.ts";
 import { acquireGpu, RUNTIME_INTERNAL } from "../src/gpu/device.ts";
 import {
   GpuValidationError,
@@ -9,8 +8,8 @@ import {
 } from "../src/gpu/error-scope.ts";
 import { PipelineCache } from "../src/gpu/pipeline-cache.ts";
 import { applyReferenceOp } from "../src/reference/ops.ts";
-import { createSession } from "../src/runtime/executor.ts";
-import { fill, graphModelBuffer, singleOpGraph } from "./helpers/graph.ts";
+import { createSessionFromContainer } from "../src/runtime/executor.ts";
+import { fill, openGraphModel, singleOpDeclaration } from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
 const wgslWithWorkgroupSize = (size: number): string => `
@@ -136,8 +135,12 @@ Deno.test({
     // （PipelineCache 等）がロックを再取得すると自己デッドロックになるため、並行 run が
     // ハングせず完走すること自体が回帰の対象になる。
     const sessions = await Promise.all(
-      (["relu", "neg"] as const).map((op) =>
-        createSession(gpu, openModel(graphModelBuffer(singleOpGraph(op, [[8, 8]], [[8, 8]]))))
+      (["relu", "neg"] as const).map(async (op) =>
+        await createSessionFromContainer(
+          gpu,
+          await openGraphModel(singleOpDeclaration(op, [[8, 8]], [[8, 8]])),
+          "model",
+        )
       ),
     );
     try {
@@ -164,9 +167,10 @@ Deno.test({
     // ラップが外れる（あるいは readback / flush をロック外へ動かす）リファクタは、この 1 本が
     // 無いと全緑のまま通り、m0-review が major とした誤帰属がそのまま復活する。
     const gpu = await acquireGpu();
-    const session = await createSession(
+    const session = await createSessionFromContainer(
       gpu,
-      openModel(graphModelBuffer(singleOpGraph("relu", [[8, 8]], [[8, 8]]))),
+      await openGraphModel(singleOpDeclaration("relu", [[8, 8]], [[8, 8]])),
+      "model",
     );
     try {
       const { layout } = await new PipelineCache(gpu.device).get(

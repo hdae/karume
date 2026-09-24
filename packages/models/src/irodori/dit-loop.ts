@@ -16,8 +16,9 @@
 
 import { disposeSteps } from "../session/dispose-steps.ts";
 import {
-  createSession,
-  openModel,
+  createSessionFromContainer,
+  type IrDeclaration,
+  openMemoryContainer,
   type ResidentTensor,
   type Session,
   type SessionOptions,
@@ -238,16 +239,21 @@ export const runDitLoopResident = async (
       sessions.push(session);
       return session;
     };
-    // ホストが組んだ小グラフは配布形を通らない（バイト列がその場にある）ので、コンテナでは
-    // なく旧 IR 面（`openModel`）から直に Session にする — 容器に包む理由が無い。
-    const openHostGraph = async (bytes: ArrayBuffer): Promise<Session> => {
-      const session = await createSession(gpu, openModel(bytes), {});
+    // ホストが組んだ小グラフは重みを 1 本も持たない（`krm` を書く理由が無い）ので、宣言だけを
+    // メモリ内容器に載せて Session にする。
+    const openHostGraph = async (
+      name: string,
+      declaration: IrDeclaration,
+    ): Promise<Session> => {
+      // 供給が 1 本も無いので `tensors` は空表（`greedy-output.ts` と同じ綴り）。
+      const bound = openMemoryContainer({ graphs: { [name]: declaration }, tensors: {} });
+      const session = await createSessionFromContainer(gpu, bound, name, {});
       sessions.push(session);
       return session;
     };
     const dit = await open(state.dit, state.ditSessionOptions);
-    const combine = await openHostGraph(combineGraph(frames, config.latentDim));
-    const euler = await openHostGraph(eulerGraph(frames, config.latentDim));
+    const combine = await openHostGraph("combine", combineGraph(frames, config.latentDim));
+    const euler = await openHostGraph("euler", eulerGraph(frames, config.latentDim));
     // 強さは step に依らないので 1 度だけ作る。
     const scales = loop.uncondVariants.map((variant) => f32(Float32Array.of(variant.scale), [1]));
 

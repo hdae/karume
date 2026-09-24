@@ -343,7 +343,7 @@ Deno.test("gemma4 fromAssets: quant 実行ノブの明示指定も資産を開�
 // `pipelineConfig.rope.<層種>.headDim` は**ホストが作る表の幅そのもの**なので、グラフ入力の
 // 宣言（`[1, M, headDim]`）と食い違うとホストは最後まで通り、落ちるのは最初の `run` になる
 // （3.7GiB のロードの**後**・文言は「要素数が shape と合わない」= どちらの宣言が誤りか読めない）。
-// 突合は家族 admission（`admitGemma4` = 重み shard を 1 バイトも取る前）が通す。焼く側の鏡像は
+// 突合は家族 admission（`admitGemma4` = 重みの part を 1 バイトも取る前）が通す。焼く側の鏡像は
 // `tools/export-recipes/gemma4/export_decode.py` の `assert_rope_inputs`。
 
 /** 実配布形と同じ宣言（sliding 256 / full 512）。`patch` で 1 本だけ壊す。 */

@@ -12,11 +12,12 @@
 // KV を上書きする」という**別の値**として出る。
 
 import { assertEquals, assertThrows } from "@std/assert";
-import { IrError, type IrGraph, parseIrGraph } from "../src/format/ir.ts";
+import { IrError, type IrGraph } from "../src/format/ir.ts";
 import { OpContractError } from "../src/ops.ts";
 import { ExecutionError, planGraph, validateGraphContracts } from "../src/runtime/plan.ts";
 import { planWeightResidency } from "../src/runtime/weight-residency.ts";
-import type { GraphJson } from "./helpers/format.ts";
+import type { DeclarationJson } from "./helpers/model-fixture.ts";
+import { mergeGraph } from "./helpers/merged-graph.ts";
 
 const HEADS = 4;
 const KV_HEADS = 1;
@@ -28,9 +29,9 @@ const WINDOW = 8;
  * drafter の最小形: 借り物スロット 2 本を readonly attention 1 本が読むだけのグラフ。
  * 入力は q `[1,H,1,D]` の 1 本で、`state_append` は 1 本も無い。
  */
-const drafterGraph = (): GraphJson => ({
+const drafterGraph = (): DeclarationJson => ({
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["attention"] },
   symbols: [],
   inputs: [{ name: "q", dtype: "f32", shape: [1, HEADS, 1, DEPTH] }],
@@ -51,9 +52,9 @@ const drafterGraph = (): GraphJson => ({
 });
 
 /** 貸し手側の最小形（自前スロット + 通常の states 形 attention + append 2 本）。 */
-const targetGraph = (): GraphJson => ({
+const targetGraph = (): DeclarationJson => ({
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["attention", "state_append"] },
   symbols: [],
   inputs: [
@@ -93,10 +94,11 @@ const targetGraph = (): GraphJson => ({
   ],
 });
 
-const parse = (graph: GraphJson): IrGraph => parseIrGraph(JSON.stringify(graph));
+/** 宣言 → 合流後のグラフ（helpers/merged-graph.ts — 供給は宣言から自動で作る）。 */
+const parse = mergeGraph;
 
 /** 変異させたグラフを parse + 契約検査まで通す（どちらの層で落ちるかは各テストが指定する）。 */
-const mutated = (mutate: (graph: GraphJson) => void): GraphJson => {
+const mutated = (mutate: (graph: DeclarationJson) => void): DeclarationJson => {
   const graph = drafterGraph();
   mutate(graph);
   return graph;
@@ -247,7 +249,7 @@ Deno.test("attrs.readonly は true のみ・state_append には書けない", ()
 });
 
 Deno.test("readonly の形検査: M = 1 MUST・B / D 一致・H % Hkv・window ≤ C", () => {
-  const cases: readonly (readonly [string, (graph: GraphJson) => void, string])[] = [
+  const cases: readonly (readonly [string, (graph: DeclarationJson) => void, string])[] = [
     ["M が 2", (g) => {
       g.inputs[0].shape = [1, HEADS, 2, DEPTH];
       g.values.o.shape = [1, HEADS, 2, DEPTH];
@@ -282,36 +284,35 @@ Deno.test("readonly の形検査: M = 1 MUST・B / D 一致・H % Hkv・window �
   }
 });
 
+/** 貸し手の initializer 名（§1.3 — 借り手の宣言名は**貸し手と同じ** MUST）。 */
+const SHARED_NAME = "model.lm_head.weight";
+
 /** 共有 initializer（§1.3）を 1 本持つ drafter（embedding の重みを貸し手から借りる形）。 */
-const sharedGraph = (): GraphJson => {
+const sharedGraph = (): DeclarationJson => {
   const graph = drafterGraph();
   graph.requires.ops = ["attention", "embedding"];
   graph.inputs.push({ name: "token", dtype: "i32", shape: [1] });
   graph.outputs.push("embed");
-  graph.initializers["target_embed"] = {
-    shared: { tensor: "model.lm_head.weight" },
-    storage: { dtype: "i8" },
-  };
-  graph.values["target_embed"] = { dtype: "f32", shape: [16, DEPTH] };
+  graph.initializers[SHARED_NAME] = { shared: true };
+  graph.values[SHARED_NAME] = { dtype: "f32", shape: [16, DEPTH] };
   graph.values["embed"] = { dtype: "f32", shape: [1, DEPTH] };
   graph.nodes.push({
     op: "embedding",
-    ins: ["target_embed", "token"],
+    ins: [SHARED_NAME, "token"],
     outs: ["embed"],
     attrs: { padding_idx: -1 },
   });
   return graph;
 };
 
-Deno.test("共有 initializer は tensor 無し・scale 無しで受理され、席が shared になる", () => {
+Deno.test("共有 initializer は実体も格納も持たずに受理され、席が shared になる", () => {
   const graph = parse(sharedGraph());
-  // 合流後は借り手の initializer 名 = 貸し手の initializer 名（`shared.tensor` は無い）。
-  assertEquals(graph.initializers["model.lm_head.weight"], { shared: true });
-  assertEquals(Object.hasOwn(graph.initializers, "target_embed"), false);
+  // 借り手の宣言名がそのまま貸し手の initializer 名（IR v2 では名前が実体の鍵）。
+  assertEquals(graph.initializers[SHARED_NAME], { shared: true });
   validateGraphContracts(graph);
   // 席は「借り物」。期待する貸し手の席は借り手側の消費（適格判定 + チャネル軸 0）だけが決まり、
   // 貸し手の codec と突き合わせるのは借り手 Session の構築時。
-  assertEquals(planWeightResidency(graph).get("model.lm_head.weight"), {
+  assertEquals(planWeightResidency(graph).get(SHARED_NAME), {
     seat: "shared",
     eligible: true,
     i4Eligible: true,
@@ -320,12 +321,16 @@ Deno.test("共有 initializer は tensor 無し・scale 無しで受理され、
   });
 });
 
-Deno.test("共有 initializer に tensor / scale を書く形は拒否する", () => {
-  const withTensor = sharedGraph();
-  withTensor.initializers["target_embed"].tensor = "model.lm_head.weight";
-  assertThrows(() => parse(withTensor), IrError, "未知のキー 'tensor'");
-
-  const withScale = sharedGraph();
-  withScale.initializers["target_embed"].storage = { dtype: "i8", scale: "model.lm_head.scale" };
-  assertThrows(() => parse(withScale), IrError, "未知のキー 'scale'");
+Deno.test("共有 initializer に実体の鍵や格納を書く形は拒否する", () => {
+  // IR v2 の initializer 宣言に書けるのは `shared` だけ（実体との対応は容器の束縛表が持つ）。
+  // 旧配布形の `tensor` / `storage` をそのまま書いた形は未知のキーとして落ちる。
+  for (const key of ["tensor", "storage"]) {
+    const graph = sharedGraph();
+    Object.assign(graph.initializers[SHARED_NAME], { [key]: "model.lm_head.weight" });
+    assertThrows(() => parse(graph), IrError, `未知のキー '${key}'`);
+  }
+  // `shared` に書けるのは `true` だけ（`false` は欄の不存在と同じ宣言 — 正準直列化が割れる）。
+  const notTrue = sharedGraph();
+  Object.assign(notTrue.initializers[SHARED_NAME], { shared: false });
+  assertThrows(() => parse(notTrue), IrError, "借り物のときだけ true");
 });

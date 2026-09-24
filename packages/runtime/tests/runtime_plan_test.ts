@@ -1,6 +1,5 @@
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { DimError } from "../src/format/dims.ts";
-import { type IrGraph, parseIrGraph } from "../src/format/ir.ts";
 import { OpContractError } from "../src/ops.ts";
 import {
   bindSymbols,
@@ -11,19 +10,20 @@ import {
   statesOnlySymbols,
   validateGraphContracts,
 } from "../src/runtime/plan.ts";
-import type { GraphJson } from "./helpers/format.ts";
+import type { DeclarationJson } from "./helpers/model-fixture.ts";
+import { mergeGraph } from "./helpers/merged-graph.ts";
 
 /** x: [T,4] → matmul(w[4,3]) → h[T,3] → add(b[3]) → y[T,3] */
-const linearGraph = (): GraphJson => ({
+const linearGraph = (): DeclarationJson => ({
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["matmul", "add"] },
   symbols: ["T"],
   inputs: [{ name: "x", dtype: "f32", shape: ["T", 4] }],
   outputs: ["y"],
   initializers: {
-    w: { tensor: "w", storage: { dtype: "f32" } },
-    b: { tensor: "b", storage: { dtype: "f32" } },
+    w: {},
+    b: {},
   },
   values: {
     w: { dtype: "f32", shape: [4, 3] },
@@ -37,7 +37,8 @@ const linearGraph = (): GraphJson => ({
   ],
 });
 
-const parse = (graph: GraphJson): IrGraph => parseIrGraph(JSON.stringify(graph));
+/** 宣言 → 合流後のグラフ（格納は宣言 dtype どおり・中身は見ない — helpers/merged-graph.ts）。 */
+const parse = mergeGraph;
 
 Deno.test("シンボル束縛は入力 shape の次元位置から取る", () => {
   const graph = parse(linearGraph());
@@ -46,7 +47,7 @@ Deno.test("シンボル束縛は入力 shape の次元位置から取る", () =>
 });
 
 /** 入力の時間軸が派生形 `2T` だけのグラフ（母音検出 CRNN の形 — ADR 0057）。 */
-const derivedGraph = (): GraphJson => {
+const derivedGraph = (): DeclarationJson => {
   const graph = linearGraph();
   graph.inputs = [{ name: "x", dtype: "f32", shape: ["2T", 4] }];
   graph.values.h = { dtype: "f32", shape: ["2T", 3] };
@@ -214,14 +215,14 @@ Deno.test("契約検査は未対応 op・非空 attrs・非 f32 dtype を構築�
 });
 
 /** table[6,5]（Tmax 形の i32 定数）→ sym_prefix_slice → y[T,T]。 */
-const prefixSliceGraph = (overrides: Partial<GraphJson> = {}): GraphJson => ({
+const prefixSliceGraph = (overrides: Partial<DeclarationJson> = {}): DeclarationJson => ({
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["sym_prefix_slice"] },
   symbols: ["T"],
   inputs: [{ name: "bind", dtype: "f32", shape: ["T"] }],
   outputs: ["y"],
-  initializers: { table: { tensor: "table", storage: { dtype: "i32" } } },
+  initializers: { table: {} },
   values: {
     table: { dtype: "i32", shape: [6, 5] },
     y: { dtype: "i32", shape: ["T", "T"] },
@@ -286,9 +287,9 @@ const layoutAxisGraph = (
   attrs: Record<string, unknown>,
   ins: readonly { name: string; shape: (number | string)[] }[],
   outShape: (number | string)[],
-): GraphJson => ({
+): DeclarationJson => ({
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: [op] },
   // 素の形（'T' 等）で現れる入力次元だけが束縛源になる（派生形しか無いシンボルは宣言できない）
   symbols: [...new Set(ins.flatMap((spec) => spec.shape.filter((dim) => typeof dim === "string")))],
@@ -397,11 +398,11 @@ Deno.test("cat の入力は 2 本以上で、3 本以上も契約検査を通る
  * 「全読者 → append」）。`extra` でノード列だけを差し替えて順序検査の変異を作る。
  */
 const stateGraph = (
-  nodes?: GraphJson["nodes"],
-  states?: GraphJson["states"],
-): GraphJson => ({
+  nodes?: DeclarationJson["nodes"],
+  states?: DeclarationJson["states"],
+): DeclarationJson => ({
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["attention", "state_append"] },
   symbols: ["M", "C"],
   inputs: [
@@ -512,7 +513,7 @@ Deno.test("state_append より後に同じスロットの読者を置けない",
 
 Deno.test("同一スロットに触れるノードの window は存在有無も値も一致する", () => {
   const nodes = stateGraph().nodes;
-  const windowed = (window: number | undefined): GraphJson["nodes"] => [
+  const windowed = (window: number | undefined): DeclarationJson["nodes"] => [
     {
       ...nodes[0],
       attrs: window === undefined ? { scale: 0.5 } : { scale: 0.5, window },
@@ -538,7 +539,7 @@ Deno.test("同一スロットに触れるノードの window は存在有無も�
 
 Deno.test("sliding の window はスロット容量を超えられない（読み書きの両側）", () => {
   const nodes = stateGraph().nodes;
-  const windowed: GraphJson["nodes"] = [
+  const windowed: DeclarationJson["nodes"] = [
     { ...nodes[0], attrs: { scale: 0.5, window: 32 } },
     { op: "state_append", ins: ["k"], outs: [], attrs: { window: 32 }, states: { slot: "kv.k" } },
     { op: "state_append", ins: ["v"], outs: [], attrs: { window: 32 }, states: { slot: "kv.v" } },

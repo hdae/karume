@@ -3,7 +3,6 @@
 
 import { assertEquals, assertNotEquals, assertRejects, assertThrows } from "@std/assert";
 import { CodegenError } from "../src/codegen/errors.ts";
-import { openModel } from "../src/format/container.ts";
 import { acquireGpu, type GpuContext, LIMIT_CAPS } from "../src/gpu/device.ts";
 import { TOPK_WORKGROUP_SIZE } from "../src/kernels/topk.ts";
 import { compareTensors, formatAllclose } from "../src/reference/allclose.ts";
@@ -13,8 +12,7 @@ import {
   type RefTensor,
   refTensor,
 } from "../src/reference/ops.ts";
-import { createSession, type Tensor } from "../src/runtime/executor.ts";
-import type { GraphJson } from "./helpers/format.ts";
+import { createSessionFromContainer, type Tensor } from "../src/runtime/executor.ts";
 import {
   ARGMAX_CASES,
   ARGMAX_TIEBREAK_INPUT,
@@ -43,7 +41,14 @@ import {
   UPSAMPLE_FRACTIONAL_CASES,
 } from "./helpers/gpu_op_cases.ts";
 import { BIT_IDENTICAL_OPS, opTolerance } from "./helpers/op-tolerance.ts";
-import { fill, graphModelBuffer, outputName, singleOpGraph } from "./helpers/graph.ts";
+import {
+  type DeclarationJson,
+  fill,
+  GRAPH_NAME,
+  openModelBytes,
+  outputName,
+  singleOpDeclaration,
+} from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import {
   type RankMutation,
@@ -58,7 +63,7 @@ import { assertMutated } from "./helpers/state-dispatch.ts";
  * 長さ 1 の列で、`topk` だけが 2 本になる。
  */
 const runOutputs = async (gpu: GpuContext, testCase: OpCase): Promise<readonly Tensor[]> => {
-  const graph = singleOpGraph(
+  const graph = singleOpDeclaration(
     testCase.op,
     testCase.inputs.map((input) => input.shape),
     testCase.outShapes,
@@ -70,7 +75,11 @@ const runOutputs = async (gpu: GpuContext, testCase: OpCase): Promise<readonly T
       attrs: testCase.attrs,
     },
   );
-  const session = await createSession(gpu, openModel(graphModelBuffer(graph)));
+  const session = await createSessionFromContainer(
+    gpu,
+    await openModelBytes(graph, []),
+    GRAPH_NAME,
+  );
   try {
     const named: Record<string, Tensor> = {};
     testCase.inputs.forEach((input, index) => {
@@ -1043,11 +1052,15 @@ Deno.test({
       assertEquals([...outputs[0].data], [...expected[0].data]);
       assertEquals([...outputs[1].data], [...expected[1].data]);
       // 上限超過は縮退せず落ちる（診断に上限値 3 が出る）
-      const graph = singleOpGraph("topk", [[2, 8]], [[2, 4], [2, 4]], {
+      const graph = singleOpDeclaration("topk", [[2, 8]], [[2, 4], [2, 4]], {
         outDtypes: ["f32", "i32"],
         attrs: { k: 4 },
       });
-      const session = await createSession(gpu, openModel(graphModelBuffer(graph)));
+      const session = await createSessionFromContainer(
+        gpu,
+        await openModelBytes(graph, []),
+        GRAPH_NAME,
+      );
       try {
         await assertRejects(
           () => session.run({ x0: input }),
@@ -1483,16 +1496,16 @@ const prefixSliceGraph = (
   outShape: readonly (number | string)[],
   slices: readonly { dim: number; coeff: number; offset: number }[],
   dtype: "f32" | "i32",
-): GraphJson => ({
+): DeclarationJson => ({
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["sym_prefix_slice"] },
   symbols: ["T"],
   // 束縛は入力 shape の次元位置からしか取れない（docs/ir-v2.md）ので、T を素の形で運ぶ
   // ダミー入力を 1 本置く。
   inputs: [{ name: "bind", dtype: "f32", shape: ["T"] }],
   outputs: ["y"],
-  initializers: { table: { tensor: "table", storage: { dtype } } },
+  initializers: { table: {} },
   values: {
     table: { dtype, shape: [...constShape] },
     y: { dtype, shape: [...outShape] },
@@ -1558,13 +1571,20 @@ Deno.test({
           testCase.slices,
           testCase.dtype,
         );
-        const buffer = graphModelBuffer(graph, [{
-          name: "table",
-          dtype: testCase.dtype === "i32" ? "I32" : "F32",
-          shape: [...testCase.constShape],
-          data: new Uint8Array(table.data.buffer, table.data.byteOffset, table.data.byteLength),
-        }]);
-        const session = await createSession(gpu, openModel(buffer));
+        const session = await createSessionFromContainer(
+          gpu,
+          await openModelBytes(graph, [{
+            graph: GRAPH_NAME,
+            initializer: "table",
+            bytes: new Uint8Array(
+              table.data.buffer,
+              table.data.byteOffset,
+              table.data.byteLength,
+            ),
+            encoding: { codec: testCase.dtype },
+          }]),
+          GRAPH_NAME,
+        );
         try {
           const outputs = await session.run({ bind: fill([bound], SIGNED) });
           // MUST: 期待 shape は**リテラル**（`resolved`）で持つ。実出力の shape を
@@ -1629,7 +1649,7 @@ Deno.test({
     const gpu = await acquireGpu();
     try {
       for (const testCase of cases) {
-        const graph = singleOpGraph(
+        const graph = singleOpDeclaration(
           "cat",
           testCase.inShapes.map((shape) => [...shape]),
           [[...testCase.outShape]],
@@ -1639,7 +1659,11 @@ Deno.test({
         const inputs = testCase.inShapes.map((shape) =>
           fill(shape.map((dim) => (dim === "T" ? testCase.bound : dim as number)), SIGNED)
         );
-        const session = await createSession(gpu, openModel(graphModelBuffer(graph)));
+        const session = await createSessionFromContainer(
+          gpu,
+          await openModelBytes(graph, []),
+          GRAPH_NAME,
+        );
         try {
           const outputs = await session.run(
             Object.fromEntries(inputs.map((input, index) => [`x${index}`, input])),

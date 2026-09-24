@@ -14,11 +14,9 @@
 // 積んだままの run を回収する。
 
 import { assertEquals, assertRejects } from "@std/assert";
-import { openModel } from "../src/format/container.ts";
 import { acquireGpu, BatchScopeError, type GpuContext } from "../src/gpu/device.ts";
-import { createSession, type Session, type Tensor } from "../src/runtime/executor.ts";
-import type { GraphJson } from "./helpers/format.ts";
-import { graphModelBuffer } from "./helpers/graph.ts";
+import { createSessionFromContainer, type Session, type Tensor } from "../src/runtime/executor.ts";
+import { type DeclarationJson, openGraphModel } from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
 const ROWS = 4;
@@ -26,9 +24,9 @@ const COLS = 3;
 const COUNT = ROWS * COLS;
 
 /** y = x + x（= 2x）。run と enqueue の両方で使える最小のグラフ。 */
-const GRAPH: GraphJson = {
+const GRAPH: DeclarationJson = {
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["add"] },
   symbols: [],
   inputs: [{ name: "x", dtype: "f32", shape: [ROWS, COLS] }],
@@ -58,8 +56,8 @@ const bits = (data: Tensor["data"] | ArrayBuffer): readonly number[] =>
       : new Uint32Array(data.buffer, data.byteOffset, data.length),
   );
 
-const openSession = (gpu: GpuContext): Promise<Session> =>
-  createSession(gpu, openModel(graphModelBuffer(GRAPH)));
+const openSession = async (gpu: GpuContext): Promise<Session> =>
+  await createSessionFromContainer(gpu, await openGraphModel(GRAPH), "model");
 
 Deno.test({
   name: "batch 区間の内側で発行した未 await run は enqueue を fail loudly にする（実 GPU）",

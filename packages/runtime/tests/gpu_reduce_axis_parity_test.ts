@@ -40,7 +40,6 @@ import {
   stridedParams,
   stridedWgsl,
 } from "../src/codegen/strided.ts";
-import { openModel } from "../src/format/container.ts";
 import { RunArena } from "../src/gpu/arena.ts";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
 import { PipelineCache } from "../src/gpu/pipeline-cache.ts";
@@ -49,8 +48,8 @@ import type { IrDtype } from "../src/format/ir.ts";
 import { numel, type ReduceOpName } from "../src/ops.ts";
 import { allclose } from "../src/reference/allclose.ts";
 import { referenceRowReduce, refTensor } from "../src/reference/ops.ts";
-import { createSession } from "../src/runtime/executor.ts";
-import { fill, graphModelBuffer, singleOpGraph } from "./helpers/graph.ts";
+import { createSessionFromContainer } from "../src/runtime/executor.ts";
+import { fill, GRAPH_NAME, openModelBytes, singleOpDeclaration } from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
 
 const STORAGE_IN = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
@@ -522,8 +521,12 @@ const reduceKeysUsed = async (
 ): Promise<ReadonlySet<string>> => {
   const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
   const outShape = [...shape.slice(0, axis), ...shape.slice(axis + 1)];
-  const graph = singleOpGraph("sum", [shape], [outShape], { attrs: { dim: axis } });
-  const session = await createSession(gpu, openModel(graphModelBuffer(graph)));
+  const graph = singleOpDeclaration("sum", [shape], [outShape], { attrs: { dim: axis } });
+  const session = await createSessionFromContainer(
+    gpu,
+    await openModelBytes(graph, []),
+    GRAPH_NAME,
+  );
   try {
     await session.run({ x0: fill(shape, SIGNED) });
     const timing = session.diagnostics().lastRunTiming;

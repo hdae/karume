@@ -1,19 +1,21 @@
 import { assertEquals, assertThrows } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
-import { parseIrGraph } from "../src/format/ir.ts";
+import { mergedGraph } from "../src/format/container/bind.ts";
 import { type FusionWeightLayout, planFusions } from "../src/runtime/fusion.ts";
 import { countUses, planGraph } from "../src/runtime/plan.ts";
 import { linearGemvStaticQuantizeKey } from "../src/kernels/linear-gemv.ts";
 import {
-  linearStaticQuantizeGraph,
+  linearStaticQuantizeModel,
   type LinearStaticQuantizeOptions,
 } from "./helpers/linear-static-quantize-graph.ts";
+import { GRAPH_NAME } from "./helpers/model-fixture.ts";
 
 const fuse = (
   o: LinearStaticQuantizeOptions = {},
   context: Partial<Parameters<typeof planFusions>[1]> = {},
 ) => {
-  const graph = parseIrGraph(JSON.stringify(linearStaticQuantizeGraph(o)));
+  // 合流結果（格納つき IrGraph）は供給元に依らない — メモリ内容器 1 本で足りる。
+  const graph = mergedGraph(linearStaticQuantizeModel(o).graphs[GRAPH_NAME], GRAPH_NAME);
   const weight: FusionWeightLayout = o.storage === "i4"
     ? { storage: "i4", groupSize: o.group ?? 512 }
     : { storage: o.storage ?? "i8" };

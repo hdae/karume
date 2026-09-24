@@ -2,8 +2,9 @@
  * 静的 census: IR グラフ 1 本 → **1 ノード 1 行**の表と、その集計。
  *
  * GPU も重みバイトも要らない。`bindSymbols` / `planGraph` / `planFusions` は全て純関数なので、
- * 先頭 shard のヘッダに載った IR にシナリオ束縛を与えるだけで「実行 1 回に出る dispatch の
- * 形」が確定する（ADR 0004 の静的形状 — 全ノードの出力 shape は 1 dispatch も出す前に決まる）。
+ * 容器の part 0（ヘッダ + グラフ記述 + モデル記述）から読んだ IR にシナリオ束縛を与えるだけで
+ * 「実行 1 回に出る dispatch の形」が確定する（ADR 0004 の静的形状 — 全ノードの出力 shape は
+ * 1 dispatch も出す前に決まる）。
  *
  * 用途は 2 つ。①候補起票の根拠を外挿から実数へ置き換える（strided 実体化の kind 別内訳など）
  * ②単体マイクロベンチの **census 加重**（同じ (op, shape, dtype, attrs, 格納) が実行 1 回に

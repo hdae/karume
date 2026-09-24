@@ -1,12 +1,12 @@
 /** 最終行の最大値をGPU内で選び、会話の出力転送を8Bにする内部実行面。 */
 import {
   type BatchScope,
-  createSession,
-  estimateSessionMemory,
   type GenerationContext,
   type GpuContext,
-  type KarumeModel,
-  openModel,
+  openMemoryContainer,
+  parseIrDeclarationValue,
+  prepareContainer,
+  type PreparedModel,
   type ResidentTensor,
   type RunInputs,
   type Session,
@@ -16,11 +16,24 @@ import type { GenerationGreedyRun, GenerationSession } from "../generation/seque
 import { disposeSteps } from "../session/dispose-steps.ts";
 import { gemma4PleGatherIds, type Gemma4PleResident } from "./ple-gpu.ts";
 
-/** 保存済みtargetグラフを変えずに、別の小IRで最大値と最小添字を得る。 */
-const selectionModel = (vocabSize: number): KarumeModel => {
-  const graph = {
+/** 選択グラフの名前（重みを 1 本も持たないのでメモリ内容器に宣言だけを載せる）。 */
+const SELECT_GRAPH = "select";
+
+/**
+ * 保存済みtargetグラフを変えずに、別の小IRで最大値と最小添字を得る。
+ *
+ * MUST: 組んだ宣言は `parseIrDeclarationValue` に通す — ここは exporter も容器の読み手も
+ * 経由しないので、通さないとグラフ単体で決まる規則（SSA・トポロジカル順・`requires.ops` と
+ * 実使用 op の一致・未知キー）が 1 つも検査されない。
+ *
+ * MUST NOT: 下のリテラルに省略可能な `states` を書き足さない。書かないことで、リテラルは
+ * `IrDeclaration` として型が付かず、`parseIrDeclarationValue` の戻り値だけが `graph` に
+ * なれる（包みを外した編集は `deno check` で落ちる）。
+ */
+const selectionModel = (vocabSize: number): PreparedModel => {
+  const graph = parseIrDeclarationValue({
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: ["topk"] },
     symbols: [],
     initializers: {},
@@ -30,17 +43,14 @@ const selectionModel = (vocabSize: number): KarumeModel => {
       value: { dtype: "f32", shape: [1, 1, 1] },
       index: { dtype: "i32", shape: [1, 1, 1] },
     },
-    nodes: [{ op: "topk", ins: ["logits"], outs: ["value", "index"], attrs: { k: 1 } }],
-  };
-  const header = new TextEncoder().encode(
-    JSON.stringify({ __metadata__: { karume_ir: JSON.stringify(graph) } }),
+    nodes: [
+      { op: "topk", ins: ["logits"], outs: ["value", "index"], attrs: { k: 1 } },
+    ],
+  });
+  return prepareContainer(
+    openMemoryContainer({ graphs: { [SELECT_GRAPH]: graph }, tensors: {} }),
+    SELECT_GRAPH,
   );
-  const padded = Math.ceil(header.byteLength / 8) * 8;
-  const buffer = new ArrayBuffer(8 + padded), bytes = new Uint8Array(buffer);
-  new DataView(buffer).setBigUint64(0, BigInt(padded), true);
-  bytes.set(header, 8);
-  bytes.fill(0x20, 8 + header.byteLength);
-  return openModel(buffer);
 };
 
 type Resources = {
@@ -60,14 +70,14 @@ const disposeResources = (resources: Resources): Promise<void> =>
 
 const prepareResources = async (
   gpu: GpuContext,
-  model: KarumeModel,
+  model: PreparedModel,
   vocabSize: number,
 ): Promise<Resources> => {
   let selector: Session | undefined;
   const residents: ResidentTensor[] = [];
   try {
     // 選択グラフは形が1個なのでbackingの複数保持予算を設けない。
-    selector = await createSession(gpu, model, { planBackingBudgetBytes: 0 });
+    selector = await model.createContainerSession(gpu, { planBackingBudgetBytes: 0 });
     const logits = await gpu.createResident(vocabSize * 4);
     residents.push(logits);
     const value = await gpu.createResident(4);
@@ -125,7 +135,7 @@ export const createGemmaGreedyOutput = (
   const model = selectionModel(vocabSize), chain = createOperationChain();
   // selectorの入力は常駐であり、ホスト入力ぶんも含むこの見積りは保守的な上界。
   const extraBytes = vocabSize * 4 + 8 +
-    estimateSessionMemory(model, { planBackingBudgetBytes: 0 }).peakAccountedBytes;
+    model.estimate({ planBackingBudgetBytes: 0 }).peakAccountedBytes;
   let ready: Promise<Resources> | undefined;
   let disposal: Promise<void> | undefined;
   const assertAlive = (): void => {

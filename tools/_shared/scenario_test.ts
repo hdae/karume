@@ -5,8 +5,9 @@
 // 値が効かないだけでなく `unused_bindings` にも出ないので、誤綴りの記録がどこにも残らない。
 
 import { assertEquals, assertThrows } from "@std/assert";
-import { parseIrGraph } from "../../packages/runtime/src/format/ir.ts";
 import type { IrGraph } from "../../packages/runtime/src/format/ir.ts";
+import { parseIrDeclarationValue } from "../../packages/runtime/mod.ts";
+import { memoryGraph } from "./ir-memory.ts";
 import { assertPlainBindingKeys, defaultScenarios, parseScenario } from "./scenario.ts";
 
 /**
@@ -14,11 +15,11 @@ import { assertPlainBindingKeys, defaultScenarios, parseScenario } from "./scena
  * 記号は入力 shape の次元位置に置く（IR は束縛の取れない記号宣言を受け付けない）。
  */
 const graphWith = (symbols: readonly string[]): IrGraph =>
-  parseIrGraph(JSON.stringify({
+  memoryGraph(parseIrDeclarationValue({
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: [] },
-    symbols,
+    symbols: [...symbols],
     inputs: symbols.map((symbol, at) => ({ name: `x${at}`, dtype: "f32", shape: [symbol] })),
     outputs: [],
     initializers: {},

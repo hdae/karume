@@ -8,29 +8,35 @@
 
 import { assertEquals, assertRejects } from "@std/assert";
 import { DispatchLimitError } from "../src/codegen/errors.ts";
-import { openModel } from "../src/format/container.ts";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { defaultGemmGeometry, gemmTileN } from "../src/kernels/gemm-geometry.ts";
-import { createSession, PREPARED_PLAN_CAPACITY, type Tensor } from "../src/runtime/executor.ts";
-import { f32Bytes, type GraphJson } from "./helpers/format.ts";
-import { fill, graphModelBuffer } from "./helpers/graph.ts";
+import {
+  createSessionFromContainer,
+  PREPARED_PLAN_CAPACITY,
+  type Tensor,
+} from "../src/runtime/executor.ts";
+import type { OpenedContainer } from "../src/format/container/open.ts";
+import {
+  type DeclarationJson,
+  f32Bytes,
+  fill,
+  GRAPH_NAME,
+  openModelBytes,
+} from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
 /**
  * y = silu(x·w + b)（x: [T,3] → y: [T,2]）。末尾 2 ノードが silu 融合に掴まれるので、
  * 融合カウンタ（ADR 0040 §3 の常設診断）をヒット run 側でも見られる。
  */
-const GRAPH: GraphJson = {
+const GRAPH: DeclarationJson = {
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["matmul", "add", "sigmoid", "mul"] },
   symbols: ["T"],
   inputs: [{ name: "x", dtype: "f32", shape: ["T", 3] }],
   outputs: ["y"],
-  initializers: {
-    w: { tensor: "proj.weight", storage: { dtype: "f32" } },
-    b: { tensor: "proj.bias", storage: { dtype: "f32" } },
-  },
+  initializers: { w: {}, b: {} },
   values: {
     w: { dtype: "f32", shape: [3, 2] },
     b: { dtype: "f32", shape: [2] },
@@ -47,15 +53,20 @@ const GRAPH: GraphJson = {
   ],
 };
 
-const modelBytes = (): ArrayBuffer =>
-  graphModelBuffer(GRAPH, [
+const openProjection = (): Promise<OpenedContainer> =>
+  openModelBytes(GRAPH, [
     {
-      name: "proj.weight",
-      dtype: "F32",
-      shape: [3, 2],
-      data: f32Bytes([0.5, -1.5, 2, 0.25, -0.75, 1]),
+      graph: GRAPH_NAME,
+      initializer: "w",
+      bytes: f32Bytes([0.5, -1.5, 2, 0.25, -0.75, 1]),
+      encoding: { codec: "f32" },
     },
-    { name: "proj.bias", dtype: "F32", shape: [2], data: f32Bytes([0.125, -0.5]) },
+    {
+      graph: GRAPH_NAME,
+      initializer: "b",
+      bytes: f32Bytes([0.125, -0.5]),
+      encoding: { codec: "f32" },
+    },
   ]);
 
 const input = (rows: number): Tensor => ({
@@ -73,7 +84,7 @@ Deno.test({
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
-    const session = await createSession(gpu, openModel(modelBytes()));
+    const session = await createSessionFromContainer(gpu, await openProjection(), GRAPH_NAME);
     try {
       assertEquals(session.diagnostics().lastRunPrepared, undefined, "未実行なら診断は undefined");
 
@@ -108,7 +119,7 @@ Deno.test({
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
-    const session = await createSession(gpu, openModel(modelBytes()));
+    const session = await createSessionFromContainer(gpu, await openProjection(), GRAPH_NAME);
     try {
       const narrow = await session.run({ x: input(4) });
       assertEquals(session.diagnostics().lastRunPrepared, { hit: false, cachedPlans: 1 });
@@ -142,7 +153,7 @@ Deno.test({
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
-    const session = await createSession(gpu, openModel(modelBytes()));
+    const session = await createSessionFromContainer(gpu, await openProjection(), GRAPH_NAME);
     const capacity = PREPARED_PLAN_CAPACITY;
     try {
       for (let rows = 1; rows <= capacity; rows += 1) {
@@ -180,7 +191,7 @@ Deno.test({
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
-    const session = await createSession(gpu, openModel(modelBytes()));
+    const session = await createSessionFromContainer(gpu, await openProjection(), GRAPH_NAME);
     try {
       await session.run({ x: input(4) });
       const derived = session.diagnostics().lastRunFusions;
@@ -208,9 +219,9 @@ Deno.test({
     // 静かに落ちる（runtime_executor_test.ts と同じ理由）。
     const tileN = gemmTileN(defaultGemmGeometry());
     const huge = gpu.limits.maxComputeWorkgroupsPerDimension * tileN + tileN;
-    const graph: GraphJson = {
+    const graph: DeclarationJson = {
       format: "karume-ir",
-      version: 1,
+      version: 2,
       requires: { ops: ["relu", "matmul"] },
       symbols: ["N"],
       inputs: [
@@ -228,7 +239,11 @@ Deno.test({
         { op: "matmul", ins: ["t", "x1"], outs: ["y"], attrs: {} },
       ],
     };
-    const session = await createSession(gpu, openModel(graphModelBuffer(graph)));
+    const session = await createSessionFromContainer(
+      gpu,
+      await openModelBytes(graph, []),
+      GRAPH_NAME,
+    );
     const small = () => ({ x0: fill([1, 1], () => 1), x1: fill([1, 4], () => 1) });
     try {
       await session.run(small());

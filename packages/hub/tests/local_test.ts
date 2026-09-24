@@ -18,7 +18,6 @@ import {
   ManifestReferenceError,
   openAsset,
   prefetchAssets,
-  streamAssets,
 } from "../mod.ts";
 import type { AssetProgress, DirectoryAdapter } from "../mod.ts";
 import { type FileRef, MANIFEST_FILENAME } from "../src/manifest.ts";
@@ -112,25 +111,25 @@ Deno.test("localDirectory: 中断は資産の読みへ透過する", async () =>
   assertEquals(directory.signals, [false, true, true, true]);
 });
 
-Deno.test("localDirectory: streamAssets は相 2 だけで完走し、CacheStorage を 1 度も開かない", async () => {
+Deno.test("localDirectory: fetchAssets は 1 本につき 1 回だけ読み、CacheStorage を 1 度も開かない", async () => {
   const dist = await buildLocalDist();
   const caches = new MemoryCacheStorage();
   const directory = memoryDirectory(dist.files);
   const loaded = await loadManifest(localDirectory(directory.adapter, { label: LABEL }), {
     caches,
   });
-  const files = selectionFiles(loaded.manifest);
-  const refs = PART_KEYS.map((key): FileRef => files[key]);
+  const selected = selectionFiles(loaded.manifest);
+  const files = Object.fromEntries(
+    PART_KEYS.map((key): [string, FileRef] => [key, selected[key]]),
+  );
   const progress = recordProgress();
 
-  const received: string[] = [];
-  for await (const asset of streamAssets(loaded, refs, { onProgress: progress.onProgress })) {
-    received.push(asset.id);
-    assertEquals(asset.bytes, payloadFor(asset.id));
-  }
+  const assets = await fetchAssets(loaded, files, { onProgress: progress.onProgress });
 
-  assertEquals(received, [...FETCHED_PART_PATHS], "宣言順に届いていない");
-  // 相 1 が丸ごと省かれるので、1 本につき読みは 1 回だけ（温めてから読み直す形にならない）。
+  PART_KEYS.forEach((key, index) => {
+    assertEquals(assets[key], payloadFor(FETCHED_PART_PATHS[index]));
+  });
+  // 温めが丸ごと省かれるので、1 本につき読みは 1 回だけ（温めてから読み直す形にならない）。
   assertEquals(directory.reads, [MANIFEST_FILENAME, ...FETCHED_PART_PATHS]);
   // 受信の途中という状態が無いので、進捗はファイルごとの complete 1 点だけ。
   assertEquals(progress.events.map((event) => event.phase), ["complete", "complete"]);

@@ -485,7 +485,7 @@ const assertSymbols = (graph: GenerationGraph, capacitySymbol: string): void => 
  * 静的配線をグラフと突き合わせて確定する（**唯一の入口** — 検証を迂回した program を作らせない）。
  *
  * MUST: GPU に触る前に落ちる（引数はグラフと数値だけ）。配線の誤りが 3.7GiB のロードの末に
- * 出るのと、`prepareModel` の直後に出るのとでは診断の価値が違う。
+ * 出るのと、`prepareContainer` の直後に出るのとでは診断の価値が違う。
  */
 export const createGenerationProgram = (spec: GenerationProgramSpec): GenerationWiring => {
   const { graph } = spec;

@@ -4,7 +4,7 @@
 
 import type { Tolerance } from "../../src/reference/allclose.ts";
 import type { RefTensor } from "../../src/reference/ops.ts";
-import { fill } from "./graph.ts";
+import { fill } from "./model-fixture.ts";
 
 export type OpCase = {
   readonly name: string;

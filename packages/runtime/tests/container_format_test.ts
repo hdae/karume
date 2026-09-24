@@ -606,6 +606,27 @@ describe("container descriptor", () => {
     );
   });
 
+  it("scale の dtype が受理集合の外なら落ちる（f16 のビット列を f32 として読まない）", async () => {
+    // 読み手は scale を宣言された dtype で読むので、受理集合（初版は f32 だけ）を見ていないと
+    // f16 の列を f32 として読む沈黙誤値になる。値域の門はここでしか撃たれない。
+    const { modelDescriptorBytes: bytes } = await writeModelContainer(syntheticModel(), OPTIONS);
+    rejectsModel("scale.dtype が受理集合の外", bytes, (doc) => {
+      anyOf(doc).binding.text_encoder["proj.weight"].encoding.scale.dtype = "f16";
+    }, "受理集合");
+  });
+
+  it("束縛表が実在しない block を指せば落ちる（規則⑤ の逆向き — 参照先が無い）", async () => {
+    // 余剰 block（どこからも参照されない）は規則⑤ が拒否する。その逆向き、束縛の側が
+    // 目次に無い id を名乗る形もここで塞ぐ（読み手が block を取りに行く前に落ちる）。
+    const { modelDescriptorBytes: bytes } = await writeModelContainer(syntheticModel(), OPTIONS);
+    rejectsModel("実体が未宣言の block", bytes, (doc) => {
+      anyOf(doc).binding.front["front.bias"].block = "absent";
+    }, "目次に無い block");
+    rejectsModel("scale が未宣言の block", bytes, (doc) => {
+      anyOf(doc).binding.text_encoder["proj.weight"].encoding.scale.block = "absent";
+    }, "目次に無い block");
+  });
+
   it("溢れて Infinity になる数・深すぎる入れ子・__proto__ を拒否する", async () => {
     const { graphDescriptorBytes: bytes } = await writeModelContainer(syntheticModel(), OPTIONS);
     const text = new TextDecoder().decode(bytes);

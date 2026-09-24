@@ -10,7 +10,7 @@
  */
 
 import { assertEquals, assertThrows } from "@std/assert";
-import { type IrGraph, parseIrGraph } from "../src/format/ir.ts";
+import type { IrGraph } from "../src/format/ir.ts";
 import {
   enumerateUnfusedWindows,
   type ExecStep,
@@ -19,7 +19,8 @@ import {
   type UnfusedWindow,
 } from "../src/runtime/fusion.ts";
 import { bindSymbols, countUses, ExecutionError, planGraph } from "../src/runtime/plan.ts";
-import type { GraphJson } from "./helpers/format.ts";
+import type { DeclarationJson } from "./helpers/model-fixture.ts";
+import { mergeGraph } from "./helpers/merged-graph.ts";
 
 /** 判定に使う device の能力（WebGPU core 既定 — 128MiB / 65535）。 */
 const TEST_LIMITS = {
@@ -34,8 +35,8 @@ const shaped = (name: string, shape: readonly number[]) => ({
 });
 
 /** グラフ JSON → 計画済みノード列 + 融合の判定文脈。 */
-const plan = (graph: GraphJson, inputShapes: Readonly<Record<string, readonly number[]>>) => {
-  const ir: IrGraph = parseIrGraph(JSON.stringify(graph));
+const plan = (graph: DeclarationJson, inputShapes: Readonly<Record<string, readonly number[]>>) => {
+  const ir: IrGraph = mergeGraph(graph);
   const nodes = planGraph(ir, bindSymbols(ir, inputShapes)).nodes;
   return {
     nodes,
@@ -66,14 +67,14 @@ const outline = (windows: readonly UnfusedWindow[]): readonly string[] =>
 const chainGraph = (options: {
   readonly extraConsumer?: boolean;
   readonly internalOutput?: boolean;
-} = {}): GraphJson => {
+} = {}): DeclarationJson => {
   const shape = [4, 8];
-  const nodes: GraphJson["nodes"] = [
+  const nodes: DeclarationJson["nodes"] = [
     { op: "neg", ins: ["x"], outs: ["a"], attrs: {} },
     { op: "add", ins: ["a", "w"], outs: ["b"], attrs: {} },
     { op: "mul", ins: ["b", "w"], outs: ["c"], attrs: {} },
   ];
-  const values: GraphJson["values"] = {
+  const values: DeclarationJson["values"] = {
     a: { dtype: "f32", shape: [...shape] },
     b: { dtype: "f32", shape: [...shape] },
     c: { dtype: "f32", shape: [...shape] },
@@ -84,7 +85,7 @@ const chainGraph = (options: {
   }
   return {
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: [...new Set(nodes.map((node) => node.op))] },
     symbols: [],
     inputs: [shaped("x", shape), shaped("w", shape)],
@@ -139,9 +140,9 @@ Deno.test("鎖の内部値が外へ出る窓は候補にならない（別 consu
  */
 Deno.test("窓内 passthrough は鎖から外れ、窓幅だけが鎖より大きくなる", () => {
   const shape = [4, 8];
-  const graph: GraphJson = {
+  const graph: DeclarationJson = {
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: ["neg", "add", "mul"] },
     symbols: [],
     inputs: [shaped("x", shape), shaped("w", shape)],
@@ -176,9 +177,9 @@ Deno.test("窓内 passthrough は鎖から外れ、窓幅だけが鎖より大�
 });
 
 Deno.test("多出力 op を含む窓は候補にならない", () => {
-  const graph: GraphJson = {
+  const graph: DeclarationJson = {
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: ["neg", "topk"] },
     symbols: [],
     inputs: [shaped("x", [4, 8])],
@@ -211,9 +212,9 @@ Deno.test("state を触るノードを含む窓は候補にならない", () => 
 });
 
 Deno.test("f32 でない鎖は候補にならない", () => {
-  const reshapeGraph = (dtype: "f32" | "i32"): GraphJson => ({
+  const reshapeGraph = (dtype: "f32" | "i32"): DeclarationJson => ({
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: ["reshape"] },
     symbols: [],
     inputs: [{ name: "x", dtype, shape: [4, 8] }],
@@ -239,9 +240,9 @@ Deno.test("f32 でない鎖は候補にならない", () => {
 
 Deno.test("融合ステップを跨いだ窓は作らない（掴めている鎖の二重計上なし）", () => {
   const shape = [4, 8];
-  const graph: GraphJson = {
+  const graph: DeclarationJson = {
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: ["sigmoid", "mul", "neg", "add"] },
     symbols: [],
     inputs: [shaped("x", shape)],

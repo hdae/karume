@@ -25,17 +25,22 @@
  */
 
 import { assert, assertEquals, assertRejects } from "@std/assert";
-import { openModel } from "../src/format/container.ts";
 import { acquireGpu, type GpuContext, LIMIT_CAPS } from "../src/gpu/device.ts";
 import { planRowBlocks } from "../src/runtime/fusion.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
 import {
-  createSession,
+  createSessionFromContainer,
   ROW_BLOCK_SPLIT,
   type SessionOptions,
   type Tensor,
 } from "../src/runtime/executor.ts";
-import { fill, type FilledTensor, graphModelBuffer, singleOpGraph } from "./helpers/graph.ts";
+import {
+  fill,
+  type FilledTensor,
+  GRAPH_NAME,
+  openGraphModel,
+  singleOpDeclaration,
+} from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
 
 /** WebGPU core 既定のストレージ束縛上限。ポータビリティ門はここを再現する。 */
@@ -137,7 +142,7 @@ const runAttention = async (
   const k = fill([b, kv, n, d], KEY);
   const v = fill([b, kv, n, d], VALUE);
   const mask = variant.mask === true ? bandMask(m, n) : undefined;
-  const graph = singleOpGraph(
+  const graph = singleOpDeclaration(
     "attention",
     [q.shape, k.shape, v.shape, ...(mask === undefined ? [] : [mask.shape])],
     [[b, h, m, d]],
@@ -147,7 +152,12 @@ const runAttention = async (
     ...variant.options,
     ...(split === undefined ? {} : { [ROW_BLOCK_SPLIT]: split }),
   };
-  const session = await createSession(gpu, openModel(graphModelBuffer(graph)), options);
+  const session = await createSessionFromContainer(
+    gpu,
+    await openGraphModel(graph),
+    GRAPH_NAME,
+    options,
+  );
   try {
     const inputs: Record<string, FilledTensor> = { x0: q, x1: k, x2: v };
     if (mask !== undefined) inputs["x3"] = mask;

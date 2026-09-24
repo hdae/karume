@@ -15,14 +15,15 @@
 // 取らずに回る門だけ。
 
 import { assert, assertEquals, assertThrows } from "@std/assert";
-import { ContainerError, type KarumeModel } from "../src/format/container.ts";
 import type { IrGraph } from "../src/format/ir.ts";
 import { numel, OpContractError } from "../src/ops.ts";
+import { RuntimeSupportError } from "../src/ops/support.ts";
 import {
   type AdmissionReport,
   type AdmissionScenario,
-  estimateSessionMemory,
+  estimateGraphMemory,
 } from "../src/runtime/estimate.ts";
+import type { PreparedModel } from "../src/runtime/executor.ts";
 import { type ExecStep, planFusions } from "../src/runtime/fusion.ts";
 import { countUses, ExecutionError, planGraph } from "../src/runtime/plan.ts";
 import { planRecipes, type StepOutput, type StepRecipe } from "../src/runtime/recipe.ts";
@@ -36,8 +37,11 @@ import {
   stateAttentionGraph,
   stateGraph,
   stateModel,
+  stateTensors,
+  weight,
 } from "./helpers/estimate-graphs.ts";
-import { f32Bytes, type GraphJson } from "./helpers/format.ts";
+import { mergeGraph, type StorageMap } from "./helpers/merged-graph.ts";
+import { type DeclarationJson, f32Bytes } from "./helpers/model-fixture.ts";
 
 const i32Bytes = (values: readonly number[]): Uint8Array<ArrayBuffer> =>
   new Uint8Array(Int32Array.from(values).buffer);
@@ -61,17 +65,17 @@ const runScenario = (report: AdmissionReport): AdmissionScenario => {
  * 圧縮しない格納だけのグラフ（f32 の matmul 重み・f32 の embedding 表・i32 の添字）。
  * `T` を持つので io と中間ピークの束縛依存もここで見る。
  */
-const plainGraph = (): GraphJson => ({
+const plainGraph = (): DeclarationJson => ({
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["matmul", "embedding"] },
   symbols: ["T"],
   inputs: [{ name: "x", dtype: "f32", shape: ["T", 4] }],
   outputs: ["h", "g"],
   initializers: {
-    w: { tensor: "m.w", storage: { dtype: "f32" } },
-    emb: { tensor: "m.emb", storage: { dtype: "f32" } },
-    idx: { tensor: "m.idx", storage: { dtype: "i32" } },
+    w: {},
+    emb: {},
+    idx: {},
   },
   values: {
     w: { dtype: "f32", shape: [4, 3] },
@@ -86,15 +90,15 @@ const plainGraph = (): GraphJson => ({
   ],
 });
 
-const plainModel = (): KarumeModel =>
+const plainModel = (): PreparedModel =>
   openGraph(plainGraph(), [
-    { name: "m.w", dtype: "F32", shape: [4, 3], data: f32Bytes(new Array(12).fill(1)) },
-    { name: "m.emb", dtype: "F32", shape: [5, 3], data: f32Bytes(new Array(15).fill(1)) },
-    { name: "m.idx", dtype: "I32", shape: [2], data: i32Bytes([0, 1]) },
+    weight("w", f32Bytes(new Array(12).fill(1))),
+    weight("emb", f32Bytes(new Array(15).fill(1))),
+    weight("idx", i32Bytes([0, 1]), { codec: "i32" }),
   ]);
 
 Deno.test("圧縮しない格納（f32 / i32）は実バイトのまま非圧縮の欄に数える", () => {
-  const { resident } = estimateSessionMemory(plainModel(), { bindings: { T: 7 } });
+  const { resident } = plainModel().estimate({ bindings: { T: 7 } });
   // w 4×3×4=48 + emb 5×3×4=60 + idx 2×4=8（いずれも 4 バイト整列済み）
   assertEquals(resident.weights.uncompressedBytes, 116);
   assertEquals(resident.weights.compressedBytes, 0);
@@ -105,28 +109,20 @@ Deno.test("圧縮しない格納（f32 / i32）は実バイトのまま非圧縮
 });
 
 /**
- * 格納 `bf16` の initializer を 1 本だけ持つ形。IR の語彙としては valid だが
+ * 格納 `bf16` の initializer を 1 本だけ持つ合流後のグラフ。IR の語彙としては valid だが
  * `RUNTIME_SUPPORT.storage` に無いので、`createSession` は必ず capability 不足で落ちる。
+ *
+ * 格納は供給側（束縛表の encoding）が決める — 宣言は `w: {}` のまま。
  */
-const bf16Model = (): KarumeModel => {
-  const graph = plainGraph();
-  return openGraph(
-    {
-      ...graph,
-      initializers: { ...graph.initializers, w: { tensor: "m.w", storage: { dtype: "bf16" } } },
-    },
-    [
-      { name: "m.w", dtype: "BF16", shape: [4, 3], data: new Uint8Array(24) },
-      { name: "m.emb", dtype: "F32", shape: [5, 3], data: f32Bytes(new Array(15).fill(1)) },
-      { name: "m.idx", dtype: "I32", shape: [2], data: i32Bytes([0, 1]) },
-    ],
-  );
-};
+const bf16Graph = (): IrGraph => mergeGraph(plainGraph(), { w: "bf16" });
 
 Deno.test("実構築が拒否する格納 dtype（bf16）に見積りを返さない", () => {
+  // 全量面（`estimateGraphMemory`）を直に呼ぶ — `PreparedModel` を経由すると
+  // `prepareContainer` の側の門が先に落とし、estimator 自身の門が空回りしていても緑になる。
+  const graph = bf16Graph();
   assertThrows(
-    () => estimateSessionMemory(bf16Model(), { bindings: { T: 7 } }),
-    ContainerError,
+    () => estimateGraphMemory(graph, planWeightResidency(graph), { bindings: { T: 7 } }),
+    RuntimeSupportError,
     "capability 不足",
   );
 });
@@ -134,15 +130,15 @@ Deno.test("実構築が拒否する格納 dtype（bf16）に見積りを返さ�
 Deno.test("io は入力バッファ + 出力 readback staging（0 要素は 4 バイト床）", () => {
   const model = plainModel();
   // x[7,4]=112 + h[7,3]=84 + g[2,3]=24
-  assertEquals(runScenario(estimateSessionMemory(model, { bindings: { T: 7 } })).ioBytes, 220);
+  assertEquals(runScenario(model.estimate({ bindings: { T: 7 } })).ioBytes, 220);
   // T=0 では x も h も 0 要素 → 床の 4 バイトずつ。g は 24 のまま
-  assertEquals(runScenario(estimateSessionMemory(model, { bindings: { T: 0 } })).ioBytes, 32);
+  assertEquals(runScenario(model.estimate({ bindings: { T: 0 } })).ioBytes, 32);
 });
 
 Deno.test("予算 0 の peakAccountedBytes は常駐の総和 + シナリオ側の最大（従来の勘定）", () => {
   // 予算 0 = slot backing を常に 1 本しか持たない形（ADR 0095 決定 1）。この形でだけ
   // 「勘定側 = 常駐 + 最大シナリオ 1 本」が成り立つ。
-  const report = estimateSessionMemory(plainModel(), {
+  const report = plainModel().estimate({
     bindings: { T: 7 },
     planBackingBudgetBytes: 0,
   });
@@ -161,7 +157,7 @@ Deno.test("予算 0 の peakAccountedBytes は常駐の総和 + シナリオ側�
 // ---------------------------------------------------------------------------
 
 Deno.test("既定予算の peakAccountedBytes は常駐 + 予算（シナリオが予算に収まる形）", () => {
-  const report = estimateSessionMemory(plainModel(), { bindings: { T: 7 } });
+  const report = plainModel().estimate({ bindings: { T: 7 } });
   assertEquals(report.planBackingBudgetBytes, DEFAULT_PLAN_BACKING_BUDGET_BYTES);
   // 最大シナリオ 500（io 220 + workspace 280）は 256 MiB の予算に収まるので、勘定側に立つのは
   // 予算のほう（保持集合はこの量を超えない = 過大側に倒した「勘定に入れた分のピーク」）。
@@ -171,7 +167,7 @@ Deno.test("既定予算の peakAccountedBytes は常駐 + 予算（シナリオ�
 
 Deno.test("予算はシナリオごとの数字を動かさない（効くのはピークだけ）", () => {
   const at = (planBackingBudgetBytes: number): AdmissionReport =>
-    estimateSessionMemory(plainModel(), { bindings: { T: 7 }, planBackingBudgetBytes });
+    plainModel().estimate({ bindings: { T: 7 }, planBackingBudgetBytes });
   // 予算は「保持本数の側」の量なので、1 本の形の必要量（io / workspace / 常駐）には効かない。
   assertEquals(at(0).scenarios, at(DEFAULT_PLAN_BACKING_BUDGET_BYTES).scenarios);
   assertEquals(at(0).resident, at(DEFAULT_PLAN_BACKING_BUDGET_BYTES).resident);
@@ -179,7 +175,7 @@ Deno.test("予算はシナリオごとの数字を動かさない（効くのは
 
 Deno.test("予算が最大シナリオより小さいときは最大シナリオが立つ（max の切り替わり）", () => {
   const peak = (planBackingBudgetBytes: number): number =>
-    estimateSessionMemory(plainModel(), { bindings: { T: 7 }, planBackingBudgetBytes })
+    plainModel().estimate({ bindings: { T: 7 }, planBackingBudgetBytes })
       .peakAccountedBytes;
   // 最大シナリオは 500（io 220 + workspace 280）。新規 1 本だけで予算を超える形は他を全て
   // 退役させて 1 本だけ持つので、予算より大きいシナリオはそのまま勘定側に立つ。
@@ -192,12 +188,12 @@ Deno.test("予算が最大シナリオより小さいときは最大シナリオ
 
 Deno.test("報告は使った予算をそのまま載せる（呼び手が組み直さずに読める）", () => {
   assertEquals(
-    estimateSessionMemory(plainModel(), { bindings: { T: 7 }, planBackingBudgetBytes: 4096 })
+    plainModel().estimate({ bindings: { T: 7 }, planBackingBudgetBytes: 4096 })
       .planBackingBudgetBytes,
     4096,
   );
   assertEquals(
-    estimateSessionMemory(plainModel(), { bindings: { T: 7 }, planBackingBudgetBytes: 0 })
+    plainModel().estimate({ bindings: { T: 7 }, planBackingBudgetBytes: 0 })
       .planBackingBudgetBytes,
     0,
   );
@@ -208,7 +204,7 @@ Deno.test("予算の値域は createSession と同じ門（非負の安全な整
   for (const budget of [-1, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 2]) {
     assertThrows(
       () =>
-        estimateSessionMemory(plainModel(), {
+        plainModel().estimate({
           bindings: { T: 7 },
           planBackingBudgetBytes: budget,
         }),
@@ -218,27 +214,27 @@ Deno.test("予算の値域は createSession と同じ門（非負の安全な整
   }
   // 対照: 0 は正当値（従来の容量 1）— 上の 4 本が「何を渡しても落ちる」ではないことの証明。
   assertEquals(
-    estimateSessionMemory(plainModel(), { bindings: { T: 7 }, planBackingBudgetBytes: 0 })
+    plainModel().estimate({ bindings: { T: 7 }, planBackingBudgetBytes: 0 })
       .peakAccountedBytes,
     616,
   );
 });
 
-/** linear の重み（適格）と mul の被演算子（適格外）に同じ格納 dtype を置くグラフ。 */
-const twoPathGraph = (
-  storage: Record<string, unknown>,
-  extra: Record<string, unknown>,
-): GraphJson => ({
+/**
+ * linear の重み（適格）と mul の被演算子（適格外）に**同じ格納**を置ける形のグラフ。
+ * IR v2 の宣言は格納を持たないので、どちらに何の codec を載せるかは供給側が決める。
+ */
+const twoPathGraph = (): DeclarationJson => ({
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["linear", "mul"] },
   symbols: [],
   inputs: [{ name: "x", dtype: "f32", shape: [2, 3] }],
   outputs: ["y"],
   initializers: {
-    w: { tensor: "m.w", storage: { ...storage } },
-    b: { tensor: "m.b", storage: { dtype: "f32" } },
-    g: { tensor: "m.g", storage: { ...extra } },
+    w: {},
+    b: {},
+    g: {},
   },
   values: {
     w: { dtype: "f32", shape: [3, 3] },
@@ -254,16 +250,12 @@ const twoPathGraph = (
 });
 
 Deno.test("f16 は適格なら 4 バイト切り上げで常駐・適格外なら f32 展開", () => {
-  const model = openGraph(
-    twoPathGraph({ dtype: "f16" }, { dtype: "f16" }),
-    [
-      // 整列降順（F32 → F16）で詰める（I4 / F32 の整列単位を跨がせない）
-      { name: "m.b", dtype: "F32", shape: [3], data: f32Bytes([0, 0, 0]) },
-      { name: "m.w", dtype: "F16", shape: [3, 3], data: f16Zeros(9) },
-      { name: "m.g", dtype: "F16", shape: [3], data: f16Zeros(3) },
-    ],
-  );
-  const { weights } = estimateSessionMemory(model).resident;
+  const model = openGraph(twoPathGraph(), [
+    weight("b", f32Bytes([0, 0, 0])),
+    weight("w", f16Zeros(9), { codec: "f16" }),
+    weight("g", f16Zeros(3), { codec: "f16" }),
+  ]);
+  const { weights } = model.estimate().resident;
   // w は numel 9 → 18 バイトを 4 バイトへ切り上げて 20
   assertEquals(weights.compressedBytes, 20);
   // b は f32 のまま 12（非圧縮の欄）
@@ -273,16 +265,16 @@ Deno.test("f16 は適格なら 4 バイト切り上げで常駐・適格外な�
 });
 
 Deno.test("i8 適格は numel の 4 バイト切り上げ + per-channel scale（奇数 numel）", () => {
-  const graph: GraphJson = {
+  const graph: DeclarationJson = {
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: ["linear"] },
     symbols: [],
     inputs: [{ name: "x", dtype: "f32", shape: [2, 5] }],
     outputs: ["y"],
     initializers: {
-      w: { tensor: "m.w", storage: { dtype: "i8", scale: "m.s" } },
-      b: { tensor: "m.b", storage: { dtype: "f32" } },
+      w: {},
+      b: {},
     },
     values: {
       w: { dtype: "f32", shape: [3, 5] },
@@ -292,11 +284,16 @@ Deno.test("i8 適格は numel の 4 バイト切り上げ + per-channel scale（
     nodes: [{ op: "linear", ins: ["x", "w", "b"], outs: ["y"], attrs: {} }],
   };
   const model = openGraph(graph, [
-    { name: "m.b", dtype: "F32", shape: [3], data: f32Bytes([0, 0, 0]) },
-    { name: "m.s", dtype: "F32", shape: [3, 1], data: f32Bytes([1, 1, 1]) },
-    { name: "m.w", dtype: "I8", shape: [3, 5], data: new Uint8Array(15) },
+    weight("b", f32Bytes([0, 0, 0])),
+    // per-channel は groupSize = 行長・scale は `[rows, 1]` ぶんの f32（v1 の keepdim 形と同じ
+    // バイト列で、shape だけを捨てた形）。
+    weight("w", new Uint8Array(new ArrayBuffer(15)), {
+      codec: "int8-sym",
+      groupSize: 5,
+      scale: { bytes: f32Bytes([1, 1, 1]), dtype: "f32" },
+    }),
   ]);
-  const report = estimateSessionMemory(model);
+  const report = model.estimate();
   // w numel 15 → 16（切り上げ）+ scale 3×4=12
   assertEquals(report.resident.weights.compressedBytes, 28);
   assertEquals(report.resident.weights.uncompressedBytes, 12);
@@ -306,16 +303,16 @@ Deno.test("i8 適格は numel の 4 バイト切り上げ + per-channel scale（
 });
 
 Deno.test("i4 適格は numel÷2 + group scale（展開経路を持つ重みスロット限定）", () => {
-  const graph: GraphJson = {
+  const graph: DeclarationJson = {
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: ["linear"] },
     symbols: [],
     inputs: [{ name: "x", dtype: "f32", shape: [2, 16] }],
     outputs: ["y"],
     initializers: {
-      w: { tensor: "m.w", storage: { dtype: "i4", scale: "m.s", group_size: 16 } },
-      b: { tensor: "m.b", storage: { dtype: "f32" } },
+      w: {},
+      b: {},
     },
     values: {
       w: { dtype: "f32", shape: [2, 16] },
@@ -325,11 +322,14 @@ Deno.test("i4 適格は numel÷2 + group scale（展開経路を持つ重みス�
     nodes: [{ op: "linear", ins: ["x", "w", "b"], outs: ["y"], attrs: {} }],
   };
   const model = openGraph(graph, [
-    { name: "m.b", dtype: "F32", shape: [2], data: f32Bytes([0, 0]) },
-    { name: "m.s", dtype: "F32", shape: [2, 1], data: f32Bytes([1, 1]) },
-    { name: "m.w", dtype: "I4", shape: [2, 16], data: new Uint8Array(16) },
+    weight("b", f32Bytes([0, 0])),
+    weight("w", new Uint8Array(new ArrayBuffer(16)), {
+      codec: "int4-sym-g",
+      groupSize: 16,
+      scale: { bytes: f32Bytes([1, 1]), dtype: "f32" },
+    }),
   ]);
-  const { weights } = estimateSessionMemory(model).resident;
+  const { weights } = model.estimate().resident;
   // w numel 32 → 16 バイト + group scale 2×4=8
   assertEquals(weights.compressedBytes, 24);
   // b は f32 のまま 8
@@ -338,15 +338,15 @@ Deno.test("i4 適格は numel÷2 + group scale（展開経路を持つ重みス�
 });
 
 Deno.test("i4 の embedding も packed のまま常駐する（ADR 0069 決定 5 の embedding 追補）", () => {
-  const graph: GraphJson = {
+  const graph: DeclarationJson = {
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: ["embedding"] },
     symbols: [],
     inputs: [{ name: "ids", dtype: "i32", shape: [2] }],
     outputs: ["y"],
     initializers: {
-      w: { tensor: "m.w", storage: { dtype: "i4", scale: "m.s", group_size: 16 } },
+      w: {},
     },
     values: {
       w: { dtype: "f32", shape: [4, 16] },
@@ -355,10 +355,13 @@ Deno.test("i4 の embedding も packed のまま常駐する（ADR 0069 決定 5
     nodes: [{ op: "embedding", ins: ["w", "ids"], outs: ["y"], attrs: { padding_idx: -1 } }],
   };
   const model = openGraph(graph, [
-    { name: "m.s", dtype: "F32", shape: [4, 1], data: f32Bytes([1, 1, 1, 1]) },
-    { name: "m.w", dtype: "I4", shape: [4, 16], data: new Uint8Array(32) },
+    weight("w", new Uint8Array(new ArrayBuffer(32)), {
+      codec: "int4-sym-g",
+      groupSize: 16,
+      scale: { bytes: f32Bytes([1, 1, 1, 1]), dtype: "f32" },
+    }),
   ]);
-  const { weights } = estimateSessionMemory(model).resident;
+  const { weights } = model.estimate().resident;
   // 語彙表 numel 64 → 32 バイト + group scale 4×4=16（展開経路は embedding カーネルにもある）
   assertEquals(weights.compressedBytes, 48);
   assertEquals(weights.uncompressedBytes, 0);
@@ -366,16 +369,16 @@ Deno.test("i4 の embedding も packed のまま常駐する（ADR 0069 決定 5
 });
 
 /** `conv1d(x, w, b)` 1 本のグラフ（w は i4 + rank 2 の group scale — 波 J-5b）。 */
-const i4Conv1dGraph = (groups: number): GraphJson => ({
+const i4Conv1dGraph = (groups: number): DeclarationJson => ({
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["conv1d"] },
   symbols: [],
   inputs: [{ name: "x", dtype: "f32", shape: [1, 32, 6] }],
   outputs: ["y"],
   initializers: {
-    w: { tensor: "m.w", storage: { dtype: "i4", scale: "m.s", group_size: 16 } },
-    b: { tensor: "m.b", storage: { dtype: "f32" } },
+    w: {},
+    b: {},
   },
   values: {
     // 行長 = Cin/groups · K（groups == 1 なら 32·2 = 64 = g16 が 4 つ）
@@ -391,14 +394,20 @@ const i4Conv1dGraph = (groups: number): GraphJson => ({
   }],
 });
 
+/** {@link i4Conv1dGraph} の `w` の格納（合流後のグラフを直に組む口で使う）。 */
+const I4_CONV1D_STORAGE: StorageMap = { w: { codec: "int4-sym-g", groupSize: 16 } };
+
 Deno.test("i4 の conv1d(groups==1) も packed のまま常駐する（ADR 0069 決定 5 の conv1d 追補）", () => {
   const model = openGraph(i4Conv1dGraph(1), [
-    { name: "m.b", dtype: "F32", shape: [4], data: f32Bytes([0, 0, 0, 0]) },
+    weight("b", f32Bytes([0, 0, 0, 0])),
     // scale は rank 非依存の rank 2 形 `[Cout, (Cin·K)/g]` = [4,4]（重みは rank 3）
-    { name: "m.s", dtype: "F32", shape: [4, 4], data: f32Bytes(new Array(16).fill(1)) },
-    { name: "m.w", dtype: "I4", shape: [4, 32, 2], data: new Uint8Array(128) },
+    weight("w", new Uint8Array(new ArrayBuffer(128)), {
+      codec: "int4-sym-g",
+      groupSize: 16,
+      scale: { bytes: f32Bytes(new Array(16).fill(1)), dtype: "f32" },
+    }),
   ]);
-  const { weights } = estimateSessionMemory(model).resident;
+  const { weights } = model.estimate().resident;
   // w numel 256 → 128 バイト + group scale 16×4 = 64
   assertEquals(weights.compressedBytes, 192);
   // b は f32 のまま 16
@@ -409,11 +418,14 @@ Deno.test("i4 の conv1d(groups==1) も packed のまま常駐する（ADR 0069 
 Deno.test("i4 の conv1d(groups>1) は適格外で f32 展開へ回る", () => {
   // 直接カーネルに展開経路は無い（groups > 1 は igemm へ流れない — 波 J-5b）。
   const model = openGraph(i4Conv1dGraph(2), [
-    { name: "m.b", dtype: "F32", shape: [4], data: f32Bytes([0, 0, 0, 0]) },
-    { name: "m.s", dtype: "F32", shape: [4, 2], data: f32Bytes(new Array(8).fill(1)) },
-    { name: "m.w", dtype: "I4", shape: [4, 16, 2], data: new Uint8Array(64) },
+    weight("b", f32Bytes([0, 0, 0, 0])),
+    weight("w", new Uint8Array(new ArrayBuffer(64)), {
+      codec: "int4-sym-g",
+      groupSize: 16,
+      scale: { bytes: f32Bytes(new Array(8).fill(1)), dtype: "f32" },
+    }),
   ]);
-  const { weights } = estimateSessionMemory(model).resident;
+  const { weights } = model.estimate().resident;
   assertEquals(weights.compressedBytes, 0);
   assertEquals(weights.uncompressedBytes, 16);
   // w numel 128 → f32 展開で 512 バイト
@@ -421,15 +433,15 @@ Deno.test("i4 の conv1d(groups>1) は適格外で f32 展開へ回る", () => {
 });
 
 Deno.test("グラフ出力になった i4 は適格外で f32 展開へ回る", () => {
-  const graph: GraphJson = {
+  const graph: DeclarationJson = {
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: ["embedding"] },
     symbols: [],
     inputs: [{ name: "ids", dtype: "i32", shape: [2] }],
     outputs: ["y", "w"],
     initializers: {
-      w: { tensor: "m.w", storage: { dtype: "i4", scale: "m.s", group_size: 16 } },
+      w: {},
     },
     values: {
       w: { dtype: "f32", shape: [4, 16] },
@@ -438,10 +450,13 @@ Deno.test("グラフ出力になった i4 は適格外で f32 展開へ回る", 
     nodes: [{ op: "embedding", ins: ["w", "ids"], outs: ["y"], attrs: { padding_idx: -1 } }],
   };
   const model = openGraph(graph, [
-    { name: "m.s", dtype: "F32", shape: [4, 1], data: f32Bytes([1, 1, 1, 1]) },
-    { name: "m.w", dtype: "I4", shape: [4, 16], data: new Uint8Array(32) },
+    weight("w", new Uint8Array(new ArrayBuffer(32)), {
+      codec: "int4-sym-g",
+      groupSize: 16,
+      scale: { bytes: f32Bytes([1, 1, 1, 1]), dtype: "f32" },
+    }),
   ]);
-  const { weights } = estimateSessionMemory(model).resident;
+  const { weights } = model.estimate().resident;
   assertEquals(weights.compressedBytes, 0);
   assertEquals(weights.uncompressedBytes, 0);
   assertEquals(weights.expandedBytes, 64 * 4);
@@ -455,22 +470,22 @@ Deno.test("グラフ出力になった i4 は適格外で f32 展開へ回る", 
  * 「`planWeightBuffers` の全要素が 3 欄のどれかにちょうど 1 度数えられる」= 席を増やして
  * `weightEstimate` の分岐を直し忘れたら赤くなる、という網羅の主張は誰も見ていない。
  */
-const allSeatsModel = (): KarumeModel => {
-  const graph: GraphJson = {
+const allSeatsModel = (): PreparedModel => {
+  const graph: DeclarationJson = {
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: ["linear", "mul"] },
     symbols: [],
     inputs: [{ name: "x", dtype: "f32", shape: [2, 16] }],
     outputs: ["y"],
     initializers: {
-      w4: { tensor: "m.w4", storage: { dtype: "i4", scale: "m.s4", group_size: 16 } },
-      b4: { tensor: "m.b4", storage: { dtype: "f32" } },
-      w8: { tensor: "m.w8", storage: { dtype: "i8", scale: "m.s8" } },
-      b8: { tensor: "m.b8", storage: { dtype: "f32" } },
-      w16: { tensor: "m.w16", storage: { dtype: "f16" } },
-      b16: { tensor: "m.b16", storage: { dtype: "f32" } },
-      g: { tensor: "m.g", storage: { dtype: "f16" } },
+      w4: {},
+      b4: {},
+      w8: {},
+      b8: {},
+      w16: {},
+      b16: {},
+      g: {},
     },
     values: {
       w4: { dtype: "f32", shape: [4, 16] },
@@ -493,23 +508,29 @@ const allSeatsModel = (): KarumeModel => {
       { op: "mul", ins: ["j", "g"], outs: ["y"], attrs: {} },
     ],
   };
-  // 整列降順（F32 → F16 → I8 → I4）で詰める。
+  // 4 codec（f32 / f16 / int8-sym / int4-sym-g）を 1 本の供給に混ぜる。
   return openGraph(graph, [
-    { name: "m.b4", dtype: "F32", shape: [4], data: f32Bytes([0, 0, 0, 0]) },
-    { name: "m.b8", dtype: "F32", shape: [4], data: f32Bytes([0, 0, 0, 0]) },
-    { name: "m.b16", dtype: "F32", shape: [4], data: f32Bytes([0, 0, 0, 0]) },
-    { name: "m.s4", dtype: "F32", shape: [4, 1], data: f32Bytes([1, 1, 1, 1]) },
-    { name: "m.s8", dtype: "F32", shape: [4, 1], data: f32Bytes([1, 1, 1, 1]) },
-    { name: "m.w16", dtype: "F16", shape: [4, 4], data: f16Zeros(16) },
-    { name: "m.g", dtype: "F16", shape: [4], data: f16Zeros(4) },
-    { name: "m.w8", dtype: "I8", shape: [4, 4], data: new Uint8Array(16) },
-    { name: "m.w4", dtype: "I4", shape: [4, 16], data: new Uint8Array(32) },
+    weight("b4", f32Bytes([0, 0, 0, 0])),
+    weight("b8", f32Bytes([0, 0, 0, 0])),
+    weight("b16", f32Bytes([0, 0, 0, 0])),
+    weight("w16", f16Zeros(16), { codec: "f16" }),
+    weight("g", f16Zeros(4), { codec: "f16" }),
+    weight("w8", new Uint8Array(new ArrayBuffer(16)), {
+      codec: "int8-sym",
+      groupSize: 4,
+      scale: { bytes: f32Bytes([1, 1, 1, 1]), dtype: "f32" },
+    }),
+    weight("w4", new Uint8Array(new ArrayBuffer(32)), {
+      codec: "int4-sym-g",
+      groupSize: 16,
+      scale: { bytes: f32Bytes([1, 1, 1, 1]), dtype: "f32" },
+    }),
   ]);
 };
 
 Deno.test("5 席同居のグラフで、常駐バッファは 3 欄のどれかにちょうど 1 度数えられる", () => {
   const model = allSeatsModel();
-  const { weights } = estimateSessionMemory(model).resident;
+  const { weights } = model.estimate().resident;
 
   // 手計算: i4 payload 32 + i4 scale 16 + i8 payload 16 + i8 scale 16 + f16 payload 32
   assertEquals(weights.compressedBytes, 112);
@@ -541,7 +562,7 @@ Deno.test("5 席同居のグラフで、常駐バッファは 3 欄のどれか�
 // ---------------------------------------------------------------------------
 
 Deno.test("state は記号容量を解決したスロット合計 + 論理長 uniform", () => {
-  const report = estimateSessionMemory(stateModel(), {
+  const report = stateModel().estimate({
     bindings: { T: 2 },
     generation: { chunkLength: 4, bindings: { C: 8 } },
   });
@@ -552,7 +573,7 @@ Deno.test("state は記号容量を解決したスロット合計 + 論理長 un
 Deno.test("state の記号容量は generation.bindings でしか動かない", () => {
   const model = stateModel();
   const at = (capacity: number): number =>
-    estimateSessionMemory(model, {
+    model.estimate({
       bindings: { T: 2 },
       generation: { chunkLength: 4, bindings: { C: capacity } },
     }).resident.stateBytes;
@@ -562,7 +583,7 @@ Deno.test("state の記号容量は generation.bindings でしか動かない", 
 });
 
 Deno.test("generation を渡さなければ state は数えない", () => {
-  const report = estimateSessionMemory(plainModel(), { bindings: { T: 7 } });
+  const report = plainModel().estimate({ bindings: { T: 7 } });
   assertEquals(report.resident.stateBytes, 0);
 });
 
@@ -577,9 +598,9 @@ Deno.test("generation を渡さなければ state は数えない", () => {
  * `M` は入力にも現れる（states 専用記号ではない）ので、束縛点が chunkLength 側であることも
  * この形でだけ観測できる。
  */
-const chunkSymbolGraph = (): GraphJson => ({
+const chunkSymbolGraph = (): DeclarationJson => ({
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["neg", "state_append"] },
   symbols: ["M", "C"],
   inputs: [{ name: "x", dtype: "f32", shape: [1, 2, "M", 4] }],
@@ -598,7 +619,7 @@ const chunkSymbolGraph = (): GraphJson => ({
 });
 
 Deno.test("generation ありは prefill / decode の 2 本を自動導出する（chunk 記号だけが動く）", () => {
-  const report = estimateSessionMemory(openGraph(chunkSymbolGraph()), {
+  const report = openGraph(chunkSymbolGraph()).estimate({
     generation: { chunkLength: 4, bindings: { C: 8 } },
     // 予算 0 = 保持 1 本。シナリオ側の足し方（和ではなく max）だけを見たいので、予算の項が
     // 立たない形で測る（予算そのものの門は「slot backing の保持予算」の節）。
@@ -622,7 +643,7 @@ Deno.test("chunk 行が数値次元のグラフでは prefill と decode が同�
   // `stateGraph` の append 入力は initializer の `[1,2,4,4]`。記号で動かない形の decode step は
   // 物理 chunk 行を prefill と同じまま queryLength=1 で回る（assertGenerationRun は
   // rows === chunkLength を decode でも許す）ので、2 本が一致するのが正しい。
-  const report = estimateSessionMemory(stateModel(), {
+  const report = stateModel().estimate({
     bindings: { T: 2 },
     generation: { chunkLength: 4, bindings: { C: 8 } },
   });
@@ -634,7 +655,7 @@ Deno.test("chunk 行が数値次元のグラフでは prefill と decode が同�
 });
 
 Deno.test("generation なしの見積りはシナリオ 1 本（io / 中間の導出は従来と同じ）", () => {
-  const report = estimateSessionMemory(plainModel(), { bindings: { T: 7 } });
+  const report = plainModel().estimate({ bindings: { T: 7 } });
   // x[7,4]=112 + h[7,3]=84 + g[2,3]=24 = 220 / 中間は h と g が同時生存（どちらもグラフ出力）で
   // 1 領域に h [0,84) + g [256,280)（offset は 256 整列 — ADR 0093 決定 1）= 280
   assertEquals(report.scenarios, [{ name: "run", ioBytes: 220, workspaceBytes: 280 }]);
@@ -643,7 +664,7 @@ Deno.test("generation なしの見積りはシナリオ 1 本（io / 中間の�
 Deno.test("chunk 行の記号を options.bindings で受けない（束縛点は chunkLength と decode の 1）", () => {
   assertThrows(
     () =>
-      estimateSessionMemory(openGraph(chunkSymbolGraph()), {
+      openGraph(chunkSymbolGraph()).estimate({
         bindings: { M: 4 },
         generation: { chunkLength: 4, bindings: { C: 8 } },
       }),
@@ -654,7 +675,7 @@ Deno.test("chunk 行の記号を options.bindings で受けない（束縛点は
 
 Deno.test("chunk 記号を持つグラフを generation 無しで見積らない", () => {
   assertThrows(
-    () => estimateSessionMemory(openGraph(chunkSymbolGraph())),
+    () => openGraph(chunkSymbolGraph()).estimate(),
     ExecutionError,
     "options.generation.chunkLength で",
   );
@@ -673,9 +694,9 @@ Deno.test("chunk 記号を持つグラフを generation 無しで見積らない
  * （= 追加シナリオが `bindings` で上書きする軸）。`V=6` / `H=4` は 3 本の増え方を別々の
  * 定数で見分けるために違う値にしてある。
  */
-const verifyRowsGraph = (): GraphJson => ({
+const verifyRowsGraph = (): DeclarationJson => ({
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["neg", "state_append", "embedding"] },
   symbols: ["M", "C", "R"],
   inputs: [
@@ -684,8 +705,8 @@ const verifyRowsGraph = (): GraphJson => ({
   ],
   outputs: ["y", "logits", "hidden"],
   initializers: {
-    vocab: { tensor: "m.vocab", storage: { dtype: "f32" } },
-    hid: { tensor: "m.hid", storage: { dtype: "f32" } },
+    vocab: {},
+    hid: {},
   },
   values: {
     vocab: { dtype: "f32", shape: [8, 6] },
@@ -705,10 +726,10 @@ const verifyRowsGraph = (): GraphJson => ({
   ],
 });
 
-const verifyRowsModel = (): KarumeModel =>
+const verifyRowsModel = (): PreparedModel =>
   openGraph(verifyRowsGraph(), [
-    { name: "m.vocab", dtype: "F32", shape: [8, 6], data: f32Bytes(new Array(48).fill(0)) },
-    { name: "m.hid", dtype: "F32", shape: [8, 4], data: f32Bytes(new Array(32).fill(0)) },
+    weight("vocab", f32Bytes(new Array(48).fill(0))),
+    weight("hid", f32Bytes(new Array(32).fill(0))),
   ]);
 
 /** 追加シナリオつきの見積り（`R` の既定は 1 = 非投機の decode と同じ行数）。 */
@@ -716,7 +737,7 @@ const verifyRowsReport = (
   scenarios: readonly { name: string; chunkLength: number; bindings?: { R: number } }[],
   planBackingBudgetBytes?: number,
 ): AdmissionReport =>
-  estimateSessionMemory(verifyRowsModel(), {
+  verifyRowsModel().estimate({
     bindings: { R: 1 },
     generation: { chunkLength: 4, bindings: { C: 8 }, scenarios },
     planBackingBudgetBytes,
@@ -774,7 +795,7 @@ Deno.test("追加シナリオの名前・物理 chunk 行・束縛は既存 2 �
   // 束縛の上書きも既存 2 形と同じ門 — 物理 chunk 行の記号は受けない（束縛点は chunkLength）。
   assertThrows(
     () =>
-      estimateSessionMemory(verifyRowsModel(), {
+      verifyRowsModel().estimate({
         bindings: { R: 1 },
         generation: {
           chunkLength: 4,
@@ -788,7 +809,7 @@ Deno.test("追加シナリオの名前・物理 chunk 行・束縛は既存 2 �
 });
 
 Deno.test("追加シナリオも peakAccountedBytes の最大に入る（予算 0）", () => {
-  const without = estimateSessionMemory(verifyRowsModel(), {
+  const without = verifyRowsModel().estimate({
     bindings: { R: 1 },
     generation: { chunkLength: 4, bindings: { C: 8 } },
     planBackingBudgetBytes: 0,
@@ -812,9 +833,9 @@ Deno.test("追加シナリオも peakAccountedBytes の最大に入る（予算 
 // ---------------------------------------------------------------------------
 
 /** 単項の直列チェーン（`x → t1 → t2 → y`）。`outputs` を差し替えると pin の効きが見える。 */
-const chainGraph = (outputs: readonly string[]): GraphJson => ({
+const chainGraph = (outputs: readonly string[]): DeclarationJson => ({
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["neg"] },
   symbols: [],
   inputs: [{ name: "x", dtype: "f32", shape: [64] }],
@@ -833,9 +854,9 @@ const chainGraph = (outputs: readonly string[]): GraphJson => ({
 });
 
 /** 3 本に分岐してから畳む形（同時生存が 4 本になる）。 */
-const fanOutGraph = (): GraphJson => ({
+const fanOutGraph = (): DeclarationJson => ({
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["neg", "add"] },
   symbols: [],
   inputs: [{ name: "x", dtype: "f32", shape: [64] }],
@@ -860,7 +881,7 @@ const fanOutGraph = (): GraphJson => ({
 Deno.test("直列チェーンのピークは同時生存 2 本ぶん（消費が尽きた中間は解放される）", () => {
   // 64 要素 = 256 バイト。t2 を確保した時点が 2 本 = 512
   assertEquals(
-    runScenario(estimateSessionMemory(openGraph(chainGraph(["y"])))).workspaceBytes,
+    runScenario(openGraph(chainGraph(["y"])).estimate()).workspaceBytes,
     512,
   );
 });
@@ -869,19 +890,19 @@ Deno.test("幅広 fan-out は同時生存 4 本ぶんに、読み書きの同居
   // s を確保した時点で t1 / t2 / t3 / s の 4 本が同時生存（生存ピーク 1024）。加えて s は
   // t1 / t2 を読む dispatch が書くので同じ領域に置けず、y も s と t3 を読むので両方の領域を
   // 避ける = 領域 3 本（768 + 256 + 256）= 1280（usage scope の制約 — ADR 0093 決定 1）。
-  assertEquals(runScenario(estimateSessionMemory(openGraph(fanOutGraph()))).workspaceBytes, 1280);
+  assertEquals(runScenario(openGraph(fanOutGraph()).estimate()).workspaceBytes, 1280);
 });
 
 Deno.test("グラフ出力は消費が尽きても pinned のまま（解放されない）", () => {
   // t1 を graph.outputs に載せると、t2 の消費後も t1 が居座って 3 本ぶん重なる
-  const report = estimateSessionMemory(openGraph(chainGraph(["t1", "y"])));
+  const report = openGraph(chainGraph(["t1", "y"])).estimate();
   assertEquals(runScenario(report).workspaceBytes, 768);
 });
 
 Deno.test("initializer とグラフ入力は中間ピークに数えない（重み・io 側の勘定）", () => {
   // matmul の h（T=7 → 84）と embedding の g（24 — 256 整列の次の区間）だけが中間。
   // x / w / emb / idx は数えない
-  const report = estimateSessionMemory(plainModel(), { bindings: { T: 7 } });
+  const report = plainModel().estimate({ bindings: { T: 7 } });
   assertEquals(runScenario(report).workspaceBytes, 280);
 });
 
@@ -889,17 +910,17 @@ Deno.test("配り直しはサイズに依らない（解放済みの 8 バイト
   // 8 → 12 → 4 バイトの 3 段。t2 は t1 を読む dispatch が書くので別領域（12 / 8）。y は t2 を
   // 読むので t2 の領域には置けず、生存を終えた t1 の区間（8 バイト）を掴む = 12 + 8 = 20
   // （旧プールの exact-size 再利用では 24 だった — ADR 0093 決定 8）。
-  const graph: GraphJson = {
+  const graph: DeclarationJson = {
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: ["matmul"] },
     symbols: [],
     inputs: [{ name: "x", dtype: "f32", shape: [1, 2] }],
     outputs: ["y"],
     initializers: {
-      w1: { tensor: "m.w1", storage: { dtype: "f32" } },
-      w2: { tensor: "m.w2", storage: { dtype: "f32" } },
-      w3: { tensor: "m.w3", storage: { dtype: "f32" } },
+      w1: {},
+      w2: {},
+      w3: {},
     },
     values: {
       w1: { dtype: "f32", shape: [2, 2] },
@@ -916,11 +937,11 @@ Deno.test("配り直しはサイズに依らない（解放済みの 8 バイト
     ],
   };
   const model = openGraph(graph, [
-    { name: "m.w1", dtype: "F32", shape: [2, 2], data: f32Bytes([1, 0, 0, 1]) },
-    { name: "m.w2", dtype: "F32", shape: [2, 3], data: f32Bytes(new Array(6).fill(1)) },
-    { name: "m.w3", dtype: "F32", shape: [3, 1], data: f32Bytes([1, 1, 1]) },
+    weight("w1", f32Bytes([1, 0, 0, 1])),
+    weight("w2", f32Bytes(new Array(6).fill(1))),
+    weight("w3", f32Bytes([1, 1, 1])),
   ]);
-  assertEquals(runScenario(estimateSessionMemory(model)).workspaceBytes, 20);
+  assertEquals(runScenario(model.estimate()).workspaceBytes, 20);
 });
 
 // ---------------------------------------------------------------------------
@@ -933,9 +954,9 @@ Deno.test("配り直しはサイズに依らない（解放済みの 8 バイト
  * `h` は 2 度消費される（鎖の入口と末尾の `add`）ので、実行相では鎖のあいだ根の実体が
  * プールへ返らない。別名を独立した値として確保すると、この重なりぶんだけ slot が余計に生える。
  */
-const aliasChainGraph = (): GraphJson => ({
+const aliasChainGraph = (): DeclarationJson => ({
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["neg", "add", "reshape"] },
   symbols: [],
   inputs: [{ name: "x", dtype: "f32", shape: [64] }],
@@ -958,14 +979,14 @@ const aliasChainGraph = (): GraphJson => ({
 Deno.test("別名の鎖は根の実体 1 本だけを数える（reshape → reshape）", () => {
   // 確保が出るのは `h`（256）と `y`（256）の 2 本きり = 512。鎖の 2 本を確保すると、`h` が
   // 生きている間は再利用できず 768 になる。
-  const report = estimateSessionMemory(openGraph(aliasChainGraph()));
+  const report = openGraph(aliasChainGraph()).estimate();
   assertEquals(runScenario(report).workspaceBytes, 512);
 });
 
 /** `neg` → `expand` の 2 本。出力 shape で恒等 / 非恒等を切り替える。 */
-const aliasExpandGraph = (outShape: readonly number[]): GraphJson => ({
+const aliasExpandGraph = (outShape: readonly number[]): DeclarationJson => ({
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["neg", "expand"] },
   symbols: [],
   inputs: [{ name: "x", dtype: "f32", shape: [1, 4] }],
@@ -983,7 +1004,7 @@ const aliasExpandGraph = (outShape: readonly number[]): GraphJson => ({
 
 Deno.test("恒等 expand は確保を出さず、複製軸のある expand は実体化ぶんを数える", () => {
   const workspaceOf = (outShape: readonly number[]): number =>
-    runScenario(estimateSessionMemory(openGraph(aliasExpandGraph(outShape)))).workspaceBytes;
+    runScenario(openGraph(aliasExpandGraph(outShape)).estimate()).workspaceBytes;
   // 恒等（[1,4] → [1,4]）は別名 = `h` の 16 バイト 1 本だけ。
   assertEquals(workspaceOf([1, 4]), 16);
   // 複製軸あり（[1,4] → [3,4]）は strided 実体化コピーへ戻る = 16 + 48。
@@ -994,9 +1015,9 @@ Deno.test("恒等 expand は確保を出さず、複製軸のある expand は�
  * グラフ出力が**別名名義**の形。`p` は `h` の実体そのものなので、pin が効くのは根の側。
  * `h` の消費が尽きても根はプールへ戻らず、後続の `t` / `y` は新しい slot を掴む。
  */
-const pinnedAliasGraph = (): GraphJson => ({
+const pinnedAliasGraph = (): DeclarationJson => ({
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["neg", "reshape"] },
   symbols: [],
   inputs: [{ name: "x", dtype: "f32", shape: [64] }],
@@ -1019,7 +1040,7 @@ const pinnedAliasGraph = (): GraphJson => ({
 Deno.test("グラフ出力が別名名義でも pin が効くのは根の実体（プールへ返らない）", () => {
   // `h`（pin された根）+ `t` + `y` の 3 本 = 768。pin が根へ届かないと `h` がプールへ戻って
   // `t` に配り直され、512 に縮む（= readback 可能な実体を他の値と共有する誤り）。
-  const report = estimateSessionMemory(openGraph(pinnedAliasGraph()));
+  const report = openGraph(pinnedAliasGraph()).estimate();
   assertEquals(runScenario(report).workspaceBytes, 768);
 });
 
@@ -1094,9 +1115,9 @@ const slotRecipes = (steps: readonly ExecStep[], graph: IrGraph): readonly StepR
  * どの先頭 op にも掛からない**ように組んである（`reshape` は upsample2x の先頭 op だが、続く
  * 並びが合わないので窓を掴まない — テスト本体が機械的に確認する）。
  */
-const aliasMixGraph = (): GraphJson => ({
+const aliasMixGraph = (): DeclarationJson => ({
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["neg", "add", "reshape", "expand"] },
   symbols: [],
   inputs: [
@@ -1180,7 +1201,7 @@ Deno.test("融合が掛からない形では estimator の中間総量と実行�
     [256, 16, 48, 48, 256, 256, 20, 20, 256, 256],
   );
   assertEquals(
-    runScenario(estimateSessionMemory(model)).workspaceBytes,
+    runScenario(model.estimate()).workspaceBytes,
     transientPlan.totalBytes,
   );
 });
@@ -1199,7 +1220,7 @@ const stateAttentionReport = (options: {
   readonly heads?: number;
   readonly limit?: number;
 }): AdmissionReport =>
-  estimateSessionMemory(openGraph(stateAttentionGraph(options.window, options.heads)), {
+  openGraph(stateAttentionGraph(options.window, options.heads)).estimate({
     generation: { chunkLength: options.chunkLength, bindings: { C: options.capacity } },
     maxStorageBufferBindingSize: options.limit ?? WIDE_LIMIT,
   });
@@ -1231,9 +1252,9 @@ Deno.test("readonly 変種（借り手の cross-attention・ins は q だけ）�
   // drafter の最小形（ADR 0096 段 2）: 借り物の external スロット 2 本を readonly attention 1 本が
   // 読むだけ。今 step の k / v 入力が無いので、実行相の 3 dispatch の読みは q と一時だけになる —
   // ここが「k / v が ins に在る」前提で組まれていると、transient 計画が未定義の参照で落ちる。
-  const graph: GraphJson = {
+  const graph: DeclarationJson = {
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: ["attention"] },
     symbols: ["C"],
     inputs: [{ name: "q", dtype: "f32", shape: [1, 4, 1, 8] }],
@@ -1252,7 +1273,7 @@ Deno.test("readonly 変種（借り手の cross-attention・ins は q だけ）�
       states: { k: "kslot", v: "vslot" },
     }],
   };
-  const report = estimateSessionMemory(openGraph(graph), {
+  const report = openGraph(graph).estimate({
     generation: { chunkLength: 1, bindings: { C: 16 } },
     maxStorageBufferBindingSize: WIDE_LIMIT,
   });
@@ -1335,8 +1356,8 @@ Deno.test("上限が動かすのは中間だけ（io・state・重みの欄は 1
 });
 
 Deno.test("states 形 attention を持たないグラフは上限を渡しても数字が変わらない", () => {
-  const without = estimateSessionMemory(plainModel(), { bindings: { T: 7 } });
-  const with_ = estimateSessionMemory(plainModel(), {
+  const without = plainModel().estimate({ bindings: { T: 7 } });
+  const with_ = plainModel().estimate({
     bindings: { T: 7 },
     maxStorageBufferBindingSize: 256,
   });
@@ -1344,8 +1365,8 @@ Deno.test("states 形 attention を持たないグラフは上限を渡しても
   // state_append だけを持つグラフ（一時を出さないノード）も同じ。
   const generation = { chunkLength: 4, bindings: { C: 8 } };
   assertEquals(
-    estimateSessionMemory(stateModel(), { bindings: { T: 2 }, generation }),
-    estimateSessionMemory(stateModel(), {
+    stateModel().estimate({ bindings: { T: 2 }, generation }),
+    stateModel().estimate({
       bindings: { T: 2 },
       generation,
       maxStorageBufferBindingSize: 256,
@@ -1359,7 +1380,7 @@ Deno.test("上限の値域はグラフの形に依らず入口で見る（読ま
   for (const limit of [-1, 0, 1.5, Number.NaN]) {
     assertThrows(
       () =>
-        estimateSessionMemory(plainModel(), {
+        plainModel().estimate({
           bindings: { T: 7 },
           maxStorageBufferBindingSize: limit,
         }),
@@ -1369,18 +1390,18 @@ Deno.test("上限の値域はグラフの形に依らず入口で見る（読ま
   }
   // 対照: 正当値は従来どおり通る（上の 4 本が「何を渡しても落ちる」ではないことの証明）。
   assertEquals(
-    estimateSessionMemory(plainModel(), {
+    plainModel().estimate({
       bindings: { T: 7 },
       maxStorageBufferBindingSize: 256,
     }).peakAccountedBytes,
-    estimateSessionMemory(plainModel(), { bindings: { T: 7 } }).peakAccountedBytes,
+    plainModel().estimate({ bindings: { T: 7 } }).peakAccountedBytes,
   );
 });
 
 Deno.test("states 形 attention の見積りに上限を渡さないのは fail loudly", () => {
   assertThrows(
     () =>
-      estimateSessionMemory(openGraph(stateAttentionGraph()), {
+      openGraph(stateAttentionGraph()).estimate({
         generation: { chunkLength: 4, bindings: { C: 16 } },
       }),
     ExecutionError,
@@ -1404,7 +1425,7 @@ Deno.test("1 行でも上限に入らない形は fail loudly（行ブロック�
 
 Deno.test("未束縛の記号次元は fail loudly（黙って 0 で埋めない）", () => {
   assertThrows(
-    () => estimateSessionMemory(plainModel()),
+    () => plainModel().estimate(),
     ExecutionError,
     "シンボル 'T' が束縛されていない",
   );
@@ -1414,25 +1435,53 @@ Deno.test("契約違反のグラフは常駐計画より先に契約検査で落
   // conv1d の attrs から `groups` を落とした形（ADR 0015 の「既定値補完をしない」）。
   // 常駐計画（planWeightResidency → i4 適格判定）が先に走ると `nodes (conv1d)` という
   // 添字を持たない診断になり、実構築（PreparedModel）と別の文言で落ちる。
+  //
+  // NOTE: 全量面（`estimateGraphMemory`）側の契約門そのものは、この主張では観測できない —
+  // 同じ関数の内側の `planGraph` が**同一文言**の `OpContractError` を出すので、estimator の
+  // 契約検査を外しても下の assertThrows は緑のままになる。順序（「常駐計画より先」）を固定
+  // しているのは後半の `prepareContainer` 側の assert だけで、テスト名の根拠はそちらにある。
   const graph = i4Conv1dGraph(1);
-  const model = openGraph(
+  const broken = mergeGraph(
     {
       ...graph,
       nodes: [{ ...graph.nodes[0], attrs: { stride: 1, padding: 0, dilation: 1 } }],
     },
-    [
-      { name: "m.b", dtype: "F32", shape: [4], data: f32Bytes([0, 0, 0, 0]) },
-      { name: "m.s", dtype: "F32", shape: [4, 4], data: f32Bytes(new Array(16).fill(1)) },
-      { name: "m.w", dtype: "I4", shape: [4, 32, 2], data: new Uint8Array(128) },
-    ],
+    I4_CONV1D_STORAGE,
   );
-  const error = assertThrows(() => estimateSessionMemory(model), OpContractError, "nodes[");
+  // 常駐計画は**壊れていない**グラフから採る。壊れたグラフで `planWeightResidency` を呼ぶと
+  // 落ちるのは計画の側（添字の無い `nodes (conv1d)`）なので、estimator が計画を使う前に
+  // 自分で契約検査を通すことを見られない。
+  const residency = planWeightResidency(mergeGraph(graph, I4_CONV1D_STORAGE));
+  const error = assertThrows(
+    () => estimateGraphMemory(broken, residency, {}),
+    OpContractError,
+    "nodes[",
+  );
   assert(error.message.includes("conv1d"), error.message);
+  // admission 相（`prepareContainer`）も同じ順序 — ここが常駐計画を先に走らせると、
+  // 同じグラフが添字を持たない `nodes (conv1d)` で落ちるようになる。
+  const prepared = assertThrows(
+    () =>
+      openGraph({
+        ...graph,
+        nodes: [{ ...graph.nodes[0], attrs: { stride: 1, padding: 0, dilation: 1 } }],
+      }, [
+        weight("b", f32Bytes([0, 0, 0, 0])),
+        weight("w", new Uint8Array(new ArrayBuffer(128)), {
+          codec: "int4-sym-g",
+          groupSize: 16,
+          scale: { bytes: f32Bytes(new Array(16).fill(1)), dtype: "f32" },
+        }),
+      ]),
+    OpContractError,
+    "nodes[",
+  );
+  assert(prepared.message.includes("conv1d"), prepared.message);
 });
 
 Deno.test("states 専用記号を options.bindings で受けない（束縛点は generation の側）", () => {
   assertThrows(
-    () => estimateSessionMemory(stateModel(), { bindings: { T: 2, C: 8 } }),
+    () => stateModel().estimate({ bindings: { T: 2, C: 8 } }),
     ExecutionError,
     "states 専用記号",
   );
@@ -1440,7 +1489,7 @@ Deno.test("states 専用記号を options.bindings で受けない（束縛点�
 
 Deno.test("states 形グラフを generation 無しで見積らない（context が要る旨で落ちる）", () => {
   assertThrows(
-    () => estimateSessionMemory(stateModel(), { bindings: { T: 2 } }),
+    () => stateModel().estimate({ bindings: { T: 2 } }),
     Error,
     "GenerationContext",
   );
@@ -1449,7 +1498,7 @@ Deno.test("states 形グラフを generation 無しで見積らない（context 
 Deno.test("states 宣言の無いグラフに generation を渡すと fail loudly", () => {
   assertThrows(
     () =>
-      estimateSessionMemory(plainModel(), {
+      plainModel().estimate({
         bindings: { T: 7 },
         generation: { chunkLength: 4 },
       }),
@@ -1461,7 +1510,7 @@ Deno.test("states 宣言の無いグラフに generation を渡すと fail loudl
 Deno.test("実構築が拒否する chunkLength に見積りを返さない", () => {
   assertThrows(
     () =>
-      estimateSessionMemory(stateModel(), {
+      stateModel().estimate({
         bindings: { T: 2 },
         generation: { chunkLength: 0, bindings: { C: 8 } },
       }),
@@ -1477,18 +1526,10 @@ Deno.test("states と入力の両方に現れる記号の食い違いは fail lo
     ...graph.states,
     v: { dtype: "f32", shape: [1, 2, "T", 4] },
   };
-  const model = openGraph(graph, [
-    { name: "m.w", dtype: "F32", shape: [4, 3], data: f32Bytes(new Array(12).fill(0)) },
-    {
-      name: "m.chunk",
-      dtype: "F32",
-      shape: [1, 2, 4, 4],
-      data: f32Bytes(new Array(32).fill(0)),
-    },
-  ]);
+  const model = openGraph(graph, stateTensors());
   assertThrows(
     () =>
-      estimateSessionMemory(model, {
+      model.estimate({
         bindings: { T: 2 },
         generation: { chunkLength: 4, bindings: { C: 8, T: 3 } },
       }),
@@ -1499,7 +1540,7 @@ Deno.test("states と入力の両方に現れる記号の食い違いは fail lo
 
 Deno.test("グラフに無い記号の束縛は fail loudly", () => {
   assertThrows(
-    () => estimateSessionMemory(plainModel(), { bindings: { T: 7, Z: 3 } }),
+    () => plainModel().estimate({ bindings: { T: 7, Z: 3 } }),
     ExecutionError,
     "'Z'",
   );
@@ -1509,13 +1550,15 @@ Deno.test("グラフに無い記号の束縛は fail loudly", () => {
 // 実構築と同じ門（グラフ全体を見ないと決まらない契約）
 // ---------------------------------------------------------------------------
 
-// 全量面は `PreparedModel` を経由しないので、契約検査を estimator 側で通していないと
-// 「createSession が必ず落ちるモデル」に完全な AdmissionReport を返す（admission の目的と逆）。
+// 全量面（`estimateGraphMemory`）は `PreparedModel` を経由しないので、契約検査を estimator 側で
+// 通していないと「createSession が必ず落ちるモデル」に完全な AdmissionReport を返す
+// （admission の目的と逆）。この節の 3 本は**その口を直に呼ぶ** — `PreparedModel.estimate` から
+// 呼ぶと `prepareContainer` の側が先に落とすので、estimator 側の門を外しても緑のままになる。
 
 /** `kv` スロットに読者だけが居て `state_append` を 1 本も持たないグラフ（決定 5b 違反）。 */
-const readerOnlyStateGraph = (): GraphJson => ({
+const readerOnlyStateGraph = (): DeclarationJson => ({
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["attention"] },
   symbols: ["M", "C"],
   inputs: [
@@ -1542,9 +1585,10 @@ const readerOnlyStateGraph = (): GraphJson => ({
 });
 
 Deno.test("読者だけの state スロットを持つグラフに見積りを返さない（実構築と同じ契約検査）", () => {
+  const graph = mergeGraph(readerOnlyStateGraph());
   const error = assertThrows(
     () =>
-      estimateSessionMemory(openGraph(readerOnlyStateGraph()), {
+      estimateGraphMemory(graph, planWeightResidency(graph), {
         generation: { chunkLength: 4, bindings: { C: 8 } },
       }),
     ExecutionError,
@@ -1554,9 +1598,9 @@ Deno.test("読者だけの state スロットを持つグラフに見積りを�
 });
 
 /** 連結軸に異なるシンボルが混ざった cat（ADR 0046 の残る拒否）。 */
-const mixedSymbolCatGraph = (): GraphJson => ({
+const mixedSymbolCatGraph = (): DeclarationJson => ({
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["cat"] },
   symbols: ["T", "U"],
   inputs: [
@@ -1570,8 +1614,9 @@ const mixedSymbolCatGraph = (): GraphJson => ({
 });
 
 Deno.test("cat の連結軸に異なるシンボルが混ざるグラフに見積りを返さない", () => {
+  const graph = mergeGraph(mixedSymbolCatGraph());
   assertThrows(
-    () => estimateSessionMemory(openGraph(mixedSymbolCatGraph()), { bindings: { T: 2, U: 3 } }),
+    () => estimateGraphMemory(graph, planWeightResidency(graph), { bindings: { T: 2, U: 3 } }),
     ExecutionError,
     "異なるシンボル",
   );
@@ -1582,7 +1627,7 @@ Deno.test("cat の連結軸に異なるシンボルが混ざるグラフに見�
 // ---------------------------------------------------------------------------
 
 Deno.test("unaccounted は勘定に入っていないものを明示する（見積りは絶対保証ではない）", () => {
-  const { unaccounted } = estimateSessionMemory(plainModel(), { bindings: { T: 7 } });
+  const { unaccounted } = plainModel().estimate({ bindings: { T: 7 } });
   const joined = unaccounted.join("\n");
   assert(joined.includes("融合"), joined);
   assert(joined.includes("params"), joined);
@@ -1593,7 +1638,7 @@ Deno.test("unaccounted は勘定に入っていないものを明示する（見
 // 融合の項の文言では覆えない大きさだった）。残る非勘定は「states 形でない attention」と
 // linear の i8a8 量子化中間で、unaccounted はそちらを名乗る。
 Deno.test("unaccounted は states 形でない attention の一時を名乗り、S / 行統計は勘定済みと書く", () => {
-  const { unaccounted } = estimateSessionMemory(stateModel(), {
+  const { unaccounted } = stateModel().estimate({
     bindings: { T: 2 },
     generation: { chunkLength: 4, bindings: { C: 8 } },
   });
@@ -1613,8 +1658,8 @@ Deno.test("parallel-fused の一時見積りは行統計の割当だけを取り
     generation: { chunkLength: 4, bindings: { C: 16 } },
     maxStorageBufferBindingSize: WIDE_LIMIT,
   };
-  const plain = estimateSessionMemory(model, options);
-  const fused = estimateSessionMemory(model, {
+  const plain = model.estimate(options);
+  const fused = model.estimate({
     ...options,
     stateAttentionReduce: "parallel-fused",
   });
@@ -1625,11 +1670,11 @@ Deno.test("parallel-fused の一時見積りは行統計の割当だけを取り
   assertEquals(prefill.ioBytes, plain.scenarios[0].ioBytes);
   const outside = { ...options, generation: { chunkLength: 16, bindings: { C: 1025 } } };
   assertEquals(
-    estimateSessionMemory(model, { ...outside, stateAttentionReduce: "parallel-fused" }),
-    estimateSessionMemory(model, outside),
+    model.estimate({ ...outside, stateAttentionReduce: "parallel-fused" }),
+    model.estimate(outside),
   );
   Object.defineProperty(options, "stateAttentionReduce", { value: "unsupported" });
-  assertThrows(() => estimateSessionMemory(model, options), ExecutionError, "stateAttentionReduce");
+  assertThrows(() => model.estimate(options), ExecutionError, "stateAttentionReduce");
 });
 
 Deno.test("attentionの見積り設定は文字列への変換前に型を拒否する", () => {
@@ -1645,7 +1690,7 @@ Deno.test("attentionの見積り設定は文字列への変換前に型を拒否
     const options = { bindings: { T: 2 } };
     Object.defineProperty(options, "stateAttentionReduce", { value });
     assertThrows(
-      () => estimateSessionMemory(model, options),
+      () => model.estimate(options),
       ExecutionError,
       "stateAttentionReduce",
     );

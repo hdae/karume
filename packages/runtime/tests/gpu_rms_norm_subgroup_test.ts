@@ -1,11 +1,10 @@
 import { assertEquals, assertRejects } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
 import { acquireGpu } from "../src/gpu/device.ts";
-import { openModel } from "../src/format/container.ts";
-import { createSession, type SessionOptions } from "../src/runtime/executor.ts";
+import { createSessionFromContainer, type SessionOptions } from "../src/runtime/executor.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
-import { graphModelBuffer } from "./helpers/graph.ts";
+import { GRAPH_NAME, openModelBytes } from "./helpers/model-fixture.ts";
 import { rmsNormAddGraph } from "./helpers/rms-norm-add-graph.ts";
 import { checkRmsSubgroup } from "./helpers/rms-subgroup-check.ts";
 
@@ -15,12 +14,13 @@ describe({
   fn: () => {
     it("不正な値・必要なdevice機能の不足を重み転送前に拒否する", async () => {
       const gpu = await acquireGpu();
+      const opened = await openModelBytes(rmsNormAddGraph(), []);
       try {
         for (const value of [null, false, "auto", "subgroup32"]) {
           const options: SessionOptions = {};
           Reflect.set(options, "rmsNormReduce", value);
           await assertRejects(
-            () => createSession(gpu, openModel(graphModelBuffer(rmsNormAddGraph())), options),
+            () => createSessionFromContainer(gpu, opened, GRAPH_NAME, options),
             Error,
             "rmsNormReduce",
           );
@@ -43,7 +43,7 @@ describe({
           const options: SessionOptions = {};
           Reflect.set(options, "rmsNormReduce", value);
           const error = await assertRejects(
-            () => createSession(gpu, openModel(graphModelBuffer(rmsNormAddGraph())), options),
+            () => createSessionFromContainer(gpu, opened, GRAPH_NAME, options),
             ExecutionError,
             "rmsNormReduce",
           );

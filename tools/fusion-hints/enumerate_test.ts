@@ -24,7 +24,8 @@
  */
 
 import { assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
-import { parseIrGraph } from "../../packages/runtime/src/format/ir.ts";
+import { parseIrDeclarationValue } from "../../packages/runtime/mod.ts";
+import { memoryGraph } from "../_shared/ir-memory.ts";
 import {
   distributionFormat,
   MANIFEST_FORMAT,
@@ -40,9 +41,9 @@ import { parseArgs } from "./main.ts";
  * 素の 3 ノード鎖（`neg → add → mul`）。どのルールの綴りにも当たらないので、計画は必ず素の
  * 列になる（= 集計の入力として素直な形）。
  */
-const CHAIN_GRAPH = parseIrGraph(JSON.stringify({
+const CHAIN_GRAPH = memoryGraph(parseIrDeclarationValue({
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["neg", "add", "mul"] },
   symbols: [],
   inputs: [
@@ -84,9 +85,9 @@ Deno.test("合成 IR: 候補の集計は op 名列ごとに数え、同じ先頭
 // ------------------------------------------------------- シナリオ束縛と CLI 語彙
 
 /** 記号 `T` を 1 本持つ合成 IR（`neg → add`）。同じ綴りを 2 コンポーネントに置いて使う。 */
-const SYMBOLIC_GRAPH = parseIrGraph(JSON.stringify({
+const SYMBOLIC_GRAPH = memoryGraph(parseIrDeclarationValue({
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["neg", "add"] },
   symbols: ["T"],
   inputs: [
@@ -110,13 +111,13 @@ const TWO_COMPONENTS: readonly GraphInput[] = [
   {
     component: "backbone",
     graph: "unit/backbone",
-    path: "backbone/model.safetensors",
+    path: "backbone/model-00001-of-00001.krm",
     ir: SYMBOLIC_GRAPH,
   },
   {
     component: "codec_encoder",
     graph: "unit/codec_encoder",
-    path: "codec_encoder/model.safetensors",
+    path: "codec_encoder/model-00001-of-00001.krm",
     ir: SYMBOLIC_GRAPH,
   },
 ];

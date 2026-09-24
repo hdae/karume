@@ -15,7 +15,7 @@
 //
 // ② グラフ宣言との突合（`assertStaticDim` / `assertOutputDim`）の**拒否経路**。ここは
 //    `fromAssets` の中では実 GPU と実資産が揃わないと踏めないので、門を直接叩く
-//    （`tests/helpers/stub-model.ts` が宣言だけの `KarumeModel` を組む）。門自身の綴りや
+//    （`tests/helpers/stub-model.ts` が宣言だけの `GraphOwner` を組む）。門自身の綴りや
 //    軸番号がずれても、正常系だけを走らせている限り緑のまま通るため、**壊れた宣言を名指しで
 //    落とすこと**を毎回踏む。
 //

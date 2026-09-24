@@ -8,7 +8,7 @@
 
 import { assertEquals, assertThrows } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
-import { parseIrGraph } from "../src/format/ir.ts";
+import type { IrGraph } from "../src/format/ir.ts";
 import { type FusionWeightLayout, planFusions } from "../src/runtime/fusion.ts";
 import { countUses, planGraph } from "../src/runtime/plan.ts";
 import {
@@ -25,7 +25,8 @@ import {
   staticQuantizePackedParams,
   staticQuantizeParams,
 } from "../src/kernels/static-quantize.ts";
-import type { GraphJson } from "./helpers/format.ts";
+import { mergeGraph, type StorageMap, type StorageSpec } from "./helpers/merged-graph.ts";
+import type { DeclarationJson } from "./helpers/model-fixture.ts";
 
 type Storage = "i2" | "i4" | "i8";
 
@@ -84,33 +85,26 @@ const GROUP = 512;
 /** 前段 linear（`afterLinear`）の縮約長 — `i2 12288×1536` は PARALLEL_SHAPES の実測形。 */
 const PRE_K = 1536;
 
-/** 重み初期化子 1 本（格納と group 長は実測表の行から引く）。 */
-const weightInit = (name: string, shape: Shape) => ({
-  tensor: name,
-  storage: {
-    dtype: shape.storage,
-    scale: `${name}s`,
-    ...(shape.group === undefined ? {} : { group_size: shape.group }),
-  },
-});
+/** 重み 1 本の格納（IR v2 の宣言は持たない — 束縛表側の欄。group 長は実測表の行から引く）。 */
+const weightStorage = (shape: Shape): StorageSpec =>
+  shape.storage === "i4"
+    ? { codec: "int4-sym-g", groupSize: shape.group ?? GROUP }
+    : { codec: shape.storage === "i2" ? "int2-off" : "int8-sym" };
 
 /** `x → static_quantize → linear` の最小形（消費先を options で崩せる）。 */
-const packedGraph = (o: Options = {}): GraphJson => {
+const packedGraph = (o: Options = {}): DeclarationJson => {
   const shape = o.shape ?? DEFAULT_SHAPE,
     m = o.m ?? 1,
     k = shape.k,
     n = shape.n;
-  const graph: GraphJson = {
+  const graph: DeclarationJson = {
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: ["linear", "static_quantize", "neg"] },
     symbols: [],
     inputs: [{ name: "src", dtype: "f32", shape: [m, o.afterLinear ? PRE_K : k] }],
     outputs: ["y", ...(o.publicQuantized ? ["xq"] : [])],
-    initializers: {
-      w: weightInit("w", shape),
-      b: { tensor: "b", storage: { dtype: "f32" } },
-    },
+    initializers: { w: {}, b: {} },
     values: {
       w: { dtype: "f32", shape: [n, k] },
       b: { dtype: "f32", shape: [n] },
@@ -122,8 +116,8 @@ const packedGraph = (o: Options = {}): GraphJson => {
   if (o.afterLinear) {
     // linear → SRQ の隣接形（ADR 0103 の融合が掴む綴り）。SRQ の入力を linear 出力にする。
     graph.values.pre = { dtype: "f32", shape: [m, k] };
-    graph.initializers.wp = { tensor: "wp", storage: { dtype: "i2", scale: "sp" } };
-    graph.initializers.bp = { tensor: "bp", storage: { dtype: "f32" } };
+    graph.initializers.wp = {};
+    graph.initializers.bp = {};
     graph.values.wp = { dtype: "f32", shape: [k, PRE_K] };
     graph.values.bp = { dtype: "f32", shape: [k] };
     graph.nodes.push({ op: "linear", ins: ["src", "wp", "bp"], outs: ["pre"], attrs: {} });
@@ -142,8 +136,8 @@ const packedGraph = (o: Options = {}): GraphJson => {
   }
   if (o.unparallelConsumer) {
     // n=260 は PARALLEL_SHAPES に無い形（= 並列 GEMV へ落ちない linear）。
-    graph.initializers.w2 = { tensor: "w2", storage: { dtype: "f32" } };
-    graph.initializers.b2 = { tensor: "b2", storage: { dtype: "f32" } };
+    graph.initializers.w2 = {};
+    graph.initializers.b2 = {};
     graph.values.w2 = { dtype: "f32", shape: [260, k] };
     graph.values.b2 = { dtype: "f32", shape: [260] };
     graph.values.y2 = { dtype: "f32", shape: [m, 260] };
@@ -154,8 +148,8 @@ const packedGraph = (o: Options = {}): GraphJson => {
     // 並列 GEMV へは落ちるが **フラグ false の行**（同じ n/k で group 長だけ違う）。
     const plain = PLAIN_SHAPES.find((s) => s.storage === shape.storage && s.k === k);
     if (plain === undefined) throw Error(`k=${k} に対するフラグ false の実測形が無い`);
-    graph.initializers.w4 = weightInit("w4", plain);
-    graph.initializers.b4 = { tensor: "b4", storage: { dtype: "f32" } };
+    graph.initializers.w4 = {};
+    graph.initializers.b4 = {};
     graph.values.w4 = { dtype: "f32", shape: [plain.n, k] };
     graph.values.b4 = { dtype: "f32", shape: [plain.n] };
     graph.values.y4 = { dtype: "f32", shape: [m, plain.n] };
@@ -164,7 +158,7 @@ const packedGraph = (o: Options = {}): GraphJson => {
   }
   if (o.weightConsumer) {
     // 活性スロット以外（重み）で同じ値を取る linear。f32 の語を期待する束縛なので packed 不可。
-    graph.initializers.b3 = { tensor: "b3", storage: { dtype: "f32" } };
+    graph.initializers.b3 = {};
     graph.values.b3 = { dtype: "f32", shape: [m] };
     graph.values.y3 = { dtype: "f32", shape: [m, m] };
     graph.nodes.push({ op: "linear", ins: ["xq", "xq", "b3"], outs: ["y3"], attrs: {} });
@@ -174,11 +168,22 @@ const packedGraph = (o: Options = {}): GraphJson => {
   return graph;
 };
 
+/** グラフの重み初期化子ごとの格納（合流の材料 — `weightLayouts` と同じ実測表の行から引く）。 */
+const storageMap = (o: Options = {}): StorageMap => {
+  const shape = o.shape ?? DEFAULT_SHAPE;
+  const plain = PLAIN_SHAPES.find((s) => s.storage === shape.storage && s.k === shape.k);
+  return {
+    w: weightStorage(shape),
+    ...(o.afterLinear ? { wp: { codec: "int2-off" } satisfies StorageSpec } : {}),
+    ...(o.plainConsumer && plain !== undefined ? { w4: weightStorage(plain) } : {}),
+  };
+};
+
 const plan = (
   o: Options = {},
   context: Partial<Parameters<typeof planFusions>[1]> = {},
 ) => {
-  const ir = parseIrGraph(JSON.stringify(packedGraph(o)));
+  const ir = mergeGraph(packedGraph(o), storageMap(o));
   const shape = o.shape ?? DEFAULT_SHAPE;
   const layout = (s: Shape): FusionWeightLayout =>
     s.storage === "i4" ? { storage: "i4", groupSize: s.group as number } : { storage: s.storage };
@@ -311,7 +316,7 @@ describe("packed int8 活性の対付け（ADR 0105）", () => {
       attrs: { scale: Math.fround(0.0013) },
     });
     graph.outputs = ["z"];
-    const ir = parseIrGraph(JSON.stringify(graph));
+    const ir: IrGraph = mergeGraph(graph, storageMap({ shape: DEFAULT_SHAPE }));
     const fused = planFusions(planGraph(ir, {}).nodes, {
       useCounts: countUses(ir),
       outputNames: new Set(ir.outputs),

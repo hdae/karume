@@ -1,4 +1,4 @@
-import type { GraphJson } from "./format.ts";
+import type { DeclarationJson } from "./model-fixture.ts";
 
 export type RmsNormAddGraphOptions = {
   rows?: number;
@@ -12,23 +12,23 @@ export type RmsNormAddGraphOptions = {
 };
 
 /** 内部値の公開・別consumer・broadcastで融合の適格性だけを変える。 */
-export const rmsNormAddGraph = (options: RmsNormAddGraphOptions = {}): GraphJson => {
+export const rmsNormAddGraph = (options: RmsNormAddGraphOptions = {}): DeclarationJson => {
   const dim = options.dim ?? 1536, shape = [options.rows ?? 4, dim];
   const n = options.interpose ? "alias" : "n";
   const residual = options.sharedResidual ? "x" : "r";
-  const inputs: GraphJson["inputs"] = [
+  const inputs: DeclarationJson["inputs"] = [
     { name: "x", dtype: "f32", shape },
     { name: "w", dtype: "f32", shape: [dim] },
   ];
   if (!options.sharedResidual) {
     inputs.push({ name: "r", dtype: "f32", shape: options.broadcast ? [1, dim] : shape });
   }
-  const values: GraphJson["values"] = {
+  const values: DeclarationJson["values"] = {
     n: { dtype: "f32", shape },
     y: { dtype: "f32", shape },
     copy: { dtype: "f32", shape },
   };
-  const nodes: GraphJson["nodes"] = [
+  const nodes: DeclarationJson["nodes"] = [
     { op: "rms_norm", ins: ["x", "w"], outs: ["n"], attrs: { eps: 1e-6 } },
   ];
   if (options.interpose) {
@@ -51,7 +51,7 @@ export const rmsNormAddGraph = (options: RmsNormAddGraphOptions = {}): GraphJson
   }
   return {
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: ["rms_norm", "add", "neg", ...(options.interpose ? ["reshape"] : [])] },
     symbols: [],
     inputs,

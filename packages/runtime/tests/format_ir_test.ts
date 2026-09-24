@@ -1,62 +1,65 @@
 import { assertEquals, assertThrows } from "@std/assert";
-import { IrError, type IrGraph, type IrStorage, parseIrGraph } from "../src/format/ir.ts";
-import { baseGraph, type GraphJson, withStateReaders } from "./helpers/format.ts";
+import { type IrDeclaration, IrError, parseIrDeclaration } from "../src/format/ir.ts";
+import {
+  baseDeclaration,
+  type DeclarationJson,
+  withStateReaders,
+} from "./helpers/model-fixture.ts";
 
-const parseMutated = (mutate: (graph: GraphJson) => void): IrGraph => {
-  const graph = baseGraph();
+const parseMutated = (mutate: (graph: DeclarationJson) => void): IrDeclaration => {
+  const graph = baseDeclaration();
   mutate(graph);
-  return parseIrGraph(JSON.stringify(graph));
+  return parseIrDeclaration(JSON.stringify(graph));
 };
 
 /** 検証規則ごとに「正常系から 1 点だけ壊す」ことで、規則が実際に効いていることを見る。 */
-const assertRejects = (hint: string, mutate: (graph: GraphJson) => void): void => {
+const assertRejects = (hint: string, mutate: (graph: DeclarationJson) => void): void => {
   assertThrows(() => parseMutated(mutate), IrError, undefined, hint);
 };
 
-// 旧配布形（v1）を読むと、initializer は**実体のテンソルキーへ改名**された合流後のグラフに
-// なる（`initializers["w"].tensor === "enc.w"` → `initializers["enc.w"]`）。`values` のキーと
-// ノードの `ins` も同じ名前へ揃い、`graph.version` は 2 になる。
-Deno.test("parseIrGraph: 最小の正常系グラフを受理する", () => {
-  const graph = parseIrGraph(JSON.stringify(baseGraph()));
+// IR v2 の宣言は**計算契約**だけを持つ（格納は容器の束縛表 — docs/ir-v2.md）。initializer 名が
+// そのまま実体の鍵なので、v1 にあった「実体のテンソルキーへの改名」はもう起きない。
+Deno.test("parseIrDeclaration: 最小の正常系グラフを受理する", () => {
+  const graph = parseIrDeclaration(JSON.stringify(baseDeclaration()));
   assertEquals(graph.format, "karume-ir");
   assertEquals(graph.version, 2);
   assertEquals(graph.symbols, ["T"]);
   assertEquals(graph.inputs, [{ name: "x", dtype: "f32", shape: ["T", 4] }]);
   assertEquals(graph.outputs, ["y"]);
-  assertEquals(graph.requires.ops, ["matmul", "add"]);
+  assertEquals(graph.requires.ops, ["add", "matmul"]);
   assertEquals(graph.nodes.map((node) => node.op), ["matmul", "add"]);
-  assertEquals(Object.keys(graph.initializers), ["enc.w", "enc.b"]);
-  assertEquals(graph.initializers["enc.w"], { storage: { codec: "f32" } });
-  assertEquals(graph.values["enc.w"], { dtype: "f32", shape: [4, 3] });
-  assertEquals(graph.nodes[0].ins, ["x", "enc.w"]);
+  assertEquals(Object.keys(graph.initializers), ["w", "b"]);
+  assertEquals(graph.initializers["w"], { shared: false });
+  assertEquals(graph.values["w"], { dtype: "f32", shape: [4, 3] });
+  assertEquals(graph.nodes[0].ins, ["x", "w"]);
   assertEquals(graph.values["h"], { dtype: "f32", shape: ["T", 3] });
 });
 
-Deno.test("parseIrGraph: format / version の固定値", () => {
+Deno.test("parseIrDeclaration: format / version の固定値", () => {
   assertRejects("format 不一致", (g) => {
     g.format = "karume";
   });
   assertRejects("version 不一致", (g) => {
-    g.version = 2;
+    g.version = 1;
   });
 });
 
-Deno.test("parseIrGraph: トップレベルのキー集合", () => {
+Deno.test("parseIrDeclaration: トップレベルのキー集合", () => {
   assertThrows(
-    () => parseIrGraph(JSON.stringify({ ...baseGraph(), extra: 1 })),
+    () => parseIrDeclaration(JSON.stringify({ ...baseDeclaration(), extra: 1 })),
     IrError,
     "未知のキー",
   );
-  const { requires: _dropped, ...withoutRequires } = baseGraph();
-  assertThrows(() => parseIrGraph(JSON.stringify(withoutRequires)), IrError, "必須キー");
+  const { requires: _dropped, ...withoutRequires } = baseDeclaration();
+  assertThrows(() => parseIrDeclaration(JSON.stringify(withoutRequires)), IrError, "必須キー");
   assertThrows(
-    () => parseIrGraph(JSON.stringify({ ...baseGraph(), nodes: {} })),
+    () => parseIrDeclaration(JSON.stringify({ ...baseDeclaration(), nodes: {} })),
     IrError,
     "配列でない",
   );
 });
 
-Deno.test("parseIrGraph: requires.ops は使用 op 集合と一致する", () => {
+Deno.test("parseIrDeclaration: requires.ops は使用 op 集合と一致する", () => {
   assertRejects("宣言漏れ", (g) => {
     g.requires.ops = ["matmul"];
   });
@@ -68,7 +71,7 @@ Deno.test("parseIrGraph: requires.ops は使用 op 集合と一致する", () =>
   });
 });
 
-Deno.test("parseIrGraph: SSA 単一代入", () => {
+Deno.test("parseIrDeclaration: SSA 単一代入", () => {
   assertRejects("ノード出力の二重定義", (g) => {
     g.nodes[1].outs = ["h"];
   });
@@ -76,12 +79,12 @@ Deno.test("parseIrGraph: SSA 単一代入", () => {
     g.inputs.push({ name: "x", dtype: "f32", shape: ["T", 4] });
   });
   assertRejects("initializer と入力の衝突", (g) => {
-    g.initializers["x"] = { tensor: "enc.b", storage: { dtype: "f32" } };
+    g.initializers["x"] = {};
     g.values["x"] = { dtype: "f32", shape: [3] };
   });
 });
 
-Deno.test("parseIrGraph: トポロジカル順（前方参照拒否）", () => {
+Deno.test("parseIrDeclaration: トポロジカル順（前方参照拒否）", () => {
   assertRejects("ノード順の逆転", (g) => {
     g.nodes.reverse();
   });
@@ -96,7 +99,7 @@ Deno.test("parseIrGraph: トポロジカル順（前方参照拒否）", () => {
   });
 });
 
-Deno.test("parseIrGraph: 宣言の完全性", () => {
+Deno.test("parseIrDeclaration: 宣言の完全性", () => {
   assertRejects("ノード出力が values に無い", (g) => {
     delete g.values["y"];
   });
@@ -115,146 +118,64 @@ Deno.test("parseIrGraph: 宣言の完全性", () => {
   assertRejects("initializer の意味論 dtype が bool", (g) => {
     g.values["w"] = { dtype: "bool", shape: [4, 3] };
   });
-  // 意味論と格納の交差（i32 は生の int32 1 通りのみ — ADR 0010）
-  assertRejects("意味論 i32 を f32 格納で宣言", (g) => {
-    g.values["w"] = { dtype: "i32", shape: [4, 3] };
-  });
-  assertRejects("意味論 f32 を i32 格納で宣言", (g) => {
-    g.initializers["w"].storage = { dtype: "i32" };
-  });
 });
 
-// ADR 0010: 記号依存定数の焼き込み先。意味論 i32 × 格納 i32 の 1 組だけが valid。
-Deno.test("parseIrGraph: 意味論 i32 の initializer は生の int32 格納と組む", () => {
+/**
+ * IR v2 の initializer 宣言に書けるのは `shared` だけ（実体との対応は容器の束縛表が
+ * `(グラフ名, initializer 名)` で持つ — docs/ir-v2.md）。旧配布形の `tensor` / `storage` を
+ * そのまま書いた形は未知のキーとして落ちる。
+ */
+Deno.test("parseIrDeclaration: initializer 宣言のキー集合は `shared` だけ", () => {
+  // 実体を持つ宣言は空オブジェクト、借り物は `{ shared: true }` の 2 形きり。
+  assertEquals(parseMutated(() => {}).initializers["w"], { shared: false });
+  const borrowed = parseMutated((g) => {
+    g.initializers["w"] = { shared: true };
+  });
+  assertEquals(borrowed.initializers["w"], { shared: true });
+
+  for (const key of ["tensor", "storage", "scale", "group_size"]) {
+    assertThrows(
+      () =>
+        parseMutated((g) => {
+          Object.assign(g.initializers["w"], { [key]: "enc.w" });
+        }),
+      IrError,
+      `未知のキー '${key}'`,
+    );
+  }
+  // MUST: `false` は欄の不存在と同じ宣言なので綴れない（正準直列化が 1 つに決まらない）。
+  assertThrows(
+    () =>
+      parseMutated((g) => {
+        Object.assign(g.initializers["w"], { shared: false });
+      }),
+    IrError,
+    "借り物のときだけ true",
+  );
+});
+
+/**
+ * 意味論 dtype と格納（codec）の交差（i32 は生の int32 1 通りのみ — ADR 0010）は**合流層**
+ * （`format/container/bind.ts` の `allowedLayouts`）の担当になった。宣言だけを見るこの層では
+ * `values` の意味論 dtype が i32 でも f32 でも受理する。
+ */
+Deno.test("parseIrDeclaration: 意味論 i32 の initializer を宣言として受理する", () => {
   const graph = parseMutated((g) => {
     g.values["w"] = { dtype: "i32", shape: [4, 3] };
-    g.initializers["w"].storage = { dtype: "i32" };
-    // add(matmul(x,w)) の dtype 契約は parse 層では見ない（契約表の層）ので宣言だけ差し替える
   });
-  assertEquals(graph.values["enc.w"].dtype, "i32");
-  assertEquals(graph.initializers["enc.w"], { storage: { codec: "i32" } });
+  assertEquals(graph.values["w"].dtype, "i32");
+  assertEquals(graph.initializers["w"], { shared: false });
 });
 
-// 格納 dtype は意味論 f32 の符号化なので、f16/bf16/i8 格納は宣言として valid のまま
-// （実行可否は assertRuntimeSupport の層）。パーサへ規則を寄せた際に仕様を狭めていないことの固定。
-Deno.test("parseIrGraph: 意味論 f32 の initializer は非 f32 格納でも受理する", () => {
-  // 合流後は codec 台帳の登録名になる。i8（`int8-sym`）は per-channel なので `groupSize` は
-  // 行長（`w` は [4,3] なので 3）・`rowAxis` は消費側 op のチャネル軸（matmul は重みスロットを
-  // 持たないので既定の 0）。
-  const expected: Record<string, IrStorage> = {
-    f16: { codec: "f16" },
-    bf16: { codec: "bf16" },
-    i8: { codec: "int8-sym", groupSize: 3, rowAxis: 0 },
-  };
-  for (const dtype of ["f16", "bf16", "i8"] as const) {
-    const graph = parseMutated((g) => {
-      // i8 は scale の宣言が必須（ADR 0019）— 他の格納 dtype には付けられない
-      g.initializers["w"].storage = dtype === "i8" ? { dtype, scale: "enc.w.scale" } : { dtype };
-    });
-    assertEquals(graph.initializers["enc.w"], { storage: expected[dtype] }, dtype);
-  }
-});
-
-Deno.test("parseIrGraph: dtype 語彙", () => {
+Deno.test("parseIrDeclaration: dtype 語彙", () => {
   assertRejects("意味論 dtype に f16", (g) => {
     g.values["h"].dtype = "f16";
   });
   assertRejects("意味論 dtype に i64", (g) => {
     g.inputs[0].dtype = "i64";
   });
-  assertRejects("格納 dtype に i2", (g) => {
-    g.initializers["w"].storage = { dtype: "i1" };
-  });
 });
-
-// ADR 0069 決定 2: group 量子化格納（i4）は scale と group_size を必須にし、group 長は
-// 2 冪かつ 16 以上・量子化軸（最終次元）が group 長で割り切れることを MUST とする
-// （端数 group を作らない制約が、行境界・group 境界のバイト整列を保証している）。
-Deno.test("parseIrGraph: 格納 i4 の受理形（scale + group_size + 量子化軸の整除）", () => {
-  const asI4 = (storage: Record<string, unknown>, lastDim = 32) => (graph: GraphJson): void => {
-    graph.values["w"] = { dtype: "f32", shape: [4, lastDim] };
-    graph.initializers["w"].storage = storage;
-  };
-
-  const graph = parseMutated(asI4({ dtype: "i4", scale: "enc.w.scale", group_size: 32 }));
-  assertEquals(graph.initializers["enc.w"], {
-    storage: { codec: "int4-sym-g", groupSize: 32, rowAxis: 0 },
-  });
-
-  assertRejects("i4 の group_size 欠落", asI4({ dtype: "i4", scale: "enc.w.scale" }));
-  assertRejects("i4 の scale 欠落", asI4({ dtype: "i4", group_size: 32 }));
-  assertRejects(
-    "group_size が 2 冪でない",
-    asI4({ dtype: "i4", scale: "enc.w.scale", group_size: 24 }),
-  );
-  assertRejects(
-    "group_size が 16 未満",
-    asI4({ dtype: "i4", scale: "enc.w.scale", group_size: 8 }),
-  );
-  assertRejects(
-    "量子化軸が group_size で割り切れない",
-    asI4({ dtype: "i4", scale: "enc.w.scale", group_size: 32 }, 48),
-  );
-
-  // 波 J-5b: 量子化軸は「先頭次元を行・残りを平坦化した行長」。rank 2 では最終次元と同値で、
-  // conv1d の `[O,Cin,K]` では `Cin·K`（K 単体が group で割り切れる必要は無い）。
-  const asConv = (shape: readonly number[]) => (graph: GraphJson): void => {
-    graph.values["w"] = { dtype: "f32", shape: [...shape] };
-    graph.initializers["w"].storage = { dtype: "i4", scale: "enc.w.scale", group_size: 16 };
-  };
-  assertEquals(
-    parseMutated(asConv([4, 8, 2])).values["enc.w"].shape,
-    [4, 8, 2],
-    "行長 16 = Cin·K は受理（K = 2 が group で割り切れないのは無関係）",
-  );
-  assertRejects("conv1d の行長が group_size で割り切れない", asConv([4, 8, 3]));
-});
-
-Deno.test("parseIrGraph: 量子化格納は宣言として受理する（実行可否は別の層）", () => {
-  const graph = parseMutated((g) => {
-    g.initializers["w"].storage = { dtype: "i8", scale: "enc.w.scale" };
-  });
-  assertEquals(graph.initializers["enc.w"], {
-    storage: { codec: "int8-sym", groupSize: 3, rowAxis: 0 },
-  });
-});
-
-// group 量子化を受理する格納は i4 だけ（ADR 0069 決定 2）。黙って無視すると group ごとの
-// scale を per-channel として読む沈黙誤値になるので、合流（改名と codec 付与）の時点で落とす。
-Deno.test("parseIrGraph: i4 以外の量子化格納に付いた group_size を拒否する", () => {
-  // i2 は宣言の時点で group_size を綴れない（parseStorage）ので、この門に来るのは i8 だけ。
-  const error = assertThrows(
-    () =>
-      parseMutated((g) => {
-        g.initializers["w"].storage = { dtype: "i8", scale: "enc.w.scale", group_size: 32 };
-      }),
-    IrError,
-    "非対応 group 量子化",
-  );
-  assertEquals(error.message.includes("i4 のみ"), true, error.message);
-});
-
-Deno.test("parseIrGraph: storage 記述子の整合", () => {
-  assertRejects("非量子化 dtype の scale", (g) => {
-    g.initializers["w"].storage = { dtype: "f32", scale: "enc.w.scale" };
-  });
-  assertRejects("非量子化 dtype の group_size", (g) => {
-    g.initializers["b"].storage = { dtype: "f16", group_size: 32 };
-  });
-  assertRejects("storage の未知キー", (g) => {
-    g.initializers["w"].storage = { dtype: "f32", zero_point: "z" };
-  });
-  assertRejects("group_size が 0", (g) => {
-    g.initializers["w"].storage = { dtype: "i8", scale: "enc.w.scale", group_size: 0 };
-  });
-  // MUST: i8 の scale は必須（ADR 0019）。既定 1.0 で補完すると、scale を書き忘れたモデルが
-  // 「量子化前の 1/127 倍の重み」で静かに走る。
-  assertRejects("i8 の scale 欠落", (g) => {
-    g.initializers["w"].storage = { dtype: "i8" };
-  });
-});
-
-Deno.test("parseIrGraph: シンボルの宣言と束縛可能性", () => {
+Deno.test("parseIrDeclaration: シンボルの宣言と束縛可能性", () => {
   assertRejects("未宣言シンボルの使用", (g) => {
     g.inputs[0].shape = ["S", 4];
   });
@@ -275,7 +196,7 @@ Deno.test("parseIrGraph: シンボルの宣言と束縛可能性", () => {
   assertEquals(derived.inputs[0].shape, ["2T", 4]);
 });
 
-Deno.test("parseIrGraph: shape 要素", () => {
+Deno.test("parseIrDeclaration: shape 要素", () => {
   assertRejects("非正準な次元式", (g) => {
     g.inputs[0].shape = ["1T", 4];
   });
@@ -285,11 +206,11 @@ Deno.test("parseIrGraph: shape 要素", () => {
   assertRejects("小数の次元", (g) => {
     g.values["b"].shape = [1.5];
   });
-  const boolDim = JSON.stringify(baseGraph()).replace('"shape":[3]', '"shape":[true]');
-  assertThrows(() => parseIrGraph(boolDim), IrError, "数値でも文字列でもない");
+  const boolDim = JSON.stringify(baseDeclaration()).replace('"shape":[3]', '"shape":[true]');
+  assertThrows(() => parseIrDeclaration(boolDim), IrError, "数値でも文字列でもない");
 });
 
-Deno.test("parseIrGraph: ノードの構造", () => {
+Deno.test("parseIrDeclaration: ノードの構造", () => {
   assertRejects("attrs がオブジェクトでない", (g) => {
     g.nodes[0].attrs = 5;
   });
@@ -304,7 +225,7 @@ Deno.test("parseIrGraph: ノードの構造", () => {
 // ADR 0067 決定 5: `outs` の本数に意味を与えるのは**契約層**（0 本を許すのは契約が effect を
 // 宣言する op だけ）。パーサは本数を見ない — ここで見るのは「見ていないこと」そのもので、
 // 非 effect op の `outs: []` が落ちるのは**別の規則**（出力の宣言が孤立する）による。
-Deno.test("parseIrGraph: outs の本数はパーサの担当ではない", () => {
+Deno.test("parseIrDeclaration: outs の本数はパーサの担当ではない", () => {
   // 出力宣言ごと消せばパーサは通る（本数の執行は tests/ops_contract_test.ts が固定する）
   const graph = parseMutated((g) => {
     g.nodes[1].outs = [];
@@ -333,12 +254,12 @@ Deno.test("parseIrGraph: outs の本数はパーサの担当ではない", () =>
 // **両方**が null プロトタイプでないと own property が黙って消える。
 const protoNameGraph = `{
   "format": "karume-ir",
-  "version": 1,
+  "version": 2,
   "requires": { "ops": ["matmul"] },
   "symbols": ["T"],
   "inputs": [{ "name": "x", "dtype": "f32", "shape": ["T", 4] }],
   "outputs": ["y"],
-  "initializers": { "__proto__": { "tensor": "__proto__", "storage": { "dtype": "f32" } } },
+  "initializers": { "__proto__": {} },
   "values": {
     "__proto__": { "dtype": "f32", "shape": [4, 3] },
     "y": { "dtype": "f32", "shape": ["T", 3] }
@@ -346,8 +267,8 @@ const protoNameGraph = `{
   "nodes": [{ "op": "matmul", "ins": ["x", "__proto__"], "outs": ["y"], "attrs": {} }]
 }`;
 
-Deno.test("parseIrGraph: '__proto__' という名前の宣言を own property として保全する", () => {
-  const graph = parseIrGraph(protoNameGraph);
+Deno.test("parseIrDeclaration: '__proto__' という名前の宣言を own property として保全する", () => {
+  const graph = parseIrDeclaration(protoNameGraph);
 
   // 実行系によっては `o["__proto__"] = v` でも own property が作られるため、hasOwn だけでは
   // 素の `{}` への退行を検出できない。器が null プロトタイプであること（＝ 受理集合に
@@ -357,20 +278,20 @@ Deno.test("parseIrGraph: '__proto__' という名前の宣言を own property �
   assertEquals(Object.hasOwn(graph.values, "__proto__"), true);
   assertEquals(Object.hasOwn(graph.initializers, "__proto__"), true);
   assertEquals(graph.values["__proto__"], { dtype: "f32", shape: [4, 3] });
-  assertEquals(graph.initializers["__proto__"], { storage: { codec: "f32" } });
+  assertEquals(graph.initializers["__proto__"], { shared: false });
   // 宣言検査を素通りしたのではなく、ノードからの参照込みで通っていること。
   assertEquals(graph.nodes[0].ins, ["x", "__proto__"]);
 });
 
-Deno.test("parseIrGraph: '__proto__' という名前でも孤立宣言は黙って消えず拒否される", () => {
+Deno.test("parseIrDeclaration: '__proto__' という名前でも孤立宣言は黙って消えず拒否される", () => {
   const orphan = `{
     "format": "karume-ir",
-    "version": 1,
+    "version": 2,
     "requires": { "ops": ["matmul"] },
     "symbols": ["T"],
     "inputs": [{ "name": "x", "dtype": "f32", "shape": ["T", 4] }],
     "outputs": ["y"],
-    "initializers": { "w": { "tensor": "enc.w", "storage": { "dtype": "f32" } } },
+    "initializers": { "w": {} },
     "values": {
       "w": { "dtype": "f32", "shape": [4, 3] },
       "y": { "dtype": "f32", "shape": ["T", 3] },
@@ -379,21 +300,21 @@ Deno.test("parseIrGraph: '__proto__' という名前でも孤立宣言は黙っ�
     "nodes": [{ "op": "matmul", "ins": ["x", "w"], "outs": ["y"], "attrs": {} }]
   }`;
 
-  assertThrows(() => parseIrGraph(orphan), IrError, "どのノードでも定義されない宣言");
+  assertThrows(() => parseIrDeclaration(orphan), IrError, "どのノードでも定義されない宣言");
 });
 
 // ADR 0066 決定 2: 生成 1 本ぶんの可変 state を置く名前付きスロット。参照側の欄（ADR 0067 の
 // states 欄 / state_append）が入ったので、**宣言だけのグラフは参照完全性で落ちる** —
 // 宣言そのものを見るテストは withStateReaders で参照側を用意する。
-Deno.test("parseIrGraph: states 節を持たないグラフは空のスロット集合になる", () => {
-  const graph = parseIrGraph(JSON.stringify(baseGraph()));
+Deno.test("parseIrDeclaration: states 節を持たないグラフは空のスロット集合になる", () => {
+  const graph = parseIrDeclaration(JSON.stringify(baseDeclaration()));
 
   assertEquals(Object.keys(graph.states), []);
   // 名前がパース入力由来の器は null プロトタイプ（values / initializers と同じ MUST）。
   assertEquals(Object.getPrototypeOf(graph.states), null);
 });
 
-Deno.test("parseIrGraph: state スロットの宣言を受理する", () => {
+Deno.test("parseIrDeclaration: state スロットの宣言を受理する", () => {
   const empty = parseMutated((g) => {
     g.states = {};
   });
@@ -452,7 +373,7 @@ const assertStatesReject = (states: unknown, includes: string): void => {
   );
 };
 
-Deno.test("parseIrGraph: state スロットの dtype は f32 のみ", () => {
+Deno.test("parseIrDeclaration: state スロットの dtype は f32 のみ", () => {
   // f16 は席の予約だけ（ADR 0066 追記 5）— 「語彙外」ではなく「未対応」として落ちる。
   assertStatesReject({ cache: { dtype: "f16", shape: [4] } }, "は未対応");
   for (const dtype of ["i32", "bool", "bf16", "i8"]) {
@@ -460,7 +381,7 @@ Deno.test("parseIrGraph: state スロットの dtype は f32 のみ", () => {
   }
 });
 
-Deno.test("parseIrGraph: state スロットの shape は容量込みの具体形", () => {
+Deno.test("parseIrDeclaration: state スロットの shape は容量込みの具体形", () => {
   assertStatesReject({ cache: { dtype: "f32", shape: [1, 1, 1, 1, 1] } }, "rank 5 は 1..4 の外");
   assertStatesReject({ cache: { dtype: "f32", shape: [] } }, "rank 0 は 1..4 の外");
   assertStatesReject({ cache: { dtype: "f32", shape: [1, 0, 4] } }, "正整数でない");
@@ -473,22 +394,25 @@ Deno.test("parseIrGraph: state スロットの shape は容量込みの具体形
  * 次元 1 個だけを**生の JSON テキスト**で差し込む（`JSON.stringify` は `1.0` を `1` に畳むので、
  * 整数値 float の受理はオブジェクト経由では観測できない）。
  */
-const parseRawDim = (raw: string, mutate: (graph: GraphJson, dim: string) => void): IrGraph => {
-  const graph = baseGraph();
+const parseRawDim = (
+  raw: string,
+  mutate: (graph: DeclarationJson, dim: string) => void,
+): IrDeclaration => {
+  const graph = baseDeclaration();
   mutate(graph, "__DIM__");
-  return parseIrGraph(JSON.stringify(graph).replaceAll('"__DIM__"', raw));
+  return parseIrDeclaration(JSON.stringify(graph).replaceAll('"__DIM__"', raw));
 };
 
 // JSON の `4.0` / `4e0` は JSON.parse が単一の number にするので整数として通る。Python 側
 // （tools/exporter/src/karume/verify.py の _parse_shape）は int / float が別型なので、この形が
 // **両側で同じ受理集合**であることを固定しないと「ランタイムは読めるが exporter の検証が落ちる」
 // 乖離になる（鏡像は tools/exporter/tests/test_verify.py の TestIntegralFloatDimensions）。
-Deno.test("parseIrGraph: JSON の整数値 float 次元を受理し、非整数は拒否する", () => {
+Deno.test("parseIrDeclaration: JSON の整数値 float 次元を受理し、非整数は拒否する", () => {
   for (const raw of ["4.0", "4e0", "0.4e1"]) {
     const values = parseRawDim(raw, (g, dim) => {
       g.values["w"].shape = [dim];
     });
-    assertEquals(values.values["enc.w"].shape, [4], raw);
+    assertEquals(values.values["w"].shape, [4], raw);
     const states = parseRawDim(raw, (g, dim) => {
       g.states = { cache: { dtype: "f32", shape: [1, dim] } };
       withStateReaders(g);
@@ -534,12 +458,12 @@ Deno.test("parseIrGraph: JSON の整数値 float 次元を受理し、非整数�
  * 定義集合に入って孤立宣言検査も逆参照検査も満たす — 参照不能な実テンソル 1 本が配布形に
  * 居座る。この組が門の唯一の検出対象。
  */
-Deno.test("parseIrGraph: 値名 / initializer 名の空文字列を拒否する", () => {
+Deno.test("parseIrDeclaration: 値名 / initializer 名の空文字列を拒否する", () => {
   assertThrows(
     () =>
       parseMutated((g) => {
         g.values[""] = { dtype: "f32", shape: [4, 3] };
-        g.initializers[""] = { tensor: "enc.ghost", storage: { dtype: "f32" } };
+        g.initializers[""] = {};
       }),
     IrError,
     "graph.values の値名: 空でない文字列でない",
@@ -548,7 +472,7 @@ Deno.test("parseIrGraph: 値名 / initializer 名の空文字列を拒否する"
   assertThrows(
     () =>
       parseMutated((g) => {
-        g.initializers[""] = { tensor: "enc.ghost", storage: { dtype: "f32" } };
+        g.initializers[""] = {};
       }),
     IrError,
     "graph.initializers の initializer 名: 空でない文字列でない",
@@ -557,12 +481,12 @@ Deno.test("parseIrGraph: 値名 / initializer 名の空文字列を拒否する"
   // 2 検査はどちらもこの組を通す — それがこの門が要る理由そのもの）
   const graph = parseMutated((g) => {
     g.values["ghost"] = { dtype: "f32", shape: [4, 3] };
-    g.initializers["ghost"] = { tensor: "enc.ghost", storage: { dtype: "f32" } };
+    g.initializers["ghost"] = {};
   });
-  assertEquals(graph.initializers["enc.ghost"], { storage: { codec: "f32" } });
+  assertEquals(graph.initializers["ghost"], { shared: false });
 });
 
-Deno.test("parseIrGraph: states の構造", () => {
+Deno.test("parseIrDeclaration: states の構造", () => {
   assertStatesReject([], "graph.states: オブジェクトでない");
   assertStatesReject({ cache: 4 }, "graph.states['cache']: オブジェクトでない");
   assertStatesReject({ cache: { dtype: "f32", shape: 4 } }, "shape: 配列でない");
@@ -574,7 +498,7 @@ Deno.test("parseIrGraph: states の構造", () => {
 
 // スロット名は値名前空間と別（ins / outs で参照されない）だが、同名は「スロット名の欄に値名を
 // 書いた / その逆」を検出できなくするだけなので拒否する。
-Deno.test("parseIrGraph: state スロット名は値名と衝突できない", () => {
+Deno.test("parseIrDeclaration: state スロット名は値名と衝突できない", () => {
   // 入力 / initializer / 中間値 / グラフ出力の 4 役すべて。
   for (const name of ["x", "w", "h", "y"]) {
     assertStatesReject(
@@ -584,15 +508,15 @@ Deno.test("parseIrGraph: state スロット名は値名と衝突できない", (
   }
 });
 
-Deno.test("parseIrGraph: '__proto__' という名前の state スロットを own property として保全する", () => {
-  const graph = parseIrGraph(`{
+Deno.test("parseIrDeclaration: '__proto__' という名前の state スロットを own property として保全する", () => {
+  const graph = parseIrDeclaration(`{
     "format": "karume-ir",
-    "version": 1,
+    "version": 2,
     "requires": { "ops": ["matmul", "state_append"] },
     "symbols": ["T"],
     "inputs": [{ "name": "x", "dtype": "f32", "shape": ["T", 4] }],
     "outputs": ["y"],
-    "initializers": { "w": { "tensor": "enc.w", "storage": { "dtype": "f32" } } },
+    "initializers": { "w": {} },
     "values": {
       "w": { "dtype": "f32", "shape": [4, 3] },
       "y": { "dtype": "f32", "shape": ["T", 3] }
@@ -625,8 +549,8 @@ Deno.test("parseIrGraph: '__proto__' という名前の state スロットを ow
  * （ADR 0067 決定 4 / 5・発行順は決定 5b の「読者 → append」）。**パーサ層の**テストなので
  * shape も契約も見られない — ここで固定するのは欄の構造と参照の完全性だけ。
  */
-const statefulGraph = (): GraphJson => {
-  const graph = baseGraph();
+const statefulGraph = (): DeclarationJson => {
+  const graph = baseDeclaration();
   graph.states = {
     "kv.k": { dtype: "f32", shape: [1, 2, 512, 8] },
     "kv.v": { dtype: "f32", shape: [1, 2, 512, 8] },
@@ -647,14 +571,14 @@ const statefulGraph = (): GraphJson => {
   return graph;
 };
 
-const parseStateful = (mutate: (graph: GraphJson) => void = () => {}): IrGraph => {
+const parseStateful = (mutate: (graph: DeclarationJson) => void = () => {}): IrDeclaration => {
   const graph = statefulGraph();
   mutate(graph);
-  return parseIrGraph(JSON.stringify(graph));
+  return parseIrDeclaration(JSON.stringify(graph));
 };
 
 // ADR 0067 決定 4: ノードは `ins` / `outs` と**別の欄**でスロットを名前参照する。
-Deno.test("parseIrGraph: ノードの states 欄を読む", () => {
+Deno.test("parseIrDeclaration: ノードの states 欄を読む", () => {
   const graph = parseStateful();
 
   assertEquals(graph.nodes.map((node) => node.op), [
@@ -672,7 +596,7 @@ Deno.test("parseIrGraph: ノードの states 欄を読む", () => {
   assertEquals(graph.nodes[3].outs, []);
 });
 
-Deno.test("parseIrGraph: states 欄は宣言済みスロットしか参照できない", () => {
+Deno.test("parseIrDeclaration: states 欄は宣言済みスロットしか参照できない", () => {
   assertThrows(
     () =>
       parseStateful((g) => {
@@ -692,7 +616,7 @@ Deno.test("parseIrGraph: states 欄は宣言済みスロットしか参照でき
   );
 });
 
-Deno.test("parseIrGraph: 誰も参照しない state スロットを拒否する", () => {
+Deno.test("parseIrDeclaration: 誰も参照しない state スロットを拒否する", () => {
   assertThrows(
     () =>
       parseStateful((g) => {
@@ -710,7 +634,7 @@ Deno.test("parseIrGraph: 誰も参照しない state スロットを拒否する
   assertEquals(Object.keys(readerOnly.states), ["kv.k", "kv.v"]);
 });
 
-Deno.test("parseIrGraph: states 欄の構造", () => {
+Deno.test("parseIrDeclaration: states 欄の構造", () => {
   const reject = (states: unknown, includes: string): void => {
     assertThrows(
       () =>
@@ -728,7 +652,7 @@ Deno.test("parseIrGraph: states 欄の構造", () => {
 });
 
 // ADR 0066 追記 7: 束縛点は 2 つ（入力 shape / states shape）だが、**効く範囲は非対称**。
-Deno.test("parseIrGraph: states 専用記号は宣言できるが値 shape には現れない", () => {
+Deno.test("parseIrDeclaration: states 専用記号は宣言できるが値 shape には現れない", () => {
   // 容量記号 C は入力のどこにも現れない（context 生成時に決まる）— それでも宣言できる
   const graph = parseStateful((g) => {
     g.symbols.push("C");
@@ -769,15 +693,15 @@ Deno.test("parseIrGraph: states 専用記号は宣言できるが値 shape に�
   assertEquals(shared.values["att"].shape, ["T", 3]);
 });
 
-Deno.test("parseIrGraph: JSON の受理集合", () => {
-  assertThrows(() => parseIrGraph("{"), IrError, "解析できない");
+Deno.test("parseIrDeclaration: JSON の受理集合", () => {
+  assertThrows(() => parseIrDeclaration("{"), IrError, "解析できない");
   assertThrows(
-    () => parseIrGraph('{"format":"karume-ir","version":NaN}'),
+    () => parseIrDeclaration('{"format":"karume-ir","version":NaN}'),
     IrError,
     "解析できない",
   );
   // 1e999 は構文としては有効だが Infinity へ丸まる — 受理集合をブラウザ JSON.parse に
   // 揃える契約のため拒否する。
-  const infinite = JSON.stringify(baseGraph()).replace('"shape":[4,3]', '"shape":[4,1e999]');
-  assertThrows(() => parseIrGraph(infinite), IrError, "有限");
+  const infinite = JSON.stringify(baseDeclaration()).replace('"shape":[4,3]', '"shape":[4,1e999]');
+  assertThrows(() => parseIrDeclaration(infinite), IrError, "有限");
 });

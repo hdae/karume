@@ -7,12 +7,10 @@
 // workgroup u32 staging による丸め障壁が実バックエンドで効いているかは、ここでしか分からない。
 
 import { assertEquals } from "@std/assert";
-import { openModel } from "../src/format/container.ts";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { ADALN_NORM_KEY } from "../src/kernels/adaln-norm.ts";
-import { createSession, type Tensor } from "../src/runtime/executor.ts";
-import type { GraphJson } from "./helpers/format.ts";
-import { fill, graphModelBuffer } from "./helpers/graph.ts";
+import { createSessionFromContainer, type Tensor } from "../src/runtime/executor.ts";
+import { type DeclarationJson, fill, GRAPH_NAME, openModelBytes } from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
 
 /** 行内は 256 スレッド workgroup の端数を通す長さ、行数は grid-stride を 1 周以上させる。 */
@@ -35,8 +33,8 @@ type AdalnGraphOptions = {
   readonly modulationExtraConsumer?: boolean;
 };
 
-const adalnGraph = (options: AdalnGraphOptions = {}): GraphJson => {
-  const values: GraphJson["values"] = {
+const adalnGraph = (options: AdalnGraphOptions = {}): DeclarationJson => {
+  const values: DeclarationJson["values"] = {
     t: { dtype: "f32", shape: [...ROW_SHAPE] },
     shift: { dtype: "f32", shape: [...MOD_SHAPE] },
     scale: { dtype: "f32", shape: [...MOD_SHAPE] },
@@ -44,7 +42,7 @@ const adalnGraph = (options: AdalnGraphOptions = {}): GraphJson => {
     p: { dtype: "f32", shape: [...ROW_SHAPE] },
     y: { dtype: "f32", shape: [...ROW_SHAPE] },
   };
-  const inputs: GraphJson["inputs"] = [
+  const inputs: DeclarationJson["inputs"] = [
     { name: "x", dtype: "f32", shape: [...ROW_SHAPE] },
     { name: "ln_weight", dtype: "f32", shape: [DIM] },
     { name: "ln_bias", dtype: "f32", shape: [DIM] },
@@ -52,7 +50,7 @@ const adalnGraph = (options: AdalnGraphOptions = {}): GraphJson => {
     { name: "shift_src", dtype: "f32", shape: [1, DIM] },
     { name: "scale_src", dtype: "f32", shape: [1, DIM] },
   ];
-  const nodes: GraphJson["nodes"] = [{
+  const nodes: DeclarationJson["nodes"] = [{
     op: "layer_norm",
     ins: ["x", "ln_weight", "ln_bias"],
     outs: ["t"],
@@ -84,7 +82,7 @@ const adalnGraph = (options: AdalnGraphOptions = {}): GraphJson => {
   }
   return {
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: [...new Set(nodes.map((node) => node.op))] },
     symbols: [],
     inputs,
@@ -160,10 +158,15 @@ Deno.test({
       for (const gate of [true, false] as const) {
         const label = `窓 ${gate ? 7 : 6}`;
         const inputs = testInputs({ gate });
-        const fused = await createSession(gpu, openModel(graphModelBuffer(adalnGraph({ gate }))));
-        const primitive = await createSession(
+        const fused = await createSessionFromContainer(
           gpu,
-          openModel(graphModelBuffer(adalnGraph({ gate, interpose: true }))),
+          await openModelBytes(adalnGraph({ gate }), []),
+          GRAPH_NAME,
+        );
+        const primitive = await createSessionFromContainer(
+          gpu,
+          await openModelBytes(adalnGraph({ gate, interpose: true }), []),
+          GRAPH_NAME,
         );
         try {
           const fusedOut = (await fused.run(inputs)).y;
@@ -215,13 +218,18 @@ Deno.test({
     try {
       // 反例はどれも「値は正しいまま dispatch が 4 本に戻る」形。正本（融合）の y と
       // ビット一致することまで見る。
-      const reference = await createSession(gpu, openModel(graphModelBuffer(adalnGraph())));
+      const reference = await createSessionFromContainer(
+        gpu,
+        await openModelBytes(adalnGraph(), []),
+        GRAPH_NAME,
+      );
       const expected = words((await reference.run(inputs)).y);
       try {
         for (const testCase of cases) {
-          const session = await createSession(
+          const session = await createSessionFromContainer(
             gpu,
-            openModel(graphModelBuffer(adalnGraph(testCase.options))),
+            await openModelBytes(adalnGraph(testCase.options), []),
+            GRAPH_NAME,
           );
           try {
             const output = await session.run(inputs);

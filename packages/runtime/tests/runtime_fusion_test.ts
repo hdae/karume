@@ -8,7 +8,6 @@
 
 import { assertEquals, assertThrows } from "@std/assert";
 import { elementwiseKey } from "../src/codegen/elementwise.ts";
-import { type IrGraph, parseIrGraph } from "../src/format/ir.ts";
 import { ADALN_NORM_KEY, adalnNormParams } from "../src/kernels/adaln-norm.ts";
 import { bmmKey } from "../src/kernels/bmm.ts";
 import { ROPE_BSHD_KEY, ROPE_KEY } from "../src/kernels/rope.ts";
@@ -23,9 +22,10 @@ import {
   planRowBlocks,
 } from "../src/runtime/fusion.ts";
 import { bindSymbols, countUses, ExecutionError, planGraph } from "../src/runtime/plan.ts";
-import type { GraphJson } from "./helpers/format.ts";
+import type { DeclarationJson } from "./helpers/model-fixture.ts";
+import { mergeGraph } from "./helpers/merged-graph.ts";
 
-const parse = (graph: GraphJson): IrGraph => parseIrGraph(JSON.stringify(graph));
+const parse = mergeGraph;
 
 /**
  * 判定に使う device の能力（WebGPU core 既定 — 128MiB / 65535）。行ブロック分割の枚数だけが
@@ -38,7 +38,7 @@ const TEST_LIMITS = {
 
 /** グラフ JSON → 融合済みステップ列（executor が run ごとに作るのと同じ入力）。 */
 const fuse = (
-  graph: GraphJson,
+  graph: DeclarationJson,
   inputShapes: Readonly<Record<string, readonly number[]>>,
 ): FusionPlan => {
   const ir = parse(graph);
@@ -100,14 +100,14 @@ type SiluOptions = {
   readonly broadcast?: boolean;
 };
 
-const siluGraph = (options: SiluOptions = {}): GraphJson => {
+const siluGraph = (options: SiluOptions = {}): DeclarationJson => {
   const shape = [4, 8];
-  const values: GraphJson["values"] = {
+  const values: DeclarationJson["values"] = {
     s: { dtype: "f32", shape: [...shape] },
     y: { dtype: "f32", shape: [...shape] },
   };
-  const inputs: GraphJson["inputs"] = [{ name: "x", dtype: "f32", shape: [...shape] }];
-  const nodes: GraphJson["nodes"] = [{ op: "sigmoid", ins: ["x"], outs: ["s"], attrs: {} }];
+  const inputs: DeclarationJson["inputs"] = [{ name: "x", dtype: "f32", shape: [...shape] }];
+  const nodes: DeclarationJson["nodes"] = [{ op: "sigmoid", ins: ["x"], outs: ["s"], attrs: {} }];
   let mulSigmoid = "s";
   if (options.interpose) {
     values.s_alias = { dtype: "f32", shape: [...shape] };
@@ -133,7 +133,7 @@ const siluGraph = (options: SiluOptions = {}): GraphJson => {
   }
   return {
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: [...new Set(nodes.map((node) => node.op))] },
     symbols: [],
     inputs,
@@ -234,11 +234,11 @@ type UpsampleOptions = {
   readonly dtype?: "f32" | "i32";
 };
 
-const upsampleGraph = (options: UpsampleOptions = {}): GraphJson => {
+const upsampleGraph = (options: UpsampleOptions = {}): DeclarationJson => {
   const dtype = options.dtype ?? "f32";
   const scale = options.scaleWidth ?? 2;
   const outW = 7 * scale;
-  const values: GraphJson["values"] = {
+  const values: DeclarationJson["values"] = {
     a: { dtype, shape: [30, 7, 1] },
     wide: { dtype, shape: [30, 7, scale] },
     b: { dtype, shape: [6, 5, outW] },
@@ -246,7 +246,7 @@ const upsampleGraph = (options: UpsampleOptions = {}): GraphJson => {
     tall: { dtype, shape: [6, 5, 2, outW] },
     y: { dtype, shape: [2, 3, 10, outW] },
   };
-  const nodes: GraphJson["nodes"] = [{ op: "reshape", ins: ["x"], outs: ["a"], attrs: {} }];
+  const nodes: DeclarationJson["nodes"] = [{ op: "reshape", ins: ["x"], outs: ["a"], attrs: {} }];
   let expandSource = "a";
   if (options.interpose) {
     values.a_alias = { dtype, shape: [30, 7, 1] };
@@ -266,7 +266,7 @@ const upsampleGraph = (options: UpsampleOptions = {}): GraphJson => {
   }
   return {
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: [...new Set(nodes.map((node) => node.op))] },
     symbols: [],
     inputs: [{ name: "x", dtype, shape: [2, 3, 5, 7] }],
@@ -336,7 +336,7 @@ type RopeOptions = {
   readonly gapReshape?: boolean;
 };
 
-const ropeGraph = (options: RopeOptions = {}): GraphJson => {
+const ropeGraph = (options: RopeOptions = {}): DeclarationJson => {
   const heads = options.heads ?? 1;
   const batch = options.batch2 ? 2 : 1;
   const headDim = options.headDim ?? 128;
@@ -351,7 +351,7 @@ const ropeGraph = (options: RopeOptions = {}): GraphJson => {
     : options.layout === "bshd"
     ? [1, 5, 1, headDim]
     : [1, 1, 5, headDim];
-  const values: GraphJson["values"] = {
+  const values: DeclarationJson["values"] = {
     first: { dtype: "f32", shape: low },
     second: { dtype: "f32", shape: high },
     negative: { dtype: "f32", shape: high },
@@ -360,13 +360,13 @@ const ropeGraph = (options: RopeOptions = {}): GraphJson => {
     cross: { dtype: "f32", shape: full },
     y: { dtype: "f32", shape: full },
   };
-  const direct: GraphJson["nodes"][number] = {
+  const direct: DeclarationJson["nodes"][number] = {
     op: "mul",
     ins: ["x", "cos"],
     outs: ["direct"],
     attrs: {},
   };
-  const nodes: GraphJson["nodes"] = [];
+  const nodes: DeclarationJson["nodes"] = [];
   if (options.order === "direct-first") nodes.push(direct);
   nodes.push({ op: "slice", ins: ["x"], outs: ["first"], attrs: { dim: 3, start: 0, end: split } });
   let catFirst = "first";
@@ -423,7 +423,7 @@ const ropeGraph = (options: RopeOptions = {}): GraphJson => {
   }
   return {
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: [...new Set(nodes.map((node) => node.op))] },
     // 記号は sym_prefix_slice を置く形でだけ要る（T は補助入力 `bind` から束縛する）。
     symbols: options.prefixSlicedSin ? ["T"] : [],
@@ -440,9 +440,7 @@ const ropeGraph = (options: RopeOptions = {}): GraphJson => {
       ...(options.gapReshape ? ["cos_view"] : []),
       ...(options.extraConsumer ? ["first_copy"] : []),
     ],
-    initializers: options.prefixSlicedSin
-      ? { sin_table: { tensor: "sin_table", storage: { dtype: "f32" } } }
-      : {},
+    initializers: options.prefixSlicedSin ? { sin_table: {} } : {},
     values,
     nodes,
   };
@@ -539,9 +537,9 @@ Deno.test("RoPE の反例（別名 / 内部 output / 別 consumer / 分割位置
 
 // -------------------------------------------------------- identity expand
 
-const expandGraph = (outShape: readonly number[]): GraphJson => ({
+const expandGraph = (outShape: readonly number[]): DeclarationJson => ({
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["neg", "expand", "reshape"] },
   symbols: [],
   inputs: [{ name: "x", dtype: "f32", shape: [3, 1] }],
@@ -612,25 +610,25 @@ type AdalnOptions = {
  * 実 IR（anima DiT）の adaLN 鎖。`layer_norm` と `mul` の間に変調ベクトルの `reshape` が
  * 挟まる**非隣接**の形をそのまま作る。
  */
-const adalnGraph = (options: AdalnOptions = {}): GraphJson => {
+const adalnGraph = (options: AdalnOptions = {}): DeclarationJson => {
   const dtype = "f32";
   const gaps = options.gaps ?? 3;
   const row = [1, ROWS, DIM];
   const modulation = options.perRowScale ? row : [1, 1, DIM];
   const biasName = options.sharedAffine ? "ln_weight" : "ln_bias";
-  const values: GraphJson["values"] = {
+  const values: DeclarationJson["values"] = {
     t: { dtype, shape: [...row] },
     s: { dtype, shape: [...modulation] },
     p: { dtype, shape: [...row] },
     y: { dtype, shape: [...row] },
   };
-  const inputs: GraphJson["inputs"] = [
+  const inputs: DeclarationJson["inputs"] = [
     { name: "x", dtype, shape: [...row] },
     { name: "ln_weight", dtype, shape: [DIM] },
     ...(options.sharedAffine ? [] : [{ name: "ln_bias", dtype, shape: [DIM] }]),
     { name: "one", dtype, shape: options.wideOne ? [DIM] : [1] },
   ];
-  const nodes: GraphJson["nodes"] = [{
+  const nodes: DeclarationJson["nodes"] = [{
     op: "layer_norm",
     ins: ["x", "ln_weight", biasName],
     outs: ["t"],
@@ -687,7 +685,7 @@ const adalnGraph = (options: AdalnOptions = {}): GraphJson => {
   }
   return {
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: [...new Set(nodes.map((node) => node.op))] },
     symbols: [],
     inputs,
@@ -699,7 +697,7 @@ const adalnGraph = (options: AdalnOptions = {}): GraphJson => {
 };
 
 /** 宣言 shape がそのまま実 shape（記号次元を使っていない）。 */
-const adalnInputs = (graph: GraphJson): Readonly<Record<string, readonly number[]>> =>
+const adalnInputs = (graph: DeclarationJson): Readonly<Record<string, readonly number[]>> =>
   Object.fromEntries(graph.inputs.map((spec) => [spec.name, spec.shape as readonly number[]]));
 
 const fuseAdaln = (options: AdalnOptions = {}): FusionPlan => {
@@ -847,7 +845,7 @@ type AttentionOptions = {
 const attentionGraph = (
   shape: AttentionShape = ATTENTION,
   options: AttentionOptions = {},
-): GraphJson => {
+): DeclarationJson => {
   const { heads, queries, keys, headDim } = shape;
   const scores3 = [heads, queries, keys];
   const scores4 = [1, heads, queries, keys];
@@ -855,7 +853,7 @@ const attentionGraph = (
   const maskShape = options.rowMask ? [1, 1, queries, keys] : [1, 1, 1, keys];
   // 非恒等 expand を作るには、元を 1 軸だけ 1 にして複製させる。
   const vSource = options.broadcastV ? [1, 1, keys, headDim] : [1, heads, keys, headDim];
-  const values: GraphJson["values"] = {
+  const values: DeclarationJson["values"] = {
     scores3: { dtype: "f32", shape: scores3 },
     scores4: { dtype: "f32", shape: scores4 },
     masked: { dtype: "f32", shape: scores4 },
@@ -868,7 +866,7 @@ const attentionGraph = (
   };
   if (options.interpose) values.scores3_alias = { dtype: "f32", shape: scores3 };
   if (options.extraConsumer) values.probsCopy = { dtype: "f32", shape: scores4 };
-  const nodes: GraphJson["nodes"] = [
+  const nodes: DeclarationJson["nodes"] = [
     { op: "bmm", ins: ["q", options.sameQk ? "q" : "kt"], outs: [qkOut], attrs: {} },
     ...(options.interpose ? [{ op: "reshape", ins: [qkOut], outs: ["scores3"], attrs: {} }] : []),
     { op: "reshape", ins: ["scores3"], outs: ["scores4"], attrs: {} },
@@ -895,7 +893,7 @@ const attentionGraph = (
   ];
   return {
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: [...new Set(nodes.map((node) => node.op))] },
     symbols: [],
     inputs: [
@@ -1022,7 +1020,7 @@ Deno.test("行ブロック attention の反例（隣接 / mask 形 / op 違い /
     "正方形の土台が掴めていない（下の 2 反例が恒真になる）",
   );
   const cases:
-    readonly (readonly [string, GraphJson, Readonly<Record<string, readonly number[]>>])[] = [
+    readonly (readonly [string, DeclarationJson, Readonly<Record<string, readonly number[]>>])[] = [
       ["別名を 1 本挟む", attentionGraph(ATTENTION, { interpose: true }), attentionInputs()],
       [
         "mask が行ごと [1,1,M,N]",
@@ -1071,9 +1069,9 @@ Deno.test("行ブロック attention の反例（隣接 / mask 形 / op 違い /
  * （原理的に行ブロックへ分割できない）。matcher を広げた／狭めたときにどちらの向きの退行も
  * 沈黙するので、掴まないこと自体と資源側の帰結を観測点として置く。
  */
-const birefnetAttentionGraph = (): GraphJson => ({
+const birefnetAttentionGraph = (): DeclarationJson => ({
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["bmm", "reshape", "embedding", "add", "softmax", "expand"] },
   symbols: [],
   inputs: [
@@ -1083,7 +1081,7 @@ const birefnetAttentionGraph = (): GraphJson => ({
     { name: "v", dtype: "f32", shape: [2, 3, 4, 5] },
   ],
   outputs: ["y"],
-  initializers: { table: { tensor: "m.table", storage: { dtype: "f32" } } },
+  initializers: { table: {} },
   values: {
     table: { dtype: "f32", shape: [8, 1] },
     scores3: { dtype: "f32", shape: [6, 4, 4] },

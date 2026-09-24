@@ -2,8 +2,9 @@
 
 Enumerate **fusion candidates** in shipped karume assets: contiguous windows of plain nodes that
 `planFusions` did not fold, filtered down to the ones that already satisfy every eligibility
-condition the fusion pass applies to all rules. GPU-free — only the safetensors header of each
-component's first shard is read (the IR travels in `__metadata__.karume_ir`).
+condition the fusion pass applies to all rules. GPU-free — only part 0 of each component's `krm`
+container is read (the header plus the graph and model descriptors, which carry the IR declaration
+and its binding table).
 
 This is stage 1 of the semi-automatic fusion discovery pipeline. It answers "where could a fusion
 rule be written?", not "should it be?".
@@ -27,8 +28,8 @@ deno run -A tools/fusion-hints/main.ts enumerate --source <dir> [options]
 ```
 
 `--source` is either a distribution mirror (a directory holding `karume.json`) or a series output
-directory (every subdirectory holding `model*.safetensors` is one component, and its shard sequence
-is resolved to the first shard).
+directory (every subdirectory holding `model*.krm` is one component, and its part sequence is
+resolved to part 0).
 
 | Option                                | Meaning                                                                                                                                                            |
 | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -36,7 +37,7 @@ is resolved to the first shard).
 | `--max-window <n>`                    | Longest contiguous window to consider (default 9, minimum 2).                                                                                                      |
 | `--top <n>`                           | Rows per graph in the Markdown table (default 10). The jsonl always holds every row.                                                                               |
 | `--model <name>`                      | Distribution form only: which model in the manifest (default: `defaultModel`).                                                                                     |
-| `--quant <name>`                      | Distribution form: the manifest quant (defaults to `defaultQuant`). Series form: the storage-dtype group (`model.i8-*.safetensors` → `i8`)                         |
+| `--quant <name>`                      | Distribution form: the manifest quant (defaults to `defaultQuant`). Series form: the storage-dtype group (`model.i8-*.krm` → `i8`)                                 |
 | `--family <name>`                     | The family, which selects the default scenario set. Required for a series output whose directory name the tool cannot map to a family (see below)                  |
 | `--scenario <name>=<SYM>:<value>[,…]` | Symbol bindings. May be repeated; each one produces a separate report. Defaults to the family's built-in scenarios                                                 |
 | `--no-fusion`                         | Enumerate against a plan with fusion switched off — every rule the pass would fold shows up as a candidate. Used to check the enumerator against known hit counts. |
@@ -143,11 +144,11 @@ table with it (ADR 0040 decision 1: one judgment point). This module only decide
 symbols of a graph and how to count what comes back.
 
 Which graphs to read is not decided here either: `tools/_shared/assets.ts` resolves an asset
-directory to one first shard per component and reads the IR out of its safetensors header, shared
+directory to one part 0 per component and reads the IR out of its graph descriptor, shared
 with `tools/opbench` so both tools see the same components — under the same names, which is what
 makes a `<component>.SYM` binding mean the same thing in both. Storage dtype follows the quant table
 there; candidates do not depend on it (a chain is decided by the node sequence alone), but resolving
-through one path keeps the two tables pointing at the same shard. The device limits the plan is
+through one path keeps the two tables pointing at the same part. The device limits the plan is
 built against (`CORE_LIMITS`) come from there too, so a candidate table and a census can be read
 side by side.
 

@@ -15,13 +15,12 @@
 //    MUST: 割れたら幾何の選択ではなく**命題そのもの**を疑う（設計判断へ戻す）。
 
 import { assert, assertEquals } from "@std/assert";
-import { openModel } from "../src/format/container.ts";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
 import { compareTensors, formatAllclose } from "../src/reference/allclose.ts";
 import { GEMM_TOLERANCE } from "./helpers/op-tolerance.ts";
 import { applyReferenceOp, type RefTensor } from "../src/reference/ops.ts";
-import { createSession, type Tensor } from "../src/runtime/executor.ts";
-import { fill, graphModelBuffer, singleOpGraph } from "./helpers/graph.ts";
+import { createSessionFromContainer, type Tensor } from "../src/runtime/executor.ts";
+import { fill, GRAPH_NAME, openModelBytes, singleOpDeclaration } from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
 /** 桁落ちが起きる程度に符号と大きさを散らした決定的な列（乱数は使わない）。 */
@@ -37,12 +36,16 @@ type ShapeCase = {
 };
 
 const runCase = async (gpu: GpuContext, testCase: ShapeCase): Promise<Tensor> => {
-  const graph = singleOpGraph(
+  const graph = singleOpDeclaration(
     testCase.op,
     testCase.inputs.map((input) => input.shape),
     [testCase.outShape],
   );
-  const session = await createSession(gpu, openModel(graphModelBuffer(graph)));
+  const session = await createSessionFromContainer(
+    gpu,
+    await openModelBytes(graph, []),
+    GRAPH_NAME,
+  );
   try {
     const named: Record<string, Tensor> = {};
     testCase.inputs.forEach((input, index) => {

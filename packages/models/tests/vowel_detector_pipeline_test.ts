@@ -17,7 +17,7 @@
 //
 // ② グラフ宣言との突合（`assertGraph`）の**拒否経路**。`fromAssets` の中では実資産が
 //    揃わないと踏めないので、門を直接叩く（`tests/helpers/stub-model.ts` が宣言だけの
-//    `KarumeModel` を組む）。長さを固定して焼いた古い形は**入出力の名前も階数も同じ**なので、
+//    `GraphOwner` を組む）。長さを固定して焼いた古い形は**入出力の名前も階数も同じ**なので、
 //    門の綴りが `format/dims.ts` の正準表記からずれても正常系だけなら緑のまま通る。
 //
 // ③ `pipelineConfig` の**宣言 3 欄**（sampleRate / featureDim / classes）は受理集合が 1 値

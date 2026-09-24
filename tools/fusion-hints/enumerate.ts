@@ -154,7 +154,7 @@ export type GraphReport = {
   readonly rows: readonly CandidateRow[];
 };
 
-/** 列挙にかける 1 コンポーネント（IR は先頭 shard のヘッダから読んだもの）。 */
+/** 列挙にかける 1 コンポーネント（IR は容器の part 0 のグラフ記述から読んだもの）。 */
 export type GraphInput = {
   readonly component: string;
   readonly graph: string;

@@ -11,14 +11,12 @@
 // 通すと GPU 実行の完了前に run が戻る。
 
 import { assert, assertEquals } from "@std/assert";
-import { openModel } from "../src/format/container.ts";
 import { acquireGpu, type GpuContext, RUNTIME_INTERNAL } from "../src/gpu/device.ts";
 import { RunArena, STORAGE_USAGE } from "../src/gpu/arena.ts";
 import { SubmitScheduler } from "../src/gpu/submit.ts";
-import { createSession, type Session, type Tensor } from "../src/runtime/executor.ts";
+import { createSessionFromContainer, type Session, type Tensor } from "../src/runtime/executor.ts";
+import { type DeclarationJson, openGraphModel } from "./helpers/model-fixture.ts";
 import { countFences } from "./helpers/fences.ts";
-import type { GraphJson } from "./helpers/format.ts";
-import { graphModelBuffer } from "./helpers/graph.ts";
 import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE } from "./helpers/gpu.ts";
 
 const ROWS = 4;
@@ -26,9 +24,9 @@ const COLS = 3;
 const COUNT = ROWS * COLS;
 
 /** y = x + x、s = y * y。**出力 2 本**（mapAsync を並列に待つ形を実際に通す）。 */
-const graph = (outputs: readonly string[]): GraphJson => ({
+const graph = (outputs: readonly string[]): DeclarationJson => ({
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["add", "mul"] },
   symbols: [],
   inputs: [{ name: "x", dtype: "f32", shape: [ROWS, COLS] }],
@@ -68,8 +66,8 @@ const expected = (phase: number): {
 const bits = (data: Tensor["data"] | Float32Array<ArrayBuffer>): readonly number[] =>
   Array.from(new Uint32Array(data.buffer, data.byteOffset, data.length));
 
-const session = (gpu: GpuContext, json: GraphJson): Promise<Session> =>
-  createSession(gpu, openModel(graphModelBuffer(json)));
+const session = async (gpu: GpuContext, json: DeclarationJson): Promise<Session> =>
+  await createSessionFromContainer(gpu, await openGraphModel(json), "model");
 
 Deno.test({
   name: "gpuTiming OFF の run はフェンスを mapAsync 1 本に畳む（onSubmittedWorkDone 0 回・実 GPU）",

@@ -1,6 +1,6 @@
 import { assert, assertEquals } from "@std/assert";
-import { acquireGpu, createSession, openModel } from "../mod.ts";
-import { graphModelBuffer, singleOpGraph } from "./helpers/graph.ts";
+import { acquireGpu, createSessionFromContainer } from "../mod.ts";
+import { GRAPH_NAME, openModelBytes, singleOpDeclaration } from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
 /** CPU の通常の数値比較から順位を作る。GPU の整数順序変換を複製しない。 */
@@ -40,7 +40,7 @@ Deno.test({
         }
         const expected = cases.map((_, r) => rank(data, r * dim, dim)[0]);
         for (const op of ["argmax", "topk"] as const) {
-          const graph = singleOpGraph(
+          const graph = singleOpDeclaration(
             op,
             [[rows, dim]],
             op === "topk" ? [[rows, 1], [rows, 1]] : [[rows, 1]],
@@ -49,7 +49,11 @@ Deno.test({
               attrs: op === "topk" ? { k: 1 } : {},
             },
           );
-          const session = await createSession(gpu, openModel(graphModelBuffer(graph)));
+          const session = await createSessionFromContainer(
+            gpu,
+            await openModelBytes(graph, []),
+            GRAPH_NAME,
+          );
           try {
             for (let repeat = 0; repeat < 2; repeat++) {
               const out = await session.run({ x0: { dtype: "f32", shape: [rows, dim], data } });
@@ -119,14 +123,18 @@ Deno.test({
           { length: rows },
           (_, r) => rank(data, r * dim, dim).slice(0, k),
         );
-        const session = await createSession(
+        const session = await createSessionFromContainer(
           gpu,
-          openModel(graphModelBuffer(singleOpGraph(
-            "topk",
-            [[rows, dim]],
-            [[rows, k], [rows, k]],
-            { outDtypes: ["f32", "i32"], attrs: { k } },
-          ))),
+          await openModelBytes(
+            singleOpDeclaration(
+              "topk",
+              [[rows, dim]],
+              [[rows, k], [rows, k]],
+              { outDtypes: ["f32", "i32"], attrs: { k } },
+            ),
+            [],
+          ),
+          GRAPH_NAME,
         );
         try {
           const out = await session.run({ x0: { dtype: "f32", shape: [rows, dim], data } });

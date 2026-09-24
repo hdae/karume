@@ -13,11 +13,13 @@
 // 毎 dispatch 確保に戻っても緑になる（どちらも例外は出ない）。
 
 import { assertEquals } from "@std/assert";
-import { openModel } from "../src/format/container.ts";
 import { acquireGpu } from "../src/gpu/device.ts";
-import { createSession, PREPARED_PLAN_CAPACITY, type Tensor } from "../src/runtime/executor.ts";
-import { f32Bytes, type GraphJson } from "./helpers/format.ts";
-import { graphModelBuffer } from "./helpers/graph.ts";
+import {
+  createSessionFromContainer,
+  PREPARED_PLAN_CAPACITY,
+  type Tensor,
+} from "../src/runtime/executor.ts";
+import { type DeclarationJson, f32Bytes, openGraphModel } from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
 /**
@@ -25,17 +27,14 @@ import { GPU_AVAILABLE } from "./helpers/gpu.ts";
  * sum）に加えて、**同形の add をもう 1 本**置く — 2 本目の add は params の全バイトが
  * 1 本目と一致するので、1 run 目の中で再利用が 1 件観測できる。
  */
-const GRAPH: GraphJson = {
+const GRAPH: DeclarationJson = {
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["matmul", "add", "sum"] },
   symbols: ["T"],
   inputs: [{ name: "x", dtype: "f32", shape: ["T", 3] }],
   outputs: ["y"],
-  initializers: {
-    w: { tensor: "proj.weight", storage: { dtype: "f32" } },
-    b: { tensor: "proj.bias", storage: { dtype: "f32" } },
-  },
+  initializers: { w: {}, b: {} },
   values: {
     w: { dtype: "f32", shape: [3, 2] },
     b: { dtype: "f32", shape: [2] },
@@ -52,15 +51,20 @@ const GRAPH: GraphJson = {
   ],
 };
 
-const modelBytes = (): ArrayBuffer =>
-  graphModelBuffer(GRAPH, [
+const openedModel = () =>
+  openGraphModel(GRAPH, [
     {
-      name: "proj.weight",
-      dtype: "F32",
-      shape: [3, 2],
-      data: f32Bytes([0.5, -1.5, 2, 0.25, -0.75, 1]),
+      graph: "model",
+      initializer: "w",
+      bytes: f32Bytes([0.5, -1.5, 2, 0.25, -0.75, 1]),
+      encoding: { codec: "f32" },
     },
-    { name: "proj.bias", dtype: "F32", shape: [2], data: f32Bytes([0.125, -0.5]) },
+    {
+      graph: "model",
+      initializer: "b",
+      bytes: f32Bytes([0.125, -0.5]),
+      encoding: { codec: "f32" },
+    },
   ]);
 
 const input = (rows: number): Tensor => ({
@@ -74,7 +78,7 @@ Deno.test({
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
-    const session = await createSession(gpu, openModel(modelBytes()));
+    const session = await createSessionFromContainer(gpu, await openedModel(), "model");
     try {
       assertEquals(session.diagnostics().lastRunParams, undefined, "未実行なら診断は undefined");
 
@@ -111,7 +115,7 @@ Deno.test({
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
-    const session = await createSession(gpu, openModel(modelBytes()));
+    const session = await createSessionFromContainer(gpu, await openedModel(), "model");
     try {
       await session.run({ x: input(4) });
       const narrow = session.diagnostics().lastRunParams;
@@ -162,7 +166,7 @@ Deno.test({
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
-    const session = await createSession(gpu, openModel(modelBytes()));
+    const session = await createSessionFromContainer(gpu, await openedModel(), "model");
     try {
       // initializer 2 本ぶんだけが載った状態から始まる。
       assertEquals(session.diagnostics().weights.allocCount, 2);

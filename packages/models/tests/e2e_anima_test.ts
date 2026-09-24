@@ -30,7 +30,7 @@
  * （テストを消して無音で緑にしない — ADR 0005）。
  *
  * NOTE: 実配布形の門は基本ぜんぶ**取得層経由**（ローカル HTTP + `fromPretrained`）で通す
- * （本番と同じ graph-first + 逐次流しの経路）。shard 分割そのものは全量面（`fromAssets`）でも
+ * （本番と同じ graph-first + 逐次流しの経路）。part 分割そのものは全量面（`fromAssets`）でも
  * 読めるので、その 1 本だけ base を `Deno.readFile` + `fromAssets` で通し、取得層経由と
  * **同じ参照 sha256** を要求する（下の「全量面」節 — X2-101）。ファイルを `Deno.open` /
  * `Deno.readFile` で読むのはテスト側だけで、パッケージ本体は Web 標準 API のみ
@@ -125,7 +125,7 @@ const readManifest = (): Manifest => parseManifest(manifestText as string);
 
 // --- ローカル HTTP（HF 形の使い捨てサーバ）------------------------------------
 //
-// 実資産の門はほぼ全てこの土台に載る — shard 分割された配布形を本番と同じ経路
+// 実資産の門はほぼ全てこの土台に載る — part 分割された配布形を本番と同じ経路
 // （graph-first + 逐次流し）で通すため。全量面（`Deno.readFile` + `fromAssets`）は下の
 // 「全量面」節が 1 本だけ持つ。喋るのは hub が実際に叩く 2 経路（revision 解決 API・
 // resolve URL）だけ。
@@ -478,9 +478,9 @@ const assertBasePng = async (
  * 素の base を {@link BASE_REFERENCE} のノブで 1 枚焼き、参照 sha256 と突き合わせる。
  *
  * 経路は**取得層経由**（ローカル HTTP + `fromPretrained`）— この配布形の text_encoder と
- * transformer は shard 分割されていて、越境参照と併せて解けるのは取得層だけ
+ * transformer は part 分割されていて、越境参照と併せて解けるのは取得層だけ
  * （デモの `--source` と同型 — `examples/shared/local-dist-server.ts`）。分割形は全量面
- * （`fromAssets`）でも読めるが、そちらは全 shard がホスト RAM に同時に載る面で、門としては
+ * （`fromAssets`）でも読めるが、そちらは全 part がホスト RAM に同時に載る面で、門としては
  * 下の 1 本（同じ参照 sha を要求する）で別に閉じる。
  */
 const assertBaseReferencePng = async (

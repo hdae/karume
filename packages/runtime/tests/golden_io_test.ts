@@ -5,13 +5,13 @@
 // 読み替えるとビット列の再解釈が通ってしまう）。ところがこの 1 行は正常な golden を通す経路
 // でしか実行されず、assert を外しても全門が緑のまま通っていた。
 //
-// GPU も実資産も要らない（helpers/format.ts の `buildSafetensors` で組んだ最小の
+// GPU も実資産も要らない（helpers/safetensors.ts の `buildSafetensors` で組んだ最小の
 // safetensors を `parseSafetensors` で読む）。
 
 import { assertEquals, AssertionError, assertStrictEquals, assertThrows } from "@std/assert";
 import { parseSafetensors, type TensorView } from "../src/format/safetensors.ts";
 import { IO_ENCODING, ioTensor } from "./helpers/golden-io.ts";
-import { buildSafetensors, f32Bytes } from "./helpers/format.ts";
+import { buildSafetensors, f32Bytes } from "./helpers/safetensors.ts";
 
 /** 4 バイト整数のバイト列（I32 / U32 の実体）。 */
 const i32Bytes = (values: readonly number[]): Uint8Array =>

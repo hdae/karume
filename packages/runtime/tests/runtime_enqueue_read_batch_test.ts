@@ -15,7 +15,7 @@
 
 import { assertEquals, assertInstanceOf, assertNotEquals, assertStringIncludes } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
-import { type IrGraph, parseIrGraph } from "../src/format/ir.ts";
+import type { IrGraph } from "../src/format/ir.ts";
 import {
   type BatchScope,
   BatchScopeError,
@@ -25,6 +25,7 @@ import {
 } from "../src/gpu/device.ts";
 import { Session } from "../src/runtime/executor.ts";
 import { fakeDevice } from "./helpers/fake-gpu.ts";
+import { mergeGraph } from "./helpers/merged-graph.ts";
 
 // ---------------------------------------------------------------------------
 // 材料（空グラフ・フェイク device・決着の観測）
@@ -32,9 +33,9 @@ import { fakeDevice } from "./helpers/fake-gpu.ts";
 
 /** ノード 0 本のグラフ。受け口の検査は積む中身を 1 バイトも見ないので、これで足りる。 */
 const emptyGraph = (): IrGraph =>
-  parseIrGraph(JSON.stringify({
+  mergeGraph({
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: [] },
     symbols: [],
     inputs: [],
@@ -42,7 +43,7 @@ const emptyGraph = (): IrGraph =>
     initializers: {},
     values: {},
     nodes: [],
-  }));
+  });
 
 /** 上限は門に掛からない値でよい（検査したいのは受け口で、確保の寸法ではない）。 */
 const LIMITS: RequiredLimits = {

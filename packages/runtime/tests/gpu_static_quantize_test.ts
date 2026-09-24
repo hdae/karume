@@ -1,29 +1,25 @@
 // static_quantize の実 GPU 突合（CPU 参照側の門は static_quantize_test.ts）。
 import { assert, assertEquals } from "@std/assert";
-import { openModel } from "../src/format/container.ts";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
 import { BUFFER_USAGE as U, MAP_MODE } from "../src/gpu/webgpu-constants.ts";
 import { STATIC_QUANTIZE_WGSL, staticQuantizeParams } from "../src/kernels/static-quantize.ts";
 import { referenceStaticQuantize, refTensor } from "../src/reference/ops.ts";
-import { createSession } from "../src/runtime/executor.ts";
-import { buildSafetensors, type GraphJson } from "./helpers/format.ts";
+import { createSessionFromContainer } from "../src/runtime/executor.ts";
+import { type DeclarationJson, GRAPH_NAME, openModelBytes } from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { bits, type Case, cases } from "./helpers/static-quantize-oracle.ts";
 
-const model = (shape: readonly number[], scale: number): ArrayBuffer => {
-  const graph: GraphJson = {
-    format: "karume-ir",
-    version: 1,
-    requires: { ops: ["static_quantize"] },
-    symbols: [],
-    inputs: [{ name: "x", dtype: "f32", shape: [...shape] }],
-    outputs: ["y"],
-    initializers: {},
-    values: { y: { dtype: "f32", shape: [...shape] } },
-    nodes: [{ op: "static_quantize", ins: ["x"], outs: ["y"], attrs: { scale } }],
-  };
-  return buildSafetensors([], { karume_ir: JSON.stringify(graph) });
-};
+const declaration = (shape: readonly number[], scale: number): DeclarationJson => ({
+  format: "karume-ir",
+  version: 2,
+  requires: { ops: ["static_quantize"] },
+  symbols: [],
+  inputs: [{ name: "x", dtype: "f32", shape: [...shape] }],
+  outputs: ["y"],
+  initializers: {},
+  values: { y: { dtype: "f32", shape: [...shape] } },
+  nodes: [{ op: "static_quantize", ins: ["x"], outs: ["y"], attrs: { scale } }],
+});
 
 const direct = async (gpu: GpuContext, c: Case): Promise<Uint32Array<ArrayBuffer>> => {
   const d = gpu.device, buffers: GPUBuffer[] = [];
@@ -78,7 +74,11 @@ Deno.test({
     try {
       for (const c of await cases()) {
         assertEquals(await direct(gpu, c), c.y, `direct scale=${c.scale}`);
-        const session = await createSession(gpu, openModel(model([c.x.length], c.scale)));
+        const session = await createSessionFromContainer(
+          gpu,
+          await openModelBytes(declaration([c.x.length], c.scale), []),
+          GRAPH_NAME,
+        );
         try {
           for (let repeat = 0; repeat < 2; repeat++) {
             const { y } = await session.run({ x: refTensor([c.x.length], c.x) });
@@ -108,7 +108,11 @@ Deno.test({
         );
         const input = refTensor(shape, x),
           expected = referenceStaticQuantize(input, { scale: 0.5 });
-        const session = await createSession(gpu, openModel(model(shape, 0.5)));
+        const session = await createSessionFromContainer(
+          gpu,
+          await openModelBytes(declaration(shape, 0.5), []),
+          GRAPH_NAME,
+        );
         try {
           const { y } = await session.run({ x: input });
           assert(y.dtype === "f32" && expected.dtype === "f32");

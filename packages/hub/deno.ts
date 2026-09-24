@@ -66,38 +66,10 @@ export const denoDirectory = (
         throw new Error(`@karume/hub/deno: ${at} を読めない`, { cause: error });
       }
     },
-    // 逐次面の器へ直接読む（`DirectoryAdapter.readFileInto` の契約）: 実長を返し、器に収まらない
-    // ファイルは読まずに実長だけ返す（size 違反を名乗るのは共通層）。`Deno.open` / `read` は
-    // signal を受けないので、読みの切れ目で中断を見る。
-    readFileInto: async (path, target, { signal }) => {
-      const at = locate(base, path);
-      let file: Deno.FsFile;
-      try {
-        file = await Deno.open(at);
-      } catch (error) {
-        throw new Error(`@karume/hub/deno: ${at} を読めない`, { cause: error });
-      }
-      try {
-        const { size } = await file.stat();
-        if (size > target.byteLength) return size;
-        let filled = 0;
-        while (filled < size) {
-          signal?.throwIfAborted();
-          const read = await file.read(target.subarray(filled, size));
-          if (read === null) {
-            throw new Error(`@karume/hub/deno: ${at} が stat の ${size} バイトより短い`);
-          }
-          filled += read;
-        }
-        return size;
-      } finally {
-        file.close();
-      }
-    },
     // 区間読み（`DirectoryAdapter.readFileRange` の契約）: 位置読みで `[offset, offset + length)` を
-    // ちょうど返す。`readFileInto` と同じ流儀 — signal は読みの切れ目で見る・finally で close・
-    // 実体パスを名乗る。宣言 size に対する検査は取得元（`sources/local.ts`）が済ませているので、
-    // ここが落とすのは「実体が宣言より短い」場合だけ。
+    // ちょうど返す。`Deno.open` / `read` は signal を受けないので、読みの切れ目で中断を見る
+    // （finally で close・実体パスを名乗る）。宣言 size に対する検査は取得元
+    // （`sources/local.ts`）が済ませているので、ここが落とすのは「実体が宣言より短い」場合だけ。
     readFileRange: async (path, offset, length, { signal }) => {
       // 中断済みなら fd を開かない（開いてからループの先頭で気づく形だと、長さ 0 の読みで
       // 中断が素通しになる — 実体に触れる前に 1 度見る）。

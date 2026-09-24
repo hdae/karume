@@ -18,11 +18,14 @@ import { assert, assertEquals } from "@std/assert";
 import { compareTensors, formatAllclose, type Tolerance } from "../src/reference/allclose.ts";
 import { referenceStateAppend, referenceStateAttention } from "../src/reference/state-attention.ts";
 import { acquireGpu, type GpuContext, RUNTIME_INTERNAL } from "../src/gpu/device.ts";
-import { openModel } from "../src/format/container.ts";
-import { createSession, type Session, type Tensor } from "../src/runtime/executor.ts";
+import { createSessionFromContainer, type Session, type Tensor } from "../src/runtime/executor.ts";
 import type { GenerationContext } from "../src/runtime/generation-context.ts";
-import type { GraphJson } from "./helpers/format.ts";
-import { graphModelBuffer, singleOpGraph } from "./helpers/graph.ts";
+import {
+  type DeclarationJson,
+  GRAPH_NAME,
+  openGraphModel,
+  singleOpDeclaration,
+} from "./helpers/model-fixture.ts";
 import { halfScale, seeded } from "./helpers/state-dispatch.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
@@ -53,13 +56,13 @@ type StateModel = {
  * 計算せず**所有層の k/v 値をそのまま ins に配線**する（決定 4）— それがこのグラフの `k` / `v` を
  * 2 本の attention が共有している形そのもので、共有は「同一スロット名 + 同一値名」で表れる。
  */
-const stateGraph = (model: StateModel, readers = 1): GraphJson => {
+const stateGraph = (model: StateModel, readers = 1): DeclarationJson => {
   const { heads, kvHeads, depth, capacity, window } = model;
   const windowAttrs = window === undefined ? {} : { window };
   const names = Array.from({ length: readers }, (_, index) => index);
   return {
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: ["attention", "state_append"] },
     symbols: capacity === "C" ? ["M", "C"] : ["M"],
     inputs: [
@@ -106,11 +109,16 @@ const stateGraph = (model: StateModel, readers = 1): GraphJson => {
   };
 };
 
-const stateSession = (
+const stateSession = async (
   gpu: GpuContext,
   model: StateModel,
   readers = 1,
-): Promise<Session> => createSession(gpu, openModel(graphModelBuffer(stateGraph(model, readers))));
+): Promise<Session> =>
+  await createSessionFromContainer(
+    gpu,
+    await openGraphModel(stateGraph(model, readers)),
+    GRAPH_NAME,
+  );
 
 const tensor = (shape: readonly number[], data: Float32Array<ArrayBuffer>): Tensor => ({
   dtype: "f32",
@@ -332,15 +340,15 @@ const materializeHistory = (history: History, model: StateModel): Float32Array<A
 };
 
 /** 1-shot 側の Session（`M` / `N` を記号にして全 step を 1 本で賄う）。 */
-const oneShotSession = (gpu: GpuContext, model: StateModel): Promise<Session> => {
+const oneShotSession = async (gpu: GpuContext, model: StateModel): Promise<Session> => {
   const { heads, depth } = model;
-  const graph = singleOpGraph(
+  const graph = singleOpDeclaration(
     "attention",
     [[1, heads, "M", depth], [1, heads, "N", depth], [1, heads, "N", depth], [1, 1, "M", "N"]],
     [[1, heads, "M", depth]],
     { attrs: { scale: halfScale(depth) }, symbols: ["M", "N"] },
   );
-  return createSession(gpu, openModel(graphModelBuffer(graph)));
+  return await createSessionFromContainer(gpu, await openGraphModel(graph), GRAPH_NAME);
 };
 
 /**

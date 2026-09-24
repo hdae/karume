@@ -162,7 +162,6 @@ export type MemoryDirectory = {
 
 export const memoryDirectory = (
   files: ReadonlyMap<string, Uint8Array<ArrayBuffer>>,
-  options: { readonly vessel?: boolean } = {},
 ): MemoryDirectory => {
   const reads: string[] = [];
   const signals: boolean[] = [];
@@ -177,31 +176,13 @@ export const memoryDirectory = (
       reads.push(path);
       signals.push(signal !== undefined);
       try {
-        // 実体を読むたびに新しい buffer が来る（tight view）— 同じ参照を配ると、
-        // 逐次面が「手放した」ことをテストが観測できなくなる。
+        // 実体を読むたびに新しい buffer が来る（tight view）— 同じ参照を配ると、共通層が
+        // 「別の実体を読んだ」ことをテストが観測できなくなる。
         return Promise.resolve(new Uint8Array(lookup(path)));
       } catch (error) {
         return Promise.reject(error);
       }
     },
-    // `vessel: true` のときだけ器へ読む面を持つ（`deno.ts` と同じ契約 — 実長を返し、収まらない
-    // ファイルは読まずに実長だけ返す）。既定では持たず、従来の tight view 経路を観測する
-    // テストの前提を変えない。
-    ...(options.vessel === true
-      ? {
-        readFileInto: (path, target, { signal }) => {
-          reads.push(path);
-          signals.push(signal !== undefined);
-          try {
-            const bytes = lookup(path);
-            if (bytes.byteLength <= target.byteLength) target.set(bytes);
-            return Promise.resolve(bytes.byteLength);
-          } catch (error) {
-            return Promise.reject(error);
-          }
-        },
-      }
-      : {}),
   };
   return { reads, signals, adapter };
 };

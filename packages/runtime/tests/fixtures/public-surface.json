@@ -43,6 +43,10 @@
         "kind": "typeAlias"
       },
       {
+        "name": "BoundContainer",
+        "kind": "typeAlias"
+      },
+      {
         "name": "ChunkBudgetStats",
         "kind": "typeAlias"
       },
@@ -57,10 +61,6 @@
       {
         "name": "ComputePrecision",
         "kind": "typeAlias"
-      },
-      {
-        "name": "ContainerError",
-        "kind": "class"
       },
       {
         "name": "ContainerFormatError",
@@ -167,19 +167,31 @@
         "kind": "class"
       },
       {
-        "name": "IrError",
-        "kind": "class"
+        "name": "IrDeclaration",
+        "kind": "typeAlias"
       },
       {
-        "name": "KarumeModel",
-        "kind": "typeAlias"
+        "name": "IrError",
+        "kind": "class"
       },
       {
         "name": "LinearGemvReduce",
         "kind": "typeAlias"
       },
       {
-        "name": "ModelShard",
+        "name": "MemoryContainerInput",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "MemoryEncoding",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "MemoryPiece",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "MemoryTensor",
         "kind": "typeAlias"
       },
       {
@@ -241,6 +253,10 @@
       {
         "name": "RuntimeCapabilities",
         "kind": "typeAlias"
+      },
+      {
+        "name": "RuntimeSupportError",
+        "kind": "class"
       },
       {
         "name": "SafetensorsDtype",
@@ -339,15 +355,7 @@
         "kind": "function"
       },
       {
-        "name": "createSession",
-        "kind": "function"
-      },
-      {
         "name": "createSessionFromContainer",
-        "kind": "function"
-      },
-      {
-        "name": "createSessionFromShards",
         "kind": "function"
       },
       {
@@ -355,15 +363,15 @@
         "kind": "function"
       },
       {
-        "name": "estimateSessionMemory",
-        "kind": "function"
-      },
-      {
         "name": "openContainer",
         "kind": "function"
       },
       {
-        "name": "openModel",
+        "name": "openMemoryContainer",
+        "kind": "function"
+      },
+      {
+        "name": "parseIrDeclarationValue",
         "kind": "function"
       },
       {
@@ -380,10 +388,6 @@
       },
       {
         "name": "prepareContainer",
-        "kind": "function"
-      },
-      {
-        "name": "prepareModel",
         "kind": "function"
       },
       {

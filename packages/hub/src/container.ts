@@ -35,7 +35,8 @@ import { type AssetRangeReader, type PinnedSource, sourceForRef } from "./source
  * part → バイト区間の引き出し口。`@karume/runtime` の `BlockSource` と構造互換で、
  * `openContainer({ kind: "source", source })` にそのまま渡せる。
  *
- * MUST: 返るバイト列は**呼び手が書き換えない**（取得元の器の view であることがある）。
+ * MUST: 返るバイト列は**呼び手が書き換えない**（取得元の実装によっては、取得元が抱え続ける
+ * buffer そのものであり得る）。
  */
 export type ContainerBlockSource = {
   /** 宣言された part の本数（長さ 0 の part も数える — 添字が part の id）。 */

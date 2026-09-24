@@ -14,32 +14,27 @@
 // ピークは生まれない）が崩れる。
 
 import { assert, assertEquals, assertRejects } from "@std/assert";
-import { openModel } from "../src/format/container.ts";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { BUFFER_USAGE } from "../src/gpu/webgpu-constants.ts";
 import {
-  createSession,
+  createSessionFromContainer,
   PREPARED_PLAN_CAPACITY,
   type Session,
   type Tensor,
 } from "../src/runtime/executor.ts";
 import type { PlanBackingStats } from "../src/runtime/session-types.ts";
-import { f32Bytes, type GraphJson } from "./helpers/format.ts";
-import { fill, graphModelBuffer } from "./helpers/graph.ts";
+import { type DeclarationJson, f32Bytes, fill, openGraphModel } from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
 /** y = silu(x·w + b)（x: [T,3] → y: [T,2]）。末尾 2 ノードが silu 融合に掴まれる。 */
-const GRAPH: GraphJson = {
+const GRAPH: DeclarationJson = {
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["matmul", "add", "sigmoid", "mul"] },
   symbols: ["T"],
   inputs: [{ name: "x", dtype: "f32", shape: ["T", 3] }],
   outputs: ["y"],
-  initializers: {
-    w: { tensor: "proj.weight", storage: { dtype: "f32" } },
-    b: { tensor: "proj.bias", storage: { dtype: "f32" } },
-  },
+  initializers: { w: {}, b: {} },
   values: {
     w: { dtype: "f32", shape: [3, 2] },
     b: { dtype: "f32", shape: [2] },
@@ -56,15 +51,20 @@ const GRAPH: GraphJson = {
   ],
 };
 
-const modelBytes = (): ArrayBuffer =>
-  graphModelBuffer(GRAPH, [
+const openedModel = () =>
+  openGraphModel(GRAPH, [
     {
-      name: "proj.weight",
-      dtype: "F32",
-      shape: [3, 2],
-      data: f32Bytes([0.5, -1.5, 2, 0.25, -0.75, 1]),
+      graph: "model",
+      initializer: "w",
+      bytes: f32Bytes([0.5, -1.5, 2, 0.25, -0.75, 1]),
+      encoding: { codec: "f32" },
     },
-    { name: "proj.bias", dtype: "F32", shape: [2], data: f32Bytes([0.125, -0.5]) },
+    {
+      graph: "model",
+      initializer: "b",
+      bytes: f32Bytes([0.125, -0.5]),
+      encoding: { codec: "f32" },
+    },
   ]);
 
 /** `phase` ごとに値が変わる入力（同じ値を配ると stale slot が検出できない）。 */
@@ -82,9 +82,9 @@ const bits = (tensor: Tensor): readonly number[] =>
 const runFresh = async (
   gpu: Awaited<ReturnType<typeof acquireGpu>>,
   inputs: Parameters<Session["run"]>[0],
-  model: ArrayBuffer = modelBytes(),
+  model = openedModel(),
 ): Promise<Tensor> => {
-  const session = await createSession(gpu, openModel(model));
+  const session = await createSessionFromContainer(gpu, await model, "model");
   try {
     const outputs = await session.run(inputs);
     assertEquals(
@@ -103,7 +103,7 @@ Deno.test({
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
-    const session = await createSession(gpu, openModel(modelBytes()));
+    const session = await createSessionFromContainer(gpu, await openedModel(), "model");
     try {
       // 1 run 目 = ミス（アリーナ経路）/ 2 run 目 = backing 構築 / 3 run 目 = backed 高速路。
       const phases = [0, 1, 2];
@@ -135,7 +135,7 @@ Deno.test({
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
-    const session = await createSession(gpu, openModel(modelBytes()));
+    const session = await createSessionFromContainer(gpu, await openedModel(), "model");
     try {
       await session.run({ x: input(4, 0) });
       const miss = session.diagnostics().lastRun;
@@ -166,7 +166,7 @@ Deno.test({
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
-    const session = await createSession(gpu, openModel(modelBytes()));
+    const session = await createSessionFromContainer(gpu, await openedModel(), "model");
     try {
       // backed run の入力は backing 所有の**1 本**へ上書きされる。await せず並行発行して、
       // 直列化（#chain）と「run は flush 完了後にしか返らない」が崩れたときに落ちる形にする
@@ -187,9 +187,9 @@ Deno.test({
 });
 
 /** グラフ出力が入力の別名になる形（reshape）+ 実 dispatch を 1 本持つ形。 */
-const ALIAS_GRAPH: GraphJson = {
+const ALIAS_GRAPH: DeclarationJson = {
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["reshape", "sigmoid"] },
   symbols: [],
   inputs: [{ name: "x", dtype: "f32", shape: [4, 3] }],
@@ -210,8 +210,8 @@ Deno.test({
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
-    const model = graphModelBuffer(ALIAS_GRAPH);
-    const session = await createSession(gpu, openModel(model));
+    const opened = await openGraphModel(ALIAS_GRAPH);
+    const session = await createSessionFromContainer(gpu, opened, "model");
     try {
       for (const phase of [0, 1, 2]) {
         const x = input(4, phase);
@@ -221,7 +221,7 @@ Deno.test({
         assertEquals(outputs["y"].shape, [12]);
         assertEquals(bits(outputs["y"]), bits(x), `phase ${phase} の別名出力`);
 
-        const reference = await createSession(gpu, openModel(model));
+        const reference = await createSessionFromContainer(gpu, opened, "model");
         try {
           assertEquals(bits(outputs["s"]), bits((await reference.run({ x }))["s"]));
         } finally {
@@ -269,7 +269,7 @@ const backingBytes = async (
   gpu: Awaited<ReturnType<typeof acquireGpu>>,
   rows: number,
 ): Promise<Measured> => {
-  const session = await createSession(gpu, openModel(modelBytes()));
+  const session = await createSessionFromContainer(gpu, await openedModel(), "model");
   try {
     // 1 run 目 = ミス（計画の導出）/ 2 run 目 = ヒット（backing の構築）。
     await session.run({ x: input(rows) });
@@ -302,7 +302,7 @@ Deno.test({
       );
 
       // 既定予算（256 MiB）— この 2 形はどちらも数十バイトなので両方が収まる。
-      const session = await createSession(gpu, openModel(modelBytes()));
+      const session = await createSessionFromContainer(gpu, await openedModel(), "model");
       try {
         await session.run({ x: input(4) });
         assertEquals(
@@ -364,7 +364,7 @@ Deno.test({
       const narrow = await backingBytes(gpu, 4);
       const wide = await backingBytes(gpu, 9);
 
-      const session = await createSession(gpu, openModel(modelBytes()), {
+      const session = await createSessionFromContainer(gpu, await openedModel(), "model", {
         planBackingBudgetBytes: 0,
       });
       try {
@@ -412,7 +412,7 @@ Deno.test({
       const budget = accountedBytes([narrow]) - 1;
       assert(budget >= 0, `narrow の実測 ${JSON.stringify(narrow)} が小さすぎて予算を作れない`);
 
-      const session = await createSession(gpu, openModel(modelBytes()), {
+      const session = await createSessionFromContainer(gpu, await openedModel(), "model", {
         planBackingBudgetBytes: budget,
       });
       try {
@@ -445,7 +445,7 @@ Deno.test({
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
-    const session = await createSession(gpu, openModel(modelBytes()));
+    const session = await createSessionFromContainer(gpu, await openedModel(), "model");
     try {
       await session.run({ x: input(4) });
       await session.run({ x: input(4) });
@@ -481,9 +481,9 @@ Deno.test({
  */
 const HALF_SCALE = Math.fround(Math.sqrt(1 / Math.sqrt(4)));
 
-const TEMP_GRAPH: GraphJson = {
+const TEMP_GRAPH: DeclarationJson = {
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["attention", "reshape"] },
   symbols: ["M"],
   inputs: [
@@ -524,7 +524,11 @@ Deno.test({
     // プール外（入力アップロードと readback staging）のぶん。アリーナの allocatedBytes から
     // これを引いた残りが「dispatch が書く出力ストレージの実確保」= slot 表の総バイト数。
     const hostBytes = inputHostBytes + bufferBytes(ROWS * 4);
-    const reference = await createSession(gpu, openModel(graphModelBuffer(TEMP_GRAPH)));
+    const reference = await createSessionFromContainer(
+      gpu,
+      await openGraphModel(TEMP_GRAPH),
+      "model",
+    );
     let pooledBytes = 0;
     try {
       await reference.run(tempInputs(0));
@@ -536,7 +540,11 @@ Deno.test({
       await reference.dispose();
     }
 
-    const session = await createSession(gpu, openModel(graphModelBuffer(TEMP_GRAPH)));
+    const session = await createSessionFromContainer(
+      gpu,
+      await openGraphModel(TEMP_GRAPH),
+      "model",
+    );
     try {
       const first = (await session.run(tempInputs(1)))["y"];
       const second = (await session.run(tempInputs(1)))["y"];
@@ -638,9 +646,10 @@ const assertPartialBackingFault = async (
   },
 ): Promise<void> => {
   const gpu = await acquireGpu();
-  const session = await createSession(
+  const session = await createSessionFromContainer(
     gpu,
-    openModel(modelBytes()),
+    await openedModel(),
+    "model",
     planBackingBudgetBytes === undefined ? {} : { planBackingBudgetBytes },
   );
   // 常駐入力（焼き込み参照が retain / release される側）。backing は入力バッファを所有
@@ -756,7 +765,7 @@ const assertLruOrder = async (touched: 4 | 9): Promise<void> => {
         `（${JSON.stringify(narrow)} / ${JSON.stringify(wide)}）`,
     );
 
-    const session = await createSession(gpu, openModel(modelBytes()), {
+    const session = await createSessionFromContainer(gpu, await openedModel(), "model", {
       planBackingBudgetBytes: accountedBytes([narrow, wide]),
     });
     const fault = injectStorageFault(gpu.device);

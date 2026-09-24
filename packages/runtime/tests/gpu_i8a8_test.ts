@@ -31,7 +31,8 @@
 
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { gridStrideWorkgroups } from "../src/codegen/dispatch.ts";
-import { openModel } from "../src/format/container.ts";
+import { perChannelGroupSize } from "../src/format/container/codecs.ts";
+import type { OpenedContainer } from "../src/format/container/open.ts";
 import { RunArena } from "../src/gpu/arena.ts";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
 import { PipelineCache } from "../src/gpu/pipeline-cache.ts";
@@ -56,18 +57,27 @@ import {
   roundTiesToEven,
 } from "../src/reference/i8a8.ts";
 import {
-  createSession,
+  createSessionFromContainer,
   I8A8_DOT,
   type I8a8Dot,
   type SessionOptions,
   type Tensor,
 } from "../src/runtime/executor.ts";
+import type { BoundContainer } from "../src/format/container/bind.ts";
 import { linearKey } from "../src/kernels/linear.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
-import { buildSafetensors, f32Bytes, type GraphJson, type TensorSpec } from "./helpers/format.ts";
+import type { TensorInput } from "./helpers/container-write.ts";
 import { quantizeI8 } from "./helpers/i8.ts";
 import { quantizeI4 } from "./helpers/i4.ts";
-import { fill, type FilledTensor } from "./helpers/graph.ts";
+import {
+  type DeclarationJson,
+  f32Bytes,
+  fill,
+  type FilledTensor,
+  GRAPH_NAME,
+  memoryModel,
+  openModelBytes,
+} from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
 
 const STORAGE_IN = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
@@ -394,43 +404,63 @@ type LinearCase = {
   readonly x?: (index: number, m: number, k: number) => number;
 };
 
-/** `linear(x, w, b)` 1 本のグラフ（w は i8 + per-channel scale）。 */
-const i8LinearModel = (
+/** `linear(x, w, b)` 1 本の宣言と供給（w は i8 + per-channel scale）。 */
+const i8LinearParts = (
   m: number,
   n: number,
   k: number,
   quantized: ReturnType<typeof quantizeI8>,
   bias: FilledTensor,
-): ArrayBuffer => {
-  const graph: GraphJson = {
+): { readonly declaration: DeclarationJson; readonly tensors: readonly TensorInput[] } => ({
+  declaration: {
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: ["linear"] },
     symbols: [],
     inputs: [{ name: "x", dtype: "f32", shape: [m, k] }],
     outputs: ["y"],
-    initializers: {
-      w: { tensor: "m.w", storage: { dtype: "i8", scale: "m.s" } },
-      b: { tensor: "m.b", storage: { dtype: "f32" } },
-    },
+    initializers: { w: {}, b: {} },
     values: {
       w: { dtype: "f32", shape: [n, k] },
       b: { dtype: "f32", shape: [n] },
       y: { dtype: "f32", shape: [m, n] },
     },
     nodes: [{ op: "linear", ins: ["x", "w", "b"], outs: ["y"], attrs: {} }],
-  };
-  // MUST: I8（1 バイト要素）はファイル末尾（後続 F32 の絶対 offset が 4 の倍数から外れる）
-  const tensors: TensorSpec[] = [
-    { name: "m.b", dtype: "F32", shape: [n], data: new Uint8Array(bias.data.buffer.slice(0)) },
-    { name: "m.s", dtype: "F32", shape: [n, 1], data: f32Bytes(quantized.scale) },
-    { name: "m.w", dtype: "I8", shape: [n, k], data: quantized.bytes },
-  ];
-  return buildSafetensors(tensors, { karume_ir: JSON.stringify(graph) });
+  },
+  tensors: [
+    {
+      graph: GRAPH_NAME,
+      initializer: "b",
+      bytes: new Uint8Array(bias.data.buffer.slice(0)),
+      encoding: { codec: "f32" },
+    },
+    {
+      graph: GRAPH_NAME,
+      initializer: "w",
+      bytes: quantized.bytes,
+      // per-channel の groupSize は台帳（`codecs.ts`）から引く（行長 k・退化形 k = 0 は 1）。
+      encoding: {
+        codec: "int8-sym",
+        groupSize: perChannelGroupSize(k),
+        scale: { bytes: f32Bytes(quantized.scale), dtype: "f32" },
+      },
+    },
+  ],
+});
+
+const i8LinearModel = (
+  m: number,
+  n: number,
+  k: number,
+  quantized: ReturnType<typeof quantizeI8>,
+  bias: FilledTensor,
+): Promise<OpenedContainer> => {
+  const { declaration, tensors } = i8LinearParts(m, n, k, quantized, bias);
+  return openModelBytes(declaration, tensors);
 };
 
 type PreparedLinear = {
-  readonly model: ArrayBuffer;
+  readonly model: Promise<BoundContainer>;
   readonly x: Tensor;
   readonly expected: Float32Array<ArrayBuffer>;
 };
@@ -464,7 +494,12 @@ const runLinear = async (
   prepared: PreparedLinear,
   options: SessionOptions,
 ): Promise<{ readonly y: Tensor; readonly pipelineCount: number; readonly keys: string[] }> => {
-  const session = await createSession(gpu, openModel(prepared.model), options);
+  const session = await createSessionFromContainer(
+    gpu,
+    await prepared.model,
+    GRAPH_NAME,
+    options,
+  );
   try {
     const outputs = await session.run({ x: prepared.x });
     const diagnostics = session.diagnostics();
@@ -667,10 +702,13 @@ Deno.test({
     const bias = fill([n], SIGNED);
     // 重みは 0 要素（[n,0]）。scale は per-channel の形だけ保つ（縮約が空なので読まれない）。
     const quantized = quantizeI8(new Float32Array(0), [n, 0], 0);
-    const model = i8LinearModel(m, n, 0, quantized, bias);
+    // NOTE: 0 要素の重みは `krm` では持てない（書き手が長さ 0 の block を作らない —
+    // container-v1 §4.1）。退化 shape の経路を踏むのが主題なので、供給はメモリ内容器で渡す。
+    const { declaration, tensors } = i8LinearParts(m, n, 0, quantized, bias);
+    const model = memoryModel(declaration, tensors);
     const x = fill([m, 0], SIGNED);
     const runK0 = async (gpu: GpuContext, options: SessionOptions): Promise<Error> => {
-      const session = await createSession(gpu, openModel(model), options);
+      const session = await createSessionFromContainer(gpu, model, GRAPH_NAME, options);
       try {
         return await assertRejects(() => session.run({ x }), Error);
       } finally {
@@ -703,7 +741,7 @@ Deno.test({
     const prepared = prepareLinear({ name: "overflow gate", m: 1, n: 4, k });
     const gpu = await acquireGpu();
     try {
-      const session = await createSession(gpu, openModel(prepared.model), {
+      const session = await createSessionFromContainer(gpu, await prepared.model, GRAPH_NAME, {
         linearCompute: "a8",
       });
       try {
@@ -757,18 +795,15 @@ const i4LinearModel = (
   groupSize: number,
   quantized: ReturnType<typeof quantizeI4>,
   bias: FilledTensor,
-): ArrayBuffer => {
-  const graph: GraphJson = {
+): Promise<OpenedContainer> => {
+  const declaration: DeclarationJson = {
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: ["linear"] },
     symbols: [],
     inputs: [{ name: "x", dtype: "f32", shape: [m, k] }],
     outputs: ["y"],
-    initializers: {
-      w: { tensor: "m.w", storage: { dtype: "i4", scale: "m.s", group_size: groupSize } },
-      b: { tensor: "m.b", storage: { dtype: "f32" } },
-    },
+    initializers: { w: {}, b: {} },
     values: {
       w: { dtype: "f32", shape: [n, k] },
       b: { dtype: "f32", shape: [n] },
@@ -776,19 +811,24 @@ const i4LinearModel = (
     },
     nodes: [{ op: "linear", ins: ["x", "w", "b"], outs: ["y"], attrs: {} }],
   };
-  return buildSafetensors(
-    [
-      { name: "m.w", dtype: "I4", shape: [n, k], data: quantized.bytes },
-      {
-        name: "m.s",
-        dtype: "F32",
-        shape: [...quantized.scaleShape],
-        data: f32Bytes([...quantized.scale]),
+  return openModelBytes(declaration, [
+    {
+      graph: GRAPH_NAME,
+      initializer: "w",
+      bytes: quantized.bytes,
+      encoding: {
+        codec: "int4-sym-g",
+        groupSize,
+        scale: { bytes: f32Bytes([...quantized.scale]), dtype: "f32" },
       },
-      { name: "m.b", dtype: "F32", shape: [n], data: f32Bytes([...bias.data]) },
-    ],
-    { karume_ir: JSON.stringify(graph) },
-  );
+    },
+    {
+      graph: GRAPH_NAME,
+      initializer: "b",
+      bytes: f32Bytes([...bias.data]),
+      encoding: { codec: "f32" },
+    },
+  ]);
 };
 
 type W4a8Case = {
@@ -824,7 +864,7 @@ const W4A8_CASES: readonly W4a8Case[] = [
 ];
 
 type PreparedW4a8 = {
-  readonly model: ArrayBuffer;
+  readonly model: Promise<BoundContainer>;
   readonly x: Tensor;
   readonly expected: Float32Array<ArrayBuffer>;
 };

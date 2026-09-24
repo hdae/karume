@@ -1,11 +1,19 @@
 // INT2 の packed 実行・CPU展開・借用を、同じ復元値の f32 経路と突き合わせる。
 import { assert, assertEquals, assertRejects } from "@std/assert";
-import { openModel } from "../src/format/container.ts";
+import type { OpenedContainer } from "../src/format/container/open.ts";
 import { acquireGpu } from "../src/gpu/device.ts";
-import { createSession, createSessionFromShards, type Tensor } from "../src/runtime/executor.ts";
-import { estimateSessionMemory } from "../src/runtime/estimate.ts";
-import { buildSafetensors, f32Bytes, type GraphJson, type TensorSpec } from "./helpers/format.ts";
-import { shardStream } from "./helpers/shard-fixture.ts";
+import {
+  createSessionFromContainer,
+  prepareContainer,
+  type Tensor,
+} from "../src/runtime/executor.ts";
+import type { TensorInput, WriteOptions } from "./helpers/container-write.ts";
+import {
+  type DeclarationJson,
+  f32Bytes,
+  GRAPH_NAME,
+  openModelBytes,
+} from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE, SHADER_F16_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
 
 const weight = (
@@ -26,26 +34,19 @@ const weight = (
   }
   return { bytes, scale, values };
 };
-const linearGraph = (
+const linearDeclaration = (
   m: number,
   n: number,
   k: number,
-  storage: "i2" | "f32",
   expanded = false,
-): GraphJson => ({
+): DeclarationJson => ({
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["linear"] },
   symbols: [],
   inputs: [{ name: "x", dtype: "f32", shape: [m, k] }],
   outputs: expanded ? ["y", "w"] : ["y"],
-  initializers: {
-    w: {
-      tensor: "w",
-      storage: storage === "i2" ? { dtype: storage, scale: "scale" } : { dtype: storage },
-    },
-    b: { tensor: "b", storage: { dtype: "f32" } },
-  },
+  initializers: { w: {}, b: {} },
   values: {
     w: { dtype: "f32", shape: [n, k] },
     b: { dtype: "f32", shape: [n] },
@@ -53,39 +54,55 @@ const linearGraph = (
   },
   nodes: [{ op: "linear", ins: ["x", "w", "b"], outs: ["y"], attrs: {} }],
 });
-const makeModel = (
-  graph: GraphJson,
+/** 宣言 + 復元値から供給を組む（`int2-off` は per-channel なので groupSize = 行長 k）。 */
+const weightTensors = (
+  declaration: DeclarationJson,
   n: number,
   k: number,
+  storage: "i2" | "f32",
   w: ReturnType<typeof weight>,
-): ArrayBuffer => {
-  const tensors: TensorSpec[] = [];
-  if (graph.initializers.b) {
+): TensorInput[] => {
+  const tensors: TensorInput[] = [];
+  if (declaration.initializers.b !== undefined) {
     tensors.push({
-      name: "b",
-      dtype: "F32",
-      shape: [n],
-      data: f32Bytes(Array.from({ length: n }, (_, i) => (i % 5 - 2) * 0.17)),
+      graph: GRAPH_NAME,
+      initializer: "b",
+      bytes: f32Bytes(Array.from({ length: n }, (_, i) => (i % 5 - 2) * 0.17)),
+      encoding: { codec: "f32" },
     });
   }
-  if (graph.initializers.w.shared === undefined) {
-    if (graph.initializers.w.storage.dtype === "i2") {
-      tensors.push({
-        name: "scale",
-        dtype: "F32",
-        shape: [n, 1],
-        data: new Uint8Array(w.scale.buffer),
-      });
-      tensors.push({ name: "w", dtype: "I2", shape: [n, k], data: w.bytes });
-    } else {tensors.push({
-        name: "w",
-        dtype: "F32",
-        shape: [n, k],
-        data: new Uint8Array(w.values.buffer),
-      });}
+  if (declaration.initializers.w.shared === undefined) {
+    tensors.push(
+      storage === "i2"
+        ? {
+          graph: GRAPH_NAME,
+          initializer: "w",
+          bytes: w.bytes,
+          encoding: {
+            codec: "int2-off",
+            groupSize: k,
+            scale: { bytes: new Uint8Array(w.scale.buffer), dtype: "f32" },
+          },
+        }
+        : {
+          graph: GRAPH_NAME,
+          initializer: "w",
+          bytes: new Uint8Array(w.values.buffer),
+          encoding: { codec: "f32" },
+        },
+    );
   }
-  return buildSafetensors(tensors, { karume_ir: JSON.stringify(graph) });
+  return tensors;
 };
+const openLinear = (
+  declaration: DeclarationJson,
+  n: number,
+  k: number,
+  storage: "i2" | "f32",
+  w: ReturnType<typeof weight>,
+  options?: WriteOptions,
+): Promise<OpenedContainer> =>
+  openModelBytes(declaration, weightTensors(declaration, n, k, storage, w), options);
 const bits = (tensor: Tensor): Uint32Array<ArrayBuffer> =>
   new Uint32Array(tensor.data.buffer, tensor.data.byteOffset, tensor.data.byteLength / 4);
 
@@ -108,11 +125,15 @@ Deno.test({
             shape: [m, k],
             data: Float32Array.from({ length: m * k }, (_, i) => Math.sin(i * 0.37) * 0.3),
           } satisfies Tensor;
-        const model = openModel(makeModel(linearGraph(m, n, k, "i2"), n, k, w));
-        const session = await createSession(gpu, model);
-        const baseline = await createSession(
+        const prepared = prepareContainer(
+          await openLinear(linearDeclaration(m, n, k), n, k, "i2", w),
+          GRAPH_NAME,
+        );
+        const session = await prepared.createContainerSession(gpu);
+        const baseline = await createSessionFromContainer(
           gpu,
-          openModel(makeModel(linearGraph(m, n, k, "f32"), n, k, w)),
+          await openLinear(linearDeclaration(m, n, k), n, k, "f32", w),
+          GRAPH_NAME,
         );
         try {
           const actual = (await session.run({ x })).y, expected = (await baseline.run({ x })).y;
@@ -124,7 +145,7 @@ Deno.test({
           );
           assertEquals(diagnostics.storage.hostExpandedBytes, 0);
           assertEquals(
-            estimateSessionMemory(model).resident.weights.compressedBytes,
+            prepared.estimate().resident.weights.compressedBytes,
             w.bytes.byteLength + w.scale.byteLength,
           );
           if (TIMING_ACQUIRE_OPTIONS.gpuTiming) {
@@ -152,7 +173,7 @@ Deno.test({
   fn: async () => {
     const gpu = await acquireGpu();
     const n = 7, k = 64, w = weight(n, k);
-    const graph = linearGraph(1, n, k, "i2");
+    const graph = linearDeclaration(1, n, k);
     delete graph.initializers.b;
     delete graph.values.b;
     graph.requires.ops = ["embedding"];
@@ -160,7 +181,11 @@ Deno.test({
     graph.values.y.shape = [3, k];
     graph.nodes = [{ op: "embedding", ins: ["w", "ids"], outs: ["y"], attrs: { padding_idx: -1 } }];
     try {
-      const owner = await createSession(gpu, openModel(makeModel(graph, n, k, w)));
+      const owner = await createSessionFromContainer(
+        gpu,
+        await openLinear(graph, n, k, "i2", w),
+        GRAPH_NAME,
+      );
       try {
         const y =
           (await owner.run({ ids: { dtype: "i32", shape: [3], data: Int32Array.of(6, 0, 3) } })).y;
@@ -169,14 +194,18 @@ Deno.test({
           expected.set(w.values.subarray(row * k, (row + 1) * k), i * k)
         );
         assertEquals(bits(y), new Uint32Array(expected.buffer));
-        const borrowed = linearGraph(1, n, k, "i2");
-        borrowed.initializers.w = { shared: { tensor: "w" }, storage: { dtype: "i2" } };
-        const borrower = await createSession(gpu, openModel(makeModel(borrowed, n, k, w)), {
-          sharedWeights: { w: owner.exportWeight("w") },
-        });
-        const baseline = await createSession(
+        const borrowed = linearDeclaration(1, n, k);
+        borrowed.initializers.w = { shared: true };
+        const borrower = await createSessionFromContainer(
           gpu,
-          openModel(makeModel(linearGraph(1, n, k, "f32"), n, k, w)),
+          await openLinear(borrowed, n, k, "i2", w),
+          GRAPH_NAME,
+          { sharedWeights: { w: owner.exportWeight("w") } },
+        );
+        const baseline = await createSessionFromContainer(
+          gpu,
+          await openLinear(linearDeclaration(1, n, k), n, k, "f32", w),
+          GRAPH_NAME,
         );
         try {
           const x = {
@@ -207,9 +236,10 @@ Deno.test({
     const gpu = await acquireGpu({ shaderF16: true });
     const n = 4, k = 64, w = weight(n, k);
     try {
-      const expanded = await createSession(
+      const expanded = await createSessionFromContainer(
         gpu,
-        openModel(makeModel(linearGraph(1, n, k, "i2", true), n, k, w)),
+        await openLinear(linearDeclaration(1, n, k, true), n, k, "i2", w),
+        GRAPH_NAME,
       );
       try {
         const result = await expanded.run({
@@ -222,9 +252,10 @@ Deno.test({
         await expanded.dispose();
       }
       for (const linearCompute of ["a8", "f16"] as const) {
-        const session = await createSession(
+        const session = await createSessionFromContainer(
           gpu,
-          openModel(makeModel(linearGraph(1, n, k, "i2"), n, k, w)),
+          await openLinear(linearDeclaration(1, n, k), n, k, "i2", w),
+          GRAPH_NAME,
           { linearCompute },
         );
         try {
@@ -251,33 +282,20 @@ Deno.test({
     const n = 7, k = 64, w = weight(n, k);
     try {
       for (const expanded of [false, true]) {
-        const graph = linearGraph(1, n, k, "i2", expanded);
-        const shards = [
-          buildSafetensors([], { karume_ir: JSON.stringify(graph) }),
-          buildSafetensors([
-            {
-              name: "b",
-              dtype: "F32",
-              shape: [n],
-              data: f32Bytes(Array.from({ length: n }, (_, i) => (i % 5 - 2) * 0.17)),
-            },
-            { name: "scale", dtype: "F32", shape: [n, 1], data: new Uint8Array(w.scale.buffer) },
-            {
-              name: "w#00001-of-00002",
-              dtype: "I2",
-              shape: [2, k],
-              data: w.bytes.subarray(0, 2 * k / 4),
-            },
-          ]),
-          buildSafetensors([{
-            name: "w#00002-of-00002",
-            dtype: "I2",
-            shape: [n - 2, k],
-            data: w.bytes.subarray(2 * k / 4),
-          }]),
-        ];
-        const full = await createSession(gpu, openModel(makeModel(graph, n, k, w)));
-        const partial = await createSessionFromShards(gpu, shardStream(shards));
+        const graph = linearDeclaration(1, n, k, expanded);
+        // block 上限を 1 行（16 B）の 4 倍まで下げて、書き手に w を piece へ割らせる。
+        const split = await openLinear(graph, n, k, "i2", w, { blockBytes: 64 });
+        assertEquals(
+          split.graphs[GRAPH_NAME].supplies.get("w")?.blocks.length,
+          2,
+          "piece 分割が起きていない（検出器が空回りする）",
+        );
+        const full = await createSessionFromContainer(
+          gpu,
+          await openLinear(graph, n, k, "i2", w),
+          GRAPH_NAME,
+        );
+        const partial = await createSessionFromContainer(gpu, split, GRAPH_NAME);
         try {
           const x = {
             dtype: "f32",
@@ -307,13 +325,15 @@ Deno.test({
       // r1 / r2 / r4、語の先読みと残り、長い K を跨ぐ。scale と bias は2冪に限定しない。
       for (const [m, n, k] of [[3, 68, 320], [3, 8192, 320], [7, 8192, 576], [2, 68, 12288]]) {
         const w = weight(n, k);
-        const rows = await createSession(
+        const rows = await createSessionFromContainer(
           gpu,
-          openModel(makeModel(linearGraph(m, n, k, "i2"), n, k, w)),
+          await openLinear(linearDeclaration(m, n, k), n, k, "i2", w),
+          GRAPH_NAME,
         );
-        const single = await createSession(
+        const single = await createSessionFromContainer(
           gpu,
-          openModel(makeModel(linearGraph(1, n, k, "i2"), n, k, w)),
+          await openLinear(linearDeclaration(1, n, k), n, k, "i2", w),
+          GRAPH_NAME,
         );
         try {
           const data = Float32Array.from(

@@ -4,12 +4,12 @@
  *
  * ## なぜ HTTP を挟まないのか
  *
- * 手元の配布形は取得元ハンドル（`@karume/hub/deno` の `denoDirectory`）で直に読める。取得層の
- * shard 面（グラフ shard → `prepareModel` → 重み shard の逐次流し）はそのまま効くので、RAM に
- * 載るのは常に「今の 1 本」だけ — 使い捨ての HF 形サーバ（`local-dist-server.ts`）を挟んでいた
- * 頃の利点は全部残り、**永続キャッシュへの複製もポートも要らなくなった**。あちらは疑似 HF の
- * HTTP 疎通そのものを見る門（`packages/models/tests/e2e_gemma4_pretrained_test.ts`）が消費者
- * として残っている。
+ * 手元の配布形は取得元ハンドル（`@karume/hub/deno` の `denoDirectory`）で直に読める。容器の
+ * 読みは part 単位（part 0 の 2 文書だけで `prepareContainer` まで進み、重みの block は part
+ * ごとに取り出す）なので、RAM に載るのは常に「今の part」だけ — 使い捨ての HF 形サーバ
+ * （`local-dist-server.ts`）を挟んでいた頃の利点は全部残り、**永続キャッシュへの複製もポートも
+ * 要らなくなった**。あちらは疑似 HF の HTTP 疎通そのものを見る門
+ * （`packages/models/tests/e2e_gemma4_pretrained_test.ts`）が消費者として残っている。
  *
  * ## 越境参照は明示 mapping だけ
  *

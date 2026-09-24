@@ -16,7 +16,7 @@
  * （3.7GB）を VAE ロードの**前**に解放する。実測機の GPUBuffer 総確保量の天井は 7,280MiB で、
  * テキスト経路と DiT が同時に生きると 5.2GB になり活性を乗せる余地が薄くなる。
  * したがって {@link AnimaPipeline.fromAssets} は **Session を 1 本も張らない** —
- * 開くのはコンテナ（`openModel` = ヘッダ解析のみ）までで、GPU 常駐は
+ * 開くのはコンテナ（`openContainer` = 2 文書の解析のみ）までで、GPU 常駐は
  * {@link AnimaPipeline.generate} の中で段ごとに張っては畳む。
  *
  * MUST: この段取りは**公開 API 側でも**守る — `generate` は直列化鎖に載せ（並行呼び出しは
@@ -260,7 +260,7 @@ export type AnimaPipelineOptions = {
   ) => void;
   /**
    * 構築の中断。{@link AnimaPipeline.fromAssets} が段の境目（入口 / トークナイザ解釈 /
-   * 各 `openModel` の間 / GPU 取得の前後）で検査する。入口を除く各境目では**イベントループへ
+   * 各 `openContainer` の間 / GPU 取得の前後）で検査する。入口を除く各境目では**イベントループへ
    * 1 度譲ってから**検査するので、同期解析の最中に届いた中断も次の境目で効く
    * （`options.gpu` を渡して await が 1 つも無い経路でも同じ）。
    * {@link AnimaPipeline.fromPretrained} は同じ 1 本を取得層へも渡すので、**DL と組み立ての

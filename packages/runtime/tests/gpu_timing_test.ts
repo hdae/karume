@@ -9,27 +9,22 @@ import { elementwiseKey } from "../src/codegen/elementwise.ts";
 import { acquireGpu, GpuFeatureError, planTimestampFeature } from "../src/gpu/device.ts";
 import type { GpuTimingStats } from "../src/gpu/submit.ts";
 import { matmulKey } from "../src/kernels/matmul.ts";
-import { openModel } from "../src/format/container.ts";
-import { createSession, type Tensor } from "../src/runtime/executor.ts";
-import { f32Bytes, type GraphJson } from "./helpers/format.ts";
-import { fill, graphModelBuffer } from "./helpers/graph.ts";
+import { createSessionFromContainer, type Tensor } from "../src/runtime/executor.ts";
+import { type DeclarationJson, f32Bytes, fill, openGraphModel } from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE } from "./helpers/gpu.ts";
 
 /**
  * y = relu(x·w + b) + b。**add を 2 回**通すのは、集計がキー単位でまとまること
  * （dispatch 4 件 → 内訳 3 キー）を、件数の一致だけで確かめられるようにするため。
  */
-const GRAPH: GraphJson = {
+const GRAPH: DeclarationJson = {
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["matmul", "add", "relu"] },
   symbols: [],
   inputs: [{ name: "x", dtype: "f32", shape: [6, 4] }],
   outputs: ["y"],
-  initializers: {
-    w: { tensor: "enc.w", storage: { dtype: "f32" } },
-    b: { tensor: "enc.b", storage: { dtype: "f32" } },
-  },
+  initializers: { w: {}, b: {} },
   values: {
     w: { dtype: "f32", shape: [4, 3] },
     b: { dtype: "f32", shape: [3] },
@@ -74,11 +69,11 @@ const runOnce = async (
   readonly timing: GpuTimingStats | undefined;
 }> => {
   const gpu = await acquireGpu(gpuTiming === undefined ? {} : { gpuTiming });
-  const model = openModel(graphModelBuffer(GRAPH, [
-    { name: "enc.w", dtype: "F32", shape: [4, 3], data: f32Bytes(W) },
-    { name: "enc.b", dtype: "F32", shape: [3], data: f32Bytes(B) },
-  ]));
-  const session = await createSession(gpu, model);
+  const opened = await openGraphModel(GRAPH, [
+    { graph: "model", initializer: "w", bytes: f32Bytes(W), encoding: { codec: "f32" } },
+    { graph: "model", initializer: "b", bytes: f32Bytes(B), encoding: { codec: "f32" } },
+  ]);
+  const session = await createSessionFromContainer(gpu, opened, "model");
   try {
     const outputs = await session.run({ x: fill([6, 4], (i) => ((i % 11) - 5) * 0.5) });
     const diagnostics = session.diagnostics();

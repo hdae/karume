@@ -1126,7 +1126,7 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
           const extra = await deriveInputs(ids, positions, signal);
           // MUST: 派生入力の `await` 明けにもう一度見る（ADR 0083 決定 5 の「段の境目」は run の
           // **発行直前**）。ここを省くと、中断が届いた後に run が 1 本まるごと進む — 先頭 chunk は
-          // 常に cold miss で GB 級の shard を読むので、「送信直後に停止」で必ず踏む窓になる。
+          // 常に cold miss で GB 級の block を読むので、「送信直後に停止」で必ず踏む窓になる。
           signal?.throwIfAborted();
           const outputs = await session.run(
             {

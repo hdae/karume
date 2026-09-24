@@ -1,14 +1,18 @@
 import { assertEquals } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
-import { parseIrGraph } from "../src/format/ir.ts";
+import { mergedGraph } from "../src/format/container/bind.ts";
 import { planFusions } from "../src/runtime/fusion.ts";
 import { countUses, planGraph } from "../src/runtime/plan.ts";
 import { rmsNormSubgroupKey } from "../src/kernels/rms-norm-subgroup.ts";
 import { rmsNormAddKey } from "../src/kernels/rms-norm.ts";
 import { rmsNormAddGraph, type RmsNormAddGraphOptions } from "./helpers/rms-norm-add-graph.ts";
+import { GRAPH_NAME, memoryModel } from "./helpers/model-fixture.ts";
 
 const fuse = (options: RmsNormAddGraphOptions = {}, enabled?: boolean, subgroup = false) => {
-  const graph = parseIrGraph(JSON.stringify(rmsNormAddGraph(options)));
+  const graph = mergedGraph(
+    memoryModel(rmsNormAddGraph(options), []).graphs[GRAPH_NAME],
+    GRAPH_NAME,
+  );
   return planFusions(planGraph(graph, {}).nodes, {
     useCounts: countUses(graph),
     outputNames: new Set(graph.outputs),

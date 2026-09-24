@@ -1,12 +1,12 @@
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
 import { acquireGpu } from "../src/gpu/device.ts";
-import { openModel } from "../src/format/container.ts";
-import { createSession } from "../src/runtime/executor.ts";
+import { createSessionFromContainer } from "../src/runtime/executor.ts";
 import type { SessionOptions } from "../src/runtime/session-types.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { linearStaticQuantizeModel } from "./helpers/linear-static-quantize-graph.ts";
+import { GRAPH_NAME } from "./helpers/model-fixture.ts";
 
 const input = (m: number, k = 1536) => ({
   x: {
@@ -29,10 +29,12 @@ describe({
           const n = storage === "i2" ? 12288 : 256;
           let first: Uint32Array<ArrayBuffer> | undefined;
           for (const m of [1, 4, 8, 9]) {
-            const model = openModel(linearStaticQuantizeModel({ storage, n, m }));
-            const baseline = await createSession(gpu, model, { linearGemvReduce: "parallel" });
+            const model = linearStaticQuantizeModel({ storage, n, m });
+            const baseline = await createSessionFromContainer(gpu, model, GRAPH_NAME, {
+              linearGemvReduce: "parallel",
+            });
             try {
-              const fused = await createSession(gpu, model, {
+              const fused = await createSessionFromContainer(gpu, model, GRAPH_NAME, {
                 linearGemvReduce: "parallel",
                 fuseLinearStaticQuantize: true,
               });
@@ -69,16 +71,18 @@ describe({
       try {
         for (const storage of ["i2", "i4", "i8"] as const) {
           const n = storage === "i2" ? 12288 : 256;
-          const owner = await createSession(
+          const owner = await createSessionFromContainer(
             gpu,
-            openModel(linearStaticQuantizeModel({ storage, n })),
+            linearStaticQuantizeModel({ storage, n }),
+            GRAPH_NAME,
             { linearGemvReduce: "parallel", fuseLinearStaticQuantize: true },
           );
           try {
             const expected = await owner.run(input(4));
-            const borrower = await createSession(
+            const borrower = await createSessionFromContainer(
               gpu,
-              openModel(linearStaticQuantizeModel({ storage, n, sharedWeight: true })),
+              linearStaticQuantizeModel({ storage, n, sharedWeight: true }),
+              GRAPH_NAME,
               {
                 linearGemvReduce: "parallel",
                 fuseLinearStaticQuantize: true,
@@ -107,12 +111,12 @@ describe({
     it("不正な型と未対応の計算方式を構築時に拒否する", async () => {
       const gpu = await acquireGpu();
       try {
-        const model = openModel(linearStaticQuantizeModel());
+        const model = linearStaticQuantizeModel();
         for (const value of [null, 0, 1, "true", [], {}]) {
           const options: SessionOptions = { linearGemvReduce: "parallel" };
           Object.defineProperty(options, "fuseLinearStaticQuantize", { value });
           await assertRejects(
-            () => createSession(gpu, model, options),
+            () => createSessionFromContainer(gpu, model, GRAPH_NAME, options),
             ExecutionError,
             "fuseLinearStaticQuantize",
           );
@@ -127,12 +131,18 @@ describe({
           ] satisfies SessionOptions[]
         ) {
           await assertRejects(
-            () => createSession(gpu, model, { ...options, fuseLinearStaticQuantize: true }),
+            () =>
+              createSessionFromContainer(gpu, model, GRAPH_NAME, {
+                ...options,
+                fuseLinearStaticQuantize: true,
+              }),
             ExecutionError,
             "fuseLinearStaticQuantize",
           );
         }
-        const session = await createSession(gpu, model, { fuseLinearStaticQuantize: false });
+        const session = await createSessionFromContainer(gpu, model, GRAPH_NAME, {
+          fuseLinearStaticQuantize: false,
+        });
         try {
           const result = await session.run(input(4));
           assert(result.y.data.every(Number.isFinite));

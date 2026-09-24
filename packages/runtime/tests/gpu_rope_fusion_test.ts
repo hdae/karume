@@ -2,12 +2,10 @@
 // 既存 primitive 列とのビット parity と dispatch 削減を直接固定する。
 
 import { assert, assertEquals } from "@std/assert";
-import { openModel } from "../src/format/container.ts";
 import { acquireGpu, LIMIT_CAPS } from "../src/gpu/device.ts";
 import { ROPE_BSHD_KEY, ROPE_KEY } from "../src/kernels/rope.ts";
-import { createSession, type Tensor } from "../src/runtime/executor.ts";
-import type { GraphJson } from "./helpers/format.ts";
-import { fill, graphModelBuffer } from "./helpers/graph.ts";
+import { createSessionFromContainer, type Tensor } from "../src/runtime/executor.ts";
+import { type DeclarationJson, fill, GRAPH_NAME, openModelBytes } from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
 
 // H=1, S=3 では n=384 となり、256 スレッド workgroup の末尾端数も通る。
@@ -26,7 +24,7 @@ const ropeGraph = (
   heads = 1,
   headDim = 128,
   layout: "bhsd" | "bshd" = "bhsd",
-): GraphJson => {
+): DeclarationJson => {
   const shape = layout === "bshd"
     ? [1, "S", heads, headDim] as const
     : [1, heads, "S", headDim] as const;
@@ -36,7 +34,7 @@ const ropeGraph = (
   const halfShape = layout === "bshd"
     ? [1, "S", heads, headDim / 2] as const
     : [1, heads, "S", headDim / 2] as const;
-  const values: GraphJson["values"] = {
+  const values: DeclarationJson["values"] = {
     first: { dtype: "f32", shape: [...halfShape] },
     second: { dtype: "f32", shape: [...halfShape] },
     negative: { dtype: "f32", shape: [...halfShape] },
@@ -46,13 +44,13 @@ const ropeGraph = (
     y: { dtype: "f32", shape: [...shape] },
   };
   if (interpose) values.first_alias = { dtype: "f32", shape: [...halfShape] };
-  const direct: GraphJson["nodes"][number] = {
+  const direct: DeclarationJson["nodes"][number] = {
     op: "mul",
     ins: ["x", "cos"],
     outs: ["direct"],
     attrs: {},
   };
-  const nodes: GraphJson["nodes"] = [];
+  const nodes: DeclarationJson["nodes"] = [];
   if (order === "direct-first") nodes.push(direct);
   nodes.push({
     op: "slice",
@@ -85,7 +83,7 @@ const ropeGraph = (
   );
   return {
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: [...new Set(nodes.map((node) => node.op))] },
     symbols: ["S"],
     inputs: [
@@ -153,11 +151,16 @@ Deno.test({
     const inputs = ropeInputs(1, 3);
     try {
       for (const order of ["slice-first", "direct-first"] as const) {
-        const fused = await createSession(
+        const fused = await createSessionFromContainer(
           gpu,
-          openModel(graphModelBuffer(ropeGraph(order, false))),
+          await openModelBytes(ropeGraph(order, false), []),
+          GRAPH_NAME,
         );
-        const split = await createSession(gpu, openModel(graphModelBuffer(ropeGraph(order, true))));
+        const split = await createSessionFromContainer(
+          gpu,
+          await openModelBytes(ropeGraph(order, true), []),
+          GRAPH_NAME,
+        );
         try {
           const fusedOut = (await fused.run(inputs)).y;
           const splitOut = (await split.run(inputs)).y;
@@ -201,9 +204,10 @@ Deno.test({
     const inputs = ropeInputs(1, 3);
     try {
       for (const order of ["slice-first", "direct-first"] as const) {
-        const fused = await createSession(
+        const fused = await createSessionFromContainer(
           gpu,
-          openModel(graphModelBuffer(ropeGraph(order, false))),
+          await openModelBytes(ropeGraph(order, false), []),
+          GRAPH_NAME,
         );
         try {
           await fused.run(inputs);
@@ -230,13 +234,15 @@ Deno.test({
     const inputs = ropeInputs(3, 5);
     try {
       for (const order of ["slice-first", "direct-first"] as const) {
-        const fused = await createSession(
+        const fused = await createSessionFromContainer(
           gpu,
-          openModel(graphModelBuffer(ropeGraph(order, false, 3))),
+          await openModelBytes(ropeGraph(order, false, 3), []),
+          GRAPH_NAME,
         );
-        const split = await createSession(
+        const split = await createSessionFromContainer(
           gpu,
-          openModel(graphModelBuffer(ropeGraph(order, true, 3))),
+          await openModelBytes(ropeGraph(order, true, 3), []),
+          GRAPH_NAME,
         );
         try {
           const fusedOut = (await fused.run(inputs)).y;
@@ -271,7 +277,11 @@ Deno.test({
     try {
       const outputGraph = ropeGraph("slice-first", false);
       outputGraph.outputs = ["first", "y"];
-      const outputSession = await createSession(gpu, openModel(graphModelBuffer(outputGraph)));
+      const outputSession = await createSessionFromContainer(
+        gpu,
+        await openModelBytes(outputGraph, []),
+        GRAPH_NAME,
+      );
       try {
         const outputs = await outputSession.run(inputs);
         assertEquals(
@@ -292,9 +302,10 @@ Deno.test({
 
       const directOutputGraph = ropeGraph("direct-first", false);
       directOutputGraph.outputs = ["direct", "y"];
-      const directOutputSession = await createSession(
+      const directOutputSession = await createSessionFromContainer(
         gpu,
-        openModel(graphModelBuffer(directOutputGraph)),
+        await openModelBytes(directOutputGraph, []),
+        GRAPH_NAME,
       );
       try {
         const outputs = await directOutputSession.run(inputs);
@@ -321,7 +332,11 @@ Deno.test({
         attrs: {},
       });
       consumerGraph.outputs = ["first_copy", "y"];
-      const consumerSession = await createSession(gpu, openModel(graphModelBuffer(consumerGraph)));
+      const consumerSession = await createSessionFromContainer(
+        gpu,
+        await openModelBytes(consumerGraph, []),
+        GRAPH_NAME,
+      );
       try {
         const outputs = await consumerSession.run(inputs);
         assertEquals(
@@ -384,13 +399,15 @@ Deno.test({
           0xff801234,
         ]);
         for (const order of ["slice-first", "direct-first"] as const) {
-          const fused = await createSession(
+          const fused = await createSessionFromContainer(
             gpu,
-            openModel(graphModelBuffer(ropeGraph(order, false, heads, dim, "bshd"))),
+            await openModelBytes(ropeGraph(order, false, heads, dim, "bshd"), []),
+            GRAPH_NAME,
           );
-          const split = await createSession(
+          const split = await createSessionFromContainer(
             gpu,
-            openModel(graphModelBuffer(ropeGraph(order, true, heads, dim, "bshd"))),
+            await openModelBytes(ropeGraph(order, true, heads, dim, "bshd"), []),
+            GRAPH_NAME,
           );
           try {
             const actual = (await fused.run(inputs)).y;
@@ -425,13 +442,15 @@ Deno.test({
     };
     try {
       assertEquals(gpu.limits.maxComputeWorkgroupsPerDimension, 2);
-      const fused = await createSession(
+      const fused = await createSessionFromContainer(
         gpu,
-        openModel(graphModelBuffer(ropeGraph("direct-first", false, heads, dim, "bshd"))),
+        await openModelBytes(ropeGraph("direct-first", false, heads, dim, "bshd"), []),
+        GRAPH_NAME,
       );
-      const split = await createSession(
+      const split = await createSessionFromContainer(
         gpu,
-        openModel(graphModelBuffer(ropeGraph("direct-first", true, heads, dim, "bshd"))),
+        await openModelBytes(ropeGraph("direct-first", true, heads, dim, "bshd"), []),
+        GRAPH_NAME,
       );
       try {
         assertFloatParity(bits((await fused.run(inputs)).y), bits((await split.run(inputs)).y));
@@ -452,9 +471,10 @@ Deno.test({
   fn: async () => {
     const gpu = await acquireGpu({ gpuTiming: true });
     try {
-      const session = await createSession(
+      const session = await createSessionFromContainer(
         gpu,
-        openModel(graphModelBuffer(ropeGraph("direct-first", false, 3, 128, "bshd"))),
+        await openModelBytes(ropeGraph("direct-first", false, 3, 128, "bshd"), []),
+        GRAPH_NAME,
       );
       try {
         await session.run({

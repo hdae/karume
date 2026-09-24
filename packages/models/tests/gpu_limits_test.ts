@@ -4,7 +4,8 @@
 // いない limit まで見る = 動くはずの環境を誤拒否する）も、どちらも実害が出る側にある。
 //
 // 突き合わせ相手を用意する面（`assertRequiredLimitsBeforeDownload` — 共有 GPU の limits か
-// アダプタ実測値か）は GPU / ロード経路が要るので `shard_loading_test.ts` の⑧⑨が縛る。
+// アダプタ実測値か）は GPU / ロード経路が要るので `container_loading_test.ts` の⑧と
+// `gpu_container_loading_test.ts` の⑨が縛る。
 
 import { assertThrows } from "@std/assert";
 import type { RequiredLimitsSpec } from "@karume/hub";

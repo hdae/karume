@@ -1,24 +1,13 @@
-import { isI2Shape } from "./i2.ts";
-
-// IR v1（docs/ir-v2.md）のグラフ JSON 型と構造検証。
-// 検証はここに 1 本化する: safetensors との突合は container.ts、次元文法は dims.ts が持ち、
+// IR v2（docs/ir-v2.md）のグラフ JSON 型と構造検証。
+// 検証はここに 1 本化する: 宣言と供給の突合は container/bind.ts、次元文法は dims.ts が持ち、
 // 本ファイルはグラフ単体で決まる規則（宣言・SSA・トポロジカル順・語彙）だけを見る。
 
-import { WEIGHT_CHANNEL_AXES, WEIGHT_SLOTS } from "../ops/names.ts";
-import { codecEntry, type CodecName, perChannelGroupSize } from "./container/codecs.ts";
+import type { CodecName } from "./container/codecs.ts";
 import { canonicalJsonValue, sortedByCodePoints, sortedObject } from "./container/json.ts";
 import { isSymbolName, parseDim, tryParseDim } from "./dims.ts";
 
 /** 意味論 dtype。計算は常にこの型で行う（f16/bf16/i8 は格納だけの概念）。 */
 export type IrDtype = "f32" | "i32" | "bool";
-
-/**
- * 格納 dtype。f32 / f16 / bf16 / i8 / i4 は**意味論 f32 の符号化**で、`i32` だけが生の int32
- * （記号依存定数の焼き込み先 — ADR 0010 の明示的な例外）。実行できるのは f32 / f16 / i8 / i4 /
- * i32 で（f16 は ADR 0018・i8 は ADR 0019・i4 は ADR 0069 — いずれも適格な重みスロットは
- * 圧縮のまま GPU 常駐・適格外はロード時に CPU で f32 展開）、bf16 は宣言として受理するだけ。
- */
-export type IrStorageDtype = "f32" | "f16" | "bf16" | "i8" | "i4" | "i2" | "i32";
 
 /** 非負整数、または `coeff·sym+offset` の正準表記（dims.ts）。 */
 export type IrDim = number | string;
@@ -55,29 +44,11 @@ type IrInput = {
   readonly shape: readonly IrDim[];
 };
 
-/** 旧配布形（IR v1）の格納宣言 — 読み手は段 3 で退役する（ADR 0108 決定 18）。 */
-type LegacyStorage = {
-  readonly dtype: IrStorageDtype;
-  /** 量子化格納の scale テンソルの safetensors キー（`i8` / `i4` / `i2` では必須 — ADR 0019 / 0069）。 */
-  readonly scale?: string;
-  /** group 量子化の group 長（`i4` では必須・2 冪かつ 16 以上 — ADR 0069 決定 2）。 */
-  readonly groupSize?: number;
-};
-
-/** 旧配布形の initializer 宣言（`tensor` + `storage`、または `shared.tensor` + `storage`）。 */
-type LegacyInitializer =
-  | { readonly tensor: string; readonly shared?: undefined; readonly storage: LegacyStorage }
-  | {
-    readonly tensor?: undefined;
-    readonly shared: { readonly tensor: string };
-    readonly storage: LegacyStorage;
-  };
-
 /**
  * 合流後の格納（docs/ir-v2.md「格納」・container-v1 §6）。`codec` は台帳の登録名で、展開経路は
  * `codecLayout(codec)` から引く（`ternary` は `int2-off` と同じ i2 経路）。`groupSize` / `rowAxis` は
  * 量子化 codec のときだけ在る（per-channel なら `groupSize` = 行長）。companion scale の実体は
- * 供給計画（束縛表 / 旧 shard の validator）が payload と一緒に運ぶので、ここには無い。
+ * 供給計画（束縛表との合流結果）が payload と一緒に運ぶので、ここには無い。
  */
 export type IrStorage = {
   readonly codec: CodecName;
@@ -87,7 +58,7 @@ export type IrStorage = {
 
 /**
  * ランタイムが実行するグラフの initializer。**名前が実体の鍵**（エクスポータの FQN /
- * `const.<hash>`）で、旧配布形（v1）を読むときは `tensor` キーへ改名してからこの形にする。
+ * `const.<hash>`）で、実体との対応は容器の束縛表が `(グラフ名, initializer 名)` で持つ。
  *
  * `shared` は貸し手 Session の重みを借りる宣言（ADR 0096 段 2 §1.3）— 名前は貸し手の
  * initializer 名と同じで、格納は持たない（正本は貸し手の常駐重み — 二重簿記の禁止）。
@@ -112,10 +83,9 @@ export type IrNode = {
   readonly states: Readonly<Record<string, string>>;
 };
 
-/** initializer 以外の節（v1 / v2 / 合流後で共通）。 */
+/** initializer 以外の節（宣言 / 合流後で共通）。 */
 type IrGraphBase = {
   readonly format: typeof IR_FORMAT;
-  /** v1（旧配布形）は 1、v2 は 2。 */
   readonly version: number;
   readonly requires: { readonly ops: readonly string[] };
   readonly symbols: readonly string[];
@@ -155,8 +125,6 @@ export class IrError extends Error {
 }
 
 const IR_FORMAT = "karume-ir";
-/** 旧配布形（safetensors 方言）の IR 版。読み手は段 3 で退役する（ADR 0108 決定 18）。 */
-const IR_VERSION_V1 = 1;
 /** IR v2（docs/ir-v2.md）。 */
 export const IR_VERSION = 2;
 
@@ -180,22 +148,6 @@ const OPTIONAL_TOP_LEVEL_KEYS = ["states"] as const;
 
 /** 意味論 dtype の全語彙（宣言としての受理集合 — 実行可否は契約表 src/ops.ts が持つ）。 */
 export const SEMANTIC_DTYPES = ["f32", "i32", "bool"] as const;
-const STORAGE_DTYPES = ["f32", "f16", "bf16", "i8", "i4", "i2", "i32"] as const;
-
-/**
- * scale / group_size の記述子を持てる格納 dtype（量子化格納）。
- *
- * MUST: 量子化でない dtype に付いた記述子は fail loudly（黙って無視すると格納の意味が
- * 二重化する）。group 量子化そのものの受理は格納 i4 だけ（ADR 0069 決定 2）で、それは
- * capability の層（format/container.ts）が見る。
- */
-const QUANTIZED_STORAGE_DTYPES: readonly IrStorageDtype[] = ["i8", "i4", "i2"];
-
-/** i4 の group 長の下限（ORT と同じ制約 — ADR 0069 決定 2）。 */
-const MIN_GROUP_SIZE = 16;
-
-/** 2 冪判定。ビット演算は 2^31 以上で int32 へ切り詰められるため使わない。 */
-const isPowerOfTwo = (value: number): boolean => 2 ** Math.round(Math.log2(value)) === value;
 
 /** state スロットの dtype 語彙。現状 f32 のみ（ADR 0066 決定 2）。 */
 const STATE_DTYPES = ["f32"] as const;
@@ -215,23 +167,17 @@ const RESERVED_STATE_DTYPES = ["f16"] as const;
 const MAX_STATE_RANK = 4;
 
 /**
- * initializer の意味論 dtype → 許される格納 dtype（docs/ir-v2.md「値と型」）。
+ * initializer が宣言できる意味論 dtype（docs/ir-v2.md「値と型」）。
  *
- * MUST: 意味論と格納の組は**この表だけ**が決める。f32 の格納語彙は「f32 値の符号化」で、
- * i32 は生の int32 1 通りのみ（ADR 0010）— 交差を許すと `i32` 宣言の initializer が f16 の
- * ビット列として読まれる沈黙誤値になる。bool の initializer は語彙に無い（実測に無く、
- * safetensors 側の BOOL は 1 バイト格納で 4 バイト前提の転送とも噛み合わない）。
+ * MUST: bool の initializer は語彙に無い（実測に無く、1 バイト格納は 4 バイト前提の転送とも
+ * 噛み合わない）。意味論 dtype と格納 codec の組（f32 の符号化 / i32 は生の int32 1 通りのみ —
+ * ADR 0010）は合流層（`format/container/bind.ts`）が持つ — 交差を許すと `i32` 宣言の
+ * initializer が f16 のビット列として読まれる沈黙誤値になる。
  */
-const INITIALIZER_STORAGE: ReadonlyMap<IrDtype, readonly IrStorageDtype[]> = new Map([
-  ["f32", ["f32", "f16", "bf16", "i8", "i4", "i2"]],
-  ["i32", ["i32"]],
-]);
+const INITIALIZER_DTYPES: ReadonlySet<IrDtype> = new Set<IrDtype>(["f32", "i32"]);
 
 export const isSemanticDtype = (value: unknown): value is IrDtype =>
   SEMANTIC_DTYPES.some((dtype) => dtype === value);
-
-const isStorageDtype = (value: string): value is IrStorageDtype =>
-  STORAGE_DTYPES.some((dtype) => dtype === value);
 
 const isStateDtype = (value: string): value is IrStateDtype =>
   STATE_DTYPES.some((dtype) => dtype === value);
@@ -297,16 +243,6 @@ const asSemanticDtype = (value: unknown, where: string): IrDtype => {
   return dtype;
 };
 
-const asStorageDtype = (value: unknown, where: string): IrStorageDtype => {
-  const dtype = asNonEmptyString(value, where);
-  if (!isStorageDtype(dtype)) {
-    // 語彙は STORAGE_DTYPES が正本（i32 は ADR 0010 の生 int32）。診断に並べる名前を
-    // 手書きすると語彙を足したときに片方だけ古くなる。
-    throw new IrError(`${where}: 格納 dtype '${dtype}' は語彙外（${STORAGE_DTYPES.join(" / ")}）`);
-  }
-  return dtype;
-};
-
 const parseShape = (value: unknown, symbols: ReadonlySet<string>, where: string): IrDim[] =>
   asArray(value, where).map((dim, index) => {
     const at = `${where}[${index}]`;
@@ -326,56 +262,6 @@ const parseShape = (value: unknown, symbols: ReadonlySet<string>, where: string)
     }
     return dim;
   });
-
-/**
- * @param shared 共有 initializer（{@link IrSharedInitializer}）の storage か。真のとき
- *   `scale` / `group_size` は**書けない**（付随実体を持つのは貸し手だけ）ので、量子化格納の
- *   「scale 必須」規則も掛けない — 掛けると借り手が貸し手の scale キーを写して持つ形になり、
- *   同じ事実が 2 箇所に生える。
- */
-const parseStorage = (value: unknown, where: string, shared = false): LegacyStorage => {
-  const obj = asPlainObject(value, where);
-  checkKeys(obj, ["dtype"], shared ? [] : ["scale", "group_size"], where);
-  const dtype = asStorageDtype(obj["dtype"], `${where}.dtype`);
-  if (shared) return { dtype };
-  const hasScale = Object.hasOwn(obj, "scale");
-  const hasGroupSize = Object.hasOwn(obj, "group_size");
-  if (dtype === "i2" && hasGroupSize) {
-    throw new IrError(`${where}: i2 は行ごとの scale のみ（group_size は付けられない）`);
-  }
-  // scale / group_size は量子化格納の記述子。非量子化 dtype に付いているのはエクスポータの
-  // 取り違えなので受理しない（黙って無視すると格納の意味が二重化する）。
-  if (!QUANTIZED_STORAGE_DTYPES.includes(dtype) && (hasScale || hasGroupSize)) {
-    throw new IrError(`${where}: 格納 dtype '${dtype}' に scale / group_size は付けられない`);
-  }
-  // MUST: i8 / i4 は scale を**明示宣言**する（ADR 0019 / 0069）。既定 1.0 で補完すると、
-  // scale を書き忘れたモデルが「量子化前の 1/127（i4 は 1/7）倍の重み」で静かに走る。
-  if (QUANTIZED_STORAGE_DTYPES.includes(dtype) && !hasScale) {
-    throw new IrError(`${where}: 格納 dtype '${dtype}' には scale（scale テンソルのキー）が要る`);
-  }
-  // MUST: i4 は group_size を**明示宣言**する（ADR 0069 決定 2）。group 長が決まらない
-  // 4bit 格納は scale の引き直し位置が決まらず、展開が黙って別の値を出す。
-  if (dtype === "i4" && !hasGroupSize) {
-    throw new IrError(`${where}: 格納 dtype 'i4' には group_size が要る（ADR 0069 決定 2）`);
-  }
-  const storage: { dtype: IrStorageDtype; scale?: string; groupSize?: number } = { dtype };
-  if (hasScale) storage.scale = asNonEmptyString(obj["scale"], `${where}.scale`);
-  if (hasGroupSize) {
-    const groupSize = obj["group_size"];
-    if (typeof groupSize !== "number" || !Number.isSafeInteger(groupSize) || groupSize < 1) {
-      throw new IrError(`${where}.group_size: 正整数でない`);
-    }
-    // MUST: i4 の group 長は 2 冪かつ 16 以上（ADR 0069 決定 2 — ORT と同制約）。この制約が
-    // 行境界・group 境界を常にバイト整列させ、末尾ゼロ詰め無しで u32 束縛が成立する。
-    if (dtype === "i4" && (!isPowerOfTwo(groupSize) || groupSize < MIN_GROUP_SIZE)) {
-      throw new IrError(
-        `${where}.group_size: ${groupSize} が 2 冪かつ ${MIN_GROUP_SIZE} 以上でない（ADR 0069 決定 2）`,
-      );
-    }
-    storage.groupSize = groupSize;
-  }
-  return storage;
-};
 
 const asStateDtype = (value: unknown, where: string): IrStateDtype => {
   const dtype = asNonEmptyString(value, where);
@@ -488,10 +374,9 @@ const parseJson = (json: string): unknown => {
 };
 
 /**
- * グラフ JSON のパースの核（v1 / v2 共通）。initializer の値の読み方だけを `parseInitializer` で
- * 差し替える — v1（旧配布形・`tensor` + `storage`）は {@link parseIrGraph}、v2（IR の宣言のみ・
- * 格納は束縛表）は {@link parseIrDeclaration}。グラフ単体で決まる規則（宣言・SSA・トポロジカル順・
- * 語彙・states）は両者で同じ 1 本を通る。
+ * グラフ JSON のパースの核。initializer の値の読み方だけを `parseInitializer` で差し替えられる
+ * （現在の読み手は {@link parseIrDeclaration} = 格納を持たない IR v2 の宣言 1 種）。グラフ単体で
+ * 決まる規則（宣言・SSA・トポロジカル順・語彙・states）はここ 1 本を通る。
  */
 const parseIrDocument = <I>(
   document: unknown,
@@ -616,183 +501,6 @@ const parseIrDocument = <I>(
     states,
     nodes,
   };
-};
-
-/**
- * **旧配布形（IR v1）**のグラフ JSON — `initializers[].tensor` + `storage` を持つ形。
- *
- * NOTE: 旧 safetensors 配布形の読み手はコンテナ形式の波の段 3 で退役する（ADR 0108 決定 18 —
- * 両読みは作らず、旧形式を読むのは移行 CLI だけになる）。それまで `fromPretrained` のレーンは
- * この入口で走る。
- */
-export const parseLegacyIrGraph = (
-  json: string,
-): { readonly graph: IrGraph; readonly legacy: LegacyKeys } => {
-  const graph = parseIrDocument(parseJson(json), IR_VERSION_V1, (obj, where): LegacyInitializer => {
-    // 欄の有無が形を判別する（`states` 欄と同じ流儀 — ADR 0096 段 2 §1.3）。`shared` を持つ
-    // 宣言は `tensor` を持てない（checkKeys の必須集合そのものが違う）ので、「バイトも書いた
-    // うえで借りる」という両義の形は綴れない。
-    if (Object.hasOwn(obj, "shared")) {
-      checkKeys(obj, ["shared", "storage"], [], where);
-      const sharedWhere = `${where}.shared`;
-      const shared = asPlainObject(obj["shared"], sharedWhere);
-      checkKeys(shared, ["tensor"], [], sharedWhere);
-      return {
-        shared: { tensor: asNonEmptyString(shared["tensor"], `${sharedWhere}.tensor`) },
-        storage: parseStorage(obj["storage"], `${where}.storage`, true),
-      };
-    }
-    checkKeys(obj, ["tensor", "storage"], [], where);
-    return {
-      tensor: asNonEmptyString(obj["tensor"], `${where}.tensor`),
-      storage: parseStorage(obj["storage"], `${where}.storage`),
-    };
-  });
-  for (const [name, initializer] of Object.entries(graph.initializers)) {
-    checkLegacyStorage(name, initializer, graph.values[name]);
-  }
-  return fromLegacy(graph);
-};
-
-/** 旧配布形のグラフ（合流後の形だけが要る呼び手向け）。 */
-export const parseIrGraph = (json: string): IrGraph => parseLegacyIrGraph(json).graph;
-
-/**
- * 旧配布形の読み手（safetensors の shard validator）だけが要る付随情報 — companion scale の
- * safetensors キー。合流後の {@link IrGraph} には無い（scale の実体は供給計画が payload と一緒に運ぶ）。
- */
-export type LegacyKeys = {
-  /** initializer 名（= 実体のテンソルキー）→ scale テンソルのキー。 */
-  readonly scaleKeys: ReadonlyMap<string, string>;
-};
-
-/** 旧 `storage.dtype` → codec 台帳の登録名（container-v1 §12 の写像）。 */
-const LEGACY_CODEC: Readonly<Record<IrStorageDtype, CodecName>> = {
-  f32: "f32",
-  f16: "f16",
-  bf16: "bf16",
-  i32: "i32",
-  i8: "int8-sym",
-  i4: "int4-sym-g",
-  i2: "int2-off",
-};
-
-/**
- * 旧配布形は per-channel scale の軸を宣言に持たない（消費側 op から導いていた — ADR 0019）。
- * 同じ重みを軸の違う 2 op が食う形は scale の意味が割れるので fail loudly。
- */
-const legacyRowAxes = (
-  nodes: readonly IrNode[],
-  names: ReadonlySet<string>,
-): Map<string, 0 | 1> => {
-  const axes = new Map<string, 0 | 1>();
-  for (const node of nodes) {
-    const slot = WEIGHT_SLOTS.get(node.op);
-    if (slot === undefined) continue;
-    const name = node.ins[slot];
-    if (name === undefined || !names.has(name)) continue;
-    const axis = WEIGHT_CHANNEL_AXES.get(node.op);
-    if (axis !== 0 && axis !== 1) {
-      throw new IrError(`op '${node.op}' に per-channel scale のチャネル軸の定義が無い`);
-    }
-    const known = axes.get(name);
-    if (known !== undefined && known !== axis) {
-      throw new IrError(
-        `initializer '${name}': チャネル軸が消費側で食い違う（${known} と ${axis}）`,
-      );
-    }
-    axes.set(name, axis);
-  }
-  return axes;
-};
-
-/**
- * 旧配布形（v1）→ 合流後の形。①initializer を**テンソルキーへ改名**する（名前 = 実体の鍵 —
- * docs/ir-v2.md。共有 initializer は貸し手のキー）②`storage.dtype` を codec 名へ写す③per-channel
- * の `rowAxis` を消費側 op から、`groupSize` を行長から導く（v2 では宣言に在る値を v1 では導出する）。
- *
- * MUST: 改名で値名前空間が衝突したら fail loudly（黙って上書きすると別の値を指す名前になる）。
- */
-const fromLegacy = (
-  document: IrGraphBase & { readonly initializers: Readonly<Record<string, LegacyInitializer>> },
-): { readonly graph: IrGraph; readonly legacy: LegacyKeys } => {
-  const rename = new Map<string, string>();
-  /** 実体キー → 先にそれを取った宣言名（診断が衝突相手を名乗るため）。 */
-  const taken = new Map<string, string>();
-  const others = new Set<string>([
-    ...document.inputs.map((input) => input.name),
-    ...document.nodes.flatMap((node) => node.outs),
-    ...Object.keys(document.states),
-  ]);
-  for (const [name, init] of Object.entries(document.initializers)) {
-    const key = init.shared !== undefined ? init.shared.tensor : init.tensor;
-    const owner = taken.get(key);
-    if (owner !== undefined) {
-      throw new IrError(
-        `graph.initializers['${name}']: 実体キー '${key}' が initializer '${owner}' と共有されている（1 実体 1 initializer MUST）`,
-      );
-    }
-    if (others.has(key)) {
-      throw new IrError(
-        `graph.initializers['${name}']: 実体キー '${key}' が値名と衝突する（改名できない）`,
-      );
-    }
-    taken.set(key, name);
-    rename.set(name, key);
-  }
-  const renamed = (name: string): string => rename.get(name) ?? name;
-  const axes = legacyRowAxes(document.nodes, new Set(rename.keys()));
-  const initializers: Record<string, IrInitializer> = Object.create(null);
-  const scaleKeys = new Map<string, string>();
-  for (const [name, init] of Object.entries(document.initializers)) {
-    const key = renamed(name);
-    if (init.shared !== undefined) {
-      initializers[key] = { shared: true };
-      continue;
-    }
-    const codec = LEGACY_CODEC[init.storage.dtype];
-    const entry = codecEntry(codec);
-    if (entry.scale === "forbidden") {
-      // group_size が付いた非量子化格納は parseStorage が既に落としている。
-      initializers[key] = { storage: { codec } };
-      continue;
-    }
-    if (entry.grouping === "channel" && init.storage.groupSize !== undefined) {
-      // group 量子化を受理する格納は i4 だけ（ADR 0069 決定 2）。黙って無視すると group ごとの
-      // scale を per-channel として読む沈黙誤値になる。
-      throw new IrError(
-        `graph.initializers['${name}']: 非対応 group 量子化（group 量子化の格納は i4 のみ — ADR 0069）`,
-      );
-    }
-    const shape = document.values[name].shape.map(Number);
-    // group 形（i4）の scale は先頭次元を行とする（`groupScaleShape` — ADR 0069 決定 3）ので行の軸は
-    // 常に 0。per-channel は消費側 op の軸（conv_transpose1d だけ 1）。
-    const rowAxis = entry.grouping === "group" ? 0 : axes.get(name) ?? 0;
-    const rowCount = shape[rowAxis] ?? 1;
-    const numel = shape.reduce((count, dim) => count * dim, 1);
-    const rowLength = rowCount === 0 ? 0 : numel / rowCount;
-    // per-channel の groupSize は行長（要素数 0 の退化形は 1 — `perChannelGroupSize`）。
-    const groupSize = entry.grouping === "group"
-      ? init.storage.groupSize ?? rowLength
-      : perChannelGroupSize(rowLength);
-    initializers[key] = { storage: { codec, groupSize, rowAxis } };
-    if (init.storage.scale !== undefined) scaleKeys.set(key, init.storage.scale);
-  }
-  const values: Record<string, IrValueInfo> = Object.create(null);
-  for (const [name, value] of Object.entries(document.values)) values[renamed(name)] = value;
-  const graph: IrGraph = {
-    format: document.format,
-    version: IR_VERSION,
-    requires: document.requires,
-    symbols: document.symbols,
-    inputs: document.inputs,
-    outputs: document.outputs.map(renamed),
-    initializers,
-    values,
-    states: document.states,
-    nodes: document.nodes.map((node) => ({ ...node, ins: node.ins.map(renamed) })),
-  };
-  return { graph, legacy: { scaleKeys } };
 };
 
 /**
@@ -955,42 +663,6 @@ const checkDefinitions = (
 };
 
 /**
- * group 量子化格納（i4）の宣言 shape と group 長の整合（ADR 0069 決定 2）。
- *
- * 量子化軸は「**先頭次元を行・残りを平坦化**した行長」（`numel / shape[0]` — rank 2 の重みでは
- * 最終次元そのもの。conv1d `[O,Cin,K]` では `Cin·K`）で、そこが `group_size` で割り切れる
- * ことが MUST。端数 group を許すと最後の group だけ scale の担当範囲が短くなり、行境界が
- * 語境界からずれて平坦添字の展開が黙って別の値を出す（端数を作らない制約で整列問題
- * そのものを消す設計）。
- */
-const checkGroupQuantizedShape = (
-  name: string,
-  initializer: LegacyInitializer,
-  value: IrValueInfo,
-): void => {
-  // 値域（2 冪かつ 16 以上）は parseStorage が保証済み。存在は型の上でだけ optional なので、
-  // 黙って読み飛ばさず言い直す（executor.ts の「格納 i8 なのに scale が無い」と同じ流儀）。
-  const groupSize = initializer.storage.groupSize;
-  if (groupSize === undefined) {
-    throw new IrError(`graph.initializers['${name}']: 格納 i4 なのに group_size が無い`);
-  }
-  if (value.shape.length === 0 || value.shape.some((dim) => typeof dim !== "number")) {
-    throw new IrError(
-      `graph.values['${name}']: 格納 i4 の initializer は数値 shape の rank 1 以上が要る`,
-    );
-  }
-  const dims = value.shape.map(Number);
-  const width = dims.reduce((count, dim) => count * dim, 1) / dims[0];
-  if (width % groupSize !== 0) {
-    throw new IrError(
-      `graph.values['${name}']: 格納 i4 の行長 ${width}（= numel / ${
-        dims[0]
-      }）が group_size ${groupSize} で割り切れない（ADR 0069 決定 2）`,
-    );
-  }
-};
-
-/**
  * 宣言の完全性: 入力は inputs[] が、initializer とノード出力は values{} が、
  * それぞれちょうど 1 回宣言する。孤立宣言（誰も定義しない values）も fail loudly。
  */
@@ -1015,9 +687,9 @@ const checkDeclarations = (
       throw new IrError(`graph.initializers['${name}']: values に dtype/shape 宣言が無い`);
     }
     // MUST: グラフ単体で決まる仕様規則はパーサ 1 箇所で見る — ロード経路ごとに書くと規則が
-    // 割れる。意味論 dtype と格納 codec の組は合流層（v2）/ checkLegacyStorage（v1）が持ち、
-    // 格納の実行可否は assertRuntimeSupport が持つ。
-    if (!INITIALIZER_STORAGE.has(values[name].dtype)) {
+    // 割れる。意味論 dtype と格納 codec の組は合流層（`format/container/bind.ts`）が持ち、
+    // 格納の実行可否はランタイム対応表との突合（`ops/support.ts`）が持つ。
+    if (!INITIALIZER_DTYPES.has(values[name].dtype)) {
       throw new IrError(
         `graph.values['${name}']: initializer の意味論 dtype '${
           values[name].dtype
@@ -1039,39 +711,10 @@ const checkDeclarations = (
 };
 
 /**
- * 旧配布形（v1）の格納宣言がグラフ単体で満たす規則 — 意味論 dtype × 格納 dtype の組・i2 の形・
- * i4 の行長整除。v2 では同じ規則を合流層（`format/container/bind.ts`）が束縛表に対して掛ける。
- */
-const checkLegacyStorage = (
-  name: string,
-  initializer: LegacyInitializer,
-  value: IrValueInfo,
-): void => {
-  const allowedStorage = INITIALIZER_STORAGE.get(value.dtype) ?? [];
-  const storageDtype = initializer.storage.dtype;
-  if (storageDtype === "i2" && !isI2Shape(value.shape)) {
-    throw new IrError(`graph.values['${name}']: i2 は正の rank 2・行長は16の倍数が必要`);
-  }
-  if (!allowedStorage.includes(storageDtype)) {
-    throw new IrError(
-      `graph.initializers['${name}']: 意味論 dtype '${value.dtype}' に格納 dtype '${storageDtype}' は組めない（${
-        allowedStorage.join(" / ")
-      } のみ）`,
-    );
-  }
-  // 共有 initializer は group 長を宣言しない（正本は貸し手の席）ので、行長の整除も
-  // 貸し手側の宣言に対して既に掛かっている — ここで掛けると「group 長が無い」で必ず落ちる。
-  if (storageDtype === "i4" && initializer.shared === undefined) {
-    checkGroupQuantizedShape(name, initializer, value);
-  }
-};
-
-/**
  * state スロット名の検査。スロットは値ではない（`ins` / `outs` で参照されず、ノードからは別の欄で
  * 名前参照する — ADR 0066 決定 1・0067 決定 4）ので**値名前空間とは別**だが、**同名は拒否する**:
  * 別名前空間の同名は「スロット名を書くべき欄に値名を書いた / その逆」を検出できなくするだけで、
- * 表現力を何も足さない。scale テンソルのキーを他 initializer の実体と衝突させない規則
- * （format/container.ts・ADR 0019）と同じ流儀。
+ * 表現力を何も足さない。1 block ≤ 1 参照（容器の規則①）と同じ流儀。
  *
  * **参照完全性**（ADR 0067 決定 4 / 5）: 宣言されたスロットは少なくとも 1 つのノードの
  * `states` 欄から参照される MUST。誰も参照しないスロットは values の孤立宣言と同じ穴で、

@@ -13,7 +13,6 @@
 // いう形で通ってしまう（例外も警告も出ない）。
 
 import { assert, assertEquals, assertRejects, assertStrictEquals, assertThrows } from "@std/assert";
-import { openModel } from "../src/format/container.ts";
 import type { IrGraph } from "../src/format/ir.ts";
 import {
   acquireGpu,
@@ -23,15 +22,28 @@ import {
   RUNTIME_INTERNAL,
 } from "../src/gpu/device.ts";
 import { GpuOutOfMemoryError } from "../src/gpu/error-scope.ts";
-import { createSession, type Session, type Tensor } from "../src/runtime/executor.ts";
+import {
+  createSessionFromContainer,
+  prepareContainer,
+  type Session,
+  type Tensor,
+} from "../src/runtime/executor.ts";
 import {
   GenerationContext,
   type GenerationContextHost,
 } from "../src/runtime/generation-context.ts";
 import { OpContractError } from "../src/ops.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
-import { baseGraph, f32Bytes, type GraphJson } from "./helpers/format.ts";
-import { graphModelBuffer } from "./helpers/graph.ts";
+import type { OpenedContainer } from "../src/format/container/open.ts";
+import type { TensorInput } from "./helpers/container-write.ts";
+import {
+  baseDeclaration,
+  baseTensors,
+  type DeclarationJson,
+  f32Bytes,
+  GRAPH_NAME,
+  openModelBytes,
+} from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
 /** WebGPU core 既定のストレージ束縛上限（容量ゲートの門はここを再現する）。 */
@@ -56,23 +68,20 @@ const CHUNK_SHAPE: readonly number[] = [1, 2, 4, 4];
  * 足りていたが、参照側の欄が入った今それは孤立宣言として拒否される。
  */
 const stateGraph = (
-  states: GraphJson["states"],
-  extra: Partial<GraphJson> = {},
+  states: DeclarationJson["states"],
+  extra: Partial<DeclarationJson> = {},
   /** `state_append` ノードの attrs（sliding にするときだけ `{ window }` を渡す）。 */
   appendAttrs: Record<string, number> = {},
-): GraphJson => {
+): DeclarationJson => {
   const slots = Object.keys(states ?? {});
   return {
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: slots.length > 0 ? ["matmul", "state_append"] : ["matmul"] },
     symbols: ["T"],
     inputs: [{ name: "x", dtype: "f32", shape: ["T", 4] }],
     outputs: ["y"],
-    initializers: {
-      w: { tensor: "proj.weight", storage: { dtype: "f32" } },
-      chunk: { tensor: "kv.chunk", storage: { dtype: "f32" } },
-    },
+    initializers: { w: {}, chunk: {} },
     values: {
       w: { dtype: "f32", shape: [4, 3] },
       y: { dtype: "f32", shape: ["T", 3] },
@@ -93,7 +102,7 @@ const stateGraph = (
   };
 };
 
-const NUMERIC_STATES: GraphJson["states"] = {
+const NUMERIC_STATES: DeclarationJson["states"] = {
   k: { dtype: "f32", shape: [1, 2, STATE_CAPACITY, 4] },
   v: { dtype: "f32", shape: [1, 2, STATE_CAPACITY, 4] },
 };
@@ -104,29 +113,33 @@ const NUMERIC_STATES: GraphJson["states"] = {
  * 解決に使われることも無い。波 C では入力 `cap` を置いて束縛可能性を満たしていたが、波 D-1 で
  * 検査が「入力 shape ∪ states shape」へ緩んだので**素の states 専用記号**として書ける。
  */
-const symbolicGraph = (): GraphJson =>
+const symbolicGraph = (): DeclarationJson =>
   stateGraph({ k: { dtype: "f32", shape: [1, 2, "C", 4] } }, { symbols: ["T", "C"] });
 
-const modelBytes = (graph: GraphJson): ArrayBuffer =>
-  graphModelBuffer(graph, [
-    {
-      name: "proj.weight",
-      dtype: "F32",
-      shape: [4, 3],
-      data: f32Bytes([0.5, -1.5, 2, 0.25, -0.75, 1, 0.125, -0.25, 1.5, 2, -1, 0.75]),
-    },
-    {
-      name: "kv.chunk",
-      dtype: "F32",
-      shape: [...CHUNK_SHAPE],
-      data: f32Bytes(new Array(1 * 2 * 4 * 4).fill(0)),
-    },
-  ]);
+/** 宣言した 2 本の initializer の実体（v2 では initializer 名がそのまま実体の鍵）。 */
+const stateTensors = (): readonly TensorInput[] => [
+  {
+    graph: GRAPH_NAME,
+    initializer: "w",
+    bytes: f32Bytes([0.5, -1.5, 2, 0.25, -0.75, 1, 0.125, -0.25, 1.5, 2, -1, 0.75]),
+    encoding: { codec: "f32" },
+  },
+  {
+    graph: GRAPH_NAME,
+    initializer: "chunk",
+    bytes: f32Bytes(new Array(1 * 2 * 4 * 4).fill(0)),
+    encoding: { codec: "f32" },
+  },
+];
 
-const stateSession = (
+const openStateModel = (graph: DeclarationJson): Promise<OpenedContainer> =>
+  openModelBytes(graph, stateTensors());
+
+const stateSession = async (
   gpu: GpuContext,
-  graph: GraphJson = stateGraph(NUMERIC_STATES),
-): Promise<Session> => createSession(gpu, openModel(modelBytes(graph)));
+  graph: DeclarationJson = stateGraph(NUMERIC_STATES),
+): Promise<Session> =>
+  await createSessionFromContainer(gpu, await openStateModel(graph), GRAPH_NAME);
 
 /** 内部面（波 D の実行統合が呼ぶ進行・汚染・搬送路）をテストから駆動する。 */
 const internals = (context: GenerationContext) => context[RUNTIME_INTERNAL];
@@ -331,12 +344,10 @@ Deno.test({
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
-    const session = await createSession(
+    const session = await createSessionFromContainer(
       gpu,
-      openModel(graphModelBuffer(baseGraph(), [
-        { name: "enc.w", dtype: "F32", shape: [4, 3], data: f32Bytes(new Array(12).fill(0.5)) },
-        { name: "enc.b", dtype: "F32", shape: [3], data: f32Bytes([1, 2, 3]) },
-      ])),
+      await openModelBytes(baseDeclaration(), baseTensors()),
+      GRAPH_NAME,
     );
     try {
       const error = await assertRejects(
@@ -486,7 +497,7 @@ Deno.test({
   ignore: !GPU_AVAILABLE || BINDING_LIMIT < OOM_SLOT_BYTES,
   fn: async () => {
     const elements = OOM_SLOT_BYTES / 4;
-    const states: GraphJson["states"] = {};
+    const states: DeclarationJson["states"] = {};
     for (let i = 0; i < OOM_SLOT_COUNT; i += 1) {
       states[`kv${i}`] = { dtype: "f32", shape: [1, 1, elements / 1024, 1024] };
     }
@@ -521,7 +532,10 @@ Deno.test({
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
-    const graph = openModel(modelBytes(stateGraph(NUMERIC_STATES))).graph;
+    const graph = prepareContainer(
+      await openStateModel(stateGraph(NUMERIC_STATES)),
+      GRAPH_NAME,
+    ).graph;
     const create = (host: GenerationContextHost): Promise<GenerationContext> =>
       GenerationContext.create(host, { chunkLength: 1 });
     try {
@@ -562,7 +576,10 @@ Deno.test({
   fn: async () => {
     // この case は device を壊すので専用の GpuContext を取る。
     const gpu = await acquireGpu();
-    const graph = openModel(modelBytes(stateGraph(NUMERIC_STATES))).graph;
+    const graph = prepareContainer(
+      await openStateModel(stateGraph(NUMERIC_STATES)),
+      GRAPH_NAME,
+    ).graph;
     // pop が決着しない窓を作る。待機を raceDeviceLost に通していなければ、この case は
     // 「失敗」ではなく**ハング**になる（消失後の popErrorScope が解決しない実装がありうる）。
     const injected = injectFaults(gpu, { hangPop: true });
@@ -1269,7 +1286,7 @@ Deno.test({
 });
 
 /** sliding スロット（窓 8）を 1 本持つグラフ。容量は記号 `C` で context 側から与える。 */
-const slidingGraph = (): GraphJson =>
+const slidingGraph = (): DeclarationJson =>
   stateGraph(
     { k: { dtype: "f32", shape: [1, 2, "C", 4] } },
     { symbols: ["T", "C"] },

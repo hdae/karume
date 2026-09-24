@@ -1,4 +1,4 @@
-import type { OpSupport, RuntimeSupport } from "../format/container.ts";
+import type { OpSupport, RuntimeSupport } from "./support.ts";
 import { type IrDtype, type IrNode, SEMANTIC_DTYPES } from "../format/ir.ts";
 import {
   assertFiniteAttr,
@@ -388,7 +388,7 @@ const DTYPES: ReadonlyMap<string, readonly IrDtype[]> = new Map([
   // strided コピー族は dtype パラメトリックなのでカーネルは共用のまま。
   [EXPAND_OP, ANY_DTYPE],
   // 焼いた定数は相対位置バケット表（i32）と位置テーブル（f32）の 2 系統。bool の
-  // initializer は語彙に無い（ir.ts の INITIALIZER_STORAGE）ので解禁しない。
+  // initializer は語彙に無い（ir.ts の INITIALIZER_DTYPES）ので解禁しない。
   [SYM_PREFIX_SLICE_OP, F32_I32],
 ]);
 

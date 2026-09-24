@@ -37,7 +37,6 @@ import {
   type AssetReader,
   type ContainerInput,
   type GpuContext,
-  type KarumeModel,
   openContainer,
   type OpenedContainer,
   prepareContainer,
@@ -50,6 +49,7 @@ import {
   type ContainerRef,
   type DistributionSource,
   fetchAssets,
+  type FetchAssetsOptions,
   type FileRef,
   type HubRepoRef,
   type LoadedManifest,
@@ -58,18 +58,18 @@ import {
   prefetchAssets,
   type ResolvedSelection,
   resolveSelection,
-  type StreamAssetsOptions,
 } from "@karume/hub";
 import { toManifestSource } from "./repo-ref.ts";
 
 /**
- * グラフ**宣言**を持つもの（`KarumeModel` と {@link ModelComponent} の共通面）。
+ * グラフ**宣言**を持つもの（`prepareContainer` が返す `PreparedModel` と
+ * {@link ModelComponent} の共通面）。
  *
  * 宣言との突合（入出力の本数・静的次元と `pipelineConfig` の一致）は取得面でも全量面でも
  * 同じ 1 本で書きたいので、検査 helper はこの面だけを受ける。
  */
 export type GraphOwner = {
-  readonly graph: KarumeModel["graph"];
+  readonly graph: PreparedModel["graph"];
 };
 
 /** コンポーネント 1 本の「実行前の姿」= グラフ宣言 + Session の入口 + 容器の資産。 */
@@ -134,7 +134,7 @@ export type ContainerComponents<Admitted> = {
 };
 
 /** {@link loadContainerComponents} の追加オプション（取得層のオプションはそのまま透過する）。 */
-export type LoadContainerOptions = StreamAssetsOptions & {
+export type LoadContainerOptions = FetchAssetsOptions & {
   /**
    * 部品差し替え席（役割 → 出所）。渡した役割は `componentKeys` の部分集合 MUST（未知の役割は
    * fail loudly — 綴り間違いを黙って「差し替えない」に畳まない）。
@@ -309,7 +309,7 @@ const nonEmptyParts = (parts: readonly FileRef[]): readonly FileRef[] =>
 const prefetchSeats = async (
   seats: readonly Seat[],
   select: (seat: Seat) => readonly FileRef[],
-  options: StreamAssetsOptions,
+  options: FetchAssetsOptions,
 ): Promise<void> => {
   const bySource = new Map<LoadedManifest, FileRef[]>();
   for (const seat of seats) {
@@ -401,7 +401,7 @@ export const loadContainerComponents = async <Admitted>(
     ],
     streamOptions.onProgress,
   );
-  const hubOptions: StreamAssetsOptions = {
+  const hubOptions: FetchAssetsOptions = {
     ...streamOptions,
     ...(aggregated === undefined ? {} : { onProgress: aggregated }),
   };

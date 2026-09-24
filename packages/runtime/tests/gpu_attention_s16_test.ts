@@ -56,7 +56,6 @@
 
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { tiledWorkgroups } from "../src/codegen/dispatch.ts";
-import { openModel } from "../src/format/container.ts";
 import { roundToF16 } from "../src/format/f16.ts";
 import { RunArena } from "../src/gpu/arena.ts";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
@@ -84,10 +83,20 @@ import { QUANTIZE_ROWS_KEY } from "../src/kernels/quantize-rows.ts";
 import { attentionScoreUsesF16 } from "../src/kernels/score-storage.ts";
 import { referenceAttentionPvQuant } from "../src/reference/i8a8.ts";
 import { stridedKey } from "../src/codegen/strided.ts";
-import { createSession, type SessionOptions, type Tensor } from "../src/runtime/executor.ts";
+import {
+  createSessionFromContainer,
+  type SessionOptions,
+  type Tensor,
+} from "../src/runtime/executor.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
 import { f32ToF16Bits } from "./helpers/f16.ts";
-import { fill, type FilledTensor, graphModelBuffer, singleOpGraph } from "./helpers/graph.ts";
+import {
+  fill,
+  type FilledTensor,
+  GRAPH_NAME,
+  openGraphModel,
+  singleOpDeclaration,
+} from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
 
 const STORAGE_IN = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
@@ -216,10 +225,15 @@ const runAttention = async (
   const q = fill([b, h, m, d], QUERY);
   const k = fill([b, h, n, d], KEY);
   const v = fill([b, h, n, d], VALUE);
-  const graph = singleOpGraph("attention", [q.shape, k.shape, v.shape], [[b, h, m, d]], {
+  const graph = singleOpDeclaration("attention", [q.shape, k.shape, v.shape], [[b, h, m, d]], {
     attrs: { scale: halfScale(d) },
   });
-  const session = await createSession(gpu, openModel(graphModelBuffer(graph)), options);
+  const session = await createSessionFromContainer(
+    gpu,
+    await openGraphModel(graph),
+    GRAPH_NAME,
+    options,
+  );
   try {
     const outputs = await session.run({ x0: q, x1: k, x2: v });
     const diagnostics = session.diagnostics();
@@ -238,10 +252,10 @@ const runAttention = async (
 
 const runGraph = async (
   gpu: GpuContext,
-  graph: ReturnType<typeof singleOpGraph>,
+  graph: ReturnType<typeof singleOpDeclaration>,
   inputs: Readonly<Record<string, Tensor | FilledTensor>>,
 ): Promise<Float32Array<ArrayBuffer>> => {
-  const session = await createSession(gpu, openModel(graphModelBuffer(graph)));
+  const session = await createSessionFromContainer(gpu, await openGraphModel(graph), GRAPH_NAME);
   try {
     const outputs = await session.run(inputs);
     return outputs["y"].data as Float32Array<ArrayBuffer>;
@@ -277,18 +291,18 @@ const s16Oracle = async (
   }
   const scores = await runGraph(
     gpu,
-    singleOpGraph("bmm", [[heads, m, d], [heads, d, n]], [[heads, m, n]]),
+    singleOpDeclaration("bmm", [[heads, m, d], [heads, d, n]], [[heads, m, n]]),
     { x0: tensorOf([heads, m, d], qs), x1: tensorOf([heads, d, n], kt) },
   );
   // ここが唯一の丸め（①QK の書き出し = pack2x16float に対応する）
   const probs = await runGraph(
     gpu,
-    singleOpGraph("softmax", [[heads, m, n]], [[heads, m, n]], { attrs: { dim: 2 } }),
+    singleOpDeclaration("softmax", [[heads, m, n]], [[heads, m, n]], { attrs: { dim: 2 } }),
     { x0: tensorOf([heads, m, n], roundedCopy(scores)) },
   );
   return await runGraph(
     gpu,
-    singleOpGraph("bmm", [[heads, m, n], [heads, n, d]], [[heads, m, d]]),
+    singleOpDeclaration("bmm", [[heads, m, n], [heads, n, d]], [[heads, m, d]]),
     {
       x0: tensorOf([heads, m, n], probs),
       x1: tensorOf([heads, n, d], v as Float32Array<ArrayBuffer>),
@@ -617,16 +631,16 @@ Deno.test({
   fn: async () => {
     const gpu = await acquireGpu();
     try {
-      const graph = singleOpGraph("attention", [[1, 1, 4, 4], [1, 1, 4, 4], [1, 1, 4, 4]], [[
+      const graph = singleOpDeclaration("attention", [[1, 1, 4, 4], [1, 1, 4, 4], [1, 1, 4, 4]], [[
         1,
         1,
         4,
         4,
       ]], { attrs: { scale: halfScale(4) } });
-      const buffer = graphModelBuffer(graph);
+      const opened = await openGraphModel(graph);
       const error = await assertRejects(
         () =>
-          createSession(gpu, openModel(buffer), {
+          createSessionFromContainer(gpu, opened, GRAPH_NAME, {
             attentionCompute: "f16",
             attentionScoreStorage: "f16",
           }),
@@ -638,7 +652,7 @@ Deno.test({
       );
       // MUST: **s16 単独は shader-f16 無しの device で通る**（ADR 0030 決定 1 と同じ規律 —
       // ここが落ちると案 γ の「feature 非依存」という前提そのものが崩れる）
-      const session = await createSession(gpu, openModel(buffer), {
+      const session = await createSessionFromContainer(gpu, opened, GRAPH_NAME, {
         attentionScoreStorage: "f16",
       });
       await session.dispose();
@@ -923,13 +937,18 @@ Deno.test({
     const v = fill([b, h, n, d], VALUE);
     // head 1 の行 3 だけを NaN にする（S の 1 行が丸ごと NaN になる）
     (q.data as Float32Array)[(1 * m + 3) * d] = Number.NaN;
-    const graph = singleOpGraph("attention", [q.shape, k.shape, v.shape], [[b, h, m, d]], {
+    const graph = singleOpDeclaration("attention", [q.shape, k.shape, v.shape], [[b, h, m, d]], {
       attrs: { scale: halfScale(d) },
     });
     const gpu = await acquireGpu();
     try {
       const run = async (options: SessionOptions): Promise<Float32Array> => {
-        const session = await createSession(gpu, openModel(graphModelBuffer(graph)), options);
+        const session = await createSessionFromContainer(
+          gpu,
+          await openGraphModel(graph),
+          GRAPH_NAME,
+          options,
+        );
         try {
           return (await session.run({ x0: q, x1: k, x2: v }))["y"].data as Float32Array;
         } finally {

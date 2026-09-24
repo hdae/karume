@@ -26,7 +26,6 @@ import { assert, assertEquals } from "@std/assert";
 import { gridStrideWorkgroups, tiledWorkgroups } from "../src/codegen/dispatch.ts";
 import { alignF16Payload } from "../src/format/f16.ts";
 import { alignI8Payload } from "../src/format/i8.ts";
-import { openModel } from "../src/format/container.ts";
 import { RunArena } from "../src/gpu/arena.ts";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
 import { PipelineCache } from "../src/gpu/pipeline-cache.ts";
@@ -49,10 +48,16 @@ import { conv2dIgemmMTile } from "../src/kernels/conv2d.ts";
 import { allclose } from "../src/reference/allclose.ts";
 import { referenceConv1d, refTensor } from "../src/reference/ops.ts";
 import type { WeightStorage } from "../src/kernels/weight-storage.ts";
-import { createSession } from "../src/runtime/executor.ts";
+import { createSessionFromContainer } from "../src/runtime/executor.ts";
 import { quantizeF16 } from "./helpers/f16.ts";
 import { quantizeI8 } from "./helpers/i8.ts";
-import { fill, type FilledTensor, graphModelBuffer, singleOpGraph } from "./helpers/graph.ts";
+import {
+  fill,
+  type FilledTensor,
+  GRAPH_NAME,
+  openModelBytes,
+  singleOpDeclaration,
+} from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE } from "./helpers/gpu.ts";
 
 const STORAGE_IN = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
@@ -654,13 +659,17 @@ const conv1dKeysUsed = async (
   groups: number,
 ): Promise<ReadonlySet<string>> => {
   const gpu = await acquireGpu({ gpuTiming: true });
-  const graph = singleOpGraph(
+  const graph = singleOpDeclaration(
     "conv1d",
     [[1, channels, 8], [channels, channels / groups, 3], [channels]],
     [[1, channels, 8]],
     { attrs: { stride: 1, padding: 1, dilation: 1, groups } },
   );
-  const session = await createSession(gpu, openModel(graphModelBuffer(graph)));
+  const session = await createSessionFromContainer(
+    gpu,
+    await openModelBytes(graph, []),
+    GRAPH_NAME,
+  );
   try {
     await session.run({
       x0: fill([1, channels, 8], SIGNED),

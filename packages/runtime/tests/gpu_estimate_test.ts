@@ -6,10 +6,8 @@
 // 認めている差）。アダプタ無しは明示 SKIP。
 
 import { assertEquals } from "@std/assert";
-import type { KarumeModel } from "../src/format/container.ts";
 import { acquireGpu, LIMIT_CAPS } from "../src/gpu/device.ts";
-import { createSession } from "../src/runtime/executor.ts";
-import { estimateSessionMemory } from "../src/runtime/estimate.ts";
+import type { PreparedModel } from "../src/runtime/executor.ts";
 import { planStateAttention } from "../src/runtime/state-attention-plan.ts";
 import {
   bothScenarios,
@@ -17,9 +15,9 @@ import {
   openGraph,
   stateAttentionGraph,
   stateModel,
+  weight,
 } from "./helpers/estimate-graphs.ts";
-import { f32Bytes, type GraphJson } from "./helpers/format.ts";
-import { fill } from "./helpers/graph.ts";
+import { type DeclarationJson, f32Bytes, fill } from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { quantizeI8 } from "./helpers/i8.ts";
 
@@ -78,9 +76,9 @@ const assertPlanBackingMatchesEstimate = async (
     const model = openGraph(stateAttentionGraph(variant.window, heads));
     const generation = { chunkLength, bindings: { C: variant.capacity } };
     const { prefill } = bothScenarios(
-      estimateSessionMemory(model, { generation, maxStorageBufferBindingSize: limit }),
+      model.estimate({ generation, maxStorageBufferBindingSize: limit }),
     );
-    const session = await createSession(gpu, model);
+    const session = await model.createContainerSession(gpu);
     try {
       const context = await session.createGenerationContext(generation);
       try {
@@ -183,20 +181,20 @@ Deno.test({
  * 圧縮 / 展開の 2 欄は診断 `storage` と厳密一致を主張でき、f32 は診断に現れない
  * （`weights.uncompressedBytes` の欄を分けている理由そのもの）ので手計算定数と突合する。
  */
-const gpuWeightModel = (): KarumeModel => {
+const gpuWeightModel = (): PreparedModel => {
   const table = fill([5, 3], (i) => (i % 7) - 3);
   const quantized = quantizeI8(table.data, [5, 3], 0);
-  const graph: GraphJson = {
+  const graph: DeclarationJson = {
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: ["embedding", "mul", "add"] },
     symbols: [],
     inputs: [{ name: "ids", dtype: "i32", shape: [2] }],
     outputs: ["y"],
     initializers: {
-      w: { tensor: "m.w", storage: { dtype: "i8", scale: "m.s" } },
-      g: { tensor: "m.g", storage: { dtype: "f16" } },
-      c: { tensor: "m.c", storage: { dtype: "f32" } },
+      w: {},
+      g: {},
+      c: {},
     },
     values: {
       w: { dtype: "f32", shape: [5, 3] },
@@ -213,10 +211,14 @@ const gpuWeightModel = (): KarumeModel => {
     ],
   };
   return openGraph(graph, [
-    { name: "m.s", dtype: "F32", shape: [5, 1], data: f32Bytes([...quantized.scale]) },
-    { name: "m.c", dtype: "F32", shape: [3], data: f32Bytes([1, 2, 3]) },
-    { name: "m.g", dtype: "F16", shape: [3], data: f16Zeros(3) },
-    { name: "m.w", dtype: "I8", shape: [5, 3], data: quantized.bytes },
+    weight("c", f32Bytes([1, 2, 3])),
+    weight("g", f16Zeros(3), { codec: "f16" }),
+    // per-channel（行長 3・group 1 本）— scale のバイト列は v1 の `[5,1]` と同じ。
+    weight("w", quantized.bytes, {
+      codec: "int8-sym",
+      groupSize: 3,
+      scale: { bytes: f32Bytes([...quantized.scale]), dtype: "f32" },
+    }),
   ]);
 };
 
@@ -227,8 +229,8 @@ Deno.test({
     const gpu = await acquireGpu();
     try {
       const weightModel = gpuWeightModel();
-      const estimate = estimateSessionMemory(weightModel);
-      const session = await createSession(gpu, weightModel);
+      const estimate = weightModel.estimate();
+      const session = await weightModel.createContainerSession(gpu);
       try {
         await session.run({ ids: fill([2], (i) => i, "i32") });
         const storage = session.diagnostics().storage;
@@ -243,8 +245,8 @@ Deno.test({
 
       const model = stateModel();
       const generation = { chunkLength: 4, bindings: { C: 8 } };
-      const stateEstimate = estimateSessionMemory(model, { bindings: { T: 2 }, generation });
-      const stateSession = await createSession(gpu, model);
+      const stateEstimate = model.estimate({ bindings: { T: 2 }, generation });
+      const stateSession = await model.createContainerSession(gpu);
       try {
         const context = await stateSession.createGenerationContext(generation);
         assertEquals(

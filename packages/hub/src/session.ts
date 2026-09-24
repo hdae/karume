@@ -62,7 +62,7 @@ export type LoadManifestOptions = {
    * （沈黙のまま数十秒止まって見えるのを避ける）。
    *
    * 呼ぶのは**HTTP 取得元だけ**（ローカル取得元は取得層を通らないので呼ばない）。届く範囲は
-   * その面の全取得 — revision 解決・`karume.json`・資産（全量面と逐次面の相 1 / 相 2）・
+   * その面の全取得 — revision 解決・`karume.json`・資産（全量面と温め面）・
    * 越境先のファイル。再試行の方針（既定 429 / 503・最大 5 回・`Retry-After` 優先）は取得層の
    * 既定のままで hub は変えない。
    *
@@ -88,8 +88,10 @@ let readSession: (loaded: LoadedManifest) => SessionSource;
 /**
  * 解決済み世代に固定された manifest。以降の取得は全てこの世代で行う。
  *
- * **取得元そのものを内部欄として運ぶ** — 資産 3 面（`fetchAssets` / `prefetchAssets` /
- * `streamAssets`）は識別欄から取得元を組み立て直すのではなく、この値が持っている取得元を開く。
+ * **取得元そのものを内部欄として運ぶ** — 取得元を要する面（`fetchAssets` / `prefetchAssets` /
+ * `openAsset` / `openContainerSource` / 在庫面 `listCachedAssets` / `evictCachedAssets`）は、
+ * つまり {@link pinnedSourceOf} を通る全ての面は、識別欄から取得元を組み立て直すのではなく、
+ * この値が持っている取得元を開く。
  * 組み立て直す形だと「HF なら repo と SHA から復元できる」という HF 固有の性質に全面が
  * 寄りかかり、復元手段の無い取得元（ローカルディレクトリ）が入れられない。
  *
@@ -136,6 +138,3 @@ export const pinnedSourceOf = (
 export type FetchAssetsOptions = LoadManifestOptions & {
   readonly onProgress?: (progress: AssetProgress) => void;
 };
-
-/** 逐次面 `streamAssets` のオプション（全量面 {@link FetchAssetsOptions} と同じ透過）。 */
-export type StreamAssetsOptions = FetchAssetsOptions;

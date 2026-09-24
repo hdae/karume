@@ -27,7 +27,6 @@
 // （置換が空振りすると「壊したのに一致した」= 恒真テストになる）。
 
 import { assert, assertEquals, assertRejects } from "@std/assert";
-import { openModel } from "../src/format/container.ts";
 import { f16BitsToF32, roundToF16 } from "../src/format/f16.ts";
 import {
   acquireGpu,
@@ -61,9 +60,9 @@ import {
   i8a8TileM,
   i8a8TileN,
 } from "../src/kernels/i8a8-geometry.ts";
-import { createSession, type SessionOptions } from "../src/runtime/executor.ts";
+import { createSessionFromContainer, type SessionOptions } from "../src/runtime/executor.ts";
 import type { I8a8Dot } from "../src/runtime/session-types.ts";
-import { fill, graphModelBuffer, singleOpGraph } from "./helpers/graph.ts";
+import { fill, GRAPH_NAME, openGraphModel, singleOpDeclaration } from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
 
 /** `127·exp(S−m)` が半整数から離れているべき最小の余裕（WGSL の `exp` 誤差 ~1e-5 の桁上）。 */
@@ -435,10 +434,15 @@ const runAttention = async (
   const q = fill([b, h, m, d], QUERY);
   const k = fill([b, h, n, d], KEY);
   const v = fill([b, h, n, d], VALUE);
-  const graph = singleOpGraph("attention", [q.shape, k.shape, v.shape], [[b, h, m, d]], {
+  const graph = singleOpDeclaration("attention", [q.shape, k.shape, v.shape], [[b, h, m, d]], {
     attrs: { scale: Math.fround(Math.sqrt(1 / Math.sqrt(d))) },
   });
-  const session = await createSession(gpu, openModel(graphModelBuffer(graph)), options);
+  const session = await createSessionFromContainer(
+    gpu,
+    await openGraphModel(graph),
+    GRAPH_NAME,
+    options,
+  );
   try {
     await session.run({ x0: q, x1: k, x2: v });
     return (session.diagnostics().lastRunTiming?.entries ?? []).map((entry) => entry.key);

@@ -175,7 +175,7 @@ const lastRowLogits = (tensor: Tensor, where: string): Float32Array<ArrayBuffer>
  * 呼び方 — 温度 0 の指定では読まれないが、実運用と同じ形で通す）。
  */
 const generate = async (
-  session: Awaited<ReturnType<PreparedModel["createSession"]>>,
+  session: Awaited<ReturnType<PreparedModel["createContainerSession"]>>,
   logitsName: string,
   ple: Gemma4Ple,
   spec: SamplerSpec,

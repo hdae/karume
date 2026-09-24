@@ -54,10 +54,10 @@ import {
 } from "@karume/runtime";
 import {
   type DistributionSource,
+  type FetchAssetsOptions,
   type HubRepoRef,
   loadManifest,
   resolveSelection,
-  type StreamAssetsOptions,
 } from "@karume/hub";
 
 import { createOperationChain } from "../concurrency/serial.ts";
@@ -931,7 +931,7 @@ class GemmaPipeline {
         ? 'GEMMA4_SOURCES["gemma4"]（@karume/models/gemma）'
         : "明示した QAT 配布形の取得元",
     );
-    const hubOptions: StreamAssetsOptions = hubLoadOptions(options);
+    const hubOptions: FetchAssetsOptions = hubLoadOptions(options);
     const loaded = await loadManifest(source, hubOptions);
     const choice = {
       ...(options.model === undefined ? {} : { model: options.model }),

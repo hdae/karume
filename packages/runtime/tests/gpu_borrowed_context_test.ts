@@ -20,13 +20,11 @@ import { compareTensors, formatAllclose, type Tolerance } from "../src/reference
 import { referenceStateAttentionReadonly } from "../src/reference/state-attention.ts";
 import { decodeI8 } from "../src/format/i8.ts";
 import { acquireGpu, type GpuContext, RUNTIME_INTERNAL } from "../src/gpu/device.ts";
-import { openModel } from "../src/format/container.ts";
-import { createSession, type Session, type Tensor } from "../src/runtime/executor.ts";
+import { createSessionFromContainer, type Session, type Tensor } from "../src/runtime/executor.ts";
 import type { GenerationContext } from "../src/runtime/generation-context.ts";
 import { LENGTHS_BYTES } from "../src/runtime/generation-context.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
-import { buildSafetensors, f32Bytes, type GraphJson } from "./helpers/format.ts";
-import { fill, graphModelBuffer } from "./helpers/graph.ts";
+import { type DeclarationJson, f32Bytes, fill, openGraphModel } from "./helpers/model-fixture.ts";
 import { halfScale, seeded } from "./helpers/state-dispatch.ts";
 import { i8BytesFrom } from "./helpers/i8.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
@@ -47,9 +45,9 @@ const VALUE = (i: number): number => (((i * 5) % 17) - 8) * 0.31;
 const SCALE = halfScale(DEPTH);
 
 /** 貸し手（target 相当）: sliding な自前スロット 2 本 + states 形 attention + append 2 本。 */
-const lenderGraph = (): GraphJson => ({
+const lenderGraph = (): DeclarationJson => ({
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["attention", "state_append"] },
   symbols: ["M", "C"],
   inputs: [
@@ -90,9 +88,9 @@ const lenderGraph = (): GraphJson => ({
 });
 
 /** 借り手（drafter 相当）: 貸し手と**同名**の external スロットを readonly attention 1 本が読む。 */
-const borrowerGraph = (): GraphJson => ({
+const borrowerGraph = (): DeclarationJson => ({
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["attention"] },
   symbols: ["C"],
   inputs: [{ name: "q", dtype: "f32", shape: [1, HEADS, 1, DEPTH] }],
@@ -242,8 +240,16 @@ Deno.test({
   fn: async () => {
     const capacity = 16;
     const gpu = await acquireGpu();
-    const lender = await createSession(gpu, openModel(graphModelBuffer(lenderGraph())));
-    const borrower = await createSession(gpu, openModel(graphModelBuffer(borrowerGraph())));
+    const lender = await createSessionFromContainer(
+      gpu,
+      await openGraphModel(lenderGraph()),
+      "model",
+    );
+    const borrower = await createSessionFromContainer(
+      gpu,
+      await openGraphModel(borrowerGraph()),
+      "model",
+    );
     const lenderContext = await lender.createGenerationContext({
       chunkLength: 4,
       bindings: { C: capacity },
@@ -322,8 +328,16 @@ Deno.test({
   fn: async () => {
     const capacity = 16;
     const gpu = await acquireGpu();
-    const lender = await createSession(gpu, openModel(graphModelBuffer(lenderGraph())));
-    const borrower = await createSession(gpu, openModel(graphModelBuffer(borrowerGraph())));
+    const lender = await createSessionFromContainer(
+      gpu,
+      await openGraphModel(lenderGraph()),
+      "model",
+    );
+    const borrower = await createSessionFromContainer(
+      gpu,
+      await openGraphModel(borrowerGraph()),
+      "model",
+    );
     const lenderContext = await lender.createGenerationContext({
       chunkLength: 4,
       bindings: { C: capacity },
@@ -415,8 +429,16 @@ Deno.test({
   fn: async () => {
     const capacity = 16;
     const gpu = await acquireGpu();
-    const lender = await createSession(gpu, openModel(graphModelBuffer(lenderGraph())));
-    const borrower = await createSession(gpu, openModel(graphModelBuffer(borrowerGraph())));
+    const lender = await createSessionFromContainer(
+      gpu,
+      await openGraphModel(lenderGraph()),
+      "model",
+    );
+    const borrower = await createSessionFromContainer(
+      gpu,
+      await openGraphModel(borrowerGraph()),
+      "model",
+    );
     const lenderContext = await lender.createGenerationContext({
       chunkLength: 4,
       bindings: { C: capacity },
@@ -484,8 +506,16 @@ Deno.test({
   fn: async () => {
     const capacity = 16;
     const gpu = await acquireGpu();
-    const lender = await createSession(gpu, openModel(graphModelBuffer(lenderGraph())));
-    const borrower = await createSession(gpu, openModel(graphModelBuffer(borrowerGraph())));
+    const lender = await createSessionFromContainer(
+      gpu,
+      await openGraphModel(lenderGraph()),
+      "model",
+    );
+    const borrower = await createSessionFromContainer(
+      gpu,
+      await openGraphModel(borrowerGraph()),
+      "model",
+    );
     const lenderContext = await lender.createGenerationContext({
       chunkLength: 4,
       bindings: { C: capacity },
@@ -519,8 +549,16 @@ Deno.test({
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
-    const lender = await createSession(gpu, openModel(graphModelBuffer(lenderGraph())));
-    const borrower = await createSession(gpu, openModel(graphModelBuffer(borrowerGraph())));
+    const lender = await createSessionFromContainer(
+      gpu,
+      await openGraphModel(lenderGraph()),
+      "model",
+    );
+    const borrower = await createSessionFromContainer(
+      gpu,
+      await openGraphModel(borrowerGraph()),
+      "model",
+    );
     const lenderContext = await lender.createGenerationContext({
       chunkLength: 4,
       bindings: { C: 16 },
@@ -574,7 +612,7 @@ Deno.test({
       // ⑥ 窓が貸し手と食い違う借り手（読み書き同式の破れ — 窓外の行を過去として読む）
       const wideWindow = borrowerGraph();
       wideWindow.nodes[0].attrs = { scale: SCALE, window: WINDOW + 2, readonly: true };
-      const wide = await createSession(gpu, openModel(graphModelBuffer(wideWindow)));
+      const wide = await createSessionFromContainer(gpu, await openGraphModel(wideWindow), "model");
       try {
         const mismatch = await assertRejects(
           () => wide.createGenerationContext({ chunkLength: 1, borrow: lenderContext }),
@@ -609,8 +647,16 @@ Deno.test({
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
-    const lender = await createSession(gpu, openModel(graphModelBuffer(lenderGraph())));
-    const borrower = await createSession(gpu, openModel(graphModelBuffer(borrowerGraph())));
+    const lender = await createSessionFromContainer(
+      gpu,
+      await openGraphModel(lenderGraph()),
+      "model",
+    );
+    const borrower = await createSessionFromContainer(
+      gpu,
+      await openGraphModel(borrowerGraph()),
+      "model",
+    );
     const lenderContext = await lender.createGenerationContext({
       chunkLength: 4,
       bindings: { C: 16 },
@@ -644,8 +690,16 @@ Deno.test({
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
-    const lender = await createSession(gpu, openModel(graphModelBuffer(lenderGraph())));
-    const borrower = await createSession(gpu, openModel(graphModelBuffer(borrowerGraph())));
+    const lender = await createSessionFromContainer(
+      gpu,
+      await openGraphModel(lenderGraph()),
+      "model",
+    );
+    const borrower = await createSessionFromContainer(
+      gpu,
+      await openGraphModel(borrowerGraph()),
+      "model",
+    );
     const small = await lender.createGenerationContext({ chunkLength: 4, bindings: { C: 16 } });
     const large = await lender.createGenerationContext({ chunkLength: 4, bindings: { C: 32 } });
     const borrowedSmall = await borrower.createGenerationContext({
@@ -708,14 +762,14 @@ const embedTable = (): {
 };
 
 /** 貸し手（重みの持ち主）: i8 の embedding 表を 1 本だけ持つ最小グラフ。 */
-const weightLenderGraph = (): GraphJson => ({
+const weightLenderGraph = (): DeclarationJson => ({
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["embedding"] },
   symbols: [],
   inputs: [{ name: "index", dtype: "i32", shape: [VOCAB] }],
   outputs: ["y"],
-  initializers: { embed: { tensor: "m.w", storage: { dtype: "i8", scale: "m.s" } } },
+  initializers: { embed: {} },
   values: {
     embed: { dtype: "f32", shape: [VOCAB, HIDDEN] },
     y: { dtype: "f32", shape: [VOCAB, HIDDEN] },
@@ -724,20 +778,20 @@ const weightLenderGraph = (): GraphJson => ({
 });
 
 /** 借り手（バイトを持たない側）: 同じ表を `shared` 宣言で借りて読む。 */
-const weightBorrowerGraph = (): GraphJson => ({
+const weightBorrowerGraph = (): DeclarationJson => ({
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["embedding"] },
   symbols: [],
   inputs: [{ name: "index", dtype: "i32", shape: [VOCAB] }],
   outputs: ["y"],
-  initializers: { borrowed_embed: { shared: { tensor: "m.w" }, storage: { dtype: "i8" } } },
+  initializers: { embed: { shared: true } },
   values: {
-    borrowed_embed: { dtype: "f32", shape: [VOCAB, HIDDEN] },
+    embed: { dtype: "f32", shape: [VOCAB, HIDDEN] },
     y: { dtype: "f32", shape: [VOCAB, HIDDEN] },
   },
   nodes: [
-    { op: "embedding", ins: ["borrowed_embed", "index"], outs: ["y"], attrs: { padding_idx: -1 } },
+    { op: "embedding", ins: ["embed", "index"], outs: ["y"], attrs: { padding_idx: -1 } },
   ],
 });
 
@@ -745,17 +799,14 @@ const weightBorrowerGraph = (): GraphJson => ({
  * 行の軸の門の材料（貸し手）: conv1d の重みスロット = 行の軸 **0**（`[Cout,Cin,K]`）。
  * 値は見ない（門は席と軸だけを見る）ので scale は恒等・payload は定数で埋める。
  */
-const convLenderGraph = (): GraphJson => ({
+const convLenderGraph = (): DeclarationJson => ({
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["conv1d"] },
   symbols: [],
   inputs: [{ name: "x", dtype: "f32", shape: [1, 2, 6] }],
   outputs: ["y"],
-  initializers: {
-    w: { tensor: "m.w", storage: { dtype: "i8", scale: "m.s" } },
-    b: { tensor: "m.b", storage: { dtype: "f32" } },
-  },
+  initializers: { w: {}, b: {} },
   values: {
     w: { dtype: "f32", shape: [4, 2, 3] },
     b: { dtype: "f32", shape: [4] },
@@ -770,53 +821,74 @@ const convLenderGraph = (): GraphJson => ({
 });
 
 /** 同じバイト列を conv_transpose1d（`[Cin,Cout,K]` = 行の軸 **1**）で食う借り手。 */
-const convBorrowerGraph = (): GraphJson => ({
+const convBorrowerGraph = (): DeclarationJson => ({
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["conv_transpose1d"] },
   symbols: [],
   inputs: [{ name: "z", dtype: "f32", shape: [1, 4, 6] }],
   outputs: ["u"],
-  initializers: {
-    borrowed: { shared: { tensor: "m.w" }, storage: { dtype: "i8" } },
-    c: { tensor: "m.c", storage: { dtype: "f32" } },
-  },
+  initializers: { w: { shared: true }, c: {} },
   values: {
-    borrowed: { dtype: "f32", shape: [4, 2, 3] },
+    w: { dtype: "f32", shape: [4, 2, 3] },
     c: { dtype: "f32", shape: [2] },
     u: { dtype: "f32", shape: [1, 2, 8] },
   },
   nodes: [{
     op: "conv_transpose1d",
-    ins: ["z", "borrowed", "c"],
+    ins: ["z", "w", "c"],
     outs: ["u"],
     attrs: { stride: 1, padding: 0 },
   }],
 });
 
-const convLenderModel = (): ArrayBuffer =>
-  buildSafetensors([
-    { name: "m.b", dtype: "F32", shape: [4], data: f32Bytes(new Float32Array(4)) },
-    // 旧配布形の i8 scale は keepdim broadcast 形（軸 0 が行 → `[4,1,1]`）。
+const openConvLenderModel = () =>
+  openGraphModel(convLenderGraph(), [
     {
-      name: "m.s",
-      dtype: "F32",
-      shape: [4, 1, 1],
-      data: f32Bytes(Float32Array.from([1, 1, 1, 1])),
+      graph: "model",
+      initializer: "w",
+      bytes: i8BytesFrom(new Array(24).fill(1)),
+      // per-channel scale の行は消費側 op のチャネル軸（conv1d = 0）で、行長 6 = groupSize。
+      encoding: {
+        codec: "int8-sym",
+        rowAxis: 0,
+        groupSize: 6,
+        scale: { bytes: f32Bytes(Float32Array.from([1, 1, 1, 1])), dtype: "f32" },
+      },
     },
-    { name: "m.w", dtype: "I8", shape: [4, 2, 3], data: i8BytesFrom(new Array(24).fill(1)) },
-  ], { karume_ir: JSON.stringify(convLenderGraph()) });
-
-const convBorrowerModel = (): ArrayBuffer =>
-  graphModelBuffer(convBorrowerGraph(), [
-    { name: "m.c", dtype: "F32", shape: [2], data: f32Bytes(new Float32Array(2)) },
+    {
+      graph: "model",
+      initializer: "b",
+      bytes: f32Bytes(new Float32Array(4)),
+      encoding: { codec: "f32" },
+    },
   ]);
 
-const weightLenderModel = (table: ReturnType<typeof embedTable>): ArrayBuffer =>
-  buildSafetensors([
-    { name: "m.s", dtype: "F32", shape: [VOCAB, 1], data: f32Bytes(table.scale) },
-    { name: "m.w", dtype: "I8", shape: [VOCAB, HIDDEN], data: table.bytes },
-  ], { karume_ir: JSON.stringify(weightLenderGraph()) });
+const openConvBorrowerModel = () =>
+  openGraphModel(convBorrowerGraph(), [
+    {
+      graph: "model",
+      initializer: "c",
+      bytes: f32Bytes(new Float32Array(2)),
+      encoding: { codec: "f32" },
+    },
+  ]);
+
+const openWeightLenderModel = (table: ReturnType<typeof embedTable>) =>
+  openGraphModel(weightLenderGraph(), [
+    {
+      graph: "model",
+      initializer: "embed",
+      bytes: table.bytes,
+      // embedding のチャネル軸は 0・行長 HIDDEN = groupSize（per-channel）。
+      encoding: {
+        codec: "int8-sym",
+        rowAxis: 0,
+        groupSize: HIDDEN,
+        scale: { bytes: f32Bytes(table.scale), dtype: "f32" },
+      },
+    },
+  ]);
 
 Deno.test({
   name: "共有 initializer: 借り手が貸し手の i8 表を読み、値がビット一致する（実 GPU）",
@@ -824,11 +896,16 @@ Deno.test({
   fn: async () => {
     const table = embedTable();
     const gpu = await acquireGpu();
-    const lender = await createSession(gpu, openModel(weightLenderModel(table)));
-    const borrower = await createSession(
+    const lender = await createSessionFromContainer(
       gpu,
-      openModel(graphModelBuffer(weightBorrowerGraph())),
-      { sharedWeights: { "m.w": lender.exportWeight("m.w") } },
+      await openWeightLenderModel(table),
+      "model",
+    );
+    const borrower = await createSessionFromContainer(
+      gpu,
+      await openGraphModel(weightBorrowerGraph()),
+      "model",
+      { sharedWeights: { embed: lender.exportWeight("embed") } },
     );
     try {
       const index = fill([VOCAB], (i) => VOCAB - 1 - i, "i32");
@@ -872,13 +949,21 @@ Deno.test({
   fn: async () => {
     const table = embedTable();
     const gpu = await acquireGpu();
-    const lender = await createSession(gpu, openModel(weightLenderModel(table)));
+    const lender = await createSessionFromContainer(
+      gpu,
+      await openWeightLenderModel(table),
+      "model",
+    );
     try {
-      const shared = lender.exportWeight("m.w");
-      const build = (graph: GraphJson, weights?: Record<string, typeof shared>): Promise<Session> =>
-        createSession(
+      const shared = lender.exportWeight("embed");
+      const build = async (
+        graph: DeclarationJson,
+        weights?: Record<string, typeof shared>,
+      ): Promise<Session> =>
+        await createSessionFromContainer(
           gpu,
-          openModel(graphModelBuffer(graph)),
+          await openGraphModel(graph),
+          "model",
           weights === undefined ? {} : { sharedWeights: weights },
         );
 
@@ -887,21 +972,21 @@ Deno.test({
         () => build(weightBorrowerGraph()),
         ExecutionError,
       );
-      assert(missing.message.includes("不足 [m.w]"), missing.message);
+      assert(missing.message.includes("不足 [embed]"), missing.message);
 
       // ② 余剰（宣言に無い名前）
       const surplus = await assertRejects(
-        () => build(weightBorrowerGraph(), { "m.w": shared, unknown: shared }),
+        () => build(weightBorrowerGraph(), { embed: shared, unknown: shared }),
         ExecutionError,
       );
       assert(surplus.message.includes("余剰 [unknown]"), surplus.message);
 
       // ③ 宣言 shape の不一致
       const wrongShape = weightBorrowerGraph();
-      wrongShape.values["borrowed_embed"].shape = [HIDDEN, VOCAB];
+      wrongShape.values["embed"].shape = [HIDDEN, VOCAB];
       wrongShape.values["y"].shape = [VOCAB, VOCAB];
       const shapeError = await assertRejects(
-        () => build(wrongShape, { "m.w": shared }),
+        () => build(wrongShape, { embed: shared }),
         ExecutionError,
       );
       assert(shapeError.message.includes("宣言 shape"), shapeError.message);
@@ -910,12 +995,16 @@ Deno.test({
       // 読み方の割れはこの軸が受け持つ: per-channel scale の軸は**消費側 op** から決まり、
       // 貸し手 conv1d（軸 0）と借り手 conv_transpose1d（軸 1）では同じバイト列に別の行の
       // scale が掛かる（例外は 1 つも出ない沈黙誤値）。
-      const axisLender = await createSession(gpu, openModel(convLenderModel()));
+      const axisLender = await createSessionFromContainer(
+        gpu,
+        await openConvLenderModel(),
+        "model",
+      );
       try {
         const axisError = await assertRejects(
-          () =>
-            createSession(gpu, openModel(convBorrowerModel()), {
-              sharedWeights: { "m.w": axisLender.exportWeight("m.w") },
+          async () =>
+            await createSessionFromContainer(gpu, await openConvBorrowerModel(), "model", {
+              sharedWeights: { w: axisLender.exportWeight("w") },
             }),
           ExecutionError,
         );
@@ -927,31 +1016,31 @@ Deno.test({
       // ⑤ 消費席の不一致。借り手が同じ表を**重みスロット以外**（elementwise の被演算子）で
       // 食う形は圧縮常駐の適格外 = 席 `expanded` で、貸し手の i8 席と組めない。通すと
       // 「packed な i8 バイト列を f32 として読む」沈黙誤値そのものになる。
-      const wrongSeat: GraphJson = {
+      const wrongSeat: DeclarationJson = {
         format: "karume-ir",
-        version: 1,
+        version: 2,
         requires: { ops: ["add"] },
         symbols: [],
         inputs: [{ name: "x", dtype: "f32", shape: [VOCAB, HIDDEN] }],
         outputs: ["y"],
-        initializers: { borrowed_embed: { shared: { tensor: "m.w" }, storage: { dtype: "i8" } } },
+        initializers: { embed: { shared: true } },
         values: {
-          borrowed_embed: { dtype: "f32", shape: [VOCAB, HIDDEN] },
+          embed: { dtype: "f32", shape: [VOCAB, HIDDEN] },
           y: { dtype: "f32", shape: [VOCAB, HIDDEN] },
         },
-        nodes: [{ op: "add", ins: ["x", "borrowed_embed"], outs: ["y"], attrs: {} }],
+        nodes: [{ op: "add", ins: ["x", "embed"], outs: ["y"], attrs: {} }],
       };
       const seatError = await assertRejects(
-        () => build(wrongSeat, { "m.w": shared }),
+        () => build(wrongSeat, { embed: shared }),
         ExecutionError,
       );
       assert(seatError.message.includes("消費席が貸し手と互換でない"), seatError.message);
 
       // ⑥ 借り物の再輸出は拒否する（借用の連鎖は持たない）。
-      const chained = await build(weightBorrowerGraph(), { "m.w": shared });
+      const chained = await build(weightBorrowerGraph(), { embed: shared });
       try {
         assertThrows(
-          () => chained.exportWeight("m.w"),
+          () => chained.exportWeight("embed"),
           ExecutionError,
           "借り物の再輸出",
         );

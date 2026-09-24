@@ -20,13 +20,21 @@
  */
 
 import { assert, assertEquals, assertRejects } from "@std/assert";
-import { openModel } from "../src/format/container.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
 import { acquireGpu, type GpuContext, LIMIT_CAPS } from "../src/gpu/device.ts";
 import { planRowBlocks } from "../src/runtime/fusion.ts";
-import { createSession, ROW_BLOCK_SPLIT, type Tensor } from "../src/runtime/executor.ts";
-import type { GraphJson } from "./helpers/format.ts";
-import { fill, type FilledTensor, graphModelBuffer } from "./helpers/graph.ts";
+import {
+  createSessionFromContainer,
+  ROW_BLOCK_SPLIT,
+  type Tensor,
+} from "../src/runtime/executor.ts";
+import {
+  type DeclarationJson,
+  fill,
+  type FilledTensor,
+  GRAPH_NAME,
+  openGraphModel,
+} from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
 /** WebGPU core 既定のストレージ束縛上限。ポータビリティ門はここを再現する。 */
@@ -64,12 +72,12 @@ const columnMask = (keys: number): FilledTensor =>
  * `interpose` は bmm と reshape の間に 0 dispatch の別名を 1 本挟むだけ。値も物理 dispatch 数も
  * 変えずに窓の隣接条件だけを外すので、**同じバックエンド上の正本**（融合前の経路）になる。
  */
-const attentionGraph = (shape: Shape, interpose = false): GraphJson => {
+const attentionGraph = (shape: Shape, interpose = false): DeclarationJson => {
   const { heads, queries, keys, headDim } = shape;
   const scores3 = [heads, queries, keys];
   const scores4 = [1, heads, queries, keys];
   const qkOut = interpose ? "scores3_alias" : "scores3";
-  const nodes: GraphJson["nodes"] = [
+  const nodes: DeclarationJson["nodes"] = [
     { op: "bmm", ins: ["q", "kt"], outs: [qkOut], attrs: {} },
     ...(interpose ? [{ op: "reshape", ins: [qkOut], outs: ["scores3"], attrs: {} }] : []),
     { op: "reshape", ins: ["scores3"], outs: ["scores4"], attrs: {} },
@@ -83,7 +91,7 @@ const attentionGraph = (shape: Shape, interpose = false): GraphJson => {
   ];
   return {
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: [...new Set(nodes.map((node) => node.op))] },
     symbols: [],
     inputs: [
@@ -125,13 +133,14 @@ type RunResult = {
 
 const run = async (
   gpu: GpuContext,
-  graph: GraphJson,
+  graph: DeclarationJson,
   inputs: Readonly<Record<string, FilledTensor>>,
   split?: number,
 ): Promise<RunResult> => {
-  const session = await createSession(
+  const session = await createSessionFromContainer(
     gpu,
-    openModel(graphModelBuffer(graph)),
+    await openGraphModel(graph),
+    GRAPH_NAME,
     split === undefined ? {} : { [ROW_BLOCK_SPLIT]: split },
   );
   try {

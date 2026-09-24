@@ -16,20 +16,27 @@
 // MUST: 期待値は**丸め後の重み**（fake-quant — ADR 0006）で作る。
 
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
-import { openModel } from "../src/format/container.ts";
+import type { OpenedContainer } from "../src/format/container/open.ts";
 import { decodeI4 } from "../src/format/i4.ts";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { compareTensors, formatAllclose } from "../src/reference/allclose.ts";
 import { GEMM_TOLERANCE } from "./helpers/op-tolerance.ts";
 import { applyReferenceOp, type RefTensor, refTensor } from "../src/reference/ops.ts";
 import { conv1dUsesVec4 } from "../src/kernels/conv1d.ts";
-import { createSession, type Tensor } from "../src/runtime/executor.ts";
+import { createSessionFromContainer, type Tensor } from "../src/runtime/executor.ts";
 import { i4EligibleInitializers } from "../src/runtime/plan.ts";
 import { linearI8a8Key, linearI8a8UsesVec4 } from "../src/kernels/linear-i8a8.ts";
 import { quantizeRowsTieMargin, referenceLinearW4a8 } from "../src/reference/i8a8.ts";
-import { buildSafetensors, f32Bytes, type GraphJson } from "./helpers/format.ts";
+import type { TensorInput } from "./helpers/container-write.ts";
 import { quantizeI4 } from "./helpers/i4.ts";
-import { fill, type FilledTensor } from "./helpers/graph.ts";
+import {
+  type DeclarationJson,
+  f32Bytes,
+  fill,
+  type FilledTensor,
+  GRAPH_NAME,
+  openModelBytes,
+} from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
 
 const SIGNED = (i: number): number => ((i % 13) - 6) * 0.75;
@@ -59,21 +66,15 @@ const i4LinearModel = (
   testCase: I4Case,
   quantized: ReturnType<typeof quantizeI4>,
   { wAsOutput = false }: { wAsOutput?: boolean } = {},
-): ArrayBuffer => {
-  const graph: GraphJson = {
+): Promise<OpenedContainer> => {
+  const declaration: DeclarationJson = {
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: ["linear"] },
     symbols: [],
     inputs: [{ name: "x", dtype: "f32", shape: [...testCase.x.shape] }],
     outputs: wAsOutput ? ["y", "w"] : ["y"],
-    initializers: {
-      w: {
-        tensor: "m.w",
-        storage: { dtype: "i4", scale: "m.s", group_size: testCase.groupSize },
-      },
-      b: { tensor: "m.b", storage: { dtype: "f32" } },
-    },
+    initializers: { w: {}, b: {} },
     values: {
       w: { dtype: "f32", shape: [...testCase.weight.shape] },
       b: { dtype: "f32", shape: [...testCase.bias.shape] },
@@ -81,24 +82,24 @@ const i4LinearModel = (
     },
     nodes: [{ op: "linear", ins: ["x", "w", "b"], outs: ["y"], attrs: {} }],
   };
-  return buildSafetensors(
-    [
-      { name: "m.w", dtype: "I4", shape: [...testCase.weight.shape], data: quantized.bytes },
-      {
-        name: "m.s",
-        dtype: "F32",
-        shape: [...quantized.scaleShape],
-        data: f32Bytes([...quantized.scale]),
+  return openModelBytes(declaration, [
+    {
+      graph: GRAPH_NAME,
+      initializer: "w",
+      bytes: quantized.bytes,
+      encoding: {
+        codec: "int4-sym-g",
+        groupSize: testCase.groupSize,
+        scale: { bytes: f32Bytes([...quantized.scale]), dtype: "f32" },
       },
-      {
-        name: "m.b",
-        dtype: "F32",
-        shape: [...testCase.bias.shape],
-        data: f32Bytes([...testCase.bias.data]),
-      },
-    ],
-    { karume_ir: JSON.stringify(graph) },
-  );
+    },
+    {
+      graph: GRAPH_NAME,
+      initializer: "b",
+      bytes: f32Bytes([...testCase.bias.data]),
+      encoding: { codec: "f32" },
+    },
+  ]);
 };
 
 const expectedLinear = (testCase: I4Case, quantized: ReturnType<typeof quantizeI4>): RefTensor =>
@@ -157,7 +158,11 @@ Deno.test({
           testCase.weight.shape,
           testCase.groupSize,
         );
-        const session = await createSession(gpu, openModel(i4LinearModel(testCase, quantized)));
+        const session = await createSessionFromContainer(
+          gpu,
+          await i4LinearModel(testCase, quantized),
+          GRAPH_NAME,
+        );
         let output: Tensor;
         let residentBytes: number;
         try {
@@ -197,18 +202,14 @@ Deno.test({
     const bias = fill([20], SIGNED);
     const q16 = quantizeI4(w16.data, w16.shape, 16);
     const q32 = quantizeI4(w32.data, w32.shape, 32);
-    const graph: GraphJson = {
+    const declaration: DeclarationJson = {
       format: "karume-ir",
-      version: 1,
+      version: 2,
       requires: { ops: ["linear"] },
       symbols: [],
       inputs: [{ name: "x", dtype: "f32", shape: [9, 32] }],
       outputs: ["y16", "y32"],
-      initializers: {
-        w16: { tensor: "m.w16", storage: { dtype: "i4", scale: "m.s16", group_size: 16 } },
-        w32: { tensor: "m.w32", storage: { dtype: "i4", scale: "m.s32", group_size: 32 } },
-        b: { tensor: "m.b", storage: { dtype: "f32" } },
-      },
+      initializers: { w16: {}, w32: {}, b: {} },
       values: {
         w16: { dtype: "f32", shape: [20, 32] },
         w32: { dtype: "f32", shape: [20, 32] },
@@ -221,19 +222,37 @@ Deno.test({
         { op: "linear", ins: ["x", "w32", "b"], outs: ["y32"], attrs: {} },
       ],
     };
-    const buffer = buildSafetensors(
-      [
-        { name: "m.w16", dtype: "I4", shape: [20, 32], data: q16.bytes },
-        { name: "m.s16", dtype: "F32", shape: [...q16.scaleShape], data: f32Bytes([...q16.scale]) },
-        { name: "m.w32", dtype: "I4", shape: [20, 32], data: q32.bytes },
-        { name: "m.s32", dtype: "F32", shape: [...q32.scaleShape], data: f32Bytes([...q32.scale]) },
-        { name: "m.b", dtype: "F32", shape: [20], data: f32Bytes([...bias.data]) },
-      ],
-      { karume_ir: JSON.stringify(graph) },
-    );
+    const opened = await openModelBytes(declaration, [
+      {
+        graph: GRAPH_NAME,
+        initializer: "w16",
+        bytes: q16.bytes,
+        encoding: {
+          codec: "int4-sym-g",
+          groupSize: 16,
+          scale: { bytes: f32Bytes([...q16.scale]), dtype: "f32" },
+        },
+      },
+      {
+        graph: GRAPH_NAME,
+        initializer: "w32",
+        bytes: q32.bytes,
+        encoding: {
+          codec: "int4-sym-g",
+          groupSize: 32,
+          scale: { bytes: f32Bytes([...q32.scale]), dtype: "f32" },
+        },
+      },
+      {
+        graph: GRAPH_NAME,
+        initializer: "b",
+        bytes: f32Bytes([...bias.data]),
+        encoding: { codec: "f32" },
+      },
+    ]);
     const gpu = await acquireGpu();
     try {
-      const session = await createSession(gpu, openModel(buffer));
+      const session = await createSessionFromContainer(gpu, opened, GRAPH_NAME);
       try {
         const outputs = await session.run({ x });
         for (
@@ -272,9 +291,10 @@ Deno.test({
     const gpu = await acquireGpu();
     try {
       const run = async (wAsOutput: boolean) => {
-        const session = await createSession(
+        const session = await createSessionFromContainer(
           gpu,
-          openModel(i4LinearModel(testCase, quantized, { wAsOutput })),
+          await i4LinearModel(testCase, quantized, { wAsOutput }),
+          GRAPH_NAME,
         );
         try {
           const outputs = await session.run({ x: testCase.x });
@@ -305,36 +325,32 @@ const i4EmbeddingModel = (
   quantized: ReturnType<typeof quantizeI4>,
   groupSize: number,
   { wAsOutput = false }: { wAsOutput?: boolean } = {},
-): ArrayBuffer => {
+): Promise<OpenedContainer> => {
   const [vocab, hidden] = weight.shape;
-  const graph: GraphJson = {
+  const declaration: DeclarationJson = {
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: ["embedding"] },
     symbols: [],
     inputs: [{ name: "index", dtype: "i32", shape: [...index.shape] }],
     outputs: wAsOutput ? ["y", "w"] : ["y"],
-    initializers: {
-      w: { tensor: "m.w", storage: { dtype: "i4", scale: "m.s", group_size: groupSize } },
-    },
+    initializers: { w: {} },
     values: {
       w: { dtype: "f32", shape: [vocab, hidden] },
       y: { dtype: "f32", shape: [index.shape[0], hidden] },
     },
     nodes: [{ op: "embedding", ins: ["w", "index"], outs: ["y"], attrs: { padding_idx: -1 } }],
   };
-  return buildSafetensors(
-    [
-      { name: "m.w", dtype: "I4", shape: [vocab, hidden], data: quantized.bytes },
-      {
-        name: "m.s",
-        dtype: "F32",
-        shape: [...quantized.scaleShape],
-        data: f32Bytes([...quantized.scale]),
-      },
-    ],
-    { karume_ir: JSON.stringify(graph) },
-  );
+  return openModelBytes(declaration, [{
+    graph: GRAPH_NAME,
+    initializer: "w",
+    bytes: quantized.bytes,
+    encoding: {
+      codec: "int4-sym-g",
+      groupSize,
+      scale: { bytes: f32Bytes([...quantized.scale]), dtype: "f32" },
+    },
+  }]);
 };
 
 Deno.test({
@@ -359,9 +375,10 @@ Deno.test({
         const quantized = quantizeI4(weight.data, weight.shape, testCase.groupSize);
         // 添字は語彙を一巡しない並び（行の取り違えが出る形・同じ行を 2 度引く形も含む）
         const index = fill([testCase.picks], (i) => (i * 3 + 1) % testCase.vocab, "i32");
-        const session = await createSession(
+        const session = await createSessionFromContainer(
           gpu,
-          openModel(i4EmbeddingModel(weight, index, quantized, testCase.groupSize)),
+          await i4EmbeddingModel(weight, index, quantized, testCase.groupSize),
+          GRAPH_NAME,
         );
         let output: Tensor;
         let residentBytes: number;
@@ -430,9 +447,10 @@ Deno.test({
     const gpu = await acquireGpu();
     let actual: Float32Array<ArrayBuffer>;
     try {
-      const session = await createSession(
+      const session = await createSessionFromContainer(
         gpu,
-        openModel(i4EmbeddingModel(weight, index, quantized, groupSize)),
+        await i4EmbeddingModel(weight, index, quantized, groupSize),
+        GRAPH_NAME,
       );
       try {
         actual = (await session.run({ index }))["y"].data as Float32Array<ArrayBuffer>;
@@ -472,9 +490,10 @@ Deno.test({
     const gpu = await acquireGpu();
     try {
       const run = async (wAsOutput: boolean) => {
-        const session = await createSession(
+        const session = await createSessionFromContainer(
           gpu,
-          openModel(i4EmbeddingModel(weight, index, quantized, groupSize, { wAsOutput })),
+          await i4EmbeddingModel(weight, index, quantized, groupSize, { wAsOutput }),
+          GRAPH_NAME,
         );
         try {
           const outputs = await session.run({ index });
@@ -522,20 +541,15 @@ const conv1dModel = (
     wAsOutput = false,
     groups = 1,
   }: { storage?: "i4" | "f32"; wAsOutput?: boolean; groups?: number } = {},
-): ArrayBuffer => {
-  const graph: GraphJson = {
+): Promise<OpenedContainer> => {
+  const declaration: DeclarationJson = {
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: ["conv1d"] },
     symbols: [],
     inputs: [{ name: "x", dtype: "f32", shape: [...x.shape] }],
     outputs: wAsOutput ? ["y", "w"] : ["y"],
-    initializers: {
-      w: storage === "i4"
-        ? { tensor: "m.w", storage: { dtype: "i4", scale: "m.s", group_size: groupSize } }
-        : { tensor: "m.w", storage: { dtype: "f32" } },
-      b: { tensor: "m.b", storage: { dtype: "f32" } },
-    },
+    initializers: { w: {}, b: {} },
     values: {
       w: { dtype: "f32", shape: [...weight.shape] },
       b: { dtype: "f32", shape: [...bias.shape] },
@@ -543,21 +557,25 @@ const conv1dModel = (
     },
     nodes: [{ op: "conv1d", ins: ["x", "w", "b"], outs: ["y"], attrs: { ...attrs, groups } }],
   };
-  const biasTensor = {
-    name: "m.b",
-    dtype: "F32",
-    shape: [...bias.shape],
-    data: f32Bytes([...bias.data]),
+  const biasTensor: TensorInput = {
+    graph: GRAPH_NAME,
+    initializer: "b",
+    bytes: f32Bytes([...bias.data]),
+    encoding: { codec: "f32" },
   };
-  return buildSafetensors(
+  return openModelBytes(
+    declaration,
     storage === "i4"
       ? [
-        { name: "m.w", dtype: "I4", shape: [...weight.shape], data: quantized.bytes },
         {
-          name: "m.s",
-          dtype: "F32",
-          shape: [...quantized.scaleShape],
-          data: f32Bytes([...quantized.scale]),
+          graph: GRAPH_NAME,
+          initializer: "w",
+          bytes: quantized.bytes,
+          encoding: {
+            codec: "int4-sym-g",
+            groupSize,
+            scale: { bytes: f32Bytes([...quantized.scale]), dtype: "f32" },
+          },
         },
         biasTensor,
       ]
@@ -566,14 +584,13 @@ const conv1dModel = (
       // 出力もビット一致する。
       : [
         {
-          name: "m.w",
-          dtype: "F32",
-          shape: [...weight.shape],
-          data: f32Bytes([...quantized.values]),
+          graph: GRAPH_NAME,
+          initializer: "w",
+          bytes: f32Bytes([...quantized.values]),
+          encoding: { codec: "f32" },
         },
         biasTensor,
       ],
-    { karume_ir: JSON.stringify(graph) },
   );
 };
 
@@ -676,11 +693,10 @@ Deno.test({
         );
         const outShape = [batch, channelsOut, lengthOut];
         const run = async (storage: "i4" | "f32") => {
-          const session = await createSession(
+          const session = await createSessionFromContainer(
             gpu,
-            openModel(
-              conv1dModel(x, weight, bias, quantized, groupSize, attrs, outShape, { storage }),
-            ),
+            await conv1dModel(x, weight, bias, quantized, groupSize, attrs, outShape, { storage }),
+            GRAPH_NAME,
           );
           try {
             const outputs = await session.run({ x });
@@ -736,11 +752,10 @@ Deno.test({
     const gpu = await acquireGpu();
     try {
       const run = async (wAsOutput: boolean) => {
-        const session = await createSession(
+        const session = await createSessionFromContainer(
           gpu,
-          openModel(
-            conv1dModel(x, weight, bias, quantized, groupSize, attrs, outShape, { wAsOutput }),
-          ),
+          await conv1dModel(x, weight, bias, quantized, groupSize, attrs, outShape, { wAsOutput }),
+          GRAPH_NAME,
         );
         try {
           const outputs = await session.run({ x });
@@ -781,11 +796,10 @@ Deno.test({
     const outShape = [1, 6, outLength(12, attrs, 4)];
     const gpu = await acquireGpu();
     try {
-      const session = await createSession(
+      const session = await createSessionFromContainer(
         gpu,
-        openModel(
-          conv1dModel(x, weight, bias, quantized, groupSize, attrs, outShape, { groups }),
-        ),
+        await conv1dModel(x, weight, bias, quantized, groupSize, attrs, outShape, { groups }),
+        GRAPH_NAME,
       );
       try {
         const output = await session.run({ x });
@@ -877,9 +891,10 @@ Deno.test({
           lengthIn % 4 === 0,
           `Lin=${lengthIn}: 踏んだ変種`,
         );
-        const session = await createSession(
+        const session = await createSessionFromContainer(
           gpu,
-          openModel(conv1dModel(x, weight, bias, quantized, groupSize, attrs, outShape)),
+          await conv1dModel(x, weight, bias, quantized, groupSize, attrs, outShape),
+          GRAPH_NAME,
         );
         let actual: Float32Array;
         try {
@@ -923,7 +938,7 @@ Deno.test("i4 の適格は linear / embedding / groups==1 の conv1d の重み�
   const eligible = (nodes: readonly unknown[]): readonly string[] =>
     [
       ...i4EligibleInitializers(
-        { initializers: { w: { tensor: "m.w" } }, nodes } as never,
+        { initializers: { w: {} }, nodes } as never,
       ),
     ].sort();
   assertEquals(eligible([{ op: "linear", ins: ["x", "w", "b"], outs: ["y"], attrs: {} }]), ["w"]);
@@ -1001,9 +1016,10 @@ Deno.test({
     // 門に届かない）。
     const gpu = await acquireGpu({ shaderF16: true });
     try {
-      const session = await createSession(
+      const session = await createSessionFromContainer(
         gpu,
-        openModel(i4LinearModel(testCase, quantized)),
+        await i4LinearModel(testCase, quantized),
+        GRAPH_NAME,
         { linearCompute: "f16" },
       );
       try {
@@ -1058,9 +1074,10 @@ Deno.test({
     });
     const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
     try {
-      const session = await createSession(
+      const session = await createSessionFromContainer(
         gpu,
-        openModel(i4LinearModel(testCase, quantized)),
+        await i4LinearModel(testCase, quantized),
+        GRAPH_NAME,
         { linearCompute: "a8" },
       );
       try {

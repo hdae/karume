@@ -14,45 +14,68 @@
 // 量子化誤差と実装誤差が混ざり、tolerance を緩める圧力になる。
 
 import { assert, assertEquals, assertThrows } from "@std/assert";
-import { assertRuntimeSupport, ContainerError, openModel } from "../src/format/container.ts";
+import type { CodecName } from "../src/format/container/codecs.ts";
+import type { OpenedContainer } from "../src/format/container/open.ts";
 import { decodeF16, f16BitsToF32 } from "../src/format/f16.ts";
-import { parseIrGraph } from "../src/format/ir.ts";
+import type { IrGraph } from "../src/format/ir.ts";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
 import { compareTensors, formatAllclose } from "../src/reference/allclose.ts";
 import { GEMM_TOLERANCE } from "./helpers/op-tolerance.ts";
 import { applyReferenceOp, type RefTensor, refTensor } from "../src/reference/ops.ts";
 import { RUNTIME_SUPPORT } from "../src/ops.ts";
+import { assertRuntimeSupport, RuntimeSupportError } from "../src/ops/support.ts";
 import { eligibleCompressedInitializers } from "../src/runtime/plan.ts";
-import { createSession, type Tensor } from "../src/runtime/executor.ts";
-import { buildSafetensors, type GraphJson, type TensorSpec } from "./helpers/format.ts";
+import { createSessionFromContainer, type Tensor } from "../src/runtime/executor.ts";
+import type { TensorInput } from "./helpers/container-write.ts";
 import { f16BytesFromBits, quantizeF16 } from "./helpers/f16.ts";
-import { fill, type FilledTensor } from "./helpers/graph.ts";
+import { mergeGraph } from "./helpers/merged-graph.ts";
+import {
+  type DeclarationJson,
+  fill,
+  type FilledTensor,
+  GRAPH_NAME,
+  openModelBytes,
+} from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
 const SIGNED = (i: number): number => ((i % 13) - 6) * 0.75;
 const POSITIVE = (i: number): number => 0.125 + (i % 17) * 0.5;
 
+/**
+ * 宣言の initializer 全部に指定 codec の空バイト列を当てて合流した `IrGraph`（同期）。
+ * 適格判定はグラフ構造だけを見るので、実体の中身は要らない — 合流層だけ通す。
+ *
+ * 既定は `f16`（この系列が見るのは f16 格納の適格判定なので、名指ししない initializer も
+ * f16 で載る — bias が f16 のまま適格から外れることが、ここの主張そのもの）。
+ */
+const mergedFor = (
+  declaration: DeclarationJson,
+  codecs: Readonly<Record<string, CodecName>> = {},
+): IrGraph =>
+  mergeGraph(
+    declaration,
+    Object.fromEntries(
+      Object.keys(declaration.initializers).map((name) => [name, codecs[name] ?? "f16"]),
+    ),
+  );
+
 // ---------------------------------------------------------------------------
 // 適格判定（GPU 非依存 — グラフ構造だけで決まる）
 // ---------------------------------------------------------------------------
 
-/** `linear(x, w, b)` 1 本のグラフ。`extra` で w の消費を足せる（混在消費を作るため）。 */
-const linearGraph = (
-  weightStorage: string,
-  extra: GraphJson["nodes"] = [],
-  extraValues: GraphJson["values"] = {},
+/** `linear(x, w, b)` 1 本の宣言。`extra` で w の消費を足せる（混在消費を作るため）。 */
+const linearDeclaration = (
+  extra: DeclarationJson["nodes"] = [],
+  extraValues: DeclarationJson["values"] = {},
   extraOutputs: readonly string[] = [],
-): GraphJson => ({
+): DeclarationJson => ({
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["linear", ...extra.map((node) => node.op)] },
   symbols: [],
   inputs: [{ name: "x", dtype: "f32", shape: [2, 4] }],
   outputs: ["y", ...extraOutputs],
-  initializers: {
-    w: { tensor: "m.w", storage: { dtype: weightStorage } },
-    b: { tensor: "m.b", storage: { dtype: "f32" } },
-  },
+  initializers: { w: {}, b: {} },
   values: {
     w: { dtype: "f32", shape: [3, 4] },
     b: { dtype: "f32", shape: [3] },
@@ -63,18 +86,17 @@ const linearGraph = (
 });
 
 Deno.test("適格判定は融合 5 op の weight スロット消費だけを通す", () => {
-  const eligible = (graph: GraphJson): readonly string[] =>
-    [...eligibleCompressedInitializers(parseIrGraph(JSON.stringify(graph)))].sort();
+  const eligible = (declaration: DeclarationJson): readonly string[] =>
+    [...eligibleCompressedInitializers(mergedFor(declaration))].sort();
 
   // 単独の weight 消費は適格。bias は同じグラフにいても**絶対に適格にならない**
   // （プロトタイプの f16 降格バグの逆 — ADR 0006 が名指しした規則）。
-  assertEquals(eligible(linearGraph("f16")), ["m.w"]);
+  assertEquals(eligible(linearDeclaration()), ["w"]);
 
   // MUST: 同じ initializer が weight 以外でも消費されたら適格を失う（混在消費）。
   // 圧縮のまま上げると elementwise 側のカーネルが u32 を f32 として読む沈黙誤値になる。
   assertEquals(
-    eligible(linearGraph(
-      "f16",
+    eligible(linearDeclaration(
       [{ op: "add", ins: ["w", "w"], outs: ["z"], attrs: {} }],
       { z: { dtype: "f32", shape: [3, 4] } },
       ["z"],
@@ -83,10 +105,10 @@ Deno.test("適格判定は融合 5 op の weight スロット消費だけを通�
   );
 
   // 消費ゼロの initializer も適格外（実行に使われないバイトを「常駐圧縮」と数えない）
-  const unused = linearGraph("f16");
-  unused.initializers["dead"] = { tensor: "m.dead", storage: { dtype: "f16" } };
+  const unused = linearDeclaration();
+  unused.initializers["dead"] = {};
   unused.values["dead"] = { dtype: "f32", shape: [2] };
-  assertEquals(eligible(unused), ["m.w"]);
+  assertEquals(eligible(unused), ["w"]);
 });
 
 Deno.test("適格判定は 5 op それぞれの weight スロット位置を見る（bias / index は適格にしない）", () => {
@@ -107,8 +129,8 @@ Deno.test("適格判定は 5 op それぞれの weight スロット位置を見�
     // 整合はここでは要らない（契約検査は別層 — plan.ts の validateGraphContracts）。
     const graph = {
       initializers: {
-        w: { tensor: "m.w", storage: { dtype: "f16" } },
-        b: { tensor: "m.b", storage: { dtype: "f16" } },
+        w: { storage: { codec: "f16" } },
+        b: { storage: { codec: "f16" } },
       },
       nodes: [{ op, ins: [...ins], outs: ["y"], attrs: {} }],
     };
@@ -121,26 +143,25 @@ Deno.test("適格判定は 5 op それぞれの weight スロット位置を見�
 });
 
 Deno.test("graph 出力になった initializer は weight スロット消費だけでも適格外", () => {
-  const eligible = (graph: GraphJson): readonly string[] =>
-    [...eligibleCompressedInitializers(parseIrGraph(JSON.stringify(graph)))].sort();
+  const eligible = (declaration: DeclarationJson): readonly string[] =>
+    [...eligibleCompressedInitializers(mergedFor(declaration))].sort();
 
   // MUST: 消費が weight スロットだけでも、値そのものがグラフ出力なら適格を失う。readback は
   // semantic f32（4 バイト / 要素）を仮定して重みバッファから写すので、圧縮のまま常駐させると
   // copy が実バッファをはみ出す（極小サイズではビット列の読み替えが黙って返る）。
-  assertEquals(eligible(linearGraph("f16", [], {}, ["w"])), []);
+  assertEquals(eligible(linearDeclaration([], {}, ["w"])), []);
 
   // 失格は**出力に載った名前だけ**に効く（同じグラフの別の重みは適格のまま）
-  const twoWeights = linearGraph(
-    "f16",
+  const twoWeights = linearDeclaration(
     [{ op: "linear", ins: ["y", "w2", "b"], outs: ["y2"], attrs: {} }],
     { y2: { dtype: "f32", shape: [2, 3] } },
     ["y2", "w"],
   );
   // requires.ops は重複を拒む（linear 2 本ぶんの宣言は 1 つ）
   twoWeights.requires.ops = ["linear"];
-  twoWeights.initializers["w2"] = { tensor: "m.w2", storage: { dtype: "f16" } };
+  twoWeights.initializers["w2"] = {};
   twoWeights.values["w2"] = { dtype: "f32", shape: [3, 3] };
-  assertEquals(eligible(twoWeights), ["m.w2"]);
+  assertEquals(eligible(twoWeights), ["w2"]);
 });
 
 // ---------------------------------------------------------------------------
@@ -186,37 +207,34 @@ type WeightedCase = {
   readonly attrs?: Record<string, unknown>;
 };
 
-/** weight を f16 initializer にした単一ノードのグラフ + 配布形バイト列。 */
+/** weight を f16 initializer にした単一ノードの宣言 + 開いた容器。 */
 const weightedModel = (
   testCase: WeightedCase,
   weightBytes: Uint8Array<ArrayBuffer>,
-): ArrayBuffer => {
-  const values: GraphJson["values"] = {
+): Promise<OpenedContainer> => {
+  const values: DeclarationJson["values"] = {
     w: { dtype: "f32", shape: [...testCase.weight.shape] },
     y: { dtype: "f32", shape: [...testCase.outShape] },
   };
-  const initializers: GraphJson["initializers"] = {
-    w: { tensor: "m.w", storage: { dtype: "f16" } },
-  };
-  // MUST: 要素数が奇数の F16 は**ファイル末尾**に置く。safetensors のデータ節は隙間なく
-  // 詰める規約なので、42 バイトの F16 の後ろに F32 を置くと絶対 offset が 4 の倍数から
-  // 外れてリーダの整列検査で落ちる（格納の並べ方の制約であって f16 経路の問題ではない）。
-  const tensors: TensorSpec[] = [];
+  const initializers: DeclarationJson["initializers"] = { w: {} };
+  // NOTE: 要素数が奇数の f16（42 バイト）でも並べる順は効かない — 容器は block ごとに
+  // 先頭 64 B 整列 + 末尾のゼロ詰めを書き手が焼くので、隣に何を置いても整列は崩れない。
+  const tensors: TensorInput[] = [];
   if (testCase.bias !== undefined) {
     values["b"] = { dtype: "f32", shape: [...testCase.bias.shape] };
-    initializers["b"] = { tensor: "m.b", storage: { dtype: "f32" } };
+    initializers["b"] = {};
     tensors.push({
-      name: "m.b",
-      dtype: "F32",
-      shape: [...testCase.bias.shape],
-      data: new Uint8Array(testCase.bias.data.buffer.slice(0)),
+      graph: GRAPH_NAME,
+      initializer: "b",
+      bytes: new Uint8Array(testCase.bias.data.buffer.slice(0)),
+      encoding: { codec: "f32" },
     });
   }
   tensors.push({
-    name: "m.w",
-    dtype: "F16",
-    shape: [...testCase.weight.shape],
-    data: weightBytes,
+    graph: GRAPH_NAME,
+    initializer: "w",
+    bytes: weightBytes,
+    encoding: { codec: "f16" },
   });
   // ins の並びは契約どおり（embedding は weight が先頭・他は x の次）
   const ins = testCase.op === "embedding" ? ["w", ...testCase.inputs.map(([name]) => name)] : [
@@ -224,9 +242,9 @@ const weightedModel = (
     "w",
     ...(testCase.bias === undefined ? [] : ["b"]),
   ];
-  const graph: GraphJson = {
+  const declaration: DeclarationJson = {
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: [testCase.op] },
     symbols: [],
     inputs: testCase.inputs.map(([name, tensor]) => ({
@@ -239,7 +257,7 @@ const weightedModel = (
     values,
     nodes: [{ op: testCase.op, ins, outs: ["y"], attrs: { ...testCase.attrs } }],
   };
-  return buildSafetensors(tensors, { karume_ir: JSON.stringify(graph) });
+  return openModelBytes(declaration, tensors);
 };
 
 const runWeighted = async (
@@ -247,7 +265,11 @@ const runWeighted = async (
   testCase: WeightedCase,
 ): Promise<{ readonly output: Tensor; readonly residentBytes: number }> => {
   const quantized = quantizeF16(testCase.weight.data);
-  const session = await createSession(gpu, openModel(weightedModel(testCase, quantized.bytes)));
+  const session = await createSessionFromContainer(
+    gpu,
+    await weightedModel(testCase, quantized.bytes),
+    GRAPH_NAME,
+  );
   try {
     const named: Record<string, Tensor> = {};
     for (const [name, tensor] of testCase.inputs) named[name] = tensor;
@@ -441,14 +463,14 @@ Deno.test({
     const bytes = f16BytesFromBits(
       Array.from({ length: vocab * hidden }, (_, i) => i),
     );
-    const graph: GraphJson = {
+    const declaration: DeclarationJson = {
       format: "karume-ir",
-      version: 1,
+      version: 2,
       requires: { ops: ["embedding"] },
       symbols: [],
       inputs: [{ name: "index", dtype: "i32", shape: [vocab] }],
       outputs: ["y"],
-      initializers: { w: { tensor: "m.w", storage: { dtype: "f16" } } },
+      initializers: { w: {} },
       values: {
         w: { dtype: "f32", shape: [vocab, hidden] },
         y: { dtype: "f32", shape: [vocab, hidden] },
@@ -460,12 +482,11 @@ Deno.test({
         attrs: { padding_idx: -1 },
       }],
     };
-    const model = buildSafetensors(
-      [{ name: "m.w", dtype: "F16", shape: [vocab, hidden], data: bytes }],
-      { karume_ir: JSON.stringify(graph) },
-    );
+    const opened = await openModelBytes(declaration, [
+      { graph: GRAPH_NAME, initializer: "w", bytes, encoding: { codec: "f16" } },
+    ]);
     const gpu = await acquireGpu();
-    const session = await createSession(gpu, openModel(model));
+    const session = await createSessionFromContainer(gpu, opened, GRAPH_NAME);
     let actual: Float32Array<ArrayBuffer>;
     try {
       const outputs = await session.run({ index: fill([vocab], (i) => i, "i32") });
@@ -514,23 +535,21 @@ const poisonedF16Graph = (
   weightShape: readonly number[],
   outShape: readonly number[],
   bias?: readonly number[],
-): GraphJson => {
+): DeclarationJson => {
   const count = outShape.reduce((total, dim) => total * dim, 1);
-  const values: GraphJson["values"] = {
+  const values: DeclarationJson["values"] = {
     poison: { dtype: "f32", shape: [count] },
     w: { dtype: "f32", shape: [...weightShape] },
     y: { dtype: "f32", shape: [...outShape] },
   };
-  const initializers: GraphJson["initializers"] = {
-    w: { tensor: "m.w", storage: { dtype: "f16" } },
-  };
+  const initializers: DeclarationJson["initializers"] = { w: {} };
   if (bias !== undefined) {
     values["b"] = { dtype: "f32", shape: [...bias] };
-    initializers["b"] = { tensor: "m.b", storage: { dtype: "f32" } };
+    initializers["b"] = {};
   }
   return {
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: ["cast", op] },
     symbols: [],
     inputs: [
@@ -563,8 +582,8 @@ Deno.test({
       // linear（タイル形）と embedding（grid-stride + 範囲外分岐）の 2 本で踏む
       const cases: readonly {
         readonly name: string;
-        readonly graph: GraphJson;
-        readonly tensors: readonly TensorSpec[];
+        readonly graph: DeclarationJson;
+        readonly tensors: readonly TensorInput[];
         readonly inputs: Record<string, Tensor>;
         readonly count: number;
       }[] = [
@@ -581,15 +600,19 @@ Deno.test({
               [4, 3],
               [3],
             ),
-            // F16（奇数要素）は末尾（後続 F32 の整列が崩れるため — weightedModel の MUST）
             tensors: [
               {
-                name: "m.b",
-                dtype: "F32",
-                shape: [3],
-                data: new Uint8Array(bias.data.buffer.slice(0)),
+                graph: GRAPH_NAME,
+                initializer: "b",
+                bytes: new Uint8Array(bias.data.buffer.slice(0)),
+                encoding: { codec: "f32" },
               },
-              { name: "m.w", dtype: "F16", shape: [3, 7], data: quantizeF16(weight.data).bytes },
+              {
+                graph: GRAPH_NAME,
+                initializer: "w",
+                bytes: quantizeF16(weight.data).bytes,
+                encoding: { codec: "f16" },
+              },
             ],
             inputs: { x: fill([4, 7], SIGNED) },
             count: 12,
@@ -607,7 +630,12 @@ Deno.test({
               [4, 3],
             ),
             tensors: [
-              { name: "m.w", dtype: "F16", shape: [5, 3], data: quantizeF16(weight.data).bytes },
+              {
+                graph: GRAPH_NAME,
+                initializer: "w",
+                bytes: quantizeF16(weight.data).bytes,
+                encoding: { codec: "f16" },
+              },
             ],
             inputs: { idx: fill([4], (i) => i % 5, "i32") },
             count: 12,
@@ -615,10 +643,8 @@ Deno.test({
         })(),
       ];
       for (const testCase of cases) {
-        const model = openModel(
-          buildSafetensors(testCase.tensors, { karume_ir: JSON.stringify(testCase.graph) }),
-        );
-        const session = await createSession(gpu, model);
+        const opened = await openModelBytes(testCase.graph, testCase.tensors);
+        const session = await createSessionFromContainer(gpu, opened, GRAPH_NAME);
         try {
           const outputs = await session.run({
             seed: fill([testCase.count], () => POISON),
@@ -655,18 +681,29 @@ Deno.test({
     const weight = fill([3, 4], POSITIVE);
     const bias = fill([3], SIGNED);
     const quantized = quantizeF16(weight.data);
-    const tensors: readonly TensorSpec[] = [
-      { name: "m.w", dtype: "F16", shape: [3, 4], data: quantized.bytes },
-      { name: "m.b", dtype: "F32", shape: [3], data: new Uint8Array(bias.data.buffer.slice(0)) },
+    const tensors: readonly TensorInput[] = [
+      {
+        graph: GRAPH_NAME,
+        initializer: "w",
+        bytes: quantized.bytes,
+        encoding: { codec: "f16" },
+      },
+      {
+        graph: GRAPH_NAME,
+        initializer: "b",
+        bytes: new Uint8Array(bias.data.buffer.slice(0)),
+        encoding: { codec: "f32" },
+      },
     ];
     const x = fill([2, 4], SIGNED);
     const run = async (
       gpu: GpuContext,
-      graph: GraphJson,
+      declaration: DeclarationJson,
     ): Promise<{ readonly y: Tensor; readonly resident: number; readonly expanded: number }> => {
-      const session = await createSession(
+      const session = await createSessionFromContainer(
         gpu,
-        openModel(buildSafetensors(tensors, { karume_ir: JSON.stringify(graph) })),
+        await openModelBytes(declaration, tensors),
+        GRAPH_NAME,
       );
       try {
         const outputs = await session.run({ x });
@@ -682,12 +719,11 @@ Deno.test({
     };
     const gpu = await acquireGpu();
     try {
-      const eligible = await run(gpu, linearGraph("f16"));
+      const eligible = await run(gpu, linearDeclaration());
       // w を add でも消費する = 混在消費（同じ linear ノードは残す）
       const mixed = await run(
         gpu,
-        linearGraph(
-          "f16",
+        linearDeclaration(
           [{ op: "add", ins: ["w", "w"], outs: ["z"], attrs: {} }],
           { z: { dtype: "f32", shape: [3, 4] } },
           ["z"],
@@ -729,18 +765,14 @@ Deno.test({
     const weight = quantizeF16(fill([3, 7], POSITIVE).data);
     const bias = quantizeF16(fill([3], SIGNED).data);
     const scale = fill([3], POSITIVE);
-    const graph: GraphJson = {
+    const declaration: DeclarationJson = {
       format: "karume-ir",
-      version: 1,
+      version: 2,
       requires: { ops: ["linear", "mul"] },
       symbols: [],
       inputs: [{ name: "x", dtype: "f32", shape: [2, 7] }],
       outputs: ["y"],
-      initializers: {
-        w: { tensor: "m.w", storage: { dtype: "f16" } },
-        b: { tensor: "m.b", storage: { dtype: "f16" } },
-        s: { tensor: "m.s", storage: { dtype: "f32" } },
-      },
+      initializers: { w: {}, b: {}, s: {} },
       values: {
         w: { dtype: "f32", shape: [3, 7] },
         b: { dtype: "f32", shape: [3] },
@@ -753,13 +785,18 @@ Deno.test({
         { op: "mul", ins: ["h", "s"], outs: ["y"], attrs: {} },
       ],
     };
-    const model = openModel(buildSafetensors([
-      { name: "m.w", dtype: "F16", shape: [3, 7], data: weight.bytes },
-      { name: "m.b", dtype: "F16", shape: [3], data: bias.bytes },
-      { name: "m.s", dtype: "F32", shape: [3], data: new Uint8Array(scale.data.buffer.slice(0)) },
-    ], { karume_ir: JSON.stringify(graph) }));
+    const opened = await openModelBytes(declaration, [
+      { graph: GRAPH_NAME, initializer: "w", bytes: weight.bytes, encoding: { codec: "f16" } },
+      { graph: GRAPH_NAME, initializer: "b", bytes: bias.bytes, encoding: { codec: "f16" } },
+      {
+        graph: GRAPH_NAME,
+        initializer: "s",
+        bytes: new Uint8Array(scale.data.buffer.slice(0)),
+        encoding: { codec: "f32" },
+      },
+    ]);
     const gpu = await acquireGpu();
-    const session = await createSession(gpu, model);
+    const session = await createSessionFromContainer(gpu, opened, GRAPH_NAME);
     try {
       const storage = session.diagnostics().storage;
       // 適格: 21 要素 × 2 バイト = 42 → 4 バイト整列で 44
@@ -801,13 +838,18 @@ Deno.test({
     const weight = fill([3, 4], POSITIVE);
     const bias = fill([3], SIGNED);
     const quantized = quantizeF16(weight.data);
-    const model = openModel(buildSafetensors([
-      { name: "m.w", dtype: "F16", shape: [3, 4], data: quantized.bytes },
-      { name: "m.b", dtype: "F32", shape: [3], data: new Uint8Array(bias.data.buffer.slice(0)) },
-    ], { karume_ir: JSON.stringify(linearGraph("f16", [], {}, ["w"])) }));
+    const opened = await openModelBytes(linearDeclaration([], {}, ["w"]), [
+      { graph: GRAPH_NAME, initializer: "w", bytes: quantized.bytes, encoding: { codec: "f16" } },
+      {
+        graph: GRAPH_NAME,
+        initializer: "b",
+        bytes: new Uint8Array(bias.data.buffer.slice(0)),
+        encoding: { codec: "f32" },
+      },
+    ]);
     const x = fill([2, 4], SIGNED);
     const gpu = await acquireGpu();
-    const session = await createSession(gpu, model);
+    const session = await createSessionFromContainer(gpu, opened, GRAPH_NAME);
     try {
       const storage = session.diagnostics().storage;
       assertEquals(
@@ -818,8 +860,8 @@ Deno.test({
       assertEquals(storage.hostExpandedBytes, quantized.values.byteLength, "CPU 展開バイト数");
       const outputs = await session.run({ x });
       // 重みは実行に依らない定数なので、丸め後の値とビット単位で一致する
-      assertEquals(outputs["m.w"].shape, [3, 4]);
-      assertEquals([...outputs["m.w"].data], [...quantized.values]);
+      assertEquals(outputs["w"].shape, [3, 4]);
+      assertEquals([...outputs["w"].data], [...quantized.values]);
       // 同じ run の計算側も従来どおり（展開経路でも値は変わらない）
       const expected = applyReferenceOp(
         "linear",
@@ -841,30 +883,17 @@ Deno.test({
  * 名つきで列挙される（i8 は ADR 0019 で門が開いた — tests/gpu_i8_weights_test.ts）。
  */
 Deno.test("bf16 は capability 不足で fail loudly（f16 の門は bf16 まで開かない）", () => {
-  const withStorage = (dtype: string, tensors: readonly TensorSpec[]): void => {
-    const graph = linearGraph(dtype);
-    const model = openModel(
-      buildSafetensors(
-        [...tensors, { name: "m.b", dtype: "F32", shape: [3], data: new Uint8Array(12) }],
-        { karume_ir: JSON.stringify(graph) },
+  const error = assertThrows(
+    // 圧縮重み + f32 bias（`b` を省くと `mergedFor` の既定 f16 になり、fixture の意図が変わる）。
+    () =>
+      assertRuntimeSupport(
+        mergedFor(linearDeclaration(), { w: "bf16", b: "f32" }),
+        RUNTIME_SUPPORT,
       ),
-    );
-    const error = assertThrows(
-      () => assertRuntimeSupport(model.graph, RUNTIME_SUPPORT),
-      ContainerError,
-      "capability 不足",
-    );
-    assertEquals(
-      error.message.includes(`非対応 格納 '${dtype}' (1): m.w`),
-      true,
-      error.message,
-    );
-  };
-  withStorage("bf16", [{ name: "m.w", dtype: "BF16", shape: [3, 4], data: new Uint8Array(24) }]);
+    RuntimeSupportError,
+    "capability 不足",
+  );
+  assertEquals(error.message.includes("非対応 格納 'bf16' (1): w"), true, error.message);
   // f16 は同じ門を通る（適格かどうかは実行可否と別軸）
-  const f16 = openModel(buildSafetensors([
-    { name: "m.w", dtype: "F16", shape: [3, 4], data: new Uint8Array(24) },
-    { name: "m.b", dtype: "F32", shape: [3], data: new Uint8Array(12) },
-  ], { karume_ir: JSON.stringify(linearGraph("f16")) }));
-  assertRuntimeSupport(f16.graph, RUNTIME_SUPPORT);
+  assertRuntimeSupport(mergedFor(linearDeclaration(), { b: "f32" }), RUNTIME_SUPPORT);
 });

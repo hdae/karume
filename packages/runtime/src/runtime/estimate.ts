@@ -37,11 +37,11 @@
  * 例外も警告も無く別の数を主張し続ける。
  */
 
-import { assertRuntimeSupport, type KarumeModel } from "../format/container.ts";
 import { parseDim, solveDim } from "../format/dims.ts";
 import type { IrDim, IrGraph } from "../format/ir.ts";
 import { toSizeClass } from "../gpu/arena.ts";
 import { numel, RUNTIME_SUPPORT, stateWindow, topkK } from "../ops.ts";
+import { assertRuntimeSupport } from "../ops/support.ts";
 import { planAliases } from "./fusion.ts";
 import {
   assertChunkBuckets,
@@ -84,11 +84,7 @@ import {
   topkOneSplitGroups,
 } from "../kernels/argmax.ts";
 import { planStateAttention, type StateAttentionBlock } from "./state-attention-plan.ts";
-import {
-  planWeightBuffers,
-  planWeightResidency,
-  type WeightResidency,
-} from "./weight-residency.ts";
+import { planWeightBuffers, type WeightResidency } from "./weight-residency.ts";
 
 /**
  * **予約名**のシナリオ。`generation` を渡さない見積りは `"run"` の 1 本、渡した見積りは
@@ -147,7 +143,7 @@ export type AdmissionScenario = {
   readonly workspaceBytes: number;
 };
 
-/** 必要バイト数の報告（{@link estimateSessionMemory} / `PreparedModel.estimate` の戻り）。 */
+/** 必要バイト数の報告（{@link estimateGraphMemory} / `PreparedModel.estimate` の戻り）。 */
 export type AdmissionReport = {
   /** run の形に依らず Session の寿命ぶん抱えるもの。 */
   readonly resident: {
@@ -272,7 +268,7 @@ export type EstimateOptions = {
    * slot backing の保持予算（`SessionOptions.planBackingBudgetBytes` と同じ値・既定
    * `DEFAULT_PLAN_BACKING_BUDGET_BYTES` = 256 MiB）。
    *
-   * MUST: 検査は `createSession` と同じ（非負の安全な整数以外は fail loudly）。見積りだけが
+   * MUST: 検査は `createContainerSession` と同じ（非負の安全な整数以外は fail loudly）。見積りだけが
    * Session の作れない予算を受けると、「見積れたのに構築が落ちる」形になる。
    * 効くのは {@link AdmissionReport.peakAccountedBytes} だけで、シナリオごとの数字は動かない
    * （予算は保持**本数**の側の量で、1 本の形の必要量ではない）。予算 0 = 常に 1 本なので、
@@ -701,9 +697,22 @@ const transientSlotBytes = (
 
 /**
  * Session 1 本ぶんの必要メモリを見積る（ADR 0070 決定 5 — GPU も device も要らない純関数）。
+ * `PreparedModel.estimate` が呼ぶのもこの 1 本である。
  *
  * 判定はしない: 返るのはカテゴリ別のバイト数と、勘定に入っていないものの列だけ。可否の
  * 最終門は out-of-memory errorScope のままで、この見積りを超えていても実行は止まらない。
+ *
+ * **グラフ単位の見積り口**でもある: ロードを終えて初期化子のバイト列を手放した呼び手
+ * （models のパイプラインは `PreparedModel` を捨てて `IrGraph` だけ残す）が、握っている
+ * グラフと `planWeightResidency(graph)` の計画、そして `{capacity, chunkLength}` を
+ * `options.generation` に載せて同じ {@link AdmissionReport} を得る。
+ *
+ * MUST: 常駐計画を**持っている呼び手はそれを渡す**（`PreparedModel` は prepare 時に 1 回だけ
+ * 計算して構築とも共有する）。構築に使ったのと別の計画を組み直して渡すと、「見積りに使った席」
+ * と「実際に上げた席」が別の計算結果になりうる形が復活する。
+ * 持っていない呼び手（`PreparedModel` を捨てて `IrGraph` だけ残す models のパイプライン）は
+ * `planWeightResidency(graph)` で引いてよい — グラフが同じなら計画も同じ純関数なので、席の
+ * 食い違いは生じない（`mod.ts` がこの 2 本を公開している理由そのもの）。
  *
  * @param options.bindings グラフ入力側の記号次元（run に渡すのと同じ束縛）。未束縛の記号が
  *   要る形は fail loudly。物理 chunk 行 `M` の記号だけは**ここでは受けない**（束縛点は
@@ -718,42 +727,12 @@ const transientSlotBytes = (
  * @param options.planBackingBudgetBytes slot backing の保持予算（`SessionOptions` と同じ値）。
  *   {@link AdmissionReport.peakAccountedBytes} の片側の項になる。
  */
-export const estimateSessionMemory = (
-  model: KarumeModel,
-  options: EstimateOptions = {},
-): AdmissionReport => {
-  // MUST: 契約検査は常駐計画（`planWeightResidency`）より**先**。引数の評価順に任せると、
-  // 契約違反のグラフは常駐計画の内側（`i4Executable` の attrs 読み）で `nodes (conv1d)` と
-  // 落ち、`nodes[i] (op)` を名乗る `validateGraphContracts` の文言にならない — 実構築
-  // （`PreparedModel`）と同じ門を同じ順で通す、というモジュール doc の MUST が破れる。
-  // 二重に通ることになるが、どちらも純関数・冪等でグラフ 1 走査ぶんの費用しかない。
-  assertRuntimeSupport(model.graph, RUNTIME_SUPPORT);
-  validateGraphContracts(model.graph);
-  return estimateGraphMemory(model.graph, planWeightResidency(model.graph), options);
-};
-
-/**
- * 見積りの本体（グラフと常駐計画だけで完結する — 全量面 {@link estimateSessionMemory} と
- * `PreparedModel.estimate` が共有する 1 本）。
- *
- * **グラフ単位の見積り口**でもある: ロードを終えて初期化子のバイト列を手放した呼び手
- * （models のパイプラインは `PreparedModel` を捨てて `IrGraph` だけ残す）が、握っている
- * グラフと `planWeightResidency(graph)` の計画、そして `{capacity, chunkLength}` を
- * `options.generation` に載せて同じ {@link AdmissionReport} を得る。
- *
- * MUST: 常駐計画を**持っている呼び手はそれを渡す**（`PreparedModel` は prepare 時に 1 回だけ
- * 計算して構築とも共有する）。構築に使ったのと別の計画を組み直して渡すと、「見積りに使った席」
- * と「実際に上げた席」が別の計算結果になりうる形が復活する。
- * 持っていない呼び手（`PreparedModel` を捨てて `IrGraph` だけ残す models のパイプライン）は
- * `planWeightResidency(graph)` で引いてよい — グラフが同じなら計画も同じ純関数なので、席の
- * 食い違いは生じない（`mod.ts` がこの 2 本を公開している理由そのもの）。
- */
 export const estimateGraphMemory = (
   graph: IrGraph,
   residency: ReadonlyMap<string, WeightResidency>,
   options: EstimateOptions,
 ): AdmissionReport => {
-  // MUST: 実構築（`createSession` / `createSessionFromShards`）と**同じ門**を先に通す。
+  // MUST: 実構築（`createSessionFromContainer`）と**同じ門**を先に通す。
   // 作れない構成へ見積りを返すと、格納 dtype や op が非対応のモデルに対して estimator だけが
   // もっともらしい総量を主張する（例: 格納 `bf16` は IR の語彙にはあるが RUNTIME_SUPPORT に
   // 無く、Session 構築は必ず落ちる）。門を共有すれば語彙が増えたときの抜けも同時に塞がる。
@@ -779,7 +758,7 @@ export const estimateGraphMemory = (
   // states 形 attention を持たないグラフで -1 / 1.5 / NaN が黙って受理される。
   assertLimitOption("maxStorageBufferBindingSize", options.maxStorageBufferBindingSize);
   assertLimitOption("maxBufferSize", options.maxBufferSize);
-  // MUST: 予算の値域も**ここで**見る（`createSession` と同じ検査 — ADR 0095 決定 1）。読む位置
+  // MUST: 予算の値域も**ここで**見る（`createContainerSession` と同じ検査 — ADR 0095 決定 1）。読む位置
   // （下のピーク）だけに置くと、Session が作れない予算で見積りだけが数を返す。
   const budgetBytes = options.planBackingBudgetBytes ?? DEFAULT_PLAN_BACKING_BUDGET_BYTES;
   if (!Number.isSafeInteger(budgetBytes) || budgetBytes < 0) {

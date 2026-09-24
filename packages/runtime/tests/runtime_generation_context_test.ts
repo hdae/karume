@@ -4,7 +4,8 @@
 // （gpu_generation_context_test.ts）はアダプタ無しの環境では 1 本も走らない。
 
 import { assert, assertEquals, assertThrows } from "@std/assert";
-import { type IrGraph, parseIrGraph } from "../src/format/ir.ts";
+import { mergedGraph } from "../src/format/container/bind.ts";
+import type { IrGraph } from "../src/format/ir.ts";
 import {
   assertChunkBuckets,
   assertChunkLength,
@@ -12,15 +13,15 @@ import {
   resolveSlotShape,
 } from "../src/runtime/generation-context.ts";
 import { ExecutionError, type SymbolBindings } from "../src/runtime/plan.ts";
-import type { GraphJson } from "./helpers/format.ts";
+import { type DeclarationJson, GRAPH_NAME, memoryModel } from "./helpers/model-fixture.ts";
 
 /**
  * 記号 2 本のグラフ。`__proto__` を宣言しているのは器の性質を撃つため — シンボルの文法
  * `[A-Za-z_][A-Za-z0-9_]*` はこの綴りにマッチする。
  */
-const symbolGraph = (): GraphJson => ({
+const symbolGraph = (): DeclarationJson => ({
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["add"] },
   symbols: ["T", "__proto__"],
   inputs: [
@@ -33,7 +34,9 @@ const symbolGraph = (): GraphJson => ({
   nodes: [{ op: "add", ins: ["x", "p"], outs: ["y"], attrs: {} }],
 });
 
-const parse = (graph: GraphJson): IrGraph => parseIrGraph(JSON.stringify(graph));
+/** 宣言 → 合流後のグラフ（initializer 0 本なので供給は要らない）。 */
+const parse = (graph: DeclarationJson): IrGraph =>
+  mergedGraph(memoryModel(graph, []).graphs[GRAPH_NAME], GRAPH_NAME);
 
 Deno.test("assertChunkLength は 1..0xffffffff の整数だけを受理する", () => {
   // 0 / 負 / 小数 / u32 の 1 つ上（搬送先が u32 なので上限はここ）。

@@ -25,7 +25,7 @@
  * MUST: 全モジュール副作用ゼロ（import 時実行・グローバル可変状態の禁止 — CLAUDE.md）。
  */
 
-import type { GenerationContext, KarumeModel, Session, Tensor } from "@karume/runtime";
+import type { GenerationContext, PreparedModel, Session, Tensor } from "@karume/runtime";
 
 import type { DraftCycle, DraftFace } from "../generation/speculation.ts";
 import {
@@ -52,7 +52,7 @@ export const GEMMA4_DRAFT_STEPS = 3;
  * 生成面の `GenerationGraph`（`../generation/program.ts`）の部分集合では足りない — 見るのは
  * states の `external` と initializers の `shared` で、どちらも IR 本体にしか無い欄である。
  */
-type DrafterGraph = KarumeModel["graph"];
+type DrafterGraph = PreparedModel["graph"];
 
 /** drafter グラフの入力名（正本は `tools/export-recipes/gemma4/export_drafter.py`）。 */
 const TOKEN_INPUT = "token";

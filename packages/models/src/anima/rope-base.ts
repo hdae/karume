@@ -2,7 +2,7 @@
  * `rope_base.safetensors`（軸別 rope 素表）の読み取り。
  *
  * 素表は IR コンテナではない**素の safetensors**（`transformer` の `extras.rope_base` —
- * ADR 0038 §2）なので `openModel` では開けない。ファイルの解析は `@karume/runtime` 公開面の
+ * ADR 0038 §2）なので `openContainer` では開けない。ファイルの解析は `@karume/runtime` 公開面の
  * `parseSafetensors`（厳格リーダ — データ節の被覆・整列・dtype はそちらで検査済み）に委ね、
  * この層は「F32・rank2 の表を軸ごとに引き、行数を突き合わせる」用途特化の検査だけを持つ
  * （DECIDED: 二重実装の解消として runtime 公開面へ載せた — ADR 0008 追記 2026-08-05）。

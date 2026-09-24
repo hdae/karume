@@ -150,7 +150,7 @@ const pinnedHfSource = (
       });
     },
 
-    readFile: async (ref, { signal, onProgress, into }) => {
+    readFile: async (ref, { signal, onProgress }) => {
       return await fetchHfFile(
         target,
         {
@@ -161,10 +161,6 @@ const pinnedHfSource = (
           // 前確保サイズでもある。確保自体が失敗する大きさ（Chromium の単一 ArrayBuffer 上限
           // 超え）なら受信前に throw されるので、数 GB を撃ち終わってから落ちることがない。
           expectedBytes: ref.size,
-          // 逐次面の器（最大 shard 長 1 本）があれば取得層にそこへ書かせる — 受信もキャッシュ
-          // 読出しも器の先頭へ入り、shard 毎のバッファ確保が消える（取得層 `into`・ADR 0070 追記）。
-          // 器の先頭 `size` バイトを指す view が返る契約は取得層側が保証する（容量不足は throw）。
-          ...(into === undefined ? {} : { into: into() }),
         },
         {
           init: requestInit(options.headers, signal),

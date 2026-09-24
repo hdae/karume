@@ -33,7 +33,6 @@
 // 資産不要。`shader-f16` を列挙しないアダプタでは SKIP（既定の f32 経路の検証は無傷）。
 
 import { assert, assertEquals, assertRejects } from "@std/assert";
-import { openModel } from "../src/format/container.ts";
 import { f16BitsToF32, roundToF16 } from "../src/format/f16.ts";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
 import {
@@ -43,11 +42,24 @@ import {
   attentionStatsRegCache,
 } from "../src/kernels/attention.ts";
 import { linearKey } from "../src/kernels/linear.ts";
-import { createSession, type SessionOptions, type Tensor } from "../src/runtime/executor.ts";
+import {
+  createSessionFromContainer,
+  type SessionOptions,
+  type Tensor,
+} from "../src/runtime/executor.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
-import { f32Bytes, type GraphJson, type TensorSpec } from "./helpers/format.ts";
+import type { OpenedContainer } from "../src/format/container/open.ts";
+import type { TensorInput } from "./helpers/container-write.ts";
 import { f32ToF16Bits, quantizeF16 } from "./helpers/f16.ts";
-import { fill, type FilledTensor, graphModelBuffer, singleOpGraph } from "./helpers/graph.ts";
+import {
+  type DeclarationJson,
+  f32Bytes,
+  fill,
+  type FilledTensor,
+  GRAPH_NAME,
+  openModelBytes,
+  singleOpDeclaration,
+} from "./helpers/model-fixture.ts";
 import { quantizeI8 } from "./helpers/i8.ts";
 import { GPU_AVAILABLE, SHADER_F16_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
 
@@ -172,15 +184,14 @@ type RunResult = {
 
 const runModel = async (
   gpu: GpuContext,
-  buffer: ArrayBuffer,
+  opened: OpenedContainer,
   inputs: Readonly<Record<string, Tensor>>,
   options: SessionOptions = {},
 ): Promise<RunResult> => {
-  const model = openModel(buffer);
-  const session = await createSession(gpu, model, options);
+  const session = await createSessionFromContainer(gpu, opened, GRAPH_NAME, options);
   try {
     const outputs = await session.run(inputs);
-    const tensor = outputs[model.graph.outputs[0]];
+    const tensor = outputs[opened.graphs[GRAPH_NAME].declaration.outputs[0]];
     return {
       output: tensor.data as Float32Array<ArrayBuffer>,
       keys: (session.diagnostics().lastRunTiming?.entries ?? []).map((entry) => entry.key),
@@ -190,22 +201,22 @@ const runModel = async (
   }
 };
 
-const runGraph = (
+const runGraph = async (
   gpu: GpuContext,
-  graph: GraphJson,
+  graph: DeclarationJson,
   inputs: Readonly<Record<string, Tensor>>,
   options: SessionOptions = {},
-  tensors: readonly TensorSpec[] = [],
-): Promise<RunResult> => runModel(gpu, graphModelBuffer(graph, tensors), inputs, options);
+  tensors: readonly TensorInput[] = [],
+): Promise<RunResult> => await runModel(gpu, await openModelBytes(graph, tensors), inputs, options);
 
 // ---------------------------------------------------------------------------
 // linear
 // ---------------------------------------------------------------------------
 
 /** `linear(x, w, b)` 1 ノード（重みは**グラフ入力** = 格納 f32 の経路）。 */
-const linearInputGraph = (m: number, n: number, k: number): GraphJson => ({
+const linearInputGraph = (m: number, n: number, k: number): DeclarationJson => ({
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["linear"] },
   symbols: [],
   inputs: [
@@ -220,17 +231,14 @@ const linearInputGraph = (m: number, n: number, k: number): GraphJson => ({
 });
 
 /** `linear(x, w, b)` 1 ノード（重みは f16 格納の initializer = 格納 f16 × 計算 f16 の組）。 */
-const linearWf16Graph = (m: number, n: number, k: number): GraphJson => ({
+const linearWf16Graph = (m: number, n: number, k: number): DeclarationJson => ({
   format: "karume-ir",
-  version: 1,
+  version: 2,
   requires: { ops: ["linear"] },
   symbols: [],
   inputs: [{ name: "x", dtype: "f32", shape: [m, k] }],
   outputs: ["y"],
-  initializers: {
-    w: { tensor: "m.w", storage: { dtype: "f16" } },
-    b: { tensor: "m.b", storage: { dtype: "f32" } },
-  },
+  initializers: { w: {}, b: {} },
   values: {
     w: { dtype: "f32", shape: [n, k] },
     b: { dtype: "f32", shape: [n] },
@@ -324,11 +332,19 @@ Deno.test({
         const weight = quantizeF16(raw);
         const bias = Float32Array.from({ length: n }, (_, i) => BS(i));
         const graph = linearWf16Graph(m, n, k);
-        // MUST: F32 を先に置く（F16 の要素数が奇数だと後続 F32 の絶対 offset が
-        // 4 バイト整列を外れ、safetensors のリーダが正当に落ちる）。
-        const tensors: readonly TensorSpec[] = [
-          { name: "m.b", dtype: "F32", shape: [n], data: f32Bytes(bias) },
-          { name: "m.w", dtype: "F16", shape: [n, k], data: weight.bytes },
+        const tensors: readonly TensorInput[] = [
+          {
+            graph: GRAPH_NAME,
+            initializer: "b",
+            bytes: f32Bytes(bias),
+            encoding: { codec: "f32" },
+          },
+          {
+            graph: GRAPH_NAME,
+            initializer: "w",
+            bytes: weight.bytes,
+            encoding: { codec: "f16" },
+          },
         ];
 
         const actual = await runGraph(gpu, graph, { x }, { linearCompute: "f16" }, tensors);
@@ -417,21 +433,21 @@ const attentionOracle = async (
   }
   const scores = await runGraph(
     gpu,
-    singleOpGraph("bmm", [[heads, m, d], [heads, d, n]], [[heads, m, n]]),
+    singleOpDeclaration("bmm", [[heads, m, d], [heads, d, n]], [[heads, m, n]]),
     { x0: tensorOf([heads, m, d], qs), x1: tensorOf([heads, d, n], kt) },
   );
 
   // ② S を f16 へ（① の書き出しの丸め）→ 行統計と P は softmax がそのまま作る
   const probs = await runGraph(
     gpu,
-    singleOpGraph("softmax", [[heads, m, n]], [[heads, m, n]], { attrs: { dim: 2 } }),
+    singleOpDeclaration("softmax", [[heads, m, n]], [[heads, m, n]], { attrs: { dim: 2 } }),
     { x0: tensorOf([heads, m, n], roundedCopy(scores.output)) },
   );
 
   // ③ P と v を f16 へ（③ のタイル充填の丸め）
   const out = await runGraph(
     gpu,
-    singleOpGraph("bmm", [[heads, m, n], [heads, n, d]], [[heads, m, d]]),
+    singleOpDeclaration("bmm", [[heads, m, n], [heads, n, d]], [[heads, m, d]]),
     {
       x0: tensorOf([heads, m, n], roundedCopy(probs.output)),
       x1: tensorOf([heads, n, d], roundedCopy(v as Float32Array<ArrayBuffer>)),
@@ -452,9 +468,14 @@ Deno.test({
         const k = fill([b, h, n, d], KEY);
         const v = fill([b, h, n, d], VALUE);
         const scale = halfScale(d);
-        const graph = singleOpGraph("attention", [q.shape, k.shape, v.shape], [[b, h, m, d]], {
-          attrs: { scale },
-        });
+        const graph = singleOpDeclaration(
+          "attention",
+          [q.shape, k.shape, v.shape],
+          [[b, h, m, d]],
+          {
+            attrs: { scale },
+          },
+        );
 
         const actual = await runGraph(gpu, graph, { x0: q, x1: k, x2: v }, {
           attentionCompute: "f16",
@@ -519,10 +540,10 @@ Deno.test({
     const gpu = await acquireGpu();
     try {
       assertEquals(gpu.shaderF16Enabled, false, "既定の acquireGpu は shader-f16 を要求しない");
-      const buffer = graphModelBuffer(linearInputGraph(4, 8, 4));
+      const opened = await openModelBytes(linearInputGraph(4, 8, 4), []);
       for (const options of [{ linearCompute: "f16" }, { attentionCompute: "f16" }] as const) {
         const error = await assertRejects(
-          () => createSession(gpu, openModel(buffer), options),
+          () => createSessionFromContainer(gpu, opened, GRAPH_NAME, options),
           ExecutionError,
         );
         assert(
@@ -545,17 +566,14 @@ Deno.test({
     const k = 8;
     const raw = Float32Array.from({ length: n * k }, (_, i) => WS(i));
     const weight = quantizeI8(raw, [n, k], 0);
-    const graph: GraphJson = {
+    const graph: DeclarationJson = {
       format: "karume-ir",
-      version: 1,
+      version: 2,
       requires: { ops: ["linear"] },
       symbols: [],
       inputs: [{ name: "x", dtype: "f32", shape: [m, k] }],
       outputs: ["y"],
-      initializers: {
-        w: { tensor: "m.w", storage: { dtype: "i8", scale: "m.w_scale" } },
-        b: { tensor: "m.b", storage: { dtype: "f32" } },
-      },
+      initializers: { w: {}, b: {} },
       values: {
         w: { dtype: "f32", shape: [n, k] },
         b: { dtype: "f32", shape: [n] },
@@ -563,30 +581,35 @@ Deno.test({
       },
       nodes: [{ op: "linear", ins: ["x", "w", "b"], outs: ["y"], attrs: {} }],
     };
-    const tensors: readonly TensorSpec[] = [
-      { name: "m.w", dtype: "I8", shape: [n, k], data: weight.bytes },
+    const tensors: readonly TensorInput[] = [
       {
-        name: "m.w_scale",
-        dtype: "F32",
-        shape: [...weight.scaleShape],
-        data: f32Bytes(weight.scale),
+        graph: GRAPH_NAME,
+        initializer: "w",
+        bytes: weight.bytes,
+        // per-channel（行長 = K が group 長・groups は 1）。`rowAxis` は linear の重みの
+        // チャネル軸 0（src/ops/names.ts の `WEIGHT_CHANNEL_AXES`）。
+        encoding: {
+          codec: "int8-sym",
+          groupSize: k,
+          scale: { dtype: "f32", bytes: f32Bytes(weight.scale) },
+        },
       },
       {
-        name: "m.b",
-        dtype: "F32",
-        shape: [n],
-        data: f32Bytes(Float32Array.from({ length: n }, (_, i) => BS(i))),
+        graph: GRAPH_NAME,
+        initializer: "b",
+        bytes: f32Bytes(Float32Array.from({ length: n }, (_, i) => BS(i))),
+        encoding: { codec: "f32" },
       },
     ];
     const gpu = await acquireGpu({ shaderF16: true });
     try {
-      const buffer = graphModelBuffer(graph, tensors);
+      const opened = await openModelBytes(graph, tensors);
       const x = fill([m, k], XS);
       // MUST: i8a8 と f32 は通る（落とすのは w8a16 の組だけ）
-      await runModel(gpu, buffer, { x }, {});
-      await runModel(gpu, buffer, { x }, { linearCompute: "a8" });
+      await runModel(gpu, opened, { x }, {});
+      await runModel(gpu, opened, { x }, { linearCompute: "a8" });
       const error = await assertRejects(
-        () => runModel(gpu, buffer, { x }, { linearCompute: "f16" }),
+        () => runModel(gpu, opened, { x }, { linearCompute: "f16" }),
         ExecutionError,
       );
       assert(error.message.includes("w8a16"), `案内が足りない: ${error.message}`);

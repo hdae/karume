@@ -17,14 +17,15 @@
 import {
   type CodecEntry,
   codecEntry,
+  type CodecName,
   groupCount,
   MIN_GROUP_SIZE,
   payloadBytes,
   perChannelGroupSize,
+  scaleBytes,
 } from "./codecs.ts";
 import type {
-  ConstBlockRecord,
-  DataBlockRecord,
+  ConstantBinding,
   Encoding,
   GraphDescriptor,
   ModelDescriptor,
@@ -34,6 +35,24 @@ import { ContainerFormatError } from "./header.ts";
 import { BLOCK_TAIL_ALIGN } from "./limits.ts";
 import { isI2Shape } from "../i2.ts";
 import type { IrDeclaration, IrDtype, IrGraph, IrInitializer } from "../ir.ts";
+
+/**
+ * block 目次の 1 行のうち**合流層が要る欄**（所在と長さ）。sha256 は要求しない — 取得したバイト列の
+ * 完全性は取得層（`open.ts` の `readBlock`）の担当で、合流は「宣言 shape × encoding × 目次」しか
+ * 見ないため。容器の目次（`ConstBlockRecord` / `DataBlockRecord`）は構造的にこれを満たし、自前の
+ * バイト列を供給するメモリ内容器（`memory.ts`）はこの 3 欄だけを埋める。
+ */
+export type SupplyRecord = {
+  readonly id: string;
+  readonly offset: number;
+  readonly length: number;
+};
+
+/** block id → 所在（part と目次の行）。未宣言の id は fail loudly。 */
+export type Locator = (
+  id: string,
+  by: string,
+) => { readonly part: number; readonly record: SupplyRecord };
 
 /** 実体 1 本ぶんの block（piece 列なら 1 piece）。 */
 export type SupplyBlock = {
@@ -66,6 +85,20 @@ export type BoundGraph = {
   readonly supplies: ReadonlyMap<string, InitializerSupply>;
 };
 
+/**
+ * `PreparedModel` が要る**供給元の面**（`krm` を開いた `OpenedContainer` も、自前のバイト列を
+ * 渡すメモリ内容器（`memory.ts`）の戻りも、構造的にこれを満たす）。置き場が合流層なのは、
+ * この面の中身（`graphs`）が合流結果そのものだから — 供給元 1 つ 1 つの実装ファイルに置くと、
+ * 他方の供給元しか使わない呼び手までそのファイルへ型依存する。
+ *
+ * MUST: `readBlock` が返したバイト列を呼び手は**書き換えない**。メモリ内容器は呼び手が渡した
+ * 器をそのまま返す（複製しない）ので、書き換えは供給元の実体を壊す。
+ */
+export type BoundContainer = {
+  readonly graphs: Readonly<Record<string, BoundGraph>>;
+  readBlock(id: string): Promise<Uint8Array<ArrayBuffer>>;
+};
+
 // NOTE: 関数宣言にするのは、`never` 戻りの呼び出しを TS が制御フローの打ち切りとして扱う条件が
 // 「宣言型が明示された識別子」であるため（const の arrow では narrowing が効かない）。
 function fail(message: string): never {
@@ -80,18 +113,56 @@ const isPowerOfTwo = (value: number): boolean => 2 ** Math.round(Math.log2(value
 
 const numelOf = (shape: readonly number[]): number => shape.reduce((count, dim) => count * dim, 1);
 
-type Locator = (
-  id: string,
-  by: string,
-) => { readonly part: number; readonly record: ConstBlockRecord | DataBlockRecord };
-
 /** block 長と payload 長の関係（§4.1 — 詰め物は 0 以上 4 未満・書き手が焼く）。 */
-const assertPadded = (record: ConstBlockRecord, payload: number, by: string): void => {
+const assertPadded = (record: SupplyRecord, payload: number, by: string): void => {
   if (record.length < payload || record.length - payload >= BLOCK_TAIL_ALIGN) {
     fail(
       `${by}: block '${record.id}' の長さ ${record.length} が payload ${payload} バイト + 詰め物（${BLOCK_TAIL_ALIGN} 未満）でない`,
     );
   }
+};
+
+/** 宣言 shape から payload バイト長（{@link payloadBytes} の素の例外をこの層の型へ言い直す）。 */
+const declaredPayloadBytes = (codec: CodecName, numel: number, where: string): number => {
+  try {
+    return payloadBytes(codec, numel, where);
+  } catch (cause) {
+    return fail(cause instanceof Error ? cause.message : String(cause));
+  }
+};
+
+/** 宣言から companion scale のバイト長（{@link scaleBytes} の素の例外をこの層の型へ言い直す）。 */
+const declaredScaleBytes = (count: number, where: string): number => {
+  try {
+    return scaleBytes(count, where);
+  } catch (cause) {
+    return fail(cause instanceof Error ? cause.message : String(cause));
+  }
+};
+
+/**
+ * piece 分割の 1 行あたりバイト数（payload ÷ 先頭次元）。
+ *
+ * piece の block 長はこの値から決まるので、**自前の block 目次を合成する供給元**
+ * （`memory.ts`）も同じ 1 本を通す — 式が 2 つあると、合成した長さと合流層が期待する長さが
+ * 静かに割れる（割れても `found.record.length === pieceBytes` の突合は両方が同じ誤りを
+ * 持つぶん恒真になる）。
+ */
+export const pieceRowBytes = (
+  codec: CodecName,
+  shape: readonly number[],
+  where: string,
+): number => rowBytesOfPayload(declaredPayloadBytes(codec, numelOf(shape), where), shape, where);
+
+/** {@link pieceRowBytes} の本体（payload を既に持っている呼び手が再計算を避けるための口）。 */
+const rowBytesOfPayload = (payload: number, shape: readonly number[], where: string): number => {
+  const rows = shape.length === 0 ? 1 : shape[0];
+  if (shape.length === 0 || payload % rows !== 0) {
+    fail(
+      `${where}: payload ${payload} バイトが先頭次元 ${rows} 行で割り切れないので piece 分割できない`,
+    );
+  }
+  return payload / rows;
 };
 
 const planSupply = (
@@ -123,12 +194,7 @@ const planSupply = (
       }]）`,
     );
   }
-  let payload: number;
-  try {
-    payload = payloadBytes(encoding.codec, numel, where);
-  } catch (cause) {
-    fail(cause instanceof Error ? cause.message : String(cause));
-  }
+  const payload = declaredPayloadBytes(encoding.codec, numel, where);
   const rows = shape.length === 0 ? 1 : shape[0];
 
   // 実体の block 列。
@@ -148,12 +214,7 @@ const planSupply = (
     if (encoding.rowAxis !== undefined && encoding.rowAxis !== 0) {
       fail(`${where}: rowAxis ${encoding.rowAxis} の initializer は piece 分割できない（規則④）`);
     }
-    if (shape.length === 0 || payload % rows !== 0) {
-      fail(
-        `${where}: payload ${payload} バイトが先頭次元 ${rows} 行で割り切れないので piece 分割できない`,
-      );
-    }
-    const rowBytes = payload / rows;
+    const rowBytes = rowBytesOfPayload(payload, shape, where);
     const last = supply.pieces[supply.pieces.length - 1];
     if (last.rows[1] !== rows) {
       fail(
@@ -162,12 +223,47 @@ const planSupply = (
         } 行が宣言 shape の先頭次元 ${rows} 行に届かない / 超える（規則④）`,
       );
     }
+    // 規則④: 行範囲は 0 から隙間なく続く。穴・重なり・空区間はどれも「どのバイトがその行を
+    // 埋めるか」が転送順で決まる沈黙誤値になる。容器経由では descriptor の parse が同じ形を
+    // 先に落とすが、**束縛規則の所有者はこの層**なので供給元に依らずここでも見る
+    // （自前のバイト列を供給するメモリ内容器は descriptor を通らない）。
+    let cursor = 0;
     for (const [i, piece] of supply.pieces.entries()) {
       const by = `${where} piece[${i}]`;
+      // 規則④: 行番号は非負の安全整数。小数の行境界は被覆検査（空区間・連続性・末尾）を
+      // どれも素通りしたうえで、`rowOffset · (全体長 / 行数)` を 4 の倍数でないバイト位置に
+      // し、GPU の writeBuffer validation まで失敗が遅れる。容器経由では descriptor の
+      // `requireIndex` が同じ形を先に落とす。
+      for (const [edge, value] of piece.rows.entries()) {
+        if (!Number.isSafeInteger(value) || value < 0) {
+          fail(
+            `${by}: 行範囲の ${
+              edge === 0 ? "開始" : "終端"
+            } ${value} が非負の安全整数でない（規則④）`,
+          );
+        }
+      }
+      if (piece.rows[1] <= piece.rows[0]) {
+        fail(`${by}: 行範囲 [${piece.rows[0]}, ${piece.rows[1]}) が空区間（規則④）`);
+      }
+      if (piece.rows[0] !== cursor) {
+        fail(
+          `${by}: 行範囲 [${piece.rows[0]}, ${piece.rows[1]}) が行 ${cursor} から続かない（規則④）`,
+        );
+      }
+      cursor = piece.rows[1];
       const found = locate(piece.block, by);
       const pieceBytes = (piece.rows[1] - piece.rows[0]) * rowBytes;
       if (i < supply.pieces.length - 1) {
         // 中間 piece に詰め物は掛けられない（次の piece の先頭を潰す）— 長さは元から 4 の倍数 MUST。
+        // 容器では書き手と目次の parse が先に落とすが、**束縛規則の所有者はこの層**なので
+        // 供給元に依らずここでも見る（見ないと、4 の倍数でない行長の codec を piece 分割した
+        // 形が GPU の writeBuffer validation まで落ちず、転送層の文言で出る）。
+        if (pieceBytes % BLOCK_TAIL_ALIGN !== 0) {
+          fail(
+            `${by}: 中間 piece の行範囲のバイト数 ${pieceBytes} が ${BLOCK_TAIL_ALIGN} の倍数でない（詰め物不可 — 規則④）`,
+          );
+        }
         if (found.record.length !== pieceBytes) {
           fail(
             `${by}: 中間 piece の block 長 ${found.record.length} が行範囲のバイト数 ${pieceBytes} と違う（詰め物不可）`,
@@ -219,15 +315,18 @@ const planSupply = (
   const scaleRef = encoding.scale;
   if (scaleRef === undefined) fail(`${where}: codec '${encoding.codec}' は scale 必須`);
   const scaleFound = locate(scaleRef.block, `${where} scale`);
-  const scaleBytes = rowCount * groupCount(rowLength, groupSize) * 4;
-  assertPadded(scaleFound.record, scaleBytes, `${where} scale`);
+  const scalePayload = declaredScaleBytes(
+    rowCount * groupCount(rowLength, groupSize),
+    `${where} scale`,
+  );
+  assertPadded(scaleFound.record, scalePayload, `${where} scale`);
   const scale: SupplyBlock = {
     id: scaleFound.record.id,
     part: scaleFound.part,
     offset: scaleFound.record.offset,
     length: scaleFound.record.length,
     rows: [0, rowCount],
-    payloadBytes: scaleBytes,
+    payloadBytes: scalePayload,
   };
   if (encoding.zeroPoint === undefined) return { encoding, blocks, scale, origin };
   const zeroFound = locate(encoding.zeroPoint.block, `${where} zeroPoint`);
@@ -287,29 +386,27 @@ export const assertTernaryCodes = (payload: Uint8Array<ArrayBuffer>, where: stri
 };
 
 /**
- * 全グラフを合流する。2 文書の構造検査（`descriptor.ts`）は済んでいる前提で、ここは宣言 shape を
- * 要する規則だけを掛ける。
+ * 宣言と供給を合流する本体 — **2 文書の形に依存しない**（容器の目次でも、自前のバイト列を
+ * 供給するメモリ内容器でも同じ 1 本を通る）。入口はグラフの宣言・const 束縛・束縛表・block の
+ * 引き当て口の 4 つだけで、ここに置く規則がモジュール doc の一覧そのものである。
+ *
+ * `binding` が `undefined` のときは束縛表を持たない形（`krg`）— const 供給と shared 以外の
+ * initializer は「重みが要る」宣言として供給計画を持たないまま残る（Session は組めない）。
  */
-export const bindGraphs = (
-  graph: GraphDescriptor,
-  model: ModelDescriptor | undefined,
-): Readonly<Record<string, BoundGraph>> => {
-  const constById = new Map(graph.const.blocks.map((block) => [block.id, block]));
-  const dataById = new Map((model?.blocks ?? []).map((block) => [block.id, block]));
-  const locate: Locator = (id, by) => {
-    const constBlock = constById.get(id);
-    if (constBlock !== undefined) return { part: 1, record: constBlock };
-    const dataBlock = dataById.get(id);
-    if (dataBlock !== undefined) return { part: dataBlock.part, record: dataBlock };
-    return fail(`${by}: 未宣言の block '${id}'`);
-  };
-  const constSupply = new Map<string, GraphDescriptor["const"]["constants"][number]>();
-  for (const entry of graph.const.constants) {
+export const bindDeclarations = (input: {
+  readonly graphs: Readonly<Record<string, IrDeclaration>>;
+  readonly constants: readonly ConstantBinding[];
+  readonly binding: ModelDescriptor["binding"] | undefined;
+  readonly locate: Locator;
+}): Readonly<Record<string, BoundGraph>> => {
+  const { graphs, constants, binding, locate } = input;
+  const constSupply = new Map<string, ConstantBinding>();
+  for (const entry of constants) {
     constSupply.set(`${entry.graph}/${entry.initializer}`, entry);
   }
 
   const out: Record<string, BoundGraph> = {};
-  for (const [graphName, declaration] of Object.entries(graph.graphs)) {
+  for (const [graphName, declaration] of Object.entries(graphs)) {
     const supplies = new Map<string, InitializerSupply>();
     for (const [name, init] of Object.entries(declaration.initializers)) {
       if (init.shared) continue;
@@ -331,10 +428,10 @@ export const bindGraphs = (
         );
         continue;
       }
-      const supply = model?.binding[graphName]?.[name];
+      const supply = binding?.[graphName]?.[name];
       if (supply === undefined) {
         // krg（束縛表を持たない）で const 以外の initializer は「重みが要る」宣言 — 供給計画は無い。
-        if (model === undefined) continue;
+        if (binding === undefined) continue;
         return fail(`${where}: 束縛表に供給が無い`);
       }
       supplies.set(name, planSupply(where, value.dtype, shape, supply, locate, "model"));
@@ -342,4 +439,30 @@ export const bindGraphs = (
     out[graphName] = { declaration, supplies };
   }
   return out;
+};
+
+/**
+ * 全グラフを合流する（2 文書の面）。構造検査（`descriptor.ts`）は済んでいる前提で、ここは
+ * 2 文書から const 束縛・束縛表・block の引き当て口を組んで {@link bindDeclarations} へ渡す
+ * 薄い外皮である。
+ */
+export const bindGraphs = (
+  graph: GraphDescriptor,
+  model: ModelDescriptor | undefined,
+): Readonly<Record<string, BoundGraph>> => {
+  const constById = new Map(graph.const.blocks.map((block) => [block.id, block]));
+  const dataById = new Map((model?.blocks ?? []).map((block) => [block.id, block]));
+  const locate: Locator = (id, by) => {
+    const constBlock = constById.get(id);
+    if (constBlock !== undefined) return { part: 1, record: constBlock };
+    const dataBlock = dataById.get(id);
+    if (dataBlock !== undefined) return { part: dataBlock.part, record: dataBlock };
+    return fail(`${by}: 未宣言の block '${id}'`);
+  };
+  return bindDeclarations({
+    graphs: graph.graphs,
+    constants: graph.const.constants,
+    binding: model?.binding,
+    locate,
+  });
 };

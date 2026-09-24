@@ -7,7 +7,7 @@
 //
 // MUST: フィクスチャは models の `encodePng` を import して作らない（依存方向が逆）。ここは
 // `CompressionStream("deflate")` で最小の encoder を持ち、正しい形を 1 箇所に置いて異常系は
-// 1 点だけ壊す（helpers/format.ts と同じ規律）。
+// 1 点だけ壊す（helpers/safetensors.ts と同じ規律）。
 // NOTE: チャンク CRC はデコーダが検証しないので 0 を書く。
 
 import { assertEquals, assertRejects } from "@std/assert";

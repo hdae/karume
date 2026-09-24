@@ -1,24 +1,19 @@
 /**
  * Session の構築相（{@link buildSessionState} = `Session.build` の本体と、構築だけが使う
- * 部品 — ノブの受理集合 / companion scale / shard の取り回し / カナリア / {@link SessionState}）。
+ * 部品 — ノブの受理集合 / companion scale / 供給単位の取り回し / カナリア /
+ * {@link SessionState}）。
  *
  * MUST: executor.ts へ import を張らない（循環 import の禁止 — session-types.ts と同じ規律）。
  * 構築相が返すのは状態（{@link SessionState}）だけで、`Session` は private constructor を
  * 持つため実体はファサード側で作る。依存は {@link "./executor.ts"} → ここの**一方向**。
  */
 
-import {
-  createShardValidator,
-  IR_METADATA_KEY,
-  type ReadyInitializer,
-} from "../format/container.ts";
 import { codecLayout } from "../format/container/codecs.ts";
 import { alignF16Payload, decodeF16 } from "../format/f16.ts";
 import { decodeI2 } from "../format/i2.ts";
 import { decodeI4 } from "../format/i4.ts";
 import { alignI8Payload, decodeI8 } from "../format/i8.ts";
-import type { IrDtype, IrGraph, LegacyKeys } from "../format/ir.ts";
-import { parseSafetensors, type SafetensorsFile } from "../format/safetensors.ts";
+import type { IrDtype, IrGraph } from "../format/ir.ts";
 import { RunArena } from "../gpu/arena.ts";
 import {
   type AttentionI8a8Decision,
@@ -96,7 +91,7 @@ const LINEAR_GEMV_REDUCES: Readonly<Record<LinearGemvReduce, true>> = {
  * 外れて既定へ黙って縮退する。
  * MUST: 診断でも利用者の変換（`toString` / `Symbol.toPrimitive` / `toJSON`）を呼ばない。非文字列は
  * `typeof` の型名だけを出す — 入力境界の診断で利用者のコードを走らせると、`ExecutionError` の
- * 代わりに利用者側の例外が `createSession` から抜ける。
+ * 代わりに利用者側の例外が `createContainerSession` から抜ける。
  *
  * パッケージ内向けに export しているのはテスト用（GPU に触れない純関数なので、アダプタ無し
  * 環境でも回帰を撃てる）。`mod.ts` の公開面には出さない（ADR 0008）。
@@ -135,8 +130,48 @@ export const HOST_WRITTEN_USAGE = BUFFER_USAGE.STORAGE | BUFFER_USAGE.COPY_DST |
   BUFFER_USAGE.COPY_SRC;
 
 /**
+ * companion scale の実体（量子化 codec のみ・piece 列では piece 1 だけ）。
+ *
+ * `shape` は**rank 2 group 形** `[shape[rowAxis], 行長 / groupSize]`（container-v1 §6.1）。
+ * per-channel（i8 / i2）は group 数 1 の `[rows, 1]` で、消費側は 1 形だけを扱う。
+ */
+export type ReadyScale = {
+  readonly bytes: Uint8Array<ArrayBuffer>;
+  readonly shape: readonly [number, number];
+};
+
+/**
+ * 供給元（コンテナの供給計画）から Session 構築へ渡る initializer 1 本ぶんの実体。
+ * **バイト列**で受け渡す（コンテナの block でも呼び手の器でもない — 供給元の形を消費側に
+ * 漏らさない）。
+ */
+export type ReadyInitializer = {
+  readonly name: string;
+  /** 格納 payload（丸ごと / その piece だけ）。整列の詰め物を含まない生バイト列。 */
+  readonly payload: Uint8Array<ArrayBuffer>;
+  readonly scale?: ReadyScale;
+  /**
+   * 分割テンソルの位置（丸ごと 1 本で来たときは undefined — container-v1 §5）。
+   *
+   * 消費側は `first` でバッファを確保して scale を上げ、`last` でだけ末尾整列の詰め物を掛け、
+   * 各 piece を `rowOffset` から決まるバイト位置へ書く（中間 piece に詰め物を掛けると、
+   * 詰め物が次の piece の先頭バイトを潰す沈黙誤値になる）。
+   */
+  readonly piece?: {
+    /** この piece が始まる行（先頭次元）。 */
+    readonly rowOffset: number;
+    /** この piece の行数。 */
+    readonly rows: number;
+    /** piece 1（バッファ確保と companion scale の転送を担う席）。 */
+    readonly first: boolean;
+    /** piece n（末尾整列の詰め物を担う席）。 */
+    readonly last: boolean;
+  };
+};
+
+/**
  * 量子化格納の companion scale（ADR 0019 / 0069）。実在・F32・形（rank 2 group 形への正規化）は
- * 供給元（旧 shard の validator / コンテナの合流層）が済ませているので、ここは view を組むだけ。
+ * 供給元（コンテナの合流層）が済ませているので、ここは view を組むだけ。
  *
  * MUST: `Float32Array` の view はコピーせずに張る（scale は重み本体に比べれば小さいが、
  * ここで無条件コピーを挟むと「生バイトのまま常駐」の経路が二重確保になる）。バイト位置の
@@ -220,47 +255,9 @@ const assertRowScale = (
 };
 
 /**
- * shard 逐次面（{@link "./executor.ts"} の `createSessionFromShards`）が 1 本ずつ受け取る
- * shard。
- *
- * hub の `StreamedAsset`（`id` = manifest の path）と**構造互換**の型を runtime 側で独立に
- * 持つ — runtime → hub の依存を作らずに、配布形のファイル名を失敗の帰属先へ通すため。
- */
-export type ModelShard = {
-  /**
-   * 資産の実名（hub 経由なら manifest の path）。
-   *
-   * MUST: 失敗とフェンスの帰属はこの id を名乗る。届いた順の連番だけでは「配布形のどの
-   * ファイルが壊れているか」が呼び手にも利用者にも決まらない（列の組み方は呼び手側にあり、
-   * 連番は runtime から見た到着順でしかない）。
-   */
-  readonly id: string;
-  /**
-   * shard のバイト列。**buffer の先頭からの view**（byteOffset 0）MUST — buffer 全体を占める
-   * tight view でも、供給側が使い回す器（最大 shard 長の buffer）の prefix view でもよい。
-   * byteOffset ≠ 0 は拒否する（slice で辻褄を合わせる形 = RAM ピーク倍増の防波堤）。
-   *
-   * MUST（供給側）: この shard の処理が終わって**次の shard を要求される（`next()` が呼ばれる）
-   * まで器を書き換えない**。runtime は `queue.writeBuffer`（呼び出し時に同期コピー）を出し
-   * 終えるまでしかバイト列を参照せず、次を要求した時点で前の shard への参照は尽きている。
-   */
-  readonly bytes: Uint8Array<ArrayBuffer>;
-};
-
-/**
- * Session 構築（{@link "./executor.ts"} の `Session.build`）が消費する shard 1 本。
- * `origin` はエラーとフェンスの帰属先で、**全量面は undefined**（帰属先が 1 つしかない単一ファイル面の文言を変えない
- * MUST — ADR 0070 受入①の契約。合成 id を作ると shard 面の語彙が全量面へ漏れる）。
- */
-export type WeightShard = {
-  readonly file: SafetensorsFile;
-  readonly origin: string | undefined;
-};
-
-/**
- * Session 構築が消費する**供給の単位**（旧 shard 1 本 = validator を通した実体列 / コンテナの
- * part 1 本 = その part にある block の実体列）。フェンス（空 submit + 完了待ち）はこの単位で
- * 1 回、errorScope は `scopePerItem` なら item（block）ごと、そうでなければ batch ごとに張る。
+ * Session 構築が消費する**供給の単位**（コンテナの part 1 本 = その part にある block の実体列）。
+ * フェンス（空 submit + 完了待ち）はこの単位で 1 回、errorScope は `scopePerItem` なら
+ * item（block）ごと、そうでなければ batch ごとに張る。
  */
 export type WeightBatch = {
   readonly origin: string | undefined;
@@ -268,99 +265,25 @@ export type WeightBatch = {
   readonly scopePerItem: boolean;
 };
 
-/** 失敗・フェンスの帰属先。連番は到着順の補助で、実名（{@link ModelShard.id}）が本体。 */
-export const shardOrigin = (index: number, id: string): string => `shard [${index}] '${id}'`;
-
 /**
  * 重みアップロード区間のラベル（errorScope とフェンスの帰属先）。`origin` から導出する —
- * shard 側と別々に持つと、片方だけ名乗り方が変わったときに 2 つの名前で同じ失敗が出る。
+ * batch 側と別々に持つと、片方だけ名乗り方が変わったときに 2 つの名前で同じ失敗が出る。
  */
 const uploadLabel = (origin: string | undefined): string =>
   origin === undefined ? "重みのアップロード" : `${origin} の重みアップロード`;
 
 /**
- * shard 由来の失敗に帰属先を足して**同じエラーを返す**（`origin` が無い全量面は素通し —
- * 文言が 1 文字も変わらない）。
+ * 供給単位由来の失敗に帰属先（`part N`）を足して**同じエラーを返す**（`origin` が無ければ
+ * 素通し — 文言が 1 文字も変わらない）。
  *
  * MUST: 新しい Error で包み直さない。呼び出し側はクラスで分岐しており（宣言違反 =
- * `ContainerError` / パーサ門 = `SafetensorsError`）、包むと分岐が壊れて stack も切れる。
+ * `ContainerFormatError`）、包むと分岐が壊れて stack も切れる。
  */
-export const attributeToShard = (origin: string | undefined, cause: unknown): unknown => {
+const attributeToOrigin = (origin: string | undefined, cause: unknown): unknown => {
   if (origin !== undefined && cause instanceof Error) {
     cause.message = `${origin}: ${cause.message}`;
   }
   return cause;
-};
-
-/**
- * shard 面の消費列: 検証済みのグラフ shard を先頭に、残り shard を parse して流す。
- *
- * MUST: グラフ shard は最初の 1 本だけ（ADR 0070 決定 3）。後続に `karume_ir` 持ちが
- * 現れたら取り違え（別モデルの混入・並び順の崩れ）の徴候なので fail loudly。
- * NOTE: グラフ shard のバイト列は {@link "./executor.ts"} の `PreparedModel` が持ち主で、
- * この generator の寿命では手放せない（2 段境界の代償 — ADR 0070 決定 3 がグラフ shard を「karume_ir + 小テンソル」と
- * 規定しているので、RAM ピーク目標「O(最大**重み** shard)」は崩れない）。
- * NOTE: 後続の連番は 1 から振る（グラフ shard が [0] — 帰属ラベルの通し番号は 2 段境界の
- * 前後で変わらない）。
- */
-export const followingShards = async function* (
-  graph: IrGraph,
-  legacy: LegacyKeys,
-  graphShard: WeightShard,
-  iterator: AsyncIterator<ModelShard>,
-): AsyncGenerator<WeightBatch, void, unknown> {
-  // 宣言と実テンソルの突合・完全性は shard 進行検証に一本化（ADR 0070 決定 1 — 全量面も
-  // 同じ門を通る。openModel 済みの入力には冪等）。
-  const validator = createShardValidator(graph, legacy);
-  const intake = (shard: WeightShard): WeightBatch => {
-    try {
-      return { origin: shard.origin, items: validator.intake(shard.file), scopePerItem: false };
-    } catch (cause) {
-      // 宣言違反・co-shard・余剰・shard 横断重複はその shard の中身を直す話なので、
-      // 帰属先はファイル名（全量面は素通し = 従来文言）。
-      throw attributeToShard(shard.origin, cause);
-    }
-  };
-  yield intake(graphShard);
-  let index = 1;
-  while (true) {
-    const next = await iterator.next();
-    if (next.done === true) break;
-    const origin = shardOrigin(index, next.value.id);
-    const file = parseShard(next.value.bytes, origin);
-    if (file.metadata.has(IR_METADATA_KEY)) {
-      throw new ExecutionError(
-        `${origin}: __metadata__.${IR_METADATA_KEY} を持つグラフ shard が複数ある` +
-          "（グラフ shard は最初の 1 本だけ — ADR 0070 決定 3）",
-      );
-    }
-    yield intake({ file, origin });
-    index += 1;
-  }
-  // 宣言完全性（欠け）は全 shard を読み終えて初めて判定できる（ADR 0070 決定 1）。
-  validator.finish();
-};
-
-/**
- * shard のバイト列を parse する。bytes は buffer の先頭からの view（{@link ModelShard.bytes}）—
- * tight view（ADR 0038 §5 の `openModel` と同じ）か、供給側が使い回す器の prefix view。
- * byteOffset ≠ 0（slice で辻褄を合わせた形）は RAM ピーク倍増の防波堤として拒否する。
- *
- * 非先頭 view もパーサ門（`SafetensorsError`）も**その shard を名乗って**落ちる —
- * 壊れた 1 本を配布形から特定するのに要るのは連番ではなくファイル名。
- */
-export const parseShard = (bytes: Uint8Array<ArrayBuffer>, origin: string): SafetensorsFile => {
-  if (bytes.byteOffset !== 0) {
-    throw new ExecutionError(
-      `${origin}: bytes が buffer の先頭から始まっていない（byteOffset ${bytes.byteOffset} / ` +
-        `byteLength ${bytes.byteLength} / buffer ${bytes.buffer.byteLength}）`,
-    );
-  }
-  try {
-    return parseSafetensors(bytes.buffer, bytes.byteLength);
-  } catch (cause) {
-    throw attributeToShard(origin, cause);
-  }
 };
 
 /**
@@ -440,9 +363,9 @@ const warnInexactAttentionCanary = (decision: AttentionI8a8Decision): void => {
 export type SessionState = {
   readonly gpu: GpuContext;
   /**
-   * 実行するグラフ。MUST: `KarumeModel`（graph + file）を丸ごと持たない — file を掴むと
-   * 配布ファイル全量の ArrayBuffer が Session の寿命まで固定され、shard 逐次消費
-   * （ADR 0070 決定 3）の「参照を手放す」契約が成立しない。構築後に要るのは graph だけ。
+   * 実行するグラフ。MUST: 供給元（開いた容器）を丸ごと持たない — 取得元のバイト列を掴むと
+   * 配布ファイル全量の ArrayBuffer が Session の寿命まで固定され、part ごとの逐次消費
+   * （ADR 0108 決定 9）の「参照を手放す」契約が成立しない。構築後に要るのは graph だけ。
    */
   readonly graph: IrGraph;
   /**
@@ -679,10 +602,10 @@ export const buildSessionState = async (
     );
   }
 
-  // MUST: 重みの確保に入る前に、席ごとの確保寸法を device の絶対上限と突き合わせる（shard
-  // ループより前 = 1 バイトも上げる前）。確保失敗の検出は shard 単位 errorScope（ADR 0070
-  // 決定 4）が担うが、それは実装の報告品質に依存し（out-of-memory scope が黙る device が実在
-  // する — docs/known-issues.md の Metal 節）、捕まえても診断は shard 粒度で、しかも数 GiB
+  // MUST: 重みの確保に入る前に、席ごとの確保寸法を device の絶対上限と突き合わせる（batch
+  // ループより前 = 1 バイトも上げる前）。確保失敗の検出は item（block）単位 errorScope
+  // （ADR 0108 決定 9）が担うが、それは実装の報告品質に依存し（out-of-memory scope が黙る
+  // device が実在する — docs/known-issues.md の Metal 節）、捕まえても数 GiB
   // 転送した後にしか出ない。寸法は宣言だけで確定している（常駐計画は prepare 相の純関数）ので、
   // 決定論的に落とせるぶんはここで落とす（同 known-issues が名指しした「明示サイズ門」）。
   // NOTE: 見るのは絶対上限だけで空き VRAM とは比べない（ADR 0070 決定 5 の規律 — 検査は
@@ -710,10 +633,9 @@ export const buildSessionState = async (
   /**
    * 展開席の piece 列が持ち越す companion scale の**写し**（キー = initializer 名）。
    *
-   * MUST: view ではなく値の写しを持つ。scale の実体は piece 1 の shard にしか無く
-   * （co-shard 契約の piece 版）、view のまま抱えるとその shard の ArrayBuffer が列の
-   * 最後まで解放されず、RAM ピーク O(最大 shard) が崩れる。写すのは scale だけで、重み
-   * 本体は 1 バイトも写さない。
+   * MUST: view ではなく値の写しを持つ。scale の実体は piece 1 と同じ part にしか無く
+   * （規則③）、view のまま抱えるとその part のバイト列が列の最後まで解放されず、
+   * RAM ピーク O(最大 part) が崩れる。写すのは scale だけで、重み本体は 1 バイトも写さない。
    */
   const carriedScales = new Map<
     string,
@@ -723,7 +645,7 @@ export const buildSessionState = async (
   let hostExpandedBytes = 0;
   // 構築相の費用内訳（{@link SessionBuildStats}）。ホスト時計だけで刻む集計器で、
   // MUST NOT: 計測のために GPU フェンスを足さない・submit の位置を動かさない
-  // （shard ごと submit 1 回という ADR 0070 決定 3 の契約が崩れると、瞬間ピークが重み 1 本ぶん
+  // （batch ごと submit 1 回という ADR 0108 決定 9 の契約が崩れると、瞬間ピークが重み 1 本ぶん
   // 押し上がる）。よって writeBuffer の実転送時間は uploadFenceMs に吸われたままになる。
   let shardCount = 0;
   let shardWaitMs = 0;
@@ -761,7 +683,7 @@ export const buildSessionState = async (
   /** 借用を積み終えた共有 initializer（構築が失敗したらここから 1 本ずつ返す）。 */
   const borrowed: SharedWeight[] = [];
   try {
-    // 借り物の重みは shard を 1 本も読まずに台帳へ載る（バイトは貸し手が既に GPU へ
+    // 借り物の重みは block を 1 つも読まずに台帳へ載る（バイトは貸し手が既に GPU へ
     // 上げている）。借用計数を先に積むのは、構築中に貸し手が dispose される窓を塞ぐため。
     for (const { name, shared: weight } of shared) {
       const internals = weight[RUNTIME_INTERNAL];
@@ -772,8 +694,8 @@ export const buildSessionState = async (
       // 載らない名前は f32 として読まれる（重み台帳の既定）ので、席の突合が門になっている。
       if (internals.resident !== undefined) residentWeights.set(name, internals.resident);
     }
-    // shard の反復待ち（= 供給側の費用）は for await が隠すので、**前の shard を処理し終えた
-    // 時刻**との差で測る（次の shard が届くまでの間はこの 2 点の間にしか無い）。
+    // batch の反復待ち（= 供給側の費用）は for await が隠すので、**前の batch を処理し終えた
+    // 時刻**との差で測る（次の batch が届くまでの間はこの 2 点の間にしか無い）。
     let shardBoundary = performance.now();
     for await (const batch of batches) {
       shardWaitMs += performance.now() - shardBoundary;
@@ -970,9 +892,8 @@ export const buildSessionState = async (
       // writeBuffer も警告すら出さない no-op になるため、包まないと重みが空のまま走り出す。
       // MUST NOT: この区間の中で await しない。push から pop の発行までを 1 つの同期区間に
       // 保つことが、device 単位ロックを取らずに LIFO の交錯を防いでいる根拠になっている。
-      // 区間の粒度: 旧 shard は batch（= shard）ごと（ADR 0070 決定 4）、コンテナは block（item）
-      // ごと（ADR 0108 決定 9 — push / pop は 1.81 µs / 回でほぼ無料。費用の主はフェンスなので
-      // フェンスは batch = part ごと 1 回に留める）。
+      // 区間の粒度: block（item）ごと（ADR 0108 決定 9 — push / pop は 1.81 µs / 回でほぼ無料。
+      // 費用の主はフェンスなのでフェンスは batch = part ごと 1 回に留める）。
       const groups = batch.scopePerItem ? batch.items.map((item) => [item]) : [batch.items];
       for (const group of groups) {
         pushFailureScopes(gpu.device);
@@ -983,7 +904,7 @@ export const buildSessionState = async (
           // スコープに吸われ、エラーが恒久的に見えなくなる）。破棄は外側の transaction 境界が
           // 1 箇所で持つ。
           await discardFailureScopes(gpu.device);
-          throw attributeToShard(batch.origin, cause);
+          throw attributeToOrigin(batch.origin, cause);
         }
         const failure = await popFailureScopes(
           gpu.device,
@@ -992,14 +913,14 @@ export const buildSessionState = async (
         if (failure !== undefined) throw failure;
       }
 
-      // MUST: batch（旧 shard / コンテナの part）ごとに**実際の submit を 1 回**出して完了まで待つ
-      // （ADR 0070 決定 3）。queue.writeBuffer は staging を確保して溜め込み、submit の完了まで
+      // MUST: batch（コンテナの part）ごとに**実際の submit を 1 回**出して完了まで待つ
+      // （ADR 0108 決定 9）。queue.writeBuffer は staging を確保して溜め込み、submit の完了まで
       // それを解放しない — 数 GiB の重みを上げた直後は VRAM が二重計上のまま最初の run に入り、
       // 初回ピークが重み 1 本ぶん押し上がる（f16 preset で実測 +2.7GiB。
       // docs/research/2026-08-08-vram-oom-misreport.md §4）。逐次消費ではこの解放が
       // RAM ピーク O(最大 batch) の成立条件そのものになる。フェンスの後にループ末尾へ抜けて
       // batch への参照が尽きる — CPU 側バイト列は転送完了後にだけ手放される
-      // （フェンス後解放の順序契約 — ADR 0070 決定 3）。
+      // （フェンス後解放の順序契約 — ADR 0108 決定 9）。
       // MUST NOT: scheduler.flush() で代用しない。pending dispatch が空だと submit を出さずに
       // 即 return するため、staging は溜まったまま残る。
       // NOTE: submit ごとの onSubmittedWorkDone を禁じているのは run のホットパス（submit.ts の
@@ -1020,7 +941,7 @@ export const buildSessionState = async (
       shardBoundary = performance.now();
     }
   } catch (cause) {
-    // transaction 境界（ADR 0070 決定 3）: 途中の shard で失敗したら（宣言違反・入力列の例外・
+    // transaction 境界（ADR 0108 決定 9）: 途中の batch で失敗したら（宣言違反・入力列の例外・
     // GPU エラーのいずれでも）、アップロード済みの重みごと weights アリーナを破棄して
     // 部分 Session を公開しない。
     // MUST: 後始末の失敗で本体の例外を上書きしない（run 側と同じ規律）。原因は本体側に
@@ -1088,16 +1009,3 @@ export const buildSessionState = async (
     outputNames: new Set(graph.outputs),
   };
 };
-
-/**
- * 重み shard が 1 本も無い列（全量面 = 全テンソルがグラフ shard に同居した列）。
- *
- * MUST: 呼ぶたびに新しい iterator を返す（使い切った generator を使い回すと、2 本目の
- * Session 構築が「既に done」の列を受けたのか空列なのか区別できない）。
- */
-export const noWeightShards = (): AsyncIterable<ModelShard> => ({
-  [Symbol.asyncIterator]: () => ({
-    next: (): Promise<IteratorResult<ModelShard, undefined>> =>
-      Promise.resolve({ done: true, value: undefined }),
-  }),
-});

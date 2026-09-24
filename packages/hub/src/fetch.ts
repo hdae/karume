@@ -8,7 +8,7 @@
  *   明示した**越境参照**（`FileRef` の `repo` / `revision` — ADR 0038 §7）だけで、その 1 本は
  *   セッションの世代ではなく宣言された (repo, revision) から取る。
  * - 取得と進捗総量の一意化（{@link fileRefKey}）・進捗の集計（`progress.ts`）。
- * - 同時取得の律速は面ごとに違う（全量面はバイト予算・逐次面の相 1 は本数 4）。
+ * - 同時取得の律速は面ごとに違う（全量面はバイト予算・温め面は本数 4）。
  * - `AbortSignal` は全取得へ透過し、**取得元が network に出ない区間でも**面の境界で明示的に見る。
  * - 引き渡すバイト列が buffer 全体を占めること（tight view）の検査。
  * - 失敗の文脈付け（`context.ts` — 真の第一失敗の復元を含む）。
@@ -38,7 +38,6 @@ import {
   LoadedManifest,
   type LoadManifestOptions,
   pinnedSourceOf,
-  type StreamAssetsOptions,
 } from "./session.ts";
 import {
   type AssetRangeReader,
@@ -51,7 +50,7 @@ import {
 import { createHfSource } from "./sources/hf.ts";
 
 /**
- * 逐次面 {@link streamAssets} 相 1 の同時取得数（数十コンポーネントの manifest で接続を
+ * 温め面 {@link prefetchAssets}（相 1）の同時取得数（数十コンポーネントの manifest で接続を
  * 破綻させない）。相 1 は body をそのままキャッシュへ流す streaming なので、受信バッファの
  * 前確保が無い＝本数だけで RAM が決まらない。
  */
@@ -91,8 +90,8 @@ const isAborted = (error: unknown, signal?: AbortSignal): boolean =>
   (signal?.aborted === true && error === signal.reason);
 
 /**
- * `openModel` は全量 ArrayBuffer を要求するため、返す bytes は buffer 全体を占めていなければ
- * ならない（slice で辻褄を合わせると RAM ピークが倍増する）。SharedArrayBuffer 背面は
+ * `openContainer` の `bytes` 入力は全量 `ArrayBuffer` を要求するため、返す bytes は buffer 全体を
+ * 占めていなければならない（slice で辻褄を合わせると RAM ピークが倍増する）。SharedArrayBuffer 背面は
  * ここで弾く（述語が主張する `Uint8Array<ArrayBuffer>` を型の上でも嘘にしない）。
  */
 const isTightView = (bytes: Uint8Array): bytes is Uint8Array<ArrayBuffer> =>
@@ -219,7 +218,7 @@ export const fetchAssets = async (
   const fetchOne = async (ref: FileRef): Promise<void> => {
     // MUST: キャッシュヒットは network に出ない＝取得元の signal 監視が効かない区間なので、
     // 取得の前後で明示的に中断を見る（数 GB の読出しを回している最中に取り消しが効かないのは
-    // 中断の透過が壊れているのと同じ — 逐次面 streamAssets と同型の確認）。
+    // 中断の透過が壊れているのと同じ — 温め面 prefetchAssets と同型の確認）。
     signal.throwIfAborted();
     let bytes: Uint8Array;
     try {
@@ -291,41 +290,20 @@ export const fetchAssets = async (
 };
 
 /**
- * {@link streamAssets} が 1 本ずつ引き渡す shard。runtime の `ModelShard` と**構造互換**で、
- * `streamAssets(...)` をそのまま `createSessionFromShards` へ渡せる。
- */
-export type StreamedAsset = {
-  /**
-   * id = manifest の path（`refs` に渡した順で届く）。runtime 側はこれを失敗とフェンスの
-   * 帰属先に使う — 到着順の連番では配布形のどのファイルかが決まらない。
-   */
-  readonly id: string;
-  /**
-   * 検証（size / sha256）を通ったバイト列。buffer の先頭からの view — 取得元が自前で確保した
-   * tight view か、逐次面が使い回す器の prefix view（`shardVessel`）。器の場合、次の `next()` で
-   * 上書きされるので、消費側は次を要求する前に使い終える（runtime の `ModelShard.bytes` の契約）。
-   */
-  readonly bytes: Uint8Array<ArrayBuffer>;
-};
-
-/**
- * 相 1 / 逐次面が共通で行う入力検査と進捗の組み立て。**取得元に触れる前**に済ませる
- * （相 1 は全 shard を落としてしまうので、network に出た後で呼び出し側の誤りに気づいても
- * 帯域が戻らない）。
- *
- * `where` は入力検査の文言に載る面の名前（呼び出し側の誤りをどの面で弾いたかが分かる）。
+ * 相 1 の入力検査と進捗の組み立て。**取得元に触れる前**に済ませる（相 1 は渡された全 ref を
+ * 落としてしまうので、network に出た後で呼び出し側の誤りに気づいても帯域が戻らない）。
  */
 const preparePhase = (
-  where: string,
   context: FetchContext,
   refs: readonly FileRef[],
   options: FetchAssetsOptions,
 ): ProgressEmitter => {
   const available = context.available;
   if (refs.length === 0) {
-    throw new ManifestReferenceError(`${where}: 取得対象が 1 つも無い（${context.session}）`, {
-      available,
-    });
+    throw new ManifestReferenceError(
+      `prefetchAssets: 取得対象が 1 つも無い（${context.session}）`,
+      { available },
+    );
   }
   // 重複検査の表はそのまま進捗の per-file 引き当て（`fileTotal`）にも使う。同一性は
   // {@link fileRefKey}（越境参照は別リポの同名 path を別の 1 本として数える）。
@@ -334,8 +312,8 @@ const preparePhase = (
     const refKey = fileRefKey(ref);
     if (declared.has(refKey)) {
       throw new ManifestReferenceError(
-        `${where}: 参照 '${refKey}' が重複している（この面は渡された列をそのまま扱う —` +
-          ` 同じ shard を 2 回渡すのは呼び出し側の誤り。全量面 fetchAssets は一意化する）`,
+        `prefetchAssets: 参照 '${refKey}' が重複している（この面は渡された列をそのまま扱う —` +
+          ` 同じ参照を 2 回渡すのは呼び出し側の誤り。全量面 fetchAssets は一意化する）`,
         { available },
       );
     }
@@ -345,14 +323,8 @@ const preparePhase = (
 };
 
 /**
- * 全 ref を「RAM に載せずに、後の全量読みが安く済む状態」にする**相 1**。{@link streamAssets} の
- * 相 1 と {@link prefetchAssets} の本体はこの 1 本（同じ機構を 2 つ書くと、同時取得数・真因の
- * 復元・進捗の綴りが片方だけ直る）。
- *
- * `emitComplete` は「この面が `complete` の発行者か」— 相 2 を持つ逐次面では引き渡しの直前が
- * 終端なので `false`（両方が出すと `downloading`* → `complete` を 1 ファイル 1 回とする
- * `AssetPhase` の契約が破れる）、相 2 を持たない {@link prefetchAssets} では終端がここしか
- * ないので `true`。
+ * 全 ref を「RAM に載せずに、後の全量読みが安く済む状態」にする**相 1**（{@link prefetchAssets}
+ * の本体）。
  *
  * MUST: 相 1 の能力は**ref ごとに**見る（`source.ts` ④は取得元ごとの optional 能力で、越境参照は
  * セッションと違う取得元から来る）。セッションの取得元だけで決めると、ローカルセッション +
@@ -365,7 +337,6 @@ const runPrefetchPhase = async (
   refs: readonly FileRef[],
   options: FetchAssetsOptions,
   progress: ProgressEmitter,
-  { emitComplete }: { readonly emitComplete: boolean },
 ): Promise<void> => {
   const failure = new AbortController();
   const prefetchSignal = options.signal === undefined
@@ -375,8 +346,8 @@ const runPrefetchPhase = async (
   const prefetchOne = async (ref: FileRef): Promise<void> => {
     // MUST: 記録ハッシュが一致するエントリは network に出ない＝取得元の signal 監視が効かない
     // 区間なので、ファイルごとに明示的に中断を見る（見ないと、取り消しも第一失敗も温まっている
-    // ファイルに対してだけ効かず、残り全 ref を舐め切ってから決着する）。全量面 fetchOne・
-    // 相 2 と同じ綴り。
+    // ファイルに対してだけ効かず、残り全 ref を舐め切ってから決着する）。全量面 fetchOne と
+    // 同じ綴り。
     prefetchSignal.throwIfAborted();
     let origin: PinnedSource;
     try {
@@ -416,7 +387,8 @@ const runPrefetchPhase = async (
       if (prefetchSignal.aborted) throw prefetchSignal.reason;
       throw context.fetchFailure(ref, "事前取得", error);
     }
-    if (emitComplete) progress.complete(ref);
+    // この面が `complete` の発行者（終端はここしかない — `AssetPhase` の契約）。
+    progress.complete(ref);
   };
 
   let next = 0;
@@ -440,19 +412,19 @@ const runPrefetchPhase = async (
 };
 
 /**
- * 資産を**先に温めるだけ**の面（逐次面 {@link streamAssets} の相 1 単体）。重み shard を先に
- * 落としておく面 — 後続の {@link streamAssets} 相 2 は network に出ない。
+ * 資産を**先に温めるだけ**の面（相 1）。重みを先に落としておく面 — 後続の
+ * {@link fetchAssets} や容器面（`openContainerSource`）は network に出ない。
  *
  * 使いどころは「Session を遅延構築するパイプラインのロード時」— 構築が初回の実行まで遅れると
- * 重み shard の DL もそこまで遅れ、ロード進捗にも現れない。ここで先に落としておけば、進捗は
+ * 重みの DL もそこまで遅れ、ロード進捗にも現れない。ここで先に落としておけば、進捗は
  * ロード中に出揃い、構築はキャッシュ読出しだけで済む。
  *
- * 機構は逐次面の相 1 と同一（同時 {@link CONCURRENCY} 本・`sha256` は通過中に照合・失敗は
- * 真因を復元して `HubFetchError`）。バイト列は返さない（RAM に載せない面なので、欲しい
- * ときは {@link streamAssets} / {@link fetchAssets} で読み直す — キャッシュヒットになる）。
+ * 同時 {@link CONCURRENCY} 本・`sha256` は通過中に照合・失敗は真因を復元して `HubFetchError`。
+ * バイト列は返さない（RAM に載せない面なので、欲しいときは {@link fetchAssets} や容器の区間読み
+ * （{@link openAsset}）で読み直す — キャッシュヒットになる）。
  *
- * 進捗は `downloading`* に続けて**ファイルごとに `complete` を 1 回**出す（相 2 を伴わない
- * この面が終端 — `AssetPhase` の契約。キャッシュ済みのファイルは `complete` 1 点だけ）。
+ * 進捗は `downloading`* に続けて**ファイルごとに `complete` を 1 回**出す（この面が終端 —
+ * `AssetPhase` の契約。キャッシュ済みのファイルは `complete` 1 点だけ）。
  *
  * **相 1 を持たない取得元（ローカルディレクトリ）の ref は、入力検査だけを行って何もしない** —
  * その ref の進捗は 1 つも出ない（全 ref がそうなら面ごと no-op）。判定は**ref ごと**なので、
@@ -471,95 +443,16 @@ export const prefetchAssets = async (
 ): Promise<void> => {
   const source = pinnedSourceOf(loaded, options);
   const context = createFetchContext(loaded, source.origin);
-  const progress = preparePhase("prefetchAssets", context, refs, options);
-  await runPrefetchPhase(source, context, refs, options, progress, {
-    emitComplete: true,
-  });
+  const progress = preparePhase(context, refs, options);
+  await runPrefetchPhase(source, context, refs, options, progress);
   // MUST: 全ファイルがキャッシュ済みの呼び出しは 1 度も network に出ない＝取得元の signal 監視が
   // 効かないので、決着後にも中断を見る（これが返却前の最後の関門）。
   options.signal?.throwIfAborted();
 };
 
 /**
- * shard を **2 相**で読み、1 本ずつ引き渡す逐次面（ADR 0070 決定 2）。
- *
- * - **相 1（prefetch）**: 最初の yield の前に、全 shard を「後の全量読みが安く済む状態」にする
- *   （HF では streaming で永続キャッシュへ落とす — RAM に全量を載せない・同時 4 本）。`sha256` は
- *   通過中に照合され、不一致はエントリ不成立で fail loud（帯域を捨てた後に全量を握って落ちない）。
- *   通ったエントリには記録ハッシュが焼かれ、既に記録が一致するエントリは network に出ずそのまま
- *   温存される。**相 1 を持たない取得元の ref は省かれる**（相 2 だけで同じ RAM 目標を満たす）。
- * - **相 2（逐次引き渡し）**: `refs` の順に 1 本ずつ「取得元から読む → 呼び手へ渡す →
- *   参照を手放す」。相 1 が焼いた記録と期待 sha256 の突合は取得元が行い（全量ハッシュ 0 回）、
- *   記録が食い違う・バイト数が合わないエントリは self-heal で 1 往復だけ取り直す。
- *
- * 全量面 {@link fetchAssets} との違いは**渡したバイト列への参照を残さない**ことで、RAM ピークが
- * O(最大 shard) に収まる（全量ホスト保持が成立しない検収モデル級のための面）。全量面は温存して
- * あるので、小モデルは従来どおりそちらを使う。
- *
- * MUST: 相 1 は**最初の `next()` まで開始されない**（async generator の遅延）。呼んだだけでは
- * 何も起きず、`for await` に入るか `next()` を呼んだ時点で DL が始まる。空の `refs`・重複 path も
- * その時点（取得元に触れる前）に {@link ManifestReferenceError} で弾く。
- *
- * NOTE: HF 取得元の相 1 は `caches` が無い環境・キャッシュ書込み失敗（quota 超過等）で
- * **fail loud** になる（バイト列を手元に持たない面なので素 fetch へ縮退する余地が無い。黙って
- * 縮退させると RAM ピークの目標が壊れる）。`onCacheError` の診断が届くのは相 2 だけで、相 1 の
- * cache I/O 失敗は `HubFetchError` として上がる。
- */
-export const streamAssets = async function* (
-  loaded: LoadedManifest,
-  refs: readonly FileRef[],
-  options: StreamAssetsOptions = {},
-): AsyncGenerator<StreamedAsset, void, unknown> {
-  const source = pinnedSourceOf(loaded, options);
-  const context = createFetchContext(loaded, source.origin);
-
-  // ---- 相 1: ここを抜けるまで 1 本も yield しない。入力検査もこの中（取得元に触れる前）で済む。
-  // `complete` は相 2 が出すので発行しない。
-  const progress = preparePhase("streamAssets", context, refs, options);
-  await runPrefetchPhase(source, context, refs, options, progress, { emitComplete: false });
-
-  // ---- 相 2: 1 本ずつ引き渡す。
-  // 器（最大 shard 長 1 本）は取得元が使うときだけ確保される（shardVessel）。
-  const vessel = shardVessel(refs);
-  for (const ref of refs) {
-    // 相 2 は大半がキャッシュ読出しで network に出ない＝取得元の signal 監視が効かない区間なので、
-    // shard の切れ目で明示的に中断を見る（数 GB の読出しを何本も回している最中に取り消しが
-    // 効かないのは中断の透過が壊れているのと同じ）。
-    options.signal?.throwIfAborted();
-
-    let bytes: Uint8Array;
-    try {
-      bytes = await sourceForRef(source, ref).readFile(ref, {
-        ...(options.signal === undefined ? {} : { signal: options.signal }),
-        // 相 1 が温めた分はキャッシュヒットなので、ここが発火するのは self-heal の取り直しだけ。
-        // NOTE: self-heal は evict してから取り直すため、その 1 巡だけ `loaded` はそのファイル
-        //       ぶん巻き戻る（phase 契約が認めている「最初からやり直し」と同じ 1 巡）。
-        //       `fileLoaded` も同じ 1 巡だけそのファイルの先頭から数え直しになる。
-        onProgress: (received) => progress.downloading(ref, received),
-        sizeViolation: context.sizeViolation(ref),
-        into: vessel.lease,
-      });
-    } catch (error) {
-      if (error instanceof HubError || isAborted(error, options.signal)) throw error;
-      throw context.fetchFailure(ref, "取得", error);
-    }
-    // MUST: yield の直前にも中断を見る — 冒頭の確認だけだと「最終 shard のキャッシュ読出しの
-    // 最中に中断された」形が観測されず、取り消したはずのロードが正常完了して下流の Session
-    // 構築まで走る（検証済みバイトを配ってから止まるのでは中断の意味が無い）。
-    options.signal?.throwIfAborted();
-    const asset = vessel.assertView(bytes, ref);
-    progress.complete(ref);
-    // MUST: ここで手放す — 引き渡したバイト列を generator 側の表に溜めない（溜めた瞬間に
-    // 全量面と同じ RAM 特性に戻り、この面の存在理由が消える）。器を使う取得元では次の反復が
-    // 同じ器へ上書きするので、消費側は次の `next()` までにバイト列を使い終える契約
-    // （runtime の `ModelShard.bytes`）。器を使わない取得元では従来どおり束縛ごと到達不能になる。
-    yield { id: ref.path, bytes: asset };
-  }
-};
-
-/**
- * 資産 1 本の**区間読み口**を開く（`source.ts` ⑧）。全量面 {@link fetchAssets} / 逐次面
- * {@link streamAssets} が「宣言 size を丸ごと 1 本」を単位にするのに対し、この面は同じ 1 本から
+ * 資産 1 本の**区間読み口**を開く（`source.ts` ⑧）。全量面 {@link fetchAssets} が「宣言 size を
+ * 丸ごと 1 本」を単位にするのに対し、この面は同じ 1 本から
  * `[offset, offset + length)` だけを引く — 数百 MiB の表から数 KB の行だけが要る消費側のための面。
  *
  * **取得元がその能力を持たなければ `undefined`**（位置読みを持たないディレクトリアダプターを
@@ -571,7 +464,7 @@ export const streamAssets = async function* (
  * 切り替えてよい行数の上限」を変える — `"scan"` の取得元では offset に比例した読み飛ばしが
  * 1 行ごとに乗るので、行数が増えると全量 1 回の方が安くなる。
  *
- * ref の取得元は逐次面と同じ解決（越境参照は宣言された (repo, revision) の取得元）で決まる。
+ * ref の取得元は他の面と同じ解決（越境参照は宣言された (repo, revision) の取得元）で決まる。
  * **開く動作が何に触るかは取得元による**（`source.ts` ⑧）— ローカル取得元は読み口を作るだけで
  * network にもキャッシュにも書かない。HF 取得元は在庫が無い参照に限り、相 1 と同じ温め
  * （全量 DL → 永続キャッシュ）を 1 度だけ挟んでから開く（この呼び出しの `signal` はその温めの
@@ -606,52 +499,5 @@ export const openAsset = async (
     cost: reader.cost,
     read: async (offset, length, readOptions) =>
       assertTightView(await reader.read(offset, length, readOptions), ref.path),
-  };
-};
-
-/**
- * 逐次面の器 — コンポーネントの**最大 shard 長で 1 本**（`refs` の `size` は manifest で確定）。
- * 遅延確保: 取得元が {@link FileReadOptions.into} を呼んだときだけ作る（器を使わない取得元に
- * 数百 MiB の buffer を無駄に持たせない — 組み込みの 2 取得元〈ディレクトリ / HF〉はどちらも使う）。
- *
- * 引き渡す view は 2 形のどちらか: ①器の prefix view（byteOffset 0 / byteLength = `ref.size`）
- * ②取得元が自前で確保した tight view。どちらも runtime の shard 受け口の契約（buffer の先頭からの
- * view）に収まる。器を使ったのに先頭 `ref.size` バイトを指していない view は取得元の実装ミスなので
- * fail loudly。
- *
- * MUST: 「器を借りた（{@link FileReadOptions.into} を呼んだ）」の述語は `buffer !== undefined`
- * ただ 1 つ（代入点は `lease` の 1 箇所）— 借りたのに別 buffer の view を返す取得元は、tight でも
- * 器 1 本ぶんの RAM を居座らせるので落とす（ホスト RAM ピークが「最大 shard + 現 shard」へ黙って
- * 戻る = ADR 0070 追記の係数 1 化が壊れる）。
- */
-const shardVessel = (refs: readonly FileRef[]) => {
-  const largest = refs.reduce((max, ref) => Math.max(max, ref.size), 0);
-  let buffer: Uint8Array<ArrayBuffer> | undefined;
-  return {
-    lease: (): Uint8Array<ArrayBuffer> => {
-      buffer ??= new Uint8Array(new ArrayBuffer(largest));
-      return buffer;
-    },
-    assertView: (bytes: Uint8Array, ref: FileRef): Uint8Array<ArrayBuffer> => {
-      // 器を 1 度も借りていない取得元は従来どおり自前の tight view（器は未確保）。
-      if (buffer === undefined) return assertTightView(bytes, ref.path);
-      if (bytes.buffer !== buffer.buffer) {
-        // 判定順 MUST: tight 検査が先（非 tight はその文言のまま落ちる）。ここまで来るのは
-        // 「器を借りた上で、器とは別の buffer をちょうどの長さで返した」形だけ。
-        assertTightView(bytes, ref.path);
-        throw new Error(
-          `hub: ${ref.path} の取得元が器（into）を借りたのに別の buffer の view を返した` +
-            `（器 ${buffer.byteLength} バイトが使われないまま居座り、ホスト RAM ピークが` +
-            `「最大 shard + 現 shard」へ戻る）`,
-        );
-      }
-      if (bytes.byteOffset !== 0 || bytes.byteLength !== ref.size) {
-        throw new Error(
-          `hub: ${ref.path} の bytes が器の先頭 ${ref.size} バイトを占めていない` +
-            `（byteOffset ${bytes.byteOffset} / byteLength ${bytes.byteLength}）`,
-        );
-      }
-      return new Uint8Array(buffer.buffer, 0, ref.size);
-    },
   };
 };

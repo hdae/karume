@@ -1,7 +1,7 @@
 /**
  * 取得の進捗（ADR 0038 §5「進捗総量は content-length ではなく manifest の `size` 合計」）。
  *
- * 集計は取得元の能力ではなく**共通層の作法**なので、全ての面（全量 / 相 1 / 逐次）が同じ 1 つの
+ * 集計は取得元の能力ではなく**共通層の作法**なので、全ての面（全量面 / 温め面）が同じ 1 つの
  * 実装を共有する。面ごとに書くと `loaded` の積み方だけが片方で直る形の食い違いを再生産する。
  */
 
@@ -66,8 +66,10 @@ const fileSizeOf = (refs: ReadonlyMap<string, FileRef>, key: string): number => 
  * 取得対象の表（キーは {@link fileRefKey}）から集計器を作る。`total` はこの表の `size` 合計に
  * 固定され、以降変わらない。
  *
- * MUST: 受信実績の記録は `onProgress` の有無に関わらず行う — 通知しないだけで、面を跨いで
- * 引き継ぐ表（逐次面の相 1 → 相 2）は常に正しくなければならない。
+ * MUST: 受信実績（`received`）の記録は通知（`emit`）より前に行う — `emit` は自分のファイルぶんも
+ * `received` から読むので、順序が逆だと送出値が 1 イベントぶん古くなる（downloading の初回が
+ * `fileLoaded` 0 を名乗り、以降ずっと 1 つ前の値で遅れる）。`fileLoaded` と全体 `loaded` は
+ * 常に同じ値を数える（`emit` が自分のキーを除いて足す）ので、食い違いはどちらの順でも出ない。
  */
 export const createProgressEmitter = (
   targets: ReadonlyMap<string, FileRef>,

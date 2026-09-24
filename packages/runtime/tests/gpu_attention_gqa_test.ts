@@ -19,14 +19,17 @@
 // B·H を 1 本のバッチ軸に畳むので、B=1 だけでは `b·Hkv + h/r` の恒等式が検証されない。
 
 import { assert, assertEquals, assertRejects } from "@std/assert";
-import { openModel } from "../src/format/container.ts";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
 import { attentionPvKey, attentionQkKey } from "../src/kernels/attention.ts";
 import { gemmUsesVec4 } from "../src/kernels/gemm.ts";
 import { attentionScoreUsesF16 } from "../src/kernels/score-storage.ts";
-import { createSession, type SessionOptions, type Tensor } from "../src/runtime/executor.ts";
+import {
+  createSessionFromContainer,
+  type SessionOptions,
+  type Tensor,
+} from "../src/runtime/executor.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
-import { graphModelBuffer, singleOpGraph } from "./helpers/graph.ts";
+import { GRAPH_NAME, openGraphModel, singleOpDeclaration } from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
 
 /** 半スケール（torch math decomp の `√scale_factor`）。D から導く契約どおりの値。 */
@@ -172,12 +175,17 @@ const runAttention = async (
   const shapes = mask === undefined
     ? [q.shape, k.shape, v.shape]
     : [q.shape, k.shape, v.shape, mask.shape];
-  const graph = singleOpGraph("attention", shapes, [out], {
+  const graph = singleOpDeclaration("attention", shapes, [out], {
     attrs: { scale: halfScale(q.shape[3]) },
   });
   const inputs: Record<string, F32Tensor> = { x0: q, x1: k, x2: v };
   if (mask !== undefined) inputs["x3"] = mask;
-  const session = await createSession(gpu, openModel(graphModelBuffer(graph)), options);
+  const session = await createSessionFromContainer(
+    gpu,
+    await openGraphModel(graph),
+    GRAPH_NAME,
+    options,
+  );
   try {
     const output = (await session.run(inputs))["y"];
     const entries = session.diagnostics().lastRunTiming?.entries ?? [];

@@ -298,7 +298,7 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
               requested.push(path);
               assert(
                 !heavyPaths.has(path),
-                `不正な実行設定で重みshard・資産を取得している: ${path}`,
+                `不正な実行設定で重みの part・資産を取得している: ${path}`,
               );
               return await Deno.readFile(`${temp}/${path}`);
             },

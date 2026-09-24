@@ -1,20 +1,24 @@
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import {
   acquireGpu,
-  createSession,
-  openModel,
+  createSessionFromContainer,
+  type GpuContext,
   type ResidentTensor,
+  type Session,
   type Tensor,
 } from "@karume/runtime";
 import { createGemmaGreedyOutput } from "../src/gemma/greedy-output.ts";
-import { graphModelBuffer } from "../../runtime/tests/helpers/graph.ts";
-import type { GraphJson } from "../../runtime/tests/helpers/format.ts";
+import {
+  type DeclarationJson,
+  GRAPH_NAME,
+  openModelBytes,
+} from "../../runtime/tests/helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 const test = (name: string, fn: () => Promise<void>): void =>
   Deno.test({ name, ignore: !GPU_AVAILABLE, fn });
-const model = (): GraphJson => ({
+const model = (): DeclarationJson => ({
   format: "karume-ir",
-  version: 1,
+  version: 2,
   symbols: [],
   requires: { ops: ["neg", "reshape", "state_append"] },
   initializers: {},
@@ -28,12 +32,14 @@ const model = (): GraphJson => ({
     { op: "state_append", ins: ["z"], outs: [], attrs: {}, states: { slot: "slot" } },
   ],
 });
+/** 重み 0 本のグラフを `krm` で書いて開き、target の Session にする。 */
+const targetSession = async (gpu: GpuContext): Promise<Session> =>
+  await createSessionFromContainer(gpu, await openModelBytes(model(), []), GRAPH_NAME);
 const input = (values = [-1, -4, -4, -2]): Record<string, Tensor> => ({
   x: { dtype: "f32", shape: [1, 1, 4], data: Float32Array.from(values) },
 });
 test("greedy出力: 通常runとbatchが別contextで同時発行されても直列化される", async () => {
-  const gpu = await acquireGpu(),
-    target = await createSession(gpu, openModel(graphModelBuffer(model())));
+  const gpu = await acquireGpu(), target = await targetSession(gpu);
   const h = createGemmaGreedyOutput(gpu, target, "y", 4);
   const a = await h.session.createGenerationContext({ chunkLength: 1 }),
     b = await h.session.createGenerationContext({ chunkLength: 1 });
@@ -59,8 +65,7 @@ test("greedy出力: 通常runとbatchが別contextで同時発行されても直
   }
 });
 test("greedy出力: 準備失敗で部分確保を返し、次の発行で再試行する", async () => {
-  const gpu = await acquireGpu(),
-    target = await createSession(gpu, openModel(graphModelBuffer(model())));
+  const gpu = await acquireGpu(), target = await targetSession(gpu);
   const h = createGemmaGreedyOutput(gpu, target, "y", 4),
     context = await h.session.createGenerationContext({ chunkLength: 1 });
   const create = gpu.createResident.bind(gpu), made: ResidentTensor[] = [];
@@ -91,8 +96,7 @@ test("greedy出力: 準備失敗で部分確保を返し、次の発行で再試
   }
 });
 test("greedy出力: 未awaitの生成後のdisposeは完了を待ち全residentを返す", async () => {
-  const gpu = await acquireGpu(),
-    target = await createSession(gpu, openModel(graphModelBuffer(model())));
+  const gpu = await acquireGpu(), target = await targetSession(gpu);
   const h = createGemmaGreedyOutput(gpu, target, "y", 4),
     context = await h.session.createGenerationContext({ chunkLength: 1 });
   const create = gpu.createResident.bind(gpu), made: ResidentTensor[] = [];

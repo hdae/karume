@@ -1,14 +1,14 @@
 // 構築ゲート（グラフ宣言と `pipelineConfig` の突合）を GPU も実資産も無しで叩くための
-// 最小 `KarumeModel`。
+// 最小 {@link GraphOwner}。
 //
 // 門が読むのは `graph` の**宣言**（symbols / inputs / outputs / values）だけで、テンソル実体
-// にもノード列にも触らない。ここで組むのはその宣言だけを持つ形で、IR パーサ（`openModel`）は
-// 通していない — 通すと「壊れた宣言」がパーサ側で先に落ち、門そのものを踏めなくなる。
+// にもノード列にも触らない。ここで組むのはその宣言だけを持つ形で、IR の構造検証も容器の合流も
+// 通していない — 通すと「壊れた宣言」がそちらで先に落ち、門そのものを踏めなくなる。
 //
 // MUST: 正常系の宣言はここで作らず、各テストが**正しい形を 1 つ書いてから 1 点だけ壊す**
 // （`helpers/safetensors.ts` と同じ流儀）。共有の既定値を置くと、壊し方が既定へ吸われる。
 
-import type { KarumeModel } from "@karume/runtime";
+import type { GraphOwner } from "../../src/hub/components.ts";
 
 /** 宣言できる次元（記号次元は `format/dims.ts` の正準表記の文字列）。 */
 export type StubDim = number | string;
@@ -21,7 +21,7 @@ export type StubGraph = {
   readonly values: Readonly<Record<string, readonly StubDim[]>>;
 };
 
-export const stubModel = (graph: StubGraph): KarumeModel => ({
+export const stubModel = (graph: StubGraph): GraphOwner => ({
   graph: {
     format: "karume-ir",
     version: 2,
@@ -43,7 +43,4 @@ export const stubModel = (graph: StubGraph): KarumeModel => ({
     states: {},
     nodes: [],
   },
-  file: { buffer: new ArrayBuffer(0), metadata: new Map(), tensors: new Map() },
-  // 旧配布形の付随情報（companion scale のキー）— 初期化子を 1 本も持たないので空。
-  legacy: { scaleKeys: new Map() },
 });

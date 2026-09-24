@@ -1,14 +1,13 @@
 // DenoのGPUテストとChromeの実走ハーネスで同じ数値・寿命の検査を使う。
 import { assert, assertEquals } from "@std/assert";
 import type { GpuContext } from "../../src/gpu/device.ts";
-import { openModel } from "../../src/format/container.ts";
 import { BUFFER_USAGE as U, MAP_MODE } from "../../src/gpu/webgpu-constants.ts";
 import { rmsNormParams } from "../../src/kernels/rms-norm.ts";
 import { rmsNormSubgroupWgsl } from "../../src/kernels/rms-norm-subgroup.ts";
 import { compareTensors, formatAllclose } from "../../src/reference/allclose.ts";
 import { applyReferenceOp, refTensor } from "../../src/reference/ops.ts";
-import { createSession, type Tensor } from "../../src/runtime/executor.ts";
-import { fill, graphModelBuffer, singleOpGraph } from "./graph.ts";
+import { createSessionFromContainer, type Tensor } from "../../src/runtime/executor.ts";
+import { fill, GRAPH_NAME, openModelBytes, singleOpDeclaration } from "./model-fixture.ts";
 import { rmsNormAddGraph } from "./rms-norm-add-graph.ts";
 import { opTolerance } from "./op-tolerance.ts";
 
@@ -32,12 +31,15 @@ export const checkRmsSubgroup = async (
         (i) => Math.sin((i % dim) * .713 + .19) * (1 + Math.floor(i / dim)),
       );
       const w = fill([dim], (i) => .2 + Math.cos(i * .17));
-      const graph = singleOpGraph("rms_norm", [[rows, dim], [dim]], [[rows, dim]], {
+      const graph = singleOpDeclaration("rms_norm", [[rows, dim], [dim]], [[rows, dim]], {
         attrs: { eps: 1e-6 },
       });
-      const session = await createSession(gpu, openModel(graphModelBuffer(graph)), {
-        rmsNormReduce: "subgroup32",
-      });
+      const session = await createSessionFromContainer(
+        gpu,
+        await openModelBytes(graph, []),
+        GRAPH_NAME,
+        { rmsNormReduce: "subgroup32" },
+      );
       try {
         const { y } = await session.run({ x0: x, x1: w });
         close(y, applyReferenceOp("rms_norm", [x, w], { eps: 1e-6 }));
@@ -57,12 +59,14 @@ export const checkRmsSubgroup = async (
       const x = fill([rows, dim], (i) => Math.sin(i * .713 + .19) * 4);
       const w = fill([dim], (i) => .2 + Math.cos(i * .17));
       const r = fill([rows, dim], (i) => Math.cos(i * .531) * 3);
-      const model = openModel(graphModelBuffer(rmsNormAddGraph({ rows, dim, normFirst })));
-      const session = await createSession(gpu, model, {
+      const model = await openModelBytes(rmsNormAddGraph({ rows, dim, normFirst }), []);
+      const session = await createSessionFromContainer(gpu, model, GRAPH_NAME, {
         rmsNormReduce: "subgroup32",
         fuseRmsNormAdd: true,
       });
-      const separate = await createSession(gpu, model, { rmsNormReduce: "subgroup32" });
+      const separate = await createSessionFromContainer(gpu, model, GRAPH_NAME, {
+        rmsNormReduce: "subgroup32",
+      });
       try {
         for (const cancel of [false, true]) {
           if (cancel) {

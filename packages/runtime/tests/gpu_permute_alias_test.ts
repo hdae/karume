@@ -1,9 +1,9 @@
 import { assertEquals, assertRejects } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
-import { openModel } from "../src/format/container.ts";
 import { acquireGpu } from "../src/gpu/device.ts";
-import { createSession } from "../src/runtime/executor.ts";
-import { fill, graphModelBuffer, singleOpGraph } from "./helpers/graph.ts";
+import { RuntimeSupportError } from "../src/ops/support.ts";
+import { createSessionFromContainer } from "../src/runtime/executor.ts";
+import { fill, GRAPH_NAME, openModelBytes, singleOpDeclaration } from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { permutedSourceIndices } from "./helpers/permute.ts";
 
@@ -21,16 +21,17 @@ describe({
           try {
             for (const shape of [[1, 3, 1, 5], [1, 1, 4, 9], [1, 3, 4, 5]]) {
               const dims = [0, 2, 1, 3], outShape = dims.map((axis) => shape[axis]);
-              const graph = singleOpGraph("permute", [shape], [outShape], {
+              const graph = singleOpDeclaration("permute", [shape], [outShape], {
                 attrs: { dims },
                 inDtypes: [dtype],
                 outDtypes: [dtype],
               });
               // 現runtimeのpermuteはf32のみ。別名にできてもcapability門は迂回しない。
               if (dtype !== "f32") {
+                const opened = await openModelBytes(graph, []);
                 await assertRejects(
-                  () => createSession(gpu, openModel(graphModelBuffer(graph))),
-                  Error,
+                  () => createSessionFromContainer(gpu, opened, GRAPH_NAME),
+                  RuntimeSupportError,
                   "非対応 意味論 dtype",
                 );
                 continue;
@@ -45,7 +46,11 @@ describe({
                 outs: ["h"],
                 attrs: { dim: 0, start: 0, end: shape[0] },
               });
-              const session = await createSession(gpu, openModel(graphModelBuffer(graph)));
+              const session = await createSessionFromContainer(
+                gpu,
+                await openModelBytes(graph, []),
+                GRAPH_NAME,
+              );
               try {
                 for (const repeat of [0, 1]) {
                   const input = fill(
@@ -82,7 +87,7 @@ describe({
 
     it("別名の出力と共有元を後段まで保持し、再実行でも壊さない", async () => {
       const gpu = await acquireGpu(), shape = [1, 3, 1, 5], permuted = [1, 1, 3, 5];
-      const graph = singleOpGraph("permute", [shape], [permuted], {
+      const graph = singleOpDeclaration("permute", [shape], [permuted], {
         attrs: { dims: [0, 2, 1, 3] },
       });
       graph.requires.ops.push("neg");
@@ -97,7 +102,11 @@ describe({
       );
       graph.outputs.push("back", "late");
       try {
-        const session = await createSession(gpu, openModel(graphModelBuffer(graph)));
+        const session = await createSessionFromContainer(
+          gpu,
+          await openModelBytes(graph, []),
+          GRAPH_NAME,
+        );
         try {
           for (const repeat of [0, 1, 2]) {
             const input = fill(shape, (i) => i + repeat + .5);
@@ -120,7 +129,7 @@ describe({
 
     it("入力由来のpermute出力は実体を保ち、同じ常駐入力へ書き戻せる", async () => {
       const gpu = await acquireGpu(), shape = [1, 2, 1, 4], permuted = [1, 1, 2, 4];
-      const graph = singleOpGraph("permute", [shape], [permuted], {
+      const graph = singleOpDeclaration("permute", [shape], [permuted], {
         attrs: { dims: [0, 2, 1, 3] },
       });
       graph.requires.ops.push("reshape");
@@ -132,7 +141,11 @@ describe({
       graph.outputs = ["after"];
       const state = await gpu.createResident(32, "permute input and output");
       try {
-        const session = await createSession(gpu, openModel(graphModelBuffer(graph)));
+        const session = await createSessionFromContainer(
+          gpu,
+          await openModelBytes(graph, []),
+          GRAPH_NAME,
+        );
         try {
           for (const repeat of [0, 1]) {
             const values = Float32Array.from({ length: 8 }, (_, i) => i + repeat + .5);
@@ -157,19 +170,23 @@ describe({
 
     it("常駐initializerのコピーを維持し、複数runで重みを破棄しない", async () => {
       const gpu = await acquireGpu(), shape = [1, 2, 1, 4], outShape = [1, 1, 2, 4];
-      const graph = singleOpGraph("permute", [shape], [outShape], {
+      const graph = singleOpDeclaration("permute", [shape], [outShape], {
         attrs: { dims: [0, 2, 1, 3] },
       });
       graph.inputs = [];
-      graph.initializers.x0 = { tensor: "weight", storage: { dtype: "f32" } };
+      graph.initializers.x0 = {};
       graph.values.x0 = { dtype: "f32", shape };
       const values = Float32Array.from({ length: 8 }, (_, i) => i + .5);
       try {
-        const session = await createSession(
+        const session = await createSessionFromContainer(
           gpu,
-          openModel(graphModelBuffer(graph, [
-            { name: "weight", dtype: "F32", shape, data: new Uint8Array(values.buffer) },
-          ])),
+          await openModelBytes(graph, [{
+            graph: GRAPH_NAME,
+            initializer: "x0",
+            bytes: new Uint8Array(values.buffer),
+            encoding: { codec: "f32" },
+          }]),
+          GRAPH_NAME,
         );
         try {
           for (const _repeat of [0, 1]) {

@@ -1,14 +1,23 @@
 // f32 格納 M=1 の GEMV を、通常 GEMM と独立 CPU 参照の両方で検収する（ADR 0082 追記 7）。
 // 実モデルは踏まない N の端、先読みの端、f32 の成分・語の境界も含める。
 import { assert, assertEquals } from "@std/assert";
-import { openModel } from "../src/format/container.ts";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
 import { linearGemvKey } from "../src/kernels/linear-gemv.ts";
 import { linearKey } from "../src/kernels/linear.ts";
 import { compareTensors, formatAllclose } from "../src/reference/allclose.ts";
 import { applyReferenceOp, refTensor } from "../src/reference/ops.ts";
-import { createSession, type SessionOptions, type Tensor } from "../src/runtime/executor.ts";
-import { buildSafetensors, f32Bytes, type GraphJson } from "./helpers/format.ts";
+import {
+  createSessionFromContainer,
+  type SessionOptions,
+  type Tensor,
+} from "../src/runtime/executor.ts";
+import type { TensorInput } from "./helpers/container-write.ts";
+import {
+  type DeclarationJson,
+  f32Bytes,
+  GRAPH_NAME,
+  openModelBytes,
+} from "./helpers/model-fixture.ts";
 import {
   GPU_AVAILABLE,
   SHADER_F16_AVAILABLE,
@@ -26,17 +35,14 @@ const fixture = (m: number, n: number, k: number) => {
     (_, i) => (i % 2 === 0 ? 1 : -1) * (0.0013 + (i % 23) * 0.017),
   );
   const bias = Float32Array.from({ length: n }, (_, i) => Math.sin(i * 0.37) * 0.13);
-  const graph: GraphJson = {
+  const declaration: DeclarationJson = {
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: ["linear"] },
     symbols: [],
     inputs: [{ name: "x", dtype: "f32", shape: [m, k] }],
     outputs: ["y"],
-    initializers: {
-      w: { tensor: "w", storage: { dtype: "f32" } },
-      b: { tensor: "b", storage: { dtype: "f32" } },
-    },
+    initializers: { w: {}, b: {} },
     values: {
       w: { dtype: "f32", shape: [n, k] },
       b: { dtype: "f32", shape: [n] },
@@ -44,18 +50,24 @@ const fixture = (m: number, n: number, k: number) => {
     },
     nodes: [{ op: "linear", ins: ["x", "w", "b"], outs: ["y"], attrs: {} }],
   };
-  const bytes = buildSafetensors([
+  const tensors: readonly TensorInput[] = [
     {
-      name: "w",
-      dtype: "F32",
-      shape: [n, k],
-      data: f32Bytes([...weight]),
+      graph: GRAPH_NAME,
+      initializer: "w",
+      bytes: f32Bytes([...weight]),
+      encoding: { codec: "f32" },
     },
-    { name: "b", dtype: "F32", shape: [n], data: f32Bytes([...bias]) },
-  ], { karume_ir: JSON.stringify(graph) });
+    {
+      graph: GRAPH_NAME,
+      initializer: "b",
+      bytes: f32Bytes([...bias]),
+      encoding: { codec: "f32" },
+    },
+  ];
   const input = refTensor([m, k], activation(m * k));
   return {
-    bytes,
+    declaration,
+    tensors,
     input,
     reference: () =>
       applyReferenceOp(
@@ -72,7 +84,12 @@ const run = async (
   data: ReturnType<typeof fixture>,
   options: SessionOptions = {},
 ): Promise<{ output: Tensor; keys: readonly string[] }> => {
-  const session = await createSession(gpu, openModel(data.bytes), options);
+  const session = await createSessionFromContainer(
+    gpu,
+    await openModelBytes(data.declaration, data.tensors),
+    GRAPH_NAME,
+    options,
+  );
   try {
     const { y } = await session.run({ x: data.input });
     return {

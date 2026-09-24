@@ -59,7 +59,7 @@
 //   根拠にならない**ことの実証（2026-09-07 実測）。
 
 import { assert, assertEquals } from "@std/assert";
-import { openModel } from "../src/format/container.ts";
+import type { OpenedContainer } from "../src/format/container/open.ts";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
 import {
   defaultLinearGemvRowsVariant,
@@ -73,9 +73,15 @@ import { linearKey } from "../src/kernels/linear.ts";
 import { compareTensors, formatAllclose } from "../src/reference/allclose.ts";
 import { GEMM_TOLERANCE } from "./helpers/op-tolerance.ts";
 import { applyReferenceOp, type RefTensor, refTensor } from "../src/reference/ops.ts";
-import { createSession, type Tensor } from "../src/runtime/executor.ts";
-import { buildSafetensors, f32Bytes, type GraphJson } from "./helpers/format.ts";
-import { fill, type FilledTensor } from "./helpers/graph.ts";
+import { createSessionFromContainer, type Tensor } from "../src/runtime/executor.ts";
+import {
+  type DeclarationJson,
+  f32Bytes,
+  fill,
+  type FilledTensor,
+  GRAPH_NAME,
+  openModelBytes,
+} from "./helpers/model-fixture.ts";
 import { quantizeI4 } from "./helpers/i4.ts";
 import { quantizeI8 } from "./helpers/i8.ts";
 import { GPU_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
@@ -154,19 +160,16 @@ const linearI4Model = (
   m: number,
   quantized: ReturnType<typeof quantizeI4>,
   bias: FilledTensor,
-): ArrayBuffer => {
+): Promise<OpenedContainer> => {
   const { k, n, groupSize } = testCase;
-  const graph: GraphJson = {
+  const declaration: DeclarationJson = {
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: ["linear"] },
     symbols: [],
     inputs: [{ name: "x", dtype: "f32", shape: [m, k] }],
     outputs: ["y"],
-    initializers: {
-      w: { tensor: "m.w", storage: { dtype: "i4", scale: "m.s", group_size: groupSize } },
-      b: { tensor: "m.b", storage: { dtype: "f32" } },
-    },
+    initializers: { w: {}, b: {} },
     values: {
       w: { dtype: "f32", shape: [n, k] },
       b: { dtype: "f32", shape: [n] },
@@ -174,19 +177,24 @@ const linearI4Model = (
     },
     nodes: [{ op: "linear", ins: ["x", "w", "b"], outs: ["y"], attrs: {} }],
   };
-  return buildSafetensors(
-    [
-      { name: "m.w", dtype: "I4", shape: [n, k], data: quantized.bytes },
-      {
-        name: "m.s",
-        dtype: "F32",
-        shape: [...quantized.scaleShape],
-        data: f32Bytes([...quantized.scale]),
+  return openModelBytes(declaration, [
+    {
+      graph: GRAPH_NAME,
+      initializer: "w",
+      bytes: quantized.bytes,
+      encoding: {
+        codec: "int4-sym-g",
+        groupSize,
+        scale: { bytes: f32Bytes([...quantized.scale]), dtype: "f32" },
       },
-      { name: "m.b", dtype: "F32", shape: [n], data: f32Bytes([...bias.data]) },
-    ],
-    { karume_ir: JSON.stringify(graph) },
-  );
+    },
+    {
+      graph: GRAPH_NAME,
+      initializer: "b",
+      bytes: f32Bytes([...bias.data]),
+      encoding: { codec: "f32" },
+    },
+  ]);
 };
 
 type RunResult = {
@@ -198,11 +206,11 @@ type RunResult = {
 /** 組み上げたモデル 1 本を走らせて出力と走ったキーを返す（格納 2 種で共有）。 */
 const runLinear = async (
   gpu: GpuContext,
-  model: ArrayBuffer,
+  model: Promise<OpenedContainer>,
   m: number,
   k: number,
 ): Promise<RunResult> => {
-  const session = await createSession(gpu, openModel(model));
+  const session = await createSessionFromContainer(gpu, await model, GRAPH_NAME);
   try {
     const output = (await session.run({ x: fill([m, k], XS) }))["y"];
     const entries = session.diagnostics().lastRunTiming?.entries ?? [];
@@ -470,19 +478,16 @@ const linearI8Model = (
   m: number,
   quantized: ReturnType<typeof quantizeI8>,
   bias: FilledTensor,
-): ArrayBuffer => {
+): Promise<OpenedContainer> => {
   const { k, n } = testCase;
-  const graph: GraphJson = {
+  const declaration: DeclarationJson = {
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: ["linear"] },
     symbols: [],
     inputs: [{ name: "x", dtype: "f32", shape: [m, k] }],
     outputs: ["y"],
-    initializers: {
-      w: { tensor: "m.w", storage: { dtype: "i8", scale: "m.s" } },
-      b: { tensor: "m.b", storage: { dtype: "f32" } },
-    },
+    initializers: { w: {}, b: {} },
     values: {
       w: { dtype: "f32", shape: [n, k] },
       b: { dtype: "f32", shape: [n] },
@@ -490,19 +495,25 @@ const linearI8Model = (
     },
     nodes: [{ op: "linear", ins: ["x", "w", "b"], outs: ["y"], attrs: {} }],
   };
-  return buildSafetensors(
-    [
-      { name: "m.w", dtype: "I8", shape: [n, k], data: quantized.bytes },
-      {
-        name: "m.s",
-        dtype: "F32",
-        shape: [...quantized.scaleShape],
-        data: f32Bytes([...quantized.scale]),
+  return openModelBytes(declaration, [
+    {
+      graph: GRAPH_NAME,
+      initializer: "w",
+      bytes: quantized.bytes,
+      // per-channel（int8-sym）は groupSize = 行長 k・groups = 1。
+      encoding: {
+        codec: "int8-sym",
+        groupSize: k,
+        scale: { bytes: f32Bytes([...quantized.scale]), dtype: "f32" },
       },
-      { name: "m.b", dtype: "F32", shape: [n], data: f32Bytes([...bias.data]) },
-    ],
-    { karume_ir: JSON.stringify(graph) },
-  );
+    },
+    {
+      graph: GRAPH_NAME,
+      initializer: "b",
+      bytes: f32Bytes([...bias.data]),
+      encoding: { codec: "f32" },
+    },
+  ]);
 };
 
 Deno.test({
@@ -880,7 +891,7 @@ const checkRowsCase = async (
   gpu: GpuContext,
   storage: WeightStorage,
   rowsCase: RowsCase,
-  build: (m: number) => ArrayBuffer,
+  build: (m: number) => Promise<OpenedContainer>,
   weightShape: readonly number[],
   values: Float32Array<ArrayBuffer>,
   bias: FilledTensor,

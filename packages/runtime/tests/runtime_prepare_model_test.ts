@@ -1,42 +1,39 @@
-// 2 段境界（ADR 0070 決定 5 / graph-first）の prepare 相 — グラフ shard 1 本で admission が
-// 完結すること。GPU も重み shard も要らない層だけをここで見る（実 GPU の A/B 門は
+// 2 段境界（ADR 0070 決定 5 / graph-first）の prepare 相 — 開いた容器の**宣言だけ**で admission が
+// 完結すること。GPU も重みの block も要らない層だけをここで見る（実 GPU の門は
 // gpu_prepared_model_test.ts）。
 //
 // 検出したいのは 2 つ:
-// ①見積りが「重み shard を 1 本も持たないまま」全量面と同じ数を出すこと（= 重み DL 前に
-//   必要側が分かるという 2 段境界の存在理由そのもの）
-// ②実行できないモデルは prepareModel の時点で落ちること — 使うグラフ shard は**重みテンソルを
-//   1 本も含まない**ので、落ちた時点で重み側に触れていないことが構成から言える。
+// ①見積りが「重みの block を 1 つも取らないまま」出ること（= 重み DL 前に必要側が分かるという
+//   2 段境界の存在理由そのもの）。取得の回数を数えて言う。
+// ②実行できないモデルは prepareContainer の時点で落ちること — 落ちた時点で重みの block に
+//   1 つも触れていないことを、同じ取得回数で言う。
 
 import { assert, assertEquals, assertThrows } from "@std/assert";
-import { ContainerError, openModel } from "../src/format/container.ts";
-import { IrError } from "../src/format/ir.ts";
-import { SafetensorsError } from "../src/format/safetensors.ts";
 import { OpContractError } from "../src/ops.ts";
-import { estimateSessionMemory } from "../src/runtime/estimate.ts";
-import { prepareModel } from "../src/runtime/executor.ts";
-import { baseGraph, buildSafetensors, type GraphJson } from "./helpers/format.ts";
-import { graphModelBuffer } from "./helpers/graph.ts";
-import { buildFixture } from "./helpers/shard-fixture.ts";
+import { RuntimeSupportError } from "../src/ops/support.ts";
+import { prepareContainer } from "../src/runtime/executor.ts";
+import { buildFixture, countingContainer } from "./helpers/mixed-codec-fixture.ts";
+import {
+  baseDeclaration,
+  baseTensors,
+  GRAPH_NAME,
+  memoryModel,
+  openModelBytes,
+} from "./helpers/model-fixture.ts";
 
-const GRAPH_SHARD_ID = "fixture-v1.0/model-00001.safetensors";
-
-const graphShard = (buffer: ArrayBuffer) => ({
-  id: GRAPH_SHARD_ID,
-  bytes: new Uint8Array(buffer),
-});
-
-/** 重みテンソルを 1 本も持たないグラフ shard（karume_ir だけ）。 */
-const graphOnlyShard = (graph: GraphJson) => graphShard(graphModelBuffer(graph));
-
-Deno.test("prepareModel の見積りは重み shard 抜きで全量面と一致する", () => {
+Deno.test("prepareContainer の見積りは重みの block を 1 つも取らずに出る", async () => {
   const fixture = buildFixture();
-  // 既定の 3 分割の先頭 = karume_ir + bias 群（w1 / w2 / w3 は後続の重み shard 側）
-  const prepared = prepareModel(graphShard(fixture.shards()[0]));
+  const counted = countingContainer(await openModelBytes(fixture.declaration, fixture.tensors));
+  const prepared = prepareContainer(counted.container, GRAPH_NAME);
   const estimate = prepared.estimate();
+  assertEquals(counted.reads(), 0, "見積りが重みの block を取っている");
 
-  assertEquals(estimate, estimateSessionMemory(openModel(fixture.fullBuffer())));
-  // 恒真化の防波堤: 4 格納混在の fixture なので圧縮常駐と非圧縮常駐がどちらも 0 でない
+  // 供給元が違っても同じ数（krm 経路 / メモリ内容器 — 見積りは宣言だけで決まる）
+  assertEquals(
+    estimate,
+    prepareContainer(memoryModel(fixture.declaration, fixture.tensors), GRAPH_NAME).estimate(),
+  );
+  // 恒真化の防波堤: 4 codec 混在の fixture なので圧縮常駐と非圧縮常駐がどちらも 0 でない
   // （全欄 0 どうしの一致で通ってしまう形を塞ぐ）。
   const { weights } = estimate.resident;
   assert(weights.compressedBytes > 0, "圧縮常駐が 0（fixture が壊れている）");
@@ -49,69 +46,33 @@ Deno.test("prepareModel の見積りは重み shard 抜きで全量面と一致�
   assertEquals(prepared.estimate(), estimate);
 });
 
-Deno.test("prepareModel は capability 不足・契約違反をグラフ shard の時点で落とす", () => {
-  const unsupportedStorage = baseGraph();
-  // bf16 は IR の語彙にはあるが実行経路が無い（ADR 0069 の隣 — capability 不足で列挙）
-  unsupportedStorage.initializers.w.storage = { dtype: "bf16" };
+Deno.test("prepareContainer は capability 不足・契約違反を重みの block を取る前に落とす", async () => {
+  // bf16 は容器の codec 台帳にはあるが実行経路が無い（ADR 0069 の隣 — capability 不足で列挙）
+  const unsupportedCodec = countingContainer(
+    await openModelBytes(baseDeclaration(), [
+      {
+        graph: GRAPH_NAME,
+        initializer: "w",
+        bytes: new Uint8Array(new ArrayBuffer(24)),
+        encoding: { codec: "bf16" },
+      },
+      baseTensors()[1],
+    ]),
+  );
   assertThrows(
-    () => prepareModel(graphOnlyShard(unsupportedStorage)),
-    ContainerError,
+    () => prepareContainer(unsupportedCodec.container, GRAPH_NAME),
+    RuntimeSupportError,
     "bf16",
   );
+  assertEquals(unsupportedCodec.reads(), 0, "capability 門の前に重みの block を取っている");
 
-  const badArity = baseGraph();
+  const badArity = baseDeclaration();
   // add に 3 本目の入力（capability 表は slot dtype しか見ないのでアリティは契約検査の担当）
   badArity.nodes[1].ins = ["h", "b", "b"];
-  assertThrows(() => prepareModel(graphOnlyShard(badArity)), OpContractError);
-});
-
-Deno.test("prepareModel の失敗は資産名（shard [0] 'id'）を名乗る", () => {
-  // safetensors ですらないバイト列（パーサ門のクラスは保つ — 包み直すと呼び手の分岐が壊れる）
-  const broken = assertThrows(
-    () => prepareModel(graphShard(new Uint8Array(64).buffer)),
-    SafetensorsError,
-  );
-  assert(broken.message.includes(GRAPH_SHARD_ID), broken.message);
-  assert(broken.message.includes("shard [0]"), broken.message);
-
-  // safetensors ではあるが karume_ir が無い（= 先頭に重み shard を置いた取り違え）
-  const notGraph = assertThrows(
-    () => prepareModel(graphShard(buildSafetensors([], undefined))),
-    ContainerError,
-    "karume_ir",
-  );
-  assert(notGraph.message.includes(GRAPH_SHARD_ID), notGraph.message);
-
-  // karume_ir はあるが IR として壊れている
-  const brokenIr = assertThrows(
-    () => prepareModel(graphShard(buildSafetensors([], { karume_ir: "{" }))),
-    IrError,
-  );
-  assert(brokenIr.message.includes(GRAPH_SHARD_ID), brokenIr.message);
-});
-
-Deno.test("prepareModel は buffer の先頭から始まらない view（slice の混入）を受けない", () => {
-  const loose = new Uint8Array(new ArrayBuffer(16), 4, 8) as Uint8Array<ArrayBuffer>;
+  const contractViolation = countingContainer(await openModelBytes(badArity, baseTensors()));
   assertThrows(
-    () => prepareModel({ id: GRAPH_SHARD_ID, bytes: loose }),
-    Error,
-    "buffer の先頭",
+    () => prepareContainer(contractViolation.container, GRAPH_NAME),
+    OpContractError,
   );
-});
-
-Deno.test("prepareModel は使い回しの器（余白のある buffer）の prefix view を受ける", () => {
-  // 供給側が最大 shard 長の器へ読んだ形: buffer は shard より長く、view は先頭から shard 長だけ。
-  const shard = new Uint8Array(graphModelBuffer(baseGraph()));
-  const vessel = new Uint8Array(new ArrayBuffer(shard.byteLength + 4096));
-  vessel.set(shard);
-  const prefix = new Uint8Array(vessel.buffer, 0, shard.byteLength);
-  const fromVessel = prepareModel({ id: GRAPH_SHARD_ID, bytes: prefix });
-  const fromTight = prepareModel({ id: GRAPH_SHARD_ID, bytes: shard });
-  assertEquals(fromVessel.graph, fromTight.graph, "器の余白がグラフの読みに混ざった");
-  // 余白ぶんを shard 長に数える形（view を buffer 全体にする）は末尾の未使用領域として落ちる。
-  assertThrows(
-    () => prepareModel({ id: GRAPH_SHARD_ID, bytes: vessel }),
-    SafetensorsError,
-    "未使用領域",
-  );
+  assertEquals(contractViolation.reads(), 0, "契約検査の前に重みの block を取っている");
 });

@@ -24,7 +24,7 @@ import {
   writeModelContainer,
   type WriteOptions,
 } from "../../../runtime/tests/helpers/container-write.ts";
-import { type IrDeclaration, parseIrDeclarationValue } from "../../../runtime/src/format/ir.ts";
+import { type IrDeclaration, parseIrDeclarationValue } from "@karume/runtime";
 
 export { parseIrDeclarationValue };
 

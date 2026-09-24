@@ -32,16 +32,21 @@
  * / `maxBufferSize`）に収まらない配布形はこの席を使えない** — 黙ってホスト経路へ退避せず、
  * 何バイト足りないかを添えて fail loudly にする。
  *
- * ## ロード（block ごとに writeBuffer — ADR 0085 決定 2 / ADR 0109 決定 4）
+ * ## ロード（piece ごとに writeBuffer — ADR 0085 決定 2 / ADR 0109 決定 4）
  *
- * ホストで 1 本の巨大 ArrayBuffer に連結しない。索引が指す `values` の block を 1 本ずつ読み、
- * **ランタイムの shard 逐次面**（ADR 0070 決定 3 / 0090 の piece）へ流す — ランタイムは piece を
- * 親 1 本ぶんの GPU バッファへ行オフセット位置に `queue.writeBuffer` し、shard ごとにフェンスを
- * 1 本立てて参照を手放す。器（合成 shard の buffer）は 1 本を使い回すので、ホスト RAM のピークは
- * 「最大 block 1 本 + 器 1 本」に収まる。
+ * ホストで 1 本の巨大 ArrayBuffer に連結しない。索引が指す `values` の block を**メモリ内容器の
+ * piece**（`openMemoryContainer` の `pieces`）としてそのまま渡す — Session 構築は part
+ * （= piece 1 本）ごとに `read()` を呼び、親 1 本ぶんの GPU バッファへ行オフセット位置に
+ * `queue.writeBuffer` し、part ごとにフェンスを 1 本立てて参照を手放す。piece のバイト列は
+ * その 1 回の読みぶんしか確保しない（器は使い回さず piece ごとに取る）ので、`values` 由来の
+ * ホスト RAM は「最大 block 1 本」に収まる。
  *
- * companion scale は piece 1 と同じ shard に置く契約（ADR 0090 決定 1）なので、**scale だけは
- * 先に全量を集める**（`scales` の block は 1 行 140 B なので本数が少ない）。
+ * companion scale は piece 1 と同じ part に置かれる契約（container-v1 §13.3 の規則③）なので、
+ * **scale だけは先に全量を集める**。ここが構築時ピークの支配項である — `scales` は
+ * `tokens × layers × 4` バイトで、E2B（262,144 token × 35 層）なら 1 本の器に 35 MiB を
+ * 集める。容器はその器をそのまま抱える（複製しない）ので、ホスト RAM のピークは
+ * 「scale 表の全量 + 最大 block 1 本」である。「最大 block 1 本」だけで見積もると支配項を
+ * 丸ごと落とす。
  *
  * MUST: **読み口を 1 回の読みより長く持たない**（`./ple.ts` と同じ MUST）。検証済みでない
  * 取得元の `AssetReader` は block を読み口の寿命ぶん保持するので、掴み続けると「1 本ずつ流す」
@@ -53,10 +58,16 @@
 import {
   type AssetReader,
   type BatchScope,
+  type BoundContainer,
+  type CodecName,
   type GpuContext,
-  type ModelShard,
+  type IrDeclaration,
+  type MemoryEncoding,
+  type MemoryTensor,
+  openMemoryContainer,
+  parseIrDeclarationValue,
+  prepareContainer,
   type PreparedModel,
-  prepareModel,
   type ResidentTensor,
   type RunInput,
   type RunInputs,
@@ -95,31 +106,20 @@ export const assertGemma4PleResidency = (
   return value as Gemma4PleResidency;
 };
 
-/** gather IR の綴り（この 1 箇所が正本 — 合成コンテナと Session の両方が引く）。 */
+/** gather IR の綴り（この 1 箇所が正本 — メモリ内容器と Session の両方が引く）。 */
 const INDEX_INPUT = "ple_index";
 const GATHER_OUTPUT = "per_layer";
 const RAW_VALUE = "ple_raw";
 const WEIGHT_TENSOR = "ple";
-const SCALE_TENSOR = "ple_scale";
 const EMBED_SCALE_TENSOR = "embed_scale";
+/** メモリ内容器に載せるグラフの名前（初期化子名 {@link WEIGHT_TENSOR} とは別の名前空間）。 */
+const GATHER_GRAPH = "ple";
 /** 物理行数（token 行）の記号 — 束縛源は {@link INDEX_INPUT} の shape だけ。 */
 const ROW_SYMBOL = "M";
 
-/**
- * 合成 shard のヘッダ領域（空白で詰めて固定長にする）。
- *
- * 固定長にするのは**器を使い回す**ため — 長さが shard ごとに動くと、器の先頭からの書き出し位置が
- * 毎回変わって「前回の残り」を踏む形を自分で作ることになる。piece 1 本ぶんのヘッダは
- * 100 バイト前後で、512 は桁 1 つぶんの余裕である（超えたら fail loudly）。
- */
-const HEADER_BYTES = 512;
-
-/** safetensors 先頭のヘッダ長欄（u64 LE）— 合成 shard を**書く**側が要る唯一のヘッダ定数。 */
-const HEADER_LENGTH_BYTES = 8;
-
-/** 格納 dtype → safetensors の綴り（合成コンテナが書く側）。 */
-const storageDtype = (index: Gemma4PleIndex): "I8" | "I4" | "I2" =>
-  index.storage === "i2" ? "I2" : index.storage === "i4" ? "I4" : "I8";
+/** 格納 dtype → codec 台帳の登録名（`values` の詰め方 — container-v1 §6.3）。 */
+const pleCodec = (index: Gemma4PleIndex): CodecName =>
+  index.storage === "i2" ? "int2-off" : index.storage === "i4" ? "int4-sym-g" : "int8-sym";
 
 /**
  * GPU 常駐に要るバイト数（**索引だけで決まる** — バイト列を読む前に分かる）。
@@ -145,27 +145,27 @@ export const gemma4PleGpuBytes = (
  * MUST: `embed_scale` は**別ノード**で掛ける（`embedding` の中へ畳まない）。ホスト経路の
  * `Math.fround(q × scale) × embedScale` と丸め点を合わせるのがこの 2 段の唯一の目的である
  * （ADR 0085 決定 4）。
+ *
+ * MUST: 組んだ宣言は `parseIrDeclarationValue` に通す — ここは exporter も容器の読み手も
+ * 経由しないので、通さないとグラフ単体で決まる規則（SSA・トポロジカル順・`requires.ops` と
+ * 実使用 op の一致・未知キー・記号名の正準表記）が 1 つも検査されない。
+ *
+ * MUST NOT: 下のリテラルに省略可能な `states` を書き足さない。書かないことで、リテラルは
+ * {@link IrDeclaration} として型が付かず、`parseIrDeclarationValue` の戻り値だけがこの関数の
+ * 返り値になれる（包みを外した編集は `deno check` で落ちる）。
  */
-export const gemma4PleGatherGraph = (index: Gemma4PleIndex): Record<string, unknown> => {
+export const gemma4PleGatherGraph = (index: Gemma4PleIndex): IrDeclaration => {
   const rows = index.tokens * index.layers;
-  const storage = index.storage;
-  return {
+  return parseIrDeclarationValue({
     format: "karume-ir",
-    version: 1,
+    version: 2,
     requires: { ops: ["embedding", "mul"] },
     symbols: [ROW_SYMBOL],
+    // IR v2 の宣言は名前だけ（格納は束縛表 = メモリ内容器の `encoding` が持つ）。`shared` は
+    // 書かない = 実体を持つ側（`false` は綴れない — 欄の不存在と同じ宣言）。
     initializers: {
-      [WEIGHT_TENSOR]: {
-        tensor: WEIGHT_TENSOR,
-        storage: {
-          dtype: storage,
-          scale: SCALE_TENSOR,
-          // i4 だけ group 長を宣言する（ADR 0069 決定 2）。group = dim にすると group scale の
-          // 平坦添字が行番号そのものになり、i8 / i2 の行 scale と同じ並びに揃う。
-          ...(storage === "i4" ? { group_size: index.dim } : {}),
-        },
-      },
-      [EMBED_SCALE_TENSOR]: { tensor: EMBED_SCALE_TENSOR, storage: { dtype: "f32" } },
+      [WEIGHT_TENSOR]: {},
+      [EMBED_SCALE_TENSOR]: {},
     },
     inputs: [{ name: INDEX_INPUT, dtype: "i32", shape: [1, ROW_SYMBOL, index.layers] }],
     outputs: [GATHER_OUTPUT],
@@ -186,77 +186,7 @@ export const gemma4PleGatherGraph = (index: Gemma4PleIndex): Record<string, unkn
       },
       { op: "mul", ins: [RAW_VALUE, EMBED_SCALE_TENSOR], outs: [GATHER_OUTPUT], attrs: {} },
     ],
-  };
-};
-
-/** 合成する safetensors のテンソル 1 本（payload は呼び手が持つ view）。 */
-type SynthTensor = {
-  readonly name: string;
-  readonly dtype: string;
-  readonly shape: readonly number[];
-  readonly bytes: Uint8Array<ArrayBuffer>;
-};
-
-/**
- * テンソル列から safetensors 1 本のバイト列を組む（`into` を渡すと器を使い回す）。
- *
- * MUST: データ節は宣言で隙間なく覆う（パーサの MUST）。ヘッダは 4 の倍数へ詰めるので、
- * データ節の先頭は常に 4 整列 = I4 / I2 / F32 の整列要件を満たす。
- */
-const writeSafetensors = (
-  metadata: Readonly<Record<string, string>> | undefined,
-  tensors: readonly SynthTensor[],
-  into?: Uint8Array<ArrayBuffer>,
-): Uint8Array<ArrayBuffer> => {
-  const header: Record<string, unknown> = {};
-  if (metadata !== undefined) header.__metadata__ = metadata;
-  let payload = 0;
-  for (const tensor of tensors) {
-    header[tensor.name] = {
-      dtype: tensor.dtype,
-      shape: tensor.shape,
-      data_offsets: [payload, payload + tensor.bytes.byteLength],
-    };
-    payload += tensor.bytes.byteLength;
-  }
-  const json = new TextEncoder().encode(JSON.stringify(header));
-  // 器を使い回す側は固定長、単発で組む側は 4 の倍数へ詰める（どちらもデータ節が 4 整列）。
-  const headerLength = into === undefined ? Math.ceil(json.byteLength / 4) * 4 : HEADER_BYTES;
-  if (json.byteLength > headerLength) {
-    throw new Error(
-      `PLE GPU 常駐: 合成 shard のヘッダ ${json.byteLength} バイトが領域 ${headerLength} を超えた`,
-    );
-  }
-  const total = HEADER_LENGTH_BYTES + headerLength + payload;
-  const target = into ?? new Uint8Array(new ArrayBuffer(total));
-  if (target.byteLength < total) {
-    throw new Error(
-      `PLE GPU 常駐: 合成 shard ${total} バイトが器 ${target.byteLength} に収まらない`,
-    );
-  }
-  new DataView(target.buffer, target.byteOffset, target.byteLength)
-    .setBigUint64(0, BigInt(headerLength), true);
-  target.set(json, HEADER_LENGTH_BYTES);
-  target.fill(0x20, HEADER_LENGTH_BYTES + json.byteLength, HEADER_LENGTH_BYTES + headerLength);
-  let cursor = HEADER_LENGTH_BYTES + headerLength;
-  for (const tensor of tensors) {
-    target.set(tensor.bytes, cursor);
-    cursor += tensor.bytes.byteLength;
-  }
-  return target.subarray(0, total);
-};
-
-/** piece キー（ADR 0090 決定 1 — 5 桁ゼロ詰め・1 始まり）。 */
-const pieceKey = (position: number, count: number): string =>
-  `${WEIGHT_TENSOR}#${String(position).padStart(5, "0")}-of-${String(count).padStart(5, "0")}`;
-
-/** 合成 shard 1 本が運ぶ piece の出どころ。 */
-type PiecePlan = {
-  /** 出どころの `values` block（索引の並び順）。 */
-  readonly block: Gemma4PleBlock;
-  /** その block の先頭から飛ばす行数（piece 1 を graph shard へ出した先頭だけ 1）。 */
-  readonly skipRows: number;
-  readonly rows: number;
+  });
 };
 
 /**
@@ -326,113 +256,65 @@ export type Gemma4PleResidentOptions = {
 };
 
 /**
- * 合成コンテナ（gather IR + PLE の piece 列）— ランタイムの shard 逐次面へそのまま流す形。
+ * 索引の指す block からメモリ内容器を組む（**GPU を 1 度も触らない**）。
  *
- * MUST: `weightShards` は**グラフ shard を含まない**（`PreparedModel.createSession` の契約）。
- */
-export type Gemma4PleGatherShards = {
-  readonly graphShard: ModelShard;
-  readonly weightShards: AsyncIterable<ModelShard>;
-};
-
-/**
- * 索引の指す block から合成コンテナを組む（**GPU を 1 度も触らない**）。
+ * `values` の block 1 本 = piece 1 本で、piece の `read()` はそのときだけ区間読みを出す
+ * （この層はバイト列を 1 本も抱えない）。行範囲は `[block.start × layers, block.stop × layers)`
+ * — IR の 1 行 = 1 層ぶんなので、token 区間はそのまま行区間になる。
  *
- * 段は 2 つ: ①`scales` の block 全部（と `values` の先頭 1 行）を集めて graph shard を作る
- * ②`values` の block を 1 本ずつ読み、piece 1 本ぶんの合成 shard として器へ書いて流す。piece 1 を
- * 先頭 1 行に切って graph shard へ同居させてあるのは、companion scale の co-shard 契約
- * （ADR 0090 決定 1）を満たしつつ graph shard を小さく保つためである（`PreparedModel` が
- * Session 構築まで掴む）。
+ * companion scale は規則③で piece 1 と同じ part に置かれるので、scale だけ先に全量を集める。
+ * block が 1 本しか無い索引は `pieces`（2 本以上 MUST）に割れないので全量 1 本で渡す。
  *
  * NOTE: `export` は合成の突合を GPU 無しで縛るため（`mod.ts` / サブパス面には出さない）。
  */
-export const buildGemma4PleGatherShards = async (
+export const buildGemma4PleGatherContainer = async (
   index: Gemma4PleIndex,
   openBlock: (asset: string) => AssetReader,
   entry: string,
-): Promise<Gemma4PleGatherShards> => {
+): Promise<BoundContainer> => {
   const factor = packFactor(index);
   const rowBytes = index.dim / factor;
   if (!Number.isSafeInteger(rowBytes) || rowBytes % 4 !== 0) {
     throw new Error(
       `${entry}: PLE の 1 層ぶん ${index.dim} 要素（格納 ${index.storage}）が` +
-        ` ${rowBytes} バイトで 4 整列しない（合成コンテナの piece が組めない）`,
+        ` ${rowBytes} バイトで 4 整列しない（容器の block 末尾整列を満たせない）`,
     );
   }
   const bytes = gemma4PleGpuBytes(index);
-  // ── scale は piece 1 と同じ shard に置く契約（ADR 0090 決定 1）なので先に全量を集める。
-  const scaleBytes = await readScaleTable(index.scales, openBlock, bytes.scales);
-  const firstRow = await readBlockRange(openBlock, index.values.blocks[0], 0, rowBytes);
-
-  // ── piece の割り付け（piece 1 = 先頭 1 行で graph shard に同居・残りは values の block 順）。
-  const plans: PiecePlan[] = [];
-  for (const [position, block] of index.values.blocks.entries()) {
-    const skipRows = position === 0 ? 1 : 0;
-    const rows = (block.stop - block.start) * index.layers - skipRows;
-    if (rows > 0) plans.push({ block, skipRows, rows });
-  }
-  const pieceCount = plans.length + 1;
-  if (pieceCount < 2) {
-    throw new Error(`${entry}: PLE の行数 ${index.tokens * index.layers} が 2 行未満`);
-  }
-
-  const graphShard: ModelShard = {
-    id: "ple.gather.graph",
-    bytes: writeSafetensors(
-      { karume_ir: JSON.stringify(gemma4PleGatherGraph(index)) },
-      [
-        {
-          name: EMBED_SCALE_TENSOR,
-          dtype: "F32",
-          shape: [1],
+  const scale = await readScaleTable(index.scales, openBlock, bytes.scales);
+  // i4 は group = 行長（ADR 0069 決定 2 の「2 冪 ≥ 16」を満たす）・i8 / i2 は per-channel で
+  // groupSize = 行長。どちらも group 数 1 なので、scale は `[tokens × layers, 1]` の f32 列
+  // そのもの（= `readScaleTable` が並べた順）になる。
+  const encoding: MemoryEncoding = {
+    codec: pleCodec(index),
+    rowAxis: 0,
+    groupSize: index.dim,
+    scale,
+  };
+  const table = index.values;
+  const readBlock = (block: Gemma4PleBlock) => (): Promise<Uint8Array<ArrayBuffer>> =>
+    readBlockRange(openBlock, block, 0, gemma4PleBlockBytes(table, block));
+  const values: MemoryTensor = table.blocks.length < 2
+    ? { encoding, bytes: await readBlock(table.blocks[0])() }
+    : {
+      encoding,
+      pieces: table.blocks.map((block) => ({
+        rows: [block.start * index.layers, block.stop * index.layers] as const,
+        read: readBlock(block),
+      })),
+    };
+  return openMemoryContainer({
+    graphs: { [GATHER_GRAPH]: gemma4PleGatherGraph(index) },
+    tensors: {
+      [GATHER_GRAPH]: {
+        [WEIGHT_TENSOR]: values,
+        [EMBED_SCALE_TENSOR]: {
+          encoding: { codec: "f32" },
           bytes: new Uint8Array(Float32Array.of(index.embedScale).buffer),
         },
-        {
-          name: SCALE_TENSOR,
-          dtype: "F32",
-          shape: [index.tokens * index.layers, 1],
-          bytes: scaleBytes,
-        },
-        {
-          name: pieceKey(1, pieceCount),
-          dtype: storageDtype(index),
-          shape: [1, index.dim],
-          bytes: firstRow,
-        },
-      ],
-    ),
-  };
-
-  // 器は 1 本だけ確保して使い回す（ADR 0070 追記の RAM ピーク係数 1 化と同じ流儀）。
-  const container = new Uint8Array(
-    new ArrayBuffer(
-      HEADER_LENGTH_BYTES + HEADER_BYTES +
-        plans.reduce((largest, plan) => Math.max(largest, plan.rows * rowBytes), 0),
-    ),
-  );
-  const weightShards = async function* (): AsyncGenerator<ModelShard, void, unknown> {
-    for (const [position, plan] of plans.entries()) {
-      const payload = await readBlockRange(
-        openBlock,
-        plan.block,
-        plan.skipRows * rowBytes,
-        plan.rows * rowBytes,
-      );
-      yield {
-        id: plan.block.asset,
-        bytes: writeSafetensors(undefined, [{
-          name: pieceKey(position + 2, pieceCount),
-          dtype: storageDtype(index),
-          shape: [plan.rows, index.dim],
-          bytes: payload,
-        }], container),
-      };
-    }
-  };
-  return {
-    graphShard,
-    weightShards: { [Symbol.asyncIterator]: () => weightShards()[Symbol.asyncIterator]() },
-  };
+      },
+    },
+  });
 };
 
 /**
@@ -464,8 +346,12 @@ const assertBindingLimits = (options: Gemma4PleResidentOptions, valuesBytes: num
 /**
  * PLE を GPU へ常駐させ、GPU 内 gather の面を返す。
  *
- * 順序は「索引の門 → 束縛上限の門 → scale の収集 → 合成 shard の逐次消費」で、GPU を触るのは
+ * 順序は「索引の門 → 束縛上限の門 → scale の収集 → piece の逐次消費」で、GPU を触るのは
  * 最後の 1 段だけである（ADR 0070 決定 5 の graph-first と同じ並び）。
+ *
+ * NOTE: `values` の block が 1 本しか無い索引（全量が block 上限に収まる小さな配布形）だけは
+ * piece に割れないので、scale の収集と同じ段で values も全量を読む — capability の門
+ * （`prepareContainer`）より前に読み切る唯一の形である。
  */
 export const createGemma4PleResident = async (
   options: Gemma4PleResidentOptions,
@@ -481,13 +367,9 @@ export const createGemma4PleResident = async (
   }
   const bytes = gemma4PleGpuBytes(index);
   assertBindingLimits(options, bytes.values);
-  const { graphShard, weightShards } = await buildGemma4PleGatherShards(
-    index,
-    options.openBlock,
-    entry,
-  );
+  const bound = await buildGemma4PleGatherContainer(index, options.openBlock, entry);
 
-  const prepared: PreparedModel = prepareModel(graphShard);
+  const prepared: PreparedModel = prepareContainer(bound, GATHER_GRAPH);
   // 出力の常駐は run の形ごとに 1 本（行数の集合は decode 1 + バケット + chunk 長で有界）。
   const outputBytes = [...new Set(options.rows)].reduce(
     (total, rows) => total + rows * index.layers * index.dim * 4,
@@ -503,7 +385,7 @@ export const createGemma4PleResident = async (
     bindings: { [ROW_SYMBOL]: maxRows },
     planBackingBudgetBytes: backingBudget,
   });
-  const session: Session = await prepared.createSession(gpu, weightShards, {
+  const session: Session = await prepared.createContainerSession(gpu, {
     planBackingBudgetBytes: backingBudget,
   });
 
