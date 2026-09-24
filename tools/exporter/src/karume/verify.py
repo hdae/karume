@@ -119,19 +119,6 @@ RESERVED_STATE_DTYPES = ("f16",)
 #: 上限（ops.STRIDED_RANK）と同じ数値だが理由が別なので定数を共有しない。
 MAX_STATE_RANK = 4
 
-#: 格納 dtype → safetensors dtype。f32/f16/bf16/i8/i4 は意味論 f32 の符号化で、`i32` だけが
-#: 生の int32（ADR 0010 の明示的な例外）。`i4` は packed 4bit（ADR 0069 決定 2 — shape は
-#: 論理形のままで、バイト数だけが bit 幅から決まる）。
-STORAGE_ENCODING = {
-    "f32": "F32",
-    "f16": "F16",
-    "bf16": "BF16",
-    "i8": "I8",
-    "i4": "I4",
-    "i2": "I2",
-    "i32": "I32",
-}
-
 #: initializer の意味論 dtype → 許される格納 dtype（docs/ir-v2.md「値と型」）。
 #: MUST: 交差を許さない — `i32` 宣言の initializer が f16 のビット列として読まれる
 #: 沈黙誤値になる。bool の initializer は語彙に無い。
@@ -1084,14 +1071,6 @@ def _as_reader_entry(value: Any, where: str) -> dict[str, Any]:
     return value
 
 
-@dataclass(frozen=True)
-class _StoredTensor:
-    """自前リーダが読んだテンソル 1 本の宣言（safetensors dtype と**論理** shape）。"""
-
-    dtype: str
-    shape: list[int]
-
-
 def _read_header(path: str | Path) -> tuple[dict[str, Any], int, int]:
     """ヘッダ JSON と `(データ節の絶対開始位置, データ節のバイト長)` を返す。
 
@@ -1123,40 +1102,6 @@ def _read_header(path: str | Path) -> tuple[dict[str, Any], int, int]:
     if not isinstance(header, dict):
         raise ContainerError("safetensors ヘッダが最上位オブジェクトでない")
     return header, data_start, file_size - data_start
-
-
-def _read_container(
-    path: str | Path,
-) -> tuple[Mapping[str, str], Mapping[str, _StoredTensor], int]:
-    """配布形を**自前で**読み、`(__metadata__, テンソルキー → 宣言, ファイル長)` を返す。
-
-    MUST: `safetensors` のリーダを通さない。ライブラリ（0.8.0）の dtype 語彙に `I4` が無く、
-    packed 4bit を含む配布形は `safe_open` の時点で開けない（ADR 0069 決定 2）— verify は
-    Karume のリーダ（`packages/runtime/src/format/safetensors.ts`）の鏡像であるべきなので、
-    読み口も自前で持つ。「別のリーダが読めた」は規則の再実装ではない、という
-    `assert_reader_layout` と同じ理由でもある。
-
-    NOTE: レイアウト規則（隙間なし・整列・宣言バイト長の一致）は `assert_reader_layout` の
-    担当で、呼び出し側が**先に**通す。ここは宣言の読み取りだけ。
-    """
-    header, data_start, data_length = _read_header(path)
-    raw = header.get("__metadata__", {})
-    if not isinstance(raw, dict) or any(
-        not isinstance(key, str) or not isinstance(value, str) for key, value in raw.items()
-    ):
-        raise ContainerError("__metadata__ が文字列 → 文字列のマップでない")
-    tensors: dict[str, _StoredTensor] = {}
-    for name, value in header.items():
-        if name == "__metadata__":
-            continue
-        where = f"テンソル '{name}'"
-        entry = _as_reader_entry(value, where)
-        shape = [
-            _as_reader_index(dim, where, f"shape[{axis}] の次元")
-            for axis, dim in enumerate(entry["shape"])
-        ]
-        tensors[name] = _StoredTensor(dtype=entry["dtype"], shape=shape)
-    return raw, tensors, data_start + data_length
 
 
 def assert_reader_layout(path: str | Path) -> None:
