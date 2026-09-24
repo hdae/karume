@@ -37,9 +37,11 @@ measurements in `docs/research/`.
   other pins still name `karume/4` revisions, which only the released packages can read until stage 3.
 - Karume container format, stage 3 (ADR 0108): the exporter writes `krm` directly (`publish_model` /
   `export_to_file` with `provenance` and `graph_name`; PLE tables and `rope_base` become container
-  assets), `karume dist` bakes a `karume/5` repository from container series, and the runtime gains an
-  in-memory container (`openMemoryContainer`) that feeds host-built graphs and already-decoded
-  tensors through the same admission and upload path as a `krm` without writing one —
+  assets), `karume dist` bakes a `karume/5` repository from container series,
+  `karume migrate --part-bytes` picks the part length from the writer's choice set
+  (256 / 512 / 768 / 1024 MiB; default 256), and the runtime gains an in-memory container
+  (`openMemoryContainer`) that feeds host-built graphs and already-decoded tensors through the same
+  admission and upload path as a `krm` without writing one —
   `parseIrDeclarationValue` / `IrDeclaration` are on the runtime surface so callers can build the
   declarations for it. Gemma's on-device PLE gather and Irodori's host graphs go through it.
 - Gemma 4 QAT family: `gemma4-qat` pipelines for E2B / E4B with fixed INT2 / INT4 storage, fixed
@@ -83,6 +85,14 @@ measurements in `docs/research/`.
 
 ### Changed
 
+- The peak of JavaScript-side `ArrayBuffer` memory (V8 "external") while building a session from a
+  container is lower (process RSS additionally includes wgpu staging and is not bounded by this): the
+  runtime uploads container
+  blocks one at a time and releases each as soon as `writeBuffer` returns (the WebGPU specification
+  copies the bytes at call time), and hub's scan path hands out views of the held part instead of
+  copies. Sources read by range (local directories, and browser blob reads by design) now peak at
+  about one block plus the CPU expansion buffer regardless of part length; Hugging Face downloads
+  under Deno still hold the current part, plus earlier parts until they are garbage-collected.
 - Decode and prefill are substantially faster: the GEMV family covers 1 ≤ M ≤ 64 as row-block
   variants, parallel GEMV (with optional subgroup reduction) is selectable from the quant seat,
   argmax over long rows runs in two phases, top-k uses a bounded heap and top-p is linear in the

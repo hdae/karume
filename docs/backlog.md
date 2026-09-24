@@ -31,8 +31,9 @@
   ピークは seek 型の約 2 倍）。irodori-v4.1-small の再アップロードと pin 更新も済（検収①の実 pin — SHA 固定の取得元で
   `fromPretrained` → `generate` を通し、取得が全て pin の revision・同じ文と seed の WAV がローカルミラー経由と
   byte 同一）。
-  **段 3 へ持ち越す RAM ピークの改善候補**（実測で採否）: hub の scan 型で取得層の `readFile` に器を渡す /
-  runtime の `containerBatches` を part 単位の items から block（予算）単位の yield へ / `slice()` を view に。持ち越した宿題のうち 128 鎖の突合・`karume verify` のコンテナ席・`assets` の
+  **段 3e 済（2026-09-24）**: part 長の既定は 256 MiB のまま。段 2 から持ち越した RAM ピークの改善候補は、hub の
+  scan 型の切り出しを view に（候補 3）と Session 構築を block ごとに読んでは上げる（候補 2(c)）を採り、取得層へ
+  器を渡す使い回し（候補 1）は採らない（ADR 0108 追記 5・[研究記録](research/2026-09-24-part-length-ram-peak.md)）。持ち越した宿題のうち 128 鎖の突合・`karume verify` のコンテナ席・`assets` の
   受け口は段 2 で閉じ、1 コンテナ複数グラフは形式の能力のまま `karume/5` では使わない（ADR 0109 決定 2）。
   段 0 の宿題だった `pushErrorScope('validation')` の同期区間を block 単位に割る費用は実測で閉じた
   （push/pop 1.81 µs / 回・フェンス 13.0 ms / 回 — ADR 0108 決定 9 に追記済み）。段 1〜6 の作るものと検収は
@@ -40,6 +41,21 @@
   実施済み（2026-09-22・38 項目・約 141 GB — 削除一覧は
   `.claude/reviews/2026-09-22_codex-format-design/outputs-cleanup-deleted.txt`。レーンが参照する系列は
   段 1 後に新形式で再生成する）。
+  **次は 3f（docs）**。段 3d から持ち越した項目:
+  - ADR 0085 の RAM 記述: GPU 常駐席の節が旧実装の語（shard 逐次面・使い回す器・「最大 shard 1 本 + 器 1 本」）の
+    ままで、構築時ピークの支配項（最大 block + scale 全量 × 2）と食い違う。
+  - `packages/models/src/gemma/ple-gpu.ts` 冒頭の doc: 「part ごとにフェンスを 1 本立てて参照を手放す」は段 3e の
+    候補 2(c) の後は古い（参照は `writeBuffer` が戻った時点で手放し、フェンスは part ごと 1 回のまま）。ピークは
+    「scale 表の全量 + 最大 block 1 本」と書いており、上の ADR 0085 の支配項（× 2）とどちらに揃えるかは実装に照らして決める。
+  - docs の死んだ参照: 段 3d で消えた `STORAGE_DTYPES`（`quantization.md` / `glossary.md` の正本ポインタ）と
+    `streamAssets`（limitations / known-issues / ADR 0070 / 0080 / 0085 / 0086 ほか）。
+  - exporter README: 出力を旧 shard（safetensors + `__metadata__.karume_ir`）として説明している節と、CLI 節の
+    サブコマンド表（`karume repack` があり `karume migrate` が無い）。`tools/export-recipes/*/README.md` の系列出力図（`model.safetensors`）も同種。
+  - `DTYPE_BYTES` / `DTYPE_ALIGN` の統合: I4 が消えて全 dtype で同値になった 2 表
+    （`packages/runtime/src/format/safetensors.ts`）を 1 本に畳む。
+  - 独立オラクル喪失の記録: `gpu_container_session_test.ts` の削除で、合成モデル（3 codec × piece 分割）の
+    出力を旧 safetensors 経路という別実装で押さえる A/B が消えた（後継は krm と、同じ構築経路を共有する
+    メモリ内容器の一致だけを見る）。被覆の穴として記録する。
 
 - **モデル横断の追加調査（2026-09-10〜11）**: Qwen3-0.6B / MiniCPM5-2B の RTN / GPTQ と
   E4B の全 PLE を含むローカル pipeline は実機検証済み。E4B chat も CPU / Deno / Chrome で一致。
