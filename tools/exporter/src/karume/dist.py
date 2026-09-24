@@ -59,6 +59,9 @@ MUST: **入力コンテナは「過去に検証済み」と信頼しない** —
 `--card-profile` はモデルカードの**帰属**（出所・ライセンス・引用）の選択で、選択肢が 2 つ
 以上ある pipeline では必須（{@link resolve_card_renderer}）。組み立てる資産には掛からない —
 同じ重みでも、どのファミリーとして配るかで帰属が変わる。
+
+`--repo` はカードの Usage 例に綴る HF リポ ID の明示の上書き口で、既定は pipeline の宣言
+（{@link resolve_repo}）。`--out` のディレクトリ名からは導かない。
 """
 
 from __future__ import annotations
@@ -1848,12 +1851,14 @@ class Pipeline:
     """pipeline ごとに違うものだけを持つディスパッチ表の 1 行。
 
     共有部（配置・共有の畳み込み・sha256・宣言と現物の突合）は上の汎用関数が持つので、
-    ここに並ぶのは「既定のモデル名 / 単一モデルの既定リポ名 / 系列とモデル名から計画を組む
+    ここに並ぶのは「既定のモデル名 / モデルが属する配布リポ名 / 系列とモデル名から計画を組む
     手順 / モデルカードの描き手」の 4 つだけ。
     """
 
     default_model: str
-    #: 単一モデルのときの既定の出力ディレクトリ名（複数モデルのリポ名は導出できない）。
+    #: モデル名 → そのモデルを収める配布リポ名（`HF_OWNER` 抜き）。カードの Usage 例に綴る
+    #: repo の正本（{@link resolve_repo}）で、呼び出し側の既定の出力先もここから綴る。
+    #: 組むモデル全部が同じ名前を返すときだけ 1 リポの名前として成立する。
     repo_name: Callable[[str], str]
     plan: Callable[[Path, str], ModelPlan]
     #: モデルカードの**帰属プロファイル**（名前 → 描き手）。テンプレートは pipeline 固有でも、
@@ -1885,6 +1890,30 @@ def resolve_card_renderer(pipeline: Pipeline, profile: str | None) -> CardRender
     if renderer is None:
         raise DistError(f"帰属プロファイル '{profile}' は無い（選択肢: {choices}）")
     return renderer
+
+
+def resolve_repo(pipeline: Pipeline, models: Sequence[str], repo: str | None) -> str:
+    """モデルカードの Usage 例に綴る HF リポ ID（`<owner>/<name>`）を決める。
+
+    正本は pipeline の宣言（{@link Pipeline.repo_name}）で、`--repo` はそれを明示で上書きする口。
+
+    MUST: 出力先のディレクトリ名からは導かない — 置き場はリポの事実ではないので、別名の
+    ディレクトリ（ステージング）で焼いた配布形のカードが、実在しないリポを指したまま公開される。
+    MUST: 組むモデルの宣言が 1 つに揃わないとき（モデル名をリポ名に含む pipeline で複数モデルを
+    1 リポへ束ねるとき）は推定せず `--repo` を求めて落とす — 束ねたリポの名前は命名の決定で
+    あって、モデル名の並びからは決まらない。
+    """
+    if repo is not None:
+        if not REPO_RE.match(repo):
+            raise DistError(f"--repo '{repo}' が '<owner>/<name>' の形でない")
+        return repo
+    names = sorted({pipeline.repo_name(model) for model in models})
+    if len(names) != 1:
+        raise DistError(
+            f"モデル {' / '.join(models)} が宣言するリポ名が 1 つに揃わない"
+            f"（{' / '.join(names)}）— 1 リポへ束ねる名前は --repo OWNER/NAME で明示する"
+        )
+    return f"{HF_OWNER}/{names[0]}"
 
 
 #: core wheel だけで組める pipeline（全量ではない — モジュール doc の MUST）。
@@ -1965,6 +1994,14 @@ def build_parser(
         )
         + "）",
     )
+    parser.add_argument(
+        "--repo",
+        metavar="OWNER/NAME",
+        default=None,
+        help="モデルカードの Usage 例に綴る HF リポ ID（既定: pipeline が宣言するリポ名。"
+        "組むモデルの宣言が 1 つに揃わないときは必須）。--out のディレクトリ名とは独立で、"
+        "別名のディレクトリへ焼いてもカードはこの名前を指す。上書きするときは --out も明示する",
+    )
     # 越境参照（ADR 0038 §7）— **5 つ揃って初めて成立する opt-in**（1 つも無ければ従来どおり
     # 完全自己完結の配布形になる。部分指定は {@link resolve_external_components} が落とす）。
     parser.add_argument(
@@ -2033,13 +2070,19 @@ def main(
     models = args.models if args.models else [pipeline.default_model]
     if args.out is not None:
         out_dir = args.out
+    elif args.repo is not None:
+        # 既定の出力先は pipeline の宣言から綴られるので、名前だけ上書きすると「あるリポの名前の
+        # ディレクトリに、別のリポを指すカード」が組み上がる。
+        raise DistError("--repo で上書きするときは --out も明示する（既定の出力先は宣言の名前）")
     elif default_out_dir is not None:
         out_dir = default_out_dir(pipeline, models)
     else:
         raise DistError("--out が要る（配布形の出力先）— 呼び出し側が既定を渡していない")
-    # 帰属プロファイルは**組み立ての前**に解決する — 誤った / 足りない指定で数 GB を並べてから
-    # 最後の 1 枚で落ちる形にしない。越境参照の指定も同じ理由でここで形だけ確かめる。
+    # 帰属プロファイルとカードのリポ ID は**組み立ての前**に解決する — 誤った / 足りない指定で
+    # 数 GB を並べてから最後の 1 枚で落ちる形にしない。越境参照の指定も同じ理由でここで形だけ
+    # 確かめる。
     render_card = resolve_card_renderer(pipeline, args.card_profile)
+    repo = resolve_repo(pipeline, models, args.repo)
     external = resolve_external_components(
         repo=args.ref_repo,
         revision=args.ref_revision,
@@ -2051,14 +2094,12 @@ def main(
     # 形でも、1 モデル目だけ入った配布形を後段に見せない。
     plans = [pipeline.plan(args.series, model) for model in models]
     # モデルカードは組み立ての中（staging）で、**検証を通った manifest** から描く（表と現物が
-    # 食い違ったまま説明だけ生えることがない順序・カードごと 1 回で据わる）。リポ ID は組み立て
-    # 先のディレクトリ名から導く — manifest は自分の在り処を知らず、ファミリーリポの名前は
-    # pipeline の定数にもできない。
+    # 食い違ったまま説明だけ生えることがない順序・カードごと 1 回で据わる）。
     manifest = assemble_family(
         plans,
         out_dir,
         models[0],
-        render_card=partial(render_card, repo=f"{HF_OWNER}/{out_dir.name}"),
+        render_card=partial(render_card, repo=repo),
         root_files=pipeline.root_files,
         external=external,
     )
@@ -2077,8 +2118,9 @@ def main(
         for _, ref in _declared_refs(manifest)
         if is_external_ref(ref)
     }
-    for repo, revision, rel_path in sorted(borrowed):
-        print(f"{borrowed[(repo, revision, rel_path)]:>12}  {repo}@{revision[:12]} {rel_path}")
+    for ref_repo, revision, rel_path in sorted(borrowed):
+        size = borrowed[(ref_repo, revision, rel_path)]
+        print(f"{size:>12}  {ref_repo}@{revision[:12]} {rel_path}")
     listing = ", ".join(
         f"{name}({model['defaultQuant']})" for name, model in manifest["models"].items()
     )

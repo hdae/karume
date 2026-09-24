@@ -60,8 +60,8 @@ ModelSection = Callable[[Mapping[str, Any]], list[str]]
 #: HF の `library_name`（全 pipeline 共通 — 読み手はこのリポジトリの runtime 1 つだけ）。
 LIBRARY_NAME = "karume"
 
-#: 配布先の HF アカウント。リポ名は組み立て先のディレクトリ名から決まる（`karume.dist` が
-#: `<HF_OWNER>/<ディレクトリ名>` を渡す）ので、ここが持つのは所有者だけ。
+#: 配布先の HF アカウント。リポ名は pipeline が宣言する（`karume.dist.resolve_repo` が
+#: `<HF_OWNER>/<宣言の名前>` を渡す）ので、ここが持つのは所有者だけ。
 HF_OWNER = "hdae"
 
 #: 注記に出す commit sha の桁数（完全な値は karume.json が持つ — 注記は指し先の目安）。

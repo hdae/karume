@@ -21,7 +21,7 @@ import hashlib
 import json
 import os
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, ClassVar
@@ -49,6 +49,7 @@ from karume.dist import (
     MANIFEST_FORMAT,
     MAX_QUANT_DESCRIPTION_CHARS,
     MAX_QUANT_LABEL_CHARS,
+    MODEL_CARD_FILENAME,
     PIPELINES,
     SHARED_DIRNAME,
     STORAGE_DTYPE_LABELS,
@@ -71,6 +72,7 @@ from karume.dist import (
     preprocessor_channels,
     resolve_card_renderer,
     resolve_external_components,
+    resolve_repo,
     verify_dist,
 )
 
@@ -1623,6 +1625,97 @@ class TestCardProfile:
         assert sorted(profiles) == ["fn", "jvnv"]
         assert resolve_card_renderer(_TWO_PROFILE_PIPELINE, "jvnv") is profiles["jvnv"]
         assert profiles["fn"] is not profiles["jvnv"]
+
+
+def _repo_echo_pipeline(repo_name: Callable[[str], str]) -> Pipeline:
+    """カードに**渡された repo だけ**を書く合成 pipeline（Usage 例の repo を観測する被験体）。"""
+    return Pipeline(
+        default_model="m",
+        repo_name=repo_name,
+        plan=lambda series_dir, model: _synthetic_plan(series_dir, model, "w/model.krm", "w"),
+        card_profiles={"echo": lambda manifest, repo, host_assets: repo},
+    )
+
+
+#: モデル名をリポ名に含む pipeline（1 モデル 1 リポが既定 — 束ねる名前は宣言から決まらない）。
+_PER_MODEL_REPO_PIPELINE = _repo_echo_pipeline(lambda model: f"karume-voice-{model}")
+
+#: どのモデルも同じ 1 リポを宣言する pipeline（家族 1 リポ）。
+_ONE_REPO_PIPELINE = _repo_echo_pipeline(lambda _model: "karume-family")
+
+_REPO_REGISTRY: Mapping[str, Pipeline] = {
+    "voice": _PER_MODEL_REPO_PIPELINE,
+    "family": _ONE_REPO_PIPELINE,
+}
+
+
+class TestCardRepository:
+    """カードの Usage 例に綴る repo — 正本は pipeline の宣言で、`--repo` は明示の上書き口。
+
+    置き場（`--out`）はリポの事実ではない。ここから導くと、別名のディレクトリで焼いた配布形の
+    カードが実在しないリポを指したまま公開される。
+    """
+
+    def _card(self, tmp_path: Path, out_name: str, *argv: str) -> str:
+        out_dir = tmp_path / out_name
+        main(
+            [*argv, "--series", str(tmp_path / "series"), "--out", str(out_dir)],
+            pipelines=_REPO_REGISTRY,
+        )
+        return (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
+
+    def test_the_card_names_the_repository_the_pipeline_declares(self, tmp_path: Path) -> None:
+        assert self._card(tmp_path, "karume-voice-m", "--pipeline", "voice") == (
+            "hdae/karume-voice-m"
+        )
+
+    def test_the_output_directory_name_does_not_reach_the_card(self, tmp_path: Path) -> None:
+        """ステージング名で焼いても、手順どおりの名前で焼いたのと同じカードになる。"""
+        staged = self._card(tmp_path, "karume-voice-m-release", "--pipeline", "voice")
+        assert staged == self._card(tmp_path, "karume-voice-m", "--pipeline", "voice")
+        assert "release" not in staged
+
+    def test_models_that_declare_one_repository_are_assembled_under_it(
+        self, tmp_path: Path
+    ) -> None:
+        card = self._card(tmp_path, "out", "--pipeline", "family", "--model", "a", "--model", "b")
+        assert card == "hdae/karume-family"
+
+    def test_it_refuses_to_guess_the_name_of_a_repository_that_bundles_models(
+        self, tmp_path: Path
+    ) -> None:
+        """宣言が揃わない束ね方は推定しない — しかも**組み立てる前**に落ちる（残骸を作らない）。"""
+        with pytest.raises(DistError, match="--repo") as error:
+            self._card(tmp_path, "out", "--pipeline", "voice", "--model", "a", "--model", "b")
+        assert "karume-voice-a" in str(error.value)
+        assert "karume-voice-b" in str(error.value)
+        assert not (tmp_path / "out").exists()
+
+    def test_an_explicit_repository_overrides_the_declaration(self, tmp_path: Path) -> None:
+        argv = ["--pipeline", "voice", "--model", "a", "--model", "b"]
+        card = self._card(tmp_path, "out", *argv, "--repo", "hdae/karume-voices")
+        assert card == "hdae/karume-voices"
+
+    @pytest.mark.parametrize("repo", ["karume-voices", "hdae/karume/voices", "hdae/", "/voices"])
+    def test_it_refuses_a_repository_that_is_not_owner_and_name(self, repo: str) -> None:
+        with pytest.raises(DistError, match="<owner>/<name>"):
+            resolve_repo(_PER_MODEL_REPO_PIPELINE, ["m"], repo)
+
+    def test_an_override_needs_an_explicit_output_directory(self, tmp_path: Path) -> None:
+        """既定の出力先は宣言の名前で綴られる — 名前だけ上書きすると置き場とカードが割れる。"""
+        called: list[Sequence[str]] = []
+
+        def hook(pipeline: Pipeline, models: Sequence[str]) -> Path:
+            called.append(models)
+            return tmp_path / pipeline.repo_name(models[0])
+
+        with pytest.raises(DistError, match="--out"):
+            main(
+                ["--pipeline", "voice", "--series", str(tmp_path), "--repo", "hdae/karume-voices"],
+                pipelines=_REPO_REGISTRY,
+                default_out_dir=hook,
+            )
+        assert called == []
 
 
 class TestPartExpansion:

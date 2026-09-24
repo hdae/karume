@@ -122,8 +122,16 @@ not the directory name.
 `--model` names the model to assemble (it moves the series it reads, the subtree it writes and the
 key it declares in the manifest). Repeating it assembles **one repository holding several models**
 (ADR 0041): the first one given becomes `defaultModel`, and files two models produce byte for byte
-identically are placed **once** under `shared/`, referenced by the same path from both. A family
-repository's name cannot be derived from the model list, so `--out` is required there.
+identically are placed **once** under `shared/`, referenced by the same path from both. When
+`--out` is omitted, the output directory comes from the driver; the recipes' driver derives it from
+a single model's declared repository only, so `--out` is required when bundling several models.
+
+The repository ID the model card's usage snippet names comes from the pipeline's declaration
+(`Pipeline.repo_name` — the source of truth for both the card and the default output directory),
+never from the `--out` directory name — a distribution assembled into a
+staging directory still names the repository it will be uploaded to. `--repo OWNER/NAME` overrides
+the declaration, and is **required** when the models being bundled declare different repositories
+(for example one repository per speaker); overriding it also requires an explicit `--out`.
 
 The layout inside a distribution is uniform — `<model>/…` subtrees plus `shared/`, with only
 `karume.json` and `README.md` at the root — and a single-model repository follows the same rule
@@ -139,10 +147,12 @@ check.
 
 **Attribution is a separate axis from the template**: `--card-profile` picks which upstream family
 the card credits (source repository, source directories and version, license terms, citations).
-SBV2 ships two profiles — `fn` and `jvnv` — and naming one is **required** there, because a silent
+Naming one is **required** whenever a pipeline declares more than one profile, because a silent
 default would keep the previous family's attribution on the next family's repository, where every
-table and snippet still reads correctly and only the credit is wrong. Anima has a single profile,
-so the flag may be omitted; the moment a second one exists, the same rule starts demanding it.
+table and snippet still reads correctly and only the credit is wrong. Every recipe pipeline
+declares a single profile — SBV2's two voice families are separate pipelines (`sbv2` for JVNV,
+`sbv2-fn` for FN) — so the pipeline decides the attribution and the flag may be omitted; the moment
+a pipeline gains a second profile, the same rule starts demanding it.
 
 ## Verification commands (all of them, after any change)
 
