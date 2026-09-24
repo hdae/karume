@@ -22,7 +22,7 @@ import { compareTensors, formatAllclose, type Tolerance } from "../src/reference
 import { assertAdapterMatchesEnvironment } from "./helpers/environment.ts";
 import { ioTensor } from "./helpers/golden-io.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
-import { type Measurement, openResults, recordFailure } from "./helpers/results.ts";
+import { openResults, runRecordedCase } from "./helpers/results.ts";
 import { modelPresent, openSeriesContainer } from "./helpers/container-files.ts";
 import { seriesGraph } from "./helpers/series-graphs.ts";
 
@@ -146,10 +146,7 @@ for (const caseName of CASES) {
     name: `EmbeddingGemma golden 突合: ${caseName}（実 GPU / torch CPU 期待値）`,
     ignore: !AVAILABLE || !GPU_AVAILABLE,
     fn: async () => {
-      const startedAt = performance.now();
-      /** 出力ごとの実測（合格した回も残す — 判定には使わない）。 */
-      const measurements: Measurement[] = [];
-      try {
+      await runRecordedCase(results, { id: caseName }, async ({ measurements }) => {
         const [opened, ioBytes] = await Promise.all([
           openSeriesContainer(new URL(MODEL_FILE, SERIES_ROOT)),
           readBuffer(SERIES_ROOT, `${IO_PREFIX}${caseName}${IO_SUFFIX}`),
@@ -209,21 +206,6 @@ for (const caseName of CASES) {
           await session.dispose();
           gpu.destroy();
         }
-      } catch (cause) {
-        // 決着は投げる前に残す（決着の無いまま抜けると、この席には前回の走行の結果が居座る）。
-        await recordFailure(results, {
-          id: caseName,
-          status: "fail",
-          elapsedMs: Math.round(performance.now() - startedAt),
-          measurements,
-        });
-        throw cause;
-      }
-      await results.record({
-        id: caseName,
-        status: "pass",
-        elapsedMs: Math.round(performance.now() - startedAt),
-        measurements,
       });
     },
   });

@@ -206,3 +206,77 @@ export const recordFailure = async (results: Results, entry: ResultEntry): Promi
     );
   }
 };
+
+/** {@link runRecordedCase} の本体へ渡す、ケース 1 件ぶんの記録の口。 */
+export type RecordedCase = {
+  /** 出力ごとの実測（合格した回も残す — 判定には使わない）。本体が積み、決着に載る。 */
+  readonly measurements: Measurement[];
+};
+
+/**
+ * 本体が例外なしに戻ったときの決着。戻り値を省いた本体は `pass`。
+ *
+ * `fail` を返すのは「全出力を測り終えてから落とす」ケース — 決着（note つき）を残したあとで
+ * 呼び手が assert する。
+ */
+export type CaseVerdict = {
+  readonly status: "pass" | "fail";
+  readonly note?: string;
+};
+
+/** {@link runRecordedCase} が記録するケースの名乗りと、失敗した回の扱い。 */
+export type RecordedCaseSpec = {
+  /** `results.json` の `cases[].id`。 */
+  readonly id: string;
+  /** 投げた回の note（省けば note を持たない）。 */
+  readonly failureNote?: (cause: unknown) => string;
+  /**
+   * 本体が投げた回にだけ、記録の前に呼ぶ。複数ケースを 1 本のテストで回す系列が「この失敗は
+   * ケースの席に残った」を知る口 — 成功側の記録が書けずに投げた回は呼ばない（その回は
+   * ケースの決着が残っていない）。
+   */
+  readonly onFailure?: () => void;
+};
+
+/**
+ * ケース 1 件を回し、決着を必ず `results.json` へ残す（実重み golden の各ケースの共通の枠）。
+ *
+ * - 本体が戻った: その決着（既定 `pass`）を {@link Results.record} で積む。書けなければ
+ *   fail loudly（{@link recordFailure} の NOTE と同じ理由）。
+ * - 本体が投げた: `fail` を {@link recordFailure} で積んでから**同じ例外を投げ直す**。決着の
+ *   無いまま抜けると、この席には同じ日の前回の走行の決着が居座る。
+ *
+ * どちらの経路でも欄の並び（id / status / elapsedMs / note / measurements）は同じで、
+ * 所要時間は呼んだ時点から記録の直前までを測る。
+ */
+export const runRecordedCase = async (
+  results: Results,
+  recordedCase: RecordedCaseSpec,
+  body: (recorded: RecordedCase) => Promise<CaseVerdict | undefined>,
+): Promise<void> => {
+  const { id, failureNote, onFailure } = recordedCase;
+  const startedAt = performance.now();
+  const measurements: Measurement[] = [];
+  const elapsedMs = (): number => Math.round(performance.now() - startedAt);
+  let verdict: CaseVerdict | undefined;
+  try {
+    verdict = await body({ measurements });
+  } catch (cause) {
+    onFailure?.();
+    await recordFailure(results, {
+      id,
+      status: "fail",
+      elapsedMs: elapsedMs(),
+      ...(failureNote === undefined ? {} : { note: failureNote(cause) }),
+      measurements,
+    });
+    throw cause;
+  }
+  await results.record({
+    id,
+    status: verdict?.status ?? "pass",
+    elapsedMs: elapsedMs(),
+    ...(verdict?.note === undefined ? {} : { note: verdict.note }),
+    measurements,
+  });
+};

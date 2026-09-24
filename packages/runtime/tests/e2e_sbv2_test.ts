@@ -31,7 +31,7 @@ import { compareTensors, formatAllclose, type Tolerance } from "../src/reference
 import { assertAdapterMatchesEnvironment } from "./helpers/environment.ts";
 import { ioTensor } from "./helpers/golden-io.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
-import { type Measurement, openResults, recordFailure } from "./helpers/results.ts";
+import { openResults, runRecordedCase } from "./helpers/results.ts";
 import { modelPresent, openSeriesContainer } from "./helpers/container-files.ts";
 import { seriesComponents, seriesGraph } from "./helpers/series-graphs.ts";
 
@@ -697,10 +697,7 @@ for (const series of SERIES) {
         `SBV2 golden 突合: ${series.name} / ${target} / ${caseName}（実 GPU / torch CPU 期待値）`,
       ignore: !available || !GPU_AVAILABLE,
       fn: async () => {
-        const startedAt = performance.now();
-        /** 出力ごとの実測（合格した回も残す — 判定には使わない）。 */
-        const measurements: Measurement[] = [];
-        try {
+        await runRecordedCase(results, { id: caseId }, async ({ measurements }) => {
           const [opened, ioBytes] = await Promise.all([
             openSeriesContainer(modelUrl(series.root, target)),
             readBuffer(series.root, target, ioFile),
@@ -801,21 +798,6 @@ for (const series of SERIES) {
           } finally {
             gpu.destroy();
           }
-        } catch (cause) {
-          // 決着は投げる前に残す（決着の無いまま抜けると、この席には前回の走行の結果が居座る）。
-          await recordFailure(results, {
-            id: caseId,
-            status: "fail",
-            elapsedMs: Math.round(performance.now() - startedAt),
-            measurements,
-          });
-          throw cause;
-        }
-        await results.record({
-          id: caseId,
-          status: "pass",
-          elapsedMs: Math.round(performance.now() - startedAt),
-          measurements,
         });
       },
     });

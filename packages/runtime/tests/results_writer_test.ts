@@ -8,6 +8,7 @@ import {
   assert,
   assertEquals,
   assertRejects,
+  assertStrictEquals,
   assertStringIncludes,
   assertThrows,
 } from "@std/assert";
@@ -17,6 +18,8 @@ import {
   openResults,
   recordFailure,
   type ResultEntry,
+  type Results,
+  runRecordedCase,
 } from "./helpers/results.ts";
 
 const KEY = "deno-intel-graphics-bmg-g21";
@@ -209,4 +212,146 @@ Deno.test("結果の書き出し: ディレクトリ区切りを含む実物の�
   } finally {
     Deno.removeSync(temporary, { recursive: true });
   }
+});
+
+// runRecordedCase（実重み golden の各ケースを包む枠）。書き出しの実体は上で見ているので、ここは
+// 記録の口を fake にして「どの経路でも決着が同じ形で 1 件積まれる」ことだけを見る。
+
+/** 積まれた決着を手元に残す fake（`record` を落とす故障注入つき）。 */
+const fakeResults = (failRecord = false): { results: Results; entries: ResultEntry[] } => {
+  const entries: ResultEntry[] = [];
+  const results: Results = {
+    dir: new URL("file:///fake/"),
+    artifact: (name: string): URL => new URL(name, "file:///fake/"),
+    record: (entry: ResultEntry): Promise<void> => {
+      if (failRecord) return Promise.reject(new Error("results.json を書けない"));
+      entries.push(entry);
+      return Promise.resolve();
+    },
+  };
+  return { results, entries };
+};
+
+const MEASUREMENT: Measurement = {
+  output: "logits",
+  maxAbs: 1e-4,
+  maxRel: 2e-4,
+  tolerance: { atol: 1e-3, rtol: 1e-3 },
+  stage: "karume",
+};
+
+/** console.error を拾いながら `action` を待つ。 */
+const captureConsoleError = async (action: () => Promise<void>): Promise<string[]> => {
+  const said: string[] = [];
+  const original = console.error;
+  console.error = (...args: unknown[]): void => {
+    said.push(args.map(String).join(" "));
+  };
+  try {
+    await action();
+  } finally {
+    console.error = original;
+  }
+  return said;
+};
+
+Deno.test("runRecordedCase: 本体が戻った回は pass と積んだ実測を 1 件残す", async () => {
+  const { results, entries } = fakeResults();
+  await runRecordedCase(results, { id: "case0" }, ({ measurements }) => {
+    measurements.push(MEASUREMENT);
+    return Promise.resolve(undefined);
+  });
+  assertEquals(entries.length, 1);
+  const [entry] = entries;
+  assertEquals(Object.keys(entry), ["id", "status", "elapsedMs", "measurements"]);
+  assertEquals(entry.id, "case0");
+  assertEquals(entry.status, "pass");
+  assertEquals(entry.measurements, [MEASUREMENT]);
+  assert(Number.isInteger(entry.elapsedMs) && entry.elapsedMs >= 0, "elapsedMs が整数 ms でない");
+});
+
+Deno.test("runRecordedCase: 本体が投げた回は fail を残してから同じ例外を投げ直す", async () => {
+  const { results, entries } = fakeResults();
+  const cause = new Error("output.0: allclose 不一致");
+  const order: string[] = [];
+  const thrown = await assertRejects(() =>
+    runRecordedCase(results, {
+      id: "case1",
+      onFailure: () => {
+        order.push(`onFailure（積んだ件数 ${entries.length}）`);
+      },
+    }, ({ measurements }) => {
+      // 落ちる前に測れた分も決着に載る（どこまで測れたかが失敗の診断になる）。
+      measurements.push(MEASUREMENT);
+      return Promise.reject(cause);
+    })
+  );
+  assertStrictEquals(thrown, cause, "元の検証例外が別の例外に置き換わった");
+  assertEquals(entries.length, 1);
+  assertEquals(Object.keys(entries[0]), ["id", "status", "elapsedMs", "measurements"]);
+  assertEquals(entries[0].status, "fail");
+  assertEquals(entries[0].measurements, [MEASUREMENT]);
+  // 系列側の「ケースの席に残った」印は記録より先に立つ。
+  assertEquals(order, ["onFailure（積んだ件数 0）"]);
+});
+
+Deno.test("runRecordedCase: 本体が fail を返した回は投げずに note つきで残す", async () => {
+  const { results, entries } = fakeResults();
+  await runRecordedCase(
+    results,
+    { id: "gelu" },
+    () => Promise.resolve({ status: "fail", note: "仕様帯で受理: sin" }),
+  );
+  assertEquals(entries.length, 1);
+  assertEquals(Object.keys(entries[0]), ["id", "status", "elapsedMs", "note", "measurements"]);
+  assertEquals(entries[0].status, "fail");
+  assertEquals(entries[0].note, "仕様帯で受理: sin");
+  assertEquals(entries[0].measurements, []);
+});
+
+Deno.test("runRecordedCase: 投げた回の note は failureNote が例外から作る", async () => {
+  const { results, entries } = fakeResults();
+  await assertRejects(
+    () =>
+      runRecordedCase(results, {
+        id: "gelu",
+        failureNote: (cause) => `例外: ${cause instanceof Error ? cause.message : String(cause)}`,
+      }, () => Promise.reject(new Error("createSession 失敗"))),
+    Error,
+    "createSession 失敗",
+  );
+  assertEquals(Object.keys(entries[0]), ["id", "status", "elapsedMs", "note", "measurements"]);
+  assertEquals(entries[0].note, "例外: createSession 失敗");
+});
+
+Deno.test("runRecordedCase: 投げた回に記録が落ちても元の例外を投げ、記録できなかったと言う", async () => {
+  const { results } = fakeResults(true);
+  const cause = new Error("shape 不一致");
+  let thrown: unknown;
+  const said = await captureConsoleError(async () => {
+    thrown = await assertRejects(() =>
+      runRecordedCase(results, { id: "case2" }, () => Promise.reject(cause))
+    );
+  });
+  assertStrictEquals(thrown, cause, "元の検証例外が I/O 例外に置き換わった");
+  assertEquals(said.length, 1, "記録できなかったことを黙って飲み込んだ");
+  assertStringIncludes(said[0], "case2");
+});
+
+Deno.test("runRecordedCase: 戻った回に記録が落ちたら投げ、onFailure は呼ばない", async () => {
+  const { results } = fakeResults(true);
+  let failed = false;
+  await assertRejects(
+    () =>
+      runRecordedCase(results, {
+        id: "case3",
+        onFailure: () => {
+          failed = true;
+        },
+      }, () => Promise.resolve(undefined)),
+    Error,
+    "results.json を書けない",
+  );
+  // ケースの決着は残っていない — 系列側が「ケースの席に残った」と誤認すると、どこにも残らない。
+  assertEquals(failed, false);
 });

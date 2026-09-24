@@ -35,7 +35,7 @@ import { compareTensors, formatAllclose, type Tolerance } from "../src/reference
 import { assertAdapterMatchesEnvironment } from "./helpers/environment.ts";
 import { ioTensor } from "./helpers/golden-io.ts";
 import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
-import { type Measurement, openResults, recordFailure } from "./helpers/results.ts";
+import { openResults, recordFailure, runRecordedCase } from "./helpers/results.ts";
 import { modelPresent, openSeriesContainer } from "./helpers/container-files.ts";
 import { seriesGraph } from "./helpers/series-graphs.ts";
 
@@ -280,10 +280,13 @@ Deno.test({
           /** ケースごとの最終位置 1 位（全ケース同一 = 定数出力の検出に使う）。 */
           const tops: number[] = [];
           for (const caseName of CASES) {
-            const startedAt = performance.now();
-            /** 出力ごとの実測（合格した回も残す — 判定には使わない）。 */
-            const measurements: Measurement[] = [];
-            try {
+            await runRecordedCase(results, {
+              id: caseName,
+              // 決着はケースの席に残る — 系列の catch で二重に積まない。
+              onFailure: () => {
+                caseSettled = true;
+              },
+            }, async ({ measurements }) => {
               const { inputs, expected } = await loadCase(caseName, parsed.graph.inputs);
               const outputs = await session.run(inputs);
               assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());
@@ -322,22 +325,6 @@ Deno.test({
                   `golden 余裕 ${golden.margin}）`,
               );
               tops.push(observed.top);
-            } catch (cause) {
-              // 決着は投げる前に残す（決着の無いまま抜けると、この席には前回の走行の結果が居座る）。
-              caseSettled = true;
-              await recordFailure(results, {
-                id: caseName,
-                status: "fail",
-                elapsedMs: Math.round(performance.now() - startedAt),
-                measurements,
-              });
-              throw cause;
-            }
-            await results.record({
-              id: caseName,
-              status: "pass",
-              elapsedMs: Math.round(performance.now() - startedAt),
-              measurements,
             });
           }
           // 恒真化の門: 全ケースの 1 位が同一なら定数出力（export.py の `_sanity` と同じ独立線を

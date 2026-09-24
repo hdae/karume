@@ -26,7 +26,7 @@ import {
 import { assertAdapterMatchesEnvironment, ENVIRONMENT } from "./helpers/environment.ts";
 import { ioTensor } from "./helpers/golden-io.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
-import { type Measurement, openResults, recordFailure } from "./helpers/results.ts";
+import { openResults, runRecordedCase } from "./helpers/results.ts";
 import { openSeriesContainer } from "./helpers/container-files.ts";
 
 /**
@@ -187,14 +187,23 @@ for (const model of MODELS) {
     name: `golden 突合: ${model}（実 GPU / torch CPU 期待値）`,
     ignore: !GPU_AVAILABLE,
     fn: async () => {
-      const startedAt = performance.now();
       /** Karume 独自基準を超えたが仕様帯で受理した出力名（結果 JSON の note になる）。 */
       const accepted: string[] = [];
-      /** 出力ごとの実測（合格した回も残す — 判定には使わない）。 */
-      const measurements: Measurement[] = [];
       /** 仕様帯でも受からなかった出力のメッセージ（1 本目でテストを落とす）。 */
       const failures: string[] = [];
-      try {
+      /** 仕様帯で受理した出力名の note（無ければ持たない — 数値は measurements が持つ）。 */
+      const acceptedNote = (): string | undefined =>
+        accepted.length === 0 ? undefined : `仕様帯で受理: ${accepted.join(", ")}`;
+      await runRecordedCase(results, {
+        id: model,
+        // 許容差以外の失敗（資産の読み・createSession・出力キー・shape / dtype・run の例外）も
+        // 席に残す。記録が落ちても元の例外（何が壊れたかを言う唯一の診断）は置き換えない。
+        failureNote: (cause) =>
+          [
+            acceptedNote(),
+            `例外: ${cause instanceof Error ? cause.message : String(cause)}`,
+          ].filter((part) => part !== undefined).join("; "),
+      }, async ({ measurements }) => {
         const [opened, ioBytes] = await Promise.all([
           openGolden(model),
           readBuffer(model, "io.safetensors"),
@@ -283,29 +292,8 @@ for (const model of MODELS) {
         } finally {
           gpu.destroy();
         }
-      } catch (cause) {
-        // 許容差以外の失敗（資産の読み・createSession・出力キー・shape / dtype・run の例外）も
-        // 席に残す。決着の無いまま抜けると、この席には前回の走行の results.json が居座る。
-        // 記録が落ちても元の例外（何が壊れたかを言う唯一の診断）は置き換えない。
-        await recordFailure(results, {
-          id: model,
-          status: "fail",
-          elapsedMs: Math.round(performance.now() - startedAt),
-          note: [
-            ...(accepted.length === 0 ? [] : [`仕様帯で受理: ${accepted.join(", ")}`]),
-            `例外: ${cause instanceof Error ? cause.message : String(cause)}`,
-          ].join("; "),
-          measurements,
-        });
-        throw cause;
-      }
-      // 決着は投げる前に残す（赤で終わった回の note も手元に要る）。
-      await results.record({
-        id: model,
-        status: failures.length === 0 ? "pass" : "fail",
-        elapsedMs: Math.round(performance.now() - startedAt),
-        ...(accepted.length === 0 ? {} : { note: `仕様帯で受理: ${accepted.join(", ")}` }),
-        measurements,
+        // 決着は投げる前に残す（赤で終わった回の note も手元に要る）。
+        return { status: failures.length === 0 ? "pass" : "fail", note: acceptedNote() };
       });
       assert(failures.length === 0, failures[0]);
     },
