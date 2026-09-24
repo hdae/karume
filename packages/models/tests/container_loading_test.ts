@@ -4,7 +4,7 @@
  *
  * ① **進捗はモデル全体で 1 本のまま**（取得が「descriptor の温め + 重みの part + 資産の
  *    全量面」へ割れても `loaded` は単調増加で全ファイルの size 合計に着地し、`complete` は
- *    ファイル数ぶん）。
+ *    ファイル数ぶん）。越境参照が自リポと同じ path を持っても、合計は 2 本ぶんのまま。
  * ② **admission は重みの part を取る前に落ちる**（part 0 の descriptor だけで capability 違反が
  *    決まり、重みの part の URL は 1 度も叩かれない — ADR 0070 決定 5 の存在理由そのもの）。
  *    この門は prefetch が admission の**後**に置かれていることの門でもある。
@@ -46,9 +46,12 @@ import {
   REPO,
   serveContainer,
   serveRepo,
+  serveRepos,
   SHA,
   SIGLIP2_CONFIG,
 } from "./helpers/container-loading-fixture.ts";
+import { MemoryCacheStorage } from "./helpers/memory-cache.ts";
+import { loadManifest, resolveSelection } from "@karume/hub";
 
 /** 長さ 0 でない part（= 取得層が実際に取りに行く列）。 */
 const fetched = (parts: readonly { path: string; size: number }[]): readonly string[] =>
@@ -126,6 +129,68 @@ Deno.test(
     const empty = [...front.parts, ...voice.parts].filter((part) => part.size === 0);
     assertEquals(empty.length > 0, true, "長さ 0 の part を持つ容器で観測していない");
     for (const part of empty) assertEquals(rig.mock.paths.includes(part.path), false);
+  },
+);
+
+Deno.test(
+  "loadContainerComponents: 越境参照が自リポと同じ path でも、進捗は別の 1 本として数える",
+  async () => {
+    // `voice` は越境先のリポから借りる容器（容器単位の越境 — 全 part が越境先の座標を名乗る）。
+    // 書き手の規約どおりの part 名は stem だけで決まるので、同じ stem の 2 本は同じ path を持つ。
+    const CROSS_REPO = "karume-test/borrowed";
+    const own = await serveContainer("shared/model.f32", linearComponent("front"));
+    const borrowed = await serveContainer("shared/model.f32", linearComponent("voice"));
+    const crossParts = borrowed.parts.map((part) => ({
+      ...part,
+      repo: CROSS_REPO,
+      revision: SHA,
+    }));
+    const models = {
+      test: {
+        pipeline: "test/1",
+        weights: {
+          front: { f32: own.entry },
+          voice: {
+            f32: { container: { descriptor: borrowed.written.descriptor, parts: crossParts } },
+          },
+        },
+        assets: {},
+        quants: { f32: { weights: { front: "f32", voice: "f32" }, session: {} } },
+        defaultQuant: "f32",
+        pipelineConfig: {},
+      },
+    };
+    const mock = serveRepos([
+      { repo: REPO, models, files: own.files },
+      { repo: CROSS_REPO, models: {}, files: borrowed.files },
+    ]);
+    const hubOptions = { fetch: mock.fetch, caches: new MemoryCacheStorage() };
+    const loaded = await loadManifest({ repo: REPO, revision: SHA, hubUrl: HUB_URL }, hubOptions);
+    const shared = fetched(own.parts).filter((path) => fetched(borrowed.parts).includes(path));
+    assertEquals(shared.length > 0, true, "同じ path を持つ 2 本で観測していない");
+
+    const events: AssetProgress[] = [];
+    await loadContainerComponents(
+      "test.fromPretrained",
+      loaded,
+      resolveSelection(loaded.manifest),
+      ["front", "voice"],
+      NO_FAMILY_GATE,
+      { ...hubOptions, onProgress: (progress) => events.push(progress) },
+    );
+
+    // path で畳むと `total` が 1 本ぶん小さくなり、`loaded` も同じだけ手前で止まる。
+    const total = [...own.parts, ...borrowed.parts].reduce((sum, part) => sum + part.size, 0);
+    assertEquals(new Set(events.map((event) => event.total)), new Set([total]));
+    assertEquals(events[events.length - 1].loaded, total);
+    // 取得先の欄は素通しされ、同じ path の 2 本を消費側でも見分けられる。
+    for (const path of shared) {
+      const origins = events
+        .filter((event) => event.phase === "complete" && event.path === path)
+        .map((event) => event.repo)
+        .sort();
+      assertEquals(origins, [CROSS_REPO, REPO].sort(), `${path} の 2 本が見分けられない`);
+    }
   },
 );
 

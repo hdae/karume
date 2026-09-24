@@ -8,6 +8,12 @@
 import { type FileRef, fileRefKey } from "./manifest.ts";
 
 /**
+ * ファイルの取得先の名乗り（`context.ts` の `FetchContext.originOf` の構造化欄）。進捗の
+ * {@link AssetProgress.repo} / {@link AssetProgress.revision} はここから写す。
+ */
+type OriginIdentity = { readonly repo?: string; readonly revisionSha?: string };
+
+/**
  * 進捗のフェーズ。`complete` は 1 ファイルの終端（bytes が確定した点）。
  *
  * MUST: 1 ファイルの phase は `downloading`* → `complete` の順にだけ進み、逆行しない
@@ -23,11 +29,28 @@ export type AssetPhase = "downloading" | "complete";
 
 export type AssetProgress = {
   readonly phase: AssetPhase;
-  /** イベントを起こしたファイルの path。 */
+  /**
+   * イベントを起こしたファイルの path（リポ内の相対 path）。
+   *
+   * MUST NOT: path だけをファイルの識別子にしない — 越境参照（ADR 0038 §7）や部品差し替えでは
+   * 別リポの同じ path が 1 回のロードに並ぶ。ファイル別に集計するときは {@link repo} /
+   * {@link revision} と組にしてキーにする。
+   */
   readonly path: string;
-  /** 取得済みバイトの合計（全ファイル・path 一意化後）。 */
+  /**
+   * ファイルを**実際に取りに行った先**のリポ（`"owner/name"`）。越境参照は宣言された越境先、
+   * それ以外はセッションのリポ。repo という概念を持たない取得元（ローカルディレクトリ）の
+   * ファイルでは欄ごと現れない（合成した名前を名乗らせない）。
+   */
+  readonly repo?: string;
+  /**
+   * {@link repo} の世代（解決済み commit SHA・40 桁小文字 hex）。越境参照は宣言された
+   * `revision`、それ以外はセッションの解決済み SHA。世代を持たない取得元では欄ごと現れない。
+   */
+  readonly revision?: string;
+  /** 取得済みバイトの合計（全ファイル・同一ファイル一意化後）。 */
   readonly loaded: number;
-  /** manifest の `size` 合計（path 一意化後）。 */
+  /** manifest の `size` 合計（同一ファイル一意化後）。 */
   readonly total: number;
   /**
    * `path` の**そのファイル自身**の受信済みバイト。`loaded` が全ファイルの合計なのに対し
@@ -66,6 +89,9 @@ const fileSizeOf = (refs: ReadonlyMap<string, FileRef>, key: string): number => 
  * 取得対象の表（キーは {@link fileRefKey}）から集計器を作る。`total` はこの表の `size` 合計に
  * 固定され、以降変わらない。
  *
+ * MUST: `originOf` はエラーの名乗りと**同じ関数**（`FetchContext.originOf`）を渡す — 進捗だけ
+ * 別に「越境かどうか」を綴ると、診断と進捗が同じファイルに違う取得先を名乗る食い違いが出る。
+ *
  * MUST: 受信実績（`received`）の記録は通知（`emit`）より前に行う — `emit` は自分のファイルぶんも
  * `received` から読むので、順序が逆だと送出値が 1 イベントぶん古くなる（downloading の初回が
  * `fileLoaded` 0 を名乗り、以降ずっと 1 つ前の値で遅れる）。`fileLoaded` と全体 `loaded` は
@@ -73,6 +99,7 @@ const fileSizeOf = (refs: ReadonlyMap<string, FileRef>, key: string): number => 
  */
 export const createProgressEmitter = (
   targets: ReadonlyMap<string, FileRef>,
+  originOf: (ref: FileRef) => OriginIdentity,
   onProgress?: (progress: AssetProgress) => void,
 ): ProgressEmitter => {
   let total = 0;
@@ -94,7 +121,17 @@ export const createProgressEmitter = (
     for (const [other, bytes] of received) {
       if (other !== refKey) sum += bytes;
     }
-    onProgress({ phase, path: ref.path, loaded: sum, total, fileLoaded, fileTotal });
+    const origin = originOf(ref);
+    onProgress({
+      phase,
+      path: ref.path,
+      ...(origin.repo === undefined ? {} : { repo: origin.repo }),
+      ...(origin.revisionSha === undefined ? {} : { revision: origin.revisionSha }),
+      loaded: sum,
+      total,
+      fileLoaded,
+      fileTotal,
+    });
   };
 
   return {

@@ -335,13 +335,15 @@ export const runGemmaCli = async (
    *
    * 通し番号は**この台本が数える**。hub は「何本目 / 全何本」を運ばない（取得は相に分かれていて、
    * 共通層の 1 イベントからは全体の本数を名乗れない）ので、分母は出さずに全体の % とバイト数で
-   * 残りを示す。
+   * 残りを示す。番号の引き当ては path だけでなく取得先（`repo` / `revision`）と組にする — 越境参照
+   * では別リポの同じ path が並ぶ。
    */
   const showProgress = (
-    { phase, path, loaded, total, fileLoaded, fileTotal }: AssetProgress,
+    { phase, path, repo, revision, loaded, total, fileLoaded, fileTotal }: AssetProgress,
   ): void => {
-    const ordinal = fileOrder.get(path) ?? fileOrder.size + 1;
-    fileOrder.set(path, ordinal);
+    const fileKey = JSON.stringify([repo ?? "", revision ?? "", path]);
+    const ordinal = fileOrder.get(fileKey) ?? fileOrder.size + 1;
+    fileOrder.set(fileKey, ordinal);
     const name = path.slice(path.lastIndexOf("/") + 1);
     const line = `  [${ordinal}] ${name} ${percent(fileLoaded, fileTotal)}%` +
       ` · 全体 ${percent(loaded, total)}% (${mib(loaded)}/${mib(total)} MiB)`;

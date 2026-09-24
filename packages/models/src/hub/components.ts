@@ -267,28 +267,46 @@ export const assetComponentOpener = async (
  *
  * 取得が「descriptor の温め + 重み part の温め + 資産の全量面」へ割れ、差し替え席では取得元も
  * 割れるが、呼び手が見る `total` は取る全ファイルの size 合計で、`loaded` は受信済み合計。
- * per-file の欄（`fileLoaded` / `fileTotal`）と `phase` は取得層のものを素通しする。
+ * per-file の欄（`fileLoaded` / `fileTotal`）・`phase`・取得先（`repo` / `revision`）は取得層の
+ * ものを素通しする。
  *
- * NOTE: 引き当てのキーは `path` 1 本 — 進捗イベントが運ぶ識別子がそれしかないため（別リポの
- * 同名 path を区別できないのは公開イベント側の既知の穴 — `docs/backlog.md`）。
+ * MUST: ファイルの引き当ては (取得先の repo, revision, path) で行う（`AssetProgress.path` の
+ * MUST NOT）— 越境参照と差し替え席は別リポの同じ path を 1 回のロードに並べるので、path だけで
+ * 畳むと 2 本が 1 本に数えられ、`total` が実際に取る量より小さくなる。
  */
 const aggregateProgress = (
-  refs: readonly FileRef[],
+  sources: readonly { readonly loaded: LoadedManifest; readonly refs: readonly FileRef[] }[],
   onProgress: ((progress: AssetProgress) => void) | undefined,
 ): ((progress: AssetProgress) => void) | undefined => {
   if (onProgress === undefined) return undefined;
   const sizes = new Map<string, number>();
-  for (const ref of refs) sizes.set(ref.path, ref.size);
+  for (const { loaded, refs } of sources) {
+    for (const ref of refs) sizes.set(progressKeyOf(loaded, ref), ref.size);
+  }
   let total = 0;
   for (const size of sizes.values()) total += size;
   const received = new Map<string, number>();
-  return ({ phase, path, fileLoaded, fileTotal }) => {
-    received.set(path, fileLoaded);
+  return (progress) => {
+    received.set(progressKey(progress.repo, progress.revision, progress.path), progress.fileLoaded);
     let loaded = 0;
     for (const bytes of received.values()) loaded += bytes;
-    onProgress({ phase, path, loaded, total, fileLoaded, fileTotal });
+    onProgress({ ...progress, loaded, total });
   };
 };
+
+/** 進捗の引き当てキー（取得先の repo / revision を持たない取得元では欄が抜けたまま綴る）。 */
+const progressKey = (repo: string | undefined, revision: string | undefined, path: string) =>
+  JSON.stringify([repo ?? "", revision ?? "", path]);
+
+/**
+ * `loaded` の取得面が `ref` について出す進捗の引き当てキー。取得先の決め方は hub の公開契約
+ * （`AssetProgress.repo` / `revision`）どおり — 越境参照（`repo` と `revision` の対）は宣言された
+ * 越境先、それ以外はその manifest のセッション（`LoadedManifest.repo` / `revisionSha`）。
+ */
+const progressKeyOf = (loaded: LoadedManifest, ref: FileRef): string =>
+  ref.repo !== undefined && ref.revision !== undefined
+    ? progressKey(ref.repo, ref.revision, ref.path)
+    : progressKey(loaded.repo, loaded.revisionSha, ref.path);
 
 /** 部品 1 本の出所（差し替え席なら別リポの manifest）。 */
 type Seat = {
@@ -396,8 +414,8 @@ export const loadContainerComponents = async <Admitted>(
 
   const aggregated = aggregateProgress(
     [
-      ...seats.flatMap((seat) => nonEmptyParts(seat.container.parts)),
-      ...Object.values(selection.assets),
+      ...seats.map((seat) => ({ loaded: seat.loaded, refs: nonEmptyParts(seat.container.parts) })),
+      { loaded, refs: Object.values(selection.assets) },
     ],
     streamOptions.onProgress,
   );

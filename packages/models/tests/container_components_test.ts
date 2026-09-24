@@ -9,9 +9,13 @@
  * ② **グラフ記述が違う容器は admission で落ちる** — 落ちるのは**重みを 1 バイトも取る前**で、
  *    どちらのリポの `.krm` も 1 本も叩かれていない（宣言だけで判る、が実装でも成立している）。
  * ③ **この系列が持たない役割名は fail loudly** — 綴り間違いを黙って「差し替えない」に畳まない。
+ * ④ **差し替え先の part が元リポの別部品と同じ path でも、進捗は別の 1 本として数える** — 差し替え
+ *    先の part は向こうの manifest では自リポ参照（`repo` を持たない）なので、宣言の path だけでは
+ *    元リポのファイルと見分けが付かない。
  */
 
 import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
+import type { AssetProgress } from "@karume/hub";
 import { loadContainerComponents } from "../src/hub/components.ts";
 import { linearComponent } from "./helpers/container-fixture.ts";
 import {
@@ -54,12 +58,14 @@ const modelsOf = (
  * 2 リポを立てる。元リポは `front` / `voice` の 2 部品、差し替え先は `voice` 1 本だけ
  * （`sameGraph` が偽なら**別のグラフ**で書く = 記述の sha256 が動く）。
  */
-const prepareSeats = async (options: { readonly sameGraph: boolean }) => {
+const prepareSeats = async (
+  options: { readonly sameGraph: boolean; readonly replacementStem?: string },
+) => {
   const front = await serveContainer("front/model.f32", linearComponent("front"));
   const voice = await serveContainer("voice/model.f32", linearComponent("voice", { w: 0.5 }));
   // 差し替え先: 同じグラフ宣言 + 別の重み値（グラフ記述はバイト同一で sha256 も一致する）。
   const replacement = await serveContainer(
-    "other/voice.f32",
+    options.replacementStem ?? "other/voice.f32",
     options.sameGraph
       ? linearComponent("voice", { w: 1.5 })
       // `op` が違えば `requires.ops` とノード列が動く = グラフ記述の sha256 も動く。
@@ -157,4 +163,40 @@ Deno.test("components: この系列が持たない役割名は差し替えられ
   assertStringIncludes(error.message, "差し替えられる役割: front / voice");
   // 綴り間違いは取得へ 1 度も出ない。
   assertEquals(fetchedContainers(rig.mock.paths), []);
+});
+
+Deno.test("components: 差し替え先の part が元リポの別部品と同じ path でも進捗は 2 本として数える", async () => {
+  // 差し替え先の `voice` を元リポの `front` と同じ stem で書く = 同じ path の part が 2 リポに並ぶ。
+  const rig = await prepareSeats({ sameGraph: true, replacementStem: "front/model.f32" });
+  const nonEmpty = (parts: readonly { path: string; size: number }[]) =>
+    parts.filter((part) => part.size > 0);
+  const shared = nonEmpty(rig.parts.front).map((part) => part.path)
+    .filter((path) => nonEmpty(rig.parts.replacement).some((part) => part.path === path));
+  assertEquals(shared.length > 0, true, "同じ path を持つ 2 本で観測していない");
+
+  const events: AssetProgress[] = [];
+  await loadContainerComponents(
+    "test.fromPretrained",
+    rig.loaded,
+    rig.selection,
+    ["front", "voice"],
+    NO_FAMILY_GATE,
+    {
+      ...rig.hubOptions,
+      components: { voice: { source: rig.source } },
+      onProgress: (progress) => events.push(progress),
+    },
+  );
+
+  const total = [...nonEmpty(rig.parts.front), ...nonEmpty(rig.parts.replacement)]
+    .reduce((sum, part) => sum + part.size, 0);
+  assertEquals(new Set(events.map((event) => event.total)), new Set([total]));
+  assertEquals(events[events.length - 1].loaded, total);
+  for (const path of shared) {
+    const origins = events
+      .filter((event) => event.phase === "complete" && event.path === path)
+      .map((event) => event.repo)
+      .sort();
+    assertEquals(origins, [OTHER_REPO, REPO].sort(), `${path} の 2 本が見分けられない`);
+  }
 });

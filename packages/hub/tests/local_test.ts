@@ -133,6 +133,16 @@ Deno.test("localDirectory: fetchAssets は 1 本につき 1 回だけ読み、Ca
   assertEquals(directory.reads, [MANIFEST_FILENAME, ...FETCHED_PART_PATHS]);
   // 受信の途中という状態が無いので、進捗はファイルごとの complete 1 点だけ。
   assertEquals(progress.events.map((event) => event.phase), ["complete", "complete"]);
+  // repo も世代も持たない取得元のファイルは、取得先の欄を**欄ごと**出さない（合成した名前や
+  // 偽の SHA を名乗らない — `loaded.repo` / `revisionSha` と同じ規律）。
+  for (const event of progress.events) {
+    assertEquals(Object.hasOwn(event, "repo"), false, `${event.path} が repo を名乗っている`);
+    assertEquals(
+      Object.hasOwn(event, "revision"),
+      false,
+      `${event.path} が revision を名乗っている`,
+    );
+  }
   assertEquals(
     caches.namespaces.size,
     0,
@@ -181,6 +191,12 @@ Deno.test("prefetchAssets: 相 1 の有無は ref ごと — 越境先が持つ�
     progress.events.map((event) => [event.phase, event.path]),
     [["complete", CROSS_PATH]],
     "越境ぶんの進捗が出ていない",
+  );
+  // ローカルセッションでも越境ぶんは宣言された越境先を名乗る（セッションが名乗りを持たない
+  // ことに引きずられて欄が落ちると、別リポの同じ path と見分けが付かなくなる）。
+  assertEquals(
+    progress.events.map((event) => [event.repo, event.revision]),
+    [[CROSS_REPO, CROSS_REVISION]],
   );
   assertEquals(directory.reads, [], "相 1 を持たない取得元の ref を読みに行っている");
 });

@@ -217,7 +217,7 @@ export const fetchAssets = async (
     if (!unique.has(refKey)) unique.set(refKey, ref);
   }
   const targets = [...unique.values()];
-  const progress = createProgressEmitter(unique, options.onProgress);
+  const progress = createProgressEmitter(unique, context.originOf, options.onProgress);
 
   const failure = new AbortController();
   const signal = options.signal === undefined
@@ -329,7 +329,7 @@ const preparePhase = (
     }
     declared.set(refKey, ref);
   }
-  return createProgressEmitter(declared, options.onProgress);
+  return createProgressEmitter(declared, context.originOf, options.onProgress);
 };
 
 /**

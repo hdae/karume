@@ -1152,6 +1152,37 @@ Deno.test("fetchAssets: 同じ path の自リポ / 越境は進捗でも別の 1
   );
 });
 
+Deno.test("fetchAssets: 進捗は実際に取りに行った先の (repo, revision) を名乗る", async () => {
+  // 同じ path の 2 本を消費側が見分けられること — path だけでファイル別の進捗をキーにすると
+  // 2 本が 1 本に混ざる（公開イベントが識別子を運ばないと、取得層の一意化が消費側で崩れる）。
+  const caches = new MemoryCacheStorage();
+  const { mock, loaded } = await load({ files: crossRepoFiles() }, caches);
+  const events: AssetProgress[] = [];
+  await fetchAssets(loaded, selectionFiles(loaded.manifest), {
+    fetch: mock.fetch,
+    caches,
+    onProgress: (progress) => events.push(progress),
+  });
+  const origins = (path: string): string[] =>
+    events.filter((event) => event.phase === "complete" && event.path === path)
+      .map((event) => `${event.repo}@${event.revision}`).sort();
+  assertEquals(
+    origins(CROSS_PATH),
+    [`${FOREIGN_REPO}@${FOREIGN_SHA}`, `${REPO}@${SHA}`].sort(),
+    "同じ path の自リポ / 越境が取得先で見分けられない",
+  );
+  // 容器単位の越境なので、借りた側の残りの part も越境先を名乗る（自リポの part は自リポ）。
+  assertEquals(origins(BORROWED_PART1), [`${FOREIGN_REPO}@${FOREIGN_SHA}`]);
+  assertEquals(origins(OWN_PART1), [`${REPO}@${SHA}`]);
+  // downloading も同じ欄を運ぶ（complete だけ名乗る形だと途中のバーが引き当てられない）。
+  for (const event of events) {
+    assert(
+      event.repo !== undefined && event.revision !== undefined,
+      `${event.path} が取得先を名乗らない`,
+    );
+  }
+});
+
 // ---- 越境した容器（ADR 0038 §7 / ADR 0109 決定 3 —「越境参照は容器単位」）。exporter は
 // 共有コンポーネントを **part 1 本 = 参照 1 つ**の形で焼くので、受け側は容器の全 part を参照先の
 // URL から取れなければならない（先頭だけ越境する / 列を畳むと、残りの part がセッションの repo に
