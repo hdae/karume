@@ -1,7 +1,7 @@
 """容器のグラフ名 = 配布形の部品名（= `karume.json` の weights のキー）の機械門（全 family 横断）。
 
 ランタイムはグラフを**名前で**引く（`prepareContainer(opened, <weights キー>)` —
-container-v1 §12）。移行 CLI も同じキーで焼く（`karume.migrate._convert_unit` が
+container-v1 §2.1）。移行 CLI も同じキーで焼く（`karume.migrate._convert_unit` が
 `graph_name=unit.component`）ので、書き手が別の綴りを名乗ると「移行済みミラー」と「再 export
 した系列」が**別物**になる。
 
@@ -16,9 +16,10 @@ container-v1 §12）。移行 CLI も同じキーで焼く（`karume.migrate._co
 2. 台本が名乗る綴りの集合が、その family の配布計画（`<family>/distribution.py` の weights）
    と一致する。
 
-この門が要るのは、破っても**どこも赤くならない**から: 書き手も `karume dist` も
-グラフ名を weights のキーと突き合わせないので、綴りが割れた容器は manifest ごと据わり、
-利用者の `createSession` で初めて「コンテナにグラフが無い」になる。
+この門が要るのは、書き手（export の一本道）がグラフ名を weights のキーと突き合わせないから。
+現物の容器との突合は `karume dist`（{@link karume.dist.assert_weight_components_verified}）が
+組み立ての前に掛けるが、そこへ届くのは実重みで export を回した後である — ここは綴りの割れを
+ソースの段で落とす。
 
 ソースを AST で読むのは、実行して確かめるには実重み（数 GB）か family ごとの tiny 模型が
 要るため（`tests/test_staged_publication.py` と同じ理由）。実物を書いて読み直す側の対は
@@ -319,8 +320,11 @@ REPO_ROOT = RECIPES_ROOT.parent.parent
 #: 仕様の正本（`docs/container-v1.md`）。
 DOCS_ROOT = REPO_ROOT / "docs"
 
-#: グラフ名 = weights のキー を述べている唯一の仕様節。
-CONTAINER_SPEC_SECTION = "12. 移行 CLI の契約"
+#: 「グラフ名 = weights のキー」の規則の本文を持つ仕様節（見出し行そのもの）。
+CONTAINER_SPEC_SECTION = "### 2.1 グラフ記述"
+
+#: 移行 CLI の契約。グラフ名の既定（親ディレクトリ名）を持ち、規則は §2.1 を参照する。
+MIGRATE_SPEC_SECTION = "## 12. 移行 CLI の契約"
 
 #: グラフ名の話の指し先として**使ってはいけない**綴り。
 #:
@@ -340,12 +344,20 @@ POINTER_SCAN_SKIP = frozenset({"__pycache__", ".venv", "node_modules"})
 
 
 def _spec_section(document: Path, heading: str) -> str:
-    """Markdown の `## <heading>` から次の `## ` までを返す（見出しが無ければ落ちる）。"""
+    """見出し行 `heading`（`## …` / `### …`）から、同じか浅い次の見出しまでを返す。
+
+    見出しが無ければ落ちる。
+    """
     lines = document.read_text(encoding="utf-8").split("\n")
-    start = next(index for index, line in enumerate(lines) if line == f"## {heading}")
+    start = next(index for index, line in enumerate(lines) if line == heading)
+    level = len(heading) - len(heading.lstrip("#"))
     rest = lines[start + 1 :]
     stop = next(
-        (index for index, line in enumerate(rest) if line.startswith("## ")),
+        (
+            index
+            for index, line in enumerate(rest)
+            if line.startswith("#") and 0 < len(line) - len(line.lstrip("#")) <= level
+        ),
         len(rest),
     )
     return "\n".join(rest[:stop])
@@ -372,16 +384,25 @@ class TestThePointerNamesTheDocumentThatCarriesTheClaim:
     """
 
     def test_the_container_spec_section_states_the_rule(self) -> None:
-        """`container-v1 §12` が「グラフ名の既定は親ディレクトリ名（= weights のキー）」を持つ。"""
+        """`container-v1 §2.1` が「容器のグラフ名 = `weights` のキー MUST」を持つ。"""
         section = _spec_section(DOCS_ROOT / "container-v1.md", CONTAINER_SPEC_SECTION)
 
+        assert "**グラフ名の規則**" in section
+        assert (
+            "容器のグラフ名 = 配布形の部品名 = `karume.json` の `weights` のキー** MUST" in section
+        )
+
+    def test_the_migrate_spec_section_defers_to_the_rule(self) -> None:
+        """`container-v1 §12` は CLI の既定（親ディレクトリ名）を持ち、規則は §2.1 を指す。"""
+        section = _spec_section(DOCS_ROOT / "container-v1.md", MIGRATE_SPEC_SECTION)
+
         assert "グラフ名の既定は親ディレクトリ名" in section
-        assert "weights のキー" in section
+        assert "規則は §2.1 のとおり weights のキー MUST" in section
 
     def test_the_old_pointers_do_not_state_the_rule(self) -> None:
         """対（非恒真）: 誤りの指し先 2 つが住む節には「グラフ名」という語が 1 度も出ない。"""
         decision = _spec_section(
-            DOCS_ROOT / "decisions" / "0109-manifest-v5-container.md", "Decision"
+            DOCS_ROOT / "decisions" / "0109-manifest-v5-container.md", "## Decision"
         )
 
         assert "### 3. `container` 欄" in decision
@@ -408,7 +429,7 @@ class TestThePointerNamesTheDocumentThatCarriesTheClaim:
         assert offenders == [], (
             f"グラフ名 / 部品名の指し先が {' / '.join(WRONG_POINTERS)} になっている:"
             f" {offenders} — 正本は container-v1"
-            f" §{CONTAINER_SPEC_SECTION.split('.')[0]}"
+            f" §{CONTAINER_SPEC_SECTION.split()[1]}"
         )
 
     def test_the_scan_really_reaches_both_languages(self) -> None:
