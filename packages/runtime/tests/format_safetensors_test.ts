@@ -336,7 +336,7 @@ Deno.test("parseSafetensorsHeader: ファイル長の取り違えは全量解析
     "範囲外",
   );
   assertThrows(
-    () => parseSafetensors(HEADER_FIXTURE, HEADER_FIXTURE.byteLength - 4),
+    () => parseSafetensors(HEADER_FIXTURE.slice(0, HEADER_FIXTURE.byteLength - 4)),
     SafetensorsError,
     "範囲外",
   );
@@ -363,42 +363,20 @@ Deno.test("safetensorsHeaderLength: 8 バイト未満の prefix を拒否する"
 });
 
 /**
- * **2 引数形**（`parseSafetensors(buffer, byteLength)`）— 供給側が最大 shard 長の buffer を
- * 使い回し、そこへ毎回の shard を先頭から読む形では、buffer の末尾に前回の残骸が居る。
- * 長さの検査が buffer 全体ではなく**渡された長さ**で行われることと、長さの取り違えが黙って
- * 通らないことを縛る。
+ * 正しいファイルの後ろに余分なバイトが続く buffer（大きめの器の先頭に読んだ等）。buffer 全体が
+ * ファイルの実長として検査され、余白が黙って通らないことを縛る。
  */
 const PREFIX_FILE = buildSafetensors([
   { name: "a", dtype: "F32", shape: [2], data: f32Bytes([1, 2]) },
 ]);
 
-Deno.test("parseSafetensors: byteLength を渡せば buffer 末尾の余白（前回の残骸）を無視する", () => {
+Deno.test("parseSafetensors: 正しいファイルの後ろに余白が続く buffer は末尾の未使用領域として拒否する", () => {
+  // 余白を除いた実長ぶんは単体で受理される — 落ちる理由が余白だけであることの対照。
+  assertEquals(parseSafetensors(PREFIX_FILE).tensors.get("a")?.shape, [2]);
+
   const buffer = new ArrayBuffer(PREFIX_FILE.byteLength + 64);
   const bytes = new Uint8Array(buffer);
   bytes.set(new Uint8Array(PREFIX_FILE));
-  bytes.fill(0xab, PREFIX_FILE.byteLength); // 前の shard の残骸に見せる
-  const file = parseSafetensors(buffer, PREFIX_FILE.byteLength);
-
-  const view = file.tensors.get("a");
-  if (view === undefined) throw new Error("tensor a が無い");
-  assertEquals(view.shape, [2]);
-  assertEquals(tensorBytes(file, view), f32Bytes([1, 2]));
-
-  // 長さを渡さなければ余白は「末尾の未使用領域」として従来どおり落ちる。
-  assertThrows(() => parseSafetensors(buffer), SafetensorsError, "未使用領域");
-});
-
-Deno.test("parseSafetensors: buffer より長い byteLength・負・非整数は拒否する", () => {
-  for (const bad of [PREFIX_FILE.byteLength + 1, -1, 1.5]) {
-    assertThrows(() => parseSafetensors(PREFIX_FILE, bad), SafetensorsError, "収まっていない");
-  }
-});
-
-Deno.test("parseSafetensors: byteLength がヘッダ長やデータ節より短ければ従来の門で落ちる", () => {
-  assertThrows(() => parseSafetensors(PREFIX_FILE, 4), SafetensorsError, "短すぎる");
-  assertThrows(
-    () => parseSafetensors(PREFIX_FILE, PREFIX_FILE.byteLength - 4),
-    SafetensorsError,
-    "範囲外",
-  );
+  bytes.fill(0xab, PREFIX_FILE.byteLength);
+  assertThrows(() => parseSafetensors(buffer), SafetensorsError, "末尾に未使用領域が 64 バイト");
 });

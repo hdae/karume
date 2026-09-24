@@ -316,23 +316,14 @@ export const parseSafetensorsHeader = (
  * このリーダの読み手は付帯資産（rope 素表・style 表・mel 基底・golden の io 等）で、Session の
  * 重みは容器 `krm` の経路が読む。
  *
- * `byteLength` はファイルの実長（既定 = buffer 全体）。ファイルより長い buffer の先頭に
- * 読み込んだ場合は、末尾の余白を「データ節末尾の未使用領域」と取り違えないよう実長を別に
- * 渡す。buffer より長い指定は fail loudly（ファイルが buffer に収まっていない）。
+ * buffer 全体をファイルの実長として扱う — ファイルより長い buffer の末尾の余白は
+ * 「データ節末尾の未使用領域」として拒否する。
  *
  * 検査そのものは {@link parseSafetensorsHeader} の 1 実装だけが持つ MUST — 全量経路と区間読み
  * 経路で受理する形が食い違わないため。
  */
-export const parseSafetensors = (
-  buffer: ArrayBuffer,
-  byteLength: number = buffer.byteLength,
-): SafetensorsFile => {
-  if (!Number.isInteger(byteLength) || byteLength < 0 || byteLength > buffer.byteLength) {
-    throw new SafetensorsError(
-      `ファイル長 ${byteLength} が buffer（${buffer.byteLength} バイト）に収まっていない`,
-    );
-  }
-  const { metadata, tensors } = parseSafetensorsHeader(buffer, byteLength);
+export const parseSafetensors = (buffer: ArrayBuffer): SafetensorsFile => {
+  const { metadata, tensors } = parseSafetensorsHeader(buffer, buffer.byteLength);
   return { buffer, metadata, tensors };
 };
 
