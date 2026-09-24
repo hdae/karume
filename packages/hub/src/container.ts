@@ -36,7 +36,8 @@ import { type AssetRangeReader, type PinnedSource, sourceForRef } from "./source
  * `openContainer({ kind: "source", source })` にそのまま渡せる。
  *
  * MUST: 返るバイト列は**呼び手が書き換えない**（取得元の実装によっては、取得元が抱え続ける
- * buffer そのものであり得る）。
+ * buffer そのものであり得る）。scan 経路の返りは part の器全体を握る view なので、区間より長く
+ * 持つ呼び手は写す（握り続けると区間ではなく part 全体が生き残る）。
  */
 export type ContainerBlockSource = {
   /** 宣言された part の本数（長さ 0 の part も数える — 添字が part の id）。 */
@@ -50,7 +51,10 @@ export type ContainerBlockSource = {
   readonly verified: boolean;
   /** 宣言された part 長（同期・1 バイトも取らずに答える）。範囲外の添字は fail loudly。 */
   partLength(index: number): number;
-  /** `[offset, offset + length)` を返す（tight view）。 */
+  /**
+   * `[offset, offset + length)` を返す。seek 経路は区間ぶんの tight view、scan 経路は保持枠の
+   * part の器の view（`byteOffset` = 区間の開始位置・`buffer` = part 全体）。
+   */
   read(part: number, offset: number, length: number): Promise<Uint8Array<ArrayBuffer>>;
 };
 
@@ -140,15 +144,19 @@ export const openContainerSource = (
   };
 
   /**
-   * scan 経路の保持枠。**同時に持つのは 1 part ぶんだけ**（別の part を読んだら前を手放す）で、
-   * 読み手は part 順に block を読むのでこれで足りる。ホスト RAM のピークはこの枠 = 最大 part 長
-   * （+ 切り出した block 1 本）になる。
+   * scan 経路の保持枠。**同時に持つのは 1 part ぶんだけ**（別の part を読んだら前を手放す）。
+   * 切り出しは器の view なので、枠が握る part の器のほかにホスト RAM は乗らない — 重みの読み手
+   * （runtime の `containerBatches`）は part の全 block の view をフェンスまで溜めるが、どれも
+   * この器の中を指す。part の境界では、手放した器が GC されるまで一時的に 2 part ぶんが生きる。
    *
    * MUST: **in-flight の全量読みも同じ席に置く** — 席を「決着したバイト列」だけにすると、同じ
    * part への並行 read が全員 readFile へ入り、その瞬間だけ part 長 × 本数が生きる。
    * NOTE: 並行に**別の** part を読むと、先の読みが決着するまで一時的に 2 part ぶんが生きる
-   *       （席を追い出された側の読みも最後まで走る）。読み手（`containerBatches`）は part 順に
-   *       直列に読むのでこの形にはならない。
+   *       （席を追い出された側の読みも最後まで走る）。追い出された part の器は、そこから切った
+   *       view を呼び手が握っている間は生き残る。重みの読み手は part 順に直列に読むのでこの形に
+   *       ならない。資産の行読み（models の PLE — 別の part を並行に読む）はこの形になるが、
+   *       区間は `readAssetRange` が写すので器を握らない（part ちょうどの資産は写さずに握るが、
+   *       握る量は写しと同じ）。
    */
   let held: HeldPart | undefined;
   const readWhole = (index: number, ref: FileRef): Promise<Uint8Array<ArrayBuffer>> => {
@@ -196,9 +204,16 @@ export const openContainerSource = (
       if (plan.kind === "seek") {
         return assertTightView(await plan.reader.read(offset, length), ref.path);
       }
-      // MUST: 切り出しは写す（`subarray` は余白のある view になり、消費側がそのまま
-      // TypedArray として読むと値がずれる）。
-      return (await readWhole(part, ref)).slice(offset, offset + length);
+      // MUST: 切り出しは写さない（写すと part ごとに器と写しで part 長を 2 重に持つ）。返るのは
+      // 保持枠の part の器の view で、次の 2 つが成り立つので消費側はそのまま読める:
+      //  - 整列: 器は tight（上の `assertTightView`）なので byteOffset = block.offset で、block
+      //    開始は 64 B 整列（descriptor の parse が強制）。scale の Float32Array view に要る 4 B
+      //    整列はこれで満たされる — `assertTightView` を外すとこの整列が偶然任せになる。
+      //  - 寿命: 重みの読み手は batch の view をフェンスまでに使い切り、次の part を読み始める
+      //    （= 枠が器を手放す）のはその後なので、view は枠が器を握る期間の内側に収まる。
+      //    資産の読み手は `readAssetRange`（models）が区間を写してから持つ（part ちょうどの資産は
+      //    写さずに器を共有するが、握る量は写しと同じ）。
+      return (await readWhole(part, ref)).subarray(offset, offset + length);
     },
   };
 };

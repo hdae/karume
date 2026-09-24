@@ -90,9 +90,19 @@ const isAborted = (error: unknown, signal?: AbortSignal): boolean =>
   (signal?.aborted === true && error === signal.reason);
 
 /**
- * `openContainer` の `bytes` 入力は全量 `ArrayBuffer` を要求するため、返す bytes は buffer 全体を
- * 占めていなければならない（slice で辻褄を合わせると RAM ピークが倍増する）。SharedArrayBuffer 背面は
- * ここで弾く（述語が主張する `Uint8Array<ArrayBuffer>` を型の上でも嘘にしない）。
+ * 取得層が返す bytes は buffer 全体を占めていなければならない。理由は面ごとに 3 つ:
+ *
+ * - 全量面（`fetchAssets`）: 呼び手は `bytes.buffer` を全量 `ArrayBuffer` としてパーサへ渡す
+ *   （slice で辻褄を合わせると RAM ピークが倍増する）。
+ * - 区間読み口（`openAsset` と、`openContainerSource` の seek 経路）: `AssetRangeReader.read` の
+ *   MUST（`source.ts`）どおり区間ちょうどの器を返す — 呼び手は `bytes.buffer` を写さずに区間
+ *   そのものとして使え、byteOffset 0 なので整列要件のある view もそのまま作れる。
+ * - 容器面（`openContainerSource` の scan 経路）: block はこの器の view として切り出すので、器が
+ *   tight であることが「byteOffset = block.offset（64 の倍数）」— scale の Float32Array view に
+ *   要る 4 B 整列 — の成立条件になる。
+ *
+ * SharedArrayBuffer 背面はここで弾く（述語が主張する `Uint8Array<ArrayBuffer>` を型の上でも嘘に
+ * しない）。
  */
 const isTightView = (bytes: Uint8Array): bytes is Uint8Array<ArrayBuffer> =>
   bytes.buffer instanceof ArrayBuffer && bytes.byteOffset === 0 &&

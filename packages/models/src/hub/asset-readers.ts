@@ -55,7 +55,10 @@ export const readAssetBuffer = (
  * MUST: buffer 全体を占めていなければ**写す**。区間読みの返りは取得元の器の view でありうるので、
  * `bytes.buffer` をそのまま渡すと block の詰め物や隣の資産まで見せることになる（資産の論理長は
  * 宣言値で、block 長はそれを 4 の倍数へ切り上げた値 — container-v1 §2.2）。写した後なら
- * `new Float32Array(buffer)` のような整列要件のある view もそのまま作れる。
+ * `new Float32Array(buffer)` のような整列要件のある view もそのまま作れる。RAM の面でも写しが
+ * 要る: hub の scan 経路では器は part 全体（既定 256 MiB）なので、数 KB の行の view を握り続けると
+ * part 全体が生き残る。buffer 全体を占める返り（part ちょうどの資産）は写さない — 器と共有するが、
+ * 握る量は写しと同じで、呼び手は書き換えない。
  *
  * NOTE: 範囲外の区間は runtime の `AssetReader.read` が宣言 `length` と突き合わせて落とす —
  * 同じ検査をここへ写さない。

@@ -83,6 +83,12 @@ export type AssetReader = {
    * 数百 MiB の表から数 KB の行だけを引く消費側のための面）。未検証の取得元では block を 1 度取って
    * sha256 を検証し、この読み口が生きている間は保持してそこから切る（保持する本数は呼び手が読み口の
    * 寿命で決める）。
+   *
+   * MUST: 返りは書き換えない。検証済みの取得元では取得元の器の view がそのまま出る（hub の scan
+   * 経路なら part 全体を握る view）ので、区間より長く持つ呼び手は写す — 握り続けると区間ではなく
+   * 器全体が生き残る。未検証の取得元でも返りは保持した block の view（`subarray`）で、その block
+   * 自体が取得元の器の view でありうる（hub で位置読みを持たないローカルディレクトリは scan 経路
+   * なので、握るのは part 全体の器）— 写す理由は同じ。
    */
   read(offset: number, length: number): Promise<Uint8Array<ArrayBuffer>>;
 };
@@ -107,7 +113,13 @@ export type OpenedContainer = {
   readBlock(id: string): Promise<Uint8Array<ArrayBuffer>>;
   /** 資産 1 本の読み口を開く（`krg` と未宣言の名前は fail loudly）。開くだけでは 1 バイトも取らない。 */
   asset(name: string): AssetReader;
-  /** `[ヘッダ'][グラフ記述][詰め物][const 領域]` を組み立てて返す（`krg` のバイトコピー抽出 — §9）。 */
+  /**
+   * `[ヘッダ'][グラフ記述][詰め物][const 領域]` を組み立てて返す（`krg` のバイトコピー抽出 — §9）。
+   *
+   * NOTE: この口はグラフ記述のバイト列を開いた容器の寿命いっぱい握る。取得元が器の view を返す形
+   * （hub の scan 経路）では part 0 の器ごと握るが、part 0 はヘッダと 2 文書ちょうどなので、増える
+   * 量はモデル記述の長さ程度に収まる。
+   */
   extractGraph(): Promise<Uint8Array<ArrayBuffer>>;
 };
 

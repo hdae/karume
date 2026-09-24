@@ -106,8 +106,10 @@ export type AssetRangeReader = {
    * MUST: `length` ちょうどを返す（短く返さない）。要求が実体の外へ出る・実体が宣言より短くて
    * 埋まらない、いずれも fail loudly — 短い戻りを黙って通すと、消費側は「0 埋めされた行」を
    * 正常な値として読む。
-   * MUST: buffer 全体を占める view（tight view）を返す — 消費側は返ったバイト列をそのまま
-   * TypedArray として読む。
+   * MUST: buffer 全体を占める view（tight view）を返す — 資産の読み手には `bytes.buffer` を写さずに
+   * 区間そのものとして使う経路がある（`openAsset` の呼び手・models の `readAssetRange`）。容器面
+   * （`container.ts`）の消費側は byteOffset を尊重して読むが、その seek 経路でも byteOffset 0 が
+   * block の整列（scale の Float32Array view に要る 4 B）をそのまま与える。
    */
   readonly read: (
     offset: number,

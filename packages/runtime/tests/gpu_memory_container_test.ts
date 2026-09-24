@@ -9,12 +9,16 @@
  * MUST: 2 経路の piece の割り方を**わざと違える**（`krm` は block 上限 128 B から書き手が決め、
  * メモリ側は行範囲を明示して 4 行ずつ）。同じ割り方で比べると「分割は GPU 側の配置を 1 バイトも
  * 変えない」という不変条件が検出器の外に出てしまう。
+ *
+ * もう 1 組: 同じ `krm` を、block を写して返す取得元と、hub の scan 経路と同じく part の器の view を
+ * 返す取得元（器の block の外は毒）から読み、出力と常駐バイト数が一致すること。読み手のどこかが
+ * byteOffset を落とすと、器の先頭や毒を読んで割れる。
  */
 
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { ContainerFormatError } from "../src/format/container/header.ts";
 import { type MemoryContainerInput, openMemoryContainer } from "../src/format/container/memory.ts";
-import { openContainer } from "../src/format/container/open.ts";
+import { type BlockSource, openContainer } from "../src/format/container/open.ts";
 import { type IrDeclaration, parseIrDeclaration } from "../src/format/ir.ts";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { createSessionFromContainer, prepareContainer } from "../src/runtime/executor.ts";
@@ -23,7 +27,11 @@ import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { quantizeF16 } from "./helpers/f16.ts";
 import { quantizeI4 } from "./helpers/i4.ts";
 import { quantizeI8 } from "./helpers/i8.ts";
-import { writeGraphContainer, writeModelContainer } from "./helpers/container-write.ts";
+import {
+  writeGraphContainer,
+  writeModelContainer,
+  type WrittenContainer,
+} from "./helpers/container-write.ts";
 import { describe, it } from "@std/testing/bdd";
 
 const M = 4;
@@ -153,6 +161,58 @@ const memoryInput = (q: Quantized, counter: { reads: number }): MemoryContainerI
 
 const OPTIONS = { partBytes: 1024, blockBytes: 128 } as const;
 
+const POISON = 0xff;
+
+/**
+ * hub の scan 経路（`packages/hub/src/container.ts`）と同じ形の取得元: part ごとに tight な器を
+ * 1 本持ち、`read` は器の `subarray` を返す（写さない）。器のうち block の外（整列の隙間・末尾）は
+ * 毒で埋める — byteOffset を落とした読みが「隣の有効なバイト列」を読んで偶然通るのを防ぐ。
+ * `verified: true` は HF 取得元と同じ（block の digest を掛けない経路）。
+ */
+const scanShapedSource = (written: WrittenContainer) => {
+  const blocksByPart = new Map<number, { readonly offset: number; readonly length: number }[]>();
+  const blocks = [
+    ...written.graph.const.blocks.map((block) => ({ ...block, part: 1 })),
+    ...written.model.blocks,
+  ];
+  for (const block of blocks) {
+    const list = blocksByPart.get(block.part) ?? [];
+    list.push(block);
+    blocksByPart.set(block.part, list);
+  }
+  let poisoned = 0;
+  // part 0（ヘッダ + 2 文書）は block を持たないのでそのまま写す。
+  const vessels = written.parts.map((part, index) => {
+    if (index === 0) return part.slice();
+    const vessel = new Uint8Array(new ArrayBuffer(part.byteLength)).fill(POISON);
+    for (const block of blocksByPart.get(index) ?? []) {
+      vessel.set(part.subarray(block.offset, block.offset + block.length), block.offset);
+    }
+    poisoned += vessel.reduce((count, byte, i) => count + (byte !== part[i] ? 1 : 0), 0);
+    return vessel;
+  });
+  const offsets: number[] = [];
+  const source: BlockSource = {
+    partCount: vessels.length,
+    verified: true,
+    partLength: (index) => vessels[index].byteLength,
+    read: (part, offset, length) => {
+      if (part >= 2) offsets.push(offset);
+      return Promise.resolve(vessels[part].subarray(offset, offset + length));
+    },
+  };
+  return { source, poisoned, offsets };
+};
+
+/** 旧 hub と同じく block を写して返す（tight）取得元 — 比較の基準。 */
+const copyingSource = (written: WrittenContainer): BlockSource => ({
+  partCount: written.parts.length,
+  verified: true,
+  partLength: (index) => written.parts[index].byteLength,
+  read: (part, offset, length) =>
+    Promise.resolve(written.parts[part].slice(offset, offset + length)),
+});
+
 describe("memory container session", { ignore: !GPU_AVAILABLE }, () => {
   it("メモリ内容器から作った Session は krm 経路と出力バイト列・常駐バイト数が一致する", async () => {
     const q = quantize();
@@ -197,6 +257,49 @@ describe("memory container session", { ignore: !GPU_AVAILABLE }, () => {
         prepareContainer(memory, "main").estimate(),
         prepareContainer(opened, "main").estimate(),
       );
+    } finally {
+      gpu.destroy();
+    }
+  });
+
+  it("part の器の view を返す取得元から組んだ Session は、写しを返す取得元と出力・常駐バイト数が一致する", async () => {
+    const q = quantize();
+    const written = await writeModelContainer(containerInput(q), OPTIONS);
+    const viewed = scanShapedSource(written);
+    // 毒が実際に器へ入り、block が器の中程（64 B 整列・0 以外）から読まれていること。
+    assert(viewed.poisoned > 0, "器に block の外の隙間が無く、毒を置けていない");
+    const gpu = await acquireGpu();
+    try {
+      const x = fill([M, K], (i) => ((i * 7) % 11) / 11 - 0.5);
+      let expected: Float32Array<ArrayBuffer>;
+      let expectedResident: number;
+      const copied = await openContainer({ kind: "source", source: copyingSource(written) });
+      const reference = await createSessionFromContainer(gpu, copied, "main");
+      try {
+        expected = (await reference.run({ x }))["y"].data as Float32Array<ArrayBuffer>;
+        expectedResident = reference.diagnostics().storage.residentCompressedBytes;
+      } finally {
+        await reference.dispose();
+      }
+
+      const opened = await openContainer({ kind: "source", source: viewed.source });
+      const session = await createSessionFromContainer(gpu, opened, "main");
+      try {
+        const actual = (await session.run({ x }))["y"].data as Float32Array<ArrayBuffer>;
+        assertEquals(new Uint8Array(actual.buffer), new Uint8Array(expected.buffer));
+        assertEquals(session.diagnostics().storage.residentCompressedBytes, expectedResident);
+        assert(
+          expectedResident > 0,
+          "圧縮のまま常駐した重みが無い（i4 / f16 / i8 の席が効いていない）",
+        );
+      } finally {
+        await session.dispose();
+      }
+      assert(
+        viewed.offsets.some((offset) => offset !== 0),
+        "重みの block が全部 part の先頭から読まれている（byteOffset ≠ 0 の view を通っていない）",
+      );
+      assert(viewed.offsets.every((offset) => offset % 64 === 0), "block 開始が 64 B 整列でない");
     } finally {
       gpu.destroy();
     }

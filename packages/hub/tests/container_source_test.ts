@@ -4,7 +4,8 @@
  * 押さえるのは 8 つ:
  *  ① 開くだけでは**何も取りに行かない**（温めは呼び手が `prefetchAssets` で先に済ませる）。
  *  ② 温めずに開いても読める（HF 取得元が初回の読みで 1 度だけ温め直す）。温め済みなら network 0。
- *  ③ `read` は区間ちょうどを tight view で返し、範囲外 / 長さ 0 の part / 未知の添字は fail loudly。
+ *  ③ `read` は区間ちょうどを返し（scan 型は保持枠の part の器の view — 写さない・次の part を
+ *     読んでも前の view は化けない）、範囲外 / 長さ 0 の part / 未知の添字は fail loudly。
  *  ④ `verified` は**取得元が全量を検証したか**（HF = true / ローカルディレクトリ = false・
  *     越境は越境先の取得元で決まる）。
  *  ⑤ scan 型は同じ part を何度読んでも**全量読みが 1 回**（並行に読んでも 1 回）。
@@ -259,7 +260,9 @@ Deno.test("openContainerSource: partCount / partLength は宣言をそのまま�
   assertEquals(source.partLength(2), payloadFor(NET_PARTS[2]).byteLength);
 });
 
-Deno.test("openContainerSource: read は区間ちょうどを tight view で返す", async () => {
+Deno.test("openContainerSource: scan 型の read は保持枠の part の器を写さずに view で返す", async () => {
+  // 写すと part ごとに器と写しで part 長を 2 重に持つ（container-v1 §11）。消費側は byteOffset を
+  // 尊重して読む（整列は器が tight + block 開始の 64 B 整列で成り立つ — container.ts の MUST）。
   const caches = new MemoryCacheStorage();
   const { loaded, mock } = await openRemote(caches);
   const source = openContainerSource(loaded, containerOf(loaded, "net"), {
@@ -269,6 +272,7 @@ Deno.test("openContainerSource: read は区間ちょうどを tight view で返�
   const payload = payloadFor(NET_PARTS[2]);
   const middle = Math.floor(payload.byteLength / 2);
 
+  const views: Uint8Array<ArrayBuffer>[] = [];
   for (const [offset, length] of [[0, 4], [middle, 3], [payload.byteLength - 5, 5], [2, 0]]) {
     const bytes = await source.read(2, offset, length);
     assertEquals(
@@ -276,10 +280,44 @@ Deno.test("openContainerSource: read は区間ちょうどを tight view で返�
       new Uint8Array(payload.subarray(offset, offset + length)),
       `[${offset}, ${offset + length}) の中身が化けている`,
     );
-    // 消費側はそのまま TypedArray として読むので、buffer 全体を占めている必要がある。
-    assertEquals(bytes.byteOffset, 0);
-    assertEquals(bytes.buffer.byteLength, length);
+    // 区間の位置は byteOffset に、part 全体は buffer に出る（写しなら byteOffset 0・buffer = 区間長）。
+    assertEquals(bytes.byteOffset, offset, `[${offset}, ${offset + length}) の位置がずれている`);
+    assertEquals(bytes.buffer.byteLength, source.partLength(2), "buffer が part の器でない");
+    views.push(bytes);
   }
+  // 同じ part の区間はどれも同じ器を指す（区間ごとに写していない）。
+  for (const view of views.slice(1)) {
+    assertStrictEquals(
+      view.buffer,
+      views[0].buffer,
+      "同じ part の区間が別の buffer に写されている",
+    );
+  }
+});
+
+Deno.test("openContainerSource: scan 型は次の part を読んでも前の part の view が化けない", async () => {
+  // 保持枠が別の part へ移っても、手放した器は上書きしない。器を part 間で使い回す実装
+  // （全量読みの受け皿を 1 本だけ確保して次の part を読み込む形）を入れると、呼び手がまだ握って
+  // いる view の中身が黙って次の part に化ける — この門で赤にする。
+  const caches = new MemoryCacheStorage();
+  const { loaded, mock } = await openRemote(caches);
+  const source = openContainerSource(loaded, containerOf(loaded, "net"), {
+    fetch: mock.fetch,
+    caches,
+  });
+  const lengthOf = (index: number): number => source.partLength(index);
+
+  const earlier = await source.read(2, 0, lengthOf(2));
+  const snapshot = earlier.slice();
+  assertEquals(snapshot, payloadFor(NET_PARTS[2]));
+
+  // 別の part を読んで保持枠を移し、さらに元の part を読み直す（器の確保が 2 度起きる）。
+  const other = await source.read(0, 0, lengthOf(0));
+  const again = await source.read(2, 0, lengthOf(2));
+
+  assertEquals(earlier, snapshot, "手放した part の view の中身が書き換わっている");
+  assertEquals(other, payloadFor(NET_PARTS[0]));
+  assertEquals(again, snapshot);
 });
 
 Deno.test("openContainerSource: 範囲外・長さ 0 の part・未知の添字は fail loudly", async () => {
