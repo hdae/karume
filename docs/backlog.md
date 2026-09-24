@@ -138,17 +138,17 @@ later の「decode 速度の残り」。
   1 回増える。4 GB 級端末で効くかを見てから裁定。
 - **既公開 3 リポの `LICENSE.md` / `NOTICE.md` 同梱是正**（起票 2026-09-04 — ADR
   [0092](decisions/0092-distribution-repos-and-sources.md) 決定 7）: `karume-irodori-v4-small` /
-  `karume-irodori-v4.1-small`（MIT = 全文 + 著作権行）と `karume-sbv2-jvnv`（CC BY-SA）は
-  法的テキストの同梱が漏れている（`verify_dist` の `LEGAL_PATHS` 席）。**次にこの 3 リポを
-  上げ直す回に同乗**させる（2026-09-04 ユーザー裁定 — 是正単独の再アップはしない）。
-  その回は release 節の `karume/5` 再アップロードで、3 リポとも同乗させる。
-  未公開の vowel-detector は同梱済み（2026-09-05 — `PIPELINE.root_files` に MIT 全文 +
-  著作権行）なので、初回公開時に漏れることはない。
-  同じ上げ直し波に**カード / NOTICE の常時分割の文面是正**も乗せる（ADR
-  [0071](decisions/0071-manifest-v3-shards.md) 末尾の未履行記録）: `card.py` の overview 3 本
-  （sbv2 / irodori / vowel_detector）と `distribution.py` の
-  NOTICE 改変列挙 3 本（siglip2 / depth_anything / gemma4）が単一ファイルの綴りのまま、
-  anima の `CONTAINER_MODIFICATION` は「収まらないときだけ分割」の条件つき文面のまま。
+  `karume-irodori-v4.1-small` と `karume-sbv2-jvnv` の公開 revision は法的テキストの同梱が漏れている
+  （`verify_dist` の `LEGAL_PATHS` 席）。**recipe 側は実装済み**（2026-09-24 ユーザー裁定 5 = a — irodori は
+  MIT 全文 + 著作権行 "Copyright (c) 2026 Aratako" を重みにも当てる・sbv2-jvnv は CC BY-SA 4.0 の条文 +
+  帰属行を同梱し、SBV2 の Pipeline を声のファミリーで分ける）。着地した形: irodori / sbv2 の Pipeline の
+  `root_files` が組み立てのたびに `LICENSE.md` / `NOTICE.md` を配布リポ直下へ書く（irodori は実装側の
+  判断で text backbone 由来の "Copyright (c) 2025 SB Intuitions" も併記）。SBV2 は別 pipeline 2 本 —
+  `--pipeline sbv2` = JVNV 系（CC BY-SA の 2 枚を持つ）・`--pipeline sbv2-fn` = FN 系（法的テキスト無し）—
+  で、帰属は pipeline が決めるので `--card-profile` は省ける。JVNV 4 声の束ねはモデルごとのリポ名宣言が
+  揃わないので `--repo hdae/karume-sbv2-jvnv` が要る（詳細は ADR 0092 決定 7 の追記）。HF へは release 節の `karume/5`
+  再アップロードで焼き直して乗る（是正単独の再アップはしない — 2026-09-04 ユーザー裁定）。
+  残るのは上げ直しと、上げた後の HF 上の `LICENSE.md` / `NOTICE.md` の在否の確認だけ。
 - **公開済み `karume-depth-anything-v2` のカード / NOTICE.md 再発行**（起票 2026-09-05）:
   depth-anything の `CONVT_MAXDIFF` は実重み `--verify` の再実測で 1.4e-06 → 6.1e-06 へ確定した
   （合成 4 ケースの最大 — 旧値は 1 ケースぶん。`verify_patches` に上限比較の門も入った）ので、
@@ -220,6 +220,15 @@ later の「decode 速度の残り」。
 
 ## later
 
+- **越境参照をツール側で扱いやすくする（ユーザー起票 2026-09-24）**: recipe が越境コンポーネント参照
+  （今の `dist.py` の `--ref-*` 5 指定 — ADR [0038](decisions/0038-manifest-v1.md) §7 追記）を宣言的に持てる形と、
+  export 用ツールが依存関係（参照先リポの main の commit SHA）を解決して参照先から順にアップロードする機能。
+  動機は 2 つ: `irodori-v4-small` と `irodori-v4.1-small` の重複（83 ファイルが同一 sha256・5,605 MiB）を
+  越境参照で消すには参照の宣言が要ること、`anima` → `anima-extra` の公開が参照先の SHA 待ちの直列で
+  手作業なこと（[release-runbook](release-runbook.md) §0）。設計は未着手。
+- **irodori v4-small と v4.1-small の重複 5,605 MiB を越境参照で消す（起票 2026-09-24）**: 2 リポの 83 ファイルが
+  同一 sha256。0.13.0 の再アップロードでは見送り、次の breaking 波で判断する（2026-09-24 ユーザー裁定）。
+  上の「越境参照をツール側で扱いやすくする」が前提。
 - **HTTP Range 取得（ADR 0108 段 6）の前倒し候補（起票 2026-09-24・判断はリリース後）**: ADR
   [0109](decisions/0109-manifest-v5-container.md) 決定 7 の前倒し条件は「段 2 の RAM ピーク harness で cold の
   ピークが『part 長 + 重ね合わせ』を超える」こと。段 3e で保持の重複は消えたが、scan 型（Deno の HF 経由）の
@@ -281,12 +290,6 @@ later の「decode 速度の残り」。
   attention / FFN → causal Conv3d VAE → scheduler と段寿命の順に検収する案。runtime 語彙と数値契約の判断が先。
   H3 は公開重みの規模・未公開の後段・ライセンス条件から構造調査に留める。
   [構成と容量試算](research/2026-09-10-codex-mtp-optimization.md#動画生成の事前調査-wan-と-minimax-h3)。
-- **カードの Usage repo 導出の硬化（起票 2026-08-25）**: `karume.dist` はカードの Usage 例の
-  repo 名を**出力ディレクトリ名**から導出するため、越境参照のステージング焼き（`--out` が
-  別名）で誤った repo 名がカードに載る（実害 = turbo カードに `-release` 付き誤名が公開されて
-  いた — ADR [0078](decisions/0078-anima-sampler-selection.md) Consequences・runbook §0 に
-  運用注意を追記済み）。恒久策 = `Pipeline.repo_name` 系の正本から導出し `--out` 名へ依存
-  しない形。
 - **examples/anima に `--sampler` ノブ（起票 2026-08-25）**: request 側 `sampler` 席
   （ADR 0078）を CLI デモから振れるようにする小改修。
 - **anima 素版 i4 の品質改善（起票 2026-08-24 — 配布スキップ裁定の復活レバー）**: 残るのは
@@ -384,6 +387,13 @@ later の「decode 速度の残り」。
   `karume/4` の revision を指し、HEAD の hub では読めない（旧版パッケージからだけ動く）。`gemma4-qat` は未公開で
   pin が無い。手順は [release-runbook](release-runbook.md) の §0〜§3（bump → `karume dist` で焼き直し →
   旧 `*.safetensors` の削除つきアップロード → 削除後の main で pin）。
+  - 進め方（2026-09-24 ユーザー裁定）: ①lockstep bump 0.13.0 を先に切る（`CHANGELOG.md` の版の節への移動は
+    リリース直前の別コミット — runbook §4）→ ②10 リポを系列から焼き直す（各 `dist.py` の最終行が
+    `karume/0.13.0` を名乗ること）→ ③GPU レーンで焼き直した各ミラーの e2e を通す → ④`anima` を上げて main の
+    SHA を確定 → ⑤その SHA で `anima-extra` を越境参照で焼いて上げる → ⑥残り 8 本を上げる（上げる直前に
+    HF の tree とローカルを突き合わせ、HF にだけ在る path を `--delete` に足す — runbook §2）→ ⑦10 本の pin。
+  - **初公開の `gemma4-qat` / `vowel-detector` は今回含めない**（2026-09-24 ユーザー裁定）。`KARUME_SOURCES` は
+    10 件のまま。
   - `irodori-v4.1-small` も焼き直して上げ直す。今の pin はカードが `karume/4` と safetensors 方言を名乗り、
     `LICENSE.md` / `NOTICE.md` も無い（移行 CLI の出力ミラーをそのまま上げたため）。移行 CLI のミラーは
     どのリポも上げない。
@@ -393,9 +403,10 @@ later の「decode 速度の残り」。
   - anima の系列 14 本を再 export する（上流 checkpoint から CPU で）。公式 4 変種（turbo-v1.1 / aesthetic-v1.1 /
     turbo-v1.0 / aesthetic-v1.0）と copycat の系列が `outputs/series/` に無く、`karume dist` が組めない。
   - sbv2 の front f16 / i8 はミラーが旧世代の export を移行したもので、系列から焼き直すと initializer 名が
-    変わる（値と出力は同じ）。
-  - 同乗: now 残件の法的テキスト同梱・カード / NOTICE の文面是正・depth-anything と birefnet・lucida の
-    カード再発行。
+    変わる（値と出力は同じ）。焼き直しは `--pipeline sbv2` で 4 声を束ね、話者ごとのリポ名宣言が揃わない
+    ので `--repo hdae/karume-sbv2-jvnv` が要る（コマンドは [assets-layout](assets-layout.md) の dist 節）。
+  - 同乗: now 残件の法的テキスト同梱・depth-anything と birefnet・lucida のカード再発行。カード / NOTICE の
+    krm 出力形の文面は `fd7c805b` で recipe 側が済んでおり、焼き直しで乗る。
 - **vowel-detector の初回公開の前提（起票 2026-09-24）**: recipe は上流の `feature_config.json` を
   `inputs/vowel-detector/` 直下から読む。この開発機は上流リポを丸ごと置いた形なので、組み立ての前に
   `cp inputs/vowel-detector/assets/feature_config.json inputs/vowel-detector/` を 1 回打つ。
@@ -439,7 +450,7 @@ later の「decode 速度の残り」。
 - **karume-sbv2-fn の HF 公開**（2026-08-20 保留裁定 — 波 K で一時「出典表記つき公開」へ
   振れたが撤回）。upstream の書面条件 = Booth 頒布ページの「商用可・クレジット不要・マージ
   自由」のみで**再配布は未言及**・配布者の素性も未確認。復活 = 配布者への再配布可否の確認、
-  またはユーザーの再裁定。カード機構（`--card-profile fn`）は維持。ローカルミラーは常設
+  またはユーザーの再裁定。焼き方（別 pipeline `--pipeline sbv2-fn` — FN 系の帰属を持つ）は維持。ローカルミラーは常設
   しない（2026-08-30 裁定 — e2e の門はライセンス記述が正の jvnv へ付け替え・fn ミラー削除。
   再生成 = assets-layout の dist コマンドで `inputs/sbv2/FN*` から）
 - **SBV2 `adjust_word2ph` の移植**（2026-08-21 不採用裁定 — ADR 0072 決定 8）。音素数が変わる

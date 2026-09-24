@@ -130,6 +130,33 @@ backlog parked の「export-recipes の別リポジトリ分離」は本決定�
 `karume-irodori-*`（MIT）と `karume-sbv2-jvnv`（CC BY-SA）は同梱が漏れている** — 次に上げ直す
 回で是正する（backlog へ起票）。
 
+**追記（2026-09-24・CC BY-SA 4.0 の形と既公開 3 リポの中身）**:
+
+出所の内訳 — **ユーザー裁定**（5 = a）: irodori は MIT の全文 + `Copyright (c) 2026 Aratako` の
+行・sbv2-jvnv は CC BY-SA 4.0 の条文を同梱・SBV2 の Pipeline を声のファミリーで分ける。
+**実装側の判断**（裁定の字面の外）: irodori に `Copyright (c) 2025 SB Intuitions` の行を上流
+`sbintuitions/modernbert-ja-310m` の `LICENSE` から足したこと、分けた Pipeline の名前を
+`sbv2`（JVNV 系 — 公開済みリポの焼き方の綴りを保つ）/ `sbv2-fn`（FN 系）にしたこと。以下は
+両方を合わせた形。
+
+- **CC BY-SA 4.0**: 条文全文 + §3(a)(1) の帰属と改変の表示。§3(a)(1)(C) / §3(b)(2) は URI
+  でも満たせるが、配布リポが HF の外へ写されても条文が一緒に動くよう、Apache と同じく全文を
+  `LICENSE.md` に置く（原文は creativecommons.org の plain-text 版 legalcode の逐語 —
+  `tools/export-recipes/_shared/licenses/cc_by_sa_4_0.txt`）。`NOTICE.md` は上流の出所と作成者
+  （上流が名乗る名前空間）・学習データ・改変の列挙・同一ライセンス継承の宣言を持つ。上流が
+  著作権表示を配っていないときは、保持する著作権行を書かない（作らない）。
+- **sbv2-jvnv**: 上流 2 本（声 `litagin/style_bert_vits2_jvnv` と text encoder
+  `ku-nlp/deberta-v2-large-japanese-char-wwm`）がどちらも CC BY-SA 4.0 なので上の形 1 組。
+  SBV2 は声のファミリーごとにライセンスが違うので、Pipeline を**ファミリーで分ける**
+  （`--pipeline sbv2` = JVNV 系・`--pipeline sbv2-fn` = FN 系）。FN 系は上流の書面条件が Booth
+  の頒布ページだけで同梱できる条文が無く、HF 公開も保留のままなので法的テキストは空。
+- **irodori**: MIT。著作権行は上流実装リポ（GitHub `Aratako/Irodori-TTS`）の
+  `Copyright (c) 2026 Aratako` を同じ作者の重み（本体・コーデック）にも当て、text backbone の素
+  `sbintuitions/modernbert-ja-310m` の `LICENSE` の `Copyright (c) 2025 SB Intuitions` を併記する
+  （backbone はその fine-tune なので、派生の再配布でも上流の表示を落とせない）。`NOTICE.md` は
+  本体を「`README.md` に載っている checkpoint」と書いて版を名指ししない — 1 組の法的テキストが
+  v4 / v4.1 の 2 リポへ載るため。
+
 ### 8. siglip2 は 1 リポ 2 モデル（既定 = base）
 
 `karume-siglip2` に base と so400m を同居させる（決定 1 の家族 1 リポがそのまま掛かる）。

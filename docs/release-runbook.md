@@ -16,7 +16,8 @@
   ので、bump 前に焼いた配布形は古い版を名乗ったまま HF へ載る。開発中のローカル再焼きは
   古い表記のままでよい（e2e が読むのはバイト列で generator ではない）が、**公開する 1 回は
   bump 後に焼き直す**。以下の節の並びは作業のまとまりであって時系列ではない — **§4 の
-  lockstep bump コミットだけは §1〜§3 より前**に置く（残りの §4 = push / Release は最後）。
+  lockstep bump コミットと直後の venv 同期だけは §1〜§3 より前**に置く（残りの §4 = CHANGELOG の
+  版の節への移動 / push / Release は最後）。
 - pin の SHA はアップロードが済むまで存在しない（ADR 0073 — models の対応表
   `<FAMILY>_SOURCES` は「公開時点の最新コミット」に固定する。表の形は ADR
   [0092](decisions/0092-distribution-repos-and-sources.md) 決定 3）。
@@ -41,10 +42,15 @@ commit SHA を焼き込む**ので、参照先が先に公開されていない�
    `--ref-role` は `text_encoder` / `vae_decoder` / `tokenizer` / `tokenizer_2` の 4 つ
    （`text_conditioner` は extra の 2 モデルとも自前なので越境しない — `distribution.py` の
    `own_text_conditioner=True`）。
-   **ステージングの `--out` は必ずリポ名と同名のディレクトリにする** — カードの Usage 例の
-   repo 名は出力ディレクトリ名から導出されるため、別名で焼くと誤った repo 名がカードに載る
-   （0.5.0 で `-release` 付きステージング名がそのまま公開カードに写った実害 — 2026-08-25 に
-   修正。恒久策は backlog later）
+   **カードの Usage 例に載る repo 名は pipeline の宣言（`Pipeline.repo_name`）から導かれ、`--out` の
+   ディレクトリ名は見ない**（0.5.0 で `-release` 付きステージング名が公開カードに写った実害は、この導出で
+   構造的に消えた）。extra は宣言の `karume-anima-extra` がそのまま載るので `--repo` は要らない。
+   `--repo` は宣言を上書きする口で、引数は `OWNER/NAME` の形（例 `hdae/karume-anima-extra` — 名前だけを
+   渡すと形の検査で落ちる）。`--repo` を付けたら `--out` も必須。複数モデルを 1 リポに束ねてモデルごとの
+   宣言が揃わない系列では `--repo` が必須で、無ければ組み立て前に落ちる — 現行では `sbv2` の JVNV 4 声
+   （宣言は話者ごとの `karume-sbv2-<話者>` なので `--repo hdae/karume-sbv2-jvnv` — 2026-09-24 に
+   `resolve_repo` で確認）。
+   `--out` は `models/<repo>`（リポ名と同名）に置く — §2 の台本は `models/<repo>` をそのまま上げる
 4. **`karume-anima-extra` を上げる**
    - [ ] extra ミラーの生成後に**越境の実資産門を復活**させる — `packages/models/tests/e2e_anima_test.ts`
          の `CROSS_REPO_MIRRORS` と `packages/runtime/tests/assets_fusion_counts_test.ts` の
@@ -124,9 +130,13 @@ export HF_XET_DEDUPLICATION_GLOBAL_DEDUP_QUERY_ENABLED=false
 - [ ] **`~/.cache/huggingface/xet/*/shard-cache` を毎回退避する**（再アップロードだけでなく
       **初回でも**）。global dedup のヒットでサーバから取り寄せた shard がここに残り、
       次のアップロードはそれを引き当てて断片化を継承する
-- [ ] **書き込みトークンへ切替**: `hf auth switch --token-name "Karume Release"` —
+- [ ] **書き込みトークンへ切替**: `tools/.venv/bin/hf auth switch --token-name "Karume Release"` —
       既定の読み取りトークン（Karume Gated Read）のままだと LFS batch が 403 になる
-      （2026-08-21 実測）。アップロードが済んだら読み取りトークンへ戻す
+      （2026-08-21 実測）。**アップロードが済んだら読み取りトークンへ戻す**:
+      `tools/.venv/bin/hf auth switch --token-name "Karume Gated Read"` → `tools/.venv/bin/hf auth list` で選ばれている
+      トークンを確かめる。NOTE: この戻しは守られていない実態がある（2026-09-24 時点で 09-23 の
+      アップロード以来 Karume Release が選ばれたまま）。書き込みトークンを常用すると、読むだけの作業でも
+      誤操作がそのまま HF への書き込みになる
 - [ ] **台本は機械の門も兼ねる**（人の目視に依存しない）: `upload` は shard-cache の退避に
       失敗した時点で非 0 終了し、アップロード後に `global_dedup_query_enabled = false` と
       CAS 照会 0 回を検査して不一致なら非 0 終了する。`check` は `models/<repo>` に
@@ -142,11 +152,21 @@ export HF_XET_DEDUPLICATION_GLOBAL_DEDUP_QUERY_ENABLED=false
       乗り、大きいリポは複数コミット（`(part N)` — huggingface_hub のコミット分割の番号で、容器の part とは
       別物）に分かれる。どれも huggingface_hub 1.27 の `upload_folder` の実装の振る舞いで、仕様の保証ではない
       — 版を上げたら確かめ直す
+- [ ] **上げる直前に HF の main とローカルミラーを突き合わせ、HF にだけ在る path を `--delete` に足す**:
+      `curl -sS "https://huggingface.co/api/models/hdae/<repo>/tree/main?recursive=true"` の `type: "file"` の
+      `path` 一覧と、`models/<repo>` 配下のファイル一覧の差を取る。`'*.safetensors'` だけでは旧形の
+      safetensors 以外が残る（例: `karume-gemma4` の旧 PLE 索引 `e2b/ple/ple.json`）。`--delete` は
+      繰り返し指定できる — 例 `tools/release/hf-upload.zsh upload karume-gemma4 --delete '*.safetensors'
+      --delete 'e2b/ple/*'`。NOTE（推測）: tree API は大きな一覧をページ分割して返しうる（huggingface_hub の
+      `list_repo_tree` は同じ endpoint を `Link` ヘッダで辿る実装）ので、1 回の curl では一覧が欠ける可能性が
+      ある — 件数が多いリポは `tools/.venv/bin/python -c` で `HfApi().list_repo_files("hdae/<repo>")` を
+      使う。HF の既定ファイル `.gitattributes` は差に出るが消さない。アップロード後に同じ
+      突き合わせをもう一度行い、差が `.gitattributes` だけであることを確かめる
 - [ ] **pin は削除後の main で焼く**: §3 の SHA はアップロードの全コミットが済んだ後の main
       （台本のログの `### main sha` 行）から取る。削除を別の回に分けると main が動き、pin を 2 回付け替える
       ことになる（実例: irodori-v4.1-small は旧 safetensors 65 本を後から消して pin を付け替えた — `1c952948`）。
       旧 revision のファイルは HF の履歴に残り、公開済みの旧版パッケージは旧 pin から読み続ける
-- [ ] **リポ名の改名（該当回のみ）**: `hf repos move <old> <new>` で改める。旧名は API /
+- [ ] **リポ名の改名（該当回のみ）**: `tools/.venv/bin/hf repos move <old> <new>` で改める。旧名は API /
       resolve とも **HTTP 307** で新名へリダイレクトするので既公開の参照は切れないが、
       **リダイレクトが生きていることを実際に叩いて確認**する —
       `curl -sS -o /dev/null -w '%{http_code} %{redirect_url}' "https://huggingface.co/api/models/<old>"`
@@ -226,11 +246,18 @@ NOTE: パッケージ README / LICENSE は公開物に含まれる（`packages/*
 - [ ] lockstep bump コミット: 3 JSR パッケージ + exporter の `version`、models → hub 等の
       `^` 依存、`deno.lock` の specifier、**`tools/uv.lock` の再生成（`uv lock` — MUST。CI は
       `uv run --locked` で鮮度検査するため、漏れると exporter / recipes 両ジョブが赤になる。
-      実例: 0.4.3 の `e15e271`）**を揃えて 1 コミット（実績: `d65535c` / `7d97dd4`）
-- [ ] `CHANGELOG.md` の `[Unreleased]` をその版の節へ移し、見出しに日付（`git log -1 --format=%cs`
-      と同じ `YYYY-MM-DD`）と版へのリンク定義を入れる。**bump コミットに含める**（ADR
-      [0008](decisions/0008-public-api.md) の「breaking は CHANGELOG で明示する」の実体 —
-      bump 後に足すと公開タグの中身と食い違う）
+      実例: 0.4.3 の `e15e271`）**を揃えて 1 コミット（実績: `d65535c` / `7d97dd4`）。
+      `CHANGELOG.md` はこのコミットに含めない（下の項目 — bump は §1〜§3 より前に切るので、
+      焼き直しからアップロードまでの間の変更も `[Unreleased]` へ書き続ける）
+- [ ] **bump の直後に venv を同期する（MUST）**: `(cd tools && uv sync --all-groups)`。manifest の
+      `generator` 欄は pyproject でも uv.lock でもなく**venv に入っている `karume` の dist-info の版**を
+      写す（`karume.dist.generator_tag()` = `importlib.metadata.version`）ので、`uv lock` だけで
+      `--no-sync` の `uv run` を続けると旧版を名乗ったまま焼ける。機械確認 = 焼き直した各 `dist.py` の
+      最終行 `[dist] <out> — karume/<版> / ...` の `<版>` が bump 後の版であること
+- [ ] **リリース直前の別コミット**で `CHANGELOG.md` の `[Unreleased]` をその版の節へ移し、見出しに
+      日付（そのコミットの `git log -1 --format=%cs` と同じ `YYYY-MM-DD`）と版へのリンク定義を入れる。
+      §3 の pin コミットの後・push の前に置く（ADR [0008](decisions/0008-public-api.md) の「breaking は
+      CHANGELOG で明示する」の実体 — Release を作るコミットに版の節が無いと公開タグの中身と食い違う）
 - [ ] push（ユーザー）→ CI 緑を確認（`ci.yml` は `deno publish --dry-run` で公開グラフも検証）
 - [ ] CI 緑の main コミットから GitHub Release を作成 → published（発火）
 - [ ] JSR 側で 3 パッケージの新 version を確認
