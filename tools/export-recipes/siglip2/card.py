@@ -100,9 +100,9 @@ def _siglip2_overview(manifest: Mapping[str, Any]) -> list[str]:
         "## What is this",
         "",
         "An image embedding distribution: the **vision tower** of SigLIP2, converted into the",
-        "WebGPU inference runtime **Karume**'s container format (a graph shard carrying the graph",
-        "JSON in `__metadata__`, followed by the weight shards it names). Runs as-is in the",
-        "browser and in Deno.",
+        "WebGPU inference runtime **Karume**'s container format (a `.krm` part sequence whose",
+        "first part carries the graph and model descriptors). Runs as-is in the browser and in",
+        "Deno.",
         "",
         "- One graph, one call: pixels in, `pooler_output` out — the pooled `[1,"
         f" {config['hiddenDim']}]` vector from the attention-pooling (MAP) head.",

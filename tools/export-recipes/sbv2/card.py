@@ -205,8 +205,8 @@ def _sbv2_overview(manifest: Mapping[str, Any]) -> list[str]:
         "## What is this",
         "",
         f"A Japanese text-to-speech distribution: **{SBV2_ARCHITECTURE}** voices converted into",
-        "the WebGPU inference runtime **Karume**'s container format (a single safetensors file =",
-        "weights + a graph JSON embedded in `__metadata__`). Runs as-is in the browser and in"
+        "the WebGPU inference runtime **Karume**'s container format (a `.krm` part sequence whose",
+        "first part carries the graph and model descriptors). Runs as-is in the browser and in"
         " Deno.",
         "",
         "- The acoustic chain is shipped as fused graphs: `text_encoder` (a Japanese DeBERTa),",

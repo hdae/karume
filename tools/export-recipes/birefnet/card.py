@@ -53,8 +53,8 @@ class BirefnetResources:
 
     #: GPU 総確保（常駐の重み + 中間の領域）。
     total: str
-    #: 中間テンソルに要る領域。**常駐の重みは持たない** — その数は manifest の shard 側に
-    #: あり（quant 表が導出する）、ここに写すと同じ量の正本が 2 つになる。
+    #: 中間テンソルに要る領域。**常駐の重みは持たない** — その数は manifest の container
+    #: （part 列）側にあり（quant 表が導出する）、ここに写すと同じ量の正本が 2 つになる。
     intermediates: str
     #: WebGPU 既定の `maxStorageBufferBindingSize`（128MiB）を超える binding を 1 本、
     #: **実測されたその正体ごと**名乗る句（読み手が「既定スペックでは走らない」と読める形）。
@@ -210,8 +210,8 @@ def _birefnet_overview(manifest: Mapping[str, Any], entry: BirefnetCheckpoint) -
         "## What is this",
         "",
         "A background-removal distribution, converted into the WebGPU inference runtime",
-        "**Karume**'s container format (a graph shard carrying the graph JSON in `__metadata__`,",
-        "followed by the weight shards it names). Runs as-is in the browser and in Deno.",
+        "**Karume**'s container format (a `.krm` part sequence whose first part carries the graph",
+        "and model descriptors). Runs as-is in the browser and in Deno.",
         "",
         f"The weights are {entry.tagline}.",
         "",

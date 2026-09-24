@@ -185,9 +185,9 @@ def _official_overview(manifest: Mapping[str, Any]) -> list[str]:
         "",
         "The official CircleStone **Anima** models —"
         f" [{base_model}](https://huggingface.co/{base_model}) and its official variants —",
-        "converted into the WebGPU inference runtime **Karume**'s container format (safetensors =",
-        "weights + a graph JSON embedded in `__metadata__`, split across numbered shards when a",
-        "component is too large for one file). Runs as-is in the browser and in Deno.",
+        "converted into the WebGPU inference runtime **Karume**'s container format (a `.krm` part",
+        "sequence whose first part carries the graph and model descriptors). Runs as-is in the",
+        "browser and in Deno.",
         "",
         f"- The default model is `{model_name}` — **{defaults['steps']} steps / guidance"
         f" {defaults['guidanceScale']}** by default.",
@@ -217,9 +217,9 @@ def _extra_overview(manifest: Mapping[str, Any]) -> list[str]:
         "",
         "Community fine-tunes of the CircleStone **Anima** base model"
         f" ([{base_model}](https://huggingface.co/{base_model})),",
-        "converted into the WebGPU inference runtime **Karume**'s container format (safetensors =",
-        "weights + a graph JSON embedded in `__metadata__`, split across numbered shards when a",
-        "component is too large for one file). Runs as-is in the browser and in Deno.",
+        "converted into the WebGPU inference runtime **Karume**'s container format (a `.krm` part",
+        "sequence whose first part carries the graph and model descriptors). Runs as-is in the",
+        "browser and in Deno.",
         "",
         f"- Ordinary many-step sampling — **{defaults['steps']} steps / guidance"
         f" {defaults['guidanceScale']}** by default. Classifier-free guidance is on, which is",

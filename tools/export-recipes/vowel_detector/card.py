@@ -107,8 +107,8 @@ def _vowel_detector_overview(manifest: Mapping[str, Any]) -> list[str]:
         "## What is this",
         "",
         "A small Japanese **vowel-sequence detector for lip-sync**, converted into the WebGPU",
-        "inference runtime **Karume**'s container format (a single safetensors file = weights + a",
-        "graph JSON embedded in `__metadata__`). Runs as-is in the browser and in Deno.",
+        "inference runtime **Karume**'s container format (a `.krm` part sequence whose first part",
+        "carries the graph and model descriptors). Runs as-is in the browser and in Deno.",
         "",
         "- Audio in, a **`.lab` timeline** out: `start end label` lines over the 7 lip-sync"
         " classes (`a` / `i` / `u` / `e` / `o` / `N` / `pau`), on a 20 ms grid.",
