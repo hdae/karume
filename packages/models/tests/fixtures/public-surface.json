@@ -3,6 +3,10 @@
   "entries": {
     ".": [
       {
+        "name": "ANIMA_SAMPLER_TYPES",
+        "kind": "variable"
+      },
+      {
         "name": "ANIMA_SOURCES",
         "kind": "variable"
       },
@@ -528,6 +532,10 @@
       }
     ],
     "./anima": [
+      {
+        "name": "ANIMA_SAMPLER_TYPES",
+        "kind": "variable"
+      },
       {
         "name": "ANIMA_SOURCES",
         "kind": "variable"

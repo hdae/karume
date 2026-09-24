@@ -27,9 +27,11 @@ export type {
 /**
  * denoise の更新則の語彙（`AnimaGenerateRequest.sampler` が受ける値）。省略時は manifest の
  * `pipelineConfig.scheduler.type` が既定を決めるので、**指定は配布者の推奨からの明示的な離脱**
- * になる。型を出さないと消費側（CLI / UI）が選択肢を綴り直すことになるので面に出す。
+ * になる。型だけでは選択肢を列挙できず、消費側（CLI の引数検査 / UI の選択肢）が値を綴り直す
+ * ことになるので、値の並び（凍結済み）も面に出す。
  */
 export type { AnimaSamplerType } from "./src/anima/config.ts";
+export { ANIMA_SAMPLER_TYPES } from "./src/anima/config.ts";
 
 /**
  * **このパッケージ版が検証した取得元の対応表**（家族 1 つにつき 1 表・キーは HF リポ名から

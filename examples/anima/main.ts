@@ -4,13 +4,14 @@
  *     deno task demo:anima --prompt "1girl, solo, ..." --resolution 1344x768 --seed 42
  *     deno task demo:anima --source someone/anima --model anima-v1.0 --quant f16 --steps 20
  *     deno task demo:anima --source models/karume-anima --steps 32 --guidance 6
+ *     deno task demo:anima --model anima-v1.0 --steps 20 --sampler dpmpp-2m
  *     deno task demo:anima --source models/karume-anima-extra \
  *         --source-map hdae/karume-anima=models/karume-anima
  *
  * `--source` 未指定なら `models/karume-anima` のローカル配布形を優先する。
  * 不在の場合だけ `ANIMA_SOURCES["anima"]` の検証済み公開 revision を取得する。
  * 明示した `--source` はローカル配布形または HF リポジトリ名としてそのまま読む。
- * 未指定のノブは manifest の `defaults` が埋める。
+ * 未指定のノブは manifest の `defaults` が埋める（`--sampler` は `scheduler.type` — ADR 0078）。
  *
  * 追加学習系（karume-anima-extra）のミラーは text stack を公式リポへ**越境参照**するので、
  * その取得元を `--source-map owner/name=<パス>` で名指しする（繰り返し可。未指定で越境を
@@ -18,13 +19,18 @@
  */
 
 import { AnimaPipeline, encodePng } from "../../packages/models/mod.ts";
-import { ANIMA_SOURCES, parseResolution } from "../../packages/models/anima.ts";
+import {
+  ANIMA_SAMPLER_TYPES,
+  ANIMA_SOURCES,
+  parseResolution,
+} from "../../packages/models/anima.ts";
 import { distributionSource, localOrPinnedSource } from "../shared/local-source.ts";
 import { runMain } from "../shared/run-main.ts";
 
 const USAGE = "--source <パス|HF repo> --source-map <owner/name=パス> --prompt <文字列>" +
   " --resolution <WxH> --model <名前>" +
-  " --quant <名前> --seed <整数> --steps <整数> --guidance <数> --negative <文字列>";
+  " --quant <名前> --seed <整数> --steps <整数> --guidance <数> --negative <文字列>" +
+  ` --sampler <${ANIMA_SAMPLER_TYPES.join("|")}>`;
 const KNOWN = new Set([
   "source",
   "source-map",
@@ -36,6 +42,7 @@ const KNOWN = new Set([
   "steps",
   "guidance",
   "negative",
+  "sampler",
 ]);
 const DEFAULT_PROMPT = "1girl, solo, long hair, blue eyes, school uniform, cherry blossoms," +
   " outdoors, smile, upper body, masterpiece, best quality";
@@ -87,6 +94,19 @@ if (rawGuidance !== undefined && !Number.isFinite(Number(rawGuidance))) {
 }
 const guidanceScale = rawGuidance === undefined ? undefined : Number(rawGuidance);
 const negativePrompt = args.get("negative");
+/**
+ * 更新則のノブ（未指定なら manifest の `scheduler.type`）。語彙の正本はパッケージの並びで、
+ * 綴り違いはモデルのロード（GB 級）より前のここで落とす。
+ */
+const spelledSampler = args.get("sampler");
+const sampler = spelledSampler === undefined
+  ? undefined
+  : ANIMA_SAMPLER_TYPES.find((candidate) => candidate === spelledSampler);
+if (spelledSampler !== undefined && sampler === undefined) {
+  throw new Error(
+    `--sampler ${spelledSampler} は ${ANIMA_SAMPLER_TYPES.join(" / ")} のどれでもない`,
+  );
+}
 
 // 越境 mapping は明示した取得元にだけ適用する。
 if (source === undefined && sourceMaps.length > 0) {
@@ -111,7 +131,8 @@ const main = async (): Promise<void> => {
   console.log(
     `[anima] ${label}` +
       ` / model ${model ?? "（manifest の既定）"}` +
-      ` / quant ${quant ?? "（manifest の既定）"} / seed ${seed}`,
+      ` / quant ${quant ?? "（manifest の既定）"}` +
+      ` / sampler ${sampler ?? "（manifest の既定）"} / seed ${seed}`,
   );
   const started = performance.now();
   await using pipeline = await AnimaPipeline.fromPretrained(
@@ -131,10 +152,13 @@ const main = async (): Promise<void> => {
     ...(resolution === undefined ? {} : { resolution }),
     ...(guidanceScale === undefined ? {} : { guidanceScale }),
     ...(negativePrompt === undefined ? {} : { negativePrompt }),
+    ...(sampler === undefined ? {} : { sampler }),
   });
   const png = await encodePng(image.data, image.width, image.height);
+  // sampler は指定したときだけ綴る — 更新則の A/B が同じ名前を上書きしないため。未指定の名前を
+  // 変えないのは、`eval-images.ts` と実画像コーパスを読む recipes がこの綴りを写しているから。
   const name = `anima-${quant ?? "default"}-${image.width}x${image.height}` +
-    `-${steps ?? "default"}step-seed${seed}.png`;
+    `-${steps ?? "default"}step${sampler === undefined ? "" : `-${sampler}`}-seed${seed}.png`;
   /** 既定の出力先に使うモデル名（取得元の末尾要素 — パスでも HF リポ名でも同じ規則）。 */
   const sourceRef = source ?? ANIMA_SOURCES["anima"].repo;
   const sourceName = sourceRef.replace(/\/+$/, "").split("/").at(-1) ?? sourceRef;

@@ -31,6 +31,7 @@ import {
   assertThrows,
 } from "@std/assert";
 import { parseManifest } from "@karume/hub";
+import { ANIMA_SAMPLER_TYPES } from "../anima.ts";
 import { assertAnimaSamplerType } from "../src/anima/config.ts";
 import {
   AnimaPipeline,
@@ -345,6 +346,24 @@ Deno.test("assertAnimaSamplerType: request 側の綴りも 2 語だけを受け�
     const thrown = assertThrows(() => assertAnimaSamplerType(value, "sampler"), Error);
     assertStringIncludes(thrown.message, expected);
   }
+});
+
+Deno.test("ANIMA_SAMPLER_TYPES: 公開した並びは受理集合そのもので、消費側からは書き換えられない", () => {
+  // CLI / UI はこの並びで引数を検査し選択肢を並べる。並びと検査が別の表を持つと「選べるのに
+  // 落ちる語」ができるので、並びの全語が検査を通ることを公開面（`./anima`）から縛る。
+  assertEquals([...ANIMA_SAMPLER_TYPES], ["euler", "dpmpp-2m"]);
+  for (const name of ANIMA_SAMPLER_TYPES) {
+    assertEquals(assertAnimaSamplerType(name, "sampler"), name);
+  }
+  // 型を通らない JS の消費者が共有の並びへ語を足す・差し替える形。凍結が外れると以後の全
+  // pipeline の受理集合が黙って広がる（未知の綴りが GPU の手前で落ちなくなる）。
+  assertThrows(
+    () => Reflect.apply(Array.prototype.push, ANIMA_SAMPLER_TYPES, ["dpm++"]),
+    TypeError,
+  );
+  assertEquals(Reflect.set(ANIMA_SAMPLER_TYPES, 0, "dpm++"), false);
+  assertEquals([...ANIMA_SAMPLER_TYPES], ["euler", "dpmpp-2m"]);
+  assertThrows(() => assertAnimaSamplerType("dpm++", "sampler"), Error, "実際 'dpm++'");
 });
 
 Deno.test("latentSnapshot: 束縛した時点の latent を写す（step を進めても写しは変わらない）", () => {

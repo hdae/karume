@@ -18,7 +18,7 @@
  * 置き場が環境ごとに違い、`main.ts` は `karume.json` を持たないパスを **HF リポジトリ名**と
  * 読んで取得しに行くので、既定を書くと打ち間違いが「知らないリポジトリの取得」に化ける。
  *
- * MUST: quant / steps は渡さない。ファイル名がその 2 つを綴る（{@link outputName}）ので、
+ * MUST: quant / steps / sampler は渡さない。ファイル名がその 3 つを綴る（{@link outputName}）ので、
  * 渡した瞬間に別名で焼かれ、golden（`io.photo-*.safetensors`）とは無関係の画像が
  * 日付席に増えるだけになる。
  *
@@ -70,7 +70,8 @@ const CASES: readonly { seed: number; case: string; subject: string; why: string
 const prompt = (subject: string): string => `${QUALITY_PREFIX}, ${subject}, ${QUALITY_SUFFIX}`;
 
 /**
- * `main.ts` が書くファイル名を写したもの（quant / steps 未指定 = `default` / `defaultstep`）。
+ * `main.ts` が書くファイル名を写したもの（quant / steps 未指定 = `default` / `defaultstep`・
+ * sampler 未指定 = 綴らない）。
  * 綴りの正本はあちらなので、1 枚ごとに存在を検査して**名前がずれたら落とす**。
  */
 const outputName = (seed: number): string =>

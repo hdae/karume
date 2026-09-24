@@ -87,9 +87,16 @@ const RESOLUTION_KEYS: readonly string[] = ["width", "height"];
  * - `"euler"` — `FlowMatchEulerDiscreteScheduler` の 1 次更新（`sampler.ts` の `cfgEulerStep`）。
  * - `"dpmpp-2m"` — DPM++ 2M（`src/generation/dpm-solver-multistep.ts`）。
  */
-export type AnimaSamplerType = "euler" | "dpmpp-2m";
+export type AnimaSamplerType = typeof ANIMA_SAMPLER_TYPES[number];
 
-const SAMPLER_TYPES: readonly AnimaSamplerType[] = ["euler", "dpmpp-2m"];
+/**
+ * {@link AnimaSamplerType} の値の並び（語彙の正本 — 型はここから導く）。検査
+ * （{@link assertAnimaSamplerType}）も CLI / UI の選択肢もこの 1 本を読む。
+ *
+ * MUST: 凍結する — 公開する module スコープの共有物で、JS の消費者が書き換えると以後の
+ * 全 pipeline の受理集合（manifest 側 / request 側の両方）が黙って変わる。
+ */
+export const ANIMA_SAMPLER_TYPES = Object.freeze(["euler", "dpmpp-2m"] as const);
 
 /**
  * `scheduler.type` 省略時の値。
@@ -176,17 +183,17 @@ const parseDefaults = (raw: unknown): AnimaDefaults => {
 /**
  * サンプラ種別の綴りを**期待と実際を並べて**検査する（manifest 側 / 生成要求側の共通口）。
  *
- * MUST: 語彙の正本は {@link SAMPLER_TYPES} 1 本 — 綴り違いが黙って既定へ縮退すると、宣言・
+ * MUST: 語彙の正本は {@link ANIMA_SAMPLER_TYPES} 1 本 — 綴り違いが黙って既定へ縮退すると、宣言・
  * 指定した更新則と実行が食い違ったまま気づけない。`where` は綴りの出所（`scheduler.type` /
  * request の `sampler`）を指す。
  */
 export const assertAnimaSamplerType = (value: unknown, where: string): AnimaSamplerType => {
   const accepted = typeof value === "string"
-    ? SAMPLER_TYPES.find((candidate) => candidate === value)
+    ? ANIMA_SAMPLER_TYPES.find((candidate) => candidate === value)
     : undefined;
   if (accepted === undefined) {
     throw new Error(
-      `${where}: 期待 ${SAMPLER_TYPES.map((name) => `'${name}'`).join(" / ")}` +
+      `${where}: 期待 ${ANIMA_SAMPLER_TYPES.map((name) => `'${name}'`).join(" / ")}` +
         `（実際 ${typeof value === "string" ? `'${value}'` : String(value)}）`,
     );
   }
