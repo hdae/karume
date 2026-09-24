@@ -265,6 +265,15 @@ NOTE: 設計案 v2 はこの流儀の先例として `distribution.py:570` の�
   part 長の集合 / block 長 / 同時処理バイト / 展開領域 / GPU の device 上限。
 - **`fromContainer(bytes)`（全量 ArrayBuffer の口）は残す**。Chromium の 2,145,386,496 B は
   **この口にだけ残る制限**であることを仕様に明記する（HF 公式配布は分割形なので当たらない）。
+- **追記（2026-09-24・段 3e）— CPU 側の解放はフェンスを待たない**: 上のフェンスが律するのは wgpu の
+  staging だけで、CPU 側のバイト列は `writeBuffer` が戻った時点で手放してよい（WebGPU 仕様: content
+  timeline で呼び出しの時点に `dataContents` を写す）。Session 構築は part の block を 1 本ずつ読んでは
+  上げて手放す（`WeightBatch.items` の lazy 化）ので、JS 側で参照が生きる重みのバイト列は part 1 本
+  ぶんから item 1 本ぶん（block 1 本 + 同乗 scale + 展開席の f32 展開結果）になる。ただし scan 型の
+  取得元では block が hub の保持枠の view なので、上限は保持枠 1 本 + GC を待つ前の器のまま（container-v1
+  §11）。段 3e の実測では scan 型の external 最大が最大 part の約 1.5〜4.4 本だった（追記 5 の 5）。フェンスは part ごと
+  1 回のまま。実機での成立は `packages/runtime/tests/gpu_write_buffer_copy_test.ts`（戻った直後に
+  毒で埋めても出力がビット一致）で固定し、ADR 0070 決定 3 の「フェンス後解放」は同日の追記で改めた。
 
 ### 10. `encoding` の宣言語彙 — bit 数は派生値にする
 
@@ -697,3 +706,38 @@ manifest の形は ADR [0109](0109-manifest-v5-container.md)、PLE は ADR [0085
     （「part 長の既定の見直し」と同じ回）で実測して採否を付ける。Range 取得（段 6）の前倒し条件
     「cold のピークが part 長 + 重ね合わせを超える」には、seek 型では当たらず scan 型で当たる — ただし
     scan 型の超過は取得ではなく保持の重複が原因なので、Range ではなく上の候補で閉じる。
+
+## 追記 5 — 段 3e の実測で確定した点（2026-09-24）
+
+段 3 の「part 長の既定の見直し」と、段 2 から持ち越した RAM ピークの改善候補 3 つの採否。実測の正本は
+[研究記録](../research/2026-09-24-part-length-ram-peak.md)（3 系列 × part 長 {256, 512, 1024} MiB ×
+cold / warm / local × 3 回の中央値）で、ここは決めた点と検収③の状況だけ。
+
+1. **part 長の既定は 256 MiB のまま**（決定 6 の「段 3 の検収後に見直す」への答え）。下の 2 / 3 の後、
+   seek 型（ローカルの位置読み・ブラウザの Blob）のピークは part 長に依らなくなったが、Deno の HF 経由
+   （scan 型）は hub の保持枠が part を握るので、おおむね part 長とともに伸びる（cold の anima run 1,139 / 1,741 /
+   2,245 MiB。gemma4 load は 1,038 / 1,032 / 1,515 MiB で、256 → 512 では伸びていない）。
+   既定を上げて得るのは part 本数だけで、区間読みの資産は 1 block = 1 part の専用 part なので本数もほとんど
+   減らない（gemma4 E2B の `model` 容器は 83 / 79 / 78 part）。
+2. **候補 3 を採る — hub の scan 型の切り出しは保持枠の器の view**（`slice()` → `subarray()`）。写しが
+   part ぶん 2 重に乗る形が消える。成立条件は整列で、器は tight（byteOffset 0）かつ block 開始は 64 B 整列
+   （決定 7）なので、scale の `Float32Array` view に要る 4 B 整列がそのまま満たされる。区間より長く持つ
+   呼び手は写す（`AssetReader.read` の MUST）。
+3. **候補 2(c) を採る — Session 構築は block を 1 本読んでは上げて手放す**（`WeightBatch.items` の
+   lazy 化・フェンスは part ごと 1 回のまま）。根拠は WebGPU 仕様の `writeBuffer`（呼び出しの時点で写す —
+   決定 9 の追記・ADR 0070 決定 3 の追記）で、`packages/runtime/tests/gpu_write_buffer_copy_test.ts` は
+   Arc B570 / Deno 2.9.6 の `test:core` レーンで緑。
+4. **候補 1（取得層の `readFile` に器を渡して使い回す）は採らない**。単独の削減は候補 3 以下で、候補 3 と
+   組むと器の view が hub の外へ出て、runtime 公開型 `BlockSource` の寿命契約を借用に変える破壊的変更が要る
+   （3 と衝突する）。加えて、取得層は同じ器の並行使用を拒むので PLE の行読み（16 本並行）が直列になり、
+   器が最大 part 長で常駐して gemma4 の host PLE の decode 中に約 +224 MiB 増える見込み（**推測**）。
+5. **検収③（part 長を動かした構成の再測・宣言からの事前見積りとの一致）**: seek 型は成立 — 3 と 2(c) の
+   後は part 長に依らず external 最大 71〜139 MiB で、item 1 本（最大 block 32 MiB + 同乗 scale + 展開席の
+   f32 展開結果）と固定分の見積りの桁に収まる。scan 型は「保持枠 1 本 + GC を待つ前の器」で、GC を待つ
+   本数は宣言からは閉じない（part 256 の anima で最大 part の約 4.4 本 = run 1,139 MiB）。warm の payload
+   digest 0 回・キャッシュ書込 0 本（段 2 の検収③）は全 27 構成で保たれた。
+6. **Range 取得（段 6）の前倒し条件**（追記 2 の 2）について、追記 3 の 10 の見立て（scan 型の超過は保持の
+   重複が原因で、Range ではなく段 3 の候補で閉じる）は半分だけ当たった。重複は 2 / 3 で消えたが、scan 型の
+   cold は今も「part 長 + 重ね合わせ」を超える（part 256 で irodori 582・gemma4 1,038・anima 1,139 MiB）。
+   残りの原因は part 単位の全量読みそのもの（取得の粒度）で、条件は形式上成り立ったまま。前倒しするかは
+   ここでは決めない。

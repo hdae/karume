@@ -2601,8 +2601,8 @@ type PreparedSource = { readonly opened: BoundContainer; readonly graphName: str
  *
  * 保持するのは ①供給元（開いた容器と対象グラフ名）②`IrGraph` ③常駐計画（席）の 3 つだけで、
  * **GPU 資源は一切持たない**（`estimate` は純関数のまま — 決定 5 の「GPU 非依存」）。重みの
- * バイト列は 1 つも抱えない: block は {@link PreparedModel.createContainerSession} が part ごとに
- * 取り、フェンスの後に手放す（RAM ピーク O(最大 part) — ADR 0108 決定 9）。
+ * バイト列は 1 つも抱えない: block は {@link PreparedModel.createContainerSession} が 1 本ずつ
+ * 取り、GPU へ上げた時点で手放す（フェンスは part ごと — ADR 0108 決定 9）。
  *
  * MUST: 構築は {@link PreparedModel.createContainerSession} だけを入口にするため、mod.ts では
  * **型としてのみ**公開する（`Session` / `GpuContext` と同じ流儀 — 直接構築すると capability 門と
@@ -2665,7 +2665,7 @@ export class PreparedModel {
   }
 
   /**
-   * 容器の block を part ごとに取り出して Session を作る（ADR 0108 決定 9 — errorScope は block
+   * 容器の block を 1 本ずつ取り出して Session を作る（ADR 0108 決定 9 — errorScope は block
    * ごと・フェンスは part ごと）。`krm` では block は取得のたびに sha256 で検証される
    * （container-v1 §7 の cold 経路 — 検証は供給元 `readBlock` の担当）。
    */
@@ -2685,6 +2685,9 @@ export class PreparedModel {
  * 容器の供給計画を part ごとの {@link WeightBatch} に流す。part の中では initializer の宣言順
  * （= 束縛表の並び）で、piece 列は添字順。scale は piece 1 と同じ part にある（規則③）ので、
  * piece 1 の item に同乗させる。
+ *
+ * block は part を読み切ってから渡すのではなく、`items` を 1 本引くたびに 1 本読む（lazy —
+ * {@link WeightBatch.items}）。
  */
 const containerBatches = async function* (
   opened: BoundContainer,
@@ -2703,8 +2706,10 @@ const containerBatches = async function* (
       byPart.set(block.part, list);
     });
   }
-  for (const part of [...byPart.keys()].sort((a, b) => a - b)) {
-    const items: ReadyInitializer[] = [];
+  /** part 1 本ぶんの item を、引かれるたびに block 1 本ずつ読んで組む。 */
+  const partItems = async function* (
+    part: number,
+  ): AsyncGenerator<ReadyInitializer, void, unknown> {
     for (const { name, supply, index } of byPart.get(part) ?? []) {
       const block = supply.blocks[index];
       const where = `graph '${graphName}' initializer '${name}'`;
@@ -2729,14 +2734,16 @@ const containerBatches = async function* (
         first: index === 0,
         last: index === supply.blocks.length - 1,
       };
-      items.push({
+      yield {
         name,
         payload,
         ...(scale === undefined ? {} : { scale }),
         ...(piece === undefined ? {} : { piece }),
-      });
+      };
     }
-    yield { origin: `part ${part}`, items, scopePerItem: true };
+  };
+  for (const part of [...byPart.keys()].sort((a, b) => a - b)) {
+    yield { origin: `part ${part}`, items: partItems(part) };
   }
 };
 
@@ -2753,7 +2760,7 @@ export const prepareContainer = (opened: BoundContainer, graphName: string): Pre
 
 /**
  * 開いた容器の 1 グラフから Session を作る（{@link prepareContainer} +
- * {@link PreparedModel.createContainerSession} の薄い合成）。block は part ごとにまとめて取る
+ * {@link PreparedModel.createContainerSession} の薄い合成）。block は 1 本ずつ取る
  * （`krm` では取るたびに sha256 で検証される — container-v1 §7）。
  */
 export const createSessionFromContainer = async (

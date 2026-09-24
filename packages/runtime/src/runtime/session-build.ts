@@ -256,13 +256,24 @@ const assertRowScale = (
 
 /**
  * Session 構築が消費する**供給の単位**（コンテナの part 1 本 = その part にある block の実体列）。
- * フェンス（空 submit + 完了待ち）はこの単位で 1 回、errorScope は `scopePerItem` なら
- * item（block）ごと、そうでなければ batch ごとに張る。
+ * フェンス（空 submit + 完了待ち）はこの単位で 1 回、errorScope は item（block）ごとに張る。
  */
 export type WeightBatch = {
   readonly origin: string | undefined;
-  readonly items: readonly ReadyInitializer[];
-  readonly scopePerItem: boolean;
+  /**
+   * part の block の実体列。1 本引くたびに block を 1 本読む（lazy）ので、消費側は 1 本ずつ
+   * 上げて手放す — `queue.writeBuffer` は呼んだ時点でバイト列を写す（WebGPU 仕様）ので、
+   * フェンスまで握らない。JS 側に生きる重みのバイト列は part 1 本ではなく item 1 本（block 1 本
+   * + piece 1 なら同乗する scale の block + 展開席ならその f32 展開結果）になる。scan 型の取得元
+   * （hub）では block が保持枠の器の view なので、上限は保持枠 1 本（part 境界では GC まで 2 part）
+   * のまま（container-v1 §11）。
+   *
+   * MUST: 1 度だけ、次の batch を引く前に最後まで回す。scan 型の取得元（hub）は part 順の
+   * 直列読みを前提に part を 1 枠だけ保持するので、途中で次の part を引くと part 全量の
+   * 読み直しが往復する。2 度回すと黙って 0 本になりうる（実行時の検出は無い — 唯一の消費者が
+   * 内部の `buildSessionState` なので doc の MUST で守る）。
+   */
+  readonly items: AsyncIterable<ReadyInitializer>;
 };
 
 /**
@@ -634,8 +645,10 @@ export const buildSessionState = async (
    * 展開席の piece 列が持ち越す companion scale の**写し**（キー = initializer 名）。
    *
    * MUST: view ではなく値の写しを持つ。scale の実体は piece 1 と同じ part にしか無く
-   * （規則③）、view のまま抱えるとその part のバイト列が列の最後まで解放されず、
-   * RAM ピーク O(最大 part) が崩れる。写すのは scale だけで、重み本体は 1 バイトも写さない。
+   * （規則③）、取得元の返りは器の view でありうる（seek 型なら scale の block、hub の scan 型
+   * なら part の保持枠）。view のまま抱えるとその器が列の最後（piece の last）まで生き残り、
+   * 重みのホスト RAM を item 1 本ぶんに抑える block 粒度の上限が崩れる。写すのは scale だけで、
+   * 重み本体は 1 バイトも写さない。
    */
   const carriedScales = new Map<
     string,
@@ -694,8 +707,10 @@ export const buildSessionState = async (
       // 載らない名前は f32 として読まれる（重み台帳の既定）ので、席の突合が門になっている。
       if (internals.resident !== undefined) residentWeights.set(name, internals.resident);
     }
-    // batch の反復待ち（= 供給側の費用）は for await が隠すので、**前の batch を処理し終えた
-    // 時刻**との差で測る（次の batch が届くまでの間はこの 2 点の間にしか無い）。
+    // 反復待ち（= 供給側の費用）は for await が隠すので、**前を処理し終えた時刻**との差で測る
+    // （次が届くまでの間はこの 2 点の間にしか無い）。待ちは 2 段ある — part の列の次の 1 本
+    // （batch）と、part の中の次の block（item — block の読みと検証はこちらに入る）。どちらも
+    // 同じ時計で足す（{@link SessionBuildStats.shardWaitMs}）。
     let shardBoundary = performance.now();
     for await (const batch of batches) {
       shardWaitMs += performance.now() - shardBoundary;
@@ -893,12 +908,14 @@ export const buildSessionState = async (
       // MUST NOT: この区間の中で await しない。push から pop の発行までを 1 つの同期区間に
       // 保つことが、device 単位ロックを取らずに LIFO の交錯を防いでいる根拠になっている。
       // 区間の粒度: block（item）ごと（ADR 0108 決定 9 — push / pop は 1.81 µs / 回でほぼ無料。
-      // 費用の主はフェンスなのでフェンスは batch = part ごと 1 回に留める）。
-      const groups = batch.scopePerItem ? batch.items.map((item) => [item]) : [batch.items];
-      for (const group of groups) {
+      // 費用の主はフェンスなのでフェンスは batch = part ごと 1 回に留める）。次の item の読み
+      // （`for await` の反復待ち）は区間の外に来る。
+      shardBoundary = performance.now();
+      for await (const item of batch.items) {
+        shardWaitMs += performance.now() - shardBoundary;
         pushFailureScopes(gpu.device);
         try {
-          for (const item of group) uploadItem(item);
+          uploadItem(item);
         } catch (cause) {
           // MUST: push した 2 本は必ず pop して積み残さない（積み残すと以後の検証結果が誤った
           // スコープに吸われ、エラーが恒久的に見えなくなる）。破棄は外側の transaction 境界が
@@ -908,19 +925,28 @@ export const buildSessionState = async (
         }
         const failure = await popFailureScopes(
           gpu.device,
-          batch.scopePerItem ? `${label}（initializer '${group[0].name}'）` : label,
+          `${label}（initializer '${item.name}'）`,
         );
         if (failure !== undefined) throw failure;
+        // item への参照はこの反復で尽きる（CPU 側バイト列の解放はフェンスを待たない — 下の
+        // フェンスの NOTE）。
+        shardBoundary = performance.now();
       }
+      // 列の終わりを知るまでの待ち（最後の item の後の反復）も供給側の費用。
+      shardWaitMs += performance.now() - shardBoundary;
 
       // MUST: batch（コンテナの part）ごとに**実際の submit を 1 回**出して完了まで待つ
       // （ADR 0108 決定 9）。queue.writeBuffer は staging を確保して溜め込み、submit の完了まで
       // それを解放しない — 数 GiB の重みを上げた直後は VRAM が二重計上のまま最初の run に入り、
       // 初回ピークが重み 1 本ぶん押し上がる（f16 preset で実測 +2.7GiB。
       // docs/research/2026-08-08-vram-oom-misreport.md §4）。逐次消費ではこの解放が
-      // RAM ピーク O(最大 batch) の成立条件そのものになる。フェンスの後にループ末尾へ抜けて
-      // batch への参照が尽きる — CPU 側バイト列は転送完了後にだけ手放される
-      // （フェンス後解放の順序契約 — ADR 0108 決定 9）。
+      // staging のピーク O(最大 batch) の成立条件そのものになる。
+      // NOTE: フェンスが律するのは staging だけで、CPU 側のバイト列ではない。WebGPU の
+      // `writeBuffer` は呼んだ時点で `dataContents` を写す（仕様の content timeline —
+      // "a copy of the bytes held by the buffer source"）ので、戻った後に元のバイト列が
+      // 書き換わっても GPU に載る値は変わらない。したがって item は上げた反復で手放し、
+      // フェンスまで握らない（ADR 0070 決定 3 / ADR 0108 決定 9 の 2026-09-24 追記・
+      // 実機の固定は tests/gpu_write_buffer_copy_test.ts）。
       // MUST NOT: scheduler.flush() で代用しない。pending dispatch が空だと submit を出さずに
       // 即 return するため、staging は溜まったまま残る。
       // NOTE: submit ごとの onSubmittedWorkDone を禁じているのは run のホットパス（submit.ts の

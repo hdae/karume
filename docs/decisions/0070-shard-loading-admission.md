@@ -72,6 +72,16 @@ writeBuffer だけの区間は pending dispatch が無く、submit しないと�
 解放されない（Session 構築後の「submit 1 回が瞬間ピーク +2.7GiB を抑えている」と同根の
 既知要件 — これを落とすと RAM ピーク O(最大 shard) の目標を実装が満たさない）。
 
+> 追記（2026-09-24・ADR 0108 段 3e）: 「転送完了前に CPU 側を解放しない（フェンス後解放）」は
+> 改める — **CPU 側のバイト列は `writeBuffer` が戻った時点で手放してよい**。WebGPU 仕様の
+> `GPUQueue.writeBuffer` は content timeline で「Let dataContents be a copy of the bytes held by
+> the buffer source data.」と定めており、呼び出しの時点で写す。したがって戻った後に元のバイト列を
+> どう書き換えても GPU に載る値は変わらず、tvmjs から写した順序は正しさの条件ではない。実機での
+> 成立は `packages/runtime/tests/gpu_write_buffer_copy_test.ts`（戻った直後に元のバイト列を毒で
+> 埋めても、出力が毒を入れない構築とビット一致）で固定する。フェンス（明示 submit + 完了待ち）の
+> 存在理由は staging の解放だけに残り、粒度は part ごとのまま（ADR 0108 決定 9）。これで Session
+> 構築は block を 1 本ずつ読んでは上げて手放す（`WeightBatch.items` の lazy 化）。
+
 **失敗の transaction 境界**（第 3 巡指摘の閉鎖）: 途中の shard で失敗した場合（sha 不一致・
 宣言違反・GPU エラー）、構築済みの GPU 資源（アップロード済み重み・weights アリーナ）を
 **全て破棄して部分 Session を公開しない** — 現行の一括構築が例外時に weights アリーナを

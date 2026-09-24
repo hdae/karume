@@ -752,8 +752,13 @@ fail loudly** で止まる。
   取得の重ね合わせと展開の重ね合わせを同じ予算で数えない。
 - 準備時に取るのは **part 0 だけ**。const（part 1）は要るときに取る。
 - **段 2 の取得単位は part**（ADR 0109 決定 7）: cold は取得層が part 全量を流して検証しキャッシュへ
-  落とし（ヒープに part は載らない）、区間読みは seek 型で block ごと・scan 型で part 1 度。ホスト RAM の
-  ピークは seek 型で block の重ね合わせ、scan 型で part 長 + 重ね合わせ。HTTP Range は段 6。
+  落とし（ヒープに part は載らない）、区間読みは seek 型で block ごと・scan 型で part 1 度。Session
+  構築は item（block 1 本 + piece 1 なら同乗する scale の block）を 1 本読んでは上げて手放すので、
+  重みのホスト RAM の上限は seek 型で item 1 本ぶん = block 1 本 + 同乗 scale + 展開席ならその f32
+  展開結果（格納のビット幅に反比例 — i4 で block の 8 倍・i2 で 16 倍）、scan 型で hub の保持枠
+  1 本（part 長 — 切り出しは器の view で写しは乗らない）+ GC を待つ前の器 + 展開席の f32 展開結果。
+  GC を待つ器の本数は宣言からは閉じず、段 3e の実測では external 最大が最大 part の約 1.5〜4.4 本だった
+  （[研究記録](research/2026-09-24-part-length-ram-peak.md)）。HTTP Range は段 6。
 - 見積りは**宣言だけで閉じる**: `parts[].length` と `blocks[].length` から、1 バイトも取る前に
   「最大同時ホスト RAM」を計算できる（ADR 0089 の流儀）。
 
