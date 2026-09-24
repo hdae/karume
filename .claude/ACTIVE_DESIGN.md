@@ -1,11 +1,11 @@
 # ACTIVE_DESIGN — Karume
 
 > 現在の設計とレビューの入口。履歴はADR / research / gitに置き、作業順は[backlog](../docs/backlog.md)、性能の採否は[perf-ledger](../docs/perf-ledger.md)を正本とする。
-> Last updated: 2026-09-24（0.13.0のリリース作業中 — lockstep bumpは済・backlogのlater / nowの小項目はリリース前に消化済み。コンテナ形式の波は段3a〜3f済で、残りはreleaseの波のHF再アップロード〈残り9リポ〉と段4〜6）
+> Last updated: 2026-09-24（0.13.0のリリース作業中 — lockstep bumpは済・backlogのlater / nowの小項目はリリース前に消化済み。コンテナ形式の波は段3a〜3f済で、HF再アップロードとpin更新は済〈2026-09-24・10リポ〉・残りはCHANGELOGの版の節への移動 → リリース前レビュー → push → Releaseと段4〜6）
 
 ## 現在の焦点
 
-- **0.13.0のリリース作業中**（2026-09-24〜・lockstep bumpは`bf857edf`で済）: 残りは焼き直し（10リポを系列から`karume dist`で）→ GPUレーンで焼き直した各ミラーのe2e → HF再アップロード（`anima` → その main の SHA で`anima-extra` → 残り8本）→ pin → `CHANGELOG.md`の`[Unreleased]`を版の節へ移す別コミット → レビュー。順序と裁定の正本は[backlog](../docs/backlog.md)のrelease節の「HF配布リポの`karume/5`再アップロード」項、手順は[release-runbook](../docs/release-runbook.md)§0〜§4。**落とし穴**:
+- **0.13.0のリリース作業中**（2026-09-24〜・lockstep bumpは`bf857edf`で済）: 焼き直し（10リポを系列から`karume dist`で・`karume/0.13.0`）→ GPUレーン（12/14緑・赤2は既知のB570環境要因）→ HF再アップロード（`anima` → その main の SHA で`anima-extra` → 残り8本・旧safetensors削除つき）→ pin 10本（`f16b8998`・HFから全pinのmanifestを引いて`karume/5`を確認）まで済。残りは`CHANGELOG.md`の`[Unreleased]`を版の節へ移す別コミット → リリース前レビュー → push → Release（runbook §4）。断片化したpart 5本の扱いは[backlog](../docs/backlog.md)のlaterで利用者裁定待ち。手順は[release-runbook](../docs/release-runbook.md)§0〜§4。**落とし穴**:
   - manifestの`generator`欄はvenvに入っている`karume`のdist-infoの版を写す — bumpの後は`(cd tools && uv sync --all-groups)`してから焼き、各`dist.py`の最終行が`karume/0.13.0`を名乗ることを確かめる（runbook §4のbumpの項）。
   - HFの旧ファイルは上げるときの`--delete`でしか消えない — 旧`*.safetensors`に加え、上げる直前にHFのtreeとローカルを突き合わせてHFにだけ在るpathを`--delete`に足す（runbook §2）。
   - pinは削除後のmainのSHAで焼く — アップロードの全コミットが済んだ後のmainを引く（runbook §2 / §3）。

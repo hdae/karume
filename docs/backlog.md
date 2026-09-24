@@ -43,8 +43,9 @@
   段 1 後に新形式で再生成する）。
   **段 3f 済（2026-09-24）**: docs を段 3d / 3e の実装へ揃えた。段 3a〜3d で決めた点と検収①②の状況は
   ADR 0108 追記 4、RAM の数え方は [container-v1](container-v1.md) §11 が正本。
-  段 3 の作るもののうち HF の全 pin の移行（残り 9 リポの再アップロード）は release の波へ移した（release 節の
-  「HF 配布リポの `karume/5` 再アップロード」項が正本）。段 4〜6 の作るものと検収は ADR 0108 の段階分解の表が正本。
+  段 3 の作るもののうち HF の全 pin の移行は **0.13.0 のリリース作業で済（2026-09-24）**: 10 リポを系列から
+  `karume/0.13.0` で焼き直して旧 safetensors の削除つきで上げ直し（anima → 越境参照の anima-extra → 残り 8 本）、pin 10 本を
+  削除後の main へ更新した（`f16b8998`）。断片化した part 5 本は later 参照。
 
 - **モデル横断の追加調査（2026-09-10〜11）**: Qwen3-0.6B / MiniCPM5-2B の RTN / GPTQ と
   E4B の全 PLE を含むローカル pipeline は実機検証済み。E4B chat も CPU / Deno / Chrome で一致。
@@ -136,38 +137,11 @@ later の「decode 速度の残り」。
   「ミス run の arena 一時（最大でバケット形 1 本ぶん）」が乗る（既定の梯子なら 768 形 + 256 形 ≈ 1.33 倍）。
   generation のミス run で活性 backing を先に退役させれば窓は消えるが、次の 768 chunk で作り直しが
   1 回増える。4 GB 級端末で効くかを見てから裁定。
-- **既公開 3 リポの `LICENSE.md` / `NOTICE.md` 同梱是正**（起票 2026-09-04 — ADR
-  [0092](decisions/0092-distribution-repos-and-sources.md) 決定 7）: `karume-irodori-v4-small` /
-  `karume-irodori-v4.1-small` と `karume-sbv2-jvnv` の公開 revision は法的テキストの同梱が漏れている
-  （`verify_dist` の `LEGAL_PATHS` 席）。**recipe 側は実装済み**（2026-09-24 ユーザー裁定 5 = a — irodori は
-  MIT 全文 + 著作権行 "Copyright (c) 2026 Aratako" を重みにも当てる・sbv2-jvnv は CC BY-SA 4.0 の条文 +
-  帰属行を同梱し、SBV2 の Pipeline を声のファミリーで分ける）。着地した形: irodori / sbv2 の Pipeline の
-  `root_files` が組み立てのたびに `LICENSE.md` / `NOTICE.md` を配布リポ直下へ書く（irodori は実装側の
-  判断で text backbone 由来の "Copyright (c) 2025 SB Intuitions" も併記）。SBV2 は別 pipeline 2 本 —
-  `--pipeline sbv2` = JVNV 系（CC BY-SA の 2 枚を持つ）・`--pipeline sbv2-fn` = FN 系（法的テキスト無し）—
-  で、帰属は pipeline が決めるので `--card-profile` は省ける。JVNV 4 声の束ねはモデルごとのリポ名宣言が
-  揃わないので `--repo hdae/karume-sbv2-jvnv` が要る（詳細は ADR 0092 決定 7 の追記）。HF へは release 節の `karume/5`
-  再アップロードで焼き直して乗る（是正単独の再アップはしない — 2026-09-04 ユーザー裁定）。
-  残るのは上げ直しと、上げた後の HF 上の `LICENSE.md` / `NOTICE.md` の在否の確認だけ。
-- **公開済み `karume-depth-anything-v2` のカード / NOTICE.md 再発行**（起票 2026-09-05）:
-  depth-anything の `CONVT_MAXDIFF` は実重み `--verify` の再実測で 1.4e-06 → 6.1e-06 へ確定した
-  （合成 4 ケースの最大 — 旧値は 1 ケースぶん。`verify_patches` に上限比較の門も入った）ので、
-  公開済みカードと NOTICE.md が名乗る 1.4e-06 は古い。次にこのリポを上げ直す回に同乗させる
-  （是正単独の再アップはしない — 上の 2 リポと同じ扱い）。
-- **公開済み `karume-birefnet-hr` / `karume-lucida` のカード再発行**（起票 2026-09-06）: `card.py` の
-  資源表の「最大 binding」を 256 / 878 MiB から cat_211 込みの 320 / 1,280 MiB へ訂正した（`d116d7e`）ので、
-  公開済みカードの数値は古い。次にこの 2 リポを上げ直す回に同乗させる（是正単独の再アップはしない —
-  上と同じ扱い）。
 - **テスト被覆の残（起票 2026-09-05）**: `SubmitScheduler` の `#encodeTimedChunk` 内の copy 分岐
   （`packages/runtime/src/gpu/submit.ts`）は依然として未検証。
 - **Metal `--diagnostics` の切り分け実験**: query set の同時生存本数と `destroy()` 滞留の
   どちらが支配かの A/B。手順①②と修正候補は [known-issues](known-issues.md) の該当節が正本。
   実機が要るのでユーザー実行。
-- **anima-extra 越境の実資産門の復活**: extra ミラーを生やし
-  `packages/models/tests/e2e_anima_test.ts` の `CROSS_REPO_MIRRORS` と
-  `packages/runtime/tests/assets_fusion_counts_test.ts` の `MIRRORS` にエントリを戻して、
-  extra 変種の融合ヒット数と参照 sha を新規凍結する
-  （[release-runbook](release-runbook.md) §0 手順 4）。
 - **差分レビューの見送り表の中優先 3 件**（正本 = `.claude/reviews/2026-09-03_7fc4ada/ROADMAP.md`
   — git 追跡外）: ①W-G5-7 opbench / fusion-hints の資産解決を `tools/_shared/assets.ts` へ統合
   ②W-G4-4 chunk 上限の出所を provenance の `sym_max` 欄へ（**再 export 同乗** — 波 b や系列更新
@@ -212,6 +186,13 @@ later の「decode 速度の残り」。
 - Pixel（8GB 級 Android Chrome）の `err.cause` 再判定 — [known-issues](known-issues.md)。
 
 ## later
+
+- **0.13.0 の再アップロードで断片化した part 5 本（起票 2026-09-24・対処は利用者の裁定）**: `hf-upload.zsh` の断片化表で
+  255 MiB 級の part のうち anima 2 本（`anima-turbo-v1.1` / `anima-v1.0` の `text_conditioner` part 3・3.6 MiB/term）・
+  birefnet-hr 1 本（`2048/matte` part 3・4.1）・lucida 2 本（`2048/matte` part 3 / 6・0.9 / 8.8）が 10 MiB/term を下回った
+  （他の 620 本超は健全・extra は 0 本）。**推測**: 旧 safetensors と同一バイトのチャンクがリポ内の既存 xorb へ重複排除された
+  形（global dedup は台本で停止済み）。公開 pin のあるリポは削除 → 再作成を使わない（runbook §2 MUST NOT）ので、
+  DL 速度の実測で許容するか、別の対処（次の上げ直しで byte が変わる回に自然解消するか）を決める。
 
 - **越境参照をツール側で扱いやすくする（ユーザー起票 2026-09-24）**: recipe が越境コンポーネント参照
   （今の `dist.py` の `--ref-*` 5 指定 — ADR [0038](decisions/0038-manifest-v1.md) §7 追記）を宣言的に持てる形と、
@@ -346,32 +327,6 @@ later の「decode 速度の残り」。
 
 ## release — リリース準備波（しばらく先）
 
-- **HF 配布リポの `karume/5` 再アップロード（残り 9 リポ・起票 2026-09-24 — ADR 0108 決定 18・ADR 0109 決定 9）**:
-  pin のある 10 リポのうち `karume/5` を指すのは `irodori-v4.1-small` だけ。残りの `anima` / `anima-extra` /
-  `birefnet-hr` / `lucida` / `depth-anything-v2` / `gemma4` / `irodori-v4-small` / `sbv2-jvnv` / `siglip2` の 9 本は
-  `karume/4` の revision を指し、HEAD の hub では読めない（旧版パッケージからだけ動く）。`gemma4-qat` は未公開で
-  pin が無い。手順は [release-runbook](release-runbook.md) の §0〜§3（bump → `karume dist` で焼き直し →
-  旧 `*.safetensors` の削除つきアップロード → 削除後の main で pin）。
-  - 進め方（2026-09-24 ユーザー裁定）: ①lockstep bump 0.13.0 を先に切る（`CHANGELOG.md` の版の節への移動は
-    リリース直前の別コミット — runbook §4）→ ②10 リポを系列から焼き直す（各 `dist.py` の最終行が
-    `karume/0.13.0` を名乗ること）→ ③GPU レーンで焼き直した各ミラーの e2e を通す → ④`anima` を上げて main の
-    SHA を確定 → ⑤その SHA で `anima-extra` を越境参照で焼いて上げる → ⑥残り 8 本を上げる（上げる直前に
-    HF の tree とローカルを突き合わせ、HF にだけ在る path を `--delete` に足す — runbook §2）→ ⑦10 本の pin。
-  - **初公開の `gemma4-qat` / `vowel-detector` は今回含めない**（2026-09-24 ユーザー裁定）。`KARUME_SOURCES` は
-    10 件のまま。
-  - `irodori-v4.1-small` も焼き直して上げ直す。今の pin はカードが `karume/4` と safetensors 方言を名乗り、
-    `LICENSE.md` / `NOTICE.md` も無い（移行 CLI の出力ミラーをそのまま上げたため）。移行 CLI のミラーは
-    どのリポも上げない。
-  - `anima` を先に上げて main の SHA を確定し、`anima-extra` をその SHA の越境参照で焼き直す（runbook §0）。
-    ローカルミラーの extra は旧 `karume/4` の anima revision を指している。上げた後に now 残件の
-    「anima-extra 越境の実資産門の復活」を行う。
-  - anima の系列 14 本を再 export する（上流 checkpoint から CPU で）。公式 4 変種（turbo-v1.1 / aesthetic-v1.1 /
-    turbo-v1.0 / aesthetic-v1.0）と copycat の系列が `outputs/series/` に無く、`karume dist` が組めない。
-  - sbv2 の front f16 / i8 はミラーが旧世代の export を移行したもので、系列から焼き直すと initializer 名が
-    変わる（値と出力は同じ）。焼き直しは `--pipeline sbv2` で 4 声を束ね、話者ごとのリポ名宣言が揃わない
-    ので `--repo hdae/karume-sbv2-jvnv` が要る（コマンドは [assets-layout](assets-layout.md) の dist 節）。
-  - 同乗: now 残件の法的テキスト同梱・depth-anything と birefnet・lucida のカード再発行。カード / NOTICE の
-    krm 出力形の文面は `fd7c805b` で recipe 側が済んでおり、焼き直しで乗る。
 - **vowel-detector の初回公開の前提（起票 2026-09-24）**: recipe は上流の `feature_config.json` を
   `inputs/vowel-detector/` 直下から読む。この開発機は上流リポを丸ごと置いた形なので、組み立ての前に
   `cp inputs/vowel-detector/assets/feature_config.json inputs/vowel-detector/` を 1 回打つ。
