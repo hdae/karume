@@ -98,7 +98,8 @@ IRODORI_CODEC_MODEL = "Aratako/Semantic-DACVAE-Japanese-32dim"
 #:
 #: NOTE: HF の `facebook/dacvae-watermarked` の README 末尾は "licensed under the SAM License"
 #: と書いており、同じリポの license タグ（`apache-2.0`）と食い違う。GitHub 側の README は
-#: "licensed under Apache-2.0" と書く。ここでは機械可読なタグと同梱の `LICENSE` に合わせる。
+#: "licensed under Apache-2.0" と書き、同リポの discussions/1 で README 側の記載が誤りだと
+#: 確認されている（2026-09-24 利用者確認）。ここでは機械可読なタグと同梱の `LICENSE` に合わせる。
 IRODORI_CODEC_PARENT_MODEL = "Aratako/Semantic-DACVAE-Japanese"
 IRODORI_CODEC_ORIGIN_MODEL = "facebook/dacvae-watermarked"
 

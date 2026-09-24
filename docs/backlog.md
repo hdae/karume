@@ -187,7 +187,7 @@ later の「decode 速度の残り」。
 
 ## later
 
-- **0.13.0 の再アップロードで断片化した part 5 本（起票 2026-09-24・対処は利用者の裁定）**: `hf-upload.zsh` の断片化表で
+- **0.13.0 の再アップロードで断片化した part 5 本（起票 2026-09-24・2026-09-24 裁定 = そのまま公開し、実 DL 速度を測ってから対処）**: `hf-upload.zsh` の断片化表で
   255 MiB 級の part のうち anima 2 本（`anima-turbo-v1.1` / `anima-v1.0` の `text_conditioner` part 3・3.6 MiB/term）・
   birefnet-hr 1 本（`2048/matte` part 3・4.1）・lucida 2 本（`2048/matte` part 3 / 6・0.9 / 8.8）が 10 MiB/term を下回った
   （他の 620 本超は健全・extra は 0 本）。**推測**: 旧 safetensors と同一バイトのチャンクがリポ内の既存 xorb へ重複排除された
@@ -220,8 +220,8 @@ later の「decode 速度の残り」。
   メモリ内容器へ渡すので、Session 構築のフェンスが piece の本数ぶん立つ
   （`packages/runtime/src/format/container/memory.ts` の part 割り）。実測済み（QAT E2B / E4B —
   [研究記録](research/2026-09-24-prerelease-gpu-measurements.md) の 2）: piece を part へ束ねると E2B でフェンスが
-  37 → 6 本になり、PLE 構築は約 −0.2 s・代償は構築時の VRAM +192 MiB。**束ねるかは利用者の裁定待ち**
-  （実装の規模は研究記録の 2 の結論）。
+  37 → 6 本になり、PLE 構築は約 −0.2 s・代償は構築時の VRAM +192 MiB。**2026-09-24 裁定 = 当面束ねない**
+  （0.13.0 のリリース前レビューで再確認・実装の規模は研究記録の 2 の結論）。
 - **container-v1 §6.2 の codec 台帳と実装のずれ（起票 2026-09-24）**: 仕様の台帳エントリは `decodeCpu` /
   `executableOps` / `wgsl` を持つが、実装の `CodecEntry`（`packages/runtime/src/format/container/codecs.ts`）は
   `layout` / `packing` / `scale` / `grouping` / `zeroPoint` だけで、圧縮のまま常駐できる op の判定は今も別々の
