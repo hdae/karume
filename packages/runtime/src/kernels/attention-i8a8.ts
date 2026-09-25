@@ -57,7 +57,8 @@
  *    `f32(acc)·s` 形が成立する条件は **s が n に依存しないこと**そのもの。per-token
  *    （V の行 n ごと）にすると scale が縮約軸上で変わり総和から括り出せない — 黙って使うと
  *    例外の出ない誤値になる（linear で `wcol` を行に流用する誤りと同型 — ADR 0024 の MUST④）。
- *    executor は既存の `strided`（permute）で Vᵀ`[B·H, D, N]` を作り、その上で
+ *    レシピ導出層（recipe-builders/attention.ts の `buildAttention`）は既存の `strided`
+ *    （permute）で Vᵀ`[B·H, D, N]` を作り、その上で
  *    `quantize_rows`（行 = `(b,h,d)`）を呼ぶ — **per-column 量子化と dp4a が要求する
  *    N 連続パックが同時に得られる**ので新カーネルは要らない。
  * 3. **行の `1/l` は dequant 側へ移る**。`prow = inv·(1/127)` は行ループ不変なので、
@@ -87,7 +88,7 @@
  *
  * 本ファイルが受け持つのは ①QK と ③PV で、②行統計は f32 のまま走る（設計 §7 の波 1 + 波 2）。
  * 適格判定は**段ごとに独立**（①は `D % 4 == 0`・③は `N % 4 == 0`）なので、
- * **片方だけ i8a8 の混成**が起こりうる（executor の `#encodeAttention`）。
+ * **片方だけ i8a8 の混成**が起こりうる（recipe-builders/attention.ts の `buildAttention`）。
  */
 
 import { CodegenError } from "../codegen/errors.ts";

@@ -147,7 +147,8 @@ export const ATTENTION_STATS_REG_CACHE_MAX = 32;
 
 /**
  * dim から regcache 変種の 1 スレッドあたり要素数を決める**唯一の純関数**
- * （`undefined` = 2 回読みループのまま）。executor はこれをキーと WGSL の両方へ渡すので、
+ * （`undefined` = 2 回読みループのまま）。レシピ導出層（recipe-builders/attention.ts の
+ * `buildAttention`）はこれをキーと WGSL の両方へ渡すので、
  * 「生成された `epc` と実際の dim が食い違う」状態が構造的に起こらない。
  */
 export const attentionStatsRegCache = (dim: number): number | undefined => {
