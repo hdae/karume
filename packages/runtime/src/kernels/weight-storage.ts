@@ -1,5 +1,6 @@
 /**
- * 重み格納の変種（`w=f32` / `w=f16` / `w=i8`）— 融合 5 カーネル（linear / conv1d / conv2d /
+ * 重み格納の変種（`w=f32` / `w=f16` / `w=i8` は融合 5 カーネル共通・`w=i4` / `w=i2` は展開経路を
+ * 持つ op だけ — ADR 0069 / 0097）— 融合 5 カーネル（linear / conv1d / conv2d /
  * conv_transpose1d / embedding）が共有する唯一の生成部品（ADR 0018 / 0019）。
  *
  * f16 変種は重みバッファを **`array<u32>`** で束縛し、`unpack2x16float` で 2 要素ずつ展開する
@@ -10,7 +11,9 @@
  * `f32(unpack4xI8(w[i >> 2])[i & 3]) * scale[出力チャネル]` — **scale は縮約の外に出さず
  * 要素ごとに掛ける**（ADR 0019: `(Σ x·q)·s` 形は乗算が減る代わりに CPU 展開とのビット一致を
  * 失う）。scale は **weight と対の追加束縛**（{@link weightLoaderWgsl} が宣言を出す）で、
- * 出力チャネルごとの f32 が平坦に並ぶ。
+ * 出力チャネルごとの f32 が平坦に並ぶ。i4 / i2 変種も同じ `array<u32>` 束縛・要素ごとの scale
+ * 乗算・weight と対の scale 束縛で、違うのは詰め方と scale の粒度（i2 は出力チャネルごと・i4 は
+ * group ごと）だけ。
  *
  * MUST: 語と位置の選択は**平坦添字**から作る。行内の相対添字で偶奇（f16）や 4 剰余（i8）を
  * 取ると、行長が 2 / 4 の倍数のときだけ偶然一致して数値が合う（行の先頭が常に語境界に来る
@@ -112,7 +115,7 @@ export const weightNote = (storage: WeightStorage): string =>
     : ", 重み i4 格納";
 
 /**
- * i8 変種で per-channel scale を束ねる局所変数の**既定の**名前。
+ * i8 / i2 変種で per-channel scale を束ねる局所変数の**既定の**名前。
  *
  * {@link weightScaleWgsl} が縮約の外で 1 度だけ束縛し、{@link weightRead} の第 4 引数として
  * 各カーネルが渡す。カーネルが束縛を忘れると WGSL のコンパイルが「未定義の識別子」で落ちる
@@ -122,10 +125,10 @@ export const weightNote = (storage: WeightStorage): string =>
 export const WEIGHT_SCALE_VAR = "wscale_v";
 
 /**
- * f16 / i8 変種の展開関数（と i8 の scale 束縛宣言）。束縛の直後に置く前提で、**前後 1 行ずつ
+ * f16 / i8 / i4 / i2 変種の展開関数（と i8 / i4 / i2 の scale 束縛宣言）。束縛の直後に置く前提で、**前後 1 行ずつ
  * 空行が入る形**に整えてある（f32 では空文字になり、従来の空行 1 本だけが残る）。
  *
- * `scaleBinding` は i8 のときだけ使う — 出力束縛の**次の番号**を渡す。f32 / f16 は宣言を
+ * `scaleBinding` は i8 / i4 / i2 のときだけ使う — 出力束縛の**次の番号**を渡す。f32 / f16 は宣言を
  * 出さないので番号は消費されず、既存 2 変種の生成物は 1 バイトも動かない。
  *
  * `quad` は {@link weightRead4} と対の quad 展開（`dequant4`）へ切り替える opt-in で、
@@ -305,8 +308,8 @@ ${indent}let ${variable} = wscale[${channel}];`
 /**
  * 重み 1 要素の読み出し式（f32 は直接添字・f16 / i8 は展開関数）。
  *
- * `scale` は**出力チャネルの scale 式**で、i8 変種だけが使う（{@link weightScaleWgsl} が
- * 束縛した {@link WEIGHT_SCALE_VAR} を渡す）。f32 / f16 は無視するので、両変種の生成物は
+ * `scale` は**scale 式**で、i8 / i4 / i2 変種だけが使う（i8 / i2 は {@link weightScaleWgsl} が
+ * 束縛した出力チャネルの {@link WEIGHT_SCALE_VAR} を、i4 は呼び出し側が引いた group の scale を渡す）。f32 / f16 は無視するので、両変種の生成物は
  * バイト単位で従来のまま。
  */
 export const weightRead = (
@@ -325,7 +328,7 @@ export const weightRead = (
  * 重み **4 要素**（平坦添字 `index`..`index+3`）の読み出し式。
  *
  * MUST: `index` は 4 の倍数（GEMM の v4 経路からのみ呼ぶ）。f32 は `vec4<f32>` 配列の quad
- * 添字、f16 / i8 は {@link weightLoaderWgsl} の quad 版が出す `dequant4` に落ちる。
+ * 添字、f16 / i8 / i4 / i2 は {@link weightLoaderWgsl} の quad 版が出す `dequant4` に落ちる。
  */
 export const weightRead4 = (
   name: string,

@@ -1,5 +1,5 @@
 /**
- * linear の **GEMV 族**（重み i4 / i8 格納、および M=1 の f16 / f32 格納 — ADR 0082）。`linear` の 2 本目のカーネル族で、
+ * linear の **GEMV 族**（重み i2 / i4 / i8 格納、および M=1 の f16 / f32 格納 — ADR 0082 / 0097）。`linear` の 2 本目のカーネル族で、
  * 出力・束縛・uniform は既定経路（src/kernels/gemm.ts の linear）と同じまま、**担当割りだけ**が
  * 「1 スレッド = 1 出力列」へ変わる。M=1（decode）の変種と、小 M（2〜{@link LINEAR_GEMV_MAX_ROWS}・
  * 短い prefill / 投機検証）の**行ブロック変種**の 2 形を持つ（後者は ADR 0082 追記 5 /
@@ -107,9 +107,9 @@ export const linearGemvUnit = (storage: WeightStorage): number => {
   if (storage === "i8") return 16;
   if (storage === "f16") return 8;
   if (storage === "f32") return 4;
-  throw new CodegenError(
-    `linear_gemv: 重み ${storage} 格納は本族に無い（f32 / f16 / i4 / i8 のみ）`,
-  );
+  // 到達不能で、格納を足したときの刻みの結線漏れをコンパイル時に赤くするのがこの行の役目。
+  const unhandled: never = storage;
+  throw new CodegenError(`linear_gemv: 未処理の重み格納: ${JSON.stringify(unhandled)}`);
 };
 
 /** f16 / f32 は M=1 だけで検収する。行ブロック側へ暗黙に広げない。 */
@@ -259,7 +259,7 @@ const assertRowsVariant = (variant: LinearGemvRowsVariant): void => {
 };
 
 /**
- * group 長 → WGSL に焼く shift（i8 は group を持たないので `undefined`）。
+ * group 長 → WGSL に焼く shift（i2 / i8 は group を持たないので `undefined`）。
  *
  * 2 冪 ≥ 16 と「格納と group 長は対」は {@link i4GroupShift}（宣言層と同じ導出点）が見る。
  * 本族はさらに **group ≥ {@link linearGemvUnit}** を要求する — 1 語ぶんの要素が group を跨ぐと
@@ -271,7 +271,7 @@ const gemvGroupShift = (
 ): number | undefined => {
   const unit = linearGemvUnit(storage);
   const shift = i4GroupShift("linear_gemv", storage, groupSize);
-  // i8 は group を持たない（対の検査は i4GroupShift が済ませている）
+  // i2 / i8 は group を持たない（対の検査は i4GroupShift が済ませている）
   if (groupSize === undefined) return shift;
   if (shift === undefined || groupSize < unit) {
     throw new CodegenError(
@@ -623,7 +623,7 @@ const scaleSetupWgsl = (storage: WeightStorage, shift: number | undefined): stri
     : weightScaleWgsl(storage, "col", "  ");
 
 /**
- * GEMV の WGSL（`out[n] = x[k] · wᵀ[n,k] + bias[n]`・M=1・重み f16 / i4 / i8 格納）。
+ * GEMV の WGSL（`out[n] = x[k] · wᵀ[n,k] + bias[n]`・M=1・重み f32 / f16 / i2 / i4 / i8 格納）。
  *
  * 1 スレッドが 1 出力列の縮約を丸ごと持つので、並列度の上限は `n`。これはビット同一の代償
  * そのもので、k 方向へ割れば並列度は上がるが縮約順が動く（MUST NOT — モジュール doc）。
