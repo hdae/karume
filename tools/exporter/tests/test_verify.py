@@ -457,6 +457,33 @@ class TestGroupQuantizedStorage:
         with pytest.raises(IrError, match="割り切れない"):
             parse(**self._i4({"dtype": "i4", "scale": "enc.s", "group_size": 32}, last_dim=48))
 
+    def test_a_shared_declaration_is_accepted_without_a_group_size(self):
+        """共有 initializer は group_size を宣言できない（刻みは貸し手が正本 — ADR 0096 段 2）。
+
+        宣言側がそう定める以上、宣言の完全性検査が「i4 なのに group_size が無い」で落とすと
+        i4 の埋め込みを貸す共有宣言が原理的に書けない。
+        """
+        graph = parse(
+            requires={"ops": ["embedding"]},
+            inputs=[{"name": "ids", "dtype": "i32", "shape": ["T"]}],
+            initializers={"x": {"shared": {"tensor": "t"}, "storage": {"dtype": "i4"}}},
+            values={
+                "x": {"dtype": "f32", "shape": [16, 32]},
+                "y": {"dtype": "f32", "shape": ["T", 32]},
+            },
+            nodes=[
+                {
+                    "op": "embedding",
+                    "ins": ["x", "ids"],
+                    "outs": ["y"],
+                    "attrs": {"padding_idx": -1},
+                }
+            ],
+        )
+
+        assert graph.initializers["x"].shared is not None
+        assert graph.initializers["x"].shared.tensor == "t"
+
 
 def declared_states(states: dict, *, referenced: list[str] | None = None) -> dict:
     """スロットを参照する `state_append` を足したグラフの上書き集合。
@@ -1560,7 +1587,11 @@ class TestReaderEntryStructure:
     """ヘッダ 1 項目の構造も門の診断で落とす（素の添字は KeyError / TypeError で漏れる）。
 
     エクスポータが書いたファイルでは到達しない（`_save_ordered` が必ず 3 キーを書く）が、
-    `karume verify` は外部で作られた safetensors も食う公開 CLI なので経路は実在する。
+    外部で作られた safetensors を読む経路は実在する — 移行 CLI が旧 shard を読む入力
+    （`karume.legacy` / `karume.migrate` — 旧形読み用の上位集合 `allow_legacy_dtypes=True`）と、
+    dacvae 変換（`tools/export-recipes/irodori/dacvae/convert.py`）が書く safetensors（既定の
+    モード = TS リーダと同じ dtype 集合 — I4 / I2 は受けない）。`karume verify` は容器しか
+    受けない。
     診断の主語が「不正なファイル」から「エクスポータが壊れた」に化けるのを防ぐ。
     """
 
@@ -1587,27 +1618,44 @@ class TestReaderPackedFourBit:
 
     `safetensors` ライブラリは `I4` を知らない（0.8.0 の dtype 語彙に無い）ので、ヘッダ JSON を
     直に読む `assert_reader_layout` が I4 を踏める唯一の門。TS 側リーダ
-    （`packages/runtime/src/format/safetensors.ts`）の受理集合と 1 対 1 に保つ。
+    （`packages/runtime/src/format/safetensors.ts`）は I4 を拒否するので、ここは旧 shard を
+    読む移行入力のモード（`allow_legacy_dtypes=True`）の規則を固定する。
     """
+
+    def test_the_asset_gate_rejects_a_packed_tensor(self, tmp_path):
+        """資産の門は TS リーダと同じ dtype 集合 — 通すとブラウザで初めて落ちる資産が書ける。"""
+        header = {"w": {"dtype": "I4", "shape": [3, 32], "data_offsets": [0, 48]}}
+
+        with pytest.raises(ContainerError, match="リーダが知らない dtype 'I4'"):
+            assert_reader_layout(
+                write_raw_container(tmp_path / "m.safetensors", header, b"\0" * 48)
+            )
 
     def test_a_packed_tensor_is_half_its_element_count(self, tmp_path):
         header = {"w": {"dtype": "I4", "shape": [3, 32], "data_offsets": [0, 48]}}
 
-        assert_reader_layout(write_raw_container(tmp_path / "m.safetensors", header, b"\0" * 48))
+        assert_reader_layout(
+            write_raw_container(tmp_path / "m.safetensors", header, b"\0" * 48),
+            allow_legacy_dtypes=True,
+        )
 
     def test_an_odd_element_count_is_rejected(self, tmp_path):
         """bit 総量が byte 境界に乗らない形（末尾要素が半バイトだけ突き出す）。"""
         header = {"w": {"dtype": "I4", "shape": [3], "data_offsets": [0, 2]}}
 
         with pytest.raises(ContainerError, match="byte 境界に乗らない"):
-            assert_reader_layout(write_raw_container(tmp_path / "m.safetensors", header, b"\0" * 2))
+            assert_reader_layout(
+                write_raw_container(tmp_path / "m.safetensors", header, b"\0" * 2),
+                allow_legacy_dtypes=True,
+            )
 
     def test_a_size_that_is_not_half_the_element_count_is_rejected(self, tmp_path):
         header = {"w": {"dtype": "I4", "shape": [3, 32], "data_offsets": [0, 96]}}
 
         with pytest.raises(ContainerError, match="サイズ不一致"):
             assert_reader_layout(
-                write_raw_container(tmp_path / "m.safetensors", header, b"\0" * 96)
+                write_raw_container(tmp_path / "m.safetensors", header, b"\0" * 96),
+                allow_legacy_dtypes=True,
             )
 
     def test_a_tensor_start_off_the_four_byte_boundary_is_rejected(self, tmp_path):
@@ -1618,7 +1666,10 @@ class TestReaderPackedFourBit:
         }
 
         with pytest.raises(ContainerError, match="整列していない"):
-            assert_reader_layout(write_raw_container(tmp_path / "m.safetensors", header, b"\0" * 4))
+            assert_reader_layout(
+                write_raw_container(tmp_path / "m.safetensors", header, b"\0" * 4),
+                allow_legacy_dtypes=True,
+            )
 
 
 class TestHeaderLengthBound:

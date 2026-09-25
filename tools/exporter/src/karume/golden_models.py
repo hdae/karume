@@ -192,8 +192,8 @@ class GatherLastDim(nn.Module):
     """最終次元の gather（実測は dim=-1 / src f32[16,T,512] / index i32[16,T,T]）。
 
     index は **i32 のグラフ入力**として渡す（torch 既定の i64 が境界で i32 に正規化される —
-    ADR 0009）。整数 initializer は IR v1 の語彙に無いので、定数として畳まない形にすること
-    自体が契約の要求。
+    ADR 0009）。i32 initializer は焼ける（{@link SymbolicTable} の gather 添字）が、この
+    golden は実行時に届く添字を踏ませるためにグラフ入力にする。
 
     2 本目の出力は引いた値を使う下流演算で、gather の結果が値として正しく流れることを
     golden に載せる。

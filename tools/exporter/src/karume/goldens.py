@@ -9,7 +9,7 @@
 へ落とすかは repo topology で、汎用 exporter の知識ではない（ADR 0065 Consequences）。
 上の起動例は `tools/exporter/` から走らせたときの相対 path。
 
-レイアウトとテンソルキー命名は README.md「golden レイアウト」に明記。
+レイアウトとテンソルキー命名は README.md「Golden layout」に明記。
 
 モデル定義（tiny な nn.Module 群）と重み初期化・入力生成ヘルパは
 {@link karume.golden_models} — ここは台帳（{@link GOLDEN_SPECS}）と生成ドライバ側。
