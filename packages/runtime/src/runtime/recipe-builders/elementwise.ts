@@ -206,7 +206,8 @@ export const buildArgmax = async (
   const rows = numel(inputShape.slice(0, -1));
   const limit = face.state.gpu.limits.maxComputeWorkgroupsPerDimension;
   const groups = argmaxSplitGroups(dim);
-  if (groups > 0) {
+  // 外側が空なら従来経路へ残す（topk(k=1) と同じ — 分割一時 0B はレシピの寿命契約に入らない）。
+  if (rows > 0 && groups > 0) {
     await buildMaxIndexSplit(
       face,
       rows,
