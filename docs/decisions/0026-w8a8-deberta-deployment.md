@@ -10,7 +10,11 @@
   （2026-08-16 追記: `e2e_deberta_test.ts` は移植済み — 3 variant × 4 ケース・tolerance は
   実測導出で歴史値〈f32 8.32e-5 / i8 1.23e-4 / atol 7e-4〉と一致。`e2e_deberta_w8a8_test.ts`
   = 決定 3 の鏡像門は未設置のまま。）
-  （2026-09-24 追記: 決定 3 の鏡像門 `packages/runtime/tests/e2e_deberta_w8a8_test.ts` は `d3aecda1` で設置した。）
+  （2026-09-24 追記: 決定 3 の鏡像門 `packages/runtime/tests/e2e_deberta_w8a8_test.ts` は `d3aecda1` で設置した。
+  門の定数〈output.0/1 の判別帯・output.2 以降の崩壊上限・census の本数〉は本 ADR の歴史値
+  〈RTX 3080 Ti・2026-08-03〉を起点に置いたもので、Arc B570 では実測から導き直していない。
+  導き直しは、門が毎回 `outputs/verify/` の results.json に残す全出力の maxAbs を読んで行う。
+  緩める根拠は仕様帯〈ADR 0106〉ではなくこの実測に限る。）
   **本 ADR の tolerance / 判別帯は歴史値**として読むこと。
 - 関連: ADR 0019（i8 格納）/ ADR 0025（w8a8 実行 — 決定⑤が本 ADR の親）/
   [dp4a-w8a8-design](../research/2026-08-03-dp4a-w8a8-design.md) §7
