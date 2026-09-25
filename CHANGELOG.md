@@ -15,6 +15,8 @@ measurements in `docs/research/`.
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-09-25
+
 ### Added
 
 - Karume container format (`krm` / `krg`, ADR 0108, stage 1): the runtime opens a container
@@ -660,7 +662,8 @@ Four distribution repositories were re-uploaded for this release.
   `fetch` injection for `fromPretrained`, and `Symbol.dispose` support on `AnimaPipeline`.
 - Model cards are generated from the manifest when a distribution is assembled.
 
-[Unreleased]: https://github.com/hdae/karume/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/hdae/karume/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/hdae/karume/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/hdae/karume/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/hdae/karume/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/hdae/karume/compare/v0.9.0...v0.10.0
