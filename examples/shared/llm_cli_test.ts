@@ -99,12 +99,20 @@ Deno.test("LLM source: path の空白・日本語・%・#・? を保ったまま
 });
 
 for (const family of ["qwen3", "minicpm5"] satisfies LlmFamily[]) {
-  const tokenizerFile = new URL(`../../${llmProfile(family).tokenizer}`, import.meta.url);
+  const tokenizerPath = llmProfile(family).tokenizer;
+  const tokenizerFile = new URL(`../../${tokenizerPath}`, import.meta.url);
   let available = false;
   try {
     available = Deno.statSync(tokenizerFile).isFile;
   } catch (error) {
     if (!(error instanceof Deno.errors.NotFound)) throw error;
+  }
+  if (!available) {
+    console.warn(
+      `[karume] ${tokenizerPath} が無いため ${family} の tokenizer パリティを SKIP する` +
+        "（生成: 公式モデルの tokenizer.json をこの位置へ手置きする — inputs/ は git 追跡外・" +
+        "docs/assets-layout.md）",
+    );
   }
   Deno.test({
     name: `${family}: 公式 tokenizer の入力・復号・チャット参照列と厳密一致（ローカル資産）`,
