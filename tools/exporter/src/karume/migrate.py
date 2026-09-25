@@ -78,8 +78,9 @@ from karume.dist import (
     manifest_text,
     sha256_file,
 )
-from karume.ir import IR_METADATA_KEY, IrGraph
+from karume.ir import IrGraph
 from karume.legacy import (
+    IR_METADATA_KEY,
     SourceTensor,
     _read_metadata,
     payload_chunks,

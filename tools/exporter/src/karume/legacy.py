@@ -27,8 +27,11 @@ from pathlib import Path
 from typing import Any
 
 from karume.container import resolve_sequence
-from karume.ir import IR_METADATA_KEY
 from karume.verify import assert_reader_layout
+
+#: 旧配布形（safetensors 方言）でグラフ JSON を載せていた `__metadata__` のキー（読むのは
+#: 移行 CLI の `karume.legacy` / `karume.migrate` だけ）。
+IR_METADATA_KEY = "karume_ir"
 
 #: 生バイトの読み出し単位。数 GB を丸読みしないための唯一の要件で、値自体は素の I/O 単位。
 _CHUNK_BYTES = 1 << 20

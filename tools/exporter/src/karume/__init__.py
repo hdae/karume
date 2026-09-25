@@ -1,8 +1,8 @@
 """Karume exporter — torch.export 済みモデルを IR（docs/ir-v2.md）とコンテナ（`krm`）へ落とす。
 
-公開面は `__all__` の 13 件が正本（列挙とここの説明は 1:1 — 機械門は
+公開面は `__all__` の 12 件が正本（列挙とここの説明は 1:1 — 機械門は
 `tests/test_architecture_boundary.py` の TestThePublicSurface）:
-IR の型と metadata キー（`IR_METADATA_KEY` / `IrGraph`）・変換（`convert` /
+IR の型（`IrGraph`）・変換（`convert` /
 `curated_decompositions` / `normalize_graph`）・格納変換（`FixedQuantizedWeight` /
 `stored_model`）・出所（`Provenance`）・検証（`parse_ir_graph` / `verify_container`）・
 一本道（`export_module` / `export_to_file` / `publish_model`）。
@@ -24,7 +24,6 @@ from types import ModuleType as _ModuleType
 #: 公開名 → 定義元モジュール。
 _EXPORTS: dict[str, str] = {
     "FixedQuantizedWeight": "karume.emit",
-    "IR_METADATA_KEY": "karume.ir",
     "IrGraph": "karume.ir",
     "Provenance": "karume.container",
     "convert": "karume.convert",
@@ -38,10 +37,8 @@ _EXPORTS: dict[str, str] = {
     "verify_container": "karume.verify",
 }
 
-# 既存の公開面テストは ASCII 昇順を要求する。RUF022 の「定数優先」と区別する。
-__all__ = [  # noqa: RUF022
+__all__ = [
     "FixedQuantizedWeight",
-    "IR_METADATA_KEY",
     "IrGraph",
     "Provenance",
     "convert",

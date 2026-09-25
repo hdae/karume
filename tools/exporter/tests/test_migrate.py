@@ -45,7 +45,6 @@ from karume.container import (
 )
 from karume.emit import stored_model
 from karume.ir import (
-    IR_METADATA_KEY,
     IrGraph,
     IrInitializer,
     IrInput,
@@ -55,6 +54,7 @@ from karume.ir import (
     IrValue,
 )
 from karume.legacy import (
+    IR_METADATA_KEY,
     LegacyFormatError,
     SourceTensor,
     StoredEntry,

@@ -17,7 +17,6 @@ import pytest
 #: 公開面の名前集合と各名前の解決先の仕様で、`karume._EXPORTS` の写しではない。
 EXPECTED_ORIGINS: dict[str, str] = {
     "FixedQuantizedWeight": "karume.emit",
-    "IR_METADATA_KEY": "karume.ir",
     "IrGraph": "karume.ir",
     "Provenance": "karume.container",
     "convert": "karume.convert",

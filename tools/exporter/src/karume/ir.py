@@ -13,9 +13,6 @@ from dataclasses import dataclass, field
 
 IR_FORMAT = "karume-ir"
 IR_VERSION = 1
-#: 旧配布形（safetensors 方言）でグラフ JSON を載せていた `__metadata__` のキー（読むのは
-#: 移行 CLI の `karume.legacy` / `karume.migrate` だけ）。
-IR_METADATA_KEY = "karume_ir"
 
 #: 非負整数、または `coeff·sym+offset` の正準表記（dims.py）。
 IrDim = int | str
@@ -147,9 +144,8 @@ class IrNode:
             "ins": list(self.ins),
             "outs": list(self.outs),
             "attrs": dict(self.attrs),
-            # MUST: 空の states は**書かない**（IrGraph.to_dict の states 節と同じ理由）。
-            # 常に出すと states を 1 本も持たない既存モデルのグラフ JSON がバイト単位で変わり、
-            # 配布物の sha 門が全部動く。
+            # 空の states は書かない — v2 の正準直列化（`container.ir_v2_document`・docs/ir-v2.md
+            # 「正準直列化」）が空欄を書かない規則に揃える。v1 の JSON は配布物に載らない。
             **({"states": dict(self.states)} if self.states else {}),
         }
 
@@ -186,9 +182,8 @@ class IrGraph:
             "outputs": list(self.outputs),
             "initializers": {name: init.to_dict() for name, init in self.initializers.items()},
             "values": {name: value.to_dict() for name, value in self.values.items()},
-            # MUST: 空の states は**書かない**。常に出すと states を 1 本も持たない既存モデルの
-            # グラフ JSON がバイト単位で変わり、配布物の sha 門が全部動く（ADR 0066 決定 2 の
-            # 「states を出す最初のモデルまで無風」）。
+            # 空の states は書かない — v2 の正準直列化（`container.ir_v2_document`・docs/ir-v2.md
+            # 「正準直列化」）が空欄を書かない規則に揃える。v1 の JSON は配布物に載らない。
             **(
                 {"states": {name: slot.to_dict() for name, slot in self.states.items()}}
                 if self.states

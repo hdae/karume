@@ -29,7 +29,8 @@ from ir_fixtures import Shape, fill_spec, fixture_spec
 
 from karume.container import codec_entry, numbered_path
 from karume.emit import StoredModel, stored_model
-from karume.ir import IR_METADATA_KEY, IrGraph
+from karume.ir import IrGraph
+from karume.legacy import IR_METADATA_KEY
 from karume.ple import ple_row_bytes
 
 #: 格納 dtype → (safetensors dtype 名, 1 要素の bit 数)。旧書き手の表の写し。
