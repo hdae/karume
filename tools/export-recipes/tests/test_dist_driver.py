@@ -12,12 +12,14 @@ core は綴りを持たないので、{@link dist.default_out_dir} の規則は�
 from __future__ import annotations
 
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 import dist
-from _shared.paths import DIST_ROOT, SERIES_ROOT
+from _shared.paths import DIST_ROOT, REPO_ROOT, SERIES_ROOT
 from anima.distribution import EXTRA_PIPELINE as ANIMA_EXTRA_PIPELINE
 from anima.distribution import OFFICIAL_PIPELINE as ANIMA_OFFICIAL_PIPELINE
 from birefnet.distribution import LUCIDA_PIPELINE
@@ -227,6 +229,24 @@ class TestReleaseRepositories:
     ) -> None:
         assert resolve_repo(dist.PIPELINES[pipeline], models, repo) == f"hdae/{directory}"
 
+    def test_the_table_names_the_same_repositories_as_the_typescript_sources(self) -> None:
+        """公開 revision の正本（TS の各 family の `*_SOURCES`）と同じリポの集合を焼くこと。
+
+        2 つの表は別の言語で独立に更新されるので、リポの追加・改名を片側だけにすると、カードの
+        Usage 例と pin のリポが割れる。TS 側は Python から読めるテキストなので機械で突き合わせる。
+        """
+        sources = sorted((REPO_ROOT / "packages" / "models" / "src").glob("*/config.ts"))
+        assert sources, "packages/models/src/*/config.ts が見つからない（置き場が動いた）"
+        declared = {
+            match
+            for path in sources
+            for match in re.findall(
+                r'^\s*repo: "(hdae/[^"]+)",$', path.read_text(encoding="utf-8"), re.MULTILINE
+            )
+        }
+
+        assert {f"hdae/{directory}" for *_, directory in RELEASE_REPOSITORIES} == declared
+
 
 #: README の受理集合を綴る 1 文（`--pipeline` の引数として叩ける名前がバッククォートで並ぶ）。
 #: 同じ節の「10 pipeline seats across 8 families」は**家族数**を語る別の文なので拾わない。
@@ -254,3 +274,37 @@ class TestReadme:
     def test_the_readme_lists_them_in_the_help_order(self) -> None:
         """並びは `--help` の並び（既定が先頭）— 読み手が CLI と突き合わせられる形にする。"""
         assert self._accepted_names() == list(dist.PIPELINES)
+
+
+def _torch_loaded_after(source: str) -> bool:
+    """新しいインタプリタで `source` を実行し、torch が `sys.modules` に入ったかを返す。
+
+    「どのモジュールが既に import 済みか」はテストセッションの `sys.modules` では判定できない
+    （他のテストが torch を読み込み済み）ので、core の test_package_init と同じ subprocess 形で
+    毎回確かめる。cwd を recipe のルートにして、`dist` / family を pytest と同じ綴りで引く。
+    """
+    completed = subprocess.run(
+        [sys.executable, "-c", f"import sys\n{source}\nprint('torch' in sys.modules)"],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=Path(dist.__file__).resolve().parent,
+    )
+    assert completed.returncode == 0, completed.stderr
+    return completed.stdout.strip() == "True"
+
+
+class TestImportingTheDriver:
+    """配布・カード層は torch を読まずに組めること（siglip2 / depth の `measurements.py` の前提）。
+
+    patch 層（torch 依存）を配布経路の import 連鎖から外す判断は、「`import dist` は torch を
+    読まない」を根拠にしている。どれか 1 つの distribution / card が patch 層や torch 依存の
+    helper を module 直下で import すると、この性質は黙って崩れる。
+    """
+
+    def test_importing_the_driver_does_not_load_torch(self) -> None:
+        assert not _torch_loaded_after("import dist")
+
+    def test_importing_a_patch_layer_does_load_torch(self) -> None:
+        """対照: 同じ判定が torch 依存の import を検出できる（上の検査が恒真でない）。"""
+        assert _torch_loaded_after("import siglip2.patch")
