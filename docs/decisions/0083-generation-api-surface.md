@@ -1,7 +1,7 @@
 # 0083: 生成 API 面 — `GenerationProgram` / `GenerationSequence`・token イベント・sampling ホスト
 
-- Status: accepted（2026-08-31 — 設計ドラフトの裁定 10 点をすべて★推奨案で確定〈ユーザー裁定〉。
-  実装は未着手 = backlog now の段 0〜3）
+- Status: implemented（2026-08-31 accepted — 設計ドラフトの裁定 10 点をすべて★推奨案で確定〈ユーザー裁定〉。
+  実装は段 0〜3 で完了 — 段 3 = `6b536fe1`〈2026-09-25 時点の現況〉）
 - Date: 2026-08-31
 - 対象: `packages/models/src/generation/`（新規 `program.ts` / `sequence.ts` / `sampler.ts` +
   `greedy.ts` の格下げ）と gemma4 の製品グラフ台本。IR 仕様・ランタイム・hub は無改変。

@@ -45,8 +45,9 @@ limitations — 超越関数のドライバ依存・シェーダコンパイラ�
 書き出しはケース名・環境キーとも**辞書順**・2 スペース・末尾改行で安定させる。複数環境の行が 1
 ファイルに同居する席では、差分が「実際に変わった行」だけになることが必須条件になる。
 
-現況の行数は anima 9 ケース / sbv2 6 ケース / irodori 2 ケース × 環境 2 本
-（`deno-intel-graphics-bmg-g21` と `deno-nvidia-geforce-rtx-3080-ti`）。
+現況（2026-09-25 時点）の行数は anima 11 ケース / sbv2 6 ケース / irodori 2 ケース × 環境 2 本
+（`deno-intel-graphics-bmg-g21` と `deno-nvidia-geforce-rtx-3080-ti`）。anima の extra 2 ケースは
+`deno-intel-graphics-bmg-g21` の行だけを持つ。
 
 ### 2. 環境キー = `<ランタイム>-<アダプタ名 slug>`
 

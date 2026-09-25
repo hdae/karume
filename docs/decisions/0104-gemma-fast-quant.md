@@ -52,3 +52,10 @@ Status: acceptedは決定そのものの承認状態であり、以下の項目�
 - 実モデルで既定/参照/明示有効/明示無効を実行し、カーネルの適用と生成一致を確認する。
 - 通常版のtarget/drafterへの伝播と同一設定での投機検証を確認する。QATのMTP対応は追加しない。
 - 新しく生成したquant宣言を使うChrome比較、deno task verify、exporter/recipe両方のpytestを通す。
+
+## 追記（2026-09-25）— コンテナ後の manifest
+
+「manifest は karume/4 のまま」は、ADR [0109](0109-manifest-v5-container.md) で `karume/5` へ進んだ後も
+`quants[].session` の欄がそのまま引き継がれている（0109 決定 2）。「重み shard 取得前の admission」の
+shard は、ADR [0108](0108-container-format.md) 以降はコンテナの part を指す。格納の正本は codec / layout
+（0108 決定 12 / 13・[container-v1](../container-v1.md) §6）。

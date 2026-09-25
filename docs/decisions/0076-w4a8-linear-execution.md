@@ -108,3 +108,10 @@ k の門を i4 にも適用するのは根拠のない過剰制約になる。
 現物）。atol=0 門は device 別 conformance の門として維持し、緩めない — 契約文の側を実態へ
 合わせた（src/kernels/linear-i8a8.ts / src/reference/i8a8.ts / session-types.ts の同旨訂正と
 同時）。
+
+## 追記（2026-09-25 — コンテナ後の格納形の正本）
+
+決定 1 の「格納形は資産ヘッダが正」は、ADR [0108](0108-container-format.md) 以降はコンテナ descriptor の
+`encoding.codec` が正で、`weightStorage` はそこから導く layout（codec 台帳 — 0108 決定 12 / 13・
+[container-v1](../container-v1.md) §6）を指す。manifest と二重持ちしない趣旨は変わらず、manifest は
+`karume/5` が同じ欄を引き継ぐ（ADR [0109](0109-manifest-v5-container.md) 決定 2）。

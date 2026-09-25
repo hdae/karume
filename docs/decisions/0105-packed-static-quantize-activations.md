@@ -1,10 +1,10 @@
 # 0105: 固定SRQの活性をpacked int8で並列GEMVへ渡す
 
 - Status: accepted（2026-09-19・K-45 段 1a として利用者が「a を優先」と裁定した範囲）。速度の採否は実測後に判断し、
-  quant宣言・manifest語彙への昇格はそこから先。
+  quant宣言・manifest語彙への昇格はそこから先。語彙への昇格と `i4-fast` の宣言は追記 2（2026-09-20）で済んだ。
 - 関連: [0097](0097-gemma4-qat-integration.md)、[0098](0098-linear-gemv-parallel.md)、
   [0103](0103-linear-static-quantize-fusion.md)、[0104](0104-gemma-fast-quant.md)、
-  [0040](0040-fusion-pass.md)、[0058](0058-numerics-opt-in-contract.md)、[0022](0022-no-runtime-autotune.md)
+  [0040](0040-fusion-pass.md)、[0058](0058-numerics-opt-in-contract.md)、[0022](0022-gemm-register-blocking.md)
 - 根拠: [QAT decode 速度の帰属](../research/2026-09-19-qat-speed-recon.md) §14（段 0 の切り分け）
 
 ## 問題
@@ -319,3 +319,10 @@ f32 自身が割れる）ので、式を似せても 2 本のカーネルは揃�
 検収（M2・利用者実走・同日）: u32 一致門 3 段とも緑 → 計測ページの往復で英語・日本語とも id 列が
 4 ロード全て同一（速度は off 35.8 / on 35.9 tok/s で中立 — [research §16.1](../research/2026-09-19-qat-speed-recon.md)）。
 `i4-fast` の宣言は維持する。
+
+## 追記 5（2026-09-25）: コンテナ後の manifest
+
+追記 2 の追記決定 3「manifest は `karume/4` のまま」は、ADR [0109](0109-manifest-v5-container.md) で `karume/5`
+へ進んだ後も `quants[].session` の `packedStaticQuantize` 欄がそのまま引き継がれている（0109 決定 2）。
+格納の正本は codec / layout（ADR [0108](0108-container-format.md) 決定 12 / 13・
+[container-v1](../container-v1.md) §6）。

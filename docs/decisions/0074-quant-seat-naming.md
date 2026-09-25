@@ -177,3 +177,12 @@ INT2 格納の追加（[ADR 0097 追記 1](0097-gemma4-qat-integration.md#追記
 | [0098](0098-linear-gemv-parallel.md)                                                             | ノブ `gemvpar`（2026-09-13 追記）                                                                     |
 | [0097 追記 5](0097-gemma4-qat-integration.md#追記-5--固定-qat-recipe-と数値比較の扱い2026-09-11) | QAT の席名 — 混成 INT2 / INT4 / INT8 を `i4` の 1 ラベルで表し、内訳は `label` / `description` に書く |
 | [0104](0104-gemma-fast-quant.md)                                                                 | ノブ `fast`（上記）・既存資産を自動更新しない宣言                                                     |
+
+## 追記（2026-09-25）— コンテナ後の格納語彙の正本
+
+決定 2 の「資産ヘッダ」は、ADR [0108](0108-container-format.md) 以降はコンテナ descriptor の
+`encoding.codec` を指す（codec 台帳 — 0108 決定 12 / 13・[container-v1](../container-v1.md) §6）。
+dtype ラベル・席名の綴りは codec から導く layout（`codecLayout`）と一致し、3 つの綴りが揃う規則の
+趣旨は `karume dist` の検査（`tools/exporter/src/karume/dist.py` の `storage_dtypes`）で今も成り立つ。
+manifest は `karume/5` が同じ欄（`quants[].weights` の dtype ラベル）を引き継ぐ（ADR
+[0109](0109-manifest-v5-container.md) 決定 2）。

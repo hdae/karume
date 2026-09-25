@@ -55,4 +55,6 @@
 - 遡及しない: sbv2 の `F1` / `FN4` などは**話者の識別子**であって版ではないので、この規則の
   対象外。irodori も現状 1 モデルなので据え置く。
 - 既に公開済みの `anima-turbo` は改名しない（pin と JSR 公開済みパッケージの既定ソースが
-  そこを指しているため — 改名は 0.5.0 の breaking 波でしか動かせない）。
+  そこを指しているため — 改名は 0.5.0 の breaking 波でしか動かせない）。その後 ADR
+  [0087](0087-anima-official-extra-repos.md)（2026-09-01）で `anima-turbo` モデルと
+  `hdae/karume-anima-turbo` リポごと退役した。

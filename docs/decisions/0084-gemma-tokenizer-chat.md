@@ -1,7 +1,7 @@
 # 0084: Gemma の tokenizer / detokenizer / chat template — compile-to-asset と射程の切り方
 
-- Status: accepted（2026-08-31 — 設計ドラフトの裁定 6 / 9 を★推奨案で確定〈ユーザー裁定〉。
-  実装は未着手 = backlog now の段 1a / 段 4）
+- Status: implemented（2026-08-31 accepted — 設計ドラフトの裁定 6 / 9 を★推奨案で確定〈ユーザー裁定〉。
+  実装は段 1a〈`a235d539`〉/ 段 4〈`088ad297`〉で完了〈2026-09-25 時点の現況〉）
 - Date: 2026-08-31
 - 対象: `packages/models/src/text/`（家族中立の共通層）/ `packages/models/src/gemma/text/`
   （新設・ファミリ側）/ `tools/export-recipes/`（compile 台本）。IR 仕様・ランタイム・hub は無改変。

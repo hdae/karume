@@ -1,6 +1,7 @@
 # 0090: shard 仕様 v3 — テンソル分割（piece）・上限 256MiB 1 本・ファイル長で測る
 
-- Status: accepted（2026-09-02 — ユーザー裁定「この方針で進めてください」。実装前の成立性は
+- Status: 一部 superseded by [0108](0108-container-format.md)（2026-09-24 発効 — 決定 2 の上書き。
+  末尾の追記）/ accepted（2026-09-02 — ユーザー裁定「この方針で進めてください」。実装前の成立性は
   [research/2026-09-02-tensor-piece-split.md](../research/2026-09-02-tensor-piece-split.md)）
 - Date: 2026-09-02
 - 関連: ADR [0081](0081-shard-spec-v2.md)（shard 仕様 v2 — **決定 2 の上限 1GiB と追記 2026-09-02 の
@@ -9,7 +10,7 @@
   同居」へ拡張・決定 3 の逐次消費は不変・追記 2026-09-02 の器の使い回しが上限の根拠）/
   [0089](0089-memory-limits-preflight.md)（読み手側の shard 上限検査 — 値と測り方が変わる）/
   [0063](0063-safetensors-physical-layout.md)（shard 単体の物理配置は不変 — piece は普通のテンソル
-  として並ぶ）/ [0069](0069-int4-storage.md)（i4 の group scale は先頭次元が行 — piece の切り方と
+  として並ぶ）/ [0069](0069-packed-w4-storage.md)（i4 の group scale は先頭次元が行 — piece の切り方と
   一致）
 
 ## Context

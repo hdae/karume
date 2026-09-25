@@ -1,7 +1,7 @@
 # 0085: PLE の配布形 — token-major + vocab レンジ shard・ホスト gather
 
-- Status: accepted（2026-08-31 — 設計ドラフトの裁定 3 を★推奨案で確定〈ユーザー裁定〉。
-  実装は未着手 = backlog now の段 1b）
+- Status: implemented（2026-08-31 accepted — 設計ドラフトの裁定 3 を★推奨案で確定〈ユーザー裁定〉。
+  実装は段 1b〈`16bf5aa6`〉で完了〈2026-09-25 時点の現況〉）
 - Date: 2026-08-31
 - 対象: `tools/export-recipes/gemma4/`（PLE の外出しと sidecar 生成）/
   `packages/models/src/gemma/`（ホスト側 loader）。IR 仕様・ランタイム・hub は**無改変**。
