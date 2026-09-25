@@ -100,11 +100,9 @@ class TestFixedPackedBytesReachTheContainer:
         counts = storage_breakdown(stored.graph)
         assert (counts.compressed_bytes, counts.scale_bytes) == (8, 8)
 
-    def test_a_per_column_scale_is_refused_before_anything_is_written(self, tmp_path):
+    def test_a_per_column_scale_is_refused_before_anything_is_written(self):
         """`[1, rows]` は行ごとの scale ではない — 通すとチャネルの値が黙って入れ替わる。"""
         plain, tensors, fixed = _fixed((1, 2))
 
         with pytest.raises(EmitError, match="scale"):
             stored_model(plain, tensors, fixed_weights=fixed)
-
-        assert list(tmp_path.iterdir()) == []
