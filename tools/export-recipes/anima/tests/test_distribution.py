@@ -157,14 +157,17 @@ def _write(path: Path, payload: bytes) -> None:
 FAKE_LORA_SHA256 = "9" * 64
 
 
-def _bake_lora_record(series: Path, sha256: str = FAKE_LORA_SHA256) -> Path:
+def _bake_lora_record(
+    series: Path, sha256: str = FAKE_LORA_SHA256, component: str = "transformer"
+) -> Path:
     """旧 fused 系列が持っていた帰属の記録を 1 本の系列へ置く（実物と同じ形）。
 
     旧 `anima-turbo`（LoRA 焼き込み）の系列は `outputs/series/` にまだ残っているので、
     新しい席へ挿し込む取り違えは**実際に起こしうる**。融合済みと素の資産は形が 1 バイトも
-    変わらないので、記録の**不在**を見る門だけがこれを捕まえる。
+    変わらないので、記録の**不在**を見る門だけがこれを捕まえる。`component` は書き手の
+    `LORA_PREFIXES` の 2 ターゲット（transformer / text_conditioner）のどちらに焼いたか。
     """
-    path = series / "transformer" / LORA_PROVENANCE_FILE
+    path = series / component / LORA_PROVENANCE_FILE
     _write(
         path,
         json.dumps({"file": "anima-turbo-lora-v0.2.safetensors", "sha256": sha256}).encode("utf-8"),
@@ -545,6 +548,29 @@ class TestLoraProvenance:
 
             with pytest.raises(DistError, match="焼いた記録のある系列が来ている"):
                 _assemble_anima(sources, tmp_path / "models" / storage)
+
+    @pytest.mark.parametrize(
+        "model",
+        [ANIMA_TURBO_MODEL_NAME, ANIMA_AESTHETIC_MODEL_NAME],
+        ids=["shared-anima-f16", "own-text-conditioner"],
+    )
+    def test_the_check_reaches_the_text_conditioner_series_too(
+        self, tmp_path: Path, model: str
+    ) -> None:
+        """書き手は text_conditioner にも LoRA を焼いて記録を残す（`LORA_PREFIXES`）。
+
+        網が transformer 系列だけだと、焼いた conditioner 系列を配布席へ挿しても素通りし、
+        `anima-f16`（共有）の「LoRA を焼いていない」MUST を誰も検査しない。共有系列と
+        自前の `<model>-f16` の両方の席で同じ門が掛かることを見る。
+        """
+        sources = _build_series(tmp_path / "series", model=model)
+        _bake_lora_record(sources.text_conditioner, component="text_conditioner")
+        out_dir = tmp_path / "models" / model
+
+        with pytest.raises(DistError, match="焼いた記録のある系列が来ている"):
+            _assemble_anima(sources, out_dir, model)
+
+        assert not out_dir.exists()
 
     # NOTE: 旧「記録は配布形へ持ち出さない」テストはこの波で削除した。記録を持つ系列は
     # 上の門で計画段に落ちるので、組み立て済みの木に記録が無いのは**恒真**になった

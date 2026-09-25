@@ -624,7 +624,8 @@ def _rope_base_of(path: Path) -> bytes:
 
 
 def assert_lora_provenance(sources: AnimaSources, expected: str | None) -> None:
-    """transformer 系列が記録した LoRA の sha256 が、モデルの宣言と一致することを確かめる。
+    """transformer 系列と text_conditioner 系列が記録した LoRA の sha256 が、モデルの宣言と
+    一致することを確かめる。
 
     MUST: モデルの宣言（{@link AnimaModel} の `lora_sha256`）が「どの LoRA を焼いた配布物か」の
     唯一の記録なのに、融合後の重みからは焼いた LoRA を復元できない。突き合わせが無いと、
@@ -636,9 +637,18 @@ def assert_lora_provenance(sources: AnimaSources, expected: str | None) -> None:
     素の重みは資産の形が 1 バイトも変わらないので、turbo の系列を素モデルの席へ挿し込む
     取り違えは他のどの検査にも掛からない。書き手（`anima/export.py`）は LoRA を焼かなかった
     ターゲットの記録を消す（全域関数）ので、**記録の不在が「焼いていない」の証跡**になる。
+
+    MUST: 書き手は `LORA_PREFIXES` の 2 ターゲット（transformer / text_conditioner）に焼いて
+    記録を残すので、text_conditioner 系列（共有の {@link ANIMA_BASE_SERIES} と自前の
+    `<model>-f16`）の記録も同じ期待値で見る。網が transformer だけだと、LoRA を焼いた
+    conditioner 系列を配布席へ挿す取り違えが素通りし、`anima-f16` の「LoRA 無し」の MUST が
+    誰にも検査されない。
     """
-    for series in transformer_series(sources):
-        path = series / "transformer" / LORA_PROVENANCE_FILE
+    records = [
+        series / "transformer" / LORA_PROVENANCE_FILE for series in transformer_series(sources)
+    ]
+    records.append(sources.text_conditioner / "text_conditioner" / LORA_PROVENANCE_FILE)
+    for path in records:
         if expected is None:
             if path.is_file():
                 raise DistError(
@@ -678,7 +688,7 @@ def assert_calib_provenance(sources: AnimaSources, spec: AnimaModel) -> None:
     AnimaModel.calib_method} から引く — 配布は 1 通りで、動くのは視認評価専用の席だけ）。
     `anima.export` の `--model` は校正条件を
     引くためだけのノブ（LoRA 焼き込みのような格納バイトへの影響が無い）なので、素版の重みを
-    `--model anima-turbo` で焼いた資産は「正しい素版 i4」に見える — 校正だけが turbo の
+    `--model anima-turbo-v1.1` で焼いた資産は「正しい素版 i4」に見える — 校正だけが turbo の
     8 step・CFG 1 で回っている。条件はモデルの `pipeline_config` から導かれる
     （`anima.calib.calib_conditions`）ので、同じ 1 箇所から引き直せば突き合わせられる。
 
