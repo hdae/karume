@@ -19,7 +19,8 @@ Helpers shared by several families that cannot be promoted into the generic core
 [`_shared/`](_shared/) — the repository's own path spellings (`models/` / `outputs/` / `inputs/`),
 which are repo topology and therefore never core knowledge, plus the gates that several families
 must judge identically (the decode-series contract, and whether an i4 series' calibration record is
-good enough to ship).
+good enough to ship), the stored-form read-back of a published `krm` container, the Gemma SPM-BPE
+tokenizer compiler, and the license texts shipped at the root of each distribution repository.
 
 ## Setup (uv workspace)
 

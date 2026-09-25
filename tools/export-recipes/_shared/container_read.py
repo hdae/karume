@@ -1,8 +1,9 @@
 """据えたコンテナ（`krm`）を**格納のまま**読み戻す（recipe 側の読み手・ADR 0065 決定 2）。
 
-台本が自分の書き出しを検算する席は 3 つある — 上流 checkpoint とのバイト一致（vowel_detector）・
-i4 系列からの重み読み戻し（irodori）・QAT の格納監査（gemma4_qat）。どれも要るのは「テンソル
-キー → 宣言した格納形と生 payload」で、意味論 f32 へ戻す前の姿である。
+台本や配布 recipe が自分の書き出しを検算する（代表例: 上流 checkpoint とのバイト一致
+〈vowel_detector〉・i4 系列からの重み読み戻し〈irodori〉・QAT の格納監査〈gemma4_qat〉 —
+呼び手の全量は rg で引く）。どれも要るのは「テンソルキー → 宣言した格納形と生 payload」で、
+意味論 f32 へ戻す前の姿である。
 
 core（`karume.verify.verify_container`）が合流まで済ませた供給計画をそのまま畳むだけなので、
 規則の写しは 1 行も持たない。block の sha256 は取り出しのたびに `ReadContainer.block` が
