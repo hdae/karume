@@ -661,8 +661,8 @@ def _h_linear(node: Node) -> Emitted:
 def _h_layer_norm(node: Node) -> Emitted:
     """aten.layer_norm → layer_norm（attrs `normalized_shape` / `eps`）。
 
-    MUST: 保存しないと native_layer_norm（3 出力）+ getitem になり、IR v1 の単一出力前提と
-    衝突する（recon §5）。
+    MUST: 保存しないと native_layer_norm（3 出力）+ getitem になり、多出力 aten の getitem
+    結線は sampling の実需まで先送り（ADR 0068 追記）なので受けられない（recon §5）。
     MUST: 正規化軸は最終次元 1 本のみ。affine は「両方あり」「両方なし」「weight だけ」の
     3 形を受け、足りないスロットは ones/zeros 合成で埋める（ADR 0016）。他の形は行カーネルの
     前提が崩れる。
