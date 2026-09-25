@@ -35,6 +35,7 @@ import {
   padSequence,
 } from "../src/anima/latents.ts";
 import { needsUncond } from "../src/generation/dpm-solver-multistep.ts";
+import { readFileIfPresent, readTextIfPresent } from "./helpers/read-if-present.ts";
 
 /** フィクスチャ 4 変種（ディレクトリ名 = `pipeline_ref.py` の既定出力 / turbo の `--out`）。 */
 const VARIANTS = [
@@ -71,8 +72,8 @@ type Fixture = {
 const openFixture = async (variant: string): Promise<Fixture | undefined> => {
   const dir = new URL(`${variant}/`, SERIES_ROOT);
   const [metaText, bytes] = await Promise.all([
-    Deno.readTextFile(new URL("pipeline.json", dir)).catch(() => undefined),
-    Deno.readFile(new URL("pipeline.safetensors", dir)).catch(() => undefined),
+    readTextIfPresent(new URL("pipeline.json", dir)),
+    readFileIfPresent(new URL("pipeline.safetensors", dir)),
   ]);
   if (metaText === undefined || bytes === undefined) return undefined;
   const meta = JSON.parse(metaText) as FixtureMeta;

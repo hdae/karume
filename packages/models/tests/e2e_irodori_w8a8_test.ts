@@ -54,6 +54,7 @@ import {
   readManifest,
   worstDifference,
 } from "./helpers/irodori-assets.ts";
+import { readTextIfPresent } from "./helpers/read-if-present.ts";
 
 /** 配布形の席の綴りと、その席が指す格納系列（`i8` と 1 組のバイトを共有する）。 */
 const QUANT = "i8-a8";
@@ -142,7 +143,7 @@ const censusOf = (diagnostics: SessionDiagnostics): KeyCensus | undefined => {
   return { i8a8Linear, quantizeRows, plainLinear };
 };
 
-const metaText = await Deno.readTextFile(new URL("meta.json", GOLDEN_DIR)).catch(() => undefined);
+const metaText = await readTextIfPresent(new URL("meta.json", GOLDEN_DIR));
 const readMeta = (): GoldenMeta => JSON.parse(metaText as string) as GoldenMeta;
 
 const seated = hasQuantSeat(QUANT);

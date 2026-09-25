@@ -71,6 +71,7 @@ import {
   readManifest,
   worstDifference,
 } from "./helpers/irodori-assets.ts";
+import { readTextIfPresent } from "./helpers/read-if-present.ts";
 
 /**
  * `z` の全要素突合に使う許容誤差（**f32 系列**）。
@@ -284,9 +285,7 @@ const runCase = async (
 
 for (const series of SERIES) {
   /** この系列の golden。無い環境は「焼いていない」なので系列ごと SKIP（部分欠けは FAIL 側）。 */
-  const metaText = await Deno.readTextFile(new URL("meta.json", series.goldenDir)).catch(
-    () => undefined,
-  );
+  const metaText = await readTextIfPresent(new URL("meta.json", series.goldenDir));
   const readMeta = (): GoldenMeta => JSON.parse(metaText as string) as GoldenMeta;
   /** 配布形にこの席があるか（席の綴りと golden の系列は 1 対 1 だが、綴りは別軸）。 */
   const seated = hasQuantSeat(series.name);

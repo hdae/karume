@@ -15,6 +15,7 @@ import {
   planCodecTiles,
 } from "../src/irodori/codec.ts";
 import { findFlatteningPoint, trimmedSampleCount } from "../src/irodori/host/trim.ts";
+import { readFileIfPresent, readTextIfPresent } from "./helpers/read-if-present.ts";
 
 // ---- タイル幾何 -----------------------------------------------------------
 
@@ -237,12 +238,8 @@ type TrimMeta = {
   readonly trim: Readonly<Record<string, { readonly frames: number; readonly point: number }>>;
 };
 
-const trimBytes = await Deno.readFile(new URL("trim.safetensors", GOLDEN_DIR)).catch(
-  () => undefined,
-);
-const trimMetaText = await Deno.readTextFile(new URL("meta.json", GOLDEN_DIR)).catch(
-  () => undefined,
-);
+const trimBytes = await readFileIfPresent(new URL("trim.safetensors", GOLDEN_DIR));
+const trimMetaText = await readTextIfPresent(new URL("meta.json", GOLDEN_DIR));
 const GOLDEN_AVAILABLE = trimBytes !== undefined && trimMetaText !== undefined;
 if (!GOLDEN_AVAILABLE) {
   console.warn(

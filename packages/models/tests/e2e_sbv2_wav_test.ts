@@ -91,6 +91,7 @@ import {
   registerReferenceGate,
 } from "../../runtime/tests/helpers/reference.ts";
 import { openResults } from "../../runtime/tests/helpers/results.ts";
+import { readFileIfPresent, readTextIfPresent } from "./helpers/read-if-present.ts";
 
 /** 資産の置き場（リポ直下 `models/karume-sbv2-jvnv/`）。 */
 const ASSETS_DIR = new URL("../../../models/karume-sbv2-jvnv/", import.meta.url);
@@ -171,9 +172,7 @@ const KNOB_KEYS = [
   "lengthScale",
 ] as const satisfies readonly (keyof Sbv2Defaults)[];
 
-const manifestText = await Deno.readTextFile(new URL("karume.json", ASSETS_DIR)).catch(
-  () => undefined,
-);
+const manifestText = await readTextIfPresent(new URL("karume.json", ASSETS_DIR));
 const ASSETS_AVAILABLE = manifestText !== undefined;
 if (!ASSETS_AVAILABLE) {
   console.warn(
@@ -290,7 +289,7 @@ const describeFirstDifference = async (
   expected: string,
   actual: Uint8Array<ArrayBuffer>,
 ): Promise<string> => {
-  const reference = await Deno.readFile(REFERENCE_WAV).catch(() => undefined);
+  const reference = await readFileIfPresent(REFERENCE_WAV);
   if (reference === undefined) {
     return `参照 WAV の実体が無い（${REFERENCE_WAV.pathname}）— 先頭差分位置は出せない`;
   }

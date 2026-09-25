@@ -13,6 +13,7 @@
 import { parseManifest, resolveSelection } from "@karume/hub";
 import type { FileRef, Manifest, ModelEntry } from "@karume/hub";
 import { parseSafetensors } from "@karume/runtime";
+import { readTextIfPresent } from "./read-if-present.ts";
 
 /** 配布形の置き場（`karume dist --pipeline irodori` の既定の出力先）。 */
 export const ASSETS_DIR = new URL("../../../../models/karume-irodori-v4-small/", import.meta.url);
@@ -29,9 +30,9 @@ export const goldenDir = (seriesRoot: string): URL =>
   new URL(`../../../../outputs/series/${seriesRoot}/pipeline/`, import.meta.url);
 
 /** 配布形の manifest（無い環境では undefined = 焼いていない）。 */
-export const manifestText: string | undefined = await Deno.readTextFile(
+export const manifestText: string | undefined = await readTextIfPresent(
   new URL("karume.json", ASSETS_DIR),
-).catch(() => undefined);
+);
 
 /** golden `meta.json` のうち、門が読む欄だけ（形は exporter が持つ — ここは読み口）。 */
 export type GoldenCase = {

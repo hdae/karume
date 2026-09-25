@@ -18,6 +18,7 @@ import { decodeTiles, planCodecTiles } from "../src/irodori/codec.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
 import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { readFileIfPresent } from "./helpers/read-if-present.ts";
 
 /** 実重み v4-small の運用値（`pipelineConfig` が運ぶ数と同じ）。 */
 const LATENT_DIM = 32;
@@ -50,7 +51,7 @@ const LATENT_COMMAND =
   "cd tools/exporter && uv run --with 'transformers==5.14.1' python irodori_pipeline.py";
 
 const readFile = async (url: URL): Promise<ArrayBuffer | undefined> => {
-  const bytes = await Deno.readFile(url).catch(() => undefined);
+  const bytes = await readFileIfPresent(url);
   return bytes === undefined
     ? undefined
     : bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);

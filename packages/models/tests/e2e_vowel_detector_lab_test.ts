@@ -40,6 +40,7 @@ import { logitsToSegments, toLab } from "../src/vowel-detector/postprocess.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
 import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { readTextIfPresent } from "./helpers/read-if-present.ts";
 
 /** 配布形（`karume dist --pipeline vowel-detector` の出力）。 */
 const DIST_DIR = new URL("../../../models/karume-vowel-detector/", import.meta.url);
@@ -83,9 +84,7 @@ const exists = (url: URL): boolean => {
   }
 };
 
-const manifestText = await Deno.readTextFile(new URL("karume.json", DIST_DIR)).catch(
-  () => undefined,
-);
+const manifestText = await readTextIfPresent(new URL("karume.json", DIST_DIR));
 const MODEL_AVAILABLE = manifestText !== undefined && modelPresent(SERIES_MODEL);
 if (!MODEL_AVAILABLE) {
   console.warn(

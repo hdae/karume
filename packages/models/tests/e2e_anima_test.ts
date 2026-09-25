@@ -68,6 +68,7 @@ import {
   registerReferenceGate,
 } from "../../runtime/tests/helpers/reference.ts";
 import { openResults } from "../../runtime/tests/helpers/results.ts";
+import { readTextIfPresent } from "./helpers/read-if-present.ts";
 
 /** 資産の置き場（リポ直下 `models/karume-anima/` — 公式 5 変種同居・既定 = turbo-v1.1）。 */
 const ASSETS_DIR = new URL("../../../models/karume-anima/", import.meta.url);
@@ -104,9 +105,7 @@ const REFERENCE = [
 const caseIdOf = (quant: string, resolution: ImageSize): string =>
   `${quant}-${formatResolution(resolution)}`;
 
-const manifestText = await Deno.readTextFile(new URL("karume.json", ASSETS_DIR)).catch(
-  () => undefined,
-);
+const manifestText = await readTextIfPresent(new URL("karume.json", ASSETS_DIR));
 const ASSETS_AVAILABLE = manifestText !== undefined;
 if (!ASSETS_AVAILABLE) {
   console.warn(
@@ -123,9 +122,7 @@ const RUNNABLE = GPU_AVAILABLE && ASSETS_AVAILABLE;
  * （{@link ASSETS_DIR}）と揃って初めて走る。
  */
 const EXTRA_ASSETS_DIR = new URL("../../../models/karume-anima-extra/", import.meta.url);
-const extraManifestText = await Deno.readTextFile(new URL("karume.json", EXTRA_ASSETS_DIR)).catch(
-  () => undefined,
-);
+const extraManifestText = await readTextIfPresent(new URL("karume.json", EXTRA_ASSETS_DIR));
 if (extraManifestText === undefined) {
   console.warn(
     `[karume] ${EXTRA_ASSETS_DIR.pathname} に karume.json が無いため越境参照の e2e を SKIP する` +
@@ -692,11 +689,16 @@ Deno.test({
     }
     // 注入した側に現物があることで、注入席が末端の取得層まで届いていること（= 実キャッシュを
     // 汚していないこと）を示す。名前空間の名前は取得層が所有するので数えるのは全名前空間ぶん。
-    // 期待は **manifest 1 本 + 一意 sha256 の本数** — 資産のキーは内容キーなので、同一バイトの
-    // 複数 path は 1 エントリに畳まれる（越境参照ぶんも同じキーの作り方で、リポが違うだけ）。
+    // 期待は **manifest 1 本 + 一意な (repo, path, sha256) の本数** — 資産のキーは取得層 HF 層の
+    // 内容キー `["hf", "model", repo, path, sha256]`（hub の `sources/hf.ts`）で path を含むので、
+    // 同一バイトでも path が違えば別エントリになる（越境参照ぶんは repo が越境先に変わるだけ）。
+    // NOTE: hub はこのキーの組み立てを公開面に出していないので、同じ 3 要素をここで組む。
     let entries = 0;
     for (const namespace of caches.namespaces.values()) entries += namespace.entries.size;
-    const expected = new Set(fetched.map((ref) => ref.sha256)).size + 1;
+    const contentKeys = new Set(
+      fetched.map((ref) => JSON.stringify([ref.repo ?? REPO, ref.path, ref.sha256])),
+    );
+    const expected = contentKeys.size + 1;
     if (entries !== expected) {
       throw new Error(`注入したキャッシュのエントリ数が ${entries}（期待 ${expected}）`);
     }

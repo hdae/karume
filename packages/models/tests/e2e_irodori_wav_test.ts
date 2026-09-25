@@ -87,6 +87,7 @@ import {
   registerReferenceGate,
 } from "../../runtime/tests/helpers/reference.ts";
 import { openResults } from "../../runtime/tests/helpers/results.ts";
+import { readFileIfPresent, readTextIfPresent } from "./helpers/read-if-present.ts";
 
 /** 配布形の置き場（`karume dist --pipeline irodori` の既定の出力先）。 */
 const ASSETS_DIR = new URL("../../../models/karume-irodori-v4-small/", import.meta.url);
@@ -170,10 +171,8 @@ const REFERENCE_KNOBS = {
   codecHaloFrames: 8,
 } as const;
 
-const manifestText = await Deno.readTextFile(new URL("karume.json", ASSETS_DIR)).catch(
-  () => undefined,
-);
-const referenceBytes = await Deno.readFile(REFERENCE_AUDIO).catch(() => undefined);
+const manifestText = await readTextIfPresent(new URL("karume.json", ASSETS_DIR));
+const referenceBytes = await readFileIfPresent(REFERENCE_AUDIO);
 const ASSETS_AVAILABLE = manifestText !== undefined && referenceBytes !== undefined;
 if (!ASSETS_AVAILABLE) {
   console.warn(
@@ -292,7 +291,7 @@ const describeFirstDifference = async (
   actual: Uint8Array<ArrayBuffer>,
 ): Promise<string> => {
   const path = referenceWavPath(item);
-  const reference = await Deno.readFile(path).catch(() => undefined);
+  const reference = await readFileIfPresent(path);
   if (reference === undefined) {
     return `参照 WAV の実体が無い（${path.pathname}）— 先頭差分位置は出せない`;
   }

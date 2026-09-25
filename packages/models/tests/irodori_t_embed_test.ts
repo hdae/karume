@@ -12,6 +12,7 @@ import { assert, assertEquals, assertThrows } from "@std/assert";
 import { parseSafetensors } from "@karume/runtime";
 import { tSchedule } from "../src/irodori/host/sampler.ts";
 import { timestepEmbedding, timestepFrequencies } from "../src/irodori/host/t-embed.ts";
+import { readFileIfPresent } from "./helpers/read-if-present.ts";
 
 const GOLDEN = new URL(
   "../../../outputs/series/irodori-v4-small/pipeline/t-embed.safetensors",
@@ -52,7 +53,7 @@ const T_EMBED_ATOL = 3e-4;
  */
 const T_SCHEDULE_ATOL = 1e-7;
 
-const goldenBytes = await Deno.readFile(GOLDEN).catch(() => undefined);
+const goldenBytes = await readFileIfPresent(GOLDEN);
 const AVAILABLE = goldenBytes !== undefined;
 if (!AVAILABLE) {
   console.warn(

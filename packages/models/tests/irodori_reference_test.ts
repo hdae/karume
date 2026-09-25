@@ -28,6 +28,7 @@ import { parseSafetensors } from "@karume/runtime";
 import { integratedLoudness, kWeightingFilters } from "../src/irodori/host/loudness.ts";
 import { ModelInputError } from "../src/errors.ts";
 import { normalizeReference, reflectPadToHop } from "../src/irodori/host/reference.ts";
+import { readTextIfPresent } from "./helpers/read-if-present.ts";
 
 /** 実重み v4-small の運用値（`pipelineConfig` が運ぶ数と同じ）。 */
 const SAMPLE_RATE = 48000;
@@ -95,7 +96,7 @@ type GoldenMeta = {
   readonly cases: Readonly<Record<string, GoldenCase>>;
 };
 
-const metaText = await Deno.readTextFile(new URL("meta.json", GOLDEN_DIR)).catch(() => undefined);
+const metaText = await readTextIfPresent(new URL("meta.json", GOLDEN_DIR));
 if (metaText === undefined) {
   console.warn(
     `[karume] 参照音声パリティ門を SKIP する（${GOLDEN_DIR.pathname} が要る）。生成: ${GOLDEN_COMMAND}`,

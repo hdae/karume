@@ -69,6 +69,7 @@ import {
   renderGemma4Chat,
   renderGemma4ChatTurn,
 } from "../src/gemma/text/chat.ts";
+import { readFileIfPresent } from "./helpers/read-if-present.ts";
 
 type ChatCase = {
   readonly name: string;
@@ -116,9 +117,9 @@ const assetsOf = (source: Fixture): GemmaTokenizerAssets => ({
 const tokenizer = new GemmaTokenizer(assetsOf(fixture));
 
 /** 系列側の実資産（無ければ undefined = compile していない）。 */
-const seriesBytes = await Deno.readFile(
+const seriesBytes = await readFileIfPresent(
   new URL("../../../outputs/series/gemma4-e2b-tokenizer/tokenizer.json", import.meta.url),
-).catch(() => undefined);
+);
 
 if (seriesBytes === undefined) {
   console.warn(
