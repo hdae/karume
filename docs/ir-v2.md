@@ -7,7 +7,8 @@ ADR [0108](decisions/0108-container-format.md)（v2 — 格納の宣言をコン
 `krg`・block / part・codec 台帳）は [container-v1](container-v1.md) が正本で、本書はグラフ JSON
 だけを定める。
 
-改訂履歴（未リリースにつきシムも移行も作らない — ADR 0003 の改訂手順）:
+改訂履歴（0.x の間は両読みもシムも作らない — 旧形式は移行 CLI で変換する〈[container-v1](container-v1.md) §12〉。
+根拠は ADR [0108](decisions/0108-container-format.md) の Consequences と決定 18〈版の分岐〉・改訂の手順は ADR 0003）:
 
 - M0: 初版。
 - M1-P2: 意味論 dtype に i32 / bool（ADR [0009](decisions/0009-dtype-i32-bool.md)）、
@@ -124,7 +125,7 @@ ADR [0108](decisions/0108-container-format.md)（v2 — 格納の宣言をコン
 ```
 
 - `format` は固定文字列 `"karume-ir"`、`version` は整数 `2`。不一致は fail loudly。
-- **未知のトップレベルキーは fail loudly**（未リリースにつき前方互換チャネルは持たない。
+- **未知のトップレベルキーは fail loudly**（前方互換チャネルは持たない。
   必要になったら本書の改訂で導入する）。上の 9 キーは**全て必須**で、省略可能な節は
   **`states` の 1 本だけ**（下の「state スロット」）。
 - `requires.ops` は nodes で実際に使われる op 名の集合と一致しなければならない（パーサが
@@ -252,7 +253,7 @@ ADR [0108](decisions/0108-container-format.md)（v2 — 格納の宣言をコン
     `exportWeight` を引く（v1 の `shared.tensor` は要らない — 名前が鍵なので）。
   - `values{}` の dtype / shape 宣言は従来どおり**必須**。格納（codec / scale / group）は
     **書かない** — 貸し手の常駐重みが正本で、写すと同じ事実が 2 箇所に生える。
-  - 束縛表の突合集合から**外れる**（container-v1 §5 の借用形 `{ "shared": true }` と対）。実体の
+  - 束縛表の突合集合から**外れる**（束縛表に載らない — container-v1 §5）。実体の
     素性はロード側の門が見る（同一 device・宣言 shape・消費席・チャネル軸 — 貸し手の codec が
     借り手の消費 op で実行できること）。
 - **宣言完全性**: 全ての値（inputs・initializers・全ノード出力）はちょうど 1 箇所で宣言される

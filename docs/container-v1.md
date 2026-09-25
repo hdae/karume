@@ -12,7 +12,8 @@ ADR [0108](decisions/0108-container-format.md) の具体化。`krm`（モデル�
 - **実行既定**（`session` / `gpuFeatures` / `requiredLimits` / `label` / `description`）→
   manifest の所有（ADR 0038 §3）。descriptor は持たない
 
-改訂履歴（未リリースにつきシムも移行も作らない — ADR 0003 の改訂手順を継承）:
+改訂履歴（0.x の間は両読みもシムも作らない — 旧形式は移行 CLI で変換する〈§12〉。
+根拠は ADR [0108](decisions/0108-container-format.md) の Consequences と決定 18〈版の分岐〉・改訂の手順は ADR 0003）:
 
 - v1（2026-09-22）: 初版。ADR 0108 の決定 1〜20 を具体化。
 - v1 訂正（2026-09-22・段 1 の実装で判明）: ①`capabilities.codecs` を**モデル記述の `codecs`** へ移す
@@ -36,6 +37,11 @@ ADR [0108](decisions/0108-container-format.md) の具体化。`krm`（モデル�
   取得の保持）にし、持ち越し scale の写しを足す・フェンスは part ごと 1 回で staging だけを律する
   ④§12 を現行の CLI 面へ（2 モード・`provenance.writer` は既定で書かない・`--part-bytes`・
   `--cross-repo`）⑤削除済みの実装への参照を現行の置き場へ。
+- v1 訂正 4（2026-09-25・実装との照合）: ①§1 の「モデル記述の直後を 64 B 整列まで詰め、それが
+  part 0 の末尾」を「part 0 = ヘッダ + 2 文書ちょうど（詰め物なし）」へ訂正する。§3 / §8 の「長さ 0 の
+  part の前に詰め物を挿まない」MUST と矛盾していた。3 実装（runtime の `derivePartOffsets`・exporter の
+  鏡像・hub の part 0 長の照合）はもとから訂正後の規則で書いている ②§8 の表の part 0 / part 1 欄を同じ
+  意味へ ③§9 の式に `[詰め物]` を足し、詰め物は写さず導き直すことを明記する。
 
 ## 0. 記法と共通規則
 
@@ -69,7 +75,10 @@ ADR [0108](decisions/0108-container-format.md) の具体化。`krm`（モデル�
   （同じ事実を 2 か所に持たせない）。
 - magic が `KRGC` なのに model descriptor length が 0 でない、またはその逆は fail loudly。
 - ヘッダ直後にグラフ記述、その直後にモデル記述が**詰めて**続く（両者の間に padding は無い）。
-- モデル記述の直後を **64 B 整列**まで zero padding する。これが part 0 の末尾である。
+- **part 0 はヘッダ + 2 文書ちょうど**で、詰め物を含まない（分割形の part 0 のファイル長 =
+  24 + グラフ記述長 + モデル記述長）。単一形の part 間の詰め物（0x00）は §8 の配置規則が決める —
+  長さ 0 でない次の part の先頭が 64 B 整列になるよう、その直前にだけ詰める（例: part 0 が 100 B・
+  part 1 が 0 B・part 2 が 30 B なら、part offset は 0 / 100 / 128）。
 
 ## 2. descriptor（2 文書）
 
@@ -329,7 +338,7 @@ block 上限を 32 MiB **以下**とする根拠は 3 点である（CPU 試作 
 - 並行 digest は効く（16 MiB × 16 を `Promise.all` で **3,702 MiB/s** = 69.2 ms。逐次 16 MiB の
   2.07 倍・256 MiB 一括の 4.0 倍）。一括 digest ではこれが取れない。
 - ブラウザは未測。Chrome は digest の入力を Blink 内部へ全量コピーする
-  （`packages/hub/src/fetch.ts:66` の記録）ので、block 化はブラウザでこそ効くはずである
+  （`packages/hub/src/fetch.ts` の `BYTE_BUDGET` の記録）ので、block 化はブラウザでこそ効くはずである
   （**推測** — コピー量が block 長で頭打ちになる）。
 
 **将来の見直し（上限を 16 MiB へ下げる）**: サイズを交互に回した実測では 16 MiB = 1,784 MiB/s に
@@ -391,7 +400,7 @@ part 長だけを測り、block 上限は測らなかったので、見直しは
 
 ## 5. 束縛表と規則 ①〜⑤
 
-束縛は **`(グラフ名, initializer 名)` で識別する**。値は 2 形のいずれか（**排他**）:
+束縛は **`(グラフ名, initializer 名)` で識別する**。値は**供給形の 1 形**（借用は束縛表に載せない — 下）:
 
 **供給形**
 
@@ -412,7 +421,7 @@ part 長だけを測り、block 上限は測らなかったので、見直しは
 `pieces[]` の要素は `{ block, rows: [begin, end) }`。`rows` は**先頭次元**の半開区間。
 
 **借用（shared）は束縛表に載せない。** 別 Session からの借用（現行 `sharedWeights` —
-`packages/runtime/src/runtime/session-types.ts:404-415`）は IR 側の `{ "shared": true }` 宣言だけが
+`packages/runtime/src/runtime/session-types.ts` の `sharedWeights`）は IR 側の `{ "shared": true }` 宣言だけが
 持ち（[ir-v2.md](ir-v2.md)「共有 initializer」— 借り手の名前 = 貸し手の initializer 名）、束縛表の
 **突合集合の外**にある。束縛表に書くと余剰として fail loudly。
 
@@ -538,16 +547,16 @@ rowLength  = numel / shape[rowAxis]
 | ③ どの op で圧縮のまま常駐できるか | packed 常駐 / ロード時 CPU 展開  | `executableOps`                             |
 
 この 3 分離は**現行が既にそうなっている**: `bf16` は①のみ（宣言は valid だが
-`RUNTIME_SUPPORT.storage` に無い — `packages/runtime/src/ops/contracts.ts:760`）、`i2` は①②③だが
+`RUNTIME_SUPPORT.storage` に無い — `packages/runtime/src/ops/contracts.ts`）、`i2` は①②③だが
 ③は linear / embedding だけ。**新しい codec を「宣言だけ先に受理する」道が既に通っている**。
 
 `executableOps` は、今日 3 本に分かれている純関数
-（`eligibleCompressedInitializers`（`plan.ts:451`）/ `i2EligibleInitializers`（`plan.ts:496`）/
-`i4EligibleInitializers`（`plan.ts:519`）— 後の 2 本はほぼ同文）を 1 欄へ畳む。
+（`plan.ts` の `eligibleCompressedInitializers` / `i2EligibleInitializers` /
+`i4EligibleInitializers` — 後の 2 本はほぼ同文）を 1 欄へ畳む。
 
 `decodeCpu` と `wgsl.unpackScalar` が**同じエントリに並ぶ**ことで、「pack 順の正本は 1 箇所」
-という現行の MUST（`packages/runtime/src/format/i4.ts:5-7`・
-`tools/exporter/src/karume/emit.py:313-332` の `pack_int4`）が構造として守られる。
+という現行の MUST（`packages/runtime/src/format/i4.ts` 冒頭の MUST・
+`tools/exporter/src/karume/emit.py` の `pack_int4`）が構造として守られる。
 
 ### 6.3 初版の codec 台帳（4 種）
 
@@ -580,19 +589,19 @@ rowLength  = numel / shape[rowAxis]
 
 正本の所在:
 
-- `int8-sym`: 値域 `tools/exporter/src/karume/quantize.py:83`（`INT8_MAX = 127`・「−128 は
-  使わない」）、scale = `clamp(amax / 127, f32 tiny)` は `quantize.py:152`、
-  `q = round(w/scale).clamp(−127, 127)` は `quantize.py:162`、CPU 展開
-  `packages/runtime/src/format/i8.ts:80-117`。
-- `int4-sym-g`: 値域 `quantize.py:307`（`INT4_MAX = 7`）、既定 group 長 32 は
-  `quantize.py:312`（`DEFAULT_GROUP_SIZE`）、scale = `clamp(amax / 7, f32 tiny)` は
-  `quantize.py:397`、`q = round(w/scale).clamp(−7, 7)` は `quantize.py:413`、pack 順の正本
-  `tools/exporter/src/karume/emit.py:313-332`（`pack_int4`）、offset 定数 `emit.py:113-116`
-  （`INT4_OFFSET = 8`）、group scale 形 `packages/runtime/src/format/container/codecs.ts` の
+- `int8-sym`: 値域 `tools/exporter/src/karume/quantize.py` の `INT8_MAX`（`= 127`・「−128 は
+  使わない」）、scale = `clamp(amax / 127, f32 tiny)` は `quantize.py` の `channel_scale`、
+  `q = round(w/scale).clamp(−127, 127)` は `quantize.py` の `quantize_to_int8`、CPU 展開
+  `packages/runtime/src/format/i8.ts` の `decodeI8`。
+- `int4-sym-g`: 値域 `quantize.py` の `INT4_MAX`（`= 7`）、既定 group 長 32 は
+  `quantize.py` の `DEFAULT_GROUP_SIZE`、scale = `clamp(amax / 7, f32 tiny)` は
+  `quantize.py` の `group_scale`、`q = round(w/scale).clamp(−7, 7)` は `quantize.py` の
+  `quantize_to_int4`、pack 順の正本 `tools/exporter/src/karume/emit.py` の `pack_int4`、offset 定数
+  `emit.py` の `INT4_OFFSET`（`= 8`）、group scale 形 `packages/runtime/src/format/container/codecs.ts` の
   `groupScaleShape`（合流層・常駐プランナ・構築・CPU 展開が共有する 1 本）、CPU 展開
   `packages/runtime/src/format/i4.ts` の `decodeI4`。
-- `int2-off`: 形の条件 `packages/runtime/src/format/i2.ts:7-10`、CPU 展開 `i2.ts:40-41`、pack
-  `emit.py:286-296`（`pack_int2` — 値域 `[-2,1]` 外を拒否）、scale は F32 の `[N,1]`・group 不可（ADR 0097
+- `int2-off`: 形の条件 `packages/runtime/src/format/i2.ts` の `isI2Shape`、CPU 展開 `i2.ts` の
+  `decodeI2`、pack `emit.py` の `pack_int2`（値域 `[-2,1]` 外を拒否）、scale は F32 の `[N,1]`・group 不可（ADR 0097
   追記 1）。
 - 宣言規則は 2 箇所に分かれる。scale / `groupSize` の有無は descriptor の読み手
   `packages/runtime/src/format/container/descriptor.ts`（`parseEncoding`）と、入力形が違うメモリ内容器
@@ -604,8 +613,8 @@ rowLength  = numel / shape[rowAxis]
 **`ternary` が別名の codec である理由**（値は `int2-off` と 1 つも違わないのに分ける理由）:
 
 - **runtime の追加は 0 行**。`{−1, 0, +1}` は `int2-off` の値域 `[−2, +1]` の**部分集合**なので、
-  詰め方も復元式も WGSL も CPU 展開も `int2-off` のものをそのまま使う。追加は exporter 側の
-  **absmean 量子化器 1 本**だけである。
+  詰め方も復元式も WGSL も CPU 展開も `int2-off` のものをそのまま使う。追加するのは exporter 側の
+  **absmean 量子化器 1 本**だけである（**未実装** — ADR 0108 の段 6。現状の exporter は `ternary` の資産を作れない）。
 - それでも分けるのは、**資産を識別できるようにする**ため。逆向き（i2 資産を三値として読む）は
   成立しない: gemma4-qat e2b の I2 テンソル先頭 4 MiB を 2bit コードで数えた実測で、
   `q = −2` が **5.8〜7.4 %** 出ている（`model.lm_head.weight` 7.447 % /
@@ -646,8 +655,8 @@ rowLength  = numel / shape[rowAxis]
 
 **descriptor は自分の正しさを証明できない。** したがって**外側の期待 hash + 長さで先に検証する**:
 
-1. 読み手は外側（manifest `karume/5` の `container.descriptor`、または `fromContainer` の呼び手が渡す
-   pin）から **2 文書それぞれの期待 sha256 と期待バイト長**を受け取る（ADR 0109 決定 3 — part 0
+1. 読み手は外側（manifest `karume/5` の `container.descriptor`、または `openContainer` の呼び手が第 2 引数
+   `expect`〈`DescriptorExpectation`〉で渡す pin）から **2 文書それぞれの期待 sha256 と期待バイト長**を受け取る（ADR 0109 決定 3 — part 0
    ファイルの sha256 とは別の事実）。
 2. part 0（または単一形の先頭）を取得し、ヘッダを読んで 2 文書の長さを得る。
 3. **2 文書のバイト列を期待値と突合してから JSON を parse する**。突合前に parse しない。
@@ -656,14 +665,14 @@ rowLength  = numel / shape[rowAxis]
 実行時の完全性は **descriptor と block の sha256** で張る。ただし **block の digest を掛けるのは未検証の
 取得元だけ**である（ADR 0108 追記 2 の 3 / ADR 0109 決定 7）:
 
-| 経路                                                           | digest の回数                                                                          |
-| -------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
-| cold（HF 経由の初回取得）                                      | 取得層が part 全量を流しながら **1 回**（記録ハッシュを焼く）。block の digest は 0 回 |
-| warm（キャッシュヒット）                                       | **0 回** — 記録ハッシュの文字列比較だけ                                                |
-| 未検証の取得元（`fromContainer(bytes)`・ローカルディレクトリ） | **block ごとに一括 digest**（32 MiB 以下なので §4.1 の速い側に収まる）                 |
+| 経路                                                                       | digest の回数                                                                          |
+| -------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| cold（HF 経由の初回取得）                                                  | 取得層が part 全量を流しながら **1 回**（記録ハッシュを焼く）。block の digest は 0 回 |
+| warm（キャッシュヒット）                                                   | **0 回** — 記録ハッシュの文字列比較だけ                                                |
+| 未検証の取得元（`openContainer({ kind: "bytes" })`・ローカルディレクトリ） | **block ごとに一括 digest**（32 MiB 以下なので §4.1 の速い側に収まる）                 |
 
 `BlockSource` が「検証済み」を名乗り、`readBlock` は名乗らない取得元にだけ digest を掛ける。
-warm で digest を走らせないのは現行の規律の継承である（`packages/hub/src/fetch.ts:71-72` —
+warm で digest を走らせないのは現行の規律の継承である（`packages/hub/src/fetch.ts` の `BYTE_BUDGET` の NOTE —
 キャッシュヒットで GB 級の digest を起こさない）。**「0 回」は重みの block と資産の payload について**
 であり、上の手順 3（2 文書を期待値と突合してから parse する）は cold でも warm でも開くたびに掛かる
 （descriptor は 32 MiB 以下・実資産では数百 KB）。取得層の cold の part 全量の逐次 sha256 は純 TS 実装
@@ -688,13 +697,13 @@ warm で digest を走らせないのは現行の規律の継承である（`pac
 
 **バイト列として同じ並び**であり、「切れ目があるか否か」だけが違う。
 
-|                  | 単一形                                         | 分割形                                          |
-| ---------------- | ---------------------------------------------- | ----------------------------------------------- |
-| part 0           | ファイル先頭から。末尾は 64 B 整列まで padding | 独立したファイル                                |
-| part 1（const）  | part 0 の直後                                  | 独立したファイル                                |
-| part 2 以降      | part 1 の直後・**64 B 整列**で連結             | それぞれ独立したファイル                        |
-| `parts[].length` | 論理 part の長さ（連結後の区間長）             | ファイル長                                      |
-| 取得の FileRef   | 1 本                                           | descriptor 1 本 + parts N 本（manifest が持つ） |
+|                  | 単一形                                                             | 分割形                                          |
+| ---------------- | ------------------------------------------------------------------ | ----------------------------------------------- |
+| part 0           | ファイル先頭から。ヘッダ + 2 文書ちょうど（詰め物を含まない）      | 独立したファイル                                |
+| part 1（const）  | part 0 の直後（長さ 0 でなければ 64 B 整列まで 0x00 を詰めてから） | 独立したファイル                                |
+| part 2 以降      | part 1 の直後・**64 B 整列**で連結                                 | それぞれ独立したファイル                        |
+| `parts[].length` | 論理 part の長さ（連結後の区間長）                                 | ファイル長                                      |
+| 取得の FileRef   | 1 本                                                               | descriptor 1 本 + parts N 本（manifest が持つ） |
 
 - **`parts` は添字 1 以上だけ**を載せる（part 0 の sha256 を自分に書くと自己参照 — §2.2）。
   part 0 の完全性は**外側の期待 hash + 長さ**が張る（§7）。manifest `karume/5` の `container.parts` は
@@ -709,7 +718,7 @@ warm で digest を走らせないのは現行の規律の継承である（`pac
   `<stem>.krm`、分割形は `<stem>-NNNNN-of-NNNNN.krm`（part 0 から・5 桁ゼロ詰め・旧 shard と同じ
   綴り規約）、`krg` は `<stem>.krg`。
 - 単一形を HF に置くこと自体は「ダウンロード用資産」として禁止しない。**制限は場所ではなく
-  取得能力で説明する**（§11 の `fromContainer` の上限）。
+  取得能力で説明する**（§10 の `openContainer({ kind: "bytes" })` の上限）。
 - 単一形 `krm` は `krg` を**内包する**（§9 でそのまま抜ける）。
 - 分割形の `krm` は、グラフを内包してもよいし、descriptor に **`graph` の内容参照**
   （`{ sha256, size }`）だけを持って外部の共有 `krg` を指してもよい。参照の取得先は
@@ -719,13 +728,14 @@ warm で digest を走らせないのは現行の規律の継承である（`pac
 ## 9. `krg` のバイトコピー抽出
 
 ```text
-krg = [ヘッダ'][グラフ記述（krm からのバイトコピー）][const 領域（krm からのバイトコピー）]
+krg = [ヘッダ'][グラフ記述（krm からのバイトコピー）][詰め物][const 領域（krm からのバイトコピー）]
 ```
 
 - **offset の書き換えは 1 バイトも要らない**。const block の offset が「const 領域の先頭からの
   相対」だからである（§3）。
 - 書き換わるのは**ヘッダだけ**: magic が `KRGC` に、model descriptor length が `0` に、
-  graph descriptor length はそのまま。
+  graph descriptor length はそのまま。詰め物は写さず、`krg` 自身の「ヘッダ + グラフ記述」の長さから
+  §8 の配置規則で導き直す（値は 0x00 なので写す中身は無い・const が空なら詰め物も無い）。
 - したがって「`krm` から抜いた `krg`」と「最初から `krg` として書いた同じグラフ」は
   **バイト同一**になり、`krg` の同一性を**内容ハッシュ**で判定できる。
 - `krg` が**持たない**もの: **重みの束縛表**（重みの要求は `graphs[].values` の宣言 shape /
@@ -744,19 +754,19 @@ krg = [ヘッダ'][グラフ記述（krm からのバイトコピー）][const �
 
 **それぞれ独立した定数として持つ**（一方を他方から派生させない）。
 
-| 対象                                      |                                   上限 | 根拠                                                                                                                    |
-| ----------------------------------------- | -------------------------------------: | ----------------------------------------------------------------------------------------------------------------------- |
-| グラフ記述の長さ                          |                                 32 MiB | 実測の IR は最大 610,143 B / 本・重複除去 47 本で 9.0 MiB。part 0 を取る費用を block 上限と同じ桁に収める（**暫定値**） |
-| モデル記述の長さ                          |                                 32 MiB | 同上（**暫定値**）                                                                                                      |
-| JSON の入れ子深さ                         |                                     64 | parse の再帰深さを宣言で閉じる                                                                                          |
-| **block 長**                              |         **33,554,432 B（32 MiB）以下** | §4.1 の根拠 3 点（割る費用ゼロ / 最大重み 56 本がちょうどこの値 / const が piece 分割できない）                         |
-| block 件数（1 コンテナ）                  |                                 65,536 | const 目次とモデル目次の合計（**暫定値**）                                                                              |
-| part 長（part 2 以降）                    | `{256, 512, 768, 1024} MiB` のいずれか | §4.2                                                                                                                    |
-| part 長の天井（part 0 / 1 を含む全 part） |            1,073,741,824 B（1024 MiB） | part 2 以降の集合の最大値と同じ値を part 0 / 1 にも掛ける — 器の寸法を宣言から見積る式を 1 本に保つ                     |
-| part 件数                                 |                                   1024 | 旧 `MAX_SHARDS` の値を継承（`MAX_PARTS` — §4.2）                                                                        |
-| 1 FileRef のバイト数                      |                                 16 GiB | 現行 `MAX_FILE_BYTES`（`packages/hub/src/manifest.ts:51`）                                                              |
-| `graphs` の個数                           |                                     64 | 実資産の最大は sbv2 の 4 グラフ級（**暫定値**）                                                                         |
-| **`fromContainer(bytes)` の全量**         |                    **2,145,386,496 B** | Chromium の単一 ArrayBuffer 上限（実測として `packages/hub/src/fetch.ts:67` に記録）。**この口にだけ残る制限**          |
+| 対象                                          |                                   上限 | 根拠                                                                                                                                                                                      |
+| --------------------------------------------- | -------------------------------------: | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| グラフ記述の長さ                              |                                 32 MiB | 実測の IR は最大 610,143 B / 本・重複除去 47 本で 9.0 MiB。part 0 を取る費用を block 上限と同じ桁に収める（**暫定値**）                                                                   |
+| モデル記述の長さ                              |                                 32 MiB | 同上（**暫定値**）                                                                                                                                                                        |
+| JSON の入れ子深さ                             |                                     64 | parse の再帰深さを宣言で閉じる                                                                                                                                                            |
+| **block 長**                                  |         **33,554,432 B（32 MiB）以下** | §4.1 の根拠 3 点（割る費用ゼロ / 最大重み 56 本がちょうどこの値 / const が piece 分割できない）                                                                                           |
+| block 件数（1 コンテナ）                      |                                 65,536 | const 目次とモデル目次の合計（**暫定値**）                                                                                                                                                |
+| part 長（part 2 以降）                        | `{256, 512, 768, 1024} MiB` のいずれか | §4.2                                                                                                                                                                                      |
+| part 長の天井（part 0 / 1 を含む全 part）     |            1,073,741,824 B（1024 MiB） | part 2 以降の集合の最大値と同じ値を part 0 / 1 にも掛ける — 器の寸法を宣言から見積る式を 1 本に保つ                                                                                       |
+| part 件数                                     |                                   1024 | 旧 `MAX_SHARDS` の値を継承（`MAX_PARTS` — §4.2）                                                                                                                                          |
+| 1 FileRef のバイト数                          |                                 16 GiB | 現行 `MAX_FILE_BYTES`（`packages/hub/src/manifest.ts`）                                                                                                                                   |
+| `graphs` の個数                               |                                     64 | 実資産の最大は sbv2 の 4 グラフ級（**暫定値**）                                                                                                                                           |
+| **`openContainer({ kind: "bytes" })` の全量** |                    **2,145,386,496 B** | `MAX_SINGLE_CONTAINER_BYTES`（`packages/runtime/src/format/container/limits.ts`）。Chromium の単一 ArrayBuffer 上限（実測の記録は `packages/hub/src/fetch.ts`）。**この口にだけ残る制限** |
 
 **暫定値について**: `graphs` の個数 64・block 件数 65,536・descriptor の長さ 32 MiB は、実測
 （IR 最大 610,143 B / 本・重複除去 47 本で 9.0 MiB・sbv2 で 4 グラフ級）から**余裕を取って置いた
@@ -777,7 +787,7 @@ fail loudly** で止まる。
 - 重ね合わせは**本数と合計バイトの両方**で制限する（例: 「転送中 1 本 + 受信・検証中 1 本」）。
   本数だけで律速を決めると、ピークが「同時本数 × その時点で一番大きいファイル」で決まって
   しまう（実測: anima turbo i4 の先頭 4 本で計 2.503 GiB を同時前確保 —
-  `packages/hub/src/fetch.ts:62-64`）。
+  `packages/hub/src/fetch.ts` の `BYTE_BUDGET`）。
 - **展開（decode）は別の処理単位にする**。1 bit → f32 は 32 倍・i2 → f32 は 16 倍に膨らむので、
   取得の重ね合わせと展開の重ね合わせを同じ予算で数えない。
 - 準備時に取るのは **part 0 だけ**。const（part 1）は要るときに取る。
@@ -833,7 +843,7 @@ fail loudly** で止まる。
   （ADR 0108 決定 9 の実測: push/pop は 1.81 µs / 回、フェンスは 13.0 ms / 回。pop だけ block
   ごとにしてフェンスを 256 MiB ごと 1 回にすると、現行相当より速い 0.77 倍）。
 - `writeBuffer` で書くバッファは**アリーナのプール対象外**である（`writeBuffer` はキュー順で
-  未 submit の先行エンコードを追い越すため — `packages/runtime/src/gpu/arena.ts:13-14, 127-133`）。
+  未 submit の先行エンコードを追い越すため — `packages/runtime/src/gpu/arena.ts` 冒頭の MUST と `allocHostWritten`）。
   この性質は block 化しても変わらない。
 - **flush-before-destroy** は従来どおり。
 
@@ -979,7 +989,7 @@ session ノブ）と、同一 config の重み差し替え（fine-tune）から�
 
 1. **分解 → 合流の往復**で、元の宣言・initializer の順序・常駐計画・見積りが一致する（CPU）。
 2. **77 グラフ全部で、新旧の適格述語の結果が一致する**
-   （`plan.ts:451` / `plan.ts:496` / `plan.ts:519` — `executableOps` へ畳んだ後も同じ集合が出る）。
+   （`plan.ts` の `eligibleCompressedInitializers` / `i2EligibleInitializers` / `i4EligibleInitializers` — `executableOps` へ畳んだ後も同じ集合が出る）。
 3. **同じグラフを再 export するとグラフ記述がバイト同一になる。** `krg` の同一性を内容ハッシュで
    判定する（§9）以上、`graphs[name]` の直列化まで決定的でなければならない。**IR v2 の直列化
    規則は [ir-v2.md](ir-v2.md) の「正準直列化」節で決め切った**（2026-09-22 — キー順はスキーマ順、
