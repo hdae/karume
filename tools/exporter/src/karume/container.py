@@ -15,13 +15,13 @@
   `4/gcd(rowBytes, 4)` に丸めて切る。
 - **part**: part 0 = ヘッダ + 2 文書・part 1 = const 領域（空でも宣言）・part 2 以降 = 重み。
   長さ 0 の part の前に詰め物を挿まない（挿むと `krg` 抽出がバイトでずれる）。
-- **メモリ**: テンソルは 1 本ずつ引いて 1 本ずつ手放す。全量をメモリに載せない
-  （`emit.write_container` と同じ流儀）。
+- **メモリ**: テンソルは 1 本ずつ引いて 1 本ずつ手放す。全量をメモリに載せない。
 
 MUST: 書き出しは「①配置を決める ②実体を 1 本ずつ流して block / part の sha256 を採る
-③2 文書を組んで書く」の 3 段で、実体は**②と③で 2 度引く**。part 0 は自分より後ろの part の
-sha256 を持つので、単一形では「先頭に置く文書が末尾の内容に依存する」— 一時ファイルを挟むか
-2 度引くかのどちらかになり、後者を採る（一時ファイルはモデル全量ぶんの書き込みを 1 回増やす）。
+③2 文書を組んで書く」の 3 段。part 0 は自分より後ろの part の sha256 を持つ。分割形は part 0 が
+別ファイルなので②で data part を書き出しまで済ませ、実体を引くのは 1 度きり。単一形では
+「先頭に置く文書が末尾の内容に依存する」— 一時ファイルを挟むか 2 度引くかのどちらかになり、
+後者を採る（実体は**②と③で 2 度引く** — 一時ファイルはモデル全量ぶんの書き込みを 1 回増やす）。
 """
 
 from __future__ import annotations
@@ -65,7 +65,7 @@ BLOCK_MAX_BYTES = 32 * _MIB
 #: 書き手が選べる part 長（part 2 以降 — §4.2）。
 PART_LENGTH_CHOICES = (256 * _MIB, 512 * _MIB, 768 * _MIB, 1024 * _MIB)
 
-#: part 長の既定（§4.2 — exporter の既定を動かすのは段 3 の検収後）。
+#: part 長の既定（§4.2 — 段 3 の検収で 256 MiB 維持と裁定済み・ADR 0108 追記 5）。
 DEFAULT_PART_BYTES = PART_LENGTH_CHOICES[0]
 
 #: part 長の天井（part 0 / 1 を含む全 part — §10）。
@@ -2118,7 +2118,11 @@ def _graph_required_ops(declaration: Any, where: str) -> list[str]:
     _require(obj.get("format") == IR_V2_FORMAT, f"{where}.format が '{IR_V2_FORMAT}' でない")
     _require(obj.get("version") == IR_V2_VERSION, f"{where}.version が {IR_V2_VERSION} でない")
     requires = _require_object(obj.get("requires"), f"{where}.requires")
-    return [_require_string(op, f"{where}.requires.ops[]") for op in requires["ops"]]
+    # TS の読み手（`format/ir.ts` の `checkKeys(requires, ["ops"], [])`）と同じ受理集合。
+    _require_keys(requires, ["ops"], [], f"{where}.requires")
+    ops = requires["ops"]
+    _require(isinstance(ops, list), f"{where}.requires.ops が配列でない: {ops!r}")
+    return [_require_string(op, f"{where}.requires.ops[]") for op in ops]
 
 
 def _graph_initializers(declaration: Mapping[str, Any], where: str) -> dict[str, bool]:
@@ -2297,11 +2301,16 @@ def _parse_model_descriptor(raw: bytes) -> ModelDescriptor:
     _require_keys(
         prov, ["license"], ["notice", "upstreamRevision", "writer"], f"{where}.provenance"
     )
+    # 省略可の 3 欄も、在れば TS の読み手と同じく非空文字列を要る（受理集合の一致）。
+    optional = {
+        key: _require_string(prov[key], f"{where}.provenance.{key}") if key in prov else None
+        for key in ("notice", "upstreamRevision", "writer")
+    }
     provenance = Provenance(
         _require_string(prov["license"], f"{where}.provenance.license"),
-        prov.get("notice"),
-        prov.get("upstreamRevision"),
-        prov.get("writer"),
+        optional["notice"],
+        optional["upstreamRevision"],
+        optional["writer"],
     )
 
     descriptor = ModelDescriptor(tuple(parts), tuple(blocks), binding, assets, provenance)

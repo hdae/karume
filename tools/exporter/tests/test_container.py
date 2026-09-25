@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from itertools import count
 from pathlib import Path
+from typing import Any
 
 import pytest
 from conftest import RUNTIME_FIXTURES
@@ -42,6 +44,8 @@ from karume.container import (
     CODEC_FOR_STORAGE,
     CODEC_LEDGER,
     HEADER_BYTES,
+    MAX_DESCRIPTOR_BYTES,
+    MAX_JSON_DEPTH,
     MIN_GROUP_SIZE,
     PART_LENGTH_CHOICES,
     AssetInput,
@@ -52,9 +56,11 @@ from karume.container import (
     ir_v2_document,
     read_container,
     read_descriptor_refs,
+    read_header,
     serialize_graph_descriptor,
     serialize_model_descriptor,
     write_graph_container,
+    write_header,
     write_model_container,
 )
 from karume.ir import IrGraph, IrInitializer, IrInput, IrNode, IrShared, IrStorage, IrValue
@@ -67,6 +73,31 @@ LIMITS_TS = RUNTIME_FIXTURES.parents[1] / "src" / "format" / "container" / "limi
 
 def write_synthetic(tmp_path: Path, *, single: bool) -> list[Path]:
     return write_synthetic_container(tmp_path / "synthetic.krm", single=single)
+
+
+def rewrite_part0(part0: Path, *, graph: bytes | None = None, model: bytes | None = None) -> None:
+    """分割形の part 0（ヘッダ + 2 文書だけ）の文書を差し替え、ヘッダの長さも合わせて書き直す。
+
+    長さを揃えるので、壊した文書が「part 0 の長さ違い」に化けず、狙った検査分岐だけを踏む。
+    """
+    raw = part0.read_bytes()
+    header = read_header(raw)
+    graph_bytes = raw[HEADER_BYTES : HEADER_BYTES + header.graph_length] if graph is None else graph
+    model_bytes = (
+        raw[HEADER_BYTES + header.graph_length : header.part0_length] if model is None else model
+    )
+    part0.write_bytes(
+        write_header(kind=header.kind, graph_length=len(graph_bytes), model_length=len(model_bytes))
+        + graph_bytes
+        + model_bytes
+    )
+
+
+def edit_model_document(written: list[Path], edit: Callable[[dict[str, Any]], None]) -> None:
+    """分割形のモデル記述を JSON として書き換える（正準 JSON で綴り直す）。"""
+    document = json.loads(read_container(written).model_descriptor_bytes)
+    edit(document)
+    rewrite_part0(written[0], model=canonical_json(document).encode())
 
 
 class TestCanonicalJson:
@@ -553,6 +584,54 @@ class TestTheWriterRefusesWhatItCannotRepresent:
             )
 
 
+class TestTheProvenanceReader:
+    """省略可の 3 欄（notice / upstreamRevision / writer）も TS の読み手と同じく非空文字列を要る。
+
+    publish の読み直しと `karume verify` はこの読み手を通るので、ここが素通しだと TS の
+    `openContainer` が開けない容器（`karume migrate --notice ""` 等）が据わる。
+    """
+
+    def test_an_empty_notice_from_the_writer_is_refused_on_read_back(self, tmp_path: Path) -> None:
+        written = write_model_container(
+            tmp_path / "m.krm",
+            synthetic_graph(),
+            synthetic_tensors(),
+            synthetic_bindings(),
+            graph_name=GRAPH_NAME,
+            provenance=Provenance(license="mit", notice=""),
+            part_bytes=FIXTURE_PART_BYTES,
+            block_bytes=FIXTURE_BLOCK_BYTES,
+        )
+
+        with pytest.raises(ContainerFormatError, match=r"provenance\.notice が非空文字列でない"):
+            read_container(written)
+
+    @pytest.mark.parametrize(
+        ("key", "value"),
+        [("writer", 5), ("upstreamRevision", None), ("notice", None), ("writer", "")],
+    )
+    def test_an_optional_field_that_is_not_a_non_empty_string_is_refused(
+        self, tmp_path: Path, key: str, value: object
+    ) -> None:
+        written = write_synthetic(tmp_path, single=False)
+        edit_model_document(written, lambda document: document["provenance"].update({key: value}))
+
+        with pytest.raises(ContainerFormatError, match=rf"provenance\.{key} が非空文字列でない"):
+            read_container(written)
+
+    def test_all_three_fields_as_non_empty_strings_read_back(self, tmp_path: Path) -> None:
+        present = {"notice": "NOTICE", "upstreamRevision": "0123abcd", "writer": "karume"}
+        written = write_synthetic(tmp_path, single=False)
+        edit_model_document(written, lambda document: document["provenance"].update(present))
+
+        read = read_container(written)
+
+        assert read.model is not None
+        assert read.model.provenance == Provenance(
+            license="apache-2.0", notice="NOTICE", upstream_revision="0123abcd", writer="karume"
+        )
+
+
 class TestTheAssetIntake:
     """資産の受け口（§2.2 / §4.2）— piece 分割せず、重みと part を共有しない。"""
 
@@ -777,15 +856,46 @@ class TestTheDescriptorReadIsBounded:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         path = write_synthetic_container(tmp_path / "model.krm", single=True)[0]
+        # 実装は `path.open("rb")` 経由で読むので、`read_bytes` を塞ぐだけでは `handle.read()` の
+        # 全量読みへの退行を見逃す — 対象 path のハンドルが返したバイト数を数えて縛る。
+        reads: list[int] = []
+        original_open = Path.open
+
+        class CountingHandle:
+            def __init__(self, handle: Any) -> None:
+                self._handle = handle
+
+            def __enter__(self) -> CountingHandle:
+                return self
+
+            def __exit__(self, *exc: object) -> None:
+                self._handle.close()
+
+            def read(self, size: int = -1) -> bytes:
+                chunk = self._handle.read(size)
+                reads.append(len(chunk))
+                return chunk
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self._handle, name)
+
+        def spying_open(self: Path, *args: Any, **kwargs: Any) -> Any:
+            handle = original_open(self, *args, **kwargs)
+            return CountingHandle(handle) if self == path else handle
 
         def forbidden(self: Path) -> bytes:
             raise AssertionError(f"{self}: 現物を丸ごと読んだ（ヘッダ + 2 文書だけ MUST）")
 
+        monkeypatch.setattr(Path, "open", spying_open)
         monkeypatch.setattr(Path, "read_bytes", forbidden)
         graph, model = read_descriptor_refs(path)
 
         assert graph.length > 0
         assert model.length > 0
+        descriptors = HEADER_BYTES + graph.length + model.length
+        # 被験体の前提: part 0 の後ろに const / 重みの data が続く単一形（痩せると門が恒真になる）。
+        assert path.stat().st_size > descriptors
+        assert sum(reads) == descriptors
 
     def test_a_graph_container_is_refused(self, tmp_path: Path) -> None:
         """`krg` は 2 文書を持たない（モデル記述が無い）— manifest の期待値を採る口ではない。"""
@@ -801,3 +911,137 @@ class TestTheDescriptorReadIsBounded:
 
         with pytest.raises(ContainerFormatError, match="krm でない"):
             read_descriptor_refs(path)
+
+
+class TestTheReaderRefuses:
+    """読み手（ヘッダと 2 文書の検査）の負例 — 1 分岐 1 ケースで `ContainerFormatError` を縛る。
+
+    `karume verify` と publish / migrate の自己検査はこの読み手に全面的に頼るので、検査が 1 本
+    緩んでも（比較演算子の取り違え等）どこかが赤になる形にしておく。被験体は分割形の part 0
+    （ヘッダ + 2 文書だけ）で、文書を書き換えるケースは {@link rewrite_part0} がヘッダの長さも
+    合わせる — 「長さ違い」に化けず、狙った分岐だけを踏む。
+    """
+
+    @staticmethod
+    def _patched_header(tmp_path: Path, start: int, raw: bytes) -> list[Path]:
+        written = write_synthetic(tmp_path, single=False)
+        part0 = bytearray(written[0].read_bytes())
+        part0[start : start + len(raw)] = raw
+        written[0].write_bytes(bytes(part0))
+        return written
+
+    def test_an_untouched_rewrite_still_reads(self, tmp_path: Path) -> None:
+        """対照 — 書き換えの足場そのものは容器を壊さない（下の赤は注入した違反のもの）。"""
+        written = write_synthetic(tmp_path, single=False)
+        edit_model_document(written, lambda document: None)
+
+        assert read_container(written).model is not None
+
+    @pytest.mark.parametrize(
+        ("start", "raw", "message"),
+        [
+            (0, b"XXXX", "未知の magic"),
+            (4, (2).to_bytes(4, "little"), "未対応のコンテナ版 2"),
+            (16, (0).to_bytes(8, "little"), "krm なのにモデル記述の長さが 0"),
+            (8, (0).to_bytes(8, "little"), "グラフ記述の長さが 0"),
+            (8, (MAX_DESCRIPTOR_BYTES + 1).to_bytes(8, "little"), "グラフ記述の長さ .* が上限"),
+            (0, b"KRGC", "krg なのにモデル記述の長さが"),
+        ],
+        ids=["magic", "version", "model-length-0", "graph-length-0", "over-limit", "krg-model"],
+    )
+    def test_a_malformed_header_is_refused(
+        self, tmp_path: Path, start: int, raw: bytes, message: str
+    ) -> None:
+        written = self._patched_header(tmp_path, start, raw)
+
+        with pytest.raises(ContainerFormatError, match=message):
+            read_container(written)
+
+    def test_a_header_shorter_than_24_bytes_is_refused(self, tmp_path: Path) -> None:
+        written = write_synthetic(tmp_path, single=False)
+        written[0].write_bytes(written[0].read_bytes()[: HEADER_BYTES - 1])
+
+        with pytest.raises(ContainerFormatError, match="ヘッダに 24 バイト必要だが 23 バイト"):
+            read_container(written)
+
+    def test_a_document_that_is_not_utf8_is_refused(self, tmp_path: Path) -> None:
+        written = write_synthetic(tmp_path, single=False)
+        graph = read_container(written).graph_descriptor_bytes
+        rewrite_part0(written[0], graph=b"\xff" + graph[1:])
+
+        with pytest.raises(ContainerFormatError, match="graphDescriptor が UTF-8 として不正"):
+            read_container(written)
+
+    def test_a_document_that_is_not_json_is_refused(self, tmp_path: Path) -> None:
+        written = write_synthetic(tmp_path, single=False)
+        graph = read_container(written).graph_descriptor_bytes
+        rewrite_part0(written[0], graph=graph[:-1])
+
+        with pytest.raises(ContainerFormatError, match="graphDescriptor が JSON として不正"):
+            read_container(written)
+
+    def test_nesting_deeper_than_the_limit_is_refused(self, tmp_path: Path) -> None:
+        written = write_synthetic(tmp_path, single=False)
+        rewrite_part0(written[0], model=b"[" * (MAX_JSON_DEPTH + 2) + b"]" * (MAX_JSON_DEPTH + 2))
+
+        with pytest.raises(ContainerFormatError, match=f"深さ上限 {MAX_JSON_DEPTH} を超えた"):
+            read_container(written)
+
+    def test_nesting_at_the_limit_passes_the_depth_check(self, tmp_path: Path) -> None:
+        """境界 — 深さちょうど上限は深さでは落ちない（次の「オブジェクトでない」で落ちる）。"""
+        written = write_synthetic(tmp_path, single=False)
+        rewrite_part0(written[0], model=b"[" * (MAX_JSON_DEPTH + 1) + b"]" * (MAX_JSON_DEPTH + 1))
+
+        with pytest.raises(ContainerFormatError, match="modelDescriptor がオブジェクトでない"):
+            read_container(written)
+
+    @pytest.mark.parametrize(
+        ("field", "value", "message"),
+        [
+            ("offset", 63, r"blocks\[1\]: offset 63 が 64 の倍数でない"),
+            ("length", 0, r"blocks\[1\]: length が 0"),
+            # blocks[0] は同じ part の 0..256 — 192 始まりは重なる（64 の倍数なので整列は通る）。
+            ("offset", 192, "block 's0003' が直前の block と重なる"),
+        ],
+        ids=["unaligned-offset", "zero-length", "overlap"],
+    )
+    def test_a_malformed_block_record_is_refused(
+        self, tmp_path: Path, field: str, value: int, message: str
+    ) -> None:
+        written = write_synthetic(tmp_path, single=False)
+        edit_model_document(written, lambda document: document["blocks"][1].update({field: value}))
+
+        with pytest.raises(ContainerFormatError, match=message):
+            read_container(written)
+
+    def test_an_unknown_key_is_refused(self, tmp_path: Path) -> None:
+        written = write_synthetic(tmp_path, single=False)
+        edit_model_document(written, lambda document: document.update({"extra": 1}))
+
+        with pytest.raises(ContainerFormatError, match="modelDescriptor: 未知のキー 'extra'"):
+            read_container(written)
+
+    @pytest.mark.parametrize(
+        ("requires", "message"),
+        [
+            ({}, r"requires\.ops が無い"),
+            ({"ops": "matmul"}, r"requires\.ops が配列でない"),
+            ({"ops": ["matmul"], "features": []}, r"requires: 未知のキー 'features'"),
+        ],
+        ids=["missing-ops", "string-ops", "unknown-key"],
+    )
+    def test_a_graph_requires_outside_the_ts_acceptance_set_is_refused(
+        self, tmp_path: Path, requires: dict[str, Any], message: str
+    ) -> None:
+        """`requires` は TS の `parseIrDeclaration` と同じく `{ops: string[]}` だけを受ける。
+
+        素の添字だと `ops` の欠落は `KeyError` になり、文字列は 1 文字ずつ反復されて
+        「capabilities.ops が和集合と一致しない」という別の場所の違反に化ける。
+        """
+        written = write_synthetic(tmp_path, single=False)
+        document = json.loads(read_container(written).graph_descriptor_bytes)
+        document["graphs"][GRAPH_NAME]["requires"] = requires
+        rewrite_part0(written[0], graph=canonical_json(document).encode())
+
+        with pytest.raises(ContainerFormatError, match=message):
+            read_container(written)
