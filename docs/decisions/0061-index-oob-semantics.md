@@ -31,3 +31,19 @@
 - LLM 波で動的添字（KV 位置・ルーティング等）が入るときは、この契約のまま成立するかを
   当該 ADR で再確認する（実行時添字が「モデル側の誤りに限られる」前提が変わるため）。
 - `docs/limitations.md` の該当節は本 ADR を指す要約になる。
+
+## 追記
+
+- 2026-09-25（Consequences の「動的添字が入るときの再確認」の記録）: LLM 波（ADR
+  [0066](0066-generation-context-state-slots.md) / [0083](0083-generation-api-surface.md)）で、利用者の実行時入力
+  （prompt の token id）が embedding の添字になった。「違反はモデル側の誤りに限られる」前提は
+  ここで崩れたが、**GPU 側の契約（範囲外 = 該当行の quiet NaN・フォールト旗は無し）は変えない**。
+  代わりに**利用者由来の添字は models の入口（ホスト境界）で `0..vocabSize−1` の範囲検査を
+  MUST とし、範囲外は `ModelInputError`（ADR [0107](0107-model-input-error.md)）で落とす** —
+  実体は `packages/models/src/generation/sequence.ts` の prompt 検査と `stopTokens` 検査。
+  内部で生成した添字（speculation の draft 列 `generation/speculation.ts`・greedy の選択結果）は
+  同じ範囲検査を素の `Error` で掛ける（利用者の入力ではなく実装の不変条件の破れなので
+  `ModelInputError` にしない）。Gemma 4 の PLE（`gemma/ple.ts` の `gather`）はホスト側で索引の
+  行数に対して同じ検査を掛ける（範囲外は OOB ではなく別 token の有効な行になるので、ここが
+  唯一の fail loudly の位置）。**以後、新しい動的添字（MoE ルーティング等）を入れる ADR は同じ
+  ホスト境界の範囲検査を MUST とし、GPU の NaN 汚染を利用者入力の検出手段にしない**。
