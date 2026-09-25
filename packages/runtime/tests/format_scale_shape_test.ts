@@ -227,6 +227,10 @@ describe("companion scale の形: 4 経路が groupScaleShape の 1 本に従う
         assertThrows(
           () => memoryModel(declarationOf(testCase), tensorsOf(testCase, numel(expected) + 1)),
           ContainerFormatError,
+          // 型だけでは、scale の長さ検査が死んでも別の規則で落ちれば緑のまま — 規則に固有の
+          // 診断を見る。
+          `initializer 'w' scale: block 'model/w#scale' の長さ ${(numel(expected) + 1) * 4} が ` +
+            `payload ${numel(expected) * 4} バイト`,
         );
       });
 

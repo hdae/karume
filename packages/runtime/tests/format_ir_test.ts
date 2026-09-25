@@ -12,9 +12,18 @@ const parseMutated = (mutate: (graph: DeclarationJson) => void): IrDeclaration =
   return parseIrDeclaration(JSON.stringify(graph));
 };
 
-/** 検証規則ごとに「正常系から 1 点だけ壊す」ことで、規則が実際に効いていることを見る。 */
-const assertRejects = (hint: string, mutate: (graph: DeclarationJson) => void): void => {
-  assertThrows(() => parseMutated(mutate), IrError, undefined, hint);
+/**
+ * 検証規則ごとに「正常系から 1 点だけ壊す」ことで、規則が実際に効いていることを見る。
+ *
+ * MUST: 期待文言（その規則に固有の診断）まで見る — `IrError` の型だけでは、狙った規則が死んでも
+ * 同じ入力が別の規則で落ちれば緑のままになる。
+ */
+const assertRejects = (
+  hint: string,
+  expected: string,
+  mutate: (graph: DeclarationJson) => void,
+): void => {
+  assertThrows(() => parseMutated(mutate), IrError, expected, hint);
 };
 
 // IR v2 の宣言は**計算契約**だけを持つ（格納は容器の束縛表 — docs/ir-v2.md）。initializer 名が
@@ -36,10 +45,10 @@ Deno.test("parseIrDeclaration: 最小の正常系グラフを受理する", () =
 });
 
 Deno.test("parseIrDeclaration: format / version の固定値", () => {
-  assertRejects("format 不一致", (g) => {
+  assertRejects("format 不一致", "graph.format が 'karume-ir' でない", (g) => {
     g.format = "karume";
   });
-  assertRejects("version 不一致", (g) => {
+  assertRejects("version 不一致", "graph.version が 2 でない", (g) => {
     g.version = 1;
   });
 });
@@ -60,64 +69,84 @@ Deno.test("parseIrDeclaration: トップレベルのキー集合", () => {
 });
 
 Deno.test("parseIrDeclaration: requires.ops は使用 op 集合と一致する", () => {
-  assertRejects("宣言漏れ", (g) => {
+  assertRejects("宣言漏れ", "宣言漏れ [add]", (g) => {
     g.requires.ops = ["matmul"];
   });
-  assertRejects("余剰", (g) => {
+  assertRejects("余剰", "余剰 [gelu]", (g) => {
     g.requires.ops = ["matmul", "add", "gelu"];
   });
-  assertRejects("重複", (g) => {
+  assertRejects("重複", "graph.requires.ops: 'add' が重複している", (g) => {
     g.requires.ops = ["matmul", "add", "add"];
   });
 });
 
 Deno.test("parseIrDeclaration: SSA 単一代入", () => {
-  assertRejects("ノード出力の二重定義", (g) => {
-    g.nodes[1].outs = ["h"];
-  });
-  assertRejects("入力名の重複", (g) => {
+  assertRejects(
+    "ノード出力の二重定義",
+    "graph.nodes[1] (add): 値 'h' が二重に定義されている",
+    (g) => {
+      g.nodes[1].outs = ["h"];
+    },
+  );
+  assertRejects("入力名の重複", "graph.inputs: 値 'x' が二重に定義されている", (g) => {
     g.inputs.push({ name: "x", dtype: "f32", shape: ["T", 4] });
   });
-  assertRejects("initializer と入力の衝突", (g) => {
-    g.initializers["x"] = {};
-    g.values["x"] = { dtype: "f32", shape: [3] };
-  });
+  assertRejects(
+    "initializer と入力の衝突",
+    "graph.initializers: 値 'x' が二重に定義されている",
+    (g) => {
+      g.initializers["x"] = {};
+      g.values["x"] = { dtype: "f32", shape: [3] };
+    },
+  );
 });
 
 Deno.test("parseIrDeclaration: トポロジカル順（前方参照拒否）", () => {
-  assertRejects("ノード順の逆転", (g) => {
+  assertRejects("ノード順の逆転", "graph.nodes[0] (add): 入力 'h' が未定義（前方参照", (g) => {
     g.nodes.reverse();
   });
-  assertRejects("未定義の ins", (g) => {
+  assertRejects("未定義の ins", "入力 'unknown' が未定義", (g) => {
     g.nodes[0].ins = ["x", "unknown"];
   });
-  assertRejects("未定義の outputs", (g) => {
+  assertRejects("未定義の outputs", "graph.outputs: 'z' が未定義", (g) => {
     g.outputs = ["z"];
   });
-  assertRejects("outputs の重複", (g) => {
+  assertRejects("outputs の重複", "graph.outputs: 'y' が重複している", (g) => {
     g.outputs = ["y", "y"];
   });
 });
 
 Deno.test("parseIrDeclaration: 宣言の完全性", () => {
-  assertRejects("ノード出力が values に無い", (g) => {
+  assertRejects("ノード出力が values に無い", "ノード出力 'y' の dtype/shape 宣言が無い", (g) => {
     delete g.values["y"];
   });
-  assertRejects("initializer が values に無い", (g) => {
-    delete g.values["w"];
-  });
-  assertRejects("入力の二重宣言", (g) => {
+  assertRejects(
+    "initializer が values に無い",
+    "graph.initializers['w']: values に dtype/shape 宣言が無い",
+    (g) => {
+      delete g.values["w"];
+    },
+  );
+  assertRejects("入力の二重宣言", "入力は inputs[] で宣言済み（二重宣言）", (g) => {
     g.values["x"] = { dtype: "f32", shape: ["T", 4] };
   });
-  assertRejects("孤立した values 宣言", (g) => {
-    g.values["ghost"] = { dtype: "f32", shape: [1] };
-  });
-  assertRejects("initializer の記号次元", (g) => {
+  assertRejects(
+    "孤立した values 宣言",
+    "graph.values['ghost']: どのノードでも定義されない宣言",
+    (g) => {
+      g.values["ghost"] = { dtype: "f32", shape: [1] };
+    },
+  );
+  assertRejects("initializer の記号次元", "initializer の shape に記号次元は使えない", (g) => {
     g.values["w"] = { dtype: "f32", shape: ["T", 3] };
   });
-  assertRejects("initializer の意味論 dtype が bool", (g) => {
-    g.values["w"] = { dtype: "bool", shape: [4, 3] };
-  });
+  assertRejects(
+    "initializer の意味論 dtype が bool",
+    "initializer の意味論 dtype 'bool' は語彙外",
+    (g) => {
+      g.values["w"] = { dtype: "bool", shape: [4, 3] };
+    },
+  );
 });
 
 /**
@@ -168,24 +197,36 @@ Deno.test("parseIrDeclaration: 意味論 i32 の initializer を宣言として�
 });
 
 Deno.test("parseIrDeclaration: dtype 語彙", () => {
-  assertRejects("意味論 dtype に f16", (g) => {
-    g.values["h"].dtype = "f16";
-  });
-  assertRejects("意味論 dtype に i64", (g) => {
-    g.inputs[0].dtype = "i64";
-  });
+  assertRejects(
+    "意味論 dtype に f16",
+    "graph.values['h'].dtype: 意味論 dtype 'f16' は語彙外",
+    (g) => {
+      g.values["h"].dtype = "f16";
+    },
+  );
+  assertRejects(
+    "意味論 dtype に i64",
+    "graph.inputs[0].dtype: 意味論 dtype 'i64' は語彙外",
+    (g) => {
+      g.inputs[0].dtype = "i64";
+    },
+  );
 });
 Deno.test("parseIrDeclaration: シンボルの宣言と束縛可能性", () => {
-  assertRejects("未宣言シンボルの使用", (g) => {
+  assertRejects("未宣言シンボルの使用", "シンボル 'S' が graph.symbols で宣言されていない", (g) => {
     g.inputs[0].shape = ["S", 4];
   });
-  assertRejects("入力 shape の次元位置に一度も現れない", (g) => {
-    g.inputs[0].shape = [8, 4];
-  });
-  assertRejects("symbols の重複", (g) => {
+  assertRejects(
+    "入力 shape の次元位置に一度も現れない",
+    "'T' が入力 shape / states shape の次元位置に現れない",
+    (g) => {
+      g.inputs[0].shape = [8, 4];
+    },
+  );
+  assertRejects("symbols の重複", "graph.symbols: 'T' が重複している", (g) => {
     g.symbols = ["T", "T"];
   });
-  assertRejects("シンボル名が不正", (g) => {
+  assertRejects("シンボル名が不正", "シンボル名 '2T' が不正", (g) => {
     g.symbols = ["T", "2T"];
   });
   // 派生形だけの入力は**受理する**（実寸から解が一意 — ADR 0057）。母音検出 CRNN は
@@ -197,13 +238,13 @@ Deno.test("parseIrDeclaration: シンボルの宣言と束縛可能性", () => {
 });
 
 Deno.test("parseIrDeclaration: shape 要素", () => {
-  assertRejects("非正準な次元式", (g) => {
+  assertRejects("非正準な次元式", "次元式 '1T' が正準文法", (g) => {
     g.inputs[0].shape = ["1T", 4];
   });
-  assertRejects("負の次元", (g) => {
+  assertRejects("負の次元", "次元 -3 が非負整数でない", (g) => {
     g.values["b"].shape = [-3];
   });
-  assertRejects("小数の次元", (g) => {
+  assertRejects("小数の次元", "次元 1.5 が非負整数でない", (g) => {
     g.values["b"].shape = [1.5];
   });
   const boolDim = JSON.stringify(baseDeclaration()).replace('"shape":[3]', '"shape":[true]');
@@ -211,13 +252,13 @@ Deno.test("parseIrDeclaration: shape 要素", () => {
 });
 
 Deno.test("parseIrDeclaration: ノードの構造", () => {
-  assertRejects("attrs がオブジェクトでない", (g) => {
+  assertRejects("attrs がオブジェクトでない", "graph.nodes[0].attrs: オブジェクトでない", (g) => {
     g.nodes[0].attrs = 5;
   });
-  assertRejects("op が空文字列", (g) => {
+  assertRejects("op が空文字列", "graph.nodes[0].op: 空でない文字列でない", (g) => {
     g.nodes[0].op = "";
   });
-  assertRejects("outs の要素が空文字列", (g) => {
+  assertRejects("outs の要素が空文字列", "graph.nodes[0].outs[0]: 空でない文字列でない", (g) => {
     g.nodes[0].outs = [""];
   });
 });
@@ -249,9 +290,9 @@ Deno.test("parseIrDeclaration: outs の本数はパーサの担当ではない",
 // オブジェクトリテラルに `"__proto__":` を書くと own key ではなく [[Prototype]] 指定になり、
 // JSON.parse が作る own property と別物になってテストが検査対象を外す。
 //
-// 実体キーも "__proto__" にする（= 改名しても名前が変わらない形）。合流は initializer を実体の
-// テンソルキーへ改名して**新しい器へ詰め直す**ので、宣言側の器（パーサ）と合流後の器の
-// **両方**が null プロトタイプでないと own property が黙って消える。
+// initializer 名がそのまま実体の鍵なので改名は起きないが、合流（`mergedGraph`）は initializer を
+// 格納確定後の**新しい器へ詰め直す**ので、宣言側の器（パーサ）と合流後の器の**両方**が
+// null プロトタイプでないと own property が黙って消える。
 const protoNameGraph = `{
   "format": "karume-ir",
   "version": 2,
