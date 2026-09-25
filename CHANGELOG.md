@@ -21,7 +21,8 @@ measurements in `docs/research/`.
   (`openContainer`), admits one of its graphs (`prepareContainer`) and builds a session from its
   blocks (`createSessionFromContainer`), checking each block's sha256 when the source has not
   already verified the whole file (ADR 0109); `codecLayout` maps a
-  codec name to its decode path. The exporter gains `karume.container` (writer / reader, canonical
+  codec name to its decode path. New types on the runtime surface: `ContainerInput`, `AssetReader`,
+  `CodecLayout` and `CodecName`. The exporter gains `karume.container` (writer / reader, canonical
   JSON with ECMAScript number spelling) and `karume migrate` (old shards → `krm`). IR v2 replaces
   IR v1 (`docs/ir-v2.md`).
 - Karume container format, stage 2 (ADR 0109): manifest `karume/5` puts a container behind every
@@ -33,10 +34,8 @@ measurements in `docs/research/`.
   assets carry a declared logical length and are read through `OpenedContainer.asset(name)`; Gemma's
   PLE sidecar becomes container assets (index schema 3 over row-aligned blocks). `karume migrate
   --manifest` converts a whole `karume/4` repository (including PLE and cross-repository references)
-  and writes the `karume/5` manifest; `karume verify --container` checks a container from the CLI.
-  `IRODORI_SOURCES["irodori-v4.1-small"]` now pins the `karume/5` re-upload of that repository; the
-  other pins still name `karume/4` revisions, which only the released packages can read until the release
-  re-uploads those repositories.
+  and writes the `karume/5` manifest; `karume verify <container>` checks a container from the CLI.
+  Every default source pin names a `karume/5` revision of its repository.
 - Karume container format, stage 3 (ADR 0108): the exporter writes `krm` directly (`publish_model` /
   `export_to_file` with `provenance` and `graph_name`; PLE tables and `rope_base` become container
   assets), `karume dist` bakes a `karume/5` repository from container series,
@@ -45,7 +44,9 @@ measurements in `docs/research/`.
   (`openMemoryContainer`) that feeds host-built graphs and already-decoded tensors through the same
   admission and upload path as a `krm` without writing one —
   `parseIrDeclarationValue` / `IrDeclaration` are on the runtime surface so callers can build the
-  declarations for it. Gemma's on-device PLE gather and Irodori's host graphs go through it.
+  declarations for it. Gemma's on-device PLE gather and Irodori's host graphs go through it. New types
+  on the runtime surface: `MemoryContainerInput`, `MemoryEncoding`, `MemoryPiece`, `MemoryTensor`, and
+  `BoundContainer` (the face both a `krm` and an in-memory container present to the session builder).
 - Gemma 4 QAT family: `gemma4-qat` pipelines for E2B / E4B with fixed INT2 / INT4 storage, fixed
   static re-quantization (SRQ) whose rounding is preserved on both CPU and GPU, PLE read back
   whole or row by row, and a chat CLI example.
@@ -113,6 +114,23 @@ measurements in `docs/research/`.
   (dispose on success and failure, observe ordering, pass-through of results and errors); CI lints
   and format-checks `tools/llm-baseline` with the export-recipes ruff settings, and `pack_int2` /
   `unpack_int2` are documented as the canonical i2 byte order (ADR 0097).
+- New names on the `@karume/runtime` surface: `DEFAULT_PLAN_BACKING_BUDGET_BYTES`,
+  `assertChunkBuckets`, and the types `AdmissionScenarioSpec`, `LinearGemvReduce`, `RmsNormReduce`,
+  `EnqueueRead`, `SharedWeight` and `SafetensorsHeader`; `Session.exportWeight`; and the
+  `SessionOptions` keys `linearGemvReduce`, `rmsNormReduce`, `fuseRmsNormAdd`,
+  `fuseLinearStaticQuantize`, `packedStaticQuantize`, `linearGemvRowsThreadTarget`,
+  `planBackingBudgetBytes`, `chunkBuckets` and `sharedWeights`.
+- New names on the `@karume/models` surface: `GEMMA4_CHUNK_BUCKETS`, `gemma4QatRopeInputs`,
+  `Gemma4QatPipeline`, and the types `Gemma4QatPipelineOptions`, `Gemma4QatFromPretrainedOptions`,
+  `ComponentSource`, `FromPretrainedComponentOptions`, `SpeculationGateOptions` (the
+  speculation gate's knobs under `speculative.gate`; `exploreMax` defaults to 512),
+  `GenerationGateTrace`, `GenerationRunPhase` / `Gemma4RunPhase` (the `phase` passed to `onRun`)
+  and `Gemma4PleResidency` (the `pleResidency` option). `speculative.policy: "always"` speculates on
+  every cycle without the gate.
+- New names on the `@karume/hub` surface: the types `ContainerRef`, `DocumentExpectation` and
+  `ContainerBlockSource`, and `ResolveOptions.weights` (fetch a subset of a model's weights by
+  name). The manifest `session` vocabulary gains four keys: `linearGemvReduce`, `fuseRmsNormAdd`,
+  `fuseLinearStaticQuantize` and `packedStaticQuantize`.
 
 ### Changed
 
@@ -138,7 +156,7 @@ measurements in `docs/research/`.
 - Slot backing is held as an LRU set under a byte budget instead of a single slot, so changing
   shape no longer rebuilds it on every run.
 - Gemma 4 prefill picks the smallest declared chunk bucket that covers the query length; the
-  default bucket set is `[32, 64, 128, 256]`.
+  default bucket set is `[4, 8, 32, 64, 128, 256]`.
 - Golden tolerances are two-tier: outputs are checked against Karume's own bound first and,
   where a WGSL accuracy bound is declared for that output, against the specification bound;
   exceeding only the first is recorded in `results.json` rather than failed.
