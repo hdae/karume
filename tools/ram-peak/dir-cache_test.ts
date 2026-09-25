@@ -121,6 +121,46 @@ Deno.test("dir-cache: keys は元の URL を返し、delete は在庫の有無�
   });
 });
 
+Deno.test("dir-cache: 上書きの put が決着するまで、古い添え状は在庫として見えない", async () => {
+  await withTempDir(async (root) => {
+    const cache = await directoryCaches(root).open("fetch-cache");
+    await cache.put(
+      KEY,
+      new Response(new Uint8Array([1, 1]), { headers: { [SHA_HEADER]: "a".repeat(64) } }),
+    );
+
+    // 本文を流している最中で止められる応答（highWaterMark 0 = 読まれるまで pull しない）。
+    let release = (): void => {};
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let streaming = (): void => {};
+    const started = new Promise<void>((resolve) => (streaming = resolve));
+    const body = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        streaming();
+        await gate;
+        controller.enqueue(new Uint8Array([2, 2, 2]));
+        controller.close();
+      },
+    }, { highWaterMark: 0 });
+    const putting = cache.put(
+      KEY,
+      new Response(body, { headers: { [SHA_HEADER]: "b".repeat(64) } }),
+    );
+    await started;
+    assertEquals(await cache.match(KEY), undefined, "決着前の put で古い添え状が見えている");
+
+    release();
+    await putting;
+    const hit = await cache.match(KEY);
+    assert(hit !== undefined, "上書きした在庫が引けない");
+    assertEquals(hit.headers.get(SHA_HEADER), "b".repeat(64), "添え状が古いまま");
+    assertEquals(new Uint8Array(await hit.arrayBuffer()), new Uint8Array([2, 2, 2]));
+    const names: string[] = [];
+    for await (const entry of Deno.readDir(`${root}/fetch-cache`)) names.push(entry.name);
+    assertEquals(names.filter((name) => name.endsWith(".partial")), [], "一時名が残っている");
+  });
+});
+
 Deno.test("dir-cache: resetCacheDirectory は置き場を空にする", async () => {
   await withTempDir(async (root) => {
     const cache = await directoryCaches(root).open("fetch-cache");

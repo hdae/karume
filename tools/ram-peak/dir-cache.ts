@@ -154,6 +154,11 @@ class DirectoryCache implements Cache {
     const url = urlOf(request);
     const base = this.#base(url);
     const partial = `${base}.partial`;
+    // MUST: 上書きの put では古い添え状を先に消す。残すと本文の据え替えから新しい添え状までの間、
+    // 古いヘッダ（古い記録ハッシュ）と新しい本文の組を在庫として返す。
+    await Deno.remove(`${base}.json`).catch((error: unknown) => {
+      if (!(error instanceof Deno.errors.NotFound)) throw error;
+    });
     let written = 0;
     const counted = new TransformStream<Uint8Array, Uint8Array>({
       transform(chunk, controller) {
@@ -175,7 +180,9 @@ class DirectoryCache implements Cache {
     // 本文の残骸を残すだけで、在庫としては見えない（`match` は添え状から入る）。
     await Deno.rename(partial, `${base}.bin`);
     const meta: EntryMeta = { url, headers: [...response.headers] };
-    await Deno.writeTextFile(`${base}.json`, JSON.stringify(meta));
+    // 添え状も一時名に書いてから据える（書きかけの JSON を `match` に読ませない）。
+    await Deno.writeTextFile(`${base}.json.partial`, JSON.stringify(meta));
+    await Deno.rename(`${base}.json.partial`, `${base}.json`);
     this.#tally.puts += 1;
     this.#tally.putBytes += written;
   }
