@@ -116,3 +116,17 @@
 > 新証拠 2 点: 異幾何 2 経路（融合 attention vs 分解 bmm）の parity と、バケット跨ぎの同一行
 > ビット一致テスト。M 65〜512 は `M64N32` に ×1.28〜1.67 の余地があるが、Anima / SBV2 の
 > 既存キー・実測選定に波及するため未採用（採否は別裁定 — research 同 §open）。
+
+> 追記（2026-08-11・波①・中 M バケットの採用）: 直前の追記で「未採用（採否は別裁定）」とした
+> M 65〜512 を、採用条件（Anima / SBV2 の E2E A/B とセット）を満たして**採用**した
+> （`a81cc083`）。現行の表は **M ≤ 64 → `M16N16 r1×4 wg4×16`・65 ≤ M ≤ 512 →
+> `M64N32 r4×4 wg8×16`・M ≥ 513 → 既定**の 3 段（境界 64 / 512 は掃引の実測境界 — 513 以上は
+> 実測点の外なので補間せず既定）。根拠は Anima / SBV2 の ABBA でバケット起因の退行なし・
+> PNG/WAV 門の sha256 全一致・EmbeddingGemma T=318 の wall ×1.24
+> （[research/2026-08-11-skinny-m-geometry.md](../research/2026-08-11-skinny-m-geometry.md)
+> §4）。直前の追記の「M ≥ 65 → 既定のまま」は当時の結論で、現況はこの 3 段。選択がプラン時
+> shape の純関数でキーに幾何判別子が載る・実行時オートチューン禁止の MUST は不変。
+> 適用経路も直前の追記の「3 経路のみ」から広がった: linear / bmm / matmul に加え、行ブロック
+> 実行の分解 attention（ADR 0060 — QK / PV は bmm）と、states 形 attention の GEMM 骨格タイル
+> 経路 ①ₜ QK / ③ₜ PV（ADR 0067 2026-09-06 追記・perf-ledger K-13 — `chunkRows` で表を引く）が
+> 同じ表を通る。融合 attention ①③（ADR 0023）・conv2d・i8a8 は引き続き通さない。
