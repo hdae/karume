@@ -5,6 +5,7 @@ import {
   bindSymbols,
   countUses,
   ExecutionError,
+  i2EligibleInitializers,
   planGraph,
   resolveShape,
   statesOnlySymbols,
@@ -580,4 +581,46 @@ Deno.test("states 専用記号は bindSymbols が要求せず、seed に来た�
   );
   // states の無いグラフでは空集合（挙動は 1 バイトも変わらない）
   assertEquals(statesOnlySymbols(parse(linearGraph())).size, 0);
+});
+
+// ADR 0097: i2 は linear / embedding の重みだけが packed のまま実行できる。同じ initializer を
+// それ以外の重みスロット（conv1d 等）も食うなら、そちらのカーネルが packed の 2bit バイトを
+// f32 として読むので、適格集合から外れて展開席へ落ちなければならない。
+Deno.test("i2 の適格集合は linear / embedding だけに食われる重みで、conv1d と共有すると外れる", () => {
+  const source: DeclarationJson = {
+    format: "karume-ir",
+    version: 2,
+    requires: { ops: ["linear", "embedding", "conv1d"] },
+    symbols: [],
+    inputs: [
+      { name: "x", dtype: "f32", shape: [2, 4] },
+      { name: "ids", dtype: "i32", shape: [2] },
+      { name: "s", dtype: "f32", shape: [1, 4, 8] },
+    ],
+    outputs: ["hl", "he", "hc", "hs", "hsc"],
+    initializers: { wl: {}, we: {}, wc: {}, ws: {}, bl: {}, bc: {} },
+    values: {
+      wl: { dtype: "f32", shape: [3, 4] },
+      we: { dtype: "f32", shape: [5, 4] },
+      wc: { dtype: "f32", shape: [3, 4, 1] },
+      ws: { dtype: "f32", shape: [3, 4] },
+      bl: { dtype: "f32", shape: [3] },
+      bc: { dtype: "f32", shape: [3] },
+      hl: { dtype: "f32", shape: [2, 3] },
+      he: { dtype: "f32", shape: [2, 4] },
+      hc: { dtype: "f32", shape: [1, 3, 8] },
+      hs: { dtype: "f32", shape: [2, 3] },
+      hsc: { dtype: "f32", shape: [1, 3, 8] },
+    },
+    nodes: [
+      { op: "linear", ins: ["x", "wl", "bl"], outs: ["hl"], attrs: {} },
+      { op: "embedding", ins: ["we", "ids"], outs: ["he"], attrs: { padding_idx: -1 } },
+      { op: "conv1d", ins: ["s", "wc", "bc"], outs: ["hc"], attrs: {} },
+      // 述語は重みスロットの消費 op だけを見る（shape の契約は見ない）ので、共有の形は
+      // linear の重みを conv1d の重みスロットへも渡すだけで作る。
+      { op: "linear", ins: ["x", "ws", "bl"], outs: ["hs"], attrs: {} },
+      { op: "conv1d", ins: ["s", "ws", "bc"], outs: ["hsc"], attrs: {} },
+    ],
+  };
+  assertEquals([...i2EligibleInitializers(parse(source))].sort(), ["we", "wl"]);
 });
