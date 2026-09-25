@@ -36,9 +36,8 @@ fixed mixed INT2/INT4/INT8 with SRQ and reference GEMV summation. E2B defaults t
 `i4-fast`, which uses the same weights and declares parallel GEMV, RMS-add fusion,
 linear-to-SRQ fusion, and packed int8 activations. `i4-gemvpar` retains parallel GEMV
 without the fusions or packed activations.
-E4B keeps `i4` as its default. Every quant other than `i4` declares a `session` field
-that the published 0.12.0 readers reject, so both `i4-gemvpar` and `i4-fast` need a
-reader newer than 0.12.0. Explicit runtime options override quant settings, including
+E4B keeps `i4` as its default. The `karume/5` manifest needs a reader of 0.13.0 or later.
+Explicit runtime options override quant settings, including
 setting a fusion flag back to `false`. To use sequential GEMV with
 `i4-fast`, also set `fuseLinearStaticQuantize: false` and `packedStaticQuantize: false`,
 or select `i4`.

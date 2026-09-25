@@ -13,9 +13,9 @@ text — the earlier claim here that the weights fell under the Gemma Terms of U
 was Gemma 3 knowledge carried over, retracted 2026-09-01). The per-revision license interview (ADR
 0065 stage 6) was held for this revision on 2026-09-01: distribution is allowed, the model card
 carries the Apache 2.0 attribution and links to the upstream model card for the usage details this
-project does not curate. Nothing derived from these weights has been **uploaded** from this
-repository yet — the distribution form is assembled locally and publication is a separate step
-(`docs/release-runbook.md`).
+project does not curate. The distribution is published as `hdae/karume-gemma4`; the pinned
+revision lives in `GEMMA4_SOURCES` (`packages/models/src/gemma/config.ts`), and publication
+follows `docs/release-runbook.md`.
 
 The authority for the design decisions is the module docstrings (`export.py`, `export_decode.py`,
 `export_product.py`, `export_drafter.py`); this file is the entry point only.
@@ -501,8 +501,7 @@ GEMV), and `i4-fast` (parallel GEMV plus RMS-add fusion). The default is
 Explicit runtime options override each quant setting, including
 `fuseRmsNormAdd: false`. Reassembling into a new output directory updates the
 metadata without requantizing weights. Existing distributions and pinned public
-revisions remain unchanged. Every quant other than `i4` declares a `session`
-field that the published 0.12.0 readers reject, so both `i4-gemvpar` and
-`i4-fast` need a hub/models reader newer than 0.12.0.
+revisions remain unchanged. The `karume/5` manifest needs a hub/models reader
+of 0.13.0 or later.
 Submission policy and prefill buckets are separate host options.
 See [the decision record](../../../docs/decisions/0104-gemma-fast-quant.md).
