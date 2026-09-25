@@ -234,16 +234,6 @@ def _declared_shape(graph: IrGraph, name: str) -> list:
     return graph.values[name].shape
 
 
-#: コミット済み golden に `krm` の現物が在るか（skip 条件）。
-#:
-#: MUST: 探す綴りは**連番**（`model-NNNNN-of-NNNNN.krm`）— 代表 path `model.krm` 自身は
-#: 書かれない（{@link _model_parts} の docstring）ので、`model.krm*` で探すと 1 本も一致せず
-#: 「krm が置かれた時点で自動で戻る」が永久に成立しない（= 突合の永久無効化）。
-COMMITTED_CONTAINERS = sorted(
-    GOLDEN_ROOT.glob(f"*/{Path(MODEL_FILE).stem}-*{Path(MODEL_FILE).suffix}")
-)
-
-
 def _model_parts(root: Path, name: str) -> tuple[Path, ...]:
     """モデルの現物（コンテナの part 列 — part 0 から）。
 
@@ -355,11 +345,6 @@ class TestDeterminism:
             path.read_bytes() for path in _model_parts(tmp_path, spec.name)
         ]
 
-    @pytest.mark.skipif(
-        not COMMITTED_CONTAINERS,
-        reason="コミット済み golden がまだ旧配布形（safetensors）— 再生成は TS 側の読み手と"
-        "同じ段で行う（段 3a の契約外）。krm が置かれた時点でこの門は自動で戻る",
-    )
     @pytest.mark.parametrize("spec", GOLDEN_SPECS, ids=lambda s: s.name)
     def test_regeneration_matches_the_committed_model(self, generated, spec):
         root, _ = generated
@@ -385,36 +370,3 @@ class TestDeterminism:
         committed = GOLDEN_ROOT / spec.name / IO_FILE
         assert committed.is_file(), f"生成物が未コミット: {committed}"
         assert committed.read_bytes() == (root / spec.name / IO_FILE).read_bytes()
-
-
-class TestTheCommittedComparisonCanComeBack:
-    """skip 条件が「置いた瞬間に戻る」綴りであることを、合成の置き場で確かめる。
-
-    MUST: 条件は**連番**（`model-NNNNN-of-NNNNN.krm`）で探す。代表 path `model.krm` は
-    書かれない仕様なので、`model.krm*` で探すと 1 本も一致せず、golden を `krm` へ再生成した
-    後も突合が skip のまま沈黙する（既存テストの実質的な無効化）。
-    """
-
-    @staticmethod
-    def _committed(root: Path) -> list[Path]:
-        """`test_goldens` の skip 条件と**同じ 1 本**の綴りで探す。"""
-        return sorted(root.glob(f"*/{Path(MODEL_FILE).stem}-*{Path(MODEL_FILE).suffix}"))
-
-    def test_a_directory_of_committed_parts_is_found(self, tmp_path: Path) -> None:
-        root = tmp_path / "golden"
-        (root / "mlp").mkdir(parents=True)
-        (root / "mlp" / "model-00001-of-00002.krm").write_bytes(b"0")
-        (root / "mlp" / "model-00002-of-00002.krm").write_bytes(b"1")
-
-        assert [path.name for path in self._committed(root)] == [
-            "model-00001-of-00002.krm",
-            "model-00002-of-00002.krm",
-        ]
-
-    def test_a_directory_of_legacy_shards_is_not_found(self, tmp_path: Path) -> None:
-        """対照 — 旧配布形しか無い間は skip のまま（今のリポジトリの状態）。"""
-        root = tmp_path / "golden"
-        (root / "mlp").mkdir(parents=True)
-        (root / "mlp" / "model-00001-of-00002.safetensors").write_bytes(b"0")
-
-        assert self._committed(root) == []
