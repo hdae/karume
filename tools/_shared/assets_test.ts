@@ -5,6 +5,7 @@
 // 見るのは「未対応・想定外は fail loudly」— 選択が外れたときに、理由と既知一覧が出ること。
 
 import { assertEquals, assertRejects } from "@std/assert";
+import { ManifestFormatError } from "../../packages/hub/mod.ts";
 import { readIrGraph, resolveAsset } from "./assets.ts";
 import {
   type ModelInput,
@@ -31,23 +32,35 @@ const partRef = (path: string, cross?: Json): Json => ({
   ...(cross ?? {}),
 });
 
+/**
+ * part 0 の長さ = ヘッダ 24 + グラフ記述 1 + モデル記述 1。hub の parse が宣言どうしの整合
+ * として検査する（container-v1 §8）。
+ */
+const PART0_BYTES = 24 + 1 + 1;
+
 /** part 列 1 本ぶんの容器（`resolveAsset` が見るのは part 0 の path だけ）。 */
 const container = (parts: readonly Json[]): Json => ({
   descriptor: {
     graph: { length: 1, sha256: "1".repeat(64) },
     model: { length: 1, sha256: "2".repeat(64) },
   },
-  parts,
+  parts: parts.map((part, index) => (index === 0 ? { ...part, size: PART0_BYTES } : part)),
 });
 
-/** 1 model / 1 部品 / 1 quant の最小 manifest（各ケースが 1 箇所だけ壊す）。 */
+/**
+ * 1 model / 1 部品 / 1 quant の最小 manifest（各ケースが 1 箇所だけ壊す）。hub の
+ * `parseManifest` を通る形 = `karume/5` の必須欄を全て持つ。
+ */
 const baseManifest = (): Json => ({
   format: "karume/5",
+  generator: "karume-test/1",
   defaultModel: "m",
   models: {
     m: {
       pipeline: "anima/1",
       defaultQuant: "i8",
+      assets: {},
+      pipelineConfig: {},
       quants: { i8: { weights: { model: "i8" } } },
       weights: {
         model: {
@@ -111,9 +124,9 @@ Deno.test("resolveAsset（配布形）: model の選択が外れたら既知一�
     await assertRejects(
       () => resolveAsset(dir, "x", undefined, undefined),
       Error,
-      "model 'x' が無い",
+      "model 'x' は manifest に無い",
     );
-    await assertRejects(() => resolveAsset(dir, "x", undefined, undefined), Error, "既知: m");
+    await assertRejects(() => resolveAsset(dir, "x", undefined, undefined), Error, "利用可能: m");
   });
 });
 
@@ -123,9 +136,13 @@ Deno.test("resolveAsset（配布形）: quant の選択が外れたら既知一�
     await assertRejects(
       () => resolveAsset(dir, undefined, "i4", undefined),
       Error,
-      "quant 'i4' が無い",
+      "quant 'i4' は manifest に無い",
     );
-    await assertRejects(() => resolveAsset(dir, undefined, "i4", undefined), Error, "既知: i8");
+    await assertRejects(
+      () => resolveAsset(dir, undefined, "i4", undefined),
+      Error,
+      "利用可能: i8",
+    );
   });
 });
 
@@ -139,7 +156,7 @@ Deno.test("resolveAsset（配布形）: quant が component の格納 dtype を�
     await assertRejects(
       () => resolveAsset(dir, undefined, undefined, undefined),
       Error,
-      "格納 dtype を選んでいない",
+      "'model' の dtype 指定が無い",
     );
   });
 });
@@ -153,7 +170,7 @@ Deno.test("resolveAsset（配布形）: 選ばれた格納 dtype が weights に
     await assertRejects(
       () => resolveAsset(dir, undefined, undefined, undefined),
       Error,
-      "格納 dtype 'f16' が無い",
+      "'model' に dtype 'f16' が無い",
     );
   });
 });
@@ -166,7 +183,7 @@ Deno.test("resolveAsset（配布形）: 旧 major の manifest は読めない�
     await assertRejects(
       () => resolveAsset(dir, undefined, undefined, undefined),
       Error,
-      "format 'karume/4' はこの版が読めない",
+      "未対応の major 'karume/4'",
     );
   });
 });
@@ -180,7 +197,23 @@ Deno.test("resolveAsset（配布形）: container.parts が空なら診断つき
     await assertRejects(
       () => resolveAsset(dir, undefined, undefined, undefined),
       Error,
-      "manifest の container.parts が空",
+      "container.parts: 0 件",
+    );
+  });
+});
+
+Deno.test("resolveAsset（配布形）: container.parts が配列でない manifest は hub の理由で落ちる（TypeError にしない）", async () => {
+  await withDir(async (dir) => {
+    const manifest = baseManifest();
+    const model = (manifest.models as Json).m as Json;
+    model.weights = {
+      model: { i8: { container: { ...container([]), parts: "model/model.i8.krm" } } },
+    };
+    await writeManifest(dir, manifest);
+    await assertRejects(
+      () => resolveAsset(dir, undefined, undefined, undefined),
+      ManifestFormatError,
+      "container.parts: 無い / 配列でない",
     );
   });
 });

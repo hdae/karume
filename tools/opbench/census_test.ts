@@ -293,14 +293,21 @@ Deno.test("census 加重: 格納の集合が同じでもスロット割り当て
   ]);
 });
 
-/** 一時ディレクトリに置く配布形の manifest（資産解決は part の実体を読まない）。 */
+/**
+ * 一時ディレクトリに置く配布形の manifest（資産解決は part の実体を読まない）。hub の
+ * `parseManifest` を通る形 = `karume/5` の必須欄を全て持つ（part 0 の size はヘッダ 24 +
+ * 2 文書 1 + 1 — container-v1 §8）。
+ */
 const DIST_MANIFEST = JSON.stringify({
   format: MANIFEST_FORMAT,
+  generator: "karume-test/1",
   defaultModel: "m",
   models: {
     m: {
       pipeline: "gemma4/1",
       defaultQuant: "i8-a8",
+      assets: {},
+      pipelineConfig: {},
       quants: {
         "i8-a8": { weights: { model: "i8" }, session: { linearCompute: "a8" } },
         // `session` の欄ごと無い quant（配布形の多数派）。
@@ -315,8 +322,8 @@ const DIST_MANIFEST = JSON.stringify({
                 model: { length: 1, sha256: "2".repeat(64) },
               },
               parts: [
-                { path: "model/model.i8-00001-of-00002.krm" },
-                { path: "model/model.i8-00002-of-00002.krm" },
+                { path: "model/model.i8-00001-of-00002.krm", size: 26, sha256: "3".repeat(64) },
+                { path: "model/model.i8-00002-of-00002.krm", size: 1, sha256: "4".repeat(64) },
               ],
             },
           },

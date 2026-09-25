@@ -9,7 +9,9 @@
  *
  * - **配布形** — `karume.json`（manifest `karume/5`）を持つディレクトリ。部品 1 つが `krm`
  *   コンテナ 1 本で、グラフ記述と束縛表は part 0 に載る（ADR 0109 決定 3）。ファイル名の推測を
- *   せず manifest の `container.parts[0]` をそのまま引く
+ *   せず manifest の `container.parts[0]` をそのまま引く。manifest の検査と model / quant の
+ *   選択は hub の `parseManifest` / `resolveSelection` がそのまま持つ（道具側で同じ判定を
+ *   書かない）
  * - **系列出力** — `outputs/series/<名前>/` 以下。manifest が無いので、ファイル名から代表 path を
  *   起こして {@link resolveParts}（Python 側 `karume.container.container_parts` の鏡像）に
  *   連番を解かせる
@@ -23,6 +25,13 @@
  */
 
 import { resolveParts } from "../../packages/runtime/tests/helpers/container-files.ts";
+import {
+  type ContainerRef,
+  parseManifest,
+  resolveSelection,
+  type SessionSpec,
+} from "../../packages/hub/mod.ts";
+import { crossRefOf } from "../../packages/hub/src/manifest.ts";
 import type { IrGraph } from "../../packages/runtime/src/format/ir.ts";
 import type { FusionLimits } from "../../packages/runtime/src/runtime/fusion.ts";
 import { bindGraphs, mergedGraph } from "../../packages/runtime/src/format/container/bind.ts";
@@ -155,49 +164,10 @@ const readExact = async (handle: Deno.FsFile, into: Uint8Array, where: URL): Pro
 };
 
 /**
- * 配布形の quant が宣言する**実行変種**（manifest の `quants[<名前>].session`）。
- *
- * MUST: キーも値も manifest 所有の語彙のまま持ち、runtime の `SessionOptions` へ翻訳しない
- * （綴りの正本は hub の allowlist — ADR 0038 §3）。census が写すのは「配布形が何を宣言して
- * いるか」であって runtime のノブではないので、翻訳を挟むと表の綴りが正本と黙って割れる。
+ * この版が読む配布 manifest の major（旧版は読まない — ADR 0109 決定 1）。実資産テストの SKIP
+ * 判定（{@link distributionFormat}）が使う。解決の経路で major を検査するのは hub の
+ * `parseManifest`。
  */
-export type SessionDeclaration = Readonly<Record<string, string>>;
-
-/**
- * manifest のうち資産解決が引く欄だけ（綴りの正本は配布形なので、ここに焼かず読む）。検査は
- * hub の `parseManifest` が持つので、ここは「読む欄の形」だけを名乗る型である。
- */
-type Manifest = {
-  /** `karume/<major>`。この道具が読むのは {@link MANIFEST_FORMAT} だけ。 */
-  readonly format: string;
-  readonly defaultModel: string;
-  readonly models: Readonly<Record<string, ManifestModel>>;
-};
-type ManifestModel = {
-  readonly pipeline: string;
-  readonly defaultQuant: string;
-  readonly quants: Readonly<Record<string, ManifestQuant>>;
-  readonly weights: Readonly<
-    Record<string, Readonly<Record<string, { readonly container: ManifestContainer }>>>
-  >;
-};
-type ManifestQuant = {
-  readonly weights: Readonly<Record<string, string>>;
-  /** 省略可（hub 側も未宣言を「ノブを 1 つも指定しない」として読む）。 */
-  readonly session?: SessionDeclaration;
-};
-/** 部品 1 つ = コンテナ 1 本。先頭が part 0（ヘッダ + 2 文書）— ADR 0109 決定 3。 */
-type ManifestContainer = {
-  readonly parts: readonly ManifestPart[];
-};
-/** `size` は part のファイル長（ADR 0038 §2 の 3 点セットの 1 つ — 必ず在る）。 */
-type ManifestPart = {
-  readonly path: string;
-  readonly size: number;
-  readonly repo?: string;
-};
-
-/** この版が読む配布 manifest の major（旧版は読まない — ADR 0109 決定 1）。 */
 export const MANIFEST_FORMAT = "karume/5";
 
 /**
@@ -222,37 +192,19 @@ export const distributionFormat = (root: URL): string | undefined => {
   return typeof format === "string" ? format : undefined;
 };
 
-/** 配布形の model 1 件（`--model` 省略時は `defaultModel`）。 */
-const manifestModel = (
-  manifest: Manifest,
-  manifestUrl: URL,
-  model: string | undefined,
-): readonly [string, ManifestModel] => {
-  const name = model ?? manifest.defaultModel;
-  if (!Object.hasOwn(manifest.models, name)) {
-    throw new Error(
-      `${manifestUrl.pathname}: model '${name}' が無い` +
-        `（既知: ${Object.keys(manifest.models).join(" / ")}）`,
-    );
-  }
-  return [name, manifest.models[name]];
-};
-
 /**
  * コンテナの part 列から part 0（グラフ記述の置き場）のローカル URL を作る。
  *
  * MUST: 越境参照（ADR 0038 §7）はローカルミラーの綴りを持たないので、ここで理由ごと落とす。
  * 黙って root 直下として解くと存在しない path を読みに行くだけだし、飛ばすと「候補ゼロの
- * 部品」として表に出てしまう。
+ * 部品」として表に出てしまう。part 列が 2 本以上あることは hub の parse が保証している。
  */
-const localPart0 = (container: ManifestContainer | undefined, root: URL, where: string): URL => {
-  // MUST: 空の part 列を診断無しの TypeError にしない（manifest が壊れている、という理由が
-  // 読める形で落とす — part 0 はグラフの置き場なので 0 本はあり得ない）。
-  const head = container?.parts?.[0];
-  if (head === undefined) throw new Error(`${where}: manifest の container.parts が空`);
-  if (head.repo !== undefined) {
+const localPart0 = (container: ContainerRef, root: URL, where: string): URL => {
+  const [head] = container.parts;
+  const cross = crossRefOf(head);
+  if (cross !== undefined) {
     throw new Error(
-      `${where}: part 0 が越境参照（repo '${head.repo}'）— ` +
+      `${where}: part 0 が越境参照（repo '${cross.repo}'）— ` +
         "ローカルに落とした配布形を --source に渡す",
     );
   }
@@ -353,7 +305,7 @@ export type AssetTargets = {
    * 宣言（`linearCompute` など）なので、加重表だけでは本番の実行変種が決まらない。表の読み手が
    * 「この加重はどの席の話か」を辿れるよう写す。
    */
-  readonly session: SessionDeclaration | undefined;
+  readonly session: SessionSpec | undefined;
   readonly components: readonly ComponentTarget[];
 };
 
@@ -377,7 +329,13 @@ export const resolveAsset = async (
     : resolveSeries(root, model, quant, family);
 };
 
-/** 配布形（manifest 正本）。 */
+/**
+ * 配布形（manifest 正本）。
+ *
+ * MUST: manifest は hub の `parseManifest` で読み、選択は `resolveSelection` に任せる。道具側で
+ * 欄を読み直すと、同じ事実（model / quant / dtype の実在・part 列の形）の判定を 2 本持つことに
+ * なり、壊れた manifest が hub の名乗る理由ではなく `TypeError` として落ちる。
+ */
 const resolveDistribution = async (
   root: URL,
   manifestUrl: URL,
@@ -385,65 +343,30 @@ const resolveDistribution = async (
   quant: string | undefined,
   family: string | undefined,
 ): Promise<AssetTargets> => {
-  const manifest: Manifest = JSON.parse(await Deno.readTextFile(manifestUrl));
-  // MUST: major を見る。旧版の manifest は欄の形が違うので、見ないと `container` が無い形を
-  // 「part 列が空」という遠い理由で落とすことになる（ADR 0109 決定 1）。
-  if (manifest.format !== MANIFEST_FORMAT) {
-    throw new Error(
-      `${manifestUrl.pathname}: format '${manifest.format}' はこの版が読めない` +
-        `（読めるのは ${MANIFEST_FORMAT} — 配布形を移行する）`,
-    );
-  }
-  const [modelName, entry] = manifestModel(manifest, manifestUrl, model);
-  const quantName = quant ?? entry.defaultQuant;
-  if (!Object.hasOwn(entry.quants, quantName)) {
-    throw new Error(
-      `${manifestUrl.pathname}: model '${modelName}' に quant '${quantName}' が無い` +
-        `（既知: ${Object.keys(entry.quants).join(" / ")}）`,
-    );
-  }
-  const quantEntry = entry.quants[quantName];
-  const selection = quantEntry.weights;
-  const components = Object.keys(entry.weights).map((component): ComponentTarget => {
-    if (!Object.hasOwn(selection, component)) {
-      throw new Error(
-        `quant '${quantName}' が component '${component}' の格納 dtype を選んでいない`,
-      );
-    }
-    const dtype = selection[component];
-    const variants = entry.weights[component];
-    if (!Object.hasOwn(variants, dtype)) {
-      throw new Error(
-        `component '${component}' に格納 dtype '${dtype}' が無い` +
-          `（既知: ${Object.keys(variants).join(" / ")}）`,
-      );
-    }
-    return {
-      component,
-      componentDtype: dtype,
-      // グラフ名 = 部品名（= manifest の weights キー — container-v1 §2.1）。
-      graph: {
-        url: localPart0(variants[dtype].container, root, `component '${component}'`),
-        graph: component,
-      },
-    };
+  const manifest = parseManifest(await Deno.readTextFile(manifestUrl));
+  const selection = resolveSelection(manifest, {
+    ...(model === undefined ? {} : { model }),
+    ...(quant === undefined ? {} : { quant }),
   });
+  const entry = manifest.models[selection.model];
+  const quantEntry = entry.quants[selection.quant];
+  const components = Object.entries(selection.containers).map((
+    [component, container],
+  ): ComponentTarget => ({
+    component,
+    componentDtype: quantEntry.weights[component],
+    // グラフ名 = 部品名（= manifest の weights キー — container-v1 §2.1）。
+    graph: { url: localPart0(container, root, `component '${component}'`), graph: component },
+  }));
   return {
-    family: family ?? familyOfPipeline(entry.pipeline),
-    model: modelName,
-    quant: quantName,
-    // 欄ごと無い quant は「ノブを 1 つも指定しない」= 空の宣言（hub の読みと同じ）。
+    family: family ?? entry.pipeline.name,
+    model: selection.model,
+    quant: selection.quant,
+    // 欄ごと無い quant は hub が空の宣言 `{}` として読む（「ノブを 1 つも指定しない」）。
     // 「宣言が無い」を表す `undefined` は manifest を持たない系列出力だけに使う。
-    session: quantEntry.session ?? {},
+    session: quantEntry.session,
     components,
   };
-};
-
-/** `anima/1` → `anima`。 */
-const familyOfPipeline = (pipeline: string): string => {
-  const [name] = pipeline.split("/");
-  if (name === "") throw new Error(`pipeline '${pipeline}' から家族名を取れない`);
-  return name;
 };
 
 /**
