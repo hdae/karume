@@ -24,7 +24,8 @@
  *    非暗号ハッシュ（FNV-1a 64bit）+ 可読な尾部で綴る。
  *
  * MUST: 使い捨ての計測用であって、`@karume/hub` の永続キャッシュの代わりではない（LRU も容量
- * 管理も無い）。置き場は `--cache-dir` が指す消して安全なディレクトリだけに向ける。
+ * 管理も無い）。置き場は `--cache-dir` が指す消して安全なディレクトリだけに向ける（CLI は
+ * `outputs/ram-peak/` の配下だけを受ける — `measure.ts` の `cacheDirectoryUnderRoot`）。
  */
 
 /** キャッシュ I/O の実績（cold / warm の判別に使う — 検収③の傍証）。 */

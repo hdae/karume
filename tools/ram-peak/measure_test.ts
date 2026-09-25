@@ -194,6 +194,35 @@ Deno.test({
 });
 
 // ---------------------------------------------------------------------------
+// --cache-dir の柵（GPU 不要 — cold の再帰削除より前に落ちる）
+// ---------------------------------------------------------------------------
+
+/** リポ直下からの相対 path を絶対 path にする（テストの cwd に依らない）。 */
+const repoPath = (relative: string): string =>
+  decodeURIComponent(new URL(`../../${relative}`, import.meta.url).pathname);
+
+const cacheDirOption = (cacheDir: string): string | undefined =>
+  toOptions(parseArgs(["--source", "unused", "--state", "cold", "--cache-dir", cacheDir])).cacheDir;
+
+Deno.test("ram-peak --cache-dir: outputs/ram-peak/ の配下だけを受け、打ち間違いの置き場は削除の前に落とす", () => {
+  const inside = repoPath("outputs/ram-peak/2026-09-25_anima/cache");
+  assertEquals(cacheDirOption(inside), inside);
+  for (
+    const outside of [
+      repoPath("outputs"),
+      repoPath(""),
+      repoPath("outputs/ram-peak"),
+      repoPath("outputs/ram-peak/"),
+      repoPath("outputs/ram-peak/../series"),
+      repoPath("outputs/ram-peak/x/../.."),
+      repoPath("outputs/ram-peak-other/cache"),
+    ]
+  ) {
+    assertThrows(() => cacheDirOption(outside), Error, "の配下でない");
+  }
+});
+
+// ---------------------------------------------------------------------------
 // --gc の受理集合（GPU 不要 — 計測の前に落ちる）
 // ---------------------------------------------------------------------------
 

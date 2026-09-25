@@ -79,7 +79,10 @@ export type MeasureOptions = {
   readonly family: FamilyName;
   /** 配布形ディレクトリ（`karume.json` を持つ）。cold / warm ではここを疑似 HF が配る。 */
   readonly source: string;
-  /** `cold` / `warm` で使うキャッシュ置き場（消して安全なディレクトリ）。 */
+  /**
+   * `cold` / `warm` で使うキャッシュ置き場（消して安全なディレクトリ）。CLI からは
+   * `outputs/ram-peak/` の配下だけを受ける（{@link cacheDirectoryUnderRoot}）。
+   */
   readonly cacheDir?: string;
   readonly model?: string;
   readonly quant?: string;
@@ -405,9 +408,9 @@ const measureFrom = async (
   for (const [name, seen] of diagnostics) {
     const stats = seen.buildStats;
     components[name] = {
-      shardCount: stats.shardCount,
+      shardCount: stats.partCount,
       uploadedMiB: mib(stats.uploadedBytes),
-      shardWaitMs: Math.round(stats.shardWaitMs),
+      shardWaitMs: Math.round(stats.supplyWaitMs),
       decodeMs: Math.round(stats.decodeMs),
       bufferCreateMs: Math.round(stats.bufferCreateMs),
       writeBufferIssueMs: Math.round(stats.writeBufferIssueMs),
@@ -501,6 +504,46 @@ export const parseArgs = (argv: readonly string[]): Map<string, string> => {
   return args;
 };
 
+/** `--cache-dir` を受けてよい置き場の根（リポの `outputs/ram-peak/`）。 */
+const CACHE_ROOT = decodeURIComponent(new URL("../../outputs/ram-peak/", import.meta.url).pathname);
+
+/** path を字面で正規化した絶対 path の要素列（空要素と `.` を落とし、`..` で 1 つ戻る）。 */
+const absoluteSegments = (path: string): readonly string[] => {
+  const absolute = path.startsWith("/") ? path : `${Deno.cwd()}/${path}`;
+  const segments: string[] = [];
+  for (const segment of absolute.split("/")) {
+    if (segment === "" || segment === ".") continue;
+    if (segment === "..") segments.pop();
+    else segments.push(segment);
+  }
+  return segments;
+};
+
+/**
+ * CLI の `--cache-dir` を検査して返す。
+ *
+ * MUST: `--state cold` は置き場を再帰削除して作り直す（`resetCacheDirectory`）ので、受けるのは
+ * `outputs/ram-peak/` の**真下より深い**場所だけ。打ち間違い（`--cache-dir outputs` / `.`）で
+ * 再 export が要る資産やリポそのものを消さないための柵で、根そのもの（測定記録の置き場）も
+ * 受けない。`matrix.ts` の既定（`outputs/ram-peak/<日付>_<label>/cache`）はこの内側にある。
+ *
+ * NOTE: 判定は字面（`..` を畳んだ後の前方一致）で、symlink は辿らない。関数から
+ * {@link measure} を直に呼ぶテストは一時ディレクトリを渡すので、柵は CLI の境界にだけ置く。
+ */
+export const cacheDirectoryUnderRoot = (path: string): string => {
+  const target = absoluteSegments(path);
+  const root = absoluteSegments(CACHE_ROOT);
+  const inside = target.length > root.length &&
+    root.every((segment, index) => target[index] === segment);
+  if (!inside) {
+    throw new Error(
+      `--cache-dir ${path} は ${CACHE_ROOT} の配下でない（cold は置き場を再帰削除するので、` +
+        "消して安全な outputs/ram-peak/<名前>/ の下だけを受ける）",
+    );
+  }
+  return path;
+};
+
 const positiveInteger = (raw: string | undefined, fallback: number, name: string): number => {
   if (raw === undefined) return fallback;
   const value = Number(raw);
@@ -527,6 +570,7 @@ export const toOptions = (args: ReadonlyMap<string, string>): MeasureOptions => 
   const source = args.get("source");
   if (source === undefined) throw new Error("--source <配布形ディレクトリ> は必須");
   const weights = args.get("weights");
+  const cacheDir = args.get("cache-dir");
   const gc = args.get("gc") ?? "false";
   if (gc !== "true" && gc !== "false") throw new Error(`--gc ${gc} は未対応（true | false）`);
   return {
@@ -534,7 +578,7 @@ export const toOptions = (args: ReadonlyMap<string, string>): MeasureOptions => 
     state: state as MeasureState,
     family,
     source,
-    ...(args.get("cache-dir") === undefined ? {} : { cacheDir: args.get("cache-dir") as string }),
+    ...(cacheDir === undefined ? {} : { cacheDir: cacheDirectoryUnderRoot(cacheDir) }),
     ...(args.get("model") === undefined ? {} : { model: args.get("model") as string }),
     ...(args.get("quant") === undefined ? {} : { quant: args.get("quant") as string }),
     component: args.get("component") ?? "transformer",
