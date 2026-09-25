@@ -635,3 +635,21 @@ Deno.test("batch finish: errorScope の pop 待ちの間に消失した区間は
   for (const pop of pops) pop.resolve(null);
   await assertRejects(() => finished, GpuDeviceLostError, "batch の完了");
 });
+
+Deno.test("beginBatch は破棄要求済み・消失済みの device で開かず、区間ロックも取らない", async () => {
+  // 開いてしまうと区間ロックを握ったまま enqueue を受理し続け、失敗が finish まで遅れる。
+  // `destroy()` はフラグを同期に立てるので、`device.lost` の reaction を待たずに落ちる。
+  const destroyed = fakeGpuContext(fakeDevice());
+  destroyed.destroy();
+  await assertRejects(() => destroyed.beginBatch(), GpuDeviceLostError, "batch の開始");
+  assertEquals(
+    await destroyed[RUNTIME_INTERNAL].withScopeLock(() => Promise.resolve("next")),
+    "next",
+    "拒否した beginBatch はロックを取っていない（後続区間が待たされない）",
+  );
+
+  const { gpu, lose } = losableGpuContext();
+  lose();
+  await gpu.device.lost;
+  await assertRejects(() => gpu.beginBatch(), GpuDeviceLostError, "batch の開始");
+});

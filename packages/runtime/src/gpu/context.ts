@@ -459,8 +459,12 @@ export class GpuContext {
    * 通常の run で計測すること — ADR 0021）。
    * NOTE: 同一 device で 2 本目を開こうとすると、1 本目が {@link BatchScope.finish} で
    * ロックを返すまでここで待つ（区間は device 単位で排他 — 入れ子にはならない）。
+   * MUST: 消失済み・破棄要求済みの device では開かない（{@link assertDeviceUsable}）。開くと
+   * 区間ロックを取って enqueue を受理し続け、失敗が `finish()` まで遅れる。区間の途中で消失した
+   * ときに finish で検出するのは設計上の受容だが、開く時点で既に使えない device は同期に判定できる。
    */
   async beginBatch(): Promise<BatchScope> {
+    assertDeviceUsable(this, "batch の開始");
     if (this.gpuTimingEnabled) {
       throw new BatchScopeError(
         "gpuTiming が有効な device では batch を開けない（1 dispatch = 1 pass に開いた " +

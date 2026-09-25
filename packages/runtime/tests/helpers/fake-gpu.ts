@@ -42,6 +42,8 @@ export const fakeDevice = (parts: FakeDeviceParts = {}): GPUDevice =>
   ({
     lost: parts.lost ?? new Promise<GPUDeviceLostInfo>(() => {}),
     features: new Set(parts.features ?? []),
+    // `GpuContext.destroy()`（破棄要求の同期フラグ）を通す検証で要る。
+    destroy: (): void => undefined,
     pushErrorScope: (): void => undefined,
     popErrorScope: parts.popErrorScope ?? ((): Promise<GPUError | null> => Promise.resolve(null)),
     queue: {
