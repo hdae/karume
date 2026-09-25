@@ -106,16 +106,18 @@ block を読むたびにその sha256 を照合する（`packages/runtime/src/fo
 `readBlock`）。つまり容器の部分では**読んだ block の改竄を検出する**。size の厳密一致だけが門として
 残るのは、manifest `assets` の `FileRef` で直接読むファイルである。
 
-### 3. 越境は明示 mapping → 明示 fallback → fail loudly（暗黙の推測・暗黙の降格は禁止）
+### 3. 越境は明示 mapping → fail loudly（暗黙の推測・暗黙の降格は禁止）
 
-越境参照（`FileRef` の `repo` + `revision` — ADR 0038 §7）の解決順は 3 段で、**どこにも推測を
+越境参照（`FileRef` の `repo` + `revision` — ADR 0038 §7）の解決順は 2 段で、**どこにも推測を
 挟まない**:
 
 1. `LocalDirectoryOptions.crossRepo` の**明示 mapping**（キー = manifest が宣言する `"owner/name"`・
    値 = その repo をまるごと提供する `DistributionSource`）。
-2. 無ければ `LocalDirectoryOptions.fallback` の**明示した委譲先**（例 `fallback: hfHub()` 相当の
-   リモート取得元）。宣言された (repo, revision) の座標へ寄せてから開く。
-3. どちらも無ければ **fail loudly**（`crossRepo` に何を書けばよいかを message が示す）。
+2. 無ければ **fail loudly**（`crossRepo` に何を書けばよいかを message が示す）。
+
+追記（2026-09-25）: 当初の 2 段目「`LocalDirectoryOptions.fallback` の明示した委譲先」は、公開面で作れる値では
+動かず（`fallback: hfHub()` の例も必ず落ちる — 2026-09-24 全域レビュー E-HB1-1）、0.13.0 で欄ごと撤去した。
+越境先はローカルでも `crossRepo` に明示する。
 
 MUST NOT: **隣接する同名ディレクトリの推測**（「`../karume-anima` があればそれ」）。取り違えた
 バイト列を黙って読ませる形で、決定 2 のとおり size が合えば通ってしまう。

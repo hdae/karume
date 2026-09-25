@@ -442,7 +442,8 @@ part 長だけを測り、block 上限は測らなかったので、見直しは
     刻みを `4/gcd(rowBytes, 4)` に丸めて切り、丸め切れないときは fail loudly。
 - **③ companion scale の block は実体と同一 part**。piece 列のときは **piece 1 と同一 part**。
   zero-point の block も同じ規則に従う。
-- **④ pieces は行範囲を隙間なく被覆する**。`rows` は昇順・`begin[0] = 0`・
+- **④ pieces は行範囲を隙間なく被覆し、part は添字順に非減少**（MUST — 構築側は piece 1 が最初の
+  part にある前提で簿記する。逆順は `openContainer` で拒否 — 2026-09-25）。`rows` は昇順・`begin[0] = 0`・
   `end[k] = begin[k+1]`・`end[最後] = shape[0]` MUST。
   **`encoding.rowAxis != 0` の initializer は piece 分割を許さない**（scale の行範囲が piece の
   行範囲に対応しないため — 今日の exporter も `conv_transpose1d` の行分割を禁じている）。

@@ -117,7 +117,9 @@ export HF_XET_DEDUPLICATION_GLOBAL_DEDUP_QUERY_ENABLED=false
 - [ ] 上の env 4 本を**同一シェルで** export してから `hf upload` を実行する
       （正本: [assets-layout.md](assets-layout.md) 公開節）。**台本
       `tools/release/hf-upload.zsh upload <repo>` がこの env・shard-cache 退避・venv の hf・
-      直後の断片化表までを 1 回で行う** — 手で打つのは台本が使えないときだけ。4 本目が
+      直後の断片化表までを 1 回で行う** — 手で打つのは台本が使えないときだけ。表には
+      `### FAILED` 行（xet のハッシュか再構成を読めなかった part — 台本は非 0 で終わる。原因を解消してから
+      上げ直す）と `### SKIP` 行（xet 以外に格納された小さいファイル）も出る（2026-09-25）。4 本目が
       読まれたことは hf_xet のログの `global_dedup_query_enabled = false (user set)` 行で
       確認する（台本はこの行と CAS 照会回数をログへ写す）。
       **NOTE（hf_xet の版差）**: 4 本目 `GLOBAL_DEDUP_QUERY_ENABLED` は
