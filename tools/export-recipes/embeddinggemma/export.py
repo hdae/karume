@@ -297,10 +297,10 @@ def assert_sentence_transformer_layout(model_dir: Path) -> None:
 
 def load_wrapper(model_dir: Path) -> EmbeddingWrapper:
     """本体 + Dense 2 段を読み、RoPE バッファを降格した export 可能なラッパを返す。"""
-    from transformers import Gemma3TextModel
-
-    # 本体を読む前に構成を検める（数百 MB を読んでから落ちない）。
+    # 本体を読む前に構成を検める（数百 MB を読んでから落ちない）。transformers の import も
+    # この後に置く — 構成の拒否は依存の有無に関わらず先に出る（CI は transformers を持たない）。
     assert_sentence_transformer_layout(model_dir)
+    from transformers import Gemma3TextModel
 
     model = Gemma3TextModel.from_pretrained(
         model_dir, dtype=torch.float32, attn_implementation="sdpa"

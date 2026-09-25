@@ -149,7 +149,7 @@ class TestExportProvenance:
         `revision=` が無いと HF の main をその時点で引き、上流の main が動いた日に
         `text_encoder` 席が黙って別の revision から焼かれる（容器は同じ出所を名乗ったまま）。
         """
-        import transformers
+        transformers = pytest.importorskip("transformers")
 
         seen: dict[str, object] = {}
 
