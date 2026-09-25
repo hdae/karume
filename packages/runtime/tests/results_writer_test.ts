@@ -12,6 +12,7 @@ import {
   assertStringIncludes,
   assertThrows,
 } from "@std/assert";
+import { parseResultsDocument } from "../../../tools/verify-diff/diff.ts";
 import type { Environment } from "./helpers/environment.ts";
 import {
   type Measurement,
@@ -354,4 +355,43 @@ Deno.test("runRecordedCase: 戻った回に記録が落ちたら投げ、onFailu
   );
   // ケースの決着は残っていない — 系列側が「ケースの席に残った」と誤認すると、どこにも残らない。
   assertEquals(failed, false);
+});
+
+// 書き手（helpers/results.ts）と読み手（tools/verify-diff）は型を別々に持つ。ADR 0106 追記の
+// 「schema は 1 のまま」は両者の一致に依存するので、書き手が実際に書いた文書を読み手へ通す。
+Deno.test("往復: runRecordedCase が書いた results.json を verify-diff の読み手がそのまま受ける", async () => {
+  const temporary = Deno.makeTempDirSync({ prefix: "karume-verify-" });
+  try {
+    const root = new URL(`file://${temporary}/`);
+    const results = openResults("golden", { root, environment: ENVIRONMENT });
+    await runRecordedCase(results, { id: "measured" }, ({ measurements }) => {
+      measurements.push({ ...MEASUREMENT, maxAbs: Number.NaN });
+      return Promise.resolve(undefined);
+    });
+    const cause = new Error("測る前に落ちた");
+    await assertRejects(
+      () =>
+        runRecordedCase(
+          results,
+          { id: "thrown", failureNote: String },
+          () => Promise.reject(cause),
+        ),
+    );
+
+    const text = await Deno.readTextFile(new URL("results.json", results.dir));
+    const document = parseResultsDocument(JSON.parse(text));
+    assertEquals(document.family, "golden");
+    assertEquals(document.environment.key, KEY);
+    assertEquals(document.cases.map((entry) => [entry.id, entry.status]), [
+      ["measured", "pass"],
+      ["thrown", "fail"],
+    ]);
+    // 非有限は書き手の JSON.stringify で null になり、読み手は「測れなかった」として受ける。
+    assertEquals(document.cases[0].measurements, [{ ...MEASUREMENT, maxAbs: null }]);
+    // runRecordedCase 経由は測る前に投げた回も欄を持つ（空配列）。
+    assertEquals(document.cases[1].measurements, []);
+    assertEquals(document.cases[1].note, "Error: 測る前に落ちた");
+  } finally {
+    Deno.removeSync(temporary, { recursive: true });
+  }
 });

@@ -16,6 +16,9 @@
  *
  * 同じ日・同じ系列を 2 度走らせたら**最後の走行が残る**（日付までで席を分け、走行ごとには
  * 分けない — 分けると「最新はどれか」を人が数えることになる）。
+ *
+ * 席の日付は**UTC**（走行を始めた時刻の `toISOString()` の日付部）。ローカル日付とはずれる —
+ * JST の機では 09:00 より前の走行が前日の席に入る。
  */
 
 import type { Tolerance } from "../../src/reference/allclose.ts";
@@ -69,7 +72,10 @@ export type ResultEntry = {
    */
   readonly elapsedMs: number;
   readonly note?: string;
-  /** 許容差判定の実測（数値突合を持たないケースは欄ごと持たない）。 */
+  /**
+   * 許容差判定の実測。{@link runRecordedCase} 経由のケースは常に持つ（本体が測る前に投げた回は
+   * 空配列）。欄ごと持たないのは {@link Results.record} を直に呼ぶケースだけ。
+   */
   readonly measurements?: readonly Measurement[];
 };
 
@@ -113,6 +119,7 @@ const readCheckout = async (): Promise<Checkout | undefined> => {
 
 /** プロセスで 1 回だけ確定する（同じ走行の全ケースが同じ時刻・同じチェックアウトを名乗る）。 */
 const STARTED_AT = new Date().toISOString();
+/** 席の日付（UTC — モジュール doc）。 */
 const TODAY = STARTED_AT.slice(0, 10);
 const CHECKOUT: Checkout | undefined = await readCheckout();
 
