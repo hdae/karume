@@ -670,3 +670,18 @@ class TestFakeQuant:
         """入口に「モジュール 0 本」の門が無い側なので、丸めた本数そのものを見る。"""
         with pytest.raises(SystemExit, match="丸めた重みが 1 本も無い"):
             ex._fake_quant("f16", nn.Identity())
+
+
+class TestProvenance:
+    """コーデック容器の出所は、単体で持ち出しても Apache 2.0 の鎖と NOTICE の在処が読める形。"""
+
+    def test_the_codec_names_both_licenses_of_its_chain(self) -> None:
+        """MUST: `mit` だけを名乗らない — 元の重み（facebook/dacvae-watermarked）は Apache 2.0。"""
+        from irodori.card import IRODORI_CODEC_LICENSE
+
+        assert ex.PROVENANCE.license == IRODORI_CODEC_LICENSE == "mit AND apache-2.0"
+
+    def test_the_codec_points_at_the_notice(self) -> None:
+        from karume.dist import NOTICE_FILENAME
+
+        assert ex.PROVENANCE.notice == NOTICE_FILENAME

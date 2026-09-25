@@ -128,11 +128,12 @@ from torch import nn
 from torch.export import Dim
 
 from _shared.paths import INPUTS_ROOT, SERIES_ROOT
-from irodori.card import IRODORI_LICENSE
+from irodori.card import IRODORI_CODEC_LICENSE
 from irodori.distribution import IRODORI_CODEC_ROLES
 from karume.artifacts import staged_publication
 from karume.container import Provenance, container_parts
 from karume.convert import normalize_boundary_tensor
+from karume.dist import NOTICE_FILENAME
 from karume.ir import IrGraph
 from karume.pipeline import export_to_file
 from karume.quantize import fake_quant_int8, round_weights_to_f16
@@ -158,8 +159,10 @@ METADATA_FILE = "metadata.json"
 MODEL_FILE = "model.krm"
 
 #: 容器へ焼く出所（container-v1 §2.3）。コーデックは上流 `Aratako/Semantic-DACVAE-Japanese-32dim`
-#: で、ライセンス識別子はカード側の正本（{@link irodori.card.IRODORI_LICENSE}）と同じ 1 本。
-PROVENANCE = Provenance(license=IRODORI_LICENSE)
+#: で、元の重みが Apache 2.0 の `facebook/dacvae-watermarked` なので、ライセンス識別子は
+#: カード側の正本 {@link irodori.card.IRODORI_CODEC_LICENSE}（MIT と Apache 2.0 の鎖）を焼く。
+#: `notice` は配布リポ直下の `NOTICE.md`（Apache 2.0 §4(b) の改変告知の在処）。
+PROVENANCE = Provenance(license=IRODORI_CODEC_LICENSE, notice=NOTICE_FILENAME)
 IO_PREFIX = "io."
 IO_SUFFIX = ".safetensors"
 INPUT_PREFIX = "input."

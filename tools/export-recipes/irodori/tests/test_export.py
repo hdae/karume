@@ -936,3 +936,11 @@ class TestTargetScales:
         wrapper = ir.ProjectorGraph(TinyResidualProjector())
 
         assert ir.target_scales(ir.TARGET_TEXT_PROJ, wrapper, {}) == {}
+
+
+class TestProvenance:
+    def test_the_container_points_at_the_notice(self) -> None:
+        """NOTICE を配る他の family と同じく、単一の krm から改変告知の在処が辿れる。"""
+        from karume.dist import NOTICE_FILENAME
+
+        assert ir.PROVENANCE.notice == NOTICE_FILENAME

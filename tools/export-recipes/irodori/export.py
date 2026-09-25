@@ -228,6 +228,7 @@ from karume.convert import (
     PRESERVED_OP_PREFIXES_WITH_ATTENTION,
     normalize_boundary_tensor,
 )
+from karume.dist import NOTICE_FILENAME
 from karume.ir import IrGraph
 from karume.pipeline import export_to_file
 from karume.quantize import (
@@ -281,8 +282,10 @@ MODEL_FILE = "model.krm"
 CHECKPOINT_FILE = "model.safetensors"
 
 #: 容器へ焼く出所（container-v1 §2.3）。ライセンス識別子はカード側の正本
-#: （{@link irodori.card.IRODORI_LICENSE}）から引く — 2 表が独立に動く形にしない。
-PROVENANCE = Provenance(license=IRODORI_LICENSE)
+#: （{@link irodori.card.IRODORI_LICENSE}）から引く — 2 表が独立に動く形にしない。`notice` は
+#: 配布リポ直下の `NOTICE.md`（`irodori.distribution.irodori_root_files`）を指す — NOTICE を配る
+#: 他の family と同じく、単一の krm を持ち出しても改変告知の在処が辿れる形にする。
+PROVENANCE = Provenance(license=IRODORI_LICENSE, notice=NOTICE_FILENAME)
 
 TOKENIZER_FILE = "tokenizer/tokenizer.json"
 IO_PREFIX = "io."

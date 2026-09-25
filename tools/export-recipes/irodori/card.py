@@ -104,9 +104,22 @@ IRODORI_CODEC_MODEL = "Aratako/Semantic-DACVAE-Japanese-32dim"
 IRODORI_CODEC_PARENT_MODEL = "Aratako/Semantic-DACVAE-Japanese"
 IRODORI_CODEC_ORIGIN_MODEL = "facebook/dacvae-watermarked"
 
-#: 配布形のライセンス識別子（上の実地確認どおり上流も同梱コーデックも MIT）。容器へ焼く出所
+#: 配布形のライセンス識別子（カードの frontmatter の HF タグ — 上流の Irodori-TTS も、同梱
+#: コーデックの直接の上流 {@link IRODORI_CODEC_MODEL} も `license: mit`）。本体側の容器へ焼く出所
 #: （`irodori.export.PROVENANCE`）もここから引く — 2 表が独立に動く形にしない。
+#:
+#: NOTE: コーデックの重みは MIT だけでは言い切れない — 元の重みが Apache 2.0 の
+#: {@link IRODORI_CODEC_ORIGIN_MODEL}（上の鎖）なので、コーデック容器の識別子は
+#: {@link IRODORI_CODEC_LICENSE} が別に持つ。
 IRODORI_LICENSE = "mit"
+
+#: コーデック容器（`codec_decoder` / `codec_encoder` — `irodori.dacvae.export.PROVENANCE`）へ
+#: 焼くライセンス識別子。上の鎖の実態（MIT の派生 + Apache 2.0 の元の重み）を、HF の識別子を
+#: SPDX の `AND` で結んで表す — 部品を単体で持ち出したとき（`fromPretrained` の `components` 席）、
+#: 容器だけで Apache 2.0 §4(a)(b) の条件が掛かることが読める形にする（2026-09-24 全域レビュー
+#: W-RC4-1・2026-09-25 裁定）。容器の `license` は識別子の文字列を運ぶだけで、読み手（core の
+#: `karume.container` / TS の `descriptor.ts`）は語彙を検査しない。
+IRODORI_CODEC_LICENSE = "mit AND apache-2.0"
 
 
 def _irodori_metadata(upstream: IrodoriUpstream) -> CardMetadata:
