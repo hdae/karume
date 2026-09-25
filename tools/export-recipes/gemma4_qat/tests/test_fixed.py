@@ -15,6 +15,7 @@ from container_series import write_component
 from transformers.integrations.gemma_quant import QuantizedEmbedding, QuantizedLinear
 
 from gemma4.distribution import assert_gemma4_ple_assets, gemma4_ple_index
+from gemma4.export_product import assert_ple_assets
 from gemma4_qat.checkpoint import TraceLinear, fixed_trace_weights, load_qat
 from gemma4_qat.ple import build_ple
 from gemma4_qat.tests.series_fixture import packed_embedding, qat_container
@@ -110,6 +111,75 @@ class TestPackedPle:
             module.embedding_scale[0, 0] = -1 if fault == "negative" else float("nan")
         with pytest.raises(ValueError):
             build_ple(module, 3, 32, tmp_path)
+
+
+def _probe(tmp_path: Path) -> list[int]:
+    with safe_open(str(tmp_path / "ple.probe.safetensors"), framework="pt") as handle:
+        return [int(token) for token in handle.get_tensor("tokens")]
+
+
+class TestPackedPleGate:
+    """export が呼ぶ PLE のビット一致門（`assert_ple_assets`）は packed の格納でも同じ 1 本。
+
+    参照は上流 `QuantizedEmbedding` の出力のまま — 門の展開が詰め順か offset を取り違えると
+    （この fixture の各バイトは下位と上位で違う値を持つので）ビット一致が崩れる。
+    """
+
+    @pytest.mark.parametrize("bits", [2, 4])
+    def test_the_written_packed_rows_rebuild_the_upstream_output_bit_for_bit(
+        self, tmp_path: Path, bits: int
+    ):
+        container, index, module = _publish(tmp_path, bits)
+        probe = _probe(tmp_path)
+        with torch.inference_mode():
+            reference = module(torch.tensor([probe], dtype=torch.int64)).reshape(
+                1, len(probe), 3, 32
+            )
+
+        assert index["storage"] == f"i{bits}"
+        assert_ple_assets(container, index, probe, reference)
+
+    @pytest.mark.parametrize(("bits", "flip"), [(2, 0x04), (4, 0x10)])
+    def test_one_flipped_field_in_a_probe_row_is_detected(
+        self, tmp_path: Path, bits: int, flip: int
+    ):
+        """容器が持つ行と 1 要素だけ違う上流（i4 は上位 nibble・i2 は 2 番目の 2bit）。"""
+        container, index, _ = _publish(tmp_path, bits)
+        probe = _probe(tmp_path)
+        bent = packed_embedding(bits, rows=9)
+        bent.embedding_quantized[probe[0], 0] ^= flip
+        with torch.inference_mode():
+            reference = bent(torch.tensor([probe], dtype=torch.int64)).reshape(1, len(probe), 3, 32)
+
+        with pytest.raises(AssertionError, match="ビット一致しない"):
+            assert_ple_assets(container, index, probe, reference)
+
+    def test_a_layer_shifted_scale_is_detected(self, tmp_path: Path):
+        """scale の層ずれは形も型も dtype も合う（`torch.equal` でしか捕まらない）。"""
+        container, index, module = _publish(tmp_path, 2)
+        probe = _probe(tmp_path)
+        with torch.inference_mode():
+            reference = module(torch.tensor([probe], dtype=torch.int64)).reshape(
+                1, len(probe), 3, 32
+            )
+        shifted = reference.clone()
+        shifted[0, :, 0] = reference[0, :, 1]
+
+        with pytest.raises(AssertionError, match="ビット一致しない"):
+            assert_ple_assets(container, index, probe, shifted)
+
+    def test_a_row_length_that_disagrees_with_the_storage_is_rejected(self, tmp_path: Path):
+        """行長は索引の `rowBytes` が正本 — 格納と寸法から導く値と割れた索引は読まない。"""
+        container, index, module = _publish(tmp_path, 4)
+        probe = _probe(tmp_path)
+        with torch.inference_mode():
+            reference = module(torch.tensor([probe], dtype=torch.int64)).reshape(
+                1, len(probe), 3, 32
+            )
+        bent = {**index, "values": {**index["values"], "rowBytes": 3 * 32}}
+
+        with pytest.raises(AssertionError, match="rowBytes"):
+            assert_ple_assets(container, bent, probe, reference)
 
 
 class TestTraceLinear:

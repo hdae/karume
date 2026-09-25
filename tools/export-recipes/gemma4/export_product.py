@@ -88,7 +88,13 @@ from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION
 from karume.ir import IrGraph
 from karume.ops import ARGMAX_OP, EMBEDDING_OP
 from karume.pipeline import export_module
-from karume.ple import PLE_INDEX_ASSET, ple_assets, ple_block_ranges, ple_row_bytes
+from karume.ple import (
+    PLE_INDEX_ASSET,
+    PLE_PACK_FACTOR,
+    ple_assets,
+    ple_block_ranges,
+    ple_row_bytes,
+)
 from karume.quantize import quantize_to_int8
 from karume.shapes import declared_shape
 from karume.states import to_states_form
@@ -196,7 +202,7 @@ class ProductChunkWrapper(decode.DecodeChunkWrapper):
 
 #: {@link decode.load_wrapper} へ渡す variant。**読まれるのは `wrapper` 欄だけ**（素材の読み方と
 #: RoPE の差し替えはラッパ型に依らない）。残り 3 欄は {@link decode.export_series} 用の分岐で、
-#: 本台本はそちらを通らない — 製品形の差（入口 2 本増・出口 logits・sidecar）は
+#: 本台本はそちらを通らない — 製品形の差（入口 2 本増・出口 logits・PLE 資産）は
 #: `ChunkVariant` の 4 欄に載らないので、系列の駆動はこのモジュールが持つ。
 _LOAD_VARIANT = decode.ChunkVariant(
     out_dir=DEFAULT_OUT_DIR, wrapper=ProductChunkWrapper, token_only=False, goldens=False
@@ -213,7 +219,7 @@ def load_wrapper(model_dir: Path) -> ProductChunkWrapper:
     return decode.load_wrapper(_LOAD_VARIANT, model_dir)
 
 
-# ---- PLE sidecar -----------------------------------------------------------
+# ---- PLE 資産 --------------------------------------------------------------
 
 
 def ple_token_bytes(layers: int, dim: int) -> int:
@@ -227,12 +233,12 @@ def ple_token_bytes(layers: int, dim: int) -> int:
 
 
 def ple_table_rows(tables: Sequence[torch.nn.Module], vocab_size: int) -> int:
-    """PLE 35 分割の行数（= sidecar の token 行数）。
+    """PLE 35 分割の行数（= PLE 資産の token 行数）。
 
     MUST: `config.vocab_size_per_layer_input` から取らない —
     {@link gemma4.export.load_model_and_tables} が**検査席の行数**（`ple.PLE_PROBE_ROWS` = 8）へ
     差し替えた後の値なので、そちらを読むと
-    8 行の sidecar が形も型も合ったまま書かれる（実際に 1 度踏んだ）。行数の正本は
+    8 行の PLE 資産が形も型も合ったまま書かれる（実際に 1 度踏んだ）。行数の正本は
     「実際に読み込んだ分割表」だけ。
 
     MUST: 主 embedding の vocab 行数と一致することを見る（ADR 0085 決定 5 の**書き手側**の半分）
@@ -411,6 +417,24 @@ def _locate_block(blocks: Sequence[Mapping[str, Any]], token: int) -> Mapping[st
     return None
 
 
+def _unpack_ple_values(packed: torch.Tensor, storage: str) -> torch.Tensor:
+    """`values` の生バイト（u8）を量子化値 q（i8）へ展開する — 末尾軸が `× 詰め数` に伸びる。
+
+    定義は container-v1 §6.3 の codec 台帳（TS の読み手の `int8-sym` / `int4-sym-g` /
+    `int2-off`）と同じ: i8 は `u = q`、i4 は `u = q + 8`（バイト内の**下位** nibble が先）、
+    i2 は `u = q + 2`（**下位 2bit から**順に）。上流 `QuantizedEmbedding` の展開とも同じ
+    定義で、門はこの 1 本だけを持つ（詰め順を取り違えると参照側と「同じ向きに間違った 2 つ」を
+    突き合わせることになるので、参照側は上流モジュールの出力のまま保つ）。
+    """
+    if storage == "i8":
+        return packed.view(torch.int8)
+    bits = 8 // PLE_PACK_FACTOR[storage]
+    mask = (1 << bits) - 1
+    offset = 1 << (bits - 1)
+    fields = [((packed >> shift) & mask).to(torch.int8) - offset for shift in range(0, 8, bits)]
+    return torch.stack(fields, dim=-1).flatten(-2)
+
+
 def assert_ple_assets(
     container: Path, index: Mapping[str, Any], probe: Sequence[int], reference: torch.Tensor
 ) -> None:
@@ -420,7 +444,12 @@ def assert_ple_assets(
     組んだ `[1,P,35,256]` そのもの — つまり **PLE をグラフに残していたら embedding op が
     出していた値**（i8 格納 + per-row scale の逆量子化は fake-quant の値を厳密に復元する
     — ADR 0019 の ±127 論証）。再配置側は**書いたバイト列を読み直し**、ホストと同じ順序
-    （`f32(i8) * scale` → `* embed_scale`）で組む。
+    （`f32(q) * scale` → `* embed_scale`）で組む。
+
+    格納（索引の `storage`）は i8 / i4 / i2 のどれでも同じ門を通る — QAT の固定 packed の PLE
+    （ADR 0097 追記 4）の参照は上流 `QuantizedEmbedding` の出力で、packed の値は
+    {@link _unpack_ple_values} で展開する。行のバイト数は索引の `rowBytes` を正本に読み、
+    格納と寸法から導く値（`karume.ple.ple_row_bytes`）と食い違えば落とす。
 
     MUST: `torch.equal`（ビット一致）で見る — scale の対応を 1 層ずらしても、block の範囲を
     1 行ずらしても、形も型も dtype も合ったまま**別 token の有効な行**が出る。
@@ -436,6 +465,14 @@ def assert_ple_assets(
     layers = int(index["layers"])
     dim = int(index["dim"])
     embed_scale = float(index["embedScale"])
+    storage = str(index["storage"])
+    row_bytes = {key: int(index[key]["rowBytes"]) for key in (PLE_VALUES_KEY, PLE_SCALES_KEY)}
+    derived = ple_row_bytes(storage, layers, dim)
+    if row_bytes != derived:
+        raise AssertionError(
+            f"索引の rowBytes {row_bytes} が格納 '{storage}'・layers {layers}・dim {dim}"
+            f" から導く {derived} と違う"
+        )
     expected_shape = (1, len(probe), layers, dim)
     if tuple(reference.shape) != expected_shape:
         raise AssertionError(f"参照 {tuple(reference.shape)} が {expected_shape} でない")
@@ -444,9 +481,12 @@ def assert_ple_assets(
     opened = open_container(container)
 
     def rows_of(
-        wanted: Sequence[tuple[Mapping[str, Any], int]], dtype: torch.dtype, width: int
+        wanted: Sequence[tuple[Mapping[str, Any], int]], stride: int
     ) -> dict[tuple[str, int], torch.Tensor]:
-        """要る `(block, token)` を **block 1 本につき 1 度の読み**で集める（残りは捨てる）。"""
+        """要る `(block, token)` を **block 1 本につき 1 度の読み**で集める（残りは捨てる）。
+
+        行は u8 の生バイト（`stride` バイト）で返す — 解釈（展開・f32 への読み替え）は呼び手。
+        """
         by_asset: dict[str, tuple[Mapping[str, Any], set[int]]] = {}
         for block, token in wanted:
             by_asset.setdefault(str(block["asset"]), (block, set()))[1].add(token)
@@ -455,13 +495,13 @@ def assert_ple_assets(
             raw = bytearray(read_asset(opened, name))
             start = int(block["start"])
             rows = int(block["stop"]) - start
-            expected = rows * layers * width * torch.empty(0, dtype=dtype).element_size()
+            expected = rows * stride
             if len(raw) != expected:
                 raise AssertionError(
                     f"資産 '{name}' が {len(raw)} バイト — 索引の範囲"
                     f" [{block['start']}, {block['stop']}) から組んだ期待は {expected}"
                 )
-            view = torch.frombuffer(raw, dtype=dtype).reshape(rows, layers, width)
+            view = torch.frombuffer(raw, dtype=torch.uint8).reshape(rows, stride)
             for token in sorted(tokens):
                 picked[(name, token)] = view[token - start].clone()
             # 次の block を読む前に block 丸ごとの器を手放す（`view` は `raw` を共有する）。
@@ -485,17 +525,22 @@ def assert_ple_assets(
             "（索引の [start, stop) が vocab を覆っていない）"
         )
 
-    values = rows_of([(block, token) for _p, token, block, _s in located], torch.int8, dim)
-    scales = rows_of([(block, token) for _p, token, _v, block in located], torch.float32, 1)
+    values = rows_of(
+        [(block, token) for _p, token, block, _s in located], row_bytes[PLE_VALUES_KEY]
+    )
+    scales = rows_of(
+        [(block, token) for _p, token, _v, block in located], row_bytes[PLE_SCALES_KEY]
+    )
     for position, token, values_block, scales_block in located:
-        quantized = values[(str(values_block["asset"]), token)].to(torch.float32)
-        scale = scales[(str(scales_block["asset"]), token)]
+        packed = values[(str(values_block["asset"]), token)]
+        quantized = _unpack_ple_values(packed, storage).reshape(layers, dim).to(torch.float32)
+        scale = scales[(str(scales_block["asset"]), token)].view(torch.float32).reshape(layers, 1)
         rebuilt[0, position] = quantized * scale * embed_scale
     if not torch.equal(rebuilt, reference):
         worst = float((rebuilt - reference).abs().max())
         raise AssertionError(
             "PLE の再配置が 35 表経路とビット一致しない"
-            f"（最大絶対差 {worst}）— i8 値と per-row scale の対応か token 範囲がずれている"
+            f"（最大絶対差 {worst}）— 値と per-row scale の対応か token 範囲がずれている"
         )
 
 
