@@ -23,7 +23,6 @@ from karume.container import (
     AssetInput,
     ContainerFormatError,
     Provenance,
-    sequence_siblings,
 )
 from karume.convert import PRESERVED_OP_PREFIXES, convert, curated_decompositions
 from karume.emit import FixedQuantizedWeight, stored_model
@@ -34,10 +33,6 @@ from karume.verify import assert_op_contracts, assert_runtime_support
 
 #: コンテナ（モデル容器）の拡張子（container-v1 §1 — 種別は magic が持つが名前も分けておく）。
 MODEL_SUFFIX = ".krm"
-
-#: 退役した配布形の拡張子。据わった後に**同じコンポーネントの**残骸だけを消す
-#: （`karume.publish` の後始末は `.krm` の連番しか知らないので、ここが 1 段足す）。
-LEGACY_SUFFIX = ".safetensors"
 
 
 def export_module(
@@ -78,6 +73,20 @@ def _assert_graph_name(graph_name: str) -> str:
     return graph_name
 
 
+def _assert_model_path(path: str | Path) -> Path:
+    """出力 path が容器の拡張子（`.krm`）で終わることを落とす。
+
+    MUST: 他の拡張子を `.krm` へ黙って読み替えない — 配布形は `krm` の 1 つだけで
+    （container-v1 §8）、別の拡張子を渡す呼び手は退役した形を書くつもりでいる。
+    """
+    final = Path(path)
+    if final.suffix != MODEL_SUFFIX:
+        raise ValueError(
+            f"出力 path '{final}' の拡張子が {MODEL_SUFFIX} ではない（配布形は krm だけ）"
+        )
+    return final
+
+
 def publish_model(
     path: str | Path,
     graph: IrGraph,
@@ -112,9 +121,9 @@ def publish_model(
     「重みではないが同じ容器で配るバイト列」の席で、重みの part の**後ろ**の専用 part に載る
     （ADR 0109 決定 4）。
 
-    出力名は `path` の拡張子を `.krm` にしたもの。既定の分割形では part 0 から
-    `<stem>-NNNNN-of-NNNNN.krm` の連番になり、`path` 自身は書かれない（HF の公式配布は
-    分割形だけ — container-v1 §8）。`single=True` は手元用の単一形。
+    `path` は `.krm` で終わる代表 path（他の拡張子は `ValueError` — {@link _assert_model_path}）。
+    既定の分割形では part 0 から `<stem>-NNNNN-of-NNNNN.krm` の連番になり、`path` 自身は
+    書かれない（HF の公式配布は分割形だけ — container-v1 §8）。`single=True` は手元用の単一形。
 
     戻すのは**格納宣言を commit したグラフ**（実際に焼いた `storage` を持つビュー）。渡された
     `graph` は 1 バイトも変えない。「書いたものが読めるか」は `karume.publish` の読み直し検証
@@ -125,7 +134,7 @@ def publish_model(
     読めない」容器を止められない。掛ける相手は `stored_model` が commit したグラフ（実際に
     焼く格納を持つビュー）で、落ちた回は **1 バイトも据わらない**。
     """
-    final = Path(path).with_suffix(MODEL_SUFFIX)
+    final = _assert_model_path(path)
     stored = stored_model(
         graph,
         tensors,
@@ -148,10 +157,6 @@ def publish_model(
         part_bytes=_part_bytes,
         block_bytes=_block_bytes,
     )
-    # 退役した配布形の残骸（同じコンポーネントの旧 shard 列）を据わった後に消す。名前の形が
-    # 一致するものだけを拾うので、同居する `io.*.safetensors` や provenance の類には触らない。
-    for stale in sequence_siblings(final.with_suffix(LEGACY_SUFFIX)):
-        stale.unlink()
     return stored.graph
 
 
@@ -183,6 +188,8 @@ def export_to_file(
     **必須** — 意味と理由は {@link publish_model}。書き出し以降（原子性・part 分割・後始末）も
     向こうが持つ。
     """
+    # 出力 path の拡張子は export の前に落とす（重い export を回してから拒否しない）。
+    _assert_model_path(path)
     graph, tensors = export_module(
         module,
         args,

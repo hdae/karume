@@ -122,17 +122,25 @@ class TestAtomicReplacement:
             hashlib.sha256(p.read_bytes()).hexdigest() for p in container_parts(right)
         ]
 
-    def test_the_output_name_carries_the_container_suffix(self, tmp_path):
-        """呼び手が旧拡張子を渡しても据わるのは `.krm`（配布形は 1 つ — container-v1 §8）。"""
-        export_to_file(
-            Biased(),
-            EXAMPLE,
-            tmp_path / "model.f32.safetensors",
-            provenance=PROVENANCE,
-            graph_name="biased",
-        )
+    @pytest.mark.parametrize("name", ["model.f32.safetensors", "model", "model.krm.tmp"])
+    def test_a_path_without_the_container_suffix_is_rejected(self, tmp_path, name):
+        """`.krm` 以外の path は黙って読み替えずに落ち、何も据わらない。
 
-        assert all(entry.suffix == ".krm" for entry in tmp_path.iterdir())
+        配布形は `krm` の 1 つだけ（container-v1 §8）。
+        """
+        with pytest.raises(ValueError, match=r"\.krm"):
+            export_to_file(
+                Biased(), EXAMPLE, tmp_path / name, provenance=PROVENANCE, graph_name="biased"
+            )
+
+        assert list(tmp_path.iterdir()) == []
+
+    def test_publish_model_rejects_a_path_without_the_container_suffix(self, tmp_path):
+        """export を済ませたグラフを渡す入口でも同じく落ちる（読み替えは 1 箇所にも残さない）。"""
+        with pytest.raises(ValueError, match=r"\.krm"):
+            published(Biased(), EXAMPLE, tmp_path / "model.safetensors")
+
+        assert list(tmp_path.iterdir()) == []
 
 
 class TestPartitionedPublication:
@@ -201,23 +209,6 @@ class TestPartitionedPublication:
             "model-00002-of-00003.krm",
             "model-00003-of-00003.krm",
         ]
-
-    def test_it_clears_the_retired_safetensors_of_a_previous_export(self, tmp_path):
-        """同じ部品の旧配布形（`.safetensors` の連番）も据わった後に消す。
-
-        残すと系列ディレクトリに「前の形と今の形」が同居し、どちらを配るかが決まらない。
-        """
-        for name in ("model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"):
-            (tmp_path / name).write_bytes(SENTINEL)
-        (tmp_path / "io.input.safetensors").write_bytes(SENTINEL)
-
-        published(TwoWeights(), TWO_EXAMPLE, tmp_path / "model.krm")
-
-        remaining = sorted(entry.name for entry in tmp_path.iterdir())
-        assert "io.input.safetensors" in remaining
-        assert not any(
-            name.endswith(".safetensors") and name.startswith("model") for name in remaining
-        )
 
     def test_the_cli_verifies_the_container_from_its_representative_path(self, tmp_path, capsys):
         """`karume verify <代表 path>` は連番へ解決してまとめて検証する。
