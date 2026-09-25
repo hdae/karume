@@ -28,7 +28,7 @@ import {
 export const MANIFEST_FILE = "karume.json";
 
 /**
- * ローカル配布形の資産束。4 ファミリの `<Family>Assets` はいずれもこの構造なので、
+ * ローカル配布形の資産束。各ファミリの `<Family>Assets` はいずれもこの構造なので、
  * どの `fromAssets` へもそのまま渡せる（ファミリごとの写しを作らない）。
  */
 export type LocalAssets = {

@@ -2,14 +2,17 @@
  * ローカルの配布形ディレクトリ（`karume.json` を持つ）を **HF 形の HTTP** で配る使い捨て
  * サーバ。
  *
- * ## 消費者は「HTTP 疎通そのものを見る門」だけ
+ * ## 消費者は「実 DL 経路そのものを通す」ものだけ
  *
  * デモの `--source <ローカルのパス>` はここを通らない — 手元の配布形は取得元ハンドル
  * （`@karume/hub/deno` の `denoDirectory` — `local-source.ts`）で直に読めるようになり、
- * ポートも永続キャッシュへの複製も要らなくなった。残る消費者は
- * `packages/models/tests/e2e_gemma4_pretrained_test.ts` で、あちらは**実 DL 経路**（revision
- * 解決 → resolve URL → 受信バイト門 → 永続キャッシュ）を通すことが門の目的なので、疑似 HF
- * を喋るこのサーバでなければならない。
+ * ポートも永続キャッシュへの複製も要らなくなった。残る消費者は次の 2 つで、どちらも**実 DL
+ * 経路**（revision 解決 → resolve URL → 受信バイト門 → 永続キャッシュ）を通すことが目的なので、
+ * 疑似 HF を喋るこのサーバでなければならない:
+ *
+ * - `packages/models/tests/e2e_gemma4_pretrained_test.ts` — その経路の疎通を見る門
+ * - `tools/ram-peak/measure.ts` の `--state cold` / `warm` — その経路のホスト RAM ピークと
+ *   キャッシュの挙動を測る
  *
  * ## なぜ HTTP でも全量読みにしないのか
  *

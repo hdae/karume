@@ -8,8 +8,9 @@
  * 読みは part 単位（part 0 の 2 文書だけで `prepareContainer` まで進み、重みの block は part
  * ごとに取り出す）なので、RAM に載るのは常に「今の part」だけ — 使い捨ての HF 形サーバ
  * （`local-dist-server.ts`）を挟んでいた頃の利点は全部残り、**永続キャッシュへの複製もポートも
- * 要らなくなった**。あちらは疑似 HF の HTTP 疎通そのものを見る門
- * （`packages/models/tests/e2e_gemma4_pretrained_test.ts`）が消費者として残っている。
+ * 要らなくなった**。あちらには実 DL 経路を通す消費者（疑似 HF の HTTP 疎通そのものを見る門
+ * `packages/models/tests/e2e_gemma4_pretrained_test.ts` と、cold / warm を測る
+ * `tools/ram-peak/measure.ts`）が残っている。
  *
  * ## 越境参照は明示 mapping だけ
  *
