@@ -252,6 +252,7 @@ Deno.test("compareWithCensus: single の加重合計を op 別に足して singl
     measured: 2,
     excluded: {},
     failed: [],
+    timing_warnings: 0,
     weighted_ms_by_op_storage: { "linear/f32+i4g32": 6, "linear/f32+i8": 3, "rms_norm/f32": 2 },
   };
   const records = [run(0, "decode-1", [
