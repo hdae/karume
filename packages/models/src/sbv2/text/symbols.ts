@@ -186,8 +186,8 @@ export const parseJpExtraRules = (raw: unknown, where: string): JpExtraRules => 
   };
   if (root["addBlank"] !== true) {
     // add_blank=False のモデルは intersperse を通さないので、音素長も word2ph も別の式に
-    // なる。デモは add_blank 前提の 1 経路しか持たない — 黙って通すと 2 倍長い列を作る。
-    throw new Error(`${where}.addBlank: true でない（add_blank 前提のデモでは未対応）`);
+    // なる。パイプラインは add_blank 前提の 1 経路しか持たない — 黙って通すと 2 倍長い列を作る。
+    throw new Error(`${where}.addBlank: true でない（add_blank 前提のパイプラインでは未対応）`);
   }
   if (rules.blankId < 0 || rules.blankId >= symbols.length) {
     throw new Error(`${where}.blankId: 記号表の範囲外（${rules.blankId}）`);
@@ -212,7 +212,7 @@ export const phonesToIds = (rules: JpExtraRules, phones: readonly string[]): num
       // 呼び手の発話だけで到達する（未知の音素を moras / words に書く）ので入力起因 = 400。
       throw new Sbv2InputError(
         `記号表に無い音素 ${JSON.stringify(phone)} が phones に含まれる（ID 化不能）。` +
-          " yomi の音素記号と JP-Extra モデルの記号表の齟齬を疑う。",
+          " 発話（moras / words）の音素記号と JP-Extra モデルの記号表の齟齬を疑う。",
       );
     }
     return id;
