@@ -122,6 +122,7 @@ export const createHandler = (
   revision: string,
   bundleSha256?: string,
   dirty?: boolean,
+  checkBundle?: Uint8Array<ArrayBuffer>,
 ): (req: Request) => Promise<Response> => {
   const staticRoot = decodeURIComponent(new URL(".", import.meta.url).pathname);
   const vendors = vendorFiles();
@@ -148,6 +149,11 @@ export const createHandler = (
         h.set("Content-Type", "text/javascript");
         return new Response(bundle, { headers: h });
       }
+      if (url.pathname === "/check.js") {
+        if (!checkBundle) return new Response(null, { status: 404, headers: h });
+        h.set("Content-Type", "text/javascript");
+        return new Response(checkBundle, { headers: h });
+      }
       if (url.pathname === "/frame.html") {
         const html = await Deno.readTextFile(`${staticRoot}/frame.html`);
         h.set("Content-Type", "text/html; charset=utf-8");
@@ -155,7 +161,7 @@ export const createHandler = (
           headers: h,
         });
       }
-      const staticFile = new Map([["/", "index.html"], [
+      const staticFile = new Map([["/", "index.html"], ["/check.html", "check.html"], [
         "/cases.json",
         "cases.json",
       ]]).get(url.pathname);
@@ -224,21 +230,26 @@ const main = async (): Promise<void> => {
   };
   const build = await Deno.makeTempDir({ prefix: "karume-browser-speed-" });
   try {
-    const output = `${build}/runner.js`;
-    const command = new Deno.Command(Deno.execPath(), {
-      args: [
-        "bundle",
-        "--platform",
-        "browser",
-        "--output",
-        output,
-        decodeURIComponent(new URL("runner.ts", import.meta.url).pathname),
-      ],
-      stdout: "inherit",
-      stderr: "inherit",
-    });
-    if (!(await command.output()).success) throw Error("Browser bundle failed");
-    const bundle = await Deno.readFile(output);
+    const bundleEntry = async (entry: string): Promise<Uint8Array<ArrayBuffer>> => {
+      const output = `${build}/${entry.replace(/\.ts$/, ".js")}`;
+      const command = new Deno.Command(Deno.execPath(), {
+        args: [
+          "bundle",
+          "--platform",
+          "browser",
+          "--output",
+          output,
+          decodeURIComponent(new URL(entry, import.meta.url).pathname),
+        ],
+        stdout: "inherit",
+        stderr: "inherit",
+      });
+      if (!(await command.output()).success) throw Error(`Browser bundle failed: ${entry}`);
+      return await Deno.readFile(output);
+    };
+    const bundle = await bundleEntry("runner.ts");
+    // subgroup32 の u32 一致門（/check.html）。速度計測とは独立の検査ページ。
+    const checkBundle = await bundleEntry("check.ts");
     const git = await new Deno.Command("git", { args: ["rev-parse", "HEAD"] }).output();
     if (!git.success) throw Error("Cannot identify checkout revision");
     const revision = new TextDecoder().decode(git.stdout).trim();
@@ -256,7 +267,7 @@ const main = async (): Promise<void> => {
     try {
       await Deno.serve(
         { hostname: "127.0.0.1", port, signal: abort.signal },
-        createHandler(roots, bundle, revision, bundleSha256, dirty),
+        createHandler(roots, bundle, revision, bundleSha256, dirty, checkBundle),
       ).finished;
     } finally {
       Deno.removeSignalListener("SIGINT", stop);

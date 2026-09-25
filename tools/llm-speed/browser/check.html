@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+  <meta charset="utf-8">
+  <title>GEMV subgroup32 u32 check</title>
+  <style>
+  body {
+    font-family: system-ui, sans-serif;
+    margin: 1.5rem;
+  }
+  pre {
+    white-space: pre-wrap;
+    border: 1px solid #ccc;
+    padding: 1rem;
+  }
+  </style>
+  <h1>Parallel GEMV: subgroup32 vs parallel u32 identity</h1>
+  <p>
+    Runs the same check as <code>packages/runtime/tests/helpers/gemv-subgroup-check.ts</code>
+    (i2 / i4 / i8 × K shapes × lanes × M ∈ {1, 4, 8}): FP64 tolerance, decode / verify agreement,
+    and bit-identical output between the parallel and subgroup32 kernels. Requires Chrome with
+    <code>subgroups</code> and <code>subgroup-size-control</code>. Copy the text below into the report.
+  </p>
+  <pre id="output"></pre>
+  <script type="module" src="/check.js"></script>
+</html>

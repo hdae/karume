@@ -19,6 +19,11 @@ GPU information, model references, dependency versions, and the benchmark bundle
 Keep the tab in the foreground and avoid other GPU workloads during measurement.
 Reload the page to stop a run; stop the server with Ctrl+C.
 
+**u32 identity check**: open **http://localhost:8787/check.html** to run the parallel-vs-subgroup32
+GEMV check (`packages/runtime/tests/helpers/gemv-subgroup-check.ts`) in Chrome. Deno cannot run
+it because it does not provide `subgroups`; the page prints the adapter, features, checkout, and
+`PASS` / `FAIL` with the failing case label. No model files are needed.
+
 Karume uses your existing converted distributions:
 
 - `models/karume-gemma4` for normal E2B
