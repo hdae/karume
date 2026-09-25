@@ -26,3 +26,16 @@
 - Deno / ブラウザ両対応が構造的に成立する（プロトタイプで実証済みの経路）。
 - transport（Range 取得・Cache API・並列度制御）はライブラリ外（examples / 補助面）。
   プロトタイプ決定 0011 の分離を継承する。
+
+## 改訂
+
+- 2026-09-25（現況との照合）: 決定の「使用を許すのは `navigator.gpu` / `performance.now` /
+  `TextDecoder` / `ArrayBuffer` 系のみ」は**閉じた列挙ではなく例示**として読む。判定基準は
+  「Web 標準 API か否か」である。runtime 本体は現在、上の 4 系統に加えて `crypto.subtle.digest`
+  （コンテナの block の sha256 照合 — `src/format/container/descriptor.ts`）・`TextEncoder`
+  （`src/format/container/header.ts` / `json.ts`）・`queueMicrotask`（`src/gpu/context.ts`）を
+  使う。どれも Web 標準で、`Deno.` と `fetch(` は本体に現れない（決定の核は不変）。
+- 同日: 帰結の「transport はライブラリ外（examples / 補助面）」は、monorepo 化で
+  `@karume/hub` パッケージへ移った（ADR [0037](0037-karume-monorepo.md)）。runtime 本体に
+  I/O を持たない点は変わらない。依存規則は「Web 標準 API のみで構成された依存パッケージは可」
+  へ拡張された（ADR [0038](0038-manifest-v1.md) §5 の「依存の扱い」）。
