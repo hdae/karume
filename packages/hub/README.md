@@ -41,8 +41,10 @@ console.log(Object.keys(selection.containers), Object.keys(assets));
 A weight component is a container (`krm`) split into parts. Warm the parts into the cache with
 `prefetchAssets` (progress, cancellation, four downloads at a time), then open the container as a
 `BlockSource` for `@karume/runtime`'s `openContainer`: `openContainerSource` reads byte ranges
-out of the warmed cache and never digests a warm hit, so peak RAM stays at one block (or one part
-where the source can only scan).
+out of the warmed cache and never digests a warm hit. With a source that can seek (a local
+directory, a browser `Blob`) peak RAM stays at one block; with a scan-only source (Deno over
+Hugging Face) the peak grows with the part length and is not bounded by the manifest — see
+[docs/limitations.md](https://github.com/hdae/karume/blob/main/docs/limitations.md).
 
 ```ts
 import { openContainerSource, prefetchAssets, selectionRefs } from "@karume/hub";
