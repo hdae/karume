@@ -486,7 +486,7 @@ def awq_search_scale(
     reference = inputs @ wide.T
     best_alpha = 0.0
     best_error = math.inf
-    best_channel = torch.ones(in_axis, dtype=torch.float64)
+    best_channel = torch.ones(in_axis, dtype=torch.float64, device=rows.device)
     for step in range(AWQ_ALPHA_STEPS + 1):
         alpha = step / AWQ_ALPHA_STEPS
         channel = amax.pow(alpha)
@@ -497,6 +497,16 @@ def awq_search_scale(
         error = float((inputs @ effective.to(torch.float64).T - reference).pow(2).sum())
         if error < best_error:
             best_alpha, best_error, best_channel = alpha, error, channel
+    # MUST: NaN は `<` で常に偽なので、全 α が非有限だと初期値（α=0・error=inf）が黙って
+    # 「最適」として残る。診断を数値に化けさせず、非有限の出所を名指しで落とす。
+    if not math.isfinite(best_error):
+        sources = [
+            name
+            for name, tensor in (("重み", rows), ("act_amax", act_amax), ("入力サンプル", samples))
+            if not bool(torch.isfinite(tensor).all())
+        ]
+        origin = "・".join(sources) if sources else "入力は全て有限 — 途中の計算が溢れた"
+        raise QuantizeError(f"{where}: AWQ の目的関数が全 α で非有限（出所: {origin}）")
     return AwqSearch(alpha=best_alpha, error=best_error, channel_scale=best_channel)
 
 

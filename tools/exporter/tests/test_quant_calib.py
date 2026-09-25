@@ -496,6 +496,22 @@ class TestAwqSearch:
         assert torch.equal(search.channel_scale, torch.ones(32, dtype=torch.float64))
         assert search.channel_scale.device == act_amax.device, "`s` は入力と同じデバイスに出る"
 
+    def test_a_non_finite_weight_fails_loudly_instead_of_reporting_alpha_zero(self):
+        """重みの NaN は α=0 を含む全 α の目的関数を NaN にする — 初期値を黙って採らない。"""
+        rows = weights(6, 32, seed=17)
+        rows[0, 0] = float("nan")
+
+        with pytest.raises(
+            QuantizeError, match=r"blocks\.0\.proj\.weight: .*全 α で非有限（出所: 重み）"
+        ):
+            awq_search_scale(
+                rows,
+                torch.ones(32, dtype=torch.float64),
+                correlated_inputs(64, 32, seed=18),
+                GRID,
+                "blocks.0.proj.weight",
+            )
+
     def test_no_sample_fails_loudly(self):
         with pytest.raises(QuantizeError, match="0 行"):
             awq_search_scale(
