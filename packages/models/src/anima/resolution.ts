@@ -4,8 +4,9 @@
  * ## なぜ受理集合を入口で持つのか
  *
  * 受理できない形をそのまま流すと、落ちるのは資産をロードし終えた後の深い場所（rope 素表の
- * 行数超過 / タイル配置の不成立 / `Dim("S")` の上限）で、診断も「どのノブが悪いのか」を
- * 言わない。入口で**条件を名指しして落とす**のが fail loudly。
+ * 行数超過 / タイル配置の不成立）で、診断も「どのノブが悪いのか」を言わない。`S` の上限
+ * （export 時の `torch.export.Dim("S")`）は IR には残らないので、深い場所でも検査されない。
+ * 入口で**条件を名指しして落とす**のが fail loudly。
  *
  * MUST: ここは**入口の綴り検査**であって、形の正本ではない。latent が patch で割り切れるか
  * （`dit-tokens.ts` の `latentSides`）・rope 素表の行数に収まるか（同 `ropeTables`）・タイルが
@@ -17,8 +18,8 @@
  * ため、跳ねる辺そのものが存在しない。下限 512px を満たせばタイルは必ず組める。
  *
  * MUST: 受理集合を manifest に書かない（ADR 0038 §2「導出元を一意に保つ」）— アーキ定数は
- * パイプライン実装、`S` の上限は dyn グラフの `Dim` 宣言、資産の実在は weights / assets 表。
- * **このモジュールの定数が受理集合の正本**である。
+ * パイプライン実装、`S` の上限は export 時の `torch.export.Dim` 宣言（IR には残らない）、資産の
+ * 実在は weights / assets 表。**このモジュールの定数が受理集合の正本**である。
  */
 
 import { ModelInputError } from "../errors.ts";
@@ -62,7 +63,10 @@ const MAX_LATENT_SIDE = 256;
 /** 各辺の上限（ピクセル）。素表の天井を解像度へ写したもの。 */
 export const MAX_RESOLUTION_SIDE = MAX_LATENT_SIDE * ANIMA_SPATIAL_COMPRESSION;
 
-/** トークン長 `S` の上限（S 形グラフの `Dim("S", max=16384)` — ADR 0034）。 */
+/**
+ * トークン長 `S` の上限（S 形グラフを export したときの `torch.export.Dim("S", max=16384)` —
+ * ADR 0034。IR には残らない）。
+ */
 export const MAX_DIT_TOKENS = 16384;
 
 /** 正方か。 */
@@ -133,7 +137,7 @@ export const assertAcceptableResolution = (size: ImageSize): void => {
   if (tokens > MAX_DIT_TOKENS) {
     throw new Error(
       `解像度 ${label} のトークン長 S=${tokens} が上限 ${MAX_DIT_TOKENS} 超` +
-        '（S 形グラフの Dim("S") の上限 — 各辺の条件とは別に面積で決まる）',
+        '（S 形グラフを export したときの Dim("S") の上限 — 各辺の条件とは別に面積で決まる）',
     );
   }
 };

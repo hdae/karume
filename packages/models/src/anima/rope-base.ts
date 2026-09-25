@@ -1,8 +1,8 @@
 /**
- * `rope_base.safetensors`（軸別 rope 素表）の読み取り。
+ * 容器の資産 `rope_base`（軸別 rope 素表）の読み取り。
  *
- * 素表は IR コンテナではない**素の safetensors**（`transformer` の `extras.rope_base` —
- * ADR 0038 §2）なので `openContainer` では開けない。ファイルの解析は `@karume/runtime` 公開面の
+ * 素表は `transformer` 容器の**資産**（役割 `rope-base` — ADR 0109 決定 4）で、payload の
+ * バイト列は**safetensors 形式**（グラフでも重みでもない）。payload の解析は `@karume/runtime` 公開面の
  * `parseSafetensors`（厳格リーダ — データ節の被覆・整列・dtype はそちらで検査済み）に委ね、
  * この層は「F32・rank2 の表を軸ごとに引き、行数を突き合わせる」用途特化の検査だけを持つ
  * （DECIDED: 二重実装の解消として runtime 公開面へ載せた — ADR 0008 追記 2026-08-05）。
@@ -62,7 +62,7 @@ const tableOf = (file: SafetensorsFile, name: string): RawTable => {
 };
 
 /**
- * `rope_base.safetensors` を読む。
+ * 資産 `rope_base` の payload（safetensors 形式）を読む。
  *
  * MUST: 行数が全軸で揃っていることを見る。揃っていないと「h の行を w の表から読む」形の
  * 取り違えが範囲内に収まって黙って通る。
