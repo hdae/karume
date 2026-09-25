@@ -1,8 +1,10 @@
 # 0071: manifest `karume/3` — dtype エントリの shard 欄
 
-- Status: accepted（2026-08-20 — ユーザー裁定「karume/3 へ format bump + shards 単一形」。
-  release 波の R1 のうち **HF 公開前締切ぶんの先行実施**〈同日のユーザー裁定 — release 節
-  「後回し（2026-08-19）」の部分変更〉）
+- Status: superseded by [0109](0109-manifest-v5-container.md)（2026-09-22 — dtype エントリは
+  `{ container }`・`shards` / `extras` は退役。決定 3〈dtype ラベルは開語彙の選択子〉は 0109 の
+  前提として存続）。当初は accepted（2026-08-20 — ユーザー裁定「karume/3 へ format bump +
+  shards 単一形」。release 波の R1 のうち **HF 公開前締切ぶんの先行実施**〈同日のユーザー裁定 —
+  release 節「後回し（2026-08-19）」の部分変更〉）
 - Date: 2026-08-20
 - 関連: ADR [0041](0041-manifest-v2.md)（manifest v2 — 本 ADR が format を上書き）/
   [0070](0070-shard-loading-admission.md)（shard ローダ契約の正本 — 決定 1 が本欄を予約）/
@@ -129,3 +131,4 @@ anima の文面（分割の有無に依らず正しい 1 本）が雛形。
 >
 > **履行（2026-09-24）**: recipe 側の文面是正は `fd7c805b` で済んだ（8 系列のカード概要と anima の NOTICE
 > 改変告知を krm の part 列の説明へ揃えた）。公開物へは release の波の焼き直しと再アップロードで乗る。
+> 同日に 0.13.0 の再アップロードと pin 更新まで完了し、公開物にも乗った（`f16b8998`）。
