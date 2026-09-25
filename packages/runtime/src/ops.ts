@@ -98,6 +98,7 @@ export type {
 export {
   arityFits,
   assertArity,
+  assertAttrKeys,
   assertDtype,
   assertNodeContract,
   assertSlotDtype,

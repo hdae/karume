@@ -848,34 +848,56 @@ export const assertNodeContract = (node: IrNode, where: string): OpContract => {
       `${where}: op '${node.op}' の出力数が ${node.outs.length}（契約は ${outputCountOf(found)}）`,
     );
   }
-  const optional = found.optionalAttrs;
-  const unknown = Object.keys(node.attrs).filter((key) =>
-    !Object.hasOwn(found.attrs, key) && (optional === undefined || !Object.hasOwn(optional, key))
-  );
-  if (unknown.length > 0) {
-    throw new OpContractError(
-      `${where}: op '${node.op}' の契約外 attrs [${unknown.sort().join(", ")}]`,
-    );
-  }
+  assertAttrKeys(found, node.attrs, stateKeys.length > 0, where);
   for (const key of attrKeysOf(found)) {
     if (!Object.hasOwn(node.attrs, key)) {
       throw new OpContractError(`${where}: op '${node.op}' の必須 attr '${key}' が無い`);
     }
     found.attrs[key](node.attrs[key], `${where} の attrs.${key}`);
   }
+  const optional = found.optionalAttrs;
   if (optional !== undefined) {
     for (const key of Object.keys(optional)) {
       if (!Object.hasOwn(node.attrs, key)) continue;
-      // MUST: 省略可能 attrs は states 形専用（{@link ContractBase.optionalAttrs}）。
-      if (stateKeys.length === 0) {
-        throw new OpContractError(
-          `${where}: op '${node.op}' の attrs.${key} は states 欄を持つノードでのみ宣言できる`,
-        );
-      }
       optional[key](node.attrs[key], `${where} の attrs.${key}`);
     }
   }
   return found;
+};
+
+/**
+ * attrs の**キー集合**が契約に適合するか — 契約外キーの拒否と、省略可能キーは states 形専用
+ * （{@link ContractBase.optionalAttrs}）の 2 点。値域と必須キーの存在は見ない。
+ *
+ * ノードの契約検査（{@link assertNodeContract}）と CPU 参照の入口（`reference/ops.ts` の
+ * `applyReferenceOpOutputs` — states を持たない）が共有する 1 本。参照側に同じ照合が無いと、
+ * 契約が拒否する attrs（例: states 欄の無い attention の `window`）を参照だけが黙って無視して
+ * 値を返し、オラクルが契約違反を値にする。
+ *
+ * MUST: 照合は `Object.hasOwn` のみ（{@link assertNodeContract} と同じ理由）。
+ */
+export const assertAttrKeys = (
+  found: OpContract,
+  attrs: Readonly<Record<string, unknown>>,
+  hasStates: boolean,
+  where: string,
+): void => {
+  const optional = found.optionalAttrs;
+  const unknown = Object.keys(attrs).filter((key) =>
+    !Object.hasOwn(found.attrs, key) && (optional === undefined || !Object.hasOwn(optional, key))
+  );
+  if (unknown.length > 0) {
+    throw new OpContractError(
+      `${where}: op '${found.name}' の契約外 attrs [${unknown.sort().join(", ")}]`,
+    );
+  }
+  if (optional === undefined || hasStates) return;
+  for (const key of Object.keys(optional)) {
+    if (!Object.hasOwn(attrs, key)) continue;
+    throw new OpContractError(
+      `${where}: op '${found.name}' の attrs.${key} は states 欄を持つノードでのみ宣言できる`,
+    );
+  }
 };
 
 /**

@@ -17,6 +17,7 @@ import type { IrDtype } from "../format/ir.ts";
 import {
   ARGMAX_OP,
   arityFits,
+  assertAttrKeys,
   assertDtype,
   assertSlotDtype,
   attentionScale,
@@ -1609,6 +1610,10 @@ export const applyReferenceOpOutputs = (
       `op '${op}' の入力数が ${inputs.length}（契約は ${describeArity(contract)}）`,
     );
   }
+  // MUST: attrs のキー集合はノードの契約検査と同じ 1 本で照合する（states は常に空 — 参照は states 形を
+  // 持たない）。照合しないと、契約が拒否する attrs（states 欄の無い attention の `window` 等）を
+  // 参照だけが黙って無視し、契約違反を値にする。
+  assertAttrKeys(contract, attrs, false, "reference");
   const declared = (): readonly number[] => {
     if (outShape === undefined) {
       throw new ReferenceOpError(`op '${op}' は出力 shape が目標形（outShape が要る）`);

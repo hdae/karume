@@ -859,6 +859,28 @@ Deno.test("attention は scale を q と k の両方へ掛け、safe-softmax で
   );
 });
 
+Deno.test("統一入口は契約が拒否する attrs のキーを値にせず落とす（ノードの契約検査と同じ照合）", () => {
+  const q = t([1, 1, 1, 2], [1, 0]);
+  const key = t([1, 1, 2, 2], [1, 0, 0, 1]);
+  const value = t([1, 1, 2, 2], [10, 20, 30, 40]);
+  // window は states 形専用。照合が無いと窓を黙って無視し、全 context の値を返す。
+  assertThrows(
+    () => applyReferenceOp("attention", [q, key, value], { scale: 0.5, window: 2 }),
+    OpContractError,
+    "attrs.window は states 欄を持つノードでのみ宣言できる",
+  );
+  assertThrows(
+    () =>
+      applyReferenceOp(
+        "conv1d",
+        [t([1, 1, 4], [1, 2, 3, 4]), t([1, 1, 3], [1, 1, 1]), t([1], [0])],
+        { ...CONV, extra: 1 },
+      ),
+    OpContractError,
+    "契約外 attrs [extra]",
+  );
+});
+
 Deno.test("embedding は行を引き直し、範囲外添字を拒否する", () => {
   const weight = t([3, 2], [1, 2, 3, 4, 5, 6]);
   const out = referenceEmbedding(weight, i32([2, 2], [2, 0, 1, 2]));
