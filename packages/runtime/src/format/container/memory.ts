@@ -40,7 +40,10 @@ import type { IrDeclaration } from "../ir.ts";
  */
 export type MemoryEncoding = {
   readonly codec: CodecName;
-  /** 量子化 codec のみ・省略時 0。 */
+  /**
+   * 量子化 codec のみ・省略時 0。1 を書けるのは `int8-sym` だけ（`int4-sym-g` / `int2-off` /
+   * `ternary` は 0 だけ — 合流層が落とす）。
+   */
   readonly rowAxis?: 0 | 1;
   /** 量子化 codec のみ・per-channel なら行長。 */
   readonly groupSize?: number;
@@ -201,7 +204,7 @@ export const openMemoryContainer = (input: MemoryContainerInput): BoundContainer
     return wholePart;
   };
   for (const [graphName, declaration] of Object.entries(input.graphs)) {
-    const supplied = input.tensors[graphName] ?? {};
+    const supplied = Object.hasOwn(input.tensors, graphName) ? input.tensors[graphName] : {};
     // 突合集合は「shared でない initializer」— shared はバイトを持たない宣言（貸し手の重みを
     // 借りる）なので、供給されたら余剰として落ちる。
     const expected = Object.entries(declaration.initializers)

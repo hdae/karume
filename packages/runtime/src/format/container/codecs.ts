@@ -13,6 +13,8 @@
  * 追加は 0 行 — 決定 13）。
  */
 
+import { compareCodePoints } from "./json.ts";
+
 /** 台帳の登録名。 */
 export type CodecName =
   | "f32"
@@ -51,6 +53,14 @@ export type CodecEntry = {
   readonly grouping: "channel" | "group" | undefined;
   /** 初版は 4 種とも zeroPoint を持てない（§6.3）。 */
   readonly zeroPoint: "allowed" | "forbidden";
+  /**
+   * 宣言してよい `rowAxis`（§6.1 / §6.3 の表）。行の軸 1 を読めるのは per-channel i8 だけで
+   * （`conv_transpose1d`）、group codec と i2 経路は展開（`decodeI4` / `decodeI2` と WGSL）が軸 0
+   * 固定。非量子化は `rowAxis` を書けないので空。
+   * MUST: 合流層はこの集合の外を拒否する — 展開は宣言の軸を受け取らないので、`[N,N]` のように
+   * 両軸の長さが一致する形では scale 形の突合が通り、別の軸で黙って展開される。
+   */
+  readonly rowAxes: readonly (0 | 1)[];
 };
 
 /** scale の dtype の受理集合（初版は f32 のみ — §6.1）。 */
@@ -66,6 +76,7 @@ const RAW = (layout: CodecLayout, blockBytes: number): CodecEntry => ({
   scale: "forbidden",
   grouping: undefined,
   zeroPoint: "forbidden",
+  rowAxes: [],
 });
 
 /**
@@ -87,6 +98,7 @@ export const CODEC_LEDGER: ReadonlyMap<CodecName, CodecEntry> = new Map<CodecNam
     scale: "required",
     grouping: "channel",
     zeroPoint: "forbidden",
+    rowAxes: [0, 1],
   }],
   ["int4-sym-g", {
     layout: "i4",
@@ -94,6 +106,7 @@ export const CODEC_LEDGER: ReadonlyMap<CodecName, CodecEntry> = new Map<CodecNam
     scale: "required",
     grouping: "group",
     zeroPoint: "forbidden",
+    rowAxes: [0],
   }],
   ["int2-off", {
     layout: "i2",
@@ -101,6 +114,7 @@ export const CODEC_LEDGER: ReadonlyMap<CodecName, CodecEntry> = new Map<CodecNam
     scale: "required",
     grouping: "channel",
     zeroPoint: "forbidden",
+    rowAxes: [0],
   }],
   ["ternary", {
     layout: "i2",
@@ -108,6 +122,7 @@ export const CODEC_LEDGER: ReadonlyMap<CodecName, CodecEntry> = new Map<CodecNam
     scale: "required",
     grouping: "channel",
     zeroPoint: "forbidden",
+    rowAxes: [0],
   }],
 ]);
 
@@ -125,7 +140,7 @@ export const codecEntry = (codec: CodecName): CodecEntry => {
 };
 
 /** 台帳の登録名を code point 順に並べたもの（診断用）。 */
-export const CODEC_NAMES: readonly CodecName[] = [...CODEC_LEDGER.keys()].sort();
+export const CODEC_NAMES: readonly CodecName[] = [...CODEC_LEDGER.keys()].sort(compareCodePoints);
 
 /**
  * per-channel codec の `groupSize`（= 行長）。要素数 0 の退化形（`in_features = 0` など）は行長 0 で、

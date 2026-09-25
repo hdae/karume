@@ -275,6 +275,44 @@ describe("openMemoryContainer: 合流層へ委ねた検査", () => {
     );
   });
 
+  it("piece 列の末尾が宣言 shape の先頭次元を超えれば落ちる", () => {
+    // 末尾の一致を `<` へ緩めると、宣言より長い供給が黙って通る。
+    assertThrows(
+      () =>
+        openWith(quantizedDeclaration(), {
+          q: quantizedPieces([[0, 2], [2, ROWS + 1]]),
+          b: biasTensor(),
+        }),
+      ContainerFormatError,
+      "末尾 5 行が宣言 shape の先頭次元 4 行に届かない / 超える",
+    );
+  });
+
+  it("piece の行範囲が空区間なら落ちる", () => {
+    // [2,2) は連続性（開始 = 直前の終端）と末尾の一致をどちらも満たすので、空区間の門だけが掴む。
+    assertThrows(
+      () =>
+        openWith(quantizedDeclaration(), {
+          q: quantizedPieces([[0, 2], [2, 2], [2, ROWS]]),
+          b: biasTensor(),
+        }),
+      ContainerFormatError,
+      "piece[1]: 行範囲 [2, 2) が空区間",
+    );
+  });
+
+  it("piece の行範囲の開始が負なら非負の門で落ちる", () => {
+    assertThrows(
+      () =>
+        openWith(quantizedDeclaration(), {
+          q: quantizedPieces([[-1, 2], [2, ROWS]]),
+          b: biasTensor(),
+        }),
+      ContainerFormatError,
+      "piece[0]: 行範囲の 開始 -1 が非負の安全整数でない",
+    );
+  });
+
   it("piece の行範囲が整数でなければ落ちる", () => {
     // 小数の行境界は被覆検査（空区間・連続性・末尾）をどれも素通りしたうえで、GPU 構築の
     // byteOffset を 4 の倍数でない位置にする。
@@ -342,6 +380,127 @@ describe("openMemoryContainer: 合流層へ委ねた検査", () => {
       ContainerFormatError,
       "codec 'f32' は scale / groupSize / rowAxis を持てない",
     );
+  });
+});
+
+// --- codec 別の rowAxis ------------------------------------------------------
+// 展開（`decodeI4` / `decodeI2` と WGSL）は宣言の軸を受け取らず軸 0 固定なので、両軸の長さが
+// 等しい `[N,N]` では scale 形の突合が通ってしまう。宣言の軸を見るのは合流層だけ。
+
+/** `q`（f32 意味論）を 1 本の op で消費するグラフ。rank 2 は linear・rank 3 は conv_transpose1d。 */
+const weightDeclaration = (shape: readonly number[]): DeclarationJson => {
+  const common = {
+    format: "karume-ir",
+    version: 2,
+    symbols: [],
+    outputs: ["y"],
+    initializers: { q: {}, b: {} },
+  };
+  if (shape.length === 2) {
+    const [rows, width] = shape;
+    return {
+      ...common,
+      requires: { ops: ["linear"] },
+      inputs: [{ name: "x", dtype: "f32", shape: [2, width] }],
+      values: {
+        q: { dtype: "f32", shape: [...shape] },
+        b: { dtype: "f32", shape: [rows] },
+        y: { dtype: "f32", shape: [2, rows] },
+      },
+      nodes: [{ op: "linear", ins: ["x", "q", "b"], outs: ["y"], attrs: {} }],
+    };
+  }
+  const [channelsIn, channelsOut, kernel] = shape;
+  const length = 5;
+  return {
+    ...common,
+    requires: { ops: ["conv_transpose1d"] },
+    inputs: [{ name: "x", dtype: "f32", shape: [1, channelsIn, length] }],
+    values: {
+      q: { dtype: "f32", shape: [...shape] },
+      b: { dtype: "f32", shape: [channelsOut] },
+      y: { dtype: "f32", shape: [1, channelsOut, length - 1 + kernel] },
+    },
+    nodes: [{
+      op: "conv_transpose1d",
+      ins: ["x", "q", "b"],
+      outs: ["y"],
+      attrs: { stride: 1, padding: 0 },
+    }],
+  };
+};
+
+/** `rowAxis: 1` の量子化 `q` と f32 の bias（中身は見ないので 0 埋め）。 */
+const rowAxisOneSupply = (input: {
+  readonly codec: "int8-sym" | "int4-sym-g" | "int2-off";
+  readonly payloadBytes: number;
+  readonly groupSize: number;
+  readonly scaleElements: number;
+  readonly biasElements: number;
+}): Record<string, MemoryTensor> => ({
+  q: {
+    bytes: new Uint8Array(input.payloadBytes),
+    encoding: {
+      codec: input.codec,
+      rowAxis: 1,
+      groupSize: input.groupSize,
+      scale: new Uint8Array(input.scaleElements * 4),
+    },
+  },
+  b: { bytes: new Uint8Array(input.biasElements * 4), encoding: { codec: "f32" } },
+});
+
+describe("openMemoryContainer: codec 別の rowAxis（合流層）", () => {
+  it("int4-sym-g の rowAxis 1 は、両軸の長さが等しい形でも落ちる", () => {
+    // [32,32]・group 16: 軸 0 と読んでも軸 1 と読んでも scale は [32,2] で、形の突合は区別しない。
+    assertThrows(
+      () =>
+        openWith(
+          weightDeclaration([32, 32]),
+          rowAxisOneSupply({
+            codec: "int4-sym-g",
+            payloadBytes: (32 * 32) / 2,
+            groupSize: 16,
+            scaleElements: 32 * 2,
+            biasElements: 32,
+          }),
+        ),
+      ContainerFormatError,
+      "codec 'int4-sym-g' の rowAxis は 0 だけ（宣言は 1",
+    );
+  });
+
+  it("int2-off の rowAxis 1 は、展開の時点でなく合流層で落ちる", () => {
+    assertThrows(
+      () =>
+        openWith(
+          weightDeclaration([16, 16]),
+          rowAxisOneSupply({
+            codec: "int2-off",
+            payloadBytes: (16 * 16) / 4,
+            groupSize: 16,
+            scaleElements: 16,
+            biasElements: 16,
+          }),
+        ),
+      ContainerFormatError,
+      "codec 'int2-off' の rowAxis は 0 だけ（宣言は 1",
+    );
+  });
+
+  it("int8-sym の rowAxis 1（conv_transpose1d 形）は受理する", () => {
+    // [Cin=4, Cout=8, K=3] の行は軸 1（8 行・行長 12）。
+    const opened = openWith(
+      weightDeclaration([4, 8, 3]),
+      rowAxisOneSupply({
+        codec: "int8-sym",
+        payloadBytes: 4 * 8 * 3,
+        groupSize: 12,
+        scaleElements: 8,
+        biasElements: 8,
+      }),
+    );
+    assertEquals(opened.graphs[GRAPH_NAME].supplies.get("q")?.encoding.rowAxis, 1);
   });
 });
 

@@ -5,10 +5,12 @@
 
 import { assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
+import { bindDeclarations } from "../src/format/container/bind.ts";
 import {
   parseGraphDescriptor,
   parseModelDescriptor,
   sha256Hex,
+  validateAgainstGraph,
 } from "../src/format/container/descriptor.ts";
 import {
   ContainerFormatError,
@@ -27,6 +29,7 @@ import {
   type ModelInput,
   writeGraphContainer,
   writeModelContainer,
+  type WrittenContainer,
 } from "./helpers/container-write.ts";
 
 // ---------------------------------------------------------------------------
@@ -196,6 +199,34 @@ const rejectsModel = (
 
 // deno-lint-ignore no-explicit-any
 const anyOf = (value: unknown): any => value;
+
+/**
+ * 書き手が焼いた正しい `krm` の model 記述だけを書き換え、part 0 を組み直して読み手へ通す。
+ * 書き手の検査を経ずに読み手（目次 → 合流層）の規則を撃つための経路。
+ */
+const openWithModelDescriptor = async (
+  written: WrittenContainer,
+  mutate: (doc: Record<string, unknown>) => void,
+): Promise<void> => {
+  const parts = [...written.parts];
+  const modelBytes = mutateJson(written.modelDescriptorBytes, mutate);
+  const header = writeHeader({
+    kind: "model",
+    version: 1,
+    graphDescriptorLength: written.graphDescriptorBytes.byteLength,
+    modelDescriptorLength: modelBytes.byteLength,
+  });
+  const part0 = new Uint8Array(
+    new ArrayBuffer(
+      HEADER_BYTES + written.graphDescriptorBytes.byteLength + modelBytes.byteLength,
+    ),
+  );
+  part0.set(header, 0);
+  part0.set(written.graphDescriptorBytes, HEADER_BYTES);
+  part0.set(modelBytes, HEADER_BYTES + written.graphDescriptorBytes.byteLength);
+  parts[0] = part0;
+  await openContainer({ kind: "parts", parts });
+};
 
 // ---------------------------------------------------------------------------
 // ヘッダ
@@ -523,6 +554,39 @@ describe("container round trip", () => {
     assertThrows(() => graphOnly.asset("ple_table"), ContainerFormatError, "未宣言の資産");
   });
 
+  it("資産の読み口は区間が安全整数でなければ落ち、検証済みの取得元が短く返しても落ちる", async () => {
+    const written = await writeModelContainer(syntheticModel(), OPTIONS);
+    const parts = written.parts.map((part) => part.slice());
+    // 開く（ヘッダ・descriptor の読み）までは正しく返し、開いた後の取得だけを短くする。
+    let shortBy = 0;
+    const sourceOf = (verified: boolean): BlockSource => ({
+      partCount: parts.length,
+      verified,
+      partLength: (index) => parts[index].byteLength,
+      read: (part, offset, length) =>
+        Promise.resolve(parts[part].subarray(offset, offset + length - shortBy)),
+    });
+
+    // NaN は範囲比較を全て素通りし、未検証の取得元では subarray が黙って 0 バイトを返していた。
+    for (const verified of [true, false]) {
+      const reader = (await openContainer({ kind: "source", source: sourceOf(verified) })).asset(
+        "ple_table",
+      );
+      await assertRejects(() => reader.read(Number.NaN, 4), ContainerFormatError, "安全整数でない");
+      await assertRejects(() => reader.read(1.5, 4), ContainerFormatError, "安全整数でない");
+      await assertRejects(() => reader.read(0, Number.NaN), ContainerFormatError, "安全整数でない");
+    }
+
+    // 検証済みの取得元は block 全体を読まない経路なので、戻りの長さを要求と突き合わせる。
+    const short = await openContainer({ kind: "source", source: sourceOf(true) });
+    shortBy = 1;
+    await assertRejects(
+      () => short.asset("ple_table").read(16, 8),
+      ContainerFormatError,
+      "取得長 7 が要求 8 と違う",
+    );
+  });
+
   it("分割形の part 本数と長さは宣言と一致しなければならない", async () => {
     const written = await writeModelContainer(syntheticModel(), OPTIONS);
     await assertRejects(
@@ -688,26 +752,8 @@ describe("container descriptor", () => {
 
   it("束縛表のキー集合は shared でも const でもない initializer の集合と完全一致する（規則⑤）", async () => {
     const written = await writeModelContainer(syntheticModel(), OPTIONS);
-    const withBinding = async (mutate: (doc: Record<string, unknown>) => void): Promise<void> => {
-      const parts = [...written.parts];
-      const modelBytes = mutateJson(written.modelDescriptorBytes, mutate);
-      const header = writeHeader({
-        kind: "model",
-        version: 1,
-        graphDescriptorLength: written.graphDescriptorBytes.byteLength,
-        modelDescriptorLength: modelBytes.byteLength,
-      });
-      const part0 = new Uint8Array(
-        new ArrayBuffer(
-          HEADER_BYTES + written.graphDescriptorBytes.byteLength + modelBytes.byteLength,
-        ),
-      );
-      part0.set(header, 0);
-      part0.set(written.graphDescriptorBytes, HEADER_BYTES);
-      part0.set(modelBytes, HEADER_BYTES + written.graphDescriptorBytes.byteLength);
-      parts[0] = part0;
-      await openContainer({ kind: "parts", parts });
-    };
+    const withBinding = (mutate: (doc: Record<string, unknown>) => void): Promise<void> =>
+      openWithModelDescriptor(written, mutate);
     await assertRejects(
       () =>
         withBinding((doc) => {
@@ -721,23 +767,41 @@ describe("container descriptor", () => {
     );
   });
 
+  it("テスト用の書き手の門: payload 長が宣言 shape と合わない入力は書く前に落とす", async () => {
+    const base = syntheticModel();
+    await assertRejects(
+      () =>
+        writeModelContainer({
+          ...base,
+          weights: base.weights.map((
+            w,
+          ) => (w.initializer === "enc.weight" ? { ...w, bytes: bytesOf(16 * 32 * 2 + 2, 1) } : w)),
+        }, OPTIONS),
+      ContainerFormatError,
+      "宣言から決まる",
+    );
+  });
+
   it("合流層: payload 長・piece の被覆・rowAxis と piece・group の刻み・scale 長を宣言 shape と突き合わせる", async () => {
     const base = syntheticModel();
     const rewrite = async (mutate: (input: ModelInput) => ModelInput): Promise<unknown> => {
       const written = await writeModelContainer(mutate(base), OPTIONS);
       return openContainer({ kind: "parts", parts: written.parts });
     };
-    // payload 長が宣言 shape と合わない → 書き手が先に落とす（宣言から決まる値の突合）。
+    // block 長が宣言 shape の payload 長と合わない krm（書き手の門を経ない改ざん）を読み手が落とす。
+    // front.bias（f16 [65] = 130 B・block 132 B）と conv.weight（int8 [4,3,8] = 96 B）の block を
+    // 入れ替える — 二重束縛（規則①）を避け、どちらも part 3 なので scale の同一 part（規則③）も
+    // 崩さない。グラフは宣言順（front → voice）に合流するので front.bias が先に撃たれる。
+    const written = await writeModelContainer(base, OPTIONS);
     await assertRejects(
       () =>
-        rewrite((input) => ({
-          ...input,
-          weights: input.weights.map((
-            w,
-          ) => (w.initializer === "enc.weight" ? { ...w, bytes: bytesOf(16 * 32 * 2 + 2, 1) } : w)),
-        })),
+        openWithModelDescriptor(written, (doc) => {
+          const bias = anyOf(doc).binding.front["front.bias"];
+          const conv = anyOf(doc).binding.voice["conv.weight"];
+          [bias.block, conv.block] = [conv.block, bias.block];
+        }),
       ContainerFormatError,
-      "宣言から決まる",
+      "initializer 'front.bias': block 'w0009' の長さ 96 が payload 130 バイト + 詰め物",
     );
     // rowAxis 1 の initializer を piece 分割させる（block 上限を 1 行分より小さく）。
     await assertRejects(
@@ -815,5 +879,98 @@ describe("container descriptor", () => {
       ContainerFormatError,
       "組めない",
     );
+  });
+
+  it("合流層: rowAxis 1 は int8-sym だけ — 両軸の長さが等しい i4 の形でも openContainer で落ちる", async () => {
+    // [32,32]・group 16 は軸 0 と読んでも軸 1 と読んでも scale が [32,2] で、長さの突合は区別しない。
+    const written = await writeModelContainer({
+      graphs: { g: declaration({ "square.weight": { shape: [32, 32] } }) },
+      consts: [],
+      weights: [{
+        graph: "g",
+        initializer: "square.weight",
+        bytes: bytesOf(32 * 32 / 2, 41),
+        encoding: {
+          codec: "int4-sym-g",
+          rowAxis: 1,
+          groupSize: 16,
+          scale: { bytes: bytesOf(32 * 2 * F32, 42), dtype: "f32" },
+        },
+      }],
+      assets: [],
+      provenance: { license: "apache-2.0", writer: "test" },
+    }, OPTIONS);
+    await assertRejects(
+      () => openContainer({ kind: "parts", parts: written.parts }),
+      ContainerFormatError,
+      "codec 'int4-sym-g' の rowAxis は 0 だけ（宣言は 1",
+    );
+    // 対照: 同じ容器の i8 conv_transpose1d 形（rowAxis 1）は受理される。
+    const opened = await openContainer({
+      kind: "parts",
+      parts: (await writeModelContainer(syntheticModel(), OPTIONS)).parts,
+    });
+    assertEquals(opened.graphs["voice"].supplies.get("conv.weight")?.encoding.rowAxis, 1);
+  });
+
+  it("Object.prototype の名前（constructor / toString）を宣言の外から引き当てない", async () => {
+    // IR の器は null プロトタイプなので initializer 名 toString は正当に宣言できる。素の {} を
+    // 名前で引くと Object.prototype の関数が「在る」ことになり、不足の列挙漏れや TypeError に化ける。
+    const input: ModelInput = {
+      graphs: { g: declaration({ "toString": { shape: [4, 4] }, "a": { shape: [4, 4] } }) },
+      consts: [],
+      weights: ["toString", "a"].map((initializer, i) => ({
+        graph: "g",
+        initializer,
+        bytes: bytesOf(16 * F32, 51 + i),
+        encoding: { codec: "f32" },
+      })),
+      assets: [{ name: "style_vectors", role: "style-vectors", bytes: bytesOf(64, 53) }],
+      provenance: { license: "apache-2.0", writer: "test" },
+    };
+    const written = await writeModelContainer(input, OPTIONS);
+    const graph = parseGraphDescriptor(written.graphDescriptorBytes);
+
+    // 束縛表から toString を外す（block は別名へ付け替えて参照を保つ）→ 不足として列挙される。
+    const moved = parseModelDescriptor(mutateJson(written.modelDescriptorBytes, (doc) => {
+      const supplies = anyOf(doc).binding.g;
+      supplies["ghost"] = supplies["toString"];
+      delete supplies["toString"];
+    }));
+    assertThrows(
+      () => validateAgainstGraph(moved, graph),
+      ContainerFormatError,
+      "不足 [toString] / 余剰 [ghost]",
+    );
+
+    // 合流層も束縛表の toString を Object.prototype の関数と取り違えない。
+    assertThrows(
+      () =>
+        bindDeclarations({
+          graphs: { g: input.graphs["g"] },
+          constants: [],
+          binding: { g: {} },
+          locate: () => {
+            throw new Error("block を引く前に落ちるはず");
+          },
+        }),
+      ContainerFormatError,
+      "束縛表に供給が無い",
+    );
+
+    // const 束縛のグラフ名 constructor は未宣言のグラフ。
+    const withConst = await writeModelContainer(syntheticModel(), OPTIONS);
+    assertThrows(
+      () =>
+        parseGraphDescriptor(mutateJson(withConst.graphDescriptorBytes, (doc) => {
+          anyOf(doc).const.constants[0].graph = "constructor";
+        })),
+      ContainerFormatError,
+      "未宣言のグラフ 'constructor'",
+    );
+
+    // 資産名 constructor は未宣言の資産。
+    const opened = await openContainer({ kind: "parts", parts: written.parts });
+    assertThrows(() => opened.asset("constructor"), ContainerFormatError, "未宣言の資産");
   });
 });

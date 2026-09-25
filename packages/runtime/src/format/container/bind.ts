@@ -9,6 +9,7 @@
  * - payload 長 = 宣言 shape と packing から決まる値。block 長との差は詰め物（0 以上 4 未満）だけ
  * - piece 列は先頭次元の行範囲を隙間なく被覆し、末尾 = shape[0]。中間 piece に詰め物は無い
  * - `rowAxis != 0` の initializer は piece 分割不可（scale の行範囲が piece の行範囲に対応しない）
+ * - `rowAxis` は codec 台帳の `rowAxes` の中だけ（軸 1 は per-channel i8 のみ — 展開は軸 0 固定）
  * - group の刻み: per-channel codec は `groupSize` = 行長、group codec は 2 冪 ≥ 16 で行長を割る
  * - scale block の長さ = `shape[rowAxis] · (行長 / groupSize) · 4`（+ 詰め物）
  * - i2 経路（`int2-off` / `ternary`）の宣言 shape は正の rank 2 で行長は 16 の倍数
@@ -289,6 +290,13 @@ const planSupply = (
   // 量子化: rowAxis / groupSize / scale は parseEncoding が存在を保証済み。
   const rowAxis = encoding.rowAxis ?? 0;
   const groupSize = encoding.groupSize ?? 0;
+  if (!entry.rowAxes.some((axis) => axis === rowAxis)) {
+    fail(
+      `${where}: codec '${encoding.codec}' の rowAxis は ${
+        entry.rowAxes.join(" / ")
+      } だけ（宣言は ${rowAxis} — container-v1 §6.3）`,
+    );
+  }
   if (shape.length === 0 || (rowAxis === 1 && shape.length < 2)) {
     fail(`${where}: rowAxis ${rowAxis} に対して宣言 shape [${shape.join(",")}] の rank が足りない`);
   }
@@ -429,7 +437,12 @@ export const bindDeclarations = (input: {
         );
         continue;
       }
-      const supply = binding?.[graphName]?.[name];
+      const graphBinding = binding !== undefined && Object.hasOwn(binding, graphName)
+        ? binding[graphName]
+        : undefined;
+      const supply = graphBinding !== undefined && Object.hasOwn(graphBinding, name)
+        ? graphBinding[name]
+        : undefined;
       if (supply === undefined) {
         // krg（束縛表を持たない）で const 以外の initializer は「重みが要る」宣言 — 供給計画は無い。
         if (binding === undefined) continue;
