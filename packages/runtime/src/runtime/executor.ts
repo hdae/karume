@@ -994,12 +994,15 @@ export class Session {
     if (read !== undefined) {
       // MUST: 決着まで同じ Session の後続 enqueue を拒む（読む slot の上書きを塞ぐ）。解除は
       // 区間の決着（成否によらず release）— リースの finalizer と同じ時点。
+      // MUST: 解除は席が自分の区間のときだけ。無条件に消すと、正しさが「この finalizer が次の
+      // 区間の enqueueRead より先に走る」という microtask の段数だけに依り、`#resolveFinish` の
+      // finalizer より前に await が 1 つ入ると次の区間の席を消して門が外れる。
       this.#readBatch = scope;
       batch.onSettled({
         complete: () => undefined,
         fail: () => undefined,
         release: () => {
-          this.#readBatch = undefined;
+          if (this.#readBatch === scope) this.#readBatch = undefined;
         },
       });
     }
