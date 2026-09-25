@@ -17,6 +17,7 @@ import type { AssetProgress } from "@karume/hub";
 import { acquireGpu } from "@karume/runtime";
 import { loadContainerComponents } from "../src/hub/components.ts";
 import { Siglip2Pipeline } from "../src/siglip2/pipeline.ts";
+import { LINEAR_PROBE_Y, runLinearProbe } from "./helpers/container-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import {
   HUB_URL,
@@ -79,10 +80,12 @@ Deno.test({
 
     const gpu = await acquireGpu();
     try {
-      // 2 本目が張れるのは、block を**呼ぶたびに**読み直しているとき（1 度読んだら終わりの
-      // 列にすると 2 本目が空を受けて「重みが足りない」で落ちる）。
+      // 2 本目が正しい出力を返すのは、block を**呼ぶたびに**読み直しているとき。Session 構築は
+      // 宣言した initializer の全到着を突き合わせないので、1 度読んだら終わりの列にすると
+      // 2 本目は空の block 列を受けたまま張れてしまう — 張れたことではなく run の出力で見る。
       for (let index = 0; index < 2; index += 1) {
         const session = await open("dit").createSession(gpu);
+        assertEquals(await runLinearProbe(session), LINEAR_PROBE_Y, `Session ${index + 1} 本目`);
         await session.dispose();
       }
     } finally {

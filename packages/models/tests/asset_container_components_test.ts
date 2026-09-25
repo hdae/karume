@@ -8,6 +8,8 @@
  * ④ **単一形キーと `[i]` の混在は fail loudly**（どちらを正とするかは決められない）。
  * ⑤ **部品の容器がまったく無い形は、2 形の綴りを添えて落ちる**（綴り間違いが「資産が無い」の
  *    遠い診断に化けない）。
+ * ⑥ **重みの part が欠けた列は受け口で落ちる**（黙って部分 Session を返さない）。落とすのは容器の
+ *    読み手（宣言された part 数との突き合わせ）で、GPU は要らない。
  *
  * ③④⑤ の診断は `part` の語と**揃っているキーの列挙**を含むこと（既存の資産診断の流儀）まで
  * 見る — 落ちること自体はキーの作り方が壊れている印で、読み手が現物を突き合わせられる形で
@@ -18,6 +20,7 @@
  */
 
 import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
+import { ContainerFormatError } from "@karume/runtime";
 import { openerOf, part, parts, single } from "./helpers/asset-container-fixture.ts";
 
 Deno.test("assetComponentOpener: 添字の欠番は part を名乗って落ちる", async () => {
@@ -77,4 +80,13 @@ Deno.test("assetComponentOpener: キーがどちらの形でも無ければ 2 �
   );
   assertStringIncludes(error.message, "部品 'vae' の容器が無い");
   assertStringIncludes(error.message, "分割形なら 'vae[0]' から添字順");
+});
+
+Deno.test("assetComponentOpener: 重みの part が欠けた列は part 数と宣言の食い違いを名乗って落ちる", async () => {
+  // 末尾の part（重みの block を持つ）を落とした列 — descriptor が宣言する part 数と合わない。
+  const error = await assertRejects(
+    () => openerOf({ "dit[0]": part(0), "dit[1]": part(1) }),
+    ContainerFormatError,
+  );
+  assertStringIncludes(error.message, "part が 2 本だが宣言は 3 本");
 });
