@@ -69,7 +69,10 @@ export type ContainerInput =
  */
 export type DescriptorExpectation = {
   readonly graph: { readonly length: number; readonly sha256: string };
-  /** `krm` のときだけ。`krg` では渡してはならない。 */
+  /**
+   * `krm` では必須、`krg` では渡してはならない（どちらも `openContainer` が ContainerFormatError で
+   * 落とす — 容器の種別はヘッダを読むまで分からないので、型ではなく開く時点で検査する）。
+   */
   readonly model?: { readonly length: number; readonly sha256: string };
 };
 
@@ -256,6 +259,11 @@ export const openContainer = async (
 
   let model: ModelDescriptor | undefined;
   if (header.kind === "model") {
+    // MUST: 期待値を渡すなら 2 文書とも（§7 の①）。graph だけで通すと、束縛表と block の
+    // sha256 を持つモデル記述が未検証のまま parse される（krg 側の門と対称）。
+    if (expect !== undefined && expect.model === undefined) {
+      throw new ContainerFormatError("krm なのにモデル記述の期待値が渡されていない");
+    }
     const modelBytes = await head.read(
       0,
       HEADER_BYTES + header.graphDescriptorLength,

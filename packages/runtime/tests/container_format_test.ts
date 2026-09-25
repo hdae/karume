@@ -458,6 +458,21 @@ describe("container round trip", () => {
     );
   });
 
+  it("krm に graph だけの期待値を渡すと、モデル記述を未検証のまま開かない", async () => {
+    const written = await writeModelContainer(syntheticModel(), OPTIONS);
+    const graphOnly = {
+      graph: {
+        length: written.graphDescriptorBytes.byteLength,
+        sha256: await sha256Hex(written.graphDescriptorBytes),
+      },
+    };
+    await assertRejects(
+      () => openContainer({ kind: "bytes", bytes: written.single }, graphOnly),
+      ContainerFormatError,
+      "モデル記述の期待値",
+    );
+  });
+
   it("block の 1 バイト改ざんは sha256 が、const 領域の改ざんは krg 抽出が捕まえる", async () => {
     const written = await writeModelContainer(syntheticModel(), OPTIONS);
     const parts = written.parts.map((part) => part.slice());
@@ -764,6 +779,45 @@ describe("container descriptor", () => {
         }),
       ContainerFormatError,
       "不足 [enc.weight] / 余剰 [model.lm_head.weight]",
+    );
+  });
+
+  it("piece の part が添字順に非減少でない容器は開く時点で落とす（規則④）", async () => {
+    // block 上限と part 長を 512 B にして、2 piece を part 2 / part 3 に 1 本ずつ置かせる。
+    // 2 block の所在（part）だけを入れ替えると、目次の構造（重なり・part 長）は正しいまま
+    // piece 1 が piece 2 より後の part に来る。門が無いと開けてしまい、構築が内部簿記の破れで落ちる。
+    const written = await writeModelContainer({
+      graphs: { g: declaration({ "tall.weight": { shape: [32, 8] } }) },
+      consts: [],
+      weights: [{
+        graph: "g",
+        initializer: "tall.weight",
+        bytes: bytesOf(32 * 8 * F32, 41),
+        encoding: { codec: "f32" },
+      }],
+      assets: [],
+      provenance: { license: "apache-2.0", writer: "test" },
+    }, { partBytes: 512, blockBytes: 512 });
+    const pieces = (doc: Record<string, unknown>): { block: string }[] =>
+      anyOf(doc).binding.g["tall.weight"].pieces;
+    const blockOf = (doc: Record<string, unknown>, id: string): { part: number } =>
+      anyOf(doc).blocks.find((block: { id: string }) => block.id === id);
+    // 前提: 書き手は piece を part 昇順に置いている（入れ替えが意味を持つ形）。
+    const original = JSON.parse(new TextDecoder().decode(written.modelDescriptorBytes));
+    assertEquals(
+      pieces(original).map((piece) => blockOf(original, piece.block).part),
+      [2, 3],
+    );
+    await openWithModelDescriptor(written, () => {});
+
+    await assertRejects(
+      () =>
+        openWithModelDescriptor(written, (doc) => {
+          const [first, second] = pieces(doc).map((piece) => blockOf(doc, piece.block));
+          [first.part, second.part] = [second.part, first.part];
+        }),
+      ContainerFormatError,
+      "graph 'g' initializer 'tall.weight' piece[1]: part 2 が直前の piece の part 3 より前にある",
     );
   });
 

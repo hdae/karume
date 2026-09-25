@@ -8,6 +8,7 @@
  * - 意味論 dtype と codec の組（f32 の符号化 / i32 は生の int32 — 交差は fail loudly）
  * - payload 長 = 宣言 shape と packing から決まる値。block 長との差は詰め物（0 以上 4 未満）だけ
  * - piece 列は先頭次元の行範囲を隙間なく被覆し、末尾 = shape[0]。中間 piece に詰め物は無い
+ * - piece の part は添字順に非減少（構築は part 昇順に流し、piece 1 で確保する）
  * - `rowAxis != 0` の initializer は piece 分割不可（scale の行範囲が piece の行範囲に対応しない）
  * - `rowAxis` は codec 台帳の `rowAxes` の中だけ（軸 1 は per-channel i8 のみ — 展開は軸 0 固定）
  * - group の刻み: per-channel codec は `groupSize` = 行長、group codec は 2 冪 ≥ 16 で行長を割る
@@ -255,6 +256,16 @@ const planSupply = (
       }
       cursor = piece.rows[1];
       const found = locate(piece.block, by);
+      // 規則④: piece の part は添字順に非減少。構築（`containerBatches` → `buildSessionState`）は
+      // block を part 昇順に流し、piece 1 でバッファを確保して scale を持ち越す（規則③で scale は
+      // piece 1 と同じ part）ので、逆順の容器は内部簿記の破れの文言で落ちる。受理集合の門を
+      // 合流相に置き、供給元に依らずここで落とす。
+      const previous = blocks.at(-1);
+      if (previous !== undefined && found.part < previous.part) {
+        fail(
+          `${by}: part ${found.part} が直前の piece の part ${previous.part} より前にある（piece の part は添字順に非減少 MUST — 規則④）`,
+        );
+      }
       const pieceBytes = (piece.rows[1] - piece.rows[0]) * rowBytes;
       if (i < supply.pieces.length - 1) {
         // 中間 piece に詰め物は掛けられない（次の piece の先頭を潰す）— 長さは元から 4 の倍数 MUST。
