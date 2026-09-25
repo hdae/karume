@@ -1,8 +1,9 @@
 """旧配布形（safetensors 方言の shard 列）の**読み取り専用**の層（移行 CLI 専用）。
 
 配布形は `krm`（container-v1）へ移ったので、safetensors 方言を**書く**コードはもう無い。
-それでも HF 上の旧リポはリリースまで生きるので、`karume migrate` が旧形を読む経路だけが
-ここに残る（container-v1 §12「旧形式を読む処理はこの CLI にだけ置く」）。
+公開リポは 0.13.0 で上げ直し済みだが、旧形は HF の旧 revision（pin した読み手が指す先）に
+残るので、`karume migrate` が旧形を読む経路だけがここに残る（container-v1 §12「旧形式を
+読む処理はこの CLI にだけ置く」）。
 
 ここが読むのは旧規則の配布形も含む列（単一ファイル / fat グラフ shard / 尾部スラック /
 piece キー `<親名>#NNNNN-of-NNNNN`）で、現行の門は掛けない（掛けたら移行できない）。分割
@@ -233,7 +234,7 @@ def read_component(paths: Sequence[Path]) -> tuple[dict[str, str], dict[str, Sou
     for index, path in enumerate(paths):
         if not path.is_file():
             raise LegacyFormatError(f"移行の入力が無い: {path}")
-        assert_reader_layout(path)
+        assert_reader_layout(path, allow_legacy_dtypes=True)
         header, data_start = _read_header(path)
         raw = _read_metadata(path, header)
         if index == 0:

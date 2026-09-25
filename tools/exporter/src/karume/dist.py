@@ -1,6 +1,8 @@
 """配布ディレクトリの組み立て — 系列ディレクトリ群 → HF へそのまま上げられる 1 リポ形。
 
-仕様の正本は ADR 0041（`docs/decisions/0041-manifest-v2.md`）。ここが作るのは §2 の形で
+仕様の正本は、manifest `karume/5` の形が ADR 0109
+（`docs/decisions/0109-manifest-v5-container.md`）、リポ内レイアウトが ADR 0041
+（`docs/decisions/0041-manifest-v2.md`）。ここが作るのは 0041 §2 の形で
 並んだファイル群と、それを宣言する `karume.json`（`karume/5`）、そして manifest から機械導出
 したモデルカード `README.md`（ADR 0037 §3 の「そのまま HF リポとして上げられる形」）。
 
@@ -131,12 +133,6 @@ SHARED_DIRNAME = "shared"
 #: （{@link verify_dist} はモデルカードを書く**前**に走るので、無いまま通る必要がある）。
 META_PATHS = frozenset({MANIFEST_FILENAME, MODEL_CARD_FILENAME})
 
-#: 配布リポ直下へ置ける**法的テキスト**の席（{@link Pipeline.root_files}）。上流の重み
-#: ライセンスが再配布の条件として要求するファイル — ライセンス文そのもののコピーと、帰属 /
-#: 改変を告げる Notice の 2 つだけ。名前を集合で縛るのは、ここが「任意ファイルを直下へ
-#: 持ち込む口」ではないことを**検査で**示すため（型では法的テキストかどうかを言えない）。
-#: {@link META_PATHS} と同じく**在ることは要求しない**（要求する pipeline だけが渡す）。
-
 #: 改変告知の置き場（配布リポ直下）。容器の `provenance.notice` が指すのはこの **path 断片**で、
 #: 本文は容器に載らない（container-v1 §2.3）。
 NOTICE_FILENAME = "NOTICE.md"
@@ -144,6 +140,11 @@ NOTICE_FILENAME = "NOTICE.md"
 #: 上流ライセンス本文の置き場（同上）。
 LICENSE_FILENAME = "LICENSE.md"
 
+#: 配布リポ直下へ置ける**法的テキスト**の席（{@link Pipeline.root_files}）。上流の重み
+#: ライセンスが再配布の条件として要求するファイル — ライセンス文そのもののコピーと、帰属 /
+#: 改変を告げる Notice の 2 つだけ。名前を集合で縛るのは、ここが「任意ファイルを直下へ
+#: 持ち込む口」ではないことを**検査で**示すため（型では法的テキストかどうかを言えない）。
+#: {@link META_PATHS} と同じく**在ることは要求しない**（要求する pipeline だけが渡す）。
 LEGAL_PATHS = frozenset({LICENSE_FILENAME, NOTICE_FILENAME})
 
 #: 規模上限（ADR 0041 §7）。hub が同じ値で弾くので、**焼く側で先に落とす**
@@ -1451,15 +1452,33 @@ def assemble_family(
 
 
 def _declared_refs(manifest: Mapping[str, Any]) -> Iterator[tuple[str, Mapping[str, Any]]]:
-    """manifest が参照する全ファイルを `(場所, 3 点セット)` で流す（重複はそのまま流す）。"""
-    for model_name, model in manifest["models"].items():
-        for name, labels in model["weights"].items():
-            for label, entry in labels.items():
-                where = f"models.{model_name}.weights.{name}.{label}.container.parts"
-                for index, ref in enumerate(entry["container"]["parts"]):
-                    yield f"{where}[{index}]", ref
-        for name, ref in model["assets"].items():
-            yield f"models.{model_name}.assets.{name}", ref
+    """manifest が参照する全ファイルを `(場所, 3 点セット)` で流す（重複はそのまま流す）。
+
+    MUST: 欄の欠落・型違いは {@link _dist_object} / {@link _dist_part_ref} で `DistError` へ
+    翻訳する — {@link external_refs} は参照元の配布形の manifest を形の検査なしでここへ
+    渡すので、参照元が壊れているときに素の `KeyError` / `TypeError` を漏らさない
+    （{@link assert_container_limits} の MUST と同じ理由）。
+    """
+    models = _dist_object(manifest.get("models"), "models")
+    for model_name, model_value in models.items():
+        model = _dist_object(model_value, f"models.{model_name}")
+        weights = _dist_object(model.get("weights"), f"models.{model_name}.weights")
+        for name, labels_value in weights.items():
+            labels = _dist_object(labels_value, f"models.{model_name}.weights.{name}")
+            for label, entry_value in labels.items():
+                entry_where = f"models.{model_name}.weights.{name}.{label}"
+                entry = _dist_object(entry_value, entry_where)
+                where = f"{entry_where}.container"
+                container = _dist_object(entry.get("container"), where)
+                parts = container.get("parts")
+                if not isinstance(parts, list):
+                    raise DistError(f"{where}.parts が配列でない（実際: {parts!r}）")
+                for index, ref in enumerate(parts):
+                    yield f"{where}.parts[{index}]", _dist_part_ref(ref, f"{where}.parts[{index}]")
+        assets = _dist_object(model.get("assets"), f"models.{model_name}.assets")
+        for name, ref in assets.items():
+            where = f"models.{model_name}.assets.{name}"
+            yield where, _dist_part_ref(ref, where)
 
 
 def is_external_ref(ref: Mapping[str, Any]) -> bool:
@@ -1490,11 +1509,14 @@ def _assert_manifest_shape(manifest: Mapping[str, Any]) -> None:
         raise DistError(
             f"defaultModel '{manifest.get('defaultModel')}' が models {sorted(models)} に無い"
         )
-    for model_name, model in models.items():
-        weights = model["weights"]
-        quants = model["quants"]
-        for name, labels in weights.items():
-            for label, entry in labels.items():
+    for model_name, model_value in models.items():
+        model = _dist_object(model_value, f"models.{model_name}")
+        weights = _dist_object(model.get("weights"), f"{model_name}.weights")
+        quants = _dist_object(model.get("quants"), f"{model_name}.quants")
+        for name, labels_value in weights.items():
+            labels = _dist_object(labels_value, f"{model_name}.weights.{name}")
+            for label, entry_value in labels.items():
+                entry = _dist_object(entry_value, f"{model_name}.weights.{name}.{label}")
                 # MUST: dtype ラベルは格納 dtype 語彙（{@link STORAGE_DTYPE_LABELS}）の内側。
                 if label not in STORAGE_DTYPE_LABELS:
                     raise DistError(
@@ -1524,20 +1546,23 @@ def _assert_manifest_shape(manifest: Mapping[str, Any]) -> None:
                         f" ['graph', 'model'] でない（実際: {found}）"
                     )
                 assert_container_limits(f"{model_name}.weights.{name}.{label}.container", container)
-        if model["defaultQuant"] not in quants:
+        default_quant = model.get("defaultQuant")
+        if not isinstance(default_quant, str) or default_quant not in quants:
             raise DistError(
-                f"{model_name}.defaultQuant '{model['defaultQuant']}' が"
-                f" quants {sorted(quants)} に無い"
+                f"{model_name}.defaultQuant '{default_quant}' が quants {sorted(quants)} に無い"
             )
-        for quant_name, quant in quants.items():
+        for quant_name, quant_value in quants.items():
             where = f"{model_name}.quants.{quant_name}"
-            if set(quant["weights"]) != set(weights):
+            quant_weights = _dist_object(
+                _dist_object(quant_value, where).get("weights"), f"{where}.weights"
+            )
+            if set(quant_weights) != set(weights):
                 raise DistError(
                     f"{where}.weights が weights の完全写像でない"
-                    f"（宣言 {sorted(quant['weights'])} / weights {sorted(weights)}）"
+                    f"（宣言 {sorted(quant_weights)} / weights {sorted(weights)}）"
                 )
-            for name, label in quant["weights"].items():
-                if label not in weights[name]:
+            for name, label in quant_weights.items():
+                if not isinstance(label, str) or label not in weights[name]:
                     raise DistError(
                         f"{where}.weights: '{name}' に dtype '{label}' が無い"
                         f"（利用可能: {sorted(weights[name])}）"

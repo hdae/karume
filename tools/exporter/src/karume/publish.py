@@ -5,8 +5,8 @@
 「一時 path をそのまま検証する」写しの側で黙って壊れた。原子性の規律も後始末もここに置く。
 
 MUST: 書き出しの直後に**読み直して**検証を通す — 「書けたが読めない」ファイルを配布物として
-残さないための門（ADR 0005 の fail loudly 規律）。検証は 3 つで、どれも読み直した容器と
-呼び手が渡した材料の突合である:
+残さないための門（ADR 0005 の fail loudly 規律）。検証は 4 つで、1〜3 は読み直した容器と
+呼び手が渡した材料の突合、4 は宣言の追加条件である:
 
 1. **payload の一致**: initializer と companion scale の payload バイト列が、渡した実体と
    sha256 で一致する。突き合わせるのは block 全体ではなく **payload 部** — 末尾の詰め物は
@@ -14,6 +14,8 @@ MUST: 書き出しの直後に**読み直して**検証を通す — 「書け�
 2. **資産の一致**: 役割・論理長・payload・末尾の詰め物が 0x00 であること。
 3. **2 文書**: グラフ記述 / モデル記述のバイト長と sha256（manifest `karume/5` の
    `container.descriptor` が名乗る値と同じ事実 — ADR 0109 決定 3）。
+4. **`ternary` のコード**: payload の全 2 bit コードが `{1, 2, 3}`（container-v1 §6.3 —
+   `karume verify` と同じ検査。TS の読み手はロード時に落とすので、据える前に落とす）。
 
 MUST: 門を実効にするため、書き出しと検証は**同じディレクトリの一時ファイル**（`.partial`）に
 対して行い、通ってはじめて `os.replace` で本番名へ据える（同一ディレクトリなので置換は原子的）。
@@ -48,7 +50,7 @@ from karume.container import (
     write_model_container,
 )
 from karume.ir import IrGraph
-from karume.verify import BoundGraph, bind_graphs
+from karume.verify import BoundGraph, _assert_ternary_payloads, bind_graphs
 
 
 class PublishError(ValueError):
@@ -179,8 +181,9 @@ def publish_container(
     """`krm` を書いて検証し、`final`（単一形）/ その連番（分割形）へ据える。
 
     `tensors` は**テンソルキー → 生バイト**の口で、実体は 1 本ずつ引いて 1 本ずつ手放す
-    （`Mapping` を遅延にすれば全量はメモリに載らない）。書き手は sha256 を採る走査と書き出しの
-    走査で **2 度引く**ので、同じキーからは毎回同じバイト列が返る MUST。
+    （`Mapping` を遅延にすれば全量はメモリに載らない）。実体は**複数回引かれる** — 分割形は
+    書き出し 1 回 + 読み直し検証 1 回、単一形は書き手が sha256 を採る走査と書き出しの走査で
+    2 回 + 読み直し検証 1 回 — ので、同じキーからは毎回同じバイト列が返る MUST。
 
     `part_bytes` / `block_bytes` は寸法の差し込み（テストが小さな資産で part またぎと piece
     分割を踏むための席）。既定値は、`part_bytes` が container-v1 §4.2 の既定（256 MiB）、
@@ -211,6 +214,8 @@ def publish_container(
         read_back = read_container(written)
         bound = bind_graphs(read_back.graph, read_back.model)[graph_name]
         payloads = _assert_payloads_match(read_back, bound, bindings, tensors)
+        # 宣言の追加条件（モジュール doc の検証 4）— `karume verify` と同じ 1 本を通す。
+        _assert_ternary_payloads(read_back, {graph_name: bound})
         checked = _assert_assets_match(read_back, assets)
         documents = (
             DocumentRef(
