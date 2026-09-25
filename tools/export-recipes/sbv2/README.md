@@ -27,9 +27,12 @@ whole SBV2 chain holds):
 
 ```sh
 cd tools/export-recipes
-uv sync --group sbv2   # style-bert-vits2==2.5.0 / huggingface-hub
+uv sync --all-groups   # includes the sbv2 group: style-bert-vits2==2.5.0 / huggingface-hub
 ```
 
+- **Sync with `--all-groups`, not `--group sbv2`.** The workspace has a single venv
+  (`tools/pyproject.toml`), so syncing only the `sbv2` group removes the other families' groups
+  (measured — the same NOTE is in the `sbv2/export.py` docstring).
 - **`style-bert-vits2` is pinned with `==`.** The exporters of the later waves are built on
   monkeypatching package internals (class attributes of the modeling code), so a minor update that
   renames a replacement target or changes the shape of a forward silently changes the graph itself.
@@ -38,31 +41,30 @@ uv sync --group sbv2   # style-bert-vits2==2.5.0 / huggingface-hub
   pytest running). `transformers==5.14.1` comes in as a transitive dependency of this group.
 - **Watch the build dependencies**: the transitive dependency `pyopenjtalk-dict` has no wheel and is
   built from an sdist, so it **requires a C / C++ compiler plus cmake and make**. Without them, `uv
-  sync --group sbv2` fails with a cmake error (the dp export itself never uses this package, but
+  sync --all-groups` fails with a cmake error (the dp export itself never uses this package, but
   dependency resolution cannot be skipped).
 
 ### Obtaining the weights
 
 **The real weights are not part of the repository.** Since 2026-08-30 the default `--model-dir` is
 `inputs/sbv2/F1` — the jvnv speaker the distribution (`karume-sbv2-jvnv`) and the E2E gates use;
-its provenance is on the jvnv model card. The FN description below is kept as the record for the
-non-public FN series (the mirrors and series are no longer kept locally — re-export from
-`inputs/sbv2/FN*` when needed).
+its provenance is on the jvnv model card.
 
-The FN speaker `FN4` comes from HF `rufflet17/voice_models`, whose `FN/FN4/` directory carries `FN4.safetensors` / `config.json` /
-`style_vectors.npy` / `style_settings.json` (the same content is also packed in `zip/FN_sbv2.zip`,
-but the unpacked directory can be fetched file by file, so the zip is unnecessary). The publisher
-declares the model free to modify. Place the 3 files the exporter reads under `inputs/sbv2/FN4/` —
-the default `--model-dir` (`style_settings.json` is not read):
+The JVNV speakers come from HF
+[`litagin/style_bert_vits2_jvnv`](https://huggingface.co/litagin/style_bert_vits2_jvnv), one
+directory per speaker (`jvnv-F1-jp/` / `jvnv-F2-jp/` / `jvnv-M1-jp/` / `jvnv-M2-jp/`). Place the 3
+files the exporter reads from `jvnv-F1-jp/` under `inputs/sbv2/F1/` — the default `--model-dir`
+(the other speakers go to `inputs/sbv2/<speaker>/` the same way):
 
 ```
-inputs/sbv2/FN4/config.json         HyperParameters (`version` drives the JP-Extra decision)
-inputs/sbv2/FN4/FN4.safetensors     ckpt (**exactly one** `*.safetensors` directly under this dir)
-inputs/sbv2/FN4/style_vectors.npy   style vectors (used for the front's style_vec)
+inputs/sbv2/F1/config.json                          HyperParameters (`version` drives the JP-Extra decision)
+inputs/sbv2/F1/jvnv-F1-jp_e160_s14000.safetensors   ckpt (**exactly one** `*.safetensors` directly under this dir)
+inputs/sbv2/F1/style_vectors.npy                    style vectors (used for the front's style_vec)
 ```
 
-`FN4` is a Style-Bert-VITS2 JP-Extra model (`version: 2.6.1-JP-Extra`) with `n_speakers: 1`, a
-`sampling_rate` of 44100, and 4 styles (`data.style2id` = Neutral / high / low / NSFW).
+`F1` is a Style-Bert-VITS2 JP-Extra model (`version: 2.0-JP-Extra`) with `n_speakers: 1`, a
+`sampling_rate` of 44100, and 7 styles (`data.style2id` = Neutral / Angry / Disgust / Fear / Happy
+/ Sad / Surprise).
 
 The ckpt is required to be the **unique** match of `<model-dir>/*.safetensors` (with several, which
 one was read would change silently), and the glob is non-recursive. Nothing generated is written
@@ -70,6 +72,21 @@ next to it: the exports go to a **separate root**, `outputs/series/`. Another sp
 model therefore needs nothing but `--model-dir` pointing at its directory — the series name is
 derived from that directory's name (`inputs/sbv2/F1/` → `outputs/series/sbv2-F1/`), so two
 speakers cannot silently overwrite each other's assets.
+
+#### Record: the non-public FN series
+
+Kept as the record for the non-public FN series (the mirrors and series are no longer kept locally
+— re-export from `inputs/sbv2/FN*` when needed; the dist command is in
+[`docs/assets-layout.md`](../../../docs/assets-layout.md)). The FN speaker `FN4` comes from HF
+`rufflet17/voice_models`, whose `FN/FN4/` directory carries `FN4.safetensors` / `config.json` /
+`style_vectors.npy` / `style_settings.json` (the same content is also packed in `zip/FN_sbv2.zip`,
+but the unpacked directory can be fetched file by file, so the zip is unnecessary). The publisher
+declares the model free to modify. Place the 3 files the exporter reads under `inputs/sbv2/FN4/`
+and pass `--model-dir inputs/sbv2/FN4` (`style_settings.json` is not read). `FN4` is a
+Style-Bert-VITS2 JP-Extra model (`version: 2.6.1-JP-Extra`) with `n_speakers: 1`, a
+`sampling_rate` of 44100, and 4 styles (`data.style2id` = Neutral / high / low / NSFW). The measured
+figures further down (node counts, storage sizes, tolerances, equivalence) were taken on `FN4`, which
+has the same architecture as the JVNV speakers.
 
 ### Generation and comparison
 
@@ -80,7 +97,7 @@ uv run --group sbv2 python -m sbv2.export                # all targets
 uv run --group sbv2 python -m sbv2.export --target front # one target only
 uv run --group sbv2 python -m sbv2.export --dtype f16    # f16 series → outputs/series/sbv2-F1-f16/
 uv run --group sbv2 python -m sbv2.export --dtype i8     # i8 series  → outputs/series/sbv2-F1-i8/
-# mixed i4 series — only the two targets the distribution ships (dp / dec carry no linear at all)
+# mixed i4 series — only the two targets the distribution ships (front / voice)
 uv run --group sbv2 python -m sbv2.export --dtype i4 --target front --target voice
 
 # 2. eager equivalence against the reference implementation (**one target per process**; see "Patch layer" below)
@@ -94,14 +111,14 @@ cd ../.. && deno test -A packages/runtime/tests/e2e_sbv2_test.ts packages/models
 ```
 
 ```
-outputs/series/sbv2-FN4/dp/model-NNNNN-of-NNNNN.krm      IR   17 nodes /  12 initializers /   1.78MB
-outputs/series/sbv2-FN4/front/model-NNNNN-of-NNNNN.krm   IR  911 nodes / 263 initializers /  33.4MB (2.1MB of baked tables)
-outputs/series/sbv2-FN4/flow/model-NNNNN-of-NNNNN.krm    IR 1589 nodes / 458 initializers / 158.9MB (0.15MB of baked tables)
-outputs/series/sbv2-FN4/dec/model-NNNNN-of-NNNNN.krm     IR  246 nodes / 197 initializers /  58.7MB
-outputs/series/sbv2-FN4/voice/model-NNNNN-of-NNNNN.krm   IR 1836 nodes / 655 initializers / 217.6MB
-outputs/series/sbv2-FN4/<target>/io.<case>.safetensors   inputs and expected torch CPU outputs
-outputs/series/sbv2-FN4/<target>/export_provenance.json  the symbolic-dimension ceiling this
-                                                         target was baked at (--sym-max)
+outputs/series/sbv2-F1/dp/model-NNNNN-of-NNNNN.krm      IR   17 nodes /  12 initializers /   1.78MB
+outputs/series/sbv2-F1/front/model-NNNNN-of-NNNNN.krm   IR  911 nodes / 263 initializers /  33.4MB (2.1MB of baked tables)
+outputs/series/sbv2-F1/flow/model-NNNNN-of-NNNNN.krm    IR 1589 nodes / 458 initializers / 158.9MB (0.15MB of baked tables)
+outputs/series/sbv2-F1/dec/model-NNNNN-of-NNNNN.krm     IR  246 nodes / 197 initializers /  58.7MB
+outputs/series/sbv2-F1/voice/model-NNNNN-of-NNNNN.krm   IR 1836 nodes / 655 initializers / 217.6MB
+outputs/series/sbv2-F1/<target>/io.<case>.safetensors   inputs and expected torch CPU outputs
+outputs/series/sbv2-F1/<target>/export_provenance.json  the symbolic-dimension ceiling this
+                                                        target was baked at (--sym-max)
 ```
 
 Each container is one component written as a numbered part sequence — `model-00001-of-00003.krm`
@@ -115,7 +132,7 @@ counts and byte sizes above are point-in-time values measured on the earlier saf
 #### Storage dtype series (`--dtype f16` / `--dtype i8` / `--dtype i4` — ADR 0018 / 0019 / 0069)
 
 `--dtype f16` / `--dtype i8` each write to a **separate series**,
-`outputs/series/sbv2-FN4-f16/<target>/` / `outputs/series/sbv2-FN4-i8/<target>/` (keeping them next
+`outputs/series/sbv2-F1-f16/<target>/` / `outputs/series/sbv2-F1-i8/<target>/` (keeping them next
 to the f32 series would silently apply the f32 tolerance of the existing E2E to compressed assets).
 The rounding (fake-quant) uses the shared `quantize.round_weights_to_f16` /
 `quantize.fake_quant_int8` and is applied to the modules of each exported target **after
@@ -139,7 +156,7 @@ f32. The totals are f32 470.34MB → f16 237.57MB (50.5%) → **i8 121.81MB (25.
 companion scales are 505,576 B (0.42% of the compressed bytes). These storage figures are
 point-in-time values measured on the earlier safetensors form.
 
-`--dtype i4` is a **mixed series** `outputs/series/sbv2-FN4-i4/<target>/`: eligible `nn.Linear`
+`--dtype i4` is a **mixed series** `outputs/series/sbv2-F1-i4/<target>/`: eligible `nn.Linear`
 and `nn.Conv1d` weights in group-32 i4 (ADR 0069 and its conv1d addendum — wave J-5b), everything
 else in per-channel i8 exactly as in the i8 series. A conv1d is eligible when `groups == 1` and
 its flattened row length `Cin·K` is a multiple of 32; depthwise convs, `ConvTranspose1d`
@@ -155,10 +172,12 @@ series.
 
 The storage sizes are point-in-time values measured on the earlier safetensors form.
 
-The gain is negligible on purpose: net_g carries only 6 linears (`enc_p.style_proj` /
-`enc_p.encoder.spk_emb_linear` in `front`, the 4 `flow_rev.flow.flows.<i>.enc.spk_emb_linear` in
-`voice`) against 86–90% conv1d. The point of the series is to let the distribution ship a
-whole-pipeline 4-bit seat next to the text encoder's, not to shrink net_g.
+Since the conv1d addendum (wave J-5b) the conv1d weights carry the size gain — `voice` drops from
+55.5MB to 36.0MB and `front` from 10.3MB to 7.4MB in the table above. Before it, only net_g's 6
+linears were eligible (`enc_p.style_proj` / `enc_p.encoder.spk_emb_linear` in `front`, the 4
+`flow_rev.flow.flows.<i>.enc.spk_emb_linear` in `voice`) against 86–90% conv1d, and the gain was
+almost zero. Together with the text encoder's reduction, the distribution's `i4` quant ships the
+whole pipeline in 4-bit storage.
 
 MUST: `--dtype` is **emit-only** (like `--sym-max`). The CLI rejects combining it with `--verify` —
 verification is an eager comparison that does not look at the storage format, and for dec / voice
@@ -211,7 +230,7 @@ the value ranges would not correspond to production and the tolerances would hav
 
 The `padded` input **has values in the padded columns too** — if the mask multiplication works, the
 tail of the output is exactly 0, and if it comes off, values leak. Without this shape it is not a
-detector for the mask path (`tests/test_sbv2/export.py` goes as far as pinning down that "replacing
+detector for the mask path (`sbv2/tests/test_export.py` goes as far as pinning down that "replacing
 the mask with all ones makes the tail non-zero", closing off vacuous truth).
 
 There are 2 asserts pinned at load time:
@@ -238,12 +257,16 @@ MUST in the docstrings of `ensure_dec_plain` and `_fake_quant` (ADR 0013 / 0018 
 
 On the Deno side: `packages/runtime/tests/e2e_sbv2_test.ts` (one case = one test) and
 `packages/models/tests/sbv2_relattn_parity_test.ts` (byte equality of the tables). Same two-stage
-structure as DeBERTa: **if `outputs/series/sbv2-FN4/` contains not a single target directory,
-everything SKIPs** (this is the environment where only the raw weights are in place and export has
-not been run yet), and when they are **partially** present (a missing target / a missing case) it is
-a FAIL. It is **parameterized by series (f32 / f16 / i8)**, and the tolerances are **derived from
-measurements per series × target** (no reuse across series — re-deriving one would silently move the
-other):
+structure as DeBERTa: **if a series directory (`outputs/series/sbv2-F1/` / `sbv2-F1-f16/` /
+`sbv2-F1-i8/`) contains not a single target directory, that series SKIPs** (this is the environment
+where only the raw weights are in place and export has not been run yet), and when they are
+**partially** present (a missing target / a missing case) it is a FAIL. It is **parameterized by
+series (f32 / f16 / i8)**, and the tolerances are **derived from measurements per series × target**
+(no reuse across series — re-deriving one would silently move the other). There is no i4 series
+here: the distribution's `i4` quant is covered on the distribution form by the WAV sha256 gate
+(`packages/models/tests/e2e_sbv2_wav_test.ts`). The measured values below come from the FN speaker;
+F1 passes every target and case under the same tolerances, which were not re-derived (the NOTE
+on the series table in `e2e_sbv2_test.ts`):
 
 | Target  | f32 atol | f32 rtol | Dominant check | f32 measured maxAbs | f16 atol | f16 rtol | f16 measured maxAbs | i8 atol | i8 rtol | i8 measured maxAbs |
 | ------- | -------- | -------- | -------------- | ------------------- | -------- | -------- | ------------------- | ------- | ------- | ------------------ |
@@ -270,8 +293,8 @@ that element is of the 1e-8 class). The derivations are authoritative in the `SB
 comments in the same file. **The final `tanh` of dec is WGSL-implementation dependent and does not
 match torch bit for bit**, so this comparison can in principle only hold with a tolerance.
 
-On the pytest side: `tests/test_sbv2/export.py` (the script's contract) and
-`tests/test_sbv2.patch.py` (unit tests for the patch layer). Building the golden inputs and the CLI
+On the pytest side: `sbv2/tests/test_export.py` (the script's contract) and
+`sbv2/tests/test_patch.py` (unit tests for the patch layer). Building the golden inputs and the CLI
 exclusivity need no real weights and always run; the export body runs **only in an environment where
 the real weights and the `sbv2` group are both present** (otherwise SKIP).
 
