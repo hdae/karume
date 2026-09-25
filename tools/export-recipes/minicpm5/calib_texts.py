@@ -4,8 +4,8 @@
 なので、コーパスの性格がそのまま丸めの偏りになる。ここは `sweep_w4.py` の校正付き構成
 （{@link minicpm5.sweep_w4.CALIB_CONFIGS}）が読む唯一の入力で、選定方針は次の 3 点:
 
-- **評価文と分離する** — {@link minicpm5.export.GOLDEN_CASES}（= 波 E の greedy 期待列の
-  素材）と 1 文も重ねない。話題も重ねない（「フランス / 日本の首都」系は 1 文も入れない）。
+- **評価文と分離する** — {@link minicpm5.export.GOLDEN_CASES}（= `export_decode` の greedy
+  期待列の素材）と 1 文も重ねない。話題も重ねない（「フランス / 日本の首都」系は 1 文も入れない）。
   重ねると「校正で見た文をそのまま評価する」形になり、teacher / greedy の一致は**校正の
   質ではなく漏れ**を測る数になる。
 - **素の言語モデルの分布へ寄せる** — 模型は base LM（chat template は載せない — `export.py`）

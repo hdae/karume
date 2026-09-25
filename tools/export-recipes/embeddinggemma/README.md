@@ -43,6 +43,8 @@ runtime attention-mask wiring) is still open — only the tokenizer part is done
 ```sh
 cd tools/export-recipes
 uv run --with 'transformers==5.14.1' python -m embeddinggemma.export
+# --batch N>1 currently fails loudly in the conversion step (docs/known-issues.md, "EmbeddingGemma
+# batch>1 export"); the flag is kept for the day the converter is generalized.
 uv run --with 'transformers==5.14.1' python -m embeddinggemma.export --batch 8 --out /path/to/out
 uv run python -m embeddinggemma.tokenizer   # tokenizer asset + parity fixture
 ```

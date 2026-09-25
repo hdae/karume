@@ -446,7 +446,7 @@ class TestGreedyCases:
         assert set(decode.GREEDY_CASES) <= {name for name, _ in one_shot.GOLDEN_CASES}
 
     def test_every_greedy_case_has_a_first_token_expectation(self):
-        """第 1 継続 token の突合（波 A との機構横断検証）が全採用ケースで効く条件。"""
+        """第 1 継続 token の突合（1-shot 形の期待表との機構横断検証）が全採用ケースで効く条件。"""
         assert set(decode.GREEDY_CASES) <= set(one_shot.GREEDY_EXPECTATIONS)
 
     def test_the_adopted_expectations_are_not_all_the_same_token(self):

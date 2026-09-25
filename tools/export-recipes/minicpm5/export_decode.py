@@ -1,4 +1,4 @@
-"""実重み MiniCPM5-1B を **states 形の chunk グラフ**（IR v1 + golden）へ書き出す台本。
+"""実重み MiniCPM5-1B を **states 形の chunk グラフ**（IR v2 の容器 + golden）へ書き出す台本。
 
 ADR [0066](../../../docs/decisions/0066-generation-context-state-slots.md)（GenerationContext と
 名前付き state スロット）/
@@ -47,7 +47,7 @@ mask 入力を落とし、Tmax² 定数と `sym_prefix_slice` を刈る。{@link
 
 ## 出力レイアウト
 
-    outputs/series/minicpm5-1b-decode/model.krm                 重み・定数 + 2 文書の記述
+    outputs/series/minicpm5-1b-decode/model-NNNNN-of-NNNNN.krm  重み・定数 + 2 文書の記述
     outputs/series/minicpm5-1b-decode/io.<case>.safetensors     無 pad 全長の入出力
     outputs/series/minicpm5-1b-decode/greedy.<case>.safetensors greedy 継続 K step の期待列
 
@@ -431,7 +431,7 @@ def _write_container(
 
     `export_to_file` は export → 書き出しが 1 本道で手術を挟む隙間が無いので、書き出し以降
     だけを core の入口から呼ぶ。**規則も原子性も再実装しない** — states 節・順序・shape の
-    検査も、shard 分割（ADR 0070 決定 1）とその据え替え・後始末も core が持つ。
+    検査も、part 割り（ADR 0108）とその据え替え・後始末も core が持つ。
 
     刈り込みで死んだ initializer（mask の Tmax² 定数）は格納テンソルからも落とす —
     `stored_model` は宣言と格納の**完全一致**を要求する。
@@ -487,7 +487,7 @@ def export_series(
 ) -> dict[str, Any]:
     """states 形 IR コンテナ・io golden・greedy golden を書き、要約を返す。
 
-    MUST: 生成物は作業席へ書き、**全ての門**（形検査・margin 門・波 A 期待表との sanity）を
+    MUST: 生成物は作業席へ書き、**全ての門**（形検査・margin 門・1-shot 形の期待表との sanity）を
     通してから据える。門より前に final へ置くと、落ちた実走が「検収門を通れる資産」を残す
     （据え替えと後片付けの規律は core の原語 {@link karume.artifacts.staged_publication}）。
     """
@@ -530,7 +530,8 @@ def export_series(
             wrapper, greedy_cases, staging, steps=steps, floor=MARGIN_FLOOR
         )
 
-        # 第 1 継続 token を波 A の期待表と突き合わせる（機構横断の突合 — 1-shot 形と decode 形の
+        # 第 1 継続 token を 1-shot 形の期待表（`one_shot.GREEDY_EXPECTATIONS`）と突き合わせる
+        # （機構横断の突合 — 1-shot 形と decode 形の
         # 台本は別物なので、同じ重み・同じ prompt で 1 位が一致することが両者の交差検証になる）。
         # MUST: 公開より前に評価する（落ちたら作業席ごと消える — 混成資産を残さない）。
         tokenizer = one_shot.load_tokenizer(model_dir)

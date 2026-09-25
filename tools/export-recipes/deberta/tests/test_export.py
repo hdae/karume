@@ -99,7 +99,7 @@ class TestSeries:
         assert len(set(roots.values())) == len(roots)
 
     def test_f16_is_not_offered(self):
-        """f16 は SBV2 系列と一体で決める（タスク #30）— ここで先取りしない。"""
+        """f16 は SBV2 系列の f16 化と一体で決める（未起票）— ここで先取りしない。"""
         assert "f16" not in export_deberta.WEIGHT_DTYPES
 
     def test_the_i4_series_is_stored_as_i8_by_default(self):

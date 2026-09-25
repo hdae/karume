@@ -1,4 +1,4 @@
-"""実重み MiniCPM5-1B（causal LM）を **1-shot 形**で IR v1 コンテナ + golden io へ書き出す台本。
+"""実重み MiniCPM5-1B（causal LM）を **1-shot 形**で IR v2 の容器 + golden io へ書き出す台本。
 
 ADR [0067](../../../docs/decisions/0067-autoregressive-attention-vocabulary.md) 決定 1（GQA を
 `attention` の整除 broadcast として受理）を**実モデルで検収する足場**。KV cache は載せない —
@@ -52,8 +52,8 @@ MUST: 出た IR の形は {@link assert_ir_form} が**必ず検査**する。`re
 
 ## 出力レイアウト
 
-    outputs/series/minicpm5-1b/model.krm             重み・定数 + 2 文書の記述
-    outputs/series/minicpm5-1b/io.<case>.safetensors 入力と torch CPU での期待出力
+    outputs/series/minicpm5-1b/model-NNNNN-of-NNNNN.krm 重み・定数 + 2 文書の記述
+    outputs/series/minicpm5-1b/io.<case>.safetensors    入力と torch CPU での期待出力
 
 io のテンソルキー規約は tiny golden / DeBERTa / EmbeddingGemma と同じ
 （`input.<グラフ入力名>` / `output.<位置>`）。logits は語彙 130560 なので 1 ケースあたり

@@ -4,10 +4,10 @@
     uv run --with 'transformers==5.14.1' python -m minicpm5.sweep_w4
 
 **runtime は 1 行も触らない**。ここでやるのは torch 側で重みを丸めて（fake-quant）品質の
-劣化を測ることだけで、格納形（`storage.dtype: "i4"` / pack 順 / WGSL）は測定の結果を見て
-から実装する。ADR 0058 決定 5 の分担で言えば「品質 = 人間レビュー + 助言的数値」の
-数値側を作る側で、機械門はここでは baseline の再現性 1 本だけ（{@link
-assert_baseline_reproduces}）。
+劣化を測ることだけ。格納形（容器の codec `int4-sym-g` — `docs/container-v1.md` §6.3 /
+pack 順 / WGSL）は Phase 0 の後に実装済みで、この台本はそれを通らない。ADR 0058 決定 5 の
+分担で言えば「品質 = 人間レビュー + 助言的数値」の数値側を作る側で、機械門はここでは
+baseline の再現性 1 本だけ（{@link assert_baseline_reproduces}）。
 
 ## 何を測るか
 
@@ -46,9 +46,10 @@ config ごとに 4 列を採る（先の 3 列は Phase 0 と同じ・4 列目�
    表がチャネル数に比例する）ので、品質と同じ表で並べる。**実測ではなく式による投影**で、
    格納形を持たない方式（この台本の 7 種のうち RTN 以外全部）は書けもしない。
 
-期待列は**波 E の資産が正本**（`outputs/series/minicpm5-1b-decode/greedy.<case>.safetensors`
-— margin 門つきで採った 3 ケース）。ここで採り直さないのは、sweep が測りたいのが
-「同じ期待列に対する量子化の劣化」だけだから。tokenizer は通さない（トークン id で完結する）。
+期待列は**`minicpm5.export_decode` が margin 門つきで採った greedy 期待列が正本**
+（`outputs/series/minicpm5-1b-decode/greedy.<case>.safetensors` の 3 ケース）。ここで採り直さ
+ないのは、sweep が測りたいのが「同じ期待列に対する量子化の劣化」だけだから。tokenizer は
+通さない（トークン id で完結する）。
 
 ## 量子化の形（ADR 0069 決定 3）
 
@@ -114,7 +115,7 @@ from minicpm5.calib_texts import CALIB_TEXTS
 #: 実重みの置き場（1-shot / decode 形と同じ素材）。
 DEFAULT_MODEL_DIR = one_shot.DEFAULT_MODEL_DIR
 
-#: 期待列（波 E の greedy golden）の置き場。
+#: 期待列（`export_decode` が margin 門つきで採った greedy golden）の置き場。
 DEFAULT_DECODE_DIR = decode.DEFAULT_OUT_DIR
 
 #: 対称量子化の片側幅（**−8 は使わない**）。±7 に閉じると group の amax 要素が `q = ±7` に
@@ -304,9 +305,10 @@ QUANT_METHODS: tuple[QuantMethod, ...] = (
 class MethodConfig:
     """方式グリッドの 1 実行ぶん（方式 × 対象 2 形）。
 
-    `include_embedding` は「非 linear 込み」の列 — `embed_tokens` を対象へ足す。i4 の実行
-    経路は linear 限定（ADR 0069 決定 5）なので**出荷できる形ではない**が、語彙側を
-    丸めたときの品質とサイズの取り分は測っておく価値がある（混成格納の判断材料）。
+    `include_embedding` は「非 linear 込み」の列 — `embed_tokens` を対象へ足す。i4 の適格 op
+    は ADR 0069 追記 6 で embedding にも開いた（`karume.emit.I4_WEIGHT_OPS`）ので、RTN i4
+    ならこの形も格納できる。語彙側を丸めたときの品質とサイズの取り分は、どの席を i4 に
+    するかの判断材料になる（RTN 以外の方式は格納形を持たない測定専用）。
     """
 
     name: str
@@ -896,12 +898,12 @@ def assert_calib_covers_scan(
         )
 
 
-# ---- 期待列（波 E の資産）---------------------------------------------------
+# ---- 期待列（export_decode の greedy 資産）------------------------------------
 
 
 @dataclass(frozen=True)
 class GreedyCase:
-    """波 E の greedy 期待列 1 ケース（`prompt[1,T]` / `expected[K]` — どちらも i64）。"""
+    """`export_decode` の greedy 期待列 1 ケース（`prompt[1,T]` / `expected[K]` — 共に i64）。"""
 
     name: str
     prompt: torch.Tensor
@@ -921,7 +923,7 @@ def load_cases(decode_dir: Path) -> tuple[GreedyCase, ...]:
     paths = sorted(decode_dir.glob(f"{GREEDY_PREFIX}*{GREEDY_SUFFIX}"))
     if not paths:
         raise FileNotFoundError(
-            f"greedy 期待列が {decode_dir} に 1 件も無い — 先に波 E の decode 資産を作ること:\n"
+            f"greedy 期待列が {decode_dir} に 1 件も無い — 先に decode 資産を作ること:\n"
             "  cd tools/export-recipes && "
             "uv run --with 'transformers==5.14.1' python -m minicpm5.export_decode"
         )

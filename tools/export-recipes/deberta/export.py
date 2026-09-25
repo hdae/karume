@@ -1,7 +1,7 @@
-"""実重み DeBERTa-v2（SBV2 text front）を IR v1 コンテナ + golden io へ書き出す台本。
+"""実重み DeBERTa-v2（SBV2 text front）を IR v2 の容器（`krm`）+ golden io へ書き出す台本。
 
 `karume.goldens` の tiny golden が「op 契約の被覆」を受け持つのに対し、こちらは
-**実重み・実トークン列での数値一致**を受け持つ（M1-P2 波 5）。生成物は `outputs/series/`
+**実重み・実トークン列での数値一致**を受け持つ。生成物は `outputs/series/`
 配下で、リポジトリ直下の `.gitignore` によりコミット対象外（重み 1.3GB 級）。
 
     uv run --with 'transformers==5.14.1' python -m deberta.export
@@ -9,13 +9,16 @@
     uv run --with 'transformers==5.14.1' python -m deberta.export --dtype i8 --act-quant
     uv run --with 'transformers==5.14.1' python -m deberta.export --dtype i4 --layers 22
 
-transformers は **5.14.1 でピン**する（recon §6-5 — モデリングコードが変わるとグラフ形が
-変わる）。pyproject.toml / uv.lock には入れず `--with` で一時的に足す。
+transformers は **5.14.1 でピン**する（`docs/research/2026-08-02-deberta-front-recon.md` §6 の
+5 項目 — モデリングコードが変わるとグラフ形が変わる）。pyproject.toml / uv.lock には入れず
+`--with` で一時的に足す。
 
 出力レイアウト（Deno 側 `packages/runtime/tests/e2e_deberta_test.ts` が列挙する）:
 
-    outputs/series/deberta/<variant>/model.krm             重み・定数 + 2 文書の記述
-    outputs/series/deberta/<variant>/io.<case>.safetensors 入力と torch CPU での期待出力
+    outputs/series/deberta/<variant>/model-NNNNN-of-NNNNN.krm 重み・定数 + 2 文書の記述
+    outputs/series/deberta/<variant>/io.<case>.safetensors    入力と torch CPU での期待出力
+
+容器は `model.krm`（{@link MODEL_FILE}）を stem とする part 列（container-v1 §8）。
 
 io のテンソルキー規約は tiny golden と同じ（`input.<グラフ入力名>` / `output.<位置>`）。
 1 モデルに対して io が複数ある点だけが違う。
@@ -24,12 +27,13 @@ io のテンソルキー規約は tiny golden と同じ（`input.<グラフ入�
 
 `--dtype i8` は**別系列**（`outputs/series/deberta-i8/`）へ書く — f32 系列と同居させると既存 E2E の
 網（f32 の tolerance）が黙って別の資産に掛かる。`--dtype f16` は**足さない**（SBV2 系列の
-f16 化と一体で決める話 — タスク #30 の領分）。
+f16 化と一体で決める話 — 未起票）。
 
 `--dtype i4` も同じ理由で**別系列**（`outputs/series/deberta-i4/`）で、中身は**混成**
 （`nn.Linear` / `nn.Embedding` = i4 group32・残り = i8）。SBV2 配布形では `i8+bert4` quant の
-`text_encoder` 席に入る（`sbv2/distribution.py`）。i4 の実行経路は linear / embedding の
-重みスロット限定（ADR 0069 決定 5）なので、単一 dtype の i4 系列は原理的に作れない。
+`text_encoder` 席に入る（`sbv2/distribution.py`）。i4 の適格 op は linear / embedding / conv1d
+（`groups == 1`）の重みスロットで（ADR 0069 追記 6 / 7）、conv1d はこの系列では i4 に**選んで
+いない**（{@link I4_MODULE_TYPES}）ので、系列は混成になる。
 
 i4 系列の encoder linear は **GPTQ 校正付きで丸める**（既定 — perf-ledger Q-6 / `deberta.calib`）。
 格納形は 1 バイトも変わらない（格子は RTN i4 g32 のまま）で、変わるのは丸め値と scale 台帳の
@@ -80,15 +84,16 @@ from .calib_texts import CALIB_TEXTS
 #: SBV2 text front が使う BERT そのもの（recon §1）。
 MODEL_ID = "ku-nlp/deberta-v2-large-japanese-char-wwm"
 
-#: 対応する格納 dtype。**f16 は無い** — SBV2 系列と一体で決める（タスク #30）。
+#: 対応する格納 dtype。**f16 は無い** — SBV2 系列の f16 化と一体で決める（未起票）。
 #: `i4` は**混成**の系列名で、実体は「{@link I4_MODULE_TYPES} の適格な重み = i4 group32・
 #: それ以外（conv・group 長で割り切れない重み）= 従来どおり i8 per-channel」
-#: （{@link BASE_WEIGHT_DTYPES} / {@link _fake_quant}）。i4 の実行経路が linear / embedding の
-#: 重みスロット限定である以上（ADR 0069 決定 5）、系列としては混成にしかなり得ない。
+#: （{@link BASE_WEIGHT_DTYPES} / {@link _fake_quant}）。conv1d は ADR 0069 追記 7 で i4 の
+#: 実行経路を持つが、この系列では i4 に選んでいないので、系列としては混成になる。
 WEIGHT_DTYPES: tuple[str, ...] = ("f32", "i8", "i4")
 
-#: i4 group32 で丸める**モジュール型**（= i4 の実行経路を持つ op と対 — `karume.emit` の
-#: `I4_WEIGHT_OPS`）。conv 系は展開経路が無いので入れない（入れると emit が fail loudly する）。
+#: i4 group32 で丸める**モジュール型**（`karume.emit` の `I4_WEIGHT_OPS` の部分集合）。conv1d
+#: （`groups == 1`）も ADR 0069 追記 7 で i4 適格だが、ここには**選んでいない**（入れると SBV2
+#: WAV の参照値の採り直しを伴う — 別の裁定）。
 I4_MODULE_TYPES: tuple[type[nn.Module], ...] = (nn.Linear, nn.Embedding)
 
 #: `nn.Embedding` の器に入っているが**表引きされない**重みの FQN。相対位置の埋め込み表は
@@ -165,8 +170,8 @@ IO_SUFFIX = ".safetensors"
 INPUT_PREFIX = "input."
 OUTPUT_PREFIX = "output."
 
-#: 記号次元 T の上限。config の `max_position_embeddings` と一致させる（Tmax 畳み込みの
-#: 評価点はここから torch の range_constraints 経由で決まる — ADR 0010）。
+#: 記号次元 T の上限。config の `max_position_embeddings` と一致させる（`Dim` の上限 =
+#: `export_provenance.json` が運ぶ上限 — 焼き込み定数は無いので記録だけが運ぶ）。
 SYM_MAX = 512
 
 #: 記号次元の上限を系列へ書き残す出所記録（{@link _write_export_provenance}）。
@@ -223,7 +228,7 @@ PAD_COUNT = 5
 class HiddenStatesWrapper(nn.Module):
     """`ModelOutput`（dict）ではなく hidden_states のタプルを返す export 用ラッパ。
 
-    IR v1 のグラフ出力は位置で引く（`output.<i>`）ので、全層の hidden_states をそのまま
+    IR v2 のグラフ出力は位置で引く（`output.<i>`）ので、全層の hidden_states をそのまま
     出力に並べる。層ごとに突合できるため、**誤差が層数でどう伸びるか**が golden から
     直接読める（tolerance の根拠づけがこれで実測になる）。
 
@@ -624,7 +629,7 @@ def export_variant(
     scales, dtype_overrides = _fake_quant(dtype, wrapper, calib_args=calib_args)
 
     # 例示入力は padded ケース（mask に 0 を含む実トークン列）。min=2 は 0/1 特殊化を避ける
-    # ため、max は Tmax 畳み込みの評価点そのもの（ADR 0010 — 別ノブで二重管理しない）。
+    # ため、max は `export_provenance.json` が運ぶ上限そのもの（別ノブで二重管理しない）。
     _, example_args = cases[-1]
     seq = Dim("T", min=2, max=sym_max)
     out_dir.parent.mkdir(parents=True, exist_ok=True)

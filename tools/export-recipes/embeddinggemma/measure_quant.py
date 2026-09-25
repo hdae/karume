@@ -10,10 +10,11 @@
        約 66%）を占めるので、量子化の旨みはここに集中している。対象を「linear 限定」と
        「linear + embedding」の 2 形で走らせ、差を語彙表の寄与として読む。
 
-NOTE: 対象 `linear+embedding` は**測定専用の形**。i4 の実行経路は消費 op が linear の重み
-スロットに限られる（ADR 0069 決定 5 / `docs/ir-v2.md` の `i4` 格納形）ので、embedding を
-4bit で「格納」する道はいま無い。ここで測るのは「その席が開いたときに何が起きるか」で、
-出荷形の主張ではない（`quant_methods` の測定専用方式も同じ立場）。
+NOTE: 対象 `linear+embedding` の i4 は**格納できる形**。i4 の適格 op は linear / embedding /
+conv1d の重みスロット（ADR 0069 追記 6 / 7・`karume.emit.I4_WEIGHT_OPS`）で、格納は
+`docs/container-v1.md` §6.3 の codec `int4-sym-g`。ただしここで測るのは方式の質の横並びで、
+出荷する quant 席の主張ではない（FP4 / NF4 / MXFP4 / k-means は格納形を持たない測定専用方式 —
+`quant_methods` の測定専用方式と同じ立場）。
 
 ## 構成（8 = baseline + 方式 7 × 対象 2 のうち baseline は対象に依らないので 1 本）
 
@@ -121,13 +122,15 @@ GROUP_SIZE = 32
 
 # ---- サイズ試算の bit 幅（格納規則の逐語）------------------------------------
 #
-# 出典は `docs/ir-v2.md` の `i4` 格納形（scale は **F32**・group ごと 1 個・group_size は 2 冪
-# かつ 16 以上）と OCP Microscaling Formats v1.0（MX の共有 scale は E8M0 = 指数 1 バイト）。
+# 出典は `docs/container-v1.md` §6.3 の codec `int4-sym-g`（scale は **F32**・group ごと
+# 1 個・groupSize は 2 冪かつ 16 以上）と OCP Microscaling Formats v1.0（MX の共有 scale は
+# E8M0 = 指数 1 バイト）。
 # k-means は格納形を持たない測定専用方式なので、**表のコストを込みで**素直に数える。
 
 #: 4bit 格子のペイロード（全方式共通 — 比較しているのは「格子の張り方」であって bit 数ではない）。
 PAYLOAD_BITS = 4.0
-#: group scale の bit 幅（`i4` の格納は F32 の group scale が MUST — `docs/ir-v2.md`）。
+#: group scale の bit 幅（`int4-sym-g` の格納は F32 の group scale が MUST —
+#: `docs/container-v1.md` §6.3）。
 F32_SCALE_BITS = 32.0
 #: MXFP4 の共有 scale は E8M0（指数 1 バイト）。
 MX_SCALE_BITS = 8.0
@@ -162,9 +165,10 @@ class Target:
     op_types: tuple[type[nn.Module], ...]
 
 
-#: transformer の linear + SentenceTransformer の Dense 2 段（出荷形の i4 適格と同じ集合）。
+#: transformer の linear + SentenceTransformer の Dense 2 段（i4 を linear の重みスロット
+#: だけに掛ける形）。
 TARGET_LINEAR = Target("linear", (nn.Linear,))
-#: 上に `embed_tokens` を足した形（EG の配布サイズの支配項 — モジュール docstring の NOTE）。
+#: 上に `embed_tokens` を足した形（EG の配布サイズの支配項 — モジュール docstring の ②）。
 TARGET_WITH_EMBEDDING = Target("linear+embedding", (nn.Linear, nn.Embedding))
 TARGETS: tuple[Target, ...] = (TARGET_LINEAR, TARGET_WITH_EMBEDDING)
 

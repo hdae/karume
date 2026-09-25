@@ -47,7 +47,7 @@ def _method(name: str) -> mq.Method:
 
 
 class TestSizeProjection:
-    """表に載る bpw の出どころ（`docs/ir-v2.md` の i4 格納形と OCP MX の逐語）。"""
+    """表に載る bpw の出どころ（`docs/container-v1.md` §6.3 の `int4-sym-g` と OCP MX の逐語）。"""
 
     @pytest.mark.parametrize("name", ["rtn-i4-g32", "fp4", "nf4"])
     def test_group_absmax_methods_land_on_five_bits(self, name):

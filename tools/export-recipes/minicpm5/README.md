@@ -4,6 +4,11 @@
 [0065](../../../docs/decisions/0065-exporter-core-recipe-split.md)) and they produce series, not
 distributions, so they have no dist recipe and no model card.
 
+The stack around them is not finished either: a public MiniCPM5 distribution and a published
+`MiniCPM5Pipeline` API are still pending. The recipes export MiniCPM5-1B only, so the MiniCPM5-2B
+series that the [MiniCPM5 CLI example](../../../examples/minicpm5/README.md) reads through
+`--source` cannot be produced here.
+
 Upstream provenance: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The authority for the design
 decisions is the module docstrings (`export.py`, `export_decode.py`); this file is the entry point
 only.
@@ -112,7 +117,8 @@ implemented only after the numbers are in. Three grids run in one pass:
   the upper bound of what a stored `zero_point` companion could recover, not a storable form
   (ADR 0069 decision 3).
 - **Method grid** — 7 rounding methods (RTN i4 / FP4 / NF4 / MXFP4 / k-means at three table
-  granularities) × 2 target sets (the 169 decoder linears, or those plus `embed_tokens` = 170).
+  granularities) × 2 target sets (the 168 decoder linears plus `lm_head` = 169, or those plus
+  `embed_tokens` = 170).
   `group_size` is fixed at 32 here: Phase 0 already answers the `g` axis, and sweeping both at once
   mixes the method difference with the `g` difference.
 - **Calibration grid** — 5 calibrated roundings (GPTQ against each of the three storage grids /
@@ -121,11 +127,11 @@ implemented only after the numbers are in. Three grids run in one pass:
   on the `nn.Linear` modules inside a stage. Calibration inputs are the 48 sentences of
   `calib_texts.py`.
 
-The reference sequences are the wave-E greedy records (`greedy.<case>.safetensors`), so no
-tokenizer is involved, and the baseline run has to reproduce them exactly before any quantized
-configuration is measured. stdout ends with **four markdown tables** (summary / quality / per-family
-weight RMSE / projected size) meant to be pasted into `docs/research/`; the size column is a
-projection from each method's formula, not a measurement.
+The reference sequences are the greedy records `export_decode` took behind its margin gate
+(`greedy.<case>.safetensors`), so no tokenizer is involved, and the baseline run has to reproduce
+them exactly before any quantized configuration is measured. stdout ends with **four markdown
+tables** (summary / quality / per-family weight RMSE / projected size) meant to be pasted into
+`docs/research/`; the size column is a projection from each method's formula, not a measurement.
 
 Four knobs:
 
