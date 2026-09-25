@@ -6,7 +6,8 @@
 // 同居 / `of` の食い違い / 欠番 / はみ出し / 別 dtype の混入）も、区間読みと sha256 検証も、
 // 実資産のある機でしか踏まれない。ここはそれを CPU だけで踏み切る席である。
 //
-// 鏡像の Python 側は `tools/exporter/tests/test_container.py` / `test_shards.py`。
+// 鏡像の Python 側は `tools/exporter/tests/test_container.py` と、`tools/exporter/tests/test_dist.py`
+// の `TestPartExpansion`（連番の part 列の展開・単一形と連番の同居の拒否）。
 
 import {
   assert,
