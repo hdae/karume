@@ -418,10 +418,12 @@ def karume_closure(entry: str) -> dict[str, list[str]]:
 class TestTheMigrationPathStaysIndependentOfTorch:
     """移行 CLI の import グラフに torch が現れない（F-12 の再発防止）。
 
-    NOTE: `python -c "import karume.migrate"` の `sys.modules` では測れない — パッケージの
-    `__init__` が公開面（`stored_model` など torch 側）を eager に import するので、どの
-    サブモジュールを import しても torch が載る。見たいのは**モジュールの依存方向**なので、
-    走査は境界の門と同じ `ast` で行う。
+    NOTE: 実行時の門（`import karume.migrate` の後の `sys.modules`）は
+    `tests/test_package_init.py` の `TORCH_FREE_MODULES` が持つ — パッケージの `__init__` が
+    公開面を初回参照で解決する（PEP 562）ので、サブモジュールの import だけでは torch が
+    載らない。こちらは**モジュールの依存方向**を `ast` で見る（関数内の遅延 import も拾う）。
+    2 本は互いの穴を埋める: `ast` は動的 import と外部パッケージ経由の torch を見ず、実行時の
+    門は呼ばれていない関数内の import を見ない。
     """
 
     def test_no_module_reachable_from_migrate_imports_torch(self) -> None:

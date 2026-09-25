@@ -31,13 +31,22 @@ EXPECTED_ORIGINS: dict[str, str] = {
     "verify_container": "karume.verify",
 }
 
-#: torch を要らないモジュール。配布・カード層（recipes の dist ドライバ）はこの連鎖だけで組む。
+#: torch を要らないモジュール。配布・カード層（recipes の dist ドライバ）はこの連鎖だけで組み、
+#: 移行 CLI（`karume migrate`）はこれに旧形の読み手・公開の 3 段・PLE / limits を足した連鎖で
+#: 組む。CLI の入口も dispatch を遅延しているので、import しただけでは torch を読まない。
 TORCH_FREE_MODULES: tuple[str, ...] = (
     "karume",
     "karume.dist",
     "karume.modelcard",
     "karume.container",
     "karume.verify",
+    "karume.migrate",
+    "karume.publish",
+    "karume.legacy",
+    "karume.ple",
+    "karume.limits",
+    "karume.artifacts",
+    "karume.cli",
 )
 
 #: 定義元が torch を要らない公開名（`EXPECTED_ORIGINS` のうち ir / container / verify の分）。
