@@ -31,7 +31,7 @@ torch.export → コンテナ `krm`〈IR v2〉・uv 管理）。設計の正本�
 - `tools/exporter/` — PyPI `karume` = **汎用 core のみ**（src layout・境界は machine gate —
   ADR 0065）/ `tools/export-recipes/` — モデル別 recipe（wheel 外・uv workspace 共有 venv・
   起動は `python -m <family>.<mod>`・dist は `export-recipes/dist.py`）。`examples/` は
-  README 整備予定（実装済みの範囲は `deno.json` の check タスクの列挙が正本・
+  各例に英語 README（実装済みの範囲は `deno.json` の check タスクの列挙が正本・
   `deno task verify` の対象）
 
 ## 検証コマンド（変更後は全て）
@@ -48,7 +48,7 @@ torch.export → コンテナ `krm`〈IR v2〉・uv 管理）。設計の正本�
   **sha 門の tolerance 化は禁止**（緩めた時点で移植の門の意味が消える）
 - exporter: `uv run pytest`（**tools/exporter と tools/export-recipes の両方で** — ADR 0065）
 - `models/` の配布形ミラーが無い機では `KARUME_ALLOW_NO_DISTRIBUTION=1` で門番を外せる
-  （QAT / quant の実資産 e2e は走らない）
+  （配布形を根にする実資産 e2e と融合ヒット数の検査は走らない）
 - git worktree は**リポ外**（例 `~/workspace/karume-wt-<名前>`）に作る — リポ内に置くと
   fmt / lint / test が worktree 側のファイルを誤拾いする（deno.json に exclude は設けない —
   2026-08-16 裁定）
