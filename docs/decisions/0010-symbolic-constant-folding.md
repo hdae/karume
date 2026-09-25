@@ -59,3 +59,8 @@ T 依存部分木）は、**エクスポータが Tmax（モデルの最大系�
   `arange(2*T)` を `[2,T]` に並べると第 2 行の先頭が T で動く。記号次元を持つ view は
   単位軸の増減だけを畳み、それ以外は入力側の prefix を切り出してから runtime の
   `reshape` で実行する。2 点評価の点数追加では対処しない。
+
+- 2026-09-24: 決定の「格納 dtype `i32`」は IR v1 の `storage` 語彙だったが、ADR
+  [0108](0108-container-format.md) 決定 17（IR v2 = IR v1 − `storage`）で格納の記述はグラフから
+  コンテナの束縛表へ移り、生の int32 は決定 12 の codec 台帳の登録名 `i32` になった。
+  initializer の意味論 i32 と、Tmax 実評価の焼き込み・`sym_prefix_slice` の決定は不変。

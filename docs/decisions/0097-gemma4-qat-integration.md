@@ -84,6 +84,9 @@ IR に `static_quantize` を追加する。入力・出力は f32 各 1 本、sh
 属性 `scale` は必須で、非負・有限かつ厳密に f32 で表せる JSON 数値だけを受理する。
 保存済み scale を暗黙に丸め直さず、負値・非有限値・f32 範囲外・丸めを要する値を拒否する。
 既存 op の属性規則は変更しない。旧 runtime は未知 op として拒否する。
+QAT の固定 SRQ はモデル自身の意味論なので IR op にする。ADR [0006](0006-quantization.md) の
+「量子化はグラフ意味論に入れない」（ADR 0025 決定 1 が IR op 化を却下した根拠）は PTQ の格納と
+実行ノブの射程で、本 op とは両立する（0006 の 2026-09-24 追記「骨格の射程」）。
 
 - scale > 0 の意味は、f32 除算 `x/scale` → 最近接の偶数への整数丸め → `[-128,127]` への飽和 → f32 乗算。
   scale=0（-0 を含む）は入力のビット列をそのまま返す。
@@ -267,3 +270,12 @@ karume の都合で公式と違う条件を取っているのではない。
 **今回の範囲に含めない**。起票だけを行い、次のタスクとして台帳が持つ。
 したがって追記 1 の「活性は丸めるだけ・計算は f32」という決定はそのまま有効で、
 CPU / GPU で token 列が分岐しうる性質も残る。
+
+## 追記 8 — コンテナ後の格納と PLE の置き場（2026-09-25）
+
+追記 1 の「IR v1 に格納 `i2`、safetensors の方言に `I2`・manifest は `karume/4` のまま」は、
+ADR [0108](0108-container-format.md) 以降は IR v2 の束縛表 `encoding` の codec `int2-off`（codec 台帳 —
+0108 決定 12 / 13・[container-v1](../container-v1.md) §6）が正本で、safetensors の方言 `I2` は受理しない。
+manifest は `karume/5` が同じ欄を引き継ぐ（ADR [0109](0109-manifest-v5-container.md) 決定 2）。
+追記 4 の PLE sidecar（schema 2・safetensors）は、コンテナの資産（索引 schema 3 と block 列）へ移った —
+正本は ADR [0085](0085-ple-host-gather.md) の 2026-09-22 追記。

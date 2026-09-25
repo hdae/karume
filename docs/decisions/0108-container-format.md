@@ -3,7 +3,8 @@
 - Status: accepted（2026-09-22 — 段 0 の成果物として proposed で起票し、同日の段 1 着手の裁定で
   accepted。codec 登録名 4 種（決定 13）も同時に確定。本 ADR と [container-v1](../container-v1.md) が正本）
 - Date: 2026-09-22
-- 対象（段ごとに触る面の宣言 — 現時点では 1 行も実装していない）:
+- 対象（段ごとに触る面の宣言 — 起票時点〈2026-09-22〉は未実装。2026-09-25 時点で段 3 まで実装済み —
+  追記 1〜5）:
   - 仕様: [docs/container-v1.md](../container-v1.md)（新設 — 物理形式の正本）/
     [docs/ir-v2.md](../ir-v2.md) → IR v2 へ改訂（`storage` の外出し・`scale` の rank 2 統一）
   - runtime: `packages/runtime/src/format/`（`container.ts` / `ir.ts` / `safetensors.ts` /
@@ -26,6 +27,18 @@
   - ADR [0081](0081-shard-spec-v2.md) 決定 1 / 3（shard 0 はグラフ専用・常時分割）
   - ADR [0090](0090-shard-spec-v3-tensor-pieces.md) **決定 2**（受理上限 `SHARD_BYTE_LIMIT` =
     256 MiB 1 本・ファイル長で測る）
+  - ADR [0003](0003-ir-v1.md) の「v0 から変えるもの 1」（initializer 単位の `storage` 記述を
+    グラフ JSON に持つ）— 決定 17 で束縛表の `encoding` へ移る
+  - ADR [0006](0006-quantization.md) 決定の「量子化は initializer の storage 記述（0003）に閉じる」
+    — 決定 17 で束縛表の `encoding` に閉じる
+  - ADR [0010](0010-symbolic-constant-folding.md) の格納 dtype `i32`（IR v1 の `storage` 語彙）
+    — 決定 12 の codec 台帳の `i32`
+  - ADR [0019](0019-i8-weight-execution.md) の scale の形と宣言（weight と同 rank の keepdim
+    broadcast 形・`storage.scale`・`group_size` が付けば拒否）と I8 の並び順（末尾）— 決定 11 の
+    rank 2 group 形 `[shape[rowAxis], 行長 / groupSize]`・`encoding.scale`・宣言の `rowAxis`
+    （per-channel codec は `groupSize` = 行長 MUST）と、決定 18 の safetensors 配置規則の退役
+  - 上の 4 本はいずれも**格納の記述**だけの上書きで、数値の契約（i8 は ±127 対称 per-channel・
+    scale は要素ごと dequant・bias は f32・意味論 dtype と格納の分離）は変えない
 - 関連: ADR [0038](0038-manifest-v1.md) §3 / §4（実行既定は manifest 所有・配布者に runtime の
   綴りを書かせない — この分担は**変えない**）/ [0041](0041-manifest-v2.md) /
   [0071](0071-manifest-v3-shards.md) / [0075](0075-quant-presentation.md)（manifest `karume/4` —
@@ -361,7 +374,8 @@ NOTE: 設計案 v2 はこの流儀の先例として `distribution.py:570` の�
 
 ### 15. 低 bit 化は**速度の理由にしない**
 
-decode は本機で帯域律速に**なっていない**（帯域利用率 11.5 / 25.5 % の実測）。低 bit codec を
+decode は RTX 3080 Ti（Chrome・2026-09-19）で帯域律速に**なっていない**（帯域利用率 11.5 / 25.5 % の実測 —
+出典・ADR 0105 後の再計算・未測の機は追記 7）。低 bit codec を
 速度目的で入れると、律速でない側を削ることになる。低 bit codec は **packed int8 活性
 （ADR 0105）が前提**であり、効くのは**メモリ**である（決定の Context 末尾の −40 % / −10 % /
 −15 %）。
@@ -635,7 +649,7 @@ descriptor を取るのが 2 周目になる）。
 3. **決定 8 の補足 — block の sha256 は未検証の取得元にだけ掛ける**。取得層がファイル全体を検証した
    バイト列（HF 経由）は `BlockSource` が検証済みと名乗り、`readBlock` は digest を掛けない
    （cold の 2 重 digest を避ける）。`fromContainer(bytes)` とローカルディレクトリ（ADR 0086 決定 2 —
-   sha256 を照合しない取得元）は block ごとに digest する。warm は従来どおり 0 回。block の sha256 は
+   hub がファイル全体の sha256 を照合しない取得元）は block ごとに digest する。warm は従来どおり 0 回。block の sha256 は
    段 6 の Range 取得で「届いた分だけ検証する」ための契約として残る（container-v1 §7 を訂正）。
 4. **追記 1 の 12 の訂正 — assets の受け口は段 2 に入れる**（段階分解表が正本）。小段の最後に置き、
    PLE は asset（役割 `ple-values` / `ple-scales` の block 列 — 区間読みの block は 1 block = 1 part — と
@@ -874,3 +888,34 @@ cold / warm / local × 3 回の中央値）で、ここは決めた点と検収�
    cold は今も「part 長 + 重ね合わせ」を超える（part 256 で irodori 582・gemma4 1,038・anima 1,139 MiB）。
    残りの原因は part 単位の全量読みそのもの（取得の粒度）で、条件は形式上成り立ったまま。前倒しするかは
    ここでは決めない。
+
+## 追記 6 — 却下案 4 の「律速は ALU 側」は誤引用（2026-09-25）
+
+却下案 4（base-243 三値）の根拠のうち「決定 15 の『律速は ALU 側』という実測に照らして悪化方向」は撤回する。
+決定 15 の本文は「帯域律速ではない」としか言っておらず、出典の
+[研究記録 2026-09-19](../research/2026-09-19-qat-speed-recon.md) は §1 で「帯域律速でも演算律速でもない」、
+§14.1 で「語あたり ALU を 83 % 削っても down 形は 0.3 %」と測った。時間を食うのは活性のロード本数で、
+算術が効くのは lm_head 形（36 %）と gate / up 形（23 %）だけである。却下の結論は変わらない — 2 冪の
+不変条件が 2 つ壊れることと、行長 `K` に `% 5` の整除条件が要る（gemma4 の実形はどれも 5 で割れない）
+ことだけで成立する。
+
+## 追記 7 — 決定 15 の帯域利用率の出典と再計算（2026-09-25）
+
+- **出典**: [研究記録 2026-09-19](../research/2026-09-19-qat-speed-recon.md) §4 の roofline。機は RTX 3080 Ti
+  （帯域 912 GB/s）、GPU 時間は Chrome の pass 境界 timestamp（QAT 7.47 ms・通常 6.28 ms）。本 ADR の起票時
+  （2026-09-22）の開発機は Intel Arc B570 に替わっていたので、決定 15 の「本機」は RTX 3080 Ti に直した。
+- **ADR 0105（packed int8 活性）後の再計算**（式 = 読むバイト ÷ 912 GB/s ÷ 実測 GPU 時間）: QAT は
+  825 MB → 0.905 ms ÷ 6.63 ms ≈ **13.6 %**、通常は 1,577 MB → 1.729 ms ÷ 6.21 ms ≈ **27.8 %**。6.63 ms は
+  研究記録 §16 の 2 回目（packed on）、6.21 ms は §13.2 の値で、**別セッションの測定**を組み合わせている。
+  結論（帯域律速ではない）は RTX では今も成り立つ。
+- **表の数値の自己整合**: 同じ式を §4 の表の列（0.905 ms / 7.47 ms・1.729 ms / 6.28 ms）に当てると 12.1 % /
+  27.5 % になり、表の 11.5 % / 25.5 % とは一致しない。どちらでも結論は変わらない。
+- **未測**: Arc B570（帯域は RTX の約 4 割）と Apple M2 の帯域利用率は無い（推測: B570 では利用率が上がりうる）。
+  B570 で測るなら Chrome で採る — Deno の timestamp は B570 で過小に出る既知の問題がある（docs/known-issues.md）。
+
+## 追記 8 — `fromContainer` の実名（2026-09-25）
+
+本文（決定 7 / 8 / 9）と追記 2 の 3 に残る `fromContainer(bytes)` は段 0 時点の名前で、実装の口は
+`openContainer` の `{ kind: "bytes" }` 入力（`packages/runtime/src/format/container/open.ts` の
+`ContainerInput`）である。本文は書き換えず、この口と読み替える（追記 4 の 7 と同じ扱い）。読み替えの記録は
+ADR [0109](0109-manifest-v5-container.md) 追記 2 にもある。

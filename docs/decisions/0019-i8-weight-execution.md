@@ -81,3 +81,20 @@
   perf で裁定。
 - 全ターゲット一括 i8 系列: VAE/text 層の削減量が小さく検証コストだけ増える。
   transformer 単独 + tiny golden 被覆で足りる。却下。
+
+## 追記（2026-09-24）— scale の形と宣言は ADR 0108 が上書きした
+
+決定のうち**格納の記述**に当たる次の 3 点は、ADR [0108](0108-container-format.md) 決定 11 / 17 / 18
+（2026-09-22 以降・IR v2 とコンテナ `krm`）が上書きした。
+
+- scale の形と宣言: 「weight と同 rank の keepdim broadcast 形・IR v1 の `storage.scale` で宣言」→
+  束縛表の `encoding.scale` が指す rank 2 group 形 `[shape[rowAxis], 行長 / groupSize]`（per-channel
+  の i8 は `[N, 1]`）。チャネル軸は宣言の `rowAxis`（`conv_transpose1d` の i8 だけ 1）で、GPU 常駐の席
+  では消費 op から導いた軸と突き合わせる（[glossary](../glossary.md) の `rowAxis` 行）。
+- `group_size`: 「付いていれば実行拒否」→ per-channel codec（`int8-sym`）は `groupSize` = 行長 MUST
+  （[container-v1](../container-v1.md) §6）。per-channel を group 形の特殊例として同じ欄で表す。
+- I8 の並び順「末尾」: safetensors の物理配置規則（ADR 0063）ごと退役した。
+
+数値の契約は変えない: i8 は ±127 対称 per-channel（zero-point なし）・scale は要素ごとの
+読み出し時 dequant（`out = Σ x·(q·s) + bias`）・GPU と CPU 展開のビット一致・bias は f32・
+平坦添字・fake-quant 規律は現行のまま有効。

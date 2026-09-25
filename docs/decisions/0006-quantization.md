@@ -4,7 +4,8 @@
 - 改訂（「格納のみ量子化・計算は f32」の骨格は現行）: ADR
   [0009](0009-dtype-i32-bool.md) — 「IR の宣言 dtype は常に f32」は意味論 i32 / bool の
   解禁で当時の値になった / ADR [0031](0031-attention-score-f16-storage.md) 決定 7 —
-  「活性 f16: 不採用」を attention スコア S の**格納に限定して**上書き。
+  「活性 f16: 不採用」を attention スコア S の**格納に限定して**上書き。骨格の射程（計算側の
+  opt-in と QAT の固定 SRQ）と、storage 記述の置き場の移転（ADR 0108）は末尾の追記。
 - 根拠資料: recon §6。方式の採否は先行実験プロジェクト（以下プロトタイプ）の実測裁定
   （試聴・SNR・精度ゲート）を継承。
 
@@ -48,3 +49,36 @@
 - w8a8（DP4a、GEMM 4.73× の候補）: 保留。DP4a は言語機能列挙が HW 対応と無関係のため
   **起動時マイクロベンチの実測で経路選択**し、精度ゲート定義とセットで個別 ADR にする。
 - 活性 f16: 不採用（検証の切り分けが濁る）。
+
+## 追記（2026-09-24）— storage 記述の置き場は ADR 0108 が上書きした
+
+決定 1 の「量子化は initializer の storage 記述（0003）に閉じる」の**置き場**は、ADR
+[0108](0108-container-format.md) 決定 17（IR v2 = IR v1 − `storage`）で、グラフ JSON から
+コンテナの束縛表の `encoding`（codec 台帳の登録名・`rowAxis` / `groupSize` / `scale`）へ移った。
+量子化がグラフの外（格納の記述）に閉じるという構造は不変で、格納の記述がグラフから束縛表へ
+出ただけである。数値の契約（格納のみ量子化・計算は f32・i8 は ±127 対称 per-channel・
+bias は f32）は変えない。
+
+## 追記（2026-09-24）— 骨格の射程（既定経路・計算側の opt-in・QAT）
+
+本 ADR の骨格「格納のみ量子化・計算は f32・量子化はグラフ意味論に入れない」は、次の 3 層の
+うち**既定経路**の決定として読む。後続の決定はこの骨格の外側に立つが、骨格を覆してはいない。
+
+- **既定経路（本 ADR）**: 格納のみ量子化・f32 計算。runtime の `SessionOptions` の実行変種は
+  全て既定が f32 の参照経路（ADR [0058](0058-numerics-opt-in-contract.md) の一般契約）。
+- **計算側の opt-in の実行ノブ**: 活性や計算精度を落とす変種は、グラフを変えない実行時の
+  named option として足す — w8a8 の `linearCompute: "i8a8"`（ADR
+  [0025](0025-w8a8-linear-execution.md)）・f16 計算変種 `:c16`（ADR
+  [0028](0028-f16-compute-variants.md)）・attention a8（ADR
+  [0030](0030-attention-a8-execution.md)）・w4a8（ADR [0076](0076-w4a8-linear-execution.md)）・
+  固定 SRQ 活性の packed int8 受け渡し（ADR [0105](0105-packed-static-quantize-activations.md)）。
+  配布資産側が既定の実行形を選ぶ場合も manifest の quant 席が宣言する（グラフは不変）。
+- **QAT の固定 SRQ はモデル自身の意味論**: 公式 QAT の活性の丸めは学習時からモデルの計算の
+  一部なので、IR op `static_quantize` として**グラフに入る**（ADR
+  [0097](0097-gemma4-qat-integration.md) 追記 2・ADR 0108 決定 17「QAT は別グラフのまま」）。
+  PTQ の格納（本 ADR の射程）とは別物で、ADR 0025 決定 1 が IR op 化を却下した理由
+  （「量子化はグラフ意味論に入らない」）は PTQ の実行ノブにだけ掛かる。
+
+不採用・保留節の「w8a8 … 起動時マイクロベンチの実測で経路選択」は当時の予告で、実装は
+ADR 0025 決定 5（dp4a とエミュの 2 変種は数値完全一致なので、`wgslLanguageFeatures` の列挙で
+速度のためにだけ選ぶ — 起動時ベンチは行わない）が正本である。
