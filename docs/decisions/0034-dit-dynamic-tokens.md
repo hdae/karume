@@ -82,3 +82,13 @@ cos/sin 表 `[1,1,S,128]` ×2）。IR の次元言語（1 次元 1 シンボル�
 - models/anima-turbo-f16-1024 は削除済みのため 1024px の主門対は i8 系列で張った
   （解像度の網は 512/1024 で閉・dtype の網は 512px 対で閉）。f16×1024 の対が要る時は
   再 emit（3.7GB・3 分）で張れる。
+
+## 追記（2026-09-24）— rope 素表の置き場は容器の資産 `rope_base`
+
+決定 3 の「素表は独立ファイル `rope_base.safetensors`」は置き場だけが変わった。ADR
+[0109](0109-manifest-v5-container.md) 決定 4 で manifest の `extras` は退役し、素表は
+`transformer` 容器の資産 `rope_base`（役割 `rope-base`）になった。部品差し替え（`components`）で
+transformer を差し替えると、素表も差し替えた容器から来る（manifest から別に DL される
+ファイルではない）。payload のバイト列は従来どおり safetensors 形式で、読み手は
+`parseSafetensors` で読む。決定 3 の本体（計算ではなく軸別素表の並べ替え・66KB・
+解像度非依存・行数 128 の天井）は不変。
