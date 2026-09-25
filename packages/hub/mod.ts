@@ -37,7 +37,7 @@
  * | 0.4.x | `karume/3` | dtype エントリの shard 欄（ADR 0071） |
  * | 0.5.x 〜 0.12.x | `karume/4` | quant の表示欄 + `requiredLimits`（ADR 0075 / 0038 §7）・
  * ファイル参照の越境席（`repo` / `revision`）・`session` の計算ノブ値 `i8a8` → `a8`（ADR 0074） |
- * | 次のリリース | `karume/5` | 配布形がコンテナ（`krm`）へ — dtype エントリが `{ container }`
+ * | 0.13.x | `karume/5` | 配布形がコンテナ（`krm`）へ — dtype エントリが `{ container }`
  * （descriptor の期待値 + part の FileRef 列）になり、`shards` / `extras` は退役（ADR 0109） |
  *
  * 配布形を上げ直す手順は `docs/release-runbook.md`。
