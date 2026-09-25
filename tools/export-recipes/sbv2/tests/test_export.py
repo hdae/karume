@@ -1784,4 +1784,16 @@ class TestTheVoiceFamilyIsDecidedByAnAllowList:
         provenance = export_sbv2.sbv2_provenance(Path("inputs/sbv2") / name)
 
         assert provenance.license == SBV2_CARD_PROFILES[family].metadata.license
-        assert provenance.upstream_revision == SBV2_CARD_PROFILES[family].source_version
+        assert provenance.upstream_revision == SBV2_CARD_PROFILES[family].source_revision
+
+    def test_the_revision_seat_carries_a_commit_sha_not_the_config_version(self) -> None:
+        """`upstreamRevision` は上流 checkpoint の revision（container-v1 §2.3）。
+
+        config の `version`（`2.0-JP-Extra`）は同じ世代の全モデルで共通なので checkpoint を
+        識別できない — minicpm5 が同じ席へ SHA を書く以上、欄の意味を割らない（W-RC5-3）。
+        """
+        provenance = export_sbv2.sbv2_provenance(Path("inputs/sbv2") / "F1")
+
+        assert provenance.upstream_revision is not None
+        assert re.fullmatch(r"[0-9a-f]{40}", provenance.upstream_revision)
+        assert provenance.upstream_revision != SBV2_CARD_PROFILES["jvnv"].source_version

@@ -102,8 +102,14 @@ class Sbv2CardProfile:
     title: str
     #: 出所リポジトリの中で、この配布形の声になったディレクトリ群。
     source_dirs: tuple[str, ...]
-    #: 出所の `config.json` が名乗る version 文字列。
+    #: 出所の `config.json` が名乗る version 文字列（SBV2 の世代 — checkpoint は識別しない）。
     source_version: str
+    #: 出所リポジトリの commit SHA（容器の `provenance.upstreamRevision` — container-v1 §2.3 の
+    #: 「上流 checkpoint の revision」）。{@link source_version} とは別の事実で、同じ席へ入れない
+    #: （version は同じ世代の全モデルで共通なので checkpoint を識別できない — 2026-09-24 全域
+    #: レビュー W-RC5-3）。取得した revision を確認できていないファミリーは `None`（容器は
+    #: revision を名乗らない — 推測の値を焼かない）。
+    source_revision: str | None
     #: Voices / Architecture に続く帰属の箇条（Markdown の行そのもの）。
     attribution: tuple[str, ...]
 
@@ -131,6 +137,10 @@ SBV2_FN_PROFILE = Sbv2CardProfile(
     title="Style-Bert-VITS2 — Karume",
     source_dirs=("FN/",),
     source_version="2.6.1-JP-Extra",
+    # 未確認: HF キャッシュの `refs/main`（`4fe4895a…`）は 2026-08-09 の FN1〜FN10 の取得時に
+    # 書かれたもので、配布の既定モデル FN4 は 2026-08-07 の別の取得。同じ revision だった根拠が
+    # 無いので名乗らない。
+    source_revision=None,
     attribution=(
         "- **Source**: converted from the author's Style-Bert-VITS2 voice-model set distributed",
         f"  on [Booth]({SBV2_FN_METADATA.license_link}) so it runs on this stack. See that page",
@@ -176,6 +186,10 @@ SBV2_JVNV_PROFILE = Sbv2CardProfile(
     title="Style-Bert-VITS2 JVNV — Karume",
     source_dirs=("jvnv-F1-jp/", "jvnv-F2-jp/", "jvnv-M1-jp/", "jvnv-M2-jp/"),
     source_version="2.0-JP-Extra",
+    # `litagin/style_bert_vits2_jvnv` の取得時の main（HF キャッシュの `refs/main` — 2026-08-09
+    # 08:07:52 に書かれた値で、4 声の取得〈08:07:32〜08:08:02・`inputs/sbv2/{F1,F2,M1,M2}`〉の
+    # 最中。2026-09-25 に現物で確認）。
+    source_revision="205830ca1d49e666ddfbf2a755f0108e9cade4dd",
     attribution=(
         f"- **Terms**: **[CC BY-SA 4.0]({SBV2_JVNV_LICENSE_URL})**, inherited from the JVNV"
         " corpus the",

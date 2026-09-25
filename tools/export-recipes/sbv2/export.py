@@ -189,8 +189,9 @@ def sbv2_provenance(model_dir: Path) -> Provenance:
     profile = SBV2_CARD_PROFILES[sbv2_family(model_dir)]
     return Provenance(
         license=profile.metadata.license,
-        # 上流 checkpoint の版（カードが名乗る `source_version` — 既に在る値だけを渡す）。
-        upstream_revision=profile.source_version,
+        # 上流 checkpoint の revision（commit SHA）。config の `version`（`source_version`）は
+        # SBV2 の世代で checkpoint を識別しないので、この席へは入れない（container-v1 §2.3）。
+        upstream_revision=profile.source_revision,
     )
 
 
