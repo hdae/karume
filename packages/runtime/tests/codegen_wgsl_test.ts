@@ -14,7 +14,7 @@ import {
 } from "../src/codegen/elementwise.ts";
 import { CodegenError } from "../src/codegen/errors.ts";
 import { GRU_SCAN_MAX_HIDDEN } from "../src/codegen/limits.ts";
-import { TANH_SATURATION } from "../src/codegen/numerics-wgsl.ts";
+import { IS_NAN_BITS_WGSL, TANH_SATURATION } from "../src/codegen/numerics-wgsl.ts";
 import {
   AXIS_REDUCE_WORKGROUP_SIZE,
   axisReduceKey,
@@ -173,6 +173,7 @@ import {
   RMS_NORM_KEY,
   RMS_NORM_WGSL,
   RMS_NORM_WORKGROUP_SIZE,
+  rmsNormAddWgsl,
   rmsNormParams,
 } from "../src/kernels/rms-norm.ts";
 import {
@@ -493,6 +494,11 @@ Deno.test("生成した WGSL がスナップショットとバイト単位で一
     ["adaln_norm.wgsl", ADALN_NORM_WGSL],
     ["rms_norm.wgsl", RMS_NORM_WGSL],
     ["rms_norm_128.wgsl", RMS_NORM_128_WGSL],
+    // RMS→add 融合（ADR 0099）。**素の rms_norm と対で置く**のが条件で、2 順序とも丸め障壁
+    // （uniform の 0 との整数 XOR）が生成物に残っていることをバイト列で凍結する（定数式の
+    // bitcast 往復へ簡略化されると融合側だけ丸めが変わる）。
+    ["rms_norm_add_nr.wgsl", rmsNormAddWgsl("norm-residual")],
+    ["rms_norm_add_rn.wgsl", rmsNormAddWgsl("residual-norm")],
     ["rms_norm_subgroup32.wgsl", rmsNormSubgroupWgsl()],
     ["rms_norm_add_subgroup32_nr.wgsl", rmsNormSubgroupWgsl("norm-residual")],
     ["rms_norm_add_subgroup32_rn.wgsl", rmsNormSubgroupWgsl("residual-norm")],
@@ -990,6 +996,9 @@ Deno.test("同じ生成入力からは常に同一の WGSL が出る（全 op ×
   }
   for (const order of (["x-sigmoid", "sigmoid-x"] as const)) {
     assertEquals(siluWgsl(order), siluWgsl(order), `silu:${order}`);
+  }
+  for (const order of (["norm-residual", "residual-norm"] as const)) {
+    assertEquals(rmsNormAddWgsl(order), rmsNormAddWgsl(order), `rms_norm_add:${order}`);
   }
   assertEquals(
     embeddingWgsl("i4", 32),
@@ -1787,7 +1796,7 @@ Deno.test("双線形 resample は出力 1 要素 = 1 スレッドで、末尾タ
 Deno.test("DCNv2 は範囲判定を正の形で書き、NaN をビット列で分けて伝播させる", () => {
   assertEquals(
     DEFORM_CONV2D_KEY,
-    `deform_conv2d:v1:nchw:f32:dcnv2:wg${DEFORM_CONV2D_WORKGROUP_SIZE}`,
+    `deform_conv2d:v2:nchw:f32:dcnv2:wg${DEFORM_CONV2D_WORKGROUP_SIZE}`,
   );
   assertEquals(DEFORM_CONV2D_WORKGROUP_SIZE, 256);
   // MUST: 範囲判定は正の形（NaN は false 側へ落ちる）。負の形（`<= -1 ||`）に書き換えると
@@ -1799,10 +1808,13 @@ Deno.test("DCNv2 は範囲判定を正の形で書き、NaN をビット列で�
     true,
   );
   // MUST: NaN はビット列で判定して**伝播**させる（正の形だけだと 0 寄与に落ちる）。
+  // 判定は共有断片の正本 1 本を注入する（ADR 0020 — 写しを持つと正本の改訂に取り残される）。
+  assertEquals(DEFORM_CONV2D_WGSL.includes(IS_NAN_BITS_WGSL), true, "共有断片を注入していない");
   assertEquals(
-    DEFORM_CONV2D_WGSL.includes("return (bitcast<u32>(v) & 0x7fffffffu) > 0x7f800000u;"),
+    DEFORM_CONV2D_WGSL.includes("if (is_nan_bits(sy) || is_nan_bits(sx)) {"),
     true,
   );
+  assertEquals(DEFORM_CONV2D_WGSL.includes("fn is_nan("), false, "NaN 判定の写しが残っている");
   assertEquals(DEFORM_CONV2D_WGSL.includes("return bitcast<f32>(dims.oob);"), true);
   // MUST: NaN のビット列は params で運ぶ（定数式の `bitcast<f32>(0x…)` は「const-expression が
   // NaN」としてシェーダ生成エラーにする実装がありうる — gather / embedding と同じ規律）。
