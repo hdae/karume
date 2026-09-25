@@ -32,29 +32,69 @@ LOG=$ROOT/outputs/release/upload-$NAME.log
 mkdir -p "$ROOT/outputs/release"
 cd "$ROOT"
 
+# HF が LFS / xet を通さず git の通常 blob として持てるファイルの上限（10 MiB）。これ未満で
+# x-xet-hash を持たないファイルは xet に載っていない = 断片化の概念が無いので SKIP 行にする。
+# これ以上のファイルは xet に載るはずなので、ハッシュが無ければ FAILED にする。
+NON_XET_MAX_BYTES=$(( 10 * 1048576 ))
+
 # 全 safetensors / krm の reconstruction terms 表（healthy なら 1 xorb = 1 term に近い・目安 ≥10 MiB/term）。
 # MUST: ローカルミラーが 0 件なら非 0 で落ちる。usage は「公開済みリポの全 safetensors / krm」を名乗る
 # 一方で列挙するのは models/<repo> なので、手元にミラーが無いと 0 周して空表を成功として出す —
 # 「検証したが問題なし」と「何も検証していない」が同じ見え方になる（runbook §2 は全件を要求する）。
+# MUST: 同じ理由を行の粒度でも守る。ハッシュや reconstruction を取れなかった行を黙って進めると
+# terms=0 → MiB/term = size（表で最も健全な値）の行が出て、検証していない part が合格に見える。
+# 取れなかった行は `### FAILED <rel>` を出し、表を最後まで出してから非 0 で返す。
 fragmentation_table() {
-  local tok cas casUrl access f rel hash stats terms xorbs size
+  local tok cas casUrl access f rel headers hash recon stats terms xorbs size failed=0
   # (N.OL) = 該当なしなら空配列 / 通常ファイルのみ / サイズ降順（`ls -S` の並びと word splitting を兼ねる）。
   local files=(models/$NAME/**/*.(safetensors|krm)(N.OL))
   if (( ${#files} == 0 )); then
     echo "### models/$NAME に .safetensors / .krm が 1 本も無い（断片化を検証していない — ミラーを置くこと）"
     return 1
   fi
-  tok=$(curl -sS "https://huggingface.co/api/models/$OWNER/$NAME/xet-read-token/main")
-  cas=$(echo "$tok" | deno eval 'const t=JSON.parse(await new Response(Deno.stdin.readable).text()); console.log(t.casUrl+" "+t.accessToken)')
+  # token の取得失敗は全行が同じ理由で落ちるので、行ごとの FAILED に散らさず表の前で落とす。
+  if ! tok=$(curl -sSf "https://huggingface.co/api/models/$OWNER/$NAME/xet-read-token/main"); then
+    echo "### FAILED xet-read-token を取れない（$OWNER/$NAME）— 断片化を検証していない"
+    return 1
+  fi
+  if ! cas=$(print -r -- "$tok" | deno eval 'const t=JSON.parse(await new Response(Deno.stdin.readable).text()); if (typeof t.casUrl!=="string"||typeof t.accessToken!=="string") Deno.exit(1); console.log(t.casUrl+" "+t.accessToken)'); then
+    echo "### FAILED xet-read-token の応答に casUrl / accessToken が無い（$OWNER/$NAME）— 断片化を検証していない"
+    return 1
+  fi
   casUrl=${cas%% *}; access=${cas##* }
   for f in $files; do
     rel=${f#models/$NAME/}
-    hash=$(curl -sS -I -L "https://huggingface.co/$OWNER/$NAME/resolve/main/$rel" | grep -i '^x-xet-hash:' | awk '{print $2}' | tr -d '\r')
-    stats=$(curl -sS -H "Authorization: Bearer $access" "$casUrl/v1/reconstructions/$hash" | deno eval 'const t=JSON.parse(await new Response(Deno.stdin.readable).text()); const terms=t.terms??[]; console.log(terms.length+" "+new Set(terms.map(x=>x.hash)).size)')
-    terms=${stats%% *}; xorbs=${stats##* }
     size=$(stat -c %s "$f")
-    printf '### fragmentation %-52s %5d MiB terms=%4d xorbs=%3d MiB/term=%.1f\n' "$rel" $(( size / 1048576 )) $terms $xorbs $(( size / 1048576.0 / (terms>0?terms:1) ))
+    if ! headers=$(curl -sSf -I -L "https://huggingface.co/$OWNER/$NAME/resolve/main/$rel"); then
+      echo "### FAILED $rel HEAD に失敗（HF に無い part か取得の失敗）"
+      failed=1; continue
+    fi
+    hash=$(print -r -- "$headers" | grep -i '^x-xet-hash:' | awk '{print $2}' | tr -d '\r')
+    if [[ -z $hash ]]; then
+      if (( size < NON_XET_MAX_BYTES )); then
+        echo "### SKIP $rel xet に載っていない小さいファイル（$size バイト — 断片化の対象外）"
+      else
+        echo "### FAILED $rel x-xet-hash が無い（$(( size / 1048576 )) MiB — xet に載っているはずの大きさ）"
+        failed=1
+      fi
+      continue
+    fi
+    if ! recon=$(curl -sSf -H "Authorization: Bearer $access" "$casUrl/v1/reconstructions/$hash"); then
+      echo "### FAILED $rel reconstruction の取得に失敗（hash $hash）"
+      failed=1; continue
+    fi
+    if ! stats=$(print -r -- "$recon" | deno eval 'const t=JSON.parse(await new Response(Deno.stdin.readable).text()); if (!Array.isArray(t.terms)) Deno.exit(1); console.log(t.terms.length+" "+new Set(t.terms.map(x=>x.hash)).size)'); then
+      echo "### FAILED $rel reconstruction の応答に terms が無い（hash $hash）"
+      failed=1; continue
+    fi
+    terms=${stats%% *}; xorbs=${stats##* }
+    if (( terms <= 0 )); then
+      echo "### FAILED $rel reconstruction の term が 0 本（hash $hash）"
+      failed=1; continue
+    fi
+    printf '### fragmentation %-52s %5d MiB terms=%4d xorbs=%3d MiB/term=%.1f\n' "$rel" $(( size / 1048576 )) $terms $xorbs $(( size / 1048576.0 / terms ))
   done
+  return $failed
 }
 
 # 今回の upload 以降の `###` 行を端末へ要約する（成功でも失敗でも同じ形で出す）。
