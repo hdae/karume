@@ -1,4 +1,4 @@
-"""実重み DACVAE（Semantic-DACVAE-Japanese-32dim）を IR v1 コンテナ + golden io へ書き出す台本。
+"""実重み DACVAE（Semantic-DACVAE-Japanese-32dim）を IR v2 コンテナ + golden io へ書き出す台本。
 
 recon の G6（decoder）/ G7（encoder）で、Irodori-TTS v4 の**コーデック段**にあたる。テキスト側
 6 ターゲットは `irodori/export.py`、ホスト側の latent までの経路は
@@ -751,7 +751,7 @@ def _main_path_evidence(
 #: ブロッキング（= 縮約順）を変えるため、ビット一致は仕様保証の無い実装挙動（実測でも
 #: スレッド数 6 で 1 ulp 差・8 で 0 と揺れる — テスト追加で global RNG 列がずれた途端に
 #: 割れた）。門の目的は mean / scale の取り違え検出で、取り違えの差は O(1) — この許容で
-#: 判別力は落ちない（取り違えが落ち続けることは `tests/test_irodori/dacvae/export.py` が固定する）。
+#: 判別力は落ちない（取り違えが落ち続けることは `irodori/dacvae/tests/test_export.py` が固定する）。
 IN_PROJ_TRUNCATION_ATOL = 3e-7
 
 

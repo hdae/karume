@@ -22,8 +22,8 @@ questions it has to answer.
   replaces class attributes and self-reports that the untouched parts of the replaced forwards are
   verbatim.
 - **Text backbone** — [sbintuitions/modernbert-ja-310m](https://huggingface.co/sbintuitions/modernbert-ja-310m),
-  the ModernBERT-ja checkpoint the text encoder was built from, re-distributed inside the Karume
-  repository. Its modeling code comes from `transformers` (pinned `transformers==5.14.1`).
+  the ModernBERT-ja checkpoint the text encoder was built from, re-distributed inside the Irodori
+  distribution repositories. Its modeling code comes from `transformers` (pinned `transformers==5.14.1`).
 - **Codec weights** — [Aratako/Semantic-DACVAE-Japanese-32dim](https://huggingface.co/Aratako/Semantic-DACVAE-Japanese-32dim),
   also re-distributed.
 - **Codec implementation** — <https://github.com/facebookresearch/dacvae>, pinned at commit

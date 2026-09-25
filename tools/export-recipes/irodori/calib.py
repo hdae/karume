@@ -13,7 +13,7 @@ scale 台帳の中身だけで、emit 側の格納経路も配布形のバイト
    **配布ラッパ（`irodori.export.DitGraph`）の FQN 空間でもある** — ラッパは DiT の部分木を
    `self.blocks` / `self.in_proj` / `self.out_proj` / `self.cond_module` と**同じ属性名**で
    抱える（`irodori.export.TARGET_SCALE_SOURCES` の `dit` 行が張り替え無しなのはこのため）。
-   ここが外れると scale 台帳のキーが safetensors のテンソルキーと空振りする。
+   ここが外れると scale 台帳のキーが容器の initializer 名（= 束縛表の鍵）と空振りする。
 2. **先頭 stage への入力** — {@link capture_stage_batches} が**参照 denoise を実際に回して**
    先頭 block への `(args, kwargs)` を forward_pre_hook で捕まえる。自前で組み直さないのは
    計測リグ（`irodori.measure_quant`）と同文で、拡散モデルでは加えて「活性が t で動く」ので

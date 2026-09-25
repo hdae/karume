@@ -11,7 +11,7 @@ Transformer 系（speaker encoder = `ReferenceLatentEncoder` / duration predicto
    同じ 3 本に落ちる（下の `_flat_qkv_attention_forward` の同値の根拠）。
 2. **complex 形 RoPE の実数化** — 原実装（`irodori_tts.model.apply_rotary_emb`）は
    `view_as_complex` で `[B,S,H,D/2]` の complex64 を作り、complex 乗算してから
-   `view_as_real` で戻す。complex は IR v1 の dtype 語彙に無く、実数対の rank 5
+   `view_as_real` で戻す。complex は IR の dtype 語彙に無く、実数対の rank 5
    （`[B,S,H,D/2,2]`）に開くと今度は rank 上限に当たる。**rank 4 のまま**「隣接ペアの入れ替え
    + cos/sin の要素倍」で書き直す（下の `_real_pair_apply_rotary_emb` の同値の根拠）。
 3. **rank-2 weight の RMSNorm を rms_norm + mul へ分割** — q/k ノルムの weight は

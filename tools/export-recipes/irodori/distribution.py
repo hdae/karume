@@ -73,7 +73,7 @@ IRODORI_SERIES_PREFIX = "irodori"
 IRODORI_PIPELINE = "irodori/1"
 
 #: チェックポイント（`inputs/irodori/<モデル名>/`）のファイル名と、`__metadata__` が持つ
-#: config の綴り。どちらも `irodori/export.py`（`MODEL_FILE` / `MODEL_CONFIG_META_KEY`）と同じ
+#: config の綴り。どちらも `irodori/export.py`（`CHECKPOINT_FILE` / `MODEL_CONFIG_META_KEY`）と同じ
 #: — 重みが実際に構成されたときの形の正本はチェックポイントの中にある（HF から引き直さない）。
 IRODORI_CKPT_FILE = "model.safetensors"
 IRODORI_CONFIG_META_KEY = "config_json"
@@ -833,6 +833,10 @@ IRODORI_COPYRIGHTS: tuple[str, ...] = (
     "Copyright (c) 2025 SB Intuitions",
 )
 
+#: Apache 2.0 が掛かる部品（manifest の weights のキー = {@link IRODORI_CODEC_DIRS} のキー）。
+#: NOTICE と `LICENSE.md` の見出しが同じ 1 語から組む — 片方だけが別の部品を指す形にしない。
+_IRODORI_CODEC_COMPONENTS = " / ".join(f"`{role}`" for role in IRODORI_CODEC_DIRS)
+
 #: 改変告知。MIT は要求しないが、格納形を変えて量子化した配布形であることは利用者が最初に
 #: 確かめたい事実なので、`LICENSE.md` と同じ席で 1 枚出す。コーデックの重みは上流が
 #: `facebook/dacvae-watermarked`（Apache 2.0）由来と書いており、Apache 2.0 §4(b) は改変した
@@ -855,9 +859,6 @@ IRODORI_COPYRIGHTS: tuple[str, ...] = (
 #: manifest 検査も素通りし、配ってからでないと食い違いに気づけない。部品名は
 #: {@link IRODORI_WEIGHTS} のキー（= manifest の weights）から組み、同梱する上流 2 本は
 #: カードと同じ定数から引く。
-#: Apache 2.0 が掛かる部品（manifest の weights のキー = {@link IRODORI_CODEC_DIRS} のキー）。
-#: NOTICE と `LICENSE.md` の見出しが同じ 1 語から組む — 片方だけが別の部品を指す形にしない。
-_IRODORI_CODEC_COMPONENTS = " / ".join(f"`{role}`" for role in IRODORI_CODEC_DIRS)
 
 IRODORI_NOTICE_MARKDOWN = f"""# NOTICE
 
@@ -940,7 +941,8 @@ PIPELINE = Pipeline(
     default_model=IRODORI_DEFAULT_MODEL,
     repo_name=irodori_repo_name,
     plan=irodori_dist_plan,
-    # 帰属は 1 通りだけ（上流 1 リポの重みを格納形へ落とし直したもの）— 選択肢が無いので
+    # 帰属プロファイルは 1 通りだけ（本体 + text backbone + コーデック〈+ その元の Apache 2.0 の
+    # 重み〉の組はどのモデルでも同じで、変わるのは本体の上流リポだけ）— 選択肢が無いので
     # 省略で通る。2 つ目のファミリーが生えた瞬間に明示が要求されはじめる。
     card_profiles={"irodori": render_irodori_model_card},
     # 上流ライセンス（MIT・コーデックの元の重みの Apache 2.0）の再配布条件は配布リポ 1 つに

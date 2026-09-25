@@ -1,8 +1,8 @@
-"""実重み Irodori-TTS v4-Small を IR v1 コンテナ + golden io へ書き出す台本。
+"""実重み Irodori-TTS v4-Small を IR v2 コンテナ（`krm`）+ golden io へ書き出す台本。
 
 今回のスコープは**テキスト条件エンコーダ**（recon の G1 / G1a / G1b）・**speaker encoder /
 duration predictor**（同 G2 / G3）・**DiT 1 step**（同 G5' = G4 を畳んだ形・ADR 0047）で、
-codec（G6 / G7）は後続の波でこの台本にターゲットとして足す。
+codec（G6 / G7）は別台本 `irodori/dacvae/export.py` が書き出す。
 
     cd tools/export-recipes
     uv run --with 'transformers==5.14.1' python -m irodori.export
@@ -11,7 +11,7 @@ codec（G6 / G7）は後続の波でこの台本にターゲットとして足�
     uv run --with 'transformers==5.14.1' python -m irodori.export --dtype i8
 
 transformers は **5.14.1 でピン**する（`embeddinggemma/export.py` と同じ理由 — モデリング
-コードが変わるとグラフ形が変わる。加えて `karume.irodori.patch` が
+コードが変わるとグラフ形が変わる。加えて `irodori.patch` が
 `ModernBertAttention.forward` をクラス属性ごと差し替える）。pyproject.toml / uv.lock には
 入れず `--with` で一時的に足す。
 
@@ -62,7 +62,7 @@ masked mean だけをホストに残す。第 1 出力（生の projector 出力
 `ReferenceLatentEncoder` の直後に来る `speaker_norm`（RMSNorm 768）まで**載せる** —
 `encode_conditions` はこの 2 つを必ず続けて掛けるので、切ると RMSNorm がホスト側の
 モデル計算の写しになる。その次の `_prepend_masked_mean_token`（時間平均トークンの前置）は
-**現行パイプラインではホストに残す**: IR v1 の `cat` は記号軸の `1 + S → S+1` を受理する
+**現行パイプラインではホストに残す**: IR の `cat` は記号軸の `1 + S → S+1` を受理する
 （ADR 0046）ので語彙の制約ではなく、実装上の線引きである。したがって
 
 - 平均トークンの生成と前置は**ホスト**（`[1,S,768]` の軸 1 平均 + concat — 純粋な配列操作）
@@ -160,7 +160,7 @@ attention）。台本ローカルの指定で、既定の分解表には入れ�
 
 ## パッチと参照の順序
 
-`karume.irodori.patch` の差し替えは**プロセス全域**なので、golden の期待値（= パッチ前の
+`irodori.patch` の差し替えは**プロセス全域**なので、golden の期待値（= パッチ前の
 eager 出力）を採り終えるまでパッチを当てない。順序は `export_series` が
 `patch.patches_applied()` で機械的に守る（破れば偽 PASS）。
 
