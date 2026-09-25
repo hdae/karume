@@ -151,6 +151,52 @@ def legacy_shards(
     return _shards(stored.graph, legacy_entries(stored), groups)
 
 
+def piece_entries(entry: Entry, rows: Sequence[tuple[int, int]]) -> list[Entry]:
+    """親 1 本を行範囲 `rows` の piece 列へ割る（旧 shard 仕様 v3 — ADR 0090）。
+
+    piece のキーは `<親名>#NNNNN-of-NNNNN`（index は 1 始まり・総数は `len(rows)`）、shape は
+    `(行数, *残り次元)` で、payload は親の行優先バイト列の該当区間。
+    """
+    row_bytes = entry.nbytes // entry.shape[0]
+    count = len(rows)
+    return [
+        Entry(
+            f"{entry.name}#{index:05d}-of-{count:05d}",
+            entry.dtype,
+            (stop - start, *entry.shape[1:]),
+            entry.payload[start * row_bytes : stop * row_bytes],
+        )
+        for index, (start, stop) in enumerate(rows, start=1)
+    ]
+
+
+def legacy_piece_shards(
+    *, parent: str, pieces: Sequence[tuple[int, int]], mark: str = "fixture", storage: str = "f32"
+) -> list[bytes]:
+    """{@link legacy_shards} と同じ素材で、テンソル `parent` を piece 列に割った shard 列。
+
+    旧書き手の配置（旧読み手契約 5）を写す: piece 1 は他のテンソルと同じ先頭の weight shard に、
+    piece 2 以降は**連続する後続の shard に 1 本ずつ**置く。
+    """
+    graph, tensors, scales, overrides = fixture_spec(mark, storage)
+    stored = stored_model(
+        graph,
+        tensors,
+        weight_dtype=storage,
+        weight_scales=scales,
+        weight_dtype_overrides=overrides,
+    )
+    entries = legacy_entries(stored)
+    target = next(entry for entry in entries if entry.name == parent)
+    split = piece_entries(target, pieces)
+    rest = [entry for entry in entries if entry.name != parent]
+    return [
+        write_safetensors([], {IR_METADATA_KEY: stored.graph.to_json()}),
+        write_safetensors(order([*rest, split[0]]), {}),
+        *(write_safetensors([piece], {}) for piece in split[1:]),
+    ]
+
+
 def legacy_fill_shards(count: int, *, mark: str) -> list[bytes]:
     """`count` 本の shard 列になる旧配布形（先頭がグラフ shard・以降 1 本 1 テンソル）。"""
     if count < 2:

@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import struct
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -22,10 +23,12 @@ from legacy_writer import (
     PLE_SHARD_FILE,
     ROPE_BASE_NAME,
     Entry,
+    legacy_piece_shards,
     legacy_ple_sidecar,
     legacy_rope_base,
     legacy_shards,
     order,
+    piece_entries,
     stage_shards,
     write_safetensors,
 )
@@ -52,6 +55,7 @@ from karume.ir import (
     IrValue,
 )
 from karume.legacy import (
+    LegacyFormatError,
     SourceTensor,
     StoredEntry,
     payload_chunks,
@@ -496,7 +500,7 @@ class TestTheCli:
         migrate.main([str(path), "--out", str(tmp_path / "out"), "--license", "apache-2.0"])
         printed = capsys.readouterr().out
 
-        # part 0（2 文書）+ part 1（const 領域・この合成では長さ 0）+ 重みの part 1 本。
+        # part 0（2 文書）+ part 1（const 領域）+ 重みの part 1 本。
         assert (tmp_path / "out" / "model.i4-00001-of-00003.krm").is_file()
         assert "parts 3" in printed and "payloads" in printed
 
@@ -860,3 +864,140 @@ class TestTheMigratedContainerMatchesADirectWrite:
         )
 
         assert [path.read_bytes() for path in other.parts] != self._migrated(tmp_path, "f32")
+
+
+class TestTheTensorPieces:
+    """旧 shard 仕様 v3 の tensor piece（`<親名>#NNNNN-of-NNNNN`）を親 1 本へ畳む（ADR 0090）。
+
+    移行器の自己検査は「畳んだ結果」どうしを比べる（突合の相手も同じ `read_component` の出力）
+    ので、畳み込みの誤りはそこでは相殺されて見えない。正常系は**直接書いた容器**と、異常系は
+    旧読み手契約 5 の分岐ごとに `LegacyFormatError` の文言で縛る。
+    """
+
+    PARENT = "piece.weight"
+
+    def test_a_piece_series_migrates_to_the_same_container_as_a_direct_write(
+        self, tmp_path: Path
+    ) -> None:
+        shards = legacy_piece_shards(
+            parent=self.PARENT, pieces=[(0, 1), (1, 3), (3, 4)], mark="piece"
+        )
+        source = stage_shards(tmp_path / "old" / "enc", "model.f32.safetensors", shards)
+        migrated = migrate_component(source, tmp_path / "migrated", provenance=PROVENANCE)
+        graph, tensors, scales, overrides = fixture_spec("piece", "f32")
+        stored = stored_model(
+            graph,
+            tensors,
+            weight_dtype="f32",
+            weight_scales=scales,
+            weight_dtype_overrides=overrides,
+        )
+        direct = publish_container(
+            tmp_path / "direct" / "model.f32.krm",
+            stored.graph,
+            stored.tensors,
+            stored.bindings,
+            graph_name="enc",
+            provenance=PROVENANCE,
+        )
+
+        # 分割前の生バイト（piece を持たない旧形から直に読む — 移行器とは別の経路）。
+        unsplit = source_material(legacy_shards(mark="piece"))[1][self.PARENT]
+        assert migrated_payloads(list(migrated.parts))[self.PARENT] == unsplit
+        assert [path.read_bytes() for path in migrated.parts] == [
+            path.read_bytes() for path in direct.parts
+        ]
+
+    #: 4 行 × 32 バイトの親（行は 4 の倍数バイト）。
+    WHOLE = Entry("w", "F32", (4, 8), bytes(range(128)))
+
+    @staticmethod
+    def _read(tmp_path: Path, weight_shards: list[list[Entry]]):
+        """グラフ shard + `weight_shards`（shard ごとのテンソル列）を置いて旧読み手に通す。"""
+        shards = [
+            legacy_shards(mark="piece")[0],
+            *(write_safetensors(order(entries), {}) for entries in weight_shards),
+        ]
+        return read_component(
+            resolve_shards(stage_shards(tmp_path, "model.f32.safetensors", shards))
+        )
+
+    def test_the_readers_join_is_the_unsplit_tensor(self, tmp_path: Path) -> None:
+        """対照 — 正当な配置は親 1 本に畳まれる（下の異常系が「常に落ちる」ではない）。"""
+        first, second = piece_entries(self.WHOLE, [(0, 1), (1, 4)])
+
+        _, stored = self._read(tmp_path, [[first], [second]])
+
+        joined = stored["w"]
+        assert (joined.entry.dtype, joined.entry.shape, joined.entry.nbytes) == ("F32", (4, 8), 128)
+        assert b"".join(payload_chunks(joined)) == self.WHOLE.payload
+
+    def test_two_pieces_of_one_parent_in_one_shard_fail_loudly(self, tmp_path: Path) -> None:
+        first, second = piece_entries(self.WHOLE, [(0, 2), (2, 4)])
+
+        with pytest.raises(LegacyFormatError, match=r"shard\[1\] に同じ親の piece が 2 本ある"):
+            self._read(tmp_path, [[first, second]])
+
+    def test_a_missing_piece_fails_loudly(self, tmp_path: Path) -> None:
+        first, second, _ = piece_entries(self.WHOLE, [(0, 1), (1, 2), (2, 4)])
+
+        with pytest.raises(LegacyFormatError, match="piece が 2 本で宣言の総数 3 と合わない"):
+            self._read(tmp_path, [[first], [second]])
+
+    def test_pieces_that_disagree_on_the_total_fail_loudly(self, tmp_path: Path) -> None:
+        first, second = piece_entries(self.WHOLE, [(0, 2), (2, 4)])
+        second = replace(second, name="w#00002-of-00003")
+
+        with pytest.raises(LegacyFormatError, match="piece の総数が 2 と 3 で食い違っている"):
+            self._read(tmp_path, [[first], [second]])
+
+    def test_pieces_out_of_shard_order_fail_loudly(self, tmp_path: Path) -> None:
+        first, second = piece_entries(self.WHOLE, [(0, 2), (2, 4)])
+
+        with pytest.raises(LegacyFormatError, match="shard 順で 1 本目の piece が index 2"):
+            self._read(tmp_path, [[second], [first]])
+
+    def test_pieces_in_non_consecutive_shards_fail_loudly(self, tmp_path: Path) -> None:
+        first, second = piece_entries(self.WHOLE, [(0, 2), (2, 4)])
+        filler = Entry("filler", "F32", (1,), bytes(4))
+
+        with pytest.raises(
+            LegacyFormatError, match=r"piece 2 が shard\[3\]・前の piece が shard\[1\]"
+        ):
+            self._read(tmp_path, [[first], [filler], [second]])
+
+    def test_a_piece_with_another_dtype_fails_loudly(self, tmp_path: Path) -> None:
+        first, second = piece_entries(self.WHOLE, [(0, 2), (2, 4)])
+
+        with pytest.raises(LegacyFormatError, match=r"piece 2 の dtype が I32（piece 1 は F32）"):
+            self._read(tmp_path, [[first], [replace(second, dtype="I32")]])
+
+    def test_a_piece_with_other_trailing_dims_fails_loudly(self, tmp_path: Path) -> None:
+        first, second = piece_entries(self.WHOLE, [(0, 2), (2, 4)])
+
+        with pytest.raises(
+            LegacyFormatError, match=r"piece 2 の残り次元 \[4\] が piece 1 の \[8\] と違う"
+        ):
+            self._read(tmp_path, [[first], [replace(second, shape=(4, 4))]])
+
+    def test_a_piece_without_rows_fails_loudly(self, tmp_path: Path) -> None:
+        first, empty, last = piece_entries(self.WHOLE, [(0, 2), (2, 2), (2, 4)])
+
+        with pytest.raises(LegacyFormatError, match="piece 2 が 1 行未満"):
+            self._read(tmp_path, [[first], [empty], [last]])
+
+    def test_a_non_final_piece_that_is_not_a_multiple_of_4_bytes_fails_loudly(
+        self, tmp_path: Path
+    ) -> None:
+        first, second = piece_entries(Entry("v", "I8", (4, 3), bytes(12)), [(0, 1), (1, 4)])
+
+        with pytest.raises(
+            LegacyFormatError, match="末尾でない piece 1 が 3 バイトで 4 の倍数でない"
+        ):
+            self._read(tmp_path, [[first], [second]])
+
+    def test_a_parent_that_is_both_whole_and_split_fails_loudly(self, tmp_path: Path) -> None:
+        first, second = piece_entries(self.WHOLE, [(0, 2), (2, 4)])
+
+        with pytest.raises(LegacyFormatError, match="丸ごとと piece の両方"):
+            self._read(tmp_path, [[self.WHOLE, first], [second]])
