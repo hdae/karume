@@ -312,6 +312,63 @@ Deno.test("Viterbi: 同点なら長い断片が勝つ（比較は厳密な `>`�
   assertEquals(tie.encode("ab"), [3, 6, 1], "▁ + ab + </s>");
 });
 
+// ---- 長大な入力（切り詰めの後ろを符号化しない）------------------------------
+
+/** 語彙 `▁` / `a` だけの T5。`a` の連続は 1 文字 1 id になる。 */
+const tinyT5 = (vocab: Map<string, T5VocabEntry>): T5Tokenizer =>
+  new T5Tokenizer({
+    vocab,
+    minScore: -1,
+    maxTokenLength: 2,
+    unkId: 2,
+    eosId: 1,
+    addedTokens: new Map(),
+    space: [[0x20, 0x20]],
+    normalizer: parseSpmTables(
+      { single: [], multi: [], extend: [], breakAfter: [], prepend: [] },
+      "空",
+    ),
+    maxLength: 512,
+  });
+
+const tinyVocabEntries = (): [string, T5VocabEntry][] => [
+  ["▁", { id: 3, score: -1 }],
+  ["a", { id: 4, score: -1 }],
+];
+
+/** `z` を含む断片を引いた時点で投げる語彙（切り詰めの後ろまで符号化したかの観測点）。 */
+class TrapVocab extends Map<string, T5VocabEntry> {
+  override get(key: string): T5VocabEntry | undefined {
+    if (key.includes("z")) throw new Error("切り詰めの後ろの断片を符号化した");
+    return super.get(key);
+  }
+}
+
+Deno.test("T5: 空白を含まない巨大な 1 断片でも引数上限で落ちず、512 に切り詰める", () => {
+  // 1 断片が約 10 万 id を超えると `push(...ids)` は V8 の引数上限で RangeError になる。
+  const ids = tinyT5(new Map(tinyVocabEntries())).encode("a".repeat(300_000));
+  assertEquals(ids.length, 512);
+  assertEquals(ids, [3, ...Array.from({ length: 510 }, () => 4), 1], "▁ + a × 510 + </s>");
+});
+
+Deno.test("T5: 切り詰めで捨てる後続の断片は符号化しない", () => {
+  const trap = tinyT5(new TrapVocab(tinyVocabEntries()));
+  // 前提: 番兵の断片を符号化すれば投げる（語彙の罠が効いている）。
+  assertThrows(() => trap.encode("z"), Error, "切り詰めの後ろ");
+  // `▁a` 1 断片 = 2 id なので、600 断片で予算 511 を越え、末尾の `▁z` には届かない。
+  const ids = trap.encode("a ".repeat(600) + "z");
+  assertEquals(ids.length, 512);
+  assertEquals(ids.at(-1), 1);
+});
+
+Deno.test("Qwen2: 切り詰めで捨てる後続の pre-token は符号化しない", () => {
+  // 番兵 `ק` は語彙の部分集合に無いので、符号化すれば「語彙に無いトークン」で投げる。
+  const sentinel = " ק";
+  assertThrows(() => qwen.encode(sentinel), Error, "語彙に無いトークン");
+  const long = caseById("long");
+  assertEquals(qwen.encode(long.text + sentinel), long.qwenIds);
+});
+
 Deno.test("Metaspace: 区切りの ▁ は次の断片の先頭に付く（MergedWithNext）", () => {
   const space: readonly (readonly [number, number])[] = [[0x20, 0x20]];
   // 先頭には必ず ▁ が付き（prepend_scheme=always）、入力中の ▁ は**その位置で切って次へ**。

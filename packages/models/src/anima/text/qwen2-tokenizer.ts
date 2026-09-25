@@ -252,14 +252,19 @@ export class Qwen2Tokenizer {
    * post_processor が特殊トークンを足さないので、切り詰めは単純な先頭切り。
    */
   encode(text: string): number[] {
+    const maxLength = this.#assets.maxLength;
     const ids: number[] = [];
+    // 先頭から順に積むだけなので、上限に達した後の chunk / pre-token を捨てても id 列は変わら
+    // ない（O(n²) の BPE を切り詰めの後ろまで回さない）。
     for (const chunk of splitAddedTokens(text, this.#added)) {
+      if (ids.length >= maxLength) break;
       if (chunk.added) {
         ids.push(this.#assets.addedTokens.get(chunk.text) as number);
         continue;
       }
       const cps = toCodePoints(normalizeNfc(chunk.text, this.#assets.nfcSegments));
       for (const piece of qwen2PreTokenize(cps, this.#assets.classes, this.#assets.caseFold)) {
+        if (ids.length >= maxLength) break;
         // ByteLevel（add_prefix_space=false）— **先頭スペースを足さない**。
         let encoded = "";
         for (const byte of this.#encoder.encode(piece)) encoded += this.#byteEncoder[byte];
@@ -273,6 +278,6 @@ export class Qwen2Tokenizer {
         }
       }
     }
-    return ids.slice(0, this.#assets.maxLength);
+    return ids.slice(0, maxLength);
   }
 }

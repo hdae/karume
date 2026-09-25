@@ -115,17 +115,23 @@ export class T5Tokenizer {
    * 長さは必ず 1 以上。
    */
   encode(text: string): number[] {
+    const budget = this.#assets.maxLength - 1;
     const ids: number[] = [];
+    // 先頭から順に積むだけなので、予算に達した後の chunk / 断片を捨てても id 列は変わらない
+    // （切り詰めの後ろを符号化する費用を入力長に比例させない）。
     for (const chunk of splitAddedTokens(text, this.#added)) {
+      if (ids.length >= budget) break;
       if (chunk.added) {
         ids.push(this.#assets.addedTokens.get(chunk.text) as number);
         continue;
       }
       const normalized = normalizeSpm(this.#assets.normalizer, chunk.text);
       for (const piece of t5PreTokenize(normalized, this.#assets.space)) {
-        ids.push(...this.#tokenize(piece));
+        if (ids.length >= budget) break;
+        // 長い断片でも引数展開しない（`push(...)` は V8 の引数上限で RangeError になる）。
+        for (const id of this.#tokenize(piece)) ids.push(id);
       }
     }
-    return [...ids.slice(0, this.#assets.maxLength - 1), this.#assets.eosId];
+    return [...ids.slice(0, budget), this.#assets.eosId];
   }
 }
