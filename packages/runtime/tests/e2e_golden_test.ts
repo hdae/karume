@@ -136,8 +136,8 @@ const readBuffer = async (model: string, file: string): Promise<ArrayBuffer> => 
 const MODEL_FILE = "model.krm";
 
 /**
- * golden 1 件の容器を開く。テンソルを 1 本も持たない spec は分割されないので単一形のまま
- * 来る（見つけ方はどちらも同じ — `resolveParts`）。
+ * golden 1 件の容器を開く。golden は全て分割形で置かれる（const が空なら part 1 は 0 バイトの
+ * ファイル — container-v1 §8）。見つけ方は `resolveParts`。
  *
  * **グラフ名は置き場のディレクトリ名**（`goldens.py` の `graph_name=spec.name`）。
  */
@@ -180,6 +180,44 @@ Deno.test("全 golden の requires.ops が実行可能な op 集合を覆う", a
     OPS_WITHOUT_GOLDEN,
     "golden が 1 本も踏んでいない op（op を足したら golden も足す / 出せない op は理由つきで OPS_WITHOUT_GOLDEN へ）",
   );
+});
+
+/**
+ * 環境キーの綴り（`environmentKey` が作る形 = `<ランタイム>-<英小文字・数字の語をハイフン 1 本で
+ * つないだ slug>`）。
+ */
+const ENVIRONMENT_KEY_PATTERN = /^(deno|chrome)-[a-z0-9]+(-[a-z0-9]+)*$/;
+
+// 仕様帯の行は**その機で 1 段目を落ちた出力**でしか引かれないので、孤児になった行（golden の削除・
+// 再 export での出力名の改名）や環境キーの綴り違いは「行が無い機」と同じ扱いになり、黙って残る。
+// 行が実体を指していることを、GPU アダプタに依らずここで固定する（ADR 0106 追記決定 1 の台帳を
+// 実体とずらさない）。
+Deno.test("OUTPUT_TOLERANCE の各行は実在する golden の出力と正しい綴りの環境キーを指す", async () => {
+  for (const [key, byEnvironment] of Object.entries(OUTPUT_TOLERANCE)) {
+    const slash = key.indexOf("/");
+    assert(slash > 0, `${key}: キーが <model>/<出力名> の形でない`);
+    const model = key.slice(0, slash);
+    const output = key.slice(slash + 1);
+    assert(MODELS.includes(model), `${key}: golden '${model}' が ${GOLDEN_ROOT.pathname} に無い`);
+    const outputs = prepareContainer(await openGolden(model), model).graph.outputs;
+    const listed = outputs.join(", ");
+    assert(
+      outputs.includes(output),
+      `${key}: 出力 '${output}' が golden '${model}' の graph.outputs（${listed}）に無い`,
+    );
+    for (const [environment, { spec }] of Object.entries(byEnvironment)) {
+      assert(
+        ENVIRONMENT_KEY_PATTERN.test(environment),
+        `${key}: 環境キー '${environment}' が ${ENVIRONMENT_KEY_PATTERN} に一致しない`,
+      );
+      for (const [name, value] of Object.entries(spec)) {
+        assert(
+          Number.isFinite(value) && value >= 0,
+          `${key} / ${environment}: ${name} = ${value} は有限の非負数でない`,
+        );
+      }
+    }
+  }
 });
 
 for (const model of MODELS) {
@@ -228,12 +266,13 @@ for (const model of MODELS) {
         }
 
         const gpu = await acquireGpu();
-        // 参照値・結果をこの機の行として残す経路なので、キーを採ったアダプタと実行アダプタの
-        // 同一性をここで見る（複数 GPU の機で取り違えると、別の機の帯で測ることになる）。
-        assertAdapterMatchesEnvironment(gpu);
-        // MUST: device の破棄は `createSession` の失敗も通す。取り逃がすと、その走行の残りが
-        // 破棄されない device を抱えたまま進み、後続が OOM で赤くなる（known-issues の遅延解放）。
+        // MUST: device の破棄は adapter 検査と `createSession` の失敗も通す。取り逃がすと、
+        // その走行の残りが破棄されない device を抱えたまま進み、後続が OOM で赤くなる
+        // （known-issues の遅延解放）。
         try {
+          // 参照値・結果をこの機の行として残す経路なので、キーを採ったアダプタと実行アダプタの
+          // 同一性をここで見る（複数 GPU の機で取り違えると、別の機の帯で測ることになる）。
+          assertAdapterMatchesEnvironment(gpu);
           const session = await parsed.createContainerSession(gpu);
           try {
             const outputs = await session.run(inputs);

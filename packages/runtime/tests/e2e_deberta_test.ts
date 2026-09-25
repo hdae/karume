@@ -382,37 +382,43 @@ for (const variant of VARIANTS) {
           }
 
           const gpu = await acquireGpu();
-          // 参照値・結果をこの機の行として残す経路なので、キーを採ったアダプタと実行アダプタの
-          // 同一性をここで見る（複数 GPU の機で取り違えると、別の機の帯で測ることになる）。
-          assertAdapterMatchesEnvironment(gpu);
-          const session = await parsed.createContainerSession(gpu);
+          // MUST: device の破棄は adapter 検査と `createSession` の失敗も通す。取り逃がすと、
+          // その走行の残りが破棄されない device を抱えたまま進み、後続が OOM で赤くなる
+          // （known-issues の遅延解放）。
           try {
-            const outputs = await session.run(inputs);
-            assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());
+            // 参照値・結果をこの機の行として残す経路なので、キーを採ったアダプタと実行アダプタの
+            // 同一性をここで見る（複数 GPU の機で取り違えると、別の機の帯で測ることになる）。
+            assertAdapterMatchesEnvironment(gpu);
+            const session = await parsed.createContainerSession(gpu);
+            try {
+              const outputs = await session.run(inputs);
+              assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());
 
-            parsed.graph.outputs.forEach((name, index) => {
-              const view = io.tensors.get(`output.${index}`);
-              assert(view !== undefined, `output.${index} が ${file} に無い`);
-              const where = `${variant.name}/${caseName} output.${index} ('${name}')`;
-              const declared = parsed.graph.values[name].dtype;
-              assertEquals(outputs[name].shape, view.shape, `${where}: shape`);
-              assertEquals(outputs[name].dtype, declared, `${where}: dtype`);
-              const report = compareTensors(
-                outputs[name],
-                ioTensor(io, view, declared),
-                variant.tolerance,
-              );
-              measurements.push({
-                output: name,
-                maxAbs: report.maxAbsError,
-                maxRel: report.maxRelError,
-                tolerance: variant.tolerance,
-                stage: "karume",
+              parsed.graph.outputs.forEach((name, index) => {
+                const view = io.tensors.get(`output.${index}`);
+                assert(view !== undefined, `output.${index} が ${file} に無い`);
+                const where = `${variant.name}/${caseName} output.${index} ('${name}')`;
+                const declared = parsed.graph.values[name].dtype;
+                assertEquals(outputs[name].shape, view.shape, `${where}: shape`);
+                assertEquals(outputs[name].dtype, declared, `${where}: dtype`);
+                const report = compareTensors(
+                  outputs[name],
+                  ioTensor(io, view, declared),
+                  variant.tolerance,
+                );
+                measurements.push({
+                  output: name,
+                  maxAbs: report.maxAbsError,
+                  maxRel: report.maxRelError,
+                  tolerance: variant.tolerance,
+                  stage: "karume",
+                });
+                assert(report.pass, `${where}: ${formatAllclose(report)}`);
               });
-              assert(report.pass, `${where}: ${formatAllclose(report)}`);
-            });
+            } finally {
+              await session.dispose();
+            }
           } finally {
-            await session.dispose();
             gpu.destroy();
           }
         });

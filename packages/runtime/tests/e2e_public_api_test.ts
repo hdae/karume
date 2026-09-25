@@ -88,56 +88,61 @@ Deno.test({
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
-    const session = await createSessionFromContainer(gpu, model(), "model");
+    // MUST: device の破棄は `createSession` の失敗も通す。取り逃がすと、その走行の残りが
+    // 破棄されない device を抱えたまま進み、後続が OOM で赤くなる（known-issues の遅延解放）。
     try {
-      const rows = 4;
-      const values = Array.from({ length: rows * 3 }, (_, i) => ((i % 9) - 4) * 0.5);
-      const x: Tensor = { dtype: "f32", shape: [rows, 3], data: Float32Array.from(values) };
+      const session = await createSessionFromContainer(gpu, model(), "model");
+      try {
+        const rows = 4;
+        const values = Array.from({ length: rows * 3 }, (_, i) => ((i % 9) - 4) * 0.5);
+        const x: Tensor = { dtype: "f32", shape: [rows, 3], data: Float32Array.from(values) };
 
-      const outputs = await session.run({ x });
-      assertEquals(Object.keys(outputs), ["y"]);
-      assertEquals(outputs["y"].shape, [rows]);
-      const expected = expectedRows(values, rows);
-      for (let row = 0; row < rows; row += 1) {
-        assertAlmostEquals(outputs["y"].data[row], expected[row], 1e-5, `row ${row}`);
+        const outputs = await session.run({ x });
+        assertEquals(Object.keys(outputs), ["y"]);
+        assertEquals(outputs["y"].shape, [rows]);
+        const expected = expectedRows(values, rows);
+        for (let row = 0; row < rows; row += 1) {
+          assertAlmostEquals(outputs["y"].data[row], expected[row], 1e-5, `row ${row}`);
+        }
+
+        // 記号次元は run ごとに束縛し直される
+        const wide = Array.from({ length: 9 * 3 }, (_, i) => (i % 5) - 2);
+        const outputs2 = await session.run({
+          x: { dtype: "f32", shape: [9, 3], data: Float32Array.from(wide) },
+        }, { T: 9 });
+        assertEquals(outputs2["y"].shape, [9]);
+        const expected2 = expectedRows(wide, 9);
+        for (let row = 0; row < 9; row += 1) {
+          assertAlmostEquals(outputs2["y"].data[row], expected2[row], 1e-5, `wide row ${row}`);
+        }
+
+        // MUST: 診断は**型付きで**受ける。`SessionDiagnostics` が参照する型のどれかが mod.ts の
+        // 列挙から落ちていても構造的には代入できてしまうので、名前で書く下の 1 行が輸出漏れの
+        // 機械検出になる（`FusionCounts` が非公開だった間はここが書けなかった）。
+        const diagnostics: SessionDiagnostics = session.diagnostics();
+        const fusions: FusionCounts | undefined = diagnostics.lastRunFusions;
+        // このグラフ（matmul / add / sum）はどのルールにも掛からない = 全カウンタ 0。
+        assertEquals(fusions, {
+          silu: 0,
+          upsample2x: 0,
+          rope: 0,
+          adaln: 0,
+          rmsNormAdd: 0,
+          linearStaticQuantize: 0,
+          rowBlockAttention: 0,
+          identityExpand: 0,
+          packedStaticQuantize: 0,
+        });
+        assertEquals(diagnostics.pipelineCount, 3);
+        // 重みアリーナは initializer 2 本に加えて params キャッシュ（Session 常駐）の実体も
+        // 所有する。この 2 run は T が違うので params は 3 ノードぶんずつ別内容で載る。
+        assertEquals(diagnostics.weights.allocCount, 2 + 3 + 3);
+        assertEquals(diagnostics.lastRunParams, { allocCount: 3, reuseCount: 0 });
+        assertEquals((diagnostics.lastRun?.allocCount ?? 0) > 0, true);
+      } finally {
+        await session.dispose();
       }
-
-      // 記号次元は run ごとに束縛し直される
-      const wide = Array.from({ length: 9 * 3 }, (_, i) => (i % 5) - 2);
-      const outputs2 = await session.run({
-        x: { dtype: "f32", shape: [9, 3], data: Float32Array.from(wide) },
-      }, { T: 9 });
-      assertEquals(outputs2["y"].shape, [9]);
-      const expected2 = expectedRows(wide, 9);
-      for (let row = 0; row < 9; row += 1) {
-        assertAlmostEquals(outputs2["y"].data[row], expected2[row], 1e-5, `wide row ${row}`);
-      }
-
-      // MUST: 診断は**型付きで**受ける。`SessionDiagnostics` が参照する型のどれかが mod.ts の
-      // 列挙から落ちていても構造的には代入できてしまうので、名前で書く下の 1 行が輸出漏れの
-      // 機械検出になる（`FusionCounts` が非公開だった間はここが書けなかった）。
-      const diagnostics: SessionDiagnostics = session.diagnostics();
-      const fusions: FusionCounts | undefined = diagnostics.lastRunFusions;
-      // このグラフ（matmul / add / sum）はどのルールにも掛からない = 全カウンタ 0。
-      assertEquals(fusions, {
-        silu: 0,
-        upsample2x: 0,
-        rope: 0,
-        adaln: 0,
-        rmsNormAdd: 0,
-        linearStaticQuantize: 0,
-        rowBlockAttention: 0,
-        identityExpand: 0,
-        packedStaticQuantize: 0,
-      });
-      assertEquals(diagnostics.pipelineCount, 3);
-      // 重みアリーナは initializer 2 本に加えて params キャッシュ（Session 常駐）の実体も
-      // 所有する。この 2 run は T が違うので params は 3 ノードぶんずつ別内容で載る。
-      assertEquals(diagnostics.weights.allocCount, 2 + 3 + 3);
-      assertEquals(diagnostics.lastRunParams, { allocCount: 3, reuseCount: 0 });
-      assertEquals((diagnostics.lastRun?.allocCount ?? 0) > 0, true);
     } finally {
-      await session.dispose();
       gpu.destroy();
     }
   },
@@ -153,28 +158,33 @@ Deno.test({
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
-    const session = await createSessionFromContainer(gpu, model(), "model");
+    // MUST: device の破棄は `createSession` の失敗も通す。取り逃がすと、その走行の残りが
+    // 破棄されない device を抱えたまま進み、後続が OOM で赤くなる（known-issues の遅延解放）。
     try {
-      const empty: Tensor = { dtype: "f32", shape: [0, 3], data: new Float32Array(0) };
-      const outputs = await session.run({ x: empty });
-      assertEquals(Object.keys(outputs), ["y"]);
-      assertEquals(outputs["y"].shape, [0], "0 要素でも shape はスカラに縮退しない");
-      assertEquals(outputs["y"].data.length, 0);
-      // 3 ノードとも「要素ゼロの dispatch」としてエンコードされる（黙って飛ばさない）
-      assertEquals(session.diagnostics().submit.dispatchCount, 3);
+      const session = await createSessionFromContainer(gpu, model(), "model");
+      try {
+        const empty: Tensor = { dtype: "f32", shape: [0, 3], data: new Float32Array(0) };
+        const outputs = await session.run({ x: empty });
+        assertEquals(Object.keys(outputs), ["y"]);
+        assertEquals(outputs["y"].shape, [0], "0 要素でも shape はスカラに縮退しない");
+        assertEquals(outputs["y"].data.length, 0);
+        // 3 ノードとも「要素ゼロの dispatch」としてエンコードされる（黙って飛ばさない）
+        assertEquals(session.diagnostics().submit.dispatchCount, 3);
 
-      // 0 要素の run が Session の状態（プール・パイプライン）を壊していない
-      const values = [1, -2, 0.5, 3, 0.25, -1];
-      const next = await session.run({
-        x: { dtype: "f32", shape: [2, 3], data: Float32Array.from(values) },
-      });
-      assertEquals(next["y"].shape, [2]);
-      const expected = expectedRows(values, 2);
-      for (let row = 0; row < 2; row += 1) {
-        assertAlmostEquals(next["y"].data[row], expected[row], 1e-5, `row ${row}`);
+        // 0 要素の run が Session の状態（プール・パイプライン）を壊していない
+        const values = [1, -2, 0.5, 3, 0.25, -1];
+        const next = await session.run({
+          x: { dtype: "f32", shape: [2, 3], data: Float32Array.from(values) },
+        });
+        assertEquals(next["y"].shape, [2]);
+        const expected = expectedRows(values, 2);
+        for (let row = 0; row < 2; row += 1) {
+          assertAlmostEquals(next["y"].data[row], expected[row], 1e-5, `row ${row}`);
+        }
+      } finally {
+        await session.dispose();
       }
     } finally {
-      await session.dispose();
       gpu.destroy();
     }
   },

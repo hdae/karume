@@ -269,12 +269,13 @@ Deno.test({
       assertGqaForm(parsed);
 
       const gpu = await acquireGpu();
-      // 参照値・結果をこの機の行として残す経路なので、キーを採ったアダプタと実行アダプタの
-      // 同一性をここで見る（複数 GPU の機で取り違えると、別の機の帯で測ることになる）。
-      assertAdapterMatchesEnvironment(gpu);
-      // MUST: device の破棄は `createSession` の失敗も通す。取り逃がすと、その走行の残りが
-      // 破棄されない device を抱えたまま進み、後続が OOM で赤くなる（known-issues の遅延解放）。
+      // MUST: device の破棄は adapter 検査と `createSession` の失敗も通す。取り逃がすと、
+      // その走行の残りが破棄されない device を抱えたまま進み、後続が OOM で赤くなる
+      // （known-issues の遅延解放）。
       try {
+        // 参照値・結果をこの機の行として残す経路なので、キーを採ったアダプタと実行アダプタの
+        // 同一性をここで見る（複数 GPU の機で取り違えると、別の機の帯で測ることになる）。
+        assertAdapterMatchesEnvironment(gpu);
         const session = await parsed.createContainerSession(gpu);
         try {
           /** ケースごとの最終位置 1 位（全ケース同一 = 定数出力の検出に使う）。 */
@@ -378,39 +379,44 @@ Deno.test({
     const layers = assertGqaForm(parsed);
 
     const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
-    const session = await parsed.createContainerSession(gpu);
+    // MUST: device の破棄は `createSession` の失敗も通す。取り逃がすと、その走行の残りが
+    // 破棄されない device を抱えたまま進み、後続が OOM で赤くなる（known-issues の遅延解放）。
     try {
-      // 最短のケース（T=6）1 本で足りる — 見るのは走ったパイプラインの種類と本数。
-      const { inputs } = await loadCase("capital-en", parsed.graph.inputs);
-      await session.run(inputs);
-      const entries = session.diagnostics().lastRunTiming?.entries;
-      assert(entries !== undefined, "lastRunTiming が無い（計測が有効な device のはず）");
-      assert(entries.length > 0, "内訳が空（キー検査が空振りしている）");
+      const session = await parsed.createContainerSession(gpu);
+      try {
+        // 最短のケース（T=6）1 本で足りる — 見るのは走ったパイプラインの種類と本数。
+        const { inputs } = await loadCase("capital-en", parsed.graph.inputs);
+        await session.run(inputs);
+        const entries = session.diagnostics().lastRunTiming?.entries;
+        assert(entries !== undefined, "lastRunTiming が無い（計測が有効な device のはず）");
+        assert(entries.length > 0, "内訳が空（キー検査が空振りしている）");
 
-      // ①QK と ③PV（②stats は行統計で GQA の軸を持たないので対象外 — キーにも `:gqa` は付かない）
-      const qk = entries.filter((entry) => entry.key.startsWith("attention_qk"));
-      const pv = entries.filter((entry) => entry.key.startsWith("attention_pv"));
-      assert(qk.length > 0 && pv.length > 0, `attention の内訳が無い: ${entries.length} 本`);
-      const plain = [...qk, ...pv].filter((entry) => !entry.key.endsWith(":gqa"));
-      assertEquals(
-        plain.map((entry) => entry.key),
-        [],
-        `16:2 の GQA なのに非 GQA キーが走った（走った内訳: ${
-          [...qk, ...pv].map((entry) => `${entry.key}×${entry.dispatchCount}`).join(" / ")
-        }）`,
-      );
+        // ①QK と ③PV（②stats は行統計で GQA の軸を持たないので対象外 — キーにも `:gqa` は付かない）
+        const qk = entries.filter((entry) => entry.key.startsWith("attention_qk"));
+        const pv = entries.filter((entry) => entry.key.startsWith("attention_pv"));
+        assert(qk.length > 0 && pv.length > 0, `attention の内訳が無い: ${entries.length} 本`);
+        const plain = [...qk, ...pv].filter((entry) => !entry.key.endsWith(":gqa"));
+        assertEquals(
+          plain.map((entry) => entry.key),
+          [],
+          `16:2 の GQA なのに非 GQA キーが走った（走った内訳: ${
+            [...qk, ...pv].map((entry) => `${entry.key}×${entry.dispatchCount}`).join(" / ")
+          }）`,
+        );
 
-      // 全層ぶん dispatch されている（1 種のパイプラインを 24 層が共有するので実測は 24 本ずつ。
-      // 行ブロック分割〈ADR 0060 / 0067 決定 7〉が保存経路へ来れば増える側なので下限で見る）。
-      const dispatches = (of: readonly { readonly dispatchCount: number }[]): number =>
-        of.reduce((total, entry) => total + entry.dispatchCount, 0);
-      assert(
-        dispatches(qk) >= layers && dispatches(pv) >= layers,
-        `attention の dispatch が層数 ${layers} に足りない: ` +
-          `①QK ${dispatches(qk)} / ③PV ${dispatches(pv)}`,
-      );
+        // 全層ぶん dispatch されている（1 種のパイプラインを 24 層が共有するので実測は 24 本ずつ。
+        // 行ブロック分割〈ADR 0060 / 0067 決定 7〉が保存経路へ来れば増える側なので下限で見る）。
+        const dispatches = (of: readonly { readonly dispatchCount: number }[]): number =>
+          of.reduce((total, entry) => total + entry.dispatchCount, 0);
+        assert(
+          dispatches(qk) >= layers && dispatches(pv) >= layers,
+          `attention の dispatch が層数 ${layers} に足りない: ` +
+            `①QK ${dispatches(qk)} / ③PV ${dispatches(pv)}`,
+        );
+      } finally {
+        await session.dispose();
+      }
     } finally {
-      await session.dispose();
       gpu.destroy();
     }
   },

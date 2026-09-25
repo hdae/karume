@@ -411,37 +411,43 @@ for (const series of SERIES) {
           const inputs = goldenInputs(parsed, io);
 
           const gpu = await acquireGpu();
-          // 参照値・結果をこの機の行として残す経路なので、キーを採ったアダプタと実行アダプタの
-          // 同一性をここで見る（複数 GPU の機で取り違えると、別の機の帯で測ることになる）。
-          assertAdapterMatchesEnvironment(gpu);
-          const session = await parsed.createContainerSession(gpu);
+          // MUST: device の破棄は adapter 検査と `createSession` の失敗も通す。取り逃がすと、
+          // その走行の残りが破棄されない device を抱えたまま進み、後続が OOM で赤くなる
+          // （known-issues の遅延解放）。
           try {
-            const outputs = await session.run(inputs);
-            assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());
+            // 参照値・結果をこの機の行として残す経路なので、キーを採ったアダプタと実行アダプタの
+            // 同一性をここで見る（複数 GPU の機で取り違えると、別の機の帯で測ることになる）。
+            assertAdapterMatchesEnvironment(gpu);
+            const session = await parsed.createContainerSession(gpu);
+            try {
+              const outputs = await session.run(inputs);
+              assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());
 
-            parsed.graph.outputs.forEach((name, index) => {
-              const view = io.tensors.get(`output.${index}`);
-              assert(view !== undefined, `output.${index} が golden に無い`);
-              const where = `${series.name} / ${caseName} output.${index} ('${name}')`;
-              const declared = parsed.graph.values[name].dtype;
-              assertEquals(outputs[name].shape, view.shape, `${where}: shape`);
-              assertEquals(outputs[name].dtype, declared, `${where}: dtype`);
-              const report = compareTensors(
-                outputs[name],
-                ioTensor(io, view, declared),
-                entry.tolerance,
-              );
-              measurements.push({
-                output: name,
-                maxAbs: report.maxAbsError,
-                maxRel: report.maxRelError,
-                tolerance: entry.tolerance,
-                stage: "karume",
+              parsed.graph.outputs.forEach((name, index) => {
+                const view = io.tensors.get(`output.${index}`);
+                assert(view !== undefined, `output.${index} が golden に無い`);
+                const where = `${series.name} / ${caseName} output.${index} ('${name}')`;
+                const declared = parsed.graph.values[name].dtype;
+                assertEquals(outputs[name].shape, view.shape, `${where}: shape`);
+                assertEquals(outputs[name].dtype, declared, `${where}: dtype`);
+                const report = compareTensors(
+                  outputs[name],
+                  ioTensor(io, view, declared),
+                  entry.tolerance,
+                );
+                measurements.push({
+                  output: name,
+                  maxAbs: report.maxAbsError,
+                  maxRel: report.maxRelError,
+                  tolerance: entry.tolerance,
+                  stage: "karume",
+                });
+                assert(report.pass, `${where}: ${formatAllclose(report)}`);
               });
-              assert(report.pass, `${where}: ${formatAllclose(report)}`);
-            });
+            } finally {
+              await session.dispose();
+            }
           } finally {
-            await session.dispose();
             gpu.destroy();
           }
         });
@@ -471,20 +477,25 @@ for (const series of SERIES) {
       );
       const [outputName] = parsed.graph.outputs;
 
-      const gpu = await acquireGpu();
-      const session = await parsed.createContainerSession(gpu);
       const pooled = new Map<string, Float32Array>();
+      const gpu = await acquireGpu();
+      // MUST: device の破棄は `createSession` の失敗も通す。取り逃がすと、その走行の残りが
+      // 破棄されない device を抱えたまま進み、後続が OOM で赤くなる（known-issues の遅延解放）。
       try {
-        // 4 ケースを 1 Session で回す（重みは 350MB〜1.7GB — ケースごとに組み直す理由が無い）。
-        for (const real of REAL_CASES) {
-          const io = parseSafetensors(await readBuffer(root, `${IO_PREFIX}${real}${IO_SUFFIX}`));
-          const output = (await session.run(goldenInputs(parsed, io)))[outputName];
-          // 判別子で絞る（Float32Array へのキャストは dtype がずれたときに黙って通る）。
-          assert(output.dtype === "f32", `${real}: pooler_output の dtype が ${output.dtype}`);
-          pooled.set(real, output.data);
+        const session = await parsed.createContainerSession(gpu);
+        try {
+          // 4 ケースを 1 Session で回す（重みは 350MB〜1.7GB — ケースごとに組み直す理由が無い）。
+          for (const real of REAL_CASES) {
+            const io = parseSafetensors(await readBuffer(root, `${IO_PREFIX}${real}${IO_SUFFIX}`));
+            const output = (await session.run(goldenInputs(parsed, io)))[outputName];
+            // 判別子で絞る（Float32Array へのキャストは dtype がずれたときに黙って通る）。
+            assert(output.dtype === "f32", `${real}: pooler_output の dtype が ${output.dtype}`);
+            pooled.set(real, output.data);
+          }
+        } finally {
+          await session.dispose();
         }
       } finally {
-        await session.dispose();
         gpu.destroy();
       }
 

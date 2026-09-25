@@ -284,33 +284,39 @@ for (const caseName of DISCOVERED) {
         const inputs = goldenInputs(parsed, io);
 
         const gpu = await acquireGpu();
-        // 参照値・結果をこの機の行として残す経路なので、キーを採ったアダプタと実行アダプタの
-        // 同一性をここで見る（複数 GPU の機で取り違えると、別の機の帯で測ることになる）。
-        assertAdapterMatchesEnvironment(gpu);
-        const session = await parsed.createContainerSession(gpu);
+        // MUST: device の破棄は adapter 検査と `createSession` の失敗も通す。取り逃がすと、
+        // その走行の残りが破棄されない device を抱えたまま進み、後続が OOM で赤くなる
+        // （known-issues の遅延解放）。
         try {
-          const outputs = await session.run(inputs);
-          assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());
+          // 参照値・結果をこの機の行として残す経路なので、キーを採ったアダプタと実行アダプタの
+          // 同一性をここで見る（複数 GPU の機で取り違えると、別の機の帯で測ることになる）。
+          assertAdapterMatchesEnvironment(gpu);
+          const session = await parsed.createContainerSession(gpu);
+          try {
+            const outputs = await session.run(inputs);
+            assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());
 
-          const [name] = parsed.graph.outputs;
-          const view = io.tensors.get("output.0");
-          assert(view !== undefined, "output.0 が golden に無い");
-          const where = `${caseName} output.0 ('${name}')`;
-          const declared = parsed.graph.values[name].dtype;
-          assertEquals(outputs[name].shape, view.shape, `${where}: shape`);
-          assertEquals(outputs[name].dtype, declared, `${where}: dtype`);
-          const expected = ioTensor(io, view, declared);
-          const report = compareTensors(outputs[name], expected, GOLDEN_TOLERANCE);
-          measurements.push({
-            output: name,
-            maxAbs: report.maxAbsError,
-            maxRel: report.maxRelError,
-            tolerance: GOLDEN_TOLERANCE,
-            stage: "karume",
-          });
-          assert(report.pass, `${where}: ${formatAllclose(report)}`);
+            const [name] = parsed.graph.outputs;
+            const view = io.tensors.get("output.0");
+            assert(view !== undefined, "output.0 が golden に無い");
+            const where = `${caseName} output.0 ('${name}')`;
+            const declared = parsed.graph.values[name].dtype;
+            assertEquals(outputs[name].shape, view.shape, `${where}: shape`);
+            assertEquals(outputs[name].dtype, declared, `${where}: dtype`);
+            const expected = ioTensor(io, view, declared);
+            const report = compareTensors(outputs[name], expected, GOLDEN_TOLERANCE);
+            measurements.push({
+              output: name,
+              maxAbs: report.maxAbsError,
+              maxRel: report.maxRelError,
+              tolerance: GOLDEN_TOLERANCE,
+              stage: "karume",
+            });
+            assert(report.pass, `${where}: ${formatAllclose(report)}`);
+          } finally {
+            await session.dispose();
+          }
         } finally {
-          await session.dispose();
           gpu.destroy();
         }
       });
@@ -336,19 +342,24 @@ Deno.test({
     assertEquals(size, staticDim(parsed, 2), "相関は正方形の入力を前提にする");
     const [name] = parsed.graph.outputs;
 
-    const gpu = await acquireGpu();
-    const session = await parsed.createContainerSession(gpu);
     const correlations = new Map<string, number>();
+    const gpu = await acquireGpu();
+    // MUST: device の破棄は `createSession` の失敗も通す。取り逃がすと、その走行の残りが
+    // 破棄されない device を抱えたまま進み、後続が OOM で赤くなる（known-issues の遅延解放）。
     try {
-      for (const caseName of SYNTHETIC_CASES) {
-        const io = parseSafetensors(await readBuffer(`${IO_PREFIX}${caseName}${IO_SUFFIX}`));
-        const output = (await session.run(goldenInputs(parsed, io)))[name];
-        assert(output.dtype === "f32", `${caseName}: 深度の dtype が ${output.dtype}`);
-        assertEquals(output.shape, [1, size, size], `${caseName}: 深度地図の形`);
-        correlations.set(caseName, rampCorrelation(output.data, size));
+      const session = await parsed.createContainerSession(gpu);
+      try {
+        for (const caseName of SYNTHETIC_CASES) {
+          const io = parseSafetensors(await readBuffer(`${IO_PREFIX}${caseName}${IO_SUFFIX}`));
+          const output = (await session.run(goldenInputs(parsed, io)))[name];
+          assert(output.dtype === "f32", `${caseName}: 深度の dtype が ${output.dtype}`);
+          assertEquals(output.shape, [1, size, size], `${caseName}: 深度地図の形`);
+          correlations.set(caseName, rampCorrelation(output.data, size));
+        }
+      } finally {
+        await session.dispose();
       }
     } finally {
-      await session.dispose();
       gpu.destroy();
     }
 

@@ -534,45 +534,51 @@ for (const series of SERIES) {
           const inputs = goldenInputs(parsed, io);
 
           const gpu = await acquireGpu();
-          // 参照値・結果をこの機の行として残す経路なので、キーを採ったアダプタと実行アダプタの
-          // 同一性をここで見る（複数 GPU の機で取り違えると、別の機の帯で測ることになる）。
-          assertAdapterMatchesEnvironment(gpu);
-          const session = await parsed.createContainerSession(gpu);
+          // MUST: device の破棄は adapter 検査と `createSession` の失敗も通す。取り逃がすと、
+          // その走行の残りが破棄されない device を抱えたまま進み、後続が OOM で赤くなる
+          // （known-issues の遅延解放）。
           try {
-            const outputs = await session.run(inputs);
-            assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());
+            // 参照値・結果をこの機の行として残す経路なので、キーを採ったアダプタと実行アダプタの
+            // 同一性をここで見る（複数 GPU の機で取り違えると、別の機の帯で測ることになる）。
+            assertAdapterMatchesEnvironment(gpu);
+            const session = await parsed.createContainerSession(gpu);
+            try {
+              const outputs = await session.run(inputs);
+              assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());
 
-            const [name] = parsed.graph.outputs;
-            const view = io.tensors.get("output.0");
-            assert(view !== undefined, "output.0 が golden に無い");
-            const where = `${series.name} / ${caseName} output.0 ('${name}')`;
-            const declared = parsed.graph.values[name].dtype;
-            assertEquals(outputs[name].shape, view.shape, `${where}: shape`);
-            assertEquals(outputs[name].dtype, declared, `${where}: dtype`);
-            const expected = ioTensor(io, view, declared);
-            const report = compareTensors(outputs[name], expected, entry.tolerance);
-            measurements.push({
-              output: name,
-              maxAbs: report.maxAbsError,
-              maxRel: report.maxRelError,
-              tolerance: entry.tolerance,
-              stage: "karume",
-            });
-            assert(report.pass, `${where}: ${formatAllclose(report)}`);
+              const [name] = parsed.graph.outputs;
+              const view = io.tensors.get("output.0");
+              assert(view !== undefined, "output.0 が golden に無い");
+              const where = `${series.name} / ${caseName} output.0 ('${name}')`;
+              const declared = parsed.graph.values[name].dtype;
+              assertEquals(outputs[name].shape, view.shape, `${where}: shape`);
+              assertEquals(outputs[name].dtype, declared, `${where}: dtype`);
+              const expected = ioTensor(io, view, declared);
+              const report = compareTensors(outputs[name], expected, entry.tolerance);
+              measurements.push({
+                output: name,
+                maxAbs: report.maxAbsError,
+                maxRel: report.maxRelError,
+                tolerance: entry.tolerance,
+                stage: "karume",
+              });
+              assert(report.pass, `${where}: ${formatAllclose(report)}`);
 
-            // 値の近さとは別に、**マスクとしての判断**が torch と一致すること。
-            assert(
-              outputs[name].dtype === "f32" && expected.dtype === "f32",
-              `${where}: f32 でない`,
-            );
-            const disagreement = maskDisagreement(outputs[name].data, expected.data);
-            assert(
-              disagreement <= MASK_DISAGREEMENT_LIMIT,
-              `${where}: 二値マスクの不一致 ${(disagreement * 100).toFixed(4)}%` +
-                `（上限 ${MASK_DISAGREEMENT_LIMIT * 100}%）`,
-            );
+              // 値の近さとは別に、**マスクとしての判断**が torch と一致すること。
+              assert(
+                outputs[name].dtype === "f32" && expected.dtype === "f32",
+                `${where}: f32 でない`,
+              );
+              const disagreement = maskDisagreement(outputs[name].data, expected.data);
+              assert(
+                disagreement <= MASK_DISAGREEMENT_LIMIT,
+                `${where}: 二値マスクの不一致 ${(disagreement * 100).toFixed(4)}%` +
+                  `（上限 ${MASK_DISAGREEMENT_LIMIT * 100}%）`,
+              );
+            } finally {
+              await session.dispose();
+            }
           } finally {
-            await session.dispose();
             gpu.destroy();
           }
         });
@@ -598,19 +604,24 @@ for (const series of SERIES) {
       assertEquals(size, staticDim(parsed, 2), "円の判別は正方形の入力を前提にする");
 
       const gpu = await acquireGpu();
-      const session = await parsed.createContainerSession(gpu);
+      // MUST: device の破棄は `createSession` の失敗も通す。取り逃がすと、その走行の残りが
+      // 破棄されない device を抱えたまま進み、後続が OOM で赤くなる（known-issues の遅延解放）。
       try {
-        const [name] = parsed.graph.outputs;
-        const output = (await session.run(goldenInputs(parsed, io)))[name];
-        assert(output.dtype === "f32", `disc のマットの dtype が ${output.dtype}`);
-        assertEquals(output.shape, [1, 1, size, size], "マットの形");
-        const { inside, outside } = discMeans(output.data, size);
-        assert(
-          inside > outside,
-          `disc の円内 logit 平均 ${inside} が円外 ${outside} 以下 — 顕著物体を分離できていない`,
-        );
+        const session = await parsed.createContainerSession(gpu);
+        try {
+          const [name] = parsed.graph.outputs;
+          const output = (await session.run(goldenInputs(parsed, io)))[name];
+          assert(output.dtype === "f32", `disc のマットの dtype が ${output.dtype}`);
+          assertEquals(output.shape, [1, 1, size, size], "マットの形");
+          const { inside, outside } = discMeans(output.data, size);
+          assert(
+            inside > outside,
+            `disc の円内 logit 平均 ${inside} が円外 ${outside} 以下 — 顕著物体を分離できていない`,
+          );
+        } finally {
+          await session.dispose();
+        }
       } finally {
-        await session.dispose();
         gpu.destroy();
       }
     },
