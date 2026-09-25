@@ -12,8 +12,8 @@
  *    家族で「初回実行まで DL が遅れ、ロード進捗にも現れない」形を無くす）。
  * ⑤ **abort 済みの `signal` で始めたロードは落ちる**（ロード中の中断契約が消えていないこと。
  *    対の「ロード時の signal を Session 構築へ持ち越さない」は GPU 側）。
- * ⑥ **descriptor のバイト列を握らない**（部品の供給口を保持したままでも常駐ゼロ）。gc を強制
- *    する必要があるので別プロセスの台本（`helpers/descriptor-retention.ts`）へ出し、ここでは
+ * ⑥ **重みの block のバイト列を握らない**（部品の供給口を保持したままでも常駐ゼロ）。gc を強制
+ *    する必要があるので別プロセスの台本（`helpers/weight-block-retention.ts`）へ出し、ここでは
  *    終了コードだけを見る。
  * ⑦ **家族 admission の違反でも重みの part は取得されない**（②の家族版）。② は runtime の
  *    capability 門だけを踏むので、「実行できないモデルの重みは 1 バイトも落とさない」の
@@ -362,11 +362,11 @@ Deno.test(
 );
 
 Deno.test(
-  "loadContainerComponents: descriptor のバイト列を握らない（別プロセスで gc 観測）",
+  "loadContainerComponents: 重みの block のバイト列を握らない（別プロセスで gc 観測）",
   async () => {
     // MUST: 別プロセス — 到達不能なだけの状態と握られた状態を区別するには gc の強制が要り、
     // `deno test` に `--v8-flags` を渡す口が無い。
-    const script = new URL("./helpers/descriptor-retention.ts", import.meta.url);
+    const script = new URL("./helpers/weight-block-retention.ts", import.meta.url);
     const { code, stdout, stderr } = await new Deno.Command(Deno.execPath(), {
       args: ["run", "-A", "--v8-flags=--expose-gc", script.href],
       stdout: "piped",

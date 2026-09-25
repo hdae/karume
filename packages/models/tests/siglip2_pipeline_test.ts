@@ -48,7 +48,7 @@ const VISION = partAssets(
   }),
 );
 
-/** `models/karume-siglip2-base/karume.json` の `pipelineConfig` 実物（6 欄）。 */
+/** `models/karume-siglip2/karume.json` の `base` の `pipelineConfig` 実物（6 欄）。 */
 const PIPELINE_CONFIG: Record<string, unknown> = {
   imageWidth: 224,
   imageHeight: 224,

@@ -1,4 +1,5 @@
-// テスト用の safetensors 組み立て（rope 素表の読み手を叩くためだけの最小ヘルパ）。
+// テスト用の safetensors 組み立て（safetensors 形式のバイト列を読む側 — rope 素表・
+// SBV2 のスタイル表など — を叩く最小ヘルパ）。
 // 期待する「正しい形」を 1 箇所に置き、異常系は各テストがそこから 1 点だけ壊す。
 
 export const f32Bytes = (values: ArrayLike<number>): Uint8Array<ArrayBuffer> => {

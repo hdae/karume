@@ -76,7 +76,7 @@ const mib = (bytes: number): string => `${(bytes / 1024 / 1024).toFixed(1)}MiB`;
 const externalAfterGc = (): number => {
   const collect = (globalThis as { gc?: () => void }).gc;
   if (collect === undefined) {
-    console.error("descriptor-retention: --v8-flags=--expose-gc 付きで起動していない");
+    console.error("weight-block-retention: --v8-flags=--expose-gc 付きで起動していない");
     Deno.exit(2);
   }
   collect();
@@ -137,19 +137,19 @@ const main = async (): Promise<void> => {
   const resident = externalAfterGc();
   // `open` を gc の後まで生かす（ここで初めて到達可能性が切れる）。
   if (open("dit").graph.outputs[0] !== "y") {
-    console.error("descriptor-retention: グラフ宣言が読めない（フィクスチャの誤り）");
+    console.error("weight-block-retention: グラフ宣言が読めない（フィクスチャの誤り）");
     Deno.exit(2);
   }
 
   if (resident > ALLOWED_RESIDENT_BYTES) {
     console.error(
-      `descriptor-retention: 容器のバイト列が常駐している` +
+      `weight-block-retention: 容器のバイト列が常駐している` +
         `（external=${mib(resident)} > 許容 ${mib(ALLOWED_RESIDENT_BYTES)}` +
         ` / 重み 1 本 ${mib(WEIGHT_BYTES)}）`,
     );
     Deno.exit(1);
   }
-  console.log(`descriptor-retention: external=${mib(resident)}`);
+  console.log(`weight-block-retention: external=${mib(resident)}`);
 };
 
 await main();

@@ -56,7 +56,7 @@ const COMPONENT = partAssets(
   }),
 );
 
-/** `models/karume-depth-anything-v2-small/karume.json` の `pipelineConfig` 実物（5 欄）。 */
+/** `models/karume-depth-anything-v2/karume.json` の `small` の `pipelineConfig` 実物（5 欄）。 */
 const PIPELINE_CONFIG: Record<string, unknown> = {
   imageWidth: 518,
   imageHeight: 518,

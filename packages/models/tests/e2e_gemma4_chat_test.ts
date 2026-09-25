@@ -1,7 +1,7 @@
 // 実重み Gemma 4 E2B の **文字列 in → 文字列 out** の検収門 — 段 4 の合格線。
 //
 // 検収するのは `src/gemma/pipeline.ts`（`Gemma4Pipeline`）と `src/gemma/text/chat.ts`
-// （`gemma4ChatPrompt`）の結線で、門は 5 本:
+// （`gemma4ChatPrompt`）の結線で、門は 7 本:
 //
 // ① **完走**: `fromAssets` → `chat([...])` が実重みで回り、温度 0（この層の既定）の出力が
 //    固定した greedy golden と文字単位で一致する。golden は**この経路自身で採った**もので、
@@ -57,7 +57,8 @@ import {
   type SessionDiagnostics,
 } from "@karume/runtime";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
-// ミラーから `Gemma4Assets` を組む helper（系列出力は旧形のままなので使えない — 冒頭の NOTE）。
+// ミラーから `Gemma4Assets` を組む helper（系列出力は manifest を持たないので使えない —
+// 冒頭の NOTE）。
 import { gemma4MirrorAssets, mirrorAvailable } from "./helpers/gemma-mirror.ts";
 import { allResidentPleBytesOfMirror } from "./helpers/ple-budget.ts";
 
@@ -459,8 +460,9 @@ Deno.test({
     });
 
     await t.step("公開の program 面は凍結された数だけで、dispose 後も読める", () => {
-      // NOTE: PLE sidecar のホストキャッシュが dispose で返ることは `gemma4_ple_test.ts` の
-      // 単体門が持つ（公開面から `derivedInputs.derive` は引けない = 面を絞った意図どおり）。
+      // NOTE: PLE（`model` 容器の資産）のホストキャッシュが dispose で返ることは
+      // `gemma4_ple_test.ts` の単体門が持つ（公開面から `derivedInputs.derive` は引けない =
+      // 面を絞った意図どおり）。
       // ここで見るのは絞った後の面の性質 — 配布形が宣言した数がそのまま読め、消費者側の
       // 書き込みが生成ループの停止集合へ届かないこと。
       const program = pipeline.program;

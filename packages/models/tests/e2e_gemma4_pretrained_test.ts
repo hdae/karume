@@ -2,7 +2,7 @@
 //
 // `fromAssets`（段 4 の門は `e2e_gemma4_chat_test.ts`）と違い、こちらはロード経路を本番と
 // 1 本にする: `karume.json` の解決 → 容器の記述文書だけ取って admission → 重みの part の逐次流し
-// → PLE sidecar の遅延読み。門は 4 本:
+// → PLE（`model` 容器の資産 — ADR 0109 決定 4）の block の遅延読み。門は 4 本:
 //
 //  ① **完走**: `fromPretrained` → `chat` が実重みで回り、温度 0（明示）の出力が
 //     `e2e_gemma4_chat_test.ts` と**同じ golden** に一致する。同じバイト列を別経路で読んでいる
