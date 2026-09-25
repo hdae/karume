@@ -1091,8 +1091,15 @@ Deno.test({
         // 診断で w4a8 が走ったことが読める（格納判別子 + group 長 — ADR 0021 / 0069）
         const diagnostics = session.diagnostics();
         assertEquals(diagnostics.pipelineCount, 2, "quantize_rows + w4a8 GEMM の 2 本");
-        const keys = (diagnostics.lastRunTiming?.entries ?? []).map((entry) => entry.key);
-        if (keys.length > 0) {
+        if (TIMING_ACQUIRE_OPTIONS.gpuTiming) {
+          // MUST: 計測を要求したのに内訳が無いなら赤 — `keys.length > 0` で守ると
+          // キー検査が黙って空振りする（helpers/gpu.ts の TIMING_ACQUIRE_OPTIONS）。
+          const entries = diagnostics.lastRunTiming?.entries;
+          assert(
+            entries !== undefined && entries.length > 0,
+            "計測を要求したのに lastRunTiming が無い（計測経路の破損）",
+          );
+          const keys = entries.map((entry) => entry.key);
           assertEquals(
             keys.includes(linearI8a8Key(linearI8a8UsesVec4(n), true, undefined, "i4", groupSize)),
             true,

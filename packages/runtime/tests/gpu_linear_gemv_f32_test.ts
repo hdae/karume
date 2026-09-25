@@ -166,14 +166,13 @@ Deno.test({
 
 Deno.test({
   name: "f32 格納でも f16 計算の指定は GEMV に置き換えない（実 GPU）",
-  ignore: !SHADER_F16_AVAILABLE,
+  // 検査はキーだけ（数値は上のケースが持つ）なので、timestamp が無い機では空の緑にせず SKIP する。
+  ignore: !SHADER_F16_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu({ ...TIMING_ACQUIRE_OPTIONS, shaderF16: true });
     try {
       const actual = await run(gpu, fixture(1, 36, 40), { linearCompute: "f16" });
-      if (TIMESTAMP_QUERY_AVAILABLE) {
-        assertEquals(actual.keys, [linearKey("f32", true, "f16", 1)]);
-      }
+      assertEquals(actual.keys, [linearKey("f32", true, "f16", 1)]);
     } finally {
       gpu.destroy();
     }

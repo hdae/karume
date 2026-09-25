@@ -2,7 +2,7 @@
 // エクスポータと同じ expand 2 本の列を private 1-pass copy に置換しても、全ビットが
 // そのまま複製されることを固定する。
 
-import { assertEquals } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { UPSAMPLE_2X_KEY } from "../src/kernels/upsample2x.ts";
 import { createSessionFromContainer, type Tensor } from "../src/runtime/executor.ts";
@@ -143,8 +143,9 @@ Deno.test({
       assertEquals(primitive.diagnostics().submit.dispatchCount, 2, "expand x2 primitive");
       assertEquals(fused.diagnostics().lastRunFusions?.upsample2x, 1, "融合カウンタ");
       assertEquals(primitive.diagnostics().lastRunFusions?.upsample2x, 0, "反例のカウンタは 0");
-      const timing = fused.diagnostics().lastRunTiming;
-      if (timing !== undefined) {
+      if (TIMING_ACQUIRE_OPTIONS.gpuTiming) {
+        const timing = fused.diagnostics().lastRunTiming;
+        assert(timing !== undefined, "計測を要求したのに lastRunTiming が無い（計測経路の破損）");
         assertEquals(timing.entries.map((entry) => entry.key), [UPSAMPLE_2X_KEY]);
       }
     } finally {

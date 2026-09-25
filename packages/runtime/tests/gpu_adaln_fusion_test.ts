@@ -6,7 +6,7 @@
 // 積）の storage 往復を消すので、丸め位置が素の列とずれれば有限値のビット列が動く。
 // workgroup u32 staging による丸め障壁が実バックエンドで効いているかは、ここでしか分からない。
 
-import { assertEquals } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { ADALN_NORM_KEY } from "../src/kernels/adaln-norm.ts";
 import { createSessionFromContainer, type Tensor } from "../src/runtime/executor.ts";
@@ -185,8 +185,12 @@ Deno.test({
             0,
             `${label}: 反例のカウンタは 0`,
           );
-          const timing = fused.diagnostics().lastRunTiming;
-          if (timing !== undefined) {
+          if (TIMING_ACQUIRE_OPTIONS.gpuTiming) {
+            const timing = fused.diagnostics().lastRunTiming;
+            assert(
+              timing !== undefined,
+              `${label}: 計測を要求したのに lastRunTiming が無い（計測経路の破損）`,
+            );
             assertEquals(
               timing.entries.map((entry) => entry.key),
               [ADALN_NORM_KEY],

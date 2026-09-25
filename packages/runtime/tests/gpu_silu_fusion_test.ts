@@ -1,7 +1,7 @@
 // SiLU = x * sigmoid(x) の strict peephole（融合ルール silu — src/runtime/fusion.ts）。
 // エクスポータが出す隣接 2 ノードだけを 1 dispatch へ畳み、掴めない形は素の列へ落ちる。
 
-import { assertEquals } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { siluKey } from "../src/kernels/silu.ts";
 import { createSessionFromContainer, type Tensor } from "../src/runtime/executor.ts";
@@ -163,8 +163,12 @@ Deno.test({
             0,
             `${order}: 反例のカウンタは 0`,
           );
-          const timing = fused.diagnostics().lastRunTiming;
-          if (timing !== undefined) {
+          if (TIMING_ACQUIRE_OPTIONS.gpuTiming) {
+            const timing = fused.diagnostics().lastRunTiming;
+            assert(
+              timing !== undefined,
+              `${order}: 計測を要求したのに lastRunTiming が無い（計測経路の破損）`,
+            );
             assertEquals(
               timing.entries.map((entry) => entry.key),
               [siluKey(order === "xs" ? "x-sigmoid" : "sigmoid-x")],
