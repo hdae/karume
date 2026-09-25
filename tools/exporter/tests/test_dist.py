@@ -937,6 +937,33 @@ class TestFamilyAssembly:
         with pytest.raises(DistError, match="出所と食い違う"):
             assemble_family(plans, tmp_path / "models" / "family", "A")
 
+    @pytest.mark.parametrize("names", [("A",), ("A", "B")], ids=["own-seat", "shared-seat"])
+    def test_it_refuses_a_series_part_that_disagrees_with_the_descriptor(
+        self, tmp_path: Path, names: tuple[str, ...]
+    ) -> None:
+        """系列の part が同じ長さのまま壊れていたら、置いた現物を descriptor の宣言と突き合わせて
+        落とす。
+
+        manifest の sha256 は置いた現物から採るので、壊れたバイト列と宣言は一致したまま据わる。
+        HF 経由の取得は block の sha256 を掛けないので、公開後にこれを見つける門は無い。
+        共有席でも出所との突合（出所自体が壊れている）では拾えない。
+        """
+        plans = [
+            _synthetic_plan(tmp_path / "series", name, "w/model.krm", "same-bytes")
+            for name in names
+        ]
+        total = len(ir_container(mark="same-bytes"))
+        weights_part = tmp_path / "series" / "same-bytes" / numbered_name("model.krm", total, total)
+        raw = bytearray(weights_part.read_bytes())
+        raw[len(raw) // 2] ^= 0xFF
+        weights_part.write_bytes(bytes(raw))
+        out_dir = tmp_path / "models" / "family"
+
+        with pytest.raises(DistError, match=rf"part {total - 1} の sha256 が descriptor の宣言と"):
+            assemble_family(plans, out_dir, "A")
+
+        assert not out_dir.exists()
+
 
 class TestRootFiles:
     """配布リポ直下の法的テキスト（上流ライセンスが再配布の条件として要求するファイル）。
@@ -2177,7 +2204,7 @@ class TestInputContainerVerification:
         他の門（宣言と現物の突合・宣言外ファイル検査）はどれもこの改竄を見ない、が上の 1 本の
         意味そのもの。
         """
-        monkeypatch.setattr(dist, "assert_weight_components_verified", lambda partitioned: None)
+        monkeypatch.setattr(dist, "assert_weight_components_verified", lambda partitioned: {})
         out_dir = tmp_path / "models" / "tampered"
 
         assemble_family([self._plan(tmp_path / "series")], out_dir, "A")
@@ -2221,7 +2248,7 @@ class TestInputContainerVerification:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """故障注入 — 門を外すと語彙外 op の容器がそのまま据わる（恒真化していないことの証明）。"""
-        monkeypatch.setattr(dist, "assert_weight_components_verified", lambda partitioned: None)
+        monkeypatch.setattr(dist, "assert_weight_components_verified", lambda partitioned: {})
         out_dir = tmp_path / "models" / "odd"
 
         assemble_family([self._unknown_op_plan(tmp_path / "series")], out_dir, "A")

@@ -1048,8 +1048,11 @@ def weight_components(partitioned: Sequence[PartitionedPlan]) -> list[tuple[tupl
     return components
 
 
-def assert_weight_components_verified(partitioned: Sequence[PartitionedPlan]) -> None:
+def assert_weight_components_verified(partitioned: Sequence[PartitionedPlan]) -> dict[Path, str]:
     """weights の全コンテナを**宣言で決まる全規則**で検証する（配置の前）。
+
+    戻りは分割形の part k（k ≥ 1）の出所 path → descriptor が宣言する `parts[k-1].sha256`
+    — 置いた現物の sha256 との突き合わせ（{@link _materialize_family}）が使う。
 
     MUST: 組み立ては入力コンテナを「過去に検証済み」と信頼しない。系列ディレクトリは
     据え替えで書き換わる可変な場所（モジュール doc）なので、**古いエクスポータで焼いた系列を
@@ -1060,8 +1063,9 @@ def assert_weight_components_verified(partitioned: Sequence[PartitionedPlan]) ->
     掛かるのは読み手の構造検査（2 文書・block 目次・codec 台帳）と合流（`bind_graphs`）と、
     **IR の受理規則**（op 語彙 / ランタイム支援 / op 契約 —
     {@link karume.verify.assert_ir_accepted}）である。どれも**宣言だけ**を見るので、数 GB の
-    payload は 1 バイトも読まない（container-v1 §7 のハッシュ 3 分離）。block の sha256 は
-    書き手側の据え替え前検証（`karume.publish`）が既に通している。
+    payload は 1 バイトも読まない（container-v1 §7 のハッシュ 3 分離）。part の中身は
+    publish が通したことを根拠に信頼しない — 配置が置いた現物の sha256（manifest へ焼くために
+    どのみち採る）を、ここが返す descriptor の `parts[].sha256` と突き合わせる（追加 I/O 0）。
 
     MUST: IR の受理規則をここで掛ける — 構造検査だけだと「語彙外の op / ランタイム未対応の
     attrs / 契約違反の shape」を宣言した容器が配布形に据わり、利用者の `createSession` で
@@ -1073,6 +1077,7 @@ def assert_weight_components_verified(partitioned: Sequence[PartitionedPlan]) ->
     無い」になる。書き手側の綴りの門（各 recipe の定数と AST の突合）はソースしか見ないので、
     **現物と宣言を突き合わせる唯一の門**がここである。
     """
+    declared: dict[Path, str] = {}
     for parts, component in weight_components(partitioned):
         try:
             verified = verify_container(parts)
@@ -1088,6 +1093,14 @@ def assert_weight_components_verified(partitioned: Sequence[PartitionedPlan]) ->
                 f" '{component}' と違う — ランタイムはこのキーでグラフを引く"
                 "（container-v1 §2.1）ので、このまま配ると createSession で落ちる"
             )
+        model = verified.read.model
+        # 単一形は part がファイルの一区間でしかないので、ファイルの sha256 とは比べられない
+        # （weights の席では {@link _assert_manifest_shape} が単一形そのものを落とす）。`krg` は
+        # parts を宣言しない（weights の席では配置の {@link _descriptor_refs} が落とす）。
+        if model is not None and len(parts) > 1:
+            for part in model.parts:
+                declared[parts[part.index]] = part.sha256
+    return declared
 
 
 def assert_root_files(root_files: Mapping[str, str]) -> None:
@@ -1245,6 +1258,7 @@ def _materialize_family(
     out_dir: Path,
     default_model: str,
     external: Mapping[str, Mapping[str, Any]],
+    declared_parts: Mapping[Path, str],
 ) -> tuple[dict[str, Any], dict[str, int]]:
     """検査済みの計画群を `out_dir` へ並べ、`karume.json` を書いて manifest を返す。
 
@@ -1307,6 +1321,24 @@ def _materialize_family(
             materialize(artifact, out_dir / rel_path)
             placed[(plan.name, role)] = rel_path
             digests[rel_path] = sha256_file(out_dir / rel_path)
+    # MUST: 置いた part の現物を descriptor の `parts[k-1].sha256` と突き合わせる（container-v1
+    # §7 の「公開・再梱包の突合用」）。manifest の sha256 は置いた現物から採るので、系列の part が
+    # 同じ長さのまま壊れていると宣言と現物は一致したまま据わり、HF 経由の取得は block の
+    # sha256 を掛けない（検証済みの取得元）— 公開後に気づく門が無い。越境参照の席は自リポに
+    # 置かないので対象外（参照先との同一性は {@link external_refs} が見る）。
+    for item in partitioned:
+        for members in item.parts.values():
+            for index, member in enumerate(members):
+                source = item.plan.artifacts[member].source
+                expected = declared_parts.get(source) if source is not None else None
+                if member in external or expected is None:
+                    continue
+                target = placed[(item.plan.name, member)]
+                if digests[target] != expected:
+                    raise DistError(
+                        f"{target}: part {index} の sha256 が descriptor の宣言と食い違う"
+                        f"（宣言 {expected} / 現物 {digests[target]}）"
+                    )
 
     models: dict[str, Any] = {}
     host_assets: dict[str, int] = {}
@@ -1402,7 +1434,7 @@ def assemble_family(
     assert_root_files(root_files or {})
     # 入力コンテナの全検証は**実在検査の後・1 バイトも書く前**（ヘッダしか読まないので、
     # ここに置いても数 GB の再読みにはならない）。
-    assert_weight_components_verified(partitioned)
+    declared_parts = assert_weight_components_verified(partitioned)
     # 越境参照は**複数モデルへ掛けてよい**。MUST: 指定役割の現物が全モデルで参照先とバイト
     # 同一（plan ごとの {@link external_refs} の突合 + 全 plan の参照一致）でなければ落とす —
     # 「同じ役割名が別バイトを指す」形が曖昧さの実体なので、モデル数で代理せずそれを直接
@@ -1432,7 +1464,7 @@ def assemble_family(
     try:
         with staged_publication(out_dir) as staging:
             manifest, host_assets = _materialize_family(
-                partitioned, staging, default_model, references
+                partitioned, staging, default_model, references, declared_parts
             )
             # 法的テキストは検証の**前**に置く — 例外側に居ることを組み立てのたびに
             # {@link verify_dist} で通しておかないと、例外が外れた回に据わってから気づく。
