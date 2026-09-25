@@ -83,14 +83,27 @@ case $MODE in
       echo "### shard-cache moved: $C" >> "$LOG"
     done
     echo "### upload $NAME $(date +%T) hf=$($HF version 2>/dev/null | tail -1)" >> "$LOG"
+    # 時刻の印 — 下の門が今回の upload の書いた xet log だけを見るための基準（upload の直前に作る）。
+    MARKER=$(mktemp) || { echo "### 時刻の印を作れない" | tee -a "$LOG"; exit 1 }
     $HF upload "$OWNER/$NAME" "models/$NAME" . --repo-type model "$@" >> "$LOG" 2>&1; rc=$?
     echo "### upload exit=$rc $(date +%T)" >> "$LOG"
+    # MUST: 今回の upload が書いた log（印より新しいもの）だけを見る。最新の 1 本を取ると、今回の
+    # hf が log を書かなかったときに前回の成功 log を読んで門を通る。log はプロセスごとに 1 本だが、
+    # 複数あれば全部を検査する。
+    XET_LOGS=(~/.cache/huggingface/xet/logs/*(N.e['[[ $REPLY -nt $MARKER ]]']))
+    rm -f "$MARKER"
     [[ $rc -ne 0 ]] && { tail -3 "$LOG"; exit $rc }
     # 4 本目の env が読まれ、CAS への chunk 照会が 0 回だったことを hf_xet のログで確かめる。
-    L=$(ls -t ~/.cache/huggingface/xet/logs/* | head -1)
-    ENABLED=$(grep -o 'global_dedup_query_enabled = [a-z]* ([a-z ]*)' "$L" | head -1)
-    QUERIES=$(grep -c 'Completed query_dedup' "$L")
-    echo "### xet log $L $ENABLED query_dedup=$QUERIES" >> "$LOG"
+    # 0 本・どれか 1 本でも停止の行が無い・照会の合計が 0 でない、のいずれでも下の門で落とす。
+    DISABLED=$(( ${#XET_LOGS} > 0 )); QUERIES=0; ENABLED=
+    for L in $XET_LOGS; do
+      ENABLED=$(grep -o 'global_dedup_query_enabled = [a-z]* ([a-z ]*)' "$L" | head -1)
+      Q=$(grep -c 'Completed query_dedup' "$L")
+      [[ $ENABLED == *"= false"* ]] || DISABLED=0
+      QUERIES=$(( QUERIES + Q ))
+      echo "### xet log $L $ENABLED query_dedup=$Q" >> "$LOG"
+    done
+    (( ${#XET_LOGS} > 0 )) || echo "### xet log 今回の upload の log が無い" >> "$LOG"
     SHA=$(curl -sS "https://huggingface.co/api/models/$OWNER/$NAME/revision/main" | deno eval 'const t=await new Response(Deno.stdin.readable).text(); console.log(JSON.parse(t).sha)')
     echo "### main sha $SHA" >> "$LOG"
     # 表は判定の前に出す（落ちる場合でも断片化の実測を残す）。0 件なら表側が落ちる。
@@ -98,8 +111,8 @@ case $MODE in
     # MUST: global dedup の停止（4 本目の env）をログへ写すだけでなく**門にする**。停止していない
     # と他リポの xorb を引き当てて断片化したまま公開が完了し、回復はリポの削除→再作成という
     # 破壊的な手順になる（runbook §2 — 検査値もそこと同じ綴り）。
-    if [[ $ENABLED != *"= false"* || $QUERIES -ne 0 ]]; then
-      echo "### FAILED global dedup が止まっていない（${ENABLED:-行が無い} / query_dedup=$QUERIES）— hf は tools/.venv のもの（hf_xet 1.6.0 以上）か" >> "$LOG"
+    if (( ! DISABLED || QUERIES != 0 )); then
+      echo "### FAILED global dedup が止まっていない（今回の log ${#XET_LOGS} 本 / ${ENABLED:-行が無い} / query_dedup=$QUERIES）— hf は tools/.venv のもの（hf_xet 1.6.0 以上）か" >> "$LOG"
       summarize
       exit 1
     fi
