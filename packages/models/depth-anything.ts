@@ -41,8 +41,8 @@ export { DEPTH_ANYTHING_SOURCES } from "./src/depth-anything/config.ts";
 export type { Rgb8Image } from "./src/image/preprocess.ts";
 
 /**
- * 入力起因の失敗（渡した要求そのものが受理できない = 入力を直せば通る — 入力画像の寸法・
- * オプションの値域）。**家族横断で 1 本**なので、複数の家族を同じホストに載せる側はこれだけで
+ * 入力起因の失敗（渡した要求そのものが受理できない = 入力を直せば通る — 入力画像の寸法と
+ * 画素列の長さ）。**家族横断で 1 本**なので、複数の家族を同じホストに載せる側はこれだけで
  * 400 と 500 を分けられる。内部不変条件の破れ・資産の齟齬・GPU 容量は素の `Error` のまま飛ぶ。
  */
 export { ModelInputError } from "./src/errors.ts";
