@@ -178,8 +178,6 @@ export HF_XET_DEDUPLICATION_GLOBAL_DEDUP_QUERY_ENABLED=false
   （tools/.venv の hf）にはある**。効いたことは hf_xet のログの
   `global_dedup_query_enabled = false (user set)` 行で確認できる。1.4.3 では存在しない env を
   export しても何も起きないので、nix の hf ではアップロードしない。
-- **回復は可能**: shard-cache を退避し、4 本の env と 1.6.0 の hf で同一バイトを上げ直すと
-  健全な xorb が新規に書かれる（実施した形はリポ削除 → 再作成・再アップ。同一リポ内の
-  delete → 再 up の 2 コミット法は未検証）。1.4.3 では回復手段が無かった（片道ラチェット）。
-  ただし**公開 pin のあるリポでは削除 → 再作成を使わない** — 削除は履歴ごと消え、旧版パッケージが
-  pin した revision が失われる（[release-runbook](release-runbook.md) §2）。
+- **断片化したときの回復手順と、公開 pin のあるリポでの禁止事項の正本は
+  [release-runbook](release-runbook.md) §2「アップロード直後の断片化検証」**である。この節が正本として
+  持つのは env 4 本と hf_xet の版の条件だけで、回復の可否・2 コミット法・リポ削除の扱いは複製しない。
