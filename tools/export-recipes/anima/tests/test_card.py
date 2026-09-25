@@ -497,6 +497,16 @@ class TestSections:
         assert "@karume/models" in card
         assert "using pipeline" in card
 
+    def test_the_usage_snippet_declares_the_pipeline_with_await_using(self, card: str) -> None:
+        """`AnimaPipeline` は `[Symbol.asyncDispose]` だけを持つ — 同期の `using` は宣言で落ちる。
+
+        部分一致（`"using pipeline" in card`）は `await using` でも `using` でも通るので、
+        宣言行を丸ごと突き合わせる。
+        """
+        lines = card.splitlines()
+        assert "await using pipeline = await AnimaPipeline.fromPretrained({" in lines
+        assert not any(line.startswith("using pipeline") for line in lines)
+
     def test_the_usage_snippet_offers_the_revision_pin(self, card: str) -> None:
         """source は object ref 形 — revision を書く席が無いと読み手は暗黙に `main` 追従になる。"""
         assert '  // revision: "<full commit sha>",' in card

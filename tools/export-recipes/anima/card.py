@@ -285,6 +285,7 @@ def _usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
                 f'  // model: "{model_name}", // default — available: {model_names}',
                 f'  // quant: "{quant}", // default — available: {quant_names}',
             ],
+            disposable="await using",
         ),
         "",
         "const image = await pipeline.generate({",

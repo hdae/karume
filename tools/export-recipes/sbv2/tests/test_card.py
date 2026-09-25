@@ -29,13 +29,15 @@ import pytest
 
 from sbv2.card import (
     SBV2_CARD_PROFILES,
+    SBV2_DEMO_TEXT,
     SBV2_FN_PROFILE,
     SBV2_JVNV_PROFILE,
+    SBV2_QUANT_ROUNDING,
     SBV2_SUPPORTED_PIPELINE,
     Sbv2CardProfile,
     render_sbv2_model_card,
 )
-from sbv2.distribution import SBV2_QUANT_ABBREVIATIONS
+from sbv2.distribution import SBV2_QUANT_ABBREVIATIONS, SBV2_QUANTS
 from siglip2.card import SIGLIP2_SUPPORTED_PIPELINE, render_siglip2_model_card
 
 #: 使い方スニペットに綴られるリポ ID（pipeline の宣言から dist が渡す）。
@@ -65,14 +67,14 @@ def _container(*refs: dict[str, Any]) -> dict[str, Any]:
 def _siglip2_manifest(model: str = "base") -> dict[str, Any]:
     """SigLIP2 の最小 manifest（テンプレート取り違えの門を両向きに見るための相手）。"""
     return {
-        "format": "karume/4",
+        "format": "karume/5",
         "generator": "karume/9.9.9",
         "defaultModel": model,
         "models": {
             model: {
                 "pipeline": SIGLIP2_SUPPORTED_PIPELINE,
                 "weights": {
-                    "vision": {"f32": _container(_ref("v/model.f32.safetensors", 11, "c"))}
+                    "vision": {"f32": _container(_ref("v/model.f32-00001-of-00003.krm", 11, "c"))}
                 },
                 "assets": {},
                 "quants": {"f32": {"weights": {"vision": "f32"}, "session": {}}},
@@ -96,10 +98,10 @@ def _sbv2_manifest() -> dict[str, Any]:
     `styles` は **ID の昇順に並べない** — カードが manifest の並びをそのまま出すこと
     （並べ替えを挟んでいないこと）を、そのまま観測できるようにするため。
     """
-    text_encoder = _ref("shared/text_encoder/model.i8.safetensors", 555, "e")
+    text_encoder = _ref("shared/text_encoder/model.i8-00001-of-00003.krm", 555, "e")
     tokenizer = _ref("shared/tokenizer/fake-tokenizer.json", 11, "3")
     return {
-        "format": "karume/4",
+        "format": "karume/5",
         "generator": "karume/9.9.9",
         "defaultModel": "ZA",
         "models": {
@@ -108,12 +110,12 @@ def _sbv2_manifest() -> dict[str, Any]:
                 "weights": {
                     "text_encoder": {"i8": _container(text_encoder)},
                     "front": {
-                        "f16": _container(_ref("ZA/front/model.f16.safetensors", 666, "f")),
-                        "i8": _container(_ref("ZA/front/model.i8.safetensors", 777, "0")),
+                        "f16": _container(_ref("ZA/front/model.f16-00001-of-00003.krm", 666, "f")),
+                        "i8": _container(_ref("ZA/front/model.i8-00001-of-00003.krm", 777, "0")),
                     },
                     "voice": {
-                        "f16": _container(_ref("ZA/voice/model.f16.safetensors", 888, "1")),
-                        "i8": _container(_ref("ZA/voice/model.i8.safetensors", 999, "2")),
+                        "f16": _container(_ref("ZA/voice/model.f16-00001-of-00003.krm", 888, "1")),
+                        "i8": _container(_ref("ZA/voice/model.i8-00001-of-00003.krm", 999, "2")),
                     },
                 },
                 "assets": {
@@ -157,8 +159,12 @@ def _sbv2_manifest() -> dict[str, Any]:
                 "pipeline": SBV2_SUPPORTED_PIPELINE,
                 "weights": {
                     "text_encoder": {"i8": _container(text_encoder)},
-                    "front": {"i8": _container(_ref("ZB/front/model.i8.safetensors", 100, "7"))},
-                    "voice": {"i8": _container(_ref("ZB/voice/model.i8.safetensors", 200, "8"))},
+                    "front": {
+                        "i8": _container(_ref("ZB/front/model.i8-00001-of-00003.krm", 100, "7"))
+                    },
+                    "voice": {
+                        "i8": _container(_ref("ZB/voice/model.i8-00001-of-00003.krm", 200, "8"))
+                    },
                 },
                 "assets": {
                     "tokenizer": tokenizer,
@@ -236,14 +242,45 @@ class TestSbv2Sections:
         assert "cc-by-sa-4.0" in sbv2_card
 
     def test_it_shows_the_minimal_typescript_entry_point(self, sbv2_card: str) -> None:
-        """実在する公開面だけを綴る（`packages/models/mod.ts` の 2 名 + 実シグネチャ）。"""
+        """実在する公開面だけを綴る（`packages/models/mod.ts` の 3 名 + 実シグネチャ）。"""
         assert "Sbv2Pipeline.fromPretrained({" in sbv2_card
         assert f'  repo: "{REPO}",' in sbv2_card
         assert '  // revision: "<full commit sha>",' in sbv2_card
         assert "@karume/models" in sbv2_card
         assert "using pipeline" in sbv2_card
         assert "encodeWav(audio.data, audio.sampleRate)" in sbv2_card
-        assert "const audio = await pipeline.generate({" in sbv2_card
+        assert "const audio = await pipeline.generate(utterance, {" in sbv2_card
+
+    def test_the_usage_snippet_declares_the_pipeline_with_await_using(self, sbv2_card: str) -> None:
+        """`Sbv2Pipeline` は `[Symbol.asyncDispose]` だけを持つ — 同期の `using` は宣言で落ちる。"""
+        lines = sbv2_card.splitlines()
+        assert "await using pipeline = await Sbv2Pipeline.fromPretrained({" in lines
+        assert not any(line.startswith("using pipeline") for line in lines)
+
+    def test_the_usage_snippet_hands_generate_an_analyzed_utterance(self, sbv2_card: str) -> None:
+        """`generate(utterance, options)` の 2 層入力（0.6.0〜）— テキスト解析は呼び手の責務。
+
+        生テキストを options に入れる形（`generate({ text })`）は型が通らない。
+        """
+        lines = sbv2_card.splitlines()
+        assert (
+            'import { encodeWav, Sbv2Pipeline, toSbv2Utterance } from "jsr:@karume/models";'
+            in lines
+        )
+        assert (
+            "const utterance = toSbv2Utterance(analyzeWithWords(await getDictionary(),"
+            f' "{SBV2_DEMO_TEXT}"));' in lines
+        )
+        assert not any(line.lstrip().startswith("text:") for line in lines)
+
+    def test_it_does_not_promise_a_dictionary_the_package_does_not_fetch(
+        self, sbv2_card: str
+    ) -> None:
+        """パッケージは辞書を取得せず、`dictionary` option も持たない（解析は呼び手）。"""
+        assert "`dictionary` option" not in sbv2_card
+        assert "the pipeline fetches it" not in sbv2_card
+        assert "belongs to the caller" in sbv2_card
+        assert "https://github.com/hdae/karume/tree/main/examples/sbv2" in sbv2_card
 
 
 class TestSbv2QuantRounding:
@@ -274,9 +311,29 @@ class TestSbv2QuantRounding:
         assert "rounded per output channel (plain RTN)" in notes
         assert "per tensor" not in notes
 
+    def test_every_shipped_seat_has_a_rounding_note(self) -> None:
+        """席を足した日に備考の欠けが沈黙で生えない（`_sbv2_quants` は無いキーを飛ばす）。"""
+        assert set(SBV2_QUANT_ROUNDING) == set(SBV2_QUANTS)
+
+    def test_a_model_declaring_every_seat_gets_a_note_for_every_seat(self) -> None:
+        manifest = _sbv2_manifest()
+        model = manifest["models"]["ZA"]
+        for role, digit in (("text_encoder", "b"), ("front", "c"), ("voice", "d")):
+            model["weights"][role]["i4"] = _container(_ref(f"ZA/{role}/model.i4.krm", 12, digit))
+        model["quants"] = copy.deepcopy(dict(SBV2_QUANTS))
+        model["defaultQuant"] = "i8"
+
+        notes = self._notes(
+            render_sbv2_model_card(manifest, REPO, SBV2_FN_PROFILE, SBV2_QUANT_ABBREVIATIONS)
+        )
+
+        for name in SBV2_QUANTS:
+            assert f"- `{name}`" in notes, name
+
     def test_the_default_mark_follows_default_quant(self, sbv2_card: str) -> None:
         """既定マークは manifest 由来 — 備考に焼くと、既定が動いたとき表とだけ食い違う。"""
-        assert "(default)" not in self._notes(sbv2_card)
+        assert "- `i8-a8` (default) —" in self._notes(sbv2_card)
+        assert "- `i8` (default)" not in self._notes(sbv2_card)
 
         manifest = _sbv2_manifest()
         manifest["models"]["ZA"]["defaultQuant"] = "i8"
@@ -298,7 +355,10 @@ class TestSbv2Derivation:
 
         assert "| 2.17 KiB (588 B shared; 110 B of assets, read on the host) |" in quants
         assert "| 2.38 KiB (588 B shared; 110 B of assets, read on the host) |" in quants
-        for path in ("shared/text_encoder/model.i8.safetensors", "ZA/voice/model.f16.safetensors"):
+        for path in (
+            "shared/text_encoder/model.i8-00001-of-00003.krm",
+            "ZA/voice/model.f16-00001-of-00003.krm",
+        ):
             assert path not in sbv2_card, path
 
     def test_it_takes_the_sizes_from_the_manifest(self, sbv2_card: str) -> None:
@@ -367,7 +427,8 @@ class TestSbv2Derivation:
 
     def test_it_marks_exactly_the_default_quant_of_the_model(self, sbv2_card: str) -> None:
         _, _, rest = sbv2_card.partition("### Quants")
-        rows = [line for line in rest.partition("### Styles")[0].splitlines()]
+        table = rest.partition("### Styles")[0].partition("How the stored weights were rounded:")[0]
+        rows = [line for line in table.splitlines()]
         default = [line for line in rows if "(default)" in line]
         assert len(default) == 1
         assert default[0].startswith("| `i8-a8` (default) |")

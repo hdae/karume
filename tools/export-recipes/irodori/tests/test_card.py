@@ -51,15 +51,19 @@ MODEL = "v4.1-small"
 def _irodori_manifest(model: str = MODEL) -> dict[str, Any]:
     """Irodori の最小 manifest（モデル名以外の値は実物と重ならない偽値）。"""
     return {
-        "format": "karume/3",
+        "format": "karume/5",
         "generator": "karume/9.9.9",
         "defaultModel": model,
         "models": {
             model: {
                 "pipeline": IRODORI_SUPPORTED_PIPELINE,
                 "weights": {
-                    "backbone": {"f16": _container(_ref("ZA/backbone/model.f16.st", 11, "a"))},
-                    "dit": {"f16": _container(_ref("ZA/dit/model.f16.st", 13, "b"))},
+                    "backbone": {
+                        "f16": _container(_ref("ZA/backbone/model.f16-00001-of-00003.krm", 11, "a"))
+                    },
+                    "dit": {
+                        "f16": _container(_ref("ZA/dit/model.f16-00001-of-00003.krm", 13, "b"))
+                    },
                 },
                 "assets": {},
                 "quants": {
@@ -110,6 +114,15 @@ class TestIrodoriEntryPoint:
         card = render_irodori_model_card(_irodori_manifest(), REPO)
         assert "fromAssets" not in card
         assert "IrodoriPipeline.fromPretrained" in card
+
+    def test_the_usage_snippet_declares_the_pipeline_with_await_using(self) -> None:
+        """`IrodoriPipeline` は `[Symbol.asyncDispose]` だけを持つ（同期 `using` は宣言で落ちる）。
+
+        部分一致は `await using` でも `using` でも通るので、宣言行を丸ごと突き合わせる。
+        """
+        lines = render_irodori_model_card(_irodori_manifest(), REPO).splitlines()
+        assert "await using pipeline = await IrodoriPipeline.fromPretrained({" in lines
+        assert not any(line.startswith("using pipeline") for line in lines)
 
 
 class TestIrodoriUpstreamAttribution:

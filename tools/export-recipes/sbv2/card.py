@@ -60,7 +60,15 @@ SBV2_DEMO_TEXT = "こんにちは、これはテストです。"
 #: 既定マークは書かない — 既定は manifest の `defaultQuant` から引く（{@link _sbv2_quants}）。
 #: ここに書くと、既定が動いたときに表と説明が別々に嘘をつく。
 SBV2_QUANT_ROUNDING: Mapping[str, tuple[str, ...]] = {
+    "f16+bert8": (
+        "`front` / `voice` in `f16`, each weight rounded to the nearest `f16` value;",
+        "  `text_encoder` in `i8`, rounded per output channel (plain RTN).",
+    ),
     "i8": ("every weight in `i8`, rounded per output channel (plain RTN).",),
+    "i8-a8": (
+        "the same stored weights as `i8`. Nothing more is rounded at export time: the",
+        "  linear layers quantize their input activations to int8 per token at run time.",
+    ),
     "i8+bert4": (
         "`text_encoder` in `i4` group-32: its linear layers rounded with **GPTQ",
         "  calibration** (a 48-sentence Japanese corpus), its embedding table plain RTN.",
@@ -106,7 +114,8 @@ class Sbv2CardProfile:
 #: モデルカードも無い**。利用条件が書かれているのは作者の Booth 頒布ページなので、SPDX
 #: 識別子は当てられず `other` を採り、`license_link` はそのページを指す。
 #: DECIDED: 帰属は**最小記述**に留める（「Booth のこのモデルを変換した」程度 — 条件の引用や
-#: 頒布者の詳細は書かない。2026-08-20 ユーザー裁定・FN の HF 公開自体も保留中 — backlog）。
+#: 頒布者の詳細は書かない。2026-08-20 ユーザー裁定 — `docs/backlog.md` parked の
+#: 「karume-sbv2-fn の HF 公開」項。FN の HF 公開自体も同項で保留中）。
 SBV2_FN_METADATA = CardMetadata(
     pipeline_tag=SBV2_PIPELINE_TAG,
     base_model=("rufflet17/voice_models",),
@@ -349,7 +358,9 @@ def _sbv2_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
         "## Usage",
         "",
         "```ts",
-        'import { encodeWav, Sbv2Pipeline } from "jsr:@karume/models";',
+        'import { analyzeWithWords } from "jsr:@hdae/yomi";',
+        'import { getDictionary } from "jsr:@hdae/yomi/loader";',
+        'import { encodeWav, Sbv2Pipeline, toSbv2Utterance } from "jsr:@karume/models";',
         "",
         *from_pretrained(
             "Sbv2Pipeline",
@@ -358,11 +369,14 @@ def _sbv2_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
                 f'  // model: "{model_name}", // default — available: {model_names}',
                 f'  // quant: "{quant}", // default — available: {quant_names}',
             ],
+            disposable="await using",
         ),
         "",
-        "const audio = await pipeline.generate({",
-        f'  text: "{SBV2_DEMO_TEXT}",',
+        "// Text analysis (readings and accents) is the caller's job:",
+        "const utterance = toSbv2Utterance(analyzeWithWords(await getDictionary(),"
+        f' "{SBV2_DEMO_TEXT}"));',
         "",
+        "const audio = await pipeline.generate(utterance, {",
         "  // Voice — the names below come from the tables further down; every model in",
         "  // this repository brings its own set:",
         *_sbv2_knob(defaults, "style", f"available: {style_names}"),
@@ -384,9 +398,13 @@ def _sbv2_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
         "exactly what `encodeWav` takes.",
         "Weights are fetched once and cached (verified against `karume.json`'s `size` / `sha256`).",
         "",
-        "The Japanese analyzer dictionary the text front-end needs is **not** part of this",
-        "repository: the pipeline fetches it on the first `generate()` and keeps it for the rest",
-        "of the instance's life (pass your own through the `dictionary` option to skip the fetch).",
+        "`generate()` takes an already-analyzed utterance: text analysis (readings and accents)",
+        "belongs to the caller, and the package fetches no dictionary of its own.",
+        "The snippet uses [`@hdae/yomi`](https://jsr.io/@hdae/yomi), whose dictionary",
+        "(about 19 MB) is fetched on the first `getDictionary()` and read from the Cache API",
+        "afterwards; to fix a reading, put yomi's overlay dictionary in front of the analysis.",
+        "The [SBV2 example](https://github.com/hdae/karume/tree/main/examples/sbv2) is the",
+        "worked version.",
     ]
 
 

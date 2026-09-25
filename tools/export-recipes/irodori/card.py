@@ -4,7 +4,8 @@
 `karume.modelcard` が持つ。ここが持つのは **Irodori 固有の事実**だけ: 帰属（重みの出所・
 同梱するコーデックと text backbone・ライセンス）と、この pipeline のカードに何を書くか。
 
-帰属プロファイルは 1 つだけ（上流 1 リポの重みを格納形へ落とし直したもの）— SBV2 のように
+帰属プロファイルは 1 つだけ（本体 + 同梱の text backbone + コーデック〈+ その元の Apache 2.0 の
+重み〉の組はどのモデルでも同じで、変わるのは本体の上流リポだけ）— SBV2 のように
 声のファミリーで出所が割れる軸を持たないので、{@link irodori.distribution.PIPELINE} は
 `card_profiles` に 1 席しか置かない。
 
@@ -224,6 +225,7 @@ def _irodori_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
                 f'  // model: "{model_name}", // default — available: {model_names}',
                 f'  // quant: "{quant}", // default — available: {quant_names}',
             ],
+            disposable="await using",
         ),
         "",
         "const audio = await pipeline.generate({",
