@@ -1,4 +1,5 @@
-"""SBV2 音響チェーンを IR v1 + golden io へ書き出す台本（ADR 0013 の emit ターゲット）。
+"""SBV2 音響チェーンを IR v2 の容器（`krm`）+ golden io へ書き出す台本（ADR 0013 の emit
+ターゲット）。
 
 ターゲットは 5 本（ADR 0013 の全量）:
 
@@ -57,7 +58,7 @@ tolerance）が黙って別の資産に掛かる。丸め（fake-quant）は共�
 （`_fake_quant` の順序 MUST）。
 
 `--dtype i4` だけは**混成**（適格な `nn.Linear` / `nn.Conv1d` = i4 group32・残りは i8
-per-channel）で、配布形では `w4` quant の `front` / `voice` 席に入る（`sbv2/distribution.py`）。
+per-channel）で、配布形では `i4` quant の `front` / `voice` 席に入る（`sbv2/distribution.py`）。
 i4 の実行経路は linear / embedding / conv1d の重みスロット限定（ADR 0069 決定 5 とその追補）で、
 `nn.ConvTranspose1d` と depthwise conv（`groups > 1`）と行長が group32 で割り切れない重みは
 i8 側へ落ちるので、系列としては混成にしかならない。

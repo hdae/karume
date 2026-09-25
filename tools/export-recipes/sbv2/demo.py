@@ -66,7 +66,7 @@ BERT_HIDDEN_FROM_END = 3
 #: 配布グラフ（`deberta/export.py` の 22 層 variant）から**同じテンソル**を引く位置。グラフは
 #: SBV2 が使う層までで切り詰めてあるので最終出力の 1 本目になる。
 #:
-#: 両者が同じテンソルを指すことは組み立て時に検査される（`karume.dist.assert_bert_hidden` —
+#: 両者が同じテンソルを指すことは組み立て時に検査される（`sbv2.distribution.assert_bert_hidden` —
 #: 22 層 × 出力 1 本 × 位置 1 の 3 点検査。ADR 0045 決定 4）。
 BERT_GRAPH_HIDDEN_FROM_END = 1
 

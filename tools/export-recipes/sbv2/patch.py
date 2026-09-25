@@ -478,7 +478,8 @@ def apply_ffn_conv_padding_patch() -> None:
 
 
 def apply_all_patches() -> None:
-    """front の export に必要な全パッチを当てる（冪等）。
+    """SBV2 の export に必要な全パッチを当てる（冪等）。front / flow / voice の各ターゲットと
+    `demo` / `measure_quant` が共通に呼ぶ。
 
     MUST: 「パッチ前の参照」を採る処理より**後**に呼ぶこと。クラス属性のプロセス全域
     差し替えなので、先に当てると以後の参照値がパッチ後の値になり、同値検証が恒真化して
@@ -704,7 +705,8 @@ class Sbv2Voice(nn.Module):
 
     MUST: `dec` は **`remove_weight_norm` 済み**であること（`sbv2.export.ensure_dec_plain`）。
     weight_norm が残っていると `dec.weight` は実効重みではなく、そのまま IR へ書けば
-    別のモデルになる。将来の f16/i8 丸めは remove **後**の実効重みに当てる（ADR 0013）。
+    別のモデルになる。f16 / i8 / i4 の丸め（`sbv2.export._fake_quant`）は remove **後**の実効重みに
+    当てる（ADR 0013）。
     """
 
     def __init__(self, net_g: nn.Module) -> None:

@@ -7,8 +7,9 @@
 
 ## 割り方 — 多層 / 双方向は**ノードを並べて**表す
 
-IR v1 の可変アリティは `cat` だけで、`aten.gru` の `Tensor[16]`（層 × 方向 × 4 本の重み）は
-構造的に載らない。したがって層と方向はグラフの構造で表す:
+IR の可変アリティ op は `cat` だけで、`gru_scan` はアリティ 4 固定（ADR 0056 決定 1）なので、
+`aten.gru` の `Tensor[16]`（層 × 方向 × 4 本の重み）は構造的に載らない。したがって層と方向は
+グラフの構造で表す:
 
     層 k: gi = linear(x, W_ih_k, b_ih_k)         ← 入力側 GEMM は既存 `linear`（時間一括 1 本）
           y_fwd = gru_scan(gi, h0, W_hh_k, b_hh_k)
@@ -73,8 +74,8 @@ def gru_forward(gru: nn.GRU, x: torch.Tensor) -> torch.Tensor:
 
     `[N, T, input_size]` → `[N, T, 2·hidden_size]`（batch_first の入出力そのもの）。
 
-    MUST: `h_n` を返さない — IR v1 は実質単一出力で、`gru_scan` は最終状態を持ち帰れない
-    （ADR 0056 決定 5）。呼び手が `h_n` を消費する形はこの層では表せない。
+    MUST: `h_n` を返さない — `gru_scan` の契約は出力 1 本（全ステップの `h`）で、最終状態を
+    持ち帰らない（ADR 0056 決定 1・決定 7）。呼び手が `h_n` を消費する形はこの層では表せない。
     """
     assert_supported(gru)
     hidden_size = gru.hidden_size
