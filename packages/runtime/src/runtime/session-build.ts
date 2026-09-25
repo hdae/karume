@@ -28,7 +28,7 @@ import { BUFFER_USAGE } from "../gpu/webgpu-constants.ts";
 import { dp4aAvailable } from "../kernels/linear-i8a8.ts";
 import type { ScoreStorage } from "../kernels/score-storage.ts";
 import type { FusionCounts } from "./fusion.ts";
-import { countUses, declaredDtypes, ExecutionError } from "./plan.ts";
+import { countUses, declaredDtypes, describeInputValue, ExecutionError } from "./plan.ts";
 import type { GenerationLimits, StepRecipe } from "./recipe.ts";
 import type { TransientLimits } from "./transient-plan.ts";
 import {
@@ -579,7 +579,9 @@ export const buildSessionState = async (
   // 値域の検査（union を読まない）は綴りの門の後 — 文言は estimate.ts の同じ門と揃える。
   if (!Number.isSafeInteger(planBackingBudgetBytes) || planBackingBudgetBytes < 0) {
     throw new ExecutionError(
-      `options.planBackingBudgetBytes ${String(planBackingBudgetBytes)} は非負の安全な整数で` +
+      `options.planBackingBudgetBytes ${
+        describeInputValue(planBackingBudgetBytes)
+      } は非負の安全な整数で` +
         "なければならない",
     );
   }
@@ -591,7 +593,9 @@ export const buildSessionState = async (
     (!Number.isSafeInteger(linearGemvRowsThreadTarget) || linearGemvRowsThreadTarget < 1)
   ) {
     throw new ExecutionError(
-      `options.linearGemvRowsThreadTarget ${String(linearGemvRowsThreadTarget)} は 1 以上の` +
+      `options.linearGemvRowsThreadTarget ${
+        describeInputValue(linearGemvRowsThreadTarget)
+      } は 1 以上の` +
         "安全な整数でなければならない",
     );
   }
@@ -874,7 +878,7 @@ export const buildSessionState = async (
               });
             }
           } else {
-            // 値域（2 冪 ≥ 16・整除）は合流層 / 旧パーサが保証済み。存在は型の上でだけ optional
+            // 値域（2 冪 ≥ 16・整除）は合流層が保証済み。存在は型の上でだけ optional
             // なので、黙って読み飛ばさず言い直す（「格納 i8 なのに scale が無い」と同じ流儀）。
             const groupSize = storage.groupSize;
             if (groupSize === undefined) {

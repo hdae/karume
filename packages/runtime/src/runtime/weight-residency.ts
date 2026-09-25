@@ -2,7 +2,7 @@
  * 重みの**常駐分類**（席）— グラフ宣言だけで決まる純関数プランナと、その結果を GPU 実体へ
  * 結び付けた Session 側の判別 union。
  *
- * MUST: 分類の正本はここ 1 本（{@link planWeightResidency}）。Session 構築（executor.ts）と
+ * MUST: 分類の正本はここ 1 本（{@link planWeightResidency}）。Session 構築（session-build.ts）と
  * 見積り（estimate.ts）が別々に「適格判定 + 格納 dtype の分岐」を書くと、片方だけ直された
  * ときに **見積りと実ロードが別のモデルを説明する**（例外も警告も出ない）。
  * MUST: 実テンソルを見ない。バイト数は宣言 shape と格納メタデータから導き、実バイトとの一致は
@@ -10,7 +10,7 @@
  *
  * 席から「実際に確保される GPU バッファ」への写像（{@link planWeightBuffers}）と、その寸法を
  * device の絶対上限と突き合わせる門（{@link assertWeightsWithinLimits}）も同じ理由でここに置く
- * — 確保する側（executor.ts）と数える側（estimate.ts）が別々に席を展開すると、片方だけ直された
+ * — 確保する側（session-build.ts）と数える側（estimate.ts）が別々に席を展開すると、片方だけ直された
  * ときに検査・見積り・実ロードが別の寸法を主張する。
  */
 
@@ -40,7 +40,7 @@ import {
  *
  * MUST: payload の `GPUBuffer` は持たない（重み台帳 `weightBuffers` が所有 — 二重保持にすると
  * 「どちらが本物か」が生まれる）。scale だけは重み台帳に載らない実体なのでここが所有する。
- * MUST: 席ごとの付随情報を**型で**要求する（i8 / i4 は scale 必須・i4 は group 長必須）。
+ * MUST: 席ごとの付随情報を**型で**要求する（i8 / i2 / i4 は scale 必須・i4 は group 長必須）。
  * 3 本の並列 Map で持つと「i4 なのに group 長が無い」形が型の上では作れてしまい、実行時検査
  * だけが最後の砦になる。
  */
@@ -52,10 +52,11 @@ export type ResidentWeight =
 /**
  * initializer 1 本の常駐分類（{@link planWeightResidency} の値）。
  *
- * 席は 5 つ:
- * - `raw` — 圧縮しない格納（f32 / i32 / bf16）を生バイトのまま GPU 常駐（executor の分岐 3 本目）
- * - `f16` / `i8` / `i4` — 圧縮のまま常駐し dequant はカーネル内（ADR 0018 / 0019 / 0069）
+ * 席は 7 つ:
+ * - `raw` — 圧縮しない格納（f32 / i32 / bf16）を生バイトのまま GPU 常駐（session-build.ts の構築相）
+ * - `f16` / `i8` / `i2` / `i4` — 圧縮のまま常駐し dequant はカーネル内（ADR 0018 / 0019 / 0097 / 0069）
  * - `expanded` — 適格外でロード時に CPU で f32 展開（正しさは保たれ VRAM 削減はゼロ）
+ * - `shared` — 借り物の重み（ADR 0096 段 2 §1.3 — 貸し手 Session の GPU バッファを束ねる）
  *
  * `payloadBytes` は**格納バイト列そのものの長さ**（整列詰め物もバッファ床も含まない）。
  * 整列は転送側（`alignF16Payload` / `alignI8Payload`）とアリーナ（`toSizeClass`）が持つ。
@@ -166,7 +167,7 @@ export const planWeightResidency = (graph: IrGraph): ReadonlyMap<string, WeightR
       plan.set(name, { seat: "f16", payloadBytes: bytes });
       continue;
     }
-    // 量子化 codec: rowAxis / groupSize の存在と値域は合流層 / 旧パーサが保証済み。存在は型の上で
+    // 量子化 codec: rowAxis / groupSize の存在と値域は合流層が保証済み。存在は型の上で
     // だけ optional なので、黙って読み飛ばさず言い直す。
     const axis = rowAxis ?? 0;
     if (groupSize === undefined) {
@@ -306,7 +307,16 @@ export const resolveSharedWeights = (
     );
   }
   return declared.map((name) => {
-    const shared = (provided ?? {})[name][RUNTIME_INTERNAL];
+    const weight = (provided ?? {})[name];
+    // MUST: 型の外から来た値（JS の呼び手）は内部面を読む前に落とす — 読むと `ExecutionError` では
+    // なく `TypeError`（`shared.initializer` の参照）や利用者の getter の例外が抜ける。
+    if (!(weight instanceof SharedWeight)) {
+      throw new ExecutionError(
+        `sharedWeights['${name}']: SharedWeight でない値（${typeof weight}）— 貸し手 Session の ` +
+          "exportWeight が返したものを渡すこと",
+      );
+    }
+    const shared = weight[RUNTIME_INTERNAL];
     const where = `sharedWeights['${name}'（貸し手の initializer '${shared.initializer}'）`;
     if (shared.gpu !== gpu) {
       throw new ExecutionError(`${where}: 貸し手と借り手の GpuContext（device）が別`);
@@ -336,7 +346,7 @@ export const resolveSharedWeights = (
         }）— 同じバッファが別の読み方をされる`,
       );
     }
-    return { name, shared: (provided ?? {})[name] };
+    return { name, shared: weight };
   });
 };
 
@@ -367,7 +377,7 @@ export type WeightBuffer = {
  *
  * 適格席（f16 / i8 / i4）と生バイト席は payload をそのまま上げ、適格外席（`expanded`）は CPU で
  * f32 展開した**後**のバイト列を上げる（配布形の圧縮バイト数は GPU に載らない）。i8 / i4 は
- * companion scale が payload とは別に**もう 1 本**確保される（executor の
+ * companion scale が payload とは別に**もう 1 本**確保される（session-build.ts の
  * `timedAlloc(Math.max(4, scale.bytes.byteLength))`）。
  */
 export const planWeightBuffers = (

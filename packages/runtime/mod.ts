@@ -178,11 +178,15 @@ export type {
  * 残す規律なので、`PreparedModel.estimate` の口が使えない。そこから同じ見積りへ戻る唯一の
  * 経路がこの 2 本（`estimateGraphMemory(graph, planWeightResidency(graph), options)`）で、
  * グラフが同じなら計画も同じ（純関数）。
+ *
+ * グラフは `PreparedModel.graph`（構築と同じ門を通った検証済みのグラフ）から取る — この呼び方
+ * では常駐計画が見積りの門より先に走るので、未検証のグラフでは失敗の文言がどのノードかを名乗らない。
  */
 export { planWeightResidency } from "./src/runtime/weight-residency.ts";
 export type { WeightResidency } from "./src/runtime/weight-residency.ts";
 /**
- * Session の構築は {@link createSessionFromContainer} だけを入口にするため、型としてのみ公開する。
+ * Session の構築は {@link prepareContainer} の `createContainerSession` と、その合成である
+ * {@link createSessionFromContainer} だけを入口にするため、型としてのみ公開する。
  *
  * `Tensor` は意味論 dtype の判別ユニオン（ADR 0009 による ADR 0008 の部分改訂）:
  * `{ dtype: "f32", data: Float32Array }` / `{ dtype: "i32", data: Int32Array }` /

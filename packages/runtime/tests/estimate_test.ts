@@ -110,7 +110,7 @@ Deno.test("圧縮しない格納（f32 / i32）は実バイトのまま非圧縮
 
 /**
  * 格納 `bf16` の initializer を 1 本だけ持つ合流後のグラフ。IR の語彙としては valid だが
- * `RUNTIME_SUPPORT.storage` に無いので、`createSession` は必ず capability 不足で落ちる。
+ * `RUNTIME_SUPPORT.storage` に無いので、`createSessionFromContainer` は必ず capability 不足で落ちる。
  *
  * 格納は供給側（束縛表の encoding）が決める — 宣言は `w: {}` のまま。
  */
@@ -199,7 +199,7 @@ Deno.test("報告は使った予算をそのまま載せる（呼び手が組み
   );
 });
 
-Deno.test("予算の値域は createSession と同じ門（非負の安全な整数以外は fail loudly）", () => {
+Deno.test("予算の値域は createSessionFromContainer と同じ門（非負の安全な整数以外は fail loudly）", () => {
   // MUST: 見積りだけが「Session の作れない予算」を受けると、見積れたのに構築が落ちる形になる。
   for (const budget of [-1, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 2]) {
     assertThrows(
@@ -218,6 +218,28 @@ Deno.test("予算の値域は createSession と同じ門（非負の安全な整
       .peakAccountedBytes,
     616,
   );
+});
+
+Deno.test("予算の値域の診断は利用者の変換を呼ばず、非数値は型名だけを出す", () => {
+  let conversions = 0;
+  const object = {
+    [Symbol.toPrimitive](): number {
+      conversions++;
+      return 4096;
+    },
+  };
+  for (const value of [object, Symbol("budget"), "4096"]) {
+    const options = { bindings: { T: 7 } };
+    Object.defineProperty(options, "planBackingBudgetBytes", { value });
+    const refused = assertThrows(
+      () => plainModel().estimate(options),
+      ExecutionError,
+      "非負の安全な整数",
+    );
+    const shown = typeof value === "string" ? JSON.stringify(value) : typeof value;
+    assert(refused.message.includes(`planBackingBudgetBytes ${shown} `), refused.message);
+  }
+  assertEquals(conversions, 0);
 });
 
 /**
@@ -1551,7 +1573,7 @@ Deno.test("グラフに無い記号の束縛は fail loudly", () => {
 // ---------------------------------------------------------------------------
 
 // 全量面（`estimateGraphMemory`）は `PreparedModel` を経由しないので、契約検査を estimator 側で
-// 通していないと「createSession が必ず落ちるモデル」に完全な AdmissionReport を返す
+// 通していないと「createSessionFromContainer が必ず落ちるモデル」に完全な AdmissionReport を返す
 // （admission の目的と逆）。この節の 3 本は**その口を直に呼ぶ** — `PreparedModel.estimate` から
 // 呼ぶと `prepareContainer` の側が先に落とすので、estimator 側の門を外しても緑のままになる。
 

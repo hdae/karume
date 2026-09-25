@@ -34,6 +34,20 @@ export class ExecutionError extends Error {
   override readonly name = "ExecutionError";
 }
 
+/**
+ * 入力境界の診断で型外の値を綴る（number は値・string は JSON の引用・それ以外は `typeof` の型名）。
+ *
+ * MUST: 利用者の変換（`toString` / `Symbol.toPrimitive` / `toJSON`）を呼ばない。`String(x)` や
+ * テンプレートリテラルで綴ると、変換が throw するオブジェクトでは `ExecutionError` の代わりに
+ * 利用者の例外が抜け、symbol ではテンプレートリテラル自体が `TypeError` を投げる。
+ */
+export const describeInputValue = (value: unknown): string =>
+  typeof value === "number"
+    ? String(value)
+    : typeof value === "string"
+    ? JSON.stringify(value)
+    : typeof value;
+
 /** 記号次元 → 実行時の具体値。 */
 export type SymbolBindings = Readonly<Record<string, number>>;
 
@@ -501,7 +515,7 @@ export const i2EligibleInitializers = (graph: IrGraph): ReadonlySet<string> => {
     if (weightSlot === undefined) continue;
     const name = node.ins[weightSlot];
     if (name === undefined || !Object.hasOwn(graph.initializers, name)) continue;
-    (node.op === "linear" || node.op === "embedding" ? executable : other).add(name);
+    (node.op === LINEAR_OP || node.op === EMBEDDING_OP ? executable : other).add(name);
   }
   for (const name of other) executable.delete(name);
   return executable;

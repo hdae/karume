@@ -56,6 +56,7 @@ import {
 import {
   assertGenerationBindings,
   countUses,
+  describeInputValue,
   ExecutionError,
   type NodePlan,
   planGraph,
@@ -714,6 +715,11 @@ const transientSlotBytes = (
  * `planWeightResidency(graph)` で引いてよい — グラフが同じなら計画も同じ純関数なので、席の
  * 食い違いは生じない（`mod.ts` がこの 2 本を公開している理由そのもの）。
  *
+ * MUST: 渡す `graph` は `PreparedModel.graph`（構築と同じ門 — capability 検査と契約検査 — を
+ * 通った検証済みのグラフ）から取る。下の門はこの関数の中で走るが、`planWeightResidency(graph)`
+ * は引数の評価で**先に**走るので、未検証のグラフでは常駐計画の内側（conv1d の attrs や payload
+ * 長の検査）が先に落ち、失敗の文言が `nodes[i] (op)` を名乗らない（fail loudly 自体は保たれる）。
+ *
  * @param options.bindings グラフ入力側の記号次元（run に渡すのと同じ束縛）。未束縛の記号が
  *   要る形は fail loudly。物理 chunk 行 `M` の記号だけは**ここでは受けない**（束縛点は
  *   `options.generation.chunkLength` と decode 形の 1 — {@link planBindings}）。
@@ -732,7 +738,9 @@ export const estimateGraphMemory = (
   residency: ReadonlyMap<string, WeightResidency>,
   options: EstimateOptions,
 ): AdmissionReport => {
-  // MUST: 実構築（`createSessionFromContainer`）と**同じ門**を先に通す。
+  // MUST: 実構築（`createSessionFromContainer`）と**同じ門**を先に通す（見積り本体より先 —
+  // 常駐計画 `residency` は呼び手が先に計算済みなので、門の後に計画する順序を保証するのは
+  // `PreparedModel` 経由、または検証済みの `PreparedModel.graph` を渡す呼び手だけ）。
   // 作れない構成へ見積りを返すと、格納 dtype や op が非対応のモデルに対して estimator だけが
   // もっともらしい総量を主張する（例: 格納 `bf16` は IR の語彙にはあるが RUNTIME_SUPPORT に
   // 無く、Session 構築は必ず落ちる）。門を共有すれば語彙が増えたときの抜けも同時に塞がる。
@@ -763,7 +771,9 @@ export const estimateGraphMemory = (
   const budgetBytes = options.planBackingBudgetBytes ?? DEFAULT_PLAN_BACKING_BUDGET_BYTES;
   if (!Number.isSafeInteger(budgetBytes) || budgetBytes < 0) {
     throw new ExecutionError(
-      `options.planBackingBudgetBytes ${budgetBytes} は非負の安全な整数でなければならない`,
+      `options.planBackingBudgetBytes ${
+        describeInputValue(budgetBytes)
+      } は非負の安全な整数でなければならない`,
     );
   }
   const chunkDims = chunkRowDims(graph);

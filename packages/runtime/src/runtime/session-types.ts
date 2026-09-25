@@ -256,7 +256,7 @@ export type SessionOptions = {
    *   docs/perf-ledger.md の Q-8、契約は src/kernels/linear-i8a8.ts の「w4a8 変種」節。
    *
    * `"f16"` は共有タイルを f16 に落とす計算変種（ADR 0028）で、重み格納が f32 / f16 の
-   * linear に効く（**i8 常駐の重みとは組めない** — w8a16 は未実装なので fail loudly）。
+   * linear に効く（**i8 / i4 常駐の重みとは組めない** — w8a16 / w4a16 は未実装なので fail loudly）。
    * MUST: 既定は `"f32"` — i8 / i4 / f16 資産を自動で低精度実行にすると既存の PNG sha256 門と
    * E2E tolerance が黙って変わる。opt-in 以外はあり得ない。
    */
@@ -425,8 +425,8 @@ export type SessionOptions = {
 export type StorageDiagnostics = {
   /**
    * 圧縮のまま GPU 常駐した重みの **GPU バッファ上のバイト数**（整列のゼロ詰め込み。
-   * i8 は **per-channel scale のバッファぶんも加算**する — 実際に GPU が抱えるバイト数を
-   * 表す欄なので、scale を除くと VRAM 実績と食い違う）。
+   * i8 / i2 / i4 は **scale（i8 / i2 は per-channel・i4 は group ごと）のバッファぶんも加算**する —
+   * 実際に GPU が抱えるバイト数を表す欄なので、scale を除くと VRAM 実績と食い違う）。
    * f32 で持ったときの 1/2（f16）・約 1/4（i8）になるのがこの経路の目的。
    */
   readonly residentCompressedBytes: number;
@@ -478,7 +478,7 @@ export type SessionBuildStats = {
    */
   readonly shardWaitMs: number;
   /**
-   * 適格外の重みを CPU で f32 展開した時間の総和（f16 / i8 / i4 の decode）。
+   * 適格外の重みを CPU で f32 展開した時間の総和（f16 / i8 / i2 / i4 の decode）。
    * **適格判定に全部通っていれば 0** — 0 でないことは VRAM 削減が落ちている
    * （{@link StorageDiagnostics.hostExpandedBytes} が正）ことと表裏。
    */
@@ -550,7 +550,7 @@ export type PlanBackingStats = {
    * 保持中の backing 全てが常駐させている**領域の総和**（未構築 / 破棄済みなら 0）。
    * MUST: 定義は「計画の領域の総和」— backing が併せて常駐させる入力バッファは含めない
    * （理由と門は {@link ActiveBacking.bytes}）。{@link SessionOptions.planBackingBudgetBytes} が
-   * 勘定するのも同じ量。
+   * 勘定するのはこれに {@link PlanBackingStats.inputBytes} を足した `residentBytes + inputBytes`。
    */
   readonly residentBytes: number;
   /**
@@ -671,7 +671,7 @@ export type SessionDiagnostics = {
   readonly lastRunPrepared: PreparedPlanStats | undefined;
   /**
    * transient slot の GPU backing の実績（run ごとではなく Session の現況 + 累計）。
-   * 未構築の Session では `{ residentBytes: 0, retainedCount: 0, buildCount: 0 }`。
+   * 未構築の Session では `{ residentBytes: 0, inputBytes: 0, retainedCount: 0, buildCount: 0 }`。
    */
   readonly planBacking: PlanBackingStats;
   /**
