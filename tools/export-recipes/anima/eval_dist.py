@@ -43,10 +43,11 @@ from anima.distribution import (
     ANIMA_BASE_MODEL_NAME,
     ANIMA_MODELS,
     ANIMA_QUANT_ABBREVIATIONS,
-    OFFICIAL_NOTICE_MARKDOWN,
+    CONTAINER_MODIFICATION,
     anima_model,
     anima_plan,
     anima_sources,
+    notice_markdown,
     root_files,
 )
 from karume.dist import DistError, ModelPlan, Pipeline
@@ -64,6 +65,18 @@ EVAL_ROOT = BENCH_ROOT
 #: `--pipeline` の綴り（受理集合はこの 1 つきり — 配布の表〈`tools/export-recipes/dist.py`〉に
 #: 混ぜないのは、あちらが「HF へ上げてよい pipeline の全量」だから）。
 EVAL_PIPELINE = "anima-i4-adaln8-eval"
+
+#: 視認評価用の組み立ての改変告知。配布の告知（int8 系列の追加まで）に、ここで席を戻した
+#: i4 系列（adaLN 変種の GPTQ 校正）の行を足す — 中身に i4 が入るのに告知が述べないと、
+#: 下の `root_files` の「改変告知が抜けた配布形を作る練習にはしない」が成り立たない。
+EVAL_NOTICE_MARKDOWN = notice_markdown(
+    (
+        CONTAINER_MODIFICATION,
+        "- An int8-quantized series of the transformer was added alongside the f16 one.",
+        "- A GPTQ-calibrated int4-quantized series of the transformer was added for local",
+        "  evaluation; its adaLN linears and the linears outside the blocks stay int8.",
+    )
+)
 
 
 def eval_plan(series_dir: Path, model: str) -> ModelPlan:
@@ -107,7 +120,7 @@ PIPELINE = Pipeline(
     card_profiles={"anima": partial(render_base_card, abbreviations=ANIMA_QUANT_ABBREVIATIONS)},
     # 法的テキストは配布形と同じものを入れる — 手元でしか開かないとはいえ、改変告知が
     # 抜けた配布形を作る練習にはしない（うっかり上げたときに落ちるのはここではない）。
-    root_files=root_files(OFFICIAL_NOTICE_MARKDOWN),
+    root_files=root_files(EVAL_NOTICE_MARKDOWN),
 )
 
 

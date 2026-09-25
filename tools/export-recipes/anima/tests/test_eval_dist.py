@@ -208,6 +208,18 @@ class TestEndToEnd:
         # 視認の入口（`examples/anima/main.ts` の `--source`）が要求するのは manifest 1 枚。
         assert (out_dir / "README.md").is_file()
 
+    def test_the_notice_states_the_i4_series_it_carries(self, tmp_path):
+        """改変告知は中身と揃う — 席を戻した i4 系列の追加も配布の int8 行と並べて述べる。"""
+        _build_series(tmp_path / "series")
+        out_dir = tmp_path / "eval" / "karume-anima-v1.0-adaln8"
+
+        eval_dist.main(["--series", str(tmp_path / "series"), "--out", str(out_dir)])
+
+        notice = " ".join((out_dir / "NOTICE.md").read_text(encoding="utf-8").split())
+        assert "An int8-quantized series of the transformer was added" in notice
+        assert "int4-quantized series of the transformer was added" in notice
+        assert "adaLN linears and the linears outside the blocks stay int8" in notice
+
 
 class TestShippingRefusesTheVariant:
     """取り違えのもう片方向: 変種の記録は**配布の**組み立てで落ちる。
