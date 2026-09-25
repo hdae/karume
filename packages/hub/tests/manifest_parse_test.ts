@@ -668,7 +668,8 @@ Deno.test("parseManifest: part のバイト上限 1024MiB（container-v1 §10 �
 
   await t.step("非 part の FileRef は対象外 — assets は上限超でも通る", () => {
     // MUST: 上限は**part 分割の契約**であって全 FileRef の天井ではない（それは 16GiB の
-    // `MAX_FILE_BYTES`）。ここを取り違えると上限超の実在資産（例: PLE sidecar）が読めなくなる。
+    // `MAX_FILE_BYTES`）。ここを取り違えると、part に割らない単体の資産で上限を超えるものが
+    // 読めなくなる。
     const manifest = parseManifest(withModel({
       assets: { style_vectors: { ...FILE, path: "style/vectors.safetensors", size: LIMIT + 1 } },
     }));
