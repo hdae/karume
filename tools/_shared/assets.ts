@@ -520,12 +520,14 @@ const soleGroup = (
 /**
  * 系列ディレクトリ名 → 家族名。`--family` の既定値でしかないので、知らない綴りは
  * fail loudly（家族名を誤ると既定シナリオの束縛が別家族のものになる）。
+ * 家族名どうしが前方一致する（`gemma4` と `gemma4-qat`）ので、最長一致で選ぶ。
  */
 const SERIES_FAMILIES: readonly string[] = [
   "anima",
   "birefnet",
   "depth-anything",
   "gemma4",
+  "gemma4-qat",
   "irodori",
   "sbv2",
   "siglip2",
@@ -534,7 +536,13 @@ const SERIES_FAMILIES: readonly string[] = [
 
 const familyOfSeriesDirectory = (root: URL): string => {
   const name = directoryName(root);
-  const match = SERIES_FAMILIES.find((family) => name === family || name.startsWith(`${family}-`));
+  const match = SERIES_FAMILIES
+    .filter((family) => name === family || name.startsWith(`${family}-`))
+    .reduce<string | undefined>(
+      (longest, family) =>
+        longest === undefined || family.length > longest.length ? family : longest,
+      undefined,
+    );
   if (match === undefined) {
     throw new Error(
       `系列ディレクトリ '${name}' から家族名を推せない（既知: ${SERIES_FAMILIES.join(" / ")}）` +

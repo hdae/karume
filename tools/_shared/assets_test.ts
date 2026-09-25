@@ -263,6 +263,24 @@ Deno.test("resolveAsset（系列出力）: ディレクトリ名から家族名�
   });
 });
 
+Deno.test("resolveAsset（系列出力）: 家族名は前方一致する候補のうち最長のものを採る", async () => {
+  await withDir(async (dir) => {
+    for (
+      const [name, family] of [
+        ["gemma4-qat-e2b-product", "gemma4-qat"],
+        ["gemma4-e2b", "gemma4"],
+      ] as const
+    ) {
+      const root = new URL(`${name}/`, dir);
+      await Deno.mkdir(root);
+      await Deno.writeFile(new URL("model-00001-of-00002.krm", root), new Uint8Array(0));
+      await Deno.writeFile(new URL("model-00002-of-00002.krm", root), new Uint8Array(0));
+      const targets = await resolveAsset(root, undefined, undefined, undefined);
+      assertEquals(targets.family, family);
+    }
+  });
+});
+
 Deno.test("readIrGraph: 名指しのグラフが無い容器は既知一覧つきで落ちる（別の部品を数えない）", async () => {
   await withDir(async (dir) => {
     const url = new URL("model-00001-of-00003.krm", dir);
