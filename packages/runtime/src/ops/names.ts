@@ -192,7 +192,8 @@ export const SYM_PREFIX_SLICE_OP = "sym_prefix_slice";
  * 改訂になる。
  *
  * - `linear` — `x[…,in] × W[out,in] + b[out]`。**bias は常時あり（arity 3 固定）**で、
- *   実測 16 本すべてが bias 付き（recon §5）。bias 無し形は実測が出るまで fail loudly。
+ *   IR 上の bias 無し形（arity 2）は fail loudly。上流の bias 無し linear はエクスポータが
+ *   ゼロ bias を合成してアリティ 3 へ正規化する（ADR 0016）。
  * - `layer_norm` — attrs `normalized_shape` / `eps`。affine（weight / bias）も常時あり。
  * - `softmax` — attrs `dim`。**最終次元のみ**受理（実測は −1 のみ — gather と同じ絞り方）。
  * - `safe_softmax` — `softmax` と同一契約 + 「行 max が −inf の行は全 0」（ADR 0044）。
@@ -334,9 +335,12 @@ export const UPSAMPLE_BILINEAR2D_OP = "upsample_bilinear2d";
  * 要る）、`gelu` / `gelu_tanh` と同じ「attr 変種は別 op」の手筋に揃える（ADR 0056 決定 2）。
  * MUST: 逆方向 op も**出力は順方向の時間順**で書く。`flip` は記号軸を拒否する（ADR 0014 /
  * 0046）ので、走査方向を op の中へ畳むことが記号 T を通す唯一の形。
- * MUST: 多層 / 双方向の欄を作らない。IR v1 の可変アリティは `cat` だけで、`aten.gru` の
- * `Tensor[16]` は構造的に載らない — 層と方向は**ノードを並べて**表す（ADR 0056 決定 7）。
- * MUST: `h_n` を返さない（IR v1 は実質単一出力 — 出力は `y` だけ）。
+ * MUST: 多層 / 双方向の欄を作らない。`aten.gru` の `Tensor[16]`（層 × 方向ぶんの重み列）を
+ * 1 ノードに載せると op が層ループと層間 `cat` を内包する — 層と方向は**ノードを並べて**表す
+ * （ADR 0056 決定 7）。
+ * MUST: `h_n` を返さない — GRU は出力 `y` だけの**単一出力の契約**で表す（ADR 0056 決定 7）。
+ * ノード多出力は IR として解禁済み（ADR 0068）だが、この契約は広げていない（`h_n` を要する
+ * 消費側が出たら op の契約の改訂として扱う）。
  * MUST: `has_biases=False` / `batch_first` / `dropout` の欄を作らない。欄の不存在がそのまま
  * 「その形は語彙に無い」の宣言になる（ADR 0023 決定 4）。
  */

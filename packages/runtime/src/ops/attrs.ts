@@ -5,8 +5,8 @@ import { OpContractError } from "./names.ts";
 /**
  * attrs スキーマ = attr キー → 値の検査（ADR 0012）。
  *
- * MUST: 宣言したキーは**全て必須**、宣言外のキーは fail loudly。省略可能な attr を持つ op
- * （融合 op の bias 有無など）が出た時点で表現を広げる — 先回りして機構だけ増やさない。
+ * MUST: 宣言したキーは**全て必須**、宣言外のキーは fail loudly。不存在それ自体が別の宣言に
+ * なる attr は必須のスキーマに混ぜず、契約の `optionalAttrs`（ops/contracts.ts）に分けて宣言する。
  */
 export type AttrSchema = Readonly<Record<string, (value: unknown, where: string) => void>>;
 /**
@@ -320,8 +320,12 @@ const assertEps = (value: unknown, where: string, what: string): number => {
 };
 
 /**
- * params の f32 語で運ぶスカラ attr。**有限の f32 スカラ**（IR v1 は非有限値を JSON
- * リテラルでも値レベルでも拒否する）。
+ * params の f32 語で運ぶスカラ attr。**有限の f32 スカラ**。
+ *
+ * MUST: 供給元に依らず非有限スカラ attr を落とす門はここが唯一。`krm` の記述は descriptor の
+ * 読み手（`openContainer`）が非有限数を拒否するが、メモリ内容器
+ * （`openMemoryContainer`）の経路は非有限数を検査しない（.claude/ACTIVE_DESIGN.md のコンテナ
+ * 形式の落とし穴）。
  *
  * NOTE: f32 に厳密表現できる値だけに絞りはしない — 適用時に f32 へ丸める規約（GPU は
  * params の f32 語、CPU 参照は `Math.fround`）で両側が一致する。
