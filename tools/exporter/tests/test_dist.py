@@ -4,7 +4,7 @@
 組み立ては weights の役割が生成物（`payload`）を指す計画を計画の受け口で落とし
 （`dist.ModelPlan.__post_init__`）、配置の前に入力コンテナを IR v1 の全規則で見る
 （`dist.assert_weight_components_verified`）。その合成は {@link ir_fixtures}（数 KB のグラフ
-1 本ぶん）で、生バイト列を持てるのは `assets` / `extras` の席だけ。
+1 本ぶん）で、生バイト列を持てるのは `assets` の席だけ（`extras` の席は `karume/5` で退役）。
 
 manifest v2（`karume/2` — ADR 0041）以降、リポ内レイアウトは一律「モデル別サブツリー +
 `shared/`」なので、期待 path は全て `<モデル名>/…` を頭に持つ。
@@ -479,6 +479,74 @@ class TestTheContainerEntryLimits:
         out_dir, _ = self._assemble(tmp_path)
 
         assert verify_dist(out_dir)
+
+
+class TestTheManifestFieldsVerifyDistReads:
+    """`verify_dist` は model / quant / 資産の欄の欠落・型違いも `DistError` で落とす。
+
+    container 入口の外側（`weights` / `quants` / `defaultQuant` / 資産の 3 点セット）も、外から
+    来た `karume.json` の一部なので、素の添字の `KeyError` / `TypeError` を漏らさない
+    （{@link karume.dist.assert_container_limits} の MUST と同じ理由）。
+    """
+
+    def _assemble(self, tmp_path: Path) -> Path:
+        out_dir = tmp_path / "models" / "fields"
+        plans = [_synthetic_plan(tmp_path / "series", "A", "w/model.krm", "fields-A")]
+        assemble_family(plans, out_dir, "A")
+        return out_dir
+
+    @staticmethod
+    def _rewrite(out_dir: Path, mutate: Callable[[dict[str, Any]], None]) -> None:
+        """据わった `karume.json` のモデル A の節だけを書き換える（現物はそのまま）。"""
+        manifest = json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+        mutate(manifest["models"]["A"])
+        (out_dir / MANIFEST_FILENAME).write_text(
+            json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+
+    @staticmethod
+    def _missing_quants(model: dict[str, Any]) -> None:
+        del model["quants"]
+
+    @staticmethod
+    def _missing_weights(model: dict[str, Any]) -> None:
+        del model["weights"]
+
+    @staticmethod
+    def _dtype_entry_is_a_string(model: dict[str, Any]) -> None:
+        model["weights"]["w"]["f16"] = "A/w/model.krm"
+
+    @staticmethod
+    def _missing_default_quant(model: dict[str, Any]) -> None:
+        del model["defaultQuant"]
+
+    @staticmethod
+    def _missing_quant_weights(model: dict[str, Any]) -> None:
+        del model["quants"]["f16"]["weights"]
+
+    @staticmethod
+    def _asset_without_a_path(model: dict[str, Any]) -> None:
+        model["assets"]["tokenizer"] = {"size": 1, "sha256": "0" * 64}
+
+    @pytest.mark.parametrize(
+        ("mutate", "message"),
+        [
+            ("_missing_quants", r"A\.quants がオブジェクトでない"),
+            ("_missing_weights", r"A\.weights がオブジェクトでない"),
+            ("_dtype_entry_is_a_string", r"A\.weights\.w\.f16 がオブジェクトでない"),
+            ("_missing_default_quant", r"A\.defaultQuant 'None' が quants"),
+            ("_missing_quant_weights", r"A\.quants\.f16\.weights がオブジェクトでない"),
+            ("_asset_without_a_path", r"models\.A\.assets\.tokenizer\.path が非空の文字列でない"),
+        ],
+    )
+    def test_a_missing_or_mistyped_field_fails_as_a_dist_error(
+        self, tmp_path: Path, mutate: str, message: str
+    ) -> None:
+        out_dir = self._assemble(tmp_path)
+        self._rewrite(out_dir, getattr(self, mutate))
+
+        with pytest.raises(DistError, match=message):
+            verify_dist(out_dir)
 
 
 class TestDtypeLabelVocabulary:
@@ -1279,6 +1347,31 @@ class TestExternalComponents:
 
         # 綴りは展開後の part 役割（`<代表役割>#<番号>`）— 参照は part 1 本ごとに解決する。
         with pytest.raises(DistError, match="役割 'text_encoder#1' のファイルが参照元"):
+            assemble_family(
+                [self._plan("borrower", tmp_path / "series")],
+                out_dir,
+                "borrower",
+                external=self._components(source),
+            )
+        assert not out_dir.exists()
+
+    def test_a_broken_source_manifest_fails_as_a_dist_error(self, tmp_path: Path) -> None:
+        """参照元の `karume.json` は形の検査を通さずに読まれるので、欄の欠落も `DistError`。
+
+        素の `KeyError` だと「参照元が壊れている」と「門の不具合」が区別できない。
+        """
+        source = self._source_dist(tmp_path)
+        manifest_path = source / MANIFEST_FILENAME
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        entry = manifest["models"]["source"]["weights"]["text_encoder"]["f16"]
+        del entry["container"]["parts"][1]["path"]
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        out_dir = tmp_path / "models" / "karume-borrower"
+
+        with pytest.raises(
+            DistError,
+            match=r"models\.source\.weights\.text_encoder\.f16\.container\.parts\[1\]\.path",
+        ):
             assemble_family(
                 [self._plan("borrower", tmp_path / "series")],
                 out_dir,
@@ -2155,7 +2248,7 @@ class TestInputContainerVerification:
             )
 
     def test_the_same_payload_in_the_assets_seat_is_assembled(self, tmp_path: Path) -> None:
-        """対照 — `assets` / `extras` は IR コンテナではない席なので、生成物はそのまま通る
+        """対照 — `assets` は IR コンテナではない席なので、生成物はそのまま通る
         （rope 素表・スタイル表・話者埋め込みが現に使っている形）。"""
         plan = ModelPlan(
             name="A",
