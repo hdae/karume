@@ -172,8 +172,10 @@ measurements in `docs/research/`.
   variants, parallel GEMV (with optional subgroup reduction) is selectable from the quant seat,
   argmax over long rows runs in two phases, top-k uses a bounded heap and top-p is linear in the
   vocabulary, and RMS+residual, RoPE, attention row-statistics+PV and linear→SRQ can be fused.
-- The distributed Gemma 4 E2B defaults to the `i4-fast` quant seat, which declares packed INT8
-  activations (`packedStaticQuantize`) for the parallel GEMV path.
+- The distributed Gemma 4 E2B defaults to the `i4-fast` quant seat, which declares parallel GEMV
+  and the RMS-norm + residual fusion; the `gemma4_qat` recipe's `i4-fast` additionally declares
+  the linear → SRQ fusion and packed INT8 activations (`packedStaticQuantize`) for the parallel
+  GEMV path.
 - Slot backing is held as an LRU set under a byte budget instead of a single slot, so changing
   shape no longer rebuilds it on every run.
 - Gemma 4 prefill picks the smallest declared chunk bucket that covers the query length; the
@@ -316,7 +318,7 @@ measurements in `docs/research/`.
 - **Breaking:** `parseSafetensors` no longer takes a second `byteLength` argument; the whole
   `ArrayBuffer` is treated as the file, so trailing bytes past the data section are rejected as
   unused space. Callers that read a file into a larger reusable buffer must pass a tight
-  `ArrayBuffer` (e.g. `buffer.slice(0, length)`) or use `parseSafetensorsHeader(prefix, fileLength)`.
+  `ArrayBuffer` (e.g. `buffer.slice(0, length)`).
 
 ## [0.12.0] - 2026-09-06
 
