@@ -134,6 +134,14 @@ measurements in `docs/research/`.
 
 ### Changed
 
+- Model cards: the Usage snippets declare the pipeline with `await using` (these pipelines only
+  implement `Symbol.asyncDispose`); the sbv2 card analyzes text with `@hdae/yomi`, converts it
+  with `toSbv2Utterance` and calls `generate(utterance, options)` (the claim that the pipeline
+  fetches a dictionary is removed); the gemma4 card names each device limit once; SBV2 cards
+  explain how every quant seat was rounded; the vowel-detector card states the minimum clip length.
+- Export recipes: `gemma4.export_drafter` no longer accepts `--sym-max`; `embeddinggemma.export`
+  fails loudly before publishing if SDPA was decomposed or the band mask is not a folded constant;
+  anima export refuses `--lora` / `--num-layers` when no running target can use them.
 - The opt-in `parallel-subgroup32` GEMV variant now spells its multiply-add with an explicit
   `fma()` like the parallel family (ADR 0101 addendum). Vulkan output is unchanged; on Metal the
   subgroup32 output now matches the parallel kernel bit for bit instead of the previous spelling.
@@ -171,6 +179,37 @@ measurements in `docs/research/`.
 
 ### Fixed
 
+- Runtime (2026-09-24 full review, obvious fixes): `openContainer` / `openMemoryContainer` reject
+  `rowAxis: 1` for `int4-sym-g` / `int2-off` / `ternary` (only `int8-sym` may declare it);
+  container readers no longer resolve names such as `constructor` through `Object.prototype`;
+  `OpenedContainer.asset(name).read` rejects non-integer / NaN ranges and short reads from a
+  verified source; `Session.enqueueRead` rejects at admission when a graph output aliases a
+  resident input and rejects an oversized batch readback before any dispatch; `Session.dispose()`
+  rejects while a batch holding this session's `enqueueRead` is unsettled (call it again after
+  `batch.finish()`); `Session.run` reports invalid generation arguments through the returned
+  Promise instead of throwing synchronously, and symbols in numeric knobs raise `ExecutionError`
+  instead of `TypeError`; `argmax` over zero outer rows with a last dimension ≥ 16384 returns an
+  empty output instead of an internal error.
+- Models: a failing Session dispose no longer replaces the original stage error (an
+  `AggregateError` carries the stage error first); Anima prompt encoding no longer throws
+  `RangeError` on very long unspaced prompts and stops tokenizing at the 512-token limit;
+  `VowelDetector` rejects non-finite audio samples with `ModelInputError` before GPU execution;
+  `resizeRgb8` rejects unknown filter names instead of returning a black image and
+  `normalizeToNchw` rejects non-finite mean / non-positive std; Gemma tokenizer assets with unknown
+  fields and PLE index assets without `storage` are rejected; `parseGemma4PipelineConfig` rejects
+  `chunkLength` / `maxChunkLength` below 2 at declaration time; Gemma 4 QAT admission errors use
+  the `Gemma4QatPipeline:` prefix; `decodeWav` rejects duplicated `fmt` / `data` chunks; SBV2
+  phoneme errors refer to the caller's utterance.
+- Exporter (`karume`): `karume verify` and the publish / migrate self-check reject optional
+  provenance fields that are not non-empty strings (matching the TypeScript reader) and reject
+  `ternary` payloads containing code 0; `publish_container` refuses such payloads before placing
+  the container; `karume migrate --manifest` verifies every declared file against the legacy
+  manifest's size / sha256 first and applies the safetensors checks to legacy PLE sidecars; f16
+  rounding fails loudly on saturation even when the tensor already holds non-finite values;
+  `karume dist` reports missing / mistyped `karume.json` fields as `DistError`; `awq_search_scale`
+  raises `QuantizeError` when every alpha is non-finite; `assert_reader_layout` rejects the legacy
+  I4 / I2 dtypes by default (`allow_legacy_dtypes=True` reads legacy shards); `karume verify`
+  accepts integral float dimensions.
 - Metal parity: the parallel GEMV family spells its products with explicit `fma()`, so the packed
   INT8 activation path matches the f32 path bit for bit on Metal as well.
 - GEMM no longer reads past the end of an edge channel; maximum selection preserves the ordering
