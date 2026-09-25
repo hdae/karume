@@ -59,8 +59,8 @@
  * ## MUST: 数値の正はここでは担保されない
  *
  * 正はグラフ単位の golden E2E（`packages/runtime/tests/e2e_irodori_test.ts`）と、full-loop の
- * latent golden（`tools/exporter/irodori_pipeline.py` が出す `pipeline/case.*.safetensors`）が
- * 担保する。
+ * latent golden（`tools/export-recipes/irodori/pipeline_ref.py` が出す
+ * `pipeline/case.*.safetensors`）が担保する。
  */
 
 import {

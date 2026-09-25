@@ -7,8 +7,8 @@
  * `wav[:, :int(max_ref_seconds·sr)]` を先に取る）。pad を正規化より前に回すと、鏡像の区間が
  * peak 判定に混ざる。
  *
- * 数の正本は golden `outputs/series/dacvae-32dim/host/`（`dacvae_host.py` が上流を**呼んで**
- * 書く 5 ケース）で、突合は `packages/models/tests/irodori_reference_test.ts`。
+ * 数の正本は golden `outputs/series/dacvae-32dim/host/`（`tools/export-recipes/irodori/dacvae/host.py`
+ * が上流を**呼んで**書く 5 ケース）で、突合は `packages/models/tests/irodori_reference_test.ts`。
  */
 
 import { ModelInputError } from "../../errors.ts";
@@ -45,7 +45,7 @@ type NormalizedReference = {
 /**
  * LUFS 正規化 + peak 制限（上流 `_normalize_loudness` → `ensure_max_of_audio`）。
  *
- * 掛けるのは **2 本の利得だけ**で、その積が正規化の全て（`dacvae_host.py` の
+ * 掛けるのは **2 本の利得だけ**で、その積が正規化の全て（`irodori/dacvae/host.py` の
  * `_decomposition_evidence` が上流の出力とのビット一致を毎回実測している）。
  */
 export const normalizeReference = (

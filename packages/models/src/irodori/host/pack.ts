@@ -38,7 +38,7 @@ const packBody = (
 /**
  * **text 側**の `normalize_text` → `strip` → BOS 前置 + 本文を `maxLength-1` で切る。
  *
- * MUST: 正規化後に空なら fail loudly。上流（`irodori_pipeline.py` の `_packed_ids`）も同じ位置で
+ * MUST: 正規化後に空なら fail loudly。上流（`irodori/pipeline_ref.py` の `_packed_ids`）も同じ位置で
  * 落ちる — BOS だけの列を通すと、**無音でも無いのに内容の無い発話**が生成される。
  */
 export const packIds = (

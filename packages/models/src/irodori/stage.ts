@@ -59,7 +59,7 @@ export const bool = (value: boolean): Tensor => ({
   data: Uint32Array.of(value ? 1 : 0),
 });
 
-/** グラフ出力**名**を位置で引く（IR v1 の出力名は `output.<i>` — 名前を決め打ちしない）。 */
+/** グラフ出力**名**を位置で引く（名前を決め打ちしない）。 */
 export const outputNameAt = (model: GraphOwner, index: number): string => {
   const name = model.graph.outputs[index];
   if (name === undefined) {
