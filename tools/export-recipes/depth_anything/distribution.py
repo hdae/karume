@@ -17,7 +17,10 @@ staging/swap・検証）は `karume.dist` が持つ。ここが持つのは **De
 MUST: 配れるのは**帰属表（{@link depth_anything.card.DEPTH_ANYTHING_UPSTREAM}）に載っている
 サイズだけ**。上流で Apache-2.0 なのは Small のみで、Base / Large は CC BY-NC 4.0（同表の MUST
 に実地確認の日付つき）。台本（`depth_anything/export.py`）は `--model-dir` でどのサイズも
-焼けるので、「焼けたものは配れる」と読める形にしない — この表が唯一の門。
+焼けるので、「焼けたものは配れる」と読める形にしない — 門は 2 段: モデル名がこの表に載って
+いること（{@link depth_anything_checkpoint}）と、系列の容器が名乗る出所（`provenance` の
+ライセンスと revision）がこの表と手元の checkpoint に一致すること（{@link depth_anything_plan}）。
+名前だけだと、Base を焼いた容器を Small の系列 path へ置いた形が通る。
 
 `pipelineConfig` の数は **2 つの独立した出どころ**から来る: 前処理の定数（寸法・統計・
 フィルタ）は上流の `preprocessor_config.json`、噛み合っているかは**焼かれたグラフの入出力
@@ -39,6 +42,7 @@ from typing import Any
 
 from _shared.licenses import apache_license_2_0
 from _shared.paths import INPUTS_ROOT
+from _shared.upstream import assert_upstream_provenance, snapshot_revision
 from karume.dist import (
     Artifact,
     DistError,
@@ -57,6 +61,7 @@ from karume.dist import (
 
 from .card import (
     DEPTH_ANYTHING_CONVT_DIFF,
+    DEPTH_ANYTHING_LICENSE,
     DEPTH_ANYTHING_UPSTREAM,
     render_depth_anything_model_card,
 )
@@ -155,8 +160,8 @@ def depth_anything_checkpoint(model: str) -> str:
     導いて、ここに 2 つ目の表を持たない（SigLIP2 の
     {@link siglip2.distribution.siglip2_checkpoint} と同じ規律）。
 
-    MUST: 表に無いサイズはここで落ちる — それが「Apache-2.0 のものしか配らない」門の実体
-    （節の冒頭の MUST）。
+    MUST: 表に無いサイズはここで落ちる — 「Apache-2.0 のものしか配らない」門の 1 段目
+    （2 段目は容器の出所の突合 — 節の冒頭の MUST）。
     """
     repo = DEPTH_ANYTHING_UPSTREAM.get(model)
     if repo is None:
@@ -183,7 +188,9 @@ class DepthAnythingSources:
     """組み立ての入力。系列（グラフ 1 本）と実重みの置き場（`inputs/` — 生成物ではない）。
 
     後者が要るのは `pipelineConfig` の前処理定数を**焼き込まずに導出**するため
-    （読むのは `preprocessor_config.json` 1 本だけなので、99MB の重みには触らない）。
+    （読むのは `preprocessor_config.json` 1 本だけなので、99MB の重みには触らない）と、容器が
+    名乗る revision を手元の checkpoint の取得記録（`_shared.upstream.snapshot_revision`）へ
+    突き合わせるため。
     """
 
     series: Path
@@ -336,6 +343,13 @@ def depth_anything_plan(
         str(sources.model / DEPTH_ANYTHING_PREPROCESSOR_FILE),
     )
     assert_depth_anything_graph(graph, container, pipeline_config)
+    # MUST: 名前の表（上の `depth_anything_checkpoint`）だけで門を閉じない — 格納・入出力形・
+    # 前処理は Small と Base で同じ形なので、Base（CC BY-NC 4.0）を焼いた容器を系列 path へ
+    # 置くとここまでが全て通る。容器が名乗る出所を帰属表と、前処理を読んだ checkpoint の
+    # revision へ突き合わせる（`_shared.upstream`）。
+    assert_upstream_provenance(
+        container, license=DEPTH_ANYTHING_LICENSE, revision=snapshot_revision(sources.model)
+    )
     return ModelPlan(
         name=model,
         pipeline=DEPTH_ANYTHING_PIPELINE,

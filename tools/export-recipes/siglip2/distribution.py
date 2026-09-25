@@ -35,6 +35,7 @@ from typing import Any
 
 from _shared.licenses import apache_license_2_0
 from _shared.paths import INPUTS_ROOT
+from _shared.upstream import assert_upstream_provenance, snapshot_revision
 from karume.dist import (
     Artifact,
     DistError,
@@ -52,6 +53,7 @@ from karume.dist import (
 )
 
 from .card import (
+    SIGLIP2_LICENSE,
     SIGLIP2_MAP_HEAD_DIFF,
     SIGLIP2_MAP_HEAD_NORM,
     SIGLIP2_UPSTREAM,
@@ -171,7 +173,9 @@ class Siglip2Sources:
     """組み立ての入力。系列（グラフ 1 本）と実重みの置き場（`inputs/` — 生成物ではない）。
 
     後者が要るのは `pipelineConfig` の前処理定数を**焼き込まずに導出**するため
-    （読むのは `preprocessor_config.json` 1 本だけなので、1.5GB の重みには触らない）。
+    （読むのは `preprocessor_config.json` 1 本だけなので、1.5GB の重みには触らない）と、容器が
+    名乗る revision を手元の checkpoint の取得記録（`_shared.upstream.snapshot_revision`）へ
+    突き合わせるため。
     """
 
     series: Path
@@ -326,6 +330,11 @@ def siglip2_plan(sources: Siglip2Sources, model: str = SIGLIP2_DEFAULT_MODEL) ->
         str(sources.model / SIGLIP2_PREPROCESSOR_FILE),
     )
     assert_siglip2_graph(graph, container, pipeline_config)
+    # 容器が名乗る出所を帰属表と、前処理を読んだ checkpoint の revision へ突き合わせる
+    # （`_shared.upstream` — 名前の表だけで門を閉じない。depth_anything と同じ形）。
+    assert_upstream_provenance(
+        container, license=SIGLIP2_LICENSE, revision=snapshot_revision(sources.model)
+    )
     return ModelPlan(
         name=model,
         pipeline=SIGLIP2_PIPELINE,

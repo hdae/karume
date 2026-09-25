@@ -159,6 +159,33 @@ class TestNestedSeries:
         assert migrate_series.sbv2_model(series) == expected
 
 
+class TestTheInputCheckpointOfAFlatSeries:
+    """系列直下形の出所は、その系列を焼いた checkpoint の実物から引く（台本と同じ 1 本）。"""
+
+    @pytest.mark.parametrize(
+        ("series", "expected"),
+        [
+            ("depth-anything-v2-small-hf", "Depth-Anything-V2-Small-hf"),
+            ("birefnet-hr-1024", "BiRefNet_HR"),
+            ("minicpm5-1b-decode", "MiniCPM5-1B"),
+        ],
+    )
+    def test_the_directory_name_spelled_as_the_series_prefix_is_found(
+        self, tmp_path: Path, series: str, expected: str
+    ) -> None:
+        for name in ("Depth-Anything-V2-Small-hf", "BiRefNet_HR", "MiniCPM5-1B", "MiniCPM5-2B"):
+            (tmp_path / name).mkdir()
+
+        assert migrate_series.input_checkpoint(tmp_path, series) == tmp_path / expected
+
+    def test_a_series_without_its_checkpoint_stops(self, tmp_path: Path) -> None:
+        """出所を導けない系列は移さない（別の checkpoint の出所を名乗る容器を作らない）。"""
+        (tmp_path / "Depth-Anything-V2-Base-hf").mkdir()
+
+        with pytest.raises(migrate_series.SeriesMigrationError, match="一意に決まらない"):
+            migrate_series.input_checkpoint(tmp_path, "depth-anything-v2-small-hf")
+
+
 class TestTheOrderOfTheFamilyTable:
     """判定の順序と接尾の分岐（表の中で唯一「条件が入る」3 か所）。"""
 

@@ -106,6 +106,7 @@ from torch import nn
 from torch.export import Dim
 
 from _shared.paths import SERIES_ROOT
+from _shared.upstream import card_license_identifier
 from anima.distribution import (
     ADALN_I8_TAG,
     ANIMA_MODELS,
@@ -231,8 +232,14 @@ DYN_SUFFIX = "-dyn"
 MODEL_FILE = "model.krm"
 
 #: 容器へ焼く出所（container-v1 §2.3）。ライセンス識別子はカード側の正本
-#: （{@link anima.card.ANIMA_METADATA}）から引く — 2 表が独立に動く形にしない。
-PROVENANCE = Provenance(license=ANIMA_METADATA.license, notice=NOTICE_FILENAME)
+#: （{@link anima.card.ANIMA_METADATA}）から引く — 2 表が独立に動く形にしない。HF の `license`
+#: は `other` なので、識別子は `license_name`（上流 `circlestone-labs/Anima` のカードの宣言・
+#: 同梱の LICENSE.md の題 "CircleStone Labs Non-Commercial License v1.0" と一致）を焼く
+#: （{@link _shared.upstream.card_license_identifier} — 決まらなければ fail loudly）。
+PROVENANCE = Provenance(
+    license=card_license_identifier(ANIMA_METADATA, "anima.card.ANIMA_METADATA"),
+    notice=NOTICE_FILENAME,
+)
 
 IO_PREFIX = "io."
 IO_SUFFIX = ".safetensors"

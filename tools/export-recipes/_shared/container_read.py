@@ -19,7 +19,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from karume.container import CONST_KEY_PREFIX, codec_entry
+from karume.container import CONST_KEY_PREFIX, Provenance, codec_entry
 from karume.dist import component_parts
 from karume.verify import VerifiedContainer, verify_container
 
@@ -149,3 +149,14 @@ def read_asset(source: Source, name: str) -> bytes:
     if record is None:
         raise ContainerReadError(f"{source}: 資産 '{name}' が無い（宣言: {sorted(model.assets)}）")
     return read.block(record.block)[: record.length]
+
+
+def read_provenance(source: Source) -> Provenance:
+    """容器が名乗る出所（`provenance` — container-v1 §2.3。**宣言だけ**を読む）。
+
+    `krg` は出所を引き継がない（container-v1 §9）ので、渡されたら落とす。
+    """
+    model = _opened(source).read.model
+    if model is None:
+        raise ContainerReadError(f"{source}: krg は provenance を持たない")
+    return model.provenance

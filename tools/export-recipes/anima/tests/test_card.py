@@ -202,7 +202,7 @@ def _quant_row(card: str, name: str) -> str:
     return rows[0]
 
 
-def _sharded_manifest() -> dict[str, Any]:
+def _split_manifest() -> dict[str, Any]:
     """重みが**さらに多くの part** へ割れた配布形（1GiB 超の分割 — container-v1 §8）。
 
     実配布の anima はこの形（transformer が 2〜4 part + 資産の part）。重みが 1 part きりの
@@ -219,24 +219,24 @@ def _sharded_manifest() -> dict[str, Any]:
 
 
 @pytest.fixture
-def sharded_card() -> str:
-    return _official(_sharded_manifest())
+def split_card() -> str:
+    return _official(_split_manifest())
 
 
-class TestShardedDistribution:
+class TestSplitDistribution:
     """分割された配布形（実配布の形）でカードが事実と食い違わないこと。"""
 
-    def test_it_counts_every_part_of_a_split_component(self, card: str, sharded_card: str) -> None:
+    def test_it_counts_every_part_of_a_split_component(self, card: str, split_card: str) -> None:
         """Download 欄は part を 1 本残らず足す（part 0 だけだと配布量が過小に出る）。
 
         分割前の f16 席は 111 + 222 + rope の part 333 + tokenizer 555 = 1,221 B（= 1.19 KiB）、
         分割後は 222 が 777 + 888 に割れて 2,664 B（= 2.60 KiB）。
         """
         assert "| 1.19 KiB (" in _quant_row(card, "f16")
-        assert "| 2.60 KiB (" in _quant_row(sharded_card, "f16")
+        assert "| 2.60 KiB (" in _quant_row(split_card, "f16")
 
     def test_it_never_calls_the_container_a_single_file(
-        self, card: str, sharded_card: str, extra_card: str
+        self, card: str, split_card: str, extra_card: str
     ) -> None:
         """散文は分割の有無に依らず 1 本（manifest 依存の出し分けはしない — X2-103 裁定 a）。
 
@@ -244,16 +244,16 @@ class TestShardedDistribution:
         カード側だけ出し分けると 2 つの文書が別のことを言う。したがって**どの manifest でも**
         「1 個の safetensors ファイル」とは書かない。
         """
-        for text in (card, sharded_card, extra_card):
+        for text in (card, split_card, extra_card):
             flat = " ".join(text.split())
             assert "a single safetensors file" not in flat
             assert "`.krm` part sequence" in flat
 
     def test_it_does_not_advertise_the_local_asset_entry_point(
-        self, card: str, sharded_card: str, extra_card: str
+        self, card: str, split_card: str, extra_card: str
     ) -> None:
         """`fromAssets` は案内しない（2026-08-29 裁定）— HF から使う入口は `fromPretrained`。"""
-        for text in (card, sharded_card, extra_card):
+        for text in (card, split_card, extra_card):
             assert "fromAssets" not in text
 
 

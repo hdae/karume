@@ -58,6 +58,7 @@ from pathlib import Path
 from typing import Any
 
 from _shared.licenses import mit_license
+from _shared.upstream import assert_upstream_provenance
 from karume.dist import (
     Artifact,
     DistError,
@@ -72,7 +73,7 @@ from karume.dist import (
     ir_graph,
 )
 
-from .card import BIREFNET_UPSTREAM, render_birefnet_model_card
+from .card import BIREFNET_LICENSE, BIREFNET_UPSTREAM, render_birefnet_model_card
 
 #: パイプライン契約（ADR 0041 §2 — モデル単位）。TS 側の受理集合は
 #: `BIREFNET_PIPELINE_NAME` / `BIREFNET_PIPELINE_MAJOR`。
@@ -338,6 +339,10 @@ def birefnet_plan(
     graph = ir_graph(container)
     pipeline_config = birefnet_pipeline_config(graph, container, model)
     assert_birefnet_graph(graph, container, pipeline_config)
+    # 容器が名乗る出所を帰属表へ突き合わせる（`_shared.upstream` — depth_anything と同じ形）。
+    # revision は「名乗っていること」まで: この family の入力は系列だけで、手元の checkpoint を
+    # 持たない（{@link BirefnetSources}）。
+    assert_upstream_provenance(container, license=BIREFNET_LICENSE, revision=None)
     return ModelPlan(
         name=model,
         pipeline=BIREFNET_PIPELINE,

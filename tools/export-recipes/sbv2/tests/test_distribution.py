@@ -242,9 +242,10 @@ _SBV2_KNOBS: Mapping[str, Any] = {
 _SBV2_SAMPLING_RATE = 22050
 _SBV2_HOP_LENGTH = 256
 
+#: 共有席の `symbols.json`（全モデル共通の規則だけ — ノブの既定も style / speaker も持たない。
+#: `sbv2.demo.jp_extra_rules` の MUST）。
 _SBV2_SYMBOLS = json.dumps(
     {
-        "defaults": dict(_SBV2_KNOBS),
         "bertHiddenFromEnd": _SBV2_BERT_FROM_END,
         "samplingRate": _SBV2_SAMPLING_RATE,
         "hopLength": _SBV2_HOP_LENGTH,
@@ -360,7 +361,7 @@ def _assemble_sbv2(
 @pytest.fixture
 def sbv2_assembled(tmp_path: Path) -> tuple[Path, dict]:
     sources = _build_sbv2_sources(tmp_path)
-    out_dir = tmp_path / "models" / sbv2_repo_name(SBV2_DEFAULT_MODEL)
+    out_dir = tmp_path / "models" / sbv2_repo_name("jvnv")
     manifest = _assemble_sbv2(sources, out_dir)
     return out_dir, manifest
 
@@ -401,7 +402,7 @@ class TestSbv2Layout:
 
     def test_it_reassembles_over_a_previous_run(self, tmp_path: Path) -> None:
         sources = _build_sbv2_sources(tmp_path)
-        out_dir = tmp_path / "models" / sbv2_repo_name(SBV2_DEFAULT_MODEL)
+        out_dir = tmp_path / "models" / sbv2_repo_name("jvnv")
         _assemble_sbv2(sources, out_dir)
         _assemble_sbv2(sources, out_dir)  # 既存リンクがあっても落ちない
         assert verify_dist(out_dir)
@@ -411,7 +412,7 @@ class TestSbv2Layout:
     ) -> None:
         """生成物（表）は前回のリンクを外してから書く — 開いて書くと源の資産が壊れる。"""
         sources = _build_sbv2_sources(tmp_path)
-        out_dir = tmp_path / "models" / sbv2_repo_name(SBV2_DEFAULT_MODEL)
+        out_dir = tmp_path / "models" / sbv2_repo_name("jvnv")
         _assemble_sbv2(sources, out_dir)
         _assemble_sbv2(sources, out_dir)
         table = load_file(str(out_dir / SBV2_DEFAULT_MODEL / SBV2_OUTPUT_PATHS["style_vectors"]))[
@@ -434,7 +435,7 @@ class TestSbv2StyleVectors:
 
     def test_it_stops_when_the_row_count_disagrees_with_num_styles(self, tmp_path: Path) -> None:
         sources = _build_sbv2_sources(tmp_path, style_rows=2)
-        out_dir = tmp_path / "models" / sbv2_repo_name(SBV2_DEFAULT_MODEL)
+        out_dir = tmp_path / "models" / sbv2_repo_name("jvnv")
         with pytest.raises(DistError, match="行数 2 が config の num_styles 3"):
             _assemble_sbv2(sources, out_dir)
         # 検査は配置の前 — 途中の配布形を 1 ファイルも残さない。
@@ -489,7 +490,7 @@ class TestSbv2SpeakerEmbeddings:
 
     def test_it_stops_when_the_row_count_disagrees_with_n_speakers(self, tmp_path: Path) -> None:
         sources = _build_sbv2_sources(tmp_path, speaker_rows=3)
-        out_dir = tmp_path / "models" / sbv2_repo_name(SBV2_DEFAULT_MODEL)
+        out_dir = tmp_path / "models" / sbv2_repo_name("jvnv")
         with pytest.raises(DistError, match="行数 3 が config の n_speakers 2"):
             _assemble_sbv2(sources, out_dir)
         # 検査は配置の前 — 途中の配布形を 1 ファイルも残さない。
@@ -629,7 +630,7 @@ class TestSbv2StorageGate:
             sources.series_f16 / "front" / "model.krm",
             _sbv2_container("front_f16", storage="f32"),
         )
-        out_dir = tmp_path / "models" / sbv2_repo_name(SBV2_DEFAULT_MODEL)
+        out_dir = tmp_path / "models" / sbv2_repo_name("jvnv")
         with pytest.raises(DistError, match=r"front_f16: .* f16 が無い"):
             _assemble_sbv2(sources, out_dir)
         # 検査は配置の前 — 途中の配布形を 1 ファイルも残さない。
@@ -686,7 +687,7 @@ class TestSbv2StorageGate:
         """
         sources = _build_sbv2_sources(tmp_path)
         replace_component(sources.series_i8 / "voice" / "model.krm", _SBV2_PAYLOADS["voice_i4"])
-        out_dir = tmp_path / "models" / sbv2_repo_name(SBV2_DEFAULT_MODEL)
+        out_dir = tmp_path / "models" / sbv2_repo_name("jvnv")
         with pytest.raises(DistError, match=r"voice_i8: .* i4 がある"):
             _assemble_sbv2(sources, out_dir)
         # 検査は配置の前 — 途中の配布形を 1 ファイルも残さない。
@@ -778,7 +779,7 @@ class TestSbv2SymGate:
     ) -> None:
         sources = _build_sbv2_sources(tmp_path)
         self._rebake(sources, "voice_i8", "T", 1024)
-        out_dir = tmp_path / "models" / sbv2_repo_name(SBV2_DEFAULT_MODEL)
+        out_dir = tmp_path / "models" / sbv2_repo_name("jvnv")
 
         with pytest.raises(DistError, match=r"voice_i8: .*上限 1024 .*宣言は 4096"):
             _assemble_sbv2(sources, out_dir)
@@ -963,7 +964,7 @@ class TestSbv2BertHiddenGate:
 
     def test_it_stops_when_only_the_symbols_are_stale(self, tmp_path: Path) -> None:
         """資産は 1 本出しなのに `symbols.json` が旧・全層出し向けの 3 を主張したまま。"""
-        symbols = json.dumps({"defaults": dict(_SBV2_KNOBS), "bertHiddenFromEnd": 3})
+        symbols = json.dumps({"bertHiddenFromEnd": 3})
         sources = _build_sbv2_sources(tmp_path, symbols=symbols.encode("utf-8"))
         with pytest.raises(DistError, match=r"bertHiddenFromEnd=3 が、出力 1 本のグラフで"):
             _assemble_sbv2(sources, tmp_path / "out")
@@ -1002,7 +1003,6 @@ class TestSbv2SymbolsModelFields:
     @staticmethod
     def _symbols(**overrides: Any) -> bytes:
         payload = {
-            "defaults": dict(_SBV2_KNOBS),
             "bertHiddenFromEnd": _SBV2_BERT_FROM_END,
             "samplingRate": _SBV2_SAMPLING_RATE,
             "hopLength": _SBV2_HOP_LENGTH,
@@ -1077,12 +1077,13 @@ class TestSbv2Manifest:
             expected = part_paths(f"model.{label}.krm", len(paths))
             assert [path.rsplit("/", 1)[-1] for path in paths] == expected
 
-    def test_every_dtype_seat_declares_an_ordered_shard_list(self, sbv2_assembled) -> None:
-        """`karume/4` の shard 列は**常に 2 要素以上**（グラフ shard + weight shard — ADR 0081）。
+    def test_every_dtype_seat_declares_an_ordered_part_list(self, sbv2_assembled) -> None:
+        """`karume/5` の part 列は**常に 2 要素以上**（グラフ記述の part 0 + 後続の part —
+        container-v1 §8 の常時分割）。
 
         以前ここは「常に 1 要素」を固定していた（分割規則が席だけで、1 本のコンテナを 1 本として
         配っていた時代の観測点）。常時分割になった今それは配布形の不変条件そのものが反転した
-        ので、主張も反転させる — 1 要素の宣言が出たら、それは書き手がグラフ shard を作って
+        ので、主張も反転させる — 1 要素の宣言が出たら、それは書き手がグラフ記述の part を分けて
         いない形で、`karume verify` の part 列の門が落とすべき資産である。
 
         並びの検査（連番が 1 始まりで欠けなく揃う）まで見るのは、ロード側が**列の順**に読む
@@ -1283,7 +1284,7 @@ class TestSbv2Sources:
 
 @requires_sbv2_package
 class TestSbv2KnobDefaults:
-    """既定ノブの出所（`style_bert_vits2.constants`）と配布資産の突合。"""
+    """既定ノブの出所（`style_bert_vits2.constants`）— 配布形でノブを持つのは manifest だけ。"""
 
     @staticmethod
     def _package_knobs() -> dict[str, Any]:
@@ -1305,25 +1306,8 @@ class TestSbv2KnobDefaults:
             "lengthScale": DEFAULT_LENGTH,
         }
 
-    def test_it_pulls_every_knob_from_the_package(self, tmp_path: Path) -> None:
-        knobs = self._package_knobs()
-        path = tmp_path / "symbols.json"
-        path.write_text(json.dumps({"defaults": knobs}), encoding="utf-8")
-        assert sbv2_knob_defaults(path) == knobs
-
-    def test_it_stops_when_the_shipped_asset_disagrees(self, tmp_path: Path) -> None:
-        """`symbols.json` と `karume.json` に同じ値が並ぶので、版ずれをここで落とす。"""
-        knobs = {**self._package_knobs(), "noiseScaleW": 0.123}
-        path = tmp_path / "symbols.json"
-        path.write_text(json.dumps({"defaults": knobs}), encoding="utf-8")
-        with pytest.raises(DistError, match="noiseScaleW"):
-            sbv2_knob_defaults(path)
-
-    def test_it_stops_when_the_shipped_asset_has_no_defaults(self, tmp_path: Path) -> None:
-        path = tmp_path / "symbols.json"
-        path.write_text(json.dumps({"symbols": ["_"]}), encoding="utf-8")
-        with pytest.raises(DistError, match="'defaults' 節が無い"):
-            sbv2_knob_defaults(path)
+    def test_it_pulls_every_knob_from_the_package(self) -> None:
+        assert sbv2_knob_defaults() == self._package_knobs()
 
 
 @requires_sbv2_package
@@ -1335,7 +1319,6 @@ class TestSbv2Cli:
         knobs = TestSbv2KnobDefaults._package_knobs()
         symbols = json.dumps(
             {
-                "defaults": knobs,
                 "bertHiddenFromEnd": _SBV2_BERT_FROM_END,
                 "samplingRate": _SBV2_SAMPLING_RATE,
                 "hopLength": _SBV2_HOP_LENGTH,
@@ -1363,7 +1346,7 @@ class TestSbv2Cli:
 
         main(["--pipeline", "sbv2", "--series", str(sources.series_f16.parent)])
 
-        out_dir = tmp_path / "models" / sbv2_repo_name(SBV2_DEFAULT_MODEL)
+        out_dir = tmp_path / "models" / sbv2_repo_name("jvnv")
         expected = _in_subtree(SBV2_DEFAULT_MODEL, _placed_paths())
         assert sorted(verify_dist(out_dir)) == sorted(expected)
         manifest = json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
@@ -1392,7 +1375,8 @@ class TestSbv2Cli:
             ]
         )
 
-        out_dir = tmp_path / "models" / "karume-sbv2-FN7"
+        # 既定の出力先はファミリーのリポ（話者単位のリポは作らない — W-RC5-2）。
+        out_dir = tmp_path / "models" / "karume-sbv2-fn"
         manifest = json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
         assert list(manifest["models"]) == ["FN7"]
         assert verify_dist(out_dir)
@@ -1574,7 +1558,22 @@ class TestSbv2PipelineEntry:
 
     def test_it_carries_the_default_model_and_the_repo_name(self) -> None:
         assert PIPELINE.default_model == SBV2_DEFAULT_MODEL
-        assert PIPELINE.repo_name(SBV2_DEFAULT_MODEL) == f"karume-sbv2-{SBV2_DEFAULT_MODEL}"
+        assert PIPELINE.repo_name(SBV2_DEFAULT_MODEL) == "karume-sbv2-jvnv"
+
+    @pytest.mark.parametrize(
+        ("pipeline", "models", "repo"),
+        [
+            (PIPELINE, ("F1", "F2", "M1", "M2"), "karume-sbv2-jvnv"),
+            (FN_PIPELINE, ("FN4", "FN7"), "karume-sbv2-fn"),
+        ],
+    )
+    def test_every_voice_of_a_family_names_the_family_repository(
+        self, pipeline, models: tuple[str, ...], repo: str
+    ) -> None:
+        """MUST: リポはファミリー単位（W-RC5-2）— 話者名から導くと `--repo` 無しの 1 周が、
+        カードの Usage に実在しないリポ（`karume-sbv2-F1`）を名乗る配布形を作る。
+        """
+        assert {pipeline.repo_name(model) for model in models} == {repo}
 
     def test_each_default_model_belongs_to_its_own_family(self) -> None:
         """既定のモデルが他ファミリーの声だと、`--model` 省略の 1 周が必ず門で落ちる。"""

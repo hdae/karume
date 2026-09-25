@@ -22,8 +22,15 @@ from typing import Any
 import pytest
 from container_series import i2_container, placed_paths, replace_component, write_component
 from ir_fixtures import Shape, ir_container
+from upstream_fixture import (
+    FIXTURE_REVISION,
+    OTHER_REVISION,
+    stamp_fixture_provenance,
+    write_snapshot,
+)
 
 from _shared.licenses import APACHE_LICENSE_2_0_PATH
+from _shared.upstream import UpstreamProvenanceError
 from depth_anything.card import (
     DEPTH_ANYTHING_CONVT_DIFF,
     DEPTH_ANYTHING_LICENSE,
@@ -44,15 +51,27 @@ from depth_anything.distribution import (
     depth_anything_sources,
 )
 from dist import default_out_dir, main
-from karume.container import CODEC_LEDGER
+from karume.container import CODEC_LEDGER, Provenance
 from karume.dist import (
     MANIFEST_FILENAME,
     MODEL_CARD_FILENAME,
+    NOTICE_FILENAME,
     DistError,
     assemble_family,
     resolve_card_renderer,
     verify_dist,
 )
+
+#: 台本（`depth_anything/export.py`）が Small を焼いたときに容器が名乗る出所の形。
+_SMALL_PROVENANCE = Provenance(
+    license=DEPTH_ANYTHING_LICENSE, notice=NOTICE_FILENAME, upstream_revision=FIXTURE_REVISION
+)
+
+
+@pytest.fixture(autouse=True)
+def _small_provenance(monkeypatch: pytest.MonkeyPatch) -> None:
+    """フィクスチャ容器に「台本が Small を焼いた」出所を名乗らせる（出所の門の正常形）。"""
+    stamp_fixture_provenance(monkeypatch, _SMALL_PROVENANCE)
 
 
 def _write(path: Path, payload: bytes) -> None:
@@ -173,6 +192,8 @@ def _build_depth_anything_sources(
             sources.model / "preprocessor_config.json",
             json.dumps(preprocessor, ensure_ascii=False).encode("utf-8"),
         )
+    # 前処理を読む checkpoint の取得記録（容器の revision の突合先）。
+    write_snapshot(sources.model, license=DEPTH_ANYTHING_LICENSE)
     return sources
 
 
@@ -268,6 +289,57 @@ class TestDepthAnythingLayout:
         replace_component(sources.series / "model.krm", i2_container(named=DEPTH_ANYTHING_ROLE))
 
         with pytest.raises(DistError, match=rf"{DEPTH_ANYTHING_ROLE}: .* i2 がある"):
+            depth_anything_plan(sources)
+
+
+class TestTheContainerProvenance:
+    """容器が名乗る出所で門を閉じる（名前の表だけだと、Base を焼いた容器が Small の系列で通る）。"""
+
+    def test_it_refuses_a_container_that_names_another_license(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Base / Large（CC BY-NC 4.0）を焼いた容器を Small の系列 path へ置いた形。
+
+        格納・入出力形・前処理は Small と同じ形なので、出所の突合より前の門は全て通る。
+        """
+        stamp_fixture_provenance(
+            monkeypatch,
+            Provenance(
+                license="cc-by-nc-4.0", notice=NOTICE_FILENAME, upstream_revision=FIXTURE_REVISION
+            ),
+        )
+        sources = _build_depth_anything_sources(tmp_path)
+
+        with pytest.raises(DistError, match=r"provenance\.license が 'cc-by-nc-4.0'"):
+            depth_anything_plan(sources)
+
+    def test_it_refuses_a_container_without_an_upstream_revision(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """revision を焼く前の台本の容器（出所を辿れない）は配らない。"""
+        stamp_fixture_provenance(
+            monkeypatch, Provenance(license=DEPTH_ANYTHING_LICENSE, notice=NOTICE_FILENAME)
+        )
+        sources = _build_depth_anything_sources(tmp_path)
+
+        with pytest.raises(DistError, match="upstreamRevision を持たない"):
+            depth_anything_plan(sources)
+
+    def test_it_refuses_a_container_baked_from_another_revision(self, tmp_path: Path) -> None:
+        """前処理を読む checkpoint と、容器を焼いた checkpoint の revision が違う形。"""
+        sources = _build_depth_anything_sources(tmp_path)
+        write_snapshot(sources.model, license=DEPTH_ANYTHING_LICENSE, revision=OTHER_REVISION)
+
+        with pytest.raises(DistError, match="別の revision"):
+            depth_anything_plan(sources)
+
+    def test_it_refuses_a_checkpoint_without_the_download_record(self, tmp_path: Path) -> None:
+        """取得記録が無い checkpoint では突合先が決まらない — 省かずに落とす。"""
+        sources = _build_depth_anything_sources(tmp_path)
+        for record in (sources.model / ".cache").rglob("*.metadata"):
+            record.unlink()
+
+        with pytest.raises(UpstreamProvenanceError, match="metadata が無い"):
             depth_anything_plan(sources)
 
 

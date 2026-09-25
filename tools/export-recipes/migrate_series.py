@@ -179,6 +179,32 @@ class Family:
     flat_role: Callable[[str], str] | None = None
 
 
+def input_checkpoint(root: Path, series: str) -> Path:
+    """系列名 → その系列を焼いた実重みの置き場（系列直下形の台本の既定出力先の逆引き）。
+
+    siglip2 / birefnet / depth-anything / minicpm5 の台本は、既定の出力先を `--model-dir` の
+    ディレクトリ名から組む（小文字化・`_` → `-`、後ろに `-<解像度>` などの接尾が付きうる）。
+    容器の出所（ライセンスと revision）はその checkpoint の実物から導く（各台本の
+    `upstream_provenance`）ので、移行も同じ置き場を引く。
+
+    MUST: 一意に決まらなければ fail loudly — 別の checkpoint の出所を名乗る容器を作らない。
+    """
+    candidates = (
+        sorted(entry for entry in root.iterdir() if entry.is_dir()) if root.is_dir() else []
+    )
+    found = [
+        entry
+        for entry in candidates
+        if series == (stem := entry.name.lower().replace("_", "-")) or series.startswith(f"{stem}-")
+    ]
+    if len(found) != 1:
+        raise SeriesMigrationError(
+            f"系列 '{series}' を焼いた checkpoint が {root} の下で一意に決まらない"
+            f"（候補: {[entry.name for entry in found]}）— 出所を名乗れない"
+        )
+    return found[0]
+
+
 def sbv2_model(series: str) -> str:
     """sbv2 の系列名 → 話者名（`sbv2-F1-i8` → `F1`）。
 
@@ -221,19 +247,25 @@ FAMILIES: tuple[Family, ...] = (
         "birefnet",
         # 系列名は `birefnet_series_name(checkpoint, model)` = 上流リポ名の小文字 + 解像度。
         lambda name: name.startswith(("birefnet-", "lucida-")),
-        lambda _: birefnet_export.PROVENANCE,
+        lambda name: birefnet_export.upstream_provenance(
+            input_checkpoint(birefnet_export.MODELS_ROOT, name)
+        ),
         flat_role=lambda _: BIREFNET_ROLE,
     ),
     Family(
         "depth-anything",
         lambda name: name.startswith("depth-anything-"),
-        lambda _: depth_anything_export.PROVENANCE,
+        lambda name: depth_anything_export.upstream_provenance(
+            input_checkpoint(depth_anything_export.MODELS_ROOT, name)
+        ),
         flat_role=lambda _: DEPTH_ANYTHING_ROLE,
     ),
     Family(
         "siglip2",
         lambda name: name.startswith("siglip2-"),
-        lambda _: siglip2_export.PROVENANCE,
+        lambda name: siglip2_export.upstream_provenance(
+            input_checkpoint(siglip2_export.MODELS_ROOT, name)
+        ),
         flat_role=lambda _: SIGLIP2_ROLE,
     ),
     Family(
@@ -288,13 +320,19 @@ FAMILIES: tuple[Family, ...] = (
     Family(
         "minicpm5",
         lambda name: name.startswith("minicpm5-"),
-        lambda _: minicpm5_export.PROVENANCE,
+        lambda name: minicpm5_export.upstream_provenance(
+            input_checkpoint(minicpm5_export.DEFAULT_MODEL_DIR.parent, name)
+        ),
         flat_role=lambda _: minicpm5_export.GRAPH_NAME,
     ),
     Family(
         "embeddinggemma",
         lambda name: name.startswith("embeddinggemma-"),
-        lambda _: embeddinggemma_export.PROVENANCE,
+        # 系列名は checkpoint を名指さない（台本の既定出力先は `--model-dir` に追随しない固定の
+        # 綴り）ので、その既定出力先を焼く既定の checkpoint から導く。
+        lambda _: embeddinggemma_export.upstream_provenance(
+            embeddinggemma_export.DEFAULT_MODEL_DIR
+        ),
         flat_role=lambda _: embeddinggemma_export.GRAPH_NAME,
     ),
 )

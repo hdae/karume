@@ -29,8 +29,13 @@ from safetensors.torch import load_file
 from torch import nn
 
 from _shared.paths import SERIES_ROOT
+from _shared.upstream import UpstreamProvenanceError
 from birefnet import export as bn
+from karume.container import Provenance
 from karume.pipeline import export_to_file
+
+#: tiny な export に焼く出所（値は突合されない — 台本の出所の導出は `_shared.upstream` の席）。
+TINY_PROVENANCE = Provenance(license="fixture")
 
 #: tiny な合成モデルの解像度（`disc_mask` が 2×2 の円内を持つ最小の形）。
 TINY_SIZE = 8
@@ -145,7 +150,7 @@ def exported(tmp_path):
         wrapper,
         (CASES[0][1],),
         tmp_path / bn.MODEL_FILE,
-        provenance=bn.PROVENANCE,
+        provenance=TINY_PROVENANCE,
         graph_name="tiny",
         symbol_names=(),
     )
@@ -296,7 +301,7 @@ class TestWriteIo:
             wrapper,
             (CASES[0][1],),
             tmp_path / bn.MODEL_FILE,
-            provenance=bn.PROVENANCE,
+            provenance=TINY_PROVENANCE,
             graph_name="tiny",
             symbol_names=(),
         )
@@ -579,3 +584,21 @@ class TestVerifyOrder:
             "tail",
         ]
         assert [entry["stage"] for entry in entries] == ["layout", "modules", "tail"]
+
+
+class TestProvenance:
+    """容器の出所は `--model-dir` の実物から導く（`_shared.upstream.snapshot_provenance`）。"""
+
+    def test_a_checkpoint_without_the_download_record_is_refused_before_the_weights(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """出所を名乗れない checkpoint は、重みを読む前に落ちる（何も据わらない）。"""
+        monkeypatch.setattr(
+            bn, "load_wrapper", lambda *_a: pytest.fail("出所の検査より先に重みを読んだ")
+        )
+        out_dir = tmp_path / "series"
+
+        with pytest.raises(UpstreamProvenanceError, match="が無い"):
+            bn.export_series(tmp_path / "BiRefNet_HR", out_dir, bn.DEFAULT_RESOLUTION)
+
+        assert not out_dir.exists()

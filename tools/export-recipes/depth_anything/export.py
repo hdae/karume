@@ -19,7 +19,10 @@ transformers は **5.14.1 でピン**する（`depth_anything.patch` がモデ�
 
 MUST: **Base / Large は上流のライセンスが CC BY-NC 4.0**（Small だけが Apache-2.0 —
 2026-08-14 に HF の API で実測）。台本は `--model-dir` でどれでも受けるが、配布形にできるのは
-Small だけ。
+Small だけ。そのため容器の出所（`provenance`）は定数にせず **`--model-dir` の実物から導く**
+（{@link _shared.upstream.snapshot_provenance} — README の `license` と取得した commit SHA）。
+Base を焼いた容器は `cc-by-nc-4.0` を名乗り、組み立て（`depth_anything.distribution`）が帰属表と
+突き合わせて落とす。
 
 ## 解像度（軸ではない — 1 点に固定）
 
@@ -105,6 +108,7 @@ from safetensors.torch import save_file
 from torch import nn
 
 from _shared.paths import INPUTS_ROOT, MISC_ROOT, SERIES_ROOT
+from _shared.upstream import snapshot_provenance
 from karume.artifacts import staged_publication
 from karume.container import Provenance, container_parts
 from karume.convert import normalize_boundary_tensor
@@ -113,7 +117,6 @@ from karume.ir import IrGraph
 from karume.pipeline import export_to_file
 
 from . import patch
-from .card import DEPTH_ANYTHING_LICENSE
 from .distribution import DEPTH_ANYTHING_ROLE
 from .measurements import CONVT_MAXDIFF
 
@@ -129,9 +132,6 @@ DEFAULT_MODEL_DIR = MODELS_ROOT / "Depth-Anything-V2-Small-hf"
 
 MODEL_FILE = "model.krm"
 
-#: 容器へ焼く出所（container-v1 §2.3）。ライセンス識別子はカード側の正本
-#: （{@link depth_anything.card.DEPTH_ANYTHING_LICENSE}）から引く — 2 表が独立に動く形にしない。
-PROVENANCE = Provenance(license=DEPTH_ANYTHING_LICENSE, notice=NOTICE_FILENAME)
 IO_PREFIX = "io."
 IO_SUFFIX = ".safetensors"
 INPUT_PREFIX = "input."
@@ -237,6 +237,16 @@ def default_out_dir(model_dir: Path) -> Path:
     1 点しか通らない — モジュール docstring の「解像度」）。
     """
     return SERIES_ROOT / model_dir.name.lower()
+
+
+def upstream_provenance(model_dir: Path) -> Provenance:
+    """容器へ焼く出所（container-v1 §2.3）を `--model-dir` の実物から導く。
+
+    ライセンス識別子は README の front matter、revision は `hf download --local-dir` の取得記録
+    （{@link _shared.upstream.snapshot_provenance}）。系列の移行（`migrate_series`）も同じ 1 本を
+    引く。
+    """
+    return snapshot_provenance(model_dir, notice=NOTICE_FILENAME)
 
 
 class DepthMap(nn.Module):
@@ -566,6 +576,8 @@ def export_series(
     {@link _shared.decode_series._publish}・据え替えと後片付けの規律は core の原語
     {@link karume.artifacts.staged_publication}）。
     """
+    # 出所は重みより先に読む（記録が無い checkpoint は 99MB を読む前に落とす）。
+    provenance = upstream_provenance(model_dir)
     wrapper, resolution = load_wrapper(model_dir)
     synthetic = build_cases(resolution)
     # MUST: 実画像は emit より先に組む（画像が欠けているなら、99MB を書き切ってから落とすの
@@ -584,7 +596,7 @@ def export_series(
             wrapper,
             (example,),
             staged / MODEL_FILE,
-            provenance=PROVENANCE,
+            provenance=provenance,
             # グラフ名は**部品名**（= karume.json の weights のキー）。ディレクトリ名から
             # 導かない — この family の容器は系列直下に据わるので、ディレクトリ名は系列名
             # （`depth-anything-v2-small-hf`）であって部品名ではない（container-v1 §2.1）。

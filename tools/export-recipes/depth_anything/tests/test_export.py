@@ -28,10 +28,18 @@ import pytest
 import torch
 from safetensors.torch import load_file
 from torch import nn
+from upstream_fixture import OTHER_REVISION, write_snapshot
 
+from _shared.container_read import read_provenance
 from _shared.paths import SERIES_ROOT
+from _shared.upstream import UpstreamProvenanceError
 from depth_anything import export as da
+from karume.container import Provenance
+from karume.dist import NOTICE_FILENAME
 from karume.pipeline import export_to_file
+
+#: tiny な export に焼く出所（値は突合されない — 台本の出所の導出は `_shared.upstream` の席）。
+TINY_PROVENANCE = Provenance(license="fixture")
 
 #: 合成 golden の解像度（実重みの 518 は重いので、性格だけを見るここでは小さく取る）。
 SMALL = 28
@@ -74,7 +82,7 @@ def exported(tmp_path):
         wrapper,
         (TINY_CASES[0][1],),
         tmp_path / da.MODEL_FILE,
-        provenance=da.PROVENANCE,
+        provenance=TINY_PROVENANCE,
         graph_name="tiny",
         symbol_names=(),
     )
@@ -242,7 +250,7 @@ class TestWriteIo:
             wrapper,
             (TINY_CASES[0][1],),
             tmp_path / da.MODEL_FILE,
-            provenance=da.PROVENANCE,
+            provenance=TINY_PROVENANCE,
             graph_name="tiny",
             symbol_names=(),
         )
@@ -544,8 +552,8 @@ class TestStagedPublication:
     """MUST: 全ての門を通してから据える（落ちた実走は席ごと消える）。"""
 
     @staticmethod
-    def _stage_tiny(monkeypatch) -> None:
-        """実重み無しで `export_series` を 1 本通せる状態にする。"""
+    def _stage_tiny(monkeypatch, tmp_path: Path) -> Path:
+        """実重み無しで `export_series` を 1 本通せる状態にし、偽 checkpoint の置き場を返す。"""
         torch.manual_seed(0)
         wrapper = TinyDepth()
         monkeypatch.setattr(da, "load_wrapper", lambda _dir: (wrapper, TINY_SIZE))
@@ -562,21 +570,53 @@ class TestStagedPublication:
             ),
         )
         monkeypatch.setattr(da, "_sanity", lambda _depths: {"depth_range": {}})
+        model_dir = tmp_path / "Depth-Anything-V2-Small-hf"
+        write_snapshot(model_dir, license="apache-2.0")
+        return model_dir
 
     def test_a_passing_run_leaves_the_series_in_place(self, monkeypatch, tmp_path) -> None:
         """恒真でないことの対（門が通れば据わる）— これが無いと下の主張が恒真になる。"""
-        self._stage_tiny(monkeypatch)
+        model_dir = self._stage_tiny(monkeypatch, tmp_path)
         monkeypatch.setattr(da, "_real_sanity", lambda _depths: {"photo-portrait": {}})
         out_dir = tmp_path / "series"
 
-        summary = da.export_series(da.DEFAULT_MODEL_DIR, out_dir, real_images=True)
+        summary = da.export_series(model_dir, out_dir, real_images=True)
 
         assert out_dir.is_dir()
         assert "real_sanity" in summary
 
+    def test_a_base_checkpoint_names_its_own_license(self, monkeypatch, tmp_path) -> None:
+        """MUST: 容器の出所は `--model-dir` の実物から — Base は CC BY-NC 4.0 を名乗る。
+
+        定数（帰属表の Apache-2.0）を焼くと、Base の容器が Small のライセンスを名乗る。
+        """
+        model_dir = self._stage_tiny(monkeypatch, tmp_path)
+        write_snapshot(model_dir, license="cc-by-nc-4.0", revision=OTHER_REVISION)
+        out_dir = tmp_path / "series"
+
+        da.export_series(model_dir, out_dir)
+
+        assert read_provenance(out_dir / da.MODEL_FILE) == Provenance(
+            license="cc-by-nc-4.0", notice=NOTICE_FILENAME, upstream_revision=OTHER_REVISION
+        )
+
+    def test_a_checkpoint_without_the_download_record_is_refused_before_the_weights(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """出所を名乗れない checkpoint は、重みを読む前に落ちる（何も据わらない）。"""
+        monkeypatch.setattr(
+            da, "load_wrapper", lambda _dir: pytest.fail("出所の検査より先に重みを読んだ")
+        )
+        out_dir = tmp_path / "series"
+
+        with pytest.raises(UpstreamProvenanceError, match="が無い"):
+            da.export_series(tmp_path / "Depth-Anything-V2-Small-hf", out_dir)
+
+        assert not out_dir.exists()
+
     def test_a_failing_real_image_gate_leaves_nothing_behind(self, monkeypatch, tmp_path) -> None:
         """実画像の遠近門が落ちたら `out_dir` は存在しない（据えてから評価しない）。"""
-        self._stage_tiny(monkeypatch)
+        model_dir = self._stage_tiny(monkeypatch, tmp_path)
 
         def _reject(_depths):
             raise AssertionError("遠近の順序が逆")
@@ -585,6 +625,6 @@ class TestStagedPublication:
         out_dir = tmp_path / "series"
 
         with pytest.raises(AssertionError, match="遠近"):
-            da.export_series(da.DEFAULT_MODEL_DIR, out_dir, real_images=True)
+            da.export_series(model_dir, out_dir, real_images=True)
 
         assert not out_dir.exists()

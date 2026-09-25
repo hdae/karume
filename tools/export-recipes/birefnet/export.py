@@ -140,6 +140,7 @@ from safetensors.torch import save_file
 from torch import nn
 
 from _shared.paths import INPUTS_ROOT, MISC_ROOT, SERIES_ROOT
+from _shared.upstream import snapshot_provenance
 from karume.artifacts import staged_publication
 from karume.container import Provenance, container_parts
 from karume.convert import normalize_boundary_tensor
@@ -148,7 +149,6 @@ from karume.ir import IrGraph
 from karume.pipeline import export_to_file
 
 from . import patch
-from .card import BIREFNET_LICENSE
 from .distribution import BIREFNET_ROLE
 
 #: 実重みの親（`inputs/birefnet/<名前>/` に HF の 7 ファイルを展開した先）。
@@ -169,9 +169,6 @@ RESOLUTION_MULTIPLE = 64
 
 MODEL_FILE = "model.krm"
 
-#: 容器へ焼く出所（container-v1 §2.3）。ライセンス識別子はカード側の正本
-#: （{@link birefnet.card.BIREFNET_LICENSE}）から引く — 2 表が独立に動く形にしない。
-PROVENANCE = Provenance(license=BIREFNET_LICENSE, notice=NOTICE_FILENAME)
 IO_PREFIX = "io."
 IO_SUFFIX = ".safetensors"
 INPUT_PREFIX = "input."
@@ -250,6 +247,19 @@ def default_out_dir(model_dir: Path, resolution: int) -> Path:
     倒す — `outputs/series/` は全系列が同じ流儀で並んでいる。
     """
     return SERIES_ROOT / f"{model_dir.name.lower().replace('_', '-')}-{resolution}"
+
+
+def upstream_provenance(model_dir: Path) -> Provenance:
+    """容器へ焼く出所（container-v1 §2.3）を `--model-dir` の実物から導く。
+
+    ライセンス識別子は README の front matter、revision は `hf download --local-dir` の取得記録
+    （{@link _shared.upstream.snapshot_provenance}）。系列の移行（`migrate_series`）も同じ 1 本を
+    引く。
+
+    定数にしないのは、別の checkpoint を焼いた容器も帰属表のライセンスを名乗る形になるから。
+    帰属表（カード側の正本）との突合は組み立て側（`birefnet.distribution`）が持つ。
+    """
+    return snapshot_provenance(model_dir, notice=NOTICE_FILENAME)
 
 
 class MatteLogits(nn.Module):
@@ -554,6 +564,8 @@ def export_series(
     {@link karume.artifacts.staged_publication}）。
     """
     assert_resolution(resolution)
+    # 出所は重みより先に読む（記録が無い checkpoint は重みを読む前に落とす）。
+    provenance = upstream_provenance(model_dir)
     wrapper = load_wrapper(model_dir, resolution)
     synthetic = build_cases(resolution)
     # MUST: 実画像は emit より先に組む（画像が欠けているなら、964MB を書き切ってから落とすの
@@ -572,7 +584,7 @@ def export_series(
             wrapper,
             (example,),
             staged / MODEL_FILE,
-            provenance=PROVENANCE,
+            provenance=provenance,
             # グラフ名は**部品名**（= karume.json の weights のキー）。ディレクトリ名から
             # 導かない — この family の容器は系列直下に据わるので、ディレクトリ名は系列名
             # （`birefnet-hr-<解像度>`）であって部品名ではない（container-v1 §2.1）。

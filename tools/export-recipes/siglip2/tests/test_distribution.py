@@ -22,19 +22,31 @@ from typing import Any
 import pytest
 from container_series import i2_container, placed_paths, replace_component, write_component
 from ir_fixtures import Shape, ir_container
+from upstream_fixture import (
+    FIXTURE_REVISION,
+    OTHER_REVISION,
+    stamp_fixture_provenance,
+    write_snapshot,
+)
 
 from _shared.licenses import APACHE_LICENSE_2_0_PATH
 from dist import default_out_dir, main
-from karume.container import CODEC_LEDGER
+from karume.container import CODEC_LEDGER, Provenance
 from karume.dist import (
     MANIFEST_FILENAME,
     MODEL_CARD_FILENAME,
+    NOTICE_FILENAME,
     DistError,
     assemble_family,
     resolve_card_renderer,
     verify_dist,
 )
-from siglip2.card import SIGLIP2_MAP_HEAD_DIFF, SIGLIP2_MAP_HEAD_NORM, SIGLIP2_UPSTREAM
+from siglip2.card import (
+    SIGLIP2_LICENSE,
+    SIGLIP2_MAP_HEAD_DIFF,
+    SIGLIP2_MAP_HEAD_NORM,
+    SIGLIP2_UPSTREAM,
+)
 from siglip2.distribution import (
     PIPELINE,
     SIGLIP2_DEFAULT_MODEL,
@@ -49,6 +61,17 @@ from siglip2.distribution import (
     siglip2_repo_name,
     siglip2_sources,
 )
+
+
+@pytest.fixture(autouse=True)
+def _baked_provenance(monkeypatch: pytest.MonkeyPatch) -> None:
+    """フィクスチャ容器に「台本が焼いた」出所を名乗らせる（出所の門の正常形）。"""
+    stamp_fixture_provenance(
+        monkeypatch,
+        Provenance(
+            license=SIGLIP2_LICENSE, notice=NOTICE_FILENAME, upstream_revision=FIXTURE_REVISION
+        ),
+    )
 
 
 def _write(path: Path, payload: bytes) -> None:
@@ -193,6 +216,8 @@ def _build_siglip2_sources(
             sources.model / "preprocessor_config.json",
             json.dumps(preprocessor, ensure_ascii=False).encode("utf-8"),
         )
+    # 前処理を読む checkpoint の取得記録（容器の revision の突合先）。
+    write_snapshot(sources.model, license=SIGLIP2_LICENSE)
     return sources
 
 
@@ -298,6 +323,40 @@ class TestSiglip2Layout:
         replace_component(sources.series / "model.krm", i2_container(named=SIGLIP2_ROLE))
 
         with pytest.raises(DistError, match=rf"{SIGLIP2_ROLE}: .* i2 がある"):
+            siglip2_plan(sources)
+
+
+class TestSiglip2ContainerProvenance:
+    """容器が名乗る出所を帰属表と手元の checkpoint へ突き合わせる（depth_anything と同じ形）。"""
+
+    def test_it_refuses_a_container_that_names_another_license(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stamp_fixture_provenance(
+            monkeypatch,
+            Provenance(license="mit", notice=NOTICE_FILENAME, upstream_revision=FIXTURE_REVISION),
+        )
+        sources = _build_siglip2_sources(tmp_path)
+
+        with pytest.raises(DistError, match=r"provenance\.license が 'mit'"):
+            siglip2_plan(sources)
+
+    def test_it_refuses_a_container_without_an_upstream_revision(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stamp_fixture_provenance(
+            monkeypatch, Provenance(license=SIGLIP2_LICENSE, notice=NOTICE_FILENAME)
+        )
+        sources = _build_siglip2_sources(tmp_path)
+
+        with pytest.raises(DistError, match="upstreamRevision を持たない"):
+            siglip2_plan(sources)
+
+    def test_it_refuses_a_container_baked_from_another_revision(self, tmp_path: Path) -> None:
+        sources = _build_siglip2_sources(tmp_path)
+        write_snapshot(sources.model, license=SIGLIP2_LICENSE, revision=OTHER_REVISION)
+
+        with pytest.raises(DistError, match="別の revision"):
             siglip2_plan(sources)
 
 
@@ -562,17 +621,17 @@ class TestSiglip2Family:
     def test_the_layout_keeps_each_models_graph_in_its_own_subtree(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """グラフ shard は寸法の宣言そのものなので、**共有席へ畳まれてはいけない**。
+        """part 0（グラフ記述を持つ part）は寸法の宣言なので、**共有席へ畳まれてはいけない**。
 
         バイト単位で同じコンポーネントは `shared/` へ畳まれる（ADR 0041 §9）ので、期待は
-        「モデル別サブツリー + shared のどれか」— 合成資産では重み shard が偶然一致するが、
-        寸法の違うグラフ shard が畳まれたらそれは器の側のバグになる。
+        「モデル別サブツリー + shared のどれか」— 合成資産では重みの part が偶然一致するが、
+        寸法の違う part 0 が畳まれたらそれは器の側のバグになる。
         """
         out_dir = self._run(tmp_path, monkeypatch)
         placed = sorted(verify_dist(out_dir))
-        graph_shard = _placed_paths()[0]
-        assert f"{SIGLIP2_DEFAULT_MODEL}/{graph_shard}" in placed
-        assert f"{_SIGLIP2_SECOND_MODEL}/{graph_shard}" in placed
+        graph_part = _placed_paths()[0]
+        assert f"{SIGLIP2_DEFAULT_MODEL}/{graph_part}" in placed
+        assert f"{_SIGLIP2_SECOND_MODEL}/{graph_part}" in placed
         assert {path.split("/", 1)[0] for path in placed} <= {
             SIGLIP2_DEFAULT_MODEL,
             _SIGLIP2_SECOND_MODEL,

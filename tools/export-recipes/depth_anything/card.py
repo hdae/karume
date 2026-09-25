@@ -50,8 +50,9 @@ DEPTH_ANYTHING_PAPER = "arxiv.org/abs/2406.09414"
 #: MUST: **Small だけが Apache-2.0**（実地確認 2026-08-14 — HF の model API:
 #: `depth-anything/Depth-Anything-V2-Base-hf` と `-Large-hf` はどちらも `license:
 #: cc-by-nc-4.0`）。サイズ軸そのものは配布形のモデル軸（世代 1 リポの中に並ぶ —
-#: `depth_anything.distribution`）だが、**この表に載っているものしか配れない**のが唯一の門で、
-#: NC の重みを Apache-2.0 のカードで再配布する事故はここで止まる。Base / Large を足すときは、
+#: `depth_anything.distribution`）だが、**この表に載っているものしか配れない**。門は名前と、
+#: 系列の容器が名乗る出所（`provenance.license` がこの表のライセンスと一致すること）の 2 段で、
+#: NC の重みを Apache-2.0 のカードで再配布する事故はそこで止まる。Base / Large を足すときは、
 #: ライセンス欄をモデル単位へ割る改修とセット（{@link DEPTH_ANYTHING_LICENSE} は今 1 値しかない）。
 DEPTH_ANYTHING_UPSTREAM: Mapping[str, str] = {
     "small": "depth-anything/Depth-Anything-V2-Small-hf",

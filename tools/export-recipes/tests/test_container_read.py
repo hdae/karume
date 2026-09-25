@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 from container_series import write_component
-from ir_fixtures import ir_container
+from ir_fixtures import FIXTURE_PROVENANCE, ir_container
 
 from _shared.container_read import (
     ContainerReadError,
@@ -23,6 +23,7 @@ from _shared.container_read import (
     read_asset,
     read_asset_declarations,
     read_layouts,
+    read_provenance,
     read_stored,
 )
 from karume.container import AssetInput
@@ -86,3 +87,9 @@ class TestTheDiagnosticsUseTheRepositoryVocabulary:
     def test_the_error_is_not_a_key_error(self, component: Path) -> None:
         """`KeyError` のままだと呼び手の `except KeyError` が辞書の引き損ないと区別できない。"""
         assert not issubclass(ContainerReadError, KeyError)
+
+
+class TestTheProvenanceIsTheOneTheWriterBaked:
+    def test_it_returns_the_provenance_of_the_model_descriptor(self, component: Path) -> None:
+        """出所の突合（`_shared.upstream`）が読む値は、書き手が焼いた `provenance` そのもの。"""
+        assert read_provenance(component) == FIXTURE_PROVENANCE

@@ -22,9 +22,10 @@ from typing import Any
 import pytest
 from container_series import i2_container, placed_paths, replace_component, write_component
 from ir_fixtures import Shape, ir_container
+from upstream_fixture import FIXTURE_REVISION, stamp_fixture_provenance
 
 from _shared.licenses import mit_license
-from birefnet.card import BIREFNET_UPSTREAM
+from birefnet.card import BIREFNET_LICENSE, BIREFNET_UPSTREAM
 from birefnet.distribution import (
     BIREFNET_COPYRIGHTS,
     BIREFNET_DEFAULT_MODEL,
@@ -46,15 +47,27 @@ from birefnet.distribution import (
     birefnet_sources,
 )
 from dist import default_out_dir, main
-from karume.container import CODEC_LEDGER
+from karume.container import CODEC_LEDGER, Provenance
 from karume.dist import (
     MANIFEST_FILENAME,
     MODEL_CARD_FILENAME,
+    NOTICE_FILENAME,
     DistError,
     assemble_family,
     resolve_card_renderer,
     verify_dist,
 )
+
+
+@pytest.fixture(autouse=True)
+def _baked_provenance(monkeypatch: pytest.MonkeyPatch) -> None:
+    """フィクスチャ容器に「台本が焼いた」出所を名乗らせる（出所の門の正常形）。"""
+    stamp_fixture_provenance(
+        monkeypatch,
+        Provenance(
+            license=BIREFNET_LICENSE, notice=NOTICE_FILENAME, upstream_revision=FIXTURE_REVISION
+        ),
+    )
 
 
 def _write(path: Path, payload: bytes) -> None:
@@ -253,6 +266,35 @@ class TestBirefnetLayout:
         replace_component(sources.series / "model.krm", i2_container(named=BIREFNET_ROLE))
 
         with pytest.raises(DistError, match=rf"{BIREFNET_ROLE}: .* i2 がある"):
+            birefnet_plan(sources, BIREFNET_HR_CHECKPOINT)
+
+
+class TestBirefnetContainerProvenance:
+    """容器が名乗る出所を帰属表へ突き合わせる（revision は「名乗っていること」まで）。"""
+
+    def test_it_refuses_a_container_that_names_another_license(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stamp_fixture_provenance(
+            monkeypatch,
+            Provenance(
+                license="apache-2.0", notice=NOTICE_FILENAME, upstream_revision=FIXTURE_REVISION
+            ),
+        )
+        sources = _build_birefnet_sources(tmp_path)
+
+        with pytest.raises(DistError, match=r"provenance\.license が 'apache-2.0'"):
+            birefnet_plan(sources, BIREFNET_HR_CHECKPOINT)
+
+    def test_it_refuses_a_container_without_an_upstream_revision(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stamp_fixture_provenance(
+            monkeypatch, Provenance(license=BIREFNET_LICENSE, notice=NOTICE_FILENAME)
+        )
+        sources = _build_birefnet_sources(tmp_path)
+
+        with pytest.raises(DistError, match="upstreamRevision を持たない"):
             birefnet_plan(sources, BIREFNET_HR_CHECKPOINT)
 
 
@@ -460,9 +502,9 @@ class TestBirefnetResolutionFamily:
     def test_the_layout_keeps_each_models_graph_in_its_own_subtree(self, tmp_path: Path) -> None:
         """part 0（グラフ記述を持つ part）は寸法の宣言なので、共有席へ畳まれてはいけない。"""
         placed = sorted(verify_dist(self._run(tmp_path)))
-        graph_shard = _placed_paths()[0]
+        graph_part = _placed_paths()[0]
         for model in BIREFNET_MODELS:
-            assert f"{model}/{graph_shard}" in placed
+            assert f"{model}/{graph_part}" in placed
         assert {path.split("/", 1)[0] for path in placed} <= {*BIREFNET_MODELS, "shared"}
 
     def test_the_card_enumerates_both_models_and_their_own_resources(self, tmp_path: Path) -> None:

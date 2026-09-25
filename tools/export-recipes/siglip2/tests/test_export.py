@@ -20,10 +20,17 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import load_file
 from torch import nn
+from upstream_fixture import FIXTURE_REVISION, write_snapshot
 
+from _shared.container_read import read_provenance
 from _shared.paths import SERIES_ROOT
+from karume.container import Provenance
+from karume.dist import NOTICE_FILENAME
 from karume.pipeline import export_to_file
 from siglip2 import export as sg
+
+#: tiny な export に焼く出所（値は突合されない — 台本の出所の導出は `_shared.upstream` の席）。
+TINY_PROVENANCE = Provenance(license="fixture")
 
 
 class TinyVisionPooler(nn.Module):
@@ -88,7 +95,7 @@ def exported(tmp_path):
         wrapper,
         (CASES[0][1],),
         tmp_path / sg.MODEL_FILE,
-        provenance=sg.PROVENANCE,
+        provenance=TINY_PROVENANCE,
         graph_name="tiny",
         symbol_names=(),
     )
@@ -127,7 +134,7 @@ class TestWriteIo:
             wrapper,
             (CASES[0][1],),
             tmp_path / sg.MODEL_FILE,
-            provenance=sg.PROVENANCE,
+            provenance=TINY_PROVENANCE,
             graph_name="tiny",
             symbol_names=(),
         )
@@ -411,26 +418,43 @@ class TestStagedPublication:
     """MUST: 全ての門を通してから据える（落ちた実走は席ごと消える）。"""
 
     @staticmethod
-    def _stage_tiny(monkeypatch) -> None:
+    def _stage_tiny(monkeypatch, tmp_path: Path) -> Path:
+        """tiny なラッパを差し込み、取得記録つきの偽 checkpoint の置き場を返す。"""
         torch.manual_seed(0)
         wrapper = TinyVisionPooler()
         wrapper.model = SimpleNamespace(config=Config())
         monkeypatch.setattr(sg, "load_wrapper", lambda _dir: wrapper)
         monkeypatch.setattr(sg, "build_cases", lambda _config: CASES)
+        model_dir = tmp_path / "siglip2-fixture"
+        write_snapshot(model_dir, license="apache-2.0")
+        return model_dir
 
     def test_a_passing_run_leaves_the_series_in_place(self, monkeypatch, tmp_path):
         """恒真でないことの対（門が通れば据わる）— これが無いと下の主張が恒真になる。"""
-        self._stage_tiny(monkeypatch)
+        model_dir = self._stage_tiny(monkeypatch, tmp_path)
         monkeypatch.setattr(sg, "_sanity", lambda _pooled: {})
         out_dir = tmp_path / "series"
 
-        summary = sg.export_series(sg.DEFAULT_MODEL_DIR, out_dir)
+        summary = sg.export_series(model_dir, out_dir)
 
         assert out_dir.is_dir()
         assert summary["dir"] == str(out_dir)
 
+    def test_the_container_names_the_checkpoint_it_was_baked_from(self, monkeypatch, tmp_path):
+        """容器の出所は `--model-dir` の実物（README の license + 取得した commit SHA）から来る。"""
+        model_dir = self._stage_tiny(monkeypatch, tmp_path)
+        write_snapshot(model_dir, license="cc-by-nc-4.0")
+        monkeypatch.setattr(sg, "_sanity", lambda _pooled: {})
+        out_dir = tmp_path / "series"
+
+        sg.export_series(model_dir, out_dir)
+
+        assert read_provenance(out_dir / sg.MODEL_FILE) == Provenance(
+            license="cc-by-nc-4.0", notice=NOTICE_FILENAME, upstream_revision=FIXTURE_REVISION
+        )
+
     def test_a_failing_sanity_leaves_nothing_behind(self, monkeypatch, tmp_path):
-        self._stage_tiny(monkeypatch)
+        model_dir = self._stage_tiny(monkeypatch, tmp_path)
 
         def _reject(_pooled):
             raise AssertionError("判別の順序が壊れている")
@@ -439,6 +463,6 @@ class TestStagedPublication:
         out_dir = tmp_path / "series"
 
         with pytest.raises(AssertionError, match="判別の順序が壊れている"):
-            sg.export_series(sg.DEFAULT_MODEL_DIR, out_dir)
+            sg.export_series(model_dir, out_dir)
 
         assert not out_dir.exists()

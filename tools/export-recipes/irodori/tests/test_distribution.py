@@ -98,7 +98,7 @@ def _in_subtree(model: str, paths: Iterable[str]) -> list[str]:
 
 
 def _placed_paths() -> list[str]:
-    """配布形に現れる相対 path — **weights の席だけ**が shard 連番に展開される（ADR 0081）。
+    """配布形に現れる相対 path — **weights の席だけ**が part 連番に展開される（container-v1 §8）。
 
     tokenizer は assets の席（1 ファイル参照）なので分割されない。
     """

@@ -730,3 +730,15 @@ class TestCalibDeviceCli:
             export_anima.main()
 
         assert "--calib-device" in capsys.readouterr().err
+
+
+class TestProvenance:
+    """容器の `provenance.license` は識別子（container-v1 §2.3）— HF の `other` を焼かない。"""
+
+    def test_the_container_names_the_license_identifier_not_other(self) -> None:
+        """`other` だと、持ち出した krm からライセンスが特定できない（W-RC3-6）。"""
+        from anima.card import ANIMA_METADATA
+
+        assert ANIMA_METADATA.license == "other"
+        assert export_anima.PROVENANCE.license == ANIMA_METADATA.license_name
+        assert export_anima.PROVENANCE.license == "circlestone-labs-non-commercial-license"
