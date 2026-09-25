@@ -342,9 +342,9 @@ SBV2_QUANTS: Mapping[str, Any] = {
 #: opt-in の参照系として残る — WAV 参照門（e2e_sbv2_wav_test）の不変アンカー。
 SBV2_DEFAULT_QUANT = "i8+bert4"
 
-#: `pipelineConfig.defaults` に載る実行時ノブ（`style_bert_vits2.constants` 由来）。綴りは
-#: `symbols.json` の `defaults` と共有する — 同じ源から引いた同じ値が配布形の 2 つの資産に
-#: 並ぶので、食い違いは組み立てで落とす（{@link sbv2_knob_defaults}）。
+#: `pipelineConfig.defaults` に載る実行時ノブ（`style_bert_vits2.constants` 由来 —
+#: {@link sbv2_knob_defaults}）。配布形の中でノブの既定を持つのは manifest のこの 1 席だけで、
+#: 共有席の `symbols.json` には載せない（`sbv2.demo.jp_extra_rules` の MUST）。
 SBV2_KNOB_KEYS: tuple[str, ...] = (
     "style",
     "styleWeight",
@@ -428,13 +428,18 @@ def sbv2_series_name(model: str) -> str:
     return f"{SBV2_SERIES_PREFIX}-{model}"
 
 
-def sbv2_repo_name(model: str) -> str:
-    """単一モデルの配布リポ名（`<DIST_ROOT>/<この名前>/` が 1 つの HF リポになる）。
+def sbv2_repo_name(family: str) -> str:
+    """声のファミリーの配布リポ名（`<DIST_ROOT>/<この名前>/` が 1 つの HF リポになる）。
+
+    リポは**声のファミリー単位**（JVNV の 4 声は `karume-sbv2-jvnv` に同居する）で、話者単位の
+    リポは作らない（2026-09-25 裁定 — 全域レビュー W-RC5-2）。Pipeline がこの名前を宣言する
+    ので、`--repo` を明示しなくてもカードの Usage と既定の出力先が公開リポを指す（話者名から
+    導いていた頃は `karume-sbv2-F1` のような実在しないリポを名乗った）。
 
     `karume-` を前置する（リポ名裁定 2026-08-09 — HF org を作らない代わりに配布リポは
     `karume-` prefix で名前空間を切る）。系列名（{@link sbv2_series_name}）には掛からない。
     """
-    return f"karume-{SBV2_SERIES_PREFIX}-{model}"
+    return f"karume-{SBV2_SERIES_PREFIX}-{family}"
 
 
 @dataclass(frozen=True)
@@ -489,13 +494,13 @@ def sbv2_placements(sources: Sbv2Sources) -> dict[str, Path]:
     }
 
 
-def sbv2_knob_defaults(symbols_path: Path) -> dict[str, Any]:
+def sbv2_knob_defaults() -> dict[str, Any]:
     """実行時ノブの既定を `style_bert_vits2.constants` から引く（定数を写経しない）。
 
-    `sbv2.demo.jp_extra_rules` が `symbols.json` の `defaults` へ焼くのと**同じ源・同じ値**。
-    配布形には両方が並ぶので、食い違いをここで落とす — TS 側は `symbols.json` からノブを
-    読み（`parseJpExtraRules`）、hub 利用側は `karume.json` の `pipelineConfig.defaults` を
-    読むため、ずれると「どちらの既定で鳴ったのか」が沈黙で分かれる。
+    配布形でノブの既定を持つのは `karume.json` の `pipelineConfig.defaults` の 1 席だけ
+    （TS 側の `Sbv2Pipeline` もそこだけを読む — `symbols.ts` の `defaults` の doc）。以前は
+    共有席の `symbols.json` にも同じ値の写しを焼いて突き合わせていたが、その写しには消費者が
+    いなかった（2026-09-24 全域レビュー W-RC5-1 で写しごと外した）。
 
     NOTE: `style_bert_vits2` は optional な `sbv2` dependency-group なので import は関数内。
     Anima の組み立てと `karume.dist` の import 自体はこの依存に触れない。
@@ -509,7 +514,7 @@ def sbv2_knob_defaults(symbols_path: Path) -> dict[str, Any]:
         DEFAULT_STYLE_WEIGHT,
     )
 
-    knobs: dict[str, Any] = {
+    return {
         "style": DEFAULT_STYLE,
         "styleWeight": DEFAULT_STYLE_WEIGHT,
         "sdpRatio": DEFAULT_SDP_RATIO,
@@ -517,23 +522,6 @@ def sbv2_knob_defaults(symbols_path: Path) -> dict[str, Any]:
         "noiseScaleW": DEFAULT_NOISEW,
         "lengthScale": DEFAULT_LENGTH,
     }
-    if not symbols_path.is_file():
-        raise DistError(f"組み立ての入力が無い: {symbols_path}")
-    shipped = json.loads(symbols_path.read_text(encoding="utf-8")).get("defaults")
-    if not isinstance(shipped, dict):
-        raise DistError(f"{symbols_path}: 'defaults' 節が無い（実行時ノブの写しの正本）")
-    disagreed = [
-        f"{key}: constants={knobs[key]!r} / symbols.json={shipped.get(key)!r}"
-        for key in SBV2_KNOB_KEYS
-        if shipped.get(key) != knobs[key]
-    ]
-    if disagreed:
-        raise DistError(
-            f"{symbols_path} の defaults が style_bert_vits2 の定数と食い違う"
-            f"（{', '.join(disagreed)}）— 資産を焼いたときと今の package が別版。"
-            "`sbv2.demo assets` を採り直す"
-        )
-    return knobs
 
 
 def sbv2_ir_graph(path: Path) -> Mapping[str, Any]:
@@ -976,7 +964,7 @@ def sbv2_plan(
 def sbv2_dist_plan(series_dir: Path, model: str) -> ModelPlan:
     """`--series` の親から SBV2 1 モデルの計画を組む（CLI のディスパッチ先）。"""
     sources = sbv2_sources(series_dir, model)
-    return sbv2_plan(sources, sbv2_knob_defaults(sources.demo / SBV2_SYMBOLS_FILE), model)
+    return sbv2_plan(sources, sbv2_knob_defaults(), model)
 
 
 def sbv2_family_dist_plan(series_dir: Path, model: str, family: str) -> ModelPlan:
@@ -1072,14 +1060,15 @@ def sbv2_jvnv_root_files() -> dict[str, str]:
 def _sbv2_pipeline(family: str, default_model: str, root_files: Mapping[str, str]) -> Pipeline:
     """1 つの声のファミリー = 1 つの配布リポぶんの Pipeline を組む。
 
-    ファミリーを**ここで 1 回だけ**束ねる — 受け付けるモデル（`plan`）・カードの帰属
-    （`card_profiles`）・リポ直下の法的テキスト（`root_files`）が同じ 1 語から入るので、
+    ファミリーを**ここで 1 回だけ**束ねる — 受け付けるモデル（`plan`）・配布リポ名
+    （`repo_name`）・カードの帰属（`card_profiles`）・リポ直下の法的テキスト（`root_files`）が
+    同じ 1 語から入るので、
     どれか 1 つだけが別のファミリーを指す形が作れない。帰属の選択肢は 1 つなので
     `--card-profile` は省略で通る（明示しても同じ名前で通る）。
     """
     return Pipeline(
         default_model=default_model,
-        repo_name=sbv2_repo_name,
+        repo_name=lambda _model: sbv2_repo_name(family),
         plan=lambda series_dir, model: sbv2_family_dist_plan(series_dir, model, family),
         card_profiles={
             family: partial(

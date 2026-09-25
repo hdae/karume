@@ -70,7 +70,7 @@ uv run python dist.py                                   # default = anima
 uv run python dist.py --pipeline irodori
 uv run python dist.py --pipeline sbv2-fn                # FN voices (not published)
 uv run python dist.py --pipeline sbv2 \
-    --model F1 --model F2 --out ../../models/karume-sbv2-jvnv --repo hdae/karume-sbv2-jvnv
+    --model F1 --model F2 --out ../../models/karume-sbv2-jvnv
 ```
 
 The accepted set is `anima` / `anima-extra` / `sbv2` / `sbv2-fn` / `irodori` / `siglip2` / `birefnet` /

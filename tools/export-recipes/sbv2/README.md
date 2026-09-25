@@ -406,11 +406,11 @@ uv run --group sbv2 python -m sbv2.demo official --model-dir ../../inputs/sbv2/F
 
 ### What `assets` produces
 
-| File                     | Content                                                                                     |
-| ------------------------ | ------------------------------------------------------------------------------------------- |
-| `symbols.json`           | the JP-Extra id rules, model constants and knob defaults (**all read from the real thing**) |
-| `deberta-tokenizer.json` | the DeBERTa character tokenizer's vocabulary, special ids and `_clean_text` decision table  |
-| `assets.safetensors`     | `style_vec` `[1,256]` and the speaker embedding `g` `[1,512,1]`                             |
+| File                     | Content                                                                                                                                                                           |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `symbols.json`           | the JP-Extra id rules and constants shared by every voice (**all read from the real thing**); no knob defaults, style or speaker — those live in `karume.json`'s `pipelineConfig` |
+| `deberta-tokenizer.json` | the DeBERTa character tokenizer's vocabulary, special ids and `_clean_text` decision table                                                                                        |
+| `assets.safetensors`     | `style_vec` `[1,256]` and the speaker embedding `g` `[1,512,1]`                                                                                                                   |
 
 **MUST: never transcribe constants by hand.** The symbol table, the tone base
 (`LANGUAGE_TONE_START_MAP["JP"]`), the language id (`LANGUAGE_ID_MAP["JP"]`) and the add_blank

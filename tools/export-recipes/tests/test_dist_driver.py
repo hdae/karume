@@ -183,7 +183,8 @@ class TestDefaultPlaces:
         assert dist.default_out_dir(SIGLIP2_PIPELINE, ["base"]).name == "karume-siglip2"
 
     def test_it_refuses_to_invent_a_family_repository_name(self) -> None:
-        """ファミリーリポの名前（例 `karume-sbv2-jvnv`）はモデル名の並びからは決まらない。"""
+        """複数モデルの出力先は `--out` の明示を求める（1 モデルの宣言だけを引く — 並べた
+        モデルの宣言が揃うかは突き合わせない）。"""
         with pytest.raises(DistError, match="--out"):
             dist.default_out_dir(SBV2_PIPELINE, ["jvnv-F1", "jvnv-F2"])
 
@@ -211,7 +212,8 @@ RELEASE_REPOSITORIES = [
     ("gemma4", ["e2b"], None, "karume-gemma4"),
     ("irodori", ["v4-small"], None, "karume-irodori-v4-small"),
     ("irodori", ["v4.1-small"], None, "karume-irodori-v4.1-small"),
-    ("sbv2", ["F1", "F2", "M1", "M2"], "hdae/karume-sbv2-jvnv", "karume-sbv2-jvnv"),
+    # `--repo` 無しで公開リポを指す（Pipeline がファミリーのリポ名を宣言する — W-RC5-2）。
+    ("sbv2", ["F1", "F2", "M1", "M2"], None, "karume-sbv2-jvnv"),
     ("siglip2", ["base", "so400m"], None, "karume-siglip2"),
 ]
 

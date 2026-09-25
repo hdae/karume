@@ -163,17 +163,15 @@ def jp_extra_rules(hps: Any) -> dict[str, Any]:
     `LANGUAGE_ID_MAP["JP"]`、add_blank の挿入位置だけが 0 になる。
     `sbv2.export.make_language` が全 0 なのは golden の合成入力としての選択で、
     推論規則ではない（合成 golden はどんな値でも成立する）。
+
+    MUST: 載せるのは**全モデル共通の規則**だけ。この 1 本は配布形の共有席
+    （`shared/text/symbols.json`）として全話者に配られるので、焼いたモデル固有の事実
+    （style / speaker / config の `version`）を載せると、別の話者に対して誤ったモデル名を
+    名乗る。実行時ノブの既定も載せない — 正本は manifest の `pipelineConfig.defaults`
+    （`sbv2.distribution.sbv2_knob_defaults`）で、TS 側はここのノブを読まない
+    （2026-09-24 全域レビュー W-RC5-1）。
     """
-    from style_bert_vits2.constants import (
-        DEFAULT_LENGTH,
-        DEFAULT_NOISE,
-        DEFAULT_NOISEW,
-        DEFAULT_SDP_RATIO,
-        DEFAULT_STYLE,
-        DEFAULT_STYLE_WEIGHT,
-        VERSION,
-        Languages,
-    )
+    from style_bert_vits2.constants import VERSION, Languages
     from style_bert_vits2.nlp.symbols import (
         LANGUAGE_ID_MAP,
         LANGUAGE_TONE_START_MAP,
@@ -194,7 +192,6 @@ def jp_extra_rules(hps: Any) -> dict[str, Any]:
         "source": {
             "package": "style_bert_vits2",
             "version": VERSION,
-            "modelVersion": hps.version,
             "bert": BERT_REPO,
         },
         # 音素記号表。添字が enc_p.emb の行番号。
@@ -212,15 +209,6 @@ def jp_extra_rules(hps: Any) -> dict[str, Any]:
         # 波形長の検算に使う（audio 長 = hopLength × フレーム数）。
         "samplingRate": hps.data.sampling_rate,
         "hopLength": hps.data.hop_length,
-        # 実行時ノブの既定（style_bert_vits2/constants.py）。デモの CLI 既定はこれを読む。
-        "defaults": {
-            "sdpRatio": DEFAULT_SDP_RATIO,
-            "noiseScale": DEFAULT_NOISE,
-            "noiseScaleW": DEFAULT_NOISEW,
-            "lengthScale": DEFAULT_LENGTH,
-            "style": DEFAULT_STYLE,
-            "styleWeight": DEFAULT_STYLE_WEIGHT,
-        },
         # BERT 特徴の取り出し位置（**配布グラフの出力**を末尾から数える — 参照側の位置とは別物）。
         "bertHiddenFromEnd": BERT_GRAPH_HIDDEN_FROM_END,
         # 相対位置の添字表をホストが作るための規則（DeBERTa の config 由来 — 写経しない）。
@@ -293,8 +281,6 @@ def emit_assets(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     rules = jp_extra_rules(hps)
-    rules["style"] = {"name": style, "id": hps.data.style2id[style], "weight": weight}
-    rules["speaker"] = {"name": speaker, "id": speaker_id}
     (out_dir / SYMBOLS_FILE).write_text(
         json.dumps(rules, ensure_ascii=False, indent=1) + "\n", encoding="utf-8"
     )
@@ -537,7 +523,13 @@ def run_official(
     if patch.patches_applied():
         raise RuntimeError("official はパッチ未適用のプロセスでのみ走らせる")
 
-    from style_bert_vits2.constants import Languages
+    from style_bert_vits2.constants import (
+        DEFAULT_LENGTH,
+        DEFAULT_NOISE,
+        DEFAULT_NOISEW,
+        DEFAULT_SDP_RATIO,
+        Languages,
+    )
     from style_bert_vits2.models.infer import infer
     from style_bert_vits2.nlp import bert_models
 
@@ -550,7 +542,14 @@ def run_official(
     net_g, hps = export.load_net_g(model_dir)
     style, weight, speaker = resolve_style_and_speaker(hps, style, style_weight, speaker)
     style_vec = style_vector(model_dir, hps, style, weight)
-    knobs = jp_extra_rules(hps)["defaults"]
+    # 実行時ノブの既定は `style_bert_vits2.constants` を直に読む（`symbols.json` へは載せない —
+    # {@link jp_extra_rules} の MUST）。
+    knobs = {
+        "sdpRatio": DEFAULT_SDP_RATIO,
+        "noiseScale": DEFAULT_NOISE,
+        "noiseScaleW": DEFAULT_NOISEW,
+        "lengthScale": DEFAULT_LENGTH,
+    }
     audio = infer(
         text=text,
         style_vec=style_vec,

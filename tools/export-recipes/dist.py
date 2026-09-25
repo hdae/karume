@@ -9,7 +9,7 @@
     uv run python dist.py --pipeline irodori
     uv run python dist.py --pipeline sbv2-fn               # FN 系（HF 公開は保留）
     uv run python dist.py --pipeline sbv2 \\
-        --model F1 --model F2 --out ../../models/karume-sbv2-jvnv --repo hdae/karume-sbv2-jvnv
+        --model F1 --model F2 --out ../../models/karume-sbv2-jvnv
     uv run python dist.py --pipeline siglip2 \\
         --model base --model so400m --out ../../models/karume-siglip2
     uv run python dist.py --pipeline lucida                # BiRefNet_HR の派生（別リポ）
@@ -66,8 +66,9 @@ DEFAULT_PIPELINE = "anima"
 def default_out_dir(pipeline: Pipeline, models: Sequence[str]) -> Path:
     """`--out` 省略時の出力先（`models/<リポ名>/` = 1 ディレクトリ 1 HF リポ）。
 
-    複数モデルのリポ名は**導出できない**（`karume-sbv2-jvnv` のようなファミリー名は命名の
-    決定であって、モデル名の並びからは決まらない）ので、明示を求めて落とす。
+    リポ名は Pipeline の宣言（`Pipeline.repo_name` — ファミリーのリポ名。sbv2 も
+    `karume-sbv2-jvnv` を宣言する）から引く。複数モデルでは `--out` の明示を求めて落とす —
+    この関数は 1 モデルの宣言だけを引き、並べたモデルの宣言が揃うかの突合を持たない。
     """
     if len(models) != 1:
         raise DistError(

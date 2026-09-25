@@ -14,9 +14,11 @@
 
 from __future__ import annotations
 
+import importlib.util
 import itertools
 import json
 import struct
+import types
 
 import numpy as np
 import pytest
@@ -152,3 +154,31 @@ class TestDumpMetadata:
 
         with pytest.raises(ValueError, match=r"__metadata__\.demo が無い"):
             demo.dump_metadata(path)
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("style_bert_vits2") is None,
+    reason="sbv2 dependency-group が無い（`uv sync --group sbv2` が前提）",
+)
+class TestSharedSymbolsCarryOnlyTheCommonRules:
+    """`symbols.json` は配布形の**共有席**（全話者に同じ 1 本）— モデル固有の事実を載せない。
+
+    焼いたモデルの style / speaker / config の `version` を載せると、別の話者に対して誤った
+    モデル名を名乗る。ノブの既定も載せない（正本は manifest の `pipelineConfig.defaults`・TS 側は
+    ここのノブを読まない — W-RC5-1）。
+    """
+
+    def test_the_rules_have_no_model_specific_fields(self, monkeypatch) -> None:
+        # 規則の残り 2 本はソースと HF の config を読むので、この検査では差し込む。
+        monkeypatch.setattr(demo, "blank_id_from_source", lambda: 0)
+        monkeypatch.setattr(demo, "bert_rel_pos_rule", lambda: {"positionBuckets": 1})
+        hps = types.SimpleNamespace(
+            version="2.0-JP-Extra",
+            data=types.SimpleNamespace(add_blank=True, sampling_rate=44100, hop_length=512),
+        )
+
+        rules = demo.jp_extra_rules(hps)
+
+        assert not {"defaults", "style", "speaker"} & set(rules)
+        assert "modelVersion" not in rules["source"]
+        assert "2.0-JP-Extra" not in json.dumps(rules)
