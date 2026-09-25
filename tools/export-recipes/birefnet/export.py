@@ -1,5 +1,6 @@
-"""実重みの BiRefNet 系（背景抜き / salient object segmentation）を IR v1 コンテナ +
-golden io へ書き出す台本。モデルは `--model-dir` で選ぶ（既定 BiRefNet_HR — 下の「モデル軸」）。
+"""実重みの BiRefNet 系（背景抜き / salient object segmentation）を IR（docs/ir-v2.md）+
+コンテナ（krm）+ golden io へ書き出す台本。モデルは `--model-dir` で選ぶ（既定 BiRefNet_HR —
+下の「モデル軸」）。
 
 生成物は `outputs/series/` 配下で、リポジトリ直下の `.gitignore` によりコミット対象外
 （重み + 焼いた定数で 1024² のとき 964MB）。
@@ -42,8 +43,10 @@ MUST: lucida の `lucida-m35-comfy.safetensors` は**対象外**（`hf download`
 **既定は 1024²**。本家の推論解像度（同梱 `handler.py` の General-HR）は 2048²。2048² の
 decoder 末尾には束縛上限 2GiB を超える中間が 2 本あった（`[1, 192, 2048, 2048]` = 3.22GB と
 `[1, 240, 2048, 2048]` = 4.03GB）が、`birefnet.patch` の ⑨（1×1 conv と bilinear upsample の
-順序交換）でどちらも消える。実行段で 2048² が通るかは karume 側の割り付け（ADR 0093）と実測
-次第で、制約の正本は docs/limitations.md の「BiRefNet 系の配布形は 1024² だけ」節。
+順序交換）でどちらも消える。2048² は karume 側の割り付け（ADR 0093）と組んで配布済み（既定の
+1024² と 1 リポに同居）だが、Intel Arc B570（Linux xe）では dispatch 1 本がジョブ制限 5 秒を超えて
+device lost になる。制約の正本は docs/limitations.md の「BiRefNet 系の配布形は 1024² と 2048² の
+2 モデル」節。
 
 `--resolution` は **64 の倍数**だけを受ける: 本体側の `PatchMerging` が各段で偶数 H/W を
 要求し（S/4・S/8・S/16 が偶数 = S%32）、`mul_scl_ipt='cat'` の半解像度枝が同じ要求を
@@ -311,7 +314,7 @@ def _checker_image(size: int) -> torch.Tensor:
 def build_cases(resolution: int) -> tuple[tuple[str, torch.Tensor], ...]:
     """golden 4 ケースの `(名前, pixel_values)`（**正規化済み**の合成画像）。
 
-    実画像を使わないのは、前処理（resize + ImageNet 正規化）がまだ karume 側に無いため。
+    合成 4 ケースは数値回帰の感度用。実画像は `--real-images` が足す。
     {@link DISC_CASE} だけは顕著物体として意味を持たせてあり、{@link _sanity} の判別が
     恒真にならない土台になっている（他の 3 枚は「顕著物体が無い」側）。
     """

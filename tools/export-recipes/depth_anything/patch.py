@@ -1,4 +1,5 @@
-"""Depth Anything V2（単一画像の相対深度推定）を torch.export → IR v1 まで通すパッチ層。
+"""Depth Anything V2（単一画像の相対深度推定）を torch.export → IR（docs/ir-v2.md）まで通す
+パッチ層。
 
 対象は transformers 移植版（`depth-anything/Depth-Anything-V2-Small-hf` の
 `DepthAnythingForDepthEstimation` = DINOv2 backbone + DPT neck / head）。差し替えるのは

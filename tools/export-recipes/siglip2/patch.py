@@ -13,7 +13,8 @@
      変換段の HANDLERS が持つのは `aten.conv2d.default` だけなので、同値な `(0, 0)` に直す。
   ② `position_embedding(position_ids)` は `position_ids = arange(N)` の i64 バッファ相手の
      行 gather なので、出力は weight そのもの。直加算へ書き換えると **i64 の initializer**
-     （IR v1 の initializer は意味論 f32 のみ）と `aten.embedding` ノードが同時に消える。
+     （IR の意味論 dtype は f32 / i32 / bool で i64 は無い — docs/ir-v2.md）と
+     `aten.embedding` ノードが同時に消える。
 - **MAP head の q/k/v 明示化（{@link apply_map_head_patch}）— ビット同一ではない**
   ③ `SiglipMultiheadAttentionPoolingHead` は `torch.nn.MultiheadAttention` をそのまま持ち、
      `need_weights` 既定 True で呼ぶので手動経路（q に 1/√d を掛けてから bmm）へ落ちる。

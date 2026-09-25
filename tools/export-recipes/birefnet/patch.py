@@ -1,4 +1,4 @@
-"""BiRefNet_HR（同梱 `birefnet.py`）を torch.export → IR v1 まで通すパッチ層。
+"""BiRefNet_HR（同梱 `birefnet.py`）を torch.export → IR（docs/ir-v2.md）まで通すパッチ層。
 
 対象は HF `ZhengPeng7/BiRefNet_HR` が `trust_remote_code` で読み込む動的モジュール
 （`transformers_modules.…birefnet`）。差し替えるのはそのモジュールのクラス属性と

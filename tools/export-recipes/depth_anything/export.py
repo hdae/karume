@@ -1,5 +1,5 @@
-"""実重みの Depth Anything V2（単一画像の相対深度推定）を IR v1 コンテナ + golden io へ
-書き出す台本。モデルは `--model-dir` で選ぶ（既定 Small — 下の「モデル軸」）。
+"""実重みの Depth Anything V2（単一画像の相対深度推定）を IR（docs/ir-v2.md）+ コンテナ（krm）+
+golden io へ書き出す台本。モデルは `--model-dir` で選ぶ（既定 Small — 下の「モデル軸」）。
 
 生成物は `outputs/series/` 配下で、リポジトリ直下の `.gitignore` によりコミット対象外。
 

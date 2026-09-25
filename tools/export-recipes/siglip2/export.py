@@ -12,7 +12,7 @@ transformers は **5.14.1 でピン**する（`siglip2.patch` がモデリング
 
 ## モデル軸
 
-対象は `--model-dir` の 1 軸で、系列名はそのディレクトリ名から導く（`export_sbv2.py` /
+対象は `--model-dir` の 1 軸で、系列名はそのディレクトリ名から導く（`sbv2/export.py` /
 `irodori/export.py` と同じ持ち方）— 出力先を固定にすると、別のモデルを書き出した瞬間に先の
 系列が黙って上書きされる。
 
@@ -125,7 +125,7 @@ DEFAULT_MODEL_DIR = MODELS_ROOT / "siglip2-base-patch16-224"
 def default_out_dir(model_dir: Path) -> Path:
     """生成物の既定の置き場（`outputs/series/<実重みのディレクトリ名>/`）。
 
-    モデル名を系列の綴りへ焼くのは `export_sbv2.py` の `default_out_root` と同じ理由 —
+    モデル名を系列の綴りへ焼くのは `sbv2/export.py` の `default_out_root` と同じ理由 —
     固定の綴りを共有すると、別のモデルを書き出した瞬間に先の資産が黙って上書きされる。
 
     格納 dtype は f32 のみなので dtype 別の枝は無い（f16 / i8 は別系列で決める話）。
@@ -233,7 +233,7 @@ def _checker_plane(size: int, cell: int) -> torch.Tensor:
 def build_cases(config: Any) -> tuple[tuple[str, torch.Tensor], ...]:
     """golden 4 ケースの `(名前, pixel_values)`（**正規化済み**の合成画像）。
 
-    実画像を使わないのはモジュール docstring の理由（前処理がまだ karume 側に無い）。
+    合成 4 ケースは数値回帰の感度用（値域の端と勾配を踏む）。実画像は `--real-images` が足す。
     構造だけを変えた対を持たせて、{@link _sanity} の cosine 順序が恒真にならないようにする:
     `ramp` と `ramp-dim` は同じ構造で強度だけ違い、`checker` は構造ごと違う。
     """
@@ -524,7 +524,7 @@ def _diff_entry(
 
 
 def verify_patches(model_dir: Path) -> list[dict[str, Any]]:
-    """パッチ前 eager との同値を **2 点**で実測する（`export_sbv2.py --verify` と同じ形）。
+    """パッチ前 eager との同値を **2 点**で実測する（`sbv2/export.py --verify` と同じ形）。
 
     1. 形の畳み込みだけ（conv padding + 位置埋め込み）→ **bit_exact が主張の中身**。演算列が
        1 対 1 で対応するので差は 0 でなければならず、外れたらここで落とす。
