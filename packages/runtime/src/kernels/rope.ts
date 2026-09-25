@@ -7,8 +7,10 @@
  * `rotate_half(x) = cat(-x[..., D/2:], x[..., :D/2])` として
  * `x * cos + rotate_half(x) * sin` を出力する。
  *
- * MUST: cos / sin はホストが torch 由来の素表から組んだ f32 値をそのまま読む。カーネル内で
- * 三角関数や token の H/W 座標を再計算しない（非正方形でも token 順だけが契約）。
+ * MUST: cos / sin はホストが用意した f32 表をそのまま読む（anima = torch 由来の素表 /
+ * gemma4 = ADR 0091 決定 1 / 2 の TS が f64 で計算して f32 へ丸めた表 — 上流の torch 表とは
+ * ビット同一でない・limitations.md）。カーネル内で三角関数や位置（anima の token の H/W 座標を
+ * 含む）を再計算しない（非正方形でも token 順だけが契約）。
  * MUST: 2 本の積を 2KiB の workgroup `u32` 配列へ書き、barrier 後に加算へ戻す。素の
  * `x*cos + rot*sin` と書くと、置換元の primitive 列（mul → mul → add の 3 dispatch）に
  * あった f32 の丸め 2 回が縮約されうる。
