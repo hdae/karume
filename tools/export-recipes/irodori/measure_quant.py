@@ -28,9 +28,9 @@
 | ---------------- | -------------------- | ----------------------------------------------- |
 | `f32`            | 丸めなし（**基準**） | 恒真化防止（full-loop golden の z とバイト一致）|
 | `f16`            | 全役割 f16           | ADR 0050 波 1 の系列の対応物                    |
-| `i8-all`         | 全役割 i8            | 配布 `w8` 席（配布 25.2%）                      |
+| `i8-all`         | 全役割 i8            | 配布 `i8` 席（配布 25.2%）                      |
 | `i8-mixed`       | duration 以外 i8     | 混成表の候補（ADR 0050 決定 6 の (i) 案）       |
-| `w8a8`           | 全役割 i8 + 活性 i8  | 配布 `w8a8` 席（DiT の Linear だけ活性も i8）   |
+| `w8a8`           | 全役割 i8 + 活性 i8  | 配布 `i8-a8` 席（DiT の Linear だけ活性も i8）  |
 | `i8-<役割>-only` | その役割だけ i8      | **直交分解 5 本**（境界 = `load_*` と 1:1）     |
 
 w4（ADR 0069 追記 5）の 5 構成は**スクリーニングの勝者 4 方式**（g=32 固定）を全役割へ当てた
@@ -566,7 +566,7 @@ CONFIGS: Mapping[str, Recipe] = MappingProxyType(
         WEIGHT_ONLY_BASE: Recipe("i8", ROLES),
         # ADR 0050 決定 6 の (i) 案 — duration だけ f32 据え置き。
         "i8-mixed": Recipe("i8", MIXED_ROLES),
-        # 配布形の `w8a8` 席 — 重みは `i8-all` と 1 バイトも変わらず、DiT の活性だけが i8。
+        # 配布形の `i8-a8` 席 — 重みは `i8-all` と 1 バイトも変わらず、DiT の活性だけが i8。
         "w8a8": Recipe("i8", ROLES, act_quant=True),
     }
 )
@@ -818,7 +818,7 @@ def load_modules(model_dir: Path, source_dir: Path) -> Loaded:
     """`irodori.pipeline_ref.emit` と同じ 9 本を組む（丸めはまだ当てない）。"""
     source = ex.IrodoriSource(source_dir)
     text_config, model_config = ex.read_configs(model_dir)
-    state = load_file(str(model_dir / ex.MODEL_FILE))
+    state = load_file(str(model_dir / ex.CHECKPOINT_FILE))
     backbone = ex.load_backbone(source, state, text_config)
     hidden_size = int(backbone.hidden_size)
     config = source.model_config(model_config)

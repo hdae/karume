@@ -1014,3 +1014,32 @@ class TestCalibrationRun:
             mq.assert_calib_covers_scan(
                 report, {**rig.scan, "blocks.9.mlp.weight": torch.zeros(1)}, "gptq-rtn"
             )
+
+
+class TestLoadModules:
+    def test_it_reads_the_upstream_checkpoint_not_the_exported_container(
+        self, tmp_path, monkeypatch
+    ):
+        """上流チェックポイント（`ex.CHECKPOINT_FILE`）と出力容器（`ex.MODEL_FILE`）は別の事実。
+
+        計測は上流の重みから 9 本を組むので、読み先が出力の `model.krm` だと実重みでは起動直後に
+        落ちる（実重みを要らないここでは、読み先の path だけを観測する）。
+        """
+        opened: list[str] = []
+
+        class _StopError(Exception):
+            pass
+
+        def _load_file(path: str):
+            opened.append(path)
+            raise _StopError
+
+        monkeypatch.setattr(ex, "IrodoriSource", lambda _source_dir: object())
+        monkeypatch.setattr(ex, "read_configs", lambda _model_dir: ({}, {}))
+        monkeypatch.setattr(mq, "load_file", _load_file)
+
+        with pytest.raises(_StopError):
+            mq.load_modules(tmp_path, tmp_path)
+
+        assert opened == [str(tmp_path / ex.CHECKPOINT_FILE)]
+        assert ex.CHECKPOINT_FILE != ex.MODEL_FILE
