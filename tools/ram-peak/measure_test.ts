@@ -19,7 +19,7 @@
 //
 // GPU が要る（Session を 1 本張る）ので、アダプタが無い環境は明示 SKIP（ADR 0005）。
 
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 // NOTE: 容器 → 配布形の組み立ては models のテスト helper を借りる（`writeModelContainer` の
 // 薄い包み + 実行できる最小の部品）。**形式の道具**であって向こうのテストの都合ではないので、
 // tools から使っても「テストが他パッケージのテスト内部に依存する」形にはならない
@@ -29,7 +29,14 @@ import {
   sha256Hex,
   writeContainer,
 } from "../../packages/models/tests/helpers/container-fixture.ts";
-import { measure, type MeasureReport, type MeasureState } from "./measure.ts";
+import {
+  measure,
+  type MeasureOptions,
+  type MeasureReport,
+  type MeasureState,
+  parseArgs,
+  toOptions,
+} from "./measure.ts";
 
 const detectAdapter = async (): Promise<boolean> => {
   const gpu: GPU | undefined = navigator.gpu;
@@ -183,5 +190,43 @@ Deno.test({
     } finally {
       await Deno.remove(root, { recursive: true });
     }
+  },
+});
+
+// ---------------------------------------------------------------------------
+// --gc の受理集合（GPU 不要 — 計測の前に落ちる）
+// ---------------------------------------------------------------------------
+
+/** `--gc` 以外は最小の引数（部品面・手元の取得元）。 */
+const optionsWithGc = (gc: string, mode = "component"): MeasureOptions =>
+  toOptions(parseArgs(["--mode", mode, "--source", "unused", "--gc", gc]));
+
+Deno.test("ram-peak --gc: true / false だけを受け、それ以外の綴りは既知一覧つきで落とす", () => {
+  assertEquals(optionsWithGc("true").explicitGc, true);
+  assertEquals(optionsWithGc("false").explicitGc, false);
+  assertEquals(toOptions(parseArgs(["--source", "unused"])).explicitGc, false);
+  for (const spelling of ["yes", "1", "TRUE", ""]) {
+    assertThrows(() => optionsWithGc(spelling), Error, "true | false");
+  }
+});
+
+Deno.test("ram-peak --gc: pipeline 面の true は計測の前に落とす（GC を挟む口が無い）", async () => {
+  await assertRejects(
+    () => measure(optionsWithGc("true", "pipeline")),
+    Error,
+    "--mode component でだけ効く",
+  );
+});
+
+Deno.test({
+  name: "ram-peak --gc: --expose-gc 無しの true は計測の前に落とす（黙って no-op にしない）",
+  // 旗付きで起動された test runner では前提が満たされるので、この振る舞いは観測できない。
+  ignore: typeof (globalThis as { gc?: unknown }).gc === "function",
+  fn: async () => {
+    await assertRejects(
+      () => measure(optionsWithGc("true")),
+      Error,
+      "--v8-flags=--expose-gc が要る",
+    );
   },
 });

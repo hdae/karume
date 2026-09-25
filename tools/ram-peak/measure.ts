@@ -90,7 +90,10 @@ export type MeasureOptions = {
   readonly steps: number;
   readonly size: number;
   readonly maxNewTokens: number;
-  /** Session を組む直前に明示 GC（`--v8-flags=--expose-gc` が前提・無ければ no-op）。 */
+  /**
+   * Session を組む直前に明示 GC（`--mode component` だけ・`--v8-flags=--expose-gc` が前提）。
+   * 前提を満たさなければ {@link measure} が計測の前に落とす。
+   */
   readonly explicitGc: boolean;
 };
 
@@ -291,12 +294,32 @@ const runComponent = async (
 };
 
 /**
+ * `explicitGc` の前提を計測の前に検査する。MUST: 黙って no-op にしない — 出力の `explicitGc` が
+ * 「GC した」と名乗るのに実際は呼んでいない行が研究記録に混ざる（{@link KNOWN} の MUST と同じ理由）。
+ */
+const assertExplicitGc = (options: MeasureOptions): void => {
+  if (!options.explicitGc) return;
+  if (options.mode !== "component") {
+    throw new Error(
+      "explicitGc は --mode component でだけ効く（pipeline 面は Session の構築が家族の" +
+        " fromPretrained の中にあり、GC を挟む口が無い）",
+    );
+  }
+  if (typeof (globalThis as { gc?: unknown }).gc !== "function") {
+    throw new Error(
+      "explicitGc には --v8-flags=--expose-gc が要る（無いと GC が黙って no-op になる）",
+    );
+  }
+};
+
+/**
  * 1 構成を測る。
  *
  * 順序が契約である: ①取得元を用意する（計測の外）②観測器を仕掛ける ③`load` ④`run` ⑤観測器を
  * 外す ⑥取得の内訳を読む（`openContainer` が digest を掛けるので、必ず観測器を外した**後**）。
  */
 export const measure = async (options: MeasureOptions): Promise<MeasureReport> => {
+  assertExplicitGc(options);
   const origin = await resolveOrigin(options);
   try {
     return await measureFrom(options, origin);
@@ -504,6 +527,8 @@ export const toOptions = (args: ReadonlyMap<string, string>): MeasureOptions => 
   const source = args.get("source");
   if (source === undefined) throw new Error("--source <配布形ディレクトリ> は必須");
   const weights = args.get("weights");
+  const gc = args.get("gc") ?? "false";
+  if (gc !== "true" && gc !== "false") throw new Error(`--gc ${gc} は未対応（true | false）`);
   return {
     mode: mode as MeasureMode,
     state: state as MeasureState,
@@ -517,7 +542,7 @@ export const toOptions = (args: ReadonlyMap<string, string>): MeasureOptions => 
     steps: positiveInteger(args.get("steps"), 2, "--steps"),
     size: positiveInteger(args.get("size"), 512, "--size"),
     maxNewTokens: positiveInteger(args.get("max-new-tokens"), 8, "--max-new-tokens"),
-    explicitGc: args.get("gc") === "true",
+    explicitGc: gc === "true",
   };
 };
 
