@@ -188,4 +188,4 @@ ADR [0079](0079-sbv2-two-layer-input.md) が正本 — テキスト解析は呼�
 `generate` は解析済みの発話（`Sbv2Utterance` — モーラ 2 値トーン直持ち）を第 1 引数に受ける。
 下書き往復（決定 4〜7 の `Sbv2Prosody`）と生トーン注入（`givenTone`）はモーラ層の `tone`
 直編集に吸収。決定 8（adjust_word2ph 不採用 — 読みの変更は修正辞書で解析からやり直す）の
-原則と `Sbv2InputError`（決定 3 の 400/500 分離）は存続する。
+原則と `Sbv2InputError`（決定 6 の 400/500 分離）は存続する。
