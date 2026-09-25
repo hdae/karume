@@ -56,10 +56,6 @@ EMBED_SCALE = 3.5
 #: 引く読み手の誤り（scales を values の block 番号で引く類）が素通りする。
 BLOCK_BYTES = 144
 
-#: 退役した sidecar 形（`ple.json` + `ple-NNNNN-of-NNNNN.safetensors`）の残骸。据え替えの前に
-#: 消す — 残すと「読み手が消えたのに資産だけ git に残る」形になる。
-_LEGACY_GLOBS = ("ple.json", "ple-*.safetensors")
-
 
 class PleFixtureGraph(nn.Module):
     """資産を載せるための最小グラフ。
@@ -105,20 +101,12 @@ def _reader(payload: bytes, stride: int) -> Callable[[int, int], bytes]:
     return read
 
 
-def _discard_legacy(destination: Path) -> None:
-    """旧 sidecar 形の残骸を消す（再生成を決定的にする — 前回の綴りを残さない）。"""
-    for pattern in _LEGACY_GLOBS:
-        for stale in sorted(destination.glob(pattern)):
-            stale.unlink()
-
-
 def write_fixture(out: Path) -> None:
     """I2 / I4 の packed PLE を**容器の資産**として書き、CPU 参照を隣に置く。"""
     for bits in (2, 4):
         storage = f"i{bits}"
         destination = out / storage
         destination.mkdir(parents=True, exist_ok=True)
-        _discard_legacy(destination)
 
         values, packed = _packed_values(bits)
         scale = (

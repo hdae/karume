@@ -43,14 +43,3 @@ class TestTheCommittedFixtureMatchesItsGenerator:
                     " `cd tools/export-recipes && uv run python -m gemma4.tests.ple_fixture`"
                     " で焼き直す"
                 )
-
-    def test_no_legacy_sidecar_survives(self) -> None:
-        """退役した sidecar 形（`ple.json` + `ple-*.safetensors`）が現物に残っていないこと。"""
-        stale = [
-            str(path.relative_to(FIXTURE_ROOT))
-            for storage in STORAGES
-            for pattern in ("ple.json", "ple-*.safetensors")
-            for path in sorted((FIXTURE_ROOT / storage).glob(pattern))
-        ]
-
-        assert stale == [], stale
