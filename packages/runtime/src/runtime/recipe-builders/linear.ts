@@ -239,7 +239,7 @@ export const buildLinear = async (
   // 門の内訳:
   // - `1 ≤ m ≤ LINEAR_GEMV_MAX_ROWS` — 1 スレッドが 1 出力列（× 行ブロック）の縮約を丸ごと持つ
   //   形で実測した範囲。上限の外は既定の GEMM 骨格のまま。
-  // - `i4` / `i8` 格納 × `f32` 計算。f16 / f32 格納は下の M=1 専用の門で受ける。
+  // - `i2` / `i4` / `i8` 格納 × `f32` 計算。f16 / f32 格納は下の M=1 専用の門で受ける。
   //   i8 × f16 計算（w8a16）は上で落ちている。
   // - `groupSize % <刻み> === 0`（i4 のみ）— 重み 1 語 32 要素が group を跨がない条件
   //   （跨ぐと語あたり 1 個の scale では足りず沈黙誤値になる）。i8 の scale は出力チャネル
@@ -329,7 +329,8 @@ export const buildLinear = async (
 };
 
 /**
- * linear の **GEMV 族**（1 ≤ M ≤ LINEAR_GEMV_MAX_ROWS × 重み i4 / i8 — ADR 0082）。
+ * linear の **GEMV 族**（1 ≤ M ≤ LINEAR_GEMV_MAX_ROWS × 重み i2 / i4 / i8、および M=1 × 重み
+ * f16 / f32 — ADR 0082〈f16 / f32 は追記 6・7〉・i2 は ADR 0097）。
  *
  * 束縛・uniform・出力実体は既定経路と同一で、変わるのは「どのスレッドがどの出力を担当するか」
  * だけ（1 スレッド = 1 出力列〈M ≥ 2 は × 行ブロック〉・共有タイルと barrier を持たない）。

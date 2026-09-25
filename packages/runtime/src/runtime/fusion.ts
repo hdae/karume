@@ -276,7 +276,7 @@ const readsPackedActivation = (
 /**
  * packed int8 活性で受け渡す固定 SRQ（ADR 0105）— 値名 → その SRQ の f32 scale。
  *
- * 受理は 4 条件:
+ * 受理は 5 条件:
  *
  * 1. 席（`packedStaticQuantize`）が立っており、`linearGemvReduce: parallel` /
  *    `linearCompute: f32`（packed 変種を持つのは並列 GEMV 族だけ）。

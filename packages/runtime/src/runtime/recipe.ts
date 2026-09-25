@@ -86,8 +86,8 @@ export type DispatchWorkgroups =
 /**
  * 1 dispatch ぶんのレシピ。
  *
- * MUST: `params` は**全カーネル共通で binding 0**（31 箇所の bind group が例外なくこの形）
- * なので、{@link BindingRecipe} の列とは別枠で持つ。
+ * MUST: `params` は**全カーネル共通で binding 0**（bind group が例外なくこの形）なので、
+ * {@link BindingRecipe} の列とは別枠で持つ。
  */
 type DispatchRecipe = {
   /** パイプラインキー（診断ラベルと同一）。 */
