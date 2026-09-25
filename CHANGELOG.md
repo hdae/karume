@@ -50,7 +50,7 @@ measurements in `docs/research/`.
   on the runtime surface: `MemoryContainerInput`, `MemoryEncoding`, `MemoryPiece`, `MemoryTensor`, and
   `BoundContainer` (the face both a `krm` and an in-memory container present to the session builder).
 - Gemma 4 QAT family: `gemma4-qat` pipelines for E2B / E4B with fixed INT2 / INT4 storage, fixed
-  static re-quantization (SRQ) whose rounding is preserved on both CPU and GPU, PLE read back
+  static range quantization (SRQ) whose rounding is preserved on both CPU and GPU, PLE read back
   whole or row by row, and a chat CLI example.
 - Speculative decoding for Gemma 4 (MTP): a drafter session, the `speculative` option, a
   draft/verify/commit loop whose token stream matches non-speculative decoding exactly, and a
@@ -120,7 +120,7 @@ measurements in `docs/research/`.
   `EnqueueRead` and `SharedWeight`; `Session.exportWeight`; and the
   `SessionOptions` keys `linearGemvReduce`, `rmsNormReduce`, `fuseRmsNormAdd`,
   `fuseLinearStaticQuantize`, `packedStaticQuantize`, `linearGemvRowsThreadTarget`,
-  `planBackingBudgetBytes`, `chunkBuckets` and `sharedWeights`.
+  `planBackingBudgetBytes` and `sharedWeights`, plus `GenerationContextSpec.chunkBuckets`.
 - New names on the `@karume/models` surface: `GEMMA4_CHUNK_BUCKETS`, `gemma4QatRopeInputs`,
   `Gemma4QatPipeline`, and the types `Gemma4QatPipelineOptions`, `Gemma4QatFromPretrainedOptions`,
   `ComponentSource`, `FromPretrainedComponentOptions`, `SpeculationGateOptions` (the
@@ -145,7 +145,8 @@ measurements in `docs/research/`.
 - `opbench single` accepts every knob of the manifest `session` vocabulary (`--session
   <knob>=true|false` for booleans), records `gpu_wall_ratio` / `timing_warning` when GPU time
   contradicts the wall clock, and `opbench census` / `tools/fusion-hints` read manifests through
-  `@karume/hub`; `tools/release/hf-upload.zsh` marks unreadable parts as `### FAILED` and exits
+  `@karume/hub`; `tools/ram-peak/measure.ts` gains `--state cold|warm|local` and `--cache-dir` (a
+  directory below `outputs/ram-peak/`); `tools/release/hf-upload.zsh` marks unreadable parts as `### FAILED` and exits
   non-zero; CI lints the workspace-external Python scripts and checks `deno.lock` for drift.
 - Model cards: the Usage snippets declare the pipeline with `await using` (these pipelines only
   implement `Symbol.asyncDispose`); the sbv2 card analyzes text with `@hdae/yomi`, converts it
@@ -261,16 +262,18 @@ measurements in `docs/research/`.
   delegate. Map cross-repo references explicitly with `crossRepo`; an unmapped reference fails
   loudly.
 - Exporter (`karume`): `IR_METADATA_KEY` moved to `karume.legacy` (used only by `karume migrate`);
-  `publish_model` no longer deletes `<stem>-NNNNN-of-NNNNN.safetensors` siblings and
-  `karume.pipeline.LEGACY_SUFFIX` is gone; `publish_model` / `export_to_file` raise `ValueError` for
-  an output path whose suffix is not `.krm` instead of rewriting it; `modelcard.from_pretrained`
-  requires the `disposable` keyword.
-- `tools/ram-peak/measure.ts --cache-dir` only accepts a directory below `outputs/ram-peak/`.
+  `write_model` / `verify_model` leave `karume.__all__` (the `karume.shards` / `karume.repack` modules
+  go with the shard form; `verify_container` / `stored_model` / `Provenance` / `FixedQuantizedWeight`
+  are the new public names); `publish_model` no longer deletes stale
+  `<stem>-NNNNN-of-NNNNN.safetensors` siblings; `publish_model` / `export_to_file` raise `ValueError`
+  for an output path whose suffix is not `.krm`; `karume migrate` writes `provenance.writer` only
+  with `--writer`; `dist.weight_components` returns `(parts, weights key)` pairs;
+  `modelcard.from_pretrained` requires the `disposable` keyword.
 - **Breaking:** the runtime's in-memory graph (`IrGraph`) now uses the merged storage vocabulary:
   `initializers[name]` is `{ storage: { codec, groupSize?, rowAxis? } }` or `{ shared: true }`,
   initializer names are the tensor keys (the exporter's FQN / `const.<hash>`), and the `tensor` /
-  `storage.dtype` / `storage.scale` fields are gone; `ReadyInitializer` carries bytes instead of
-  safetensors views, and capability diagnostics say `非対応 格納 '<layout>'`. Shared initializers
+  `storage.dtype` / `storage.scale` fields are gone, and capability diagnostics say
+  `非対応 格納 '<layout>'`. Shared initializers
   are named after the lender's initializer.
 - **Breaking:** hub reads manifest `karume/5` only (no `karume/4`); `resolveFiles` / `ResolvedFiles` /
   `WeightFiles` are replaced by `resolveSelection` / `ResolvedSelection` / `WeightContainer`, the
@@ -286,7 +289,8 @@ measurements in `docs/research/`.
   that rounded up to 4) — containers written by the stage-1 writer must be rewritten; `BlockSource`
   gains a required `verified` flag and `DescriptorExpectation.sha256` is a plain string.
 - **Breaking:** the Gemma 4 product graph exits on the selected R rows as logits plus hidden
-  state, and the default bucket set gains 4 and 8 — distributions must be re-exported.
+  state, and declares the prefill buckets 4, 8, 32, 64, 128 and 256 — distributions must be
+  re-exported.
 - **Breaking:** the Gemma 4 drafter's calling convention was aligned with the upstream layout and
   its goldens re-baked.
 - **Breaking:** speculation stops enumerating acceptances at a stop token, and reports what was
@@ -305,10 +309,10 @@ measurements in `docs/research/`.
   `openMemoryContainer`, then `prepareContainer` → `estimate()` → `createContainerSession()`;
   estimate a graph you already hold with `estimateGraphMemory`. Capability shortfalls throw
   `RuntimeSupportError`; descriptor, binding and supply violations throw `ContainerFormatError`.
-  `parseSafetensors` stays for plain safetensors assets, but the packed `I4` / `I2` dialect dtypes
-  are rejected (`SafetensorsDtype` shrinks to the official set).
+  `parseSafetensors` stays for plain safetensors assets, but the packed `I4` dialect dtype is
+  rejected (`SafetensorsDtype` is a subset of the official set).
 - **Breaking:** hub's shard streaming face is gone: `streamAssets`, `StreamedAsset`,
-  `StreamAssetsOptions`, `FileReadOptions.into` and `DirectoryAdapter.readFileInto` are removed
+  `StreamAssetsOptions` and `DirectoryAdapter.readFileInto` are removed
   (`fetchAssets`, `prefetchAssets`, `openAsset` and `openContainerSource` remain).
 - **Breaking:** exporter: `karume repack` is removed and `karume verify` checks containers only;
   `publish_model` / `export_to_file` require `provenance` and `graph_name` (the graph name must equal
