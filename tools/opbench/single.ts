@@ -28,8 +28,12 @@ import { WEIGHT_CHANNEL_AXES, WEIGHT_SLOTS } from "../../packages/runtime/src/op
 import { f32ToF16Bits } from "../../packages/runtime/tests/helpers/f16.ts";
 import { memoryContainer } from "../_shared/ir-memory.ts";
 import { toSessionOptions } from "../../packages/models/src/session/options.ts";
-import type { SessionSpec } from "../../packages/hub/src/manifest.ts";
-import type { SessionDeclaration } from "../_shared/assets.ts";
+import type {
+  AttentionCompute,
+  LinearCompute,
+  ScoreStorage,
+  SessionSpec,
+} from "../../packages/hub/mod.ts";
 import type { CensusSummary, WeightRow } from "./census.ts";
 import {
   calibrateReps,
@@ -314,45 +318,105 @@ export const buildCaseModel = (row: WeightRow, requestedReps: number): CaseModel
   return { container: memoryContainer(GRAPH_NAME, declaration, tensors), inputs, reps };
 };
 
-const LINEAR_COMPUTE = new Set(["f32", "a8", "f16"]);
-const ATTENTION_COMPUTE = new Set(["f32", "f16", "a8"]);
-const SCORE_STORAGE = new Set(["f32", "f16"]);
+/**
+ * manifest 所有の値の受理集合（hub の `SessionSpec` の union を網羅する表）。
+ *
+ * MUST: 器は `Record<union, true>` — hub の union に値が増減すると、この表が型検査で落ちる
+ * （値の配列で持つと、足された値が黙って拒否され続ける）。
+ */
+const LINEAR_COMPUTE: Readonly<Record<LinearCompute, true>> = { f32: true, a8: true, f16: true };
+const ATTENTION_COMPUTE: Readonly<Record<AttentionCompute, true>> = {
+  f32: true,
+  f16: true,
+  a8: true,
+};
+const SCORE_STORAGE: Readonly<Record<ScoreStorage, true>> = { f32: true, f16: true };
+const LINEAR_GEMV_REDUCE: Readonly<
+  Record<NonNullable<SessionSpec["linearGemvReduce"]>, true>
+> = { sequential: true, parallel: true };
+
+const isAccepted = <T extends string>(
+  accepted: Readonly<Record<T, true>>,
+  value: string,
+): value is T => Object.hasOwn(accepted, value);
+
+/** 列挙のノブ 1 本を読む（受理集合の外は fail loudly）。 */
+const choice = <T extends string>(
+  knob: string,
+  accepted: Readonly<Record<T, true>>,
+  value: unknown,
+): T => {
+  if (typeof value === "string" && isAccepted(accepted, value)) return value;
+  throw new Error(
+    `session.${knob} ${JSON.stringify(value) ?? typeof value} は不正` +
+      `（受理: ${Object.keys(accepted).join(" / ")}）`,
+  );
+};
+
+/** 真偽値のノブ 1 本を読む（`"true"` などの文字列は受けない — CLI の変換は呼び手）。 */
+const flag = (knob: string, value: unknown): boolean => {
+  if (typeof value === "boolean") return value;
+  throw new Error(`session.${knob} ${JSON.stringify(value) ?? typeof value} は真偽値でない`);
+};
 
 /**
- * summary.json の `session`（manifest の逐語・ツール側では未検証）を runtime の SessionOptions へ
- * 写す。写像は packages/models と同じ関数（明示写像 — 綴りが割れれば型検査で落ちる）。census が
- * 検証していないぶん、ここでキーと値を allowlist で見て fail loudly にする。`overrides` は CLI の
+ * ノブ名 → 読み手。キー集合は `Required<SessionSpec>` の**網羅** — hub の語彙にノブが増えると
+ * この宣言が型検査で落ちるので、「census は写したのに single が未知として落ちる」形
+ * （`linearGemvReduce` / 融合の真偽値を 3 ノブの allowlist が拒否していた）が再発しない。
+ */
+const SESSION_KNOBS: {
+  readonly [K in keyof Required<SessionSpec>]: (value: unknown) => SessionSpec;
+} = {
+  linearCompute: (value) => ({ linearCompute: choice("linearCompute", LINEAR_COMPUTE, value) }),
+  attentionCompute: (value) => ({
+    attentionCompute: choice("attentionCompute", ATTENTION_COMPUTE, value),
+  }),
+  attentionScoreStorage: (value) => ({
+    attentionScoreStorage: choice("attentionScoreStorage", SCORE_STORAGE, value),
+  }),
+  linearGemvReduce: (value) => ({
+    linearGemvReduce: choice("linearGemvReduce", LINEAR_GEMV_REDUCE, value),
+  }),
+  fuseRmsNormAdd: (value) => ({ fuseRmsNormAdd: flag("fuseRmsNormAdd", value) }),
+  fuseLinearStaticQuantize: (value) => ({
+    fuseLinearStaticQuantize: flag("fuseLinearStaticQuantize", value),
+  }),
+  packedStaticQuantize: (value) => ({
+    packedStaticQuantize: flag("packedStaticQuantize", value),
+  }),
+};
+
+const isSessionKnob = (key: string): key is keyof SessionSpec => Object.hasOwn(SESSION_KNOBS, key);
+
+/** CLI の `<knob>=<value>` の値。真偽値のノブは `true` / `false` で綴る。 */
+const cliValue = (text: string): string | boolean =>
+  text === "true" ? true : text === "false" ? false : text;
+
+/**
+ * summary.json の `session` と CLI の上書きを runtime の SessionOptions へ写す。
+ *
+ * census は hub の `parseManifest` が検査した `SessionSpec` を写すが、summary.json はファイルの
+ * 境界（手で直せる・別版の道具が書ける）なので、ここで `SessionSpec` として読み直してから
+ * models の `toSessionOptions`（配布形の読み込みと同じ写像）へ渡す。`overrides` は CLI の
  * `--session <knob>=<value>` で、宣言に上書きする（対照実行用）。
+ *
+ * NOTE: ノブどうしの組み合わせ（`packedStaticQuantize` は `linearGemvReduce: parallel` を要る）
+ * の拒否は runtime の Session 構築が持つ — ここで写さない。
  */
 export const sessionOptionsOf = (
-  declaration: SessionDeclaration | null,
+  declaration: Readonly<Record<string, unknown>> | null,
   overrides: Readonly<Record<string, string>> = {},
 ): SessionOptions => {
-  const merged: Record<string, string> = { ...(declaration ?? {}), ...overrides };
-  const spec: { -readonly [K in keyof SessionSpec]?: SessionSpec[K] } = {};
+  const merged: Record<string, unknown> = { ...(declaration ?? {}) };
+  for (const [key, text] of Object.entries(overrides)) merged[key] = cliValue(text);
+  let spec: SessionSpec = {};
   for (const [key, value] of Object.entries(merged)) {
-    switch (key) {
-      case "linearCompute":
-        if (!LINEAR_COMPUTE.has(value)) throw new Error(`session.linearCompute '${value}' は不正`);
-        spec.linearCompute = value as SessionSpec["linearCompute"];
-        break;
-      case "attentionCompute":
-        if (!ATTENTION_COMPUTE.has(value)) {
-          throw new Error(`session.attentionCompute '${value}' は不正`);
-        }
-        spec.attentionCompute = value as SessionSpec["attentionCompute"];
-        break;
-      case "attentionScoreStorage":
-        if (!SCORE_STORAGE.has(value)) {
-          throw new Error(`session.attentionScoreStorage '${value}' は不正`);
-        }
-        spec.attentionScoreStorage = value as SessionSpec["attentionScoreStorage"];
-        break;
-      default:
-        throw new Error(
-          `session の未知のノブ '${key}'（既知: linearCompute / attentionCompute / attentionScoreStorage）`,
-        );
+    if (!isSessionKnob(key)) {
+      throw new Error(
+        `session の未知のノブ '${key}'（既知: ${Object.keys(SESSION_KNOBS).join(" / ")}）`,
+      );
     }
+    spec = { ...spec, ...SESSION_KNOBS[key](value) };
   }
   return toSessionOptions(spec);
 };
@@ -383,6 +447,13 @@ export type SingleRecord = {
   /** その run で立ったパイプラインキー（timing のみ・ns 降順。wall では空）。 */
   readonly keys: readonly string[];
   readonly clamped_negative_samples: number;
+  /** timing: 代表値を採った run の GPU 実時間 / 壁時計（1 に近いのが正常）。wall では null。 */
+  readonly gpu_wall_ratio: number | null;
+  /**
+   * timing: ns が壁時計と矛盾するときの警告（bench.ts の `timingWallWarning` — Deno ×
+   * timestampPeriod ≠ 1 の GPU では ns が raw tick のまま）。矛盾が無ければ・wall では null。
+   */
+  readonly timing_warning: string | null;
 };
 
 export type RunSingleOptions = {
@@ -501,6 +572,8 @@ export const measureCase = async (
       wall_ms_per_rep_min: null,
       keys: result.keys,
       clamped_negative_samples: result.clampedNegativeSamples,
+      gpu_wall_ratio: result.gpuWallRatio,
+      timing_warning: result.wallWarning ?? null,
     };
   }
   let reps = 1;
@@ -526,6 +599,8 @@ export const measureCase = async (
         wall_ms_per_rep_min: result.msPerRepMin,
         keys: [],
         clamped_negative_samples: 0,
+        gpu_wall_ratio: null,
+        timing_warning: null,
       };
     }
     reps *= 2;
@@ -571,6 +646,8 @@ export type SingleSummary = {
     readonly rounds: number;
   };
   readonly measured: number;
+  /** timing の警告（{@link SingleRecord.timing_warning}）が立ったケース数。0 でなければ ns を信用しない。 */
+  readonly timing_warnings: number;
   readonly excluded: Readonly<Record<string, number>>;
   readonly failed: readonly CaseFailure[];
   /** (op, storage_signature) ごとの weighted_ms 合計（timing のみ — K-11 の照合はこの表で）。 */
@@ -606,6 +683,7 @@ export const buildSingleSummary = (
       rounds: options.rounds ?? ROUNDS,
     },
     measured: records.length,
+    timing_warnings: records.filter((record) => record.timing_warning !== null).length,
     excluded,
     failed,
     weighted_ms_by_op_storage: Object.fromEntries(byOpStorage),

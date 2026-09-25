@@ -29,12 +29,8 @@ import {
   type FusionCounts,
   planFusions,
 } from "../../packages/runtime/src/runtime/fusion.ts";
-import {
-  type AssetTargets,
-  type ComponentTarget,
-  CORE_LIMITS,
-  type SessionDeclaration,
-} from "../_shared/assets.ts";
+import type { SessionSpec } from "../../packages/hub/mod.ts";
+import { type AssetTargets, type ComponentTarget, CORE_LIMITS } from "../_shared/assets.ts";
 import { resolveComponentBindings, type Scenario } from "../_shared/scenario.ts";
 
 /** 初期化子の格納（census 行の `storage` 欄 1 要素）。 */
@@ -359,10 +355,11 @@ export type CensusSummary = {
   readonly model: string;
   readonly quant: string;
   /**
-   * この quant が宣言した実行変種の**逐語の写し**（manifest 所有の綴りのまま）。系列出力は
-   * manifest を持たないので `null` = 実行変種は宣言されていない（呼び手が与える）。
+   * この quant が宣言した実行変種（hub の `parseManifest` が検査した `SessionSpec` — manifest
+   * 所有の綴りのまま・真偽値のノブを含む）。系列出力は manifest を持たないので `null` =
+   * 実行変種は宣言されていない（呼び手が与える）。
    */
-  readonly session: SessionDeclaration | null;
+  readonly session: SessionSpec | null;
   readonly scenarios: readonly ScenarioSummary[];
 };
 

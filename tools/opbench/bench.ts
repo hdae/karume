@@ -89,6 +89,8 @@ export type TimingSample = {
   readonly keys: readonly string[];
   /** 非単調 timestamp を 0 に丸めたサンプル数（0 でないなら読みが疑わしい — 黙って捨てない）。 */
   readonly clampedNegativeSamples: number;
+  /** 同じ run の壁時計（ns・`run` の呼び出しから決着まで）。{@link timingWallWarning} が読む。 */
+  readonly wallNs: number;
 };
 
 /**
@@ -96,7 +98,9 @@ export type TimingSample = {
  * 空表で「測れた」と読ませない。
  */
 export const sampleTiming = async (session: Session, inputs: RunInputs): Promise<TimingSample> => {
+  const started = performance.now();
   await session.run(inputs);
+  const wallNs = (performance.now() - started) * 1e6;
   const timing = session.diagnostics().lastRunTiming;
   if (timing === undefined) {
     throw new Error("lastRunTiming が無い — acquireGpu({ gpuTiming: true }) の device で測ること");
@@ -106,7 +110,42 @@ export const sampleTiming = async (session: Session, inputs: RunInputs): Promise
     dispatchCount: timing.dispatchCount,
     keys: timing.entries.map((entry) => entry.key),
     clampedNegativeSamples: timing.clampedNegativeSamples,
+    wallNs,
   };
+};
+
+/** GPU 実時間 / 壁時計 の上限。GPU の pass は run の壁時計の内側で走るので、1 を超えない。 */
+export const MAX_GPU_WALL_RATIO = 1.05;
+
+/**
+ * GPU 実時間 / 壁時計 の下限（壁時計が目標長以上の run だけに掛ける）。
+ *
+ * 反復数は GPU 実時間で目標長（{@link TARGET_PASS_MS}）に合わせるので、ns が正しければ
+ * 壁時計との差は submit とフェンスの床（≈11ms — research 2026-08-30 §7）と encode の費用だけで、
+ * 比は 1 に近い。Deno × `timestampPeriod` ≠ 1 の GPU（B570 は 52.08 ns/tick）では ns が raw tick の
+ * ままなので、比は 1/period 前後まで落ち、反復数は period 倍に膨らむ（known-issues「Intel Arc
+ * B570」節）。1/8 はその 2 つの間に置いた線で、壁時計が目標長に届かない run（床が支配する短い
+ * run）では比が正しくても小さくなるので判定しない。
+ */
+export const MIN_GPU_WALL_RATIO = 1 / 8;
+
+/**
+ * timing の ns が壁時計と矛盾するときの警告文（矛盾しなければ `undefined`）。
+ *
+ * timestamp の周期は WebGPU の API に出ないので、ns を自動で補正することはできない。ここで
+ * できるのは、同じ run の壁時計と突き合わせて「この ns は信用できない」を記録に残すことだけで、
+ * 黙って誤った ms と反復数を出さないための欄である。
+ */
+export const timingWallWarning = (totalNs: number, wallNs: number): string | undefined => {
+  const ratio = totalNs / wallNs;
+  if (ratio > MAX_GPU_WALL_RATIO) {
+    return `GPU 実時間が壁時計を超えた（比 ${ratio.toFixed(3)}）— timestamp の ns 換算が過大`;
+  }
+  if (wallNs >= TARGET_PASS_MS * 1e6 && ratio < MIN_GPU_WALL_RATIO) {
+    return `GPU 実時間が壁時計の ${ratio.toFixed(4)} 倍 — timestamp が ns に換算されていない疑い` +
+      "（Deno × timestampPeriod ≠ 1）。ns / weighted_ms / 反復数を信用しない";
+  }
+  return undefined;
 };
 
 /** timing モードの代表値（rounds 回の min）。 */
@@ -123,6 +162,10 @@ export type TimingResult = {
   readonly dispatchesPerNode: number;
   readonly keys: readonly string[];
   readonly clampedNegativeSamples: number;
+  /** 代表値（min）を採った round の GPU 実時間 / 壁時計。 */
+  readonly gpuWallRatio: number;
+  /** その round の {@link timingWallWarning}（矛盾が無ければ `undefined`）。 */
+  readonly wallWarning: string | undefined;
 };
 
 export const measureTiming = async (
@@ -139,16 +182,23 @@ export const measureTiming = async (
   let dispatchesPerNode = 0;
   let keys: readonly string[] = [];
   let clamped = 0;
+  let representative: TimingSample | undefined;
   for (let round = 0; round < rounds; round += 1) {
     // MUST: round の間に filler を挟む — 計測パス（≈80ms）だけでは P8 へ落ちる（モジュール doc）。
     if (heater !== undefined) await heater.run();
     const sample = await sampleTiming(session, inputs);
     if (sample.dispatchCount === 0) throw new Error("dispatch が 0 本の run を測った");
     const perNode = sample.totalNs / reps;
-    if (perNode < min) min = perNode;
+    if (perNode < min) {
+      min = perNode;
+      representative = sample;
+    }
     dispatchesPerNode = sample.dispatchCount / reps;
     keys = sample.keys;
     clamped += sample.clampedNegativeSamples;
+  }
+  if (representative === undefined) {
+    throw new Error(`timing の round が 1 本も無い（rounds=${rounds}）`);
   }
   return {
     mode: "timing",
@@ -158,6 +208,8 @@ export const measureTiming = async (
     dispatchesPerNode,
     keys,
     clampedNegativeSamples: clamped,
+    gpuWallRatio: representative.totalNs / representative.wallNs,
+    wallWarning: timingWallWarning(representative.totalNs, representative.wallNs),
   };
 };
 

@@ -138,17 +138,17 @@ holds the same op `reps` times (all nodes read the same inputs; only the outputs
 it on a real GPU under the protocol implemented in `bench.ts`. This is stage 2 of the harness: the
 single-op time × the census weight is what a kernel candidate is worth.
 
-| Option                     | Meaning                                                                                                                                       |
-| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--census <dir>`           | Output directory of `census` (`summary.json` is read: the weight table and the quant's `session`)                                             |
-| `--out <dir>`              | Where `single.jsonl` (one row per case) and `summary.json` are written                                                                        |
-| `--mode timing\|wall`      | `timing` = GPU timestamps, one pass per dispatch (default when the adapter has `timestamp-query`); `wall` = submit-to-fence wall clock        |
-| `--op <name>`              | Only this op (repeatable)                                                                                                                     |
-| `--scenario <name>`        | Only this scenario                                                                                                                            |
-| `--component <name>`       | Only this component                                                                                                                           |
-| `--limit <n>`              | Only the first n cases by weight (`count × output elements`)                                                                                  |
-| `--session <knob>=<value>` | Override the execution variant (`linearCompute` / `attentionCompute` / `attentionScoreStorage`; repeatable). Default = the census's `session` |
-| `--rounds <n>`             | Rounds per case; the reported value is the **min** (default 5)                                                                                |
+| Option                     | Meaning                                                                                                                                                             |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--census <dir>`           | Output directory of `census` (`summary.json` is read: the weight table and the quant's `session`)                                                                   |
+| `--out <dir>`              | Where `single.jsonl` (one row per case) and `summary.json` are written                                                                                              |
+| `--mode timing\|wall`      | `timing` = GPU timestamps, one pass per dispatch (default when the adapter has `timestamp-query`); `wall` = submit-to-fence wall clock                              |
+| `--op <name>`              | Only this op (repeatable)                                                                                                                                           |
+| `--scenario <name>`        | Only this scenario                                                                                                                                                  |
+| `--component <name>`       | Only this component                                                                                                                                                 |
+| `--limit <n>`              | Only the first n cases by weight (`count × output elements`)                                                                                                        |
+| `--session <knob>=<value>` | Override the execution variant (any knob of the manifest's `session` vocabulary; boolean knobs take `true` / `false`; repeatable). Default = the census's `session` |
+| `--rounds <n>`             | Rounds per case; the reported value is the **min** (default 5)                                                                                                      |
 
 ### What is measured, and what is not
 
@@ -158,7 +158,8 @@ single-op time × the census weight is what a kernel candidate is worth.
   KV state (`state_append`, windowed `attention`) need a generation context and are excluded too. A
   row that still cannot be built or run is recorded under `failed` with the runtime's message and the
   sweep continues.
-- **Execution variant**: the census's `session` (the quant's declaration) is mapped to the runtime's
+- **Execution variant**: the census's `session` (the quant's declaration, validated by
+  `@karume/hub`'s `parseManifest` when the census reads the manifest) is mapped to the runtime's
   `SessionOptions` with the same explicit mapping `@karume/models` uses, so a linear in an `a8`
   quant is measured on the `a8` kernel, not the f32 one. The pipeline keys that actually ran are in
   each record (`keys`) — the plan phase decides the kernel, the tool only reports it.
@@ -180,10 +181,17 @@ single-op time × the census weight is what a kernel candidate is worth.
    `dispatches_per_node`, and `weighted_ms = ns × count`; `wall` reports `wall_ms_per_rep_min` for a batch of `reps` enqueues
    behind a single fence. The two modes measure different quantities (timing opens one pass per
    dispatch), so a record carries only one of them and no ratio between them is ever formed.
+   As a sanity check only, a `timing` record also carries `gpu_wall_ratio` (GPU time / wall
+   clock of the same run) and a `timing_warning` when the two contradict each other: GPU time
+   above the wall clock, or below 1/8 of a wall clock that reached the target pass length. Deno
+   does not convert timestamp ticks to ns, so on a GPU whose `timestampPeriod` is not 1 (Intel
+   Arc B570: 52.08 ns/tick) `ns_per_node_min` and `weighted_ms` read about 52× too small and
+   `reps` 52× too large. The period is not exposed by WebGPU, so the tool cannot correct it; it
+   only marks such records.
 5. Absolute times are comparable only within one rig and one session; compare ratios across runs.
 
 `summary.json` records the adapter (`rig`), the mode, the counts of measured / excluded / failed
-cases, and `weighted_ms_by_op_storage` — the census-weighted total per `(op, storage signature)`,
+cases, the number of records with a `timing_warning` (`timing_warnings`), and `weighted_ms_by_op_storage` — the census-weighted total per `(op, storage signature)`,
 which is the number the K-11 acceptance line (gemma4 decode `linear/f32+i4g32`) is checked against.
 
 ## `graph` — one real run, per-key GPU time, compared with the census

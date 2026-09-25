@@ -2,7 +2,7 @@
 //
 // `pinClocks` は fake Heater（決まった ms を返すだけ）で回すので、実 GPU も timestamp も要らない。
 
-import { assertEquals, assertRejects } from "@std/assert";
+import { assert, assertEquals, assertRejects } from "@std/assert";
 import {
   calibrateReps,
   type Heater,
@@ -10,6 +10,7 @@ import {
   measureWall,
   pinClocks,
   TARGET_PASS_MS,
+  timingWallWarning,
   WARMUP_MIN_RUNS,
 } from "./bench.ts";
 
@@ -37,6 +38,25 @@ Deno.test("calibrateReps: 1 dispatch で目標長ちょうどなら 1 本", () =
 
 Deno.test("calibrateReps: 速すぎる dispatch は上限で打ち切る", () => {
   assertEquals(calibrateReps(1e3), MAX_REPS);
+});
+
+Deno.test("timingWallWarning: ns が正しい run（目標長 + フェンスの床）は警告しない", () => {
+  const targetNs = TARGET_PASS_MS * 1e6;
+  assertEquals(timingWallWarning(targetNs, targetNs + 11e6), undefined);
+  // 床が支配する短い run は、比が小さくても判定しない（壁時計が目標長に届いていない）。
+  assertEquals(timingWallWarning(1e6, 12e6), undefined);
+});
+
+Deno.test("timingWallWarning: raw tick のままの ns（B570 の period 52.08）は壁時計と矛盾するので警告する", () => {
+  // 校正は過小な ns を見て反復を 52 倍積むので、実時間は目標長の 52 倍になる。
+  const realNs = TARGET_PASS_MS * 1e6 * 52.08;
+  const warning = timingWallWarning(realNs / 52.08, realNs + 11e6);
+  assert(warning !== undefined && warning.includes("ns に換算されていない疑い"), warning);
+});
+
+Deno.test("timingWallWarning: GPU 実時間が壁時計を超えたら警告する（pass は run の内側で走る）", () => {
+  const warning = timingWallWarning(120e6, 100e6);
+  assert(warning !== undefined && warning.includes("壁時計を超えた"), warning);
 });
 
 Deno.test("pinClocks: 安定した filler は累計 500ms（= WARMUP_NS）に届くまで回る", async () => {

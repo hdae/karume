@@ -190,6 +190,33 @@ Deno.test("sessionOptionsOf: 宣言を写し、上書きが勝ち、未知のノ
   assertThrows(() => sessionOptionsOf({ submitPolicy: "x" }), Error, "未知のノブ");
 });
 
+Deno.test("sessionOptionsOf: 配布の既定 quant（i4-fast）が宣言する真偽値つきのノブを全て写す", () => {
+  // 通常 Gemma E2B の i4-fast（ADR 0104）。
+  assertEquals(sessionOptionsOf({ linearGemvReduce: "parallel", fuseRmsNormAdd: true }), {
+    linearGemvReduce: "parallel",
+    fuseRmsNormAdd: true,
+  });
+  // QAT E2B の i4-fast（ADR 0105 追記 2）— 4 ノブとも写る（明示 false も落とさない）。
+  const qat = {
+    linearGemvReduce: "parallel",
+    fuseRmsNormAdd: true,
+    fuseLinearStaticQuantize: false,
+    packedStaticQuantize: true,
+  } as const;
+  assertEquals(sessionOptionsOf(qat), qat);
+  // CLI の上書きは true / false の綴りで真偽値のノブへ届く。
+  assertEquals(sessionOptionsOf(qat, { packedStaticQuantize: "false" }), {
+    ...qat,
+    packedStaticQuantize: false,
+  });
+});
+
+Deno.test("sessionOptionsOf: 真偽値のノブに真偽値以外が来たら落ちる", () => {
+  assertThrows(() => sessionOptionsOf({ fuseRmsNormAdd: "yes" }), Error, "fuseRmsNormAdd");
+  assertThrows(() => sessionOptionsOf({}, { fuseRmsNormAdd: "yes" }), Error, "真偽値でない");
+  assertThrows(() => sessionOptionsOf({ linearGemvReduce: true }), Error, "linearGemvReduce");
+});
+
 const adapter = navigator.gpu === undefined ? null : await navigator.gpu.requestAdapter();
 const timestampQuery = adapter !== null && adapter.features.has("timestamp-query");
 

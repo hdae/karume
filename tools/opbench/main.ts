@@ -258,7 +258,7 @@ const USAGE = `使い方: deno run -A tools/opbench/main.ts <census|single|graph
     --scenario <name>    このシナリオだけ
     --component <name>   このコンポーネントだけ
     --limit <n>          加重（count × 出力要素）の降順で先頭 n 件だけ
-    --session <knob>=<value>   実行変種の上書き（linearCompute / attentionCompute / attentionScoreStorage・繰り返し可）
+    --session <knob>=<value>   実行変種の上書き（manifest の session 語彙・真偽値のノブは true / false・繰り返し可）
     --rounds <n>         代表値（min）を採る反復回数（既定 ${ROUNDS}）
   graph --source <dir> --out <dir> [--family <gemma4|gemma4-qat|anima|siglip2|irodori>] [--census <dir> --scenario <name>]
     --source <dir>       配布形（karume.json あり）— pipeline の fromPretrained で読む
@@ -367,6 +367,7 @@ const runSingle = async (args: ReadonlyMap<string, readonly string[]>): Promise<
               : `${record.wall_ms_per_rep_min?.toFixed(4)} ms/rep`
           }`,
         );
+        if (record.timing_warning !== null) console.warn(`${label} WARN: ${record.timing_warning}`);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         failed.push({
