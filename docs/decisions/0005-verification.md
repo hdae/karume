@@ -52,7 +52,14 @@
   vowel-detector / minicpm5 / embeddinggemma / deberta / dacvae）。系列名は配布形の綴りに揃える
   （テストファイル名もそれに追随させた — `gemma_*_test.ts` → `gemma4_*_test.ts` 他）。
 - **門番は core だけ**: `gpu_gate` / `assets_gate` / `distribution_gate` は全 SKIP を FAIL に
-  する門で、系列とは無関係に配布形を要求する（`distribution_gate` は gemma4 の配布形を見る）。
+  する門で、系列とは無関係に配布形を要求する（`distribution_gate` の射程は、2026-09-25 裁定で**公開済み 10 リポの
+  全ミラー** + `karume-gemma4-qat`〈未公開だが QAT の公開入口 e2e と融合ヒット数の検査が根にする〉へ広げた。
+  配布形ミラーを根にする実資産 e2e と、`assets_fusion_counts_test.ts` の融合ヒット数の配布形節〈anima /
+  anima-extra / irodori / gemma4 / gemma4-qat〉の無音 SKIP を塞ぐため。e2e がまだ読まないミラーも載せる —
+  e2e を足した日に門番の更新を忘れても無音 SKIP が戻らないように。未公開の vowel-detector は配布形を作ってから載せる。
+  見るのは manifest が `karume/5` であることと既定選択の part の実在・長さで、失敗文言は各ミラーの作り方
+  〈`tools/export-recipes` の `dist.py`・越境参照で焼く anima-extra は release-runbook〉と opt-out
+  `KARUME_ALLOW_NO_DISTRIBUTION=1` を案内する。2026-09-24 までの射程は gemma4 系 2 本だけだった）。
   系列レーンに同梱すると、その系列と関係の無い資産の不在でレーンが赤くなる。
 - **被覆の門**: レーン分割の唯一の危険は「テストを足したのにどのレーンにも入らない」形で、
   これは無音で通る（レーン実行では一度も走らず、フル verify でしか現れない）。
