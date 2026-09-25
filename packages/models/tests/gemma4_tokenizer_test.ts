@@ -22,6 +22,7 @@ import { assertEquals, assertThrows } from "@std/assert";
 import { createBpeModel } from "../src/text/bpe.ts";
 import { type GemmaTokenizerAssets, parseGemmaTokenizerAsset } from "../src/gemma/text/asset.ts";
 import { GemmaTokenizer } from "../src/gemma/text/tokenizer.ts";
+import { readFileIfPresent } from "./helpers/read-if-present.ts";
 
 type EncodeCase = {
   readonly name: string;
@@ -82,9 +83,9 @@ const readFixture = async (name: string): Promise<Fixture> =>
 
 /** 系列側の実資産（無ければ undefined = compile していない）。 */
 const readSeriesAsset = async (series: string): Promise<Uint8Array | undefined> =>
-  await Deno.readFile(
+  await readFileIfPresent(
     new URL(`../../../outputs/series/${series}/tokenizer.json`, import.meta.url),
-  ).catch(() => undefined);
+  );
 
 /** 決定的な擬似乱数（chunk 分割の抽選を毎回同じにする）。 */
 const nextRandom = (state: number): { value: number; state: number } => {
@@ -163,6 +164,30 @@ Deno.test("資産 JSON の門: 信用できない外部入力として扱う", a
 
   await t.step("知らない format 版は読まない", () => {
     assertThrows(() => parseAsset({ ...minimalAsset(), format: "karume-gemma-tokenizer/2" }));
+  });
+
+  await t.step("出所記録 source は読み流す（書き手が必ず綴る欄）", () => {
+    parseAsset({ ...minimalAsset(), source: { path: "synthetic" } });
+  });
+
+  await t.step("未知キーは落ちる（同版内の欄の追加・綴り違いを黙って読み流さない）", () => {
+    assertThrows(
+      () => parseAsset({ ...minimalAsset(), mergeCount: 1 }),
+      Error,
+      "未知キー 'mergeCount'",
+    );
+    const asset = minimalAsset();
+    asset["spec"] = { ...(asset["spec"] as Record<string, unknown>), extra: "x" };
+    assertThrows(() => parseAsset(asset), Error, "tokenizer.spec: 未知キー 'extra'");
+  });
+
+  await t.step("欄が欠ければ「無い」で落ちる", () => {
+    const { mergesCount: _, ...withoutCount } = minimalAsset();
+    assertThrows(() => parseAsset(withoutCount), Error, "tokenizer.mergesCount: 無い");
+    const asset = minimalAsset();
+    const { decoder: __, ...specWithoutDecoder } = asset["spec"] as Record<string, unknown>;
+    asset["spec"] = specWithoutDecoder;
+    assertThrows(() => parseAsset(asset), Error, "tokenizer.spec.decoder: 無い");
   });
 
   await t.step("宣言された構成が 1 欄でも違えば落ちる", () => {

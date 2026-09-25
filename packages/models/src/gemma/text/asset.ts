@@ -17,6 +17,7 @@
  * 別のトークナイザなので、読まずに落とす）。
  */
 
+import { assertAllowedKeys } from "../../config/readers.ts";
 import { assertUniqueLines, setUnique } from "../../text/asset-gates.ts";
 import { type BpeModel, createBpeModel } from "../../text/bpe.ts";
 
@@ -27,6 +28,26 @@ const ASSET_FORMAT = "karume-gemma-tokenizer/1";
 const SPEC_NORMALIZER = "replace-space-with-metaspace";
 const SPEC_PRE_TOKENIZER = "split-space-merged-with-previous";
 const SPEC_DECODER = "metaspace-byte-fallback-fuse";
+
+/**
+ * 資産の欄（書き手 `_shared/gemma_tokenizer.py` の `asset_payload` / `spec_of` と 1 対 1）。
+ * `source` は出所記録で、読み手は解釈しない。
+ */
+const ASSET_KEYS = [
+  "format",
+  "source",
+  "spec",
+  "vocab",
+  "mergesText",
+  "mergesCount",
+  "byteIds",
+  "addedTokens",
+  "specialIds",
+  "unkId",
+  "bosId",
+  "eosId",
+] as const;
+const SPEC_KEYS = ["normalizer", "preTokenizer", "decoder", "postProcessor"] as const;
 
 /** SentencePiece の空白置換文字（U+2581）。normalizer と decoder の両方が使う。 */
 export const METASPACE = "▁";
@@ -64,6 +85,12 @@ const asRecord = (value: unknown, label: string): Record<string, unknown> => {
   return value as Record<string, unknown>;
 };
 
+/** 欄を `Object.hasOwn` 経由で引く（欠落は「無い」で落とす — 型の文言に化かさない）。 */
+const readField = (record: Record<string, unknown>, key: string, where: string): unknown => {
+  if (!Object.hasOwn(record, key)) throw new Error(`${where}.${key}: 無い`);
+  return record[key];
+};
+
 const asString = (value: unknown, label: string): string => {
   if (typeof value !== "string") throw new Error(`${label}: 文字列でない`);
   return value;
@@ -87,6 +114,7 @@ const asArray = (value: unknown, label: string): unknown[] => {
 /** 宣言された構成を exact-match する（1 欄でも違えば別のトークナイザ）。 */
 const parseSpec = (raw: unknown, label: string): GemmaTokenizerSpec => {
   const spec = asRecord(raw, label);
+  assertAllowedKeys(spec, SPEC_KEYS, label);
   for (
     const [field, want] of [
       ["normalizer", SPEC_NORMALIZER],
@@ -94,14 +122,14 @@ const parseSpec = (raw: unknown, label: string): GemmaTokenizerSpec => {
       ["decoder", SPEC_DECODER],
     ] as const
   ) {
-    const got = asString(spec[field], `${label}.${field}`);
+    const got = asString(readField(spec, field, label), `${label}.${field}`);
     if (got !== want) {
       throw new Error(
         `${label}.${field}: ${JSON.stringify(want)} でない（${JSON.stringify(got)}）`,
       );
     }
   }
-  const post = asString(spec["postProcessor"], `${label}.postProcessor`);
+  const post = asString(readField(spec, "postProcessor", label), `${label}.postProcessor`);
   if (post !== "none" && post !== "bos-eos") {
     throw new Error(`${label}.postProcessor: 未知の形（${JSON.stringify(post)}）`);
   }
@@ -156,31 +184,47 @@ const parseAddedTokens = (raw: unknown, label: string): Map<string, number> => {
 /** 資産 JSON（解析済み）を資産表へ。 */
 const interpretGemmaTokenizerAsset = (raw: unknown): GemmaTokenizerAssets => {
   const asset = asRecord(raw, "tokenizer");
-  const format = asString(asset["format"], "tokenizer.format");
+  const format = asString(readField(asset, "format", "tokenizer"), "tokenizer.format");
   if (format !== ASSET_FORMAT) {
     throw new Error(`tokenizer.format: ${JSON.stringify(ASSET_FORMAT)} でない（${format}）`);
   }
-  const spec = parseSpec(asset["spec"], "tokenizer.spec");
+  // 版の門の後に置く — 欄の増えた新版は「未知キー」でなく「版が違う」で落とす。
+  assertAllowedKeys(asset, ASSET_KEYS, "tokenizer");
+  const spec = parseSpec(readField(asset, "spec", "tokenizer"), "tokenizer.spec");
 
-  const vocabLines = asArray(asset["vocab"], "tokenizer.vocab").map((token, index) =>
-    asString(token, `tokenizer.vocab[${index}]`)
-  );
+  const vocabLines = asArray(readField(asset, "vocab", "tokenizer"), "tokenizer.vocab").map((
+    token,
+    index,
+  ) => asString(token, `tokenizer.vocab[${index}]`));
   // 行番号 = id なので、重複は「例外にならない配布破損」（先の id が引けなくなる）。
   assertUniqueLines(vocabLines, "tokenizer.vocab");
 
-  const byteIds = asArray(asset["byteIds"], "tokenizer.byteIds").map((id, index) =>
-    asId(id, `tokenizer.byteIds[${index}]`)
-  );
+  const byteIds = asArray(readField(asset, "byteIds", "tokenizer"), "tokenizer.byteIds").map((
+    id,
+    index,
+  ) => asId(id, `tokenizer.byteIds[${index}]`));
   const model = createBpeModel({
     vocab: vocabLines.map((token, id) => [id, token] as const),
-    merges: parseMerges(asset["mergesText"], asset["mergesCount"], "tokenizer.mergesText"),
+    merges: parseMerges(
+      readField(asset, "mergesText", "tokenizer"),
+      readField(asset, "mergesCount", "tokenizer"),
+      "tokenizer.mergesText",
+    ),
     byteIds,
   });
 
-  const addedTokens = parseAddedTokens(asset["addedTokens"], "tokenizer.addedTokens");
+  const addedTokens = parseAddedTokens(
+    readField(asset, "addedTokens", "tokenizer"),
+    "tokenizer.addedTokens",
+  );
   const addedIds = new Set(addedTokens.values());
   const specialIds = new Set<number>();
-  for (const [index, id] of asArray(asset["specialIds"], "tokenizer.specialIds").entries()) {
+  for (
+    const [index, id] of asArray(
+      readField(asset, "specialIds", "tokenizer"),
+      "tokenizer.specialIds",
+    ).entries()
+  ) {
     const specialId = asId(id, `tokenizer.specialIds[${index}]`);
     // 特殊トークンは追加語彙の部分集合（正本の `is_special_token` も追加語彙側を見る）。
     // 外れた id を通すと「skip されるはずのトークンが本文に出る / 出ないはずが消える」。
@@ -191,7 +235,7 @@ const interpretGemmaTokenizerAsset = (raw: unknown): GemmaTokenizerAssets => {
   }
 
   const vocabId = (field: string): number => {
-    const id = asId(asset[field], `tokenizer.${field}`);
+    const id = asId(readField(asset, field, "tokenizer"), `tokenizer.${field}`);
     if (!model.tokenOf.has(id)) throw new Error(`tokenizer.${field}: id ${id} が語彙に無い`);
     return id;
   };
