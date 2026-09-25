@@ -124,12 +124,13 @@ DEPTH_ANYTHING_STORAGE_REQUIREMENTS: Mapping[str, str] = {DEPTH_ANYTHING_ROLE: "
 #: dtype とは無関係に起こる。系列 root の取り違えは数値の門では原理的に検出できない
 #: （ADR 0027 / 0029）ので、ここが唯一の検出器。
 #:
-#: MUST: 禁止は**役割ごとに集合**で持ち、書き出しうる圧縮格納（`karume.emit.WEIGHT_DTYPES` の
-#: f32 以外）を**全部**名指しする — 1 つでも抜けると、抜けた格納形だけが黙って素通りする
+#: MUST: 禁止は**役割ごとに集合**で持ち、格納検査が見る語彙（codec 台帳
+#: `karume.container.CODEC_LEDGER` の layout — `karume.dist.storage_dtypes`）の f32 / i32 以外を
+#: **全部**名指しする — 1 つでも抜けると、抜けた格納形だけが黙って素通りする
 #: （anima / irodori / sbv2 と同じ規律）。I32 を載せないのは、i32 が圧縮ではなく素の格納
 #: （`karume.emit` の plain 側）で、添字表として素の系列にも普通に居るから。
 DEPTH_ANYTHING_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {
-    DEPTH_ANYTHING_ROLE: ("f16", "i8", "i4")
+    DEPTH_ANYTHING_ROLE: ("f16", "bf16", "i8", "i4", "i2")
 }
 
 #: weights の宣言（dtype ラベル → 役割名）。dtype が 1 つしかないので quant 表は空でよい

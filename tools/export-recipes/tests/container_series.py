@@ -20,9 +20,21 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
-from karume.container import container_parts, numbered_name, numbered_path, sequence_siblings
+import torch
+
+from karume.container import (
+    Provenance,
+    container_parts,
+    numbered_name,
+    numbered_path,
+    sequence_siblings,
+)
 from karume.dist import WeightFiles
+from karume.emit import FixedQuantizedWeight, stored_model
+from karume.ir import IrGraph, IrInitializer, IrInput, IrNode, IrStorage, IrValue
+from karume.publish import publish_container
 
 #: `ir_fixtures.ir_container` の戻りが割れる part 本数（2 文書 + const 領域 + 重み 1 part）。
 #: 合成の資産は数 KB なので重みは 1 part に収まるが、**常時分割**（container-v1 §8）なので
@@ -68,6 +80,44 @@ def read_component(path: Path) -> list[bytes]:
     `write_component` の逆で、`ir_fixtures` の戻り（`list[bytes]`）とそのまま比較できる。
     """
     return [part.read_bytes() for part in container_parts(path)]
+
+
+def i2_container(*, named: str) -> list[bytes]:
+    """重み 1 本を `int2-off`（layout `i2`）で持つ最小の正当なコンテナの part 列。
+
+    `ir_fixtures.ir_container` は `karume.emit.WEIGHT_DTYPES`（f32 / f16 / i8 / i4）しか書けないが、
+    格納の門が見る語彙は codec 台帳の layout 全体で、i2 は QAT 系列（固定の packed 値 —
+    `FixedQuantizedWeight`）だけが持つ。その系列 root を素の f32 席へ取り違えたときに禁止表が
+    落とすことを、**本物の束縛表**で試すための席（scale の companion が f32 なので「f32 を
+    含む」も真になり、要求検査は素通りする — 実物の圧縮系列と同じ形）。
+    """
+    graph = IrGraph(
+        symbols=[],
+        inputs=[IrInput(name="ids", dtype="i32", shape=[2])],
+        outputs=["y"],
+        initializers={"w": IrInitializer(tensor="w", storage=IrStorage(dtype="f32"))},
+        values={"w": IrValue(dtype="f32", shape=[2, 16]), "y": IrValue(dtype="f32", shape=[2, 16])},
+        nodes=[IrNode(op="embedding", ins=["w", "ids"], outs=["y"], attrs={"padding_idx": -1})],
+    )
+    fixed = {
+        "w": FixedQuantizedWeight(
+            dtype="i2",
+            packed=torch.zeros((2, 4), dtype=torch.uint8),
+            scale=torch.ones((2, 1), dtype=torch.float32),
+        )
+    }
+    tensors = {"w": torch.empty(2, 16, dtype=torch.float32, device="meta")}
+    stored = stored_model(graph, tensors, fixed_weights=fixed)
+    with TemporaryDirectory() as staging:
+        result = publish_container(
+            Path(staging) / "model.krm",
+            stored.graph,
+            stored.tensors,
+            stored.bindings,
+            graph_name=named,
+            provenance=Provenance(license="mit"),
+        )
+        return [path.read_bytes() for path in result.parts]
 
 
 def part_paths(rel_path: str, total: int = CONTAINER_PARTS) -> list[str]:

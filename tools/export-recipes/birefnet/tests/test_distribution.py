@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from container_series import placed_paths, write_component
+from container_series import i2_container, placed_paths, replace_component, write_component
 from ir_fixtures import Shape, ir_container
 
 from _shared.licenses import mit_license
@@ -35,6 +35,7 @@ from birefnet.distribution import (
     BIREFNET_MODELS,
     BIREFNET_OUTPUT_PATHS,
     BIREFNET_ROLE,
+    BIREFNET_STORAGE_FORBIDDEN,
     BIREFNET_WEIGHTS,
     LUCIDA_PIPELINE,
     PIPELINE,
@@ -45,6 +46,7 @@ from birefnet.distribution import (
     birefnet_sources,
 )
 from dist import default_out_dir, main
+from karume.container import CODEC_LEDGER
 from karume.dist import (
     MANIFEST_FILENAME,
     MODEL_CARD_FILENAME,
@@ -234,6 +236,24 @@ class TestBirefnetLayout:
         sources = _build_birefnet_sources(tmp_path, storage="f32")
 
         assert birefnet_plan(sources, BIREFNET_HR_CHECKPOINT).name == BIREFNET_DEFAULT_MODEL
+
+    def test_the_forbidden_table_names_every_compressed_layout_in_the_codec_ledger(self) -> None:
+        """禁止表は格納検査の語彙（codec 台帳の layout）から f32 / i32 を除いた**全部**を持つ。
+
+        1 つでも抜けると、抜けた格納形の系列 root だけが f32 席を黙って通る。i32 は素の格納
+        （添字表）なので禁じない。
+        """
+        compressed = {entry.layout for entry in CODEC_LEDGER.values()} - {"f32", "i32"}
+
+        assert set(BIREFNET_STORAGE_FORBIDDEN[BIREFNET_ROLE]) == compressed
+
+    def test_it_refuses_an_i2_series_in_the_f32_seat(self, tmp_path: Path) -> None:
+        """`ir_container` では書けない i2（QAT 系列の固定 packed 値）も、束縛表の現物で落ちる。"""
+        sources = _build_birefnet_sources(tmp_path)
+        replace_component(sources.series / "model.krm", i2_container(named=BIREFNET_ROLE))
+
+        with pytest.raises(DistError, match=rf"{BIREFNET_ROLE}: .* i2 がある"):
+            birefnet_plan(sources, BIREFNET_HR_CHECKPOINT)
 
 
 class TestBirefnetPipelineConfig:
