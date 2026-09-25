@@ -60,7 +60,10 @@
    構成を変えたテストデータで戻せることがある」の実例。
 2. rope.max_size の宣言は h/w = 120（= 1920px）で、受理上限 2048px（素表行数 128 由来）
    との間の 1920〜2048px は「素表は組めるがモデル宣言の外」。docs/limitations.md 行きの
-   by-design 制約として記録（実用上は S 上限と VRAM が先に効く）。
+   by-design 制約として記録（実用上は S 上限と VRAM が先に効く）。記録先は
+   [limitations.md](../limitations.md) の項「anima: 1920px 超〜2048px の解像度は rope の
+   モデル宣言外の位置を使う（受理する・品質は未実測）」（2026-09-04 裁定 — 受理集合はこの理由では
+   狭めない。コード側の記録は `packages/models/src/anima/resolution.ts` の `MAX_LATENT_SIDE` の NOTE）。
 
 ## Consequences
 
