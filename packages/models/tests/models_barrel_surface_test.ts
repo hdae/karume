@@ -9,7 +9,8 @@
 // NOTE: 型 export（`GreedySpec`）は実行時に観測できないので、ここで見るのは値 export だけ。
 // 型だけを戻した場合は「型はあるのに実装が無い」形になり、消費側の `deno check` が落ちる。
 
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertNotEquals } from "@std/assert";
+import config from "../deno.json" with { type: "json" };
 import * as models from "../mod.ts";
 import type { Gemma4FromPretrainedOptions as BarrelFromPretrained } from "../mod.ts";
 import type { ComponentSource } from "../mod.ts";
@@ -133,17 +134,18 @@ Deno.test("barrel: gemma の公開面（薄い面 — 組み立ての入口は�
 // 表の**中身**（キーの規則・repo 名・40 桁 hex）を見るのは `sources_test.ts` で、ここで縛るのは
 // 2 点:
 //
-// ① **subpath ⊆ barrel を 8 面すべてで**見る（`deno.json` の `exports` は `.` + 8 サブパス）。
-//    `./gemma` 1 面だけに掛けていた頃は、他 7 面のどの値 export を `mod.ts` から落としても
+// ① **subpath ⊆ barrel を 9 面すべてで**見る（`deno.json` の `exports` は `.` + 9 サブパス —
+//    走査する面の集合は `exports` のキーと突き合わせる）。
+//    `./gemma` 1 面だけに掛けていた頃は、他の面のどの値 export を `mod.ts` から落としても
 //    全テストが緑のままだった。
 // ② `<FAMILY>_SOURCES` の**畳み込み漏れ**（家族表を新設したのに `src/sources.ts` へ足し忘れる）
 //    を落とす。`src/sources.ts` のスプレッドは実行時に列挙できないので、代わりに
-//    「8 サブパスから集めた表のキーの和集合 === `Object.keys(KARUME_SOURCES)`」を突き合わせる。
+//    「9 サブパスから集めた表のキーの和集合 === `Object.keys(KARUME_SOURCES)`」を突き合わせる。
 //
-// 未配布家族（`./birefnet` / `./vowel-detector`）は表を 1 本も持たないのが正しい状態なので、
+// 表を持たない家族（`./vowel-detector` など未配布の家族）は 1 本も出さないのが正しい状態なので、
 // 陽性対照（表が 1 本以上ある）は面ごとではなく**全体で 1 回**置く。
 
-/** `deno.json` の `exports` が持つ 8 サブパス（`.` = barrel を除く全部）。 */
+/** `deno.json` の `exports` が持つ 9 サブパス（`.` = barrel を除く全部）。 */
 const subpathSurfaces = async (): Promise<readonly { name: string; surface: string[] }[]> => [
   { name: "./anima", surface: Object.keys(await import("../anima.ts")) },
   { name: "./birefnet", surface: Object.keys(await import("../birefnet.ts")) },
@@ -156,7 +158,22 @@ const subpathSurfaces = async (): Promise<readonly { name: string; surface: stri
   { name: "./vowel-detector", surface: Object.keys(await import("../vowel-detector.ts")) },
 ];
 
-Deno.test("barrel: 8 サブパスの値 export は全部 barrel にも載る（両建ての食い違い）", async () => {
+/** `deno.json` の `exports` から barrel（`.`）を除いたサブパス名（昇順）。 */
+const exportedSubpaths = (exports: Readonly<Record<string, string>>): string[] =>
+  Object.keys(exports).filter((name) => name !== ".").toSorted();
+
+Deno.test("barrel: 走査するサブパスは deno.json の exports のサブパスちょうど", async () => {
+  const scanned = (await subpathSurfaces()).map(({ name }) => name).toSorted();
+  // 陽性対照 — exports に面が増えれば比較は割れる（hardcoded 同士の恒真な比較にしない）。
+  assertNotEquals(exportedSubpaths({ ...config.exports, "./dummy": "./dummy.ts" }), scanned);
+  assertEquals(
+    exportedSubpaths(config.exports),
+    scanned,
+    "deno.json の exports と走査するサブパス（subpathSurfaces）が食い違う — 面が増えたら走査も増やす",
+  );
+});
+
+Deno.test("barrel: 9 サブパスの値 export は全部 barrel にも載る（両建ての食い違い）", async () => {
   const barrel = Object.keys(models);
   const subpaths = await subpathSurfaces();
   // 陽性対照 — 空の名前空間を並べて緑になる形にしない。
@@ -177,7 +194,7 @@ Deno.test("barrel: 取得元対応表はサブパスと barrel の両方から�
   const tables = subpaths.flatMap(({ surface }) =>
     surface.filter((exported) => exported.endsWith("_SOURCES"))
   );
-  // 陽性対照は全体で 1 回 — 未配布家族（birefnet 系 / vowel-detector）は表を持たないのが正しい。
+  // 陽性対照は全体で 1 回 — 表を持たない家族（vowel-detector など）は 0 本が正しい。
   assert(tables.length >= 1, "サブパスに取得元対応表が 1 本も無い");
   for (const table of tables) assert(barrel.includes(table), `barrel に ${table} が無い`);
   // サブパス側の足し忘れは上の filter では見えないので、家族の表を名指しでも縛る。
@@ -189,6 +206,7 @@ Deno.test("barrel: 取得元対応表はサブパスと barrel の両方から�
       "GEMMA4_SOURCES",
       "SIGLIP2_SOURCES",
       "DEPTH_ANYTHING_SOURCES",
+      "BIREFNET_SOURCES",
     ]
   ) {
     assert(tables.includes(table), `サブパス barrel に ${table} が無い`);
@@ -235,7 +253,8 @@ Deno.test("barrel: KARUME_SOURCES は家族表の和集合ちょうど（畳み�
     Object.keys(models.KARUME_SOURCES).toSorted(),
     "KARUME_SOURCES が家族表の和集合と一致しない（src/sources.ts への畳み込み漏れか余り）",
   );
-  // サブパスの数は `deno.json` の exports と揃っていること（面が増えたら走査も増やす）。
+  // 上の名前空間の列は `subpathSurfaces` と同じ面を並べていること（後者は `deno.json` の
+  // exports と突き合わせ済み — 走査するサブパスの門）。
   assertEquals(subpaths.length, namespaces.length);
 });
 
