@@ -281,8 +281,9 @@ batch>1 のマスク畳み込み対応）で、コア変換基盤への設計判
 終了の報告あり）だが、回線切断・アプリ側 abort と見え方が同一のため、修正版で `err.cause`
 を実機観測するまで確定できない。常駐そのものの削減は 0.7.0 の shard 分割配布（R1 統合波）で入り、
 現行はコンテナの block 単位の取得と Session 構築に置き換わった（ブラウザの取得元は seek 型 —
-ADR [0108](decisions/0108-container-format.md) 追記 5）。残タスク = anima の HF 配布を `karume/5` で
-上げ直した後（release の波 — [backlog](backlog.md) の release 節）の実機再観測のみ。
+ADR [0108](decisions/0108-container-format.md) 追記 5）。anima の HF 配布は `karume/5` で
+上げ直し済み（0.13.0 の再アップロード・2026-09-24）。残タスク = 実機再観測のみ（[backlog](backlog.md) now の
+「ユーザー実機」の Pixel 項）。
 
 ## hub: `evictCachedAssets` で weights を `drafter` だけに絞っても共通 assets（tokenizer）が消える
 

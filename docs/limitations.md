@@ -1268,8 +1268,8 @@ hub が「未対応の major」として落とし（`packages/hub/src/manifest.t
 「未知の magic」で落とす（`packages/runtime/src/format/container/header.ts`）。旧形式を読む処理は移行 CLI
 （`tools/exporter` の `uv run karume migrate` — 部品単位の位置引数か、`--manifest` のリポ丸ごとモード）にだけ置き、
 入力は読むだけで消さない。旧版のパッケージは旧 revision（40 桁 SHA）を pin しているので、旧版のまま使う限り
-旧配布形は動き続ける。HF の公開リポのうち `karume/5` へ上げ直したのは irodori-v4.1-small だけで、残りは
-release の波で上げ直すまで現行のパッケージからは読めない（[backlog](backlog.md) の release 節）。
+旧配布形は動き続ける。HF の公開リポは全 10 本を `karume/5` へ上げ直し済みで（0.13.0 の再アップロード・
+2026-09-24）、現行のパッケージの pin はその revision を指す。
 
 ## hub: キャッシュは credential で隔離しない（by-design — 2026-08-28 裁定）
 
