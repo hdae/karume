@@ -49,10 +49,10 @@ DEPTH_ANYTHING_PAPER = "arxiv.org/abs/2406.09414"
 #:
 #: MUST: **Small だけが Apache-2.0**（実地確認 2026-08-14 — HF の model API:
 #: `depth-anything/Depth-Anything-V2-Base-hf` と `-Large-hf` はどちらも `license:
-#: cc-by-nc-4.0`）。サイズ軸そのものは配布形の軸（1 サイズ = 1 リポ）だが、**この表に
-#: 載っているものしか配れない**のが唯一の門で、NC の重みを Apache-2.0 のカードで再配布する
-#: 事故はここで止まる。Base / Large を足すときは、ライセンス欄をモデル単位へ割る改修と
-#: セット（{@link DEPTH_ANYTHING_LICENSE} は今 1 値しかない）。
+#: cc-by-nc-4.0`）。サイズ軸そのものは配布形のモデル軸（世代 1 リポの中に並ぶ —
+#: `depth_anything.distribution`）だが、**この表に載っているものしか配れない**のが唯一の門で、
+#: NC の重みを Apache-2.0 のカードで再配布する事故はここで止まる。Base / Large を足すときは、
+#: ライセンス欄をモデル単位へ割る改修とセット（{@link DEPTH_ANYTHING_LICENSE} は今 1 値しかない）。
 DEPTH_ANYTHING_UPSTREAM: Mapping[str, str] = {
     "small": "depth-anything/Depth-Anything-V2-Small-hf",
 }
@@ -85,9 +85,14 @@ def _depth_anything_repo(name: str) -> str:
 def _depth_anything_title(manifest: Mapping[str, Any]) -> str:
     """見出し（`Depth Anything V2 Small — Karume`）。
 
-    サイズの綴りは**上流リポ名から導く**（1 リポ 1 サイズなので、既定モデルの上流が
-    そのままリポの名前）— 2 つ目の表を持つと、片方だけ動いたときに「Base の重みを Small
-    として売る」カードが黙って作れる。
+    サイズの綴りは**上流リポ名から導く**（既定モデルの上流リポ名をそのまま見出しにする）—
+    2 つ目の表を持つと、片方だけ動いたときに「Base の重みを Small として売る」カードが黙って
+    作れる。
+
+    NOTE: リポは世代 1 つでサイズはその中のモデル軸（`depth_anything.distribution`）なので、
+    見出しが既定サイズだけを名乗る形は、配れるサイズが Small 1 つの今だけ成り立つ。2 サイズ目を
+    載せるとき（{@link DEPTH_ANYTHING_UPSTREAM} の MUST のライセンス割りとセット）に見出しを
+    世代名へ改める — 今変えると中身が同じ配布カードの再発行だけが生じる。
     """
     checkpoint = _depth_anything_repo(manifest["defaultModel"]).split("/", 1)[1]
     return f"{checkpoint.removesuffix('-hf').replace('-', ' ')} — Karume"
