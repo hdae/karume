@@ -65,3 +65,25 @@ Euler 更新（`x += v·Δt`・[1,S,32] ≤ 24k 要素）と CFG 合成
   （解の候補 = 融合 attention の実行時マスク対応〈ADR 0023 の将来枠〉か S 上限）。
 - U7（概算）: 10s 発話 ≈2s / 30s 発話 ≈6.5s の GPU 実時間 + ホスト固定費 3.8s（recon §6 —
   attention は分解経路なので楽観側。実測は G5' 着地後）。
+
+## 追記（2026-09-25）— 決定 3 の分岐点の条件は ADR 0054 で成立した
+
+決定 3 の分岐点「タスク #7 の『入力値の Session 常駐』が入ったら G4 を切り出す」の条件は、ADR
+[0054](0054-resident-loop-and-fence.md)（2026-08-13）で仕組みとして成立した。ResidentTensor（GpuContext が
+持つ常駐バッファ）と batch enqueue が入り、DiT ループは条件 state 3 本をループの前に 1 度だけ常駐テンソルへ
+書く（`packages/models/src/irodori/dit-loop.ts` — 毎 forward の writeBuffer が消えた）。G4 を別グラフに
+しても、出力 178MB は出力 slot から常駐テンソルへの GPU コピー（0054 決定 3 の `copyOutputs`）で DiT へ渡せる。
+決定 3 が畳む理由にした「毎 run アップロード ≈30ms」は払わずに済む形になった。
+
+ここでいう条件は [perf-ledger](../perf-ledger.md) の H-4（pipeline 単位の Session 常駐 — generate をまたいで
+Session を持ち続ける）とは別物と読む。H-4 の行は本 ADR の決定 3 を引いているが、決定 3 が要るのは「1 回の
+生成の中で、入力値が run をまたいで GPU に残る」ことで、それは ResidentTensor で満たされた。H-4 が未着手の
+ままでも、G4 の切り出しの前提は欠けていない。
+
+それでも G4 は今も DiT グラフに畳まれたまま（`tools/export-recipes/irodori/export.py` の
+`project_context_kv`）で、forward ごとに再計算している。**切り出すか見送るかはここでは決めない**。決め手の
+数字（決定 3 の再計算 59.6 GFLOP/forward・生成 1 回で ≈0.56 s と、切り出したときの常駐 +178MB の VRAM）は
+K-4a と常駐ループより前の実行形で採ったものである。0054 の検収で irodori はほぼ GPU 律速（全 GPU ≈4.2 s）に
+なったので、今は再計算がそのまま壁に効く側にいる可能性がある（推測・未計測）。現行の実行形で G4 の GPU 時間と
+VRAM を測り直してから決める。切り出すなら新 ADR で決定 3 を置き換える（irodori の再 export・配布形の
+再アップロード・pin の更新を伴う）。
