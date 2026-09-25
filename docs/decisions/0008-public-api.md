@@ -66,3 +66,21 @@
   `packages/runtime/tests/helpers/public-surface.ts` 1 本。**射程は `deno doc` が出す集合**なので、
   `@ignore` を付けた export は doc の出力に載らず、この門も見ない（消える側は `- 名前` の差分で落ちるが、
   `@ignore` 付きで増える面は素通りする）。名指し門と併せて、意図の宣言は人が書く側が持つ。
+- 2026-09-25: **上の 2026-08-05 / 09-05 / 09-07 の追記が理由にした配布形は、コンテナ形式（ADR 0108 / 0109）の
+  波で退役した**。決定の生死は 3 件で分かれるので、現況をここに記録する（各追記の本文は当時の記録として残す）。
+  - 2026-08-05（`parseSafetensors` / `SafetensorsError`）: **決定は生きていて、理由の文言だけが古い**。
+    「ADR 0038 §2 の extras」は ADR 0109 決定 4 で退役し、Anima の rope 素表は容器の資産 `rope_base`（役割
+    `rope-base`）になった。今の公開理由は「容器の中身として届く safetensors 形式の payload を、models が同じ
+    厳格検査で読む」ことで、消費者は sbv2 のスタイル表（`models/src/sbv2/style.ts`）・vowel-detector
+    （`models/src/vowel-detector/pipeline.ts`）・rope 素表（`models/src/anima/rope-base.ts`）である。
+    同じ追記で出した `tensorBytes` は repo 内の消費者がテストだけになったので、0.13.0 で公開面から外す
+    （2026-09-25 裁定 — 退役した配布形の残骸の整理。既リリースの面なので Breaking）。
+  - 2026-09-05（道具が runtime のテスト補助を掴む）: **構造は同じで、固有名が全部古い**。`shard-files.ts` と
+    Python `karume.shards.resolve_shards` はこの波で削除された。今は `tools/_shared/assets.ts` が
+    `packages/runtime/tests/helpers/container-files.ts` の `resolveParts`（Python
+    `karume.container.resolve_sequence` / `container_parts` の鏡像）を掴む。`Deno` API に依るので `src/` へ
+    昇格できない点と、3 実装目を作らない理由はそのまま成り立つ。
+  - 2026-09-07（`parseSafetensorsHeader` / `safetensorsHeaderLength` / 型 `SafetensorsHeader`）: **公開理由が
+    消えた**。PLE は safetensors の shard から `model` 容器の資産へ移り、ヘッダを小読みする呼び手が repo 内に
+    無い（残る参照は自身の単体テストだけ）。この 3 つは v0.12.0 より後に足した未リリースの面なので、0.13.0 で
+    公開面から外す（2026-09-25 裁定）。`parseSafetensors` の内部では部分適用のまま使う。
