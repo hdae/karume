@@ -196,7 +196,7 @@ NOTE: 設計案 v2 はこの流儀の先例として `distribution.py:570` の�
 - 並行 digest は効く（16 MiB × 16 を `Promise.all` で **3,702 MiB/s** — 逐次 16 MiB の 2.07 倍・
   256 MiB 一括の 4.0 倍）。一括 digest ではこれが取れない。
 - ブラウザは未測。Chrome は digest の入力を Blink 内部へ全量コピーする
-  （`packages/hub/src/fetch.ts:68-70` の記録）ので、block 化はブラウザでこそ効くはずである
+  （`packages/hub/src/fetch.ts` の `BYTE_BUDGET` の記録）ので、block 化はブラウザでこそ効くはずである
   （**推測** — コピー量が block 長で頭打ちになる）。
 - **将来の見直し（16 MiB へ下げる）**: 交互計測では 16 MiB = 1,784 MiB/s に対し 32 MiB =
   938 MiB/s で、速さだけを見れば 16 MiB が有利である。下げるときの副作用は 2 つ —
@@ -249,7 +249,7 @@ NOTE: 設計案 v2 はこの流儀の先例として `distribution.py:570` の�
   `fromContainer` の呼び手が渡す pin）。descriptor 自身は自分の正しさを証明できない。
 - **実行時の完全性は descriptor と block の sha256**。cold は block ごとに一括 digest、warm は
   記録ハッシュの文字列比較だけで **digest 0 回**（キャッシュヒット時に GB 級の digest を
-  走らせない — `packages/hub/src/fetch.ts:66-73` の現行規律を継承）。
+  走らせない — `packages/hub/src/fetch.ts` の `BYTE_BUDGET` の現行規律を継承）。
 - **ファイル全体の sha256 は公開・再梱包の突合用**として分離する（実行時には使わない）。
 - ハッシュの役割 3 分離を仕様に明記する: ①**取得物の期待ハッシュ**（外側が持つ）②**派生
   キャッシュキー**（入力 digest + recipe 版 + 変換設定 — 生成前に決まる）③**派生物の内容
@@ -816,7 +816,7 @@ manifest の形は ADR [0109](0109-manifest-v5-container.md)、PLE は ADR [0085
     分割込み）で `krm` とメモリ内容器を突き合わせ、piece の割り方は 2 経路でわざと違えてある。ただし
     2 経路は合流層から Session 構築までを共有するので、この縮図の出力を**別実装で**押さえる A/B は
     無くなった。合流か構築の誤りは両辺に同じだけ乗り、この 1 本では検出できない。見積りの A/B
-    （`runtime_prepare_model_test.ts`）も同じ形である。緩和として外部の正解が 2 つ残る。①codec ごとの
+    （`runtime_prepare_container_test.ts`）も同じ形である。緩和として外部の正解が 2 つ残る。①codec ごとの
     GPU テストは CPU 参照（`applyReferenceOp` + `decodeI4` / `decodeI8`）と突き合わせる。②実資産の環境別
     sha256 参照行（ADR 0106）は段 3 の間 1 行も書き換えていない（最終変更 `689157c7`・2026-09-20）ので、
     行がある環境では新しい経路が旧経路で焼いた出力とビット同一であることを押さえている（anima /
@@ -915,7 +915,46 @@ cold / warm / local × 3 回の中央値）で、ここは決めた点と検収�
 
 ## 追記 8 — `fromContainer` の実名（2026-09-25）
 
-本文（決定 7 / 8 / 9）と追記 2 の 3 に残る `fromContainer(bytes)` は段 0 時点の名前で、実装の口は
+本文（決定 2 / 8 / 9）と追記 2 の 3 に残る `fromContainer(bytes)` は段 0 時点の名前で、実装の口は
 `openContainer` の `{ kind: "bytes" }` 入力（`packages/runtime/src/format/container/open.ts` の
 `ContainerInput`）である。本文は書き換えず、この口と読み替える（追記 4 の 7 と同じ扱い）。読み替えの記録は
 ADR [0109](0109-manifest-v5-container.md) 追記 2 にもある。
+
+## 追記 9 — 決定 16 の「三値 absmean の冪等性論証」を撤回し、scale 台帳の単一性へ置き換える（2026-09-25）
+
+決定 16 の「三値の absmean は**冪等性の論証を本 ADR の追記として書き直す**」は撤回する。書き直せる論証が
+無い。absmean（`γ = mean|W|`・`W̃ = RoundClip(W/γ, −1, 1)·γ`）は不動点を持たない。1 回目の丸めで要素は
+`{−γ, 0, +γ}` になる。もう 1 度掛けると `γ' = p·γ`（`p` = 非ゼロ要素の割合）になる。`p < 1` なら非ゼロ要素は
+`±1/p` に写って ±1 へクリップされ、`±p·γ` へ動く。不動点は `p = 1`（ゼロが 1 本も無い）のときしか無い。
+
+代わりに次を段 6（absmean の実装）の前提にする。
+
+1. **scale 台帳は丸めと同時に確定し、確定後は再計算しない** MUST。格納値は確定した scale を渡して量子化する
+   （i8 の `quantize_to_int8(weight, scale)` と同じ受け渡し — `tools/exporter/src/karume/quantize.py`）。
+2. **冪等性を当てにする経路は absmean では使えない**。同じ重みに 2 度丸めを掛ける形（tied 重みの二重適用 —
+   `fake_quant_int8` の docstring が i8 / i4 の排他を MUST にしている形）は検出して fail loudly にする。
+   再 export で scale を引き直す形と、「scale を引き直しても同値」を当てにした検算も使わない。
+3. 規律の名前を「冪等性」から「**台帳の単一性**」（1 つの重みに scale 台帳は 1 本・引き直さない）へ改める。
+
+冪等になる変種（例: scale を `max|W|` 基準にする）へ寄せる案は採らない。値域は三値のままでも BitNet 系の
+absmean とは別の量子化器になり、品質特性が変わる。現行コードへの影響は無い（absmean は未実装 — 段 6）。
+
+## 追記 10 — 決定 7 / Consequences の訂正: 読み手側の末尾詰め物の分岐は 2 つ残る（2026-09-25）
+
+決定 7 は「書き手が block 長を 4 の倍数に焼く」ことで読み手側の末尾ゼロ詰めの分岐 3 つが退役するとし、
+Consequences の「退役するもの」も同じことを書いた。書き手が block 末尾を 0x00 で焼く点は決定どおり入ったが、
+読み手側には次の **2 分岐が残る**（コードは現状維持 — 2026-09-25 裁定）。
+
+- f16 席: 奇数要素長の payload を末尾 2 バイトのゼロ詰めで 4 バイト整列させる（`session-build.ts` の
+  `alignF16Payload`）。
+- i8 / i2 席: 要素数が 4 の倍数でない payload を末尾のゼロ詰めで 4 バイト整列させる（`alignI8Payload`）。
+
+残る理由は供給側の形にある。`containerBatches`（`executor.ts`）は `readBlock(...)` を block の payload 長で
+切ってから渡すので、書き手が焼いた詰め物は読み手まで届かない。メモリ内容器（`openMemoryContainer`）の
+block はそもそも詰め物を持たない（`format/container/memory.ts` — 合成する目次の長さ = payload 長）。
+2 つの供給元を 1 つの形で受けるため、読み手が詰め直す。
+
+費用は、奇数長の f16 と要素数が 4 の倍数でない i8 / i2 の initializer ごとに、payload 1 本ぶんを新しい器へ
+写すことだけである。対象は bias などの小さいテンソルが大半になる。供給側で詰め物込みの長さを渡して 2 分岐を
+消す案は、Session 構築の長さ突合（`seat.payloadBytes` との一致）を範囲の検査へ緩めることになるので、ここでは
+採らない。

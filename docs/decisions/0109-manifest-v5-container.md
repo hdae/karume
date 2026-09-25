@@ -225,8 +225,11 @@ ADR 0108 決定 19 の `fromPretrained(source, { components: { <役割>: Compone
 2. **区間読みの保持は scan 型で part 1 本ぶんの保持枠**（`packages/hub/src/container.ts` の保持枠）。seek 型の
    保持は 0（block の区間 view だけ）。決定 7 の「本数 2」より厳しいので、実装を決定へ戻す利得は無い。
 3. **`BYTE_BUDGET`（1.5 GiB）は全量面 `fetchAssets` にだけ残る**（manifest の `assets` 用 — 1 ファイルの受信
-   バッファを受信前に確保する面なので、合計バイトの予算が要る）。容器の part はこの面を通らない。
+   バッファを受信前に確保する面なので、合計バイトの予算が要る）。容器の part はこの面を通らない。値は
+   据え置く（2026-09-25 裁定）。`fetch.ts` の `BYTE_BUDGET` の根拠文が引く実測（anima turbo i4 の先頭 4 本で
+   計 2.503 GiB の同時前確保）は `karume/4` の shard を全量面で取っていた頃のもので、今この面を通るのは資産だけ
+   である。値の根拠は「1 ファイルの前確保 + 検証の一時コピーを単一 ArrayBuffer の上限より下に置く」の側に残る。
 4. **`fromContainer(bytes)` の実名は `openContainer` の `{ kind: "bytes" }` 入力**
    （`packages/runtime/src/format/container/open.ts` の `ContainerInput`）。決定 7 と ADR
-   [0108](0108-container-format.md)（決定 7 / 8 / 9 と追記 2 の 3）に残る `fromContainer` はこの口と読み替える。
+   [0108](0108-container-format.md)（決定 2 / 8 / 9 と追記 2 の 3）に残る `fromContainer` はこの口と読み替える。
    本文は書き換えない。
