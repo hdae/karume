@@ -294,6 +294,38 @@ Deno.test("寸法が正の整数でなければ落ちる", () => {
   assertThrows(() => resizeRgb8(image, 4, 2.5), ModelInputError, "出力サイズ 4×2.5");
 });
 
+Deno.test("未知の補間フィルタ名は落ちる（Object.prototype のメンバを kernel に受けて全黒にしない）", () => {
+  // 型は `ResampleFilter` で塞いであるが、barrel を JS から叩く呼び手には届かない。
+  const image: Rgb8Image = { data: new Uint8Array(12).fill(200), width: 2, height: 2 };
+  for (const filter of ["toString", "constructor", "__proto__", "lanczos"]) {
+    const error = assertThrows(
+      () => resizeRgb8(image, 4, 4, filter as never),
+      Error,
+      `補間フィルタ ${JSON.stringify(filter)} は未対応`,
+    );
+    // 名前の綴り違いは入力の値域違反ではない（ADR 0107 決定 3 — sampler 名と同じ扱い）。
+    assert(!(error instanceof ModelInputError), `${filter} が ModelInputError になっている`);
+  }
+});
+
+Deno.test("mean / std が正規化に使えない値なら落ちる（Inf / NaN の平面を黙って返さない）", () => {
+  const image: Rgb8Image = { data: new Uint8Array(12).fill(128), width: 2, height: 2 };
+  for (const bad of [0, -0.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+    assertThrows(
+      () => normalizeToNchw(image, imageMean, [imageStd[0], bad, imageStd[2]]),
+      ModelInputError,
+      `std[1] = ${bad} が正の有限数でない`,
+    );
+  }
+  for (const bad of [Number.NaN, Number.NEGATIVE_INFINITY]) {
+    assertThrows(
+      () => normalizeToNchw(image, [imageMean[0], imageMean[1], bad], imageStd),
+      ModelInputError,
+      `mean[2] = ${bad} が有限でない`,
+    );
+  }
+});
+
 // ---- 入力起因かどうかの分類（ADR 0107）------------------------------------
 
 describe("共通 image 層の失敗をホストが 400 / 500 に振り分けるとき", () => {

@@ -174,6 +174,16 @@ export const resizeRgb8 = (
   if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) {
     throw new ModelInputError(`出力サイズ ${width}×${height} が正の整数でない`);
   }
+  // MUST: `Object.hasOwn` で引く — JS の呼び手が `"toString"` 等を渡すと Object.prototype の
+  // メンバを kernel として受け、support が NaN → 全 tap が空 → 全黒画像を黙って返す。
+  // 名前の綴り違いなので素の `Error`（ADR 0107 決定 3 — sampler 名と同じ扱い）。
+  if (!Object.hasOwn(KERNELS, filter)) {
+    throw new Error(
+      `resizeRgb8: 補間フィルタ ${JSON.stringify(filter)} は未対応（期待 ${
+        Object.keys(KERNELS).map((name) => `'${name}'`).join(" / ")
+      }）`,
+    );
+  }
   const kernel = KERNELS[filter];
   const horizontal = buildTaps(image.width, width, kernel);
   const middleStride = width * CHANNELS;
@@ -306,6 +316,20 @@ export const normalizeToNchw = (
   std: readonly [number, number, number],
 ): Float32Array<ArrayBuffer> => {
   assertRgb8(image);
+  // mean / std は呼び手が渡す値そのもの（家族は config の parse 済みの値しか渡さない — 到達は
+  // barrel の直叩きだけ）。std が 0 / 非有限だと 0 除算で Inf / NaN の平面を黙って返す。
+  for (let channel = 0; channel < CHANNELS; channel += 1) {
+    if (!Number.isFinite(mean[channel])) {
+      throw new ModelInputError(
+        `normalizeToNchw: mean[${channel}] = ${mean[channel]} が有限でない`,
+      );
+    }
+    if (!Number.isFinite(std[channel]) || std[channel] <= 0) {
+      throw new ModelInputError(
+        `normalizeToNchw: std[${channel}] = ${std[channel]} が正の有限数でない`,
+      );
+    }
+  }
   const plane = image.width * image.height;
   const out = new Float32Array(plane * CHANNELS) as Float32Array<ArrayBuffer>;
   for (let channel = 0; channel < CHANNELS; channel += 1) {
