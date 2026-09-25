@@ -45,6 +45,10 @@
 - **device.lost はランタイム一級イベント**。無視すると mapAsync が永久ハングする。
   device / PipelineCache / スケジューラは `device.destroy()` 後に再構築できる構造にする
   （VRAM を返すのは device.destroy() のみ — buffer.destroy() は 1 バイトも返さない）。
+  追記（2026-09-25）: この経路に届かない環境がある — Deno 2.9.6 は device lost を例外にせず
+  panic し、プロセスごと消える（`docs/known-issues.md`「Intel Arc B570」節）。また submit の
+  時間予算分割は 1 dispatch が単独で予算を超える場合には効かない（`docs/limitations.md`「BiRefNet
+  系の配布形」節の 2048² × B570）。
 - `requiredLimits` は compute 系（workgroup storage / invocations / workgroupSize X,Y,Z）
   まで明示要求し、取得後に検証する。`pushErrorScope('validation')` を常設する
   （無効パイプラインは throw せず dispatch no-op → 出力全 0 の沈黙故障）。
@@ -77,5 +81,8 @@
 ## 未決（個別 ADR 待ち）
 
 - KV キャッシュの IR/実行表現（静的最大長 vs prefill/decode 分割）— プロトタイプでも未決。
+  → ADR [0066](0066-generation-context-state-slots.md)（GenerationContext と名前付き state
+  スロット）で決着。
 - 時間予算の既定値の根拠づけ（プロトタイプは 100ms・安全率 0.5 の経験値）。
 - メモリプランの発展形（厳密 liveness / 静的アリーナ計画）。
+  → ADR [0093](0093-transient-liveness-packing.md)（区間 + offset 配置）で決着。
