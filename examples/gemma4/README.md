@@ -35,8 +35,8 @@ forms are mutually exclusive:
 
 ## Options
 
-All options are `--key value` pairs except `--speculative` and `--diagnostics`, which are bare
-switches. Unknown keys are rejected rather than silently ignored.
+All options are `--key value` pairs except `--speculative`, `--diagnostics`, and `--no-warmup`,
+which are bare switches. Unknown keys are rejected rather than silently ignored.
 
 | Option                           | Default                 | What it does                                                                                                       |
 | -------------------------------- | ----------------------- | ------------------------------------------------------------------------------------------------------------------ |
@@ -53,6 +53,7 @@ switches. Unknown keys are rejected rather than silently ignored.
 | `--ple-residency <host\|gpu>`    | `host`                  | Keep the PLE tables on the GPU and gather them there. Fails loudly when they do not fit one storage binding.       |
 | `--speculative`                  | off                     | Build the MTP drafter and speculate while decoding. Speed only — the token sequence does not change.               |
 | `--diagnostics`                  | off                     | Print the per-op GPU time breakdown of the last run of each turn to stderr. Not usable on macOS/Metal — see below. |
+| `--no-warmup`                    | off                     | Skip the startup warmup (see Timing and warmup below).                                                             |
 
 Any sampling flag you pass is layered on top of the recommended values the asset declares; the ones
 you leave out keep their declared value.
@@ -182,7 +183,8 @@ default until rebuilt; QAT E4B still defaults to `i4`.
 
 An explicit `--linear-gemv-reduce sequential` or `parallel` overrides the selected
 quant, and `--fuse-rms-norm-add <true|false>` does the same for the RMS-norm/add fusion
-(`--fuse-linear-static-quantize` exists as well, but ordinary Gemma quants never declare it).
+(`--fuse-linear-static-quantize` and `--packed-static-quantize` exist as well, but ordinary Gemma
+quants never declare them).
 With older distributions, `--linear-gemv-reduce parallel` works without a rebuild.
 The kernel applies to measured packed INT2/INT4/INT8 shapes and 1–8 rows; other shapes
 retain their existing kernels. Rounding and generated tokens can differ, particularly

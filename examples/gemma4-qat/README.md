@@ -63,22 +63,25 @@ deno task demo:gemma4-qat --quant i4-fast
 All three quant labels require a distribution built with the current recipe; rebuild the local
 distribution if `--quant i4-fast` reports an unknown quant. E2B then defaults to `i4-fast`, which
 uses the same packed weights as `i4` and declares `session.linearGemvReduce: "parallel"` together
-with `session.fuseRmsNormAdd: true` and `session.fuseLinearStaticQuantize: true`. `i4-gemvpar`
-declares parallel GEMV alone, and `i4` retains the reference summation order. QAT E4B still
-defaults to `i4`.
+with `session.fuseRmsNormAdd: true`, `session.fuseLinearStaticQuantize: true`, and
+`session.packedStaticQuantize: true`. `i4-gemvpar` declares parallel GEMV alone, and `i4` retains
+the reference summation order. QAT E4B still defaults to `i4`.
 
 Individual knobs override what the selected quant declares:
 
 ```sh
-deno task demo:gemma4-qat --linear-gemv-reduce sequential --fuse-linear-static-quantize false
+deno task demo:gemma4-qat --linear-gemv-reduce sequential --fuse-linear-static-quantize false \
+  --packed-static-quantize false
 deno task demo:gemma4-qat --fuse-rms-norm-add false
+deno task demo:gemma4-qat --packed-static-quantize false
 ```
 
 `--fuse-linear-static-quantize` fuses the static activation rounding (SRQ) that follows a linear
-into that linear, and it requires parallel GEMV. Passing `--linear-gemv-reduce sequential` alone on
-an `i4-fast` distribution is therefore rejected at load time: either select `--quant i4` (or
-`i4-gemvpar`) or turn the fusion off explicitly, as in the first line above. The startup line prints
-the effective value of all three knobs, and marks the ones the quant declaration still decides.
+into that linear, and `--packed-static-quantize` hands the SRQ activations to parallel GEMV as packed
+int8; both require parallel GEMV. Passing `--linear-gemv-reduce sequential` alone on an `i4-fast`
+distribution is therefore rejected at load time: either select `--quant i4` (or `i4-gemvpar`) or
+turn both off explicitly, as in the first line above. The startup line prints the effective value of
+all four knobs, and marks the ones the quant declaration still decides.
 
 The parallel GEMV kernel applies to measured packed INT2/INT4/INT8 shapes and 1–8 rows; other
 shapes retain their existing kernels. Rounding and generated tokens can differ, particularly for
