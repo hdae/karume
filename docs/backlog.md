@@ -7,7 +7,7 @@
 > [perf-ledger](perf-ledger.md) が正本で、ここは波として参照するだけ ④by-design 制約の正本は
 > [limitations](limitations.md) — 作業化が裁定された時だけここに載る。
 
-## now — 0.12.0 リリース後（2026-09-06）
+## now — 0.13.0 リリース後（2026-09-25）
 
 - **Karume 専用コンテナ形式の波（起票 2026-09-22）**: 配布形を safetensors 方言から専用コンテナ
   （`krm` = モデル / `krg` = グラフ）へ移す。正本は [ADR 0108](decisions/0108-container-format.md)（accepted）と
@@ -45,7 +45,10 @@
   ADR 0108 追記 4、RAM の数え方は [container-v1](container-v1.md) §11 が正本。
   段 3 の作るもののうち HF の全 pin の移行は **0.13.0 のリリース作業で済（2026-09-24）**: 10 リポを系列から
   `karume/0.13.0` で焼き直して旧 safetensors の削除つきで上げ直し（anima → 越境参照の anima-extra → 残り 8 本）、pin 10 本を
-  削除後の main へ更新した（`f16b8998`）。断片化した part 5 本は later 参照。
+  削除後の main へ更新した（`f16b8998`）。断片化した part 5 本は later 参照。**0.13.0 は 2026-09-25 に公開済み**
+  （Release `v0.13.0` = `4b167df8`・JSR 3 パッケージ・`smoke:published` 緑・リリースノートは
+  `outputs/release/release-notes-v0.13.0.draft.md`）。anima / anima-extra の pin は NOTICE の権利付与文
+  （`7416a285`）より前の revision（重み同一・pin 更新は次の breaking 波で判断 — 裁定 28 番）。
 
 - **モデル横断の追加調査（2026-09-10〜11）**: Qwen3-0.6B / MiniCPM5-2B の RTN / GPTQ と
   E4B の全 PLE を含むローカル pipeline は実機検証済み。E4B chat も CPU / Deno / Chrome で一致。
