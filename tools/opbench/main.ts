@@ -1,5 +1,10 @@
 /**
- * opbench — OP マイクロベンチ基盤の CLI（1 段目 = 静的 census）。
+ * opbench — OP マイクロベンチ基盤の CLI。サブコマンドは 4 つ:
+ *
+ * - `census` — 静的 census（資産のグラフから op × 形状を数える・GPU 不要）
+ * - `single` — census の op を 1 本ずつ GPU で測る
+ * - `graph` — 配布形をパイプラインで回し、op 別の GPU 時間をグラフ内で測る
+ * - `torch` — single の各行を torch（eager / compile）で組んで測り、比を出す
  *
  *     deno run -A tools/opbench/main.ts census \
  *         --source models/karume-gemma4 --out outputs/bench/karume-gemma4/2026-09-03_op-census
@@ -8,9 +13,9 @@
  *     deno run -A tools/opbench/main.ts census --source models/karume-gemma4 \
  *         --scenario long=M:1,C:8192 --out <dir>
  *
- * 1 実行 = 1 資産 = `census.jsonl` 1 本 + `summary.json` 1 本（先例 = tools/ram-peak/measure.ts の
+ * census は 1 実行 = 1 資産 = `census.jsonl` 1 本 + `summary.json` 1 本（先例 = tools/ram-peak/measure.ts の
  * 「1 構成 = 1 プロセス」）。GPU も重みバイトも使わない — 読むのは容器の part 0（ヘッダ +
- * グラフ記述 + モデル記述）だけ。
+ * グラフ記述 + モデル記述）だけ。各サブコマンドの引数は USAGE が正本。
  */
 
 import { directoryUrl, externalPath, readIrGraph, resolveAsset } from "../_shared/assets.ts";
@@ -237,7 +242,7 @@ const runCensus = async (args: ReadonlyMap<string, readonly string[]>): Promise<
   }));
 };
 
-const USAGE = `使い方: deno run -A tools/opbench/main.ts <census|single> …
+const USAGE = `使い方: deno run -A tools/opbench/main.ts <census|single|graph|torch> …
   census --source <dir> --out <dir>
     --source <dir>       配布形（karume.json あり）か outputs/series の系列ディレクトリ
     --out <dir>          census.jsonl / summary.json の書き出し先
