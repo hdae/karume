@@ -133,6 +133,9 @@ measurements in `docs/research/`.
 
 ### Changed
 
+- anima distribution repositories: `NOTICE.md` and the model card now state that any rights to use
+  the CircleStone Models and/or Derivatives are granted directly by CircleStone Labs LLC under the
+  CircleStone Labs Non-Commercial License (license §3(a)).
 - `GpuContext.beginBatch()` rejects with `GpuDeviceLostError` when the device is already lost or
   destroyed; `openContainer` rejects a `krm` whose expectation has `graph` but no `model`, and
   containers whose weight pieces are not in non-decreasing part order; `estimateGraphMemory` /
