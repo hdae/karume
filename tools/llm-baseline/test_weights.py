@@ -8,6 +8,7 @@ from weights import (
     DiskPle,
     assert_qat_checked_range,
     assert_srq_scales,
+    ple_placement,
 )
 
 
@@ -67,6 +68,19 @@ def test_quantized_ple_keeps_layer_scales_and_block_boundaries():
     expected = (VALUES.float() * SCALES.unsqueeze(-1)).flatten(1)[ids] * 4
 
     assert torch.equal(module(ids), expected)
+
+
+def test_the_ple_record_names_the_row_lookup_that_was_installed(tmp_path):
+    """loader.json の `ple` は、容器の資産を引く経路と公式 checkpoint を引く経路を取り違えない。"""
+    save_file(
+        {"model.language_model.embed_tokens_per_layer.weight": torch.zeros(8, 12)},
+        tmp_path / "model.safetensors",
+    )
+
+    assert ple_placement(ContainerPle(_ple_index(), _reader(), 4)) == "container-row-lookup"
+    assert ple_placement(DiskPle(tmp_path, 4)) == "disk-row-lookup"
+    with pytest.raises(TypeError, match="未知の module"):
+        ple_placement(torch.nn.Embedding(8, 12))
 
 
 def test_a_ple_index_of_another_schema_is_refused():

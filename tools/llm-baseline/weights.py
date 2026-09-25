@@ -281,6 +281,15 @@ class ContainerPle(nn.Module):
         )
 
 
+def ple_placement(module: nn.Module) -> str:
+    """差し込んだ PLE の行読みの経路を名乗る（記録は分岐の判断でなく差し込んだ実体から導く）。"""
+    if isinstance(module, ContainerPle):
+        return "container-row-lookup"
+    if isinstance(module, DiskPle):
+        return "disk-row-lookup"
+    raise TypeError(f"PLE の経路が未知の module です: {type(module).__name__}")
+
+
 def put(model: nn.Module, name: str, value: torch.Tensor) -> None:
     parent, _, leaf = name.rpartition(".")
     module = model.get_submodule(parent)
@@ -369,7 +378,7 @@ def load_float_model(
         "loadedParameterNames": sorted(loaded),
         "attention": "eager",
         "dtype": "float32",
-        "ple": "disk-row-lookup" if family == "gemma4" else None,
+        "ple": ple_placement(model.model.embed_tokens_per_layer) if family == "gemma4" else None,
     }
 
 
