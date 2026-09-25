@@ -96,6 +96,16 @@ manifest 側の門も HF とは性格が違う: HF の `MAX_MANIFEST_BYTES` は�
 `parse` の throw はそのまま外へ出す（ローカルには evict すべきキャッシュが無いので、壊れた
 manifest は毎回同じ `ManifestFormatError` で落ちるのが正しい）。
 
+追記（2026-09-25 — コンテナ経路の現況）: 上の「sha256 を照合しない・改竄を検出しない」は、
+**ホスト（hub）がファイル全体の sha256 を照合しない**という意味で今も成り立つ。ただし
+コンテナ（`krm` の part — ADR [0108](0108-container-format.md) / [0109](0109-manifest-v5-container.md)
+決定 7）では、ローカル取得元は**未検証の取得元**として扱われる（`integrity: "local"` →
+`packages/hub/src/container.ts` の `verified = integrity === "network"` が false）。runtime の
+`openContainer` は descriptor の 2 文書を manifest の期待値（長さ + sha256）と常に照合し、
+block を読むたびにその sha256 を照合する（`packages/runtime/src/format/container/open.ts` の
+`readBlock`）。つまり容器の部分では**読んだ block の改竄を検出する**。size の厳密一致だけが門として
+残るのは、manifest `assets` の `FileRef` で直接読むファイルである。
+
 ### 3. 越境は明示 mapping → 明示 fallback → fail loudly（暗黙の推測・暗黙の降格は禁止）
 
 越境参照（`FileRef` の `repo` + `revision` — ADR 0038 §7）の解決順は 3 段で、**どこにも推測を
@@ -141,6 +151,10 @@ RAM ピーク目標 O(最大 shard) を満たす（ADR 0070 決定 2 の読み�
 ディスクを 2 倍使ったうえで読みが 1 段増えるだけで、得るものが 1 つも無い。`headers` / `fetch` /
 `caches` の 3 ノブも**取得元ハンドルを渡した呼び出しでは 1 つも効かない**（HTTP 取得元専用の
 語彙が公開面に出ているもの — 8 家族の `*FromPretrainedOptions` の doc に明記した）。
+
+追記（2026-09-25）: 逐次面（`streamAssets`）は旧配布形の読み手とともに退役した（2026-09-24・
+段 3d）。ローカル取得元の読みは、コンテナ経路の区間読み（ADR [0109](0109-manifest-v5-container.md)
+決定 7）と `fetchAssets` が担う。
 
 ### 6. エラーと識別欄の語彙を一般化する（持たない身元を名乗らせない）
 

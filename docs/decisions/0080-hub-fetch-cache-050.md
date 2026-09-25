@@ -95,3 +95,9 @@ limitations に by-design として記載する。将来 gated 運用を始め�
   検出できるのは「途中で切れたコピー・別 quant の取り違え」までで、**改竄は検出しない**
   （by-design として `docs/limitations.md` に記載）。決定 3（credential 隔離の撤去）は
   HTTP 取得元だけの話で、ローカル取得元はそもそも CacheStorage を通らない。
+- 2026-09-25（コンテナ経路 — ADR [0109](0109-manifest-v5-container.md) 決定 7）: 上の「ローカル
+  経路は改竄を検出しない」は、**hub がファイル全体の sha256 を照合しない**点に限って今も成り立つ。
+  コンテナ（`krm` の part）では、ローカル取得元は未検証の取得元として扱われ、runtime の
+  `openContainer` が descriptor の 2 文書と、読んだ block ごとの sha256 を照合する（ADR
+  [0086](0086-distribution-source.md) 決定 2 の追記）。size の厳密一致だけが門として残るのは
+  manifest `assets` の `FileRef` で直接読むファイルである。

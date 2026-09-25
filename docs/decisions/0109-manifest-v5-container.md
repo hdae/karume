@@ -141,8 +141,8 @@ hub はコンテナ 1 本につき `BlockSource` を返す取得面を 1 本持�
   二次になる — `fetch-cache/src/core.ts:1510-1566`）。
 - **「検証済み」を運ぶ**: 取得層がファイル全体を検証したバイト列（HF 経由）は `BlockSource` が
   検証済みと名乗り、`openContainer.readBlock` は**未検証の取得元にだけ** block の sha256 を掛ける
-  （`fromContainer(bytes)`・ローカルディレクトリ — ADR 0086 決定 2 の「ローカルは sha256 を照合
-  しない」はそのまま）。cold の 2 重 digest（温めの逐次 + block）を避ける。container-v1 §7 の表を
+  （`fromContainer(bytes)`・ローカルディレクトリ — hub がファイル全体の sha256 を照合しない点は
+  ADR 0086 決定 2 のまま）。cold の 2 重 digest（温めの逐次 + block）を避ける。container-v1 §7 の表を
   この形に訂正する。
 - **HTTP Range は段 6 のまま**。前倒しの条件は「段 2 の RAM ピーク harness で cold のピークが
   『part 長 + 重ね合わせ』を超える」こと。取得層（`@hdae/fetch-cache`）は段 2 では変更しない。
@@ -214,3 +214,19 @@ ADR 0108 決定 19 の `fromPretrained(source, { components: { <役割>: Compone
 3. **本文の段 3 への持ち越しは済んだ**。決定 8 の「dist.py / recipe が `krm` を直接書く」は段 3a / 3b、
    Consequences の「`StreamedAsset` 系の shard 面の退役」は段 3d（hub の `streamAssets` / `StreamedAsset` /
    `StreamAssetsOptions` を削除）で入った。
+
+## 追記 2 — 決定 7 の同時取得予算と `fromContainer(bytes)` の実名（2026-09-25）
+
+決定 7 の末尾（段 2 の既定 = 本数 2・合計 = 最大 part 長 × 2）は採られなかった。段 2f 以降の実装は次の形で、
+数え方の正本は [container-v1](../container-v1.md) §11 である。
+
+1. **温め（相 1）は本数 4 本の streaming**（`packages/hub/src/fetch.ts` の `CONCURRENCY` — `prefetchAssets`）。
+   body をそのままキャッシュへ流すので受信バッファの前確保が無く、本数からは RAM が決まらない。
+2. **区間読みの保持は scan 型で part 1 本ぶんの保持枠**（`packages/hub/src/container.ts` の保持枠）。seek 型の
+   保持は 0（block の区間 view だけ）。決定 7 の「本数 2」より厳しいので、実装を決定へ戻す利得は無い。
+3. **`BYTE_BUDGET`（1.5 GiB）は全量面 `fetchAssets` にだけ残る**（manifest の `assets` 用 — 1 ファイルの受信
+   バッファを受信前に確保する面なので、合計バイトの予算が要る）。容器の part はこの面を通らない。
+4. **`fromContainer(bytes)` の実名は `openContainer` の `{ kind: "bytes" }` 入力**
+   （`packages/runtime/src/format/container/open.ts` の `ContainerInput`）。決定 7 と ADR
+   [0108](0108-container-format.md)（決定 7 / 8 / 9 と追記 2 の 3）に残る `fromContainer` はこの口と読み替える。
+   本文は書き換えない。
