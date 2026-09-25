@@ -402,7 +402,7 @@ def from_pretrained(
     repo: str,
     options: Sequence[str],
     *,
-    disposable: str = "using",
+    disposable: str,
 ) -> list[str]:
     """使い方スニペットの `fromPretrained` 呼び出し 1 つ（**object ref 形** + pin の席）。
 
@@ -411,7 +411,8 @@ def from_pretrained(
     そのまま入る行の並び（family 固有のノブ — 2 スペース字下げ済みで渡す）。
 
     `disposable` は宣言の綴り（`using` / `await using`）— pipeline が同期 / 非同期どちらの
-    dispose を持つかは family 側の事実なので、ここでは選ばない。
+    dispose を持つかは family 側の事実なので、ここでは選ばない（既定を持たない — 既定の綴りが
+    family の事実と違えば、カードの使い方がそのまま型エラーのコードになる）。
     """
     return [
         f"{disposable} pipeline = await {pipeline_class}.fromPretrained({{",

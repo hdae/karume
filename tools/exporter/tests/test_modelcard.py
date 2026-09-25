@@ -390,7 +390,9 @@ class TestFromPretrained:
     """
 
     def test_it_passes_the_repository_as_an_object_and_keeps_the_options_second(self) -> None:
-        lines = from_pretrained("AnimaPipeline", "hdae/karume-anima-turbo", ['  // quant: "f16",'])
+        lines = from_pretrained(
+            "AnimaPipeline", "hdae/karume-anima-turbo", ['  // quant: "f16",'], disposable="using"
+        )
 
         assert lines[0] == "using pipeline = await AnimaPipeline.fromPretrained({"
         assert lines[1] == '  repo: "hdae/karume-anima-turbo",'
@@ -398,7 +400,7 @@ class TestFromPretrained:
 
     def test_it_offers_the_pin_as_a_commented_out_line(self) -> None:
         """既定は `main` 追従のまま — 外すだけで pin できる形にする（2 本のサンプルに割らない）。"""
-        lines = from_pretrained("AnimaPipeline", "hdae/x", [])
+        lines = from_pretrained("AnimaPipeline", "hdae/x", [], disposable="using")
 
         assert '  // revision: "<full commit sha>",' in lines
         assert any("Pin a commit for reproducible builds" in line for line in lines)
@@ -408,6 +410,14 @@ class TestFromPretrained:
         lines = from_pretrained("Siglip2Pipeline", "hdae/x", [], disposable="await using")
 
         assert lines[0].startswith("await using pipeline = await Siglip2Pipeline")
+
+    def test_the_disposable_spelling_has_no_default(self) -> None:
+        """綴りを名乗らない呼び出しは落ちる。
+
+        既定が family の事実と違えば、カードの使い方が黙って誤ったコードになる。
+        """
+        with pytest.raises(TypeError, match="disposable"):
+            from_pretrained("Siglip2Pipeline", "hdae/x", [])  # type: ignore[call-arg]
 
 
 class TestRequirePipeline:
