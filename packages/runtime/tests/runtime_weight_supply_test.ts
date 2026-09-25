@@ -112,7 +112,8 @@ type BeforeRead = (id: string) => Promise<void>;
  *
  * 記録は 1 本の列 `events` に時系列で積む: `read <block>`（取得元の読みの開始）/
  * `write <block>`（`queue.writeBuffer` — 渡された器から、どの block の読みが返した器かを引く）/
- * `submit`（空 submit）/ `fence`（`onSubmittedWorkDone` の完了待ち）。
+ * `push` / `pop`（errorScope 1 本の push / pop）/ `submit`（空 submit）/ `fence`
+ * （`onSubmittedWorkDone` の完了待ち）。
  *
  * DOM 型全体は再現しないので cast で渡す（tests/helpers/fake-gpu.ts と同じテスト専用の境界）。
  * GpuContext 自体は本物を使う（消失購読と errorScope の経路は本番実装のまま通す）。
@@ -126,9 +127,11 @@ const recorder = () => {
     features: new Set<string>(),
     limits: { minStorageBufferOffsetAlignment: 256 },
     pushErrorScope: (): void => {
+      events.push("push");
       counts.openScopes += 1;
     },
     popErrorScope: (): Promise<GPUError | null> => {
+      events.push("pop");
       counts.openScopes -= 1;
       return Promise.resolve(null);
     },
@@ -173,7 +176,7 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
 // ---------------------------------------------------------------------------
 
 describe("重みの供給は block を 1 本ずつ読んで上げる", () => {
-  it("読みと writeBuffer が block ごとに交互に並び、フェンスは part ごとに 1 回だけ張る", async () => {
+  it("読みと writeBuffer が block ごとに交互に並び、errorScope は block ごと・フェンスは part ごとに 1 回だけ張る", async () => {
     const { events, gpu, trace } = recorder();
     const session = await createSessionFromContainer(gpu, trace(container()), GRAPH_NAME);
     // 破棄の flush も完了待ちを 1 回呼ぶので、構築が終わった時点の列を写しておく。
@@ -181,21 +184,40 @@ describe("重みの供給は block を 1 本ずつ読んで上げる", () => {
     const { shardCount } = session.diagnostics().buildStats;
     await session.dispose();
 
+    // errorScope は block（item）ごとに 1 対（out-of-memory + validation の 2 本 push → write →
+    // 2 本 pop）。part 単位へ粗くなると確保失敗の帰属が block から part へ落ちる。空 submit の
+    // 周りには張らない（確保も検証も伴わない — session-build.ts のフェンスの NOTE）。
     assertEquals(built, [
       // part 1 本目（丸ごと供給 b / c）: part を読み切らずに 1 本ずつ上げる。
       "read model/b",
+      "push",
+      "push",
       "write model/b",
+      "pop",
+      "pop",
       "read model/c",
+      "push",
+      "push",
       "write model/c",
+      "pop",
+      "pop",
       "submit",
       "fence",
       // 次の part の読みはフェンスの後。
       "read model/w#piece1",
+      "push",
+      "push",
       "write model/w#piece1",
+      "pop",
+      "pop",
       "submit",
       "fence",
       "read model/w#piece2",
+      "push",
+      "push",
       "write model/w#piece2",
+      "pop",
+      "pop",
       "submit",
       "fence",
     ]);
