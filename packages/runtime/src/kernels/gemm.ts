@@ -35,7 +35,7 @@
  * 従来の文字列を返す形にする）。スナップショット（tests/fixtures/wgsl/）が検出器。
  * MUST: K タイル幅は 16 のまま・外側 `t` も内側 `kk` も昇順。1 出力要素あたりの加算順序が
  * 旧 16×16 カーネルと完全に一致する（既存の数値契約を動かさないための土台）。
- * MUST: m タイルの行数（{@link GEMM_MTILE_SMALL} の 32 行変種 — conv2d のみ）を変えても
+ * MUST: m タイルの行数（{@link GEMM_MTILE_SMALL} の 32 行変種 — conv1d / conv2d の implicit GEMM のみ）を変えても
  * **1 出力要素の数値経路は変えない**。タイル形が決めるのは「どの workgroup がどの出力を
  * 担当するか」だけで、K 縮約の順序も丸めの並びも `acc` の初期値も共通の骨格が持つ。
  * MUST: 1 workgroup = 1 出力タイルで全域を覆う。grid-stride で縮退できないため dispatch 数の
@@ -778,9 +778,9 @@ const fillBLinear = (
 ): string => {
   // i4 の group scale は k 依存なのでチャネル不変の巻き上げ（{@link scaleVar}）が使えない —
   // **quad ごと**に 1 度引く（wk0 は 4 整列・group_size ≥ 16 なので quad は group を跨がない
-  // — ADR 0069 決定 3 の「タイル読み込み時に group 境界で引き直す」の実装形）。端 quad
-  // （wk0 ≥ dims.k / wcol ≥ dims.n）の添字は WGSL の境界付きアクセスで安全で、読んだ値は
-  // ガードにより一度も使われない（prologueBLinear の端タイルと同じ扱い）。
+  // — ADR 0069 決定 3 の「タイル読み込み時に group 境界で引き直す」の実装形）。範囲外は
+  // 読まない: 読みは `wcol < dims.n` の分岐の内側にあり、`k % group_size == 0` かつ
+  // `group_size ≥ 16`（2 冪）から k は K タイル幅の倍数になるので `wk0 < dims.k` も常に成り立つ。
   const groupScale = (slot: number): string =>
     weight === "i4"
       ? `
@@ -911,7 +911,7 @@ ${rows}`;
 };
 
 /**
- * 書き出し。`ceil(m/64) × ceil(n/64)` タイルが出力の全要素をちょうど 1 回ずつ覆う
+ * 書き出し。`ceil(m/tileM) × ceil(n/tileN)` タイル（{@link gemmTileM} / {@link gemmTileN}）が出力の全要素をちょうど 1 回ずつ覆う
  * （full-write — ADR 0014）。v4 は `n % 4 == 0` なので quad の端数が出ない。
  *
  * `bias` は常に f32 なのでキャスト無しで vec4 に組める（ADR 0006）。
@@ -1054,7 +1054,7 @@ const accumulatorUpdate = (geometry: GemmGeometry, compute: GemmCompute): string
 /**
  * head / Dims 追加欄 / prologue / fillA / fillB / store の断片を差し込んだ 1 本のシェーダ。
  *
- * `dimsExtra` は uniform の 4 語目以降（融合 attention ① の `scale` / conv2d の幾何 13 語）。
+ * `dimsExtra` は uniform の 4 語目以降（融合 attention ① の `scale` / conv1d / conv2d の畳み込み幾何）。
  * uniform struct は 16 バイト整列なので 4 語目は既に確保済みで、既存 3 op では空文字
  * （生成物は 1 バイトも動かない）。`accInit` も同様に省略時は従来の 0 初期化そのまま。
  *

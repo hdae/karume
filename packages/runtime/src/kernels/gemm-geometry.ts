@@ -1,9 +1,9 @@
 /**
  * f32 / f16 GEMM 骨格（src/kernels/gemm.ts が持つ matmul / bmm / linear / 融合 attention の
- * ①QK・③PV / conv2d の implicit GEMM）が共有する**タイル幾何のパラメタ面**。
+ * ①QK・③PV / conv1d / conv2d の implicit GEMM）が共有する**タイル幾何のパラメタ面**。
  *
  * ```
- * tileM = regM · wgY   （1 workgroup が持つ出力の行数 — conv2d だけが 32 の変種を取る）
+ * tileM = regM · wgY   （1 workgroup が持つ出力の行数 — conv1d / conv2d の implicit GEMM だけが 32 の変種を取る）
  * tileN = regN · wgX   （                     列数）
  * threads = wgX · wgY  （1 スレッドが regM×regN の出力を持つ）
  * ```
@@ -287,7 +287,7 @@ export const gemmGeometryForRows = (rows: number): GemmGeometry => {
  * メモリへ落ちるため（Metal で顕著）。展開しても K タイル幅・`t` / `kk` の昇順・1 出力要素
  * あたりの加算順序は変わらない（出力ごとに独立な縮約を名前へ割り当て直すだけ）。
  *
- * `init` は 1 行ぶんの初期値式（既定は 0）。conv2d だけが **bias-first**（ADR 0024 の MUST）で
+ * `init` は 1 行ぶんの初期値式（既定は 0）。conv1d / conv2d の implicit GEMM だけが **bias-first**（ADR 0024 の MUST）で
  * 行 = 出力チャネルの bias を差し込む。
  */
 export const gemmAccumulatorInit = (
