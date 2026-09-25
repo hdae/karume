@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -250,6 +251,32 @@ def _lender_layouts() -> dict[str, str]:
     return {TINY_SHARED_TENSOR: "i8"}
 
 
+class TestTheCommandLine:
+    """drafter の CLI は効くノブだけを受理する（効かないノブを黙って捨てない — fail loudly）。"""
+
+    def test_the_chunk_symbol_bound_is_not_accepted(self, capsys):
+        """drafter には chunk 記号が無いので `--sym-max` は受理されず、起動が落ちる。"""
+        with pytest.raises(SystemExit):
+            drafter.build_parser().parse_args(["--sym-max", "512"])
+
+        assert "--sym-max" in capsys.readouterr().err
+
+    def test_the_shared_skeleton_is_still_accepted(self, tmp_path):
+        """骨組みの `--model-dir` / `--out` は 1-shot 台本と同じ綴りで受ける。"""
+        args = drafter.build_parser().parse_args(
+            ["--model-dir", str(tmp_path / "m"), "--out", str(tmp_path / "o")]
+        )
+
+        assert (args.model_dir, args.out) == (tmp_path / "m", tmp_path / "o")
+        assert not hasattr(args, "sym_max")
+
+    def test_the_one_shot_skeleton_keeps_the_chunk_symbol_bound(self):
+        """省くのは drafter だけ — 既定の骨組みは `--sym-max` を持ち続ける。"""
+        args = gx.series_parser("one-shot", Path("out")).parse_args(["--sym-max", "512"])
+
+        assert args.sym_max == 512
+
+
 class TestReadingTheLender:
     """貸し手から**構造で**引く（綴りを写経しない）ことと、その検出線。"""
 
@@ -470,6 +497,22 @@ class TestExportedDrafterForm:
         mutate(verified)
 
         with pytest.raises(AssertionError, match=message):
+            drafter.assert_ir_form_drafter(verified, config, lender, TINY_STEPS)
+
+    @pytest.mark.parametrize("part", decode.ROPE_PARTS)
+    def test_the_form_gate_checks_the_width_of_every_rope_part(self, tiny_container, part):
+        """故障注入 — cos / sin のどちらの幅が崩れても書き手側の門で落ちる。
+
+        並びは入力名で縛られているので、片方の幅の取り違えだけが名前の検査を抜ける
+        （配布側の門では落ちるが、書き手側の門の網羅が欠ける）。
+        """
+        verified, config, lender = tiny_container
+        name = decode.rope_input_name(decode.ROPE_LAYER_TYPES[0], part)
+        index = next(i for i, spec in enumerate(verified.inputs) if spec.name == name)
+        spec = verified.inputs[index]
+        verified.inputs[index] = replace(spec, shape=[*spec.shape[:-1], spec.shape[-1] + 1])
+
+        with pytest.raises(AssertionError, match=f"グラフ入力 '{name}'"):
             drafter.assert_ir_form_drafter(verified, config, lender, TINY_STEPS)
 
     def test_the_distribution_gate_accepts_the_pair(self, tiny_container):

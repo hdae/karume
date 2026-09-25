@@ -97,7 +97,7 @@ from gemma4 import export as one_shot
 from gemma4 import export_decode as decode
 from gemma4 import export_product as product
 from gemma4 import ple, provenance
-from gemma4.distribution import GEMMA4_DRAFTER_ROLE
+from gemma4.distribution import GEMMA4_CHUNK_LENGTH, GEMMA4_DRAFTER_ROLE
 from karume.artifacts import staged_publication
 from karume.container import container_parts
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION
@@ -150,7 +150,7 @@ GOLDEN_CYCLES = 200
 
 #: golden の prefill を割る行数。**karume の既定 chunkLength と同じ**にする（貸し手の実行が
 #: 同じ割り方で積むので、積和の順序を揃えられる唯一のノブ）。綴りの正本は配布 recipe。
-GOLDEN_PREFILL_CHUNK = 768
+GOLDEN_PREFILL_CHUNK = GEMMA4_CHUNK_LENGTH
 
 #: 短いケースの本文（E-4 の a と同じ会話 — 1 ターンの依頼文）。**窓 512 の内側**で終わる長さで、
 #: `P < window` の側（列が窓より少ない）を踏む唯一のケース。
@@ -600,13 +600,15 @@ def assert_ir_form_drafter(
     text = config.get_text_config()
     specs = decode.rope_specs(text)
     for layer_type in decode.ROPE_LAYER_TYPES:
-        name = decode.rope_input_name(layer_type, "cos")
-        spec = next(item for item in graph.inputs if item.name == name)
         expected = [1, 1, specs[layer_type].head_dim]
-        if spec.dtype != "f32" or list(spec.shape) != expected:
-            raise AssertionError(
-                f"グラフ入力 '{name}' が {spec.dtype} {list(spec.shape)} — f32 {expected} でない"
-            )
+        for part in decode.ROPE_PARTS:
+            name = decode.rope_input_name(layer_type, part)
+            spec = next(item for item in graph.inputs if item.name == name)
+            if spec.dtype != "f32" or list(spec.shape) != expected:
+                raise AssertionError(
+                    f"グラフ入力 '{name}' が {spec.dtype} {list(spec.shape)} —"
+                    f" f32 {expected} でない"
+                )
 
     if len(graph.outputs) != steps:
         raise AssertionError(f"IR 出力が {len(graph.outputs)} 本（draft {steps} 段の 1 本ずつ）")
@@ -1115,7 +1117,7 @@ def example_inputs(wrapper: DrafterWrapper, specs: Mapping[str, Any]) -> tuple[t
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = one_shot.series_parser(__doc__.split("\n\n")[0], DEFAULT_OUT_DIR)
+    parser = one_shot.series_parser(__doc__.split("\n\n")[0], DEFAULT_OUT_DIR, with_sym_max=False)
     parser.add_argument("--steps", type=int, default=DRAFT_STEPS)
     parser.add_argument("--product-dir", type=Path, default=DEFAULT_PRODUCT_DIR)
     parser.add_argument("--cycles", type=int, default=GOLDEN_CYCLES)
@@ -1128,9 +1130,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
     options = {
-        name: value
-        for name, value in vars(args).items()
-        if name not in ("model_dir", "out", "sym_max")
+        name: value for name, value in vars(args).items() if name not in ("model_dir", "out")
     }
     summary = export_series(args.model_dir, args.out, **options)
     print(json.dumps({"model_dir": str(args.model_dir), **summary}, indent=1, ensure_ascii=False))
