@@ -21,7 +21,7 @@ export class RuntimeSupportError extends Error {
 /** op ごとの実行可能条件。op 名だけでは dtype と attrs の差が表せない。 */
 export type OpSupport = {
   /**
-   * 実行できる意味論 dtype の**和**（op ごとに違う — 契約表 src/ops.ts が正本）。
+   * 実行できる意味論 dtype の**和**（op ごとに違う — 契約表 src/ops/contracts.ts が正本）。
    * スロット別契約の op ではこの和が実際の受理より広いので、入力の突合には使わない。
    */
   readonly dtypes: ReadonlySet<IrDtype>;
@@ -45,7 +45,10 @@ export type OpSupport = {
    * 持たせても既存の判定は変わらない。
    */
   readonly outDtypes: readonly ReadonlySet<IrDtype>[];
-  /** 実装済みの attr キー（契約表の attrs スキーマが宣言するキーそのもの）。 */
+  /**
+   * 実装済みの attr キー（契約表が宣言する必須 attrs と省略可能 attrs〈`optionalAttrs`〉の
+   * キーの和）。
+   */
   readonly attrKeys: ReadonlySet<string>;
 };
 

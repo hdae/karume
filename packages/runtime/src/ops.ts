@@ -13,6 +13,8 @@
 
 // 実体は src/ops/ の 4 モジュール（names = op 名と基底 / attrs = attrs スキーマとアクセサ /
 // contracts = 契約表と照会 / shapes = shape 計算）。この面は再輸出のみで、公開名は分割前と同一。
+// 同じディレクトリの support.ts（ランタイム対応表の型と列挙門）はこの面の外で、
+// runtime/executor.ts・runtime/estimate.ts・mod.ts が直接 import する。
 
 export {
   ARGMAX_OP,

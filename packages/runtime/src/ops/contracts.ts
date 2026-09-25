@@ -143,7 +143,7 @@ type ContractBase = {
    * MUST: 「アリティ検査を緩める」ためにこの欄を立てない。可変なのは cat の入力本数だけで、
    * 他の op は本数そのものが契約（bias 常時ありのアリティ 3 固定など）。
    * NOTE: capability 射影（{@link slotDtypesOf}）は下限ぶんのスロットしか作らない。uniform
-   * 契約では全スロットが同じ受理集合なので、余ったスロットを和で見る列挙門（container.ts）と
+   * 契約では全スロットが同じ受理集合なので、余ったスロットを和で見る列挙門（ops/support.ts の `assertRuntimeSupport`）と
    * 結論が一致する。
    */
   readonly variadic?: true;
@@ -159,7 +159,8 @@ type ContractBase = {
    */
   readonly maxArity?: number;
   /**
-   * **省略可能な attrs**（現状 `window` の 1 本 — ADR 0067 決定 4 / 5）。宣言されていれば
+   * **省略可能な attrs**（現状 `window`〈ADR 0067 決定 4 / 5〉と `readonly`〈ADR 0096 段 2 §1.2〉の
+   * 2 本）。宣言されていれば
    * 値域検査を通り、無ければ「欄の不存在」がそのまま意味を持つ。
    *
    * MUST: 必須 attrs（{@link ContractBase.attrs}）を optional 化するために使わない。
@@ -701,7 +702,7 @@ export const attrKeysOf = (found: OpContract): readonly string[] => Object.keys(
  * 契約が**省略可能**として宣言する attrs キー（{@link ContractBase.optionalAttrs}）。
  *
  * MUST: capability 射影（{@link RUNTIME_SUPPORT}）には必須と省略可能の**和**を載せる —
- * 列挙門（container.ts）は「実装済みの attr キー」との差を「未実装 attrs」として並べるので、
+ * 列挙門（ops/support.ts の `assertRuntimeSupport`）は「実装済みの attr キー」との差を「未実装 attrs」として並べるので、
  * 省略可能なぶんを落とすと states 形の正しいグラフが capability 不足で拒否される。
  */
 export const optionalAttrKeysOf = (found: OpContract): readonly string[] =>
@@ -753,9 +754,10 @@ export const RUNTIME_SUPPORT: RuntimeSupport = {
     }]),
   ),
   // 生の int32 格納（ADR 0010）は記号依存定数の焼き込み先として実行対象。f16（ADR 0018）・
-  // i8（ADR 0019）・i4（ADR 0069）は実行経路が入った（適格な重みスロットは圧縮のまま GPU
-  // 常駐・適格外はロード時に CPU で f32 展開）ので、**どの initializer に付いていても実行
-  // できる**。i4 の適格だけ狭い（linear の重みスロット限定 — 適格外は CPU 展開の受け皿）。
+  // i8（ADR 0019）・i4（ADR 0069）・i2（ADR 0097 追記 1）は実行経路が入った（適格な重みスロットは
+  // 圧縮のまま GPU 常駐・適格外はロード時に CPU で f32 展開）ので、**どの initializer に付いて
+  // いても実行できる**。i4 の適格だけ狭い（linear の重みスロット限定 — 適格外は CPU 展開の
+  // 受け皿）。i2 の適格は linear / embedding の重みスロット。
   // bf16 だけが宣言としては valid で実行できない（capability 不足として列挙で落ちる）。
   storage: new Set(["f32", "f16", "i8", "i4", "i2", "i32"]),
   io: new Set(IO_DTYPES),
