@@ -153,3 +153,26 @@ view なので減らない（container-v1 §11）。決定 1 の「shard ルー�
 検査（Python 正本 `shards.py`）」は、`shards` 欄と `shards.py` が退役したので、現行では
 `packages/hub/src/manifest.ts` が `container.parts` だけに掛ける part 長の天井（1024 MiB・閉区間）と読む
 （Python 正本は `tools/exporter/src/karume/container.py` の `PART_MAX_BYTES`）。
+
+## 追記（2026-09-25 — 決定 3 の「展開ワーストを書かない」根拠の訂正）
+
+決定 3 は、需要を常駐前提の寸法に限る根拠を「f32 展開のワーストを要求に書くと本来動く環境を DL 前に誤拒否
+する」とした。この根拠は現行コードでは成り立たない。常駐できるかどうか（席）を決める
+`planWeightResidency(graph)`（`packages/runtime/src/runtime/weight-residency.ts`）はグラフだけを受ける純関数で、
+device に依らない。常駐できない席（`expanded`）は、どの device でも f32 へ展開されて `numel × 4` で確保される。
+したがって展開後の寸法が既定を超える配布物は、既定スペックの device では `createSession` の上限検査で必ず
+落ちる。「本来動く環境」は無い。
+
+現行の需要の意味論は次のとおりで、コードは据え置く（2026-09-25 裁定）。
+
+- exporter の需要（`tools/exporter/src/karume/dist.py` の `component_demand_bytes`）は、合流した供給計画の
+  **payload 長**（piece を合わせた長さと companion scale）と最大 state スロットの最大である。展開席の展開後
+  サイズは数えない。
+- よって「欄なし = 既定スペックで動く」が保証するのは**常駐席（raw / f16 / i8 / i4 / i2）と state が既定内**で
+  あることまでで、展開席の寸法は欄に現れない。展開席の上限超過は `createSession` の検査（決定 1）が受ける。
+- 実資産では展開席は 0 本である（2026-09-24 の全域レビューで配布形 110 容器の全 initializer を席分類した
+  結果）。今は食い違いが発火しない潜在の差に留まる。
+
+展開席を需要に含める（Python に席分類の鏡像を持たせ、TS との突合表で固定する）のはリリース後の候補とする。
+`tools/exporter/src/karume/limits.py` の docstring の MUST（「展開ワーストを要求に書くと誤拒否する」）も、
+この訂正に揃える対象である。
