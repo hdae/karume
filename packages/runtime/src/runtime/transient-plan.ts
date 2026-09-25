@@ -76,7 +76,10 @@ export type TransientStepSpec = {
 
 export type TransientProgram = readonly TransientStepSpec[];
 
-/** 計画が従う device の上限（granted 値。見積りは WebGPU core 既定を渡す）。 */
+/**
+ * 計画が従う device の上限（granted 値）。見積りは呼び手が渡した granted 値を使い、無指定の欄と
+ * offset 整列は WebGPU core 既定で埋める。
+ */
 export type TransientLimits = {
   readonly maxBufferSize: number;
   readonly maxStorageBufferBindingSize: number;

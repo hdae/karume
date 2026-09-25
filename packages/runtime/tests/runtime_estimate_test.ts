@@ -94,3 +94,20 @@ Deno.test("グラフ出力（pinned）は生存を終えず、後続は整列し
   // （offset 整列は device の minStorageBufferOffsetAlignment・仕様既定 256 — ADR 0093 決定 1）。
   assertEquals(workspaceBytes(reluChainModel(["h1", "h3"])), 272);
 });
+
+Deno.test("渡された maxBufferSize を中間の領域の上限に使う（実行相と同じ granted 値 — ADR 0093 決定 4）", () => {
+  // 上と同じ形。無指定なら領域の上限は束縛上限と core 既定の大きいほう（256 MiB）なので、h3 は h1 の
+  // 領域の offset 256 に入る = 272。maxBufferSize 256 を渡すと offset 256 + 8 が領域の上限を超え、
+  // h3 は h2 の領域（読む相手なので置けない）でもない 3 本目の領域へ回る = 8 × 3 = 24。
+  const model = reluChainModel(["h1", "h3"]);
+  const scenario = (options: Parameters<PreparedModel["estimate"]>[0]) => {
+    const report = model.estimate(options);
+    assertEquals(report.scenarios.map(({ name }) => name), ["run"]);
+    return report.scenarios[0];
+  };
+  assertEquals(scenario({ maxStorageBufferBindingSize: 256 }).workspaceBytes, 272);
+  assertEquals(
+    scenario({ maxStorageBufferBindingSize: 256, maxBufferSize: 256 }).workspaceBytes,
+    24,
+  );
+});

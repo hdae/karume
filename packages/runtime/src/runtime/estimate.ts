@@ -257,12 +257,16 @@ export type EstimateOptions = {
   /**
    * `maxBufferSize` の granted 値（`GPUDevice.limits` / `readAdapterLimits`）。
    *
-   * 使うのは state スロット単体の上限検査だけで、どのカテゴリのバイト数も動かさない
-   * （`maxStorageBufferBindingSize` と**対**— 実構築は 2 本とも見る: ADR 0066 追記 5）。
+   * 使うのは state スロット単体の上限検査（`maxStorageBufferBindingSize` と**対**— 実構築は
+   * 2 本とも見る: ADR 0066 追記 5）と、中間パッキングの領域の上限（実行相と同じ granted 値で
+   * 詰める — ADR 0093 決定 4）。後者は `workspaceBytes` を動かしうる（first-fit の領域の割れ方が
+   * 上限で変わる）。offset 整列は device 値を受ける欄が無いので WebGPU core 既定（256）で詰める。
    *
    * 任意欄にしてあるのは、device を持たない呼び手（グラフだけを握った見積り）を壊さないため。
    * 渡した欄だけが検査に効き、未指定の側は既定値で埋めない（どの device でも実際には出ない
-   * 境界を estimator だけが主張しないため）。値域（正の安全整数）はグラフの形に依らず入口で見る。
+   * 境界を estimator だけが主張しないため）。中間パッキングだけは無指定でも領域の上限が要るので、
+   * 束縛上限と WebGPU core 既定の大きいほうで詰める。値域（正の安全整数）はグラフの形に依らず
+   * 入口で見る。
    */
   readonly maxBufferSize?: number;
   /**
@@ -612,8 +616,10 @@ const stateAttentionTemps = (
  * MUST: 上限超過（slot 実寸 > 束縛上限）は計画関数が**全件列挙して**落とす（ADR 0093 決定 5）。
  * 見積りの入口でも同じ検査が走るので、「この device では中間が束ねられない」形は数を返さず
  * fail loudly になる。上限は `limit`（`EstimateOptions.maxStorageBufferBindingSize` — 無指定なら
- * WebGPU core 既定）で、領域の上限はそれと core 既定の大きいほう（束縛上限 ≤ `maxBufferSize` は
- * 仕様の不変条件）。
+ * WebGPU core 既定）で、領域の上限は `maxBufferSize`（`EstimateOptions.maxBufferSize`）。後者が
+ * 無指定のときだけ束縛上限と core 既定の大きいほうで埋める（束縛上限 ≤ `maxBufferSize` は仕様の
+ * 不変条件）。渡された granted 値を使うのは、first-fit の領域の割れ方が上限で変わり、実行相
+ * （granted 値で計画する）と総和が食い違うため（ADR 0093 決定 4）。
  * MUST: 簿記の単位は**値名ではなく slot**（別名は根の生存を延ばす）。
  */
 const transientSlotBytes = (
@@ -621,6 +627,7 @@ const transientSlotBytes = (
   nodes: readonly NodePlan[],
   stateShapes: ReadonlyMap<string, readonly number[]> | undefined,
   limit: number | undefined,
+  maxBufferSize: number | undefined,
   stateAttentionReduce: StateAttentionReduce,
 ): number => {
   const uses = countUses(graph);
@@ -690,7 +697,7 @@ const transientSlotBytes = (
   });
   const bindingLimit = limit ?? CORE_TRANSIENT_LIMITS.maxStorageBufferBindingSize;
   return planTransients(program, {
-    maxBufferSize: Math.max(CORE_TRANSIENT_LIMITS.maxBufferSize, bindingLimit),
+    maxBufferSize: maxBufferSize ?? Math.max(CORE_TRANSIENT_LIMITS.maxBufferSize, bindingLimit),
     maxStorageBufferBindingSize: bindingLimit,
     offsetAlignment: CORE_TRANSIENT_LIMITS.offsetAlignment,
   }).totalBytes;
@@ -863,6 +870,7 @@ export const estimateGraphMemory = (
         plan.nodes,
         state.shapes,
         options.maxStorageBufferBindingSize,
+        options.maxBufferSize,
         stateAttentionReduce,
       ),
     };
