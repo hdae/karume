@@ -1,6 +1,7 @@
 import { assert, assertEquals } from "@std/assert";
 import { acquireGpu } from "../../packages/runtime/mod.ts";
 import { denoDirectory } from "../../packages/hub/deno.ts";
+import { parseManifest } from "../../packages/hub/mod.ts";
 import { gemma4ChatPrompt, Gemma4Pipeline } from "../../packages/models/gemma.ts";
 import { Gemma4QatPipeline } from "../../packages/models/gemma4-qat.ts";
 import { gemma4StopTokens } from "../../packages/models/src/gemma/text/chat.ts";
@@ -141,14 +142,25 @@ const main = async (): Promise<void> => {
   const profile = profileFrom(raw), name = profile.name;
   const data = input(raw);
   assertEquals(await digest(profile.tokenizer), data.tokenizerSha256);
+  // 実際に効く quant と session 宣言は配布形の manifest から導いて記録する（既定 quant は版で
+  // 変わる — 0.13.0 で E2B は i4 → i4-fast）。読んだ quant をそのまま fromPretrained に渡し、
+  // 記録と構築が別々に既定を解決して食い違う余地を残さない。
+  const manifestPath = `${profile.source}/karume.json`;
+  const manifestEntry = parseManifest(await Deno.readTextFile(manifestPath)).models[profile.model];
+  assert(manifestEntry !== undefined, `${manifestPath} にモデル ${profile.model} が無い`);
+  const quant = manifestEntry.defaultQuant;
   await Deno.mkdir(out);
   const gpu = await acquireGpu();
   using _gpu = { [Symbol.dispose]: () => gpu.destroy() };
   const metadata = {
-    format: "karume-llm-speed-result/1",
+    format: "karume-llm-speed-result/2",
     engine: "deno-webgpu",
     model: name,
     source: profile.source,
+    manifestSha256: await digest(manifestPath),
+    quant,
+    // 呼び手の明示指定は渡さないので、宣言がそのまま効く（欠けた欄は runtime の既定 — ADR 0104）。
+    quantSession: manifestEntry.quants[quant].session,
     deno: Deno.version,
     platform: Deno.build,
     adapter: {
@@ -198,7 +210,7 @@ const main = async (): Promise<void> => {
     await save(`${out}/summary.json`, { ...metadata, loadSeconds: loaded, cases });
   };
   const started = performance.now();
-  const common = { gpu, model: profile.model, chunkLength: 64 };
+  const common = { gpu, model: profile.model, quant, chunkLength: 64 };
   await using pipeline = profile.family === "gemma4"
     ? await Gemma4Pipeline.fromPretrained(denoDirectory(profile.source), common)
     : await Gemma4QatPipeline.fromPretrained(denoDirectory(profile.source), {

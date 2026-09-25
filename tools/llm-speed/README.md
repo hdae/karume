@@ -82,9 +82,11 @@ Both runners support `--warmups 1 --repeats 3` (defaults). PyTorch additionally 
   Each run starts with a fresh sequence/cache. Only the first case is marked `firstInProcess`;
   the second case has already benefited from the first case's initialization. Driver and filesystem
   caches are not cleared, so this is not a controlled cold-machine benchmark.
-- Save every run, generated token IDs, timing, versions, device, and source fingerprints. Repetitions
-  within an engine must produce identical tokens and stop IDs. Cross-engine agreement is assessed
-  separately: equal stored weights do not guarantee identical GPU reductions or greedy output.
+- Save every run, generated token IDs, timing, versions, device, and source fingerprints. The Deno
+  engine also records the manifest sha256, the effective quant, and its session declaration.
+  Repetitions within an engine must produce identical tokens and stop IDs. Cross-engine agreement
+  is assessed separately: equal stored weights do not guarantee identical GPU reductions or greedy
+  output.
 
 ### Quantization and execution differences
 
