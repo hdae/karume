@@ -9,7 +9,7 @@
  * MUST: 純関数（GPU 資源を作らず、入力も変更しない）。実行（recipe.ts）・焼き込み（backing）・
  * 見積り（estimate.ts）は**この 1 本**を共有する — 規則が 2 箇所に分かれると、確保と見積り
  * （または確保と束縛）が例外なしに別の数を主張する。
- * MUST: 再生の順序は旧 `executeStepRecipe` / 旧 `derivePlanSlots`（2026-09-05 に退役）と同一 — ステップ出力の確保
+ * MUST: 再生の順序は次のとおり — ステップ出力の確保
  * （slot 昇順）→ dispatch ごとに一時の確保（`allocBefore`）→ dispatch → 一時の解放（`releaseAfter`・
  * 確保の逆順）→ 入力の解放（延べ列）→ 定義ぶんの解放（出力 slot 昇順）。順序が割れると
  * 「まだ読まれる入力が出力として配り直される」形が例外なしに生まれる。
@@ -109,7 +109,7 @@ export type TransientPlan = {
   readonly peakLiveBytes: number;
   /**
    * 先に置かれた別の slot とバイト範囲を共有する slot の本数（= 生存区間が重ならないので同じ
-   * バイトを配り直した回数）。旧プールの `reuseCount` に相当する診断値で、full-write（ADR 0014）の
+   * バイトを配り直した回数）。診断値で、full-write（ADR 0014）の
    * 故障注入テストが「配り直しが実際に起きた」ことを確かめる観測点。
    */
   readonly sharedSlots: number;
@@ -150,7 +150,7 @@ const assertLimits = (limits: TransientLimits): void => {
 /**
  * 確保プログラムを再生して配置する（モジュール doc の MUST 群）。
  *
- * 再生の簿記（参照計数）は旧 `derivePlanSlots` と同じ: 定義ぶんの 1 + `uses` を retain し、
+ * 再生の簿記（参照計数）: 定義ぶんの 1 + `uses` を retain し、
  * 入力の解放と定義ぶんの解放で減らす。負になれば消費計数の誤り、末尾に残れば解放漏れ — どちらも
  * fail loudly（pinned は残ってよい）。
  */
@@ -233,7 +233,7 @@ export const planTransients = (
     });
     for (const name of step.releases) release(env.get(name));
     for (const slot of outputs) release(slot);
-    // 別名の出力は slot を持たない（束縛は ValueSource の元をそのまま解決する — 旧 derivePlanSlots と同じ契約）。
+    // 別名の出力は slot を持たない（束縛は ValueSource の元をそのまま解決する）。
     steps.push({
       outputs: step.outputs.map((output, index) =>
         output.kind === "alias" ? undefined : outputs[index]
