@@ -9,9 +9,9 @@
  * MUST: この層は `device.ts` を import しない。errorScope の規律は device 単位の LIFO
  * スタックという WebGPU の性質だけで閉じており、GpuContext を知る必要が無い。分離してあるのは
  * それに加えて**実行時の循環を構造的に消す**ため — `PipelineCache` はここだけに依存するので、
- * GpuContext が PipelineCache を所有しても device.ts ⇄ pipeline-cache.ts の輪ができない。
+ * GpuContext が PipelineCache を所有しても context.ts ⇄ pipeline-cache.ts の輪ができない。
  *
- * NOTE: `GpuDeviceLostError` 等の device 固有のエラーは `device.ts` に残る（errorScope は device
+ * NOTE: `GpuDeviceLostError` 等の device 固有のエラーは `context.ts` に残る（errorScope は device
  * 消失を捕らえない — 消失後の `popErrorScope` は null で resolve する）。
  */
 

@@ -599,7 +599,7 @@ export const probeAttentionI8a8Dot = async (
 
   try {
     // MUST: push から pop の発行までに await を挟まない（device 単位 LIFO の交錯を防ぐ根拠 —
-    // src/gpu/device.ts の「errorScope 区間の不変条件」）。確保・束縛・エンコード・submit は
+    // src/gpu/context.ts の「errorScope 区間の不変条件」）。確保・束縛・エンコード・submit は
     // 全て同期。
     pushFailureScopes(device);
     let variants: readonly Variant[];
@@ -837,7 +837,7 @@ const armsBitIdentical = (a: CanaryProbe, b: CanaryProbe): boolean =>
  * - 両腕とも帯外 → {@link GpuFeatureError}。変種の選び方の問題ではないので縮退先が無い。
  *
  * `patch` は**故障注入テスト専用**の生成物差し替え口（不一致経路と両不一致経路は健全な実機
- * では作れない — src/gpu/device.ts の shader-f16 カナリアと同じ事情）。
+ * では作れない — src/gpu/acquire.ts の shader-f16 カナリアと同じ事情）。
  */
 export const decideAttentionI8a8Dot = (
   gpu: GpuContext,
