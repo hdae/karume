@@ -292,9 +292,10 @@ const TIMESTAMP_BYTES = 8;
 /**
  * 1 チャンクで作る querySet の容量上限。
  *
- * WebGPU の `maxQueryCount` は 4,096 で、必要数は「チャンクの dispatch 数 × 2」。既定政策の
- * `maxChunkSize` 1,024 なら 2,048 で収まるが、政策で上限を上げると**静かに** validation で
- * 落ちる（= その submit の全 pass が実行されない）ため、エンコード前に明示的に落とす。
+ * 必要数は「チャンクの dispatch 数 × 2」。2,048 は ADR 0021 の設計枠（既定政策の
+ * `maxChunkSize` 1,024 の 2 倍）で、WebGPU の querySet 上限 `maxQueryCount` 4,096 より
+ * 保守的に置いている。WebGPU 上は有効な 1,025〜2,048 の `maxChunkSize` もこの枠で拒否する。
+ * 枠を超える政策は、エンコード前（構築時と querySet 作成時）に明示的に落とす。
  */
 const MAX_TIMESTAMP_QUERIES = 2048;
 
