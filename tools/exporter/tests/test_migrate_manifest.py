@@ -25,7 +25,9 @@ from legacy_writer import Entry, legacy_fill_shards, legacy_shards, order, write
 
 from karume import migrate, publish
 from karume.container import PART_LENGTH_CHOICES, AssetRecord, Provenance, numbered_name
+from karume.legacy import LegacyFormatError
 from karume.migrate import MigrateError, migrate_repository, parse_cross_repo
+from karume.verify import ContainerError
 
 PROVENANCE = Provenance(license="apache-2.0", writer="karume/test")
 
@@ -434,6 +436,70 @@ class TestTheCopiedFiles:
             migrated(repo, out)
 
 
+class TestTheDeclaredFiles:
+    """旧 manifest の FileRef（size / sha256）を現物と突き合わせてから変換する。
+
+    移行の「生バイト同一」は手元のファイルとの比較なので、ここが無いと旧 revision と食い違う
+    ミラーの中身が新しい sha256 で洗浄され、逐語で写す assets の FileRef は現物と違う sha256 を
+    名乗る。突合は変換より前 — 落ちた時点で out に容器が 1 本も無い。
+    """
+
+    def test_a_flipped_byte_in_an_old_shard_fails_before_any_container_is_written(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        # 宣言順で後ろの席（alpha.decoder）の重み shard — 先頭の席の変換より前に落ちることを見る。
+        shard = repo / numbered_name("alpha/decoder/model.f32.safetensors", 2, 2)
+        blob = bytearray(shard.read_bytes())
+        blob[-1] ^= 0xFF
+        shard.write_bytes(bytes(blob))
+        out = tmp_path / "out"
+
+        with pytest.raises(
+            MigrateError, match=r"'alpha/decoder/model\.f32-00002-of-00002\.safetensors' の sha256"
+        ):
+            migrated(repo, out)
+        assert not list(out.rglob("*.krm"))
+
+    def test_a_copied_file_whose_size_differs_from_its_declaration_fails_loudly(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        (repo / "tokenizer.json").write_text('{"model":"changed"}\n', encoding="utf-8")
+        out = tmp_path / "out"
+
+        with pytest.raises(MigrateError, match=r"'tokenizer\.json' の長さ \d+ が宣言 \d+ と違う"):
+            migrated(repo, out)
+        assert not list(out.rglob("*.krm"))
+
+    @pytest.mark.parametrize("spelling", ["a" * 63, "A" * 64])
+    def test_a_sha256_that_is_not_64_lowercase_hex_digits_fails_loudly(
+        self, repo: Path, tmp_path: Path, spelling: str
+    ) -> None:
+        manifest = json.loads((repo / "karume.json").read_text(encoding="utf-8"))
+        manifest["models"]["alpha"]["assets"]["tokenizer"]["sha256"] = spelling
+        (repo / "karume.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+        with pytest.raises(MigrateError, match=r"assets\['tokenizer'\]\.sha256 が sha256"):
+            migrated(repo, tmp_path / "out")
+
+    def test_a_crossed_descriptor_sha256_is_spelled_like_a_sha256(
+        self, borrower: Path, repo: Path, tmp_path: Path
+    ) -> None:
+        """引き写す側（参照先の `karume/5`）の sha256 も綴りを見る — 逐語で写す値だから。"""
+        lender_out = tmp_path / "lender"
+        migrated(repo, lender_out)
+        manifest = json.loads((lender_out / "karume.json").read_text(encoding="utf-8"))
+        container = manifest["models"]["alpha"]["weights"]["encoder"]["f32"]["container"]
+        container["descriptor"]["model"]["sha256"] = "a" * 63
+        (lender_out / "karume.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+        with pytest.raises(MigrateError, match=r"descriptor\.model\.sha256 が sha256"):
+            migrated(
+                borrower,
+                tmp_path / "out",
+                cross_repos=[parse_cross_repo(f"hdae/lender={lender_out}@{REVISION}")],
+            )
+
+
 class TestTheExtras:
     def test_rope_base_becomes_a_container_asset(self, repo: Path, tmp_path: Path) -> None:
         out = tmp_path / "out"
@@ -705,6 +771,35 @@ def stage_gemma_repo(
     return root
 
 
+def redeclare_asset(repo: Path, model: str, asset: str, blob: bytes) -> None:
+    """宣言済みの資産を書き換え、manifest の 3 点セットも合わせる。
+
+    宣言と現物の食い違いは移行の入口の突合が先に落とすので、中身の検査を踏む故障注入は
+    manifest ごと書き直す。
+    """
+    manifest_path = repo / "karume.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assets = manifest["models"][model]["assets"]
+    assets[asset] = place(repo, assets[asset]["path"], blob)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+
+def doctor_ple_shard(repo: Path, position: int, edit: Any) -> None:
+    """旧 PLE shard `position` のヘッダ JSON だけを `edit` で書き換え、manifest も合わせる。
+
+    データ節は 1 バイトも動かさない（ヘッダ長は元と同じ 8 の倍数へ空白で詰め直す）ので、壊れて
+    いるのは書き換えた宣言だけになる。
+    """
+    name = numbered_name("ple.safetensors", position, len(PLE_RANGES))
+    blob = (repo / "e2b" / "ple" / name).read_bytes()
+    length = struct.unpack("<Q", blob[:8])[0]
+    header = json.loads(blob[8 : 8 + length])
+    edit(header)
+    raw = json.dumps(header, separators=(",", ":")).encode("utf-8")
+    raw += b" " * (-len(raw) % 8)
+    redeclare_asset(repo, "e2b", name, struct.pack("<Q", len(raw)) + raw + blob[8 + length :])
+
+
 def source_rows(repo: Path, directory: str, key: str) -> bytes:
     """旧 shard の `key` を token 順に連結した生バイト（突合の相手を別経路で取る）。"""
     out = bytearray()
@@ -845,7 +940,7 @@ class TestThePleFold:
         index = json.loads(index_path.read_text(encoding="utf-8"))
         index["shards"][1]["stop"] = 44
         index["shards"][2]["start"] = 44
-        index_path.write_text(json.dumps(index), encoding="utf-8")
+        redeclare_asset(gemma_repo, "e2b", "ple_index", json.dumps(index).encode("utf-8"))
 
         with pytest.raises(MigrateError, match=r"karume_ple\.stop"):
             migrated(gemma_repo, tmp_path / "out")
@@ -858,7 +953,7 @@ class TestThePleFold:
         index_path = gemma_repo / manifest["models"]["e2b"]["assets"]["ple_index"]["path"]
         index = json.loads(index_path.read_text(encoding="utf-8"))
         index["dim"] = PLE_DIM - 1
-        index_path.write_text(json.dumps(index), encoding="utf-8")
+        redeclare_asset(gemma_repo, "e2b", "ple_index", json.dumps(index).encode("utf-8"))
 
         with pytest.raises(MigrateError, match=r"dim 15 が格納 .i4. の詰め数 2 で割り切れない"):
             migrated(gemma_repo, tmp_path / "out")
@@ -869,6 +964,50 @@ class TestThePleFold:
 
         with pytest.raises(MigrateError, match=r"values の 1 行 2 バイトが 4 の倍数でない"):
             migrated(root, tmp_path / "out")
+
+    @pytest.mark.parametrize(
+        ("edit", "message"),
+        [
+            (
+                lambda header: header["values"].update(dtype="X9"),
+                r"テンソル 'values': リーダが知らない dtype 'X9'",
+            ),
+            (
+                # 行数とバイト長は合ったまま、行の中身の形だけが嘘をつく（旧来は行数とバイト長
+                # しか見ていなかったので通っていた）。
+                lambda header: header["values"].update(
+                    shape=[header["values"]["shape"][0], PLE_LAYERS, PLE_DIM * 2]
+                ),
+                r"テンソル 'values': サイズ不一致",
+            ),
+        ],
+        ids=["unknown-dtype", "shape-disagrees-with-length"],
+    )
+    def test_a_shard_that_breaks_the_reader_layout_fails_loudly(
+        self, gemma_repo: Path, tmp_path: Path, edit: Any, message: str
+    ) -> None:
+        """旧 shard の読み取り（`legacy.read_component`）と同じレイアウトの門を通る。"""
+        doctor_ple_shard(gemma_repo, 2, edit)
+
+        with pytest.raises(ContainerError, match=message):
+            migrated(gemma_repo, tmp_path / "out")
+
+    def test_a_metadata_value_that_is_not_a_string_fails_loudly(
+        self, gemma_repo: Path, tmp_path: Path
+    ) -> None:
+        """`__metadata__` は逐語で受ける（`str()` で強制変換して黙って通さない）。"""
+        doctor_ple_shard(gemma_repo, 2, lambda header: header["__metadata__"].update(note=5))
+
+        with pytest.raises(LegacyFormatError, match="__metadata__ が文字列 → 文字列のマップでない"):
+            migrated(gemma_repo, tmp_path / "out")
+
+    def test_a_doctored_but_well_formed_shard_still_migrates(
+        self, gemma_repo: Path, tmp_path: Path
+    ) -> None:
+        """対照 — ヘッダを書き直しただけ（宣言は同じ）なら通る（上の門は恒真に落ちない）。"""
+        doctor_ple_shard(gemma_repo, 2, lambda header: None)
+
+        assert migrated(gemma_repo, tmp_path / "out").converted
 
     def test_an_owner_without_a_local_seat_fails_loudly(
         self, gemma_repo: Path, tmp_path: Path

@@ -17,9 +17,10 @@
   {@link karume.container.ir_v2_document}。
 - **codec は台帳へ写す**（`i8 → int8-sym` / `i4 → int4-sym-g` / `i2 → int2-off`）。`ternary` へは
   写さない — 値域が部分集合でも「三値である」という主張は量子化器の側がするもの。
-- **`rowAxis` は消費側 op から引く**（`emit.weight_channel_axes` の鏡像 — `conv_transpose1d`
-  だけ 1）。旧 keepdim 形の scale が**その軸の形ちょうど**であることを現物の宣言で確かめてから
-  焼く（バイト数だけ合わせると per-column の scale を per-channel として宣言できてしまう）。
+- **`rowAxis` は消費側 op から引く**（{@link karume.container.weight_channel_axes} —
+  `conv_transpose1d` だけ 1）。旧 keepdim 形の scale が**その軸の形ちょうど**であることを
+  現物の宣言で確かめてから焼く（バイト数だけ合わせると per-column の scale を per-channel として
+  宣言できてしまう）。
 
 MUST: 自己検査（書いたものを読み直して initializer ごとに sha256 を突き合わせる）を**通してから
 据える** — 書き出しは一時 path（`.partial`）へ行い、検査が通った回だけ `os.replace` で本番名へ
@@ -56,6 +57,7 @@ from karume.container import (
     DEFAULT_PART_BYTES,
     GRAPH_NAME_PATTERN,
     PART_LENGTH_CHOICES,
+    SHA256_HEX_PATTERN,
     AssetInput,
     ContainerFormatError,
     DocumentRef,
@@ -79,6 +81,7 @@ from karume.dist import (
 from karume.ir import IR_METADATA_KEY, IrGraph
 from karume.legacy import (
     SourceTensor,
+    _read_metadata,
     payload_chunks,
     read_component,
     resolve_shards,
@@ -86,7 +89,7 @@ from karume.legacy import (
 )
 from karume.ple import PLE_INDEX_ASSET, PLE_PACK_FACTOR, PleError, ple_assets, ple_row_bytes
 from karume.publish import PublishError, PublishResult, publish_container
-from karume.verify import parse_ir_graph
+from karume.verify import assert_reader_layout, parse_ir_graph
 
 #: 新コンテナの拡張子（§1 — 種別は magic が持つが、ファイル名も分けておく）。
 MODEL_SUFFIX = ".krm"
@@ -186,7 +189,8 @@ def _bindings(graph: IrGraph) -> dict[str, Encoding]:
 
 
 def _expected_scale_shape(shape: Sequence[int], encoding: Encoding) -> list[int]:
-    """旧配布形が持っているはずの scale の形（`verify._assert_scale_tensor` の受理形）。"""
+    """旧配布形が持っているはずの scale の形（旧 IR v1 の受理形 — keepdim 形は IR v2 で退役し、
+    知っているのはこの移行 CLI だけ）。"""
     assert encoding.group_size is not None and encoding.row_axis is not None
     if codec_entry(encoding.codec).grouping == "group":
         # group 形は rank2 ちょうど（行数 = 先頭次元・最終次元 = 行長 / group 長）。
@@ -387,6 +391,14 @@ def _text(value: Any, where: str) -> str:
     return value
 
 
+def _sha256(value: Any, where: str) -> str:
+    _require(
+        isinstance(value, str) and SHA256_HEX_PATTERN.match(value) is not None,
+        f"{where} が sha256（小文字 16 進 64 文字）でない: {value!r}",
+    )
+    return value
+
+
 def _count(value: Any, where: str) -> int:
     _require(
         isinstance(value, int) and not isinstance(value, bool) and value >= 0,
@@ -425,7 +437,7 @@ def _file_ref(value: Any, where: str) -> FileRef:
     ref = FileRef(
         _text(obj["path"], f"{where}.path"),
         _count(obj["size"], f"{where}.size"),
-        _text(obj["sha256"], f"{where}.sha256"),
+        _sha256(obj["sha256"], f"{where}.sha256"),
         None if "repo" not in obj else _text(obj["repo"], f"{where}.repo"),
         None if "revision" not in obj else _text(obj["revision"], f"{where}.revision"),
     )
@@ -696,6 +708,7 @@ def migrate_repository(
     )
     seat_crosses = {seat: _entry_cross(entry, str(seat)) for seat, entry in _seats(legacy)}
     _assert_cross_repos_declared(seat_crosses, crosses)
+    _assert_declared_files(repo, legacy)
     folds = {
         name: _plan_ple(repo, model, f"models['{name}']") for name, model in legacy.models.items()
     }
@@ -759,6 +772,35 @@ def migrate_repository(
     _require(not written.exists(), f"出力先に {MANIFEST_FILE} が既に在る（消してからやり直す）")
     written.write_text(manifest_text(manifest), encoding="utf-8")
     return RepositoryResult(written, tuple(reports), crossed, copied)
+
+
+def _assert_declared_files(repo: Path, legacy: LegacyManifest) -> None:
+    """旧 manifest が宣言する自リポのファイルを、現物の size（stat）と sha256 に突き合わせる。
+
+    MUST: 変換と複写より**前に**全部見る。移行の「生バイト同一」は手元のファイルとの比較なので、
+    手元のミラーが旧 revision と食い違っていると（途中まで更新・壊れたファイル）、その中身が
+    新しい sha256 で洗浄された `karume/5` になり、逐語で写す `assets` の FileRef は現物と違う
+    sha256 を名乗る。越境参照は手元に実体が無いので見ない（引き写す側の綴りは読み取りで見る）。
+    """
+    checked: set[FileRef] = set()
+    for model_name, model in legacy.models.items():
+        entries = [entry for labels in model.weights.values() for entry in labels.values()]
+        refs = [*(ref for entry in entries for ref in entry.refs), *model.assets.values()]
+        for ref in refs:
+            if ref.cross is not None or ref in checked:
+                continue
+            checked.add(ref)
+            where = f"models['{model_name}']: 旧 manifest が宣言する '{ref.path}'"
+            path = repo / ref.path
+            _require(path.is_file(), f"{where} が手元に無い")
+            size = path.stat().st_size
+            _require(size == ref.size, f"{where} の長さ {size} が宣言 {ref.size} と違う")
+            actual = sha256_file(path)
+            _require(
+                actual == ref.sha256,
+                f"{where} の sha256 が宣言と違う（宣言 {ref.sha256} / 現物 {actual}）"
+                " — 手元のミラーが旧 revision と食い違っている",
+            )
 
 
 def _seats(legacy: LegacyManifest) -> Iterator[tuple[_Seat, WeightEntry]]:
@@ -854,7 +896,7 @@ def _crossed_parse(container: Mapping[str, Any], where: str, cross: CrossRepo) -
         documents.append(
             DocumentRef(
                 _count(document["length"], f"{where}.descriptor.{key}.length"),
-                _text(document["sha256"], f"{where}.descriptor.{key}.sha256"),
+                _sha256(document["sha256"], f"{where}.descriptor.{key}.sha256"),
             )
         )
     parts: list[FileRef] = []
@@ -1128,19 +1170,24 @@ class _StoredEntry:
 
 
 def _read_sidecar_header(path: Path) -> tuple[dict[str, str], dict[str, _StoredEntry], int]:
-    """旧 sidecar の safetensors を**ヘッダだけ**読む（PLE shard は数百 MB になる）。"""
+    """旧 sidecar の safetensors を**ヘッダだけ**読む（PLE shard は数百 MB になる）。
+
+    MUST: 旧 shard の読み取り（{@link karume.legacy.read_component}）と同じ門を通す — レイアウト
+    （既知 dtype・宣言長の一致・隙間なし・整列）を先に見て、`__metadata__` は文字列 → 文字列の
+    マップとして**逐語**で受ける（型を強制変換すると壊れた sidecar が遠い場所の例外になる）。
+    """
+    assert_reader_layout(path, allow_legacy_dtypes=True)
     header = safetensors_header(path)
     with path.open("rb") as handle:
         data_start = 8 + int.from_bytes(handle.read(8), "little")
-    raw = header.get("__metadata__", {})
-    _require(isinstance(raw, dict), f"{path}: __metadata__ がマップでない")
+    metadata = _read_metadata(path, header)
     entries: dict[str, _StoredEntry] = {}
     for name, spec in header.items():
         if name == "__metadata__":
             continue
         begin, end = spec["data_offsets"]
         entries[name] = _StoredEntry(spec["dtype"], tuple(spec["shape"]), begin, end)
-    return {str(k): str(v) for k, v in raw.items()}, entries, data_start
+    return metadata, entries, data_start
 
 
 def _read_segments(segments: Sequence[tuple[Path, int, int]], begin: int, end: int) -> bytes:
