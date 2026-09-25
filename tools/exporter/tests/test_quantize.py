@@ -121,6 +121,19 @@ class TestOverflow:
 
         assert torch.isinf(model.linear.weight[0, 0])
 
+    def test_a_saturating_value_next_to_an_existing_infinity_still_fails_loudly(self):
+        """判定は要素単位 — 既存の inf が同じテンソルにあっても、有限値の飽和は見逃さない。
+
+        件数は「元が有限・丸め後が非有限」の要素だけを数える（既存の inf は含めない）。
+        """
+        model = Tiny()
+        with torch.no_grad():
+            model.linear.weight[0, 0] = float("inf")
+            model.linear.weight[0, 1] = 1e6
+
+        with pytest.raises(QuantizeError, match="有限値 1 個が非有限へ飽和"):
+            round_weights_to_f16(model)
+
 
 class Weighted(nn.Module):
     """`WEIGHT_SLOTS` の全 5 op 相当のモジュール（i8 の per-channel 軸を全種類踏む）。"""
@@ -206,7 +219,7 @@ class TestInt8Quantization:
             assert torch.equal(restored, module.weight), name
 
     def test_minus_128_is_never_used(self):
-        """−128 を捨てて ±127 に閉じる（最大絶対値要素が厳密復元されて冪等になる）。"""
+        """−128 を捨てて ±127 に閉じる（最大絶対値要素が ±127 に乗って scale が不動点になる）。"""
         model = Weighted()
 
         report = fake_quant_int8(model)
@@ -346,7 +359,7 @@ class TestInt4GroupQuantization:
             assert torch.equal(dequantize_int4(quantize_to_int4(weight, scale), scale), weight)
 
     def test_minus_eight_is_never_used(self):
-        """−8 を捨てて ±7 に閉じる（最大絶対値要素が厳密復元されて冪等になる）。"""
+        """−8 を捨てて ±7 に閉じる（最大絶対値要素が ±7 に乗って scale が不動点になる）。"""
         model = Grouped()
 
         report = fake_quant_int4(model, group_size=32)
@@ -804,3 +817,41 @@ class TestIncludeFilter:
         report = fake_quant_int8(Holder(), include=lambda fqn: fqn == "table")
 
         assert sorted(report.scales) == ["table.weight"]
+
+
+class TestReachableScaleIsAFixedPoint:
+    """冪等の根拠そのもの: 到達可能な scale `s = fl(amax/D)` は `fl(fl(D·s)/D)` の不動点。
+
+    amax 要素の厳密復元（`fl(D·s) == amax`）は成り立たないことがあるので、冪等の根拠を
+    そちらに置かない（`INT8_MAX` のコメント・ADR 0069 追記 3）。f32 の丸めは正規数の範囲で
+    2 冪倍に対して不変なので、amax を `[1, 2)` の全 f32（2^23 個）で網羅すれば正規数の
+    大半を覆う。scale が非正規数へ落ちる最小正規数の binade `[2^−126, 2^−125)` は別に網羅する。
+    D は i8（127）/ i4（7）/ FP4（6）/ NF4（1）の表の最大準位。
+    """
+
+    ONE_TO_TWO = 0x3F800000  # f32 の 1.0 のビット列
+    SMALLEST_NORMAL = 0x00800000  # f32 の 2^−126 のビット列
+
+    @staticmethod
+    def every_f32_in_one_binade(start: int = ONE_TO_TWO) -> torch.Tensor:
+        """`start`（binade 先頭のビット列）から 2^23 個 = その binade の全 f32。"""
+        return torch.arange(start, start + (1 << 23), dtype=torch.int32).view(torch.float32)
+
+    @pytest.mark.parametrize("binade", [ONE_TO_TWO, SMALLEST_NORMAL])
+    @pytest.mark.parametrize("max_level", [float(INT8_MAX), float(INT4_MAX), 6.0, 1.0])
+    def test_scaling_back_and_forth_returns_the_same_scale(self, max_level: float, binade: int):
+        amax = self.every_f32_in_one_binade(binade)
+        scale = amax / max_level
+
+        rescaled = (scale * max_level) / max_level
+
+        assert torch.equal(rescaled, scale)
+
+    @pytest.mark.parametrize("max_level", [float(INT8_MAX), float(INT4_MAX), 6.0])
+    def test_the_amax_element_itself_is_not_always_restored_exactly(self, max_level: float):
+        """冪等を「amax の厳密復元」で説明すると誤りになることの固定（1ulp ずれる amax がある）。"""
+        amax = self.every_f32_in_one_binade()
+
+        restored = (amax / max_level) * max_level
+
+        assert bool((restored != amax).any())

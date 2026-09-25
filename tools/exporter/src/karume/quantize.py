@@ -62,8 +62,10 @@ def round_weights_to_f16(model: torch.nn.Module) -> RoundReport:
             if tensor.dtype is not torch.float32:
                 continue
             rounded = tensor.to(torch.float16).to(torch.float32)
-            if torch.isfinite(tensor).all() and not torch.isfinite(rounded).all():
-                overflow = int((~torch.isfinite(rounded)).sum())
+            # 要素単位: 元から非有限の要素は丸めのせいではないので数えない。
+            saturated = torch.isfinite(tensor) & ~torch.isfinite(rounded)
+            if saturated.any():
+                overflow = int(saturated.sum())
                 raise QuantizeError(
                     f"'{name}': f16 への丸めで有限値 {overflow} 個が非有限へ飽和した"
                     f"（f16 の値域は |x| ≤ 65504・実測 max |x| = "
@@ -78,8 +80,12 @@ def round_weights_to_f16(model: torch.nn.Module) -> RoundReport:
 # ---- i8（per-channel symmetric）— ADR 0019 ---------------------------------
 
 #: 量子化幅の片側（**−128 は使わない**）。±127 に閉じると最大絶対値要素が `q = ±127` に
-#: 乗って `q·scale` で厳密に復元されるので、fake-quant が**冪等**になる（再適用でビット不変
-#: — `tests/test_quantize.py` が固定する）。−128 を許すと scale だけが動く再量子化が起きる。
+#: 乗るので、丸め済みの重みから引き直す scale は `fl(fl(127·s)/127)` になる。到達可能な scale
+#: `s = fl(amax/127)` はこの写像の**不動点**なので、fake-quant が**冪等**になる（再適用でビット
+#: 不変 — `tests/test_quantize.py` が固定する）。理由: amax は `127·s` の最近接丸めで s に落ちる
+#: f32 なので、`fl(127·s)` は `127·s` へ amax 以上に近く、127 で割り戻すと s に落ちる。
+#: amax 要素そのものの厳密復元（`fl(127·s) == amax`）は f32 では 1ulp ずれうる — 冪等の根拠は
+#: そちらではない（ADR 0069 追記 3）。−128 を許すと scale だけが動く再量子化が起きる。
 INT8_MAX = 127
 
 #: per-channel scale の**チャネル軸**（モジュール型 → 重みテンソルの軸番号 — ADR 0019）。
@@ -108,9 +114,10 @@ QUANT_MODULE_TYPES: tuple[type[nn.Module], ...] = tuple(QUANT_CHANNEL_AXES)
 class Int8Report:
     """量子化した重みの scale 台帳と計数。
 
-    `scales` のキーは**モデル内 FQN**（`<module>.weight`）で、`convert.py` が safetensors の
-    テンソルキーに使う FQN と同じ空間。`id(tensor)` で突き合わせない（ADR 0006）— パラメータ
-    同一性は正規化・焼き込みで簡単に崩れ、崩れても黙って「対象 0 本」に落ちるだけだから。
+    `scales` のキーは**モデル内 FQN**（`<module>.weight`）で、`convert.py` が initializer の
+    `tensor`（コンテナの束縛表のキー）に使う FQN と同じ空間。`id(tensor)` で突き合わせない
+    （ADR 0006）— パラメータ同一性は正規化・焼き込みで簡単に崩れ、崩れても黙って
+    「対象 0 本」に落ちるだけだから。
     """
 
     #: FQN → scale（重みと同 rank の keepdim 形・F32）。
@@ -301,9 +308,10 @@ def storage_rows(weight: torch.Tensor) -> torch.Tensor:
 
 # ---- i4（K 方向 group symmetric）— ADR 0069 ---------------------------------
 
-#: 量子化幅の片側（**−8 は使わない**）。±7 に閉じると group の amax 要素が `q = ±7` に乗って
-#: `q·scale` で厳密に復元されるので、fake-quant が**冪等**になる（ADR 0019 の ±127 論証の
-#: 4bit 版 — ADR 0069 決定 3）。−8 を許すと scale だけが動く再量子化が起きる。
+#: 量子化幅の片側（**−8 は使わない**）。±7 に閉じると group の amax 要素が `q = ±7` に乗り、
+#: 到達可能な scale `s = fl(amax/7)` が `fl(fl(7·s)/7)` の**不動点**なので、fake-quant が
+#: **冪等**になる（`INT8_MAX` の論証の 4bit 版 — ADR 0069 決定 3・追記 3）。amax 要素の厳密
+#: 復元は 1ulp ずれうるので根拠にしない。−8 を許すと scale だけが動く再量子化が起きる。
 INT4_MAX = 7
 
 #: 既定の group 長（ADR 0069 追記 = Phase 0 sweep の実測で確定した 32）。格納欄なので、
@@ -435,8 +443,9 @@ def fake_quant_int4(
 
     既定の対象が **`nn.Linear` の `weight` だけ**なのは、i4 の実行経路が linear の重み
     スロット限定で始まるから（ADR 0069 決定 5）。`op_types` は**明示 opt-in の口**で、i8 の
-    {@link QUANT_MODULE_TYPES}（全 5 種）まで広げられる — ただし広げてよいのは**品質測定**
-    まで。bias も norm 系 weight も触らないのは全対象で同じ。
+    {@link QUANT_MODULE_TYPES}（全 5 種）まで広げられる — ただし出荷で広げてよいのは
+    `emit.I4_WEIGHT_OPS`（linear / embedding / conv1d）まで（conv2d / `ConvTranspose1d` は
+    品質測定専用）。bias も norm 系 weight も触らないのは全対象で同じ。
 
     MUST: **emit へ渡せるのは `emit.I4_WEIGHT_OPS`（linear / embedding / conv1d）分の scale
     だけ**（`emit._plan_i4` の適格は消費 op がそこに載ること）。scale の形は rank に依らず
