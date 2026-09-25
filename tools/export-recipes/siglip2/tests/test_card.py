@@ -55,14 +55,14 @@ def _container(*refs: dict[str, Any]) -> dict[str, Any]:
 def _siglip2_manifest(model: str = "base") -> dict[str, Any]:
     """SigLIP2 の最小 manifest（値は実物と重ならない偽値）。"""
     return {
-        "format": "karume/3",
+        "format": "karume/5",
         "generator": "karume/9.9.9",
         "defaultModel": model,
         "models": {
             model: {
                 "pipeline": SIGLIP2_SUPPORTED_PIPELINE,
                 "weights": {
-                    "vision": {"f32": _container(_ref("v/model.f32.safetensors", 11, "c"))}
+                    "vision": {"f32": _container(_ref("v/model.f32-00001-of-00003.krm", 11, "c"))}
                 },
                 "assets": {},
                 "quants": {"f32": {"weights": {"vision": "f32"}, "session": {}}},

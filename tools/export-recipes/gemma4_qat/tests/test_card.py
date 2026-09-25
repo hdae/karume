@@ -55,14 +55,14 @@ def _container(*refs: dict[str, Any]) -> dict[str, Any]:
 def _qat_manifest(model: str = "e2b") -> dict[str, Any]:
     """QAT の最小 manifest（値は実物と重ならない偽値）。"""
     return {
-        "format": "karume/4",
+        "format": "karume/5",
         "generator": "karume/9.9.9",
         "defaultModel": model,
         "models": {
             model: {
                 "pipeline": QAT_PIPELINE,
                 "weights": {
-                    "model": {"i4": _container(_ref("model/model.i4.safetensors", 13, "a"))}
+                    "model": {"i4": _container(_ref("model/model.i4-00001-of-00003.krm", 13, "a"))}
                 },
                 "assets": {"ple_index": _ref("ple/ple.json", 7, "b")},
                 "quants": {

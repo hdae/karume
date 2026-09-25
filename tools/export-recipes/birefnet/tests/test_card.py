@@ -66,13 +66,15 @@ def _birefnet_manifest(model: str = MODEL) -> dict[str, Any]:
     """BiRefNet 系の最小 manifest（解像度以外は実物と重ならない偽値）。"""
     side = int(model)
     return {
-        "format": "karume/3",
+        "format": "karume/5",
         "generator": "karume/9.9.9",
         "defaultModel": model,
         "models": {
             model: {
                 "pipeline": BIREFNET_SUPPORTED_PIPELINE,
-                "weights": {"matte": {"f32": _container(_ref("m/model.f32.safetensors", 13, "d"))}},
+                "weights": {
+                    "matte": {"f32": _container(_ref("m/model.f32-00001-of-00003.krm", 13, "d"))}
+                },
                 "assets": {},
                 "quants": {"f32": {"weights": {"matte": "f32"}, "session": {}}},
                 "defaultQuant": "f32",
