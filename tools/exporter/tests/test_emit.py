@@ -23,6 +23,7 @@ from karume.container import (
     Provenance,
     codec_entry,
     container_parts,
+    ir_v2_document,
     weight_channel_axes,
 )
 from karume.emit import (
@@ -40,6 +41,7 @@ from karume.ir import (
     IrInitializer,
     IrInput,
     IrNode,
+    IrShared,
     IrStorage,
     IrValue,
 )
@@ -52,7 +54,7 @@ from karume.quantize import (
     quantize_to_int4,
     quantize_to_int8,
 )
-from karume.verify import verify_container
+from karume.verify import ir_graph_from_container, verify_container
 
 #: 合成の出所（`--license` を落とした配布形は作らない — container-v1 §12）。
 PROVENANCE = Provenance(license="mit")
@@ -77,11 +79,12 @@ def sample_graph() -> tuple[IrGraph, dict[str, torch.Tensor]]:
 
 
 class TestRoundTrip:
-    def test_the_graph_is_embedded_under_the_metadata_key(self, tmp_path):
-        """グラフはグラフ shard の `__metadata__` に載り、テンソルは weight shard に載る。"""
+    def test_the_container_supplies_the_tensor_key_and_carries_the_provenance(self, tmp_path):
+        """書いた容器を開いて合流まで通すと、グラフ 1 本の initializer がテンソルキーで供給され、
+        モデル記述に provenance が載る。"""
         graph, tensors = sample_graph()
 
-        path = write_component(tmp_path / "model.safetensors", graph, tensors)
+        path = write_component(tmp_path / "model.krm", graph, tensors)
 
         verified = bound(path)
         assert set(verified.graphs) == {GRAPH_NAME}
@@ -90,12 +93,23 @@ class TestRoundTrip:
         assert verified.read.model is not None
         assert verified.read.model.provenance == PROVENANCE
 
-    def test_the_written_file_passes_the_full_verification(self, tmp_path):
+    def test_the_graph_read_back_from_the_file_is_the_written_declaration(self, tmp_path):
+        """全検証を通した容器の 2 文書から起こし直した宣言 = 書き手が commit した宣言。
+
+        容器の文書は IR v2（initializer 名がテンソルキー — docs/ir-v2.md §13.1）なので、
+        グラフは v2 の文書どうしで、格納はテンソルキーごとの initializer 宣言で突き合わせる。
+        """
         graph, tensors = sample_graph()
 
-        path = write_component(tmp_path / "model.safetensors", graph, tensors)
+        path = write_component(tmp_path / "model.krm", graph, tensors)
 
-        assert written_graph(path).to_dict() == graph.to_dict()
+        written = written_graph(path)
+        read_back = ir_graph_from_container(bound(path).read, GRAPH_NAME)
+        assert written.to_dict() == graph.to_dict()
+        assert ir_v2_document(read_back) == ir_v2_document(written)
+        assert {init.tensor: init.to_dict() for init in read_back.initializers.values()} == {
+            init.tensor: init.to_dict() for init in written.initializers.values()
+        }
 
 
 class TestDeclarationAgreement:
@@ -103,13 +117,13 @@ class TestDeclarationAgreement:
         graph, _ = sample_graph()
 
         with pytest.raises(EmitError, match="欠落"):
-            write_model(tmp_path / "model.safetensors", graph, {})
+            write_model(tmp_path / "model.krm", graph, {})
 
     def test_unreferenced_tensor_fails_loudly(self, tmp_path):
         graph, tensors = sample_graph()
 
         with pytest.raises(EmitError, match="余剰"):
-            write_model(tmp_path / "model.safetensors", graph, {**tensors, "stray": torch.zeros(2)})
+            write_model(tmp_path / "model.krm", graph, {**tensors, "stray": torch.zeros(2)})
 
 
 def rounded(*shape: int) -> torch.Tensor:
@@ -231,7 +245,7 @@ class TestF16Storage:
     def test_eligible_weights_are_stored_as_f16_and_bias_stays_f32(self, tmp_path):
         graph, tensors = weight_graph()
 
-        path = write_component(tmp_path / "model.safetensors", graph, tensors, weight_dtype="f16")
+        path = write_component(tmp_path / "model.krm", graph, tensors, weight_dtype="f16")
 
         # 宣言の観測点はファイル側（`write_model` は呼び手の graph を書き換えない）。
         declared = written_graph(path).initializers
@@ -250,7 +264,7 @@ class TestF16Storage:
         """
         graph, tensors = weight_graph(output_weight=True)
 
-        path = write_component(tmp_path / "model.safetensors", graph, tensors, weight_dtype="f16")
+        path = write_component(tmp_path / "model.krm", graph, tensors, weight_dtype="f16")
 
         declared = written_graph(path).initializers
         assert declared["w"].storage.dtype == "f32"
@@ -262,7 +276,7 @@ class TestF16Storage:
     def test_the_f16_file_passes_the_full_verification(self, tmp_path):
         graph, tensors = weight_graph()
 
-        path = write_component(tmp_path / "model.safetensors", graph, tensors, weight_dtype="f16")
+        path = write_component(tmp_path / "model.krm", graph, tensors, weight_dtype="f16")
 
         expected = compressed_view(graph, {"w": "f16", "emb": "f16"})
         assert written_graph(path).to_dict() == expected.to_dict()
@@ -271,7 +285,7 @@ class TestF16Storage:
         graph, tensors = weight_graph()
         expected = tensors["enc.w"].clone()
 
-        path = write_component(tmp_path / "model.safetensors", graph, tensors, weight_dtype="f16")
+        path = write_component(tmp_path / "model.krm", graph, tensors, weight_dtype="f16")
 
         stored = stored_tensor(path, "enc.w", torch.float16, expected.shape).to(torch.float32)
         assert torch.equal(stored, expected)
@@ -286,26 +300,26 @@ class TestF16Storage:
         tensors["enc.w"] = torch.full((3, 4), 1.0 / 3.0)
 
         with pytest.raises(EmitError, match="fake-quant"):
-            write_model(tmp_path / "model.safetensors", graph, tensors, weight_dtype="f16")
+            write_model(tmp_path / "model.krm", graph, tensors, weight_dtype="f16")
 
     def test_a_graph_without_eligible_weights_fails_loudly(self, tmp_path):
         """「f16 指定なのに適格 0MB」を沈黙させない（ADR 0006 の常設診断の書き出し側）。"""
         graph, tensors = sample_graph()
 
         with pytest.raises(EmitError, match="圧縮格納が 1 本も計画されなかった"):
-            write_model(tmp_path / "model.safetensors", graph, tensors, weight_dtype="f16")
+            write_model(tmp_path / "model.krm", graph, tensors, weight_dtype="f16")
 
     def test_an_unknown_weight_dtype_fails_loudly(self, tmp_path):
         graph, tensors = weight_graph()
 
         # bf16 は IR の語彙にはあるが実行経路が無い（ADR 0006）。
         with pytest.raises(EmitError, match="書き出せない"):
-            write_model(tmp_path / "model.safetensors", graph, tensors, weight_dtype="bf16")
+            write_model(tmp_path / "model.krm", graph, tensors, weight_dtype="bf16")
 
     def test_the_breakdown_counts_eligible_and_plain_bytes(self, tmp_path):
         graph, tensors = weight_graph()
 
-        path = write_component(tmp_path / "model.safetensors", graph, tensors, weight_dtype="f16")
+        path = write_component(tmp_path / "model.krm", graph, tensors, weight_dtype="f16")
         # 内訳は**書いたファイルの宣言**から数える（呼び手の graph は圧縮宣言を持たない）。
         breakdown = storage_breakdown(written_graph(path))
 
@@ -331,6 +345,41 @@ class TestF16Storage:
         assert breakdown.plain_tensors == 2
         assert breakdown.plain_bytes == (3 + 3 * 5) * 4
         assert breakdown.scale_bytes == 0
+
+    def test_the_breakdown_does_not_count_a_shared_initializer(self):
+        """共有宣言（ADR 0096 段 2）は貸し手のバイトを借りるだけで、この容器に 1 バイトも書かない。
+
+        内訳が数えるのは「この容器に書くバイト」— 貸し手の重みが載ると常設診断（ADR 0006）が
+        実態からずれる。
+        """
+        graph = IrGraph(
+            symbols=[],
+            inputs=[IrInput(name="x", dtype="f32", shape=[2, 8])],
+            outputs=["y", "z"],
+            initializers={
+                "w": IrInitializer(tensor="own.w", storage=IrStorage(dtype="f32")),
+                "lent": IrInitializer(
+                    shared=IrShared(tensor="lender.w"), storage=IrStorage(dtype="f16")
+                ),
+            },
+            values={
+                "w": IrValue(dtype="f32", shape=[4, 8]),
+                "lent": IrValue(dtype="f32", shape=[16, 8]),
+                "y": IrValue(dtype="f32", shape=[2, 4]),
+                "z": IrValue(dtype="f32", shape=[2, 16]),
+            },
+            nodes=[
+                IrNode(op="linear", ins=["x", "w"], outs=["y"], attrs={}),
+                IrNode(op="linear", ins=["x", "lent"], outs=["z"], attrs={}),
+            ],
+        )
+
+        breakdown = storage_breakdown(graph)
+
+        assert breakdown.plain_tensors == 1
+        assert breakdown.plain_bytes == 4 * 8 * 4
+        assert breakdown.compressed_tensors == 0
+        assert breakdown.compressed_bytes == 0
 
 
 def int8_weight_graph() -> tuple[IrGraph, dict[str, torch.Tensor], dict[str, torch.Tensor]]:
@@ -381,7 +430,7 @@ class TestI8Storage:
         graph, tensors, scales = int8_weight_graph()
 
         path = write_component(
-            tmp_path / "model.safetensors", graph, tensors, weight_dtype="i8", weight_scales=scales
+            tmp_path / "model.krm", graph, tensors, weight_dtype="i8", weight_scales=scales
         )
 
         declared = written_graph(path).initializers
@@ -399,7 +448,7 @@ class TestI8Storage:
         graph, tensors, scales = int8_weight_graph()
 
         path = write_component(
-            tmp_path / "model.safetensors", graph, tensors, weight_dtype="i8", weight_scales=scales
+            tmp_path / "model.krm", graph, tensors, weight_dtype="i8", weight_scales=scales
         )
 
         expected = compressed_view(graph, {"w": "i8", "emb": "i8"})
@@ -411,7 +460,7 @@ class TestI8Storage:
         expected = tensors["enc.w"].clone()
 
         path = write_component(
-            tmp_path / "model.safetensors", graph, tensors, weight_dtype="i8", weight_scales=scales
+            tmp_path / "model.krm", graph, tensors, weight_dtype="i8", weight_scales=scales
         )
 
         stored = stored_tensor(path, "enc.w", torch.int8, expected.shape).to(torch.float32)
@@ -425,7 +474,7 @@ class TestI8Storage:
 
         with pytest.raises(EmitError, match="ビット一致しない"):
             write_model(
-                tmp_path / "model.safetensors",
+                tmp_path / "model.krm",
                 graph,
                 tensors,
                 weight_dtype="i8",
@@ -444,7 +493,7 @@ class TestI8Storage:
 
         with pytest.raises(EmitError, match="ビット一致しない"):
             write_model(
-                tmp_path / "model.safetensors",
+                tmp_path / "model.krm",
                 graph,
                 tensors,
                 weight_dtype="i8",
@@ -479,7 +528,7 @@ class TestI8Storage:
 
         with pytest.raises(EmitError, match="scale の dtype"):
             write_model(
-                tmp_path / "model.safetensors",
+                tmp_path / "model.krm",
                 graph,
                 tensors,
                 weight_dtype="i8",
@@ -493,7 +542,7 @@ class TestI8Storage:
 
         with pytest.raises(EmitError, match="per-channel scale が無い"):
             write_model(
-                tmp_path / "model.safetensors",
+                tmp_path / "model.krm",
                 graph,
                 tensors,
                 weight_dtype="i8",
@@ -507,7 +556,7 @@ class TestI8Storage:
 
         with pytest.raises(EmitError, match="keepdim 形"):
             write_model(
-                tmp_path / "model.safetensors",
+                tmp_path / "model.krm",
                 graph,
                 tensors,
                 weight_dtype="i8",
@@ -524,7 +573,7 @@ class TestI8Storage:
 
         with pytest.raises(EmitError, match="衝突"):
             write_model(
-                tmp_path / "model.safetensors",
+                tmp_path / "model.krm",
                 graph,
                 tensors,
                 weight_dtype="i8",
@@ -535,13 +584,13 @@ class TestI8Storage:
         graph, tensors = sample_graph()
 
         with pytest.raises(EmitError, match="圧縮格納が 1 本も計画されなかった"):
-            write_model(tmp_path / "model.safetensors", graph, tensors, weight_dtype="i8")
+            write_model(tmp_path / "model.krm", graph, tensors, weight_dtype="i8")
 
     def test_the_breakdown_counts_i8_bytes_and_the_scale_overhead(self, tmp_path):
         graph, tensors, scales = int8_weight_graph()
 
         path = write_component(
-            tmp_path / "model.safetensors", graph, tensors, weight_dtype="i8", weight_scales=scales
+            tmp_path / "model.krm", graph, tensors, weight_dtype="i8", weight_scales=scales
         )
         # 内訳は**書いたファイルの宣言**から数える（呼び手の graph は圧縮宣言を持たない）。
         breakdown = storage_breakdown(written_graph(path))
@@ -907,7 +956,7 @@ class TestI4Storage:
     def test_eligible_linear_weights_are_stored_as_i4_with_a_group_scale(self, tmp_path):
         graph, tensors, scales = int4_weight_graph()
 
-        path = write_int4(tmp_path / "model.safetensors", graph, tensors, scales)
+        path = write_int4(tmp_path / "model.krm", graph, tensors, scales)
 
         declared = written_graph(path).initializers
         assert declared["w"].storage.dtype == "i4"
@@ -930,7 +979,7 @@ class TestI4Storage:
         graph, tensors, scales = int4_weight_graph()
         expected = tensors["enc.w"].clone()
 
-        path = write_int4(tmp_path / "model.safetensors", graph, tensors, scales)
+        path = write_int4(tmp_path / "model.krm", graph, tensors, scales)
 
         packed = stored_payload(path, "enc.w")
         restored = dequantize_int4(unpack_int4(packed, (3, 32)), scales["enc.w"])
@@ -939,7 +988,7 @@ class TestI4Storage:
     def test_the_emitted_i4_file_satisfies_the_reader_layout_rules(self, tmp_path):
         graph, tensors, scales = int4_weight_graph()
 
-        path = write_int4(tmp_path / "model.safetensors", graph, tensors, scales)
+        path = write_int4(tmp_path / "model.krm", graph, tensors, scales)
 
         # 例外が出なければ合格（block の 64 B 整列と 4 B 倍数長を読み手が見る）。
         bound(path)
@@ -953,7 +1002,7 @@ class TestI4Storage:
         """
         graph, tensors, scales = int4_weight_graph()
 
-        path = write_int4(tmp_path / "model.safetensors", graph, tensors, scales)
+        path = write_int4(tmp_path / "model.krm", graph, tensors, scales)
 
         expected = compressed_view(graph, {"w": "i4"}, group_size=16)
         assert written_graph(path).to_dict() == expected.to_dict()
@@ -961,7 +1010,7 @@ class TestI4Storage:
     def test_the_breakdown_counts_i4_bytes_and_the_group_scale_overhead(self, tmp_path):
         graph, tensors, scales = int4_weight_graph()
 
-        path = write_int4(tmp_path / "model.safetensors", graph, tensors, scales)
+        path = write_int4(tmp_path / "model.krm", graph, tensors, scales)
         breakdown = storage_breakdown(written_graph(path))
 
         assert breakdown.compressed_tensors == 1
@@ -979,7 +1028,7 @@ class TestI4Storage:
         """
         graph, tensors, scales = int4_weight_graph(conv=True)
 
-        path = write_int4(tmp_path / "model.safetensors", graph, tensors, scales)
+        path = write_int4(tmp_path / "model.krm", graph, tensors, scales)
 
         declared = written_graph(path).initializers
         assert declared["cw"].storage.dtype == "i4"
@@ -999,7 +1048,7 @@ class TestI4Storage:
         graph, tensors, scales = int4_weight_graph(conv=True)
         expected = tensors["enc.cw"].clone()
 
-        path = write_int4(tmp_path / "model.safetensors", graph, tensors, scales)
+        path = write_int4(tmp_path / "model.krm", graph, tensors, scales)
 
         packed = stored_payload(path, "enc.cw")
         restored = dequantize_int4(unpack_int4(packed, (3, 2, 16)), scales["enc.cw"])
@@ -1014,7 +1063,7 @@ class TestI4Storage:
         """
         graph, tensors, scales = int4_weight_graph(conv=True)
 
-        path = write_int4(tmp_path / "model.safetensors", graph, tensors, scales)
+        path = write_int4(tmp_path / "model.krm", graph, tensors, scales)
 
         declared = written_graph(path).initializers
         assert declared["cw"].storage.dtype == "i4"
@@ -1029,7 +1078,7 @@ class TestI4Storage:
         """
         graph, tensors, scales = int4_weight_graph(conv=True, conv_groups=2)
 
-        path = write_int4(tmp_path / "model.safetensors", graph, tensors, scales)
+        path = write_int4(tmp_path / "model.krm", graph, tensors, scales)
 
         declared = written_graph(path).initializers
         assert declared["w"].storage.dtype == "i4"
@@ -1045,7 +1094,7 @@ class TestI4Storage:
         """
         graph, tensors, scales = int4_weight_graph(wide=True)
 
-        path = write_int4(tmp_path / "model.safetensors", graph, tensors, scales)
+        path = write_int4(tmp_path / "model.krm", graph, tensors, scales)
 
         declared = written_graph(path).initializers
         assert declared["w"].storage.dtype == "i4", "行長 32 側（既定 g でも割り切れる）"
@@ -1062,7 +1111,7 @@ class TestI4Storage:
         """
         graph, tensors, scales = int4_embedding_graph()
 
-        path = write_int4(tmp_path / "model.safetensors", graph, tensors, scales)
+        path = write_int4(tmp_path / "model.krm", graph, tensors, scales)
 
         declared = written_graph(path).initializers
         assert declared["emb"].storage.dtype == "i4"
@@ -1077,7 +1126,7 @@ class TestI4Storage:
         graph, tensors, scales = int4_embedding_graph()
         expected = tensors["enc.emb"].clone()
 
-        path = write_int4(tmp_path / "model.safetensors", graph, tensors, scales)
+        path = write_int4(tmp_path / "model.krm", graph, tensors, scales)
 
         packed = stored_payload(path, "enc.emb")
         restored = dequantize_int4(unpack_int4(packed, (3, 32)), scales["enc.emb"])
@@ -1087,7 +1136,7 @@ class TestI4Storage:
         """I4 が 2 本並んでも「隙間なく・4 バイト整列」が保たれる（ADR 0069 追記 2 の並び）。"""
         graph, tensors, scales = int4_embedding_graph()
 
-        path = write_int4(tmp_path / "model.safetensors", graph, tensors, scales)
+        path = write_int4(tmp_path / "model.krm", graph, tensors, scales)
 
         bound(path)
 
@@ -1099,7 +1148,7 @@ class TestI4Storage:
         """
         graph, tensors, scales = int4_embedding_graph()
 
-        path = write_int4(tmp_path / "model.safetensors", graph, tensors, scales)
+        path = write_int4(tmp_path / "model.krm", graph, tensors, scales)
 
         expected = compressed_view(graph, {"w": "i4", "emb": "i4"}, group_size=16)
         assert written_graph(path).to_dict() == expected.to_dict()
@@ -1108,7 +1157,7 @@ class TestI4Storage:
         """内訳の i4 バイトは linear と embedding の 2 本ぶん（0.5 バイト / 要素）。"""
         graph, tensors, scales = int4_embedding_graph()
 
-        path = write_int4(tmp_path / "model.safetensors", graph, tensors, scales)
+        path = write_int4(tmp_path / "model.krm", graph, tensors, scales)
         breakdown = storage_breakdown(written_graph(path))
 
         assert breakdown.compressed_tensors == 2
@@ -1127,20 +1176,20 @@ class TestI4Storage:
         graph.outputs.append("c")
 
         with pytest.raises(EmitError, match="圧縮格納が 1 本も計画されなかった"):
-            write_int4(tmp_path / "model.safetensors", graph, tensors, scales)
+            write_int4(tmp_path / "model.krm", graph, tensors, scales)
 
     def test_a_missing_scale_fails_loudly(self, tmp_path):
         """適格なのに scale が無い = fake-quant が届いていない重み（ADR 0006）。"""
         graph, tensors, _ = int4_weight_graph()
 
         with pytest.raises(EmitError, match="group scale が無い"):
-            write_int4(tmp_path / "model.safetensors", graph, tensors, {})
+            write_int4(tmp_path / "model.krm", graph, tensors, {})
 
     def test_a_scale_that_is_not_in_group_form_fails_loudly(self, tmp_path):
         graph, tensors, _ = int4_weight_graph()
 
         with pytest.raises(EmitError, match="group 形"):
-            write_int4(tmp_path / "model.safetensors", graph, tensors, {"enc.w": torch.ones(1, 2)})
+            write_int4(tmp_path / "model.krm", graph, tensors, {"enc.w": torch.ones(1, 2)})
 
     def test_a_group_size_outside_the_accepted_set_fails_loudly(self, tmp_path):
         """scale `[3,4]` は group 8 を意味する — 2 冪だが 16 未満（ADR 0069 決定 2）。
@@ -1151,7 +1200,7 @@ class TestI4Storage:
         graph, tensors, _ = int4_weight_graph()
 
         with pytest.raises(EmitError, match="2 冪かつ 16 以上でない"):
-            write_int4(tmp_path / "model.safetensors", graph, tensors, {"enc.w": torch.ones(3, 4)})
+            write_int4(tmp_path / "model.krm", graph, tensors, {"enc.w": torch.ones(3, 4)})
 
     def test_a_scale_that_is_not_f32_fails_loudly(self, tmp_path):
         """companion scale は F32 固定（i8 と同じ理由 — 逆変換の等値検査では検出できない）。"""
@@ -1159,7 +1208,7 @@ class TestI4Storage:
         half = {key: value.to(torch.float16) for key, value in scales.items()}
 
         with pytest.raises(EmitError, match="scale の dtype"):
-            write_int4(tmp_path / "model.safetensors", graph, tensors, half)
+            write_int4(tmp_path / "model.krm", graph, tensors, half)
 
     def test_an_unrounded_eligible_weight_fails_loudly(self, tmp_path):
         """丸めの掛け忘れ / 順序の誤りは黙って通さない（ADR 0006）。"""
@@ -1167,7 +1216,7 @@ class TestI4Storage:
         tensors["enc.w"] = torch.full((3, 32), 1.0 / 3.0)
 
         with pytest.raises(EmitError, match="ビット一致しない"):
-            write_int4(tmp_path / "model.safetensors", graph, tensors, scales)
+            write_int4(tmp_path / "model.krm", graph, tensors, scales)
 
     def test_a_scale_that_is_not_the_one_fake_quant_used_fails_loudly(self, tmp_path):
         """fake-quant が使ったのと**別の** scale で書こうとすると逆変換ゲートが落ちる。"""
@@ -1175,7 +1224,7 @@ class TestI4Storage:
         drifted = {key: value * 1.0000002 for key, value in scales.items()}
 
         with pytest.raises(EmitError, match="ビット一致しない"):
-            write_int4(tmp_path / "model.safetensors", graph, tensors, drifted)
+            write_int4(tmp_path / "model.krm", graph, tensors, drifted)
 
     def test_a_tampered_packed_byte_is_caught_by_the_round_trip_gate(self, tmp_path, monkeypatch):
         """故障注入: packed バイトを 1 個だけ書き換えると逆変換ビット一致門が発火する
@@ -1196,13 +1245,13 @@ class TestI4Storage:
         graph, tensors, scales = int4_weight_graph()
 
         with pytest.raises(EmitError, match="ビット一致しない"):
-            write_int4(tmp_path / "model.safetensors", graph, tensors, scales)
+            write_int4(tmp_path / "model.krm", graph, tensors, scales)
 
     def test_a_graph_without_eligible_weights_fails_loudly(self, tmp_path):
         graph, tensors = sample_graph()
 
         with pytest.raises(EmitError, match="圧縮格納が 1 本も計画されなかった"):
-            write_model(tmp_path / "model.safetensors", graph, tensors, weight_dtype="i4")
+            write_model(tmp_path / "model.krm", graph, tensors, weight_dtype="i4")
 
 
 class TestFailureLeavesTheGraphUntouched:
@@ -1220,7 +1269,7 @@ class TestFailureLeavesTheGraphUntouched:
         before = json.loads(graph.to_json())
 
         with pytest.raises(EmitError, match="fake-quant"):
-            write_model(tmp_path / "model.safetensors", graph, tensors, weight_dtype="f16")
+            write_model(tmp_path / "model.krm", graph, tensors, weight_dtype="f16")
 
         assert graph.initializers["emb"].storage.dtype == "f32"
         assert json.loads(graph.to_json()) == before
@@ -1232,7 +1281,7 @@ class TestFailureLeavesTheGraphUntouched:
 
         with pytest.raises(EmitError, match="per-channel scale が無い"):
             write_model(
-                tmp_path / "model.safetensors",
+                tmp_path / "model.krm",
                 graph,
                 tensors,
                 weight_dtype="i8",
@@ -1251,7 +1300,7 @@ class TestFailureLeavesTheGraphUntouched:
         graph, tensors, scales = int8_weight_graph()
         tensors["enc.w"] = torch.full((3, 4), 1.0 / 3.0)
         before = json.loads(graph.to_json())
-        path = tmp_path / "model.safetensors"
+        path = tmp_path / "model.krm"
 
         # 計画だけなら通る（実データを読む検査は payload が引かれるまで掛からない）。
         stored_model(graph, tensors, weight_dtype="i8", weight_scales=scales)
@@ -1276,7 +1325,7 @@ class TestSuccessLeavesTheGraphUntouched:
         graph, tensors = weight_graph()
         before = json.loads(graph.to_json())
 
-        write_model(tmp_path / "model.safetensors", graph, tensors, weight_dtype="f16")
+        write_model(tmp_path / "model.krm", graph, tensors, weight_dtype="f16")
 
         assert json.loads(graph.to_json()) == before
 
@@ -1319,7 +1368,7 @@ class TestStreamingConversion:
         monkeypatch.setattr(emit, "_convert_for_storage", spy)
         graph, tensors = weight_graph()
 
-        write_model(tmp_path / "model.safetensors", graph, tensors, weight_dtype="f16")
+        write_model(tmp_path / "model.krm", graph, tensors, weight_dtype="f16")
 
         # 2 テンソル（enc.w / enc.emb）× 2 走査 — **書きながら** sha256 を採る回と、据える前の
         # 読み直し検証で引き直す回。分割形は part 0 を最後に書けるので、書き出しと digest が
@@ -1425,7 +1474,7 @@ class TestMixedStorage:
         graph, tensors, scales = mixed_weight_graph()
 
         path = write_component(
-            tmp_path / "model.safetensors",
+            tmp_path / "model.krm",
             graph,
             tensors,
             weight_dtype="i4",
@@ -1447,7 +1496,7 @@ class TestMixedStorage:
         graph, tensors, scales = mixed_weight_graph()
 
         path = write_component(
-            tmp_path / "model.safetensors",
+            tmp_path / "model.krm",
             graph,
             tensors,
             weight_scales=scales,
@@ -1462,7 +1511,7 @@ class TestMixedStorage:
         graph, tensors = weight_graph()
 
         path = write_component(
-            tmp_path / "model.safetensors",
+            tmp_path / "model.krm",
             graph,
             tensors,
             weight_dtype="f16",
@@ -1478,7 +1527,7 @@ class TestMixedStorage:
 
         with pytest.raises(EmitError, match="どの initializer のテンソルでもない"):
             write_model(
-                tmp_path / "model.safetensors",
+                tmp_path / "model.krm",
                 graph,
                 tensors,
                 weight_dtype="f16",
@@ -1491,7 +1540,7 @@ class TestMixedStorage:
 
         with pytest.raises(EmitError, match="適格でない"):
             write_model(
-                tmp_path / "model.safetensors",
+                tmp_path / "model.krm",
                 graph,
                 tensors,
                 weight_dtype_overrides={"enc.w": "f16"},
@@ -1506,7 +1555,7 @@ class TestMixedStorage:
 
         with pytest.raises(EmitError, match="の重みスロットだけ"):
             write_model(
-                tmp_path / "model.safetensors",
+                tmp_path / "model.krm",
                 graph,
                 tensors,
                 weight_scales=scales,
@@ -1518,7 +1567,7 @@ class TestMixedStorage:
 
         with pytest.raises(EmitError, match="書き出せない"):
             write_model(
-                tmp_path / "model.safetensors",
+                tmp_path / "model.krm",
                 graph,
                 tensors,
                 weight_dtype_overrides={"enc.w": "f64"},
@@ -1535,7 +1584,7 @@ class TestMixedStorage:
 
         with pytest.raises(EmitError, match="圧縮格納は f32 実体のみ"):
             write_model(
-                tmp_path / "model.safetensors",
+                tmp_path / "model.krm",
                 graph,
                 tensors,
                 weight_scales=scales,
@@ -1585,7 +1634,7 @@ class TestThePlannedCompressionGate:
         graph, tensors, scales = int4_weight_graph()
 
         path = write_component(
-            tmp_path / "model.safetensors",
+            tmp_path / "model.krm",
             graph,
             tensors,
             weight_dtype="i8",
@@ -1605,7 +1654,7 @@ class TestThePlannedCompressionGate:
         graph, tensors = conv2d_only_graph()
 
         with pytest.raises(EmitError) as err:
-            write_model(tmp_path / "model.safetensors", graph, tensors, weight_dtype="i4")
+            write_model(tmp_path / "model.krm", graph, tensors, weight_dtype="i4")
 
         assert "i4 の展開経路（linear / embedding / conv1d" in str(err.value)
 
@@ -1614,7 +1663,7 @@ class TestThePlannedCompressionGate:
         graph, tensors = sample_graph()
 
         with pytest.raises(EmitError) as err:
-            write_model(tmp_path / "model.safetensors", graph, tensors, weight_dtype="f16")
+            write_model(tmp_path / "model.krm", graph, tensors, weight_dtype="f16")
 
         assert "既定 f16" in str(err.value)
         assert "明示指定 なし" in str(err.value)
@@ -1644,4 +1693,4 @@ class TestInitializerKeyInjectivity:
         )
 
         with pytest.raises(EmitError, match="1:1 でない"):
-            write_model(tmp_path / "model.safetensors", graph, tensors, weight_dtype="f16")
+            write_model(tmp_path / "model.krm", graph, tensors, weight_dtype="f16")
