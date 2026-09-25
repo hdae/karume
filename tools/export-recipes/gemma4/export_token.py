@@ -35,8 +35,8 @@ MUST: 記録を書くために logits opt-in 系列を**再 export しない** �
 
 ## 出力レイアウト
 
-    outputs/series/gemma4-e2b-decode-token/model.safetensors  重み・定数 + karume_ir
-    outputs/series/gemma4-e2b-decode-token/reference.json     出所記録（指紋 + 流用 golden）
+    outputs/series/gemma4-e2b-decode-token/model.krm        重み・定数 + 2 文書の記述
+    outputs/series/gemma4-e2b-decode-token/reference.json   出所記録（指紋 + 流用 golden）
 """
 
 from __future__ import annotations

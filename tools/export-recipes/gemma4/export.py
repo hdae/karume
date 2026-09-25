@@ -1,4 +1,5 @@
-"""実重み Gemma 4 E2B（text デコーダ）を **1-shot 形**で IR v1 コンテナ + golden io へ書き出す台本。
+"""実重み Gemma 4 E2B（text デコーダ）を **1-shot 形**で `model.krm`（IR v2）+ golden io へ
+書き出す台本。
 
 `minicpm5/export.py` の鏡像（`input_ids[1,T] → logits[1,T,262144]`・KV cache 無し）だが、
 検収の主眼は 2 つ増えている:
@@ -856,17 +857,23 @@ def export_series(model_dir: Path, out_dir: Path, *, sym_max: int = SYM_MAX) -> 
     }
 
 
-def series_parser(description: str, out_dir: Path) -> argparse.ArgumentParser:
+def series_parser(
+    description: str, out_dir: Path, *, with_sym_max: bool = True
+) -> argparse.ArgumentParser:
     """この family の 3 台本に共通な CLI の骨組み（`--model-dir` / `--out` / `--sym-max`）。
 
     系列で違うのは既定の出力先と、chunk 系列だけが足す `--positions` / `--steps` だけ
     （{@link gemma4.export_decode.run_variant_cli}）。3 つの入口で綴りや既定が割れると、
     「台本ごとに違う名前の同じノブ」が生える。
+
+    `with_sym_max=False` は chunk 記号を持たない台本（MTP drafter）用 — 効かないノブを
+    受理して黙って捨てない（fail loudly）ために、`--sym-max` 自体を登録しない。
     """
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument("--model-dir", type=Path, default=DEFAULT_MODEL_DIR)
     parser.add_argument("--out", type=Path, default=out_dir)
-    parser.add_argument("--sym-max", type=int, default=SYM_MAX)
+    if with_sym_max:
+        parser.add_argument("--sym-max", type=int, default=SYM_MAX)
     return parser
 
 

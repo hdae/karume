@@ -339,7 +339,7 @@ def gemma4_series_name(model: str, suffix: str) -> str:
 
 @dataclass(frozen=True)
 class Gemma4Sources:
-    """組み立ての入力。系列 2 本（製品グラフ + PLE sidecar / トークナイザ資産）と、
+    """組み立ての入力。系列 2 本（製品グラフ + PLE〈容器の資産〉/ トークナイザ資産）と、
     上流チェックポイント（推奨サンプラの出どころ — 読むのは
     `generation_config.json` 1 本だけで、重みには触らない）。
     """
@@ -524,7 +524,7 @@ def gemma4_vocab_size(graph: Mapping[str, Any], path: Path) -> int:
     出力が **2 本**（`logits[1, R, V]` → `hidden[1, R, H]` の順）であることまで見るのは、
     検収用の 2 系列（logits opt-in / token-only）が同じ系列名の下に紛れ込むと**幅だけが別の
     意味の数**になるため。行軸が記号 `R` なのは投機 verify が 1 回で複数行を採点するからで、
-    通常の decode はそこを 1 に束縛する。V は主 embedding の行数そのもので、PLE sidecar と
+    通常の decode はそこを 1 に束縛する。V は主 embedding の行数そのもので、PLE（容器の資産）と
     トークナイザの相互照合（ADR 0085 決定 5）の基準になる。
 
     MUST: 順序まで見る（logits と hidden は行軸まで同型で、幅だけが違う）— 入れ替わった資産を

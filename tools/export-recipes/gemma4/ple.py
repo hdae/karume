@@ -5,8 +5,9 @@
 （各 `[262144, 256]`・列スライス）へ割り、`stack` で `[1,T,35,256]` へ組み直して
 `per_layer_inputs=` として上流へ渡す。
 
-台本 3 本（1-shot の {@link gemma4.export}・chunk 系列の {@link gemma4.export_decode} /
-{@link gemma4.export_token}）は**どれもこの 1 本を通す** — 分割の規則が 2 箇所に生えると、
+台本 5 本（1-shot の {@link gemma4.export}・chunk 系列の {@link gemma4.export_decode} /
+{@link gemma4.export_token} / {@link gemma4.export_product}・MTP drafter の
+{@link gemma4.export_drafter}）は**どれもこの 1 本を通す** — 分割の規則が 2 箇所に生えると、
 片方だけ直したときの食い違いが golden の突合まで誰にも見えない。
 
 ## 行ブロック読み（{@link load_per_layer_tables}）

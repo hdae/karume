@@ -9,7 +9,7 @@ source revisions and download hashes are recorded in the QAT research artifacts.
 records the weight, config, and tokenizer fingerprints in `reference.json`.
 
 The converted text weights retain the original packed integers and scales. The graph is rewritten
-into states form, PLE is stored in a host-read sidecar, and RoPE inputs are generated on the host.
+into states form, PLE is stored as host-read container assets, and RoPE inputs are generated on the host.
 The model card states the numerical and validation limits. Distribution assembly includes the
 verbatim Apache 2.0 license from `../_shared/licenses/apache_license_2_0.txt` and a modification
 notice. It does not publish or upload anything.

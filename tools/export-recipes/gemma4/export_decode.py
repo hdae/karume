@@ -1,4 +1,5 @@
-"""実重み Gemma 4 E2B を **states 形の chunk グラフ**（IR v1 + golden）へ書き出す台本。
+"""実重み Gemma 4 E2B を **states 形の chunk グラフ**（`model.krm`〈IR v2〉+ golden）へ
+書き出す台本。
 
 ADR [0066](../../../docs/decisions/0066-generation-context-state-slots.md)（GenerationContext と
 名前付き state スロット）/
@@ -88,8 +89,9 @@ karume の sliding 述語は `in_window(col, limit) = col <= limit && (limit - c
 包含なので、`config.sliding_window` をそのまま `window` attrs へ宣言する。
 
 容量は層種別で分ける（ADR 0066 追記 9）: full スロットは記号 `C`（context 生成時に選ぶ —
-決定 3）・sliding スロットは `window` 実数。ring は window ちょうどで閉じるので、記号のままだと
-`C - window` 行が常に死蔵になる（C=8192 で約 180MiB）。詳細は {@link states_plan}。
+決定 3）・sliding スロットは `window + SLIDING_SLACK_ROWS` の実数（{@link sliding_capacity}）。
+ring はこの容量で閉じるので、記号のままだと `C - (window + SLIDING_SLACK_ROWS)` 行が常に死蔵になる
+（C=8192 で約 180MiB）。余裕行の理由は {@link SLIDING_SLACK_ROWS}、詳細は {@link states_plan}。
 
 ## mask は「trace を通すためだけ」に居る
 
