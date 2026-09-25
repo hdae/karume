@@ -30,8 +30,9 @@
  *
  * ## MUST: 数値の正はここでは担保されない
  *
- * 正は golden E2E（`packages/runtime/tests/e2e_sbv2_test.ts`）と、`tools/exporter/sbv2_demo.py
- * reference` による torch 突合（example の dump 経路）が担保する。
+ * 正は golden E2E（`packages/runtime/tests/e2e_sbv2_test.ts`）と、`tools/export-recipes/sbv2/demo.py`
+ * の `reference`（`python -m sbv2.demo reference`）による torch 突合（example の dump 経路）が
+ * 担保する。
  *
  * ## MUST: テキスト解析はこのパッケージの責務ではない（0.6.0 の再裁定）
  *
@@ -215,7 +216,7 @@ const assetBuffer = (
 ): ArrayBuffer => readAssetBuffer("sbv2", "weights / assets", assets, key);
 
 /**
- * 全量面（`fromAssets`）のコンポーネント供給口（受け口の実装は 7 家族共有 —
+ * 全量面（`fromAssets`）のコンポーネント供給口（受け口の実装は 8 家族共有 —
  * {@link assetComponentOpener}）。部品のキーは単一形 `krm` の 1 本（`voice`）か、分割形の
  * part 列（`voice[0]` / `voice[1]` / …）。
  *
@@ -277,7 +278,7 @@ const i32 = (values: readonly number[], shape: readonly number[]): Tensor => ({
 const ones = (count: number): Float32Array<ArrayBuffer> => new Float32Array(count).fill(1);
 
 /**
- * グラフ出力を**位置**で引く（IR v1 の出力名は export 時の torch ノード名 — `slice_54` /
+ * グラフ出力を**位置**で引く（IR の出力名は export 時の torch ノード名 — `slice_54` /
  * `mul_3780` のように意味を持たないので名前を決め打ちしない）。本数は
  * {@link buildSbv2State} が構築時に見る。
  */

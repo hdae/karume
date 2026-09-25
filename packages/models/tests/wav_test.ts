@@ -10,6 +10,7 @@ import { assert, assertEquals, assertThrows } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
 import { decodeWav, encodeWav } from "../src/audio/wav.ts";
 import { ModelInputError } from "../src/errors.ts";
+import { readTextIfPresent } from "./helpers/read-if-present.ts";
 
 /** golden `meta.json` の置き場（`tools/export-recipes/irodori/dacvae/host.py` の既定の出力先）。 */
 const HOST_GOLDEN = new URL(
@@ -19,7 +20,7 @@ const HOST_GOLDEN = new URL(
 const HOST_COMMAND = "cd tools/export-recipes && uv run --with descript-audiotools --with einops " +
   "--with 'transformers==5.14.1' python -m irodori.dacvae.host";
 
-const goldenText = await Deno.readTextFile(HOST_GOLDEN).catch(() => undefined);
+const goldenText = await readTextIfPresent(HOST_GOLDEN);
 if (goldenText === undefined) {
   console.warn(
     `[karume] wav のスケール突合を SKIP する（${HOST_GOLDEN.pathname} が要る）。生成: ${HOST_COMMAND}`,
@@ -285,6 +286,61 @@ Deno.test("decodeWav: 'data' が無い / 長さが宣言と食い違うファイ
   assertThrows(() => decodeWav(fmtOnly), ModelInputError, "'data' チャンクが無い");
 });
 
+/** 器の末尾にチャンクを 1 本足し、RIFF の宣言サイズを揃える（奇数長は 1 バイト詰め）。 */
+const appendChunk = (
+  wav: Uint8Array<ArrayBuffer>,
+  id: string,
+  body: Uint8Array,
+): Uint8Array<ArrayBuffer> => {
+  const bytes = new Uint8Array(wav.length + 8 + body.length + (body.length % 2));
+  bytes.set(wav);
+  ascii(bytes, wav.length, id);
+  const view = new DataView(bytes.buffer);
+  view.setUint32(wav.length + 4, body.length, true);
+  bytes.set(body, wav.length + 8);
+  view.setUint32(4, bytes.length - 8, true);
+  return bytes;
+};
+
+describe("decodeWav が同じ id のチャンクを 2 本持つ器を受けたとき", () => {
+  const single = (): Uint8Array<ArrayBuffer> =>
+    buildWav({
+      format: 1,
+      channels: 1,
+      sampleRate: 48000,
+      bits: 16,
+      payload: int16Payload([16384]),
+    });
+
+  it("'data' が 2 本なら後勝ちで読まずに落とす", () => {
+    const twoData = appendChunk(single(), "data", int16Payload([-16384]));
+    assertThrows(() => decodeWav(twoData), ModelInputError, "チャンク 'data' が 2 本ある");
+  });
+
+  it("'fmt ' が 2 本なら後勝ちで読まずに落とす", () => {
+    const wav = single();
+    // 1 本目の `fmt ` の中身（offset 20 から 16 バイト）をそのまま写す — 中身が同じでも重複は重複。
+    const twoFmt = appendChunk(wav, "fmt ", wav.slice(20, 36));
+    assertThrows(() => decodeWav(twoFmt), ModelInputError, "チャンク 'fmt ' が 2 本ある");
+  });
+
+  it("読み飛ばす未知チャンク（LIST）は 2 本あっても通る", () => {
+    const twoList = appendChunk(
+      buildWav({
+        format: 1,
+        channels: 1,
+        sampleRate: 48000,
+        bits: 16,
+        payload: int16Payload([16384]),
+        extraChunk: { id: "LIST", length: 7 },
+      }),
+      "LIST",
+      new Uint8Array(3),
+    );
+    assertEquals(Array.from(decodeWav(twoList).data), [0.5]);
+  });
+});
+
 Deno.test("decodeWav: フレーム境界で割り切れない data は落とす", () => {
   assertThrows(
     () =>
@@ -436,7 +492,7 @@ describe("共通 audio 層の失敗をホストが 400 / 500 に振り分ける�
   });
 
   // NOTE: 内部不変条件の破れ（ModelInputError **でない**素の Error）は、この層には到達経路が
-  // 無い。`wav.ts` の throw は 16 本とも呼び手のバイト列 / 波形 / 周波数だけを見ており、資産にも
+  // 無い。`wav.ts` の throw は 17 本とも呼び手のバイト列 / 波形 / 周波数だけを見ており、資産にも
   // 配線にも由来しない。「ModelInputError でない」側は共通 image 層が持つ
   // （`image_preprocess_test.ts` の `resizePlaneF32` — 公開面に出ていない内部ヘルパ）。
 });

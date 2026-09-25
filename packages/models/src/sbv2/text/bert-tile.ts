@@ -3,7 +3,7 @@
  *
  * 参照実装 `nlp/japanese/bert_feature.py` の
  * `torch.cat(res["hidden_states"][-3:-2], -1)[0]` → `torch.cat([res[i].repeat(w[i],1) ...]).T`
- * に対応する 2 段。IR v1 のグラフ出力は位置で引く（`output.<i>`）ので、選択は
+ * に対応する 2 段。IR のグラフ出力は位置で引くので、選択は
  * **末尾からの相対位置**で行う（層を削った variant でも同じ規則で引ける）。
  */
 

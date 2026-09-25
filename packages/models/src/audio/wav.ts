@@ -5,7 +5,7 @@
  * WAV を読む）なので、ファミリのディレクトリではなく `src/audio/` に置く（`src/image/png.ts`
  * と同じ位置づけ）。ランタイム依存は無い（`DataView` だけ）。
  *
- * パイプラインの出力と、torch 参照（`tools/exporter/sbv2_demo.py`）が出す reference.wav /
+ * パイプラインの出力と、torch 参照（`tools/export-recipes/sbv2/demo.py`）が出す reference.wav /
  * official.wav は**同じ規則**で書く（クリップ → `floor(x·32767 + 0.5)`）。エンコード規則が
  * 割れると「聴き比べ」に実装差が混ざる。
  *
@@ -14,8 +14,8 @@
  * {@link decodeWav} の int16 → f32 は **32768 で割り**、{@link encodeWav} の f32 → int16 は
  * **32767 を掛ける**。前者は参照音声の読み手（上流 `soundfile` / `codec.py`）の規約に、後者は聴き比べ
  * 相手の torch 台本に、それぞれ合わせた結果で、どちらも**外部との一致が正**。揃えると
- * 参照音声の LUFS が上流とずれる（相対 3e-5 — 実測は `dacvae_host.py` の
- * `_wav_scale_evidence`）。したがって往復すると 1LSB 級の差が出る（`wav_test.ts` が固定）。
+ * 参照音声の LUFS が上流とずれる（相対 3e-5 — 実測は `tools/export-recipes/irodori/dacvae/host.py`
+ * の `_wav_scale_evidence`）。したがって往復すると 1LSB 級の差が出る（`wav_test.ts` が固定）。
  */
 
 import { ModelInputError } from "../errors.ts";
@@ -162,6 +162,11 @@ const findChunks = (view: DataView): { readonly fmt: RiffChunk; readonly data: R
           `残りは ${logicalEnd - offset} バイトしかない`,
       );
     }
+    // MUST: `fmt ` / `data` は 1 本ずつ。後勝ちで上書きすると、書き手の意図と別の data を黙って
+    // 読みうる（読み飛ばす未知チャンクは重複してよい）。
+    if ((id === "fmt " && fmt !== undefined) || (id === "data" && data !== undefined)) {
+      throw new ModelInputError(`decodeWav: チャンク '${id}' が 2 本ある`);
+    }
     if (id === "fmt ") fmt = { offset, length };
     if (id === "data") data = { offset, length };
     cursor = offset + length + (length % 2);
@@ -183,7 +188,7 @@ const findChunks = (view: DataView): { readonly fmt: RiffChunk; readonly data: R
  *
  * リサンプルはしない。周波数が要求と違うかどうかは呼び出し側（パイプライン）が判定する。
  *
- * NOTE: ヘッダ・チャンク・形式の検査は {@link findChunks} の 5 本を含めて全て
+ * NOTE: ヘッダ・チャンク・形式の検査は {@link findChunks} の 6 本を含めて全て
  * {@link ModelInputError}。解析しているのは**ホストが渡したバイト列そのもの**（この関数も
  * barrel から出るだけで、パイプラインの内側からは呼ばれない）で、資産の齟齬ではない — 打つ手は
  * 「渡す WAV を直す」の 1 つ = HTTP なら 400 に当たる（ADR 0107 決定 2）。

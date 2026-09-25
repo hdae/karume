@@ -31,8 +31,8 @@ import type { Tensor } from "@karume/runtime";
  *
  * MUST（沈黙誤値クラス）: この値がモデルの `window_size` とずれると、`idx_k` は
  * `clamp(rel+4, 0, 8)` のまま**幅の違う埋め込みを gather する**。要素数の辻褄は合うので
- * shape エラーにならず、出力だけが静かに誤る。Python 側は `export_sbv2._assert_window_size`
- * が ckpt ロード時に落とし、ホスト側はパリティテストが**モデルコンテナに焼き込まれた
+ * shape エラーにならず、出力だけが静かに誤る。Python 側は `sbv2.export._assert_window_size`
+ * （`tools/export-recipes/sbv2/export.py`）が ckpt ロード時に落とし、ホスト側はパリティテストが**モデルコンテナに焼き込まれた
  * value 側の表の幅**（`2w+1`）と突き合わせて落とす — 両側に門を置くのは、片側だけだと
  * 「ホストとゴールデンが同じ誤りを共有して検証をすり抜ける」経路が残るため。
  */

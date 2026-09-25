@@ -217,7 +217,7 @@ const assetBuffer = (
 ): ArrayBuffer => readAssetBuffer("depth-anything", "weights", assets, key);
 
 /**
- * 全量面（`fromAssets`）のコンポーネント供給口（受け口の実装は 7 家族共有 —
+ * 全量面（`fromAssets`）のコンポーネント供給口（受け口の実装は 8 家族共有 —
  * {@link assetComponentOpener}）。部品のキーは単一形 `krm` の 1 本（`depth`）か、分割形の
  * part 列（`depth[0]` / `depth[1]` / …）。
  */

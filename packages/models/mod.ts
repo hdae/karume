@@ -1,7 +1,7 @@
 /**
  * `@karume/models` — パイプライン群の barrel。ファミリ別サブパス（`./anima` / `./birefnet` /
- * `./depth-anything` / `./gemma` / `./irodori` / `./sbv2` / `./siglip2` / `./vowel-detector`）と
- * 両建て（ADR 0037）。
+ * `./depth-anything` / `./gemma` / `./gemma4-qat` / `./irodori` / `./sbv2` / `./siglip2` /
+ * `./vowel-detector`）と両建て（ADR 0037）。
  *
  * ADR 0008 の流儀で**薄い面**にする — ここに並ぶのは「パイプラインを組んで生成する」「出た
  * 画像を書き出す」という利用者ストーリーだけで、内部モジュールの素通し再輸出はしない。

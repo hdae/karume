@@ -2,8 +2,8 @@
  * スタイルベクトルと話者埋め込みの**行引き**（配布形の 2 つの表 → front / voice の入力）。
  *
  * 配布形は「表を配って実行時に行を引く」形で、名前 → 行番号の対応は `pipelineConfig` の
- * `styles` / `speakers` が持つ（ADR 0038 §2 / `karume/dist.py` の SBV2 節 — 表 2 本と
- * pipelineConfig の 3 つで 1 組）。
+ * `styles` / `speakers` が持つ（ADR 0038 §2 / `tools/export-recipes/sbv2/distribution.py` —
+ * 表 2 本と pipelineConfig の 3 つで 1 組）。
  *
  * ## MUST: 行がずれても shape は合う
  *
@@ -15,14 +15,17 @@
  * ## 参照実装との対応
  *
  * {@link styleVector} は `TTSModel.__get_style_vector` と同式（正本は
- * `tools/exporter/sbv2_demo.py` の `style_vector`）で、**平均スタイルは行 0** という SBV2 の
+ * `tools/export-recipes/sbv2/demo.py` の `style_vector`）で、**平均スタイルは行 0** という SBV2 の
  * 規約に乗っている。`weight = 1` なら選んだ行そのもの、`0` なら平均行に縮退する。
  */
 
 import { parseSafetensors, type Tensor } from "@karume/runtime";
 import { Sbv2InputError } from "./errors.ts";
 
-/** 配布形の safetensors に入っている表のテンソル名（`karume/dist.py` の綴りと対）。 */
+/**
+ * 配布形の safetensors に入っている表のテンソル名（`tools/export-recipes/sbv2/distribution.py` の
+ * `SBV2_STYLE_KEY` / `SBV2_SPEAKER_KEY` と対）。
+ */
 export const STYLE_TENSOR = "style_vectors";
 export const SPEAKER_TENSOR = "speaker_embeddings";
 

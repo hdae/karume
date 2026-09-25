@@ -12,9 +12,10 @@
 import { ModelInputError } from "./errors.ts";
 
 /**
- * `seed` の受理集合（**非負の安全整数**）を見る門。anima / sbv2 / irodori が共有する。
+ * `seed` の受理集合（**非負の安全整数**）を見る門。anima / sbv2 / irodori と、gemma の生成
+ * sampler（`generation/random.ts`）が共有する。
  *
- * 3 家族とも受けた `seed` を `BigInt` へ落として splitmix64 の状態にするので、条件の理由は
+ * 4 者とも受けた `seed` を `BigInt` へ落として splitmix64 の状態にするので、条件の理由は
  * 3 つに分かれる:
  *
  * - **非負**は API の値域方針である。負も `BigInt` へは落ちる（`BigInt(-1) === -1n`）し、

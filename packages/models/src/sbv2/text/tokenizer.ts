@@ -21,8 +21,8 @@
  *
  * 「1 文字」は Unicode コードポイント単位。トークン数は word2ph の長さと直結するので、
  * ここの分割規則が参照実装とずれると BERT 特徴が音素へ誤配置される（音は出るが崩れる）。
- * その齟齬は `sbv2_demo.py reference` が「同じ bert_text から同じ input_ids が出るか」で
- * 実データ突合する。
+ * その齟齬は `python -m sbv2.demo reference`（`tools/export-recipes/sbv2/demo.py`）が「同じ
+ * bert_text から同じ input_ids が出るか」で実データ突合する。
  */
 
 import { assertUniqueLines } from "../../text/asset-gates.ts";

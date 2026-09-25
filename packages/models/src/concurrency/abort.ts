@@ -19,7 +19,8 @@
  * 失われる** — 先に仕掛けた timer より message タスクが先に配送されうるので、「実行開始後に
  * 届いた中断は最初の段境界で効く」（`anima_pipeline_test` / `irodori_pipeline_test` の門）が
  * 負荷次第で破れる（2026-09-05 フル verify で実測）。中断の確実な観測を速度より優先する。
- * 非表示タブの throttling は limitations に記録する（W-M6-3）。
+ * 非表示タブの throttling は limitations の「ブラウザ: 非表示タブでは生成が timer throttling の
+ * 刻みに釘付けになる」節に記録してある。
  *
  * `signal` 未指定なら譲らない（購読していない呼び出しにタスク 1 往復のコストを乗せない）。
  */
