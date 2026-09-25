@@ -275,15 +275,6 @@ const slidingSlackRows = (
 };
 
 /**
- * `spec.bindings` を検査して null プロトタイプの表へ写す。
- *
- * MUST: 束縛の器は null プロトタイプ（plan.ts の `bindSymbols` と同じ理由 — シンボルの文法
- * `[A-Za-z_][A-Za-z0-9_]*` は "__proto__" にマッチし、素の `{}` では代入が [[Prototype]] 設定に
- * 化けて own property が作られない）。
- * MUST: 記号容量は**ここで与えられた値だけ**で決まる。states は束縛源にならず（ADR 0066
- * 決定 2）、context は入力を 1 本も持たないので、入力 shape からの推定は原理的に不可能。
- */
-/**
  * `chunkLength` の値域検査（GPU 非依存の純関数）。
  *
  * MUST: 上限は u32（`queryLength ≤ chunkLength` の門を通じて論理長の上限もここで決まる —
@@ -337,6 +328,15 @@ export const assertChunkBuckets = (
   }
 };
 
+/**
+ * `spec.bindings` を検査して null プロトタイプの表へ写す。
+ *
+ * MUST: 束縛の器は null プロトタイプ（plan.ts の `bindSymbols` と同じ理由 — シンボルの文法
+ * `[A-Za-z_][A-Za-z0-9_]*` は "__proto__" にマッチし、素の `{}` では代入が [[Prototype]] 設定に
+ * 化けて own property が作られない）。
+ * MUST: 記号容量は**ここで与えられた値だけ**で決まる。states は束縛源にならず（ADR 0066
+ * 決定 2）、context は入力を 1 本も持たないので、入力 shape からの推定は原理的に不可能。
+ */
 export const resolveBindings = (
   graph: IrGraph,
   bindings: SymbolBindings | undefined,
@@ -914,6 +914,11 @@ export class GenerationContext {
    *
    * 返るのは**凍結済み**の object（`Object.freeze`）— 上限検査が信頼する値なので、書き換えは
    * strict mode（モジュールは常に strict）で `TypeError` になる。
+   *
+   * 借り手 context では**常に undefined**（借り手は deferred run も commit も拒否されるので保留を
+   * 持たない）。貸し手に保留があっても借り手からは見えないので、「draft してよいか」の判定に
+   * 借り手のこの値を使わないこと — 保留は貸し手の `pendingCommit` を読む（保留中の貸し手に対する
+   * 借り手 run は、貸し手側のリース取得が拒否する）。
    */
   get pendingCommit(): { readonly pastLength: number; readonly queryLength: number } | undefined {
     this.#assertUsable("pendingCommit");
