@@ -73,4 +73,4 @@ W-RT6-1 / W-AD3-2）。subgroup32 は parallel と同じ和を subgroup の値�
 - RTX / Vulkan では数値不変のはず（0105 追記 4 の 540 組の掃引と同じ機序 — コンパイラが縮約する）。**Metal では
   subgroup32 の出力バイトが変更前から変わる**（parallel と揃う側へ）。2026-09-13 の M2 一致記録は fma 化前の実測。
 - 再検収: Chrome（M2）で `deno task bench:llm-browser` → `http://localhost:8787/check.html`（u32 一致門をそのまま
-  Chrome で走らせる入口。tools/llm-speed/browser/check.ts）。結果はこの追記に記録する（**実施待ち**）。
+  Chrome で走らせる入口。tools/llm-speed/browser/check.ts）。結果（2026-09-25・利用者の M2）: **PASS** — parallel と subgroup32 の u32 一致 180 ケース / 28,080 要素（Apple metal-3・Chrome 153・checkout 8d3bd8b4・features subgroups / subgroup-size-control / timestamp-query・wgsl subgroup_id あり・297 ms）。決定 3 と決定 4 の一致は fma 化後の Metal で成立する。
