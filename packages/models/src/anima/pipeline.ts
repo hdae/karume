@@ -101,6 +101,7 @@ import {
   toAcquireGpuOptions,
 } from "../session/gpu-features.ts";
 import { toSessionOptions } from "../session/options.ts";
+import { disposeSteps } from "../session/dispose-steps.ts";
 import { toManifestSource } from "../hub/repo-ref.ts";
 import {
   type FromPretrainedComponentOptions,
@@ -302,7 +303,7 @@ const assetBuffer = (
 ): ArrayBuffer => readAssetBuffer("anima", "weights / assets", assets, key);
 
 /**
- * 全量面（`fromAssets`）のコンポーネント供給口（受け口の実装は 7 家族共有 —
+ * 全量面（`fromAssets`）のコンポーネント供給口（受け口の実装は 8 家族共有 —
  * {@link assetComponentOpener}）。部品のキーは単一形 `krm` の 1 本（`transformer`）か、
  * 分割形の part 列（`transformer[0]` / `transformer[1]` / …）。
  */
@@ -522,6 +523,7 @@ const withSession = async <T>(
   ) => Promise<T>,
 ): Promise<T> => {
   const session = await model.createSession(gpu, sessionOptions);
+  let failure: { readonly error: unknown } | undefined;
   try {
     const outputName = model.graph.outputs[0];
     const run = async (inputs: Record<string, Tensor>): Promise<Tensor> => {
@@ -530,8 +532,17 @@ const withSession = async <T>(
       return outputs[outputName];
     };
     return await body(run, session);
+  } catch (error) {
+    failure = { error };
+    throw error;
   } finally {
-    await session.dispose();
+    // MUST: dispose の失敗で body の失敗を上書きしない（`disposeSteps` の doc）。
+    await disposeSteps([
+      () => {
+        if (failure !== undefined) throw failure.error;
+      },
+      () => session.dispose(),
+    ]);
   }
 };
 

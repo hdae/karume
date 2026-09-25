@@ -3,9 +3,10 @@
  *
  * - body が返しても throw しても、張った Session を**ちょうど 1 回** dispose する（途中で落ちた
  *   段の VRAM が残ると、後続の段が「最初の失敗とは別の場所」で確保に落ちる）。
- * - body の返り値と例外は包まずにそのまま呼び手へ渡る。
+ * - body の返り値と例外は包まずにそのまま呼び手へ渡る。dispose も落ちたときだけ、body の例外を
+ *   先頭にした `AggregateError` で両方を運ぶ（dispose の失敗で最初の失敗を上書きしない）。
  * - `run` は Session の出力を返し、`observe` はその run の**後**・呼び手へ戻る**前**に毎回呼ばれる。
- * - Session の構築が落ちたら body は呼ばれない。
+ * - Session の構築が落ちたら body は呼ばれない（GPU を取らない枝なので with_session_test.ts）。
  *
  * NOTE: `Session` は `#` 付き private field を持つクラスで fake に置き換えられないため、重みを
  * 持たない小さなグラフ（y = x + x）をメモリ内容器で組んで実 Session を張る。dispose の回数は
@@ -157,6 +158,43 @@ describe({
       });
     });
 
+    describe("body も dispose も throw したとき", () => {
+      it("dispose の失敗で上書きせず、body の例外を先頭に両方を AggregateError で伝える", async () => {
+        await withGpu(async (gpu) => {
+          const log = emptyLog();
+          const thrown = new Error("body の途中で落ちた");
+          const disposeFailure = new Error("flush に失敗した");
+          const spied = spiedComponent(log);
+          const component: ModelComponent = {
+            ...spied,
+            createSession: async (gpuContext, options) => {
+              const session = await spied.createSession(gpuContext, options);
+              const dispose = session.dispose.bind(session);
+              session.dispose = async () => {
+                await dispose();
+                throw disposeFailure;
+              };
+              return session;
+            },
+          };
+
+          const error = await assertRejects(
+            () =>
+              withSession(gpu, component, {}, undefined, () => {
+                throw thrown;
+              }),
+            AggregateError,
+          );
+
+          assertEquals(error.errors.length, 2);
+          assertStrictEquals(error.errors[0], thrown);
+          assertStrictEquals(error.errors[1], disposeFailure);
+          assertEquals(log.disposeCalls, 1);
+          await assertDisposed(log.sessions[0]);
+        });
+      });
+    });
+
     describe("run", () => {
       it("Session の出力を返し、observe を run の後・呼び手へ戻る前に 1 回ずつ呼ぶ", async () => {
         await withGpu(async (gpu) => {
@@ -198,29 +236,6 @@ describe({
 
           assertEquals(values, [1, -3]);
           assertEquals(log.disposeCalls, 1);
-        });
-      });
-    });
-
-    describe("Session の構築が落ちたとき", () => {
-      it("body を呼ばず、構築の例外をそのまま伝える", async () => {
-        await withGpu(async (gpu) => {
-          const failure = new Error("Session を張れなかった");
-          const component: ModelComponent = {
-            ...spiedComponent(emptyLog()),
-            createSession: () => Promise.reject(failure),
-          };
-          let bodyCalled = false;
-
-          const error = await assertRejects(() =>
-            withSession(gpu, component, {}, undefined, () => {
-              bodyCalled = true;
-              return Promise.resolve();
-            })
-          );
-
-          assertStrictEquals(error, failure);
-          assertEquals(bodyCalled, false);
         });
       });
     });

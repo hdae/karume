@@ -14,6 +14,7 @@ import type {
   Tensor,
 } from "@karume/runtime";
 import type { ModelComponent } from "../hub/components.ts";
+import { disposeSteps } from "./dispose-steps.ts";
 
 /**
  * 1 グラフぶんの Session を張り、使い終わったら必ず解放する。
@@ -35,6 +36,7 @@ export const withSession = async <T>(
   ) => Promise<T>,
 ): Promise<T> => {
   const session = await model.createSession(gpu, sessionOptions);
+  let failure: { readonly error: unknown } | undefined;
   try {
     const run = async (inputs: Record<string, Tensor>): Promise<Record<string, Tensor>> => {
       const outputs = await session.run(inputs);
@@ -42,7 +44,17 @@ export const withSession = async <T>(
       return outputs;
     };
     return await body(run, session);
+  } catch (error) {
+    failure = { error };
+    throw error;
   } finally {
-    await session.dispose();
+    // MUST: dispose の失敗で body の失敗を上書きしない（`disposeSteps` の doc — 素の `finally`
+    // で投げると最初に何が壊れたかが消える）。
+    await disposeSteps([
+      () => {
+        if (failure !== undefined) throw failure.error;
+      },
+      () => session.dispose(),
+    ]);
   }
 };
