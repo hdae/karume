@@ -18,7 +18,7 @@ denoise.py / decoders.py）。この台本はその 4 ブロックの逐語的�
     pipeline.json          プロンプト・step 数・shift・CFG 係数・LoRA（`lora` / `lora_scale`）
                            ・shape 一覧
 
-MUST: 出力先を `models/anima-turbo/`（配布形）直下にしない。あちらは manifest が宣言した
+MUST: 出力先を `models/<repo>/`（配布形）直下にしない。あちらは manifest が宣言した
 ファイルだけを並べて**そのまま HF へ上げる**木で、宣言外のファイルが混ざると `verify_dist` が
 止まる（音声デモで `outputs/misc/sbv2-demo/` を分けたのと同じ理由）。
 

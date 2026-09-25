@@ -206,7 +206,7 @@ Eager equivalence across the patches (`--verify`):
 
 The VAE alone is not bit-identical because CausalConv3d(T=1) → conv2d becomes **the same number of
 additions performed in a different order**. Equivalence per rewrite is pinned by
-`tests/test_anima.patch.py` at `< 1e-14` in f64 (conv3d↔conv2d / channel L2↔`F.normalize` / rank-4
+`tests/test_patch.py` at `< 1e-14` in f64 (conv3d↔conv2d / channel L2↔`F.normalize` / rank-4
 form of RMS_norm). The two nearest-exact resamples, which only move data, are **bit-identical** in
 f32. The amplification factor of the whole decoder is about 5.4e3 as measured in f64, so f32
 rounding (1.19e-7) growing into the 9e-6 class is consistent.
@@ -414,9 +414,10 @@ turbo DiT that selects 453 linears for i4 and leaves the patchify entrance (`pat
 axis 68) on i8. Output goes to `outputs/series/anima-i4/`.
 
 ```sh
-# GPTQ-calibrated (the default); --model names whose conditions to calibrate under
-uv run --group anima python -m anima.export --dtype i4 --model anima-turbo
-uv run --group anima python -m anima.export --dtype i4 --model anima-turbo --calib-prompts 12
+# GPTQ-calibrated (the default); --model names whose conditions to calibrate under. No model ships
+# an i4 seat (2026-09-01 ruling), so these series are for measurement and visual evaluation only
+uv run --group anima python -m anima.export --dtype i4 --model anima-v1.0
+uv run --group anima python -m anima.export --dtype i4 --model anima-v1.0 --calib-prompts 12
 uv run --group anima python -m anima.export --dtype i4 --no-calib       # plain RTN, smoke only
 ```
 
@@ -519,7 +520,7 @@ uv run --group anima python -m anima.pipeline_ref --resolution 1344x768 …   # 
 - The outputs are `outputs/series/anima-pipeline/pipeline.safetensors` (21 tensors, 9.4MB) and
   `pipeline.json` (prompt, step count, shift, CFG coefficient, and the role and shape of every
   tensor).
-- **Not placed directly under the distribution tree `models/anima-turbo/`** — that one holds exactly
+- **Not placed directly under a distribution tree `models/<repo>/`** — that one holds exactly
   the files the manifest declares and is uploaded to HF as-is, and an undeclared file stops
   `verify_dist` (the same reason `outputs/misc/sbv2-demo/` is kept separate).
 - The prompt is a single fixed English string (danbooru-style tags). **The negative prompt is not
@@ -614,7 +615,7 @@ uv run --group anima python -m anima.tiling --resolution 1344x768 \
   tile`" (the deliberate deviation announced in recon §4.2). The script fails loudly if
   `vae.use_tiling` is true.
 - **The blend formulas are transcribed verbatim from upstream** (`blend_v` / `blend_h`). Equivalence
-  is pinned by `tests/test_anima/tiling.py` as **bit equality against the real methods** — once the
+  is pinned by `tests/test_tiling.py` as **bit equality against the real methods** — once the
   scan is our own, this is the only place the formulas' isomorphism can be guaranteed.
 - The weights are fake-quantized to the same dtype as the asset series before the references are
   taken (ADR 0006 — the same discipline as `anima/pipeline_ref.py`). The default `--dtype f16`
@@ -658,7 +659,7 @@ uv run --group anima python -m anima.rope_tables       # into outputs/series/ani
 - The outputs are `rope.safetensors` (`cos_<WxH>` / `sin_<WxH>` per geometry, each `[1,1,S,128]`,
   16.5MB) and `rope.json` (latent dimensions, token grid, S, number of rows in the base tables).
 - The Python-side mirror (reconstruction from the base tables ≡ the upstream tables) is pinned by
-  `tests/test_anima/rope_tables.py` using a **synthetic rope without real weights** (a configuration where
+  `tests/test_rope_tables.py` using a **synthetic rope without real weights** (a configuration where
   h and w of `rope_scale` differ so that a mix-up shows up in the numbers).
 
 ## Prompt layer of the image demo (`anima/demo.py`)
@@ -689,7 +690,7 @@ below).
 - The runtime assets (4.6MB in total) live under **`outputs/` = `.gitignore`**. They keep only the
   information execution needs out of the raw `tokenizer.json` files (13.8MB in total), so that
   **licensed material is not carried in the repository**.
-- **MUST: do not place them directly under the distribution tree `models/anima-turbo/`** — that one
+- **MUST: do not place them directly under a distribution tree `models/<repo>/`** — that one
   holds exactly the files the manifest declares and is uploaded to HF as-is (the same reason
   `outputs/series/anima-pipeline/` is kept separate).
 - The fixture only holds a **subset** of the vocabularies (Qwen2 218 tokens / 375 merges / T5 125
@@ -743,7 +744,7 @@ regional indicators and emoji ZWJ sequences need no boundary rules implemented.
 | Stage                                         | Where                                           | Scale (measured)                                                                                                                                                          |
 | --------------------------------------------- | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | ① equivalence of the folding                  | `anima/demo.py` (the emit gate)                 | all 1,112,064 cp + 5,512 rule keys + 200,000 randomized (fixed seed) / the pre-token scan and the NFC segmentation each cover **all cp × 11 contexts = 12,232,704 cases** |
-| ② reference implementation vs `AutoTokenizer` | `anima/demo.py` + `tests/test_anima/demo.py`    | 28 cases (`padding="longest"` / `max_length=512` / `truncation=True` — the same call as `anima.pipeline_ref.encode_text`) + **2,000 randomized prompts** (fixed seed)     |
+| ② reference implementation vs `AutoTokenizer` | `anima/demo.py` + `tests/test_demo.py`          | 28 cases (`padding="longest"` / `max_length=512` / `truncation=True` — the same call as `anima.pipeline_ref.encode_text`) + **2,000 randomized prompts** (fixed seed)     |
 | ③ TS implementation vs the fixture            | `packages/models/tests/anima_tokenizer_test.ts` | 28 cases × 2 tokenizers + 251 NFC pairs + property tests + a cross-check against the pipeline reference                                                                   |
 
 - ① **only runs on regeneration** (it takes minutes). The pytest side (②) redoes the same comparison

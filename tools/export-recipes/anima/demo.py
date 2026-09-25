@@ -16,7 +16,7 @@ r"""examples/anima デモのプロンプト層（トークナイザ）の資産 
        全ケース（PROMPT_CASES）の参照 id 列と、その再現に要る語彙の**部分集合**
        （151k / 32k の語彙を commit しないための分離）、および NFC の実測対
 
-MUST: 資産を `models/anima-turbo/`（配布形）直下に置かない。あちらは manifest が宣言した
+MUST: 資産を `models/<repo>/`（配布形）直下に置かない。あちらは manifest が宣言した
 ファイルだけを並べて**そのまま HF へ上げる**木で、宣言外のファイルが混ざると `verify_dist` が
 止まる（`outputs/misc/sbv2-demo/` / 系列 `anima-pipeline/` を分けたのと同じ理由）。
 
