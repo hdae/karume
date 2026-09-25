@@ -36,6 +36,7 @@
  */
 
 import { CodegenError } from "../codegen/errors.ts";
+import { IS_NAN_BITS_WGSL } from "../codegen/numerics-wgsl.ts";
 import { assertU32Params } from "../codegen/params.ts";
 
 export const DEFORM_CONV2D_WORKGROUP_SIZE = 256;
@@ -48,9 +49,13 @@ export const DEFORM_CONV2D_WORKGROUP_SIZE = 256;
  */
 export const DEFORM_CONV2D_OOB_BITS = 0x7fc00000;
 
-/** MUST: WGSL を変えたらキーも上げる（パイプラインキャッシュは本文を見ない）。 */
+/**
+ * MUST: WGSL を変えたらキーも上げる（パイプラインキャッシュは本文を見ない）。
+ *
+ * v2: NaN 判定を写しの `is_nan` から共有断片 {@link IS_NAN_BITS_WGSL} へ替えた（判定式は同一）。
+ */
 export const DEFORM_CONV2D_KEY =
-  `deform_conv2d:v1:nchw:f32:dcnv2:wg${DEFORM_CONV2D_WORKGROUP_SIZE}`;
+  `deform_conv2d:v2:nchw:f32:dcnv2:wg${DEFORM_CONV2D_WORKGROUP_SIZE}`;
 
 export const DEFORM_CONV2D_WGSL: string =
   `// karume deform_conv2d (DCNv2: x[B,Cin,H,W] * W[Cout,Cin,Kh,Kw] + b[Cout], f32, 直接畳み込み)
@@ -79,13 +84,11 @@ struct Dims {
 
 // NaN のビット列判定（ADR 0020）— 指数部が全 1 かつ仮数部が非 0。比較演算に寄せると
 // ドライバの畳み込みで判定ごと消える。
-fn is_nan(v: f32) -> bool {
-  return (bitcast<u32>(v) & 0x7fffffffu) > 0x7f800000u;
-}
+${IS_NAN_BITS_WGSL}
 
 // 入力平面 \`plane\` の双線形サンプル。範囲外はゼロ埋め（4 隅個別）・NaN は伝播。
 fn deform_sample(plane: u32, sy: f32, sx: f32) -> f32 {
-  if (is_nan(sy) || is_nan(sx)) {
+  if (is_nan_bits(sy) || is_nan_bits(sx)) {
     return bitcast<f32>(dims.oob);
   }
   // 正の形の範囲判定。これを通れば floor(sy) は [-1, H-1] なので i32 変換は必ず定義される。

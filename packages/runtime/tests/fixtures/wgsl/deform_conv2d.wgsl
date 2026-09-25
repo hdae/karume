@@ -24,13 +24,13 @@ struct Dims {
 
 // NaN のビット列判定（ADR 0020）— 指数部が全 1 かつ仮数部が非 0。比較演算に寄せると
 // ドライバの畳み込みで判定ごと消える。
-fn is_nan(v: f32) -> bool {
-  return (bitcast<u32>(v) & 0x7fffffffu) > 0x7f800000u;
+fn is_nan_bits(x: f32) -> bool {
+  return (bitcast<u32>(x) & 0x7fffffffu) > 0x7f800000u;
 }
 
 // 入力平面 `plane` の双線形サンプル。範囲外はゼロ埋め（4 隅個別）・NaN は伝播。
 fn deform_sample(plane: u32, sy: f32, sx: f32) -> f32 {
-  if (is_nan(sy) || is_nan(sx)) {
+  if (is_nan_bits(sy) || is_nan_bits(sx)) {
     return bitcast<f32>(dims.oob);
   }
   // 正の形の範囲判定。これを通れば floor(sy) は [-1, H-1] なので i32 変換は必ず定義される。
