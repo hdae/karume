@@ -240,6 +240,8 @@ materialization 点を残す。必要な箇所は 2 つ:
   消費するモデルは別の設計（IR v1 の多出力化、または状態返し版の別 op）が要る。
   Kokoro-82M の双方向 LSTM が `h_n` / `c_n` を消費するかは**未検証**なので、LSTM に着手する
   前にそこを確かめること（契約の形が手戻りする唯一の分岐）。
+  （追記: ノードレベル多出力は ADR [0068](0068-decode-exit-multi-output.md) 決定 1 で解禁済み —
+  残る壁は exporter の `operator.getitem` 結線〈0068 追記 2 の 3〉。）
 - ゲート数を attrs にして GRU と兼ねる形は採れない（`gelu` / `gelu_tanh` と同じ attr 変種問題 —
   決定 2 と同じ理由で別 op が正）。
 
