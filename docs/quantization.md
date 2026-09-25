@@ -40,6 +40,7 @@ manifest へ保存できるキーの正本は `packages/hub/src/manifest.ts` の
 | `linearGemvReduce`           | 一部可（`parallel-subgroup32` は保存語彙外） | 任意（`i4-gemvpar` / `i4-fast` が宣言）                 | ADR [0098](decisions/0098-linear-gemv-parallel.md)・[0101](decisions/0101-linear-gemv-subgroup.md)                                                                               |
 | `fuseRmsNormAdd`             | 可                                           | 任意（`i4-fast` が宣言）                                | ADR [0099](decisions/0099-rms-norm-add-fusion.md)                                                                                                                                |
 | `fuseLinearStaticQuantize`   | 可                                           | 任意（gemma4-qat の `i4-fast` だけが宣言）              | ADR [0103](decisions/0103-linear-static-quantize-fusion.md)・[0104](decisions/0104-gemma-fast-quant.md)                                                                          |
+| `packedStaticQuantize`       | 可                                           | 任意（gemma4-qat E2B の `i4-fast` だけが宣言）          | ADR [0105](decisions/0105-packed-static-quantize-activations.md)                                                                                                                 |
 | `rmsNormReduce`              | 不可                                         | 任意（subgroups 必須）                                  | ADR [0100](decisions/0100-rms-subgroup-reduction.md)                                                                                                                             |
 | `stateAttentionReduce`       | 不可                                         | 任意（Gemma family 既定は `parallel`）                  | ADR [0058](decisions/0058-numerics-opt-in-contract.md)・[0067](decisions/0067-autoregressive-attention-vocabulary.md)・[0102](decisions/0102-state-attention-stats-pv-fusion.md) |
 | `linearGemvRowsThreadTarget` | 不可                                         | 任意（並列度の目標値）                                  | ADR [0022](decisions/0022-gemm-register-blocking.md)・[0082](decisions/0082-linear-gemv-decode.md)                                                                               |
@@ -75,20 +76,21 @@ manifest へ保存できるキーの正本は `packages/hub/src/manifest.ts` の
 宣言しており、**格納経路を持つのは f16 / RTN i8 / RTN i4 / GPTQ-rtn i4 の 4 つだけ**という線引きを
 コードが担保する。
 
-| 方式                                | 格納経路                 | 状態             | 正本                                                                                                          |
-| ----------------------------------- | ------------------------ | ---------------- | ------------------------------------------------------------------------------------------------------------- |
-| f16 丸め                            | あり                     | 製品             | ADR [0018](decisions/0018-f16-weight-execution.md)                                                            |
-| RTN i8                              | あり                     | 製品             | ADR [0019](decisions/0019-i8-weight-execution.md)・[0029](decisions/0029-sbv2-i8-series-and-quant-quality.md) |
-| RTN i4                              | あり                     | 製品             | ADR [0069](decisions/0069-packed-w4-storage.md)                                                               |
-| GPTQ（`grid="rtn"`）                | あり（i4 席へ直結）      | 製品             | [perf-ledger](perf-ledger.md) Q-6                                                                             |
-| GPTQ の act-order / static-groups   | あり（格納形は不変）     | 任意・既定オフ   | [backlog](backlog.md)「GPTQ 掃引の再評価」                                                                    |
-| AWQ                                 | 無し                     | 棄却             | [perf-ledger](perf-ledger.md) Q-7                                                                             |
-| NF4                                 | 無し（測定専用）         | 保留             | [perf-ledger](perf-ledger.md) Q-3                                                                             |
-| FP4（e2m1）                         | 無し                     | 保留（測定のみ） | `quant_methods.py`                                                                                            |
-| MXFP4                               | 無し                     | 棄却             | [perf-ledger](perf-ledger.md) Q-4                                                                             |
-| k-means codebook                    | 無し                     | 保留             | [perf-ledger](perf-ledger.md) Q-2                                                                             |
-| 群内直交回転（rot-rtn / rot-lloyd） | 無し（未実装）           | 保留（起票のみ） | [perf-ledger](perf-ledger.md) Q-11                                                                            |
-| 活性の per-token i8 化              | 格納ではなく参照側の模擬 | 製品             | ADR [0025](decisions/0025-w8a8-linear-execution.md)・[0030](decisions/0030-attention-a8-execution.md)         |
+| 方式                                | 格納経路                 | 状態                  | 正本                                                                                                          |
+| ----------------------------------- | ------------------------ | --------------------- | ------------------------------------------------------------------------------------------------------------- |
+| f16 丸め                            | あり                     | 製品                  | ADR [0018](decisions/0018-f16-weight-execution.md)                                                            |
+| RTN i8                              | あり                     | 製品                  | ADR [0019](decisions/0019-i8-weight-execution.md)・[0029](decisions/0029-sbv2-i8-series-and-quant-quality.md) |
+| RTN i4                              | あり                     | 製品                  | ADR [0069](decisions/0069-packed-w4-storage.md)                                                               |
+| GPTQ（`grid="rtn"`）                | あり（i4 席へ直結）      | 製品                  | [perf-ledger](perf-ledger.md) Q-6                                                                             |
+| GPTQ の act-order / static-groups   | あり（格納形は不変）     | 任意・既定オフ        | [backlog](backlog.md)「GPTQ 掃引の再評価」                                                                    |
+| AWQ                                 | 無し                     | 棄却                  | [perf-ledger](perf-ledger.md) Q-7                                                                             |
+| NF4                                 | 無し（測定専用）         | 保留                  | [perf-ledger](perf-ledger.md) Q-3                                                                             |
+| FP4（e2m1）                         | 無し                     | 保留（測定のみ）      | `quant_methods.py`                                                                                            |
+| MXFP4                               | 無し                     | 棄却                  | [perf-ledger](perf-ledger.md) Q-4                                                                             |
+| k-means codebook                    | 無し                     | 保留                  | [perf-ledger](perf-ledger.md) Q-2                                                                             |
+| 群内直交回転（rot-rtn / rot-lloyd） | 無し（未実装）           | 保留（起票のみ）      | [perf-ledger](perf-ledger.md) Q-11                                                                            |
+| 三値 absmean（`ternary` codec）     | 無し（未実装）           | 予約（ADR 0108 段 6） | ADR [0108](decisions/0108-container-format.md) 決定 13・[container-v1](container-v1.md) §6.3                  |
+| 活性の per-token i8 化              | 格納ではなく参照側の模擬 | 製品                  | ADR [0025](decisions/0025-w8a8-linear-execution.md)・[0030](decisions/0030-attention-a8-execution.md)         |
 
 ### 4-b. 固定量子化（QAT — 上流の整数をそのまま持ち込む）
 
