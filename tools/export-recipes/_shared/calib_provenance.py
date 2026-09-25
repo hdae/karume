@@ -1,7 +1,8 @@
 """i4 系列の校正条件（`calib_provenance.json`）が配布に足りるかの判定（ADR 0065 決定 2）。
 
 校正の方式も予算も**格納形を 1 バイトも変えない**（格子は RTN i4 g32 のまま — 変わるのは
-丸め値と scale 台帳だけ）ので、`verify_dist` の構造検査もヘッダ dtype 検査も素通りする。
+丸め値と scale 台帳だけ）ので、`verify_dist` の構造検査も束縛表の格納検査（`assert_storage`）も
+素通りする。
 判別できる事実は「書き出した側が残した記録」1 つきりで、その記録を読む席は
 `irodori.distribution`（配布の組み立て）・`irodori.pipeline_ref`（golden の焼き直し）・
 `anima.distribution`（同じく組み立て）の 3 つある。
