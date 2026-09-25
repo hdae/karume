@@ -1,4 +1,4 @@
-"""Anima の 4 コンポーネントを IR v1 + golden io へ書き出す台本（ADR 0016 の emit ターゲット）。
+"""Anima の 4 コンポーネントを IR v2 + golden io へ書き出す台本（ADR 0016 の emit ターゲット）。
 
 起点は diffusers 版 `circlestone-labs/Anima-Base-v1.0-Diffusers`（recon は
 docs/research/2026-08-02-anima-recon.md）。素の diffusers モジュールは rank5〜8・feat_cache・
@@ -288,7 +288,7 @@ class Component:
     reference: tuple[tuple[torch.Tensor, ...], ...] | None
     symbol_names: tuple[str, ...] = ("T",)
     #: i8 / i4 の scale 台帳（FQN → scale）。キーは **`module` から見た FQN** で、
-    #: safetensors のテンソルキーと同じ空間になる（`--dtype i8` / `i4` 以外では空）。
+    #: 容器の initializer 名（= 束縛表の鍵）と同じ空間になる（`--dtype i8` / `i4` 以外では空）。
     weight_scales: Mapping[str, torch.Tensor] = field(default_factory=dict)
     #: 1 本単位の格納 dtype 指定（テンソルキー → dtype）。混成 i4 系列だけが埋める
     #: （既定の {@link BASE_WEIGHT_DTYPES} に優先する — `karume.emit._plan_weight_dtype`）。
@@ -639,6 +639,9 @@ LORA_PREFIXES = {
     TARGET_TEXT_CONDITIONER: "text_conditioner",
 }
 
+#: `--num-layers`（層の切り詰め）が効くターゲット（Qwen3 の層列と DiT の block 列だけ）。
+NUM_LAYERS_TARGETS = (TARGET_TEXT_ENCODER, TARGET_TRANSFORMER)
+
 
 def _assert_vae_unpatched(where: str) -> None:
     """参照採取が VAE パッチ適用**前**であることを固定する（恒真化の門 — ADR 0013）。
@@ -926,7 +929,7 @@ def _fake_quant(
     ②焼き込んだ ΔW が丸めを外して格納時の再丸めが golden との対応を壊す。
 
     MUST（i8 / i4 のみ）: **export する `nn.Module` そのもの**に当てる。scale 台帳のキーは
-    ここで見た FQN で、safetensors のテンソルキー（= `torch.export` が見る FQN）と同じで
+    ここで見た FQN で、容器の initializer 名（= 束縛表の鍵 = `torch.export` が見る FQN）と同じで
     なければ emit 側の突合が空振りする（`id()` 突合は禁止 — ADR 0006）。
 
     `calib_probe` は i4 の校正付き丸めが stage 分解一致門に流すラッパの入力（golden ケースの
@@ -960,7 +963,7 @@ def _write_lora_provenance(args: argparse.Namespace, target: str, out_dir: Path)
     MUST: 焼いていない側で**古い記録を消す**（全域関数）。`--lora` 付きで採った系列へ `--lora`
     無しで採り直したとき、重みだけ素に戻って記録が前回のまま生き残ると、
     `assert_lora_provenance` は「記録が在る × sha 一致」しか見ないので「取り下げ」を素通しして
-    配布 README に嘘の帰属を印字させる。記録の存在が「今の `model.safetensors` に焼いた」と
+    配布 README に嘘の帰属を印字させる。記録の存在が「今の `model.krm` に焼いた」と
     同値であることが、この機構の唯一の拠り所。NOTE: `emit_target` が作業席ごと据え替えるように
     なった今、CLI 経路では席が毎回まっさらなのでここは実質空振りする — それでも全域関数のまま
     残すのは、直接呼ぶ書き手（テスト・将来の別入口）にとって不変条件が変わらないため。
@@ -995,7 +998,8 @@ def _write_calib_provenance(args: argparse.Namespace, target: str, out_dir: Path
     # 読めてしまい、組み立て側が「校正なしを配ろうとした」を名指しで拒否できない。
     #
     # `guidance` は校正条件をモデル別化した 2026-08-23（波 J-4 ②）に足した欄。読み手
-    # （`distribution.assert_calib_provenance`）が見るのは `method` だけなので、欄の追加は
+    # （`distribution.assert_calib_provenance` → `_shared.calib_provenance.calib_complaint`）は
+    # 記録に在る欄だけを判定し、欄の不在は受理する（同モジュールの MUST）ので、欄の追加は
     # 既にある turbo 系列の記録（追加前の形）の受理を 1 つも変えない — 既存資産へ再 export を
     # 要求しない形に留める MUST（記録は資産と違って作り直しの費用が丸め時間そのもの）。
     conditions = None if args.no_calib else calib.calib_conditions(args.model)
@@ -1398,6 +1402,31 @@ def main(argv: Sequence[str] | None = None) -> None:
         if args.target is None and args.verify is None:
             args.target = [TARGET_TRANSFORMER]
 
+    # 実際に走る対象。`--target` 省略時は dtype の既定集合（`allowed`）なので、下のノブ検査は
+    # `requested` ではなくこの集合で判定する（省略時に LoRA の対象が在るのに拒否する形にしない）。
+    targets = (
+        [args.verify]
+        if args.verify is not None
+        else list(dict.fromkeys(args.target if args.target is not None else allowed))
+    )
+
+    # MUST: 効かないノブを黙って受けない（`--dit-graph dyn` / 校正ノブと同じ強さ）。対象に
+    # LoRA の効くターゲットが 1 本も無い `--lora` は何も焼かず、記録も書かれない — 「LoRA を
+    # 焼いたつもりの系列」が記録なしで生える。`--lora-scale` は `--lora` 無しでは効かず、
+    # `--num-layers` も層列を持つターゲットが無ければ 1 本も切らない。
+    if args.lora is not None and not any(name in LORA_PREFIXES for name in targets):
+        parser.error(
+            f"--lora が効くターゲットは {', '.join(LORA_PREFIXES)} だけ"
+            f"（対象: {', '.join(targets)}）"
+        )
+    if args.lora is None and args.lora_scale != 1.0:
+        parser.error(f"--lora-scale は --lora と一緒にだけ効く（指定は {args.lora_scale}）")
+    if args.num_layers is not None and not any(name in NUM_LAYERS_TARGETS for name in targets):
+        parser.error(
+            f"--num-layers が効くターゲットは {', '.join(NUM_LAYERS_TARGETS)} だけ"
+            f"（対象: {', '.join(targets)}）"
+        )
+
     # MUST: 校正の解像度はグラフの解像度と揃っていること。校正入力は
     # `calib.CALIB_RESOLUTION` 固定（品質裁定が採られた条件を動かさないための設計 — あちらの
     # NOTE）なので、`--resolution` を振ると「別の解像度で選んだ丸め先」を焼き込んだグラフが
@@ -1420,7 +1449,6 @@ def main(argv: Sequence[str] | None = None) -> None:
         print(f"bit_exact all = {all(entry['bit_exact'] for entry in report)}")
         return
 
-    targets = list(dict.fromkeys(args.target if args.target is not None else allowed))
     summaries = [emit_target(target, args, args.out / target) for target in targets]
     print(json.dumps(summaries, indent=1, ensure_ascii=False))
 

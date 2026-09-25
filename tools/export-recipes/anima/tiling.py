@@ -1,7 +1,7 @@
 """VAE decode の**固定タイル化**の参照フィクスチャを作る（#21 波 T1）。
 
 Karume の VAE decoder のグラフは**解像度に対して構造不変**なので（512px 用と 1024px 用の
-`model.safetensors` はノード列・重みバイトまで完全一致 —
+`model.safetensors` はノード列・重みバイトまで完全一致 — 当時の safetensors 形での実測・
 `docs/research/2026-08-03-dynres-vae-tiling.md` §1.2）、512px 用資産を latent 64×64 の
 **タイル decoder** としてそのまま使い、切り出し / ブレンド / 貼り付けだけをホストで行える。
 その「ホスト側の数の正」がここで、TS 実装は `packages/models/src/anima/tiling.ts`。

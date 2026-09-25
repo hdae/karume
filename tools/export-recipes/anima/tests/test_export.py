@@ -461,6 +461,57 @@ class TestCliExclusion:
             export_anima.main()
 
 
+class TestIneffectiveKnobs:
+    """効かないノブ（`--lora` / `--lora-scale` / `--num-layers`）を黙って受けない。"""
+
+    @staticmethod
+    def _emitted(monkeypatch, argv: list[str]) -> list[str]:
+        emitted: list[str] = []
+
+        def stub(target, args, out_dir):
+            emitted.append(target)
+            return {"target": target}
+
+        monkeypatch.setattr("sys.argv", ["export.py", *argv])
+        monkeypatch.setattr(export_anima, "emit_target", stub)
+        export_anima.main()
+        return emitted
+
+    @pytest.mark.parametrize(
+        ("argv", "knob"),
+        [
+            (["--target", "text_encoder", "--lora", "x.safetensors"], "--lora"),
+            (["--verify", "vae_decoder", "--lora", "x.safetensors"], "--lora"),
+            (["--lora-scale", "2"], "--lora-scale"),
+            (["--target", "vae_decoder", "--num-layers", "2"], "--num-layers"),
+            (["--target", "text_conditioner", "--num-layers", "2"], "--num-layers"),
+        ],
+    )
+    def test_a_knob_no_requested_target_uses_is_refused(self, monkeypatch, capsys, argv, knob):
+        """LoRA を焼いたつもりの系列が記録なしで生える形にしない（`--dit-graph dyn` と同じ）。"""
+        monkeypatch.setattr("sys.argv", ["export.py", *argv])
+
+        with pytest.raises(SystemExit) as raised:
+            export_anima.main()
+
+        assert raised.value.code == 2
+        assert knob in capsys.readouterr().err
+
+    def test_lora_on_a_target_it_fuses_into_is_accepted(self, monkeypatch):
+        emitted = self._emitted(monkeypatch, ["--target", "transformer", "--lora", "x"])
+
+        assert emitted == ["transformer"]
+
+    def test_the_default_targets_count_as_the_targets_that_run(self, monkeypatch):
+        """`--target` 省略時は dtype の既定集合が走る — 指定の有無ではなく走る集合で判定する。"""
+        emitted = self._emitted(
+            monkeypatch,
+            ["--dtype", "i8", "--lora", "x", "--lora-scale", "0.5", "--num-layers", "2"],
+        )
+
+        assert emitted == ["transformer"]
+
+
 class TestOrderGuard:
     def test_taking_a_reference_after_the_vae_patch_is_rejected(self, monkeypatch):
         """恒真化の門 — パッチ後の「参照」は差が常に 0 になるので緑でも証拠にならない。"""

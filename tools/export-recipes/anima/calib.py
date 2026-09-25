@@ -13,7 +13,7 @@ scale 台帳の中身だけで、`emit` 側の格納経路も配布形のバイ�
    **export するラッパの FQN 空間**（{@link STAGE_PREFIX} = `model.transformer_blocks`）—
    計測リグ（`anima.measure_quant`）が素の `CosmosTransformer3DModel` を駆動して
    `transformer_blocks.<i>` を使うのに対し、export は `patch.AnimaDit` を通すので `model.` が
-   1 段挟まる。ここを外すと scale 台帳のキーが safetensors のテンソルキーと空振りする。
+   1 段挟まる。ここを外すと scale 台帳のキーが容器の initializer 名（= 束縛表の鍵）と空振りする。
 2. **先頭 stage への入力** — {@link capture_stage_batches} が**参照 denoise を実際に回して**
    先頭 block への `(args, kwargs)` を forward_pre_hook で捕まえる。自前で組み直さないのは
    deberta / 計測リグと同文で、拡散モデルでは加えて「活性が sigma で動く」ので**step を

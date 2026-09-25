@@ -8,7 +8,7 @@
 - i4 適格が「block 内 = 校正」「block 外 = 素の RTN」へ**過不足なく排他に**割れること
 - 感度実験変種（`--i4-adaln-i8`）が adaLN + block 外を i8 へ役割で割ること、そして
   **既定 OFF が集合も経路も値も従来と 1 ビットも変わらない**こと
-- scale 台帳のキーがラッパの FQN 空間（= safetensors のテンソルキー）に居ること
+- scale 台帳のキーがラッパの FQN 空間（= 容器の initializer 名）に居ること
 - 校正が**実際に別の丸め**を産むこと（素通りしたら格納形が同じなので資産からは読めない）
 - 校正入力とグラフで block の呼ばれ方が同じこと
 - 校正入力を**配布条件と同じ状態の重み**から採ること（block 外は丸めた後・block 内は丸める前）
@@ -706,7 +706,7 @@ class TestBatchesMatchGraph:
 
 class TestCalibratedI4:
     def test_the_ledger_keys_live_in_the_wrapper_fqn_space(self, stub_capture):
-        """MUST: 台帳のキー = safetensors のテンソルキー（emit の突合はここで決まる）。"""
+        """MUST: 台帳のキー = 容器の initializer 名（emit の突合はここで決まる）。"""
         wrapper = make_wrapper()
         stub_capture(wrapper)
 
