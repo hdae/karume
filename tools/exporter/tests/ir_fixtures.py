@@ -68,7 +68,7 @@ GROUP_SIZE = 16
 _IN = 32
 _OUT = 4
 
-#: 分割フィクスチャ 1 shard ぶんのテンソル（f32 16 要素 = 64 バイト）。
+#: 分割フィクスチャ 1 part ぶんのテンソル（f32 16 要素 = 64 バイト — 連番 part: container-v1 §8）。
 _FILL_ELEMENTS = 16
 
 #: 合成が自分で足す席の接頭辞。recipe の門は initializer 名から層番号を数える

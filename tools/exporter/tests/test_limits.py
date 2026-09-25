@@ -178,7 +178,7 @@ class TestStateSlotDemand:
         assert max_state_slot_bytes(graph, self._CONFIG, "where") == 4096 * 256 * 4
 
     def test_a_large_capacity_outgrows_any_single_tensor(self) -> None:
-        """重みは shard 上限で割れるが、スロットは 1 本のまま — 長い会話は state が支配する。
+        """重みは block 上限で割れるが、スロットは 1 本のまま — 長い会話は state が支配する。
 
         gemma4 の full スロット（`[1, 1, C, 512]`）を容量 131,072 で数えるとちょうど 256MiB =
         buffer 既定そのもので、binding 既定（128MiB）だけを超える帯に入る。

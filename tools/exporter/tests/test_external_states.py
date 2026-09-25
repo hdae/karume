@@ -490,7 +490,7 @@ def _shared_container_graph() -> tuple[IrGraph, dict[str, torch.Tensor], dict]:
 
 class TestTheContainerExcludesSharedDeclarations:
     def test_a_shared_declaration_needs_no_stored_tensor(self):
-        """宣言 / 格納の完全一致から外れる（借り手の shard にバイトは 1 つも無い）。"""
+        """宣言 / 格納の完全一致から外れる（借り手の容器にバイトは 1 つも無い）。"""
         graph, tensors, scales = _shared_container_graph()
 
         committed = stored_model(graph, tensors, weight_dtype="i8", weight_scales=scales).graph
