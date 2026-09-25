@@ -127,7 +127,10 @@ export const readHeader = (bytes: Uint8Array<ArrayBuffer>): ContainerHeader => {
   return { kind, version, graphDescriptorLength, modelDescriptorLength };
 };
 
-/** part 0（ヘッダ + 2 文書）の長さ。単一形ではこの直後を 64 B 整列まで詰める（§1 / §8）。 */
+/**
+ * part 0（ヘッダ + 2 文書）の長さ。単一形では、次の part が長さ 0 でなければこの直後を 64 B
+ * 整列まで詰める（§1 / §8 — 規則は {@link derivePartOffsets}）。
+ */
 export const part0Length = (header: ContainerHeader): number =>
   HEADER_BYTES + header.graphDescriptorLength + header.modelDescriptorLength;
 
