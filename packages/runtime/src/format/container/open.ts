@@ -7,7 +7,9 @@
  * 2. グラフ記述 / モデル記述を**外側の期待 hash + 長さ**で先に検証してから parse する
  *    （manifest の FileRef や呼び手の pin が持つ値。descriptor 自身は自分の hash を持てない — §7）。
  * 3. 宣言だけで決まる検査（2 文書の整合・束縛の突合・payload 長）を通す。
- * 4. block は要るときに取り、取った block ごとに sha256 を検証する。
+ * 4. block は要るときに取る。取得元が未検証（{@link BlockSource.verified} が false）なら、取った
+ *    block ごとに sha256 を検証する（検証済みの取得元は取得層がファイル全体を検証済み — ADR 0109
+ *    決定 7）。
  *
  * `BlockSource` は「単一形の全量バイト」と「part ごとのバイト列」を同じ面に揃える。単一形の part
  * 絶対 offset は書き手と共有する {@link derivePartOffsets} が導く（descriptor に絶対 offset を
@@ -327,7 +329,9 @@ export const openContainer = async (
   };
 
   const asset: OpenedContainer["asset"] = (name) => {
-    const binding = model?.assets[name];
+    const binding = model !== undefined && Object.hasOwn(model.assets, name)
+      ? model.assets[name]
+      : undefined;
     if (binding === undefined) throw new ContainerFormatError(`未宣言の資産 '${name}'`);
     const found = locate(binding.block);
     let verifiedBlock: Promise<Uint8Array<ArrayBuffer>> | undefined;
@@ -335,13 +339,25 @@ export const openContainer = async (
       role: binding.role,
       length: binding.length,
       read: async (offset, length) => {
+        // NaN は全ての比較が偽になって範囲検査を素通りし、小数は subarray が黙って切り捨てる。
+        if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(length)) {
+          throw new ContainerFormatError(
+            `資産 '${name}': 区間 (offset ${offset}, length ${length}) が安全整数でない`,
+          );
+        }
         if (offset < 0 || length < 0 || offset + length > binding.length) {
           throw new ContainerFormatError(
             `資産 '${name}': ${offset}..${offset + length} が論理長 ${binding.length} をはみ出す`,
           );
         }
         if (source.verified) {
-          return await source.read(found.part, found.record.offset + offset, length);
+          const bytes = await source.read(found.part, found.record.offset + offset, length);
+          if (bytes.byteLength !== length) {
+            throw new ContainerFormatError(
+              `資産 '${name}': 取得長 ${bytes.byteLength} が要求 ${length} と違う`,
+            );
+          }
+          return bytes;
         }
         verifiedBlock ??= readBlock(binding.block);
         return (await verifiedBlock).subarray(offset, offset + length);
