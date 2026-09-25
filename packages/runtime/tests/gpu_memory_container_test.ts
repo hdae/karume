@@ -21,7 +21,7 @@
  * 落ちることも同じケースで見る — 許容差が codec 展開の誤りを通すほど緩くないことの確認。
  */
 
-import { assert, assertEquals, assertRejects } from "@std/assert";
+import { assert, assertEquals, assertNotEquals, assertRejects } from "@std/assert";
 import type { BoundContainer } from "../src/format/container/bind.ts";
 import { ContainerFormatError } from "../src/format/container/header.ts";
 import { type MemoryContainerInput, openMemoryContainer } from "../src/format/container/memory.ts";
@@ -254,7 +254,7 @@ const scanShapedSource = (written: WrittenContainer) => {
   return { source, poisoned, offsets };
 };
 
-/** 旧 hub と同じく block を写して返す（tight）取得元 — 比較の基準。 */
+/** block を写して返す（tight）取得元 — 比較の基準。 */
 const copyingSource = (written: WrittenContainer): BlockSource => ({
   partCount: written.parts.length,
   verified: true,
@@ -273,6 +273,7 @@ describe("memory container session", { ignore: !GPU_AVAILABLE }, () => {
       const opened = await openContainer({ kind: "parts", parts: written.parts });
       // 書き手は block 上限 128 B で i8（192 B）も i4（384 B）も piece に割っている。
       assertEquals(opened.graphs.main.supplies.get("enc.w2")?.blocks.length, 2);
+      assertEquals(opened.graphs.main.supplies.get("enc.w1")?.blocks.length, 3);
       let expected: Float32Array<ArrayBuffer>;
       let expectedResident: number;
       const fromContainer = await createSessionFromContainer(gpu, opened, "main");
@@ -288,6 +289,12 @@ describe("memory container session", { ignore: !GPU_AVAILABLE }, () => {
       // 開いた時点では piece の読み口を 1 度も引いていない（lazy）。
       assertEquals(counter.reads, 0);
       assertEquals(memory.graphs.main.supplies.get("enc.w2")?.blocks.length, 2);
+      // 前提（モジュール doc の MUST）: 2 経路の piece の割り方が違う。書き手の刻みが変わって
+      // 同じ割り方になると、この A/B は分割の不変条件を見なくなる。
+      const w2Rows = (bound: BoundContainer) =>
+        bound.graphs.main.supplies.get("enc.w2")?.blocks.map((block) => block.rows);
+      assertEquals(w2Rows(memory), [[0, N / 2], [N / 2, N]]);
+      assertNotEquals(w2Rows(opened), w2Rows(memory), "krm とメモリ側の piece の割り方が同じ");
       const session = await createSessionFromContainer(gpu, memory, "main");
       try {
         const actual = (await session.run({ x }))["y"].data as Float32Array<ArrayBuffer>;
