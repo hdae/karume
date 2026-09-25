@@ -211,7 +211,12 @@ export class GpuContext {
   readonly adapterInfo: GPUAdapterInfo;
   /** device が実際に有効化した feature（アダプタが持つだけの feature は含まない）。 */
   readonly features: ReadonlySet<string>;
-  /** 参考情報。未実装環境では空集合。機能検出には使わない。 */
+  /**
+   * WGSL 言語機能（未実装環境では空集合）。単独では GPU 対応の証明にしない。使ってよいのは
+   * 数値が同一な変種の選択（w8a8 の dot4I8Packed / エミュ — ADR 0025）と、明示要求時の
+   * 必要条件の検査（subgroup_id — device feature と実走も要求する）に限る。
+   * 線引きの正本は {@link "./acquire.ts"} の `readWgslLanguageFeatures`。
+   */
   readonly wgslLanguageFeatures: ReadonlySet<string>;
   readonly limits: RequiredLimits;
   #lost: GPUDeviceLostInfo | undefined;
@@ -330,7 +335,9 @@ export class GpuContext {
    * 未解除の消失購読の本数（診断）。
    *
    * `raceDeviceLost`（{@link GpuContextInternals}）は決着時に必ず解除するので、待機が全て
-   * 決着していれば 0 に戻る。0 に戻らないことが「flush / readback ごとに reaction が積み残る」
+   * 決着していれば基線に戻る。基線は 0 ではなく構成で変わる: `onDeviceLost` を渡して構築した
+   * 場合はコンストラクタが張る常駐の 1 本を含み（基線 1）、利用者が {@link GpuContext.onLost}
+   * で張って未解除の購読もその本数だけ数に入る。基線に戻らないことが「flush / readback ごとに reaction が積み残る」
    * リークの姿で、挙動からは観測できない（ハングも誤値も起こさず、長寿命 Session で単調増加
    * するだけ）。
    * 見えない残留を正直に数値で出すためだけの面。
@@ -670,9 +677,8 @@ export class ResidentTensor {
    * 全域をホストへ読み戻す（staging へ copy → `mapAsync`）。**フェンスはこの 1 本だけ**で、
    * 生成ループの終端で潜在を 1 度取り出すために置いてある。
    *
-   * MUST: 呼ぶのは {@link BatchScope.finish} の**後**。queue の順序は保たれるので値としては
-   * 正しいが、batch の内側で呼ぶとフェンスが 1 本増え、しかもこの submit の失敗が batch の
-   * errorScope に帰属して原因の切り分けができなくなる。
+   * MUST: 呼ぶのは {@link BatchScope.finish} の**後**。batch の内側で呼ぶとフェンスが 1 本増え、
+   * しかも区間が決着する前の値を読む（区間の残りの enqueue を含まない）。
    *
    * MUST: 消失済み device では読まない（{@link assertDeviceUsable} — `write` /
    * {@link GpuContext.createResident} と同じ門）。`destroy()` 直後の窓（フラグは同期に立つが
@@ -850,6 +856,16 @@ type BatchInternals = {
    * 登録は fail loudly（解決しない Promise を返さない）。
    */
   readAtFinish(sources: readonly BatchReadSource[]): Promise<readonly ArrayBuffer[]>;
+  /**
+   * {@link BatchInternals.readAtFinish} が登録時に行う受け口の検査（読み戻し開始後の拒否と、
+   * 登録済み合計 + 今回分の上限）だけを、登録せずに行う。
+   *
+   * MUST: `Session.enqueueRead` は dispatch を 1 本も積む前にこれを呼ぶ — 登録（readAtFinish）は
+   * submit の後なので、そこで初めて落ちると救える失敗（読み戻しが大きすぎるだけ）が state 書込み
+   * 後の失敗になり context を poison する。検査の実装は readAtFinish と同じ 1 本。
+   * readAtFinish 側の検査は外さない（この検査と登録の間に他 Session の登録が挟まりうる）。
+   */
+  assertReadAtFinish(sources: readonly BatchReadSource[]): void;
 };
 
 /**
@@ -995,17 +1011,14 @@ export class BatchScope {
         this.#finalizers.push(finalizer);
       },
       readAtFinish: (sources) => {
-        if (this.#readbackStarted) {
-          throw new BatchScopeError("決着の読み戻しが始まった batch にはグラフ出力を登録できない");
-        }
-        const total = sources.reduce((sum, source) => sum + source.size, 0);
-        this.#assertReadbackBytes(this.#readbackBytes() + total, "グラフ出力の読み戻し");
+        this.#assertGraphReadAcceptable(sources);
         const { promise, resolve, reject } = Promise.withResolvers<readonly ArrayBuffer[]>();
         // 決着を呼び手が受け取るまで未処理拒否にしない（拒否の中身は finish がそのまま返す）。
         void promise.catch(() => undefined);
         this.#graphReads.push({ sources, resolve, reject });
         return promise;
       },
+      assertReadAtFinish: (sources) => this.#assertGraphReadAcceptable(sources),
       enter: (owner) => {
         if (owner !== this.#gpu) {
           throw new BatchScopeError("別の GpuContext で開いた batch には enqueue できない");
@@ -1178,6 +1191,15 @@ export class BatchScope {
         "finishAndRead は未終了・settle中でない batch に1回だけ指定できる",
       );
     }
+  }
+
+  /** グラフ出力の読み戻しを登録できるか（{@link BatchInternals.readAtFinish} の受け口）。 */
+  #assertGraphReadAcceptable(sources: readonly BatchReadSource[]): void {
+    if (this.#readbackStarted) {
+      throw new BatchScopeError("決着の読み戻しが始まった batch にはグラフ出力を登録できない");
+    }
+    const total = sources.reduce((sum, source) => sum + source.size, 0);
+    this.#assertReadbackBytes(this.#readbackBytes() + total, "グラフ出力の読み戻し");
   }
 
   /** 決着時の staging に載る合計バイト数（常駐の指定 + 登録済みグラフ出力）。 */
