@@ -165,8 +165,10 @@ def group_absmax_scale(
     """`scale = clamp(amax_group / max_level, f32 tiny)` を group 形 `[チャネル, group 数]` で返す。
 
     `quantize.group_scale`（i4 の `amax/7`）の準位表版で、`max_level` は表の最大絶対値
-    （FP4 = 6.0 / NF4 = 1.0）。group の amax 要素が表の両端へ乗るので、`quantize` 側と同じ
-    理由で丸めが冪等になる。下限 clamp は全ゼロ group（`amax == 0`）の 0 除算避け。
+    （FP4 = 6.0 / NF4 = 1.0）。group の amax 要素が表の両端へ乗り、到達可能な scale
+    `s = fl(amax/max_level)` が `fl(fl(max_level·s)/max_level)` の不動点なので、`quantize`
+    側（`INT8_MAX` の論証）と同じ理由で丸めが冪等になる — amax 要素の厳密復元には頼らない。
+    下限 clamp は全ゼロ group（`amax == 0`）の 0 除算避け。
     """
     grouped = grouped_view(rows, group_size, where)
     amax = grouped.abs().amax(dim=-1)
