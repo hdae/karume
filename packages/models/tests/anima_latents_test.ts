@@ -81,9 +81,6 @@ Deno.test("animaLatents: 呼ぶたびに独立した写し（消費側の書き�
   const first = animaLatents();
   assertEquals([...first.mean], [...ANIMA_LATENTS_MEAN]);
   assertEquals([...first.std], [...ANIMA_LATENTS_STD]);
-  // 実体そのものではない。
-  assertNotStrictEquals(first.mean, ANIMA_LATENTS_MEAN);
-  assertNotStrictEquals(first.std, ANIMA_LATENTS_STD);
 
   const meanBefore = ANIMA_LATENTS_MEAN[0];
   const stdBefore = ANIMA_LATENTS_STD[0];

@@ -18,8 +18,13 @@
 
 import { ModelInputError } from "../errors.ts";
 
-/** PNG シグネチャ（8 バイト）。 */
-const SIGNATURE = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+/**
+ * PNG シグネチャ（8 バイト）。
+ *
+ * MUST: 配列リテラルに留め、`Uint8Array` は {@link encodePng} の中で組む（モジュールスコープで
+ * `Uint8Array.from` を実行しない — {@link buildCrcTable} と同じ横断不変条件）。
+ */
+const SIGNATURE: readonly number[] = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 
 /** 8bit / チャネル。 */
 const BIT_DEPTH = 8;
@@ -142,7 +147,7 @@ export const encodePng = async (
   ihdr[12] = INTERLACE_NONE;
 
   const parts = [
-    SIGNATURE,
+    Uint8Array.from(SIGNATURE),
     chunk("IHDR", ihdr),
     chunk("IDAT", await deflate(raw)),
     chunk("IEND", new Uint8Array(0)),

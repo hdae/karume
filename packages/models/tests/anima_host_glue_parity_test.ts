@@ -28,12 +28,7 @@
 import { assert, assertEquals } from "@std/assert";
 import { parseSafetensors, type Tensor } from "@karume/runtime";
 import { cfgEulerStep, sigmaSchedule } from "../src/anima/sampler.ts";
-import {
-  ANIMA_LATENTS_MEAN,
-  ANIMA_LATENTS_STD,
-  denormalizeLatents,
-  padSequence,
-} from "../src/anima/latents.ts";
+import { animaLatents, denormalizeLatents, padSequence } from "../src/anima/latents.ts";
 import { needsUncond } from "../src/generation/dpm-solver-multistep.ts";
 import { readFileIfPresent, readTextIfPresent } from "./helpers/read-if-present.ts";
 
@@ -185,16 +180,17 @@ for (const variant of VARIANTS) {
     ignore,
     fn: () => {
       assert(fixture !== undefined);
-      // 本番は VAE config の写し（ANIMA_LATENTS_*）を使うので、ここでもそれを渡す。写しが
+      // 本番は VAE config の写し（animaLatents）を使うので、ここでもそれを渡す。写しが
       // この変種の参照と同じ数であることを先に押さえる（変種ごとに VAE を読み直して採った値）。
-      assertBitIdentical(ANIMA_LATENTS_MEAN, fixture.f32("latents_mean").data, "latents_mean");
-      assertBitIdentical(ANIMA_LATENTS_STD, fixture.f32("latents_std").data, "latents_std");
+      const { mean, std } = animaLatents();
+      assertBitIdentical(mean, fixture.f32("latents_mean").data, "latents_mean");
+      assertBitIdentical(std, fixture.f32("latents_std").data, "latents_std");
       // 逆正規化の入力は最後に参照を採った step の latent（`pipeline_ref.py` の decode 段）。
       const last = fixture.f32(`latents_${stepTag(fixture.meta.ref_steps)}`);
       const expected = fixture.f32("latents_denorm");
       assertEquals(expected.shape, last.shape, "latents_denorm の shape");
       assertBitIdentical(
-        denormalizeLatents(last.data, last.shape, ANIMA_LATENTS_MEAN, ANIMA_LATENTS_STD),
+        denormalizeLatents(last.data, last.shape, mean, std),
         expected.data,
         "latents_denorm",
       );

@@ -69,12 +69,7 @@ import {
   dpmSolverMultistepStep,
   needsUncond,
 } from "../generation/dpm-solver-multistep.ts";
-import {
-  ANIMA_LATENTS_MEAN,
-  ANIMA_LATENTS_STD,
-  denormalizeLatents,
-  padSequence,
-} from "./latents.ts";
+import { animaLatents, denormalizeLatents, padSequence } from "./latents.ts";
 import { imageToRgba } from "./image.ts";
 import { assertAcceptableResolution, formatResolution, type ImageSize } from "./resolution.ts";
 import { blendExtentAt, decodeTiled, planVaeTiling, tileCount } from "./tiling.ts";
@@ -1048,12 +1043,8 @@ export class AnimaPipeline {
     );
 
     // --- ④ 逆正規化 → VAE decode（常時タイル — ADR 0038 §4）-------------------
-    const denormalized = denormalizeLatents(
-      latents,
-      latentShape,
-      ANIMA_LATENTS_MEAN,
-      ANIMA_LATENTS_STD,
-    );
+    const { mean: latentsMean, std: latentsStd } = animaLatents();
+    const denormalized = denormalizeLatents(latents, latentShape, latentsMean, latentsStd);
     const decoded = await withStage(
       "vae_decoder",
       state.vaeDecoder,
