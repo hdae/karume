@@ -1,7 +1,13 @@
 # 0070: shard ロードの 2 相契約とメモリ admission
 
 - Status: accepted（2026-08-17 — 委任チェック方式・大域裁定なし。Codex レビュー
-  第 3〜5 巡を反映〈完全性集合・co-shard・transaction 境界・明示 submit〉し第 6 巡で go）
+  第 3〜5 巡を反映〈完全性集合・co-shard・transaction 境界・明示 submit〉し第 6 巡で go）。
+  **現行は決定 5（admission の estimator・`unaccounted`）と「補助資源の見積り内訳（2026-09-12）」
+  だけ**。決定 1〜4 の shard 面（shard 化・2 相ロードと逐次面・shard 消費の Session 構築面・
+  shard 単位の errorScope）は ADR [0108](0108-container-format.md) / [0109](0109-manifest-v5-container.md)
+  （段 3d `9e905d9f`）で退役した（errorScope の同期区間は 0108 決定 9 の block / part 単位へ）。
+  決定 2 の「sha256 照合はキャッシュヒットにも走る（非交渉条件）」は ADR
+  [0080](0080-hub-fetch-cache-050.md) 決定 1 が変更した。
 - 関連: ADR [0038](0038-manifest-v1.md)（manifest と hub 取得層 — FileRef 3 点セットと
   fetch-cache 接続契約を継承）/ [0041](0041-manifest-v2.md) / [0063](0063-safetensors-physical-layout.md)
   （shard の欄の確定 = release 波の R1 と同席）/ [0004](0004-execution-model.md)（errorScope
@@ -56,6 +62,9 @@ tvmjs 型の 2 相（調査 §5.1）を fetch-cache 接続契約（ADR 0038 決�
 - **相 2**: shard を**逐次** 1 本ずつ「キャッシュから取得 → **sha256 照合**（キャッシュ
   ヒット側も走らせる — 現行 validate フックの維持。**非交渉条件**）→ 呼び手へ渡す →
   参照を手放す」。
+  **変更（2026-08-28・ADR [0080](0080-hub-fetch-cache-050.md) 決定 1）**: キャッシュヒット時の
+  全量再ハッシュは、fetch-cache が格納時に記録したハッシュとの比較に置き換わった（格納後の
+  サイレントなビット腐敗は検出しない — 代償は 0080 が受け入れた）。上の「非交渉条件」は現行ではない。
 - 公開面: 既存の全量 Record 面は**温存**し（小モデルは従来どおり）、**shard 逐次面**
   （`AsyncIterable` 型 — shard 名 + bytes）を追加する。RAM ピーク目標 = O(最大 shard)。
 
@@ -140,7 +149,8 @@ await が無い」ことで従来どおり保たれ、区間が短くなるだ�
     `caches` 不在・キャッシュ書込み失敗は fail loud（バイト列を手元に持たない面に素 fetch 縮退の
     余地は無い。`onCacheError` 診断が届くのは相 2 のみ）。相 2 の sha256 照合は従来の validate
     フック経由で**キャッシュヒットにも走る**（非交渉条件の維持 — prefetch が焼く検証済み
-    マーカーは読まない。将来 opt-down する場合の席としてだけ残る）。
+    マーカーは読まない。将来 opt-down する場合の席としてだけ残る）。〔ADR 0080 決定 1 が変更 —
+    決定 2 の注記を参照〕
   - **runtime（決定 3）**: `createSessionFromShards(gpu, shards: AsyncIterable<Uint8Array>,
     options)`。最初の shard = グラフ shard（`karume_ir` 必須）・後続への `karume_ir` 再登場は
     fail loudly・bytes は buffer 全体を占める view MUST。**全量面 `createSession` は「1 shard の
