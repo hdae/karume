@@ -39,3 +39,20 @@ in-place 更新（unlink → copy・`karume.json` は最後）しており、I/O
 - 出力先の親に一時的に `<名前>.staging` / `<名前>.old` が現れる（models/ は git 追跡外）。
 - `place_file` 等の `dest.unlink(missing_ok=True)` は staging が常に空から作られるため
   実質到達しない防御になった（撤去は別コミット候補）（2026-08-16 撤去済み）。
+
+## 追記（2026-09-24）— 単体 export の原子性は作業席へ移った
+
+決定 1 の「`export_to_file` 単体で temp → verify → replace・既存 final は 1 バイトも変えない」は、
+現行の `export_to_file` 単体では**保証しない**。`export_to_file` → `publish_model` →
+`publish_container`（`tools/exporter/src/karume/{pipeline,publish}.py`）は、一時名で書いて読み戻し
+検査を通した後、`krg` と `krm` の part を 1 本ずつ `os.replace` で据える。途中で落ちた回はこの
+呼び出しが据えた現物を消して閉じるので、`final` が前回の成果物の置き場だと**前回の
+last-known-good が消える**（`publish_container` の docstring の MUST）。
+
+原子性の単位はディレクトリになった。保証は決定 2 と同じ staging → swap を 1 ファイルの書き手にも
+開いた作業席 `karume.artifacts.staged_publication`（`with` を例外なく抜けたときだけ `final` へ
+据える）が持ち、全 recipe の書き出しが作業席の内側にあることを
+`tools/export-recipes/tests/test_staged_publication.py` が AST で機械検査する。移転は
+`45e75120`（成果物公開を作業席の原語へ 1 本化）と `8086ed37`（配布形の書き手を `krm` へ切り替え
+— 分割形の part 単位の据え替えが入った）。新しい recipe の書き手は `export_to_file` を作業席の
+外で呼ばない MUST。決定 2 / 3（dist の staging → swap・丸ごと置換）は不変。
