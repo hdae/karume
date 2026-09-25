@@ -61,8 +61,9 @@ export type DeriveInputsOptions = {
   /**
    * この生成の中断（`GenerationRequest.signal` がそのまま降りてくる）。
    *
-   * 派生入力の材料が GB 級の遅延ロードになる配布形（gemma4 の PLE sidecar — ADR 0085）では、
-   * ここを見ないと「停止を押しても 758MB の読みが終わるまで返らない」形になる。
+   * 派生入力の材料が GB 級の遅延ロードになる配布形（gemma4 の PLE — `model` 容器の資産・
+   * ADR 0085）では、ここを見ないと「停止を押しても block 1 本（≤ 32 MiB）の読みが終わるまで
+   * 返らない」形になる。
    */
   readonly signal?: AbortSignal;
 };
@@ -399,7 +400,7 @@ const assertLogitsOutput = (
  * hidden 出口（`[1,R,H]` の f32）であることを見て、H を返す。
  *
  * `vocabSize` に当たる宣言を受けないのは、H を突き合わせる相手が資産側に無いためである
- * （語彙数は tokenizer と PLE sidecar の相互照合の基準になるが、hidden 幅はグラフだけが持つ）。
+ * （語彙数は tokenizer と PLE の索引の相互照合の基準になるが、hidden 幅はグラフだけが持つ）。
  * よってここが見るのは「正整数の固定次元であること」まで — 記号のままなら run ごとに幅が
  * 変わる形で、drafter 側の重みと繋がらない。
  */

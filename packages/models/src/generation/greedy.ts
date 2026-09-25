@@ -60,7 +60,7 @@ export type GreedySpec<C extends GenerationDisposable = GenerationContext> = {
    * MiniCPM5 decode 系列の `position_ids`）はここが唯一の供給口である。
    *
    * MUST: **同期の純関数**（同じ `(ids, positions)` に同じ値）。`sequence.ts` 側が非同期なのは
-   * GB 級の遅延ロード（PLE sidecar）を待つ席が要るためで、この関数の目的は固定 token id 列での
+   * GB 級の遅延ロード（PLE の block）を待つ席が要るためで、この関数の目的は固定 token id 列での
    * 検収なので、待ちの入る派生入力は通さない。
    */
   readonly derive?: (

@@ -4,7 +4,7 @@
  * 束ねるのは 4 つで、どれも既に別の場所で正本を持っている:
  *
  * 1. 製品グラフ（PLE 外出し + 最終行 logits 出口）の Session — `tools/export-recipes/gemma4/
- *    export_product.py` の出力を移行 CLI が畳んだ容器）
+ *    export_product.py` が直接書く容器 `model.krm`
  * 2. ホスト PLE gather（`src/gemma/ple.ts` — ADR
  *    [0085](../../../../docs/decisions/0085-ple-host-gather.md)）を
  *    {@link GenerationWiring.derivedInputs} の席へ差す
@@ -967,6 +967,7 @@ class GemmaPipeline {
           model,
           config,
           options.speculative === undefined ? undefined : open(DRAFTER),
+          entry,
         );
         // MUST: グラフから確定した model 名を**捨てずに運ぶ**（PLE 門が層数から引き直さない）。
         const admission: GemmaFamilyAdmission = family === "gemma4-qat"
@@ -1065,7 +1066,7 @@ class GemmaPipeline {
     // 持たない（バイト列と `config` だけ）ので、宣言そのものへ到達できない。実寸の検査は
     // Session 構築時の `assertWeightsWithinLimits`（ADR 0089 決定 1）が受け持つ。
     const model = open(MODEL);
-    const admitted = admitGemma4(model, config);
+    const admitted = admitGemma4(model, config, undefined, gemmaEntryName(family));
     // PLE の索引は容器の資産なので、取得面と**同じ 1 本**の門を通す（`readGemma4PleIndex` が
     // 索引と block の整合まで見る）。
     const pleIndex = await readGemma4PleIndex(where, model);

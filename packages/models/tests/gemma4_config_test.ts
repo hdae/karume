@@ -24,12 +24,15 @@ import { ExecutionError } from "@karume/runtime";
 import { ModelInputError } from "../src/errors.ts";
 import { type Gemma4PipelineConfig, parseGemma4PipelineConfig } from "../src/gemma/config.ts";
 import {
+  admitGemma4,
   assertChunkLength,
   assertGemma4ChunkBuckets,
   assertRopeInputShapes,
+  gemmaEntryName,
 } from "../src/gemma/admission.ts";
 import { GEMMA4_CHUNK_BUCKETS, Gemma4Pipeline } from "../src/gemma/pipeline.ts";
 import type { GenerationGraph } from "../src/generation/program.ts";
+import type { GraphOwner } from "../src/hub/components.ts";
 import { stubModel } from "./helpers/stub-model.ts";
 
 /**
@@ -225,6 +228,19 @@ Deno.test("gemma4 pipelineConfig: 値域", async (t) => {
     assertThrows(() => parseGemma4PipelineConfig({ ...MINIMAL, chunkLength: 0 }), Error);
     assertThrows(() => parseGemma4PipelineConfig({ ...MINIMAL, maxPosition: 1.5 }), Error);
   });
+  await t.step(
+    "chunk の行数は 2 以上（1 行は decode 形の専用値 — 資産の齟齬として素の Error）",
+    () => {
+      for (const key of ["chunkLength", "maxChunkLength"]) {
+        const error = assertThrows(
+          () => parseGemma4PipelineConfig({ ...MINIMAL, [key]: 1 }),
+          Error,
+          `pipelineConfig.${key}: 2 以上の整数でない`,
+        );
+        assert(!(error instanceof ModelInputError), error.message);
+      }
+    },
+  );
   await t.step("sampler の値域は generation/sampler.ts の assertSpec と同じ", () => {
     const sampler = { ...RECOMMENDED };
     assertThrows(
@@ -347,9 +363,9 @@ Deno.test("gemma4 fromAssets: quant 実行ノブの明示指定も資産を開�
 // `tools/export-recipes/gemma4/export_decode.py` の `assert_rope_inputs`。
 
 /** 実配布形と同じ宣言（sliding 256 / full 512）。`patch` で 1 本だけ壊す。 */
-const ropeGraph = (
+const ropeOwner = (
   patch: Readonly<Record<string, readonly (number | string)[]>> = {},
-): GenerationGraph =>
+): GraphOwner =>
   stubModel({
     symbols: ["C", "M"],
     inputs: [
@@ -363,7 +379,11 @@ const ropeGraph = (
     ].filter((input) => input.shape.length > 0),
     outputs: ["logits"],
     values: { logits: [1, 1, 262144] },
-  }).graph;
+  });
+
+const ropeGraph = (
+  patch: Readonly<Record<string, readonly (number | string)[]>> = {},
+): GenerationGraph => ropeOwner(patch).graph;
 
 Deno.test("gemma4 rope 突合: 宣言どおりのグラフは通り、幅の食い違いは名指しで落ちる", async (t) => {
   const config = parseGemma4PipelineConfig(MINIMAL);
@@ -408,6 +428,30 @@ Deno.test("gemma4 rope 突合: 宣言どおりのグラフは通り、幅の食�
       Error,
       "グラフ入力 'rope_sliding_attention_sin' が無い",
     );
+  });
+});
+
+Deno.test("gemma4 家族 admission: 配下の門の文言は呼んだ家族の入口名を名乗る", async (t) => {
+  const config = parseGemma4PipelineConfig(MINIMAL);
+  const qat = gemmaEntryName("gemma4-qat");
+
+  await t.step("RoPE の幅の食い違い（QAT の入口から）", () => {
+    const error = assertThrows(
+      () => admitGemma4(ropeOwner({ fullCos: [1, "M", 256] }), config, undefined, qat),
+      Error,
+      "rope_full_attention_cos",
+    );
+    assert(error.message.startsWith("Gemma4QatPipeline: "), error.message);
+  });
+
+  await t.step("出口の本数の食い違い（QAT の入口から）", () => {
+    // `ropeGraph` の出口は logits 1 本 — 製品グラフの契約（logits + hidden の 2 本）で落ちる。
+    const error = assertThrows(
+      () => admitGemma4(ropeOwner(), config, undefined, qat),
+      Error,
+      "グラフ出力が 1 本",
+    );
+    assert(error.message.startsWith("Gemma4QatPipeline: "), error.message);
   });
 });
 

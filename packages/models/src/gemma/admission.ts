@@ -81,7 +81,7 @@ export type Gemma4Admission = {
 /**
  * 選んだ行の logits 出口の語彙数をグラフから引く（`[1, R, V]` — ADR 0083 決定 6）。
  *
- * MUST: 呼び手に宣言させない。V は主 embedding の行数そのもので、宣言と食い違えば PLE
+ * MUST: 呼び手に宣言させない。V は主 embedding の行数そのもので、宣言と食い違えば
  * PLE の索引との相互照合（ADR 0085 決定 5）が**間違った基準**で通ってしまう。形の検査は
  * `createGenerationProgram` が同じ値でもう一度行う。
  *
@@ -90,22 +90,22 @@ export type Gemma4Admission = {
  * 流儀）。出口 1 本の旧配布形は**ここで**落とす — 互換分岐を書くと「hidden の無い資産で
  * 投機が黙って組めない」形が残る。
  */
-const vocabSizeOf = (graph: GenerationGraph): number => {
+const vocabSizeOf = (graph: GenerationGraph, entry: string): number => {
   if (graph.outputs.length !== GRAPH_OUTPUTS) {
     throw new Error(
-      `Gemma4Pipeline: グラフ出力が ${graph.outputs.length} 本` +
+      `${entry}: グラフ出力が ${graph.outputs.length} 本` +
         `（製品グラフの出口は logits + hidden の ${GRAPH_OUTPUTS} 本 — ADR 0083 決定 6）`,
     );
   }
   const name = graph.outputs[0];
   if (!Object.hasOwn(graph.values, name)) {
-    throw new Error(`Gemma4Pipeline: グラフ出力 '${name}' の値情報が無い`);
+    throw new Error(`${entry}: グラフ出力 '${name}' の値情報が無い`);
   }
   const shape = graph.values[name].shape;
   const vocab = shape[2];
   if (shape.length !== 3 || typeof vocab !== "number") {
     throw new Error(
-      `Gemma4Pipeline: グラフ出力 '${name}' の shape [${shape.join(",")}] が [1,R,V] でない`,
+      `${entry}: グラフ出力 '${name}' の shape [${shape.join(",")}] が [1,R,V] でない`,
     );
   }
   return vocab;
@@ -117,16 +117,16 @@ const vocabSizeOf = (graph: GenerationGraph): number => {
  * 呼ぶのは投機のときだけ（drafter の入力 `hidden` の幅がこれと一致する MUST）。本数と順序は
  * {@link vocabSizeOf} が既に見ている。
  */
-const hiddenSizeOf = (graph: GenerationGraph): number => {
+const hiddenSizeOf = (graph: GenerationGraph, entry: string): number => {
   const name = graph.outputs[1];
   if (!Object.hasOwn(graph.values, name)) {
-    throw new Error(`Gemma4Pipeline: グラフ出力 '${name}' の値情報が無い`);
+    throw new Error(`${entry}: グラフ出力 '${name}' の値情報が無い`);
   }
   const shape = graph.values[name].shape;
   const hidden = shape[2];
   if (shape.length !== 3 || typeof hidden !== "number") {
     throw new Error(
-      `Gemma4Pipeline: グラフ出力 '${name}' の shape [${shape.join(",")}] が [1,R,H] でない`,
+      `${entry}: グラフ出力 '${name}' の shape [${shape.join(",")}] が [1,R,H] でない`,
     );
   }
   return hidden;
@@ -140,7 +140,7 @@ const hiddenSizeOf = (graph: GenerationGraph): number => {
  * `createGenerationContext` の束縛点へ渡す（ADR 0066 追記 7）。綴りを定数で持たないのは、
  * 資産側の綴りが変わったときに**黙って束縛されない記号**が残るのを避けるため。
  */
-const capacitySymbolOf = (graph: GenerationGraph): string => {
+const capacitySymbolOf = (graph: GenerationGraph, entry: string): string => {
   const fromInputs = new Set<string>();
   for (const input of graph.inputs) {
     for (const dim of input.shape) {
@@ -150,7 +150,7 @@ const capacitySymbolOf = (graph: GenerationGraph): string => {
   const free = graph.symbols.filter((symbol) => !fromInputs.has(symbol));
   if (free.length !== 1) {
     throw new Error(
-      `Gemma4Pipeline: 入力 shape から決まらない記号が ${free.length} 本` +
+      `${entry}: 入力 shape から決まらない記号が ${free.length} 本` +
         `（[${free.join(", ")}] — full スロットの容量記号 1 本であること）`,
     );
   }
@@ -172,6 +172,9 @@ const capacitySymbolOf = (graph: GenerationGraph): string => {
 export const assertRopeInputShapes = (
   graph: GenerationGraph,
   config: Gemma4PipelineConfig,
+  // NOTE: 既定が通常 Gemma の名前なのは {@link assertChunkLength} と同じ理由（直接叩く検査は
+  // 入口を持たない）。実経路（{@link admitGemma4}）は必ず family の名前を渡す。
+  entry: string = gemmaEntryName("gemma4"),
 ): void => {
   for (const layerType of GEMMA4_ROPE_LAYER_TYPES) {
     const { headDim } = config.rope[layerType];
@@ -180,12 +183,12 @@ export const assertRopeInputShapes = (
       const input = graph.inputs.find((entry) => entry.name === name);
       if (input === undefined) {
         throw new Error(
-          `Gemma4Pipeline: グラフ入力 '${name}' が無い（RoPE がホスト供給の資産でない）`,
+          `${entry}: グラフ入力 '${name}' が無い（RoPE がホスト供給の資産でない）`,
         );
       }
       if (input.shape.length !== 3 || input.shape[2] !== headDim) {
         throw new Error(
-          `Gemma4Pipeline: グラフ入力 '${name}' の shape [${input.shape.join(",")}] が` +
+          `${entry}: グラフ入力 '${name}' の shape [${input.shape.join(",")}] が` +
             ` pipelineConfig.rope.${layerType}.headDim ${headDim} と食い違う` +
             `（[1, M, ${headDim}] が要る）`,
         );
@@ -214,12 +217,15 @@ export const assertRopeInputShapes = (
 export const admitGemma4 = (
   component: GraphOwner,
   config: Gemma4PipelineConfig,
-  drafter?: GraphOwner,
+  drafter: GraphOwner | undefined,
+  // MUST: family の入口名（{@link gemmaEntryName}）— 両家族がこの 1 本を通るので、配下の門の
+  // 文言が固定の名前を名乗ると QAT の利用者に別の入口の話として届く。
+  entry: string,
 ): Gemma4Admission => {
   const { graph } = component;
-  assertRopeInputShapes(graph, config);
-  const vocabSize = vocabSizeOf(graph);
-  const capacitySymbol = capacitySymbolOf(graph);
+  assertRopeInputShapes(graph, config, entry);
+  const vocabSize = vocabSizeOf(graph, entry);
+  const capacitySymbol = capacitySymbolOf(graph, entry);
   return {
     config,
     vocabSize,
@@ -228,10 +234,10 @@ export const admitGemma4 = (
     // 投機の知識で、target の門とは別の 1 本）。target の材料は**確定したもの**を渡す。
     ...(drafter === undefined ? {} : {
       drafter: {
-        admission: admitGemma4Drafter("Gemma4Pipeline", drafter.graph, {
+        admission: admitGemma4Drafter(entry, drafter.graph, {
           graph,
           rope: config.rope,
-          hiddenSize: hiddenSizeOf(graph),
+          hiddenSize: hiddenSizeOf(graph, entry),
           capacitySymbol,
         }),
       },

@@ -625,7 +625,7 @@ const i32Row = (rows: number, data: Int32Array<ArrayBuffer>): Tensor => ({
  * バケットを引く理由: 短い prompt を `chunkLength`（配布既定 768）行へ pad すると、pad 行は
  * 出力にも KV にも寄与しないのに行局所な op（linear / pointwise / norm）の仕事だけは物理行数に
  * 比例して積む。32 token の発話 1 本 + 1 token 生成の壁が 385 → 106 ms（linear −73%）になる実測
- * （`.claude/reviews/2026-09-06_performance-investigation/02_HOST_GENERATION.md` F-02）があり、
+ * （ADR 0066 追記 10 — 再計測は `docs/research/2026-09-07-codex-perf-review-followup.md` §5）があり、
  * chat の user 発話は短いのに context の `chunkLength` は途中で変えられないので、多ターンでは
  * 毎ターンこの pad を払う。一方で長い prompt は 768 一括が最速なので「既定を下げる」形は採らず、
  * **許す物理行数を複数持って chunk ごとに選ぶ**（ADR 0066 決定 4 / 追記〈バケット〉）。
@@ -950,7 +950,7 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
    * ホスト由来の追加入力（宣言した名前と過不足なく一致することを毎回見る）。
    *
    * `signal` を降ろすのは、派生入力の材料が GB 級の遅延ロードになる配布形（gemma4 の PLE
-   * sidecar）があるため — best-effort なので、無視する実装でも run の前の検査で閉じる。
+   * の block）があるため — best-effort なので、無視する実装でも run の前の検査で閉じる。
    */
   const deriveInputs = async (
     ids: Int32Array<ArrayBuffer>,

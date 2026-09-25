@@ -257,13 +257,17 @@ export const parseGemma4PipelineConfig = (raw: unknown): Gemma4PipelineConfig =>
   if (!isRecord(raw)) throw new Error(`${where}: オブジェクトでない（${String(raw)}）`);
   assertAllowedKeys(raw, ROOT_KEYS, where);
   const positiveInteger = (value: number): boolean => Number.isSafeInteger(value) && value >= 1;
-  const chunkLength = readNumber(raw, "chunkLength", where, positiveInteger, "1 以上の整数でない");
+  // MUST: chunk の行数は 2 以上（実行時ノブの門 `assertChunkLength` と同じ下限 — 1 行の chunk は
+  // decode 形の専用値）。宣言の段で閉じないと、配布形の齟齬が呼び手の入力起因の型
+  // （`ModelInputError`）で落ちる（ADR 0107 決定 2）。書き手 `gemma4_pipeline_config` も [2, max] で焼く。
+  const chunkRows = (value: number): boolean => Number.isSafeInteger(value) && value >= 2;
+  const chunkLength = readNumber(raw, "chunkLength", where, chunkRows, "2 以上の整数でない");
   const maxChunkLength = readNumber(
     raw,
     "maxChunkLength",
     where,
-    positiveInteger,
-    "1 以上の整数でない",
+    chunkRows,
+    "2 以上の整数でない",
   );
   const maxPosition = readNumber(raw, "maxPosition", where, positiveInteger, "1 以上の整数でない");
   const capacity = readNumber(raw, "capacity", where, positiveInteger, "1 以上の整数でない");

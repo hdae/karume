@@ -365,11 +365,11 @@ export const createGemma4PleResident = async (
   options: Gemma4PleResidentOptions,
 ): Promise<Gemma4PleResident> => {
   const { gpu, index, entry } = options;
-  // ① sidecar の行数 と ② 主 embedding の vocab 行数（ADR 0085 決定 5 の相互照合 — ホスト経路の
+  // ① PLE の索引の行数 と ② 主 embedding の vocab 行数（ADR 0085 決定 5 の相互照合 — ホスト経路の
   // `createGemma4Ple` が持つ門と同じ関係を、この席でも通す）。
   if (index.tokens !== options.vocabSize) {
     throw new Error(
-      `${entry}: PLE sidecar の行数 ${index.tokens} が主 embedding の vocab 行数` +
+      `${entry}: PLE の索引の行数 ${index.tokens} が主 embedding の vocab 行数` +
         ` ${options.vocabSize} と違う（別の語彙で焼かれた組み合わせ）`,
     );
   }
@@ -433,7 +433,7 @@ export const createGemma4PleResident = async (
         // 位置である（ホスト経路 `Gemma4Ple.gather` の ③ と同じ門）。
         if (id < 0 || id >= index.tokens) {
           throw new Error(
-            `${entry}: token id[${row}] ${id} が PLE sidecar の 0..${index.tokens - 1} の外`,
+            `${entry}: token id[${row}] ${id} が PLE の索引の 0..${index.tokens - 1} の外`,
           );
         }
         const base = id * index.layers;
