@@ -1084,6 +1084,26 @@ class Rank5NotUnbind(nn.Module):
         return (split * 2.0).reshape(batch, heads, length, dim)
 
 
+class RopeUnbindSqueezing(nn.Module):
+    """RoPE と同じ分割（最終次元を (2, D/2) に割る rank5 の view → 分割軸の幅 1 slice）の後、
+    `squeeze` で落とす軸を選べる形。
+
+    `axis=3` は分割軸を落とす本物の unbind、`axis=0` は別の長さ 1 軸（batch）を落とす形で、
+    後者は幅 1 の軸の位置が違うので unbind ではない。
+    """
+
+    def __init__(self, axis: int) -> None:
+        super().__init__()
+        self.axis = axis
+
+    def forward(self, x):
+        batch, length, heads, dim = x.shape
+        split = x.reshape(batch, length, heads, 2, dim // 2)
+        first = split[:, :, :, 0:1, :].squeeze(self.axis)
+        second = split[:, :, :, 1:2, :].squeeze(self.axis)
+        return torch.cat([-second, first], dim=-1)
+
+
 class Patchify(nn.Module):
     """patchify（rank8 の reshape → permute → reshape）。"""
 
@@ -1152,6 +1172,26 @@ class TestRankLowering:
         # 変換もできる（rank 上限が効くのは strided コピー族だけで、elementwise は rank 自由）
         graph, _ = export_and_convert(Rank5NotUnbind(), args)
         assert node_ops(graph) == ["reshape", "mul", "reshape"]
+
+    @pytest.mark.parametrize(
+        ("axis", "expected"),
+        [pytest.param(3, 2, id="split axis"), pytest.param(0, 0, id="batch axis")],
+    )
+    def test_only_a_squeeze_of_the_split_axis_is_folded(self, axis, expected):
+        """畳むのは squeeze が**分割軸**を落とす形だけ — 別の長さ 1 軸を落とす squeeze は素通し。
+
+        op 種だけで照合すると batch 軸を落とす形も掴み、置換後の slice（`[1,T,H,64]`）が元の
+        squeeze の出力（`[T,H,1,64]`）と食い違う。
+        """
+        module = RopeUnbindSqueezing(axis)
+        args = (torch.randn(1, 3, 2, 8),)
+        decomposed = decompose(module, args)
+
+        stats = normalize_graph(decomposed)
+
+        assert stats.get("split_unbind->slice", 0) == expected
+        with torch.no_grad():
+            assert torch.equal(decomposed.module()(*args), module(*args))
 
     def test_a_unit_replication_collapses_the_whole_chain(self):
         """複製数 1（GQA 無し = MHA 構成）の鎖は丸ごと恒等として消える。

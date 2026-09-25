@@ -846,7 +846,12 @@ def _unbind_consumers(view: Node, *, split_dim: int) -> list[tuple[Node, int, in
         squeeze = _sole_user(user)
         if end - start != 1 or squeeze is None:
             return None
-        if squeeze.target not in (aten.squeeze.dim, aten.squeeze.dims):
+        if squeeze.target not in (aten.squeeze.dim, aten.squeeze.dims) or len(squeeze.args) < 2:
+            return None
+        # 落とすのが**分割軸ちょうど**であること — 別の長さ 1 軸（batch の軸 0 など）を落とす
+        # squeeze は unbind ではないので、この view には触れない（呼び手の MUST）。
+        dims = squeeze.args[1] if squeeze.target is aten.squeeze.dims else [squeeze.args[1]]
+        if {int(dim) % rank for dim in dims} != {split_dim}:
             return None
         rewritten.append((squeeze, start, end))
     return rewritten
@@ -1315,9 +1320,9 @@ def _select_to_squeeze(graph: Graph, stats: Counter) -> None:
 def _split_to_slices(graph: Graph, stats: Counter) -> None:
     """`split_with_sizes(x, sizes, dim)` + `getitem` → `slice` の列（ADR 0014）。
 
-    IR に多出力 op は無い（ノードは単一出力 — docs/ir-v2.md）ので、分割は取り出し口ごとの
-    slice に開く。実測は ConvFlow / ResidualCoupling の `torch.split(x, [half]*2, 1)`
-    （recon §2）で、消費側は必ず `getitem` の定数添字。
+    多出力 aten の getitem 結線は sampling の実需まで先送り（ADR 0068 追記）なので、分割は
+    取り出し口ごとの slice に開く。実測は ConvFlow / ResidualCoupling の
+    `torch.split(x, [half]*2, 1)`（recon §2）で、消費側は必ず `getitem` の定数添字。
 
     MUST: **消費者が getitem だけ**の形にしか発火しない。タプルそのものを他所へ渡す形は
     書き換えが同値でないので、触らず未対応 op の全件列挙に回す（黙って近似しない）。
