@@ -6,7 +6,8 @@
 （`tools/exporter/tests/test_architecture_boundary.py` が機械で守る）。
 
 Lucida は独立 recipe にしない — 構造は BiRefNet_HR と同一で、違うのは重みの出所（と、それに
-紐づく帰属・リポ名）だけなので、`--model` の 1 軸として同じ表が持つ。
+紐づく帰属・リポ名）だけなので、export 台本では `--model-dir` の 1 軸、配布では pipeline 席
+（`--pipeline birefnet` / `lucida` の別リポ — ADR 0092 決定 1）として同じ recipe が持つ。
 
 MUST: **再輸出しない**（`from birefnet import X` で family の中身が芋づるに import される形に
 しない）。台本は重い上流 import を持つので、`import birefnet` が transformers / timm / kornia を
