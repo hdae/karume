@@ -151,6 +151,18 @@ ATTRIBUTION_NOTICE = (
     " WITH USE OF THIS MODEL."
 )
 
+#: 上流ライセンス §3(a) 後段 — 受領者へ「CircleStone Models / Derivatives の使用権は本ライセンスに
+#: 基づき Company から直接付与される」と**明示する（specify）**ための固定文。前段（ライセンスの
+#: コピーの提供）は `LICENSE.md` の逐語同梱で満たし、後段はこの 1 文で満たす（2026-09-25 裁定）。
+#: 当事者名・定義語・ライセンス名は原文（`circlestone_license.txt` の前文と §1 / §3(a)）の綴りに
+#: 合わせる。{@link ATTRIBUTION_NOTICE} と同じく `NOTICE.md`（`anima/distribution.py`）とこの
+#: カードの両方がここを引く — 法的文言を 2 箇所で独立に持つと、片方だけが割れる。
+RIGHTS_GRANT_STATEMENT = (
+    "Any rights to use the CircleStone Models and/or Derivatives in this repository are granted"
+    " to you directly by CircleStone Labs LLC under the CircleStone Labs Non-Commercial License"
+    " (LICENSE.md)."
+)
+
 #: `resolution` ノブの受理集合を 1 行で言ったもの（**manifest に無い事実** — 受理集合の正本は
 #: `packages/models/src/anima/resolution.ts` で、ADR 0038 §2 により manifest には書かない）。
 #: 刻み = 空間圧縮 8 × patch 2、下限は VAE タイル decoder の latent 64（= 512px）、上限は
@@ -376,7 +388,8 @@ def _origins(manifest: Mapping[str, Any], intro: tuple[str, ...]) -> list[str]:
 def _base_license(manifest: Mapping[str, Any]) -> list[str]:
     """ライセンス節 — 上流の再配布条件と、第三者 fine-tune 側の許諾の**重ね合わせ**。
 
-    Notice の本文はカードにも逐語で出す（turbo 側と同じ理由 — §3(b) の掲示要件）。
+    Notice の本文はカードにも逐語で出す（turbo 側と同じ理由 — §3(b) の掲示要件）。§3(a) 後段の
+    権利付与の明示文（{@link RIGHTS_GRANT_STATEMENT}）も `NOTICE.md` と同じ 1 定数で出す。
     """
     # 並びは出所節と同じく manifest のまま（同 MUST — カード内で順序を 2 通りにしない）。
     fine_tunes = [name for name in manifest["models"] if UPSTREAM_MODELS[name].permissions]
@@ -392,6 +405,8 @@ def _base_license(manifest: Mapping[str, Any]) -> list[str]:
         "CircleStone Non-Commercial License (non-commercial use only). This repository ships",
         "`LICENSE.md` (the full license text) and `NOTICE.md` (this attribution plus the list of",
         "modifications).",
+        "",
+        RIGHTS_GRANT_STATEMENT,
         "",
         ATTRIBUTION_NOTICE,
         "",

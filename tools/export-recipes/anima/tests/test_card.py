@@ -30,6 +30,7 @@ from anima.card import (
     ATTRIBUTION_NOTICE,
     EXTRA_ORIGINS_INTRO,
     OFFICIAL_ORIGINS_INTRO,
+    RIGHTS_GRANT_STATEMENT,
     SUPPORTED_PIPELINE,
     UPSTREAM_MODELS,
     render_base_card,
@@ -287,6 +288,12 @@ class TestOfficialCard:
         """§3(b) の掲示要件は逐語で満たす（要約は掲示でない）。"""
         assert ATTRIBUTION_NOTICE in card
 
+    def test_it_specifies_that_the_rights_are_granted_directly_by_the_company(
+        self, card: str
+    ) -> None:
+        """§3(a) 後段の明示文は `NOTICE.md` と同じ 1 定数を逐語で載せる。"""
+        assert RIGHTS_GRANT_STATEMENT in card
+
     def test_it_states_that_the_outputs_stay_the_users_own(self, card: str) -> None:
         """ライセンス v1.2 §2(e) — 非商用の縛りが掛かるのは重みで、生成物には掛からない。
 
@@ -388,6 +395,12 @@ class TestExtraCard:
     def test_it_shows_the_attribution_notice_verbatim(self, extra_card: str) -> None:
         """§3(b) の掲示要件は公式リポ側と同じく逐語で満たす。"""
         assert ATTRIBUTION_NOTICE in extra_card
+
+    def test_it_specifies_that_the_rights_are_granted_directly_by_the_company(
+        self, extra_card: str
+    ) -> None:
+        """§3(a) 後段の明示文は公式リポ側と同じ 1 定数を逐語で載せる。"""
+        assert RIGHTS_GRANT_STATEMENT in extra_card
 
     def test_it_lists_the_permissions_of_every_source_page(self, extra_card: str) -> None:
         """出所ページの許諾欄は作者ごとに違う — **出所ごとに逐語で**載せる。"""

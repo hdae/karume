@@ -32,7 +32,7 @@ from container_series import (
 from ir_fixtures import ir_container
 
 from _shared.container_read import read_asset
-from anima.card import ATTRIBUTION_NOTICE
+from anima.card import ATTRIBUTION_NOTICE, RIGHTS_GRANT_STATEMENT
 from anima.distribution import (
     ANIMA_AESTHETIC_MODEL_NAME,
     ANIMA_BASE_MODEL_NAME,
@@ -65,6 +65,7 @@ from anima.distribution import (
     anima_quants,
     anima_sources,
     anima_weights,
+    notice_markdown,
 )
 from dist import main
 from karume.artifacts import STAGING_SUFFIX
@@ -1694,6 +1695,21 @@ class TestLegalTexts:
         assert notice == EXTRA_NOTICE_MARKDOWN
         assert (out_dir / "LICENSE.md").read_bytes() == LICENSE_SOURCE_PATH.read_bytes()
         assert ATTRIBUTION_NOTICE in notice
+
+    def test_the_notice_specifies_that_the_rights_are_granted_directly_by_the_company(
+        self, tmp_path: Path
+    ) -> None:
+        """§3(a) 後段 — 使用権は Company から受領者へ直接付与されると明示する（逐語の 1 定数）。
+
+        告知の組み立て自体（任意の改変列挙）と、両リポに据わった `NOTICE.md` の両方で見る —
+        どちらか一方の経路だけが定数を引き忘れると、そのリポだけが §3(a) を欠く。
+        """
+        assert RIGHTS_GRANT_STATEMENT in notice_markdown(("- A modification.",))
+        official = (self._run(tmp_path / "official") / "NOTICE.md").read_text(encoding="utf-8")
+        extra_out = self._run(tmp_path / "extra", pipeline="anima-extra", model="anima-wai-v1.0")
+        extra = (extra_out / "NOTICE.md").read_text(encoding="utf-8")
+        assert RIGHTS_GRANT_STATEMENT in official
+        assert RIGHTS_GRANT_STATEMENT in extra
 
     def test_the_notice_states_the_modifications_inside_the_attribution_notice(
         self, tmp_path: Path

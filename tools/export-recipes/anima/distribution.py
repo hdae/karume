@@ -22,6 +22,7 @@ from _shared.calib_provenance import calib_complaint
 from _shared.container_read import ContainerReadError, read_asset
 from anima.card import (
     ATTRIBUTION_NOTICE,
+    RIGHTS_GRANT_STATEMENT,
     render_base_card,
     render_extra_card,
 )
@@ -112,9 +113,13 @@ CALIB_DEVICES = ("cpu", "cuda")
 CALIB_SHIPPABLE_DEVICE = "cpu"
 
 #: 上流の重みライセンス原文（この recipe の隣に逐語で置いてある）。配布は Derivative の
-#: Distribution なので §3(a)（ライセンスのコピーを第三者へ提供する）が掛かる — 要約や
-#: 書き換えでは条件を満たさないため、**1 バイトも変えずに**配布リポ直下の `LICENSE.md` として
-#: 出す。`Path(__file__)` 基準で引くのは、cwd にも系列の置き場にも依存しないため。
+#: Distribution なので §3(a) が掛かる。§3(a) の要件は 2 つ — 前段「ライセンスのコピーを
+#: 第三者へ提供する」と、後段「CircleStone Models / Derivatives の使用権は本ライセンスに基づき
+#: Company から受領者へ直接付与されると明示する」。前段は要約や書き換えでは満たさないため、
+#: **1 バイトも変えずに**配布リポ直下の `LICENSE.md` として出す。後段は固定文
+#: {@link RIGHTS_GRANT_STATEMENT}（`anima/card.py` が正本）を `NOTICE.md` とカードの両方に
+#: 載せて満たす（2026-09-25 裁定）。`Path(__file__)` 基準で引くのは、cwd にも系列の置き場にも
+#: 依存しないため。
 LICENSE_SOURCE_PATH = Path(__file__).parent / "circlestone_license.txt"
 
 #: どのリポの告知にも載る改変（コンテナ形式への変換）。
@@ -136,6 +141,7 @@ CONTAINER_MODIFICATION = (
 def notice_markdown(modifications: tuple[str, ...]) -> str:
     """配布リポ直下の `NOTICE.md`。
 
+    §3(a) 後段（権利は Company から直接付与される旨の明示 — {@link RIGHTS_GRANT_STATEMENT}）+
     §3(b)（Attribution Notice の掲示）+ §3(d)(i)（改変した旨を **Attribution Notice の中に**
     含める）+ §3(d)(iii)（公式製品と誤認させない）を 1 枚で満たす。逐語ブロックは
     {@link ATTRIBUTION_NOTICE}（`anima/card.py` が正本）で、残りは Karume 側の事実の記述。
@@ -161,6 +167,10 @@ def notice_markdown(modifications: tuple[str, ...]) -> str:
                 "",
                 "This is not an official product of CircleStone Labs LLC, and it is not endorsed,",
                 "approved or validated by CircleStone Labs LLC.",
+                "",
+                "## License",
+                "",
+                RIGHTS_GRANT_STATEMENT,
                 "",
                 "The full license text is distributed alongside this repository as LICENSE.md.",
             ]
