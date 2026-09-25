@@ -251,6 +251,44 @@ test("batch generation: 後続Session失敗は書き込み済みcontextをpoison
   }
 });
 
+test("batch generation: 相乗りした別Sessionの決着前disposeは拒否され、contextをpoisonしない", async () => {
+  const { gpu, session } = await open(),
+    context = await session.createGenerationContext({ chunkLength: 4 }),
+    sink = await gpu.createResident(16);
+  const reader = await createSessionFromContainer(
+    gpu,
+    await openGraphModel(singleOpDeclaration("neg", [[4]], [[4]])),
+    GRAPH_NAME,
+  );
+  try {
+    const batch = await gpu.beginBatch();
+    await session.enqueue(inputs(1, 0), {
+      batch,
+      generation: { context, queryLength: 1 },
+      copyOutputs: { o: sink },
+    });
+    const read = reader.enqueueRead(
+      { x0: { dtype: "f32", shape: [4], data: Float32Array.of(1, 2, 3, 4) } },
+      { batch },
+    );
+    await read.admitted;
+    // 通すと決着時の copy が破棄済みの slot backing を写し元に積み、区間全体が validation で
+    // 落ちて context まで poison される（ADR 0066: 後続Sessionの失敗は区間全体の失敗）。
+    await assertRejects(() => reader.dispose(), Error, "enqueueRead の読み戻し");
+    await batch.finishAndRead({ o: sink });
+    assertEquals(Array.from((await read.outputs).y.data), [-1, -2, -3, -4]);
+    assertEquals(context.pastLength, 1);
+    await session.run(inputs(1, 1), {}, { context, queryLength: 1 });
+    assertEquals(context.pastLength, 2);
+  } finally {
+    await reader.dispose();
+    await context.dispose();
+    await session.dispose();
+    sink.dispose();
+    gpu.destroy();
+  }
+});
+
 for (const fault of ["compile", "map"] as const) {
   test(`batch generation: ${fault}失敗時のstateと予約を保つ`, async () => {
     const { gpu, session } = await open(),

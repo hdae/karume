@@ -24,6 +24,7 @@ import {
   type RequiredLimits,
 } from "../src/gpu/device.ts";
 import { Session } from "../src/runtime/executor.ts";
+import { ExecutionError } from "../src/runtime/plan.ts";
 import { fakeDevice } from "./helpers/fake-gpu.ts";
 import { mergeGraph } from "./helpers/merged-graph.ts";
 
@@ -208,5 +209,103 @@ describe("enqueue の受け口は options.batch を 1 度だけ読む", () => {
     assertEquals(issued.length, 1);
     assertNotEquals((await outcomeOf(issued[0])).state, "pending");
     await session.dispose();
+  });
+});
+
+describe("Session.dispose は enqueueRead を積んだ batch の決着前には受け付けない", () => {
+  it("決着前の dispose は受付終了の前に拒否し、finish 後の dispose は通る", async () => {
+    const gpu = gpuContext();
+    const session = await emptySession(gpu);
+    const batch = await gpu.beginBatch();
+    const read = session.enqueueRead({}, { batch });
+    assertEquals(await outcomeOf(read.admitted), { state: "resolved" });
+    // 決着時の読み戻しの写し元は slot backing の生のバッファ（借用計数なし）— 通すと破棄本体が
+    // finish の copy より先に backing を destroy する。
+    const refused = await rejectionOf(session.dispose());
+    assertInstanceOf(refused, ExecutionError);
+    assertStringIncludes(refused.message, "enqueueRead の読み戻し");
+    // 拒否は受付終了の前 = Session はまだ使える（後続の区間へ積める）。
+    assertEquals(await outcomeOf(batch.finish()), { state: "resolved" });
+    assertEquals(await outcomeOf(read.outputs), { state: "resolved" });
+    const next = await gpu.beginBatch();
+    assertEquals(await outcomeOf(session.enqueue({}, { batch: next })), { state: "resolved" });
+    assertEquals(await outcomeOf(next.finish()), { state: "resolved" });
+    assertEquals(await outcomeOf(session.dispose()), { state: "resolved" });
+  });
+});
+
+describe("enqueueRead の読み戻し合計の上限は dispatch の前に検査する", () => {
+  // 上限は 1 本ぶん（12 bytes）は通り、2 本ぶん（24 bytes）は超える値にする。
+  const READBACK_LIMITS: RequiredLimits = { ...LIMITS, maxBufferSize: 16 };
+
+  /** 入力 `x`（f32 × 3 = 12 bytes）をそのまま出力するグラフ（ノード 0 本でも読み戻しが 12 bytes 載る）。 */
+  const passThroughGraph = (): IrGraph =>
+    mergeGraph({
+      format: "karume-ir",
+      version: 2,
+      requires: { ops: [] },
+      symbols: [],
+      inputs: [{ name: "x", dtype: "f32", shape: [3] }],
+      outputs: ["x"],
+      initializers: {},
+      values: {},
+      nodes: [],
+    });
+
+  /** backing の確保と入力の書き込みを受けるフェイク device（書き込みの発行を数える）。 */
+  const recordingGpu = (): { readonly gpu: GpuContext; readonly writes: () => number } => {
+    let writes = 0;
+    const device = fakeDevice();
+    Object.assign(device, {
+      limits: { minStorageBufferOffsetAlignment: 256 },
+      createBuffer: (descriptor: GPUBufferDescriptor) => ({
+        size: descriptor.size,
+        destroy: (): void => undefined,
+      }),
+    });
+    Object.assign(device.queue, {
+      writeBuffer: (): void => {
+        writes += 1;
+      },
+      submit: (): void => undefined,
+    });
+    return {
+      gpu: new GpuContext(device, readAdapterInfo({}), READBACK_LIMITS, new Set()),
+      writes: () => writes,
+    };
+  };
+
+  const passThroughSession = async (gpu: GpuContext): Promise<Session> => {
+    async function* noShards(): AsyncGenerator<never> {}
+    return await Session.build(gpu, passThroughGraph(), new Map(), noShards(), {});
+  };
+
+  const x = () => ({ dtype: "f32" as const, shape: [3], data: Float32Array.of(1, 2, 3) });
+
+  it("登録済み合計 + 今回分が上限を超える enqueueRead は、入力の書き込みも backing の保持もせずに拒否する", async () => {
+    const { gpu, writes } = recordingGpu();
+    const first = await passThroughSession(gpu);
+    const second = await passThroughSession(gpu);
+    const batch = await gpu.beginBatch();
+    const accepted = first.enqueueRead({ x: x() }, { batch });
+    assertEquals(await outcomeOf(accepted.admitted), { state: "resolved" });
+    const writesBefore = writes();
+
+    const refusedRead = second.enqueueRead({ x: x() }, { batch });
+    const refused = await rejectionOf(refusedRead.admitted);
+    assertInstanceOf(refused, BatchScopeError);
+    assertStringIncludes(refused.message, "maxBufferSize");
+    // 検査が登録（submit の後）でしか走らないと、入力を書き dispatch を submit した後に落ちる
+    // （generation 付きなら state を書いた後 = context の poison）。
+    assertEquals(writes() - writesBefore, 0);
+    // dispatch 前の失敗経路は、この enqueue が新規構築した backing を退役させる。
+    assertEquals(second.diagnostics().planBacking.retainedCount, 0);
+
+    // 区間の決着は拒否された enqueue の失敗を帰属先として返す（読み戻しはフェイクでは走らない）。
+    await outcomeOf(batch.finish());
+    await outcomeOf(accepted.outputs);
+    await outcomeOf(refusedRead.outputs);
+    await first.dispose();
+    await second.dispose();
   });
 });

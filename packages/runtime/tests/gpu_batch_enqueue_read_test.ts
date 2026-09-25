@@ -4,13 +4,15 @@
  * 見るのは ①出力が run と同じ値で、batch の終端 map 1 回（staging 1 本・queue 待ち 0 回）で
  * 返ること ②`outputs` は決着前に解決しないこと ③常駐の `finishAndRead` と同じ staging に
  * 連結すること ④同じ Session の後続 enqueue をその batch の決着まで拒むこと ⑤受理の失敗と
- * 区間の GPU 失敗が `outputs` にも出て、成功データを返さないこと。
+ * 区間の GPU 失敗が `outputs` にも出て、成功データを返さないこと ⑥出力が常駐入力の別名になる
+ * enqueueRead を受理で拒むこと ⑦決着前の Session.dispose を受付終了の前に拒むこと。
  */
 import { assertEquals, assertRejects, assertStrictEquals } from "@std/assert";
 import { acquireGpu, BatchScopeError, type GpuContext, ResidentTensor } from "../src/gpu/device.ts";
 import { GpuValidationError } from "../src/gpu/error-scope.ts";
 import { BUFFER_USAGE } from "../src/gpu/webgpu-constants.ts";
 import { createSessionFromContainer, type Tensor } from "../src/runtime/executor.ts";
+import { ExecutionError } from "../src/runtime/plan.ts";
 import { openGraphModel, singleOpDeclaration } from "./helpers/model-fixture.ts";
 import { countFences } from "./helpers/fences.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
@@ -152,6 +154,82 @@ test("batch enqueueRead: 区間の GPU 失敗では outputs も拒否し成功�
     assertEquals(Array.from((await again.outputs).y.data), [-1, -2, -3]);
   } finally {
     bad.dispose();
+    await target.dispose();
+    gpu.destroy();
+  }
+});
+
+/** y = reshape(x)（[2,2] → [4]）— グラフ出力が入力の別名になる縮退グラフ。 */
+const aliasSession = async (gpu: GpuContext) =>
+  await createSessionFromContainer(
+    gpu,
+    await openGraphModel(singleOpDeclaration("reshape", [[2, 2]], [[4]])),
+    "model",
+  );
+
+test("batch enqueueRead: 出力が常駐入力の別名なら受理で落ち、区間に何も積まない", async () => {
+  const gpu = await acquireGpu(), target = await aliasSession(gpu);
+  const resident = await gpu.createResident(16, "r");
+  try {
+    resident.write(Float32Array.of(1, 2, 3, 4));
+    const batch = await gpu.beginBatch();
+    // 写しは決着時に走るので、通すと admitted の後・finish の前の write が読み戻しに混ざる
+    // （積んだ時点と別の値が黙って返る）。
+    const read = target.enqueueRead({ x0: resident }, { batch });
+    const failure = await assertRejects(() => read.admitted, ExecutionError, "別名");
+    assertEquals(
+      [failure.message.includes("'y'"), failure.message.includes("'x0'")],
+      [true, true],
+      failure.message,
+    );
+    assertStrictEquals(await assertRejects(() => read.outputs), failure);
+    assertStrictEquals(await assertRejects(() => batch.finish()), failure);
+    assertEquals(resident.useReferences, 0);
+  } finally {
+    await target.dispose();
+    resident.dispose();
+    gpu.destroy();
+  }
+});
+
+test("batch enqueueRead: ホスト入力の別名出力は通り、入力の値を返す", async () => {
+  // ホスト入力の実体は backing 所有で、決着までの上書きは同じ Session の後続 enqueue だけ
+  // （#readBatch が塞ぐ）なので許す。
+  const gpu = await acquireGpu(), target = await aliasSession(gpu);
+  try {
+    const batch = await gpu.beginBatch();
+    const read = target.enqueueRead(
+      { x0: { dtype: "f32", shape: [2, 2], data: Float32Array.of(1, 2, 3, 4) } },
+      { batch },
+    );
+    await read.admitted;
+    await batch.finish();
+    assertEquals(Array.from((await read.outputs).y.data), [1, 2, 3, 4]);
+  } finally {
+    await target.dispose();
+    gpu.destroy();
+  }
+});
+
+test("batch enqueueRead: 決着前の Session.dispose は受付終了の前に拒否し、finish 後は通る", async () => {
+  const gpu = await acquireGpu(), target = await session(gpu);
+  try {
+    const expected = await target.run({ x0: input() });
+    const batch = await gpu.beginBatch();
+    const read = target.enqueueRead({ x0: input() }, { batch });
+    await read.admitted;
+    // 通すと破棄本体が slot backing を destroy した後に、決着時の copy がその実体を写し元に積む。
+    await assertRejects(() => target.dispose(), ExecutionError, "enqueueRead の読み戻し");
+    await batch.finish();
+    const outputs = await read.outputs;
+    const u32 = (tensor: Tensor): number[] => {
+      const data = tensor.data as Float32Array;
+      return Array.from(new Uint32Array(data.buffer, data.byteOffset, data.length));
+    };
+    assertEquals(u32(outputs.y), u32(expected.y));
+    await target.dispose();
+  } finally {
+    // dispose は 2 度目以降も同じ完了を返す。
     await target.dispose();
     gpu.destroy();
   }

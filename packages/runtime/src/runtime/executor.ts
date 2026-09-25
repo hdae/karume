@@ -70,6 +70,7 @@ export type { FusionCounts } from "./fusion.ts";
 import {
   assertGenerationBindings,
   bindSymbols,
+  describeInputValue,
   ExecutionError,
   planGraph,
   statesOnlySymbols,
@@ -365,7 +366,9 @@ const assertGenerationCommit = (capturedGeneration: GenerationRun | undefined): 
     capturedGeneration.commit !== "deferred"
   ) {
     throw new ExecutionError(
-      `run: generation.commit '${capturedGeneration.commit}' は 'immediate' か 'deferred' のみ`,
+      `run: generation.commit ${
+        describeInputValue(capturedGeneration.commit)
+      } は 'immediate' か 'deferred' のみ`,
     );
   }
   // MUST: deferred run が sliding ring へ書ける行数は**余裕まで**（`Q ≤ slidingSlack`）。
@@ -469,7 +472,8 @@ export const PREPARED_PLAN_CAPACITY = 12;
  * perf-ledger H-15）: slot は run の中間バッファそのもの（DiT で ~1GiB 規模）なので本数で
  * 持つと VRAM が本数倍になるが、生成の prefill バケット形 / decode 形は数〜数十 MiB で、
  * 切替のたびに作り直す ≈ 40 ms の方が高くつく。予算に入らない大きい形は従来どおり 1 本だけ
- * （他を全て退役させる）。導出済み計画（ホストのオブジェクトだけ）を 8 本持てるのとは前提が違う。
+ * （他を全て退役させる）。導出済み計画（ホストのオブジェクトだけ）を
+ * {@link PREPARED_PLAN_CAPACITY} 本持てるのとは前提が違う。
  */
 type ActiveBacking = {
   /** この backing が属する導出済み計画のキー（{@link Session.#preparedKey}）。 */
@@ -735,21 +739,22 @@ export class Session {
     // 読むので、参照のまま持ち回ると発行直後の書き換えが「dispatch 数の算出元と uniform に載る
     // 値の分裂」「リースは A に立っているが KV を書くのは B」という沈黙誤値になる。リースも
     // この写しから取る（同期区間の取得と本体の読みが同じ 1 つの値から出るのが根拠）。
-    const capturedGeneration: GenerationRun | undefined = generation === undefined ? undefined : {
-      context: generation.context,
-      queryLength: generation.queryLength,
-      commit: generation.commit,
-    };
-    try {
-      assertGenerationCommit(capturedGeneration);
-    } catch (cause) {
-      return Promise.reject(cause);
-    }
-    const lease = capturedGeneration?.context[RUNTIME_INTERNAL];
+    let capturedGeneration: GenerationRun | undefined;
+    let lease: GenerationContext[typeof RUNTIME_INTERNAL] | undefined;
     let captured: CapturedInputs;
     let capturedBindings: SymbolBindings;
     let used: ResidentTensor[];
     try {
+      // MUST: 第 3 引数の写し・値域の検査・`[RUNTIME_INTERNAL]` の取り出しもこの try の中で行う
+      // （外に置くと getter の throw や型外の context が同期 throw として漏れる — {@link Session.#admit}
+      // と同じ規律）。順序は写し → 値域 → 取り出し → 入力の写し（リースの取得は予約の後）。
+      capturedGeneration = generation === undefined ? undefined : {
+        context: generation.context,
+        queryLength: generation.queryLength,
+        commit: generation.commit,
+      };
+      assertGenerationCommit(capturedGeneration);
+      lease = capturedGeneration?.context[RUNTIME_INTERNAL];
       // MUST: 入力の写しはリース取得より**前**（写しが落ちた後に返し手の居ないリースが 1 本
       // 残ると、以後の `rewind()` が永久に拒否される）。
       captured = captureInputs(inputs);
@@ -1154,10 +1159,21 @@ export class Session {
     });
   }
 
-  /** 重みを解放する。通常runは完了を待つ。未決着batchにcontextが予約されていれば受付終了前に拒否する。 */
+  /**
+   * 重みを解放する。通常runは完了を待つ。未決着batchにcontextが予約されている、またはこの
+   * Sessionの`enqueueRead`が読み戻しを待つbatchが未決着なら、受付終了前に拒否する（finish後に再試行できる）。
+   */
   dispose(): Promise<void> {
     try {
       for (const context of this.#contexts) context[RUNTIME_INTERNAL].assertCanDispose();
+      // MUST: 決着時の読み戻し（`readAtFinish`）の写し元は slot backing の生の GPUBuffer で、
+      // 借用計数を持たない。ここで通すと破棄本体が backing を destroy した後に finish の copy が
+      // 積まれ、区間全体（相乗りした別 Session の context も）が真因から遠い validation で落ちる。
+      if (this.#readBatch !== undefined) {
+        throw new ExecutionError(
+          "dispose: この Session は enqueueRead の読み戻しで batch の最終決着待ち（finish 後に破棄すること）",
+        );
+      }
     } catch (cause) {
       return Promise.reject(cause);
     }
@@ -1746,7 +1762,14 @@ export class Session {
       // MUST: 写し元の解決（実体に依存する検査）は dispatch を 1 本も積む前に済ませる。
       const writes = this.#resolveCopyOutputs(copies, activated.backing);
       // MUST: 読み戻す出力の解決（実体に依存する検査）も dispatch を 1 本も積む前に済ませる。
-      reads = read === undefined ? undefined : this.#planReadback(activated.backing, shapes);
+      reads = read === undefined
+        ? undefined
+        : this.#planReadback(activated.backing, shapes, residentInputs);
+      // MUST: 読み戻しの合計上限も dispatch の前に検査する（登録は submit の後なので、そこで
+      // 初めて落ちると state を書いた後の失敗になり context を poison する）。
+      if (reads !== undefined) {
+        options.batch[RUNTIME_INTERNAL].assertReadAtFinish(reads.map((item) => item.source));
+      }
       graph.inputs.forEach((spec, index) => {
         const values = data[index];
         if (values !== undefined) this.#writeInput(activated.backing, spec.name, values);
@@ -2054,7 +2077,8 @@ export class Session {
    * 別 signature は予算内なら**追加**、超過なら古い順に退役させてから確保）。
    * `built` は「この run が新規構築したか」— 失敗時の回復規律（{@link Session.#runOnce}）が読む。
    *
-   * MUST: 呼ぶのは run の `withScopeLock` / errorScope 区間の内側だけ。createBuffer は上限超過で
+   * MUST: 呼ぶのは run の `withScopeLock` / errorScope 区間の内側か、enqueue が属する batch の
+   * 区間（batch が握る区間ロック / errorScope）の内側だけ。createBuffer は上限超過で
    * 同期例外を投げずに無効バッファを返し、createBindGroup の validation 失敗も例外にならない
    * ため、囲まないと「無効な slot / bind group に dispatch が書く」沈黙故障になる。
    * MUST: 確保から `#backings` への登録（= 所有権の確立）までを try/catch で囲み、途中の
@@ -2441,10 +2465,16 @@ export class Session {
    * 決着時に読み戻すグラフ出力の写し元を slot backing から解決する（{@link Session.enqueueRead}）。
    * 適格の判定と initializer の扱いは {@link Session.#resolveOutput} の 1 本きり
    * （pin された slot だけ・initializer は重みバッファそのもの）。
+   *
+   * MUST: 写し元が常駐入力の実体そのもの（グラフ出力が常駐入力の別名 — reshape / 恒等 expand の
+   * 縮退グラフ）なら受理で落とす。写しは積んだ時点でなく**決着時**に走るので、`admitted` の後・
+   * 決着の前の `ResidentTensor.write`（使用予約を見ない — borrowed の契約）が読み戻しに混ざり、
+   * 積んだ時点と別の値が黙って返る。{@link Session.#resolveCopyOutputs} の自己コピー門と対。
    */
   #planReadback(
     backing: ActiveBacking,
     shapes: ReadonlyMap<string, readonly number[]>,
+    residentInputs: ReadonlyMap<string, ResidentTensor>,
   ): readonly PlannedRead[] {
     return this.#state.graph.outputs.map((name) => {
       const { shape, count, buffer, offset, size } = this.#resolveOutput(
@@ -2452,6 +2482,14 @@ export class Session {
         shapes,
         name,
       );
+      for (const [input, resident] of residentInputs) {
+        if (resident[RUNTIME_INTERNAL].buffer === buffer) {
+          throw new ExecutionError(
+            `enqueueRead: 出力 '${name}' は常駐入力 '${input}' の別名（reshape / 恒等 expand）— ` +
+              "読み戻しは決着時に走るので、決着前の write が読み戻しに混ざる",
+          );
+        }
+      }
       return { name, shape, count, source: { buffer, offset, size } };
     });
   }
@@ -2666,8 +2704,10 @@ export class PreparedModel {
 
   /**
    * 容器の block を 1 本ずつ取り出して Session を作る（ADR 0108 決定 9 — errorScope は block
-   * ごと・フェンスは part ごと）。`krm` では block は取得のたびに sha256 で検証される
-   * （container-v1 §7 の cold 経路 — 検証は供給元 `readBlock` の担当）。
+   * ごと・フェンスは part ごと）。block の sha256 を検証するのは取得元が未検証
+   * （`BlockSource.verified` が false — 全量バイト・part 列・ローカルディレクトリ）のときだけ。
+   * HF 経由は取得層がファイル全体を検証済み（ADR 0109 決定 7 / container-v1 §7 — 検証は供給元
+   * `readBlock` の担当）。
    */
   async createContainerSession(gpu: GpuContext, options: SessionOptions = {}): Promise<Session> {
     const source = this.#source;
@@ -2764,7 +2804,7 @@ export const prepareContainer = (opened: BoundContainer, graphName: string): Pre
 /**
  * 開いた容器の 1 グラフから Session を作る（{@link prepareContainer} +
  * {@link PreparedModel.createContainerSession} の薄い合成）。block は 1 本ずつ取る
- * （`krm` では取るたびに sha256 で検証される — container-v1 §7）。
+ * （block の sha256 は取得元が未検証のときだけ検証する — container-v1 §7）。
  */
 export const createSessionFromContainer = async (
   gpu: GpuContext,
