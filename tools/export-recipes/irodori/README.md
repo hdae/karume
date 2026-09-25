@@ -29,14 +29,18 @@ uv run --with descript-audiotools --with einops python -m irodori.dacvae.export 
 uv run python dist.py --pipeline irodori                                 # 7. distribution (8 graphs + tokenizer)
 ```
 
-The distribution carries an **f16 weight-storage series** next to f32 (ADR 0050), so step 7 needs
-both series. Regenerate the f16 side with the same three scripts (order caveats are identical; the
+The distribution carries **f16 and i8 weight-storage series** next to f32 (ADR 0050), plus an i4
+series for `dit` (below), so step 7 needs f32 / f16 / i8 (all eight roles) and i4 (`dit`).
+Regenerate the f16 and i8 sides with the same three scripts (order caveats are identical; the
 codec / full-loop inputs stay on the f32 series on purpose — inputs are dtype-neutral):
 
 ```sh
 uv run --with 'transformers==5.14.1' python -m irodori.export --dtype f16     # 2'. six graphs
 uv run --with 'transformers==5.14.1' python -m irodori.pipeline_ref --dtype f16   # 4'. full-loop goldens
 uv run --with descript-audiotools --with einops python -m irodori.dacvae.export --dtype f16  # 6'. codec
+uv run --with 'transformers==5.14.1' python -m irodori.export --dtype i8      # 2'''. six graphs
+uv run --with 'transformers==5.14.1' python -m irodori.pipeline_ref --dtype i8    # 4'''. full-loop goldens
+uv run --with descript-audiotools --with einops python -m irodori.dacvae.export --dtype i8  # 6'''. codec
 ```
 
 The `i8+dit4` quant seat adds an **i4 series for `dit` only** — the other seven roles share the i8 bytes,
