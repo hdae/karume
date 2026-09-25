@@ -1,7 +1,7 @@
 /**
  * コンテナ 1 本の取得面（`openContainerSource` — ADR 0109 決定 7）。
  *
- * 押さえるのは 8 つ:
+ * 押さえるのは 9 つ:
  *  ① 開くだけでは**何も取りに行かない**（温めは呼び手が `prefetchAssets` で先に済ませる）。
  *  ② 温めずに開いても読める（HF 取得元が初回の読みで 1 度だけ温め直す）。温め済みなら network 0。
  *  ③ `read` は区間ちょうどを返し（scan 型は保持枠の part の器の view — 写さない・次の part を
@@ -12,6 +12,8 @@
  *  ⑥ seek 型は要求した区間だけをアダプターへ降ろす。
  *  ⑦ 越境した容器は越境先の取得元から読む。未 mapping は開くときに `HubFetchError`。
  *  ⑧ 読みの失敗は取得元の素の `Error`（この面は取得ではない）。
+ *  ⑨ 失敗は覚えない — 読み口を開けなかった part も、全量読みに失敗した part も、次の読みで
+ *     取り直す。
  */
 
 import { assert, assertEquals, assertRejects, assertStrictEquals, assertThrows } from "@std/assert";
@@ -551,6 +553,60 @@ Deno.test("openContainerSource: 読みの失敗は取得元の素の Error（取
 
   const error = await assertRejects(() => source.read(2, 0, 4), Error);
   assert(!(error instanceof HubFetchError), `${error.name} が取得の文脈に包まれている`);
+});
+
+Deno.test("openContainerSource: 読み口を開けなかった part も次の読みで開き直す", async () => {
+  // Deno の HF 経由は、part ごとの初回の読みで区間読み口を開く（温め直しつき）。その失敗を
+  // 経路の決定として覚えると、一過性の 404・切断で開けなかった part が以後の読みで同じ reject を
+  // 返し続け、Session 構築が恒久的に失敗する（container.ts の planFor の MUST）。
+  const caches = new MemoryCacheStorage();
+  const served = serveAll();
+  const path = NET_PARTS[2];
+  served.delete(path);
+  const { loaded, mock } = await openRemote(caches, served);
+  const source = openContainerSource(loaded, containerOf(loaded, "net"), {
+    fetch: mock.fetch,
+    caches,
+  });
+
+  await assertRejects(() => source.read(2, 0, 4), Error);
+  // 取得元が戻った（一過性の失敗が解けた）後の読みは、同じ面のまま成功する。
+  served.set(path, payloadFor(path));
+  assertEquals(
+    await source.read(2, 0, 4),
+    new Uint8Array(payloadFor(path).subarray(0, 4)),
+    "1 度開けなかった part を開き直していない",
+  );
+});
+
+Deno.test("openContainerSource: scan 型は全量読みに失敗した part を次の読みで読み直す", async () => {
+  // 失敗した全量読みを保持枠に残すと、一過性の読み失敗で落ちた part が以後の読みで同じ reject を
+  // 返し続ける（container.ts の readWhole の MUST）。区間読みを持たないアダプター = 全量読みの経路。
+  const base = memoryDirectory(localFiles());
+  const path = NET_PARTS[2];
+  let failures = 1;
+  const adapter: DirectoryAdapter = {
+    readFile: (target, options) => {
+      if (target === path && failures > 0) {
+        failures -= 1;
+        return Promise.reject(new Error(`test-directory: ${target} の読みが一時的に切れた`));
+      }
+      return base.adapter.readFile(target, options);
+    },
+  };
+  const loaded = await loadManifest(localDirectory(adapter, { label: "./models/test" }), {
+    caches: new MemoryCacheStorage(),
+  });
+  const source = openContainerSource(loaded, containerOf(loaded, "net"));
+  base.reads.length = 0;
+
+  await assertRejects(() => source.read(2, 0, 4), Error, "一時的に切れた");
+  assertEquals(
+    await source.read(2, 0, 4),
+    new Uint8Array(payloadFor(path).subarray(0, 4)),
+    "失敗した全量読みが保持枠に残っている",
+  );
+  assertEquals(base.reads, [path], "2 度目の読みが全量読みをやり直していない");
 });
 
 Deno.test("openContainerSource: 中断済みの signal では口を返さない", async () => {
