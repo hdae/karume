@@ -71,21 +71,12 @@ export { parseIrDeclarationValue } from "./src/format/ir.ts";
 export type { IrDeclaration } from "./src/format/ir.ts";
 /**
  * safetensors 厳格リーダ（被覆・整列・dtype 検査込み）。Karume の容器でない付帯資産
- * （例: Anima の rope 素表 — ADR 0038 §2 の extras）を models 側が同じ門で読むための面で、
+ * （例: Anima の rope 素表 — `transformer` 容器の資産 `rope_base`〈役割 `rope-base` — ADR 0109
+ * 決定 4〉の payload）を models 側が同じ門で読むための面で、
  * 汎用ローダの提供が目的ではない（DECIDED: 二重実装の解消 — ADR 0008 追記 2026-08-05）。
  */
-export { parseSafetensors, SafetensorsError, tensorBytes } from "./src/format/safetensors.ts";
-/**
- * 既に公開しているパーサの部分適用（ヘッダだけを解く面）。区間読みできる読み口を持つ呼び手が、
- * ファイル全量を持たずにテンソル表を得るための入口で、新しい概念は増えない。
- */
-export { parseSafetensorsHeader, safetensorsHeaderLength } from "./src/format/safetensors.ts";
-export type {
-  SafetensorsDtype,
-  SafetensorsFile,
-  SafetensorsHeader,
-  TensorView,
-} from "./src/format/safetensors.ts";
+export { parseSafetensors, SafetensorsError } from "./src/format/safetensors.ts";
+export type { SafetensorsDtype, SafetensorsFile, TensorView } from "./src/format/safetensors.ts";
 
 export {
   acquireGpu,

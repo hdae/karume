@@ -108,14 +108,8 @@ const elementCount = (shape: readonly number[], where: string): number => {
   return count;
 };
 
-/**
- * 宣言（dtype + 要素数）から決まるテンソルのバイト長。
- *
- * MUST: 宣言由来のバイト長を求める側（実バイトを見ない見積り・常駐プランナ）は**この 1 本を
- * 通す** — パーサの実バイト検証（下の「サイズ不一致」門）が使うのと同じ式なので、両者が
- * 食い違うことが原理的に起きない。
- */
-export const declaredByteLength = (dtype: SafetensorsDtype, count: number): number =>
+/** 宣言（dtype + 要素数）から決まるテンソルのバイト長（下の「サイズ不一致」門が使う）。 */
+const declaredByteLength = (dtype: SafetensorsDtype, count: number): number =>
   count * DTYPE_BYTES[dtype];
 
 const parseDeclaration = (name: string, raw: unknown): DeclaredTensor => {
