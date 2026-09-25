@@ -3,8 +3,8 @@
  * ので、テストも**無いことの観測**が中心になる — 世代を名乗らない / CacheStorage を開かない /
  * 相 1 を持たない / sha256 を照合しない（size だけ見る）/ 越境先を推測しない。
  *
- * 取得元の差し替えを踏むために、fallback には fake の取得元（`DistributionSource` の内部契約を
- * 直接実装したもの）を注入する — 公開のリモート factory は段③なので、ここでは席だけを踏む。
+ * リモートの越境先を踏むために、crossRepo には fake の取得元（`DistributionSource` の内部契約を
+ * 直接実装したもの）を注入する — HF 取得元のハンドルを組む公開 factory は無い。
  */
 
 import { assert, assertEquals, assertRejects, assertStrictEquals } from "@std/assert";
@@ -19,7 +19,7 @@ import {
   openAsset,
   prefetchAssets,
 } from "../mod.ts";
-import type { AssetProgress, DirectoryAdapter } from "../mod.ts";
+import type { AssetProgress, DirectoryAdapter, LocalDirectoryOptions } from "../mod.ts";
 import { type FileRef, MANIFEST_FILENAME } from "../src/manifest.ts";
 import {
   DistributionSource,
@@ -173,10 +173,9 @@ Deno.test("prefetchAssets: 相 1 の有無は ref ごと — 越境先が持つ�
   // セッションの取得元だけで判定すると、ローカル配布形 + 越境先がリモートという正当な構成で
   // 越境ぶんの温めが丸ごと飛ぶ（進捗も signal も届かないまま、実際の取得は後の読みの中で走る）。
   const dist = await buildLocalDist({ cross: true });
-  const calls: [string, string][] = [];
   const warmed: string[] = [];
   const { directory, loaded } = await openLocal(dist.files, {
-    crossRepo: { [CROSS_REPO]: fakeRemote(dist.crossFiles, calls, { warmed }) },
+    crossRepo: { [CROSS_REPO]: fakeRemote(dist.crossFiles, { warmed }) },
   });
   const files = selectionFiles(loaded.manifest);
   const refs = [...PART_KEYS.map((key): FileRef => files[key]), files["text_encoder"]];
@@ -285,16 +284,15 @@ Deno.test("localDirectory: 壊れた karume.json は毎回同じ ManifestFormatE
   assertEquals(directory.reads, [MANIFEST_FILENAME, MANIFEST_FILENAME]);
 });
 
-// ---- 越境（ADR 0038 §7）: 明示 mapping / 明示 fallback / どちらも無い の 3 形。
+// ---- 越境（ADR 0038 §7）: 明示 mapping / mapping に無い の 2 形（委譲先の欄は持たない）。
 
 /**
- * 越境先だけを提供する fake の取得元（段③の公開 factory の代役）。`shortBy` を渡すと、宣言
+ * 越境先だけを提供する fake の取得元（HF 取得元の代役）。`shortBy` を渡すと、宣言
  * `size` より短いバイト数を名乗る**リモート**取得元になる（越境先の完全性検証の失敗を踏む形）。
  * `warmed` を渡すと**相 1 を持つ**取得元になり、温めた path をそこへ記録する。
  */
 const fakeRemote = (
   files: ReadonlyMap<string, Uint8Array<ArrayBuffer>>,
-  calls: [string, string][],
   options: { readonly shortBy?: number; readonly warmed?: string[] } = {},
 ): DistributionSource => {
   const pinnedFor = (repo: string, revision: string): PinnedSource => {
@@ -325,10 +323,7 @@ const fakeRemote = (
           return Promise.resolve();
         },
       }),
-      originFor: (crossRepo, crossRevision) => {
-        calls.push([crossRepo, crossRevision]);
-        return pinnedFor(crossRepo, crossRevision);
-      },
+      originFor: (crossRepo, crossRevision) => pinnedFor(crossRepo, crossRevision),
     };
   };
   const driver: SourceDriver = {
@@ -357,17 +352,27 @@ Deno.test("localDirectory: 越境参照は明示 mapping の取得元から取�
   assertEquals(crossDirectory.reads, [CROSS_PATH], "越境先から取っていない");
 });
 
-Deno.test("localDirectory: mapping に無い越境は明示 fallback へ宣言座標のまま委譲する", async () => {
+Deno.test("localDirectory: 越境の委譲先（fallback）の欄は受けない — 渡しても委譲せずに落ちる", async () => {
   const dist = await buildLocalDist({ cross: true });
-  const calls: [string, string][] = [];
-  const assets = await crossAssets({
-    fallback: fakeRemote(dist.crossFiles, calls),
-  });
-  assertEquals(assets["text_encoder"], payloadFor(`${CROSS_REPO}/${CROSS_PATH}`));
-  assertEquals(calls, [[CROSS_REPO, CROSS_REVISION]], "宣言された座標で委譲していない");
+  const crossDirectory = memoryDirectory(dist.crossFiles);
+  // 型の門: 欄が公開面へ戻ると `@ts-expect-error` が余って `deno check` が赤くなる（公開面で
+  // 作れる値のどれも委譲先として機能しない — `LocalDirectoryOptions.crossRepo` の NOTE）。
+  const options: LocalDirectoryOptions = {
+    // @ts-expect-error 委譲先の欄は LocalDirectoryOptions に無い
+    fallback: localDirectory(crossDirectory.adapter, { label: "./models/共有" }),
+  };
+
+  // 型を経ない呼び手（JS）が渡しても、黙って委譲せず mapping 不足として落ちる。
+  const error = await assertRejects(() => crossAssets(options), HubFetchError);
+  assert(error.cause instanceof Error, "設定不足の理由を cause に残していない");
+  assert(
+    !error.cause.message.includes("fallback"),
+    `${error.cause.message} が存在しない欄を案内している`,
+  );
+  assertEquals(crossDirectory.reads, [], "受けないはずの委譲先を読んだ");
 });
 
-Deno.test("localDirectory: mapping も fallback も無い越境は推測せずに落ちる", async () => {
+Deno.test("localDirectory: mapping に無い越境は推測せずに落ちる", async () => {
   const error = await assertRejects(() => crossAssets({}), HubFetchError);
   assertEquals(error.path, CROSS_PATH);
   // 診断は**宣言された越境先**を名乗る（セッションのディレクトリではない）。
@@ -382,10 +387,9 @@ Deno.test("localDirectory: mapping も fallback も無い越境は推測せず�
 
 Deno.test("localDirectory: 越境先の完全性検証の失敗は越境先の失敗元を名乗る", async () => {
   const dist = await buildLocalDist({ cross: true });
-  const calls: [string, string][] = [];
 
   const error = await assertRejects(
-    () => crossAssets({ fallback: fakeRemote(dist.crossFiles, calls, { shortBy: 1 }) }),
+    () => crossAssets({ crossRepo: { [CROSS_REPO]: fakeRemote(dist.crossFiles, { shortBy: 1 }) } }),
     IntegrityError,
   );
 
@@ -394,7 +398,7 @@ Deno.test("localDirectory: 越境先の完全性検証の失敗は越境先の�
   assertEquals(error.repo, CROSS_REPO);
   assertEquals(error.revisionSha, CROSS_REVISION);
   assertEquals(error.actual, String(payloadFor(`${CROSS_REPO}/${CROSS_PATH}`).byteLength - 1));
-  // ローカルセッション + リモート越境（`fallback` が正式に受ける構成）。バイト列は network から
+  // ローカルセッション + リモート越境（`crossRepo` が正式に受ける構成）。バイト列は network から
   // 来たので再試行に意味がある — セッションの分類 "local"（取り直しても同じ）を継ぐと、アプリに
   // 「回復手段は無い」と嘘を伝える。
   assertEquals(error.source, "network");

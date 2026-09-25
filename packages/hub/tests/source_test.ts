@@ -3,7 +3,7 @@
  *
  * 越境の振り分けは面ごとに書くと片方だけ素通しする形の取り違えを生むため 1 箇所へ集約してある。
  * 公開面からは「越境参照が混ざったときのバイト列」でしか観測できないので、分岐そのものを
- * ここで固定する（将来ここへ「明示 mapping → 明示 fallback → fail loudly」の解決順が入る）。
+ * ここで固定する（将来ここへ「明示 mapping → fail loudly」の解決順が入る）。
  */
 
 import { assertEquals, assertStrictEquals } from "@std/assert";

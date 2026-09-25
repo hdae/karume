@@ -85,18 +85,13 @@ export type LocalDirectoryOptions = {
    *
    * MUST: 明示 mapping だけを見る — 「隣に同名のディレクトリがあればそれ」のような推測は、
    * 取り違えたバイト列を黙って読ませる（サイズが合えば通る）。宣言が無ければ落とす。
+   *
+   * NOTE: mapping に無い越境の委譲先（repo を問わず受ける取得元）の欄は持たない。委譲先として
+   * 働くのは HF リポの取得元だが、それを {@link DistributionSource} のハンドルとして組む公開 API
+   * が無い（`loadManifest` / `fromPretrained` が `HubRepoRef` を内部で解決する）ので、欄を置いても
+   * 公開面で作れる値のどれも委譲先として機能しない。公開 factory ができた時点で足す。
    */
   readonly crossRepo?: Readonly<Record<string, DistributionSource>>;
-  /**
-   * mapping に無い越境参照の委譲先（例: 別のローカルディレクトリの取得元 — Deno なら
-   * `denoDirectory`）。**明示した場合だけ**降格する（暗黙のリモート降格は禁止 —
-   * オフライン前提の配布が黙って network へ出る）。
-   *
-   * NOTE: HF リポを {@link DistributionSource} のハンドルとして組む公開 API は無い
-   * （`loadManifest` / `fromPretrained` が `HubRepoRef` を内部で解決する）ので、ここでリモートへ
-   * 降格させる構成は現在の公開面では作れない。
-   */
-  readonly fallback?: DistributionSource;
 };
 
 /** 越境先を宣言された (repo, revision) の座標で開く。 */
@@ -109,7 +104,7 @@ const pinTarget = (
 const missingCrossRepo = (label: string, repo: string, revision: string): Error =>
   new Error(
     `@karume/hub: ローカル取得元（ディレクトリ ${label}）に repo '${repo}' の越境先が無い。` +
-      `localDirectory の crossRepo に { "${repo}": <取得元> } を渡すか、fallback を指定すること` +
+      `localDirectory の crossRepo に { "${repo}": <取得元> } を渡すこと` +
       `（宣言 revision ${revision} — 隣接する同名ディレクトリを推測して読むことはしない）`,
   );
 
@@ -210,14 +205,10 @@ const pinnedLocalSource = (
 
     originFor: (repo, revision) => {
       const mapped = settings.crossRepo;
-      if (mapped !== undefined && Object.hasOwn(mapped, repo)) {
-        return pinTarget(mapped[repo], revision, options);
+      if (mapped === undefined || !Object.hasOwn(mapped, repo)) {
+        throw missingCrossRepo(settings.label, repo, revision);
       }
-      const { fallback } = settings;
-      if (fallback === undefined) throw missingCrossRepo(settings.label, repo, revision);
-      // 委譲先は「他の repo も提供できる取得元」なので、自分の座標ではなく宣言された座標へ
-      // 寄せてから開く（mapping と違い、fallback は特定の repo に紐付いていない）。
-      return pinTarget(fallback, revision, options).originFor(repo, revision);
+      return pinTarget(mapped[repo], revision, options);
     },
 
     // ⑥在庫は常に「渡された全部がある」— 相 1 を持たないのと同じ理屈で、直接読める取得元では
