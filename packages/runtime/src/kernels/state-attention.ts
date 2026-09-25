@@ -28,6 +28,9 @@
  *
  * ## ③' KV 並列縮約変種（`SessionOptions.stateAttentionReduce: "parallel"` — perf-ledger K-12）
  *
+ * `"parallel-fused"` も同じ席として ③' を選ぶ（適格な計画では ② と ③' を融合 stats-PV に替える —
+ * ADR 0102・state-attention-stats-pv.ts）。
+ *
  * ③ は 1 invocation が O の 1 要素を live 列の**逐次ループ**で積むため、decode（M=1）では
  * 有効 invocation が `D × B·H`（Gemma 4 E2B の full 層で 4,096）に固定され、KV 長が伸びるほど
  * 1 スレッドの逐次長だけが伸びる（P=16K で attention が decode GPU 時間の 72% —
@@ -50,6 +53,9 @@
  * させて `0.0` を寄与する）。WGSL の barrier は一様制御流の外に置けない。
  *
  * ## ①' D 並列縮約変種（**席は ③' と同じ** `stateAttentionReduce: "parallel"` — perf-ledger K-14）
+ *
+ * `"parallel-fused"` も同じ席として ①' を選ぶ（融合は ③ 側だけ — ADR 0102・
+ * state-attention-stats-pv.ts）。
  *
  * ① は 1 invocation が S の 1 要素（`(局所行, live 列)`）を持ち、内積が `D` の**逐次ループ**
  * （1 スレッドが D 本の積和）。decode（M=1）では live 列が伸びるほど invocation 数は増えるが、
@@ -96,8 +102,9 @@
  * MUST: 述語は ① と同じ `in_window(col, past + row)`。live 範囲内なら述語外でも **−inf を必ず
  * 書く**（② が残骸を食わないため）。述語外の列の積和は回してよい（読む K 行は範囲内なので安全で、
  * 値は書き出しの `select` で捨てる）。
- * MUST: 適用条件は {@link stateQkTiledEligible}（`M ≥ 16`）。優先順は M=1 かつ席が `"parallel"` →
- * ①' / `M ≥ 16` → ①ₜ / それ以外 → ①（判定は runtime 側 `buildStateAttention` の 1 箇所）。
+ * MUST: 適用条件は {@link stateQkTiledEligible}（`M ≥ 16`）。優先順は `M ≤ 8`（decode の M=1 と
+ * verify）かつ席が `"parallel"` / `"parallel-fused"` → ①' / `M ≥ 16` → ①ₜ / それ以外 → ①
+ * （判定は runtime 側 `buildStateAttention` の 1 箇所）。
  *
  * ## ③ₜ V 行タイル共有変種（**席に依らない既定経路** — perf-ledger K-13 段 2）
  *
@@ -306,8 +313,9 @@ export const stateQkTiledKey = (sliding: boolean, gqa: boolean, chunkRows: numbe
  * MUST: **① とビット同一**（1 出力要素あたりの加算順が d 昇順の逐次で一致 — ADR 0022 決定 3 の
  * 数値契約が骨格側の不変条件）。だから席（`stateAttentionReduce`）に依らない**既定経路**で、
  * 縮約順が変わる ①' とは性格が違う。
- * MUST: `M = 1` の計画では ①' の適用条件（{@link stateQkParallelEligible}）と重ならない
- * （1 < 16）。優先順は runtime 側 `buildStateAttention` が 1 箇所で持つ。
+ * MUST: `M ≤ 8` の計画（decode の M=1 と verify）では ①' の適用条件
+ * （{@link stateQkParallelEligible}）と重ならない（8 < 16）。優先順は runtime 側
+ * `buildStateAttention` が 1 箇所で持つ。
  */
 export const stateQkTiledEligible = (chunkRows: number): boolean => chunkRows >= 16;
 
@@ -1148,8 +1156,10 @@ export type StateAttentionGeometry = {
  * MUST: sliding は `1 ≤ W ≤ C`（ADR 0067 決定 4 ③）。`W = 0` で sliding の WGSL を撃つと
  * `window - 1u` がアンダーフローし `col % 0u` が実装依存値になる。
  * MUST: `colCap` は live 列の**静的上限**以上（full は `P + Q ≤ C` の context 側検査から `C`・
- * sliding は `(W−1) + M`）。足りないと ① の書きが範囲外へ落ち（robustness で捨てられ）、
- * ②③ が残骸を読む。
+ * sliding は `(W−1) + M`）。足りないと ① の書き `s[(z·rows_block + local_row)·col_cap + cl]` は
+ * `cl ≥ col_cap` の列で、最後の行を除き**隣の行の S を沈黙で上書きする**（範囲外へ落ちて
+ * 捨てられるのは末尾の行だけ）。②③ も同じ添字で隣の行を自分の列として誤読する。例外も NaN も
+ * 出ないので、この門は MUST。
  * MUST: `rowOffset + rowsBlock ≤ M`（行ブロックが chunk からはみ出さない）。
  */
 const assertStateGeometry = (where: string, geometry: StateAttentionGeometry): void => {

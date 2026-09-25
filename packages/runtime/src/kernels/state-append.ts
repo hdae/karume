@@ -18,8 +18,11 @@
  * 衝突しない（この門は sliding 変種にだけ生成される）。
  *
  * NOTE: full スロットの `P + Q ≤ C`（ADR 0067 決定 4 ④）は **context 側の実行時検査**で、
- * ここでは見ない（`P` は実行時値で params に載らない）。破った場合の書きは範囲外へ落ちる
- * （robustness で捨てられる）ので、検査の欠落は「静かに書かれない」形で出る。
+ * ここでは見ない（`P` は実行時値で params に載らない）。破った場合、`P + row ≥ C` の行の書き先
+ * `dst = (kv_plane·C + P + row)·D + d` は、最後の平面を除き**隣の kv 平面の行 `[0, P+row−C)` を
+ * 沈黙で上書きする**（範囲外へ落ちて捨てられるのは最後の平面だけ）。①QK / ③PV の読み
+ * `(kv_plane·C + slot_row(col))·D` も同じ隣の平面を誤読する。別 head の KV が例外なしに壊れるので、
+ * context 側の検査は MUST。
  */
 
 import { CodegenError } from "../codegen/errors.ts";
