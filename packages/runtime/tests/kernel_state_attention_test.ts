@@ -21,6 +21,7 @@ import {
   stateLiveColumns,
   statePvKey,
   statePvParallelKey,
+  statePvParallelReadonlyKey,
   statePvTiledEligible,
   statePvTiledKey,
   statePvTiledParams,
@@ -30,6 +31,7 @@ import {
   stateQkKey,
   stateQkParallelEligible,
   stateQkParallelKey,
+  stateQkParallelReadonlyKey,
   stateQkParallelWgsl,
   stateQkParallelWorkgroups,
   stateQkTiledEligible,
@@ -42,6 +44,7 @@ import {
   stateSlotRowWgsl,
   stateStatsKey,
   stateStatsParams,
+  stateStatsReadonlyKey,
   stateStatsWgsl,
   stateStatsWorkgroups,
 } from "../src/kernels/state-attention.ts";
@@ -58,6 +61,7 @@ import { ReferenceOpError } from "../src/reference/ops.ts";
 import {
   referenceStateAppend,
   referenceStateAttention,
+  referenceStateAttentionReadonly,
   type StateAttentionRefInput,
 } from "../src/reference/state-attention.ts";
 
@@ -99,6 +103,37 @@ Deno.test("states 形のキーは :sliding / :gqa の 2 ビットだけで分か
     stateAppendKey(false),
     stateAppendKey(true),
   ];
+  assertEquals(new Set(keys).size, keys.length);
+});
+
+Deno.test("readonly 形のキーは live 形と別の綴りで、states 形の全キーと衝突しない", () => {
+  // readonly は束縛が 1 本少なく、② の live の式も違う。drafter と target が同じ device の
+  // パイプラインキャッシュを共有するので、キーが live 形と衝突すると他方の WGSL が配られ、
+  // 例外なしに窓がずれる。綴りをここで固定する。
+  assertEquals(
+    stateQkParallelReadonlyKey(false, false),
+    "attention_state_qk:v1:f32:wg16x16:par:ro",
+  );
+  assertEquals(stateStatsReadonlyKey(true), "attention_state_stats:v2:f32:wg256:ro:sliding");
+  assertEquals(
+    statePvParallelReadonlyKey(true, true),
+    "attention_state_pv:v1:f32:wg16x16:par:ro:sliding:gqa",
+  );
+  const keys = [
+    ...VARIANTS.flatMap(([sliding, gqa]) => [
+      stateQkKey(sliding, gqa),
+      stateQkParallelKey(sliding, gqa),
+      stateQkParallelReadonlyKey(sliding, gqa),
+      statePvKey(sliding, gqa),
+      statePvParallelKey(sliding, gqa),
+      statePvParallelReadonlyKey(sliding, gqa),
+      stateStatsPvKey(sliding, gqa),
+    ]),
+    ...[false, true].flatMap((sliding) => [stateStatsKey(sliding), stateStatsReadonlyKey(sliding)]),
+    stateAppendKey(false),
+    stateAppendKey(true),
+  ];
+  assertEquals(keys.length, 4 * 7 + 2 * 2 + 2);
   assertEquals(new Set(keys).size, keys.length);
 });
 
@@ -577,6 +612,64 @@ Deno.test("CPU 参照: 形の取り違えは突合の前で落ちる", () => {
     ReferenceOpError,
     "queryLength",
   );
+});
+
+Deno.test("CPU 参照: 負・非整数の pastLength / window は full 扱いや空行へ化けずに突合の前で落ちる", () => {
+  // 門が無いと window = -1 は stateSliding が false で黙って full 扱いになり、past = -1 は
+  // live 列が 0 本になって厳密 0（append は範囲外の物理行 -1 への黙った書き捨て）を返す。
+  const probe = windowProbe({
+    window: 0,
+    past: 1,
+    query: 1,
+    chunkRows: 1,
+    capacity: 4,
+    poison: 0,
+  });
+  const append = {
+    kvPlanes: 1,
+    chunkRows: 1,
+    depth: 1,
+    capacity: 4,
+    window: 0,
+    past: 1,
+    query: 1,
+    x: new Float32Array(1),
+    slot: new Float32Array(4),
+  };
+  const readonly = {
+    batch: 1,
+    heads: 1,
+    kvHeads: 1,
+    depth: 1,
+    capacity: 4,
+    window: 0,
+    past: 1,
+    q: new Float32Array(1),
+    slotK: new Float32Array(4),
+    slotV: new Float32Array(4),
+    scale: 1,
+  };
+  const cases: readonly [string, () => unknown, string][] = [
+    ["attention window=-1", () => referenceStateAttention({ ...probe, window: -1 }), "window"],
+    ["attention window=1.5", () => referenceStateAttention({ ...probe, window: 1.5 }), "window"],
+    ["attention past=-1", () => referenceStateAttention({ ...probe, past: -1 }), "pastLength"],
+    ["attention past=0.5", () => referenceStateAttention({ ...probe, past: 0.5 }), "pastLength"],
+    ["append window=-1", () => referenceStateAppend({ ...append, window: -1 }), "window"],
+    ["append past=-1", () => referenceStateAppend({ ...append, past: -1 }), "pastLength"],
+    [
+      "readonly window=-1",
+      () => referenceStateAttentionReadonly({ ...readonly, window: -1 }),
+      "window",
+    ],
+    [
+      "readonly past=-1",
+      () => referenceStateAttentionReadonly({ ...readonly, past: -1 }),
+      "pastLength",
+    ],
+  ];
+  for (const [name, run, message] of cases) {
+    assertThrows(run, ReferenceOpError, message, name);
+  }
 });
 
 Deno.test("①' の並列縮約変種はキーに `:par` を持ち、① の契約断片をそのまま共有する", () => {
