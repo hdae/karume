@@ -18,14 +18,18 @@ questions it has to answer.
   and [Aratako/Irodori-TTS-v4.1-Small](https://huggingface.co/Aratako/Irodori-TTS-v4.1-Small)
   (one distribution repository per model; `card.py`'s `IRODORI_UPSTREAMS` picks by model name).
 - **Model implementation** — [Aratako/Irodori-TTS](https://github.com/Aratako/Irodori-TTS),
-  imported from a local clone through `sys.path` (`--source-dir`); no copy lives here. `patch.py`
-  replaces class attributes and self-reports that the untouched parts of the replaced forwards are
-  verbatim.
+  imported from a local clone through `sys.path` (`--source-dir`). `patch.py` replaces class
+  attributes, and one of its replacement forwards is a verbatim copy of the upstream forward except
+  for one line (see the block below).
 - **Text backbone** — [sbintuitions/modernbert-ja-310m](https://huggingface.co/sbintuitions/modernbert-ja-310m),
   the ModernBERT-ja checkpoint the text encoder was built from, re-distributed inside the Irodori
   distribution repositories. Its modeling code comes from `transformers` (pinned `transformers==5.14.1`).
 - **Codec weights** — [Aratako/Semantic-DACVAE-Japanese-32dim](https://huggingface.co/Aratako/Semantic-DACVAE-Japanese-32dim),
-  also re-distributed.
+  also re-distributed. Its weights derive from
+  [Aratako/Semantic-DACVAE-Japanese](https://huggingface.co/Aratako/Semantic-DACVAE-Japanese)
+  (MIT), whose weights in turn derive from
+  [facebook/dacvae-watermarked](https://huggingface.co/facebook/dacvae-watermarked) (Apache-2.0) —
+  the chain recorded in `card.py` (checked 2026-09-24).
 - **Codec implementation** — <https://github.com/facebookresearch/dacvae>, pinned at commit
   `414c20785fc3a28373073ea8ef7a1316eeeaca6e` (`dacvae/export.py`), imported from a local clone
   through `sys.path`; no copy lives here.
@@ -59,14 +63,14 @@ published.
 
 ### Aratako/Irodori-TTS (model implementation)
 
-| Item                     | Value                                                                                                                                                                                                                                                                                   |
-| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Upstream repository      | <https://github.com/Aratako/Irodori-TTS>                                                                                                                                                                                                                                                |
-| Revision used            | Unverified                                                                                                                                                                                                                                                                              |
-| Form of copy             | Imported from a clone via `sys.path`; no copy in this directory.                                                                                                                                                                                                                        |
-| Code license             | MIT — read from the `LICENSE` of the clone this recipe imports (`inputs/irodori/Irodori-TTS`, checked 2026-09-05; "Copyright (c) 2026 Aratako").                                                                                                                                        |
-| Weights license          | n/a                                                                                                                                                                                                                                                                                     |
-| Attribution requirements | MIT requires the copyright notice and permission text to travel with copies of the software. Nothing is copied into this directory and no upstream source enters the published distribution, so no obligation attaches to this block (the codec / weight blocks are judged separately). |
+| Item                     | Value                                                                                                                                                                                                                                                           |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Upstream repository      | <https://github.com/Aratako/Irodori-TTS>                                                                                                                                                                                                                        |
+| Revision used            | Unverified                                                                                                                                                                                                                                                      |
+| Form of copy             | Imported from a clone via `sys.path`. `patch.py`'s `_folded_rms_low_rank_adaln_forward` is a verbatim copy of `irodori_tts.model.LowRankAdaLN.forward` except for the normalization line (its docstring says so).                                               |
+| Code license             | MIT — read from the `LICENSE` of the clone this recipe imports (`inputs/irodori/Irodori-TTS`, checked 2026-09-05; "Copyright (c) 2026 Aratako").                                                                                                                |
+| Weights license          | n/a                                                                                                                                                                                                                                                             |
+| Attribution requirements | Undecided (human review). MIT requires the copyright notice and permission text to travel with copies of the software; the verbatim fragment in `patch.py` (Form of copy) lives in this repository, while no upstream source enters the published distribution. |
 
 ### sbintuitions/modernbert-ja-310m (text backbone)
 
@@ -81,14 +85,36 @@ published.
 
 ### Aratako/Semantic-DACVAE-Japanese-32dim (codec weights)
 
-| Item                     | Value                                                                                                                        |
-| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------- |
-| Upstream repository      | <https://huggingface.co/Aratako/Semantic-DACVAE-Japanese-32dim>                                                              |
-| Revision used            | Unverified                                                                                                                   |
-| Form of copy             | Re-distributed inside the Irodori distribution.                                                                              |
-| Code license             | n/a (weights only)                                                                                                           |
-| Weights license          | `card.py` records MIT (checked in `docs/research/2026-08-11-irodori-source-recon.md`). Unverified against the revision used. |
-| Attribution requirements | Unverified                                                                                                                   |
+| Item                     | Value                                                                                                                                                                                                        |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Upstream repository      | <https://huggingface.co/Aratako/Semantic-DACVAE-Japanese-32dim>                                                                                                                                              |
+| Revision used            | Unverified                                                                                                                                                                                                   |
+| Form of copy             | Re-distributed inside the Irodori distribution.                                                                                                                                                              |
+| Code license             | n/a (weights only)                                                                                                                                                                                           |
+| Weights license          | `card.py` records MIT (checked in `docs/research/2026-08-11-irodori-source-recon.md`). Unverified against the revision used. The weights derive from the two blocks below, and the chain ends in Apache-2.0. |
+| Attribution requirements | Unverified                                                                                                                                                                                                   |
+
+### Aratako/Semantic-DACVAE-Japanese (codec weights — parent)
+
+| Item                     | Value                                                                                                                               |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------- |
+| Upstream repository      | <https://huggingface.co/Aratako/Semantic-DACVAE-Japanese>                                                                           |
+| Revision used            | n/a — not loaded; `card.py` records the revision seen on the HF models API (`96adcf19…`, checked 2026-09-24).                       |
+| Form of copy             | Not copied directly. It is the `base_model` of the codec weights above.                                                             |
+| Code license             | n/a (weights only)                                                                                                                  |
+| Weights license          | `card.py` records `mit` (HF models API, checked 2026-09-24). Its README says the weights derive from `facebook/dacvae-watermarked`. |
+| Attribution requirements | Unverified                                                                                                                          |
+
+### facebook/dacvae-watermarked (codec weights — origin)
+
+| Item                     | Value                                                                                                                                                                                                                                                                                                                        |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Upstream repository      | <https://huggingface.co/facebook/dacvae-watermarked>                                                                                                                                                                                                                                                                         |
+| Revision used            | n/a — not loaded; `card.py` records the revision seen on the HF models API (`8680102d…`, checked 2026-09-24).                                                                                                                                                                                                                |
+| Form of copy             | Not copied directly. It is the `base_model` of the parent above, so the redistributed codec weights derive from it.                                                                                                                                                                                                          |
+| Code license             | n/a (weights only)                                                                                                                                                                                                                                                                                                           |
+| Weights license          | `card.py` records `apache-2.0` (the HF license tag, checked 2026-09-24). The repository README says "SAM License"; the upstream discussions/1 confirms that the README is wrong (user-confirmed 2026-09-24 — `card.py`).                                                                                                     |
+| Attribution requirements | Apache 2.0 §4(a)(b): the distribution repositories carry the Apache 2.0 text and the attribution / change notice (`distribution.py`'s `irodori_root_files` — `LICENSE.md` / `NOTICE.md`). Neither the HF nor the GitHub upstream carries a `NOTICE` file, so §4(d) has nothing to propagate (`card.py`, checked 2026-09-24). |
 
 ### facebookresearch/dacvae (codec implementation)
 
@@ -103,11 +129,11 @@ published.
 
 ### transformers (ModernBERT implementation)
 
-| Item                     | Value                                                                                                                                                              |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Upstream repository      | <https://github.com/huggingface/transformers>                                                                                                                      |
-| Revision used            | `transformers==5.14.1`                                                                                                                                             |
-| Form of copy             | Monkeypatch of imported classes; no copy in this directory.                                                                                                        |
-| Code license             | Apache-2.0 — read from the installed wheel's own `LICENSE` (`transformers 5.14.1`, checked 2026-09-05; "Copyright 2018- The Hugging Face team").                   |
-| Weights license          | n/a                                                                                                                                                                |
-| Attribution requirements | None attach here: no `transformers` code is copied into this directory or redistributed (import-time dependency only), and Apache 2.0 §4 starts at redistribution. |
+| Item                     | Value                                                                                                                                                                                                          |
+| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Upstream repository      | <https://github.com/huggingface/transformers>                                                                                                                                                                  |
+| Revision used            | `transformers==5.14.1`                                                                                                                                                                                         |
+| Form of copy             | Monkeypatch of imported classes. `patch.py`'s `_flat_qkv_attention_forward` is a verbatim copy of `ModernBertAttention.forward` except for how qkv is split (its docstring says so).                           |
+| Code license             | Apache-2.0 — read from the installed wheel's own `LICENSE` (`transformers 5.14.1`, checked 2026-09-05; "Copyright 2018- The Hugging Face team").                                                               |
+| Weights license          | n/a                                                                                                                                                                                                            |
+| Attribution requirements | Undecided (human review). Apache 2.0 §4 starts at redistribution; no `transformers` code enters the published distribution, while the verbatim fragment in `patch.py` (Form of copy) lives in this repository. |
