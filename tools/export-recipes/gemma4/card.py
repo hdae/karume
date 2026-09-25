@@ -221,8 +221,8 @@ def _gemma4_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
         'console.log(await stream.done); // { reason: "eos" | "max-tokens" | "aborted", … }',
         "```",
         "",
-        "Messages are plain `system` / `user` / `assistant` turns; tool calls, thinking channels",
-        "and image or audio parts are rejected rather than silently dropped.",
+        "Messages are plain `system` / `developer` / `user` / `assistant` turns; tool calls,",
+        "thinking channels and image or audio parts are rejected rather than silently dropped.",
         "With no `sampler` in the request, generation uses this repository's recommended default:"
         f" temperature {knob(sampler['temperature'])}, top-k {knob(sampler['topK'])},"
         f" top-p {knob(sampler['topP'])}.",
@@ -230,15 +230,37 @@ def _gemma4_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
     ]
 
 
+def _gemma4_device_limits(quants: Mapping[str, Mapping[str, Any]]) -> str:
+    """`requiredLimits` を上限名ごとに畳む（全 quant で値が同じなら名前 1 回・値 1 つ）。
+
+    値が quant 間で割れたとき（その上限を宣言しない quant があるときも含む）だけ、値ごとに
+    quant 名を添える — 畳んだ 1 つの値を「全席の上限」と読ませない。
+    """
+    names = dict.fromkeys(
+        name for quant in quants.values() for name in quant.get("requiredLimits", {})
+    )
+    parts: list[str] = []
+    for name in names:
+        holders: dict[int | None, list[str]] = {}
+        for quant_name, quant in quants.items():
+            holders.setdefault(quant.get("requiredLimits", {}).get(name), []).append(quant_name)
+        if len(holders) == 1:
+            parts.append(f"`{name}` ≥ {next(iter(holders)):,} B")
+            continue
+        split = "; ".join(
+            f"≥ {value:,} B for {', '.join(f'`{quant_name}`' for quant_name in quant_names)}"
+            for value, quant_names in holders.items()
+            if value is not None
+        )
+        parts.append(f"`{name}` {split}")
+    return " / ".join(parts)
+
+
 def _gemma4_generation(model: Mapping[str, Any]) -> list[str]:
     """この配布形の生成側の宣言（利用者が渡すもの・上限・推奨既定がここで読める）。"""
     config = model["pipelineConfig"]
     sampler = config["sampler"]
-    limits = " / ".join(
-        f"`{name}` ≥ {value:,} B"
-        for quant in model["quants"].values()
-        for name, value in quant.get("requiredLimits", {}).items()
-    )
+    limits = _gemma4_device_limits(model["quants"])
     lines = [
         "### Generation",
         "",

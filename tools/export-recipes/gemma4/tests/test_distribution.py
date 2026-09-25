@@ -27,6 +27,7 @@ from _shared.container_read import read_asset, read_asset_declarations
 from _shared.licenses import APACHE_LICENSE_2_0_PATH
 from gemma4 import distribution as gemma4_distribution
 from gemma4.card import GEMMA4_UPSTREAM, render_gemma4_model_card
+from gemma4.chat import PLAIN_ROLES
 from gemma4.distribution import (
     GEMMA4_CAPACITY,
     GEMMA4_CHUNK_LENGTH,
@@ -724,6 +725,17 @@ class TestGemma4Card:
 
         assert "of assets, read on the host" not in card
 
+    def test_it_names_every_accepted_chat_role(self, gemma4_assembled) -> None:
+        """カードが語る role は受理集合（`gemma4.chat.PLAIN_ROLES` — TS 側と同じ射程）と一致する。
+
+        1 つでも落ちると、公開カードの読み手はその role を使えないと誤読する。
+        """
+        _, manifest = gemma4_assembled
+        card = render_gemma4_model_card(manifest, "hdae/karume-gemma4")
+
+        roles = " / ".join(f"`{role}`" for role in PLAIN_ROLES)
+        assert f"Messages are plain {roles} turns" in card
+
     def test_it_renders_the_attribution_and_the_declared_defaults(self, gemma4_assembled) -> None:
         _, manifest = gemma4_assembled
         card = render_gemma4_model_card(manifest, "hdae/karume-gemma4")
@@ -787,6 +799,45 @@ class TestGemma4Card:
         assert "device limits" in card
         assert "maxStorageBufferBindingSize" in card
         assert "134,217,728" in card
+
+    @staticmethod
+    def _device_limits_line(manifest: Mapping[str, Any], limits_by_quant: Callable) -> str:
+        other = json.loads(json.dumps(manifest))
+        quants = other["models"][GEMMA4_DEFAULT_MODEL]["quants"]
+        for quant_name, quant in quants.items():
+            quant["requiredLimits"] = limits_by_quant(quant_name)
+        card = render_gemma4_model_card(other, "hdae/karume-gemma4")
+        return next(line for line in card.splitlines() if "**device limits**" in line)
+
+    def test_a_limit_every_quant_shares_is_named_once(self, gemma4_assembled) -> None:
+        """同じ重みの席が同じ上限を持つとき、上限名は 1 回ずつ（quant ごとに繰り返さない）。"""
+        _, manifest = gemma4_assembled
+        assert len(_model(manifest)["quants"]) >= 2
+        line = self._device_limits_line(
+            manifest,
+            lambda _quant: {
+                "maxBufferSize": 402_653_184,
+                "maxStorageBufferBindingSize": 402_653_184,
+            },
+        )
+
+        assert line.count("`maxBufferSize`") == 1
+        assert line.count("`maxStorageBufferBindingSize`") == 1
+        assert line.count("402,653,184") == 2
+        assert " for `" not in line
+
+    def test_a_limit_that_differs_between_quants_names_each_quant(self, gemma4_assembled) -> None:
+        """値が割れたら値ごとに quant 名を添える（畳んだ 1 値を全席の上限と読ませない）。"""
+        _, manifest = gemma4_assembled
+        line = self._device_limits_line(
+            manifest,
+            lambda quant: {"maxBufferSize": 536_870_912 if quant == "i4" else 402_653_184},
+        )
+        others = [name for name in _model(manifest)["quants"] if name != "i4"]
+
+        assert line.count("`maxBufferSize`") == 1
+        assert "≥ 536,870,912 B for `i4`" in line
+        assert f"≥ 402,653,184 B for {', '.join(f'`{name}`' for name in others)}" in line
 
     def test_it_omits_the_device_limits_line_when_no_quant_declares_one(
         self, gemma4_assembled
