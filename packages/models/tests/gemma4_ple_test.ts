@@ -125,6 +125,15 @@ Deno.test("parseGemma4PleIndex: 壊れた索引を黙って読まない", async 
     );
   });
 
+  await t.step("storage の欠落を i8 と読まない（schema 3 では必須）", () => {
+    const { storage: _, ...withoutStorage } = raw;
+    assertThrows(
+      () => parseGemma4PleIndex(withoutStorage),
+      Error,
+      "ple_index.storage undefined が i8 / i4 / i2 でない",
+    );
+  });
+
   await t.step("embedScale は正の有限数（0 は行が全部 0 になる）", () => {
     assertThrows(
       () => parseGemma4PleIndex({ ...raw, embedScale: 0 }),

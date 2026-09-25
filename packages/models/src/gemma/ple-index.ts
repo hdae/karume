@@ -60,7 +60,7 @@ export type Gemma4PleTable = {
 
 /** `ple_index`（schema 3）の受理形。 */
 export type Gemma4PleIndex = {
-  /** 格納 dtype（省略された索引は i8 と読む）。 */
+  /** 格納 dtype。 */
   readonly storage: Gemma4PleStorage;
   /** 索引が持つ token 行数（= `vocab_size_per_layer_input`）。 */
   readonly tokens: number;
@@ -184,13 +184,12 @@ export const parseGemma4PleIndex = (raw: unknown, where = PLE_INDEX_ASSET): Gemm
         `（旧 sidecar の索引は読まない — 配布形は容器の資産へ移った）`,
     );
   }
-  const declared = Object.hasOwn(root, "storage") ? root.storage : undefined;
-  if (
-    declared !== undefined && declared !== "i8" && declared !== "i4" && declared !== "i2"
-  ) {
-    throw new Error(`${where}.storage ${String(declared)} が i8 / i4 / i2 でない`);
+  // MUST: 欠落を i8 と読まない — schema 3 の書き手は必ず綴る。既定へ倒すと、欄を落とした索引が
+  // 「storage が無い」ではなく rowBytes の食い違い（i8 block なら黙って通る）として現れる。
+  const storage = Object.hasOwn(root, "storage") ? root.storage : undefined;
+  if (storage !== "i8" && storage !== "i4" && storage !== "i2") {
+    throw new Error(`${where}.storage ${String(storage)} が i8 / i4 / i2 でない`);
   }
-  const storage: Gemma4PleStorage = declared ?? "i8";
   const tokens = readCount(root, "tokens", where);
   const layers = readCount(root, "layers", where);
   const dim = readCount(root, "dim", where);
