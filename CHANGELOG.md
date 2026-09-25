@@ -54,8 +54,7 @@ measurements in `docs/research/`.
   draft/verify/commit loop whose token stream matches non-speculative decoding exactly, and a
   self-financing gate that falls back to plain decode in contexts where speculation loses.
 - Range reads for assets: `openAsset` and `AssetRangeReader` in hub, a directory adapter that
-  reads at an offset, `parseSafetensorsHeader` / `safetensorsHeaderLength` on the runtime surface,
-  and range reads over Hugging Face files once fetch-cache 0.8.0 has fetched and verified them whole
+  reads at an offset, and range reads over Hugging Face files once fetch-cache 0.8.0 has fetched and verified them whole
   (no HTTP Range requests).
 - `Session.enqueueRead` reads graph outputs back at the batch's terminal fence; PLE can be kept
   resident on the GPU as an opt-in, with `per_layer_inputs` gathered on device.
@@ -116,7 +115,7 @@ measurements in `docs/research/`.
   `unpack_int2` are documented as the canonical i2 byte order (ADR 0097).
 - New names on the `@karume/runtime` surface: `DEFAULT_PLAN_BACKING_BUDGET_BYTES`,
   `assertChunkBuckets`, and the types `AdmissionScenarioSpec`, `LinearGemvReduce`, `RmsNormReduce`,
-  `EnqueueRead`, `SharedWeight` and `SafetensorsHeader`; `Session.exportWeight`; and the
+  `EnqueueRead` and `SharedWeight`; `Session.exportWeight`; and the
   `SessionOptions` keys `linearGemvReduce`, `rmsNormReduce`, `fuseRmsNormAdd`,
   `fuseLinearStaticQuantize`, `packedStaticQuantize`, `linearGemvRowsThreadTarget`,
   `planBackingBudgetBytes`, `chunkBuckets` and `sharedWeights`.
@@ -134,6 +133,15 @@ measurements in `docs/research/`.
 
 ### Changed
 
+- `GpuContext.beginBatch()` rejects with `GpuDeviceLostError` when the device is already lost or
+  destroyed; `openContainer` rejects a `krm` whose expectation has `graph` but no `model`, and
+  containers whose weight pieces are not in non-decreasing part order; `estimateGraphMemory` /
+  `PreparedModel.estimate` pack intermediates within `options.maxBufferSize` when it is given.
+- `opbench single` accepts every knob of the manifest `session` vocabulary (`--session
+  <knob>=true|false` for booleans), records `gpu_wall_ratio` / `timing_warning` when GPU time
+  contradicts the wall clock, and `opbench census` / `tools/fusion-hints` read manifests through
+  `@karume/hub`; `tools/release/hf-upload.zsh` marks unreadable parts as `### FAILED` and exits
+  non-zero; CI lints the workspace-external Python scripts and checks `deno.lock` for drift.
 - Model cards: the Usage snippets declare the pipeline with `await using` (these pipelines only
   implement `Symbol.asyncDispose`); the sbv2 card analyzes text with `@hdae/yomi`, converts it
   with `toSbv2Utterance` and calls `generate(utterance, options)` (the claim that the pipeline
@@ -179,6 +187,10 @@ measurements in `docs/research/`.
 
 ### Fixed
 
+- The safe-softmax guard is no longer removed when scores can reach -inf via a negated +inf literal
+  or an f32 overflow; `karume dist` refuses a series whose weight parts disagree with the
+  descriptor's `parts[].sha256`; `tools/mtp-bench` derives the PLE budget from mirror paths with
+  spaces or non-ASCII characters.
 - Runtime (2026-09-24 full review, obvious fixes): `openContainer` / `openMemoryContainer` reject
   `rowAxis: 1` for `int4-sym-g` / `int2-off` / `ternary` (only `int8-sym` may declare it);
   container readers no longer resolve names such as `constructor` through `Object.prototype`;
@@ -235,6 +247,18 @@ measurements in `docs/research/`.
 
 ### Breaking
 
+- `@karume/runtime`: `tensorBytes` is no longer exported (view `SafetensorsFile.buffer` with the
+  tensor's `byteOffset` / `byteLength`); `SessionBuildStats.shardCount` / `shardWaitMs` are renamed
+  to `partCount` / `supplyWaitMs`.
+- `@karume/hub`: `LocalDirectoryOptions.fallback` is removed — no public value could act as a
+  delegate. Map cross-repo references explicitly with `crossRepo`; an unmapped reference fails
+  loudly.
+- Exporter (`karume`): `IR_METADATA_KEY` moved to `karume.legacy` (used only by `karume migrate`);
+  `publish_model` no longer deletes `<stem>-NNNNN-of-NNNNN.safetensors` siblings and
+  `karume.pipeline.LEGACY_SUFFIX` is gone; `publish_model` / `export_to_file` raise `ValueError` for
+  an output path whose suffix is not `.krm` instead of rewriting it; `modelcard.from_pretrained`
+  requires the `disposable` keyword.
+- `tools/ram-peak/measure.ts --cache-dir` only accepts a directory below `outputs/ram-peak/`.
 - **Breaking:** the runtime's in-memory graph (`IrGraph`) now uses the merged storage vocabulary:
   `initializers[name]` is `{ storage: { codec, groupSize?, rowAxis? } }` or `{ shared: true }`,
   initializer names are the tensor keys (the exporter's FQN / `const.<hash>`), and the `tensor` /

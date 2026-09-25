@@ -271,10 +271,6 @@
         "kind": "typeAlias"
       },
       {
-        "name": "SafetensorsHeader",
-        "kind": "typeAlias"
-      },
-      {
         "name": "ScoreStorage",
         "kind": "typeAlias"
       },
@@ -379,10 +375,6 @@
         "kind": "function"
       },
       {
-        "name": "parseSafetensorsHeader",
-        "kind": "function"
-      },
-      {
         "name": "planWeightResidency",
         "kind": "function"
       },
@@ -392,14 +384,6 @@
       },
       {
         "name": "readAdapterLimits",
-        "kind": "function"
-      },
-      {
-        "name": "safetensorsHeaderLength",
-        "kind": "function"
-      },
-      {
-        "name": "tensorBytes",
         "kind": "function"
       }
     ]
