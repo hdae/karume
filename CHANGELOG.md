@@ -266,9 +266,8 @@ measurements in `docs/research/`.
   go with the shard form; `verify_container` / `stored_model` / `Provenance` / `FixedQuantizedWeight`
   are the new public names); `publish_model` no longer deletes stale
   `<stem>-NNNNN-of-NNNNN.safetensors` siblings; `publish_model` / `export_to_file` raise `ValueError`
-  for an output path whose suffix is not `.krm`; `karume migrate` writes `provenance.writer` only
-  with `--writer`; `dist.weight_components` returns `(parts, weights key)` pairs;
-  `modelcard.from_pretrained` requires the `disposable` keyword.
+  for an output path whose suffix is not `.krm`; `dist.weight_components` returns
+  `(parts, weights key)` pairs; `modelcard.from_pretrained` requires the `disposable` keyword.
 - **Breaking:** the runtime's in-memory graph (`IrGraph`) now uses the merged storage vocabulary:
   `initializers[name]` is `{ storage: { codec, groupSize?, rowAxis? } }` or `{ shared: true }`,
   initializer names are the tensor keys (the exporter's FQN / `const.<hash>`), and the `tensor` /
@@ -289,8 +288,8 @@ measurements in `docs/research/`.
   that rounded up to 4) — containers written by the stage-1 writer must be rewritten; `BlockSource`
   gains a required `verified` flag and `DescriptorExpectation.sha256` is a plain string.
 - **Breaking:** the Gemma 4 product graph exits on the selected R rows as logits plus hidden
-  state, and declares the prefill buckets 4, 8, 32, 64, 128 and 256 — distributions must be
-  re-exported.
+  state — distributions must be re-exported. `Gemma4Pipeline` prefills in buckets by default
+  (`GEMMA4_CHUNK_BUCKETS` = 4, 8, 32, 64, 128, 256; `Gemma4PipelineOptions.chunkBuckets` overrides).
 - **Breaking:** the Gemma 4 drafter's calling convention was aligned with the upstream layout and
   its goldens re-baked.
 - **Breaking:** speculation stops enumerating acceptances at a stop token, and reports what was
@@ -316,9 +315,8 @@ measurements in `docs/research/`.
   (`fetchAssets`, `prefetchAssets`, `openAsset` and `openContainerSource` remain).
 - **Breaking:** exporter: `karume repack` is removed and `karume verify` checks containers only;
   `publish_model` / `export_to_file` require `provenance` and `graph_name` (the graph name must equal
-  the manifest `weights` key — `karume dist` refuses otherwise), `WeightFiles.extras` is gone, the
-  Gemma 4 QAT `reference.json` is schema 3 (`pleBlocks`), and `tools/llm-speed` profiles
-  distributions only.
+  the manifest `weights` key — `karume dist` refuses otherwise), `WeightFiles.extras` is gone, and
+  `tools/llm-speed` profiles distributions only.
 - **Breaking:** `parseSafetensors` no longer takes a second `byteLength` argument; the whole
   `ArrayBuffer` is treated as the file, so trailing bytes past the data section are rejected as
   unused space. Callers that read a file into a larger reusable buffer must pass a tight
