@@ -34,28 +34,28 @@ fn main(
     let xqt = wg.y * (dims.k / 4u) + unitt * 4u;
     let bt_0 = unpack4xI8(pwt.x);
     let xat_0 = x[xqt + 0u];
-    acc = acc + xat_0.x * (f32(bt_0.x) * wscale_v);
-    acc = acc + xat_0.y * (f32(bt_0.y) * wscale_v);
-    acc = acc + xat_0.z * (f32(bt_0.z) * wscale_v);
-    acc = acc + xat_0.w * (f32(bt_0.w) * wscale_v);
+    acc = fma(xat_0.x, (f32(bt_0.x) * wscale_v), acc);
+    acc = fma(xat_0.y, (f32(bt_0.y) * wscale_v), acc);
+    acc = fma(xat_0.z, (f32(bt_0.z) * wscale_v), acc);
+    acc = fma(xat_0.w, (f32(bt_0.w) * wscale_v), acc);
     let bt_1 = unpack4xI8(pwt.y);
     let xat_1 = x[xqt + 1u];
-    acc = acc + xat_1.x * (f32(bt_1.x) * wscale_v);
-    acc = acc + xat_1.y * (f32(bt_1.y) * wscale_v);
-    acc = acc + xat_1.z * (f32(bt_1.z) * wscale_v);
-    acc = acc + xat_1.w * (f32(bt_1.w) * wscale_v);
+    acc = fma(xat_1.x, (f32(bt_1.x) * wscale_v), acc);
+    acc = fma(xat_1.y, (f32(bt_1.y) * wscale_v), acc);
+    acc = fma(xat_1.z, (f32(bt_1.z) * wscale_v), acc);
+    acc = fma(xat_1.w, (f32(bt_1.w) * wscale_v), acc);
     let bt_2 = unpack4xI8(pwt.z);
     let xat_2 = x[xqt + 2u];
-    acc = acc + xat_2.x * (f32(bt_2.x) * wscale_v);
-    acc = acc + xat_2.y * (f32(bt_2.y) * wscale_v);
-    acc = acc + xat_2.z * (f32(bt_2.z) * wscale_v);
-    acc = acc + xat_2.w * (f32(bt_2.w) * wscale_v);
+    acc = fma(xat_2.x, (f32(bt_2.x) * wscale_v), acc);
+    acc = fma(xat_2.y, (f32(bt_2.y) * wscale_v), acc);
+    acc = fma(xat_2.z, (f32(bt_2.z) * wscale_v), acc);
+    acc = fma(xat_2.w, (f32(bt_2.w) * wscale_v), acc);
     let bt_3 = unpack4xI8(pwt.w);
     let xat_3 = x[xqt + 3u];
-    acc = acc + xat_3.x * (f32(bt_3.x) * wscale_v);
-    acc = acc + xat_3.y * (f32(bt_3.y) * wscale_v);
-    acc = acc + xat_3.z * (f32(bt_3.z) * wscale_v);
-    acc = acc + xat_3.w * (f32(bt_3.w) * wscale_v);
+    acc = fma(xat_3.x, (f32(bt_3.x) * wscale_v), acc);
+    acc = fma(xat_3.y, (f32(bt_3.y) * wscale_v), acc);
+    acc = fma(xat_3.z, (f32(bt_3.z) * wscale_v), acc);
+    acc = fma(xat_3.w, (f32(bt_3.w) * wscale_v), acc);
     }
   }
   for (var width = 8u; width > 0u; width /= 2u) {

@@ -119,8 +119,8 @@ macOS 26 で再実測 = 同じ 12 本が同一署名で再現。フル verify �
 Deno 2.9.5 / 2.9.6 に Metal / naga / wgpu の更新は無い（denoland/deno#36257 = mapped range の
 み）。根治候補 = WGSL 側で丸めを固定する手段は明示 `fma()` が有効と判明（ADR
 [0105](decisions/0105-packed-static-quantize-activations.md) 追記 4 — bitcast 往復 + XOR 0 の
-丸め障壁は M2 で無効と実測し撤回）。適用済みは並列 GEMV 族だけで、逐次 GEMV・行ブロック・
-subgroup 変種・conv・gru・attention エピローグは未適用。TS 参照の FMA 許容化は未着手。記録 =
+丸め障壁は M2 で無効と実測し撤回）。適用済みは並列 GEMV 族と subgroup32 変種（2026-09-25・M2 の再検収は
+[0101 追記](decisions/0101-linear-gemv-subgroup.md)）で、逐次 GEMV・行ブロック・conv・gru・attention エピローグは未適用。TS 参照の FMA 許容化は未着手。記録 =
 [research/2026-08-06-metal-silent-miscompute.md](research/2026-08-06-metal-silent-miscompute.md)
 （時点）と
 [research/2026-08-29-chatgpt-review-verification.md](research/2026-08-29-chatgpt-review-verification.md)

@@ -59,3 +59,35 @@ describe("GEMV並列加算の選択とコード生成", () => {
     assertThrows(() => linearGemvSubgroupWgsl("i8", 32, 4));
   });
 });
+
+describe("subgroup32変種の積和はparallelと同じ綴り", () => {
+  // ADR 0101 決定 3（積和は parallel と同一）を綴りで縛る。parallel 族だけ fma 化して subgroup が
+  // `acc + x * d` のまま残ると、Metal では縮約の入れ方が式形で変わり u32 一致が崩れる（ADR 0105 追記 4）。
+  // GPU 実走の u32 一致門（helpers/gemv-subgroup-check.ts）は Deno で SKIP になるので、この門が常設側。
+  const macLines = (wgsl: string): string[] =>
+    wgsl.split("\n").map((line) => line.trim()).filter((line) => line.startsWith("acc = "));
+  it("全60形でfma行の列が一致し、積和にacc + x * dが残らない", () => {
+    let compared = 0;
+    for (const storage of ["i2", "i4", "i8"] as const) {
+      for (const group of storage === "i4" ? [32, 512, 2048, 4096] : [undefined]) {
+        for (const lanes of [2, 4, 8, 16, 32] as const) {
+          const parallel = macLines(linearGemvParallelWgsl(storage, group, lanes));
+          const subgroup = macLines(linearGemvSubgroupWgsl(storage, group, lanes));
+          const fma = (lines: string[]): string[] =>
+            lines.filter((l) => l.startsWith("acc = fma("));
+          assertEquals(fma(subgroup), fma(parallel), `${storage} g${group} l${lanes}`);
+          assertEquals(fma(subgroup).length > 0, true);
+          // subgroup の値交換（`if (lane < width) { acc = acc + other; }`）は if の行なので、
+          // `acc = ` で始まる行に `acc + x * d` の綴りが 1 本も無いことが積和の門になる。
+          assertEquals(
+            subgroup.filter((l) => l.startsWith("acc = acc +")),
+            [],
+            `${storage} g${group} l${lanes}: 積和に acc + x * d が残っている`,
+          );
+          compared++;
+        }
+      }
+    }
+    assertEquals(compared, 30);
+  });
+});

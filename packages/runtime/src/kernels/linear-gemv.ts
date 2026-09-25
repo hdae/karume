@@ -440,13 +440,15 @@ const activationQuad = (packed: boolean, slot: string, name: string, quad: numbe
 };
 
 /**
- * 積和 1 行。並列族（`parallelWgsl` の f32 / packed × 融合なし / あり）は明示 `fma()` で綴る。
+ * 積和 1 行。並列族（`parallelWgsl` の f32 / packed × 融合なし / あり）と subgroup32 変種は明示
+ * `fma()` で綴る。
  *
- * MUST: 並列族は `fma`。`acc + x * d` の綴りは fma への縮約をコンパイラに委ねる形で、RTX / Vulkan
- * では常に縮約される（明示 fma と u32 同一 — 540 組の掃引）が、Metal（M2）は式形ごとに縮約の入れ方を
- * 変え、同じ数式のカーネル 2 本（f32 と packed）が u32 で割れた。明示 fma は縮約の自由度そのものを
- * 消すので、両経路が同じ丸めになる（ADR 0105 追記 4）。逐次 GEMV・行ブロック・subgroup 変種は
- * 参照経路の数値を動かさないため従来の綴りのまま。
+ * MUST: 並列族と subgroup32 は `fma`。`acc + x * d` の綴りは fma への縮約をコンパイラに委ねる形で、
+ * RTX / Vulkan では常に縮約される（明示 fma と u32 同一 — 540 組の掃引）が、Metal（M2）は式形ごとに
+ * 縮約の入れ方を変え、同じ数式のカーネル 2 本（f32 と packed）が u32 で割れた。明示 fma は縮約の
+ * 自由度そのものを消すので、両経路が同じ丸めになる（ADR 0105 追記 4）。subgroup32 は parallel と
+ * 同じ和を subgroup の値交換で出す変種なので、積和の綴りも parallel と同一にする（ADR 0101 決定 3・
+ * 追記 2026-09-25）。逐次 GEMV・行ブロックは参照経路の数値を動かさないため従来の綴りのまま。
  */
 const mac = (fma: boolean, x: string, d: string): string =>
   fma ? `    acc = fma(${x}, ${d}, acc);` : `    acc = acc + ${x} * ${d};`;
@@ -1096,6 +1098,7 @@ export const linearGemvSubgroupKey = (
 /**
  * parallelと同じ入力配分・加算木をsubgroup内の値交換で実行する。
  * 既存のWGSLとキーは維持する。固定32レーンの機能を明示要求し、共有メモリを使わない。
+ * 積和は parallel と同じ明示 `fma()`（{@link mac} — 綴りが違うと Metal で parallel と u32 が割れる）。
  * DECIDED: docs/decisions/0101-linear-gemv-subgroup.md
  */
 export const linearGemvSubgroupWgsl = (
@@ -1134,7 +1137,7 @@ fn main(
     let row_base = col * units;${scaleSetupWgsl(storage, shift)}
     for (var unit = lane; unit < units; unit += ${lanes}u) {
 ${unitLoads(storage, "t", "unit", shift, "wg.y * (dims.k / 4u) + ")}
-${unitMacs(storage, "t")}
+${unitMacs(storage, "t", false, true)}
     }
   }
   for (var width = ${lanes / 2}u; width > 0u; width /= 2u) {

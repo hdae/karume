@@ -116,6 +116,11 @@ measurements in `docs/research/`.
 
 ### Changed
 
+- The opt-in `parallel-subgroup32` GEMV variant now spells its multiply-add with an explicit
+  `fma()` like the parallel family (ADR 0101 addendum). Vulkan output is unchanged; on Metal the
+  subgroup32 output now matches the parallel kernel bit for bit instead of the previous spelling.
+  The browser benchmark server serves `/check.html`, which runs the parallel-vs-subgroup32 u32
+  identity check in Chrome.
 - The peak of JavaScript-side `ArrayBuffer` memory (V8 "external") while building a session from a
   container is lower (process RSS additionally includes wgpu staging and is not bounded by this): the
   runtime uploads container

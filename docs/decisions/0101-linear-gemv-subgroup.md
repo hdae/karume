@@ -57,3 +57,20 @@ M2向けの既定採用を見送る。RTXのQATでは利得が再現している
 画面の初期選択だけを既存parallelへ戻す。両E2B・dense・RMS融合・投入768の2設定20生成となり、
 GEMV/RMSのsubgroup比較は引き続き選択できる。runtime・モデル・quant・CLIの既定と保存形式は変えない。
 既に得られたM2の80生成を同じ設定で取り直す必要はない。
+
+## 追記（2026-09-25）: 決定 3 の積和を明示 `fma()` に揃える
+
+[ADR 0105 追記 4](0105-packed-static-quantize-activations.md#追記-42026-09-20-追記-3-の撤回と並列-gemv-族の積和を明示-fma-で綴る決定)が
+並列族の積和を `acc = fma(x, d, acc)` に変えたとき、subgroup32 変種だけ `acc = acc + x * d` のまま残った。
+Metal は式形ごとに fma への縮約の入れ方を変えるので、その状態では決定 3「積和は parallel と同一」が字面どおりでなく、
+u32 一致の門（`tests/helpers/gemv-subgroup-check.ts`）は Metal で成り立つ保証が無かった（2026-09-24 の全域レビュー
+W-RT6-1 / W-AD3-2）。subgroup32 は parallel と同じ和を subgroup の値交換で出す変種で、参照経路ではない。
+
+- `linearGemvSubgroupWgsl` の積和を parallel と同じ `mac(fma = true)` にする。キーは変えない（0105 追記 4 の先例と同じ —
+  キーはパイプラインキャッシュの識別子で、決定性の門はスナップショットが担う）。snapshot 3 本を焼き直した。
+- 常設の門: `linear_gemv_parallel_test.ts` が全 30 形（格納 × group × lane）で parallel と subgroup32 の `acc = fma(…)`
+  行の列が一致し、積和に `acc + x * d` が残らないことを綴りで縛る。
+- RTX / Vulkan では数値不変のはず（0105 追記 4 の 540 組の掃引と同じ機序 — コンパイラが縮約する）。**Metal では
+  subgroup32 の出力バイトが変更前から変わる**（parallel と揃う側へ）。2026-09-13 の M2 一致記録は fma 化前の実測。
+- 再検収: Chrome（M2）で `deno task bench:llm-browser` → `http://localhost:8787/check.html`（u32 一致門をそのまま
+  Chrome で走らせる入口。tools/llm-speed/browser/check.ts）。結果はこの追記に記録する（**実施待ち**）。
