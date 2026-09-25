@@ -10,7 +10,7 @@
  * 操作の promise をそのまま返すので、失敗は fail loudly のまま届く。
  *
  * NOTE: runtime の Session も同じ形で run / dispose を直列化している（`executor.ts` の
- * `#enqueue`）が、あちらは Session 1 本の内側だけを守る。段ごとに Session を張り替える
+ * `#serialize`）が、あちらは Session 1 本の内側だけを守る。段ごとに Session を張り替える
  * パイプラインは、その外側（generate 1 回ぶん）をここで守る。
  */
 
