@@ -5,7 +5,7 @@
 
 ## 現在の焦点
 
-- **0.13.0 公開済み（2026-09-25）**: Release `v0.13.0` = `4b167df8`・JSR 3 パッケージ 0.13.0・`deno task smoke:published` 緑。焼き直し（10リポを系列から`karume dist`で・`karume/0.13.0`）→ HF再アップロード（旧safetensors削除つき）→ pin 10本（`f16b8998`）→ CHANGELOGの版の節（`867a33c7`・リリースノート起草時の突合で3コミット訂正）→ リリースノート（`outputs/release/release-notes-v0.13.0.draft.md`・独立検証3巡）→ Release → runbook §5の事後まで済。anima / anima-extraのpinはNOTICEの権利付与文（`7416a285`）より前のrevision（重み同一・pin更新は次のbreaking波で判断）。断片化したpart 5本は2026-09-24に「そのまま公開し、実DL速度を測ってから対処」と裁定済み（[backlog](../docs/backlog.md)のlater）。次はリリース後の波の着手順の相談（2026-09-24全域レビューの見送り項目・perf-ledger起票分・admission波・焼き直し波・コンテナ段4〜6）。手順は[release-runbook](../docs/release-runbook.md)§0〜§5。**落とし穴**（次のリリース向け）:
+- **0.13.0 公開済み（2026-09-25）**: Release `v0.13.0` = `4b167df8`・JSR 3 パッケージ 0.13.0・`deno task smoke:published` 緑。焼き直し（10リポを系列から`karume dist`で・`karume/0.13.0`）→ HF再アップロード（旧safetensors削除つき）→ pin 10本（`f16b8998`）→ CHANGELOGの版の節（`867a33c7`・リリースノート起草時の突合で3コミット訂正）→ リリースノート（`outputs/release/release-notes-v0.13.0.draft.md`・独立検証3巡）→ Release → runbook §5の事後まで済。anima / anima-extraのpinは権利付与文を含むmainへ更新済み（`75b127b5`・karume.jsonはbyte同一）。断片化したpart 5本は2026-09-24に「そのまま公開し、実DL速度を測ってから対処」と裁定済み（[backlog](../docs/backlog.md)のlater）。次はリリース後の波の着手順の相談（2026-09-24全域レビューの見送り項目・perf-ledger起票分・admission波・焼き直し波・コンテナ段4〜6）。手順は[release-runbook](../docs/release-runbook.md)§0〜§5。**落とし穴**（次のリリース向け）:
   - manifestの`generator`欄はvenvに入っている`karume`のdist-infoの版を写す — bumpの後は`(cd tools && uv sync --all-groups)`してから焼き、各`dist.py`の最終行が`karume/0.13.0`を名乗ることを確かめる（runbook §4のbumpの項）。
   - HFの旧ファイルは上げるときの`--delete`でしか消えない — 旧`*.safetensors`に加え、上げる直前にHFのtreeとローカルを突き合わせてHFにだけ在るpathを`--delete`に足す（runbook §2）。
   - pinは削除後のmainのSHAで焼く — アップロードの全コミットが済んだ後のmainを引く（runbook §2 / §3）。

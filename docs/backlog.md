@@ -47,8 +47,8 @@
   `karume/0.13.0` で焼き直して旧 safetensors の削除つきで上げ直し（anima → 越境参照の anima-extra → 残り 8 本）、pin 10 本を
   削除後の main へ更新した（`f16b8998`）。断片化した part 5 本は later 参照。**0.13.0 は 2026-09-25 に公開済み**
   （Release `v0.13.0` = `4b167df8`・JSR 3 パッケージ・`smoke:published` 緑・リリースノートは
-  `outputs/release/release-notes-v0.13.0.draft.md`）。anima / anima-extra の pin は NOTICE の権利付与文
-  （`7416a285`）より前の revision（重み同一・pin 更新は次の breaking 波で判断 — 裁定 28 番）。
+  `outputs/release/release-notes-v0.13.0.draft.md`）。anima / anima-extra の pin は権利付与文を含む
+  main へ更新済み（`75b127b5`・karume.json は byte 同一 — 裁定 28 番）。
 
 - **モデル横断の追加調査（2026-09-10〜11）**: Qwen3-0.6B / MiniCPM5-2B の RTN / GPTQ と
   E4B の全 PLE を含むローカル pipeline は実機検証済み。E4B chat も CPU / Deno / Chrome で一致。
