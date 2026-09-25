@@ -240,6 +240,35 @@ class TestFixture:
         assert fixture["decode"][0]["text"] == "abc"
 
 
+class TestEmit:
+    """`emit` は資産とフィクスチャを**揃ってからだけ**書く（片方だけ新しくなる口を開けない）。"""
+
+    def test_a_failing_fixture_capture_leaves_no_asset_behind(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        tokenizer_path = tmp_path / "tokenizer.json"
+        tokenizer_path.write_text(json.dumps(_tokenizer_json()), encoding="utf-8")
+        asset_path = tmp_path / "out" / "tokenizer.asset.json"
+        fixture_path = tmp_path / "out" / "fixture.json"
+
+        def _failing_capture(**_: Any) -> dict[str, Any]:
+            raise RuntimeError("upstream capture failed")
+
+        # 出所はリポジトリ相対で書くので、合成資産の置き場を根に見立てる。
+        monkeypatch.setattr(shared_tokenizer, "REPO_ROOT", tmp_path)
+        monkeypatch.setattr(shared_tokenizer, "build_fixture", _failing_capture)
+
+        with pytest.raises(RuntimeError, match="upstream capture failed"):
+            shared_tokenizer.emit(
+                tokenizer_json=tokenizer_path,
+                asset_path=asset_path,
+                fixture_path=fixture_path,
+            )
+
+        assert not asset_path.exists()
+        assert not fixture_path.exists()
+
+
 #: 異体字セレクタ（`Mn` だが結合クラスは 0 — 幅ゼロで、目でも隣の絵文字と区別できない）。
 #: `SHARED_ENCODE_CASES` を綴っているソース（門はランタイムの文字列ではなく**綴り**を見る —
 #: `\u200d` は実行時には生の U+200D になるので、`case.text` を見ても書き分けは判らない）。

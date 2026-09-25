@@ -596,7 +596,9 @@ def emit(
         "mergesCount": len(compiled.merges),
         "addedCount": len(compiled.added_tokens),
     }
-    asset_bytes = write_json(asset_path, asset_payload(compiled, source=source))
+    # 両方を組み終えてから書く — 上流の採取（`build_fixture`）が落ちたときに、新しい資産と
+    # 古いフィクスチャが並んで残らないように。
+    payload = asset_payload(compiled, source=source)
     fixture = build_fixture(
         tokenizer_json=tokenizer_json,
         compiled=compiled,
@@ -604,6 +606,7 @@ def emit(
         decode_cases=byte_run_decode_cases(compiled),
         source=source,
     )
+    asset_bytes = write_json(asset_path, payload)
     fixture_bytes = write_json(fixture_path, fixture)
     print(f"[karume] 資産      {asset_path} ({asset_bytes / 1e6:.1f} MB)")
     print(
