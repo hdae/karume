@@ -100,8 +100,15 @@ def _vowel_detector_seconds(config: Mapping[str, Any], frames: int) -> str:
     return f"{frames / per_second:.1f}"
 
 
+def _vowel_detector_milliseconds(config: Mapping[str, Any], frames: int) -> str:
+    """フレーム数 → ミリ秒（下限は 1 秒に満たないので、秒の小数 1 桁では 0.0 に潰れる）。"""
+    per_second = config["sampleRate"] / VOWEL_DETECTOR_HOP
+    return f"{frames * 1000 / per_second:g}"
+
+
 def _vowel_detector_overview(manifest: Mapping[str, Any]) -> list[str]:
     config = default_model(manifest)["pipelineConfig"]
+    shortest = _vowel_detector_milliseconds(config, config["minFrames"])
     longest = _vowel_detector_seconds(config, config["maxFrames"])
     return [
         "## What is this",
@@ -119,9 +126,11 @@ def _vowel_detector_overview(manifest: Mapping[str, Any]) -> list[str]:
         "- **Decoding and resampling are yours.** The entry point is a"
         f" `Float32Array` of {config['sampleRate']} Hz mono samples; this repository ships no"
         " WAV parser and no resampler.",
-        "- **One graph, any length.** The time axis is symbolic, so a clip of any duration runs"
-        " through the same graph with no padding and no length buckets. Audio longer than"
-        f" {longest} s is rejected rather than silently truncated — split it and call twice.",
+        f"- **One graph for every length from {shortest} ms to {longest} s.** The time axis is"
+        " symbolic, so any clip in that range runs through the same graph with no padding and no"
+        f" length buckets. Audio longer than {longest} s is rejected rather than silently"
+        f" truncated — split it and call twice. Audio shorter than {shortest} ms is rejected"
+        " rather than padded.",
         "- Not readable by transformers (it's a different container with an embedded graph); the"
         f" reader is a pipeline that implements `{VOWEL_DETECTOR_SUPPORTED_PIPELINE}`.",
         f"- Exporter used for the conversion: `{manifest['generator']}`. The distribution manifest"
@@ -208,6 +217,7 @@ def _vowel_detector_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
 def _vowel_detector_shape(model: Mapping[str, Any]) -> list[str]:
     """入出力と運用上限（利用者が渡すもの・受け取るものがここで読める）。"""
     config = model["pipelineConfig"]
+    floor = config["minFrames"]
     limit = config["maxFrames"]
     return [
         "### Input, output and limits",
@@ -222,15 +232,16 @@ def _vowel_detector_shape(model: Mapping[str, Any]) -> list[str]:
         f"- **classes**: {', '.join(f'`{name}`' for name in config['classes'])} — in this order"
         " (the order *is* the class id). `cons` is absorbed into the neighbouring vowel during",
         "  post-processing, so it never reaches the `.lab`.",
-        f"- **length**: any, up to **{limit} frames of 10 ms**"
+        f"- **length**: from **{floor} frames** ({_vowel_detector_milliseconds(config, floor)} ms)"
+        f" up to **{limit} frames of 10 ms**"
         f" ({_vowel_detector_seconds(config, limit)} s). The clip runs at its own length — there",
         "  is no padding and no bucketing, so the numbers do not depend on how long the clip is.",
         "  An odd number of frames drops the last one (the output grid is 20 ms).",
         "- **output**: one `.lab` line per run of frames, at 20 ms resolution.",
         "",
-        "The limit is the symbolic upper bound the graph was exported with, not a property of the",
-        "weights: past it the pipeline refuses the clip instead of truncating it. Split longer",
-        "recordings and call `detect` per part.",
+        "The limits are the symbolic range the graph was exported with, not a property of the",
+        "weights: outside it the pipeline refuses the clip instead of padding or truncating it.",
+        "Split longer recordings and call `detect` per part.",
     ]
 
 

@@ -455,7 +455,7 @@ class TestVowelDetectorModelCard:
         # 格納形を変えない配布形は 4 値のどれでもない（Hub の推論に任せる）。
         assert "base_model_relation" not in card
         # 「任意長 1 本」と上限は利用者が最初に確かめたい制約そのもの（数は manifest から）。
-        assert "**One graph, any length.**" in card
+        assert "**One graph for every length from 40 ms to 600.0 s.**" in card
         assert "longer than 600.0 s is rejected rather than silently truncated" in card
         assert f"**{VOWEL_DETECTOR_MAX_FRAMES} frames of 10 ms** (600.0 s)" in card
 

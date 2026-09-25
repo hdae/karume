@@ -47,14 +47,16 @@ def _container(*refs: dict[str, Any]) -> dict[str, Any]:
 def _vowel_detector_manifest() -> dict[str, Any]:
     """母音検出の最小 manifest（値は実物と重ならない偽値）。"""
     return {
-        "format": "karume/3",
+        "format": "karume/5",
         "generator": "karume/9.9.9",
         "defaultModel": "ZA",
         "models": {
             "ZA": {
                 "pipeline": VOWEL_DETECTOR_SUPPORTED_PIPELINE,
                 "weights": {
-                    "detector": {"f32": _container(_ref("ZA/detector/model.f32.st", 11, "a"))},
+                    "detector": {
+                        "f32": _container(_ref("ZA/detector/model.f32-00001-of-00003.krm", 11, "a"))
+                    },
                 },
                 "assets": {},
                 "quants": {"f32": {"weights": {"detector": "f32"}, "session": {}}},
@@ -62,6 +64,7 @@ def _vowel_detector_manifest() -> dict[str, Any]:
                 "pipelineConfig": {
                     "sampleRate": 3200,
                     "featureDim": 17,
+                    "minFrames": 6,
                     "maxFrames": 1900,
                     "classes": ["a", "i", "u", "e", "o", "N", "pau", "cons"],
                 },
@@ -84,3 +87,29 @@ class TestVowelDetectorEntryPoint:
         card = render_vowel_detector_model_card(_vowel_detector_manifest(), REPO)
         assert "fromAssets" not in card
         assert "VowelDetectorPipeline.fromPretrained" in card
+
+
+class TestVowelDetectorLengthRange:
+    """カードが名乗る長さの範囲 — 下限も上限も manifest の `minFrames` / `maxFrames` 由来。"""
+
+    @staticmethod
+    def _card(min_frames: int) -> str:
+        manifest = _vowel_detector_manifest()
+        config = manifest["models"]["ZA"]["pipelineConfig"]
+        config["sampleRate"] = 16000
+        config["minFrames"] = min_frames
+        return render_vowel_detector_model_card(manifest, REPO)
+
+    def test_it_states_the_lower_bound_the_pipeline_enforces(self) -> None:
+        """`minFrames` 未満はパイプラインが拒む — カードが「任意長」と言うと約束を超える。"""
+        card = self._card(4)
+
+        assert "any length" not in card
+        assert "**One graph for every length from 40 ms to 19.0 s.**" in card
+        assert "- **length**: from **4 frames** (40 ms) up to **1900 frames of 10 ms**" in card
+
+    def test_the_lower_bound_follows_the_manifest(self) -> None:
+        card = self._card(10)
+
+        assert "from 100 ms to 19.0 s" in card
+        assert "from **10 frames** (100 ms)" in card

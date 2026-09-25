@@ -326,7 +326,7 @@ def _vowel_detector_expects(raw: Mapping[str, Any], key: str, expected: int, whe
 
 
 def vowel_detector_pipeline_config(feature_config: Mapping[str, Any], where: str) -> dict[str, Any]:
-    """`pipelineConfig`（TS 側スキーマの 4 欄）を上流 config と台本の宣言から組む。
+    """`pipelineConfig`（TS 側スキーマの 5 欄）を上流 config と台本の宣言から組む。
 
     `minFrames` / `maxFrames` だけが**焼いたグラフ側の数**（{@link VOWEL_DETECTOR_MIN_FRAMES} /
     {@link VOWEL_DETECTOR_MAX_FRAMES} = 記号次元 `T` の値域を入力側の単位へ直したもの）で、

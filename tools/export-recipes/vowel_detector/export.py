@@ -1,4 +1,4 @@
-"""軽量な母音認識 CRNN（音声 → リップシンク用の母音クラス列）を IR v1 コンテナ +
+"""軽量な母音認識 CRNN（音声 → リップシンク用の母音クラス列）を IR v2 の容器（`krm`）+
 golden io へ書き出す台本。**長さは記号軸なので、グラフは 1 本だけ**。
 
     uv run python -m vowel_detector.export
@@ -36,7 +36,7 @@ karume の次元言語（`coeff·sym+offset` — ADR 0010）に載らない。`2
 記号を通せるのは `nn.GRU` を `karume::gru_scan` へ差し替えているから（下の「差し替え層」）。
 `aten.gru.input` の分解は `run_decompositions` が**時間方向へ完全展開**するので、
 `Dim("T")` は `Specializations unexpectedly required (T)` で落ちる（T10=200 で 8,434 ノード）。
-差し替え後は **T 非依存の 19 ノード**で、長さバケットも右ゼロ pad も要らない。
+差し替え後は **T 非依存の 18 ノード**で、長さバケットも右ゼロ pad も要らない。
 
 `--length` は emit する golden ケースと**トレースの例**の長さで、グラフの受理集合ではない
 （**2 の倍数**だけを受けるのは上と同じ理由）。

@@ -110,7 +110,8 @@ paths to be byte-identical.
 `pipelineConfig` comes from two independent places and they are checked against each other before
 anything is placed: the feature contract (`sampleRate` / `featureDim` / `classes`) is read verbatim
 from the upstream `feature_config.json`, while `maxFrames` is the symbolic upper bound the export
-script baked (`SYM_MAX`, in 20 ms frames, doubled). The IR carries symbol _names_ but no ranges, so
-the limit exists only in the manifest — the assembly gate checks instead that the graph really is
+script baked (`SYM_MAX`, in 20 ms frames, doubled) and `minFrames` the lower bound (`SYM_MIN`,
+doubled the same way — 4 frames, 40 ms). The IR carries symbol _names_ but no ranges, so the limits
+exist only in the manifest — the assembly gate checks instead that the graph really is
 symbolic (`2T` in, `T` out); a graph baked for one fixed length would otherwise assemble fine and
 fail in the user's hands for every clip but one.
