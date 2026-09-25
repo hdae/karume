@@ -22,10 +22,16 @@ import pytest
 import torch
 from safetensors.torch import save_file
 from torch import nn
+from upstream_fixture import OTHER_REVISION, write_snapshot
 
+from _shared.upstream import UpstreamProvenanceError
 from embeddinggemma import export as eg
+from karume.container import Provenance
 from karume.ir import IrGraph, IrInitializer, IrInput, IrNode, IrStorage, IrValue
 from karume.pipeline import export_to_file
+
+#: tiny な export に焼く出所（値は突合されない — 台本の出所の導出は `upstream_provenance` の席）。
+TINY_PROVENANCE = Provenance(license="fixture")
 
 
 class TinyEmbedding(nn.Module):
@@ -62,7 +68,11 @@ def exported_batch3(tmp_path):
     torch.manual_seed(0)
     wrapper = TinyEmbedding()
     graph = export_to_file(
-        wrapper, CASE_B3[1:], tmp_path / eg.MODEL_FILE, provenance=eg.PROVENANCE, graph_name="tiny"
+        wrapper,
+        CASE_B3[1:],
+        tmp_path / eg.MODEL_FILE,
+        provenance=TINY_PROVENANCE,
+        graph_name="tiny",
     )
     return wrapper, graph, tmp_path
 
@@ -106,7 +116,7 @@ class TestWriteIoPreservesTheBatchDimension:
             wrapper,
             CASE_B1[1:],
             tmp_path / eg.MODEL_FILE,
-            provenance=eg.PROVENANCE,
+            provenance=TINY_PROVENANCE,
             graph_name="tiny",
         )
 
@@ -364,3 +374,18 @@ class TestAssertIrForm:
 
         with pytest.raises(AssertionError, match="Tmax 形"):
             eg.assert_ir_form(graph, TINY_IR_CONFIG, TINY_SYM_MAX)
+
+
+class TestUpstreamProvenance:
+    """容器の revision は `--model-dir` の取得記録から導く（直書きしない）。"""
+
+    def test_the_revision_comes_from_the_download_record(self, tmp_path) -> None:
+        write_snapshot(tmp_path, license="ignored", revision=OTHER_REVISION)
+
+        assert eg.upstream_provenance(tmp_path) == Provenance(
+            license=eg.LICENSE, upstream_revision=OTHER_REVISION
+        )
+
+    def test_a_checkpoint_without_the_record_fails_loudly(self, tmp_path) -> None:
+        with pytest.raises(UpstreamProvenanceError, match="metadata が無い"):
+            eg.upstream_provenance(tmp_path)

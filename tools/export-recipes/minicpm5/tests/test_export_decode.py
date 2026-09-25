@@ -29,6 +29,7 @@ from torch.export import Dim
 
 from _shared import decode_series as shared
 from karume.artifacts import SUPERSEDED_SUFFIX
+from karume.container import Provenance
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION
 from karume.ir import IrGraph, IrInitializer, IrInput, IrNode, IrStorage, IrValue
 from karume.pipeline import export_module
@@ -535,7 +536,11 @@ class TestExportedDecodeForm:
         graph, tensors = _export_tiny_decode(wrapper)
         surgical = to_states_form(graph, decode.states_plan(graph, LAYERS))
         verified = decode._write_container(
-            surgical, tensors, tmp_path / one_shot.MODEL_FILE, graph_name="tiny"
+            surgical,
+            tensors,
+            tmp_path / one_shot.MODEL_FILE,
+            graph_name="tiny",
+            provenance=Provenance(license="fixture"),
         )
         return graph, verified, wrapper
 

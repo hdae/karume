@@ -30,7 +30,7 @@ published.
 | Item                     | Value                                                                                                |
 | ------------------------ | ---------------------------------------------------------------------------------------------------- |
 | Upstream repository      | <https://huggingface.co/ku-nlp/deberta-v2-large-japanese-char-wwm>                                   |
-| Revision used            | Unverified                                                                                           |
+| Revision used            | `547b0e8b044fba3f9b84d0ab9f990440bd130c8b` (pinned as `export.MODEL_REVISION`; fetched 2026-08-02)   |
 | Form of copy             | Loaded, not copied. Re-distributed in converted storage form.                                        |
 | Code license             | n/a (weights only)                                                                                   |
 | Weights license          | `../sbv2/card.py` records `cc-by-sa-4.0` (checked 2026-08-07). Unverified against the revision used. |

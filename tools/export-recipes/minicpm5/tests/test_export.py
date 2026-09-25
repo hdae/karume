@@ -22,7 +22,10 @@ from types import SimpleNamespace
 import pytest
 import torch
 from torch.export import Dim
+from upstream_fixture import OTHER_REVISION, write_snapshot
 
+from _shared.upstream import UpstreamProvenanceError
+from karume.container import Provenance
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION
 from karume.ir import IrGraph, IrInitializer, IrInput, IrNode, IrStorage, IrValue
 from karume.pipeline import export_to_file
@@ -72,7 +75,7 @@ def _export_tiny(tmp_path: Path, wrapper) -> IrGraph:
         wrapper,
         (ids,),
         tmp_path / mc.MODEL_FILE,
-        provenance=mc.PROVENANCE,
+        provenance=Provenance(license="fixture"),
         graph_name="tiny",
         dynamic_shapes=({1: Dim("T", min=2, max=TINY_SYM_MAX)},),
         preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
@@ -366,3 +369,18 @@ class TestGoldenCases:
     def test_the_expectations_are_not_all_the_same_token(self):
         """定数出力の検出線が恒真にならない条件（期待が 1 種類だと `_sanity` の後段が死ぬ）。"""
         assert len(set(mc.GREEDY_EXPECTATIONS.values())) > 1
+
+
+class TestUpstreamProvenance:
+    """容器の revision は `--model-dir` の取得記録から導く（直書きしない）。"""
+
+    def test_the_revision_comes_from_the_download_record(self, tmp_path) -> None:
+        write_snapshot(tmp_path, license="ignored", revision=OTHER_REVISION)
+
+        assert mc.upstream_provenance(tmp_path) == Provenance(
+            license=mc.LICENSE, upstream_revision=OTHER_REVISION
+        )
+
+    def test_a_checkpoint_without_the_record_fails_loudly(self, tmp_path) -> None:
+        with pytest.raises(UpstreamProvenanceError, match="metadata が無い"):
+            mc.upstream_provenance(tmp_path)

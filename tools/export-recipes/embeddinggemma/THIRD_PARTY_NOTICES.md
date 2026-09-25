@@ -34,14 +34,14 @@ published.
 
 ### google/embeddinggemma-300m
 
-| Item                     | Value                                                           |
-| ------------------------ | --------------------------------------------------------------- |
-| Upstream repository      | <https://huggingface.co/google/embeddinggemma-300m>             |
-| Revision used            | Unverified                                                      |
-| Form of copy             | Loaded, not copied. Not distributed from this repository today. |
-| Code license             | n/a (weights only)                                              |
-| Weights license          | Unverified                                                      |
-| Attribution requirements | Unverified                                                      |
+| Item                     | Value                                                                                                                                                  |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Upstream repository      | <https://huggingface.co/google/embeddinggemma-300m>                                                                                                    |
+| Revision used            | `57c266a740f537b4dc058e1b0cda161fd15afa75` (fetched 2026-08-11 into `inputs/embeddinggemma/google-300m`; the export reads it from the download record) |
+| Form of copy             | Loaded, not copied. Not distributed from this repository today.                                                                                        |
+| Code license             | n/a (weights only)                                                                                                                                     |
+| Weights license          | Unverified                                                                                                                                             |
+| Attribution requirements | Unverified                                                                                                                                             |
 
 ### transformers (model implementation)
 

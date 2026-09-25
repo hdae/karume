@@ -74,7 +74,7 @@ from torch.nn import functional
 from _shared.decode_series import _write_greedy, assert_case_room, positions_for
 from _shared.paths import SERIES_ROOT
 from karume.artifacts import staged_publication
-from karume.container import container_parts
+from karume.container import Provenance, container_parts
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION, normalize_boundary_tensor
 from karume.ir import IrGraph
 from karume.ops import ARGMAX_OP, ATTENTION_OP, STATE_APPEND_OP
@@ -425,7 +425,12 @@ def assert_ir_form_decode(
 
 
 def _write_container(
-    graph: IrGraph, tensors: Mapping[str, torch.Tensor], path: Path, *, graph_name: str
+    graph: IrGraph,
+    tensors: Mapping[str, torch.Tensor],
+    path: Path,
+    *,
+    graph_name: str,
+    provenance: Provenance,
 ) -> IrGraph:
     """手術済みグラフを書いて検証する（公開の 3 段は `pipeline.publish_model` に預ける）。
 
@@ -438,7 +443,7 @@ def _write_container(
     """
     declared = {init.tensor for init in graph.initializers.values()}
     stored = {name: tensor for name, tensor in tensors.items() if name in declared}
-    return publish_model(path, graph, stored, provenance=one_shot.PROVENANCE, graph_name=graph_name)
+    return publish_model(path, graph, stored, provenance=provenance, graph_name=graph_name)
 
 
 def _write_io(
@@ -491,6 +496,8 @@ def export_series(
     通してから据える。門より前に final へ置くと、落ちた実走が「検収門を通れる資産」を残す
     （据え替えと後片付けの規律は core の原語 {@link karume.artifacts.staged_publication}）。
     """
+    # 出所は重みより先に読む（1-shot 台本と同じ 1 本 — `minicpm5.export.upstream_provenance`）。
+    provenance = one_shot.upstream_provenance(model_dir)
     wrapper = load_wrapper(model_dir, positions=positions)
     cases = one_shot.build_cases(model_dir, sym_max)
     greedy_cases = tuple(case for case in cases if case[0] in GREEDY_CASES)
@@ -520,7 +527,11 @@ def export_series(
         # グラフ名は**部品名**（1-shot 台本と同じ綴り — `minicpm5.export.GRAPH_NAME`）。
         # ディレクトリ名から導かない（container-v1 §2.1）。
         verified = _write_container(
-            surgical, tensors, staging / one_shot.MODEL_FILE, graph_name=one_shot.GRAPH_NAME
+            surgical,
+            tensors,
+            staging / one_shot.MODEL_FILE,
+            graph_name=one_shot.GRAPH_NAME,
+            provenance=provenance,
         )
         form = assert_ir_form_decode(verified, config)
 

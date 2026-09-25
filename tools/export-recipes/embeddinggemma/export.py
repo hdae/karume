@@ -75,6 +75,7 @@ from torch import nn
 from torch.export import Dim
 
 from _shared.paths import INPUTS_ROOT, SERIES_ROOT
+from _shared.upstream import snapshot_revision
 from karume.artifacts import staged_publication
 from karume.container import Provenance, container_parts
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION, normalize_boundary_tensor
@@ -99,10 +100,21 @@ MODEL_FILE = "model.krm"
 #: 名乗っておく。系列ディレクトリ名（`embeddinggemma-300m`）とは一致しない。
 GRAPH_NAME = "model"
 
-#: 容器へ焼く出所（container-v1 §2.3）。この recipe は配布形を組まない（カードも
-#: `distribution.py` も無い）ので、識別子の出どころは上流モデルカードの宣言そのもので、
+#: 容器へ焼くライセンス識別子（container-v1 §2.3）。この recipe は配布形を組まない（カードも
+#: `distribution.py` も無い）ので、出どころは上流モデルカードの宣言そのもので、
 #: `THIRD_PARTY_NOTICES.md` が「使った revision に対しては未確認」と記録している値である。
-PROVENANCE = Provenance(license="gemma")
+LICENSE = "gemma"
+
+
+def upstream_provenance(model_dir: Path) -> Provenance:
+    """容器へ焼く出所。revision は `--model-dir` の取得記録から導く。
+
+    直書きしない（{@link _shared.upstream.snapshot_revision}）— 定数だと `--model-dir` が別の
+    スナップショットを指しても、容器は同じ revision を名乗る。系列の移行（`migrate_series`）も
+    同じ 1 本を引く。
+    """
+    return Provenance(license=LICENSE, upstream_revision=snapshot_revision(model_dir))
+
 
 #: **上流チェックポイント**の重みファイル名（HF の綴り — 出力の容器とは別物）。
 CHECKPOINT_FILE = "model.safetensors"
@@ -519,6 +531,8 @@ def export_series(
     {@link _shared.decode_series._publish}・据え替えと後片付けの規律は core の原語
     {@link karume.artifacts.staged_publication}）。
     """
+    # 出所は重みより先に読む（取得記録が無い checkpoint は重みを読む前に落とす）。
+    provenance = upstream_provenance(model_dir)
     wrapper = load_wrapper(model_dir)
     cases = (
         build_cases(model_dir, sym_max)
@@ -538,7 +552,7 @@ def export_series(
             wrapper,
             (example_ids, example_mask),
             staged / MODEL_FILE,
-            provenance=PROVENANCE,
+            provenance=provenance,
             # グラフ名は**部品名**（{@link GRAPH_NAME}）— ディレクトリ名から導かない。
             graph_name=GRAPH_NAME,
             dynamic_shapes=({1: seq}, {1: seq}),

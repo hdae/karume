@@ -74,6 +74,7 @@ from torch import nn
 from torch.export import Dim
 
 from _shared.paths import INPUTS_ROOT, SERIES_ROOT
+from _shared.upstream import snapshot_revision
 from karume.artifacts import staged_publication
 from karume.container import Provenance, container_parts
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION, normalize_boundary_tensor
@@ -97,12 +98,22 @@ MODEL_FILE = "model.krm"
 #: 名乗っておく。系列ディレクトリ名（`minicpm5-1b`）とは一致しない。
 GRAPH_NAME = "model"
 
-#: 容器へ焼く出所（container-v1 §2.3）。この recipe は配布形を組まない（カードも
-#: `distribution.py` も無い）ので、識別子の出どころは上流モデルカードの宣言そのもので、
+#: 容器へ焼くライセンス識別子（container-v1 §2.3）。この recipe は配布形を組まない（カードも
+#: `distribution.py` も無い）ので、出どころは上流モデルカードの宣言そのもので、
 #: `THIRD_PARTY_NOTICES.md` が「使った revision に対しては未確認」と記録している値である。
-PROVENANCE = Provenance(
-    license="apache-2.0", upstream_revision="4e9de7a0778dc1c362e983e6858f0e77542cbdca"
-)
+LICENSE = "apache-2.0"
+
+
+def upstream_provenance(model_dir: Path) -> Provenance:
+    """容器へ焼く出所。revision は `--model-dir` の取得記録から導く。
+
+    直書きしない（{@link _shared.upstream.snapshot_revision}）— 定数だと `--model-dir` が別の
+    スナップショットを指しても、容器は同じ revision を名乗る。decode 形の台本
+    （`minicpm5.export_decode`）と系列の移行（`migrate_series`）も同じ 1 本を引く。
+    """
+    return Provenance(license=LICENSE, upstream_revision=snapshot_revision(model_dir))
+
+
 IO_PREFIX = "io."
 IO_SUFFIX = ".safetensors"
 INPUT_PREFIX = "input."
@@ -485,6 +496,8 @@ def export_series(model_dir: Path, out_dir: Path, *, sym_max: int = SYM_MAX) -> 
     {@link _shared.decode_series._publish}・据え替えと後片付けの規律は core の原語
     {@link karume.artifacts.staged_publication}）。
     """
+    # 出所は重みより先に読む（取得記録が無い checkpoint は重みを読む前に落とす）。
+    provenance = upstream_provenance(model_dir)
     wrapper = load_wrapper(model_dir)
     cases = build_cases(model_dir, sym_max)
     out_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -500,7 +513,7 @@ def export_series(model_dir: Path, out_dir: Path, *, sym_max: int = SYM_MAX) -> 
             wrapper,
             (example_ids,),
             staged / MODEL_FILE,
-            provenance=PROVENANCE,
+            provenance=provenance,
             # グラフ名は**部品名**（{@link GRAPH_NAME}）— ディレクトリ名から導かない。
             graph_name=GRAPH_NAME,
             dynamic_shapes=({1: seq},),

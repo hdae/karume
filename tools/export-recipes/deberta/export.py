@@ -84,6 +84,20 @@ from .calib_texts import CALIB_TEXTS
 #: SBV2 text front が使う BERT そのもの（recon §1）。
 MODEL_ID = "ku-nlp/deberta-v2-large-japanese-char-wwm"
 
+#: {@link MODEL_ID} を取得する revision（HF の commit SHA）。重みと tokenizer の取得はこの 1 点に
+#: 固定し、容器の `provenance.upstreamRevision` にも同じ値を焼く（{@link PROVENANCE}）。
+#:
+#: MUST: `revision=` を外さない — 外すと HF の main をその時点で引くので、上流の main が動いた
+#: 日に SBV2 配布の `text_encoder` 席が黙って別の revision から焼かれる（transformers は固定して
+#: いても重みは固定されない）。値は 2026-08-02 に取得した HF キャッシュ
+#: （`models--ku-nlp--deberta-v2-large-japanese-char-wwm`）の唯一のスナップショットで、
+#: 現行の配布物はこれから焼いた（`refs/main` も同じ値 — 2026-09-25 に現物で確認）。
+#:
+#: NOTE: `--model` に HF 以外（ローカルのディレクトリ）を渡すと transformers は `revision` を
+#: 見ない。その経路で焼いた容器もこの revision を名乗るので、配布に使う系列は既定の
+#: `--model` で焼く。
+MODEL_REVISION = "547b0e8b044fba3f9b84d0ab9f990440bd130c8b"
+
 #: 対応する格納 dtype。**f16 は無い** — SBV2 系列の f16 化と一体で決める（未起票）。
 #: `i4` は**混成**の系列名で、実体は「{@link I4_MODULE_TYPES} の適格な重み = i4 group32・
 #: それ以外（conv・group 長で割り切れない重み）= 従来どおり i8 per-channel」
@@ -161,7 +175,7 @@ GRAPH_NAME = "text_encoder"
 #: `deberta/tests/test_export.py` が毎回突き合わせる。
 LICENSE = "cc-by-sa-4.0"
 
-PROVENANCE = Provenance(license=LICENSE)
+PROVENANCE = Provenance(license=LICENSE, upstream_revision=MODEL_REVISION)
 IO_PREFIX = "io."
 #: w8a8 鏡像 io の prefix。**`io.` で始まらない**こと MUST — Deno 側の通常ケース列挙は
 #: `startsWith("io.")` なので、`io.` 始まりにすると鏡像が w8 の golden として拾われる。
@@ -284,7 +298,7 @@ def load_model(model_id: str, num_layers: int) -> nn.Module:
     from transformers import DebertaV2Model
 
     model = DebertaV2Model.from_pretrained(
-        model_id, dtype=torch.float32, attn_implementation="eager"
+        model_id, revision=MODEL_REVISION, dtype=torch.float32, attn_implementation="eager"
     )
     if num_layers > model.config.num_hidden_layers:
         raise ValueError(
@@ -617,7 +631,7 @@ def export_variant(
     model = load_model(model_id, num_layers)
     patch.assert_supported(model.config)
     patch.apply_external_rel_pos_patch()
-    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    tokenizer = AutoTokenizer.from_pretrained(model_id, revision=MODEL_REVISION)
     cases = build_cases(tokenizer, model)
     wrapper = HiddenStatesWrapper(model, single_output=single_output)
     # MUST: 校正入力は**パッチ適用後の wrapper**へ流す（stage の実シグネチャがパッチで変わる）。

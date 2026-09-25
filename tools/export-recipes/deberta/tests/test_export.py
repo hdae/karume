@@ -143,6 +143,28 @@ class TestExportProvenance:
 
         assert export_deberta.PROVENANCE.license == SBV2_TEXT_ENCODER_LICENSE
 
+    def test_the_weights_are_fetched_at_the_revision_the_container_names(self, monkeypatch):
+        """MUST: 取得は revision 固定で、容器が名乗る revision と同じ 1 点。
+
+        `revision=` が無いと HF の main をその時点で引き、上流の main が動いた日に
+        `text_encoder` 席が黙って別の revision から焼かれる（容器は同じ出所を名乗ったまま）。
+        """
+        import transformers
+
+        seen: dict[str, object] = {}
+
+        def fetch(model_id, **kwargs):
+            seen.update(kwargs)
+            raise RuntimeError("取得はここで止める")
+
+        monkeypatch.setattr(transformers.DebertaV2Model, "from_pretrained", fetch)
+
+        with pytest.raises(RuntimeError, match="取得はここで止める"):
+            export_deberta.load_model(export_deberta.MODEL_ID, 1)
+
+        assert seen["revision"] == export_deberta.MODEL_REVISION
+        assert export_deberta.PROVENANCE.upstream_revision == export_deberta.MODEL_REVISION
+
     def test_it_records_the_variant_and_the_symbolic_maximum(self, tmp_path):
         """記録の欄は読み手が突き合わせる 2 つ（`target` / `sym_max`）そのもの。"""
         from sbv2.distribution import SBV2_MAX_TOKENS, SBV2_TEXT_ENCODER_VARIANT
