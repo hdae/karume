@@ -382,9 +382,19 @@ def _fold_rms_norm(graph: Graph, stats: Counter) -> None:
 
 
 def _introduces_neg_inf(node: Node) -> bool:
+    """引数に**非有限**の float リテラル（f32 へ丸めた後の値で見る）を持つか。
+
+    `-inf` だけでなく `+inf` と NaN も源に数える — `+inf` は neg / sub / 負の mul で -inf に
+    化ける（`scores - mask * float("inf")`）ので、符号を追わずに保守側へ倒す。値は torch の
+    scalar → f32 変換と同じ丸めで見る（double では有限でも `-1e39` は f32 で -inf になる）。
+
+    NOTE: 有限リテラルどうしの演算が f32 で溢れる形（`finfo.min + finfo.min`）は拾わない —
+    リテラル 1 本の値からは決まらず、演算の値域を追う判定になる。
+    """
+
     def holds(value: Any) -> bool:
         if isinstance(value, float):
-            return value == NEG_INF
+            return not math.isfinite(float(torch.tensor(value, dtype=torch.float32)))
         if isinstance(value, (list, tuple)):
             return any(holds(item) for item in value)
         return False
@@ -403,7 +413,7 @@ _NEG_INF_SANITIZERS = (
     aten.exp.default,
 )
 
-#: 有限の入力から -inf を**生む** op — 引数に -inf リテラルを持たないので
+#: 有限の入力から -inf を**生む** op — 引数に非有限リテラルを持たないので
 #: {@link _introduces_neg_inf} では源として数えられない。
 #:
 #: `log(0)` / `log1p(-1)` は -inf が定義どおりの出力なので無条件に源。
@@ -494,7 +504,7 @@ def _can_be_neg_inf(node: Node, placeholders: _Placeholders) -> bool:
 
     多層 attention では下段の softmax 経由でマスクが上段の依存錐に入るため、「依存錐に
     -inf 定数があるか」だけでは全段が偽陽性になる。値域が有限な op を伝播の壁として扱い、
-    実際に -inf になり得る経路だけを見る。源は -inf リテラルを持つノード
+    実際に -inf になり得る経路だけを見る。源は非有限リテラル（f32 へ丸めた値）を持つノード
     （{@link _introduces_neg_inf}）だけでなく、有限の入力から -inf を**生む** op
     （{@link _produces_neg_inf}）も数える。持ち上げられた定数 / buffer / parameter は
     {@link _Placeholders} が実値で判定し、それ以外の非 call_function ノードは

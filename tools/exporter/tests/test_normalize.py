@@ -607,6 +607,24 @@ class FullyMaskedAttention(nn.Module):
         return nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=bias)
 
 
+class LiteralMaskedAttention(nn.Module):
+    """グラフ内のリテラルから組むマスク（`-inf` を直書きしない -inf 源の形）。
+
+    `negate=True` は `+inf` のリテラルを符号反転して -inf にする形（`-mask * inf` の類）。
+    """
+
+    def __init__(self, literal: float, *, negate: bool = False) -> None:
+        super().__init__()
+        self.literal = literal
+        self.negate = negate
+
+    def forward(self, q, k, v):
+        bias = torch.full((1, 1, 4, 4), self.literal)
+        return nn.functional.scaled_dot_product_attention(
+            q, k, v, attn_mask=-bias if self.negate else bias
+        )
+
+
 class BufferMaskedAttention(nn.Module):
     """マスクを `register_buffer` で持つ SDPA。
 
@@ -805,6 +823,37 @@ class TestDropSafeSoftmaxGuard:
 
         assert stats["softmax_guard:rewritten-safe"] == 1
         assert [node.meta.get(SAFE_SOFTMAX_META) for node in _softmax_nodes(decomposed)] == [True]
+
+    @pytest.mark.parametrize(
+        "module",
+        [
+            pytest.param(LiteralMaskedAttention(float("inf"), negate=True), id="negated-pos-inf"),
+            pytest.param(LiteralMaskedAttention(-1e39), id="f32-overflowing-literal"),
+        ],
+    )
+    def test_a_literal_that_is_neg_inf_only_in_f32_or_after_negation_is_a_source(self, module):
+        """`+inf` の符号反転と、f32 へ丸めると -inf になるリテラルも -inf 源に数える。
+
+        `value == -inf` の double 比較だけを見る判定は両方を「有限」と誤り、全要素 -inf の
+        行があるのにガードを**除去**する（torch は 0 を返す行を IR は NaN にする）。
+        """
+        decomposed = decompose(module, ATTENTION_ARGS)
+
+        stats = normalize_graph(decomposed)
+
+        assert "softmax_guard:no-neg-inf" not in stats
+        assert [node.meta.get(SAFE_SOFTMAX_META) for node in _softmax_nodes(decomposed)] == [True]
+
+    def test_the_most_negative_finite_f32_literal_is_not_a_source(self):
+        """`finfo(f32).min` は f32 で有限 — 丸めて見ても源にならない（過剰判定の検出器）。"""
+        decomposed = decompose(
+            LiteralMaskedAttention(torch.finfo(torch.float32).min), ATTENTION_ARGS
+        )
+
+        stats = normalize_graph(decomposed)
+
+        assert stats["softmax_guard:no-neg-inf"] == 1
+        assert not any(node.meta.get(SAFE_SOFTMAX_META) for node in _softmax_nodes(decomposed))
 
     def test_a_neg_inf_source_on_the_score_side_rewrites_to_safe_softmax(self):
         """スコア側に -inf 源がある形（マスクの実評価では閉じないもう 1 系）も置換に回る。"""
