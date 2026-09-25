@@ -11,7 +11,9 @@
  * （追跡外の結果を追跡下へ持ち込まないための席の分割なので、同期機構は置かない。別の置き場に
  * まとめてあるなら `--root` で指す）。
  *
- * 環境ごとに採るのは**最新の日付**の席 1 本（`--date` を付けるとその日付だけ）。
+ * 環境ごとに採るのは**最新の日付**の席 1 本（`--date` を付けるとその日付だけ）。席の日付は
+ * **UTC**（走行を始めた時刻の日付部 — packages/runtime/tests/helpers/results.ts）なので、JST の
+ * 朝 9 時より前に始めた走行は前日の席に入る。`--date` も UTC の日付で指す。
  *
  * 終了コードは**差異があっても 0** — これは門ではなく、割れた場所を指す道具である。sha256 の
  * クロスデバイス一致はそもそも保証しない（docs/limitations.md）ので、実物の sha 違いも差異として
@@ -40,7 +42,7 @@ const FLAGS: ReadonlySet<string> = new Set(["json"]);
 const USAGE = `使い方: deno run -A tools/verify-diff/main.ts [オプション]
   --root <dir>         結果の根（既定 = このリポジトリの outputs/verify/）
   --family <name>      この系列だけ（繰り返し可・既定 = 根にある全系列）
-  --date YYYY-MM-DD    この日付の席だけ（既定 = 環境ごとに最新の日付）
+  --date YYYY-MM-DD    この日付（UTC）の席だけ（既定 = 環境ごとに最新の日付）
   --json               行列と警告を JSON で出す（既定 = Markdown）`;
 
 export type Args = {
