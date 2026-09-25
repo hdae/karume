@@ -3,8 +3,9 @@
 置き場を patch 層から分けている理由は `siglip2.measurements` と同じ — 実測幅を語る綴りは
 配布側（`depth_anything.card` のモデルカード / `depth_anything.distribution` の改変告知）が
 引くが、それらは `dist.py` ドライバの import 連鎖に乗っている。数を `depth_anything.patch` が
-持つと、配布側の import 連鎖に patch 層（torch 依存）が入る（torch 自体は現状 core の
-`karume/__init__` が eager に引くので、ここで消えるのは patch 層の依存だけ — siglip2 と同じ）。
+持つと、配布側の import 連鎖に patch 層（torch 依存）が入る。exporter core の `karume/__init__` は
+公開面を初回参照で解決する（PEP 562）ので、`import dist` は torch を読まない（2026-09-24 実測）。
+ここで patch 層を配布経路の連鎖から外しておかないと、その性質がこのファイル経由で崩れる。
 
 MUST: 実測幅を語る綴りはこのファイルの 1 つだけ。以前は patch 層の docstring（`1.4e-06`）と
 カードの定数（`1.4e-6`）に分かれており、**同じ実測値が 2 つの綴りで並んでいた** — 片方だけが
