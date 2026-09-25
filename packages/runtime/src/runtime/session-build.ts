@@ -668,8 +668,8 @@ export const buildSessionState = async (
   // MUST NOT: 計測のために GPU フェンスを足さない・submit の位置を動かさない
   // （batch ごと submit 1 回という ADR 0108 決定 9 の契約が崩れると、瞬間ピークが重み 1 本ぶん
   // 押し上がる）。よって writeBuffer の実転送時間は uploadFenceMs に吸われたままになる。
-  let shardCount = 0;
-  let shardWaitMs = 0;
+  let partCount = 0;
+  let supplyWaitMs = 0;
   let decodeMs = 0;
   let bufferCreateMs = 0;
   let writeBufferIssueMs = 0;
@@ -718,11 +718,11 @@ export const buildSessionState = async (
     // 反復待ち（= 供給側の費用）は for await が隠すので、**前を処理し終えた時刻**との差で測る
     // （次が届くまでの間はこの 2 点の間にしか無い）。待ちは 2 段ある — part の列の次の 1 本
     // （batch）と、part の中の次の block（item — block の読みと検証はこちらに入る）。どちらも
-    // 同じ時計で足す（{@link SessionBuildStats.shardWaitMs}）。
-    let shardBoundary = performance.now();
+    // 同じ時計で足す（{@link SessionBuildStats.supplyWaitMs}）。
+    let supplyBoundary = performance.now();
     for await (const batch of batches) {
-      shardWaitMs += performance.now() - shardBoundary;
-      shardCount += 1;
+      supplyWaitMs += performance.now() - supplyBoundary;
+      partCount += 1;
       // errorScope とフェンスは同じラベルを名乗る MUST（別々に組むと同じアップロード区間の
       // 失敗が 2 つの名前で出る）。
       const label = uploadLabel(batch.origin);
@@ -918,9 +918,9 @@ export const buildSessionState = async (
       // 区間の粒度: block（item）ごと（ADR 0108 決定 9 — push / pop は 1.81 µs / 回でほぼ無料。
       // 費用の主はフェンスなのでフェンスは batch = part ごと 1 回に留める）。次の item の読み
       // （`for await` の反復待ち）は区間の外に来る。
-      shardBoundary = performance.now();
+      supplyBoundary = performance.now();
       for await (const item of batch.items) {
-        shardWaitMs += performance.now() - shardBoundary;
+        supplyWaitMs += performance.now() - supplyBoundary;
         pushFailureScopes(gpu.device);
         try {
           uploadItem(item);
@@ -938,10 +938,10 @@ export const buildSessionState = async (
         if (failure !== undefined) throw failure;
         // item への参照はこの反復で尽きる（CPU 側バイト列の解放はフェンスを待たない — 下の
         // フェンスの NOTE）。
-        shardBoundary = performance.now();
+        supplyBoundary = performance.now();
       }
       // 列の終わりを知るまでの待ち（最後の item の後の反復）も供給側の費用。
-      shardWaitMs += performance.now() - shardBoundary;
+      supplyWaitMs += performance.now() - supplyBoundary;
 
       // MUST: batch（コンテナの part）ごとに**実際の submit を 1 回**出して完了まで待つ
       // （ADR 0108 決定 9）。queue.writeBuffer は staging を確保して溜め込み、submit の完了まで
@@ -972,7 +972,7 @@ export const buildSessionState = async (
         label,
       );
       uploadFenceMs += performance.now() - fenceStart;
-      shardBoundary = performance.now();
+      supplyBoundary = performance.now();
     }
   } catch (cause) {
     // transaction 境界（ADR 0108 決定 9）: 途中の batch で失敗したら（宣言違反・入力列の例外・
@@ -1012,8 +1012,8 @@ export const buildSessionState = async (
     residentWeights,
     storage: { residentCompressedBytes, hostExpandedBytes },
     buildStats: {
-      shardCount,
-      shardWaitMs,
+      partCount,
+      supplyWaitMs,
       decodeMs,
       bufferCreateMs,
       writeBufferIssueMs,

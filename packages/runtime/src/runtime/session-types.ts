@@ -449,7 +449,7 @@ export type StorageDiagnostics = {
  * ADR 0108 決定 9）。したがって `queue.writeBuffer` の**実 GPU 転送時間はホスト時計から分離
  * できず**、part 末尾のフェンス待ち（{@link SessionBuildStats.uploadFenceMs}）に丸ごと吸われる。
  * MUST: この 7 席から「転送そのものの速度」を読まないこと。分解の上限は
- * **「ホストが費やした時間」（shardWait / decode / bufferCreate / writeBufferIssue）と
+ * **「ホストが費やした時間」（supplyWait / decode / bufferCreate / writeBufferIssue）と
  * 「GPU の完了を待った時間」（uploadFence）の 2 区分**で、後者の内訳（実転送 / キュー待ち /
  * ドライバの都合）はランタイムからは見えない。
  *
@@ -464,19 +464,16 @@ export type StorageDiagnostics = {
 export type SessionBuildStats = {
   /**
    * 消費した供給単位（容器の part）の本数。
-   *
-   * NOTE: 欄名は旧名（shard）の据え置き — 公開面なので改名は breaking。
    */
-  readonly shardCount: number;
+  readonly partCount: number;
   /**
    * 供給の**次の 1 本を待った**時間の総和（`for await` の反復待ち）。待ちは 2 段あり、どちらも
    * 足す — part の列の次の 1 本と、part の中の次の block。block は引かれるたびに 1 本ずつ読まれる
    * （lazy）ので、取得と検証（未検証の取得元での sha256・三値の符号検査）の費用はほぼ全部
    * block 側の待ちに入る。ネットワーク / ディスクの費用がここに集まるので、この席が構築費から
-   * その帰属を分離する唯一の点になる（大きければ遅いのは Karume ではなく供給側）。欄名は旧名の
-   * 据え置き。
+   * その帰属を分離する唯一の点になる（大きければ遅いのは Karume ではなく供給側）。
    */
-  readonly shardWaitMs: number;
+  readonly supplyWaitMs: number;
   /**
    * 適格外の重みを CPU で f32 展開した時間の総和（f16 / i8 / i2 / i4 の decode）。
    * **適格判定に全部通っていれば 0** — 0 でないことは VRAM 削減が落ちている

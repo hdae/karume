@@ -7,7 +7,7 @@
 // 解放されるかは単体では観測できないので、ここは順序で固定する — 実測は tools/ram-peak）。
 //
 // 併せて固定するもの:
-// - `SessionBuildStats.shardWaitMs` が block の読みを待った時間と、列の終わりを知るまでの待ちを
+// - `SessionBuildStats.supplyWaitMs` が block の読みを待った時間と、列の終わりを知るまでの待ちを
 //   含む（読みが batch の本体へ移っても、供給側の費用が統計から消えない）
 // - part の途中で読みが落ちたら、上げ済みの重みごとアリーナを破棄し、以後の block を 1 本も
 //   読まない（transaction 境界 — lazy で初めて生じる「part の前半だけ上げた」状態）
@@ -181,7 +181,7 @@ describe("重みの供給は block を 1 本ずつ読んで上げる", () => {
     const session = await createSessionFromContainer(gpu, trace(container()), GRAPH_NAME);
     // 破棄の flush も完了待ちを 1 回呼ぶので、構築が終わった時点の列を写しておく。
     const built = [...events];
-    const { shardCount } = session.diagnostics().buildStats;
+    const { partCount } = session.diagnostics().buildStats;
     await session.dispose();
 
     // errorScope は block（item）ごとに 1 対（out-of-memory + validation の 2 本 push → write →
@@ -222,10 +222,10 @@ describe("重みの供給は block を 1 本ずつ読んで上げる", () => {
       "fence",
     ]);
     // フェンスの回数は上の事象列の完全一致が固定する。ここが数えるのは消費した batch の本数。
-    assertEquals(shardCount, 3, "消費した batch の本数 = part の本数");
+    assertEquals(partCount, 3, "消費した batch の本数 = part の本数");
   });
 
-  it("shardWaitMs は block の読みを待った時間を含む（読みの遅い取得元）", async () => {
+  it("supplyWaitMs は block の読みを待った時間を含む（読みの遅い取得元）", async () => {
     const DELAY_MS = 20;
     const { gpu, trace } = recorder();
     let readMs = 0;
@@ -237,7 +237,7 @@ describe("重みの供給は block を 1 本ずつ読んで上げる", () => {
       reads += 1;
     });
     const session = await createSessionFromContainer(gpu, slow, GRAPH_NAME);
-    const { shardWaitMs } = session.diagnostics().buildStats;
+    const { supplyWaitMs } = session.diagnostics().buildStats;
     await session.dispose();
 
     assertEquals(reads, 4, "block 4 本（b / c / w の piece 2 本）を 1 回ずつ読む");
@@ -246,12 +246,12 @@ describe("重みの供給は block を 1 本ずつ読んで上げる", () => {
     // 読みの時間の総和そのもの（許すのは浮動小数の足し算の順序差だけ）。
     const SUM_ORDER_EPSILON_MS = 1e-6;
     assert(
-      shardWaitMs >= readMs - SUM_ORDER_EPSILON_MS,
-      `shardWaitMs ${shardWaitMs} ms が読みを待った時間 ${readMs} ms を含んでいない`,
+      supplyWaitMs >= readMs - SUM_ORDER_EPSILON_MS,
+      `supplyWaitMs ${supplyWaitMs} ms が読みを待った時間 ${readMs} ms を含んでいない`,
     );
   });
 
-  it("shardWaitMs は列の終わりを知るまでの待ちも含む（最後の item の後で遅れる列）", async () => {
+  it("supplyWaitMs は列の終わりを知るまでの待ちも含む（最後の item の後で遅れる列）", async () => {
     // 容器経路（`containerBatches`）の列の終わりは読みを伴わず、取得元の読みに遅延を入れても
     // ここには届かない。そこで構築の入口（`Session.build`）へ、終わりを告げる前に遅れる列を
     // 直接渡す — item 0 本なので、測られる待ちは列の終わりの待ちだけになる。
@@ -283,18 +283,18 @@ describe("重みの供給は block を 1 本ずつ読んで上げる", () => {
       yield { origin: "part 1", items: lateEnd };
     }
     const session = await Session.build(gpu, emptyGraph, new Map(), oneBatch(), {});
-    const { shardWaitMs, shardCount } = session.diagnostics().buildStats;
+    const { supplyWaitMs, partCount } = session.diagnostics().buildStats;
     await session.dispose();
 
-    assertEquals(shardCount, 1);
+    assertEquals(partCount, 1);
     assert(
       tailMs >= DELAY_MS,
       `列の終わりの遅延が効いていない（${tailMs} ms — 検出器が空振りする）`,
     );
     const SUM_ORDER_EPSILON_MS = 1e-6;
     assert(
-      shardWaitMs >= tailMs - SUM_ORDER_EPSILON_MS,
-      `shardWaitMs ${shardWaitMs} ms が列の終わりの待ち ${tailMs} ms を含んでいない`,
+      supplyWaitMs >= tailMs - SUM_ORDER_EPSILON_MS,
+      `supplyWaitMs ${supplyWaitMs} ms が列の終わりの待ち ${tailMs} ms を含んでいない`,
     );
   });
 
