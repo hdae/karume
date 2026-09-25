@@ -34,11 +34,11 @@ from gemma4 import export as gx
 from gemma4 import export_decode as decode
 from gemma4 import export_drafter as drafter
 from gemma4.rope import FULL_ATTENTION, SLIDING_ATTENTION
-from karume.container import ir_v2_document
+from karume.container import canonical_json, container_parts, ir_v2_document
 from karume.dist import DistError
 from karume.ir import IrState
 from karume.pipeline import publish_model
-from karume.verify import parse_ir_graph
+from karume.verify import verify_container
 
 #: tiny な drafter の寸法（実物は hidden 256 / 層 4 / heads 4 / head_dim 256|512 /
 #: backbone 1536 / 語彙 262144）。**実物と違う数**にする — 寸法を焼き込んでいれば落ちる。
@@ -551,10 +551,13 @@ class TestExportedDrafterForm:
                 borrowed, Path("borrower"), lent, Path("lender"), rope, TINY_BACKBONE
             )
 
-    def test_the_graph_round_trips_through_the_parser(self, tiny_container):
-        """配布形のグラフ JSON は往復でバイトが動かない（3 宣言とも受理集合が同じ）。"""
+    def test_the_graph_round_trips_through_the_container(self, tiny_container, tmp_path):
+        """配布形のグラフ JSON（IR v2 の正準直列化）は、容器へ書いて読み戻してもバイトが動かない
+        （3 宣言とも受理集合が同じ）。読み戻しは容器の読み手（`verify_container`）を通す。
+        """
         verified, _, _ = tiny_container
-        text = verified.to_json()
+        text = canonical_json(ir_v2_document(verified))
 
-        assert parse_ir_graph(text).to_json() == text
+        read = verify_container(container_parts(tmp_path / gx.MODEL_FILE)).read
+        assert canonical_json(read.graph.graphs["tiny"]) == text
         assert json.loads(text)["states"]["l0.k"]["external"] is True
