@@ -32,7 +32,7 @@ llama.cpp WebGPU が実運用している（調査 §4.1）。
   素朴 RTN へ帰属させた 0006:45 の側が不正確 — 調査 §7 wt LB-6 の検証済み補正）。
 - 0019 のその他（i8 経路・±127 対称・平坦添字・タイル読み込み時 dequant・fake-quant 規律）
   は**本 ADR の土台としてそのまま有効**。
-- 派生同期（実装波で）: ir-v2.md「group_size は実行経路が無い」・limitations の w4 項・
+- 派生同期（実装波で）: 当時の `docs/ir-v1.md`（現 [docs/ir-v2.md](../ir-v2.md) の前身・`2960ce37^` の版）「group_size は実行経路が無い」・limitations の w4 項・
   container の groupSize 拒否。
 
 ### 2. 格納の表現 = bit 幅一般化（shape は論理のまま — 裁定 3a）
@@ -340,3 +340,20 @@ w4 横展開 + 量子化方式スクリーニング波（backlog now 節）に�
 - 追記 7 の 2 が指す runtime の `format/i4.groupScaleShape` は `format/container/codecs.ts` の
   `groupScaleShape`（引数に `rowAxis` が増えた）へ移り、合流層・常駐プランナ・容器から Session 構築へ渡す
   scale 形・CPU 展開 `decodeI4` の全てがこの 1 本から形を導く（`e034a136`）。
+
+## 追記 11（2026-09-25・決定 2 / 3 の宣言表現は容器の codec 台帳へ移った）
+
+- **移ったのは宣言の表現だけ**: 決定 2 の格納 dtype `storage.dtype: "i4"` と
+  `storage.group_size`、safetensors リーダの 3 面（サイズ・整列・view）、ADR 0063 の書き出し順は、
+  ADR [0108](0108-container-format.md) 決定 10〜13 と
+  [docs/container-v1.md](../container-v1.md) §6 の束縛表 `encoding`（codec `int4-sym-g` /
+  `groupSize` / `scale`）と codec 台帳（`packages/runtime/src/format/container/codecs.ts` の
+  `CODEC_LEDGER`）へ移った。safetensors の方言 dtype `I4` は受理しない（ADR 0063 の 2026-09-24
+  追記）。
+- **意味論は不変**: 値域（15 準位・offset 8 の unsigned nibble）・pack 順（決定 4）・group scale 形
+  （追記 10）・dequant 式 `(u − 8) · scale`・group 長の制約（2 冪かつ ≥ 16）・f16 scale の
+  admission 条件は容器でもこの ADR が正本のまま。
+- **zero-point の予約欄の実名**: 決定 3 が予告した `storage.zero_point` は使わない。追加時の欄は
+  `encoding.zeroPoint`（block 参照 — container-v1 §6.1）で、台帳の `zeroPoint: "forbidden"` を
+  `"allowed"` に変える形で解禁する。「offset 8 = zero_point 省略時の既定」という読みの予約は
+  変わらない。

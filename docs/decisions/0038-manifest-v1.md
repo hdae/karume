@@ -9,12 +9,13 @@
   名前空間と credential 隔離 / キャッシュヒット毎の全量 sha256 / 依存 pin `^0.3`）は ADR
   [0080](0080-hub-fetch-cache-050.md) で撤去・変更済みで、§5 の該当箇所に個別の打ち消しを
   置いた。取得元非依存の契約（進捗の算出と `AbortSignal` の透過・同時取得数と in-flight
-  バイト予算・`openModel` へ渡す前の tight view assert・エラーの形と利用可能ラベル・
-  `onCacheError` のアプリ配達）は追記 2026-08-31 のとおり §5 のまま全取得元に掛かる。
+  バイト予算・資産の読み手へ渡す前の tight view 検査〈`packages/hub/src/fetch.ts` の
+  `assertTightView`〉・エラーの形と利用可能ラベル・`onCacheError` のアプリ配達）は追記
+  2026-08-31 のとおり §5 のまま全取得元に掛かる。
 - Date: 2026-08-05（pre-mortem 3 レンズ・44 指摘を反映した改訂版）
 - 関連: ADR [0037](0037-karume-monorepo.md)（配布形の親決定）/
   [0033](0033-vae-fixed-tile-decode.md)（タイル VAE）/
-  [0034](0034-dit-dynamic-tokens.md)（S 形 DiT）/ [docs/ir-v2.md](../ir-v2.md)（コンテナ規約）
+  [0034](0034-dit-dynamic-tokens.md)（S 形 DiT）/ 当時の `docs/ir-v1.md`（現 [docs/ir-v2.md](../ir-v2.md) の前身・`2960ce37^` の版）（コンテナ規約）
 
 ## Context
 
@@ -546,13 +547,16 @@ manifest はリポジトリ直下の固定名 **`karume.json`**。
   解決するため**受け側は 0 行変更**（受理はテストで固定）。assets / extras の席（1 ファイル
   参照のみ）は従来どおり分割参照を fail loudly。焼く側の突合（参照先現物 = 自分で組むバイト列）
   は shard 全要素へ適用。
+  （`karume/5` では越境参照は容器単位 — `container.parts` の全要素が同じ `repo` / `revision` の対
+  であることを parse で門にする。ADR [0109](0109-manifest-v5-container.md)。）
 - 2026-08-31: **§5 の HF 固有記述は「HF アダプターの契約」へ降格する**（ADR
   [0086](0086-distribution-source.md)）。取得元は HF だけではなくなり、§5 が並べていた接続契約は
   2 つに割れる — **取得元固有**（可変 ref → commit SHA の解決・キャッシュ名前空間の所有・
   `hubUrl`・相 1 の streaming prefetch・sha256 照合）は `sources/hf.ts` の契約として読み、
   **取得元非依存**（進捗の算出と `AbortSignal` の透過・同時取得数と in-flight バイト予算・
-  `openModel` へ渡す前の tight view assert・エラーの形と利用可能ラベル・`onCacheError` の
-  アプリ配達）は共通層の契約として §5 のまま全取得元に掛かる。§7 の越境参照（`repo` /
+  資産の読み手へ渡す前の tight view 検査〈`packages/hub/src/fetch.ts` の `assertTightView`〉・
+  エラーの形と利用可能ラベル・`onCacheError` のアプリ配達）は共通層の契約として §5 のまま全取得元に
+  掛かる。§7 の越境参照（`repo` /
   `revision`）は取得元契約の 1 つ（`originFor`）になり、ローカル取得元では明示 mapping と明示
   fallback だけが解決手段になる（ADR 0086 決定 3）。
 
