@@ -58,5 +58,9 @@
   へ倒した。内訳が要るときは `gpuTiming: true`（デモは `--gpu-timing`）の別 run で採る。
 - タイムスタンプの分解能はブラウザ実装が量子化しうる（Chrome の緩和策）。集計は数百〜
   数千 dispatch の合計なので影響は薄いが、単発 dispatch の絶対値は参考値として扱う。
+  追記（2026-09-25）: 単位そのものが環境で変わる — Deno（ext/webgpu）は timestamp を ns へ換算
+  せず raw tick のまま返すので、`timestampPeriod` ≠ 1 の GPU（Arc B570 = 52.0833 ns）では決定 3 の
+  「ns 合計」が ns ではなく約 52 分の 1 に出る。WebGPU API は period を露出しないので karume は
+  補正しない（`docs/known-issues.md`「Intel Arc B570」節）。
 - 却下案: B = チャンク粒度計測（op 混在で内訳にならない）/ C = CPU 時刻の細分化
   （onSubmittedWorkDone は累積完了 — ADR 0004 の既知の罠）。
