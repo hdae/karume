@@ -289,6 +289,81 @@ describe({
       }
     });
 
+    it("NaN は符号ビットに従って +127 / -128 へ飽和する（quiet / signaling とも・f32 経路と違う唯一の 2 値の片方）", async () => {
+      const gpu = await acquireGpu(), d = gpu.device;
+      try {
+        // 入力はビット列で渡す（カーネルは u32 として読むので NaN のペイロードも届く）。
+        // +qNaN / -qNaN / +sNaN / -sNaN / 1.0 / -1.0 / +0 / -0
+        const bits = Uint32Array.of(
+          0x7fc00000,
+          0xffc00000,
+          0x7f800001,
+          0xff800001,
+          0x3f800000,
+          0xbf800000,
+          0,
+          0x80000000,
+        );
+        const count = bits.length, scale = 0.5;
+        const owned: GPUBuffer[] = [];
+        d.pushErrorScope("validation");
+        let validationError: GPUError | null = null;
+        let bytes: number[] = [];
+        try {
+          const make = (
+            v: number | ArrayBufferView<ArrayBuffer>,
+            usage = U.STORAGE | U.COPY_DST | U.COPY_SRC,
+          ): GPUBuffer => {
+            const b = d.createBuffer({ size: typeof v === "number" ? v : v.byteLength, usage });
+            owned.push(b);
+            if (typeof v !== "number") d.queue.writeBuffer(b, 0, v);
+            return b;
+          };
+          const input = make(bits);
+          const codes = make(count);
+          const stage = make(count, U.MAP_READ | U.COPY_DST);
+          const pp = make(staticQuantizePackedParams(count, scale), U.UNIFORM | U.COPY_DST);
+          const pipeline = d.createComputePipeline({
+            layout: "auto",
+            compute: {
+              module: d.createShaderModule({ code: STATIC_QUANTIZE_PACKED_WGSL }),
+              entryPoint: "main",
+            },
+          });
+          const encoder = d.createCommandEncoder(), pass = encoder.beginComputePass();
+          pass.setPipeline(pipeline);
+          pass.setBindGroup(
+            0,
+            d.createBindGroup({
+              layout: pipeline.getBindGroupLayout(0),
+              entries: [pp, input, codes].map((buffer, binding) => ({
+                binding,
+                resource: { buffer },
+              })),
+            }),
+          );
+          pass.dispatchWorkgroups(1);
+          pass.end();
+          encoder.copyBufferToBuffer(codes, 0, stage, 0, count);
+          d.queue.submit([encoder.finish()]);
+          await stage.mapAsync(MAP_MODE.READ);
+          bytes = [...new Uint8Array(stage.getMappedRange().slice(0))];
+          stage.unmap();
+        } finally {
+          d.queue.submit([]);
+          await d.queue.onSubmittedWorkDone();
+          validationError = await d.popErrorScope();
+          for (const b of owned) b.destroy();
+        }
+        assertEquals(validationError, null);
+        // NaN の magnitude は全境界を超えるので level は符号で決まる上限（+127 / 128 = -128）。
+        // 1.0 / 0.5 = 2 → 0x02、-2 → 0xFE、-0 は int8 に席が無く 0x00。
+        assertEquals(bytes, [0x7f, 0x80, 0x7f, 0x80, 0x02, 0xfe, 0x00, 0x00]);
+      } finally {
+        gpu.destroy();
+      }
+    });
+
     it("並列 GEMV の packed 変種は現行経路と u32 完全一致する（i2/i4/i8 × lane × 融合あり/なし）", async () => {
       const gpu = await acquireGpu(), d = gpu.device;
       try {
