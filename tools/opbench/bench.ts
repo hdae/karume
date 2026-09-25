@@ -16,7 +16,7 @@
  * 割った倍率を主張しない — 混ぜて倍率を出した過去の誤りを再生産しないための規律。
  */
 
-import type { GpuContext, RunInputs, Session } from "../../packages/runtime/mod.ts";
+import type { RunInputs, Session } from "../../packages/runtime/mod.ts";
 
 /** 1 タイムドパスの目標長（ms）。研究 §5-1 の実測値をそのまま既定にする。 */
 export const TARGET_PASS_MS = 80;
@@ -174,10 +174,11 @@ export type WallResult = {
  * gpuTiming 無効 device で、反復ぶんの enqueue を **フェンス 1 本の区間**（`beginBatch`）に束ねて
  * 壁時計を測る。1 submit ≈11ms のフェンス床（research 2026-08-30 §7）を反復で償却するため、
  * `run` を反復回数ぶん呼ぶ形は採らない（床が反復回数ぶん乗る）。
+ * `gpu` / `session` は使う面だけを受ける（偽の device で区間ロックの返却を検査するため）。
  */
-export const measureWall = async (
-  gpu: GpuContext,
-  session: Session,
+export const measureWall = async <Batch extends { finish(): Promise<unknown> }>(
+  gpu: { beginBatch(): Promise<Batch> },
+  session: { enqueue(inputs: RunInputs, options: { readonly batch: Batch }): Promise<unknown> },
   inputs: RunInputs,
   reps: number,
   rounds: number = ROUNDS,
@@ -185,12 +186,19 @@ export const measureWall = async (
 ): Promise<WallResult> => {
   const once = async (): Promise<number> => {
     const batch = await gpu.beginBatch();
-    const started = performance.now();
-    const pending: Promise<void>[] = [];
-    for (let rep = 0; rep < reps; rep += 1) pending.push(session.enqueue(inputs, { batch }));
-    await Promise.all(pending);
-    await batch.finish();
-    return performance.now() - started;
+    // MUST: batch は device 単位で排他の区間ロックを持ち、finish でしか返らない。enqueue の
+    // reject で finish を飛ばすと次の beginBatch / Session の dispose が永久に待ち、single の
+    // 「1 行の失敗で掃引を止めない」が掃引全体のハングに化ける（finish は何度呼んでも同じ決着）。
+    try {
+      const started = performance.now();
+      const pending: Promise<unknown>[] = [];
+      for (let rep = 0; rep < reps; rep += 1) pending.push(session.enqueue(inputs, { batch }));
+      await Promise.all(pending);
+      await batch.finish();
+      return performance.now() - started;
+    } finally {
+      await batch.finish();
+    }
   };
   await once();
   if (heater !== undefined) await pinClocks(heater);

@@ -2,11 +2,12 @@
 //
 // `pinClocks` は fake Heater（決まった ms を返すだけ）で回すので、実 GPU も timestamp も要らない。
 
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertRejects } from "@std/assert";
 import {
   calibrateReps,
   type Heater,
   MAX_REPS,
+  measureWall,
   pinClocks,
   TARGET_PASS_MS,
   WARMUP_MIN_RUNS,
@@ -54,4 +55,49 @@ Deno.test("pinClocks: 毎回遅くなる filler は安定と見なさず 64 回�
   const { runs } = await pinClocks(heater);
   assertEquals(heater.calls(), 64);
   assertEquals(runs, 64);
+});
+
+/**
+ * device 単位で排他の区間ロックを真似る fake（本物は runtime の `GpuContext.beginBatch`）。
+ * 2 本目の `beginBatch` は 1 本目の `finish` まで決着しない。
+ */
+const fakeExclusiveGpu = () => {
+  let held: Promise<void> = Promise.resolve();
+  let finishes = 0;
+  return {
+    beginBatch: async () => {
+      await held;
+      const lock = Promise.withResolvers<void>();
+      held = lock.promise;
+      return {
+        finish: () => {
+          finishes += 1;
+          lock.resolve();
+          return Promise.resolve();
+        },
+      };
+    },
+    finishes: () => finishes,
+  };
+};
+
+Deno.test("measureWall: enqueue が reject しても batch を閉じ、次の beginBatch が決着する", async () => {
+  const gpu = fakeExclusiveGpu();
+  const failure = new Error("host 側の enqueue 失敗");
+  let calls = 0;
+  const session = {
+    enqueue: () => {
+      calls += 1;
+      return calls === 2 ? Promise.reject(failure) : Promise.resolve();
+    },
+  };
+  const rejected = await assertRejects(() => measureWall(gpu, session, {}, 3, 1));
+  assertEquals(rejected, failure);
+  assertEquals(gpu.finishes() >= 1, true);
+  // 区間ロックが返っていなければ beginBatch は決着せず、macrotask 1 つ後の番兵が先に勝つ。
+  const next = await Promise.race([
+    gpu.beginBatch().then(() => "opened"),
+    new Promise<string>((resolve) => setTimeout(() => resolve("hung"), 0)),
+  ]);
+  assertEquals(next, "opened");
 });
